@@ -29,7 +29,7 @@
 
 #include "src/core/global.h"
 #include "gfnff_parameters.h"
-#include "forcefieldthread.h"  // For Bond, Angle, Dihedral, Inversion struct definitions
+#include "ff_terms.h"  // Bond, Angle, Dihedral, Inversion, vdW, EQ, CNDerivStore, GeoGradMatrix
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 

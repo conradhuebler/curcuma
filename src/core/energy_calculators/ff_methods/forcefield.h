@@ -1,6 +1,6 @@
 /*
  * < Generic force field class for curcuma . >
- * Copyright (C) 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2024 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,29 +21,14 @@
 
 #include "src/core/global.h"
 
-#include <string>
-#include <unordered_map>
-
-#include "forcefieldthread.h"
+#include "ff_terms.h"
 #include "ff_workspace.h"
-
-#include "src/core/hbonds.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
-#ifdef USE_D3
-#include "src/core/energy_calculators/qm_methods/dftd3interface.h"
-#endif
-
-#ifdef USE_D4
-#include "src/core/energy_calculators/qm_methods/dftd4interface.h"
-#endif
-
-#include "qmdff_par.h"
-#include "uff_par.h"
-
-#include <functional>
-#include <set>
+#include <array>
+#include <memory>
+#include <string>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -51,19 +36,26 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
-static const json FFJson = {
-    { "threads", 1 },
-    { "gradient", 1 }
-};
-
-// CNDerivStore is defined in forcefieldthread.h (transitively included via ff_workspace.h)
+/**
+ * @brief UFF / UFF-D3 / QMDFF force field front-end.
+ *
+ * ForceField parses the interaction lists produced by ForceFieldGenerator
+ * (bonds, angles, dihedrals, inversions, vdW pairs and, for uff-d3, the D3
+ * dispersion pairs), owns the parameter cache (input.xyz -> input.param.json)
+ * and evaluates energy and gradient through FFWorkspace. GFN-FF has its own
+ * engine (class GFNFF) and does not pass through this class.
+ *
+ * Claude Generated (Sep 2026): the legacy ForceFieldThread engine, the CG pair
+ * loop and the GFN-FF parameter intake were removed. All of it had been dead
+ * since GFNFF moved to FFWorkspace and the MethodFactory stopped routing the
+ * "cg" / "d3" method names here.
+ */
 class ForceField {
 
 public:
     ForceField(const json& controller);
     ~ForceField();
 
-    // inline void setAtomCount(int atom) { m_natoms = atom; }
     inline void setAtomTypes(const std::vector<int>& atom_types)
     {
         m_atom_types = atom_types;
@@ -74,9 +66,10 @@ public:
     // TODO: Eventually merge QMInterface and ForceField into unified interface
     void setMolecule(const Mol& mol);
     void UpdateGeometry(const Matrix& geometry);
-    inline void UpdateGeometry(const double* coord);
-    inline void UpdateGeometry(const std::vector<std::array<double, 3>>& geometry);
+    void UpdateGeometry(const double* coord);
+    void UpdateGeometry(const std::vector<std::array<double, 3>>& geometry);
 
+    /// Energy in Hartree (and gradient in Hartree/Bohr if requested) from FFWorkspace.
     double Calculate(bool gradient = true);
 
     Matrix Gradient() const { return m_gradient; }
@@ -88,62 +81,13 @@ public:
     inline double InversionEnergy() const { return m_inversion_energy; }
     inline double VdWEnergy() const { return m_vdw_energy; }
     inline double RepulsionEnergy() const { return m_rep_energy; }
-    inline double HHEnergy() const { return m_gfnff_repulsion; }  // Claude Generated (Dec 2025): GFN-FF repulsion energy
-    inline double BondedRepulsionEnergy() const { return m_gfnff_bonded_repulsion; }
-    inline double NonbondedRepulsionEnergy() const { return m_gfnff_nonbonded_repulsion; }
     inline double DispersionEnergy() const { return m_dispersion_energy; }
-    inline double D3Energy() const { return m_d3_energy; }  // Claude Generated (Jan 2, 2026): D3 dispersion energy
-    inline double D4Energy() const { return m_d4_energy; }  // Claude Generated (Jan 2, 2026): D4 dispersion energy
-    inline double CoulombEnergy() const { return m_coulomb_energy; }
-    inline double ElectrostatEnergy() const { return m_eq_energy; }
-    inline double HydrogenBondEnergy() const { return m_energy_hbond; }   // Claude Generated (2025): Phase 5
-    inline double HalogenBondEnergy() const { return m_energy_xbond; }    // Claude Generated (2025): Phase 5
-    // Claude Generated (May 2026, HB-investigation): per-case HB split (sum equals HydrogenBondEnergy()).
-    inline double HBondCase1Energy() const { return m_hbond_case1_energy; }
-    inline double HBondCase2Energy() const { return m_hbond_case2_energy; }
-    inline double HBondCase3Energy() const { return m_hbond_case3_energy; }
-    inline double HBondCase4Energy() const { return m_hbond_case4_energy; }
-    inline int HBondCase1Count() const { return m_hbond_case1_count; }
-    inline int HBondCase2Count() const { return m_hbond_case2_count; }
-    inline int HBondCase3Count() const { return m_hbond_case3_count; }
-    inline int HBondCase4Count() const { return m_hbond_case4_count; }
-    inline double ATMEnergy() const { return m_atm_energy; }        // Claude Generated (December 2025): ATM energy
-    inline double BatmEnergy() const { return m_batm_energy; }       // Claude Generated (Jan 17, 2026): Batm energy
-    inline double STorsEnergy() const { return m_stors_energy; }     // Claude Generated (March 2026): Triple bond torsion energy
-
-    // Claude Generated (May 2026): Output control and parallelization metadata for unified GFN-FF reporting.
-    // GFN-FF wrapper sets suppress_output=true and prints its own GFNFFEnergyReport.
-    // TODO: unify UFF/QMDFF energy output to the same GFNFFEnergyReport format.
-    void setSuppressOutput(bool v) { m_suppress_output = v; }
-    double getPoolWallTime() const { return m_t_pool_wall; }
-    double getChainRuleTime() const { return m_t_chainrule; }
-    int getThreadCount() const { return static_cast<int>(m_stored_threads.size()); }
-    const std::unordered_map<std::string, long long>& getTermTimings() const { return m_term_timings_aggregate; }
+    inline double D3Energy() const { return m_d3_energy; }  // Claude Generated (Jan 2, 2026): D3 dispersion energy (uff-d3)
 
     void setParameter(const json& parameter);
     void setParameterFile(const std::string& file);
 
-    /**
-     * @brief Set GFN-FF parameters from native structs (no JSON round-trip)
-     *
-     * Claude Generated (March 2026): Primary parameter intake for GFN-FF.
-     * Replaces the JSON serialization/deserialization path for in-memory transfer.
-     * JSON-based setParameter() is kept only for loading cached parameters from disk.
-     *
-     * @param params Complete GFN-FF parameter set as native C++ structs
-     */
-    void setGFNFFParameters(const GFNFFParameterSet& params);
-
-    /// Claude Generated (March 2026): Clear parameter data in existing threads for reuse.
-    /// Avoids thread destruction/recreation when only parameters change.
-    void clearThreadData();
-
-    // Claude Generated (Feb 15, 2026): HB/XB update methods for MD simulations
-    // Reference: Fortran gfnff_engrad.F90:246-260 - dynamic list rebuilding
-    void updateGFNFFHBonds(const json& hbonds);
-    void updateGFNFFXBonds(const json& xbonds);
-
-    // Parameter caching functions for all FF methods (UFF, GFN-FF, QMDFF, etc.)
+    // Parameter caching functions (UFF, UFF-D3, QMDFF)
     bool saveParametersToFile(const std::string& filename) const;
     bool loadParametersFromFile(const std::string& filename);
     json exportCurrentParameters() const;
@@ -155,127 +99,28 @@ public:
     static std::string generateParameterFileName(const std::string& geometry_file);
     void setParameterCaching(bool enable) { m_enable_caching = enable; }
 
-    // Claude Generated (March 2026): Topology cache — opaque JSON block stored in param.json
-    // GFNFF sets topology data after calculation; ForceField persists it with other parameters.
-    void setTopologyCache(const json& topology) { m_topology_cache = topology; }
-    const json& getTopologyCache() const { return m_topology_cache; }
-
-    // Phase 5A: Distribute EEQ charges to all threads for fqq calculation (Claude Generated Nov 2025)
-    void distributeEEQCharges(const Vector& charges);
-
-    // Claude Generated (Feb 21, 2026): Distribute Phase-1 topology charges for BATM
-    // Reference: Fortran gfnff_engrad.F90:620 uses topo%qa (Phase-1, fixed) for BATM
-    // CRITICAL: BATM must use Phase-1 charges (fixed at init), not Phase-2 EEQ charges (geometry-dependent)
-    void distributeTopologyCharges(const Vector& charges);
-
-    // Get cached EEQ charges for GFN-FF cache restoration (Claude Generated Dec 2025)
-    const Vector& getCachedEEQCharges() const { return m_eeq_charges; }
-
-    // Claude Generated (Jan 18, 2026): Distribute D3 CN to all threads for dynamic r0 calculation
-    // Reference: Fortran gfnff_engrad.F90:432 - CN recalculated at each energy evaluation
-    void distributeD3CN(const Vector& d3_cn);
-
-    // Get cached D3 CN for validation (Claude Generated Jan 18, 2026)
-    const Vector& getCachedD3CN() const { return m_d3_cn; }
-
-    // Claude Generated (Feb 15, 2026): Accessor for verbose output
-    int getDispersionPairCount() const { return static_cast<int>(m_gfnff_dispersions.size()); }
-
-    // Claude Generated (Feb 15, 2026): Set dc6dcn matrix for dispersion CN gradient
-    // Reference: Fortran gfnff_gdisp0.f90:262-305 - dc6dcn(i,j) = dC6(i,j)/dCN(i)
-    void setDispersionDC6DCN(const Matrix& dc6dcn);
-
-    /// Claude Generated (Mar 2026): Zero-copy dc6dcn — threads point directly to D4Generator's matrix
-    void setDispersionDC6DCNPtr(const Matrix* dc6dcn_ptr) {
-        for (auto* thread : m_stored_threads) {
-            thread->setDispersionDC6DCN(dc6dcn_ptr);
-        }
-    }
-
-    // Claude Generated (Feb 1, 2026): Distribute CN, CNF, and CN derivatives for Coulomb gradients
-    // Reference: Fortran gfnff_engrad.F90:418-422 - charge derivative via CN
-    // Claude Generated (WP4, May 2026): dcn now passed as CNDerivStore (pair-list) instead of std::vector<SpMatrix>
-    void distributeCNandDerivatives(const Vector& cn, const Vector& cnf,
-                                     const CNDerivStore& dcn);
-
-    // Claude Generated (Feb 22, 2026): Distribute only CN to threads for energy-only evaluations
-    // Needed so dynamic r0 in bonds uses current CN, not stale values from last gradient call
-    void distributeCNOnly(const Vector& cn);
-
     Eigen::MatrixXd NumGrad();
-
-    // Claude Generated (February 2026): Per-component gradient decomposition for validation
-    // Activates gradient component storage in all threads
-    void setStoreGradientComponents(bool store);
-    // Per-component gradient getters (summed across all threads)
-    Matrix GradientBond() const;
-    Matrix GradientAngle() const;
-    Matrix GradientTorsion() const;
-    Matrix GradientRepulsion() const;
-    Matrix GradientCoulomb() const;
-    Matrix GradientDispersion() const;
-    Matrix GradientHB() const;
-    Matrix GradientXB() const;
-    Matrix GradientBATM() const;
-    Matrix GradientATM() const;   ///< ATM three-body dispersion gradient (Claude Generated Mar 2026)
-
-    /// Claude Generated (Mar 2026): Expose CN chain-rule correction for dispersion diagnostic
-    /// Returns the dEdcn_disp * dcn component (zero if gradient components not stored)
-    Matrix getDispCNCorrection() const { return m_disp_cn_correction; }
 
     // Claude Generated: Parameter analysis functionality
     void printParameterSummary() const;
 
-    /// Claude Generated (Mar 2026): Expose thread pool for Phase-A sub-task parallelisation
-    CxxThreadPool* threadPool() const { return m_threadpool; }
-
-    /// Claude Generated (April 2026): Set unit cell for PBC minimum image convention
-    /// cell_angstrom: 3×3 matrix (Angstrom); converted to Bohr internally for thread distribution
-    void setUnitCell(const Eigen::Matrix3d& cell_angstrom, bool has_pbc);
-
-    /// WP-FF-DistMatrix-Sharing (May 2026): expose external packed-triangular distance arrays
-    /// to all ForceFieldThread instances. Lifetime managed by caller (typically GFNFF).
-    /// Pass nullptr to clear the references.
-    void setSharedDistances(const Eigen::VectorXd* srab, const Eigen::VectorXd* sqrab);
-
 private:
-    void AutoRanges();
     void setBonds(const json& bonds);
     void setAngles(const json& angles);
     void setDihedrals(const json& dihedrals);
     void setInversions(const json& inversions);
+    void setvdWs(const json& vdws);
     void setESPs(const json& esps);
 
-    // Claude Generated: CG parameter generation methods
-    void generateCGParameters(const json& cg_config);
-    Eigen::Vector3d getCGShapeForAtom(int atom_index, const json& config);
-    Eigen::Vector3d getCGOrientationForAtom(int atom_index, const json& config);
+    /// Claude Generated (Sep 2026): parse "d3_dispersion_pairs" (D3ParameterGenerator output,
+    /// forwarded by ForceFieldGenerator for uff-d3) into the GFNFFDispersion pair layout that
+    /// FFWorkspace evaluates with dispersion_method = "d3".
+    void setD3DispersionPairs(const json& pairs);
 
-    std::vector<ForceFieldThread*> m_stored_threads;
+    /// Claude Generated (Sep 2026): build the FFWorkspace from the parsed interaction lists.
+    void buildWorkspace();
+
     CxxThreadPool* m_threadpool;
-    void setvdWs(const json& vdws);
-
-    // Phase 4.2: GFN-FF pairwise non-bonded parameter setters (Claude Generated 2025)
-    void setGFNFFDispersions(const json& dispersions);
-    void setD4Dispersions(const json& dispersions);  // Claude Generated - Dec 25, 2025: Native D4 dispersion
-    void setGFNFFBondedRepulsions(const json& repulsions);
-    void setGFNFFNonbondedRepulsions(const json& repulsions);
-    void setGFNFFCoulombs(const json& coulombs);
-    void setGFNFFSTorsions(const json& storsions); // Claude Generated (March 2026): Triple bond torsions
-
-    // Phase 3: GFN-FF hydrogen bond and halogen bond parameter setters (Claude Generated 2025)
-    void setGFNFFHydrogenBonds(const json& hbonds);
-    void setGFNFFHalogenBonds(const json& xbonds);
-
-    // ATM three-body dispersion parameter setter (Claude Generated 2025)
-    void setATMTriples(const json& triples);
-
-    // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
-    // GFN-FF bonded ATM (batm) parameter setter for 1,4-pairs
-    void setGFNFFBatms(const json& batms);
-
-    // Claude Generated (Feb 21, 2026): Bond-HB mapping for dncoord_erf
-    void loadBondHBData(const json& bond_hb_data_json);
 
     // Claude Generated: Energy component storage for regression testing (Nov 2025)
     double m_bond_energy = 0.0;
@@ -284,131 +129,30 @@ private:
     double m_inversion_energy = 0.0;
     double m_vdw_energy = 0.0;
     double m_rep_energy = 0.0;
-    double m_gfnff_repulsion = 0.0;  // Claude Generated (Dec 2025): GFN-FF repulsion energy (standard exponential repulsion)
-    double m_gfnff_bonded_repulsion = 0.0;    // Claude Generated (Mar 2026): bonded repulsion (REPSCALB=1.7583)
-    double m_gfnff_nonbonded_repulsion = 0.0; // Claude Generated (Mar 2026): non-bonded repulsion (REPSCALN=0.4270)
-    double m_eq_energy = 0.0;
     double m_dispersion_energy = 0.0;
-    double m_coulomb_energy = 0.0;
-    double m_energy_hbond = 0.0;    // Claude Generated (2025): Phase 5 - Hydrogen bond energy
-    double m_energy_xbond = 0.0;    // Claude Generated (2025): Phase 5 - Halogen bond energy
-    double m_atm_energy = 0.0;      // Claude Generated (December 2025): ATM three-body dispersion energy
-    double m_batm_energy = 0.0;     // Claude Generated (January 17, 2026): Batm three-body dispersion energy
-    double m_stors_energy = 0.0;    // Claude Generated (March 2026): Triple bond torsion energy
-    // Claude Generated (May 2026, HB-investigation): per-case HB split for Fortran comparison.
-    double m_hbond_case1_energy = 0.0;
-    double m_hbond_case2_energy = 0.0;
-    double m_hbond_case3_energy = 0.0;
-    double m_hbond_case4_energy = 0.0;
-    int m_hbond_case1_count = 0;
-    int m_hbond_case2_count = 0;
-    int m_hbond_case3_count = 0;
-    int m_hbond_case4_count = 0;
-    double m_d3_energy = 0.0;       // Claude Generated (Jan 2, 2026): D3 dispersion energy (for UFF-D3 and GFN-FF)
-    double m_d4_energy = 0.0;       // Claude Generated (Jan 2, 2026): D4 dispersion energy (for GFN-FF)
-
-    // Claude Generated (May 2026): Output suppression flag + last-pool wall-clock for GFN-FF unified report
-    bool m_suppress_output = false;
-    double m_t_pool_wall = 0.0;
-    double m_t_chainrule = 0.0;
-    std::unordered_map<std::string, long long> m_term_timings_aggregate;
+    double m_d3_energy = 0.0;       // Claude Generated (Jan 2, 2026): D3 dispersion energy (uff-d3)
 
     GeoGradMatrix m_geometry, m_gradient;  // WP-G: RowMajor N×3 hot data
     std::vector<int> m_atom_types;
     std::string m_method = "uff";
-    StringList m_uff_methods = { "uff", "uff-d3" };  // Claude Generated (December 19, 2025): uff-d3 already included
-    StringList m_qmdff_methods = { "qmdff", "quff" };
     double m_e0 = 0;
     int m_natoms = 0;
     int m_threads = 1;
-    int m_gradient_type = 1;
     std::vector<Bond> m_bonds;
     std::vector<Angle> m_angles;
-    std::vector<Dihedral> m_dihedrals;        // Primary torsions (n=3, n=2, etc.)
-    std::vector<Dihedral> m_extra_dihedrals;   // Extra sp3-sp3 gauche torsions (n=1) - Claude Generated (Jan 2, 2026)
+    std::vector<Dihedral> m_dihedrals;
     std::vector<Inversion> m_inversions;
     std::vector<vdW> m_vdWs;
     std::vector<EQ> m_EQs;
 
-    // Phase 4.2: GFN-FF pairwise non-bonded storage (Claude Generated 2025)
-    std::vector<GFNFFDispersion> m_gfnff_dispersions;
-    std::vector<GFNFFDispersion> m_d4_dispersions;  // Claude Generated - Dec 25, 2025: Native D4 dispersion pairs
-    std::vector<D3DispersionPair> m_d3_pairs;        // Claude Generated - Apr 2026: P1c — Separate D3 storage
-    std::vector<GFNFFRepulsion> m_gfnff_bonded_repulsions;
-    std::vector<GFNFFRepulsion> m_gfnff_nonbonded_repulsions;
-    std::vector<GFNFFCoulomb> m_gfnff_coulombs;
-    std::vector<GFNFFSTorsion> m_gfnff_storsions;  // Claude Generated (March 2026): Triple bond torsions
-
-    // Phase 3: GFN-FF hydrogen bond and halogen bond storage (Claude Generated 2025)
-    std::vector<GFNFFHydrogenBond> m_gfnff_hbonds;
-    std::vector<GFNFFHalogenBond> m_gfnff_xbonds;
-
-    // ATM three-body dispersion storage (D3/D4)
-    std::vector<ATMTriple> m_atm_triples;
-
-    // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
-    // GFN-FF bonded ATM (batm) parameters for 1,4-pairs
-    std::vector<GFNFFBatmTriple> m_gfnff_batms;
-
-    // Claude Generated (Feb 21, 2026): Bond-HB mapping for dncoord_erf at runtime
-    std::vector<BondHBEntry> m_bond_hb_data;
-
-    // EEQ charges for GFN-FF (cached with parameters - Claude Generated Dec 2025)
-    Vector m_eeq_charges;
-
-    // Claude Generated (Feb 21, 2026): Phase-1 topology charges for BATM
-    // Reference: Fortran gfnff_engrad.F90:620 uses topo%qa (Phase-1, fixed) for BATM
-    // These are FIXED at initialization, unlike m_eeq_charges which are geometry-dependent
-    Vector m_topology_charges;
-
-    // Claude Generated (Jan 18, 2026): D3 coordination numbers for dynamic r0 calculation
-    // Recalculated from current geometry at each Calculate() call for gfnff
-    Vector m_d3_cn;
-
-    // Claude Generated (Feb 1, 2026): CN, CNF, and CN derivatives for Coulomb charge derivative gradients
-    // Reference: Fortran gfnff_engrad.F90:418-422 - qtmp(i) = q(i)*cnf(i)/(2*sqrt(cn(i)))
-    // Phase 1a (Mar 2026): Stored ONLY in ForceField, not copied to threads.
-    Vector m_cn;                    // Coordination numbers per atom
-    Vector m_cnf;                   // CNF parameters per atom (for qtmp calculation)
-    // Claude Generated (WP4, May 2026): CNDerivStore (pair-list + diag) replaces std::vector<SpMatrix>.
-    // Same mathematical semantics: applyAdd(v, out) computes out += M * v with M = full sparse N×N×3.
-    CNDerivStore m_dcn;
-
-    // Claude Generated (Mar 2026, Phase 1b): dc6dcn stored here, shared to threads via const pointer.
-    Matrix m_dc6dcn;                // dc6dcn(i,j) = dC6(i,j)/dCN(i)
-
-    // Claude Generated (Feb 23, 2026): Per-atom Coulomb self-energy parameters
-    // Extracted once from pairs at load time. Used for sequential TERM 2+3
-    // computation in parent (thread-count-independent).
-    // Fix: Eliminates coupling between pair distribution and self-energy.
-    Vector m_coulomb_chi_base;   // -chi + dxi (without cnf*sqrt(cn))
-    Vector m_coulomb_gam;        // Chemical hardness (gameeq)
-    Vector m_coulomb_alp;        // Chemical softness (alpeeq, squared)
-    Vector m_coulomb_cnf;        // CN correction factor (cnf_eeq)
-    Vector m_coulomb_chi_static; // Static chi_eff (legacy fallback)
-
-    // Claude Generated (Mar 2026): Per-component CN chain-rule corrections for GradComp
-    // These are computed in Calculate() and added in the component getters
-    // Reference: Fortran applies CN chain-rule to g_bond, g_disp, g_es separately
-    // WP-G: RowMajor for cache-friendly dcn->m_*_cn_correction contraction (CNDerivStore::applyAdd target)
-    GeoGradMatrix m_bond_cn_correction;     // dEdcn_bond * dcn chain-rule → added to GradientBond()
-    GeoGradMatrix m_disp_cn_correction;     // dEdcn_disp * dcn chain-rule → added to GradientDispersion()
-    GeoGradMatrix m_coulomb_cn_correction;  // TERM 1b qtmp * dcn → added to GradientCoulomb()
-    bool m_store_gradient_components = false; // mirror of thread flag for getters
+    /// uff-d3 pairwise D3 dispersion terms (GFNFFDispersion layout consumed by FFWorkspace)
+    std::vector<GFNFFDispersion> m_d3_dispersions;
 
     json m_parameters;
-    json m_topology_cache;  // Claude Generated (March 2026): Opaque topology block for param.json persistence
     std::string m_auto_param_file; // Auto-detected parameter file path
     bool m_enable_caching = true; // Can be disabled for multi-threading
     bool m_in_setParameter = false; // Claude Generated: Recursive guard for setParameter()
 
-    // Claude Generated (April 2026): Periodic Boundary Conditions
-    // Unit cell in Bohr (ForceField internal units); propagated to threads in AutoRanges()
-    Eigen::Matrix3d m_unit_cell_bohr = Eigen::Matrix3d::Identity();
-    Eigen::Matrix3d m_unit_cell_bohr_inv = Eigen::Matrix3d::Identity();
-    bool m_has_pbc = false;
-
-    // Claude Generated (March 2026): FFWorkspace for UFF/QMDFF (replaces ForceFieldThread path)
+    // Claude Generated (March 2026): FFWorkspace evaluates all UFF/QMDFF terms
     std::unique_ptr<FFWorkspace> m_workspace;
-    bool m_use_workspace = false; ///< True when UFF/QMDFF use FFWorkspace path
 };

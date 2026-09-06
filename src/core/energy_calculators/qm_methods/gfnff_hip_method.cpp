@@ -21,7 +21,7 @@
 #include "src/core/energy_calculators/ff_methods/rocm/gpu_utils_hip.h"
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"
 #include "src/core/energy_calculators/ff_methods/forcefield.h"
-#include "src/core/energy_calculators/ff_methods/forcefieldthread.h"
+#include "src/core/energy_calculators/ff_methods/ff_terms.h"
 
 #include <chrono>
 #include <cmath>

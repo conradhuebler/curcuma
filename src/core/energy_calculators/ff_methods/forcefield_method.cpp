@@ -129,8 +129,6 @@ json ForceFieldMethod::generateForceFieldController() const {
     // Method-specific parameters
     if (m_method_name == "uff-d3") {
         controller["d3_correction"] = true;
-    } else if (m_method_name == "gfnff") {
-        controller["gfnff_mode"] = "native";
     }
     
     return controller;
@@ -422,7 +420,9 @@ void ForceFieldMethod::setParameterFile(const std::string& filename) {
 // =================================================================================
 
 std::vector<std::string> ForceFieldMethod::getSupportedMethods() {
-    return {"uff", "uff-d3", "d3", "qmdff", "gfnff"};
+    // Claude Generated (Sep 2026): gfnff has its own engine (GFNFF), "d3" is rejected by
+    // MethodFactory; ForceField evaluates only these three through FFWorkspace.
+    return {"uff", "uff-d3", "qmdff"};
 }
 
 bool ForceFieldMethod::isMethodSupported(const std::string& method_name) {
@@ -474,13 +474,8 @@ json ForceFieldMethod::getDefaultConfigForMethod(const std::string& method_name)
     // Method-specific defaults
     if (method_name == "uff-d3") {
         config["d3_correction"] = true;
-    } else if (method_name == "gfnff") {
-        config["gfnff_mode"] = "native";
-        config["parameter_caching"] = true;
     } else if (method_name == "qmdff") {
         config["qmdff_version"] = "latest";
-    } else if (method_name == "d3") {
-        config["d3_preset"] = "pbe0";  // Default preset for D3-only method
     }
 
     return config;
@@ -674,17 +669,19 @@ json ForceFieldMethod::getEnergyDecomposition() const {
         return energy_json;
     }
 
-    // Get all energy components from ForceField
+    // Get all energy components from ForceField. UFF/QMDFF have no Coulomb, H-/X-bond
+    // or three-body dispersion terms; the keys are kept (as 0.0) for consumers that read
+    // the same layout from GFN-FF (curcumaopt, simplemd).
     energy_json["Bond"] = m_forcefield->BondEnergy();
     energy_json["Angle"] = m_forcefield->AngleEnergy();
     energy_json["Torsion"] = m_forcefield->DihedralEnergy();
     energy_json["Inversion"] = m_forcefield->InversionEnergy();
     energy_json["Dispersion"] = m_forcefield->DispersionEnergy();
-    energy_json["Coulomb"] = m_forcefield->CoulombEnergy();
-    energy_json["HBond"] = m_forcefield->HydrogenBondEnergy();
-    energy_json["XBond"] = m_forcefield->HalogenBondEnergy();
-    energy_json["ATM"] = m_forcefield->ATMEnergy();
-    energy_json["BATM"] = m_forcefield->BatmEnergy();
+    energy_json["Coulomb"] = 0.0;
+    energy_json["HBond"] = 0.0;
+    energy_json["XBond"] = 0.0;
+    energy_json["ATM"] = 0.0;
+    energy_json["BATM"] = 0.0;
 
     return energy_json;
 }
@@ -725,27 +722,3 @@ double ForceFieldMethod::getDispersionEnergy() const {
     return m_forcefield->DispersionEnergy();
 }
 
-double ForceFieldMethod::getCoulombEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->CoulombEnergy();
-}
-
-double ForceFieldMethod::getHBondEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->HydrogenBondEnergy();
-}
-
-double ForceFieldMethod::getXBondEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->HalogenBondEnergy();
-}
-
-double ForceFieldMethod::getATMEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->ATMEnergy();
-}
-
-double ForceFieldMethod::getBatmEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->BatmEnergy();
-}
