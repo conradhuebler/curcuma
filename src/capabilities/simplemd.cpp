@@ -870,8 +870,18 @@ bool SimpleMD::Initialise()
     }
 
     m_interface = new EnergyCalculator(m_method, ec_config, Basename());
+    // Fail loud (Sep 2026): an unknown/unavailable method used to leave a calculator without a
+    // backend and the first FastEnergy() call segfaulted. Abort the setup with the reason.
+    if (m_interface->Error()) {
+        CurcumaLogger::error("MD setup failed: " + m_interface->ErrorMessage());
+        return false;
+    }
 
     m_interface->setMolecule(m_molecule.getMolInfo());
+    if (m_interface->Error()) {
+        CurcumaLogger::error("MD setup failed while setting the molecule: " + m_interface->ErrorMessage());
+        return false;
+    }
     // Energy-method-setup boundary (Claude Generated, Jun 2026): EnergyCalculator construction +
     // setMolecule (e.g. GFN-FF parameter generation) leaves the global CurcumaLogger verbosity
     // clamped to 0 (it captures/restores around an already-clamped level), so the remaining setup
@@ -1893,6 +1903,7 @@ void SimpleMD::start()
 void SimpleMD::prepareRun()
 {
     if (m_initialised == false) {
+        CurcumaLogger::error("MD not initialised (setup failed, see the messages above) - nothing to run");
         m_run_prepared = false;
         return;
     }

@@ -2681,7 +2681,13 @@ Vector EEQSolver::solveEEQ(
     }
 
     // Claude Generated (March 2026): Use unified dispatchSolve instead of duplicated solver logic
-    Vector charges = dispatchSolve(A, x, natoms, nfrag, total_charge);
+    // Sep 2026: pin the BLAS to one thread here (this legacy single-phase path passes no
+    // thread budget) so the LAPACK result does not depend on the machine load.
+    Vector charges;
+    {
+        curcuma::ScopedBlasThreads _blas_threads(1);
+        charges = dispatchSolve(A, x, natoms, nfrag, total_charge);
+    }
 
     // DEBUG: Verify linear solve accuracy
     if (m_verbosity >= 3) {
@@ -3046,7 +3052,15 @@ std::vector<Vector> EEQSolver::calculateTopologyChargesMultiRHS(
     // Claude Generated (March 2026): Use configurable solver dispatch instead of hardcoded LU
     // This allows the user to select solve_method (lu, schur_cholesky, pcg, auto) for Phase 1 too
     // Claude Generated (WP2, May 2026): forward pool/num_threads so Stage-4 batched LU runs in parallel
-    Vector topology_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads);
+    // Sep 2026: same BLAS-thread guard as the Phase-2 solve. Without it the Phase-1 dpotrf/
+    // dpotrs ran with OpenBLAS's default thread count (all cores), which made the topology
+    // charges differ by ~1e-13 depending on machine load (threaded kernels reassociate) and
+    // turned the 10 ps MD tests into load-dependent coin flips.
+    Vector topology_charges;
+    {
+        curcuma::ScopedBlasThreads _blas_threads(num_threads > 0 ? num_threads : 1);
+        topology_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads);
+    }
 
     // Claude Generated (March 2026): Print Phase 1 charge summary
     if (m_verbosity >= 3 && natoms <= 10) {

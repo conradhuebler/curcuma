@@ -38,6 +38,7 @@ ENERGY_DRIFT_TOL=0.50
 run_test() {
     cd "$TEST_DIR"
     rm -f input.trj.xyz input.opt.xyz input.restart stdout.log stderr.log
+    rm -rf input.snapshots input.topo.json   # stale -no_bmt snapshots / topology cache (Sep 2026)
     cleanup_bmt_dirs
 
     echo "Running: $CURCUMA -md input.xyz -method gfnff -maxtime $MD_MAXTIME"
