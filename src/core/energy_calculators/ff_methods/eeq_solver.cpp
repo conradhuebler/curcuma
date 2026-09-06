@@ -842,9 +842,9 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     m_solve_method = parseSolveMethod(m_config.get<std::string>("solve_method", "cholesky"));
     // Read the Int PARAMs through double: CLI values arrive as JSON numbers (0.0), which a
     // strict get<int>() rejects in favour of the default.
-    m_ppcg_min_nfrag = static_cast<int>(m_config.get<double>("eeq_ppcg_min_nfrag", 32.0));
+    m_ppcg_min_nfrag = static_cast<int>(m_config.get<double>("eeq_ppcg_min_nfrag", 1.0));
     m_ppcg_min_atoms = static_cast<int>(m_config.get<double>("eeq_ppcg_min_atoms", 500.0));
-    m_ppcg_tol       = m_config.get<double>("eeq_ppcg_tol", 1e-10);
+    m_ppcg_tol       = m_config.get<double>("eeq_ppcg_tol", 1e-12);
     m_ppcg_max_iter  = static_cast<int>(m_config.get<double>("eeq_ppcg_max_iter", 500.0));
     if (m_config.get<int>("verbosity", 0) >= 2)
         CurcumaLogger::info(fmt::format("EEQ solver config: solve_method={}, ppcg auto at nfrag>={} & N>={}, tol={:.0e}, max_iter={}",
@@ -1567,7 +1567,8 @@ Vector EEQSolver::dispatchSolve(
     // and the `else if (method_to_use == LU)` branch below stays dead code. With LU in
     // the guard, explicit-LU routes through that branch's `goto lu_solve`.
     if (method_to_use == EEQSolveMethod::SchurCholesky || method_to_use == EEQSolveMethod::PCG
-        || method_to_use == EEQSolveMethod::LU || m_solve_method == EEQSolveMethod::Auto) {
+        || method_to_use == EEQSolveMethod::LU || method_to_use == EEQSolveMethod::ProjectedPCG
+        || m_solve_method == EEQSolveMethod::Auto) {
         // Views into the augmented matrix (B3, Sep 2026): the former N x N copy of A_nn and
         // the dense nfrag x N rebuild of C cost O(N^2) per solve for nothing — C is exactly
         // the constraint block of A.
@@ -3541,6 +3542,7 @@ Vector EEQSolver::calculateFinalCharges(
 
     if (m_verbosity >= 3) {
         const char* solver_name = (m_solve_method == EEQSolveMethod::PCG) ? "PCG"
+            : (m_solve_method == EEQSolveMethod::ProjectedPCG) ? "projected PCG"
             : (m_solve_method == EEQSolveMethod::SchurCholesky) ? "Cholesky"
             : (m_solve_method == EEQSolveMethod::Auto) ? "auto (benchmark)" : "LU";
         if (use_iterative)

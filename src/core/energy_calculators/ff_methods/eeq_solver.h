@@ -834,9 +834,9 @@ private:
     int    m_refactor_force_every = 0;  ///< WP-EEQ-Cache: force refactorization every N steps (0 = disabled)
     int    m_refine_iters = 1;          ///< A4: iterative-refinement steps on a cached-factor solve (0 = off)
     // Projected PCG (many-fragment path, Sep 2026): see solveWithProjectedPCG()
-    int    m_ppcg_min_nfrag = 32;       ///< auto-select PPCG when nfrag >= this (0 = never auto)
+    int    m_ppcg_min_nfrag = 1;        ///< auto-select PPCG when nfrag >= this (0 = never auto)
     int    m_ppcg_min_atoms = 500;      ///< ... and natoms >= this
-    double m_ppcg_tol = 1e-10;          ///< relative residual tolerance (|P r| <= tol * (|b|+1))
+    double m_ppcg_tol = 1e-12;          ///< relative residual tolerance (|P r| <= tol * (|b|+1))
     int    m_ppcg_max_iter = 500;       ///< iteration cap; non-convergence falls back to Schur-Cholesky
     Vector m_ppcg_last_q;               ///< warm start (previous step's charges)
     double m_matrix_rebuild_eps = 0.0;  ///< WP-EEQ-Matrix-Cache: max displacement before A_nn off-diag rebuild (0 = disabled)
@@ -1080,9 +1080,9 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "WP-EEQ-Cache: Force Cholesky refactorization every N steps regardless of geometry. "
           "0 = never force (only geometry-triggered). Recommended: 100 for long MD runs.", "Algorithm", {})
     PARAM(eeq_refine_iters, Int, 1, "A4: iterative-refinement steps applied when the EEQ solve reuses a cached Cholesky factor. Each step costs O(N^2) and removes the stale-factor error, so charges stay exact for the current geometry and the gradient stays consistent. 0 disables refinement.", "Algorithm", {})
-    PARAM(eeq_ppcg_min_nfrag, Int, 32, "Projected-PCG EEQ solve is selected automatically when the system has at least this many fragments (and eeq_ppcg_min_atoms atoms): ONE iterative solve instead of nfrag+1 direct solves. 0 disables the automatic choice (solve_method ppcg still forces it). Approximate to eeq_ppcg_tol.", "Algorithm", {})
+    PARAM(eeq_ppcg_min_nfrag, Int, 1, "Projected-PCG EEQ solve is selected automatically when the system has at least this many fragments AND at least eeq_ppcg_min_atoms atoms: ONE iterative solve on the constraint tangent space instead of the dense factorisation (+ nfrag extra solves). 0 disables the automatic choice (solve_method ppcg still forces it, eeq_ppcg_min_atoms keeps small systems exact). Converged to eeq_ppcg_tol; polymer/1410: 44 -> 16 ms per solve, dE 1e-12 Eh.", "Algorithm", {})
     PARAM(eeq_ppcg_min_atoms, Int, 500, "Minimum atom count for the automatic projected-PCG choice (small systems stay on the exact Schur-Cholesky solve).", "Algorithm", {})
-    PARAM(eeq_ppcg_tol, Double, 1e-10, "Projected-PCG relative residual tolerance |P r| <= tol (|b|+1); 1e-10 gives charge errors ~1e-10 e and energy errors ~1e-10 Eh.", "Algorithm", {})
+    PARAM(eeq_ppcg_tol, Double, 1e-12, "Projected-PCG relative residual tolerance |P r| <= tol (|b|+1); 1e-12 gives energy/gradient deviations ~1e-12 from the direct solve (1e-10 saves ~15% of the iterations).", "Algorithm", {})
     PARAM(eeq_ppcg_max_iter, Int, 500, "Projected-PCG iteration cap; on non-convergence the exact Schur-Cholesky solve is used for that step.", "Algorithm", {})
     PARAM(eeq_matrix_rebuild_eps_bohr, Double, 0.0,
           "WP-EEQ-Matrix-Cache: max atom displacement (Bohr) before A_nn Coulomb off-diagonal is "
