@@ -993,6 +993,8 @@ public:
     const Vector& getLastCNF() const { return m_last_cnf; }
     const Matrix* getDC6DCNPtr() const { return m_d4_generator ? &m_d4_generator->getDC6DCN() : nullptr; }
     FFWorkspace* getWorkspace() const { return m_workspace.get(); }
+    /// GPU wrappers: keep the FULL parameter set for consumeCachedParameterSet() (default: bonded terms only).
+    void setKeepFullParameterSet(bool keep) { m_keep_full_parameter_set = keep; }
     /// Shared CxxThreadPool (null before initializeForceField()).
     CxxThreadPool* threadPool() const;
 
@@ -2479,6 +2481,12 @@ private:
     // Claude Generated (March 2026): Heap-stored parameter copy for external consumers.
     // Set in initializeForceField(), consumed once via consumeCachedParameterSet().
     std::unique_ptr<GFNFFParameterSet> m_cached_parameter_set;
+    bool m_keep_full_parameter_set = false; ///< GPU wrappers need the full pair lists; CPU keeps bonded terms only
+    std::unique_ptr<GFNFFParameterSet> makeParameterSetCache(const GFNFFParameterSet& p) const;
+    // EEQ Phase-2 topology input, rebuilt only when the topology changes (B3, Sep 2026)
+    std::optional<EEQSolver::TopologyInput> m_eeq_topo_cache;
+    unsigned m_eeq_topo_cache_version = 0;
+    mutable unsigned m_topology_version = 0; ///< bumped whenever m_cached_topology is (re)assigned (also from const getCachedTopology)
 
     // Claude Generated (March 2026): Last re-detected HB/XB lists from updateHBXBIfNeeded()
     std::vector<GFNFFHydrogenBond> m_last_hbonds;

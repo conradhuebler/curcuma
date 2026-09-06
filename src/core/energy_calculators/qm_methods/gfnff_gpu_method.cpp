@@ -107,6 +107,7 @@ bool GFNFFGPUComputationalMethod::setMolecule(const Mol& mol)
         if (m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
             disp_dev = disp_dev || m_parameters["gfnff"].value("gpu_disp_pairs_on_device", false);
         m_gfnff->setSkipHostDispPairs(disp_dev);
+        m_gfnff->setKeepFullParameterSet(true);  // consumeCachedParameterSet() needs every pair list
     }
 
     // CPU topology + parameter generation (same as CPU gfnff)

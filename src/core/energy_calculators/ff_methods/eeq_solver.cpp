@@ -1653,15 +1653,12 @@ Vector EEQSolver::dispatchSolve(
     // the guard, explicit-LU routes through that branch's `goto lu_solve`.
     if (method_to_use == EEQSolveMethod::SchurCholesky || method_to_use == EEQSolveMethod::PCG
         || method_to_use == EEQSolveMethod::LU || m_solve_method == EEQSolveMethod::Auto) {
-        Matrix A_nn = A.topLeftCorner(natoms, natoms);
+        // Views into the augmented matrix (B3, Sep 2026): the former N x N copy of A_nn and
+        // the dense nfrag x N rebuild of C cost O(N^2) per solve for nothing — C is exactly
+        // the constraint block of A.
+        const MatrixCRef A_nn = A.topLeftCorner(natoms, natoms);
         Vector rhs_atoms = x.head(natoms);
-
-        Matrix C = Matrix::Zero(nfrag, natoms);
-        for (int f = 0; f < nfrag; ++f) {
-            for (int j = 0; j < natoms; ++j) {
-                C(f, j) = A(natoms + f, j);
-            }
-        }
+        const MatrixCRef C = A.block(natoms, 0, nfrag, natoms);
         Vector rhs_constraints = x.tail(nfrag);
 
         // Auto-benchmark on first call
@@ -2087,9 +2084,9 @@ Vector EEQSolver::dispatchSolve(
 // Cholesky is O(N³/6) vs O(N³/3) for LU — roughly 2× faster.
 
 Vector EEQSolver::solveWithSchurCholesky(
-    const Matrix& A_nn,
+    const MatrixCRef& A_nn,
     const Vector& rhs_atoms,
-    const Matrix& C,
+    const MatrixCRef& C,
     const Vector& rhs_constraints,
     int natoms,
     int nfrag)
@@ -2290,7 +2287,7 @@ Vector EEQSolver::BlockJacobiPC::apply(const Vector& r) const {
     return z;
 }
 
-EEQSolver::BlockJacobiPC EEQSolver::buildBlockJacobi(const Matrix& A_nn, const Matrix& C) {
+EEQSolver::BlockJacobiPC EEQSolver::buildBlockJacobi(const MatrixCRef& A_nn, const MatrixCRef& C) {
     BlockJacobiPC pc;
     const int nfrag = static_cast<int>(C.rows());
     const int natoms = static_cast<int>(C.cols());
@@ -2338,7 +2335,7 @@ EEQSolver::BlockJacobiPC EEQSolver::buildBlockJacobi(const Matrix& A_nn, const M
 // dominant EEQ matrices. Block-Jacobi (Stage 2) drops k further when nfrag>1.
 
 Vector EEQSolver::solveWithPCG(
-    const Matrix& A,
+    const MatrixCRef& A,
     const Vector& b,
     const Vector& x0,
     int max_iter,
@@ -2444,7 +2441,7 @@ Vector EEQSolver::solveWithPCG(
 // updated harmlessly until all columns reach tolerance or max_iter is hit.
 
 Matrix EEQSolver::solveWithPCG_multiRHS(
-    const Matrix& A,
+    const MatrixCRef& A,
     const Matrix& B,
     const Matrix& X0,
     int max_iter,
@@ -3663,10 +3660,16 @@ Vector EEQSolver::calculateFinalCharges(
 
         // ===== Build A Matrix with Current Alpha =====
         // Claude Generated (Mar 2026): Pre-allocated A buffer — avoids 13 MB alloc per step
-        m_phase2_A.setZero();
-        m_phase2_rhs.setZero();
         Matrix& A = m_phase2_A;
         Vector& x = m_phase2_rhs;
+        // Only the constraint rows/columns need clearing: every entry of the natoms x natoms
+        // block is (re)written below (diagonal, both triangles, cutoff zeros, or the cached
+        // off-diagonal copy). Zeroing the full (N+nfrag)^2 matrix cost O(N^2) per solve.
+        if (nfrag > 0) {
+            A.bottomRows(nfrag).setZero();
+            A.rightCols(nfrag).setZero();
+        }
+        x.setZero();
 
         // WP-EEQ-Matrix-Cache (May 2026): check if we can reuse the cached
         // Coulomb off-diagonal from a previous step.  Off-diag values are

@@ -99,6 +99,9 @@ enum class EEQSolveMethod {
  */
 class EEQSolver {
 public:
+    /// Read-only view of a (row-major) Matrix block, e.g. A.topLeftCorner(n, n), without copying.
+    using MatrixCRef = Eigen::Ref<const Matrix, 0, Eigen::OuterStride<>>;
+
     /**
      * @brief Topology information for EEQ Phase 1
      *
@@ -777,9 +780,9 @@ private:
      * @return Charge vector (N elements), or empty vector on failure
      */
     Vector solveWithSchurCholesky(
-        const Matrix& A_nn,
+        const MatrixCRef& A_nn,
         const Vector& rhs_atoms,
-        const Matrix& C,
+        const MatrixCRef& C,
         const Vector& rhs_constraints,
         int natoms,
         int nfrag
@@ -805,7 +808,7 @@ private:
      */
     struct BlockJacobiPC;  // Forward decl — defined below
     Vector solveWithPCG(
-        const Matrix& A,
+        const MatrixCRef& A,
         const Vector& b,
         const Vector& x0,
         int max_iter,
@@ -841,7 +844,7 @@ private:
 
     /// Build BlockJacobiPC from A_nn and the fragment constraint matrix C (nfrag × natoms).
     /// Returns a default-constructed (invalid) PC if any fragment block fails Cholesky.
-    static BlockJacobiPC buildBlockJacobi(const Matrix& A_nn, const Matrix& C);
+    static BlockJacobiPC buildBlockJacobi(const MatrixCRef& A_nn, const MatrixCRef& C);
 
     /**
      * @brief Multi-RHS Block-PCG solver — solves A·X = B with B ∈ R^{N × m} simultaneously.
@@ -864,7 +867,7 @@ private:
      * @return         N×m solution matrix X with A·X ≈ B
      */
     Matrix solveWithPCG_multiRHS(
-        const Matrix& A,
+        const MatrixCRef& A,
         const Matrix& B,
         const Matrix& X0,
         int max_iter,

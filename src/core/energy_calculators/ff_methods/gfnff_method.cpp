@@ -734,6 +734,32 @@ GFNFF::~GFNFF() = default;
 
 CxxThreadPool* GFNFF::threadPool() const { return m_pool.get(); }
 
+std::unique_ptr<GFNFFParameterSet> GFNFF::makeParameterSetCache(const GFNFFParameterSet& p) const
+{
+    if (m_keep_full_parameter_set)
+        return std::make_unique<GFNFFParameterSet>(p);
+    // CPU consumers (validation-test JSON exports, react-mode refresh) only read the bonded
+    // terms; the O(N^2) pair lists live in the workspace.
+    auto c = std::make_unique<GFNFFParameterSet>();
+    c->bonds = p.bonds;
+    c->angles = p.angles;
+    c->dihedrals = p.dihedrals;
+    c->extra_dihedrals = p.extra_dihedrals;
+    c->inversions = p.inversions;
+    c->storsions = p.storsions;
+    c->bond_hb_data = p.bond_hb_data;
+    c->eeq_charges = p.eeq_charges;
+    c->topology_charges = p.topology_charges;
+    c->dispersion_method = p.dispersion_method;
+    c->e0 = p.e0;
+    c->method_type = p.method_type;
+    c->dispersion_enabled = p.dispersion_enabled;
+    c->hbond_enabled = p.hbond_enabled;
+    c->repulsion_enabled = p.repulsion_enabled;
+    c->coulomb_enabled = p.coulomb_enabled;
+    return c;
+}
+
 bool GFNFF::InitialiseMolecule(const Mol& molecule)
 {
     // Set member variables from Mol (was QMInterface base class responsibility)
@@ -786,6 +812,7 @@ bool GFNFF::InitialiseMolecule()
 
     // Invalidate cached topology and bond list because geometry changed
     m_cached_topology.reset();
+    ++m_topology_version;
     m_cached_bond_list.reset();
     m_static_topology_valid = false;  // Reset static topology cache for new molecule
 
@@ -979,6 +1006,7 @@ const GFNFF::TopologyInfo& GFNFF::getCachedTopology() const {
             m_eeq_solver->invalidateMatrixCache();
         }
         m_cached_topology = calculateTopologyInfo();
+        ++m_topology_version;
         m_last_topology_geometry = m_geometry_bohr;
         m_static_topology_valid = true;
         m_full_topology_recalculated = true;  // Signal GPU path to update reference geometry
@@ -1312,7 +1340,6 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
 
     // Prepare EEQ topology input
     t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
-    EEQSolver::TopologyInput eeq_topo;
     const TopologyInfo* topo_ptr = nullptr;
     // Static-Mode (WP-S1): freeze_eeq overrides do_eeq once initial charges are captured.
     bool do_eeq = (m_eeq_solver && !m_skip_eeq_recalc && !freeze_eeq);
@@ -1333,18 +1360,26 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     }
     if (do_eeq) {
         topo_ptr = &getCachedTopology();
-        eeq_topo.neighbor_lists = topo_ptr->neighbor_lists;
-        eeq_topo.nfrag = topo_ptr->nfrag;
-        eeq_topo.fraglist = topo_ptr->fraglist;
-        eeq_topo.qfrag = topo_ptr->qfrag;
-        eeq_topo.covalent_radii.resize(m_atomcount);
-        for (int i = 0; i < m_atomcount; ++i) {
-            int z = m_atoms[i];
-            if (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) {
-                eeq_topo.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];
-            } else {
-                eeq_topo.covalent_radii[i] = 1.0;
+        // The EEQ topology input (neighbour lists, fragments, radii) only changes with the
+        // topology; rebuilding it per step deep-copied N neighbour vectors (B3, Sep 2026).
+        if (!m_eeq_topo_cache || m_eeq_topo_cache_version != m_topology_version
+            || static_cast<int>(m_eeq_topo_cache->covalent_radii.size()) != m_atomcount) {
+            EEQSolver::TopologyInput eeq_topo;
+            eeq_topo.neighbor_lists = topo_ptr->neighbor_lists;
+            eeq_topo.nfrag = topo_ptr->nfrag;
+            eeq_topo.fraglist = topo_ptr->fraglist;
+            eeq_topo.qfrag = topo_ptr->qfrag;
+            eeq_topo.covalent_radii.resize(m_atomcount);
+            for (int i = 0; i < m_atomcount; ++i) {
+                int z = m_atoms[i];
+                if (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) {
+                    eeq_topo.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];
+                } else {
+                    eeq_topo.covalent_radii[i] = 1.0;
+                }
             }
+            m_eeq_topo_cache = std::move(eeq_topo);
+            m_eeq_topo_cache_version = m_topology_version;
         }
     }
     if (do_timing) {
@@ -1436,7 +1471,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             new_charges = m_eeq_solver->calculateFinalCharges(
                 m_atoms, m_geometry_bohr, m_charge,
                 topo_ptr->topology_charges, m_last_cn,
-                topo_ptr->hybridization, eeq_topo,
+                topo_ptr->hybridization, m_eeq_topo_cache,
                 true, topo_ptr->alpeeq, pool, total_threads);
             if (do_timing) {
                 t_eeq_solve = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
@@ -1493,7 +1528,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             Vector new_charges = m_eeq_solver->calculateFinalCharges(
                 m_atoms, m_geometry_bohr, m_charge,
                 topo_ptr->topology_charges, m_last_cn,
-                topo_ptr->hybridization, eeq_topo,
+                topo_ptr->hybridization, m_eeq_topo_cache,
                 true, topo_ptr->alpeeq, pool, m_threads);
             if (do_timing) {
                 t_eeq_solve = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
@@ -2072,7 +2107,7 @@ bool GFNFF::rebuildReactiveTopology()
     ff_params.coulomb_enabled = m_parameters.value("coulomb", true);
 
     // Refresh the heap copy for external consumers (GPU rebuild path reads a clone).
-    m_cached_parameter_set = std::make_unique<GFNFFParameterSet>(ff_params);
+    m_cached_parameter_set = makeParameterSetCache(ff_params);
 
     // Active engine: full interaction-list swap + re-partition. Atom types, thread
     // pool and partition count survive inside the workspace.
@@ -2983,6 +3018,7 @@ bool GFNFF::importTopology(const json& topo_json)
     // ICX rejects the no-arg emplace if TopologyInfo's default ctor isn't visible
     // through the GFNFFTopology+GFNFFDynamicState multi-inheritance pattern.
     m_cached_topology = TopologyInfo{};
+    ++m_topology_version;
     TopologyInfo& topo = *m_cached_topology;
 
     // Fragment information
@@ -3248,12 +3284,11 @@ bool GFNFF::initializeForceField()
         m_workspace = std::make_unique<FFWorkspace>(num_threads);
         m_workspace->setAtomTypes(m_atoms);
 
-        // Save a heap copy for external consumers BEFORE moving into workspace
-        m_cached_parameter_set = std::make_unique<GFNFFParameterSet>(ff_params);
-
-        // Copy (not regenerate) parameters for the workspace
-        GFNFFParameterSet ws_params = ff_params;
-        m_workspace->setInteractionLists(std::move(ws_params));
+        // Keep a copy for external consumers (full pair lists only when a GPU wrapper asked
+        // for them, bonded terms otherwise), then MOVE the set into the workspace. The former
+        // two full copies cost ~3 s / 1.2 GB on a 3000-atom water box (B3, Sep 2026).
+        m_cached_parameter_set = makeParameterSetCache(ff_params);
+        m_workspace->setInteractionLists(std::move(ff_params));
 
         if (num_threads > 1 && threadPool()) {
             m_workspace->setPool(threadPool());
@@ -3430,6 +3465,7 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     // Cache the init topology so getCachedTopology() returns the same data
     // used for HBond/XBond detection — avoids re-computation drift
     m_cached_topology = topo_info;
+    ++m_topology_version;
     m_geometry_tracker.updateGeometry(m_geometry_bohr);
 
     auto end_time = std::chrono::high_resolution_clock::now();

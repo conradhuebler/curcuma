@@ -95,6 +95,17 @@ void FFWorkspace::computeHBCoordinationNumbers(int p)
             bond.hb_cn_H = (it != hb_cn_map.end()) ? it->second : 0.0;
         }
     }
+
+    // CSR index by H atom. The per-H entry order equals the order the former linear
+    // scan visited them, so the gradient accumulation order (and result) is unchanged.
+    const int nat = static_cast<int>(m_atom_types.size());
+    m_hb_grad_offsets.assign(nat + 1, 0);
+    for (const auto& e : m_hb_grad_entries) ++m_hb_grad_offsets[e.H_atom + 1];
+    for (int a = 0; a < nat; ++a) m_hb_grad_offsets[a + 1] += m_hb_grad_offsets[a];
+    m_hb_grad_list.resize(m_hb_grad_entries.size());
+    std::vector<int> fill(m_hb_grad_offsets.begin(), m_hb_grad_offsets.end() - 1);
+    for (int k = 0; k < static_cast<int>(m_hb_grad_entries.size()); ++k)
+        m_hb_grad_list[fill[m_hb_grad_entries[k].H_atom]++] = k;
 }
 
 // ============================================================================
@@ -158,10 +169,12 @@ void FFWorkspace::calcBonds(int p)
                 constexpr double t1 = 0.1;
                 double zz = t1 * alpha_orig * dr * dr * energy;
                 int H = (m_atom_types[bond.i] == 1) ? bond.i : bond.j;
-                for (const auto& hbg : m_hb_grad_entries) {
-                    if (hbg.H_atom != H) continue;
-                    acc.gradient.row(H) += zz * hbg.dCN_dH.transpose();
-                    acc.gradient.row(hbg.B_atom) += zz * hbg.dCN_dB.transpose();
+                if (H + 1 < static_cast<int>(m_hb_grad_offsets.size())) {
+                    for (int k = m_hb_grad_offsets[H]; k < m_hb_grad_offsets[H + 1]; ++k) {
+                        const auto& hbg = m_hb_grad_entries[m_hb_grad_list[k]];
+                        acc.gradient.row(H) += zz * hbg.dCN_dH.transpose();
+                        acc.gradient.row(hbg.B_atom) += zz * hbg.dCN_dB.transpose();
+                    }
                 }
             }
 
@@ -1149,7 +1162,8 @@ void FFWorkspace::calcHydrogenBonds(int p)
         }
         acc.energy.hbond += E_HB;
 
-        if (std::getenv("CURCUMA_HB_DUMP") && std::abs(E_HB) > 1e-13) {
+        static const bool hb_dump = (std::getenv("CURCUMA_HB_DUMP") != nullptr);  // once, not per triple
+        if (hb_dump && std::abs(E_HB) > 1e-13) {
             fmt::print("HBTRIP A={:3d} H={:3d} B={:3d} case={} E={:.12f}\n",
                        hb.i+1, hb.j+1, hb.k+1, hb.case_type, E_HB);
         }
