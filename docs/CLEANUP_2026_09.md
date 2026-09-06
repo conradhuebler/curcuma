@@ -46,17 +46,19 @@ final = 215b3af1 incl. the projected-PCG EEQ below; run-to-run variance on this 
 |---|---|---|---|---|
 | polymer 1410 | gfnff SP cold / warm (8 thr) | 774 / 560 ms | 430 / 429 ms | 1.8 / 1.3 |
 | polymer 1410 | gfnff SP cold / warm (1 thr) | 765 / 721 ms | 495 / 439 ms | 1.55 / 1.6 |
-| water box 3000 (999 fragments) | gfnff SP cold / warm (8 thr) | 7.07 / 6.47 s | 2.32 / 2.27 s | 3.05 / 2.85 |
+| water box 3000 (999 fragments) | gfnff SP cold / warm (8 thr) | 7.07 / 6.47 s | 2.09 / 1.99 s | 3.4 / 3.3 |
 | water box 3000 | gfnff MD step (8 thr) | 1092 ms | 309 ms | 3.5 |
-| polymer 1410 | gfnff MD 100 fs (8 thr) | 12.5 s | 9.4-11.9 s | 1.05-1.3 |
+| polymer 1410 | gfnff MD 100 fs (8 thr) | 12.5 s | 7.5 s (round 2, PPCG default) | 1.65 |
 | polymer 1410 | gfn1 SP (8 thr) | 190.9 s | 131.6-143.6 s | 1.33-1.45 |
 | polymer 1410 | gfn2 SP (8 thr) | 113.1 s | 82.4-98.7 s | 1.15-1.37 |
 | complex 231 | gfnff SP (1 thr) | 76 ms | 45 ms | 1.7 |
 | triose 66 | gfn2 SP (1 thr) | 134 ms | 111 ms | 1.2 |
 
-Energies: identical to the last digit for every single-fragment run; the water box (projected
-PCG) differs by <= 5e-12 Eh, gradients by <= 5e-10 Eh/Bohr. All three MD runs end with
-identical energies.
+Energies: identical to the last digit for every run below 500 atoms; systems on the
+projected-PCG default (polymer, water box) differ by <= 2e-12 Eh and <= 1e-12 Eh/Bohr from the
+baseline. All MD runs end with identical energies. All timings were taken while four unrelated
+`-confsearch` jobs of the operator (~24 cores) were running on the same box, so absolute times
+are inflated and ratios carry ~10 % noise; both binaries were measured under the same load.
 
 Small molecules (< 100 atoms) are dominated by process start-up (20-50 ms) and did not change.
 
