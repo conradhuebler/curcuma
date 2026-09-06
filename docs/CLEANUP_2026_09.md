@@ -157,15 +157,38 @@ Operator-approved plan (three tiers; tier 3 "unify kernel bodies" deliberately N
   and water box -328.18429136 Eh, `test_gfnff_gpu` 4/4. ROCm — CMake block mirrors CUDA
   line by line, **unverified** (no SDK here).
 - **Pre-existing Vulkan test failures, unchanged by this round** (fail identically with the
-  pre-plugin binary of the same commit): `cli_gpu_gradient_01/02_vulkan_*` expect a
+  pre-plugin binary of the same commit AND with a Vulkan build of the pre-branch baseline
+  db0c760f): `cli_gpu_gradient_01/02_vulkan_*` expect a
   "Gradient norm" line that `-sp -verbosity 2` no longer prints (the CPU reference run fails
   the same way; the baseline db0c760f binary does not print it either), and 4 of the 20
   opt-in `sqm_val_vkdc_*` divide-and-conquer eigensolve tests (C6H6/acetic-acid-dimer/
   caffeine gfn1, caffeine gfn2) give NaN on this NVIDIA card with `CURCUMA_VK_TRIDIAG_SOLVE=dc`
-  (the D&C was validated on an AMD RADV device, see SQM_VULKAN.md). The default Vulkan
-  eigensolve path is fine.
+  (the D&C was validated on an AMD RADV device, see SQM_VULKAN.md; the baseline binary
+  needs 127 s for C6H6 before returning NaN). The default Vulkan eigensolve path is fine.
+- Regression bench baseline db0c760f vs round 3 (CPU): all 30 single points identical to
+  12 digits (polymer within the documented 1e-12 PPCG tolerance), the three MD runs identical.
 - `cli_simplemd_08_cg_spheres` failed only because a stale 0-byte `input.snapshots/input.trj.xyz`
   from a killed run was picked up by `find_output_file`; the script now starts clean.
+
+- **GFN-FF host wrapper unified (Opus agent, merged).** `gfnff_gpu_method.cpp` /
+  `gfnff_hip_method.cpp` (1405 + 1435 lines, 76 differing) became one class template
+  `GFNFFGpuMethodImpl<Backend>` in `qm_methods/gfnff_gpu_method_impl.h` (1665 lines) plus two
+  ~40-line instantiations; the four device headers (`gpu_utils.h`, `gfnff_soa.h`,
+  `ff_workspace_gpu.h`, `eeq_solver_gpu.h`) exist once on top of `ff_methods/gpu_rt.h`
+  (runtime-API spelling `gpuMalloc`/`gpuMemcpy`/…), the `rocm/*_hip.h` files are 12–24-line
+  shims. 6073 → 3545 lines (−2528). The one functional CUDA/HIP difference (ROCm routes
+  ≥16 fragments to the CPU PCG because the device GPU-Schur is not ported) is a traits
+  default (`default_eeq_cpu_fragment_threshold` 16 vs 0) and `if constexpr
+  (Backend::has_device_schur)` for the three log lines. The class names stay real classes
+  (`dynamic_cast` in `test_gfnff_gpu`); `extern template` keeps the code in exactly one TU
+  per backend. Verified (RTX 5080, plugin rebuilt, **zero** core objects recompiled):
+  complex gfnff -37.24064863, water box -328.18429136 Eh, a 50-step GPU MD line byte-identical
+  (`0.050000 -38.641498 … -36.916123`), `test_gfnff_gpu` 4/4 (agent: 17/17 reference molecules),
+  79/79 GPU ctests. HIP: the agent showed the ROCm view of the template is token-identical
+  (10391/10391) to the deleted `gfnff_hip_method.{h,cpp}` — an argument, not a compile.
+  Reviewable judgment call: the HIP shims `#define FFWorkspaceGPU FFWorkspaceHip` (etc.)
+  instead of one shared class name, because `gfnff_rocm.hip` was off-limits and both plugins
+  load `RTLD_GLOBAL`.
 
 ## Still open (deliberately)
 

@@ -3,16 +3,22 @@
  * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * Claude Generated (March 2026): SoA layout for GPU-coalesced memory access.
- * Converts GFN-FF AoS parameter structs to GPU-friendly SoA with RAII cudaMalloc.
+ * Converts GFN-FF AoS parameter structs to GPU-friendly SoA with RAII gpuMalloc.
+ *
+ * Claude Generated (Sep 2026): SHARED by the CUDA and the ROCm backend.  The runtime
+ * API is spelled through ../gpu_rt.h (gpuMalloc / gpuStream_t / ...), so this file is
+ * the single definition of the device SoA layout; rocm/gfnff_soa_hip.h is a one-line
+ * include shim.  Only the two ROCm gather-kernel CSR blocks below are backend-specific
+ * and they are marked as such.
  *
  * Reference: Spicher/Grimme J. Chem. Theory Comput. 2020 (GFN-FF)
  */
 
 #pragma once
 
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
 
-#include <cuda_runtime.h>
+#include "../gpu_rt.h"
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -32,7 +38,7 @@ struct GFNFFHalogenBond;
 struct GFNFFHydrogenBond;
 
 // ============================================================================
-// CudaBuffer<T>: RAII wrapper around cudaMalloc / cudaFree
+// CudaBuffer<T>: RAII wrapper around gpuMalloc / gpuFree (cuda*/hip*, see gpu_rt.h)
 //
 // Claude Generated (March 2026): GPU memory owner, non-copyable, moveable.
 // ============================================================================
@@ -65,48 +71,48 @@ struct CudaBuffer {
     void alloc(int count) {
         free();
         if (count <= 0) return;
-        cudaError_t err = cudaMalloc(reinterpret_cast<void**>(&ptr), count * sizeof(T));
-        if (err != cudaSuccess)
-            throw std::runtime_error(std::string("cudaMalloc failed: ") + cudaGetErrorString(err));
+        gpuError_t err = gpuMalloc(reinterpret_cast<void**>(&ptr), count * sizeof(T));
+        if (err != gpuSuccess)
+            throw std::runtime_error(std::string(GPU_RT_PREFIX "Malloc failed: ") + gpuGetErrorString(err));
         n = count;
     }
 
     /// Upload count elements from host to GPU (auto-allocates if needed)
-    /// Uses synchronous cudaMemcpy because callers often pass temporary host
+    /// Uses synchronous gpuMemcpy because callers often pass temporary host
     /// buffers (std::vector locals in SoA::upload) that are destroyed before
     /// any stream synchronisation point.  Async copy from freed memory was
     /// the root cause of the "double free or corruption" crash.
-    void upload(const T* host_data, int count, cudaStream_t /*stream*/ = nullptr) {
+    void upload(const T* host_data, int count, gpuStream_t /*stream*/ = nullptr) {
         if (count <= 0) return;
         if (n < count) alloc(count);
-        cudaError_t err = cudaMemcpy(ptr, host_data, count * sizeof(T),
-                                     cudaMemcpyHostToDevice);
-        if (err != cudaSuccess)
-            throw std::runtime_error(std::string("cudaMemcpy H2D failed: ") + cudaGetErrorString(err));
+        gpuError_t err = gpuMemcpy(ptr, host_data, count * sizeof(T),
+                                     gpuMemcpyHostToDevice);
+        if (err != gpuSuccess)
+            throw std::runtime_error(std::string(GPU_RT_PREFIX "Memcpy H2D failed: ") + gpuGetErrorString(err));
     }
 
     /// Upload from std::vector
-    void upload(const std::vector<T>& v, cudaStream_t stream = nullptr) {
+    void upload(const std::vector<T>& v, gpuStream_t stream = nullptr) {
         upload(v.data(), static_cast<int>(v.size()), stream);
     }
 
     /// Download count elements from GPU to host
-    void download(T* host_data, int count, cudaStream_t stream = nullptr) const {
+    void download(T* host_data, int count, gpuStream_t stream = nullptr) const {
         if (count <= 0 || !ptr) return;
-        cudaError_t err = cudaMemcpyAsync(host_data, ptr, count * sizeof(T),
-                                          cudaMemcpyDeviceToHost, stream);
-        if (err != cudaSuccess)
-            throw std::runtime_error(std::string("cudaMemcpyAsync D2H failed: ") + cudaGetErrorString(err));
+        gpuError_t err = gpuMemcpyAsync(host_data, ptr, count * sizeof(T),
+                                          gpuMemcpyDeviceToHost, stream);
+        if (err != gpuSuccess)
+            throw std::runtime_error(std::string(GPU_RT_PREFIX "MemcpyAsync D2H failed: ") + gpuGetErrorString(err));
     }
 
     /// Zero-fill count elements on GPU
-    void zero(int count, cudaStream_t stream = nullptr) {
+    void zero(int count, gpuStream_t stream = nullptr) {
         if (count <= 0 || !ptr) return;
-        cudaMemsetAsync(ptr, 0, count * sizeof(T), stream);
+        gpuMemsetAsync(ptr, 0, count * sizeof(T), stream);
     }
 
     void free() {
-        if (ptr) { cudaFree(ptr); ptr = nullptr; n = 0; }
+        if (ptr) { gpuFree(ptr); ptr = nullptr; n = 0; }
     }
 
     operator T*()             { return ptr; }
@@ -124,7 +130,23 @@ struct DispersionSoA {
     CudaBuffer<double> dc6dcn_ji;  ///< [n] dC6(i,j)/dCN(j) per pair (updated per step)
     int n = 0;
 
-    void upload(const std::vector<GFNFFDispersion>& v, cudaStream_t stream = nullptr);
+#ifdef USE_ROCM
+    // ROCm gather path (Claude Generated June 2026): the deferred gradient-mode k_dispersion is
+    // the dominant MD cost (~113 ms on polymer) - grad + dEdcn FP64 atomicAdd over ~943k pairs.
+    // k_dispersion_gather sums per atom (no in-loop atomics). The dynamic per-pair data (dc6dcn,
+    // updated every step) stays pair-indexed and is read via csr_pairidx; csr_is_i selects
+    // dc6dcn_ij vs dc6dcn_ji for this atom. Static per-pair data is read via the same index.
+    // Not ported to CUDA (native FP64 atomics make the pair kernel competitive there).
+    CudaBuffer<int>    csr_off;      ///< [N+1] row offsets
+    CudaBuffer<int>    csr_partner;  ///< [2*n] partner atom per directed edge
+    CudaBuffer<int>    csr_pairidx;  ///< [2*n] original pair index t per directed edge
+    CudaBuffer<int>    csr_is_i;     ///< [2*n] 1 if this atom is idx_i[t], else 0
+    int csr_N = 0;
+
+    void upload(const std::vector<GFNFFDispersion>& v, int natoms, gpuStream_t stream = nullptr);
+#else
+    void upload(const std::vector<GFNFFDispersion>& v, gpuStream_t stream = nullptr);
+#endif
 };
 
 // ============================================================================
@@ -135,7 +157,7 @@ struct RepulsionSoA {
     CudaBuffer<double> alpha, repab, r_cut;
     int n = 0;
 
-    void upload(const std::vector<GFNFFRepulsion>& v, cudaStream_t stream = nullptr);
+    void upload(const std::vector<GFNFFRepulsion>& v, gpuStream_t stream = nullptr);
 };
 
 // ============================================================================
@@ -146,7 +168,23 @@ struct CoulombSoA {
     CudaBuffer<double> gamma_ij, r_cut;
     int n = 0;
 
-    void upload(const std::vector<GFNFFCoulomb>& v, cudaStream_t stream = nullptr);
+#ifdef USE_ROCM
+    // ROCm gather path (Claude Generated June 2026): per-atom CSR adjacency built from the
+    // pair list. The pair k_coulomb does 6 FP64 atomicAdd per pair (~6M on polymer); on RDNA
+    // (slow/emulated FP64 atomics) that is the dominant MD cost (185 ms). k_coulomb_gather
+    // sums per atom (no in-loop atomics, only 3 atomicAdd/atom) - bit-identical gamma/rcut.
+    // Not ported to CUDA (native FP64 atomics make the pair kernel competitive there).
+    CudaBuffer<int>    csr_off;      ///< [N+1] row offsets
+    CudaBuffer<int>    csr_partner;  ///< [2*n] partner atom per directed edge
+    CudaBuffer<double> csr_gamma;    ///< [2*n] gamma_ij per directed edge
+    CudaBuffer<double> csr_rcut;     ///< [2*n] r_cut per directed edge
+    int    csr_N = 0;
+    double r_cut_scalar = 0.0;       ///< uniform per-pair cutoff (for the dense N-body kernel)
+
+    void upload(const std::vector<GFNFFCoulomb>& v, int natoms, gpuStream_t stream = nullptr);
+#else
+    void upload(const std::vector<GFNFFCoulomb>& v, gpuStream_t stream = nullptr);
+#endif
 };
 
 // ============================================================================
@@ -169,7 +207,7 @@ struct BondSoA {
     int n = 0;
 
     void upload(const std::vector<Bond>& v, const std::vector<int>& atom_types,
-                cudaStream_t stream = nullptr);
+                gpuStream_t stream = nullptr);
 };
 
 // ============================================================================
@@ -182,7 +220,7 @@ struct HBAlphaSoA {
     int n = 0;
 
     void upload(const std::vector<int>& h_idx, const std::vector<int>& b_idx,
-                const std::vector<double>& rcov, cudaStream_t stream = nullptr);
+                const std::vector<double>& rcov, gpuStream_t stream = nullptr);
 };
 
 // ============================================================================
@@ -196,7 +234,7 @@ struct AngleSoA {
 
     void upload(const std::vector<Angle>& v,
                 const std::vector<int>& atom_types,
-                cudaStream_t stream = nullptr);
+                gpuStream_t stream = nullptr);
 };
 
 // ============================================================================
@@ -214,7 +252,7 @@ struct DihedralSoA {
     void upload(const std::vector<Dihedral>& standard,
                 const std::vector<Dihedral>& extra,
                 const std::vector<int>& atom_types,
-                cudaStream_t stream = nullptr);
+                gpuStream_t stream = nullptr);
 };
 
 // ============================================================================
@@ -229,7 +267,7 @@ struct InversionSoA {
 
     void upload(const std::vector<Inversion>& v,
                 const std::vector<int>& atom_types,
-                cudaStream_t stream = nullptr);
+                gpuStream_t stream = nullptr);
 };
 
 // ============================================================================
@@ -241,7 +279,7 @@ struct STorsionSoA {
     CudaBuffer<double> erefhalf;
     int n = 0;
 
-    void upload(const std::vector<GFNFFSTorsion>& v, cudaStream_t stream = nullptr);
+    void upload(const std::vector<GFNFFSTorsion>& v, gpuStream_t stream = nullptr);
 };
 
 // ============================================================================
@@ -253,7 +291,7 @@ struct BATMSoA {
     CudaBuffer<double> zb3atm_i, zb3atm_j, zb3atm_k;
     int n = 0;
 
-    void upload(const std::vector<GFNFFBatmTriple>& v, cudaStream_t stream = nullptr);
+    void upload(const std::vector<GFNFFBatmTriple>& v, gpuStream_t stream = nullptr);
 };
 
 // ============================================================================
@@ -269,7 +307,7 @@ struct ATMSoA {
 
     void upload(const std::vector<ATMTriple>& v,
                 const std::vector<int>& atom_types,
-                cudaStream_t stream = nullptr);
+                gpuStream_t stream = nullptr);
 };
 
 // ============================================================================
@@ -285,7 +323,7 @@ struct XBondSoA {
 
     void upload(const std::vector<GFNFFHalogenBond>& v,
                 const std::vector<int>& atom_types,
-                cudaStream_t stream = nullptr);
+                gpuStream_t stream = nullptr);
 };
 
 // ============================================================================
@@ -322,7 +360,7 @@ struct HBondSoA {
 
     void upload(const std::vector<GFNFFHydrogenBond>& v,
                 const std::vector<int>& atom_types,
-                cudaStream_t stream = nullptr);
+                gpuStream_t stream = nullptr);
 };
 
 // ============================================================================
@@ -357,4 +395,4 @@ struct RefCoordSoA {
     bool empty() const { return N == 0 || d_rx.empty(); }
 };
 
-#endif // USE_CUDA
+#endif // USE_CUDA || USE_ROCM

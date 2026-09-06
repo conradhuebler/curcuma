@@ -64,7 +64,8 @@ cached in `GFNFF` per topology version.
    call it from `executeGFNFF()`; add the reduction in `reduce()`.
 5. **Report**: extend `GFNFFEnergyReport` / the verbosity-2 table in `GFNFF::Calculation()`.
 6. **GPU**: mirror the kernel in `cuda/gfnff_kernels.cu` (+ `rocm/gfnff_rocm.hip`) and the SoA
-   upload in `cuda/gfnff_soa.h` / `rocm/gfnff_soa_hip.h`, or gate the term CPU-only.
+   upload in `cuda/gfnff_soa.h` (shared by CUDA and HIP since Sep 2026; the `rocm/*_hip.h`
+   files are include shims), or gate the term CPU-only.
 7. **Test**: add the term to `test_gfnff_validation.cpp` against the Fortran reference.
 
 ## GFN-FF Gradient Implementation Status (February 2026)
@@ -665,6 +666,17 @@ std::string method = "d4";  // Matches Fortran reference
 - Maintainability: Single D3 implementation to validate and update
 
 ## GPU Pipeline (cuda/)
+
+- **Sep 2026 — one host wrapper, shared headers**: the CUDA and HIP `ComputationalMethod`
+  wrappers are one class template `GFNFFGpuMethodImpl<Backend>` (`qm_methods/gfnff_gpu_method_impl.h`,
+  traits = workspace/EEQ types, backend name, `has_device_schur`, CPU-fragment threshold,
+  `downloadDoubles`); `gfnff_gpu_method.*` / `gfnff_hip_method.*` are ~40-line instantiations.
+  `gpu_utils.h`, `gfnff_soa.h`, `ff_workspace_gpu.h`, `eeq_solver_gpu.h` exist once under `cuda/`
+  on top of `ff_methods/gpu_rt.h` (`gpuMalloc`/`gpuMemcpy`/`gpuStream_t` → cuda*/hip* by
+  `__HIP_PLATFORM_AMD__`); the `rocm/*_hip.h` files are shims that `#define` the Hip class
+  names (the untouched `gfnff_rocm.hip` uses them, and both plugins load `RTLD_GLOBAL`, so the
+  two backends must not export identical symbols). Kernel TUs stay separate (not merged blind;
+  no ROCm SDK here — the HIP side is a token-identical mechanical mirror, uncompiled).
 
 ### ✅ Phase 1+2: GPU CN + GPU dc6dcn (March 2026)
 - GPU CN computation replaces CPU O(N²) erf() loop

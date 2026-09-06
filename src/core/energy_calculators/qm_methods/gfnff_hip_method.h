@@ -1,12 +1,16 @@
 /*
- * <GFNFFHipComputationalMethod — GPU-accelerated GFN-FF wrapper>
+ * <GFNFFHipComputationalMethod — ROCm backend of the shared GFN-FF GPU wrapper>
  * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * Claude Generated (March 2026): ComputationalMethod adapter for gfnff GPU path.
- * Available only when compiled with USE_CUDA=ON.
+ * Claude Generated (Sep 2026): the ~1400 lines of wrapper logic moved to the shared
+ * class template GFNFFGpuMethodImpl<Backend> (gfnff_gpu_method_impl.h), which the CUDA
+ * wrapper uses as well.  This file is now only the ROCm backend traits plus the
+ * concrete class that keeps the established public name.
+ * Available only when compiled with USE_ROCM=ON.
  *
  * Usage:
- *   ./curcuma -sp mol.xyz -method gfnff -gpu cuda    # Explicit GPU
+ *   ./curcuma -sp mol.xyz -method gfnff -gpu rocm    # Explicit GPU
  *   ./curcuma -sp mol.xyz -method gfnff -gpu auto   # GPU if available
  *   ./curcuma -sp mol.xyz -method gfnff             # CPU (default)
  */
@@ -15,170 +19,56 @@
 
 #ifdef USE_ROCM
 
-#include "../computational_method.h"
-#include "../ff_methods/gfnff.h"
-#include "../ff_methods/eeq_solver.h"  // EEQSolveMethod enum
 #include "../ff_methods/rocm/ff_workspace_hip.h"
 #include "../ff_methods/rocm/eeq_solver_hip.h"
-
-#include <memory>
+#include "gfnff_gpu_method_impl.h"
 
 /**
- * @brief GPU-accelerated native GFN-FF (ComputationalMethod adapter).
+ * @brief ROCm backend traits for GFNFFGpuMethodImpl.
  *
- * Every energy term runs on the device (bonded terms, dispersion, repulsion, Coulomb,
- * H-/X-bonds, ATM/BATM, CN + chain rule, EEQ). The host `GFNFF` object still owns the
- * topology, FT-HMO pi-bond orders, Phase-1 EEQ, native parameter generation and the
- * RMSD-gated H-/X-bond re-detection; its results are uploaded through the SoA layout.
- * The former "CPU residual workspace" design (some terms on the host) is gone —
- * see docs/GPU_GFNNF_DISCREPANCIES.md and ff_methods/CLAUDE.md "GPU Pipeline".
+ * Claude Generated (Sep 2026).  Everything the shared wrapper needs to know about the
+ * backend it drives: the two device classes, the strings it puts in log lines, and the
+ * one capability that actually differs between CUDA and ROCm (the device Schur EEQ).
  */
-class GFNFFHipComputationalMethod : public ComputationalMethod {
+struct GFNFFRocmBackend {
+    using Workspace = FFWorkspaceHip;
+    using EEQSolver = EEQSolverHip;
+
+    /// Backend name used in log prose.
+    static constexpr const char* name = "ROCm";
+    /// Device workspace class name, used in the init-failure message.
+    static constexpr const char* workspace_name = "FFWorkspaceHip";
+
+    /// The device Schur EEQ solves (WP5-A / WP7-A / WP7-B / WP7-C) are NOT ported to
+    /// HIP — they return false and the wrapper falls back to the WP2 GPU solve + CPU
+    /// Schur complement.  That is the expected path here, not a numerical failure, so
+    /// the wrapper reports it at verbosity 3 instead of warning.
+    static constexpr bool has_device_schur = false;
+
+    /// Deliverable 3 (Jun 2026): from 16 fragments on, the EEQ goes to the exact CPU
+    /// PCG — the device path would do a dense N x N Cholesky (O(N^3)) for nfrag>1.
+    static constexpr int default_eeq_cpu_fragment_threshold = 16;
+
+    /// Blocking device->host copy of n doubles (GPU-Schur charge download).
+    /// Defined in gfnff_hip_method.cpp so <hip/hip_runtime.h> stays out of this header.
+    static void downloadDoubles(double* host, const double* device, int n);
+};
+
+// The wrapper is instantiated in exactly one translation unit (gfnff_hip_method.cpp),
+// same as before the template refactor.
+extern template class GFNFFGpuMethodImpl<GFNFFRocmBackend>;
+
+/**
+ * @brief GPU-accelerated GFN-FF via HIP/ROCm (method name: "gfnff" with -gpu rocm)
+ *
+ * Kept as a real class (not an alias): the plugin entry point creates it by name.
+ */
+// NOTE: deliberately NOT 'final' — marking it final lets the compiler
+// devirtualise calls through a GFNFFHipComputationalMethod* into direct references to the
+// (extern-template) base members, which callers outside this plugin cannot resolve.
+class GFNFFHipComputationalMethod : public GFNFFGpuMethodImpl<GFNFFRocmBackend> {
 public:
-    explicit GFNFFHipComputationalMethod(const std::string& method_name, const json& config);
-    ~GFNFFHipComputationalMethod();
-
-    // === ComputationalMethod interface ===
-
-    bool setMolecule(const Mol& mol) override;
-    double calculateEnergy(bool gradient = false) override;
-    Matrix getGradient() const override;
-    void copyGradientTo(Matrix& target) const override;
-    Vector getCharges() const override;
-    Vector getBondOrders() const override;
-    Position getDipole() const override;
-    bool updateGeometry(const Matrix& geometry) override;
-    bool hasGradient() const override { return true; }
-    bool isThreadSafe() const override { return false; }
-    std::string getMethodName() const override { return m_method_name; }
-
-    // === Configuration ===
-
-    void setThreadCount(int threads) override;
-    void setParameters(const json& params) override;
-    json getParameters() const override;
-
-    // === Error handling ===
-
-    bool hasError() const override;
-    void clearError() override;
-    std::string getErrorMessage() const override;
-
-    // === Energy decomposition ===
-
-    json getEnergyDecomposition() const override;
-
-    /// Expose GPU dEdcn for diagnostics (valid after calculateEnergy with gradient)
-    const Vector& getGPUdEdcn() const;
-
-    /// Expose GPU workspace for gradient diagnostics (e.g. gradientBeforeCN)
-    FFWorkspaceHip* getGPUWorkspace() const { return m_gpu_workspace.get(); }
-
-    /// Get GPU CN result (valid after calculateEnergy)
-    const Vector& getGPUCN() const { return m_gpu_cn_final; }
-
-    // WP-P1 (May 2026): per-phase and per-stream timings for MD diagnostics
-    json getLastPrepTiming() const override;
-    json getStreamTimings() const override;
-    void setForcePhaseTiming(bool on) override;
-
-private:
-    /**
-     * @brief Initialize GPU workspace from GFNFF parameter set.
-     * Called after m_gfnff->InitialiseMolecule() succeeds.
-     * @return true on success; sets m_has_error on CUDA failure.
-     */
-    bool initGPUWorkspace();
-
-    std::unique_ptr<GFNFF>          m_gfnff;
-    // NOTE: GPU params intentionally leaked (raw ptr, never freed).
-    // FFWorkspaceHip's CUDA allocations corrupt adjacent heap metadata, making
-    // the GFNFFParameterSet unfreeable.  Cost: ~100 KB one-time leak.
-    // TODO: Investigate CUDA driver heap corruption root cause.
-    GFNFFParameterSet*              m_gpu_params_leaked = nullptr;
-    std::unique_ptr<FFWorkspaceHip> m_gpu_workspace;
-
-    // Claude Generated (March 2026): GPU EEQ solver (cuSOLVER Cholesky)
-    std::unique_ptr<EEQSolverHip>   m_eeq_gpu;
-
-    // Pre-allocated buffers for GPU EEQ Schur complement (avoid per-step heap allocs)
-    std::vector<double> m_eeq_z1;           ///< [N] A⁻¹ · b_atoms
-    std::vector<double> m_eeq_Z2;           ///< [N*nfrag] A⁻¹ · C^T (column-major)
-    std::vector<double> m_eeq_charges_gpu;  ///< [N] final charges from GPU path
-    std::vector<double> m_schur_workspace;  ///< [nfrag*(nfrag+2)] CPU Schur: S matrix + rhs + lambda (no heap after CUDA init)
-
-    // WP2: cached topology-constant EEQ data (avoid prepareEEQParametersForGPU per step)
-    std::vector<int>    m_eeq_fraglist;          ///< [N] fragment IDs (topology-constant)
-    std::vector<double> m_eeq_rhs_constraints;   ///< [nfrag] target charges (topology-constant)
-    int                 m_eeq_nfrag = 1;         ///< number of fragments (topology-constant)
-
-    json             m_parameters;
-    std::string      m_method_name;
-    std::vector<int> m_atom_types;   ///< Element numbers (Z) — stored from setMolecule()
-    bool             m_allow_unconverged_charges = false; ///< Respect allow_unconverged_charges for GPU→CPU fallback (Claude Generated Apr 2026)
-    bool             m_skip_phase2 = false;               ///< Skip Phase 2 EEQ refinement, use Phase 1 topology charges (Claude Generated Apr 2026)
-    bool             m_initialized   = false;
-    bool             m_has_error     = false;
-    std::string      m_error_message;
-    double           m_last_energy   = 0.0;
-    double           m_gpu_upload_time_ms = 0.0;
-    Matrix           m_cached_gradient; ///< Cached gradient (copied from GPU workspace after calculate)
-
-    // CN chain-rule pair list (generated once at init, used every gradient step)
-    // Claude Generated (March 2026): Full GPU gradient consistency
-    std::vector<int>    m_cn_pair_i;        ///< atom i indices
-    std::vector<int>    m_cn_pair_j;        ///< atom j indices
-    std::vector<double> m_cn_pair_rcov;     ///< scaled cov. radius sum (Bohr)
-    bool                m_cn_pairs_generated = false;
-
-    // Task #10 (Jun 2026): CN-derivative pair-list regen controls (from PARAMs)
-    bool                m_cn_pair_regen = true;       ///< regen on topology displacement
-    int                 m_cn_pair_regen_every = 0;    ///< force regen every N grad steps (0=off)
-    double              m_cn_pair_cutoff_factor = 2.5;///< cutoff = factor*(rcov_i+rcov_j)
-    long                m_cn_pair_grad_steps = 0;     ///< gradient-step counter for regen_every
-
-    // GPU CN result (always used — GPU CN is the default path)
-    Vector              m_gpu_cn_final;        ///< Cached GPU CN result
-
-    // RMSD-based EEQ lazy refactorization (Apr 2026)
-    // Caller tracks geometry RMSD from last full Cholesky refactorization.
-    // m_eeq_rmsd_threshold == 0.0 → always refactorize (default, matches reference).
-    // m_eeq_rmsd_threshold >  0.0 → lazy: reuse L when per-atom RMSD < threshold (Bohr).
-    double m_eeq_rmsd_threshold = 0.0;  ///< Bohr; from eeq_rmsd_threshold param
-    Matrix m_eeq_ref_geom;              ///< geometry (Bohr) at last EEQ refactorization
-    bool   m_eeq_has_ref_geom = false;
-
-    // EEQ Coulomb-matrix distance cutoff (Bohr). Default 0 = no cutoff, matches Fortran
-    // goed_gfnff. Set non-zero only for performance experiments — produces HF-inconsistent
-    // gradients vs. the un-truncated Coulomb energy and degrades MD energy conservation.
-    double m_eeq_distance_cutoff = 0.0;  ///< Bohr; from eeq_distance_cutoff param
-
-    // WP7-B (May 2026): GPU EEQ solver strategy for nfrag>1 systems.
-    // SchurCholesky → WP5-A (nfrag=1) / WP7-A (nfrag>1) — exact, full N×N Cholesky.
-    // Batched      → WP7-B (nfrag>1)                   — per-fragment Cholesky, drops cross-fragment Coulomb.
-    // PCG          → WP7-C (nfrag>1)                   — iterative O(k·N²), warm-started.
-    // LU / Auto    → CPU concepts; Auto resolves to PCG above pcg_large_threshold else SchurCholesky.
-    EEQSolveMethod m_eeq_strategy = EEQSolveMethod::SchurCholesky;
-    double m_eeq_batched_min_distance_bohr = 15.0;  ///< warn if min inter-frag distance < this
-
-    // WP7-C (May 2026): GPU PCG parameters (mirror CPU EEQSolver defaults).
-    int    m_eeq_pcg_max_iter   = 200;     ///< per-PCG-call iteration cap
-    double m_eeq_pcg_tolerance  = 1e-10;   ///< convergence tolerance on |r|
-    int    m_eeq_pcg_threshold  = 500;     ///< Auto strategy: PCG for N>=this (else cholesky)
-
-    // Deliverable 3 (Jun 2026): fragment count at/above which the device EEQ solve is
-    // replaced by the exact CPU PCG/block-Jacobi solver. The device path does a dense
-    // N x N Cholesky for nfrag>1 (O(N^3), intractable for solvent boxes); the CPU PCG is
-    // O(N^2 k) and exact. 0 = always use the device solve. From eeq_rocm_cpu_fragment_threshold.
-    int    m_eeq_cpu_fragment_threshold = 16;
-
-    int  m_calc_count = 0;  ///< counts calculateEnergy() calls; first 5 always print timing
-
-    /**
-     * @brief Generate CN pair list from geometry and covalent radii.
-     * Called once after initGPUWorkspace(). Pairs with rcov_sum < 2*max contribution.
-     */
-    void generateCNPairList(const Matrix& geom_bohr);
+    using GFNFFGpuMethodImpl<GFNFFRocmBackend>::GFNFFGpuMethodImpl;
 };
 
 #endif // USE_ROCM
