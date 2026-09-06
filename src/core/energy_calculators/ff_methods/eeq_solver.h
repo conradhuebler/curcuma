@@ -286,22 +286,6 @@ public:
     );
 
     /**
-     * @brief Calculate EEQ electrostatic energy from charges
-     *
-     * @param charges Atomic partial charges
-     * @param atoms Atomic numbers
-     * @param geometry_bohr Coordinates in Bohr
-     * @param cn Coordination numbers (for cnf corrections)
-     * @return EEQ energy in Hartree
-     */
-    double calculateEEQEnergy(
-        const Vector& charges,
-        const std::vector<int>& atoms,
-        const Matrix& geometry_bohr,
-        const Vector& cn
-    );
-
-    /**
      * @brief Calculate dgam corrections with full pi-system and amide detection
      *
      * Claude Generated (March 2026): Public interface for computing dgam with
@@ -532,37 +516,6 @@ private:
     );
 
     /**
-     * @brief Build EEQ matrix with intelligent caching for performance optimization
-     *
-     * Enhanced version of buildCorrectedEEQMatrix that uses intelligent caching
-     * to avoid expensive matrix reconstruction when geometry changes are insignificant.
-     *
-     * @param atoms Atomic numbers
-     * @param geometry_bohr Coordinates in Bohr
-     * @param cn Coordination numbers
-     * @param current_charges Current charge estimate (used for charge-dependent dgam/alpha)
-     * @param dxi Electronegativity corrections
-     * @param dgam Hardness corrections (gam - qa*ff)
-     * @param hybridization Hybridization states
-     * @param topology Optional topology for topological distances
-     * @param distance_mode Distance calculation mode (Topological for Phase 1, Geometric for Phase 2)
-     * @return Augmented EEQ matrix (natoms+1)×(natoms+1) with caching
-     *
-     * Claude Generated - Performance Optimization Implementation
-     */
-    Matrix buildSmartEEQMatrix(
-        const std::vector<int>& atoms,
-        const Matrix& geometry_bohr,
-        const Vector& cn,
-        const Vector& current_charges,
-        const Vector& dxi,
-        const Vector& dgam,
-        const std::vector<int>& hybridization,
-        const std::optional<TopologyInput>& topology,
-        EEQDistanceMode distance_mode = EEQDistanceMode::Topological
-    );
-
-    /**
      * @brief Solve augmented EEQ linear system with corrected parameters
      *
      * Sets up RHS: x(i) = -chi + dxi [+ CNF*sqrt(nb) if use_cnf_term=true]
@@ -676,40 +629,6 @@ private:
         const std::vector<int>& hybridization,
         const std::vector<bool>& is_amide,
         const std::optional<TopologyInput>& topology
-    ) const;
-
-    /**
-     * @brief Build neighbor lists for each atom
-     *
-     * @param atoms Atomic numbers
-     * @param geometry_bohr Coordinates in Bohr
-     * @param cutoff_radius Cutoff radius in Bohr (default 10.0)
-     * @return Vector of neighbor index lists
-     */
-    std::vector<std::vector<int>> buildNeighborLists(
-        const std::vector<int>& atoms,
-        const Matrix& geometry_bohr,
-        double cutoff_radius = 10.0
-    ) const;
-
-    /**
-     * @brief Compute topological distances via Floyd-Warshall algorithm
-     *
-     * Computes shortest path distances through the bond graph, where each bond
-     * has length = sum of covalent radii. Topological distances are always
-     * greater than or equal to geometric distances.
-     *
-     * Reference: XTB gfnff_ini.f90:431-461
-     *
-     * @param atoms Atomic numbers
-     * @param topology Topology information (neighbor lists, covalent radii)
-     * @return Matrix of topological distances in Bohr
-     *
-     * Claude Generated December 2025
-     */
-    Matrix computeTopologicalDistances(
-        const std::vector<int>& atoms,
-        const TopologyInput& topology
     ) const;
 
     /**
@@ -894,49 +813,8 @@ private:
     // ===== Cached Data for Energy Calculation =====
 
     // EEQ Solver intelligent caching for performance optimization
-    class EEQSolverCache {
-    private:
-        Matrix m_last_geometry;
-        Matrix m_last_A_matrix;
-        Vector m_last_charges;
-        bool m_cache_valid = false;
-        double m_change_threshold = 1e-6;
-
-    public:
-        bool isGeometryChanged(const Matrix& current_geometry) const {
-            if (!m_cache_valid) return true;
-            if (m_last_geometry.rows() != current_geometry.rows() ||
-                m_last_geometry.cols() != current_geometry.cols()) {
-                return true;
-            }
-            return (m_last_geometry - current_geometry).array().abs().maxCoeff() > m_change_threshold;
-        }
-
-        void cacheResults(const Matrix& geometry, const Matrix& A, const Vector& charges) {
-            m_last_geometry = geometry;
-            m_last_A_matrix = A;
-            m_last_charges = charges;
-            m_cache_valid = true;
-        }
-
-        Matrix getCachedAMatrix() const { return m_last_A_matrix; }
-        Vector getCachedCharges() const { return m_last_charges; }
-        bool isValid() const { return m_cache_valid; }
-
-        void reset() {
-            m_cache_valid = false;
-            m_last_geometry = Matrix();
-            m_last_A_matrix = Matrix();
-            m_last_charges = Vector();
-        }
-    };
 
     mutable Vector m_dxi_stored;      ///< Stored dxi corrections from last calculateCharges() call
-    mutable Matrix m_cached_topological_distances;  ///< Cached topological distances from Phase 1 for Phase 2 reuse (Jan 2, 2026)
-
-    // Intelligent EEQ matrix caching for performance
-    mutable std::unique_ptr<EEQSolverCache> m_eeq_cache;
-
     // PCG warm-start cache for iterative EEQ solve
     // Claude Generated - March 2026 (Performance optimization)
     // May 2026: m_pcg_last_Z2 promoted from Vector to Matrix so all nfrag constraint

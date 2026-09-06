@@ -814,64 +814,6 @@ static inline int detectElementSpecificHybridization(int Z, double cn,
     return 5; // sp3d2
 }
 
-// ===== Test Function for Element-Specific Hybridization =====
-// Simple test to verify the element-specific hybridization logic
-// Claude Generated - December 2025 (Phase 2 Validation)
-// NOTE: This test function is currently unused but kept for future validation
-// If needed, it can be called with proper verbosity guard in main code
-static void testElementSpecificHybridizationLogic() {
-    std::vector<int> dummy_atoms = {0};
-    int passed = 0;
-    int failed = 0;
-
-    // Test cases: {Z, CN, expected_hyb, description}
-    std::vector<std::tuple<int, double, int, std::string>> test_cases = {
-        {8, 2.0, 3, "Oxygen CN=2 (CRITICAL: should be sp3)"},
-        {6, 2.0, 1, "Carbon CN=2 (should be sp)"},
-        {7, 3.0, 3, "Nitrogen CN=3 (should be sp3)"},
-        {1, 2.0, 1, "Hydrogen CN=2 (should be sp)"},
-        {17, 2.0, 1, "Chlorine CN=2 (should be sp)"},
-        {17, 1.0, 0, "Chlorine CN=1 (should be unknown)"},
-        {26, 4.0, 3, "Iron CN=4 (should be sp3)"},
-        {8, 1.0, 2, "Oxygen CN=1 (should be sp2)"},
-        {6, 3.0, 2, "Carbon CN=3 (should be sp2)"},
-        {7, 2.0, 2, "Nitrogen CN=2 (should be sp2)"},
-        {9, 2.0, 1, "Fluorine CN=2 (should be sp)"}
-    };
-
-    // Guarded by verbosity check - disabled by default
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        std::cout << "\n=== Element-Specific Hybridization Validation ===" << std::endl;
-
-        for (const auto& test_case : test_cases) {
-            int Z = std::get<0>(test_case);
-            double cn = std::get<1>(test_case);
-            int expected = std::get<2>(test_case);
-            std::string desc = std::get<3>(test_case);
-
-            int actual = detectElementSpecificHybridization(Z, cn, dummy_atoms, std::nullopt, 0);
-
-            if (actual == expected) {
-                std::cout << "✅ " << desc << " → " << actual << " (PASS)" << std::endl;
-                passed++;
-            } else {
-                std::cout << "❌ " << desc << " → " << actual << " (FAIL, expected " << expected << ")" << std::endl;
-                failed++;
-            }
-        }
-
-        std::cout << "\n=== Test Results ===" << std::endl;
-        std::cout << "Passed: " << passed << "/" << test_cases.size() << std::endl;
-        std::cout << "Failed: " << failed << "/" << test_cases.size() << std::endl;
-
-        if (failed == 0) {
-            std::cout << "🎉 All element-specific hybridization tests passed!" << std::endl;
-        } else {
-            std::cout << "⚠️  Some tests failed. Review implementation." << std::endl;
-        }
-    }
-}
-
 // ===== Original EEQSolver Implementation =====
 
 // Claude Generated - March 2026
@@ -905,7 +847,6 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     m_eeq_extrap_order     = m_config.get<int>("eeq_extrapolation_order", 3);
 
     // Initialize EEQ caching system
-    m_eeq_cache = std::make_unique<EEQSolverCache>();
 
     if (m_verbosity >= 2) {
         CurcumaLogger::info("EEQSolver initialized with parameters:");
@@ -1402,42 +1343,6 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
                 A(j, row) = 1.0;
             }
         }
-    }
-
-    return A;
-}
-
-// Enhanced EEQ matrix construction with intelligent caching
-Matrix EEQSolver::buildSmartEEQMatrix(
-    const std::vector<int>& atoms,
-    const Matrix& geometry_bohr,
-    const Vector& cn,
-    const Vector& current_charges,
-    const Vector& dxi,
-    const Vector& dgam,
-    const std::vector<int>& hybridization,
-    const std::optional<TopologyInput>& topology,
-    EEQDistanceMode distance_mode)
-{
-    // Check if we can reuse cached computation
-    if (m_eeq_cache && !m_eeq_cache->isGeometryChanged(geometry_bohr)) {
-        if (m_verbosity >= 2) {
-            CurcumaLogger::info("EEQSolver: Using cached EEQ matrix (geometry unchanged)");
-        }
-        // For identical geometries, return cached matrix with possible adjustments
-        return m_eeq_cache->getCachedAMatrix();
-    }
-
-    if (m_verbosity >= 3) {
-        CurcumaLogger::info("EEQSolver: Building EEQ matrix from scratch");
-    }
-
-    // Build matrix using existing logic, passing through distance mode
-    Matrix A = buildCorrectedEEQMatrix(atoms, geometry_bohr, cn, current_charges, dxi, dgam, hybridization, topology, distance_mode);
-
-    // Cache the result for future use
-    if (m_eeq_cache) {
-        m_eeq_cache->cacheResults(geometry_bohr, A, Vector::Zero(atoms.size())); // Charges cached separately
     }
 
     return A;
@@ -2547,29 +2452,6 @@ Matrix EEQSolver::solveWithPCG_multiRHS(
     return X;
 }
 
-void EEQSolver::printConvergenceSummary() {
-    if (m_pcg_total_calls == 0) return;
-    if (m_pcg_nonconv_calls > 0 && m_verbosity >= 1) {
-        int conv = m_pcg_total_calls - m_pcg_nonconv_calls;
-        CurcumaLogger::warn(fmt::format(
-            "EEQ PCG: {}/{} converged, {} not (worst |r|={:.2e}, {} iters total)",
-            conv, m_pcg_total_calls, m_pcg_nonconv_calls,
-            m_pcg_worst_residual, m_pcg_total_iters));
-    } else if (m_pcg_nonconv_calls == 0 && m_verbosity >= 2) {
-        CurcumaLogger::info(fmt::format(
-            "EEQ PCG: {}/{} converged ({} iters total)",
-            m_pcg_total_calls, m_pcg_total_calls, m_pcg_total_iters));
-    }
-    resetConvergenceStats();
-}
-
-void EEQSolver::resetConvergenceStats() {
-    m_pcg_total_calls = 0;
-    m_pcg_nonconv_calls = 0;
-    m_pcg_total_iters = 0;
-    m_pcg_worst_residual = 0.0;
-}
-
 /**
  * @brief Solve augmented EEQ linear system with corrected parameters
  * @param A Augmented EEQ matrix (natoms+1) × (natoms+1)
@@ -2888,7 +2770,6 @@ std::vector<Vector> EEQSolver::calculateTopologyChargesMultiRHS(
         // CRITICAL FIX (Jan 2, 2026): Cache topological distances for Phase 2 reuse
         // Reference: XTB gfnff_ini2.f90:1189-1199 uses same 'pair' array for both phases
         // Phase 2 must NOT recalculate with geometric distances!
-        m_cached_topological_distances = topo_dist;
 
         // Setup off-diagonal Coulomb matrix with topological distances
         for (int i = 0; i < natoms; ++i) {
@@ -2954,7 +2835,6 @@ std::vector<Vector> EEQSolver::calculateTopologyChargesMultiRHS(
         }
 
         // Cache geometric distances for Phase 2 reuse
-        m_cached_topological_distances = geom_dist;
     }
 
     // 3. Setup fragment charge constraints
@@ -3122,92 +3002,6 @@ std::vector<Vector> EEQSolver::calculateTopologyChargesMultiRHS(
     return results;
 }
 
-// ===== Floyd-Warshall Topological Distances =====
-
-Matrix EEQSolver::computeTopologicalDistances(
-    const std::vector<int>& atoms,
-    const TopologyInput& topology
-) const {
-    const int natoms = atoms.size();
-
-    // Claude Generated (Feb 20, 2026): float32 Floyd-Warshall matching Fortran real(sp)
-    //
-    // Fortran declares: real(sp) :: rabd(nat,nat)  (gfnff_ini.f90:432)
-    // Using float32 here is CRITICAL for EEQ charge accuracy:
-    //   - float32 rounding accumulates along shortest paths
-    //   - Different topological distances → different Phase-1 qa → different fqq/alpha/zetac6
-    //   - Without float32: bond/torsion/repulsion/dispersion errors of 1e-3 to 1e-2 Eh
-    //   - With float32: near-exact match with Fortran reference
-    const float RABD_CUTOFF_F = 13.0f;   // Fortran gfnff_ini.f90:88, real(sp)
-    const float TDIST_THR_F   = 12.0f;   // Fortran gfnff_param.f90:776, real(sp)
-
-    // Reference: external/gfnff/src/gfnff_param.f90:817 (gen%rfgoed1 = 1.175)
-    const double RFGOED1 = 1.175;
-    const double BOHR_TO_ANGSTROM = 0.52917726;
-
-    // 1. Initialize with cutoff value (flat float32 array for cache efficiency)
-    // Reference: gfnff_ini.f90:431-442
-    std::vector<float> rabd(natoms * natoms, RABD_CUTOFF_F);
-
-    // 2. Set diagonal to zero
-    for (int i = 0; i < natoms; ++i)
-        rabd[i * natoms + i] = 0.0f;
-
-    // 3. Set bonded distances (sum of covalent radii, cast to float32)
-    // Reference: gfnff_ini.f90:438-448
-    for (int i = 0; i < natoms; ++i) {
-        float rad_i = static_cast<float>(topology.covalent_radii[i]);
-        for (int j : topology.neighbor_lists[i]) {
-            float bond = rad_i + static_cast<float>(topology.covalent_radii[j]);
-            rabd[i * natoms + j] = bond;
-            rabd[j * natoms + i] = bond;
-        }
-    }
-
-    // 4. Floyd-Warshall shortest path in float32, matching Fortran real(sp) arithmetic
-    // Reference: gfnff_ini.f90:462-471
-    for (int k = 0; k < natoms; ++k) {
-        for (int i = 0; i < natoms; ++i) {
-            float rik = rabd[i * natoms + k];
-            if (rik > TDIST_THR_F) continue;
-            for (int j = 0; j < natoms; ++j) {
-                float rkj = rabd[k * natoms + j];
-                if (rkj > TDIST_THR_F) continue;
-                float candidate = rik + rkj;   // float32 addition like Fortran
-                if (rabd[i * natoms + j] > candidate)
-                    rabd[i * natoms + j] = candidate;
-            }
-        }
-    }
-
-    // 5. Convert to double Matrix with cutoff and Angstrom→Bohr scaling
-    // Reference: gfnff_ini.f90:474-480
-    Matrix result(natoms, natoms);
-    for (int i = 0; i < natoms; ++i) {
-        for (int j = 0; j < natoms; ++j) {
-            float rij = rabd[i * natoms + j];
-            double val = (rij > TDIST_THR_F)
-                ? static_cast<double>(RABD_CUTOFF_F)
-                : static_cast<double>(rij);
-            result(i, j) = RFGOED1 * val / BOHR_TO_ANGSTROM;
-        }
-    }
-
-    if (m_verbosity >= 3) {
-        std::cerr << "\n=== Floyd-Warshall Topological Distances (float32, Bohr) ===" << std::endl;
-        for (int i = 0; i < std::min(5, natoms); ++i) {
-            for (int j = 0; j < i; ++j) {
-                double d = result(i, j);
-                if (d < RFGOED1 * RABD_CUTOFF_F / BOHR_TO_ANGSTROM - 1.0)
-                    std::cerr << fmt::format("  d_topo[{},{}] = {:.6f} Bohr", i, j, d) << std::endl;
-            }
-        }
-        std::cerr << "========================================\n" << std::endl;
-    }
-
-    return result;
-}
-
 // ===== Multi-Source Dijkstra Topological Distances (Performance Replacement) =====
 // Claude Generated (March 2026): O(N·E·logN) replacement for O(N³) Floyd-Warshall
 // For sparse molecular graphs (degree ~3-4), this is ~50-100× faster for N>500
@@ -3328,6 +3122,30 @@ Matrix EEQSolver::computeTopologicalDistancesSparse(
 //
 // Reference: XTB gfnff_ini.f90:693-707, gfnff_ini2.f90:1140-1246
 // Claude Generated - December 2025, Updated January 2, 2026
+
+// PCG convergence bookkeeping (printed once per Phase-2 solve, verbosity-gated).
+void EEQSolver::printConvergenceSummary() {
+    if (m_pcg_total_calls == 0) return;
+    if (m_pcg_nonconv_calls > 0 && m_verbosity >= 1) {
+        int conv = m_pcg_total_calls - m_pcg_nonconv_calls;
+        CurcumaLogger::warn(fmt::format(
+            "EEQ PCG: {}/{} converged, {} not (worst |r|={:.2e}, {} iters total)",
+            conv, m_pcg_total_calls, m_pcg_nonconv_calls,
+            m_pcg_worst_residual, m_pcg_total_iters));
+    } else if (m_pcg_nonconv_calls == 0 && m_verbosity >= 2) {
+        CurcumaLogger::info(fmt::format(
+            "EEQ PCG: {}/{} converged ({} iters total)",
+            m_pcg_total_calls, m_pcg_total_calls, m_pcg_total_iters));
+    }
+    resetConvergenceStats();
+}
+
+void EEQSolver::resetConvergenceStats() {
+    m_pcg_total_calls = 0;
+    m_pcg_nonconv_calls = 0;
+    m_pcg_total_iters = 0;
+    m_pcg_worst_residual = 0.0;
+}
 
 Vector EEQSolver::calculateFinalCharges(
     const std::vector<int>& atoms,
@@ -4140,57 +3958,6 @@ Vector EEQSolver::calculateFinalCharges(
     return final_charges;
 }
 
-// ===== Energy Calculation =====
-
-double EEQSolver::calculateEEQEnergy(
-    const Vector& charges,
-    const std::vector<int>& atoms,
-    const Matrix& geometry_bohr,
-    const Vector& cn)
-{
-    const int natoms = atoms.size();
-    double energy = 0.0;
-
-    // Pairwise Coulomb energy with erf damping
-    for (int i = 0; i < natoms; ++i) {
-        for (int j = 0; j < i; ++j) {
-            double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
-            double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
-            double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
-            double r = std::sqrt(dx*dx + dy*dy + dz*dz);
-
-            if (r < 1e-10) continue;
-
-            EEQParameters params_i = getParameters(atoms[i], cn(i));
-            EEQParameters params_j = getParameters(atoms[j], cn(j));
-
-            double gamma_ij = 1.0 / std::sqrt(params_i.alp + params_j.alp);
-            double erf_gamma = curcuma_erf(gamma_ij * r);
-            double coulomb = erf_gamma / r;
-
-            energy += charges(i) * charges(j) * coulomb;
-        }
-    }
-
-    // Self-energy terms
-    const double TSQRT2PI = 0.797884560802866;
-    for (int i = 0; i < natoms; ++i) {
-        EEQParameters params_i = getParameters(atoms[i], cn(i));
-
-        // CRITICAL FIX (Session 11): chi_i must include dxi term!
-        // Reference: XTB gfnff_engrad.F90:1581
-        // chi = -χ + dxi + CNF·√CN (NOT just -χ + CNF·√CN!)
-        double dxi_i = (m_dxi_stored.size() > i) ? m_dxi_stored(i) : 0.0;
-        double chi_i = -params_i.chi + dxi_i + params_i.cnf * std::sqrt(cn(i));
-        double self_energy = -charges(i) * chi_i
-                           + 0.5 * charges(i) * charges(i) * (params_i.gam + TSQRT2PI / std::sqrt(params_i.alp));
-
-        energy += self_energy;
-    }
-
-    return energy;  // Hartree
-}
-
 // ===== Correction Terms =====
 
 Vector EEQSolver::calculateDxi(
@@ -4739,29 +4506,3 @@ std::vector<bool> EEQSolver::detectAmideHydrogens(
     return is_amide_h;
 }
 
-std::vector<std::vector<int>> EEQSolver::buildNeighborLists(
-    const std::vector<int>& atoms,
-    const Matrix& geometry_bohr,
-    double cutoff_radius) const
-{
-    const int natoms = atoms.size();
-    std::vector<std::vector<int>> neighbors(natoms);
-
-    double cutoff_sq = cutoff_radius * cutoff_radius;
-
-    for (int i = 0; i < natoms; ++i) {
-        for (int j = 0; j < natoms; ++j) {
-            if (i == j) continue;
-
-            Vector ri = geometry_bohr.row(i);
-            Vector rj = geometry_bohr.row(j);
-            double distance_sq = (ri - rj).squaredNorm();
-
-            if (distance_sq < cutoff_sq) {
-                neighbors[i].push_back(j);
-            }
-        }
-    }
-
-    return neighbors;
-}
