@@ -29,8 +29,8 @@
 
 #include "src/core/global.h"
 #include "src/core/solvation/implicit_solvation.h"
-#include "qm_driver.h"
-#include "STOIntegrals.hpp"
+#include "interface/abstract_interface.h"
+#include "json.hpp"
 
 #include <Eigen/Dense>
 #include <array>
@@ -627,12 +627,12 @@ inline int solventModelCode(const std::string& s)
     return -1;
 }
 
-class XTB : public QMDriver {
+class XTB : public QMInterface {
 public:
     explicit XTB(MethodType method);
     ~XTB() override;
 
-    // QMDriver API
+    // QMInterface API
     using QMInterface::InitialiseMolecule;   // unhide base-class overloads (Mol& / Mol*)
     bool   InitialiseMolecule() override;
     double Calculation(bool gradient = false) override;
@@ -670,6 +670,9 @@ public:
                                 std::vector<int>& nref) const;            // xtb_native.cpp
     Vector  getOrbitalEnergies() const { return m_wfn.eps; }
     Matrix  getMOCoefficients() const { return m_wfn.C; }
+    Matrix  MolecularOrbitals() const { return m_mo; }
+    Vector  Energies() const { return m_energies; }
+    int     NumElectrons() const { return m_num_electrons; }
     Matrix  getDensity() const { return m_wfn.P; }
     // Converged per-iteration SCC energy components (Eh), cached from the last
     // SCF iteration. Reference for the device SCC-energy reductions (Stage 6,
@@ -1106,13 +1109,21 @@ private:
     void parallelStripes(int n_threads,
                          const std::function<void(int, int)>& worker) const; // xtb_native.cpp
 
-    /* ----- legacy QMDriver hooks (still routed through MakeOverlap/H) */
-    Matrix MakeOverlap(std::vector<STO::Orbital>& basisset) override;
-    Matrix MakeH(const Matrix& S,
-                 const std::vector<STO::Orbital>& basisset) override;
-
 private:
     MethodType m_method;
+
+    // Converged MO coefficients / orbital energies / occupied-orbital count,
+    // mirrored from m_wfn after every Calculation() for the wrapper accessors
+    // MolecularOrbitals()/Energies()/NumElectrons() (formerly inherited from
+    // the QMDriver base, which this class no longer derives from).
+    Matrix m_mo;
+    Vector m_energies;
+    int    m_num_electrons = 0;
+
+    // LAPACK dsyevd/ssyevd scratch, reused across SCF iterations (xtb_scf.cpp).
+    std::vector<double> m_lapack_work;
+    std::vector<float>  m_lapack_work_f;
+    std::vector<int>    m_lapack_iwork;
 
     BasisMap     m_basis;
     H0Data       m_h0;

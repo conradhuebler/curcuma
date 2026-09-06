@@ -52,8 +52,7 @@ namespace curcuma::xtb {
  *  Lifecycle
  * ------------------------------------------------------------------------- */
 XTB::XTB(MethodType method)
-    : QMDriver()
-    , m_method(method)
+    : m_method(method)
 {
 }
 
@@ -1415,7 +1414,7 @@ double XTB::Calculation(bool gradient)
                                         homo, lumo, (lumo - homo) * 27.211386245988));
     }
 
-    // Update QMDriver state for wrapper compatibility
+    // Mirror the converged wavefunction for the wrapper accessors
     m_mo = m_wfn.C;
     m_energies = m_wfn.eps;
     m_num_electrons = static_cast<int>(m_wfn.nocc);
@@ -2585,18 +2584,6 @@ void XTB::addDispersionPotential(Potential& pot) const
         return;
     for (int A = 0; A < m_atomcount; ++A)
         pot.v_at(A) += dEdq(A);
-}
-
-/* ------------------------------------------------------------------------- *
- *  Legacy QMDriver hooks — not used yet; we go through buildH0Data() instead.
- * ------------------------------------------------------------------------- */
-Matrix XTB::MakeOverlap(std::vector<STO::Orbital>& /*basisset*/)
-{
-    return Matrix::Identity(m_basis.nao, m_basis.nao);
-}
-Matrix XTB::MakeH(const Matrix& /*S*/, const std::vector<STO::Orbital>& /*basisset*/)
-{
-    return Matrix::Zero(m_basis.nao, m_basis.nao);
 }
 
 } // namespace curcuma::xtb

@@ -367,12 +367,14 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
             if (info != 0) return false;
             const auto te1 = clk::now();
             int lwork = 1 + 6 * n + 2 * n * n, liwork = 3 + 5 * n;
-            std::vector<float> work(static_cast<size_t>(lwork));
-            std::vector<int>   iwork(static_cast<size_t>(liwork));
+            // Persistent scratch (Claude Generated, Sep 2026): the ~2·nao² work
+            // array was allocated (and zero-filled) on every SCF iteration.
+            if (m_lapack_work_f.size() < static_cast<size_t>(lwork)) m_lapack_work_f.resize(lwork);
+            if (m_lapack_iwork.size()  < static_cast<size_t>(liwork)) m_lapack_iwork.resize(liwork);
             Eigen::VectorXf epsf(n);
             const char jobz = 'V';
             ssyevd_(&jobz, &uplo, &n, Af.data(), &n, epsf.data(),
-                    work.data(), &lwork, iwork.data(), &liwork, &info);
+                    m_lapack_work_f.data(), &lwork, m_lapack_iwork.data(), &liwork, &info);
             if (info != 0) return false;
             const auto te2 = clk::now();
             A   = Af.cast<double>();             // standard-form eigenvectors → FP64 for the shared back-transform
@@ -388,11 +390,14 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
             if (info != 0) return false;
             const auto te1 = clk::now();
             int lwork = 1 + 6 * n + 2 * n * n, liwork = 3 + 5 * n;
-            std::vector<double> work(static_cast<size_t>(lwork));
-            std::vector<int>    iwork(static_cast<size_t>(liwork));
+            // Persistent scratch (Claude Generated, Sep 2026): for nao=4000 the
+            // work array is 256 MB; allocating + zero-filling it per iteration
+            // cost more than the reduction step itself. Bit-identical.
+            if (m_lapack_work.size()  < static_cast<size_t>(lwork))  m_lapack_work.resize(lwork);
+            if (m_lapack_iwork.size() < static_cast<size_t>(liwork)) m_lapack_iwork.resize(liwork);
             const char jobz = 'V';
             dsyevd_(&jobz, &uplo, &n, A.data(), &n, eps.data(),
-                    work.data(), &lwork, iwork.data(), &liwork, &info);
+                    m_lapack_work.data(), &lwork, m_lapack_iwork.data(), &liwork, &info);
             if (info != 0) return false;
             const auto te2 = clk::now();
             m_t_xfx  += ms(te0, te1);            // reduce (dsygst)

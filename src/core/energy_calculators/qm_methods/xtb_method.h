@@ -22,7 +22,7 @@
 #include "../computational_method.h"
 
 #ifdef USE_XTB
-#include "src/core/qm_methods/xtbinterface.h"
+#include "xtbinterface.h"
 #endif
 
 #include <memory>
