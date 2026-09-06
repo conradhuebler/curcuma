@@ -821,6 +821,7 @@ EEQSolveMethod EEQSolver::parseSolveMethod(const std::string& method_str) {
     if (method_str == "lu") return EEQSolveMethod::LU;
     if (method_str == "ldlt") return EEQSolveMethod::LDLT;
     if (method_str == "pcg") return EEQSolveMethod::PCG;
+    if (method_str == "ppcg" || method_str == "projected_pcg") return EEQSolveMethod::ProjectedPCG;
     if (method_str == "batched") return EEQSolveMethod::Batched;
     // "cholesky" (canonical) and "schur_cholesky" (legacy) both map to SchurCholesky
     if (method_str == "cholesky" || method_str == "schur_cholesky")
@@ -839,6 +840,15 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     m_allow_unconverged = m_config.get<bool>("allow_unconverged_charges", false);
     m_skip_phase2 = m_config.get<bool>("skip_phase2", false);
     m_solve_method = parseSolveMethod(m_config.get<std::string>("solve_method", "cholesky"));
+    // Read the Int PARAMs through double: CLI values arrive as JSON numbers (0.0), which a
+    // strict get<int>() rejects in favour of the default.
+    m_ppcg_min_nfrag = static_cast<int>(m_config.get<double>("eeq_ppcg_min_nfrag", 32.0));
+    m_ppcg_min_atoms = static_cast<int>(m_config.get<double>("eeq_ppcg_min_atoms", 500.0));
+    m_ppcg_tol       = m_config.get<double>("eeq_ppcg_tol", 1e-10);
+    m_ppcg_max_iter  = static_cast<int>(m_config.get<double>("eeq_ppcg_max_iter", 500.0));
+    if (m_config.get<int>("verbosity", 0) >= 2)
+        CurcumaLogger::info(fmt::format("EEQ solver config: solve_method={}, ppcg auto at nfrag>={} & N>={}, tol={:.0e}, max_iter={}",
+            m_config.get<std::string>("solve_method", "cholesky"), m_ppcg_min_nfrag, m_ppcg_min_atoms, m_ppcg_tol, m_ppcg_max_iter));
     m_refactor_eps         = m_config.get<double>("eeq_refactor_eps_bohr", 0.05);
     m_refactor_force_every = m_config.get<int>("eeq_refactor_force_every", 0);
     m_refine_iters         = m_config.get<int>("eeq_refine_iters", 1);
@@ -1566,6 +1576,21 @@ Vector EEQSolver::dispatchSolve(
         const MatrixCRef C = A.block(natoms, 0, nfrag, natoms);
         Vector rhs_constraints = x.tail(nfrag);
 
+        // Many-fragment path (Sep 2026): one projected-CG solve instead of nfrag+1 direct
+        // solves. Forced by solve_method=ppcg, automatic for large many-fragment systems.
+        const bool ppcg_forced = (method_to_use == EEQSolveMethod::ProjectedPCG);
+        const bool ppcg_auto = (method_to_use == EEQSolveMethod::SchurCholesky || m_solve_method == EEQSolveMethod::Auto)
+            && m_ppcg_min_nfrag > 0 && nfrag >= m_ppcg_min_nfrag && natoms >= m_ppcg_min_atoms;
+        if (ppcg_forced || ppcg_auto) {
+            Vector q_ppcg = solveWithProjectedPCG(A_nn, rhs_atoms, C, rhs_constraints, natoms, nfrag);
+            if (q_ppcg.size() == natoms) {
+                charges = q_ppcg;
+                goto end_dispatch;
+            }
+            if (m_verbosity >= 1)
+                CurcumaLogger::warn("EEQ: projected PCG did not converge, using the exact Schur-Cholesky solve for this step");
+        }
+
         // Auto-benchmark on first call
         // Claude Generated (March 2026): Skip benchmark for large N — PCG always wins above ~500 atoms.
         // SchurCholesky for N>500 allocates O(N²) memory and O(N³) compute — prohibitively slow.
@@ -1987,6 +2012,92 @@ Vector EEQSolver::dispatchSolve(
 // But the NxN Coulomb+hardness sub-matrix A is SPD (positive diagonal dominance
 // from hardness terms + positive off-diagonal Coulomb terms).
 // Cholesky is O(N³/6) vs O(N³/3) for LU — roughly 2× faster.
+
+// ---------------------------------------------------------------------------
+// Projected preconditioned CG (many-fragment EEQ). See the header for the maths.
+// ---------------------------------------------------------------------------
+Vector EEQSolver::solveWithProjectedPCG(
+    const MatrixCRef& A_nn,
+    const Vector& rhs_atoms,
+    const MatrixCRef& C,
+    const Vector& rhs_constraints,
+    int natoms,
+    int nfrag)
+{
+    // Fragment membership from the 0/1 constraint block.
+    std::vector<int> frag(natoms, 0);
+    std::vector<double> nfrag_atoms(nfrag, 0.0);
+    for (int f = 0; f < nfrag; ++f)
+        for (int j = 0; j < natoms; ++j)
+            if (C(f, j) != 0.0) { frag[j] = f; nfrag_atoms[f] += 1.0; }
+    for (int f = 0; f < nfrag; ++f)
+        if (nfrag_atoms[f] == 0.0) return Vector();   // empty fragment: leave it to the direct solver
+
+    // Jacobi preconditioner and its per-fragment sums (for the projected preconditioner).
+    const Vector Minv = A_nn.diagonal().cwiseInverse();
+    std::vector<double> sM(nfrag, 0.0);
+    for (int i = 0; i < natoms; ++i) sM[frag[i]] += Minv(i);
+
+    std::vector<double> s(nfrag);
+    // P v = v - C^T (C C^T)^{-1} C v : subtract the per-fragment mean.
+    auto project = [&](Vector& v) {
+        std::fill(s.begin(), s.end(), 0.0);
+        for (int i = 0; i < natoms; ++i) s[frag[i]] += v(i);
+        for (int i = 0; i < natoms; ++i) v(i) -= s[frag[i]] / nfrag_atoms[frag[i]];
+    };
+    // z = M^{-1} r - M^{-1} C^T mu with mu = (C M^{-1} C^T)^{-1} C M^{-1} r, so that C z = 0.
+    auto precondition = [&](const Vector& r, Vector& z) {
+        z = Minv.cwiseProduct(r);
+        std::fill(s.begin(), s.end(), 0.0);
+        for (int i = 0; i < natoms; ++i) s[frag[i]] += z(i);
+        for (int i = 0; i < natoms; ++i) z(i) -= Minv(i) * s[frag[i]] / sM[frag[i]];
+    };
+
+    // Feasible start: previous charges (warm start) or zero, shifted per fragment onto qfrag.
+    Vector q = (m_ppcg_last_q.size() == natoms) ? m_ppcg_last_q : Vector::Zero(natoms);
+    std::fill(s.begin(), s.end(), 0.0);
+    for (int i = 0; i < natoms; ++i) s[frag[i]] += q(i);
+    for (int i = 0; i < natoms; ++i) q(i) += (rhs_constraints(frag[i]) - s[frag[i]]) / nfrag_atoms[frag[i]];
+
+    const double tol_abs = m_ppcg_tol * (rhs_atoms.norm() + 1.0);
+    Vector r = rhs_atoms - A_nn * q;
+    project(r);
+    Vector z(natoms), p(natoms), Ap(natoms);
+    precondition(r, z);
+    p = z;
+    double rz = r.dot(z);
+    double r_norm = r.norm();
+    int iters = 0;
+    bool converged = (r_norm <= tol_abs);
+    while (!converged && iters < m_ppcg_max_iter) {
+        Ap.noalias() = A_nn * p;                 // dense matvec: the only O(N^2) step per iteration
+        const double pAp = p.dot(Ap);
+        if (!(pAp > 0.0)) break;                 // lost positive definiteness on the tangent space
+        const double alpha = rz / pAp;
+        q += alpha * p;
+        r -= alpha * Ap;
+        project(r);                              // keeps the residual in the tangent space
+        ++iters;
+        r_norm = r.norm();
+        if (r_norm <= tol_abs) { converged = true; break; }
+        precondition(r, z);
+        const double rz_new = r.dot(z);
+        p = z + (rz_new / rz) * p;
+        rz = rz_new;
+    }
+    m_pcg_total_calls++;
+    m_pcg_total_iters += iters;
+    if (!converged) {
+        m_pcg_nonconv_calls++;
+        if (r_norm > m_pcg_worst_residual) m_pcg_worst_residual = r_norm;
+        return Vector();
+    }
+    if (m_verbosity >= 2)
+        CurcumaLogger::info(fmt::format("[EEQ] projected PCG converged in {} iterations (|Pr|={:.2e}, nfrag={})",
+                                        iters, r_norm, nfrag));
+    m_ppcg_last_q = q;
+    return q;
+}
 
 Vector EEQSolver::solveWithSchurCholesky(
     const MatrixCRef& A_nn,
@@ -3179,6 +3290,7 @@ Vector EEQSolver::calculateFinalCharges(
     // m_phase2_historically_implausible is reset on the next plausible solve.
     // See docs/GFNFF_POLARIZATION_AUDIT.md.
 
+    const auto t_p2_start = std::chrono::high_resolution_clock::now();
     if (m_verbosity >= 2) {
         fmt::print(stderr, "[EEQ] Phase 2: preparing corrections (dxi, dgam, pi/amide detection)...\n");
     }
@@ -3749,7 +3861,15 @@ Vector EEQSolver::calculateFinalCharges(
         // matrix build above has already joined, so there is no thread nesting. See
         // src/core/blas_threads.h.
         curcuma::ScopedBlasThreads _blas_threads(num_threads > 0 ? num_threads : 1);
+        const auto t_p2_solve = std::chrono::high_resolution_clock::now();
         Vector new_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads);
+        if (m_verbosity >= 2) {
+            const auto t_p2_end = std::chrono::high_resolution_clock::now();
+            const double ms_prep  = std::chrono::duration<double, std::milli>(t_p2_solve - t_p2_start).count();
+            const double ms_solve = std::chrono::duration<double, std::milli>(t_p2_end - t_p2_solve).count();
+            CurcumaLogger::info(fmt::format("[EEQ] Phase 2 timing: corrections+matrix {:.1f} ms, solve {:.1f} ms (N={}, nfrag={})",
+                                            ms_prep, ms_solve, natoms, nfrag));
+        }
 
         // Empty return from dispatchSolve signals all solvers failed.
         // Prefer the last successful Phase 2 charges (from a prior step) over Phase 1

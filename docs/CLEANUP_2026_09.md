@@ -53,6 +53,28 @@ Measured (release/, -O3, AVX2, OpenBLAS, 8 threads, `OMP_NUM_THREADS=1`; baselin
 
 Small molecules (< 100 atoms) are dominated by process start-up (20-50 ms) and did not change.
 
+## Many-fragment EEQ: projected PCG (approximate by tolerance, operator-approved)
+
+The Schur-Cholesky solve needs `nfrag + 1` triangular solves (`A_nn^{-1} C^T`), i.e. O(N² nfrag):
+on a 3000-atom water box (999 fragments) that was 887 ms per solve, 927 ms of a 1092 ms MD step.
+`EEQSolver::solveWithProjectedPCG` runs ONE conjugate-gradient iteration sequence on the
+constraint tangent space (projection = subtract the per-fragment mean, O(N); Jacobi
+preconditioner projected the same way), warm-started from the previous step's charges. It is
+selected automatically for `nfrag >= 32` and `N >= 500` (`eeq_ppcg_min_nfrag`, `eeq_ppcg_min_atoms`;
+0 disables, `solve_method ppcg` forces) and converges to `eeq_ppcg_tol` (1e-10 relative).
+
+| water box 3000 / 999 fragments, 8 threads | exact Schur-Cholesky | projected PCG |
+|---|---|---|
+| Phase-2 solve | 887 ms | 59 ms (14 iterations) |
+| EEQ per MD step | 927 ms | 143 ms |
+| MD step total | 1092 ms | 309 ms |
+| energy | -328.184291307772 | -328.184291307772 |
+| max gradient difference | — | 3e-10 Eh/Bohr |
+
+Single-fragment and small systems are untouched (polymer/1410 identical). The constrained
+problem is very well conditioned: the per-fragment constraint removes the long-range
+charge-transfer modes, so 2-14 iterations reach 1e-13..1e-9 residuals.
+
 ## Structure for future methods
 
 - `MethodFactory::methodTable()`: one `MethodDescriptor` row per method family (names, family,
@@ -80,11 +102,11 @@ wrapper received the same two-line change as the CUDA wrapper (`setKeepFullParam
 
 ## Findings not fixed here (deliberately)
 
-- **MD per-step cost of GFN-FF is the Phase-2 EEQ solve**: 45-70 ms of ~90 ms at N=1410
-  (refactorisation + N² matrix build); a single point does not show it because Phase 2 is
-  skipped when the geometry is unchanged. Reusing the Cholesky factor is an approximation
-  (A4 refinement), and the many-fragment Schur path costs O(N²·nfrag); both are algorithm
-  choices, not cleanup.
+- **MD per-step cost of single-fragment GFN-FF is the Phase-2 EEQ solve**: 45-70 ms of ~90 ms
+  at N=1410 (refactorisation + N² matrix build); a single point does not show it because
+  Phase 2 is skipped when the geometry is unchanged. Reusing the Cholesky factor is an
+  approximation (A4 refinement). The many-fragment case is now covered by the projected PCG
+  above; the single-fragment dense factorisation is untouched.
 - **`cli_simplemd_08_gfnff_acetic_acid_dimer_md` is flaky under parallel `ctest -j`**: the
   OpenMP-parallel Phase-1 EEQ gives charges differing by 1e-13 under thread contention and
   the 10 ps trajectory is chaotic (drift 0.02 idle vs 0.13 loaded). Baseline and new build

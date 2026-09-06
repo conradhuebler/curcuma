@@ -42,7 +42,10 @@ Force field implementation system with multi-threading support for UFF, QMDFF, a
 
 **EEQSolver** (`eeq_solver.cpp/h`): two-phase EEQ (topological Phase 1, geometric Phase 2 with
 dxi/dgam/alpha corrections); Schur-Cholesky default (`dpotrf` under `ScopedBlasThreads`),
-PCG/LDLT/LU alternatives, cached factor + iterative refinement for MD. Phase-2 takes
+PCG/LDLT/LU alternatives, cached factor + iterative refinement for MD; **projected PCG**
+(`solveWithProjectedPCG`, auto for nfrag >= 32 & N >= 500) replaces the O(N² nfrag) Schur
+route for many-fragment boxes (water/3000: 887 -> 59 ms per solve, energies identical to 12
+digits, gradients to 3e-10). Phase-2 takes
 `Eigen::Ref` views of the augmented matrix (no N x N copies). The `TopologyInput` it needs is
 cached in `GFNFF` per topology version.
 

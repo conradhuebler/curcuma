@@ -79,6 +79,7 @@ enum class EEQSolveMethod {
     LDLT,           ///< Bunch-Kaufman LDL^T on NxN block (indefinite-capable) + Schur; LLT-fail fallback
     Batched,        ///< Per-fragment Cholesky (GPU only); CPU falls back to SchurCholesky
     PCG,            ///< Preconditioned Conjugate Gradient with warm start
+    ProjectedPCG,   ///< Constraint-projected PCG on A_nn: ONE iterative solve for any number of fragments
     Auto            ///< Auto-select via first-call benchmark (SchurCholesky vs PCG)
 };
 
@@ -698,6 +699,30 @@ private:
      * @param nfrag Number of fragments
      * @return Charge vector (N elements), or empty vector on failure
      */
+    /**
+     * @brief Constraint-projected preconditioned CG for the fragment-constrained EEQ system.
+     *
+     * Solves  min 1/2 q^T A_nn q - b^T q  s.t.  C q = qfrag  (KKT: A_nn q + C^T lambda = b) with
+     * a single CG run on the constraint tangent space: the residual and the Jacobi-preconditioned
+     * direction are projected with P = I - C^T (C C^T)^{-1} C, which for the 0/1 fragment
+     * membership matrix C is just "subtract the per-fragment mean" (O(N)). Cost per iteration is
+     * one dense matvec, independent of nfrag — the Schur route needs nfrag+1 solves (O(N^2 nfrag)),
+     * which is what made many-fragment boxes (solvent) expensive.
+     *
+     * Not bit-identical to the direct solve: charges are converged to |P r| <= tol (|b|+1),
+     * i.e. an approximation controlled by eeq_ppcg_tol (default 1e-10, energy error ~1e-10 Eh).
+     * Warm-started from the previous step's charges (re-projected onto the current qfrag).
+     * Returns an empty vector if not converged within eeq_ppcg_max_iter (caller falls back).
+     * Claude Generated (Sep 2026), machine-tested on a 3000-atom water box.
+     */
+    Vector solveWithProjectedPCG(
+        const MatrixCRef& A_nn,
+        const Vector& rhs_atoms,
+        const MatrixCRef& C,
+        const Vector& rhs_constraints,
+        int natoms,
+        int nfrag);
+
     Vector solveWithSchurCholesky(
         const MatrixCRef& A_nn,
         const Vector& rhs_atoms,
@@ -808,6 +833,12 @@ private:
     double m_refactor_eps = 0.05;       ///< WP-EEQ-Cache: max displacement (Bohr) before re-factorizing
     int    m_refactor_force_every = 0;  ///< WP-EEQ-Cache: force refactorization every N steps (0 = disabled)
     int    m_refine_iters = 1;          ///< A4: iterative-refinement steps on a cached-factor solve (0 = off)
+    // Projected PCG (many-fragment path, Sep 2026): see solveWithProjectedPCG()
+    int    m_ppcg_min_nfrag = 32;       ///< auto-select PPCG when nfrag >= this (0 = never auto)
+    int    m_ppcg_min_atoms = 500;      ///< ... and natoms >= this
+    double m_ppcg_tol = 1e-10;          ///< relative residual tolerance (|P r| <= tol * (|b|+1))
+    int    m_ppcg_max_iter = 500;       ///< iteration cap; non-convergence falls back to Schur-Cholesky
+    Vector m_ppcg_last_q;               ///< warm start (previous step's charges)
     double m_matrix_rebuild_eps = 0.0;  ///< WP-EEQ-Matrix-Cache: max displacement before A_nn off-diag rebuild (0 = disabled)
 
     // ===== Cached Data for Energy Calculation =====
@@ -1049,6 +1080,10 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "WP-EEQ-Cache: Force Cholesky refactorization every N steps regardless of geometry. "
           "0 = never force (only geometry-triggered). Recommended: 100 for long MD runs.", "Algorithm", {})
     PARAM(eeq_refine_iters, Int, 1, "A4: iterative-refinement steps applied when the EEQ solve reuses a cached Cholesky factor. Each step costs O(N^2) and removes the stale-factor error, so charges stay exact for the current geometry and the gradient stays consistent. 0 disables refinement.", "Algorithm", {})
+    PARAM(eeq_ppcg_min_nfrag, Int, 32, "Projected-PCG EEQ solve is selected automatically when the system has at least this many fragments (and eeq_ppcg_min_atoms atoms): ONE iterative solve instead of nfrag+1 direct solves. 0 disables the automatic choice (solve_method ppcg still forces it). Approximate to eeq_ppcg_tol.", "Algorithm", {})
+    PARAM(eeq_ppcg_min_atoms, Int, 500, "Minimum atom count for the automatic projected-PCG choice (small systems stay on the exact Schur-Cholesky solve).", "Algorithm", {})
+    PARAM(eeq_ppcg_tol, Double, 1e-10, "Projected-PCG relative residual tolerance |P r| <= tol (|b|+1); 1e-10 gives charge errors ~1e-10 e and energy errors ~1e-10 Eh.", "Algorithm", {})
+    PARAM(eeq_ppcg_max_iter, Int, 500, "Projected-PCG iteration cap; on non-convergence the exact Schur-Cholesky solve is used for that step.", "Algorithm", {})
     PARAM(eeq_matrix_rebuild_eps_bohr, Double, 0.0,
           "WP-EEQ-Matrix-Cache: max atom displacement (Bohr) before A_nn Coulomb off-diagonal is "
           "rebuilt from scratch. When below this AND CN drift < 0.05, the cached off-diagonal is "
