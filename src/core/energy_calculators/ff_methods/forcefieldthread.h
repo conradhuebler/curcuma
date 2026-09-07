@@ -84,7 +84,10 @@ struct CNDerivStore {
 
     void clear() {
         pairs.clear();
-        diag.resize(0, 0);
+        // GeoGradMatrix fixes the column count at 3, so resize(0, 0) trips Eigen's
+        // size assertion in any build with assertions enabled (it aborted the
+        // GFN-FF energy-only path). resize(0, 3) empties the matrix as intended.
+        diag.resize(0, 3);
         natoms = 0;
     }
     bool empty() const { return natoms == 0; }

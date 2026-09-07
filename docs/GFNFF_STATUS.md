@@ -4,6 +4,15 @@
 **Implementation**: AI-generated, machine-tested — **human production testing pending**
 **Location**: `src/core/energy_calculators/ff_methods/`
 
+## React topology mode (Aug 2026) 🤖⚙️
+
+Dynamic bond topology for MD: `-gfnff.topology_mode react` re-detects bonds with a
+hysteresis scan (optimistic formation 1.6 / conservative retention 2.6) and rebuilds
+all bonded terms, the repulsion partition and the EEQ fragment constraints at change
+events. Energy jumps at events are logged as `dE_jump`; NVT-only. Machine-tested
+(rebuild == fresh-init bit-identity, H-recombination MD, no-event regression);
+not human production tested. See [GFNFF_REACT_TOPOLOGY.md](GFNFF_REACT_TOPOLOGY.md).
+
 ## Latest: Aromatic ring torsions fixed (Jun 20, 2026) ✅
 
 Native gave aromatic/conjugated **ring** torsions the *acyclic* rule (n=3, φ0=180°, half

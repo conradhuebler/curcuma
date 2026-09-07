@@ -548,8 +548,30 @@ GFNFF::GFNFF(const json& parameters)
     }
     m_threads = m_parameters.value("threads", 1);  // Claude Generated (WP1, May 2026)
 
-    // Extract topology mode
+    // Extract topology mode: auto (adaptive caching), constant (frozen), react
+    // (dynamic bond topology, Claude Generated Aug 2026). "default" aliases auto.
     m_topology_mode = m_parameters.value("topology_mode", "auto");
+    if (m_topology_mode == "default")
+        m_topology_mode = "auto";
+    if (m_topology_mode != "auto" && m_topology_mode != "constant" && m_topology_mode != "react") {
+        CurcumaLogger::warn(fmt::format("GFNFF: unknown topology_mode '{}', falling back to 'auto'", m_topology_mode));
+        m_topology_mode = "auto";
+    }
+    m_react_form_factor = m_parameters.value("react_bond_form_factor", 1.6);
+    m_react_break_factor = m_parameters.value("react_bond_break_factor", 2.6);
+    m_react_check_every = m_parameters.value("react_check_every", 5);
+    m_react_check_disp = m_parameters.value("react_check_disp_bohr", 0.25);
+    m_react_refractory_scans = m_parameters.value("react_refractory_scans", 10);
+    m_react_valence_cap = m_parameters.value("react_valence_cap", true);
+    m_react_exchange_scans = m_parameters.value("react_exchange_scans", 20);
+    m_react_slack_form_factor = m_parameters.value("react_slack_form_factor", 1.2);
+    if (m_topology_mode == "react" && m_react_break_factor <= m_react_form_factor) {
+        CurcumaLogger::warn(fmt::format(
+            "GFNFF react: break factor {:.3f} <= form factor {:.3f} leaves no hysteresis; resetting to defaults 1.6/2.6",
+            m_react_break_factor, m_react_form_factor));
+        m_react_form_factor = 1.6;
+        m_react_break_factor = 2.6;
+    }
     m_cache_topology = m_parameters.value("cache_topology", true);
     m_print_timing = m_parameters.value("print_timing", true);
 
@@ -771,6 +793,43 @@ bool GFNFF::InitialiseMolecule()
     m_cached_topology.reset();
     m_cached_bond_list.reset();
     m_static_topology_valid = false;  // Reset static topology cache for new molecule
+
+    // React topology mode (Claude Generated Aug 2026): guards + initial bond-set seed.
+    if (m_topology_mode == "react") {
+        if (m_static_charges || m_static_cn) {
+            CurcumaLogger::error(
+                "GFN-FF topology_mode=react is incompatible with static_charges/static_cn "
+                "(gfnff-fast): frozen CN/charges cannot follow a changing bond topology.");
+            return false;
+        }
+        if (m_atomcount > 2000) {
+            CurcumaLogger::warn(fmt::format(
+                "GFN-FF react mode with {} atoms: each topology rebuild is O(N^3); expect stalls at bond-change events.",
+                m_atomcount));
+        }
+        // Seed the reactive bond set BEFORE parameter generation so bond terms,
+        // adjacency, EEQ fragment constraints and the repulsion partition are all
+        // built from the same list. Mol-provided bonds (m_forced_bonds) act as the
+        // seed if present; otherwise geometric detection at the plain 1.3 factor.
+        m_react_bonds = getCachedBondList();
+        m_forced_bonds = m_react_bonds;
+        // The bond-list call above marked the geometry as seen in the SHARED
+        // m_geometry_tracker, which would make getCachedTopology() return the (empty)
+        // cached topology below. Reset tracker + bond cache so initialisation takes
+        // the full topology path; the list regenerates identically from m_forced_bonds.
+        m_cached_bond_list.reset();
+        m_geometry_tracker.reset();
+        m_react_ref_geometry = m_geometry_bohr;
+        m_react_calls = 0;
+        m_react_rebuild_count = 0;
+        m_react_rebuilt = false;
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::result(fmt::format(
+                "GFN-FF react topology mode: {} initial bonds, form/break hysteresis {:.2f}/{:.2f}, scan every {} calls or {:.2f} Bohr displacement",
+                m_react_bonds.size(), m_react_form_factor, m_react_break_factor,
+                m_react_check_every, m_react_check_disp));
+        }
+    }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Validating molecule structure...");
@@ -1730,6 +1789,410 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
     }
 }
 
+// ===========================================================================
+// React topology mode (Claude Generated Aug 2026)
+// Event-driven reactive bond topology: bonds may form and break during MD.
+// The hysteresis scan owns the bond list via m_forced_bonds, so every topology
+// consumer (adjacency, EEQ fragment constraints, repulsion partition, rings,
+// Hueckel, BATM) stays consistent with it. See docs/GFNFF_REACT_TOPOLOGY.md.
+// ===========================================================================
+
+void GFNFF::syncLegacyForceField(const GFNFFParameterSet& ff_params)
+{
+    if (!m_forcefield)
+        return;
+
+    m_forcefield->setGFNFFParameters(ff_params);
+
+    // Phase-1 topology charges for BATM (Fortran gfnff_engrad.F90:620 uses topo%qa).
+    // Must happen AFTER setGFNFFParameters(), which (re)creates threads via AutoRanges().
+    if (m_cached_topology.has_value() && m_cached_topology->topology_charges.size() > 0) {
+        m_forcefield->distributeTopologyCharges(m_cached_topology->topology_charges);
+    }
+
+    // CN, CNF and CN derivatives for Coulomb charge-derivative gradients
+    // (Fortran gfnff_engrad.F90:418-422).
+    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+    Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
+
+    Vector cnf(m_atoms.size());
+    for (size_t i = 0; i < m_atoms.size(); ++i) {
+        int z = m_atoms[i];
+        cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
+                    ? GFNFFParameters::cnf_eeq[z - 1]
+                    : 0.0;
+    }
+
+    CNDerivStore dcn = calculateCoordinationNumberDerivatives(cn);
+    m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
+}
+
+bool GFNFF::detectReactiveBondChanges()
+{
+    const std::set<std::pair<int, int>> current(m_react_bonds.begin(), m_react_bonds.end());
+    std::vector<std::pair<int, int>> next;
+    next.reserve(m_react_bonds.size() + 8);
+    std::vector<std::pair<int, int>> formed, broken;
+
+    std::vector<double> rcov(m_atomcount), fat_val(m_atomcount);
+    for (int i = 0; i < m_atomcount; ++i) {
+        rcov[i] = getCovalentRadius(m_atoms[i]);
+        fat_val[i] = fat[m_atoms[i]];
+    }
+
+    // Coordination cap for bond FORMATION: normal element valence + 1 (the +1 allows
+    // the exchange intermediate, e.g. linear H-H-H or 5-coordinate carbon in flight).
+    // Strict for the 2nd period and halogens where hypervalence does not exist —
+    // without this, hot confined systems grow unphysical agglomerates (e.g. N with 6
+    // neighbours). Hypervalence-capable elements (Si, P, S, ...) and metals stay at 6,
+    // the angle generator's neighbour limit. Existing bonds are never removed by the
+    // cap — only new formations are refused. Empirical v1; the principled replacement
+    // is an over-coordination energy (docs/GFNFF_REACT_TOPOLOGY.md, Open refinements).
+    // Tick down refractory counters (one unit per scan).
+    for (auto it = m_react_refractory.begin(); it != m_react_refractory.end();) {
+        if (--(it->second) <= 0)
+            it = m_react_refractory.erase(it);
+        else
+            ++it;
+    }
+
+    // Valence cap for bond FORMATION, bond-order aware: an atom may take a new sigma
+    // bond only while its USED valence (sum of bond orders: sigma = 1 plus the Hueckel
+    // pi order of each existing bond) stays below the element valence + 1 exchange
+    // slack. Counting bond orders instead of neighbours matters for multiple bonds:
+    // N in N2 has one neighbour but all three valences used — it may take exactly one
+    // extra bond (the activation step), and more capacity only frees up once the N-N
+    // pi order drops after a rebuild. Strict for 2nd-period elements and halogens
+    // (no hypervalence); Si/P/S and metals keep the angle generator's limit of 6.
+    // Existing bonds are never removed by the cap — only new formations are refused.
+    // Empirical v1; the principled replacement is an over-coordination energy
+    // (docs/GFNFF_REACT_TOPOLOGY.md, Open refinements).
+    auto valence_cap = [&](int a) -> double {
+        switch (m_atoms[a]) {
+        case 1: case 2: return 1.0 + 1.0; // H, He
+        case 5: return 3.0 + 1.0; // B
+        case 6: return 4.0 + 1.0; // C
+        case 7: return 3.0 + 1.0; // N
+        case 8: return 2.0 + 1.0; // O
+        case 9: case 10: return 1.0 + 1.0; // F, Ne
+        case 17: case 35: case 53: return 1.0 + 1.0; // Cl, Br, I
+        default: return 6.0; // hypervalence-capable + metals
+        }
+    };
+    // Element-specific neighbour limits for FORMATION (operator-set chemistry
+    // empirics, v1): catenation limit = max neighbours of the SAME element
+    // (N may bind at most 1 N -> hydrazine/diazene yes, N3 chains/rings no;
+    // O at most 1 O -> peroxide yes, ozone no; C at most 3 C -> chains and
+    // branches yes, quaternary-C clustering no; H at most 2 H covers the linear
+    // exchange intermediate), plus a hydrogen limit per element (C 4, N 3, O 2,
+    // halogens 1). Both only gate NEW bonds; seeded topologies are kept. Both
+    // suppress some real chemistry (azide/ozone formation, quaternary carbon
+    // centres) — switchable via react_valence_cap, refusals logged.
+    auto same_element_limit = [](int z) {
+        switch (z) {
+        case 1: return 2;              // H (H-H-H exchange)
+        case 2: case 10: return 0;     // He, Ne
+        case 6: return 3;              // C
+        case 7: return 1;              // N
+        case 8: return 1;              // O
+        case 9: case 17: case 35: case 53: return 1; // F, Cl, Br, I
+        case 15: return 3;             // P (P4)
+        case 16: return 2;             // S (chains/S8)
+        default: return 6;
+        }
+    };
+    auto hydrogen_limit = [](int z) {
+        switch (z) {
+        case 6: return 4;              // C
+        case 7: return 3;              // N
+        case 8: return 2;              // O
+        case 9: case 17: case 35: case 53: return 1; // halogens
+        case 14: return 4;             // Si
+        case 15: return 3;             // P
+        case 16: return 2;             // S
+        default: return 6;
+        }
+    };
+    std::vector<int> same_el_neighbors(m_atomcount, 0);
+    std::vector<int> h_neighbors(m_atomcount, 0);
+    std::vector<int> sigma_count(m_atomcount, 0);
+
+    const std::vector<double>* pibo = nullptr;
+    if (m_cached_topology && !m_cached_topology->pi_bond_orders.empty()
+        && static_cast<int>(m_cached_topology->pi_bond_orders.size()) >= m_atomcount * (m_atomcount + 1) / 2)
+        pibo = &m_cached_topology->pi_bond_orders;
+    auto bond_order = [&](int i, int j) {
+        double bo = 1.0; // sigma
+        if (pibo)
+            bo += std::max(0.0, (*pibo)[lin(i, j)]);
+        return bo;
+    };
+    std::vector<double> valence_used(m_atomcount, 0.0);
+
+    std::vector<std::pair<double, std::pair<int, int>>> candidates; // (r, pair)
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int j = i + 1; j < m_atomcount; ++j) {
+            double r = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
+            double thr = (rcov[i] + rcov[j]) * fat_val[i] * fat_val[j];
+            if (current.count({ i, j }) > 0) {
+                // Existing bond survives until it stretches past the break threshold
+                if (r > m_react_break_factor * thr) {
+                    broken.emplace_back(i, j);
+                } else {
+                    next.emplace_back(i, j);
+                    double bo = bond_order(i, j);
+                    valence_used[i] += bo;
+                    valence_used[j] += bo;
+                    if (m_atoms[i] == m_atoms[j]) {
+                        ++same_el_neighbors[i];
+                        ++same_el_neighbors[j];
+                    }
+                    if (m_atoms[j] == 1) ++h_neighbors[i];
+                    if (m_atoms[i] == 1) ++h_neighbors[j];
+                    ++sigma_count[i];
+                    ++sigma_count[j];
+                }
+            } else if (r < m_react_form_factor * thr) {
+                candidates.emplace_back(r, std::make_pair(i, j));
+            }
+        }
+    }
+
+    // Closest candidates claim the remaining valence first.
+    std::sort(candidates.begin(), candidates.end());
+    for (const auto& [r, p] : candidates) {
+        // Both filters below suppress some real behaviour too (hypervalent
+        // intermediates beyond the +1 slack; geminate re-recombination inside the
+        // refractory window). They are therefore switchable PARAMs and every refusal
+        // is logged, so what they suppress stays measurable.
+        if (m_react_valence_cap
+            && (valence_used[p.first] + 1.0 > valence_cap(p.first) + 1e-6
+                || valence_used[p.second] + 1.0 > valence_cap(p.second) + 1e-6)) {
+            if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::info(fmt::format(
+                    "REACT formation refused (valence cap): atoms {}-{} (used {:.2f}/{:.2f} and {:.2f}/{:.2f})",
+                    p.first + 1, p.second + 1, valence_used[p.first], valence_cap(p.first),
+                    valence_used[p.second], valence_cap(p.second)));
+            continue;
+        }
+        if (m_react_valence_cap) {
+            const int zi = m_atoms[p.first], zj = m_atoms[p.second];
+            bool refused = false;
+            if (zi == zj
+                && (same_el_neighbors[p.first] >= same_element_limit(zi)
+                    || same_el_neighbors[p.second] >= same_element_limit(zj)))
+                refused = true;
+            if (!refused && zj == 1 && h_neighbors[p.first] >= hydrogen_limit(zi))
+                refused = true;
+            if (!refused && zi == 1 && h_neighbors[p.second] >= hydrogen_limit(zj))
+                refused = true;
+            if (refused) {
+                if (CurcumaLogger::get_verbosity() >= 2)
+                    CurcumaLogger::info(fmt::format(
+                        "REACT formation refused (neighbor limit): atoms {}-{}",
+                        p.first + 1, p.second + 1));
+                continue;
+            }
+        }
+        if (m_react_refractory.count(p) > 0) {
+            if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::info(fmt::format(
+                    "REACT formation refused (refractory): atoms {}-{} ({} scans left)",
+                    p.first + 1, p.second + 1, m_react_refractory[p]));
+            continue;
+        }
+        // A bond that pushes either atom above its nominal sigma valence consumes the
+        // exchange slack: it only forms at the tighter slack radius. Otherwise an H
+        // sitting on one partner keeps re-bridging to the next heavy atom at the
+        // optimistic radius and the exchange resolution has to undo it over and over.
+        {
+            const bool uses_slack = (sigma_count[p.first] >= static_cast<int>(valence_cap(p.first) - 1.0 + 0.5))
+                || (sigma_count[p.second] >= static_cast<int>(valence_cap(p.second) - 1.0 + 0.5));
+            if (uses_slack) {
+                double thr = (rcov[p.first] + rcov[p.second]) * fat_val[p.first] * fat_val[p.second];
+                if (r > m_react_slack_form_factor * thr) {
+                    if (CurcumaLogger::get_verbosity() >= 2)
+                        CurcumaLogger::info(fmt::format(
+                            "REACT formation refused (slack radius): atoms {}-{} at r={:.2f} Bohr",
+                            p.first + 1, p.second + 1, r));
+                    continue;
+                }
+            }
+        }
+        next.push_back(p);
+        formed.push_back(p);
+        valence_used[p.first] += 1.0;
+        valence_used[p.second] += 1.0;
+        if (m_atoms[p.first] == m_atoms[p.second]) {
+            ++same_el_neighbors[p.first];
+            ++same_el_neighbors[p.second];
+        }
+        if (m_atoms[p.second] == 1) ++h_neighbors[p.first];
+        if (m_atoms[p.first] == 1) ++h_neighbors[p.second];
+        ++sigma_count[p.first];
+        ++sigma_count[p.second];
+    }
+
+    // Exchange resolution: the +1 valence slack exists for transient intermediates
+    // (H bridging two heavy atoms, 5-coordinate carbon in flight). Combined with the
+    // conservative break radius such states can become geometrically locked — no
+    // single bond ever reaches its break distance while the partners hold the atom
+    // in place. An intermediate must resolve: an atom whose SIGMA bond count stays
+    // above its sigma valence (cap minus the slack, e.g. H > 1, N > 3, C > 4) for
+    // react_exchange_scans consecutive scans has its weakest bond (largest r
+    // relative to the pair threshold) broken. Deliberately counts sigma bonds, not
+    // pi-order-weighted valence: the Hueckel pi bookkeeping lags between rebuilds
+    // and would dismantle genuine activation steps (measured for N2H2 systems:
+    // pi-based triggering forced ~230 breaks / 15 ps).
+    if (m_react_exchange_scans > 0) {
+        for (int a = 0; a < m_atomcount; ++a) {
+            if (sigma_count[a] > static_cast<int>(valence_cap(a) - 1.0 + 0.5)) {
+                if (++m_react_overvalence_streak[a] > m_react_exchange_scans) {
+                    int worst = -1;
+                    double worst_ratio = -1.0;
+                    for (int k = 0; k < static_cast<int>(next.size()); ++k) {
+                        if (next[k].first != a && next[k].second != a)
+                            continue;
+                        int o = (next[k].first == a) ? next[k].second : next[k].first;
+                        double r = (m_geometry_bohr.row(a) - m_geometry_bohr.row(o)).norm();
+                        double ratio = r / ((rcov[a] + rcov[o]) * fat_val[a] * fat_val[o]);
+                        if (ratio > worst_ratio) {
+                            worst_ratio = ratio;
+                            worst = k;
+                        }
+                    }
+                    if (worst >= 0) {
+                        auto pair = next[worst];
+                        broken.push_back(pair);
+                        next.erase(next.begin() + worst);
+                        if (CurcumaLogger::get_verbosity() >= 1)
+                            CurcumaLogger::result(fmt::format(
+                                "REACT exchange resolved: broke {}{}-{}{} (atom {} over-valent for {} scans)",
+                                Elements::ElementAbbr[m_atoms[pair.first]], pair.first + 1,
+                                Elements::ElementAbbr[m_atoms[pair.second]], pair.second + 1,
+                                a + 1, m_react_exchange_scans));
+                    }
+                    m_react_overvalence_streak.erase(a);
+                }
+            } else {
+                m_react_overvalence_streak.erase(a);
+            }
+        }
+    }
+
+    if (formed.empty() && broken.empty())
+        return false;
+
+    // Refractory period: a pair that just broke may not re-form for N scans. This
+    // interrupts the form/break cycle whose event jumps otherwise pump the
+    // recombination energy through the thermostat repeatedly.
+    if (m_react_refractory_scans > 0)
+        for (const auto& b : broken)
+            m_react_refractory[b] = m_react_refractory_scans;
+
+    m_react_bonds = std::move(next);
+
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        auto atom_label = [&](int a) {
+            int z = m_atoms[a];
+            const std::string& sym = (z >= 1 && z < static_cast<int>(Elements::ElementAbbr.size()))
+                                       ? Elements::ElementAbbr[z] : "?";
+            return fmt::format("{}{}", sym, a + 1);
+        };
+        for (const auto& [i, j] : formed)
+            CurcumaLogger::result(fmt::format("REACT bond formed: {}-{}", atom_label(i), atom_label(j)));
+        for (const auto& [i, j] : broken)
+            CurcumaLogger::result(fmt::format("REACT bond broken: {}-{}", atom_label(i), atom_label(j)));
+    }
+    return true;
+}
+
+void GFNFF::updateReactiveTopologyIfNeeded()
+{
+    if (m_topology_mode != "react" || !m_initialized)
+        return;
+
+    ++m_react_calls;
+
+    bool scan = (m_react_check_every > 0) && (m_react_calls % m_react_check_every == 0);
+    if (!scan && m_react_check_disp > 0.0
+        && m_react_ref_geometry.rows() == m_geometry_bohr.rows()) {
+        double max_disp = (m_geometry_bohr - m_react_ref_geometry).array().abs().maxCoeff();
+        scan = (max_disp > m_react_check_disp);
+    }
+    if (!scan)
+        return;
+
+    bool changed = detectReactiveBondChanges();
+    m_react_ref_geometry = m_geometry_bohr;
+    if (changed)
+        rebuildReactiveTopology();
+}
+
+bool GFNFF::rebuildReactiveTopology()
+{
+    const int verb = CurcumaLogger::get_verbosity();
+
+    // Diagnostic: energy on the OLD topology at the current geometry, so the
+    // discontinuity introduced by the rebuild (dE_jump) is measured, not hidden.
+    // Requires CN state from a previous step; skipped otherwise.
+    const bool diag = (verb >= 1) && m_workspace && (m_last_cn.size() == m_atomcount);
+    double e_before = 0.0;
+    if (diag) {
+        m_workspace->setGeometry(m_geometry_bohr);
+        e_before = m_workspace->calculate(false);
+    }
+
+    m_forced_bonds = m_react_bonds;
+
+    // Force the full topology path in getCachedTopology(): the bond list changed even
+    // if atoms moved less than the 0.5 Bohr displacement trigger. The react scan keeps
+    // its own reference geometry (m_react_ref_geometry) and never reads this tracker.
+    m_cached_bond_list.reset();
+    m_geometry_tracker.reset();
+    m_static_topology_valid = false;
+
+    GFNFFParameterSet ff_params;
+    try {
+        ff_params = generateGFNFFParameterSet();
+    } catch (const std::exception& e) {
+        CurcumaLogger::error(std::string("REACT rebuild: parameter generation failed: ") + e.what());
+        return false;
+    }
+
+    ff_params.dispersion_enabled = m_parameters.value("dispersion", true);
+    ff_params.hbond_enabled = m_parameters.value("hbond", true);
+    ff_params.repulsion_enabled = m_parameters.value("repulsion", true);
+    ff_params.coulomb_enabled = m_parameters.value("coulomb", true);
+
+    // Legacy ForceField engine: parameters + topology charges + CN/dcn (kept consistent
+    // even though the energy path runs through FFWorkspace).
+    syncLegacyForceField(ff_params);
+
+    // Refresh the heap copy for external consumers (GPU rebuild path reads a clone).
+    m_cached_parameter_set = std::make_unique<GFNFFParameterSet>(ff_params);
+
+    // Active engine: full interaction-list swap + re-partition. Atom types, thread
+    // pool and partition count survive inside the workspace.
+    if (m_workspace) {
+        m_workspace->rebuildInteractionLists(std::move(ff_params));
+    }
+
+    m_react_rebuilt = true;
+    ++m_react_rebuild_count;
+    m_hbxb_updated = true; // HB/XB lists were rebuilt inside parameter generation
+
+    if (diag) {
+        double e_after = m_workspace->calculate(false);
+        double de = e_after - e_before;
+        CurcumaLogger::result(fmt::format(
+            "REACT rebuild #{}: {} bonds, dE_jump = {:.6f} Eh ({:+.1f} kJ/mol)",
+            m_react_rebuild_count, m_react_bonds.size(), de,
+            de * CurcumaUnit::Energy::HARTREE_TO_KJMOL));
+    }
+    return true;
+}
+
 double GFNFF::Calculation(bool gradient)
 {
     // Claude Generated (February 2026): Start total calculation timer for verbosity 1+
@@ -1783,6 +2246,11 @@ double GFNFF::Calculation(bool gradient)
     // forget to refresh m_shared_srab to the CURRENT geometry, Phase 2 sees stale
     // distances from the previous MD step and produces wrong charges → wrong
     // gradient → CSVR thermostat exchange ~2× XTB reference (commit 94bdeec bug).
+    // React topology mode (Claude Generated Aug 2026): re-detect bonds with hysteresis
+    // and rebuild all bonded terms BEFORE distances/CN/EEQ/HB-XB, so every consumer in
+    // this step sees the new topology.
+    updateReactiveTopologyIfNeeded();
+
     computeSharedDistances();
     if (m_forcefield) {
         m_forcefield->setSharedDistances(&m_shared_srab, &m_shared_sqrab);
@@ -2983,12 +3451,14 @@ bool GFNFF::initializeForceField()
     }
 
     try {
-        m_forcefield->setGFNFFParameters(ff_params);
+        // Parameters + Phase-1 topology charges + CN/CNF/dcn for the legacy engine.
+        // Shared with rebuildReactiveTopology() (react mode). Claude Generated Aug 2026.
+        syncLegacyForceField(ff_params);
         if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::success("m_forcefield->setGFNFFParameters() completed successfully");
+            CurcumaLogger::success("syncLegacyForceField() completed successfully");
         }
     } catch (const std::exception& e) {
-        CurcumaLogger::error(std::string("m_forcefield->setGFNFFParameters() failed: ") + e.what());
+        CurcumaLogger::error(std::string("syncLegacyForceField() failed: ") + e.what());
         return false;
     }
 
@@ -3036,41 +3506,9 @@ bool GFNFF::initializeForceField()
         }
     }
 
-    // EEQ charges already distributed by setGFNFFParameters() → no need to call distributeEEQCharges here
-
-    // Claude Generated (Mar 6, 2026): Distribute Phase-1 topology charges for BATM AFTER setParameter()
-    // Reference: Fortran gfnff_engrad.F90:620 uses topo%qa (Phase-1, fixed) for BATM
-    // CRITICAL: Must happen AFTER setParameter() which creates threads via AutoRanges().
-    if (m_cached_topology.has_value() && m_cached_topology->topology_charges.size() > 0) {
-        m_forcefield->distributeTopologyCharges(m_cached_topology->topology_charges);
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info(fmt::format("Phase-1 topology charges distributed for BATM ({} atoms)",
-                                           m_cached_topology->topology_charges.size()));
-        }
-    }
-
-    // Claude Generated (Feb 1, 2026): Calculate and distribute CN, CNF, and CN derivatives
-    // Reference: Fortran gfnff_engrad.F90:418-422 - for Coulomb charge derivative gradients
-    {
-        auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
-        Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
-
-        Vector cnf(m_atoms.size());
-        for (size_t i = 0; i < m_atoms.size(); ++i) {
-            int z = m_atoms[i];
-            cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
-                        ? GFNFFParameters::cnf_eeq[z - 1]
-                        : 0.0;
-        }
-
-        // Claude Generated (WP4, May 2026): CNDerivStore replaces std::vector<SpMatrix>
-        CNDerivStore dcn = calculateCoordinationNumberDerivatives(cn);
-        m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("CN, CNF, and CN derivatives calculated and distributed for Coulomb gradients");
-        }
-    }
+    // EEQ charges are distributed by syncLegacyForceField() above (parameters +
+    // Phase-1 topology charges for BATM + CN/CNF/dcn for Coulomb charge-derivative
+    // gradients — Fortran refs gfnff_engrad.F90:620 and :418-422).
 
     // Claude Generated (Mar 2026): Create FFWorkspace from copy of ff_params (single generation)
     // CRITICAL: Do NOT call generateGFNFFParameterSet() again — a third call causes heap corruption.

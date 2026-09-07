@@ -310,6 +310,16 @@ public:
     void setBondHBData(const std::vector<BondHBEntry>& data) { m_bond_hb_data = data; }
 
     // Dynamic HB/XB list updates (for MD simulations)
+    /**
+     * @brief Full interaction-list swap + re-partition for a live workspace.
+     *
+     * Claude Generated (Aug 2026): used by the GFN-FF react topology mode when the
+     * bond topology changed. Atom types, thread pool and partition count survive;
+     * all master lists (incl. the bonded/non-bonded repulsion partition and the
+     * Coulomb self-energy params) are replaced by the freshly generated set.
+     */
+    void rebuildInteractionLists(GFNFFParameterSet&& params);
+
     void updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds);
     void updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds);
 
