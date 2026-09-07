@@ -5,8 +5,8 @@ on:
     # master publishes a numbered prerelease; any other branch listed here publishes its own
     # ci-<branch> prerelease, so branch builds never overwrite the master assets.
     # feature/** and fix/** follow the naming rule in CLAUDE.md, so a new branch is built
-    # without touching this file; branches outside that scheme are listed individually.
-    branches: [ master, "feature/**", "fix/**", cleanup-gfn-2026-09 ]
+    # without touching this file; a branch outside that scheme has to be added here.
+    branches: [ master, "feature/**", "fix/**" ]
     # Documentation-only commits cannot change the binaries. The consequence is that a
     # markdown-only push does not refresh the release assets.
     paths-ignore: [ '**.md' ]
