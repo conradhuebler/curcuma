@@ -109,18 +109,18 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
     xtb->setMixedPrecision(true);
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        const bool gfn2 = getMethodName() == "gfn2";
+        // The format string must be a compile-time constant (fmt >= 9 checks it in a
+        // consteval context), so the method-dependent part is selected as plain text.
+        const char* detail = getMethodName() == "gfn2"
+            ? "integral build (CN/S/H0/L/gamma + dp/qp multipole) + multipole SCF + "
+              "nuclear gradient incl. multipole-integral Pulay on the GPU (Stage 4 / "
+              "R-AP3); only the multipole SD/DD/SQ interaction gradient + dispersion + "
+              "CN chain-rule on CPU"
+            : "integral build (CN/S/H0/L/gamma) + SCF + nuclear gradient on the GPU; "
+              "only the dispersion gradient + CN chain-rule on CPU (Stage 4)";
         CurcumaLogger::info(fmt::format(
-            gfn2
-                ? "{}: ROCm fully device-resident (rocSOLVER + HIP kernels): integral "
-                  "build (CN/S/H0/L/gamma + dp/qp multipole) + multipole SCF + nuclear "
-                  "gradient incl. multipole-integral Pulay on the GPU (Stage 4 / R-AP3); "
-                  "only the multipole SD/DD/SQ interaction gradient + dispersion + CN "
-                  "chain-rule on CPU"
-                : "{}: ROCm fully device-resident (rocSOLVER + HIP kernels): integral "
-                  "build (CN/S/H0/L/gamma) + SCF + nuclear gradient on the GPU; only the "
-                  "dispersion gradient + CN chain-rule on CPU (Stage 4)",
-            getMethodName()));
+            "{}: ROCm fully device-resident (rocSOLVER + HIP kernels): {}",
+            getMethodName(), detail));
     }
 #else
     if (CurcumaLogger::get_verbosity() >= 2)

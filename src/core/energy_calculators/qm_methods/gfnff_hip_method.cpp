@@ -15,9 +15,12 @@
 
 #ifdef USE_ROCM
 
-#include <hip/hip_runtime.h>  // host-side hipMemcpy for the GPU-Schur charge download
-
+// The project headers come first (as in the CUDA sibling): <hip/hip_runtime.h> defines
+// __noinline__ as a macro, which corrupts the [[__gnu__::__noinline__]] attribute in
+// libstdc++'s <format> (pulled in via global.h -> <chrono>).
 #include "gfnff_hip_method.h"
+
+#include <hip/hip_runtime.h>  // host-side hipMemcpy for the GPU-Schur charge download
 
 // ---------------------------------------------------------------------------
 // ROCm backend traits: the single runtime-API call the wrapper needs
