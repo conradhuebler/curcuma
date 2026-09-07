@@ -1536,7 +1536,9 @@ nlohmann::json SimpleMD::WriteRestartInformation()
         restart["rmsd_econv"] = m_rmsd_econv;
         restart["wtmtd"] = m_wtmtd;
         restart["rmsd_DT"] = m_rmsd_DT;
-        restart["rmsd_ref_file"] = Basename() + ".mtd.xyz";
+        // The deposits are written through outputPath(), so record that same path - a bare
+        // basename resolves against the CWD, where the file does not exist in BMT mode.
+        restart["rmsd_ref_file"] = outputPath(Basename() + ".mtd.xyz");
         restart["counter"] = m_bias_structure_count;
         restart["rmsd_atoms"] = m_rmsd_atoms;
         std::vector<json> bias(m_bias_structure_count);
@@ -3440,7 +3442,7 @@ void SimpleMD::EvaluateBias(bool do_deposit)
             Molecule out_mol(m_molecule);
             out_mol.setGeometry(full_geometry);
             out_mol.setName(std::to_string(m_currentStep));
-            out_mol.writeXYZFile(Basename() + ".mtd.xyz");
+            out_mol.writeXYZFile(outputPath(Basename() + ".mtd.xyz"));
             if (m_nocolvarfile == false) {
                 std::ofstream colvarfile;
                 colvarfile.open(outputPath("COLVAR"));
@@ -3712,7 +3714,7 @@ void SimpleMD::EvaluateBias(bool do_deposit)
             Molecule out_mol(m_molecule);
             out_mol.setGeometry(full_geometry);
             out_mol.setName(std::to_string(m_currentStep));
-            out_mol.appendXYZFile(Basename() + ".mtd.xyz");
+            out_mol.appendXYZFile(outputPath(Basename() + ".mtd.xyz"));
             if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::result_fmt("RMSD-MTD: Deposited bias structure {} (pool total: {})",
                     new_count, m_shared_pool->biasStructureCount());
