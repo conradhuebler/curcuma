@@ -406,6 +406,8 @@ ctest -R "cli_rmsd_01" --verbose
 - **Commit message format**: Start with action verb (Fix, Add, Improve, Refactor), follow with brief description
 - **Include Co-Author info**: All commits include Claude contribution notes with proper attribution
 - **Test artifacts stay local**: Build outputs and temporary test files are ignored by .gitignore
+- **Branch names**: `feature/<topic>` for new capabilities, `fix/<topic>` for bug fixes; `<topic>` is 2-4 lowercase ASCII words in kebab-case naming the subject, no dates or issue numbers (e.g. `feature/gfnff-solvation`, `fix/bmt-dir-collision`)
+- **Why the scheme matters**: `.github/workflows/ccpp.yml` builds `feature/**` and `fix/**` automatically and publishes each as its own `ci-<branch>` prerelease — a branch outside the scheme has to be added to the workflow by hand
 
 ## Standards
 

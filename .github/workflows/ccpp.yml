@@ -2,89 +2,166 @@ name: AutomaticBuild
 
 on:
   push:
-    branches: [ master ] #Everytime master branch is updated
-    # paths: ['.github/workflows/*',  'src/*'] #only when these files are modifed
+    # master publishes a numbered prerelease; any other branch listed here publishes its own
+    # ci-<branch> prerelease, so branch builds never overwrite the master assets.
+    # feature/** and fix/** follow the naming rule in CLAUDE.md, so a new branch is built
+    # without touching this file; branches outside that scheme are listed individually.
+    branches: [ master, "feature/**", "fix/**", cleanup-gfn-2026-09 ]
+    # Documentation-only commits cannot change the binaries. The consequence is that a
+    # markdown-only push does not refresh the release assets.
+    paths-ignore: [ '**.md' ]
   pull_request:
-    branches: [ master ] #for every pull request going to master
-    # paths: ['.github/workflows/*', 'src/*'] #only when these files are modifed
+    branches: [ master ]
+    paths-ignore: [ '**.md' ]
+  # Lets any branch be built and published on demand without adding it to the list above.
+  workflow_dispatch:
+
+# The default GITHUB_TOKEN is read-only; creating a release and moving a tag needs write.
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
 
-  makerelease:
-    runs-on: ubuntu-latest
-    outputs:
-      version: 0.0.${{ github.run_number }}
-    steps:
-      - name: Create Release
-        id: create_release
-        uses: softprops/action-gh-release@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: 0.0.${{ github.run_number }}
-          name: Curcuma 0.0.${{ github.run_number }}
-          draft: false
-          prerelease: true
-
-  linux_20:
-    needs: [makerelease]
+  linux:
     runs-on: ubuntu-22.04
-
+    timeout-minutes: 90
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Cache FetchContent dependencies
-      uses: actions/cache@v4
-      with:
-        path: |
-          release_xtb/_deps
-          external/fmt
-          external/LBFGSpp
-          external/CxxThreadPool
-          external/ripser
-          external/cpp-d4
-        key: fetchcontent-${{ hashFiles('CMakeLists.txt') }}
+      - name: Cache FetchContent dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            release_xtb/_deps
+            external/fmt
+            external/LBFGSpp
+            external/CxxThreadPool
+            external/ripser
+            external/cpp-d4
+          key: fetchcontent-${{ hashFiles('CMakeLists.txt') }}
 
-    - uses: awalsh128/cache-apt-pkgs-action@latest
-      with:
-        packages: liblapacke-dev libatlas-base-dev libopenblas-dev libblas-dev liblapack-dev gfortran-12
-        version: 1.0
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: liblapacke-dev libatlas-base-dev libopenblas-dev libblas-dev liblapack-dev gfortran-12
+          version: 1.0
 
-    - name: Build
-      run: sh scripts/build_unix_github.sh
+      - name: Build
+        run: sh scripts/build_unix_github.sh
 
-    - name: Deploy
-      run: sh scripts/deploy_unix_github_20_04.sh
+      - name: Deploy
+        run: sh scripts/deploy_unix_github_20_04.sh
 
-    - name: Upload Release Asset
-      uses: svenstaro/upload-release-action@v2
-      with:
-        file: ./package/curcuma-nightly-x86_64.AppImage
-        asset_name: curcuma-nightly-${{ needs.makerelease.outputs.version }}-20_04-x86_64-Linux.AppImage
-        asset_content_type: application/zip
-        repo_token: ${{ secrets.GITHUB_TOKEN }}
-        tag: 0.0.${{ github.run_number }}
+      - name: Collect artifact
+        run: |
+          mkdir -p out
+          cp ./package/curcuma-nightly-x86_64.AppImage out/curcuma-x86_64-Linux.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: out/*
+          if-no-files-found: error
 
   windows:
-    needs: [makerelease]
     runs-on: windows-latest
-
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up MinGW
         uses: e-t-l/setup-mingw@patch-1
         with:
-            platform: x64
+          platform: x64
 
       - name: Build
         run: scripts/build_windows.bat
 
-      - name: Upload Release Asset
-        uses: svenstaro/upload-release-action@v2
+      - name: Collect artifact
+        shell: bash
+        run: |
+          mkdir -p out
+          cp curcuma-windows.zip out/curcuma-x86_64-Windows.zip
+
+      - uses: actions/upload-artifact@v4
         with:
-          file: ./curcuma-windows.zip
-          asset_name: curcuma-nightly-${{ needs.makerelease.outputs.version }}-windows-x86_64.zip
-          asset_content_type: application/zip
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          tag: 0.0.${{ github.run_number }}
+          name: windows
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    name: Publish prerelease
+    runs-on: ubuntu-latest
+    needs: [linux, windows]
+    # Publish whatever built, so one failing platform does not withhold the other. Pull
+    # requests build but never publish.
+    if: ${{ github.event_name != 'pull_request' && !cancelled() }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Compute release identity
+        id: rel
+        run: |
+          set -eu
+          if [ "${GITHUB_REF}" = "refs/heads/master" ]; then
+            # One numbered prerelease per master run, as before.
+            echo "tag=0.0.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "name=Curcuma 0.0.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "version=0.0.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "move_tag=false" >> "$GITHUB_OUTPUT"
+          else
+            # One prerelease per branch, its tag following the branch head.
+            slug="$(echo "${GITHUB_REF_NAME}" | tr '/' '-' | tr -cd 'A-Za-z0-9._-')"
+            echo "tag=ci-${slug}" >> "$GITHUB_OUTPUT"
+            echo "name=Curcuma CI (${GITHUB_REF_NAME})" >> "$GITHUB_OUTPUT"
+            echo "version=ci-${slug}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "move_tag=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Move the branch tag to this commit
+        if: ${{ steps.rel.outputs.move_tag == 'true' }}
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "${{ steps.rel.outputs.tag }}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${{ steps.rel.outputs.tag }}" --force
+
+      - name: Name the assets after the release
+        run: |
+          set -eu
+          mkdir -p upload
+          v="${{ steps.rel.outputs.version }}"
+          if [ -f dist/linux/curcuma-x86_64-Linux.AppImage ]; then
+            cp dist/linux/curcuma-x86_64-Linux.AppImage "upload/curcuma-${v}-x86_64-Linux.AppImage"
+          fi
+          if [ -f dist/windows/curcuma-x86_64-Windows.zip ]; then
+            cp dist/windows/curcuma-x86_64-Windows.zip "upload/curcuma-${v}-x86_64-Windows.zip"
+          fi
+          ls -l upload
+
+      - name: Publish prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.rel.outputs.tag }}
+          name: ${{ steps.rel.outputs.name }}
+          prerelease: true
+          make_latest: false
+          target_commitish: ${{ github.sha }}
+          files: upload/*
+          body: |
+            Automated build from `${{ github.ref_name }}`.
+            Commit: ${{ github.sha }}
+            Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          append_body: false
+          overwrite_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
