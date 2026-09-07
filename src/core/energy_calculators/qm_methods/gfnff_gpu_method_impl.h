@@ -119,10 +119,12 @@ public:
     void setForcePhaseTiming(bool on) override;
 
     /// CPU-side GFNFF instance (topology, EEQ charges, react bond list and its
-    /// events). Same accessor as the CPU wrapper, so a driver can read live force
-    /// field state without caring which backend runs the energy.
-    /// Claude Generated (Sep 2026).
+    /// events). Overrides the virtual hook rather than being a plain inline
+    /// accessor: this class lives in a dlopen plugin and derives from an
+    /// `extern template` base, so only a vtable dispatch is resolvable from outside
+    /// the plugin. Claude Generated (Sep 2026).
     GFNFF* getGFNFF() const { return m_gfnff.get(); }
+    GFNFF* gfnffInstance() const override { return m_gfnff.get(); }
 
 private:
     /**

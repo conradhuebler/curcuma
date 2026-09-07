@@ -22,6 +22,8 @@
 #include "src/core/global.h"
 #include "json.hpp"
 
+class GFNFF;   ///< forward declaration for gfnffInstance(); no header dependency
+
 using json = nlohmann::json;
 
 /**
@@ -107,6 +109,21 @@ public:
      * @return Vector of per-atom CN values, or empty vector if not supported
      */
     virtual Vector getCN() const { return Vector(); }
+
+    /**
+     * @brief The GFNFF instance behind this method, or nullptr for anything else.
+     *
+     * Claude Generated (Sep 2026). Lets a driver read live force-field state — the
+     * reactive bond list and its events, the hydrogen/halogen-bond lists — without
+     * knowing which backend runs the energy.
+     *
+     * VIRTUAL on purpose: the CUDA and ROCm wrappers live in dlopen plugins and
+     * derive from an `extern template` base, so an inline accessor on the concrete
+     * class is not resolvable from outside the plugin (see the "deliberately NOT
+     * final" note in gfnff_gpu_method.h). Dispatching through the vtable, which the
+     * plugin emits, is what works across that boundary.
+     */
+    virtual GFNFF* gfnffInstance() const { return nullptr; }
     
     /**
      * @brief Copy gradient into pre-allocated target (avoids heap allocation).
