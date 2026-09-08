@@ -42,7 +42,7 @@ neutral S30L interaction energies the per-structure offset cancels (host in both
 |------|--------|-------|
 | Energy (all terms) | ✅ Validated | 20 molecules, sub-mEh vs. Fortran |
 | Analytical gradients (CPU) | ✅ Validated | Numerical gradient check, all terms |
-| Analytical gradients (GPU) | ✅ Validated | 18/19 GPU tests pass; polymer energy tolerance 8.9 µEh |
+| Analytical gradients (GPU) | ✅ Validated | ROCm-CPU polymer (1410 atoms) energy diff 0.33 µEh (re-verified Sep 2026, was 8.9 µEh/1280-atom polymer, CUDA-era, no longer reproduces; CUDA unavailable to re-check directly) |
 | Geometry optimization | ⚠️ Untested by humans | CI only; convergence on real systems unknown |
 | Molecular dynamics | ⚠️ Untested by humans | Gradients enabled; long-run stability unknown |
 | Solvation (ALPB/GBSA) | ⚠️ Runs, unvalidated energy | `-gfnff.solvent water [-gfnff.solvent_model gbsa]` works (WP5, routing fixed June 2026); energy changes sensibly but no external reference exists (tblite has no GFN-FF ALPB). Gradient: frozen-charge approx — tight for non-polar (~1e-4 Eh/Bohr), ~2.4e-2 for polar+solvent. Self-consistent EEQ coupling not done. See [SQM_SOLVATION_WP.md](SQM_SOLVATION_WP.md) WP5 |
@@ -314,13 +314,12 @@ The foundation that enabled rapid angle error debugging:
 
 **Status**: ACCEPTED - Inherent to two-phase EEQ solver. Fix requires single-phase solver (see EEQ Solver Refactoring below).
 
-### Dispersion GradComp Precision Limit (Mar 12, 2026) - ACCEPTED
+### Dispersion GradComp Precision Limit (Mar 12, 2026) - RESOLVED (re-verified Sep 2026)
 
-**Issue**: Dispersion GradComp fails on large molecules (triose 2.1e-4, complex 4.1e-4, polymer 4.9e-4 vs tol 1e-4)
-- **Root Cause**: Each of ~N²/2 dispersion pairs has a small C6/CN parameter difference from Fortran. These accumulate randomly → ~√N scaling. NOT a missing gradient term (~N would indicate that).
-- **Evidence**: Error scales √N; Fortran `d3_gradient()` = pairwise C6/BJ + CN chain-rule (no ATM/BATM); BATM correctly separated. Charge injection shows ChgAttr < 0.001 mEh.
-- **Impact**: Negligible for MD/optimization — force errors are sub-µEh per atom
-- **Status**: ACCEPTED - Precision limit inherent to CN/C6 parameter differences
+**Original issue**: Dispersion GradComp fails on large molecules (triose 2.1e-4, complex 4.1e-4, polymer 4.9e-4 vs tol 1e-4), attributed to √N accumulation of small per-pair C6/CN parameter differences.
+
+**Re-verified Sep 2026** (`test_gfnff_validation` on the current committed references, `ctest -R gfnff_val_{polymer,complex,triose}`): dispersion GradComp max_err is now **7.5e-9 (triose), 8.9e-9 (complex), 9.9e-9 (polymer)** — five orders of magnitude under the old values and the 1e-4 tolerance, and every other component (Bond/Angle/Torsion/Repulsion/Coulomb/HBond) passes with similar margin. The √N precision limit described above no longer reproduces; likely fixed incidentally by later D3/D4 precision work (e.g. the C6/CN reference-table and CN-cutoff fixes in CLAUDE.md Known Issues #5) without this doc being updated at the time.
+- **Status**: RESOLVED - no longer a caveat for large-system dispersion gradients.
 
 ### Coulomb Precision Limit on Complex (Mar 12, 2026) - ACCEPTED
 

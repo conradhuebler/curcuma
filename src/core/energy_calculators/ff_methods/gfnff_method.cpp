@@ -3369,6 +3369,17 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     // Phase 6: Coulomb (native — no JSON)
     t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     params.coulombs = generateCoulombPairsNative();
+    {
+        // Claude Generated (Sep 2026): per-atom self-energy, independent of the
+        // pair list above (fixes E=0 for isolated charged atoms — see
+        // generateCoulombSelfEnergyNative()).
+        CoulombSelfEnergy self = generateCoulombSelfEnergyNative();
+        params.coul_self_chi_base = std::move(self.chi_base);
+        params.coul_self_gam = std::move(self.gam);
+        params.coul_self_alp = std::move(self.alp);
+        params.coul_self_cnf = std::move(self.cnf);
+        params.coul_self_chi_static = std::move(self.chi_static);
+    }
     if (do_timing) t_coulomb = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
 
     // Phase 7: Repulsion (native — no JSON)
@@ -9702,6 +9713,57 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
     (void)duration;
 
     return coulombs;
+}
+
+GFNFF::CoulombSelfEnergy GFNFF::generateCoulombSelfEnergyNative() const
+{
+    // Claude Generated (Sep 2026): per-atom half of generateCoulombPairsNative()'s
+    // fillPair(), extracted so the EEQ self-energy no longer depends on there being
+    // at least one Coulomb pair. Reference: Fortran gfnff_engrad.F90:1378-1389 — the
+    // self-energy statement (es = es - q*(chi+cnf*sqrt(cn)) + 0.5*q*q*(gam+...)) runs
+    // for every atom i unconditionally, outside/after the inner j<i pairwise loop.
+    // Root cause of the bug this fixes: a single free atom's `do j=1,i-1` loop is
+    // empty too, but the Fortran self term still executes; curcuma's C++ port split
+    // the two into independent pieces (calcCoulomb() for pairs, postProcess() for
+    // self-energy) and derived the self-energy's per-atom inputs by scanning the
+    // pair list (FFWorkspace::setInteractionLists()) — empty pair list -> empty
+    // inputs -> the self-energy silently never fires. This function sources the
+    // same per-atom topology data fillPair() uses, but indexed 0..m_atomcount-1
+    // directly, with no pairing required.
+    CoulombSelfEnergy self;
+    self.chi_base = Eigen::VectorXd::Zero(m_atomcount);
+    self.gam = Eigen::VectorXd::Zero(m_atomcount);
+    self.alp = Eigen::VectorXd::Zero(m_atomcount);
+    self.cnf = Eigen::VectorXd::Zero(m_atomcount);
+    self.chi_static = Eigen::VectorXd::Zero(m_atomcount);
+
+    const TopologyInfo& topo_info = getCachedTopology();
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        double alp_i = topo_info.eeq_alp[i];
+        if (topo_info.alpeeq.size() == m_atomcount)
+            alp_i = topo_info.alpeeq(i);
+
+        double dxi_i = (i < topo_info.dxi.size()) ? topo_info.dxi(i) : 0.0;
+        double chi_base_i = -topo_info.eeq_chi[i] + dxi_i;
+        if (i < static_cast<int>(topo_info.is_amide_h.size()) && topo_info.is_amide_h[i])
+            chi_base_i -= 0.02;
+
+        double cnf_i = topo_info.eeq_cnf[i];
+        double cn_i = topo_info.coordination_numbers(i);
+
+        double gam_i = topo_info.eeq_gam[i];
+        if (topo_info.dgam.size() == m_atomcount)
+            gam_i += topo_info.dgam(i);
+
+        self.chi_base(i) = chi_base_i;
+        self.gam(i) = gam_i;
+        self.alp(i) = alp_i;
+        self.cnf(i) = cnf_i;
+        self.chi_static(i) = chi_base_i + cnf_i * std::sqrt(cn_i);
+    }
+
+    return self;
 }
 
 std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::generateRepulsionPairsNative() const

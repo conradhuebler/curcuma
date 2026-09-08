@@ -1163,14 +1163,24 @@ if(USE_ROCM)
 
     # ---- native xTB device TU: hipcc -c xtb_hip_context.hip -> .o ----------------
     set(_hip_ctx_src ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.hip)
-    set(_hip_ctx_hdr ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.h)
+    # Claude Generated (Sep 2026): add_custom_command does no implicit header scanning
+    # (unlike normal target_sources compilation), so every header this .hip transitively
+    # #includes must be listed explicitly in DEPENDS or an edit to one silently leaves a
+    # stale .hip.o linked into libcurcuma_rocm.so — an ABI mismatch against the freshly
+    # recompiled g++ host objects (struct layout drift, e.g. GFNFFParameterSet growing a
+    # field, corrupts memory at runtime instead of failing to build). `rm
+    # release/*.hip.o` forces a rebuild if a header is missing from either list below.
+    set(_hip_ctx_hdrs
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/rocm/xtb_hip_integrals.hiph
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/parameters/xtb_params_extra.hpp)
     set(_hip_ctx_obj ${CMAKE_CURRENT_BINARY_DIR}/xtb_hip_context.hip.o)
     add_custom_command(
         OUTPUT  ${_hip_ctx_obj}
         COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 --offload-arch=${ROCM_GPU_ARCH}
                 ${_hipcc_defs} ${_hipcc_incs}
                 ${_hip_ctx_src} -o ${_hip_ctx_obj}
-        DEPENDS ${_hip_ctx_src} ${_hip_ctx_hdr}
+        DEPENDS ${_hip_ctx_src} ${_hip_ctx_hdrs}
         COMMENT "Compiling HIP xTB context with hipcc (arch ${ROCM_GPU_ARCH})"
         VERBATIM)
     add_custom_target(curcuma_hip_ctx DEPENDS ${_hip_ctx_obj})
@@ -1178,14 +1188,26 @@ if(USE_ROCM)
 
     # ---- GFN-FF device TU: hipcc -c gfnff_rocm.hip -> .o ---------------------------
     # Single-TU HIP port of cuda/{gfnff_kernels,ff_workspace_gpu,eeq_solver_gpu,gpu_utils}.
+    # See the DEPENDS comment above the xTB context command — same hazard, same fix.
     set(_hip_ff_src ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/gfnff_rocm.hip)
+    set(_hip_ff_hdrs
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/ff_workspace_hip.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/eeq_solver_hip.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/eeq_solver_hip.hiph
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/gfnff_soa_hip.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/gfnff_kernels_hip.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/gpu_utils_hip.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/gfnff_parameters.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/ff_terms.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/gfnff_par.h
+        ${PROJECT_SOURCE_DIR}/src/core/curcuma_logger.h)
     set(_hip_ff_obj ${CMAKE_CURRENT_BINARY_DIR}/gfnff_rocm.hip.o)
     add_custom_command(
         OUTPUT  ${_hip_ff_obj}
         COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 --offload-arch=${ROCM_GPU_ARCH}
                 ${_hipcc_defs} ${_hipcc_incs}
                 ${_hip_ff_src} -o ${_hip_ff_obj}
-        DEPENDS ${_hip_ff_src}
+        DEPENDS ${_hip_ff_src} ${_hip_ff_hdrs}
         COMMENT "Compiling HIP GFN-FF kernels with hipcc (arch ${ROCM_GPU_ARCH})"
         VERBATIM)
     add_custom_target(curcuma_hip_gfnff DEPENDS ${_hip_ff_obj})

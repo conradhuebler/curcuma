@@ -83,6 +83,8 @@ Native GFN methods (no external dependency required, canonical backends since AP
 
 > Native GFN1/GFN2 can use multiple cores **within one calculation** of a single large molecule: pass `-threads N` to a `-sp`/`-opt`/MD run (default is serial and bit-identical). Integral setup, gradient and Fock build scale ~3–5×; see [docs/SQM_THREADING.md](docs/SQM_THREADING.md).
 
+> **Benchmark test sets on demand:** `python scripts/fetch_testset.py fetch mor41` downloads the Grimme-group MOR41/GMTKN55/S30L benchmark sets into the layout the validation scripts expect (S30L's Supporting Information is paywalled and must be placed by hand; instructions are printed). `scripts/testset_perf.py` then times CPU/threading/GPU performance on whatever set is fetched. See [docs/TESTSET_RETRIEVAL.md](docs/TESTSET_RETRIEVAL.md).
+
 > Opt-in **MKL-free / GPU-portable eigensolve kernels** are available for the native GFN SCF (MKL stays the default): `-eigensolver native` (own Householder + Cuppen divide-and-conquer), `-eigensolver purify` (0 K density-matrix purification, GEMM-only, no diagonalization), `-eigensolver lobpcg` (seeded block LOBPCG, experimental), and `CURCUMA_EIG_TRED2=blocked` (BLAS-3 blocked tridiagonalization). See [docs/SQM_EIGENSOLVE_GPU.md](docs/SQM_EIGENSOLVE_GPU.md).
 
 > Opt-in **CUDA GPU path** for the native GFN1/GFN2 solver: `-method gfn1|gfn2 -gpu cuda` (build `release_cuda/` with `-DUSE_CUDA=ON`). Staged cuSOLVER/cuBLAS port (the CPU path is unchanged and `#ifdef`-free); both **GFN1** and **GFN2** run a device-resident SCF under the default Broyden mixing, and **Stage 3 builds the integrals (CN/S/H0/L/γ/multipole) on the device and Stage 4 the nuclear gradient — so `-opt`/`-md` are fully device-resident** (only xyz up, gradient+energy down per step; every device kernel matches the CPU elementwise to ~1e-15). 🤖 AI-generated / ⚙️ machine-tested only. See [docs/SQM_GPU.md](docs/SQM_GPU.md).
@@ -141,8 +143,15 @@ The native `gfnff` implementation is **AI-implemented and machine-tested** — h
 **Not validated / not implemented:**
 - **Periodic boundary conditions**: Not implemented
 - **Organometallics / transition metals**: No test molecule with metal center; parameter quality unknown
-- **Gradient accuracy for large systems**: Dispersion gradients show √N accumulation error (expected for O(N²) terms, scientifically acceptable for MD/opt)
-- **GPU energy for polymer (1280 atoms)**: 8.9 µEh vs. 1 µEh tolerance — pre-existing, under investigation
+
+**Large-system precision (re-verified Sep 2026, superseding an older note)**: the two caveats
+previously listed here — "dispersion gradients show √N accumulation error on large systems"
+and "GPU energy for polymer (1280 atoms): 8.9 µEh vs. 1 µEh tolerance" — no longer reproduce.
+`test_gfnff_validation` on the current 1410-atom `polymer.xyz` (`ctest -R gfnff_val_polymer`):
+dispersion GradComp max_err 9.9e-9 Eh/Bohr (tol 1e-4, was ~4.9e-4 in Mar 2026 — likely fixed
+incidentally by later D3/D4 precision work, e.g. CLAUDE.md Known Issues #5). CPU-vs-GPU
+single-point energy on the same molecule, ROCm (gfx1150): 0.33 µEh (well under the 1 µEh
+target; CUDA hardware was not available to re-check that backend directly).
 
 **Reactive MD (experimental)**: `-gfnff.topology_mode react` lets bonds form and break during MD (hysteresis re-detection + bonded-term rebuild, NVT-only) — see [docs/GFNFF_REACT_TOPOLOGY.md](docs/GFNFF_REACT_TOPOLOGY.md).
 

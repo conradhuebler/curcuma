@@ -4403,19 +4403,23 @@ Vector EEQSolver::calculateDgam(
             if (Z == 17) ff = -0.02;  // Cl
             if (Z == 35) ff = -0.11;  // Br
             if (Z == 53) ff = -0.07;  // I
+        }
 
-            // Metal corrections (requires metal_type array)
-            if (Z >= 1 && Z <= 86) {
-                int imetal_val = metal_type[Z - 1];
-                if (imetal_val == 1) ff = -0.08;   // Main group metals
-                if (imetal_val == 2) ff = -0.9;    // Transition metals (XTB comment: "too large")
-            }
+        // Claude Generated (Sep 2026): metal + noble-gas corrections are unconditional
+        // in the Fortran reference (gfnff_ini.f90:658-660: independent `if`s, not
+        // `else if`s, so they overwrite ff for ANY element, not just Z>10). They were
+        // nested inside the `else if (Z > 10)` branch above, which made them
+        // unreachable for the only two metals with Z<=10 (Li Z=3, Be Z=4 -
+        // metal_type[]==1): isolated Li+/Be+/Be2+ silently got dgam=0 instead of
+        // qa*(-0.08), a 25-200 kcal/mol self-energy error found via GMTKN55
+        // (DIPCS10/G21IP/ALK8 single-ion structures; Na+/Mg2+, Z>10, were unaffected).
+        if (Z >= 1 && Z <= 86) {
+            int imetal_val = metal_type[Z - 1];
+            if (imetal_val == 1) ff = -0.08;   // Main group metals
+            if (imetal_val == 2) ff = -0.9;    // Transition metals (XTB comment: "too large")
 
-            // Noble gases (Group 8)
-            if (Z >= 1 && Z <= 86) {
-                int group = periodic_group[Z - 1];
-                if (group == 8) ff = 0.0;  // Noble gases
-            }
+            int group = periodic_group[Z - 1];
+            if (group == 8) ff = 0.0;  // Noble gases
         }
 
         dgam(i) = qa * ff;

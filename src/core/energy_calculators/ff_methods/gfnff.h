@@ -1195,6 +1195,21 @@ private:
     /// Generate Coulomb pair parameters as native GFNFFCoulomb structs
     std::vector<GFNFFCoulomb> generateCoulombPairsNative() const;
 
+    /// Per-atom EEQ Coulomb self-energy inputs (chi_base/gam/alp/cnf/chi_static),
+    /// independent of the pair list above — see generateCoulombSelfEnergyNative().
+    struct CoulombSelfEnergy {
+        Eigen::VectorXd chi_base, gam, alp, cnf, chi_static;
+    };
+
+    /// Generate per-atom Coulomb self-energy parameters (Claude Generated Sep 2026).
+    /// Mirrors the per-atom half of generateCoulombPairsNative()'s fillPair(), but
+    /// runs unconditionally for every atom (no pairing), matching the Fortran
+    /// reference (gfnff_engrad.F90:1378-1389: the self-energy statement executes
+    /// for every atom i regardless of whether the inner j<i pairwise loop has any
+    /// iterations). Needed so a single isolated atom — where the pair list is
+    /// structurally empty — still gets a nonzero EEQ self-energy.
+    CoulombSelfEnergy generateCoulombSelfEnergyNative() const;
+
     /// Generate repulsion pair parameters as native GFNFFRepulsion structs (bonded + nonbonded)
     std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> generateRepulsionPairsNative() const;
 
