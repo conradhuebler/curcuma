@@ -317,6 +317,7 @@ PARAM(react_refractory_scans, Int, 10, "React mode: a pair whose bond just broke
 PARAM(react_valence_cap, Bool, true, "React mode: refuse a new bond while an atom already uses its element valence plus one exchange slack, counting bond orders so multiple bonds consume valence. Prevents unphysical agglomerates; disable to sample unconstrained formation. Refused formations are logged at verbosity 2.", "Reactive", {})
 PARAM(react_exchange_scans, Int, 20, "React mode: an atom may stay above its nominal valence for at most this many scans, then its weakest bond is broken. Forces exchange intermediates like a hydrogen bridging two heavy atoms to resolve instead of staying geometrically locked. 0 disables.", "Reactive", {})
 PARAM(react_slack_form_factor, Double, 1.2, "React mode: tighter formation radius factor for bonds that push an atom above its nominal sigma valence into the exchange slack. A genuine exchange intermediate has the extra partner near bond distance; the ordinary optimistic factor would re-create bridges endlessly.", "Reactive", {})
+PARAM(storsion_reference_loop_bug, Bool, false, "Reproduce the reference implementation's triple-bond-torsion (sTors) loop bug bit-for-bit. Both pprcht/gfnff and xtb 6.7.1 call sTors_eg(m,...) with the array SIZE m instead of the loop index, so they evaluate only the LAST detected C-triplebond-C torsion, m times, and drop all others (and give exactly zero whenever the last slot was never filled). Curcuma sums every detected torsion, which is what the term is meant to do - its erefhalf is a DLPNO-CCSD(T) diphenylacetylene reference value, not a fitted parameter. Enable only to reproduce reference totals exactly.", "Advanced", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {
@@ -351,6 +352,7 @@ public:
         Vector neighbor_counts;                                  // Simple neighbor counts (integer CN)
         std::vector<int> hybridization;                          // 0=sp3, 1=sp, 2=sp2, 3=terminal, 5=hypervalent
         std::vector<int> pi_fragments;                           // Pi fragment assignment per atom
+        std::vector<int> pi_atoms_final;                         // Fortran post-Hueckel piadr (gfnff_ini.f90:1016, "piadr = itmp"): 1 iff the atom ends a bond inside a SOLVED pi-system. Stricter than pi_fragments and the array every consumer after the Hueckel section tests - Claude Generated Sep 2026
         std::vector<int> itag;                                   // -1 iff atom is eta-coordinated to a metal (Fortran itag; gfnff_ini2.f90:170-198) - Claude Generated Jul 2026
         std::vector<int> pi_system_charge;                       // ipis: charge per pi-system (subtract from nelpi) - Claude Generated Jul 2026
         std::vector<int> ring_sizes;                             // Smallest ring containing each atom
@@ -1867,7 +1869,8 @@ private:
         const std::vector<double>& charges = {},
         const Eigen::MatrixXd& geometry_bohr = Eigen::MatrixXd(),
         const std::vector<int>& pi_system_charge = {},
-        const std::vector<int>& itag = {}) const;
+        const std::vector<int>& itag = {},
+        std::vector<int>* pi_atoms_final = nullptr) const;
 
     // Advanced parameter structures (EEQParameters already defined above at line 298)
     // TopologyInfo now defined at line 51 (public section) for use in function signatures

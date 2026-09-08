@@ -2880,7 +2880,7 @@ json GFNFF::exportTopology() const
     const TopologyInfo& topo = *m_cached_topology;
 
     // Version for format compatibility
-    topo_json["version"] = 2;
+    topo_json["version"] = 3;
 
     // Fragment information (for multi-fragment systems)
     topo_json["nfrag"] = topo.nfrag;
@@ -2920,6 +2920,11 @@ json GFNFF::exportTopology() const
     // Pi-system fragments
     if (!topo.pi_fragments.empty()) {
         topo_json["pi_fragments"] = topo.pi_fragments;
+    }
+
+    // Post-Hueckel pi membership (Fortran piadr after gfnff_ini.f90:1016)
+    if (!topo.pi_atoms_final.empty()) {
+        topo_json["pi_atoms_final"] = topo.pi_atoms_final;
     }
 
     // Eta(η)-coordination tags (Claude Generated Jul 2026)
@@ -3011,8 +3016,10 @@ bool GFNFF::importTopology(const json& topo_json)
     // v2 (Jul 2026): topology now comes from the Fortran four-list neighbour
     // construction; a v1 cache holds a hybridization from the old full-list heuristic
     // and an adjacency that is not the nbdum mixture, so it must be rejected.
+    // v3 (Sep 2026): adds pi_atoms_final (Fortran post-Hueckel piadr). A v2 cache cannot
+    // supply it, and silently falling back would reintroduce the torsion fkl bug it fixes.
     int version = topo_json.value("version", 0);
-    if (version < 2) {
+    if (version < 3) {
         CurcumaLogger::warn("GFNFF::importTopology: Unknown topology format version");
         return false;
     }
@@ -3082,6 +3089,9 @@ bool GFNFF::importTopology(const json& topo_json)
     }
 
     // Pi fragments
+    if (topo_json.contains("pi_atoms_final")) {
+        topo.pi_atoms_final = topo_json["pi_atoms_final"].get<std::vector<int>>();
+    }
     if (topo_json.contains("pi_fragments")) {
         topo.pi_fragments = topo_json["pi_fragments"].get<std::vector<int>>();
     }
@@ -3882,16 +3892,25 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // Step 4a: Bond-type specific shifts
     int hyb1_value = topo.hybridization[atom1];
     int hyb2_value = topo.hybridization[atom2];
-    int m_hybi = (hyb1_value < 1 || hyb1_value > 3) ? 3 : hyb1_value;
-    int m_hybj = (hyb2_value < 1 || hyb2_value > 3) ? 3 : hyb2_value;
-    int hybi = std::max(m_hybi, m_hybj);
-    int hybj = std::min(m_hybi, m_hybj);
+    // CORRECTED (Sep 2026): these classifications must see the RAW Fortran hybridization,
+    // where hydrogen is 0 and a hypervalent atom is 5. Folding "anything outside 1..3" onto
+    // 3 (as the bsmat lookup below does, where it is value-preserving) silently turned every
+    // X-H bond into an "sp3" partner, so an sp2-N-H bond matched the N-sp2 rules meant for a
+    // genuine sp3-N/sp2-C bond, and no bond could ever reach the hypervalent branch.
+    // Measured on the guanidine imine N-H of GMTKN55 Amino20x4/ARG: bstrength 1.2896 instead
+    // of 1.0792, i.e. that single bond 21.8 kcal/mol too deep.
+    int hybi = std::max(hyb1_value, hyb2_value);
+    int hybj = std::min(hyb1_value, hyb2_value);
 
+    // Fortran gfnff_ini.f90:1106-1121. Note the N-sp2 rule is directional there: the
+    // NITROGEN must be the sp3 partner ("hyb(ii)==3 .and. hyb(jj)==2 .and. at(ii)==7").
+    const bool n_sp3_on_sp2 = (hyb1_value == 3 && hyb2_value == 2 && z1 == 7)
+                           || (hyb2_value == 3 && hyb1_value == 2 && z2 == 7);
     int bbtyp = 1; // Default single
     if (hybi == 5 || hybj == 5) bbtyp = 4; // hypervalent
     else if (hybi == 1 || hybj == 1) bbtyp = 3; // triple/sp-X
     else if (hybi == 2 && hybj == 2) bbtyp = 2; // sp2-sp2
-    else if (hybi == 3 && hybj == 2 && (z1 == 7 || z2 == 7)) bbtyp = 2; // N-sp2
+    else if (n_sp3_on_sp2) bbtyp = 2; // N-sp2
 
     // Claude Generated (Jul 2026): metal bonds take Fortran's mutually-exclusive metal
     // branch (gfnff_ini.f90:1129-1206) — the hybridization/bbtyp/F-F base shifts below are
@@ -4007,9 +4026,15 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     int matrix_i = (hyb1 < 1 || hyb1 > 3) ? 3 : hyb1;
     int matrix_j = (hyb2 < 1 || hyb2 > 3) ? 3 : hyb2;
 
-    // Reuse hybi and hybj calculated earlier for bstrength lookup
+    // bsmat lookup only: fold hyb 0 (H) onto 3 so the index stays inside the 4x4 table.
+    // That fold is value-preserving - row/column 0 and 3 of bsmat are identical - which is
+    // exactly why it hid the bug above for so long: the table lookup was right, only the
+    // special-case tests keyed on the folded value were not. hyb 5 is caught before the
+    // lookup, so it never indexes the table.
     hybi = std::max(matrix_i, matrix_j);
     hybj = std::min(matrix_i, matrix_j);
+    const int hybi_raw = std::max(hyb1, hyb2);
+    const int hybj_raw = std::min(hyb1, hyb2);
 
     // CRITICAL FIX (Phase 11): Special handling for hydrogen bonds!
     // Fortran gfnff_param.f90 has bsmat(1,1)=1.98 for sp-sp (triple bond)
@@ -4024,7 +4049,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         bstrength = bstren[1];  // 1.00 (single bond)
     } else {
         // Get bond strength from hybridization matrix (Fortran gfnff_ini.f90:1127-1133)
-        if (hybi == 5 || hybj == 5) {
+        if (hybi_raw == 5 || hybj_raw == 5) {
             // Hypervalent atoms
             bstrength = bstren[4];  // 1.22
         } else {
@@ -4037,7 +4062,10 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // N-sp2 correction: if one atom is sp3 (hyb=3) and other is sp2 (hyb=2) and at least one is nitrogen
     // Reference says: if (hybi.eq.3 .and. hybj.eq.2 .and. (ia.eq.7 .or. ja.eq.7)) bstrength = gen%bstren(2)*1.04
     // NOTE: C-N bond in caffeine rings where N is methylated (sp3) and C is aromatic (sp2)
-    if (hybi == 3 && hybj == 2 && (z1 == 7 || z2 == 7)) {
+    // Unlike the btyp rule above, this one is NOT directional in the reference - either atom
+    // may be the nitrogen - but it still needs the raw hybridizations, so that an X-H bond
+    // (hydrogen: hyb 0, not 3) can never reach it.
+    if (hybi_raw == 3 && hybj_raw == 2 && (z1 == 7 || z2 == 7)) {
         bstrength = bstren[2] * 1.04;  // treat as stronger due to conjugation/charge
     }
 
@@ -7452,7 +7480,8 @@ std::vector<double> GFNFF::calculatePiBondOrders(
     const std::vector<double>& charges,
     const Eigen::MatrixXd& geometry_bohr,
     const std::vector<int>& pi_system_charge,
-    const std::vector<int>& itag_in) const
+    const std::vector<int>& itag_in,
+    std::vector<int>* pi_atoms_final) const
 {
     /**
      * Claude Generated (January 14, 2026) - Updated for Phase 1: Full Hückel implementation
@@ -7512,7 +7541,8 @@ std::vector<double> GFNFF::calculatePiBondOrders(
             bond_list,
             geometry_bohr,
             itag,
-            pi_system_charge
+            pi_system_charge,
+            pi_atoms_final
         );
 
         // Ensure correct size
@@ -7587,6 +7617,16 @@ std::vector<double> GFNFF::calculatePiBondOrders(
         // Store in triangular format using lin(i,j)
         int idx = lin(atom_i, atom_j);
         pi_bond_orders[idx] = pbo;
+
+        // Simplified-approx counterpart of the Fortran itmp bookkeeping (see the full-Hückel
+        // path in HuckelSolver::calculatePiBondOrders): both ends of a conjugated bond count
+        // as π atoms. Only reached when the full Hückel solver is switched off.
+        if (pi_atoms_final && pi_i != 0 && pi_j != 0 && pi_i == pi_j) {
+            if (pi_atoms_final->size() != static_cast<size_t>(m_atomcount))
+                pi_atoms_final->assign(m_atomcount, 0);
+            (*pi_atoms_final)[atom_i] = 1;
+            (*pi_atoms_final)[atom_j] = 1;
+        }
 
         if (CurcumaLogger::get_verbosity() >= 3 && pbo > 0.0) {
             CurcumaLogger::result(fmt::format(
@@ -8431,8 +8471,21 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
         CurcumaLogger::info(fmt::format("Found {} A-X halogen pairs", ax_pairs.size()));
     }
 
-    const double xb_cutoff = 10.0;
-    const double xb_cutoff_sq = xb_cutoff * xb_cutoff;
+    // CORRECTED (Sep 2026): the B search used a hardcoded 10 Bohr cutoff on the X-B
+    // distance. The reference prunes the X-bond list on the A-B distance against hbthr2
+    // (gfnff_ini2.f90:751-757 and :1103-1111, "rab = sqrab(A,B); if (rab > hbthr2) cycle"),
+    // which is 450 Bohr^2 = 21.2 Bohr at the reference accuracy of 0.1 - both a different
+    // atom pair and a far longer reach. The tight cutoff silently dropped the long-range
+    // tail of the term: S30L-CI host 11/12 (a thiophene macrocycle, S as the X donor) kept
+    // 140 of the reference's 940 triples and came out 0.099 kcal/mol short. Same threshold
+    // source as the HB list, so hb_accuracy / hb_thr2_bohr2 steer both consistently.
+    double xb_thr2;
+    {
+        const double hb_acc = m_parameters.value("hb_accuracy", 0.1);
+        const double thr2_override = m_parameters.value("hb_thr2_bohr2", 0.0);
+        xb_thr2 = (thr2_override > 0.0) ? thr2_override : (400.0 - std::log10(hb_acc) * 50.0);
+    }
+    const double xb_cutoff = std::sqrt(xb_thr2);
 
     // Claude Generated (Apr 2026): Spatial cell list for O(N) B-atom lookup.
     // Threshold configurable via nb_cell_list_min_atoms (shared with HB and Coulomb).
@@ -8445,14 +8498,19 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
     }
 
     for (const auto& [A, X] : ax_pairs) {
-        auto process_B = [&](int B, double r_BX_sq) {
+        auto process_B = [&](int B, double r_AB_sq) {
             if (B == A || B == X) return;
             if (current_basicity[B] < 1e-6) return;
 
-            if (m_atoms[B] == 6) {
-                if (topo_info.pi_fragments[B] == 0 || charges[B] >= 0.05) return;
-            } else {
-                if (charges[B] > 0.05) return;
+            // gfnff_ini.f90:874-876 gates BOTH the pi test and the charge test on group 4
+            // (C, Si, Ge, Sn, Pb) - "must be a (pi)base". CORRECTED (Sep 2026): curcuma also
+            // rejected every NON-group-4 B with qa > 0.05, a filter the reference does not
+            // have; it dropped the mildly positive thiophene sulfurs of S30L-CI host 11/12
+            // from their own X-bond list.
+            const int z_B = m_atoms[B];
+            const int group_B = (z_B >= 1 && z_B <= 86) ? periodic_group[z_B - 1] : 0;
+            if (group_B == 4) {
+                if (topo_info.pi_fragments[B] == 0 || charges[B] > 0.05) return;
             }
 
             // Fortran gfnff_ini.f90:872: `if (bpair(lin(j,ix)) .le. 3) cycle` — B must be
@@ -8487,22 +8545,23 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
 
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::info(fmt::format(
-                    "  XB detected: A={} ({}) X={} ({}) B={} ({}) r_BX={:.3f} Bohr",
+                    "  XB detected: A={} ({}) X={} ({}) B={} ({}) r_AB={:.3f} Bohr",
                     A, Elements::ElementAbbr[m_atoms[A]], X,
                     Elements::ElementAbbr[m_atoms[X]], B,
-                    Elements::ElementAbbr[m_atoms[B]], std::sqrt(r_BX_sq)));
+                    Elements::ElementAbbr[m_atoms[B]], std::sqrt(r_AB_sq)));
             }
         };
 
+        // The reference threshold is on A-B, so the neighbour query is centred on A.
         if (use_cell_list) {
-            cell_list.forEachNeighbor(X, xb_cutoff_sq, process_B);
+            cell_list.forEachNeighbor(A, xb_thr2, process_B);
         } else {
             for (int B = 0; B < m_atomcount; ++B) {
-                Vector r_X = m_geometry_bohr.row(X);
+                Vector r_A = m_geometry_bohr.row(A);
                 Vector r_B = m_geometry_bohr.row(B);
-                double r_BX_sq = (r_B - r_X).squaredNorm();
-                if (r_BX_sq >= xb_cutoff_sq) continue;
-                process_B(B, r_BX_sq);
+                double r_AB_sq = (r_B - r_A).squaredNorm();
+                if (r_AB_sq > xb_thr2) continue;
+                process_B(B, r_AB_sq);
             }
         }
     }
@@ -9370,7 +9429,8 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         charges_vec,
         m_geometry_bohr,  // P2a: Pass geometry instead of distance_matrix
         topo_info.pi_system_charge,  // ipis per pi-system (Jul 2026, F3)
-        topo_info.itag  // carbene(+1)/NO2(+1)/eta(-1) tags for the FT-HMO electron count
+        topo_info.itag,  // carbene(+1)/NO2(+1)/eta(-1) tags for the FT-HMO electron count
+        &topo_info.pi_atoms_final  // Fortran "piadr = itmp" (gfnff_ini.f90:1016)
     );
 
     {

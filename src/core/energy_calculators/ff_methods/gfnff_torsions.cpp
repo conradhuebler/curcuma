@@ -647,32 +647,22 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
         hyb_l = topo_outer.hybridization[l_atom_idx];
     }
 
-    // Lambda to check if nitrogen atom is NOT in pi-system (piadr==0)
+    // Lambda to check if nitrogen atom is NOT in pi-system (Fortran "piadr(kk) == 0")
+    //
+    // CORRECTED (Sep 2026): this used to reimplement pi-membership with two heuristics
+    // (any bond with pibo > 0.1, or any sp/sp2 neighbour). The Fortran does not do that -
+    // by the time the torsion loop runs, gfnff_ini.f90:1016 has already REPLACED piadr with
+    // itmp, a plain atom-indexed flag set for both ends of every bond inside a solved
+    // pi-system. (Only the uses BEFORE that line, e.g. the EEQ dgam branch at :650, see the
+    // well-known index-cutoff form of piadr - see Known Issue #11.) The heuristics disagree
+    // exactly where it matters: a nitrogen kept OUT of the pi-system but still surrounded by
+    // sp2 ring carbons - e.g. the Na-coordinated pyrrole N of S30L-CI 29 - was reported as
+    // "in pi" and never got the 0.5 reduction, leaving 14 torsions at twice the reference FC.
     auto is_nitrogen_not_pi = [&](int atom_idx, int z_atom) -> bool {
         if (z_atom != 7) return false;  // Must be nitrogen
         if (atom_idx < 0 || atom_idx >= m_atomcount) return false;
-
-        // Condition 1: Direct bonds with significant pi-character (pibo > 0.1)
-        if (!topo_outer.pi_bond_orders.empty()) {
-            for (int other = 0; other < m_atomcount; other++) {
-                if (other == atom_idx) continue;
-                int pibo_idx = lin(atom_idx, other);
-                if (pibo_idx >= 0 && pibo_idx < static_cast<int>(topo_outer.pi_bond_orders.size())) {
-                    if (topo_outer.pi_bond_orders[pibo_idx] > 0.1) return false;  // In pi-system
-                }
-            }
-        }
-
-        // Condition 2: N adjacent to sp or sp2 atoms ("picon" case)
-        for (const auto& bond : bond_list_outer) {
-            int neighbor = (bond.first == atom_idx) ? bond.second : (bond.second == atom_idx) ? bond.first : -1;
-            if (neighbor >= 0 && neighbor < static_cast<int>(topo_outer.hybridization.size())) {
-                int neighbor_hyb = topo_outer.hybridization[neighbor];
-                if (neighbor_hyb == 1 || neighbor_hyb == 2) return false;  // In pi-system
-            }
-        }
-
-        return true;  // nitrogen NOT in pi-system
+        if (static_cast<int>(topo_outer.pi_atoms_final.size()) != m_atomcount) return false;
+        return topo_outer.pi_atoms_final[atom_idx] == 0;
     };
 
     // Nitrogen reduction: RESET fkl to base*0.5 (NOT cumulative multiply!)
@@ -2139,11 +2129,19 @@ std::vector<GFNFFSTorsion> GFNFF::generateSTorsionsNative() const
     // mixture), not a rebuild from the raw bond list. See docs/GFNFF_NEIGHBOR_LISTS.md.
     const std::vector<std::vector<int>>& neighbors = topo.adjacency_list;
 
+    // Fortran gfnff_ini.f90:1908-1924 pre-counts candidate triple bonds ("nn") with only the
+    // two-neighbour-carbon test, allocates sTorsl(6,nn), and then lets specialTorsList fill
+    // however many actually survive the distance/sp2/C1/C4 filters. nn is therefore an upper
+    // bound on the filled entries, and it is the "m" the buggy energy loop uses - so the
+    // reference-emulation path below needs it. Cheap to track, unused otherwise.
+    int nn_precount = 0;
+
     for (int i = 0; i < m_atomcount; ++i) {
         // Carbon with two neighbors (potential sp center)
         if (m_atoms[i] == 6 && neighbors[i].size() == 2) {
             for (int nbi : neighbors[i]) {
                 if (nbi <= i) continue; // Avoid double counting
+                if (m_atoms[nbi] == 6 && neighbors[nbi].size() == 2) ++nn_precount;
 
                 // Other carbon with two neighbors
                 if (m_atoms[nbi] == 6 && neighbors[nbi].size() == 2) {
@@ -2197,6 +2195,26 @@ std::vector<GFNFFSTorsion> GFNFF::generateSTorsionsNative() const
                     }
                 }
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Opt-in: reproduce the reference implementation's sTors loop bug
+    // ------------------------------------------------------------------
+    // gfnff_engrad.F90:494-503 loops "do i=1,m" but calls sTors_eg(m, n, ...), and sTors_eg
+    // reads topo%sTorsl(:,m) - the array SIZE, not the loop index. Both pprcht/gfnff and
+    // xtb 6.7.1 therefore evaluate ONLY the last allocated column, m times, and never touch
+    // the others; its guard "if (.not. any(sTorsl(:,m) == 0))" additionally zeroes the whole
+    // term whenever fewer entries survived the filters than were allocated.
+    // Emitting m copies of the last entry reproduces both the energy and the gradient exactly.
+    // Off by default: curcuma sums every torsion, which is what the term is for (erefhalf is
+    // a DLPNO-CCSD(T) diphenylacetylene value, not a fitted parameter, so summing correctly
+    // does not invalidate the GFN-FF parametrisation).
+    if (m_parameters.value("storsion_reference_loop_bug", false)) {
+        if (static_cast<int>(storsions.size()) != nn_precount) {
+            storsions.clear();  // last column never filled -> reference contributes zero
+        } else if (!storsions.empty()) {
+            storsions.assign(static_cast<size_t>(nn_precount), storsions.back());
         }
     }
 

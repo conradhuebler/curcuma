@@ -16,10 +16,22 @@ machine).
 |--------|-----------:|----------------------:|----:|-----:|----:|
 | gfn2   | 2140 | 320 | 0.000 | 0.001 | 0.017 |
 | gfn1   | 2142 | 320 | 0.047 | 0.549 | 11.93 |
-| gfnff  | 2458 | 0   | 3.389 | 17.45 | 500.0 |
+| gfnff  | 2458 | 0   | 2.117 | 16.04 | 500.0 |
 
 gfn1/gfn2 skip every structure with a nonzero `.UHF` (see "Known limitation" below).
 gfnff has no open-shell term and runs everything.
+
+The gfnff row was 3.389 after the two isolated-ion EEQ fixes below, 3.462 after the
+pyrrole pi-veto fix (CLAUDE.md Known Issue #10), and reached **2.117** with the four
+term-level fixes of Known Issue #12 - the nitro pi-electron count and the sp2-N-H bond
+strength being the two GMTKN55 exercises heavily (`Amino20x4` MAD 5.664 -> 0.001,
+max 26.9 -> 0.016).
+
+> **Reading the numbers back**: `scripts/gmtkn55_compare.py` caches every energy in
+> `_run/energies.json` and reuses it unless `--recompute` is given. A re-run after a code
+> change therefore reports the OLD energies unless the `<subset>/<name>|cur|<method>` keys
+> are dropped first. Two "MAD unchanged" observations in this repo's history came from
+> exactly that.
 
 **gfn1/gfn2 confirm prior findings** (main-group, closed-shell): essentially exact
 reproduction of xtb, consistent with `docs/SQM_VALIDATION.md` / `docs/SQM_WP2_gfn1_accuracy.md`.
