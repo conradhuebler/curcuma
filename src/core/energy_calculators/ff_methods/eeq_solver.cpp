@@ -3321,7 +3321,17 @@ Vector EEQSolver::calculateFinalCharges(
     // Claude Generated (February 2026): Proper amideH detection for Phase 2 chi correction
     // Reference: Fortran gfnff_ini.f90:717 uses amideH() function from gfnff_ini2.f90:1575
     // Requires: H with 1 neighbor, that neighbor is amide N, amide N has exactly 1 sp3 C
-    std::vector<bool> is_amide_h = use_corrections ? detectAmideHydrogens(atoms, hybridization, is_amide, topology) : std::vector<bool>(natoms, false);
+    // Claude Generated (Sep 2026, S30L-CI system 17): amideH()'s internal amide() call uses
+    // piadr2 (true pi membership), NOT the piadr index-cutoff `is_amide` above - reusing
+    // `is_amide` here silently dropped the -0.02 amide-H chi correction whenever a
+    // molecule's pi atoms weren't exactly atoms 1..npiall (e.g. a plain cyclic bis-amide
+    // with an sp3 CH2 interleaved between the two amide units), overpolarizing the amide N
+    // and its H by ~0.03-0.04 e and costing ~5 kcal/mol in the Coulomb term. See
+    // detectAmideNitrogens()'s exact_pi_membership parameter for the full explanation.
+    std::vector<bool> is_amide_for_h = use_corrections
+        ? detectAmideNitrogens(atoms, hybridization, is_pi_atom, topology, cn, /*exact_pi_membership=*/true)
+        : std::vector<bool>(natoms, false);
+    std::vector<bool> is_amide_h = use_corrections ? detectAmideHydrogens(atoms, hybridization, is_amide_for_h, topology) : std::vector<bool>(natoms, false);
 
     Vector dgam = use_corrections ? calculateDgam(atoms, topology_charges, hybridization, is_pi_atom, is_amide) : Vector::Zero(natoms);
 
@@ -4461,7 +4471,9 @@ std::vector<bool> EEQSolver::detectAmideHydrogensFull(
     const std::optional<TopologyInput>& topology) const
 {
     auto is_pi = detectPiSystem(atoms, hybridization, topology);
-    auto is_amide = detectAmideNitrogens(atoms, hybridization, is_pi, topology, cn);
+    // exact_pi_membership=true: matches amideH()'s own internal amide() call in Fortran
+    // (piadr2, not piadr) - see detectAmideNitrogens()'s doc comment.
+    auto is_amide = detectAmideNitrogens(atoms, hybridization, is_pi, topology, cn, /*exact_pi_membership=*/true);
     return detectAmideHydrogens(atoms, hybridization, is_amide, topology);
 }
 
@@ -4564,7 +4576,8 @@ std::vector<bool> EEQSolver::detectAmideNitrogens(
     const std::vector<int>& hybridization,
     const std::vector<bool>& is_pi_atom,
     const std::optional<TopologyInput>& topology,
-    const Vector& cn) const
+    const Vector& cn,
+    bool exact_pi_membership) const
 {
     const int natoms = atoms.size();
     std::vector<bool> is_amide(natoms, false);
@@ -4575,16 +4588,36 @@ std::vector<bool> EEQSolver::detectAmideNitrogens(
     // Fortran amide() (gfnff_ini2.f90:1553) receives piadr (NOT piadr2) as the pi array.
     // piadr(i)!=0 is equivalent to i_fortran <= npiall, i.e. i_cpp < npiall.
     // This means the "pi check" in amide() tests atom INDEX, not actual pi membership.
+    //
+    // Claude Generated (Sep 2026, S30L-CI system 17): Fortran actually calls amide() with
+    // TWO different pi arrays depending on the caller, and they disagree whenever a
+    // molecule's pi atoms are not exactly atoms 1..npiall by original numbering (true for
+    // any molecule where a non-pi atom - e.g. an sp3 CH2 - is interleaved with pi atoms,
+    // as in a simple cyclic bis-amide):
+    //   - gfnff_ini.f90:651 (the ff=-0.16 dgam branch) passes `piadr`  -> the buggy
+    //     index-cutoff behaviour above. GFN-FF's parameters were fit against this
+    //     quirk, so it must be preserved exactly for that caller.
+    //   - gfnff_ini2.f90:1499's amideH(), called from gfnff_ini.f90:673 for the
+    //     "chieeq(H) -= 0.02" Phase-2 chi correction, passes `piadr2` instead - the
+    //     CORRECT atom-indexed pi-membership array (piadr2(i)!=0 iff atom i truly is a
+    //     pi atom). That call must use real pi membership, not the index cutoff.
+    // Both call this same nc/no counting logic, so `exact_pi_membership` switches between
+    // them: false (default) reproduces the piadr bug for the dgam ff branch; true gives
+    // the piadr2-correct answer for the amideH()-derived hydrogen chi correction.
     int npiall = 0;
     for (int k = 0; k < natoms; ++k) {
         if (is_pi_atom[k]) npiall++;
     }
 
+    auto is_pi = [&](int idx) {
+        return exact_pi_membership ? is_pi_atom[idx] : (idx < npiall);
+    };
+
     for (int i = 0; i < natoms; ++i) {
         // FIX (Mar 7, 2026): Match Fortran amide() from gfnff_ini2.f90:1553-1580
         // Updated (Mar 19, 2026): Use Fortran-compatible piadr index check
         // Fortran: if (pi(a) .eq. 0 ...) → piadr(a)==0 → a > npiall → 0-based: i >= npiall
-        if (atoms[i] != 7 || i >= npiall) continue;
+        if (atoms[i] != 7 || !is_pi(i)) continue;
         if (i < static_cast<int>(hybridization.size()) && hybridization[i] != 3) continue;
 
         // Count pi-C neighbors (Fortran: nc)
@@ -4592,7 +4625,7 @@ std::vector<bool> EEQSolver::detectAmideNitrogens(
         int nc = 0;
         int ic = -1;  // The single pi-C neighbor (if nc==1)
         for (int neighbor : topology->neighbor_lists[i]) {
-            if (atoms[neighbor] == 6 && neighbor < npiall) {
+            if (atoms[neighbor] == 6 && is_pi(neighbor)) {
                 nc++;
                 ic = neighbor;
             }
@@ -4603,7 +4636,7 @@ std::vector<bool> EEQSolver::detectAmideNitrogens(
         // Fortran: at(j)==8 .and. pi(j).ne.0 .and. nb(20,j)==1 → piadr(j)!=0 → j < npiall
         int no = 0;
         for (int n2 : topology->neighbor_lists[ic]) {
-            if (atoms[n2] == 8 && n2 < npiall &&
+            if (atoms[n2] == 8 && is_pi(n2) &&
                 static_cast<int>(topology->neighbor_lists[n2].size()) == 1) {
                 no++;
             }

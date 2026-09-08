@@ -604,6 +604,9 @@ private:
      * @param is_pi_atom Pi-system membership flags
      * @param topology Topology information
      * @param cn Coordination numbers
+     * @param exact_pi_membership Use true is_pi_atom[] membership for the
+     *        neighbour pi-checks instead of the Fortran piadr index-cutoff
+     *        replication (see .cpp for why both variants must exist)
      * @return Vector of amide nitrogen flags
      */
     std::vector<bool> detectAmideNitrogens(
@@ -611,7 +614,8 @@ private:
         const std::vector<int>& hybridization,
         const std::vector<bool>& is_pi_atom,
         const std::optional<TopologyInput>& topology,
-        const Vector& cn
+        const Vector& cn,
+        bool exact_pi_membership = false
     ) const;
 
     /**
