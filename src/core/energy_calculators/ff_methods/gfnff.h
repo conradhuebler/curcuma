@@ -1618,10 +1618,12 @@ private:
      * @brief Detect pi-systems and conjugated fragments (PHASE 2 OPTIMIZED)
      * @param hyb Hybridization states
      * @param adjacency_list Pre-computed bond connectivity (eliminates O(N²) loop)
+     * @param nb_full Full (unfiltered) neighbour list, for the N/S pi-veto below
      * @return Vector mapping atoms to pi-fragment IDs (0 = no pi-system)
      */
     std::vector<int> detectPiSystems(const std::vector<int>& hyb,
-                                     const std::vector<std::vector<int>>& adjacency_list) const;
+                                     const std::vector<std::vector<int>>& adjacency_list,
+                                     const std::vector<std::vector<int>>& nb_full) const;
 
     /**
      * @brief Find smallest ring size for each atom and enumerate all rings

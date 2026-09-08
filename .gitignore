@@ -107,6 +107,7 @@ test_cases/MOR41-testset/_run/
 # hand-curated driver/reference files (reactions.dat, reference_s30l, ...).
 test_cases/MOR41-testset/*/
 test_cases/s30l_test_set/*/
+test_cases/s30lci_test_set/*/
 test_cases/GMTKN55-testset/
 test_cases/**/PROVENANCE.txt
 

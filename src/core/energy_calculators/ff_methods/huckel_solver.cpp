@@ -107,6 +107,13 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
 
         int npi = static_cast<int>(pi_atoms.size());
 
+        if (std::getenv("CURCUMA_HUCKELDUMP")) {
+            for (int k : pi_atoms) {
+                fmt::print("HUCKELATOM pis={} atom={}(Z={}) hyb={} tag={} nel={}\n",
+                           pis, k + 1, atoms[k], hybridization[k], tags[k], pi_electrons[k]);
+            }
+        }
+
         // Claude Generated (Jul 2026, F3): subtract the pi-system charge (ipis) from
         // the electron count. Port from xtb gfnff_ini.f90:874 (nelpi = nelpi - ipis(pis)).
         // ipis is the charge localised on this pi-system (computed in GFNFF via the

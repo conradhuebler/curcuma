@@ -1111,6 +1111,10 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
     } else if (CurcumaLogger::get_verbosity() >= 4) {
         CurcumaLogger::info(fmt::format("GFNFF: Using cached bond list ({} bonds)", m_cached_bond_list->size()));
     }
+    if (std::getenv("CURCUMA_BONDDUMP")) {
+        static int call_no = 0;
+        fmt::print("GETCACHEDBONDLIST call#{} -> {} bonds\n", ++call_no, m_cached_bond_list->size());
+    }
     return *m_cached_bond_list;
 }
 
@@ -6299,7 +6303,8 @@ std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int
 }
 
 std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb,
-                                         const std::vector<std::vector<int>>& adjacency_list) const
+                                         const std::vector<std::vector<int>>& adjacency_list,
+                                         const std::vector<std::vector<int>>& nb_full) const
 {
     // Phase 2.2: Pi-system detection (conjugated fragments)
     // PHASE 2 OPTIMIZED (Feb 7, 2026): Use pre-computed adjacency_list (eliminates O(N²) distance calculations)
@@ -6323,6 +6328,24 @@ std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb,
     std::vector<bool> is_pi_candidate(m_atomcount, false);
     for (int i = 0; i < m_atomcount; ++i) {
         if (!hoffdiag_nonzero(m_atoms[i])) continue;
+
+        // Claude Generated (Sep 2026, S30L-CI system 29): unconditional pi-atom veto,
+        // ported verbatim from gfnff_ini.f90:918-919 (the "NR3-X is not a pi" / "SO3 is
+        // not a pi" lines) — was entirely missing here. A nitrogen with more than 3
+        // total neighbours (e.g. a pyrrole/imine N additionally coordinated by a metal
+        // or alkali counterion) has its lone pair tied up in that 4th sigma/ionic bond,
+        // so it must NOT enter the Hückel pi-system as a lone-pair donor. Without this,
+        // curcuma pulled such an N into a 5-atom/6-electron ring Hückel system where the
+        // Fortran reference (pprcht/gfnff) keeps only the 4 ring carbons (4-electron
+        // system, N excluded) — a qualitatively different, wrongly delocalised pi-bond-
+        // order pattern worth ~45 kcal/mol in the bond term for that one ring (S30L-CI
+        // system 29 AB, a calix[4]pyrrole-type host binding an anion with an explicit
+        // Na+ counterion sitting on the pyrrole N). Uses topo%nb(20,i) i.e. the FULL
+        // (unfiltered) neighbour count, matching Fortran exactly — not the eta-aware
+        // adjacency_list mixture, which would under-count an eta-coordinated atom.
+        if (m_atoms[i] == 7 && static_cast<int>(nb_full[i].size()) > 3) continue;   // NR3-X
+        if (m_atoms[i] == 16 && hyb[i] == 5) continue;                              // SO3
+
         // sp/sp2 atoms are candidates; N/O/S/F/Cl/B with hyb=0 or 3 are "picon" candidates
         // (lone-pair / fluorine conjugation) that join if bonded to an sp/sp2 atom (Step 2).
         is_pi_candidate[i] = true;
@@ -7607,6 +7630,18 @@ std::vector<Bond> GFNFF::generateBondsNative(const TopologyInfo& topo_info) cons
             {
                 auto bond_params = getGFNFFBondParameters(i, j, m_atoms[i], m_atoms[j], distance, topo_info);
 
+                if (std::getenv("CURCUMA_BONDDUMP")) {
+                    double cn_i = (i < topo_info.coordination_numbers.size()) ? topo_info.coordination_numbers[i] : -1.0;
+                    double cn_j = (j < topo_info.coordination_numbers.size()) ? topo_info.coordination_numbers[j] : -1.0;
+                    double r0_dyn = (bond_params.r0_base_i + bond_params.cnfak_i * cn_i
+                                    + bond_params.r0_base_j + bond_params.cnfak_j * cn_j
+                                    + bond_params.rabshift) * bond_params.ff;
+                    fmt::print("BONDPARAM {}({})-{}({}) R={:.4f} r0_dyn={:.4f} fc={:.6f} alpha={:.4f} fqq={:.4f} ff={:.4f} rabshift={:.4f} cn_i={:.4f} cn_j={:.4f}\n",
+                               i+1, m_atoms[i], j+1, m_atoms[j], distance, r0_dyn,
+                               bond_params.force_constant, bond_params.alpha, bond_params.fqq,
+                               bond_params.ff, bond_params.rabshift, cn_i, cn_j);
+                }
+
                 Bond b;
                 b.type = 3;
                 b.i = i;
@@ -8704,6 +8739,14 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     }
     const auto& bond_list = getCachedBondList();
 
+    if (std::getenv("CURCUMA_BONDDUMP")) {
+        for (const auto& [ai, aj] : bond_list) {
+            fmt::print("BOND {:5d}({}) - {:5d}({})  r={:.3f} Bohr\n",
+                       ai + 1, m_atoms[ai], aj + 1, m_atoms[aj],
+                       (m_geometry_bohr.row(ai) - m_geometry_bohr.row(aj)).norm());
+        }
+    }
+
     // Fortran four-list neighbour construction (gfnff_ini2.f90:128-130, 197-202).
     // Fills nb_full / nb_hc / nb_nometal / metallic_character / itag and returns the
     // eta-aware mixture nbdum, which becomes the working adjacency exactly as Fortran
@@ -8766,7 +8809,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // NOTE: Removed std::async parallelization (May 2026) to prevent nested thread
     // creation when GFN-FF is called from an external thread pool (e.g. ConfSearch).
     // The overhead is negligible for parameter generation; thread safety is critical.
-    topo_info.pi_fragments = detectPiSystems(topo_info.hybridization, topo_info.adjacency_list);
+    topo_info.pi_fragments = detectPiSystems(topo_info.hybridization, topo_info.adjacency_list, topo_info.nb_full);
     // neighbor_lists is an alias of adjacency_list (== Fortran topo%nb after gfnff_ini2.f90:335).
     // itag is already set by buildNeighborListSet (eta) and determineHybridizationFortran (carbene/NO2).
     topo_info.neighbor_lists = topo_info.adjacency_list;
