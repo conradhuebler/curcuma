@@ -13,12 +13,22 @@ Claude Generated - December 25, 2025
 """
 
 import os
+import shutil
 import sys
 import subprocess
 import argparse
 import re
 from pathlib import Path
 from typing import Dict, Optional
+
+
+def find_xtb():
+    for cand in (os.environ.get("XTB_BIN"), shutil.which("xtb"),
+                 os.path.expanduser("~/Downloads/xtb-dist/bin/xtb"),
+                 os.path.expanduser("~/Downloads/xtb-6.6.1/bin/xtb")):
+        if cand and os.path.exists(cand):
+            return cand
+    return "/opt/xtb/bin/xtb"
 
 class Color:
     """ANSI color codes for terminal output"""
@@ -214,8 +224,9 @@ def main():
     )
     parser.add_argument(
         '--xtb-path',
-        default='/home/conrad/Downloads/xtb-6.6.1/bin/xtb',
-        help='Path to XTB executable (default: /home/conrad/Downloads/xtb-6.6.1/bin/xtb)'
+        default=find_xtb(),
+        help='Path to XTB executable (default: $XTB_BIN, else `which xtb`, else a few '
+             'common install paths)'
     )
     parser.add_argument(
         '--output-cpp',
