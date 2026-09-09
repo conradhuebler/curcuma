@@ -8805,6 +8805,9 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
      * Claude Generated (Jul 2026).
      */
     m_bond_qa.clear();
+    m_frag_carry_nfrag = 0;
+    m_frag_carry_list.clear();
+    m_frag_carry_qfrag.clear();
     TopologyInfo topo = calculateTopologyInfoOnce();
 
     if (topo.topology_charges.size() != m_atomcount) return topo;
@@ -8822,7 +8825,17 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("GFN-FF q-loop: charge-shrunk radii changed the bond list, running pass 2");
     }
-    return calculateTopologyInfoOnce();
+    // Carry pass-1's fragmentation into pass 2 (reference gate `if (topo%nfrag <= 1)`).
+    if (topo.nfrag > 1) {
+        m_frag_carry_nfrag = topo.nfrag;
+        m_frag_carry_list = topo.fraglist;
+        m_frag_carry_qfrag = topo.qfrag;
+    }
+    TopologyInfo topo2 = calculateTopologyInfoOnce();
+    m_frag_carry_nfrag = 0;
+    m_frag_carry_list.clear();
+    m_frag_carry_qfrag.clear();
+    return topo2;
 }
 
 GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
@@ -8917,12 +8930,31 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // Phase 10: Detect molecular fragments for constrained EEQ (Claude Generated - Jan 31, 2026)
     // Fortran fragments on the FULL list (gfnff_ini.f90:468 mrecgff(...,nbf,...)), so an
     // eta ligand is never split off into its own fragment (which would corrupt qfrag).
-    auto frag_res = detectMolecularFragments(topo_info.nb_full);
-    topo_info.nfrag = frag_res.first;
-    topo_info.fraglist = frag_res.second;
-    topo_info.qfrag.assign(topo_info.nfrag, 0.0);
-    if (topo_info.nfrag == 1) {
-        topo_info.qfrag[0] = static_cast<double>(m_charge);
+    // CORRECTED (Sep 2026): the reference gates its whole fragment block on
+    // `if (topo%nfrag <= 1)` (gfnff_ini.f90:467), so the SECOND q-loop pass keeps the
+    // fragmentation and qfrag established in pass 1 - even when the charge-shrunk radii have
+    // meanwhile merged two fragments into one. Curcuma re-detected them every pass. For a
+    // charged species where pass 2 does create the extra bond (GMTKN55 G21EA/EA_25, the
+    // dichlorine radical anion Cl2-, whose 2.73 A contact crosses the threshold once the
+    // anionic Cl radius grows) that silently dropped nfrag 2 -> 1, and with it the per-
+    // fragment EEQ constraints: charges came out (-0.5, -0.5) instead of (-1, 0), and every
+    // charge-dependent quantity downstream (alpeeq, dgam, the Coulomb self-energy) followed.
+    // 100 kcal/mol on that structure; the same mechanism drove the AHB21/BH76/G21EA/SIE4x4
+    // family. See the rev-gfnff TODO for the physics side of this - the reference is not
+    // right either, it is simply self-consistent.
+    if (m_frag_carry_nfrag > 1
+        && static_cast<int>(m_frag_carry_list.size()) == m_atomcount) {
+        topo_info.nfrag = m_frag_carry_nfrag;
+        topo_info.fraglist = m_frag_carry_list;
+        topo_info.qfrag = m_frag_carry_qfrag;
+    } else {
+        auto frag_res = detectMolecularFragments(topo_info.nb_full);
+        topo_info.nfrag = frag_res.first;
+        topo_info.fraglist = frag_res.second;
+        topo_info.qfrag.assign(topo_info.nfrag, 0.0);
+        if (topo_info.nfrag == 1) {
+            topo_info.qfrag[0] = static_cast<double>(m_charge);
+        }
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {

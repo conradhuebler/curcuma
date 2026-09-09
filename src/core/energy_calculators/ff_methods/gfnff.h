@@ -2538,6 +2538,13 @@ private:
     /// Fortran's pass 1 (gfnff_ini.f90:258 sets qa=0 before the q-loop). Filled by the
     /// second q-loop pass. Claude Generated (Jul 2026).
     mutable std::vector<double> m_bond_qa;
+    // q-loop pass-2 carry-over of the fragmentation. The reference gates its whole fragment
+    // block on `if (topo%nfrag <= 1)` (gfnff_ini.f90:467), so the second pass KEEPS the
+    // fragmentation and qfrag found in pass 1 even when the charge-shrunk radii have since
+    // merged two fragments into one. Empty nfrag (0) means "detect normally".
+    mutable int m_frag_carry_nfrag = 0;
+    mutable std::vector<int> m_frag_carry_list;
+    mutable std::vector<double> m_frag_carry_qfrag;
     CNDerivStore m_last_dcn; ///< CN derivatives (gradient only). Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
 
     // WP-FF-DistMatrix-Sharing (May 2026): shared packed-triangular distance arrays.
