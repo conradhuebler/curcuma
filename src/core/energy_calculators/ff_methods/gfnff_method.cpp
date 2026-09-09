@@ -8631,6 +8631,25 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
             }), nbrs.end());
         }
         eta_free_dist = calculateTopologyDistances(eta_free_adj);
+        // A DIRECT bond is distance 1 no matter how the eta list stores it. The reference
+        // builds topo%bpair in nbondmat (gfnff_ini2.f90:1303-1309) by first walking the
+        // neighbour lists and setting `pair(lin(k,i)) = 1` for every listed neighbour --
+        // so a pair that EITHER atom lists as a neighbour is bonded, and the asymmetry of
+        // the eta storage cannot turn it into anything else; only the 2- and 3-bond
+        // expansion that follows sees the asymmetric lists. Claude Generated (Sep 2026,
+        // GMTKN55 ALK8/li_ch2n): dropping the metal<->eta edges in BOTH directions made
+        // the bonded Li-C pair come out THREE bonds apart, i.e. a spurious 1,4-pair. The
+        // BATM triple loop then paired it with the neighbours of the metal, one of which
+        // IS the other member of the pair -- a triple with two identical atoms, r_jk = 0,
+        // and the bonded-ATM term went NaN for the whole molecule. The reference cannot
+        // produce that because its bpair and its neighbour list are the same graph.
+        for (const auto& [a, b] : getCachedBondList()) {
+            if (a >= 0 && a < static_cast<int>(eta_free_dist.size())
+                && b >= 0 && b < static_cast<int>(eta_free_dist[a].size())) {
+                eta_free_dist[a][b] = 1;
+                eta_free_dist[b][a] = 1;
+            }
+        }
     }
     const std::vector<std::vector<int>>& xb_bpair = has_eta ? eta_free_dist : topo_info.bpair;
 
@@ -9996,6 +10015,25 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
             }), nbrs.end());
         }
         eta_free_dist = calculateTopologyDistances(eta_free_adj);
+        // A DIRECT bond is distance 1 no matter how the eta list stores it. The reference
+        // builds topo%bpair in nbondmat (gfnff_ini2.f90:1303-1309) by first walking the
+        // neighbour lists and setting `pair(lin(k,i)) = 1` for every listed neighbour --
+        // so a pair that EITHER atom lists as a neighbour is bonded, and the asymmetry of
+        // the eta storage cannot turn it into anything else; only the 2- and 3-bond
+        // expansion that follows sees the asymmetric lists. Claude Generated (Sep 2026,
+        // GMTKN55 ALK8/li_ch2n): dropping the metal<->eta edges in BOTH directions made
+        // the bonded Li-C pair come out THREE bonds apart, i.e. a spurious 1,4-pair. The
+        // BATM triple loop then paired it with the neighbours of the metal, one of which
+        // IS the other member of the pair -- a triple with two identical atoms, r_jk = 0,
+        // and the bonded-ATM term went NaN for the whole molecule. The reference cannot
+        // produce that because its bpair and its neighbour list are the same graph.
+        for (const auto& [a, b] : getCachedBondList()) {
+            if (a >= 0 && a < static_cast<int>(eta_free_dist.size())
+                && b >= 0 && b < static_cast<int>(eta_free_dist[a].size())) {
+                eta_free_dist[a][b] = 1;
+                eta_free_dist[b][a] = 1;
+            }
+        }
     }
     const std::vector<std::vector<int>>& batm_bpair = has_eta ? eta_free_dist : topo_info.bpair;
 
