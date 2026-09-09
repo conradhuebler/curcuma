@@ -290,6 +290,26 @@ returns is not accurate — the PX13 barriers are 3-18x too high, because GFN-FF
 describe a transition state where the bonding topology changes. Making those numbers right
 is a parametrisation question and belongs to the react-gfnff work, not here.
 
+**When does it actually fire?** The trigger is a BOND whose two topology charges multiply
+to `qa_i * qa_j < -0.675`. `CURCUMA_BONDDUMP=1` now prints `qaprod=` per bond, so the
+headroom of any system is measurable. Scanned over the reference sets:
+
+| set | n | largest negative qa product | over 0.675 |
+|---|---:|---:|---:|
+| S30L-CI (host-guest, multi-fragment, explicit counterions) | 86 | 0.140 | 0 |
+| ALKBDE10 (bonded ion pairs: LiF, NaCl, KF, CaO, ...) | 10 | 0.157 | 0 |
+| IL16 / AHB21 / CHB6 / DIPCS10 / SIE4x4 / G21EA / PX13 | 176 | 1.014 | 2 |
+
+So it is NOT "ionic system" or "multi-fragment" that does it — GFN-FF's topology charges
+stay modest there (LiF reaches only qa = +-0.32). It takes a strongly polar bond in a
+SYMMETRIC BRIDGING arrangement: the (HF)n proton-transfer rings put qa = +-1.007 on every
+atom because each hydrogen sits midway between two fluorines. `hf_5_ts` (0.578) and
+`AHB21/3` (0.544) are the closest non-overflowing cases, at about 80 % of the threshold.
+
+That geometry — a hydrogen or an ion halfway between two acceptors — is exactly what a
+**reactive** run walks through, which is why this guard matters more for react-gfnff than
+for any static benchmark.
+
 **A harness bug found on the way.** `xtb` prints `TOTAL ENERGY NaN Eh` for these two
 structures but still prints finite values for the individual terms above it, and
 `scripts/gmtkn55_compare.py`'s last-resort parser scanned every line containing "energy"

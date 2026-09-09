@@ -7918,10 +7918,17 @@ std::vector<Bond> GFNFF::generateBondsNative(const TopologyInfo& topo_info) cons
                     double r0_dyn = (bond_params.r0_base_i + bond_params.cnfak_i * cn_i
                                     + bond_params.r0_base_j + bond_params.cnfak_j * cn_j
                                     + bond_params.rabshift) * bond_params.ff;
-                    fmt::print("BONDPARAM {}({})-{}({}) R={:.4f} r0_dyn={:.4f} fc={:.6f} alpha={:.4f} fqq={:.4f} ff={:.4f} rabshift={:.4f} cn_i={:.4f} cn_j={:.4f}\n",
+                    // qaprod is the argument of the fqq logistic. The reference's naive
+                    // exp(t)/(1+exp(t)) overflows to NaN once |qaprod| > 0.675 (t past
+                    // 709); curcuma clamps instead, see the fqq block in
+                    // getGFNFFBondParameters and docs/REV_GFNFF_TODO.md #10. Printing it
+                    // here makes the headroom of a given system measurable.
+                    double qa_i = (i < topo_info.topology_charges.size()) ? topo_info.topology_charges[i] : 0.0;
+                    double qa_j = (j < topo_info.topology_charges.size()) ? topo_info.topology_charges[j] : 0.0;
+                    fmt::print("BONDPARAM {}({})-{}({}) R={:.4f} r0_dyn={:.4f} fc={:.6f} alpha={:.4f} fqq={:.4f} ff={:.4f} rabshift={:.4f} cn_i={:.4f} cn_j={:.4f} qaprod={:.4f}\n",
                                i+1, m_atoms[i], j+1, m_atoms[j], distance, r0_dyn,
                                bond_params.force_constant, bond_params.alpha, bond_params.fqq,
-                               bond_params.ff, bond_params.rabshift, cn_i, cn_j);
+                               bond_params.ff, bond_params.rabshift, cn_i, cn_j, qa_i * qa_j);
                 }
 
                 Bond b;
