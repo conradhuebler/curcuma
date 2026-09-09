@@ -9957,8 +9957,28 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         // survived.
         int hyb_i = topo_info.hybridization[atom_i];
         int hyb_j = topo_info.hybridization[atom_j];
-        bool is_metal_i = topo_info.is_metal[atom_i];
-        bool is_metal_j = topo_info.is_metal[atom_j];
+        // btyp = 5 is gated on imetal, not on param%metal(Z) raw (gfnff_ini.f90:1120),
+        // and imetal demotes a low-coordinate element of group > 3 to a non-metal
+        // (:273-274, "Sn, Pb, Bi, with small CN are better described as non-metals").
+        // Claude Generated (Sep 2026, GMTKN55 HEAVYSB11/pb2me6): without the demotion the
+        // Pb-Pb bond came out btyp = 5, which switches off every rule gated on btyp < 5 —
+        // most visibly the extra sp3-sp3 n=1 torsion (gfnff_ini.f90:1810-1830). The
+        // reference generates 72 torsions for that molecule, curcuma 63, and the missing
+        // nine carry a NEGATIVE barrier (-0.031 each), so the torsion term came out
+        // +0.0000235 instead of -0.000146 Eh. Same raw-metal-test class as the fqq gate
+        // corrected in Known Issue #22(a).
+        auto imetal_nonzero = [&](int a) -> bool {
+            const int z = m_atoms[a];
+            if (z < 1 || z > 86) return false;
+            if (GFNFFParameters::metal_type[z - 1] == 0) return false;
+            const int grp = GFNFFParameters::periodic_group[z - 1];
+            if (grp > 3 && a < static_cast<int>(topo_info.adjacency_list.size())
+                && static_cast<int>(topo_info.adjacency_list[a].size()) <= 4)
+                return false;
+            return true;
+        };
+        bool is_metal_i = imetal_nonzero(atom_i);
+        bool is_metal_j = imetal_nonzero(atom_j);
 
         topo_info.bond_types[bond_idx] = classifyBondType(atom_i, atom_j,
                                                             hyb_i, hyb_j,

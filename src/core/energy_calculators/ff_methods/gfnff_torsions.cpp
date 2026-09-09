@@ -554,46 +554,25 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
         k_is_pi = t_info.pi_atoms_final[k_atom_idx] > 0;
     }
 
-    // Pi-conjugated central bond (n=2, most important for aromatic accurate energies)
-    if (j_is_pi && k_is_pi) {
-        params.periodicity = 2;
-        params.phase_shift = M_PI;
-    }
-    // sp³-sp³: Threefold (gfnff_ini.f90:1841)
-    else if (hyb_j == 3 && hyb_k == 3) {
-        params.periodicity = 3;     // nrot = 3
-        params.phase_shift = M_PI;  // phi0 = 180° (keeps acyclic default)
-    }
-    // sp²-sp²: Twofold ONLY for a real pi central bond (gfnff_ini.f90:1732 `btyp(m)==2`).
-    // CRITICAL (Jul 24, 2026): the Fortran nrot=2 is keyed on the BOND type btyp==2, not
-    // on both atoms being sp2. A metal M-C bond with a locally-sp2 carbon (hyb=2) is
-    // btyp=5 (metal), not 2, so it keeps nrot=1 — the Ti-C4 torsion of ED40a/ED14 was
-    // wrongly getting nrot=2. Gate on bond_type==2 (btyp of the central bond).
-    else if (hyb_j == 2 && hyb_k == 2 && bond_type == 2) {
-        params.periodicity = 2;     // nrot = 2
-        params.phase_shift = M_PI;  // phi0 = 180° (planar trans)
-    }
-    // Pi-sp³ mixed (gfnff_ini.f90:1733-1744). CRITICAL (Jul 24, 2026): the Fortran
-    // nrot=3 for sp2-sp3 fires ONLY via the pi-sp3 path, which requires the sp2 atom
-    // to be in a pi system (piadr>0). A NON-pi sp2 atom — e.g. a transition metal with
-    // 3 neighbours (hyb=2 from gfnff_ini2.f90:241, but piadr=0) — keeps the acyclic
-    // default nrot=1 (and f1=torsf(1), not the pi-sp3 0.5). Without the pi gate, the
-    // metal-C torsions of ED40a/PR41/ED14 got nrot=3 AND f1=0.5 (half FC), ~0.4-0.56
-    // kcal too low in the torsion term. Gate on the sp2 atom being pi.
-    else if ((hyb_j == 2 && hyb_k == 3 && j_is_pi) || (hyb_j == 3 && hyb_k == 2 && k_is_pi)) {
-        params.periodicity = 3;     // nrot = 3
-        params.phase_shift = M_PI;  // phi0 = 180°
-    }
-    // sp-X: Linear (gfnff_ini.f90: implicit default)
-    else if (hyb_j == 1 || hyb_k == 1) {
-        params.periodicity = 1;
-        params.phase_shift = M_PI;
-    }
-    // Fallback: acyclic default
-    else {
-        params.periodicity = 1;
-        params.phase_shift = M_PI;
-    }
+    // ACYCLIC periodicity, gfnff_ini.f90:1727-1748. These are INDEPENDENT ifs in the
+    // reference and later ones OVERRIDE earlier ones; curcuma had them as an else-if
+    // chain with two extra conditions. Claude Generated (Sep 2026, GMTKN55
+    // YBDE18/nf3-ch2):
+    //   * the leading "both atoms pi -> nrot = 2" has no counterpart at all — the
+    //     reference keys nrot = 2 on the BOND type, not on the two atoms;
+    //   * `btyp == 2` was additionally gated on both centres being sp2, which the
+    //     reference does not require. An sp3 nitrogen on an sp2 partner is btyp = 2
+    //     through the N-sp2 rule (:1108-1109), so the F3N-CH2 ylide's six torsions must
+    //     get nrot = 2; curcuma left them at 1, worth 0.11 kcal/mol.
+    // The nrot = 2 gate on bond_type is what keeps a metal M-C bond (btyp = 5) at
+    // nrot = 1, which is why the Jul 2026 fix introduced it; that part is preserved.
+    // The pi-sp3 rule still requires the sp2 partner to be a pi atom (piadr > 0).
+    params.periodicity = 1;
+    params.phase_shift = M_PI;      // phi0 = 180 deg (trans) throughout the acyclic case
+    if (hyb_j == 3 && hyb_k == 3) params.periodicity = 3;               // Me case
+    if (bond_type == 2) params.periodicity = 2;                          // pi central bond
+    if ((j_is_pi && !k_is_pi && hyb_k == 3)
+        || (k_is_pi && !j_is_pi && hyb_j == 3)) params.periodicity = 3;  // pi-sp3
 
     // ==========================================================================
     // STEP 2: Calculate force constant using GFN-FF formula (CORRECTED Dec 2025)
@@ -760,8 +739,16 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     if (eff_hyb_j == 3 && eff_hyb_k == 3) {
         // Ethane-like: keep f1 = 1.0
         // Special cases for heteroatoms (simplified from lines 1857-1879):
-        int group_j = (z_j == 7 || z_j == 15) ? 5 : (z_j == 8 || z_j == 16) ? 6 : 0;
-        int group_k = (z_k == 7 || z_k == 15) ? 5 : (z_k == 8 || z_k == 16) ? 6 : 0;
+        // param%group(Z), not a hand-written map. Claude Generated (Sep 2026, GMTKN55
+        // HEAVYSB11): the old expression recognised only N/P as group 5 and O/S as group
+        // 6, so As, Sb, Bi, Se and Te fell through as group 0 and the SP3-specials never
+        // fired for them. Sb2Me4's Sb-Sb torsion kept the default instead of nrot = 3,
+        // phi0 = 60, f1 = 3.0 — 0.25 kcal/mol, and the same for As2Me4, H2Se2, Te2Me2.
+        auto group_of_z = [](int z) {
+            return (z >= 1 && z <= 86) ? GFNFFParameters::periodic_group[z - 1] : 0;
+        };
+        int group_j = group_of_z(z_j);
+        int group_k = group_of_z(z_k);
 
         if (group_j == 6 && group_k == 6) {
             // O-O, S-S: higher barrier, nrot=2, phi0=90° (gfnff_ini.f90:1873-1879)
@@ -1221,8 +1208,13 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     // Claude Generated (Jul 2026). The Fortran pi f2 f1-scaling (0.55) that follows this
     // block is applied once, just before fctot.
     if (hyb_j == 3 && hyb_k == 3) {
-        int g_j = (z_j == 7 || z_j == 15) ? 5 : (z_j == 8 || z_j == 16) ? 6 : 0;
-        int g_k = (z_k == 7 || z_k == 15) ? 5 : (z_k == 8 || z_k == 16) ? 6 : 0;
+        // param%group(Z) — see the note at the earlier group block; As/Sb/Bi are group 5
+        // and Se/Te group 6, which the old hand-written map missed entirely.
+        auto group_of_z2 = [](int z) {
+            return (z >= 1 && z <= 86) ? GFNFFParameters::periodic_group[z - 1] : 0;
+        };
+        int g_j = group_of_z2(z_j);
+        int g_k = group_of_z2(z_k);
         if (g_j == 5 && g_k == 5) {                                     // N-N, P-P, N-P
             f1 = 3.0;
             params.periodicity = 3;
