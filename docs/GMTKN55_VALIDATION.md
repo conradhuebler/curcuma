@@ -16,7 +16,7 @@ machine).
 |--------|-----------:|----------------------:|----:|-----:|----:|
 | gfn2   | 2140 | 320 | 0.000 | 0.001 | 0.017 |
 | gfn1   | 2142 | 320 | 0.047 | 0.549 | 11.93 |
-| gfnff  | 2458 | 0   | 0.416 |  3.77 | 105.5 |
+| gfnff  | 2458 | 0   | 0.268 |  3.20 | 84.5  |
 
 gfn1/gfn2 skip every structure with a nonzero `.UHF` (see "Known limitation" below).
 gfnff has no open-shell term and runs everything.
@@ -39,7 +39,18 @@ the maximum again, 151.5 -> 105.5: `BH76` 4.79 -> 0.080, `SIE4x4` and `CHB6` -> 
 (the q-loop's carbene charge override) reached **0.447**, with `G21EA` 0.653 -> 0.131, and
 Known Issue #19 (the non-reference angle-`fqq` guard) **0.446**, with `BH76` 0.080 -> 0.057.
 Known Issue #20 (the missing hypervalent torsion correction) reached **0.416**, with `ICONF`
-1.78 -> 0.398 and `PArel` 0.95 -> 0.348.
+1.78 -> 0.398 and `PArel` 0.95 -> 0.348. Known Issue #21 - twelve defects found by arbitrating
+EVERY remaining outlier against pprcht - reached **0.268** and moved the set maximum
+105.5 -> 84.5: `BHDIV10` 1.182 -> 0.043, `PX13` 0.633 -> 0.023, `ISOL24` 0.881 -> 0.300,
+`W4-11` 0.716 -> 0.197, `CARBHB12` 0.445 -> 0.000, `HAL59` 0.312 -> 0.000, `MB16-43`
+10.405 -> 7.901.
+
+**Where the residual now sits.** The 14 largest deviations outside `MB16-43` were arbitrated
+one by one against pprcht: 13 of them are pprcht-vs-xtb reference splits (curcuma matches
+pprcht to <0.03 kcal/mol) and one is a small genuine residual, `HEAVY28/pbh4_teh2` at
+-0.39 kcal/mol. Above roughly 0.4 kcal/mol and outside `MB16-43`, what this table measures
+is therefore the divergence between the two GFN-FF implementations, not a curcuma port
+error. Read the gfnff row accordingly.
 
 > **Reading the numbers back**: `scripts/gmtkn55_compare.py` caches every energy in
 > `_run/energies.json` and reuses it unless `--recompute` is given. A re-run after a code

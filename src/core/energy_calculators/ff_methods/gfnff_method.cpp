@@ -3938,12 +3938,16 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
                        || (z2 >= 1 && z2 <= 86 && metal_type[z2 - 1] > 0);
 
     if (!bond_has_metal) {
+        // Fortran gfnff_ini.f90:1143-1149. These are INDEPENDENT `if`s, not a chain:
+        // the first three ASSIGN, the last two accumulate. Claude Generated (Sep 2026):
+        // curcuma had rules 1/2 as an else-if chain and rule 2 as `+=`, so a hypervalent
+        // X-H bond kept hyper_shift where the reference overwrites it with rabshifth.
         // 1. Bond type specific shifts
         if (bbtyp == 4) shift = hyper_shift;
-        else if (z1 == 1 || z2 == 1) shift = gen_rabshifth;
+        if (z1 == 1 || z2 == 1) shift = gen_rabshifth;
 
         // 2. F-F special shift
-        if (z1 == 9 && z2 == 9) shift += 0.22;
+        if (z1 == 9 && z2 == 9) shift = 0.22;
 
         // 3. X-sp3 hybridization correction
         if ((hyb1_value == 3 && hyb2_value == 0) || (hyb1_value == 0 && hyb2_value == 3)) {
@@ -3956,14 +3960,25 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         }
     }
 
+    // Snapshot of the local shift BEFORE the heavy-atom block. Claude Generated
+    // (Sep 2026, GMTKN55 PX13/hf_2_ts): the reference's pi correction
+    // (gfnff_ini.f90:1174) is `shift = gen%hueckelp*(gen%bzref-pibo)` — an ASSIGNMENT
+    // that DISCARDS everything set above — and only the heavy-atom shifts at :1268 are
+    // added after it. curcuma computes the pi shift far below (Step 9) and ADDED it to
+    // the local shift, double-counting whenever a bond had both. Splitting the local
+    // shift from the heavy-atom shift here lets Step 10 reproduce the overwrite exactly.
+    const double shift_pre_pi = shift;
+    double heavy_shift = 0.0;
+
     // 5. Heavy atom shifts (Z > 10) — applies to all bonds incl. metal (Fortran gfnff_ini.f90:1268)
     if (z1 > 10 && z2 > 10) {
-        shift += hshift3;
-        if (z1 > 18) shift += hshift4;
-        if (z2 > 18) shift += hshift4;
-        if (z1 > 36) shift += hshift5;
-        if (z2 > 36) shift += hshift5;
+        heavy_shift += hshift3;
+        if (z1 > 18) heavy_shift += hshift4;
+        if (z2 > 18) heavy_shift += hshift4;
+        if (z1 > 36) heavy_shift += hshift5;
+        if (z2 > 36) heavy_shift += hshift5;
     }
+    shift += heavy_shift;
 
     double rabshift = gen_rabshift + shift;
 
@@ -4241,14 +4256,22 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         // Claude Generated (Feb 21, 2026): Aldehyde detection via ctype logic
         // Reference: Fortran gfnff_ini2.f90:1497-1511
         // ctype(atom) = 1 if: carbon, in pi system, exactly 1 pi-oxygen neighbor
+        //
+        // The pi array is the reference's post-Hückel piadr (`piadr = itmp`,
+        // gfnff_ini.f90:1016) — the bond-parameter loop that calls ctype starts at :1094,
+        // well after that line. Claude Generated (Sep 2026): use pi_atoms_final, falling
+        // back to the pre-Hückel candidate list only if the Hückel never ran.
+        const std::vector<int>& ctype_piadr =
+            (static_cast<int>(topo.pi_atoms_final.size()) == m_atomcount)
+                ? topo.pi_atoms_final : topo.pi_fragments;
         bool is_aldehyde = false;
-        if (heavy_atom == 6 && heavy_idx < static_cast<int>(topo.pi_fragments.size())) {
-            bool carbon_in_pi = (topo.pi_fragments[heavy_idx] > 0);
+        if (heavy_atom == 6 && heavy_idx < static_cast<int>(ctype_piadr.size())) {
+            bool carbon_in_pi = (ctype_piadr[heavy_idx] > 0);
             if (carbon_in_pi && heavy_idx < static_cast<int>(topo.neighbor_lists.size())) {
                 int pi_oxygen_count = 0;
                 for (int nb : topo.neighbor_lists[heavy_idx]) {
-                    if (m_atoms[nb] == 8 && nb < static_cast<int>(topo.pi_fragments.size())
-                        && topo.pi_fragments[nb] > 0) {
+                    if (m_atoms[nb] == 8 && nb < static_cast<int>(ctype_piadr.size())
+                        && ctype_piadr[nb] > 0) {
                         pi_oxygen_count++;
                     }
                 }
@@ -4256,12 +4279,19 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
             }
         }
 
-        if (heavy_atom == 6 && is_3ring) {
-            // 3-ring CH: stronger due to ring strain
-            fxh = 1.05;  // +5%
-        } else if (heavy_atom == 6 && is_aldehyde) {
-            // Aldehyde CH: weaker
-            fxh = 0.95;  // -5%
+        // Fortran gfnff_ini.f90:1150-1157: inside the C-H branch the two rules are
+        // INDEPENDENT `if`s and the aldehyde one comes SECOND, so it overrides the
+        // 3-ring one for a carbon that is both. Claude Generated (Sep 2026, GMTKN55
+        // W4-11/oxirene): curcuma had them as an else-if chain, so oxirene's ring
+        // carbons — a 3-ring AND a C=O-type carbon, since the ring oxygen is a pi atom
+        // — took fxh 1.05 instead of 0.95. That single factor is the ratio 1.10526
+        // between curcuma's C-H force constant (-0.18250) and the reference's
+        // (-0.16512), worth 21.3 kcal/mol in the bond term of a 5-atom molecule.
+        // The B/N/O rules that follow are mutually exclusive with the C branch by
+        // element, so the chain below is faithful.
+        if (heavy_atom == 6 && (is_3ring || is_aldehyde)) {
+            fxh = is_aldehyde ? 0.95   // aldehyd CH (second rule, wins)
+                              : 1.05;  // 3-ring CH
         } else if (heavy_atom == 5) {
             // B-H bond: strong
             fxh = 1.10;  // +10%
@@ -4659,7 +4689,23 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // Step 10: Final Consolidation of Shifts and Equilibrium Distance
     // CRITICAL: Total rabshift must include pi-shift and metal-shift!
     // Fortran: r0 = (ra + rb + shift) * ff
-    double total_rabshift = rabshift + pi_shift + metal_shift;
+    //
+    // Assembly order of the reference's single `shift` variable:
+    //   :1143-1149  local specials (hypervalent / XH / F-F / X-sp3 / X-sp)   [non-metal]
+    //   :1189-1253  metal specials, on a branch that starts from shift = 0   [metal]
+    //   :1174       if (pibo > 0) shift = hueckelp*(bzref - pibo)   <-- OVERWRITES
+    //   :1268-1272  if both heavy: shift = shift + hshift3/4/5      <-- accumulates
+    //   :1276       vbond(1) = gen%rabshift + shift
+    // So a pi bond keeps NONE of its local specials. Claude Generated (Sep 2026):
+    // reproduced here with shift_pre_pi / heavy_shift, which the r0 block above kept
+    // apart for exactly this purpose. Measured on the F-F contact of the HF-dimer
+    // proton-transfer TS (GMTKN55 PX13/hf_2_ts), where the F-F rule (+0.22) and the
+    // pi shift (+0.1258, pibo ~ 1.5e-4) were both applied: r0 3.0555 instead of
+    // 2.8355 Bohr, 19.2 kcal/mol in the bond term. The metal branch is mutually
+    // exclusive with the pi branch in the reference (pibo is 0 for a metal bond —
+    // no metal is in `pilist`), so metal_shift stays additive.
+    const double local_shift = (pibo > 0.0) ? pi_shift : shift_pre_pi;
+    double total_rabshift = gen_rabshift + local_shift + heavy_shift + metal_shift;
     // Fortran gfnff_ini.f90:1289 — r0 = rtmp + vbond(1). rtmp is the Goedecker/SK reference
     // distance (curcuma's (ra+rb)*ff — verified bit-equal to Fortran's rtmp for both metal-C and
     // the ligand C-O), and vbond(1) = rabshift + shift (+ pi_shift + metal_shift) is added
@@ -4943,6 +4989,13 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     int nmet = 0; // Metal neighbors
     int npi = 0;  // Pi-system neighbors
 
+    // npi uses the reference's POST-Hückel piadr (`piadr = itmp`, gfnff_ini.f90:1016);
+    // the angle setup at :1380 onwards runs well after that line. Claude Generated
+    // (Sep 2026) — the pre-Hückel candidate list (pi_fragments) is strictly larger.
+    const std::vector<int>& angle_piadr =
+        (static_cast<int>(topo_info.pi_atoms_final.size()) == m_atomcount)
+            ? topo_info.pi_atoms_final : topo_info.pi_fragments;
+
     // Count neighbors on atom_i
     if (m_atoms[atom_i] == 1) nh++;
     if (m_atoms[atom_i] == 6) nc++;
@@ -4950,7 +5003,7 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     if (m_atoms[atom_i] == 8) no++;
     if (m_atoms[atom_i] == 14) nsi++;
     if (!topo_info.is_metal.empty() && atom_i < topo_info.is_metal.size() && topo_info.is_metal[atom_i]) nmet++;
-    if (!topo_info.pi_fragments.empty() && atom_i < topo_info.pi_fragments.size() && topo_info.pi_fragments[atom_i] != 0) npi++;
+    if (!angle_piadr.empty() && atom_i < static_cast<int>(angle_piadr.size()) && angle_piadr[atom_i] != 0) npi++;
 
     // Count neighbors on atom_k
     if (m_atoms[atom_k] == 1) nh++;
@@ -4959,7 +5012,7 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     if (m_atoms[atom_k] == 8) no++;
     if (m_atoms[atom_k] == 14) nsi++;
     if (!topo_info.is_metal.empty() && atom_k < topo_info.is_metal.size() && topo_info.is_metal[atom_k]) nmet++;
-    if (!topo_info.pi_fragments.empty() && atom_k < topo_info.pi_fragments.size() && topo_info.pi_fragments[atom_k] != 0) npi++;
+    if (!angle_piadr.empty() && atom_k < static_cast<int>(angle_piadr.size()) && angle_piadr[atom_k] != 0) npi++;
 
     // Get central atom properties (z_center already declared at line 1855)
     // Add bounds checking to prevent crashes
@@ -5242,15 +5295,17 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
             // This is critical for methylated N in aromatic rings (e.g., caffeine)
             // XTB marks these as sp3 but with pi=1 (π-connected)
             //
-            // Detection methods:
-            // 1. npi > 0: neighbors are in pi_fragments
-            // 2. Neighbors have hyb=2 (sp2) indicating aromatic connection
-            int hyb_i = (atom_i < topo_info.hybridization.size()) ? topo_info.hybridization[atom_i] : 3;
-            int hyb_k = (atom_k < topo_info.hybridization.size()) ? topo_info.hybridization[atom_k] : 3;
-            bool has_sp2_neighbor = (hyb_i == 1 || hyb_i == 2 || hyb_k == 1 || hyb_k == 2);
-
-            // Use π-conjugated path if either detection method finds π-character
-            if (npi > 0 || has_sp2_neighbor) {
+            // The reference's only test here is `if (npi > 0)` (gfnff_ini.f90:1518),
+            // where npi counts how many of the two OUTER atoms are pi atoms.
+            // Claude Generated (Sep 2026, GMTKN55 WCPT18/ts4): curcuma additionally took
+            // the pi branch whenever an outer atom merely had hyb 1 or 2, which the
+            // reference never does. In the ts4 proton-transfer TS the bridging hydrogen
+            // is two-coordinate and therefore hyb=1, so the H-N-H angles of both
+            // nitrogens took the conjugated branch (theta0 = 113 deg) instead of the
+            // saturated-pyramidal one (theta0 = 104 deg, f2 = 0.40 + nh*0.19). At the TS
+            // those angles are opened to 152.8 deg, where the 9-degree difference in
+            // theta0 is worth 5.1 kcal/mol on a 7-atom molecule.
+            if (npi > 0) {
                 // Phase 2C Complete: Amide detection (January 10, 2026)
                 // Reference: gfnff_ini.f90:1616-1622
                 // Uses FunctionalGroupDetector for exact Fortran amide() port
@@ -5258,10 +5313,12 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
                 // Safety check: only use FunctionalGroupDetector if neighbor_lists is populated
                 bool is_amide = false;
                 if (!topo_info.neighbor_lists.empty() && atom_j < static_cast<int>(topo_info.neighbor_lists.size())) {
+                    // amide() is called with piadr here (gfnff_ini.f90:1520), i.e. the
+                    // post-Hückel array — same reasoning as npi above.
                     FunctionalGroupDetector detector(m_atomcount, m_atoms,
                                                     topo_info.neighbor_lists,
                                                     topo_info.hybridization,
-                                                    topo_info.pi_fragments);
+                                                    angle_piadr);
                     is_amide = detector.isAmideNitrogen(atom_j);
                 }
 
@@ -6390,92 +6447,81 @@ std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb,
 
     std::vector<int> pi_fragments(m_atomcount, 0); // 0 = not in pi-system
 
-    // Step 1: Identify all potential pi-system members.
-    // Claude Generated (Jul 2026, F3 audit): a pi-candidate must be an element with a
-    // non-zero Hückel off-diagonal parameter (hoffdiag>0): B,C,N,O,F,S,Cl
-    // (gfnff_param.f90:701-707). Atoms with hoffdiag=0 (H, He, Li, Be, metals, Br, I,
-    // noble gases, ...) never produce a non-zero pibo in xtb (zero coupling -> piadr=0
-    // after the Hückel), so xtb excludes them from the pi-system. curcuma previously
-    // made ANY sp/sp2 atom a candidate (wrongly pulling in terminal Br/I that got hyb=1)
-    // and missed F/Cl (hyb=0, hoffdiag=0.23/1.0). Restricting to the hoffdiag>0 set
-    // matches xtb: F/Cl enter (bonded to sp/sp2), Br/I stay out.
-    auto hoffdiag_nonzero = [](int z) {
+    // Steps 1-3 are a verbatim port of the reference pi-atom setup,
+    // gfnff_ini.f90:312-354 ("setup list of all possible pi atoms" + "make pi
+    // neighbor list" + mrecgff). Claude Generated (Sep 2026) — rewritten from a
+    // per-BOND classification to the reference's per-ATOM one; see the two rule
+    // notes below for what that changed and why.
+    //
+    // The reference admits an atom on either of two independent grounds:
+    //   piat  = (hyb == 1 or 2) and pilist(Z)      ! sp/sp2 B,C,N,O,F,S,Cl
+    //   picon = (any neighbour is sp/sp2) and nofs(Z)   ! lone-pair N,O,F,S,Cl
+    // plus three unconditional vetoes (SO3 oxygen, NR3-X nitrogen, SO3 sulphur).
+    // Membership does NOT require having a pi PARTNER: an isolated sp2 carbon is a
+    // pi atom that forms its own one-atom system, which the Hückel loop then skips
+    // via `npi < 2` (huckel_solver.cpp:134, Fortran gfnff_ini.f90:936). That still
+    // matters, because "is atom i a pi atom" is read by the EEQ dxi corrections and
+    // the X-bond base filter, not only by the Hückel.
+    auto pilist = [](int z) {   // gfnff_ini2.f90:1390-1395
         return z == 5 || z == 6 || z == 7 || z == 8 || z == 9 || z == 16 || z == 17;
     };
-    std::vector<bool> is_pi_candidate(m_atomcount, false);
+    auto nofs = [](int z) {     // gfnff_ini2.f90:1397-1402
+        return z == 7 || z == 8 || z == 9 || z == 16 || z == 17;
+    };
+
+    std::vector<bool> is_pi_member(m_atomcount, false);
     for (int i = 0; i < m_atomcount; ++i) {
-        if (!hoffdiag_nonzero(m_atoms[i])) continue;
+        const int zi = m_atoms[i];
+        bool piat = (hyb[i] == 1 || hyb[i] == 2) && pilist(zi);
 
-        // Claude Generated (Sep 2026, S30L-CI system 29): unconditional pi-atom veto,
-        // ported verbatim from gfnff_ini.f90:918-919 (the "NR3-X is not a pi" / "SO3 is
-        // not a pi" lines) — was entirely missing here. A nitrogen with more than 3
-        // total neighbours (e.g. a pyrrole/imine N additionally coordinated by a metal
-        // or alkali counterion) has its lone pair tied up in that 4th sigma/ionic bond,
-        // so it must NOT enter the Hückel pi-system as a lone-pair donor. Without this,
-        // curcuma pulled such an N into a 5-atom/6-electron ring Hückel system where the
-        // Fortran reference (pprcht/gfnff) keeps only the 4 ring carbons (4-electron
-        // system, N excluded) — a qualitatively different, wrongly delocalised pi-bond-
-        // order pattern worth ~45 kcal/mol in the bond term for that one ring (S30L-CI
-        // system 29 AB, a calix[4]pyrrole-type host binding an anion with an explicit
-        // Na+ counterion sitting on the pyrrole N). Uses topo%nb(20,i) i.e. the FULL
-        // (unfiltered) neighbour count, matching Fortran exactly — not the eta-aware
-        // adjacency_list mixture, which would under-count an eta-coordinated atom.
-        if (m_atoms[i] == 7 && static_cast<int>(nb_full[i].size()) > 3) continue;   // NR3-X
-        if (m_atoms[i] == 16 && hyb[i] == 5) continue;                              // SO3
+        // kk counts sp/sp2 NEIGHBOURS of any element — hydrogen included.
+        // Claude Generated (Sep 2026, GMTKN55 PX13/hf_2_ts): curcuma used to require
+        // the sp/sp2 partner to be a pi candidate itself, which silently dropped the
+        // whole "lone pair next to an sp centre" branch whenever the sp centre was an
+        // H. In the HF-dimer proton-transfer TS both fluorines are picon precisely
+        // because their bridging hydrogens come out sp (hyb=1); the reference builds a
+        // 2-atom F...F pi-system with piBO=0, curcuma built no pi-system at all, and
+        // the F-F bond then missed its pi treatment (r0 2.9297 vs 2.8355 Bohr, fc
+        // -0.1291 vs -0.0884) — 19.2 kcal/mol in the bond term on a 4-atom molecule.
+        int kk = 0;
+        for (int j : adjacency_list[i]) {
+            if (zi == 8 && m_atoms[j] == 16 && hyb[j] == 5) {
+                piat = false;   // SO3 oxygen is not a pi (gfnff_ini.f90:321-324)
+                continue;       // Fortran `cycle`: this neighbour does not count for kk
+            }
+            if (hyb[j] == 1 || hyb[j] == 2) ++kk;
+        }
+        const bool picon = (kk > 0) && nofs(zi);
 
-        // sp/sp2 atoms are candidates; N/O/S/F/Cl/B with hyb=0 or 3 are "picon" candidates
-        // (lone-pair / fluorine conjugation) that join if bonded to an sp/sp2 atom (Step 2).
-        is_pi_candidate[i] = true;
+        // Unconditional vetoes (gfnff_ini.f90:328-329). Both use topo%nb(20,i), the
+        // FULL neighbour count — see the Sep 2026 S30L-CI note in the git history:
+        // a pyrrole N additionally coordinated by a metal or alkali counterion has its
+        // lone pair tied up in that 4th bond and must not enter as a donor.
+        if (zi == 7 && static_cast<int>(nb_full[i].size()) > 3) continue;   // NR3-X
+        if (zi == 16 && hyb[i] == 5) continue;                             // SO3
+
+        if (picon || piat) is_pi_member[i] = true;
     }
 
-    // Step 2: Build adjacency for pi-candidates only (PHASE 2: using pre-computed bonds)
+    // Step 2: pi-neighbour list = every BONDED pair of members (gfnff_ini.f90:338-351).
+    // The reference applies no bond-type test here at all; two members that are bonded
+    // are always linked, so e.g. two picon heteroatoms bonded to each other end up in
+    // the same system.
     std::vector<std::vector<int>> pi_neighbors(m_atomcount);
     for (int i = 0; i < m_atomcount; ++i) {
-        if (!is_pi_candidate[i]) continue;
-
-        // PHASE 2 OPTIMIZED: Iterate only over bonded neighbors (not all atoms)
+        if (!is_pi_member[i]) continue;
         for (int j : adjacency_list[i]) {
-            if (j <= i || !is_pi_candidate[j]) continue;  // Avoid duplicates and non-pi atoms
-
-            // Verify bond has pi-character or potential for conjugation
-            bool is_pi_bond = false;
-
-            // picon heteroatom: B,N,O,F,S,Cl (NOT C). Used by Case 2.
-            auto is_picon_heteroatom = [](int z) {
-                return (z == 5 || z == 7 || z == 8 || z == 9 || z == 16 || z == 17);
-            };
-
-            // Case 1: Both are true pi-atoms (sp/sp2)
-            if ((hyb[i] == 1 || hyb[i] == 2) && (hyb[j] == 1 || hyb[j] == 2)) {
-                is_pi_bond = true;
-            }
-            // Case 2: One is sp/sp2 and other is a picon HETEROatom (B/N/O/F/S/Cl, NOT C)
-            // with a lone pair / conjugation (gfnff_ini2.f90 includes F,Cl in the pi-Hückel).
-            // Claude Generated (Jul 2026, F3 audit): the non-sp/sp2 partner must be a
-            // heteroatom — a sp3 C bonded to an sp2 C (e.g. toluene Me-phenyl) is a pure
-            // sigma bond and xtb keeps the sp3 C OUT of the pi-system (piadr=0). Allowing
-            // sp3 C here pulled 190 sp3 carbons into the pi-system and broke the S30L
-            // clean neutrals. Restrict to z != 6.
-            else if ((hyb[i] == 1 || hyb[i] == 2) && is_picon_heteroatom(m_atoms[j])) {
-                is_pi_bond = true;
-            }
-            else if ((hyb[j] == 1 || hyb[j] == 2) && is_picon_heteroatom(m_atoms[i])) {
-                is_pi_bond = true;
-            }
-
-            if (is_pi_bond) {
-                pi_neighbors[i].push_back(j);
-                pi_neighbors[j].push_back(i);
-            }
+            if (is_pi_member[j]) pi_neighbors[i].push_back(j);
         }
     }
 
-    // Step 3: Connected component analysis
+    // Step 3: connected components over the members (Fortran mrecgff). Members without
+    // any pi neighbour form their own single-atom system, exactly as in the reference.
     std::vector<bool> visited(m_atomcount, false);
     int fragment_id = 1;
 
     for (int start = 0; start < m_atomcount; ++start) {
-        if (pi_neighbors[start].empty() || visited[start]) continue;
+        if (!is_pi_member[start] || visited[start]) continue;
 
         std::stack<int> stack;
         stack.push(start);
@@ -7529,19 +7575,60 @@ void GFNFF::buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<in
 
     topo.metallic_character = computeMetallicCharacter();
 
-    // --- nb_hc: drop ALL bonds of highly-coordinated atoms (icase=2) ---
+    // icase 2 and 3 are NOT filtered views of icase 1 — they re-run the distance test.
+    // Claude Generated (Sep 2026, GMTKN55 AL2X6/al2f6): getnb (gfnff_ini2.f90:361-419)
+    // applies the metal radius enlargement `fm` ONLY in icase 1; icase 2 and 3 keep
+    // fm = 1 and therefore use a STRICTER threshold for any pair involving a metal.
+    // curcuma used to derive all three lists from the single icase-1 bond list and only
+    // apply the hc_crit / metal filters, so nb_hc and nb_nometal could never lose a bond
+    // that nbf kept. That difference is invisible until the charge shrink of the q-loop's
+    // second pass moves a metal pair between the two thresholds: in Al2F6 the Al-Al
+    // contact stays inside the enlarged icase-1 radius but falls outside the plain one,
+    // so the reference gets nbf = 5 / topo%nb = 4 and hence nbdiff = 1, which stops the
+    // group-3 rule `nb20i > 4 .and. ati > 10 .and. nbdiff == 0 -> hyb = 5` from firing.
+    // Aluminium is sp3 in the reference and hypervalent in curcuma, worth theta0 = 109.5
+    // vs 90 deg and f2 = 1.0 vs 0.11 on every Al-centred angle.
+    //
+    // The pair criterion is the same one getCachedBondList() uses, minus fm; see the
+    // comment there for the reference lines.
+    const bool geometric_nb = m_forced_bonds.empty();
+    auto pair_bonded_no_fm = [&](int i, int j) -> bool {
+        using GFNFFParameters::normcn;
+        constexpr double rthr = 1.25;      // gen%rthr
+        constexpr double rqshrink = 0.23;  // gen%rqshrink
+        const int zi = m_atoms[i], zj = m_atoms[j];
+        const bool have_qa = (static_cast<int>(m_bond_qa.size()) == m_atomcount);
+        auto qshift_of = [&](int a) {
+            const int z = m_atoms[a];
+            const int mt = (z >= 1 && z <= 86) ? metal_type[z - 1] : 0;
+            return have_qa ? m_bond_qa[a] * rqshrink * (mt > 0 ? 2.0 : 1.0) : 0.0;
+        };
+        const double ncn_i = (zi >= 1 && zi <= 86) ? static_cast<double>(normcn[zi - 1]) : 4.0;
+        const double ncn_j = (zj >= 1 && zj <= 86) ? static_cast<double>(normcn[zj - 1]) : 4.0;
+        double rco = GFNFFParameters::computeRabEstimate(zi, zj, ncn_i, ncn_j);
+        rco -= qshift_of(i) + qshift_of(j);
+        rco *= fat[zi] * fat[zj];
+        const double distance = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
+        return distance < rthr * rco;   // fm == 1 for icase 2 and 3
+    };
+
+    // --- nb_hc: no highly-coordinated atoms (icase=2) ---
     // Fortran cycles the pair if EITHER endpoint's FULL CN exceeds its cap, so the
     // bond disappears from both rows.
     topo.nb_hc.assign(m_atomcount, {});
     for (int i = 0; i < m_atomcount; ++i) {
         if (static_cast<int>(topo.nb_full[i].size()) > hc_crit(m_atoms[i])) continue;
-        for (int j : topo.nb_full[i]) {
+        for (int j = 0; j < m_atomcount; ++j) {
+            if (j == i) continue;
             if (static_cast<int>(topo.nb_full[j].size()) > hc_crit(m_atoms[j])) continue;
-            topo.nb_hc[i].push_back(j);
+            const bool bonded = geometric_nb
+                ? pair_bonded_no_fm(i, j)
+                : (std::find(topo.nb_full[i].begin(), topo.nb_full[i].end(), j) != topo.nb_full[i].end());
+            if (bonded) topo.nb_hc[i].push_back(j);
         }
     }
 
-    // --- nbm: drop metals and unusually coordinated heavy atoms (icase=3) ---
+    // --- nbm: no metals and unusually coordinated stuff (icase=3) ---
     auto nbm_excluded = [&](int a) -> bool {
         const int z = m_atoms[a];
         if (topo.metallic_character[a] > 0.25 || is_metal(z)) return true;                 // metal case
@@ -7552,9 +7639,13 @@ void GFNFF::buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<in
     topo.nb_nometal.assign(m_atomcount, {});
     for (int i = 0; i < m_atomcount; ++i) {
         if (nbm_excluded(i)) continue;
-        for (int j : topo.nb_full[i]) {
+        for (int j = 0; j < m_atomcount; ++j) {
+            if (j == i) continue;
             if (nbm_excluded(j)) continue;
-            topo.nb_nometal[i].push_back(j);
+            const bool bonded = geometric_nb
+                ? pair_bonded_no_fm(i, j)
+                : (std::find(topo.nb_full[i].begin(), topo.nb_full[i].end(), j) != topo.nb_full[i].end());
+            if (bonded) topo.nb_nometal[i].push_back(j);
         }
     }
 
@@ -8563,15 +8654,26 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
                 Z == 15 || Z == 33 || Z == 51);
     };
 
+    // The reference enumerates A-X as "every atom i, every neighbour ix of i that is an
+    // xatom" (gfnff_ini.f90:843-846), so a bond whose BOTH ends are xatoms yields TWO
+    // ordered pairs — (i=a, X=b) and (i=b, X=a). Claude Generated (Sep 2026, GMTKN55
+    // HAL59/BrBr_pyr): curcuma scanned the bond list with an if/else-if and kept only the
+    // first endpoint as the halogen donor, so a homonuclear X-X bond (Br-Br, I-I, S-S in a
+    // disulfide, P-P, ...) produced only one of the two orientations — and which one it
+    // was depended on the atom order in the input file. In Br2...pyridine that picked the
+    // OUTER bromine as the donor, whose A-X...B angle is ~0 instead of ~180, so the whole
+    // X-bond term evaluated to exactly 0.0 against the reference's -0.011225 Eh (7.0
+    // kcal/mol). Emitting both orders reproduces the reference list.
     std::vector<std::pair<int,int>> ax_pairs;
     for (const auto& bond : bonds) {
-        int X = -1, A = -1;
-        if (is_halogen(m_atoms[bond.first])) { X = bond.first; A = bond.second; }
-        else if (is_halogen(m_atoms[bond.second])) { X = bond.second; A = bond.first; }
-        if (X != -1) {
-            if (m_atoms[X] == 16 && topo_info.neighbor_lists[X].size() > 2) continue;
-            ax_pairs.push_back({A, X});
-        }
+        // "no sulphoxide etc S" (gfnff_ini.f90:847): an S donor with more than two
+        // neighbours is rejected as X, in either orientation.
+        auto usable_as_X = [&](int X) {
+            return is_halogen(m_atoms[X])
+                && !(m_atoms[X] == 16 && topo_info.neighbor_lists[X].size() > 2);
+        };
+        if (usable_as_X(bond.second)) ax_pairs.push_back({bond.first, bond.second});
+        if (usable_as_X(bond.first))  ax_pairs.push_back({bond.second, bond.first});
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -8868,12 +8970,27 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         }
     }
 
-    if (getCachedBondList() == bonds_pass1 && !carbene_override_pending) {
-        return topo;  // neither channel changed - pass 2 would be a no-op
-    }
-
+    // CORRECTED again (Sep 2026, GMTKN55 AL2X6/al2f6): the gate is GONE — the reference
+    // runs the loop exactly twice for every molecule (`do while (qloop_count < 2 .and.
+    // gen%rqshrink > 1e-3)`, gfnff_ini.f90:263, with rqshrink = 0.23 fixed), and the
+    // "only two channels" premise above was wrong a second time. The charge-shrunk radii
+    // (gfnff_ini2.f90:122) are fed to ALL THREE neighbour-list builds — nbf (full),
+    // topo%nb (high-coordination filtered) and nbm (metal filtered) — and the
+    // hybridization rules read the DIFFERENCES `nbdiff = nbf - topo%nb` and
+    // `nbmdiff = nbf - nbm`, not just the bond list. In Al2F6 the two aluminiums keep
+    // five neighbours in nbf across both passes, but the HC-filtered list drops 5 -> 4
+    // in pass 2, so nbdiff goes 0 -> 1 and the group-3 rule
+    // (`nb20i > 4 .and. ati > 10 .and. nbdiff == 0 -> hyb = 5`) stops firing: hypervalent
+    // in pass 1, sp3 in pass 2. curcuma stopped after pass 1 and kept hyb = 5, which the
+    // angle code turns into theta0 = 90 deg and f2 = 0.11 instead of the metal branch's
+    // theta0 = 109.5 and f2 = 1.0 — 2.7 kcal/mol of the 2.85 kcal/mol al2f6 residual.
+    // Detecting that cheaply would mean rebuilding all three neighbour lists anyway, i.e.
+    // most of pass 2, so the gate buys little; running it always is both faithful and
+    // simpler. Measured after the change: MOR41 and S30L-CI bit-identical, so the
+    // "calculateTopologyInfoOnce is not re-entrant" worry recorded here earlier does not
+    // show up on any reference structure.
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("GFN-FF q-loop: charge-shrunk radii changed the bond list, running pass 2");
+        CurcumaLogger::info("GFN-FF q-loop: running pass 2 with the charge-shrunk radii");
     }
     // Carry pass-1's fragmentation into pass 2 (reference gate `if (topo%nfrag <= 1)`).
     if (topo.nfrag > 1) {
@@ -9171,6 +9288,27 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
                             }
 
                             topology_from_cache = (topo_info.topology_charges.size() == m_atomcount);
+
+                            // Claude Generated (Sep 2026, GMTKN55 PX13/hf_2_ts): re-arm the
+                            // Phase-1 contract of solveWithSchurCholesky by hand. That cache is
+                            // keyed on geometry + CN ONLY (eeq_solver.cpp:2130-2146), while the
+                            // matrix it factorizes also depends on dgam/alpeeq/dxi — the very
+                            // quantities Phase 1 produces. The design relies on Phase 1's
+                            // local-solve branch (eeq_solver.cpp:2205) setting valid=false before
+                            // every Phase 2, which is the only thing that makes the narrow key
+                            // sound. A cache hit here SKIPS Phase 1, so that invalidation never
+                            // happens: in the GFN-FF q-loop the geometry and CN are identical in
+                            // both passes, so pass 2's Phase 2 scored a false cache hit and solved
+                            // with pass 1's factorization. Symptom on PX13/hf_2_ts (the HF-dimer
+                            // proton-transfer TS, whose bond list grows 4 -> 5 in pass 2): Phase-2
+                            // charges +-0.0129 instead of +-0.2464, Coulomb -0.00406 instead of
+                            // -0.03994 Eh — 22.5 kcal/mol, and it appeared or vanished purely with
+                            // the presence of the .topo.json file. Same failure class as the Jul
+                            // 2026 pending-buffer fix documented at eeq_solver.cpp:2750.
+                            if (topology_from_cache && m_eeq_solver) {
+                                m_eeq_solver->invalidateCholeskyCache();
+                            }
+
                             // Claude Generated (Jul 2026): routine cache-hit report is verbosity-2+ detail.
                             // ConfSearch reuses the topology cache on every child MD/opt, so at verbosity 1
                             // this flooded stdout with one [OK] line per reused structure. Demoted to info.
@@ -9696,13 +9834,20 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     topo_info.bond_types.resize(bond_list.size());
     for (size_t bond_idx = 0; bond_idx < bond_list.size(); ++bond_idx) {
         const auto& [atom_i, atom_j] = bond_list[bond_idx];
-        // Use pi-adjusted hybridization for bond type classification
-        // Fortran's hyb() is already pi-adjusted when btyp is assigned (gfnff_ini.f90:1154)
-        // sp3 atoms in pi-systems should be treated as sp2 for bond type purposes
+        // The reference assigns btyp from the RAW hyb array (gfnff_ini.f90:1106-1121).
+        // Claude Generated (Sep 2026, GMTKN55 W4-11/oxirene): curcuma promoted an sp3
+        // atom sitting in a pi-system to sp2 first, citing gfnff_ini.f90:1154 — but that
+        // line is inside the fxh block and adjusts no hybridization at all. The only
+        // post-Hückel hyb change in the reference is the GEODEP sp2 -> sp3 DEMOTION at
+        // :1031. The invented promotion turned oxirene's ring C-O bonds (sp2 C + sp3,
+        // pi-conjugated O) from btyp=1 into btyp=2, which gives their ring torsions
+        // periodicity 2 instead of 1. In a planar molecule every n=2 torsion sits exactly
+        // at its own minimum, so the whole torsion term collapsed to 0.0 against the
+        // reference's 0.001608 Eh. For nitrogen the promotion was invisible (an sp3 N on
+        // an sp2 partner reaches btyp=2 through the N-sp2 rule anyway), which is why it
+        // survived.
         int hyb_i = topo_info.hybridization[atom_i];
         int hyb_j = topo_info.hybridization[atom_j];
-        if (hyb_i == 3 && topo_info.pi_fragments[atom_i] > 0) hyb_i = 2;
-        if (hyb_j == 3 && topo_info.pi_fragments[atom_j] > 0) hyb_j = 2;
         bool is_metal_i = topo_info.is_metal[atom_i];
         bool is_metal_j = topo_info.is_metal[atom_j];
 
@@ -9710,17 +9855,24 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
                                                             hyb_i, hyb_j,
                                                             is_metal_i, is_metal_j);
 
-        // Claude Generated (Jul 2026): reference btyp re-classification for conjugated
-        // sp centres (gfnff_ini.f90:1168-1178). classifyBondType marks ANY sp bond
-        // (hyb==1) as btyp=3 (torsion-less), but the reference promotes an sp-sp2 bond
-        // with pi bond order > 0.1 back to btyp=2 (a real pi bond). Without this, sp2-sp
-        // conjugated bonds (e.g. the buckycatcher fullerene/aromatic-alkyne carbons in
-        // S30L 7) are wrongly skipped in torsion generation -> missing pi torsions.
-        if (topo_info.bond_types[bond_idx] == 3) {
-            int bb = 3;
-            if (hyb_i == 0 || hyb_j == 0 || hyb_i == 3 || hyb_j == 3) bb = 1;   // sp-sp3
-            else if (hyb_i == 2 || hyb_j == 2) bb = 2;                          // sp-sp2
-            if (bb != 3 && !topo_info.pi_bond_orders.empty()) {
+        // Reference btyp re-classification inside the bond-parameter loop. Two steps,
+        // in this order:
+        //   gfnff_ini.f90:1188-1190  local bbtyp fix-up for "triple" (sp) bonds:
+        //       sp-sp3 -> 1, sp-sp2 -> 2   (btyp(i) itself is NOT touched here)
+        //   gfnff_ini.f90:1176-1179  if (pibo > 0) and bbtyp /= 3 and pibo > 0.1:
+        //       btyp(i) = 2                (a real pi bond)
+        // Both live inside the non-metal branch `if (bbtyp < 5)`, so metal bonds are
+        // untouched. Claude Generated (Jul 2026, extended Sep 2026): curcuma applied the
+        // promotion ONLY to bonds that classifyBondType had called btyp=3, missing the
+        // reference's much broader rule — any btyp 1 or 4 bond with pi bond order above
+        // 0.1 is a pi bond as well.
+        {
+            int bb = topo_info.bond_types[bond_idx];
+            if (bb == 3) {
+                if (hyb_i == 0 || hyb_j == 0 || hyb_i == 3 || hyb_j == 3) bb = 1;   // sp-sp3
+                else if (hyb_i == 2 || hyb_j == 2) bb = 2;                          // sp-sp2
+            }
+            if (bb != 3 && bb < 5 && !topo_info.pi_bond_orders.empty()) {
                 int idx = lin(atom_i, atom_j);
                 double pibo_ij = (idx >= 0 && idx < static_cast<int>(topo_info.pi_bond_orders.size()))
                                      ? topo_info.pi_bond_orders[idx] : 0.0;
