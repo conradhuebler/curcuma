@@ -4211,7 +4211,19 @@ Vector EEQSolver::calculateDxi(
             // Previous code applied dxi=-0.15 to ALL C with nn==2, causing HCN charge error.
             if (nn == 2) {
                 bool is_carbene = false;  // Equivalent of itag==1
-                if (topology.has_value() && topology->neighbor_lists[i].size() == 2) {
+                // CORRECTED (Sep 2026): prefer the REAL itag whenever the caller supplies it.
+                // Re-deriving "carbene" from the angle reproduces only the first half of
+                // gfnff_ini2.f90:244-253 and misses two later corrections the reference makes
+                // to the same array: the qa < -0.4 override (:251-254) and the aryne rule
+                // (:341-351, two bonded carbene carbons cancel each other's tag). On GMTKN55
+                // DC13/c20bowl every rim carbon of the cage therefore kept a spurious
+                // dxi = -0.15, which drove the EEQ charges ~18x too large and the Coulomb term
+                // from -0.0003 to -0.1017 Eh (64 kcal/mol).
+                const bool have_itag = topology.has_value()
+                    && static_cast<int>(topology->itag.size()) == natoms;
+                if (have_itag) {
+                    is_carbene = (topology->itag[i] == 1);
+                } else if (topology.has_value() && topology->neighbor_lists[i].size() == 2) {
                     int nb1 = topology->neighbor_lists[i][0];
                     int nb2 = topology->neighbor_lists[i][1];
                     // Calculate bond angle at atom i

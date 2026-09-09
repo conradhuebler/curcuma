@@ -1373,6 +1373,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             eeq_topo.nfrag = topo_ptr->nfrag;
             eeq_topo.fraglist = topo_ptr->fraglist;
             eeq_topo.qfrag = topo_ptr->qfrag;
+            eeq_topo.itag = topo_ptr->itag;  // real Fortran itag for the dxi carbene test
             eeq_topo.covalent_radii.resize(m_atomcount);
             for (int i = 0; i < m_atomcount; ++i) {
                 int z = m_atoms[i];
@@ -7329,6 +7330,27 @@ std::vector<int> GFNFF::determineHybridizationFortran(const GFNFFTopology& topo,
         }
     }
 
+    // ------------------------------------------------------------------
+    // Aryne rule (Fortran gfnff_ini2.f90:341-351)
+    // ------------------------------------------------------------------
+    // Two BONDED carbons that both came out of the loop above tagged as carbenes are an
+    // aryne, not two carbenes, so both tags are cleared again. Curcuma was missing this
+    // and therefore kept the tag on every 2-coordinate carbon that has a 2-coordinate
+    // carbon neighbour. Since itag==1 means "contributes no pi electron", the whole rim
+    // of a carbon cage then went missing from the Hueckel electron count: GMTKN55
+    // DC13/c20bowl came out with 10 pi electrons instead of 20, wrecking the bond orders
+    // and with them the bond term by 564 kcal/mol.
+    // Ported with the reference's in-place semantics (clearing both ends as it scans), so
+    // the outcome for chains of three or more adjacent carbene carbons matches exactly.
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int kk : nbdum[i]) {
+            if (m_atoms[kk] == 6 && m_atoms[i] == 6 && itag[i] == 1 && itag[kk] == 1) {
+                itag[i] = 0;
+                itag[kk] = 0;
+            }
+        }
+    }
+
     return hyb;
 }
 
@@ -8964,6 +8986,9 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         eeq_topology_input.nfrag = topo_info.nfrag;
         eeq_topology_input.fraglist = topo_info.fraglist;
         eeq_topology_input.qfrag = topo_info.qfrag;
+        // Real itag (set by determineHybridizationFortran above), so calculateDxi() can test
+        // the tag the reference actually carries instead of re-deriving it from geometry.
+        eeq_topology_input.itag = topo_info.itag;
         // CRITICAL FIX (Mar 2026): Use Pyykko covalent radii (param%rad), NOT D3 radii
         eeq_topology_input.covalent_radii.resize(m_atomcount);
         for (int i = 0; i < m_atomcount; ++i) {

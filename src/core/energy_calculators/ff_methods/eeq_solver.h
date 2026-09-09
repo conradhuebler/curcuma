@@ -121,6 +121,11 @@ public:
         int nfrag = 1;                                 // Number of molecular fragments
         std::vector<int> fraglist;                     // fraglist[i] = fragment ID for atom i (1-indexed)
         std::vector<double> qfrag;                     // qfrag[f] = target charge for fragment f
+        // Fortran itag (gfnff_ini2.f90): +1 carbene C / NO2 N, -1 eta-coordinated, 0 otherwise.
+        // Supplied so the dxi corrections can test the REAL tag instead of re-deriving it from
+        // geometry: the stored tag has already been through the aryne rule and the qa < -0.4
+        // override, and re-deriving it silently skips both. Empty = fall back to the heuristic.
+        std::vector<int> itag;
     };
 
     /**

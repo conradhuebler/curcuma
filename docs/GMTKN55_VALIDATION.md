@@ -16,7 +16,7 @@ machine).
 |--------|-----------:|----------------------:|----:|-----:|----:|
 | gfn2   | 2140 | 320 | 0.000 | 0.001 | 0.017 |
 | gfn1   | 2142 | 320 | 0.047 | 0.549 | 11.93 |
-| gfnff  | 2458 | 0   | 1.445 | 12.83 | 500.0 |
+| gfnff  | 2458 | 0   | 1.244 |  7.92 | 151.5 |
 
 gfn1/gfn2 skip every structure with a nonzero `.UHF` (see "Known limitation" below).
 gfnff has no open-shell term and runs everything.
@@ -28,7 +28,8 @@ strength being the two GMTKN55 exercises heavily (`Amino20x4` MAD 5.664 -> 0.001
 max 26.9 -> 0.016). Known Issue #13 (two-fragment charge placement) then took it to
 **1.445**: `AHB21` MAD 22.05 -> 0.606 (max 239 -> 4.8), `CHB6` 7.73 -> 1.51, `BH76`
 6.90 -> 4.79, plus the `nh_linear_fix` refinement (`DIPCS10` 8.28 -> 0.000,
-`NBPRC` 3.84 -> 0.108).
+`NBPRC` 3.84 -> 0.108). Known Issue #14 (aryne rule + dxi itag) then took it to **1.244** and, for the first
+time, moved the set-wide maximum: 500.0 -> 151.5 (`DC13/c20bowl` +500.0 -> -6.29).
 
 > **Reading the numbers back**: `scripts/gmtkn55_compare.py` caches every energy in
 > `_run/energies.json` and reuses it unless `--recompute` is given. A re-run after a code
