@@ -7184,7 +7184,8 @@ Vector GFNFF::calculateDgam(const Vector& qa_charges,
 // Faithful port of Fortran external/gfnff/src/gfnff_ini2.f90:170-198.
 // curcuma's neighbor_lists[i] is the FULL bonded adjacency (== Fortran nbf, incl. metals);
 // the metal-removed list (nbm) is obtained here by filtering metal_type==0.
-std::vector<int> GFNFF::computeEtaCoordination(const std::vector<std::vector<int>>& neighbor_lists) const
+std::vector<int> GFNFF::computeEtaCoordination(const std::vector<std::vector<int>>& neighbor_lists,
+                                               const std::vector<std::vector<int>>& nbm) const
 {
     using GFNFFParameters::metal_type;
     std::vector<int> itag(m_atomcount, 0);
@@ -7199,10 +7200,16 @@ std::vector<int> GFNFF::computeEtaCoordination(const std::vector<std::vector<int
 
         const std::vector<int>& nbf = neighbor_lists[i];
         int nbf_count = static_cast<int>(nbf.size());
-        int nbm_count = 0;  // neighbors with metals removed
-        for (int kk : nbf) {
-            if (!is_metal(m_atoms[kk])) nbm_count++;
-        }
+        // nbm(20,i) is the length of the icase=3 neighbour list, which getnb builds with
+        // its OWN distance test and drops not only metals but also anything with
+        // mchar > 0.25 and any heavy atom above its normal CN (gfnff_ini2.f90:314-319).
+        // Claude Generated (Sep 2026, GMTKN55 MB16-43/03): curcuma recomputed it here as
+        // "neighbours of i that are not a metal element", which is a different and larger
+        // number. For that structure's first carbon it gave 3 where the real nbm list has
+        // 2, so the Cp rule (nbf >= 4 and nbm == 3) fired on an atom the reference does
+        // not treat as eta-coordinated at all - and nbdum, hybridisation, bpair and the
+        // BATM triple list all followed.
+        int nbm_count = (i < static_cast<int>(nbm.size())) ? static_cast<int>(nbm[i].size()) : 0;
 
         bool etacoord = false;
         // Cp (cyclopentadienyl): full CN >= 4, metal-removed CN == 3
@@ -7694,7 +7701,7 @@ void GFNFF::buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<in
     }
 
     // --- itag: eta detection needs nbf and nbm (gfnff_ini2.f90:170-195) ---
-    topo.itag = computeEtaCoordination(topo.nb_full);
+    topo.itag = computeEtaCoordination(topo.nb_full, topo.nb_nometal);
 
     // --- nbdum: per-atom mixture (gfnff_ini2.f90:197-202) ---
     nbdum.assign(m_atomcount, {});
@@ -8640,46 +8647,12 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
     // eta bonds (metal <-> itag==-1 ligand) removed so they no longer bridge. Normal metal
     // bonds (Ru-P/Ru-S) are kept, so the S-donor filter of PR34 is unchanged. Only built
     // when the topology actually has eta atoms; otherwise the normal bpair is used.
-    const bool has_eta = std::any_of(topo_info.itag.begin(), topo_info.itag.end(),
-                                     [](int t) { return t == -1; });
-    std::vector<std::vector<int>> eta_free_dist;
-    if (has_eta && !topo_info.neighbor_lists.empty()) {
-        auto is_metal_atom = [&](int a) {
-            int z = (a >= 0 && a < m_atomcount) ? m_atoms[a] : 0;
-            return z >= 1 && z <= 86 && GFNFFParameters::metal_type[z - 1] > 0;
-        };
-        auto is_eta = [&](int a) {
-            return a >= 0 && a < static_cast<int>(topo_info.itag.size()) && topo_info.itag[a] == -1;
-        };
-        std::vector<std::vector<int>> eta_free_adj = topo_info.neighbor_lists;
-        for (int i = 0; i < static_cast<int>(eta_free_adj.size()); ++i) {
-            auto& nbrs = eta_free_adj[i];
-            nbrs.erase(std::remove_if(nbrs.begin(), nbrs.end(), [&](int j) {
-                return (is_metal_atom(i) && is_eta(j)) || (is_metal_atom(j) && is_eta(i));
-            }), nbrs.end());
-        }
-        eta_free_dist = calculateTopologyDistances(eta_free_adj);
-        // A DIRECT bond is distance 1 no matter how the eta list stores it. The reference
-        // builds topo%bpair in nbondmat (gfnff_ini2.f90:1303-1309) by first walking the
-        // neighbour lists and setting `pair(lin(k,i)) = 1` for every listed neighbour --
-        // so a pair that EITHER atom lists as a neighbour is bonded, and the asymmetry of
-        // the eta storage cannot turn it into anything else; only the 2- and 3-bond
-        // expansion that follows sees the asymmetric lists. Claude Generated (Sep 2026,
-        // GMTKN55 ALK8/li_ch2n): dropping the metal<->eta edges in BOTH directions made
-        // the bonded Li-C pair come out THREE bonds apart, i.e. a spurious 1,4-pair. The
-        // BATM triple loop then paired it with the neighbours of the metal, one of which
-        // IS the other member of the pair -- a triple with two identical atoms, r_jk = 0,
-        // and the bonded-ATM term went NaN for the whole molecule. The reference cannot
-        // produce that because its bpair and its neighbour list are the same graph.
-        for (const auto& [a, b] : getCachedBondList()) {
-            if (a >= 0 && a < static_cast<int>(eta_free_dist.size())
-                && b >= 0 && b < static_cast<int>(eta_free_dist[a].size())) {
-                eta_free_dist[a][b] = 1;
-                eta_free_dist[b][a] = 1;
-            }
-        }
-    }
-    const std::vector<std::vector<int>>& xb_bpair = has_eta ? eta_free_dist : topo_info.bpair;
+    // bpair comes from computeBpairNbondmat(), a verbatim port of the reference's
+    // nbondmat: level 1 records a bond from EITHER direction, levels 2 and 3 require
+    // symmetric reachability. That is exactly the eta behaviour this code used to
+    // approximate with a hand-built "eta-free" distance matrix, so the approximation is
+    // gone. Claude Generated (Sep 2026).
+    const std::vector<std::vector<int>>& xb_bpair = topo_info.bpair;
 
     // Pre-calculate atom-specific basicity with overrides
     std::vector<double> current_basicity(m_atomcount);
@@ -8854,6 +8827,66 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
     (void)duration;
 
     return xbonds;
+}
+
+std::vector<std::vector<int>> GFNFF::computeBpairNbondmat(const std::vector<std::vector<int>>& nb) const
+{
+    // Reference: gfnff_ini2.f90:1280-1357 (nbondmat) + :1360-1387 (pairsbond).
+    // Claude Generated (Sep 2026).
+    const int n = m_atomcount;
+    std::vector<std::vector<int>> pair(n, std::vector<int>(n, 0));
+
+    // Level 1: every neighbour EITHER atom lists is a bond (gfnff_ini2.f90:1303-1309).
+    // This is why the asymmetric eta storage cannot demote a real bond.
+    for (int i = 0; i < n; ++i) {
+        if (i >= static_cast<int>(nb.size())) break;
+        for (int k : nb[i]) {
+            if (k < 0 || k >= n || k == i) continue;
+            pair[i][k] = 1;
+            pair[k][i] = 1;
+        }
+    }
+
+    // Two expansion rounds, tagging 2 then 3. The frontier grows along the ASYMMETRIC
+    // neighbour list, but a tag is only awarded when the membership is symmetric.
+    std::vector<std::vector<int>> lst(n);
+    std::vector<std::vector<char>> inL(n, std::vector<char>(n, 0));
+    for (int i = 0; i < n && i < static_cast<int>(nb.size()); ++i) {
+        for (int k : nb[i]) {
+            if (k >= 0 && k < n && !inL[i][k]) { inL[i][k] = 1; lst[i].push_back(k); }
+        }
+    }
+
+    for (int tag = 2; tag <= 3; ++tag) {
+        std::vector<std::vector<int>> added(n);
+        for (int i = 0; i < n; ++i) {
+            for (int i1 : lst[i]) {
+                if (i1 < 0 || i1 >= static_cast<int>(nb.size())) continue;
+                for (int newatom : nb[i1]) {
+                    if (newatom < 0 || newatom >= n || inL[i][newatom]) continue;
+                    inL[i][newatom] = 1;
+                    added[i].push_back(newatom);
+                }
+            }
+        }
+        for (int i = 0; i < n; ++i)
+            lst[i].insert(lst[i].end(), added[i].begin(), added[i].end());
+
+        // pairsbond: first tag wins, and both directions must see each other.
+        for (int i = 0; i < n; ++i) {
+            for (int j = 0; j < i; ++j) {
+                if (pair[i][j] != 0) continue;
+                if (inL[i][j] && inL[j][i]) { pair[i][j] = tag; pair[j][i] = tag; }
+            }
+        }
+    }
+
+    // Anything still unassigned is "further than 3 bonds" -> 5 (gfnff_ini2.f90:1351-1355).
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < n; ++j)
+            if (i != j && pair[i][j] == 0) pair[i][j] = 5;
+
+    return pair;
 }
 
 std::vector<std::vector<int>> GFNFF::calculateTopologyDistances(const std::vector<std::vector<int>>& adjacency_list) const
@@ -10011,7 +10044,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     }
 
     // bpair is same as topo_distances (topological distance matrix)
-    topo_info.bpair = topo_info.topo_distances;
+    topo_info.bpair = computeBpairNbondmat(topo_info.adjacency_list);
 
     // eta-aware bpair for the BATM 1,4-pair test. Claude Generated (Jul 24, 2026):
     // same root cause as the X-bond bpair fix (detectHalogenBondsNative). The Fortran
@@ -10024,46 +10057,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // (~1 kcal on PR26/PR28/PR27/ED33, entirely in the bonded-ATM term). Rebuild the
     // distance on an adjacency with the eta bonds (metal <-> itag==-1 ligand) removed;
     // normal metal bonds (Ru-P/Ru-Cl) are kept. Only built when eta atoms exist.
-    const bool has_eta = std::any_of(topo_info.itag.begin(), topo_info.itag.end(),
-                                     [](int t) { return t == -1; });
-    std::vector<std::vector<int>> eta_free_dist;
-    if (has_eta && !topo_info.neighbor_lists.empty()) {
-        auto is_metal_atom = [&](int a) {
-            int z = (a >= 0 && a < m_atomcount) ? m_atoms[a] : 0;
-            return z >= 1 && z <= 86 && GFNFFParameters::metal_type[z - 1] > 0;
-        };
-        auto is_eta = [&](int a) {
-            return a >= 0 && a < static_cast<int>(topo_info.itag.size()) && topo_info.itag[a] == -1;
-        };
-        std::vector<std::vector<int>> eta_free_adj = topo_info.neighbor_lists;
-        for (int i = 0; i < static_cast<int>(eta_free_adj.size()); ++i) {
-            auto& nbrs = eta_free_adj[i];
-            nbrs.erase(std::remove_if(nbrs.begin(), nbrs.end(), [&](int j) {
-                return (is_metal_atom(i) && is_eta(j)) || (is_metal_atom(j) && is_eta(i));
-            }), nbrs.end());
-        }
-        eta_free_dist = calculateTopologyDistances(eta_free_adj);
-        // A DIRECT bond is distance 1 no matter how the eta list stores it. The reference
-        // builds topo%bpair in nbondmat (gfnff_ini2.f90:1303-1309) by first walking the
-        // neighbour lists and setting `pair(lin(k,i)) = 1` for every listed neighbour --
-        // so a pair that EITHER atom lists as a neighbour is bonded, and the asymmetry of
-        // the eta storage cannot turn it into anything else; only the 2- and 3-bond
-        // expansion that follows sees the asymmetric lists. Claude Generated (Sep 2026,
-        // GMTKN55 ALK8/li_ch2n): dropping the metal<->eta edges in BOTH directions made
-        // the bonded Li-C pair come out THREE bonds apart, i.e. a spurious 1,4-pair. The
-        // BATM triple loop then paired it with the neighbours of the metal, one of which
-        // IS the other member of the pair -- a triple with two identical atoms, r_jk = 0,
-        // and the bonded-ATM term went NaN for the whole molecule. The reference cannot
-        // produce that because its bpair and its neighbour list are the same graph.
-        for (const auto& [a, b] : getCachedBondList()) {
-            if (a >= 0 && a < static_cast<int>(eta_free_dist.size())
-                && b >= 0 && b < static_cast<int>(eta_free_dist[a].size())) {
-                eta_free_dist[a][b] = 1;
-                eta_free_dist[b][a] = 1;
-            }
-        }
-    }
-    const std::vector<std::vector<int>>& batm_bpair = has_eta ? eta_free_dist : topo_info.bpair;
+    // bpair comes from computeBpairNbondmat(), a verbatim port of the reference's
+    // nbondmat: level 1 records a bond from EITHER direction, levels 2 and 3 require
+    // symmetric reachability. That is exactly the eta behaviour this code used to
+    // approximate with a hand-built "eta-free" distance matrix, so the approximation is
+    // gone. Claude Generated (Sep 2026).
+    const std::vector<std::vector<int>>& batm_bpair = topo_info.bpair;
 
     // Generate b3list for batm calculation
     topo_info.b3list.clear();

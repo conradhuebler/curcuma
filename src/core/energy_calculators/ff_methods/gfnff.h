@@ -1115,6 +1115,22 @@ private:
     std::vector<std::vector<int>> calculateTopologyDistances(const std::vector<std::vector<int>>& adjacency_list) const;
 
     /**
+     * @brief Verbatim port of the reference's nbondmat (gfnff_ini2.f90:1280-1357).
+     *
+     * Produces topo%bpair: 1 for a direct bond as recorded in EITHER direction, 2 and 3
+     * for pairs that reach each other SYMMETRICALLY within that many bonds, 5 for
+     * everything else. The symmetry requirement (pairsbond's `dai .and. daj`,
+     * gfnff_ini2.f90:1380) is what stops an eta bond — stored only on the metal's side —
+     * from bridging a longer path, while the level-1 pass still records it as a bond.
+     * Curcuma previously approximated this with a plain BFS plus an "eta-free" variant,
+     * which got the two halves right separately but never together.
+     *
+     * @param nb Per-atom neighbour list; the reference passes topo%nb, i.e. the nbdum
+     *           mixture that curcuma keeps in TopologyInfo::adjacency_list.
+     */
+    std::vector<std::vector<int>> computeBpairNbondmat(const std::vector<std::vector<int>>& nb) const;
+
+    /**
      * @brief Detect molecular fragments (connected components)
      * @param adjacency_list Per-atom neighbor connectivity
      * @return Pair of (nfrag, fraglist)
@@ -1763,7 +1779,11 @@ private:
      * @param neighbor_lists Full bonded adjacency (== Fortran nbf, includes metals)
      * @return itag vector (size m_atomcount): -1 if η-coordinated, else 0
      */
-    std::vector<int> computeEtaCoordination(const std::vector<std::vector<int>>& neighbor_lists) const;
+    /// @param neighbor_lists nbf, the full list (getnb icase=1)
+    /// @param nbm            the metal-filtered list (getnb icase=3) — the reference's
+    ///                       nbm(20,i) is the SIZE OF THAT LIST, not "nbf minus metals"
+    std::vector<int> computeEtaCoordination(const std::vector<std::vector<int>>& neighbor_lists,
+                                            const std::vector<std::vector<int>>& nbm) const;
 
     /**
      * @brief Estimate per-atom "metallic character" mchar
