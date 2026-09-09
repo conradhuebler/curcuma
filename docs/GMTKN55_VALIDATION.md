@@ -106,7 +106,10 @@ Issues; 3 unit-test binaries not rebuilt since before this session) - none touch
 > An arbitration run (worst ~77 outliers, curcuma vs pprcht vs xtb) showed these are
 > **mostly genuine curcuma port errors**, not the pprcht-vs-xtb reference split that
 > dominates MOR41: 66 port errors, 5 splits (RSE43, BHPERI, DC13/ch2n2), 6 mixed (only
-> MB16-43, where pprcht and xtb themselves differ by 30-85 kcal/mol). Term fingerprints
+> MB16-43, where pprcht and xtb themselves differ by 30-85 kcal/mol - and where all three
+> engines miss the set's own published decomposition energies by a MAD of 380-400 kcal/mol,
+> so that split cannot be arbitrated and is not worth chasing; see REV_GFNFF_TODO.md #7).
+> Term fingerprints
 > split them in two: a **bond/topology-perception** family (DC13/c20bowl +564 kcal in the
 > bond term alone, AL2X6 bridged dimers, ALK8 Li clusters, HEAVY28/HEAVYSB11 heavy
 > hydrides) and a smaller set of strained/hypervalent cases (oxiranes, H2S2O7, N-ylides).

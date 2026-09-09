@@ -126,6 +126,37 @@ from the GMTKN55 structure (there one fluoride is its own fragment). The GFN-FF 
 therefore the reference-faithful `fqq` regime throughout — the comparison measures the term,
 not the guard.
 
+### 7. MB16-43 is out of reach for GFN-FF, so the pprcht-vs-xtb split there is moot
+`MB16-43` is the last large GMTKN55 residual (curcuma-vs-xtb MAD 10.4, max 105) and the one
+cluster where **pprcht and xtb disagree with each other** by 30-170 kcal/mol per structure.
+Arbitrating that split needs a yardstick, so the set's own published decomposition reactions
+(`MB16-43/.res`, e.g. `-2·E(35) -20·E(H2) +2·E(LiH) + ... = 228.1748 kcal/mol`) were computed
+with all three engines:
+
+| engine | MAD vs published reference | max |
+|---|---:|---:|
+| pprcht | **383.4** kcal/mol | 1135.6 |
+| curcuma | 384.0 | 1152.7 |
+| xtb | 398.3 | 1135.6 |
+
+(42 of 43 reactions; one engine failed on reaction 03.)
+
+**All three are wrong by two orders of magnitude more than they differ from each other.** The
+split is irrelevant for accuracy here; only port fidelity is at stake, and the reference is
+itself ambiguous, so there is nothing to chase.
+
+Pipeline validated against r²SCAN-3c on two reactions, including the worst case:
+
+| reaction | published | r²SCAN-3c | GFN-FF |
+|---|---:|---:|---:|
+| 35 | 228.2 | **228.1** | 300.1 (ppr) / 314.7 (cur) / 181.8 (xtb) |
+| 22 | 706.2 | **704.2** | −150.0 (all three) |
+
+Two contributing reasons, both structural: MB16-43 molecules are "mindless" random main-group
+species whose bonding GFN-FF was never fitted for, and several are **open-shell radicals**
+(structure 22 has 75 electrons, a doublet) which GFN-FF has no concept of at all. Same class
+as case 4 (MOR41 reaction thermochemistry), one order of magnitude worse.
+
 ## How to add to this list
 
 An entry belongs here when an **external** reference (r²SCAN-3c, GFN2, DLPNO, experiment)
