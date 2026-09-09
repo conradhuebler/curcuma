@@ -1,8 +1,19 @@
 # WP: A programmatic tool API — results, log sinks, and a richer parameter registry
 
-## Status (Sep 2026): planned, nothing implemented yet
+## Status (09.09.2026)
 
-Every work package below is open. Nothing in this document describes existing behaviour
+| WP | | |
+|---|---|---|
+| WP1 | Extend the parameter registry | **done** |
+| WP2 | Annotate what is exposed | **done** — 13 modules, 65 enum values, 15 relevance conditions |
+| WP3 | Thread-local log sink | **done** — sink plus 148 migrated prints |
+| WP4 | Per-run state instead of global | **done** — verbosity, stop, output directory |
+| WP5 | `Results()` | **partly** — the contract, `RMSDDriver`, `SimpleMD`; `opt`/`sp` and the rest are open |
+| WP6 | A measurement capability | open |
+| WP7 | Export the capability table | open |
+| WP8 | Directed external potentials | open |
+
+Anything without a "done" marker is planned and does not exist. Nothing in this document describes existing behaviour
 unless it is explicitly marked as such under "Starting point". Line numbers were measured
 on this branch (`llm-core`, based on `origin/master` at `a991adcb`) and will drift.
 
@@ -41,7 +52,7 @@ What already exists and works:
 
 What is missing, with the evidence:
 
-1. **No result contract.** `CurcumaMethod` (`src/capabilities/curcumamethod.h:35`) has
+1. **No result contract.** *(WP5: addressed for RMSDDriver and SimpleMD.)* `CurcumaMethod` (`src/capabilities/curcumamethod.h:35`) has
    `start()` but no `Results()` (`grep -c "virtual json Results"` → 0). Result documents are
    assembled in `main.cpp`, e.g. the `.rmsd.json` block. Only two drivers expose results at
    all, with different types: `TrajectoryAnalysis::getResults() -> const json&`
@@ -49,21 +60,21 @@ What is missing, with the evidence:
    const std::vector<json>&` (`analysis.h:198`). In process there is no file to read back,
    so without `Results()` the result is simply unreachable.
 
-2. **No log sink.** `CurcumaLogger` (`src/core/curcuma_logger.h:34`) is all-static and writes
+2. **No log sink.** *(WP3: done.)* `CurcumaLogger` (`src/core/curcuma_logger.h:34`) is all-static and writes
    through `fmt::print` to stdout. Beyond it, 831 raw `std::cout` sites in `src/`
    (`main.cpp` 163, `analysis.cpp` 144, `simplemd.cpp` 81).
 
-3. **Global verbosity state assumes single-threaded LIFO nesting.** `CurcumaMethod` saves
+3. **Global verbosity state assumes single-threaded LIFO nesting.** *(WP4: done.)* `CurcumaMethod` saves
    `CurcumaLogger::get_verbosity()` in its constructors (`curcumamethod.cpp:49` and `:102`)
    and restores it in the destructor. Two concurrent instances on different threads overwrite
    each other, and one destructor restores a level captured on another thread. Every
    destructor also calls `printCitations()` to stdout.
 
-4. **Cancellation goes through a file in the current directory.** `CurcumaMethod::CheckStop()`
+4. **Cancellation goes through a file in the current directory.** *(WP4: done, `requestStop()`.)* `CurcumaMethod::CheckStop()`
    (`curcumamethod.cpp:263`) tests for a file named `stop` in the CWD. That is process-global:
    one stop aborts every concurrent run, and a leftover file aborts the next one at step 0.
 
-5. **BMT writes into the caller's directory.** Each run creates
+5. **BMT writes into the caller's directory.** *(WP4: done, `pinOutputDir()`.)* Each run creates
    `Basename.Keyword.TIMESTAMP/` unless suppressed.
 
 6. **The parameter registry does not know enough for a schema.** Five gaps:
