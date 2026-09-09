@@ -181,6 +181,67 @@ against xtb's 58.
 Same conclusion as case 7 (MB16-43) and case 4 (MOR41): where the two references disagree,
 they are both far enough from reality that the disagreement carries no information.
 
+### 9. The pprcht-vs-xtb split sits almost entirely outside what GFN-FF can do
+
+The whole GMTKN55 sweep was re-evaluated as REACTIONS rather than single points: each
+subset's `.res` file is a `tmer2++` script that carries both the stoichiometry and the
+published high-level reference value, so every reaction can be scored from the cached
+single points. Pipeline checks: it reproduces the AL2X6 dimerisation numbers of entry 8
+exactly, and r2SCAN-3c reproduces the published value on the three reactions run below
+(0.3 / 3.2 / 16 kcal/mol).
+
+**Where GFN-FF is usable, the two references are indistinguishable:**
+
+| reaction class | n | MAD curcuma | MAD xtb | max split | split > 1 kcal |
+|---|---:|---:|---:|---:|---:|
+| pure conformers | 285 | 1.49 | 1.47 | 5.13 | 1 |
+| non-covalent complexes | 239 | 9.41 | 9.41 | 0.01 | 0 |
+| isomerisations | 102 | 28.10 | 28.12 | 8.38 | 2 |
+| charged non-covalent | 63 | 33.81 | 33.78 | 1.03 | 4 |
+| bond breaking / atomisation / open shell | 397 | 118.96 | 120.58 | ~170 | 39 |
+
+GFN-FF is genuinely accurate only for conformers (1.5 kcal/mol), and there the two
+implementations differ by more than 1 kcal/mol on exactly ONE of 285 reactions. For
+non-covalent complexes they agree to 0.01 kcal/mol. The split lives in the last row.
+
+**Where the split IS large, pprcht is usually the better one** — over all 541 evaluable
+reactions, restricted to those where the two implementations disagree:
+
+| split threshold | n | curcuma closer | xtb closer | mean split | mean own error |
+|---|---:|---:|---:|---:|---:|
+| > 1 kcal/mol | 42 | 21 | 21 | 24.0 | 228.5 |
+| > 5 kcal/mol | 22 | 15 | 7 | 43.7 | 290.4 |
+| > 20 kcal/mol | 11 | 10 | 1 | 75.4 | 404.2 |
+
+**The decisive single case** is the largest split in the set, MB16-43 reaction 41
+(`-2*[41] -16 H2 +4 BH3 +6 CH4 +F2 +2 NaH +2 AlH3 +2 S2`; structure 41 is a doublet and
+S2 a triplet, so GFN-FF is doubly out of its depth):
+
+| method | kcal/mol |
+|---|---:|
+| published (GMTKN55) | +160.29 |
+| r2SCAN-3c | **+176.33** |
+| curcuma = pprcht | +146.04 |
+| xtb | **-23.04** |
+
+pprcht is in the right range with the right sign; xtb has the wrong sign and is ~190
+kcal/mol out. Two smaller checks, for contrast:
+
+| reaction | published | r2SCAN-3c | curcuma | xtb |
+|---|---:|---:|---:|---:|
+| ISOL24 i11 (isomerisation) | +36.90 | +33.71 | +89.27 | +97.65 |
+| ICONF N3P3H12 (conformer) | +12.16 | +11.88 | -8.00 | -2.87 |
+
+The ICONF case is the one conformer where the split matters (5.1 kcal/mol) — and there
+BOTH implementations get the sign wrong, xtb merely less badly. So the pattern is not
+uniform; it is a tendency that only becomes clear at the extreme end.
+
+**Verdict**: tracking pprcht rather than xtb is supported by the external references, most
+clearly at the biggest divergences. But this is not where GFN-FF's error lives. Chasing
+the remaining split further would buy nothing for any application the method is suited to,
+and the numbers above are the reason MB16-43 and AL2X6 are treated as closed
+(entries 7 and 8).
+
 ## How to add to this list
 
 An entry belongs here when an **external** reference (r²SCAN-3c, GFN2, DLPNO, experiment)
