@@ -28,6 +28,7 @@
 
 /* Claude Generated 2025: QMDFFfit Parameter Registry - replaces static QMDFFFitJson */
 BEGIN_PARAMETER_DEFINITION(qmdfffit)
+MODULE_INFO("Fit QMDFF force-field parameters to a reference structure.", "Calculation", {"qmdfffit"})
     PARAM(method, String, "gfn2", "QM method for initial force field.", "General", {})
     PARAM(hessian_file, String, "hessian.json", "Input Hessian file.", "Input", {"hessian"})
     PARAM(charges_file, String, "scf.json", "Input charges file.", "Input", {"charges"})

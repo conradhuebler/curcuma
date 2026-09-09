@@ -1095,7 +1095,8 @@ private:
 // ===== Parameter Definitions =====
 
 BEGIN_PARAMETER_DEFINITION(eeq_solver)
-    PARAM(accuracy, String, "normal", "Accuracy profile: loose|normal|medium|high. Maps to solver tolerances and iteration limits.", "Basic", {})
+    PARAM(accuracy, String, "normal", "Accuracy profile: loose|normal|medium|high. Maps to solver tolerances and iteration limits.", "Basic", {},
+        "enum=loose|normal|medium|high")
     PARAM(allow_unconverged_charges, Bool, false, "Allow calculation to continue with unconverged charges (warn instead of abort).", "Advanced", {})
     PARAM(skip_phase2, Bool, false, "Skip Phase 2 EEQ refinement and use Phase 1 topology charges directly. Faster but less accurate.", "Advanced", {})
     PARAM(max_iterations, Int, 50,

@@ -231,7 +231,8 @@ void printGFNFFParamGenReport(const GFNFFParamGenReport& r);
 // energy +1.63 kcal. At 10 Bohr the CN is converged and matches the reference; the SP
 // bond energy is bit-identical to the legacy per-bond path (which used the full CN).
 BEGIN_PARAMETER_DEFINITION(gfnff)
-PARAM(accuracy, String, "normal", "Accuracy profile: loose|normal|medium|high. Maps to EEQ and CN parameters.", "Basic", {})
+PARAM(accuracy, String, "normal", "Accuracy profile: loose|normal|medium|high. Maps to EEQ and CN parameters.", "Basic", {},
+        "enum=loose|normal|medium|high")
 PARAM(allow_unconverged_charges, Bool, false, "Allow calculation to continue with unconverged EEQ charges (warn instead of abort).", "Advanced", {})
 PARAM(skip_phase2, Bool, false, "Skip Phase 2 EEQ refinement and use Phase 1 topology charges directly. Faster but less accurate.", "Advanced", {})
 PARAM(cn_cutoff_bohr, Double, 10.0, "CN neighbor list cutoff radius in Bohr (reference cnthr=100 Bohr^2=10 Bohr). 0 = use accuracy-based threshold instead.", "Advanced", {})
