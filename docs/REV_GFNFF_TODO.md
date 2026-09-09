@@ -72,6 +72,25 @@ keeps pass 1's fragmentation, `gfnff_ini.f90:467`), because that is both faithfu
 smaller error. Affects the whole charged-complex family: AHB21, BH76 SN2 transition states,
 G21EA, SIE4x4, CHB6.
 
+### 3b. Carbene angle: GFN-FF bends CH2- 30 deg wrong either way
+Bending scan of the methylene anion CH2- (C-H fixed at 1.129 A, H-C-H varied), relative
+energies in kcal/mol:
+
+| H-C-H | GFN-FF carbene (θ0=145) | GFN-FF reference (θ0=120) | GFN2 | r²SCAN-3c |
+|---:|---:|---:|---:|---:|
+| 90 | 13.77 | 10.42 | 2.56 | 1.58 |
+| **100** | 8.87 | 5.72 | **0.00** | **0.00** |
+| 110 | 5.27 | 2.62 | 1.66 | 1.14 |
+| 120 | 2.77 | 0.81 | 6.65 | 4.57 |
+| 130 | 1.17 | **0.00** | 14.27 | 9.72 |
+| 145 | **0.00** | 0.02 | 28.81 | 19.02 |
+
+GFN2 and r²SCAN-3c agree on a minimum at **100°** (experiment ~102°). The reference-faithful
+treatment minimises at 130°, the carbene one at 145° — so restoring port fidelity (Known
+Issue #18) also moved GFN-FF *towards* the truth, unlike case 3. But 130° vs 100° is still a
+30° error: GFN-FF has no equilibrium angle that fits a bent carbanion. Unlike case 3 there is
+no conflict here, only a ceiling.
+
 ### 4. GFN-FF cannot do MOR41 reaction thermochemistry at all
 Against DLPNO-CCSD(T) (Table S1, 41 reactions): pprcht MAD 62.6, curcuma 63.1, xtb 71.7
 kcal/mol, where GFN2 reaches ~12. A method limitation, not a port issue — recorded so nobody

@@ -7213,7 +7213,17 @@ std::vector<int> GFNFF::determineHybridizationFortran(const GFNFFTopology& topo,
     const auto& nbf = topo.nb_full;
     const auto& nbhc = topo.nb_hc;
     const auto& nbm = topo.nb_nometal;
-    const bool have_qa = (topo.topology_charges.size() == m_atomcount);
+    // CORRECTED (Sep 2026): in the reference `topo%qa` is a member that SURVIVES the q-loop,
+    // so pass 2's hybridization sees pass 1's charges. Here topo_info is rebuilt per pass and
+    // its topology_charges are still empty at this point (the Phase-1 EEQ runs later in the
+    // same function), so the carbene charge override below could never fire. m_bond_qa already
+    // carries exactly those pass-1 charges for the radius shrink - use them as the fallback.
+    const bool topo_has_qa = (topo.topology_charges.size() == m_atomcount);
+    const bool carry_has_qa = (static_cast<int>(m_bond_qa.size()) == m_atomcount);
+    const bool have_qa = topo_has_qa || carry_has_qa;
+    auto qa_of = [&](int i) -> double {
+        return topo_has_qa ? topo.topology_charges(i) : m_bond_qa[i];
+    };
 
     std::vector<int> hyb(m_atomcount, 0);
 
@@ -7257,7 +7267,7 @@ std::vector<int> GFNFF::determineHybridizationFortran(const GFNFFTopology& topo,
                 } else {
                     hyb[i] = 1;      // linear triple bond etc
                 }
-                if (have_qa && topo.topology_charges(i) < -0.4) {
+                if (have_qa && qa_of(i) < -0.4) {
                     hyb[i] = 2;
                     itag[i] = 0;
                 }
@@ -8791,11 +8801,14 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
      * Pass 1 runs with qa = 0 (gfnff_ini.f90:258), pass 2 re-derives the topology with the
      * pass-1 charges shrinking the bond radii.
      *
-     * The charges only ever reach the rest of the model THROUGH the bond list, so if the
-     * shrink does not change a single bond, pass 2 is a mathematical no-op and pass 1 is
-     * already the converged answer. Verified against an instrumented Fortran build: the
-     * bond list changes between passes on exactly 1 of 95 MOR41 structures (PR40). So the
-     * expensive second pass is gated on the bond list actually changing.
+     * The charges reach the rest of the model through exactly two channels (gfnff_ini2.f90):
+     * the bond-radius shrink at :122, and the carbene charge override at :250
+     * (`qa < -0.4` -> hyb=2, itag=0 for a two-coordinate group-4 atom). If neither can change
+     * anything, pass 2 is a mathematical no-op and pass 1 is already the converged answer.
+     * Verified against an instrumented Fortran build: the bond list changes between passes on
+     * exactly 1 of 95 MOR41 structures (PR40). So the expensive second pass is gated on one of
+     * the two channels actually firing. (Until Sep 2026 the gate knew only about the bond
+     * list, which silently skipped the carbene override - see the comment at the gate.)
      *
      * That gate is also a correctness safeguard: calculateTopologyInfoOnce() is NOT
      * currently re-entrant (a second invocation converges to a slightly different Coulomb
@@ -8818,8 +8831,28 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
                      topo.topology_charges.data() + m_atomcount);
     m_cached_bond_list.reset();  // re-detect with charge-shrunk radii
 
-    if (getCachedBondList() == bonds_pass1) {
-        return topo;  // shrink changed nothing - pass 2 would be a no-op
+    // CORRECTED (Sep 2026): the bond list is NOT the only channel. topo%qa reaches the
+    // perception at exactly two places in gfnff_ini2.f90 - the radius shrink at :122 (covered
+    // by the bond-list comparison above) and the carbene charge override at :250,
+    // `if (topo%qa(i) < -0.4) then hyb=2; itag=0`, for a group-4 atom with two neighbours.
+    // Pass 1 runs with qa = 0, so that override can only ever fire in pass 2. Skipping pass 2
+    // therefore left GMTKN55 G21EA/EA_9 (the methylene anion CH2-, H-C-H = 99.9 deg) tagged as
+    // a carbene: theta0 = 145 instead of the reference's 120, and dxi = -0.15 on top, worth
+    // 3.4 kcal/mol in the angle term and 28.1 in Coulomb.
+    bool carbene_override_pending = false;
+    {
+        const auto& nb_p1 = topo.neighbor_lists;
+        for (int i = 0; i < m_atomcount && !carbene_override_pending; ++i) {
+            const int z = m_atoms[i];
+            if (z < 1 || z > 86) continue;
+            if (GFNFFParameters::periodic_group[z - 1] != 4) continue;
+            if (i >= static_cast<int>(nb_p1.size()) || nb_p1[i].size() != 2) continue;
+            if (topo.topology_charges(i) < -0.4) carbene_override_pending = true;
+        }
+    }
+
+    if (getCachedBondList() == bonds_pass1 && !carbene_override_pending) {
+        return topo;  // neither channel changed - pass 2 would be a no-op
     }
 
     if (CurcumaLogger::get_verbosity() >= 2) {
@@ -10551,6 +10584,12 @@ bool GFNFF::calculateDxi(TopologyInfo& topo_info) const
     // Also fixed off-by-one: was using covalent_radii[z] instead of [z-1]
     EEQSolver::TopologyInput eeq_topology;
     eeq_topology.neighbor_lists = topo_info.neighbor_lists;
+    // Real Fortran itag, so calculateDxi's carbene rule tests the tag the hybridization
+    // routine actually set instead of re-deriving it from the bond angle. Without it the
+    // methylene anion CH2- (GMTKN55 G21EA/EA_9) kept dxi = -0.15 in the second q-loop pass
+    // even though the qa < -0.4 override had already cleared its carbene tag - 26.8 kcal/mol
+    // in the Coulomb term, exactly q(C) * 0.15.
+    eeq_topology.itag = topo_info.itag;
     eeq_topology.covalent_radii.resize(m_atomcount);
     for (int i = 0; i < m_atomcount; ++i) {
         int z = m_atoms[i];
