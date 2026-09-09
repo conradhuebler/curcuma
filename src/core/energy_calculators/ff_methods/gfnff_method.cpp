@@ -4211,8 +4211,29 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // This is equivalent to: fqq = 1.0 + qfacbm0 * tanh(15*qafac/2)
     double qfacbm0 = 0.047;  // Fortran gfnff_param.f90:772
     double qafac = qa1 * qa2 * 70.0;
-    double exp_term = std::exp(-15.0 * qafac);
-    fqq = 1.0 + qfacbm0 * exp_term / (1.0 + exp_term);
+    const double t = -15.0 * qafac;
+    // DELIBERATE DEVIATION from the reference (see docs/REV_GFNFF_TODO.md #10).
+    // The reference writes the logistic naively as exp(t)/(1+exp(t)). For a strongly
+    // ionic bond that overflows: |qa_i * qa_j| > 0.675 already puts t past 709, exp(t)
+    // becomes +Inf and Inf/(1+Inf) is NaN — the bond force constant, the bond energy and
+    // the whole single point follow. GMTKN55 PX13/hf_4_ts and hf_6_ts (cyclic (HF)n
+    // proton-transfer transition states, qa = +-1.007 on every atom) return NaN from
+    // pprcht AND from xtb for exactly this reason; the number the GMTKN55 harness records
+    // for them from xtb is the angle term alone. This is a numerical accident, not a
+    // fitted quirk — no parametrisation was ever done against a NaN — so curcuma clamps
+    // instead. The branch is bit-identical to the reference wherever the reference
+    // produces a finite value; it only replaces the overflow by the analytic limit
+    // (logistic -> 1 as t -> +inf, -> 0 as t -> -inf). Claude Generated (Sep 2026).
+    double logistic;
+    if (t > 300.0) {
+        logistic = 1.0;
+    } else if (t < -300.0) {
+        logistic = 0.0;
+    } else {
+        const double exp_term = std::exp(t);
+        logistic = exp_term / (1.0 + exp_term);
+    }
+    fqq = 1.0 + qfacbm0 * logistic;
 
     // Step 7: Phase 6 - Ring strain corrections and XH special cases
     // Reference: Fortran gfnff_ini.f90:1150-1165, 1278-1279

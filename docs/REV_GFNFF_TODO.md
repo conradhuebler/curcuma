@@ -242,6 +242,64 @@ the remaining split further would buy nothing for any application the method is 
 and the numbers above are the reason MB16-43 and AL2X6 are treated as closed
 (entries 7 and 8).
 
+### 10. The bond charge factor `fqq` overflows to NaN for strongly ionic bonds
+
+**curcuma deviates by default.** The reference writes the logistic naively
+(`gfnff_ini.f90`, non-metal bond branch):
+
+    qafac = qa(i)*qa(j)*70
+    fqq   = 1 + qfacbm0 * exp(-15*qafac) / (1 + exp(-15*qafac))
+
+For an ionic bond that overflows. `|qa_i * qa_j| > 0.675` already puts the exponent past
+709, `exp` returns +Inf, and `Inf/(1+Inf)` is NaN — so the force constant, the bond energy
+and the entire single point become NaN. GMTKN55 `PX13/hf_4_ts` and `hf_6_ts` (cyclic (HF)n
+proton-transfer transition states with qa = +-1.007 on every atom) return **NaN from
+pprcht AND from xtb**; the value the GMTKN55 harness records from xtb for them is the
+angle term alone, i.e. junk.
+
+curcuma clamps the logistic to its analytic limits outside `|t| <= 300`. The branch is
+**bit-identical** wherever the reference produces a finite number — verified over all 2460
+GMTKN55 structures that pprcht can evaluate: MAD 0.01230, max 26.9978, and the same
+per-threshold counts before and after the change, with only the two NaN structures moving
+from "curcuma has no energy" to "pprcht has no energy". No parametrisation was ever done
+against a NaN, so this is a numerical accident and not a fitted quirk, which is why it is
+the default rather than opt-in.
+
+**It buys correctness, not accuracy.** The two structures now yield finite energies, and
+the PX13 barriers they complete show what those energies are worth:
+
+| (HF)n proton transfer | published | curcuma | xtb |
+|---|---:|---:|---:|
+| hf_2 | 42.3 | 66.8 | 66.8 |
+| hf_3 | 20.7 | 137.6 | 137.6 |
+| hf_4 | 14.7 | **223.1** | 404.3 (junk) |
+| hf_5 | 14.6 | 220.0 | 220.0 |
+| hf_6 | 16.6 | **293.2** | 609.7 (junk) |
+
+GFN-FF is 3-18x out on every one of these — it cannot describe a transition state where
+the bonding topology changes. The guard replaces "no number at all" with "a number that is
+as wrong as its neighbours", which is the right behaviour for an optimiser or an MD that
+would otherwise abort, and nothing more.
+
+**A harness bug found on the way.** `xtb` prints `TOTAL ENERGY NaN Eh` for these two
+structures but still prints finite values for the individual terms above it, and
+`scripts/gmtkn55_compare.py`'s last-resort parser scanned every line containing "energy"
+and took the first number followed by "Eh" — the ANGLE energy. So the comparison recorded
+`PX13/hf_4_ts` from xtb as -0.000479853103 Eh, a fabricated number, and the two "xtb"
+columns of the table above (404.3 and 609.7) came from it. The parser now detects NaN and
+reports a failure instead. Anything that reads an external code's output needs to fail
+loudly when that code fails; a fallback that keeps looking until it finds *a* number will
+eventually find the wrong one.
+
+**What the whole port campaign bought, honestly.** The reaction-level numbers of entry 9
+are the answer: over 285 conformer reactions curcuma sits at MAD 1.49 kcal/mol and xtb at
+1.47; over 239 non-covalent complexes both are at 9.41. curcuma, pprcht and xtb are
+indistinguishable in accuracy. The port fixes moved curcuma from *a wrong implementation*
+of GFN-FF (up to 500 kcal/mol on a single structure) to *a correct* one, which is worth
+doing because nothing downstream — MD, conformer search, optimisation — can be reasoned
+about otherwise. It did not, and could not, make GFN-FF more accurate. Any real accuracy
+gain has to come from the deliberate deviations collected in this file.
+
 ## How to add to this list
 
 An entry belongs here when an **external** reference (r²SCAN-3c, GFN2, DLPNO, experiment)

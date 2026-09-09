@@ -116,15 +116,21 @@ def parse_curcuma_energy(stdout):
 
 
 def parse_xtb_energy(stdout):
+    """Total energy from an xtb run, or None if xtb did not produce one.
+
+    NaN handling (Sep 2026): GFN-FF's bond charge factor overflows to NaN for strongly
+    ionic bonds, and xtb then prints "TOTAL ENERGY NaN Eh" while still printing finite
+    numbers for the individual terms above it. The old loose fallback scanned every line
+    containing "energy" and took the first number followed by "Eh", which for such a run
+    silently returned the ANGLE energy as the total — that is how PX13/hf_4_ts entered
+    this comparison as -0.000479853103 Eh instead of as a failure. Detect NaN first, and
+    keep the fallback anchored to a total-energy line.
+    """
+    if re.search(r"(?i)total energy\s*:?\s*N[Aa]N", stdout):
+        return None
     m = re.search(r"TOTAL ENERGY[^\n]*?(-?\d+\.\d+)\s*Eh", stdout)
     if not m:
-        m = re.search(r"total energy\s*:\s*(-?\d+\.\d+)\s*Eh", stdout)
-    if not m:
-        for line in stdout.splitlines():
-            if "energy" in line.lower():
-                mm = re.search(r"(-?\d+\.\d+)\s*Eh", line)
-                if mm:
-                    return float(mm.group(1))
+        m = re.search(r"total energy\s*:?\s*(-?\d+\.\d+)\s*Eh", stdout)
     return float(m.group(1)) if m else None
 
 
