@@ -16,6 +16,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  */
+#include <numeric>
 #include "rmsd/rmsd_functions.h"
 #include "src/core/global.h" // For CurcumaLogger - Claude Generated
 #include "src/core/citation_registry.h"
@@ -1747,4 +1748,31 @@ Geometry RMSDDriver::Gradient() const
         return g / (RMSD() * (wsum > 0 ? wsum : 1.0));
     }
     return (m_reference.getGeometry() - m_target.getGeometry()) / (RMSD() * m_target.getGeometry().rows());
+}
+
+// Claude Generated 2026 - The document main.cpp used to assemble, now where the
+// data is. Deliberately the exact same set of keys, so the .rmsd.json the CLI
+// writes is unchanged: the caller adds only what it alone knows, the file names.
+// Pure -- writes nothing.
+json RMSDDriver::Results() const
+{
+    json result;
+    result["rmsd"] = m_rmsd;
+    result["rmsd_raw"] = RMSDRaw();
+
+    // Identity when no reordering ran, so a consumer always gets a usable mapping
+    // rather than having to special-case an empty one. The atom count is the
+    // driver's knowledge, which is why the fill belongs here and not in the caller.
+    std::vector<int> permutation = ReorderRules();
+    if (permutation.empty()) {
+        permutation.resize(ReferenceAligned().AtomCount());
+        std::iota(permutation.begin(), permutation.end(), 0);
+    }
+    result["permutation"] = permutation;
+
+    result["reference_xyz"] = ReferenceAligned().XYZString();
+    // The geometry whose deviation equals RMSD(): reordered and aligned, or the
+    // plain best fit when no reorder ran.
+    result["reorder_xyz"] = TargetForRMSD().XYZString();
+    return result;
 }

@@ -80,6 +80,22 @@ public:
     void UpdateController(const json& controller);
 
     virtual void start() = 0; // TODO make pure virtual and move all main action here
+
+    /// Machine-readable outcome of this run.
+    ///
+    /// Claude Generated 2026 - Results were assembled in main.cpp, so anything that
+    /// was not the CLI had to re-derive them or scrape the files the CLI wrote. A
+    /// caller embedding curcuma gets nothing at all: in-process there is no file to
+    /// read back.
+    ///
+    /// PURE by contract: it returns what was computed and never touches the
+    /// filesystem. Writing artefacts stays with the caller, because a GUI running a
+    /// dozen analyses must not have a dozen files appear in the user's project as a
+    /// side effect of asking for a number.
+    ///
+    /// The default is an empty object -- a driver that has not been given one yet
+    /// says so, rather than pretending to have answered.
+    virtual json Results() const { return json::object(); }
     virtual void printHelp() const { std::cout << "No help available for this method." << std::endl; };
 
     bool CheckStop() const;
