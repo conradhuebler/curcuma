@@ -453,11 +453,11 @@ void SimpleMD::LoadControlJson()
         // m_coupling = m_dT;
         m_rattle = m_config.get<int>("rattle");
         if (m_verbosity >= 1) {
-            std::cout << "Using rattle to constrain bonds!" << std::endl;
+            CurcumaLogger::raw("Using rattle to constrain bonds!");
             if (m_rattle_12)
-                std::cout << "Using rattle to constrain 1,2 distances!" << std::endl;
+                CurcumaLogger::raw("Using rattle to constrain 1,2 distances!");
             if (m_rattle_13)
-                std::cout << "Using rattle to constrain 1,3 distances between two bonds!" << std::endl;
+                CurcumaLogger::raw("Using rattle to constrain 1,3 distances between two bonds!");
         }
 
     } else {
@@ -472,13 +472,13 @@ void SimpleMD::LoadControlJson()
             return this->CleanEnergy();
         };
         if (m_verbosity >= 1)
-            std::cout << "Energy Calculator will be set up for each step! Single steps are slower, but more reliable. Recommended for the combination of GFN2 and solvation." << std::endl;
+            CurcumaLogger::raw("Energy Calculator will be set up for each step! Single steps are slower, but more reliable. Recommended for the combination of GFN2 and solvation.");
     } else {
         Energy = [=]() -> double {
             return this->FastEnergy();
         };
         if (m_verbosity >= 1)
-            std::cout << "Energy Calculator will NOT be set up for each step! Fast energy calculation! This is the default way and should not be changed unless the energy and gradient calculation are unstable (happens with GFN2 and solvation)." << std::endl;
+            CurcumaLogger::raw("Energy Calculator will NOT be set up for each step! Fast energy calculation! This is the default way and should not be changed unless the energy and gradient calculation are unstable (happens with GFN2 and solvation).");
     }
 
     // Claude Generated 2025: Wall Potential Parameters - Enum-based selection
@@ -509,8 +509,7 @@ void SimpleMD::LoadControlJson()
                 break;
         }
         if (m_verbosity >= 1)
-            std::cout << "Setting up spherical potential" << std::endl;
-
+            CurcumaLogger::raw("Setting up spherical potential");
     } else if (wall_geom == WallGeometry::Rect) {
         switch (wall_pot) {
             case WallPotentialType::LogFermi:
@@ -529,7 +528,7 @@ void SimpleMD::LoadControlJson()
                 break;
         }
         if (m_verbosity >= 1)
-            std::cout << "Setting up rectangular potential" << std::endl;
+            CurcumaLogger::raw("Setting up rectangular potential");
     } else {
         WallPotential = [=]() -> double {
             return 0;
@@ -606,7 +605,7 @@ bool SimpleMD::Initialise()
     } else if (m_seed == 0)
         m_seed = m_natoms * m_T0;
     if (m_verbosity >= 1)
-        std::cout << "Random seed is " << m_seed << std::endl;
+        CurcumaLogger::raw("Random seed is ", m_seed);
     gen.seed(m_seed);
 
     if (m_initfile != "none") {
@@ -694,7 +693,7 @@ bool SimpleMD::Initialise()
     } else if (m_seed == 0)
         m_seed = m_T0 * m_natoms;
     if (m_verbosity >= 1)
-        std::cout << "Random seed is " << m_seed << std::endl;
+        CurcumaLogger::raw("Random seed is ", m_seed);
     gen.seed(m_seed);
 
 
@@ -729,13 +728,10 @@ bool SimpleMD::Initialise()
     m_molecule.setCharge(0);
     if (!m_nocenter) {
         if (m_verbosity >= 1)
-            std::cout << "Move stucture to the origin ... " << std::endl;
+            CurcumaLogger::raw("Move stucture to the origin ... ");
         m_molecule.Center(m_COM);
     } else if (m_verbosity >= 1)
-        std::cout << "Move stucture NOT to the origin ... " << std::endl;
-
-
-
+        CurcumaLogger::raw("Move stucture NOT to the origin ... ");
     if (!m_restart) {
         m_eigen_geometry = Eigen::MatrixXd::Zero(m_natoms, 3);
         m_eigen_velocities = Eigen::MatrixXd::Zero(m_natoms, 3);
@@ -971,16 +967,16 @@ bool SimpleMD::Initialise()
         }
         if (m_restart) {
             if (m_verbosity >= 1) {
-                std::cout << "Reading structure files from " << m_rmsd_ref_file << std::endl;
+                CurcumaLogger::raw("Reading structure files from ", m_rmsd_ref_file);
                 for (const auto& i : m_bias_json)
-                    std::cout << i << std::endl;
+                    CurcumaLogger::raw(i);
             }
             FileIterator file(m_rmsd_ref_file);
             int index = 0;
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
                 if (m_verbosity >= 1)
-                    std::cout << m_bias_json[index] << std::endl;
+                    CurcumaLogger::raw(m_bias_json[index]);
                 int thread_index = index % m_bias_threads.size();
                 m_bias_threads[thread_index]->addGeometry(mol.getGeometry(), m_bias_json[index]);
                 ++index;
@@ -989,7 +985,7 @@ bool SimpleMD::Initialise()
         } else {
             if (m_rmsd_ref_file != "none") {
                 if (m_verbosity >= 1)
-                    std::cout << "Reading structure files from " << m_rmsd_ref_file << std::endl;
+                    CurcumaLogger::raw("Reading structure files from ", m_rmsd_ref_file);
                 int index = 0;
 
                 FileIterator file(m_rmsd_ref_file);
@@ -1342,7 +1338,7 @@ void SimpleMD::InitialiseWalls()
     }
     if (m_wall_render) {
         if (m_verbosity >= 1)
-            std::cout << "render walls" << std::endl;
+            CurcumaLogger::raw("render walls");
         if (m_wall_type == 1) {
             Position x0 = Position{ m_wall_spheric_radius, 0, 0 };
             Position x1 = Position{ -m_wall_spheric_radius, 0, 0 };
@@ -1936,8 +1932,7 @@ void SimpleMD::prepareRun()
     if (thermo == ThermostatType::None) {
         ThermostatFunction = [this] { None(); };
         if (m_verbosity >= 1)
-            std::cout << "No Thermostat applied\n"
-                      << std::endl;
+            CurcumaLogger::raw("No Thermostat applied\n");
     }
 
     m_Epot = Energy();
@@ -2468,7 +2463,7 @@ bool SimpleMD::step()
             if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
                 m_eval_mtd = true;
                 if (m_verbosity >= 1)
-                    std::cout << "Starting with MetaDynamics ..." << std::endl;
+                    CurcumaLogger::raw("Starting with MetaDynamics ...");
             }
         }
     }
@@ -2532,7 +2527,7 @@ bool SimpleMD::step()
             }
         } else if (!write && m_rescue && m_run_states.size() > (1 - m_current_rescue)) {
             if (m_verbosity >= 1)
-                std::cout << "Molecule exploded, resetting to previous state ..." << std::endl;
+                CurcumaLogger::raw("Molecule exploded, resetting to previous state ...");
             LoadRestartInformation(m_run_states[m_run_states.size() - 1 - m_current_rescue]);
             Geometry geometry = m_molecule.getGeometry();
             for (int i = 0; i < m_natoms; ++i) {
@@ -2635,9 +2630,9 @@ void SimpleMD::finalizeRun()
 
     PrintStatus();
     if (m_thermostat == "csvr" && m_verbosity >= 1)
-        std::cout << "Exchange with heat bath " << m_Ekin_exchange << "Eh" << std::endl;
+        CurcumaLogger::raw("Exchange with heat bath ", m_Ekin_exchange, "Eh");
     if (m_dipole && m_verbosity >= 1) {
-        std::cout << "Calculated averaged dipole moment " << m_aver_dipol_linear * 2.5418 << " Debye and " << m_aver_dipol_linear * 2.5418 * 3.3356 << " Cm [e-30]" << std::endl;
+        CurcumaLogger::raw("Calculated averaged dipole moment ", m_aver_dipol_linear * 2.5418, " Debye and ", m_aver_dipol_linear * 2.5418 * 3.3356, " Cm [e-30]");
     }
 
 #ifdef USE_Plumed
@@ -2647,13 +2642,12 @@ void SimpleMD::finalizeRun()
 #endif
     if (m_rmsd_mtd) {
         if (m_verbosity >= 1)
-            std::cout << "Sum of Energy of COLVARs:" << std::endl;
+            CurcumaLogger::raw("Sum of Energy of COLVARs:");
         for (int i = 0; i < m_bias_threads.size(); ++i) {
             auto structures = m_bias_threads[i]->getBiasStructure();
             for (int j = 0; j < structures.size(); ++j) {
                 if (m_verbosity >= 1)
-                    std::cout << structures[j].rmsd_reference << "\t" << structures[j].energy << "\t" << structures[j].counter / static_cast<double>(m_colvar_incr) * 100 << std::endl;
-
+                    CurcumaLogger::raw(structures[j].rmsd_reference, "\t", structures[j].energy, "\t", structures[j].counter / static_cast<double>(m_colvar_incr) * 100);
                 m_rmsd_mtd_molecule.setGeometry(structures[j].geometry);
                 m_rmsd_mtd_molecule.setEnergy(structures[j].energy);
                 m_rmsd_mtd_molecule.setName(std::to_string(structures[j].index) + " " + std::to_string(structures[j].rmsd_reference));
@@ -2828,7 +2822,7 @@ void SimpleMD::AdjustRattleTolerance()
     else if (m_aver_rattle_Temp < m_T0)
         m_rattle_tol_12 += 0.01;
     if (m_verbosity >= 1)
-        std::cout << m_rattle_counter << " " << m_aver_rattle_Temp << " " << m_rattle_tol_12 << std::endl;
+        CurcumaLogger::raw(m_rattle_counter, " ", m_aver_rattle_Temp, " ", m_rattle_tol_12);
     m_rattle_tol_12 = std::abs(m_rattle_tol_12);
     m_rattle_counter = 0;
     m_aver_rattle_Temp = 0;
@@ -2931,7 +2925,7 @@ void SimpleMD::Verlet()
             if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
                 m_eval_mtd = true;
                 if (m_verbosity >= 1)
-                    std::cout << "Starting with MetaDynamics ..." << std::endl;
+                    CurcumaLogger::raw("Starting with MetaDynamics ...");
             }
         }
     }
@@ -3177,7 +3171,7 @@ void SimpleMD::Rattle()
             if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
                 m_eval_mtd = true;
                 if (m_verbosity >= 1)
-                    std::cout << "Starting with MetaDynamics ..." << std::endl;
+                    CurcumaLogger::raw("Starting with MetaDynamics ...");
             }
         }
     }
@@ -3811,7 +3805,7 @@ void SimpleMD::EvaluateBias(bool do_deposit)
         m_bias_structure_count++;
         m_rmsd_mtd_molecule.appendXYZFile(outputPath(Basename() + ".mtd.xyz"));
         if (m_verbosity >= 1)
-            std::cout << m_bias_structure_count << " stored structures currently" << std::endl;
+            CurcumaLogger::raw(m_bias_structure_count, " stored structures currently");
     }
     m_end = std::chrono::system_clock::now();
     int m_time = std::chrono::duration_cast<std::chrono::milliseconds>(m_end - m_start).count();
@@ -3987,8 +3981,8 @@ double SimpleMD::ApplySphericHarmonicWalls()
         /*
         if(out)
         {
-            std::cout << m_eigen_geometry.data()[3 * i + 0]  << " " << m_eigen_geometry.data()[3 * i + 1]  << " " << m_eigen_geometry.data()[3 * i + 2] << std::endl;
-            std::cout << dx << " " << dy << " " << dz << std::endl;
+            CurcumaLogger::raw(m_eigen_geometry.data()[3 * i + 0], " ", m_eigen_geometry.data()[3 * i + 1], " ", m_eigen_geometry.data()[3 * i + 2]);
+            CurcumaLogger::raw(dx, " ", dy, " ", dz);
         }*/
         // std::cout << distance << " ";
         potential += curr_pot;
@@ -4053,8 +4047,8 @@ double SimpleMD::ApplyRectHarmonicWalls()
         m_eigen_gradient.data()[3 * i + 2] += dz;
         /* if(out)
          {
-             std::cout << m_eigen_geometry.data()[3 * i + 0]  << " " << m_eigen_geometry.data()[3 * i + 1]  << " " << m_eigen_geometry.data()[3 * i + 2] << std::endl;
-             std::cout << dx << " " << dy << " " << dz << std::endl;
+             CurcumaLogger::raw(m_eigen_geometry.data()[3 * i + 0], " ", m_eigen_geometry.data()[3 * i + 1], " ", m_eigen_geometry.data()[3 * i + 2]);
+             CurcumaLogger::raw(dx, " ", dy, " ", dz);
          }*/
         sum_grad += std::abs(dx) + std::abs(dy) + std::abs(dz);
 
@@ -4318,9 +4312,9 @@ void SimpleMD::PrintStatus() const
 
 void SimpleMD::PrintMatrix(const double* matrix) const
 {
-    std::cout << "Print Matrix" << std::endl;
+    CurcumaLogger::raw("Print Matrix");
     for (int i = 0; i < m_natoms; ++i) {
-        std::cout << matrix[3 * i] << " " << matrix[3 * i + 1] << " " << matrix[3 * i + 2] << std::endl;
+        CurcumaLogger::raw(matrix[3 * i], " ", matrix[3 * i + 1], " ", matrix[3 * i + 2]);
     }
     std::cout << std::endl;
 }
@@ -4423,7 +4417,7 @@ bool SimpleMD::WriteGeometry()
     if (m_writeUnique) {
         if (m_unqiue->CheckMolecule(new Molecule(m_molecule))) {
             if (m_verbosity >= 1)
-                std::cout << " ** new structure was added **" << std::endl;
+                CurcumaLogger::raw(" ** new structure was added **");
             PrintStatus();
             m_time_step = 0;
             m_unique_structures.push_back(new Molecule(m_molecule));
