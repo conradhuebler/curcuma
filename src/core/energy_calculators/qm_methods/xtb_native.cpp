@@ -1958,6 +1958,23 @@ void XTB::buildReferenceOccupations()
         }
     }
     m_wfn.nocc = total;
+    // Split into alpha/beta, verbatim from tblite get_alpha_beta_occupation
+    // (src/tblite/wavefunction/type.f90:162-176). m_spin carries multiplicity - 1,
+    // i.e. the number of unpaired electrons (tblite nuhf). Closed shell (nuhf = 0)
+    // gives nalpha = nbeta = nocc/2, and the open-shell code paths then never run.
+    // Claude Generated (Sep 2026).
+    {
+        const double nuhf = nUhf();
+        const double diff = std::min(nuhf, m_wfn.nocc);
+        const double ntmp = m_wfn.nocc - diff;
+        m_nalpha = ntmp / 2.0 + diff;
+        m_nbeta = ntmp / 2.0;
+        if (nuhf > 0.0 && CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::param("open_shell_nuhf", static_cast<int>(std::lround(nuhf)));
+            CurcumaLogger::param("n_alpha", m_nalpha);
+            CurcumaLogger::param("n_beta", m_nbeta);
+        }
+    }
     m_wfn.q_at.setZero(m_basis.nat);
     m_wfn.q_sh.setZero(m_basis.nsh);
     if (m_method == MethodType::GFN2) {

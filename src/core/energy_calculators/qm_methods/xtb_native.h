@@ -1012,6 +1012,14 @@ private:
     // fractional occupations m_wfn.focc (xtb fermismear, scc_core.f90). Claude Generated.
     double electronicFreeEnergy() const;                                 // xtb_scf.cpp
 
+    // Alpha/beta electron counts (tblite get_alpha_beta_occupation). Equal to
+    // nocc/2 each in the closed-shell case, in which none of the open-shell code runs.
+    double m_nalpha = 0.0;
+    double m_nbeta = 0.0;
+    // Electronic entropy accumulated by the two-channel occupation; consumed by
+    // electronicFreeEnergy(). Only meaningful while openShell() is true.
+    mutable double m_ts_uhf = 0.0;
+
     // Assemble full Fock matrix: F = H0 + isotropic potential + multipole.
     // Isotropic: F_μν = H0_μν - 0.5·S_μν·(v_ao(μ) + v_ao(ν))
     // GFN2:      adds dp_int·vdp + qp_int·vqp via tblite add_vmp_to_h1.
@@ -1035,6 +1043,24 @@ private:
     //     m_electronic_temp, or integer closed-shell at T=0). Mirrors solveEigen.
     //   updatePopulationsFromPopAo: shell/atom Mulliken charges from precomputed
     //     AO populations pop_ao(μ)=Σ_ν P_μν·S_μν (GFN1: no multipole moments).
+    /**
+     * @brief Fermi occupations of ONE spin channel, max 1.0 per orbital.
+     *
+     * Verbatim port of tblite's get_fermi_filling / get_aufbau_filling /
+     * get_fermi_filling_ (src/tblite/wavefunction/fermi.f90): aufbau to obtain the
+     * channel's HOMO index, then a Newton iteration on the Fermi level that targets
+     * exactly that integer electron count. `entropy` returns this channel's
+     * sum(f ln f + (1-f) ln(1-f)) * kT, i.e. tblite's get_electronic_entropy.
+     * Claude Generated (Sep 2026, open-shell support).
+     */
+    static void fermiFillingChannel(const Vector& eps, double nel, double kT,
+                                    Eigen::VectorXd& occ_ch, double& entropy);
+
+    /// Number of unpaired electrons (tblite nuhf). m_spin carries multiplicity - 1.
+    double nUhf() const { return (m_spin > 0.0) ? m_spin : 0.0; }
+    /// True when the SCF must run the two-channel (open-shell) occupation.
+    bool openShell() const { return nUhf() > 0.0; }
+
     void occupationsFromEps(const Vector& eps,
                             Eigen::VectorXd& occ, int& ncol) const;      // xtb_scf.cpp
     void updatePopulationsFromPopAo(const Eigen::VectorXd& pop_ao);      // xtb_scf.cpp

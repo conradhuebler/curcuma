@@ -59,7 +59,10 @@ METHODS = {
     "gfn1": ["--gfn", "1"],
     "gfn2": ["--gfn", "2"],
 }
-OPEN_SHELL_UNSUPPORTED = {"gfn1", "gfn2"}   # see module docstring
+# Sep 2026: native gfn1/gfn2 gained the open-shell (two-channel Fermi) occupation, so
+# nothing is skipped any more. Kept as an empty set so the reporting code below still
+# has something to test against.
+OPEN_SHELL_UNSUPPORTED = set()
 
 
 def find_xtb():
@@ -137,9 +140,9 @@ def parse_xtb_energy(stdout):
 # ------------------------------------------------------------------ engines
 
 
-def run_curcuma(xyz_path, method, charge, timeout):
+def run_curcuma(xyz_path, method, charge, timeout, uhf=0):
     cmd = [str(CURCUMA), "-sp", str(xyz_path), "-method", method,
-           "-charge", str(charge), "-verbosity", "0", "-no_bmt"]
+           "-charge", str(charge), "-spin", str(uhf), "-verbosity", "0", "-no_bmt"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -261,7 +264,7 @@ def main():
                 if not args.recompute and key_cur in cache:
                     e_cur = cache[key_cur]
                 else:
-                    e_cur, out = run_curcuma(xyz, method, charge, args.timeout)
+                    e_cur, out = run_curcuma(xyz, method, charge, args.timeout, uhf)
                     cache[key_cur] = e_cur
                     (logdir / subset).mkdir(parents=True, exist_ok=True)
                     (logdir / subset / f"{name}.{method}.cur.log").write_text(out)

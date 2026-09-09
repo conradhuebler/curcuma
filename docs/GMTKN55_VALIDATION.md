@@ -14,12 +14,25 @@ machine).
 
 | method | n compared | skipped (open-shell) | MAD | RMSD | max |
 |--------|-----------:|----------------------:|----:|-----:|----:|
-| gfn2   | 2140 | 320 | 0.000 | 0.001 | 0.017 |
-| gfn1   | 2142 | 320 | 0.047 | 0.549 | 11.93 |
+| gfn2   | 2458 | 0   | 0.000 | 0.001 | 0.017 |
+| gfn1   | 2462 | 0   | 23.09 | 1143  | 56738 |
 | gfnff  | 2458 | 0   | 0.262 |  3.20 | 84.5  |
 
-gfn1/gfn2 skip every structure with a nonzero `.UHF` (see "Known limitation" below).
-gfnff has no open-shell term and runs everything.
+Nothing is skipped any more: native gfn1/gfn2 gained the open-shell (two-channel Fermi)
+occupation in Sep 2026, so the 320 structures with a nonzero `.UHF` are now compared too
+(CLAUDE.md Known Issue #9). Split by shell:
+
+| method | closed shell | | open shell | |
+|---|---:|---:|---:|---:|
+| | n | MAD | n | MAD |
+| gfn2 | 2140 | 0.0000 | 318 | **0.00000** |
+| gfn1 | 2141* | 0.0466 | 320 | **0.00002** |
+
+\* the gfn1 row of the table above is dominated by ONE closed-shell structure,
+`W4-11/so3`, where curcuma returns -108.066 Eh against xtb's -17.649 (56738 kcal/mol).
+That is a pre-existing defect — a rebuild of the pre-open-shell source gives the identical
+number — and gfn2 handles the same structure correctly. Excluding it, gfn1 sits at
+MAD 0.0466 / max 11.93, i.e. exactly where it was before. Not root-caused.
 
 The gfnff row was 3.389 after the two isolated-ion EEQ fixes below, 3.462 after the
 pyrrole pi-veto fix (CLAUDE.md Known Issue #10), and reached **2.117** with the four
