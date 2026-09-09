@@ -90,10 +90,26 @@ public:
     /// How many sinks are active on this thread. For tests and diagnostics.
     static std::size_t active_sink_count();
 
+    /// Process-wide default, as before. The CLI sets this once.
     static void set_verbosity(int level) { m_verbosity = level; }
+
+    // Claude Generated 2026 - Per-thread override.
+    //
+    // CurcumaMethod used to save and restore the *global* level around its own
+    // lifetime, with a comment stating the assumption: single-threaded, strictly
+    // nested. qurcuma breaks both -- the MD worker and a job from the chat dock
+    // overlap -- and then one destructor restores a level another thread had
+    // captured, leaving a run either mute or shouting.
+    //
+    // -1 means "no override, use the process default", which is also what restores
+    // the previous state when a scope ends.
+    static void set_thread_verbosity(int level);
+    static int thread_verbosity();
+    /// The level actually in force on this thread.
+    static int effective_verbosity();
     static void set_colors(bool enable) { m_use_colors = enable; }
     static void set_format(OutputFormat fmt) { m_format = fmt; }
-    static int get_verbosity() { return m_verbosity; }
+    static int get_verbosity() { return effective_verbosity(); }
     static bool colors_enabled() { return m_use_colors; }
 
     // Claude Generated: global progress-bar switch. Disabled via -noprogress or when

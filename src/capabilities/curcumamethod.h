@@ -21,6 +21,7 @@
 
 #include "src/tools/general.h"
 
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -38,7 +39,7 @@ public:
     CurcumaMethod(const json& defaults, const json& controller, int verbosity); // New verbosity constructor - Claude Generated
     CurcumaMethod()
     {
-        m_saved_global_verbosity = CurcumaLogger::get_verbosity(); // restored in dtor (scoped verbosity)
+        m_saved_thread_verbosity = CurcumaLogger::thread_verbosity(); // restored in dtor (per-thread, scoped)
         m_help = true;
         m_verbosity = 1; // Default: Normal Print
     }
@@ -70,6 +71,27 @@ public:
     std::string Filename() const { return m_filename; }
     std::string OutputDir() const { return m_output_dir; }
     std::string BMTDir() const { return m_bmt_dir; }
+
+    // Claude Generated 2026 - Two pieces of per-run control an embedded caller needs.
+    //
+    /// Ask this run to stop. Thread-safe, and unlike the "stop" file it addresses
+    /// ONE run: that file sits in the working directory, so it aborts every
+    /// concurrent method at once and a forgotten one kills the next run at step 0.
+    void requestStop() { m_stop_requested.store(true); }
+    bool stopRequested() const { return m_stop_requested.load(); }
+
+    /// Pin the output directory and keep createBMTDir() from replacing it.
+    ///
+    /// Without this an embedded caller gets a Basename.Keyword.TIMESTAMP folder in
+    /// the user's working directory for every single run -- a GUI doing a dozen
+    /// analyses leaves a dozen of them behind. Pass a temporary directory, or an
+    /// empty string to opt out of any output directory at all.
+    void pinOutputDir(const std::string& directory)
+    {
+        m_output_dir = directory;
+        m_output_dir_pinned = true;
+    }
+    bool outputDirPinned() const { return m_output_dir_pinned; }
     void setOutputDir(const std::string& dir);
     std::string outputPath(const std::string& filename) const;
     void ensureOutputDir() const;
@@ -120,7 +142,9 @@ protected:
     // level), restored in the dtor — so a sub-method (SimpleMD/ConfScan/...) created by a parent
     // (e.g. ConfSearch) restores the parent's level when it is destroyed, instead of leaving the
     // global CurcumaLogger verbosity clamped to its own. -1 = nothing to restore.
-    int m_saved_global_verbosity = -1;
+    /// The thread's verbosity override as it was on entry; -1 means there was
+    /// none, and restoring -1 clears the override again. Claude Generated 2026.
+    int m_saved_thread_verbosity = -1;
 
 private:
     /* Lets have this for all modules */
@@ -143,5 +167,7 @@ private:
     std::string m_filename;
     std::string m_output_dir;
     std::string m_bmt_dir;                    // Claude Generated 2026: BMT directory path
+    bool m_output_dir_pinned = false;         // Claude Generated 2026: pinOutputDir()
+    std::atomic<bool> m_stop_requested { false };  // Claude Generated 2026: requestStop()
     std::vector<std::string> m_bak_files;    // Claude Generated 2026: Files to copy back to CWD
 };
