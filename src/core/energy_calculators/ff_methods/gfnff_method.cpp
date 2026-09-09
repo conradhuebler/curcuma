@@ -4898,13 +4898,30 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         qa_i = topo_info.topology_charges[atom_i];
         qa_k = topo_info.topology_charges[atom_k];
 
-        // Check if charges are in reasonable range (-1 to +1)
-        if (std::abs(qa_center) < 1.0 && std::abs(qa_i) < 1.0 && std::abs(qa_k) < 1.0) {
+        // CORRECTED (Sep 2026), two things, both from gfnff_ini.f90:1426-1430:
+        //  - There is no "charges must be within +-1" guard in the reference. It silently
+        //    left fqq = 1 whenever one of the three atoms carried a full unit charge, which
+        //    is precisely what a charged fragment does: in GMTKN55 BH76/fch3fts (the
+        //    F...CH3...F SN2 transition state) the leaving fluoride is its own fragment with
+        //    qa = -1.000000 exactly, so all three F-C-H bends kept fqq = 1.000 instead of
+        //    0.8521 and came out 0.2631 against the reference's 0.224.
+        //  - The metal branch tests `imetal`, i.e. param%metal(Z) with the low-coordinate
+        //    group>3 demotion, not curcuma's is_metal flag (transition metals and
+        //    lanthanides only). A main-group metal centre must take the 2.5 factor too.
+        auto imetal_of = [&](int a) -> int {
+            const int z = (a >= 0 && a < m_atomcount) ? m_atoms[a] : 0;
+            if (z < 1 || z > 86) return 0;
+            int im = GFNFFParameters::metal_type[z - 1];
+            const int grp = GFNFFParameters::periodic_group[z - 1];
+            const int nb_a = (a < static_cast<int>(topo_info.neighbor_lists.size()))
+                                 ? static_cast<int>(topo_info.neighbor_lists[a].size()) : 0;
+            if (im == 1 && grp > 3 && nb_a <= 4) im = 0;
+            return im;
+        };
+        {
             double charge_product = qa_center * qa_i + qa_center * qa_k;
-            bool has_metal = (topo_info.is_metal[atom_i] ||
-                             topo_info.is_metal[atom_j] ||
-                             topo_info.is_metal[atom_k]);
-
+            const bool has_metal = (imetal_of(atom_i) != 0 || imetal_of(atom_j) != 0
+                                    || imetal_of(atom_k) != 0);
             double factor = has_metal ? 2.5 : 1.0;
             fqq = 1.0 - charge_product * qfacBEN * factor;
         }

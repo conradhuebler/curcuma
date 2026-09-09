@@ -104,6 +104,28 @@ parameters are fitted for ordinary 2-electron bonds and overbind a 2-centre-3-el
 Getting the perception right therefore does not help until the bond term can express a
 half bond.
 
+### 6. The angle term is ~3x too soft at an SN2 transition state
+Umbrella scan of the F...CH3...F- transition state (C-F and C-H fixed, the three F-C-H
+angles varied together), energy relative to the D3h point:
+
+| F-C-H | GFN-FF | GFN2 | r²SCAN-3c |
+|---:|---:|---:|---:|
+| 80° | **2.13** | 6.03 | **6.43** |
+| 85° | 0.48 | 1.49 | 1.61 |
+| 90° | 0.00 | 0.00 | 0.00 |
+
+GFN2 reproduces r²SCAN-3c almost exactly; GFN-FF is a factor of three too soft. Known Issue
+#19 restored port fidelity by removing a non-reference `|qa| < 1` guard around the angle
+`fqq`, which **softens** the F-C-H constants further (0.2631 -> 0.224) — i.e. away from the
+physics, like case 3. It was still the right call: the accidental stiffening only ever
+applied to angles at a full-unit-charge fragment, so it was not a principled correction.
+A revised model would need a stiffer bend at a hypercoordinate centre generally.
+
+*Caveat on the numbers*: the scan geometry is symmetric, so its perception differs slightly
+from the GMTKN55 structure (there one fluoride is its own fragment). The GFN-FF column is
+therefore the reference-faithful `fqq` regime throughout — the comparison measures the term,
+not the guard.
+
 ## How to add to this list
 
 An entry belongs here when an **external** reference (r²SCAN-3c, GFN2, DLPNO, experiment)
