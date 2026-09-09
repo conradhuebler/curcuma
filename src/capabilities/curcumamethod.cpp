@@ -267,7 +267,7 @@ bool CurcumaMethod::CheckStop() const
     // Claude Generated 2026 - The per-run request first. The file below stays for
     // the CLI, where it is the only way in, but it is process-wide: it stops every
     // concurrent run, and a leftover one aborts the next at step 0.
-    if (m_stop_requested.load())
+    if (m_stop_requested.value.load())
         return true;
 
 #ifdef C17
