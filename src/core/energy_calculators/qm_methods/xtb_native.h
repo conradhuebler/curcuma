@@ -1266,6 +1266,19 @@ private:
     int         m_diis_subspace = 6;     // DIIS history depth (Fock matrices kept)
     double      m_level_shift   = 0.2;   // virtual-orbital shift magnitude (Eh), LevelShift mode
     std::string m_scf_guess     = "eeq"; // initial charge guess: "eeq" (default, dftd4 EEQ) | "h0" (bare)
+    // Runaway-solution recovery (Claude Generated, Sep 2026). The GFN third-order term
+    // scales as q^3 and is unbounded below, so an SCF started far from the ground state
+    // can converge to a spurious stationary point with absurd charges. Observed on
+    // GMTKN55 W4-11/so3 with gfn1: the single-shot EEQ guess put iteration 0 at
+    // -32.7 Eh (SO2, the closest analogue, starts at -11.7), and the SCF settled at
+    // -108.066 Eh against xtb's -17.649, with a third-order term of -134.6 Eh. Starting
+    // from the bare-H0 guess instead reproduces xtb to 1e-8. The reference's own default
+    // guess is "sad" (q = charge/nat, i.e. zero for a neutral molecule; tblite
+    // app/cli.f90:585), which is what H0 amounts to here. Rather than change curcuma's
+    // faster EEQ default for everyone, the converged charges are checked and the whole
+    // calculation is redone from H0 when they are physically impossible.
+    bool m_force_h0_guess = false;   ///< set by the retry; suppresses the EEQ guess
+    bool m_in_scf_retry   = false;   ///< guards against recursing more than once
     std::string m_eigensolver   = "mkl"; // eigensolve backend: "mkl" (dsyevd) | "native"/"dnc"
     // FP32 early-iteration eigensolve (MKL path), ON by default since Jul 2026.
     // The eigensolve is ~58% of native-GFN runtime after the shell-pair-blocked

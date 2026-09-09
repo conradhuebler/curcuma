@@ -631,7 +631,19 @@ double XTB::Calculation(bool gradient)
         }
     }
 
-    if (guess_set) {
+    if (m_force_h0_guess) {
+        // Runaway retry: start from the bare H0, i.e. do NOT take the extrapolated or
+        // warm-started charges — those ARE the runaway solution we are trying to escape.
+        // Claude Generated (Sep 2026).
+        guess_set = false;
+        q_sh_old.setZero(nsh);
+        m_wfn.q_sh.setZero(nsh);
+        m_wfn.q_at.setZero(m_atomcount);
+        if (m_method == MethodType::GFN2) {
+            m_wfn.dp_at.setZero(3, m_atomcount);
+            m_wfn.qp_at.setZero(6, m_atomcount);
+        }
+    } else if (guess_set) {
         // extrapolation already populated m_wfn / q_sh_old
     } else if (m_warmstart && m_warmstart_q_sh.size() == nsh) {
         q_sh_old   = m_warmstart_q_sh;
@@ -651,7 +663,7 @@ double XTB::Calculation(bool gradient)
         }
         if (verb >= scf_min)
             CurcumaLogger::result("SCF initial guess: warm-start from previous step");
-    } else if (m_scf_guess == "eeq") {
+    } else if (m_scf_guess == "eeq" && !m_force_h0_guess) {
         Vector q_sh_guess;
         if (seedEEQGuess(q_sh_guess)) {
             q_sh_old   = q_sh_guess;
@@ -1496,6 +1508,29 @@ double XTB::Calculation(bool gradient)
                                 solve_sum, acc_solve - solve_sum);
         CurcumaLogger::info_fmt("  populations     : {:8.2f} ms ({:5.2f}/it)", acc_mull,   acc_mull / it);
         CurcumaLogger::info_fmt("  energy/mix      : {:8.2f} ms ({:5.2f}/it)", acc_energy, acc_energy / it);
+    }
+
+    // Reject a converged solution whose charges are physically impossible and redo the
+    // whole calculation from the bare-H0 guess. See the note on m_force_h0_guess in the
+    // header. The bound is generous: GFN Mulliken charges of a real system stay well
+    // inside +-2 e, and a bare monoatomic ion cannot exceed its own formal charge, so
+    // 4 e on top of the molecular charge can only be reached by a runaway.
+    if (!m_in_scf_retry && m_wfn.q_at.size() == m_atomcount) {
+        const double q_max = m_wfn.q_at.cwiseAbs().maxCoeff();
+        const double q_bound = 4.0 + std::abs(static_cast<double>(m_charge));
+        if (q_max > q_bound) {
+            CurcumaLogger::warn_fmt(
+                "SCF converged to an implausible charge distribution (max |q| = {:.2f} e > "
+                "{:.2f}); repeating from the bare-H0 guess", q_max, q_bound);
+            m_in_scf_retry = true;
+            m_force_h0_guess = true;
+            m_warmstart_q_sh.resize(0);
+            m_scf_history.clear();
+            const double e_retry = Calculation(gradient);
+            m_in_scf_retry = false;
+            m_force_h0_guess = false;
+            return e_retry;
+        }
     }
 
     return m_E_total;

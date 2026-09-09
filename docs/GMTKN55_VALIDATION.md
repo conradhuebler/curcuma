@@ -15,7 +15,7 @@ machine).
 | method | n compared | skipped (open-shell) | MAD | RMSD | max |
 |--------|-----------:|----------------------:|----:|-----:|----:|
 | gfn2   | 2458 | 0   | 0.000 | 0.001 | 0.017 |
-| gfn1   | 2462 | 0   | 23.09 | 1143  | 56738 |
+| gfn1   | 2462 | 0   | 0.041 | 0.512 | 11.93 |
 | gfnff  | 2458 | 0   | 0.262 |  3.20 | 84.5  |
 
 Nothing is skipped any more: native gfn1/gfn2 gained the open-shell (two-channel Fermi)
@@ -28,11 +28,11 @@ occupation in Sep 2026, so the 320 structures with a nonzero `.UHF` are now comp
 | gfn2 | 2140 | 0.0000 | 318 | **0.00000** |
 | gfn1 | 2141* | 0.0466 | 320 | **0.00002** |
 
-\* the gfn1 row of the table above is dominated by ONE closed-shell structure,
-`W4-11/so3`, where curcuma returns -108.066 Eh against xtb's -17.649 (56738 kcal/mol).
-That is a pre-existing defect — a rebuild of the pre-open-shell source gives the identical
-number — and gfn2 handles the same structure correctly. Excluding it, gfn1 sits at
-MAD 0.0466 / max 11.93, i.e. exactly where it was before. Not root-caused.
+\* `W4-11/so3` with gfn1 used to sit at 56738 kcal/mol here — an SCF that converged to a
+spurious stationary point (max |q| = 13.9 e) out of the EEQ initial guess. curcuma now
+rejects a physically impossible converged charge distribution and repeats from the bare H0,
+which reproduces xtb to 1e-8; see CLAUDE.md Known Issue #9. The remaining gfn1 residual is
+the pre-existing HAL59 iodine/bromine one (max 11.93).
 
 The gfnff row was 3.389 after the two isolated-ion EEQ fixes below, 3.462 after the
 pyrrole pi-veto fix (CLAUDE.md Known Issue #10), and reached **2.117** with the four
