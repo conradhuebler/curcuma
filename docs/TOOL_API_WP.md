@@ -209,6 +209,54 @@ ANSI-coloured banner on stdout, which any parser has to cut away.
 **Done when:** a test asserts every dispatched command appears in the table;
 `-export_config rmsd | jq .` succeeds.
 
+### WP8 — Directed external potentials
+
+The motivating case is agentic docking: a model loads a receptor and a guest and has to get the
+guest into the cavity. To do that it needs an actuator -- it has to be able to *pull* on a set of
+atoms and then watch what happens.
+
+**What exists today.** `SimpleMD::applyExternalForces(const Geometry& forces)`
+(`simplemd.h:269`) takes an additive per-atom force matrix, but `m_external_forces` is documented
+as "cleared after use" (`:503`) and applies between two `step()` calls. It is an injection, not a
+potential: the caller has to re-apply it every step, nothing is recorded in the controller, and a
+run cannot be reproduced from its configuration. The only declarative potentials in SimpleMD are
+the walls (`wall_*`, 11 PARAMs).
+
+**What is missing.** A configured, persistent set of external potentials, evaluated inside the
+force loop the way the walls are, described by parameters so that a run carries its own
+definition and `-export_run` reproduces it. Three forms cover the cases in sight:
+
+| Form | Meaning | Docking use |
+|---|---|---|
+| `constant_force` | fixed force on an atom set along a direction | steer the guest |
+| `centroid_harmonic` | harmonic restraint of an atom set's centroid to a point | hold the guest at the cavity centre |
+| `distance_harmonic` | harmonic restraint between two atom sets' centroids | draw two fragments together, or keep them apart |
+
+Atom sets are named with the existing selection grammar (`FragString2Indicies`), so `"F1"` is the
+guest and no new syntax appears.
+
+**Two requirements that are easy to miss.**
+
+*It has to be a structured parameter.* A list of potentials is an array of objects, and
+`ParamType` currently knows only `String|Int|Double|Bool` -- this is the same gap that leaves
+`temp_regions` unregistered (see the starting point above). WP8 therefore depends on WP1's `Json`
+type, and is the second consumer that proves it.
+
+*It has to be settable while the run is going.* An agent adjusts the pull and watches the
+response; a value that can only be given at startup is useless for that. The pattern already
+exists in SimpleMD for the thermostat setpoint and the wall parameters, which qurcuma changes
+live through thread-safe setters -- external potentials need the same, not just a controller
+entry read once in `Initialise()`.
+
+**Done when:** a run started with two potentials in its controller reproduces from
+`-export_run`; `-export_config simplemd` describes them; a potential added or changed mid-run
+takes effect on the next step; and the forces show up in the energy/gradient bookkeeping rather
+than being added behind its back.
+
+**Deliberately not in scope:** finding the cavity. That is a separate question and probably not
+curcuma's, at least not first -- see the guiding-scenario section in qurcuma's
+`docs/WP-llm-tool-layer.md`.
+
 ## Branch discipline
 
 This branch (`llm-core`) is based on `origin/master` and stays free of `reactff2`
