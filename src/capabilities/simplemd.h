@@ -627,10 +627,12 @@ private:
     // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
     // Claude Generated - Parameter Registry Integration (October 2025)
     BEGIN_PARAMETER_DEFINITION(simplemd)
+    MODULE_INFO("Molecular dynamics: integrator, thermostat, constraints, walls and bias potentials.", "Dynamics", {"md"})
 
     // --- Basic Simulation Parameters ---
     PARAM(method, String, "uff", "Energy calculation method (e.g., uff, gfn2).", "Basic", {})
-    PARAM(temperature, Double, 298.15, "Target temperature in Kelvin.", "Basic", {"T"})
+    PARAM(temperature, Double, 298.15, "Target temperature.", "Basic", {"T"},
+        "tier=primary; unit=K; min=0")
     PARAM(initial_temperature, Double, -1.0, "Initial temperature for velocity sampling (K). -1: same as 'temperature'. Use this to anneal into the target or to start cold/warm; the thermostat still drives toward 'temperature'. Ignored on restart (velocities come from the restart file).", "Basic", {"T_init", "T0", "initT"})
     PARAM(time_step, Double, 1.0, "Integration time step in femtoseconds.", "Basic", {"dt"})
     PARAM(max_time, Double, 1000.0, "Maximum simulation time in femtoseconds.", "Basic", {"MaxTime"})
@@ -640,7 +642,8 @@ private:
     PARAM(threads, Int, 1, "Number of parallel threads.", "Basic", {})
 
     // --- Thermostat ---
-    PARAM(thermostat, String, "csvr", "Thermostat type: berendsen|andersen|nosehover|csvr|none.", "Thermostat", {})
+    PARAM(thermostat, String, "csvr", "Thermostat type.", "Thermostat", {},
+        "tier=primary; enum=csvr|berendsen|andersen|nosehover|none")
     PARAM(coupling, Double, 10.0, "Thermostat coupling time in fs.", "Thermostat", {})
     PARAM(andersen_probability, Double, 0.001, "Andersen thermostat collision probability.", "Thermostat", {})
     PARAM(chain_length, Int, 3, "Chain length for Nosé-Hoover thermostat.", "Thermostat", {"chainlength"})
@@ -729,6 +732,11 @@ private:
     PARAM(temp_abort_delta, Double, 300.0, "Abort when <T> exceeds (target T + temp_abort_delta) Kelvin. <= 0 disables this threshold. Only active when temp_abort=true.", "ConfSearch", {})
 
     // --- Temperature Ramp (Jun 2026, Claude Generated) ---
+    // Claude Generated 2026 - Registered at last. It was read from the controller by
+    // ParseThermalRegions() but never declared, so it had no default, never showed up
+    // in -export_config, and no schema could describe it.
+    PARAM(temp_regions, Json, "[]", "Per-region thermostats: a list of {atoms, temperature, schedule} objects. atoms uses the selection grammar.", "Temperature Ramp", {},
+        "tier=advanced")
     PARAM(temp_ramp, Bool, false, "Enable a multi-stage temperature ramp schedule (see temp_schedule). A live GUI slider / setTargetTemperature() overrides it for the rest of the run.", "Temperature Ramp", {})
     PARAM(temp_schedule, String, "", "Ramp schedule 'target:mode:value;...'. mode=steps ramps the setpoint linearly from the previous target to <target> over <value> integration steps; mode=reach jumps the setpoint to <target> and advances once |<T>-target| < value Kelvin. Example: '500:steps:5000;500:steps:2000;300:reach:10'.", "Temperature Ramp", {})
 
