@@ -157,6 +157,30 @@ species whose bonding GFN-FF was never fitted for, and several are **open-shell 
 (structure 22 has 75 electrons, a doublet) which GFN-FF has no concept of at all. Same class
 as case 4 (MOR41 reaction thermochemistry), one order of magnitude worse.
 
+### 8. AL2X6 dimerisation comes out with the wrong SIGN in every GFN-FF
+`AL2X6` is the second cluster where pprcht and xtb disagree (`al2me6`, 26.3 kcal/mol in the
+repulsion term; curcuma matches pprcht there exactly). The set's own published reference is
+the dimerisation energy `2 AlX3 -> Al2X6`, so the split can be arbitrated directly:
+
+| reaction | published | r²SCAN-3c | pprcht | xtb | curcuma |
+|---|---:|---:|---:|---:|---:|
+| al2h6 <- 2 alh3 | 38.5 | **40.6** | −32.7 | −32.7 | −32.7 |
+| al2f6 <- 2 alf3 | 51.6 | **52.0** | −2.4 | −2.4 | −5.2 |
+| al2cl6 <- 2 alcl3 | 32.5 | **32.4** | −23.3 | −23.3 | −23.3 |
+| al2me6 <- 2 alme3 | 23.1 | **24.7** | −8.9 | **−35.2** | −8.9 |
+
+(positive = dimer bound; r²SCAN-3c reproduces the published values to 1-2 kcal/mol, which
+validates the reaction pipeline.)
+
+**Every GFN-FF variant gets the sign wrong**: it predicts the dimers unbound by 3-35 kcal/mol
+where they are bound by 23-52, an error of 40-70 kcal/mol. The 3-centre-2-electron Al-X-Al
+bridge is simply not in the model. The pprcht-vs-xtb split is therefore moot here too, though
+pprcht (and with it curcuma) happens to be the closer of the two on `al2me6`: 32 kcal off
+against xtb's 58.
+
+Same conclusion as case 7 (MB16-43) and case 4 (MOR41): where the two references disagree,
+they are both far enough from reality that the disagreement carries no information.
+
 ## How to add to this list
 
 An entry belongs here when an **external** reference (r²SCAN-3c, GFN2, DLPNO, experiment)
