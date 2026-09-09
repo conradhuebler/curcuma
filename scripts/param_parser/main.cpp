@@ -30,6 +30,50 @@ std::string trim(const std::string& str)
     return str.substr(strBegin, strRange);
 }
 
+/// Is the PARAM( ... ) of @p text closed?
+///
+/// Claude Generated 2026 - The accumulator used to give up as soon as the text so
+/// far held "PARAM" and any ')'. Help texts contain those long before the PARAM's
+/// own closing paren -- "'chloroform'). 'none' (default)" is enough -- so a PARAM
+/// written across several lines with adjacent string literals was warned about and
+/// then thrown away. gfnff's `solvent` and `solvent_model` were lost that way and
+/// never reached the registry, which is why the source carries a note asking for
+/// PARAMs to stay on one line.
+///
+/// Parentheses inside string literals do not count, and a backslash escapes the
+/// next character.
+bool param_parens_closed(const std::string& text)
+{
+    bool in_string = false;
+    bool escaped = false;
+    bool saw_open = false;
+    int depth = 0;
+
+    for (char c : text) {
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (c == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (c == '"') {
+            in_string = !in_string;
+            continue;
+        }
+        if (in_string)
+            continue;
+        if (c == '(') {
+            ++depth;
+            saw_open = true;
+        } else if (c == ')') {
+            --depth;
+        }
+    }
+    return saw_open && depth <= 0;
+}
+
 // Function to generate the C++ header file content - Claude Generated (fixed)
 std::string generate_header_content(const std::vector<Parameter>& params)
 {
@@ -206,8 +250,29 @@ int main(int argc, char* argv[])
             }
 
             if (in_param_block) {
+                // A comment line is not a declaration. gfnff.h keeps a removed
+                // parameter as "// PARAM(eeq_distance_cutoff, ...) - REMOVED" for
+                // the record, and without this it is reported as malformed on
+                // every single build.
+                const std::string stripped = line.substr(line.find_first_not_of(" \t") == std::string::npos
+                        ? 0
+                        : line.find_first_not_of(" \t"));
+                if (stripped.rfind("//", 0) == 0)
+                    continue;
+
+                // Ignore anything before a PARAM starts: comments between the
+                // definitions would otherwise end up glued to the next one.
+                if (accumulated_line.empty() && line.find("PARAM(") == std::string::npos)
+                    continue;
+
                 // Accumulate lines for multi-line PARAM definitions
                 accumulated_line += " " + line;
+
+                // Wait until the PARAM's own parenthesis is closed. Judging by the
+                // mere presence of ')' cuts multi-line definitions in half (see
+                // param_parens_closed).
+                if (!param_parens_closed(accumulated_line))
+                    continue;
 
                 // Try to match complete PARAM definition
                 if (std::regex_search(accumulated_line, match, param_regex) && match.size() == 7) {
@@ -221,8 +286,9 @@ int main(int argc, char* argv[])
                         std::string(match[6]) // aliases - DON'T trim! We need quotes for parsing
                     });
                     accumulated_line.clear();
-                } else if (accumulated_line.find("PARAM") != std::string::npos && accumulated_line.find(')') != std::string::npos && match.size() == 0) {
-                    // PARAM found but didn't match - likely syntax error
+                } else {
+                    // Closed, but still no match: a genuine syntax error rather
+                    // than a definition that had not finished arriving.
                     std::cerr << "Warning: Malformed PARAM in " << filepath
                               << " around line " << line_number << "\n";
                     accumulated_line.clear();
