@@ -374,6 +374,7 @@ private:
 
     // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv - Claude Generated 2025
     BEGIN_PARAMETER_DEFINITION(confscan)
+    MODULE_INFO("Conformer scanning: filter an ensemble by energy, RMSD and rotational constants.", "Conformational", {"confscan"})
 
     // --- General Settings ---
     PARAM(restart, Bool, true, "Enable restarting from previous scan", "General", {})

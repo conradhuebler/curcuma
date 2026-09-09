@@ -73,6 +73,7 @@ private:
 
 /* Claude Generated 2025: Docking Parameter Registry - replaces static DockingJson */
 BEGIN_PARAMETER_DEFINITION(docking)
+MODULE_INFO("Place a guest molecule against a host and score the poses.", "Docking", {"dock"})
     PARAM(host, String, "", "Host molecule file.", "Input", {})
     PARAM(guest, String, "", "Guest molecule file.", "Input", {})
     PARAM(complex, String, "", "Pre-assembled complex file.", "Input", {"Complex"})

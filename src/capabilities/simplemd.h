@@ -689,30 +689,42 @@ private:
     MODULE_INFO("Molecular dynamics: integrator, thermostat, constraints, walls and bias potentials.", "Dynamics", {"md"})
 
     // --- Basic Simulation Parameters ---
-    PARAM(method, String, "uff", "Energy calculation method (e.g., uff, gfn2).", "Basic", {})
+    PARAM(method, String, "uff", "Energy calculation method (e.g., uff, gfn2).", "Basic", {},
+        "tier=primary")
     PARAM(temperature, Double, 298.15, "Target temperature.", "Basic", {"T"},
         "tier=primary; unit=K; min=0")
-    PARAM(initial_temperature, Double, -1.0, "Initial temperature for velocity sampling (K). -1: same as 'temperature'. Use this to anneal into the target or to start cold/warm; the thermostat still drives toward 'temperature'. Ignored on restart (velocities come from the restart file).", "Basic", {"T_init", "T0", "initT"})
-    PARAM(time_step, Double, 1.0, "Integration time step in femtoseconds.", "Basic", {"dt"})
-    PARAM(max_time, Double, 1000.0, "Maximum simulation time in femtoseconds.", "Basic", {"MaxTime"})
-    PARAM(charge, Int, 0, "Total charge of the system.", "Basic", {})
-    PARAM(spin, Int, 0, "Total spin multiplicity of the system (0=singlet, 1=doublet).", "Basic", {"Spin"})
+    PARAM(initial_temperature, Double, -1.0, "Initial temperature for velocity sampling (K). -1: same as 'temperature'. Use this to anneal into the target or to start cold/warm; the thermostat still drives toward 'temperature'. Ignored on restart (velocities come from the restart file).", "Basic", {"T_init", "T0", "initT"},
+        "unit=K")
+    PARAM(time_step, Double, 1.0, "Integration time step in femtoseconds.", "Basic", {"dt"},
+        "tier=primary; unit=fs; min=0")
+    PARAM(max_time, Double, 1000.0, "Maximum simulation time in femtoseconds.", "Basic", {"MaxTime"},
+        "tier=primary; unit=fs; min=0")
+    PARAM(charge, Int, 0, "Total charge of the system.", "Basic", {},
+        "tier=primary")
+    PARAM(spin, Int, 0, "Total spin multiplicity of the system (0=singlet, 1=doublet).", "Basic", {"Spin"},
+        "tier=primary")
     PARAM(seed, Int, -1, "Random seed (-1: time, 0: auto).", "Basic", {})
-    PARAM(threads, Int, 1, "Number of parallel threads.", "Basic", {})
+    PARAM(threads, Int, 1, "Number of parallel threads.", "Basic", {},
+        "min=1")
 
     // --- Thermostat ---
     PARAM(thermostat, String, "csvr", "Thermostat type.", "Thermostat", {},
         "tier=primary; enum=csvr|berendsen|andersen|nosehover|none")
-    PARAM(coupling, Double, 10.0, "Thermostat coupling time in fs.", "Thermostat", {})
-    PARAM(andersen_probability, Double, 0.001, "Andersen thermostat collision probability.", "Thermostat", {})
-    PARAM(chain_length, Int, 3, "Chain length for Nosé-Hoover thermostat.", "Thermostat", {"chainlength"})
+    PARAM(coupling, Double, 10.0, "Thermostat coupling time in fs.", "Thermostat", {},
+        "unit=fs; min=0")
+    PARAM(andersen_probability, Double, 0.001, "Andersen thermostat collision probability.", "Thermostat", {},
+        "min=0; max=1")
+    PARAM(chain_length, Int, 3, "Chain length for Nosé-Hoover thermostat.", "Thermostat", {"chainlength"},
+        "min=1")
 
     // --- System Control ---
-    PARAM(remove_com_motion, Double, 100.0, "Remove translation/rotation every N fs.", "System", {"rm_COM"})
+    PARAM(remove_com_motion, Double, 100.0, "Remove translation/rotation every N fs.", "System", {"rm_COM"},
+        "unit=fs")
     PARAM(remove_com_mode, Int, 1, "Removal mode (0:none, 1:trans only, 2:rot only, 3:both). Rotation removal is opt-in (use 2 or 3).", "System", {"rmrottrans"})
     PARAM(no_center, Bool, false, "Disable centering of the molecule at the origin.", "System", {"nocenter"})
     PARAM(use_com, Bool, false, "Use center of mass (otherwise geometric center).", "System", {"COM"})
-    PARAM(hydrogen_mass, Int, 1, "Hydrogen mass scaling factor for HMR.", "System", {"hmass"})
+    PARAM(hydrogen_mass, Int, 1, "Hydrogen mass scaling factor for HMR.", "System", {"hmass"},
+        "min=1")
     PARAM(initial_velocity_scale, Double, 1.0, "Initial velocity scaling factor.", "System", {"velo"})
 
     // --- Output & Restart ---
@@ -733,17 +745,28 @@ private:
     PARAM(rattle_max_iterations, Int, 100, "Maximum RATTLE iterations.", "RATTLE", {"rattle_maxiter"})
 
     // --- Wall Potentials ---
-    PARAM(wall_type, String, "none", "Wall type: none|spheric|rect.", "Walls", {"wall"})
-    PARAM(wall_potential, String, "harmonic", "Wall behaviour: logfermi|harmonic push escaping atoms back (and do work on them); pbc exerts no force and instead moves a whole molecule that left the container back in on the opposite side. pbc is a container, not a periodic cell: the energy has no minimum image, so interactions are not continued across the boundary and a molecule whose destination is occupied is reflected instead (see docs/WP-PERIODIC-NONBONDED.md).", "Walls", {})
-    PARAM(wall_radius, Double, 0.0, "Radius for spherical wall (Å). Auto-sized if 0.", "Walls", {"wall_spheric_radius"})
-    PARAM(wall_temp, Double, 298.15, "Wall temperature/strength in K.", "Walls", {})
-    PARAM(wall_beta, Double, 6.0, "Steepness parameter for wall potential.", "Walls", {})
-    PARAM(wall_x_min, Double, 0.0, "Min x-boundary for rectangular wall (Å).", "Walls", {})
-    PARAM(wall_x_max, Double, 0.0, "Max x-boundary for rectangular wall (Å).", "Walls", {})
-    PARAM(wall_y_min, Double, 0.0, "Min y-boundary for rectangular wall (Å).", "Walls", {})
-    PARAM(wall_y_max, Double, 0.0, "Max y-boundary for rectangular wall (Å).", "Walls", {})
-    PARAM(wall_z_min, Double, 0.0, "Min z-boundary for rectangular wall (Å).", "Walls", {})
-    PARAM(wall_z_max, Double, 0.0, "Max z-boundary for rectangular wall (Å).", "Walls", {})
+    PARAM(wall_type, String, "none", "Wall type: none|spheric|rect.", "Walls", {"wall"},
+        "enum=none|spheric|rect")
+    PARAM(wall_potential, String, "harmonic", "Wall behaviour: logfermi|harmonic push escaping atoms back (and do work on them); pbc exerts no force and instead moves a whole molecule that left the container back in on the opposite side. pbc is a container, not a periodic cell: the energy has no minimum image, so interactions are not continued across the boundary and a molecule whose destination is occupied is reflected instead (see docs/WP-PERIODIC-NONBONDED.md).", "Walls", {},
+        "enum=logfermi|harmonic|pbc; requires=wall_type!=none")
+    PARAM(wall_radius, Double, 0.0, "Radius for spherical wall (Å). Auto-sized if 0.", "Walls", {"wall_spheric_radius"},
+        "unit=A; min=0; requires=wall_type=spheric")
+    PARAM(wall_temp, Double, 298.15, "Wall temperature/strength in K.", "Walls", {},
+        "unit=K; min=0; requires=wall_type!=none")
+    PARAM(wall_beta, Double, 6.0, "Steepness parameter for wall potential.", "Walls", {},
+        "min=0; requires=wall_type!=none")
+    PARAM(wall_x_min, Double, 0.0, "Min x-boundary for rectangular wall (Å).", "Walls", {},
+        "unit=A; requires=wall_type=rect")
+    PARAM(wall_x_max, Double, 0.0, "Max x-boundary for rectangular wall (Å).", "Walls", {},
+        "unit=A; requires=wall_type=rect")
+    PARAM(wall_y_min, Double, 0.0, "Min y-boundary for rectangular wall (Å).", "Walls", {},
+        "unit=A; requires=wall_type=rect")
+    PARAM(wall_y_max, Double, 0.0, "Max y-boundary for rectangular wall (Å).", "Walls", {},
+        "unit=A; requires=wall_type=rect")
+    PARAM(wall_z_min, Double, 0.0, "Min z-boundary for rectangular wall (Å).", "Walls", {},
+        "unit=A; requires=wall_type=rect")
+    PARAM(wall_z_max, Double, 0.0, "Max z-boundary for rectangular wall (Å).", "Walls", {},
+        "unit=A; requires=wall_type=rect")
 
     // --- Metadynamics (PLUMED) ---
     PARAM(mtd, Bool, false, "Enable PLUMED metadynamics.", "Metadynamics", {})
@@ -751,13 +774,17 @@ private:
 
     // --- RMSD-based Metadynamics (Internal) ---
     PARAM(rmsd_mtd, Bool, false, "Enable internal RMSD-based metadynamics.", "RMSD-MTD", {})
-    PARAM(rmsd_mtd_k, Double, 0.01, "Hill-height constant: bias height W_i = k * counter_i (Eh). The force is the exact gradient of the bias, so k is ~100x smaller than the pre-2026 value.", "RMSD-MTD", {"k_rmsd"})
-    PARAM(rmsd_mtd_alpha, Double, 10.0, "Width parameter for RMSD Gaussians.", "RMSD-MTD", {"alpha_rmsd"})
+    PARAM(rmsd_mtd_k, Double, 0.01, "Hill-height constant: bias height W_i = k * counter_i (Eh). The force is the exact gradient of the bias, so k is ~100x smaller than the pre-2026 value.", "RMSD-MTD", {"k_rmsd"},
+        "requires=rmsd_mtd")
+    PARAM(rmsd_mtd_alpha, Double, 10.0, "Width parameter for RMSD Gaussians.", "RMSD-MTD", {"alpha_rmsd"},
+        "requires=rmsd_mtd")
     PARAM(rmsd_mtd_pace, Int, 1, "DEPRECATED and ignored under the strided scheme (use rmsd_mtd_deposit_stride). Only honoured by rmsd_mtd_scheme=legacy.", "RMSD-MTD", {"mtd_steps"})
     PARAM(rmsd_mtd_max_gaussians, Int, -1, "Maximum number of stored bias structures.", "RMSD-MTD", {"max_rmsd_N"})
     PARAM(rmsd_mtd_ref_file, String, "none", "File with reference structures for RMSD-MTD.", "RMSD-MTD", {"rmsd_ref_file"})
-    PARAM(rmsd_mtd_atoms, String, "-1", "Atom indices to use for RMSD calculation.", "RMSD-MTD", {"rmsd_atoms"})
-    PARAM(rmsd_mtd_dt, Double, 2000.0, "Well-tempered bias temperature Delta_T (K). Only used when wtmtd=true, and only for the reported well-tempered energy -- it never affects the force or the exploration.", "RMSD-MTD", {"rmsd_DT"})
+    PARAM(rmsd_mtd_atoms, String, "-1", "Atom indices to use for RMSD calculation.", "RMSD-MTD", {"rmsd_atoms"},
+        "requires=rmsd_mtd")
+    PARAM(rmsd_mtd_dt, Double, 2000.0, "Well-tempered bias temperature Delta_T (K). Only used when wtmtd=true, and only for the reported well-tempered energy -- it never affects the force or the exploration.", "RMSD-MTD", {"rmsd_DT"},
+        "unit=K; requires=wtmtd")
     PARAM(rmsd_mtd_max_height, Int, 0, "Cap the per-structure hill counter used in the bias force: W_i = k * min(counter_i, cap). 0 = unbounded (legacy). Stops the shared bias pool from heating the dynamics over many runs (counter_i grows on every visit).", "RMSD-MTD", {})
     PARAM(rmsd_mtd_freeze_inherited, Bool, false, "Freeze the hill heights of bias structures already present at this MD run's start; only structures deposited during this run gain height. Bounds the cumulative bias force across successive shared-pool runs (geometry sharing is preserved).", "RMSD-MTD", {})
     PARAM(rmsd_mtd_screen, Bool, true, "Skip bias hills whose Gaussian contribution is provably negligible, using a rotation/translation-invariant RMSD lower bound (principal radii of gyration of the RMSD subset) plus a Gaussian cutoff. Physics-preserving: energy, force and the visited set are unaffected. false = evaluate every hill (legacy).", "RMSD-MTD", {})
@@ -797,7 +824,8 @@ private:
     PARAM(temp_regions, Json, "[]", "Per-region thermostats: a list of {atoms, temperature, schedule} objects. atoms uses the selection grammar.", "Temperature Ramp", {},
         "tier=advanced")
     PARAM(temp_ramp, Bool, false, "Enable a multi-stage temperature ramp schedule (see temp_schedule). A live GUI slider / setTargetTemperature() overrides it for the rest of the run.", "Temperature Ramp", {})
-    PARAM(temp_schedule, String, "", "Ramp schedule 'target:mode:value;...'. mode=steps ramps the setpoint linearly from the previous target to <target> over <value> integration steps; mode=reach jumps the setpoint to <target> and advances once |<T>-target| < value Kelvin. Example: '500:steps:5000;500:steps:2000;300:reach:10'.", "Temperature Ramp", {})
+    PARAM(temp_schedule, String, "", "Ramp schedule 'target:mode:value;...'. mode=steps ramps the setpoint linearly from the previous target to <target> over <value> integration steps; mode=reach jumps the setpoint to <target> and advances once |<T>-target| < value Kelvin. Example: '500:steps:5000;500:steps:2000;300:reach:10'.", "Temperature Ramp", {},
+        "requires=temp_ramp")
 
     END_PARAMETER_DEFINITION
     // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^
