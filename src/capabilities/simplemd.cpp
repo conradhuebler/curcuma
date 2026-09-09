@@ -4519,3 +4519,17 @@ void SimpleMD::NoseHover()
     }
     m_xi[0] += 0.5 * m_dT * (2.0 * kinetic_energy - m_dof * m_T0 * kb_Eh) / m_Q[0];
 }
+
+// Claude Generated 2026 - see the header.
+json SimpleMD::Results() const
+{
+    json result;
+    result["steps"] = m_step;
+    result["time_fs"] = m_currentStep;
+    result["potential_energy"] = m_Epot;
+    result["kinetic_energy"] = m_Ekin;
+    result["total_energy"] = m_Epot + m_Ekin;
+    result["temperature"] = m_T;
+    result["target_temperature"] = m_T0;
+    return result;
+}

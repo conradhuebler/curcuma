@@ -243,6 +243,15 @@ public:
     const Geometry& positions() const { return m_eigen_geometry; }
     const Geometry& velocities() const { return m_eigen_velocities; }
     const Geometry& gradient() const { return m_eigen_gradient; }
+    /// Claude Generated 2026 - Where the run got to. Pure; the trajectory and
+    /// restart files are written by the run itself, not by asking for this.
+    ///
+    /// Note for whoever merges the reactff2 line: stopReason() lives there and
+    /// belongs in here as "stop_reason". It is left out rather than guessed,
+    /// because a run that ended badly reporting nothing is better than one
+    /// reporting a reason it does not have.
+    json Results() const override;
+
     double potentialEnergy() const { return m_Epot; }
     double kineticEnergy() const { return m_Ekin; }
     double currentTemperature() const { return m_T; }
