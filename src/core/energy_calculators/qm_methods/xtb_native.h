@@ -29,8 +29,8 @@
 
 #include "src/core/global.h"
 #include "src/core/solvation/implicit_solvation.h"
-#include "qm_driver.h"
-#include "STOIntegrals.hpp"
+#include "interface/abstract_interface.h"
+#include "json.hpp"
 
 #include <Eigen/Dense>
 #include <array>
@@ -627,12 +627,12 @@ inline int solventModelCode(const std::string& s)
     return -1;
 }
 
-class XTB : public QMDriver {
+class XTB : public QMInterface {
 public:
     explicit XTB(MethodType method);
     ~XTB() override;
 
-    // QMDriver API
+    // QMInterface API
     using QMInterface::InitialiseMolecule;   // unhide base-class overloads (Mol& / Mol*)
     bool   InitialiseMolecule() override;
     double Calculation(bool gradient = false) override;
@@ -670,6 +670,9 @@ public:
                                 std::vector<int>& nref) const;            // xtb_native.cpp
     Vector  getOrbitalEnergies() const { return m_wfn.eps; }
     Matrix  getMOCoefficients() const { return m_wfn.C; }
+    Matrix  MolecularOrbitals() const { return m_mo; }
+    Vector  Energies() const { return m_energies; }
+    int     NumElectrons() const { return m_num_electrons; }
     Matrix  getDensity() const { return m_wfn.P; }
     // Converged per-iteration SCC energy components (Eh), cached from the last
     // SCF iteration. Reference for the device SCC-energy reductions (Stage 6,
@@ -782,6 +785,13 @@ public:
     void setDiisSubspace(int n)           { if (n >= 2) m_diis_subspace = n; }
     void setLevelShift(double b)          { m_level_shift = b; }
     void setScfGuess(const std::string& g){ m_scf_guess = g; }
+    // Opt-in: build the 4s/4p shells from xtb's older STO-6G tables instead of
+    // tblite's (K, Ca, Ge-Kr only). See STO_CGTO.hpp pAlpha6_legacy_4s.
+    void setSto6gLegacy4sp(bool b)        { m_sto6g_legacy_4sp = b; }
+    // D4 three-body (ATM) real-space cutoff in Bohr. tblite uses 25.0 (the default,
+    // since tblite is curcuma's reference for GFN1/GFN2), xtb passes 40.0. Set 40.0
+    // to reproduce the xtb binary on molecules extending past ~25 Bohr.
+    void setD4AtmCutoff(double c)         { m_d4_atm_cutoff = c; }
     ScfMode scfMode() const               { return m_scf_mode; }
 
     // Electronic temperature in Kelvin (0 → integer occupation, no Fermi smearing).
@@ -1009,6 +1019,14 @@ private:
     // fractional occupations m_wfn.focc (xtb fermismear, scc_core.f90). Claude Generated.
     double electronicFreeEnergy() const;                                 // xtb_scf.cpp
 
+    // Alpha/beta electron counts (tblite get_alpha_beta_occupation). Equal to
+    // nocc/2 each in the closed-shell case, in which none of the open-shell code runs.
+    double m_nalpha = 0.0;
+    double m_nbeta = 0.0;
+    // Electronic entropy accumulated by the two-channel occupation; consumed by
+    // electronicFreeEnergy(). Only meaningful while openShell() is true.
+    mutable double m_ts_uhf = 0.0;
+
     // Assemble full Fock matrix: F = H0 + isotropic potential + multipole.
     // Isotropic: F_μν = H0_μν - 0.5·S_μν·(v_ao(μ) + v_ao(ν))
     // GFN2:      adds dp_int·vdp + qp_int·vqp via tblite add_vmp_to_h1.
@@ -1032,6 +1050,24 @@ private:
     //     m_electronic_temp, or integer closed-shell at T=0). Mirrors solveEigen.
     //   updatePopulationsFromPopAo: shell/atom Mulliken charges from precomputed
     //     AO populations pop_ao(μ)=Σ_ν P_μν·S_μν (GFN1: no multipole moments).
+    /**
+     * @brief Fermi occupations of ONE spin channel, max 1.0 per orbital.
+     *
+     * Verbatim port of tblite's get_fermi_filling / get_aufbau_filling /
+     * get_fermi_filling_ (src/tblite/wavefunction/fermi.f90): aufbau to obtain the
+     * channel's HOMO index, then a Newton iteration on the Fermi level that targets
+     * exactly that integer electron count. `entropy` returns this channel's
+     * sum(f ln f + (1-f) ln(1-f)) * kT, i.e. tblite's get_electronic_entropy.
+     * Claude Generated (Sep 2026, open-shell support).
+     */
+    static void fermiFillingChannel(const Vector& eps, double nel, double kT,
+                                    Eigen::VectorXd& occ_ch, double& entropy);
+
+    /// Number of unpaired electrons (tblite nuhf). m_spin carries multiplicity - 1.
+    double nUhf() const { return (m_spin > 0.0) ? m_spin : 0.0; }
+    /// True when the SCF must run the two-channel (open-shell) occupation.
+    bool openShell() const { return nUhf() > 0.0; }
+
     void occupationsFromEps(const Vector& eps,
                             Eigen::VectorXd& occ, int& ncol) const;      // xtb_scf.cpp
     void updatePopulationsFromPopAo(const Eigen::VectorXd& pop_ao);      // xtb_scf.cpp
@@ -1069,7 +1105,10 @@ private:
 
     // Repulsion + (GFN1) halogen-bond energies.
     double calcRepulsionEnergy() const;                                  // xtb_native.cpp
-    double calcHalogenBondEnergy() const;                                // xtb_native.cpp
+    double calcHalogenBondEnergy() const;                                // xtb_h0.cpp
+    // Analytic gradient of the GFN1 halogen-bond correction; adds into `gradient`
+    // (nat×3, Eh/Bohr). No-op for GFN2. Claude Generated.
+    void   addHalogenBondGradient(Matrix& gradient) const;               // xtb_h0.cpp
 
     // GFN2 D4 dispersion (optional — requires USE_D4 at compile time).
     // need_gradient gates the (expensive) GFN1 D3 finite-difference geometry
@@ -1106,13 +1145,21 @@ private:
     void parallelStripes(int n_threads,
                          const std::function<void(int, int)>& worker) const; // xtb_native.cpp
 
-    /* ----- legacy QMDriver hooks (still routed through MakeOverlap/H) */
-    Matrix MakeOverlap(std::vector<STO::Orbital>& basisset) override;
-    Matrix MakeH(const Matrix& S,
-                 const std::vector<STO::Orbital>& basisset) override;
-
 private:
     MethodType m_method;
+
+    // Converged MO coefficients / orbital energies / occupied-orbital count,
+    // mirrored from m_wfn after every Calculation() for the wrapper accessors
+    // MolecularOrbitals()/Energies()/NumElectrons() (formerly inherited from
+    // the QMDriver base, which this class no longer derives from).
+    Matrix m_mo;
+    Vector m_energies;
+    int    m_num_electrons = 0;
+
+    // LAPACK dsyevd/ssyevd scratch, reused across SCF iterations (xtb_scf.cpp).
+    std::vector<double> m_lapack_work;
+    std::vector<float>  m_lapack_work_f;
+    std::vector<int>    m_lapack_iwork;
 
     BasisMap     m_basis;
     H0Data       m_h0;
@@ -1229,6 +1276,27 @@ private:
     int         m_diis_subspace = 6;     // DIIS history depth (Fock matrices kept)
     double      m_level_shift   = 0.2;   // virtual-orbital shift magnitude (Eh), LevelShift mode
     std::string m_scf_guess     = "eeq"; // initial charge guess: "eeq" (default, dftd4 EEQ) | "h0" (bare)
+    // xtb and tblite disagree on the STO-6G 4s/4p expansion; curcuma follows
+    // tblite (the better fit to the exact Slater function). Set true to
+    // reproduce the xtb binary bit-for-bit on K, Ca and Ge-Kr. STO_CGTO.hpp.
+    bool        m_sto6g_legacy_4sp = false;
+    // D4 ATM cutoff (Bohr). 25.0 = tblite (default), 40.0 = xtb. Carries the ENTIRE
+    // GFN2 energy deviation against xtb on molecules extending past ~25 Bohr, and
+    // ~45 % of the gfn2 runtime on a 231-atom system. Claude Generated (Sep 2026).
+    double      m_d4_atm_cutoff = 25.0;
+    // Runaway-solution recovery (Claude Generated, Sep 2026). The GFN third-order term
+    // scales as q^3 and is unbounded below, so an SCF started far from the ground state
+    // can converge to a spurious stationary point with absurd charges. Observed on
+    // GMTKN55 W4-11/so3 with gfn1: the single-shot EEQ guess put iteration 0 at
+    // -32.7 Eh (SO2, the closest analogue, starts at -11.7), and the SCF settled at
+    // -108.066 Eh against xtb's -17.649, with a third-order term of -134.6 Eh. Starting
+    // from the bare-H0 guess instead reproduces xtb to 1e-8. The reference's own default
+    // guess is "sad" (q = charge/nat, i.e. zero for a neutral molecule; tblite
+    // app/cli.f90:585), which is what H0 amounts to here. Rather than change curcuma's
+    // faster EEQ default for everyone, the converged charges are checked and the whole
+    // calculation is redone from H0 when they are physically impossible.
+    bool m_force_h0_guess = false;   ///< set by the retry; suppresses the EEQ guess
+    bool m_in_scf_retry   = false;   ///< guards against recursing more than once
     std::string m_eigensolver   = "mkl"; // eigensolve backend: "mkl" (dsyevd) | "native"/"dnc"
     // FP32 early-iteration eigensolve (MKL path), ON by default since Jul 2026.
     // The eigensolve is ~58% of native-GFN runtime after the shell-pair-blocked
@@ -1381,6 +1449,8 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
 
     lookup("scf_mode",     [&](const json& v){ if (v.is_string()) xtb.setScfMode(v.get<std::string>()); });
     lookup("scf_guess",    [&](const json& v){ if (v.is_string()) xtb.setScfGuess(v.get<std::string>()); });
+    lookup("sto6g_legacy_4sp", [&](const json& v){ if (v.is_boolean()) xtb.setSto6gLegacy4sp(v.get<bool>()); });
+    lookup("d4_atm_cutoff", [&](const json& v){ if (v.is_number()) xtb.setD4AtmCutoff(v.get<double>()); });
     lookup("eigensolver",  [&](const json& v){ if (v.is_string()) xtb.setEigensolver(v.get<std::string>()); });
     lookup("scf_damping",  [&](const json& v){ if (v.is_number()) xtb.setScfDamping(v.get<double>()); });
     lookup("scf_threshold",[&](const json& v){ if (v.is_number()) xtb.setScfThreshold(v.get<double>()); });

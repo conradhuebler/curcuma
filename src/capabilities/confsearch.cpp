@@ -1082,9 +1082,7 @@ nlohmann::json ConfSearch::ChildConfig(const std::string& method, int threads) c
     // kEnergyCalcMethodScopes in src/core/energycalculator.cpp -- without this,
     // "curcuma -confsearch mol.xyz -method gfn2 -xtb.solvent water" never reached ANY child
     // calculation: the sub-scope sits at controller["xtb"] and was simply never forwarded.
-    static const char* const scopes[] = { "gfnff", "eeq_solver", "xtb", "tblite", "ulysses",
-        "d3", "d4", "uff", "qmdff", "eht", "orca" };
-    for (const char* s : scopes) {
+    for (const std::string& s : MethodFactory::methodParameterScopes()) {
         if (m_controller.contains(s) && m_controller[s].is_object())
             cfg[s] = m_controller[s];
     }

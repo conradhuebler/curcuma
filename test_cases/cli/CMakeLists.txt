@@ -157,6 +157,7 @@ add_cli_test(simplemd 04_rattle_all)
 add_cli_test(simplemd 05_spheric_wall)
 add_cli_test(simplemd 06_alias_temperature)
 add_cli_test(simplemd 07_restart_simulation)
+add_cli_test(simplemd 08_cg_spheres)
 add_cli_test(simplemd 08_gfnff_acetic_acid_dimer_md)
 add_cli_test(simplemd 09_xtbgfnff_acetic_acid_dimer_md)
 add_cli_test(simplemd 10_gfnff_polymer_md)
@@ -247,6 +248,15 @@ set_tests_properties(cli_sqm_06_gfn2_extended_singlepoint PROPERTIES DISABLED TR
 set_tests_properties(cli_sqm_07_gfn1_extended_singlepoint PROPERTIES DISABLED TRUE)
 # AP3: gfn2 -opt still broken (gradient = zero), disable until AP4 restores gradient.
 set_tests_properties(cli_sqm_10_gfn2_optimization_smoke PROPERTIES DISABLED TRUE)
+
+# Claude Generated (Sep 2026): test 11 asserts `-method ipea1` routes to and matches
+# TBLite (ipea1 has no other provider, MethodFactory throws without USE_TBLITE) -
+# disable it when this build wasn't configured with TBLite, same DISABLED pattern
+# as the tests above, instead of a permanent hard failure.
+if(NOT USE_TBLITE)
+    set_tests_properties(cli_sqm_11_gfn2_provider_check PROPERTIES DISABLED TRUE)
+    message(STATUS "cli_sqm_11_gfn2_provider_check: disabled - USE_TBLITE is OFF (ipea1 has no other provider)")
+endif()
 
 # Allow the optimization test more wall-clock — caffeine -opt can run > 30 s
 # (kept for reference; test is currently DISABLED)

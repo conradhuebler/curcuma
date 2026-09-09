@@ -629,7 +629,7 @@ private:
     BEGIN_PARAMETER_DEFINITION(simplemd)
 
     // --- Basic Simulation Parameters ---
-    PARAM(method, String, "uff", "Energy calculation method (e.g., uff, gfn2).", "Basic", {})
+    PARAM(method, String, "gfnff", "Energy calculation method. Default gfnff: the fast choice for MD and conformer sampling. gfn2 is the more accurate one (semi-empirical QM, ~100x slower); uff/qmdff remain available.", "Basic", {})
     PARAM(temperature, Double, 298.15, "Target temperature in Kelvin.", "Basic", {"T"})
     PARAM(initial_temperature, Double, -1.0, "Initial temperature for velocity sampling (K). -1: same as 'temperature'. Use this to anneal into the target or to start cold/warm; the thermostat still drives toward 'temperature'. Ignored on restart (velocities come from the restart file).", "Basic", {"T_init", "T0", "initT"})
     PARAM(time_step, Double, 1.0, "Integration time step in femtoseconds.", "Basic", {"dt"})

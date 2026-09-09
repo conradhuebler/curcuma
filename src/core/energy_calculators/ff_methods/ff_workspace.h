@@ -29,7 +29,7 @@
 
 #include "src/core/global.h"
 #include "gfnff_parameters.h"
-#include "forcefieldthread.h"  // For Bond, Angle, Dihedral, Inversion struct definitions
+#include "ff_terms.h"  // Bond, Angle, Dihedral, Inversion, vdW, EQ, CNDerivStore, GeoGradMatrix
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
@@ -371,6 +371,9 @@ private:
     std::vector<GFNFFBatmTriple> m_batm_triples;
     std::vector<BondHBEntry> m_bond_hb_data;
     std::vector<HBGradEntry> m_hb_grad_entries;
+    // CSR index of m_hb_grad_entries by H atom, insertion order preserved (B3, Sep 2026):
+    // calcBonds() visits only the entries of its own H instead of scanning all of them.
+    std::vector<int> m_hb_grad_offsets, m_hb_grad_list;
     std::vector<vdW> m_vdws;                    ///< UFF/QMDFF LJ non-bonded pairs
 
     // Cached bonded pairs for fast repulsion lookup
@@ -398,6 +401,8 @@ private:
     // === Core execution ===
     void executeGFNFF(int partition);
     void executeUFF(int partition);    ///< Claude Generated (March 2026): UFF energy/gradient
+    void executeCG(int partition);     ///< Sep 2026: coarse-grained LJ spheres/ellipsoids (ff_workspace_cg.cpp)
+    void calcCGPairs(int partition);
     void executeQMDFF(int partition);  ///< Claude Generated (March 2026): QMDFF energy/gradient
     void postProcess(bool gradient);
     void reduce();

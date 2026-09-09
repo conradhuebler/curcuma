@@ -87,9 +87,23 @@ void FFWorkspace::setInteractionLists(GFNFFParameterSet&& params)
         m_bonded_pairs.insert({bond.j, bond.i});
     }
 
-    // Extract per-atom Coulomb self-energy parameters from pairs (for TERM 2+3 in postProcess)
-    // Same logic as ForceField::setGFNFFParameters lines 418-444
-    if (!m_coulombs.empty() && m_natoms > 0) {
+    // Per-atom Coulomb self-energy parameters (for TERM 2+3 in postProcess).
+    // Claude Generated (Sep 2026): prefer the dedicated per-atom fields
+    // (GFNFF::generateCoulombSelfEnergyNative()), which are populated regardless
+    // of pair count. Falling back to scanning m_coulombs (the previous, buggy
+    // behaviour) only when a producer of GFNFFParameterSet doesn't fill the new
+    // fields (e.g. UFF/QMDFF, which share this struct but have no EEQ self-energy)
+    // — that fallback is empty for an isolated atom (0 pairs for N=1), which was
+    // exactly the bug: native GFN-FF returned 0.0 Eh for any single charged atom
+    // because the pair-derived vectors stayed empty and postProcess()'s
+    // `m_coul_gam.size() == m_natoms` guard silently skipped the self-energy.
+    if (params.coul_self_gam.size() == m_natoms && m_natoms > 0) {
+        m_coul_chi_base = std::move(params.coul_self_chi_base);
+        m_coul_gam = std::move(params.coul_self_gam);
+        m_coul_alp = std::move(params.coul_self_alp);
+        m_coul_cnf = std::move(params.coul_self_cnf);
+        m_coul_chi_static = std::move(params.coul_self_chi_static);
+    } else if (!m_coulombs.empty() && m_natoms > 0) {
         m_coul_chi_base = Vector::Zero(m_natoms);
         m_coul_gam = Vector::Zero(m_natoms);
         m_coul_alp = Vector::Zero(m_natoms);
@@ -221,6 +235,8 @@ double FFWorkspace::calculate(bool gradient)
             executeUFF(t);
         else if (m_method_type == FFMethodType::QMDFF)
             executeQMDFF(t);
+        else if (m_method_type == FFMethodType::CG)
+            executeCG(t);
         else
             executeGFNFF(t);
     };

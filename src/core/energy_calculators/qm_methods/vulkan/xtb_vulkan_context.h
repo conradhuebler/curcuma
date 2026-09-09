@@ -142,12 +142,12 @@ public:
 
     // ---- Device GFN2 multipole integrals (Stage 3m / V-AP2) -----------------
     // beginMultipoleComputed builds the AO dipole(3)/quadrupole(6) integrals on the
-    // device from the resident overlap + basis (multipole_ints kernel); downloadMultipole
+    // device from the resident overlap + basis (multipole_ints kernel); downloadMultipoleInts
     // fetches dp_int (3·nao²) / qp_int (6·nao²), column-major (mu,nu) at mu+nu*nao, so the
     // host GFN2 SCF skips its O(nao²) setupMultipole integral loop. Requires a prior
     // beginComputed. Returns false if unavailable (caller keeps the CPU build).
     bool beginMultipoleComputed();
-    bool downloadMultipole(double* dp_int3, double* qp_int6);
+    bool downloadMultipoleInts(double* dp_int3, double* qp_int6);
 
     // ---- Device-resident GFN2 multipole SCF (Stage 2b / V-AP3) --------------
     // solveMultipole: one resident SCF step with the GFN2 anisotropic Fock term

@@ -21,6 +21,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/elements.h"
 #include "src/core/units.h"
+#include "src/core/math_compat.h"
 #include "src/core/periodic_table.h"
 #include "src/core/functional_groups.h"  // Claude Generated (January 10, 2026): Amide detection
 #include <chrono>
@@ -479,8 +480,7 @@ GFNFFParameterSet GFNFFParameterSet::fromJSON(const json& j)
 // =============================================================================
 
 GFNFF::GFNFF()
-    : m_forcefield(nullptr)
-    , m_initialized(false)
+    : m_initialized(false)
     , m_energy_total(0.0)
 {
     json default_parameters = {
@@ -515,8 +515,7 @@ GFNFF::GFNFF()
 }
 
 GFNFF::GFNFF(const json& parameters)
-    : m_forcefield(nullptr)
-    , m_initialized(false)
+    : m_initialized(false)
     , m_energy_total(0.0)
 {
     json default_parameters = {
@@ -731,12 +730,34 @@ void GFNFF::applyEEQCutoffAutoIfRequested()
     }
 }
 
-GFNFF::~GFNFF()
+GFNFF::~GFNFF() = default;
+
+CxxThreadPool* GFNFF::threadPool() const { return m_pool.get(); }
+
+std::unique_ptr<GFNFFParameterSet> GFNFF::makeParameterSetCache(const GFNFFParameterSet& p) const
 {
-    if (m_forcefield) {
-        delete m_forcefield;
-        m_forcefield = nullptr;
-    }
+    if (m_keep_full_parameter_set)
+        return std::make_unique<GFNFFParameterSet>(p);
+    // CPU consumers (validation-test JSON exports, react-mode refresh) only read the bonded
+    // terms; the O(N^2) pair lists live in the workspace.
+    auto c = std::make_unique<GFNFFParameterSet>();
+    c->bonds = p.bonds;
+    c->angles = p.angles;
+    c->dihedrals = p.dihedrals;
+    c->extra_dihedrals = p.extra_dihedrals;
+    c->inversions = p.inversions;
+    c->storsions = p.storsions;
+    c->bond_hb_data = p.bond_hb_data;
+    c->eeq_charges = p.eeq_charges;
+    c->topology_charges = p.topology_charges;
+    c->dispersion_method = p.dispersion_method;
+    c->e0 = p.e0;
+    c->method_type = p.method_type;
+    c->dispersion_enabled = p.dispersion_enabled;
+    c->hbond_enabled = p.hbond_enabled;
+    c->repulsion_enabled = p.repulsion_enabled;
+    c->coulomb_enabled = p.coulomb_enabled;
+    return c;
 }
 
 bool GFNFF::InitialiseMolecule(const Mol& molecule)
@@ -791,6 +812,7 @@ bool GFNFF::InitialiseMolecule()
 
     // Invalidate cached topology and bond list because geometry changed
     m_cached_topology.reset();
+    ++m_topology_version;
     m_cached_bond_list.reset();
     m_static_topology_valid = false;  // Reset static topology cache for new molecule
 
@@ -861,10 +883,6 @@ bool GFNFF::InitialiseMolecule()
         return false;
     }
 
-    // Claude Generated (April 2026): Propagate PBC unit cell to ForceField (threads already created)
-    if (m_has_pbc && m_forcefield) {
-        m_forcefield->setUnitCell(m_unit_cell, true);
-    }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success("Force field initialization successful");
@@ -940,10 +958,6 @@ bool GFNFF::UpdateMolecule()
     // will handle cache invalidation based on geometry change thresholds.
     // The existing cached results will be used if geometry change is insignificant.
 
-    // Update geometry in forcefield
-    if (m_forcefield) {
-        m_forcefield->UpdateGeometry(m_geometry_bohr);  // Pass Bohr geometry
-    }
 
     return true;
 }
@@ -992,6 +1006,7 @@ const GFNFF::TopologyInfo& GFNFF::getCachedTopology() const {
             m_eeq_solver->invalidateMatrixCache();
         }
         m_cached_topology = calculateTopologyInfo();
+        ++m_topology_version;
         m_last_topology_geometry = m_geometry_bohr;
         m_static_topology_valid = true;
         m_full_topology_recalculated = true;  // Signal GPU path to update reference geometry
@@ -1096,6 +1111,10 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
     } else if (CurcumaLogger::get_verbosity() >= 4) {
         CurcumaLogger::info(fmt::format("GFNFF: Using cached bond list ({} bonds)", m_cached_bond_list->size()));
     }
+    if (std::getenv("CURCUMA_BONDDUMP")) {
+        static int call_no = 0;
+        fmt::print("GETCACHEDBONDLIST call#{} -> {} bonds\n", ++call_no, m_cached_bond_list->size());
+    }
     return *m_cached_bond_list;
 }
 
@@ -1193,7 +1212,7 @@ void GFNFF::computeSharedDistances() const
         }
     };
 
-    auto* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
+    auto* pool = threadPool();
     const int T = (m_threads > 1 && N > 64) ? std::min(m_threads, N) : 1;
     if (T > 1 && pool) {
         std::vector<std::future<void>> futures;
@@ -1272,7 +1291,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             // mode (cn_cutoff_bohr > 0). Timing captured in t_cn; t_dcn stays 0.
             if (gradient && !gpu_only && cn_cutoff_bohr > 0.0) {
                 int fused_T = m_threads;
-                auto* fused_pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
+                auto* fused_pool = threadPool();
                 if (fused_pool) fused_pool->setActiveThreadCount(fused_T);
                 auto fused = computeCNAndDerivativesFused(cn_cutoff_bohr, fused_pool, fused_T);
                 m_last_cn          = std::move(fused.cn_values);
@@ -1317,7 +1336,6 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
 
     // Distribute D3 CN to CPU ForceField and workspace (skip for GPU-only path)
     if (!gpu_only) {
-        if (m_forcefield) m_forcefield->distributeD3CN(m_last_cn);
         if (m_workspace) {
             m_workspace->setGeometry(m_geometry_bohr);
             m_workspace->setD3CN(m_last_cn);
@@ -1326,7 +1344,6 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
 
     // Prepare EEQ topology input
     t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
-    EEQSolver::TopologyInput eeq_topo;
     const TopologyInfo* topo_ptr = nullptr;
     // Static-Mode (WP-S1): freeze_eeq overrides do_eeq once initial charges are captured.
     bool do_eeq = (m_eeq_solver && !m_skip_eeq_recalc && !freeze_eeq);
@@ -1347,18 +1364,27 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     }
     if (do_eeq) {
         topo_ptr = &getCachedTopology();
-        eeq_topo.neighbor_lists = topo_ptr->neighbor_lists;
-        eeq_topo.nfrag = topo_ptr->nfrag;
-        eeq_topo.fraglist = topo_ptr->fraglist;
-        eeq_topo.qfrag = topo_ptr->qfrag;
-        eeq_topo.covalent_radii.resize(m_atomcount);
-        for (int i = 0; i < m_atomcount; ++i) {
-            int z = m_atoms[i];
-            if (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) {
-                eeq_topo.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];
-            } else {
-                eeq_topo.covalent_radii[i] = 1.0;
+        // The EEQ topology input (neighbour lists, fragments, radii) only changes with the
+        // topology; rebuilding it per step deep-copied N neighbour vectors (B3, Sep 2026).
+        if (!m_eeq_topo_cache || m_eeq_topo_cache_version != m_topology_version
+            || static_cast<int>(m_eeq_topo_cache->covalent_radii.size()) != m_atomcount) {
+            EEQSolver::TopologyInput eeq_topo;
+            eeq_topo.neighbor_lists = topo_ptr->neighbor_lists;
+            eeq_topo.nfrag = topo_ptr->nfrag;
+            eeq_topo.fraglist = topo_ptr->fraglist;
+            eeq_topo.qfrag = topo_ptr->qfrag;
+            eeq_topo.itag = topo_ptr->itag;  // real Fortran itag for the dxi carbene test
+            eeq_topo.covalent_radii.resize(m_atomcount);
+            for (int i = 0; i < m_atomcount; ++i) {
+                int z = m_atoms[i];
+                if (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) {
+                    eeq_topo.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];
+                } else {
+                    eeq_topo.covalent_radii[i] = 1.0;
+                }
             }
+            m_eeq_topo_cache = std::move(eeq_topo);
+            m_eeq_topo_cache_version = m_topology_version;
         }
     }
     if (do_timing) {
@@ -1388,7 +1414,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         }
 
         int total_threads = m_threads;  // WP1: cached member, see GFNFF::setThreadCount
-        auto* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
+        auto* pool = threadPool();
         if (pool) pool->setActiveThreadCount(total_threads);
 
         // CN-derivative pair list only needed for CPU path (GPU has k_cn_chainrule kernel).
@@ -1450,7 +1476,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             new_charges = m_eeq_solver->calculateFinalCharges(
                 m_atoms, m_geometry_bohr, m_charge,
                 topo_ptr->topology_charges, m_last_cn,
-                topo_ptr->hybridization, eeq_topo,
+                topo_ptr->hybridization, m_eeq_topo_cache,
                 true, topo_ptr->alpeeq, pool, total_threads);
             if (do_timing) {
                 t_eeq_solve = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
@@ -1459,12 +1485,6 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
 
         // Distribute to CPU ForceField/workspace (skip for GPU-only path)
         if (!gpu_only) {
-            if (m_forcefield) {
-                m_forcefield->distributeCNandDerivatives(m_last_cn, m_last_cnf, m_last_dcn);
-                if (m_d4_generator) {
-                    m_forcefield->setDispersionDC6DCNPtr(&m_d4_generator->getDC6DCN());
-                }
-            }
             if (m_workspace) {
                 m_workspace->setCNDerivatives(m_last_cn, m_last_cnf, m_last_dcn);
                 if (m_d4_generator) {
@@ -1480,7 +1500,6 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
                            && new_charges.cwiseAbs().maxCoeff() < 50.0;
             if (charges_ok) {
                 if (!gpu_only) {
-                    if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
                     if (m_workspace) m_workspace->setEEQCharges(new_charges);
                 }
                 // GPU path: memcpy into pre-allocated m_charges to avoid Eigen heap alloc
@@ -1504,19 +1523,17 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         }
         m_last_dcn.clear();
 
-        if (!gpu_only && m_forcefield) m_forcefield->distributeCNOnly(m_last_cn);
-
         if (do_eeq && !skip_eeq && !eeq_charges_current) {
             t0 = std::chrono::high_resolution_clock::now();
             // Claude Generated (WP2, May 2026): pass thread pool through to enable
             // Stage-4 batched per-fragment LU parallelisation in the energy-only path.
             // Mirrors the gradient-path call at gfnff_method.cpp:1025-1029.
-            auto* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
+            auto* pool = threadPool();
             if (pool) pool->setActiveThreadCount(m_threads);
             Vector new_charges = m_eeq_solver->calculateFinalCharges(
                 m_atoms, m_geometry_bohr, m_charge,
                 topo_ptr->topology_charges, m_last_cn,
-                topo_ptr->hybridization, eeq_topo,
+                topo_ptr->hybridization, m_eeq_topo_cache,
                 true, topo_ptr->alpeeq, pool, m_threads);
             if (do_timing) {
                 t_eeq_solve = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
@@ -1526,7 +1543,6 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
                                && new_charges.cwiseAbs().maxCoeff() < 50.0;
                 if (charges_ok) {
                     if (!gpu_only) {
-                        if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
                         if (m_workspace) m_workspace->setEEQCharges(new_charges);
                     }
                     if (m_gpu_path_preallocated) {
@@ -1715,8 +1731,7 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
     // Store old counts for verbose output
     int old_hb_count = m_hb_reference ? m_hb_reference->nhb_count : 0;
     int old_xb_count = m_hb_reference ? m_hb_reference->nxb_count : 0;
-    int old_disp_count = m_forcefield ? m_forcefield->getDispersionPairCount()
-                       : (m_workspace ? m_workspace->dispersionPairCount() : 0);
+    int old_disp_count = m_workspace ? m_workspace->dispersionPairCount() : 0;
 
     // Get current topology with updated geometry
     const TopologyInfo& topo = getCachedTopology();
@@ -1724,37 +1739,6 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
     // Re-detect HB/XB pairs with Phase-1 charges (topology_charges)
     auto new_hbonds_native = detectHydrogenBondsNative(topo.topology_charges);
     auto new_xbonds_native = detectHalogenBondsNative(topo.topology_charges);
-
-    // Update ForceField parameters (JSON path for legacy ForceFieldThread)
-    if (m_forcefield) {
-        json hb_json = json::array();
-        for (const auto& hb : new_hbonds_native) {
-            json j;
-            j["type"] = "hydrogen_bond"; j["case_type"] = hb.case_type;
-            j["i"] = hb.i; j["j"] = hb.j; j["k"] = hb.k;
-            j["basicity_A"] = hb.basicity_A; j["basicity_B"] = hb.basicity_B;
-            j["acidity_A"] = hb.acidity_A; j["acidity_B"] = hb.acidity_B;
-            j["q_H"] = hb.q_H; j["q_A"] = hb.q_A; j["q_B"] = hb.q_B;
-            j["r_cut"] = hb.r_cut;
-            j["neighbors_A"] = hb.neighbors_A; j["neighbors_B"] = hb.neighbors_B;
-            if (hb.case_type == 3) {
-                j["acceptor_parent_index"] = hb.acceptor_parent_index;
-                j["neighbors_C"] = hb.neighbors_C;
-            }
-            hb_json.push_back(j);
-        }
-        json xb_json = json::array();
-        for (const auto& xb : new_xbonds_native) {
-            json j;
-            j["type"] = "halogen_bond";
-            j["i"] = xb.i; j["j"] = xb.j; j["k"] = xb.k;
-            j["basicity_B"] = xb.basicity_B; j["acidity_X"] = xb.acidity_X;
-            j["q_X"] = xb.q_X; j["q_B"] = xb.q_B; j["r_cut"] = xb.r_cut;
-            xb_json.push_back(j);
-        }
-        m_forcefield->updateGFNFFHBonds(hb_json);
-        m_forcefield->updateGFNFFXBonds(xb_json);
-    }
 
     // Update internal workspace
     if (m_workspace) {
@@ -1787,44 +1771,6 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
         CurcumaLogger::param("XB pairs", fmt::format("{} → {}", old_xb_count, m_hb_reference->nxb_count));
         CurcumaLogger::param("Dispersion pairs", std::to_string(old_disp_count) + " (static)");
     }
-}
-
-// ===========================================================================
-// React topology mode (Claude Generated Aug 2026)
-// Event-driven reactive bond topology: bonds may form and break during MD.
-// The hysteresis scan owns the bond list via m_forced_bonds, so every topology
-// consumer (adjacency, EEQ fragment constraints, repulsion partition, rings,
-// Hueckel, BATM) stays consistent with it. See docs/GFNFF_REACT_TOPOLOGY.md.
-// ===========================================================================
-
-void GFNFF::syncLegacyForceField(const GFNFFParameterSet& ff_params)
-{
-    if (!m_forcefield)
-        return;
-
-    m_forcefield->setGFNFFParameters(ff_params);
-
-    // Phase-1 topology charges for BATM (Fortran gfnff_engrad.F90:620 uses topo%qa).
-    // Must happen AFTER setGFNFFParameters(), which (re)creates threads via AutoRanges().
-    if (m_cached_topology.has_value() && m_cached_topology->topology_charges.size() > 0) {
-        m_forcefield->distributeTopologyCharges(m_cached_topology->topology_charges);
-    }
-
-    // CN, CNF and CN derivatives for Coulomb charge-derivative gradients
-    // (Fortran gfnff_engrad.F90:418-422).
-    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
-    Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
-
-    Vector cnf(m_atoms.size());
-    for (size_t i = 0; i < m_atoms.size(); ++i) {
-        int z = m_atoms[i];
-        cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
-                    ? GFNFFParameters::cnf_eeq[z - 1]
-                    : 0.0;
-    }
-
-    CNDerivStore dcn = calculateCoordinationNumberDerivatives(cn);
-    m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
 }
 
 bool GFNFF::detectReactiveBondChanges()
@@ -2165,12 +2111,8 @@ bool GFNFF::rebuildReactiveTopology()
     ff_params.repulsion_enabled = m_parameters.value("repulsion", true);
     ff_params.coulomb_enabled = m_parameters.value("coulomb", true);
 
-    // Legacy ForceField engine: parameters + topology charges + CN/dcn (kept consistent
-    // even though the energy path runs through FFWorkspace).
-    syncLegacyForceField(ff_params);
-
     // Refresh the heap copy for external consumers (GPU rebuild path reads a clone).
-    m_cached_parameter_set = std::make_unique<GFNFFParameterSet>(ff_params);
+    m_cached_parameter_set = makeParameterSetCache(ff_params);
 
     // Active engine: full interaction-list swap + re-partition. Atom types, thread
     // pool and partition count survive inside the workspace.
@@ -2206,7 +2148,6 @@ double GFNFF::Calculation(bool gradient)
         CurcumaLogger::info("=== GFNFF::Calculation() START ===");
         CurcumaLogger::param("gradient_requested", gradient ? "true" : "false");
         CurcumaLogger::param("initialized", m_initialized ? "true" : "false");
-        CurcumaLogger::param("forcefield_ptr", m_forcefield ? "valid" : "null");
     }
 
     if (!m_initialized) {
@@ -2218,13 +2159,9 @@ double GFNFF::Calculation(bool gradient)
         return 0.0;
     }
 
-    if (!m_forcefield && !m_workspace) {
-        CurcumaLogger::error("GFN-FF calculation failed: Neither ForceField nor Workspace available");
+    if (!m_workspace) {
+        CurcumaLogger::error("GFN-FF calculation failed: force-field workspace not initialised");
         return 0.0;
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("Calling ForceField::Calculate()...");
     }
 
     // Claude Generated (Feb 20, 2026): Recalculate CN and Phase-2 EEQ charges for current geometry
@@ -2236,7 +2173,6 @@ double GFNFF::Calculation(bool gradient)
     // Phase-1 charges (topo%qa) remain fixed (topology-dependent only).
 
     // Claude Generated (Mar 2026): Timing infrastructure for sequential sections
-    const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
     double t_cn = 0, t_threads = 0, t_hbxb_update = 0;
 
     // WP-FF-DistMatrix-Sharing (May 2026): compute packed sqrab/srab ONCE for this
@@ -2252,9 +2188,6 @@ double GFNFF::Calculation(bool gradient)
     updateReactiveTopologyIfNeeded();
 
     computeSharedDistances();
-    if (m_forcefield) {
-        m_forcefield->setSharedDistances(&m_shared_srab, &m_shared_sqrab);
-    }
     if (m_eeq_solver) {
         m_eeq_solver->setExternalDistances(&m_shared_srab);
     }
@@ -2280,26 +2213,17 @@ double GFNFF::Calculation(bool gradient)
     // Apr 2026: enabled unconditionally when gradient is requested so the NaN trap below
     // can attribute NaNs to specific energy terms at any verbosity (memory cost ~= 10 * Natoms*3 doubles).
     if (gradient) {
-        if (m_forcefield) m_forcefield->setStoreGradientComponents(true);
         if (m_workspace) m_workspace->setStoreGradientComponents(true);
     }
 
     // =========================================================================
     // Phase B: Force field energy/gradient calculation
-    // Workspace path (m_use_workspace) or legacy ForceField path
+    // FFWorkspace engine (bonded + non-bonded kernels, threaded via m_pool)
     // =========================================================================
     auto t_ff_start = std::chrono::high_resolution_clock::now();
     double energy_hartree;
 
-    // Claude Generated (May 2026): Suppress ForceField's own decomposition output —
-    // GFN-FF wrapper prints the unified GFNFFEnergyReport at verbosity >= 2 below.
-    if (m_forcefield) m_forcefield->setSuppressOutput(true);
-
-    if (m_use_workspace && m_workspace) {
-        energy_hartree = m_workspace->calculate(gradient);
-    } else {
-        energy_hartree = m_forcefield->Calculate(gradient);
-    }
+    energy_hartree = m_workspace->calculate(gradient);
     t_threads = std::chrono::duration<double, std::milli>(
         std::chrono::high_resolution_clock::now() - t_ff_start).count();
 
@@ -2344,13 +2268,7 @@ double GFNFF::Calculation(bool gradient)
         // Previous multiplication by BOHR_TO_ANGSTROM was incorrect and amplified gradients
         // Previous division by BOHR_TO_ANGSTROM was also incorrect and reduced gradients
         // Correct approach: Use gradient directly as returned by ForceField
-        Matrix grad_hartree;
-        if (m_use_workspace && m_workspace) {
-            grad_hartree = m_workspace->gradient();
-        } else {
-            grad_hartree = m_forcefield->Gradient();
-        }
-        m_gradient = grad_hartree;  // No conversion needed
+        m_gradient = m_workspace->gradient();  // Eh/Bohr, no conversion needed
 
         // Claude Generated (Mar 2026): Add ALPB solvation gradient
         // WP-G (May 2026): ALPB takes ColumnMajor Matrix; convert at the boundary.
@@ -2383,7 +2301,7 @@ double GFNFF::Calculation(bool gradient)
                     CurcumaLogger::error_fmt("  [NaN] term={} first_atom={} axis={}", name, atom, axis);
                 }
             };
-            if (m_use_workspace && m_workspace) {
+            {
                 scanComp(m_workspace->gradientBond(),       "bond");
                 scanComp(m_workspace->gradientAngle(),      "angle");
                 scanComp(m_workspace->gradientTorsion(),    "torsion");
@@ -2394,17 +2312,6 @@ double GFNFF::Calculation(bool gradient)
                 scanComp(m_workspace->gradientXB(),         "xb");
                 scanComp(m_workspace->gradientBATM(),       "batm");
                 scanComp(m_workspace->gradientATM(),        "atm");
-            } else if (m_forcefield) {
-                scanComp(m_forcefield->GradientBond(),       "bond");
-                scanComp(m_forcefield->GradientAngle(),      "angle");
-                scanComp(m_forcefield->GradientTorsion(),    "torsion");
-                scanComp(m_forcefield->GradientRepulsion(),  "repulsion");
-                scanComp(m_forcefield->GradientCoulomb(),    "coulomb");
-                scanComp(m_forcefield->GradientDispersion(), "dispersion");
-                scanComp(m_forcefield->GradientHB(),         "hb");
-                scanComp(m_forcefield->GradientXB(),         "xb");
-                scanComp(m_forcefield->GradientBATM(),       "batm");
-                scanComp(m_forcefield->GradientATM(),        "atm");
             }
         }
 
@@ -2461,7 +2368,7 @@ double GFNFF::Calculation(bool gradient)
                     }
                 };
 
-                if (m_use_workspace && m_workspace) {
+                {
                     checkComponentInvariance(m_workspace->gradientBond(),       "bond      ");
                     checkComponentInvariance(m_workspace->gradientAngle(),      "angle     ");
                     checkComponentInvariance(m_workspace->gradientTorsion(),    "torsion   ");
@@ -2472,30 +2379,9 @@ double GFNFF::Calculation(bool gradient)
                     checkComponentInvariance(m_workspace->gradientXB(),         "xb        ");
                     checkComponentInvariance(m_workspace->gradientBATM(),       "batm      ");
                     checkComponentInvariance(m_workspace->gradientATM(),        "atm       ");
-                } else {
-                    checkComponentInvariance(m_forcefield->GradientBond(),       "bond      ");
-                    checkComponentInvariance(m_forcefield->GradientAngle(),      "angle     ");
-                    checkComponentInvariance(m_forcefield->GradientTorsion(),    "torsion   ");
-                    checkComponentInvariance(m_forcefield->GradientRepulsion(),  "repulsion ");
-                    checkComponentInvariance(m_forcefield->GradientCoulomb(),    "coulomb   ");
-                    checkComponentInvariance(m_forcefield->GradientDispersion(), "dispersion");
-                    checkComponentInvariance(m_forcefield->GradientHB(),         "hb        ");
-                    checkComponentInvariance(m_forcefield->GradientXB(),         "xb        ");
-                    checkComponentInvariance(m_forcefield->GradientBATM(),       "batm      ");
-                    checkComponentInvariance(m_forcefield->GradientATM(),        "atm       ");
                 }
             }
         }
-    }
-
-    // Claude Generated (Feb 22, 2026): Auto-trigger compareGradients at verbosity >= 3
-    // Reference: Plan Phase 1.1 - diagnose gradient errors via analytical vs numerical comparison
-    // m_comparing_gradients guard prevents recursion (NumGrad calls Calculation internally)
-    if (CurcumaLogger::get_verbosity() >= 3 && !m_comparing_gradients) {
-        CurcumaLogger::info("--- Gradient Numerical Verification ---");
-        m_comparing_gradients = true;
-        compareGradients(1e-5);
-        m_comparing_gradients = false;
     }
 
     // No unit conversion needed - already in Hartree
@@ -2583,12 +2469,11 @@ double GFNFF::Calculation(bool gradient)
 
     // Claude Generated (May 2026): Unified verbosity-2 GFN-FF report (CPU path).
     // Format identical to GPU path; both populate the same GFNFFEnergyReport struct.
-    if (CurcumaLogger::get_verbosity() >= 2 && (m_forcefield || m_workspace)) {
+    if (CurcumaLogger::get_verbosity() >= 2 && m_workspace) {
         GFNFFEnergyReport rep;
         rep.is_gpu = false;
 
-        // Energy components — workspace path (preferred) or ForceField legacy path.
-        if (m_use_workspace && m_workspace) {
+        {
             const auto& comp = m_workspace->energyComponents();
             rep.bond          = comp.bond;
             rep.angle         = comp.angle;
@@ -2612,34 +2497,10 @@ double GFNFF::Calculation(bool gradient)
             rep.xbond         = comp.xbond;
             rep.atm           = comp.atm;
             rep.batm          = comp.batm;
-        } else if (m_forcefield) {
-            rep.bond          = m_forcefield->BondEnergy();
-            rep.angle         = m_forcefield->AngleEnergy();
-            rep.dihedral      = m_forcefield->DihedralEnergy();
-            rep.inversion     = m_forcefield->InversionEnergy();
-            rep.stors         = m_forcefield->STorsEnergy();
-            rep.dispersion    = m_forcefield->DispersionEnergy();
-            rep.bonded_rep    = m_forcefield->BondedRepulsionEnergy();
-            rep.nonbonded_rep = m_forcefield->NonbondedRepulsionEnergy();
-            rep.coulomb       = m_forcefield->CoulombEnergy();
-            rep.hbond         = m_forcefield->HydrogenBondEnergy();
-            // Claude Generated (May 2026, HB-investigation): per-case split for Fortran comparison
-            rep.hbond_case1   = m_forcefield->HBondCase1Energy();
-            rep.hbond_case2   = m_forcefield->HBondCase2Energy();
-            rep.hbond_case3   = m_forcefield->HBondCase3Energy();
-            rep.hbond_case4   = m_forcefield->HBondCase4Energy();
-            rep.hbond_case1_count = m_forcefield->HBondCase1Count();
-            rep.hbond_case2_count = m_forcefield->HBondCase2Count();
-            rep.hbond_case3_count = m_forcefield->HBondCase3Count();
-            rep.hbond_case4_count = m_forcefield->HBondCase4Count();
-            rep.xbond         = m_forcefield->HalogenBondEnergy();
-            rep.atm           = m_forcefield->ATMEnergy();
-            rep.batm          = m_forcefield->BatmEnergy();
         }
         rep.total = m_energy_total;
 
-        // Per-term CPU-sum timings — populated by either the workspace path or legacy ForceField.
-        if (m_use_workspace && m_workspace) {
+        {
             const auto& tt = m_workspace->termTimings();
             rep.t_bond.cpu_sum       = tt.bonds;
             rep.t_angle.cpu_sum      = tt.angles;
@@ -2667,35 +2528,6 @@ double GFNFF::Calculation(bool gradient)
             add_pos(tt.coulomb); add_pos(tt.hbond); add_pos(tt.xbond);
             add_pos(tt.atm); add_pos(tt.batm);
             rep.t_pool_cpu_sum = (sum_cpu > 0.0) ? sum_cpu : -1.0;
-        } else if (m_forcefield) {
-            // Legacy ForceField path — uses ForceFieldThread::timeEnergyTerm map
-            const auto& tt = m_forcefield->getTermTimings();
-            auto get_ms = [&](const std::string& key) -> double {
-                auto it = tt.find(key);
-                return (it != tt.end()) ? static_cast<double>(it->second) : -1.0;
-            };
-            rep.t_bond.cpu_sum      = get_ms("bonds");
-            rep.t_angle.cpu_sum     = get_ms("angles");
-            rep.t_dihedral.cpu_sum  = get_ms("torsions");
-            rep.t_inversion.cpu_sum = get_ms("inversions");
-            rep.t_dispersion.cpu_sum    = get_ms("dispersion");
-            rep.t_bonded_rep.cpu_sum    = get_ms("bonded_repulsion");
-            rep.t_nonbonded_rep.cpu_sum = get_ms("nonbonded_repulsion");
-            rep.t_coulomb.cpu_sum       = get_ms("coulomb");
-            rep.t_hbond.cpu_sum         = get_ms("hydrogen_bonds");
-            rep.t_xbond.cpu_sum         = get_ms("halogen_bonds");
-            rep.t_atm.cpu_sum           = get_ms("atm_dispersion");
-            rep.t_batm.cpu_sum          = get_ms("batm");
-
-            rep.n_cpu_threads  = m_forcefield->getThreadCount();
-            rep.t_pool_wall    = m_forcefield->getPoolWallTime();
-            double sum_cpu = 0.0;
-            for (const auto& [k, v] : tt) sum_cpu += static_cast<double>(v);
-            rep.t_pool_cpu_sum = (sum_cpu > 0.0) ? sum_cpu : -1.0;
-
-            rep.t_gradient_cpu = m_forcefield->getChainRuleTime();
-            if (gradient)
-                rep.t_gradient.cpu_sum = m_forcefield->getChainRuleTime();
         }
 
         // Serial phases (always available)
@@ -2932,8 +2764,8 @@ GFNFF::GFNFFResults GFNFF::getResults() const
 {
     GFNFFResults results;
 
-    if (!m_initialized || !m_forcefield) {
-        CurcumaLogger::warn("GFNFF::getResults: Not initialized or no forcefield");
+    if (!m_initialized || !m_workspace) {
+        CurcumaLogger::warn("GFNFF::getResults: Not initialized");
         return results;
     }
 
@@ -2944,23 +2776,23 @@ GFNFF::GFNFFResults GFNFF::getResults() const
     results.gnorm = m_gradient.norm();
 
     // Bonded energies from ForceField
-    results.e_bond = m_forcefield->BondEnergy();
-    results.e_angle = m_forcefield->AngleEnergy();
-    results.e_torsion = m_forcefield->DihedralEnergy();
-    results.e_inversion = m_forcefield->InversionEnergy();
-    results.e_storsion = m_forcefield->STorsEnergy();
+    results.e_bond = BondEnergy();
+    results.e_angle = AngleEnergy();
+    results.e_torsion = DihedralEnergy();
+    results.e_inversion = InversionEnergy();
+    results.e_storsion = STorsEnergy();
 
     // Non-bonded energies
-    results.e_repulsion = m_forcefield->HHEnergy();  // GFN-FF repulsion (HHEnergy = m_gfnff_repulsion)
-    results.e_bonded_repulsion = m_forcefield->BondedRepulsionEnergy();
-    results.e_coulomb = m_forcefield->CoulombEnergy();
-    results.e_dispersion = m_forcefield->DispersionEnergy();
-    results.e_hb = m_forcefield->HydrogenBondEnergy();
-    results.e_xb = m_forcefield->HalogenBondEnergy();
+    results.e_repulsion = RepulsionEnergy();  // GFN-FF repulsion (HHEnergy = m_gfnff_repulsion)
+    results.e_bonded_repulsion = BondedRepulsionEnergy();
+    results.e_coulomb = CoulombEnergy();
+    results.e_dispersion = DispersionEnergy();
+    results.e_hb = HydrogenBondEnergy();
+    results.e_xb = HalogenBondEnergy();
 
     // Three-body dispersion
-    results.e_atm = m_forcefield->ATMEnergy();
-    results.e_batm = m_forcefield->BatmEnergy();
+    results.e_atm = ATMEnergy();
+    results.e_batm = BatmEnergy();
 
     // Charges
     results.charges = m_charges;
@@ -2980,16 +2812,16 @@ GFNFF::GFNFFResults GFNFF::getResults() const
         results.g_total = m_gradient;
 
         // Per-component gradients (if stored)
-        results.g_bond = m_forcefield->GradientBond();
-        results.g_angle = m_forcefield->GradientAngle();
-        results.g_torsion = m_forcefield->GradientTorsion();
-        results.g_repulsion = m_forcefield->GradientRepulsion();
-        results.g_coulomb = m_forcefield->GradientCoulomb();
-        results.g_dispersion = m_forcefield->GradientDispersion();
-        results.g_hb = m_forcefield->GradientHB();
-        results.g_xb = m_forcefield->GradientXB();
-        results.g_atm = m_forcefield->GradientATM();
-        results.g_batm = m_forcefield->GradientBATM();
+        results.g_bond = GradientBond();
+        results.g_angle = GradientAngle();
+        results.g_torsion = GradientTorsion();
+        results.g_repulsion = GradientRepulsion();
+        results.g_coulomb = GradientCoulomb();
+        results.g_dispersion = GradientDispersion();
+        results.g_hb = GradientHB();
+        results.g_xb = GradientXB();
+        results.g_atm = GradientATM();
+        results.g_batm = GradientBATM();
     }
 
     // Dipole moment calculation
@@ -3011,10 +2843,6 @@ void GFNFF::setParameters(const json& parameters)
     m_parameters = MergeJson(m_parameters, parameters);
     m_threads = m_parameters.value("threads", m_threads);  // Claude Generated (WP1, May 2026)
 
-    if (m_forcefield && m_initialized) {
-        json ff_params = generateGFNFFParameters();
-        m_forcefield->setParameter(ff_params);
-    }
 }
 
 // =================================================================================
@@ -3053,7 +2881,7 @@ json GFNFF::exportTopology() const
     const TopologyInfo& topo = *m_cached_topology;
 
     // Version for format compatibility
-    topo_json["version"] = 2;
+    topo_json["version"] = 3;
 
     // Fragment information (for multi-fragment systems)
     topo_json["nfrag"] = topo.nfrag;
@@ -3093,6 +2921,11 @@ json GFNFF::exportTopology() const
     // Pi-system fragments
     if (!topo.pi_fragments.empty()) {
         topo_json["pi_fragments"] = topo.pi_fragments;
+    }
+
+    // Post-Hueckel pi membership (Fortran piadr after gfnff_ini.f90:1016)
+    if (!topo.pi_atoms_final.empty()) {
+        topo_json["pi_atoms_final"] = topo.pi_atoms_final;
     }
 
     // Eta(η)-coordination tags (Claude Generated Jul 2026)
@@ -3184,8 +3017,10 @@ bool GFNFF::importTopology(const json& topo_json)
     // v2 (Jul 2026): topology now comes from the Fortran four-list neighbour
     // construction; a v1 cache holds a hybridization from the old full-list heuristic
     // and an adjacency that is not the nbdum mixture, so it must be rejected.
+    // v3 (Sep 2026): adds pi_atoms_final (Fortran post-Hueckel piadr). A v2 cache cannot
+    // supply it, and silently falling back would reintroduce the torsion fkl bug it fixes.
     int version = topo_json.value("version", 0);
-    if (version < 2) {
+    if (version < 3) {
         CurcumaLogger::warn("GFNFF::importTopology: Unknown topology format version");
         return false;
     }
@@ -3195,6 +3030,7 @@ bool GFNFF::importTopology(const json& topo_json)
     // ICX rejects the no-arg emplace if TopologyInfo's default ctor isn't visible
     // through the GFNFFTopology+GFNFFDynamicState multi-inheritance pattern.
     m_cached_topology = TopologyInfo{};
+    ++m_topology_version;
     TopologyInfo& topo = *m_cached_topology;
 
     // Fragment information
@@ -3254,6 +3090,9 @@ bool GFNFF::importTopology(const json& topo_json)
     }
 
     // Pi fragments
+    if (topo_json.contains("pi_atoms_final")) {
+        topo.pi_atoms_final = topo_json["pi_atoms_final"].get<std::vector<int>>();
+    }
     if (topo_json.contains("pi_fragments")) {
         topo.pi_fragments = topo_json["pi_fragments"].get<std::vector<int>>();
     }
@@ -3335,32 +3174,13 @@ bool GFNFF::initializeForceField()
 {
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== GFNFF::initializeForceField() START ===");
-        CurcumaLogger::param("forcefield_exists", m_forcefield ? "yes (will delete)" : "no");
+        CurcumaLogger::param("threads", std::to_string(m_threads));
     }
 
-    if (m_forcefield) {
-        delete m_forcefield;
-    }
-
-    json ff_config = {
-        { "threads", m_parameters["threads"] },
-        { "gradient", m_parameters["gradient"] },
-        { "method", "gfnff" }
-    };
-
-    // Claude Generated (December 2025): Add geometry_file for automatic parameter caching
-    if (m_parameters.contains("geometry_file")) {
-        ff_config["geometry_file"] = m_parameters["geometry_file"];
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param("geometry_file (for caching)", m_parameters["geometry_file"].get<std::string>());
-        }
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("Creating ForceField instance...");
-        CurcumaLogger::param("threads", std::to_string(m_threads));  // WP1
-        CurcumaLogger::param("gradient", std::to_string(m_parameters.value("gradient", 1)));
-    }
+    // Shared worker pool for topology setup, EEQ solves and the workspace kernels.
+    // Recreated on every (re)initialisation, as the former ForceField engine did.
+    m_pool = std::make_unique<CxxThreadPool>();
+    m_pool->setProgressBar(CxxThreadPool::ProgressBarType::None);
 
     // Claude Generated (WP-C, May 2026): cutoff configuration summary at init time.
     // Visibility at verbosity >= 2 so operators can see which cutoffs are active without
@@ -3387,27 +3207,6 @@ bool GFNFF::initializeForceField()
         CurcumaLogger::param("  hb_r_cut / xb_r_cut / rep_r_cut",
             std::string("50.0 / 20.0 / 20.0 Bohr  (Struct defaults, set per pair)"));
     }
-
-    m_forcefield = new ForceField(ff_config);
-    m_forcefield->setAtomTypes(m_atoms);
-
-    // CRITICAL FIX: Set geometry in ForceField! setAtomTypes() only sets atom types, not geometry
-    // Without this, m_geometry in ForceField is empty, causing out-of-bounds access in threads
-    // NOTE: Use Bohr geometry (m_geometry_bohr) because GFN-FF parameters are in Bohr
-    m_forcefield->UpdateGeometry(m_geometry_bohr);
-
-    // FF parameter caching disabled — the JSON round-trip produces slightly different
-    // energies vs the native struct path. Topology caching is handled separately by GFNFF.
-    m_forcefield->setParameterCaching(false);
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::success("ForceField instance created");
-        CurcumaLogger::param("geometry_set", std::to_string(m_geometry_bohr.rows()) + " atoms");
-        CurcumaLogger::param("cache_topology", m_cache_topology ? "true" : "false");
-    }
-
-    // Note: FF parameter caching (param.json) is disabled because the JSON round-trip
-    // produces ~1.8 µEh energy drift. Topology caching uses a separate .topo.json file.
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Cache miss - calculating topology (bonds, angles, torsions, inversions)...");
@@ -3447,19 +3246,6 @@ bool GFNFF::initializeForceField()
         CurcumaLogger::param("angles_count", std::to_string(ff_params.angles.size()));
         CurcumaLogger::param("torsions_count", std::to_string(ff_params.dihedrals.size()));
         CurcumaLogger::param("inversions_count", std::to_string(ff_params.inversions.size()));
-        CurcumaLogger::info("About to call m_forcefield->setGFNFFParameters()...");
-    }
-
-    try {
-        // Parameters + Phase-1 topology charges + CN/CNF/dcn for the legacy engine.
-        // Shared with rebuildReactiveTopology() (react mode). Claude Generated Aug 2026.
-        syncLegacyForceField(ff_params);
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::success("syncLegacyForceField() completed successfully");
-        }
-    } catch (const std::exception& e) {
-        CurcumaLogger::error(std::string("syncLegacyForceField() failed: ") + e.what());
-        return false;
     }
 
     // Claude Generated (March 2026): Save topology cache to .topo.json
@@ -3506,10 +3292,6 @@ bool GFNFF::initializeForceField()
         }
     }
 
-    // EEQ charges are distributed by syncLegacyForceField() above (parameters +
-    // Phase-1 topology charges for BATM + CN/CNF/dcn for Coulomb charge-derivative
-    // gradients — Fortran refs gfnff_engrad.F90:620 and :418-422).
-
     // Claude Generated (Mar 2026): Create FFWorkspace from copy of ff_params (single generation)
     // CRITICAL: Do NOT call generateGFNFFParameterSet() again — a third call causes heap corruption.
     {
@@ -3517,19 +3299,17 @@ bool GFNFF::initializeForceField()
         m_workspace = std::make_unique<FFWorkspace>(num_threads);
         m_workspace->setAtomTypes(m_atoms);
 
-        // Save a heap copy for external consumers BEFORE moving into workspace
-        m_cached_parameter_set = std::make_unique<GFNFFParameterSet>(ff_params);
+        // Keep a copy for external consumers (full pair lists only when a GPU wrapper asked
+        // for them, bonded terms otherwise), then MOVE the set into the workspace. The former
+        // two full copies cost ~3 s / 1.2 GB on a 3000-atom water box (B3, Sep 2026).
+        m_cached_parameter_set = makeParameterSetCache(ff_params);
+        m_workspace->setInteractionLists(std::move(ff_params));
 
-        // Copy (not regenerate) parameters for the workspace
-        GFNFFParameterSet ws_params = ff_params;
-        m_workspace->setInteractionLists(std::move(ws_params));
-
-        if (num_threads > 1 && m_forcefield->threadPool()) {
-            m_workspace->setPool(m_forcefield->threadPool());
+        if (num_threads > 1 && threadPool()) {
+            m_workspace->setPool(threadPool());
         }
 
         m_workspace->partition();
-        m_use_workspace = true;
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::success(fmt::format("FFWorkspace created: {} bonds, {} disp, {} atoms, T={}",
@@ -3543,505 +3323,6 @@ bool GFNFF::initializeForceField()
     }
 
     return true;
-}
-
-json GFNFF::generateGFNFFParameters()
-{
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    json parameters;
-    parameters["method"] = "gfnff";
-    parameters["e0"] = 0.0;
-
-    // Check if advanced parametrization is enabled
-    // ACTIVATED (Session 10, Dec 2025): Two-Phase EEQ System now default
-    // Claude Generated: Enable advanced parametrization (Two-Phase EEQ) by default
-    bool use_advanced = m_parameters.value("use_advanced_parametrization", true);
-
-    if (use_advanced) {
-        CurcumaLogger::info("Using advanced GFN-FF parametrization (experimental)");
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("About to call getCachedTopology() [advanced mode]...");
-            CurcumaLogger::param("use_advanced", "true");
-        }
-
-        // Retrieve cached topology information for advanced parametrization
-        const TopologyInfo& topo_info = getCachedTopology();
-
-        // CRITICAL: Validate topology charges (always, not just at verbosity 3)
-        bool has_nan = false;
-        for (int i = 0; i < topo_info.eeq_charges.size(); ++i) {
-            if (std::isnan(topo_info.eeq_charges[i]) || std::isinf(topo_info.eeq_charges[i])) {
-                has_nan = true;
-                CurcumaLogger::error(fmt::format("INVALID CHARGE at index {}: {}", i, topo_info.eeq_charges[i]));
-                break;
-            }
-        }
-        if (has_nan) {
-            throw std::runtime_error("Invalid topology: NaN or Inf detected in EEQ charges - this usually indicates "
-                                     "a numerically unstable EEQ matrix for this molecule");
-        }
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::success("getCachedTopology() returned [advanced mode]");
-            CurcumaLogger::param("cn_size", std::to_string(topo_info.coordination_numbers.size()));
-            CurcumaLogger::param("charges_size", std::to_string(topo_info.eeq_charges.size()));
-            CurcumaLogger::param("has_invalid_charges", "no - validated");
-        }
-
-        // CRITICAL FIX (Claude Generated Jan 2, 2026): Set charges BEFORE generating torsions!
-        // Torsions need m_charges for fqq correction factor
-        m_charges = topo_info.eeq_charges;
-
-        // NOTE (Claude Generated Mar 6, 2026): Topology charge distribution for BATM moved to
-        // initializeForceField() AFTER setParameter() — threads don't exist yet at this point.
-        // See initializeForceField() line ~845 for the actual distribution.
-
-        // Phase 1A: Bonds (sequential - prerequisite for all other phases)
-        // CRITICAL FIX (Claude Generated Jan 15, 2026): Pass full topo_info to include pi_bond_orders!
-        json bonds = generateTopologyAwareBonds(topo_info);
-        parameters["bonds"] = bonds;
-
-        // Claude Generated (Feb 2026): Parallel parameter generation
-        // After bonds, 6 phases are independent and can run in parallel:
-        //   angles, torsions, inversions, coulomb, repulsion, dispersion
-        int thread_count = m_threads;  // WP1
-
-        if (thread_count > 1) {
-            // Parallel path: use CxxThreadPool for inter-phase parallelism
-            auto parallel_start = std::chrono::high_resolution_clock::now();
-
-            CxxThreadPool pool;
-            pool.setProgressBar(CxxThreadPool::ProgressBarType::None);
-            pool.setActiveThreadCount(std::min(thread_count, 6));  // Max 6 independent phases
-
-            // Create one thread per independent generation phase
-            auto* t_angles = new ParameterGeneratorThread("angles", [this, &topo_info]() {
-                return generateTopologyAwareAngles(topo_info);
-            });
-            auto* t_torsions = new ParameterGeneratorThread("torsions", [this]() {
-                return generateGFNFFTorsions();
-            });
-            auto* t_inversions = new ParameterGeneratorThread("inversions", [this]() {
-                return generateGFNFFInversions();
-            });
-            auto* t_coulomb = new ParameterGeneratorThread("coulomb", [this]() {
-                return generateGFNFFCoulombPairs();
-            });
-            auto* t_repulsion = new ParameterGeneratorThread("repulsion", [this]() {
-                return generateGFNFFRepulsionPairs();
-            });
-            auto* t_dispersion = new ParameterGeneratorThread("dispersion", [this]() {
-                return generateGFNFFDispersionPairs();
-            });
-            auto* t_storsions = new ParameterGeneratorThread("storsions", [this]() {
-                return generateGFNFFSTorsions();
-            });
-
-            pool.addThread(t_angles);
-            pool.addThread(t_torsions);
-            pool.addThread(t_inversions);
-            pool.addThread(t_coulomb);
-            pool.addThread(t_repulsion);
-            pool.addThread(t_dispersion);
-            pool.addThread(t_storsions);
-
-            pool.StartAndWait();
-
-            // Collect results from threads
-            parameters["angles"] = t_angles->getResult();
-            parameters["dihedrals"] = t_torsions->getResult();
-            parameters["inversions"] = t_inversions->getResult();
-            parameters["gfnff_coulombs"] = t_coulomb->getResult();
-            parameters["gfnff_storsions"] = t_storsions->getResult();
-
-            json repulsion_data = t_repulsion->getResult();
-            parameters["gfnff_bonded_repulsions"] = repulsion_data["bonded"];
-            parameters["gfnff_nonbonded_repulsions"] = repulsion_data["nonbonded"];
-
-            json dispersions = t_dispersion->getResult();
-
-            // Per-phase timing at verbosity >= 2
-            if (CurcumaLogger::get_verbosity() >= 2) {
-                auto parallel_end = std::chrono::high_resolution_clock::now();
-                auto parallel_ms = std::chrono::duration_cast<std::chrono::milliseconds>(parallel_end - parallel_start);
-                CurcumaLogger::result_fmt("  Parallel phases ({} threads): {} ms", std::min(thread_count, 6), parallel_ms.count());
-                CurcumaLogger::param("    angles", fmt::format("{} ms", t_angles->getExecutionTime()));
-                CurcumaLogger::param("    torsions", fmt::format("{} ms", t_torsions->getExecutionTime()));
-                CurcumaLogger::param("    inversions", fmt::format("{} ms", t_inversions->getExecutionTime()));
-                CurcumaLogger::param("    coulomb", fmt::format("{} ms", t_coulomb->getExecutionTime()));
-                CurcumaLogger::param("    repulsion", fmt::format("{} ms", t_repulsion->getExecutionTime()));
-                CurcumaLogger::param("    dispersion", fmt::format("{} ms", t_dispersion->getExecutionTime()));
-                CurcumaLogger::param("    storsions", fmt::format("{} ms", t_storsions->getExecutionTime()));
-            }
-
-            // Threads cleaned up by CxxThreadPool destructor (AutoDelete=true)
-
-            // Route dispersion to correct parameter key
-            if (dispersions.size() > 0 && dispersions[0].contains("dispersion_method") &&
-                dispersions[0]["dispersion_method"] == "d4") {
-                parameters["d4_dispersion_pairs"] = dispersions;
-            } else {
-                parameters["gfnff_dispersions"] = dispersions;
-            }
-
-        } else {
-            // Sequential path: single-threaded (no ThreadPool overhead)
-            parameters["angles"] = generateTopologyAwareAngles(topo_info);
-            parameters["dihedrals"] = generateGFNFFTorsions();
-            parameters["gfnff_storsions"] = generateGFNFFSTorsions();
-            parameters["inversions"] = generateGFNFFInversions();
-            parameters["gfnff_coulombs"] = generateGFNFFCoulombPairs();
-
-            json repulsion_data = generateGFNFFRepulsionPairs();
-            parameters["gfnff_bonded_repulsions"] = repulsion_data["bonded"];
-            parameters["gfnff_nonbonded_repulsions"] = repulsion_data["nonbonded"];
-
-            json dispersions = generateGFNFFDispersionPairs();
-            if (dispersions.size() > 0 && dispersions[0].contains("dispersion_method") &&
-                dispersions[0]["dispersion_method"] == "d4") {
-                parameters["d4_dispersion_pairs"] = dispersions;
-            } else {
-                parameters["gfnff_dispersions"] = dispersions;
-            }
-        }
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info(fmt::format("DEBUG: generateGFNFFParameters returning {} bonds", parameters["bonds"].size()));
-        }
-
-        // Add ATM triples if generated from D3/D4 (set by generateGFNFFDispersionPairs)
-        if (!m_atm_triples.is_null() && m_atm_triples.is_array() && !m_atm_triples.empty()) {
-            parameters["atm_triples"] = m_atm_triples;
-            if (CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::param("ATM triples added to parameters",
-                                     static_cast<int>(m_atm_triples.size()));
-            }
-        }
-
-        // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
-        // Generate batm (bonded ATM) parameters for 1,4-pairs
-        // Reference: external/gfnff/src/gfnff_param.f90:528-535, gfnff_engrad.F90:562-603
-        if (topo_info.nbatm > 0) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info("Generating batm (bonded ATM) parameters for 1,4-pairs");
-            }
-
-            // Calculate zb3atm parameters
-            // Reference: external/gfnff/src/gfnff_param.f90:528-535
-            // zb3atm(z) = -z * batmscal^(1/3)  (except Z=1 uses 0.25 instead of 1.0)
-            // Reference: external/gfnff/src/gfnff_param.f90:799
-            const double batmscal = 0.30;  // bonded ATM scal (Fortran: 0.30)
-            const double batmscal_cuberoot = std::pow(batmscal, 1.0/3.0);
-
-            std::vector<double> zb3atm(87, 0.0);  // Z=1..86
-            for (int z = 1; z <= 86; ++z) {
-                if (z == 1) {
-                    // Hydrogen has special factor 0.25
-                    zb3atm[z] = -0.25 * batmscal_cuberoot;
-                } else {
-                    zb3atm[z] = -static_cast<double>(z) * batmscal_cuberoot;
-                }
-            }
-
-            // Generate batm triples with zb3atm parameters
-            json batms = json::array();
-            for (const auto& [i, j, k] : topo_info.b3list) {
-                json batm_triple;
-                batm_triple["i"] = i;
-                batm_triple["j"] = j;
-                batm_triple["k"] = k;
-                batm_triple["zb3atm_i"] = zb3atm[m_atoms[i]];
-                batm_triple["zb3atm_j"] = zb3atm[m_atoms[j]];
-                batm_triple["zb3atm_k"] = zb3atm[m_atoms[k]];
-                batms.push_back(batm_triple);
-            }
-            parameters["gfnff_batms"] = batms;
-
-            if (CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::success(fmt::format("Generated {} batm triples for GFN-FF",
-                                                   static_cast<int>(batms.size())));
-            }
-        } else if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("No 1,4-pairs found - skipping batm parameter generation");
-        }
-
-        // Claude Generated (2025-12-13): Validation logging for parameter generation
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param("Generated bonds", static_cast<int>(parameters["bonds"].size()));
-            CurcumaLogger::param("Generated angles", static_cast<int>(parameters["angles"].size()));
-            CurcumaLogger::param("Generated dihedrals", static_cast<int>(parameters["dihedrals"].size()));
-            CurcumaLogger::param("Generated inversions", static_cast<int>(parameters["inversions"].size()));
-            CurcumaLogger::param("Generated coulombs", static_cast<int>(parameters["gfnff_coulombs"].size()));
-            CurcumaLogger::param("Generated bonded repulsions", static_cast<int>(parameters["gfnff_bonded_repulsions"].size()));
-            CurcumaLogger::param("Generated non-bonded repulsions", static_cast<int>(parameters["gfnff_nonbonded_repulsions"].size()));
-
-            // Check both gfnff_dispersions and d4_dispersion_pairs (D4 route)
-            if (parameters.contains("gfnff_dispersions"))
-                CurcumaLogger::param("Generated dispersions (gfnff)", static_cast<int>(parameters["gfnff_dispersions"].size()));
-            else if (parameters.contains("d4_dispersion_pairs"))
-                CurcumaLogger::param("Generated dispersions (D4)", static_cast<int>(parameters["d4_dispersion_pairs"].size()));
-
-            // Verify correct structure
-            if (!parameters["bonds"].is_array())
-                CurcumaLogger::error("bonds is not an array!");
-            if (!parameters["angles"].is_array())
-                CurcumaLogger::error("angles is not an array!");
-            if (!parameters["dihedrals"].is_array())
-                CurcumaLogger::error("dihedrals is not an array!");
-            if (!parameters["inversions"].is_array())
-                CurcumaLogger::error("inversions is not an array!");
-        }
-
-        parameters["vdws"] = json::array(); // Legacy vdW (will be replaced by pairwise)
-
-        // Phase 2.3: HB/XB Detection (Claude Generated 2025)
-        // Claude Generated (May 2026, HB-investigation): topology_charges (Phase-1) matches
-        // Fortran gfnff_ini.f90:807-839; eeq_charges (Phase-2) over-polarizes the filter.
-        if (m_parameters.value("hbond", true)) {
-            parameters["gfnff_hbonds"] = detectHydrogenBonds(topo_info.topology_charges);
-            parameters["gfnff_xbonds"] = detectHalogenBonds(topo_info.topology_charges);
-        }
-
-        parameters["hbonds"] = detectHydrogenBonds(topo_info.topology_charges);  // Legacy (backward compat)
-
-        // Claude Generated (Feb 21, 2026): Populate bond nr_hb and bond_hb_data
-        // Reference: Fortran gfnff_ini2.f90:1008-1060 (bond_hb_AHB_set0/set1)
-        // Cross-reference detected HB triplets (A-H...B) with the bond list:
-        //   For each bond where one atom is H bonded to donor A, count B acceptors
-        //   and store the AH-B mapping for dncoord_erf at runtime.
-        if (parameters.contains("gfnff_hbonds") && parameters["gfnff_hbonds"].is_array()) {
-            json& bonds_json = parameters["bonds"];
-            const json& hbonds_json = parameters["gfnff_hbonds"];
-
-            // Build map: (A_atom, H_atom) -> [list of B atom indices]
-            // Only count B atoms that are N or O (Z=7 or Z=8), matching Fortran constraint
-            std::map<std::pair<int,int>, std::vector<int>> ah_to_b_atoms;
-            for (const auto& hb : hbonds_json) {
-                int A = hb["i"].get<int>();
-                int H = hb["j"].get<int>();
-                int B = hb["k"].get<int>();
-                int z_b = m_atoms[B];
-                if (z_b == 7 || z_b == 8) {
-                    ah_to_b_atoms[{A, H}].push_back(B);
-                }
-            }
-
-            // For each bond, check if it's an A-H bond participating in HBs
-            json bond_hb_data = json::array();
-            for (auto& bond : bonds_json) {
-                int bi = bond["i"].get<int>();
-                int bj = bond["j"].get<int>();
-                int z_i = m_atoms[bi];
-                int z_j = m_atoms[bj];
-
-                // Identify which atom is H and which is the donor A
-                int hbH = -1, hbA = -1;
-                if (z_i == 1) { hbH = bi; hbA = bj; }
-                else if (z_j == 1) { hbH = bj; hbA = bi; }
-                else continue;  // Not an X-H bond
-
-                // Donor must be N or O (Fortran gfnff_ini2.f90:1043)
-                int z_a = m_atoms[hbA];
-                if (z_a != 7 && z_a != 8) continue;
-
-                auto it = ah_to_b_atoms.find({hbA, hbH});
-                if (it != ah_to_b_atoms.end() && !it->second.empty()) {
-                    bond["nr_hb"] = static_cast<int>(it->second.size());
-
-                    // Store AH-B mapping for dncoord_erf runtime calculation
-                    json entry;
-                    entry["A"] = hbA;
-                    entry["H"] = hbH;
-                    entry["B_atoms"] = it->second;
-                    bond_hb_data.push_back(entry);
-                }
-            }
-            parameters["bond_hb_data"] = bond_hb_data;
-
-            if (CurcumaLogger::get_verbosity() >= 2 && !bond_hb_data.empty()) {
-                CurcumaLogger::info(fmt::format("Bond-HB coupling: {} AH pairs with {} total B atoms",
-                    bond_hb_data.size(),
-                    [&]() { int n = 0; for (const auto& e : bond_hb_data) n += e["B_atoms"].size(); return n; }()));
-            }
-        }
-
-        // Store topology information for debugging
-        parameters["topology_info"] = {
-            { "coordination_numbers", std::vector<double>(topo_info.coordination_numbers.data(), topo_info.coordination_numbers.data() + topo_info.coordination_numbers.size()) },
-            { "hybridization", topo_info.hybridization },
-            { "ring_sizes", topo_info.ring_sizes },
-            { "eeq_charges", std::vector<double>(topo_info.eeq_charges.data(), topo_info.eeq_charges.data() + topo_info.eeq_charges.size()) }
-        };
-
-        // CRITICAL FIX (Claude Generated Jan 2, 2026): Store charges at top-level for cache loading
-        // ForceField.tryLoadAutoParameters() expects charges at parameters["eeq_charges"]
-        // Not nested inside topology_info!
-        parameters["eeq_charges"] = std::vector<double>(topo_info.eeq_charges.data(),
-                                                         topo_info.eeq_charges.data() + topo_info.eeq_charges.size());
-
-        // Use calculated charges instead of loading from file
-        // NOTE: m_charges already set at line 499 BEFORE torsion generation!
-        // (Claude Generated Jan 2, 2026): This was the bug - charges were set AFTER torsions
-
-        // NOTE (Claude Generated Dec 2025): Charge distribution happens in initializeForceField()
-        // AFTER setParameter() creates threads (threads don't exist yet at this point)
-
-    } else {
-        CurcumaLogger::info("Using basic GFN-FF parametrization");
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("About to call getCachedTopology() [basic mode]...");
-            CurcumaLogger::param("use_advanced", "false");
-        }
-
-        // Retrieve cached topology information for basic parametrization
-        const TopologyInfo& topo_info = getCachedTopology();
-
-        // CRITICAL: Validate topology charges (always, not just at verbosity 3)
-        bool has_nan = false;
-        for (int i = 0; i < topo_info.eeq_charges.size(); ++i) {
-            if (std::isnan(topo_info.eeq_charges[i]) || std::isinf(topo_info.eeq_charges[i])) {
-                has_nan = true;
-                CurcumaLogger::error(fmt::format("INVALID CHARGE at index {}: {}", i, topo_info.eeq_charges[i]));
-                break;
-            }
-        }
-        if (has_nan) {
-            throw std::runtime_error("Invalid topology: NaN or Inf detected in EEQ charges - this usually indicates "
-                                     "a numerically unstable EEQ matrix for this molecule");
-        }
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::success("getCachedTopology() returned [basic mode]");
-            CurcumaLogger::param("cn_size", std::to_string(topo_info.coordination_numbers.size()));
-            CurcumaLogger::param("charges_size", std::to_string(topo_info.eeq_charges.size()));
-            CurcumaLogger::param("has_invalid_charges", "no - validated");
-        }
-
-        // CRITICAL FIX (Claude Generated Jan 2, 2026): Set charges BEFORE generating torsions
-        // Torsions need m_charges for fqq correction factor!
-        m_charges = topo_info.eeq_charges;
-
-        // NOTE (Claude Generated Mar 6, 2026): Topology charge distribution for BATM moved to
-        // initializeForceField() AFTER setParameter() — threads don't exist yet at this point.
-
-        // Generate GFN-FF bonds with real parameters
-        json bonds = generateGFNFFBonds();
-        json angles = generateGFNFFAngles(topo_info);
-        json torsions = generateGFNFFTorsions(); // ✅ Phase 1.1 implemented (needs m_charges!)
-        json inversions = generateGFNFFInversions(); // ✅ Phase 1.2 implemented
-
-        parameters["bonds"] = bonds;
-        parameters["angles"] = angles;
-        parameters["dihedrals"] = torsions;
-        parameters["inversions"] = inversions;
-
-        // CRITICAL FIX (Session 10, Dec 2025): Distribute EEQ charges to ForceFieldThreads
-        // Claude Generated: This enables charge-dependent fqq corrections in bond energy
-        if (m_forcefield && !m_charges.isZero()) {
-            m_forcefield->distributeEEQCharges(m_charges);
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info("EEQ charges distributed to ForceFieldThreads [basic mode]");
-                CurcumaLogger::param("charge_count", std::to_string(m_charges.size()));
-            }
-        }
-
-        // Phase 4.2: Generate pairwise non-bonded parameters
-        parameters["gfnff_coulombs"] = generateGFNFFCoulombPairs();
-        json repulsion_data = generateGFNFFRepulsionPairs();
-        parameters["gfnff_bonded_repulsions"] = repulsion_data["bonded"];
-        parameters["gfnff_nonbonded_repulsions"] = repulsion_data["nonbonded"];
-        json dispersions = generateGFNFFDispersionPairs();
-
-        // Claude Generated - Dec 25, 2025: Store D4 as "d4_dispersion_pairs" to route to CalculateD4DispersionContribution()
-        // Check what type of dispersion was generated (D4 or D3 or fallback)
-        if (dispersions.size() > 0 && dispersions[0].contains("dispersion_method") &&
-            dispersions[0]["dispersion_method"] == "d4") {
-            parameters["d4_dispersion_pairs"] = dispersions;  // Native D4 charge-weighted C6
-        } else {
-            parameters["gfnff_dispersions"] = dispersions;  // Native GFN-FF or D3 fallback
-        }
-
-        // Add ATM triples if generated from D3/D4 (Claude Generated Jan 2025)
-        if (!m_atm_triples.is_null() && m_atm_triples.is_array() && !m_atm_triples.empty()) {
-            parameters["atm_triples"] = m_atm_triples;
-            if (CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::param("ATM triples added to parameters",
-                                     static_cast<int>(m_atm_triples.size()));
-            }
-        }
-
-        parameters["vdws"] = json::array(); // Legacy vdW (will be replaced by pairwise)
-
-        // Phase 2.3: HB/XB Detection (Claude Generated 2025)
-        // Claude Generated (May 2026, HB-investigation): use Phase-1 topology_charges to match Fortran.
-        if (m_parameters.value("hbond", true)) {
-            parameters["gfnff_hbonds"] = detectHydrogenBonds(topo_info.topology_charges);
-            parameters["gfnff_xbonds"] = detectHalogenBonds(topo_info.topology_charges);
-        }
-
-        // Claude Generated (Feb 21, 2026): Populate bond nr_hb (basic mode, same as advanced)
-        if (parameters.contains("gfnff_hbonds") && parameters["gfnff_hbonds"].is_array()) {
-            json& bonds_json = parameters["bonds"];
-            const json& hbonds_json = parameters["gfnff_hbonds"];
-
-            std::map<std::pair<int,int>, std::vector<int>> ah_to_b_atoms;
-            for (const auto& hb : hbonds_json) {
-                int A = hb["i"].get<int>();
-                int H = hb["j"].get<int>();
-                int B = hb["k"].get<int>();
-                int z_b = m_atoms[B];
-                if (z_b == 7 || z_b == 8) {
-                    ah_to_b_atoms[{A, H}].push_back(B);
-                }
-            }
-
-            json bond_hb_data = json::array();
-            for (auto& bond : bonds_json) {
-                int bi = bond["i"].get<int>();
-                int bj = bond["j"].get<int>();
-
-                int hbH = -1, hbA = -1;
-                if (m_atoms[bi] == 1) { hbH = bi; hbA = bj; }
-                else if (m_atoms[bj] == 1) { hbH = bj; hbA = bi; }
-                else continue;
-
-                int z_a = m_atoms[hbA];
-                if (z_a != 7 && z_a != 8) continue;
-
-                auto it = ah_to_b_atoms.find({hbA, hbH});
-                if (it != ah_to_b_atoms.end() && !it->second.empty()) {
-                    bond["nr_hb"] = static_cast<int>(it->second.size());
-                    json entry;
-                    entry["A"] = hbA;
-                    entry["H"] = hbH;
-                    entry["B_atoms"] = it->second;
-                    bond_hb_data.push_back(entry);
-                }
-            }
-            parameters["bond_hb_data"] = bond_hb_data;
-        }
-    }
-
-    // Integration with existing corrections (H4, D3/D4)
-    if (m_parameters.contains("dispersion") && m_parameters["dispersion"]) {
-        parameters["use_dispersion"] = true;
-        parameters["use_d4"] = true; // Use existing D4 implementation
-    }
-
-    if (m_parameters.contains("hbond") && m_parameters["hbond"]) {
-        parameters["use_hbond"] = true;
-        parameters["use_h4"] = true; // Use existing H4 implementation
-    }
-
-    // GFN-FF specific settings
-    parameters["repulsion_scaling"] = m_parameters.value("repulsion_scaling", 1.0);
-
-    (void)start_time;
-
-    return parameters;
 }
 
 // Claude Generated (March 2026): Native parameter set generation — bypasses JSON entirely
@@ -4103,6 +3384,17 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     // Phase 6: Coulomb (native — no JSON)
     t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     params.coulombs = generateCoulombPairsNative();
+    {
+        // Claude Generated (Sep 2026): per-atom self-energy, independent of the
+        // pair list above (fixes E=0 for isolated charged atoms — see
+        // generateCoulombSelfEnergyNative()).
+        CoulombSelfEnergy self = generateCoulombSelfEnergyNative();
+        params.coul_self_chi_base = std::move(self.chi_base);
+        params.coul_self_gam = std::move(self.gam);
+        params.coul_self_alp = std::move(self.alp);
+        params.coul_self_cnf = std::move(self.cnf);
+        params.coul_self_chi_static = std::move(self.chi_static);
+    }
     if (do_timing) t_coulomb = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
 
     // Phase 7: Repulsion (native — no JSON)
@@ -4199,6 +3491,7 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     // Cache the init topology so getCachedTopology() returns the same data
     // used for HBond/XBond detection — avoids re-computation drift
     m_cached_topology = topo_info;
+    ++m_topology_version;
     m_geometry_tracker.updateGeometry(m_geometry_bohr);
 
     auto end_time = std::chrono::high_resolution_clock::now();
@@ -4273,225 +3566,6 @@ GFNFF::BondHBRebuildResult GFNFF::rebuildBondHBData(
         }
     }
     return result;
-}
-
-json GFNFF::generateGFNFFBonds() const
-{
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    json bonds = json::array();
-
-    // Use cached topology information to avoid redundant calculations
-    const TopologyInfo& topo_info = getCachedTopology();
-
-    // BUGFIX (Jul 2026): enumerate the AUTHORITATIVE bond list instead of re-deriving
-    // it here. This function used to apply its own `1.3*(rcov_i+rcov_j)*fat_i*fat_j`
-    // heuristic, independent of getCachedBondList(), which since the Jul 2026 getnb port
-    // implements the Fortran criterion (gfnff_ini2.f90:111-126 + :361-419). The two
-    // disagreed: on MOR41 ED07 getnb gives 68 bonds (== xtb `#bonds: 68`) while this
-    // heuristic gave 70, inventing an agostic W...C and W...H pair that xtb does not
-    // have. Those two bonds carried -0.0704 Eh of spurious binding and were the whole
-    // of ED07's -37.8 kcal/mol error. Fortran likewise builds `blist` from a neighbour
-    // list (gfnff_ini.f90:281-305), never from a second independent distance rule.
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info(fmt::format("GFN-FF bond generation: {} atoms, {} bonds from getnb list",
-                                        m_atomcount, getCachedBondList().size()));
-    }
-
-    {
-        for (const auto& [i, j] : getCachedBondList()) {
-            Vector ri = m_geometry_bohr.row(i);
-            Vector rj = m_geometry_bohr.row(j);
-            double distance = (ri - rj).norm();
-
-            {
-                json bond;
-                bond["type"] = 3; // GFN-FF type
-                bond["i"] = i;
-                bond["j"] = j;
-                bond["k"] = 0; // Not used in GFN-FF but required by ForceField
-                bond["distance"] = distance; // Current bond distance
-
-                // Phase 9: GFN-FF bond parameters with full topology awareness
-                auto bond_params = getGFNFFBondParameters(i, j, m_atoms[i], m_atoms[j], distance, topo_info);
-                bond["fc"] = bond_params.force_constant;
-                bond["r0_ij"] = bond_params.equilibrium_distance;
-                bond["r0_ik"] = 0.0; // Not used in GFN-FF but required by ForceField
-                bond["exponent"] = bond_params.alpha;  // Phase 1.3: store α in exponent field
-                bond["rabshift"] = bond_params.rabshift;  // Claude Generated (Dec 2025): Store vbond(1) for validation
-                bond["fqq"] = bond_params.fqq;  // Claude Generated (Jan 7, 2026): Store charge-dependent factor
-
-                // Claude Generated (Jan 18, 2026): Dynamic r0 calculation parameters
-                bond["z_i"] = bond_params.z_i;
-                bond["z_j"] = bond_params.z_j;
-                bond["r0_base_i"] = bond_params.r0_base_i;
-                bond["r0_base_j"] = bond_params.r0_base_j;
-                bond["cnfak_i"] = bond_params.cnfak_i;
-                bond["cnfak_j"] = bond_params.cnfak_j;
-                bond["ff"] = bond_params.ff;
-
-                if (CurcumaLogger::get_verbosity() >= 3 && bonds.size() < 5) {
-                    CurcumaLogger::info(fmt::format("  Bond {}-{}: fc={:.6f}, r0={:.6f}, alpha={:.6f}",
-                                          i, j, bond_params.force_constant, bond_params.equilibrium_distance, bond_params.alpha));
-                }
-
-                bonds.push_back(bond);
-            }
-        }
-    }
-
-    if (bonds.empty()) {
-        CurcumaLogger::warn("No bonds detected in GFN-FF");
-    } else {
-        if (CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::info(fmt::format("GFN-FF detected {} bonds", bonds.size()));
-            }
-    }
-
-    (void)start_time;
-
-    return bonds;
-}
-
-json GFNFF::generateGFNFFAngles(const TopologyInfo& topo_info) const
-{
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    // Phase 2.3: Use adjacency list from topology (Claude Generated - Dec 2025)
-    // OPTIMIZATION: O(N_atoms × N_bonds) → O(N_atoms + N_bonds)
-    // Instead of searching bond_list for each atom, use pre-built adjacency list
-
-    // Claude Generated (February 2026): Phase 1 - CN Pre-computation Optimization
-    //
-    // PROBLEM: getGFNFFAngleParameters() called once per angle (2,614 times for 1410 atoms)
-    //          Each call recomputed CN for ALL atoms (O(N²) work)
-    //          Result: 2,614 × O(N²) = catastrophic redundancy (~26 seconds wasted!)
-    //
-    // SOLUTION: Compute CN ONCE before angle loop, pass as parameter to getGFNFFAngleParameters()
-    //           Reduces CN overhead from 26 seconds to 0.01 seconds (2600× speedup!)
-    //
-    // LESSON: Always identify and eliminate redundant calculations in nested loops.
-    // CN VALUE cutoff = 40 Bohr (squared). This is the conservative outer bound for
-    // CN sum contributions; the erf counting term is essentially zero beyond ~10 Bohr,
-    // so 40 Bohr is a safety margin. Distinct from cn_deriv_cutoff_sq at line ~1014
-    // which controls the CN-DERIVATIVE store reach (Term 1b stencil) and may grow
-    // with eeq_distance_cutoff. The same 40-Bohr value also appears in
-    // generateAnglesNative() and the legacy generateGFNFFAngles() — kept hardcoded
-    // here rather than promoted to a PARAM because it is a Fortran-matching internal
-    // tolerance, not a user-tunable knob.
-    constexpr double cn_value_cutoff_sq = 40.0 * 40.0;
-    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, cn_value_cutoff_sq);
-    Vector coord_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
-
-    // Claude Generated (February 2026): Phase 2 - OpenMP Angle Loop Parallelization
-    //
-    // PROBLEM: After Phase 1, angle generation still takes 186ms for 1410 atoms (serial execution)
-    //          Multiple CPU cores available but only one is working
-    //
-    // SOLUTION: Parallelize outer loop across centers using OpenMP
-    //           Expected speedup: 3-4× on 4 cores (186ms → ~50ms)
-    //
-    // ARCHITECTURE:
-    //   - Thread-local storage: Each thread builds its own angle list
-    //   - Dynamic scheduling: Better load balancing (different atoms have different neighbor counts)
-    //   - Critical section: Minimal synchronization overhead for merging results
-    //
-    // THREAD SAFETY:
-    //   - topo_info: Read-only ✅
-    //   - coord_numbers: Read-only ✅
-    //   - m_geometry_bohr: Read-only ✅
-    //   - local_angles: Thread-local ✅
-    //   - angles_vec: Protected by critical section ✅
-
-    std::vector<json> angles_vec;
-
-    #pragma omp parallel
-    {
-        // Thread-local storage for angle collection
-        std::vector<json> local_angles;
-
-        // Dynamic scheduling handles variable neighbor counts well
-        #pragma omp for schedule(dynamic, 10)
-        for (int center = 0; center < m_atomcount; ++center) {
-            // Phase 2.3: Direct access to neighbors via adjacency list (O(1) lookup)
-            // OLD: for (const auto& bond : bond_list) - O(N_bonds) search per atom
-            // NEW: topo_info.adjacency_list[center] - O(1) access
-            const std::vector<int>& neighbors = topo_info.adjacency_list[center];
-
-            // Generate all possible angles with center as middle atom
-            for (int i = 0; i < neighbors.size(); ++i) {
-                for (int j = i + 1; j < neighbors.size(); ++j) {
-                    json angle;
-                    angle["type"] = 3; // GFN-FF type
-                    angle["i"] = neighbors[i];
-                    angle["j"] = center;
-                    angle["k"] = neighbors[j];
-
-                    // Calculate current angle for reference
-                    Vector ri = m_geometry_bohr.row(neighbors[i]);
-                    Vector rj = m_geometry_bohr.row(center);
-                    Vector rk = m_geometry_bohr.row(neighbors[j]);
-
-                    Vector v1 = ri - rj;
-                    Vector v2 = rk - rj;
-
-                    // Safely calculate angle with bounds checking
-                    double v1_norm = v1.norm();
-                    double v2_norm = v2.norm();
-
-                    // Skip if vectors are too small (linear geometry or duplicate atoms)
-                    if (v1_norm < 1e-10 || v2_norm < 1e-10) {
-                        continue;
-                    }
-
-                    double cos_angle = v1.dot(v2) / (v1_norm * v2_norm);
-                    // Clamp to valid acos range [-1, 1] to avoid NaN
-                    cos_angle = std::max(-1.0, std::min(1.0, cos_angle));
-                    double current_angle = acos(cos_angle);
-
-                    // GFN-FF angle parameters (Claude Generated Nov 2025: Phase 2 with topology info)
-                    // Claude Generated (February 2026): Pass pre-computed CN to avoid redundant calculations
-                    auto angle_params = getGFNFFAngleParameters(neighbors[i],
-                        center,
-                        neighbors[j],
-                        current_angle,
-                        topo_info,
-                        coord_numbers);
-
-                    angle["fc"] = angle_params.force_constant;
-                    angle["theta0_ijk"] = angle_params.equilibrium_angle;
-                    angle["r0_ij"] = (ri - rj).norm(); // Distance i-j
-                    angle["r0_ik"] = (rk - rj).norm(); // Distance k-j
-                    // Phase 1.3: No longer using Fourier coefficients (C0/C1/C2)
-                    // GFN-FF uses simple angle bending formula
-
-                    local_angles.push_back(angle);
-                }
-            }
-        }
-
-        // Merge thread-local results into global container
-        // Critical section minimizes synchronization overhead
-        #pragma omp critical
-        {
-            angles_vec.insert(angles_vec.end(), local_angles.begin(), local_angles.end());
-        }
-    }
-
-    // Convert vector to JSON array
-    json angles = json::array();
-    for (const auto& a : angles_vec) {
-        angles.push_back(a);
-    }
-
-    // Phase 1.1: Guard debug output (Claude Generated - Dec 2025)
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::success(fmt::format("Generated {} GFN-FF angles", angles.size()));
-    }
-
-    (void)start_time;
-
-    return angles;
 }
 
 bool GFNFF::calculateTopology()
@@ -4571,11 +3645,25 @@ int GFNFF::classifyBondType(int atom_i, int atom_j, int hyb_i, int hyb_j,
         btyp = 5; // Metal bond
     }
 
-    // TM metal-metal bonds (both are transition metals)
-    // Simplified: If both are metals, assume TM-TM
-    // TODO: Check reference implementation for imetal flag
-    // Full implementation would check imetal == 2 (transition metal flag)
-    if (is_metal_i && is_metal_j) {
+    // TM metal-metal bonds. CORRECTED (Sep 2026): the reference requires imetal==2 on BOTH
+    // atoms (gfnff_ini.f90:1121, "if (imetal(ii)==2 .and. imetal(jj)==2) btyp=7"), i.e. two
+    // TRANSITION metals; a main-group metal has imetal==1 and its bonds stay btyp=5. The old
+    // "both are metals" shortcut (an explicit TODO in this file) promoted the Al-Al bond of
+    // GMTKN55 AL2X6/al2me6 to TM-TM, which swaps bstren(5)=1.00 for bstren(7)=3.40 on that
+    // bond. imetal is param%metal(Z), demoted to 0 for a low-coordinate element of group > 3
+    // (gfnff_ini.f90:273-274).
+    auto imetal_of = [&](int a) -> int {
+        const int z = m_atoms[a];
+        if (z < 1 || z > 86) return 0;
+        int im = GFNFFParameters::metal_type[z - 1];
+        const int grp = GFNFFParameters::periodic_group[z - 1];
+        const auto& topo_nb = getCachedTopology().neighbor_lists;
+        const int nb_a = (a < static_cast<int>(topo_nb.size()))
+                             ? static_cast<int>(topo_nb[a].size()) : 0;
+        if (nb_a <= 4 && grp > 3) im = 0;
+        return im;
+    };
+    if (is_metal_i && is_metal_j && imetal_of(atom_i) == 2 && imetal_of(atom_j) == 2) {
         btyp = 7; // TM metal-metal
     }
 
@@ -4604,16 +3692,6 @@ bool GFNFF::validateMolecule() const
     }
 
     return true;
-}
-
-double GFNFF::convertToHartree(double energy) const
-{
-    return energy * KCAL_TO_HARTREE;
-}
-
-Matrix GFNFF::convertGradientToHartree(const Matrix& gradient) const
-{
-    return gradient * KCAL_TO_HARTREE * ANGSTROM_TO_BOHR;
 }
 
 double GFNFF::getCovalentRadius(int atomic_number) const
@@ -4829,16 +3907,25 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // Step 4a: Bond-type specific shifts
     int hyb1_value = topo.hybridization[atom1];
     int hyb2_value = topo.hybridization[atom2];
-    int m_hybi = (hyb1_value < 1 || hyb1_value > 3) ? 3 : hyb1_value;
-    int m_hybj = (hyb2_value < 1 || hyb2_value > 3) ? 3 : hyb2_value;
-    int hybi = std::max(m_hybi, m_hybj);
-    int hybj = std::min(m_hybi, m_hybj);
+    // CORRECTED (Sep 2026): these classifications must see the RAW Fortran hybridization,
+    // where hydrogen is 0 and a hypervalent atom is 5. Folding "anything outside 1..3" onto
+    // 3 (as the bsmat lookup below does, where it is value-preserving) silently turned every
+    // X-H bond into an "sp3" partner, so an sp2-N-H bond matched the N-sp2 rules meant for a
+    // genuine sp3-N/sp2-C bond, and no bond could ever reach the hypervalent branch.
+    // Measured on the guanidine imine N-H of GMTKN55 Amino20x4/ARG: bstrength 1.2896 instead
+    // of 1.0792, i.e. that single bond 21.8 kcal/mol too deep.
+    int hybi = std::max(hyb1_value, hyb2_value);
+    int hybj = std::min(hyb1_value, hyb2_value);
 
+    // Fortran gfnff_ini.f90:1106-1121. Note the N-sp2 rule is directional there: the
+    // NITROGEN must be the sp3 partner ("hyb(ii)==3 .and. hyb(jj)==2 .and. at(ii)==7").
+    const bool n_sp3_on_sp2 = (hyb1_value == 3 && hyb2_value == 2 && z1 == 7)
+                           || (hyb2_value == 3 && hyb1_value == 2 && z2 == 7);
     int bbtyp = 1; // Default single
     if (hybi == 5 || hybj == 5) bbtyp = 4; // hypervalent
     else if (hybi == 1 || hybj == 1) bbtyp = 3; // triple/sp-X
     else if (hybi == 2 && hybj == 2) bbtyp = 2; // sp2-sp2
-    else if (hybi == 3 && hybj == 2 && (z1 == 7 || z2 == 7)) bbtyp = 2; // N-sp2
+    else if (n_sp3_on_sp2) bbtyp = 2; // N-sp2
 
     // Claude Generated (Jul 2026): metal bonds take Fortran's mutually-exclusive metal
     // branch (gfnff_ini.f90:1129-1206) — the hybridization/bbtyp/F-F base shifts below are
@@ -4847,16 +3934,43 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // gen_rabshift (line 1276) and the heavy-heavy shift (line 1268, kept below). Without
     // this gate, a metal center with hyb=0 (octahedral TM) wrongly triggers the sp (0,1)
     // correction (+0.14) — inflating the M-CO equilibrium distance and over-binding.
-    bool bond_has_metal = (z1 >= 1 && z1 <= 86 && metal_type[z1 - 1] > 0)
-                       || (z2 >= 1 && z2 <= 86 && metal_type[z2 - 1] > 0);
+    //
+    // CORRECTED (Sep 2026, GMTKN55 HEAVY28): the branch is selected by `bbtyp < 5` in the
+    // reference, and btyp=5 comes from `imetal(ii) > 0 .or. imetal(jj) > 0` — imetal, NOT
+    // param%metal(Z) raw. gfnff_ini.f90:273-274 demotes a low-coordinate element of group
+    // > 3 back to a non-metal ("Sn, Pb, Bi, with small CN are better described as
+    // non-metals"), which is exactly the correction Known Issue #16 applied to the fqq /
+    // force-constant half of this function while leaving THIS gate on the raw array. So
+    // BiH3 (Bi, 3 neighbours) and PbH4 (Pb, 4 neighbours) took the metal branch and
+    // skipped the whole non-metal shift block below — most visibly the X-H rule, leaving
+    // rabshift at gen_rabshift = -0.110 instead of -0.110 + rabshifth = -0.160 and the
+    // Bi-H / Pb-H r0 0.044 / 0.076 Angstrom too long. That is a per-molecule constant
+    // (BiH3 -0.72, PbH4 -0.39 kcal/mol in the bond term, everything else exact) which
+    // every HEAVY28 complex inherits, doubling where the motif appears twice.
+    auto imetal_bond = [&](int z, int a) -> int {
+        if (z < 1 || z > 86) return 0;
+        int im = metal_type[z - 1];
+        if (im == 0) return 0;
+        const int grp = GFNFFParameters::periodic_group[z - 1];
+        if (grp <= 3) return im;
+        const int nb_a = (a >= 0 && a < static_cast<int>(topo.neighbor_lists.size()))
+                             ? static_cast<int>(topo.neighbor_lists[a].size()) : -1;
+        if (nb_a >= 0 && nb_a <= 4) im = 0;   // Sn, Pb, Bi, ... with small CN
+        return im;
+    };
+    bool bond_has_metal = (imetal_bond(z1, atom1) > 0) || (imetal_bond(z2, atom2) > 0);
 
     if (!bond_has_metal) {
+        // Fortran gfnff_ini.f90:1143-1149. These are INDEPENDENT `if`s, not a chain:
+        // the first three ASSIGN, the last two accumulate. Claude Generated (Sep 2026):
+        // curcuma had rules 1/2 as an else-if chain and rule 2 as `+=`, so a hypervalent
+        // X-H bond kept hyper_shift where the reference overwrites it with rabshifth.
         // 1. Bond type specific shifts
         if (bbtyp == 4) shift = hyper_shift;
-        else if (z1 == 1 || z2 == 1) shift = gen_rabshifth;
+        if (z1 == 1 || z2 == 1) shift = gen_rabshifth;
 
         // 2. F-F special shift
-        if (z1 == 9 && z2 == 9) shift += 0.22;
+        if (z1 == 9 && z2 == 9) shift = 0.22;
 
         // 3. X-sp3 hybridization correction
         if ((hyb1_value == 3 && hyb2_value == 0) || (hyb1_value == 0 && hyb2_value == 3)) {
@@ -4869,14 +3983,25 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         }
     }
 
+    // Snapshot of the local shift BEFORE the heavy-atom block. Claude Generated
+    // (Sep 2026, GMTKN55 PX13/hf_2_ts): the reference's pi correction
+    // (gfnff_ini.f90:1174) is `shift = gen%hueckelp*(gen%bzref-pibo)` — an ASSIGNMENT
+    // that DISCARDS everything set above — and only the heavy-atom shifts at :1268 are
+    // added after it. curcuma computes the pi shift far below (Step 9) and ADDED it to
+    // the local shift, double-counting whenever a bond had both. Splitting the local
+    // shift from the heavy-atom shift here lets Step 10 reproduce the overwrite exactly.
+    const double shift_pre_pi = shift;
+    double heavy_shift = 0.0;
+
     // 5. Heavy atom shifts (Z > 10) — applies to all bonds incl. metal (Fortran gfnff_ini.f90:1268)
     if (z1 > 10 && z2 > 10) {
-        shift += hshift3;
-        if (z1 > 18) shift += hshift4;
-        if (z2 > 18) shift += hshift4;
-        if (z1 > 36) shift += hshift5;
-        if (z2 > 36) shift += hshift5;
+        heavy_shift += hshift3;
+        if (z1 > 18) heavy_shift += hshift4;
+        if (z2 > 18) heavy_shift += hshift4;
+        if (z1 > 36) heavy_shift += hshift5;
+        if (z2 > 36) heavy_shift += hshift5;
     }
+    shift += heavy_shift;
 
     double rabshift = gen_rabshift + shift;
 
@@ -4954,9 +4079,15 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     int matrix_i = (hyb1 < 1 || hyb1 > 3) ? 3 : hyb1;
     int matrix_j = (hyb2 < 1 || hyb2 > 3) ? 3 : hyb2;
 
-    // Reuse hybi and hybj calculated earlier for bstrength lookup
+    // bsmat lookup only: fold hyb 0 (H) onto 3 so the index stays inside the 4x4 table.
+    // That fold is value-preserving - row/column 0 and 3 of bsmat are identical - which is
+    // exactly why it hid the bug above for so long: the table lookup was right, only the
+    // special-case tests keyed on the folded value were not. hyb 5 is caught before the
+    // lookup, so it never indexes the table.
     hybi = std::max(matrix_i, matrix_j);
     hybj = std::min(matrix_i, matrix_j);
+    const int hybi_raw = std::max(hyb1, hyb2);
+    const int hybj_raw = std::min(hyb1, hyb2);
 
     // CRITICAL FIX (Phase 11): Special handling for hydrogen bonds!
     // Fortran gfnff_param.f90 has bsmat(1,1)=1.98 for sp-sp (triple bond)
@@ -4971,7 +4102,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         bstrength = bstren[1];  // 1.00 (single bond)
     } else {
         // Get bond strength from hybridization matrix (Fortran gfnff_ini.f90:1127-1133)
-        if (hybi == 5 || hybj == 5) {
+        if (hybi_raw == 5 || hybj_raw == 5) {
             // Hypervalent atoms
             bstrength = bstren[4];  // 1.22
         } else {
@@ -4984,7 +4115,10 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // N-sp2 correction: if one atom is sp3 (hyb=3) and other is sp2 (hyb=2) and at least one is nitrogen
     // Reference says: if (hybi.eq.3 .and. hybj.eq.2 .and. (ia.eq.7 .or. ja.eq.7)) bstrength = gen%bstren(2)*1.04
     // NOTE: C-N bond in caffeine rings where N is methylated (sp3) and C is aromatic (sp2)
-    if (hybi == 3 && hybj == 2 && (z1 == 7 || z2 == 7)) {
+    // Unlike the btyp rule above, this one is NOT directional in the reference - either atom
+    // may be the nitrogen - but it still needs the raw hybridizations, so that an X-H bond
+    // (hydrogen: hyb 0, not 3) can never reach it.
+    if (hybi_raw == 3 && hybj_raw == 2 && (z1 == 7 || z2 == 7)) {
         bstrength = bstren[2] * 1.04;  // treat as stronger due to conjugation/charge
     }
 
@@ -5077,8 +4211,29 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // This is equivalent to: fqq = 1.0 + qfacbm0 * tanh(15*qafac/2)
     double qfacbm0 = 0.047;  // Fortran gfnff_param.f90:772
     double qafac = qa1 * qa2 * 70.0;
-    double exp_term = std::exp(-15.0 * qafac);
-    fqq = 1.0 + qfacbm0 * exp_term / (1.0 + exp_term);
+    const double t = -15.0 * qafac;
+    // DELIBERATE DEVIATION from the reference (see docs/REV_GFNFF_TODO.md #10).
+    // The reference writes the logistic naively as exp(t)/(1+exp(t)). For a strongly
+    // ionic bond that overflows: |qa_i * qa_j| > 0.675 already puts t past 709, exp(t)
+    // becomes +Inf and Inf/(1+Inf) is NaN — the bond force constant, the bond energy and
+    // the whole single point follow. GMTKN55 PX13/hf_4_ts and hf_6_ts (cyclic (HF)n
+    // proton-transfer transition states, qa = +-1.007 on every atom) return NaN from
+    // pprcht AND from xtb for exactly this reason; the number the GMTKN55 harness records
+    // for them from xtb is the angle term alone. This is a numerical accident, not a
+    // fitted quirk — no parametrisation was ever done against a NaN — so curcuma clamps
+    // instead. The branch is bit-identical to the reference wherever the reference
+    // produces a finite value; it only replaces the overflow by the analytic limit
+    // (logistic -> 1 as t -> +inf, -> 0 as t -> -inf). Claude Generated (Sep 2026).
+    double logistic;
+    if (t > 300.0) {
+        logistic = 1.0;
+    } else if (t < -300.0) {
+        logistic = 0.0;
+    } else {
+        const double exp_term = std::exp(t);
+        logistic = exp_term / (1.0 + exp_term);
+    }
+    fqq = 1.0 + qfacbm0 * logistic;
 
     // Step 7: Phase 6 - Ring strain corrections and XH special cases
     // Reference: Fortran gfnff_ini.f90:1150-1165, 1278-1279
@@ -5145,14 +4300,22 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         // Claude Generated (Feb 21, 2026): Aldehyde detection via ctype logic
         // Reference: Fortran gfnff_ini2.f90:1497-1511
         // ctype(atom) = 1 if: carbon, in pi system, exactly 1 pi-oxygen neighbor
+        //
+        // The pi array is the reference's post-Hückel piadr (`piadr = itmp`,
+        // gfnff_ini.f90:1016) — the bond-parameter loop that calls ctype starts at :1094,
+        // well after that line. Claude Generated (Sep 2026): use pi_atoms_final, falling
+        // back to the pre-Hückel candidate list only if the Hückel never ran.
+        const std::vector<int>& ctype_piadr =
+            (static_cast<int>(topo.pi_atoms_final.size()) == m_atomcount)
+                ? topo.pi_atoms_final : topo.pi_fragments;
         bool is_aldehyde = false;
-        if (heavy_atom == 6 && heavy_idx < static_cast<int>(topo.pi_fragments.size())) {
-            bool carbon_in_pi = (topo.pi_fragments[heavy_idx] > 0);
+        if (heavy_atom == 6 && heavy_idx < static_cast<int>(ctype_piadr.size())) {
+            bool carbon_in_pi = (ctype_piadr[heavy_idx] > 0);
             if (carbon_in_pi && heavy_idx < static_cast<int>(topo.neighbor_lists.size())) {
                 int pi_oxygen_count = 0;
                 for (int nb : topo.neighbor_lists[heavy_idx]) {
-                    if (m_atoms[nb] == 8 && nb < static_cast<int>(topo.pi_fragments.size())
-                        && topo.pi_fragments[nb] > 0) {
+                    if (m_atoms[nb] == 8 && nb < static_cast<int>(ctype_piadr.size())
+                        && ctype_piadr[nb] > 0) {
                         pi_oxygen_count++;
                     }
                 }
@@ -5160,12 +4323,19 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
             }
         }
 
-        if (heavy_atom == 6 && is_3ring) {
-            // 3-ring CH: stronger due to ring strain
-            fxh = 1.05;  // +5%
-        } else if (heavy_atom == 6 && is_aldehyde) {
-            // Aldehyde CH: weaker
-            fxh = 0.95;  // -5%
+        // Fortran gfnff_ini.f90:1150-1157: inside the C-H branch the two rules are
+        // INDEPENDENT `if`s and the aldehyde one comes SECOND, so it overrides the
+        // 3-ring one for a carbon that is both. Claude Generated (Sep 2026, GMTKN55
+        // W4-11/oxirene): curcuma had them as an else-if chain, so oxirene's ring
+        // carbons — a 3-ring AND a C=O-type carbon, since the ring oxygen is a pi atom
+        // — took fxh 1.05 instead of 0.95. That single factor is the ratio 1.10526
+        // between curcuma's C-H force constant (-0.18250) and the reference's
+        // (-0.16512), worth 21.3 kcal/mol in the bond term of a 5-atom molecule.
+        // The B/N/O rules that follow are mutually exclusive with the C branch by
+        // element, so the chain below is faithful.
+        if (heavy_atom == 6 && (is_3ring || is_aldehyde)) {
+            fxh = is_aldehyde ? 0.95   // aldehyd CH (second rule, wins)
+                              : 1.05;  // 3-ring CH
         } else if (heavy_atom == 5) {
             // B-H bond: strong
             fxh = 1.10;  // +10%
@@ -5350,6 +4520,23 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     int imetal2 = (z2 >= 1 && z2 <= 86) ? metal_type[z2 - 1] : 0;
     int group1 = (z1 >= 1 && z1 <= 86) ? periodic_group[z1 - 1] : 0;
     int group2 = (z2 >= 1 && z2 <= 86) ? periodic_group[z2 - 1] : 0;
+    // CORRECTED (Sep 2026): imetal is not param%metal(Z) raw - gfnff_ini.f90:273-274 demotes a
+    // low-coordinate element of group > 3 back to a non-metal ("Sn, Pb, Bi, with small CN are
+    // better described as non-metals"). Without it PbH4 took the METAL bond branch: fqq came out
+    // 1.1437 instead of 1.033 and the force constant -0.0523 instead of -0.064, leaving the
+    // molecule 27.2 kcal/mol too weakly bound - a constant error inherited unchanged by every
+    // HEAVY28 complex built from it (pbh4_2, with two of them, was off by exactly twice that).
+    {
+        const auto& nb_t = getCachedTopology().neighbor_lists;
+        auto demote = [&](int imet, int grp, int a) {
+            if (imet != 1 || grp <= 3) return imet;
+            const int nb_a = (a >= 0 && a < static_cast<int>(nb_t.size()))
+                                 ? static_cast<int>(nb_t[a].size()) : 0;
+            return nb_a <= 4 ? 0 : imet;
+        };
+        imetal1 = demote(imetal1, group1, atom1);
+        imetal2 = demote(imetal2, group2, atom2);
+    }
 
     // Metal type classification (Fortran gfnff_ini.f90:1158-1167)
     // CRITICAL: H must not be treated as alkali metal even though it's in group 1!
@@ -5546,7 +4733,23 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // Step 10: Final Consolidation of Shifts and Equilibrium Distance
     // CRITICAL: Total rabshift must include pi-shift and metal-shift!
     // Fortran: r0 = (ra + rb + shift) * ff
-    double total_rabshift = rabshift + pi_shift + metal_shift;
+    //
+    // Assembly order of the reference's single `shift` variable:
+    //   :1143-1149  local specials (hypervalent / XH / F-F / X-sp3 / X-sp)   [non-metal]
+    //   :1189-1253  metal specials, on a branch that starts from shift = 0   [metal]
+    //   :1174       if (pibo > 0) shift = hueckelp*(bzref - pibo)   <-- OVERWRITES
+    //   :1268-1272  if both heavy: shift = shift + hshift3/4/5      <-- accumulates
+    //   :1276       vbond(1) = gen%rabshift + shift
+    // So a pi bond keeps NONE of its local specials. Claude Generated (Sep 2026):
+    // reproduced here with shift_pre_pi / heavy_shift, which the r0 block above kept
+    // apart for exactly this purpose. Measured on the F-F contact of the HF-dimer
+    // proton-transfer TS (GMTKN55 PX13/hf_2_ts), where the F-F rule (+0.22) and the
+    // pi shift (+0.1258, pibo ~ 1.5e-4) were both applied: r0 3.0555 instead of
+    // 2.8355 Bohr, 19.2 kcal/mol in the bond term. The metal branch is mutually
+    // exclusive with the pi branch in the reference (pibo is 0 for a metal bond —
+    // no metal is in `pilist`), so metal_shift stays additive.
+    const double local_shift = (pibo > 0.0) ? pi_shift : shift_pre_pi;
+    double total_rabshift = gen_rabshift + local_shift + heavy_shift + metal_shift;
     // Fortran gfnff_ini.f90:1289 — r0 = rtmp + vbond(1). rtmp is the Goedecker/SK reference
     // distance (curcuma's (ra+rb)*ff — verified bit-equal to Fortran's rtmp for both metal-C and
     // the ligand C-O), and vbond(1) = rabshift + shift (+ pi_shift + metal_shift) is added
@@ -5785,13 +4988,30 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         qa_i = topo_info.topology_charges[atom_i];
         qa_k = topo_info.topology_charges[atom_k];
 
-        // Check if charges are in reasonable range (-1 to +1)
-        if (std::abs(qa_center) < 1.0 && std::abs(qa_i) < 1.0 && std::abs(qa_k) < 1.0) {
+        // CORRECTED (Sep 2026), two things, both from gfnff_ini.f90:1426-1430:
+        //  - There is no "charges must be within +-1" guard in the reference. It silently
+        //    left fqq = 1 whenever one of the three atoms carried a full unit charge, which
+        //    is precisely what a charged fragment does: in GMTKN55 BH76/fch3fts (the
+        //    F...CH3...F SN2 transition state) the leaving fluoride is its own fragment with
+        //    qa = -1.000000 exactly, so all three F-C-H bends kept fqq = 1.000 instead of
+        //    0.8521 and came out 0.2631 against the reference's 0.224.
+        //  - The metal branch tests `imetal`, i.e. param%metal(Z) with the low-coordinate
+        //    group>3 demotion, not curcuma's is_metal flag (transition metals and
+        //    lanthanides only). A main-group metal centre must take the 2.5 factor too.
+        auto imetal_of = [&](int a) -> int {
+            const int z = (a >= 0 && a < m_atomcount) ? m_atoms[a] : 0;
+            if (z < 1 || z > 86) return 0;
+            int im = GFNFFParameters::metal_type[z - 1];
+            const int grp = GFNFFParameters::periodic_group[z - 1];
+            const int nb_a = (a < static_cast<int>(topo_info.neighbor_lists.size()))
+                                 ? static_cast<int>(topo_info.neighbor_lists[a].size()) : 0;
+            if (im == 1 && grp > 3 && nb_a <= 4) im = 0;
+            return im;
+        };
+        {
             double charge_product = qa_center * qa_i + qa_center * qa_k;
-            bool has_metal = (topo_info.is_metal[atom_i] ||
-                             topo_info.is_metal[atom_j] ||
-                             topo_info.is_metal[atom_k]);
-
+            const bool has_metal = (imetal_of(atom_i) != 0 || imetal_of(atom_j) != 0
+                                    || imetal_of(atom_k) != 0);
             double factor = has_metal ? 2.5 : 1.0;
             fqq = 1.0 - charge_product * qfacBEN * factor;
         }
@@ -5813,6 +5033,13 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     int nmet = 0; // Metal neighbors
     int npi = 0;  // Pi-system neighbors
 
+    // npi uses the reference's POST-Hückel piadr (`piadr = itmp`, gfnff_ini.f90:1016);
+    // the angle setup at :1380 onwards runs well after that line. Claude Generated
+    // (Sep 2026) — the pre-Hückel candidate list (pi_fragments) is strictly larger.
+    const std::vector<int>& angle_piadr =
+        (static_cast<int>(topo_info.pi_atoms_final.size()) == m_atomcount)
+            ? topo_info.pi_atoms_final : topo_info.pi_fragments;
+
     // Count neighbors on atom_i
     if (m_atoms[atom_i] == 1) nh++;
     if (m_atoms[atom_i] == 6) nc++;
@@ -5820,7 +5047,7 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     if (m_atoms[atom_i] == 8) no++;
     if (m_atoms[atom_i] == 14) nsi++;
     if (!topo_info.is_metal.empty() && atom_i < topo_info.is_metal.size() && topo_info.is_metal[atom_i]) nmet++;
-    if (!topo_info.pi_fragments.empty() && atom_i < topo_info.pi_fragments.size() && topo_info.pi_fragments[atom_i] != 0) npi++;
+    if (!angle_piadr.empty() && atom_i < static_cast<int>(angle_piadr.size()) && angle_piadr[atom_i] != 0) npi++;
 
     // Count neighbors on atom_k
     if (m_atoms[atom_k] == 1) nh++;
@@ -5829,7 +5056,7 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     if (m_atoms[atom_k] == 8) no++;
     if (m_atoms[atom_k] == 14) nsi++;
     if (!topo_info.is_metal.empty() && atom_k < topo_info.is_metal.size() && topo_info.is_metal[atom_k]) nmet++;
-    if (!topo_info.pi_fragments.empty() && atom_k < topo_info.pi_fragments.size() && topo_info.pi_fragments[atom_k] != 0) npi++;
+    if (!angle_piadr.empty() && atom_k < static_cast<int>(angle_piadr.size()) && angle_piadr[atom_k] != 0) npi++;
 
     // Get central atom properties (z_center already declared at line 1855)
     // Add bounds checking to prevent crashes
@@ -6112,15 +5339,17 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
             // This is critical for methylated N in aromatic rings (e.g., caffeine)
             // XTB marks these as sp3 but with pi=1 (π-connected)
             //
-            // Detection methods:
-            // 1. npi > 0: neighbors are in pi_fragments
-            // 2. Neighbors have hyb=2 (sp2) indicating aromatic connection
-            int hyb_i = (atom_i < topo_info.hybridization.size()) ? topo_info.hybridization[atom_i] : 3;
-            int hyb_k = (atom_k < topo_info.hybridization.size()) ? topo_info.hybridization[atom_k] : 3;
-            bool has_sp2_neighbor = (hyb_i == 1 || hyb_i == 2 || hyb_k == 1 || hyb_k == 2);
-
-            // Use π-conjugated path if either detection method finds π-character
-            if (npi > 0 || has_sp2_neighbor) {
+            // The reference's only test here is `if (npi > 0)` (gfnff_ini.f90:1518),
+            // where npi counts how many of the two OUTER atoms are pi atoms.
+            // Claude Generated (Sep 2026, GMTKN55 WCPT18/ts4): curcuma additionally took
+            // the pi branch whenever an outer atom merely had hyb 1 or 2, which the
+            // reference never does. In the ts4 proton-transfer TS the bridging hydrogen
+            // is two-coordinate and therefore hyb=1, so the H-N-H angles of both
+            // nitrogens took the conjugated branch (theta0 = 113 deg) instead of the
+            // saturated-pyramidal one (theta0 = 104 deg, f2 = 0.40 + nh*0.19). At the TS
+            // those angles are opened to 152.8 deg, where the 9-degree difference in
+            // theta0 is worth 5.1 kcal/mol on a 7-atom molecule.
+            if (npi > 0) {
                 // Phase 2C Complete: Amide detection (January 10, 2026)
                 // Reference: gfnff_ini.f90:1616-1622
                 // Uses FunctionalGroupDetector for exact Fortran amide() port
@@ -6128,10 +5357,12 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
                 // Safety check: only use FunctionalGroupDetector if neighbor_lists is populated
                 bool is_amide = false;
                 if (!topo_info.neighbor_lists.empty() && atom_j < static_cast<int>(topo_info.neighbor_lists.size())) {
+                    // amide() is called with piadr here (gfnff_ini.f90:1520), i.e. the
+                    // post-Hückel array — same reasoning as npi above.
                     FunctionalGroupDetector detector(m_atomcount, m_atoms,
                                                     topo_info.neighbor_lists,
                                                     topo_info.hybridization,
-                                                    topo_info.pi_fragments);
+                                                    angle_piadr);
                     is_amide = detector.isAmideNitrogen(atom_j);
                 }
 
@@ -6189,6 +5420,57 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
             }
         }
     }
+
+    // MOVED HERE (Sep 2026): the oxygen block used to sit AFTER the ring-strain block below,
+    // so a 3-ring ether had its ring equilibrium angle overwritten again by the generic
+    // "O with two neighbours -> 104.5 deg" rule. The reference has the oxygen rules at
+    // gfnff_ini.f90:1582-1598 and the ring rules at :1635-1649, i.e. the RING wins. Oxirane
+    // came out with theta0 = 104.5 instead of 82.0 and its angle term was 25.5 kcal/mol too
+    // high; dioxirane, with two such centres, twice that. The block only reads nh/nsi/nmet/npi
+    // and current_angle, all computed further up, so moving it changes nothing else.
+    // Get neighbors directly from topology adjacency list
+    std::vector<int> neighbors;
+    if (!topo_info.adjacency_list.empty() && atom_j < topo_info.adjacency_list.size()) {
+        neighbors = topo_info.adjacency_list[atom_j];
+    }
+
+    // Oxygen corrections: More accurate angle values based on Fortran reference
+    // Reference: gfnff_ini.f90:1582-1598
+    // Phase 2B Extensions (January 10, 2026): Si/metal widening, aromatic ethers
+    if (m_atoms[atom_j] == 8) {  // Central atom is oxygen
+        // Default O with 2 neighbors: 104.5°
+        if (neighbors.size() == 2) {
+            r0_deg = 104.5;
+
+            // H2O case: both neighbors are hydrogen
+            if (nh == 2) {
+                r0_deg = 100.0;  // H-O-H equilibrium angle
+                f2 = 1.20;       // H2O is better with 1.2-1.3
+            }
+
+            // Phase 2B: O-Si widening
+            r0_deg = r0_deg + 7.0 * nsi;  // Oxygen angles widen with Si attached
+
+            // Phase 2B: O-Metal widening
+            r0_deg = r0_deg + 14.0 * nmet;  // Oxygen angles widen even more with M attached
+
+            // Phase 2B: Aromatic ethers (Ph-O-Ph)
+            if (npi == 2) {
+                r0_deg = 109.0;  // More open angle for aromatic substituents
+            }
+
+            // Phase 2B: Metal coordination (M-O-X can be linear)
+            if (nmet > 0) {
+                double current_angle_deg = current_angle * 180.0 / M_PI;
+                const double linear_threshold = 160.0;
+                if (current_angle_deg > linear_threshold) {
+                    r0_deg = 180.0;  // Metal coordination can be linear (GEODEP)
+                    f2 = 0.3;        // Much weaker force constant
+                }
+            }
+        }
+    }
+
 
     // Phase 2D: Ring strain corrections (ALL elements)
     // Reference: gfnff_ini.f90:1635-1649
@@ -6317,63 +5599,12 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         }
     }
 
-    // METAL center: Transition and main group metals
-    // Reference: gfnff_ini.f90:1705-1714
-    int imetal_center = (z_center >= 1 && z_center <= 86) ? GFNFFParameters::metal_type[z_center - 1] : 0;
-    if (imetal_center > 0) {
-        if (hyb == 0) {
-            r0_deg = 90.0;
-            f2 = 1.35;  // Important for metal angles
-        }
-        if (hyb == 1) r0_deg = 180.0;
-        if (hyb == 2) r0_deg = 120.0;
-        if (hyb == 3) r0_deg = 109.5;
-        double current_angle_deg = current_angle * 180.0 / M_PI;
-        if (current_angle_deg > 160.0) r0_deg = 180.0;  // GEODEP
-    }
-
-    // Get neighbors directly from topology adjacency list
-    std::vector<int> neighbors;
-    if (!topo_info.adjacency_list.empty() && atom_j < topo_info.adjacency_list.size()) {
-        neighbors = topo_info.adjacency_list[atom_j];
-    }
-
-    // Oxygen corrections: More accurate angle values based on Fortran reference
-    // Reference: gfnff_ini.f90:1582-1598
-    // Phase 2B Extensions (January 10, 2026): Si/metal widening, aromatic ethers
-    if (m_atoms[atom_j] == 8) {  // Central atom is oxygen
-        // Default O with 2 neighbors: 104.5°
-        if (neighbors.size() == 2) {
-            r0_deg = 104.5;
-
-            // H2O case: both neighbors are hydrogen
-            if (nh == 2) {
-                r0_deg = 100.0;  // H-O-H equilibrium angle
-                f2 = 1.20;       // H2O is better with 1.2-1.3
-            }
-
-            // Phase 2B: O-Si widening
-            r0_deg = r0_deg + 7.0 * nsi;  // Oxygen angles widen with Si attached
-
-            // Phase 2B: O-Metal widening
-            r0_deg = r0_deg + 14.0 * nmet;  // Oxygen angles widen even more with M attached
-
-            // Phase 2B: Aromatic ethers (Ph-O-Ph)
-            if (npi == 2) {
-                r0_deg = 109.0;  // More open angle for aromatic substituents
-            }
-
-            // Phase 2B: Metal coordination (M-O-X can be linear)
-            if (nmet > 0) {
-                double current_angle_deg = current_angle * 180.0 / M_PI;
-                const double linear_threshold = 160.0;
-                if (current_angle_deg > linear_threshold) {
-                    r0_deg = 180.0;  // Metal coordination can be linear (GEODEP)
-                    f2 = 0.3;        // Much weaker force constant
-                }
-            }
-        }
-    }
+    // REMOVED (Sep 2026): a duplicate metal-center block used to sit here. It was a strict
+    // subset of the documented one further down (search imetal_ctr) except that it lacked the
+    // Sn/Pb/Bi demotion of gfnff_ini.f90:274, so it re-imposed r0 = 109.5 on a four-coordinate
+    // Pb after the heavy-main-group rules had correctly produced 99.5 (109.5 - nh*5). For the
+    // perfectly tetrahedral PbH4 that makes theta0 equal the actual angle, and the whole angle
+    // term collapses to zero (0.0 vs the reference's 0.003308 Eh).
 
     // NOTE: Nitrogen corrections now handled comprehensively in Phase 2C above (lines 2187-2277)
     // No additional nitrogen corrections needed here
@@ -6466,52 +5697,6 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     return params;
 }
 
-bool GFNFF::loadGFNFFCharges()
-{
-    // Try to load charges from reference GFN-FF calculation
-    std::string charges_file = "releaseX/gfnff_charges";
-    std::ifstream file(charges_file);
-
-    if (!file.is_open()) {
-        CurcumaLogger::warn(fmt::format("Could not open {} for reading charges", charges_file));
-        return false;
-    }
-
-    m_charges = Vector::Zero(m_atomcount);
-
-    std::string line;
-    int atom_idx = 0;
-
-    while (std::getline(file, line) && atom_idx < m_atomcount) {
-        // Remove leading/trailing whitespace
-        line.erase(0, line.find_first_not_of(" \t"));
-        line.erase(line.find_last_not_of(" \t") + 1);
-
-        if (!line.empty()) {
-            try {
-                double charge = std::stod(line);
-                m_charges[atom_idx] = charge;
-                atom_idx++;
-            } catch (const std::exception& e) {
-                CurcumaLogger::error(fmt::format("Error parsing charge on line {}: {}", atom_idx + 1, e.what()));
-                return false;
-            }
-        }
-    }
-
-    file.close();
-
-    if (atom_idx != m_atomcount) {
-        CurcumaLogger::warn(fmt::format("Expected {} charges, got {}", m_atomcount, atom_idx));
-        return false;
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF charges from {}", atom_idx, charges_file));
-    }
-    return true;
-}
-
 // =================================================================================
 // Advanced GFN-FF Parameter Generation (Placeholder implementations)
 // =================================================================================
@@ -6563,7 +5748,7 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
                     double distance = std::sqrt(distance_sq);
                     double r_cov = rcov_bohr[i] + rcov_bohr[j];
                     double dr = (distance - r_cov) / r_cov;
-                    cn_i += 0.5 * (1.0 + std::erf(kn * dr));
+                    cn_i += 0.5 * (1.0 + curcuma_erf(kn * dr));
                 }
                 cn_raw[i] = cn_i;
             }
@@ -6595,7 +5780,7 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
                 double distance = std::sqrt(distance_sq);
                 double r_cov = rcov_bohr[i] + rcov_bohr[j];
                 double dr = (distance - r_cov) / r_cov;
-                cn_i += 0.5 * (1.0 + std::erf(kn * dr));
+                cn_i += 0.5 * (1.0 + curcuma_erf(kn * dr));
             }
             cn_raw[i] = cn_i;
         }
@@ -7011,7 +6196,7 @@ GFNFF::CNAndDerivResult GFNFF::computeCNAndDerivativesFused(
                     double dr       = (r_ij - rcov_sum) / rcov_sum;
 
                     // CN contribution (erf-based, same formula as calculateGFNFFCNWithNeighbors)
-                    double erfCN = 0.5 * (1.0 + std::erf(kn * dr));
+                    double erfCN = 0.5 * (1.0 + curcuma_erf(kn * dr));
                     loc.cn_raw[i] += erfCN;
                     loc.cn_raw[j] += erfCN;
 
@@ -7078,7 +6263,7 @@ GFNFF::CNAndDerivResult GFNFF::computeCNAndDerivativesFused(
                 double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
                 double dr       = (r_ij - rcov_sum) / rcov_sum;
 
-                double erfCN = 0.5 * (1.0 + std::erf(kn * dr));
+                double erfCN = 0.5 * (1.0 + curcuma_erf(kn * dr));
                 result.cn_raw[i] += erfCN;
                 result.cn_raw[j] += erfCN;
 
@@ -7102,8 +6287,8 @@ GFNFF::CNAndDerivResult GFNFF::computeCNAndDerivativesFused(
     Vector dlogdcn(N);
     for (int i = 0; i < N; ++i) {
         // Log-compress cn_raw → cn_values (same formula as calculateGFNFFCNWithNeighbors)
-        result.cn_values[i] = std::log(1.0 + std::exp(cnmax))
-                            - std::log(1.0 + std::exp(cnmax - result.cn_raw[i]));
+        result.cn_values[i] = curcuma_log(1.0 + curcuma_exp(cnmax))
+                            - curcuma_log(1.0 + curcuma_exp(cnmax - result.cn_raw[i]));
         // dlogCN/dcn — same formula as calculateCoordinationNumberDerivatives step 2
         dlogdcn[i] = std::exp(cnmax) / (std::exp(cnmax) + std::exp(result.cn_raw[i]));
     }
@@ -7217,7 +6402,7 @@ std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int
             } else {
                 // For other elements: Check if linear (sp) or bent (sp2)
                 double dot_product = bond_vectors[0].dot(bond_vectors[1]);
-                double angle = std::acos(std::max(-1.0, std::min(1.0, dot_product)));
+                double angle = curcuma_acos(std::max(-1.0, std::min(1.0, dot_product)));
 
                 if (angle > 2.8) { // ~160° - linear geometry
                     hyb[i] = 1; // sp
@@ -7249,7 +6434,7 @@ std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int
                 for (int j = 0; j < 3; ++j) {
                     int k = (j + 1) % 3;
                     double dot = bond_vectors[j].dot(bond_vectors[k]);
-                    angle_sum += std::acos(std::max(-1.0, std::min(1.0, dot)));
+                    angle_sum += curcuma_acos(std::max(-1.0, std::min(1.0, dot)));
                 }
 
                 // Planar: sum ≈ 2π, Pyramidal: sum < 2π
@@ -7296,7 +6481,8 @@ std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int
 }
 
 std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb,
-                                         const std::vector<std::vector<int>>& adjacency_list) const
+                                         const std::vector<std::vector<int>>& adjacency_list,
+                                         const std::vector<std::vector<int>>& nb_full) const
 {
     // Phase 2.2: Pi-system detection (conjugated fragments)
     // PHASE 2 OPTIMIZED (Feb 7, 2026): Use pre-computed adjacency_list (eliminates O(N²) distance calculations)
@@ -7305,74 +6491,81 @@ std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb,
 
     std::vector<int> pi_fragments(m_atomcount, 0); // 0 = not in pi-system
 
-    // Step 1: Identify all potential pi-system members.
-    // Claude Generated (Jul 2026, F3 audit): a pi-candidate must be an element with a
-    // non-zero Hückel off-diagonal parameter (hoffdiag>0): B,C,N,O,F,S,Cl
-    // (gfnff_param.f90:701-707). Atoms with hoffdiag=0 (H, He, Li, Be, metals, Br, I,
-    // noble gases, ...) never produce a non-zero pibo in xtb (zero coupling -> piadr=0
-    // after the Hückel), so xtb excludes them from the pi-system. curcuma previously
-    // made ANY sp/sp2 atom a candidate (wrongly pulling in terminal Br/I that got hyb=1)
-    // and missed F/Cl (hyb=0, hoffdiag=0.23/1.0). Restricting to the hoffdiag>0 set
-    // matches xtb: F/Cl enter (bonded to sp/sp2), Br/I stay out.
-    auto hoffdiag_nonzero = [](int z) {
+    // Steps 1-3 are a verbatim port of the reference pi-atom setup,
+    // gfnff_ini.f90:312-354 ("setup list of all possible pi atoms" + "make pi
+    // neighbor list" + mrecgff). Claude Generated (Sep 2026) — rewritten from a
+    // per-BOND classification to the reference's per-ATOM one; see the two rule
+    // notes below for what that changed and why.
+    //
+    // The reference admits an atom on either of two independent grounds:
+    //   piat  = (hyb == 1 or 2) and pilist(Z)      ! sp/sp2 B,C,N,O,F,S,Cl
+    //   picon = (any neighbour is sp/sp2) and nofs(Z)   ! lone-pair N,O,F,S,Cl
+    // plus three unconditional vetoes (SO3 oxygen, NR3-X nitrogen, SO3 sulphur).
+    // Membership does NOT require having a pi PARTNER: an isolated sp2 carbon is a
+    // pi atom that forms its own one-atom system, which the Hückel loop then skips
+    // via `npi < 2` (huckel_solver.cpp:134, Fortran gfnff_ini.f90:936). That still
+    // matters, because "is atom i a pi atom" is read by the EEQ dxi corrections and
+    // the X-bond base filter, not only by the Hückel.
+    auto pilist = [](int z) {   // gfnff_ini2.f90:1390-1395
         return z == 5 || z == 6 || z == 7 || z == 8 || z == 9 || z == 16 || z == 17;
     };
-    std::vector<bool> is_pi_candidate(m_atomcount, false);
+    auto nofs = [](int z) {     // gfnff_ini2.f90:1397-1402
+        return z == 7 || z == 8 || z == 9 || z == 16 || z == 17;
+    };
+
+    std::vector<bool> is_pi_member(m_atomcount, false);
     for (int i = 0; i < m_atomcount; ++i) {
-        if (!hoffdiag_nonzero(m_atoms[i])) continue;
-        // sp/sp2 atoms are candidates; N/O/S/F/Cl/B with hyb=0 or 3 are "picon" candidates
-        // (lone-pair / fluorine conjugation) that join if bonded to an sp/sp2 atom (Step 2).
-        is_pi_candidate[i] = true;
+        const int zi = m_atoms[i];
+        bool piat = (hyb[i] == 1 || hyb[i] == 2) && pilist(zi);
+
+        // kk counts sp/sp2 NEIGHBOURS of any element — hydrogen included.
+        // Claude Generated (Sep 2026, GMTKN55 PX13/hf_2_ts): curcuma used to require
+        // the sp/sp2 partner to be a pi candidate itself, which silently dropped the
+        // whole "lone pair next to an sp centre" branch whenever the sp centre was an
+        // H. In the HF-dimer proton-transfer TS both fluorines are picon precisely
+        // because their bridging hydrogens come out sp (hyb=1); the reference builds a
+        // 2-atom F...F pi-system with piBO=0, curcuma built no pi-system at all, and
+        // the F-F bond then missed its pi treatment (r0 2.9297 vs 2.8355 Bohr, fc
+        // -0.1291 vs -0.0884) — 19.2 kcal/mol in the bond term on a 4-atom molecule.
+        int kk = 0;
+        for (int j : adjacency_list[i]) {
+            if (zi == 8 && m_atoms[j] == 16 && hyb[j] == 5) {
+                piat = false;   // SO3 oxygen is not a pi (gfnff_ini.f90:321-324)
+                continue;       // Fortran `cycle`: this neighbour does not count for kk
+            }
+            if (hyb[j] == 1 || hyb[j] == 2) ++kk;
+        }
+        const bool picon = (kk > 0) && nofs(zi);
+
+        // Unconditional vetoes (gfnff_ini.f90:328-329). Both use topo%nb(20,i), the
+        // FULL neighbour count — see the Sep 2026 S30L-CI note in the git history:
+        // a pyrrole N additionally coordinated by a metal or alkali counterion has its
+        // lone pair tied up in that 4th bond and must not enter as a donor.
+        if (zi == 7 && static_cast<int>(nb_full[i].size()) > 3) continue;   // NR3-X
+        if (zi == 16 && hyb[i] == 5) continue;                             // SO3
+
+        if (picon || piat) is_pi_member[i] = true;
     }
 
-    // Step 2: Build adjacency for pi-candidates only (PHASE 2: using pre-computed bonds)
+    // Step 2: pi-neighbour list = every BONDED pair of members (gfnff_ini.f90:338-351).
+    // The reference applies no bond-type test here at all; two members that are bonded
+    // are always linked, so e.g. two picon heteroatoms bonded to each other end up in
+    // the same system.
     std::vector<std::vector<int>> pi_neighbors(m_atomcount);
     for (int i = 0; i < m_atomcount; ++i) {
-        if (!is_pi_candidate[i]) continue;
-
-        // PHASE 2 OPTIMIZED: Iterate only over bonded neighbors (not all atoms)
+        if (!is_pi_member[i]) continue;
         for (int j : adjacency_list[i]) {
-            if (j <= i || !is_pi_candidate[j]) continue;  // Avoid duplicates and non-pi atoms
-
-            // Verify bond has pi-character or potential for conjugation
-            bool is_pi_bond = false;
-
-            // picon heteroatom: B,N,O,F,S,Cl (NOT C). Used by Case 2.
-            auto is_picon_heteroatom = [](int z) {
-                return (z == 5 || z == 7 || z == 8 || z == 9 || z == 16 || z == 17);
-            };
-
-            // Case 1: Both are true pi-atoms (sp/sp2)
-            if ((hyb[i] == 1 || hyb[i] == 2) && (hyb[j] == 1 || hyb[j] == 2)) {
-                is_pi_bond = true;
-            }
-            // Case 2: One is sp/sp2 and other is a picon HETEROatom (B/N/O/F/S/Cl, NOT C)
-            // with a lone pair / conjugation (gfnff_ini2.f90 includes F,Cl in the pi-Hückel).
-            // Claude Generated (Jul 2026, F3 audit): the non-sp/sp2 partner must be a
-            // heteroatom — a sp3 C bonded to an sp2 C (e.g. toluene Me-phenyl) is a pure
-            // sigma bond and xtb keeps the sp3 C OUT of the pi-system (piadr=0). Allowing
-            // sp3 C here pulled 190 sp3 carbons into the pi-system and broke the S30L
-            // clean neutrals. Restrict to z != 6.
-            else if ((hyb[i] == 1 || hyb[i] == 2) && is_picon_heteroatom(m_atoms[j])) {
-                is_pi_bond = true;
-            }
-            else if ((hyb[j] == 1 || hyb[j] == 2) && is_picon_heteroatom(m_atoms[i])) {
-                is_pi_bond = true;
-            }
-
-            if (is_pi_bond) {
-                pi_neighbors[i].push_back(j);
-                pi_neighbors[j].push_back(i);
-            }
+            if (is_pi_member[j]) pi_neighbors[i].push_back(j);
         }
     }
 
-    // Step 3: Connected component analysis
+    // Step 3: connected components over the members (Fortran mrecgff). Members without
+    // any pi neighbour form their own single-atom system, exactly as in the reference.
     std::vector<bool> visited(m_atomcount, false);
     int fragment_id = 1;
 
     for (int start = 0; start < m_atomcount; ++start) {
-        if (pi_neighbors[start].empty() || visited[start]) continue;
+        if (!is_pi_member[start] || visited[start]) continue;
 
         std::stack<int> stack;
         stack.push(start);
@@ -7732,7 +6925,7 @@ Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb,
             // Coulomb interaction with error function damping
             // A(i,j) = erf(γ_ij * r_ij) / r_ij
             double erf_arg = gamma_ij * r_ij;
-            double erf_val = std::erf(erf_arg);
+            double erf_val = curcuma_erf(erf_arg);
             double coulomb = erf_val / r_ij;
 
             A(i, j) = coulomb;
@@ -7987,51 +7180,12 @@ Vector GFNFF::calculateDgam(const Vector& qa_charges,
     return dgam;
 }
 
-/**
- * @brief Build per-atom neighbor lists from bond pairs
- *
- * Claude Generated (December 2025, Session 6): Two-phase EEQ support
- * Converts cached bond list into per-atom neighbor connectivity for
- * enhanced dxi correction calculations and topology analysis.
- *
- * Creates symmetric neighbor lists: if i→j, then j→i
- *
- * @return Vector of neighbor lists (one per atom)
- */
-std::vector<std::vector<int>> GFNFF::buildNeighborLists() const
-{
-    const auto& bonds = getCachedBondList();
-    std::vector<std::vector<int>> neighbors(m_atomcount);
-
-    // Convert bond pairs to per-atom neighbor lists
-    for (const auto& [i, j] : bonds) {
-        neighbors[i].push_back(j);
-        neighbors[j].push_back(i);
-    }
-
-    // Debug output if verbosity is high
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("Neighbor Lists (for first 3 atoms):");
-        for (int i = 0; i < std::min(3, m_atomcount); ++i) {
-            std::string neighbor_str;
-            for (int n : neighbors[i]) {
-                if (!neighbor_str.empty()) neighbor_str += ", ";
-                neighbor_str += std::to_string(n);
-            }
-            CurcumaLogger::result(fmt::format(
-                "  Atom {}: [{}] (count: {})",
-                i, neighbor_str, neighbors[i].size()));
-        }
-    }
-
-    return neighbors;
-}
-
 // Claude Generated (July 2026): Detect eta(η)-coordinated atoms.
 // Faithful port of Fortran external/gfnff/src/gfnff_ini2.f90:170-198.
 // curcuma's neighbor_lists[i] is the FULL bonded adjacency (== Fortran nbf, incl. metals);
 // the metal-removed list (nbm) is obtained here by filtering metal_type==0.
-std::vector<int> GFNFF::computeEtaCoordination(const std::vector<std::vector<int>>& neighbor_lists) const
+std::vector<int> GFNFF::computeEtaCoordination(const std::vector<std::vector<int>>& neighbor_lists,
+                                               const std::vector<std::vector<int>>& nbm) const
 {
     using GFNFFParameters::metal_type;
     std::vector<int> itag(m_atomcount, 0);
@@ -8046,10 +7200,16 @@ std::vector<int> GFNFF::computeEtaCoordination(const std::vector<std::vector<int
 
         const std::vector<int>& nbf = neighbor_lists[i];
         int nbf_count = static_cast<int>(nbf.size());
-        int nbm_count = 0;  // neighbors with metals removed
-        for (int kk : nbf) {
-            if (!is_metal(m_atoms[kk])) nbm_count++;
-        }
+        // nbm(20,i) is the length of the icase=3 neighbour list, which getnb builds with
+        // its OWN distance test and drops not only metals but also anything with
+        // mchar > 0.25 and any heavy atom above its normal CN (gfnff_ini2.f90:314-319).
+        // Claude Generated (Sep 2026, GMTKN55 MB16-43/03): curcuma recomputed it here as
+        // "neighbours of i that are not a metal element", which is a different and larger
+        // number. For that structure's first carbon it gave 3 where the real nbm list has
+        // 2, so the Cp rule (nbf >= 4 and nbm == 3) fired on an atom the reference does
+        // not treat as eta-coordinated at all - and nbdum, hybridisation, bpair and the
+        // BATM triple list all followed.
+        int nbm_count = (i < static_cast<int>(nbm.size())) ? static_cast<int>(nbm[i].size()) : 0;
 
         bool etacoord = false;
         // Cp (cyclopentadienyl): full CN >= 4, metal-removed CN == 3
@@ -8161,13 +7321,23 @@ std::vector<int> GFNFF::determineHybridizationFortran(const GFNFFTopology& topo,
         if (na < 1e-12 || nb2 < 1e-12) return 0.0;
         double t = a.dot(b) / (na * nb2);
         t = std::max(-1.0, std::min(1.0, t));
-        return std::acos(t) * 180.0 / M_PI;
+        return curcuma_acos(t) * 180.0 / M_PI;
     };
 
     const auto& nbf = topo.nb_full;
     const auto& nbhc = topo.nb_hc;
     const auto& nbm = topo.nb_nometal;
-    const bool have_qa = (topo.topology_charges.size() == m_atomcount);
+    // CORRECTED (Sep 2026): in the reference `topo%qa` is a member that SURVIVES the q-loop,
+    // so pass 2's hybridization sees pass 1's charges. Here topo_info is rebuilt per pass and
+    // its topology_charges are still empty at this point (the Phase-1 EEQ runs later in the
+    // same function), so the carbene charge override below could never fire. m_bond_qa already
+    // carries exactly those pass-1 charges for the radius shrink - use them as the fallback.
+    const bool topo_has_qa = (topo.topology_charges.size() == m_atomcount);
+    const bool carry_has_qa = (static_cast<int>(m_bond_qa.size()) == m_atomcount);
+    const bool have_qa = topo_has_qa || carry_has_qa;
+    auto qa_of = [&](int i) -> double {
+        return topo_has_qa ? topo.topology_charges(i) : m_bond_qa[i];
+    };
 
     std::vector<int> hyb(m_atomcount, 0);
 
@@ -8211,7 +7381,7 @@ std::vector<int> GFNFF::determineHybridizationFortran(const GFNFFTopology& topo,
                 } else {
                     hyb[i] = 1;      // linear triple bond etc
                 }
-                if (have_qa && topo.topology_charges(i) < -0.4) {
+                if (have_qa && qa_of(i) < -0.4) {
                     hyb[i] = 2;
                     itag[i] = 0;
                 }
@@ -8251,7 +7421,34 @@ std::vector<int> GFNFF::determineHybridizationFortran(const GFNFFTopology& topo,
                 if (is_metal(m_atoms[kk])) hyb[i] = 1;
                 if (m_atoms[jj] == 7 && m_atoms[kk] == 7 && nbdum[jj].size() <= 2 && nbdum[kk].size() <= 2)
                     hyb[i] = 1;  // N=N=N
-                if (phi > lintr) hyb[i] = 1;  // GEODEP
+                // GEODEP angle fallback. Guarded (nh_linear_fix, default true): an N that
+                // carries an H is not promoted to sp by the angle alone -- a thermally
+                // stretched =N-H would otherwise get theta0=180 and lock its own distortion
+                // in as the equilibrium (self-reinforcing artefact in conformer searches).
+                //
+                // ORIGIN: added on branch `confsearch` (51830efa). REFINED here (Sep 2026)
+                // and therefore NOT byte-identical to that branch any more -- reconcile
+                // deliberately on merge, this version is the newer one.
+                // Why: confsearch assumed every genuine sp N-H is already caught by the
+                // structural rules above. It is not. A GMTKN55 sweep found two counter-
+                // examples the bare guard broke, both linear by bonding rather than by
+                // distortion: DIPCS10/n2h2_2+ (HN=NH 2+, +165.5 kcal/mol) and NBPRC/nh-bh
+                // (HN=BH, +78.4). The discriminator is the nitrogen's heavy partner: a
+                // genuinely sp N sits in a LINEAR CHAIN, so that partner is itself
+                // 2-coordinate, whereas the artefact's =N-H hangs off a 3-coordinate sp2
+                // carbon. So only suppress the promotion when the heavy partner is branched.
+                bool nh_guard = false;
+                if (nh > 0 && m_parameters.value("nh_linear_fix", true)) {
+                    nh_guard = true;
+                    for (int nb_of_n : nbdum[i]) {
+                        if (m_atoms[nb_of_n] != 1
+                            && static_cast<int>(nbdum[nb_of_n].size()) <= 2) {
+                            nh_guard = false;  // linear chain -> genuine sp, let GEODEP run
+                        }
+                    }
+                }
+                if (phi > lintr && !nh_guard)
+                    hyb[i] = 1;  // GEODEP
             }
             if (nb20i == 1) hyb[i] = 1;
         } else if (grp == 6) {  // O, S, Se, Te, Po
@@ -8285,6 +7482,27 @@ std::vector<int> GFNFF::determineHybridizationFortran(const GFNFFTopology& topo,
             if (nni == 4 && grp > -7) hyb[i] = 3;   // early TM, tetrahedral
             if (nni == 4 && grp <= -7) hyb[i] = 3;  // late TM, square planar
             if (nni == 5 && grp == -3) hyb[i] = 3;  // Sc-La are tetrahedral at CN=5
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Aryne rule (Fortran gfnff_ini2.f90:341-351)
+    // ------------------------------------------------------------------
+    // Two BONDED carbons that both came out of the loop above tagged as carbenes are an
+    // aryne, not two carbenes, so both tags are cleared again. Curcuma was missing this
+    // and therefore kept the tag on every 2-coordinate carbon that has a 2-coordinate
+    // carbon neighbour. Since itag==1 means "contributes no pi electron", the whole rim
+    // of a carbon cage then went missing from the Hueckel electron count: GMTKN55
+    // DC13/c20bowl came out with 10 pi electrons instead of 20, wrecking the bond orders
+    // and with them the bond term by 564 kcal/mol.
+    // Ported with the reference's in-place semantics (clearing both ends as it scans), so
+    // the outcome for chains of three or more adjacent carbene carbons matches exactly.
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int kk : nbdum[i]) {
+            if (m_atoms[kk] == 6 && m_atoms[i] == 6 && itag[i] == 1 && itag[kk] == 1) {
+                itag[i] = 0;
+                itag[kk] = 0;
+            }
         }
     }
 
@@ -8408,19 +7626,60 @@ void GFNFF::buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<in
 
     topo.metallic_character = computeMetallicCharacter();
 
-    // --- nb_hc: drop ALL bonds of highly-coordinated atoms (icase=2) ---
+    // icase 2 and 3 are NOT filtered views of icase 1 — they re-run the distance test.
+    // Claude Generated (Sep 2026, GMTKN55 AL2X6/al2f6): getnb (gfnff_ini2.f90:361-419)
+    // applies the metal radius enlargement `fm` ONLY in icase 1; icase 2 and 3 keep
+    // fm = 1 and therefore use a STRICTER threshold for any pair involving a metal.
+    // curcuma used to derive all three lists from the single icase-1 bond list and only
+    // apply the hc_crit / metal filters, so nb_hc and nb_nometal could never lose a bond
+    // that nbf kept. That difference is invisible until the charge shrink of the q-loop's
+    // second pass moves a metal pair between the two thresholds: in Al2F6 the Al-Al
+    // contact stays inside the enlarged icase-1 radius but falls outside the plain one,
+    // so the reference gets nbf = 5 / topo%nb = 4 and hence nbdiff = 1, which stops the
+    // group-3 rule `nb20i > 4 .and. ati > 10 .and. nbdiff == 0 -> hyb = 5` from firing.
+    // Aluminium is sp3 in the reference and hypervalent in curcuma, worth theta0 = 109.5
+    // vs 90 deg and f2 = 1.0 vs 0.11 on every Al-centred angle.
+    //
+    // The pair criterion is the same one getCachedBondList() uses, minus fm; see the
+    // comment there for the reference lines.
+    const bool geometric_nb = m_forced_bonds.empty();
+    auto pair_bonded_no_fm = [&](int i, int j) -> bool {
+        using GFNFFParameters::normcn;
+        constexpr double rthr = 1.25;      // gen%rthr
+        constexpr double rqshrink = 0.23;  // gen%rqshrink
+        const int zi = m_atoms[i], zj = m_atoms[j];
+        const bool have_qa = (static_cast<int>(m_bond_qa.size()) == m_atomcount);
+        auto qshift_of = [&](int a) {
+            const int z = m_atoms[a];
+            const int mt = (z >= 1 && z <= 86) ? metal_type[z - 1] : 0;
+            return have_qa ? m_bond_qa[a] * rqshrink * (mt > 0 ? 2.0 : 1.0) : 0.0;
+        };
+        const double ncn_i = (zi >= 1 && zi <= 86) ? static_cast<double>(normcn[zi - 1]) : 4.0;
+        const double ncn_j = (zj >= 1 && zj <= 86) ? static_cast<double>(normcn[zj - 1]) : 4.0;
+        double rco = GFNFFParameters::computeRabEstimate(zi, zj, ncn_i, ncn_j);
+        rco -= qshift_of(i) + qshift_of(j);
+        rco *= fat[zi] * fat[zj];
+        const double distance = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
+        return distance < rthr * rco;   // fm == 1 for icase 2 and 3
+    };
+
+    // --- nb_hc: no highly-coordinated atoms (icase=2) ---
     // Fortran cycles the pair if EITHER endpoint's FULL CN exceeds its cap, so the
     // bond disappears from both rows.
     topo.nb_hc.assign(m_atomcount, {});
     for (int i = 0; i < m_atomcount; ++i) {
         if (static_cast<int>(topo.nb_full[i].size()) > hc_crit(m_atoms[i])) continue;
-        for (int j : topo.nb_full[i]) {
+        for (int j = 0; j < m_atomcount; ++j) {
+            if (j == i) continue;
             if (static_cast<int>(topo.nb_full[j].size()) > hc_crit(m_atoms[j])) continue;
-            topo.nb_hc[i].push_back(j);
+            const bool bonded = geometric_nb
+                ? pair_bonded_no_fm(i, j)
+                : (std::find(topo.nb_full[i].begin(), topo.nb_full[i].end(), j) != topo.nb_full[i].end());
+            if (bonded) topo.nb_hc[i].push_back(j);
         }
     }
 
-    // --- nbm: drop metals and unusually coordinated heavy atoms (icase=3) ---
+    // --- nbm: no metals and unusually coordinated stuff (icase=3) ---
     auto nbm_excluded = [&](int a) -> bool {
         const int z = m_atoms[a];
         if (topo.metallic_character[a] > 0.25 || is_metal(z)) return true;                 // metal case
@@ -8431,14 +7690,18 @@ void GFNFF::buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<in
     topo.nb_nometal.assign(m_atomcount, {});
     for (int i = 0; i < m_atomcount; ++i) {
         if (nbm_excluded(i)) continue;
-        for (int j : topo.nb_full[i]) {
+        for (int j = 0; j < m_atomcount; ++j) {
+            if (j == i) continue;
             if (nbm_excluded(j)) continue;
-            topo.nb_nometal[i].push_back(j);
+            const bool bonded = geometric_nb
+                ? pair_bonded_no_fm(i, j)
+                : (std::find(topo.nb_full[i].begin(), topo.nb_full[i].end(), j) != topo.nb_full[i].end());
+            if (bonded) topo.nb_nometal[i].push_back(j);
         }
     }
 
     // --- itag: eta detection needs nbf and nbm (gfnff_ini2.f90:170-195) ---
-    topo.itag = computeEtaCoordination(topo.nb_full);
+    topo.itag = computeEtaCoordination(topo.nb_full, topo.nb_nometal);
 
     // --- nbdum: per-atom mixture (gfnff_ini2.f90:197-202) ---
     nbdum.assign(m_atomcount, {});
@@ -8459,37 +7722,6 @@ void GFNFF::buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<in
     }
 }
 
-int GFNFF::countNeighborsWithin20Bohr(int atom_index, const Eigen::MatrixXd& geometry_bohr) const
-{
-    /**
-     * Claude Generated (January 14, 2026) - Phase 2: Exact nb20 implementation
-     * P2a (April 2026): Replaced distance_matrix lookup with on-the-fly computation.
-     *
-     * Port from gfnff_ini2.f90 neighbor list generation.
-     * Counts atoms within 20 Bohr cutoff for bond fcn correction.
-     *
-     * Reference: external/gfnff/src/gfnff_ini2.f90 - getnb() subroutine
-     */
-
-    static constexpr double NB20_CUTOFF_SQ = 400.0;  // 20^2 Bohr^2
-
-    int count = 0;
-    int natoms = static_cast<int>(geometry_bohr.rows());
-
-    for (int j = 0; j < natoms; j++) {
-        if (j != atom_index) {
-            double dx = geometry_bohr(atom_index, 0) - geometry_bohr(j, 0);
-            double dy = geometry_bohr(atom_index, 1) - geometry_bohr(j, 1);
-            double dz = geometry_bohr(atom_index, 2) - geometry_bohr(j, 2);
-            if (dx*dx + dy*dy + dz*dz < NB20_CUTOFF_SQ) {
-                count++;
-            }
-        }
-    }
-
-    return count;
-}
-
 std::vector<double> GFNFF::calculatePiBondOrders(
     const std::vector<std::pair<int,int>>& bond_list,
     const std::vector<int>& hybridization,
@@ -8497,7 +7729,8 @@ std::vector<double> GFNFF::calculatePiBondOrders(
     const std::vector<double>& charges,
     const Eigen::MatrixXd& geometry_bohr,
     const std::vector<int>& pi_system_charge,
-    const std::vector<int>& itag_in) const
+    const std::vector<int>& itag_in,
+    std::vector<int>* pi_atoms_final) const
 {
     /**
      * Claude Generated (January 14, 2026) - Updated for Phase 1: Full Hückel implementation
@@ -8557,7 +7790,8 @@ std::vector<double> GFNFF::calculatePiBondOrders(
             bond_list,
             geometry_bohr,
             itag,
-            pi_system_charge
+            pi_system_charge,
+            pi_atoms_final
         );
 
         // Ensure correct size
@@ -8633,6 +7867,16 @@ std::vector<double> GFNFF::calculatePiBondOrders(
         int idx = lin(atom_i, atom_j);
         pi_bond_orders[idx] = pbo;
 
+        // Simplified-approx counterpart of the Fortran itmp bookkeeping (see the full-Hückel
+        // path in HuckelSolver::calculatePiBondOrders): both ends of a conjugated bond count
+        // as π atoms. Only reached when the full Hückel solver is switched off.
+        if (pi_atoms_final && pi_i != 0 && pi_j != 0 && pi_i == pi_j) {
+            if (pi_atoms_final->size() != static_cast<size_t>(m_atomcount))
+                pi_atoms_final->assign(m_atomcount, 0);
+            (*pi_atoms_final)[atom_i] = 1;
+            (*pi_atoms_final)[atom_j] = 1;
+        }
+
         if (CurcumaLogger::get_verbosity() >= 3 && pbo > 0.0) {
             CurcumaLogger::result(fmt::format(
                 "  Bond {}-{}: hyb({},{}) pi({},{}) → pbo={:.2f} [idx={}]",
@@ -8651,56 +7895,6 @@ std::vector<double> GFNFF::calculatePiBondOrders(
     }
 
     return pi_bond_orders;
-}
-
-double GFNFF::calculateEEQEnergy(const Vector& charges, const Vector& cn) const
-{
-    // Phase 3.2: EEQ electrostatic energy calculation
-    // Reference: gfnff_engrad.F90:1378-1389 (EEQ energy in goed_gfnff)
-    //
-    // Energy formula:
-    // E_EEQ = Σ_i<j q_i*q_j*erf(γ_ij*r_ij)/r_ij
-    //       + Σ_i [-q_i*(χ_i + cnf_i*√CN_i) + 0.5*q_i²*(γ_i + √(2π)/√α_i)]
-    //
-    // This is the electrostatic energy from the EEQ method.
-    // Note: In GFN-FF, this uses "frozen charge" approximation for gradients.
-
-    const int n = m_atomcount;
-    const double sqrt_2pi = 0.79788456080287;  // sqrt(2/π)
-    double energy = 0.0;
-
-    // Pairwise Coulomb interactions: Σ_i<j q_i*q_j*γ_ij(r_ij)
-    for (int i = 0; i < n; ++i) {
-        EEQParameters params_i = getEEQParameters(m_atoms[i]);
-
-        for (int j = 0; j < i; ++j) {
-            EEQParameters params_j = getEEQParameters(m_atoms[j]);
-
-            // Distance between atoms
-            Vector r_ij_vec = m_geometry_bohr.row(i) - m_geometry_bohr.row(j);
-            double r_ij = r_ij_vec.norm();
-
-            // Damping parameter: γ_ij = 1/sqrt(α_i + α_j)
-            double gamma_ij = 1.0 / std::sqrt(params_i.alp + params_j.alp);
-
-            // Coulomb interaction with error function damping
-            double erf_arg = gamma_ij * r_ij;
-            double erf_val = std::erf(erf_arg);
-            double coulomb = erf_val / r_ij;
-
-            // Pairwise energy contribution
-            energy += charges[i] * charges[j] * coulomb;
-        }
-
-        // Self-energy and electronegativity terms for atom i
-        // E_i = -q_i*(χ_i + cnf_i*√CN_i) + 0.5*q_i²*(γ_i + √(2π)/√α_i)
-        double self_interaction = params_i.gam + sqrt_2pi / std::sqrt(params_i.alp);
-        double en_term = params_i.chi + params_i.cnf * std::sqrt(cn[i]);
-
-        energy += -charges[i] * en_term + 0.5 * charges[i] * charges[i] * self_interaction;
-    }
-
-    return energy;
 }
 
 // OVERLOAD 1: New signature (Claude Generated Jan 15, 2026) - accepts full TopologyInfo with pi_bond_orders
@@ -8724,6 +7918,25 @@ std::vector<Bond> GFNFF::generateBondsNative(const TopologyInfo& topo_info) cons
 
             {
                 auto bond_params = getGFNFFBondParameters(i, j, m_atoms[i], m_atoms[j], distance, topo_info);
+
+                if (std::getenv("CURCUMA_BONDDUMP")) {
+                    double cn_i = (i < topo_info.coordination_numbers.size()) ? topo_info.coordination_numbers[i] : -1.0;
+                    double cn_j = (j < topo_info.coordination_numbers.size()) ? topo_info.coordination_numbers[j] : -1.0;
+                    double r0_dyn = (bond_params.r0_base_i + bond_params.cnfak_i * cn_i
+                                    + bond_params.r0_base_j + bond_params.cnfak_j * cn_j
+                                    + bond_params.rabshift) * bond_params.ff;
+                    // qaprod is the argument of the fqq logistic. The reference's naive
+                    // exp(t)/(1+exp(t)) overflows to NaN once |qaprod| > 0.675 (t past
+                    // 709); curcuma clamps instead, see the fqq block in
+                    // getGFNFFBondParameters and docs/REV_GFNFF_TODO.md #10. Printing it
+                    // here makes the headroom of a given system measurable.
+                    double qa_i = (i < topo_info.topology_charges.size()) ? topo_info.topology_charges[i] : 0.0;
+                    double qa_j = (j < topo_info.topology_charges.size()) ? topo_info.topology_charges[j] : 0.0;
+                    fmt::print("BONDPARAM {}({})-{}({}) R={:.4f} r0_dyn={:.4f} fc={:.6f} alpha={:.4f} fqq={:.4f} ff={:.4f} rabshift={:.4f} cn_i={:.4f} cn_j={:.4f} qaprod={:.4f}\n",
+                               i+1, m_atoms[i], j+1, m_atoms[j], distance, r0_dyn,
+                               bond_params.force_constant, bond_params.alpha, bond_params.fqq,
+                               bond_params.ff, bond_params.rabshift, cn_i, cn_j, qa_i * qa_j);
+                }
 
                 Bond b;
                 b.type = 3;
@@ -8755,52 +7968,6 @@ std::vector<Bond> GFNFF::generateBondsNative(const TopologyInfo& topo_info) cons
     (void)duration;
 
     return bonds;
-}
-
-// JSON wrapper — delegates to native generator for backward compatibility
-json GFNFF::generateTopologyAwareBonds(const TopologyInfo& topo_info) const
-{
-    auto bonds = generateBondsNative(topo_info);
-    json result = json::array();
-    for (const auto& b : bonds) {
-        json bond;
-        bond["type"] = b.type;
-        bond["i"] = b.i;
-        bond["j"] = b.j;
-        bond["k"] = b.k;
-        bond["distance"] = b.distance;
-        bond["fc"] = b.fc;
-        bond["r0_ij"] = b.r0_ij;
-        bond["r0_ik"] = b.r0_ik;
-        bond["exponent"] = b.exponent;
-        bond["rabshift"] = b.rabshift;
-        bond["fqq"] = b.fqq;
-        bond["z_i"] = b.z_i;
-        bond["z_j"] = b.z_j;
-        bond["r0_base_i"] = b.r0_base_i;
-        bond["r0_base_j"] = b.r0_base_j;
-        bond["cnfak_i"] = b.cnfak_i;
-        bond["cnfak_j"] = b.cnfak_j;
-        bond["ff"] = b.ff;
-        result.push_back(bond);
-    }
-    return result;
-}
-
-// OVERLOAD 2: Legacy signature (Claude Generated Jan 15, 2026) - for backward compatibility
-json GFNFF::generateTopologyAwareBonds(const Vector& cn, const std::vector<int>& hyb,
-    const Vector& charges, const std::vector<int>& rings) const
-{
-    // Create TopologyInfo from separate parameters (without pi_bond_orders)
-    TopologyInfo topo_info;
-    topo_info.coordination_numbers = cn;
-    topo_info.hybridization = hyb;
-    topo_info.eeq_charges = charges;
-    topo_info.ring_sizes = rings;
-    // pi_bond_orders will be empty - legacy callers don't have them
-
-    // Call new overload
-    return generateTopologyAwareBonds(topo_info);
 }
 
 // Claude Generated (Feb 11, 2026): New overload using complete TopologyInfo
@@ -8893,198 +8060,6 @@ std::vector<Angle> GFNFF::generateAnglesNative(const TopologyInfo& topo_info) co
     return angles_vec;
 }
 
-// JSON wrapper — delegates to native generator
-json GFNFF::generateTopologyAwareAngles(const TopologyInfo& topo_info) const
-{
-    auto angles = generateAnglesNative(topo_info);
-    json result = json::array();
-    for (const auto& a : angles) {
-        json angle;
-        angle["type"] = a.type;
-        angle["i"] = a.i;
-        angle["j"] = a.j;
-        angle["k"] = a.k;
-        angle["fc"] = a.fc;
-        angle["theta0_ijk"] = a.theta0_ijk;
-        angle["r0_ij"] = a.r0_ij;
-        angle["r0_ik"] = a.r0_ik;
-        result.push_back(angle);
-    }
-    return result;
-}
-
-// Legacy overload - for backward compatibility (without pi_bond_orders)
-json GFNFF::generateTopologyAwareAngles(const Vector& cn, const std::vector<int>& hyb,
-    const Vector& charges, const std::vector<int>& rings) const
-{
-    // Claude Generated (February 2026): Timing for parameter generation breakdown
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    // Phase 2: Topology-aware angle parameter generation
-    // Build bond list first
-    std::vector<std::pair<int, int>> bond_list;
-    json bonds = generateTopologyAwareBonds(cn, hyb, charges, rings);
-
-    for (const auto& bond : bonds) {
-        bond_list.push_back({ bond["i"], bond["j"] });
-    }
-
-    // Build complete adjacency list from bond_list for topology-aware parameter generation
-    // This is needed by getGFNFFAngleParameters() for element-specific angle corrections
-    std::vector<std::vector<int>> adjacency_list(m_atomcount);
-    for (const auto& [atom_i, atom_j] : bond_list) {
-        adjacency_list[atom_i].push_back(atom_j);
-        adjacency_list[atom_j].push_back(atom_i);
-    }
-
-    // Claude Generated (February 2026): Phase 1 - CN Pre-computation for legacy function
-    // Pre-compute CN once for all angles (same optimization as in new generateGFNFFAngles)
-    // CN VALUE cutoff: see comment at constexpr definition in generateGFNFFAngles.
-    constexpr double cn_value_cutoff_sq = 40.0 * 40.0;
-    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, cn_value_cutoff_sq);
-    Vector coord_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
-
-    // Claude Generated (February 2026): Phase 2 - OpenMP parallelization for legacy function
-    std::vector<json> angles_vec;
-
-    #pragma omp parallel
-    {
-        std::vector<json> local_angles;
-
-        #pragma omp for schedule(dynamic, 10)
-        for (int center = 0; center < m_atomcount; ++center) {
-        std::vector<int> neighbors;
-
-        // Find all atoms bonded to center
-        for (const auto& bond : bond_list) {
-            if (bond.first == center)
-                neighbors.push_back(bond.second);
-            if (bond.second == center)
-                neighbors.push_back(bond.first);
-        }
-
-        // Generate all possible angles with center as middle atom
-        for (size_t i = 0; i < neighbors.size(); ++i) {
-            for (size_t j = i + 1; j < neighbors.size(); ++j) {
-                json angle;
-                angle["type"] = 3; // GFN-FF type
-                angle["i"] = neighbors[i];
-                angle["j"] = center;
-                angle["k"] = neighbors[j];
-
-                // Calculate current angle
-                Vector ri = m_geometry_bohr.row(neighbors[i]);
-                Vector rj = m_geometry_bohr.row(center);
-                Vector rk = m_geometry_bohr.row(neighbors[j]);
-
-                Vector v1 = ri - rj;
-                Vector v2 = rk - rj;
-
-                double v1_norm = v1.norm();
-                double v2_norm = v2.norm();
-
-                // Skip if vectors are too small
-                if (v1_norm < 1e-10 || v2_norm < 1e-10) {
-                    continue;
-                }
-
-                double cos_angle = v1.dot(v2) / (v1_norm * v2_norm);
-                cos_angle = std::max(-1.0, std::min(1.0, cos_angle));
-                double current_angle = acos(cos_angle);
-
-                // Get basic angle parameters
-                // Note: generateTopologyAwareAngles is called with raw charges vector
-                // Create a minimal TopologyInfo for compatibility with Phase 2
-                TopologyInfo topo_compat;
-                topo_compat.eeq_charges = charges;  // Use provided charges
-                topo_compat.coordination_numbers = cn;  // Use provided CN
-                topo_compat.hybridization = hyb;  // Use provided hybridization
-                topo_compat.adjacency_list = adjacency_list;  // Use pre-built adjacency list
-
-                // Initialize metal flags (needed for angle parameter calculation)
-                topo_compat.is_metal.resize(m_atomcount, false);
-                for (int i = 0; i < m_atomcount; ++i) {
-                    int z = m_atoms[i];
-                    // Mark metals (simplified: transition metals and lanthanides/actinides)
-                    if ((z >= 21 && z <= 30) || (z >= 39 && z <= 48) ||
-                        (z >= 57 && z <= 80) || (z >= 89 && z <= 103)) {
-                        topo_compat.is_metal[i] = true;
-                    }
-                }
-
-                // Claude Generated (February 2026): Pass pre-computed CN (Phase 1 optimization)
-                auto angle_params = getGFNFFAngleParameters(neighbors[i],
-                    center,
-                    neighbors[j],
-                    current_angle,
-                    topo_compat,
-                    coord_numbers);
-
-                // Phase 2: Apply topology corrections to force constant
-                double topology_factor = 1.0;
-
-                // Ring strain correction (small ring angles are stiffer)
-                int ring_center = rings[center];
-                int ring_i = rings[neighbors[i]];
-                int ring_k = rings[neighbors[j]];
-
-                // If all three atoms are in rings, assume they form a ring angle
-                if (ring_center > 0 && ring_i > 0 && ring_k > 0) {
-                    int ring_size = std::min({ring_center, ring_i, ring_k});
-                    if (ring_size == 3) {
-                        topology_factor *= 1.30; // Cyclopropane +30% angle strain
-                    } else if (ring_size == 4) {
-                        topology_factor *= 1.20; // Cyclobutane +20% angle strain
-                    } else if (ring_size == 5) {
-                        topology_factor *= 1.08; // Cyclopentane +8% strain
-                    }
-                }
-
-                // Hybridization correction (linear/planar geometries)
-                int hyb_center = hyb[center];
-                if (hyb_center == 1) {
-                    // sp center - expects linear geometry (180°)
-                    topology_factor *= 1.25; // Stiffer angle bending for sp
-                } else if (hyb_center == 2) {
-                    // sp2 center - expects planar geometry (120°)
-                    topology_factor *= 1.10; // Moderate stiffness for sp2
-                }
-                // sp3 uses default parameters
-
-                // Apply topology corrections
-                angle_params.force_constant *= topology_factor;
-
-                angle["fc"] = angle_params.force_constant;
-                angle["theta0_ijk"] = angle_params.equilibrium_angle;
-                angle["r0_ij"] = v1_norm; // Distance i-j
-                angle["r0_ik"] = v2_norm; // Distance k-j
-
-                local_angles.push_back(angle);
-            }
-        }
-        }  // end omp for
-
-        // Merge thread-local results
-        #pragma omp critical
-        {
-            angles_vec.insert(angles_vec.end(), local_angles.begin(), local_angles.end());
-        }
-    }  // end omp parallel
-
-    // Convert vector to JSON array
-    json angles = json::array();
-    for (const auto& a : angles_vec) {
-        angles.push_back(a);
-    }
-
-    // Claude Generated (February 2026): Report timing at verbosity 1+
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    (void)duration;
-
-    return angles;
-}
-
 std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& charges) const
 {
     // Claude Generated (March 2026): Native struct version of detectHydrogenBonds
@@ -9135,7 +8110,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
             Vector v2 = r_n2 - r_i;
 
             double cos_phi = v1.dot(v2) / (v1.norm() * v2.norm());
-            double phi_deg = std::acos(std::clamp(cos_phi, -1.0, 1.0)) * 180.0 / M_PI;
+            double phi_deg = curcuma_acos(std::clamp(cos_phi, -1.0, 1.0)) * 180.0 / M_PI;
 
             if (phi_deg < 150.0 && charges[i] > -0.4) {
                 current_basicity[i] = 1.46;
@@ -9417,7 +8392,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
             });
         };
 
-        CxxThreadPool* opt_pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
+        CxxThreadPool* opt_pool = threadPool();
         const int opt_par_threshold = m_parameters.value("hb_parallel_min_pairs", 500);
         const bool opt_parallel = (opt_pool != nullptr && opt_par_threshold >= 0
                                    && static_cast<int>(ab_pairs.size()) > opt_par_threshold);
@@ -9452,7 +8427,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
     // Claude Generated (Apr 2026): Parallelise main HB detection loop via CxxThreadPool.
     // The AB-pair outer loop is embarrassingly parallel; each thread collects into
     // its own local vector, merged after the barrier.  No locking in the hot path.
-    CxxThreadPool* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
+    CxxThreadPool* pool = threadPool();
     const int hb_par_threshold = m_parameters.value("hb_parallel_min_pairs", 500);
     const bool use_parallel = (pool != nullptr && hb_par_threshold >= 0
                                && static_cast<int>(ab_pairs.size()) > hb_par_threshold);
@@ -9644,31 +8619,6 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
     return hbonds;
 }
 
-// JSON wrapper — delegates to native generator for disk-cache compatibility
-json GFNFF::detectHydrogenBonds(const Vector& charges) const
-{
-    auto hbonds = detectHydrogenBondsNative(charges);
-    json result = json::array();
-    for (const auto& hb : hbonds) {
-        json j;
-        j["type"] = "hydrogen_bond";
-        j["case_type"] = hb.case_type;
-        j["i"] = hb.i; j["j"] = hb.j; j["k"] = hb.k;
-        j["basicity_A"] = hb.basicity_A; j["basicity_B"] = hb.basicity_B;
-        j["acidity_A"] = hb.acidity_A; j["acidity_B"] = hb.acidity_B;
-        j["q_H"] = hb.q_H; j["q_A"] = hb.q_A; j["q_B"] = hb.q_B;
-        j["r_cut"] = hb.r_cut;
-        j["neighbors_A"] = hb.neighbors_A;
-        j["neighbors_B"] = hb.neighbors_B;
-        if (hb.case_type == 3) {
-            j["acceptor_parent_index"] = hb.acceptor_parent_index;
-            j["neighbors_C"] = hb.neighbors_C;
-        }
-        result.push_back(j);
-    }
-    return result;
-}
-
 std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& charges) const
 {
     // Claude Generated (March 2026): Native struct version of detectHalogenBonds
@@ -9697,27 +8647,12 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
     // eta bonds (metal <-> itag==-1 ligand) removed so they no longer bridge. Normal metal
     // bonds (Ru-P/Ru-S) are kept, so the S-donor filter of PR34 is unchanged. Only built
     // when the topology actually has eta atoms; otherwise the normal bpair is used.
-    const bool has_eta = std::any_of(topo_info.itag.begin(), topo_info.itag.end(),
-                                     [](int t) { return t == -1; });
-    std::vector<std::vector<int>> eta_free_dist;
-    if (has_eta && !topo_info.neighbor_lists.empty()) {
-        auto is_metal_atom = [&](int a) {
-            int z = (a >= 0 && a < m_atomcount) ? m_atoms[a] : 0;
-            return z >= 1 && z <= 86 && GFNFFParameters::metal_type[z - 1] > 0;
-        };
-        auto is_eta = [&](int a) {
-            return a >= 0 && a < static_cast<int>(topo_info.itag.size()) && topo_info.itag[a] == -1;
-        };
-        std::vector<std::vector<int>> eta_free_adj = topo_info.neighbor_lists;
-        for (int i = 0; i < static_cast<int>(eta_free_adj.size()); ++i) {
-            auto& nbrs = eta_free_adj[i];
-            nbrs.erase(std::remove_if(nbrs.begin(), nbrs.end(), [&](int j) {
-                return (is_metal_atom(i) && is_eta(j)) || (is_metal_atom(j) && is_eta(i));
-            }), nbrs.end());
-        }
-        eta_free_dist = calculateTopologyDistances(eta_free_adj);
-    }
-    const std::vector<std::vector<int>>& xb_bpair = has_eta ? eta_free_dist : topo_info.bpair;
+    // bpair comes from computeBpairNbondmat(), a verbatim port of the reference's
+    // nbondmat: level 1 records a bond from EITHER direction, levels 2 and 3 require
+    // symmetric reachability. That is exactly the eta behaviour this code used to
+    // approximate with a hand-built "eta-free" distance matrix, so the approximation is
+    // gone. Claude Generated (Sep 2026).
+    const std::vector<std::vector<int>>& xb_bpair = topo_info.bpair;
 
     // Pre-calculate atom-specific basicity with overrides
     std::vector<double> current_basicity(m_atomcount);
@@ -9748,7 +8683,7 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
             Vector v2 = r_n2 - r_i;
 
             double cos_phi = v1.dot(v2) / (v1.norm() * v2.norm());
-            double phi_deg = std::acos(std::clamp(cos_phi, -1.0, 1.0)) * 180.0 / M_PI;
+            double phi_deg = curcuma_acos(std::clamp(cos_phi, -1.0, 1.0)) * 180.0 / M_PI;
 
             if (phi_deg < 150.0 && charges[i] > -0.4) {
                 current_basicity[i] = 1.46;
@@ -9762,23 +8697,47 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
                 Z == 15 || Z == 33 || Z == 51);
     };
 
+    // The reference enumerates A-X as "every atom i, every neighbour ix of i that is an
+    // xatom" (gfnff_ini.f90:843-846), so a bond whose BOTH ends are xatoms yields TWO
+    // ordered pairs — (i=a, X=b) and (i=b, X=a). Claude Generated (Sep 2026, GMTKN55
+    // HAL59/BrBr_pyr): curcuma scanned the bond list with an if/else-if and kept only the
+    // first endpoint as the halogen donor, so a homonuclear X-X bond (Br-Br, I-I, S-S in a
+    // disulfide, P-P, ...) produced only one of the two orientations — and which one it
+    // was depended on the atom order in the input file. In Br2...pyridine that picked the
+    // OUTER bromine as the donor, whose A-X...B angle is ~0 instead of ~180, so the whole
+    // X-bond term evaluated to exactly 0.0 against the reference's -0.011225 Eh (7.0
+    // kcal/mol). Emitting both orders reproduces the reference list.
     std::vector<std::pair<int,int>> ax_pairs;
     for (const auto& bond : bonds) {
-        int X = -1, A = -1;
-        if (is_halogen(m_atoms[bond.first])) { X = bond.first; A = bond.second; }
-        else if (is_halogen(m_atoms[bond.second])) { X = bond.second; A = bond.first; }
-        if (X != -1) {
-            if (m_atoms[X] == 16 && topo_info.neighbor_lists[X].size() > 2) continue;
-            ax_pairs.push_back({A, X});
-        }
+        // "no sulphoxide etc S" (gfnff_ini.f90:847): an S donor with more than two
+        // neighbours is rejected as X, in either orientation.
+        auto usable_as_X = [&](int X) {
+            return is_halogen(m_atoms[X])
+                && !(m_atoms[X] == 16 && topo_info.neighbor_lists[X].size() > 2);
+        };
+        if (usable_as_X(bond.second)) ax_pairs.push_back({bond.first, bond.second});
+        if (usable_as_X(bond.first))  ax_pairs.push_back({bond.second, bond.first});
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info(fmt::format("Found {} A-X halogen pairs", ax_pairs.size()));
     }
 
-    const double xb_cutoff = 10.0;
-    const double xb_cutoff_sq = xb_cutoff * xb_cutoff;
+    // CORRECTED (Sep 2026): the B search used a hardcoded 10 Bohr cutoff on the X-B
+    // distance. The reference prunes the X-bond list on the A-B distance against hbthr2
+    // (gfnff_ini2.f90:751-757 and :1103-1111, "rab = sqrab(A,B); if (rab > hbthr2) cycle"),
+    // which is 450 Bohr^2 = 21.2 Bohr at the reference accuracy of 0.1 - both a different
+    // atom pair and a far longer reach. The tight cutoff silently dropped the long-range
+    // tail of the term: S30L-CI host 11/12 (a thiophene macrocycle, S as the X donor) kept
+    // 140 of the reference's 940 triples and came out 0.099 kcal/mol short. Same threshold
+    // source as the HB list, so hb_accuracy / hb_thr2_bohr2 steer both consistently.
+    double xb_thr2;
+    {
+        const double hb_acc = m_parameters.value("hb_accuracy", 0.1);
+        const double thr2_override = m_parameters.value("hb_thr2_bohr2", 0.0);
+        xb_thr2 = (thr2_override > 0.0) ? thr2_override : (400.0 - std::log10(hb_acc) * 50.0);
+    }
+    const double xb_cutoff = std::sqrt(xb_thr2);
 
     // Claude Generated (Apr 2026): Spatial cell list for O(N) B-atom lookup.
     // Threshold configurable via nb_cell_list_min_atoms (shared with HB and Coulomb).
@@ -9791,14 +8750,19 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
     }
 
     for (const auto& [A, X] : ax_pairs) {
-        auto process_B = [&](int B, double r_BX_sq) {
+        auto process_B = [&](int B, double r_AB_sq) {
             if (B == A || B == X) return;
             if (current_basicity[B] < 1e-6) return;
 
-            if (m_atoms[B] == 6) {
-                if (topo_info.pi_fragments[B] == 0 || charges[B] >= 0.05) return;
-            } else {
-                if (charges[B] > 0.05) return;
+            // gfnff_ini.f90:874-876 gates BOTH the pi test and the charge test on group 4
+            // (C, Si, Ge, Sn, Pb) - "must be a (pi)base". CORRECTED (Sep 2026): curcuma also
+            // rejected every NON-group-4 B with qa > 0.05, a filter the reference does not
+            // have; it dropped the mildly positive thiophene sulfurs of S30L-CI host 11/12
+            // from their own X-bond list.
+            const int z_B = m_atoms[B];
+            const int group_B = (z_B >= 1 && z_B <= 86) ? periodic_group[z_B - 1] : 0;
+            if (group_B == 4) {
+                if (topo_info.pi_fragments[B] == 0 || charges[B] > 0.05) return;
             }
 
             // Fortran gfnff_ini.f90:872: `if (bpair(lin(j,ix)) .le. 3) cycle` — B must be
@@ -9833,22 +8797,23 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
 
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::info(fmt::format(
-                    "  XB detected: A={} ({}) X={} ({}) B={} ({}) r_BX={:.3f} Bohr",
+                    "  XB detected: A={} ({}) X={} ({}) B={} ({}) r_AB={:.3f} Bohr",
                     A, Elements::ElementAbbr[m_atoms[A]], X,
                     Elements::ElementAbbr[m_atoms[X]], B,
-                    Elements::ElementAbbr[m_atoms[B]], std::sqrt(r_BX_sq)));
+                    Elements::ElementAbbr[m_atoms[B]], std::sqrt(r_AB_sq)));
             }
         };
 
+        // The reference threshold is on A-B, so the neighbour query is centred on A.
         if (use_cell_list) {
-            cell_list.forEachNeighbor(X, xb_cutoff_sq, process_B);
+            cell_list.forEachNeighbor(A, xb_thr2, process_B);
         } else {
             for (int B = 0; B < m_atomcount; ++B) {
-                Vector r_X = m_geometry_bohr.row(X);
+                Vector r_A = m_geometry_bohr.row(A);
                 Vector r_B = m_geometry_bohr.row(B);
-                double r_BX_sq = (r_B - r_X).squaredNorm();
-                if (r_BX_sq >= xb_cutoff_sq) continue;
-                process_B(B, r_BX_sq);
+                double r_AB_sq = (r_B - r_A).squaredNorm();
+                if (r_AB_sq > xb_thr2) continue;
+                process_B(B, r_AB_sq);
             }
         }
     }
@@ -9864,25 +8829,64 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
     return xbonds;
 }
 
-// JSON wrapper — delegates to native generator for disk-cache compatibility
-json GFNFF::detectHalogenBonds(const Vector& charges) const
+std::vector<std::vector<int>> GFNFF::computeBpairNbondmat(const std::vector<std::vector<int>>& nb) const
 {
-    auto xbonds = detectHalogenBondsNative(charges);
-    json result = json::array();
-    for (const auto& xb : xbonds) {
-        json j;
-        j["type"] = "halogen_bond";
-        j["i"] = xb.i;
-        j["j"] = xb.j;
-        j["k"] = xb.k;
-        j["basicity_B"] = xb.basicity_B;
-        j["acidity_X"] = xb.acidity_X;
-        j["q_X"] = xb.q_X;
-        j["q_B"] = xb.q_B;
-        j["r_cut"] = xb.r_cut;
-        result.push_back(j);
+    // Reference: gfnff_ini2.f90:1280-1357 (nbondmat) + :1360-1387 (pairsbond).
+    // Claude Generated (Sep 2026).
+    const int n = m_atomcount;
+    std::vector<std::vector<int>> pair(n, std::vector<int>(n, 0));
+
+    // Level 1: every neighbour EITHER atom lists is a bond (gfnff_ini2.f90:1303-1309).
+    // This is why the asymmetric eta storage cannot demote a real bond.
+    for (int i = 0; i < n; ++i) {
+        if (i >= static_cast<int>(nb.size())) break;
+        for (int k : nb[i]) {
+            if (k < 0 || k >= n || k == i) continue;
+            pair[i][k] = 1;
+            pair[k][i] = 1;
+        }
     }
-    return result;
+
+    // Two expansion rounds, tagging 2 then 3. The frontier grows along the ASYMMETRIC
+    // neighbour list, but a tag is only awarded when the membership is symmetric.
+    std::vector<std::vector<int>> lst(n);
+    std::vector<std::vector<char>> inL(n, std::vector<char>(n, 0));
+    for (int i = 0; i < n && i < static_cast<int>(nb.size()); ++i) {
+        for (int k : nb[i]) {
+            if (k >= 0 && k < n && !inL[i][k]) { inL[i][k] = 1; lst[i].push_back(k); }
+        }
+    }
+
+    for (int tag = 2; tag <= 3; ++tag) {
+        std::vector<std::vector<int>> added(n);
+        for (int i = 0; i < n; ++i) {
+            for (int i1 : lst[i]) {
+                if (i1 < 0 || i1 >= static_cast<int>(nb.size())) continue;
+                for (int newatom : nb[i1]) {
+                    if (newatom < 0 || newatom >= n || inL[i][newatom]) continue;
+                    inL[i][newatom] = 1;
+                    added[i].push_back(newatom);
+                }
+            }
+        }
+        for (int i = 0; i < n; ++i)
+            lst[i].insert(lst[i].end(), added[i].begin(), added[i].end());
+
+        // pairsbond: first tag wins, and both directions must see each other.
+        for (int i = 0; i < n; ++i) {
+            for (int j = 0; j < i; ++j) {
+                if (pair[i][j] != 0) continue;
+                if (inL[i][j] && inL[j][i]) { pair[i][j] = tag; pair[j][i] = tag; }
+            }
+        }
+    }
+
+    // Anything still unassigned is "further than 3 bonds" -> 5 (gfnff_ini2.f90:1351-1355).
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < n; ++j)
+            if (i != j && pair[i][j] == 0) pair[i][j] = 5;
+
+    return pair;
 }
 
 std::vector<std::vector<int>> GFNFF::calculateTopologyDistances(const std::vector<std::vector<int>>& adjacency_list) const
@@ -10019,11 +9023,14 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
      * Pass 1 runs with qa = 0 (gfnff_ini.f90:258), pass 2 re-derives the topology with the
      * pass-1 charges shrinking the bond radii.
      *
-     * The charges only ever reach the rest of the model THROUGH the bond list, so if the
-     * shrink does not change a single bond, pass 2 is a mathematical no-op and pass 1 is
-     * already the converged answer. Verified against an instrumented Fortran build: the
-     * bond list changes between passes on exactly 1 of 95 MOR41 structures (PR40). So the
-     * expensive second pass is gated on the bond list actually changing.
+     * The charges reach the rest of the model through exactly two channels (gfnff_ini2.f90):
+     * the bond-radius shrink at :122, and the carbene charge override at :250
+     * (`qa < -0.4` -> hyb=2, itag=0 for a two-coordinate group-4 atom). If neither can change
+     * anything, pass 2 is a mathematical no-op and pass 1 is already the converged answer.
+     * Verified against an instrumented Fortran build: the bond list changes between passes on
+     * exactly 1 of 95 MOR41 structures (PR40). So the expensive second pass is gated on one of
+     * the two channels actually firing. (Until Sep 2026 the gate knew only about the bond
+     * list, which silently skipped the carbene override - see the comment at the gate.)
      *
      * That gate is also a correctness safeguard: calculateTopologyInfoOnce() is NOT
      * currently re-entrant (a second invocation converges to a slightly different Coulomb
@@ -10033,6 +9040,9 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
      * Claude Generated (Jul 2026).
      */
     m_bond_qa.clear();
+    m_frag_carry_nfrag = 0;
+    m_frag_carry_list.clear();
+    m_frag_carry_qfrag.clear();
     TopologyInfo topo = calculateTopologyInfoOnce();
 
     if (topo.topology_charges.size() != m_atomcount) return topo;
@@ -10043,14 +9053,59 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
                      topo.topology_charges.data() + m_atomcount);
     m_cached_bond_list.reset();  // re-detect with charge-shrunk radii
 
-    if (getCachedBondList() == bonds_pass1) {
-        return topo;  // shrink changed nothing - pass 2 would be a no-op
+    // CORRECTED (Sep 2026): the bond list is NOT the only channel. topo%qa reaches the
+    // perception at exactly two places in gfnff_ini2.f90 - the radius shrink at :122 (covered
+    // by the bond-list comparison above) and the carbene charge override at :250,
+    // `if (topo%qa(i) < -0.4) then hyb=2; itag=0`, for a group-4 atom with two neighbours.
+    // Pass 1 runs with qa = 0, so that override can only ever fire in pass 2. Skipping pass 2
+    // therefore left GMTKN55 G21EA/EA_9 (the methylene anion CH2-, H-C-H = 99.9 deg) tagged as
+    // a carbene: theta0 = 145 instead of the reference's 120, and dxi = -0.15 on top, worth
+    // 3.4 kcal/mol in the angle term and 28.1 in Coulomb.
+    bool carbene_override_pending = false;
+    {
+        const auto& nb_p1 = topo.neighbor_lists;
+        for (int i = 0; i < m_atomcount && !carbene_override_pending; ++i) {
+            const int z = m_atoms[i];
+            if (z < 1 || z > 86) continue;
+            if (GFNFFParameters::periodic_group[z - 1] != 4) continue;
+            if (i >= static_cast<int>(nb_p1.size()) || nb_p1[i].size() != 2) continue;
+            if (topo.topology_charges(i) < -0.4) carbene_override_pending = true;
+        }
     }
 
+    // CORRECTED again (Sep 2026, GMTKN55 AL2X6/al2f6): the gate is GONE — the reference
+    // runs the loop exactly twice for every molecule (`do while (qloop_count < 2 .and.
+    // gen%rqshrink > 1e-3)`, gfnff_ini.f90:263, with rqshrink = 0.23 fixed), and the
+    // "only two channels" premise above was wrong a second time. The charge-shrunk radii
+    // (gfnff_ini2.f90:122) are fed to ALL THREE neighbour-list builds — nbf (full),
+    // topo%nb (high-coordination filtered) and nbm (metal filtered) — and the
+    // hybridization rules read the DIFFERENCES `nbdiff = nbf - topo%nb` and
+    // `nbmdiff = nbf - nbm`, not just the bond list. In Al2F6 the two aluminiums keep
+    // five neighbours in nbf across both passes, but the HC-filtered list drops 5 -> 4
+    // in pass 2, so nbdiff goes 0 -> 1 and the group-3 rule
+    // (`nb20i > 4 .and. ati > 10 .and. nbdiff == 0 -> hyb = 5`) stops firing: hypervalent
+    // in pass 1, sp3 in pass 2. curcuma stopped after pass 1 and kept hyb = 5, which the
+    // angle code turns into theta0 = 90 deg and f2 = 0.11 instead of the metal branch's
+    // theta0 = 109.5 and f2 = 1.0 — 2.7 kcal/mol of the 2.85 kcal/mol al2f6 residual.
+    // Detecting that cheaply would mean rebuilding all three neighbour lists anyway, i.e.
+    // most of pass 2, so the gate buys little; running it always is both faithful and
+    // simpler. Measured after the change: MOR41 and S30L-CI bit-identical, so the
+    // "calculateTopologyInfoOnce is not re-entrant" worry recorded here earlier does not
+    // show up on any reference structure.
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("GFN-FF q-loop: charge-shrunk radii changed the bond list, running pass 2");
+        CurcumaLogger::info("GFN-FF q-loop: running pass 2 with the charge-shrunk radii");
     }
-    return calculateTopologyInfoOnce();
+    // Carry pass-1's fragmentation into pass 2 (reference gate `if (topo%nfrag <= 1)`).
+    if (topo.nfrag > 1) {
+        m_frag_carry_nfrag = topo.nfrag;
+        m_frag_carry_list = topo.fraglist;
+        m_frag_carry_qfrag = topo.qfrag;
+    }
+    TopologyInfo topo2 = calculateTopologyInfoOnce();
+    m_frag_carry_nfrag = 0;
+    m_frag_carry_list.clear();
+    m_frag_carry_qfrag.clear();
+    return topo2;
 }
 
 GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
@@ -10106,6 +9161,14 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     }
     const auto& bond_list = getCachedBondList();
 
+    if (std::getenv("CURCUMA_BONDDUMP")) {
+        for (const auto& [ai, aj] : bond_list) {
+            fmt::print("BOND {:5d}({}) - {:5d}({})  r={:.3f} Bohr\n",
+                       ai + 1, m_atoms[ai], aj + 1, m_atoms[aj],
+                       (m_geometry_bohr.row(ai) - m_geometry_bohr.row(aj)).norm());
+        }
+    }
+
     // Fortran four-list neighbour construction (gfnff_ini2.f90:128-130, 197-202).
     // Fills nb_full / nb_hc / nb_nometal / metallic_character / itag and returns the
     // eta-aware mixture nbdum, which becomes the working adjacency exactly as Fortran
@@ -10137,12 +9200,31 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // Phase 10: Detect molecular fragments for constrained EEQ (Claude Generated - Jan 31, 2026)
     // Fortran fragments on the FULL list (gfnff_ini.f90:468 mrecgff(...,nbf,...)), so an
     // eta ligand is never split off into its own fragment (which would corrupt qfrag).
-    auto frag_res = detectMolecularFragments(topo_info.nb_full);
-    topo_info.nfrag = frag_res.first;
-    topo_info.fraglist = frag_res.second;
-    topo_info.qfrag.assign(topo_info.nfrag, 0.0);
-    if (topo_info.nfrag == 1) {
-        topo_info.qfrag[0] = static_cast<double>(m_charge);
+    // CORRECTED (Sep 2026): the reference gates its whole fragment block on
+    // `if (topo%nfrag <= 1)` (gfnff_ini.f90:467), so the SECOND q-loop pass keeps the
+    // fragmentation and qfrag established in pass 1 - even when the charge-shrunk radii have
+    // meanwhile merged two fragments into one. Curcuma re-detected them every pass. For a
+    // charged species where pass 2 does create the extra bond (GMTKN55 G21EA/EA_25, the
+    // dichlorine radical anion Cl2-, whose 2.73 A contact crosses the threshold once the
+    // anionic Cl radius grows) that silently dropped nfrag 2 -> 1, and with it the per-
+    // fragment EEQ constraints: charges came out (-0.5, -0.5) instead of (-1, 0), and every
+    // charge-dependent quantity downstream (alpeeq, dgam, the Coulomb self-energy) followed.
+    // 100 kcal/mol on that structure; the same mechanism drove the AHB21/BH76/G21EA/SIE4x4
+    // family. See the rev-gfnff TODO for the physics side of this - the reference is not
+    // right either, it is simply self-consistent.
+    if (m_frag_carry_nfrag > 1
+        && static_cast<int>(m_frag_carry_list.size()) == m_atomcount) {
+        topo_info.nfrag = m_frag_carry_nfrag;
+        topo_info.fraglist = m_frag_carry_list;
+        topo_info.qfrag = m_frag_carry_qfrag;
+    } else {
+        auto frag_res = detectMolecularFragments(topo_info.nb_full);
+        topo_info.nfrag = frag_res.first;
+        topo_info.fraglist = frag_res.second;
+        topo_info.qfrag.assign(topo_info.nfrag, 0.0);
+        if (topo_info.nfrag == 1) {
+            topo_info.qfrag[0] = static_cast<double>(m_charge);
+        }
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -10168,7 +9250,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // NOTE: Removed std::async parallelization (May 2026) to prevent nested thread
     // creation when GFN-FF is called from an external thread pool (e.g. ConfSearch).
     // The overhead is negligible for parameter generation; thread safety is critical.
-    topo_info.pi_fragments = detectPiSystems(topo_info.hybridization, topo_info.adjacency_list);
+    topo_info.pi_fragments = detectPiSystems(topo_info.hybridization, topo_info.adjacency_list, topo_info.nb_full);
     // neighbor_lists is an alias of adjacency_list (== Fortran topo%nb after gfnff_ini2.f90:335).
     // itag is already set by buildNeighborListSet (eta) and determineHybridizationFortran (carbene/NO2).
     topo_info.neighbor_lists = topo_info.adjacency_list;
@@ -10237,6 +9319,15 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         eeq_topology_input.nfrag = topo_info.nfrag;
         eeq_topology_input.fraglist = topo_info.fraglist;
         eeq_topology_input.qfrag = topo_info.qfrag;
+        // Real itag (set by determineHybridizationFortran above), so calculateDxi() can test
+        // the tag the reference actually carries instead of re-deriving it from geometry.
+        eeq_topology_input.itag = topo_info.itag;
+        // The EEQ section reads the PRE-Hückel pi-candidate list (gfnff_ini.f90:312-336);
+        // hand it the force field's own array so the dgam / amide rules stop using
+        // EEQSolver's older, veto-less inference. Claude Generated (Sep 2026).
+        eeq_topology_input.is_pi.assign(m_atomcount, 0);
+        for (int i = 0; i < m_atomcount && i < static_cast<int>(topo_info.pi_fragments.size()); ++i)
+            eeq_topology_input.is_pi[i] = (topo_info.pi_fragments[i] != 0) ? 1 : 0;
         // CRITICAL FIX (Mar 2026): Use Pyykko covalent radii (param%rad), NOT D3 radii
         eeq_topology_input.covalent_radii.resize(m_atomcount);
         for (int i = 0; i < m_atomcount; ++i) {
@@ -10306,6 +9397,27 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
                             }
 
                             topology_from_cache = (topo_info.topology_charges.size() == m_atomcount);
+
+                            // Claude Generated (Sep 2026, GMTKN55 PX13/hf_2_ts): re-arm the
+                            // Phase-1 contract of solveWithSchurCholesky by hand. That cache is
+                            // keyed on geometry + CN ONLY (eeq_solver.cpp:2130-2146), while the
+                            // matrix it factorizes also depends on dgam/alpeeq/dxi — the very
+                            // quantities Phase 1 produces. The design relies on Phase 1's
+                            // local-solve branch (eeq_solver.cpp:2205) setting valid=false before
+                            // every Phase 2, which is the only thing that makes the narrow key
+                            // sound. A cache hit here SKIPS Phase 1, so that invalidation never
+                            // happens: in the GFN-FF q-loop the geometry and CN are identical in
+                            // both passes, so pass 2's Phase 2 scored a false cache hit and solved
+                            // with pass 1's factorization. Symptom on PX13/hf_2_ts (the HF-dimer
+                            // proton-transfer TS, whose bond list grows 4 -> 5 in pass 2): Phase-2
+                            // charges +-0.0129 instead of +-0.2464, Coulomb -0.00406 instead of
+                            // -0.03994 Eh — 22.5 kcal/mol, and it appeared or vanished purely with
+                            // the presence of the .topo.json file. Same failure class as the Jul
+                            // 2026 pending-buffer fix documented at eeq_solver.cpp:2750.
+                            if (topology_from_cache && m_eeq_solver) {
+                                m_eeq_solver->invalidateCholeskyCache();
+                            }
+
                             // Claude Generated (Jul 2026): routine cache-hit report is verbosity-2+ detail.
                             // ConfSearch reuses the topology cache on every child MD/opt, so at verbosity 1
                             // this flooded stdout with one [OK] line per reused structure. Demoted to info.
@@ -10336,17 +9448,43 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         }
 
         // Claude Generated (WP2, May 2026): forward pool + thread count to parallelise Stage-4
-        auto* pool_setup = m_forcefield ? m_forcefield->threadPool() : nullptr;
+        auto* pool_setup = threadPool();
         if (pool_setup) pool_setup->setActiveThreadCount(m_threads);
 
         // Claude Generated (Jul 2026, F2): distribute the molecular charge across fragments.
         // Previously qfrag was left at [0,...,0] for nfrag>1, so the per-fragment EEQ
         // constraint forced total charge 0 — broken for charged host-guest complexes
-        // (S30L systems 23-30, error sign/magnitude ~ Q). Mirror xtb 6.6.1
-        // (external/xtb/src/gfnff/gfnff_ini.f90:474-502): for nfrag==2 & m_charge!=0 try
-        // BOTH placements, keep the one with lower EEQ electrostatic energy; for nfrag>2
-        // put the charge on fragment 0; nfrag==1 and neutral keep the existing path.
-        if (topo_info.nfrag == 2 && m_charge != 0) {
+        // (S30L systems 23-30, error sign/magnitude ~ Q). For nfrag>2 put the charge on
+        // fragment 0; nfrag==1 and neutral keep the existing path.
+        //
+        // CORRECTED (Sep 2026): for nfrag==2 the reference's two-placement auto-detection
+        // (gfnff_ini.f90:536-560) is DEAD CODE. It is gated on
+        // `sum(topo%qfrag(2:nfrag)) > 999`, but qfrag is pre-initialised to [ichrg, 0, ...],
+        // so the sum is 0 and the block never runs — in both pprcht and xtb. The effective
+        // reference rule is therefore "the whole charge on fragment 0", full stop. Curcuma
+        // used to run the intended-but-disabled trial and keep the lower-energy placement,
+        // which is where the GMTKN55 charged-complex cluster came from: for AHB21/21
+        // (HCOO- ... HF, the proton unambiguously on F at 1.0 A) the trial puts the -1 on
+        // the HF fragment, giving its hydrogen a charge of -0.52 and the Coulomb term
+        // -0.971 Eh instead of -1.349 — 237 kcal/mol on one 6-atom structure.
+        // The trial remains available via -gfnff.frag_charge_autodetect true; it is not
+        // the default because nothing shows it to be the better rule (the S30L-23 case
+        // where it looked better was decided against xtb's .CHRG line-2 parsing quirk,
+        // a different branch entirely), while it is demonstrably worse here.
+        const bool frag_autodetect = m_parameters.value("frag_charge_autodetect", false);
+        if (topo_info.nfrag == 2 && m_charge != 0 && !frag_autodetect) {
+            // Reference behaviour: whole charge on fragment 0.
+            topo_info.qfrag = {static_cast<double>(m_charge), 0.0};
+            eeq_topology_input.qfrag = topo_info.qfrag;
+            topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
+                m_atoms, m_geometry_bohr, m_charge, topo_info.coordination_numbers,
+                eeq_topology_input, true, pool_setup, m_threads);
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::info(fmt::format(
+                    "F2: nfrag=2 charged (q={}) -> whole charge on fragment 0 (reference rule)",
+                    m_charge));
+            }
+        } else if (topo_info.nfrag == 2 && m_charge != 0) {
             // A1 (Jul 2026): both placements share the same Phase-1 matrix (qfrag
             // enters only the constraint RHS), so build it once and solve both RHS.
             const double qc = static_cast<double>(m_charge);
@@ -10469,7 +9607,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         }
 
         // Claude Generated (WP2, May 2026): forward pool + thread count to parallelise Stage-4
-        auto* pool_phase2 = m_forcefield ? m_forcefield->threadPool() : nullptr;
+        auto* pool_phase2 = threadPool();
         if (pool_phase2) pool_phase2->setActiveThreadCount(m_threads);
         topo_info.eeq_charges = m_eeq_solver->calculateFinalCharges(
             m_atoms,
@@ -10612,13 +9750,14 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
             ti.nfrag = topo_info.nfrag;
             ti.fraglist = topo_info.fraglist;
             ti.qfrag = topo_info.qfrag;
+            ti.itag = topo_info.itag;  // real itag for the dxi carbene test
             ti.covalent_radii.resize(m_atomcount);
             for (int i = 0; i < m_atomcount; ++i) {
                 int z = m_atoms[i];
                 ti.covalent_radii[i] = (z >= 1 && z <= (int)GFNFFParameters::covalent_radii.size())
                                       ? GFNFFParameters::covalent_radii[z - 1] : 1.0;
             }
-            auto* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
+            auto* pool = threadPool();
             if (pool) pool->setActiveThreadCount(m_threads);
 
             std::vector<double> qfrag_save = topo_info.qfrag;
@@ -10729,8 +9868,38 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         charges_vec,
         m_geometry_bohr,  // P2a: Pass geometry instead of distance_matrix
         topo_info.pi_system_charge,  // ipis per pi-system (Jul 2026, F3)
-        topo_info.itag  // carbene(+1)/NO2(+1)/eta(-1) tags for the FT-HMO electron count
+        topo_info.itag,  // carbene(+1)/NO2(+1)/eta(-1) tags for the FT-HMO electron count
+        &topo_info.pi_atoms_final  // Fortran "piadr = itmp" (gfnff_ini.f90:1016)
     );
+
+    // ----------------------------------------------------------------------
+    // GEODEP sp2 -> sp3 promotion (Fortran gfnff_ini.f90:1024-1032)
+    // ----------------------------------------------------------------------
+    // A group-4 atom (C, Si, Ge, ...) with three neighbours that came out of the
+    // hybridisation routine as sp2 but ended up OUTSIDE every pi-system is re-classified
+    // as sp3 when it is markedly pyramidal (out-of-plane angle > 40 deg). This runs here,
+    // right after the Hueckel section, because it tests the POST-Hueckel piadr
+    // (pi_atoms_final) - the reference does the same, at line 1024 vs 1016.
+    // Curcuma was missing the rule entirely: the bridging methyl carbons of GMTKN55
+    // AL2X6/al2me6 (three neighbours in the mixture list, strongly pyramidal, no pi) stayed
+    // sp2, so their C-H bonds lost the X-sp3 r0 shift of -0.022 and took bsmat(2,0)=1.0792
+    // instead of bsmat(3,0)=1.0000 - 8.6 kcal/mol on each of six bonds.
+    // Caveat: omega depends on the ORDER of the three neighbours, and this uses curcuma's
+    // neighbour ordering. For a pyramidal centre every permutation is far above the 40 deg
+    // threshold and for a planar one far below, so the classification is insensitive to it.
+    if (static_cast<int>(topo_info.pi_atoms_final.size()) == m_atomcount) {
+        for (int i = 0; i < m_atomcount; ++i) {
+            const int z = m_atoms[i];
+            if (z < 1 || z > 86) continue;
+            if (GFNFFParameters::periodic_group[z - 1] != 4) continue;
+            if (topo_info.hybridization[i] != 2) continue;
+            if (topo_info.pi_atoms_final[i] != 0) continue;
+            const auto& nb_i = topo_info.neighbor_lists[i];
+            if (nb_i.size() != 3) continue;
+            const double phi = calculateOutOfPlaneAngle(i, nb_i[0], nb_i[1], nb_i[2]);
+            if (std::abs(phi) * 180.0 / M_PI > 40.0) topo_info.hybridization[i] = 3;
+        }
+    }
 
     {
         // A0: the FT-HMO (Hueckel) solve itself
@@ -10774,31 +9943,65 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     topo_info.bond_types.resize(bond_list.size());
     for (size_t bond_idx = 0; bond_idx < bond_list.size(); ++bond_idx) {
         const auto& [atom_i, atom_j] = bond_list[bond_idx];
-        // Use pi-adjusted hybridization for bond type classification
-        // Fortran's hyb() is already pi-adjusted when btyp is assigned (gfnff_ini.f90:1154)
-        // sp3 atoms in pi-systems should be treated as sp2 for bond type purposes
+        // The reference assigns btyp from the RAW hyb array (gfnff_ini.f90:1106-1121).
+        // Claude Generated (Sep 2026, GMTKN55 W4-11/oxirene): curcuma promoted an sp3
+        // atom sitting in a pi-system to sp2 first, citing gfnff_ini.f90:1154 — but that
+        // line is inside the fxh block and adjusts no hybridization at all. The only
+        // post-Hückel hyb change in the reference is the GEODEP sp2 -> sp3 DEMOTION at
+        // :1031. The invented promotion turned oxirene's ring C-O bonds (sp2 C + sp3,
+        // pi-conjugated O) from btyp=1 into btyp=2, which gives their ring torsions
+        // periodicity 2 instead of 1. In a planar molecule every n=2 torsion sits exactly
+        // at its own minimum, so the whole torsion term collapsed to 0.0 against the
+        // reference's 0.001608 Eh. For nitrogen the promotion was invisible (an sp3 N on
+        // an sp2 partner reaches btyp=2 through the N-sp2 rule anyway), which is why it
+        // survived.
         int hyb_i = topo_info.hybridization[atom_i];
         int hyb_j = topo_info.hybridization[atom_j];
-        if (hyb_i == 3 && topo_info.pi_fragments[atom_i] > 0) hyb_i = 2;
-        if (hyb_j == 3 && topo_info.pi_fragments[atom_j] > 0) hyb_j = 2;
-        bool is_metal_i = topo_info.is_metal[atom_i];
-        bool is_metal_j = topo_info.is_metal[atom_j];
+        // btyp = 5 is gated on imetal, not on param%metal(Z) raw (gfnff_ini.f90:1120),
+        // and imetal demotes a low-coordinate element of group > 3 to a non-metal
+        // (:273-274, "Sn, Pb, Bi, with small CN are better described as non-metals").
+        // Claude Generated (Sep 2026, GMTKN55 HEAVYSB11/pb2me6): without the demotion the
+        // Pb-Pb bond came out btyp = 5, which switches off every rule gated on btyp < 5 —
+        // most visibly the extra sp3-sp3 n=1 torsion (gfnff_ini.f90:1810-1830). The
+        // reference generates 72 torsions for that molecule, curcuma 63, and the missing
+        // nine carry a NEGATIVE barrier (-0.031 each), so the torsion term came out
+        // +0.0000235 instead of -0.000146 Eh. Same raw-metal-test class as the fqq gate
+        // corrected in Known Issue #22(a).
+        auto imetal_nonzero = [&](int a) -> bool {
+            const int z = m_atoms[a];
+            if (z < 1 || z > 86) return false;
+            if (GFNFFParameters::metal_type[z - 1] == 0) return false;
+            const int grp = GFNFFParameters::periodic_group[z - 1];
+            if (grp > 3 && a < static_cast<int>(topo_info.adjacency_list.size())
+                && static_cast<int>(topo_info.adjacency_list[a].size()) <= 4)
+                return false;
+            return true;
+        };
+        bool is_metal_i = imetal_nonzero(atom_i);
+        bool is_metal_j = imetal_nonzero(atom_j);
 
         topo_info.bond_types[bond_idx] = classifyBondType(atom_i, atom_j,
                                                             hyb_i, hyb_j,
                                                             is_metal_i, is_metal_j);
 
-        // Claude Generated (Jul 2026): reference btyp re-classification for conjugated
-        // sp centres (gfnff_ini.f90:1168-1178). classifyBondType marks ANY sp bond
-        // (hyb==1) as btyp=3 (torsion-less), but the reference promotes an sp-sp2 bond
-        // with pi bond order > 0.1 back to btyp=2 (a real pi bond). Without this, sp2-sp
-        // conjugated bonds (e.g. the buckycatcher fullerene/aromatic-alkyne carbons in
-        // S30L 7) are wrongly skipped in torsion generation -> missing pi torsions.
-        if (topo_info.bond_types[bond_idx] == 3) {
-            int bb = 3;
-            if (hyb_i == 0 || hyb_j == 0 || hyb_i == 3 || hyb_j == 3) bb = 1;   // sp-sp3
-            else if (hyb_i == 2 || hyb_j == 2) bb = 2;                          // sp-sp2
-            if (bb != 3 && !topo_info.pi_bond_orders.empty()) {
+        // Reference btyp re-classification inside the bond-parameter loop. Two steps,
+        // in this order:
+        //   gfnff_ini.f90:1188-1190  local bbtyp fix-up for "triple" (sp) bonds:
+        //       sp-sp3 -> 1, sp-sp2 -> 2   (btyp(i) itself is NOT touched here)
+        //   gfnff_ini.f90:1176-1179  if (pibo > 0) and bbtyp /= 3 and pibo > 0.1:
+        //       btyp(i) = 2                (a real pi bond)
+        // Both live inside the non-metal branch `if (bbtyp < 5)`, so metal bonds are
+        // untouched. Claude Generated (Jul 2026, extended Sep 2026): curcuma applied the
+        // promotion ONLY to bonds that classifyBondType had called btyp=3, missing the
+        // reference's much broader rule — any btyp 1 or 4 bond with pi bond order above
+        // 0.1 is a pi bond as well.
+        {
+            int bb = topo_info.bond_types[bond_idx];
+            if (bb == 3) {
+                if (hyb_i == 0 || hyb_j == 0 || hyb_i == 3 || hyb_j == 3) bb = 1;   // sp-sp3
+                else if (hyb_i == 2 || hyb_j == 2) bb = 2;                          // sp-sp2
+            }
+            if (bb != 3 && bb < 5 && !topo_info.pi_bond_orders.empty()) {
                 int idx = lin(atom_i, atom_j);
                 double pibo_ij = (idx >= 0 && idx < static_cast<int>(topo_info.pi_bond_orders.size()))
                                      ? topo_info.pi_bond_orders[idx] : 0.0;
@@ -10867,7 +10070,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     }
 
     // bpair is same as topo_distances (topological distance matrix)
-    topo_info.bpair = topo_info.topo_distances;
+    topo_info.bpair = computeBpairNbondmat(topo_info.adjacency_list);
 
     // eta-aware bpair for the BATM 1,4-pair test. Claude Generated (Jul 24, 2026):
     // same root cause as the X-bond bpair fix (detectHalogenBondsNative). The Fortran
@@ -10880,27 +10083,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // (~1 kcal on PR26/PR28/PR27/ED33, entirely in the bonded-ATM term). Rebuild the
     // distance on an adjacency with the eta bonds (metal <-> itag==-1 ligand) removed;
     // normal metal bonds (Ru-P/Ru-Cl) are kept. Only built when eta atoms exist.
-    const bool has_eta = std::any_of(topo_info.itag.begin(), topo_info.itag.end(),
-                                     [](int t) { return t == -1; });
-    std::vector<std::vector<int>> eta_free_dist;
-    if (has_eta && !topo_info.neighbor_lists.empty()) {
-        auto is_metal_atom = [&](int a) {
-            int z = (a >= 0 && a < m_atomcount) ? m_atoms[a] : 0;
-            return z >= 1 && z <= 86 && GFNFFParameters::metal_type[z - 1] > 0;
-        };
-        auto is_eta = [&](int a) {
-            return a >= 0 && a < static_cast<int>(topo_info.itag.size()) && topo_info.itag[a] == -1;
-        };
-        std::vector<std::vector<int>> eta_free_adj = topo_info.neighbor_lists;
-        for (int i = 0; i < static_cast<int>(eta_free_adj.size()); ++i) {
-            auto& nbrs = eta_free_adj[i];
-            nbrs.erase(std::remove_if(nbrs.begin(), nbrs.end(), [&](int j) {
-                return (is_metal_atom(i) && is_eta(j)) || (is_metal_atom(j) && is_eta(i));
-            }), nbrs.end());
-        }
-        eta_free_dist = calculateTopologyDistances(eta_free_adj);
-    }
-    const std::vector<std::vector<int>>& batm_bpair = has_eta ? eta_free_dist : topo_info.bpair;
+    // bpair comes from computeBpairNbondmat(), a verbatim port of the reference's
+    // nbondmat: level 1 records a bond from EITHER direction, levels 2 and 3 require
+    // symmetric reachability. That is exactly the eta behaviour this code used to
+    // approximate with a hand-built "eta-free" distance matrix, so the approximation is
+    // gone. Claude Generated (Sep 2026).
+    const std::vector<std::vector<int>>& batm_bpair = topo_info.bpair;
 
     // Generate b3list for batm calculation
     topo_info.b3list.clear();
@@ -11117,25 +10305,55 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
     return coulombs;
 }
 
-// JSON wrapper — delegates to native generator for disk-cache compatibility
-json GFNFF::generateGFNFFCoulombPairs() const
+GFNFF::CoulombSelfEnergy GFNFF::generateCoulombSelfEnergyNative() const
 {
-    auto coulombs = generateCoulombPairsNative();
-    json result = json::array();
-    for (const auto& c : coulombs) {
-        json j;
-        j["i"] = c.i; j["j"] = c.j;
-        j["q_i"] = c.q_i; j["q_j"] = c.q_j;
-        j["gamma_ij"] = c.gamma_ij;
-        j["chi_i"] = c.chi_i; j["chi_j"] = c.chi_j;
-        j["chi_base_i"] = c.chi_base_i; j["chi_base_j"] = c.chi_base_j;
-        j["cnf_i"] = c.cnf_i; j["cnf_j"] = c.cnf_j;
-        j["gam_i"] = c.gam_i; j["gam_j"] = c.gam_j;
-        j["alp_i"] = c.alp_i; j["alp_j"] = c.alp_j;
-        j["r_cut"] = c.r_cut;
-        result.push_back(j);
+    // Claude Generated (Sep 2026): per-atom half of generateCoulombPairsNative()'s
+    // fillPair(), extracted so the EEQ self-energy no longer depends on there being
+    // at least one Coulomb pair. Reference: Fortran gfnff_engrad.F90:1378-1389 — the
+    // self-energy statement (es = es - q*(chi+cnf*sqrt(cn)) + 0.5*q*q*(gam+...)) runs
+    // for every atom i unconditionally, outside/after the inner j<i pairwise loop.
+    // Root cause of the bug this fixes: a single free atom's `do j=1,i-1` loop is
+    // empty too, but the Fortran self term still executes; curcuma's C++ port split
+    // the two into independent pieces (calcCoulomb() for pairs, postProcess() for
+    // self-energy) and derived the self-energy's per-atom inputs by scanning the
+    // pair list (FFWorkspace::setInteractionLists()) — empty pair list -> empty
+    // inputs -> the self-energy silently never fires. This function sources the
+    // same per-atom topology data fillPair() uses, but indexed 0..m_atomcount-1
+    // directly, with no pairing required.
+    CoulombSelfEnergy self;
+    self.chi_base = Eigen::VectorXd::Zero(m_atomcount);
+    self.gam = Eigen::VectorXd::Zero(m_atomcount);
+    self.alp = Eigen::VectorXd::Zero(m_atomcount);
+    self.cnf = Eigen::VectorXd::Zero(m_atomcount);
+    self.chi_static = Eigen::VectorXd::Zero(m_atomcount);
+
+    const TopologyInfo& topo_info = getCachedTopology();
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        double alp_i = topo_info.eeq_alp[i];
+        if (topo_info.alpeeq.size() == m_atomcount)
+            alp_i = topo_info.alpeeq(i);
+
+        double dxi_i = (i < topo_info.dxi.size()) ? topo_info.dxi(i) : 0.0;
+        double chi_base_i = -topo_info.eeq_chi[i] + dxi_i;
+        if (i < static_cast<int>(topo_info.is_amide_h.size()) && topo_info.is_amide_h[i])
+            chi_base_i -= 0.02;
+
+        double cnf_i = topo_info.eeq_cnf[i];
+        double cn_i = topo_info.coordination_numbers(i);
+
+        double gam_i = topo_info.eeq_gam[i];
+        if (topo_info.dgam.size() == m_atomcount)
+            gam_i += topo_info.dgam(i);
+
+        self.chi_base(i) = chi_base_i;
+        self.gam(i) = gam_i;
+        self.alp(i) = alp_i;
+        self.cnf(i) = cnf_i;
+        self.chi_static(i) = chi_base_i + cnf_i * std::sqrt(cn_i);
     }
-    return result;
+
+    return self;
 }
 
 std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::generateRepulsionPairsNative() const
@@ -11278,32 +10496,6 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
     return {std::move(bonded_reps), std::move(nonbonded_reps)};
 }
 
-// JSON wrapper — delegates to native generator for disk-cache compatibility
-json GFNFF::generateGFNFFRepulsionPairs() const
-{
-    auto [bonded, nonbonded] = generateRepulsionPairsNative();
-    json bonded_json = json::array();
-    json nonbonded_json = json::array();
-    for (const auto& r : bonded) {
-        json j;
-        j["i"] = r.i; j["j"] = r.j;
-        j["alpha"] = r.alpha; j["repab"] = r.repab;
-        j["r_cut"] = r.r_cut;
-        bonded_json.push_back(j);
-    }
-    for (const auto& r : nonbonded) {
-        json j;
-        j["i"] = r.i; j["j"] = r.j;
-        j["alpha"] = r.alpha; j["repab"] = r.repab;
-        j["r_cut"] = r.r_cut;
-        nonbonded_json.push_back(j);
-    }
-    json result;
-    result["bonded"] = bonded_json;
-    result["nonbonded"] = nonbonded_json;
-    return result;
-}
-
 std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GFNFF::generateDispersionPairsNative() const
 {
     auto disp_start = std::chrono::high_resolution_clock::now();
@@ -11407,427 +10599,14 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
             }
         }
     } else {
-        // D3 fallback — still via JSON (rarely used, not optimized)
-        json dispersions_json = generateGFNFFDispersionPairs();
-        dispersions.reserve(dispersions_json.size());
-        for (const auto& dj : dispersions_json) {
-            GFNFFDispersion d;
-            d.i = dj["i"]; d.j = dj["j"];
-            d.C6 = dj["C6"]; d.r4r2ij = dj["r4r2ij"];
-            d.r0_squared = dj["r0_squared"];
-            d.r_cut = dj.value("r_cut", 50.0);
-            d.zetac6 = dj.value("zetac6", 1.0);
-            dispersions.push_back(d);
-        }
-
-        if (!m_atm_triples.is_null() && m_atm_triples.is_array()) {
-            for (const auto& tj : m_atm_triples) {
-                ATMTriple t;
-                t.i = tj["i"]; t.j = tj["j"]; t.k = tj["k"];
-                t.C6_ij = tj["C6_ij"]; t.C6_ik = tj["C6_ik"]; t.C6_jk = tj["C6_jk"];
-                t.s9 = tj.value("s9", 1.0); t.a1 = tj.value("a1", 0.0);
-                t.a2 = tj.value("a2", 0.0); t.alp = tj.value("alp", 14.0);
-                t.atm_method = tj.value("atm_method", "d3");
-                t.triple_scale = tj.value("triple_scale", 1.0);
-                atm_triples.push_back(t);
-            }
-        }
+        // The JSON-based D3 variant ("gfnff-d3") was removed with the legacy
+        // ForceField engine; GFN-FF dispersion is D4 (Spicher & Grimme 2020).
+        throw std::runtime_error("GFN-FF: D3 dispersion variant is not available (use the default D4)");
     }
 
     (void)disp_start;
 
     return {std::move(dispersions), std::move(atm_triples), disp_method};
-}
-
-json GFNFF::generateGFNFFDispersionPairs() const
-{
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    /**
-     * @brief Generate D3/D4 dispersion pairwise parameters with BJ damping
-     *
-     * Reference: Grimme et al., J. Chem. Phys. 132, 154104 (2010) [D3-BJ]
-     *           Caldeweyher et al., J. Chem. Phys. 150, 154122 (2019) [D4]
-     * Formula: E_disp = -Σ_ij f_damp(r) * (s6*C6/r^6 + s8*C8/r^8)
-     *
-     * ✅ **NATIVE D3 INTEGRATION** (Claude Generated December 19, 2025):
-     * - Uses validated D3ParameterGenerator (10/11 molecules <1% error)
-     * - Geometry-dependent CN calculation with Gaussian weighting
-     * - Eliminates ~200 lines of duplicate dispersion code
-     * - Consistent D3 implementation across all methods (GFN-FF, UFF-D3)
-     *
-     * Fallback chain: D4 (preferred) → D3 (validated) → free-atom C6 (legacy)
-     */
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("=== generateGFNFFDispersionPairs() START ===");
-        CurcumaLogger::param("m_atomcount", std::to_string(m_atomcount));
-    }
-
-    // Step 1: Check if dispersion is enabled
-    // GFN-FF uses D4 dispersion by default (Spicher & Grimme, Angew. Chem. Int. Ed. 2020)
-    bool enable_dispersion = m_parameters.value("dispersion", true);
-    if (!enable_dispersion) {
-        if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::warn("Dispersion correction disabled by user");
-        }
-        return json::array();  // Empty array = no dispersion pairs
-    }
-
-    // Step 2: Determine dispersion method from method name
-    // Phase 2.1 (January 2026): D4 as default with CN-only weighting
-    // - "gfnff" → D4 (Casimir-Polder integration, matches Fortran reference)
-    // - "gfnff-d3" → D3 (static lookup tables, legacy compatibility)
-    std::string method_name = m_parameters.value("method", "gfnff");
-    std::string method = "d4";  // Default to D4 (matches GFN-FF reference with Casimir-Polder integration)
-
-    // Check if method name explicitly requests D3
-    if (method_name.find("-d3") != std::string::npos) {
-        method = "d3";
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info(fmt::format("GFN-FF method: {} → Dispersion: {}", method_name, method));
-    }
-
-    // Step 3: Try D4 (preferred) - Phase 2.1 (December 2025): D4 activated
-    if (method == "d4") {
-        // D4 is always available (part of curcuma core, no external dependency)
-        if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::info("Using D4ParameterGenerator (charge-weighted C6)");
-        }
-
-        try {
-            json d4_input = m_parameters.value("d4param", json::object());
-
-            // CRITICAL OVERRIDE (Jan 25, 2026): Force GFN-FF specific D4 parameters
-            // This ensures we use the correct GFN-FF specific damping values (a1=0.58, a2=4.80, s8=2.0)
-            d4_input["d4_a1"] = 0.58;
-            d4_input["d4_a2"] = 4.80;
-            d4_input["d4_s8"] = 2.00;
-            d4_input["d4_s6"] = 1.00;
-            d4_input["d4_s9"] = 1.00;
-            // Lever 3 Opt B: plumb the user-facing gfnff flag down to the generator.
-            d4_input["d4_disp_half_contraction"] = m_parameters.value("disp_half_contraction", true);
-
-            ConfigManager d4_config("d4param", d4_input);
-            // Claude Generated (Feb 15, 2026): Store D4ParameterGenerator for runtime dc6dcn access
-            // Previously was local variable d4_gen - now stored as m_d4_generator member
-            m_d4_generator = std::make_unique<D4ParameterGenerator>(d4_config);
-
-            // Claude Generated (Jan 31, 2026): Pass topology charges for zeta scaling
-            // Reference: Fortran gfnff_ini.f90:789 - f1 = zeta(ati, topo%qa(i))
-            // GFN-FF uses topology-based charges (topo%qa) for zetac6 calculation,
-            // which are computed ONCE during initialization with INTEGER neighbor counts.
-            // This differs from geometry-dependent EEQ charges used for CN weighting.
-            const TopologyInfo& topo_info = getCachedTopology();
-            if (topo_info.topology_charges.size() > 0) {
-                m_d4_generator->setTopologyCharges(topo_info.topology_charges);
-                if (CurcumaLogger::get_verbosity() >= 2) {
-                    CurcumaLogger::info(fmt::format("D4: Using topology charges for zeta scaling ({} atoms)",
-                        topo_info.topology_charges.size()));
-                }
-            }
-
-            // Generate D4 parameters with geometry (charge-dependent)
-            // Use existing m_geometry_bohr (already converted in InitialiseMolecule)
-            m_d4_generator->GenerateParameters(m_atoms, m_geometry_bohr);
-
-            json d4_params = m_d4_generator->getParameters();
-
-            if (d4_params.contains("d4_dispersion_pairs")) {
-                // Extract ATM triples from D4 (Claude Generated Jan 2025)
-                if (d4_params.contains("atm_triples") && !d4_params["atm_triples"].is_null()) {
-                    m_atm_triples = d4_params["atm_triples"];
-                    if (CurcumaLogger::get_verbosity() >= 2) {
-                        CurcumaLogger::success(fmt::format("D4: Generated {} dispersion pairs, {} ATM triples",
-                            d4_params["d4_dispersion_pairs"].size(),
-                            m_atm_triples.size()));
-                    }
-                } else {
-                    if (CurcumaLogger::get_verbosity() >= 2) {
-                        CurcumaLogger::success(fmt::format("D4: Generated {} dispersion pairs",
-                            d4_params["d4_dispersion_pairs"].size()));
-                    }
-                }
-
-                (void)start_time;
-
-                // WP-Disp (Mai 2026): optional distance cutoff on D4 dispersion pair-list.
-                // Default 0.0 = no filter (Fortran-parity). At 15.0 Bohr: ~38x fewer pairs
-                // for mixture N=6200, O(N^2)->O(N*k) per-step in CalculateGFNFFDispersionContribution.
-                // Hellmann-Feynman consistency: dc6dcn accumulation is over m_gfnff_dispersions only,
-                // so filtering here automatically restricts the CN-derivative chain rule too (Site C).
-                // Read cutoff — check top-level first (set by promotion loop), then nested fallback.
-                double disp_cut = m_parameters.value("dispersion_cutoff_bohr", 0.0);
-                if (disp_cut <= 0.0 && m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
-                    disp_cut = m_parameters["gfnff"].value("dispersion_cutoff_bohr", 0.0);
-                if (disp_cut > 0.0) {
-                    const double disp_cut_sq = disp_cut * disp_cut;
-                    const size_t n_full = d4_params["d4_dispersion_pairs"].size();
-                    json filtered_pairs = json::array();
-                    for (const auto& pair : d4_params["d4_dispersion_pairs"]) {
-                        int pi = pair["i"];
-                        int pj = pair["j"];
-                        Eigen::Vector3d ri = m_geometry_bohr.row(pi);
-                        Eigen::Vector3d rj = m_geometry_bohr.row(pj);
-                        if ((ri - rj).squaredNorm() <= disp_cut_sq) {
-                            auto p = pair;
-                            p["r_cut"] = disp_cut; // step-time guard matches init cutoff
-                            filtered_pairs.push_back(std::move(p));
-                        }
-                    }
-                    if (CurcumaLogger::get_verbosity() >= 2) {
-                        CurcumaLogger::param("dispersion_cutoff_bohr",
-                            fmt::format("{:.1f} Bohr  ({} / {} pairs retained)",
-                                disp_cut, filtered_pairs.size(), n_full));
-                    }
-                    d4_params["d4_dispersion_pairs"] = std::move(filtered_pairs);
-                }
-
-                return d4_params["d4_dispersion_pairs"];
-            } else {
-                if (CurcumaLogger::get_verbosity() >= 2) {
-                    CurcumaLogger::warn("D4: No pairs generated, falling back to D3");
-                }
-                method = "d3";  // Fallback
-            }
-        } catch (const std::exception& e) {
-            if (CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::error(fmt::format("D4 generation failed: {}", e.what()));
-            }
-            method = "d3";  // Fallback
-        }
-    }
-
-    // Step 4: Use native D3 (always available - part of curcuma core) - December 19, 2025
-    if (method == "d3") {
-        // Phase 3: Refactored to use factory method (generateD3Dispersion)
-        return generateD3Dispersion();
-    }
-
-    // Step 5: Final fallback (always works)
-    (void)start_time;
-
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::warn("No valid dispersion method, using free-atom approximation");
-    }
-    return generateFreeAtomDispersion();
-}
-
-// ============================================================================
-// Claude Generated (December 2025): D3/D4 Dispersion Integration - Helper Methods
-// ============================================================================
-
-json GFNFF::generateD3Dispersion() const
-{
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    // TODO Might me obsolete once D3 and D4 Params are fully integrated
-    /**
-     * @brief Factory method for D3 dispersion parameter generation
-     *
-     * Claude Generated (December 2025): Phase 3 - Factory method refactoring
-     *
-     * This method encapsulates all D3-specific dispersion parameter generation.
-     * It creates a D3ParameterGenerator, runs it with the current geometry,
-     * and converts the output to GFN-FF dispersion pair format.
-     *
-     * Features:
-     * - Uses validated D3ParameterGenerator (10/11 molecules <1% error)
-     * - Geometry-dependent CN calculation with Gaussian weighting
-     * - Converts D3 output to GFN-FF format
-     * - Handles exceptions with fallback to free-atom C6
-     *
-     * Reference: Grimme et al., J. Chem. Phys. 132, 154104 (2010)
-     */
-
-    try {
-        if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::info("Using native D3ParameterGenerator (validated 10/11 <1% error)");
-        }
-
-        // Extract D3 configuration (GFN-FF defaults: s6=1.0, s8=2.85, a1=0.80, a2=4.60)
-        ConfigManager d3_config = extractDispersionConfig("d3");
-        D3ParameterGenerator d3_gen(d3_config);
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("🔍 GFN-FF calling D3ParameterGenerator with geometry");
-            CurcumaLogger::param("atoms_count", static_cast<int>(m_atoms.size()));
-            CurcumaLogger::param("geometry_rows", static_cast<int>(m_geometry.rows()));
-        }
-
-        // Generate D3 parameters with geometry-dependent CN calculation
-        d3_gen.GenerateParameters(m_atoms, m_geometry);
-
-        // Get D3 pairwise parameters
-        json d3_params = d3_gen.getParameters();
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::success("✅ D3ParameterGenerator returned parameters");
-            CurcumaLogger::param("d3_params_size", static_cast<int>(d3_params.size()));
-        }
-
-        // Extract ATM triples from D3 (Claude Generated Jan 2025)
-        if (d3_params.contains("atm_triples") && !d3_params["atm_triples"].is_null()) {
-            m_atm_triples = d3_params["atm_triples"];
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::param("D3 ATM triples", static_cast<int>(m_atm_triples.size()));
-            }
-        }
-
-        // Convert D3 output to GFN-FF dispersion pair format
-        if (!d3_params.contains("d3_dispersion_pairs")) {
-            if (CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::warn("D3 generated no dispersion pairs, falling back to free-atom");
-            }
-            return generateFreeAtomDispersion();
-        }
-
-        const auto& d3_pairs = d3_params["d3_dispersion_pairs"];
-        json gfnff_dispersions = json::array();
-
-        // Get damping parameters and scaling factors from D3 config
-        // CRITICAL FIX (Jan 25, 2026): Synced with GFN-FF Fortran source defaults
-        double s6 = d3_config.get<double>("d3_s6", GFNFFParameters::s6);
-        double s8 = d3_config.get<double>("d3_s8", GFNFFParameters::s8);  // GFN-FF default (now 2.0)
-        double a1 = d3_config.get<double>("d3_a1", GFNFFParameters::a1);  // GFN-FF default (now 0.58)
-        double a2 = d3_config.get<double>("d3_a2", GFNFFParameters::a2);  // GFN-FF default (now 4.80 Bohr)
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("📊 D3 Damping Parameters (GFN-FF):");
-            CurcumaLogger::param("s6", s6);
-            CurcumaLogger::param("s8", s8);
-            CurcumaLogger::param("a1", a1);
-            CurcumaLogger::param("a2 (Bohr)", a2);
-        }
-
-        // Convert each D3 pair to GFN-FF format
-        int pair_count = 0;
-        for (const auto& d3_pair : d3_pairs) {
-            json gfnff_pair;
-            gfnff_pair["i"] = d3_pair["i"];
-            gfnff_pair["j"] = d3_pair["j"];
-            gfnff_pair["C6"] = d3_pair["c6"];  // Raw C6 (s6 applied in energy calculation)
-            gfnff_pair["C8"] = d3_pair["c8"];  // Raw C8 (s8 applied in energy calculation)
-            gfnff_pair["s6"] = s6;
-            gfnff_pair["s8"] = s8;
-            gfnff_pair["a1"] = a1;
-            gfnff_pair["a2"] = a2;
-            gfnff_pair["r_cut"] = 38.73;  // sqrt(dispthr=1500) Bohr (Fortran gfnff_param.f90:558)
-
-            // Show first 3 pairs at verbosity 3
-            if (CurcumaLogger::get_verbosity() >= 3 && pair_count < 3) {
-                CurcumaLogger::info(fmt::format("  D3 pair {}: [{},{}] C6={:.6f} C8={:.6f} CN_i={:.3f} CN_j={:.3f}",
-                    pair_count,
-                    d3_pair["i"].get<int>(),
-                    d3_pair["j"].get<int>(),
-                    d3_pair["c6"].get<double>(),
-                    d3_pair["c8"].get<double>(),
-                    d3_pair["cn_i"].get<double>(),
-                    d3_pair["cn_j"].get<double>()));
-            }
-            pair_count++;
-
-            gfnff_dispersions.push_back(gfnff_pair);
-        }
-
-        if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::success(fmt::format("D3 dispersion: {} pairs generated (validated accuracy)",
-                                                gfnff_dispersions.size()));
-        }
-
-        (void)start_time;
-
-        return gfnff_dispersions;
-
-    } catch (const std::exception& e) {
-        (void)start_time;
-
-        if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::error(fmt::format("D3 generation failed: {}, falling back to free-atom", e.what()));
-        }
-        return generateFreeAtomDispersion();
-    }
-}
-
-json GFNFF::generateFreeAtomDispersion() const
-{
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    // TODO Might me obsolete once D3 and D4 Params are fully integrated
-
-    /**
-     * @brief Fallback dispersion generation using free-atom C6 approximation
-     *
-     * This is the legacy implementation extracted from generateGFNFFDispersionPairs().
-     * Uses hardcoded free-atom C6 coefficients from C6_atomic array.
-     *
-     * Advantages:
-     * - Always available (no external dependencies)
-     * - Fast (no geometry-dependent calculations)
-     *
-     * Disadvantages:
-     * - Less accurate than geometry-dependent D3/D4
-     * - No coordination number dependence
-     * - Fixed C8/C6 ratio (not element-specific)
-     *
-     * Claude Generated (December 2025): Extracted from original implementation
-     */
-
-    using namespace GFNFFParameters;
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("Using free-atom C6 approximation (fallback)");
-    }
-
-    json dispersion_pairs = json::array();
-
-    // GFN-FF specific parameters (from gfnff_param.f90)
-    const double s6 = 1.0;  // C6 scaling factor
-    const double s8 = 2.85;  // C8 scaling factor (Reference: gfnff_param.f90:467-468)
-    const double a1 = 0.80; // BJ damping parameter 1
-    const double a2 = 4.60; // BJ damping parameter 2 (Bohr)
-
-    // Generate all pairwise dispersion interactions
-    for (int i = 0; i < m_atomcount; ++i) {
-        for (int j = i + 1; j < m_atomcount; ++j) {
-            json dispersion;
-            dispersion["i"] = i;
-            dispersion["j"] = j;
-
-            // Get atomic C6 coefficients
-            int zi = m_atoms[i] - 1; // 0-indexed
-            int zj = m_atoms[j] - 1;
-
-            double C6_i = (zi >= 0 && zi < C6_atomic.size()) ? C6_atomic[zi] : 50.0;
-            double C6_j = (zj >= 0 && zj < C6_atomic.size()) ? C6_atomic[zj] : 50.0;
-
-            // Combine rule for C6_ij: geometric mean
-            double C6_ij = std::sqrt(C6_i * C6_j);
-
-            // Estimate C8 from C6 (typical ratio C8/C6 ≈ 25 Bohr^2)
-            double C8_ij = C6_ij * 25.0;
-
-            dispersion["C6"] = C6_ij;
-            dispersion["C8"] = C8_ij;
-            dispersion["s6"] = s6;
-            dispersion["s8"] = s8;
-            dispersion["a1"] = a1;
-            dispersion["a2"] = a2;
-            dispersion["r_cut"] = 38.73; // sqrt(dispthr=1500) Bohr (Fortran gfnff_param.f90:558)
-
-            dispersion_pairs.push_back(dispersion);
-        }
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::warn(fmt::format("Free-atom approximation: {} pairs (consider compiling with USE_D3 or USE_D4 for better accuracy)", dispersion_pairs.size()));
-    }
-
-    (void)start_time;
-
-    return dispersion_pairs;
 }
 
 ConfigManager GFNFF::extractDispersionConfig(const std::string& method) const
@@ -11884,86 +10663,28 @@ ConfigManager GFNFF::extractDispersionConfig(const std::string& method) const
     return ConfigManager(method + "param", disp_config);
 }
 
-// Claude Generated (Mar 2026): Energy component getters — workspace or ForceField
-double GFNFF::BondEnergy() const {
-    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().bond;
-    return m_forcefield ? m_forcefield->BondEnergy() : 0.0;
-}
-
-double GFNFF::AngleEnergy() const {
-    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().angle;
-    return m_forcefield ? m_forcefield->AngleEnergy() : 0.0;
-}
-
-double GFNFF::DihedralEnergy() const {
-    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().dihedral;
-    return m_forcefield ? m_forcefield->DihedralEnergy() : 0.0;
-}
-
-double GFNFF::InversionEnergy() const {
-    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().inversion;
-    return m_forcefield ? m_forcefield->InversionEnergy() : 0.0;
-}
-
-double GFNFF::VdWEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->VdWEnergy();
-}
-
+// Energy component getters (FFWorkspace is the only GFN-FF engine).
+#define GFNFF_WS_ENERGY(NAME, FIELD) \
+    double GFNFF::NAME() const { return m_workspace ? m_workspace->energyComponents().FIELD : 0.0; }
+GFNFF_WS_ENERGY(BondEnergy, bond)
+GFNFF_WS_ENERGY(AngleEnergy, angle)
+GFNFF_WS_ENERGY(DihedralEnergy, dihedral)
+GFNFF_WS_ENERGY(InversionEnergy, inversion)
+GFNFF_WS_ENERGY(STorsEnergy, stors)
+GFNFF_WS_ENERGY(BondedRepulsionEnergy, bonded_rep)
+GFNFF_WS_ENERGY(NonbondedRepulsionEnergy, nonbonded_rep)
+GFNFF_WS_ENERGY(DispersionEnergy, dispersion)
+GFNFF_WS_ENERGY(D4Energy, dispersion)
+GFNFF_WS_ENERGY(CoulombEnergy, coulomb)
+GFNFF_WS_ENERGY(BatmEnergy, batm)
+GFNFF_WS_ENERGY(HydrogenBondEnergy, hbond)
+GFNFF_WS_ENERGY(HalogenBondEnergy, xbond)
+GFNFF_WS_ENERGY(ATMEnergy, atm)
+#undef GFNFF_WS_ENERGY
 double GFNFF::RepulsionEnergy() const {
-    if (m_use_workspace && m_workspace)
-        return m_workspace->energyComponents().bonded_rep + m_workspace->energyComponents().nonbonded_rep;
-    return m_forcefield ? m_forcefield->HHEnergy() : 0.0;
-}
-
-double GFNFF::BondedRepulsionEnergy() const {
-    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().bonded_rep;
-    return m_forcefield ? m_forcefield->BondedRepulsionEnergy() : 0.0;
-}
-
-double GFNFF::NonbondedRepulsionEnergy() const {
-    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().nonbonded_rep;
-    return m_forcefield ? m_forcefield->NonbondedRepulsionEnergy() : 0.0;
-}
-
-double GFNFF::DispersionEnergy() const {
-    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().dispersion;
-    return m_forcefield ? m_forcefield->DispersionEnergy() : 0.0;
-}
-
-double GFNFF::CoulombEnergy() const {
-    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().coulomb;
-    return m_forcefield ? m_forcefield->CoulombEnergy() : 0.0;
-}
-
-double GFNFF::D3Energy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->D3Energy();
-}
-
-double GFNFF::D4Energy() const {
-    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().dispersion;
-    return m_forcefield ? m_forcefield->D4Energy() : 0.0;
-}
-
-double GFNFF::BatmEnergy() const {
-    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().batm;
-    return m_forcefield ? m_forcefield->BatmEnergy() : 0.0;
-}
-
-double GFNFF::HydrogenBondEnergy() const {
-    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().hbond;
-    return m_forcefield ? m_forcefield->HydrogenBondEnergy() : 0.0;
-}
-
-double GFNFF::HalogenBondEnergy() const {
-    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().xbond;
-    return m_forcefield ? m_forcefield->HalogenBondEnergy() : 0.0;
-}
-
-double GFNFF::ATMEnergy() const {
-    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().atm;
-    return m_forcefield ? m_forcefield->ATMEnergy() : 0.0;
+    if (!m_workspace) return 0.0;
+    const auto& c = m_workspace->energyComponents();
+    return c.bonded_rep + c.nonbonded_rep;
 }
 
 // =================================================================================
@@ -11971,52 +10692,25 @@ double GFNFF::ATMEnergy() const {
 // =================================================================================
 
 void GFNFF::setStoreGradientComponents(bool store) {
-    if (m_forcefield) m_forcefield->setStoreGradientComponents(store);
     if (m_workspace) m_workspace->setStoreGradientComponents(store);
 }
 
-// Claude Generated (Mar 2026): Component gradient getters — workspace or ForceField
-Matrix GFNFF::GradientBond() const {
-    if (m_use_workspace && m_workspace) return m_workspace->gradientBond();
-    return m_forcefield ? m_forcefield->GradientBond() : Matrix();
-}
-Matrix GFNFF::GradientAngle() const {
-    if (m_use_workspace && m_workspace) return m_workspace->gradientAngle();
-    return m_forcefield ? m_forcefield->GradientAngle() : Matrix();
-}
-Matrix GFNFF::GradientTorsion() const {
-    if (m_use_workspace && m_workspace) return m_workspace->gradientTorsion();
-    return m_forcefield ? m_forcefield->GradientTorsion() : Matrix();
-}
-Matrix GFNFF::GradientRepulsion() const {
-    if (m_use_workspace && m_workspace) return m_workspace->gradientRepulsion();
-    return m_forcefield ? m_forcefield->GradientRepulsion() : Matrix();
-}
-Matrix GFNFF::GradientCoulomb() const {
-    if (m_use_workspace && m_workspace) return m_workspace->gradientCoulomb();
-    return m_forcefield ? m_forcefield->GradientCoulomb() : Matrix();
-}
-Matrix GFNFF::GradientDispersion() const {
-    if (m_use_workspace && m_workspace) return m_workspace->gradientDispersion();
-    return m_forcefield ? m_forcefield->GradientDispersion() : Matrix();
-}
-Matrix GFNFF::GradientHB() const {
-    if (m_use_workspace && m_workspace) return m_workspace->gradientHB();
-    return m_forcefield ? m_forcefield->GradientHB() : Matrix();
-}
-Matrix GFNFF::GradientXB() const {
-    if (m_use_workspace && m_workspace) return m_workspace->gradientXB();
-    return m_forcefield ? m_forcefield->GradientXB() : Matrix();
-}
-Matrix GFNFF::GradientBATM() const {
-    if (m_use_workspace && m_workspace) return m_workspace->gradientBATM();
-    return m_forcefield ? m_forcefield->GradientBATM() : Matrix();
-}
-Matrix GFNFF::GradientATM() const {
-    if (m_use_workspace && m_workspace) return m_workspace->gradientATM();
-    return m_forcefield ? m_forcefield->GradientATM() : Matrix();
-}
-Matrix GFNFF::getDispCNCorrection() const { return m_forcefield ? m_forcefield->getDispCNCorrection() : Matrix(); }
+#define GFNFF_WS_GRADIENT(NAME, WS_NAME) \
+    Matrix GFNFF::NAME() const { return m_workspace ? Matrix(m_workspace->WS_NAME()) : Matrix(); }
+GFNFF_WS_GRADIENT(GradientBond, gradientBond)
+GFNFF_WS_GRADIENT(GradientAngle, gradientAngle)
+GFNFF_WS_GRADIENT(GradientTorsion, gradientTorsion)
+GFNFF_WS_GRADIENT(GradientRepulsion, gradientRepulsion)
+GFNFF_WS_GRADIENT(GradientCoulomb, gradientCoulomb)
+GFNFF_WS_GRADIENT(GradientDispersion, gradientDispersion)
+GFNFF_WS_GRADIENT(GradientHB, gradientHB)
+GFNFF_WS_GRADIENT(GradientXB, gradientXB)
+GFNFF_WS_GRADIENT(GradientBATM, gradientBATM)
+GFNFF_WS_GRADIENT(GradientATM, gradientATM)
+#undef GFNFF_WS_GRADIENT
+// The workspace folds the D4 CN chain-rule into the total gradient; no separate
+// per-term CN correction is stored. Returns empty (consumers treat that as "n/a").
+Matrix GFNFF::getDispCNCorrection() const { return Matrix(); }
 
 // =================================================================================
 // Charge Injection for Testing/Validation (Claude Generated December 2025)
@@ -12033,11 +10727,11 @@ void GFNFF::setCharges(const Vector& charges) {
     // Store charges
     m_charges = charges;
 
-    // Distribute to ForceField if initialized
-    if (m_forcefield) {
-        m_forcefield->distributeEEQCharges(charges);
+    // Distribute to the workspace if initialized
+    if (m_workspace) {
+        m_workspace->setEEQCharges(charges);
     } else {
-        CurcumaLogger::warn("GFNFF::setCharges - ForceField not initialized, "
+        CurcumaLogger::warn("GFNFF::setCharges - workspace not initialized, "
                            "charges stored but not distributed");
     }
 
@@ -12048,289 +10742,6 @@ void GFNFF::setCharges(const Vector& charges) {
             CurcumaLogger::info(fmt::format("  Atom {}: q = {:.6f} e", i+1, charges[i]));
         }
     }
-}
-
-// =================================================================================
-// Parameter Regeneration for Testing/Validation (Claude Generated January 2025)
-// =================================================================================
-
-bool GFNFF::regenerateParametersWithCurrentCharges() {
-    if (!m_initialized) {
-        CurcumaLogger::error("GFNFF::regenerateParametersWithCurrentCharges - Not initialized");
-        return false;
-    }
-
-    if (!m_forcefield) {
-        CurcumaLogger::error("GFNFF::regenerateParametersWithCurrentCharges - ForceField not initialized");
-        return false;
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("Regenerating GFN-FF parameters with injected charges...");
-    }
-
-    // Step 1: Get topology with current (injected) charges
-    // We need to recalculate topology parameters using m_charges
-    TopologyInfo topo;
-
-    // Calculate coordination numbers with current geometry
-    std::vector<double> cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
-    // Properly convert std::vector to Eigen Vector (must copy, not map)
-    topo.coordination_numbers = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
-
-    // Use hybridization and other topology data from original EEQ calculation (cached in m_cached_topology)
-    if (m_cached_topology) {
-        topo.hybridization = m_cached_topology->hybridization;
-        topo.ring_sizes = m_cached_topology->ring_sizes;
-        topo.neighbor_lists = m_cached_topology->neighbor_lists;
-        topo.adjacency_list = m_cached_topology->adjacency_list;
-        topo.distance_matrix = m_cached_topology->distance_matrix;
-        // P2a (Apr 2026): squared_dist_matrix removed — was dead weight
-        topo.topo_distances = m_cached_topology->topo_distances;  // Phase 9B: Floyd-Warshall bond counts
-    } else {
-        CurcumaLogger::warn("GFNFF::regenerateParametersWithCurrentCharges - No cached topology available");
-        return false;
-    }
-
-    // IMPORTANT: Use injected charges instead of EEQ charges
-    topo.eeq_charges = m_charges;
-    // For testing/validation, also use injected charges for topology charges
-    // This ensures parameter generation uses the same charges as energy calculation
-    topo.topology_charges = m_charges;
-
-    // Step 2: Regenerate charge-dependent parameters
-    try {
-        // Generate bonds and angles with new charges (fqq depends on charges)
-        // IMPORTANT: Make copies to ensure safe lifetime beyond this function
-        Vector charges_copy = m_charges;  // Copy charges for safe usage
-        Vector cn_copy = topo.coordination_numbers;  // Copy CN
-        std::vector<int> hyb_copy = topo.hybridization;
-        std::vector<int> ring_copy = topo.ring_sizes;
-
-        json bonds = generateTopologyAwareBonds(
-            cn_copy,
-            hyb_copy,
-            charges_copy,  // Uses copied injected charges
-            ring_copy
-        );
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info(fmt::format("DEBUG: Generated {} bonds with regenerated charges", bonds.size()));
-        }
-
-        json angles = generateTopologyAwareAngles(
-            cn_copy,
-            hyb_copy,
-            charges_copy,  // Uses copied injected charges
-            ring_copy
-        );
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info(fmt::format("DEBUG: Generated {} angles with regenerated charges", angles.size()));
-        }
-
-        // Step 3: Build complete parameter JSON
-        // Get current parameters (which include dihedrals, inversions, etc.)
-        json ff_params = m_forcefield->exportCurrentParameters();
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info(fmt::format("DEBUG: Current FF params - bonds: {}, angles: {}, dihedrals: {}, inversions: {}",
-                ff_params["bonds"].size(),
-                ff_params["angles"].size(),
-                ff_params.value("dihedrals", json::array()).size(),
-                ff_params.value("inversions", json::array()).size()));
-        }
-
-        // CRITICAL: Update charge-dependent parameters (bonds and angles only)
-        // Claude Generated (Jan 13, 2026): Bonds and angles use fqq charge corrections
-        ff_params["bonds"] = bonds;
-        ff_params["angles"] = angles;
-
-        // Claude Generated (Jan 13, 2026): Torsions should NOT be regenerated with charge injection
-        // Reasoning:
-        //   1. Torsions are topology-dependent (which atoms, which bonds, rotatable?)
-        //   2. Topology doesn't change when charges are injected for testing
-        //   3. fqq correction is minor (~5-10% effect) and should use topology charges (qa), not energy charges (q)
-        //   4. Data shows regeneration makes accuracy WORSE: 3.16× error → 3.67× error (0.000074 → 0.00008587 Eh)
-        //   5. Original torsions generated with EEQ-calculated charges are more accurate
-        // Therefore: Keep torsions from initial generation (cached in ForceField)
-        // XTB reference: 0.000023 Eh, Original: 0.000074 Eh (215% error, acceptable for small value)
-
-        // Inversions can be kept from cache (genuinely not charge-dependent)
-
-        // Keep existing non-topology parameters (dispersion, repulsion, etc.)
-        // These are mostly distance-dependent, not charge-dependent
-
-        // Step 4: Update ForceField with regenerated parameters
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("DEBUG: Calling setParameter with regenerated bonds/angles");
-        }
-        m_forcefield->setParameter(ff_params);
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::success("DEBUG: setParameter completed successfully");
-        }
-
-        if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::success(fmt::format("Parameters regenerated with {} charges",
-                                             m_charges.size()));
-            CurcumaLogger::info(fmt::format("Bonds: {}, Angles: {} (charge-dependent terms regenerated, torsions kept from cache)",
-                                            bonds.size(), angles.size()));
-        }
-
-        return true;
-
-    } catch (const std::exception& e) {
-        CurcumaLogger::error(fmt::format("Parameter regeneration failed: {}", e.what()));
-        return false;
-    }
-}
-
-// Phase 3: Parameter validation infrastructure (Claude Generated December 2025)
-
-json GFNFF::getBondParameters() const {
-    if (!m_forcefield) {
-        CurcumaLogger::warn("GFNFF::getBondParameters - ForceField not initialized");
-        return json::array();
-    }
-
-    // Export current parameters and return bonds section
-    json ff_params = m_forcefield->exportCurrentParameters();
-    if (ff_params.contains("bonds")) {
-        return ff_params["bonds"];
-    }
-
-    return json::array();
-}
-
-json GFNFF::getAngleParameters() const {
-    if (!m_forcefield) {
-        CurcumaLogger::warn("GFNFF::getAngleParameters - ForceField not initialized");
-        return json::array();
-    }
-
-    json ff_params = m_forcefield->exportCurrentParameters();
-    if (ff_params.contains("angles")) {
-        return ff_params["angles"];
-    }
-
-    return json::array();
-}
-
-// Claude Generated (March 2026): Per-torsion diagnostic infrastructure
-json GFNFF::getTorsionParameters() const {
-    if (!m_forcefield) {
-        CurcumaLogger::warn("GFNFF::getTorsionParameters - ForceField not initialized");
-        return json::object();
-    }
-
-    json ff_params = m_forcefield->exportCurrentParameters();
-    json result;
-    result["primary"] = ff_params.value("dihedrals", json::array());
-    result["extra"] = ff_params.value("extra_dihedrals", json::array());
-    return result;
-}
-
-json GFNFF::getInversionParameters() const {
-    if (!m_forcefield) {
-        CurcumaLogger::warn("GFNFF::getInversionParameters - ForceField not initialized");
-        return json::array();
-    }
-
-    json ff_params = m_forcefield->exportCurrentParameters();
-    return ff_params.value("inversions", json::array());
-}
-
-void GFNFF::setBondParametersForTesting(const json& bond_params) {
-    if (!m_forcefield) {
-        throw std::runtime_error("GFNFF::setBondParametersForTesting - ForceField not initialized");
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("GFNFF::setBondParametersForTesting - Injecting {} bond parameters",
-                                       bond_params.size()));
-    }
-
-    // Get current parameters, replace bonds, and reload
-    json ff_params = m_forcefield->exportCurrentParameters();
-    ff_params["bonds"] = bond_params;
-    m_forcefield->setParameter(ff_params);
-}
-
-void GFNFF::setAngleParametersForTesting(const json& angle_params) {
-    if (!m_forcefield) {
-        throw std::runtime_error("GFNFF::setAngleParametersForTesting - ForceField not initialized");
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("GFNFF::setAngleParametersForTesting - Injecting {} angle parameters",
-                                       angle_params.size()));
-    }
-
-    json ff_params = m_forcefield->exportCurrentParameters();
-    ff_params["angles"] = angle_params;
-    m_forcefield->setParameter(ff_params);
-}
-
-// =================================================================================
-// vbond Parameter Access for Verification (Claude Generated November 2025)
-// =================================================================================
-
-bool GFNFF::getVBondParameters(int bond_index, double& shift, double& alpha, double& force_constant) const
-{
-    if (!m_forcefield) {
-        return false;
-    }
-
-    // Get the force field parameters using exportCurrentParameters
-    json ff_params = m_forcefield->exportCurrentParameters();
-
-    // Check if bonds exist
-    if (!ff_params.contains("bonds") || !ff_params["bonds"].is_array()) {
-        return false;
-    }
-
-    json bonds = ff_params["bonds"];
-
-    // Check if bond_index is valid
-    if (bond_index < 0 || bond_index >= bonds.size()) {
-        return false;
-    }
-
-    // Get the specific bond
-    json bond = bonds[bond_index];
-
-    // Extract the calculated parameters from the force field
-    // Claude Generated (Dec 2025): Extract vbond parameters for validation testing
-    // rabshift is now stored directly in the bond JSON (added Dec 2025)
-    if (bond.contains("r0_ij") && bond.contains("exponent") && bond.contains("fc") && bond.contains("rabshift")) {
-        // shift: vbond(1) = rabshift (stored during parameter generation)
-        shift = bond["rabshift"].get<double>();
-
-        // alpha: Exponent for exponential bond potential E = fc * exp(-alpha * (r-r0)^2)
-        alpha = bond["exponent"].get<double>();
-
-        // force_constant: Pre-exponential factor (fc)
-        force_constant = bond["fc"].get<double>();
-
-        return true;
-    }
-
-    return false;
-}
-
-int GFNFF::getBondCount() const
-{
-    if (!m_forcefield) {
-        return 0;
-    }
-
-    json ff_params = m_forcefield->exportCurrentParameters();
-
-    if (ff_params.contains("bonds") && ff_params["bonds"].is_array()) {
-        return ff_params["bonds"].size();
-    }
-
-    return 0;
 }
 
 // =================================================================================
@@ -12400,7 +10811,7 @@ bool GFNFF::calculateTopologyCharges(TopologyInfo& topo_info) const
     // This was incorrectly disabled, causing 0.0025 e charge error per hydroxyl oxygen
     // and cumulative Coulomb energy errors of ~26 mEh for triose (66 atoms).
     // Claude Generated (WP2, May 2026): forward pool + thread count
-    auto* pool_topo = m_forcefield ? m_forcefield->threadPool() : nullptr;
+    auto* pool_topo = threadPool();
     if (pool_topo) pool_topo->setActiveThreadCount(m_threads);
     topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
         m_atoms,
@@ -12456,6 +10867,12 @@ bool GFNFF::calculateDxi(TopologyInfo& topo_info) const
     // Also fixed off-by-one: was using covalent_radii[z] instead of [z-1]
     EEQSolver::TopologyInput eeq_topology;
     eeq_topology.neighbor_lists = topo_info.neighbor_lists;
+    // Real Fortran itag, so calculateDxi's carbene rule tests the tag the hybridization
+    // routine actually set instead of re-deriving it from the bond angle. Without it the
+    // methylene anion CH2- (GMTKN55 G21EA/EA_9) kept dxi = -0.15 in the second q-loop pass
+    // even though the qa < -0.4 override had already cleared its carbene tag - 26.8 kcal/mol
+    // in the Coulomb term, exactly q(C) * 0.15.
+    eeq_topology.itag = topo_info.itag;
     eeq_topology.covalent_radii.resize(m_atomcount);
     for (int i = 0; i < m_atomcount; ++i) {
         int z = m_atoms[i];
@@ -12714,7 +11131,7 @@ bool GFNFF::calculateFinalCharges(TopologyInfo& topo_info, int max_iterations,
 
     // Delegate to EEQSolver for Phase 2 refinement
     // Claude Generated (WP2, May 2026): forward pool + thread count
-    auto* pool_final = m_forcefield ? m_forcefield->threadPool() : nullptr;
+    auto* pool_final = threadPool();
     if (pool_final) pool_final->setActiveThreadCount(m_threads);
     topo_info.eeq_charges = m_eeq_solver->calculateFinalCharges(
         m_atoms,
@@ -12752,6 +11169,162 @@ bool GFNFF::calculateFinalCharges(TopologyInfo& topo_info, int max_iterations,
 // Reference: Plan unified-baking-gizmo.md - MD energy drift diagnosis
 // Purpose: Compare analytical vs numerical gradients to identify inconsistencies
 
+// EEQ electrostatic energy of a given charge set (used by the fragment charge-
+// assignment trial in calculateTopologyInfoOnce, gfnff_ini.f90:474-502).
+double GFNFF::calculateEEQEnergy(const Vector& charges, const Vector& cn) const
+{
+    // Phase 3.2: EEQ electrostatic energy calculation
+    // Reference: gfnff_engrad.F90:1378-1389 (EEQ energy in goed_gfnff)
+    //
+    // Energy formula:
+    // E_EEQ = Σ_i<j q_i*q_j*erf(γ_ij*r_ij)/r_ij
+    //       + Σ_i [-q_i*(χ_i + cnf_i*√CN_i) + 0.5*q_i²*(γ_i + √(2π)/√α_i)]
+    //
+    // This is the electrostatic energy from the EEQ method.
+    // Note: In GFN-FF, this uses "frozen charge" approximation for gradients.
+
+    const int n = m_atomcount;
+    const double sqrt_2pi = 0.79788456080287;  // sqrt(2/π)
+    double energy = 0.0;
+
+    // Pairwise Coulomb interactions: Σ_i<j q_i*q_j*γ_ij(r_ij)
+    for (int i = 0; i < n; ++i) {
+        EEQParameters params_i = getEEQParameters(m_atoms[i]);
+
+        for (int j = 0; j < i; ++j) {
+            EEQParameters params_j = getEEQParameters(m_atoms[j]);
+
+            // Distance between atoms
+            Vector r_ij_vec = m_geometry_bohr.row(i) - m_geometry_bohr.row(j);
+            double r_ij = r_ij_vec.norm();
+
+            // Damping parameter: γ_ij = 1/sqrt(α_i + α_j)
+            double gamma_ij = 1.0 / std::sqrt(params_i.alp + params_j.alp);
+
+            // Coulomb interaction with error function damping
+            double erf_arg = gamma_ij * r_ij;
+            double erf_val = curcuma_erf(erf_arg);
+            double coulomb = erf_val / r_ij;
+
+            // Pairwise energy contribution
+            energy += charges[i] * charges[j] * coulomb;
+        }
+
+        // Self-energy and electronegativity terms for atom i
+        // E_i = -q_i*(χ_i + cnf_i*√CN_i) + 0.5*q_i²*(γ_i + √(2π)/√α_i)
+        double self_interaction = params_i.gam + sqrt_2pi / std::sqrt(params_i.alp);
+        double en_term = params_i.chi + params_i.cnf * std::sqrt(cn[i]);
+
+        energy += -charges[i] * en_term + 0.5 * charges[i] * charges[i] * self_interaction;
+    }
+
+    return energy;
+}
+
+// ---------------------------------------------------------------------------
+// Parameter export for the validation tests (JSON view of the native structs).
+// Keys match the former ForceField::exportCurrentParameters() layout.
+// ---------------------------------------------------------------------------
+json GFNFF::getBondParameters() const {
+    json bonds = json::array();
+    if (!m_cached_parameter_set) return bonds;
+    for (const auto& b : m_cached_parameter_set->bonds) {
+        json jb;
+        jb["type"] = b.type; jb["i"] = b.i; jb["j"] = b.j; jb["k"] = b.k;
+        jb["distance"] = b.distance; jb["fc"] = b.fc; jb["exponent"] = b.exponent;
+        jb["r0_ij"] = b.r0_ij; jb["r0_ik"] = b.r0_ik; jb["rabshift"] = b.rabshift; jb["fqq"] = b.fqq;
+        jb["z_i"] = b.z_i; jb["z_j"] = b.z_j; jb["r0_base_i"] = b.r0_base_i; jb["r0_base_j"] = b.r0_base_j;
+        jb["cnfak_i"] = b.cnfak_i; jb["cnfak_j"] = b.cnfak_j; jb["ff"] = b.ff;
+        jb["nr_hb"] = b.nr_hb; jb["hb_cn_H"] = b.hb_cn_H;
+        bonds.push_back(jb);
+    }
+    return bonds;
+}
+
+json GFNFF::getAngleParameters() const {
+    json angles = json::array();
+    if (!m_cached_parameter_set) return angles;
+    for (const auto& a : m_cached_parameter_set->angles) {
+        json ja;
+        ja["type"] = a.type; ja["i"] = a.i; ja["j"] = a.j; ja["k"] = a.k;
+        ja["fc"] = a.fc; ja["r0_ij"] = a.r0_ij; ja["r0_ik"] = a.r0_ik; ja["theta0_ijk"] = a.theta0_ijk;
+        ja["C0"] = a.C0; ja["C1"] = a.C1; ja["C2"] = a.C2;
+        angles.push_back(ja);
+    }
+    return angles;
+}
+
+static json dihedralsToJson(const std::vector<Dihedral>& list) {
+    json out = json::array();
+    for (const auto& d : list) {
+        json jd;
+        jd["type"] = d.type; jd["i"] = d.i; jd["j"] = d.j; jd["k"] = d.k; jd["l"] = d.l;
+        jd["V"] = d.V; jd["n"] = d.n; jd["phi0"] = d.phi0;
+        out.push_back(jd);
+    }
+    return out;
+}
+
+json GFNFF::getTorsionParameters() const {
+    json result;
+    result["primary"] = m_cached_parameter_set ? dihedralsToJson(m_cached_parameter_set->dihedrals) : json::array();
+    result["extra"]   = m_cached_parameter_set ? dihedralsToJson(m_cached_parameter_set->extra_dihedrals) : json::array();
+    return result;
+}
+
+json GFNFF::getInversionParameters() const {
+    json out = json::array();
+    if (!m_cached_parameter_set) return out;
+    for (const auto& inv : m_cached_parameter_set->inversions) {
+        json ji;
+        ji["type"] = inv.type; ji["i"] = inv.i; ji["j"] = inv.j; ji["k"] = inv.k; ji["l"] = inv.l;
+        ji["fc"] = inv.fc; ji["C0"] = inv.C0; ji["C1"] = inv.C1; ji["C2"] = inv.C2;
+        ji["potential_type"] = inv.potential_type; ji["omega0"] = inv.omega0;
+        out.push_back(ji);
+    }
+    return out;
+}
+
+// Numerical gradient with FIXED EEQ charges but dynamic CN (isolates gradient-formula
+// bugs from the missing dq/dx). Geometry AND CN are updated per displacement; the
+// workspace keeps the charges last set by setEEQCharges().
+Matrix GFNFF::NumGradFixedCharges(double dx)
+{
+    if (!m_initialized || !m_workspace || m_atomcount == 0) {
+        CurcumaLogger::error("GFNFF::NumGradFixedCharges: Not initialized");
+        return Matrix::Zero(1, 3);
+    }
+    Matrix original_geometry = m_geometry;
+    Matrix original_geometry_bohr = m_geometry_bohr;
+    Matrix numgrad = Matrix::Zero(m_atomcount, 3);
+
+    auto energy_at = [&]() {
+        auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+        m_workspace->setGeometry(m_geometry_bohr);
+        m_workspace->setD3CN(Vector::Map(cn_vec.data(), cn_vec.size()).eval());
+        return m_workspace->calculate(false);
+    };
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int dim = 0; dim < 3; ++dim) {
+            m_geometry_bohr(i, dim) += dx;
+            m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
+            const double E_plus = energy_at();
+            m_geometry_bohr(i, dim) -= 2 * dx;
+            m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
+            const double E_minus = energy_at();
+            numgrad(i, dim) = (E_plus - E_minus) / (2 * dx);
+            m_geometry_bohr(i, dim) = original_geometry_bohr(i, dim);
+            m_geometry(i, dim) = original_geometry(i, dim);
+        }
+    }
+    energy_at();   // restore workspace geometry + CN
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::result_fmt("Fixed-charge numerical gradient computed: norm = {:.6e} Eh/Bohr",
+                                  numgrad.norm());
+    }
+    return numgrad;
+}
+
 /**
  * @brief Compute numerical gradient by finite differences
  *
@@ -12766,7 +11339,7 @@ bool GFNFF::calculateFinalCharges(TopologyInfo& topo_info, int max_iterations,
  */
 Matrix GFNFF::NumGrad(double dx)
 {
-    if (!m_initialized || !m_forcefield || m_atomcount == 0) {
+    if (!m_initialized || !m_workspace || m_atomcount == 0) {
         CurcumaLogger::error("GFNFF::NumGrad: Not initialized");
         return Matrix::Zero(1, 3);
     }
@@ -12790,16 +11363,12 @@ Matrix GFNFF::NumGrad(double dx)
             m_geometry_bohr(i, dim) += dx;
             m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
 
-            // Update ForceField with perturbed geometry
-            m_forcefield->UpdateGeometry(m_geometry_bohr);
-
-            // Energy calculation (includes EEQ recalculation via Calculation())
+            // Energy calculation (includes CN + EEQ recalculation via Calculation())
             double E_plus = Calculation(false);
 
             // Backward perturbation
             m_geometry_bohr(i, dim) -= 2 * dx;
             m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
-            m_forcefield->UpdateGeometry(m_geometry_bohr);
 
             double E_minus = Calculation(false);
 
@@ -12817,10 +11386,7 @@ Matrix GFNFF::NumGrad(double dx)
         }
     }
 
-    // Restore ForceField geometry
-    m_forcefield->UpdateGeometry(original_geometry_bohr);
-
-    // Recalculate charges for original geometry (restore state)
+    // Recalculate CN/charges for the original geometry (restore state)
     Calculation(false);
 
     if (CurcumaLogger::get_verbosity() >= 2) {
@@ -12828,512 +11394,6 @@ Matrix GFNFF::NumGrad(double dx)
     }
 
     return numgrad;
-}
-
-/**
- * @brief Numerical gradient with FIXED charges but dynamic CN
- *
- * Claude Generated (Feb 23, 2026): Isolates gradient formula bugs from missing dq/dx.
- * Updates geometry AND recalculates CN for each perturbation (so bond r0 is correct),
- * but does NOT recalculate EEQ charges (keeps q fixed).
- *
- * The analytical gradient computes: direct terms + CN chain-rule (dE/dCN * dCN/dx).
- * This numerical gradient computes: dE(x; CN(x), q_fixed)/dx via central difference.
- * Any deviation = gradient formula bug (not missing dq/dx).
- *
- * Reference: Fortran gfnff_engrad.F90 gradient also uses fixed-charge approximation.
- */
-Matrix GFNFF::NumGradFixedCharges(double dx)
-{
-    if (!m_initialized || !m_forcefield || m_atomcount == 0) {
-        CurcumaLogger::error("GFNFF::NumGradFixedCharges: Not initialized");
-        return Matrix::Zero(1, 3);
-    }
-
-    // Save original geometry
-    Matrix original_geometry = m_geometry;
-    Matrix original_geometry_bohr = m_geometry_bohr;
-
-    Matrix numgrad = Matrix::Zero(m_atomcount, 3);
-
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("Computing fixed-charge numerical gradient (CN updated, EEQ fixed)...");
-    }
-
-    for (int i = 0; i < m_atomcount; ++i) {
-        for (int dim = 0; dim < 3; ++dim) {
-            // Forward perturbation in Bohr
-            m_geometry_bohr(i, dim) += dx;
-            m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
-
-            // Update geometry AND recalculate CN (but NOT EEQ charges)
-            // distributeD3CN must also be called so bond r0 = (r0_base + cnfak*CN)*ff updates correctly
-            m_forcefield->UpdateGeometry(m_geometry_bohr);
-            auto cn_vec_plus = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
-            Vector cn_plus = Vector::Map(cn_vec_plus.data(), cn_vec_plus.size()).eval();
-            m_forcefield->distributeCNOnly(cn_plus);
-            m_forcefield->distributeD3CN(cn_plus);
-            double E_plus = m_forcefield->Calculate(false);
-
-            // Backward perturbation
-            m_geometry_bohr(i, dim) -= 2 * dx;
-            m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
-            m_forcefield->UpdateGeometry(m_geometry_bohr);
-            auto cn_vec_minus = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
-            Vector cn_minus = Vector::Map(cn_vec_minus.data(), cn_vec_minus.size()).eval();
-            m_forcefield->distributeCNOnly(cn_minus);
-            m_forcefield->distributeD3CN(cn_minus);
-            double E_minus = m_forcefield->Calculate(false);
-
-            // Central difference
-            numgrad(i, dim) = (E_plus - E_minus) / (2 * dx);
-
-            // Restore original coordinate
-            m_geometry_bohr(i, dim) = original_geometry_bohr(i, dim);
-            m_geometry(i, dim) = original_geometry(i, dim);
-        }
-    }
-
-    // Restore ForceField geometry and CN
-    m_forcefield->UpdateGeometry(original_geometry_bohr);
-    auto cn_vec_orig = CNCalculator::calculateGFNFFCN(m_atoms, original_geometry_bohr);
-    Vector cn_orig = Vector::Map(cn_vec_orig.data(), cn_vec_orig.size()).eval();
-    m_forcefield->distributeCNOnly(cn_orig);
-    m_forcefield->distributeD3CN(cn_orig);
-
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::result_fmt("Fixed-charge numerical gradient computed: norm = {:.6e} Eh/Bohr",
-                                  numgrad.norm());
-    }
-
-    return numgrad;
-}
-
-/**
- * @brief Diagnose gradient components (verbosity >= 3)
- *
- * Claude Generated (Feb 21, 2026): Per-term gradient diagnostics.
- * Reference: Plan unified-baking-gizmo.md Step 1d
- *
- * Prints norms of each energy term's gradient contribution.
- * Requires setStoreGradientComponents(true) before Calculation().
- */
-void GFNFF::diagnoseGradientComponents() const
-{
-    if (CurcumaLogger::get_verbosity() < 3) {
-        return;
-    }
-
-    if (!m_forcefield) {
-        CurcumaLogger::warn("diagnoseGradientComponents: ForceField not available");
-        return;
-    }
-
-    CurcumaLogger::info("=== Gradient Component Norms (Eh/Bohr) ===");
-
-    double bond_norm = m_forcefield->GradientBond().norm();
-    double angle_norm = m_forcefield->GradientAngle().norm();
-    double torsion_norm = m_forcefield->GradientTorsion().norm();
-    double repulsion_norm = m_forcefield->GradientRepulsion().norm();
-    double coulomb_norm = m_forcefield->GradientCoulomb().norm();
-    double dispersion_norm = m_forcefield->GradientDispersion().norm();
-    double hb_norm = m_forcefield->GradientHB().norm();
-    double xb_norm = m_forcefield->GradientXB().norm();
-    double batm_norm = m_forcefield->GradientBATM().norm();
-    double atm_norm = m_forcefield->GradientATM().norm();
-
-    CurcumaLogger::param("bond", fmt::format("{:.6e}", bond_norm));
-    CurcumaLogger::param("angle", fmt::format("{:.6e}", angle_norm));
-    CurcumaLogger::param("torsion", fmt::format("{:.6e}", torsion_norm));
-    CurcumaLogger::param("repulsion", fmt::format("{:.6e}", repulsion_norm));
-    CurcumaLogger::param("coulomb", fmt::format("{:.6e}", coulomb_norm));
-    CurcumaLogger::param("dispersion", fmt::format("{:.6e}", dispersion_norm));
-    CurcumaLogger::param("atm", fmt::format("{:.6e}", atm_norm));
-    CurcumaLogger::param("hb", fmt::format("{:.6e}", hb_norm));
-    CurcumaLogger::param("xb", fmt::format("{:.6e}", xb_norm));
-    CurcumaLogger::param("batm", fmt::format("{:.6e}", batm_norm));
-
-    // Identify dominant terms
-    double max_norm = std::max({bond_norm, angle_norm, torsion_norm, repulsion_norm,
-                                coulomb_norm, dispersion_norm, atm_norm, hb_norm, xb_norm, batm_norm});
-    std::string dominant = "unknown";
-    if (max_norm == bond_norm) dominant = "bond";
-    else if (max_norm == angle_norm) dominant = "angle";
-    else if (max_norm == torsion_norm) dominant = "torsion";
-    else if (max_norm == repulsion_norm) dominant = "repulsion";
-    else if (max_norm == coulomb_norm) dominant = "coulomb";
-    else if (max_norm == dispersion_norm) dominant = "dispersion";
-    else if (max_norm == atm_norm) dominant = "atm";
-    else if (max_norm == hb_norm) dominant = "hb";
-    else if (max_norm == xb_norm) dominant = "xb";
-    else if (max_norm == batm_norm) dominant = "batm";
-
-    CurcumaLogger::param("dominant_term", dominant);
-}
-
-/**
- * @brief Compare analytical vs numerical gradient
- *
- * Claude Generated (Feb 21, 2026): Gradient validation for MD stability.
- * Reference: Plan unified-baking-gizmo.md Step 1e
- *
- * @return Maximum absolute deviation between analytical and numerical gradients
- */
-double GFNFF::compareGradients(double dx)
-{
-    if (CurcumaLogger::get_verbosity() < 3) {
-        // Still compute comparison but without verbose output
-        if (m_gradient.rows() == 0 || m_gradient.cols() == 0) {
-            return -1.0;  // No analytical gradient available
-        }
-        Matrix numeric = NumGrad(dx);
-        return (m_gradient - numeric).array().abs().maxCoeff();
-    }
-
-    // Claude Generated (Feb 23, 2026): Two-level gradient comparison
-    // Level 1: analytical vs fixed-charge numgrad → isolates gradient formula bugs
-    // Level 2: analytical vs full numgrad → shows total deviation including dq/dx
-    CurcumaLogger::info("=== Analytical vs Numerical Gradient Comparison ===");
-
-    // Always compute analytical gradient fresh (ensures it's up-to-date)
-    Calculation(true);
-    Matrix analytic = m_gradient;
-
-    // Save component gradients NOW, before NumGrad calls overwrite thread state
-    // Guard: workspace path doesn't populate ForceField's stored_threads
-    bool have_components = !m_use_workspace && m_forcefield;
-    Matrix grad_bond       = have_components ? m_forcefield->GradientBond()       : Matrix::Zero(m_atomcount, 3);
-    Matrix grad_angle      = have_components ? m_forcefield->GradientAngle()      : Matrix::Zero(m_atomcount, 3);
-    Matrix grad_torsion    = have_components ? m_forcefield->GradientTorsion()    : Matrix::Zero(m_atomcount, 3);
-    Matrix grad_repulsion  = have_components ? m_forcefield->GradientRepulsion()  : Matrix::Zero(m_atomcount, 3);
-    Matrix grad_coulomb    = have_components ? m_forcefield->GradientCoulomb()    : Matrix::Zero(m_atomcount, 3);
-    Matrix grad_dispersion = have_components ? m_forcefield->GradientDispersion() : Matrix::Zero(m_atomcount, 3);
-    Matrix grad_hb         = have_components ? m_forcefield->GradientHB()         : Matrix::Zero(m_atomcount, 3);
-    Matrix grad_xb         = have_components ? m_forcefield->GradientXB()         : Matrix::Zero(m_atomcount, 3);
-    Matrix grad_batm       = have_components ? m_forcefield->GradientBATM()       : Matrix::Zero(m_atomcount, 3);
-    Matrix grad_atm        = have_components ? m_forcefield->GradientATM()        : Matrix::Zero(m_atomcount, 3);
-
-    // Level 1: Fixed-charge numerical gradient (CN updated, EEQ charges fixed)
-    // This comparison isolates REAL gradient formula bugs.
-    // The analytical gradient includes direct terms + CN chain-rule.
-    // The fixed-charge numgrad captures the same via central difference.
-    // Any deviation = gradient formula error (NOT missing dq/dx).
-    CurcumaLogger::info("--- Level 1: Fixed-Charge Comparison (gradient formula test) ---");
-    Matrix numeric_fixed = NumGradFixedCharges(dx);
-
-    double max_diff_fixed = 0.0;
-    int max_atom_fixed = -1, max_dim_fixed = -1;
-    for (int i = 0; i < m_atomcount; ++i) {
-        for (int d = 0; d < 3; ++d) {
-            double diff = std::abs(analytic(i, d) - numeric_fixed(i, d));
-            if (diff > max_diff_fixed) {
-                max_diff_fixed = diff;
-                max_atom_fixed = i;
-                max_dim_fixed = d;
-            }
-        }
-    }
-
-    CurcumaLogger::param("fixed_max_deviation", fmt::format("{:.2e} Eh/Bohr", max_diff_fixed));
-    CurcumaLogger::param("fixed_max_at_atom", std::to_string(max_atom_fixed));
-    CurcumaLogger::param("fixed_max_at_dim", std::to_string(max_dim_fixed));
-
-    if (max_diff_fixed > 1e-6) {
-        CurcumaLogger::warn(fmt::format("GRADIENT FORMULA BUG: fixed-charge deviation {:.2e} Eh/Bohr at atom {} dim {}",
-                                        max_diff_fixed, max_atom_fixed, max_dim_fixed));
-        CurcumaLogger::info(fmt::format("  Analytical: ({:.6e}, {:.6e}, {:.6e})",
-                                        analytic(max_atom_fixed, 0), analytic(max_atom_fixed, 1), analytic(max_atom_fixed, 2)));
-        CurcumaLogger::info(fmt::format("  NumFixed:   ({:.6e}, {:.6e}, {:.6e})",
-                                        numeric_fixed(max_atom_fixed, 0), numeric_fixed(max_atom_fixed, 1), numeric_fixed(max_atom_fixed, 2)));
-
-        // Per-atom deviation table for top 5 worst atoms
-        CurcumaLogger::info("  Top deviations (analytical - numeric_fixed):");
-        std::vector<std::tuple<double, int, int>> deviations;
-        for (int i = 0; i < m_atomcount; ++i) {
-            for (int d = 0; d < 3; ++d) {
-                double diff = analytic(i, d) - numeric_fixed(i, d);
-                deviations.push_back({std::abs(diff), i, d});
-            }
-        }
-        std::sort(deviations.begin(), deviations.end(), std::greater<>());
-        for (int k = 0; k < std::min(10, static_cast<int>(deviations.size())); ++k) {
-            auto [absdiff, atom, dim] = deviations[k];
-            double signed_diff = analytic(atom, dim) - numeric_fixed(atom, dim);
-            const char* dimname[] = {"x", "y", "z"};
-            CurcumaLogger::info(fmt::format("    atom {:2d} {}: ana={:+.6e} num={:+.6e} diff={:+.6e}",
-                                            atom, dimname[dim],
-                                            analytic(atom, dim), numeric_fixed(atom, dim), signed_diff));
-        }
-
-        // Per-component gradient at worst atom to identify buggy term
-        // Uses saved component gradients (captured before NumGrad overwrites thread state)
-        CurcumaLogger::info(fmt::format("  Per-component analytical gradient at atom {} (Eh/Bohr):", max_atom_fixed));
-        auto printComp = [&](const std::string& name, const Matrix& comp) {
-            if (comp.rows() > max_atom_fixed) {
-                CurcumaLogger::info(fmt::format("    {:12s}: ({:+.6e}, {:+.6e}, {:+.6e}) |norm|={:.2e}",
-                    name,
-                    comp(max_atom_fixed, 0), comp(max_atom_fixed, 1), comp(max_atom_fixed, 2),
-                    comp.row(max_atom_fixed).norm()));
-            }
-        };
-        printComp("bond",       grad_bond);
-        printComp("angle",      grad_angle);
-        printComp("torsion",    grad_torsion);
-        printComp("repulsion",  grad_repulsion);
-        printComp("coulomb",    grad_coulomb);
-        printComp("dispersion", grad_dispersion);
-        printComp("hb",         grad_hb);
-        printComp("xb",         grad_xb);
-        printComp("batm",       grad_batm);
-        printComp("atm",        grad_atm);
-
-        // Sum of components to verify they add up to analytical
-        Matrix comp_sum = Matrix::Zero(m_atomcount, 3);
-        comp_sum += grad_bond;
-        comp_sum += grad_angle;
-        comp_sum += grad_torsion;
-        comp_sum += grad_repulsion;
-        comp_sum += grad_coulomb;
-        comp_sum += grad_dispersion;
-        comp_sum += grad_hb;
-        comp_sum += grad_xb;
-        comp_sum += grad_batm;
-        comp_sum += grad_atm;
-        double residual = (analytic - comp_sum).norm();
-        CurcumaLogger::info(fmt::format("  Component sum residual: {:.2e} (should be ~0 if all components captured)", residual));
-        if (residual > 1e-6) {
-            CurcumaLogger::warn(fmt::format("  Missing gradient contribution: {:.2e} Eh/Bohr (CN chain-rule, BATM, ATM, etc.)", residual));
-            // Show what's missing at the worst atom
-            Eigen::Vector3d missing = analytic.row(max_atom_fixed) - comp_sum.row(max_atom_fixed);
-            CurcumaLogger::info(fmt::format("    missing at atom {}: ({:+.6e}, {:+.6e}, {:+.6e})",
-                                            max_atom_fixed, missing(0), missing(1), missing(2)));
-        }
-    } else {
-        CurcumaLogger::success(fmt::format("Gradient formulas OK: fixed-charge deviation {:.2e} Eh/Bohr", max_diff_fixed));
-    }
-
-    // Per-term numerical gradient at worst atom to identify buggy term
-    // Uses fixed-charge approach (CN updated, EEQ fixed) to compute per-term energy changes
-    if (max_diff_fixed > 1e-6 && max_atom_fixed >= 0) {
-        CurcumaLogger::info(fmt::format("--- Per-Term Gradient Isolation at atom {} ---", max_atom_fixed));
-
-        // Save original state
-        Matrix orig_geom = m_geometry;
-        Matrix orig_geom_bohr = m_geometry_bohr;
-
-        // For each dimension at the worst atom, compute per-term numerical gradient
-        struct TermInfo {
-            std::string name;
-            std::function<double()> getter;
-        };
-
-        // Note on gradient storage (forcefieldthread.cpp line 137-199):
-        //   GradientTorsion()    = torsion + extra_torsion + inversion + storsions
-        //   GradientDispersion() = D4 pairwise dispersion only
-        //   GradientATM()        = ATM three-body dispersion (separate from D4, matching Fortran g_disp scope)
-        //   GradientBATM()       = BATM bonded three-body
-        // Energy terms match these component groups for correct comparison.
-        std::vector<TermInfo> terms = {
-            {"bond",       [&]() { return m_forcefield->BondEnergy(); }},
-            {"angle",      [&]() { return m_forcefield->AngleEnergy(); }},
-            {"tors+inv",   [&]() { return m_forcefield->DihedralEnergy() + m_forcefield->InversionEnergy(); }},
-            {"repulsion",  [&]() { return m_forcefield->HHEnergy(); }},
-            {"coulomb",    [&]() { return m_forcefield->CoulombEnergy(); }},
-            {"dispersion", [&]() { return m_forcefield->DispersionEnergy(); }},
-            {"atm",        [&]() { return m_forcefield->ATMEnergy(); }},
-            {"batm",       [&]() { return m_forcefield->BatmEnergy(); }},
-            {"hb",         [&]() { return m_forcefield->HydrogenBondEnergy(); }},
-            {"xb",         [&]() { return m_forcefield->HalogenBondEnergy(); }},
-        };
-
-        // Matrix: [term_index][dim] = numerical gradient
-        std::vector<std::array<double, 3>> term_numgrad(terms.size());
-
-        // Temporarily suppress output during per-term numerical gradient
-        int saved_verbosity = CurcumaLogger::get_verbosity();
-        CurcumaLogger::set_verbosity(0);
-        try {
-            for (int dim = 0; dim < 3; ++dim) {
-                int i = max_atom_fixed;
-
-                // Forward perturbation
-                m_geometry_bohr(i, dim) += dx;
-                m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
-                m_forcefield->UpdateGeometry(m_geometry_bohr);
-                auto cn_p = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
-                Vector cn_plus = Vector::Map(cn_p.data(), cn_p.size()).eval();
-                m_forcefield->distributeCNOnly(cn_plus);
-                m_forcefield->Calculate(false);
-
-                std::vector<double> E_plus(terms.size());
-                for (size_t t = 0; t < terms.size(); ++t) {
-                    E_plus[t] = terms[t].getter();
-                }
-
-                // Backward perturbation
-                m_geometry_bohr(i, dim) -= 2 * dx;
-                m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
-                m_forcefield->UpdateGeometry(m_geometry_bohr);
-                auto cn_m = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
-                Vector cn_minus = Vector::Map(cn_m.data(), cn_m.size()).eval();
-                m_forcefield->distributeCNOnly(cn_minus);
-                m_forcefield->Calculate(false);
-
-                std::vector<double> E_minus(terms.size());
-                for (size_t t = 0; t < terms.size(); ++t) {
-                    E_minus[t] = terms[t].getter();
-                }
-
-                for (size_t t = 0; t < terms.size(); ++t) {
-                    term_numgrad[t][dim] = (E_plus[t] - E_minus[t]) / (2 * dx);
-                }
-
-                // Restore
-                m_geometry_bohr(i, dim) = orig_geom_bohr(i, dim);
-                m_geometry(i, dim) = orig_geom(i, dim);
-            }
-        } catch (...) {
-            CurcumaLogger::set_verbosity(saved_verbosity);
-            throw;
-        }
-        CurcumaLogger::set_verbosity(saved_verbosity);
-
-        // Restore geometry and CN
-        m_forcefield->UpdateGeometry(orig_geom_bohr);
-        auto cn_o = CNCalculator::calculateGFNFFCN(m_atoms, orig_geom_bohr);
-        Vector cn_orig = Vector::Map(cn_o.data(), cn_o.size()).eval();
-        m_forcefield->distributeCNOnly(cn_orig);
-
-        // Compare per-term analytical vs numerical gradient at worst atom
-        // Use name-based matching between energy terms and stored component gradients
-        // Match combined energy groups to stored gradient components
-        std::map<std::string, const Matrix*> comp_map = {
-            {"bond",       &grad_bond},
-            {"angle",      &grad_angle},
-            {"tors+inv",   &grad_torsion},     // torsion + extra_torsion + inversion
-            {"repulsion",  &grad_repulsion},
-            {"coulomb",    &grad_coulomb},
-            {"disp+atm",   &grad_dispersion},  // D4 dispersion + ATM
-            {"batm",       &grad_batm},
-            {"hb",         &grad_hb},
-            {"xb",         &grad_xb},
-        };
-
-        CurcumaLogger::info(fmt::format("  Term       |  dim |    analytical   |    numerical   |   difference"));
-        CurcumaLogger::info("  -----------+------+----------------+----------------+----------------");
-
-        // Track worst term
-        double worst_term_dev = 0.0;
-        std::string worst_term_name;
-
-        for (size_t t = 0; t < terms.size(); ++t) {
-            for (int dim = 0; dim < 3; ++dim) {
-                double num_val = term_numgrad[t][dim];
-                double ana_val = 0.0;
-                bool has_component = false;
-
-                // Match term to stored component gradient by name
-                auto it = comp_map.find(terms[t].name);
-                if (it != comp_map.end() && it->second->rows() > max_atom_fixed) {
-                    ana_val = (*it->second)(max_atom_fixed, dim);
-                    has_component = true;
-                }
-
-                double diff = has_component ? (ana_val - num_val) : 0.0;
-                const char* dimname[] = {"x", "y", "z"};
-
-                // Print all terms with significant values
-                if (std::abs(num_val) > 1e-10 || std::abs(ana_val) > 1e-10) {
-                    std::string marker = "";
-                    if (has_component && std::abs(diff) > 1e-5) marker = " <<<";
-                    else if (!has_component && std::abs(num_val) > 1e-8) marker = " (no ana)";
-                    CurcumaLogger::info(fmt::format("  {:10s} |  {}   | {:+.6e}  | {:+.6e}  | {:+.6e}{}",
-                        terms[t].name, dimname[dim],
-                        has_component ? ana_val : 0.0, num_val, diff, marker));
-                }
-
-                if (has_component && std::abs(diff) > worst_term_dev) {
-                    worst_term_dev = std::abs(diff);
-                    worst_term_name = terms[t].name;
-                }
-            }
-        }
-
-        CurcumaLogger::info(fmt::format("  WORST TERM: {} (max deviation: {:.2e} Eh/Bohr)", worst_term_name, worst_term_dev));
-    }
-
-    // Level 2: Full numerical gradient (with CN/EEQ recalculation)
-    // This comparison shows the total deviation including the missing dq/dx term.
-    CurcumaLogger::info("--- Level 2: Full Comparison (includes dq/dx charge response) ---");
-    Matrix numeric_full = NumGrad(dx);
-
-    double max_diff_full = 0.0;
-    int max_atom_full = -1, max_dim_full = -1;
-    for (int i = 0; i < m_atomcount; ++i) {
-        for (int d = 0; d < 3; ++d) {
-            double diff = std::abs(analytic(i, d) - numeric_full(i, d));
-            if (diff > max_diff_full) {
-                max_diff_full = diff;
-                max_atom_full = i;
-                max_dim_full = d;
-            }
-        }
-    }
-
-    CurcumaLogger::param("analytical_norm", fmt::format("{:.6e} Eh/Bohr", analytic.norm()));
-    CurcumaLogger::param("numerical_full_norm", fmt::format("{:.6e} Eh/Bohr", numeric_full.norm()));
-    CurcumaLogger::param("numerical_fixed_norm", fmt::format("{:.6e} Eh/Bohr", numeric_fixed.norm()));
-    CurcumaLogger::param("full_max_deviation", fmt::format("{:.2e} Eh/Bohr", max_diff_full));
-    CurcumaLogger::param("full_max_at_atom", std::to_string(max_atom_full));
-    CurcumaLogger::param("full_max_at_dim", std::to_string(max_dim_full));
-
-    // The difference between full and fixed numgrad is the dq/dx charge response
-    double charge_response_max = 0.0;
-    for (int i = 0; i < m_atomcount; ++i) {
-        for (int d = 0; d < 3; ++d) {
-            double diff = std::abs(numeric_full(i, d) - numeric_fixed(i, d));
-            if (diff > charge_response_max) charge_response_max = diff;
-        }
-    }
-    CurcumaLogger::param("charge_response_max", fmt::format("{:.2e} Eh/Bohr", charge_response_max));
-
-    if (max_diff_full > 1e-4) {
-        CurcumaLogger::warn(fmt::format("Full gradient deviation: {:.2e} Eh/Bohr at atom {} dim {}",
-                                        max_diff_full, max_atom_full, max_dim_full));
-        CurcumaLogger::info(fmt::format("  Analytical: ({:.6e}, {:.6e}, {:.6e})",
-                                        analytic(max_atom_full, 0), analytic(max_atom_full, 1), analytic(max_atom_full, 2)));
-        CurcumaLogger::info(fmt::format("  NumFull:    ({:.6e}, {:.6e}, {:.6e})",
-                                        numeric_full(max_atom_full, 0), numeric_full(max_atom_full, 1), numeric_full(max_atom_full, 2)));
-    }
-
-    // Translation invariance check: sum of forces should be ~0
-    Eigen::Vector3d total_force = analytic.colwise().sum();
-    double translation_error = total_force.norm();
-
-    // Rotation invariance check: sum of torques should be ~0
-    Eigen::Vector3d total_torque = Eigen::Vector3d::Zero();
-    Eigen::Vector3d com = Eigen::Vector3d::Zero();
-    for (int i = 0; i < m_atomcount; ++i) {
-        com += m_geometry_bohr.row(i).transpose();
-    }
-    com /= m_atomcount;
-
-    for (int i = 0; i < m_atomcount; ++i) {
-        Eigen::Vector3d r = m_geometry_bohr.row(i).transpose() - com;
-        Eigen::Vector3d f = analytic.row(i).transpose();
-        total_torque += r.cross(f);
-    }
-    double rotation_error = total_torque.norm();
-
-    CurcumaLogger::param("translation_invariance", fmt::format("{:.2e} Eh/Bohr", translation_error));
-    CurcumaLogger::param("rotation_invariance", fmt::format("{:.2e} Eh·Bohr/Bohr", rotation_error));
-
-    if (translation_error > 1e-8 || rotation_error > 1e-8) {
-        CurcumaLogger::warn("Gradient invariance violation detected!");
-    }
-
-    // Return the fixed-charge deviation (the actionable metric for gradient bugs)
-    return max_diff_fixed;
 }
 
 // Claude Generated (Apr 2026): P1a — Delegate CN-change threshold check to D4ParameterGenerator

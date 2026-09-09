@@ -24,6 +24,8 @@
 #include "vk_context.h"
 #include "shaders/spirv_kernels.h"
 #include "../parameters/xtb_params_extra.hpp"   // covalent_rad_d3_au / pauling_en / atomic_rad_au
+#include "src/core/math_compat.h"
+#include "../native_eigensolver.h"              // canonical host tql2 + rank-1 merge
 
 #include <vulkan/vulkan.h>
 
@@ -51,71 +53,21 @@ struct Buf {
     VkDeviceSize   size = 0;
 };
 
-inline double triPythag(double a, double b) {
-    double aa = std::fabs(a), ab = std::fabs(b);
-    if (aa > ab) { double r = ab / aa; return aa * std::sqrt(1.0 + r * r); }
-    if (ab == 0.0) return 0.0;
-    double r = aa / ab; return ab * std::sqrt(1.0 + r * r);
-}
-inline double triSign(double a, double b) { return (b >= 0.0) ? std::fabs(a) : -std::fabs(a); }
-
-// Symmetric tridiagonal eigensolve (EISPACK tql2, implicit-shift QL) on raw column-major
-// arrays — the CPU half of the GPU Householder eigensolver. diag[n], off[n-1] (off[k]
-// connects rows k,k+1). On success eval[n] is ascending and Zcol[n*n] (column-major) holds
-// the matching tridiagonal eigenvectors. Robust to degeneracies (full rotation accumulation),
-// so no inverse-iteration clustering pitfalls. Ported from native_eigensolver.cpp. Claude Generated.
+// The host half of the GPU eigensolver: the symmetric tridiagonal QL solve. This used to
+// be a verbatim copy of native_eigensolver.cpp's tql2/solveTriQL (~65 lines, including its
+// own pythag/sign helpers); it now calls the canonical implementation through the
+// raw-pointer entry point curcuma::eigsolver::solveTridiagonalQL (same arrays, same
+// arithmetic, no Vulkan copy to keep in sync). diag[n], off[n-1] (off[k] connects rows
+// k,k+1) -> ascending eval[n] + column-major Zcol[n*n]. Claude Generated (Sep 2026).
 //
-// This O(n³) eigenvector accumulation is the remaining serial phase of the GPU eigensolver
-// (~75 ms/iter on `complex`/558 after the GPU tridiag + back-transform; EIG-1/EIG-2A). It is
-// memory-bandwidth-bound (Givens z-update arithmetic intensity ~0.2 flop/byte), so host
-// threading it gives only ~1.3× even at 16 threads on the shared-DDR iGPU and no net
-// eigensolve win — a GPU divide-and-conquer eigenvector solve is the real (high-effort)
-// lever (WP EIG-3b). Kept single-threaded and pedagogically clear. Claude Generated.
+// This O(n^3) eigenvector accumulation is the remaining serial phase of the GPU
+// eigensolver (~75 ms/iter on `complex`/558 after the GPU tridiag + back-transform;
+// EIG-1/EIG-2A). It is memory-bandwidth-bound (Givens z-update arithmetic intensity
+// ~0.2 flop/byte), so host threading gives only ~1.3x even at 16 threads on the
+// shared-DDR iGPU and no net eigensolve win — a GPU divide-and-conquer eigenvector
+// solve is the real (high-effort) lever (WP EIG-3b).
 inline bool cpuTriEig(int n, const double* diag, const double* off, double* eval, double* Zcol) {
-    std::vector<double> d(diag, diag + n), e(n, 0.0), z((size_t)n * n, 0.0);
-    for (int k = 0; k < n - 1; ++k) e[k + 1] = off[k];
-    for (int i = 0; i < n; ++i) z[i + (size_t)i * n] = 1.0;   // Z = I (column-major)
-    for (int i = 1; i < n; ++i) e[i - 1] = e[i];
-    e[n - 1] = 0.0;
-    for (int l = 0; l < n; ++l) {
-        int iter = 0, m = 0;
-        do {
-            for (m = l; m < n - 1; ++m) {
-                double dd = std::fabs(d[m]) + std::fabs(d[m + 1]);
-                if (std::fabs(e[m]) <= std::numeric_limits<double>::epsilon() * dd) break;
-            }
-            if (m != l) {
-                if (iter++ == 50) return false;
-                double g = (d[l + 1] - d[l]) / (2.0 * e[l]);
-                double r = triPythag(g, 1.0);
-                g = d[m] - d[l] + e[l] / (g + triSign(r, g));
-                double s = 1.0, c = 1.0, p = 0.0;
-                int i = m - 1;
-                for (; i >= l; --i) {
-                    double f = s * e[i], b = c * e[i];
-                    r = triPythag(f, g); e[i + 1] = r;
-                    if (r == 0.0) { d[i + 1] -= p; e[m] = 0.0; break; }
-                    s = f / r; c = g / r; g = d[i + 1] - p;
-                    r = (d[i] - g) * s + 2.0 * c * b; p = s * r; d[i + 1] = g + p; g = c * r - b;
-                    for (int k = 0; k < n; ++k) {
-                        f = z[k + (size_t)(i + 1) * n];
-                        z[k + (size_t)(i + 1) * n] = s * z[k + (size_t)i * n] + c * f;
-                        z[k + (size_t)i * n]       = c * z[k + (size_t)i * n] - s * f;
-                    }
-                }
-                if (r == 0.0 && i >= l) continue;
-                d[l] -= p; e[l] = g; e[m] = 0.0;
-            }
-        } while (m != l);
-    }
-    std::vector<int> idx(n);
-    for (int i = 0; i < n; ++i) idx[i] = i;
-    std::sort(idx.begin(), idx.end(), [&](int a, int b) { return d[a] < d[b]; });
-    for (int j = 0; j < n; ++j) {
-        eval[j] = d[idx[j]];
-        std::memcpy(Zcol + (size_t)j * n, z.data() + (size_t)idx[j] * n, sizeof(double) * n);
-    }
-    return true;
+    return curcuma::eigsolver::solveTridiagonalQL(n, diag, off, eval, Zcol);
 }
 } // namespace
 
@@ -980,75 +932,25 @@ struct XtbVulkanContext::Impl {
     }
 
     // Eigenproblem of diag(D)+rho·z·zᵀ with deflation, via the GPU secular solve. Returns
-    // eval[n] and W[n×n] (column-major, original input basis), eval(j) ↔ W.col(j). The host
-    // does the rank1Eigen bookkeeping (z-normalize, sign-fold, sort, deflation Givens,
-    // assembly, scatter-back); the heavy secular solve runs on the GPU (secularSolveDev). A
-    // faithful port of rank1Eigen (native_eigensolver.cpp); the deflation moves onto the GPU
-    // in Step C. Claude Generated (EIG-3).
+    // eval[n] and W[n×n] (column-major, original input basis), eval(j) ↔ W.col(j).
+    //
+    // The deflation bookkeeping (z-normalize, sign-fold, sort, degenerate-D Givens,
+    // assembly, undo-rotations, scatter-back) used to be a ~60-line hand copy of
+    // rank1Eigen (native_eigensolver.cpp). It now calls that canonical implementation via
+    // curcuma::eigsolver::rank1EigenDeflate and only supplies the SECULAR SOLVE — the one
+    // step that runs on the GPU here (secularSolveDev). Claude Generated (Sep 2026).
+    //
+    // Debug/reference path only: reached with CURCUMA_VK_DC_HOST=1 (and
+    // CURCUMA_VK_TRIDIAG_SOLVE=dc); the default merge is the fully device-resident
+    // rank1EigenGpu.
     bool rank1EigenDev(const double* D_in, const double* z_in, int n, double rho_in,
                        double* eval, double* W) {
-        std::fill(W, W + (size_t)n * n, 0.0);
-        double zn = 0.0; for (int i = 0; i < n; ++i) zn += z_in[i] * z_in[i];
-        zn = std::sqrt(zn);
-        if (zn < std::numeric_limits<double>::min()) {                       // no coupling
-            for (int i = 0; i < n; ++i) { eval[i] = D_in[i]; W[i + (size_t)i * n] = 1.0; }
-            return true;
-        }
-        std::vector<double> z(n); for (int i = 0; i < n; ++i) z[i] = z_in[i] / zn;
-        double rho = rho_in * zn * zn; const bool flip = (rho < 0.0);
-        std::vector<double> D(n); for (int i = 0; i < n; ++i) D[i] = flip ? -D_in[i] : D_in[i];
-        if (flip) rho = -rho;
-        std::vector<int> perm(n); for (int i = 0; i < n; ++i) perm[i] = i;
-        std::sort(perm.begin(), perm.end(), [&](int a, int b) { return D[a] < D[b]; });
-        std::vector<double> Ds(n), zs(n);
-        for (int i = 0; i < n; ++i) { Ds[i] = D[perm[i]]; zs[i] = z[perm[i]]; }
-        double maxabs = 0.0; for (int i = 0; i < n; ++i) maxabs = std::max(maxabs, std::fabs(Ds[i]));
-        const double tol = 8.0 * std::numeric_limits<double>::epsilon() * (maxabs + std::fabs(rho));
-        // Deflation: Givens (plane jprev,i) for degenerate-D runs (anchor accumulates the
-        // weight), then negligible-weight indices. Mirrors rank1Eigen lines 326-342.
-        struct Giv { int p, i; double c, s; };
-        std::vector<Giv> giv; std::vector<char> deflated(n, 0);
-        int jprev = -1;
-        for (int i = 0; i < n; ++i) {
-            if (jprev < 0) { jprev = i; continue; }
-            if (std::fabs(Ds[i] - Ds[jprev]) <= tol) {
-                const double r = triPythag(zs[jprev], zs[i]);
-                const double c = (r > 0.0) ? zs[jprev] / r : 1.0;
-                const double s = (r > 0.0) ? zs[i] / r : 0.0;
-                giv.push_back({ jprev, i, c, s }); zs[jprev] = r; zs[i] = 0.0; deflated[i] = 1;
-            } else jprev = i;
-        }
-        for (int i = 0; i < n; ++i) if (!deflated[i] && std::fabs(zs[i]) <= tol) deflated[i] = 1;
-        std::vector<int> sec; for (int i = 0; i < n; ++i) if (!deflated[i]) sec.push_back(i);
-        const int ksz = (int)sec.size();
-        std::vector<double> lam_sec(std::max(1, ksz)), Wsec((size_t)std::max(1, ksz) * std::max(1, ksz));
-        if (ksz > 0) {
-            std::vector<double> delta(ksz), zeta(ksz);
-            for (int t = 0; t < ksz; ++t) { delta[t] = Ds[sec[t]]; zeta[t] = zs[sec[t]]; }
-            if (!secularSolveDev(delta.data(), zeta.data(), ksz, rho, lam_sec.data(), Wsec.data())) return false;
-        }
-        // Assemble in the rotated sorted basis: deflated → e_i, secular → W_sec.
-        std::vector<double> Wp((size_t)n * n, 0.0), evalp(n);
-        int slot = 0;
-        for (int i = 0; i < n; ++i) if (deflated[i]) { Wp[i + (size_t)slot * n] = 1.0; evalp[slot] = Ds[i]; ++slot; }
-        for (int t = 0; t < ksz; ++t) {
-            for (int u = 0; u < ksz; ++u) Wp[sec[u] + (size_t)slot * n] = Wsec[u + (size_t)t * ksz];
-            evalp[slot] = lam_sec[t]; ++slot;
-        }
-        // Undo the Givens (apply Gᵀ in reverse) → eigenvectors in the sorted basis.
-        for (int g = (int)giv.size() - 1; g >= 0; --g) {
-            const Giv& G = giv[g];
-            for (int col = 0; col < n; ++col) {
-                const double a = Wp[G.p + (size_t)col * n], b = Wp[G.i + (size_t)col * n];
-                Wp[G.p + (size_t)col * n] = G.c * a - G.s * b;
-                Wp[G.i + (size_t)col * n] = G.s * a + G.c * b;
-            }
-        }
-        // Scatter to original basis (row perm[i] ← sorted row i) and unflip eigenvalues.
-        for (int i = 0; i < n; ++i)
-            for (int col = 0; col < n; ++col) W[perm[i] + (size_t)col * n] = Wp[i + (size_t)col * n];
-        for (int i = 0; i < n; ++i) eval[i] = flip ? -evalp[i] : evalp[i];
-        return true;
+        return curcuma::eigsolver::rank1EigenDeflate(
+            D_in, z_in, n, rho_in, eval, W,
+            [this](const double* D, const double* z, int k, double rho,
+                   double* lam, double* Wsec) {
+                return secularSolveDev(D, z, k, rho, lam, Wsec);
+            });
     }
 
     // Recursive Cuppen D&C on the tridiagonal (diag d, off-diagonal e). Leaves (n≤kCutoff)
@@ -1468,7 +1370,7 @@ struct XtbVulkanContext::Impl {
         if (!buildLowdinX(bnao)) return false;
         // GFN2: build dp_int/qp_int on the device too (needs the resident rS just built),
         // so they are resident for the multipole Fock/moments + downloadable for the host
-        // gradient. mp_computed gates downloadMultipole / the resident multipole loop.
+        // gradient. mp_computed gates downloadMultipoleInts / the resident multipole loop.
         if (bis_gfn2 && mp_ready) {
             const uint32_t gn = (bnao + 7) / 8;
             uint32_t pcM[1] = { (uint32_t)bnao };
@@ -1768,8 +1670,8 @@ struct XtbVulkanContext::Impl {
     // CN log-compression (host; GLSL fp64 has no log): cn = log(1+e^CNMAX) − log(1+e^(CNMAX−raw)).
     static double eqCompressCn(double raw) {
         const double CNMAX = 4.4;
-        static const double l = std::log(1.0 + std::exp(CNMAX));
-        return l - std::log(1.0 + std::exp(CNMAX - raw));
+        static const double l = curcuma_log(1.0 + curcuma_exp(CNMAX));
+        return l - curcuma_log(1.0 + curcuma_exp(CNMAX - raw));
     }
     bool eqEnsure(int N) {
         if (N == eq_n && eqM.buf) return true;
@@ -1948,7 +1850,7 @@ bool XtbVulkanContext::beginMultipoleComputed()
 {
     return m_impl && m_impl->vkc.ok() && m_impl->beginResidentMP();
 }
-bool XtbVulkanContext::downloadMultipole(double* dp_int3, double* qp_int6)
+bool XtbVulkanContext::downloadMultipoleInts(double* dp_int3, double* qp_int6)
 {
     if (!m_impl || !m_impl->vkc.ok() || !dp_int3 || !qp_int6) return false;
     return m_impl->downloadMP(dp_int3, qp_int6);

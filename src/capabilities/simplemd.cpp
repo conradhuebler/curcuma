@@ -854,10 +854,7 @@ bool SimpleMD::Initialise()
     // constructor never sees flat flags like -static_all true or -eeq_distance_cutoff_auto
     // true that the registry routed into controller["gfnff"]. Mirrors the
     // EnergyCalculator::reattachMethodScopes fix used by the opt/sp path (WP6).
-    static const std::vector<std::string> kMethodScopes = {
-        "gfnff", "eeq_solver", "tblite", "xtb", "ulysses", "eht", "dftd3", "dftd4", "orca"
-    };
-    for (const auto& scope : kMethodScopes) {
+    for (const auto& scope : MethodFactory::methodParameterScopes()) {
         if (m_controller.contains(scope) && m_controller[scope].is_object()
             && !ec_config.contains(scope)) {
             ec_config[scope] = m_controller[scope];
@@ -873,8 +870,18 @@ bool SimpleMD::Initialise()
     }
 
     m_interface = new EnergyCalculator(m_method, ec_config, Basename());
+    // Fail loud (Sep 2026): an unknown/unavailable method used to leave a calculator without a
+    // backend and the first FastEnergy() call segfaulted. Abort the setup with the reason.
+    if (m_interface->Error()) {
+        CurcumaLogger::error("MD setup failed: " + m_interface->ErrorMessage());
+        return false;
+    }
 
     m_interface->setMolecule(m_molecule.getMolInfo());
+    if (m_interface->Error()) {
+        CurcumaLogger::error("MD setup failed while setting the molecule: " + m_interface->ErrorMessage());
+        return false;
+    }
     // Energy-method-setup boundary (Claude Generated, Jun 2026): EnergyCalculator construction +
     // setMolecule (e.g. GFN-FF parameter generation) leaves the global CurcumaLogger verbosity
     // clamped to 0 (it captures/restores around an already-clamped level), so the remaining setup
@@ -1529,7 +1536,9 @@ nlohmann::json SimpleMD::WriteRestartInformation()
         restart["rmsd_econv"] = m_rmsd_econv;
         restart["wtmtd"] = m_wtmtd;
         restart["rmsd_DT"] = m_rmsd_DT;
-        restart["rmsd_ref_file"] = Basename() + ".mtd.xyz";
+        // The deposits are written through outputPath(), so record that same path - a bare
+        // basename resolves against the CWD, where the file does not exist in BMT mode.
+        restart["rmsd_ref_file"] = outputPath(Basename() + ".mtd.xyz");
         restart["counter"] = m_bias_structure_count;
         restart["rmsd_atoms"] = m_rmsd_atoms;
         std::vector<json> bias(m_bias_structure_count);
@@ -1896,6 +1905,7 @@ void SimpleMD::start()
 void SimpleMD::prepareRun()
 {
     if (m_initialised == false) {
+        CurcumaLogger::error("MD not initialised (setup failed, see the messages above) - nothing to run");
         m_run_prepared = false;
         return;
     }
@@ -3432,7 +3442,7 @@ void SimpleMD::EvaluateBias(bool do_deposit)
             Molecule out_mol(m_molecule);
             out_mol.setGeometry(full_geometry);
             out_mol.setName(std::to_string(m_currentStep));
-            out_mol.writeXYZFile(Basename() + ".mtd.xyz");
+            out_mol.writeXYZFile(outputPath(Basename() + ".mtd.xyz"));
             if (m_nocolvarfile == false) {
                 std::ofstream colvarfile;
                 colvarfile.open(outputPath("COLVAR"));
@@ -3704,7 +3714,7 @@ void SimpleMD::EvaluateBias(bool do_deposit)
             Molecule out_mol(m_molecule);
             out_mol.setGeometry(full_geometry);
             out_mol.setName(std::to_string(m_currentStep));
-            out_mol.appendXYZFile(Basename() + ".mtd.xyz");
+            out_mol.appendXYZFile(outputPath(Basename() + ".mtd.xyz"));
             if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::result_fmt("RMSD-MTD: Deposited bias structure {} (pool total: {})",
                     new_count, m_shared_pool->biasStructureCount());

@@ -3847,7 +3847,7 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_gather_rhs_fragments(
 #include "gfnff_kernels_hip.h"
 
 #include "../gfnff_parameters.h"
-#include "../forcefieldthread.h"   // Bond, Angle, Dihedral, Inversion structs
+#include "../ff_terms.h"   // Bond, Angle, Dihedral, Inversion structs
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"  // covalent_rad_d3
 
 #include <cstdlib>  // std::getenv (CURCUMA_GFNFF_GPU_FREEZE_HBQ opt-out)

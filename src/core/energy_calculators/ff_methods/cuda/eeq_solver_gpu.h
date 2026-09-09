@@ -9,6 +9,13 @@
  * Interface is CUDA-agnostic (Pimpl pattern) — can be forward-declared
  * from non-CUDA translation units.
  *
+ * Claude Generated (Sep 2026): SHARED by the CUDA and the ROCm backend - the Pimpl
+ * keeps cuSOLVER/rocSOLVER out of this file, so the two copies differed only in the
+ * class name.  The ROCm build gets this exact declaration under its hipified names via
+ * rocm/eeq_solver_hip.h (EEQSolverGPU -> EEQSolverHip, rocSOLVER dpotrf/dpotrs); the
+ * names stay distinct because libcurcuma_cuda.so and libcurcuma_rocm.so are dlopen'd
+ * with RTLD_GLOBAL and must not export colliding symbols.
+ *
  * Minimum compute capability: 6.0 (Pascal) — native double atomicAdd.
  *
  * Reference: Spicher/Grimme J. Chem. Theory Comput. 2020 (GFN-FF EEQ)
@@ -16,7 +23,7 @@
 
 #pragma once
 
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
 
 #include <memory>
 #include <vector>
@@ -317,6 +324,9 @@ private:
     int m_last_N = 0;  ///< cached N for workspace reuse
 
     // ── WP-B (Jun 2026): mixed-precision FP32-factor + FP64-refine helpers ──────
+    // CUDA only: defined in eeq_solver_gpu.cu.  The ROCm TU implements the same two
+    // steps as file-static functions (mixedFactorHip / mixedSolveRefineHip in
+    // rocm/eeq_solver_hip.hiph), so for USE_ROCM these are declared but never used.
     /// FP32 Cholesky of the FP64 matrix currently in d_A (left intact). Stores the
     /// FP32 factor in d_A_f32. Returns the cuSOLVER info (0 = SPD success). Does NOT
     /// modify d_A, so the caller can fall back to the FP64 dpotrf/LU path on failure.
@@ -327,4 +337,4 @@ private:
     void mixedSolveRefine(int N, int nrhs);
 };
 
-#endif // USE_CUDA
+#endif // USE_CUDA || USE_ROCM

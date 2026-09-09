@@ -27,7 +27,25 @@ REPO = Path(__file__).resolve().parents[1]
 TESTSET = REPO / "test_cases" / "s30l_test_set"
 RUNDIR = TESTSET / "_run"
 CURCUMA = REPO / "release" / "curcuma"
-XTB = Path.home() / "Downloads" / "xtb-6.6.1" / "bin" / "xtb"
+
+
+def find_xtb():
+    env = os.environ.get("XTB_BIN")
+    if env and Path(env).exists():
+        return Path(env)
+    which = shutil.which("xtb")
+    if which:
+        return Path(which)
+    for cand in ("/opt/xtb/bin/xtb",
+                 Path.home() / "Downloads" / "xtb-dist" / "bin" / "xtb",
+                 Path.home() / "Downloads" / "xtb-6.6.1" / "bin" / "xtb"):
+        p = Path(cand)
+        if p.exists():
+            return p
+    return None
+
+
+XTB = find_xtb()
 
 BOHR = 0.52917721067          # Bohr -> Angstrom
 AU2KCAL = 627.509474           # Hartree -> kcal/mol
@@ -135,6 +153,8 @@ def run_xtb(xyz_path, charge, workdir, frag_charges=None):
 
 
 def main():
+    if XTB is None or not XTB.exists():
+        raise SystemExit("xtb binary not found - set XTB_BIN or install xtb on PATH")
     only = set(int(x) for x in sys.argv[1:]) if len(sys.argv) > 1 else None
     RUNDIR.mkdir(parents=True, exist_ok=True)
     refs = [float(x) for x in (TESTSET / "reference_s30l").read_text().split()]

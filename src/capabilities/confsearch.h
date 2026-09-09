@@ -247,7 +247,7 @@ private:
     BEGIN_PARAMETER_DEFINITION(confsearch)
 
     // --- Methods ---
-    PARAM(method, String, "gfnff", "Energy method used for both phases unless md_method or opt_method override it.", "Methods", {})
+    PARAM(method, String, "gfnff", "Energy method used for both phases unless md_method or opt_method override it. Default gfnff: the fast general-purpose choice (native GFN-FF). gfn2 is the accurate one (native GFN2-xTB, ~100x slower); gfn1, eht, pm3, uff, qmdff also available.", "Methods", {})
     PARAM(md_method, String, "", "Cheap method driving MD exploration and pre-optimisation. Empty falls back to method.", "Methods", {})
     PARAM(opt_method, String, "", "Accurate method for the per-cycle re-optimisation and the final ranking. Empty falls back to method.", "Methods", {})
 

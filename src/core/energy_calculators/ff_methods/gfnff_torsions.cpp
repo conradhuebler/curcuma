@@ -49,6 +49,7 @@
 
 #include "gfnff.h"
 #include "gfnff_par.h"
+#include "src/core/math_compat.h"
 #include <cmath>
 #include <array>
 #include <set>
@@ -543,53 +544,35 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     // Claude Generated (Jan 25, 2026): Use pi-fragment data to determine periodicity
     // This ensures ring bonds in aromatic systems (like Caffeine N-C) use n=2
     // despite local CN=3 (sp3) markings.
+    // pi_atoms_final, not pi_fragments — the torsion setup runs after the reference's
+    // `piadr = itmp` (gfnff_ini.f90:1016). See the note on is_in_pi_fr below.
     const TopologyInfo& t_info = getCachedTopology();
     bool j_is_pi = false, k_is_pi = false;
-    if (j_atom_idx >= 0 && k_atom_idx >= 0 && !t_info.pi_fragments.empty()) {
-        j_is_pi = t_info.pi_fragments[j_atom_idx] > 0;
-        k_is_pi = t_info.pi_fragments[k_atom_idx] > 0;
+    if (j_atom_idx >= 0 && k_atom_idx >= 0
+        && static_cast<int>(t_info.pi_atoms_final.size()) == m_atomcount) {
+        j_is_pi = t_info.pi_atoms_final[j_atom_idx] > 0;
+        k_is_pi = t_info.pi_atoms_final[k_atom_idx] > 0;
     }
 
-    // Pi-conjugated central bond (n=2, most important for aromatic accurate energies)
-    if (j_is_pi && k_is_pi) {
-        params.periodicity = 2;
-        params.phase_shift = M_PI;
-    }
-    // sp³-sp³: Threefold (gfnff_ini.f90:1841)
-    else if (hyb_j == 3 && hyb_k == 3) {
-        params.periodicity = 3;     // nrot = 3
-        params.phase_shift = M_PI;  // phi0 = 180° (keeps acyclic default)
-    }
-    // sp²-sp²: Twofold ONLY for a real pi central bond (gfnff_ini.f90:1732 `btyp(m)==2`).
-    // CRITICAL (Jul 24, 2026): the Fortran nrot=2 is keyed on the BOND type btyp==2, not
-    // on both atoms being sp2. A metal M-C bond with a locally-sp2 carbon (hyb=2) is
-    // btyp=5 (metal), not 2, so it keeps nrot=1 — the Ti-C4 torsion of ED40a/ED14 was
-    // wrongly getting nrot=2. Gate on bond_type==2 (btyp of the central bond).
-    else if (hyb_j == 2 && hyb_k == 2 && bond_type == 2) {
-        params.periodicity = 2;     // nrot = 2
-        params.phase_shift = M_PI;  // phi0 = 180° (planar trans)
-    }
-    // Pi-sp³ mixed (gfnff_ini.f90:1733-1744). CRITICAL (Jul 24, 2026): the Fortran
-    // nrot=3 for sp2-sp3 fires ONLY via the pi-sp3 path, which requires the sp2 atom
-    // to be in a pi system (piadr>0). A NON-pi sp2 atom — e.g. a transition metal with
-    // 3 neighbours (hyb=2 from gfnff_ini2.f90:241, but piadr=0) — keeps the acyclic
-    // default nrot=1 (and f1=torsf(1), not the pi-sp3 0.5). Without the pi gate, the
-    // metal-C torsions of ED40a/PR41/ED14 got nrot=3 AND f1=0.5 (half FC), ~0.4-0.56
-    // kcal too low in the torsion term. Gate on the sp2 atom being pi.
-    else if ((hyb_j == 2 && hyb_k == 3 && j_is_pi) || (hyb_j == 3 && hyb_k == 2 && k_is_pi)) {
-        params.periodicity = 3;     // nrot = 3
-        params.phase_shift = M_PI;  // phi0 = 180°
-    }
-    // sp-X: Linear (gfnff_ini.f90: implicit default)
-    else if (hyb_j == 1 || hyb_k == 1) {
-        params.periodicity = 1;
-        params.phase_shift = M_PI;
-    }
-    // Fallback: acyclic default
-    else {
-        params.periodicity = 1;
-        params.phase_shift = M_PI;
-    }
+    // ACYCLIC periodicity, gfnff_ini.f90:1727-1748. These are INDEPENDENT ifs in the
+    // reference and later ones OVERRIDE earlier ones; curcuma had them as an else-if
+    // chain with two extra conditions. Claude Generated (Sep 2026, GMTKN55
+    // YBDE18/nf3-ch2):
+    //   * the leading "both atoms pi -> nrot = 2" has no counterpart at all — the
+    //     reference keys nrot = 2 on the BOND type, not on the two atoms;
+    //   * `btyp == 2` was additionally gated on both centres being sp2, which the
+    //     reference does not require. An sp3 nitrogen on an sp2 partner is btyp = 2
+    //     through the N-sp2 rule (:1108-1109), so the F3N-CH2 ylide's six torsions must
+    //     get nrot = 2; curcuma left them at 1, worth 0.11 kcal/mol.
+    // The nrot = 2 gate on bond_type is what keeps a metal M-C bond (btyp = 5) at
+    // nrot = 1, which is why the Jul 2026 fix introduced it; that part is preserved.
+    // The pi-sp3 rule still requires the sp2 partner to be a pi atom (piadr > 0).
+    params.periodicity = 1;
+    params.phase_shift = M_PI;      // phi0 = 180 deg (trans) throughout the acyclic case
+    if (hyb_j == 3 && hyb_k == 3) params.periodicity = 3;               // Me case
+    if (bond_type == 2) params.periodicity = 2;                          // pi central bond
+    if ((j_is_pi && !k_is_pi && hyb_k == 3)
+        || (k_is_pi && !j_is_pi && hyb_j == 3)) params.periodicity = 3;  // pi-sp3
 
     // ==========================================================================
     // STEP 2: Calculate force constant using GFN-FF formula (CORRECTED Dec 2025)
@@ -646,32 +629,22 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
         hyb_l = topo_outer.hybridization[l_atom_idx];
     }
 
-    // Lambda to check if nitrogen atom is NOT in pi-system (piadr==0)
+    // Lambda to check if nitrogen atom is NOT in pi-system (Fortran "piadr(kk) == 0")
+    //
+    // CORRECTED (Sep 2026): this used to reimplement pi-membership with two heuristics
+    // (any bond with pibo > 0.1, or any sp/sp2 neighbour). The Fortran does not do that -
+    // by the time the torsion loop runs, gfnff_ini.f90:1016 has already REPLACED piadr with
+    // itmp, a plain atom-indexed flag set for both ends of every bond inside a solved
+    // pi-system. (Only the uses BEFORE that line, e.g. the EEQ dgam branch at :650, see the
+    // well-known index-cutoff form of piadr - see Known Issue #11.) The heuristics disagree
+    // exactly where it matters: a nitrogen kept OUT of the pi-system but still surrounded by
+    // sp2 ring carbons - e.g. the Na-coordinated pyrrole N of S30L-CI 29 - was reported as
+    // "in pi" and never got the 0.5 reduction, leaving 14 torsions at twice the reference FC.
     auto is_nitrogen_not_pi = [&](int atom_idx, int z_atom) -> bool {
         if (z_atom != 7) return false;  // Must be nitrogen
         if (atom_idx < 0 || atom_idx >= m_atomcount) return false;
-
-        // Condition 1: Direct bonds with significant pi-character (pibo > 0.1)
-        if (!topo_outer.pi_bond_orders.empty()) {
-            for (int other = 0; other < m_atomcount; other++) {
-                if (other == atom_idx) continue;
-                int pibo_idx = lin(atom_idx, other);
-                if (pibo_idx >= 0 && pibo_idx < static_cast<int>(topo_outer.pi_bond_orders.size())) {
-                    if (topo_outer.pi_bond_orders[pibo_idx] > 0.1) return false;  // In pi-system
-                }
-            }
-        }
-
-        // Condition 2: N adjacent to sp or sp2 atoms ("picon" case)
-        for (const auto& bond : bond_list_outer) {
-            int neighbor = (bond.first == atom_idx) ? bond.second : (bond.second == atom_idx) ? bond.first : -1;
-            if (neighbor >= 0 && neighbor < static_cast<int>(topo_outer.hybridization.size())) {
-                int neighbor_hyb = topo_outer.hybridization[neighbor];
-                if (neighbor_hyb == 1 || neighbor_hyb == 2) return false;  // In pi-system
-            }
-        }
-
-        return true;  // nitrogen NOT in pi-system
+        if (static_cast<int>(topo_outer.pi_atoms_final.size()) != m_atomcount) return false;
+        return topo_outer.pi_atoms_final[atom_idx] == 0;
     };
 
     // Nitrogen reduction: RESET fkl to base*0.5 (NOT cumulative multiply!)
@@ -737,18 +710,23 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     // Get effective hybridization (considering pi-system participation)
     const TopologyInfo& topo = getCachedTopology();
 
-    // Direct mirror of xtb piadr(atom) > 0: true iff the atom is in a detected
-    // pi-system. Replaces the previous pibo>0.1 + partial picon (N/O/F/S only)
-    // inference, which diverged from piadr for low-pibo pi atoms and for B/Cl
-    // picon atoms (detectPiSystems covers B,C,N,O,F,S,Cl) and so mis-applied the
-    // f2*1.3 heavy-outer boost, the eff_hyb promotion, and the ring notpicon gate.
-    // pi_fragments is 0 for non-pi atoms and >=1 for pi-system atoms
-    // (detectPiSystems, gfnff_method.cpp:6590-6695; gfnff.h:316).
-    // Claude Generated (Jul 2026).
+    // Direct mirror of the reference's piadr(atom) > 0 AS SEEN BY THE TORSION LOOP.
+    // Claude Generated (Jul 2026; array corrected Sep 2026): the reference overwrites
+    // its pi array right after the Hückel section — `piadr = itmp` (gfnff_ini.f90:1016),
+    // where itmp marks both ends of every bond that lies inside a SOLVED pi-system
+    // (:1005-1010). The torsion setup runs long after that line, so every piadr test in
+    // it reads the post-Hückel membership, which is what pi_atoms_final holds; the
+    // pre-Hückel candidate list (pi_fragments) is strictly larger. The difference is not
+    // academic: pi_fragments also contains "picon" atoms — an N/O/F/S/Cl with any sp or
+    // sp2 NEIGHBOUR — and a transition metal with three neighbours has hyb=2, so every
+    // amine/phosphine/ether donor on such a metal is a pre-Hückel pi candidate while the
+    // Hückel never solves it (the metal itself is not a candidate, so the donor is a
+    // one-atom system). Reading the wrong array applied the acyclic pi-sp3 rule (f1=0.5
+    // instead of 1.0) to 12 extra torsions of MOR41 PR41, a 0.56 kcal/mol error.
     auto is_in_pi_fr = [&](int atom_idx, int /*z_atom*/) -> bool {
         if (atom_idx < 0 || atom_idx >= m_atomcount) return false;
-        if (topo.pi_fragments.empty()) return false;
-        return topo.pi_fragments[atom_idx] > 0;
+        if (static_cast<int>(topo.pi_atoms_final.size()) != m_atomcount) return false;
+        return topo.pi_atoms_final[atom_idx] > 0;
     };
 
     int eff_hyb_j = hyb_j;
@@ -761,8 +739,16 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     if (eff_hyb_j == 3 && eff_hyb_k == 3) {
         // Ethane-like: keep f1 = 1.0
         // Special cases for heteroatoms (simplified from lines 1857-1879):
-        int group_j = (z_j == 7 || z_j == 15) ? 5 : (z_j == 8 || z_j == 16) ? 6 : 0;
-        int group_k = (z_k == 7 || z_k == 15) ? 5 : (z_k == 8 || z_k == 16) ? 6 : 0;
+        // param%group(Z), not a hand-written map. Claude Generated (Sep 2026, GMTKN55
+        // HEAVYSB11): the old expression recognised only N/P as group 5 and O/S as group
+        // 6, so As, Sb, Bi, Se and Te fell through as group 0 and the SP3-specials never
+        // fired for them. Sb2Me4's Sb-Sb torsion kept the default instead of nrot = 3,
+        // phi0 = 60, f1 = 3.0 — 0.25 kcal/mol, and the same for As2Me4, H2Se2, Te2Me2.
+        auto group_of_z = [](int z) {
+            return (z >= 1 && z <= 86) ? GFNFFParameters::periodic_group[z - 1] : 0;
+        };
+        int group_j = group_of_z(z_j);
+        int group_k = group_of_z(z_k);
 
         if (group_j == 6 && group_k == 6) {
             // O-O, S-S: higher barrier, nrot=2, phi0=90° (gfnff_ini.f90:1873-1879)
@@ -875,13 +861,13 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
                         }
                     }
 
-                    // CRITICAL: Scale f1 when pi-system is present! (gfnff_ini.f90:1906)
-                    // This balances the large f2 contribution
-                    f1 *= 0.55;
-
+                    // NOTE: the companion `f1 = f1*0.55` of the same reference block is
+                    // deliberately NOT applied here — it is applied once, just before
+                    // fctot, so that it scales whatever f1 the ring / pi-sp3 / SP3-special
+                    // blocks below finally settle on. See the comment there.
                     if (CurcumaLogger::get_verbosity() >= 3) {
-                        CurcumaLogger::info(fmt::format("  Pi-bond correction: pibo={:.4f}, f2={:.6f}, f1 scaled to {:.4f}",
-                                                         pibo, f2, f1));
+                        CurcumaLogger::info(fmt::format("  Pi-bond correction: pibo={:.4f}, f2={:.6f}",
+                                                         pibo, f2));
                     }
                 }
             }
@@ -962,6 +948,14 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
         const auto& bond_list = getCachedBondList();
         const TopologyInfo& topo = getCachedTopology();
 
+        // The reference's amide()/alphaCO() take piadr, and the torsion setup runs after
+        // `piadr = itmp` (gfnff_ini.f90:1016) — so the POST-Hückel membership. Claude
+        // Generated (Sep 2026); falls back to the candidate list only if the Hückel never
+        // ran (pi_atoms_final then unallocated).
+        const std::vector<int>& pi_piadr =
+            (static_cast<int>(topo.pi_atoms_final.size()) == m_atomcount)
+                ? topo.pi_atoms_final : topo.pi_fragments;
+
         // Hybridization bounds check
         if (j_atom_idx < topo.hybridization.size() && k_atom_idx < topo.hybridization.size()) {
             int hyb_j = topo.hybridization[j_atom_idx];
@@ -969,7 +963,7 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
 
             // 1. alphaCO correction (gfnff_ini.f90:1678): fij *= 1.3
             //    isAlphaCO is symmetric (checks both central atoms internally).
-            if (isAlphaCO(j_atom_idx, k_atom_idx, m_atoms, topo.hybridization, topo.pi_fragments, bond_list)) {
+            if (isAlphaCO(j_atom_idx, k_atom_idx, m_atoms, topo.hybridization, pi_piadr, bond_list)) {
                 fij *= 1.3;
                 if (CurcumaLogger::get_verbosity() >= 3) {
                     CurcumaLogger::info("  alphaCO correction: fij *= 1.3 (C=O alpha carbon detected)");
@@ -978,14 +972,14 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
 
             // 2. Amide corrections (gfnff_ini.f90:1679-1680): fij *= 1.3
             //    amide(N) with the OTHER central atom an sp3 carbon.
-            if (isAmide(j_atom_idx, m_atoms, topo.hybridization, topo.pi_fragments, bond_list) &&
+            if (isAmide(j_atom_idx, m_atoms, topo.hybridization, pi_piadr, bond_list) &&
                 z_k == 6 && hyb_k == 3) {
                 fij *= 1.3;
                 if (CurcumaLogger::get_verbosity() >= 3) {
                     CurcumaLogger::info("  amide correction (j->k): fij *= 1.3 (peptide bond detected)");
                 }
             }
-            if (isAmide(k_atom_idx, m_atoms, topo.hybridization, topo.pi_fragments, bond_list) &&
+            if (isAmide(k_atom_idx, m_atoms, topo.hybridization, pi_piadr, bond_list) &&
                 z_j == 6 && hyb_j == 3) {
                 fij *= 1.3;
                 if (CurcumaLogger::get_verbosity() >= 3) {
@@ -994,36 +988,45 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
             }
         }
 
-        // 3. Hypervalent bond correction (btyp == 4): fij *= 0.2
-        //    Reference: gfnff_ini.f90:1811 "if (btyp(m) .eq. 4) fij = fij*0.2d0"
-        //    Note: Bond type detection not yet fully implemented
-        //    TODO Phase 2D: Implement full bond type classification system
-        //    For now: Deferred (low impact - rare in organic molecules)
+    }
+
+    // 3. Hypervalent bond correction (Fortran gfnff_ini.f90:1811,
+    //    "if (btyp(m) .eq. 4) fij = fij*0.2d0"), applied LAST, after the alphaCO and amide
+    //    scalings, exactly as in the reference.
+    //    IMPLEMENTED (Sep 2026). It had been deferred as "rare in organic molecules" and
+    //    could not have worked anyway: classifyBondType() folded hyb 5 onto 3, so btyp=4 was
+    //    unreachable until that fold was removed (Known Issue #15). Its absence multiplied
+    //    every torsion across a hypervalent centre by 5: disulfuric acid H2S2O7 (GMTKN55
+    //    ICONF and PArel, S is hyb=5) had all twelve of its torsions at exactly 5x the
+    //    reference force constant, 12.6 kcal/mol on the molecule.
+    if (bond_type == 4) {
+        fij *= 0.2;
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("  hypervalent central bond (btyp=4): fij *= 0.2");
+        }
     }
 
     // ---------------------------------------------------------------------------
     // (F) Metal classification checks (NEW - from reference: gfnff_ini.f90:1751-1752)
     // ---------------------------------------------------------------------------
-    // Skip high-coordinate metals: no HC metals with >4 neighbors
-    if (j_atom_idx >= 0 && j_atom_idx < m_atoms.size()) {
-        const TopologyInfo& topo = getCachedTopology();
-        if (j_atom_idx < topo.neighbor_lists.size() && j_atom_idx < topo.is_metal.size()) {
-            int coord_j = topo.neighbor_lists[j_atom_idx].size();
-            if (topo.is_metal[j_atom_idx] && coord_j > 4) {
-                params.barrier_height = 0.0;
-                return params;  // Skip HC metals
-            }
-        }
-    }
-    if (k_atom_idx >= 0 && k_atom_idx < m_atoms.size()) {
-        const TopologyInfo& topo = getCachedTopology();
-        if (k_atom_idx < topo.neighbor_lists.size() && k_atom_idx < topo.is_metal.size()) {
-            int coord_k = topo.neighbor_lists[k_atom_idx].size();
-            if (topo.is_metal[k_atom_idx] && coord_k > 4) {
-                params.barrier_height = 0.0;
-                return params;  // Skip HC metals
-            }
-        }
+    // Skip high-coordinate metals: no HC metals with >4 neighbors.
+    // CORRECTED (Sep 2026): the reference tests `param%metal(Z) > 1`, i.e. only a
+    // TRANSITION metal (metal_type == 2); a main-group metal (metal_type == 1) is not
+    // skipped however high its coordination. Curcuma used topo.is_metal, which is true for
+    // main-group metals too, so all 110 torsion quartets of GMTKN55 AL2X6/al2me6 - every
+    // one of them across a 5-coordinate Al - returned a zero barrier and the whole torsion
+    // term vanished (0.0 vs the reference's 0.005849 Eh, 3.7 kcal/mol).
+    auto skip_hc_metal = [&](int a) -> bool {
+        if (a < 0 || a >= static_cast<int>(m_atoms.size())) return false;
+        const int z = m_atoms[a];
+        if (z < 1 || z > 86) return false;
+        if (GFNFFParameters::metal_type[z - 1] <= 1) return false;  // TM only
+        const auto& nb_a = getCachedTopology().neighbor_lists;
+        return a < static_cast<int>(nb_a.size()) && static_cast<int>(nb_a[a].size()) > 4;
+    };
+    if (skip_hc_metal(j_atom_idx) || skip_hc_metal(k_atom_idx)) {
+        params.barrier_height = 0.0;
+        return params;  // Skip HC metals
     }
 
     // ---------------------------------------------------------------------------
@@ -1117,14 +1120,15 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
 
         // CB7 amide case (gfnff_ini.f90:1665-1667): pi C-N bond in a 5-ring whose N
         // is an amide -> stiff barrier f1=5.0. at(ii)*at(jj)==42 == C(6)*N(7).
-        // Claude Generated (Jul 2026). NOTE on ordering: the Fortran applies the pi
-        // scaling f1*=0.55 AFTER this (line 1718), but curcuma already applied it above
-        // (f2 block). Reproduce the reference value by re-applying 0.55 when pibo>0.
+        // Claude Generated (Jul 2026). The pi scaling f1*=0.55 that the Fortran applies
+        // after this is now done once, before fctot.
         if (bond_type == 2 && ring_size == 5 && z_j * z_k == 42) {
-            if (isAmide(j_atom_idx, m_atoms, topo.hybridization, topo.pi_fragments, getCachedBondList()) ||
-                isAmide(k_atom_idx, m_atoms, topo.hybridization, topo.pi_fragments, getCachedBondList())) {
+            const std::vector<int>& cb7_piadr =
+                (static_cast<int>(topo.pi_atoms_final.size()) == m_atomcount)
+                    ? topo.pi_atoms_final : topo.pi_fragments;
+            if (isAmide(j_atom_idx, m_atoms, topo.hybridization, cb7_piadr, getCachedBondList()) ||
+                isAmide(k_atom_idx, m_atoms, topo.hybridization, cb7_piadr, getCachedBondList())) {
                 f1 = 5.0;
-                if (central_pibo > 0.0) f1 *= 0.55;  // mirror the post-ring pi scaling
             }
         }
 
@@ -1149,12 +1153,12 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     // aliphatic chains (e.g., phenyl-CH2) has low barriers with threefold symmetry.
     // Nitrogen pi-atoms get even weaker barriers (f1=0.2, "important for CB7 conf.")
 
-    // Use pi_fragments (= Fortran piadr) for direct pi-system membership check
-    // This matches STEP 1 (line 541) and Fortran gfnff_ini.f90:1873
-    bool j_in_pi = (j_atom_idx >= 0 && j_atom_idx < static_cast<int>(topo.pi_fragments.size())
-                    && topo.pi_fragments[j_atom_idx] > 0);
-    bool k_in_pi = (k_atom_idx >= 0 && k_atom_idx < static_cast<int>(topo.pi_fragments.size())
-                    && topo.pi_fragments[k_atom_idx] > 0);
+    // pi_atoms_final = the reference's post-Hückel piadr, which is what the torsion
+    // setup reads (see the is_in_pi_fr note above). This is the rule that PR41's
+    // metal-bound donors were wrongly matching through the pre-Hückel candidate list.
+    const bool have_pi_final = (static_cast<int>(topo.pi_atoms_final.size()) == m_atomcount);
+    bool j_in_pi = have_pi_final && j_atom_idx >= 0 && topo.pi_atoms_final[j_atom_idx] > 0;
+    bool k_in_pi = have_pi_final && k_atom_idx >= 0 && topo.pi_atoms_final[k_atom_idx] > 0;
 
     // Claude Generated (June 2026): the pi-sp3 rule is ACYCLIC-only in Fortran
     // (gfnff_ini.f90:1733-1744 lives in the `else` of `if (lring)`). Applying it to a
@@ -1200,13 +1204,17 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     // end (~line 1150), so the SP3-specials must come after it too. Uses the RAW hyb, so a
     // bond between two sp3 group-5 atoms (N-N, P-P, N-P) gets nrot=3, phi0=60, f1=3.0 even
     // when one end is in a pi-system (raw hyb stays 3) — the aminophosphine P-N bonds of
-    // ED30/PR30, which the pi-sp3 override otherwise forced to phi0=180/f1=0.2. Mirror the
-    // Fortran pi f2 f1-scaling (0.55) for the rare conjugated (pibo>0) case.
-    // Claude Generated (Jul 2026).
+    // ED30/PR30, which the pi-sp3 override otherwise forced to phi0=180/f1=0.2.
+    // Claude Generated (Jul 2026). The Fortran pi f2 f1-scaling (0.55) that follows this
+    // block is applied once, just before fctot.
     if (hyb_j == 3 && hyb_k == 3) {
-        int g_j = (z_j == 7 || z_j == 15) ? 5 : (z_j == 8 || z_j == 16) ? 6 : 0;
-        int g_k = (z_k == 7 || z_k == 15) ? 5 : (z_k == 8 || z_k == 16) ? 6 : 0;
-        bool sp3_special = true;
+        // param%group(Z) — see the note at the earlier group block; As/Sb/Bi are group 5
+        // and Se/Te group 6, which the old hand-written map missed entirely.
+        auto group_of_z2 = [](int z) {
+            return (z >= 1 && z <= 86) ? GFNFFParameters::periodic_group[z - 1] : 0;
+        };
+        int g_j = group_of_z2(z_j);
+        int g_k = group_of_z2(z_k);
         if (g_j == 5 && g_k == 5) {                                     // N-N, P-P, N-P
             f1 = 3.0;
             params.periodicity = 3;
@@ -1221,11 +1229,20 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
             params.periodicity = 2;
             params.phase_shift = 90.0 * M_PI / 180.0;
             if (z_j >= 16 && z_k >= 16) f1 = 25.0;                      // S-S
-        } else {
-            sp3_special = false;
         }
-        if (sp3_special && central_pibo > 0.0) f1 *= 0.55;             // pi f2 scaling (gfnff_ini.f90:1904)
     }
+
+    // Pi f1 scaling, applied ONCE and LAST (Fortran gfnff_ini.f90:1778, the closing line
+    // of the `if (pibo(m) > 0)` block). In the reference that block sits after the
+    // ring/acyclic case AND after the SP3 specials, so the 0.55 multiplies the FINAL f1.
+    // Claude Generated (Sep 2026, GMTKN55 PX13/hf_2_ts): curcuma applied it up in the f2
+    // section instead, where every later f1 assignment simply overwrote it — the ring
+    // cases (fr3/fr4/fr5/fr6, the terminal-atom 0.30) and the acyclic pi-sp3 override
+    // (0.5/0.2) all lost it, and two spot-fixes had been added to re-apply it for the CB7
+    // and SP3-special branches only. Measured on the HF-dimer proton-transfer TS, whose
+    // two 3-ring torsions sit on a central F-F bond with a tiny but nonzero pi bond order:
+    // barrier 0.31958 instead of 0.17577, exactly the factor 1/0.55, worth 2.4 kcal/mol.
+    if (central_pibo > 0.0) f1 *= 0.55;
 
     // ---------------------------------------------------------------------------
     // (F) Final force constant calculation
@@ -1775,7 +1792,7 @@ std::pair<std::vector<Dihedral>, std::vector<Dihedral>> GFNFF::generateTorsionsN
                 auto calculate_bond_angle = [&](int a, int b, int c) {
                     Eigen::Vector3d v_ba = (m_geometry.row(a).head<3>() - m_geometry.row(b).head<3>()).normalized();
                     Eigen::Vector3d v_bc = (m_geometry.row(c).head<3>() - m_geometry.row(b).head<3>()).normalized();
-                    return std::acos(std::max(-1.0, std::min(1.0, v_ba.dot(v_bc))));
+                    return curcuma_acos(std::max(-1.0, std::min(1.0, v_ba.dot(v_bc))));
                 };
 
                 double angle_ijk = calculate_bond_angle(i, j, k); // Angle at j (central 1)
@@ -2138,11 +2155,19 @@ std::vector<GFNFFSTorsion> GFNFF::generateSTorsionsNative() const
     // mixture), not a rebuild from the raw bond list. See docs/GFNFF_NEIGHBOR_LISTS.md.
     const std::vector<std::vector<int>>& neighbors = topo.adjacency_list;
 
+    // Fortran gfnff_ini.f90:1908-1924 pre-counts candidate triple bonds ("nn") with only the
+    // two-neighbour-carbon test, allocates sTorsl(6,nn), and then lets specialTorsList fill
+    // however many actually survive the distance/sp2/C1/C4 filters. nn is therefore an upper
+    // bound on the filled entries, and it is the "m" the buggy energy loop uses - so the
+    // reference-emulation path below needs it. Cheap to track, unused otherwise.
+    int nn_precount = 0;
+
     for (int i = 0; i < m_atomcount; ++i) {
         // Carbon with two neighbors (potential sp center)
         if (m_atoms[i] == 6 && neighbors[i].size() == 2) {
             for (int nbi : neighbors[i]) {
                 if (nbi <= i) continue; // Avoid double counting
+                if (m_atoms[nbi] == 6 && neighbors[nbi].size() == 2) ++nn_precount;
 
                 // Other carbon with two neighbors
                 if (m_atoms[nbi] == 6 && neighbors[nbi].size() == 2) {
@@ -2196,6 +2221,26 @@ std::vector<GFNFFSTorsion> GFNFF::generateSTorsionsNative() const
                     }
                 }
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Opt-in: reproduce the reference implementation's sTors loop bug
+    // ------------------------------------------------------------------
+    // gfnff_engrad.F90:494-503 loops "do i=1,m" but calls sTors_eg(m, n, ...), and sTors_eg
+    // reads topo%sTorsl(:,m) - the array SIZE, not the loop index. Both pprcht/gfnff and
+    // xtb 6.7.1 therefore evaluate ONLY the last allocated column, m times, and never touch
+    // the others; its guard "if (.not. any(sTorsl(:,m) == 0))" additionally zeroes the whole
+    // term whenever fewer entries survived the filters than were allocated.
+    // Emitting m copies of the last entry reproduces both the energy and the gradient exactly.
+    // Off by default: curcuma sums every torsion, which is what the term is for (erefhalf is
+    // a DLPNO-CCSD(T) diphenylacetylene value, not a fitted parameter, so summing correctly
+    // does not invalidate the GFN-FF parametrisation).
+    if (m_parameters.value("storsion_reference_loop_bug", false)) {
+        if (static_cast<int>(storsions.size()) != nn_precount) {
+            storsions.clear();  // last column never filled -> reference contributes zero
+        } else if (!storsions.empty()) {
+            storsions.assign(static_cast<size_t>(nn_precount), storsions.back());
         }
     }
 
