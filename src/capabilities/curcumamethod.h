@@ -33,6 +33,23 @@ struct RestartValidationResult {
     std::string error_message;
 };
 
+/// A stop request that survives being copied without carrying the request over.
+///
+/// Claude Generated 2026 - CurcumaMethod subclasses are assigned in places
+/// (simplemd.cpp assigns a whole RMSDDriver into m_shared_pool_driver), and a bare
+/// std::atomic member deletes the implicit assignment of every one of them. This
+/// wrapper keeps them assignable and states the semantics: a copy is a fresh run,
+/// so it starts unstopped.
+struct StopFlag {
+    std::atomic<bool> value { false };
+
+    StopFlag() = default;
+    StopFlag(const StopFlag&) { }
+    StopFlag& operator=(const StopFlag&) { return *this; }
+    StopFlag(StopFlag&&) noexcept { }
+    StopFlag& operator=(StopFlag&&) noexcept { return *this; }
+};
+
 class CurcumaMethod {
 public:
     CurcumaMethod(const json& defaults, const json& controller, bool silent); // Legacy constructor
@@ -77,8 +94,8 @@ public:
     /// Ask this run to stop. Thread-safe, and unlike the "stop" file it addresses
     /// ONE run: that file sits in the working directory, so it aborts every
     /// concurrent method at once and a forgotten one kills the next run at step 0.
-    void requestStop() { m_stop_requested.store(true); }
-    bool stopRequested() const { return m_stop_requested.load(); }
+    void requestStop() { m_stop_requested.value.store(true); }
+    bool stopRequested() const { return m_stop_requested.value.load(); }
 
     /// Pin the output directory and keep createBMTDir() from replacing it.
     ///
@@ -168,6 +185,6 @@ private:
     std::string m_output_dir;
     std::string m_bmt_dir;                    // Claude Generated 2026: BMT directory path
     bool m_output_dir_pinned = false;         // Claude Generated 2026: pinOutputDir()
-    std::atomic<bool> m_stop_requested { false };  // Claude Generated 2026: requestStop()
+    StopFlag m_stop_requested;                // Claude Generated 2026: requestStop()
     std::vector<std::string> m_bak_files;    // Claude Generated 2026: Files to copy back to CWD
 };
