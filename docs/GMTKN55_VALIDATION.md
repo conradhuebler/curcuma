@@ -16,7 +16,7 @@ machine).
 |--------|-----------:|----------------------:|----:|-----:|----:|
 | gfn2   | 2140 | 320 | 0.000 | 0.001 | 0.017 |
 | gfn1   | 2142 | 320 | 0.047 | 0.549 | 11.93 |
-| gfnff  | 2458 | 0   | 0.268 |  3.20 | 84.5  |
+| gfnff  | 2458 | 0   | 0.262 |  3.20 | 84.5  |
 
 gfn1/gfn2 skip every structure with a nonzero `.UHF` (see "Known limitation" below).
 gfnff has no open-shell term and runs everything.
@@ -45,12 +45,19 @@ EVERY remaining outlier against pprcht - reached **0.268** and moved the set max
 `W4-11` 0.716 -> 0.197, `CARBHB12` 0.445 -> 0.000, `HAL59` 0.312 -> 0.000, `MB16-43`
 10.405 -> 7.901.
 
-**Where the residual now sits.** The 14 largest deviations outside `MB16-43` were arbitrated
-one by one against pprcht: 13 of them are pprcht-vs-xtb reference splits (curcuma matches
-pprcht to <0.03 kcal/mol) and one is a small genuine residual, `HEAVY28/pbh4_teh2` at
--0.39 kcal/mol. Above roughly 0.4 kcal/mol and outside `MB16-43`, what this table measures
-is therefore the divergence between the two GFN-FF implementations, not a curcuma port
-error. Read the gfnff row accordingly.
+Known Issue #22 (the raw `metal_type` gate and three out-of-bounds element tables) reached
+**0.262** and took `HEAVY28` 0.406 -> **0.000** (max 2.06 -> 0.002).
+
+**Where the residual now sits.** 46 of the 82 deviations above 0.3 kcal/mol outside
+`MB16-43` were arbitrated one by one against pprcht, and every one of them is a
+pprcht-vs-xtb reference split with curcuma matching pprcht to <0.03 kcal/mol. Excluding
+`MB16-43` the MAD is **0.081**. What this table measures above roughly 0.3 kcal/mol is
+therefore the divergence between the two GFN-FF implementations, not a curcuma port error
+- and for the two subsets that dominate it, `MB16-43` and `AL2X6`, all GFN-FF
+implementations are anyway far from the true QM. Read the gfnff row accordingly.
+
+Known curcuma-vs-pprcht residuals that remain: inside `MB16-43` (`/23` +0.565, `/35`
++0.268, on top of a 60-84 kcal split) and `AL2X6/al2me6` at +0.03. Neither is root-caused.
 
 > **Reading the numbers back**: `scripts/gmtkn55_compare.py` caches every energy in
 > `_run/energies.json` and reuses it unless `--recompute` is given. A re-run after a code

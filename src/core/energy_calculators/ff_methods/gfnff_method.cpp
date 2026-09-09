@@ -3934,8 +3934,31 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // gen_rabshift (line 1276) and the heavy-heavy shift (line 1268, kept below). Without
     // this gate, a metal center with hyb=0 (octahedral TM) wrongly triggers the sp (0,1)
     // correction (+0.14) — inflating the M-CO equilibrium distance and over-binding.
-    bool bond_has_metal = (z1 >= 1 && z1 <= 86 && metal_type[z1 - 1] > 0)
-                       || (z2 >= 1 && z2 <= 86 && metal_type[z2 - 1] > 0);
+    //
+    // CORRECTED (Sep 2026, GMTKN55 HEAVY28): the branch is selected by `bbtyp < 5` in the
+    // reference, and btyp=5 comes from `imetal(ii) > 0 .or. imetal(jj) > 0` — imetal, NOT
+    // param%metal(Z) raw. gfnff_ini.f90:273-274 demotes a low-coordinate element of group
+    // > 3 back to a non-metal ("Sn, Pb, Bi, with small CN are better described as
+    // non-metals"), which is exactly the correction Known Issue #16 applied to the fqq /
+    // force-constant half of this function while leaving THIS gate on the raw array. So
+    // BiH3 (Bi, 3 neighbours) and PbH4 (Pb, 4 neighbours) took the metal branch and
+    // skipped the whole non-metal shift block below — most visibly the X-H rule, leaving
+    // rabshift at gen_rabshift = -0.110 instead of -0.110 + rabshifth = -0.160 and the
+    // Bi-H / Pb-H r0 0.044 / 0.076 Angstrom too long. That is a per-molecule constant
+    // (BiH3 -0.72, PbH4 -0.39 kcal/mol in the bond term, everything else exact) which
+    // every HEAVY28 complex inherits, doubling where the motif appears twice.
+    auto imetal_bond = [&](int z, int a) -> int {
+        if (z < 1 || z > 86) return 0;
+        int im = metal_type[z - 1];
+        if (im == 0) return 0;
+        const int grp = GFNFFParameters::periodic_group[z - 1];
+        if (grp <= 3) return im;
+        const int nb_a = (a >= 0 && a < static_cast<int>(topo.neighbor_lists.size()))
+                             ? static_cast<int>(topo.neighbor_lists[a].size()) : -1;
+        if (nb_a >= 0 && nb_a <= 4) im = 0;   // Sn, Pb, Bi, ... with small CN
+        return im;
+    };
+    bool bond_has_metal = (imetal_bond(z1, atom1) > 0) || (imetal_bond(z2, atom2) > 0);
 
     if (!bond_has_metal) {
         // Fortran gfnff_ini.f90:1143-1149. These are INDEPENDENT `if`s, not a chain:
