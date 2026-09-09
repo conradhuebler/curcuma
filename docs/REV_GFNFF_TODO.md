@@ -13,6 +13,13 @@ revised force field can pick them up deliberately rather than rediscover them.
 quirk? If yes, "fixing" it invalidates the parametrisation and must stay opt-in. If the
 quantity is a hard-coded ab-initio constant or a plain coding slip, curcuma may lead.
 
+**Scope, going forward**: this file is also where the parametric adaptation towards
+**react-gfnff** ([GFNFF_REACT_TOPOLOGY.md](GFNFF_REACT_TOPOLOGY.md)) is collected. Port
+fidelity gets curcuma to reproduce GFN-FF; the entries here are what makes it describe the
+chemistry better than GFN-FF does — including refitting parameters where the functional
+form itself is the limit. Bond-breaking and transition states (entries 4, 6, 9, 10) are the
+obvious targets.
+
 ## Already deviating from the reference by default
 
 ### 1. `nh_linear_fix` — GEODEP angle rule creates artefact minima at N-H centres
@@ -276,10 +283,12 @@ the PX13 barriers they complete show what those energies are worth:
 | hf_5 | 14.6 | 220.0 | 220.0 |
 | hf_6 | 16.6 | **293.2** | 609.7 (junk) |
 
-GFN-FF is 3-18x out on every one of these — it cannot describe a transition state where
-the bonding topology changes. The guard replaces "no number at all" with "a number that is
-as wrong as its neighbours", which is the right behaviour for an optimiser or an MD that
-would otherwise abort, and nothing more.
+**curcuma covers a case both reference implementations drop.** That is the point of the
+guard: a strongly ionic bond no longer takes the whole single point down, so an optimiser,
+an MD or a conformer search walks through such a geometry instead of aborting. The value it
+returns is not accurate — the PX13 barriers are 3-18x too high, because GFN-FF cannot
+describe a transition state where the bonding topology changes. Making those numbers right
+is a parametrisation question and belongs to the react-gfnff work, not here.
 
 **A harness bug found on the way.** `xtb` prints `TOTAL ENERGY NaN Eh` for these two
 structures but still prints finite values for the individual terms above it, and
