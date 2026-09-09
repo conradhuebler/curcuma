@@ -135,20 +135,24 @@ test compares the per-module definition count before and after (`simplemd` 78,
 `confsearch` 71, `analysis` 50, `confscan` 44, `gfnff` 35, `rmsd` 33); `-list_modules` shows
 module descriptions.
 
-**A bug to fix while in there (found 09.09.2026).** The extractor silently drops
-multi-line PARAMs whose help text is written as adjacent string literals. Measured: the
-generator reports 662 definitions and warns once about `gfnff.h` around line 310; `solvent` and
-`solvent_model` (`gfnff.h:298` and `:304`) are **not** in the generated registry at all, so
-`ConfigManager` has no defaults for them and `-export_config gfnff` does not list them.
+**A bug found and fixed on the way in (09.09.2026) — larger than it first looked.** The
+extractor silently dropped multi-line PARAMs whose help text is written as adjacent string
+literals. The single warning it emitted pointed at `gfnff.h`, which suggested two lost
+parameters; the true number was **22**, the rest disappearing without any warning at all.
 
-The cause is the accumulate-and-match loop: it warns and *clears the accumulator* as soon as the
-text so far contains "PARAM" and any `)`, and these help texts contain one
-(`'chloroform'). 'none' (default)`) long before the PARAM's own closing paren. The same
-parameter written on one 436-character line (`xtbinterface.h:42`) goes through fine, which is why
-the source carries the note "PARAMs stay single-line".
+The cause was the accumulate-and-match loop: it warned and *cleared the accumulator* as soon as
+the text so far contained "PARAM" and any `)`, and these help texts contain one
+(`'chloroform'). 'none' (default)`) long before the PARAM's own closing paren. The same parameter
+written on one 436-character line (`xtbinterface.h:42`) went through fine, which is why the
+source carries the note "PARAMs stay single-line".
 
-Fix: only attempt the match, and only warn, once the PARAM's opening parenthesis is balanced,
-counting parentheses outside string literals. The count then has to go 662 → 664.
+Fixed by waiting for the PARAM's own parenthesis to close, counting only parentheses outside
+string literals, and by skipping comment lines — `gfnff.h` keeps a removed parameter as
+`// PARAM(eeq_distance_cutoff, ...) - REMOVED` for the record, which was reported as malformed on
+every build. Count 662 → **684**, nothing lost. What came back: 18 `eeq_solver` parameters
+(the whole PCG/extrapolation block), `gfnff.solvent`, `gfnff.solvent_model` and two
+`eeq_refactor_*`. None of them had a `ConfigManager` default or appeared in `-export_config`
+before.
 
 ### WP2 — Annotate what is exposed
 
