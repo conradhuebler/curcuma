@@ -299,6 +299,46 @@ The foundation that enabled rapid angle error debugging:
 
 ## Known Limitations (Documented Architectural Differences)
 
+### GEODEP angle rule creates artefact minima at N-H centers — guarded (Aug 2026, `nh_linear_fix`, default ON)
+
+> Origin: this guard was developed and validated on the `confsearch` branch (commit
+> `51830efa`) and ported here verbatim in Sep 2026, so a later merge of `confsearch` sees
+> identical text rather than a conflict or a duplicate section. `confsearch` is the origin
+> if the two ever diverge.
+
+**Inherited method defect** (xtb 6.7.1 reproduces it, so not a port bug): the reference
+hybridisation fallback "input angle > 160 deg → sp, θ0 = 180" (`gen%linthr`,
+`gfnff_ini.f90`) declares any near-linear input angle linear-by-design. A thermally
+stretched =N-H (measured: guanidine imine at 179 deg in a hot MD snapshot, WEKLQ) is
+re-perceived as sp, its distortion becomes its own equilibrium, and the structure
+optimises INTO the artefact, appearing ~160 kJ/mol too deep (curcuma −18.859 vs −18.768 Eh;
+xtb −276 kJ/mol; GFN2 puts the same geometry +115 kJ/mol above the conformer record). In a
+conformer search whose snapshot optimisations each derive their own topology, one such
+event founds a self-reinforcing family (75 % of a pool within three temperature stages);
+the species check compares bonds only and passes the hybridisation flip.
+
+Curcuma's default (`-gfnff.nh_linear_fix true`) skips the angle-only sp promotion for a
+2-coordinate nitrogen carrying a hydrogen. All genuine sp N-H cases (H-N=C isocyanide-like,
+terminal R-N=N, metal nitriles, azide chains) are caught by the structural rules that run
+before the angle fallback and are unaffected — normal geometries are bit-identical
+(55/55 runnable gfnff ctests unchanged). `-gfnff.nh_linear_fix false` restores bit-faithful
+reference behaviour for validation against xtb/pprcht (verified: reproduces −18.85926294 Eh
+on the artefact structure).
+
+Minimal reproduction (measured Sep 2026 when porting the guard to `feature/gfn-cleanup`;
+formamidine HN=CH-NH2, only the imine C-N-H angle varied):
+
+| imine C-N-H | `nh_linear_fix true` (default) | `false` | xtb 6.7.1 |
+|---|---|---|---|
+| 179° (stretched) | −1.15574423 | −1.28386692 | −1.28386690 |
+| 119° (normal) | −1.17801951 | −1.17801951 | −1.17801951 |
+
+The artefact is worth **0.128 Eh ≈ 336 kJ/mol** of spurious depth, and it makes the
+*distorted* geometry deeper than the relaxed one (−1.2839 vs −1.1780) — which is exactly
+why an optimisation walks into it. At a normal angle the guard is inert and the energy is
+bit-faithful to the reference. Also verified inert across all 95 MOR41 and all 90 S30L-CI
+structures (bit-identical with and without the guard).
+
 ### Bond Energy Size-Dependent Error (Feb 14, 2026) - INVESTIGATED
 
 **Issue**: Bond energy error scales with system size (~7 µEh/bond for complex)

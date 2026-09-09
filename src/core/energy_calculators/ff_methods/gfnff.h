@@ -234,6 +234,12 @@ BEGIN_PARAMETER_DEFINITION(gfnff)
 PARAM(accuracy, String, "normal", "Accuracy profile: loose|normal|medium|high. Maps to EEQ and CN parameters.", "Basic", {})
 PARAM(allow_unconverged_charges, Bool, false, "Allow calculation to continue with unconverged EEQ charges (warn instead of abort).", "Advanced", {})
 PARAM(skip_phase2, Bool, false, "Skip Phase 2 EEQ refinement and use Phase 1 topology charges directly. Faster but less accurate.", "Advanced", {})
+// ORIGIN NOTE (do not duplicate on merge): nh_linear_fix and its guard in
+// determineHybridizationFortran() were first added on the `confsearch` branch (51830efa,
+// Aug 29 2026), where the artefact was found. Ported here verbatim - same PARAM text, same
+// guard - so a later merge of `confsearch` sees identical lines instead of a conflict or a
+// second copy. If the two ever diverge, `confsearch` is the origin; reconcile there.
+PARAM(nh_linear_fix, Bool, true, "Do not let the angle-only GEODEP rule (input angle > 160 deg -> sp) promote a 2-coordinate nitrogen that carries a hydrogen to sp hybridisation. Why: the reference rule (gfnff_ini.f90, gen%linthr) declares ANY near-linear input angle linear-by-design, so a thermally stretched =N-H (measured: a guanidine imine N-H at 179 deg in a hot MD snapshot) is re-perceived as sp, gets theta0=180, and the distortion becomes its own equilibrium -- the structure optimises INTO the artefact and appears ~160 kJ/mol too deep (xtb 6.7.1 reproduces this with -276 kJ/mol, so it is an inherited method defect, not a port bug). In a conformer search, where every snapshot optimisation derives its own topology, one such event founds a self-reinforcing family (measured: 75 percent of a WEKLQ pool within three temperature stages). The genuine sp cases of an N-H nitrogen (H-N=C isocyanide-like, R-N=N terminal, metal nitriles, azides) are all caught by the STRUCTURAL rules that run before the angle fallback and are unaffected by this guard. Set false for bit-faithful reference (xtb/pprcht) behaviour, e.g. for validation against the Fortran implementations.", "Advanced", {})
 PARAM(cn_cutoff_bohr, Double, 10.0, "CN neighbor list cutoff radius in Bohr (reference cnthr=100 Bohr^2=10 Bohr). 0 = use accuracy-based threshold instead.", "Advanced", {})
 PARAM(cn_accuracy, Double, 1.0, "CN accuracy for threshold calculation (cnthr = 100 - log10(acc)*50). Only used when cn_cutoff_bohr = 0. Set to 0 for full O(N^2) reference mode.", "Advanced", {})
 PARAM(solve, String, "auto",
