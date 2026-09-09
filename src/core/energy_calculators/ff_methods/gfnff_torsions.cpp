@@ -985,11 +985,22 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
             }
         }
 
-        // 3. Hypervalent bond correction (btyp == 4): fij *= 0.2
-        //    Reference: gfnff_ini.f90:1811 "if (btyp(m) .eq. 4) fij = fij*0.2d0"
-        //    Note: Bond type detection not yet fully implemented
-        //    TODO Phase 2D: Implement full bond type classification system
-        //    For now: Deferred (low impact - rare in organic molecules)
+    }
+
+    // 3. Hypervalent bond correction (Fortran gfnff_ini.f90:1811,
+    //    "if (btyp(m) .eq. 4) fij = fij*0.2d0"), applied LAST, after the alphaCO and amide
+    //    scalings, exactly as in the reference.
+    //    IMPLEMENTED (Sep 2026). It had been deferred as "rare in organic molecules" and
+    //    could not have worked anyway: classifyBondType() folded hyb 5 onto 3, so btyp=4 was
+    //    unreachable until that fold was removed (Known Issue #15). Its absence multiplied
+    //    every torsion across a hypervalent centre by 5: disulfuric acid H2S2O7 (GMTKN55
+    //    ICONF and PArel, S is hyb=5) had all twelve of its torsions at exactly 5x the
+    //    reference force constant, 12.6 kcal/mol on the molecule.
+    if (bond_type == 4) {
+        fij *= 0.2;
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("  hypervalent central bond (btyp=4): fij *= 0.2");
+        }
     }
 
     // ---------------------------------------------------------------------------

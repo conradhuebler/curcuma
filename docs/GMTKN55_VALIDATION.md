@@ -16,7 +16,7 @@ machine).
 |--------|-----------:|----------------------:|----:|-----:|----:|
 | gfn2   | 2140 | 320 | 0.000 | 0.001 | 0.017 |
 | gfn1   | 2142 | 320 | 0.047 | 0.549 | 11.93 |
-| gfnff  | 2458 | 0   | 0.446 |  3.81 | 105.5 |
+| gfnff  | 2458 | 0   | 0.416 |  3.77 | 105.5 |
 
 gfn1/gfn2 skip every structure with a nonzero `.UHF` (see "Known limitation" below).
 gfnff has no open-shell term and runs everything.
@@ -38,6 +38,8 @@ Known Issue #17 (the q-loop's second pass re-detecting fragments) then took it t
 the maximum again, 151.5 -> 105.5: `BH76` 4.79 -> 0.080, `SIE4x4` and `CHB6` -> 0.000. Known Issue #18
 (the q-loop's carbene charge override) reached **0.447**, with `G21EA` 0.653 -> 0.131, and
 Known Issue #19 (the non-reference angle-`fqq` guard) **0.446**, with `BH76` 0.080 -> 0.057.
+Known Issue #20 (the missing hypervalent torsion correction) reached **0.416**, with `ICONF`
+1.78 -> 0.398 and `PArel` 0.95 -> 0.348.
 
 > **Reading the numbers back**: `scripts/gmtkn55_compare.py` caches every energy in
 > `_run/energies.json` and reuses it unless `--recompute` is given. A re-run after a code
@@ -100,8 +102,8 @@ Issues; 3 unit-test binaries not rebuilt since before this session) - none touch
 
 > **Updated Sep 2026.** The AHB21 bullet below is RESOLVED - it was the two-fragment
 > charge placement (Known Issue #13), now at MAD 0.606 / max 4.8. The section is kept for
-> the categories that remain. Current state: MAD 0.446 / RMSD 3.81 / max 105.5, with
-> 115 of 2458 structures above 1 kcal/mol and 13 above 20.
+> the categories that remain. Current state: MAD 0.416 / RMSD 3.77 / max 105.5, with
+> 106 of 2458 structures above 1 kcal/mol and 13 above 20.
 >
 > An arbitration run (worst ~77 outliers, curcuma vs pprcht vs xtb) showed these are
 > **mostly genuine curcuma port errors**, not the pprcht-vs-xtb reference split that
