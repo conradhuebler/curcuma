@@ -339,6 +339,25 @@ why an optimisation walks into it. At a normal angle the guard is inert and the 
 bit-faithful to the reference. Also verified inert across all 95 MOR41 and all 90 S30L-CI
 structures (bit-identical with and without the guard).
 
+**Cross-check against higher levels on the same two geometries.** ΔE(179° − 119°), i.e. how
+much higher the stretched N-H geometry should sit:
+
+| method | kcal/mol | kJ/mol |
+|---|---:|---:|
+| r²SCAN-3c (ORCA 6, def2-mTZVPP) | **+24.1** | +101.0 |
+| GFN2 (curcuma, == xtb to 1e-8) | **+24.0** | +100.4 |
+| GFN-FF, `nh_linear_fix true` (default) | +14.0 | +58.5 |
+| GFN-FF, `nh_linear_fix false` (= xtb/pprcht) | **−66.4** | −277.9 |
+
+GFN2 reproduces r²SCAN-3c to 0.1 kcal/mol here, so the sign is not in doubt: the stretched
+geometry is ~24 kcal/mol **above** the relaxed one. The reference GFN-FF behaviour inverts
+that sign and is ~90 kcal/mol off; the guard leaves a 10 kcal/mol underestimate, which is
+ordinary force-field error. This is the independent justification for `nh_linear_fix`
+defaulting to ON rather than to bit-faithfulness. Caveat: single points on a constructed
+formamidine geometry (only the angle varies, nothing is relaxed), so the 0.1 kcal/mol
+GFN2/r²SCAN-3c agreement is partly coincidence — the sign and order of magnitude are the
+load-bearing part.
+
 ### Bond Energy Size-Dependent Error (Feb 14, 2026) - INVESTIGATED
 
 **Issue**: Bond energy error scales with system size (~7 µEh/bond for complex)
