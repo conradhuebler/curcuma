@@ -4569,6 +4569,20 @@ std::vector<bool> EEQSolver::detectPiSystem(
     const int natoms = atoms.size();
     std::vector<bool> is_pi_atom(natoms, false);
 
+    // Prefer the force field's own pi-candidate list when the caller supplies it. That
+    // array is the verbatim port of gfnff_ini.f90:312-336; the inference below predates it
+    // and differs in three ways that matter — it has no NR3-X and no SO3 veto, its pi
+    // element set is missing B and Cl, and its picon branch covers only N/O/F and only for
+    // hyb == 3. Claude Generated (Sep 2026, GMTKN55 BHROT27/methylamine): a nitrogen with
+    // four neighbours is vetoed by the reference but counted here, which pushes npiall from
+    // 1 to 2 and flips the dgam nitrogen branch from ff = -0.13 to -0.14 through the
+    // replicated piadr index-cutoff bug — 0.15 kcal/mol in the Coulomb term of a 7-atom
+    // molecule, and the same wherever an amine sits next to an sp/sp2 centre.
+    if (topology.has_value() && static_cast<int>(topology->is_pi.size()) == natoms) {
+        for (int i = 0; i < natoms; ++i) is_pi_atom[i] = (topology->is_pi[i] != 0);
+        return is_pi_atom;
+    }
+
     auto is_pi_element = [](int Z) {
         return (Z == 6 || Z == 7 || Z == 8 || Z == 9 || Z == 16);  // C, N, O, F, S
     };

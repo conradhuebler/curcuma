@@ -9322,6 +9322,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         // Real itag (set by determineHybridizationFortran above), so calculateDxi() can test
         // the tag the reference actually carries instead of re-deriving it from geometry.
         eeq_topology_input.itag = topo_info.itag;
+        // The EEQ section reads the PRE-Hückel pi-candidate list (gfnff_ini.f90:312-336);
+        // hand it the force field's own array so the dgam / amide rules stop using
+        // EEQSolver's older, veto-less inference. Claude Generated (Sep 2026).
+        eeq_topology_input.is_pi.assign(m_atomcount, 0);
+        for (int i = 0; i < m_atomcount && i < static_cast<int>(topo_info.pi_fragments.size()); ++i)
+            eeq_topology_input.is_pi[i] = (topo_info.pi_fragments[i] != 0) ? 1 : 0;
         // CRITICAL FIX (Mar 2026): Use Pyykko covalent radii (param%rad), NOT D3 radii
         eeq_topology_input.covalent_radii.resize(m_atomcount);
         for (int i = 0; i < m_atomcount; ++i) {

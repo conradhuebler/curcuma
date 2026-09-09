@@ -126,6 +126,13 @@ public:
         // geometry: the stored tag has already been through the aryne rule and the qa < -0.4
         // override, and re-deriving it silently skips both. Empty = fall back to the heuristic.
         std::vector<int> itag;
+        // Fortran piadr as the EEQ section sees it: the PRE-Hückel pi-candidate list
+        // (gfnff_ini.f90:312-336), i.e. GFNFF::detectPiSystems()'s output, nonzero for a
+        // candidate. Supplied so the dgam / amide rules use the SAME array as the rest of
+        // the force field instead of EEQSolver::detectPiSystem()'s own older inference,
+        // which has neither the NR3-X / SO3 vetoes nor B/Cl/S in its element lists.
+        // Empty = fall back to that inference.
+        std::vector<char> is_pi;
     };
 
     /**
