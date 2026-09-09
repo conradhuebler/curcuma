@@ -63,19 +63,32 @@ Curcuma contains a mix of production-tested and AI-generated code. The following
 ### UFF, xTB, GFN-FF and Dispersion Correction
 Curcuma has an interface to tblite, xtb as well simple-d3 and cpp-d4, enabling semiempirical calculations or combinations of UFF with D3, D4 and H4 (no parameters are adjusted yet). To use one of the methods, please add **-method methodname** to your arguments:
 
-UFF (default)
-- uff : Universal Force Field
+Classical force field:
+- uff : Universal Force Field (no longer any capability's default since Sep 2026)
 
-Native force field (no external dependency required):
+Native force field (no external dependency required, **the default for every capability**):
 - **gfnff** : Native C++ GFN-FF — full energy and gradient, validated against Fortran reference (see status below)
 - **gfnff** + `-gpu cuda` : CUDA-accelerated variant; topology cached, charges on CPU, all kernels on GPU
 - **xtb-gfnff** : GFN-FF via the xtb Fortran library (USE_GFNFF build flag)
 
+**Which method should I use?** `gfnff` is the **fast** one and the default for every
+capability (single point, optimisation, MD, Hessian, conformer search): a native GFN-FF
+force field, no external dependency, milliseconds per gradient. `gfn2` is the **accurate**
+one: native GFN2-xTB, semi-empirical QM, roughly two orders of magnitude slower but with
+real electronic structure (charges, orbitals, bond breaking). Use `gfnff` to explore and
+`gfn2` to decide.
+
 Native GFN methods (no external dependency required, canonical backends since AP3 2026-04-25):
-- **gfn1** : Native GFN1-xTB — 10/12 validation molecules at 1e-8 vs tblite
-- **gfn2** : Native GFN2-xTB — 11/12 validation molecules at 1e-8 vs tblite (only `complex` open at 6.95e-5)
+- **gfn1** : Native GFN1-xTB — 14/16 validation molecules at 1e-8 vs tblite; includes the GFN1-only halogen-bond correction (B–X···A, added Sep 2026)
+- **gfn2** : Native GFN2-xTB — 15/16 validation molecules at 1e-8 vs tblite (only `complex` open at 7.3e-8)
 
 > Native GFN1/GFN2 are validated against tblite to a 1e-8 Eh target — see [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md). For explicit tblite or xtb backends use `tblite-gfn1`/`tblite-gfn2` or `xtb-gfn1`/`xtb-gfn2`.
+
+> **Halogen bonds (GFN1, Sep 2026):** GFN1 carries a classical B–X···A correction (X = Cl/Br/I/At, acceptor = N/O/P/S) that GFN2 does not. It was previously unimplemented; with it, all 2462 GMTKN55 structures reproduce xtb 6.7.1 to MAD 0.00007 / max 0.011 kcal/mol (was 0.041 / 11.93, and every deviation above 0.1 kcal was a halogen-bonded `HAL59` structure). See [docs/GMTKN55_VALIDATION.md](docs/GMTKN55_VALIDATION.md).
+
+> **4th-period elements (GFN1):** what is left of that 0.011 kcal/mol is a genuine xtb-vs-tblite disagreement, not a curcuma error — the two references carry different STO-6G 4s/4p tables (Z = 19–36; GFN2 uses STO-4G there and is unaffected). curcuma follows tblite, whose expansion fits the exact Slater function 3–5× better. `-xtb.sto6g_legacy_4sp true` switches to xtb's tables and reproduces the binary bit-for-bit. Details in [docs/GMTKN55_VALIDATION.md](docs/GMTKN55_VALIDATION.md).
+
+> **Gradients (Sep 2026):** analytic gradients are now validated set-wide against xtb 6.7.1 on all 2462 GMTKN55 geometries (median deviation 3e-7 / 4e-7 / 4e-8 Eh/Bohr for gfn1 / gfn2 / gfnff), with the outliers arbitrated by finite differences of each code's own energy. That sweep found and fixed two unit bugs — GFN-FF MD forces were a factor 1.89 too small, and vibrational frequencies were too high for every method — see [docs/GRADIENT_VALIDATION.md](docs/GRADIENT_VALIDATION.md). Frequencies now match xtb to ≤0.13 % on H2O for all three methods.
 
 > **Speed:** on a 231-atom complex (single core, energy+gradient) native `gfn1` runs in ~1.02 s and `gfn2` in ~1.08 s, versus xtb 6.7.1 at 1.37 s / 0.98 s — i.e. gfn1 is faster than xtb and gfn2 within ~11%. See [docs/SQM_PERFORMANCE.md](docs/SQM_PERFORMANCE.md) for the single-core record and [docs/SQM_THREADING.md](docs/SQM_THREADING.md) for `-threads N` scaling.
 

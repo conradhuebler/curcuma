@@ -15,7 +15,7 @@ machine).
 | method | n compared | skipped (open-shell) | MAD | RMSD | max |
 |--------|-----------:|----------------------:|----:|-----:|----:|
 | gfn2   | 2458 | 0   | 0.000 | 0.001 | 0.017 |
-| gfn1   | 2462 | 0   | 0.041 | 0.512 | 11.93 |
+| gfn1   | 2462 | 0   | 0.000 | 0.001 | 0.011 |
 | gfnff  | 2458 | 0   | 0.262 |  3.20 | 84.5  |
 
 Nothing is skipped any more: native gfn1/gfn2 gained the open-shell (two-channel Fermi)
@@ -26,13 +26,22 @@ occupation in Sep 2026, so the 320 structures with a nonzero `.UHF` are now comp
 |---|---:|---:|---:|---:|
 | | n | MAD | n | MAD |
 | gfn2 | 2140 | 0.0000 | 318 | **0.00000** |
-| gfn1 | 2141* | 0.0466 | 320 | **0.00002** |
+| gfn1 | 2142*| 0.00008 | 320 | **0.00001** |
 
 \* `W4-11/so3` with gfn1 used to sit at 56738 kcal/mol here — an SCF that converged to a
 spurious stationary point (max |q| = 13.9 e) out of the EEQ initial guess. curcuma now
 rejects a physically impossible converged charge distribution and repeats from the bare H0,
-which reproduces xtb to 1e-8; see CLAUDE.md Known Issue #9. The remaining gfn1 residual is
-the pre-existing HAL59 iodine/bromine one (max 11.93).
+which reproduces xtb to 1e-8; see CLAUDE.md Known Issue #9.
+
+The gfn1 row was **MAD 0.041 / max 11.93** until Sep 2026, and every one of its 41
+deviations above 0.1 kcal/mol was in `HAL59`: the GFN1 halogen-bond correction was a stub
+returning 0.0 (CLAUDE.md Known Issue #26). With the term ported, `HAL59` goes MAD
+0.950 → **0.00128**, max 11.93 → 0.011, and no subset is above 0.011 any more. What is
+left is **not a curcuma error**: it is the xtb-vs-tblite STO-6G 4s/4p split (Known Issue
+#27), which curcuma resolves in tblite's favour on a measured basis-quality argument.
+`-xtb.sto6g_legacy_4sp true` reproduces the xtb binary bit-for-bit and takes the 56
+structures containing a Z=19–36 element from MAD 0.00313 / max 0.01056 to
+**0.0000056 / 0.0000143** kcal/mol — i.e. the split is the whole of it.
 
 The gfnff row was 3.389 after the two isolated-ion EEQ fixes below, 3.462 after the
 pyrrole pi-veto fix (CLAUDE.md Known Issue #10), and reached **2.117** with the four
@@ -80,6 +89,112 @@ Known curcuma-vs-pprcht residuals that remain: inside `MB16-43` (`/23` +0.565, `
 
 **gfn1/gfn2 confirm prior findings** (main-group, closed-shell): essentially exact
 reproduction of xtb, consistent with `docs/SQM_VALIDATION.md` / `docs/SQM_WP2_gfn1_accuracy.md`.
+
+## GFN1: the halogen-bond correction was never implemented — FIXED (Sep 2026)
+
+`XTB::calcHalogenBondEnergy()` returned `0.0` with the comment "to be implemented if
+accuracy requires it". It does: GFN1 carries a classical B–X···A term (X = Cl/Br/I/At,
+acceptor = N/O/P/S) that GFN2 does not have, and it is worth up to 0.019 Eh. The entire
+gfn1 GMTKN55 residual was that one term — 41 structures above 0.1 kcal/mol, **all** of
+them `HAL59`, none anywhere else.
+
+Ported verbatim from `external/xtb/src/xtb/halogen.f90` (`xbpot`) plus the triple list of
+`scf_module.F90:370-404`; `external/tblite/src/tblite/classical/halogen.f90` was checked
+line by line against it and is algebraically identical. The parameters were already in
+`gfn1_params.hpp` (`halogen_bond`, `halogen_radscale` 1.3, `halogen_damping` 0.44) and
+unused. The analytic gradient is ported with it and agrees with xtb's own gradient on
+`FI_pyr` to 2.6e-7 Eh/Bohr (the residual is the pre-existing GFN1 D3 finite-difference
+term, not the new one).
+
+| | MAD | max | >0.1 kcal |
+|---|---:|---:|---:|
+| gfn1 GMTKN55 before | 0.041 | 11.933 | 41 |
+| gfn1 GMTKN55 after | 0.00007 | 0.011 | 0 |
+| `HAL59` before | 0.950 | 11.933 | |
+| `HAL59` after | 0.00128 | 0.011 | |
+
+Why no test caught it: `test_cases/sqm_reference` had no molecule with a halogen bond —
+its one halogen case, `HCl`, has neither an acceptor nor a nonzero bond strength (Cl's
+GFN1 `halogen_bond` parameter is exactly 0, so only Br/I/At contribute at all).
+`sqm_val_FI_pyr_gfn1` now closes that gap; it fails on the pre-fix binary by −19.0 mEh.
+
+## GFN2: its residual is the D4 three-body cutoff — also a reference split (Sep 2026)
+
+gfn2's max deviation of 0.017 kcal/mol is **entirely the D4 dispersion**, and entirely one
+cutoff. On `ISOL24/i4p` (81 atoms) the repulsion matches to the printed digit and xtb's
+SCC-minus-dispersion equals curcuma's `Electronic` to 6.6e-8 Eh, while the dispersion
+differs by 2.663e-5 Eh — exactly the total.
+
+The trigger is spatial **extent**, not atom count: affected structures reach past ~25 Bohr
+(`ISOL24/i2p` 32.3, `UPU23/0a` 27.7, `ISOL24/i4p` 51.7, `IDISP/F22l` 54.4), unaffected ones
+stay under 18 — including 36-atom `DC13/omcb`. An n-alkane series switches on between
+C8 (21.0 Bohr, 4e-9 Eh) and C12 (30.5 Bohr, 2.3e-6), growing to 3.5e-5 at C32 (78.4 Bohr).
+
+xtb calls `d4_gradient` with two-body 60 / three-body 40 Bohr and CN 40
+(`scf_module.F90:766-767`); tblite uses `realspace_cutoff(disp3=25, disp2=50)` with CN 30
+(`disp/d4.f90:82`). curcuma follows tblite. Isolating the three shows the **three-body (ATM)
+cutoff carries 100 %** of it — pair 60 + CN 40 with ATM still at 25 leaves `ISOL24/i4p` at
++0.01666 against +0.01667, while ATM 40 gives −0.00003 and takes the whole set to
+**MAD 0.000 / max 0.000**.
+
+tblite's 25.0 is the default (curcuma's GFN1/GFN2 reference is tblite, and 40 breaks the
+`triose`/`complex` 1e-8 gates and costs ~45 % of gfn2 runtime on 231 atoms).
+**`-xtb.d4_atm_cutoff 40.0`** reproduces the xtb binary exactly.
+
+## GFN1: what remains is an xtb-vs-tblite reference split (Sep 2026)
+
+The residual after the halogen fix (max 0.011 kcal/mol) correlates exactly with one thing:
+**the main-group 4th period**. Every such element in the set is affected (K, Ca, Ge, As,
+Se, Br, Kr — 31 of 38 Br structures); H/C/N/O appear only as their partners; the 3rd and
+5th period are clean. Homonuclear dimers make it unambiguous:
+
+| | 3rd period | 4th period | 5th period |
+|---|---|---|---|
+| |S₂ P₂ Cl₂ Ar₂ ≤ 4e-9 Eh | Ge₂ 1.0e-7, As₂ 1.7e-6, Kr₂ 1.4e-6, Se₂ 1.0e-5, Br₂ 1.3e-5 | Sb₂ Te₂ I₂ Xe₂ ≤ 7e-9 Eh |
+
+Single atoms are exact to 1e-9, so it is an interatomic term; a Br₂ term decomposition puts
+all of it in the electronic part (repulsion and dispersion match xtb to the printed digit).
+
+**Cause**: `external/xtb/src/xtb/slater.f90` and `external/tblite/src/tblite/basis/slater.f90`
+carry different **STO-6G 4s and 4p** tables, each keeping the other variant present but
+commented out. Diffing all STO-NG tables (1G–6G, α and coefficients, 15 functions — 540
+values) shows the disagreement is those two entries and nothing else; every GFN1 element
+table and the auxiliary `pauling_en` / `atomic_rad` / `covalent_rad_2009` tables were
+re-diffed in the same pass and are exact. GFN2 expands its 4s/4p shells with STO-4G and is
+structurally immune.
+
+**tblite's values are the better ones**, measured against the exact Slater function
+(L2 error of the normalized radial fit, ζ=1):
+
+| | tblite (curcuma default) | xtb | shared entries for scale |
+|---|---:|---:|---|
+| 4s | **7.7e-5** | 4.1e-4 | 3s 2.0e-4 |
+| 4p | **1.2e-4** | 3.4e-4 | 3p 2.8e-4, 5p 6.3e-5 |
+
+The legacy set also gives 4s and 4p **bit-identical exponents** and carries 7 significant
+digits against 10 everywhere else — a stale transcription, not a Stewart optimisation.
+
+**Physics cannot arbitrate, and that was measured.** On `HEAVYSB11`'s 11 homolytic
+dissociation energies (published high-level references) the two variants differ by
+0.001–0.008 kcal/mol while GFN1's own error is +19…+36 (MAD 24.098 vs 24.097). An
+r²SCAN-3c reference (ORCA 6, `R2SCAN-3c TightSCF`, same geometries) for the four
+4th-period reactions has its **own** MAD of 3.63 kcal/mol against the published values —
+450–3600× coarser than the effect under test. The decision therefore rests on the basis
+quality above, which is exact and code-independent.
+
+**Decision**: tblite's tables are the default; `-xtb.sto6g_legacy_4sp true` reproduces xtb
+bit-for-bit. Effect of the flag:
+
+| set | default | with `-xtb.sto6g_legacy_4sp` |
+|---|---|---|
+| GMTKN55, all 56 structures with Z=19–36 | MAD 0.00313, max 0.01056 | **0.0000056 / 0.0000143** |
+| MOR41 gfn1 (94 structures, `PR40` excluded) | MAD 0.00041, max 0.00515 | **0.0000188 / 0.0000419** |
+
+so the split is 100% of the remaining GFN1 deviation. Z=19–36 also covers **Sc–Zn**, which
+GMTKN55 cannot show (main-group only) but MOR41 does: its ten largest gfn1 residuals are
+Mn, Se, Ti, Co, Fe, Ni and Cr species, all dropping to <5e-5 kcal with the flag.
+(`MOR41/PR40` is excluded for an unrelated reason — see Known Issue #26: **xtb** converges
+there to a Ti Mulliken charge of −17.28 e.)
 
 ## GFN-FF: two isolated-ion EEQ bugs FIXED (Sep 2026)
 
@@ -178,8 +293,10 @@ Full per-subset table and outlier list: `test_cases/GMTKN55-testset/_run/gmtkn55
   ctest suite re-run after both GFN-FF fixes (no regressions).
 - Not tested: GMTKN55 WTMAD-2 / relative reaction-energy accuracy vs the high-level QM
   reference (would need a `tmer2++` `.res` parser - separate, larger undertaking).
-- Not tested: gradients, optimisation, any charged/open-shell system for gfn1/gfn2
-  (skipped by design, see Known Issues #9).
+- Not tested here: optimisation. Open-shell gfn1/gfn2 is no longer skipped (Known Issue
+  #9); gradients are covered outside this sweep — the new GFN1 halogen-bond gradient was
+  checked against xtb's own gradient and by full-SCF finite differences on `HAL59/FI_pyr`,
+  but no set-wide gradient comparison exists.
 - Not root-caused: the AHB21/BH76-TS/MB16-43/AL2X6/YBDE18/DC13 GFN-FF outlier
   categories above - flagged, not individually diagnosed to a specific line of code.
 

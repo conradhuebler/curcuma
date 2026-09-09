@@ -180,6 +180,11 @@ void XTB::calculateGradient()
     }
 
     // ==========================================================================
+    //  1b.  GFN1 halogen-bond gradient (classical B–X···A term, no density)
+    // ==========================================================================
+    addHalogenBondGradient(m_gradient);
+
+    // ==========================================================================
     //  2a.  On-site CN contribution: dEdcn[iat] += (-kcn[ish]) · P(μ,μ)
     //       (diagonal H0 elements: H0_μμ = se[ish]; dH0/dCN = -kcn[ish])
     // ==========================================================================
@@ -874,6 +879,10 @@ bool XTB::calculateGradientGpu()
         xyz[3*i+1] = m_geometry(i, 1) * AA_TO_AU;
         xyz[3*i+2] = m_geometry(i, 2) * AA_TO_AU;
     }
+
+    // 1b. GFN1 halogen-bond gradient (classical, host-side — the device kernels
+    // cover sections 1/2/3 only).
+    addHalogenBondGradient(m_gradient);
 
     // 3b. Dispersion gradient (host-cached) + its CN chain-rule contribution.
     if (m_disp_gradient_valid

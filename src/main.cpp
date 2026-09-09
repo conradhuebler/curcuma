@@ -1761,15 +1761,15 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
     if (want_gradient) {
         Geometry gradient = energy_calc.Gradient();
         double grad_norm = Eigen::Map<Eigen::VectorXd>(gradient.data(), gradient.size()).norm();
-        CurcumaLogger::param("Gradient norm", fmt::format("{:.6e} Eh/Bohr", grad_norm));
+        CurcumaLogger::param("Gradient norm", fmt::format("{:.6e} Eh/Ang", grad_norm));
 
         // Claude Generated (Jul 2026): full-vector dump for backend comparison.
         if (!dump_gradient_path.empty()) {
             std::ofstream gf(dump_gradient_path);
             if (gf) {
-                gf << "# GFN-FF/xTB analytic gradient dE/dx [Eh/Bohr], one atom per row\n";
+                gf << "# GFN-FF/xTB analytic gradient dE/dx [Eh/Angstrom], one atom per row\n";
                 gf << "# energy " << fmt::format("{:.12f}", energy) << " Eh, gnorm "
-                   << fmt::format("{:.12e}", grad_norm) << " Eh/Bohr\n";
+                   << fmt::format("{:.12e}", grad_norm) << " Eh/Angstrom\n";
                 for (int i = 0; i < gradient.rows(); ++i)
                     gf << fmt::format("{:.14e} {:.14e} {:.14e}\n",
                                       gradient(i, 0), gradient(i, 1), gradient(i, 2));
@@ -1787,7 +1787,10 @@ int executeOptimization(const json& controller, int argc, char** argv) {
     if (argc < 3) {
         fmt::print("\nUsage: curcuma -opt input.xyz [parameters]\n\n");
         fmt::print("Basic:\n");
-        fmt::print("  -method <name>       Energy method: uff, gfnff, gfn2, ... (default: gfnff)\n");
+        fmt::print("  -method <name>       Energy method (default: gfnff)\n");
+        fmt::print("                         gfnff     - fast: native GFN-FF, the general-purpose default\n");
+        fmt::print("                         gfn2      - accurate: native GFN2-xTB, ~100x slower than gfnff\n");
+        fmt::print("                         gfn1, eht, pm3, uff, qmdff, ... (see docs/)\n");
         fmt::print("  -optimizer <name>    Optimization algorithm (default: auto)\n");
         fmt::print("                         auto      - automatic selection based on system size\n");
         fmt::print("                         lbfgspp   - external LBFGSpp library (robust, recommended)\n");

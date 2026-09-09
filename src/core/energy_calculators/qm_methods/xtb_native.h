@@ -785,6 +785,13 @@ public:
     void setDiisSubspace(int n)           { if (n >= 2) m_diis_subspace = n; }
     void setLevelShift(double b)          { m_level_shift = b; }
     void setScfGuess(const std::string& g){ m_scf_guess = g; }
+    // Opt-in: build the 4s/4p shells from xtb's older STO-6G tables instead of
+    // tblite's (K, Ca, Ge-Kr only). See STO_CGTO.hpp pAlpha6_legacy_4s.
+    void setSto6gLegacy4sp(bool b)        { m_sto6g_legacy_4sp = b; }
+    // D4 three-body (ATM) real-space cutoff in Bohr. tblite uses 25.0 (the default,
+    // since tblite is curcuma's reference for GFN1/GFN2), xtb passes 40.0. Set 40.0
+    // to reproduce the xtb binary on molecules extending past ~25 Bohr.
+    void setD4AtmCutoff(double c)         { m_d4_atm_cutoff = c; }
     ScfMode scfMode() const               { return m_scf_mode; }
 
     // Electronic temperature in Kelvin (0 → integer occupation, no Fermi smearing).
@@ -1098,7 +1105,10 @@ private:
 
     // Repulsion + (GFN1) halogen-bond energies.
     double calcRepulsionEnergy() const;                                  // xtb_native.cpp
-    double calcHalogenBondEnergy() const;                                // xtb_native.cpp
+    double calcHalogenBondEnergy() const;                                // xtb_h0.cpp
+    // Analytic gradient of the GFN1 halogen-bond correction; adds into `gradient`
+    // (nat×3, Eh/Bohr). No-op for GFN2. Claude Generated.
+    void   addHalogenBondGradient(Matrix& gradient) const;               // xtb_h0.cpp
 
     // GFN2 D4 dispersion (optional — requires USE_D4 at compile time).
     // need_gradient gates the (expensive) GFN1 D3 finite-difference geometry
@@ -1266,6 +1276,14 @@ private:
     int         m_diis_subspace = 6;     // DIIS history depth (Fock matrices kept)
     double      m_level_shift   = 0.2;   // virtual-orbital shift magnitude (Eh), LevelShift mode
     std::string m_scf_guess     = "eeq"; // initial charge guess: "eeq" (default, dftd4 EEQ) | "h0" (bare)
+    // xtb and tblite disagree on the STO-6G 4s/4p expansion; curcuma follows
+    // tblite (the better fit to the exact Slater function). Set true to
+    // reproduce the xtb binary bit-for-bit on K, Ca and Ge-Kr. STO_CGTO.hpp.
+    bool        m_sto6g_legacy_4sp = false;
+    // D4 ATM cutoff (Bohr). 25.0 = tblite (default), 40.0 = xtb. Carries the ENTIRE
+    // GFN2 energy deviation against xtb on molecules extending past ~25 Bohr, and
+    // ~45 % of the gfn2 runtime on a 231-atom system. Claude Generated (Sep 2026).
+    double      m_d4_atm_cutoff = 25.0;
     // Runaway-solution recovery (Claude Generated, Sep 2026). The GFN third-order term
     // scales as q^3 and is unbounded below, so an SCF started far from the ground state
     // can converge to a spurious stationary point with absurd charges. Observed on
@@ -1431,6 +1449,8 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
 
     lookup("scf_mode",     [&](const json& v){ if (v.is_string()) xtb.setScfMode(v.get<std::string>()); });
     lookup("scf_guess",    [&](const json& v){ if (v.is_string()) xtb.setScfGuess(v.get<std::string>()); });
+    lookup("sto6g_legacy_4sp", [&](const json& v){ if (v.is_boolean()) xtb.setSto6gLegacy4sp(v.get<bool>()); });
+    lookup("d4_atm_cutoff", [&](const json& v){ if (v.is_number()) xtb.setD4AtmCutoff(v.get<double>()); });
     lookup("eigensolver",  [&](const json& v){ if (v.is_string()) xtb.setEigensolver(v.get<std::string>()); });
     lookup("scf_damping",  [&](const json& v){ if (v.is_number()) xtb.setScfDamping(v.get<double>()); });
     lookup("scf_threshold",[&](const json& v){ if (v.is_number()) xtb.setScfThreshold(v.get<double>()); });
