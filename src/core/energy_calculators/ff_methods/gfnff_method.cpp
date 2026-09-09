@@ -4446,6 +4446,23 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     int imetal2 = (z2 >= 1 && z2 <= 86) ? metal_type[z2 - 1] : 0;
     int group1 = (z1 >= 1 && z1 <= 86) ? periodic_group[z1 - 1] : 0;
     int group2 = (z2 >= 1 && z2 <= 86) ? periodic_group[z2 - 1] : 0;
+    // CORRECTED (Sep 2026): imetal is not param%metal(Z) raw - gfnff_ini.f90:273-274 demotes a
+    // low-coordinate element of group > 3 back to a non-metal ("Sn, Pb, Bi, with small CN are
+    // better described as non-metals"). Without it PbH4 took the METAL bond branch: fqq came out
+    // 1.1437 instead of 1.033 and the force constant -0.0523 instead of -0.064, leaving the
+    // molecule 27.2 kcal/mol too weakly bound - a constant error inherited unchanged by every
+    // HEAVY28 complex built from it (pbh4_2, with two of them, was off by exactly twice that).
+    {
+        const auto& nb_t = getCachedTopology().neighbor_lists;
+        auto demote = [&](int imet, int grp, int a) {
+            if (imet != 1 || grp <= 3) return imet;
+            const int nb_a = (a >= 0 && a < static_cast<int>(nb_t.size()))
+                                 ? static_cast<int>(nb_t[a].size()) : 0;
+            return nb_a <= 4 ? 0 : imet;
+        };
+        imetal1 = demote(imetal1, group1, atom1);
+        imetal2 = demote(imetal2, group2, atom2);
+    }
 
     // Metal type classification (Fortran gfnff_ini.f90:1158-1167)
     // CRITICAL: H must not be treated as alkali metal even though it's in group 1!
@@ -5286,6 +5303,57 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         }
     }
 
+    // MOVED HERE (Sep 2026): the oxygen block used to sit AFTER the ring-strain block below,
+    // so a 3-ring ether had its ring equilibrium angle overwritten again by the generic
+    // "O with two neighbours -> 104.5 deg" rule. The reference has the oxygen rules at
+    // gfnff_ini.f90:1582-1598 and the ring rules at :1635-1649, i.e. the RING wins. Oxirane
+    // came out with theta0 = 104.5 instead of 82.0 and its angle term was 25.5 kcal/mol too
+    // high; dioxirane, with two such centres, twice that. The block only reads nh/nsi/nmet/npi
+    // and current_angle, all computed further up, so moving it changes nothing else.
+    // Get neighbors directly from topology adjacency list
+    std::vector<int> neighbors;
+    if (!topo_info.adjacency_list.empty() && atom_j < topo_info.adjacency_list.size()) {
+        neighbors = topo_info.adjacency_list[atom_j];
+    }
+
+    // Oxygen corrections: More accurate angle values based on Fortran reference
+    // Reference: gfnff_ini.f90:1582-1598
+    // Phase 2B Extensions (January 10, 2026): Si/metal widening, aromatic ethers
+    if (m_atoms[atom_j] == 8) {  // Central atom is oxygen
+        // Default O with 2 neighbors: 104.5°
+        if (neighbors.size() == 2) {
+            r0_deg = 104.5;
+
+            // H2O case: both neighbors are hydrogen
+            if (nh == 2) {
+                r0_deg = 100.0;  // H-O-H equilibrium angle
+                f2 = 1.20;       // H2O is better with 1.2-1.3
+            }
+
+            // Phase 2B: O-Si widening
+            r0_deg = r0_deg + 7.0 * nsi;  // Oxygen angles widen with Si attached
+
+            // Phase 2B: O-Metal widening
+            r0_deg = r0_deg + 14.0 * nmet;  // Oxygen angles widen even more with M attached
+
+            // Phase 2B: Aromatic ethers (Ph-O-Ph)
+            if (npi == 2) {
+                r0_deg = 109.0;  // More open angle for aromatic substituents
+            }
+
+            // Phase 2B: Metal coordination (M-O-X can be linear)
+            if (nmet > 0) {
+                double current_angle_deg = current_angle * 180.0 / M_PI;
+                const double linear_threshold = 160.0;
+                if (current_angle_deg > linear_threshold) {
+                    r0_deg = 180.0;  // Metal coordination can be linear (GEODEP)
+                    f2 = 0.3;        // Much weaker force constant
+                }
+            }
+        }
+    }
+
+
     // Phase 2D: Ring strain corrections (ALL elements)
     // Reference: gfnff_ini.f90:1635-1649
     // These override hybridization-based angles for small rings
@@ -5413,63 +5481,12 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         }
     }
 
-    // METAL center: Transition and main group metals
-    // Reference: gfnff_ini.f90:1705-1714
-    int imetal_center = (z_center >= 1 && z_center <= 86) ? GFNFFParameters::metal_type[z_center - 1] : 0;
-    if (imetal_center > 0) {
-        if (hyb == 0) {
-            r0_deg = 90.0;
-            f2 = 1.35;  // Important for metal angles
-        }
-        if (hyb == 1) r0_deg = 180.0;
-        if (hyb == 2) r0_deg = 120.0;
-        if (hyb == 3) r0_deg = 109.5;
-        double current_angle_deg = current_angle * 180.0 / M_PI;
-        if (current_angle_deg > 160.0) r0_deg = 180.0;  // GEODEP
-    }
-
-    // Get neighbors directly from topology adjacency list
-    std::vector<int> neighbors;
-    if (!topo_info.adjacency_list.empty() && atom_j < topo_info.adjacency_list.size()) {
-        neighbors = topo_info.adjacency_list[atom_j];
-    }
-
-    // Oxygen corrections: More accurate angle values based on Fortran reference
-    // Reference: gfnff_ini.f90:1582-1598
-    // Phase 2B Extensions (January 10, 2026): Si/metal widening, aromatic ethers
-    if (m_atoms[atom_j] == 8) {  // Central atom is oxygen
-        // Default O with 2 neighbors: 104.5°
-        if (neighbors.size() == 2) {
-            r0_deg = 104.5;
-
-            // H2O case: both neighbors are hydrogen
-            if (nh == 2) {
-                r0_deg = 100.0;  // H-O-H equilibrium angle
-                f2 = 1.20;       // H2O is better with 1.2-1.3
-            }
-
-            // Phase 2B: O-Si widening
-            r0_deg = r0_deg + 7.0 * nsi;  // Oxygen angles widen with Si attached
-
-            // Phase 2B: O-Metal widening
-            r0_deg = r0_deg + 14.0 * nmet;  // Oxygen angles widen even more with M attached
-
-            // Phase 2B: Aromatic ethers (Ph-O-Ph)
-            if (npi == 2) {
-                r0_deg = 109.0;  // More open angle for aromatic substituents
-            }
-
-            // Phase 2B: Metal coordination (M-O-X can be linear)
-            if (nmet > 0) {
-                double current_angle_deg = current_angle * 180.0 / M_PI;
-                const double linear_threshold = 160.0;
-                if (current_angle_deg > linear_threshold) {
-                    r0_deg = 180.0;  // Metal coordination can be linear (GEODEP)
-                    f2 = 0.3;        // Much weaker force constant
-                }
-            }
-        }
-    }
+    // REMOVED (Sep 2026): a duplicate metal-center block used to sit here. It was a strict
+    // subset of the documented one further down (search imetal_ctr) except that it lacked the
+    // Sn/Pb/Bi demotion of gfnff_ini.f90:274, so it re-imposed r0 = 109.5 on a four-coordinate
+    // Pb after the heavy-main-group rules had correctly produced 99.5 (109.5 - nh*5). For the
+    // perfectly tetrahedral PbH4 that makes theta0 equal the actual angle, and the whole angle
+    // term collapses to zero (0.0 vs the reference's 0.003308 Eh).
 
     // NOTE: Nitrogen corrections now handled comprehensively in Phase 2C above (lines 2187-2277)
     // No additional nitrogen corrections needed here
