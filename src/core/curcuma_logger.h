@@ -24,6 +24,8 @@
 #include <fmt/color.h>
 #include <fmt/core.h>
 #include <set>
+#include <functional>
+#include <cstdint>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -49,6 +51,45 @@ private:
 
 public:
     // Configuration methods
+    // ------------------------------------------------------------------
+    // Capturing the output  -  Claude Generated 2026
+    //
+    // curcuma prints. Embedded in a GUI that is a problem: the text goes to a
+    // terminal nobody is looking at, which is why qurcuma runs every controller at
+    // verbosity 0 and had to have SimpleMD::stopReason() retrofitted just to learn
+    // why a run ended.
+    //
+    // A sink is THREAD-LOCAL on purpose. Two CurcumaMethods can run at once -- the
+    // MD worker and a job started from a chat window -- and a process-wide sink
+    // would hand each of them the other's output.
+    // ------------------------------------------------------------------
+    enum class SinkLevel { Debug = 0,
+        Info = 1,
+        Warning = 2,
+        Error = 3 };
+
+    using Sink = std::function<void(SinkLevel, const std::string&)>;
+
+    /// Captures everything the CURRENT THREAD logs while it is alive. Scopes nest;
+    /// every scope on the stack sees the message, so an outer "capture this whole
+    /// job" still works when an inner one is installed.
+    class SinkScope {
+    public:
+        explicit SinkScope(Sink sink);
+        ~SinkScope();
+        SinkScope(const SinkScope&) = delete;
+        SinkScope& operator=(const SinkScope&) = delete;
+
+        /// Identifies this capture, so records can be attributed to a run.
+        std::uint64_t id() const { return m_id; }
+
+    private:
+        std::uint64_t m_id = 0;
+    };
+
+    /// How many sinks are active on this thread. For tests and diagnostics.
+    static std::size_t active_sink_count();
+
     static void set_verbosity(int level) { m_verbosity = level; }
     static void set_colors(bool enable) { m_use_colors = enable; }
     static void set_format(OutputFormat fmt) { m_format = fmt; }
@@ -203,8 +244,11 @@ public:
 
 private:
     // Helper functions for internal formatting
-    static void log_colored(fmt::color color, const std::string& prefix, const std::string& msg, bool force_visible = false);
+    static void log_colored(fmt::color color, const std::string& prefix, const std::string& msg,
+        bool force_visible = false, SinkLevel level = SinkLevel::Info);
     static void log_plain(const std::string& msg);
+    /// Hand @p text to every sink on this thread. Never throws into the caller.
+    static void emit_to_sinks(SinkLevel level, const std::string& text);
     static std::string format_json_value(const json& value);
     static std::string format_energy_relative(double eh_diff);
     static std::string format_time(double fs);
