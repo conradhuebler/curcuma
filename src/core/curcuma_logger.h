@@ -26,6 +26,7 @@
 #include <set>
 #include <functional>
 #include <cstdint>
+#include <sstream>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -153,6 +154,20 @@ public:
 
     // Special formatting functions
     static void result_raw(const std::string& data);
+
+    /// Claude Generated 2026 - Drop-in for `std::cout << a << b << std::endl`.
+    ///
+    /// Same stream semantics, so the formatting of numbers is byte-for-byte what
+    /// std::cout produced; unconditional, so migrating a print does not silently
+    /// hide it at low verbosity; and it reaches any sink, which is the point --
+    /// curcuma's setup chatter went to a terminal nobody was watching.
+    template <typename... Args>
+    static void raw(Args&&... args)
+    {
+        std::ostringstream stream;
+        (stream << ... << args);
+        result_raw(stream.str());
+    }
     static void progress(int current, int total, const std::string& msg);
     // Claude Generated: live in-place progress bar (carriage-return). No-op when the global
     // switch is off (set_progress_enabled). The caller handles verbosity gating, because the
