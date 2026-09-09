@@ -302,9 +302,9 @@ The foundation that enabled rapid angle error debugging:
 ### GEODEP angle rule creates artefact minima at N-H centers — guarded (Aug 2026, `nh_linear_fix`, default ON)
 
 > Origin: this guard was developed and validated on the `confsearch` branch (commit
-> `51830efa`) and ported here verbatim in Sep 2026, so a later merge of `confsearch` sees
-> identical text rather than a conflict or a duplicate section. `confsearch` is the origin
-> if the two ever diverge.
+> `51830efa`) and ported here in Sep 2026. It has since been **refined here** (see
+> "Refinement" below), so the two branches are no longer identical — **this** is the newer
+> version, take it on merge.
 
 **Inherited method defect** (xtb 6.7.1 reproduces it, so not a port bug): the reference
 hybridisation fallback "input angle > 160 deg → sp, θ0 = 180" (`gen%linthr`,
@@ -318,12 +318,25 @@ event founds a self-reinforcing family (75 % of a pool within three temperature 
 the species check compares bonds only and passes the hybridisation flip.
 
 Curcuma's default (`-gfnff.nh_linear_fix true`) skips the angle-only sp promotion for a
-2-coordinate nitrogen carrying a hydrogen. All genuine sp N-H cases (H-N=C isocyanide-like,
-terminal R-N=N, metal nitriles, azide chains) are caught by the structural rules that run
-before the angle fallback and are unaffected — normal geometries are bit-identical
-(55/55 runnable gfnff ctests unchanged). `-gfnff.nh_linear_fix false` restores bit-faithful
-reference behaviour for validation against xtb/pprcht (verified: reproduces −18.85926294 Eh
-on the artefact structure).
+2-coordinate nitrogen carrying a hydrogen whose heavy partner is branched.
+`-gfnff.nh_linear_fix false` restores bit-faithful reference behaviour for validation
+against xtb/pprcht (verified: reproduces −18.85926294 Eh on the artefact structure).
+
+**Refinement (Sep 2026) — the original guard was too broad.** `confsearch` assumed every
+genuine sp N-H is already caught by the structural rules that run before the angle
+fallback (H-N=C isocyanide-like, terminal R-N=N, metal nitriles, azide chains). A GMTKN55
+sweep disproved that: exactly **2 of 2462** structures were changed by the bare guard, and
+both were genuine sp centres it wrongly demoted — `DIPCS10/n2h2_2+` (linear HN=NH²⁺,
+**+165.5 kcal/mol**) and `NBPRC/nh-bh` (linear HN=BH, **+78.4**). Neither is reached by the
+structural rules: their partner is an N resp. B, not a 1-coordinate C or N.
+
+The discriminator is the nitrogen's heavy partner. A genuinely sp nitrogen sits in a
+**linear chain**, so that partner is itself 2-coordinate; the artefact's =N-H hangs off a
+3-coordinate sp² carbon. The guard therefore fires only when the heavy partner has ≥3
+neighbours. After the refinement `DIPCS10` is at MAD 0.000 (max 0.0) and `NBPRC` at MAD
+0.108 (max 2.2), while the artefact stays guarded and normal geometries stay bit-identical
+(all 95 MOR41 and all 90 S30L-CI structures unchanged; gfnff ctest 55/56, the one failure
+pre-existing).
 
 Minimal reproduction (measured Sep 2026 when porting the guard to `feature/gfn-cleanup`;
 formamidine HN=CH-NH2, only the imine C-N-H angle varied):

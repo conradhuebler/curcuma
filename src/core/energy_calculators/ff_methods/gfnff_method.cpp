@@ -7266,13 +7266,32 @@ std::vector<int> GFNFF::determineHybridizationFortran(const GFNFFTopology& topo,
                 if (m_atoms[jj] == 7 && m_atoms[kk] == 7 && nbdum[jj].size() <= 2 && nbdum[kk].size() <= 2)
                     hyb[i] = 1;  // N=N=N
                 // GEODEP angle fallback. Guarded (nh_linear_fix, default true): an N that
-                // carries an H is never promoted to sp by the angle alone -- a thermally
+                // carries an H is not promoted to sp by the angle alone -- a thermally
                 // stretched =N-H would otherwise get theta0=180 and lock its own distortion
                 // in as the equilibrium (self-reinforcing artefact in conformer searches).
-                // All genuine sp N-H cases are caught by the structural rules above.
-                // ORIGIN: added on branch `confsearch` (51830efa); ported here verbatim so a
-                // later merge sees identical lines. Do not duplicate the guard.
-                if (phi > lintr && !(nh > 0 && m_parameters.value("nh_linear_fix", true)))
+                //
+                // ORIGIN: added on branch `confsearch` (51830efa). REFINED here (Sep 2026)
+                // and therefore NOT byte-identical to that branch any more -- reconcile
+                // deliberately on merge, this version is the newer one.
+                // Why: confsearch assumed every genuine sp N-H is already caught by the
+                // structural rules above. It is not. A GMTKN55 sweep found two counter-
+                // examples the bare guard broke, both linear by bonding rather than by
+                // distortion: DIPCS10/n2h2_2+ (HN=NH 2+, +165.5 kcal/mol) and NBPRC/nh-bh
+                // (HN=BH, +78.4). The discriminator is the nitrogen's heavy partner: a
+                // genuinely sp N sits in a LINEAR CHAIN, so that partner is itself
+                // 2-coordinate, whereas the artefact's =N-H hangs off a 3-coordinate sp2
+                // carbon. So only suppress the promotion when the heavy partner is branched.
+                bool nh_guard = false;
+                if (nh > 0 && m_parameters.value("nh_linear_fix", true)) {
+                    nh_guard = true;
+                    for (int nb_of_n : nbdum[i]) {
+                        if (m_atoms[nb_of_n] != 1
+                            && static_cast<int>(nbdum[nb_of_n].size()) <= 2) {
+                            nh_guard = false;  // linear chain -> genuine sp, let GEODEP run
+                        }
+                    }
+                }
+                if (phi > lintr && !nh_guard)
                     hyb[i] = 1;  // GEODEP
             }
             if (nb20i == 1) hyb[i] = 1;
@@ -9050,11 +9069,37 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         // Claude Generated (Jul 2026, F2): distribute the molecular charge across fragments.
         // Previously qfrag was left at [0,...,0] for nfrag>1, so the per-fragment EEQ
         // constraint forced total charge 0 — broken for charged host-guest complexes
-        // (S30L systems 23-30, error sign/magnitude ~ Q). Mirror xtb 6.6.1
-        // (external/xtb/src/gfnff/gfnff_ini.f90:474-502): for nfrag==2 & m_charge!=0 try
-        // BOTH placements, keep the one with lower EEQ electrostatic energy; for nfrag>2
-        // put the charge on fragment 0; nfrag==1 and neutral keep the existing path.
-        if (topo_info.nfrag == 2 && m_charge != 0) {
+        // (S30L systems 23-30, error sign/magnitude ~ Q). For nfrag>2 put the charge on
+        // fragment 0; nfrag==1 and neutral keep the existing path.
+        //
+        // CORRECTED (Sep 2026): for nfrag==2 the reference's two-placement auto-detection
+        // (gfnff_ini.f90:536-560) is DEAD CODE. It is gated on
+        // `sum(topo%qfrag(2:nfrag)) > 999`, but qfrag is pre-initialised to [ichrg, 0, ...],
+        // so the sum is 0 and the block never runs — in both pprcht and xtb. The effective
+        // reference rule is therefore "the whole charge on fragment 0", full stop. Curcuma
+        // used to run the intended-but-disabled trial and keep the lower-energy placement,
+        // which is where the GMTKN55 charged-complex cluster came from: for AHB21/21
+        // (HCOO- ... HF, the proton unambiguously on F at 1.0 A) the trial puts the -1 on
+        // the HF fragment, giving its hydrogen a charge of -0.52 and the Coulomb term
+        // -0.971 Eh instead of -1.349 — 237 kcal/mol on one 6-atom structure.
+        // The trial remains available via -gfnff.frag_charge_autodetect true; it is not
+        // the default because nothing shows it to be the better rule (the S30L-23 case
+        // where it looked better was decided against xtb's .CHRG line-2 parsing quirk,
+        // a different branch entirely), while it is demonstrably worse here.
+        const bool frag_autodetect = m_parameters.value("frag_charge_autodetect", false);
+        if (topo_info.nfrag == 2 && m_charge != 0 && !frag_autodetect) {
+            // Reference behaviour: whole charge on fragment 0.
+            topo_info.qfrag = {static_cast<double>(m_charge), 0.0};
+            eeq_topology_input.qfrag = topo_info.qfrag;
+            topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
+                m_atoms, m_geometry_bohr, m_charge, topo_info.coordination_numbers,
+                eeq_topology_input, true, pool_setup, m_threads);
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::info(fmt::format(
+                    "F2: nfrag=2 charged (q={}) -> whole charge on fragment 0 (reference rule)",
+                    m_charge));
+            }
+        } else if (topo_info.nfrag == 2 && m_charge != 0) {
             // A1 (Jul 2026): both placements share the same Phase-1 matrix (qfrag
             // enters only the constraint RHS), so build it once and solve both RHS.
             const double qc = static_cast<double>(m_charge);

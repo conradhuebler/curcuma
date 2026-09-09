@@ -16,7 +16,7 @@ machine).
 |--------|-----------:|----------------------:|----:|-----:|----:|
 | gfn2   | 2140 | 320 | 0.000 | 0.001 | 0.017 |
 | gfn1   | 2142 | 320 | 0.047 | 0.549 | 11.93 |
-| gfnff  | 2458 | 0   | 2.117 | 16.04 | 500.0 |
+| gfnff  | 2458 | 0   | 1.445 | 12.83 | 500.0 |
 
 gfn1/gfn2 skip every structure with a nonzero `.UHF` (see "Known limitation" below).
 gfnff has no open-shell term and runs everything.
@@ -25,7 +25,10 @@ The gfnff row was 3.389 after the two isolated-ion EEQ fixes below, 3.462 after 
 pyrrole pi-veto fix (CLAUDE.md Known Issue #10), and reached **2.117** with the four
 term-level fixes of Known Issue #12 - the nitro pi-electron count and the sp2-N-H bond
 strength being the two GMTKN55 exercises heavily (`Amino20x4` MAD 5.664 -> 0.001,
-max 26.9 -> 0.016).
+max 26.9 -> 0.016). Known Issue #13 (two-fragment charge placement) then took it to
+**1.445**: `AHB21` MAD 22.05 -> 0.606 (max 239 -> 4.8), `CHB6` 7.73 -> 1.51, `BH76`
+6.90 -> 4.79, plus the `nh_linear_fix` refinement (`DIPCS10` 8.28 -> 0.000,
+`NBPRC` 3.84 -> 0.108).
 
 > **Reading the numbers back**: `scripts/gmtkn55_compare.py` caches every energy in
 > `_run/energies.json` and reuses it unless `--recompute` is given. A re-run after a code
@@ -86,13 +89,26 @@ Issues; 3 unit-test binaries not rebuilt since before this session) - none touch
 
 ## GFN-FF: remaining outliers (unrelated to the two fixes above)
 
+> **Updated Sep 2026.** The AHB21 bullet below is RESOLVED - it was the two-fragment
+> charge placement (Known Issue #13), now at MAD 0.606 / max 4.8. The section is kept for
+> the categories that remain. Current state: MAD 1.445 / RMSD 12.83 / max 500.0, with
+> 172 of 2458 structures above 1 kcal/mol and 53 above 20.
+>
+> An arbitration run (worst ~77 outliers, curcuma vs pprcht vs xtb) showed these are
+> **mostly genuine curcuma port errors**, not the pprcht-vs-xtb reference split that
+> dominates MOR41: 66 port errors, 5 splits (RSE43, BHPERI, DC13/ch2n2), 6 mixed (only
+> MB16-43, where pprcht and xtb themselves differ by 30-85 kcal/mol). Term fingerprints
+> split them in two: a **bond/topology-perception** family (DC13/c20bowl +564 kcal in the
+> bond term alone, AL2X6 bridged dimers, ALK8 Li clusters, HEAVY28/HEAVYSB11 heavy
+> hydrides) and a smaller set of strained/hypervalent cases (oxiranes, H2S2O7, N-ylides).
+
 MAD 3.389 / RMSD 17.45 / max 500.0 kcal/mol still exceeds gfn1/gfn2 by ~2 orders of
 magnitude. The worst outliers cluster into recognisable categories, not one single bug -
 none involve isolated atoms or Li/Be, so neither fix above touches them:
 
-- **Charged anionic H-bond complexes (AHB21)**: the majority of the largest remaining
-  outliers (+67 to +239 kcal/mol) are AHB21 (charge -1). Consistent with the
-  charged-fragment HB caveats already documented in `docs/S30L_GFNNF_VALIDATION.md`.
+- **~~Charged anionic H-bond complexes (AHB21)~~ RESOLVED (Known Issue #13)**: these were
+  the largest remaining outliers (+67 to +239 kcal/mol, all charge -1). Cause was not the
+  H-bond term at all but the fragment the net charge was placed on; see below.
 - **SN2/proton-transfer transition states (BH76)**: `fch3fts`, `hoch3fts`, `fch3clts`,
   `clch3clts` (-72 to -151 kcal/mol). Bond-breaking/forming TS geometries are a known
   hard case for any topology-perception-based force field (bond order is ambiguous at
