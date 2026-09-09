@@ -135,6 +135,21 @@ test compares the per-module definition count before and after (`simplemd` 78,
 `confsearch` 71, `analysis` 50, `confscan` 44, `gfnff` 35, `rmsd` 33); `-list_modules` shows
 module descriptions.
 
+**A bug to fix while in there (found 09.09.2026).** The extractor silently drops
+multi-line PARAMs whose help text is written as adjacent string literals. Measured: the
+generator reports 662 definitions and warns once about `gfnff.h` around line 310; `solvent` and
+`solvent_model` (`gfnff.h:298` and `:304`) are **not** in the generated registry at all, so
+`ConfigManager` has no defaults for them and `-export_config gfnff` does not list them.
+
+The cause is the accumulate-and-match loop: it warns and *clears the accumulator* as soon as the
+text so far contains "PARAM" and any `)`, and these help texts contain one
+(`'chloroform'). 'none' (default)`) long before the PARAM's own closing paren. The same
+parameter written on one 436-character line (`xtbinterface.h:42`) goes through fine, which is why
+the source carries the note "PARAMs stay single-line".
+
+Fix: only attempt the match, and only warn, once the PARAM's opening parenthesis is balanced,
+counting parentheses outside string literals. The count then has to go 662 → 664.
+
 ### WP2 — Annotate what is exposed
 
 The ~60 parameters of the commands a GUI or tool layer exposes: `tier`, `enum` for
