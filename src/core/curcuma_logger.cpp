@@ -18,6 +18,10 @@
  */
 
 #include "curcuma_logger.h"
+
+#include <vector>
+
+#include <atomic>
 #include "citation_registry.h"
 #include <algorithm>
 #include <cstdlib> // for getenv
@@ -96,13 +100,13 @@ void CurcumaLogger::initialize(int verbosity, bool auto_detect_colors)
 void CurcumaLogger::error(const std::string& msg)
 {
     // Errors always visible
-    log_colored(fmt::color::red, "[ERROR] ", msg, true);
+    log_colored(fmt::color::red, "[ERROR] ", msg, true, SinkLevel::Error);
 }
 
 void CurcumaLogger::warn(const std::string& msg)
 {
     if (m_verbosity >= 1) {
-        log_colored(fmt::color::orange, "[WARN]  ", msg);
+        log_colored(fmt::color::orange, "[WARN]  ", msg, false, SinkLevel::Warning);
     }
 }
 
@@ -340,6 +344,7 @@ void CurcumaLogger::param_comparison_table(const json& defaults, const json& con
 void CurcumaLogger::result_raw(const std::string& data)
 {
     // Raw results for scripting - no colors, no prefix
+    emit_to_sinks(SinkLevel::Info, data);
     fmt::print("{}\n", data);
 }
 
@@ -439,7 +444,7 @@ void CurcumaLogger::debug(int level, const std::string& msg)
 void CurcumaLogger::debug_var(const std::string& name, const std::string& value)
 {
     if (1 <= 2) { // CURCUMA_DEBUG_LEVEL
-        log_colored(fmt::color::magenta, "[DEBUG] ", fmt::format("{} = {}", name, value));
+        log_colored(fmt::color::magenta, "[DEBUG] ", fmt::format("{} = {}", name, value), false, SinkLevel::Debug);
     }
 }
 
@@ -458,8 +463,70 @@ void CurcumaLogger::debug_timing(const std::string& label)
 // Private Helper Implementation
 // ============================================================================
 
-void CurcumaLogger::log_colored(fmt::color color, const std::string& prefix, const std::string& msg, bool force)
+// ============================================================================
+// Output capture  -  Claude Generated 2026
+// ============================================================================
+
+namespace {
+
+struct SinkEntry {
+    std::uint64_t id;
+    CurcumaLogger::Sink sink;
+};
+
+// Thread-local: two CurcumaMethods can run at once, and a process-wide list would
+// hand each of them the other's output.
+thread_local std::vector<SinkEntry> t_sinks;
+thread_local bool t_in_sink = false;
+std::atomic<std::uint64_t> g_next_sink_id { 1 };
+
+/// Restores the reentrancy flag even if a sink throws.
+struct SinkGuard {
+    SinkGuard() { t_in_sink = true; }
+    ~SinkGuard() { t_in_sink = false; }
+};
+
+}  // namespace
+
+CurcumaLogger::SinkScope::SinkScope(Sink sink)
+    : m_id(g_next_sink_id.fetch_add(1))
 {
+    t_sinks.push_back({ m_id, std::move(sink) });
+}
+
+CurcumaLogger::SinkScope::~SinkScope()
+{
+    for (auto it = t_sinks.rbegin(); it != t_sinks.rend(); ++it) {
+        if (it->id == m_id) {
+            t_sinks.erase(std::next(it).base());
+            return;
+        }
+    }
+}
+
+std::size_t CurcumaLogger::active_sink_count()
+{
+    return t_sinks.size();
+}
+
+void CurcumaLogger::emit_to_sinks(SinkLevel level, const std::string& text)
+{
+    if (t_sinks.empty() || t_in_sink)
+        return;   // a sink that logs would otherwise recurse without end
+    SinkGuard guard;
+    for (const auto& entry : t_sinks) {
+        if (entry.sink)
+            entry.sink(level, text);
+    }
+}
+
+void CurcumaLogger::log_colored(fmt::color color, const std::string& prefix, const std::string& msg,
+    bool force, SinkLevel level)
+{
+    // The sink gets the message without prefix or colour: a consumer wants the
+    // content and carries the level in its own record.
+    emit_to_sinks(level, msg);
+
     if (m_format == OutputFormat::PLAIN) {
         // Plain mode: content only, no prefixes, no colors (like ORCA/Gaussian)
         fmt::print("{}\n", msg);
@@ -472,6 +539,7 @@ void CurcumaLogger::log_colored(fmt::color color, const std::string& prefix, con
 
 void CurcumaLogger::log_plain(const std::string& msg)
 {
+    emit_to_sinks(SinkLevel::Info, msg);
     fmt::print("{}\n", msg);
 }
 
