@@ -191,6 +191,11 @@ public:
 
     /*! \brief Best-fit RMSD after reordering (the permutation RMSD); equals the plain value
      *  when no reordering ran. */
+    /// Claude Generated 2026 - What this run computed, without the caller's
+    /// context: the file names that appear in the CLI's .rmsd.json are the CLI's
+    /// own concern and are added there. Pure -- writes nothing.
+    json Results() const override;
+
     inline double RMSD() const { return m_rmsd; }
 
     /*! \brief Plain best-fit RMSD in the original atom order, WITHOUT reordering. Only

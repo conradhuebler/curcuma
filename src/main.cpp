@@ -1659,21 +1659,9 @@ int executeRMSD(const json& controller, int argc, char** argv) {
 
     // Write RMSD results as JSON
     {
-        json rmsd_result;
-        rmsd_result["rmsd"] = driver->RMSD();
-        rmsd_result["rmsd_raw"] = driver->RMSDRaw();
-
-        // Permutation vector: identity if no reordering was performed
-        std::vector<int> permutation = driver->ReorderRules();
-        if (permutation.empty()) {
-            permutation.resize(driver->ReferenceAligned().AtomCount());
-            std::iota(permutation.begin(), permutation.end(), 0);
-        }
-        rmsd_result["permutation"] = permutation;
-        rmsd_result["reference_xyz"] = driver->ReferenceAligned().XYZString();
-        // Geometry whose deviation equals RMSD() (reordered+aligned, or plain best-fit when
-        // no reorder ran). Same result as the old TargetReorderd()/TargetAligned() fallback.
-        rmsd_result["reorder_xyz"] = driver->TargetForRMSD().XYZString();
+        // Claude Generated 2026 - The document now comes from the driver; the file
+        // names are the only part the CLI knows and the driver does not.
+        json rmsd_result = driver->Results();
         rmsd_result["reference_file"] = reffile;
         rmsd_result["target_file"] = tarfile;
 
