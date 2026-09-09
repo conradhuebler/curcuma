@@ -995,26 +995,24 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     // ---------------------------------------------------------------------------
     // (F) Metal classification checks (NEW - from reference: gfnff_ini.f90:1751-1752)
     // ---------------------------------------------------------------------------
-    // Skip high-coordinate metals: no HC metals with >4 neighbors
-    if (j_atom_idx >= 0 && j_atom_idx < m_atoms.size()) {
-        const TopologyInfo& topo = getCachedTopology();
-        if (j_atom_idx < topo.neighbor_lists.size() && j_atom_idx < topo.is_metal.size()) {
-            int coord_j = topo.neighbor_lists[j_atom_idx].size();
-            if (topo.is_metal[j_atom_idx] && coord_j > 4) {
-                params.barrier_height = 0.0;
-                return params;  // Skip HC metals
-            }
-        }
-    }
-    if (k_atom_idx >= 0 && k_atom_idx < m_atoms.size()) {
-        const TopologyInfo& topo = getCachedTopology();
-        if (k_atom_idx < topo.neighbor_lists.size() && k_atom_idx < topo.is_metal.size()) {
-            int coord_k = topo.neighbor_lists[k_atom_idx].size();
-            if (topo.is_metal[k_atom_idx] && coord_k > 4) {
-                params.barrier_height = 0.0;
-                return params;  // Skip HC metals
-            }
-        }
+    // Skip high-coordinate metals: no HC metals with >4 neighbors.
+    // CORRECTED (Sep 2026): the reference tests `param%metal(Z) > 1`, i.e. only a
+    // TRANSITION metal (metal_type == 2); a main-group metal (metal_type == 1) is not
+    // skipped however high its coordination. Curcuma used topo.is_metal, which is true for
+    // main-group metals too, so all 110 torsion quartets of GMTKN55 AL2X6/al2me6 - every
+    // one of them across a 5-coordinate Al - returned a zero barrier and the whole torsion
+    // term vanished (0.0 vs the reference's 0.005849 Eh, 3.7 kcal/mol).
+    auto skip_hc_metal = [&](int a) -> bool {
+        if (a < 0 || a >= static_cast<int>(m_atoms.size())) return false;
+        const int z = m_atoms[a];
+        if (z < 1 || z > 86) return false;
+        if (GFNFFParameters::metal_type[z - 1] <= 1) return false;  // TM only
+        const auto& nb_a = getCachedTopology().neighbor_lists;
+        return a < static_cast<int>(nb_a.size()) && static_cast<int>(nb_a[a].size()) > 4;
+    };
+    if (skip_hc_metal(j_atom_idx) || skip_hc_metal(k_atom_idx)) {
+        params.barrier_height = 0.0;
+        return params;  // Skip HC metals
     }
 
     // ---------------------------------------------------------------------------

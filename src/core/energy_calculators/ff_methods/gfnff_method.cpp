@@ -3645,11 +3645,25 @@ int GFNFF::classifyBondType(int atom_i, int atom_j, int hyb_i, int hyb_j,
         btyp = 5; // Metal bond
     }
 
-    // TM metal-metal bonds (both are transition metals)
-    // Simplified: If both are metals, assume TM-TM
-    // TODO: Check reference implementation for imetal flag
-    // Full implementation would check imetal == 2 (transition metal flag)
-    if (is_metal_i && is_metal_j) {
+    // TM metal-metal bonds. CORRECTED (Sep 2026): the reference requires imetal==2 on BOTH
+    // atoms (gfnff_ini.f90:1121, "if (imetal(ii)==2 .and. imetal(jj)==2) btyp=7"), i.e. two
+    // TRANSITION metals; a main-group metal has imetal==1 and its bonds stay btyp=5. The old
+    // "both are metals" shortcut (an explicit TODO in this file) promoted the Al-Al bond of
+    // GMTKN55 AL2X6/al2me6 to TM-TM, which swaps bstren(5)=1.00 for bstren(7)=3.40 on that
+    // bond. imetal is param%metal(Z), demoted to 0 for a low-coordinate element of group > 3
+    // (gfnff_ini.f90:273-274).
+    auto imetal_of = [&](int a) -> int {
+        const int z = m_atoms[a];
+        if (z < 1 || z > 86) return 0;
+        int im = GFNFFParameters::metal_type[z - 1];
+        const int grp = GFNFFParameters::periodic_group[z - 1];
+        const auto& topo_nb = getCachedTopology().neighbor_lists;
+        const int nb_a = (a < static_cast<int>(topo_nb.size()))
+                             ? static_cast<int>(topo_nb[a].size()) : 0;
+        if (nb_a <= 4 && grp > 3) im = 0;
+        return im;
+    };
+    if (is_metal_i && is_metal_j && imetal_of(atom_i) == 2 && imetal_of(atom_j) == 2) {
         btyp = 7; // TM metal-metal
     }
 
@@ -9390,6 +9404,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
             ti.nfrag = topo_info.nfrag;
             ti.fraglist = topo_info.fraglist;
             ti.qfrag = topo_info.qfrag;
+            ti.itag = topo_info.itag;  // real itag for the dxi carbene test
             ti.covalent_radii.resize(m_atomcount);
             for (int i = 0; i < m_atomcount; ++i) {
                 int z = m_atoms[i];
@@ -9510,6 +9525,35 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         topo_info.itag,  // carbene(+1)/NO2(+1)/eta(-1) tags for the FT-HMO electron count
         &topo_info.pi_atoms_final  // Fortran "piadr = itmp" (gfnff_ini.f90:1016)
     );
+
+    // ----------------------------------------------------------------------
+    // GEODEP sp2 -> sp3 promotion (Fortran gfnff_ini.f90:1024-1032)
+    // ----------------------------------------------------------------------
+    // A group-4 atom (C, Si, Ge, ...) with three neighbours that came out of the
+    // hybridisation routine as sp2 but ended up OUTSIDE every pi-system is re-classified
+    // as sp3 when it is markedly pyramidal (out-of-plane angle > 40 deg). This runs here,
+    // right after the Hueckel section, because it tests the POST-Hueckel piadr
+    // (pi_atoms_final) - the reference does the same, at line 1024 vs 1016.
+    // Curcuma was missing the rule entirely: the bridging methyl carbons of GMTKN55
+    // AL2X6/al2me6 (three neighbours in the mixture list, strongly pyramidal, no pi) stayed
+    // sp2, so their C-H bonds lost the X-sp3 r0 shift of -0.022 and took bsmat(2,0)=1.0792
+    // instead of bsmat(3,0)=1.0000 - 8.6 kcal/mol on each of six bonds.
+    // Caveat: omega depends on the ORDER of the three neighbours, and this uses curcuma's
+    // neighbour ordering. For a pyramidal centre every permutation is far above the 40 deg
+    // threshold and for a planar one far below, so the classification is insensitive to it.
+    if (static_cast<int>(topo_info.pi_atoms_final.size()) == m_atomcount) {
+        for (int i = 0; i < m_atomcount; ++i) {
+            const int z = m_atoms[i];
+            if (z < 1 || z > 86) continue;
+            if (GFNFFParameters::periodic_group[z - 1] != 4) continue;
+            if (topo_info.hybridization[i] != 2) continue;
+            if (topo_info.pi_atoms_final[i] != 0) continue;
+            const auto& nb_i = topo_info.neighbor_lists[i];
+            if (nb_i.size() != 3) continue;
+            const double phi = calculateOutOfPlaneAngle(i, nb_i[0], nb_i[1], nb_i[2]);
+            if (std::abs(phi) * 180.0 / M_PI > 40.0) topo_info.hybridization[i] = 3;
+        }
+    }
 
     {
         // A0: the FT-HMO (Hueckel) solve itself

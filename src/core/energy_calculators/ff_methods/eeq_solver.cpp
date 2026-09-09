@@ -4177,9 +4177,22 @@ Vector EEQSolver::calculateDxi(
             for (int j : topology->neighbor_lists[i]) {
                 int Z_j = atoms[j];
                 if (Z_j == 1) nh++;
-                // Metal check
-                if (Z_j > 20 && (Z_j <= 30 || (Z_j >= 39 && Z_j <= 48) || (Z_j >= 72 && Z_j <= 80))) {
-                    nm++;
+                // Metal check. CORRECTED (Sep 2026): this was a hardcoded transition-metal
+                // range (3d/4d/5d only), but the reference counts `imetal(j) /= 0`
+                // (gfnff_ini.f90:372), and imetal is `param%metal(Z)` - which includes the
+                // MAIN-GROUP metals - demoted to 0 only for a low-coordinate element of
+                // group > 3 (gfnff_ini.f90:273-274, "Sn, Pb, Bi with small CN are better
+                // described as non-metals"). Missing the main-group metals flipped the sign
+                // of the polyvalent-halogen dxi rule below: the bridging chlorines of
+                // GMTKN55 AL2X6/al2cl6 took -nn*0.021 instead of +nn*0.05, a 0.142 shift in
+                // chieeq that inverted their topology charge (-0.261 vs the reference
+                // +0.158) and, through fqq, cost 52 kcal/mol in the bond term.
+                if (Z_j >= 1 && Z_j <= 86) {
+                    int imetal_j = metal_type[Z_j - 1];
+                    const int group_j = periodic_group[Z_j - 1];
+                    const int nb_j = static_cast<int>(topology->neighbor_lists[j].size());
+                    if (nb_j <= 4 && group_j > 3) imetal_j = 0;
+                    if (imetal_j != 0) nm++;
                 }
                 // Sum electronegativities for averaging
                 if (Z_j < static_cast<int>(pauling_en.size())) {
