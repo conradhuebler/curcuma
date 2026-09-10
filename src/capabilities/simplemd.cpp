@@ -4515,6 +4515,29 @@ void SimpleMD::NoseHover()
 }
 
 // Claude Generated 2026 - see the header.
+double SimpleMD::containerVolume() const
+{
+    // 1 = spheric, 2 = rect; anything else is no container. A wall whose bounds
+    // are all still zero is auto-sized by the run and has no volume to report yet.
+    if (m_wall_type == 1) {
+        const double r = m_wall_spheric_radius;
+        return r > 0.0 ? 4.0 / 3.0 * pi * r * r * r : 0.0;
+    }
+    if (m_wall_type == 2) {
+        const double dx = m_wall_x_max - m_wall_x_min;
+        const double dy = m_wall_y_max - m_wall_y_min;
+        const double dz = m_wall_z_max - m_wall_z_min;
+        if (dx > 0.0 && dy > 0.0 && dz > 0.0)
+            return dx * dy * dz;
+    }
+    return 0.0;
+}
+
+double SimpleMD::density() const
+{
+    return m_molecule.Density(containerVolume());
+}
+
 json SimpleMD::Results() const
 {
     json result;
@@ -4525,5 +4548,10 @@ json SimpleMD::Results() const
     result["total_energy"] = m_Epot + m_Ekin;
     result["temperature"] = m_T;
     result["target_temperature"] = m_T0;
+    const double volume = containerVolume();
+    if (volume > 0.0) {
+        result["container_volume"] = volume;          // Angstrom^3
+        result["density"] = m_molecule.Density(volume); // g/cm^3
+    }
     return result;
 }
