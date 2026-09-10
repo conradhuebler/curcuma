@@ -143,6 +143,12 @@ add_test(NAME gfnff_react_fd_gradient
          COMMAND test_gfnff_react_fd
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
+# External potentials: parsing and selection resolution. Claude Generated 2026.
+add_executable(test_external_potentials test_external_potentials.cpp)
+target_link_libraries(test_external_potentials curcuma_cap curcuma_core)
+add_test(NAME external_potentials COMMAND test_external_potentials)
+set_tests_properties(external_potentials PROPERTIES TIMEOUT 300)
+
 # Copy reference data to build tree so tests can find them
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/reference_data
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
