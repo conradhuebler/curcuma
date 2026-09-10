@@ -242,11 +242,26 @@ Three decisions the implementation settled:
 - **Selections are resolved per frame.** `"F2"` on frame 900 is not the same index set as on
   frame 0, and for a measurement over a trajectory that is the correct reading, not a bug.
 
-**Still open: the six commands in `main.cpp` are not dispatched onto it yet.** They keep their
-own argv parsing and frame loops, so for now the capability is a second way to compute the same
-thing rather than the only one — which is the situation this WP exists to end. It was left out
-deliberately: `main.cpp` is the collision hotspot named under Branch discipline, and the
-rewiring is mechanical once that file is quiet.
+**Still open: the six commands in `main.cpp` are not dispatched onto it yet**, and the reason
+is no longer only the collision hotspot. Running them first turned up two mismatches that a
+blind rewiring would have shipped as silent regressions:
+
+- **`-torsion` reports a dihedral in `[0, 360)`.** Measured on 353 frames of
+  `test_cases/confs/conf.xyz`: mean 198.7°, min 110.2°, max 249.8°. `GeometryTools::Dihedral`
+  is signed — the IUPAC convention and the better default — and switching would have moved
+  every number that command has ever printed. Now a setting (`dihedral_range`), signed for new
+  callers, `positive` for the one that has to keep its output.
+- **`-distance` does not measure two atoms.** It takes two atom *sets* and reports the distance
+  between their centroids. The capability had no kind for that; `centroid_distance` is it.
+  (The command also reads its selections one-based, so `-distance file 0 5` prints 0 Å because
+  selection `"0"` is index −1. Recorded here, not changed.)
+
+Both were found by **running the commands**, not by reading them.
+
+**What the rewiring still needs first: a net.** `test_cases/cli/` has no coverage for any of
+the six, so today there is nothing that would catch a changed number. Golden references for
+all six, on a single structure and on a trajectory, are the prerequisite — and worth having
+whether or not the rewiring follows, since these commands are currently untested.
 
 ### WP7 — Export the capability table
 
