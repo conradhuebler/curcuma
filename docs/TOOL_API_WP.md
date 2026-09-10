@@ -283,6 +283,57 @@ entry read once in `Initialise()`.
 takes effect on the next step; and the forces show up in the energy/gradient bookkeeping rather
 than being added behind its back.
 
+**Done** (`619b43f8`), in `src/capabilities/external_potentials.{h,cpp}`. What the
+implementation settled that the plan above left open:
+
+- **Work is accumulated per potential**, the sum over steps of F·dr. WP9 stage 1 asked for
+  exactly this and it belongs to the potential rather than to a separate pass. For
+  `constant_force` the energy alone is origin-dependent (E = −ΣF·r), so the work is the
+  quantity that means anything, and the header says so rather than leaving it to be found out.
+- **A selection that matches nothing is refused at parse time.** A bias that silently acts on
+  nothing is worse than one that will not start.
+- **The evaluation has no reference to SimpleMD**: it takes a geometry and a gradient. That is
+  deliberate, because the optimiser wants the same potentials — see below.
+
+**Open, and the natural next step: the same potentials in a geometry optimisation.** Every
+optimiser already has an external-force hook, but it takes a flat force vector, i.e. the same
+transient injection. Restrained optimisation is the more useful case of the two:
+
+| Form | In MD | In an optimisation |
+|---|---|---|
+| `centroid_harmonic` | hold a fragment while it is heated | place a guest in a cavity, relax everything else around it |
+| `distance_harmonic` | draw two fragments together | a **relaxed scan**: step `r0` outward, minimise at each value, and the binding curve falls out |
+| `constant_force` | steer, and integrate the work | **questionable**: E = −F·r is unbounded, so the minimiser translates the set along the force and there may be no minimum at all |
+
+The accumulated work has no meaning for an optimiser either: there is no trajectory, only
+whatever path the minimiser took. So the wiring is not symmetric — the two harmonic forms
+belong in the optimiser, `constant_force` should be refused there, and `work` reported only
+for MD.
+
+**Attempted and reverted, with what it showed.** A first pass wired all three backends:
+`OptimizerDriver` gained the potentials plus a bias evaluated in Angstrom units, and each
+backend converted at its own gradient site — ANCOpt hands out coordinates in Angstrom while
+LBFGSpp and the native optimisers work in Bohr. It built. It did not work, and it was taken
+back out rather than left in place, because a restraint that is wired and silently does
+nothing is the exact failure mode this layer keeps running into.
+
+What is known, so the next attempt does not start over:
+
+- **The plumbing is reached.** A probe in the bias showed it called with the right shapes
+  (18 coordinates for 6 atoms, one potential) from the backends.
+- **Nothing moved.** With `k = 5 Eh/Å²` pulling two waters from 6.0 Å towards `r0 = 4.0 Å`,
+  the centroid distance stayed at exactly 6.000 Å on all three, and the reported energy
+  carried none of the bias (0.0038 Eh, the plain UFF value, where the restraint alone would
+  be several Eh).
+- **The backends fail differently**: `native_lbfgs` ran its 400 iterations and returned six
+  atoms; `lbfgspp` and `ancopt` returned zero iterations and an empty molecule. All three
+  reported `success = false`. That an unconverged run hands back the *input* geometry would
+  explain the unchanged distance on all three at once, and is the first thing to check.
+- **The measurement is the right one.** A wrong Angstrom/Bohr factor does not crash, it moves
+  the restrained minimum, so a restrained distance landing on `r0` is what proves each
+  conversion. The optimiser half of `test_external_potentials.cpp` was written around exactly
+  that and can be restored from this branch's history.
+
 **Deliberately not in scope:** finding the cavity. That is a separate question and probably not
 curcuma's, at least not first -- see the guiding-scenario section in qurcuma's
 `docs/WP-llm-tool-layer.md`.
