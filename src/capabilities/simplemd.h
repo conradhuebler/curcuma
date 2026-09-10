@@ -20,6 +20,10 @@
 
 #pragma once
 
+#include "external_potentials.h"
+
+#include <mutex>
+
 #include <chrono>
 #include <ctime>
 #include <functional>
@@ -268,6 +272,22 @@ public:
      *  Hartree/Bohr (same units as m_eigen_gradient). */
     void applyExternalForces(const Geometry& forces);
 
+    /**
+     * @brief Replace the configured external potentials while the run is going.
+     *
+     * @p list has the shape of the `external_potentials` parameter. Applied before
+     * the next step, like the thermostat setpoint and the wall parameters, so an
+     * agent can adjust a pull and watch the response. Accumulated work starts over
+     * with the new set: it belongs to the potential that did it.
+     *
+     * Returns false and fills @p error when the list does not parse; the previous
+     * set then stays in force. Thread-safe. Claude Generated 2026.
+     */
+    bool setExternalPotentials(const json& list, std::string* error = nullptr);
+
+    /** @brief The configured potentials, their settings and the work they did. */
+    json externalPotentials() const;
+
     // Getters for stepwise GUI feedback
     const Geometry& positions() const { return m_eigen_geometry; }
     const Geometry& velocities() const { return m_eigen_velocities; }
@@ -456,6 +476,8 @@ private:
     void StepRamp(RampState& rs, double& T0, double measuredT);  ///< advance one schedule by one step
     void UpdateTemperatureRamp();                                ///< drive global + region setpoints (called each step)
     void ParseThermalRegions();                                  ///< read temp_regions specs from the controller
+    void ParseExternalPotentials();                              ///< read external_potentials from the controller
+    void ApplyExternalPotentials();                              ///< add their energy and gradient, and advance the work
     void ResolveThermalRegions();                                ///< resolve atom indices + default complement (needs molecule)
     double RegionTemperature(const std::vector<int>& atoms, int dof) const;  ///< instantaneous T of an atom subset
     void ApplyThermostat();                                      ///< per-region dispatch (or legacy global path)
@@ -528,6 +550,16 @@ private:
     // Stepwise-API state (Claude Generated 2026)
     Geometry m_external_forces;          // additive per-atom force contribution, cleared after use
     bool m_external_forces_pending = false;
+
+    // Claude Generated 2026 - Configured external potentials: unlike the injection
+    // above they persist, they are described by the controller, and they carry the
+    // work they have done. Guarded because a caller changes them mid-run.
+    std::vector<curcuma::ExternalPotential> m_external_potentials;
+    std::vector<curcuma::ExternalPotential> m_pending_external_potentials;
+    bool m_pending_external_potentials_valid = false;
+    mutable std::mutex m_external_potential_mutex;
+    Geometry m_previous_geometry;        // for the work integral over one step
+    double m_external_potential_energy = 0.0;
     bool m_run_prepared = false;         // true after prepareRun(), false after finalizeRun()
     bool m_run_aborted = false;          // mirrors former local `aborted` flag in start()
     bool m_wall_wrap = false;            ///< wall_potential=pbc: wrap instead of push (wrapIntoContainer)
@@ -849,6 +881,8 @@ private:
     // Claude Generated 2026 - Registered at last. It was read from the controller by
     // ParseThermalRegions() but never declared, so it had no default, never showed up
     // in -export_config, and no schema could describe it.
+    PARAM(external_potentials, Json, "[]", "Directed external potentials: a list of {kind, atoms, ...} objects. kind is constant_force (direction, magnitude in Eh/A), centroid_harmonic (target, k in Eh/A^2) or distance_harmonic (atoms_b, k, r0 in A). atoms uses the selection grammar. Persistent, unlike the transient force injection, and changeable while the run is going.", "External Potentials", {},
+        "tier=primary")
     PARAM(temp_regions, Json, "[]", "Per-region thermostats: a list of {atoms, temperature, schedule} objects. atoms uses the selection grammar.", "Temperature Ramp", {},
         "tier=advanced")
     PARAM(temp_ramp, Bool, false, "Enable a multi-stage temperature ramp schedule (see temp_schedule). A live GUI slider / setTargetTemperature() overrides it for the rest of the run.", "Temperature Ramp", {})
