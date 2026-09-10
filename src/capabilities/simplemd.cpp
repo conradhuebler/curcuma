@@ -388,6 +388,7 @@ void SimpleMD::LoadControlJson()
     m_global_ramp.enabled = m_temp_ramp
         && ParseSchedule(m_config.get<std::string>("temp_schedule"), m_global_ramp.schedule, "temp_schedule");
     ParseThermalRegions();
+    ParseExternalPotentials();
 
     // Claude Generated 2025: Output & Restart Parameters
     m_writerestart = m_config.get<int>("write_restart_frequency");
@@ -2211,6 +2212,78 @@ double SimpleMD::RegionTemperature(const std::vector<int>& atoms, int dof) const
 /* Claude Generated 2026 - Read the temp_regions JSON array from the merged controller.
  * Each element: {atoms (FragString2Indicies grammar), temperature, temp_schedule?}. Only the
  * specs are stored here; atom indices are resolved in prepareRun() once the molecule is known. */
+// Claude Generated 2026 - Read the configured external potentials. A malformed
+// entry is an error the run should not start with: a bias that silently does
+// nothing is worse than one that refuses.
+void SimpleMD::ParseExternalPotentials()
+{
+    m_external_potentials.clear();
+    json cfg = m_config.exportConfig();
+    if (!cfg.contains("external_potentials"))
+        return;
+
+    std::string error;
+    std::vector<curcuma::ExternalPotential> parsed
+        = curcuma::parseExternalPotentials(cfg["external_potentials"], m_molecule, &error);
+    if (!error.empty()) {
+        CurcumaLogger::error("external_potentials: " + error);
+        return;
+    }
+    m_external_potentials = std::move(parsed);
+    if (!m_external_potentials.empty() && m_verbosity >= 1) {
+        CurcumaLogger::info("external potentials: "
+            + std::to_string(m_external_potentials.size()) + " configured");
+    }
+}
+
+// Claude Generated 2026 - Energy and gradient of the configured potentials, in the
+// same place the walls are applied and with the same sign convention. A pending
+// replacement is taken up here, so a change reaches the very next step.
+void SimpleMD::ApplyExternalPotentials()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_external_potential_mutex);
+        if (m_pending_external_potentials_valid) {
+            m_external_potentials = std::move(m_pending_external_potentials);
+            m_pending_external_potentials.clear();
+            m_pending_external_potentials_valid = false;
+        }
+    }
+    if (m_external_potentials.empty()) {
+        m_external_potential_energy = 0.0;
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(m_external_potential_mutex);
+    m_external_potential_energy = curcuma::applyExternalPotentials(
+        m_external_potentials, m_eigen_geometry, m_previous_geometry, m_eigen_gradient);
+    m_previous_geometry = m_eigen_geometry;
+}
+
+bool SimpleMD::setExternalPotentials(const json& list, std::string* error)
+{
+    std::string message;
+    std::vector<curcuma::ExternalPotential> parsed
+        = curcuma::parseExternalPotentials(list, m_molecule, &message);
+    if (!message.empty()) {
+        if (error)
+            *error = message;
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(m_external_potential_mutex);
+    m_pending_external_potentials = std::move(parsed);
+    m_pending_external_potentials_valid = true;
+    if (error)
+        error->clear();
+    return true;
+}
+
+json SimpleMD::externalPotentials() const
+{
+    std::lock_guard<std::mutex> lock(m_external_potential_mutex);
+    return curcuma::describeExternalPotentials(m_external_potentials);
+}
+
 void SimpleMD::ParseThermalRegions()
 {
     m_thermal_regions.clear();
@@ -2941,6 +3014,7 @@ void SimpleMD::Verlet()
     }
 #endif
     WallPotential();
+    ApplyExternalPotentials();
     ekin = 0.0;
 
     for (int i = 0; i < m_natoms; ++i) {
@@ -3187,6 +3261,7 @@ void SimpleMD::Rattle()
     }
 #endif
     WallPotential();
+    ApplyExternalPotentials();
 
     for (int i = 0; i < m_natoms; ++i) {
         m_eigen_velocities.data()[3 * i + 0] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
@@ -4558,6 +4633,16 @@ json SimpleMD::Results() const
     result["total_energy"] = m_Epot + m_Ekin;
     result["temperature"] = m_T;
     result["target_temperature"] = m_T0;
+    // What the external potentials did. The work is the number a Jarzynski or
+    // Crooks estimate is built from; the energy alone is origin-dependent for a
+    // constant force.
+    if (!m_external_potentials.empty()) {
+        result["external_potentials"] = externalPotentials();
+        double work = 0.0;
+        for (const curcuma::ExternalPotential& potential : m_external_potentials)
+            work += potential.work;
+        result["external_work"] = work;
+    }
     const double volume = containerVolume();
     if (volume > 0.0) {
         result["container_volume"] = volume;          // Angstrom^3
