@@ -12,6 +12,7 @@
 | WP6 | A measurement capability | open |
 | WP7 | Export the capability table | open |
 | WP8 | Directed external potentials | open |
+| WP9 | Free-energy protocols (work, PMF, FEP) | open |
 
 Anything without a "done" marker is planned and does not exist. Nothing in this document describes existing behaviour
 unless it is explicitly marked as such under "Starting point". Line numbers were measured
@@ -286,6 +287,58 @@ than being added behind its back.
 **Deliberately not in scope:** finding the cavity. That is a separate question and probably not
 curcuma's, at least not first -- see the guiding-scenario section in qurcuma's
 `docs/WP-llm-tool-layer.md`.
+
+### WP9 — Free-energy protocols (work, PMF, FEP)
+
+Asked for a binding *free* energy, a model can today compute a potential-energy difference and
+say so. Everything beyond that is out of reach, and the gap is not one tool but three different
+depths of change. Listing them together because the cheapest is nearly free once WP8 exists and
+the deepest touches the energy calculators.
+
+**What already exists and is easy to overlook.** `rmsd_mtd` is a real enhanced-sampling bias, not
+a toy: RMSD-space metadynamics with an exact gradient of the bias potential, well-tempered
+reporting, a deposition stride and a cap on stored hills (`simplemd.h`, "RMSD-MTD", 13 PARAMs).
+The walls are a second declarative biasing form. Restart files carry a run's state
+(`curcuma_restart.json`). So biasing infrastructure is present; what is missing is a *collective
+variable* other than RMSD, the bookkeeping around a biased run, and the statistics on top.
+
+**Stage 1 — the work along a steered pull.** With WP8's `constant_force` in place, a pull is
+already a steered MD. What is missing is that nobody adds up what it did: the accumulated work
+`∫F·dr` of the external potentials over the trajectory, reported per step and in `Results()`.
+That single number turns a pull into a Jarzynski estimate once several pulls are averaged, and
+into Crooks with the reverse direction. Cheap, and it makes the actuator quantitative instead of
+merely visible.
+
+**Stage 2 — a restrained collective variable, and histograms.** Umbrella sampling along a
+distance coordinate is the usual route to a host–guest PMF and needs **no** Hamiltonian scaling
+at all — only a harmonic restraint on a CV and the CV's value per step:
+
+| Piece | Meaning |
+|---|---|
+| CV definition | distance between two atom-set centroids first; the same selection grammar as WP8 |
+| `cv_harmonic` | restraint of that CV to a target with a force constant, both settable mid-run |
+| CV trace | the value each step, in `Results()`, so windows can be histogrammed |
+| WHAM/MBAR | the estimator over a set of windows |
+
+The restraint form is WP8's `distance_harmonic` with a target that moves, so stages 1 and 2 share
+their machinery. The estimator itself is arithmetic over collected histograms and does not have to
+live in the force loop; it could equally be a separate capability that reads window files.
+
+**Stage 3 — λ-coupling and soft-core (FEP/TI).** Scaling the non-bonded interactions between two
+atom groups by a coupling parameter, with soft-core to keep the potential finite as atoms vanish,
+plus `∂V/∂λ` per step for TI and `ΔU` between neighbouring λ for BAR/MBAR. This is the only stage
+that reaches into the energy calculators rather than into `SimpleMD`, and it has to be done per
+method: GFN-FF's non-bonded terms, and the semiempirical methods separately, where "decoupling"
+is not even well defined for the SCF part. That is a research question as much as an
+implementation, and it is the reason this stage is named last rather than first.
+
+**Done when:** stage 1 — a steered run reports its accumulated external work in `Results()`, and
+two runs in opposite directions can be combined; stage 2 — a set of umbrella windows on a
+centroid distance produces a PMF whose barrier is reproducible from the run configurations;
+stage 3 — not scoped yet, deliberately.
+
+**Deliberately not in scope:** treating a potential-energy difference as a free energy anywhere in
+the output. If ΔG is not what was computed, the result says ΔE.
 
 ## Branch discipline
 
