@@ -430,6 +430,22 @@ bool Molecule::addPair(const std::pair<int, Position>& atom)
     return exist;
 }
 
+double Molecule::Density(double volume) const
+{
+    if (volume <= 0.0)
+        return 0.0;
+
+    double mass = 0.0;
+    for (int atom_type : m_atoms) {
+        double atomic_mass = Elements::AtomicMass[atom_type];
+        if (atomic_mass < 1e-6)
+            atomic_mass = 1.0;   // same defensive rule as CalculateMass()
+        mass += atomic_mass;
+    }
+    constexpr double kAmuPerCubicAngstromToGramPerCubicCentimetre = 1.66053906660;
+    return mass / volume * kAmuPerCubicAngstromToGramPerCubicCentimetre;
+}
+
 double Molecule::CalculateMass()
 {
     // Claude Generated: Molecular mass calculation using atomic masses

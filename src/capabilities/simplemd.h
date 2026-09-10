@@ -281,6 +281,23 @@ public:
     /// reporting a reason it does not have.
     json Results() const override;
 
+    /**
+     * @brief Volume of the confinement container in Angstrom^3, 0 when there is
+     * none or when curcuma sizes it at run time (all bounds still zero).
+     *
+     * Claude Generated 2026 - the run knows its own box; a caller that wants a
+     * density should not have to reconstruct it from the controller.
+     */
+    double containerVolume() const;
+
+    /**
+     * @brief Density of the contents of the container in g/cm^3, 0 without a
+     * sized container. In a fixed box with a fixed number of molecules this does
+     * not change during the run: its use is checking a packing, not following one.
+     * Claude Generated 2026.
+     */
+    double density() const;
+
     double potentialEnergy() const { return m_Epot; }
     double kineticEnergy() const { return m_Ekin; }
     double currentTemperature() const { return m_T; }
