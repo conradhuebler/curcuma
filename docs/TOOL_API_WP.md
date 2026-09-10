@@ -9,7 +9,7 @@
 | WP3 | Thread-local log sink | **done** — sink plus 148 migrated prints |
 | WP4 | Per-run state instead of global | **done** — verbosity, stop, output directory |
 | WP5 | `Results()` | **partly** — the contract, `RMSDDriver`, `SimpleMD`; `opt`/`sp` and the rest are open |
-| WP6 | A measurement capability | open |
+| WP6 | A measurement capability | **done** — the capability and its test; the six CLI commands are not yet dispatched onto it |
 | WP7 | Export the capability table | open |
 | WP8 | Directed external potentials | **done** — three forms, live-settable, each carrying its accumulated work |
 | WP9 | Free-energy protocols (work, PMF, FEP) | open |
@@ -225,6 +225,28 @@ side effect of this WP.
 
 **Done when:** `curcuma -angle`, `-torsion`, `-distance` produce the same numbers as before
 on both a single structure and a trajectory; `-export_config measurement` yields a schema.
+
+**The capability is done** (`d06b153e`), with `test_measurement` checking it against geometry
+worked out by hand rather than against a previous run of the same code. The dependency above
+was resolved by taking **only** the `GeometryTools` half of `09a451c4` (`62a8bb34`): those are
+pure additions and change no existing number, while the `BestFitRotation` fix in the same
+commit is RMSD numerics another line of work is active in and stays where it is.
+
+Three decisions the implementation settled:
+
+- **How many atoms a kind needs is a property of the kind.** `requiredAtoms()` is the only
+  place that knows, and an angle over two atoms is refused with the count in the message
+  rather than measured as something else.
+- **A centroid is reported as a position**, not reduced to a scalar with statistics over it.
+  The mean of three coordinates is a number nobody should be able to quote.
+- **Selections are resolved per frame.** `"F2"` on frame 900 is not the same index set as on
+  frame 0, and for a measurement over a trajectory that is the correct reading, not a bug.
+
+**Still open: the six commands in `main.cpp` are not dispatched onto it yet.** They keep their
+own argv parsing and frame loops, so for now the capability is a second way to compute the same
+thing rather than the only one — which is the situation this WP exists to end. It was left out
+deliberately: `main.cpp` is the collision hotspot named under Branch discipline, and the
+rewiring is mechanical once that file is quiet.
 
 ### WP7 — Export the capability table
 
