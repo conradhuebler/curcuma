@@ -11,7 +11,7 @@
 | WP5 | `Results()` | **partly** — the contract, `RMSDDriver`, `SimpleMD`; `opt`/`sp` and the rest are open |
 | WP6 | A measurement capability | open |
 | WP7 | Export the capability table | open |
-| WP8 | Directed external potentials | open |
+| WP8 | Directed external potentials | **done** — three forms, live-settable, each carrying its accumulated work |
 | WP9 | Free-energy protocols (work, PMF, FEP) | open |
 
 Anything without a "done" marker is planned and does not exist. Nothing in this document describes existing behaviour
@@ -283,6 +283,33 @@ entry read once in `Initialise()`.
 `-export_run`; `-export_config simplemd` describes them; a potential added or changed mid-run
 takes effect on the next step; and the forces show up in the energy/gradient bookkeeping rather
 than being added behind its back.
+
+**Done** (`619b43f8`), in `src/capabilities/external_potentials.{h,cpp}`. What the
+implementation settled that the plan above left open:
+
+- **Work is accumulated per potential**, the sum over steps of F·dr. WP9 stage 1 asked for
+  exactly this and it belongs to the potential rather than to a separate pass. For
+  `constant_force` the energy alone is origin-dependent (E = −ΣF·r), so the work is the
+  quantity that means anything, and the header says so rather than leaving it to be found out.
+- **A selection that matches nothing is refused at parse time.** A bias that silently acts on
+  nothing is worse than one that will not start.
+- **The evaluation has no reference to SimpleMD**: it takes a geometry and a gradient. That is
+  deliberate, because the optimiser wants the same potentials — see below.
+
+**Open, and the natural next step: the same potentials in a geometry optimisation.** Every
+optimiser already has an external-force hook, but it takes a flat force vector, i.e. the same
+transient injection. Restrained optimisation is the more useful case of the two:
+
+| Form | In MD | In an optimisation |
+|---|---|---|
+| `centroid_harmonic` | hold a fragment while it is heated | place a guest in a cavity, relax everything else around it |
+| `distance_harmonic` | draw two fragments together | a **relaxed scan**: step `r0` outward, minimise at each value, and the binding curve falls out |
+| `constant_force` | steer, and integrate the work | **questionable**: E = −F·r is unbounded, so the minimiser translates the set along the force and there may be no minimum at all |
+
+The accumulated work has no meaning for an optimiser either: there is no trajectory, only
+whatever path the minimiser took. So the wiring is not symmetric — the two harmonic forms
+belong in the optimiser, `constant_force` should be refused there, and `work` reported only
+for MD.
 
 **Deliberately not in scope:** finding the cavity. That is a separate question and probably not
 curcuma's, at least not first -- see the guiding-scenario section in qurcuma's
