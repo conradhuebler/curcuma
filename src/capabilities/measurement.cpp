@@ -26,6 +26,7 @@ int requiredAtoms(MeasurementKind kind)
     case MeasurementKind::Dihedral: return 4;
     case MeasurementKind::Gyration:
     case MeasurementKind::Centroid:
+    case MeasurementKind::CentroidDistance:
     case MeasurementKind::RmsdToReference: return 0;
     }
     return 0;
@@ -39,6 +40,7 @@ std::string measurementKindName(MeasurementKind kind)
     case MeasurementKind::Dihedral: return "dihedral";
     case MeasurementKind::Gyration: return "gyration";
     case MeasurementKind::Centroid: return "centroid";
+    case MeasurementKind::CentroidDistance: return "centroid_distance";
     case MeasurementKind::RmsdToReference: return "rmsd";
     }
     return "distance";
@@ -51,6 +53,7 @@ bool parseMeasurementKind(const std::string& name, MeasurementKind& out)
     if (name == "dihedral" || name == "torsion") { out = MeasurementKind::Dihedral; return true; }
     if (name == "gyration") { out = MeasurementKind::Gyration; return true; }
     if (name == "centroid") { out = MeasurementKind::Centroid; return true; }
+    if (name == "centroid_distance") { out = MeasurementKind::CentroidDistance; return true; }
     if (name == "rmsd")     { out = MeasurementKind::RmsdToReference; return true; }
     return false;
 }
@@ -82,6 +85,7 @@ void Measurement::LoadControlJson()
         return;
     }
     m_unit = Json2KeyWord<std::string>(m_defaults, "unit");
+    m_dihedral_positive = Json2KeyWord<std::string>(m_defaults, "dihedral_range") == "positive";
     m_window = Json2KeyWord<int>(m_defaults, "window");
     m_first_frame = Json2KeyWord<int>(m_defaults, "first_frame");
     m_last_frame = Json2KeyWord<int>(m_defaults, "last_frame");
@@ -136,11 +140,18 @@ bool Measurement::measureFrame(const Molecule& molecule, double& value, Position
         value = toUnit(GeometryTools::Angle(molecule.Atom(atoms[0]).second,
             molecule.Atom(atoms[1]).second, molecule.Atom(atoms[2]).second));
         return true;
-    case MeasurementKind::Dihedral:
-        value = toUnit(GeometryTools::Dihedral(molecule.Atom(atoms[0]).second,
+    case MeasurementKind::Dihedral: {
+        double degrees = GeometryTools::Dihedral(molecule.Atom(atoms[0]).second,
             molecule.Atom(atoms[1]).second, molecule.Atom(atoms[2]).second,
-            molecule.Atom(atoms[3]).second));
+            molecule.Atom(atoms[3]).second);
+        // The CLI's -torsion has always reported [0, 360). Signed is the IUPAC
+        // convention and the better default, but changing what an existing command
+        // prints is not a side effect anyone should get for free.
+        if (m_dihedral_positive && degrees < 0.0)
+            degrees += 360.0;
+        value = toUnit(degrees);
         return true;
+    }
     case MeasurementKind::Gyration:
     case MeasurementKind::Centroid: {
         Geometry subset(atoms.empty() ? molecule.AtomCount() : int(atoms.size()), 3);
@@ -158,6 +169,34 @@ bool Measurement::measureFrame(const Molecule& molecule, double& value, Position
             value = GeometryTools::GyrationRadius(subset);
         else
             position = GeometryTools::Centroid(subset);
+        return true;
+    }
+    case MeasurementKind::CentroidDistance: {
+        const std::string other = Json2KeyWord<std::string>(m_defaults, "atoms_b");
+        if (other.empty()) {
+            m_error = "centroid_distance needs a second selection in atoms_b";
+            return false;
+        }
+        Molecule copy = molecule;
+        copy.GetFragments();
+        const std::vector<int> setB = copy.FragString2Indicies(other);
+        if (setB.empty()) {
+            m_error = "selection \"" + other + "\" matched no atoms";
+            return false;
+        }
+        const auto centreOf = [&molecule](const std::vector<int>& set) {
+            Position c { 0, 0, 0 };
+            for (int index : set)
+                c += molecule.Atom(index).second;
+            return set.empty() ? c : Position(c / double(set.size()));
+        };
+        for (int index : setB) {
+            if (index < 0 || index >= molecule.AtomCount()) {
+                m_error = "atom index " + std::to_string(index) + " is outside the structure";
+                return false;
+            }
+        }
+        value = (centreOf(atoms) - centreOf(setB)).norm();
         return true;
     }
     case MeasurementKind::RmsdToReference: {
