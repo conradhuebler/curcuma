@@ -446,6 +446,14 @@ set_tests_properties(purification PROPERTIES TIMEOUT 60 LABELS "native_xtb;eigen
 # path) vs Eigen's lowest-k eigenpairs, incl. a warm-start (subspace-recycling) case.
 # The measurement capability. Claude Generated 2026 - checked against geometry
 # worked out by hand, not against a previous run of the same code.
+# The CIF reader and supercell builder. Claude Generated 2026 - the face-centring
+# case is checked against positions worked out on paper, because a reader that
+# ignores symmetry returns a well-formed molecule with the wrong atom count.
+add_executable(test_cif test_cif.cpp)
+target_link_libraries(test_cif curcuma_core)
+add_test(NAME cif COMMAND test_cif)
+set_tests_properties(cif PROPERTIES TIMEOUT 60)
+
 add_executable(test_measurement test_measurement.cpp)
 target_link_libraries(test_measurement curcuma_cap curcuma_core)
 add_test(NAME measurement_capability COMMAND test_measurement)

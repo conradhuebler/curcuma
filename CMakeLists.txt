@@ -497,6 +497,7 @@ set(curcuma_core_SRC
         src/capabilities/rmsdtraj.cpp
         src/capabilities/external_potentials.cpp
         src/capabilities/measurement.cpp
+        src/tools/cif.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/md_diagnostics.cpp
         src/capabilities/analysis.cpp
@@ -610,6 +611,7 @@ set(curcuma_cap_SRC
         src/capabilities/rmsdtraj.cpp
         src/capabilities/external_potentials.cpp
         src/capabilities/measurement.cpp
+        src/tools/cif.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/md_diagnostics.cpp
         src/capabilities/analysis.cpp

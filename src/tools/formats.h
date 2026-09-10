@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include "src/tools/cif.h"
+
 #include <Eigen/Dense>
 
 #include <algorithm>
@@ -621,14 +623,27 @@ inline Molecule LoadFile(const std::string& filename)
         return Molecule(SDF2Mol(filename));
     else if (std::string(filename).find(".vtf") != std::string::npos)
         return Molecule(VTF2Mol(filename));
-    else if (std::string(filename).find(".json") != std::string::npos) {
+    else if (std::string(filename).find(".cif") != std::string::npos) {
+        // Claude Generated 2026 - Not inline with the others: reading a CIF means
+        // applying its symmetry operations, which is a couple of hundred lines and
+        // does not belong in a header everything includes.
+        const curcuma::CifResult result = curcuma::ReadCif(filename);
+        if (!result.ok()) {
+            fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold,
+                "\n" + result.error + "\n");
+            return Molecule();
+        }
+        for (const std::string& note : result.notes)
+            fmt::print(fg(fmt::color::orange), "\ncif: " + note + "\n");
+        return result.molecule;
+    } else if (std::string(filename).find(".json") != std::string::npos) {
         Molecule molecule;
         molecule.ImportJson(filename);
         return molecule;
     } else if (std::string(filename).find("coord") != std::string::npos || std::string(filename).find("tmol") != std::string::npos)
         return Molecule(Coord2Mol(filename));
     else {
-        fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "\nI dont understand the file type. Please use xyz (trj), sdf, mol2, vtf or turbomole coord files as input.\n");
+        fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "\nI dont understand the file type. Please use xyz (trj), sdf, mol2, vtf, cif or turbomole coord files as input.\n");
         fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "\nTried to open " + filename + " and failed.");
         fmt::print("\n\n");
         return Molecule();
