@@ -2336,6 +2336,15 @@ bool SimpleMD::setExternalPotentials(const json& list, std::string* error)
     return true;
 }
 
+double SimpleMD::externalWork() const
+{
+    std::lock_guard<std::mutex> lock(m_external_potential_mutex);
+    double work = 0.0;
+    for (const curcuma::ExternalPotential& potential : m_external_potentials)
+        work += potential.work;
+    return work;
+}
+
 json SimpleMD::externalPotentials() const
 {
     std::lock_guard<std::mutex> lock(m_external_potential_mutex);

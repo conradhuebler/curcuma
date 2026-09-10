@@ -288,6 +288,10 @@ public:
     /** @brief The configured potentials, their settings and the work they did. */
     json externalPotentials() const;
 
+    /** @brief Total work the external potentials have done, in Eh. Cheap enough to
+     *  ask for every frame, unlike externalPotentials(). Claude Generated 2026. */
+    double externalWork() const;
+
     // Getters for stepwise GUI feedback
     const Geometry& positions() const { return m_eigen_geometry; }
     const Geometry& velocities() const { return m_eigen_velocities; }
