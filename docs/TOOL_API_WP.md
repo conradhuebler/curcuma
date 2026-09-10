@@ -225,6 +225,43 @@ side effect of this WP.
 **Done when:** `curcuma -angle`, `-torsion`, `-distance` produce the same numbers as before
 on both a single structure and a trajectory; `-export_config measurement` yields a schema.
 
+**The capability is done** (`d06b153e`), with `test_measurement` checking it against geometry
+worked out by hand rather than against a previous run of the same code. The dependency above
+was resolved by taking **only** the `GeometryTools` half of `09a451c4` (`62a8bb34`): those are
+pure additions and change no existing number, while the `BestFitRotation` fix in the same
+commit is RMSD numerics another line of work is active in and stays where it is.
+
+Three decisions the implementation settled:
+
+- **How many atoms a kind needs is a property of the kind.** `requiredAtoms()` is the only
+  place that knows, and an angle over two atoms is refused with the count in the message
+  rather than measured as something else.
+- **A centroid is reported as a position**, not reduced to a scalar with statistics over it.
+  The mean of three coordinates is a number nobody should be able to quote.
+- **Selections are resolved per frame.** `"F2"` on frame 900 is not the same index set as on
+  frame 0, and for a measurement over a trajectory that is the correct reading, not a bug.
+
+**Still open: the six commands in `main.cpp` are not dispatched onto it yet**, and the reason
+is no longer only the collision hotspot. Running them first turned up two mismatches that a
+blind rewiring would have shipped as silent regressions:
+
+- **`-torsion` reports a dihedral in `[0, 360)`.** Measured on 353 frames of
+  `test_cases/confs/conf.xyz`: mean 198.7°, min 110.2°, max 249.8°. `GeometryTools::Dihedral`
+  is signed — the IUPAC convention and the better default — and switching would have moved
+  every number that command has ever printed. Now a setting (`dihedral_range`), signed for new
+  callers, `positive` for the one that has to keep its output.
+- **`-distance` does not measure two atoms.** It takes two atom *sets* and reports the distance
+  between their centroids. The capability had no kind for that; `centroid_distance` is it.
+  (The command also reads its selections one-based, so `-distance file 0 5` prints 0 Å because
+  selection `"0"` is index −1. Recorded here, not changed.)
+
+Both were found by **running the commands**, not by reading them.
+
+**What the rewiring still needs first: a net.** `test_cases/cli/` has no coverage for any of
+the six, so today there is nothing that would catch a changed number. Golden references for
+all six, on a single structure and on a trajectory, are the prerequisite — and worth having
+whether or not the rewiring follows, since these commands are currently untested.
+
 ### WP7 — Export the capability table
 
 `src/core/capability_table.{h,cpp}`: **metadata only** (name, description, category,
