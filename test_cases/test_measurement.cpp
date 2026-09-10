@@ -149,6 +149,41 @@ int main()
             "and so is a measurement with nothing to measure");
     }
     {
+        // The CLI's -torsion has always printed [0, 360). Signed is the better
+        // default and the IUPAC one, but an existing command must keep its numbers,
+        // so the convention is a setting rather than a silent change.
+        json controller;
+        controller["kind"] = "dihedral";
+        controller["atoms"] = "1,2,3,4";
+        json positive = controller;
+        positive["dihedral_range"] = "positive";
+
+        curcuma::Molecule mirrored;
+        mirrored.addPair({ 6, Position(1.0, 0.0, 0.0) });
+        mirrored.addPair({ 6, Position(0.0, 0.0, 0.0) });
+        mirrored.addPair({ 6, Position(0.0, 2.0, 0.0) });
+        mirrored.addPair({ 6, Position(0.0, 2.0, -3.0) });   // the other side
+
+        const double signedValue = run(mirrored, controller)["values"][0].get<double>();
+        const double positiveValue = run(mirrored, positive)["values"][0].get<double>();
+        check(signedValue < 0.0 && near(signedValue, -90.0, 1e-4),
+            "the signed convention puts the mirrored dihedral at -90 degrees");
+        check(near(positiveValue, 270.0, 1e-4),
+            "and dihedral_range=positive reports the same geometry as 270, which is what "
+            "the CLI has always printed");
+    }
+    {
+        // Two sets, not two atoms: this is what the -distance command measures, and
+        // it had no counterpart in the capability until it was checked against it.
+        json controller;
+        controller["kind"] = "centroid_distance";
+        controller["atoms"] = "1,2";
+        controller["atoms_b"] = "3,4";
+        const json r = run(square(), controller);
+        check(r.contains("values") && near(r["values"][0].get<double>(), 1.0),
+            "the centroid distance of the square's two halves is 1.0 A");
+    }
+    {
         check(curcuma::requiredAtoms(curcuma::MeasurementKind::Dihedral) == 4
                 && curcuma::requiredAtoms(curcuma::MeasurementKind::Gyration) == 0,
             "how many atoms a kind needs is a property of the kind");

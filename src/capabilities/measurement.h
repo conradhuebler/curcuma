@@ -37,6 +37,7 @@ enum class MeasurementKind {
     Dihedral,          ///< over four, signed
     Gyration,          ///< radius of gyration of an atom set (all atoms when empty)
     Centroid,          ///< the set's centroid; reported as a position, not a scalar
+    CentroidDistance,  ///< between two sets' centroids; one atom each is the plain distance
     RmsdToReference    ///< against the first frame, or against a given reference
 };
 
@@ -96,6 +97,7 @@ private:
     MeasurementKind m_kind = MeasurementKind::Distance;
     std::vector<int> m_atoms;
     std::string m_unit;
+    bool m_dihedral_positive = false;
     int m_window = 10;
     int m_first_frame = 0;
     int m_last_frame = -1;   ///< -1: to the end
@@ -114,7 +116,7 @@ MODULE_INFO("Simple geometric measurements over a structure or a trajectory: dis
     "Analysis", { "distance", "angle", "torsion", "bond", "gyration", "centroid" })
 
 PARAM(kind, String, "distance", "What to measure.", "Basic", {},
-    "tier=primary; enum=distance|angle|dihedral|gyration|centroid|rmsd")
+    "tier=primary; enum=distance|angle|dihedral|gyration|centroid|centroid_distance|rmsd")
 PARAM(atoms, Selection, "", "Atoms to measure, in the selection grammar. Two for a distance, "
                             "three for an angle, four for a dihedral; any number for gyration "
                             "and centroid, empty meaning all of them.", "Basic", {},
@@ -122,6 +124,14 @@ PARAM(atoms, Selection, "", "Atoms to measure, in the selection grammar. Two for
 PARAM(unit, String, "degrees", "Unit for the angular kinds: degrees or radians. Lengths are "
                                "always Angstrom.", "Basic", {},
     "enum=degrees|radians")
+PARAM(atoms_b, Selection, "", "Second atom set, for centroid_distance.", "Basic", {},
+    "tier=primary")
+PARAM(dihedral_range, String, "signed", "How a dihedral is reported: signed gives the IUPAC "
+                                        "(-180, 180], positive maps it onto [0, 360). The CLI's "
+                                        "-torsion has always used positive, so changing the "
+                                        "default would change every number it has ever printed.",
+    "Basic", {},
+    "enum=signed|positive")
 PARAM(window, Int, 10, "Moving-average window for the per-frame statistics.", "Statistics", {},
     "min=1")
 PARAM(first_frame, Int, 0, "First frame to measure (0-based).", "Frames", {},
