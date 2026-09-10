@@ -144,6 +144,12 @@ add_test(NAME gfnff_react_fd_gradient
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
 # Claude Generated (Sep 2026): GeometryTools angle/dihedral/radius of gyration.
+# External potentials: parsing and selection resolution. Claude Generated 2026.
+add_executable(test_external_potentials test_external_potentials.cpp)
+target_link_libraries(test_external_potentials curcuma_cap curcuma_core)
+add_test(NAME external_potentials COMMAND test_external_potentials)
+set_tests_properties(external_potentials PROPERTIES TIMEOUT 300)
+
 add_executable(test_geometry_tools test_geometry_tools.cpp)
 target_link_libraries(test_geometry_tools curcuma_core)
 if(USE_PCH)
