@@ -16,7 +16,9 @@ cd build_windows
 
 REM 3. Configure CMake
 echo Configuring project...
-cmake -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release .. -DUSE_TBLITE=OFF -DUSE_XTB=OFF -DUSE_Plumed=OFF
+REM USE_PORTABLE_MATH=ON: avoids Wine/native-Windows erf()/acos()/exp()/log()
+REM divergence via the CRT math DLL (api-ms-win-crt-math-l1-1-0.dll) -- see docs/PORTABLE_ERF.md
+cmake -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release .. -DUSE_TBLITE=OFF -DUSE_XTB=OFF -DUSE_Plumed=OFF -DUSE_PORTABLE_MATH=ON
 if %errorlevel% neq 0 (
     echo [ERROR] CMake configuration failed!
     exit /b %errorlevel%

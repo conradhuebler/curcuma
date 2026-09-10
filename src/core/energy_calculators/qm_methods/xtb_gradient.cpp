@@ -13,7 +13,7 @@
  *
  * AP4: repulsion + H0/Pulay (s/p only) + Coulomb + CN chain-rule.
  * AP5: GFN2 direct multipole gradient (SD/DD/SQ) + mrad/CN chain-rule.
- * AP5 (TODO): integral Pulay term (multipole integral derivatives × v_dp/v_qp).
+ * AP5b: integral Pulay term (multipole integral derivatives × v_dp/v_qp), section 5.
  *
  * Claude Generated. GPL-3.0.
  */
@@ -180,6 +180,11 @@ void XTB::calculateGradient()
     }
 
     // ==========================================================================
+    //  1b.  GFN1 halogen-bond gradient (classical B–X···A term, no density)
+    // ==========================================================================
+    addHalogenBondGradient(m_gradient);
+
+    // ==========================================================================
     //  2a.  On-site CN contribution: dEdcn[iat] += (-kcn[ish]) · P(μ,μ)
     //       (diagonal H0 elements: H0_μμ = se[ish]; dH0/dCN = -kcn[ish])
     // ==========================================================================
@@ -216,6 +221,13 @@ void XTB::calculateGradient()
     // which span thread boundaries — so threads write into private grad/dEdcn
     // partials that are summed afterwards. Bit-identical to the serial sum up to
     // floating-point reassociation (validated against the serial reference).
+    // Shells are geometry-independent: convert once instead of once per shell
+    // pair in the inner loop (as_cgto_shell copies two std::vectors). Same hoist
+    // as B1 in getHamiltonianH0(); identical values. Claude Generated, Sep 2026.
+    std::vector<CGTO::Shell> shells(nsh);
+    for (int ish = 0; ish < nsh; ++ish)
+        shells[ish] = as_cgto_shell(m_basis.cgto[ish]);
+
     const int grad_threads = effectiveIntraThreads(nat);
     std::vector<Matrix> grad_parts(grad_threads, Matrix::Zero(nat, 3));
     std::vector<Vector> dEdcn_parts(grad_threads, Vector::Zero(nat));
@@ -248,7 +260,7 @@ void XTB::calculateGradient()
                 const int ia_nao   = m_basis.nao_sh[ish_a];
                 const double pi_a  = 1.0 + m_h0.shpoly[ish_a] * rr;
                 const double zeta_a = m_basis.cgto[ish_a].slater_exp;
-                const CGTO::Shell sh_a = as_cgto_shell(m_basis.cgto[ish_a]);
+                const CGTO::Shell& sh_a = shells[ish_a];
 
                 for (int ib = 0; ib < nsh_jat; ++ib) {
                     const int ish_b    = m_basis.ish_at[jat] + ib;
@@ -256,7 +268,7 @@ void XTB::calculateGradient()
                     const int jb_nao   = m_basis.nao_sh[ish_b];
                     const double pi_b  = 1.0 + m_h0.shpoly[ish_b] * rr;
                     const double zeta_b = m_basis.cgto[ish_b].slater_exp;
-                    const CGTO::Shell sh_b = as_cgto_shell(m_basis.cgto[ish_b]);
+                    const CGTO::Shell& sh_b = shells[ish_b];
 
                     // X-I1: d-touching shell pair uses the spherical-transform
                     // gradient blocks (computed once per shell pair); pure s/p
@@ -867,6 +879,10 @@ bool XTB::calculateGradientGpu()
         xyz[3*i+1] = m_geometry(i, 1) * AA_TO_AU;
         xyz[3*i+2] = m_geometry(i, 2) * AA_TO_AU;
     }
+
+    // 1b. GFN1 halogen-bond gradient (classical, host-side — the device kernels
+    // cover sections 1/2/3 only).
+    addHalogenBondGradient(m_gradient);
 
     // 3b. Dispersion gradient (host-cached) + its CN chain-rule contribution.
     if (m_disp_gradient_valid

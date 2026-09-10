@@ -158,14 +158,10 @@ void CurcumaOpt::LoadControlJson()
     // this, CLI overrides like -gfnff.eeq_distance_cutoff are dropped because
     // m_controller["opt"] / ["sp"] don't carry sibling scopes. Add only when missing
     // — explicit per-scope overrides always win.
-    static constexpr const char* kMethodScopes[] = {
-        "gfnff", "eeq_solver", "xtb", "tblite", "ulysses",
-        "d3", "d4", "uff", "qmdff", "eht"
-    };
     for (const char* sub : {"opt", "sp"}) {
         if (!m_controller.contains(sub) || !m_controller[sub].is_object())
             m_controller[sub] = json::object();
-        for (const char* scope : kMethodScopes) {
+        for (const std::string& scope : MethodFactory::methodParameterScopes()) {
             if (m_controller.contains(scope) && !m_controller[sub].contains(scope)) {
                 m_controller[sub][scope] = m_controller[scope];
             }
@@ -209,10 +205,10 @@ void CurcumaOpt::LoadControlJson()
         }
     }
 
-    m_method = m_defaults.value("method", std::string("uff"));
+    m_method = m_defaults.value("method", std::string("gfnff"));
     // Override method from controller if provided (CLI parameter)
     if (m_controller.contains("method")) {
-        m_method = m_controller.value("method", std::string("uff"));
+        m_method = m_controller.value("method", std::string("gfnff"));
         m_defaults["method"] = m_method; // Keep both JSON objects synchronized
     }
     m_charge = m_defaults.value("charge", 0);
@@ -280,8 +276,8 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
     // Claude Generated: Silent initialization to avoid confusing uff output when gfnff is requested
     json silent_sp = m_controller["sp"];
     silent_sp["verbosity"] = 0;  // Make early initialization silent
-    EnergyCalculator interface(m_defaults.value("method", std::string("uff")), silent_sp, Basename());
-    std::string method = m_defaults.value("method", std::string("uff"));
+    EnergyCalculator interface(m_defaults.value("method", std::string("gfnff")), silent_sp, Basename());
+    std::string method = m_defaults.value("method", std::string("gfnff"));
 
     auto iter = molecules.begin();
     interface.setMolecule(iter->getMolInfo());

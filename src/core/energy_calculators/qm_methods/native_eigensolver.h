@@ -35,6 +35,8 @@
 
 #include <Eigen/Dense>
 
+#include <functional>
+
 namespace curcuma::eigsolver {
 
 /**
@@ -118,5 +120,71 @@ bool purifyDensity(const Eigen::MatrixXd& Atil, int nocc,
 bool lobpcgLowest(const Eigen::MatrixXd& A, int k,
                   Eigen::MatrixXd& X, Eigen::VectorXd& evals,
                   int maxIter = 50, double tol = 1e-8, int nConverge = -1);
+
+/* ===================================================================== *
+ *  Raw-pointer building blocks — the pieces a GPU backend drives itself.
+ *
+ *  The Vulkan xTB engine (qm_methods/vulkan/xtb_vulkan_context.cpp) runs the
+ *  tridiagonalization and the divide-and-conquer merges on the device, but the
+ *  HOST half of each step is exactly the code above. These two entry points
+ *  expose it on raw column-major arrays (what a device buffer maps to), so the
+ *  backend calls the canonical implementation instead of keeping a copy.
+ *  Claude Generated (Sep 2026).
+ * ===================================================================== */
+
+/**
+ * @brief Symmetric tridiagonal eigensolve (implicit-shift QL) on raw arrays.
+ *
+ * The raw-pointer face of the D&C base case: `diag[n]` / `off[n-1]` (off[k] connects rows
+ * k and k+1) in, ascending `eval[n]` and the matching eigenvectors `evec` (n×n,
+ * COLUMN-major, column j ↔ eval[j]) out. Full rotation accumulation, so degenerate
+ * spectra are handled without inverse-iteration clustering. Returns false if an
+ * eigenvalue needs > 50 QL iterations.
+ *
+ * @param n     matrix dimension (> 0)
+ * @param diag  diagonal, length n
+ * @param off   sub-diagonal, length n-1 (unread for n == 1)
+ * @param eval  out: eigenvalues, ascending, length n
+ * @param evec  out: eigenvectors, column-major n*n
+ */
+bool solveTridiagonalQL(int n, const double* diag, const double* off,
+                        double* eval, double* evec);
+
+/**
+ * @brief Secular-equation solver hook for rank1EigenDeflate.
+ *
+ * Called once per merge with the DEFLATED secular set: `D[k]` (strictly ascending),
+ * `z[k]` (weights), `rho` > 0. Must write the k ascending roots to `lam[k]` and the
+ * secular eigenvectors to `Wsec` (k×k, column-major, stride k). Return false to abort
+ * the merge. An empty hook means "use the built-in host solver".
+ */
+using SecularSolveFn = std::function<bool(const double* D, const double* z, int k,
+                                          double rho, double* lam, double* Wsec)>;
+
+/**
+ * @brief Eigenproblem of diag(D) + rho·z·zᵀ with deflation, on raw arrays.
+ *
+ * The rank-1 merge step of the Cuppen divide-and-conquer: normalise z, fold the sign of
+ * rho, sort D, deflate (Givens rotations for degenerate diagonals + negligible weights),
+ * solve the secular equation on what is left, assemble, undo the rotations and scatter
+ * back to the input basis. Returns `eval[n]` and `W` (n×n COLUMN-major, eval[j] ↔ column j).
+ *
+ * Pass `secular` to run only the secular solve elsewhere (e.g. a GPU kernel); the
+ * deflation bookkeeping around it — the part that is easy to get subtly wrong — stays
+ * shared. With an empty hook this is the plain host solver.
+ *
+ * @param D_in     diagonal, length n
+ * @param z_in     rank-1 update vector, length n
+ * @param n        dimension (> 0)
+ * @param rho_in   rank-1 coefficient (either sign)
+ * @param eval     out: eigenvalues, length n (input order, NOT sorted)
+ * @param W        out: eigenvectors, column-major n*n
+ * @param secular  optional secular-solve hook (default: the built-in host solver)
+ * @param nThreads thread budget for the built-in secular solve (ignored when hooked)
+ */
+bool rank1EigenDeflate(const double* D_in, const double* z_in, int n, double rho_in,
+                       double* eval, double* W,
+                       const SecularSolveFn& secular = SecularSolveFn(),
+                       int nThreads = 1);
 
 } // namespace curcuma::eigsolver

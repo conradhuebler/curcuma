@@ -14,6 +14,14 @@
  * from non-CUDA translation units.  All CUDA types are hidden in the Pimpl
  * (FFWorkspaceGPUImpl, defined in ff_workspace_gpu.cu).
  *
+ * Claude Generated (Sep 2026): SHARED by the CUDA and the ROCm backend - the Pimpl
+ * keeps every runtime type out of this file, so the two copies differed only in the
+ * class name.  The ROCm build gets this exact declaration under its hipified names via
+ * rocm/ff_workspace_hip.h (FFWorkspaceGPU -> FFWorkspaceHip); the names stay distinct
+ * because libcurcuma_cuda.so and libcurcuma_rocm.so are dlopen'd with RTLD_GLOBAL and
+ * must not export colliding symbols.  Device implementations: ff_workspace_gpu.cu (nvcc)
+ * resp. rocm/gfnff_rocm.hip (hipcc).
+ *
  * Minimum compute capability: 6.0 (Pascal) — native double atomicAdd.
  *
  * Reference: Spicher/Grimme J. Chem. Theory Comput. 2020 (GFN-FF)
@@ -21,7 +29,7 @@
 
 #pragma once
 
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
 
 #include "src/core/global.h"
 #include "../ff_workspace.h"           // FFEnergyComponents, Matrix, Vector, SpMatrix
@@ -646,4 +654,4 @@ private:
     FFTermTimings m_kernel_timings;
 };
 
-#endif // USE_CUDA
+#endif // USE_CUDA || USE_ROCM

@@ -54,6 +54,20 @@ option(USE_AVX2
 option(USE_AVX512
     "Enable AVX-512 instructions (Skylake-X+, not portable)" OFF)
 
+# Claude Generated (Aug 2026): self-contained erf()/acos()/exp()/log() (see
+# src/core/portable_{erf,acos,exp,log}.h and src/core/math_compat.h) instead
+# of the platform CRT/libm. On MinGW/Windows, these dynamically import from
+# api-ms-win-crt-math-l1-1-0.dll; Wine's reimplementation of that DLL rounds
+# them differently in the last bit than native Windows' ucrtbase, which can
+# flip GFN-FF/EEQ's angle- and CN-based classification thresholds
+# (hybridisation, bond type, HB donor/acceptor, pi-membership) into a
+# different discrete decision for the same geometry. See docs/PORTABLE_ERF.md.
+# Off by default to keep existing validated golden-value tests bit-for-bit
+# unchanged; the Windows build turns it on (scripts/build_windows.bat) since
+# that is where the divergence was observed.
+option(USE_PORTABLE_MATH
+    "Use vendored fdlibm-derived erf()/acos()/exp()/log() instead of platform CRT/libm (deterministic across Wine/native-Windows)" OFF)
+
 option(USE_BLAS
     "Enable BLAS" OFF)
 
@@ -88,28 +102,32 @@ option(USE_PCH
     "Enable Precompiled Headers for faster compilation" ON)
 
 option(USE_CUDA
-    "Enable CUDA-accelerated GPU (gfnff + gfn1/gfn2 -gpu cuda, requires CUDA toolkit)" OFF)
+    "Build the CUDA GPU plugin libcurcuma_cuda.so (gfnff + gfn1/gfn2 -gpu cuda, requires CUDA toolkit)" OFF)
 
 # Claude Generated (June 2026): ROCm/HIP-accelerated GFN-FF + native xTB (-gpu rocm).
 # Requires the ROCm toolkit (hipcc, hipBLAS, rocSOLVER). Separate HIP source tree
-# under .../rocm/ mirrors the CUDA .../cuda/ kernels; runtime code gates on USE_ROCM.
+# under .../rocm/ mirrors the CUDA .../cuda/ kernels.
 option(USE_ROCM
-    "Enable ROCm/HIP-accelerated GPU (gfnff/gfn1/gfn2 -gpu rocm, requires ROCm toolkit)" OFF)
+    "Build the ROCm GPU plugin libcurcuma_rocm.so (gfnff/gfn1/gfn2 -gpu rocm, requires ROCm toolkit)" OFF)
 
-# Claude Generated (June 2026): Vulkan-compute-accelerated GFN-FF + native xTB
-# (-gpu vulkan). Hand-written SPIR-V compute shaders (no BLAS/LAPACK on Vulkan).
+# Claude Generated (June 2026): Vulkan-compute-accelerated native xTB (-gpu vulkan).
+# Hand-written SPIR-V compute shaders (no BLAS/LAPACK on Vulkan).
 # Requires the Vulkan SDK (loader + headers + glslc/glslangValidator).
 option(USE_VULKAN
-    "Enable Vulkan-compute-accelerated GPU (gfnff/gfn1/gfn2 -gpu vulkan, requires Vulkan SDK)" OFF)
+    "Build the Vulkan GPU plugin libcurcuma_vulkan.so (gfn1/gfn2 -gpu vulkan, requires Vulkan SDK)" OFF)
 
 # ---------------------------------------------------------------------------
-# Unified GPU backend switches (Jun 2026)
+# GPU backends are runtime-loaded plugins (Sep 2026)
 # ---------------------------------------------------------------------------
-# One umbrella flag per backend (USE_CUDA / USE_ROCM / USE_VULKAN) is the single
-# switch — turning one on enables BOTH the native-xTB (gfn1/gfn2) AND the GFN-FF GPU
-# path for that backend. There are no per-method sub-flags; the source gates on the
-# umbrella directly. (Jun 2026: the former USE_*_XTB / USE_*_GFNFF sub-flags were
-# dissolved — they were forced to follow the umbrella anyway.)
+# One umbrella flag per backend (USE_CUDA / USE_ROCM / USE_VULKAN) builds ONE shared
+# library, libcurcuma_<backend>.so, placed next to the curcuma executable. It holds the
+# device code plus the concrete GPU ComputationalMethods and exports a tiny C ABI
+# (see src/core/energy_calculators/gpu_plugin.h). curcuma_core and the executable
+# contain NO backend symbol and NO backend #ifdef: `-gpu <backend>` dlopen's the plugin
+# on demand and falls back to the CPU method (with a warning) when it is absent. So a
+# single CPU binary serves every machine; the plugins are optional add-ons, and any
+# subset of them can be built into the same tree. Each plugin mirrors curcuma_core's
+# compile definitions so shared classes have one ABI on both sides of dlopen.
 
 # WP-D Stage B (May 2026): hand-rolled AVX2 exp(-x^2) for GFN-FF dcn step 3 hot loop.
 # Opt-in. Default OFF keeps the build bit-identical to pre-WP. Requires AVX2 (set
@@ -509,12 +527,12 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/xtb_gradient.cpp
         src/core/energy_calculators/qm_methods/nddo_params.cpp
         src/core/energy_calculators/ff_methods/gfnff_method.cpp
-        src/core/energy_calculators/ff_methods/gfnff_advanced.cpp
         src/core/energy_calculators/ff_methods/gfnff_torsions.cpp
         src/core/energy_calculators/ff_methods/gfnff_inversions.cpp
         src/core/energy_calculators/ff_methods/ff_workspace.cpp
         src/core/energy_calculators/ff_methods/ff_workspace_gfnff.cpp
         src/core/energy_calculators/ff_methods/ff_workspace_uff.cpp
+        src/core/energy_calculators/ff_methods/ff_workspace_cg.cpp
         src/core/energy_calculators/ff_methods/alpb_solvation.cpp
         src/core/energy_calculators/ff_methods/eeq_solver.cpp
         src/core/energy_calculators/ff_methods/huckel_solver.cpp
@@ -537,7 +555,6 @@ set(curcuma_core_SRC
         src/core/molecule.cpp
         src/core/xyz_comment_parser.cpp
         src/core/fileiterator.cpp
-        src/core/energy_calculators/ff_methods/forcefieldthread.cpp
         src/core/energy_calculators/ff_methods/forcefield.cpp
         src/core/energy_calculators/ff_methods/forcefieldfunctions.h
         src/core/energy_calculators/ff_methods/forcefieldgenerator.cpp
@@ -644,6 +661,12 @@ endif()
 
 if(USE_MKL)
     target_compile_definitions(curcuma_core PRIVATE USE_MKL)
+endif()
+
+# Claude Generated (Aug 2026): see USE_PORTABLE_MATH option above / src/core/math_compat.h
+if(USE_PORTABLE_MATH)
+    target_compile_definitions(curcuma_core PRIVATE CURCUMA_PORTABLE_MATH)
+    message(STATUS "erf()/acos()/exp()/log(): using vendored portable implementations (USE_PORTABLE_MATH=ON)")
 endif()
 
 add_library(curcuma_cap  ${curcuma_cap_SRC})
@@ -1016,14 +1039,14 @@ if(USE_CUDA)
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY LANGUAGE CUDA)
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 
-    # Claude Generated (Jul 2026): CUDA is now a RUNTIME-LOADED PLUGIN, not baked into
+    # Claude Generated (Jul 2026): CUDA is a RUNTIME-LOADED PLUGIN, not baked into
     # curcuma_core. cuBLAS/cuSOLVER run ~40 ms of DT_INIT (kernel dispatch tables) at load
     # time; linking them into the main binary taxed EVERY CPU-only run's startup (~50 ms
-    # vs gxtb's ~1 ms). Now curcuma_core stays CUDA-symbol-free (it drives the GPU only
+    # vs gxtb's ~1 ms). curcuma_core stays CUDA-symbol-free (it drives the GPU only
     # through the CUDA-free GpuScfBackend seam) and dlopen's libcurcuma_cuda.so on demand
-    # via gpu_plugin.cpp. USE_CUDA on the core only enables the loader calls in
-    # method_factory; the CUDA runtime loads lazily when -gpu cuda is actually used.
-    target_compile_definitions(curcuma_core PUBLIC USE_CUDA)
+    # via gpu_plugin.cpp. Sep 2026: the core no longer carries USE_CUDA at all - the
+    # method factory probes the plugin at runtime, so the CPU objects are byte-identical
+    # whether or not any GPU plugin is built. USE_CUDA is defined for the plugin only.
 
     # The loadable GPU plugin: a shared library holding all CUDA device/host code plus the
     # concrete GPU ComputationalMethods. It links the CUDA runtime; its undefined core
@@ -1038,7 +1061,7 @@ if(USE_CUDA)
     # Match curcuma_core's compile definitions EXACTLY so every shared class (XTB, ...) has
     # an identical ABI on both sides of the dlopen boundary. Generator expression captures
     # the final set (incl. USE_GFNFF/USE_MKL/USE_D4/... set elsewhere in this file).
-    target_compile_definitions(curcuma_cuda PRIVATE
+    target_compile_definitions(curcuma_cuda PRIVATE USE_CUDA
         $<TARGET_PROPERTY:curcuma_core,COMPILE_DEFINITIONS>)
     set_target_properties(curcuma_cuda PROPERTIES
         CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
@@ -1056,19 +1079,27 @@ endif()
 
 # Claude Generated (June 2026): ROCm/HIP backend (gfnff/gfn1/gfn2 -gpu rocm).
 # Build: cmake -DUSE_ROCM=ON -DCMAKE_PREFIX_PATH=/opt/rocm && make -j4
-# (USE_ROCM is the single switch — it enables both the native-xTB and GFN-FF GPU paths,
-#  mirroring CUDA. ROCM_GPU_ARCH is auto-detected from rocminfo; override only if wrong.)
-# The HIP context (device handshake + rocSOLVER eigensolver + the Stage-2 resident-SCF
-# __global__ kernels) is compiled by hipcc into a plain relocatable object via a custom
-# command, then linked into curcuma_core as an EXTERNAL_OBJECT with g++. This builds the
-# device kernels while keeping the HIP-only --offload-arch / --hip-link flags off the GNU
-# link of curcuma_core + the executables (which otherwise flips the link to ld.lld and
-# drops the GNU OpenMP runtime libgomp). curcuma_core links libamdhip64 (+ rocSOLVER /
-# rocBLAS when present); no enable_language(HIP) / CMake HIP machinery is used.
+# (USE_ROCM is the single switch - it builds both the native-xTB and GFN-FF GPU paths
+#  into ONE plugin, libcurcuma_rocm.so, mirroring CUDA. ROCM_GPU_ARCH is auto-detected
+#  from rocminfo; override only if wrong.)
+# The two HIP TUs (xTB context: device handshake + rocSOLVER eigensolver + resident-SCF
+# __global__ kernels; GFN-FF: single-TU port of the CUDA kernels) are compiled by hipcc
+# into plain relocatable objects via custom commands, then linked into the plugin as
+# EXTERNAL_OBJECTs with g++. This builds the device kernels while keeping the HIP-only
+# --offload-arch / --hip-link flags off the GNU link (which otherwise flips the link to
+# ld.lld and drops the GNU OpenMP runtime libgomp). Only the plugin links libamdhip64 +
+# rocSOLVER + rocBLAS; no enable_language(HIP) / CMake HIP machinery is used.
+# Sep 2026: converted from `target_sources(curcuma_core ...)` to a dlopen plugin - the
+# core and the executable are HIP-free (see the GPU-plugin note near the USE_* options).
 if(USE_ROCM)
     find_library(ROCM_HIP_RT amdhip64 REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64)
-    find_package(rocblas QUIET)
-    find_package(rocsolver QUIET)
+    # rocSOLVER/rocBLAS are MANDATORY: eeq_solver_hip.hiph calls rocblas_create_handle /
+    # rocsolver_dpotrf unconditionally and the xTB eigensolver is rocSOLVER dsygvd.
+    # Search /usr too so a distro that installs ROCm under /usr links without
+    # -DCMAKE_PREFIX_PATH=/opt/rocm.
+    find_library(ROCM_ROCSOLVER rocsolver REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64 /usr/lib /usr/lib64)
+    find_library(ROCM_ROCBLAS   rocblas   REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64 /usr/lib /usr/lib64)
+    find_program(HIPCC_EXECUTABLE hipcc REQUIRED PATHS /opt/rocm/bin)
 
     # Auto-detect the HIP offload arch from rocminfo so the compiled code object
     # matches the installed GPU. A wrong arch (--offload-arch=gfx1150 on a gfx1101
@@ -1104,163 +1135,137 @@ if(USE_ROCM)
         endif()
     endif()
 
-    target_compile_definitions(curcuma_core PUBLIC USE_ROCM)
 
-    # ---- ROCm native xTB (gfn1/gfn2 -gpu rocm) --------------------------------
-    find_program(HIPCC_EXECUTABLE hipcc REQUIRED PATHS /opt/rocm/bin)
-    # ROCM_GPU_ARCH is auto-detected above (top of the USE_ROCM block).
-
-    # hipcc compile flags + defines. HAVE_ROCSOLVER gates the eigensolver/resident code.
-    set(_hipcc_defs -DUSE_ROCM -D__HIP_PLATFORM_AMD__)
-    # Match the g++ build's Eigen alignment (CURCUMA_EIGEN_ALIGN, set with the march/AVX
-    # switch above) so Eigen objects crossing this hipcc TU <-> g++ boundary share one ABI.
+    # hipcc compile defines shared by both device TUs. Match the g++ build's Eigen
+    # alignment (CURCUMA_EIGEN_ALIGN, set with the march/AVX switch above) so Eigen
+    # objects crossing the hipcc TU <-> g++ boundary share one ABI. FMT_HEADER_ONLY:
+    # the plugin's g++ sources get it through the mirrored curcuma_core definitions
+    # (fmt::fmt-header-only INTERFACE define), but a custom command inherits nothing,
+    # so it is spelled out here - otherwise the device TU references the non-inline
+    # fmt::vprint and the link fails.
+    set(_hipcc_defs -DUSE_ROCM -D__HIP_PLATFORM_AMD__ -DHAVE_ROCSOLVER -DHAVE_ROCBLAS -DFMT_HEADER_ONLY)
     if(NOT CURCUMA_EIGEN_ALIGN EQUAL 0)
         list(APPEND _hipcc_defs -DEIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN})
     endif()
-    set(_rocm_wrap_defs "")
-    if(rocsolver_FOUND AND rocblas_FOUND)
-        find_library(ROCM_ROCSOLVER rocsolver REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64)
-        find_library(ROCM_ROCBLAS   rocblas   REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64)
-        list(APPEND _hipcc_defs -DHAVE_ROCSOLVER -DHAVE_ROCBLAS)
-        # Claude Generated (Jul 2026): pre-formed "-D..." tokens + COMPILE_OPTIONS below,
-        # not bare macro names + COMPILE_DEFINITIONS. The Makefile generator was emitting
-        # this source's COMPILE_DEFINITIONS list with the leading entry "-D"-prefixed but
-        # trailing entries bare (e.g. "-D__HIP_PLATFORM_AMD__ HAVE_ROCSOLVER"), which g++
-        # then tried to treat as a linker input file ("HAVE_ROCSOLVER: file not found").
-        # COMPILE_OPTIONS passes tokens through verbatim, sidestepping the quirk.
-        list(APPEND _rocm_wrap_defs "-DHAVE_ROCSOLVER")
-        message(STATUS "ROCm Stage 1/2 enabled (rocSOLVER dsygvd + HIP kernels)")
-    else()
-        message(STATUS "ROCm Stage 0 only: install rocsolver + rocblas for the GPU eigensolver")
-    endif()
+    # USE_D3/USE_D4 are NOT passed - the GFN-FF .hip pulls them from this build's
+    # generated global_config.h (-I${PROJECT_BINARY_DIR}), so the device TU and the
+    # core never disagree on the dispersion backend. GFN-FF uses its own D4
+    # (dispersion/), so configure with -DUSE_D4=ON -DUSE_D3=OFF.
+    set(_hipcc_incs
+        -I${CMAKE_SOURCE_DIR} -I${PROJECT_SOURCE_DIR} -I${PROJECT_BINARY_DIR}
+        -I${PROJECT_SOURCE_DIR}/external
+        -I${PROJECT_SOURCE_DIR}/external/fmt/include
+        -I${PROJECT_SOURCE_DIR}/external/eigen-3.4.0
+        -I${PROJECT_SOURCE_DIR}/external/cpp-d4/include
+        -I${PROJECT_SOURCE_DIR}/external/LBFGSpp/include
+        -I${PROJECT_SOURCE_DIR}/external/ripser
+        -I/opt/rocm/include)
 
-    # hipcc -c <ctx>.hip -> .o  (host + device code in one relocatable object).
+    # ---- native xTB device TU: hipcc -c xtb_hip_context.hip -> .o ----------------
     set(_hip_ctx_src ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.hip)
-    set(_hip_ctx_hdr ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.h)
+    # Claude Generated (Sep 2026): add_custom_command does no implicit header scanning
+    # (unlike normal target_sources compilation), so every header this .hip transitively
+    # #includes must be listed explicitly in DEPENDS or an edit to one silently leaves a
+    # stale .hip.o linked into libcurcuma_rocm.so — an ABI mismatch against the freshly
+    # recompiled g++ host objects (struct layout drift, e.g. GFNFFParameterSet growing a
+    # field, corrupts memory at runtime instead of failing to build). `rm
+    # release/*.hip.o` forces a rebuild if a header is missing from either list below.
+    set(_hip_ctx_hdrs
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/rocm/xtb_hip_integrals.hiph
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/parameters/xtb_params_extra.hpp)
     set(_hip_ctx_obj ${CMAKE_CURRENT_BINARY_DIR}/xtb_hip_context.hip.o)
     add_custom_command(
         OUTPUT  ${_hip_ctx_obj}
         COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 --offload-arch=${ROCM_GPU_ARCH}
-                ${_hipcc_defs} -I${CMAKE_SOURCE_DIR} -I${PROJECT_SOURCE_DIR} -I/opt/rocm/include
+                ${_hipcc_defs} ${_hipcc_incs}
                 ${_hip_ctx_src} -o ${_hip_ctx_obj}
-        DEPENDS ${_hip_ctx_src} ${_hip_ctx_hdr}
+        DEPENDS ${_hip_ctx_src} ${_hip_ctx_hdrs}
         COMMENT "Compiling HIP xTB context with hipcc (arch ${ROCM_GPU_ARCH})"
         VERBATIM)
     add_custom_target(curcuma_hip_ctx DEPENDS ${_hip_ctx_obj})
     set_source_files_properties(${_hip_ctx_obj} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
 
-    # Host wrapper (g++) + the prebuilt HIP object, both into curcuma_core.
-    target_sources(curcuma_core PRIVATE
-        src/core/energy_calculators/qm_methods/xtb_hip_method.cpp
-        ${_hip_ctx_obj})
-    add_dependencies(curcuma_core curcuma_hip_ctx)
-    target_include_directories(curcuma_core PRIVATE /opt/rocm/include)
-    target_link_libraries(curcuma_core ${ROCM_HIP_RT})
-    if(rocsolver_FOUND AND rocblas_FOUND)
-        target_link_libraries(curcuma_core ${ROCM_ROCSOLVER} ${ROCM_ROCBLAS})
-    endif()
-    if(_rocm_wrap_defs)
-        set_source_files_properties(
-            src/core/energy_calculators/qm_methods/xtb_hip_method.cpp
-            PROPERTIES COMPILE_OPTIONS "${_rocm_wrap_defs}")
-    endif()
-
-    message(STATUS "ROCm native xTB enabled: gfn1/gfn2 -gpu rocm available")
-
-    # ---- ROCm GFN-FF (gfnff -gpu rocm) -------------------------------------
+    # ---- GFN-FF device TU: hipcc -c gfnff_rocm.hip -> .o ---------------------------
     # Single-TU HIP port of cuda/{gfnff_kernels,ff_workspace_gpu,eeq_solver_gpu,gpu_utils}.
-    # Same EXTERNAL_OBJECT pattern as the xTB block: hipcc -c -> one .o, g++ links it.
-    # USE_D3/USE_D4 are NOT passed here — the .hip pulls them from this build's generated
-    # global_config.h (-I${PROJECT_BINARY_DIR}), so the device TU and curcuma_core never
-    # disagree on the dispersion backend. GFN-FF uses its own D4 (dispersion/), so configure
-    # with -DUSE_D4=ON -DUSE_D3=OFF.
-    if(NOT HIPCC_EXECUTABLE)
-        find_program(HIPCC_EXECUTABLE hipcc REQUIRED PATHS /opt/rocm/bin)
-    endif()
-    # ROCM_GPU_ARCH is auto-detected above (top of the USE_ROCM block).
-
-    # FMT_HEADER_ONLY: curcuma_core links fmt::fmt-header-only (INTERFACE define), but the
-    # hipcc custom command does not inherit that target's compile defs, so set it here too —
-    # otherwise the device TU references the non-inline fmt::vprint and the g++ link fails.
-    set(_hip_ff_defs -DUSE_ROCM -D__HIP_PLATFORM_AMD__ -DFMT_HEADER_ONLY)
-    # Match the g++ Eigen alignment (see the xTB block / the march-derived CURCUMA_EIGEN_ALIGN)
-    # so workspace matrices read in the g++ wrapper (e.g. the gradient norm) share one ABI.
-    if(NOT CURCUMA_EIGEN_ALIGN EQUAL 0)
-        list(APPEND _hip_ff_defs -DEIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN})
-    endif()
-    # rocSOLVER/rocBLAS are MANDATORY for the GFN-FF ROCm path: eeq_solver_hip.hiph
-    # calls rocblas_create_handle / rocsolver_dpotrf unconditionally (the only gate is
-    # USE_ROCM — there is no source-level fallback), so the .o always references these
-    # symbols. find by name (searching /usr too) so a distro that installs ROCm under
-    # /usr links without -DCMAKE_PREFIX_PATH=/opt/rocm. The QUIET find_package result
-    # above is intentionally ignored here.
-    if(NOT ROCM_ROCSOLVER)
-        find_library(ROCM_ROCSOLVER rocsolver REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64 /usr/lib /usr/lib64)
-        find_library(ROCM_ROCBLAS   rocblas   REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64 /usr/lib /usr/lib64)
-    endif()
-    list(APPEND _hip_ff_defs -DHAVE_ROCSOLVER -DHAVE_ROCBLAS)
-
+    # See the DEPENDS comment above the xTB context command — same hazard, same fix.
     set(_hip_ff_src ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/gfnff_rocm.hip)
+    set(_hip_ff_hdrs
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/ff_workspace_hip.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/eeq_solver_hip.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/eeq_solver_hip.hiph
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/gfnff_soa_hip.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/gfnff_kernels_hip.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/gpu_utils_hip.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/gfnff_parameters.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/ff_terms.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/gfnff_par.h
+        ${PROJECT_SOURCE_DIR}/src/core/curcuma_logger.h)
     set(_hip_ff_obj ${CMAKE_CURRENT_BINARY_DIR}/gfnff_rocm.hip.o)
     add_custom_command(
         OUTPUT  ${_hip_ff_obj}
         COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 --offload-arch=${ROCM_GPU_ARCH}
-                ${_hip_ff_defs}
-                -I${CMAKE_SOURCE_DIR} -I${PROJECT_SOURCE_DIR} -I${PROJECT_BINARY_DIR}
-                -I${PROJECT_SOURCE_DIR}/external
-                -I${PROJECT_SOURCE_DIR}/external/fmt/include
-                -I${PROJECT_SOURCE_DIR}/external/eigen-3.4.0
-                -I${PROJECT_SOURCE_DIR}/external/cpp-d4/include
-                -I${PROJECT_SOURCE_DIR}/external/LBFGSpp/include
-                -I${PROJECT_SOURCE_DIR}/external/ripser
-                -I/opt/rocm/include
+                ${_hipcc_defs} ${_hipcc_incs}
                 ${_hip_ff_src} -o ${_hip_ff_obj}
-        DEPENDS ${_hip_ff_src}
+        DEPENDS ${_hip_ff_src} ${_hip_ff_hdrs}
         COMMENT "Compiling HIP GFN-FF kernels with hipcc (arch ${ROCM_GPU_ARCH})"
         VERBATIM)
     add_custom_target(curcuma_hip_gfnff DEPENDS ${_hip_ff_obj})
     set_source_files_properties(${_hip_ff_obj} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
 
-    target_sources(curcuma_core PRIVATE
+    # ---- the loadable plugin: g++ host wrappers + C entry points + the two hipcc objects
+    # Undefined core symbols (XTB, FFWorkspace, CurcumaLogger, ...) resolve against the
+    # -rdynamic curcuma executable at dlopen time, exactly like libcurcuma_cuda.so.
+    add_library(curcuma_rocm SHARED
+        src/core/energy_calculators/qm_methods/xtb_hip_method.cpp
         src/core/energy_calculators/qm_methods/gfnff_hip_method.cpp
+        src/core/energy_calculators/qm_methods/rocm/gpu_plugin_entry_rocm.cpp
+        ${_hip_ctx_obj}
         ${_hip_ff_obj})
-    add_dependencies(curcuma_core curcuma_hip_gfnff)
-    target_include_directories(curcuma_core PRIVATE /opt/rocm/include)
-    target_link_libraries(curcuma_core ${ROCM_HIP_RT} ${ROCM_ROCSOLVER} ${ROCM_ROCBLAS})
-    # The g++-compiled host wrapper needs the HIP platform macro for <hip/hip_runtime.h>
-    # (single host-side hipMemcpy for the GPU-Schur charge download).
-    # Claude Generated (Jul 2026): pre-formed "-D..." tokens + COMPILE_OPTIONS, not bare
-    # macro names + COMPILE_DEFINITIONS - see the matching xtb_hip_method.cpp comment above
-    # for why (COMPILE_DEFINITIONS here only "-D"-prefixed the first list entry).
-    set(_ff_wrap_defs "-D__HIP_PLATFORM_AMD__" "-DHAVE_ROCSOLVER")
-    set_source_files_properties(
-        src/core/energy_calculators/qm_methods/gfnff_hip_method.cpp
-        PROPERTIES COMPILE_OPTIONS "${_ff_wrap_defs}")
-    message(STATUS "ROCm GFN-FF enabled: gfnff -gpu rocm available")
+    add_dependencies(curcuma_rocm curcuma_hip_ctx curcuma_hip_gfnff)
+    target_include_directories(curcuma_rocm PRIVATE ${PROJECT_SOURCE_DIR} /opt/rocm/include)
+    target_link_libraries(curcuma_rocm PRIVATE ${ROCM_HIP_RT} ${ROCM_ROCSOLVER} ${ROCM_ROCBLAS})
+    # __HIP_PLATFORM_AMD__: the g++-compiled wrappers include <hip/hip_runtime.h> (host-side
+    # hipMemcpy for the GPU-Schur charge download). Mirror curcuma_core's definitions for
+    # a single ABI across the dlopen boundary (see the CUDA plugin).
+    target_compile_definitions(curcuma_rocm PRIVATE
+        USE_ROCM __HIP_PLATFORM_AMD__ HAVE_ROCSOLVER HAVE_ROCBLAS
+        $<TARGET_PROPERTY:curcuma_core,COMPILE_DEFINITIONS>)
+    set_target_properties(curcuma_rocm PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    add_dependencies(curcuma curcuma_rocm)
 
-    message(STATUS "ROCm: rocBLAS=${rocblas_FOUND} rocSOLVER=${rocsolver_FOUND}")
+    message(STATUS "ROCm enabled: gfn1/gfn2/gfnff -gpu rocm via loadable libcurcuma_rocm.so (arch ${ROCM_GPU_ARCH})")
 endif()
 
-# Claude Generated (June 2026): Vulkan compute backend (gfnff/gfn1/gfn2 -gpu vulkan).
+# Claude Generated (June 2026): Vulkan compute backend (gfn1/gfn2 -gpu vulkan).
 # Build: cmake -DUSE_VULKAN=ON && make -j4
-# Stage 0 wires the host Vulkan context (instance/device/queue handshake) + native-xTB
-# pass-through wrapper. The hand-written SPIR-V compute shaders under vulkan/shaders/
-# are compiled+embedded starting at Stage 1 (the eigensolver path); not referenced here.
+# Host Vulkan context (instance/device/queue handshake) + native-xTB wrapper; the
+# hand-written SPIR-V compute shaders under vulkan/shaders/ are embedded by the
+# context sources. GFN-FF has no Vulkan port yet (the plugin's GFN-FF entry point
+# returns nullptr and the core falls back to CPU).
+# Sep 2026: converted from `target_sources(curcuma_core ...)` to the dlopen plugin
+# libcurcuma_vulkan.so - the core and the executable are Vulkan-loader-free (see the
+# GPU-plugin note near the USE_* options).
 if(USE_VULKAN)
     find_package(Vulkan REQUIRED)
 
-    set(VULKAN_SOURCES
+    add_library(curcuma_vulkan SHARED
         src/core/energy_calculators/qm_methods/vulkan/vk_context.cpp
         src/core/energy_calculators/qm_methods/vulkan/xtb_vulkan_context.cpp
-        src/core/energy_calculators/qm_methods/xtb_vulkan_method.cpp)
+        src/core/energy_calculators/qm_methods/xtb_vulkan_method.cpp
+        src/core/energy_calculators/qm_methods/vulkan/gpu_plugin_entry_vulkan.cpp)
+    target_include_directories(curcuma_vulkan PRIVATE ${PROJECT_SOURCE_DIR} ${Vulkan_INCLUDE_DIRS})
+    target_link_libraries(curcuma_vulkan PRIVATE Vulkan::Vulkan)
+    target_compile_definitions(curcuma_vulkan PRIVATE USE_VULKAN
+        $<TARGET_PROPERTY:curcuma_core,COMPILE_DEFINITIONS>)
+    set_target_properties(curcuma_vulkan PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    add_dependencies(curcuma curcuma_vulkan)
 
-    target_sources(curcuma_core PRIVATE ${VULKAN_SOURCES})
-    target_include_directories(curcuma_core PRIVATE ${PROJECT_SOURCE_DIR} ${Vulkan_INCLUDE_DIRS})
-    target_link_libraries(curcuma_core Vulkan::Vulkan)
-    target_compile_definitions(curcuma_core PUBLIC USE_VULKAN)
-
-    message(STATUS "Vulkan native xTB enabled: gfn1/gfn2 -gpu vulkan available")
-    message(STATUS "Vulkan support enabled: -gpu vulkan available (Stage 0)")
+    message(STATUS "Vulkan enabled: gfn1/gfn2 -gpu vulkan via loadable libcurcuma_vulkan.so")
 endif()
 
 # Claude Generated 2026 - MSVC has no pthread (threads come from the CRT); MinGW

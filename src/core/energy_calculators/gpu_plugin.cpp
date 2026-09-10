@@ -54,7 +54,7 @@ constexpr const char* kPluginExt = ".so";
 // no LD_LIBRARY_PATH/PATH entry is required), then the default loader search path. On POSIX,
 // RTLD_GLOBAL so the plugin's undefined core symbols bind to the already-loaded executable
 // (built -rdynamic).
-void* pluginHandle(const std::string& backend)
+void* pluginHandle(const std::string& backend, bool quiet = false)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
     const std::string soname = "libcurcuma_" + backend + kPluginExt;
@@ -76,7 +76,7 @@ void* pluginHandle(const std::string& backend)
         handle = reinterpret_cast<void*>(::LoadLibraryA(soname.c_str()));
 
     if (!handle) {
-        CurcumaLogger::warn("GPU plugin '" + soname + "' could not be loaded (error "
+        if (!quiet) CurcumaLogger::warn("GPU plugin '" + soname + "' could not be loaded (error "
                             + std::to_string(::GetLastError()) + "); falling back to CPU.");
     }
 #else
@@ -95,7 +95,7 @@ void* pluginHandle(const std::string& backend)
 
     if (!handle) {
         const char* err = ::dlerror();
-        CurcumaLogger::warn("GPU plugin '" + soname + "' could not be loaded ("
+        if (!quiet) CurcumaLogger::warn("GPU plugin '" + soname + "' could not be loaded ("
                             + (err ? err : "unknown") + "); falling back to CPU.");
     }
 #endif
@@ -149,6 +149,24 @@ std::unique_ptr<ComputationalMethod> createGfnff(const std::string& backend, con
     const std::string cfg = config.dump();
     ComputationalMethod* method = fn(cfg.c_str());
     return std::unique_ptr<ComputationalMethod>(method);
+}
+
+bool available(const std::string& backend)
+{
+    return pluginHandle(backend, /*quiet=*/true) != nullptr;
+}
+
+const std::vector<std::string>& knownBackends()
+{
+    static const std::vector<std::string> backends = { "cuda", "rocm", "vulkan" };
+    return backends;
+}
+
+std::string firstAvailable()
+{
+    for (const auto& b : knownBackends())
+        if (available(b)) return b;
+    return "none";
 }
 
 } // namespace gpu_plugin

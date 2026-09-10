@@ -52,8 +52,7 @@ namespace curcuma::xtb {
  *  Lifecycle
  * ------------------------------------------------------------------------- */
 XTB::XTB(MethodType method)
-    : QMDriver()
-    , m_method(method)
+    : m_method(method)
 {
 }
 
@@ -201,10 +200,12 @@ double XTB::energySolvation() const
 
 // Non-member helper for convergence check (must be defined before Calculation)
 namespace {
-    bool checkConvergence_impl(const Vector& q_old, const Vector& q_new,
-                                double e_old, double e_new, double thresh)
+    // dq is the max-abs residual of the SCC vector the mixer works on: shell charges
+    // for GFN1, shell charges + atomic dipole/quadrupole moments for GFN2. tblite
+    // converges on the same two conditions (xtb/singlepoint.f90:254-256:
+    // `econverged = |sum(eelec) - elast| < econv`, `pconverged = mixer%get_error() < pconv`).
+    bool checkConvergence_impl(double dq, double e_old, double e_new, double thresh)
     {
-        const double dq = (q_new - q_old).cwiseAbs().maxCoeff();
         const double de = std::fabs(e_new - e_old);
         return (dq < thresh && de < thresh * 100.0);
     }
@@ -632,7 +633,19 @@ double XTB::Calculation(bool gradient)
         }
     }
 
-    if (guess_set) {
+    if (m_force_h0_guess) {
+        // Runaway retry: start from the bare H0, i.e. do NOT take the extrapolated or
+        // warm-started charges — those ARE the runaway solution we are trying to escape.
+        // Claude Generated (Sep 2026).
+        guess_set = false;
+        q_sh_old.setZero(nsh);
+        m_wfn.q_sh.setZero(nsh);
+        m_wfn.q_at.setZero(m_atomcount);
+        if (m_method == MethodType::GFN2) {
+            m_wfn.dp_at.setZero(3, m_atomcount);
+            m_wfn.qp_at.setZero(6, m_atomcount);
+        }
+    } else if (guess_set) {
         // extrapolation already populated m_wfn / q_sh_old
     } else if (m_warmstart && m_warmstart_q_sh.size() == nsh) {
         q_sh_old   = m_warmstart_q_sh;
@@ -652,7 +665,7 @@ double XTB::Calculation(bool gradient)
         }
         if (verb >= scf_min)
             CurcumaLogger::result("SCF initial guess: warm-start from previous step");
-    } else if (m_scf_guess == "eeq") {
+    } else if (m_scf_guess == "eeq" && !m_force_h0_guess) {
         Vector q_sh_guess;
         if (seedEEQGuess(q_sh_guess)) {
             q_sh_old   = q_sh_guess;
@@ -976,12 +989,13 @@ double XTB::Calculation(bool gradient)
             continue;
         }
 
-        // Broyden mixes the SCC charge vector: capture the input x_in (current
-        // m_wfn charges) before the potential is built and the populations are
-        // overwritten by the diagonalisation.
-        Vector x_in;
-        if (mode == ScfMode::Broyden)
-            x_in = packSCC();
+        // Capture the SCC input vector x_in (current m_wfn charges, and for GFN2 the
+        // atomic multipole moments) before the potential is built and the populations
+        // are overwritten by the diagonalisation. Broyden mixes it; the convergence
+        // test below measures the residual packSCC() - x_in on the SAME vector, which
+        // is what tblite does (`pconverged = mixer%get_error() < pconv`,
+        // xtb/singlepoint.f90:255). Captured for every mode, not just Broyden.
+        Vector x_in = packSCC();
 
         // Reset and build potentials. On the device-potential path (Stage 5 B3/B4)
         // the whole potential is built inside the GPU solve below, so the host
@@ -1222,8 +1236,16 @@ double XTB::Calculation(bool gradient)
         acc_mull   += ms(t_solve, t_mull);
         acc_energy += ms(t_mull,  clock::now());
 
-        // Per-iteration diagnostics
-        const double dq = (q_sh_new - q_sh_old).cwiseAbs().maxCoeff();
+        // Per-iteration diagnostics. dq is the residual of the FULL SCC vector the
+        // mixer works on: shell charges for GFN1, shell charges + atomic dipole and
+        // quadrupole moments for GFN2. Measuring only the shell charges (as this did
+        // until Sep 2026) lets GFN2 stop while the moments are still moving — the
+        // energy is then still right to O(dP^2) but the GRADIENT only to O(dP).
+        // H2 is the extreme case: symmetry pins its shell charges to 0 from the first
+        // iteration, so the SCF exited after 2 cycles with the moments unconverged and
+        // the analytic gradient came out 0.0330 instead of 0.0211 Eh/Bohr (60 % off,
+        // while the energy still matched xtb to 1e-8). Claude Generated.
+        const double dq = (packSCC() - x_in).cwiseAbs().maxCoeff();
         dq_prev = dq;   // drives the LevelShift fade-out on the next iteration
         const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
         const double t_iter_ms = ms(t_iter0, clock::now());
@@ -1249,8 +1271,10 @@ double XTB::Calculation(bool gradient)
         // density beyond the loose threshold. Default 1 = no effect. Claude Generated.
         if (iter > 0 && !m_eig_fp32
             && (!xlbomd_corrector_step || iter + 1 >= m_scf_xlbomd_correctors)) {
-            if (checkConvergence_impl(q_sh_old, q_sh_new,
-                                       e_total_old, e_scc, thresh)) {
+            // dq is the full-SCC-vector residual computed above (shell charges for
+            // GFN1, + atomic multipole moments for GFN2), matching what the mixer
+            // acts on and what tblite converges on.
+            if (checkConvergence_impl(dq, e_total_old, e_scc, thresh)) {
                 m_scf_converged = true;
                 break;
             }
@@ -1415,7 +1439,7 @@ double XTB::Calculation(bool gradient)
                                         homo, lumo, (lumo - homo) * 27.211386245988));
     }
 
-    // Update QMDriver state for wrapper compatibility
+    // Mirror the converged wavefunction for the wrapper accessors
     m_mo = m_wfn.C;
     m_energies = m_wfn.eps;
     m_num_electrons = static_cast<int>(m_wfn.nocc);
@@ -1497,6 +1521,29 @@ double XTB::Calculation(bool gradient)
                                 solve_sum, acc_solve - solve_sum);
         CurcumaLogger::info_fmt("  populations     : {:8.2f} ms ({:5.2f}/it)", acc_mull,   acc_mull / it);
         CurcumaLogger::info_fmt("  energy/mix      : {:8.2f} ms ({:5.2f}/it)", acc_energy, acc_energy / it);
+    }
+
+    // Reject a converged solution whose charges are physically impossible and redo the
+    // whole calculation from the bare-H0 guess. See the note on m_force_h0_guess in the
+    // header. The bound is generous: GFN Mulliken charges of a real system stay well
+    // inside +-2 e, and a bare monoatomic ion cannot exceed its own formal charge, so
+    // 4 e on top of the molecular charge can only be reached by a runaway.
+    if (!m_in_scf_retry && m_wfn.q_at.size() == m_atomcount) {
+        const double q_max = m_wfn.q_at.cwiseAbs().maxCoeff();
+        const double q_bound = 4.0 + std::abs(static_cast<double>(m_charge));
+        if (q_max > q_bound) {
+            CurcumaLogger::warn_fmt(
+                "SCF converged to an implausible charge distribution (max |q| = {:.2f} e > "
+                "{:.2f}); repeating from the bare-H0 guess", q_max, q_bound);
+            m_in_scf_retry = true;
+            m_force_h0_guess = true;
+            m_warmstart_q_sh.resize(0);
+            m_scf_history.clear();
+            const double e_retry = Calculation(gradient);
+            m_in_scf_retry = false;
+            m_force_h0_guess = false;
+            return e_retry;
+        }
     }
 
     return m_E_total;
@@ -1835,7 +1882,8 @@ void XTB::buildBasis()
                 principalFor(z, ish),
                 angFor(z, ish),
                 zetaFor(z, ish),
-                nprimFor(z, ish));
+                nprimFor(z, ish),
+                m_sto6g_legacy_4sp);
         }
         // Gram-Schmidt orthogonalize same-l shells
         for (int ish = 1; ish < nshell; ++ish) {
@@ -1959,6 +2007,23 @@ void XTB::buildReferenceOccupations()
         }
     }
     m_wfn.nocc = total;
+    // Split into alpha/beta, verbatim from tblite get_alpha_beta_occupation
+    // (src/tblite/wavefunction/type.f90:162-176). m_spin carries multiplicity - 1,
+    // i.e. the number of unpaired electrons (tblite nuhf). Closed shell (nuhf = 0)
+    // gives nalpha = nbeta = nocc/2, and the open-shell code paths then never run.
+    // Claude Generated (Sep 2026).
+    {
+        const double nuhf = nUhf();
+        const double diff = std::min(nuhf, m_wfn.nocc);
+        const double ntmp = m_wfn.nocc - diff;
+        m_nalpha = ntmp / 2.0 + diff;
+        m_nbeta = ntmp / 2.0;
+        if (nuhf > 0.0 && CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::param("open_shell_nuhf", static_cast<int>(std::lround(nuhf)));
+            CurcumaLogger::param("n_alpha", m_nalpha);
+            CurcumaLogger::param("n_beta", m_nbeta);
+        }
+    }
     m_wfn.q_at.setZero(m_basis.nat);
     m_wfn.q_sh.setZero(m_basis.nsh);
     if (m_method == MethodType::GFN2) {
@@ -2329,7 +2394,7 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
         std::vector<double> e_at(nat, 0.0), g_at(3 * nat, 0.0), dcn_at(nat, 0.0);
         if (m_gpu_scf->dispersionATM(nat, c6f.data(), dc6f.data(),
                                      /*s9=*/5.0, /*a1=*/0.52, /*a2=*/5.0, /*alp=*/16.0,
-                                     /*cutoff=*/25.0, e_at.data(), g_at.data(), dcn_at.data())) {
+                                     /*cutoff=*/m_d4_atm_cutoff, e_at.data(), g_at.data(), dcn_at.data())) {
             double esum = 0.0;
             for (int a = 0; a < nat; ++a) {
                 esum += e_at[a];
@@ -2344,7 +2409,8 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
     }
     if (!atm_device) {
         E += m_d4_evaluator->computeATM(
-            m_atoms, geom_bohr, /*with_gradient=*/true, m_disp_gradient, m_disp_dEdcn);
+            m_atoms, geom_bohr, /*with_gradient=*/true, m_disp_gradient, m_disp_dEdcn,
+            m_d4_atm_cutoff);
     }
     const auto td2 = d4clk::now();
 
@@ -2585,18 +2651,6 @@ void XTB::addDispersionPotential(Potential& pot) const
         return;
     for (int A = 0; A < m_atomcount; ++A)
         pot.v_at(A) += dEdq(A);
-}
-
-/* ------------------------------------------------------------------------- *
- *  Legacy QMDriver hooks — not used yet; we go through buildH0Data() instead.
- * ------------------------------------------------------------------------- */
-Matrix XTB::MakeOverlap(std::vector<STO::Orbital>& /*basisset*/)
-{
-    return Matrix::Identity(m_basis.nao, m_basis.nao);
-}
-Matrix XTB::MakeH(const Matrix& /*S*/, const std::vector<STO::Orbital>& /*basisset*/)
-{
-    return Matrix::Zero(m_basis.nao, m_basis.nao);
 }
 
 } // namespace curcuma::xtb

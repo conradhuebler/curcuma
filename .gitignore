@@ -2,6 +2,10 @@ package.json
 package-lock.json
 node_modules/
 
+# Python
+__pycache__/
+*.pyc
+
 # C++ objects and libs
 *.slo
 *.lo
@@ -97,6 +101,15 @@ test_cases/**/*.dat
 
 # MOR41 validation: track the driver data, ignore generated run artifacts
 test_cases/MOR41-testset/_run/
+
+# Grimme-group benchmark test-set data fetched on demand (scripts/fetch_testset.py,
+# docs/TESTSET_RETRIEVAL.md) - raw structures are not committed, only the small
+# hand-curated driver/reference files (reactions.dat, reference_s30l, ...).
+test_cases/MOR41-testset/*/
+test_cases/s30l_test_set/*/
+test_cases/s30lci_test_set/*/
+test_cases/GMTKN55-testset/
+test_cases/**/PROVENANCE.txt
 
 # GFN-FF / MD topology dumps (generated during runs) - Claude Generated May 2026
 *.topo.json

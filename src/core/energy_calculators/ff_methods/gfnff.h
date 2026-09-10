@@ -235,6 +235,14 @@ PARAM(accuracy, String, "normal", "Accuracy profile: loose|normal|medium|high. M
         "enum=loose|normal|medium|high")
 PARAM(allow_unconverged_charges, Bool, false, "Allow calculation to continue with unconverged EEQ charges (warn instead of abort).", "Advanced", {})
 PARAM(skip_phase2, Bool, false, "Skip Phase 2 EEQ refinement and use Phase 1 topology charges directly. Faster but less accurate.", "Advanced", {})
+// ORIGIN NOTE (do not duplicate on merge): nh_linear_fix and its guard in
+// determineHybridizationFortran() were first added on the `confsearch` branch (51830efa,
+// Aug 29 2026), where the artefact was found, and ported here in Sep 2026. The guard has
+// since been REFINED here (it now also requires the nitrogen's heavy partner to be
+// branched), so the two branches are no longer identical: THIS version is the newer one,
+// take it on merge. The PARAM text below is still byte-identical to confsearch's.
+PARAM(nh_linear_fix, Bool, true, "Do not let the angle-only GEODEP rule (input angle > 160 deg -> sp) promote a 2-coordinate nitrogen that carries a hydrogen to sp hybridisation. Why: the reference rule (gfnff_ini.f90, gen%linthr) declares ANY near-linear input angle linear-by-design, so a thermally stretched =N-H (measured: a guanidine imine N-H at 179 deg in a hot MD snapshot) is re-perceived as sp, gets theta0=180, and the distortion becomes its own equilibrium -- the structure optimises INTO the artefact and appears ~160 kJ/mol too deep (xtb 6.7.1 reproduces this with -276 kJ/mol, so it is an inherited method defect, not a port bug). In a conformer search, where every snapshot optimisation derives its own topology, one such event founds a self-reinforcing family (measured: 75 percent of a WEKLQ pool within three temperature stages). The genuine sp cases of an N-H nitrogen (H-N=C isocyanide-like, R-N=N terminal, metal nitriles, azides) are all caught by the STRUCTURAL rules that run before the angle fallback and are unaffected by this guard. Set false for bit-faithful reference (xtb/pprcht) behaviour, e.g. for validation against the Fortran implementations.", "Advanced", {})
+PARAM(frag_charge_autodetect, Bool, false, "For a CHARGED molecule that falls into exactly TWO fragments, try both placements of the net charge and keep the one with the lower EEQ electrostatic energy. Off by default because that is NOT what the reference does: its auto-detection block (gfnff_ini.f90, nfrag==2 branch) is gated on sum(qfrag(2:nfrag)) > 999 while qfrag is pre-initialised to [charge, 0, ...], so the block is dead code in both pprcht and xtb and the effective rule is 'whole charge on fragment 0'. Enabling the trial changes which fragment carries the charge and can be very wrong: GMTKN55 AHB21/21 (formate ... HF) then puts the -1 on the two-atom HF fragment, giving its hydrogen a charge of -0.52 and shifting the Coulomb term by 237 kcal/mol. Enable only to reproduce curcuma's pre-Sep-2026 behaviour or to experiment with the placement rule.", "Advanced", {})
 PARAM(cn_cutoff_bohr, Double, 10.0, "CN neighbor list cutoff radius in Bohr (reference cnthr=100 Bohr^2=10 Bohr). 0 = use accuracy-based threshold instead.", "Advanced", {})
 PARAM(cn_accuracy, Double, 1.0, "CN accuracy for threshold calculation (cnthr = 100 - log10(acc)*50). Only used when cn_cutoff_bohr = 0. Set to 0 for full O(N^2) reference mode.", "Advanced", {})
 PARAM(solve, String, "auto",
@@ -318,6 +326,7 @@ PARAM(react_refractory_scans, Int, 10, "React mode: a pair whose bond just broke
 PARAM(react_valence_cap, Bool, true, "React mode: refuse a new bond while an atom already uses its element valence plus one exchange slack, counting bond orders so multiple bonds consume valence. Prevents unphysical agglomerates; disable to sample unconstrained formation. Refused formations are logged at verbosity 2.", "Reactive", {})
 PARAM(react_exchange_scans, Int, 20, "React mode: an atom may stay above its nominal valence for at most this many scans, then its weakest bond is broken. Forces exchange intermediates like a hydrogen bridging two heavy atoms to resolve instead of staying geometrically locked. 0 disables.", "Reactive", {})
 PARAM(react_slack_form_factor, Double, 1.2, "React mode: tighter formation radius factor for bonds that push an atom above its nominal sigma valence into the exchange slack. A genuine exchange intermediate has the extra partner near bond distance; the ordinary optimistic factor would re-create bridges endlessly.", "Reactive", {})
+PARAM(storsion_reference_loop_bug, Bool, false, "Reproduce the reference implementation's triple-bond-torsion (sTors) loop bug bit-for-bit. Both pprcht/gfnff and xtb 6.7.1 call sTors_eg(m,...) with the array SIZE m instead of the loop index, so they evaluate only the LAST detected C-triplebond-C torsion, m times, and drop all others (and give exactly zero whenever the last slot was never filled). Curcuma sums every detected torsion, which is what the term is meant to do - its erefhalf is a DLPNO-CCSD(T) diphenylacetylene reference value, not a fitted parameter. Enable only to reproduce reference totals exactly.", "Advanced", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {
@@ -352,6 +361,7 @@ public:
         Vector neighbor_counts;                                  // Simple neighbor counts (integer CN)
         std::vector<int> hybridization;                          // 0=sp3, 1=sp, 2=sp2, 3=terminal, 5=hypervalent
         std::vector<int> pi_fragments;                           // Pi fragment assignment per atom
+        std::vector<int> pi_atoms_final;                         // Fortran post-Hueckel piadr (gfnff_ini.f90:1016, "piadr = itmp"): 1 iff the atom ends a bond inside a SOLVED pi-system. Stricter than pi_fragments and the array every consumer after the Hueckel section tests - Claude Generated Sep 2026
         std::vector<int> itag;                                   // -1 iff atom is eta-coordinated to a metal (Fortran itag; gfnff_ini2.f90:170-198) - Claude Generated Jul 2026
         std::vector<int> pi_system_charge;                       // ipis: charge per pi-system (subtract from nelpi) - Claude Generated Jul 2026
         std::vector<int> ring_sizes;                             // Smallest ring containing each atom
@@ -602,27 +612,6 @@ public:
     Matrix NumGradFixedCharges(double dx = 1e-5);
 
     /**
-     * @brief Diagnose gradient components for validation (verbosity >= 3)
-     *
-     * Claude Generated (Feb 21, 2026): Per-term gradient diagnostics.
-     * Prints norms of each energy term's gradient contribution.
-     * Requires setStoreGradientComponents(true) before Calculation().
-     */
-    void diagnoseGradientComponents() const;
-
-    /**
-     * @brief Compare analytical vs numerical gradient (verbosity >= 3)
-     * @param dx Finite difference step size (default: 1e-5 Bohr)
-     * @return Maximum absolute deviation between analytical and numerical gradients
-     *
-     * Claude Generated (Feb 21, 2026): Gradient validation for MD stability.
-     * Prints detailed comparison and identifies worst-case atom/dimension.
-     * Enhanced Feb 23, 2026: Two-level comparison (full EEQ vs fixed-charge)
-     * to distinguish missing dq/dx from real gradient bugs.
-     */
-    double compareGradients(double dx = 1e-5);
-
-    /**
      * @brief Get atomic partial charges (Phase 2 energy charges - nlist%q)
      * @return Vector of atomic charges (final energy charges)
      *
@@ -817,7 +806,7 @@ public:
 
     /**
      * @brief Compute CN, EEQ charges, and (if gradient) CN derivatives for current geometry.
-     * Results are stored internally and distributed to m_forcefield/m_workspace.
+     * Results are stored internally and distributed to m_workspace.
      * Call getters below to retrieve results for external workspaces.
      * @param gradient  If true, also compute gradient-related data (cnf, dc6dcn)
      * @param gpu_only  If true, skip sparse dcn matrix build and CPU forcefield/workspace
@@ -1015,6 +1004,10 @@ public:
     const Vector& getLastCNF() const { return m_last_cnf; }
     const Matrix* getDC6DCNPtr() const { return m_d4_generator ? &m_d4_generator->getDC6DCN() : nullptr; }
     FFWorkspace* getWorkspace() const { return m_workspace.get(); }
+    /// GPU wrappers: keep the FULL parameter set for consumeCachedParameterSet() (default: bonded terms only).
+    void setKeepFullParameterSet(bool keep) { m_keep_full_parameter_set = keep; }
+    /// Shared CxxThreadPool (null before initializeForceField()).
+    CxxThreadPool* threadPool() const;
 
     // Static-Mode (WP-S1, May 2026): expose frozen-state flags so the GPU method can
     // propagate them to FFWorkspaceGPU before launching kernels.
@@ -1075,8 +1068,8 @@ public:
 
     /// Compute shared packed-triangular distance arrays from m_geometry_bohr.
     /// Allocates/refreshes m_shared_sqrab and m_shared_srab (size N(N+1)/2).
-    /// Thread-pool parallelized via m_forcefield->threadPool().
-    /// Called from GFNFF::Calculation() after prepareCNAndEEQ, before m_forcefield->Calculate().
+    /// Thread-pool parallelized via threadPool().
+    /// Called from GFNFF::Calculation() after prepareCNAndEEQ, before m_workspace->calculate().
     void computeSharedDistances() const;
 
     const Eigen::VectorXd& sharedSqrab() const { return m_shared_sqrab; }
@@ -1096,15 +1089,6 @@ private:
      * @return true if successful
      */
     bool initializeForceField();
-
-    /**
-     * @brief Generate GFN-FF specific force field parameters (JSON)
-     * @return JSON with GFN-FF parameters
-     *
-     * Delegates to generateGFNFFParameterSet() and serializes to JSON.
-     * Kept for backward compatibility with file-based parameter caching.
-     */
-    json generateGFNFFParameters();
 
     /**
      * @brief Calculate topology and connectivity for GFN-FF
@@ -1130,6 +1114,22 @@ private:
      * Claude Generated (Dec 24, 2025): Breadth-First Search for 1,3/1,4 topology factors
      */
     std::vector<std::vector<int>> calculateTopologyDistances(const std::vector<std::vector<int>>& adjacency_list) const;
+
+    /**
+     * @brief Verbatim port of the reference's nbondmat (gfnff_ini2.f90:1280-1357).
+     *
+     * Produces topo%bpair: 1 for a direct bond as recorded in EITHER direction, 2 and 3
+     * for pairs that reach each other SYMMETRICALLY within that many bonds, 5 for
+     * everything else. The symmetry requirement (pairsbond's `dai .and. daj`,
+     * gfnff_ini2.f90:1380) is what stops an eta bond — stored only on the metal's side —
+     * from bridging a longer path, while the level-1 pass still records it as a bond.
+     * Curcuma previously approximated this with a plain BFS plus an "eta-free" variant,
+     * which got the two halves right separately but never together.
+     *
+     * @param nb Per-atom neighbour list; the reference passes topo%nb, i.e. the nbdum
+     *           mixture that curcuma keeps in TopologyInfo::adjacency_list.
+     */
+    std::vector<std::vector<int>> computeBpairNbondmat(const std::vector<std::vector<int>>& nb) const;
 
     /**
      * @brief Detect molecular fragments (connected components)
@@ -1161,33 +1161,6 @@ private:
      * @return true if molecule is valid
      */
     bool validateMolecule() const;
-
-    /**
-     * @brief Convert energy from kcal/mol to Hartree
-     * @param energy Energy in kcal/mol
-     * @return Energy in Hartree
-     */
-    double convertToHartree(double energy) const;
-
-    /**
-     * @brief Convert gradient from kcal/(mol*Angstrom) to Hartree/Bohr
-     * @param gradient Gradient in kcal/(mol*Angstrom)
-     * @return Gradient in Hartree/Bohr
-     */
-    Matrix convertGradientToHartree(const Matrix& gradient) const;
-
-    /**
-     * @brief Generate GFN-FF bond parameters from bond detection
-     * @return JSON array of bond parameters
-     */
-    json generateGFNFFBonds() const;
-
-    /**
-     * @brief Generate GFN-FF angle parameters from topology
-     * @param topo_info Topology information including charges, hybridization, CN, etc.
-     * @return JSON array of angle parameters
-     */
-    json generateGFNFFAngles(const TopologyInfo& topo_info) const;
 
     /**
      * @brief Generate GFN-FF torsion parameters from topology
@@ -1249,6 +1222,21 @@ private:
     /// Generate Coulomb pair parameters as native GFNFFCoulomb structs
     std::vector<GFNFFCoulomb> generateCoulombPairsNative() const;
 
+    /// Per-atom EEQ Coulomb self-energy inputs (chi_base/gam/alp/cnf/chi_static),
+    /// independent of the pair list above — see generateCoulombSelfEnergyNative().
+    struct CoulombSelfEnergy {
+        Eigen::VectorXd chi_base, gam, alp, cnf, chi_static;
+    };
+
+    /// Generate per-atom Coulomb self-energy parameters (Claude Generated Sep 2026).
+    /// Mirrors the per-atom half of generateCoulombPairsNative()'s fillPair(), but
+    /// runs unconditionally for every atom (no pairing), matching the Fortran
+    /// reference (gfnff_engrad.F90:1378-1389: the self-energy statement executes
+    /// for every atom i regardless of whether the inner j<i pairwise loop has any
+    /// iterations). Needed so a single isolated atom — where the pair list is
+    /// structurally empty — still gets a nonzero EEQ self-energy.
+    CoulombSelfEnergy generateCoulombSelfEnergyNative() const;
+
     /// Generate repulsion pair parameters as native GFNFFRepulsion structs (bonded + nonbonded)
     std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> generateRepulsionPairsNative() const;
 
@@ -1265,59 +1253,6 @@ private:
     std::vector<GFNFFBatmTriple> generateBatmTriplesNative(const TopologyInfo& topo_info) const;
 
     // Phase 4.2: GFN-FF pairwise non-bonded parameter generation (Claude Generated 2025)
-
-    /**
-     * @brief Generate EEQ-based Coulomb electrostatics pairwise parameters
-     * Formula: E_coul = q_i * q_j * erf(γ_ij * r_ij) / r_ij
-     * @return JSON array of Coulomb pair parameters
-     */
-    json generateGFNFFCoulombPairs() const;
-
-    /**
-     * @brief Generate GFN-FF repulsion pairwise parameters
-     * Formula: E_rep = repab * exp(-α*r^1.5) / r
-     * @return JSON array of repulsion pair parameters
-     */
-    json generateGFNFFRepulsionPairs() const;
-
-    /**
-     * @brief Generate D3/D4 dispersion pairwise parameters with BJ damping
-     * Formula: E_disp = -Σ_ij f_damp(r) * (s6*C6/r^6 + s8*C8/r^8)
-     * @return JSON array of dispersion pair parameters
-     *
-     * Claude Generated (December 2025): D3/D4 integration
-     * - Default (`gfnff`): ALWAYS uses the self-contained D4ParameterGenerator
-     *   (Casimir-Polder C6, `dispersion/d4param_generator`, compiled unconditionally into
-     *   curcuma_core). It is NOT gated by USE_D4 and does NOT use the external dftd4interface
-     *   / curcuma_d4 / LAPACKE lib — that flag only controls the standalone `-d4` method.
-     * - `gfnff-d3` selects the native D3ParameterGenerator instead.
-     * - generateFreeAtomDispersion() is a last-resort fallback, reached only if D4
-     *   construction throws (its "compile with USE_D4" hint does not apply to GFN-FF).
-     */
-    json generateGFNFFDispersionPairs() const;
-
-    /**
-     * @brief Generate dispersion parameters using free-atom C6 approximation
-     * @return JSON array of dispersion pair parameters
-     *
-     * Claude Generated (December 2025): Fallback method
-     * Legacy implementation extracted from generateGFNFFDispersionPairs().
-     * Uses hardcoded free-atom C6 coefficients (geometry-independent).
-     * Less accurate than D3/D4 but always available.
-     */
-    json generateFreeAtomDispersion() const;
-
-    /**
-     * @brief Factory method to generate D3 dispersion parameters
-     * @return JSON array of D3 dispersion pair parameters
-     *
-     * Claude Generated (December 2025): Phase 3 - Factory method
-     * Encapsulates all D3-specific generation logic with fallback handling.
-     * Creates D3ParameterGenerator, runs GenerateParameters(), and converts
-     * output to GFN-FF dispersion pair format.
-     * Handles exceptions and falls back to free-atom C6 if D3 fails.
-     */
-    json generateD3Dispersion() const;
 
     /**
      * @brief Extract D3/D4 configuration from main GFN-FF config
@@ -1451,12 +1386,6 @@ private:
      */
     GFNFFBondParams getGFNFFBondParameters(int atom1, int atom2, int z1, int z2,
                                             double distance, const TopologyInfo& topo) const;
-
-    /**
-     * @brief Load atomic charges from reference GFN-FF calculation
-     * @return true if charges loaded successfully
-     */
-    bool loadGFNFFCharges();
 
     /**
      * @brief Get EEQ parameters for an element
@@ -1716,10 +1645,12 @@ private:
      * @brief Detect pi-systems and conjugated fragments (PHASE 2 OPTIMIZED)
      * @param hyb Hybridization states
      * @param adjacency_list Pre-computed bond connectivity (eliminates O(N²) loop)
+     * @param nb_full Full (unfiltered) neighbour list, for the N/S pi-veto below
      * @return Vector mapping atoms to pi-fragment IDs (0 = no pi-system)
      */
     std::vector<int> detectPiSystems(const std::vector<int>& hyb,
-                                     const std::vector<std::vector<int>>& adjacency_list) const;
+                                     const std::vector<std::vector<int>>& adjacency_list,
+                                     const std::vector<std::vector<int>>& nb_full) const;
 
     /**
      * @brief Find smallest ring size for each atom and enumerate all rings
@@ -1816,6 +1747,8 @@ private:
      * @return Vector of EEQ charges
      */
     Vector calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb, const std::vector<int>& rings) const;
+    /// EEQ electrostatic energy for a charge set (fragment charge-assignment trial).
+    double calculateEEQEnergy(const Vector& charges, const Vector& cn) const;
 
     /**
      * @brief Calculate dgam (charge-dependent hardness) corrections
@@ -1836,19 +1769,6 @@ private:
                         const std::vector<int>& ring_sizes) const;
 
     /**
-     * @brief Build per-atom neighbor lists from bond pairs
-     *
-     * Claude Generated (December 2025, Session 6): Two-phase EEQ support
-     * Converts cached bond list into per-atom neighbor connectivity for
-     * enhanced topology analysis and future dxi corrections.
-     *
-     * Creates symmetric neighbor lists: if atom i bonds to j, then both lists updated
-     *
-     * @return Vector of neighbor lists (one std::vector<int> per atom)
-     */
-    std::vector<std::vector<int>> buildNeighborLists() const;
-
-    /**
      * @brief Detect eta(η)-coordinated atoms (metal-alkene/alkyne/Cp side-on bonding)
      *
      * Claude Generated (July 2026). Faithful port of the Fortran etacoord logic
@@ -1860,7 +1780,11 @@ private:
      * @param neighbor_lists Full bonded adjacency (== Fortran nbf, includes metals)
      * @return itag vector (size m_atomcount): -1 if η-coordinated, else 0
      */
-    std::vector<int> computeEtaCoordination(const std::vector<std::vector<int>>& neighbor_lists) const;
+    /// @param neighbor_lists nbf, the full list (getnb icase=1)
+    /// @param nbm            the metal-filtered list (getnb icase=3) — the reference's
+    ///                       nbm(20,i) is the SIZE OF THAT LIST, not "nbf minus metals"
+    std::vector<int> computeEtaCoordination(const std::vector<std::vector<int>>& neighbor_lists,
+                                            const std::vector<std::vector<int>>& nbm) const;
 
     /**
      * @brief Estimate per-atom "metallic character" mchar
@@ -1939,22 +1863,6 @@ private:
                                                    std::vector<int>& itag) const;
 
     /**
-     * @brief Count neighbors within 20 Bohr cutoff (nb20)
-     *
-     * Claude Generated (January 14, 2026) - Phase 2: Exact nb20 implementation
-     * Port from gfnff_ini2.f90 neighbor list generation.
-     *
-     * Returns the number of atoms within 20 Bohr (≈10.58 Å) of the given atom.
-     * This is used for bond fcn correction factors in GFN-FF.
-     * P2a (April 2026): Now uses on-the-fly distance computation instead of N×N matrix.
-     *
-     * @param atom_index Index of atom to count neighbors for
-     * @param geometry_bohr N×3 geometry matrix in Bohr
-     * @return Number of neighbors within 20 Bohr cutoff
-     */
-    int countNeighborsWithin20Bohr(int atom_index, const Eigen::MatrixXd& geometry_bohr) const;
-
-    /**
      * @brief Calculate simplified π-bond orders for all atom pairs
      *
      * Claude Generated (January 10, 2026) - Phase 2C: π-bond order approximation
@@ -1990,75 +1898,8 @@ private:
         const std::vector<double>& charges = {},
         const Eigen::MatrixXd& geometry_bohr = Eigen::MatrixXd(),
         const std::vector<int>& pi_system_charge = {},
-        const std::vector<int>& itag = {}) const;
-
-    /**
-     * @brief Calculate EEQ electrostatic energy
-     *
-     * Claude Generated (2025): Phase 3.2 EEQ energy contribution
-     * Reference: gfnff_engrad.F90:1378-1389 (EEQ energy formula)
-     *
-     * Computes electrostatic energy from EEQ charges:
-     * E_EEQ = Σ_ij q_i*q_j*γ_ij(r_ij) + Σ_i q_i*[-χ_i - cnf*√CN_i + 0.5*q_i*(γ_i + √(2π)/√α_i)]
-     *
-     * Note: Gradients use "frozen charge" approximation (∂q/∂r neglected)
-     *
-     * @param charges EEQ atomic charges from calculateEEQCharges()
-     * @param cn Coordination numbers
-     * @return EEQ electrostatic energy in Hartree
-     */
-    double calculateEEQEnergy(const Vector& charges, const Vector& cn) const;
-
-    /**
-     * @brief Generate topology-aware bond parameters
-     * @param cn Coordination numbers
-     * @param hyb Hybridization states
-     * @param charges EEQ charges
-     * @param rings Ring information
-     * @return JSON with advanced bond parameters
-     */
-    json generateTopologyAwareBonds(const Vector& cn, const std::vector<int>& hyb,
-        const Vector& charges, const std::vector<int>& rings) const;
-
-    /**
-     * Claude Generated (Jan 15, 2026): New overload accepting full TopologyInfo with pi_bond_orders
-     * @param topo_info Complete topology information including pi_bond_orders
-     * @return JSON with advanced bond parameters
-     */
-    json generateTopologyAwareBonds(const TopologyInfo& topo_info) const;
-
-    /**
-     * @brief Generate topology-aware angle parameters
-     * @param cn Coordination numbers
-     * @param hyb Hybridization states
-     * @param charges EEQ charges
-     * @param rings Ring information
-     * @return JSON with advanced angle parameters
-     */
-    json generateTopologyAwareAngles(const Vector& cn, const std::vector<int>& hyb,
-        const Vector& charges, const std::vector<int>& rings) const;
-
-    /**
-     * @brief Generate angle parameters with full topology info including pi-bond orders
-     * Claude Generated (Feb 11, 2026): New overload using complete TopologyInfo
-     * This ensures pi_bond_orders, atom_to_rings, and all topology data is available
-     */
-    json generateTopologyAwareAngles(const TopologyInfo& topo_info) const;
-
-    /**
-     * @brief Detect hydrogen bonds and set up A-H...B interactions
-     * @param charges EEQ charges
-     * @return JSON with hydrogen bond parameters
-     */
-    json detectHydrogenBonds(const Vector& charges) const;
-
-    /**
-     * @brief Detect halogen bond (XB) interactions
-     * @param charges EEQ charges for charge-based criteria
-     * @return JSON with halogen bond parameters
-     * Claude Generated (2025): Phase 2.2 - XB Detection
-     */
-    json detectHalogenBonds(const Vector& charges) const;
+        const std::vector<int>& itag = {},
+        std::vector<int>* pi_atoms_final = nullptr) const;
 
     // Advanced parameter structures (EEQParameters already defined above at line 298)
     // TopologyInfo now defined at line 51 (public section) for use in function signatures
@@ -2180,12 +2021,7 @@ public:
      * @return Inversion/out-of-plane energy or 0 if not calculated
      */
     double InversionEnergy() const;
-
-    /**
-     * @brief Get van der Waals energy component
-     * @return Van der Waals interaction energy or 0 if not calculated
-     */
-    double VdWEnergy() const;
+    double STorsEnergy() const;
 
     /**
      * @brief Get repulsion energy component
@@ -2206,13 +2042,6 @@ public:
      * @return Electrostatic energy or 0 if not calculated
      */
     double CoulombEnergy() const;
-
-    /**
-     * @brief Get D3 dispersion energy component
-     * @return D3 dispersion energy or 0 if not calculated
-     * Claude Generated (Jan 2, 2026): D3 dispersion energy accessor
-     */
-    double D3Energy() const;
 
     /**
      * @brief Get D4 dispersion energy component
@@ -2288,22 +2117,6 @@ public:
     // =================================================================================
     // vbond Parameter Access for Verification (Claude Generated November 2025)
     // =================================================================================
-
-    /**
-     * @brief Get vbond parameters for verification against reference implementation
-     * @param bond_index Index of bond (0-based)
-     * @param shift Output: vbond(1,i) - equilibrium distance shift parameter
-     * @param alpha Output: vbond(2,i) - exponential decay parameter
-     * @param force_constant Output: vbond(3,i) - force constant parameter
-     * @return true if parameters were successfully retrieved
-     */
-    bool getVBondParameters(int bond_index, double& shift, double& alpha, double& force_constant) const;
-
-    /**
-     * @brief Get number of bonds in the system
-     * @return Number of bonds
-     */
-    int getBondCount() const;
 
     // =================================================================================
     // TWO-PHASE EEQ SYSTEM (Claude Generated November 2025, Session 5)
@@ -2419,12 +2232,17 @@ public:
      *
      * Claude Generated - December 27, 2025
      */
+    /// JSON view of the native parameter set (bonds/angles/dihedrals/extra_dihedrals/inversions).
     json getForceFieldParameters() const {
-        if (m_forcefield) {
-            return m_forcefield->exportCurrentParameters();
-        }
-        return json();
-    };
+        json out;
+        out["bonds"] = getBondParameters();
+        out["angles"] = getAngleParameters();
+        json tors = getTorsionParameters();
+        out["dihedrals"] = tors.value("primary", json::array());
+        out["extra_dihedrals"] = tors.value("extra", json::array());
+        out["inversions"] = getInversionParameters();
+        return out;
+    }
 
     /**
      * @brief Phase 2: Calculate final refined charges by solving corrected EEQ
@@ -2472,24 +2290,6 @@ public:
     void setRepDiag(bool diag) { m_rep_diag = diag; }
 
     /**
-     * @brief Regenerate GFN-FF parameters using current charges (for testing/validation)
-     *
-     * Claude Generated (January 2025): Testing utility for charge-dependent validation
-     * Regenerates all charge-dependent parameters (bonds, angles, dihedrals, inversions)
-     * using the current m_charges (set via setCharges()).
-     *
-     * Call AFTER setCharges() but BEFORE Calculation() to ensure parameter-charge consistency.
-     *
-     * This is required because GFN-FF parameters depend on charges:
-     * - Bond force constants depend on fqq (charge-dependent correction)
-     * - Angle force constants have charge-dependent terms
-     * - Electrostatic parameters depend on charge distribution
-     *
-     * @return true if parameter regeneration successful
-     */
-    bool regenerateParametersWithCurrentCharges();
-
-    /**
      * @brief Get current bond parameters (for validation)
      *
      * Claude Generated (December 2025): Phase 3 - Parameter validation infrastructure
@@ -2528,26 +2328,6 @@ public:
      */
     json getInversionParameters() const;
 
-    /**
-     * @brief Set bond parameters for testing (bypasses generation)
-     *
-     * Claude Generated (December 2025): Phase 3 - Parameter injection for Test 8
-     * Allows injection of exact reference parameters to isolate energy calculation
-     * errors from parameter generation errors.
-     *
-     * @param bond_params JSON array of bond parameters in ForceField format
-     */
-    void setBondParametersForTesting(const json& bond_params);
-
-    /**
-     * @brief Set angle parameters for testing (bypasses generation)
-     *
-     * Claude Generated (December 2025): Phase 3 - Parameter injection for Test 8
-     *
-     * @param angle_params JSON array of angle parameters in ForceField format
-     */
-    void setAngleParametersForTesting(const json& angle_params);
-
 private:
     // Molecular structure (formerly from QMInterface base class)
     int m_atomcount = 0; ///< Number of atoms
@@ -2560,9 +2340,8 @@ private:
     // GFN-FF specific
     json m_parameters; ///< GFN-FF parameters
     int m_threads = 1; ///< Claude Generated (WP1, May 2026): cached thread count, kept in sync with m_parameters["threads"]
-    ForceField* m_forcefield; ///< Force field engine using modern structure
+    std::unique_ptr<CxxThreadPool> m_pool; ///< Shared worker pool (topology setup, EEQ, workspace kernels)
     std::unique_ptr<FFWorkspace> m_workspace; ///< Claude Generated (Mar 2026): Unified workspace (replaces ForceField path)
-    bool m_use_workspace = false; ///< Use FFWorkspace path instead of ForceField
 
     GeoGradMatrix m_geometry_bohr; ///< Geometry in Bohr (GFN-FF parameters are in Bohr) — WP-G: RowMajor
 
@@ -2575,7 +2354,6 @@ private:
     bool m_use_full_huckel = true; ///< Use full Hückel calculation (default: true, set to false for simplified approximation)
 
     // ATM three-body dispersion terms (extracted from D3/D4 - Claude Generated Jan 2025)
-    mutable json m_atm_triples; ///< Bonded ATM triples from D3/D4 parameter generators
 
     // Claude Generated (Feb 15, 2026): D4ParameterGenerator kept alive for runtime dc6dcn computation
     // Reference: Fortran gfnff_gdisp0.f90:382-395 - dc6dcn needed for dispersion CN gradient
@@ -2649,7 +2427,6 @@ private:
     };
 
     bool m_initialized; ///< Initialization status
-    bool m_comparing_gradients = false; ///< Guard to prevent recursion in compareGradients
     bool m_skip_eeq_recalc = false; ///< Skip Phase-2 EEQ recalculation (for charge injection diagnostic)
     bool m_rep_diag = false; ///< Dump repulsion alphanb diagnostic
 
@@ -2728,13 +2505,6 @@ private:
      */
     bool rebuildReactiveTopology();
 
-    /**
-     * @brief Push a generated parameter set into the legacy ForceField engine
-     * (parameters + Phase-1 topology charges + CN/CNF/dcn). Shared by
-     * initializeForceField() and rebuildReactiveTopology().
-     */
-    void syncLegacyForceField(const GFNFFParameterSet& ff_params);
-
     // Topology caching mode: "auto" (two-tier caching) or "constant" (never recalculate)
     std::string m_topology_mode = "auto";
 
@@ -2760,6 +2530,12 @@ private:
     // Claude Generated (March 2026): Heap-stored parameter copy for external consumers.
     // Set in initializeForceField(), consumed once via consumeCachedParameterSet().
     std::unique_ptr<GFNFFParameterSet> m_cached_parameter_set;
+    bool m_keep_full_parameter_set = false; ///< GPU wrappers need the full pair lists; CPU keeps bonded terms only
+    std::unique_ptr<GFNFFParameterSet> makeParameterSetCache(const GFNFFParameterSet& p) const;
+    // EEQ Phase-2 topology input, rebuilt only when the topology changes (B3, Sep 2026)
+    std::optional<EEQSolver::TopologyInput> m_eeq_topo_cache;
+    unsigned m_eeq_topo_cache_version = 0;
+    mutable unsigned m_topology_version = 0; ///< bumped whenever m_cached_topology is (re)assigned (also from const getCachedTopology)
 
     // Claude Generated (March 2026): Last re-detected HB/XB lists from updateHBXBIfNeeded()
     std::vector<GFNFFHydrogenBond> m_last_hbonds;
@@ -2783,6 +2559,13 @@ private:
     /// Fortran's pass 1 (gfnff_ini.f90:258 sets qa=0 before the q-loop). Filled by the
     /// second q-loop pass. Claude Generated (Jul 2026).
     mutable std::vector<double> m_bond_qa;
+    // q-loop pass-2 carry-over of the fragmentation. The reference gates its whole fragment
+    // block on `if (topo%nfrag <= 1)` (gfnff_ini.f90:467), so the second pass KEEPS the
+    // fragmentation and qfrag found in pass 1 even when the charge-shrunk radii have since
+    // merged two fragments into one. Empty nfrag (0) means "detect normally".
+    mutable int m_frag_carry_nfrag = 0;
+    mutable std::vector<int> m_frag_carry_list;
+    mutable std::vector<double> m_frag_carry_qfrag;
     CNDerivStore m_last_dcn; ///< CN derivatives (gradient only). Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
 
     // WP-FF-DistMatrix-Sharing (May 2026): shared packed-triangular distance arrays.

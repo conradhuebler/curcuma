@@ -6,6 +6,11 @@
 
 A simple Open Source molecular modelling tool.
 
+> **Sep 2026:** the native GFN-FF / GFN1 / GFN2 stack was cleaned up (single `FFWorkspace`
+> engine, table-driven method registry, ~20k lines of dead code removed) and sped up with
+> numerically identical results; `curcuma -methods` lists every method with its providers.
+> Details: [docs/CLEANUP_2026_09.md](docs/CLEANUP_2026_09.md).
+
 ## Download and requirements
 Dependencies are fetched automatically via CMake FetchContent (no manual submodule init required).
 - [LBFGSpp](https://github.com/conradhuebler/LBFGSpp) a fork of [yixuan/LBFGSpp](https://github.com/yixuan/LBFGSpp/) provides LBFGS optimiser, the fork allows performing single step optimisation without resetting any calculated optimsation history
@@ -58,25 +63,40 @@ Curcuma contains a mix of production-tested and AI-generated code. The following
 ### UFF, xTB, GFN-FF and Dispersion Correction
 Curcuma has an interface to tblite, xtb as well simple-d3 and cpp-d4, enabling semiempirical calculations or combinations of UFF with D3, D4 and H4 (no parameters are adjusted yet). To use one of the methods, please add **-method methodname** to your arguments:
 
-UFF (default)
-- uff : Universal Force Field
+Classical force field:
+- uff : Universal Force Field (no longer any capability's default since Sep 2026)
 
-Native force field (no external dependency required):
+Native force field (no external dependency required, **the default for every capability**):
 - **gfnff** : Native C++ GFN-FF — full energy and gradient, validated against Fortran reference (see status below)
 - **gfnff** + `-gpu cuda` : CUDA-accelerated variant; topology cached, charges on CPU, all kernels on GPU
 - **xtb-gfnff** : GFN-FF via the xtb Fortran library (USE_GFNFF build flag)
 
+**Which method should I use?** `gfnff` is the **fast** one and the default for every
+capability (single point, optimisation, MD, Hessian, conformer search): a native GFN-FF
+force field, no external dependency, milliseconds per gradient. `gfn2` is the **accurate**
+one: native GFN2-xTB, semi-empirical QM, roughly two orders of magnitude slower but with
+real electronic structure (charges, orbitals, bond breaking). Use `gfnff` to explore and
+`gfn2` to decide.
+
 Native GFN methods (no external dependency required, canonical backends since AP3 2026-04-25):
-- **gfn1** : Native GFN1-xTB — 10/12 validation molecules at 1e-8 vs tblite
-- **gfn2** : Native GFN2-xTB — 11/12 validation molecules at 1e-8 vs tblite (only `complex` open at 6.95e-5)
+- **gfn1** : Native GFN1-xTB — 14/16 validation molecules at 1e-8 vs tblite; includes the GFN1-only halogen-bond correction (B–X···A, added Sep 2026)
+- **gfn2** : Native GFN2-xTB — 15/16 validation molecules at 1e-8 vs tblite (only `complex` open at 7.3e-8)
 
 > Native GFN1/GFN2 are validated against tblite to a 1e-8 Eh target — see [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md). For explicit tblite or xtb backends use `tblite-gfn1`/`tblite-gfn2` or `xtb-gfn1`/`xtb-gfn2`.
+
+> **Halogen bonds (GFN1, Sep 2026):** GFN1 carries a classical B–X···A correction (X = Cl/Br/I/At, acceptor = N/O/P/S) that GFN2 does not. It was previously unimplemented; with it, all 2462 GMTKN55 structures reproduce xtb 6.7.1 to MAD 0.00007 / max 0.011 kcal/mol (was 0.041 / 11.93, and every deviation above 0.1 kcal was a halogen-bonded `HAL59` structure). See [docs/GMTKN55_VALIDATION.md](docs/GMTKN55_VALIDATION.md).
+
+> **4th-period elements (GFN1):** what is left of that 0.011 kcal/mol is a genuine xtb-vs-tblite disagreement, not a curcuma error — the two references carry different STO-6G 4s/4p tables (Z = 19–36; GFN2 uses STO-4G there and is unaffected). curcuma follows tblite, whose expansion fits the exact Slater function 3–5× better. `-xtb.sto6g_legacy_4sp true` switches to xtb's tables and reproduces the binary bit-for-bit. Details in [docs/GMTKN55_VALIDATION.md](docs/GMTKN55_VALIDATION.md).
+
+> **Gradients (Sep 2026):** analytic gradients are now validated set-wide against xtb 6.7.1 on all 2462 GMTKN55 geometries (median deviation 3e-7 / 4e-7 / 4e-8 Eh/Bohr for gfn1 / gfn2 / gfnff), with the outliers arbitrated by finite differences of each code's own energy. That sweep found and fixed two unit bugs — GFN-FF MD forces were a factor 1.89 too small, and vibrational frequencies were too high for every method — see [docs/GRADIENT_VALIDATION.md](docs/GRADIENT_VALIDATION.md). Frequencies now match xtb to ≤0.13 % on H2O for all three methods.
 
 > **Speed:** on a 231-atom complex (single core, energy+gradient) native `gfn1` runs in ~1.02 s and `gfn2` in ~1.08 s, versus xtb 6.7.1 at 1.37 s / 0.98 s — i.e. gfn1 is faster than xtb and gfn2 within ~11%. See [docs/SQM_PERFORMANCE.md](docs/SQM_PERFORMANCE.md) for the single-core record and [docs/SQM_THREADING.md](docs/SQM_THREADING.md) for `-threads N` scaling.
 
 > **d-shell elements (X-I1, June 2026):** native GFN1/GFN2 now handle d-shell basis functions (S, P, Cl, Si and other main-group d elements), matching tblite to ≤1e-8 Eh; analytic gradients FD-validated. CPU only — on `-gpu` a d-shell system falls back to the CPU integral/SCF path. Transition metals: after the Jul 2026 fixes (shell-vs-angular parameter indexing + 6s/6p STO-6G expansion), **native GFN1 and GFN2 reproduce tblite for transition metals** — GFN2 3d exact (1e-8), GFN1 72/95 MOR41 structures exact; both leave a small **~1e-3 Eh** residual for 4d/5d (heavy-element band/multipole/D4, still open). **GFN-FF transition metals are not yet validated.** See [docs/SQM_DSHELL_WP.md](docs/SQM_DSHELL_WP.md) and [docs/MOR41_VALIDATION.md](docs/MOR41_VALIDATION.md).
 
 > Native GFN1/GFN2 can use multiple cores **within one calculation** of a single large molecule: pass `-threads N` to a `-sp`/`-opt`/MD run (default is serial and bit-identical). Integral setup, gradient and Fock build scale ~3–5×; see [docs/SQM_THREADING.md](docs/SQM_THREADING.md).
+
+> **Benchmark test sets on demand:** `python scripts/fetch_testset.py fetch mor41` downloads the Grimme-group MOR41/GMTKN55/S30L benchmark sets into the layout the validation scripts expect (S30L's Supporting Information is paywalled and must be placed by hand; instructions are printed). `scripts/testset_perf.py` then times CPU/threading/GPU performance on whatever set is fetched. See [docs/TESTSET_RETRIEVAL.md](docs/TESTSET_RETRIEVAL.md).
 
 > Opt-in **MKL-free / GPU-portable eigensolve kernels** are available for the native GFN SCF (MKL stays the default): `-eigensolver native` (own Householder + Cuppen divide-and-conquer), `-eigensolver purify` (0 K density-matrix purification, GEMM-only, no diagonalization), `-eigensolver lobpcg` (seeded block LOBPCG, experimental), and `CURCUMA_EIG_TRED2=blocked` (BLAS-3 blocked tridiagonalization). See [docs/SQM_EIGENSOLVE_GPU.md](docs/SQM_EIGENSOLVE_GPU.md).
 
@@ -136,10 +156,19 @@ The native `gfnff` implementation is **AI-implemented and machine-tested** — h
 **Not validated / not implemented:**
 - **Periodic boundary conditions**: Not implemented
 - **Organometallics / transition metals**: No test molecule with metal center; parameter quality unknown
-- **Gradient accuracy for large systems**: Dispersion gradients show √N accumulation error (expected for O(N²) terms, scientifically acceptable for MD/opt)
-- **GPU energy for polymer (1280 atoms)**: 8.9 µEh vs. 1 µEh tolerance — pre-existing, under investigation
+
+**Large-system precision (re-verified Sep 2026, superseding an older note)**: the two caveats
+previously listed here — "dispersion gradients show √N accumulation error on large systems"
+and "GPU energy for polymer (1280 atoms): 8.9 µEh vs. 1 µEh tolerance" — no longer reproduce.
+`test_gfnff_validation` on the current 1410-atom `polymer.xyz` (`ctest -R gfnff_val_polymer`):
+dispersion GradComp max_err 9.9e-9 Eh/Bohr (tol 1e-4, was ~4.9e-4 in Mar 2026 — likely fixed
+incidentally by later D3/D4 precision work, e.g. CLAUDE.md Known Issues #5). CPU-vs-GPU
+single-point energy on the same molecule, ROCm (gfx1150): 0.33 µEh (well under the 1 µEh
+target; CUDA hardware was not available to re-check that backend directly).
 
 **Reactive MD (experimental)**: `-gfnff.topology_mode react` lets bonds form and break during MD (hysteresis re-detection + bonded-term rebuild, NVT-only) — see [docs/GFNFF_REACT_TOPOLOGY.md](docs/GFNFF_REACT_TOPOLOGY.md).
+
+**Cross-platform determinism (`-DUSE_PORTABLE_MATH=ON`)**: Wine and native Windows can round `erf`/`acos`/`exp`/`log` differently in the last bit (different CRT-DLL reimplementations), which can flip a GFN-FF classification threshold into a different bond term. Vendored fdlibm-derived replacements close this; off by default, on for the Windows nightly build — see [docs/PORTABLE_ERF.md](docs/PORTABLE_ERF.md).
 
 **Known differences from Fortran reference** (see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)):
 - Sub-mEh agreement for most small/medium molecules

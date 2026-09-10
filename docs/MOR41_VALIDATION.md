@@ -397,7 +397,19 @@ that was not a correctness advantage. The GFN-FF-vs-QM gap is the method's, not 
 After fixes (i)-(n), **all 95 structures are within 0.1 kcal** (per-structure MAD 0.004, reaction MAD
 0.008). The worst residuals are **PR30/PR31 ~0.07 kcal**; everything else is smaller. **Every MOR41
 GFN-FF residual above 0.1 kcal has been traced to a specific bug and fixed** — what remains is
-genuine sub-0.1-kcal fine-precision. Ground-truth with the `external/gfnff/_build/gfnff` analyzer
+genuine sub-0.1-kcal fine-precision.
+
+> **Superseded (Sep 2026)**: that last sentence was wrong again. The PR30/PR31 ~0.07 kcal residual
+> was the X-bond B-search cutoff — curcuma pruned candidate B atoms at a hardcoded 10 Bohr on the
+> **X-B** distance, while the reference prunes on **A-B** against `hbthr2` = 450 Bohr^2 (21.2 Bohr),
+> `gfnff_ini2.f90:751-757`. See CLAUDE.md Known Issue #12(d). Per-structure vs pprcht is now
+> **MAD 0.00067, max 0.012 kcal**, 1 structure above 0.01 (was MAD 0.00429, max 0.070, 9 above 0.01):
+> PR30 +0.070 → −0.0005, PR31 +0.070 → −0.0005, ED09 +0.054 → −0.0003. 15 of the 95 structures
+> changed, none by more than 0.071 kcal. Lesson worth keeping: a residual that is small, scattered
+> and resists parameter-level explanation is more often a truncation/cutoff mismatch than "fine
+> precision" — this is the second time that label was applied here and turned out to be wrong.
+
+Ground-truth with the `external/gfnff/_build/gfnff` analyzer
 (per-bond `pibo`/`fqq`/force-constant print via `pr=.true.`; `CURCUMA_TORS_DUMP`/`CURCUMA_PIBO_DUMP`/
 `CURCUMA_BOND_CSV_ALL`/`CURCUMA_HB_DUMP` for per-term dumps).
 **Critical method note:** for sub-mEh per-bond work, compare against the *energy-time* r0 — raise the

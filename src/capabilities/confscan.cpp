@@ -391,6 +391,18 @@ void ConfScan::LoadControlJson()
        and confscan owns its own, so it lands in confscan.method while the RMSD drivers
        are configured from the exported "rmsd" module. */
     m_RMSDmethod = m_config.get<std::string>("rmsd.method");
+    // Claude Generated (Sep 2026): a misspelled method name (e.g. "intertia") used to be
+    // silently accepted here and only caught deep inside RMSDDriver::LoadAlignmentMethodParameters(),
+    // which falls back to 'subspace' with a warning that is easy to miss under the live
+    // progress bar - meanwhile this object's own "Current Configuration" summary kept
+    // echoing the invalid raw string as if it were what actually ran. Validate immediately
+    // so the mismatch is impossible to miss, and record the resolved name for the summary.
+    m_RMSDmethod_effective = m_RMSDmethod;
+    if (!RMSDDriver::IsValidAlignmentMethodName(m_RMSDmethod)) {
+        m_RMSDmethod_effective = RMSDDriver::DefaultAlignmentMethodName();
+        CurcumaLogger::warn_fmt("Unknown RMSD method '{}' (check spelling) - every comparison will silently use '{}' instead. Valid names: {}.",
+            m_RMSDmethod, m_RMSDmethod_effective, RMSDDriver::ValidAlignmentMethodNames());
+    }
     m_update_rotation = m_config.get<bool>("rmsd.update_rotation");
     m_nomunkres = m_config.get<bool>("rmsd.nomunkres", false);  // May not exist in RMSD
     m_molalign = m_config.get<std::string>("rmsd.molalign_bin");
@@ -455,7 +467,7 @@ void ConfScan::LoadControlJson()
 
     // RMSD method logging
     if (m_verbosity >= 1) {
-        CurcumaLogger::result_fmt("Permutation of atomic indices performed according to {}", m_RMSDmethod);
+        CurcumaLogger::result_fmt("Permutation of atomic indices performed according to {}", m_RMSDmethod_effective);
     }
 
     if (m_useorders == -1)
@@ -464,7 +476,10 @@ void ConfScan::LoadControlJson()
     if (m_verbosity >= 1) {
         CurcumaLogger::result("Current Configuration:");
         CurcumaLogger::result_fmt("  Threads:         {}", m_threads);
-        CurcumaLogger::result_fmt("  RMSD method:     {}", m_RMSDmethod);
+        if (m_RMSDmethod_effective != m_RMSDmethod)
+            CurcumaLogger::result_fmt("  RMSD method:     {} (invalid '{}' requested)", m_RMSDmethod_effective, m_RMSDmethod);
+        else
+            CurcumaLogger::result_fmt("  RMSD method:     {}", m_RMSDmethod_effective);
         CurcumaLogger::result_fmt("  Force Reorder:   {}", m_force_reorder);
         CurcumaLogger::result_fmt("  Molalign Tol.:   {}", m_molaligntol);
         CurcumaLogger::result_fmt("  Write files:     {}", m_write);

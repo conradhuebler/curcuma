@@ -2132,7 +2132,12 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
                 d.C6 = c6;
                 d.r4r2ij = r4r2ij;
                 d.r0_squared = r0_sq;
-                d.r_cut = 50.0;  // D4 pair-energy cutoff (struct default; verified by XTB comparison May 2026)
+                // D4 two-body cutoff, tblite's realspace_cutoff(disp2=50) (disp/d4.f90:82).
+                // xtb passes 60.0 (scf_module.F90:766) but the difference is unmeasurable:
+                // with 60 instead of 50 the worst GMTKN55 gfn2 deviation moves 0.01667 ->
+                // 0.01666 kcal/mol. The whole deviation is the THREE-body cutoff instead
+                // (-xtb.d4_atm_cutoff). Measured Sep 2026; Claude Generated.
+                d.r_cut = 50.0;
                 d.zetac6 = zetac6;
                 // P1c (Apr 2026): Legacy D3 fields removed from GFNFFDispersion
 
