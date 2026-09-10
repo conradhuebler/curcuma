@@ -18,7 +18,8 @@ quantity is a hard-coded ab-initio constant or a plain coding slip, curcuma may 
 fidelity gets curcuma to reproduce GFN-FF; the entries here are what makes it describe the
 chemistry better than GFN-FF does — including refitting parameters where the functional
 form itself is the limit. Bond-breaking and transition states (entries 4, 6, 9, 10) are the
-obvious targets.
+obvious targets, and the `reactff2` branch feeds in through entries 11-15, which say what a
+refit has to supply before the reactive mode can drop its empirical filters.
 
 ## Already deviating from the reference by default
 
@@ -328,6 +329,83 @@ of GFN-FF (up to 500 kcal/mol on a single structure) to *a correct* one, which i
 doing because nothing downstream — MD, conformer search, optimisation — can be reasoned
 about otherwise. It did not, and could not, make GFN-FF more accurate. Any real accuracy
 gain has to come from the deliberate deviations collected in this file.
+
+## What react-gfnff needs from a refit
+
+The reactive topology mode ([GFNFF_REACT_TOPOLOGY.md](GFNFF_REACT_TOPOLOGY.md)) works, and
+`reactff2` is where it is developed. It reaches a running bond-forming, bond-breaking MD
+through **empirical filters standing in for missing physics**, each of them switchable and
+each of them documented there as such. Those filters are the shopping list for a refit: an
+entry below is not a bug to fix in the port, it is a place where the functional form or its
+parameters have to change before the stopgap can go.
+
+These entries are **not** externally arbitrated the way entries 1-10 are. They are known
+gaps rather than measured deviations, and they are marked as such so nobody quotes a number
+from here that has not been measured.
+
+### 11. A topology change is a step in the potential energy
+
+Rebuilding the bond list regenerates every bonded term, the repulsion partition and the EEQ
+constraints at once, so the energy jumps: measured H + H → H₂, about −450 kJ/mol arriving in
+a single step; a break at the default factor returns +21 to +34 kJ/mol. `dE_jump` records it
+per event. The consequence is that the mode is **NVT-only** — a thermostat has to absorb the
+jumps, and NVE drifts at every event.
+
+Everything else on this list follows from this one. A refit target that removes it: bonded
+terms whose contribution goes smoothly to zero over the formation/break window, so the two
+topologies agree in energy where they are exchanged, and the 3-/4-body damping that already
+switches semi-smoothly is joined by the repulsion re-partition. That is a change of
+functional form, and the parameters were fitted for a fixed topology, so it cannot be done
+by re-tuning alone.
+
+### 12. The formation and break radii are geometric factors, not energetics
+
+Formation is optimistic (1.6 × the covalent sum) because the non-bonded repulsion wall
+limits the capture radius; retention is conservative (2.6) because the Gaussian well of the
+bond term decays slowly, so that breaking removes only ~20-35 kJ/mol of residual well
+instead of ~480. Both numbers are chosen for the behaviour they produce, not derived.
+
+The refit target is the per-pair, energy-based criterion already named as an open refinement
+there: remove a bond where **its own** well has decayed past a threshold. That needs the
+bond term's depth and width to be trustworthy far from equilibrium, which is exactly where
+GFN-FF was never fitted — see entry 6 for the same problem at a transition state.
+
+### 13. The valence cap is a rule where an energy belongs
+
+A new bond forms only while both partners' used valence (Σ bond orders, σ = 1 plus the
+Hückel π order) stays within the element valence plus one exchange slot. Without it a hot,
+confined system over-bonds into a cluster whose energy eventually turns NaN. The caps
+(H/F/halogens 1+1, O 2+1, N 3+1, B 3+1, C 4+1, hypervalence-capable and metals 6) are
+chemical common sense, not a fit.
+
+A refit replaces the rule with an **over-coordination energy** rising beyond the element
+valence (ReaxFF-style). Its shape and offset are what the QM reference has to supply:
+deliberately hyper-coordinated species, computed at a level that resolves the penalty. That
+is a genuine parametrisation task and the clearest candidate for "QM-learned" in this file.
+
+### 14. The refractory period hides an energy pump
+
+A pair whose bond broke may not re-form for 10 scans (~25 fs). Without it the form/break
+cycle pumps the recombination energy through the thermostat repeatedly: measured for
+N₂ + 3 H₂ at 3500 K in a 3.5 Å wall over 20 ps, 301 events without cap and refractory
+against 35 with, and a NaN in the first case.
+
+This is a timer compensating for entry 11. With a continuous energy at the exchange point
+there is nothing to pump and the refractory period has no work left to do. It is listed
+separately because it is the cheapest test of whether a refit succeeded: if the refractory
+period can be set to zero without the event count exploding, the discontinuity is gone.
+
+### 15. There is no reference data for the reactions this is aimed at
+
+GFN-FF is not parametrised for transition states, and entry 6 measures the angle term at ~⅓
+of the correct stiffness at an SN2 saddle. A reactive force field is judged on barriers and
+paths, so a refit needs reference paths, not just reference minima: NEB or comparable at
+GFN2-xTB or higher for the target reactions. The current target is ammonia synthesis
+(N₂ + 3 H₂); Miller-Urey-type chemistry is the candidate after it.
+
+Until such a set exists, the react mode demonstrates machinery rather than energetics, and
+the documentation says so in those words. Producing that set is the prerequisite for every
+entry above, because none of them can be shown to have improved anything without it.
 
 ## How to add to this list
 
