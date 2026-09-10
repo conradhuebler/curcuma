@@ -465,6 +465,13 @@ set_tests_properties(purification PROPERTIES TIMEOUT 60 LABELS "native_xtb;eigen
 
 # Claude Generated (Jun 2026): seeded block LOBPCG kernel (the iterative `-eigensolver lobpcg`
 # path) vs Eigen's lowest-k eigenpairs, incl. a warm-start (subspace-recycling) case.
+# The measurement capability. Claude Generated 2026 - checked against geometry
+# worked out by hand, not against a previous run of the same code.
+add_executable(test_measurement test_measurement.cpp)
+target_link_libraries(test_measurement curcuma_cap curcuma_core)
+add_test(NAME measurement_capability COMMAND test_measurement)
+set_tests_properties(measurement_capability PROPERTIES TIMEOUT 120)
+
 add_executable(test_lobpcg test_lobpcg.cpp)
 target_link_libraries(test_lobpcg curcuma_core)
 if(USE_PCH)
