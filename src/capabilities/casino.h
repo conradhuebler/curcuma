@@ -38,7 +38,7 @@ MODULE_INFO("Monte Carlo sampling of conformational space.", "Dynamics", {"casin
     PARAM(steps, Int, 10000, "Number of Monte Carlo steps", "Basic", {})
     PARAM(temperature, Double, 300.0, "Temperature in Kelvin", "Basic", {})
     PARAM(step_size, Double, 0.1, "Maximum displacement per move (Angstrom)", "Basic", {})
-    PARAM(method, String, "uff", "Computational method for energy/gradient", "Basic", {})
+    PARAM(method, String, "gfnff", "Computational method for energy/gradient. Default gfnff: the fast general-purpose choice (native GFN-FF, no external dependency). Use gfn2 when accuracy matters more than speed.", "Basic", {})
     PARAM(seed, Int, 42, "Random seed for reproducibility", "Basic", {})
 
     // Output options

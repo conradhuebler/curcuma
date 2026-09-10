@@ -236,6 +236,14 @@ PARAM(accuracy, String, "normal", "Accuracy profile: loose|normal|medium|high. M
         "enum=loose|normal|medium|high")
 PARAM(allow_unconverged_charges, Bool, false, "Allow calculation to continue with unconverged EEQ charges (warn instead of abort).", "Advanced", {})
 PARAM(skip_phase2, Bool, false, "Skip Phase 2 EEQ refinement and use Phase 1 topology charges directly. Faster but less accurate.", "Advanced", {})
+// ORIGIN NOTE (do not duplicate on merge): nh_linear_fix and its guard in
+// determineHybridizationFortran() were first added on the `confsearch` branch (51830efa,
+// Aug 29 2026), where the artefact was found, and ported here in Sep 2026. The guard has
+// since been REFINED here (it now also requires the nitrogen's heavy partner to be
+// branched), so the two branches are no longer identical: THIS version is the newer one,
+// take it on merge. The PARAM text below is still byte-identical to confsearch's.
+PARAM(nh_linear_fix, Bool, true, "Do not let the angle-only GEODEP rule (input angle > 160 deg -> sp) promote a 2-coordinate nitrogen that carries a hydrogen to sp hybridisation. Why: the reference rule (gfnff_ini.f90, gen%linthr) declares ANY near-linear input angle linear-by-design, so a thermally stretched =N-H (measured: a guanidine imine N-H at 179 deg in a hot MD snapshot) is re-perceived as sp, gets theta0=180, and the distortion becomes its own equilibrium -- the structure optimises INTO the artefact and appears ~160 kJ/mol too deep (xtb 6.7.1 reproduces this with -276 kJ/mol, so it is an inherited method defect, not a port bug). In a conformer search, where every snapshot optimisation derives its own topology, one such event founds a self-reinforcing family (measured: 75 percent of a WEKLQ pool within three temperature stages). The genuine sp cases of an N-H nitrogen (H-N=C isocyanide-like, R-N=N terminal, metal nitriles, azides) are all caught by the STRUCTURAL rules that run before the angle fallback and are unaffected by this guard. Set false for bit-faithful reference (xtb/pprcht) behaviour, e.g. for validation against the Fortran implementations.", "Advanced", {})
+PARAM(frag_charge_autodetect, Bool, false, "For a CHARGED molecule that falls into exactly TWO fragments, try both placements of the net charge and keep the one with the lower EEQ electrostatic energy. Off by default because that is NOT what the reference does: its auto-detection block (gfnff_ini.f90, nfrag==2 branch) is gated on sum(qfrag(2:nfrag)) > 999 while qfrag is pre-initialised to [charge, 0, ...], so the block is dead code in both pprcht and xtb and the effective rule is 'whole charge on fragment 0'. Enabling the trial changes which fragment carries the charge and can be very wrong: GMTKN55 AHB21/21 (formate ... HF) then puts the -1 on the two-atom HF fragment, giving its hydrogen a charge of -0.52 and shifting the Coulomb term by 237 kcal/mol. Enable only to reproduce curcuma's pre-Sep-2026 behaviour or to experiment with the placement rule.", "Advanced", {})
 PARAM(cn_cutoff_bohr, Double, 10.0, "CN neighbor list cutoff radius in Bohr (reference cnthr=100 Bohr^2=10 Bohr). 0 = use accuracy-based threshold instead.", "Advanced", {})
 PARAM(cn_accuracy, Double, 1.0, "CN accuracy for threshold calculation (cnthr = 100 - log10(acc)*50). Only used when cn_cutoff_bohr = 0. Set to 0 for full O(N^2) reference mode.", "Advanced", {})
 PARAM(solve, String, "auto",
@@ -319,6 +327,7 @@ PARAM(react_refractory_scans, Int, 10, "React mode: a pair whose bond just broke
 PARAM(react_valence_cap, Bool, true, "React mode: refuse a new bond while an atom already uses its element valence plus one exchange slack, counting bond orders so multiple bonds consume valence. Prevents unphysical agglomerates; disable to sample unconstrained formation. Refused formations are logged at verbosity 2.", "Reactive", {})
 PARAM(react_exchange_scans, Int, 20, "React mode: an atom may stay above its nominal valence for at most this many scans, then its weakest bond is broken. Forces exchange intermediates like a hydrogen bridging two heavy atoms to resolve instead of staying geometrically locked. 0 disables.", "Reactive", {})
 PARAM(react_slack_form_factor, Double, 1.2, "React mode: tighter formation radius factor for bonds that push an atom above its nominal sigma valence into the exchange slack. A genuine exchange intermediate has the extra partner near bond distance; the ordinary optimistic factor would re-create bridges endlessly.", "Reactive", {})
+PARAM(storsion_reference_loop_bug, Bool, false, "Reproduce the reference implementation's triple-bond-torsion (sTors) loop bug bit-for-bit. Both pprcht/gfnff and xtb 6.7.1 call sTors_eg(m,...) with the array SIZE m instead of the loop index, so they evaluate only the LAST detected C-triplebond-C torsion, m times, and drop all others (and give exactly zero whenever the last slot was never filled). Curcuma sums every detected torsion, which is what the term is meant to do - its erefhalf is a DLPNO-CCSD(T) diphenylacetylene reference value, not a fitted parameter. Enable only to reproduce reference totals exactly.", "Advanced", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {
@@ -353,6 +362,7 @@ public:
         Vector neighbor_counts;                                  // Simple neighbor counts (integer CN)
         std::vector<int> hybridization;                          // 0=none/octahedral, 1=sp, 2=sp2, 3=sp3, 5=hypervalent (determineHybridizationFortran)
         std::vector<int> pi_fragments;                           // Pi fragment assignment per atom
+        std::vector<int> pi_atoms_final;                         // Fortran post-Hueckel piadr (gfnff_ini.f90:1016, "piadr = itmp"): 1 iff the atom ends a bond inside a SOLVED pi-system. Stricter than pi_fragments and the array every consumer after the Hueckel section tests - Claude Generated Sep 2026
         std::vector<int> itag;                                   // -1 iff atom is eta-coordinated to a metal (Fortran itag; gfnff_ini2.f90:170-198) - Claude Generated Jul 2026
         std::vector<int> pi_system_charge;                       // ipis: charge per pi-system (subtract from nelpi) - Claude Generated Jul 2026
         std::vector<int> ring_sizes;                             // Smallest ring containing each atom
@@ -1124,6 +1134,22 @@ private:
     std::vector<std::vector<int>> calculateTopologyDistances(const std::vector<std::vector<int>>& adjacency_list) const;
 
     /**
+     * @brief Verbatim port of the reference's nbondmat (gfnff_ini2.f90:1280-1357).
+     *
+     * Produces topo%bpair: 1 for a direct bond as recorded in EITHER direction, 2 and 3
+     * for pairs that reach each other SYMMETRICALLY within that many bonds, 5 for
+     * everything else. The symmetry requirement (pairsbond's `dai .and. daj`,
+     * gfnff_ini2.f90:1380) is what stops an eta bond — stored only on the metal's side —
+     * from bridging a longer path, while the level-1 pass still records it as a bond.
+     * Curcuma previously approximated this with a plain BFS plus an "eta-free" variant,
+     * which got the two halves right separately but never together.
+     *
+     * @param nb Per-atom neighbour list; the reference passes topo%nb, i.e. the nbdum
+     *           mixture that curcuma keeps in TopologyInfo::adjacency_list.
+     */
+    std::vector<std::vector<int>> computeBpairNbondmat(const std::vector<std::vector<int>>& nb) const;
+
+    /**
      * @brief Detect molecular fragments (connected components)
      * @param adjacency_list Per-atom neighbor connectivity
      * @return Pair of (nfrag, fraglist)
@@ -1213,6 +1239,21 @@ private:
 
     /// Generate Coulomb pair parameters as native GFNFFCoulomb structs
     std::vector<GFNFFCoulomb> generateCoulombPairsNative() const;
+
+    /// Per-atom EEQ Coulomb self-energy inputs (chi_base/gam/alp/cnf/chi_static),
+    /// independent of the pair list above — see generateCoulombSelfEnergyNative().
+    struct CoulombSelfEnergy {
+        Eigen::VectorXd chi_base, gam, alp, cnf, chi_static;
+    };
+
+    /// Generate per-atom Coulomb self-energy parameters (Claude Generated Sep 2026).
+    /// Mirrors the per-atom half of generateCoulombPairsNative()'s fillPair(), but
+    /// runs unconditionally for every atom (no pairing), matching the Fortran
+    /// reference (gfnff_engrad.F90:1378-1389: the self-energy statement executes
+    /// for every atom i regardless of whether the inner j<i pairwise loop has any
+    /// iterations). Needed so a single isolated atom — where the pair list is
+    /// structurally empty — still gets a nonzero EEQ self-energy.
+    CoulombSelfEnergy generateCoulombSelfEnergyNative() const;
 
     /// Generate repulsion pair parameters as native GFNFFRepulsion structs (bonded + nonbonded)
     std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> generateRepulsionPairsNative() const;
@@ -1622,10 +1663,12 @@ private:
      * @brief Detect pi-systems and conjugated fragments (PHASE 2 OPTIMIZED)
      * @param hyb Hybridization states
      * @param adjacency_list Pre-computed bond connectivity (eliminates O(N²) loop)
+     * @param nb_full Full (unfiltered) neighbour list, for the N/S pi-veto below
      * @return Vector mapping atoms to pi-fragment IDs (0 = no pi-system)
      */
     std::vector<int> detectPiSystems(const std::vector<int>& hyb,
-                                     const std::vector<std::vector<int>>& adjacency_list) const;
+                                     const std::vector<std::vector<int>>& adjacency_list,
+                                     const std::vector<std::vector<int>>& nb_full) const;
 
     /**
      * @brief Find smallest ring size for each atom and enumerate all rings
@@ -1755,7 +1798,11 @@ private:
      * @param neighbor_lists Full bonded adjacency (== Fortran nbf, includes metals)
      * @return itag vector (size m_atomcount): -1 if η-coordinated, else 0
      */
-    std::vector<int> computeEtaCoordination(const std::vector<std::vector<int>>& neighbor_lists) const;
+    /// @param neighbor_lists nbf, the full list (getnb icase=1)
+    /// @param nbm            the metal-filtered list (getnb icase=3) — the reference's
+    ///                       nbm(20,i) is the SIZE OF THAT LIST, not "nbf minus metals"
+    std::vector<int> computeEtaCoordination(const std::vector<std::vector<int>>& neighbor_lists,
+                                            const std::vector<std::vector<int>>& nbm) const;
 
     /**
      * @brief Estimate per-atom "metallic character" mchar
@@ -1869,7 +1916,8 @@ private:
         const std::vector<double>& charges = {},
         const Eigen::MatrixXd& geometry_bohr = Eigen::MatrixXd(),
         const std::vector<int>& pi_system_charge = {},
-        const std::vector<int>& itag = {}) const;
+        const std::vector<int>& itag = {},
+        std::vector<int>* pi_atoms_final = nullptr) const;
 
     // Advanced parameter structures (EEQParameters already defined above at line 298)
     // TopologyInfo now defined at line 51 (public section) for use in function signatures
@@ -2535,6 +2583,13 @@ private:
     /// Fortran's pass 1 (gfnff_ini.f90:258 sets qa=0 before the q-loop). Filled by the
     /// second q-loop pass. Claude Generated (Jul 2026).
     mutable std::vector<double> m_bond_qa;
+    // q-loop pass-2 carry-over of the fragmentation. The reference gates its whole fragment
+    // block on `if (topo%nfrag <= 1)` (gfnff_ini.f90:467), so the second pass KEEPS the
+    // fragmentation and qfrag found in pass 1 even when the charge-shrunk radii have since
+    // merged two fragments into one. Empty nfrag (0) means "detect normally".
+    mutable int m_frag_carry_nfrag = 0;
+    mutable std::vector<int> m_frag_carry_list;
+    mutable std::vector<double> m_frag_carry_qfrag;
     CNDerivStore m_last_dcn; ///< CN derivatives (gradient only). Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
 
     // WP-FF-DistMatrix-Sharing (May 2026): shared packed-triangular distance arrays.

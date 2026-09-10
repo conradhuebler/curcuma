@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-# Claude Generated (Jul 2026)
-"""S30L host-guest benchmark: compare Curcuma native GFN-FF vs xtb 6.6.1 GFN-FF.
+# Claude Generated (Sep 2026)
+"""S30L-CI host-guest benchmark: compare Curcuma native GFN-FF vs xtb GFN-FF.
 
-Runs single-point GFN-FF on host (A), guest (B), complex (AB) of all 30 S30L
-complexes with both engines on identical xyz geometries (converted once from
-the Turbomole coord files, Bohr -> Angstrom), computes association energies
-DE = E(AB) - E(A) - E(B) [kcal/mol], and compares:
-  - Primary:   curcuma vs xtb            (does native reproduce the reference impl?)
-  - Secondary: both vs reference_s30l    (context; GFN-FF does not match lit. values)
+Same procedure as scripts/s30l_gfnff_compare.py, but for the S30L-CI variant
+(counterion-neutralised charged complexes: 23-30 carry an explicit counterion
+instead of a bare net charge, so no .CHRG files are needed anywhere in this
+set - read_charge() still checks for one and would honour it if present).
 
-Charged systems (23-30) carry .CHRG files; charge is passed to curcuma via
--charge and to xtb via a .CHRG file in the xtb working directory.
+Runs single-point GFN-FF on host (A), guest (B), complex (AB) of all 30
+S30L-CI complexes with both engines on identical xyz geometries (converted
+once from the Turbomole coord files, Bohr -> Angstrom), computes association
+energies DE = E(AB) - E(A) - E(B) [kcal/mol], and compares:
+  - Primary:   curcuma vs xtb              (does native reproduce the reference impl?)
+  - Secondary: both vs reference_s30lci    (context; GFN-FF does not match lit. values)
 
 Read-only w.r.t. the test set; writes only under _run/.
 """
@@ -24,7 +26,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-TESTSET = REPO / "test_cases" / "s30l_test_set"
+TESTSET = REPO / "test_cases" / "s30lci_test_set"
 RUNDIR = TESTSET / "_run"
 CURCUMA = REPO / "release" / "curcuma"
 
@@ -36,9 +38,9 @@ def find_xtb():
     which = shutil.which("xtb")
     if which:
         return Path(which)
-    for cand in ("/opt/xtb/bin/xtb",
+    for cand in ("/opt/bin/xtb", "/opt/xtb/bin/xtb",
                  Path.home() / "Downloads" / "xtb-dist" / "bin" / "xtb",
-                 Path.home() / "Downloads" / "xtb-6.6.1" / "bin" / "xtb"):
+                 Path.home() / "Downloads" / "xtb-6.7.1" / "bin" / "xtb"):
         p = Path(cand)
         if p.exists():
             return p
@@ -50,15 +52,11 @@ XTB = find_xtb()
 BOHR = 0.52917721067          # Bohr -> Angstrom
 AU2KCAL = 627.509474           # Hartree -> kcal/mol
 
-# Only --gfnff is needed for a single point (xtb defaults to SP when no --opt).
 XTB_ARGS = ["--gfnff", "--sp"]
 
 
 def read_coord(path):
-    """Parse Turbomole $coord (Bohr) -> list of (element, x, y, z) in Angstrom.
-
-    Lines starting with '$' are directives and skipped. Each data line is
-    'x y z element' (element lowercase, e.g. 'c','h','n')."""
+    """Parse Turbomole $coord (Bohr) -> list of (element, x, y, z) in Angstrom."""
     atoms = []
     in_coord = False
     for line in path.read_text().splitlines():
@@ -83,7 +81,6 @@ def read_charge(folder):
     """Read integer charge from folder/.CHRG if present, else 0."""
     chrg = folder / ".CHRG"
     if chrg.exists():
-        # int() tolerates leading '+'/'-'; .CHRG holds e.g. '+1',' -2 '
         return int(chrg.read_text().strip())
     return 0
 
@@ -103,13 +100,10 @@ def parse_curcuma_energy(stdout):
 
 
 def parse_xtb_energy(stdout):
-    # xtb 6.6.1 prints "| TOTAL ENERGY  ...  Eh |" in a bordered table, plus
-    # a plain "total energy   :  -123.456789 Eh" summary line. Try both.
     m = re.search(r"TOTAL ENERGY[^\n]*?(-?\d+\.\d+)\s*Eh", stdout)
     if not m:
         m = re.search(r"total energy\s*:\s*(-?\d+\.\d+)\s*Eh", stdout)
     if not m:
-        # last-ditch: any "Eh" float on a line mentioning energy
         for line in stdout.splitlines():
             if "energy" in line.lower():
                 mm = re.search(r"(-?\d+\.\d+)\s*Eh", line)
@@ -125,28 +119,14 @@ def run_curcuma(xyz_path, charge):
     return parse_curcuma_energy(proc.stdout), proc.stdout + proc.stderr
 
 
-def run_xtb(xyz_path, charge, workdir, frag_charges=None):
-    """Copy xyz + .CHRG into a clean workdir and run xtb --gfnff --sp there.
-
-    .CHRG format (xtb gfnff_setup.f90:208-222): line 1 = total charge, line 2 =
-    per-fragment charges. If line 2 is absent, xtb falls back to line 1 for the
-    fragment charges, i.e. qfrag=[charge, 0] -> the WHOLE charge on fragment 1
-    (the first fragment = host). For host-guest AB complexes where the charge is
-    on the GUEST (e.g. S30L 23: A=0, B=+1), that mis-places the charge on the
-    host. Passing frag_charges=[qA, qB] writes line 2 so xtb puts each fragment's
-    charge on the correct fragment, matching curcuma's F2 both-assignment trial.
-    """
+def run_xtb(xyz_path, charge, workdir):
     workdir.mkdir(parents=True, exist_ok=True)
     local_xyz = workdir / xyz_path.name
     shutil.copy(xyz_path, local_xyz)
-    if frag_charges is not None:
-        line2 = " ".join(f"{q:+d}" for q in frag_charges)
-        (workdir / ".CHRG").write_text(f"{charge:+d}\n{line2}\n")
-    else:
-        (workdir / ".CHRG").write_text(f"{charge:+d}\n")
+    (workdir / ".CHRG").write_text(f"{charge:+d}\n")
     cmd = [str(XTB), str(local_xyz)] + XTB_ARGS
     env = dict(os.environ)
-    env["XTBPATH"] = ""  # avoid picking up stray param files
+    env["XTBPATH"] = ""
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600,
                           cwd=str(workdir), env=env)
     return parse_xtb_energy(proc.stdout), proc.stdout + proc.stderr
@@ -157,7 +137,7 @@ def main():
         raise SystemExit("xtb binary not found - set XTB_BIN or install xtb on PATH")
     only = set(int(x) for x in sys.argv[1:]) if len(sys.argv) > 1 else None
     RUNDIR.mkdir(parents=True, exist_ok=True)
-    refs = [float(x) for x in (TESTSET / "reference_s30l").read_text().split()]
+    refs = [float(x) for x in (TESTSET / "reference_s30lci").read_text().split()]
     assert len(refs) == 30, f"expected 30 reference values, got {len(refs)}"
 
     rows = []
@@ -168,7 +148,7 @@ def main():
         if not syscomp.is_dir():
             print(f"[{i:2d}] missing folder, skip", flush=True)
             continue
-        energies = {}   # (engine, part) -> Eh or None
+        energies = {}
         logdir = RUNDIR / str(i)
         logdir.mkdir(parents=True, exist_ok=True)
         charges = {}
@@ -184,17 +164,14 @@ def main():
             q = read_charge(syscomp / part)
             charges[part] = q
             xyz = logdir / f"{part}.xyz"
-            write_xyz(xyz, atoms, comment=f"S30L-{i}-{part} q={q}")
-            # curcuma
+            write_xyz(xyz, atoms, comment=f"S30LCI-{i}-{part} q={q}")
             e_cur, out_cur = run_curcuma(xyz, q)
             energies[("cur", part)] = e_cur
             (logdir / f"{part}.cur.log").write_text(out_cur)
-            # xtb
             xwdir = logdir / f"{part}_xtb"
             e_xtb, out_xtb = run_xtb(xyz, q, xwdir)
             energies[("xtb", part)] = e_xtb
             (logdir / f"{part}.xtb.log").write_text(out_xtb)
-            # clean xtb scratch files
             for scratch in ("xtbrestart", "charges", "wbo", "gfnff_topo",
                             "gfnff_charges", "gfnff_adjacency"):
                 sf = xwdir / scratch
@@ -229,7 +206,6 @@ def main():
             "status": status,
         })
 
-    # write CSV
     csv_path = RUNDIR / "results.csv"
     with csv_path.open("w", newline="") as f:
         w = csv.writer(f)
@@ -245,7 +221,6 @@ def main():
                         f"{r['d_xtb_ref']:.4f}" if r["d_xtb_ref"] is not None else "",
                         r["status"]])
 
-    # summary stats
     def stats(key):
         vals = [abs(r[key]) for r in rows if r[key] is not None]
         if not vals:
@@ -258,9 +233,9 @@ def main():
 
     md_path = RUNDIR / "results.md"
     with md_path.open("w") as f:
-        f.write("# S30L: Curcuma GFN-FF vs xtb 6.6.1 GFN-FF\n\n")
+        f.write("# S30L-CI: Curcuma GFN-FF vs xtb GFN-FF\n\n")
         f.write("All association energies in kcal/mol. DE = E(AB)-E(A)-E(B).\n")
-        f.write("d_cur_xtb = curcuma - xtb (primary); d_*_ref = engine - reference_s30l.\n\n")
+        f.write("d_cur_xtb = curcuma - xtb (primary); d_*_ref = engine - reference_s30lci.\n\n")
         f.write("| i | qAB | DE_cur | DE_xtb | DE_ref | d_cur_xtb | d_cur_ref | d_xtb_ref | status |\n")
         f.write("|---|----|-------:|-------:|-------:|---------:|---------:|---------:|:------|\n")
         for r in rows:
@@ -283,7 +258,6 @@ def main():
             else:
                 n, mad, mx, rms = s
                 f.write(f"- {label}: n={n}  MAD={mad:.3f}  max={mx:.3f}  RMSD={rms:.3f}\n")
-        # flag outliers
         outliers = [r for r in rows if r["d_cur_xtb"] is not None and abs(r["d_cur_xtb"]) > 1.0]
         f.write(f"\n## Outliers (|d_cur_xtb| > 1.0 kcal/mol): {len(outliers)}\n\n")
         for r in outliers:
@@ -291,7 +265,6 @@ def main():
                     f"(DE_cur={r['de_cur']:.2f}, DE_xtb={r['de_xtb']:.2f})\n")
 
     print(f"\nWrote {csv_path}\nWrote {md_path}")
-    # also print summary to stdout
     s = stats("d_cur_xtb")
     if s:
         n, mad, mx, rms = s

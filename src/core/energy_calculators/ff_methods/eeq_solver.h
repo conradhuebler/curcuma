@@ -121,6 +121,18 @@ public:
         int nfrag = 1;                                 // Number of molecular fragments
         std::vector<int> fraglist;                     // fraglist[i] = fragment ID for atom i (1-indexed)
         std::vector<double> qfrag;                     // qfrag[f] = target charge for fragment f
+        // Fortran itag (gfnff_ini2.f90): +1 carbene C / NO2 N, -1 eta-coordinated, 0 otherwise.
+        // Supplied so the dxi corrections can test the REAL tag instead of re-deriving it from
+        // geometry: the stored tag has already been through the aryne rule and the qa < -0.4
+        // override, and re-deriving it silently skips both. Empty = fall back to the heuristic.
+        std::vector<int> itag;
+        // Fortran piadr as the EEQ section sees it: the PRE-Hückel pi-candidate list
+        // (gfnff_ini.f90:312-336), i.e. GFNFF::detectPiSystems()'s output, nonzero for a
+        // candidate. Supplied so the dgam / amide rules use the SAME array as the rest of
+        // the force field instead of EEQSolver::detectPiSystem()'s own older inference,
+        // which has neither the NR3-X / SO3 vetoes nor B/Cl/S in its element lists.
+        // Empty = fall back to that inference.
+        std::vector<char> is_pi;
     };
 
     /**
@@ -604,6 +616,9 @@ private:
      * @param is_pi_atom Pi-system membership flags
      * @param topology Topology information
      * @param cn Coordination numbers
+     * @param exact_pi_membership Use true is_pi_atom[] membership for the
+     *        neighbour pi-checks instead of the Fortran piadr index-cutoff
+     *        replication (see .cpp for why both variants must exist)
      * @return Vector of amide nitrogen flags
      */
     std::vector<bool> detectAmideNitrogens(
@@ -611,7 +626,8 @@ private:
         const std::vector<int>& hybridization,
         const std::vector<bool>& is_pi_atom,
         const std::optional<TopologyInput>& topology,
-        const Vector& cn
+        const Vector& cn,
+        bool exact_pi_membership = false
     ) const;
 
     /**

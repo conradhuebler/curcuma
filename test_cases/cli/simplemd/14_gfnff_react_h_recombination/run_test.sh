@@ -3,8 +3,16 @@
 # Test: gfnff react topology mode — H atom recombination
 # Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
 # Claude Generated (Aug 2026) - Validates:
-#   1. 4 free H atoms in a tight spherical wall at 3000 K recombine:
+#   1. 4 free H atoms in a tight spherical wall at 6000 K recombine:
 #      at least one "REACT bond formed" event fires
+#      (was 3000 K until Sep 2026. The GFN-FF gradient returned through
+#       ComputationalMethod::getGradient() was in Eh/Bohr where the contract is
+#       Eh/Angstrom, so MD forces were a factor 1/au = 1.8897 too small and the
+#       H atoms approached far closer than the potential allows — recombination
+#       at 3000 K was an artefact of that. With the corrected forces the same
+#       configurations need ~1.89x the temperature, and 3000*1.8897 = 5670 K is
+#       what 6000 K reflects. Verified: 6000 K/r=2.5 gives 3 formations and 6
+#       rebuilds, 9000 K/r=1.8 gives 4/8; 3000 K gives 0 for every seed tried.)
 #   2. every rebuild logs its dE_jump (the accepted energy discontinuity
 #      is measured, not hidden)
 #   3. the run stays numerically stable (no NaN/Inf, no crash)
@@ -22,7 +30,7 @@ run_test() {
     rm -f stdout.log stderr.log input.trj.xyz
     cleanup_bmt_dirs
     timeout 280 $CURCUMA -md input.xyz -method gfnff -gfnff.topology_mode react \
-        -temperature 3000 -maxtime 5000 -md.time_step 0.5 -threads 1 \
+        -temperature 6000 -maxtime 5000 -md.time_step 0.5 -threads 1 \
         -md.seed 42 -md.no_restart -md.rattle_12 false \
         -md.wall_type spheric -md.wall_radius 2.5 \
         -no_bmt > stdout.log 2> stderr.log

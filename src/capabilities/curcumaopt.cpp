@@ -205,10 +205,10 @@ void CurcumaOpt::LoadControlJson()
         }
     }
 
-    m_method = m_defaults.value("method", std::string("uff"));
+    m_method = m_defaults.value("method", std::string("gfnff"));
     // Override method from controller if provided (CLI parameter)
     if (m_controller.contains("method")) {
-        m_method = m_controller.value("method", std::string("uff"));
+        m_method = m_controller.value("method", std::string("gfnff"));
         m_defaults["method"] = m_method; // Keep both JSON objects synchronized
     }
     m_charge = m_defaults.value("charge", 0);
@@ -276,8 +276,8 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
     // Claude Generated: Silent initialization to avoid confusing uff output when gfnff is requested
     json silent_sp = m_controller["sp"];
     silent_sp["verbosity"] = 0;  // Make early initialization silent
-    EnergyCalculator interface(m_defaults.value("method", std::string("uff")), silent_sp, Basename());
-    std::string method = m_defaults.value("method", std::string("uff"));
+    EnergyCalculator interface(m_defaults.value("method", std::string("gfnff")), silent_sp, Basename());
+    std::string method = m_defaults.value("method", std::string("gfnff"));
 
     auto iter = molecules.begin();
     interface.setMolecule(iter->getMolInfo());

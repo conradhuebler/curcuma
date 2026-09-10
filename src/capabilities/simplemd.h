@@ -715,9 +715,11 @@ private:
     MODULE_INFO("Molecular dynamics: integrator, thermostat, constraints, walls and bias potentials.", "Dynamics", {"md"})
 
     // --- Basic Simulation Parameters ---
-    PARAM(method, String, "uff", "Energy calculation method (e.g., uff, gfn2).", "Basic", {},
+    // master's texts and its gfnff default, this branch's tier/unit/bound
+    // annotations. The default matters: master moved every capability to gfnff.
+    PARAM(method, String, "gfnff", "Energy calculation method. Default gfnff: the fast choice for MD and conformer sampling. gfn2 is the more accurate one (semi-empirical QM, ~100x slower); uff/qmdff remain available.", "Basic", {},
         "tier=primary")
-    PARAM(temperature, Double, 298.15, "Target temperature.", "Basic", {"T"},
+    PARAM(temperature, Double, 298.15, "Target temperature in Kelvin.", "Basic", {"T"},
         "tier=primary; unit=K; min=0")
     PARAM(initial_temperature, Double, -1.0, "Initial temperature for velocity sampling (K). -1: same as 'temperature'. Use this to anneal into the target or to start cold/warm; the thermostat still drives toward 'temperature'. Ignored on restart (velocities come from the restart file).", "Basic", {"T_init", "T0", "initT"},
         "unit=K")

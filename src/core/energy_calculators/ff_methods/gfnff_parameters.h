@@ -255,6 +255,13 @@ struct GFNFFParameterSet {
     std::vector<GFNFFRepulsion> nonbonded_repulsions;
     std::vector<GFNFFCoulomb> coulombs;
 
+    // Per-atom Coulomb self-energy inputs (Claude Generated Sep 2026), independent
+    // of the pair list above — see GFNFF::generateCoulombSelfEnergyNative(). Sized
+    // m_atomcount when populated; a single isolated atom still needs a nonzero EEQ
+    // self-energy even though `coulombs` is structurally empty for N=1.
+    Eigen::VectorXd coul_self_chi_base, coul_self_gam, coul_self_alp,
+        coul_self_cnf, coul_self_chi_static;
+
     // Three-body terms
     std::vector<GFNFFHydrogenBond> hbonds;
     std::vector<GFNFFHalogenBond> xbonds;

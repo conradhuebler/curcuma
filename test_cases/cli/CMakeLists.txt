@@ -251,6 +251,15 @@ set_tests_properties(cli_sqm_07_gfn1_extended_singlepoint PROPERTIES DISABLED TR
 # AP3: gfn2 -opt still broken (gradient = zero), disable until AP4 restores gradient.
 set_tests_properties(cli_sqm_10_gfn2_optimization_smoke PROPERTIES DISABLED TRUE)
 
+# Claude Generated (Sep 2026): test 11 asserts `-method ipea1` routes to and matches
+# TBLite (ipea1 has no other provider, MethodFactory throws without USE_TBLITE) -
+# disable it when this build wasn't configured with TBLite, same DISABLED pattern
+# as the tests above, instead of a permanent hard failure.
+if(NOT USE_TBLITE)
+    set_tests_properties(cli_sqm_11_gfn2_provider_check PROPERTIES DISABLED TRUE)
+    message(STATUS "cli_sqm_11_gfn2_provider_check: disabled - USE_TBLITE is OFF (ipea1 has no other provider)")
+endif()
+
 # Allow the optimization test more wall-clock — caffeine -opt can run > 30 s
 # (kept for reference; test is currently DISABLED)
 set_tests_properties(cli_sqm_10_gfn2_optimization_smoke PROPERTIES TIMEOUT 180)

@@ -505,3 +505,25 @@ add_subdirectory(cli)
 # Claude Generated (Phase 0, Apr 2026): reference SCC dumps from tblite
 # for native GFN1/GFN2 validation (see scripts/extract_xtb_params.py + xtb_native.*)
 add_subdirectory(sqm_reference)
+
+# Claude Generated (Sep 2026): interface-level gradient + frequency contract.
+# Guards two things nothing else covered:
+#   1. EnergyCalculator::Gradient() must be Eh/Angstrom for EVERY method — SimpleMD
+#      integrates it against Angstrom coordinates and the FD Hessian differences it
+#      against Angstrom displacements. GFN-FF returned Eh/Bohr here until Sep 2026;
+#      gfnff_numgrad_builtin could not see it because it compares GFN-FF's INTERNAL
+#      gradient against an internal FD, both in Bohr.
+#   2. Vibrational frequencies vs committed xtb 6.7.1 values (no xtb needed at run
+#      time). Catches the Eh/Ang^2-vs-Eh/Bohr^2 Hessian bug and the empirical
+#      "+47.349 cm-1" offset that used to mask it.
+# Verified to FAIL on a pre-fix binary (gfnff gradient ratio 0.5287 = au; frequencies
+# 92 % / 92 % / 40 % high for gfn1 / gfn2 / gfnff).
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME gradient_unit_contract
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/check_gradient_units.py
+                     $<TARGET_FILE:curcuma>)
+    set_tests_properties(gradient_unit_contract
+        PROPERTIES TIMEOUT 300 LABELS "gradient;frequencies;native_xtb;gfnff")
+endif()

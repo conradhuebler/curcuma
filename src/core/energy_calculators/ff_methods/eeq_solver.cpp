@@ -3321,7 +3321,17 @@ Vector EEQSolver::calculateFinalCharges(
     // Claude Generated (February 2026): Proper amideH detection for Phase 2 chi correction
     // Reference: Fortran gfnff_ini.f90:717 uses amideH() function from gfnff_ini2.f90:1575
     // Requires: H with 1 neighbor, that neighbor is amide N, amide N has exactly 1 sp3 C
-    std::vector<bool> is_amide_h = use_corrections ? detectAmideHydrogens(atoms, hybridization, is_amide, topology) : std::vector<bool>(natoms, false);
+    // Claude Generated (Sep 2026, S30L-CI system 17): amideH()'s internal amide() call uses
+    // piadr2 (true pi membership), NOT the piadr index-cutoff `is_amide` above - reusing
+    // `is_amide` here silently dropped the -0.02 amide-H chi correction whenever a
+    // molecule's pi atoms weren't exactly atoms 1..npiall (e.g. a plain cyclic bis-amide
+    // with an sp3 CH2 interleaved between the two amide units), overpolarizing the amide N
+    // and its H by ~0.03-0.04 e and costing ~5 kcal/mol in the Coulomb term. See
+    // detectAmideNitrogens()'s exact_pi_membership parameter for the full explanation.
+    std::vector<bool> is_amide_for_h = use_corrections
+        ? detectAmideNitrogens(atoms, hybridization, is_pi_atom, topology, cn, /*exact_pi_membership=*/true)
+        : std::vector<bool>(natoms, false);
+    std::vector<bool> is_amide_h = use_corrections ? detectAmideHydrogens(atoms, hybridization, is_amide_for_h, topology) : std::vector<bool>(natoms, false);
 
     Vector dgam = use_corrections ? calculateDgam(atoms, topology_charges, hybridization, is_pi_atom, is_amide) : Vector::Zero(natoms);
 
@@ -4167,9 +4177,22 @@ Vector EEQSolver::calculateDxi(
             for (int j : topology->neighbor_lists[i]) {
                 int Z_j = atoms[j];
                 if (Z_j == 1) nh++;
-                // Metal check
-                if (Z_j > 20 && (Z_j <= 30 || (Z_j >= 39 && Z_j <= 48) || (Z_j >= 72 && Z_j <= 80))) {
-                    nm++;
+                // Metal check. CORRECTED (Sep 2026): this was a hardcoded transition-metal
+                // range (3d/4d/5d only), but the reference counts `imetal(j) /= 0`
+                // (gfnff_ini.f90:372), and imetal is `param%metal(Z)` - which includes the
+                // MAIN-GROUP metals - demoted to 0 only for a low-coordinate element of
+                // group > 3 (gfnff_ini.f90:273-274, "Sn, Pb, Bi with small CN are better
+                // described as non-metals"). Missing the main-group metals flipped the sign
+                // of the polyvalent-halogen dxi rule below: the bridging chlorines of
+                // GMTKN55 AL2X6/al2cl6 took -nn*0.021 instead of +nn*0.05, a 0.142 shift in
+                // chieeq that inverted their topology charge (-0.261 vs the reference
+                // +0.158) and, through fqq, cost 52 kcal/mol in the bond term.
+                if (Z_j >= 1 && Z_j <= 86) {
+                    int imetal_j = metal_type[Z_j - 1];
+                    const int group_j = periodic_group[Z_j - 1];
+                    const int nb_j = static_cast<int>(topology->neighbor_lists[j].size());
+                    if (nb_j <= 4 && group_j > 3) imetal_j = 0;
+                    if (imetal_j != 0) nm++;
                 }
                 // Sum electronegativities for averaging
                 if (Z_j < static_cast<int>(pauling_en.size())) {
@@ -4201,7 +4224,19 @@ Vector EEQSolver::calculateDxi(
             // Previous code applied dxi=-0.15 to ALL C with nn==2, causing HCN charge error.
             if (nn == 2) {
                 bool is_carbene = false;  // Equivalent of itag==1
-                if (topology.has_value() && topology->neighbor_lists[i].size() == 2) {
+                // CORRECTED (Sep 2026): prefer the REAL itag whenever the caller supplies it.
+                // Re-deriving "carbene" from the angle reproduces only the first half of
+                // gfnff_ini2.f90:244-253 and misses two later corrections the reference makes
+                // to the same array: the qa < -0.4 override (:251-254) and the aryne rule
+                // (:341-351, two bonded carbene carbons cancel each other's tag). On GMTKN55
+                // DC13/c20bowl every rim carbon of the cage therefore kept a spurious
+                // dxi = -0.15, which drove the EEQ charges ~18x too large and the Coulomb term
+                // from -0.0003 to -0.1017 Eh (64 kcal/mol).
+                const bool have_itag = topology.has_value()
+                    && static_cast<int>(topology->itag.size()) == natoms;
+                if (have_itag) {
+                    is_carbene = (topology->itag[i] == 1);
+                } else if (topology.has_value() && topology->neighbor_lists[i].size() == 2) {
                     int nb1 = topology->neighbor_lists[i][0];
                     int nb2 = topology->neighbor_lists[i][1];
                     // Calculate bond angle at atom i
@@ -4403,19 +4438,23 @@ Vector EEQSolver::calculateDgam(
             if (Z == 17) ff = -0.02;  // Cl
             if (Z == 35) ff = -0.11;  // Br
             if (Z == 53) ff = -0.07;  // I
+        }
 
-            // Metal corrections (requires metal_type array)
-            if (Z >= 1 && Z <= 86) {
-                int imetal_val = metal_type[Z - 1];
-                if (imetal_val == 1) ff = -0.08;   // Main group metals
-                if (imetal_val == 2) ff = -0.9;    // Transition metals (XTB comment: "too large")
-            }
+        // Claude Generated (Sep 2026): metal + noble-gas corrections are unconditional
+        // in the Fortran reference (gfnff_ini.f90:658-660: independent `if`s, not
+        // `else if`s, so they overwrite ff for ANY element, not just Z>10). They were
+        // nested inside the `else if (Z > 10)` branch above, which made them
+        // unreachable for the only two metals with Z<=10 (Li Z=3, Be Z=4 -
+        // metal_type[]==1): isolated Li+/Be+/Be2+ silently got dgam=0 instead of
+        // qa*(-0.08), a 25-200 kcal/mol self-energy error found via GMTKN55
+        // (DIPCS10/G21IP/ALK8 single-ion structures; Na+/Mg2+, Z>10, were unaffected).
+        if (Z >= 1 && Z <= 86) {
+            int imetal_val = metal_type[Z - 1];
+            if (imetal_val == 1) ff = -0.08;   // Main group metals
+            if (imetal_val == 2) ff = -0.9;    // Transition metals (XTB comment: "too large")
 
-            // Noble gases (Group 8)
-            if (Z >= 1 && Z <= 86) {
-                int group = periodic_group[Z - 1];
-                if (group == 8) ff = 0.0;  // Noble gases
-            }
+            int group = periodic_group[Z - 1];
+            if (group == 8) ff = 0.0;  // Noble gases
         }
 
         dgam(i) = qa * ff;
@@ -4457,7 +4496,9 @@ std::vector<bool> EEQSolver::detectAmideHydrogensFull(
     const std::optional<TopologyInput>& topology) const
 {
     auto is_pi = detectPiSystem(atoms, hybridization, topology);
-    auto is_amide = detectAmideNitrogens(atoms, hybridization, is_pi, topology, cn);
+    // exact_pi_membership=true: matches amideH()'s own internal amide() call in Fortran
+    // (piadr2, not piadr) - see detectAmideNitrogens()'s doc comment.
+    auto is_amide = detectAmideNitrogens(atoms, hybridization, is_pi, topology, cn, /*exact_pi_membership=*/true);
     return detectAmideHydrogens(atoms, hybridization, is_amide, topology);
 }
 
@@ -4528,6 +4569,20 @@ std::vector<bool> EEQSolver::detectPiSystem(
     const int natoms = atoms.size();
     std::vector<bool> is_pi_atom(natoms, false);
 
+    // Prefer the force field's own pi-candidate list when the caller supplies it. That
+    // array is the verbatim port of gfnff_ini.f90:312-336; the inference below predates it
+    // and differs in three ways that matter — it has no NR3-X and no SO3 veto, its pi
+    // element set is missing B and Cl, and its picon branch covers only N/O/F and only for
+    // hyb == 3. Claude Generated (Sep 2026, GMTKN55 BHROT27/methylamine): a nitrogen with
+    // four neighbours is vetoed by the reference but counted here, which pushes npiall from
+    // 1 to 2 and flips the dgam nitrogen branch from ff = -0.13 to -0.14 through the
+    // replicated piadr index-cutoff bug — 0.15 kcal/mol in the Coulomb term of a 7-atom
+    // molecule, and the same wherever an amine sits next to an sp/sp2 centre.
+    if (topology.has_value() && static_cast<int>(topology->is_pi.size()) == natoms) {
+        for (int i = 0; i < natoms; ++i) is_pi_atom[i] = (topology->is_pi[i] != 0);
+        return is_pi_atom;
+    }
+
     auto is_pi_element = [](int Z) {
         return (Z == 6 || Z == 7 || Z == 8 || Z == 9 || Z == 16);  // C, N, O, F, S
     };
@@ -4560,7 +4615,8 @@ std::vector<bool> EEQSolver::detectAmideNitrogens(
     const std::vector<int>& hybridization,
     const std::vector<bool>& is_pi_atom,
     const std::optional<TopologyInput>& topology,
-    const Vector& cn) const
+    const Vector& cn,
+    bool exact_pi_membership) const
 {
     const int natoms = atoms.size();
     std::vector<bool> is_amide(natoms, false);
@@ -4571,16 +4627,36 @@ std::vector<bool> EEQSolver::detectAmideNitrogens(
     // Fortran amide() (gfnff_ini2.f90:1553) receives piadr (NOT piadr2) as the pi array.
     // piadr(i)!=0 is equivalent to i_fortran <= npiall, i.e. i_cpp < npiall.
     // This means the "pi check" in amide() tests atom INDEX, not actual pi membership.
+    //
+    // Claude Generated (Sep 2026, S30L-CI system 17): Fortran actually calls amide() with
+    // TWO different pi arrays depending on the caller, and they disagree whenever a
+    // molecule's pi atoms are not exactly atoms 1..npiall by original numbering (true for
+    // any molecule where a non-pi atom - e.g. an sp3 CH2 - is interleaved with pi atoms,
+    // as in a simple cyclic bis-amide):
+    //   - gfnff_ini.f90:651 (the ff=-0.16 dgam branch) passes `piadr`  -> the buggy
+    //     index-cutoff behaviour above. GFN-FF's parameters were fit against this
+    //     quirk, so it must be preserved exactly for that caller.
+    //   - gfnff_ini2.f90:1499's amideH(), called from gfnff_ini.f90:673 for the
+    //     "chieeq(H) -= 0.02" Phase-2 chi correction, passes `piadr2` instead - the
+    //     CORRECT atom-indexed pi-membership array (piadr2(i)!=0 iff atom i truly is a
+    //     pi atom). That call must use real pi membership, not the index cutoff.
+    // Both call this same nc/no counting logic, so `exact_pi_membership` switches between
+    // them: false (default) reproduces the piadr bug for the dgam ff branch; true gives
+    // the piadr2-correct answer for the amideH()-derived hydrogen chi correction.
     int npiall = 0;
     for (int k = 0; k < natoms; ++k) {
         if (is_pi_atom[k]) npiall++;
     }
 
+    auto is_pi = [&](int idx) {
+        return exact_pi_membership ? is_pi_atom[idx] : (idx < npiall);
+    };
+
     for (int i = 0; i < natoms; ++i) {
         // FIX (Mar 7, 2026): Match Fortran amide() from gfnff_ini2.f90:1553-1580
         // Updated (Mar 19, 2026): Use Fortran-compatible piadr index check
         // Fortran: if (pi(a) .eq. 0 ...) → piadr(a)==0 → a > npiall → 0-based: i >= npiall
-        if (atoms[i] != 7 || i >= npiall) continue;
+        if (atoms[i] != 7 || !is_pi(i)) continue;
         if (i < static_cast<int>(hybridization.size()) && hybridization[i] != 3) continue;
 
         // Count pi-C neighbors (Fortran: nc)
@@ -4588,7 +4664,7 @@ std::vector<bool> EEQSolver::detectAmideNitrogens(
         int nc = 0;
         int ic = -1;  // The single pi-C neighbor (if nc==1)
         for (int neighbor : topology->neighbor_lists[i]) {
-            if (atoms[neighbor] == 6 && neighbor < npiall) {
+            if (atoms[neighbor] == 6 && is_pi(neighbor)) {
                 nc++;
                 ic = neighbor;
             }
@@ -4599,7 +4675,7 @@ std::vector<bool> EEQSolver::detectAmideNitrogens(
         // Fortran: at(j)==8 .and. pi(j).ne.0 .and. nb(20,j)==1 → piadr(j)!=0 → j < npiall
         int no = 0;
         for (int n2 : topology->neighbor_lists[ic]) {
-            if (atoms[n2] == 8 && n2 < npiall &&
+            if (atoms[n2] == 8 && is_pi(n2) &&
                 static_cast<int>(topology->neighbor_lists[n2].size()) == 1) {
                 no++;
             }
