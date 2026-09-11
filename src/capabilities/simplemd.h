@@ -401,6 +401,18 @@ private:
     double ApplyRectLogFermiWalls();
 
     double ApplySphericHarmonicWalls();
+
+    /** Bias auf den Gyrationsradius; addiert dE/dr auf m_eigen_gradient und gibt E zurueck. */
+    double ApplyGyrationBias();
+    /** Claude Generated (Sep 2026): target-free, well-tempered 1-D metadynamics on the heavy-atom radius
+     *  of gyration -- hills at the Rg values this trajectory (and, seeded by ConfSearch, the search) has
+     *  visited, no target value. Adds dE/dr to m_eigen_gradient, returns E. See PARAM rg_flood. */
+    double ApplyRgFlood();
+    /** Claude Generated (Sep 2026): harmonic distance restraints 1/2 k (d - d0)^2 acting during the
+     *  dynamics (json list `distance_restraints`, same form the optimiser reads). Adds dE/dr to
+     *  m_eigen_gradient in the convention of the other added terms, returns E. Used by ConfGen's
+     *  steered relaxation of a built proposal. */
+    double ApplyDistanceRestraints();
     double ApplyRectHarmonicWalls();
 
     void InitConstrainedBonds();
@@ -524,6 +536,24 @@ private:
     double m_wall_spheric_radius = 6, m_wall_temp = 298.15, m_wall_beta = 6;
     double m_wall_x_min = 0, m_wall_x_max = 0, m_wall_y_min = 0, m_wall_y_max = 0, m_wall_z_min = 0, m_wall_z_max = 0;
     double m_wall_potential = 0, m_average_wall_potential = 0;
+    // Claude Generated (Sep 2026): Gyrationsradius-Bias, siehe ApplyGyrationBias()
+    bool m_gyration_bias = false, m_gyration_one_sided = true, m_gyration_heavy_only = true;
+    double m_gyration_target = -1.0, m_gyration_force = 0.1, m_gyration_potential = 0.0;
+    std::vector<int> m_gyration_indices;
+    double m_gyration_current = 0.0;
+    // Claude Generated (Sep 2026): Rg flooding, see ApplyRgFlood() and PARAM rg_flood
+    bool m_rg_flood = false, m_rg_flood_armed = false;
+    double m_rg_flood_sigma = -1.0, m_rg_flood_sigma_eff = 0.15, m_rg_flood_w0 = -1.0, m_rg_flood_w0_eff = 0.0;
+    double m_rg_flood_dt = 2000.0, m_rg_flood_wall = -1.0, m_rg_flood_wall_force = 0.05, m_rg_flood_warmup_fs = 300.0;
+    double m_rg_flood_potential = 0.0, m_rg_seen_min = 1e9, m_rg_seen_max = 0.0;
+    int m_rg_flood_last_deposit_step = -1, m_rg_flood_deposits = 0;
+    std::vector<int> m_rg_indices;                       ///< heavy atoms the CV is computed over
+    std::vector<double> m_rg_hill_pos, m_rg_hill_w;       ///< deposited hills: centre (A) and height (Eh)
+    std::vector<double> m_rg_seed_hills, m_rg_warmup;    ///< hills handed in by the caller; Rg samples of the warm-up
+    // Claude Generated (Sep 2026): distance restraints during MD, see ApplyDistanceRestraints()
+    struct MDDistanceRestraint { int i = -1, j = -1; double target = 0.0, force = 1.0; };
+    std::vector<MDDistanceRestraint> m_distance_restraints;
+    double m_restraint_potential = 0.0;
     double m_virial_correction = 0, m_average_virial_correction = 0;
     double m_deltaT = 0;
     double m_k_rmsd = 0.01;
@@ -736,6 +766,18 @@ private:
     // --- RMSD-based Metadynamics (Internal) ---
     PARAM(rmsd_mtd, Bool, false, "Enable internal RMSD-based metadynamics.", "RMSD-MTD", {})
     PARAM(rmsd_mtd_k, Double, 0.01, "Hill-height constant: bias height W_i = k * counter_i (Eh). The force is the exact gradient of the bias, so k is ~100x smaller than the pre-2026 value.", "RMSD-MTD", {"k_rmsd"})
+    PARAM(gyration_bias, Bool, false, "Add a bias on the RADIUS OF GYRATION to the dynamics: E = 1/2 * k * (Rg - Rg0)^2, with the analytic gradient. A second collective variable next to the RMSD bias, and it addresses a gap that variable cannot: the RMSD bias drives AWAY from visited structures but has no preference in compactness, so a search can sit in an extended family indefinitely. Measured on a 107-atom peptide: the deep basin sits at Rg = 4.076 A; of a run that found it, 38 of 2210 structures lie below 4.20, and of a run that did not, 0 of 1513 -- the compact corner was simply never entered. Imposing the same compaction as a STATIC restraint in an optimisation was tried and does not work (0 of 45 restrained builds survive the clash gate: a harmonic restraint between two distant atoms satisfies its distance along the shortest path, which runs through the molecule). During dynamics the molecule folds along a physical trajectory instead, which is why this belongs here and not in the proposal generator. Off by default -- new term, measure before trusting.", "Bias", {})
+    PARAM(gyration_target, Double, -1.0, "Target radius of gyration Rg0 in Angstrom for -gyration_bias. -1 = derive it from the starting structure as 0.95 * Rg(start), i.e. ask for a 5 percent contraction relative to where the run begins. Set an absolute value when a target compactness is known from a reference structure.", "Bias", {})
+    PARAM(gyration_force, Double, 0.1, "Force constant k of the gyration bias in Eh/Angstrom^2. Scale reference: at k = 0.1 a deviation of 0.5 A costs 0.0125 Eh = 33 kJ/mol, which is the order of the conformer spread on a peptide of this size -- strong enough to matter, not strong enough to dominate the force field. The RMSD hills next to it are k_hill * counter with k_hill = 0.01 Eh.", "Bias", {})
+    PARAM(gyration_one_sided, Bool, true, "Act only when Rg EXCEEDS the target, like a wall. The bias then pushes towards compactness and never resists a structure that is already compact enough -- which is the asymmetry the measurement calls for (the missing region is compact, not extended). false = a plain two-sided harmonic that also holds the molecule away from over-collapse.", "Bias", {})
+    PARAM(gyration_heavy_only, Bool, true, "Compute Rg over heavy atoms only. Hydrogens follow their host and add noise without adding a coordinate; the reference numbers this term was designed against are heavy-atom radii.", "Bias", {})
+    PARAM(rg_flood, Bool, false, "Target-free compactness sampling: well-tempered 1-D metadynamics on the heavy-atom radius of gyration, V(Rg) = SUM_j w_j exp(-(Rg-Rg_j)^2/(2 sigma^2)), a hill deposited every rmsd_mtd_deposit_stride at the CURRENT Rg with height w = W0 exp(-V(Rg)/(kB dT)) (Barducci). It has no target value: it pushes the trajectory away from the Rg values already visited, towards BOTH the compact and the extended side. Why (measured on a 107-atom peptide, 17343 bias deposits of two production runs): the RMSD bias alone leaves the seed's Rg upwards in 90 percent of deposits, +0.7 to +0.85 A median at every temperature, because expansion is the cheapest way to gain RMSD against every deposited hill; a direct A/B from the same seed (450 K, 1000 fs) gave +0.20 A without and +0.52 A with the RMSD bias. In all four pools examined the mean energy is worst exactly in the Rg bins where those deposits land. Compact products were only ever inherited from compact seeds. This term corrects the distribution of candidates; it is NOT a ranking criterion (Spearman Rg-E only 0.2-0.5) and knows nothing about any reference structure. Off by default -- new term, A/B pending.", "Bias", {})
+    PARAM(rg_flood_sigma, Double, -1.0, "Hill width sigma in Angstrom for -rg_flood. -1 = adaptive: the standard deviation of Rg over the first rg_flood_warmup fs of THIS trajectory, i.e. the fluctuation inside the starting basin (the textbook choice of a metadynamics hill width). Measured on 299 walkers of a peptide search: median 0.17 A (quartiles 0.12-0.24). Fallback 0.15 A when the warm-up gives less than 0.05 A.", "Bias", {})
+    PARAM(rg_flood_w0, Double, -1.0, "Initial hill height W0 in Hartree for -rg_flood. -1 = kB*T/4 of the run temperature (about 0.9 kJ/mol at 450 K). With the well-tempered damping (rg_flood_dt) the bias converges to dT/(T+dT) times the free-energy profile along Rg -- it can level that profile, it can never grow into a mountain (the lesson of the RMSD counter runaway).", "Bias", {})
+    PARAM(rg_flood_dt, Double, 2000.0, "Well-tempered bias temperature dT in Kelvin for -rg_flood: each new hill is damped by exp(-V(Rg)/(kB dT)). Same default as rmsd_mtd_dt.", "Bias", {})
+    PARAM(rg_flood_wall, Double, -1.0, "Soft upper wall for -rg_flood in Angstrom: above this Rg a one-sided harmonic 1/2 k (Rg-wall)^2 (k = rg_flood_wall_force) is added, so the flooding does not spend its budget filling the extended side first. -1 = no wall. ConfSearch sets it per repetition from the search's OWN pool (the rg_flood_wall_quantile of the heavy-atom Rg of the optimised minima found so far), i.e. data-driven and reference-free; measured, 98-100 percent of the 50 lowest conformers of every pool lie below its 95th percentile.", "Bias", {})
+    PARAM(rg_flood_wall_force, Double, 0.05, "Force constant of the -rg_flood_wall in Eh/Angstrom^2 (0.05: a 0.5 A excursion beyond the wall costs 16 kJ/mol).", "Bias", {})
+    PARAM(rg_flood_warmup, Double, 300.0, "Warm-up in fs before -rg_flood starts acting: Rg is only recorded (for the adaptive sigma), no hill and no force. Measured basin fluctuation settles within 300 fs.", "Bias", {})
     PARAM(rmsd_mtd_alpha, Double, 10.0, "Width parameter for RMSD Gaussians.", "RMSD-MTD", {"alpha_rmsd"})
     PARAM(rmsd_mtd_pace, Int, 1, "DEPRECATED and ignored under the strided scheme (use rmsd_mtd_deposit_stride). Only honoured by rmsd_mtd_scheme=legacy.", "RMSD-MTD", {"mtd_steps"})
     PARAM(rmsd_mtd_max_gaussians, Int, -1, "Maximum number of stored bias structures.", "RMSD-MTD", {"max_rmsd_N"})

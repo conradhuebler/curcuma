@@ -19,7 +19,7 @@ run_test() {
     cd "$TEST_DIR"
     cleanup_bmt_dirs
     rm -f stdout.log stderr.log
-    timeout 280 "$CURCUMA" -confsearch input.xyz -method gfnff \
+    timeout 280 "$CURCUMA" -confsearch input.xyz -seed 42 -method gfnff \
         -startT 500 -endT 400 -deltaT 100 -time 1200 -threads 1 \
         -confgen_phase true -confgen_max_proposals 6 \
         > stdout.log 2> stderr.log

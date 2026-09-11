@@ -149,6 +149,10 @@ private:
 
     /// Detect the non-covalent interactions of ONE structure (geometry + partial charges).
     std::vector<NCIContact> detectNCI(const Molecule& mol, const std::vector<double>& charges) const;
+    /** Claude Generated (Sep 2026): number of hydrogen bonds (donor/acceptor pairs) present in exactly
+     *  one of the two structures -- the symmetric difference of their H-bond sets. Geometric criterion
+     *  only (detectNCI without charges). Used by the novelty rule of PARAM new_energy_gain. */
+    int hbondHamming(const Molecule& a, const Molecule& b) const;
 
     /// Union of all contacts observed anywhere in the ensemble -> per-frame presence vector.
     void buildNCISpace();
@@ -244,6 +248,18 @@ private:
          *  poor predictor; ranking it by novelty alone throws away that the terms do relate to the
          *  final energy. Both enter the score, see PARAM proposal_ranking. */
         int novelty = 0;
+        /* Claude Generated (Sep 2026): the ensemble member the optimised proposal is closest to
+         * (best-fit RMSD), and whether the proposal entered the ensemble through the energy/pattern
+         * rule of PARAM new_energy_gain rather than the RMSD threshold. */
+        int nearest_frame = -1;
+        bool deeper = false;
+        bool unconverged = false;  ///< kept although the optimiser hit its step cap (Sep 2026), like RELAX does
+        /* Claude Generated (Sep 2026): ROUTE move -- the torsion states were chosen so that a rigid
+         * rotation brings the intended donor/acceptor pair close (see generateRouteProposals()).
+         * route_start is that rigidly rotated, clash-free geometry; the restrained build starts
+         * from it instead of from the template. */
+        Molecule route_start;
+        double route_rigid_distance = 0.0; ///< H...A after the rigid rotation, Angstrom
         /**
          * Claude Generated (Aug 2026): an NCI move instead of a torsion move. Entries are
          * (index into m_nci_pairs, desired presence 0/1) relative to the template. Empty for the
@@ -296,6 +312,25 @@ private:
      */
     std::vector<Proposal> generateProposals() const;
     void optimiseProposals(std::vector<Proposal>& proposals) const;
+
+    /**
+     * @brief Add the caller's polar X-H restraints to an optimiser config, next to its own ones.
+     *
+     * Claude Generated (Sep 2026): every optimisation this class runs can transfer a proton, and
+     * until now none of them was guarded -- ConfSearch's -hold_polar_h reached RELAX and the
+     * re-scoring pass, but not the proposal optimisations, because PerformConfGen never handed the
+     * restraints down. Measured on a 107-atom peptide: 275 of 1049 optimised proposals of one
+     * production run (26 %, 183 of them NCI moves) came out with a changed bond topology, H107
+     * having moved from O57 to N25. They were correctly rejected afterwards -- .proposals.new.xyz
+     * requires topology_ok -- so nothing entered the pool, but a quarter of the proposal budget
+     * bought tautomers. A second run under the same code lost only 3 %, so the rate depends on how
+     * strained the templates are, not on the move set alone.
+     *
+     * MERGE, never overwrite: an NCI move IS a set of distance restraints, and dropping them would
+     * turn the move into a plain free optimisation. Own restraints win on a duplicated atom pair,
+     * so a move that deliberately pulls on an X-H is not fought by this guard.
+     */
+    nlohmann::json withPolarHydrogenRestraints(const nlohmann::json& own) const;
 
     /**
      * @brief Re-optimise the template structures to get a comparable energy reference.
@@ -450,7 +485,28 @@ private:
      * around that, which is precisely the concerted motion a torsion move cannot express. Restraints
      * are released afterwards; optimiseProposals() reports a freely optimised energy as always.
      */
-    bool restrainedBuildNCI(const Proposal& p, Molecule& driven) const;
+    bool restrainedBuildNCI(const Proposal& p, Molecule& driven, const Molecule* start = nullptr) const;
+    /** Claude Generated (Sep 2026): the torsion route to a hydrogen bond -- for an absent D-H...A pair,
+ *  the combination of observed rotamer states of the torsions on the bond path D->A that brings H and A
+ *  closest by RIGID rotation, then the restrained build from that geometry. Unifies the two move sets:
+ *  the goal is a contact, the means is a rotation around bonds (the physical path), not a pull through
+ *  the molecule (measured: 0 of 45 contact pulls survive the clash gate). */
+    std::vector<Proposal> generateRouteProposals() const;
+    /** Claude Generated (Sep 2026): template order shared by every move set -- the lowest-energy input
+ *  frame first, then (with -template_diversity) frames picked greedily for the largest H-bond-pattern
+ *  distance to the ones already chosen, so the proposals do not all start in one basin. */
+    std::vector<int> templateOrder() const;
+    /** Claude Generated (Sep 2026): steered relaxation -- a short MD with the move's distance restraints
+     *  (and the polar-H guard) still acting, so the rest of the molecule adapts to the new bond before
+     *  the restraint is released. Returns the final MD geometry (the caller re-optimises restrained). */
+    Molecule steerRelax(const Molecule& start, const nlohmann::json& distance_restraints, int seed) const;
+    /** Claude Generated (Sep 2026): would forming pair k on top of pattern `have` over-saturate a partner?
+ *  An acceptor already holding two bonds, or a donor hydrogen already donating, is skipped. */
+    bool saturated(int k, const std::vector<int>& have) const;
+
+
+    /** Gemessenes Ziel eines Kontaktzugs: Median des Abstands ueber die Traeger im Ensemble. */
+    double contactTargetDistance(int pair_index) const;
 
     /**
      * @brief Sorted list of bonded atom pairs, with an EXPLICIT covalent-radius factor.
@@ -502,15 +558,32 @@ private:
     mutable bool m_eval_unusable = false;
     std::string m_analysis_file;
     std::string m_proposal_ranking = "mixed";
+    std::string m_nci_ranking = "population";
+    bool m_nci_contact_moves = false;         ///< Claude Generated (Sep 2026): Kompaktierungszug
+    double m_nci_contact_break_distance = 8.0;
+    mutable std::vector<bool> m_atom_is_hydrogen; ///< je Atom: ist es ein H (fuer die Stufenreihenfolge)
+ ///< Claude Generated (Sep 2026): Richtung des Populationsterms im NCI-Zug
     int m_concerted_max = 5;
     mutable std::map<std::string, double> m_reference_terms; ///< terms of the deepest structure (see fitModel)
     mutable std::set<std::vector<int>> m_patterns_before; ///< contact patterns from the memory file
     double m_proposal_novelty_weight = 0.5;   ///< extra structures for the description (see PARAM analysis_file)
     double m_clash_factor = 1.2, m_new_rmsd = 1.0, m_topology_factor = 1.3;
+    double m_new_energy_gain = 1.0; ///< see PARAM new_energy_gain
+    int m_new_pattern_min = 1;      ///< see PARAM new_pattern_min
     // Claude Generated (Jul 2026): restrained build (P0). See buildProposalGeometry().
     bool m_restrained_build = true;
     double m_restraint_force = 0.5;
     int m_restraint_max_iterations = 500;
+    /**
+     * Claude Generated (Sep 2026): polar X-H distance restraints handed down by the caller, in the
+     * json form GeometryRestraints::fromJson reads. Empty = none.
+     *
+     * Why the caller supplies them instead of this class deriving them: the reference bond lengths
+     * belong to the SURFACE the proposals are optimised on, and only the caller knows which
+     * structure defines it (ConfSearch keeps one reference per PES). See PolarHydrogenRestraints()
+     * there and withPolarHydrogenRestraints() below.
+     */
+    nlohmann::json m_polar_h_restraints = nlohmann::json::array();
 
     /**
      * ONE calculator for the whole run: analysis single points, proposal optimisations and the
@@ -538,6 +611,11 @@ private:
         const std::vector<std::pair<std::vector<int>, std::vector<int>>>& entries) const;
     int m_consensus_max = 3;
     double m_nci_form_distance = 1.90, m_nci_break_distance = 3.50, m_nci_restraint_force = 1.0;
+    // Claude Generated (Sep 2026): route move, saturation rule, clamp pairs, template diversity
+    int m_route_max = 6, m_route_depth = 3;
+    double m_route_reach = 3.0;
+    bool m_nci_saturation = true, m_nci_clamp = true, m_template_diversity = true;
+    double m_nci_steer_fs = 0.0, m_nci_steer_temperature = 300.0; ///< see PARAM nci_steer_fs
 
     std::vector<TorsionSpace::Torsion> m_torsions;
     std::vector<std::vector<double>> m_state_centres; ///< per torsion
@@ -566,7 +644,7 @@ private:
     PARAM(isomerise_min_separation, Double, 60.0, "How far a scan minimum must lie from the state the ensemble already knows, in degrees, before it counts as a different state. Below this it is the same basin seen from its flank.", "Proposals", {})
     PARAM(concerted_max, Int, 5, "Number of CONCERTED proposals: one torsion change and one hydrogen-bond change in the SAME restrained optimisation. Implemented Aug 2026 -- before that the value was read and never used, and this help text described a move set that did not exist. The torsion is chosen by geometric coupling: its rotation must move exactly ONE of the two bridge partners, since only then does it change their relative position. Reason from the measurements: the NCI move alone keeps its target pattern in 7 of 13 cases but lands in an already known minimum in 6 of those 7 -- changing one bond does not by itself change the basin, the backbone has to follow. Measured with the move in place, same bridge budget: 4 new conformers instead of 2, bridge distance to the reference 11 instead of 13. 0 disables them.", "NCI", {})
     PARAM(proposal_ranking, String, "mixed", "How the enumerated candidates are ordered before the budget cuts them off: energy = by the additive model alone (the behaviour up to Aug 2026), coverage = by the largest Hamming distance to everything already seen or tried, mixed = both, weighted by -proposal_novelty_weight. Measured background: the model predicts energies badly (cross-validated it explains ~30 % of the spread, and a delta model between the two surfaces even degrades the ranking), while the descriptions SEPARATE excellently -- 141 of 142 structures carry a distinct contact pattern. Ordering by energy alone therefore uses the weak property of the description and ignores the strong one.", "Proposals", {})
-    PARAM(proposal_novelty_weight, Double, 0.5, "Weight of the novelty term in -proposal_ranking mixed: 0 = energy only, 1 = coverage only. Both contributions are standardised over the candidate set, so the weight is comparable across systems.", "Proposals", {})
+    PARAM(proposal_novelty_weight, Double, 1.0, "Weight of the novelty (coverage) term in -proposal_ranking mixed; 1.0 = order the candidates by coverage alone, 0.0 = by the additive torsion-state model alone. Default 1.0 since Sep 2026: the model was measured at r = -0.02 between its ordering and the optimised energy of the same proposals (15 proposals, triose) and explains ~15 % of the energy variance in cross-validation on two peptide ensembles -- it has nothing to say about which candidate is worth an optimisation, while coverage (distance in state and contact space to everything tried) is the property the description is good at.", "Generation", {})
     PARAM(analysis_file, String, "", "Additional structures used for the DESCRIPTION only -- torsion states, contact patterns, the additive model and the novelty check. Geometric templates still come from the file the run was called with. Motivated by the measured weakness of the statistics: a cycle of a search delivers a handful of structures (6 in one measured case), while 29 torsions with up to 11 states each and over 100 contacts need far more to be estimated at all. The cumulative pool of the whole run is one to two orders of magnitude larger and costs nothing to reuse.", "Proposals", {})
     PARAM(proposal_templates, Int, 5, "Number of lowest-energy ensemble members used as geometric templates.", "Generation", {})
     PARAM(proposal_depth, Int, 2, "Maximum number of torsions changed simultaneously relative to a template (Hamming distance). Depths beyond 3 are only usable together with -proposal_candidate_cap, which switches the enumeration to sampling.", "Generation", {})
@@ -585,6 +663,8 @@ private:
     PARAM(clash_factor, Double, 1.2, "A built structure is rejected when a non-bonded atom pair comes closer than this factor times the sum of their covalent radii. The default is deliberately close to the BOND-DETECTION criterion (~1.3): a built structure that puts two atoms inside bonding distance makes the force field derive a new bond, and the optimisation then relaxes into a different molecule, not a conformer.", "Generation", {})
     PARAM(topology_factor, Double, 1.3, "Covalent-radius factor for the topology check of optimised proposals. A proposal whose bond list differs from the reference is a reaction product, not a conformer, and is rejected. Lower than Molecule's default 1.5, which counts compressed 1-3 contacts as bonds.", "Generation", {})
     PARAM(new_rmsd, Double, 1.0, "Best-fit RMSD in Angstrom above which an optimised proposal counts as a new conformer.", "Generation", {})
+    PARAM(new_energy_gain, Double, 1.0, "Second way for an optimised proposal to count as NEW, next to the RMSD threshold of -new_rmsd: it is a valid conformer (topology intact), it lies BELOW its closest ensemble member by more than this many kJ/mol on the SAME energy surface, and its hydrogen-bond pattern differs from that member by at least -new_pattern_min bonds. 0 = off (RMSD rule only, the behaviour up to Sep 2026). Why: a conformer is a minimum, and two topologically identical minima with different energies are different conformers no matter how close they are in Angstrom -- the RMSD rule alone throws the deeper one away when it sits inside the threshold. Measured on a 107-atom peptide over two production runs (35 + 20 repetitions): 61 and 38 valid proposals landed 0.3-1.25 A from a member AND more than 1 kJ/mol below it, 84-85 percent of them with a different H-bond pattern (control group under 0.3 A: 7-9 percent). One of them, built one repetition before the dynamics found it, was 5.2 kJ/mol below everything in the pool and 0.03 A heavy-atom RMSD from what later became that run's record -- discarded as not new. Requires that the input energies (XYZ comment lines) and the proposal optimisation are on the same surface with the same restraints; ConfSearch guarantees that and switches the rule off when its evaluation method differs from the RELAX method. A standalone -confgen run on a file with energies from another method must set 0. The deduplication at the end keeps the lower member of a basin, so an accepted deeper neighbour replaces rather than duplicates. Accepted structures carry the suffix _deeper in their name.", "Generation", {})
+    PARAM(new_pattern_min, Int, 1, "Minimum number of hydrogen bonds (donor/acceptor pairs) in which a proposal accepted through -new_energy_gain must differ from its closest ensemble member. 0 = energy alone decides. 1 (default) demands a visibly different contact pattern, which is what separated the deeper neighbours from re-optimised copies in the measurement behind -new_energy_gain.", "Generation", {})
     PARAM(restrained_build, Bool, true, "When rigidly setting the torsions produces a clash or a changed bond topology, build the structure by a RESTRAINED optimisation instead: start from the clash-free template, hold the target torsions with a harmonic restraint and let the rest of the molecule relax out of the way, then release. Recovers proposals that the rigid build throws away (measured: 72 percent of them on a compact molecule). False = rigid build only.", "Generation", {})
     PARAM(restraint_force, Double, 0.5, "Force constant of the dihedral restraint in Eh/rad^2 during the restrained build. Larger holds the torsion closer to its target and pushes harder against the clash.", "Generation", {})
     PARAM(restraint_max_iterations, Int, 500, "Maximum optimisation steps of the restrained build stage.", "Generation", {})
@@ -602,11 +682,22 @@ private:
     PARAM(nci_min_population, Int, 2, "A contact must occur in at least this many structures to enter the NCI pattern. Contacts seen once carry no contrast and only inflate the model.", "NCI", {})
 
     PARAM(nci_generate, Bool, true, "With -generate true, additionally propose NCI MOVES: break a hydrogen bond the template has and form one that occurs elsewhere in the ensemble, realised by distance restraints. This is the move set that acts on the description which actually distinguishes the conformers (the H-bond term carries the energy spread, the torsion term does not), and it reaches structures a torsion recombination cannot express.", "NCI", {})
+    PARAM(nci_contact_moves, Bool, false, "Admit CLOSE and IONIC contacts to the NCI move set, not only hydrogen bonds, restrained heavy-atom to heavy-atom with a MEASURED target (the median distance over exactly those ensemble members that carry the contact). Such a move runs staged and first, and contact moves are ordered by the FOLD they demand (current distance minus target) instead of by population. MEASURED RESULT: IT DOES NOT WORK, and the number says why. On WEKLQ, ranked by fold, 0 of 45 contact moves survive -- 44 are rejected by the clash/topology gate, 1 fails to reach its restraint. Merely admitting the contacts without the fold ranking builds 8 of 45 but comes out LESS compact than without them (R_gyr 4.275 against 4.202), because the population order picks some short contact among 467 movable ones instead of the one that folds the molecule. The reason is structural, not a tuning problem: a harmonic restraint between two distant heavy atoms satisfies its distance along the shortest path, which runs THROUGH the rest of the molecule. Compaction cannot be imposed by a static restrained optimisation; it has to come from dynamics under a global compaction bias. Kept as a documented negative and as the machinery for that experiment -- do not expect proposals from it.", "NCI", {})
+    PARAM(nci_contact_break_distance, Double, 8.0, "Target distance in Angstrom when a contact move BREAKS a close contact. Must be clearly outside -nci_contact_distance (4.0), otherwise the contact re-forms during the free optimisation -- same reasoning as -nci_break_distance for hydrogen bonds, one length scale up because heavy-atom contacts are detected at a larger distance.", "NCI", {})
+    PARAM(nci_ranking, String, "population", "Direction of the population term when NCI moves are ordered. population = prefer FORMING a hydrogen bond that many ensemble members realise (the behaviour up to Sep 2026). rarity = the opposite sign, i.e. prefer forming the bonds that are RARE in the ensemble. Why the switch exists: measured on a 166-structure WEKLQ ensemble constructed so that all nine hydrogen bonds of a known deep basin are present (7 to 80 carriers each), the templates carry up to 5 of those bonds and the generated proposals carry at most 2 at -nci_depth 1 and at most 3 at depth 3 with a four-fold budget. The move set therefore walks AWAY from that basin rather than merely approaching it slowly, and neither depth nor budget nor -nci_min_population 1 changes that. The mechanism is the sign in the term: breaking a RARE bond costs almost nothing while forming a COMMON one pays, so every structure drifts out of the rare-pattern corner into the population bulk. The counterweight already present (-proposal_ranking coverage / -proposal_novelty_weight) measures distance in contact space and does not distinguish rare from common. Not the default, because inverting it is untested on any system where the population term is the right prior.", "NCI", {})
     PARAM(nci_max_proposals, Int, 10, "Maximum number of NCI moves built and optimised, in addition to the torsion proposals.", "NCI", {})
     PARAM(nci_depth, Int, 1, "Number of hydrogen bonds changed simultaneously in one NCI move.", "NCI", {})
     PARAM(nci_form_distance, Double, 1.90, "Target H...acceptor distance in Angstrom when an NCI move FORMS a hydrogen bond.", "NCI", {})
     PARAM(nci_break_distance, Double, 3.50, "Target H...acceptor distance in Angstrom when an NCI move BREAKS a hydrogen bond. Must be clearly outside nci_hbond_distance, otherwise the bond re-forms during the free optimisation.", "NCI", {})
     PARAM(nci_restraint_force, Double, 1.0, "Force constant of the distance restraint in Eh/Angstrom^2 during an NCI move.", "NCI", {})
+    PARAM(nci_steer_fs, Double, 0.0, "Steered relaxation of a built NCI or route proposal: after the restrained build, run this many femtoseconds of MD on the description method with the move's distance restraints (and the polar-H guard) still acting, then re-optimise restrained and hand the structure to the free optimisation. 0 = off. Why: measured on a 107-atom peptide, 25-55 percent of the built hydrogen-bond moves relax back into their template once the restraint is released -- the bond was closed, but the rest of the molecule never moved to accommodate it. A static restrained optimisation finds the nearest local compromise; a few hundred femtoseconds of thermal motion under the same restraint let the environment reorganise along a physical path. Costs one short force-field MD per proposal.", "Generation", {})
+    PARAM(nci_steer_temperature, Double, 300.0, "Temperature in Kelvin of the steered relaxation (-nci_steer_fs).", "Generation", {})
+    PARAM(route_max, Int, 6, "Number of ROUTE proposals per call (0 = off). A route move forms one hydrogen bond the template lacks by ROTATING: among the observed rotamer states of the torsions on the bond path between donor and acceptor (up to -route_depth of them at once) it takes the combination that brings H and acceptor closest to the form distance by rigid rotation, checks that geometry for clashes, and only then pulls the bond closed in the restrained build, starting from the rotated geometry. Why: a hydrogen bond between distant groups forms because a side chain or the backbone turns around bonds -- the physical path -- and not because two atoms are dragged through the molecule. Measured on a 125-structure peptide ensemble (gfnff build): 20 of 20 routes built with 0 clash rejections and 0 unreached restraints, against 7 of 15 for the pull-based NCI moves; 19-20 of 20 new by RMSD; 15-17 of 20 keep the bond after the free optimisation. Judged on gfn2 (12 routes, polar-H restraints): all 12 new, but 36 kJ/mol above the ensemble minimum, 6 of 12 snapped back, at most 2 of the 9 target bonds -- a reliable BUILDER, not yet a proven source of depth; n = 1 ensemble. Needs no target knowledge: pairs come from the ensemble's own contact vocabulary, states from its own rotamers.", "Generation", {})
+    PARAM(route_depth, Int, 3, "Maximum number of path torsions changed together in one route move (-route_max). Measured on the peptide: depth 3 is where independent recombination stopped paying; the route changes only torsions between the two partners, so its combinations stay small.", "Generation", {})
+    PARAM(route_reach, Double, 3.0, "A route counts only when the rigid rotation brings H...acceptor below this distance in Angstrom (and improves it by at least 1 A). From there the restraint closes the last stretch to -nci_form_distance without pulling through the molecule.", "Generation", {})
+    PARAM(nci_saturation, Bool, true, "Do not propose to FORM a hydrogen bond whose acceptor already holds two bonds or whose donor hydrogen already donates one, in the template's own pattern. Plain chemistry -- a carbonyl oxygen accepts twice, an N-H donates once -- and it removes moves the free optimisation undoes anyway.", "Generation", {})
+    PARAM(nci_clamp, Bool, false, "Admit CLAMP moves: two absent hydrogen bonds that share a heavy atom (the same side-chain nitrogen accepting one bond and donating another, or one acceptor taking a second donor) are formed together in one staged restrained build. Why it exists: the deepest basin of the measured peptide is defined by exactly such a bidirectional clamp of both basic side chains, and single-bond moves reached at most 2-3 of its 9 bonds. Why it is OFF: measured on a 125-structure ensemble carrying all nine bonds, 14 of 21 clamp builds died at the clash gate -- pulling two bonds through the molecule at once is the failure mode the route move avoids -- and the survivors displaced single moves inside nci_max_proposals without reaching more of the motif (max 2 of 9). The clamp that works has to be built by rotation (a two-target route), which is not implemented.", "Generation", {})
+    PARAM(template_diversity, Bool, true, "Choose the proposal templates for pattern diversity, not only energy: the lowest-energy input structure first, then greedily the candidate (from the lowest 3 x proposal_templates by energy) whose hydrogen-bond pattern differs most from the templates already chosen. Otherwise every move set starts from the same basin, and the measured record chain shows that key steps came from seeds ranked 5-10.", "Generation", {})
 
     PARAM(consensus_build, Bool, false, "With -generate true, additionally assemble structures DE NOVO from the individually most favourable torsion states instead of mutating an existing one, walking away from the ensemble one torsion at a time. Reaches state vectors that no sequence of one- or two-torsion mutations can reach: measured, every chemically valid assembly was a new conformer, but they sit high in energy (best +44 kJ/mol) and each costs a build plus two optimisations. Off by default for that cost.", "Generation", {})
     PARAM(proposal_memory_file, String, "", "Path to a file recording the state vectors that have already been proposed. When set, ConfGen skips combinations listed there and appends the ones it builds. ConfSearch passes one file per run, so a temperature stage does not rebuild what an earlier repetition already tried -- measured: repetitions 2 and 3 of a 600 K stage proposed the same structures again, and 32 of 113 proposals across a 7-cycle run were repeats.", "Generation", {})

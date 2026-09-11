@@ -27,7 +27,7 @@ run_test() {
     # REFINE only has work to do when the per-repetition funnel did NOT already run on the ranking
     # surface. The default is -relax_pes opt, where the funnel produces opt_method minima directly
     # and REFINE is skipped as redundant -- that path is covered by 04_relax_pes_opt.
-    timeout 280 "$CURCUMA" -confsearch input.xyz -md_method gfnff -opt_method uff \
+    timeout 280 "$CURCUMA" -confsearch input.xyz -seed 42 -md_method gfnff -opt_method uff \
         -startT 500 -endT 400 -deltaT 100 -time 600 -threads 1 \
         -phase3b_two_stage true -relax_pes md \
         > stdout.log 2> stderr.log

@@ -340,6 +340,44 @@ void SimpleMD::LoadControlJson()
     m_rmsd_mtd = m_config.get<bool>("rmsd_mtd");
     m_k_rmsd = m_config.get<double>("rmsd_mtd_k");
     m_alpha_rmsd = m_config.get<double>("rmsd_mtd_alpha");
+    // Claude Generated (Sep 2026): Gyrationsradius-Bias
+    m_gyration_bias = m_config.get<bool>("gyration_bias");
+    m_gyration_target = m_config.get<double>("gyration_target");
+    m_gyration_force = m_config.get<double>("gyration_force");
+    m_gyration_one_sided = m_config.get<bool>("gyration_one_sided");
+    m_gyration_heavy_only = m_config.get<bool>("gyration_heavy_only");
+    // Claude Generated (Sep 2026): Rg flooding (target-free compactness CV), see ApplyRgFlood()
+    m_rg_flood = m_config.get<bool>("rg_flood");
+    m_rg_flood_sigma = m_config.get<double>("rg_flood_sigma");
+    m_rg_flood_w0 = m_config.get<double>("rg_flood_w0");
+    m_rg_flood_dt = m_config.get<double>("rg_flood_dt");
+    m_rg_flood_wall = m_config.get<double>("rg_flood_wall");
+    m_rg_flood_wall_force = m_config.get<double>("rg_flood_wall_force");
+    m_rg_flood_warmup_fs = m_config.get<double>("rg_flood_warmup");
+    {
+        // Hills handed in by the caller (ConfSearch: the Rg of the pool minima found so far) -- a plain
+        // array, not a registered PARAM; ConfigManager keeps unknown flat keys verbatim.
+        json cfg = m_config.exportConfig();
+        m_rg_seed_hills.clear();
+        if (cfg.contains("rg_flood_seed_hills") && cfg["rg_flood_seed_hills"].is_array())
+            for (const auto& v : cfg["rg_flood_seed_hills"])
+                if (v.is_number())
+                    m_rg_seed_hills.push_back(v.get<double>());
+        // Claude Generated (Sep 2026): distance restraints during the dynamics (ConfGen steering).
+        m_distance_restraints.clear();
+        if (cfg.contains("distance_restraints") && cfg["distance_restraints"].is_array())
+            for (const auto& e : cfg["distance_restraints"]) {
+                if (!e.is_object())
+                    continue;
+                MDDistanceRestraint r;
+                r.i = e.value("i", -1);
+                r.j = e.value("j", -1);
+                r.target = e.value("target", 0.0);
+                r.force = e.value("force", 1.0);
+                if (r.i >= 0 && r.j >= 0 && r.i != r.j && r.target > 0.0)
+                    m_distance_restraints.push_back(r);
+            }
+    }
     m_mtd_steps = m_config.get<int>("rmsd_mtd_pace");
     m_chain_length = m_config.get<int>("chain_length");
     m_rmsd_rmsd = m_config.get<double>("rmsd_rmsd", 1.0);  // Not in PARAM block - legacy
@@ -601,6 +639,35 @@ bool SimpleMD::Initialise()
     m_eigen_geometry = Eigen::MatrixXd::Zero(m_natoms, 3);
     m_eigen_geometry_old = Eigen::MatrixXd::Zero(m_natoms, 3);
     m_eigen_gradient = Eigen::MatrixXd::Zero(m_natoms, 3);
+    /* Claude Generated (Sep 2026): Atomauswahl und ggf. Zielwert des Gyrationsradius-Bias. Der
+     * Vorgabewert -1 leitet das Ziel aus der Startstruktur ab (5 % Kontraktion), damit der Term
+     * ohne Kenntnis einer Referenzstruktur benutzbar ist. */
+    if (m_gyration_bias) {
+        m_gyration_indices.clear();
+        for (int i = 0; i < m_natoms; ++i)
+            if (!m_gyration_heavy_only || m_molecule.Atom(i).first != 1)
+                m_gyration_indices.push_back(i);
+    }
+    /* Claude Generated (Sep 2026): Rg flooding works on the heavy atoms only and starts every run
+     * fresh -- its hills are this trajectory's memory, the search-wide memory arrives through
+     * rg_flood_seed_hills. */
+    if (!m_distance_restraints.empty() && m_verbosity >= 1)
+        CurcumaLogger::result_fmt("SimpleMD: {} harmonic distance restraint(s) act during the dynamics",
+            static_cast<int>(m_distance_restraints.size()));
+    if (m_rg_flood) {
+        m_rg_indices.clear();
+        for (int i = 0; i < m_natoms; ++i)
+            if (m_molecule.Atom(i).first != 1)
+                m_rg_indices.push_back(i);
+        m_rg_hill_pos.clear();
+        m_rg_hill_w.clear();
+        m_rg_warmup.clear();
+        m_rg_flood_armed = false;
+        m_rg_flood_deposits = 0;
+        m_rg_flood_last_deposit_step = -1;
+        m_rg_seen_min = 1e9;
+        m_rg_seen_max = 0.0;
+    }
     m_eigen_gradient_old = Eigen::MatrixXd::Zero(m_natoms, 3);
     m_eigen_velocities = Eigen::MatrixXd::Zero(m_natoms, 3);
 
@@ -2817,6 +2884,13 @@ void SimpleMD::finalizeRun()
                 m_bias_hills_evaluated, m_bias_hills_screened, screen_pct, m_mtd_time) << std::endl;
         writeMtdProvenance();
     }
+    // Claude Generated (Sep 2026): one line on the Rg flooding, so a log shows what the term did.
+    if (m_rg_flood && m_verbosity >= 1)
+        std::cout << fmt::format("Rg flooding: {} hill(s) deposited by this run (+{} seeded), sigma {:.3f} A, W0 {:.5f} Eh, "
+                                 "Rg visited {:.3f}-{:.3f} A{}",
+            m_rg_flood_deposits, static_cast<int>(m_rg_seed_hills.size()), m_rg_flood_sigma_eff, m_rg_flood_w0_eff,
+            m_rg_seen_min, m_rg_seen_max,
+            m_rg_flood_armed ? "" : " (never armed -- run shorter than rg_flood_warmup)") << std::endl;
     // Per-instance filename so concurrent MD workers don't overwrite each other's final dump.
     std::ofstream restart_file(snapshotPath(Basename() + ".final.json"));
     nlohmann::json restart;
@@ -3087,6 +3161,9 @@ void SimpleMD::Verlet()
     }
 #endif
     WallPotential();
+    m_gyration_potential = ApplyGyrationBias();
+    m_rg_flood_potential = ApplyRgFlood();
+    m_restraint_potential = ApplyDistanceRestraints();
     ekin = 0.0;
 
     for (int i = 0; i < m_natoms; ++i) {
@@ -3333,6 +3410,9 @@ void SimpleMD::Rattle()
     }
 #endif
     WallPotential();
+    m_gyration_potential = ApplyGyrationBias();
+    m_rg_flood_potential = ApplyRgFlood();
+    m_restraint_potential = ApplyDistanceRestraints();
 
     for (int i = 0; i < m_natoms; ++i) {
         m_eigen_velocities.data()[3 * i + 0] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
@@ -4165,6 +4245,195 @@ double SimpleMD::ApplyRectLogFermiWalls()
 
     return potential;
     // std::cout << potential*kbT << std::endl;
+}
+
+
+double SimpleMD::ApplyGyrationBias()
+{
+    /* Claude Generated (Sep 2026): Bias auf den Gyrationsradius als zweite Kollektivvariable neben
+     * dem RMSD-Bias.
+     *
+     *     Rg^2 = 1/N * sum_i |r_i - R|^2,   R = Schwerpunkt der gewaehlten Atome
+     *     E    = 1/2 * k * (Rg - Rg0)^2                    (einseitig: nur fuer Rg > Rg0)
+     *     dE/dr_j = k * (Rg - Rg0) * (r_j - R) / (N * Rg)
+     *
+     * Die Ableitung des Schwerpunkts faellt heraus, weil sum_i (r_i - R) = 0 ist.
+     *
+     * EINHEITEN: dieselbe Konvention wie die beiden anderen Zusatzterme dieser Datei -- die
+     * Wandpotentiale und der RMSD-Hügelgradient schreiben Eh/Angstrom in m_eigen_gradient, und
+     * dieser Term muss mit dem RMSD-Bias auf einer Skala liegen, weil beide gleichzeitig wirken.
+     * (Die QM-Schnittstelle liefert ihren Gradienten selbst; ob deren Konvention dieselbe ist, ist
+     * eine offene Frage, die aelter ist als dieser Term und beide vorhandenen Zusatzterme
+     * gleichermassen betrifft.) */
+    if (!m_gyration_bias || m_gyration_indices.empty())
+        return 0.0;
+    const int n = static_cast<int>(m_gyration_indices.size());
+    double cx = 0.0, cy = 0.0, cz = 0.0;
+    for (int idx : m_gyration_indices) {
+        cx += m_eigen_geometry.data()[3 * idx + 0];
+        cy += m_eigen_geometry.data()[3 * idx + 1];
+        cz += m_eigen_geometry.data()[3 * idx + 2];
+    }
+    cx /= n; cy /= n; cz /= n;
+    double sum2 = 0.0;
+    for (int idx : m_gyration_indices) {
+        const double dx = m_eigen_geometry.data()[3 * idx + 0] - cx;
+        const double dy = m_eigen_geometry.data()[3 * idx + 1] - cy;
+        const double dz = m_eigen_geometry.data()[3 * idx + 2] - cz;
+        sum2 += dx * dx + dy * dy + dz * dz;
+    }
+    const double rg = std::sqrt(sum2 / n);
+    m_gyration_current = rg;
+    if (rg < 1e-8)
+        return 0.0;
+    /* Vorgabe -1: Ziel aus der STARTGEOMETRIE ableiten, einmalig beim ersten Aufruf. So ist der Term
+     * ohne Kenntnis einer Referenzstruktur benutzbar -- er verlangt dann 5 % Kontraktion gegenueber
+     * dem Punkt, an dem der Lauf beginnt, statt einen absoluten Wert vorauszusetzen. */
+    if (m_gyration_target <= 0.0) {
+        m_gyration_target = 0.95 * rg;
+        if (m_verbosity >= 1)
+            CurcumaLogger::result_fmt("SimpleMD: gyration bias -- target derived from the start "
+                                      "structure: Rg0 = {:.3f} A (0.95 x {:.3f}), k = {} Eh/A^2{}",
+                m_gyration_target, rg, m_gyration_force, m_gyration_one_sided ? ", one-sided" : "");
+    }
+    const double dev = rg - m_gyration_target;
+    if (m_gyration_one_sided && dev <= 0.0)
+        return 0.0;
+    const double energy = 0.5 * m_gyration_force * dev * dev;
+    const double pref = m_gyration_force * dev / (n * rg);
+    for (int idx : m_gyration_indices) {
+        m_eigen_gradient.data()[3 * idx + 0] += pref * (m_eigen_geometry.data()[3 * idx + 0] - cx);
+        m_eigen_gradient.data()[3 * idx + 1] += pref * (m_eigen_geometry.data()[3 * idx + 1] - cy);
+        m_eigen_gradient.data()[3 * idx + 2] += pref * (m_eigen_geometry.data()[3 * idx + 2] - cz);
+    }
+    return energy;
+}
+
+double SimpleMD::ApplyRgFlood()
+{
+    /* Claude Generated (Sep 2026): target-free compactness sampling. Well-tempered metadynamics on
+     * the heavy-atom radius of gyration (see PARAM rg_flood for the measurement behind it):
+     *
+     *     Rg      = sqrt( 1/N sum_i |r_i - R|^2 ),   R = centroid of the heavy atoms
+     *     V(Rg)   = sum_j w_j exp( -(Rg - Rg_j)^2 / (2 sigma^2) )  [+ 1/2 k (Rg - wall)^2 for Rg > wall]
+     *     w_new   = W0 exp( -V_hills(Rg) / (kB dT) )              (Barducci, Bussi, Parrinello 2008)
+     *     dE/dr_j = dV/dRg * (r_j - R) / (N Rg)                  (centroid derivative cancels)
+     *
+     * Same unit convention as ApplyGyrationBias and the wall potentials (Eh, Angstrom). The first
+     * rg_flood_warmup fs only record Rg: the adaptive sigma is the fluctuation of the starting basin,
+     * and the hills the caller hands in (rg_flood_seed_hills) are placed with that sigma once known. */
+    if (!m_rg_flood || m_rg_indices.empty())
+        return 0.0;
+    const int n = static_cast<int>(m_rg_indices.size());
+    double cx = 0.0, cy = 0.0, cz = 0.0;
+    for (int idx : m_rg_indices) {
+        cx += m_eigen_geometry.data()[3 * idx + 0];
+        cy += m_eigen_geometry.data()[3 * idx + 1];
+        cz += m_eigen_geometry.data()[3 * idx + 2];
+    }
+    cx /= n; cy /= n; cz /= n;
+    double sum2 = 0.0;
+    for (int idx : m_rg_indices) {
+        const double dx = m_eigen_geometry.data()[3 * idx + 0] - cx;
+        const double dy = m_eigen_geometry.data()[3 * idx + 1] - cy;
+        const double dz = m_eigen_geometry.data()[3 * idx + 2] - cz;
+        sum2 += dx * dx + dy * dy + dz * dz;
+    }
+    const double rg = std::sqrt(sum2 / n);
+    if (rg < 1e-8)
+        return 0.0;
+    m_rg_seen_min = std::min(m_rg_seen_min, rg);
+    m_rg_seen_max = std::max(m_rg_seen_max, rg);
+
+    if (!m_rg_flood_armed) {
+        m_rg_warmup.push_back(rg);
+        if (m_step * m_dT < m_rg_flood_warmup_fs)
+            return 0.0;
+        if (m_rg_flood_sigma > 0.0) {
+            m_rg_flood_sigma_eff = m_rg_flood_sigma;
+        } else {
+            double mean = 0.0;
+            for (double v : m_rg_warmup) mean += v;
+            mean /= m_rg_warmup.size();
+            double var = 0.0;
+            for (double v : m_rg_warmup) var += (v - mean) * (v - mean);
+            var /= std::max<std::size_t>(1, m_rg_warmup.size() - 1);
+            m_rg_flood_sigma_eff = (std::sqrt(var) >= 0.05) ? std::sqrt(var) : 0.15;
+        }
+        m_rg_flood_w0_eff = (m_rg_flood_w0 > 0.0) ? m_rg_flood_w0 : kb_Eh * m_T0 / 4.0;
+        for (double p : m_rg_seed_hills) {
+            m_rg_hill_pos.push_back(p);
+            m_rg_hill_w.push_back(m_rg_flood_w0_eff);
+        }
+        m_rg_flood_armed = true;
+        m_rg_flood_last_deposit_step = m_step;
+        if (m_verbosity >= 1)
+            CurcumaLogger::result_fmt("Rg flooding armed after {:.0f} fs: sigma = {:.3f} A{}, W0 = {:.5f} Eh "
+                                      "({:.2f} kJ/mol), dT = {} K, {} hill(s) seeded from the caller{}, Rg now {:.3f} A",
+                m_step * m_dT, m_rg_flood_sigma_eff, m_rg_flood_sigma > 0.0 ? "" : " (adaptive)",
+                m_rg_flood_w0_eff, m_rg_flood_w0_eff * 2625.5, m_rg_flood_dt,
+                static_cast<int>(m_rg_seed_hills.size()),
+                m_rg_flood_wall > 0.0 ? fmt::format(", soft wall above {:.3f} A", m_rg_flood_wall) : "", rg);
+    }
+
+    const double s2 = m_rg_flood_sigma_eff * m_rg_flood_sigma_eff;
+    double v_hills = 0.0, dv = 0.0;
+    for (std::size_t j = 0; j < m_rg_hill_pos.size(); ++j) {
+        const double d = rg - m_rg_hill_pos[j];
+        const double g = std::exp(-d * d / (2.0 * s2));
+        v_hills += m_rg_hill_w[j] * g;
+        dv += -m_rg_hill_w[j] * g * d / s2;
+    }
+    double energy = v_hills;
+    if (m_rg_flood_wall > 0.0 && rg > m_rg_flood_wall) {
+        const double dev = rg - m_rg_flood_wall;
+        energy += 0.5 * m_rg_flood_wall_force * dev * dev;
+        dv += m_rg_flood_wall_force * dev;
+    }
+    // Deposit on the same cadence as the RMSD hills; the height is damped by the bias already there.
+    if (m_step - m_rg_flood_last_deposit_step >= std::max(1, m_deposit_stride_steps)) {
+        const double w = m_rg_flood_w0_eff * std::exp(-v_hills / (kb_Eh * std::max(1.0, m_rg_flood_dt)));
+        m_rg_hill_pos.push_back(rg);
+        m_rg_hill_w.push_back(w);
+        m_rg_flood_last_deposit_step = m_step;
+        ++m_rg_flood_deposits;
+    }
+    const double pref = dv / (n * rg);
+    for (int idx : m_rg_indices) {
+        m_eigen_gradient.data()[3 * idx + 0] += pref * (m_eigen_geometry.data()[3 * idx + 0] - cx);
+        m_eigen_gradient.data()[3 * idx + 1] += pref * (m_eigen_geometry.data()[3 * idx + 1] - cy);
+        m_eigen_gradient.data()[3 * idx + 2] += pref * (m_eigen_geometry.data()[3 * idx + 2] - cz);
+    }
+    return energy;
+}
+
+double SimpleMD::ApplyDistanceRestraints()
+{
+    // Claude Generated (Sep 2026): E = sum 1/2 k (d - d0)^2, dE/dr_i = k (d - d0) (r_i - r_j)/d.
+    // Same unit convention as the wall, RMSD-hill and Rg terms of this file (Eh, Angstrom).
+    if (m_distance_restraints.empty())
+        return 0.0;
+    double energy = 0.0;
+    for (const MDDistanceRestraint& r : m_distance_restraints) {
+        if (r.i >= m_natoms || r.j >= m_natoms)
+            continue;
+        const double dx = m_eigen_geometry.data()[3 * r.i + 0] - m_eigen_geometry.data()[3 * r.j + 0];
+        const double dy = m_eigen_geometry.data()[3 * r.i + 1] - m_eigen_geometry.data()[3 * r.j + 1];
+        const double dz = m_eigen_geometry.data()[3 * r.i + 2] - m_eigen_geometry.data()[3 * r.j + 2];
+        const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (d < 1e-8)
+            continue;
+        const double dev = d - r.target;
+        energy += 0.5 * r.force * dev * dev;
+        const double pref = r.force * dev / d;
+        m_eigen_gradient.data()[3 * r.i + 0] += pref * dx;
+        m_eigen_gradient.data()[3 * r.i + 1] += pref * dy;
+        m_eigen_gradient.data()[3 * r.i + 2] += pref * dz;
+        m_eigen_gradient.data()[3 * r.j + 0] -= pref * dx;
+        m_eigen_gradient.data()[3 * r.j + 1] -= pref * dy;
+        m_eigen_gradient.data()[3 * r.j + 2] -= pref * dz;
+    }
+    return energy;
 }
 
 double SimpleMD::ApplySphericHarmonicWalls()

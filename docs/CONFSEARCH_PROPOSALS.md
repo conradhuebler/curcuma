@@ -461,6 +461,364 @@ H...acceptor (`-nci_form_distance` 1.9 A, `-nci_break_distance` 3.5 A, `-nci_res
 target bond -- deliberately no energy model, since the pattern was measured to separate but not to
 predict.
 
+### The polar-hydrogen guard reaches the proposals (Sep 2026)
+
+Every optimisation in this class can transfer a proton, and until Sep 2026 none of them was
+guarded. ConfSearch's `-hold_polar_h` reached the RELAX funnel and the re-scoring pass, but
+`PerformConfGen` never handed the restraints down, so the proposal optimisations ran free. The NCI
+move is the worst case for this: re-tying a hydrogen bond puts the donor proton between two
+acceptors, which is exactly the geometry a proton crosses.
+
+**Measured (107-atom peptide, WEKLQ).** Over a whole production run, 275 of 1049 optimised proposals
+(**26 %**, 183 of them NCI moves) came back with a changed bond topology -- H107 having moved from
+O57 to N25. A second run under identical code lost only 3 %, so the rate follows how strained the
+templates are, not the move set alone. Nothing entered the pool: `.proposals.new.xyz` requires
+`topology_ok`, and ConfSearch reads that file. The cost was a quarter of the proposal budget spent
+on tautomers -- and they are seductive in the log, because a zwitterion of this molecule sits
+*below* every conformer (one at -161.668324 Eh against a standing record of -161.665370).
+
+A/B on the ensemble that produced them (41 structures, gfnff describes / gfn2 judges):
+
+| | proposals with changed topology |
+|---|---|
+| without the guard | **5 of 10** (O57-H107 -> N25 / N35) |
+| with the guard | **0 of 3** (run incomplete) |
+
+Plus, from the first production run under the new code: **0 of 23**.
+
+Mechanics: ConfSearch passes `polar_h_restraints` (the json form `GeometryRestraints::fromJson`
+reads) into ConfGen's config, derived from the reference structure of the surface that *optimises*
+the proposals -- `m_topo_ref_opt` when `eval_method == opt_method`, `FunnelTopoRef()` otherwise.
+`ConfGen::withPolarHydrogenRestraints()` appends them to whatever restraints a move already has and
+**never overwrites**: an NCI move IS a set of distance restraints, and replacing them would turn the
+move into a plain free optimisation. On a duplicated atom pair the move's own restraint wins, so a
+move that deliberately pulls on an X-H is not fought by the guard. Applied at all three sites: the
+free proposal optimisation (`optimiseProposals`), the torsion drive (`restrainedBuild`) and the
+bridge pull including its staged variant (`restrainedBuildNCI`).
+
+Not a PARAM: it is a restraint *list*, derived per run from the caller's reference geometry, not a
+setting. ConfigManager keeps unknown flat keys, so it arrives verbatim.
+
+### The move set, re-examined as chemistry (Sep 2026)
+
+Five changes to the logic, each with the measurement that motivated it and the measurement that judged
+it. Test bed: a 125-structure ensemble drawn from the second WEKLQ production run so that all nine
+hydrogen bonds of the known deep basin are present (22 to 443 carriers each; the templates themselves
+carry at most 5 of the 9). Builds on gfnff; judgement on gfn2 with the polar-H restraints. One
+ensemble, one molecule -- every number below is n = 1 in that sense.
+
+| change | flag, default | why | measured |
+|---|---|---|---|
+| **Route move**: form a bond by rotating the torsions on the donor-acceptor path into observed rotamer states, aim at the form distance, then restrained build from the rotated geometry | `-route_max` 6, `-route_depth` 3, `-route_reach` 3.0 | a bond forms because groups turn around bonds, not because atoms are pulled through the molecule (0 of 45 contact pulls survived the clash gate) | gfnff: **20 of 20 built**, 0 clash rejections, 0 unreached (pull-based NCI moves: 7 of 15); 19-20 of 20 new; 15-17 of 20 keep the bond when released. gfn2: 12 of 12 new, **+36 kJ/mol above the ensemble minimum**, 6 of 12 snap back, at most 2 of the 9 target bonds |
+| **Saturation rule**: never propose a bond on an acceptor already holding two or a donor H already donating | `-nci_saturation` true | a carbonyl oxygen accepts twice, an N-H donates once | removes moves the free optimisation undoes; no downside observed |
+| **Clamp pairs**: two absent bonds sharing a heavy atom formed together | `-nci_clamp` **false** | the deep basin is a bidirectional side-chain clamp | 14 of 21 clamp builds die at the clash gate, survivors reach at most 2 of 9 -- the static pull fails exactly as for single bonds; a rotation-built clamp is not implemented |
+| **Steered relaxation**: 300 fs restrained MD after the build, before release | `-nci_steer_fs` 0 (off), `-nci_steer_temperature` 300 | 25-55 % of built bonds snap back on release because the environment never moved | 17 of 20 kept vs 15 of 20 without (within noise); best new conformer +2.8 vs -21.8 kJ/mol relative to the ensemble minimum (worse, single stochastic realisation) -- **no measurable gain**, kept as an opt-in |
+| **Template diversity**: templates picked for H-bond-pattern distance, not energy alone | `-template_diversity` true | key steps of the record chain came from seeds ranked 5-10 | 26 of 26 new vs 21 of 27 with energy-only templates |
+| **Ordering by coverage only** | `-proposal_novelty_weight` 1.0 | the additive model orders at r = -0.02 against the optimised energy | no longer spends budget on the model's favourites |
+| Coupled torsions via crossover, window 2 | `-crossover_max 15 -crossover_window 2` (not default) | adjacent torsions move together | **0 of 15** kept their transferred states, best +15.6 kJ/mol above the minimum -- negative |
+
+**The lesson of the table.** Build reliability and chemical value are different properties. The route
+move is a far better *builder* (no clash losses, everything new), and on the ranking surface its
+products sit where every other proposal type sits: 80-120 kJ/mol above the reference, far from the
+target basin. What decides value is the surface the structure relaxes on, and the gfnff-built
+geometries do not land in the deep gfn2 basins (the basin-mapping result of the funnel analysis, here
+at the level of single moves). The route therefore replaces the pull-based build, it does not replace
+the search. Two things it does not yet do and that follow directly from the clamp measurement: a
+two-target route (rotate so that BOTH bonds of a clamp come into reach), and building on the ranking
+surface itself when the two surfaces differ.
+
+### The novelty gate was blind to energy (`-new_energy_gain`, Sep 2026, default 1.0 kJ/mol)
+
+Until Sep 2026 an optimised proposal counted as new only by geometry: topology intact and best-fit
+RMSD above `-new_rmsd` (1.25 A inside ConfSearch, the search's own dedup radius) to every ensemble
+member. A conformer is a minimum, and two topologically identical minima with different energies are
+different conformers however close they sit in Angstrom -- but such a proposal was discarded whenever
+it landed inside the threshold.
+
+**Measured on the two gfn2 production runs of WEKLQ** (35 + 20 repetitions, every optimised proposal
+re-scored against its closest ensemble member; scripts in the session's `agent_confgen/`):
+
+| run | valid proposals | 0.3-1.25 A from a member | of those > 1 kJ/mol BELOW that member | with a different H-bond pattern |
+|---|---|---|---|---|
+| record run (`20260823_211047`) | 993 | 299 (30 %) | **61** | 52 of 61 (85 %) |
+| second run (`20260902_205547`) | 496 | 134 (27 %) | **38** | 32 of 38 (84 %) |
+| control: proposals < 0.3 A from a member | | 235 / 114 | 3 / 9 | 7-9 % |
+
+The 0.3-1.25 A band is not noise around a known minimum: 84-85 % of the deeper structures there carry a
+different hydrogen-bond pattern than the member they were compared with, against 7-9 % for the
+re-optimised copies below 0.3 A. The most consequential single case (n = 1): in `cycle03_T500K_r4` of
+the record run, `proposal_from_1_d3_driven` came out at -14.9 kJ/mol, 5.2 below everything in the pool
+at that time, with a heavy-atom RMSD of **0.03 A to the structure that became the record** one
+repetition later -- and was rejected as not new (0.66 A all-atom from its template).
+
+**The rule now.** A valid proposal is new when
+
+```
+rmsd_to_nearest > new_rmsd
+   OR ( E_nearest(file) - E_proposal > new_energy_gain   AND   hbond_hamming(proposal, nearest) >= new_pattern_min )
+```
+
+`E_nearest(file)` is the energy in the comment line of the input structure, i.e. the value the search
+ranks on; the proposal energy comes from ConfGen's own optimisation. The two are comparable only when
+they sit on the same surface under the same restraints. Inside ConfSearch that holds by construction
+(RELAX and the proposal optimisation both run on `RelaxMethod()` with the polar-H restraints), and
+ConfSearch switches the rule off with a message when its `confgen_eval_method` differs from the RELAX
+method. A standalone `-confgen` run on a file whose energies come from another method must pass
+`-new_energy_gain 0`. `new_pattern_min` (default 1) is what separated deeper neighbours from
+re-optimised copies in the measurement; `0` lets the energy alone decide.
+
+Accepted structures carry the suffix `_deeper` in `.proposals.opt.xyz`/`.proposals.new.xyz`, so the
+provenance analysis can tell the two acceptance routes apart. Cost: none beyond one H-bond detection
+per candidate; the end-of-run deduplication keeps the lower member of a basin, so an accepted deeper
+neighbour replaces rather than duplicates. The retrospective count above is the only measurement so
+far; the prospective A/B (same gfn2 budget, `-new_energy_gain 0` vs `1`, three seeds each) is open.
+
+### Two claims of this document that fell with the restraint audit (Sep 2026)
+
+Both production runs above ran with `-hold_polar_h`. In the record run the RELAX minima were therefore
+restrained, while the recombination step's re-optimisation of its templates was **not** (the polar-H
+pass-through to ConfGen came later, see above). That mixed two energy scales in one pool, and two
+statements below this section rest on that mixture:
+
+- *"Match against ALL optimised proposals … the step is the dominant seed supplier of the whole second
+  half."* Re-counted over all 35 repetitions: of the 234 top-10 hits that the "vs `.opt.xyz`" count
+  attributes to recombination, **226 are MD structures** that a proposal re-found by relaxing back onto
+  its own template (0.02-0.05 A). Those copies sat a median **2.85 kJ/mol** (P10-P90 -5.6 … -0.4) below
+  their restrained parent at identical geometry -- the restraint energy. In the second run, where both
+  sides are restrained, the same copies sit at +0.01 kJ/mol (n = 114) and genuine proposals appear in
+  the top-10 in 0 of 16 repetitions after `cycle01_r4`. The `.opt.xyz`-based table is therefore a
+  measurement of the restraint offset, not of recombination.
+- *"The reference run's record (-19.79 kJ/mol) sits 0.02 A from its own parent, because it IS that
+  parent re-optimised."* True, and the 4.06 kJ/mol are that parent's restraint energy: re-optimised
+  with the restraints it does not move (0.00 kJ/mol, 1 step), without them it reaches -161.665371 Eh.
+  See [CONFSEARCH_ENERGY_HYGIENE.md](CONFSEARCH_ENERGY_HYGIENE.md) section 1.
+
+`-confgen_dry_abort` keeps its default OFF; its justification table below is affected in the same way
+and should be re-read with the offset in mind.
+
+### The re-scoring pass is skipped when it has nothing to re-score (Sep 2026)
+
+After RECOMBINE, ConfSearch re-optimised the **whole** reduce file -- templates and appended proposals
+-- on `RelaxMethod()` whenever ConfGen had *described* the ensemble with another method (gfnff for the
+per-term decomposition). But the templates already are `RelaxMethod()` minima (they came out of RELAX),
+and with `-confgen_eval_method auto` the proposals were optimised and judged on `RelaxMethod()` as well.
+Measured on the two gfn2 production runs:
+
+| run | RECOMBINE optimisations | of which re-scoring | share of ALL optimisations of the run | median gain of the re-scoring |
+|---|---|---|---|---|
+| record run | 3698 | 2679 (72 %) | 25 % | -2.85 kJ/mol = the restraint release (proposals were unrestrained then) |
+| second run | 2967 | 2324 (78 %) | 35 % | +0.01 kJ/mol (both sides restrained); 287 of 2324 diverged |
+
+The pass now runs only when the proposals were judged on a surface other than `RelaxMethod()` -- then it
+puts them on the ranking scale, which is what it was written for. `ConfSearch::PerformConfGen` records
+the judging method in `m_confgen_judging`; the RECOMBINE block tests it and logs the skip with the number
+of optimisations saved. Same result, a quarter to a third of a run's optimisations back.
+
+**Resolved cause (Sep 2026): the proposals that never reach `.proposals.opt.xyz` ran out of optimiser
+steps.** 643 built, 496 optimised in the second WEKLQ run (23 %), 0 of 1019 in the record run -- the
+difference is the polar-H restraint inside ConfGen's optimisation. Reproduced on triose (66 atoms, gfnff
+describes / gfn2 judges, `-hold_polar_h`, three runs): 3 of 11, 5 of 16 and 9 of 18 built proposals
+dropped with "Did not converge within 5000 iterations" (visible only at verbosity 2; the ConfGen child
+runs silent inside ConfSearch). A one-shot restart of the optimiser was considered and not measured (the
+build meant to test it never linked -- caught by the binary timestamp); the RELAX-consistent rule was
+chosen instead. Two changes, both aligning ConfGen with what RELAX already does:
+
+- **Unconverged proposals are kept** (`Proposal::unconverged`, name suffix `_unconverged`) when the
+  result is finite and not blown up (extent within ten times the built geometry, floor 50 A -- the
+  `-opt_divergence_factor` yardstick). ConfSearch's RELAX has accepted unconverged snapshots all along
+  ("a partially optimised structure is still a candidate"); dropping them only in ConfGen threw away a
+  quarter of the proposal budget. Their energy is an upper bound of their minimum; topology gate and
+  novelty rules apply unchanged.
+- **The proposal optimisation carries `convergence_preset normal`**, so the step cap scales with the
+  molecule (max(500, 10 N): 660 for triose, 1070 for WEKLQ) instead of the driver's flat 5000. Same
+  thresholds; a stalled optimisation costs a fifth to an eighth.
+
+Measured after the change on the same triose setup (one repetition): **15 of 15** built proposals kept
+(before: 8 of 11, 11 of 16, 9 of 18), 7 of them unconverged; 11 new conformers entered the ensemble
+(before 3-6), 3 through the energy rule; and the deepest structure of the cycle, 14.9 kJ/mol below the
+re-optimised ensemble minimum, was one of the unconverged ones -- its energy an upper bound. One run, one
+molecule; the count of kept structures is a fact, their value is not yet measured.
+
+RELAX itself still runs with the flat 5000-step cap (no preset in `ChildConfig`); it accepts unconverged
+results, so a stalled snapshot there costs 5000 gradients too. Not changed here -- it is the main funnel
+and the change would have to be measured -- but it is the same lever.
+
+### Switching RECOMBINE off when it stops paying (`-confgen_dry_abort`, default OFF)
+
+The step costs one optimisation per proposal, so an automatic switch-off after a dry spell is an
+obvious idea. It was implemented, and then measured -- and the measurement is why it is **off by
+default**.
+
+**Per repetition of the run that produced this system's record** (35 repetitions with a REDUCE stage,
+`added` = frames in `.proposals.new.xyz`, "gain" = best proposal minus best RELAX structure of that
+repetition, positive = the proposals won):
+
+```
+added:  3 to 21, in 35 of 35 repetitions        -> a criterion on "no new conformer" NEVER fires
+gain > 0.5 kJ/mol: 27 of 35 repetitions
+longest unproductive streak: exactly 5
+```
+
+The streak and what followed it:
+
+```
+cycle02_T550K_r4   RECOMBINE   -8.22    best RELAX   +6.39
+cycle02_T550K_r5   RECOMBINE  -29.64    best RELAX   +9.04
+cycle03_T500K_r1   RECOMBINE   -6.83    best RELAX   +6.84
+cycle03_T500K_r2   RECOMBINE  -28.05    best RELAX   +6.38
+cycle03_T500K_r3   RECOMBINE   -9.27    best RELAX  +19.07
+cycle03_T500K_r4   RECOMBINE   +8.68    best RELAX   -6.23   <- first value below the GOAT reference
+cycle03_T500K_r5   RECOMBINE   +5.61    best RELAX  -10.43
+cycle04_T450K_r1   RECOMBINE   +6.10    best RELAX   -9.92
+cycle04_T450K_r2   RECOMBINE   +4.05    best RELAX  -15.73   <- the record is born here
+```
+
+Any `N <= 5` switches the step off in the repetition immediately before the run turns around; any
+`N >= 6` never fires on that run at all. There is no safe value on this evidence.
+
+This is the standard trap of deriving a cut-off from how **often** something pays instead of how
+**much**, when the payoff sits in the tail -- the same shape as the energy-window and bias-height
+decisions elsewhere in this search. The mechanism exists for a system that is measurably different;
+before turning it on, tabulate the per-repetition yield the way the table above does.
+
+**Criterion when enabled: the SEED, not the count and not the energy.** A repetition is barren when
+none of the conformers RECOMBINE added is picked as a seed for the next MD. That is what makes a
+proposal worth its optimisation -- the search starts from it -- and it is the only one of the three
+that both fires and means something:
+
+- *count*: never fires (35 of 35 repetitions produced conformers),
+- *energy*: fires, and the table above shows where,
+- *seed*: fires, and a structure that is never started from is exactly the one that bought nothing.
+
+Evaluated at the end of the repetition, where `m_in_stack` already holds the next MD's seeds, and
+matched **geometrically** (RMSD < 0.05 A) rather than by energy -- the re-scoring optimisation shifts
+the energies, so an energy match would silently stop matching and every repetition would count as
+barren.
+
+#### Match against ALL optimised proposals, not against `.proposals.new.xyz`
+
+This distinction decides whether the criterion is useful or destructive, and it was got wrong first.
+`.proposals.new.xyz` holds only proposals the novelty gate accepts, i.e. further than `-new_rmsd`
+(1.25 A) from every ensemble member. **The most valuable proposal this search has ever produced fails
+that test**: the reference run's record (-19.79 kJ/mol) sits 0.02 A from its own parent, because it
+IS that parent re-optimised. It appears in `.proposals.opt.xyz` and never in `.proposals.new.xyz`.
+
+The same run, same repetitions, counted both ways -- how many of the ten lowest pool structures
+(the seed candidates) are recombination products:
+
+| repetition | vs `.new.xyz` | vs `.opt.xyz` |
+|---|---|---|
+| cycle01_T600K_r1 | 6/10 | 7/10 |
+| cycle01_T600K_r2 ... cycle03_T500K_r2 | 0/10 | 0-3/10 |
+| cycle03_T500K_r3 | 0/10 | 3/10 |
+| cycle03_T500K_r4 | 0/10 | 3/10 |
+| cycle04_T450K_r1 | 0/10 | 4/10 |
+| cycle04_T450K_r2 *(record born)* | 0/10 | 5/10 |
+| cycle04_T450K_r3 | 0/10 | 6/10 |
+| cycle04_T450K_r4 | 0/10 | 7/10 |
+| cycle04_T450K_r5 | 0/10 | 9/10 |
+| cycle05_T400K_r1 | 0/10 | **10/10** |
+
+Against the "new" file the step looks dead after repetition 1 and any dry-abort would have switched
+it off long before 450 K -- destroying the record. Against all optimised proposals it is the dominant
+seed supplier of the whole second half of the run. The topology-rejected structures in that file
+never reach the pool, so they cannot match a seed; they only cost a few RMSD evaluations.
+
+Measured on the second production run (`20260902_205547`, gfn2, `-hold_polar_h`), same counting:
+7/10 in r1, then 2, 3, 2, and **0/10 for eight consecutive repetitions** from 600 K r5 through
+500 K r2. So the two runs behave in opposite ways -- which is the reason the abort stays off by
+default rather than being tuned to either of them.
+
+### Why the NCI move cannot reach a compact basin (measured Sep 2026)
+
+A known deep basin of WEKLQ (the -19.8 kJ/mol record) is defined by nine hydrogen bonds, four of
+which form a **bidirectional clamp**: both basic side chains simultaneously accept a backbone N-H and
+donate to a backbone C=O. A 166-structure test ensemble was built from a production run that never
+entered that basin, deliberately enriched so that **all nine bonds are present** (7 to 80 carriers
+each) -- separating "the vocabulary is missing" from "the move set cannot use it".
+
+Templates in that ensemble carry up to **5** of the nine. Five variants were run:
+
+| variant | settings | proposals | max bonds | bidirectional | R_gyr min |
+|---|---|---|---|---|---|
+| *(templates)* | — | 166 | **5** | 0 | 4.212 |
+| A | defaults (`nci_depth 1`, budget 10) | 15 | 2 | 0 | 4.292 |
+| B | `nci_depth 3`, budget 40 | 39 | 3 | 0 | 4.202 |
+| C | + `nci_min_population 1`, `concerted_max 10` | 40 | 3 | 0 | 4.202 |
+| D | + `nci_ranking rarity` | 33 | 3 | 0 | 4.248 |
+| E | `rarity` + `proposal_ranking coverage` | 32 | 1 | 0 | 4.288 |
+
+**Every variant produces structures carrying FEWER of the target bonds than the templates it built
+them from**, and none reaches the record's R_gyr of 4.076. Four hypotheses tested and rejected:
+
+- *vocabulary* — no, all nine bonds are in the ensemble by construction;
+- *depth* — no, `nci_depth 3` gives the same maximum as depth 1;
+- *budget* — no, a four-fold budget changes nothing;
+- *ranking* — no, inverting the population term (`-nci_ranking rarity`, added for this test) gives the
+  same result, and combining it with pure coverage makes it worse.
+
+A fifth was rejected by comparing `.proposals.xyz` (built, restraints still on) with
+`.proposals.opt.xyz` (after the free optimisation): **the release does not undo the pattern.** The
+built structures already carry at most 2-3 bonds, and the free optimisation preserves that number
+(2→2, 3→3, 3→3, 1→1).
+
+The failure is in the **build**, and the logs name it:
+
+```
+A: 5 built,  0 unreached, 10 rejected by the clash/topology gate
+B: 19 built, 4 unreached, 22 rejected
+D: 13 built, 0 unreached, 32 rejected     (71 % of all moves)
+```
+
+53-71 % of the moves are thrown away because the built geometry clashes or changes the bond topology
+— not because the restraint failed to arrive. Pulling a bond closed that only exists in a **compact**
+fold, starting from an extended structure, drives atoms into each other, and the gate correctly
+rejects the result.
+
+**Conclusion: the bottleneck is compaction, not bridging.** The target basin is the compact corner of
+the search space (R_gyr 4.076; only 38 of 2210 structures of the run that found it are below 4.20,
+and 0 of 1513 of the run that did not), and the move set has no coordinate that compacts. A move that
+first pulls the molecule together — e.g. a restraint on the radius of gyration, or on the
+indole/leucine contact that is 4.12 A in the record against a 7.62 A median elsewhere — and only then
+imposes the bonds is a **new move set**, not a parameter setting. Nothing reachable through the
+existing flags closes this gap.
+
+`-nci_ranking rarity` is kept as a documented negative: it exists, it is off by default, and the
+measurement above is the reason not to expect anything from it.
+
+### The compaction move (`-nci_contact_moves`, Sep 2026) -- built, measured, does not work
+
+The section above localises the failure in the BUILD: 53-71 % of NCI moves die at the clash/topology
+gate because a hydrogen bond that only exists in a compact fold cannot be pulled closed on an
+extended structure. The obvious remedy is a move that folds first. It was implemented: close and
+ionic contacts join the move set, restrained heavy-atom to heavy-atom, with a target that is
+**measured** (median distance over the ensemble members carrying the contact -- so the old objection
+"a close contact has no well-defined target geometry" does not hold), always staged and always ahead
+of any bridge restraint.
+
+Two variants, same 166-structure ensemble:
+
+| | built | unreached | rejected by clash/topology | R_gyr min | indole/Leu min |
+|---|---|---|---|---|---|
+| bridges only (`nci_depth 3`) | 19 | 4 | 22 | 4.202 | 5.20 |
+| + contacts, population order | 8 | 8 | 29 | **4.275** | 5.20 |
+| + contacts, ordered by demanded fold | **0** | 1 | **44** | — | — |
+
+Admitting the contacts without direction makes the result *less* compact than not having them: the
+population order picks some short contact among 467 movable ones rather than the one that folds the
+molecule. Giving it direction -- rank by demanded fold, i.e. current distance minus target -- kills
+the move set entirely: **0 of 45 survive**.
+
+That is not a tuning failure, it is structural. **A harmonic restraint between two distant heavy
+atoms satisfies its distance along the shortest path, and that path runs through the rest of the
+molecule.** The larger the demanded fold, the more certain the clash. Compaction cannot be imposed by
+a static restrained optimisation.
+
+What it would take instead: compaction as a **bias during dynamics** -- a term on the radius of
+gyration (or on a hydrophobic contact) added to the MD, so the molecule folds along a physical
+trajectory instead of being pulled through itself. That is an MTD question, not a ConfGen one. The
+flag is kept as a documented negative and as the machinery for that experiment.
+
 ### The concerted move (`-concerted_max`, implemented Aug 2026)
 
 **Correction to earlier versions of this document.** `-concerted_max` was described here and in the

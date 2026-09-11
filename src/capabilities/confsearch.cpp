@@ -224,6 +224,23 @@ bool ConfSearch::Initialise()
     return true;
 }
 
+// Claude Generated (Sep 2026): unweighted heavy-atom radius of gyration of a geometry, elements taken
+// from ref (all pool structures share the atom order of the input). Used for the Rg-flooding hand-over.
+static double HeavyAtomRg(const Molecule& ref, const Geometry& g)
+{
+    Eigen::Vector3d c = Eigen::Vector3d::Zero();
+    int n = 0;
+    for (int i = 0; i < ref.AtomCount() && i < g.rows(); ++i)
+        if (ref.Atom(i).first != 1) { c += Eigen::Vector3d(g.row(i)); ++n; }
+    if (n == 0)
+        return 0.0;
+    c /= n;
+    double sum2 = 0.0;
+    for (int i = 0; i < ref.AtomCount() && i < g.rows(); ++i)
+        if (ref.Atom(i).first != 1) sum2 += (Eigen::Vector3d(g.row(i)) - c).squaredNorm();
+    return std::sqrt(sum2 / n);
+}
+
 void ConfSearch::start()
 {
     const std::string p = Basename();
@@ -710,6 +727,23 @@ void ConfSearch::start()
     if (m_explore_md_rattle >= 0)
         md["rattle"] = m_explore_md_rattle;
     nlohmann::json rattle_base = md.contains("rattle") ? md["rattle"] : nlohmann::json(0);
+    /* Claude Generated (Sep 2026): heavy-atom bias metric (PARAM rmsd_mtd_heavy_only). The subset is
+     * handed to SimpleMD as an explicit 1-based index list, the grammar FragString2Indicies reads;
+     * every walker of this search shares the atom order of the input, so one list serves all. */
+    if (m_rmsd_mtd_heavy_only && !m_in_stack.empty()) {
+        std::string heavy;
+        int n_heavy = 0;
+        for (int i = 0; i < m_in_stack[0]->AtomCount(); ++i)
+            if (m_in_stack[0]->Atom(i).first != 1) {
+                heavy += (heavy.empty() ? "" : ",") + std::to_string(i + 1);
+                ++n_heavy;
+            }
+        if (n_heavy >= 3) {
+            md["rmsd_mtd_atoms"] = heavy;
+            CurcumaLogger::result_fmt("ConfSearch: RMSD-MTD bias metric restricted to the {} heavy atoms of {} "
+                                      "(-rmsd_mtd_heavy_only)", n_heavy, m_in_stack[0]->AtomCount());
+        }
+    }
 
     // Save a copy of the initial optimised input structures as fallback seeds.
     // When a temperature cycle leaves m_in_stack empty (all structures topo/energy-rejected),
@@ -742,14 +776,21 @@ void ConfSearch::start()
       const double stage_entry_best = m_global_min_opt;
       bool stage_new_best = false;
       int stage_dry_reps = 0; // Claude Generated (Aug 2026): consecutive dry repetitions of this stage
+      int chain_round = 0, chain_rounds_stage = 0; // Claude Generated (Sep 2026): densification chain, see PARAM refine_md_chain
       m_refined_seeds.clear(); // Claude Generated (Aug 2026): refine-once memory is per temperature stage
       for (int stage_rep = 0; stage_rep < stage_repeats; ++stage_rep) {
         const bool last_repetition = (stage_rep == stage_repeats - 1);
+        // Claude Generated (Sep 2026): a chain round re-enters the same repetition index without an
+        // exploration MD (PARAM refine_md_chain); everything keyed on "first repetition of the stage"
+        // must not fire again, and its files carry their own tag.
+        const bool chain_now = chain_round > 0;
         // Claude Generated (Jul 2026): every file this cycle writes carries this tag, so the cycles
         // no longer overwrite each other's intermediates and a listing groups them by temperature.
         m_cycle_tag = (stage_repeats > 1)
             ? fmt::format("cycle{:02d}_T{}K_r{}", temperature_cycle, static_cast<int>(m_currentT), stage_rep + 1)
             : fmt::format("cycle{:02d}_T{}K", temperature_cycle, static_cast<int>(m_currentT));
+        if (chain_now)
+            m_cycle_tag += fmt::format("_c{}", chain_round);
         // Stem of the exploration files: MD snapshots (<stem>.xyz), their optimisation
         // (<stem>.opt.xyz) and the dedup result (<stem>.opt.accepted.xyz).
         const std::string explore = cycleStage("s1_explore", m_md_method);
@@ -764,7 +805,7 @@ void ConfSearch::start()
         const std::string stage_pool = Basename() + "."
             + fmt::format("cycle{:02d}_T{}K", temperature_cycle, static_cast<int>(m_currentT))
             + ".s4_stage_pool." + RelaxMethod();
-        if (stage_rep == 0)
+        if (stage_rep == 0 && !chain_now)
             std::ofstream(outputPath(stage_pool + ".xyz"), std::ios::trunc).close();
         // Claude Generated (Jun 2026): per-cycle wall-clock timing
         RunTimer cycle_timer;
@@ -775,7 +816,10 @@ void ConfSearch::start()
         // Claude Generated (Jul 2026): section() instead of header() -- header() is gated at
         // verbosity >= 2, so at the default level the run had no visible block structure at all.
         // The stage banner once per temperature; the repetitions get a lighter line below.
-        if (stage_rep == 0)
+        if (chain_now)
+            CurcumaLogger::section(fmt::format("T = {} K, repetition {} / {} -- densification chain round {}",
+                static_cast<int>(m_currentT), stage_rep + 1, stage_repeats, chain_round));
+        else if (stage_rep == 0)
             CurcumaLogger::section(fmt::format("ConfSearch Temperature Cycle {} / {}   T = {} K",
                                        temperature_cycle,
                                        static_cast<int>((m_startT - m_endT) / m_deltaT) + 1,
@@ -840,6 +884,47 @@ void ConfSearch::start()
                 m_rmsd_mtd_cap_eff = std::max(0, m_rmsd_mtd_max_height);
             }
         }
+        /* Claude Generated (Sep 2026): Rg flooding hand-over (see SimpleMD PARAM rg_flood). The
+         * search's own optimised minima -- the persistent hills in the bias pool, fed back by
+         * opt_feedback_bias -- tell the children (a) where in Rg the search has already been (seed
+         * hills, one per occupied bin) and (b) where its extended tail ends (soft wall at a quantile).
+         * Both are data of THIS run; no reference structure and no target value enter. In the first
+         * repetition the pool has no minima yet, so the seeds themselves stand in. */
+        if (md.value("rg_flood", false) && !m_in_stack.empty()) {
+            const Molecule& ref = *m_in_stack[0];
+            std::vector<double> rgs;
+            if (m_bias_pool) {
+                for (const auto& bs : m_bias_pool->snapshot())
+                    if (bs.persistent)
+                        rgs.push_back(HeavyAtomRg(ref, bs.geometry));
+            }
+            const bool from_pool = !rgs.empty();
+            if (!from_pool)
+                for (const Molecule* m : m_in_stack)
+                    rgs.push_back(HeavyAtomRg(*m, m->getGeometry()));
+            std::sort(rgs.begin(), rgs.end());
+            nlohmann::json hills = nlohmann::json::array();
+            if (m_rg_flood_pool_seed && !rgs.empty() && m_rg_flood_seed_bin > 0.0) {
+                double last_bin = -1e9;
+                for (double r : rgs) {
+                    const double bin = std::floor(r / m_rg_flood_seed_bin) * m_rg_flood_seed_bin + 0.5 * m_rg_flood_seed_bin;
+                    if (std::fabs(bin - last_bin) > 1e-9) { hills.push_back(bin); last_bin = bin; }
+                }
+            }
+            md["rg_flood_seed_hills"] = hills;
+            double wall = -1.0;
+            if (m_rg_flood_wall_quantile > 0.0 && rgs.size() >= 10) {
+                const std::size_t idx = static_cast<std::size_t>(std::floor(m_rg_flood_wall_quantile * (rgs.size() - 1)));
+                wall = rgs[std::min(idx, rgs.size() - 1)];
+            }
+            md["rg_flood_wall"] = wall;
+            CurcumaLogger::result_fmt("ConfSearch: Rg flooding -- {} seed hill(s) from {} {} (heavy-atom Rg {:.2f}-{:.2f} A){}",
+                static_cast<int>(hills.size()), static_cast<int>(rgs.size()),
+                from_pool ? "optimised pool minima" : "seed structure(s) (pool empty yet)",
+                rgs.empty() ? 0.0 : rgs.front(), rgs.empty() ? 0.0 : rgs.back(),
+                wall > 0.0 ? fmt::format(", soft wall at the {:.0f}th percentile = {:.3f} A", 100.0 * m_rg_flood_wall_quantile, wall)
+                           : std::string(", no wall (fewer than 10 minima yet)"));
+        }
         // Claude Generated (Jun 2026): auto-enable RATTLE for hot cycles. A 1 fs step at high T
         // under-samples X-H stretches (period ~10 fs) -> energy drift / spurious bond breaking;
         // constraining them (mode 2 = H-only) stabilises the dynamics. Cooler cycles keep the
@@ -875,7 +960,7 @@ void ConfSearch::start()
         // of all snapshots, so the topology gate discarded almost everything the MD produced.
         // "deposits" keeps the fed-back minima (the memory of which basins are known) and drops only
         // the hill mass; "all" empties the pool.
-        if (m_bias_pool && stage_rep == 0 && m_bias_reset != "never") {
+        if (m_bias_pool && stage_rep == 0 && !chain_now && m_bias_reset != "never") {
             const int before = m_bias_pool->biasStructureCount();
             if (m_bias_reset == "all")
                 m_bias_pool->clear();
@@ -904,7 +989,12 @@ void ConfSearch::start()
                 CurcumaLogger::result_fmt("ConfSearch: {} symmetry permutation(s) active in RMSD-MTD bias (smooth sum-over-images)",
                     static_cast<int>(m_permutation_cache.size()));
             }
-            PerformMolecularDynamics(m_in_stack, md);
+            if (!chain_now)
+                PerformMolecularDynamics(m_in_stack, md);
+            else
+                CurcumaLogger::result_fmt("ConfSearch: densification chain round {} -- no exploration MD, only the "
+                                          "densification of the {} updated seed(s) (-refine_md_chain)",
+                    chain_round, static_cast<int>(m_in_stack.size()));
 
             // Claude Generated (Aug 2026): REFINEMENT MD step -- a second, differently configured
             // trajectory per seed (see PARAM refine_md). The biased exploration above discovers;
@@ -978,6 +1068,7 @@ void ConfSearch::start()
                 } else {
                 nlohmann::json md_refine = md;
                 md_refine["max_time"] = m_refine_md_time;
+                md_refine["rg_flood"] = false; // Claude Generated (Sep 2026): densification harvests around its seed, no compactness flooding there
                 md_refine["time_step"] = m_refine_md_dt;
                 // never weaken an explicit all-bond constraint (mode 1 is the superset of mode 2)
                 if (md.value("rattle", 0) != 1)
@@ -1190,6 +1281,10 @@ void ConfSearch::start()
             // drop it before it becomes this cycle's "best", sets the energy window and re-seeds
             // a basin that is already seeded (see PARAM refine_md_refind_rmsd).
             DropDensifyRefinds(outputPath(relax + ".xyz"));
+            /* Claude Generated (Sep 2026): BEFORE anything selects on these energies -- the window,
+             * the deduplication, the seed ranking and the cycle-best report all read this file.
+             * See PARAM relax_polish_rank. */
+            PolishRelaxTop(relax, opt);
             int opt_count = 0;
             {
                 FileIterator opt_file(outputPath(relax + ".xyz"));
@@ -1245,7 +1340,7 @@ void ConfSearch::start()
         // Claude Generated (Jul 2026): Phase 3c -- recombine the torsion states of this cycle's
         // minima. Placed after the dedup (so it works on distinct minima) and before Phase 3b (so its
         // structures go through the accurate re-optimisation and the Phase 4 filters like any other).
-        if (m_confgen_phase && !no_new_bias_structures && rmsd_count >= 2) {
+        if (m_confgen_phase && !m_confgen_disabled && !no_new_bias_structures && rmsd_count >= 2) {
             const std::string cg_method = ConfGenMethod();
             CurcumaLogger::section(fmt::format("Step 4 RECOMBINE: Torsion Recombination / ConfGen ({})", cg_method));
             if (cg_method != RelaxMethod())
@@ -1260,7 +1355,23 @@ void ConfSearch::start()
              * "is this a single-method run". With -relax_pes opt the funnel already produced
              * opt_method minima and REFINE is skipped, so the proposals would otherwise stay on
              * the ConfGen surface and be ranked against opt_method energies. */
-            if (added > 0 && cg_method != RelaxMethod() && !refine_needed) {
+            /* Claude Generated (Sep 2026): the re-scoring pass re-optimised the WHOLE reduce file --
+             * templates and appended proposals -- at RelaxMethod() whenever ConfGen DESCRIBED with
+             * another method. But the templates already ARE RelaxMethod() minima (they came out of
+             * RELAX), and with -confgen_eval_method auto the proposals were optimised and judged on
+             * RelaxMethod() too. Measured on two production runs: 2679 and 2324 of these
+             * optimisations per run, 72-78 % of RECOMBINE's cost and 25-38 % of ALL optimisations
+             * of the run, with a median gain of 0.00 kJ/mol once both sides carry the same
+             * restraints (and 287 of them diverged in one run). The pass is needed exactly when the
+             * proposals were JUDGED on a surface other than RelaxMethod() -- then it puts them on
+             * the ranking scale. m_confgen_judging is set by PerformConfGen. */
+            const bool proposals_on_relax_scale = (m_confgen_judging == RelaxMethod());
+            if (added > 0 && cg_method != RelaxMethod() && !refine_needed && proposals_on_relax_scale)
+                CurcumaLogger::result_fmt("ConfSearch: re-scoring pass skipped -- the {} new conformer(s) were already "
+                                          "optimised and judged on {} (the RELAX surface), as were the templates; "
+                                          "nothing to put on a common scale (saves {} optimisations)",
+                    added, RelaxMethod(), rmsd_count + added);
+            if (added > 0 && cg_method != RelaxMethod() && !refine_needed && !proposals_on_relax_scale) {
                 const std::string rescored = cycleStage("s4_recombine_rescored", RelaxMethod());
                 nlohmann::json opt_cg = ChildConfig(RelaxMethod(), m_threads);
                 /* Claude Generated (Aug 2026): this pass re-optimises the WHOLE ensemble, not just
@@ -1294,6 +1405,37 @@ void ConfSearch::start()
             } else {
                 CurcumaLogger::result("ConfSearch: RECOMBINE found no new conformer this cycle");
             }
+            /* Claude Generated (Sep 2026): remember what RECOMBINE contributed, so the seeding at
+             * the end of this repetition can say whether any of it became a SEED -- see
+             * PARAM confgen_dry_abort.
+             *
+             * ALL optimised proposals, NOT .proposals.new.xyz. That file holds only the ones the
+             * novelty gate calls new, i.e. further than -new_rmsd (1.25 A) from every ensemble
+             * member -- and the single most valuable proposal this search ever produced does not
+             * qualify: the record of the reference run (-19.79 kJ/mol) sits 0.02 A from its own
+             * parent, because it is that parent RE-OPTIMISED, not a new conformer. It appears in
+             * .proposals.opt.xyz and never in .proposals.new.xyz. Measured consequence of getting
+             * this wrong: matched against the "new" file, RECOMBINE looks dead after repetition 1
+             * of that run (6 of the top 10 seed candidates, then 0 of 10 for all 34 following
+             * repetitions) and this counter would have switched it off long before 450 K. Matched
+             * against all optimised proposals, the same run shows the opposite -- 3 of 10 from
+             * 500 K r3, rising to 5, 6, 7, 9 across the 450 K stage and 10 of 10 at 400 K r1. The
+             * topology-rejected ones in this file never reach the pool, so they cannot match a
+             * seed; they only cost a few RMSD evaluations. */
+            if (m_confgen_dry_abort > 0) {
+                m_recombine_products.clear();
+                std::ifstream check(outputPath(reduce + ".proposals.opt.xyz"));
+                if (check.good()) {
+                    FileIterator it(outputPath(reduce + ".proposals.opt.xyz"));
+                    while (!it.AtEnd()) {
+                        Molecule mol = it.Next();
+                        if (mol.AtomCount() > 0)
+                            m_recombine_products.push_back(mol);
+                    }
+                }
+            }
+        } else if (m_confgen_phase && m_confgen_disabled) {
+            // one line per repetition would be noise; the switch-off was announced once
         } else if (m_confgen_phase && no_new_bias_structures) {
             CurcumaLogger::result("ConfSearch: RECOMBINE skipped -- no new structures this cycle");
         } else if (m_confgen_phase) {
@@ -1415,6 +1557,7 @@ void ConfSearch::start()
         // repetition's ensemble additions land within seed_energy_window of the running global
         // minimum. A repetition that adds none of those AND improves no best energy is "dry".
         int inwindow_added = 0;
+        int inwindow_densify = 0; // Claude Generated (Sep 2026): of those, products of the densification MD (chain criterion)
         const double rep_entry_best = best_energy;
         const double rep_entry_best_opt = best_energy_opt;
         std::vector<BiasStructure> rejected_bias; // -bias_rejected: hills on the wrong species
@@ -1567,8 +1710,11 @@ void ConfSearch::start()
             if (!dual_method && (mol->Energy() - lowest_energy) * 2625.5 < m_energy_window) {
                 mol->appendXYZFile(cumulative_file);
                 ensemble_kept++;
-                if ((mol->Energy() - m_global_min) * 2625.5 < m_seed_energy_window)
+                if ((mol->Energy() - m_global_min) * 2625.5 < m_seed_energy_window) {
                     inwindow_added++;
+                    if (mol->Name().find("_densify") != std::string::npos)
+                        inwindow_densify++;
+                }
             }
 
             // md_method minimum -> bias pool (drives the gfnff MD next cycle).
@@ -1600,14 +1746,20 @@ void ConfSearch::start()
             // Claude Generated (Aug 2026): the seeds are the best structures of ALL cycles, not of
             // this one -- see m_seed_pool_md. The diversity rule in SelectSeeds still applies, so a
             // pooled structure is dropped again when this cycle already covers its basin.
+            /* Claude Generated (Sep 2026): label with the surface the candidates' energies are ON.
+             * Under -relax_pes opt this "md-side" pool holds RelaxMethod() (= opt_method) energies;
+             * printing m_md_method here made a gfnff/gfn2 hybrid log claim "seed selection on the
+             * gfnff PES" while every candidate carried a gfn2 energy. The three labels below are
+             * cosmetic (ApplySeedWindow/SelectSeeds use the name only in their log lines). */
+            const std::string seed_pes_label = RelaxMethod();
             const double used_window_md
-                = ApplySeedWindow(window_seeds, m_global_min, eff_seed_window, m_md_method, rejected_energy);
+                = ApplySeedWindow(window_seeds, m_global_min, eff_seed_window, seed_pes_label, rejected_energy);
             AccumulateSeedPool(m_seed_pool_md, window_seeds);
             const int pooled_md = OfferSeedPool(window_seeds, m_seed_pool_md, m_global_min, used_window_md);
             CurcumaLogger::result_fmt("ConfSearch: seed candidates from all cycles [{}]: {} in the pool, "
                                       "{} of them not produced by this cycle",
-                m_md_method, static_cast<int>(m_seed_pool_md.size()), pooled_md);
-            rejected_energy += SelectSeeds(window_seeds, m_md_method, m_global_min);
+                seed_pes_label, static_cast<int>(m_seed_pool_md.size()), pooled_md);
+            rejected_energy += SelectSeeds(window_seeds, seed_pes_label, m_global_min);
             for (auto* mol : window_seeds) {
                 m_in_stack.push_back(mol);
                 accepted++;
@@ -1779,8 +1931,11 @@ void ConfSearch::start()
                         mol->appendXYZFile(cumulative_file);
                         ensemble_kept++;
                         if (m_global_min_opt == std::numeric_limits<double>::infinity()
-                            || (mol->Energy() - m_global_min_opt) * 2625.5 < m_seed_energy_window)
+                            || (mol->Energy() - m_global_min_opt) * 2625.5 < m_seed_energy_window) {
                             inwindow_added++;
+                            if (mol->Name().find("_densify") != std::string::npos)
+                                inwindow_densify++;
+                        }
                     }
                 }
                 if (m_opt_feedback_bias && m_bias_pool) {
@@ -1982,6 +2137,53 @@ void ConfSearch::start()
                 m_in_stack.push_back(new Molecule(*mol));
         }
 
+        /* Claude Generated (Sep 2026): -confgen_dry_abort, evaluated HERE and not at the
+         * recombination step itself, because the question is not whether RECOMBINE produced
+         * structures -- it always does -- but whether it produced ones the search then STARTS FROM.
+         * m_in_stack now holds the seeds of the next MD, so the test is direct: is any of them one
+         * of this repetition's recombination products? Geometric, not by energy: the re-scoring
+         * optimisation moves the energies, so an energy match would silently stop matching. */
+        if (m_confgen_dry_abort > 0 && m_confgen_phase && !m_confgen_disabled) {
+            int seeded = 0;
+            double best_seeded = std::numeric_limits<double>::infinity();
+            for (const auto* seed : m_in_stack) {
+                if (!seed || seed->AtomCount() == 0)
+                    continue;
+                for (const Molecule& prod : m_recombine_products) {
+                    if (prod.AtomCount() != seed->AtomCount())
+                        continue;
+                    const double r = RMSDFunctions::getRMSD(prod.getGeometry(),
+                        RMSDFunctions::getAligned(prod.getGeometry(), seed->getGeometry(), 1));
+                    if (r < 0.05) {
+                        seeded++;
+                        best_seeded = std::min(best_seeded, seed->Energy());
+                        break;
+                    }
+                }
+            }
+            m_confgen_dry_reps = (seeded > 0) ? 0 : m_confgen_dry_reps + 1;
+            if (seeded > 0)
+                CurcumaLogger::result_fmt("ConfSearch: {} of the {} seed(s) for the next MD came from "
+                                          "RECOMBINE (deepest of them {:.4f} Eh)",
+                    seeded, static_cast<int>(m_in_stack.size()), best_seeded);
+            else if (!m_recombine_products.empty())
+                CurcumaLogger::result_fmt("ConfSearch: none of RECOMBINE's {} optimised proposal(s) became a seed "
+                                          "({} of {} such repetitions in a row, -confgen_dry_abort)",
+                    static_cast<int>(m_recombine_products.size()), m_confgen_dry_reps, m_confgen_dry_abort);
+            if (m_confgen_dry_reps >= m_confgen_dry_abort) {
+                m_confgen_disabled = true;
+                CurcumaLogger::warn_fmt("ConfSearch: RECOMBINE switched off for the rest of the run -- its "
+                                        "conformers have not been picked as a seed for {} repetitions "
+                                        "(-confgen_dry_abort {}). Know what this can cost: on the reference run "
+                                        "the step's products beat the best RELAX structure in 27 of 35 "
+                                        "repetitions, the longest barren streak was 5, and the repetition right "
+                                        "after it was both productive and the one that first went below the "
+                                        "reference energy -- three repetitions before the record was born.",
+                    m_confgen_dry_reps, m_confgen_dry_abort);
+            }
+        }
+        m_recombine_products.clear();
+
         // End-of-cycle checkpoint (Claude Generated, Jun 2026): the cycle is complete -- cumulative
         // pool, seeds, energies and the bias pool are all final for this T. next_T points at the
         // next (lower) temperature, so a resume starts the following cycle fresh.
@@ -2001,7 +2203,32 @@ void ConfSearch::start()
         // skipped -- the loop jumps to the LAST repetition, which still runs in full, because the
         // stage finalisation (the once-per-stage REFINE and the seed selection) is gated on it
         // and skipping that silently lost whole stages before (see the stage-pool comment above).
-        if (m_stage_saturation_abort > 0 && !last_repetition) {
+        /* Claude Generated (Sep 2026): densification chain (PARAM refine_md_chain). If this
+         * repetition's densification put something new inside the seed window, the updated seeds
+         * are worth another densification pass right now -- the mechanism that carried the record
+         * chain (0.3-1.1 A steps from the best seed in consecutive repetitions). The next loop
+         * iteration re-enters the SAME repetition index as a chain round: no exploration MD, own
+         * file tag (_c<k>), no effect on the stage-repetition count or the saturation bookkeeping.
+         * Not after the last repetition, which owns the stage finalisation. */
+        if (chain_now)
+            ++chain_rounds_stage;
+        if (m_refine_md && m_refine_md_chain && !last_repetition && !stop_requested) {
+            if (inwindow_densify > 0 && chain_round < m_refine_md_chain_max) {
+                ++chain_round;
+                --stage_rep; // ++ of the loop re-enters this repetition as chain round `chain_round`
+                CurcumaLogger::result_fmt("ConfSearch: densification put {} new structure(s) inside the seed window -- "
+                                          "chain round {} of at most {} follows without an exploration MD",
+                    inwindow_densify, chain_round, m_refine_md_chain_max);
+            } else {
+                if (chain_now)
+                    CurcumaLogger::result_fmt("ConfSearch: densification chain ends after {} round(s) ({})",
+                        chain_round, inwindow_densify > 0 ? "refine_md_chain_max reached" : "round was dry");
+                chain_round = 0;
+            }
+        } else {
+            chain_round = 0;
+        }
+        if (m_stage_saturation_abort > 0 && !last_repetition && !chain_now && chain_round == 0) {
             const bool productive = (best_energy < rep_entry_best - 1e-9)
                 || (best_energy_opt < rep_entry_best_opt - 1e-9)
                 || inwindow_added > 0;
@@ -2021,8 +2248,10 @@ void ConfSearch::start()
         if (m_global_min_opt < stage_entry_best - 1e-9)
             stage_new_best = true;
         if (stage_repeats > 1)
-            CurcumaLogger::result_fmt("ConfSearch: T={}K stage complete -- {} repetitions in {:.1f} s",
-                static_cast<int>(m_currentT), stage_repeats, stage_timer.Elapsed() / 1000.0);
+            CurcumaLogger::result_fmt("ConfSearch: T={}K stage complete -- {} repetitions{} in {:.1f} s",
+                static_cast<int>(m_currentT), stage_repeats,
+                chain_rounds_stage > 0 ? fmt::format(" + {} densification chain round(s)", chain_rounds_stage) : "",
+                stage_timer.Elapsed() / 1000.0);
         {
             StageSummary row;
             row.cycle = temperature_cycle;
@@ -2075,6 +2304,12 @@ void ConfSearch::start()
         // Final ranking at the accurate level (opt_method).
         nlohmann::json final_scan = FilterConfig(m_opt_method, m_threads);
         PerformFilter(p + ".cumulative.opt", final_scan); // reads "<p>.cumulative.opt.xyz"
+        /* Claude Generated (Sep 2026): the search is over, so the guard that kept it out of the
+         * tautomers has done its job -- and it is a constraint, so everything reported below still
+         * carries its energy. Release it on the top of the deliverable and re-sort; see PARAM
+         * release_polar_h_rank. After the deduplication on purpose: the restrained energies decided
+         * which structures are distinct, which is the comparison they are consistent for. */
+        ReleasePolarHydrogenRestraints(outputPath(p + ".cumulative.opt.accepted.xyz"));
         CurcumaLogger::success_fmt("ConfSearch: Final result in {}.cumulative.opt.accepted.xyz", p);
 
         // Claude Generated (Jun 2026): Final energy statistics over the deduplicated conformer set.
@@ -2773,7 +3008,26 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
                     res.success ? "" : "  (not converged)");
             ++written;
         } else if (fallback.AtomCount() > 0 && fallback.getGeometry().allFinite()) {
-            fallback.appendXYZFile(output_file);
+            /* Claude Generated (Sep 2026): the fallback is the INPUT snapshot, and its energy is the
+             * energy of whatever produced it -- under -relax_pes opt the exploration method. Written
+             * as it was, it put a gfnff energy into a uff-ranked ensemble (measured on the
+             * relax_pes_opt CLI test: one structure at -1.94 Eh among values near +0.2, whenever the
+             * uff energy evaluation itself failed). The energy that belongs here is the ranking
+             * method's single point at the input geometry, which the optimiser recorded before it
+             * failed (energy_trajectory.front()). Without that number the scale is unknown and the
+             * structure stays out of the ensemble -- it is already in the .failed.xyz file. */
+            Molecule fb = fallback;
+            const bool have_start = !res.energy_trajectory.empty() && std::isfinite(res.energy_trajectory.front());
+            if (have_start)
+                fb.setEnergy(res.energy_trajectory.front());
+            if (have_start || RelaxMethod() == m_md_method) {
+                fb.appendXYZFile(output_file);
+            } else {
+                CurcumaLogger::warn_fmt("  Struct {:2d}: optimisation unusable and no {} energy available -- "
+                                        "left out of the ensemble (input kept in {})",
+                    idx + 1, opt_method_name, failed_file);
+                return;
+            }
             if (!diverged)   // the divergence case has already said what happened, in more detail
                 CurcumaLogger::warn_fmt("  Struct {:2d}: optimisation unusable ({}), using the input geometry",
                     idx + 1,
@@ -3372,6 +3626,235 @@ bool ConfSearch::RepairSnapshot(Molecule& mol, EnergyCalculator& calculator) con
  * apart can still relax into different minima, and this screen cannot know that -- it is a cost
  * saving, not a deduplication, and it is off by default for that reason.
  */
+void ConfSearch::ReleasePolarHydrogenRestraints(const std::string& accepted_path)
+{
+    // Claude Generated (Sep 2026): see PARAM release_polar_h_rank and the declaration in the header.
+    if (!m_hold_polar_h || m_release_polar_h_rank == 0)
+        return;
+    {
+        std::ifstream check(accepted_path);
+        if (!check.good())
+            return;
+    }
+    std::vector<Molecule> all;
+    {
+        FileIterator it(accepted_path);
+        while (!it.AtEnd()) {
+            Molecule mol = it.Next();
+            if (mol.AtomCount() > 0)
+                all.push_back(mol);
+        }
+    }
+    if (all.empty())
+        return;
+    std::vector<int> order(all.size());
+    for (std::size_t i = 0; i < all.size(); ++i)
+        order[i] = static_cast<int>(i);
+    std::sort(order.begin(), order.end(), [&all](int a, int b) { return all[a].Energy() < all[b].Energy(); });
+    const int n = (m_release_polar_h_rank < 0)
+        ? static_cast<int>(order.size())
+        : std::min<int>(m_release_polar_h_rank, static_cast<int>(order.size()));
+    order.resize(n);
+
+    CurcumaLogger::section("ConfSearch: Releasing the polar-hydrogen restraints on the final ensemble");
+    const std::string stem = Basename() + ".s7_release." + m_opt_method;
+    {
+        bool first = true;
+        for (int idx : order) {
+            if (first) { all[idx].writeXYZFile(outputPath(stem + ".xyz")); first = false; }
+            else          all[idx].appendXYZFile(outputPath(stem + ".xyz"));
+        }
+    }
+    // Deliberately NO distance_restraints -- that is the whole point of this pass.
+    nlohmann::json opt_free = ChildConfig(m_opt_method, m_threads);
+    PerformOptimisation(stem, opt_free, stem + ".opt");
+
+    std::vector<Molecule> freed;
+    {
+        std::ifstream check(outputPath(stem + ".opt.xyz"));
+        if (!check.good())
+            return;
+        FileIterator it(outputPath(stem + ".opt.xyz"));
+        while (!it.AtEnd()) {
+            Molecule mol = it.Next();
+            if (mol.AtomCount() > 0)
+                freed.push_back(mol);
+        }
+    }
+    if (freed.size() != order.size()) {
+        CurcumaLogger::warn_fmt("ConfSearch: the release pass returned {} of {} structures -- skipped, the "
+                                "final ensemble keeps its restrained energies",
+            static_cast<int>(freed.size()), static_cast<int>(order.size()));
+        return;
+    }
+
+    // The released structures live on the ranking surface, so they are checked against ITS reference.
+    const Matrix& reference = (m_topo_matrix_opt.rows() > 0) ? m_topo_matrix_opt : m_topo_matrix;
+    int released = 0, transferred = 0;
+    double total = 0.0, worst = 0.0;
+    for (std::size_t k = 0; k < order.size(); ++k) {
+        const Matrix topo_cur = TopologyMatrix(freed[k]);
+        if (reference.rows() == 0 || topo_cur.rows() != reference.rows()
+            || (reference - topo_cur).cwiseAbs().sum() > 1e-4) {
+            // The proton moved as soon as it was let go: this conformer only exists under the
+            // restraint. Keep the restrained geometry -- it is a real conformer of the right
+            // species, just measured against a constraint.
+            transferred++;
+            continue;
+        }
+        const double gain = (all[order[k]].Energy() - freed[k].Energy()) * 2625.5;
+        if (gain <= 1e-6)
+            continue;
+        released++;
+        total += gain;
+        worst = std::max(worst, gain);
+        Molecule better = freed[k];
+        better.setName(all[order[k]].Name());
+        all[order[k]] = better;
+    }
+    if (released == 0 && transferred == 0) {
+        CurcumaLogger::result_fmt("ConfSearch: releasing the restraints changed nothing in the {} lowest "
+                                  "conformers -- their restrained minima ARE the free ones",
+            n);
+        return;
+    }
+    // The release reorders: a structure that gains 3 kJ/mol overtakes one that gains none.
+    std::sort(all.begin(), all.end(), [](const Molecule& a, const Molecule& b) { return a.Energy() < b.Energy(); });
+    bool first = true;
+    for (const Molecule& mol : all) {
+        if (first) { mol.writeXYZFile(accepted_path); first = false; }
+        else          mol.appendXYZFile(accepted_path);
+    }
+    CurcumaLogger::result_fmt("ConfSearch: {} of the {} lowest conformers re-optimised without the polar-X-H "
+                              "restraints (mean {:.2f}, max {:.2f} kJ/mol lower) -- the reported energies are "
+                              "now free minima, and the ensemble was re-sorted because the gain differs per "
+                              "structure.",
+        released, n, released ? total / released : 0.0, worst);
+    if (transferred > 0)
+        CurcumaLogger::warn_fmt("ConfSearch: {} of them transferred a proton the moment the restraint was "
+                                "lifted -- they keep their RESTRAINED geometry and energy. Those conformers "
+                                "are only minima under the constraint; check them before quoting them.",
+            transferred);
+}
+
+void ConfSearch::PolishRelaxTop(const std::string& relax_stem, const nlohmann::json& opt)
+{
+    // Claude Generated (Sep 2026): see PARAM relax_polish_rank and the declaration in the header.
+    if (m_relax_polish_rank <= 0)
+        return;
+    /* Claude Generated (Sep 2026): RETRACTED default. The 3.80 kJ/mol that justified this pass were
+     * measured by re-optimising RELAX products of a -hold_polar_h run WITHOUT the restraints -- i.e.
+     * they were the restraint energy, not an optimiser that stops early. Re-measured (6 structures,
+     * three stages): with the same restraints the second pass gains 0.00 kJ/mol in 1-4 steps, without
+     * them 2.7-6.3 kJ/mol. On a restrained run the pass measured 0.000 median over 200 structures and
+     * diverged in 2 of 10 restarts. So under -hold_polar_h it is skipped even when requested: the only
+     * offset that exists there is the restraint energy, and -release_polar_h_rank removes that once
+     * at the end, where it belongs. */
+    if (m_hold_polar_h) {
+        if (!m_polish_skip_reported) {
+            CurcumaLogger::result_fmt("ConfSearch: RELAX polish pass skipped under -hold_polar_h -- re-measured, the "
+                                      "restrained RELAX minima are converged (second pass gains 0.00 kJ/mol; "
+                                      "the 3.8 kJ/mol once attributed to an early optimiser stop were the "
+                                      "restraint energy). That offset is removed once at the end "
+                                      "(-release_polar_h_rank).");
+            m_polish_skip_reported = true;
+        }
+        return;
+    }
+    const std::string path = outputPath(relax_stem + ".xyz");
+    {
+        std::ifstream check(path);
+        if (!check.good())
+            return;
+    }
+    std::vector<Molecule> all;
+    {
+        FileIterator it(path);
+        while (!it.AtEnd()) {
+            Molecule mol = it.Next();
+            if (mol.AtomCount() > 0)
+                all.push_back(mol);
+        }
+    }
+    if (all.empty())
+        return;
+
+    // The lowest -relax_polish_rank structures, by index so the file order can be restored.
+    std::vector<int> order(all.size());
+    for (std::size_t i = 0; i < all.size(); ++i)
+        order[i] = static_cast<int>(i);
+    std::sort(order.begin(), order.end(), [&all](int a, int b) { return all[a].Energy() < all[b].Energy(); });
+    const int n = std::min<int>(m_relax_polish_rank, static_cast<int>(order.size()));
+    order.resize(n);
+
+    const std::string stem = relax_stem + ".polish";
+    {
+        bool first = true;
+        for (int idx : order) {
+            if (first) { all[idx].writeXYZFile(outputPath(stem + ".xyz")); first = false; }
+            else          all[idx].appendXYZFile(outputPath(stem + ".xyz"));
+        }
+    }
+    nlohmann::json opt_polish = opt;
+    if (!m_relax_polish_preset.empty())
+        opt_polish["convergence_preset"] = m_relax_polish_preset;
+    PerformOptimisation(stem, opt_polish, stem + ".opt");
+
+    std::vector<Molecule> polished;
+    {
+        std::ifstream check(outputPath(stem + ".opt.xyz"));
+        if (!check.good())
+            return;
+        FileIterator it(outputPath(stem + ".opt.xyz"));
+        while (!it.AtEnd()) {
+            Molecule mol = it.Next();
+            if (mol.AtomCount() > 0)
+                polished.push_back(mol);
+        }
+    }
+    /* The optimiser writes one result per input in input order, but a hard failure can drop one --
+     * then the alignment is gone and silently writing the results back would swap geometries
+     * between pool entries. Fall back to leaving the batch alone; the pass is an improvement, not a
+     * requirement. */
+    if (polished.size() != order.size()) {
+        CurcumaLogger::warn_fmt("ConfSearch: polish pass returned {} of {} structures -- skipped, the "
+                                "RELAX batch keeps its first-pass energies",
+            static_cast<int>(polished.size()), static_cast<int>(order.size()));
+        return;
+    }
+
+    int improved = 0;
+    double total = 0.0, worst = 0.0;
+    for (std::size_t k = 0; k < order.size(); ++k) {
+        const double gain = (all[order[k]].Energy() - polished[k].Energy()) * 2625.5;
+        if (gain <= 1e-6)
+            continue; // a second pass never has to make a structure worse
+        improved++;
+        total += gain;
+        worst = std::max(worst, gain);
+        // Keep the provenance name -- the chain analysis reads it, and this is the same structure.
+        Molecule better = polished[k];
+        better.setName(all[order[k]].Name());
+        all[order[k]] = better;
+    }
+    if (improved == 0) {
+        CurcumaLogger::result_fmt("ConfSearch: polish pass over the {} lowest RELAX structures found nothing "
+                                  "to gain -- they were already converged",
+            n);
+        return;
+    }
+    bool first = true;
+    for (const Molecule& mol : all) {
+        if (first) { mol.writeXYZFile(path); first = false; }
+        else          mol.appendXYZFile(path);
+    }
+    CurcumaLogger::result_fmt("ConfSearch: polish pass -- {} of the {} lowest RELAX structures dropped further "
+                              "on a SECOND optimiser pass (mean {:.2f}, max {:.2f} kJ/mol). The first pass stops "
+                              "early; a restart resets the L-BFGS history and converges. Energy window, "
+                              "deduplication and seed ranking see the corrected values.",
+        improved, n, total / improved, worst);
+}
+
 int ConfSearch::DropDensifyRefinds(const std::string& path) const
 {
     // Claude Generated (Aug 2026): see PARAM refine_md_refind_rmsd. The complement of
@@ -3915,6 +4398,41 @@ int ConfSearch::PerformConfGen(const std::string& f, const std::string& method)
         // its own settings there (gfnff/xtb/tblite/... are merged for every child).
         if (!eval.empty() && eval != method)
             cfg["eval_method"] = eval;
+        /* Claude Generated (Sep 2026): ConfGen's energy-aware novelty rule (PARAM new_energy_gain)
+         * compares a proposal's optimised energy with the FILE energy of its closest ensemble member.
+         * Those file energies come from RELAX on RelaxMethod(); the proposal is optimised by the
+         * judging method (eval, or the description method when eval is empty). The two are only
+         * comparable when they are the same method -- otherwise the rule is switched off here and the
+         * RMSD criterion alone decides, exactly as before Sep 2026. */
+        {
+            const std::string judging = eval.empty() ? method : eval;
+            m_confgen_judging = judging;
+            const bool user_set = m_controller.contains("confgen") && m_controller["confgen"].is_object()
+                && m_controller["confgen"].contains("new_energy_gain");
+            if (judging != RelaxMethod() && cfg.value("new_energy_gain", 0.0) > 0.0) {
+                cfg["new_energy_gain"] = 0.0;
+                CurcumaLogger::result_fmt("ConfSearch: ConfGen's energy-aware novelty rule is OFF for this run -- proposals "
+                                          "are judged on {} but the ensemble energies are {} (RELAX); the two scales "
+                                          "cannot be compared{}",
+                    judging, RelaxMethod(), user_set ? " (your -new_energy_gain setting is overridden)" : "");
+            }
+        }
+        /* Claude Generated (Sep 2026): -hold_polar_h has to reach ConfGen too. It guarded RELAX
+         * (the funnel) and the re-scoring pass, but NOT the optimisations inside the recombination
+         * step -- and those are the ones that re-tie hydrogen bonds, i.e. the move most likely to
+         * walk a proton across. Measured on a 107-atom peptide, one production run: 275 of 1049
+         * optimised proposals (26 %) came back with H107 moved from O57 to N25, 183 of them from
+         * the NCI move. The topology gate rejected every one of them (.proposals.new.xyz requires
+         * topology_ok, so the pool was never polluted) -- the cost was a quarter of the proposal
+         * budget spent on tautomers. A second run under identical code lost only 3 %, so the rate
+         * follows how strained the templates are.
+         *
+         * The reference structure must belong to the surface that OPTIMISES the proposals, because
+         * the restraint targets are that surface's own X-H bond lengths. */
+        if (m_hold_polar_h) {
+            const bool judged_by_opt = (!eval.empty() && eval == m_opt_method && m_topo_ref_opt.AtomCount() > 0);
+            cfg["polar_h_restraints"] = PolarHydrogenRestraints(judged_by_opt ? m_topo_ref_opt : FunnelTopoRef());
+        }
     }
     cfg["nci_generate"] = m_confgen_nci_moves;
     cfg["consensus_build"] = m_confgen_consensus;
@@ -4792,6 +5310,8 @@ void ConfSearch::LoadControlJson()
     m_repair_snapshots = m_config.get<bool>("repair_snapshots");
     m_topology_lock = m_config.get<bool>("topology_lock"); // Claude Generated (Aug 2026)
     m_stage_saturation_abort = m_config.get<int>("stage_saturation_abort"); // Claude Generated (Aug 2026)
+    m_refine_md_chain = m_config.get<bool>("refine_md_chain");           // Claude Generated (Sep 2026)
+    m_refine_md_chain_max = m_config.get<int>("refine_md_chain_max");
     // Claude Generated (Aug 2026): explore/refine two-step MD
     m_refine_md = m_config.get<bool>("refine_md");
     m_refine_md_time = m_config.get<double>("refine_md_time");
@@ -4803,6 +5323,10 @@ void ConfSearch::LoadControlJson()
     m_refine_md_r_dep = m_config.get<double>("refine_md_r_dep");
     m_refine_md_once = m_config.get<bool>("refine_md_once");
     m_densify_opt_preset = m_config.get<std::string>("densify_opt_preset");
+    m_relax_polish_rank = m_config.get<int>("relax_polish_rank");
+    m_relax_polish_preset = m_config.get<std::string>("relax_polish_preset");
+    m_release_polar_h_rank = m_config.get<int>("release_polar_h_rank");
+    m_confgen_dry_abort = m_config.get<int>("confgen_dry_abort");
     m_seed_window_relax = m_config.get<bool>("seed_window_relax"); // Claude Generated (Aug 2026)
     m_refine_md_min_shift = m_config.get<double>("refine_md_min_shift");
     m_refine_md_refind_rmsd = m_config.get<double>("refine_md_refind_rmsd");
@@ -4849,6 +5373,10 @@ void ConfSearch::LoadControlJson()
     m_freeze_inherited = m_config.get<bool>("rmsd_mtd_freeze_inherited");
     m_rmsd_mtd_max_gaussians = m_config.get<int>("rmsd_mtd_max_gaussians");  // Claude Generated (Jul 2026)
     m_rmsd_mtd_screen = m_config.get<bool>("rmsd_mtd_screen");
+    m_rg_flood_wall_quantile = m_config.get<double>("rg_flood_wall_quantile");
+    m_rg_flood_pool_seed = m_config.get<bool>("rg_flood_pool_seed");
+    m_rg_flood_seed_bin = m_config.get<double>("rg_flood_seed_bin");
+    m_rmsd_mtd_heavy_only = m_config.get<bool>("rmsd_mtd_heavy_only");
     m_rmsd_mtd_cutoff_tol = m_config.get<double>("rmsd_mtd_cutoff_tol");
     m_rmsd_mtd_screen_margin = m_config.get<double>("rmsd_mtd_screen_margin");
     m_opt_feedback_bias = m_config.get<bool>("opt_feedback_bias");

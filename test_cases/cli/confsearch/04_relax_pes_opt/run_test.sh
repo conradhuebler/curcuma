@@ -34,7 +34,7 @@ run_test() {
     cleanup_bmt_dirs
     rm -f stdout.log stderr.log
     # No -relax_pes here on purpose: this test pins the DEFAULT.
-    timeout 280 "$CURCUMA" -confsearch input.xyz -md_method gfnff -opt_method uff \
+    timeout 280 "$CURCUMA" -confsearch input.xyz -seed 42 -md_method gfnff -opt_method uff \
         -startT 500 -endT 400 -deltaT 100 -time 600 -threads 1 \
         > stdout.log 2> stderr.log
     RUN_EXIT=$?

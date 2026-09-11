@@ -30,7 +30,7 @@ run_test() {
     rm -f on.log off.log stderr.log
     # startT 500 -> endT 300, deltaT 100: three stages, so the interpolation is checkable by hand
     # (factor 3 => 3 seeds at 500 K, 6 at 400 K, 9 at 300 K).
-    timeout 280 "$CURCUMA" -confsearch input.xyz -method gfnff \
+    timeout 280 "$CURCUMA" -confsearch input.xyz -seed 42 -method gfnff \
         -startT 500 -endT 300 -deltaT 100 -time 400 -repeat 1 -seed_rank 3 -threads 1 \
         -seed_rank_cold_factor 3.0 -seed_bias_penalty 20.0 -confgen_phase false \
         > on.log 2> stderr.log
