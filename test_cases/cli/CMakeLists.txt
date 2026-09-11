@@ -195,9 +195,9 @@ set_tests_properties(cli_confsearch_01_gfnff_smoke PROPERTIES TIMEOUT 400 LABELS
 add_cli_test(confsearch 02_confgen_phase)
 set_tests_properties(cli_confsearch_02_confgen_phase PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;confgen")
 add_cli_test(confsearch 03_two_stage_phase3b)
-set_tests_properties(cli_confsearch_03_two_stage_phase3b PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;uff;dual_method")
+set_tests_properties(cli_confsearch_03_two_stage_phase3b PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;qmdff;dual_method")
 add_cli_test(confsearch 04_relax_pes_opt)
-set_tests_properties(cli_confsearch_04_relax_pes_opt PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;uff;dual_method")
+set_tests_properties(cli_confsearch_04_relax_pes_opt PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;qmdff;dual_method")
 add_cli_test(confsearch 05_seed_cold_bias)
 set_tests_properties(cli_confsearch_05_seed_cold_bias PROPERTIES TIMEOUT 600 LABELS "confsearch;gfnff;seeding")
 

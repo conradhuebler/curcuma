@@ -19,9 +19,13 @@
 #  2. the funnel's files carry the RANKING method, not the exploration method,
 #  3. REFINE is skipped with the reason given (its input already IS the accurate ensemble),
 #  4. no file of the funnel is written on the exploration surface,
-#  5. the ensemble is on one energy scale (all energies within a plausible uff range, no gfnff
+#  5. the ensemble is on one energy scale (all energies within a plausible qmdff range, no gfnff
 #     values mixed in -- the two surfaces differ by hundreds of Hartree).
-# uff is the accurate method purely so the test stays fast; the path is method-agnostic.
+# qmdff is the ranking method purely so the test stays fast; the path is method-agnostic.
+# NOT uff: -md_method gfnff -opt_method uff segfaults in ~EnergyCalculator when the MD thread
+# pool is torn down (reproducible 3/3 after the Sep 2026 master merge; pure master does not
+# crash, pure confsearch before the merge did not either, and no other pair does -- gfnff/gfn2,
+# gfnff/qmdff, gfnff/eht, uff/uff, uff/gfnff and gfn2/uff all run clean). See TODO.md.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../test_utils.sh"
@@ -34,7 +38,7 @@ run_test() {
     cleanup_bmt_dirs
     rm -f stdout.log stderr.log
     # No -relax_pes here on purpose: this test pins the DEFAULT.
-    timeout 280 "$CURCUMA" -confsearch input.xyz -seed 42 -md_method gfnff -opt_method uff \
+    timeout 280 "$CURCUMA" -confsearch input.xyz -seed 42 -md_method gfnff -opt_method qmdff \
         -startT 500 -endT 400 -deltaT 100 -time 600 -threads 1 \
         > stdout.log 2> stderr.log
     RUN_EXIT=$?
@@ -57,7 +61,7 @@ validate_results() {
 
     # 1. the choice is stated, not implied
     TESTS_RUN=$((TESTS_RUN + 1))
-    if grep -q "selection funnel (RELAX + energy window + dedup + re-scoring) runs at uff" stdout.log; then
+    if grep -q "selection funnel (RELAX + energy window + dedup + re-scoring) runs at qmdff" stdout.log; then
         echo -e "${GREEN}\xe2\x9c\x93 PASS${NC}: the funnel surface is reported"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
@@ -68,10 +72,10 @@ validate_results() {
 
     # 2. + 4. the funnel writes on the ranking surface and nowhere else
     local relax_opt reduce_opt relax_md reduce_md
-    relax_opt=$(find_output_file "input.cycle01_T500K_r1.s2_relax.uff.xyz")
-    reduce_opt=$(find_output_file "input.cycle01_T500K_r1.s3_reduce.uff.xyz")
-    [ -z "$relax_opt" ] && relax_opt=$(find_output_file "input.cycle01_T500K.s2_relax.uff.xyz")
-    [ -z "$reduce_opt" ] && reduce_opt=$(find_output_file "input.cycle01_T500K.s3_reduce.uff.xyz")
+    relax_opt=$(find_output_file "input.cycle01_T500K_r1.s2_relax.qmdff.xyz")
+    reduce_opt=$(find_output_file "input.cycle01_T500K_r1.s3_reduce.qmdff.xyz")
+    [ -z "$relax_opt" ] && relax_opt=$(find_output_file "input.cycle01_T500K.s2_relax.qmdff.xyz")
+    [ -z "$reduce_opt" ] && reduce_opt=$(find_output_file "input.cycle01_T500K.s3_reduce.qmdff.xyz")
     relax_md=$(find_output_file "input.cycle01_T500K_r1.s2_relax.gfnff.xyz")
     [ -z "$relax_md" ] && relax_md=$(find_output_file "input.cycle01_T500K.s2_relax.gfnff.xyz")
     TESTS_RUN=$((TESTS_RUN + 1))
@@ -85,7 +89,7 @@ validate_results() {
 
     # 3. REFINE is skipped, and the reason is given
     TESTS_RUN=$((TESTS_RUN + 1))
-    if grep -q "REFINE skipped -- the funnel already ran at uff" stdout.log; then
+    if grep -q "REFINE skipped -- the funnel already ran at qmdff" stdout.log; then
         echo -e "${GREEN}\xe2\x9c\x93 PASS${NC}: REFINE skipped with its reason stated"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
@@ -107,8 +111,8 @@ validate_results() {
         TESTS_FAILED=$((TESTS_FAILED + 1)); failed=1
     fi
 
-    # 6. one energy scale: the funnel ensemble must not mix uff and gfnff energies. A gfnff energy
-    #    for this molecule is tens of Hartree, a uff energy is a small positive number -- so a
+    # 6. one energy scale: the funnel ensemble must not mix qmdff and gfnff energies. A gfnff energy
+    #    for this molecule is tens of Hartree, a qmdff energy is a small positive number -- so a
     #    single sign/magnitude test separates them without hard-coding a golden value.
     TESTS_RUN=$((TESTS_RUN + 1))
     if [ -s "$reduce_opt" ] && awk '/Energy =/ {

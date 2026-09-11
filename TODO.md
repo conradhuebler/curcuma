@@ -8,6 +8,19 @@
 
 ## 🔴 KRITISCH / HÖCHSTE PRIORITÄT
 
+- **Segfault: `-md_method gfnff -opt_method uff` in ConfSearch (Sep 11, 2026)**. Crash in
+  `~EnergyCalculator` while `CxxThreadPool::~CxxThreadPool()` tears down the MD threads, after the
+  run has produced correct results. Reproducible 3/3. Measured scope: ONLY this pair --
+  gfnff/gfn2, gfnff/qmdff, gfnff/eht, uff/uff, uff/gfnff and gfn2/uff all run clean, so no
+  production path is affected. Appeared with the Sep 2026 master merge (`611cdd6a`): pure master
+  does not crash on the same command, and the confsearch branch did not before the merge, so it
+  is the combination of this branch's ConfSearch with master's ForceField/FFWorkspace rework.
+  Not triggered by any ConfSearch switch (`-topology_lock`, `-confgen_phase`, `-opt_feedback_bias`,
+  `-relax_pes`, `-snapshot_dedup_rmsd` all still crash). `MALLOC_CHECK_=3` reports no heap
+  corruption, so it is a stale/invalid object rather than an overflow -- next step is an
+  AddressSanitizer build. `cli_confsearch_04` was moved to qmdff, so the suite is green and this
+  issue is NOT covered by a test any more.
+
 *No critical blockers remaining!* All SimpleMD issues resolved.
 
 ---
