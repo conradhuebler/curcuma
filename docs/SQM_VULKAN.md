@@ -83,11 +83,14 @@ brought up stage-by-stage and is correct at every step.
 |------|------|
 | `qm_methods/vulkan/vk_context.{h,cpp}` | Generic Vulkan compute context: instance / FP64 device / compute queue / command pool |
 | `qm_methods/vulkan/xtb_vulkan_context.{h,cpp}` | xTB device engine over a `VkContext`; mirrors `XtbGpuContext` |
-| `qm_methods/xtb_vulkan_method.{h,cpp}` | `ComputationalMethod` wrapper; owns the context + the CPU `NativeXtbMethod` |
+| `qm_methods/xtb_vulkan_method.{h,cpp}` | `ComputationalMethod` wrapper (Sep 2026: a thin instantiation of `XtbGpuAdapter<XtbVulkanContext>` + `XtbGpuResidentBackend<…>` from `qm_methods/xtb_gpu_adapter.h`; only the eigensolver hook, `downloadCholesky` and the `CURCUMA_VK_GFN2_CPUGRAD` hatch are Vulkan-specific) |
 | `qm_methods/vulkan/shaders/*.comp` | Hand-written FP64 GLSL compute shaders (compiled to SPIR-V) |
 
-Dispatch: `method_factory.cpp` `resolveNativeXtbGpuMode()` returns `"vulkan"` when
-`-gpu vulkan` and `USE_VULKAN` are set, then constructs `XtbVulkanComputationalMethod`.
+Dispatch (Sep 2026): the Vulkan backend is the runtime plugin `libcurcuma_vulkan.so`
+(`qm_methods/vulkan/gpu_plugin_entry_vulkan.cpp`, built by `-DUSE_VULKAN=ON`). `method_factory.cpp`
+`resolveGpuMode()` returns `"vulkan"` when `-gpu vulkan` is given and the plugin is found next
+to the executable, and `gpu_plugin::createNativeXtb("vulkan", …)` constructs
+`XtbVulkanComputationalMethod` inside the plugin. See [GPU_PLUGIN_STARTUP.md](GPU_PLUGIN_STARTUP.md).
 
 ## Eigensolver choice
 

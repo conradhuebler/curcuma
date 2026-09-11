@@ -7,6 +7,7 @@
 
 #include "cn_calculator.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/math_compat.h"
 
 #include <cmath>
 #include <algorithm>
@@ -164,11 +165,11 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
             double distance = std::sqrt(distance_sq);
             double rcov_ij = rcov_bohr[i] + rcov_bohr[j];
             double dr = (distance - rcov_ij) / rcov_ij;
-            cn_raw += 0.5 * (1.0 + std::erf(kn * dr));
+            cn_raw += 0.5 * (1.0 + curcuma_erf(kn * dr));
         }
 
         // Log transformation for numerical stability: CN in [0, cnmax]
-        cn_values[i] = std::log(1.0 + std::exp(cnmax)) - std::log(1.0 + std::exp(cnmax - cn_raw));
+        cn_values[i] = curcuma_log(1.0 + curcuma_exp(cnmax)) - curcuma_log(1.0 + curcuma_exp(cnmax - cn_raw));
         if (out_cn_raw) (*out_cn_raw)[i] = cn_raw;
     }
 
@@ -335,9 +336,9 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
                 double dist = std::sqrt(dist_sq);
                 double rcov_ij = rcov_bohr[i] + rcov_bohr[j];
                 double dr = (dist - rcov_ij) / rcov_ij;
-                cn_raw += 0.5 * (1.0 + std::erf(kn * dr));
+                cn_raw += 0.5 * (1.0 + curcuma_erf(kn * dr));
             }
-            cn_values[i] = std::log(1.0 + std::exp(cnmax)) - std::log(1.0 + std::exp(cnmax - cn_raw));
+            cn_values[i] = curcuma_log(1.0 + curcuma_exp(cnmax)) - curcuma_log(1.0 + curcuma_exp(cnmax - cn_raw));
         }
         return cn_values;
 
@@ -417,11 +418,11 @@ CNCalculator::CNResult CNCalculator::calculateGFNFFCNWithNeighbors(
             double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
             double rcov_ij = rcov_bohr[i] + rcov_bohr[j];
             double dr = (dist - rcov_ij) / rcov_ij;
-            cn_raw_i += 0.5 * (1.0 + std::erf(kn * dr));
+            cn_raw_i += 0.5 * (1.0 + curcuma_erf(kn * dr));
         }
         result.cn_raw[i] = cn_raw_i;
-        result.cn_values[i] = std::log(1.0 + std::exp(cnmax))
-                            - std::log(1.0 + std::exp(cnmax - cn_raw_i));
+        result.cn_values[i] = curcuma_log(1.0 + curcuma_exp(cnmax))
+                            - curcuma_log(1.0 + curcuma_exp(cnmax - cn_raw_i));
     }
 
     return result;

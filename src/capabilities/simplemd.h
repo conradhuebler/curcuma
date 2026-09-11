@@ -267,6 +267,12 @@ public:
     double currentTime() const { return m_currentStep; }
     const Molecule& currentMolecule() const { return m_molecule; }
 
+    /** Claude Generated (2026): the energy calculator driving this run, for
+     *  read-only inspection between steps (e.g. reading GFN-FF's current
+     *  hydrogen- and halogen-bond lists for a live interaction overlay).
+     *  Null before the run is prepared; never owned by the caller. */
+    EnergyCalculator* energyCalculator() const { return m_interface; }
+
     /** Claude Generated (2026): set the thermostat target temperature live (Kelvin).
      *  Safe to call between step() calls from the driving thread. Setting it marks the
      *  run as manually overridden, so any active temperature ramp stops touching m_T0
@@ -705,7 +711,7 @@ private:
     BEGIN_PARAMETER_DEFINITION(simplemd)
 
     // --- Basic Simulation Parameters ---
-    PARAM(method, String, "uff", "Energy calculation method (e.g., uff, gfn2).", "Basic", {})
+    PARAM(method, String, "gfnff", "Energy calculation method. Default gfnff: the fast choice for MD and conformer sampling. gfn2 is the more accurate one (semi-empirical QM, ~100x slower); uff/qmdff remain available.", "Basic", {})
     PARAM(temperature, Double, 298.15, "Target temperature in Kelvin.", "Basic", {"T"})
     PARAM(initial_temperature, Double, -1.0, "Initial temperature for velocity sampling (K). -1: same as 'temperature'. Use this to anneal into the target or to start cold/warm; the thermostat still drives toward 'temperature'. Ignored on restart (velocities come from the restart file).", "Basic", {"T_init", "T0", "initT"})
     PARAM(time_step, Double, 1.0, "Integration time step in femtoseconds.", "Basic", {"dt"})

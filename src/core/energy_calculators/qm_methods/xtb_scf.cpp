@@ -16,6 +16,7 @@
  * Claude Generated. GPL-3.0.
  */
 
+#include <limits>
 #include "xtb_native.h"
 #include "native_eigensolver.h"
 #include "src/core/curcuma_logger.h"
@@ -367,12 +368,14 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
             if (info != 0) return false;
             const auto te1 = clk::now();
             int lwork = 1 + 6 * n + 2 * n * n, liwork = 3 + 5 * n;
-            std::vector<float> work(static_cast<size_t>(lwork));
-            std::vector<int>   iwork(static_cast<size_t>(liwork));
+            // Persistent scratch (Claude Generated, Sep 2026): the ~2·nao² work
+            // array was allocated (and zero-filled) on every SCF iteration.
+            if (m_lapack_work_f.size() < static_cast<size_t>(lwork)) m_lapack_work_f.resize(lwork);
+            if (m_lapack_iwork.size()  < static_cast<size_t>(liwork)) m_lapack_iwork.resize(liwork);
             Eigen::VectorXf epsf(n);
             const char jobz = 'V';
             ssyevd_(&jobz, &uplo, &n, Af.data(), &n, epsf.data(),
-                    work.data(), &lwork, iwork.data(), &liwork, &info);
+                    m_lapack_work_f.data(), &lwork, m_lapack_iwork.data(), &liwork, &info);
             if (info != 0) return false;
             const auto te2 = clk::now();
             A   = Af.cast<double>();             // standard-form eigenvectors → FP64 for the shared back-transform
@@ -388,11 +391,14 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
             if (info != 0) return false;
             const auto te1 = clk::now();
             int lwork = 1 + 6 * n + 2 * n * n, liwork = 3 + 5 * n;
-            std::vector<double> work(static_cast<size_t>(lwork));
-            std::vector<int>    iwork(static_cast<size_t>(liwork));
+            // Persistent scratch (Claude Generated, Sep 2026): for nao=4000 the
+            // work array is 256 MB; allocating + zero-filling it per iteration
+            // cost more than the reduction step itself. Bit-identical.
+            if (m_lapack_work.size()  < static_cast<size_t>(lwork))  m_lapack_work.resize(lwork);
+            if (m_lapack_iwork.size() < static_cast<size_t>(liwork)) m_lapack_iwork.resize(liwork);
             const char jobz = 'V';
             dsyevd_(&jobz, &uplo, &n, A.data(), &n, eps.data(),
-                    work.data(), &lwork, iwork.data(), &liwork, &info);
+                    m_lapack_work.data(), &lwork, m_lapack_iwork.data(), &liwork, &info);
             if (info != 0) return false;
             const auto te2 = clk::now();
             m_t_xfx  += ms(te0, te1);            // reduce (dsygst)
@@ -430,7 +436,29 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
     }
 
     const auto t_dens0 = std::chrono::steady_clock::now();
-    if (m_electronic_temp > 0.0) {
+    if (openShell()) {
+        // Open shell: one set of orbitals, two Fermi fillings, summed occupations —
+        // tblite's nspin == 1 branch (src/tblite/scf/iterator.f90:309-323). This is the
+        // restricted-open / fractional-occupation treatment that `xtb --uhf` uses for
+        // GFN1 and GFN2; it is NOT a UHF with two Fock matrices. Claude Generated
+        // (Sep 2026). The closed-shell branches below are untouched and stay
+        // bit-identical.
+        Eigen::VectorXd occ_a, occ_b;
+        double s_a = 0.0, s_b = 0.0;
+        const double kT_uhf = m_electronic_temp * 3.166808e-6;
+        fermiFillingChannel(m_wfn.eps, m_nalpha, kT_uhf, occ_a, s_a);
+        fermiFillingChannel(m_wfn.eps, m_nbeta, kT_uhf, occ_b, s_b);
+        Eigen::VectorXd occ = occ_a + occ_b;
+        m_ts_uhf = s_a + s_b;
+        int ncol = 0;
+        for (int i = 0; i < nao; ++i)
+            if (occ(i) > 1.0e-12) ncol = i + 1;
+        if (ncol == 0) return false;
+        const auto Cocc = m_wfn.C.leftCols(ncol);
+        const Matrix Cw = Cocc * occ.head(ncol).asDiagonal();
+        m_wfn.P.noalias() = Cw * Cocc.transpose();
+        m_wfn.focc = occ;
+    } else if (m_electronic_temp > 0.0) {
         // Fermi-Dirac smearing: bisect for Fermi level, build fractional-occupation density
         const double kT = m_electronic_temp * 3.166808e-6;  // K → Hartree
         const double n_elec = m_wfn.nocc;
@@ -597,12 +625,90 @@ void XTB::updatePopulations(const Matrix& S)
  *    T = 0 : integer closed-shell (2 per occupied orbital).           *
  *  Keep in sync with solveEigen (xtb_scf.cpp).                        *
  * ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ *
+ *  fermiFillingChannel()  (Claude Generated, Sep 2026)               *
+ *                                                                    *
+ *  One spin channel, occupations in [0,1]. Verbatim port of tblite    *
+ *  get_fermi_filling / get_aufbau_filling / get_fermi_filling_        *
+ *  (src/tblite/wavefunction/fermi.f90) plus get_electronic_entropy    *
+ *  (src/tblite/scf/iterator.f90:341-346).                             *
+ *                                                                    *
+ *  NOTE the target of the Newton iteration is the INTEGER homo count  *
+ *  from the aufbau step, not `nel` itself - that is what the          *
+ *  reference does, and it matters for fractional nel.                 *
+ * ------------------------------------------------------------------ */
+void XTB::fermiFillingChannel(const Vector& eps, double nel, double kT,
+                              Eigen::VectorXd& occ_ch, double& entropy)
+{
+    const int n = static_cast<int>(eps.size());
+    occ_ch.setZero(n);
+    entropy = 0.0;
+    if (n == 0 || nel <= 0.0) return;
+
+    // get_aufbau_filling
+    int homo = static_cast<int>(std::floor(nel));
+    for (int i = 0; i < std::min(homo, n); ++i) occ_ch(i) = 1.0;
+    const double frac = nel - std::floor(nel);
+    if (homo < n) occ_ch(homo) = frac;
+    if (frac > 0.5) ++homo;
+    if (homo <= 0) return;
+    if (kT <= 0.0) return;   // T = 0: aufbau filling is the answer
+
+    // get_fermi_filling_ : Newton on the Fermi level, target occt = homo
+    double e_fermi = 0.5 * (eps(std::max(homo, 1) - 1) + eps(std::min(homo + 1, n) - 1));
+    const double occt = static_cast<double>(homo);
+    const double thr = std::sqrt(std::numeric_limits<double>::epsilon());
+    for (int cycle = 0; cycle < 200; ++cycle) {
+        double total_number = 0.0, total_dfermi = 0.0;
+        for (int i = 0; i < n; ++i) {
+            double fermifunct = 0.0, dfermifunct = 0.0;
+            const double x = (eps(i) - e_fermi) / kT;
+            if (x < 50.0) {
+                const double ex = std::exp(x);
+                fermifunct = 1.0 / (ex + 1.0);
+                dfermifunct = ex / (kT * (ex + 1.0) * (ex + 1.0));
+            }
+            occ_ch(i) = fermifunct;
+            total_number += fermifunct;
+            total_dfermi += dfermifunct;
+        }
+        if (total_dfermi == 0.0) break;
+        const double change_fermi = (occt - total_number) / total_dfermi;
+        e_fermi += change_fermi;
+        if (std::abs(occt - total_number) <= thr) break;
+    }
+
+    // get_electronic_entropy: s = sum(log(f^f * (1-f)^(1-f))) * kT
+    for (int i = 0; i < n; ++i) {
+        const double f = occ_ch(i);
+        if (f > 1.0e-14 && (1.0 - f) > 1.0e-14)
+            entropy += f * std::log(f) + (1.0 - f) * std::log(1.0 - f);
+    }
+    entropy *= kT;
+}
+
 void XTB::occupationsFromEps(const Vector& eps,
                              Eigen::VectorXd& occ, int& ncol) const
 {
     const int nao = m_basis.nao;
     occ.setZero(nao);
     ncol = 0;
+    // Open shell: two Fermi fillings over the SAME orbitals, summed - tblite's
+    // nspin == 1 branch (src/tblite/scf/iterator.f90:309-323). Closed shell keeps the
+    // original single-channel code below untouched, so those results stay bit-identical.
+    // Claude Generated (Sep 2026).
+    if (openShell()) {
+        Eigen::VectorXd occ_a, occ_b;
+        double s_a = 0.0, s_b = 0.0;
+        const double kT_uhf = m_electronic_temp * 3.166808e-6;
+        fermiFillingChannel(eps, m_nalpha, kT_uhf, occ_a, s_a);
+        fermiFillingChannel(eps, m_nbeta, kT_uhf, occ_b, s_b);
+        occ = occ_a + occ_b;
+        m_ts_uhf = s_a + s_b;
+        for (int i = 0; i < nao; ++i)
+            if (occ(i) > 1.0e-12) ncol = i + 1;
+        return;
+    }
     if (m_electronic_temp > 0.0) {
         const double kT = m_electronic_temp * 3.166808e-6;  // K → Hartree
         const double n_elec = m_wfn.nocc;
@@ -659,6 +765,11 @@ double XTB::electronicFreeEnergy() const
 {
     if (m_electronic_temp <= 0.0 || m_wfn.focc.size() == 0)
         return 0.0;
+    // Open shell: the two channels have different occupations, so the entropy cannot be
+    // recovered from the summed focc. The occupation routine stores it (tblite sums the
+    // per-channel get_electronic_entropy, src/tblite/scf/iterator.f90:319-322).
+    // Claude Generated (Sep 2026).
+    if (openShell()) return m_ts_uhf;
     const double kT  = m_electronic_temp * 3.166808e-6;  // K → Hartree (matches smearing)
     const double thr = 1.0e-9;                            // xtb fermismear cutoff
     double s = 0.0;

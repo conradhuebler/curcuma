@@ -17,6 +17,29 @@ upstream guard not shown in the snippet.
 
 ---
 
+## Resolved (2026-09-06) — cleanup batch (see docs/CLEANUP_2026_09.md)
+
+| ID | Status | Fix |
+|----|--------|-----|
+| **F-E1** | reduced | `gfnff_method.cpp` 13350 -> 10690 lines: legacy engine sync, JSON parameter path, dead diagnostics and 8 uncalled helpers removed. Still one class; split by concern remains open. |
+| **F-E3** | resolved | per-term accessors are workspace-only (macro-generated); no dual-backend fork. |
+| **F-E2** | resolved | NaN-trap / invariance blocks iterate the workspace components only. |
+| **F-Q2** | resolved | dead `calculateFinalCharges` wrapper family removed with the JSON path. |
+| **F-Q3** | resolved | `gfnff_advanced.{h,cpp}` deleted. |
+| **F-E9** | partly | thread-engine statics gone with `forcefieldthread.cpp`; `gfnff_method.cpp` statics untouched. |
+| **F-Q9** | n/a | legacy engine removed; the GPU leak workaround itself is unchanged. |
+| **X-M1** | resolved | the 17 declared-but-undefined `XTBMethod` members removed (round 2). |
+| **X-I5 / X-G1** | resolved earlier | `as_cgto_shell`/`ao_to_type` live in `xtb_ao_utils.hpp`; the audit entry was stale. |
+| **D-1..D-4** | — | unchanged. |
+| new | resolved | native xTB no longer derives from `QMDriver`; `MakeOverlap/MakeH` stubs gone. |
+| new | resolved | duplicate `gfn1_params.hpp` / `gfn2_xtb_params.hpp` / `gfn2-xtb_param.hpp`, `integrals.h`, `test_parser.cpp`, pre-NDDO `am1/pm3/pm6/mndo` classes, `vulkan/prototype`, `d4_reference_data.cpp`, `qmdff_terms.h` deleted. |
+| new | resolved | `ForceFieldThread` engine + GFN-FF/JSON parts of `ForceField` deleted; shared structs in `ff_terms.h`. |
+| new | resolved | EEQ solver: `EEQSolverCache`, dense Floyd-Warshall, `buildNeighborLists`, `calculateEEQEnergy`, emoji self-test, write-only N x N cache removed; Phase-2 uses `Ref` views. |
+| new | resolved | MethodFactory if-chains -> `MethodDescriptor` table; five sub-scope lists -> `methodParameterScopes()`. |
+| new | resolved | `-method cg` registered again (workspace CG kernel, `-load_ff_json`); SimpleMD aborts with the factory reason instead of segfaulting. |
+| new | **open** | GFN-FF PBC on the CPU path is silently non-periodic (unit cell only reached the removed engine). |
+| new | resolved | Phase-1 EEQ now runs under the BLAS-thread guard (the 1e-13 load dependence came from unpinned OpenBLAS threads, not OpenMP); MD test scripts clear stale caches. |
+
 ## Resolved (2026-06-26) — fail-loud batch
 
 The highest-priority *silent-wrong-result* items were fixed and verified (build green,
@@ -310,8 +333,8 @@ S/P/Cl/Si), B0 guard removed; see [docs/SQM_DSHELL_WP.md](SQM_DSHELL_WP.md). Rem
 | D-8 | `method_factory.cpp:418–599` | medium | ~180-line flat if/else dispatch; ADR comment (390) cites a "GCC 15 brace-init with std::function issue" as the reason — weak justification. New methods require editing this function. Registry/map. |
 | D-9 | `method_factory.cpp:528–543` | medium | `xtb-gfn1/2` resolve TBLite>XTB; `xtb-gfnff` resolves External>XTB. Two different fallback orders for the same `xtb-*` family. Pick one + document. |
 | D-10 | `method_factory.cpp:530–534,546–563` | medium | `if (hasTBLite())` runtime guard wrapping an `#ifdef USE_TBLITE` block — the runtime check is a constant either way, so one guard is redundant. Keep only `#ifdef`. |
-| D-11 | `method_factory.cpp:493–516` | medium | GPU `#ifdef` matrix inconsistent: CUDA gates on `USE_CUDA` alone; ROCm on `USE_ROCM`; Vulkan is a hard-coded CPU fallback + warning regardless of `USE_VULKAN`. Three conventions in one function. |
-| D-12 | `method_factory.cpp:180–228` vs `474–513` | low | `resolveNativeXtbGpuMode` duplicated inline for GFN-FF. Reuse. |
+| D-11 | RESOLVED (Sep 2026) `method_factory.cpp` `resolveGpuMode()` | — | The `#ifdef` matrix is gone: every backend is a dlopen plugin probed at runtime (`gpu_plugin::available`), one convention for cuda/rocm/vulkan/auto. See docs/GPU_PLUGIN_STARTUP.md. |
+| D-12 | RESOLVED (Sep 2026) | — | one `resolveGpuMode()` serves GFN1/GFN2 (`createNativeXtbAny`) and GFN-FF. |
 | D-13 | `method_factory.cpp:685–691` | low | `getMethodInfo` checks phantom `cgfnff` (never produced by `create()`, only in dead `energycalculator_enums.h:32`). Dead branch. |
 | D-14 | `method_factory.cpp:101–158` | low | `checkCompilationFlag` string-dispatch wrapper re-lists the six `has*()` flags; unused outside the file. Delete; callers use `has*()` directly. |
 | D-15 | `energycalculator.cpp:47-56` + `method_factory.cpp:418` | high | Config JSON round-tripped through `ConfigManager` then re-merged (lossy + patched by `reattachMethodScopes`). `MethodFactory::create` should accept `const ConfigManager&` directly (wrappers already build one internally). |
@@ -321,7 +344,7 @@ S/P/Cl/Si), B0 guard removed; see [docs/SQM_DSHELL_WP.md](SQM_DSHELL_WP.md). Rem
 | D-19 | `energycalculator.cpp:497` | low | Stale Chinese comment `// Step size in Angstrom (更适合 Bohr units)` — contradictory. |
 | D-20 | `energycalculator.h:369,380` | medium | `Interface()` raw `ComputationalMethod*` (`@deprecated` but used) and `getCN()` duplicate of `CN()`. Delete, migrate callers. |
 | D-21 | `energycalculator.h:446–447` | medium | Both `m_controller` and `m_parameter` stored; `setParameter` mirrors into the method but `m_controller` never updated — two sources of truth. |
-| D-22 | `energycalculator.h:463–464` | low | `m_gpu_fallback`/`m_gpu_fallback_warned` uninitialised (others use `= false`). |
+| D-22 | RESOLVED | — | `m_gpu_fallback`/`m_gpu_fallback_warned` are `= false` initialised; the flag is set from the runtime plugin probe (Sep 2026). |
 | D-23 | `energycalculator.h:184` | low | Typo `OrbitalOccuptations` (missing `a`). Rename + alias. |
 
 ### `computational_method.h` / `curcumamethod.*`
@@ -389,10 +412,10 @@ exception: treat its interface as maintained.
 **Build-flag naming trap (merged from the energy-system audit):** `USE_GFNFF`
 controls the **external** C/Fortran GFN-FF interface (`ExternalGFNFFMethod`),
 *not* the native `gfnff` (which is always available). The flag name suggests
-it enables GFN-FF in general — a common confusion. Likewise the GPU flag
-matrix (`USE_CUDA`/`USE_CUDA`, `USE_ROCM`/`USE_ROCM`/`USE_ROCM`,
-`USE_VULKAN`/`USE_VULKAN`) lets you enable a GPU framework without the
-matching method backend → silent CPU fallback at runtime (cf. D-11, X-P1).
+it enables GFN-FF in general — a common confusion. The GPU flags are
+plugin switches since Sep 2026: `USE_CUDA`/`USE_ROCM`/`USE_VULKAN` each build one
+`libcurcuma_<backend>.so` next to the executable and nothing in the core; a missing
+plugin is reported at runtime ("plugin ... is not present"), no longer silently (cf. X-P1).
 
 ---
 

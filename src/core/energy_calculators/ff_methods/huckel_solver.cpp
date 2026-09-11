@@ -38,7 +38,8 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
     const std::vector<std::pair<int,int>>& bonds,
     const Eigen::MatrixXd& geometry_bohr,
     const std::vector<int>& itag,
-    const std::vector<int>& pi_system_charge)
+    const std::vector<int>& pi_system_charge,
+    std::vector<int>* pi_atoms_final)
 {
     const int natoms = static_cast<int>(atoms.size());
     const int nbonds = static_cast<int>(bonds.size());
@@ -47,6 +48,11 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
     // Triangular storage: pbo[huckel_lin(i,j)] for atom pair (i,j)
     int ntriangular = natoms * (natoms + 1) / 2;
     std::vector<double> pbo(ntriangular, 0.0);
+
+    // Fortran itmp / post-Hückel piadr (gfnff_ini.f90:1009-1016)
+    if (pi_atoms_final) {
+        pi_atoms_final->assign(natoms, 0);
+    }
 
     // Create itag vector if not provided (all zeros)
     std::vector<int> tags = itag;
@@ -106,6 +112,13 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
         }
 
         int npi = static_cast<int>(pi_atoms.size());
+
+        if (std::getenv("CURCUMA_HUCKELDUMP")) {
+            for (int k : pi_atoms) {
+                fmt::print("HUCKELATOM pis={} atom={}(Z={}) hyb={} tag={} nel={}\n",
+                           pis, k + 1, atoms[k], hybridization[k], tags[k], pi_electrons[k]);
+            }
+        }
 
         // Claude Generated (Jul 2026, F3): subtract the pi-system charge (ipis) from
         // the electron count. Port from xtb gfnff_ini.f90:874 (nelpi = nelpi - ipis(pis)).
@@ -219,6 +232,13 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
                 double bond_order = P_old(ja, ia);
                 pbo[huckel_lin(ii, jj)] = bond_order;
 
+                // Fortran gfnff_ini.f90:1009-1010 marks BOTH ends here (itmp), independent
+                // of the bond-order value; line 1016 then replaces piadr with it.
+                if (pi_atoms_final) {
+                    (*pi_atoms_final)[ii] = 1;
+                    (*pi_atoms_final)[jj] = 1;
+                }
+
                 if (m_verbosity >= 3) {
                     CurcumaLogger::info(fmt::format("  Bond {}-{}: pbo = {:.4f}", ii, jj, bond_order));
                 }
@@ -250,14 +270,14 @@ int HuckelSolver::countPiElectrons(int atom_type, int hyb, int tag) const
             break;
 
         case 7:  // Nitrogen
-            if (hyb == 2 && tag == 1) {
-                // NO₂ group: itag=1 avoids odd electron number
-                nel = 1;
-            } else if (hyb <= 2) {
-                nel = 1;  // sp or sp²
-            } else if (hyb == 3) {
-                nel = 2;  // sp³ (lone pair)
-            }
+            // The Fortran reference (gfnff_ini.f90:917-920) uses three INDEPENDENT
+            // ifs here, and the first two overlap: a nitro N (hyb=2, itag=1) matches
+            // both and therefore contributes 2 electrons, not 1. Its own comment says
+            // so ("the itag=1 avoids an odd el number for the nitro group (its 4)").
+            // Do NOT collapse this into an else-if chain.
+            if (hyb == 2 && tag == 1) nel += 1;  // NO₂ group: extra electron
+            if (hyb <= 2) nel += 1;              // sp or sp²
+            if (hyb == 3) nel += 2;              // sp³ (lone pair)
             break;
 
         case 8:  // Oxygen

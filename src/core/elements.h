@@ -692,6 +692,12 @@ static int String2Element(std::string string)
 {
     transform(string.begin(), string.end(), string.begin(), ::tolower);
     int element = 0;
+    // Numeric atomic numbers ("6", "226" for the coarse-grained bead) are accepted as-is
+    // (Sep 2026): several exporters and the CG inputs write the number instead of the symbol.
+    if (!string.empty() && std::all_of(string.begin(), string.end(), [](unsigned char c) { return std::isdigit(c); })) {
+        const long z = std::stol(string);
+        return (z >= 0 && z < static_cast<long>(ElementAbbr_Low.size())) ? static_cast<int>(z) : 0;
+    }
 
     for (int i = 0; i < ElementAbbr_Low.size(); ++i) {
         if (string.compare(ElementAbbr_Low[i]) == 0) {

@@ -108,7 +108,8 @@ static json EQJson{
 // Claude Generated 2025: ForceField Generator Parameter Registry - replaces const FFGenerator JSON
 BEGIN_PARAMETER_DEFINITION(forcefield)
     // Method Selection
-    PARAM(method, String, "uff", "Force field method (uff, uff-d3, d3, qmdff).", "Method", {})
+    PARAM(method, String, "uff", "Force field method (uff, uff-d3, qmdff, cg).", "Method", {})
+    PARAM(load_ff_json, String, "none", "JSON file with extra force-field input merged into the ForceField controller; for -method cg it carries cg_default (shape_vector, sigma, epsilon, potential_type), optional cg_per_atom, pair_interactions and bonds.", "Method", {})
     PARAM(d3_preset, String, "pbe0", "D3 functional preset for d3-only method (pbe0, blyp, b3lyp, tpss, pbe, bp86, gfnff).", "D3-Only", {})
 
     // Dispersion Corrections (D3/D4)

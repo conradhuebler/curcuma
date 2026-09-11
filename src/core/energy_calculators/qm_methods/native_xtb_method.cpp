@@ -55,6 +55,11 @@ json NativeXtbMethod::getDefaultConfig(MethodType method)
         { "scf_damping", 0.4 },          // Density damping factor
         { "scf_mode", "broyden" },       // broyden(default) | diis | plain | level-shift
         { "scf_guess", "eeq" },          // Initial charge guess: eeq(default) | h0
+        { "sto6g_legacy_4sp", false },   // false(default) = tblite's STO-6G 4s/4p tables;
+                                         // true = xtb's older ones (K, Ca, Ge-Kr only).
+                                         // The two references disagree here and nowhere
+                                         // else; tblite's fit the exact Slater function
+                                         // better. See STO_CGTO.hpp.
         { "eigensolver", "mkl" },        // Eigensolve backend: mkl(default, dsyevd) | native/dnc
                                          // (self-contained Householder+QL, no LAPACK; WP4)
                                          // eeq seeds shell charges from a single-shot dftd4 EEQ

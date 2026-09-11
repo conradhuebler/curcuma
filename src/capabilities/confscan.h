@@ -466,6 +466,7 @@ private:
     int m_useorders = 10;
     int m_looseThresh = 7, m_tightThresh = 3;
     std::string m_RMSDmethod = "subspace";
+    std::string m_RMSDmethod_effective = "subspace"; // Claude Generated (Sep 2026): resolved name actually used, see LoadControlJson()
     int m_MaxHTopoDiff = -1;
     int m_threads = 1;
     int m_RMSDElement = 7;

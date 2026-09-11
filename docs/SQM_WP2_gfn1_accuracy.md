@@ -161,3 +161,55 @@ authoritative s-dftd3 reference. The `getR6` fix improves their `C8/C6` to exact
 but their full energies are not checked against anything authoritative. The older
 "D3 <1% on 10/11" table does not establish correctness (its references were never
 tied to s-dftd3).
+
+---
+
+## Sep 2026 — the last GFN1 gap was outside this WP: the halogen-bond correction
+
+Everything above is about the *electronic* residual on halogen-free molecules. The
+largest GFN1 error in the code was elsewhere and this WP never saw it, because none
+of its 12 (now 16) validation molecules contains a halogen bond: `XTB::calcHalogenBondEnergy()`
+was a stub returning `0.0`.
+
+GFN1 has a classical B–X···A term (X ∈ {Cl, Br, I, At}, acceptor ∈ {N, O, P, S})
+that GFN2 does not, worth up to 0.019 Eh. Ported verbatim from
+`external/xtb/src/xtb/halogen.f90` (`xbpot`) + the triple list of
+`scf_module.F90:370-404`; `external/tblite/src/tblite/classical/halogen.f90` is
+algebraically identical. Parameters were already generated in `gfn1_params.hpp`
+(only Br/I/At are nonzero — Cl's bond strength is exactly 0, which is why `HCl`
+in the validation set could never expose the gap).
+
+GMTKN55 gfn1 vs xtb: MAD **0.041 → 0.00007**, max **11.933 → 0.011** kcal/mol,
+41 structures above 0.1 kcal → **0** (all 41 were `HAL59`). The analytic gradient
+was ported with it (CPU + GPU paths) and agrees with xtb's own gradient on
+`FI_pyr` to 2.6e-7 Eh/Bohr. New regression test: `sqm_val_FI_pyr_gfn1` (1e-8 gate,
+xtb-generated reference), which fails on the pre-fix binary by −19.0 mEh.
+
+The remaining gfn1 GMTKN55 residual (max 0.011 kcal) is **not** halogen-related:
+its largest members are Br₂, As, Ge, Se and Kr species including ones with no
+halogen bond at all (`HEAVYSB11/br2`, `RG18/kr3`). That was chased next — and it
+turns out not to be a curcuma error either.
+
+## Sep 2026 — the 4th-period residual is a reference split
+
+xtb and tblite carry **different STO-6G 4s/4p tables** (each file keeps the other
+variant present but commented out); the disagreement is those two entries and
+nothing else in 540 STO-NG values. It hits exactly the elements with an n=4 s/p
+shell at STO-6G, i.e. **Z = 19–36** — GFN2 expands those shells with STO-4G and is
+structurally immune, which is why only GFN1 ever showed it.
+
+tblite's values (curcuma's default) are the better expansion of the exact Slater
+function: L2 error **7.7e-5 vs 4.1e-4** (4s) and **1.2e-4 vs 3.4e-4** (4p), against
+2.0e-4 / 2.8e-4 / 6.3e-5 for the shared 3s/3p/5p entries. The legacy set gives 4s
+and 4p bit-identical exponents at 7 significant digits — a stale transcription.
+Neither the published `HEAVYSB11` reference values nor an r²SCAN-3c calculation can
+arbitrate: the two variants differ by 0.001–0.008 kcal/mol, GFN1's own error there
+is 19–36 kcal/mol, and r²SCAN-3c's own MAD against the published values is 3.63.
+
+`-xtb.sto6g_legacy_4sp true` reproduces the xtb binary bit-for-bit; it takes the 56
+Z=19–36 GMTKN55 structures from MAD 0.00313 to **0.0000056** kcal/mol and MOR41 gfn1
+from 0.00041 to **0.0000188**, i.e. the split is all of what was left. See CLAUDE.md
+Known Issue #27 and [GMTKN55_VALIDATION.md](GMTKN55_VALIDATION.md).
+
+The remaining 1e-8-gate xfails are unchanged and unrelated to any of this: `He2`
+(dispersion-only numerical floor) and `complex` (231 atoms, SCF fixed-point floor).

@@ -467,7 +467,7 @@ private:
     int m_nan_gradient_reports = 0;
     bool m_error = false;                            ///< Error state flag
     std::string m_error_message;                     ///< Error description
-    bool m_gpu_fallback = false;                    ///< GPU requested but CUDA unavailable
+    bool m_gpu_fallback = false;                    ///< GPU requested but its plugin is absent (CPU used)
     bool m_gpu_fallback_warned = false;              ///< Final GPU warning already printed
     int m_atoms = 0;                                 ///< Number of atoms
     int m_mult = 1;                                  ///< Multiplicity

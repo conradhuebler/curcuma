@@ -249,6 +249,30 @@ static const std::map<std::string, AlignmentMethod> method_map = {
     {"predefined", AlignmentMethod::PREDEFINED_ORDER}
 };
 
+// Claude Generated (Sep 2026): expose method_map lookups so callers outside RMSDDriver
+// (ConfScan's config summary in particular) can validate a method name up front instead
+// of only discovering the fallback deep inside LoadAlignmentMethodParameters().
+bool RMSDDriver::IsValidAlignmentMethodName(const std::string& name)
+{
+    return method_map.find(name) != method_map.end();
+}
+
+std::string RMSDDriver::ValidAlignmentMethodNames()
+{
+    std::string result;
+    for (const auto& entry : method_map) {
+        if (!result.empty())
+            result += ", ";
+        result += entry.first;
+    }
+    return result;
+}
+
+std::string RMSDDriver::DefaultAlignmentMethodName()
+{
+    return "subspace";
+}
+
 // Claude Generated - Extract alignment method selection and configuration
 void RMSDDriver::LoadAlignmentMethodParameters()
 {

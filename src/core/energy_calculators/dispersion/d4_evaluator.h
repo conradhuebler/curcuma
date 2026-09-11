@@ -158,7 +158,10 @@ public:
     // charge-INDEPENDENT — there is no q-response (matches tblite
     // get_dispersion_nonsc). No-op when m_params.s9 == 0.
     //
-    // cutoff_bohr: real-space cutoff for the 3-body sum (tblite GFN2 uses 25.0).
+    // cutoff_bohr: real-space cutoff for the 3-body sum. xtb passes 40.0 Bohr
+    //   (scf_module.F90:767, d4_gradient's cutoff3); tblite uses realspace_cutoff(disp3=25)
+    //   (disp/d4.f90:82). curcuma follows tblite, its reference for GFN1/GFN2; pass 40.0
+    //   via -xtb.d4_atm_cutoff to reproduce the xtb binary. Claude Generated (Sep 2026).
     double computeATM(const std::vector<int>& atoms,
                       const Matrix& geometry_bohr,
                       bool with_gradient,

@@ -79,6 +79,7 @@ enum class EEQSolveMethod {
     LDLT,           ///< Bunch-Kaufman LDL^T on NxN block (indefinite-capable) + Schur; LLT-fail fallback
     Batched,        ///< Per-fragment Cholesky (GPU only); CPU falls back to SchurCholesky
     PCG,            ///< Preconditioned Conjugate Gradient with warm start
+    ProjectedPCG,   ///< Constraint-projected PCG on A_nn: ONE iterative solve for any number of fragments
     Auto            ///< Auto-select via first-call benchmark (SchurCholesky vs PCG)
 };
 
@@ -99,6 +100,9 @@ enum class EEQSolveMethod {
  */
 class EEQSolver {
 public:
+    /// Read-only view of a (row-major) Matrix block, e.g. A.topLeftCorner(n, n), without copying.
+    using MatrixCRef = Eigen::Ref<const Matrix, 0, Eigen::OuterStride<>>;
+
     /**
      * @brief Topology information for EEQ Phase 1
      *
@@ -117,6 +121,18 @@ public:
         int nfrag = 1;                                 // Number of molecular fragments
         std::vector<int> fraglist;                     // fraglist[i] = fragment ID for atom i (1-indexed)
         std::vector<double> qfrag;                     // qfrag[f] = target charge for fragment f
+        // Fortran itag (gfnff_ini2.f90): +1 carbene C / NO2 N, -1 eta-coordinated, 0 otherwise.
+        // Supplied so the dxi corrections can test the REAL tag instead of re-deriving it from
+        // geometry: the stored tag has already been through the aryne rule and the qa < -0.4
+        // override, and re-deriving it silently skips both. Empty = fall back to the heuristic.
+        std::vector<int> itag;
+        // Fortran piadr as the EEQ section sees it: the PRE-Hückel pi-candidate list
+        // (gfnff_ini.f90:312-336), i.e. GFNFF::detectPiSystems()'s output, nonzero for a
+        // candidate. Supplied so the dgam / amide rules use the SAME array as the rest of
+        // the force field instead of EEQSolver::detectPiSystem()'s own older inference,
+        // which has neither the NR3-X / SO3 vetoes nor B/Cl/S in its element lists.
+        // Empty = fall back to that inference.
+        std::vector<char> is_pi;
     };
 
     /**
@@ -280,22 +296,6 @@ public:
         const std::optional<Vector>& alpeeq = std::nullopt,  // Claude Generated (January 2026): Charge-dependent alpha
         CxxThreadPool* pool = nullptr,  // Claude Generated (Mar 2026): Pool-based parallelisation
         int num_threads = 1
-    );
-
-    /**
-     * @brief Calculate EEQ electrostatic energy from charges
-     *
-     * @param charges Atomic partial charges
-     * @param atoms Atomic numbers
-     * @param geometry_bohr Coordinates in Bohr
-     * @param cn Coordination numbers (for cnf corrections)
-     * @return EEQ energy in Hartree
-     */
-    double calculateEEQEnergy(
-        const Vector& charges,
-        const std::vector<int>& atoms,
-        const Matrix& geometry_bohr,
-        const Vector& cn
     );
 
     /**
@@ -529,37 +529,6 @@ private:
     );
 
     /**
-     * @brief Build EEQ matrix with intelligent caching for performance optimization
-     *
-     * Enhanced version of buildCorrectedEEQMatrix that uses intelligent caching
-     * to avoid expensive matrix reconstruction when geometry changes are insignificant.
-     *
-     * @param atoms Atomic numbers
-     * @param geometry_bohr Coordinates in Bohr
-     * @param cn Coordination numbers
-     * @param current_charges Current charge estimate (used for charge-dependent dgam/alpha)
-     * @param dxi Electronegativity corrections
-     * @param dgam Hardness corrections (gam - qa*ff)
-     * @param hybridization Hybridization states
-     * @param topology Optional topology for topological distances
-     * @param distance_mode Distance calculation mode (Topological for Phase 1, Geometric for Phase 2)
-     * @return Augmented EEQ matrix (natoms+1)×(natoms+1) with caching
-     *
-     * Claude Generated - Performance Optimization Implementation
-     */
-    Matrix buildSmartEEQMatrix(
-        const std::vector<int>& atoms,
-        const Matrix& geometry_bohr,
-        const Vector& cn,
-        const Vector& current_charges,
-        const Vector& dxi,
-        const Vector& dgam,
-        const std::vector<int>& hybridization,
-        const std::optional<TopologyInput>& topology,
-        EEQDistanceMode distance_mode = EEQDistanceMode::Topological
-    );
-
-    /**
      * @brief Solve augmented EEQ linear system with corrected parameters
      *
      * Sets up RHS: x(i) = -chi + dxi [+ CNF*sqrt(nb) if use_cnf_term=true]
@@ -647,6 +616,9 @@ private:
      * @param is_pi_atom Pi-system membership flags
      * @param topology Topology information
      * @param cn Coordination numbers
+     * @param exact_pi_membership Use true is_pi_atom[] membership for the
+     *        neighbour pi-checks instead of the Fortran piadr index-cutoff
+     *        replication (see .cpp for why both variants must exist)
      * @return Vector of amide nitrogen flags
      */
     std::vector<bool> detectAmideNitrogens(
@@ -654,7 +626,8 @@ private:
         const std::vector<int>& hybridization,
         const std::vector<bool>& is_pi_atom,
         const std::optional<TopologyInput>& topology,
-        const Vector& cn
+        const Vector& cn,
+        bool exact_pi_membership = false
     ) const;
 
     /**
@@ -673,40 +646,6 @@ private:
         const std::vector<int>& hybridization,
         const std::vector<bool>& is_amide,
         const std::optional<TopologyInput>& topology
-    ) const;
-
-    /**
-     * @brief Build neighbor lists for each atom
-     *
-     * @param atoms Atomic numbers
-     * @param geometry_bohr Coordinates in Bohr
-     * @param cutoff_radius Cutoff radius in Bohr (default 10.0)
-     * @return Vector of neighbor index lists
-     */
-    std::vector<std::vector<int>> buildNeighborLists(
-        const std::vector<int>& atoms,
-        const Matrix& geometry_bohr,
-        double cutoff_radius = 10.0
-    ) const;
-
-    /**
-     * @brief Compute topological distances via Floyd-Warshall algorithm
-     *
-     * Computes shortest path distances through the bond graph, where each bond
-     * has length = sum of covalent radii. Topological distances are always
-     * greater than or equal to geometric distances.
-     *
-     * Reference: XTB gfnff_ini.f90:431-461
-     *
-     * @param atoms Atomic numbers
-     * @param topology Topology information (neighbor lists, covalent radii)
-     * @return Matrix of topological distances in Bohr
-     *
-     * Claude Generated December 2025
-     */
-    Matrix computeTopologicalDistances(
-        const std::vector<int>& atoms,
-        const TopologyInput& topology
     ) const;
 
     /**
@@ -776,10 +715,34 @@ private:
      * @param nfrag Number of fragments
      * @return Charge vector (N elements), or empty vector on failure
      */
-    Vector solveWithSchurCholesky(
-        const Matrix& A_nn,
+    /**
+     * @brief Constraint-projected preconditioned CG for the fragment-constrained EEQ system.
+     *
+     * Solves  min 1/2 q^T A_nn q - b^T q  s.t.  C q = qfrag  (KKT: A_nn q + C^T lambda = b) with
+     * a single CG run on the constraint tangent space: the residual and the Jacobi-preconditioned
+     * direction are projected with P = I - C^T (C C^T)^{-1} C, which for the 0/1 fragment
+     * membership matrix C is just "subtract the per-fragment mean" (O(N)). Cost per iteration is
+     * one dense matvec, independent of nfrag — the Schur route needs nfrag+1 solves (O(N^2 nfrag)),
+     * which is what made many-fragment boxes (solvent) expensive.
+     *
+     * Not bit-identical to the direct solve: charges are converged to |P r| <= tol (|b|+1),
+     * i.e. an approximation controlled by eeq_ppcg_tol (default 1e-10, energy error ~1e-10 Eh).
+     * Warm-started from the previous step's charges (re-projected onto the current qfrag).
+     * Returns an empty vector if not converged within eeq_ppcg_max_iter (caller falls back).
+     * Claude Generated (Sep 2026), machine-tested on a 3000-atom water box.
+     */
+    Vector solveWithProjectedPCG(
+        const MatrixCRef& A_nn,
         const Vector& rhs_atoms,
-        const Matrix& C,
+        const MatrixCRef& C,
+        const Vector& rhs_constraints,
+        int natoms,
+        int nfrag);
+
+    Vector solveWithSchurCholesky(
+        const MatrixCRef& A_nn,
+        const Vector& rhs_atoms,
+        const MatrixCRef& C,
         const Vector& rhs_constraints,
         int natoms,
         int nfrag
@@ -805,7 +768,7 @@ private:
      */
     struct BlockJacobiPC;  // Forward decl — defined below
     Vector solveWithPCG(
-        const Matrix& A,
+        const MatrixCRef& A,
         const Vector& b,
         const Vector& x0,
         int max_iter,
@@ -841,7 +804,7 @@ private:
 
     /// Build BlockJacobiPC from A_nn and the fragment constraint matrix C (nfrag × natoms).
     /// Returns a default-constructed (invalid) PC if any fragment block fails Cholesky.
-    static BlockJacobiPC buildBlockJacobi(const Matrix& A_nn, const Matrix& C);
+    static BlockJacobiPC buildBlockJacobi(const MatrixCRef& A_nn, const MatrixCRef& C);
 
     /**
      * @brief Multi-RHS Block-PCG solver — solves A·X = B with B ∈ R^{N × m} simultaneously.
@@ -864,7 +827,7 @@ private:
      * @return         N×m solution matrix X with A·X ≈ B
      */
     Matrix solveWithPCG_multiRHS(
-        const Matrix& A,
+        const MatrixCRef& A,
         const Matrix& B,
         const Matrix& X0,
         int max_iter,
@@ -886,54 +849,19 @@ private:
     double m_refactor_eps = 0.05;       ///< WP-EEQ-Cache: max displacement (Bohr) before re-factorizing
     int    m_refactor_force_every = 0;  ///< WP-EEQ-Cache: force refactorization every N steps (0 = disabled)
     int    m_refine_iters = 1;          ///< A4: iterative-refinement steps on a cached-factor solve (0 = off)
+    // Projected PCG (many-fragment path, Sep 2026): see solveWithProjectedPCG()
+    int    m_ppcg_min_nfrag = 1;        ///< auto-select PPCG when nfrag >= this (0 = never auto)
+    int    m_ppcg_min_atoms = 500;      ///< ... and natoms >= this
+    double m_ppcg_tol = 1e-12;          ///< relative residual tolerance (|P r| <= tol * (|b|+1))
+    int    m_ppcg_max_iter = 500;       ///< iteration cap; non-convergence falls back to Schur-Cholesky
+    Vector m_ppcg_last_q;               ///< warm start (previous step's charges)
     double m_matrix_rebuild_eps = 0.0;  ///< WP-EEQ-Matrix-Cache: max displacement before A_nn off-diag rebuild (0 = disabled)
 
     // ===== Cached Data for Energy Calculation =====
 
     // EEQ Solver intelligent caching for performance optimization
-    class EEQSolverCache {
-    private:
-        Matrix m_last_geometry;
-        Matrix m_last_A_matrix;
-        Vector m_last_charges;
-        bool m_cache_valid = false;
-        double m_change_threshold = 1e-6;
-
-    public:
-        bool isGeometryChanged(const Matrix& current_geometry) const {
-            if (!m_cache_valid) return true;
-            if (m_last_geometry.rows() != current_geometry.rows() ||
-                m_last_geometry.cols() != current_geometry.cols()) {
-                return true;
-            }
-            return (m_last_geometry - current_geometry).array().abs().maxCoeff() > m_change_threshold;
-        }
-
-        void cacheResults(const Matrix& geometry, const Matrix& A, const Vector& charges) {
-            m_last_geometry = geometry;
-            m_last_A_matrix = A;
-            m_last_charges = charges;
-            m_cache_valid = true;
-        }
-
-        Matrix getCachedAMatrix() const { return m_last_A_matrix; }
-        Vector getCachedCharges() const { return m_last_charges; }
-        bool isValid() const { return m_cache_valid; }
-
-        void reset() {
-            m_cache_valid = false;
-            m_last_geometry = Matrix();
-            m_last_A_matrix = Matrix();
-            m_last_charges = Vector();
-        }
-    };
 
     mutable Vector m_dxi_stored;      ///< Stored dxi corrections from last calculateCharges() call
-    mutable Matrix m_cached_topological_distances;  ///< Cached topological distances from Phase 1 for Phase 2 reuse (Jan 2, 2026)
-
-    // Intelligent EEQ matrix caching for performance
-    mutable std::unique_ptr<EEQSolverCache> m_eeq_cache;
-
     // PCG warm-start cache for iterative EEQ solve
     // Claude Generated - March 2026 (Performance optimization)
     // May 2026: m_pcg_last_Z2 promoted from Vector to Matrix so all nfrag constraint
@@ -1168,6 +1096,10 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "WP-EEQ-Cache: Force Cholesky refactorization every N steps regardless of geometry. "
           "0 = never force (only geometry-triggered). Recommended: 100 for long MD runs.", "Algorithm", {})
     PARAM(eeq_refine_iters, Int, 1, "A4: iterative-refinement steps applied when the EEQ solve reuses a cached Cholesky factor. Each step costs O(N^2) and removes the stale-factor error, so charges stay exact for the current geometry and the gradient stays consistent. 0 disables refinement.", "Algorithm", {})
+    PARAM(eeq_ppcg_min_nfrag, Int, 1, "Projected-PCG EEQ solve is selected automatically when the system has at least this many fragments AND at least eeq_ppcg_min_atoms atoms: ONE iterative solve on the constraint tangent space instead of the dense factorisation (+ nfrag extra solves). 0 disables the automatic choice (solve_method ppcg still forces it, eeq_ppcg_min_atoms keeps small systems exact). Converged to eeq_ppcg_tol; polymer/1410: 44 -> 16 ms per solve, dE 1e-12 Eh.", "Algorithm", {})
+    PARAM(eeq_ppcg_min_atoms, Int, 500, "Minimum atom count for the automatic projected-PCG choice (small systems stay on the exact Schur-Cholesky solve).", "Algorithm", {})
+    PARAM(eeq_ppcg_tol, Double, 1e-12, "Projected-PCG relative residual tolerance |P r| <= tol (|b|+1); 1e-12 gives energy/gradient deviations ~1e-12 from the direct solve (1e-10 saves ~15% of the iterations).", "Algorithm", {})
+    PARAM(eeq_ppcg_max_iter, Int, 500, "Projected-PCG iteration cap; on non-convergence the exact Schur-Cholesky solve is used for that step.", "Algorithm", {})
     PARAM(eeq_matrix_rebuild_eps_bohr, Double, 0.0,
           "WP-EEQ-Matrix-Cache: max atom displacement (Bohr) before A_nn Coulomb off-diagonal is "
           "rebuilt from scratch. When below this AND CN drift < 0.05, the cached off-diagonal is "

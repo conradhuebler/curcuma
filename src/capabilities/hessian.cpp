@@ -39,7 +39,7 @@ HessianThread::HessianThread(const json& controller, int i, int j, int xi, int x
     , m_fullnumerical(fullnumerical)
 {
     setAutoDelete(true);
-    m_method = m_controller.value("method", std::string("uff"));
+    m_method = m_controller.value("method", std::string("gfnff"));
     if (i == j && xi == i && xj == i && i == 0)
         m_schema = [this]() {
             this->Threaded();
@@ -231,7 +231,10 @@ Hessian::Hessian(const std::string& method, const ConfigManager& config, bool si
     m_threads = m_controller.value("threads", m_threads);
     m_method = method;
     m_scale_functions = [](double eigenvalue_sqrt) -> double {
-        return eigenvalue_sqrt * CurcumaUnit::Energy::HARTREE_TO_WAVENUMBER / std::sqrt(CurcumaUnit::Constants::AMU_TO_AU) + 47.349;
+        // No additive offset. The historic "+ 47.349 cm-1" was an empirical patch that
+        // compensated the missing Eh/Ang^2 -> Eh/Bohr^2 conversion in ConvertHessian();
+        // with that conversion in place the formula is exact. Claude Generated (Sep 2026).
+        return eigenvalue_sqrt * CurcumaUnit::Energy::HARTREE_TO_WAVENUMBER / std::sqrt(CurcumaUnit::Constants::AMU_TO_AU);
     };
 }
 
@@ -242,7 +245,10 @@ Hessian::Hessian(const ConfigManager& config, bool silent)
     m_controller = MergeJson(m_defaults, config.exportConfig());
     m_threads = m_controller.value("threads", m_threads);
     m_scale_functions = [](double eigenvalue_sqrt) -> double {
-        return eigenvalue_sqrt * CurcumaUnit::Energy::HARTREE_TO_WAVENUMBER / std::sqrt(CurcumaUnit::Constants::AMU_TO_AU) + 47.349;
+        // No additive offset. The historic "+ 47.349 cm-1" was an empirical patch that
+        // compensated the missing Eh/Ang^2 -> Eh/Bohr^2 conversion in ConvertHessian();
+        // with that conversion in place the formula is exact. Claude Generated (Sep 2026).
+        return eigenvalue_sqrt * CurcumaUnit::Energy::HARTREE_TO_WAVENUMBER / std::sqrt(CurcumaUnit::Constants::AMU_TO_AU);
     };
 }
 Hessian::~Hessian()
@@ -270,7 +276,7 @@ void Hessian::LoadControlJson()
     m_finite_diff_step = m_controller.value("finite_diff_step", 5e-3);
     m_verbosity = m_controller.value("verbosity", 1);
     m_hess = m_controller.value("hess", 1);
-    m_method = m_controller.value("method", std::string("uff"));
+    m_method = m_controller.value("method", std::string("gfnff"));
     m_threads = m_controller.value("threads", 1);
 
     // Ensure method and threads are in m_controller for downstream code (HessianThread, etc.)
@@ -430,6 +436,32 @@ Matrix Hessian::ProjectHessian(const Matrix& hessian)
 Vector Hessian::ConvertHessian(Matrix& hessian)
 {
     Vector vector;
+
+    // Unit conversion Eh/Ang^2 -> Eh/Bohr^2 (Claude Generated, Sep 2026).
+    // The finite-difference Hessian is built as (G(x+d) - G(x-d)) / 2d from
+    // EnergyCalculator::Gradient() (Eh/Angstrom, see gfnff_method.cpp/xtb_native.cpp)
+    // with the molecule's Cartesian coordinates, which are Angstrom — so it comes out
+    // in Eh/Ang^2. The frequency formula below expects atomic units, hence the au^2
+    // factor: d^2E/dBohr^2 = d^2E/dAng^2 * (Ang/Bohr)^2.
+    //
+    // Without it every frequency was too high, and the "+ 47.349 cm-1" offset in
+    // m_scale_functions papered over part of that. Measured on H2O against xtb 6.7.1
+    // before the fixes: gfn1 2863.8/6690.5/6890.8 and gfn2 3023.4/6635.5/6636.8, i.e.
+    // a factor 1/au = 1.8897 too high; gfnff 2290.7/5044.2/5047.9, a factor
+    // sqrt(1/au) = 1.3747 — GFN-FF also returned its gradient in Eh/Bohr back then,
+    // so one of the two Angstrom/Bohr factors cancelled for it and one did not.
+    //
+    // With both corrected, curcuma reproduces xtb 6.7.1 on H2O to <= 0.13 percent:
+    //   gfn1  1490.4/3515.4/3621.4  vs xtb 1490.57/3515.28/3626.07
+    //   gfn2  1574.9/3486.3/3487.0  vs xtb 1574.99/3486.05/3491.64
+    //   gfnff 1631.9/3635.0/3637.6  vs xtb 1632.01/3634.77/3637.31
+    // Guarded by the ctest `gradient_unit_contract` (test_cases/check_gradient_units.py).
+    //
+    // A Hessian READ from file (ReadHessian) is divided by au^2 on input, so this
+    // factor cancels there and such a file is taken as Eh/Bohr^2 — the usual
+    // convention for an ORCA/Turbomole $hessian block. That path is not covered by a
+    // test here.
+    hessian *= CurcumaUnit::Legacy::au * CurcumaUnit::Legacy::au;
 
     // Apply mass-weighting: H'_ij = H_ij / sqrt(m_i * m_j)
     for (int i = 0; i < m_molecule.AtomCount() * 3; i++) {

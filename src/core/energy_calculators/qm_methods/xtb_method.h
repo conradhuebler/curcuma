@@ -22,7 +22,7 @@
 #include "../computational_method.h"
 
 #ifdef USE_XTB
-#include "src/core/qm_methods/xtbinterface.h"
+#include "xtbinterface.h"
 #endif
 
 #include <memory>
@@ -108,53 +108,13 @@ public:
      */
     Vector getOrbitalOccupations() const override;
     
-    /**
-     * @brief Set electronic temperature for calculation
-     * @param temperature Electronic temperature in Kelvin
-     */
-    void setTemperature(double temperature);
     
-    /**
-     * @brief Get current electronic temperature
-     * @return Electronic temperature in Kelvin
-     */
-    double getTemperature() const;
     
-    /**
-     * @brief Set accuracy level for calculation
-     * @param accuracy Accuracy level (1=rough, 2=normal, 3=high)
-     */
-    void setAccuracy(int accuracy);
     
-    /**
-     * @brief Get current accuracy level
-     * @return Accuracy level (1-3)
-     */
-    int getAccuracy() const;
     
-    /**
-     * @brief Set maximum SCF iterations
-     * @param maxiter Maximum number of SCF iterations
-     */
-    void setMaxSCFIterations(int maxiter);
     
-    /**
-     * @brief Get maximum SCF iterations
-     * @return Maximum SCF iterations
-     */
-    int getMaxSCFIterations() const;
     
-    /**
-     * @brief Set multiplicity (spin state)
-     * @param mult Multiplicity (1=singlet, 2=doublet, 3=triplet, etc.)
-     */
-    void setMultiplicity(int mult);
     
-    /**
-     * @brief Get current multiplicity
-     * @return Multiplicity
-     */
-    int getMultiplicity() const;
     
     /**
      * @brief Get supported XTB methods
@@ -162,12 +122,6 @@ public:
      */
     static std::vector<std::string> getSupportedMethods();
     
-    /**
-     * @brief Check if method is supported by XTB
-     * @param method_name Method to check
-     * @return True if method is supported
-     */
-    static bool isMethodSupported(const std::string& method_name);
     
     /**
      * @brief Check if XTB is available (compilation flag)
@@ -191,54 +145,12 @@ private:
     bool m_calculation_done;                       ///< Flag if calculation was performed
     double m_last_energy;                          ///< Last calculated energy
     
-    /**
-     * @brief Initialize XTB interface with current parameters
-     * @return True if initialization successful
-     */
-    bool initializeXTB();
     
-    /**
-     * @brief Update XTB configuration from JSON parameters
-     */
-    void updateXTBConfig();
     
-    /**
-     * @brief Generate XTB settings JSON from parameters
-     * @return XTB settings JSON
-     */
-    json generateXTBSettings() const;
     
-    /**
-     * @brief Convert method name to XTB-compatible format
-     * @param method_name Input method name
-     * @return XTB-compatible method name
-     */
-    std::string convertMethodNameForXTB(const std::string& method_name) const;
     
-    /**
-     * @brief Handle XTB-specific errors
-     * @param operation Description of failed operation
-     */
-    void handleXTBError(const std::string& operation);
     
-    /**
-     * @brief Validate method name for XTB compatibility
-     * @param method_name Method to validate
-     * @return True if method is valid for XTB
-     */
-    bool validateMethodName(const std::string& method_name) const;
     
-    /**
-     * @brief Get default configuration for specific XTB method
-     * @param method_name XTB method name
-     * @return Default JSON configuration
-     */
-    static json getDefaultConfigForMethod(const std::string& method_name);
     
-    /**
-     * @brief Check if XTB supports threading (depends on compilation)
-     * @return True if XTB was compiled with threading support
-     */
-    bool supportsThreading() const;
 };
 

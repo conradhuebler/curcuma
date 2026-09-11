@@ -50,7 +50,15 @@ public:
 
 ### MethodFactory System
 
-**Priority-based method creation** with automatic fallbacks:
+**Table-driven registry (Sep 2026)**: `MethodFactory::methodTable()` holds one `MethodDescriptor`
+per method family (names/aliases, family, description, availability probe, providers in priority
+order, creator lambda). `create()`, `getAvailableMethods()`, `isMethodAvailable()`,
+`getMethodInfo()` and `printAvailableMethods()` (`curcuma -methods`) all read that table.
+
+**Adding a method**: (1) a `ComputationalMethod` subclass with its `PARAM` block, (2) one row in
+`methodTable()`, (3) add its JSON sub-scope name to `MethodFactory::methodParameterScopes()` if
+it has one — that list is what EnergyCalculator / opt / MD / ConfSearch forward, so no per-site
+lists to keep in sync.
 
 #### **Method Hierarchies** (canonical, AP3 April 2026 — see top-level CLAUDE.md)
 ```cpp
@@ -82,7 +90,7 @@ All QM methods are wrapped to provide the same interface while preserving their 
 ### Force Field Wrapper
 
 **ForceFieldMethod** wraps the ForceField class while maintaining:
-- **Multi-threading support** via ForceFieldThread
+- **Threading** via the shared `FFWorkspace` engine (see `ff_methods/CLAUDE.md`)
 - **Parameter generation** integration with ForceFieldGenerator  
 - **Universal caching** with 96% speedup for iterative calculations
 - **Thread safety** controls for concurrent access

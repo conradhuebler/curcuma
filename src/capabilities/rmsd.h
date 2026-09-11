@@ -135,6 +135,18 @@ public:
 
     void setMatchingAtoms(const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms);
 
+    /*! \brief Claude Generated (Sep 2026): check an alignment method name (e.g. from
+     *  -rmsd.method/-confscan.method) against the same lookup LoadAlignmentMethodParameters()
+     *  uses internally, so callers can catch a typo (e.g. "intertia") before it silently
+     *  falls back to 'subspace' deep inside a per-thread RMSDDriver, where the warning is
+     *  easy to miss and the caller's own config summary would otherwise keep echoing the
+     *  invalid raw string as if it were what actually ran. */
+    static bool IsValidAlignmentMethodName(const std::string& name);
+    //! Comma-separated list of recognised alignment method names, for warning/help text.
+    static std::string ValidAlignmentMethodNames();
+    //! Name of the method LoadAlignmentMethodParameters() falls back to on an unrecognised name.
+    static std::string DefaultAlignmentMethodName();
+
     double Rules2RMSD(const std::vector<int> rules, int fragment = -1);
     StructComp Rule2RMSD(const std::vector<int> rules, int fragment = 1);
 

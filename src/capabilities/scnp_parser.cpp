@@ -401,7 +401,7 @@ json ScnpInputParser::convertToStandardConfig(const json& scnp_params)
         {"steps", 10000},
         {"temperature", 300.0},
         {"step_size", 0.1},
-        {"method", "uff"},
+        {"method", "gfnff"},
         {"move_strategy", "single_atom"},
         {"output_frequency", 100},
         {"verbose", true}

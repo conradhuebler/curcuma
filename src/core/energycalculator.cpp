@@ -20,6 +20,7 @@
 
 #include "energycalculator.h"
 #include "energy_calculators/ff_methods/forcefield_method.h"
+#include "energy_calculators/gpu_plugin.h"
 #include "src/tools/general.h"
 #include "src/core/curcuma_logger.h"
 #include "config_manager.h"
@@ -39,10 +40,7 @@
 // rebuild the method. ConfigManager("energycalculator", controller) only carries
 // the energycalculator scope; method-specific sub-objects are otherwise dropped
 // before reaching MethodFactory.
-static const char* const kEnergyCalcMethodScopes[] = {
-    "gfnff", "eeq_solver", "xtb", "tblite", "ulysses",
-    "d3", "d4", "uff", "qmdff", "eht", "orca"
-};
+// The scope list lives in MethodFactory::methodParameterScopes() (single source of truth).
 
 
 EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller)
@@ -109,7 +107,7 @@ void EnergyCalculator::initializeCommonFromConfig(const ConfigManager& config, c
     // on the first (and only) build. Previously this was a post-construction
     // reattachMethodScopes() that rebuilt the whole method a second time.
     if (raw_controller && raw_controller->is_object()) {
-        for (const char* scope : kEnergyCalcMethodScopes) {
+        for (const std::string& scope : MethodFactory::methodParameterScopes()) {
             if (raw_controller->contains(scope) && !m_controller.contains(scope))
                 m_controller[scope] = (*raw_controller)[scope];
         }
@@ -154,8 +152,11 @@ void EnergyCalculator::initializeCommonFromConfig(const ConfigManager& config, c
     // Create computational method using factory
     if (!createMethod(m_method_name, m_controller)) {
         m_error = true;
-        m_error_message = fmt::format("Failed to create method: {}", m_method_name);
-        CurcumaLogger::error("Failed to create computational method: " + m_method_name);
+        // Keep the factory's reason (unknown name, missing provider, ...) visible to the user.
+        if (m_error_message.empty())
+            m_error_message = fmt::format("Failed to create method: {}", m_method_name);
+        CurcumaLogger::error("Failed to create computational method: " + m_method_name
+                             + " -- " + m_error_message);
         return;
     }
 
@@ -212,22 +213,15 @@ bool EnergyCalculator::createMethod(const std::string& method_name, const json& 
         ClearError();
 
         // Track GPU fallback: user explicitly requested a GPU backend (cuda/rocm/
-        // vulkan) that this build was not compiled with. "auto" is best-effort and
-        // never warns. Claude Generated (June 2026): generalised from CUDA-only.
+        // vulkan) whose plugin is not present. "auto" is best-effort and never
+        // warns. Claude Generated (June 2026): generalised from CUDA-only.
         {
             std::string gpu_req = config.value("gpu", "none");
             std::transform(gpu_req.begin(), gpu_req.end(), gpu_req.begin(), ::tolower);
-            bool explicit_gpu = (gpu_req == "cuda" || gpu_req == "rocm" || gpu_req == "vulkan");
-            bool have_backend = false;
-#if defined(USE_CUDA)
-            if (gpu_req == "cuda") have_backend = true;
-#endif
-#if defined(USE_ROCM)
-            if (gpu_req == "rocm") have_backend = true;
-#endif
-#if defined(USE_VULKAN)
-            if (gpu_req == "vulkan") have_backend = true;
-#endif
+            const bool explicit_gpu = (gpu_req == "cuda" || gpu_req == "rocm" || gpu_req == "vulkan");
+            // Sep 2026: every GPU backend is a dlopen plugin (libcurcuma_<backend>.so next to
+            // the executable), so availability is a runtime probe, not a compile-time macro.
+            const bool have_backend = explicit_gpu && gpu_plugin::available(gpu_req);
             if (explicit_gpu && !have_backend) {
                 m_gpu_fallback = true;
             }

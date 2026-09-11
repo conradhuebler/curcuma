@@ -289,8 +289,13 @@ void secularSolve(const Eigen::VectorXd& D, const Eigen::VectorXd& z, double rho
 // Eigenproblem of diag(D_in) + rho_in·z_in·z_inᵀ with deflation. Returns eigenvalues
 // `eval` and eigenvectors `W` (columns), eval(j) ↔ W.col(j), in the input basis/order.
 // `nThreads` is forwarded to the secular solve (the parallelisable heavy part).
-void rank1Eigen(const Eigen::VectorXd& D_in, const Eigen::VectorXd& z_in, double rho_in,
-                Eigen::VectorXd& eval, Eigen::MatrixXd& W, int nThreads = 1)
+// `secular` (Claude Generated, Sep 2026) optionally replaces ONLY the secular solve — the
+// Vulkan D&C runs that step on the GPU and reuses this deflation bookkeeping. Null (the
+// default, and the only thing the CPU path ever passes) = the built-in secularSolve, so
+// the CPU numerics are untouched. Returns false only when a hooked secular solve fails.
+bool rank1Eigen(const Eigen::VectorXd& D_in, const Eigen::VectorXd& z_in, double rho_in,
+                Eigen::VectorXd& eval, Eigen::MatrixXd& W, int nThreads = 1,
+                const SecularSolveFn* secular = nullptr)
 {
     const int n = static_cast<int>(D_in.size());
     eval.resize(n);
@@ -300,7 +305,7 @@ void rank1Eigen(const Eigen::VectorXd& D_in, const Eigen::VectorXd& z_in, double
     if (zn < std::numeric_limits<double>::min()) {   // no coupling
         eval = D_in;
         W.setIdentity();
-        return;
+        return true;
     }
     // Normalise z (‖z‖=1) and fold the sign of rho (solve for −D if rho<0, negate at end).
     Eigen::VectorXd z = z_in / zn;
@@ -351,7 +356,17 @@ void rank1Eigen(const Eigen::VectorXd& D_in, const Eigen::VectorXd& z_in, double
         const int ksz = static_cast<int>(sec.size());
         Eigen::VectorXd delta(ksz), zeta(ksz);
         for (int t = 0; t < ksz; ++t) { delta(t) = Ds(sec[t]); zeta(t) = zs(sec[t]); }
-        secularSolve(delta, zeta, rho, lam_sec, W_sec, nThreads);
+        if (secular && *secular) {
+            // Hooked (e.g. GPU) secular solve. Eigen is column-major, so W_sec.data()
+            // is exactly the [u + t*ksz] layout the hook is contracted to write.
+            lam_sec.resize(ksz);
+            W_sec.resize(ksz, ksz);
+            if (!(*secular)(delta.data(), zeta.data(), ksz, rho,
+                            lam_sec.data(), W_sec.data()))
+                return false;
+        } else {
+            secularSolve(delta, zeta, rho, lam_sec, W_sec, nThreads);
+        }
     }
 
     // Assemble eigenpairs in the rotated sorted basis (M'): deflated → e_i, secular → W_sec.
@@ -381,6 +396,7 @@ void rank1Eigen(const Eigen::VectorXd& D_in, const Eigen::VectorXd& z_in, double
     // Scatter back to the original basis (row perm[i] ← sorted row i) and unflip eigenvalues.
     for (int i = 0; i < n; ++i) W.row(perm[i]) = Wp.row(i);
     eval = flip ? (-evalp).eval() : evalp;
+    return true;
 }
 
 // Recursive Cuppen divide-and-conquer for the tridiagonal (diag d, off-diagonal e).
@@ -941,6 +957,48 @@ bool lobpcgLowest(const Eigen::MatrixXd& A, int k,
     }
     // Not converged within maxIter → let the caller fall back to a dense diagonalization.
     return false;
+}
+
+/* ===================================================================== *
+ *  Raw-pointer building blocks for the GPU backends (Claude Generated,
+ *  Sep 2026). Thin marshalling shells around the two internal routines
+ *  above — the Vulkan engine used to carry its own copy of both.
+ * ===================================================================== */
+
+bool solveTridiagonalQL(int n, const double* diag, const double* off,
+                        double* eval, double* evec)
+{
+    if (n <= 0 || !diag || !eval || !evec) return false;
+    Eigen::VectorXd d(n), e(std::max(0, n - 1));
+    for (int i = 0; i < n; ++i) d(i) = diag[i];
+    for (int i = 0; i < n - 1; ++i) e(i) = off[i];
+
+    Eigen::VectorXd ev;
+    Eigen::MatrixXd V;
+    if (!solveTriQL(d, e, ev, V)) return false;
+
+    // Eigen::MatrixXd is column-major, so V.data() already has the caller's layout.
+    for (int i = 0; i < n; ++i) eval[i] = ev(i);
+    std::memcpy(evec, V.data(), sizeof(double) * static_cast<size_t>(n) * n);
+    return true;
+}
+
+bool rank1EigenDeflate(const double* D_in, const double* z_in, int n, double rho_in,
+                       double* eval, double* W,
+                       const SecularSolveFn& secular, int nThreads)
+{
+    if (n <= 0 || !D_in || !z_in || !eval || !W) return false;
+    Eigen::VectorXd D(n), z(n);
+    for (int i = 0; i < n; ++i) { D(i) = D_in[i]; z(i) = z_in[i]; }
+
+    Eigen::VectorXd ev;
+    Eigen::MatrixXd Wm;
+    if (!rank1Eigen(D, z, rho_in, ev, Wm, nThreads, secular ? &secular : nullptr))
+        return false;
+
+    for (int i = 0; i < n; ++i) eval[i] = ev(i);
+    std::memcpy(W, Wm.data(), sizeof(double) * static_cast<size_t>(n) * n);   // column-major
+    return true;
 }
 
 } // namespace curcuma::eigsolver
