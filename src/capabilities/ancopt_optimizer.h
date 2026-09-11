@@ -64,6 +64,11 @@ struct ANCCoordinates {
 
     bool initialized = false;
 
+    /// Claude Generated (Sep 2026) - Cartesian coordinates held fixed (3*atom+k).
+    /// Their rows of B are zeroed before the reference coordinates are taken, so no
+    /// mode moves a held atom and no held gradient component reaches the step.
+    std::vector<int> frozen_dofs;
+
     // Methods
     void allocate(int natoms, int num_vars, double h_low, double h_max);
     void deallocate();
@@ -305,6 +310,11 @@ protected:
      * Ported from XTB trproj()
      */
     void projectTranslationsRotations(Matrix& hessian, const Molecule& mol);
+    /// Claude Generated (Sep 2026) - Held atoms (OptimizerDriver constraints): the
+    /// Cartesian DOFs to keep, and the model Hessian with their rows and columns
+    /// zeroed, which leaves them in the null space the ANC selection skips.
+    std::vector<int> frozenDofs() const;
+    void projectFrozenAtoms(Matrix& hessian) const;
 
     /**
      * @brief Get optimization thresholds based on level

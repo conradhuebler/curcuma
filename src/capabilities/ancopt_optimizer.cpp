@@ -186,6 +186,9 @@ bool ANCCoordinates::generateANC(const Matrix& cartesian_hessian, const Vector& 
     }
 
     // Initialize internal coordinates from Cartesian
+    for (int dof : frozen_dofs)
+        if (dof >= 0 && dof < n3)
+            B.row(dof).setZero();
     setCartesian(xyz);
 
     CurcumaLogger::success("ANC generated with " + std::to_string(nvar) + " internal coordinates");
@@ -339,6 +342,9 @@ bool ANCCoordinates::generateANCLanczos(const Matrix& H, const Vector& xyz,
         std::swap(hess(i, i), hess(j, j));
     }
 
+    for (int dof : frozen_dofs)
+        if (dof >= 0 && dof < n3)
+            B.row(dof).setZero();
     setCartesian(xyz);
 
     auto t_end = clk::now();
@@ -452,6 +458,18 @@ bool ANCOptimizer::InitializeOptimizerInternal() {
 
     // Calculate number of internal coordinates
     int nvar = 3 * m_molecule.AtomCount() - (is_linear ? 5 : 6);
+    // Claude Generated (Sep 2026) - Held atoms take their coordinates out, and with
+    // three or more of them held nothing is left of free translation or rotation
+    // (one held atom leaves the three rotations about it, two the one about their axis).
+    const std::vector<int> frozen = frozenDofs();
+    m_anc->frozen_dofs = frozen;
+    if (!frozen.empty()) {
+        const int held = int(frozen.size()) / 3;
+        const int free_atoms = m_molecule.AtomCount() - held;
+        nvar = 3 * free_atoms - (held >= 3 ? 0 : held == 2 ? 1 : 3);
+        CurcumaLogger::info_fmt("ANCOpt: {} atoms held, {} internal coordinates for the rest",
+            held, nvar);
+    }
 
     // Claude Nov 2025: BUG FIX - Ensure nvar is positive
     if (nvar <= 0) {
@@ -505,8 +523,12 @@ bool ANCOptimizer::InitializeOptimizerInternal() {
     // Generate initial model Hessian
     Matrix cart_hess = generateModelHessian(m_molecule);
 
-    // Project out translations and rotations
-    projectTranslationsRotations(cart_hess, m_molecule);
+    // Project out translations and rotations -- or, with held atoms, the held
+    // coordinates: then there is no free rigid-body motion to project.
+    if (frozen.empty())
+        projectTranslationsRotations(cart_hess, m_molecule);
+    else
+        projectFrozenAtoms(cart_hess);
 
     // Generate ANC from Hessian
     if (!generateANCFromHessian(cart_hess, m_molecule)) {
@@ -574,7 +596,10 @@ Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates
 
         // Generate new model Hessian
         Matrix cart_hess = generateModelHessian(m_molecule);
-        projectTranslationsRotations(cart_hess, m_molecule);
+        if (m_anc->frozen_dofs.empty())
+            projectTranslationsRotations(cart_hess, m_molecule);
+        else
+            projectFrozenAtoms(cart_hess);
 
         // Regenerate ANC
         Vector current_xyz(3 * m_molecule.AtomCount());
@@ -1027,6 +1052,29 @@ Matrix ANCOptimizer::generateModelHessian(const Molecule& mol) {
 }
 
 
+
+std::vector<int> ANCOptimizer::frozenDofs() const
+{
+    std::vector<int> dofs;
+    if (!m_context.use_constraints)
+        return dofs;
+    for (size_t i = 0; i < m_context.atom_constraints.size() && int(i) < m_molecule.AtomCount(); ++i) {
+        if (m_context.atom_constraints[i] == 0)
+            for (int k = 0; k < 3; ++k)
+                dofs.push_back(3 * int(i) + k);
+    }
+    return dofs;
+}
+
+void ANCOptimizer::projectFrozenAtoms(Matrix& hessian) const
+{
+    for (int dof : m_anc->frozen_dofs) {
+        if (dof < 0 || dof >= hessian.rows())
+            continue;
+        hessian.row(dof).setZero();
+        hessian.col(dof).setZero();
+    }
+}
 
 bool ANCOptimizer::generateANCFromHessian(const Matrix& cart_hess, const Molecule& mol) {
     // Convert Cartesian coordinates to flat vector
