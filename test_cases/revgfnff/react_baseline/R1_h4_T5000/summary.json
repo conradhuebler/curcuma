@@ -1,0 +1,26 @@
+{
+ "run": "R1_h4_T5000",
+ "doc": "R1 H+H formation threshold (doc lines 46-50: 'free H atoms recombine at 3000 K'; test 14 needs 6000 K)",
+ "cmd": "/home/conrad/src/curcuma_branches/curcuma/release/curcuma -md input.xyz -method gfnff -gfnff.topology_mode react -md.time_step 0.5 -md.seed 42 -md.no_restart -md.rattle_12 false -md.thermostat csvr -md.coupling 10 -md.wall_type spheric -threads 1 -verbosity 1 -no_bmt -temperature 5000 -maxtime 5000 -md.wall_radius 2.5",
+ "exit": 0,
+ "wall_s": 0.3,
+ "formed": 1,
+ "broken": 1,
+ "rebuilds": 2,
+ "exchange_resolved": 0,
+ "dE_jump_kJ": {
+  "n": 2,
+  "median": -222.39999999999998,
+  "min": -451.4,
+  "max": 6.6,
+  "sum": -444.79999999999995
+ },
+ "nan_or_unstable": false,
+ "final_fragments": [
+  "H",
+  "H",
+  "H",
+  "H"
+ ],
+ "max_r_A": 9.71
+}

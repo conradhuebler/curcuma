@@ -1,0 +1,24 @@
+{
+ "class": "L",
+ "system": "cl_radical",
+ "tag": "Cl radical single point, UKS doublet (TODO#3 dissociation reference)",
+ "charge": 0,
+ "mult": 2,
+ "uks": true,
+ "broken_sym": false,
+ "n_points": 1,
+ "n_ok": 1,
+ "orca_rc": 0,
+ "wall_s": 8.9,
+ "points": [
+  {
+   "point": 0,
+   "label": "Cl",
+   "energy_eh": -460.11405131814,
+   "s2": 0.754124,
+   "hirshfeld": [
+    0.0
+   ]
+  }
+ ]
+}

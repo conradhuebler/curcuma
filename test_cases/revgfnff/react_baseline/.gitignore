@@ -1,0 +1,7 @@
+# Claude Generated (Sep 2026): keep only the reproducible essentials of each run
+*/input.trj.xyz
+*/*.topo.json
+*/*restart*
+*/*.diag.jsonl
+*/stdout.log
+*/input.snapshots/

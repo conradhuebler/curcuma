@@ -1,0 +1,94 @@
+{
+ "class": "B",
+ "system": "n2_h_n2h",
+ "tag": "NEB-TS path n2_h_n2h",
+ "charge": 0,
+ "mult": 2,
+ "uks": true,
+ "broken_sym": false,
+ "n_points": 11,
+ "n_ok": 11,
+ "orca_rc": 0,
+ "status": "ok",
+ "attempts": 1,
+ "wall_s": 216.0,
+ "points": [
+  {
+   "point": 0,
+   "label": "role=reactant_0",
+   "role": "reactant",
+   "energy_eh": -110.004561224175,
+   "s2": 0.75
+  },
+  {
+   "point": 1,
+   "label": "role=image_1",
+   "role": "image",
+   "energy_eh": -110.004486341876,
+   "s2": 0.750001
+  },
+  {
+   "point": 2,
+   "label": "role=image_2",
+   "role": "image",
+   "energy_eh": -110.004763118803,
+   "s2": 0.750003
+  },
+  {
+   "point": 3,
+   "label": "role=image_3",
+   "role": "image",
+   "energy_eh": -110.004875718371,
+   "s2": 0.750022
+  },
+  {
+   "point": 4,
+   "label": "role=image_4",
+   "role": "image",
+   "energy_eh": -110.003609159279,
+   "s2": 0.750332
+  },
+  {
+   "point": 5,
+   "label": "role=image_5",
+   "role": "image",
+   "energy_eh": -110.00029374539,
+   "s2": 0.751682
+  },
+  {
+   "point": 6,
+   "label": "role=image_6",
+   "role": "image",
+   "energy_eh": -109.996424039444,
+   "s2": 0.755434
+  },
+  {
+   "point": 7,
+   "label": "role=image_7",
+   "role": "image",
+   "energy_eh": -109.99416502807,
+   "s2": 0.761834
+  },
+  {
+   "point": 8,
+   "label": "role=image_8",
+   "role": "image",
+   "energy_eh": -109.998461009203,
+   "s2": 0.763945
+  },
+  {
+   "point": 9,
+   "label": "role=product_9",
+   "role": "product",
+   "energy_eh": -110.010926548871,
+   "s2": 0.755985
+  },
+  {
+   "point": 10,
+   "label": "role=ts_10",
+   "role": "ts",
+   "energy_eh": -109.994215325562,
+   "s2": 0.762063
+  }
+ ]
+}

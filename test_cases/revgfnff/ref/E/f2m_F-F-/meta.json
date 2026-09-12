@@ -1,0 +1,24 @@
+{
+ "date": "2026-09-12T03:21:32",
+ "host": "fjodor",
+ "curcuma_head": "d8ce5ca0",
+ "orca": "/opt/orca/orca",
+ "script": "scripts/revgfnff_ref.py",
+ "argv": [
+  "run",
+  "--classes",
+  "E",
+  "--only",
+  "f2m",
+  "--jobs",
+  "1",
+  "--nprocs",
+  "4"
+ ],
+ "orca_version": "6.0.0",
+ "keywords": "r2SCAN-3c TightSCF EnGrad",
+ "nprocs": 4,
+ "uks": true,
+ "broken_sym": false,
+ "note": "r2SCAN-3c unconstrained Opt diverges for f2m; using fixed r=1.92 A (no Opt run), Sep 2026 fix"
+}

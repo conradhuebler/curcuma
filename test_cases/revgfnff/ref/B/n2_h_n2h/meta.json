@@ -1,0 +1,26 @@
+{
+ "date": "2026-09-12T02:22:32",
+ "host": "fjodor",
+ "curcuma_head": "d8ce5ca0",
+ "orca": "/opt/orca/orca",
+ "script": "scripts/revgfnff_ref.py",
+ "argv": [
+  "run",
+  "--classes",
+  "B",
+  "--jobs",
+  "4",
+  "--nprocs",
+  "4"
+ ],
+ "status": "ok",
+ "attempts": 1,
+ "note": "reactant: N2 bonded pair set to eq length, H pushed to 4.5 A; product: BH76 hn2 (bound N2H)",
+ "keywords": "r2SCAN-3c TightSCF NEB-TS then EnGrad",
+ "nprocs": 4,
+ "uks": true,
+ "broken_sym": false,
+ "charge": 0,
+ "mult": 2,
+ "nimages": 8
+}

@@ -1,0 +1,24 @@
+{
+ "date": "2026-09-12T02:58:28",
+ "host": "fjodor",
+ "curcuma_head": "d8ce5ca0",
+ "orca": "/opt/orca/orca",
+ "script": "scripts/revgfnff_ref.py",
+ "argv": [
+  "run",
+  "--classes",
+  "B",
+  "--jobs",
+  "4",
+  "--nprocs",
+  "4"
+ ],
+ "status": "failed",
+ "attempts": 2,
+ "note": "reactant: class A n2h4 + h2 stacked 3.5 A apart, r2SCAN-3c Opt; product: 2 separate optimised NH3 (class A geometry) 8 A apart",
+ "keywords": "r2SCAN-3c TightSCF NEB-TS",
+ "nprocs": 4,
+ "uks": false,
+ "charge": 0,
+ "mult": 1
+}

@@ -1,0 +1,147 @@
+{
+ "class": "E",
+ "system": "hf2_transit",
+ "tag": "PX13/hf_2 proton-transfer transit, reactant->TS (Kabsch-matched)",
+ "charge": 0,
+ "mult": 1,
+ "uks": false,
+ "broken_sym": false,
+ "n_points": 11,
+ "n_ok": 11,
+ "orca_rc": 0,
+ "wall_s": 109.6,
+ "points": [
+  {
+   "point": 0,
+   "label": "frac=0.00",
+   "energy_eh": -200.895779388119,
+   "s2": null,
+   "hirshfeld": [
+    0.147562,
+    0.241318,
+    -0.143181,
+    -0.245695
+   ]
+  },
+  {
+   "point": 1,
+   "label": "frac=0.10",
+   "energy_eh": -200.89461652463,
+   "s2": null,
+   "hirshfeld": [
+    0.142685,
+    0.237684,
+    -0.131378,
+    -0.248986
+   ]
+  },
+  {
+   "point": 2,
+   "label": "frac=0.20",
+   "energy_eh": -200.892471341021,
+   "s2": null,
+   "hirshfeld": [
+    0.139712,
+    0.235782,
+    -0.121875,
+    -0.253613
+   ]
+  },
+  {
+   "point": 3,
+   "label": "frac=0.30",
+   "energy_eh": -200.890703160065,
+   "s2": null,
+   "hirshfeld": [
+    0.138566,
+    0.235164,
+    -0.114594,
+    -0.259126
+   ]
+  },
+  {
+   "point": 4,
+   "label": "frac=0.40",
+   "energy_eh": -200.889147911631,
+   "s2": null,
+   "hirshfeld": [
+    0.139084,
+    0.235154,
+    -0.109377,
+    -0.264851
+   ]
+  },
+  {
+   "point": 5,
+   "label": "frac=0.50",
+   "energy_eh": -200.886068571703,
+   "s2": null,
+   "hirshfeld": [
+    0.141203,
+    0.234843,
+    -0.106308,
+    -0.269728
+   ]
+  },
+  {
+   "point": 6,
+   "label": "frac=0.60",
+   "energy_eh": -200.879270967751,
+   "s2": null,
+   "hirshfeld": [
+    0.145028,
+    0.232898,
+    -0.106202,
+    -0.271702
+   ]
+  },
+  {
+   "point": 7,
+   "label": "frac=0.70",
+   "energy_eh": -200.867767907218,
+   "s2": null,
+   "hirshfeld": [
+    0.150866,
+    0.227321,
+    -0.111142,
+    -0.267025
+   ]
+  },
+  {
+   "point": 8,
+   "label": "frac=0.80",
+   "energy_eh": -200.853378072366,
+   "s2": null,
+   "hirshfeld": [
+    0.15906,
+    0.215739,
+    -0.124283,
+    -0.250506
+   ]
+  },
+  {
+   "point": 9,
+   "label": "frac=0.90",
+   "energy_eh": -200.841255658378,
+   "s2": null,
+   "hirshfeld": [
+    0.168699,
+    0.198082,
+    -0.147481,
+    -0.219278
+   ]
+  },
+  {
+   "point": 10,
+   "label": "frac=1.00",
+   "energy_eh": -200.837025359675,
+   "s2": null,
+   "hirshfeld": [
+    0.177236,
+    0.177236,
+    -0.177226,
+    -0.177226
+   ]
+  }
+ ]
+}

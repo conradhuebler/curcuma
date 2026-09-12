@@ -1,0 +1,29 @@
+{
+ "run": "R3_n2_3h2_filters_off",
+ "doc": "R3 N2+3H2 3500 K / 3.5 A / 20 ps (doc lines 103-108: 301 events without cap+refractory, 35 with, final N2H2 + 4 H)",
+ "cmd": "/home/conrad/src/curcuma_branches/curcuma/release/curcuma -md input.xyz -method gfnff -gfnff.topology_mode react -md.time_step 0.5 -md.seed 42 -md.no_restart -md.rattle_12 false -md.thermostat csvr -md.coupling 10 -md.wall_type spheric -threads 1 -verbosity 1 -no_bmt -temperature 3500 -maxtime 20000 -md.wall_radius 3.5 -gfnff.react_valence_cap false -gfnff.react_refractory_scans 0",
+ "exit": 0,
+ "wall_s": 2.1,
+ "formed": 147,
+ "broken": 150,
+ "rebuilds": 288,
+ "exchange_resolved": 0,
+ "dE_jump_kJ": {
+  "n": 288,
+  "median": 1.85,
+  "min": -1389.6,
+  "max": 1124.2,
+  "sum": 10154.8
+ },
+ "nan_or_unstable": false,
+ "final_fragments": [
+  "H",
+  "H",
+  "H",
+  "H",
+  "H",
+  "H",
+  "N2"
+ ],
+ "max_r_A": 11.93
+}

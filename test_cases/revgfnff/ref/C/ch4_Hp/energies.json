@@ -1,0 +1,120 @@
+{
+ "class": "C",
+ "system": "ch4_Hp",
+ "tag": "H approaching ch4 atom 0",
+ "charge": 1,
+ "mult": 1,
+ "uks": false,
+ "broken_sym": false,
+ "n_points": 15,
+ "n_ok": 15,
+ "orca_rc": 0,
+ "wall_s": 145.9,
+ "points": [
+  {
+   "point": 0,
+   "label": "d=1.00",
+   "energy_eh": -40.667940812309,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 1,
+   "label": "d=1.10",
+   "energy_eh": -40.679142403183,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 2,
+   "label": "d=1.20",
+   "energy_eh": -40.677924884478,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 3,
+   "label": "d=1.30",
+   "energy_eh": -40.669741875215,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 4,
+   "label": "d=1.40",
+   "energy_eh": -40.657958051776,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 5,
+   "label": "d=1.50",
+   "energy_eh": -40.644651123237,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 6,
+   "label": "d=1.60",
+   "energy_eh": -40.631036197633,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 7,
+   "label": "d=1.75",
+   "energy_eh": -40.611631700613,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 8,
+   "label": "d=1.90",
+   "energy_eh": -40.594451785339,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 9,
+   "label": "d=2.10",
+   "energy_eh": -40.57550360855,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 10,
+   "label": "d=2.30",
+   "energy_eh": -40.560704367465,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 11,
+   "label": "d=2.50",
+   "energy_eh": -40.549338249193,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 12,
+   "label": "d=2.70",
+   "energy_eh": -40.540758327003,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 13,
+   "label": "d=2.85",
+   "energy_eh": -40.535833028123,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 14,
+   "label": "d=3.00",
+   "energy_eh": -40.531990452371,
+   "s2": null,
+   "hirshfeld": null
+  }
+ ]
+}

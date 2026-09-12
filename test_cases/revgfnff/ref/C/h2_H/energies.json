@@ -1,0 +1,120 @@
+{
+ "class": "C",
+ "system": "h2_H",
+ "tag": "H approaching h2 atom 1",
+ "charge": 0,
+ "mult": 2,
+ "uks": true,
+ "broken_sym": false,
+ "n_points": 15,
+ "n_ok": 15,
+ "orca_rc": 0,
+ "wall_s": 152.7,
+ "points": [
+  {
+   "point": 0,
+   "label": "d=1.00",
+   "energy_eh": -1.656616651825,
+   "s2": 0.757038,
+   "hirshfeld": null
+  },
+  {
+   "point": 1,
+   "label": "d=1.10",
+   "energy_eh": -1.659945552158,
+   "s2": 0.75643,
+   "hirshfeld": null
+  },
+  {
+   "point": 2,
+   "label": "d=1.20",
+   "energy_eh": -1.662053370926,
+   "s2": 0.75548,
+   "hirshfeld": null
+  },
+  {
+   "point": 3,
+   "label": "d=1.30",
+   "energy_eh": -1.663463286975,
+   "s2": 0.754414,
+   "hirshfeld": null
+  },
+  {
+   "point": 4,
+   "label": "d=1.40",
+   "energy_eh": -1.664443904959,
+   "s2": 0.753415,
+   "hirshfeld": null
+  },
+  {
+   "point": 5,
+   "label": "d=1.50",
+   "energy_eh": -1.665148926356,
+   "s2": 0.752537,
+   "hirshfeld": null
+  },
+  {
+   "point": 6,
+   "label": "d=1.60",
+   "energy_eh": -1.665684721372,
+   "s2": 0.751828,
+   "hirshfeld": null
+  },
+  {
+   "point": 7,
+   "label": "d=1.75",
+   "energy_eh": -1.666296336027,
+   "s2": 0.751076,
+   "hirshfeld": null
+  },
+  {
+   "point": 8,
+   "label": "d=1.90",
+   "energy_eh": -1.666741705718,
+   "s2": 0.750613,
+   "hirshfeld": null
+  },
+  {
+   "point": 9,
+   "label": "d=2.10",
+   "energy_eh": -1.667085370691,
+   "s2": 0.750284,
+   "hirshfeld": null
+  },
+  {
+   "point": 10,
+   "label": "d=2.30",
+   "energy_eh": -1.667215798379,
+   "s2": 0.750127,
+   "hirshfeld": null
+  },
+  {
+   "point": 11,
+   "label": "d=2.50",
+   "energy_eh": -1.667196323548,
+   "s2": 0.750057,
+   "hirshfeld": null
+  },
+  {
+   "point": 12,
+   "label": "d=2.70",
+   "energy_eh": -1.66712436414,
+   "s2": 0.750025,
+   "hirshfeld": null
+  },
+  {
+   "point": 13,
+   "label": "d=2.85",
+   "energy_eh": -1.66704487089,
+   "s2": 0.750013,
+   "hirshfeld": null
+  },
+  {
+   "point": 14,
+   "label": "d=3.00",
+   "energy_eh": -1.666969908429,
+   "s2": 0.750006,
+   "hirshfeld": null
+  }
+ ]
+}

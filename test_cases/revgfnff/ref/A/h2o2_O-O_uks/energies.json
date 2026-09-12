@@ -1,0 +1,155 @@
+{
+ "class": "A",
+ "system": "h2o2_O-O_uks",
+ "tag": "O-O rigid stretch, UKS broken symmetry, outside in",
+ "charge": 0,
+ "mult": 1,
+ "uks": true,
+ "broken_sym": true,
+ "n_points": 20,
+ "n_ok": 1,
+ "orca_rc": 0,
+ "wall_s": 142.1,
+ "points": [
+  {
+   "point": 0,
+   "label": "r=5.1427",
+   "energy_eh": -151.456052569985,
+   "s2": 1.006561,
+   "hirshfeld": null
+  },
+  {
+   "point": 1,
+   "label": "r=4.4081",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 2,
+   "label": "r=4.0407",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 3,
+   "label": "r=3.6734",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 4,
+   "label": "r=3.3060",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 5,
+   "label": "r=2.9387",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 6,
+   "label": "r=2.6448",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 7,
+   "label": "r=2.3510",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 8,
+   "label": "r=2.2040",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 9,
+   "label": "r=2.0571",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 10,
+   "label": "r=1.9102",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 11,
+   "label": "r=1.7632",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 12,
+   "label": "r=1.6163",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 13,
+   "label": "r=1.5428",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 14,
+   "label": "r=1.4694",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 15,
+   "label": "r=1.3959",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 16,
+   "label": "r=1.3224",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 17,
+   "label": "r=1.2489",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 18,
+   "label": "r=1.1755",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 19,
+   "label": "r=1.1020",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  }
+ ]
+}

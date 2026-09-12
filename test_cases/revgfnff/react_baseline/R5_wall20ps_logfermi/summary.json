@@ -1,0 +1,28 @@
+{
+ "run": "R5_wall20ps_logfermi",
+ "doc": "R5 container table 20 ps (doc lines 176-179: 11.00/177, 8.76/294, 4.91/601)",
+ "cmd": "/home/conrad/src/curcuma_branches/curcuma/release/curcuma -md input.xyz -method gfnff -gfnff.topology_mode react -md.time_step 0.5 -md.seed 42 -md.no_restart -md.rattle_12 false -md.thermostat csvr -md.coupling 10 -md.wall_type spheric -threads 1 -verbosity 1 -no_bmt -temperature 3000 -maxtime 20000 -md.wall_radius 4.5 -md.wall_potential logfermi",
+ "exit": 0,
+ "wall_s": 3.6,
+ "formed": 28,
+ "broken": 26,
+ "rebuilds": 52,
+ "exchange_resolved": 0,
+ "dE_jump_kJ": {
+  "n": 52,
+  "median": -53.099999999999994,
+  "min": -541.3,
+  "max": 584.5,
+  "sum": 149.4999999999999
+ },
+ "nan_or_unstable": false,
+ "final_fragments": [
+  "H",
+  "H",
+  "H2",
+  "N2H4",
+  "NH",
+  "NH3"
+ ],
+ "max_r_A": 4.49
+}

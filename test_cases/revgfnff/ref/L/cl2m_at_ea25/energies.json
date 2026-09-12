@@ -1,0 +1,25 @@
+{
+ "class": "L",
+ "system": "cl2m_at_ea25",
+ "tag": "Cl2- at the GMTKN55 G21EA/EA_25 geometry (TODO#3)",
+ "charge": -1,
+ "mult": 2,
+ "uks": true,
+ "broken_sym": false,
+ "n_points": 1,
+ "n_ok": 1,
+ "orca_rc": 0,
+ "wall_s": 9.2,
+ "points": [
+  {
+   "point": 0,
+   "label": "r=2.7300",
+   "energy_eh": -920.418281223117,
+   "s2": 0.753336,
+   "hirshfeld": [
+    -0.499996,
+    -0.499996
+   ]
+  }
+ ]
+}

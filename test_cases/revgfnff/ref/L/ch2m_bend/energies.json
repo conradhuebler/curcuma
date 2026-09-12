@@ -1,0 +1,81 @@
+{
+ "class": "L",
+ "system": "ch2m_bend",
+ "tag": "CH2- bending scan, C-H fixed 1.129 A, UKS doublet (TODO#3b)",
+ "charge": -1,
+ "mult": 2,
+ "uks": true,
+ "broken_sym": false,
+ "n_points": 6,
+ "n_ok": 6,
+ "orca_rc": 0,
+ "wall_s": 61.2,
+ "points": [
+  {
+   "point": 0,
+   "label": "HCH=90",
+   "energy_eh": -39.143997157501,
+   "s2": 0.754951,
+   "hirshfeld": [
+    -0.735413,
+    -0.132298,
+    -0.132298
+   ]
+  },
+  {
+   "point": 1,
+   "label": "HCH=100",
+   "energy_eh": -39.146514254242,
+   "s2": 0.75493,
+   "hirshfeld": [
+    -0.736809,
+    -0.1316,
+    -0.1316
+   ]
+  },
+  {
+   "point": 2,
+   "label": "HCH=110",
+   "energy_eh": -39.144701511688,
+   "s2": 0.75497,
+   "hirshfeld": [
+    -0.74146,
+    -0.129274,
+    -0.129274
+   ]
+  },
+  {
+   "point": 3,
+   "label": "HCH=120",
+   "energy_eh": -39.139233644884,
+   "s2": 0.755123,
+   "hirshfeld": [
+    -0.748835,
+    -0.125586,
+    -0.125586
+   ]
+  },
+  {
+   "point": 4,
+   "label": "HCH=130",
+   "energy_eh": -39.131019318619,
+   "s2": 0.755409,
+   "hirshfeld": [
+    -0.758637,
+    -0.120686,
+    -0.120686
+   ]
+  },
+  {
+   "point": 5,
+   "label": "HCH=145",
+   "energy_eh": -39.116200217547,
+   "s2": 0.75599,
+   "hirshfeld": [
+    -0.77642,
+    -0.111794,
+    -0.111794
+   ]
+  }
+ ]
+}

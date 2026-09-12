@@ -1,0 +1,27 @@
+{
+ "run": "R4_n4h4_slack_off",
+ "doc": "R4 N4H4 3500 K / 3.2 A / 15 ps (doc lines 129-135: 278 events / 115 resolutions with slack radius, 736/248 without)",
+ "cmd": "/home/conrad/src/curcuma_branches/curcuma/release/curcuma -md input.xyz -method gfnff -gfnff.topology_mode react -md.time_step 0.5 -md.seed 42 -md.no_restart -md.rattle_12 false -md.thermostat csvr -md.coupling 10 -md.wall_type spheric -threads 1 -verbosity 1 -no_bmt -temperature 3500 -maxtime 15000 -md.wall_radius 3.2 -gfnff.react_slack_form_factor 1.6",
+ "exit": 0,
+ "wall_s": 1.7,
+ "formed": 189,
+ "broken": 190,
+ "rebuilds": 366,
+ "exchange_resolved": 0,
+ "dE_jump_kJ": {
+  "n": 366,
+  "median": -3.25,
+  "min": -891.6,
+  "max": 1261.4,
+  "sum": 12420.5
+ },
+ "nan_or_unstable": false,
+ "final_fragments": [
+  "H",
+  "H",
+  "H",
+  "N2",
+  "N2H"
+ ],
+ "max_r_A": 6.96
+}

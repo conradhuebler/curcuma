@@ -1,0 +1,64 @@
+{
+ "class": "L",
+ "system": "formamidine_imine",
+ "tag": "formamidine imine C-N-H angle scan (TODO#1)",
+ "charge": 0,
+ "mult": 1,
+ "uks": false,
+ "broken_sym": false,
+ "n_points": 7,
+ "n_ok": 7,
+ "orca_rc": 0,
+ "wall_s": 66.6,
+ "points": [
+  {
+   "point": 0,
+   "label": "CNH=119",
+   "energy_eh": -149.968997583237,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 1,
+   "label": "CNH=130",
+   "energy_eh": -149.962033278393,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 2,
+   "label": "CNH=140",
+   "energy_eh": -149.953077517222,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 3,
+   "label": "CNH=150",
+   "energy_eh": -149.943354339654,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 4,
+   "label": "CNH=160",
+   "energy_eh": -149.934558978839,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 5,
+   "label": "CNH=170",
+   "energy_eh": -149.928207935928,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 6,
+   "label": "CNH=179",
+   "energy_eh": -149.925521003059,
+   "s2": null,
+   "hirshfeld": null
+  }
+ ]
+}

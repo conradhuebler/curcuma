@@ -1,0 +1,159 @@
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 1.05499669
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 1.12499602
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 1.19499536
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 1.26499470
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 1.33499404
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 1.40499337
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 1.47499271
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 1.54499205
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 1.68499072
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 1.82498940
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 1.96498807
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 2.10498675
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 2.24498542
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 2.52498277
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 2.80498012
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 3.15497681
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 3.50497349
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 3.85497018
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 4.20496687
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+* xyz 0 1
+F 0.00000000 0.00000000 0.00500663
+F 0.00000000 0.00000000 4.90496024
+*

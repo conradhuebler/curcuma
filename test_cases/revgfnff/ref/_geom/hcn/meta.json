@@ -1,0 +1,20 @@
+{
+ "date": "2026-09-11T18:35:32",
+ "host": "fjodor",
+ "curcuma_head": "d8ce5ca0",
+ "orca": "/opt/orca/orca",
+ "script": "scripts/revgfnff_ref.py",
+ "argv": [
+  "run",
+  "--classes",
+  "A",
+  "C",
+  "E",
+  "D",
+  "--jobs",
+  "6",
+  "--nprocs",
+  "4"
+ ],
+ "keywords": "r2SCAN-3c TightSCF Opt"
+}

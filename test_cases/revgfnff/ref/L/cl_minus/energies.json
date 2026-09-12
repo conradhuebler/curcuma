@@ -1,0 +1,24 @@
+{
+ "class": "L",
+ "system": "cl_minus",
+ "tag": "Cl- single point (TODO#3 dissociation reference)",
+ "charge": -1,
+ "mult": 1,
+ "uks": false,
+ "broken_sym": false,
+ "n_points": 1,
+ "n_ok": 1,
+ "orca_rc": 0,
+ "wall_s": 9.1,
+ "points": [
+  {
+   "point": 0,
+   "label": "Cl-",
+   "energy_eh": -460.238105393644,
+   "s2": null,
+   "hirshfeld": [
+    -1.0
+   ]
+  }
+ ]
+}

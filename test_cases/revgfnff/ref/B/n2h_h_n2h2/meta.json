@@ -1,0 +1,26 @@
+{
+ "date": "2026-09-12T02:29:17",
+ "host": "fjodor",
+ "curcuma_head": "d8ce5ca0",
+ "orca": "/opt/orca/orca",
+ "script": "scripts/revgfnff_ref.py",
+ "argv": [
+  "run",
+  "--classes",
+  "B",
+  "--jobs",
+  "4",
+  "--nprocs",
+  "4"
+ ],
+ "status": "ok",
+ "attempts": 1,
+ "note": "reactant: BH76 hn2 + h stacked 3.5 A apart, r2SCAN-3c Opt (UKS BS); product: class A n2h2 reference geometry",
+ "keywords": "r2SCAN-3c TightSCF NEB-TS then EnGrad",
+ "nprocs": 4,
+ "uks": true,
+ "broken_sym": true,
+ "charge": 0,
+ "mult": 1,
+ "nimages": 8
+}

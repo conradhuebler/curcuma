@@ -1,0 +1,12 @@
+{
+ "class": "B",
+ "system": "n2h4_h2_2nh3",
+ "tag": "NEB-TS path n2h4_h2_2nh3",
+ "charge": 0,
+ "mult": 1,
+ "status": "failed",
+ "n_points": 11,
+ "n_ok": 0,
+ "attempts": 2,
+ "wall_s": 2187.7
+}

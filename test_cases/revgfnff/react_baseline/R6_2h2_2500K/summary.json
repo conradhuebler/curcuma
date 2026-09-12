@@ -1,0 +1,26 @@
+{
+ "run": "R6_2h2_2500K",
+ "doc": "R6 2 H2 at 2500 K, 3 ps (doc line 278: no spurious events)",
+ "cmd": "/home/conrad/src/curcuma_branches/curcuma/release/curcuma -md input.xyz -method gfnff -gfnff.topology_mode react -md.time_step 0.5 -md.seed 42 -md.no_restart -md.rattle_12 false -md.thermostat csvr -md.coupling 10 -md.wall_type spheric -threads 1 -verbosity 1 -no_bmt -temperature 2500 -maxtime 3000 -md.wall_radius 3.0",
+ "exit": 0,
+ "wall_s": 0.2,
+ "formed": 1,
+ "broken": 2,
+ "rebuilds": 3,
+ "exchange_resolved": 0,
+ "dE_jump_kJ": {
+  "n": 3,
+  "median": 12.3,
+  "min": -455.4,
+  "max": 20.3,
+  "sum": -422.79999999999995
+ },
+ "nan_or_unstable": false,
+ "final_fragments": [
+  "H",
+  "H",
+  "H",
+  "H"
+ ],
+ "max_r_A": 5.75
+}

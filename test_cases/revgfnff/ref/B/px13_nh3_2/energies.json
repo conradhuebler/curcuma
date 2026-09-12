@@ -1,0 +1,12 @@
+{
+ "class": "B",
+ "system": "px13_nh3_2",
+ "tag": "NEB-TS path px13_nh3_2",
+ "charge": 0,
+ "mult": 1,
+ "status": "failed",
+ "n_points": 11,
+ "n_ok": 0,
+ "attempts": 2,
+ "wall_s": 6533.2
+}

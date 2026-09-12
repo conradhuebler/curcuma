@@ -1,0 +1,19 @@
+{
+ "run": "R2_2h2_break1.45",
+ "doc": "R2 H2 break dE_jump (doc lines 54-59: +482 kJ/mol at 1.45 vs +21..34 at 2.6)",
+ "cmd": "/home/conrad/src/curcuma_branches/curcuma/release/curcuma -md input.xyz -method gfnff -gfnff.topology_mode react -md.time_step 0.5 -md.seed 42 -md.no_restart -md.rattle_12 false -md.thermostat csvr -md.coupling 10 -md.wall_type spheric -threads 1 -verbosity 1 -no_bmt -temperature 3000 -maxtime 3000 -md.wall_radius 2.5 -gfnff.react_bond_break_factor 1.45",
+ "exit": 0,
+ "wall_s": 0.2,
+ "formed": 0,
+ "broken": 1,
+ "rebuilds": 1,
+ "exchange_resolved": 0,
+ "dE_jump_kJ": {
+  "n": 1,
+  "median": 25.4,
+  "min": 25.4,
+  "max": 25.4,
+  "sum": 25.4
+ },
+ "nan_or_unstable": true
+}

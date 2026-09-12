@@ -1,0 +1,155 @@
+{
+ "class": "A",
+ "system": "h2_H-H_uks",
+ "tag": "H-H rigid stretch, UKS broken symmetry, outside in",
+ "charge": 0,
+ "mult": 1,
+ "uks": true,
+ "broken_sym": true,
+ "n_points": 20,
+ "n_ok": 20,
+ "orca_rc": 0,
+ "wall_s": 177.1,
+ "points": [
+  {
+   "point": 0,
+   "label": "r=2.5953",
+   "energy_eh": -0.998836388997,
+   "s2": 0.948494,
+   "hirshfeld": null
+  },
+  {
+   "point": 1,
+   "label": "r=2.2245",
+   "energy_eh": -1.005432801034,
+   "s2": 0.842189,
+   "hirshfeld": null
+  },
+  {
+   "point": 2,
+   "label": "r=2.0392",
+   "energy_eh": -1.01163044552,
+   "s2": 0.754245,
+   "hirshfeld": null
+  },
+  {
+   "point": 3,
+   "label": "r=1.8538",
+   "energy_eh": -1.020717324569,
+   "s2": 0.640529,
+   "hirshfeld": null
+  },
+  {
+   "point": 4,
+   "label": "r=1.6684",
+   "energy_eh": -1.034044005943,
+   "s2": 0.472976,
+   "hirshfeld": null
+  },
+  {
+   "point": 5,
+   "label": "r=1.4830",
+   "energy_eh": -1.054888598118,
+   "s2": 0.136821,
+   "hirshfeld": null
+  },
+  {
+   "point": 6,
+   "label": "r=1.3347",
+   "energy_eh": -1.080030268985,
+   "s2": 0.0,
+   "hirshfeld": null
+  },
+  {
+   "point": 7,
+   "label": "r=1.1864",
+   "energy_eh": -1.107292298678,
+   "s2": 0.0,
+   "hirshfeld": null
+  },
+  {
+   "point": 8,
+   "label": "r=1.1123",
+   "energy_eh": -1.121101920868,
+   "s2": 0.0,
+   "hirshfeld": null
+  },
+  {
+   "point": 9,
+   "label": "r=1.0381",
+   "energy_eh": -1.13458333996,
+   "s2": 0.0,
+   "hirshfeld": null
+  },
+  {
+   "point": 10,
+   "label": "r=0.9640",
+   "energy_eh": -1.147195991358,
+   "s2": 0.0,
+   "hirshfeld": null
+  },
+  {
+   "point": 11,
+   "label": "r=0.8898",
+   "energy_eh": -1.158126427092,
+   "s2": 0.0,
+   "hirshfeld": null
+  },
+  {
+   "point": 12,
+   "label": "r=0.8157",
+   "energy_eh": -1.1661318507,
+   "s2": 0.0,
+   "hirshfeld": null
+  },
+  {
+   "point": 13,
+   "label": "r=0.7786",
+   "energy_eh": -1.168505856859,
+   "s2": 0.0,
+   "hirshfeld": null
+  },
+  {
+   "point": 14,
+   "label": "r=0.7415",
+   "energy_eh": -1.16938161728,
+   "s2": 0.0,
+   "hirshfeld": null
+  },
+  {
+   "point": 15,
+   "label": "r=0.7044",
+   "energy_eh": -1.168356144968,
+   "s2": 0.0,
+   "hirshfeld": null
+  },
+  {
+   "point": 16,
+   "label": "r=0.6674",
+   "energy_eh": -1.164921769401,
+   "s2": 0.0,
+   "hirshfeld": null
+  },
+  {
+   "point": 17,
+   "label": "r=0.6303",
+   "energy_eh": -1.158432220328,
+   "s2": 0.0,
+   "hirshfeld": null
+  },
+  {
+   "point": 18,
+   "label": "r=0.5932",
+   "energy_eh": -1.148055599548,
+   "s2": 0.0,
+   "hirshfeld": null
+  },
+  {
+   "point": 19,
+   "label": "r=0.5561",
+   "energy_eh": -1.132707330653,
+   "s2": 0.0,
+   "hirshfeld": null
+  }
+ ]
+}

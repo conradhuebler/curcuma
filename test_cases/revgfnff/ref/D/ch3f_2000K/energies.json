@@ -1,0 +1,190 @@
+{
+ "class": "D",
+ "system": "ch3f_2000K",
+ "tag": "GFN-FF MD snapshots at 2000 K",
+ "charge": 0,
+ "mult": 1,
+ "uks": false,
+ "broken_sym": false,
+ "n_points": 25,
+ "n_ok": 25,
+ "orca_rc": 0,
+ "wall_s": 242.2,
+ "points": [
+  {
+   "point": 0,
+   "label": "frame0",
+   "energy_eh": -139.721349874625,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 1,
+   "label": "frame1",
+   "energy_eh": -139.698387806582,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 2,
+   "label": "frame2",
+   "energy_eh": -139.701333362231,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 3,
+   "label": "frame3",
+   "energy_eh": -139.660829135002,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 4,
+   "label": "frame4",
+   "energy_eh": -139.711913779614,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 5,
+   "label": "frame5",
+   "energy_eh": -139.698357899409,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 6,
+   "label": "frame6",
+   "energy_eh": -139.708279030334,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 7,
+   "label": "frame7",
+   "energy_eh": -139.685140701033,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 8,
+   "label": "frame8",
+   "energy_eh": -139.670655719317,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 9,
+   "label": "frame9",
+   "energy_eh": -139.707287860527,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 10,
+   "label": "frame10",
+   "energy_eh": -139.696987566983,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 11,
+   "label": "frame11",
+   "energy_eh": -139.657271035353,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 12,
+   "label": "frame12",
+   "energy_eh": -139.661878351026,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 13,
+   "label": "frame13",
+   "energy_eh": -139.703923294052,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 14,
+   "label": "frame14",
+   "energy_eh": -139.694171813351,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 15,
+   "label": "frame15",
+   "energy_eh": -139.676370796739,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 16,
+   "label": "frame16",
+   "energy_eh": -139.69978922322,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 17,
+   "label": "frame17",
+   "energy_eh": -139.670907914754,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 18,
+   "label": "frame18",
+   "energy_eh": -139.694149401893,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 19,
+   "label": "frame19",
+   "energy_eh": -139.688931301433,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 20,
+   "label": "frame20",
+   "energy_eh": -139.678425443848,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 21,
+   "label": "frame21",
+   "energy_eh": -139.677851366531,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 22,
+   "label": "frame22",
+   "energy_eh": -139.679677578226,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 23,
+   "label": "frame23",
+   "energy_eh": -139.648879524386,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 24,
+   "label": "frame24",
+   "energy_eh": -139.680216335985,
+   "s2": null,
+   "hirshfeld": null
+  }
+ ]
+}

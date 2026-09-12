@@ -1,0 +1,8 @@
+! r2SCAN-3c TightSCF EnGrad UKS
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz -1 2
+Cl 0.00000000 0.00000000 -0.06407700
+Cl 0.00000000 0.00000000 2.66592300
+*

@@ -1,0 +1,24 @@
+# Claude Generated (Sep 2026): ORCA scratch and bulky outputs stay local; the extracted
+# energies/gradients/geometries and the inputs are what the repo keeps.
+*.gbw
+*.densities*
+*.ges
+*.tmp*
+*.prop*
+*.property.txt
+*.bibtex
+*.engrad
+*.opt
+*.xyz.gz
+*.out
+*.out.gz
+*_trj.xyz
+*.smd*
+*.cis
+*.hess
+*.cpcm*
+*.trj
+*.txt
+_log/
+_raw/
+*.md_scratch/

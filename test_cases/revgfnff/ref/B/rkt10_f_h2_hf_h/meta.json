@@ -1,0 +1,24 @@
+{
+ "date": "2026-09-12T02:18:12",
+ "host": "fjodor",
+ "curcuma_head": "d8ce5ca0",
+ "orca": "/opt/orca/orca",
+ "script": "scripts/revgfnff_ref.py",
+ "argv": [
+  "run",
+  "--classes",
+  "B",
+  "--jobs",
+  "4",
+  "--nprocs",
+  "4"
+ ],
+ "status": "failed",
+ "attempts": 2,
+ "note": "3-atom endpoints from BH76/RKT10, bonded pairs set to h2/hf eq. length",
+ "keywords": "r2SCAN-3c TightSCF NEB-TS",
+ "nprocs": 4,
+ "uks": true,
+ "charge": 0,
+ "mult": 2
+}

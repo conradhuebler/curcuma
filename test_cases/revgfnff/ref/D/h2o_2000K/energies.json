@@ -1,0 +1,190 @@
+{
+ "class": "D",
+ "system": "h2o_2000K",
+ "tag": "GFN-FF MD snapshots at 2000 K",
+ "charge": 0,
+ "mult": 1,
+ "uks": false,
+ "broken_sym": false,
+ "n_points": 25,
+ "n_ok": 25,
+ "orca_rc": 0,
+ "wall_s": 256.8,
+ "points": [
+  {
+   "point": 0,
+   "label": "frame0",
+   "energy_eh": -76.416563322841,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 1,
+   "label": "frame1",
+   "energy_eh": -76.414670807623,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 2,
+   "label": "frame2",
+   "energy_eh": -76.415018856319,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 3,
+   "label": "frame3",
+   "energy_eh": -76.408316773659,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 4,
+   "label": "frame4",
+   "energy_eh": -76.414902583141,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 5,
+   "label": "frame5",
+   "energy_eh": -76.416802347389,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 6,
+   "label": "frame6",
+   "energy_eh": -76.417002350275,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 7,
+   "label": "frame7",
+   "energy_eh": -76.415640610349,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 8,
+   "label": "frame8",
+   "energy_eh": -76.407618803243,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 9,
+   "label": "frame9",
+   "energy_eh": -76.41299420776,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 10,
+   "label": "frame10",
+   "energy_eh": -76.388730788871,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 11,
+   "label": "frame11",
+   "energy_eh": -76.400409815163,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 12,
+   "label": "frame12",
+   "energy_eh": -76.413770188268,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 13,
+   "label": "frame13",
+   "energy_eh": -76.39962380666,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 14,
+   "label": "frame14",
+   "energy_eh": -76.403422347007,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 15,
+   "label": "frame15",
+   "energy_eh": -76.412845382492,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 16,
+   "label": "frame16",
+   "energy_eh": -76.407328763688,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 17,
+   "label": "frame17",
+   "energy_eh": -76.411560598785,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 18,
+   "label": "frame18",
+   "energy_eh": -76.41156134675,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 19,
+   "label": "frame19",
+   "energy_eh": -76.40614076465,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 20,
+   "label": "frame20",
+   "energy_eh": -76.410012448192,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 21,
+   "label": "frame21",
+   "energy_eh": -76.414353841819,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 22,
+   "label": "frame22",
+   "energy_eh": -76.416700243222,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 23,
+   "label": "frame23",
+   "energy_eh": -76.399420953266,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 24,
+   "label": "frame24",
+   "energy_eh": -76.399865224505,
+   "s2": null,
+   "hirshfeld": null
+  }
+ ]
+}

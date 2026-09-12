@@ -1,0 +1,94 @@
+{
+ "class": "B",
+ "system": "rkt14_h_oh_h2_o",
+ "tag": "NEB-TS path rkt14_h_oh_h2_o",
+ "charge": 0,
+ "mult": 3,
+ "uks": true,
+ "broken_sym": false,
+ "n_points": 11,
+ "n_ok": 11,
+ "orca_rc": 0,
+ "status": "ok",
+ "attempts": 1,
+ "wall_s": 187.0,
+ "points": [
+  {
+   "point": 0,
+   "label": "role=reactant_0",
+   "role": "reactant",
+   "energy_eh": -76.225190297703,
+   "s2": 2.003307
+  },
+  {
+   "point": 1,
+   "label": "role=image_1",
+   "role": "image",
+   "energy_eh": -76.22527538614,
+   "s2": 2.00335
+  },
+  {
+   "point": 2,
+   "label": "role=image_2",
+   "role": "image",
+   "energy_eh": -76.225529300491,
+   "s2": 2.003444
+  },
+  {
+   "point": 3,
+   "label": "role=image_3",
+   "role": "image",
+   "energy_eh": -76.226785185825,
+   "s2": 2.003741
+  },
+  {
+   "point": 4,
+   "label": "role=image_4",
+   "role": "image",
+   "energy_eh": -76.224453329799,
+   "s2": 2.009212
+  },
+  {
+   "point": 5,
+   "label": "role=image_5",
+   "role": "image",
+   "energy_eh": -76.219845108372,
+   "s2": 2.013732
+  },
+  {
+   "point": 6,
+   "label": "role=image_6",
+   "role": "image",
+   "energy_eh": -76.222696924213,
+   "s2": 2.007672
+  },
+  {
+   "point": 7,
+   "label": "role=image_7",
+   "role": "image",
+   "energy_eh": -76.22644255111,
+   "s2": 2.005114
+  },
+  {
+   "point": 8,
+   "label": "role=image_8",
+   "role": "image",
+   "energy_eh": -76.226787389297,
+   "s2": 2.004981
+  },
+  {
+   "point": 9,
+   "label": "role=product_9",
+   "role": "product",
+   "energy_eh": -76.226743968411,
+   "s2": 2.004988
+  },
+  {
+   "point": 10,
+   "label": "role=ts_10",
+   "role": "ts",
+   "energy_eh": -76.219813741887,
+   "s2": 2.013407
+  }
+ ]
+}
