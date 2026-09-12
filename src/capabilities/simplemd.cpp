@@ -2815,6 +2815,8 @@ void SimpleMD::finalizeRun()
     // Fixes trajectory file generation for short simulations where dump_frequency > total_steps
     WriteGeometry();
 
+    m_Etot = m_Epot + m_Ekin; // Claude Generated (Sep 12, 2026): the final row used to print the Etot of the last periodic print (stale by up to print_frequency); Epot/Ekin are refreshed every step in Verlet()
+
     PrintStatus();
     flushReactEvents();
     if (m_react_rebuilds > 0 && m_verbosity >= 1) {
