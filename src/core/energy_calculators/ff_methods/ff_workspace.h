@@ -57,6 +57,7 @@ struct FFEnergyComponents {
     double coulomb = 0, hbond = 0, xbond = 0;
     double atm = 0, batm = 0, stors = 0;
     double over_coord = 0;                      // rev-gfnff stage 1: over-coordination penalty (Sep 2026)
+    double sqe_hardness = 0;                    // rev-gfnff stage 2: bond hardness 1/2 kappa_ij p_ij^2 (Sep 2026)
     // Claude Generated (May 2026, HB-investigation): per-case HB diagnostic split.
     // Sum of cases equals hbond. Counts compare against Fortran nhb1/nhb2.
     double hbond_case1 = 0, hbond_case2 = 0, hbond_case3 = 0, hbond_case4 = 0;
@@ -70,6 +71,7 @@ struct FFEnergyComponents {
         coulomb = hbond = xbond = 0;
         atm = batm = stors = 0;
         over_coord = 0;
+        sqe_hardness = 0;
         hbond_case1 = hbond_case2 = hbond_case3 = hbond_case4 = 0;
         hbond_case1_count = hbond_case2_count = hbond_case3_count = hbond_case4_count = 0;
     }
@@ -82,6 +84,7 @@ struct FFEnergyComponents {
         coulomb += o.coulomb; hbond += o.hbond; xbond += o.xbond;
         atm += o.atm; batm += o.batm; stors += o.stors;
         over_coord += o.over_coord;
+        sqe_hardness += o.sqe_hardness;
         // Claude Generated (May 2026, HB-investigation): per-case reduction
         hbond_case1 += o.hbond_case1; hbond_case2 += o.hbond_case2;
         hbond_case3 += o.hbond_case3; hbond_case4 += o.hbond_case4;
@@ -96,7 +99,7 @@ struct FFEnergyComponents {
         return bond + angle + dihedral + inversion + dispersion +
                vdw + rep +
                bonded_rep + nonbonded_rep + coulomb + hbond + xbond +
-               atm + batm + stors + over_coord;
+               atm + batm + stors + over_coord + sqe_hardness;
     }
 };
 
@@ -194,6 +197,27 @@ struct FFAccumulator {
  * the bonded/non-bonded repulsion of a pair is blended with the same weight, and the
  * over-coordination energy is added (docs/REV_GFNFF_ROADMAP.md, WP3; rev_bond_order.h).
  */
+/**
+ * @brief rev-gfnff stage 2: one split-charge pair of the current topology corner
+ *
+ * Claude Generated (Sep 2026), docs/REV_GFNFF_STAGE2.md. The charges themselves are solved
+ * by EEQSolver::calculateSplitCharges(); the workspace only carries the resulting split
+ * charge p of every pair so that the hardness energy and its r-derivative can be evaluated
+ * on the same geometry as every other term:
+ *
+ *     E_sqe = sum_(ij) 1/2 kappa0_ij / b_ij(r) p_ij^2
+ *     dE/dr = -1/2 p_ij^2 kappa0_ij / b_ij^2 db_ij/dr        (E is variational in p)
+ *
+ * b is the bond order of the E_over switch (RevSettings::R2 / bo2_width), so the pair term
+ * grows without bound as the bond breaks — which is exactly what pins the charge back onto
+ * the separating fragment.
+ */
+struct SqePairData {
+    int i = -1, j = -1;    ///< the pair; p flows i -> j
+    double p = 0.0;        ///< split charge (e), from the SQE solve of this corner
+    double kappa0 = 0.0;   ///< 1/2 (kappa_Z(i) + kappa_Z(j)) in Eh
+};
+
 struct RevSettings {
     bool enabled = false;
     bool bond_weight = true;      ///< bond well  x  b_ij
@@ -339,6 +363,7 @@ public:
         std::set<std::pair<int, int>> bonded_pairs;
         std::vector<PartitionRanges> partitions;
         Vector eeq_charges, topology_charges, coul_chi_base, coul_gam, coul_alp, coul_cnf, coul_chi_static;
+        std::vector<SqePairData> sqe_pairs; ///< rev-gfnff stage 2: this corner's split-charge pairs
         double e0 = 0.0;
     };
     /// start a transition: params[m] is the parameter set of corner (m | 1 << k) for every existing corner m
@@ -350,6 +375,13 @@ public:
     const std::vector<Bond>& bonds() const { return m_bonds; } ///< bond list of the slot corner (fading wells are copied from here)
     /// called with the corner mask after that corner was swapped into the slot and before it is evaluated (per-corner EEQ charges)
     void setCornerPrepare(std::function<void(int)> f) { m_corner_prepare = std::move(f); }
+    /// rev-gfnff stage 2 (Sep 2026): install the split-charge pairs of the corner currently in the
+    /// slot. Called per step from the same callback that sets the corner's EEQ charges, so the data
+    /// travels with the corner through swapState().
+    void setSqePairs(std::vector<SqePairData> pairs) { m_sqe_pairs = std::move(pairs); }
+    /// rev-gfnff stage 2: pairs with b below this are treated as rigid (no hardness term)
+    void setSqeBmin(double b) { m_sqe_bmin = b; }
+    const std::vector<SqePairData>& sqePairs() const { return m_sqe_pairs; }
     void updateTransitions();
 
     /// Create partition ranges and allocate accumulators
@@ -460,6 +492,8 @@ private:
     std::shared_ptr<const GFNFFTables> m_tables = GFNFFTables::defaults(); ///< runtime tables (Sep 2026)
     RevSettings m_rev;         ///< rev-gfnff stage 1 (Sep 2026)
     Vector m_rev_bo_sum;       ///< per-atom sum_j b_ij BO_ij of the last step (rev mode)
+    std::vector<SqePairData> m_sqe_pairs; ///< rev-gfnff stage 2: split-charge pairs of the slot corner
+    double m_sqe_bmin = 1e-3;  ///< rev-gfnff stage 2: bond-order floor of the hardness term
     std::vector<RevTransition> m_transitions;      ///< stage 1b: transitions in flight (bit t of a corner mask)
     std::vector<TopologyState> m_corners;          ///< corner states by mask; the slot's own entry is a placeholder
     int m_slot_mask = 0;                           ///< which corner the member slot currently holds
@@ -585,6 +619,8 @@ private:
     }
     /// rev-gfnff: over-coordination energy + gradient, main thread, after the partitions (Sep 2026)
     void calcOverCoordination(bool gradient);
+    /// rev-gfnff stage 2: bond-hardness energy + gradient of the split charges (Sep 2026)
+    void calcSqeHardness(bool gradient);
     void calcDispersion(int p);
     void calcD4Dispersion(int p);
     void calcBondedRepulsion(int p);

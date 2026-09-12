@@ -1973,3 +1973,48 @@ void FFWorkspace::calcOverCoordination(bool gradient)
     apply(m_bonded_reps);
     apply(m_nonbonded_reps);
 }
+
+// ============================================================================
+// rev-gfnff stage 2: bond hardness of the split-charge model (Claude Generated, Sep 2026)
+//   E_sqe   = sum_(ij) 1/2 kappa_ij p_ij^2,   kappa_ij(b) = kappa0_ij / b_ij(r)
+//   dE/dr   = 1/2 p_ij^2 dkappa/db db/dr = -1/2 p_ij^2 kappa0_ij / b_ij^2 db_ij/dr
+// E is variational in p (the SQE system is solved to dE/dp = 0 before the kernel runs), so
+// the only explicit r-dependence left is b_ij — the p_ij are held fixed here. b is the same
+// bond order the over-coordination term uses (RevSettings::R2 / bo2_width).
+// Runs on the main thread after the partitions, next to calcOverCoordination().
+// docs/REV_GFNFF_STAGE2.md
+// ============================================================================
+
+void FFWorkspace::calcSqeHardness(bool gradient)
+{
+    if (m_sqe_pairs.empty() || m_natoms == 0)
+        return;
+    const double bmin = std::max(m_sqe_bmin, 1e-12);
+    double e_sqe = 0.0;
+    for (const SqePairData& sp : m_sqe_pairs) {
+        if (sp.i < 0 || sp.j < 0 || sp.i >= m_natoms || sp.j >= m_natoms)
+            continue;
+        if (sp.kappa0 == 0.0 || sp.p == 0.0)
+            continue;
+        Eigen::Vector3d ri = m_geometry.row(sp.i), rj = m_geometry.row(sp.j);
+        const Eigen::Vector3d d = ri - rj;
+        const double r = d.norm();
+        if (r < 1e-8)
+            continue;
+        double dbdr = 0.0;
+        const double b_raw = revOrder(sp.i, sp.j, r, gradient ? &dbdr : nullptr);
+        // Below the floor the pair is rigid: the solver has already forced p = 0 there, and
+        // clamping keeps kappa (and its derivative) finite if a pair drifts out mid-step.
+        const bool clamped = (b_raw <= bmin);
+        const double b = clamped ? bmin : b_raw;
+        const double pp = sp.p * sp.p;
+        e_sqe += 0.5 * sp.kappa0 * pp / b;
+        if (!gradient || clamped)
+            continue;
+        const double dEdr = -0.5 * pp * sp.kappa0 / (b * b) * dbdr;
+        const Eigen::Vector3d g = (dEdr / r) * d;
+        m_result_gradient.row(sp.i) += g.transpose();
+        m_result_gradient.row(sp.j) -= g.transpose();
+    }
+    m_result_energy.sqe_hardness += e_sqe;
+}

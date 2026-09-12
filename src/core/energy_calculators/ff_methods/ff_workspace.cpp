@@ -303,6 +303,10 @@ double FFWorkspace::calculateSingle(bool gradient)
     // bond-order sums, so it runs once on the main thread after the partitions.
     if (m_rev.enabled && m_rev.over_coord && m_method_type == FFMethodType::GFN_FF)
         calcOverCoordination(gradient);
+    // rev-gfnff stage 2 (Sep 2026): the bond-hardness term of the split-charge model. Same
+    // place as E_over: it is a per-pair term over the whole corner, not a partitioned list.
+    if (m_rev.enabled && !m_sqe_pairs.empty() && m_method_type == FFMethodType::GFN_FF)
+        calcSqeHardness(gradient);
 
     t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     postProcess(gradient);
@@ -327,6 +331,7 @@ double FFWorkspace::calculateSingle(bool gradient)
         fmt::print("  hbond     = {:+.15e}\n", m_result_energy.hbond);
         fmt::print("  xbond     = {:+.15e}\n", m_result_energy.xbond);
         fmt::print("  overcoord = {:+.15e}\n", m_result_energy.over_coord);
+        fmt::print("  sqe_hard  = {:+.15e}\n", m_result_energy.sqe_hardness);
         CurcumaLogger::info("=== CPU ENERGY END ===");
     }
 
@@ -618,6 +623,7 @@ void FFWorkspace::swapState(TopologyState& st)
     std::swap(m_coul_alp, st.coul_alp);
     std::swap(m_coul_cnf, st.coul_cnf);
     std::swap(m_coul_chi_static, st.coul_chi_static);
+    std::swap(m_sqe_pairs, st.sqe_pairs); // rev-gfnff stage 2: the corner's split charges travel with it
     std::swap(m_e0, st.e0);
 }
 
@@ -724,6 +730,7 @@ static void addScaledComponents(FFEnergyComponents& a, const FFEnergyComponents&
     a.bonded_rep += w * b.bonded_rep; a.nonbonded_rep += w * b.nonbonded_rep;
     a.coulomb += w * b.coulomb; a.hbond += w * b.hbond; a.xbond += w * b.xbond;
     a.atm += w * b.atm; a.batm += w * b.batm; a.stors += w * b.stors; a.over_coord += w * b.over_coord;
+    a.sqe_hardness += w * b.sqe_hardness;
     a.hbond_case1 += w * b.hbond_case1; a.hbond_case2 += w * b.hbond_case2; a.hbond_case3 += w * b.hbond_case3; a.hbond_case4 += w * b.hbond_case4;
 }
 

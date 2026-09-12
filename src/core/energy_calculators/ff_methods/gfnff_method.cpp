@@ -129,9 +129,13 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
     row("X-bonds",             r.xbond,        r.t_xbond);
     row("ATM (3-body)",        r.atm,          r.t_atm);
     row("BATM",                r.batm,         r.t_batm);
-    if (r.over_coord != 0.0) {
+    if (r.over_coord != 0.0 || r.sqe_hardness != 0.0) {
         CurcumaLogger::result("  rev-gfnff:");
-        row("OverCoord",           r.over_coord,   TT{});
+        if (r.over_coord != 0.0)
+            row("OverCoord",           r.over_coord,   TT{});
+        // rev-gfnff stage 2 (Sep 2026): 1/2 kappa0_ij / b_ij p_ij^2 summed over the bond graph
+        if (r.sqe_hardness != 0.0)
+            row("SqeHardness",         r.sqe_hardness, TT{});
     }
     CurcumaLogger::result("  ═════════════════════════════════════════════════════════════════");
     CurcumaLogger::result(fmt::format("  {:<22} {:>+16.10f}", "Total", r.total));
@@ -1393,7 +1397,11 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         // solve did not include. Force the Phase-2 solve so m_charges is solvated.
         // The reaction field is geometry-only, so re-solving at an unchanged geometry
         // gives the same result (negligible redundant cost for solvated runs).
-        && !m_solvation;
+        && !m_solvation
+        // rev-gfnff stage 2 (Sep 2026): the charges cached by the topology-initialisation
+        // Phase 2 are the CONSTRAINED EEQ ones - they are not the split-charge solution and
+        // carry no p values for the hardness kernel, so the SQE solve must always run here.
+        && !m_rev_sqe;
     if (eeq_charges_current && CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("GFN-FF: Skipping redundant Phase-2 EEQ (geometry unchanged)");
     }
@@ -1511,11 +1519,14 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         Vector new_charges;
         if (do_eeq && !skip_eeq && !eeq_charges_current) {
             t0 = std::chrono::high_resolution_clock::now();
-            new_charges = m_eeq_solver->calculateFinalCharges(
-                m_atoms, m_geometry_bohr, m_charge,
-                topo_ptr->topology_charges, m_last_cn,
-                topo_ptr->hybridization, m_eeq_topo_cache,
-                true, topo_ptr->alpeeq, pool, total_threads);
+            new_charges = m_rev_sqe
+                ? revSolveSplitCharges(revSlotCorner(*topo_ptr), topo_ptr->topology_charges,
+                      topo_ptr->hybridization, m_eeq_topo_cache, topo_ptr->alpeeq, pool, total_threads)
+                : m_eeq_solver->calculateFinalCharges(
+                    m_atoms, m_geometry_bohr, m_charge,
+                    topo_ptr->topology_charges, m_last_cn,
+                    topo_ptr->hybridization, m_eeq_topo_cache,
+                    true, topo_ptr->alpeeq, pool, total_threads);
             if (do_timing) {
                 t_eeq_solve = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
             }
@@ -1568,11 +1579,14 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             // Mirrors the gradient-path call at gfnff_method.cpp:1025-1029.
             auto* pool = threadPool();
             if (pool) pool->setActiveThreadCount(m_threads);
-            Vector new_charges = m_eeq_solver->calculateFinalCharges(
-                m_atoms, m_geometry_bohr, m_charge,
-                topo_ptr->topology_charges, m_last_cn,
-                topo_ptr->hybridization, m_eeq_topo_cache,
-                true, topo_ptr->alpeeq, pool, m_threads);
+            Vector new_charges = m_rev_sqe
+                ? revSolveSplitCharges(revSlotCorner(*topo_ptr), topo_ptr->topology_charges,
+                      topo_ptr->hybridization, m_eeq_topo_cache, topo_ptr->alpeeq, pool, m_threads)
+                : m_eeq_solver->calculateFinalCharges(
+                    m_atoms, m_geometry_bohr, m_charge,
+                    topo_ptr->topology_charges, m_last_cn,
+                    topo_ptr->hybridization, m_eeq_topo_cache,
+                    true, topo_ptr->alpeeq, pool, m_threads);
             if (do_timing) {
                 t_eeq_solve = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
             }
@@ -2872,6 +2886,7 @@ double GFNFF::Calculation(bool gradient)
             rep.atm           = comp.atm;
             rep.batm          = comp.batm;
             rep.over_coord    = comp.over_coord; // rev-gfnff stage 1 (Sep 2026)
+            rep.sqe_hardness  = comp.sqe_hardness; // rev-gfnff stage 2 (Sep 2026)
         }
         rep.total = m_energy_total;
 
@@ -3308,6 +3323,11 @@ std::string GFNFF::computeTopologyFingerprint() const
             data += fmt::format(",p{}={:.5f}", kv.first, kv.second);
         for (const auto& kv : m_rev_valence)
             data += fmt::format(",v{}={:.3f}", kv.first, kv.second);
+        // stage 2 (Sep 2026): the charge model and its kappa_Z change the charges the cache
+        // stores (Phase-1 charges, alpeeq, the whole Coulomb block), so they belong here too
+        data += fmt::format("|SQE={},{:.6g}", m_rev_sqe ? 1 : 0, m_rev_sqe_bmin);
+        for (const auto& kv : m_rev_sqe_kappa)
+            data += fmt::format(",k{}={:.6f}", kv.first, kv.second);
     }
     // Use std::hash for a fast, non-cryptographic fingerprint
     size_t hash = std::hash<std::string>{}(data);
@@ -12039,6 +12059,49 @@ void GFNFF::setupRevSettings()
     if (rev.contains("valence"))
         for (const auto& [z, v] : rev["valence"].items())
             m_rev_valence[std::stoi(z)] = v.get<double>();
+    // ---- rev-gfnff stage 2 (Claude Generated, Sep 2026): split-charge model ------------------
+    {
+        std::string cm = m_parameters.value("rev_charge_model", std::string("eeq"));
+        if (rev.contains("charge_model") && rev["charge_model"].is_string())
+            cm = rev["charge_model"].get<std::string>();
+        std::transform(cm.begin(), cm.end(), cm.begin(), [](unsigned char c) { return std::tolower(c); });
+        if (cm != "eeq" && cm != "sqe")
+            throw std::runtime_error("rev-gfnff: rev_charge_model must be eeq or sqe, got '" + cm + "'");
+        // hard gate on rev_enabled: plain `gfnff` must stay bit-identical even if someone
+        // passes -gfnff.rev_charge_model sqe to it (the per-atom rev tables are not filled there)
+        m_rev_sqe = (cm == "sqe") && rv.enabled;
+        m_rev_sqe_bmin = m_parameters.value("rev_sqe_bmin", 1e-3);
+        if (rev.contains("sqe_bmin"))
+            m_rev_sqe_bmin = rev["sqe_bmin"].get<double>();
+        m_rev_sqe_kappa.clear();
+        // the six fitted elements of the design; every other element keeps kappa_Z = 0
+        static const std::pair<const char*, int> kappa_elements[] = {
+            { "rev_sqe_kappa_H", 1 }, { "rev_sqe_kappa_C", 6 }, { "rev_sqe_kappa_N", 7 },
+            { "rev_sqe_kappa_O", 8 }, { "rev_sqe_kappa_F", 9 }, { "rev_sqe_kappa_Cl", 17 }
+        };
+        for (const auto& [name, Z] : kappa_elements) {
+            const double v = m_parameters.value(name, 0.0);
+            if (v != 0.0)
+                m_rev_sqe_kappa[Z] = v;
+        }
+        // the rev section wins (that is what a fit writes): a scalar sets every element that
+        // has a PARAM, a map sets individual atomic numbers
+        if (rev.contains("sqe_kappa")) {
+            if (rev["sqe_kappa"].is_number()) {
+                const double v = rev["sqe_kappa"].get<double>();
+                for (const auto& [name, Z] : kappa_elements)
+                    m_rev_sqe_kappa[Z] = v;
+            } else {
+                for (const auto& [z, v] : rev["sqe_kappa"].items())
+                    m_rev_sqe_kappa[std::stoi(z)] = v.get<double>();
+            }
+        }
+        for (const auto& kv : m_rev_sqe_kappa)
+            if (kv.second < 0.0)
+                throw std::runtime_error("rev-gfnff: rev_sqe_kappa must not be negative (the hardness matrix would lose definiteness)");
+        if (cm == "sqe" && !rv.enabled)
+            CurcumaLogger::warn("rev-gfnff: rev_charge_model=sqe has no effect while rev_enabled is false (use -method revgfnff)");
+    }
     if (rv.bo_width >= 0.0 || rv.bo2_width >= 0.0)
         throw std::runtime_error("rev-gfnff: rev_bo_width and rev_bo2_width must be negative (b -> 1 inside the switching radius)");
 }
@@ -12068,7 +12131,7 @@ void GFNFF::fillRevPerAtom()
 // rev-gfnff stage 1b (Claude Generated, Sep 12, 2026): multi-transition corner bookkeeping
 // ============================================================================================
 
-GFNFF::CornerEEQ GFNFF::captureCornerEEQ()
+GFNFF::CornerEEQ GFNFF::captureCornerEEQ(bool corner_generation)
 {
     CornerEEQ ce;
     const TopologyInfo& topo = getCachedTopology();
@@ -12087,7 +12150,200 @@ GFNFF::CornerEEQ GFNFF::captureCornerEEQ()
         ti.covalent_radii[i] = (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) ? GFNFFParameters::covalent_radii[z - 1] : 1.0;
     }
     ce.topo = std::move(ti);
+    // rev-gfnff stage 2 (Claude Generated, Sep 2026): the corner's split-charge model.
+    // The pair set follows the corner's bond graph; q0 is frozen here, at s = 0, which is the
+    // whole point of the design's corner rule - the discrete decision is taken where the
+    // corner's blend weight is zero, so it can never produce an energy jump.
+    if (m_rev_sqe) {
+        ce.sqe_pairs = revSqePairs(ce.topo->neighbor_lists);
+        const bool have_q = (m_charges.size() == m_atomcount) && m_charges.allFinite();
+        ce.q0 = (corner_generation && have_q) ? revSqeQ0Rounded(ce, m_charges)
+                                              : revSqeQ0Fragments(*ce.topo);
+    }
     return ce;
+}
+
+// ============================================================================================
+// rev-gfnff stage 2 (Claude Generated, Sep 2026): the split-charge model on the GFNFF side
+// docs/REV_GFNFF_STAGE2.md
+// ============================================================================================
+
+std::vector<std::pair<int, int>> GFNFF::revSqePairs(const std::vector<std::vector<int>>& neighbor_lists) const
+{
+    // "the corner's topology bond list (fading wells included) plus the pairs of transitions
+    // in flight" - a pair the corner does not (yet) call a bond still has to be able to carry
+    // charge, otherwise the charge would jump when it joins the list.
+    std::set<std::pair<int, int>> set;
+    auto add = [&](int i, int j) {
+        if (i < 0 || j < 0 || i == j || i >= m_atomcount || j >= m_atomcount)
+            return;
+        set.emplace(std::min(i, j), std::max(i, j));
+    };
+    for (int i = 0; i < static_cast<int>(neighbor_lists.size()); ++i)
+        for (int j : neighbor_lists[i])
+            add(i, j);
+    for (const Bond& b : m_rev_fading)
+        add(b.i, b.j);
+    if (m_workspace)
+        for (const RevTransition& tr : m_workspace->transitions())
+            add(tr.i, tr.j);
+    if (m_rev_pending)
+        add(m_rev_pending_tr.i, m_rev_pending_tr.j);
+    return std::vector<std::pair<int, int>>(set.begin(), set.end());
+}
+
+Vector GFNFF::revSqeQ0Fragments(const EEQSolver::TopologyInput& ti) const
+{
+    // Initialisation rule: the integer fragment charges (today's reference rule - whole charge
+    // on fragment 0, `-charge` / .CHRG as before) spread uniformly over the fragment's atoms.
+    // Inside a bonded fragment the increments p equalise the charges again, so where exactly
+    // the charge sits is immaterial in the kappa -> 0 limit.
+    Vector q0 = Vector::Zero(m_atomcount);
+    const int nfrag = std::max(1, ti.nfrag);
+    const bool have_frag = static_cast<int>(ti.fraglist.size()) >= m_atomcount;
+    std::vector<int> count(nfrag, 0);
+    for (int i = 0; i < m_atomcount; ++i) {
+        const int f = have_frag ? (ti.fraglist[i] - 1) : 0;
+        if (f >= 0 && f < nfrag)
+            count[f]++;
+    }
+    for (int i = 0; i < m_atomcount; ++i) {
+        const int f = have_frag ? (ti.fraglist[i] - 1) : 0;
+        if (f < 0 || f >= nfrag || count[f] == 0)
+            continue;
+        const double qf = (f < static_cast<int>(ti.qfrag.size()))
+            ? ti.qfrag[f]
+            : (f == 0 ? static_cast<double>(m_charge) : 0.0);
+        q0(i) = qf / static_cast<double>(count[f]);
+    }
+    // safety net: the sum must be the molecular charge, otherwise the SQE solve would drift
+    const double miss = static_cast<double>(m_charge) - q0.sum();
+    if (std::abs(miss) > 1e-9 && m_atomcount > 0)
+        q0.array() += miss / static_cast<double>(m_atomcount);
+    return q0;
+}
+
+Vector GFNFF::revSqeQ0Rounded(const CornerEEQ& ce, const Vector& q_now) const
+{
+    // Corner-generation rule of the design: Q_f = round(sum_(i in f) q_i), with
+    // sum_f Q_f = Q_total enforced by moving the residual to the fragment with the lowest EEQ
+    // chemical potential mu_f = mean_i (chi_i - sum_j A_ij q_j) - the most electronegative
+    // side keeps the electron. (The design states the electron case; a leftover HOLE is placed
+    // symmetrically on the HIGHEST mu, i.e. the least electronegative fragment.)
+    if (!ce.topo.has_value())
+        return Vector::Zero(m_atomcount);
+    const EEQSolver::TopologyInput& ti = *ce.topo;
+    const int nfrag = std::max(1, ti.nfrag);
+    const bool have_frag = static_cast<int>(ti.fraglist.size()) >= m_atomcount;
+    std::vector<int> count(nfrag, 0);
+    std::vector<double> sum(nfrag, 0.0);
+    auto frag_of = [&](int i) {
+        const int f = have_frag ? (ti.fraglist[i] - 1) : 0;
+        return (f >= 0 && f < nfrag) ? f : 0;
+    };
+    for (int i = 0; i < m_atomcount; ++i) {
+        const int f = frag_of(i);
+        count[f]++;
+        sum[f] += q_now(i);
+    }
+    std::vector<double> Q(nfrag, 0.0);
+    double placed = 0.0;
+    for (int f = 0; f < nfrag; ++f) {
+        Q[f] = std::round(sum[f]);
+        placed += Q[f];
+    }
+    const double residual = static_cast<double>(m_charge) - placed;
+    if (std::abs(residual) > 1e-9) {
+        int target = 0;
+        if (nfrag > 1 && m_eeq_solver && m_last_cn.size() == m_atomcount) {
+            Vector mu = m_eeq_solver->calculateChemicalPotential(
+                m_atoms, m_geometry_bohr, m_charge, q_now, ce.topology_charges, m_last_cn,
+                ce.hybridization, ce.topo, true, ce.alpeeq);
+            if (mu.size() == m_atomcount) {
+                std::vector<double> mu_f(nfrag, 0.0);
+                for (int i = 0; i < m_atomcount; ++i)
+                    mu_f[frag_of(i)] += mu(i);
+                for (int f = 0; f < nfrag; ++f)
+                    if (count[f] > 0)
+                        mu_f[f] /= static_cast<double>(count[f]);
+                double best = mu_f[0];
+                for (int f = 1; f < nfrag; ++f) {
+                    const bool better = (residual < 0.0) ? (mu_f[f] < best) : (mu_f[f] > best);
+                    if (better) { best = mu_f[f]; target = f; }
+                }
+            }
+        }
+        Q[target] += residual;
+    }
+    Vector q0 = Vector::Zero(m_atomcount);
+    for (int i = 0; i < m_atomcount; ++i) {
+        const int f = frag_of(i);
+        if (count[f] > 0)
+            q0(i) = Q[f] / static_cast<double>(count[f]);
+    }
+    return q0;
+}
+
+GFNFF::CornerEEQ GFNFF::revSlotCorner(const TopologyInfo& topo) const
+{
+    CornerEEQ ce;
+    ce.sqe_pairs = revSqePairs(topo.neighbor_lists);
+    // q0 is a discrete decision and must NOT be re-taken every step: while a transition set is
+    // in flight the all-ones corner's q0 was frozen when that corner was created (s = 0). Only
+    // outside a transition (static single point, plain MD step) is it the initialisation rule.
+    if (!m_rev_corner_eeq.empty() && m_rev_corner_eeq.back().q0.size() == m_atomcount) {
+        ce.q0 = m_rev_corner_eeq.back().q0;
+    } else if (m_eeq_topo_cache.has_value()) {
+        ce.q0 = revSqeQ0Fragments(*m_eeq_topo_cache);
+    } else {
+        ce.q0 = Vector::Constant(m_atomcount, m_atomcount > 0 ? static_cast<double>(m_charge) / m_atomcount : 0.0);
+    }
+    return ce;
+}
+
+Vector GFNFF::revSolveSplitCharges(const CornerEEQ& ce, const Vector& topology_charges,
+    const std::vector<int>& hybridization, const std::optional<EEQSolver::TopologyInput>& topo,
+    const std::optional<Vector>& alpeeq, CxxThreadPool* pool, int threads)
+{
+    // b is taken from the E_over switch (RevSettings::R2 / bo2_width) at the CURRENT geometry,
+    // exactly as the over-coordination sums and the repulsion blend do; kappa0 mixes the two
+    // element parameters. The same list then goes to the workspace so its hardness kernel and
+    // the solve see one and the same (b, p, kappa0).
+    const RevSettings& rv = m_rev_settings;
+    std::vector<EEQSolver::SqePair> pairs;
+    pairs.reserve(ce.sqe_pairs.size());
+    const bool have_rcov = static_cast<int>(rv.rcov.size()) == m_atomcount && static_cast<int>(rv.fat.size()) == m_atomcount;
+    for (const auto& pr : ce.sqe_pairs) {
+        EEQSolver::SqePair sp;
+        sp.i = pr.first;
+        sp.j = pr.second;
+        const double dx = m_geometry_bohr(sp.i, 0) - m_geometry_bohr(sp.j, 0);
+        const double dy = m_geometry_bohr(sp.i, 1) - m_geometry_bohr(sp.j, 1);
+        const double dz = m_geometry_bohr(sp.i, 2) - m_geometry_bohr(sp.j, 2);
+        const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
+        sp.b = have_rcov ? RevGFNFF::bondOrder(r, rv.R2(sp.i, sp.j), rv.bo2_width, nullptr) : 1.0;
+        sp.kappa0 = 0.5 * (revSqeKappa(m_atoms[sp.i]) + revSqeKappa(m_atoms[sp.j]));
+        pairs.push_back(sp);
+    }
+    Vector p;
+    Vector q = m_eeq_solver->calculateSplitCharges(m_atoms, m_geometry_bohr, m_charge, ce.q0,
+        topology_charges, m_last_cn, hybridization, topo, pairs, m_rev_sqe_bmin, &p, true,
+        alpeeq, pool, threads);
+    if (m_workspace) {
+        std::vector<SqePairData> data;
+        data.reserve(pairs.size());
+        for (int k = 0; k < static_cast<int>(pairs.size()); ++k) {
+            SqePairData d;
+            d.i = pairs[k].i;
+            d.j = pairs[k].j;
+            d.p = (p.size() > k) ? p(k) : 0.0;
+            d.kappa0 = pairs[k].kappa0;
+            data.push_back(d);
+        }
+        m_workspace->setSqeBmin(m_rev_sqe_bmin);
+        m_workspace->setSqePairs(std::move(data));
+    }
+    return q;
 }
 
 void GFNFF::appendFadingWells(GFNFFParameterSet& params) const
@@ -12187,8 +12443,13 @@ void GFNFF::installCornerPrepare()
             return;
         m_eeq_solver->invalidateCholeskyCache();
         m_eeq_solver->invalidateMatrixCache();
-        Vector q = m_eeq_solver->calculateFinalCharges(m_atoms, m_geometry_bohr, m_charge, ce.topology_charges, m_last_cn,
-            ce.hybridization, ce.topo, true, ce.alpeeq, threadPool(), m_threads);
+        // rev-gfnff stage 2 (Sep 2026): this corner's charges come from its own split-charge
+        // system (its pair set, its frozen q0), and its p values are installed into the slot,
+        // which currently holds this corner - so they travel back out with swapState().
+        Vector q = (m_rev_sqe && ce.q0.size() == m_atomcount)
+            ? revSolveSplitCharges(ce, ce.topology_charges, ce.hybridization, ce.topo, ce.alpeeq, threadPool(), m_threads)
+            : m_eeq_solver->calculateFinalCharges(m_atoms, m_geometry_bohr, m_charge, ce.topology_charges, m_last_cn,
+                ce.hybridization, ce.topo, true, ce.alpeeq, threadPool(), m_threads);
         m_eeq_solver->invalidateCholeskyCache();
         m_eeq_solver->invalidateMatrixCache();
         if (q.size() == m_atomcount && q.allFinite())
@@ -12267,8 +12528,31 @@ void GFNFF::finishTransition(int t, bool keep_new, const char* why)
             appendFadingWells(p);
             m_cached_parameter_set = makeParameterSetCache(p);
             m_workspace->rebuildInteractionLists(std::move(p));
-            if (!m_rev_corner_eeq.empty())
+            if (!m_rev_corner_eeq.empty()) {
+                // rev-gfnff stage 2 (Sep 2026): a revert returns to a corner that ALREADY
+                // EXISTS - its q0 was frozen when that corner was created. Re-deriving it here
+                // would re-take the discrete decision at a moment when the blend weight is not
+                // zero, which is exactly the jump the design's "applied when the corner is
+                // created, never at completion" rule exists to avoid. Measured on the SN2 demo:
+                // re-deriving cost -17.7 kJ/mol at an s = 0 revert, keeping it costs 0.0.
+                Vector q0_keep = m_rev_corner_eeq.back().q0;
                 m_rev_corner_eeq.back() = captureCornerEEQ();
+                if (m_rev_sqe && q0_keep.size() == m_atomcount)
+                    m_rev_corner_eeq.back().q0 = std::move(q0_keep);
+                // setInteractionLists() has just re-installed the parameter set's CONSTRAINED
+                // EEQ charges, which are not the split-charge solution. The next
+                // prepareCNAndEEQ() would fix that before any energy is used, but the jump
+                // measured a few lines below would then compare two different charge models
+                // and report a jump that never happens (measured: -17.7 kJ/mol on the SN2
+                // demo). Re-solve here so the diagnostic describes what actually runs.
+                const CornerEEQ& ce = m_rev_corner_eeq.back();
+                if (m_rev_sqe && m_eeq_solver && ce.q0.size() == m_atomcount && m_last_cn.size() == m_atomcount) {
+                    Vector q = revSolveSplitCharges(ce, ce.topology_charges, ce.hybridization, ce.topo,
+                        ce.alpeeq, threadPool(), m_threads);
+                    if (q.size() == m_atomcount && q.allFinite())
+                        m_workspace->setEEQCharges(q);
+                }
+            }
         } catch (const std::exception& e) {
             CurcumaLogger::error(std::string("REACT stage 1b: regeneration after a reverted transition failed: ") + e.what());
         }

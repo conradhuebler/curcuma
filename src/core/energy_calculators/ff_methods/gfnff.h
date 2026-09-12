@@ -120,6 +120,7 @@ struct GFNFFEnergyReport {
     double dispersion = 0, bonded_rep = 0, nonbonded_rep = 0;
     double coulomb = 0, hbond = 0, xbond = 0, atm = 0, batm = 0;
     double over_coord = 0;   // rev-gfnff stage 1 (Sep 2026)
+    double sqe_hardness = 0; // rev-gfnff stage 2 (Sep 2026)
     // Claude Generated (May 2026, HB-investigation): per-case HB diagnostic split.
     // hbond = case1 + case2 + case3 + case4. Counts compare against Fortran nhb1/nhb2.
     double hbond_case1 = 0, hbond_case2 = 0, hbond_case3 = 0, hbond_case4 = 0;
@@ -358,6 +359,20 @@ PARAM(rev_bo_form, Double, 0.05, "rev-gfnff react scan: a non-bonded pair (never
 PARAM(rev_bo_break, Double, 0.02, "rev-gfnff react scan: a bond leaves the list once its term weight falls below this value.", "Reactive", {})
 PARAM(rev_over_p, Double, 0.3, "rev-gfnff: default over-coordination prefactor p_Z in Eh (per-element values via the rev.p_over override).", "Reactive", {})
 PARAM(rev_over_k, Double, 10.0, "rev-gfnff: softplus steepness of the over-coordination penalty.", "Reactive", {})
+// ---- rev-gfnff stage 2 (Claude Generated, Sep 2026): split-charge (SQE) model ---------------
+// docs/REV_GFNFF_STAGE2.md. q_i = q0_i + sum_j p_ij with a per-bond hardness
+// kappa_ij = kappa0_ij / b_ij; kappa0_ij = 1/2 (kappa_Z(i) + kappa_Z(j)). kappa -> 0 on a
+// connected bond graph reproduces the constrained EEQ minimum exactly, b -> 0 pins the charge
+// on the separating fragment, so the model interpolates continuously between the two limits
+// that today's discrete fragment count brackets.
+PARAM(rev_charge_model, String, "eeq", "rev-gfnff stage 2: charge model. eeq = today's per-fragment constrained EEQ; sqe = split charges on the bond graph with a per-bond hardness kappa_ij = kappa0_ij / b_ij (no fragment constraint). Default eeq until the kappa_Z fit is done.", "Reactive", {})
+PARAM(rev_sqe_kappa_H, Double, 0.0, "rev-gfnff stage 2: bond-hardness parameter kappa_Z of hydrogen (Eh). 0 = the pair costs nothing to polarise, i.e. the connected-graph EEQ limit.", "Reactive", {})
+PARAM(rev_sqe_kappa_C, Double, 0.0, "rev-gfnff stage 2: bond-hardness parameter kappa_Z of carbon (Eh).", "Reactive", {})
+PARAM(rev_sqe_kappa_N, Double, 0.0, "rev-gfnff stage 2: bond-hardness parameter kappa_Z of nitrogen (Eh).", "Reactive", {})
+PARAM(rev_sqe_kappa_O, Double, 0.0, "rev-gfnff stage 2: bond-hardness parameter kappa_Z of oxygen (Eh).", "Reactive", {})
+PARAM(rev_sqe_kappa_F, Double, 0.0, "rev-gfnff stage 2: bond-hardness parameter kappa_Z of fluorine (Eh).", "Reactive", {})
+PARAM(rev_sqe_kappa_Cl, Double, 0.0, "rev-gfnff stage 2: bond-hardness parameter kappa_Z of chlorine (Eh).", "Reactive", {})
+PARAM(rev_sqe_bmin, Double, 1e-3, "rev-gfnff stage 2: a pair whose bond order falls below this is dropped from the split-charge system (its hardness kappa0/b would exceed 1000 kappa0, i.e. it is rigid).", "Reactive", {})
 PARAM(storsion_reference_loop_bug, Bool, false, "Reproduce the reference implementation's triple-bond-torsion (sTors) loop bug bit-for-bit. Both pprcht/gfnff and xtb 6.7.1 call sTors_eg(m,...) with the array SIZE m instead of the loop index, so they evaluate only the LAST detected C-triplebond-C torsion, m times, and drop all others (and give exactly zero whenever the last slot was never filled). Curcuma sums every detected torsion, which is what the term is meant to do - its erefhalf is a DLPNO-CCSD(T) diphenylacetylene reference value, not a fitted parameter. Enable only to reproduce reference totals exactly.", "Advanced", {})
 PARAM(param_file, String, "", "rev-gfnff: JSON file with sparse parameter overrides ({gen:{...}, tables:{name:{Z:value}}, rev:{...}}) deep-merged over the built-in GFN-FF tables; unknown keys abort.", "Advanced", {})
 PARAM(param_json, String, "", "rev-gfnff: the same override document given inline as a JSON string; merged after param_file.", "Advanced", {})
@@ -2112,6 +2127,8 @@ public:
     double BatmEnergy() const;
     /// rev-gfnff stage 1: over-coordination energy of the last calculation (0 unless enabled)
     double OverCoordEnergy() const { return m_workspace ? m_workspace->energyComponents().over_coord : 0.0; }
+    /// rev-gfnff stage 2 (Sep 2026): bond-hardness energy of the split-charge model
+    double SqeHardnessEnergy() const { return m_workspace ? m_workspace->energyComponents().sqe_hardness : 0.0; }
 
     // Claude Generated (April 2026): PBC accessors for GPU path
     bool hasPBC() const { return m_has_pbc; }
@@ -2411,6 +2428,13 @@ private:
         std::vector<int> hybridization;
         std::optional<EEQSolver::TopologyInput> topo;
         std::optional<Vector> alpeeq;
+        // rev-gfnff stage 2 (Sep 2026): the corner's split-charge model. `q0` is the ONE
+        // discrete decision left (docs/REV_GFNFF_STAGE2.md) and is frozen when the corner is
+        // created, at s = 0, so no energy jump can come from it; `sqe_pairs` is the corner's
+        // bond list (fading wells included) plus the pairs of the transitions in flight, the
+        // bond order b of each pair being taken at the current geometry every step.
+        Vector q0;
+        std::vector<std::pair<int, int>> sqe_pairs;
     };
     bool m_rev_pending = false;                    ///< the next rebuild starts m_rev_pending_tr
     RevTransition m_rev_pending_tr;
@@ -2420,7 +2444,11 @@ private:
     std::vector<std::pair<int, int>> m_rev_base_bonds; ///< topology before the first transition of a set
     CornerEEQ m_rev_base_eeq;
     void loadParameterOverrides();                 ///< param_file / param_json tables + rev settings (ctor and setParameters)
-    CornerEEQ captureCornerEEQ();                  ///< EEQ inputs of the currently cached topology
+    /// EEQ inputs of the currently cached topology. `corner_generation` picks the q0 rule of
+    /// the design: true = round the current fragment charge sums (a corner created by a
+    /// topology event), false = the initialisation rule (integer fragment charges of qfrag
+    /// spread uniformly). Falls back to the initialisation rule when no charges exist yet.
+    CornerEEQ captureCornerEEQ(bool corner_generation = true);
     bool prepareTransitionCorners(std::vector<GFNFFParameterSet>& out); ///< generate the new corners except the all-ones one
     void appendFadingWells(GFNFFParameterSet& params) const;
     void installCornerPrepare();                   ///< per-corner EEQ solve callback into the workspace
@@ -2428,6 +2456,28 @@ private:
     void finishTransition(int t, bool keep_new, const char* why); ///< complete / revert / snap one transition (measured jump)
     void snapTransition(int t, const char* why, std::vector<std::pair<int, int>>* next);
     std::map<int, double> m_rev_p_over, m_rev_valence;  ///< per-element overrides from the rev section of the tables
+    // ---- rev-gfnff stage 2 (Claude Generated, Sep 2026): split-charge model ------------------
+    bool m_rev_sqe = false;                     ///< rev_charge_model == "sqe"
+    double m_rev_sqe_bmin = 1e-3;               ///< pairs below this bond order are rigid
+    std::map<int, double> m_rev_sqe_kappa;      ///< Z -> kappa_Z (Eh); absent = 0
+    double revSqeKappa(int Z) const { auto it = m_rev_sqe_kappa.find(Z); return it == m_rev_sqe_kappa.end() ? 0.0 : it->second; }
+    /// the pair set of a corner: its bond graph + the fading wells + the pairs in transition
+    std::vector<std::pair<int, int>> revSqePairs(const std::vector<std::vector<int>>& neighbor_lists) const;
+    /// q0 of the initialisation rule: the integer fragment charges of qfrag, uniform per atom
+    Vector revSqeQ0Fragments(const EEQSolver::TopologyInput& ti) const;
+    /// q0 of the corner-generation rule: rounded fragment sums of `q_now`, residual to the
+    /// fragment with the lowest (highest) EEQ chemical potential when an electron (a hole) is left over
+    Vector revSqeQ0Rounded(const CornerEEQ& ce, const Vector& q_now) const;
+    /// the split-charge data of the SLOT corner (the expected topology): its pair set comes
+    /// from the current cached topology, its q0 from the stored all-ones corner if a transition
+    /// set exists (frozen at creation) and otherwise from the initialisation rule
+    CornerEEQ revSlotCorner(const TopologyInfo& topo) const;
+    /// solve the split-charge system of one corner and push its p values into the workspace slot
+    Vector revSolveSplitCharges(const CornerEEQ& ce, const Vector& topology_charges,
+                                const std::vector<int>& hybridization,
+                                const std::optional<EEQSolver::TopologyInput>& topo,
+                                const std::optional<Vector>& alpeeq,
+                                CxxThreadPool* pool, int threads);
     void setupRevSettings();                    ///< fill m_rev_settings from PARAMs + tables (ctor) 
     void fillRevPerAtom();                      ///< per-atom rcov/fat/p/valence (after the atoms are known)
     double revValence(int Z) const;             ///< nominal sigma valence of an element

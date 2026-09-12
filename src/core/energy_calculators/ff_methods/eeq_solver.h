@@ -137,6 +137,27 @@ public:
     };
 
     /**
+     * @brief One bond-graph pair of the split-charge (SQE) model
+     *
+     * rev-gfnff stage 2 (Claude Generated, Sep 2026, docs/REV_GFNFF_STAGE2.md).
+     * A pair carries a split charge p_ij (p_ji = -p_ij); the atomic charge is
+     * q_i = q0_i + sum_j p_ij. Its hardness is kappa_ij(b) = kappa0_ij / b_ij, i.e.
+     * the harder the weaker the bond: a pair with b -> 0 cannot move any charge and
+     * the two sides fall back to their reference charges q0.
+     *
+     * `b` is the bond order of the E_over switch (RevSettings::R2 / bo2_width) at the
+     * CURRENT geometry, `kappa0` the element mixing 1/2 (kappa_Z(i) + kappa_Z(j)) in Eh.
+     * The mixing is done by the caller (GFNFF) because the very same list also feeds the
+     * workspace hardness kernel — see the note on calculateSplitCharges().
+     */
+    struct SqePair {
+        int i = -1;         ///< first atom of the pair
+        int j = -1;         ///< second atom (p_ij flows i -> j: q_i += p, q_j -= p)
+        double b = 0.0;     ///< bond order of the pair at the current geometry
+        double kappa0 = 0.0;///< 1/2 (kappa_Z(i) + kappa_Z(j)) in Eh
+    };
+
+    /**
      * @brief Construct EEQ solver from configuration
      * @param config ConfigManager with eeq_solver parameters
      */
@@ -303,6 +324,92 @@ public:
     );
 
     /**
+     * @brief Split-charge (SQE) charges on a bond graph — rev-gfnff stage 2
+     *
+     * Claude Generated (Sep 2026), docs/REV_GFNFF_STAGE2.md.
+     *
+     * Replaces the hard per-fragment charge constraint of EEQ by a per-bond hardness.
+     * With q = q0 + B p (B the pair incidence matrix, B_{i,k} = +1, B_{j,k} = -1) the
+     * energy is
+     *
+     *     E(p) = 1/2 q^T A q - chi^T q + 1/2 sum_k kappa_k p_k^2,   kappa_k = kappa0_k / b_k
+     *
+     * with A the Phase-2 corrected EEQ matrix and chi its right-hand side. dE/dp = 0 gives
+     * the symmetric positive definite system of the design:
+     *
+     *     (B^T A B + K) p = -B^T (A q0 - chi),     K = diag(kappa_k)
+     *
+     * sum_i q_i = sum_i q0_i holds identically, so no fragment constraint and no fragment
+     * detection is needed — a connected bond graph IS a fragment. Limits: kappa0 -> 0 on a
+     * connected graph reproduces the constrained EEQ minimum exactly (the fidelity guard of
+     * the design); b -> 0 makes a pair infinitely hard and separating fragments keep q0.
+     *
+     * A, chi and every Phase-2 correction (dxi, dgam, alpeeq, amide-H, reaction field) come
+     * from calculateFinalCharges() itself — this function installs an SQE context and lets
+     * that function build the matrix, so the kappa = 0 limit is EQUAL to EEQ by construction
+     * rather than by a second, parallel implementation of the same matrix.
+     *
+     * Cache handling (Known Issue #21c class): the Cholesky and A-off-diagonal caches are
+     * keyed on geometry + CN only, which two topology corners at the SAME geometry share.
+     * Both are invalidated before and after the solve.
+     *
+     * @param atoms            atomic numbers
+     * @param geometry_bohr    coordinates (Bohr)
+     * @param total_charge     total molecular charge (only used by the fallback paths)
+     * @param q0               reference charges, sum q0 = total_charge (see the design's q0 rules)
+     * @param topology_charges Phase-1 charges (qa) — same meaning as in calculateFinalCharges
+     * @param cn               coordination numbers
+     * @param hybridization    hybridization states
+     * @param topology         topology input (neighbour lists, fragments, itag, pi)
+     * @param pairs            bond-graph pairs with b and kappa0 (see SqePair)
+     * @param bmin             pairs with b < bmin are dropped (kappa would exceed 1/bmin kappa0)
+     * @param p_out            optional: the split charges of the ACCEPTED pairs, in the order
+     *                         of `pairs`, 0 for a dropped pair
+     * @param use_corrections  as in calculateFinalCharges (GFN-FF passes true)
+     * @param alpeeq           charge-dependent alpha from Phase 1
+     * @return atomic charges q = q0 + B p
+     */
+    Vector calculateSplitCharges(
+        const std::vector<int>& atoms,
+        const Matrix& geometry_bohr,
+        int total_charge,
+        const Vector& q0,
+        const Vector& topology_charges,
+        const Vector& cn,
+        const std::vector<int>& hybridization,
+        const std::optional<TopologyInput>& topology,
+        const std::vector<SqePair>& pairs,
+        double bmin,
+        Vector* p_out = nullptr,
+        bool use_corrections = true,
+        const std::optional<Vector>& alpeeq = std::nullopt,
+        CxxThreadPool* pool = nullptr,
+        int num_threads = 1
+    );
+
+    /**
+     * @brief Per-atom EEQ chemical potential mu_i = chi_i - (A q)_i — rev-gfnff stage 2
+     *
+     * Claude Generated (Sep 2026). Needed by the corner q0 rule of the design: when the
+     * rounded fragment charges do not add up to the total, the residual goes to the fragment
+     * with the LOWEST mean mu (the most electronegative side keeps the electron). Uses the
+     * same Phase-2 matrix as the charge solve; no charges are solved, so the result is exact
+     * for the given q and costs one matrix build.
+     */
+    Vector calculateChemicalPotential(
+        const std::vector<int>& atoms,
+        const Matrix& geometry_bohr,
+        int total_charge,
+        const Vector& q,
+        const Vector& topology_charges,
+        const Vector& cn,
+        const std::vector<int>& hybridization,
+        const std::optional<TopologyInput>& topology,
+        bool use_corrections = true,
+        const std::optional<Vector>& alpeeq = std::nullopt
+    );
+
+    /**
      * @brief Calculate dgam corrections with full pi-system and amide detection
      *
      * Claude Generated (March 2026): Public interface for computing dgam with
@@ -421,6 +528,28 @@ public:
     }
 
 private:
+    // ===== rev-gfnff stage 2: split-charge (SQE) context (Claude Generated, Sep 2026) =====
+    /**
+     * @brief Request installed by calculateSplitCharges() / calculateChemicalPotential()
+     *
+     * calculateFinalCharges() checks for it right after it has built the Phase-2 matrix A
+     * and its right-hand side chi, and then either solves the SQE system instead of the
+     * constrained EEQ system, or (probe mode, `pairs == nullptr`) only reports
+     * mu = chi - A q0 and returns q0 unchanged.
+     */
+    struct SqeContext {
+        const std::vector<SqePair>* pairs = nullptr; ///< nullptr = probe mode (mu only)
+        const Vector* q0 = nullptr;                  ///< reference charges
+        double bmin = 1e-3;                          ///< pairs below this bond order are dropped
+        Vector p;                                    ///< out: split charge per input pair
+        Vector mu;                                   ///< out: chi_i - (A q0)_i per atom
+        bool solved = false;                         ///< out: the SQE system was actually solved
+    };
+    SqeContext* m_sqe_ctx = nullptr;
+
+    /// rev-gfnff stage 2: solve (B^T A B + K) p = -B^T (A q0 - chi) and return q = q0 + B p
+    Vector solveSplitChargeSystem(const MatrixCRef& A_nn, const Vector& chi, int natoms, SqeContext& ctx) const;
+
     /**
      * @brief Element-specific EEQ parameters
      *

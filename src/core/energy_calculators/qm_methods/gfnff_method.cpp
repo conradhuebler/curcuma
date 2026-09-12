@@ -203,6 +203,7 @@ json GFNFFComputationalMethod::getEnergyDecomposition() const {
     energy_json["RepulsionBonded"] = m_gfnff->BondedRepulsionEnergy();
     energy_json["RepulsionNonbonded"] = m_gfnff->NonbondedRepulsionEnergy();
     energy_json["OverCoord"] = m_gfnff->OverCoordEnergy();   // rev-gfnff stage 1
+    energy_json["SqeHardness"] = m_gfnff->SqeHardnessEnergy(); // rev-gfnff stage 2
 
     return energy_json;
 }

@@ -181,6 +181,18 @@ add_test(NAME gfnff_rev_fd
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(gfnff_rev_fd PROPERTIES TIMEOUT 120 LABELS "gfnff;rev")
 
+# rev-gfnff stage 2 (Claude Generated, Sep 2026): split-charge (SQE) charge model —
+# kappa = 0 fidelity against constrained EEQ + FD gradient of the bond-hardness term
+add_executable(test_gfnff_sqe test_gfnff_sqe.cpp)
+target_link_libraries(test_gfnff_sqe curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_sqe REUSE_FROM curcuma_core)
+endif()
+add_test(NAME gfnff_sqe
+         COMMAND test_gfnff_sqe ${CMAKE_CURRENT_SOURCE_DIR}
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(gfnff_sqe PROPERTIES TIMEOUT 300 LABELS "gfnff;rev;sqe")
+
 # Copy reference data to build tree so tests can find them
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/reference_data
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR})

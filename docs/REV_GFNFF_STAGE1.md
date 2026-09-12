@@ -116,6 +116,12 @@ cost for large systems. (4) The blend force `dE/ds ds/dr` of a re-parametrisatio
 necessary and what a physically sensible re-parametrisation (an H is never sp; stage 3) will
 shrink.
 
+**Stage 2 (split charges) on the same two systems.** `docs/REV_GFNFF_STAGE2.md` repeats this table
+for `-gfnff.rev_charge_model sqe` (kappa_H = kappa_N = 0.2 Eh) against an `eeq` baseline of the
+same binary and seeds, n = 3 each: both stay inside the numbers above, and the single ~43-45
+kJ/mol N2 + 3 H2 outlier that this table records as "one run 43" appears once in three runs for
+BOTH charge models.
+
 - **Gradient**: `test_gfnff_rev_fd` (H2 scans, CH4 + H, stretched N2H2, and four react
   sequences walked into their transition windows) agrees with central finite differences to the
   same residual as plain `gfnff`.

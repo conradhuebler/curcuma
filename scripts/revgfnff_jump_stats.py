@@ -2,11 +2,11 @@
 # Claude Generated (Sep 2026) - rev-gfnff stage 1b: dE_jump histogram of revgfnff react MD runs (rev-gfnff stage 1b acceptance metric).
 # Usage: python3 scripts/revgfnff_jump_stats.py --tag NAME [--dt 0.25] [--tscale 1.05] [--only h4_2000_rev ...] [--extra "-gfnff.rev_blend false"]
 # Output: test_cases/revgfnff/jump_stats/<tag>/summary.md (+ per-run stdout.log, summary.json).
-import json, re, statistics, subprocess, sys, time, argparse, shutil
+import json, os, re, statistics, subprocess, sys, time, argparse, shutil
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 REPO = Path(__file__).resolve().parents[1]
-CUR = REPO / "release" / "curcuma"
+CUR = Path(os.environ.get("CURCUMA_BIN", REPO / "release" / "curcuma"))  # Claude Generated (Sep 2026): env override so a side build can be measured
 SYS = REPO / "test_cases" / "revgfnff" / "systems"
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 BASE = ["-gfnff.topology_mode", "react", "-md.no_restart",
