@@ -1748,6 +1748,20 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         }
         const bool reuse_topology = read_bool(controller, "batch_reuse_topology")
             || (controller.contains("opt") && read_bool(controller["opt"], "batch_reuse_topology"));
+        if (!reuse_topology) {
+            // Claude Generated (Sep 12, 2026): frames that are re-perceived must not hit the on-disk
+            // topology cache: its fingerprint is the element list plus the bond graph, so a transition
+            // state with the bond graph of its reactant complex replayed the complex's Phase-1 EEQ
+            // charges (BH76 fch3fts: -1.4586 instead of -1.3248 Eh). Found by the rev-gfnff fitter.
+            if (!energy_controller.contains("gfnff") || !energy_controller["gfnff"].is_object())
+                energy_controller["gfnff"] = json::object();
+            energy_controller["gfnff"]["cache_topology"] = false;
+        }
+        // Claude Generated (Sep 12, 2026): frames that are re-perceived must not hit the on-disk
+        // topology cache. Its fingerprint is the element list plus the bond graph, so a transition
+        // state with the bond graph of its reactant complex would replay the complex's Phase-1 EEQ
+        // charges (BH76 fch3fts: -1.4586 instead of -1.3248 Eh). Found by the rev-gfnff fitter.
+
         std::ofstream out(batch_out);
         if (!out) {
             CurcumaLogger::error("Could not open -batch_out file: " + batch_out);

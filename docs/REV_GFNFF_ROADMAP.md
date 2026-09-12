@@ -131,8 +131,19 @@ of late well joins, chatter cost, dt = 0.5 fs, locality for large systems.
       stage 1 does not touch. Consequences: (1) the "30 % better" expectation was wrong for
       stage 1 - barrier accuracy is stage 3 (bond shape) plus stage 2 (charges for the
       anionic sets); (2) E_over must be parametrised against the TS structures, not only the
-      rigid approach curves of class C - the fitter gets a barrier dataset (next step); (3) the
-      stage-1 fitted parameters are NOT adopted.
+      rigid approach curves of class C - done the same evening: `scripts/revgfnff_fit.py` has a
+      `barriers` dataset (GMTKN55 subsets, static single points, `-gfnff.cache_topology false`
+      in the batch route - the on-disk topology cache is keyed on element list + bond graph and
+      replayed a reactant complex's Phase-1 charges for its transition state; the batch path
+      now disables it whenever frames are re-perceived). Refit of E_over against class C +
+      BH76/WCPT18/PX13/BHPERI/BHDIV10 with the class-D guard, MAD kcal/mol gfnff / rev default /
+      fit (p_over + shift) / fit (+ N,O valence): BH76 56.4 / 59.4 / 54.8 / 54.8; BHDIV10 39.9 /
+      47.8 / 36.3 / 33.2; BHPERI 35.4 / 33.9 / 33.3 / 33.3; PX13 143 / 251 / 145 / 152; WCPT18
+      31.8 / 38.2 / 26.8 / 26.8; class C rms 103 -> 44 / 42; D guard unchanged. Values (fit 2):
+      p_over H/C/N/O 0 / 0.21 / 0.34 / 0.99 Eh, shift 0.87, valence N 2.54, O 2.53
+      (`test_cases/revgfnff/fit_work/wp3_fit2/override_fitted.json`). React MD smoothness with
+      these values unchanged (N2 + 3 H2 100 % below 5 kJ/mol). Adoption as defaults is an
+      operator decision; (3) the earlier class-C-only fit is NOT adopted.
 
 ## WP4 - stage 2: charge model (design: `docs/REV_GFNFF_STAGE2.md`, 2026-09-12; implementation in progress)
 

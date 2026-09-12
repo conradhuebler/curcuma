@@ -33,6 +33,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import revgfnff_data as rd
+import gmtkn55_reactions as gr  # Claude Generated (Sep 2026) - WP3 barrier dataset
 
 REPO = Path(__file__).resolve().parents[1]
 CURCUMA = REPO / "release" / "curcuma"
@@ -166,6 +167,155 @@ def load_systems(classes, topology_mode="react"):
     return systems
 
 
+# ------------------------------------------------------------------ GMTKN55 barrier dataset (Claude Generated, Sep 2026, WP3)
+#
+# docs/REV_GFNFF_ROADMAP.md WP3 "Barrier acceptance MEASURED and NOT MET": stage-1's
+# over-coordination term was fitted only against class-C rigid approach curves, and the
+# fitted N/O penalties wrecked WCPT18/PX13 (proton-transfer TSs, where a real TS atom is
+# transiently over-coordinated). This dataset lets the fitter see actual barrier heights,
+# not just the artificial hyper-coordination curves.
+#
+# A barrier "point" is a reaction energy (TS - reactant, or a general tmer2++ stoichiometry),
+# built from single-point energies of the GMTKN55 structures involved. Unlike classes A/C/D/E/L
+# (one system = one molecule at several geometries, topology shared across frames), each
+# GMTKN55 structure is an independent molecule and must get its OWN topology
+# (`-batch_reuse_topology false`); structures are batched per (charge, spin) bucket since one
+# curcuma process applies a single -charge/-spin to every frame it is given (see main.cpp's
+# batch-mode comment).
+
+
+@dataclass
+class BarrierReaction:
+    subset: str
+    label: str
+    keys: list    # ["{structure_dir}/{name}", ...] aligned with coeffs, structure_dir(subset) from gmtkn55_reactions
+    coeffs: list
+    ref: float    # kcal/mol, published reference barrier/reaction energy
+
+
+@dataclass
+class BarrierGroup:
+    charge: int
+    mult: int
+    keys: list    # ordered unique structure keys sharing this (charge, mult)
+
+    @property
+    def name(self):
+        return f"barrier_c{self.charge}_m{self.mult}"
+
+
+def read_single_xyz(path):
+    """One-frame XYZ -> [(sym, x, y, z), ...] (Angstrom, as written by the GMTKN55 testset)."""
+    lines = path.read_text().splitlines()
+    n = int(lines[0].split()[0])
+    return [(t[0], float(t[1]), float(t[2]), float(t[3])) for t in (ln.split() for ln in lines[2:2 + n])]
+
+
+def load_barrier_data(subsets):
+    """GMTKN55 barrier reactions + charge/spin batching groups for the given subsets.
+
+    Reuses scripts/gmtkn55_reactions.py for stoichiometry/reference parsing (.res + upstream
+    CSV cross-check) and structure_meta() for charge/UHF; aborts on the same inconsistencies
+    gmtkn55_reactions.py itself would abort on (mismatched .res/CSV reference, missing rows).
+    Returns (reactions: list[BarrierReaction], groups: list[BarrierGroup]).
+    """
+    rxs, problems = gr.load_reactions(subsets)
+    if problems:
+        sys.exit("barrier reaction list inconsistent:\n  " + "\n  ".join(problems))
+    keys_meta = {}  # "{structure_dir}/{name}" -> (charge, mult)
+    reactions = []
+    for rx in rxs:
+        keys = [f"{gr.structure_dir(rx.subset)}/{s}" for s in rx.species]
+        for k, s in zip(keys, rx.species):
+            if k not in keys_meta:
+                charge, uhf = gr.structure_meta(rx.subset, s)
+                keys_meta[k] = (charge, uhf + 1)
+        reactions.append(BarrierReaction(rx.subset, rx.label, keys, list(rx.coeffs), rx.ref))
+    buckets = {}
+    for k, cm in keys_meta.items():
+        buckets.setdefault(cm, []).append(k)
+    groups = [BarrierGroup(charge=cm[0], mult=cm[1], keys=sorted(ks)) for cm, ks in sorted(buckets.items())]
+    return reactions, groups
+
+
+def write_barrier_group_xyz(group, path):
+    lines = []
+    for k in group.keys:
+        subset_dir, name = k.split("/", 1)
+        atoms = read_single_xyz(gr.TESTSET / subset_dir / name / "struc.xyz")
+        lines.append(str(len(atoms)))
+        lines.append(k)
+        for sym, x, y, z in atoms:
+            lines.append(f"{sym} {x:.10f} {y:.10f} {z:.10f}")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def run_barrier_group(curcuma, workdir, group, override_path):
+    """One curcuma batch single point over a (charge, mult) bucket's structures.
+
+    One topology per structure (-batch_reuse_topology false): unlike run_system()'s classes
+    A/C/D/E/L (one molecule, several geometries), every frame here is an unrelated molecule.
+
+    -gfnff.cache_topology false is REQUIRED here, not cosmetic: the on-disk .topo.json cache
+    is keyed by a fingerprint of atom count/Z-list/bond graph (gfnff_method.cpp's
+    computeTopologyFingerprint()), not geometry or charge. All frames of one batch process
+    share one cache-file basename (group.name), and a reactant-complex/TS/product triple
+    along a reaction path routinely PERCEIVES THE SAME bond graph at different geometries --
+    e.g. GMTKN55 BH76 fch3fcomp and fch3fts. Without this flag, the second frame gets a
+    false cache hit and silently reuses the first frame's Phase-1 EEQ charges, which is
+    exactly wrong for the barrier dataset (found by comparing a batched fch3fts energy,
+    -1.4586 Eh, against a fresh single-structure run, -1.32475 Eh -- the latter matches the
+    per-structure reference cache in test_cases/revgfnff/fit_work/cache/terms_revgfnff_default.json).
+    """
+    xyz_path = workdir / f"{group.name}.xyz"
+    out_path = workdir / f"{group.name}.jsonl"
+    cmd = [
+        str(curcuma), "-sp", str(xyz_path), "-batch", "true", "-batch_out", str(out_path),
+        "-batch_reuse_topology", "false", "-method", "revgfnff",
+        "-gfnff.param_file", str(override_path), "-gfnff.cache_topology", "false",
+        "-charge", str(group.charge), "-spin", str(group.mult - 1),
+        "-gradient", "false", "-threads", "1", "-verbosity", "0", "-no_bmt",
+    ]
+    try:
+        subprocess.run(cmd, cwd=str(workdir), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=600, check=False)
+    except subprocess.TimeoutExpired:
+        return []
+    if not out_path.exists():
+        return []
+    frames = []
+    for line in out_path.read_text().splitlines():
+        line = line.strip()
+        if line:
+            try:
+                frames.append(json.loads(line))
+            except json.JSONDecodeError:
+                frames.append({"error": "unparseable JSONL line"})
+    return frames
+
+
+def barrier_pairs_from_energies(reactions, energy_by_key):
+    """{subset: [(model_kcal, ref_kcal), ...]} from per-structure energies (Eh); reactions
+    with any missing structure energy are skipped (not counted as a silent zero)."""
+    out = {}
+    for rx in reactions:
+        if not all(k in energy_by_key for k in rx.keys):
+            continue
+        model = sum(c * energy_by_key[k] for k, c in zip(rx.keys, rx.coeffs)) * HARTREE_TO_KCAL
+        out.setdefault(rx.subset, []).append((model, rx.ref))
+    return out
+
+
+def barrier_subset_stats(pairs_by_subset):
+    stats = {}
+    for subset, pairs in pairs_by_subset.items():
+        n = len(pairs)
+        mad = sum(abs(m - r) for m, r in pairs) / n
+        rms = math.sqrt(sum((m - r) ** 2 for m, r in pairs) / n)
+        stats[subset] = {"n": n, "MAD": mad, "RMS": rms}
+    return stats
+
+
 # ------------------------------------------------------------------ parameter vector <-> override JSON
 
 
@@ -254,11 +404,12 @@ class Evaluation:
     guard_grad: dict           # old class-A gradient-RMS guard, REPORTED ONLY (no penalty): same shape or {}
     n_failed_systems: int
     n_failed_frames: int
+    barrier_stats: dict = field(default_factory=dict)   # subset -> {"n", "MAD", "RMS"} (Claude Generated, Sep 2026, WP3)
 
 
 class FitContext:
     def __init__(self, param_defs, dataset_defs, lam, guard_factor, systems, workdir, curcuma, jobs,
-                 guard_d_systems=None, grad_guard_factor=1.5):
+                 guard_d_systems=None, grad_guard_factor=1.5, barrier_reactions=None, barrier_groups=None):
         self.param_defs = param_defs
         self.dataset_defs = dataset_defs
         self.lam = lam
@@ -266,6 +417,10 @@ class FitContext:
         self.grad_guard_factor = grad_guard_factor   # old class-A gradient guard threshold (reported only)
         self.systems = systems
         self.guard_d_systems = guard_d_systems or []
+        # Claude Generated (Sep 2026, WP3): GMTKN55 barrier dataset -- reactions (stoichiometry +
+        # reference) and the (charge, spin) batching groups that supply their single points.
+        self.barrier_reactions = barrier_reactions or []
+        self.barrier_groups = barrier_groups or []
         self.workdir = workdir
         self.curcuma = curcuma
         self.jobs = jobs
@@ -297,6 +452,30 @@ class FitContext:
                 s = futs[fut]
                 results[s.name] = fut.result()
         return results
+
+    def _run_barrier_groups(self, override_path):
+        """Claude Generated (Sep 2026, WP3): run every (charge, spin) barrier bucket, return
+        {structure_key: energy_eh} for every structure that computed cleanly."""
+        results = {}
+        with ThreadPoolExecutor(max_workers=self.jobs) as ex:
+            futs = {ex.submit(run_barrier_group, self.curcuma, self.workdir, g, override_path): g
+                    for g in self.barrier_groups}
+            for fut in as_completed(futs):
+                g = futs[fut]
+                results[g.name] = fut.result()
+        energy_by_key = {}
+        n_failed = 0
+        for g in self.barrier_groups:
+            frames = results.get(g.name)
+            if not frames or len(frames) != len(g.keys):
+                n_failed += len(g.keys)
+                continue
+            for k, fr in zip(g.keys, frames):
+                if "error" in fr or "energy_eh" not in fr:
+                    n_failed += 1
+                    continue
+                energy_by_key[k] = fr["energy_eh"]
+        return energy_by_key, n_failed
 
     def _compute_grad_guard_baseline(self):
         """Gradient RMS (Eh/Angstrom) at every class-A topology frame, DEFAULT parameters.
@@ -380,8 +559,8 @@ class FitContext:
                 class_pts.setdefault(s.cls, []).append((dE_model, dE_ref))
                 if "gradient_eh_ang" in fr and pt.gradient_eh_ang is not None:
                     gm = np.array(fr["gradient_eh_ang"], dtype=float).reshape(-1) * HARTREE_TO_KCAL
-                    gr = np.array(pt.gradient_eh_ang, dtype=float) * HARTREE_TO_KCAL
-                    class_grad.setdefault(s.cls, []).append(gm - gr)
+                    g_ref = np.array(pt.gradient_eh_ang, dtype=float) * HARTREE_TO_KCAL
+                    class_grad.setdefault(s.cls, []).append(gm - g_ref)
 
         class_stats = {}
         for cls in sorted(set(class_pts) | set(class_grad)):
@@ -393,8 +572,24 @@ class FitContext:
             rms_g = math.sqrt(sum(float(np.dot(d, d)) / d.size for d in diffs) / n_g) if n_g else None
             class_stats[cls] = {"n_E": n_e, "rms_E": rms_e, "n_G": n_g, "rms_G": rms_g}
 
+        # Claude Generated (Sep 2026, WP3): GMTKN55 barrier reactions -- one curcuma batch call
+        # per (charge, spin) bucket, then the reaction/barrier sums from those single points.
+        n_failed_barrier = 0
+        barrier_pairs_by_subset = {}
+        if self.barrier_groups:
+            energy_by_key, n_failed_barrier = self._run_barrier_groups(override_path)
+            barrier_pairs_by_subset = barrier_pairs_from_energies(self.barrier_reactions, energy_by_key)
+        barrier_stats = barrier_subset_stats(barrier_pairs_by_subset)
+
         residual_chunks = []
         for ds in self.dataset_defs:
+            if "barriers" in ds:
+                w_r = ds.get("weight_R", 1.0)
+                pairs = [pr for subset in ds["barriers"] for pr in barrier_pairs_by_subset.get(subset, [])]
+                if pairs and w_r:
+                    n_r = len(pairs)
+                    residual_chunks.append(np.array([(m - r) for m, r in pairs]) * math.sqrt(w_r / n_r))
+                continue
             w_e, w_g = ds.get("weight_E", 1.0), ds.get("weight_G", 0.0)
             pairs = [pr for c in ds["classes"] for pr in class_pts.get(c, [])]
             if pairs and w_e:
@@ -433,7 +628,8 @@ class FitContext:
 
         residuals = np.concatenate(residual_chunks) if residual_chunks else np.zeros(1)
         loss = float(np.dot(residuals, residuals))
-        result = Evaluation(loss, residuals, class_stats, guard_d, guard_grad, n_failed_systems, n_failed_frames)
+        result = Evaluation(loss, residuals, class_stats, guard_d, guard_grad,
+                             n_failed_systems, n_failed_frames + n_failed_barrier, barrier_stats)
         self.cache[key] = result
         return result
 
@@ -556,6 +752,14 @@ def format_class_stats(class_stats):
     return "\n".join(lines)
 
 
+def format_barrier_stats(barrier_stats):
+    """Claude Generated (Sep 2026, WP3): per-subset MAD/RMS of GMTKN55 barrier reactions."""
+    lines = []
+    for subset, s in sorted(barrier_stats.items()):
+        lines.append(f"    barrier {subset:10s}: n={s['n']:4d} MAD={s['MAD']:8.2f} kcal/mol   RMS={s['RMS']:8.2f} kcal/mol")
+    return "\n".join(lines)
+
+
 def format_guards(ev):
     lines = []
     if ev.guard_d:
@@ -630,13 +834,28 @@ def main():
     guard_factor = config.get("guard_factor", 1.10)
     grad_guard_factor = config.get("grad_guard_factor", 1.5)
 
-    classes_needed = sorted({c for d in dataset_defs for c in d["classes"]})
-    print(f"loading reference data for classes {classes_needed} (topology={args.topology}) ...")
-    systems = load_systems(classes_needed, topology_mode=args.topology)
-    print(f"loaded {len(systems)} reference systems "
-          f"({sum(len(s.points) for s in systems)} points)")
-    if not systems:
-        print("no reference systems found for the requested classes -- aborting")
+    classes_needed = sorted({c for d in dataset_defs for c in d.get("classes", [])})
+    # Claude Generated (Sep 2026, WP3): GMTKN55 barrier subsets requested by any dataset entry
+    # of the form {"barriers": [...], "weight_R": ...} -- see load_barrier_data().
+    barrier_subsets_needed = sorted({s for d in dataset_defs for s in d.get("barriers", [])})
+
+    systems = []
+    if classes_needed:
+        print(f"loading reference data for classes {classes_needed} (topology={args.topology}) ...")
+        systems = load_systems(classes_needed, topology_mode=args.topology)
+        print(f"loaded {len(systems)} reference systems "
+              f"({sum(len(s.points) for s in systems)} points)")
+
+    barrier_reactions, barrier_groups = [], []
+    if barrier_subsets_needed and not args.dry_run:
+        print(f"loading GMTKN55 barrier reactions for {barrier_subsets_needed} ...")
+        barrier_reactions, barrier_groups = load_barrier_data(barrier_subsets_needed)
+        print(f"loaded {len(barrier_reactions)} barrier reactions "
+              f"({len(barrier_groups)} charge/spin batches, "
+              f"{sum(len(g.keys) for g in barrier_groups)} structures)")
+
+    if not systems and not barrier_reactions:
+        print("no reference systems or barrier reactions found for the requested datasets -- aborting")
         sys.exit(1)
 
     # class-D guard systems: always loaded (regardless of the requested datasets) unless
@@ -674,9 +893,12 @@ def main():
         print(f"removed {len(stale_topo)} stale .topo.json cache file(s) from {args.workdir}")
     for s in systems + guard_d_systems:
         write_system_xyz(s, args.workdir / f"{s.name}.xyz")
+    for g in barrier_groups:
+        write_barrier_group_xyz(g, args.workdir / f"{g.name}.xyz")
 
     ctx = FitContext(param_defs, dataset_defs, lam, guard_factor, systems, args.workdir, args.curcuma, args.jobs,
-                      guard_d_systems=guard_d_systems, grad_guard_factor=grad_guard_factor)
+                      guard_d_systems=guard_d_systems, grad_guard_factor=grad_guard_factor,
+                      barrier_reactions=barrier_reactions, barrier_groups=barrier_groups)
     x0 = p0_vector(param_defs)
 
     t0 = time.time()
@@ -684,6 +906,8 @@ def main():
     print(f"\np0 evaluation: loss={ev0.loss:.6g}  "
           f"failed systems={ev0.n_failed_systems}/{len(systems)}  failed frames={ev0.n_failed_frames}")
     print(format_class_stats(ev0.class_stats))
+    if ev0.barrier_stats:
+        print(format_barrier_stats(ev0.barrier_stats))
     print(format_guards(ev0))
 
     if args.evaluate_only or args.dry_run:
@@ -706,6 +930,8 @@ def main():
     print(f"\nfinal evaluation: loss={ev_final.loss:.6g}  "
           f"failed systems={ev_final.n_failed_systems}/{len(systems)}  failed frames={ev_final.n_failed_frames}")
     print(format_class_stats(ev_final.class_stats))
+    if ev_final.barrier_stats:
+        print(format_barrier_stats(ev_final.barrier_stats))
     print(format_guards(ev_final))
 
     print("\nparameters (name: p0 -> final):")
@@ -728,6 +954,8 @@ def main():
             ],
             "class_stats_before": ev0.class_stats,
             "class_stats_after": ev_final.class_stats,
+            "barrier_stats_before": ev0.barrier_stats,
+            "barrier_stats_after": ev_final.barrier_stats,
             "guard_d_before": ev0.guard_d,
             "guard_d_after": ev_final.guard_d,
             "guard_grad_before": ev0.guard_grad,
