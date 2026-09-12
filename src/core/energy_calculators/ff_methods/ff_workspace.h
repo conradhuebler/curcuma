@@ -269,6 +269,7 @@ struct RevTransition {
     bool active = false;
     bool forming = true;            ///< formation (s grows as the pair closes) or break (s grows as it opens)
     bool tight = false;             ///< coordinate is the bond-order switch (1,3 ring closure) instead of the transition switch
+    bool well_blend = false;        ///< a FORMING pair: its own well lives only in the new corners, so the blend carries it in over s (rev_form_switch = order). false = the well is copied into every corner, which is only energy-neutral when the join sits where the term weight is ~0 (rev_form_switch = weight).
     int i = -1, j = -1;
     double w_a = 0.05, w_b = 0.5;   ///< window of the transition COORDINATE c (bo3 switch): s = (c - w_a) / (w_b - w_a), clamped to [0, 1]
     // per step (set by FFWorkspace::updateBlend)

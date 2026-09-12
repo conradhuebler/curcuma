@@ -2826,9 +2826,10 @@ void SimpleMD::finalizeRun()
         const double median = j.empty() ? 0.0 : j[j.size() / 2];
         const double sum = std::accumulate(j.begin(), j.end(), 0.0);
         CurcumaLogger::result(fmt::format(
-            "REACT summary: {} formed, {} broken, {} rebuilds, energy jumps median {:+.1f} / min {:+.1f} / max {:+.1f} / sum {:+.1f} kJ/mol",
-            m_react_formed, m_react_broken, m_react_rebuilds, median,
-            j.empty() ? 0.0 : j.front(), j.empty() ? 0.0 : j.back(), sum));
+            "REACT summary: {} formed, {} broken, {} rebuilds, energy jumps ({} measured{}) median {:+.1f} / min {:+.1f} / max {:+.1f} / sum {:+.1f} kJ/mol",
+            m_react_formed, m_react_broken, m_react_rebuilds, j.size(),
+            m_react_dejump_unavailable > 0 ? fmt::format(", {} n/a", m_react_dejump_unavailable) : std::string(),
+            median, j.empty() ? 0.0 : j.front(), j.empty() ? 0.0 : j.back(), sum));
     }
     if (m_thermostat == "csvr" && m_verbosity >= 1)
         CurcumaLogger::raw("Exchange with heat bath ", m_Ekin_exchange, "Eh");
@@ -4925,7 +4926,8 @@ json SimpleMD::Results() const
         react["broken"] = m_react_broken;
         react["rebuilds"] = m_react_rebuilds;
         react["bonds"] = g->reactiveBonds().size();
-        react["dE_jump_kJ"] = m_react_dejump_kj;
+        react["dE_jump_kJ"] = m_react_dejump_kj;               // only the measured ones
+        react["dE_jump_unavailable"] = m_react_dejump_unavailable; // rebuilds whose jump could not be measured
         result["react"] = react;
     }
     return result;
@@ -4953,17 +4955,24 @@ void SimpleMD::flushReactEvents()
         ++m_react_rebuilds;
         m_react_formed += static_cast<long>(ev.formed.size());
         m_react_broken += static_cast<long>(ev.broken.size());
+        // Claude Generated (Sep 12, 2026): a jump that could not be measured (the first event of a
+        // run has no previous-step state) is reported as "n/a" and left out of the statistics; a 0.0
+        // would bias the median.
         const bool finite = std::isfinite(ev.de_jump_eh);
         const double de_kj = finite ? ev.de_jump_eh * CurcumaUnit::Energy::HARTREE_TO_KJMOL : 0.0;
         if (finite)
             m_react_dejump_kj.push_back(de_kj);
+        else
+            ++m_react_dejump_unavailable;
         if (m_verbosity >= 1) {
             for (const auto& [i, j] : ev.formed)
                 CurcumaLogger::result(fmt::format("REACT bond formed: {}-{} (t = {:.1f} fs)", label(i), label(j), m_currentStep));
             for (const auto& [i, j] : ev.broken)
                 CurcumaLogger::result(fmt::format("REACT bond broken: {}-{} (t = {:.1f} fs)", label(i), label(j), m_currentStep));
-            CurcumaLogger::result(fmt::format("REACT rebuild #{}: {} bonds, dE_jump = {:.6f} Eh ({:+.1f} kJ/mol)",
-                m_react_rebuilds, g->reactiveBonds().size(), ev.de_jump_eh, de_kj));
+            CurcumaLogger::result(finite ? fmt::format("REACT rebuild #{}: {} bonds, dE_jump = {:.6f} Eh ({:+.1f} kJ/mol)",
+                                      m_react_rebuilds, g->reactiveBonds().size(), ev.de_jump_eh, de_kj)
+                                        : fmt::format("REACT rebuild #{}: {} bonds, dE_jump = n/a (no previous-step state)",
+                                              m_react_rebuilds, g->reactiveBonds().size()));
         }
     }
 }

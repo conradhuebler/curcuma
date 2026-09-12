@@ -82,6 +82,60 @@ is perceived sp and its H-H bond takes `bsmat[1][1] = 1.98` instead of 1.00; a n
 
 Everything is switchable: `rev_blend false` gives stage 1a (measured for comparison).
 
+## Formation criterion: which switch joins a new bond (`rev_form_switch`, Sep 12, 2026)
+
+Until Sep 12, 2026 a non-bonded pair joined the bond list once the **wide term-weight switch**
+(`rev_bo_center` 2.0, width -7.5) rose above `rev_bo_form` = 0.05. That switch crosses 0.05 at
+**2.31x the covalent sum**, which is inside hydrogen-bond and van-der-Waals contact range, so the
+criterion joined contacts that are not bonds. Measured on the Cs water dimer (O-O 2.910 A, donor
+H...O 1.952 A), `revgfnff -gfnff.topology_mode react`, 300 K, 1 ps, dt 0.25 fs, no thermostat:
+
+| switch at | H...O 1.952 A (1.954x) | O...O 2.910 A (2.185x) | value at a bond (0.96x) |
+|---|---:|---:|---:|
+| wide term weight `rev_bo_*` (2.0/-7.5) | **0.5956** | **0.1631** | 1.000000 |
+| narrow bond order `rev_bo2_*` (1.4/-6) | **3.9e-04** | **9.7e-07** | 0.9961 |
+
+The wide switch reads the hydrogen bond as 60 % of a bond: both contacts joined at t = 0 and the
+run produced **18 formations / 15 breaks / 33 rebuilds per ps** on a molecule that does not react,
+with a mean Epot **4.03 kcal/mol below** the same run in static topology. The narrow switch reads
+3.9e-04 there - a factor 260 below even a 0.1 threshold.
+
+**Default since Sep 12, 2026: `rev_form_switch = order`** - a fresh pair joins once its NARROW bond
+order exceeds `rev_bo2_form` (0.1, crossing at **1.611x** the covalent sum). Three independent
+radii coincide there, which is why 0.1 was chosen rather than a tighter or looser value:
+
+- the non-rev react mode has formed at `react_form_factor` = **1.6x** since it existed (tests 13-15),
+- a bond starts **breaking** at transition coordinate 0.5, which is exactly **1.600x**, so formation
+  and break are now symmetric about the same radius,
+- it is the value `rev_bo13_form` already uses for a 1,3 ring closure on the same switch.
+
+The result is insensitive to the exact number: 0.02 (1.739x) and 0.05 (1.671x) also give zero
+formations on the water dimer, as does the default up to 800 K.
+
+Two things follow from joining at a radius where the well is no longer ~0, and both are part of the
+mode rather than of the threshold:
+
+1. **The transition runs on the narrow switch too** (`tr.tight`, as a 1,3 closure always has),
+   window `rev_bo2_form` -> 0.9, i.e. 1.611x -> 1.189x. On the wider bo3 coordinate the join would
+   already sit at c = 0.47 against a window end of 0.8 - 0.06x the covalent sum for H-H, and the FD
+   gradient of an active transition degraded to 6.9e-04 Eh/A there (2.1e-05 with the narrow window).
+2. **The forming pair's own well is not copied into the old corners** (`RevTransition::well_blend`):
+   at 1.611x the wide term weight is already 0.982, so copying it would switch the full well on at
+   the event - which is exactly the non-rev hard swap (measured |dE_jump| up to 0.158 Eh on the H4
+   test). With the well left to the blend the event is energy-neutral by construction (s = 0).
+   A **fading well** is exempt: it re-forms on the bo3 coordinate and is already in every corner,
+   so it keeps the old treatment (dropping it on a revert cost +190 kJ/mol until that was fixed).
+
+`-gfnff.rev_form_switch weight` restores the previous behaviour bit-for-bit (verified: water dimer
+18/15/33 and H4 94/94/240 with identical jump statistics).
+
+Measured effect, 4 free H atoms, 6000 K, wall 2.5 A, dt 0.25 fs, 5 ps, `revgfnff`:
+
+| | formations | rebuilds | median \|dE_jump\| | max \|dE_jump\| |
+|---|---:|---:|---:|---:|
+| `weight` (previous) | 94 | 240 | 0.00 Eh | 0.0335 Eh |
+| `order` (new default) | 17 | 50 | 0.00 Eh | **3e-05 Eh** |
+
 ## Measured (dt = 0.25 fs, 2-5 ps, CSVR, spherical wall; `scripts/revgfnff_jump_stats.py`)
 
 Per-event jump `dE_jump` = E(after) - E(before) at the same geometry at every topology event,
@@ -146,7 +200,7 @@ BOTH charge models.
 
 `rev_bo_center/width` (2.0/-7.5), `rev_bo2_center/width` (1.4/-6), `rev_bo3_center/width`
 (1.6/-8), `rev_bo4_center/width` (1.7/-12), `rev_bo5_center/width` (1.3/-12), `-md.rev_dt_cap` (0.25 fs), `rev_bo_form/break` (0.05/0.02), `rev_tr_begin/end/prebreak/revert`
-(0.02/0.8/0.5/0.75), `rev_bo13_form` (0.1), `rev_max_transitions` (4), `rev_demote_cooldown`
+(0.02/0.8/0.5/0.75), `rev_bo13_form` (0.1), `rev_form_switch` (order), `rev_bo2_form` (0.1), `rev_max_transitions` (4), `rev_demote_cooldown`
 (0), `rev_blend` (true), `rev_over_p/k/shift`. Diagnostics: `CURCUMA_REACTSCAN=1` prints every
 stretched bond and every candidate pair per scan (call, r, w, c, fading/1,3/in-transition
 flags); verbosity 3 prints the per-term jump of every event.

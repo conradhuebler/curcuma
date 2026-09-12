@@ -358,6 +358,8 @@ PARAM(rev_bo13_form, Double, 0.1, "rev-gfnff stage 1b: a topological 1,3 pair be
 PARAM(rev_max_transitions, Int, 4, "rev-gfnff stage 1b: transitions blended at the same time (2^k topology corners are evaluated per step); a further event snaps the transition closest to either end of its window.", "Reactive", {})
 PARAM(rev_bo_form, Double, 0.05, "rev-gfnff react scan: a non-bonded pair (never a 1,3 pair) joins the bond list once its term WEIGHT exceeds this value, i.e. where its terms are still ~0.", "Reactive", {})
 PARAM(rev_bo_break, Double, 0.02, "rev-gfnff react scan: a bond leaves the list once its term weight falls below this value.", "Reactive", {})
+PARAM(rev_form_switch, String, "order", "rev-gfnff react scan: which switch decides that a non-bonded pair BECOMES a bond. order (default, Sep 12, 2026) = the narrow bond-order switch rev_bo2_* at the threshold rev_bo2_form, i.e. the switch that already reads ~0 at 1,3 and hydrogen-bond distances; the new pair's own well then enters through the transition blend (s) instead of at once, so the join stays energy-neutral. weight = the previous behaviour: the WIDE term-weight switch rev_bo_* at rev_bo_form, which still reads above 0.05 out to 2.31x the covalent sum and therefore joins hydrogen bonds and van-der-Waals contacts (water dimer: 18 formations/ps, Epot 4 kcal/mol below the static run).", "Reactive", {})
+PARAM(rev_bo2_form, Double, 0.1, "rev-gfnff react scan: formation threshold on the NARROW bond order (rev_bo2_*) for rev_form_switch = order. 0.1 crosses at 1.611x the covalent sum, which is the non-rev react formation factor (1.6) and the radius at which a bond starts breaking (transition coordinate 0.5 at 1.600x), so formation and break are symmetric; the water dimer reads 3.9e-4 at its H...O and 9.7e-7 at its O...O contact.", "Reactive", {})
 PARAM(rev_over_p, Double, 0.3, "rev-gfnff: default over-coordination prefactor p_Z in Eh (per-element values via the rev.p_over override).", "Reactive", {})
 PARAM(rev_over_k, Double, 10.0, "rev-gfnff: softplus steepness of the over-coordination penalty.", "Reactive", {})
 // ---- rev-gfnff stage 2 (Claude Generated, Sep 2026): split-charge (SQE) model ---------------
@@ -2417,6 +2419,8 @@ private:
     const GFNFFTables& T() const { return *m_tables; } ///< the tables this instance evaluates with
     RevSettings m_rev_settings;                 ///< rev-gfnff stage 1 (Sep 2026): kernel switches and per-atom data
     double m_rev_bo_form = 0.05, m_rev_bo_break = 0.02; ///< rev-gfnff react scan thresholds on the term weight
+    bool m_rev_form_order = true;   ///< rev_form_switch == "order": the narrow bond order decides a formation (Sep 12, 2026)
+    double m_rev_bo2_form = 0.1;    ///< formation threshold on the narrow bond order (rev_form_switch == "order")
     double m_rev_tr_begin = 0.02, m_rev_tr_end = 0.8, m_rev_tr_revert = 0.75;
     double m_rev_tr_prebreak = 0.5;    ///< stage 1b: a bond starts breaking below this coordinate (below the formation end: a formed bond sticks)
     double m_rev_bo13_form = 0.1;      ///< stage 1b: a 1,3 pair closes a ring once its bond order (E_over switch) exceeds this

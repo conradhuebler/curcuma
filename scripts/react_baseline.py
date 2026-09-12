@@ -201,6 +201,7 @@ def run_one(name, xyz, extra, doc):
     wall = time.time() - t0
     out = ANSI.sub("", proc.stdout + proc.stderr)
     (d / "stdout.log").write_text(out)
+    # "dE_jump = n/a (...)" (Sep 12, 2026) and the older "nan" both mean "not measured": skipped here
     jumps = [float(m.group(1)) for m in re.finditer(r"dE_jump = [-+\d.a-z]+ Eh \(([-+\d.]+) kJ/mol\)", out) if "nan" not in m.group(0)]
     summary = {
         "run": name, "doc": doc, "cmd": " ".join(cmd), "exit": proc.returncode, "wall_s": round(wall, 1),

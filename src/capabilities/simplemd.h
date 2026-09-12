@@ -714,6 +714,7 @@ private:
     long m_react_broken = 0;                ///< bond breaks (incl. exchange resolutions)
     long m_react_rebuilds = 0;              ///< topology rebuild events
     std::vector<double> m_react_dejump_kj;  ///< dE_jump of every rebuild, kJ/mol
+    long m_react_dejump_unavailable = 0; ///< rebuilds whose dE_jump could not be measured (no previous-step state)
     double m_last_hbxb_ms = 0.0;   ///< placeholder; HBXB-update lives inside Calculation() and is hard to isolate
     double m_last_integrator_ms = 0.0;  ///< wall-clock of last Integrator() call in step()
 

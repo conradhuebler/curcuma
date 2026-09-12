@@ -888,7 +888,8 @@ bool GFNFF::InitialiseMolecule()
             CurcumaLogger::result(fmt::format(
                 "GFN-FF react filters: valence cap {}, refractory {} scans, exchange {} scans, slack factor {:.2f}{}",
                 m_react_valence_cap ? "on" : "off", m_react_refractory_scans, m_react_exchange_scans, m_react_slack_form_factor,
-                m_rev_settings.enabled ? fmt::format("; rev weights: form at w > {:.3f}, break at w < {:.3f}; transition coordinate bo3 {:.2f}x k {:.1f}, window {:.2f}..{:.2f}, revert {:.2f}; E_over shift {:.3f} k {:.1f} p(H,C,N,O) {:.3f} {:.3f} {:.3f} {:.3f} valence(N,O) {:.2f} {:.2f} preset {}",
+                m_rev_settings.enabled ? fmt::format("; rev form switch {} (order: bond order bo2 > {:.3f}); weights: form at w > {:.3f}, break at w < {:.3f}; transition coordinate bo3 {:.2f}x k {:.1f}, window {:.2f}..{:.2f}, revert {:.2f}; E_over shift {:.3f} k {:.1f} p(H,C,N,O) {:.3f} {:.3f} {:.3f} {:.3f} valence(N,O) {:.2f} {:.2f} preset {}",
+                    m_rev_form_order ? "order" : "weight", m_rev_bo2_form,
                     m_rev_bo_form, m_rev_bo_break, m_rev_settings.bo3_center, m_rev_settings.bo3_width, m_rev_tr_begin, m_rev_tr_end, m_rev_tr_revert,
                     m_rev_settings.over_shift, m_rev_settings.over_k, revOverP(1), revOverP(6), revOverP(7), revOverP(8), revValence(7), revValence(8),
                     m_parameters.value("rev_over_preset", std::string("stage1a"))) : ""));
@@ -1959,7 +1960,11 @@ bool GFNFF::detectReactiveBondChanges()
             const RevTransition& tr = trs[t];
             if (tr.s >= 1.0) {
                 finishTransition(t, true, "complete");
-            } else if (tr.s <= 0.0 && ((tr.forming && tr.w < 0.5 * m_rev_bo_form) || (!tr.forming && tr.c > m_rev_tr_revert))) {
+            // a formation that never left s = 0 is undone once the pair turned back far enough: past
+            // half the join weight (rev_form_switch = weight), or below the start of the transition
+            // window (order; its join sits at c ~ 0.47, so c < rev_tr_begin means r > 1.89x rcov_sum)
+            } else if (tr.s <= 0.0 && ((tr.forming && ((m_rev_form_order && tr.tight) ? (tr.c < m_rev_tr_begin) : (tr.w < 0.5 * m_rev_bo_form)))
+                          || (!tr.forming && tr.c > m_rev_tr_revert))) {
                 finishTransition(t, false, "revert");
                 topology_changed = true;
             }
@@ -2047,7 +2052,8 @@ bool GFNFF::detectReactiveBondChanges()
                 && (CurcumaLogger::info(fmt::format("REACT scan call {}: pair {}-{} r {:.4f} w {:.4f} c {:.4f} fading {} one_three {} in_transition {} cooled {}",
                        m_react_calls, i + 1, j + 1, r, b_ij, c_ij, fading ? 1 : 0, one_three ? 1 : 0, in_transition ? 1 : 0,
                        (m_rev_cooldown.count({ i, j }) && m_react_calls < m_rev_cooldown[{ i, j }]) ? 1 : 0)), false)) {
-            } else if (rev ? (!in_transition && (one_three ? (o_ij > m_rev_bo13_form) : fading ? (c_ij > m_rev_tr_begin) : (b_ij > m_rev_bo_form)))
+            } else if (rev ? (!in_transition && (one_three ? (o_ij > m_rev_bo13_form) : fading ? (c_ij > m_rev_tr_begin)
+                                                                                              : (m_rev_form_order ? (o_ij > m_rev_bo2_form) : (b_ij > m_rev_bo_form))))
                            : (r < m_react_form_factor * thr)) {
                 if (one_three)
                     one_three_cand.insert({ i, j });
@@ -2121,7 +2127,20 @@ bool GFNFF::detectReactiveBondChanges()
         } else {
             pair = candidates.front().second;
             tr.forming = true;
-            tr.tight = one_three_cand.count(pair) > 0;
+            const bool is13 = one_three_cand.count(pair) > 0;
+            // A FADING well re-forms on the bo3 coordinate (rev_tr_begin) whatever the formation
+            // switch is, and its well is already in every corner - so it keeps the old treatment.
+            const bool is_fading = fading_set.count(pair) > 0;
+            // rev_form_switch = order decides on the narrow bond order, so the transition runs on the
+            // SAME switch (as the 1,3 ring closure always has). Running it on the wider bo3
+            // coordinate would leave almost no window: the join already sits at c = 0.47 of it,
+            // against a window end of 0.8, i.e. 0.06x the covalent sum for H-H. (Sep 12, 2026)
+            tr.tight = is13 || (m_rev_form_order && !is_fading);
+            // ... and the well must NOT be copied into the old corners at such a join, where it is
+            // already deep: the blend ramps it in over s instead. A fading well is exempt - it IS in
+            // the old corners, and dropping it on a revert would dump the whole well (measured: one
+            // +190 kJ/mol event per 3 ps run of test 17 while this exemption was missing).
+            tr.well_blend = m_rev_form_order && !is_fading;
             {
                 // same for a formation: the window starts at the coordinate seen now (a fading
                 // well re-forms once c > tr_begin, and c may already be 0.1-0.2 by then)
@@ -2129,7 +2148,7 @@ bool GFNFF::detectReactiveBondChanges()
                 const double thr_c = (rcov[pair.first] + rcov[pair.second]) * fat_val[pair.first] * fat_val[pair.second];
                 const double c_now = tr.tight ? RevGFNFF::bondOrder(r_c, m_rev_settings.bo2_center * thr_c, m_rev_settings.bo2_width)
                                               : RevGFNFF::bondOrder(r_c, m_rev_settings.bo3_center * thr_c, m_rev_settings.bo3_width);
-                const double a0 = tr.tight ? m_rev_bo13_form : m_rev_tr_begin;
+                const double a0 = tr.tight ? (is13 ? m_rev_bo13_form : m_rev_bo2_form) : m_rev_tr_begin;
                 const double b0 = tr.tight ? 0.9 : m_rev_tr_end;
                 tr.w_a = std::max(a0, std::min(c_now, b0 - 0.1));
                 tr.w_b = b0;
@@ -2161,8 +2180,9 @@ bool GFNFF::detectReactiveBondChanges()
             const double r_pair = (m_geometry_bohr.row(pair.first) - m_geometry_bohr.row(pair.second)).norm();
             const double thr_pair = (rcov[pair.first] + rcov[pair.second]) * fat_val[pair.first] * fat_val[pair.second];
             const double w_pair = RevGFNFF::bondOrder(r_pair, m_rev_settings.bo_center * thr_pair, m_rev_settings.bo_width);
-            CurcumaLogger::result(fmt::format("REACT bond {}: {}-{} (blend {} -> {}) r_scan {:.4f} w_scan {:.4f}", formed.empty() ? "broken" : "formed",
-                lab(pair.first), lab(pair.second), tr.w_a, tr.w_b, r_pair, w_pair));
+            const double o_pair = RevGFNFF::bondOrder(r_pair, m_rev_settings.bo2_center * thr_pair, m_rev_settings.bo2_width);
+            CurcumaLogger::result(fmt::format("REACT bond {}: {}-{} (blend {} -> {}) r_scan {:.4f} w_scan {:.4f} o_scan {:.4f} r/rcov {:.3f}", formed.empty() ? "broken" : "formed",
+                lab(pair.first), lab(pair.second), tr.w_a, tr.w_b, r_pair, w_pair, o_pair, r_pair / thr_pair));
         }
         return true;
     }
@@ -2380,15 +2400,22 @@ bool GFNFF::rebuildReactiveTopology()
     // Energy on the OLD topology at the current geometry, so the discontinuity the
     // dynamics experiences (dE_jump) is measured, not hidden. Always measured: the
     // cost is two workspace evaluations per EVENT (not per step), and GUI consumers
-    // read it through the event record at verbosity 0. Requires CN state from a
-    // previous step; NaN otherwise.
+    // read it through the event record at verbosity 0.
+    //
+    // Claude Generated (Sep 12, 2026): the scan runs at the TOP of Calculation(), so at an event in
+    // the very first step the workspace has not been fed this step's CN and EEQ charges yet (both
+    // are set further down in the same Calculation()) and the energy it returns is not a number.
+    // That is reported as "not available" rather than as a NaN jump, and the event record keeps its
+    // NaN so that every consumer skips it instead of averaging in a zero.
     const bool diag = m_workspace && (m_last_cn.size() == m_atomcount);
     double e_before = 0.0;
+    bool have_before = false;
     FFEnergyComponents comp_before;
     if (diag) {
         m_workspace->setGeometry(m_geometry_bohr);
         e_before = m_workspace->calculate(false);
         comp_before = m_workspace->energyComponents();
+        have_before = std::isfinite(e_before);
     }
 
     // Snapshot for rollback: if parameter generation throws, the engines keep their
@@ -2468,15 +2495,19 @@ bool GFNFF::rebuildReactiveTopology()
     m_hbxb_updated = true; // HB/XB lists were rebuilt inside parameter generation
 
     if (diag) {
-        double e_after = m_workspace->calculate(false);
-        double de = e_after - e_before;
+        const double e_after = m_workspace->calculate(false);
+        const bool have = have_before && std::isfinite(e_after);
+        const double de = have ? (e_after - e_before) : std::numeric_limits<double>::quiet_NaN();
         if (!m_react_events.empty())
-            m_react_events.back().de_jump_eh = de;
+            m_react_events.back().de_jump_eh = de; // stays NaN when it could not be measured
         if (verb >= 1)
-            CurcumaLogger::result(fmt::format(
+            CurcumaLogger::result(have ? fmt::format(
                 "REACT rebuild #{}: {} bonds, dE_jump = {:.6f} Eh ({:+.1f} kJ/mol)",
                 m_react_rebuild_count, m_react_bonds.size(), de,
-                de * CurcumaUnit::Energy::HARTREE_TO_KJMOL));
+                de * CurcumaUnit::Energy::HARTREE_TO_KJMOL)
+                                      : fmt::format(
+                "REACT rebuild #{}: {} bonds, dE_jump = n/a (no previous-step state)",
+                m_react_rebuild_count, m_react_bonds.size()));
         // Claude Generated (Sep 2026, rev-gfnff): which term carries the jump. The per-term
         // split is what decides whether a residual discontinuity is a bonded-term parameter
         // change (dual-topology blending, roadmap stage 1b) or the EEQ fragment constraints
@@ -12052,6 +12083,23 @@ void GFNFF::setupRevSettings()
     }
     m_rev_bo_form = m_parameters.value("rev_bo_form", 0.05);
     m_rev_bo_break = m_parameters.value("rev_bo_break", 0.02);
+    // Claude Generated (Sep 12, 2026): which switch joins a new bond. The wide term-weight switch
+    // still reads above rev_bo_form out to 2.31x the covalent sum, i.e. inside hydrogen-bond and
+    // van-der-Waals range (water dimer: 18 formations/ps on a molecule that does not react); the
+    // narrow bond order reads 3.9e-4 there. See docs/REV_GFNFF_STAGE1.md, "Formation criterion".
+    m_rev_bo2_form = m_parameters.value("rev_bo2_form", 0.1);
+    {
+        const std::string fs = m_parameters.value("rev_form_switch", std::string("order"));
+        if (fs == "order")
+            m_rev_form_order = true;
+        else if (fs == "weight")
+            m_rev_form_order = false;
+        else {
+            CurcumaLogger::warn("rev-gfnff: unknown rev_form_switch '" + fs + "', using order");
+            m_rev_form_order = true;
+            m_parameters["rev_form_switch"] = "order"; // so the log and -export_run report what ran
+        }
+    }
     rv.blend = m_parameters.value("rev_blend", true);
     rv.bo4_center = m_parameters.value("rev_bo4_center", 1.7);
     rv.bo4_width = m_parameters.value("rev_bo4_width", -12.0);
@@ -12076,6 +12124,8 @@ void GFNFF::setupRevSettings()
     if (rev.contains("over_k")) rv.over_k = rev["over_k"].get<double>();
     if (rev.contains("over_shift")) rv.over_shift = rev["over_shift"].get<double>();
     if (rev.contains("bo_form")) { m_rev_bo_form = rev["bo_form"].get<double>(); rv.w_join = m_rev_bo_form; }
+    if (rev.contains("bo2_form")) m_rev_bo2_form = rev["bo2_form"].get<double>();
+    if (rev.contains("form_switch")) m_rev_form_order = (rev["form_switch"].get<std::string>() != "weight");
     if (rev.contains("bo_break")) m_rev_bo_break = rev["bo_break"].get<double>();
     if (rev.contains("bo4_center")) rv.bo4_center = rev["bo4_center"].get<double>();
     if (rev.contains("bo4_width")) rv.bo4_width = rev["bo4_width"].get<double>();
@@ -12533,8 +12583,9 @@ void GFNFF::finishTransition(int t, bool keep_new, const char* why)
     if (!keep_new) {
         if (tr.forming) {
             m_react_bonds.erase(std::remove(m_react_bonds.begin(), m_react_bonds.end(), pair), m_react_bonds.end());
-            // its well is still in every corner: keep it as a fading well unless it is ~0 already
-            if (tr.w > m_rev_bo_break) {
+            // its well is still in every corner: keep it as a fading well unless it is ~0 already.
+            // With tr.well_blend the well never entered the old corners, so there is nothing to fade.
+            if (!tr.well_blend && tr.w > m_rev_bo_break) {
                 bool have = false;
                 for (const Bond& b : m_rev_fading)
                     if (std::min(b.i, b.j) == pair.first && std::max(b.i, b.j) == pair.second) { have = true; break; }
@@ -12600,17 +12651,19 @@ void GFNFF::finishTransition(int t, bool keep_new, const char* why)
     double de = std::numeric_limits<double>::quiet_NaN();
     if (diag) {
         const double e1 = m_workspace->calculate(false);
-        de = e1 - e0;
+        if (std::isfinite(e0) && std::isfinite(e1)) // not measurable before the first full step
+            de = e1 - e0;
         if (verb >= 2)
             reportReactJumpTerms(why, m_workspace->energyComponents(), c0, -1.0, 0.0, tr.w, tr.r, tr.i, tr.j, tr.c);
     }
     if (verb >= 1)
-        CurcumaLogger::result(fmt::format("REACT blend {}: {}-{} ({} {}), s = {:.2f}, w = {:.3f}, c = {:.3f}, jump {:+.1f} kJ/mol, {} in flight",
+        CurcumaLogger::result(fmt::format("REACT blend {}: {}-{} ({} {}), s = {:.2f}, w = {:.3f}, c = {:.3f}, jump {} kJ/mol, {} in flight",
             why, tr.i + 1, tr.j + 1, tr.forming ? "formation" : "break", keep_new ? "kept" : "undone", tr.s, tr.w, tr.c,
-            std::isfinite(de) ? de * CurcumaUnit::Energy::HARTREE_TO_KJMOL : 0.0, m_workspace->transitions().size()));
+            std::isfinite(de) ? fmt::format("{:+.1f}", de * CurcumaUnit::Energy::HARTREE_TO_KJMOL) : std::string("n/a"),
+            m_workspace->transitions().size()));
     ReactEvent ev;
     ev.call = m_react_calls;
-    ev.de_jump_eh = std::isfinite(de) ? de : 0.0;
+    ev.de_jump_eh = de; // NaN when it could not be measured - never 0.0, which would bias the median
     if (!keep_new)
         (tr.forming ? ev.broken : ev.formed).emplace_back(pair.first, pair.second);
     m_react_events.push_back(std::move(ev));

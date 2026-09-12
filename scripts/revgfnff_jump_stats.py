@@ -30,8 +30,10 @@ def run(name, xyz, method, T, tmax, wall, out, extra):
     p = subprocess.run(cmd, capture_output=True, text=True, cwd=d)
     txt = ANSI.sub("", p.stdout + p.stderr); (d / "stdout.log").write_text(txt)
     jumps, terms = [], {t: [] for t in TERMS}
-    for m in re.finditer(r"dE_jump = ([-+\d.a-z]+) Eh \(([-+\d.]+) kJ/mol\)", txt):
-        if "nan" in m.group(1): jumps.append(float("nan")); continue
+    # Sep 12, 2026: a rebuild whose jump could not be measured prints "dE_jump = n/a (...)" instead
+    # of a NaN (the value is missing, not zero); it still counts as a rebuild and is skipped below.
+    for m in re.finditer(r"dE_jump = (?:n/a|([-+\d.a-z]+) Eh \(([-+\d.]+) kJ/mol\))", txt):
+        if m.group(1) is None or "nan" in m.group(1): jumps.append(float("nan")); continue
         jumps.append(float(m.group(2)))
     for m in re.finditer(r"REACT jump terms \[kJ/mol\]: (.*)", txt):
         for t, v in re.findall(r"(\w+) ([-+\d.]+)", m.group(1)):
@@ -46,7 +48,7 @@ def run(name, xyz, method, T, tmax, wall, out, extra):
          "frac_lt1": (sum(a < 1 for a in ab) / len(ab)) if ab else None,
          "frac_lt5": (sum(a < 5 for a in ab) / len(ab)) if ab else None,
          "term_median_abs": {t: (statistics.median([abs(x) for x in v]) if v else None) for t, v in terms.items()},
-         "epot_nan": bool(re.search(r"dE_jump = nan", txt[txt.find("REACT rebuild #2"):])) if "REACT rebuild #2" in txt else False}
+         "epot_nan": bool(re.search(r"dE_jump = (?:nan|n/a)", txt[txt.find("REACT rebuild #2"):])) if "REACT rebuild #2" in txt else False}
     (d / "summary.json").write_text(json.dumps(s, indent=1))
     return s
 TSCALE = 1.0

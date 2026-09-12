@@ -670,8 +670,10 @@ void FFWorkspace::beginTransition(RevTransition tr, std::vector<GFNFFParameterSe
         rebuildInteractionLists(std::move(params[m])); // into the empty slot
         swapState(corners[m | (1 << k)]);              // and out again
     }
-    if (tr.forming) {
+    if (tr.forming && !tr.well_blend) {
         // the well of the forming pair belongs to every corner, so the blend never touches it
+        // (only correct while the join sits where the term weight is ~0; with rev_form_switch =
+        // order the join is tight, the well is NOT copied and the blend ramps it in over s)
         const int a = std::min(tr.i, tr.j), b = std::max(tr.i, tr.j);
         auto find_pair = [&](const std::vector<Bond>& list) -> const Bond* {
             for (const auto& bd : list)

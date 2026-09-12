@@ -125,8 +125,14 @@ int main()
         // (formation c: 0.02 -> 0.8, break c: 0.5 -> 0.02 on the 1.6x/-8 switch; H-H
         // covalent sum 0.666 A, so 1.15 A = 1.73x and 1.05 A = 1.58x).
         struct Seq { std::string name; std::vector<double> path; };
+        // Claude Generated (Sep 12, 2026): with the default rev_form_switch = order the formation
+        // joins at 1.611x the covalent sum (1.073 A here) and its window runs on the NARROW switch
+        // from rev_bo2_form = 0.1 to 0.9, i.e. 1.073 A -> 0.792 A. The two "1.7->1.3->..." rows
+        // therefore no longer start a transition at 1.3 A (narrow order 3.9e-4 there); the last row
+        // walks 1.7 -> 1.05 -> 0.95 A, which joins at 1.05 A and probes at s ~ 0.33 of that window.
         for (const Seq& q : { Seq { "forming H2 1.7->1.3->1.15 A", { 1.7, 1.3, 1.15 } }, Seq { "forming H2 1.7->1.3->1.05 A", { 1.7, 1.3, 1.05 } },
-                              Seq { "breaking H2 0.9->1.05->1.15 A", { 0.9, 1.05, 1.15 } }, Seq { "breaking H2 0.9->1.05->1.20 A", { 0.9, 1.05, 1.20 } } }) {
+                              Seq { "breaking H2 0.9->1.05->1.15 A", { 0.9, 1.05, 1.15 } }, Seq { "breaking H2 0.9->1.05->1.20 A", { 0.9, 1.05, 1.20 } },
+                              Seq { "forming H2 1.7->1.05->0.95 A", { 1.7, 1.05, 0.95 } } }) {
             EnergyCalculator calc("revgfnff", cfg);
             calc.setMolecule(h2(q.path.front()).getMolInfo());
             calc.CalculateEnergy(false);
