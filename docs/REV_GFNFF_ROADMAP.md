@@ -142,8 +142,10 @@ of late well joins, chatter cost, dt = 0.5 fs, locality for large systems.
       31.8 / 38.2 / 26.8 / 26.8; class C rms 103 -> 44 / 42; D guard unchanged. Values (fit 2):
       p_over H/C/N/O 0 / 0.21 / 0.34 / 0.99 Eh, shift 0.87, valence N 2.54, O 2.53
       (`test_cases/revgfnff/fit_work/wp3_fit2/override_fitted.json`). React MD smoothness with
-      these values unchanged (N2 + 3 H2 100 % below 5 kJ/mol). Adoption as defaults is an
-      operator decision; (3) the earlier class-C-only fit is NOT adopted.
+      these values unchanged (N2 + 3 H2 100 % below 5 kJ/mol). **Adopted as the built-in
+      defaults (operator, 2026-09-12)**; the stage-1a values stay selectable
+      (`-gfnff.rev_over_preset stage1a`, `test_cases/revgfnff/params/`); (3) the earlier
+      class-C-only fit is NOT adopted.
 
 ## WP4 - stage 2: charge model (design: `docs/REV_GFNFF_STAGE2.md`, 2026-09-12; implementation in progress)
 
