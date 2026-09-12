@@ -156,6 +156,28 @@ of late well joins, chatter cost, dt = 0.5 fs, locality for large systems.
 
 ## WP5 - stage 3: full refit H/C/N/O/F/Cl (sketch)
 
+Data input measured 2026-09-12 (`test_cases/revgfnff/fit_work/wellshape/`, class-A curves vs
+r2SCAN-3c, model = gfnff static / revgfnff react, energies relative to each curve's minimum):
+
+| bond | D_e ref / model [kcal/mol] | r/r_eq at 50 % D_e ref / model | at 90 % ref / model | k ref / model |
+|---|---|---|---|---|
+| H-H | 107 / 103 | 1.77 / 1.42 | 2.63 / 1.68 | 867 / 1876 (2.2x too stiff) |
+| C-H | 115 / 102 | 1.58 / 1.40 | 2.22 / 1.76 | 776 / 716 |
+| C-C | 108 / 85 | 1.43 / 1.32 | 1.88 / 1.55 | 647 / 486 |
+| C=C | 189 / 151 | 1.48 / 1.34 | 2.10 / 1.54 | 1435 / 1168 |
+| N-H | 111 / 85 | 1.52 / 1.34 | 2.11 / 1.52 | 1024 / 912 |
+| O-H | 122 / 58 | 1.54 / 1.26 | 2.08 / 1.37 | 1220 / 1202 |
+| C-F | 114 / 85 | 1.45 / 1.33 | 2.09 / 1.56 | 806 / 747 |
+| H-Cl | 104 / 59 | 1.48 / 1.33 | 1.88 / 1.70 | 755 / 396 |
+
+The Gaussian well saturates 0.2-0.5 r_eq too early and its depth (with all other terms) is
+12-25 % too small for C-H/C-C/C=C/N-H/C-F and 43-52 % for O-H/H-Cl; beyond 1.6 r_eq both
+models sit 15-65 kcal/mol below the reference. The react blend removes the static per-frame
+topology flip (+108 kcal/mol spike on H2 at 1.4 r_eq -> 14) but cannot add binding that the
+well does not have. Stage-3 target therefore: a bond form with the Gaussian's curvature at r0
+(equilibrium fidelity) and a Morse-like tail out to 2.5 r_eq with the right D_e, fitted on the
+55 class-A curves with the conformer / class-D guards; H-Cl and O-H first.
+
 - [ ] Parameter groups bond -> repulsion -> angle -> torsion -> charge, L2 to the defaults,
       guards (conformers <= 1.6, NCI <= 10, MOR41 reaction MAD <= 70, S30L-CI not worse than
       gfnff), held-out 20 % of WP2 plus BHDIV10 and INV24.
