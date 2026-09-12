@@ -16,7 +16,10 @@ Classes (roadmap WP2):
   D  off-equilibrium: GFN-FF MD snapshots at 1000 / 2000 K, single points
   E  charged cases for the charge model: Cl2-/F2- curves, proton-transfer transits,
      with Hirshfeld charges
-  B  NEB-TS paths (not yet in this driver)
+  B  NEB-TS paths, 15 roadmap paths (--b-mode neb, default); 6 of the 9 that failed to
+     converge have a benchmark-supplied TS (+reactant/product for PX13), and can be run as
+     9-point reactant->TS->product single-point EnGrad interpolations instead
+     (--b-mode ts-points, Claude Generated Sep 2026; see TsPointsJob)
 
 Reference geometries: the hand-written start geometry is relaxed with curcuma GFN2 and then
 with r2SCAN-3c (ORCA Opt); the optimised molecule is the origin of every rigid scan.
@@ -395,6 +398,29 @@ def transit_points(reactant, ts, fracs):
                      aligned[k][2] + f * (ts[k][2] - aligned[k][2]),
                      aligned[k][3] + f * (ts[k][3] - aligned[k][3])) for k in range(len(ts))])
     return pts, rmsd
+
+
+def _kabsch_fixed(P_atoms, Q_atoms):
+    """Claude Generated (Sep 2026) -- rigidly align P_atoms onto Q_atoms using a FIXED
+    index correspondence (no atom reordering), unlike `match_transit_endpoints`, which
+    additionally brute-forces same-element permutations. Used by the class-B ts-points mode
+    (see TsPointsJob), where the reactant/product atom order is already guaranteed by
+    construction to match the TS's -- a permutation search there could only ever find a
+    spurious lower-RMSD relabelling (e.g. swapping the transferring H of a BH76 abstraction
+    TS with a spectator H), silently breaking the physical atom correspondence."""
+    P = np.array([a[1:] for a in P_atoms], dtype=float)
+    Q = np.array([a[1:] for a in Q_atoms], dtype=float)
+    P_aligned, rmsd = _kabsch(P, Q)
+    return [(P_atoms[k][0], float(P_aligned[k][0]), float(P_aligned[k][1]), float(P_aligned[k][2]))
+            for k in range(len(P_atoms))], rmsd
+
+
+def _lerp_atoms(A, B, f):
+    """Claude Generated (Sep 2026) -- per-atom linear interpolation A -> B at fraction f
+    (0=A, 1=B), same atom order/count required. Used by TsPointsJob to build the
+    reactant->TS and TS->product legs of the ts-points path."""
+    return [(A[k][0], A[k][1] + f * (B[k][1] - A[k][1]), A[k][2] + f * (B[k][2] - A[k][2]),
+             A[k][3] + f * (B[k][3] - A[k][3])) for k in range(len(A))]
 
 
 # ------------------------------------------------------------------ ORCA
@@ -810,6 +836,161 @@ class NebJob:
         return "ok", len(points), total_wall
 
 
+# ---------------------------------------------------- class B, --b-mode ts-points (Sep 2026)
+# Claude Generated (Sep 2026) -- alternative to NebJob for class-B paths whose NEB did not
+# converge (WP2_STATUS.md) but whose reactant/TS/product ARE available from the benchmark
+# itself. See TsPointsJob docstring.
+
+TS_POINTS_LEGS = 3  # interpolated frames per leg -> 1 + LEGS + 1 + LEGS + 1 = 9 points total
+
+
+def _archive_failed_neb(d, log):
+    """If `d` holds a pre-existing attempt for this class-B system that is NOT itself a
+    ts-points result (tagged by meta.json's "b_mode"=="ts-points"), move it aside to
+    `<d>_neb_failed` (never delete) so the ts-points run gets a clean directory under the
+    same name. No-op if `d` doesn't exist yet, if it already holds a ts-points result (a
+    rerun must not re-archive a good result), or if `<d>_neb_failed` already exists (never
+    overwrite an earlier archive)."""
+    if not d.exists():
+        return
+    meta_path = d / "meta.json"
+    is_ts_points = False
+    if meta_path.exists():
+        try:
+            is_ts_points = json.loads(meta_path.read_text()).get("b_mode") == "ts-points"
+        except Exception:
+            pass
+    if is_ts_points:
+        return
+    archived = d.parent / f"{d.name}_neb_failed"
+    if archived.exists():
+        log(f"    {d.name}: {archived.name} already exists, leaving {d.name} in place (not re-archiving)")
+        return
+    shutil.move(str(d), str(archived))
+    log(f"    {d.name}: archived pre-existing attempt to {archived.name}/")
+
+
+class TsPointsJob:
+    """Claude Generated (Sep 2026) -- `--b-mode ts-points` alternative to NebJob, for class-B
+    paths whose NEB failed to converge (both attempts, WP2_STATUS.md) but whose reactant/TS/
+    product geometries ARE available from the benchmark itself: BH76 3-atom H-transfer TS
+    (ships the TS structure; reactant/product built from it exactly as `_bh76_3atom_builder`
+    does for the NEB endpoints) and PX13 symmetric proton-transfer dimers (ships BOTH the
+    reactant complex and the TS; product = the degenerate mirror through the TS, via the
+    existing `_px13_transit_builder`/`transit_points` machinery).
+
+    Builds a fixed 9-point path -- reactant, 3 linearly-interpolated frames reactant->TS, TS,
+    3 frames TS->product, product -- by Kabsch-aligning reactant and product onto the TS with
+    a FIXED atom correspondence (`_kabsch_fixed`; NOT the permutation-searching Kabsch used
+    elsewhere, which could relabel chemically distinct same-element atoms) and then linearly
+    interpolating each leg, then runs ONE EnGrad multi-job pass (reusing orca_input/
+    parse_orca) over all 9 points. No NEB, no path optimisation: this is a hand-built path
+    through configuration space, not a minimum-energy path, so E(TS)-E(reactant) from it is
+    a single-point barrier ESTIMATE (r2SCAN-3c at the benchmark's own TS geometry), not a
+    curcuma-side TS search result.
+
+    Written in the same energies.json/gradients.json/points.xyz/meta.json layout as NebJob
+    (per-point "role": reactant/interp/ts/product), plus `"interpolated": true` and the
+    Kabsch RMSDs in meta.json. Moves any pre-existing (NEB) attempt directory aside to
+    `<system>_neb_failed/` before writing (see `_archive_failed_neb`) -- never deletes it."""
+
+    def __init__(self, system, build_fn, mult=1, uks=False, broken_sym=False, tag=""):
+        self.cls = "B"
+        self.system, self.build_fn = system, build_fn
+        self.uks, self.broken_sym, self.tag = uks, broken_sym, tag
+        self.charge, self.mult = 0, mult  # updated from build_fn's return at run() time
+        self.points = [None] * (2 * TS_POINTS_LEGS + 3)  # plan-time point count only
+
+    @property
+    def dir(self):
+        return REF / self.cls / self.system
+
+    def done(self):
+        e, m = self.dir / "energies.json", self.dir / "meta.json"
+        if not e.exists() or not m.exists():
+            return False
+        try:
+            is_ts_points = json.loads(m.read_text()).get("b_mode") == "ts-points"
+            status = json.loads(e.read_text()).get("status")
+            return is_ts_points and status in ("ok", "failed")
+        except Exception:
+            return False
+
+    def run(self, nprocs, log):
+        d = self.dir
+        _archive_failed_neb(d, log)
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            reactant, product, ts_atoms, charge, mult, note = self.build_fn(nprocs, log)
+        except Exception as exc:
+            (d / "energies.json").write_text(json.dumps({"class": "B", "system": self.system, "tag": self.tag,
+                                                          "charge": self.charge, "mult": self.mult, "status": "blocked",
+                                                          "n_points": len(self.points), "n_ok": 0, "wall_s": 0.0,
+                                                          "error": f"endpoint build failed: {exc}"}, indent=1))
+            (d / "meta.json").write_text(json.dumps(meta({"status": "blocked", "error": str(exc), "b_mode": "ts-points"}), indent=1))
+            log(f"  B {self.system}: BLOCKED (endpoint build) {exc}")
+            return "blocked", len(self.points), 0.0
+        self.charge, self.mult = charge, mult
+        aligned_reactant, rmsd_r = _kabsch_fixed(reactant, ts_atoms)
+        aligned_product, rmsd_p = _kabsch_fixed(product, ts_atoms)
+        write_xyz(d / "reactant.xyz", aligned_reactant, f"{self.system} reactant, Kabsch-aligned onto TS (fixed correspondence, rmsd {rmsd_r:.4f} A)")
+        write_xyz(d / "product.xyz", aligned_product, f"{self.system} product, Kabsch-aligned onto TS (fixed correspondence, rmsd {rmsd_p:.4f} A)")
+        write_xyz(d / "ts.xyz", ts_atoms, f"{self.system} TS (benchmark geometry)")
+        fracs = [k / (TS_POINTS_LEGS + 1) for k in range(1, TS_POINTS_LEGS + 1)]  # e.g. 0.25, 0.5, 0.75
+        leg1 = [_lerp_atoms(aligned_reactant, ts_atoms, f) for f in fracs]
+        leg2 = [_lerp_atoms(ts_atoms, aligned_product, f) for f in fracs]
+        points = [aligned_reactant] + leg1 + [ts_atoms] + leg2 + [aligned_product]
+        roles = ["reactant"] + ["interp"] * TS_POINTS_LEGS + ["ts"] + ["interp"] * TS_POINTS_LEGS + ["product"]
+        leg_fracs = [0.0] + fracs + [1.0] + fracs + [1.0]
+        labels = [f"{roles[k]}_f{leg_fracs[k]:.2f}" if roles[k] == "interp" else roles[k] for k in range(len(points))]
+        eg_inp = orca_input(points, charge, mult, nprocs, uks=self.uks, broken_sym=self.broken_sym, hirshfeld=False)
+        (d / "job.inp").write_text(eg_inp)
+        rc, wall = run_orca(d, "job.inp", extra_keep={"ts.xyz"})
+        out = (d / "job.out").read_text(errors="replace")
+        with gzip.open(d / "job.out.gz", "wt") as gz:
+            gz.write(out)
+        (d / "job.out").unlink()
+        recs = parse_orca(out)
+        energies, ok_n = [], 0
+        with (d / "points.xyz").open("w") as fx:
+            for k, atoms in enumerate(points):
+                rec = recs[k] if k < len(recs) else {"energy_eh": None, "gradient_eh_bohr": None, "s2": None}
+                e = rec["energy_eh"] if rec.get("gradient_eh_bohr") is not None else None
+                if e is not None:
+                    ok_n += 1
+                energies.append({"point": k, "label": labels[k], "role": roles[k], "energy_eh": e,
+                                 "s2": rec.get("s2"), "gradient_eh_bohr": rec.get("gradient_eh_bohr") if e is not None else None})
+                fx.write(f"{len(atoms)}\nE={e if e is not None else 'nan'} charge={charge} mult={mult} point={k} role={roles[k]}\n")
+                fx.write("".join(f"{s} {x:.8f} {y:.8f} {z:.8f}\n" for s, x, y, z in atoms))
+        (d / "gradients.json").write_text(json.dumps({"unit": "Eh/Bohr", "gradients": [e["gradient_eh_bohr"] for e in energies]}))
+        for e in energies:
+            e.pop("gradient_eh_bohr")
+        status = "ok" if ok_n == len(points) else "failed"
+        (d / "energies.json").write_text(json.dumps({"class": "B", "system": self.system, "tag": self.tag,
+                                                      "charge": charge, "mult": mult, "uks": self.uks,
+                                                      "broken_sym": self.broken_sym, "n_points": len(points), "n_ok": ok_n,
+                                                      "orca_rc": rc, "status": status, "wall_s": round(wall, 1),
+                                                      "points": energies}, indent=1))
+        (d / "meta.json").write_text(json.dumps(meta({"status": status, "note": note, "b_mode": "ts-points",
+                                                       "interpolated": True, "keywords": KEYWORDS + " EnGrad",
+                                                       "nprocs": nprocs, "uks": self.uks, "broken_sym": self.broken_sym,
+                                                       "charge": charge, "mult": mult,
+                                                       "rmsd_reactant_to_ts_A": round(rmsd_r, 4),
+                                                       "rmsd_product_to_ts_A": round(rmsd_p, 4),
+                                                       "roles": roles}), indent=1))
+        log(f"  B {self.system}: {ok_n}/{len(points)} points ok (ts-points), {wall:.0f} s")
+        return status, len(points), wall
+
+
+# (class-B systems eligible for --b-mode ts-points: their NEB failed AND the benchmark ships
+# usable TS/reactant/product geometries. The other 3 failed paths (n2_h2_n2h2, n2h2_h2_n2h4,
+# n2h4_h2_2nh3) are N2Hx+H2 chain steps with NO benchmark TS -- build_jobs logs and skips
+# them in ts-points mode rather than silently falling back to NEB.)
+TS_POINTS_ELIGIBLE = {"rkt01_h_hcl_h2_cl", "rkt10_f_h2_hf_h", "hf2ts_h_f2_hf_f",
+                       "px13_hf_2", "px13_h2o_2", "px13_nh3_2"}
+TS_POINTS_NO_BENCHMARK_TS = {"n2_h2_n2h2", "n2h2_h2_n2h4", "n2h4_h2_2nh3"}
+
+
 def _bh76_3atom_builder(ts_subdir, reactant_spec, product_spec, mult):
     a, b, molA, freeA = reactant_spec
     c, d_, molB, freeB = product_spec
@@ -1016,7 +1197,7 @@ def build_lost_scan_jobs(only, nprocs, log):
 # ------------------------------------------------------------------ plan
 
 
-def build_jobs(classes, only, nprocs, log):
+def build_jobs(classes, only, nprocs, log, b_mode="neb"):
     jobs = []
     if "A" in classes:
         for mol, i, j, label in CURVES:
@@ -1075,7 +1256,12 @@ def build_jobs(classes, only, nprocs, log):
         for name, build_fn, mult, uks, broken_sym in BPATHS:
             if only and name not in only:
                 continue
-            jobs.append(NebJob(name, build_fn, mult=mult, uks=uks, broken_sym=broken_sym, nimages=8, tag=f"NEB-TS path {name}"))
+            if b_mode == "ts-points" and name in TS_POINTS_ELIGIBLE:
+                jobs.append(TsPointsJob(name, build_fn, mult=mult, uks=uks, broken_sym=broken_sym, tag=f"ts-points path {name}"))
+            elif b_mode == "ts-points" and name in TS_POINTS_NO_BENCHMARK_TS:
+                log(f"  B {name}: --b-mode ts-points has no benchmark TS for this N2Hx+H2 chain step -- skipped")
+            else:
+                jobs.append(NebJob(name, build_fn, mult=mult, uks=uks, broken_sym=broken_sym, nimages=8, tag=f"NEB-TS path {name}"))
     if "D" in classes:
         for mol in OFFEQ:
             if only and mol not in only:
@@ -1101,6 +1287,13 @@ def main():
     ap.add_argument("--nprocs", type=int, default=4, help="cores per ORCA job")
     ap.add_argument("--uks-inside-out", action="store_true", help="retry strategy for UKS curves that failed outside-in")
     ap.add_argument("--slowconv", action="store_true", help="damped SCF (SlowConv, MaxIter 500) for hard series")
+    ap.add_argument("--b-mode", choices=["neb", "ts-points"], default="neb",
+                     help="class-B path construction: 'neb' (default) runs ORCA NEB-TS; "
+                          "'ts-points' (Claude Generated, Sep 2026) replaces it, for the systems in "
+                          "TS_POINTS_ELIGIBLE only, with 9 single-point EnGrad calculations on a hand-built "
+                          "reactant->TS->product path (benchmark TS/reactant/product, Kabsch-aligned onto "
+                          "the TS, linearly interpolated) -- for class-B systems whose NEB does not converge "
+                          "but whose benchmark ships usable endpoint/TS geometries (see TsPointsJob)")
     args = ap.parse_args()
     global UKS_INSIDE_OUT, SLOWCONV
     UKS_INSIDE_OUT, SLOWCONV = args.uks_inside_out, args.slowconv
@@ -1122,7 +1315,7 @@ def main():
         summary()
         return
 
-    jobs = build_jobs(args.classes, args.only, args.nprocs, log)
+    jobs = build_jobs(args.classes, args.only, args.nprocs, log, b_mode=args.b_mode)
     todo = [j for j in jobs if not j.done()]
     log(f"{len(jobs)} jobs planned, {len(todo)} to run ({sum(len(j.points) for j in todo)} points), "
         f"{args.jobs} x {args.nprocs} cores")

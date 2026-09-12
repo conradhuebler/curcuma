@@ -1,5 +1,5 @@
 3
-hf2ts_h_f2_hf_f reactant
-H 0.000000 0.000000 -4.455098
-F 0.000000 0.000000 0.044902
-F 0.000000 0.000000 1.444888
+hf2ts_h_f2_hf_f reactant, Kabsch-aligned onto TS (fixed correspondence, rmsd 1.3414 A)
+H 0.000000 0.000000 -3.466662
+F 0.000000 0.000000 1.033338
+F 0.000000 0.000000 2.433324

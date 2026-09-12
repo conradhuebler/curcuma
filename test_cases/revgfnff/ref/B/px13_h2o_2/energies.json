@@ -1,12 +1,79 @@
 {
  "class": "B",
  "system": "px13_h2o_2",
- "tag": "NEB-TS path px13_h2o_2",
+ "tag": "ts-points path px13_h2o_2",
  "charge": 0,
  "mult": 1,
- "status": "failed",
- "n_points": 11,
- "n_ok": 0,
- "attempts": 2,
- "wall_s": 3812.8
+ "uks": false,
+ "broken_sym": false,
+ "n_points": 9,
+ "n_ok": 9,
+ "orca_rc": 0,
+ "status": "ok",
+ "wall_s": 85.0,
+ "points": [
+  {
+   "point": 0,
+   "label": "reactant",
+   "role": "reactant",
+   "energy_eh": -152.845754817233,
+   "s2": null
+  },
+  {
+   "point": 1,
+   "label": "interp_f0.25",
+   "role": "interp",
+   "energy_eh": -152.834892267967,
+   "s2": null
+  },
+  {
+   "point": 2,
+   "label": "interp_f0.50",
+   "role": "interp",
+   "energy_eh": -152.828772153445,
+   "s2": null
+  },
+  {
+   "point": 3,
+   "label": "interp_f0.75",
+   "role": "interp",
+   "energy_eh": -152.804820792855,
+   "s2": null
+  },
+  {
+   "point": 4,
+   "label": "ts",
+   "role": "ts",
+   "energy_eh": -152.775760844234,
+   "s2": null
+  },
+  {
+   "point": 5,
+   "label": "interp_f0.25",
+   "role": "interp",
+   "energy_eh": -152.685415401303,
+   "s2": null
+  },
+  {
+   "point": 6,
+   "label": "interp_f0.50",
+   "role": "interp",
+   "energy_eh": -149.841522924844,
+   "s2": null
+  },
+  {
+   "point": 7,
+   "label": "interp_f0.75",
+   "role": "interp",
+   "energy_eh": -151.612113572612,
+   "s2": null
+  },
+  {
+   "point": 8,
+   "label": "product",
+   "role": "product",
+   "energy_eh": -152.488970470945,
+   "s2": null
+  }
+ ]
 }

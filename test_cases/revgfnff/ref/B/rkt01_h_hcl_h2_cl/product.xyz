@@ -1,5 +1,5 @@
 3
-rkt01_h_hcl_h2_cl product
-H 0.000000 0.000000 -0.256616
-Cl 0.000000 0.000000 4.243384
-H 0.000000 0.000000 -0.998130
+rkt01_h_hcl_h2_cl product, Kabsch-aligned onto TS (fixed correspondence, rmsd 1.3859 A)
+H 0.000000 0.000000 -1.252829
+Cl 0.000000 0.000000 3.247171
+H 0.000000 0.000000 -1.994343

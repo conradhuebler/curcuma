@@ -79,8 +79,13 @@ separately; every reference calculation is stored with input, output, geometries
 - [~] B NEB-TS paths: 6 of 15 converged (rkt06 H+H2, hclhts, hfhts, rkt14 H+OH, N2+H, N2H+H;
       11 points each with the TS), 9 did not (no-barrier bands for F+H2/Cl+H2, IDPP interpolation
       failure for N2+H2 -> N2H2, TS optimisation not converged for the three N2Hx+H2 steps and
-      PX13 h2o_2/nh3_2/hf_2). Cheaper follow-up: single points + gradients along the
-      benchmark's own TS geometries (BH76/PX13 ship them) instead of NEB-TS.
+      PX13 h2o_2/nh3_2/hf_2). Follow-up done 2026-09-12 (`--b-mode ts-points`): for the six of
+      them with a benchmark TS, E+G at reactant / TS / product plus three interpolated frames
+      per leg (9 points each, 593 s ORCA). PX13 forward barriers 36.9/43.9/57.9 kcal/mol
+      (benchmark 42.3/48.6/59.3) are usable; the three BH76 sets are usable only as TS +
+      interpolants, their rigid "reactant complex" endpoints (atom pushed to 4.5 A) carry a
+      residual-interaction error, and the mirrored PX13 "products" are SCF artefacts. The three
+      N2Hx + H2 chain steps have no benchmark TS and stay open (needs a relaxed scan or IRC).
 - Total ORCA wall ~9 h at 4 x 4 cores; 1731 + 138 + ~66 usable E+G points.
 
 ## WP3 - stage 1: continuous bond order + over-coordination energy

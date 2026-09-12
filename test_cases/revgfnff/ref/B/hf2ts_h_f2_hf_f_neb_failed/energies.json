@@ -1,0 +1,12 @@
+{
+ "class": "B",
+ "system": "hf2ts_h_f2_hf_f",
+ "tag": "NEB-TS path hf2ts_h_f2_hf_f",
+ "charge": 0,
+ "mult": 2,
+ "status": "failed",
+ "n_points": 11,
+ "n_ok": 0,
+ "attempts": 2,
+ "wall_s": 88.2
+}

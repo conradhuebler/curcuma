@@ -1,0 +1,12 @@
+{
+ "class": "B",
+ "system": "rkt10_f_h2_hf_h",
+ "tag": "NEB-TS path rkt10_f_h2_hf_h",
+ "charge": 0,
+ "mult": 2,
+ "status": "failed",
+ "n_points": 11,
+ "n_ok": 0,
+ "attempts": 2,
+ "wall_s": 69.3
+}

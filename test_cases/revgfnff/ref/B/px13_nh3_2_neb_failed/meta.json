@@ -1,0 +1,24 @@
+{
+ "date": "2026-09-12T04:18:10",
+ "host": "fjodor",
+ "curcuma_head": "d8ce5ca0",
+ "orca": "/opt/orca/orca",
+ "script": "scripts/revgfnff_ref.py",
+ "argv": [
+  "run",
+  "--classes",
+  "B",
+  "--jobs",
+  "4",
+  "--nprocs",
+  "4"
+ ],
+ "status": "failed",
+ "attempts": 2,
+ "note": "reactant aligned onto PX13/nh3_2_ts (Kabsch rmsd 0.7449 A); product = 2*TS - reactant (degenerate mirror)",
+ "keywords": "r2SCAN-3c TightSCF NEB-TS",
+ "nprocs": 4,
+ "uks": false,
+ "charge": 0,
+ "mult": 1
+}

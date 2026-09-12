@@ -1,12 +1,79 @@
 {
  "class": "B",
  "system": "hf2ts_h_f2_hf_f",
- "tag": "NEB-TS path hf2ts_h_f2_hf_f",
+ "tag": "ts-points path hf2ts_h_f2_hf_f",
  "charge": 0,
  "mult": 2,
- "status": "failed",
- "n_points": 11,
- "n_ok": 0,
- "attempts": 2,
- "wall_s": 88.2
+ "uks": true,
+ "broken_sym": false,
+ "n_points": 9,
+ "n_ok": 9,
+ "orca_rc": 0,
+ "status": "ok",
+ "wall_s": 104.4,
+ "points": [
+  {
+   "point": 0,
+   "label": "reactant",
+   "role": "reactant",
+   "energy_eh": -200.011147670784,
+   "s2": 0.75
+  },
+  {
+   "point": 1,
+   "label": "interp_f0.25",
+   "role": "interp",
+   "energy_eh": -200.011359226712,
+   "s2": 0.75
+  },
+  {
+   "point": 2,
+   "label": "interp_f0.50",
+   "role": "interp",
+   "energy_eh": -200.011136296677,
+   "s2": 0.75001
+  },
+  {
+   "point": 3,
+   "label": "interp_f0.75",
+   "role": "interp",
+   "energy_eh": -200.012725921571,
+   "s2": 0.751313
+  },
+  {
+   "point": 4,
+   "label": "ts",
+   "role": "ts",
+   "energy_eh": -200.025155797288,
+   "s2": 0.776365
+  },
+  {
+   "point": 5,
+   "label": "interp_f0.25",
+   "role": "interp",
+   "energy_eh": -200.066791174039,
+   "s2": 0.756706
+  },
+  {
+   "point": 6,
+   "label": "interp_f0.50",
+   "role": "interp",
+   "energy_eh": -200.108134137811,
+   "s2": 0.752138
+  },
+  {
+   "point": 7,
+   "label": "interp_f0.75",
+   "role": "interp",
+   "energy_eh": -200.148994529145,
+   "s2": 0.752131
+  },
+  {
+   "point": 8,
+   "label": "product",
+   "role": "product",
+   "energy_eh": -200.170570967369,
+   "s2": 0.752133
+  }
+ ]
 }
