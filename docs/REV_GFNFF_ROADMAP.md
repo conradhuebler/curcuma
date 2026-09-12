@@ -118,8 +118,21 @@ of late well joins, chatter cost, dt = 0.5 fs, locality for large systems.
 - [ ] Stage 1b open: late-join tail (0-1 jumps > 40 kJ/mol per 3 ps), chatter cost (100-200
       reverts / 3 ps), dt = 0.5 fs stability, corner locality for large systems, NVE dt^2 test,
       CLI tests 16-18 of the plan, H recombination |dE_jump| < 5 kJ/mol with a sane start geometry.
-- [ ] Acceptance after the fit against WP2 A+C: dE_jump median < 1 kJ/mol; BH76 H-transfer
-      barriers >= 30 % better than the WP0 baseline (56.4 kcal/mol MAD); conformer guard <= 1.6.
+- [x] Smoothness acceptance met (dE_jump median 0.1 kJ/mol, see STAGE1.md).
+- [x] Barrier acceptance MEASURED and NOT MET (2026-09-12, `test_cases/revgfnff/fit_work/barriers/`):
+      MAD vs reference in kcal/mol, gfnff / revgfnff default / revgfnff fitted - BH76 all (76)
+      56.4 / 59.4 / 57.7; BH76 hydrogen transfer (44) 43.0 / 49.0 / 46.3; BHPERI 35.4 / 33.9 /
+      35.8; BHDIV10 39.9 / 47.8 / 45.4; PX13 143 / 251 / 262; WCPT18 31.8 / 38.2 / 74.5;
+      BHROT27 and INV24 unchanged. At the benchmark geometries every switch is saturated, so
+      bond/angle/torsion/repulsion/Coulomb are bit-identical to gfnff; the whole change is the
+      over-coordination term (+9.5 / +6.6 kcal/mol on the H-transfer barriers), and the fitted
+      N/O penalties (0.99 / 0.44 Eh) wreck the proton-transfer sets. The barrier error itself is
+      the bond term (+48.7 kcal/mol mean on H transfer, the Gaussian well at 1.2-1.4x), which
+      stage 1 does not touch. Consequences: (1) the "30 % better" expectation was wrong for
+      stage 1 - barrier accuracy is stage 3 (bond shape) plus stage 2 (charges for the
+      anionic sets); (2) E_over must be parametrised against the TS structures, not only the
+      rigid approach curves of class C - the fitter gets a barrier dataset (next step); (3) the
+      stage-1 fitted parameters are NOT adopted.
 
 ## WP4 - stage 2: charge model (design: `docs/REV_GFNFF_STAGE2.md`, 2026-09-12; implementation in progress)
 
