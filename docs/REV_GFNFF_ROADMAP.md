@@ -116,7 +116,7 @@ of late well joins, chatter cost, dt = 0.5 fs, locality for large systems.
 - [ ] Acceptance after the fit against WP2 A+C: dE_jump median < 1 kJ/mol; BH76 H-transfer
       barriers >= 30 % better than the WP0 baseline (56.4 kcal/mol MAD); conformer guard <= 1.6.
 
-## WP4 - stage 2: charge model (design sketch in the plan)
+## WP4 - stage 2: charge model (design: `docs/REV_GFNFF_STAGE2.md`, 2026-09-12; implementation in progress)
 
 - [ ] Split charges `p_ij = -p_ji` on pairs with `b_ij > 0`, hardness `kappa_ij^0 / b_ij`,
       Coulomb kernel and self-energy unchanged, fragment constraints dropped in the rev mode.
