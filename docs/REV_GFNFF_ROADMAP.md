@@ -36,13 +36,13 @@ separately; every reference calculation is stored with input, output, geometries
 
 ## WP1 - parameter override + fit infrastructure (serves stages 1-3)
 
-- [ ] WP1a `GFNFFTables` (`ff_methods/gfnff_param_tables.{h,cpp}`): gen% literals hoisted
+- [x] WP1a `GFNFFTables` (`ff_methods/gfnff_param_tables.{h,cpp}`): gen% literals hoisted
       (`gfnff_method.cpp` 3991-3996, 4548-4551, 4305, 4719, 4872-4874, 5764; `huckel_solver.h:168`;
       `ff_workspace_gfnff.cpp` 208, 1211-1212), element tables as runtime copies of
       `GFNFFParameters::*`, `-gfnff.param_file` / `-gfnff.param_json` sparse deep-merge, fail-loud
       on unknown keys, fingerprint extended by the table hash, bit-identity guard test.
-- [ ] WP1b `-gfnff.dump_params FILE` via the existing `GFNFFParameterSet::toJSON()`.
-- [ ] WP1c batch single point `-sp multi.xyz -batch true` (one JSON line per frame with energy,
+- [x] WP1b `-gfnff.dump_params FILE` via the existing `GFNFFParameterSet::toJSON()`.
+- [x] WP1c batch single point `-sp multi.xyz -batch true` (one JSON line per frame with energy,
       gradient in Eh/Angstrom and the term table).
 - [x] WP1d `scripts/revgfnff_fit.py` (2026-09-12, numpy-only LM with FD Jacobian + Nelder-Mead;
       relative energies within a system + gradients; every system one `-sp -batch` run with
