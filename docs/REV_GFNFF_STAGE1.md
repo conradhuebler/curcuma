@@ -159,6 +159,17 @@ used to dissociate hot H2 is gone). Completions,
 reverts and demotes cost exactly 0.0 kJ/mol; the Coulomb jump of a fragment merge (up to -50
 kJ/mol at s = 0 before) is gone because the EEQ is solved per corner.
 
+**Scope of these numbers: diatomics only.** Every cell above is 2 H2, 4 H or N2 + 3 H2, where a
+bond event cannot re-parametrise a molecular fragment - so the smoothness they show does not
+transfer. Measured 2026-09-12 on methanol (react MD, CSVR, 1 ps, dt 0.25, one run per
+temperature): 1000 K gives 3 rebuilds with median |dE_jump| 44.5 and max 69.2 kJ/mol, 2000 K
+gives 43 rebuilds with median 0.00 but max **130.9** kJ/mol and 7 above 5. The class-A bond scans
+agree - 8 polyatomic bonds at -25..-85 kJ/mol per rebuild, negative, i.e. the new topology is
+lower and the event heats the dynamics (`test_cases/revgfnff/_log/CLASSA_FROZENCN.md`). n is
+small; a proper polyatomic baseline is being measured into
+`test_cases/revgfnff/_log/POLY_JUMP_BASELINE.md`. Until it exists, no acceptance criterion may
+rest on the table above.
+
 **Remaining tail.** (1) The 4 H square start geometry (1.3 A, all pairs at w = 0.5) begins with
 six wells joining at half weight - a property of the test input (seeding the initial topology with
 those pairs was tried and rejected: it also seeds their hybridisation). (2) The well join itself at w = 0.05 costs 1-5 kJ/mol

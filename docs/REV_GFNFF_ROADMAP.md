@@ -19,6 +19,41 @@ perception, continuous weights; every residual jump is measured (`dE_jump`) befo
 smoothed; no spin variable in stages 1-3, open-shell structures are flagged and reported
 separately; every reference calculation is stored with input, output, geometries and metadata.
 
+## Decisions (operator, 2026-09-12) - staging revised after the Fable design review
+
+Review: `test_cases/revgfnff/_log/FABLE_ROADMAP_REVIEW.md` (data basis: 27 class-A bond
+decompositions, 3 barrier CSVs, 6 jump-stat cells, 1 water-dimer run).
+
+5. **Stage 3 before stage 2, and stage 3 starts with two rule fixes, not with a new well.**
+   Measured reason: the model's excess at 1.3-1.6 r_eq is the *dynamic* r0 retreating as the
+   stretched pair's own erf contribution leaves its partners' CN (+9..+24 kcal/mol on every X-H
+   bond; with CN frozen the C-H curve tracks r2SCAN-3c to < 1 kcal/mol out to 1.6 r_eq), and
+   pairwise wells have no valence conservation at all: for H + CH4 the two partial wells put the
+   TS **78 kcal/mol below** the reactants where r2SCAN-3c has +12. A deeper or wider well makes
+   barriers worse until that is fixed. Order: (i) drop the pair's own cn_ij from its r0, (ii)
+   valence-share factor c_ij on the bond energy, each measured on its own falsifier; only then
+   (iii) the well form and (iv) the element-table refit, with an E_over refit after (ii).
+6. **Acceptance on radical H-transfer is the path shape, not the absolute barrier.** 42 of the 44
+   BH76 hydrogen-transfer structures are open-shell radicals evaluated closed-shell, and the
+   cleanest bond-term falsifier (`rkt06_h_h2`) is a doublet as well. The spin-free ground rule
+   below stands; radical reactions stay targets (they are what a reactive FF is for - ctest 14 is
+   H recombination), but acceptance is rms against the r2SCAN-3c path and the barrier position,
+   with the UKS-reference caveat stated. Cl2-/F2- are 2c-3e radical anions: report, not target,
+   so the stage-2 headline target moves to closed-shell charged NCI (AHB21/CHB6/IL16, n=43) and
+   the anionic SN2 barriers.
+7. **The react join criterion is tightened now.** The wide term weight (w > 0.05 at ~2.3x the
+   covalent sum) declares a water dimer's H...O (1.952 A) *and* its O...O (2.910 A) to be bonds:
+   18 formations / 15 breaks / 33 rebuilds per ps at 300 K on a molecule that does not react.
+   Harmless only while the well is clipped to -2 kcal/mol there; about -15 per hydrogen bond with
+   a real tail. The wide weight stays a term-list/blend device, the join decision moves to the
+   narrow switch. Details and numbers in `docs/REV_GFNFF_STAGE1.md`.
+
+Corrections to earlier numbers in this file (measured, trust these): the WP3 "bond +48.7
+kcal/mol on hydrogen transfer" holds only with `hcnts` in the set - RKT-only (n=38) is bond
++43.2, MAD 40.5; and the WP5 "H-H k 2.2x too stiff" is mostly the bonded H-H repulsion (the
+Gaussian contributes 375 of ~1876 kcal/mol/A^2), so every k_e statement is about well +
+repulsion, not the well.
+
 ## WP0 - data basis (done 2026-09-11)
 
 - [x] `scripts/gmtkn55_reactions.py`: 1505 reactions from `.res` + upstream CSV, WTMAD-2 verified
