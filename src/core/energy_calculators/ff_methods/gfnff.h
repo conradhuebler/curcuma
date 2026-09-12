@@ -341,6 +341,7 @@ PARAM(rev_bo_width, Double, -7.5, "rev-gfnff: steepness k of the erf bond-order 
 PARAM(rev_bo2_center, Double, 1.4, "rev-gfnff: switching radius factor of the BOND ORDER used by the over-coordination sum and the repulsion blend (1 at the bond, 0 at 1,3 and hydrogen-bond distances).", "Reactive", {})
 PARAM(rev_bo2_width, Double, -6.0, "rev-gfnff: steepness of the bond-order switch.", "Reactive", {})
 PARAM(rev_over_shift, Double, 0.5, "rev-gfnff: the penalty argument is bo_sum - valence - shift, so a saturated atom pays nothing.", "Reactive", {})
+PARAM(rev_over_preset, String, "stage1a", "rev-gfnff: built-in set of the over-coordination parameters (per-element p_over, over_shift, sigma valences). stage1a (default) = the placeholder set: p_over 0.3 for every element, over_shift 0.5, nominal sigma valences. fit2026-09-12 = the Levenberg-Marquardt fit against reference class C plus the GMTKN55 barriers, mirroring test_cases/revgfnff/params/rev_over_fit_2026-09-12.json; it stays opt-in until stage 3 re-measures the barriers. An explicit rev_over_p / rev_over_shift and the rev section of a -gfnff.param_file / -gfnff.param_json override document win over the preset.", "Reactive", {})
 PARAM(rev_blend, Bool, true, "rev-gfnff stage 1b: blend the bonded terms of the old and the new topology while the transition pair crosses its weight window instead of swapping them at the event.", "Reactive", {})
 PARAM(rev_bo3_center, Double, 1.6, "rev-gfnff stage 1b: centre of the TRANSITION coordinate switch in units of the covalent sum (x fat_i fat_j). The re-parametrisation of the neighbours blends in over rev_tr_begin..rev_tr_end of this switch, i.e. between 1.63x (1,3 pairs read 0.02) and 1.31x (equilibrium bonds read above 0.95); the pair's own well keeps the wide weight.", "Reactive", {})
 PARAM(rev_bo3_width, Double, -8.0, "rev-gfnff stage 1b: steepness k of the transition coordinate switch (negative: 1 inside the centre).", "Reactive", {})
@@ -2481,6 +2482,7 @@ private:
     void setupRevSettings();                    ///< fill m_rev_settings from PARAMs + tables (ctor) 
     void fillRevPerAtom();                      ///< per-atom rcov/fat/p/valence (after the atoms are known)
     double revValence(int Z) const;             ///< nominal sigma valence of an element
+    double revOverP(int Z) const;               ///< over-coordination prefactor p_Z of an element (preset / rev section / rev_over_p)
     int m_threads = 1; ///< Claude Generated (WP1, May 2026): cached thread count, kept in sync with m_parameters["threads"]
     std::unique_ptr<CxxThreadPool> m_pool; ///< Shared worker pool (topology setup, EEQ, workspace kernels)
     std::unique_ptr<FFWorkspace> m_workspace; ///< Claude Generated (Mar 2026): Unified workspace (replaces ForceField path)

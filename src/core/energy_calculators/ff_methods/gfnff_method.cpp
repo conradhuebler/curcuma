@@ -888,8 +888,10 @@ bool GFNFF::InitialiseMolecule()
             CurcumaLogger::result(fmt::format(
                 "GFN-FF react filters: valence cap {}, refractory {} scans, exchange {} scans, slack factor {:.2f}{}",
                 m_react_valence_cap ? "on" : "off", m_react_refractory_scans, m_react_exchange_scans, m_react_slack_form_factor,
-                m_rev_settings.enabled ? fmt::format("; rev weights: form at w > {:.3f}, break at w < {:.3f}; transition coordinate bo3 {:.2f}x k {:.1f}, window {:.2f}..{:.2f}, revert {:.2f}",
-                    m_rev_bo_form, m_rev_bo_break, m_rev_settings.bo3_center, m_rev_settings.bo3_width, m_rev_tr_begin, m_rev_tr_end, m_rev_tr_revert) : ""));
+                m_rev_settings.enabled ? fmt::format("; rev weights: form at w > {:.3f}, break at w < {:.3f}; transition coordinate bo3 {:.2f}x k {:.1f}, window {:.2f}..{:.2f}, revert {:.2f}; E_over shift {:.3f} k {:.1f} p(H,C,N,O) {:.3f} {:.3f} {:.3f} {:.3f} valence(N,O) {:.2f} {:.2f} preset {}",
+                    m_rev_bo_form, m_rev_bo_break, m_rev_settings.bo3_center, m_rev_settings.bo3_width, m_rev_tr_begin, m_rev_tr_end, m_rev_tr_revert,
+                    m_rev_settings.over_shift, m_rev_settings.over_k, revOverP(1), revOverP(6), revOverP(7), revOverP(8), revValence(7), revValence(8),
+                    m_parameters.value("rev_over_preset", std::string("stage1a"))) : ""));
         }
     }
 
@@ -11978,6 +11980,13 @@ void GFNFF::recordD4CNValues(const std::vector<double>& cn)
 // rev-gfnff stage 1 (Claude Generated, Sep 2026): settings and per-atom data
 // ============================================================================
 
+double GFNFF::revOverP(int Z) const
+{
+    if (auto it = m_rev_p_over.find(Z); it != m_rev_p_over.end())
+        return it->second;
+    return m_parameters.value("rev_over_p", 0.3);
+}
+
 double GFNFF::revValence(int Z) const
 {
     if (auto it = m_rev_valence.find(Z); it != m_rev_valence.end())
@@ -12011,6 +12020,36 @@ void GFNFF::setupRevSettings()
     rv.bo2_width = m_parameters.value("rev_bo2_width", -6.0);
     rv.over_k = m_parameters.value("rev_over_k", 10.0);
     rv.over_shift = m_parameters.value("rev_over_shift", 0.5);
+    // Claude Generated (Sep 12, 2026): built-in over-coordination parameter sets, selected by
+    // -gfnff.rev_over_preset (docs/REV_GFNFF_ROADMAP.md WP3, test_cases/revgfnff/params/).
+    // "stage1a" is the default placeholder set and needs no table at all: the cleared maps make
+    // revOverP()/revValence() fall back to rev_over_p = 0.3 and the nominal sigma valences.
+    // "fit2026-09-12" is the Levenberg-Marquardt fit against reference class C plus the GMTKN55
+    // barriers and mirrors rev_over_fit_2026-09-12.json; it is opt-in until stage 3 re-measures
+    // the barriers (operator decision 2026-09-12). The rev section of a -gfnff.param_file /
+    // -gfnff.param_json override document is read further down and therefore still wins over
+    // whatever the preset put here.
+    {
+        const std::string preset = m_parameters.value("rev_over_preset", std::string("stage1a"));
+        m_rev_p_over.clear();
+        m_rev_valence.clear();
+        if (preset == "fit2026-09-12") {
+            m_rev_p_over = { { 1, 0.0 }, { 6, 0.20905855948810678 }, { 7, 0.3390406173980198 }, { 8, 0.9941359009503772 } };
+            m_rev_valence = { { 7, 2.5363405882536694 }, { 8, 2.5306183215899516 } };
+            // Limitation: the registry always supplies rev_over_shift, so "the user left it alone"
+            // and an explicit -gfnff.rev_over_shift 0.5 cannot be told apart. The preset's shift is
+            // therefore applied only while the PARAM still reads the registry default 0.5; any
+            // other explicit value wins, and an explicit 0.5 is silently replaced by the fit's.
+            if (std::abs(rv.over_shift - 0.5) < 1e-12)
+                rv.over_shift = 0.869858593152913;
+        } else if (preset == "stage1a") {
+            // nothing to fill: the cleared maps plus the rev_over_p / rev_over_shift PARAM defaults
+            // and revValence()'s table already are the stage-1a placeholder set
+        } else {
+            CurcumaLogger::warn("rev-gfnff: unknown rev_over_preset '" + preset + "', using stage1a");
+            m_parameters["rev_over_preset"] = "stage1a"; // so the log and -export_run report what ran
+        }
+    }
     m_rev_bo_form = m_parameters.value("rev_bo_form", 0.05);
     m_rev_bo_break = m_parameters.value("rev_bo_break", 0.02);
     rv.blend = m_parameters.value("rev_blend", true);
@@ -12027,8 +12066,7 @@ void GFNFF::setupRevSettings()
     m_rev_bo13_form = m_parameters.value("rev_bo13_form", 0.1);
     m_rev_demote_cooldown = m_parameters.value("rev_demote_cooldown", 0);
     m_rev_max_transitions = std::max(1, m_parameters.value("rev_max_transitions", 4));
-    m_rev_p_over.clear();
-    m_rev_valence.clear();
+    // (the preset's per-element values stay; the rev section below overrides them - Sep 12, 2026)
     // the rev section of the parameter tables wins over the PARAMs (that is what a fit writes)
     const json& rev = m_tables->rev;
     if (rev.contains("bo_center")) rv.bo_center = rev["bo_center"].get<double>();
