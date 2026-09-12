@@ -30,10 +30,13 @@
 #include "src/core/global.h"
 #include "gfnff_parameters.h"
 #include "ff_terms.h"  // Bond, Angle, Dihedral, Inversion, vdW, EQ, CNDerivStore, GeoGradMatrix
+#include "gfnff_param_tables.h"  // Claude Generated (Sep 2026): runtime gen scalars
+#include "rev_bond_order.h"      // Claude Generated (Sep 2026): rev-gfnff stage 1 switching functions
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include <Eigen/Dense>
+#include <functional>
 #include <Eigen/Sparse>
 
 #include <future>
@@ -53,6 +56,7 @@ struct FFEnergyComponents {
     double bonded_rep = 0, nonbonded_rep = 0;   // GFN-FF exponential repulsion
     double coulomb = 0, hbond = 0, xbond = 0;
     double atm = 0, batm = 0, stors = 0;
+    double over_coord = 0;                      // rev-gfnff stage 1: over-coordination penalty (Sep 2026)
     // Claude Generated (May 2026, HB-investigation): per-case HB diagnostic split.
     // Sum of cases equals hbond. Counts compare against Fortran nhb1/nhb2.
     double hbond_case1 = 0, hbond_case2 = 0, hbond_case3 = 0, hbond_case4 = 0;
@@ -65,6 +69,7 @@ struct FFEnergyComponents {
         bonded_rep = nonbonded_rep = 0;
         coulomb = hbond = xbond = 0;
         atm = batm = stors = 0;
+        over_coord = 0;
         hbond_case1 = hbond_case2 = hbond_case3 = hbond_case4 = 0;
         hbond_case1_count = hbond_case2_count = hbond_case3_count = hbond_case4_count = 0;
     }
@@ -76,6 +81,7 @@ struct FFEnergyComponents {
         bonded_rep += o.bonded_rep; nonbonded_rep += o.nonbonded_rep;
         coulomb += o.coulomb; hbond += o.hbond; xbond += o.xbond;
         atm += o.atm; batm += o.batm; stors += o.stors;
+        over_coord += o.over_coord;
         // Claude Generated (May 2026, HB-investigation): per-case reduction
         hbond_case1 += o.hbond_case1; hbond_case2 += o.hbond_case2;
         hbond_case3 += o.hbond_case3; hbond_case4 += o.hbond_case4;
@@ -90,7 +96,7 @@ struct FFEnergyComponents {
         return bond + angle + dihedral + inversion + dispersion +
                vdw + rep +
                bonded_rep + nonbonded_rep + coulomb + hbond + xbond +
-               atm + batm + stors;
+               atm + batm + stors + over_coord;
     }
 };
 
@@ -137,6 +143,7 @@ struct FFTermTimings {
  */
 struct FFAccumulator {
     GeoGradMatrix gradient;          ///< N×3 gradient accumulator (WP-G: RowMajor)
+    /// rev-gfnff stage 1b: acc += scale * o for everything a bonded kernel writes (energies, gradient, dEdcn, components)
     Vector dEdcn;             ///< N dE/dCN for chain-rule
     Vector dEdcn_bond;        ///< N bond-only dE/dCN for per-component attribution
     FFEnergyComponents energy;
@@ -179,6 +186,72 @@ struct FFAccumulator {
  * Claude Generated (March 2026): Linear ranges (begin/end) for simple lists,
  * index vectors for three-body terms that need modulo-based distribution.
  */
+/**
+ * @brief rev-gfnff stage 1 settings of the workspace (Claude Generated, Sep 2026)
+ *
+ * Off by default: every kernel then evaluates exactly the GFN-FF expression. With
+ * `enabled` the bonded terms are multiplied by the continuous bond order of their bonds,
+ * the bonded/non-bonded repulsion of a pair is blended with the same weight, and the
+ * over-coordination energy is added (docs/REV_GFNFF_ROADMAP.md, WP3; rev_bond_order.h).
+ */
+struct RevSettings {
+    bool enabled = false;
+    bool bond_weight = true;      ///< bond well  x  b_ij
+    bool term_weights = true;     ///< angle/torsion/inversion damping  x  product of bond weights
+    bool blend_repulsion = true;  ///< E_rep = b E_bonded + (1-b) E_nonbonded on every pair that carries both sets
+    bool over_coord = true;       ///< E_over,i = p_Z sp(sum_j b_ij BO_ij - Val_Z)^2
+    bool blend = true;            ///< stage 1b: dual-topology blending of the bonded terms over a transition
+    double bo_center = 2.0;       ///< term WEIGHT switch: R = f_b (rcov_i + rcov_j) fat_i fat_j (wide: the well decays by itself)
+    double bo_width = -7.5;       ///< k of the weight switch (negative: w -> 1 inside R)
+    double w_join = 0.05;         ///< the react scan's join weight (rev_bo_form): the TERM weight is (w - w_join)/(1 - w_join) clamped, so a pair joins and leaves the lists at exactly zero weight (Sep 12, 2026: the join used to cost 1-5 kJ/mol, the dominant NVE drift)
+    double bo2_center = 1.4;      ///< BOND ORDER switch for E_over (Sep 12, 2026: softened from 1.3/-16, which sat inside the thermal amplitude of X-H bonds and made E_over a stiff wall at 0.5 fs)
+    double bo2_width = -6.0;      ///< k of the bond-order switch (softened Sep 12, 2026 for 0.5 fs stability)
+    double bo3_center = 1.6;      ///< stage 1b TRANSITION coordinate switch: the neighbour re-parametrisation of a topology change blends in over rev_tr_begin..rev_tr_end of this order, i.e. between 1.63x (1,3 pairs read 0.02) and 1.31x (equilibrium bonds read > 0.95)
+    double bo3_width = -8.0;      ///< k of the transition switch (-5 was tried for 0.5 fs and was LESS stable: the wider window lets more transitions overlap)
+    double bo4_center = 1.7;      ///< REPULSION BLEND switch: 0.9993 at 1.38x (the turning point of a hot X-H bond; at 1.5x/-10 the 4.5 % of the huge non-bonded repulsion there blew up 0.5 fs MD), 0.5 at 1.7x where a bond really breaks, 0.02 at 1.9x; 1,3 and 1,4 pairs are excluded topologically
+    double bo4_width = -12.0;     ///< k of the repulsion blend switch
+    double bo5_center = 1.3;      ///< REPULSION BLEND switch of NON-BONDED-list pairs: 0.5 at 1.3x, 1e-4 at 1.63x (1,3 / 1,4 distances), 1e-9 at H-bond distance - a pair that really approaches has joined the bonded list (w > 0.05 at 2.3x) long before, where bo4 takes over continuously (both switches read ~0 there)
+    double bo5_width = -12.0;     ///< k of the non-bonded repulsion blend switch
+    double over_k = 10.0;         ///< softplus steepness
+    double over_shift = 0.5;      ///< penalty argument is (bo_sum - valence - over_shift): no penalty for a saturated atom
+    std::vector<double> rcov;     ///< per atom, Bohr (GFNFF covalent radius, as the react scan uses it)
+    std::vector<double> fat;      ///< per atom, element scaling of the react scan threshold
+    std::vector<double> over_p;   ///< per atom, penalty prefactor p_Z (Eh)
+    std::vector<double> valence;  ///< per atom, nominal sigma valence Val_Z
+
+    /// switching radius of the term weight of a pair
+    double R(int i, int j) const { return bo_center * (rcov[i] + rcov[j]) * fat[i] * fat[j]; }
+    /// switching radius of the bond order of a pair
+    double R2(int i, int j) const { return bo2_center * (rcov[i] + rcov[j]) * fat[i] * fat[j]; }
+    /// switching radius of the transition coordinate of a pair (stage 1b)
+    double R3(int i, int j) const { return bo3_center * (rcov[i] + rcov[j]) * fat[i] * fat[j]; }
+    /// switching radius of the repulsion blend of a pair
+    double R4(int i, int j) const { return bo4_center * (rcov[i] + rcov[j]) * fat[i] * fat[j]; }
+    double R5(int i, int j) const { return bo5_center * (rcov[i] + rcov[j]) * fat[i] * fat[j]; }
+};
+
+/**
+ * @brief rev-gfnff stage 1b: one topology transition in flight (Claude Generated, Sep 2026)
+ *
+ * While the term weight w of the pair (i, j) crosses the window [w_a, w_b] the workspace
+ * carries the bonded lists of BOTH topologies: the primary (new, after the event) and the
+ * alternative (old, before the event), and evaluates
+ *     E_bonded = (1 - s) E_alt + s E_primary,   s = clamp((w - w_a) / (w_b - w_a), 0, 1).
+ * Forming: w_a = 0.05 -> w_b = 0.5 (the new bond and the re-selected neighbour parameters
+ * grow in as the pair approaches); breaking: w_a = 0.5 -> w_b = 0.02 (the old topology fades
+ * out while the bond stretches). The list swap therefore costs nothing at either end.
+ */
+struct RevTransition {
+    bool active = false;
+    bool forming = true;            ///< formation (s grows as the pair closes) or break (s grows as it opens)
+    bool tight = false;             ///< coordinate is the bond-order switch (1,3 ring closure) instead of the transition switch
+    int i = -1, j = -1;
+    double w_a = 0.05, w_b = 0.5;   ///< window of the transition COORDINATE c (bo3 switch): s = (c - w_a) / (w_b - w_a), clamped to [0, 1]
+    // per step (set by FFWorkspace::updateBlend)
+    double w = 0.0, dwdr = 0.0, r = 0.0, s = 0.0, dsdw = 0.0; ///< w = term weight of the pair (reporting only); dwdr = dc/dr (gradient of s)
+    double c = 0.0;                 ///< transition coordinate of the pair (bo3 order)
+};
+
 struct PartitionRanges {
     std::pair<int,int> bonds = {0,0};
     std::pair<int,int> angles = {0,0};
@@ -228,9 +301,56 @@ public:
 
     /// Move interaction lists from GFNFFParameterSet
     void setInteractionLists(GFNFFParameterSet&& params);
+    /// Claude Generated (Sep 2026, rev-gfnff): the runtime parameter tables the kernels read their gen scalars from
+    void setTables(std::shared_ptr<const GFNFFTables> tables) { m_tables = std::move(tables); }
+    const GFNFFTables& tables() const { return *m_tables; }
 
     /// Set atom types (element numbers)
     void setAtomTypes(const std::vector<int>& atoms);
+    /// Claude Generated (Sep 2026, rev-gfnff stage 1): switch the continuous-bond-order kernels on
+    void setRev(const RevSettings& rev) { m_rev = rev; }
+    const RevSettings& rev() const { return m_rev; }
+    /// per-atom bond-order sums of the last calculate() (rev mode; empty otherwise)
+    const Vector& revBondOrderSum() const { return m_rev_bo_sum; }
+    /// rev-gfnff stage 1b: install `params` as the new primary lists and keep the CURRENT bonded
+    /// lists as the alternative topology, blended on the weight of pair (i, j) over [w_a, w_b]
+    // ---- rev-gfnff stage 1b (Sep 2026): multi-transition blending over 2^k topology corners.
+    // Every transition t in flight has a coordinate s_t in [0, 1]; corner mask b holds the force
+    // field of the topology "base + events with bit set"; E = sum_b W_b E_b with
+    // W_b = prod_t (b_t ? s_t : 1 - s_t). Each corner is a complete FFWorkspace state (bonded and
+    // non-bonded lists, charges, e0) swapped into the evaluation slot in O(1), so no kernel knows
+    // about the blend. The slot holds the all-ones corner (the expected topology) between calls.
+    struct TopologyState {
+        std::vector<Bond> bonds;
+        std::vector<Angle> angles;
+        std::vector<Dihedral> dihedrals, extra_dihedrals;
+        std::vector<Inversion> inversions;
+        std::vector<GFNFFSTorsion> storsions;
+        std::vector<GFNFFDispersion> dispersions, d4_dispersions;
+        std::vector<GFNFFRepulsion> bonded_reps, nonbonded_reps;
+        std::vector<GFNFFCoulomb> coulombs;
+        std::vector<GFNFFHydrogenBond> hbonds;
+        std::vector<GFNFFHalogenBond> xbonds;
+        std::vector<ATMTriple> atm_triples;
+        std::vector<GFNFFBatmTriple> batm_triples;
+        std::vector<BondHBEntry> bond_hb_data;
+        std::vector<HBGradEntry> hb_grad_entries;
+        std::vector<int> hb_grad_offsets, hb_grad_list;
+        std::set<std::pair<int, int>> bonded_pairs;
+        std::vector<PartitionRanges> partitions;
+        Vector eeq_charges, topology_charges, coul_chi_base, coul_gam, coul_alp, coul_cnf, coul_chi_static;
+        double e0 = 0.0;
+    };
+    /// start a transition: params[m] is the parameter set of corner (m | 1 << k) for every existing corner m
+    void beginTransition(RevTransition tr, std::vector<GFNFFParameterSet>&& params);
+    /// end transition t: keep the corners with its bit set (completed) or cleared (reverted)
+    void endTransition(int t, bool keep_new);
+    const std::vector<RevTransition>& transitions() const { return m_transitions; }
+    bool transitionActive() const { return !m_transitions.empty(); }
+    const std::vector<Bond>& bonds() const { return m_bonds; } ///< bond list of the slot corner (fading wells are copied from here)
+    /// called with the corner mask after that corner was swapped into the slot and before it is evaluated (per-corner EEQ charges)
+    void setCornerPrepare(std::function<void(int)> f) { m_corner_prepare = std::move(f); }
+    void updateTransitions();
 
     /// Create partition ranges and allocate accumulators
     void partition();
@@ -337,6 +457,18 @@ private:
     // === Shared state (read-only per step) ===
     GeoGradMatrix m_geometry;  // WP-G: RowMajor for contiguous row(i) reads in inner loops
     std::vector<int> m_atom_types;
+    std::shared_ptr<const GFNFFTables> m_tables = GFNFFTables::defaults(); ///< runtime tables (Sep 2026)
+    RevSettings m_rev;         ///< rev-gfnff stage 1 (Sep 2026)
+    Vector m_rev_bo_sum;       ///< per-atom sum_j b_ij BO_ij of the last step (rev mode)
+    std::vector<RevTransition> m_transitions;      ///< stage 1b: transitions in flight (bit t of a corner mask)
+    std::vector<TopologyState> m_corners;          ///< corner states by mask; the slot's own entry is a placeholder
+    int m_slot_mask = 0;                           ///< which corner the member slot currently holds
+    std::function<void(int)> m_corner_prepare;
+    std::vector<double> m_corner_energy;
+    std::vector<GeoGradMatrix> m_corner_gradient;
+    std::vector<FFEnergyComponents> m_corner_components;
+    void swapState(TopologyState& st);             ///< O(1) exchange of the slot with a stored corner
+    double calculateSingle(bool gradient);         ///< one topology (the pre-stage-1b calculate())
     Vector m_eeq_charges, m_topology_charges, m_d3_cn;
     Vector m_cn, m_cnf;
     CNDerivStore m_dcn;  // Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
@@ -408,12 +540,51 @@ private:
     void reduce();
 
     // === GFN-FF energy term calculators (ported from ForceFieldThread) ===
-    void calcBonds(int p);
-    void calcAngles(int p);
-    void calcDihedrals(int p);
-    void calcExtraTorsions(int p);
-    void calcInversions(int p);
-    void calcSTorsions(int p);
+    // The six bonded kernels take the accumulator, the list and the index range explicitly so
+    // that the same code evaluates the primary and the alternative topology of a blend
+    // (rev-gfnff stage 1b, Sep 2026).
+    void calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, std::pair<int, int> range);
+    void calcAngles(FFAccumulator& acc, const std::vector<Angle>& list, std::pair<int, int> range);
+    void calcDihedrals(FFAccumulator& acc, const std::vector<Dihedral>& list, std::pair<int, int> range);
+    void calcExtraTorsions(FFAccumulator& acc, const std::vector<Dihedral>& list, std::pair<int, int> range);
+    void calcInversions(FFAccumulator& acc, const std::vector<Inversion>& list, std::pair<int, int> range);
+    void calcSTorsions(FFAccumulator& acc, const std::vector<GFNFFSTorsion>& list, std::pair<int, int> range);
+    /// all six bonded kernels of one topology into `acc`
+    void runBonded(FFAccumulator& acc, const PartitionRanges& pr, FFTermTimings* timings);
+    /// rev-gfnff: continuous bond order of a pair at distance r (Bohr); dw = db/dr
+    double revWeight(int i, int j, double r, double* dw) const {
+        double d = 0.0;
+        const double w = RevGFNFF::bondOrder(r, m_rev.R(i, j), m_rev.bo_width, &d);
+        const double denom = 1.0 - m_rev.w_join;
+        if (w <= m_rev.w_join || denom <= 0.0) {
+            if (dw) *dw = 0.0;
+            return 0.0;
+        }
+        if (dw) *dw = d / denom;
+        return (w - m_rev.w_join) / denom;
+    }
+    /// the raw (unshifted) term-weight switch, as the react scan sees it
+    double revWeightRaw(int i, int j, double r, double* dw) const {
+        return RevGFNFF::bondOrder(r, m_rev.R(i, j), m_rev.bo_width, dw);
+    }
+    /// rev-gfnff: bond order of a pair (tight switch: E_over sums and the repulsion blend)
+    double revOrder(int i, int j, double r, double* db) const {
+        return RevGFNFF::bondOrder(r, m_rev.R2(i, j), m_rev.bo2_width, db);
+    }
+    /// rev-gfnff: repulsion blend weight of a pair (see RevSettings::bo4_center)
+    double revBlend(int i, int j, double r, double* db) const {
+        return RevGFNFF::bondOrder(r, m_rev.R4(i, j), m_rev.bo4_width, db);
+    }
+    /// rev-gfnff: repulsion blend weight of a NON-BONDED-list pair (tight switch, see RevSettings::bo5_center)
+    double revBlendNB(int i, int j, double r, double* db) const {
+        return RevGFNFF::bondOrder(r, m_rev.R5(i, j), m_rev.bo5_width, db);
+    }
+    /// rev-gfnff stage 1b: transition coordinate of a pair (medium switch, see RevSettings::bo3_center)
+    double revCoord(int i, int j, double r, double* dc) const {
+        return RevGFNFF::bondOrder(r, m_rev.R3(i, j), m_rev.bo3_width, dc);
+    }
+    /// rev-gfnff: over-coordination energy + gradient, main thread, after the partitions (Sep 2026)
+    void calcOverCoordination(bool gradient);
     void calcDispersion(int p);
     void calcD4Dispersion(int p);
     void calcBondedRepulsion(int p);

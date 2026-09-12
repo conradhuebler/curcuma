@@ -1721,6 +1721,90 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         || (controller.contains("opt") && read_bool(controller["opt"], "gradient"))
         || !dump_gradient_path.empty();
 
+    // Claude Generated (Sep 2026, rev-gfnff WP1c): batch mode. `-sp frames.xyz -batch true`
+    // evaluates every frame of a multi-structure file in ONE process and writes one JSON
+    // line per frame (energy, gradient in Eh/Angstrom, term decomposition) to
+    // -batch_out FILE (default <basename>.batch.jsonl in the working directory). A
+    // parameter fit needs thousands of single points per loss evaluation and the ~10 ms
+    // process start-up would otherwise dominate. Charge and spin apply to every frame
+    // (the XYZ comment line is not parsed), so callers bucket structures by charge/spin.
+    // A frame that fails is recorded with its error and the batch continues; the exit
+    // code is non-zero if any frame failed. -batch_reuse_topology true keeps the force
+    // field topology of the first frame (MD snapshots of ONE molecule); the default
+    // re-perceives every frame as a fresh single point.
+    const bool batch = read_bool(controller, "batch")
+        || (controller.contains("opt") && read_bool(controller["opt"], "batch"));
+    if (batch) {
+        std::string batch_out;
+        auto read_out = [&](const json& j) {
+            if (j.is_object() && j.contains("batch_out") && j["batch_out"].is_string())
+                batch_out = j["batch_out"].get<std::string>();
+        };
+        read_out(controller);
+        if (controller.contains("opt")) read_out(controller["opt"]);
+        if (batch_out.empty()) {
+            std::string base = std::filesystem::path(argv[2]).stem().string();
+            batch_out = base + ".batch.jsonl";
+        }
+        const bool reuse_topology = read_bool(controller, "batch_reuse_topology")
+            || (controller.contains("opt") && read_bool(controller["opt"], "batch_reuse_topology"));
+        std::ofstream out(batch_out);
+        if (!out) {
+            CurcumaLogger::error("Could not open -batch_out file: " + batch_out);
+            return 1;
+        }
+        FileIterator frames(argv[2], true);
+        if (frames.AtEnd()) {
+            CurcumaLogger::error(std::string("No structures in ") + argv[2]);
+            return 1;
+        }
+        std::unique_ptr<EnergyCalculator> calc;
+        std::vector<int> last_atoms;
+        int n_frames = 0, n_failed = 0;
+        while (!frames.AtEnd()) {
+            Molecule frame = frames.Next();
+            if (controller.contains("charge"))
+                frame.setCharge(controller["charge"].get<int>());
+            if (controller.contains("spin"))
+                frame.setSpin(controller["spin"].get<int>());
+            const bool same_composition = (frame.Atoms() == last_atoms);
+            json rec;
+            rec["frame"] = n_frames;
+            rec["natoms"] = frame.AtomCount();
+            try {
+                if (!calc || !(reuse_topology && same_composition)) {
+                    calc = std::make_unique<EnergyCalculator>(method, energy_controller);
+                    calc->setMolecule(frame.getMolInfo());
+                    last_atoms = frame.Atoms();
+                } else {
+                    calc->updateGeometry(frame.getGeometry());
+                }
+                const double e = calc->CalculateEnergy(want_gradient);
+                if (calc->Error()) {
+                    rec["error"] = calc->ErrorMessage();
+                    ++n_failed;
+                } else {
+                    rec["energy_eh"] = e;
+                    if (want_gradient) {
+                        Geometry g = calc->Gradient();
+                        json gj = json::array();
+                        for (int i = 0; i < g.rows(); ++i)
+                            gj.push_back({ g(i, 0), g(i, 1), g(i, 2) });
+                        rec["gradient_eh_ang"] = gj;
+                    }
+                    rec["terms"] = calc->getEnergyDecomposition();
+                }
+            } catch (const std::exception& ex) {
+                rec["error"] = ex.what();
+                ++n_failed;
+            }
+            out << rec.dump() << "\n";
+            ++n_frames;
+        }
+        fmt::print("Batch single point: {} frames, {} failed, written to {}\n", n_frames, n_failed, batch_out);
+        return n_failed ? 1 : 0;
+    }
+
     Molecule molecule(argv[2]);
     // Claude Generated (Jul 2026): Apply charge/spin from CLI controller to the molecule
     // before the energy calculation. Mirrors the -opt path (see below). Without this,

@@ -172,6 +172,15 @@ set_tests_properties(cli_simplemd_14_gfnff_react_h_recombination PROPERTIES TIME
 add_cli_test(simplemd 15_gfnff_react_water_noevent)
 set_tests_properties(cli_simplemd_15_gfnff_react_water_noevent PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;react")
 set_tests_properties(cli_simplemd_12_eeq_cutoff_auto PROPERTIES TIMEOUT 180 LABELS "simplemd;gfnff;eeq_cutoff")
+# Claude Generated (Sep 2026): reactive revgfnff (rev-gfnff stage 1b) regression tests
+# (docs/REV_GFNFF_STAGE1.md). Systems shared with scripts/revgfnff_jump_stats.py
+# (test_cases/revgfnff/systems/).
+add_cli_test(simplemd 16_gfnff_rev_h2_smooth)
+set_tests_properties(cli_simplemd_16_gfnff_rev_h2_smooth PROPERTIES TIMEOUT 600 LABELS "simplemd;gfnff;react;rev")
+add_cli_test(simplemd 17_gfnff_rev_n2h2_norefractory)
+set_tests_properties(cli_simplemd_17_gfnff_rev_n2h2_norefractory PROPERTIES TIMEOUT 600 LABELS "simplemd;gfnff;react;rev")
+add_cli_test(simplemd 18_gfnff_rev_nve_vs_gfnff)
+set_tests_properties(cli_simplemd_18_gfnff_rev_nve_vs_gfnff PROPERTIES TIMEOUT 600 LABELS "simplemd;gfnff;react;rev")
 # Claude Generated (Jul 2026): RMSD-MTD strided-scheme regression tests (docs/RMSD_MTD_TEXTBOOK.md 6)
 add_cli_test(simplemd 13_rmsd_mtd_legacy_ab)
 set_tests_properties(cli_simplemd_13_rmsd_mtd_legacy_ab PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;rmsd_mtd")

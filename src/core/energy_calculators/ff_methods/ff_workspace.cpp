@@ -221,7 +221,7 @@ void FFWorkspace::setCoulombSelfEnergyParams(const Vector& chi_base, const Vecto
     m_coul_chi_static = chi_static;
 }
 
-double FFWorkspace::calculate(bool gradient)
+double FFWorkspace::calculateSingle(bool gradient)
 {
     const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
     auto t_calc_start = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
@@ -299,6 +299,11 @@ double FFWorkspace::calculate(bool gradient)
         t_execute = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
     }
 
+    // rev-gfnff stage 1 (Sep 2026): the over-coordination energy needs the complete
+    // bond-order sums, so it runs once on the main thread after the partitions.
+    if (m_rev.enabled && m_rev.over_coord && m_method_type == FFMethodType::GFN_FF)
+        calcOverCoordination(gradient);
+
     t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     postProcess(gradient);
     if (do_timing) {
@@ -321,6 +326,7 @@ double FFWorkspace::calculate(bool gradient)
         fmt::print("  coulomb   = {:+.15e}\n", m_result_energy.coulomb);
         fmt::print("  hbond     = {:+.15e}\n", m_result_energy.hbond);
         fmt::print("  xbond     = {:+.15e}\n", m_result_energy.xbond);
+        fmt::print("  overcoord = {:+.15e}\n", m_result_energy.over_coord);
         CurcumaLogger::info("=== CPU ENERGY END ===");
     }
 
@@ -342,12 +348,11 @@ void FFWorkspace::executeGFNFF(int p)
     // BEFORE the parallel dispatch (they write shared m_bonds[].hb_cn_H / m_hb_grad_entries
     // that every partition's calcBonds reads) — see the thread-safety note there.
 
-    // Bonded terms
-    auto t = tic(); calcBonds(p);          timings.bonds      = toc(t);
-    t = tic();      calcAngles(p);         timings.angles     = toc(t);
-    t = tic();      calcDihedrals(p);
-                    calcExtraTorsions(p);  timings.dihedrals  = toc(t);
-    t = tic();      calcInversions(p);     timings.inversions = toc(t);
+    // Bonded terms. rev-gfnff stage 1b (Sep 2026): during a topology transition both
+    // topologies are evaluated and blended, E = (1 - s) E_alt + s E_primary.
+    auto t = tic();
+    runBonded(m_accumulators[p], m_partitions[p], &timings);
+    (void)t;
 
     // Non-bonded pairwise terms
     if (m_dispersion_enabled) {
@@ -383,11 +388,31 @@ void FFWorkspace::executeGFNFF(int p)
         t = tic(); calcBATM(p); timings.batm = toc(t);
     }
 
-    // Triple bond torsions
-    if (!m_storsions.empty()) {
-        t = tic(); calcSTorsions(p); timings.stors = toc(t);
+    // Triple bond torsions: evaluated inside runBonded() with the other bonded terms.
+}
+
+// rev-gfnff stage 1b (Claude Generated, Sep 2026): the six bonded kernels of one topology
+void FFWorkspace::runBonded(FFAccumulator& acc, const PartitionRanges& pr, FFTermTimings* timings)
+{
+    auto tic = []() { return std::chrono::high_resolution_clock::now(); };
+    auto toc = [](auto t0) { return std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count(); };
+    const auto& bonds = m_bonds;
+    const auto& angles = m_angles;
+    const auto& dihedrals = m_dihedrals;
+    const auto& extra = m_extra_dihedrals;
+    const auto& inversions = m_inversions;
+    const auto& storsions = m_storsions;
+    auto t = tic(); calcBonds(acc, bonds, pr.bonds);            if (timings) timings->bonds = toc(t);
+    t = tic();      calcAngles(acc, angles, pr.angles);         if (timings) timings->angles = toc(t);
+    t = tic();      calcDihedrals(acc, dihedrals, pr.dihedrals);
+                    calcExtraTorsions(acc, extra, pr.extra_dihedrals); if (timings) timings->dihedrals = toc(t);
+    t = tic();      calcInversions(acc, inversions, pr.inversions); if (timings) timings->inversions = toc(t);
+    if (!storsions.empty()) {
+        t = tic();  calcSTorsions(acc, storsions, pr.storsions); if (timings) timings->stors = toc(t);
     }
 }
+
+
 
 void FFWorkspace::reduce()
 {
@@ -474,6 +499,7 @@ void FFWorkspace::postProcess(bool gradient)
         t_self_energy = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
     }
 
+
     // =========================================================================
     // dEdcn chain-rule gradient + Coulomb TERM 1b
     // Reference: Fortran gfnff_engrad.F90:418-422 (bond/disp), 449-454 (coulomb)
@@ -556,4 +582,227 @@ void FFWorkspace::postProcess(bool gradient)
         }
     }
 
+}
+
+// ============================================================================================
+// rev-gfnff stage 1b (Claude Generated, Sep 12, 2026): multi-transition blending over 2^k corners
+// ============================================================================================
+
+void FFWorkspace::swapState(TopologyState& st)
+{
+    std::swap(m_bonds, st.bonds);
+    std::swap(m_angles, st.angles);
+    std::swap(m_dihedrals, st.dihedrals);
+    std::swap(m_extra_dihedrals, st.extra_dihedrals);
+    std::swap(m_inversions, st.inversions);
+    std::swap(m_storsions, st.storsions);
+    std::swap(m_dispersions, st.dispersions);
+    std::swap(m_d4_dispersions, st.d4_dispersions);
+    std::swap(m_bonded_reps, st.bonded_reps);
+    std::swap(m_nonbonded_reps, st.nonbonded_reps);
+    std::swap(m_coulombs, st.coulombs);
+    std::swap(m_hbonds, st.hbonds);
+    std::swap(m_xbonds, st.xbonds);
+    std::swap(m_atm_triples, st.atm_triples);
+    std::swap(m_batm_triples, st.batm_triples);
+    std::swap(m_bond_hb_data, st.bond_hb_data);
+    std::swap(m_hb_grad_entries, st.hb_grad_entries);
+    std::swap(m_hb_grad_offsets, st.hb_grad_offsets);
+    std::swap(m_hb_grad_list, st.hb_grad_list);
+    std::swap(m_bonded_pairs, st.bonded_pairs);
+    std::swap(m_partitions, st.partitions);
+    std::swap(m_eeq_charges, st.eeq_charges);
+    std::swap(m_topology_charges, st.topology_charges);
+    std::swap(m_coul_chi_base, st.coul_chi_base);
+    std::swap(m_coul_gam, st.coul_gam);
+    std::swap(m_coul_alp, st.coul_alp);
+    std::swap(m_coul_cnf, st.coul_cnf);
+    std::swap(m_coul_chi_static, st.coul_chi_static);
+    std::swap(m_e0, st.e0);
+}
+
+void FFWorkspace::updateTransitions()
+{
+    for (RevTransition& tr : m_transitions) {
+        if (!tr.active || m_geometry.rows() <= std::max(tr.i, tr.j))
+            continue;
+        Eigen::Vector3d ri = m_geometry.row(tr.i), rj = m_geometry.row(tr.j);
+        const double r = (ri - rj).norm();
+        double dw = 0.0, dc = 0.0;
+        const double w = revWeightRaw(tr.i, tr.j, r, &dw); // the scan's thresholds are on the raw switch
+        const double c = tr.tight ? revOrder(tr.i, tr.j, r, &dc) : revCoord(tr.i, tr.j, r, &dc);
+        // smoothstep in the window: C1 at both ends (the linear clamp had a kink at s = 0 and
+        // s = 1, i.e. a force that switches on abruptly at the detected coordinate)
+        const double span = tr.w_b - tr.w_a;
+        double u = (c - tr.w_a) / span;
+        double s, dsdw;
+        if (u <= 0.0) { s = 0.0; dsdw = 0.0; }
+        else if (u >= 1.0) { s = 1.0; dsdw = 0.0; }
+        else { s = u * u * (3.0 - 2.0 * u); dsdw = 6.0 * u * (1.0 - u) / span; }
+        tr.r = r;
+        tr.w = w;
+        tr.c = c;
+        tr.dwdr = dc;
+        tr.s = s;
+        tr.dsdw = dsdw;
+    }
+}
+
+void FFWorkspace::beginTransition(RevTransition tr, std::vector<GFNFFParameterSet>&& params)
+{
+    const int k = static_cast<int>(m_transitions.size());
+    const int n_old = 1 << k;
+    if (static_cast<int>(m_corners.size()) != n_old) { // k == 0: the slot is the only corner
+        m_corners.assign(n_old, TopologyState {});
+        m_slot_mask = n_old - 1;
+    }
+    swapState(m_corners[m_slot_mask]); // the slot now holds the placeholder
+    std::vector<TopologyState> corners(2 * n_old);
+    for (int m = 0; m < n_old; ++m)
+        corners[m] = std::move(m_corners[m]);
+    for (int m = 0; m < n_old; ++m) {
+        rebuildInteractionLists(std::move(params[m])); // into the empty slot
+        swapState(corners[m | (1 << k)]);              // and out again
+    }
+    if (tr.forming) {
+        // the well of the forming pair belongs to every corner, so the blend never touches it
+        const int a = std::min(tr.i, tr.j), b = std::max(tr.i, tr.j);
+        auto find_pair = [&](const std::vector<Bond>& list) -> const Bond* {
+            for (const auto& bd : list)
+                if (std::min(bd.i, bd.j) == a && std::max(bd.i, bd.j) == b)
+                    return &bd;
+            return nullptr;
+        };
+        for (int m = 0; m < n_old; ++m) {
+            if (find_pair(corners[m].bonds))
+                continue;
+            if (const Bond* bd = find_pair(corners[m | (1 << k)].bonds)) {
+                corners[m].bonds.push_back(*bd);
+                swapState(corners[m]);
+                partition();
+                swapState(corners[m]);
+            }
+        }
+    }
+    m_corners = std::move(corners);
+    tr.active = true;
+    m_transitions.push_back(tr);
+    m_slot_mask = (1 << (k + 1)) - 1;
+    swapState(m_corners[m_slot_mask]);
+    updateTransitions();
+}
+
+void FFWorkspace::endTransition(int t, bool keep_new)
+{
+    const int k = static_cast<int>(m_transitions.size());
+    if (t < 0 || t >= k)
+        return;
+    const int n = 1 << k;
+    swapState(m_corners[m_slot_mask]); // store the slot
+    std::vector<TopologyState> kept(n / 2);
+    for (int mask = 0; mask < n; ++mask) {
+        if (((mask >> t) & 1) != (keep_new ? 1 : 0))
+            continue;
+        const int nm = (mask & ((1 << t) - 1)) | ((mask >> (t + 1)) << t);
+        kept[nm] = std::move(m_corners[mask]);
+    }
+    m_corners = std::move(kept);
+    m_transitions.erase(m_transitions.begin() + t);
+    m_slot_mask = (1 << (k - 1)) - 1;
+    swapState(m_corners[m_slot_mask]);
+    if (m_transitions.empty()) {
+        m_corners.clear();
+        m_slot_mask = 0;
+    }
+    updateTransitions();
+}
+
+static void addScaledComponents(FFEnergyComponents& a, const FFEnergyComponents& b, double w)
+{
+    a.bond += w * b.bond; a.angle += w * b.angle; a.dihedral += w * b.dihedral; a.inversion += w * b.inversion;
+    a.dispersion += w * b.dispersion; a.vdw += w * b.vdw; a.rep += w * b.rep;
+    a.bonded_rep += w * b.bonded_rep; a.nonbonded_rep += w * b.nonbonded_rep;
+    a.coulomb += w * b.coulomb; a.hbond += w * b.hbond; a.xbond += w * b.xbond;
+    a.atm += w * b.atm; a.batm += w * b.batm; a.stors += w * b.stors; a.over_coord += w * b.over_coord;
+    a.hbond_case1 += w * b.hbond_case1; a.hbond_case2 += w * b.hbond_case2; a.hbond_case3 += w * b.hbond_case3; a.hbond_case4 += w * b.hbond_case4;
+}
+
+double FFWorkspace::calculate(bool gradient)
+{
+    if (m_transitions.empty())
+        return calculateSingle(gradient);
+    updateTransitions();
+    const int k = static_cast<int>(m_transitions.size());
+    const int n = 1 << k;
+    m_corner_energy.assign(n, 0.0);
+    m_corner_gradient.resize(n);
+    m_corner_components.assign(n, FFEnergyComponents {});
+    std::vector<Vector> dcn(n), dcnb(n);
+    for (int mask = 0; mask < n; ++mask) {
+        const bool swap_in = (mask != m_slot_mask);
+        if (swap_in)
+            swapState(m_corners[mask]);
+        if (m_corner_prepare)
+            m_corner_prepare(mask);
+        m_corner_energy[mask] = calculateSingle(gradient);
+        m_corner_components[mask] = m_result_energy;
+        if (gradient) {
+            m_corner_gradient[mask] = m_result_gradient;
+            dcn[mask] = m_dEdcn_total;
+            dcnb[mask] = m_dEdcn_bond_total;
+        }
+        if (swap_in)
+            swapState(m_corners[mask]);
+    }
+    auto weight = [&](int mask, int skip) {
+        double w = 1.0;
+        for (int t = 0; t < k; ++t) {
+            if (t == skip)
+                continue;
+            w *= ((mask >> t) & 1) ? m_transitions[t].s : (1.0 - m_transitions[t].s);
+        }
+        return w;
+    };
+    double E = 0.0;
+    FFEnergyComponents comp {};
+    GeoGradMatrix G;
+    Vector dcn_tot, dcnb_tot;
+    if (gradient) {
+        G = GeoGradMatrix::Zero(m_natoms, 3);
+        if (dcn[0].size() > 0) dcn_tot = Vector::Zero(dcn[0].size());
+        if (dcnb[0].size() > 0) dcnb_tot = Vector::Zero(dcnb[0].size());
+    }
+    for (int mask = 0; mask < n; ++mask) {
+        const double W = weight(mask, -1);
+        E += W * m_corner_energy[mask];
+        addScaledComponents(comp, m_corner_components[mask], W);
+        if (gradient) {
+            G += W * m_corner_gradient[mask];
+            if (dcn_tot.size() == dcn[mask].size()) dcn_tot += W * dcn[mask];
+            if (dcnb_tot.size() == dcnb[mask].size()) dcnb_tot += W * dcnb[mask];
+        }
+    }
+    if (gradient) {
+        // d E / d s_t  (d s_t / d r_t) on the transition pair
+        for (int t = 0; t < k; ++t) {
+            const RevTransition& tr = m_transitions[t];
+            if (tr.dsdw == 0.0 || tr.r <= 1e-8)
+                continue;
+            double D = 0.0;
+            for (int mask = 0; mask < n; ++mask)
+                D += (((mask >> t) & 1) ? 1.0 : -1.0) * weight(mask, t) * m_corner_energy[mask];
+            const double f = D * tr.dsdw * tr.dwdr / tr.r;
+            Eigen::Vector3d ri = m_geometry.row(tr.i), rj = m_geometry.row(tr.j);
+            Eigen::Vector3d g = f * (ri - rj);
+            G.row(tr.i) += g.transpose();
+            G.row(tr.j) -= g.transpose();
+        }
+        m_result_gradient = G;
+        m_dEdcn_total = dcn_tot;
+        m_dEdcn_bond_total = dcnb_tot;
+    }
+    m_result_energy = comp;
+    // the corners' e0 differ; callers read m_e0 + total(), so the blended offset goes into the Coulomb field
+    m_result_energy.coulomb += E - (m_e0 + m_result_energy.total());
+    return E;
 }

@@ -33,6 +33,7 @@
 #include "src/core/math_compat.h"
 
 #include <fmt/core.h>
+#include <cstdlib>
 #include <fmt/format.h>
 
 #include <cmath>
@@ -112,17 +113,16 @@ void FFWorkspace::computeHBCoordinationNumbers(int p)
 // Reference: Fortran gfnff_engrad.F90:675-721
 // ============================================================================
 
-void FFWorkspace::calcBonds(int p)
+void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, std::pair<int, int> range)
 {
-    auto& acc = m_accumulators[p];
-    auto [begin, end] = m_partitions[p].bonds;
+    auto [begin, end] = range;
     Matrix grad_before;
     if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
 
     bool use_dynamic_r0 = (m_d3_cn.size() > 0);
 
     for (int idx = begin; idx < end; ++idx) {
-        const auto& bond = m_bonds[idx];
+        const auto& bond = list[idx];
 
         Eigen::VectorXd vi = m_geometry.row(bond.i);
         Eigen::VectorXd vj = m_geometry.row(bond.j);
@@ -156,12 +156,24 @@ void FFWorkspace::calcBonds(int p)
 
         double exp_term = std::exp(-alpha * dr * dr);
         double energy = k_b * exp_term;
+        // rev-gfnff stage 1 (Sep 2026): the well is switched off smoothly by the continuous
+        // bond order instead of being dropped when the bond leaves the topology.
+        double w = 1.0, dwdr = 0.0;
+        if (m_rev.enabled && m_rev.bond_weight) {
+            w = revWeight(bond.i, bond.j, rij, &dwdr);
+            energy *= w;
+        }
         acc.energy.bond += energy;
 
         if (m_do_gradient) {
+            // d(w E_gauss)/dr = w dE_gauss/dr + E_gauss dw/dr, E_gauss = energy / w.
+            // Only the first part depends on r0 and therefore on CN: dEdr stays the
+            // Gaussian derivative for the chain rule below, the weight part goes to the
+            // Cartesian gradient directly.
             double dEdr = -2.0 * alpha * dr * energy;
-            acc.gradient.row(bond.i) += dEdr * derivate.row(0);
-            acc.gradient.row(bond.j) += dEdr * derivate.row(1);
+            double dEdr_cart = dEdr + ((w != 1.0 || dwdr != 0.0) ? (k_b * exp_term) * dwdr : 0.0);
+            acc.gradient.row(bond.i) += dEdr_cart * derivate.row(0);
+            acc.gradient.row(bond.j) += dEdr_cart * derivate.row(1);
 
             // HB alpha-modulation chain-rule gradient
             if (bond.nr_hb >= 1) {
@@ -197,16 +209,15 @@ void FFWorkspace::calcBonds(int p)
 // Reference: Fortran gfnff_engrad.F90:857-916
 // ============================================================================
 
-void FFWorkspace::calcAngles(int p)
+void FFWorkspace::calcAngles(FFAccumulator& acc, const std::vector<Angle>& list, std::pair<int, int> range)
 {
-    auto& acc = m_accumulators[p];
-    auto [begin, end] = m_partitions[p].angles;
+    auto [begin, end] = range;
     Matrix grad_before;
     if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
 
     const double pi = 3.14159265358979323846;
     const double linear_threshold = 1.0e-6;
-    const double atcuta = 0.595;
+    const double atcuta = tables().gen.atcuta; // runtime table (Sep 2026)
     constexpr double rcov_scale_angle = 4.0 / 3.0;
 
     auto get_rcov_bohr = [&](int atomic_number) -> double {
@@ -216,7 +227,7 @@ void FFWorkspace::calcAngles(int p)
     };
 
     for (int idx = begin; idx < end; ++idx) {
-        const auto& angle = m_angles[idx];
+        const auto& angle = list[idx];
         auto i = m_geometry.row(angle.i);
         auto j = m_geometry.row(angle.j);
         auto k = m_geometry.row(angle.k);
@@ -256,10 +267,24 @@ void FFWorkspace::calcAngles(int p)
 
         double damp_ij = 1.0 / (1.0 + rr_ij);
         double damp_jk = 1.0 / (1.0 + rr_jk);
-        double damp = damp_ij * damp_jk;
 
         double damp2ij = (r_ij_sq > 1e-8) ? -2.0 * 2.0 * rr_ij / (r_ij_sq * (1.0 + rr_ij) * (1.0 + rr_ij)) : 0.0;
         double damp2jk = (r_jk_sq > 1e-8) ? -2.0 * 2.0 * rr_jk / (r_jk_sq * (1.0 + rr_jk) * (1.0 + rr_jk)) : 0.0;
+
+        // rev-gfnff stage 1 (Sep 2026): each bond of the angle contributes its continuous
+        // bond order as an extra factor; damp2 stays "(d factor/dr)/r" so the gradient code
+        // below is unchanged.
+        if (m_rev.enabled && m_rev.term_weights) {
+            double r_ij = std::sqrt(r_ij_sq), r_jk = std::sqrt(r_jk_sq);
+            double dw_ij = 0.0, dw_jk = 0.0;
+            double w_ij = revWeight(angle.i, angle.j, r_ij, &dw_ij);
+            double w_jk = revWeight(angle.j, angle.k, r_jk, &dw_jk);
+            damp2ij = damp2ij * w_ij + damp_ij * dw_ij / std::max(r_ij, 1e-8);
+            damp2jk = damp2jk * w_jk + damp_jk * dw_jk / std::max(r_jk, 1e-8);
+            damp_ij *= w_ij;
+            damp_jk *= w_jk;
+        }
+        double damp = damp_ij * damp_jk;
 
         acc.energy.angle += energy * damp;
 
@@ -292,15 +317,14 @@ void FFWorkspace::calcAngles(int p)
 // Reference: Fortran gfnff_engrad.F90:1041-1122
 // ============================================================================
 
-void FFWorkspace::calcDihedrals(int p)
+void FFWorkspace::calcDihedrals(FFAccumulator& acc, const std::vector<Dihedral>& list, std::pair<int, int> range)
 {
-    auto& acc = m_accumulators[p];
-    auto [begin, end] = m_partitions[p].dihedrals;
+    auto [begin, end] = range;
     Matrix grad_before;
     if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
 
-    const double atcutt = 0.505;
-    const double atcutt_nci = 0.305;
+    const double atcutt = tables().gen.atcutt;         // runtime tables (Sep 2026)
+    const double atcutt_nci = tables().gen.atcutt_nci;
     constexpr double rcov_scale_tors = 4.0 / 3.0;
 
     auto get_rcov_bohr = [&](int atomic_number) -> double {
@@ -310,7 +334,7 @@ void FFWorkspace::calcDihedrals(int p)
     };
 
     for (int idx = begin; idx < end; ++idx) {
-        const auto& dih = m_dihedrals[idx];
+        const auto& dih = list[idx];
 
         Matrix derivate;
         double phi = GFNFF_Geometry::calculateDihedralAngle(
@@ -356,6 +380,33 @@ void FFWorkspace::calcDihedrals(int p)
         double damp_ij = 1.0 / (1.0 + rr_ij);
         double damp_jk = 1.0 / (1.0 + rr_jk);
         double damp_kl = 1.0 / (1.0 + rr_kl);
+        double damp2ij = (r_ij_sq > 1e-8) ? -4.0 * rr_ij / (r_ij_sq * (1.0 + rr_ij) * (1.0 + rr_ij)) : 0.0;
+        double damp2jk = (r_jk_sq > 1e-8) ? -4.0 * rr_jk / (r_jk_sq * (1.0 + rr_jk) * (1.0 + rr_jk)) : 0.0;
+        double damp2kl = (r_kl_sq > 1e-8) ? -4.0 * rr_kl / (r_kl_sq * (1.0 + rr_kl) * (1.0 + rr_kl)) : 0.0;
+        int rev_extra_i = -1, rev_extra_l = -1;
+        double rev_d1 = 0.0, rev_d3 = 0.0, rev_r1 = 0.0, rev_r3 = 0.0, rev_w1 = 1.0, rev_w3 = 1.0, rev_damp0_ij = 0.0, rev_damp0_kl = 0.0;
+        if (m_rev.enabled && m_rev.term_weights) { // rev-gfnff stage 1 (Sep 2026), see calcAngles
+            double r1 = std::sqrt(r_ij_sq), r2 = std::sqrt(r_jk_sq), r3 = std::sqrt(r_kl_sq);
+            double d1 = 0.0, d2 = 0.0, d3 = 0.0;
+            // The stored quartet is NOT the bonded chain: the central bond is j-k, but the outer
+            // atoms hang crosswise (i on k, l on j; the GFN-FF damping deliberately uses the
+            // 1,3 distances i-j and k-l). The rev weight of an outer atom must be the weight of
+            // its BOND, so it is taken from the bonded partner (Sep 12, 2026: with the wrong pairs
+            // the weights were 0.5-0.96 at equilibrium and halved caffeine's torsion term).
+            const int pi = m_bonded_pairs.count({ dih.i, dih.k }) ? dih.k : dih.j;
+            const int pl = m_bonded_pairs.count({ dih.l, dih.j }) ? dih.j : dih.k;
+            const double r1b = (m_geometry.row(dih.i) - m_geometry.row(pi)).norm();
+            const double r3b = (m_geometry.row(dih.l) - m_geometry.row(pl)).norm();
+            double w1 = revWeight(dih.i, pi, r1b, &d1), w2 = revWeight(dih.j, dih.k, r2, &d2), w3 = revWeight(dih.l, pl, r3b, &d3);
+            (void)r1; (void)r3;
+            // d w1 / d r acts on the bond i-pi, not on i-j: fold it into the Cartesian gradient of
+            // that pair directly (below) and keep damp2 for the j-k chain-rule only
+            damp2jk = damp2jk * w2 + damp_jk * d2 / std::max(r2, 1e-8);
+            damp2ij *= w1; damp2kl *= w3;
+            rev_extra_i = pi; rev_extra_l = pl; rev_d1 = d1; rev_d3 = d3; rev_r1 = r1b; rev_r3 = r3b; rev_w1 = w1; rev_w3 = w3;
+            rev_damp0_ij = damp_ij; rev_damp0_kl = damp_kl;
+            damp_ij *= w1; damp_jk *= w2; damp_kl *= w3;
+        }
         double damp = damp_ij * damp_jk * damp_kl;
 
         acc.energy.dihedral += energy * damp;
@@ -369,10 +420,7 @@ void FFWorkspace::calcDihedrals(int p)
             acc.gradient.row(dih.k) += dEdphi * derivate.row(2);
             acc.gradient.row(dih.l) += dEdphi * derivate.row(3);
 
-            // Damping gradient terms
-            double damp2ij = (r_ij_sq > 1e-8) ? -4.0 * rr_ij / (r_ij_sq * (1.0 + rr_ij) * (1.0 + rr_ij)) : 0.0;
-            double damp2jk = (r_jk_sq > 1e-8) ? -4.0 * rr_jk / (r_jk_sq * (1.0 + rr_jk) * (1.0 + rr_jk)) : 0.0;
-            double damp2kl = (r_kl_sq > 1e-8) ? -4.0 * rr_kl / (r_kl_sq * (1.0 + rr_kl) * (1.0 + rr_kl)) : 0.0;
+            // Damping gradient terms (damp2 = (d factor/dr)/r, bond weights included above)
 
             Eigen::Vector3d vij = ri - rj;
             Eigen::Vector3d vjk = rj - rk;
@@ -387,6 +435,20 @@ void FFWorkspace::calcDihedrals(int p)
             acc.gradient.row(dih.j) += (-t1 + t2).transpose();
             acc.gradient.row(dih.k) += (-t2 + t3).transpose();
             acc.gradient.row(dih.l) += (-t3).transpose();
+            if (rev_extra_i >= 0) { // d w1 / d r on the bond i-pi and d w3 / d r on l-pl (rev-gfnff, Sep 12, 2026)
+                if (rev_r1 > 1e-8) {
+                    const double f1 = energy * rev_damp0_ij * damp_jk * damp_kl * rev_d1 / rev_r1;
+                    Eigen::Vector3d g1 = f1 * (m_geometry.row(dih.i) - m_geometry.row(rev_extra_i)).transpose();
+                    acc.gradient.row(dih.i) += g1.transpose();
+                    acc.gradient.row(rev_extra_i) -= g1.transpose();
+                }
+                if (rev_r3 > 1e-8) {
+                    const double f3 = energy * damp_ij * damp_jk * rev_damp0_kl * rev_d3 / rev_r3;
+                    Eigen::Vector3d g3 = f3 * (m_geometry.row(dih.l) - m_geometry.row(rev_extra_l)).transpose();
+                    acc.gradient.row(dih.l) += g3.transpose();
+                    acc.gradient.row(rev_extra_l) -= g3.transpose();
+                }
+            }
         }
     }
 
@@ -398,16 +460,15 @@ void FFWorkspace::calcDihedrals(int p)
 // Extra Torsions (sp3-sp3 gauche, same formula)
 // ============================================================================
 
-void FFWorkspace::calcExtraTorsions(int p)
+void FFWorkspace::calcExtraTorsions(FFAccumulator& acc, const std::vector<Dihedral>& list, std::pair<int, int> range)
 {
-    auto& acc = m_accumulators[p];
-    auto [begin, end] = m_partitions[p].extra_dihedrals;
+    auto [begin, end] = range;
     if (begin == end) return;
 
     Matrix grad_before;
     if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
 
-    const double atcutt = 0.505;
+    const double atcutt = tables().gen.atcutt; // runtime table (Sep 2026)
     constexpr double rcov_scale_tors = 4.0 / 3.0;
 
     auto get_rcov_bohr = [&](int atomic_number) -> double {
@@ -417,7 +478,7 @@ void FFWorkspace::calcExtraTorsions(int p)
     };
 
     for (int idx = begin; idx < end; ++idx) {
-        const auto& dih = m_extra_dihedrals[idx];
+        const auto& dih = list[idx];
 
         Matrix derivate;
         double phi = GFNFF_Geometry::calculateDihedralAngle(
@@ -457,15 +518,41 @@ void FFWorkspace::calcExtraTorsions(int p)
         double rr_jk = (r_jk_sq / rcut_jk); rr_jk *= rr_jk;
         double rr_kl = (r_kl_sq / rcut_kl); rr_kl *= rr_kl;
 
-        double damp = (1.0 / (1.0 + rr_ij)) * (1.0 / (1.0 + rr_jk)) * (1.0 / (1.0 + rr_kl));
+        double damp_ij = 1.0 / (1.0 + rr_ij);
+        double damp_jk = 1.0 / (1.0 + rr_jk);
+        double damp_kl = 1.0 / (1.0 + rr_kl);
+        double damp2ij = (r_ij_sq > 1e-8) ? -4.0 * rr_ij / (r_ij_sq * (1.0 + rr_ij) * (1.0 + rr_ij)) : 0.0;
+        double damp2jk = (r_jk_sq > 1e-8) ? -4.0 * rr_jk / (r_jk_sq * (1.0 + rr_jk) * (1.0 + rr_jk)) : 0.0;
+        double damp2kl = (r_kl_sq > 1e-8) ? -4.0 * rr_kl / (r_kl_sq * (1.0 + rr_kl) * (1.0 + rr_kl)) : 0.0;
+        int rev_extra_i = -1, rev_extra_l = -1;
+        double rev_d1 = 0.0, rev_d3 = 0.0, rev_r1 = 0.0, rev_r3 = 0.0, rev_w1 = 1.0, rev_w3 = 1.0, rev_damp0_ij = 0.0, rev_damp0_kl = 0.0;
+        if (m_rev.enabled && m_rev.term_weights) { // rev-gfnff stage 1 (Sep 2026), see calcAngles
+            double r1 = std::sqrt(r_ij_sq), r2 = std::sqrt(r_jk_sq), r3 = std::sqrt(r_kl_sq);
+            double d1 = 0.0, d2 = 0.0, d3 = 0.0;
+            // The stored quartet is NOT the bonded chain: the central bond is j-k, but the outer
+            // atoms hang crosswise (i on k, l on j; the GFN-FF damping deliberately uses the
+            // 1,3 distances i-j and k-l). The rev weight of an outer atom must be the weight of
+            // its BOND, so it is taken from the bonded partner (Sep 12, 2026: with the wrong pairs
+            // the weights were 0.5-0.96 at equilibrium and halved caffeine's torsion term).
+            const int pi = m_bonded_pairs.count({ dih.i, dih.k }) ? dih.k : dih.j;
+            const int pl = m_bonded_pairs.count({ dih.l, dih.j }) ? dih.j : dih.k;
+            const double r1b = (m_geometry.row(dih.i) - m_geometry.row(pi)).norm();
+            const double r3b = (m_geometry.row(dih.l) - m_geometry.row(pl)).norm();
+            double w1 = revWeight(dih.i, pi, r1b, &d1), w2 = revWeight(dih.j, dih.k, r2, &d2), w3 = revWeight(dih.l, pl, r3b, &d3);
+            (void)r1; (void)r3;
+            // d w1 / d r acts on the bond i-pi, not on i-j: fold it into the Cartesian gradient of
+            // that pair directly (below) and keep damp2 for the j-k chain-rule only
+            damp2jk = damp2jk * w2 + damp_jk * d2 / std::max(r2, 1e-8);
+            damp2ij *= w1; damp2kl *= w3;
+            rev_extra_i = pi; rev_extra_l = pl; rev_d1 = d1; rev_d3 = d3; rev_r1 = r1b; rev_r3 = r3b; rev_w1 = w1; rev_w3 = w3;
+            rev_damp0_ij = damp_ij; rev_damp0_kl = damp_kl;
+            damp_ij *= w1; damp_jk *= w2; damp_kl *= w3;
+        }
+        double damp = damp_ij * damp_jk * damp_kl;
 
         acc.energy.dihedral += energy * damp;
 
         if (m_do_gradient) {
-            double damp_ij = 1.0 / (1.0 + rr_ij);
-            double damp_jk = 1.0 / (1.0 + rr_jk);
-            double damp_kl = 1.0 / (1.0 + rr_kl);
-
             double dEdphi = -V * n * std::sin(c1) * damp;
             // derivate.row() is 1×3: no .transpose() needed for row() +=
             acc.gradient.row(dih.i) += dEdphi * derivate.row(0);
@@ -473,9 +560,6 @@ void FFWorkspace::calcExtraTorsions(int p)
             acc.gradient.row(dih.k) += dEdphi * derivate.row(2);
             acc.gradient.row(dih.l) += dEdphi * derivate.row(3);
 
-            double damp2ij = (r_ij_sq > 1e-8) ? -4.0 * rr_ij / (r_ij_sq * (1.0 + rr_ij) * (1.0 + rr_ij)) : 0.0;
-            double damp2jk = (r_jk_sq > 1e-8) ? -4.0 * rr_jk / (r_jk_sq * (1.0 + rr_jk) * (1.0 + rr_jk)) : 0.0;
-            double damp2kl = (r_kl_sq > 1e-8) ? -4.0 * rr_kl / (r_kl_sq * (1.0 + rr_kl) * (1.0 + rr_kl)) : 0.0;
 
             Eigen::Vector3d t1 = energy * damp2ij * damp_jk * damp_kl * (ri - rj);
             Eigen::Vector3d t2 = energy * damp_ij * damp2jk * damp_kl * (rj - rk);
@@ -486,6 +570,20 @@ void FFWorkspace::calcExtraTorsions(int p)
             acc.gradient.row(dih.j) += (-t1 + t2).transpose();
             acc.gradient.row(dih.k) += (-t2 + t3).transpose();
             acc.gradient.row(dih.l) += (-t3).transpose();
+            if (rev_extra_i >= 0) { // d w1 / d r on the bond i-pi and d w3 / d r on l-pl (rev-gfnff, Sep 12, 2026)
+                if (rev_r1 > 1e-8) {
+                    const double f1 = energy * rev_damp0_ij * damp_jk * damp_kl * rev_d1 / rev_r1;
+                    Eigen::Vector3d g1 = f1 * (m_geometry.row(dih.i) - m_geometry.row(rev_extra_i)).transpose();
+                    acc.gradient.row(dih.i) += g1.transpose();
+                    acc.gradient.row(rev_extra_i) -= g1.transpose();
+                }
+                if (rev_r3 > 1e-8) {
+                    const double f3 = energy * damp_ij * damp_jk * rev_damp0_kl * rev_d3 / rev_r3;
+                    Eigen::Vector3d g3 = f3 * (m_geometry.row(dih.l) - m_geometry.row(rev_extra_l)).transpose();
+                    acc.gradient.row(dih.l) += g3.transpose();
+                    acc.gradient.row(rev_extra_l) -= g3.transpose();
+                }
+            }
         }
     }
 
@@ -499,13 +597,12 @@ void FFWorkspace::calcExtraTorsions(int p)
 // Uses domegadr analytical derivatives from gfnff_inversions.cpp
 // ============================================================================
 
-void FFWorkspace::calcInversions(int p)
+void FFWorkspace::calcInversions(FFAccumulator& acc, const std::vector<Inversion>& list, std::pair<int, int> range)
 {
     // Claude Generated (Mar 2026): Complete inversion with gradient
     // Ported from ForceFieldThread::CalculateGFNFFInversionContribution
     // Reference: gfnff_engrad.F90:1355-1387
-    auto& acc = m_accumulators[p];
-    auto [begin, end] = m_partitions[p].inversions;
+    auto [begin, end] = range;
     if (begin == end) return;
 
     Matrix grad_before;
@@ -519,22 +616,23 @@ void FFWorkspace::calcInversions(int p)
         return 1.0 * GFNFFParameters::gfnff_aatoau * rcov_scale;
     };
 
-    auto calc_damp = [](double rsq, double rcov_a, double rcov_b) -> double {
-        double rcut = GFNFFParameters::atcutt * (rcov_a + rcov_b) * (rcov_a + rcov_b);
+    const double atcutt_inv = tables().gen.atcutt; // runtime table (Sep 2026), captured by the lambdas
+    auto calc_damp = [atcutt_inv](double rsq, double rcov_a, double rcov_b) -> double {
+        double rcut = atcutt_inv * (rcov_a + rcov_b) * (rcov_a + rcov_b);
         double rr = (rsq / rcut) * (rsq / rcut);
         return 1.0 / (1.0 + rr);
     };
 
-    auto calc_ddamp = [](double r2_val, double rcov_a, double rcov_b) -> double {
+    auto calc_ddamp = [atcutt_inv](double r2_val, double rcov_a, double rcov_b) -> double {
         if (r2_val < 1e-8) return 0.0;
-        double rcut_val = GFNFFParameters::atcutt * (rcov_a + rcov_b) * (rcov_a + rcov_b);
+        double rcut_val = atcutt_inv * (rcov_a + rcov_b) * (rcov_a + rcov_b);
         double rr_val = (r2_val / rcut_val) * (r2_val / rcut_val);
         double one_plus_rr = 1.0 + rr_val;
         return -4.0 * rr_val / (r2_val * one_plus_rr * one_plus_rr);
     };
 
     for (int idx = begin; idx < end; ++idx) {
-        const auto& inv = m_inversions[idx];
+        const auto& inv = list[idx];
 
         // Atom layout: i=center, j=nb1, k=nb2, l=nb3
         Eigen::Vector3d r_center = m_geometry.row(inv.i).transpose();
@@ -561,7 +659,20 @@ void FFWorkspace::calcInversions(int p)
         double damp_ij = calc_damp(rij_sq, rcov_c, rcov_1);
         double damp_jk = calc_damp(rjk_sq, rcov_2, rcov_1);
         double damp_jl = calc_damp(rjl_sq, rcov_1, rcov_3);
-        double damp = damp_ij * damp_jk * damp_jl;
+        // rev-gfnff stage 1 (Sep 2026): the three centre-neighbour bonds carry the weights
+        double w_inv = 1.0, dw_c1 = 0.0, dw_c2 = 0.0, dw_c3 = 0.0, r_c1 = 0.0, r_c2 = 0.0, r_c3 = 0.0;
+        if (m_rev.enabled && m_rev.term_weights) {
+            r_c1 = std::sqrt(rij_sq);
+            r_c2 = (r_nb2 - r_center).norm();
+            r_c3 = (r_nb3 - r_center).norm();
+            const double w1 = revWeight(inv.i, inv.j, r_c1, &dw_c1);
+            const double w2 = revWeight(inv.i, inv.k, r_c2, &dw_c2);
+            const double w3 = revWeight(inv.i, inv.l, r_c3, &dw_c3);
+            w_inv = w1 * w2 * w3;
+            // d(w_inv)/dr_ck expressed through the other two weights
+            dw_c1 *= w2 * w3; dw_c2 *= w1 * w3; dw_c3 *= w1 * w2;
+        }
+        double damp = damp_ij * damp_jk * damp_jl * w_inv;
 
         // Energy and dE/domega
         double V = inv.fc;
@@ -605,10 +716,24 @@ void FFWorkspace::calcInversions(int p)
 
             // center: -term1, nb1(hub): +term1+term2+term3, nb2: -term2, nb3: -term3
             // Note: .transpose() converts Vector3d (3×1) to RowVector (1×3) for row() +=
-            acc.gradient.row(inv.i) -= term1.transpose();
-            acc.gradient.row(inv.j) += (term1 + term2 + term3).transpose();
-            acc.gradient.row(inv.k) -= term2.transpose();
-            acc.gradient.row(inv.l) -= term3.transpose();
+            // (the damping product below excludes w_inv, whose gradient follows separately)
+            const double dpl = damp_ij * damp_jk * damp_jl;
+            acc.gradient.row(inv.i) -= (w_inv * term1).transpose();
+            acc.gradient.row(inv.j) += (w_inv * (term1 + term2 + term3)).transpose();
+            acc.gradient.row(inv.k) -= (w_inv * term2).transpose();
+            acc.gradient.row(inv.l) -= (w_inv * term3).transpose();
+            if (m_rev.enabled && m_rev.term_weights) {
+                // dE/dr_ck of the bond-order weights: et * dpl * d(w_inv)/dr_ck along the centre-neighbour vector
+                auto add_pair = [&](int a, int b, const Eigen::Vector3d& vab, double r, double dw) {
+                    if (r < 1e-8) return;
+                    Eigen::Vector3d g = (et * dpl * dw / r) * vab;
+                    acc.gradient.row(a) -= g.transpose();
+                    acc.gradient.row(b) += g.transpose();
+                };
+                add_pair(inv.i, inv.j, r_nb1 - r_center, r_c1, dw_c1);
+                add_pair(inv.i, inv.k, r_nb2 - r_center, r_c2, dw_c2);
+                add_pair(inv.i, inv.l, r_nb3 - r_center, r_c3, dw_c3);
+            }
         }
     }
 
@@ -621,17 +746,16 @@ void FFWorkspace::calcInversions(int p)
 // Reference: Fortran gfnff_engrad.F90:3454
 // ============================================================================
 
-void FFWorkspace::calcSTorsions(int p)
+void FFWorkspace::calcSTorsions(FFAccumulator& acc, const std::vector<GFNFFSTorsion>& list, std::pair<int, int> range)
 {
-    auto& acc = m_accumulators[p];
-    auto [begin, end] = m_partitions[p].storsions;
+    auto [begin, end] = range;
     if (begin == end) return;
 
     Matrix grad_before;
     if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
 
     for (int idx = begin; idx < end; ++idx) {
-        const auto& stor = m_storsions[idx];
+        const auto& stor = list[idx];
         Matrix derivate;
         // GFN-FF uses Bohr coordinates internally (m_au = 1.0)
         double phi = GFNFF_Geometry::calculateDihedralAngle(
@@ -803,12 +927,26 @@ void FFWorkspace::calcBondedRepulsion(int p)
         if (rij > rep.r_cut || rij < 1e-8) continue;
 
         double r_1_5 = rij * std::sqrt(rij);
-        double exp_term = std::exp(-rep.alpha * r_1_5);
-        double base_energy = rep.repab * exp_term / rij;
+        double base_energy, dEdr;
+        if (rep.blend && m_rev.enabled && m_rev.blend_repulsion) {
+            // rev-gfnff stage 1 (Sep 2026): b E_bonded + (1-b) E_nonbonded with the continuous
+            // bond order b of the pair; the list membership no longer decides the parameter set.
+            double dw = 0.0;
+            const double w = revBlend(rep.i, rep.j, rij, &dw); // bonded list: crossover at 1.7x/-12, 1 - 1e-9 at 1.1x, 0.9993 at the turning point of a hot X-H bond (1.38x)
+            const double eb = rep.repab_b * std::exp(-rep.alpha_b * r_1_5) / rij;
+            const double en = rep.repab_n * std::exp(-rep.alpha_n * r_1_5) / rij;
+            base_energy = w * eb + (1.0 - w) * en;
+            const double deb = -eb / rij - 1.5 * rep.alpha_b * std::sqrt(rij) * eb;
+            const double den = -en / rij - 1.5 * rep.alpha_n * std::sqrt(rij) * en;
+            dEdr = w * deb + (1.0 - w) * den + (eb - en) * dw;
+        } else {
+            double exp_term = std::exp(-rep.alpha * r_1_5);
+            base_energy = rep.repab * exp_term / rij;
+            dEdr = (-base_energy / rij - 1.5 * rep.alpha * std::sqrt(rij) * base_energy);
+        }
         acc.energy.bonded_rep += base_energy;
 
         if (m_do_gradient) {
-            double dEdr = (-base_energy / rij - 1.5 * rep.alpha * std::sqrt(rij) * base_energy);
             Eigen::Vector3d grad = dEdr * rij_vec / rij;
             acc.gradient.row(rep.i) += grad.transpose();
             acc.gradient.row(rep.j) -= grad.transpose();
@@ -841,12 +979,26 @@ void FFWorkspace::calcNonbondedRepulsion(int p)
         if (rij > rep.r_cut || rij < 1e-8) continue;
 
         double r_1_5 = rij * std::sqrt(rij);
-        double exp_term = std::exp(-rep.alpha * r_1_5);
-        double base_energy = rep.repab * exp_term / rij;
+        double base_energy, dEdr;
+        if (rep.blend && m_rev.enabled && m_rev.blend_repulsion) {
+            // rev-gfnff stage 1 (Sep 2026): b E_bonded + (1-b) E_nonbonded with the continuous
+            // bond order b of the pair; the list membership no longer decides the parameter set.
+            double dw = 0.0;
+            const double w = revBlendNB(rep.i, rep.j, rij, &dw); // non-bonded list: tight switch (1.3x/-12), ~0 at 1,4 / H-bond distances
+            const double eb = rep.repab_b * std::exp(-rep.alpha_b * r_1_5) / rij;
+            const double en = rep.repab_n * std::exp(-rep.alpha_n * r_1_5) / rij;
+            base_energy = w * eb + (1.0 - w) * en;
+            const double deb = -eb / rij - 1.5 * rep.alpha_b * std::sqrt(rij) * eb;
+            const double den = -en / rij - 1.5 * rep.alpha_n * std::sqrt(rij) * en;
+            dEdr = w * deb + (1.0 - w) * den + (eb - en) * dw;
+        } else {
+            double exp_term = std::exp(-rep.alpha * r_1_5);
+            base_energy = rep.repab * exp_term / rij;
+            dEdr = (-base_energy / rij - 1.5 * rep.alpha * std::sqrt(rij) * base_energy);
+        }
         acc.energy.nonbonded_rep += base_energy;
 
         if (m_do_gradient) {
-            double dEdr = (-base_energy / rij - 1.5 * rep.alpha * std::sqrt(rij) * base_energy);
             Eigen::Vector3d grad = dEdr * rij_vec / rij;
             acc.gradient.row(rep.i) += grad.transpose();
             acc.gradient.row(rep.j) -= grad.transpose();
@@ -1023,8 +1175,8 @@ void FFWorkspace::calcHydrogenBonds(int p)
         Eigen::Vector3d lp_vector = Eigen::Vector3d::Zero();
         if (hb.case_type == 4) {
             int z_B = m_atom_types[hb.k];
-            double repz_B = (z_B >= 1 && z_B <= static_cast<int>(GFNFFParameters::repz.size()))
-                          ? GFNFFParameters::repz[z_B - 1] : 1.0;
+            double repz_B = (z_B >= 1 && z_B <= static_cast<int>(tables().repz.size()))
+                          ? tables().repz[z_B - 1] : 1.0;
             lp_dist = 0.50 - 0.018 * repz_B;
             static constexpr double HBLPCUT = 56.0;
 
@@ -1208,8 +1360,8 @@ void FFWorkspace::calcHydrogenBonds(int p)
 
             if (hb.case_type >= 2) {
                 // ===== Case 2/3/4: abhgfnff_eg2new gradient =====
-                double p_bh = 1.8;   // 1 + hbabmix
-                double p_ab = -0.8;  // -hbabmix
+                const double p_bh = 1.0 + tables().gen.hbabmix;   // 1 + hbabmix (runtime table)
+                const double p_ab = -tables().gen.hbabmix;  // -hbabmix
                 double rbhdamp = damp_env * p_bh / (rbh2 * r_HB);
                 double rabdamp = damp_env * p_ab / (rab2 * r_AB);
 
@@ -1756,4 +1908,68 @@ void FFWorkspace::calcBATM(int p)
 
     if (acc.has_components && m_do_gradient)
         acc.grad_batm += (acc.gradient - grad_before);
+}
+
+// ============================================================================
+// rev-gfnff stage 1: over-coordination energy (Claude Generated, Sep 2026)
+//   bo_sum_i = sum_j b_ij BO_ij over every pair that carries the blended repulsion
+//   E_over  = sum_i p_i sp(bo_sum_i - Val_i)^2,  sp = softplus (rev_bond_order.h)
+// Two passes over the pairs: the sums first, then the gradient through d b_ij / dr.
+// Runs on the main thread after the partitions (needs the complete sums).
+// ============================================================================
+
+void FFWorkspace::calcOverCoordination(bool gradient)
+{
+    const int N = m_natoms;
+    if (N == 0 || static_cast<int>(m_rev.over_p.size()) != N || static_cast<int>(m_rev.valence.size()) != N)
+        return;
+    m_rev_bo_sum = Vector::Zero(N);
+    auto pair_r = [&](int i, int j, Eigen::Vector3d* vec) {
+        Eigen::Vector3d ri = m_geometry.row(i), rj = m_geometry.row(j);
+        Eigen::Vector3d d = ri - rj;
+        if (vec) *vec = d;
+        return d.norm();
+    };
+    auto accumulate = [&](const std::vector<GFNFFRepulsion>& list) {
+        for (const auto& rep : list) {
+            if (!rep.blend) continue;
+            const double r = pair_r(rep.i, rep.j, nullptr);
+            if (r < 1e-8) continue;
+            const double b = revOrder(rep.i, rep.j, r, nullptr) * rep.bo_mult;
+            m_rev_bo_sum(rep.i) += b;
+            m_rev_bo_sum(rep.j) += b;
+        }
+    };
+    accumulate(m_bonded_reps);
+    accumulate(m_nonbonded_reps);
+
+    double e_over = 0.0;
+    Vector dEdsum = Vector::Zero(N); // dE_over / d bo_sum_i
+    for (int i = 0; i < N; ++i) {
+        double dsp = 0.0;
+        const double sp = RevGFNFF::softplus(m_rev_bo_sum(i) - m_rev.valence[i] - m_rev.over_shift, m_rev.over_k, &dsp);
+        e_over += m_rev.over_p[i] * sp * sp;
+        dEdsum(i) = 2.0 * m_rev.over_p[i] * sp * dsp;
+    }
+    m_result_energy.over_coord += e_over;
+    if (!gradient)
+        return;
+    auto apply = [&](const std::vector<GFNFFRepulsion>& list) {
+        for (const auto& rep : list) {
+            if (!rep.blend) continue;
+            Eigen::Vector3d vec;
+            const double r = pair_r(rep.i, rep.j, &vec);
+            if (r < 1e-8) continue;
+            double dbdr = 0.0;
+            revOrder(rep.i, rep.j, r, &dbdr);
+            const double f = (dEdsum(rep.i) + dEdsum(rep.j)) * rep.bo_mult * dbdr / r;
+            {
+                Eigen::Vector3d g = f * vec;
+                m_result_gradient.row(rep.i) += g.transpose();
+                m_result_gradient.row(rep.j) -= g.transpose();
+            }
+        }
+    };
+    apply(m_bonded_reps);
+    apply(m_nonbonded_reps);
 }

@@ -31,6 +31,7 @@
 #include "src/core/config_manager.h"
 #include "src/core/parameter_macros.h"
 #include "src/core/charge_extrapolation.h"
+#include "src/core/energy_calculators/ff_methods/gfnff_param_tables.h"  // Claude Generated (Sep 2026): runtime EEQ tables
 
 #include <Eigen/Dense>
 #include <deque>
@@ -145,6 +146,9 @@ public:
      * @brief Default destructor
      */
     ~EEQSolver() = default;
+
+    /// Claude Generated (Sep 2026, rev-gfnff): EEQ element tables (chi, gam, alpha, cnf) to evaluate with
+    void setTables(std::shared_ptr<const GFNFFTables> tables) { m_tables = std::move(tables); }
 
     // ===== Convergence Statistics =====
 
@@ -838,6 +842,7 @@ private:
     // ===== Configuration =====
 
     ConfigManager m_config;           ///< Configuration manager
+    std::shared_ptr<const GFNFFTables> m_tables = GFNFFTables::defaults(); ///< runtime tables (Sep 2026)
     int m_max_iterations;             ///< Maximum iterations for Phase 2 refinement
     double m_convergence_threshold;   ///< Convergence threshold for charge changes (e)
     int m_verbosity;                  ///< Verbosity level (0-3)

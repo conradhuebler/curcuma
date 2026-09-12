@@ -52,7 +52,7 @@ using namespace std;
 // =================================================================================
 
 const std::vector<std::string> MethodFactory::m_ff_methods = {
-    "uff", "uff-d3", "d3", "qmdff", "gfnff", "gfnff-fast"
+    "uff", "uff-d3", "d3", "qmdff", "gfnff", "gfnff-fast", "revgfnff", "gfnff-rev"
 };
 
 const std::vector<std::string> MethodFactory::m_tblite_methods = {
@@ -376,6 +376,23 @@ namespace {
 std::unique_ptr<ComputationalMethod> createNativeGfnff(const std::string& method, const json& config)
 {
     json gfnff_config = config;
+    // rev-gfnff stage 1 (Claude Generated, Sep 2026): its own method name so that `gfnff`
+    // stays bit-identical. The preset switches the continuous-bond-order kernels on and
+    // turns the empirical react filters off, which the over-coordination energy replaces.
+    if (method == "revgfnff" || method == "gfnff-rev") {
+        gfnff_config["rev_enabled"] = true;
+        gfnff_config["react_valence_cap"] = false;
+        gfnff_config["react_refractory_scans"] = 0;
+        gfnff_config["react_exchange_scans"] = 0;
+        gfnff_config["react_check_every"] = 1;   // a term must join the lists while its weight is still ~0
+        if (config.contains("gpu") && config["gpu"].is_string() && config["gpu"].get<std::string>() != "none"
+            && config["gpu"].get<std::string>() != "") {
+            CurcumaLogger::warn("Method 'revgfnff' is CPU-only in stage 1; ignoring -gpu");
+        }
+        gfnff_config["gpu"] = "none";
+        CurcumaLogger::info("rev-gfnff stage 1: continuous bond order, blended repulsion, over-coordination energy "
+                            "(docs/REV_GFNFF_ROADMAP.md); AI-generated, machine-tested only; reactive MD needs dt <= 0.25 fs");
+    }
     if (method == "gfnff-fast") {
         gfnff_config["static_charges"] = true;
         gfnff_config["static_cn"] = true;
@@ -452,7 +469,7 @@ const std::vector<MethodDescriptor>& MethodFactory::methodTable()
         { {"pm6"}, "Quantum Methods (native)", "PM6 (NDDO)", always, {{"Native", always}},
           [](const std::string&, const json& c) -> std::unique_ptr<ComputationalMethod> { return std::make_unique<NDDOMethod>(NDDOMethodType::PM6, c); } },
         // ---- native force fields ----
-        { {"gfnff", "gfnff-fast"}, "Force Fields (native)", "GFN-FF, native (gfnff-fast: frozen charges/CN; -gpu cuda|rocm)",
+        { {"gfnff", "gfnff-fast", "revgfnff", "gfnff-rev"}, "Force Fields (native)", "GFN-FF, native (gfnff-fast: frozen charges/CN; -gpu cuda|rocm; revgfnff: reactive stage 1, CPU)",
           always, {{"Native", always},
                    {"Native+GPU", []() { return gpu_plugin::available("cuda") || gpu_plugin::available("rocm"); }}},
           [](const std::string& m, const json& c) { return createNativeGfnff(m, c); } },
@@ -577,7 +594,7 @@ json MethodFactory::getMethodInfo(const std::string& method_name) {
         info["description"] = d->description;
         for (const auto& p : d->providers)
             info["providers"].push_back({{"name", p.first}, {"available", p.second()}});
-        if (m == "gfnff" || m == "gfnff-fast")
+        if (m == "gfnff" || m == "gfnff-fast")  // revgfnff: CPU-only
             info["gpu_support"] = gpu_plugin::available("cuda") || gpu_plugin::available("rocm");
     }
     return info;

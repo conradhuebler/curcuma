@@ -702,10 +702,23 @@ private:
     // WP-P1 (May 2026): per-phase wall-clock breakdown for diagnostics
     bool m_md_diagnostics_timing = false;
     double m_last_ff_ms = 0.0;     ///< wall-clock of last m_interface->CalculateEnergy()
+
+    // Claude Generated (Sep 2026, rev-gfnff WP0c): react-topology events. The GFN-FF
+    // instance records every bond change (formed/broken pairs + dE_jump) in its event
+    // list; SimpleMD drains that list after every energy call and reports it at the
+    // run's own verbosity and in Results(). The calculator's own REACT log lines are
+    // muted inside an MD run (the energy calls run below the calculator's verbosity),
+    // so without this hook a CLI run could not see its reaction events at all.
+    void flushReactEvents();
+    long m_react_formed = 0;                ///< bond formations since the run started
+    long m_react_broken = 0;                ///< bond breaks (incl. exchange resolutions)
+    long m_react_rebuilds = 0;              ///< topology rebuild events
+    std::vector<double> m_react_dejump_kj;  ///< dE_jump of every rebuild, kJ/mol
     double m_last_hbxb_ms = 0.0;   ///< placeholder; HBXB-update lives inside Calculation() and is hard to isolate
     double m_last_integrator_ms = 0.0;  ///< wall-clock of last Integrator() call in step()
 
     int m_mtd_dT = -1;
+    double m_rev_dt_requested = 0.0; ///< revgfnff: the time step the user asked for when it was capped (0 = not capped)
     int m_seed = -1;
     int m_time_step = 0;
     int m_dof = 0;
@@ -761,6 +774,7 @@ private:
         "unit=K")
     PARAM(time_step, Double, 1.0, "Integration time step in femtoseconds.", "Basic", {"dt"},
         "tier=primary; unit=fs; min=0")
+    PARAM(rev_dt_cap, Double, 0.25, "Largest time step (fs) used with -method revgfnff; larger requested steps are clamped with a warning because the reactive blend is not integrable at 0.5 fs for hot X-H bonds. 0 disables the cap.", "Basic", {})
     PARAM(max_time, Double, 1000.0, "Maximum simulation time in femtoseconds.", "Basic", {"MaxTime"},
         "tier=primary; unit=fs; min=0")
     PARAM(charge, Int, 0, "Total charge of the system.", "Basic", {},

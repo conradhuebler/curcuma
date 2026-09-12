@@ -110,6 +110,8 @@ public:
      * @param level 0=silent, 1=minimal, 2=detailed, 3=full debug
      */
     void setVerbosity(int level) { m_verbosity = level; }
+    /// Claude Generated (Sep 2026, rev-gfnff): gen%hueckelp3 from the runtime parameter tables
+    void setHueckelp3(double v) { hueckelp3 = v; }
 
 private:
     // ========================================
@@ -165,7 +167,7 @@ private:
     // Algorithm control parameters
     static constexpr double hiter = 0.700;       // Iteration mixing (β scaling reduction)
     static constexpr double htriple = 1.45;      // Triple bond β reduction factor
-    static constexpr double hueckelp3 = -0.24;   // Diagonal charge dependence
+    double hueckelp3 = -0.24;                    // Diagonal charge dependence (runtime table via setHueckelp3, Sep 2026)
     static constexpr double pilpf = 0.530;       // Lone pair diagonal shift (2e⁻ systems)
     static constexpr int maxhiter = 5;           // Maximum iterations (prevents divergence)
     static constexpr double fermi_temp = 4000.0; // Electronic temperature for Fermi smearing (K)

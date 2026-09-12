@@ -119,6 +119,13 @@ struct GFNFFRepulsion {
     double alpha = 0.0;
     double repab = 0.0;
     double r_cut = 50.0;
+    // rev-gfnff stage 1 (Claude Generated, Sep 2026): with `blend` the pair carries BOTH
+    // parameter sets and the kernel evaluates b E(alpha_b, repab_b) + (1-b) E(alpha_n, repab_n)
+    // with the continuous bond order b, instead of the bonded/non-bonded list membership.
+    bool blend = false;
+    double alpha_b = 0.0, repab_b = 0.0;   // bonded set (repa, REPSCALB)
+    double alpha_n = 0.0, repab_n = 0.0;   // non-bonded set (repan, REPSCALN, CN/charge scaled)
+    double bo_mult = 1.0;                  // bond-order multiplicity of a bonded pair (1 + pi, +1 for sp-sp)
 };
 
 /**

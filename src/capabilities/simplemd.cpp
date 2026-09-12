@@ -19,6 +19,7 @@
  */
 
 #include <algorithm>
+#include <numeric> // Claude Generated (Sep 2026): std::accumulate for the REACT summary
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -44,6 +45,8 @@
 
 #include "src/core/elements.h"
 #include "src/core/energycalculator.h"
+#include "src/core/energy_calculators/ff_methods/gfnff.h" // Claude Generated (Sep 2026): react event API
+#include "src/core/units.h"
 #include "src/core/fileiterator.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
@@ -299,6 +302,17 @@ void SimpleMD::LoadControlJson()
     m_spin = m_config.get<int>("spin");
     m_charge = m_config.get<int>("charge");
     m_dT = m_config.get<double>("time_step");
+    // Claude Generated (Sep 12, 2026, rev-gfnff): the reactive blend of revgfnff is integrable
+    // at 0.25 fs but not at 0.5 fs for hot X-H bonds (a re-parametrisation of several hundred
+    // kJ/mol released within one step catapults hydrogens; docs/REV_GFNFF_STAGE1.md). Cap the
+    // step unless the user switches the cap off.
+    if (m_method == "revgfnff" || m_method == "gfnff-rev") {
+        const double cap = m_config.get<double>("rev_dt_cap");
+        if (cap > 0.0 && m_dT > cap) {
+            m_rev_dt_requested = m_dT; // reported once the logger verbosity is set (below)
+            m_dT = cap;
+        }
+    }
     m_maxtime = m_config.get<double>("max_time");
     m_T0 = m_config.get<double>("temperature");
     m_T_init = m_config.get<double>("initial_temperature");
@@ -898,6 +912,8 @@ bool SimpleMD::Initialise()
     }
 
     m_interface = new EnergyCalculator(m_method, ec_config, Basename());
+    m_react_formed = m_react_broken = m_react_rebuilds = 0; // Claude Generated (Sep 2026)
+    m_react_dejump_kj.clear();
     // Fail loud (Sep 2026): an unknown/unavailable method used to leave a calculator without a
     // backend and the first FastEnergy() call segfaulted. Abort the setup with the reason.
     if (m_interface->Error()) {
@@ -918,6 +934,18 @@ bool SimpleMD::Initialise()
     // level here. (A deeper fix would stop the EnergyCalculator setup path leaking 0 in the first
     // place.)
     CurcumaLogger::set_verbosity(m_verbosity);
+    if (m_rev_dt_requested > 0.0) // plain print: the per-thread logger level may still be 0 here (Known Issue #31)
+        fmt::print("WARNING revgfnff: requested time step {:.3f} fs exceeds the reactive-blend limit; running with {:.3f} fs "
+                   "(-md.rev_dt_cap 0 keeps the requested step; docs/REV_GFNFF_STAGE1.md)\n", m_rev_dt_requested, m_dT);
+    // Claude Generated (Sep 2026): the per-thread override (llm-core WP4) shadows the
+    // process default, so the re-assert above is only effective on the thread level.
+    // A nested silent helper constructed during setup leaves the thread level at 0
+    // otherwise, and every level-1 message of this run (REACT events included) is lost.
+    CurcumaLogger::set_thread_verbosity(m_verbosity);
+    // The energy calculator runs one level below the run: quiet at the default -v 1,
+    // its own per-call output appears from -v 2. Reaction events are reported by
+    // SimpleMD itself (flushReactEvents), independent of this level.
+    m_interface->setVerbosity(std::max(0, m_verbosity - 1));
     // Iterative mode: raise SCF display threshold by one level so system verbosity
     // controls output (silent at default=1, visible at -v 2). Claude Generated.
     m_interface->setIterativeMode(true);
@@ -2788,6 +2816,18 @@ void SimpleMD::finalizeRun()
     WriteGeometry();
 
     PrintStatus();
+    flushReactEvents();
+    if (m_react_rebuilds > 0 && m_verbosity >= 1) {
+        // Claude Generated (Sep 2026): one-line balance of the reactive run
+        std::vector<double> j = m_react_dejump_kj;
+        std::sort(j.begin(), j.end());
+        const double median = j.empty() ? 0.0 : j[j.size() / 2];
+        const double sum = std::accumulate(j.begin(), j.end(), 0.0);
+        CurcumaLogger::result(fmt::format(
+            "REACT summary: {} formed, {} broken, {} rebuilds, energy jumps median {:+.1f} / min {:+.1f} / max {:+.1f} / sum {:+.1f} kJ/mol",
+            m_react_formed, m_react_broken, m_react_rebuilds, median,
+            j.empty() ? 0.0 : j.front(), j.empty() ? 0.0 : j.back(), sum));
+    }
     if (m_thermostat == "csvr" && m_verbosity >= 1)
         CurcumaLogger::raw("Exchange with heat bath ", m_Ekin_exchange, "Eh");
     if (m_dipole && m_verbosity >= 1) {
@@ -4660,6 +4700,7 @@ double SimpleMD::FastEnergy()
     auto t_ff_end = std::chrono::high_resolution_clock::now();
     m_last_ff_ms = std::chrono::duration<double, std::milli>(t_ff_end - t_ff_start).count();
     m_eigen_gradient = m_interface->Gradient();
+    flushReactEvents(); // Claude Generated (Sep 2026): report bond changes of this step
 
     // Claude Generated (Feb 2026): Gradient sanity check for MD stability
     for (int i = 0; i < 3 * m_natoms; ++i) {
@@ -4874,5 +4915,53 @@ json SimpleMD::Results() const
         result["container_volume"] = volume;          // Angstrom^3
         result["density"] = m_molecule.Density(volume); // g/cm^3
     }
+    // Claude Generated (Sep 2026): reactive-topology balance (only when GFN-FF runs in react mode)
+    if (const GFNFF* g = (m_interface && m_interface->Interface()) ? m_interface->Interface()->gfnffInstance() : nullptr;
+        g && g->topologyMode() == "react") {
+        json react;
+        react["formed"] = m_react_formed;
+        react["broken"] = m_react_broken;
+        react["rebuilds"] = m_react_rebuilds;
+        react["bonds"] = g->reactiveBonds().size();
+        react["dE_jump_kJ"] = m_react_dejump_kj;
+        result["react"] = react;
+    }
     return result;
+}
+
+/* Claude Generated (Sep 2026, rev-gfnff WP0c): drain the GFN-FF react event list.
+ * Cheap when nothing happened (one virtual call + an empty vector exchange). The log
+ * lines use the same wording as the calculator's own, so scripts and the CLI tests
+ * (cli_simplemd_14) read either source. */
+void SimpleMD::flushReactEvents()
+{
+    ComputationalMethod* cm = m_interface ? m_interface->Interface() : nullptr;
+    GFNFF* g = cm ? cm->gfnffInstance() : nullptr;
+    if (!g || g->topologyMode() != "react")
+        return;
+    auto events = g->consumeReactEvents();
+    if (events.empty())
+        return;
+    auto label = [&](int a) {
+        const int z = (a >= 0 && a < static_cast<int>(m_atomtype.size())) ? m_atomtype[a] : 0;
+        const std::string& sym = (z >= 1 && z < static_cast<int>(Elements::ElementAbbr.size())) ? Elements::ElementAbbr[z] : "?";
+        return fmt::format("{}{}", sym, a + 1);
+    };
+    for (const auto& ev : events) {
+        ++m_react_rebuilds;
+        m_react_formed += static_cast<long>(ev.formed.size());
+        m_react_broken += static_cast<long>(ev.broken.size());
+        const bool finite = std::isfinite(ev.de_jump_eh);
+        const double de_kj = finite ? ev.de_jump_eh * CurcumaUnit::Energy::HARTREE_TO_KJMOL : 0.0;
+        if (finite)
+            m_react_dejump_kj.push_back(de_kj);
+        if (m_verbosity >= 1) {
+            for (const auto& [i, j] : ev.formed)
+                CurcumaLogger::result(fmt::format("REACT bond formed: {}-{} (t = {:.1f} fs)", label(i), label(j), m_currentStep));
+            for (const auto& [i, j] : ev.broken)
+                CurcumaLogger::result(fmt::format("REACT bond broken: {}-{} (t = {:.1f} fs)", label(i), label(j), m_currentStep));
+            CurcumaLogger::result(fmt::format("REACT rebuild #{}: {} bonds, dE_jump = {:.6f} Eh ({:+.1f} kJ/mol)",
+                m_react_rebuilds, g->reactiveBonds().size(), ev.de_jump_eh, de_kj));
+        }
+    }
 }

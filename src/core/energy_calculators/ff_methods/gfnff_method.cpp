@@ -129,6 +129,10 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
     row("X-bonds",             r.xbond,        r.t_xbond);
     row("ATM (3-body)",        r.atm,          r.t_atm);
     row("BATM",                r.batm,         r.t_batm);
+    if (r.over_coord != 0.0) {
+        CurcumaLogger::result("  rev-gfnff:");
+        row("OverCoord",           r.over_coord,   TT{});
+    }
     CurcumaLogger::result("  ═════════════════════════════════════════════════════════════════");
     CurcumaLogger::result(fmt::format("  {:<22} {:>+16.10f}", "Total", r.total));
     if (r.gradient_norm >= 0.0) {
@@ -508,10 +512,12 @@ GFNFF::GFNFF()
     eeq_params["eeq_solver"]["verbosity"] = CurcumaLogger::get_verbosity();
     ConfigManager eeq_config("eeq_solver", eeq_params);
     m_eeq_solver = std::make_unique<EEQSolver>(eeq_config);
+    m_eeq_solver->setTables(m_tables); // Claude Generated (Sep 2026): runtime EEQ tables
 
     // Initialize Hückel solver (Jan 2026 - Phase 1: Full Hückel implementation)
     m_huckel_solver = std::make_unique<HuckelSolver>();
     m_huckel_solver->setVerbosity(CurcumaLogger::get_verbosity());
+    m_huckel_solver->setHueckelp3(m_tables->gen.hueckelp3); // Claude Generated (Sep 2026)
     m_use_full_huckel = true;  // Default: use full Hückel calculation
 }
 
@@ -546,6 +552,12 @@ GFNFF::GFNFF(const json& parameters)
             m_parameters[k] = v;
         }
     }
+
+    // Claude Generated (Sep 2026, rev-gfnff WP1a): runtime parameter tables. Without an
+    // override this is the shared pristine copy of gfnff_par.h and every number below is
+    // bit-identical to before; with -gfnff.param_file / -gfnff.param_json the merged copy
+    // is used everywhere the generator reads a fit-relevant table or gen scalar.
+    loadParameterOverrides();
     m_threads = m_parameters.value("threads", 1);  // Claude Generated (WP1, May 2026)
 
     // Extract topology mode: auto (adaptive caching), constant (frozen), react
@@ -589,10 +601,12 @@ GFNFF::GFNFF(const json& parameters)
     }
     ConfigManager eeq_config("eeq_solver", eeq_params);
     m_eeq_solver = std::make_unique<EEQSolver>(eeq_config);
+    m_eeq_solver->setTables(m_tables); // Claude Generated (Sep 2026): runtime EEQ tables
 
     // Initialize Hückel solver (Jan 2026 - Phase 1: Full Hückel implementation)
     m_huckel_solver = std::make_unique<HuckelSolver>();
     m_huckel_solver->setVerbosity(CurcumaLogger::get_verbosity());
+    m_huckel_solver->setHueckelp3(m_tables->gen.hueckelp3); // Claude Generated (Sep 2026)
     // Check if user wants to use simplified approximation instead
     m_use_full_huckel = !m_parameters.value("use_simplified_pbo", false);
 
@@ -842,6 +856,11 @@ bool GFNFF::InitialiseMolecule()
         // built from the same list. Mol-provided bonds (m_forced_bonds) act as the
         // seed if present; otherwise geometric detection at the plain 1.3 factor.
         m_react_bonds = getCachedBondList();
+        // rev-gfnff note (Sep 12, 2026): seeding the initial list with every pair above the join
+        // weight was tried and rejected - it makes such pairs TOPOLOGY bonds (hybridisation,
+        // neighbour counts), not just wells, and the spurious re-parametrisation then has to
+        // break again. A start geometry with pairs inside the join radius therefore begins with
+        // the wells joining at their current weight (test 14's 1.3 A square); documented.
         m_forced_bonds = m_react_bonds;
         // From here on the react set is authoritative: an EMPTY set must stay empty
         // (getCachedBondList() would otherwise fall back to geometric detection with a
@@ -862,6 +881,11 @@ bool GFNFF::InitialiseMolecule()
                 "GFN-FF react topology mode: {} initial bonds, form/break hysteresis {:.2f}/{:.2f}, scan every {} calls or {:.2f} Bohr displacement",
                 m_react_bonds.size(), m_react_form_factor, m_react_break_factor,
                 m_react_check_every, m_react_check_disp));
+            CurcumaLogger::result(fmt::format(
+                "GFN-FF react filters: valence cap {}, refractory {} scans, exchange {} scans, slack factor {:.2f}{}",
+                m_react_valence_cap ? "on" : "off", m_react_refractory_scans, m_react_exchange_scans, m_react_slack_form_factor,
+                m_rev_settings.enabled ? fmt::format("; rev weights: form at w > {:.3f}, break at w < {:.3f}; transition coordinate bo3 {:.2f}x k {:.1f}, window {:.2f}..{:.2f}, revert {:.2f}",
+                    m_rev_bo_form, m_rev_bo_break, m_rev_settings.bo3_center, m_rev_settings.bo3_width, m_rev_tr_begin, m_rev_tr_end, m_rev_tr_revert) : ""));
         }
     }
 
@@ -1411,15 +1435,15 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         if (m_gpu_path_preallocated) {
             for (int i = 0; i < m_atomcount; ++i) {
                 int z = m_atoms[i];
-                m_last_cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
-                                  ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
+                m_last_cnf(i) = (z >= 1 && z <= static_cast<int>(T().cnf_eeq.size()))
+                                  ? T().cnf_eeq[z - 1] : 0.0;
             }
         } else {
             Vector cnf(m_atoms.size());
             for (size_t i = 0; i < m_atoms.size(); ++i) {
                 int z = m_atoms[i];
-                cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
-                            ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
+                cnf(i) = (z >= 1 && z <= static_cast<int>(T().cnf_eeq.size()))
+                            ? T().cnf_eeq[z - 1] : 0.0;
             }
             m_last_cnf = cnf;
         }
@@ -1674,16 +1698,16 @@ GFNFF::EEQGPUParams GFNFF::prepareEEQParametersForGPU(const Vector& cn) const
         if (i < topo.alpeeq.size()) {
             params.alpha_corrected[i] = topo.alpeeq(i);
         } else {
-            double alpha_base = (z >= 1 && z <= static_cast<int>(GFNFFParameters::alpha_eeq.size()))
-                                  ? GFNFFParameters::alpha_eeq[z - 1] : 0.903430;
+            double alpha_base = (z >= 1 && z <= static_cast<int>(T().alpha_eeq.size()))
+                                  ? T().alpha_eeq[z - 1] : 0.903430;
             params.alpha_corrected[i] = alpha_base * alpha_base;
         }
 
         // gam_corrected: gam_base + dgam
         double gam_base = (i < static_cast<int>(topo.eeq_gam.size()))
                             ? topo.eeq_gam[i]
-                            : ((z >= 1 && z <= static_cast<int>(GFNFFParameters::gam_eeq.size()))
-                                 ? GFNFFParameters::gam_eeq[z - 1] : 0.5);
+                            : ((z >= 1 && z <= static_cast<int>(T().gam_eeq.size()))
+                                 ? T().gam_eeq[z - 1] : 0.5);
         double dgam_i = (i < topo.dgam.size()) ? topo.dgam(i) : 0.0;
         params.gam_corrected[i] = gam_base + dgam_i;
 
@@ -1693,13 +1717,13 @@ GFNFF::EEQGPUParams GFNFF::prepareEEQParametersForGPU(const Vector& cn) const
         //   where chieeq = -chi + dxi (gfnff_ini.f90:696 for Phase 2)
         double chi_base = (i < static_cast<int>(topo.eeq_chi.size()))
                             ? topo.eeq_chi[i]
-                            : ((z >= 1 && z <= static_cast<int>(GFNFFParameters::chi_eeq.size()))
-                                 ? GFNFFParameters::chi_eeq[z - 1] : 0.0);
+                            : ((z >= 1 && z <= static_cast<int>(T().chi_eeq.size()))
+                                 ? T().chi_eeq[z - 1] : 0.0);
         double dxi_i = (i < topo.dxi.size()) ? topo.dxi(i) : 0.0;
         double cnf_i = (i < static_cast<int>(topo.eeq_cnf.size()))
                           ? topo.eeq_cnf[i]
-                          : ((z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
-                               ? GFNFFParameters::cnf_eeq[z - 1] : 0.0);
+                          : ((z >= 1 && z <= static_cast<int>(T().cnf_eeq.size()))
+                               ? T().cnf_eeq[z - 1] : 0.0);
 
         double chi_corrected = -chi_base + dxi_i;
 
@@ -1787,9 +1811,31 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
     }
 }
 
+// Claude Generated (Sep 2026, rev-gfnff stage 1b diagnostics): per-term energy jump of a
+// topology event (begin / complete / revert / promote of a blend, or a hard swap) in kJ/mol.
+// `s` is the blend coordinate after the event (-1 = no transition active), `swap_bonded` the
+// bonded energy difference primary - alternative, i.e. what a hard swap would have cost.
+static void reportReactJumpTerms(const char* tag, const FFEnergyComponents& a, const FFEnergyComponents& b, double s, double swap_bonded,
+    double w_ws = 0.0, double r_ws = 0.0, int i_ws = -1, int j_ws = -1, double c_ws = 0.0)
+{
+    const double k = CurcumaUnit::Energy::HARTREE_TO_KJMOL;
+    CurcumaLogger::info(fmt::format(
+        "REACT jump terms [kJ/mol] ({}): bond {:+.1f} angle {:+.1f} tors {:+.1f} inv {:+.1f} brep {:+.1f} nbrep {:+.1f} "
+        "coul {:+.1f} disp {:+.1f} hb {:+.1f} over {:+.1f} batm {:+.1f} | s {:.2f} swap {:+.1f} w_ws {:.4f} c_ws {:.4f} r_ws {:.4f} ij {} {}",
+        tag, (a.bond - b.bond) * k, (a.angle - b.angle) * k, (a.dihedral - b.dihedral) * k, (a.inversion - b.inversion) * k,
+        (a.bonded_rep - b.bonded_rep) * k, (a.nonbonded_rep - b.nonbonded_rep) * k, (a.coulomb - b.coulomb) * k,
+        (a.dispersion - b.dispersion) * k, (a.hbond - b.hbond) * k, (a.over_coord - b.over_coord) * k, (a.batm - b.batm) * k,
+        s, swap_bonded * k, w_ws, c_ws, r_ws, i_ws, j_ws));
+}
+
+static const bool s_react_scan_trace = std::getenv("CURCUMA_REACTSCAN") != nullptr; // Claude Generated (Sep 2026): per-scan trace of stretched bonds
+
 bool GFNFF::detectReactiveBondChanges()
 {
     const std::set<std::pair<int, int>> current(m_react_bonds.begin(), m_react_bonds.end());
+    if (s_react_scan_trace)
+        CurcumaLogger::info(fmt::format("REACT scan call {}: {} bonds, transition active {}", m_react_calls, current.size(),
+            (m_rev_settings.enabled && m_rev_settings.blend && m_workspace && m_workspace->transitionActive()) ? 1 : 0));
     std::vector<std::pair<int, int>> next;
     next.reserve(m_react_bonds.size() + 8);
     std::vector<std::pair<int, int>> formed, broken;
@@ -1881,14 +1927,91 @@ bool GFNFF::detectReactiveBondChanges()
     };
     std::vector<double> valence_used(m_atomcount, 0.0);
 
+    // rev-gfnff stage 1b (Claude Generated, Sep 2026): a transition in flight is finished,
+    // reverted or kept before any new event is considered.
+    const bool rev_blend = m_rev_settings.enabled && m_rev_settings.blend && m_workspace;
+    if (rev_blend && m_workspace->transitionActive()) {
+        // the transition coordinates must belong to THIS geometry, not to the last force call
+        m_workspace->setGeometry(m_geometry_bohr);
+        m_workspace->updateTransitions();
+        // stage 1b: finish every transition that reached an end of its window (complete at s = 1,
+        // undone at s = 0 once the pair turned back with some hysteresis); a revert changes the
+        // topology this scan was built on, so the scan is repeated at the next call
+        bool topology_changed = false;
+        const std::vector<RevTransition> trs = m_workspace->transitions();
+        for (int t = static_cast<int>(trs.size()) - 1; t >= 0; --t) {
+            const RevTransition& tr = trs[t];
+            if (tr.s >= 1.0) {
+                finishTransition(t, true, "complete");
+            } else if (tr.s <= 0.0 && ((tr.forming && tr.w < 0.5 * m_rev_bo_form) || (!tr.forming && tr.c > m_rev_tr_revert))) {
+                finishTransition(t, false, "revert");
+                topology_changed = true;
+            }
+        }
+        if (topology_changed)
+            return false;
+    }
+    std::set<std::pair<int, int>> in_tr;
+    if (rev_blend)
+        for (const RevTransition& tr : m_workspace->transitions())
+            in_tr.insert({ std::min(tr.i, tr.j), std::max(tr.i, tr.j) });
+    // stage 1b: the 1,3 test counts only SETTLED bonds - a transition below s = 0.5 has not
+    // re-parametrised anything yet (a forming pair at w = 0.05 is physically absent), so it must
+    // not turn a third atom's ordinary well join into a "ring closure" that waits for the tight switch
+    std::vector<std::set<int>> settled_adj(m_atomcount);
+    if (m_rev_settings.enabled) {
+        std::set<std::pair<int, int>> settled(m_react_bonds.begin(), m_react_bonds.end());
+        if (rev_blend)
+            for (const RevTransition& tr : m_workspace->transitions()) {
+                const std::pair<int, int> pr { std::min(tr.i, tr.j), std::max(tr.i, tr.j) };
+                if (tr.forming && tr.s < 0.5) settled.erase(pr);
+                if (!tr.forming && tr.s < 0.5) settled.insert(pr);
+            }
+        for (const auto& b : settled) {
+            settled_adj[b.first].insert(b.second);
+            settled_adj[b.second].insert(b.first);
+        }
+    }
+    std::vector<std::pair<double, std::pair<int, int>>> pre_breaks; // (w, pair) bonds below the pre-break weight
+
     std::vector<std::pair<double, std::pair<int, int>>> candidates; // (r, pair)
+    // stage 1b: fading wells (broken bonds whose well is still carried) re-form on the transition
+    // coordinate and are dropped silently once their weight is ~0
+    std::set<std::pair<int, int>> fading_set;
+    for (const Bond& fw : m_rev_fading)
+        fading_set.insert({ std::min(fw.i, fw.j), std::max(fw.i, fw.j) });
+    std::vector<std::pair<int, int>> fading_drop;
+    std::set<std::pair<int, int>> one_three_cand; // 1,3 pairs closing a ring: their transition runs on the bond-order switch
     for (int i = 0; i < m_atomcount; ++i) {
         for (int j = i + 1; j < m_atomcount; ++j) {
             double r = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
             double thr = (rcov[i] + rcov[j]) * fat_val[i] * fat_val[j];
+            // rev-gfnff stage 1 (Sep 2026): the scan decides on the term WEIGHT of the pair, so a
+            // term that joins or leaves the lists does so where its weight is already ~0 (the
+            // well of a topology bond keeps its full tail; the tight bond order is for E_over).
+            // A 1,3 pair (topological distance 2) is never a formation candidate: at the wide
+            // weight it would read as bonded, and the valence cap that used to block it is off.
+            const bool rev = m_rev_settings.enabled;
+            const double b_ij = rev ? RevGFNFF::bondOrder(r, m_rev_settings.bo_center * thr, m_rev_settings.bo_width) : 0.0;
+            // stage 1b: the transition COORDINATE (medium switch) decides when the neighbours are re-parametrised
+            const double c_ij = rev ? RevGFNFF::bondOrder(r, m_rev_settings.bo3_center * thr, m_rev_settings.bo3_width) : 0.0;
+            const bool fading = rev && fading_set.count({ i, j }) > 0;
+            const double o_ij = rev ? RevGFNFF::bondOrder(r, m_rev_settings.bo2_center * thr, m_rev_settings.bo2_width) : 0.0; // bond order (E_over switch): 1,3 pairs read ~0
+            bool one_three = false;
+            if (rev && settled_adj[i].count(j) == 0)
+                for (int kk : settled_adj[i])
+                    if (settled_adj[j].count(kk)) { one_three = true; break; }
+            // rev-gfnff stage 1b: the pair whose transition is in flight is neither a break nor a
+            // formation candidate - its window is followed by the blend, not by the scan
+            const bool in_transition = rev_blend && in_tr.count({ i, j }) > 0;
             if (current.count({ i, j }) > 0) {
-                // Existing bond survives until it stretches past the break threshold
-                if (r > m_react_break_factor * thr) {
+                if (rev && c_ij < 0.99 && s_react_scan_trace)
+                    CurcumaLogger::info(fmt::format("REACT scan call {}: bond {}-{} r {:.4f} w {:.4f} c {:.4f} in_transition {} active {}",
+                        m_react_calls, i + 1, j + 1, r, b_ij, c_ij, in_transition ? 1 : 0, m_workspace->transitionActive() ? 1 : 0));
+                // A topology bond starts breaking once its transition coordinate leaves the bonded plateau
+                if (rev_blend && !in_transition && c_ij < m_rev_tr_prebreak)
+                    pre_breaks.emplace_back(c_ij, std::make_pair(i, j));
+                if (!rev_blend && (rev ? (b_ij < m_rev_bo_break) : (r > m_react_break_factor * thr))) {
                     broken.emplace_back(i, j);
                 } else {
                     next.emplace_back(i, j);
@@ -1904,10 +2027,128 @@ bool GFNFF::detectReactiveBondChanges()
                     ++sigma_count[i];
                     ++sigma_count[j];
                 }
-            } else if (r < m_react_form_factor * thr) {
+            } else if (rev && s_react_scan_trace && b_ij > 0.5 * m_rev_bo_form
+                && (CurcumaLogger::info(fmt::format("REACT scan call {}: pair {}-{} r {:.4f} w {:.4f} c {:.4f} fading {} one_three {} in_transition {} cooled {}",
+                       m_react_calls, i + 1, j + 1, r, b_ij, c_ij, fading ? 1 : 0, one_three ? 1 : 0, in_transition ? 1 : 0,
+                       (m_rev_cooldown.count({ i, j }) && m_react_calls < m_rev_cooldown[{ i, j }]) ? 1 : 0)), false)) {
+            } else if (rev ? (!in_transition && (one_three ? (o_ij > m_rev_bo13_form) : fading ? (c_ij > m_rev_tr_begin) : (b_ij > m_rev_bo_form)))
+                           : (r < m_react_form_factor * thr)) {
+                if (one_three)
+                    one_three_cand.insert({ i, j });
+                // a fresh pair joins where its well is ~0 (wide weight); a fading well or a 1,3 pair
+                // re-enters the topology only where the transition coordinate starts (stage 1b)
                 candidates.emplace_back(r, std::make_pair(i, j));
+            } else if (fading && b_ij < m_rev_bo_break) {
+                fading_drop.emplace_back(i, j); // its well is ~0 now: forget it, no event
             }
         }
+    }
+
+    // rev-gfnff stage 1b: one transition at a time. A breaking bond (weight below the
+    // pre-break value) goes first, otherwise the closest forming pair. While a transition is
+    // in flight a new event promotes it (measured jump), so no pair is ever held back.
+    if (rev_blend) {
+        if (!fading_drop.empty()) {
+            std::set<std::pair<int, int>> drop(fading_drop.begin(), fading_drop.end());
+            m_rev_fading.erase(std::remove_if(m_rev_fading.begin(), m_rev_fading.end(), [&](const Bond& b) {
+                return drop.count({ std::min(b.i, b.j), std::max(b.i, b.j) }) > 0; }), m_rev_fading.end());
+        }
+        std::sort(pre_breaks.begin(), pre_breaks.end());
+        std::sort(candidates.begin(), candidates.end());
+        // a demoted pair may not start again at once (it would only ping-pong with the interrupting event)
+        auto cooled = [&](const std::pair<int, int>& pr) {
+            auto it = m_rev_cooldown.find(pr);
+            return it != m_rev_cooldown.end() && m_react_calls < it->second;
+        };
+        // (only demoted formations cool down: their well is carried as a fading well meanwhile; a
+        // break or a fresh formation never waits - a delayed well join would be the hard swap again)
+        candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&](const auto& c) { return cooled(c.second); }), candidates.end());
+        const bool have_event = !pre_breaks.empty() || !candidates.empty();
+        if (!have_event)
+            return false;
+        // stage 1b (multi-transition): a new event joins the transitions in flight; when the
+        // limit is reached the transition closest to either end of its window is snapped there
+        if (static_cast<int>(m_workspace->transitions().size()) >= m_rev_max_transitions) {
+            const auto& trs = m_workspace->transitions();
+            int t_snap = 0;
+            double best = 2.0;
+            for (int t = 0; t < static_cast<int>(trs.size()); ++t) {
+                const double d = std::min(trs[t].s, 1.0 - trs[t].s);
+                if (d < best) { best = d; t_snap = t; }
+            }
+            snapTransition(t_snap, !pre_breaks.empty() ? "a bond started breaking" : "another pair started forming", &next);
+        }
+        if (m_workspace->transitions().empty()) { // first transition of a set: remember the base topology
+            m_rev_base_bonds = m_react_bonds;
+            m_rev_base_eeq = captureCornerEEQ();
+        }
+        std::pair<int, int> pair;
+        RevTransition tr;
+        if (!pre_breaks.empty()) {
+            pair = pre_breaks.front().second;
+            tr.forming = false;
+            tr.tight = false;
+            // the window starts at the coordinate the scan actually saw (a hot X-H bond moves the
+            // coordinate by up to 0.15 per step), so s = 0 by construction; it ends where a 1,3
+            // pair would sit. A start too close to the end is clamped to keep the window finite.
+            tr.w_a = std::min(m_rev_tr_prebreak, std::max(pre_breaks.front().first, m_rev_tr_begin + 0.1));
+            tr.w_b = m_rev_tr_begin;
+            broken.push_back(pair);
+            next.erase(std::remove(next.begin(), next.end(), pair), next.end());
+            // the well outlives the topology bond: keep its (frozen) parameters as a fading well
+            if (fading_set.count(pair) == 0)
+                for (const Bond& bd : m_workspace->bonds())
+                    if (std::min(bd.i, bd.j) == pair.first && std::max(bd.i, bd.j) == pair.second) {
+                        m_rev_fading.push_back(bd);
+                        break;
+                    }
+        } else {
+            pair = candidates.front().second;
+            tr.forming = true;
+            tr.tight = one_three_cand.count(pair) > 0;
+            {
+                // same for a formation: the window starts at the coordinate seen now (a fading
+                // well re-forms once c > tr_begin, and c may already be 0.1-0.2 by then)
+                const double r_c = (m_geometry_bohr.row(pair.first) - m_geometry_bohr.row(pair.second)).norm();
+                const double thr_c = (rcov[pair.first] + rcov[pair.second]) * fat_val[pair.first] * fat_val[pair.second];
+                const double c_now = tr.tight ? RevGFNFF::bondOrder(r_c, m_rev_settings.bo2_center * thr_c, m_rev_settings.bo2_width)
+                                              : RevGFNFF::bondOrder(r_c, m_rev_settings.bo3_center * thr_c, m_rev_settings.bo3_width);
+                const double a0 = tr.tight ? m_rev_bo13_form : m_rev_tr_begin;
+                const double b0 = tr.tight ? 0.9 : m_rev_tr_end;
+                tr.w_a = std::max(a0, std::min(c_now, b0 - 0.1));
+                tr.w_b = b0;
+            }
+            formed.push_back(pair);
+            next.push_back(pair);
+            m_rev_fading.erase(std::remove_if(m_rev_fading.begin(), m_rev_fading.end(), [&](const Bond& b) {
+                return std::min(b.i, b.j) == pair.first && std::max(b.i, b.j) == pair.second; }), m_rev_fading.end());
+        }
+        tr.i = pair.first;
+        tr.j = pair.second;
+        tr.active = true;
+        m_rev_pending = true;
+        m_rev_pending_tr = tr;
+        m_react_bonds = std::move(next);
+        ReactEvent ev;
+        ev.call = m_react_calls;
+        ev.formed = formed;
+        ev.broken = broken;
+        m_react_events.push_back(std::move(ev));
+        if (m_react_events.size() > kReactEventLimit)
+            m_react_events.erase(m_react_events.begin(), m_react_events.begin() + (m_react_events.size() - kReactEventLimit));
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            auto lab = [&](int a) {
+                int z = m_atoms[a];
+                const std::string& sym = (z >= 1 && z < static_cast<int>(Elements::ElementAbbr.size())) ? Elements::ElementAbbr[z] : "?";
+                return fmt::format("{}{}", sym, a + 1);
+            };
+            const double r_pair = (m_geometry_bohr.row(pair.first) - m_geometry_bohr.row(pair.second)).norm();
+            const double thr_pair = (rcov[pair.first] + rcov[pair.second]) * fat_val[pair.first] * fat_val[pair.second];
+            const double w_pair = RevGFNFF::bondOrder(r_pair, m_rev_settings.bo_center * thr_pair, m_rev_settings.bo_width);
+            CurcumaLogger::result(fmt::format("REACT bond {}: {}-{} (blend {} -> {}) r_scan {:.4f} w_scan {:.4f}", formed.empty() ? "broken" : "formed",
+                lab(pair.first), lab(pair.second), tr.w_a, tr.w_b, r_pair, w_pair));
+        }
+        return true;
     }
 
     // Closest candidates claim the remaining valence first.
@@ -2118,6 +2359,7 @@ void GFNFF::updateReactiveTopologyIfNeeded()
 bool GFNFF::rebuildReactiveTopology()
 {
     const int verb = CurcumaLogger::get_verbosity();
+    const char* jump_tag = m_rev_pending ? (m_rev_pending_tr.forming ? "begin_form" : "begin_break") : "swap";
 
     // Energy on the OLD topology at the current geometry, so the discontinuity the
     // dynamics experiences (dE_jump) is measured, not hidden. Always measured: the
@@ -2126,9 +2368,11 @@ bool GFNFF::rebuildReactiveTopology()
     // previous step; NaN otherwise.
     const bool diag = m_workspace && (m_last_cn.size() == m_atomcount);
     double e_before = 0.0;
+    FFEnergyComponents comp_before;
     if (diag) {
         m_workspace->setGeometry(m_geometry_bohr);
         e_before = m_workspace->calculate(false);
+        comp_before = m_workspace->energyComponents();
     }
 
     // Snapshot for rollback: if parameter generation throws, the engines keep their
@@ -2147,6 +2391,20 @@ bool GFNFF::rebuildReactiveTopology()
     m_geometry_tracker.reset();
     m_static_topology_valid = false;
 
+    // stage 1b: the other new corners of a pending transition are generated first, the
+    // all-ones corner (= m_react_bonds) last by the normal flow so that the caches describe it
+    std::vector<GFNFFParameterSet> rev_corner_params;
+    if (m_rev_pending && !prepareTransitionCorners(rev_corner_params)) {
+        m_rev_pending = false;
+        m_forced_bonds = old_bonds;
+        m_react_bonds = old_bonds;
+        m_cached_bond_list.reset();
+        m_geometry_tracker.reset();
+        m_static_topology_valid = false;
+        if (!m_react_events.empty())
+            m_react_events.pop_back();
+        return false;
+    }
     GFNFFParameterSet ff_params;
     try {
         ff_params = generateGFNFFParameterSet();
@@ -2168,12 +2426,23 @@ bool GFNFF::rebuildReactiveTopology()
     ff_params.coulomb_enabled = m_parameters.value("coulomb", true);
 
     // Refresh the heap copy for external consumers (GPU rebuild path reads a clone).
+    // stage 1b: wells of broken bonds keep their frozen parameters in the bond list (weighted by
+    // the wide w) until the pair is far enough for the weight to be ~0 (rev_bo_break)
+    appendFadingWells(ff_params);
     m_cached_parameter_set = makeParameterSetCache(ff_params);
 
     // Active engine: full interaction-list swap + re-partition. Atom types, thread
     // pool and partition count survive inside the workspace.
     if (m_workspace) {
-        m_workspace->rebuildInteractionLists(std::move(ff_params));
+        if (m_rev_pending) { // stage 1b: the new corners join the transition set; ff_params is the all-ones corner
+            rev_corner_params.back() = std::move(ff_params);
+            m_rev_corner_eeq.back() = captureCornerEEQ();
+            installCornerPrepare();
+            m_workspace->beginTransition(m_rev_pending_tr, std::move(rev_corner_params));
+            m_rev_pending = false;
+        } else {
+            m_workspace->rebuildInteractionLists(std::move(ff_params));
+        }
     }
 
     refreshReactBondOrders();
@@ -2192,6 +2461,20 @@ bool GFNFF::rebuildReactiveTopology()
                 "REACT rebuild #{}: {} bonds, dE_jump = {:.6f} Eh ({:+.1f} kJ/mol)",
                 m_react_rebuild_count, m_react_bonds.size(), de,
                 de * CurcumaUnit::Energy::HARTREE_TO_KJMOL));
+        // Claude Generated (Sep 2026, rev-gfnff): which term carries the jump. The per-term
+        // split is what decides whether a residual discontinuity is a bonded-term parameter
+        // change (dual-topology blending, roadmap stage 1b) or the EEQ fragment constraints
+        // (stage 2).
+        if (verb >= 2) {
+            const FFEnergyComponents& a = m_workspace->energyComponents();
+            double s_now = -1.0, w_now = 0.0, r_now = 0.0, c_now = 0.0;
+            int i_now = -1, j_now = -1;
+            if (m_workspace->transitionActive()) {
+                const RevTransition& tr = m_workspace->transitions().back();
+                s_now = tr.s; w_now = tr.w; r_now = tr.r; c_now = tr.c; i_now = tr.i; j_now = tr.j;
+            }
+            reportReactJumpTerms(jump_tag, a, comp_before, s_now, 0.0, w_now, r_now, i_now, j_now, c_now);
+        }
     }
     return true;
 }
@@ -2588,6 +2871,7 @@ double GFNFF::Calculation(bool gradient)
             rep.xbond         = comp.xbond;
             rep.atm           = comp.atm;
             rep.batm          = comp.batm;
+            rep.over_coord    = comp.over_coord; // rev-gfnff stage 1 (Sep 2026)
         }
         rep.total = m_energy_total;
 
@@ -2932,8 +3216,62 @@ GFNFF::GFNFFResults GFNFF::getResults() const
 void GFNFF::setParameters(const json& parameters)
 {
     m_parameters = MergeJson(m_parameters, parameters);
+    // Claude Generated (Sep 12, 2026): the CLI's gfnff sub-config arrives here AFTER construction
+    // (single-point path), so it must be flattened and the overrides / rev settings re-read
+    // exactly as the constructor does - otherwise -gfnff.rev_* and -gfnff.param_file were
+    // silently ignored in -sp runs (the batch path constructs with the full config and was fine)
+    if (parameters.contains("gfnff") && parameters["gfnff"].is_object())
+        for (const auto& [k, v] : parameters["gfnff"].items())
+            m_parameters[k] = v;
     m_threads = m_parameters.value("threads", m_threads);  // Claude Generated (WP1, May 2026)
+    loadParameterOverrides();
+    if (m_workspace) {
+        m_workspace->setTables(m_tables);
+        if (m_rev_settings.enabled) {
+            fillRevPerAtom();
+            m_workspace->setRev(m_rev_settings);
+        }
+    }
+}
 
+// Claude Generated (Sep 2026, rev-gfnff WP1a): runtime parameter tables from -gfnff.param_file /
+// -gfnff.param_json plus the rev settings; called by the constructor and by setParameters().
+void GFNFF::loadParameterOverrides()
+{
+    json overrides = json::object();
+    const std::string pfile = m_parameters.value("param_file", std::string());
+    if (!pfile.empty()) {
+        std::ifstream in(pfile);
+        if (!in)
+            throw std::runtime_error("GFN-FF: cannot open param_file '" + pfile + "'");
+        json doc = json::parse(in);
+        for (auto& [sec, body] : doc.items())
+            for (auto& [k, v] : body.items())
+                overrides[sec][k] = v;
+    }
+    if (m_parameters.contains("param_json") && !m_parameters["param_json"].is_null()) {
+        json doc;
+        if (m_parameters["param_json"].is_string()) {
+            const std::string txt = m_parameters["param_json"].get<std::string>();
+            if (!txt.empty())
+                doc = json::parse(txt);
+        } else if (m_parameters["param_json"].is_object()) {
+            doc = m_parameters["param_json"];
+        }
+        if (doc.is_object())
+            for (auto& [sec, body] : doc.items())
+                for (auto& [k, v] : body.items())
+                    overrides[sec][k] = v;
+    }
+    m_tables = GFNFFTables::fromOverrides(overrides);
+    setupRevSettings(); // rev-gfnff stage 1 (Sep 2026): PARAMs + rev section of the tables
+    if (!m_tables->hash.empty() && CurcumaLogger::get_verbosity() >= 1) {
+        size_t n = 0;
+        for (const auto& [sec, body] : overrides.items())
+            n += body.size();
+        CurcumaLogger::result(fmt::format("GFN-FF parameter overrides active: {} entries in {} section(s), hash {}",
+            n, overrides.size(), m_tables->hash));
+    }
 }
 
 // =================================================================================
@@ -2954,6 +3292,22 @@ std::string GFNFF::computeTopologyFingerprint() const
     for (size_t i = 0; i < bonds.size(); ++i) {
         if (i > 0) data += ",";
         data += std::to_string(bonds[i].first) + "-" + std::to_string(bonds[i].second);
+    }
+    // Claude Generated (Sep 2026): parameter overrides change the Phase-1 charges the cache
+    // stores, so a modified table set must not hit a cache written with the defaults.
+    if (!m_tables->hash.empty())
+        data += "|P=" + m_tables->hash;
+    // rev-gfnff (Sep 12, 2026): a cache written by gfnff must not be replayed by revgfnff or
+    // vice versa - the cached parameter set carries the rev repulsion sets and the perception
+    // differs, so the fingerprint carries every rev setting that shapes the generated set
+    if (m_rev_settings.enabled) {
+        const RevSettings& rv = m_rev_settings;
+        data += fmt::format("|REV={}{}{}{}|{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f}", rv.bond_weight, rv.term_weights, rv.blend_repulsion, rv.over_coord,
+            rv.bo_center, rv.bo_width, rv.bo2_center, rv.bo2_width, rv.bo3_center, rv.bo3_width, rv.bo4_center, rv.bo4_width, rv.over_k, rv.over_shift) + fmt::format(",{:.4f},{:.4f}", rv.bo5_center, rv.bo5_width);
+        for (const auto& kv : m_rev_p_over)
+            data += fmt::format(",p{}={:.5f}", kv.first, kv.second);
+        for (const auto& kv : m_rev_valence)
+            data += fmt::format(",v{}={:.3f}", kv.first, kv.second);
     }
     // Use std::hash for a fast, non-cryptographic fingerprint
     size_t hash = std::hash<std::string>{}(data);
@@ -3391,6 +3745,19 @@ bool GFNFF::initializeForceField()
         int num_threads = m_threads;  // WP1
         m_workspace = std::make_unique<FFWorkspace>(num_threads);
         m_workspace->setAtomTypes(m_atoms);
+        m_workspace->setTables(m_tables); // Claude Generated (Sep 2026): gen scalars of the kernels
+        if (m_rev_settings.enabled) {      // rev-gfnff stage 1 (Sep 2026)
+            fillRevPerAtom();
+            m_workspace->setRev(m_rev_settings);
+        }
+        // Claude Generated (Sep 2026, rev-gfnff WP1b): -gfnff.dump_params FILE
+        if (const std::string dump = m_parameters.value("dump_params", std::string()); !dump.empty()) {
+            std::ofstream out(dump);
+            if (out)
+                out << ff_params.toJSON().dump(1) << "\n";
+            else
+                CurcumaLogger::error("GFN-FF: cannot write dump_params file '" + dump + "'");
+        }
 
         // Keep a copy for external consumers (full pair lists only when a GPU wrapper asked
         // for them, bonded terms otherwise), then MOVE the set into the workspace. The former
@@ -3912,6 +4279,15 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // Fortran gfnff_rab.f90:125-136
     // Index: [row-1][0 or 1]  (row = 1..6 for H-He, Li-Ne, Na-Ar, K-Kr, Rb-Xe, Cs-Rn)
     using namespace GFNFFParameters;
+    // Claude Generated (Sep 2026, rev-gfnff): the fit-relevant tables come from the runtime
+    // copy; these locals shadow the compile-time originals for the rest of this function.
+    const auto& bond_params = T().bond_params;
+    const auto& r0_gfnff = T().r0_gfnff;
+    const auto& cnfak_gfnff = T().cnfak_gfnff;
+    const auto& en_gfnff = T().en_gfnff;
+    const auto& en_rab_gfnff = T().en_rab_gfnff;
+    const auto& bstren = T().gen.bstren;
+    const auto& bsmat = T().gen.bsmat;
 
     // Helper lambda: Get periodic table row (1-6)
     // Fortran gfnff_rab.f90:165-185 (iTabRow6 function)
@@ -3988,12 +4364,12 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // Reference Formula: r0 = (ra + rb) * ff + (gen%rabshift + shift)
     // CRITICAL: Shift is added AFTER the electronegativity factor ff!
 
-    double gen_rabshift = -0.110;    // Fortran: gen%rabshift
-    double gen_rabshifth = -0.050;   // Fortran: gen%rabshifth (XH bonds)
-    double hyper_shift = 0.030;      // Fortran: gen%hyper_shift
-    double hshift3 = -0.110;         // Fortran: gen%hshift3 (Heavy-Heavy Z>10)
-    double hshift4 = -0.110;         // Fortran: gen%hshift4 (Z>18)
-    double hshift5 = -0.060;         // Fortran: gen%hshift5 (Z>36)
+    const double gen_rabshift = T().gen.rabshift;    // Fortran: gen%rabshift (runtime table, Sep 2026)
+    const double gen_rabshifth = T().gen.rabshifth;   // Fortran: gen%rabshifth (XH bonds)
+    const double hyper_shift = T().gen.hyper_shift;      // Fortran: gen%hyper_shift
+    const double hshift3 = T().gen.hshift3;         // Fortran: gen%hshift3 (Heavy-Heavy Z>10)
+    const double hshift4 = T().gen.hshift4;         // Fortran: gen%hshift4 (Z>18)
+    const double hshift5 = T().gen.hshift5;         // Fortran: gen%hshift5 (Z>36)
 
     double shift = 0.0;
 
@@ -4147,16 +4523,9 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // Phase 3 NEW: Hybridization-dependent bond strength matrix (4×4)
     // Fortran gfnff_param.f90:804-814
     // split0 = 0.67, split1 = 0.33 for mixed hybridizations
-    static const double bsmat[4][4] = {
-        // hyb=0 (unknown/sp3)
-        { 1.0000, 1.3234, 1.0792, 1.0000 },  // vs. hyb=0,1,2,3
-        // hyb=1 (sp)
-        { 1.3234, 1.9800, 1.4842, 1.3234 },  // vs. hyb=0,1,2,3
-        // hyb=2 (sp2)
-        { 1.0792, 1.4842, 1.2400, 1.0792 },  // vs. hyb=0,1,2,3
-        // hyb=3 (sp3)
-        { 1.0000, 1.3234, 1.0792, 1.0000 }   // vs. hyb=0,1,2,3
-    };
+    // bsmat is the runtime copy T().gen.bsmat (shadowed at the top of this function, Sep 2026);
+    // its default rows are gfnff_par.h: {1.0000,1.3234,1.0792,1.0000}, {1.3234,1.9800,1.4842,1.3234},
+    // {1.0792,1.4842,1.2400,1.0792}, {1.0000,1.3234,1.0792,1.0000} for hyb rows/cols 0..3.
     // Computed as: bsmat[i][j] = split0*bstren[bond_i] + split1*bstren[bond_j]
     // Example: bsmat[1][0] = 0.67*1.00 + 0.33*1.98 = 1.3234
 
@@ -4302,7 +4671,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // Fortran formula (sigmoid function for smooth charge-dependence)
     // fqq = 1.0 + qfacbm0 * exp(-15*qafac) / (1 + exp(-15*qafac))
     // This is equivalent to: fqq = 1.0 + qfacbm0 * tanh(15*qafac/2)
-    double qfacbm0 = 0.047;  // Fortran gfnff_param.f90:772
+    const double qfacbm0 = T().gen.qfacbm0;  // Fortran gfnff_param.f90:772 (runtime table)
     double qafac = qa1 * qa2 * 70.0;
     const double t = -15.0 * qafac;
     // DELIBERATE DEVIATION from the reference (see docs/REV_GFNFF_TODO.md #10).
@@ -4545,10 +4914,10 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // - For weaker π-bonds (pibo < 0.67), longer equilibrium distance, shallower well
     // ========================================================================
 
-    constexpr double hueckelp = 0.340;   // Shift correction factor
-    constexpr double bzref = 0.370;      // Reference P value for R0 shift
-    constexpr double hueckelp2 = 1.00;   // Force constant correction factor
-    constexpr double bzref2 = 0.315;     // Reference P value for force constant
+    const double hueckelp = T().gen.hueckelp;   // Shift correction factor (runtime table)
+    const double bzref = T().gen.bzref;      // Reference P value for R0 shift
+    const double hueckelp2 = T().gen.hueckelp2;   // Force constant correction factor
+    const double bzref2 = T().gen.bzref2;     // Reference P value for force constant
 
     // Get pi-bond order for this bond from Hückel calculation
     double pibo = 0.0;
@@ -4716,7 +5085,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         // --- metal fqq (gfnff_ini.f90:1209-1211) ---
         // qfacbm: [0]=1.0 (non-metal), [1:2]=-0.2, [3]=0.70, [4]=0.50.
         // Charge factor 25.0 (not the normal-bond 70.0).
-        static const double qfacbm[5] = { 1.0, -0.2, -0.2, 0.70, 0.50 };
+        const auto& qfacbm = T().gen.qfacbm; // runtime table (Sep 2026); reference: { 1.0, -0.2, -0.2, 0.70, 0.50 };
         double qafac_m = qa1 * qa2 * 25.0;
         double dum_m = std::exp(-15.0 * qafac_m) / (1.0 + std::exp(-15.0 * qafac_m));
         fqq = 1.0 + dum_m * (qfacbm[mtyp1] + qfacbm[mtyp2]) * 0.5;
@@ -4869,9 +5238,9 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 
     // Step 11: Alpha parameter with metal-specific sign flip (Fortran gfnff_param.f90:642-644, gfnff_ini.f90:1240)
     // CRITICAL PARAMETERS FROM FORTRAN
-    double srb1 = 0.3731;   // Fortran: gen%srb1
-    double srb2 = 0.3171;   // Fortran: gen%srb2
-    double srb3 = 0.2538;   // Fortran: gen%srb3
+    const double srb1 = T().gen.srb1;   // Fortran: gen%srb1 (runtime table)
+    const double srb2 = T().gen.srb2;   // Fortran: gen%srb2
+    const double srb3 = T().gen.srb3;   // Fortran: gen%srb3
     // NOTE: CH4 alpha shows 2% discrepancy with XTB 6.6.1 - may be due to different
     // parameter set used in XTB 6.6.1 (commit 8d0f1dd) vs current Fortran source
 
@@ -5013,6 +5382,8 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     // Removed "getGFNFFAngleParameters() call #" debug output for verbosity level 1
 
     using namespace GFNFFParameters;
+    const auto& angle_params = T().angle_params;         // runtime tables (Sep 2026)
+    const auto& angl2_neighbors = T().angl2_neighbors;
     GFNFFAngleParams params;
 
     // Original GFN-FF angle parameters from gfnff_param.f90 (angl_angewChem2020 array)
@@ -5761,7 +6132,7 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     double fijk = fijk_calc;  // angle_param * angl2_i * angl2_k
 
     // Check threshold: if fijk is too small, skip this angle
-    static const double THRESHOLD = 0.001;  // gen%fcthr in Fortran
+    const double THRESHOLD = T().gen.fcthr;  // gen%fcthr in Fortran (runtime table)
     if (fijk < THRESHOLD) {
         // Skip angles with too small fijk - this matches Fortran filtering!
         params.force_constant = 0.0;
@@ -7599,6 +7970,11 @@ std::vector<int> GFNFF::determineHybridizationFortran(const GFNFFTopology& topo,
         }
     }
 
+    // rev-gfnff note (Sep 12, 2026): forcing hyb = 0 for a two-coordinate hydrogen (to avoid the
+    // 2x deeper sp-sp H-H well of the reference rule) was tried and rejected: the angle term at
+    // that hydrogen then takes a tetrahedral theta0 instead of 180 deg and the jumps get larger
+    // (N2 + 3 H2 at 0.25 fs: 4-11 events above 40 kJ/mol per run instead of 0). A consistent
+    // treatment of the over-coordinated hydrogen (bond, angle, E_over together) is stage 3.
     return hyb;
 }
 
@@ -9656,7 +10032,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
             topo_info.alpeeq = Vector::Zero(m_atomcount);
             for (int i = 0; i < m_atomcount; ++i) {
                 int z_i = m_atoms[i];
-                double alpha_base = (z_i >= 1 && z_i <= 86) ? GFNFFParameters::alpha_eeq[z_i - 1] : 0.903430;
+                double alpha_base = (z_i >= 1 && z_i <= 86) ? T().alpha_eeq[z_i - 1] : 0.903430;
                 topo_info.alpeeq(i) = alpha_base * alpha_base;
             }
         }
@@ -10236,14 +10612,14 @@ GFNFF::EEQParameters GFNFF::getEEQParameters(int atom_idx, const TopologyInfo& t
 
     // Get base EEQ parameters from canonical arrays in gfnff_par.h
     // Reference: gfnff_param.f90 chi/gam/alp/cnf_angewChem2020 (Spicher, Grimme 2020)
-    if (z >= 1 && z <= static_cast<int>(GFNFFParameters::chi_eeq.size())) {
-        params.chi = GFNFFParameters::chi_eeq[z - 1];
-        params.gam = GFNFFParameters::gam_eeq[z - 1];
+    if (z >= 1 && z <= static_cast<int>(T().chi_eeq.size())) {
+        params.chi = T().chi_eeq[z - 1];
+        params.gam = T().gam_eeq[z - 1];
         // CRITICAL FIX (Nov 2025): alp must be SQUARED (gfnff_ini.f90:420)
-        double alp_raw = GFNFFParameters::alpha_eeq[z - 1];
+        double alp_raw = T().alpha_eeq[z - 1];
         params.alp = alp_raw * alp_raw;  // Fortran: topo%alpeeq(i) = param%alp(ati)**2
-        params.cnf = (z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
-                         ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
+        params.cnf = (z <= static_cast<int>(T().cnf_eeq.size()))
+                         ? T().cnf_eeq[z - 1] : 0.0;
     } else {
         // Fallback values
         params.chi = 1.0;
@@ -10456,6 +10832,17 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
     auto start_time = std::chrono::high_resolution_clock::now();
 
     using namespace GFNFFParameters;
+    // Claude Generated (Sep 2026, rev-gfnff): runtime repulsion tables and scalars
+    const auto& repa_angewChem2020 = T().repa;
+    const auto& repan_angewChem2020 = T().repan;
+    const auto& repz = T().repz;
+    const double REPSCALB = T().gen.repscalb;
+    const double REPSCALN = T().gen.repscaln;
+    const double QREPSCAL = T().gen.qrepscal;
+    const double NREPSCAL = T().gen.nrepscal;
+    const double HHFAC = T().gen.hhfac;
+    const double HH13REP = T().gen.hh13rep;
+    const double HH14REP = T().gen.hh14rep;
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== generateRepulsionPairsNative() START ===");
@@ -10466,6 +10853,52 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
 
     const std::vector<std::pair<int,int>>& cached_bonds = getCachedBondList();
     std::set<std::pair<int, int>> bonded_set(cached_bonds.begin(), cached_bonds.end());
+
+    // ===== NON-BONDED parameter set of a pair (also needed for bonded pairs in rev mode) =====
+    const TopologyInfo& topo_info = getCachedTopology();
+    const bool rev_blend = m_rev_settings.enabled; // rev-gfnff stage 1 (Sep 2026)
+    auto nonbonded_set = [&](int i, int j, double& alpha_n, double& repab_n) {
+        int zi = m_atoms[i] - 1, zj = m_atoms[j] - 1;
+        double repz_i = (zi >= 0 && zi < static_cast<int>(repz.size())) ? repz[zi] : 1.0;
+        double repz_j = (zj >= 0 && zj < static_cast<int>(repz.size())) ? repz[zj] : 1.0;
+        double qa_i = (i < topo_info.topology_charges.size()) ? topo_info.topology_charges[i] : 0.0;
+        double qa_j = (j < topo_info.topology_charges.size()) ? topo_info.topology_charges[j] : 0.0;
+        double cn_i = (i < topo_info.neighbor_counts.size()) ? topo_info.neighbor_counts[i] : 0.0;
+        double cn_j = (j < topo_info.neighbor_counts.size()) ? topo_info.neighbor_counts[j] : 0.0;
+        double fn_i = 1.0 + NREPSCAL / (1.0 + cn_i * cn_i);
+        double fn_j = 1.0 + NREPSCAL / (1.0 + cn_j * cn_j);
+        double dum1 = repan_angewChem2020[zi] * (1.0 + qa_i * QREPSCAL) * fn_i;
+        double dum2 = repan_angewChem2020[zj] * (1.0 + qa_j * QREPSCAL) * fn_j;
+        double ff = 1.0;
+        int Z_i = m_atoms[i], Z_j = m_atoms[j];
+        if (Z_i == 1 && Z_j == 1) {
+            ff = HHFAC;
+            int topo_dist = topo_info.topo_distances[i][j];
+            if (topo_dist == 2) ff *= HH13REP;
+            else if (topo_dist == 3) ff *= HH14REP;
+        } else if ((Z_i == 1 && PeriodicTable::getMetalType(Z_j) > 0) || (Z_j == 1 && PeriodicTable::getMetalType(Z_i) > 0)) {
+            ff = 0.85;
+        } else if ((Z_i == 1 && Z_j == 6) || (Z_j == 1 && Z_i == 6)) {
+            ff = 0.91;
+        } else if ((Z_i == 1 && Z_j == 8) || (Z_j == 1 && Z_i == 8)) {
+            ff = 1.04;
+        }
+        alpha_n = std::sqrt(dum1 * dum2) * ff;
+        repab_n = repz_i * repz_j * REPSCALN;
+    };
+    // bond-order multiplicity of a bonded pair for the over-coordination sum (1 + pi, +1 for sp-sp)
+    auto bond_multiplicity = [&](int i, int j) {
+        double bo = 1.0;
+        const auto& pibo = topo_info.pi_bond_orders;
+        if (static_cast<int>(pibo.size()) >= m_atomcount * (m_atomcount + 1) / 2) {
+            double pi = std::max(0.0, pibo[lin(i, j)]);
+            bo += pi;
+            const auto& hyb = topo_info.hybridization;
+            if (static_cast<int>(hyb.size()) >= m_atomcount && hyb[i] == 1 && hyb[j] == 1 && pi > 0.5)
+                bo += 1.0;
+        }
+        return bo;
+    };
 
     // ===== BONDED REPULSION =====
     for (const auto& bond : cached_bonds) {
@@ -10487,12 +10920,23 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
         r.alpha = std::sqrt(repa_angewChem2020[zi] * repa_angewChem2020[zj]);
         r.repab = repz_i * repz_j * REPSCALB;
         r.r_cut = 20.0;
+        if (rev_blend) {
+            r.blend = true;
+            r.alpha_b = r.alpha;
+            r.repab_b = r.repab;
+            nonbonded_set(i, j, r.alpha_n, r.repab_n);
+            // sigma count only: the Hueckel pi orders of aromatic N/O exceed the element valence
+            // (they share lone pairs with the pi system), so a pi-weighted sum would penalise a
+            // saturated ring atom. Stage 1 penalises sigma partners beyond the sigma valence;
+            // the pi bonds are re-solved by the Hueckel topology at the next rebuild.
+            r.bo_mult = 1.0;
+            (void)bond_multiplicity;
+        }
 
         bonded_reps.push_back(r);
     }
 
     // ===== NON-BONDED REPULSION =====
-    const TopologyInfo& topo_info = getCachedTopology();
 
     // Lever 5 (Jun 2026): the non-bonded repulsion energy + gradient hard-cut at r_cut
     // (NB_REP_RCUT, forcefieldthread.cpp:2207/2266), so a pair beyond r_cut contributes
@@ -10532,10 +10976,11 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
         double ff = 1.0;
         int Z_i = m_atoms[i];
         int Z_j = m_atoms[j];
+        const int topo_dist_ij = topo_info.topo_distances[i][j];
 
         if (Z_i == 1 && Z_j == 1) {
             ff = HHFAC;
-            int topo_dist = topo_info.topo_distances[i][j];
+            int topo_dist = topo_dist_ij;
             if (topo_dist == 2) ff *= HH13REP;
             else if (topo_dist == 3) ff *= HH14REP;
         }
@@ -10556,6 +11001,14 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
         r.alpha = std::sqrt(dum1 * dum2) * ff;
         r.repab = repz_i * repz_j * REPSCALN;
         r.r_cut = NB_REP_RCUT;
+        if (rev_blend && topo_dist_ij != 2) { // rev-gfnff stage 1: the bonded set of this pair, for the blend when it comes close (a 1,3 pair stays purely non-bonded; non-bonded pairs blend on the tight bo5 switch, so 1,4 pairs and H-bonds read ~0)
+            r.blend = true;
+            r.alpha_n = r.alpha;
+            r.repab_n = r.repab;
+            r.alpha_b = std::sqrt(repa_angewChem2020[zi] * repa_angewChem2020[zj]);
+            r.repab_b = repz_i * repz_j * REPSCALB;
+            r.bo_mult = 1.0;
+        }
 
         nonbonded_reps.push_back(r);
 
@@ -11102,7 +11555,7 @@ bool GFNFF::calculateAlpeeq(TopologyInfo& topo_info) const
         double qa = topo_info.topology_charges(i);
 
         // Get base alpha (UNSQUARED) from gfnff_par.h
-        double alpha_base = (z_i >= 1 && z_i <= 86) ? GFNFFParameters::alpha_eeq[z_i - 1] : 0.903430;
+        double alpha_base = (z_i >= 1 && z_i <= 86) ? T().alpha_eeq[z_i - 1] : 0.903430;
 
         // Element-specific ff factor
         // Reference: Fortran gfnff_ini.f90:718-724
@@ -11499,4 +11952,366 @@ bool GFNFF::canSkipD4GaussianWeightsUpdate(const std::vector<double>& cn) const
 void GFNFF::recordD4CNValues(const std::vector<double>& cn)
 {
     if (m_d4_generator) m_d4_generator->recordCNValues(cn);
+}
+
+// ============================================================================
+// rev-gfnff stage 1 (Claude Generated, Sep 2026): settings and per-atom data
+// ============================================================================
+
+double GFNFF::revValence(int Z) const
+{
+    if (auto it = m_rev_valence.find(Z); it != m_rev_valence.end())
+        return it->second;
+    switch (Z) { // nominal sigma valence, no exchange slack (the slack is what the penalty is for)
+    case 1: return 1.0;
+    case 2: case 10: case 18: return 0.0;
+    case 3: case 11: case 19: return 1.0;
+    case 4: case 12: case 20: return 2.0;
+    case 5: case 13: return 3.0;
+    case 6: case 14: return 4.0;
+    case 7: return 3.0;
+    case 8: return 2.0;
+    case 9: case 17: case 35: case 53: return 1.0;
+    default: return 6.0; // hypervalence-capable main group and metals: effectively no penalty
+    }
+}
+
+void GFNFF::setupRevSettings()
+{
+    RevSettings& rv = m_rev_settings;
+    rv.enabled = m_parameters.value("rev_enabled", false);
+    rv.bond_weight = m_parameters.value("rev_bond_weight", true);
+    rv.term_weights = m_parameters.value("rev_term_weights", true);
+    rv.blend_repulsion = m_parameters.value("rev_blend_repulsion", true);
+    rv.over_coord = m_parameters.value("rev_over_coord", true);
+    rv.bo_center = m_parameters.value("rev_bo_center", 2.0);
+    rv.bo_width = m_parameters.value("rev_bo_width", -7.5);
+    rv.w_join = m_parameters.value("rev_bo_form", 0.05);
+    rv.bo2_center = m_parameters.value("rev_bo2_center", 1.4);
+    rv.bo2_width = m_parameters.value("rev_bo2_width", -6.0);
+    rv.over_k = m_parameters.value("rev_over_k", 10.0);
+    rv.over_shift = m_parameters.value("rev_over_shift", 0.5);
+    m_rev_bo_form = m_parameters.value("rev_bo_form", 0.05);
+    m_rev_bo_break = m_parameters.value("rev_bo_break", 0.02);
+    rv.blend = m_parameters.value("rev_blend", true);
+    rv.bo4_center = m_parameters.value("rev_bo4_center", 1.7);
+    rv.bo4_width = m_parameters.value("rev_bo4_width", -12.0);
+    rv.bo5_center = m_parameters.value("rev_bo5_center", 1.3);
+    rv.bo5_width = m_parameters.value("rev_bo5_width", -12.0);
+    rv.bo3_center = m_parameters.value("rev_bo3_center", 1.6);
+    rv.bo3_width = m_parameters.value("rev_bo3_width", -8.0);
+    m_rev_tr_begin = m_parameters.value("rev_tr_begin", 0.02);
+    m_rev_tr_end = m_parameters.value("rev_tr_end", 0.8);
+    m_rev_tr_revert = m_parameters.value("rev_tr_revert", 0.75);
+    m_rev_tr_prebreak = m_parameters.value("rev_tr_prebreak", 0.5);
+    m_rev_bo13_form = m_parameters.value("rev_bo13_form", 0.1);
+    m_rev_demote_cooldown = m_parameters.value("rev_demote_cooldown", 0);
+    m_rev_max_transitions = std::max(1, m_parameters.value("rev_max_transitions", 4));
+    m_rev_p_over.clear();
+    m_rev_valence.clear();
+    // the rev section of the parameter tables wins over the PARAMs (that is what a fit writes)
+    const json& rev = m_tables->rev;
+    if (rev.contains("bo_center")) rv.bo_center = rev["bo_center"].get<double>();
+    if (rev.contains("bo_width")) rv.bo_width = rev["bo_width"].get<double>();
+    if (rev.contains("bo2_center")) rv.bo2_center = rev["bo2_center"].get<double>();
+    if (rev.contains("bo2_width")) rv.bo2_width = rev["bo2_width"].get<double>();
+    if (rev.contains("over_k")) rv.over_k = rev["over_k"].get<double>();
+    if (rev.contains("over_shift")) rv.over_shift = rev["over_shift"].get<double>();
+    if (rev.contains("bo_form")) { m_rev_bo_form = rev["bo_form"].get<double>(); rv.w_join = m_rev_bo_form; }
+    if (rev.contains("bo_break")) m_rev_bo_break = rev["bo_break"].get<double>();
+    if (rev.contains("bo4_center")) rv.bo4_center = rev["bo4_center"].get<double>();
+    if (rev.contains("bo4_width")) rv.bo4_width = rev["bo4_width"].get<double>();
+    if (rev.contains("bo5_center")) rv.bo5_center = rev["bo5_center"].get<double>();
+    if (rev.contains("bo5_width")) rv.bo5_width = rev["bo5_width"].get<double>();
+    if (rev.contains("bo3_center")) rv.bo3_center = rev["bo3_center"].get<double>();
+    if (rev.contains("bo3_width")) rv.bo3_width = rev["bo3_width"].get<double>();
+    if (rev.contains("tr_begin")) m_rev_tr_begin = rev["tr_begin"].get<double>();
+    if (rev.contains("tr_end")) m_rev_tr_end = rev["tr_end"].get<double>();
+    if (rev.contains("tr_revert")) m_rev_tr_revert = rev["tr_revert"].get<double>();
+    if (rev.contains("tr_prebreak")) m_rev_tr_prebreak = rev["tr_prebreak"].get<double>();
+    if (rev.contains("p_over")) {
+        if (rev["p_over"].is_number())
+            m_parameters["rev_over_p"] = rev["p_over"].get<double>();
+        else
+            for (const auto& [z, v] : rev["p_over"].items())
+                m_rev_p_over[std::stoi(z)] = v.get<double>();
+    }
+    if (rev.contains("valence"))
+        for (const auto& [z, v] : rev["valence"].items())
+            m_rev_valence[std::stoi(z)] = v.get<double>();
+    if (rv.bo_width >= 0.0 || rv.bo2_width >= 0.0)
+        throw std::runtime_error("rev-gfnff: rev_bo_width and rev_bo2_width must be negative (b -> 1 inside the switching radius)");
+}
+
+void GFNFF::fillRevPerAtom()
+{
+    RevSettings& rv = m_rev_settings;
+    const double p_default = m_parameters.value("rev_over_p", 0.3);
+    rv.rcov.assign(m_atomcount, 0.0);
+    rv.fat.assign(m_atomcount, 1.0);
+    rv.over_p.assign(m_atomcount, p_default);
+    rv.valence.assign(m_atomcount, 6.0);
+    for (int i = 0; i < m_atomcount; ++i) {
+        const int Z = m_atoms[i];
+        rv.rcov[i] = getCovalentRadius(Z);
+        rv.fat[i] = (Z >= 1 && Z <= 86) ? fat[Z] : 1.0;
+        if (auto it = m_rev_p_over.find(Z); it != m_rev_p_over.end())
+            rv.over_p[i] = it->second;
+        rv.valence[i] = revValence(Z);
+    }
+}
+
+// rev-gfnff stage 1b (Claude Generated, Sep 2026): end a transition before s reached 1.
+// The jump (1 - s) (E_primary - E_alt) is measured and reported, never hidden.
+
+// ============================================================================================
+// rev-gfnff stage 1b (Claude Generated, Sep 12, 2026): multi-transition corner bookkeeping
+// ============================================================================================
+
+GFNFF::CornerEEQ GFNFF::captureCornerEEQ()
+{
+    CornerEEQ ce;
+    const TopologyInfo& topo = getCachedTopology();
+    ce.topology_charges = topo.topology_charges;
+    ce.hybridization = topo.hybridization;
+    ce.alpeeq = topo.alpeeq;
+    EEQSolver::TopologyInput ti;
+    ti.neighbor_lists = topo.neighbor_lists;
+    ti.nfrag = topo.nfrag;
+    ti.fraglist = topo.fraglist;
+    ti.qfrag = topo.qfrag;
+    ti.itag = topo.itag;
+    ti.covalent_radii.resize(m_atomcount);
+    for (int i = 0; i < m_atomcount; ++i) {
+        const int z = m_atoms[i];
+        ti.covalent_radii[i] = (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) ? GFNFFParameters::covalent_radii[z - 1] : 1.0;
+    }
+    ce.topo = std::move(ti);
+    return ce;
+}
+
+void GFNFF::appendFadingWells(GFNFFParameterSet& params) const
+{
+    // fading wells (broken bonds) and the wells of forming transitions in flight: a corner
+    // generated while such a transition is in flight lacks the pair in its bond list, but the
+    // well must be in EVERY corner (the blend never touches it), else it vanishes at a snap
+    std::vector<Bond> wells = m_rev_fading;
+    if (m_workspace)
+        for (const RevTransition& tr : m_workspace->transitions())
+            if (tr.forming)
+                for (const Bond& bd : m_workspace->bonds())
+                    if (std::min(bd.i, bd.j) == std::min(tr.i, tr.j) && std::max(bd.i, bd.j) == std::max(tr.i, tr.j)) {
+                        wells.push_back(bd);
+                        break;
+                    }
+    for (const Bond& fw : wells) {
+        bool present = false;
+        for (const auto& bd : params.bonds)
+            if (std::min(bd.i, bd.j) == std::min(fw.i, fw.j) && std::max(bd.i, bd.j) == std::max(fw.i, fw.j)) {
+                present = true;
+                break;
+            }
+        if (!present)
+            params.bonds.push_back(fw);
+    }
+}
+
+bool GFNFF::prepareTransitionCorners(std::vector<GFNFFParameterSet>& out)
+{
+    const RevTransition& tr = m_rev_pending_tr;
+    const int k = static_cast<int>(m_workspace->transitions().size());
+    const int n_old = 1 << k;
+    if (k == 0) {
+        m_rev_corner_bonds.assign(1, m_rev_base_bonds);
+        m_rev_corner_eeq.assign(1, m_rev_base_eeq);
+    }
+    if (static_cast<int>(m_rev_corner_bonds.size()) != n_old || static_cast<int>(m_rev_corner_eeq.size()) != n_old) {
+        CurcumaLogger::error("REACT stage 1b: corner bookkeeping out of step, transition dropped");
+        return false;
+    }
+    out.clear();
+    out.resize(n_old);
+    std::vector<std::vector<std::pair<int, int>>> new_bonds(n_old);
+    std::vector<CornerEEQ> new_eeq(n_old);
+    const std::pair<int, int> pair { std::min(tr.i, tr.j), std::max(tr.i, tr.j) };
+    for (int mk = 0; mk < n_old; ++mk) {
+        auto bonds = m_rev_corner_bonds[mk];
+        if (tr.forming) {
+            if (std::find(bonds.begin(), bonds.end(), pair) == bonds.end())
+                bonds.push_back(pair);
+        } else {
+            bonds.erase(std::remove(bonds.begin(), bonds.end(), pair), bonds.end());
+        }
+        new_bonds[mk] = bonds;
+        if (mk == n_old - 1)
+            continue; // the all-ones corner is generated by the normal rebuild flow (last)
+        m_forced_bonds = bonds;
+        m_cached_bond_list.reset();
+        m_geometry_tracker.reset();
+        m_static_topology_valid = false;
+        try {
+            out[mk] = generateGFNFFParameterSet();
+        } catch (const std::exception& e) {
+            CurcumaLogger::error(std::string("REACT stage 1b: corner parameter generation failed: ") + e.what());
+            return false;
+        }
+        out[mk].dispersion_enabled = m_parameters.value("dispersion", true);
+        out[mk].hbond_enabled = m_parameters.value("hbond", true);
+        out[mk].repulsion_enabled = m_parameters.value("repulsion", true);
+        out[mk].coulomb_enabled = m_parameters.value("coulomb", true);
+        appendFadingWells(out[mk]);
+        new_eeq[mk] = captureCornerEEQ();
+    }
+    for (int mk = 0; mk < n_old; ++mk) {
+        m_rev_corner_bonds.push_back(new_bonds[mk]);
+        m_rev_corner_eeq.push_back(new_eeq[mk]);
+    }
+    m_react_bonds = new_bonds[n_old - 1];
+    m_forced_bonds = m_react_bonds;
+    m_cached_bond_list.reset();
+    m_geometry_tracker.reset();
+    m_static_topology_valid = false;
+    return true;
+}
+
+void GFNFF::installCornerPrepare()
+{
+    if (!m_workspace)
+        return;
+    m_workspace->setCornerPrepare([this](int mask) {
+        const int all = (1 << static_cast<int>(m_workspace->transitions().size())) - 1;
+        if (mask == all || mask >= static_cast<int>(m_rev_corner_eeq.size()))
+            return; // the slot corner is solved by prepareCNAndEEQ()
+        const CornerEEQ& ce = m_rev_corner_eeq[mask];
+        if (!m_eeq_solver || ce.topology_charges.size() != m_atomcount || m_last_cn.size() != m_atomcount)
+            return;
+        m_eeq_solver->invalidateCholeskyCache();
+        m_eeq_solver->invalidateMatrixCache();
+        Vector q = m_eeq_solver->calculateFinalCharges(m_atoms, m_geometry_bohr, m_charge, ce.topology_charges, m_last_cn,
+            ce.hybridization, ce.topo, true, ce.alpeeq, threadPool(), m_threads);
+        m_eeq_solver->invalidateCholeskyCache();
+        m_eeq_solver->invalidateMatrixCache();
+        if (q.size() == m_atomcount && q.allFinite())
+            m_workspace->setEEQCharges(q);
+    });
+}
+
+void GFNFF::dropTransitionCorners(int t, bool keep_new)
+{
+    const int n = static_cast<int>(m_rev_corner_bonds.size());
+    if (n < 2 || t < 0 || (1 << t) >= n)
+        return;
+    std::vector<std::vector<std::pair<int, int>>> bonds(n / 2);
+    std::vector<CornerEEQ> eeq(n / 2);
+    for (int mask = 0; mask < n; ++mask) {
+        if (((mask >> t) & 1) != (keep_new ? 1 : 0))
+            continue;
+        const int nm = (mask & ((1 << t) - 1)) | ((mask >> (t + 1)) << t);
+        bonds[nm] = std::move(m_rev_corner_bonds[mask]);
+        eeq[nm] = std::move(m_rev_corner_eeq[mask]);
+    }
+    m_rev_corner_bonds = std::move(bonds);
+    m_rev_corner_eeq = std::move(eeq);
+}
+
+void GFNFF::finishTransition(int t, bool keep_new, const char* why)
+{
+    if (!m_workspace || t < 0 || t >= static_cast<int>(m_workspace->transitions().size()))
+        return;
+    const RevTransition tr = m_workspace->transitions()[t];
+    const int verb = CurcumaLogger::get_verbosity();
+    const bool diag = m_last_cn.size() == m_atomcount;
+    double e0 = 0.0;
+    FFEnergyComponents c0;
+    if (diag) {
+        m_workspace->setGeometry(m_geometry_bohr);
+        e0 = m_workspace->calculate(false);
+        c0 = m_workspace->energyComponents();
+    }
+    m_workspace->endTransition(t, keep_new);
+    dropTransitionCorners(t, keep_new);
+    const std::pair<int, int> pair { std::min(tr.i, tr.j), std::max(tr.i, tr.j) };
+    if (!keep_new) {
+        if (tr.forming) {
+            m_react_bonds.erase(std::remove(m_react_bonds.begin(), m_react_bonds.end(), pair), m_react_bonds.end());
+            // its well is still in every corner: keep it as a fading well unless it is ~0 already
+            if (tr.w > m_rev_bo_break) {
+                bool have = false;
+                for (const Bond& b : m_rev_fading)
+                    if (std::min(b.i, b.j) == pair.first && std::max(b.i, b.j) == pair.second) { have = true; break; }
+                if (!have)
+                    for (const Bond& bd : m_workspace->bonds())
+                        if (std::min(bd.i, bd.j) == pair.first && std::max(bd.i, bd.j) == pair.second) {
+                            m_rev_fading.push_back(bd);
+                            break;
+                        }
+            }
+        } else {
+            if (std::find(m_react_bonds.begin(), m_react_bonds.end(), pair) == m_react_bonds.end())
+                m_react_bonds.push_back(pair);
+            m_rev_fading.erase(std::remove_if(m_rev_fading.begin(), m_rev_fading.end(), [&](const Bond& b) {
+                return std::min(b.i, b.j) == pair.first && std::max(b.i, b.j) == pair.second; }), m_rev_fading.end());
+        }
+        // the expected topology changed: regenerate the slot's parameter set (same topology as the
+        // stored all-ones corner, so the blend stays continuous; only the caches are refreshed)
+        m_forced_bonds = m_react_bonds;
+        m_cached_bond_list.reset();
+        m_geometry_tracker.reset();
+        m_static_topology_valid = false;
+        try {
+            GFNFFParameterSet p = generateGFNFFParameterSet();
+            p.dispersion_enabled = m_parameters.value("dispersion", true);
+            p.hbond_enabled = m_parameters.value("hbond", true);
+            p.repulsion_enabled = m_parameters.value("repulsion", true);
+            p.coulomb_enabled = m_parameters.value("coulomb", true);
+            appendFadingWells(p);
+            m_cached_parameter_set = makeParameterSetCache(p);
+            m_workspace->rebuildInteractionLists(std::move(p));
+            if (!m_rev_corner_eeq.empty())
+                m_rev_corner_eeq.back() = captureCornerEEQ();
+        } catch (const std::exception& e) {
+            CurcumaLogger::error(std::string("REACT stage 1b: regeneration after a reverted transition failed: ") + e.what());
+        }
+    }
+    refreshReactBondOrders();
+    m_hbxb_updated = true;
+    double de = std::numeric_limits<double>::quiet_NaN();
+    if (diag) {
+        const double e1 = m_workspace->calculate(false);
+        de = e1 - e0;
+        if (verb >= 2)
+            reportReactJumpTerms(why, m_workspace->energyComponents(), c0, -1.0, 0.0, tr.w, tr.r, tr.i, tr.j, tr.c);
+    }
+    if (verb >= 1)
+        CurcumaLogger::result(fmt::format("REACT blend {}: {}-{} ({} {}), s = {:.2f}, w = {:.3f}, c = {:.3f}, jump {:+.1f} kJ/mol, {} in flight",
+            why, tr.i + 1, tr.j + 1, tr.forming ? "formation" : "break", keep_new ? "kept" : "undone", tr.s, tr.w, tr.c,
+            std::isfinite(de) ? de * CurcumaUnit::Energy::HARTREE_TO_KJMOL : 0.0, m_workspace->transitions().size()));
+    ReactEvent ev;
+    ev.call = m_react_calls;
+    ev.de_jump_eh = std::isfinite(de) ? de : 0.0;
+    if (!keep_new)
+        (tr.forming ? ev.broken : ev.formed).emplace_back(pair.first, pair.second);
+    m_react_events.push_back(std::move(ev));
+    if (m_react_events.size() > kReactEventLimit)
+        m_react_events.erase(m_react_events.begin(), m_react_events.begin() + (m_react_events.size() - kReactEventLimit));
+}
+
+void GFNFF::snapTransition(int t, const char* why, std::vector<std::pair<int, int>>* next)
+{
+    if (!m_workspace || t < 0 || t >= static_cast<int>(m_workspace->transitions().size()))
+        return;
+    const RevTransition tr = m_workspace->transitions()[t];
+    const bool keep_new = tr.s >= 0.5;
+    const std::pair<int, int> pair { std::min(tr.i, tr.j), std::max(tr.i, tr.j) };
+    finishTransition(t, keep_new, keep_new ? "promote" : "demote");
+    if (CurcumaLogger::get_verbosity() >= 1)
+        CurcumaLogger::result(fmt::format("REACT blend snapped because {}", why));
+    if (!keep_new && next) { // the scan built `next` from the interrupted topology
+        if (tr.forming)
+            next->erase(std::remove(next->begin(), next->end(), pair), next->end());
+        else if (std::find(next->begin(), next->end(), pair) == next->end())
+            next->push_back(pair);
+    }
+    if (!keep_new && tr.forming)
+        m_rev_cooldown[pair] = m_react_calls + m_rev_demote_cooldown;
 }

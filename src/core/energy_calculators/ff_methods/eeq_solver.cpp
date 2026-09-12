@@ -1073,7 +1073,7 @@ Vector EEQSolver::calculateCharges(
                 double gam_corr = params_i.gam + dgam(i);
 
                 // Compute alpeeq using charge-dependent ff (matching gfnff_ini.f90:718-725)
-                double alpha_base = (z_i >= 1 && z_i <= 86) ? alpha_eeq[z_i - 1] : 0.903430;
+                double alpha_base = (z_i >= 1 && z_i <= 86) ? m_tables->alpha_eeq[z_i - 1] : 0.903430;
                 double ff = 0.0;
                 if (z_i == 6) ff = 0.09;
                 else if (z_i == 7) ff = -0.21;
@@ -1220,7 +1220,7 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
     Vector alpha_corrected(natoms);
     for (int i = 0; i < natoms; ++i) {
         int z_i = atoms[i];
-        double alpha_base = (z_i >= 1 && z_i <= 86) ? alpha_eeq[z_i - 1] : 0.903430;
+        double alpha_base = (z_i >= 1 && z_i <= 86) ? m_tables->alpha_eeq[z_i - 1] : 0.903430;
 
         // Charge-dependent ff factor (from XTB gfnff_ini.f90:699-705)
         double ff = 0.0;
@@ -3590,7 +3590,7 @@ Vector EEQSolver::calculateFinalCharges(
                 int z_i = atoms[i];
 
                 // Get base alpha (UNSQUARED) from gfnff_par.h
-                double alpha_base = (z_i >= 1 && z_i <= 86) ? alpha_eeq[z_i - 1] : 0.903430;
+                double alpha_base = (z_i >= 1 && z_i <= 86) ? m_tables->alpha_eeq[z_i - 1] : 0.903430;
 
                 // CRITICAL FIX (Jan 7, 2026): Phase 2-specific alpha corrections
                 // Fortran goed_gfnff uses different alpha values than goedeckera (Phase 1)
@@ -4511,10 +4511,10 @@ EEQSolver::EEQParameters EEQSolver::getParameters(int Z, double cn) const
 
     if (Z >= 1 && Z <= 86) {
         int idx = Z - 1;
-        params.chi = chi_eeq[idx];
-        params.gam = gam_eeq[idx];
-        params.alp = alpha_eeq[idx] * alpha_eeq[idx];  // CRITICAL: Must be SQUARED!
-        params.cnf = cnf_eeq[idx];
+        params.chi = m_tables->chi_eeq[idx];   // runtime tables (Sep 2026, rev-gfnff)
+        params.gam = m_tables->gam_eeq[idx];
+        params.alp = m_tables->alpha_eeq[idx] * m_tables->alpha_eeq[idx];  // CRITICAL: Must be SQUARED!
+        params.cnf = m_tables->cnf_eeq[idx];
     } else {
         CurcumaLogger::warn(fmt::format("EEQSolver: No parameters for Z={}, using defaults", Z));
         params.chi = 1.0;

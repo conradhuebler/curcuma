@@ -197,6 +197,12 @@ json GFNFFComputationalMethod::getEnergyDecomposition() const {
     energy_json["XBond"] = m_gfnff->HalogenBondEnergy();
     energy_json["ATM"] = m_gfnff->ATMEnergy();
     energy_json["BATM"] = m_gfnff->BatmEnergy();
+    // Claude Generated (Sep 2026, rev-gfnff): the remaining terms of the verbosity-2 table,
+    // so a batch single point carries the complete decomposition.
+    energy_json["sTors"] = m_gfnff->STorsEnergy();
+    energy_json["RepulsionBonded"] = m_gfnff->BondedRepulsionEnergy();
+    energy_json["RepulsionNonbonded"] = m_gfnff->NonbondedRepulsionEnergy();
+    energy_json["OverCoord"] = m_gfnff->OverCoordEnergy();   // rev-gfnff stage 1
 
     return energy_json;
 }

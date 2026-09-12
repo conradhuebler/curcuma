@@ -72,14 +72,14 @@ The asymmetry is deliberate:
   drift at every event.
 - Between events the gradient is exact for the current topology (same code path
   as a normal GFN-FF run), up to the pre-existing residual below.
-- **Pre-existing analytic-vs-FD gradient residual (recorded, not caused by react
-  mode):** for H2 the analytic gradient deviates from central finite differences
-  by up to 5.3e-2 Eh/A at equilibrium and 1.0e-1 Eh/A at 1.0 A stretch. Term
-  isolation shows the bond term alone carries 2.4e-2 (the dynamic-r0 CN chain)
-  and most of the rest sits in the repulsion term (whose gradient is documented
-  as partial). The residual is bit-identical between a react-formed surface and a
-  fresh forced-bond initialisation, so react mode adds nothing to it. Tracked by
-  `test_gfnff_react_fd`, which prints both numbers.
+- **Analytic-vs-FD gradient residual: withdrawn (Sep 11, 2026).** Earlier versions
+  of this document reported a residual of up to 1.0e-1 Eh/A for H2 and attributed
+  it to the bond CN chain and a partial repulsion gradient. That number was
+  measured on a binary built before the gradient-unit fix (CLAUDE.md Known Issue
+  #28, `Gradient()` returned Eh/Bohr against an Angstrom finite difference).
+  Rebuilt, `test_gfnff_react_fd` gives **4.97e-5 Eh/A** on the react-formed and on
+  the fresh-init surface alike; the residual is FD truncation, not a term defect.
+  See `docs/REV_GFNFF_DATA_BASIS.md` section 4.
 - GFN-FF is **not parameterized for transition states**. Barrier heights, TS
   geometries and reaction energetics from this mode are qualitative at best.
   Measured for the ammonia-synthesis target: N2 + 3 H2 at 3500 K in a 3.5 A wall
@@ -278,6 +278,36 @@ heap workaround in the workspace constructor), bounded by the number of events.
 - Manual: 2x H2 at 2500 K, 3 ps — no spurious events at the default factors;
   17/17 `gfnff_val_*` Fortran-parity references and the full `cli_simplemd_*`
   suite unchanged.
+
+## Re-measurement with correct forces (Sep 11, 2026)
+
+Every number above this section was recorded before the gradient-unit fix (CLAUDE.md Known
+Issue #28: GFN-FF forces were 1/au = 1.89x too weak). `scripts/react_baseline.py` re-runs
+the documented conditions with fixed seeds; inputs in `test_cases/revgfnff/systems/`,
+per-run `summary.json` in `test_cases/revgfnff/react_baseline/`. Full table and reading in
+`docs/REV_GFNFF_DATA_BASIS.md` section 4; the short form:
+
+| quantity | documented | measured now |
+|---|---|---|
+| H + H recombination threshold (4 H, 2.5 A wall, 5 ps) | 3000 K | 5000 K (6000 K: 3 formations, 6 rebuilds) |
+| formation jump H + H -> H2 | about -450 kJ/mol | -451 to -548 kJ/mol |
+| break jump, early factor 1.45 (needs form 1.2, see guard) | +482 kJ/mol | +464 to +475 kJ/mol |
+| break jump, default 2.6 | +21 to +34 kJ/mol | +6.6 to +33.5 kJ/mol |
+| N2 + 3 H2, 3500 K, 20 ps: events without / with cap+refractory | 301 / 35 | 288 / 67 rebuilds, no NaN either way |
+| N4H4, 3500 K, 15 ps: without / with slack radius | 736 / 278 | 366 / 37 rebuilds |
+| 2 N2 + 6 H2, 3000 K, 5 ps, max r: harmonic 298 / 10000, logfermi 298 / 10000 | 9.70 / 5.20 / 4.54 / 3.73 A | 11.63 / 4.74 / 5.61 / 3.44 A |
+| 20 ps container: harmonic / logfermi / pbc (max r, rebuilds) | 11.00 A 177, 8.76 A 294, 4.91 A 601 | 10.33 A 83, 4.49 A 52, 5.41 A 109 (pbc run ends as 4 NH3) |
+| 2 H2 at 2500 K, 3 ps, default factors | no events | 1 formation, 2 breaks |
+
+The last row matters most: the default hysteresis 1.6/2.6 was tuned on the weak force scale
+and now fires from ordinary vibrations of a small hot system. The factors need re-tuning, or
+the energy-based criterion of the open refinements below.
+
+Two things the re-measurement had to fix first: the CLI could not see react events at all on
+this branch (the per-thread verbosity override of the tool-API work was left at 0 during MD;
+`EnergyCalculator` and `SimpleMD` now handle the thread level, and SimpleMD reports the events
+itself through `consumeReactEvents()`, plus a `REACT summary` line and `Results()["react"]`),
+and `react_bond_break_factor` below the formation factor is silently reset to the defaults.
 
 ## Open refinements
 

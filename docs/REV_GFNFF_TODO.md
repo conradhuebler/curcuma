@@ -407,6 +407,13 @@ Until such a set exists, the react mode demonstrates machinery rather than energ
 the documentation says so in those words. Producing that set is the prerequisite for every
 entry above, because none of them can be shown to have improved anything without it.
 
+**Status (Sep 11, 2026):** the data basis was taken stock of in
+[REV_GFNFF_DATA_BASIS.md](REV_GFNFF_DATA_BASIS.md) — 194 barriers with published references
+are on disk and decomposed per term (the bond term carries the barrier error), the react
+baseline is re-measured with correct forces, and the reference campaign (dissociation curves,
+NEB-TS paths, hyper-coordinated species, all r2SCAN-3c) is WP2 of
+[REV_GFNFF_ROADMAP.md](REV_GFNFF_ROADMAP.md).
+
 ## How to add to this list
 
 An entry belongs here when an **external** reference (r²SCAN-3c, GFN2, DLPNO, experiment)

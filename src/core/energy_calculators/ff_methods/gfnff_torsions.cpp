@@ -581,9 +581,13 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     // Formula: fctot = (f1 + 10*torsf[2]*f2) * fqq * fij * fkl
     // CRITICAL: Result is in HARTREE, not kcal/mol!
 
-    // GFN-FF constants (from gfnff_param.f90:742-753)
-    const double torsf_pi = 1.18;       // Pi bond scaling
-    const double fcthr = 1.0e-3;        // Force constant threshold (Hartree)
+    // GFN-FF constants (from gfnff_param.f90:742-753) - runtime tables (Sep 2026, rev-gfnff)
+    const auto& tors_angewChem2020 = T().tors;
+    const auto& tors2_angewChem2020 = T().tors2;
+    const double torsf_single = T().gen.torsf_single;
+    const double torsf_pi = T().gen.torsf_pi;       // Pi bond scaling
+    const double fcthr = T().gen.fcthr;        // Force constant threshold (Hartree)
+    const double FR3 = T().gen.fr3, FR4 = T().gen.fr4, FR5 = T().gen.fr5, FR6 = T().gen.fr6;
 
     // Bounds check
     if (z_i < 1 || z_i > 86 || z_j < 1 || z_j > 86 ||
@@ -1894,7 +1898,7 @@ std::pair<std::vector<Dihedral>, std::vector<Dihedral>> GFNFF::generateTorsionsN
                 // ==========================================================
                 // STEP 7: Store primary torsion if above threshold
                 // ==========================================================
-                constexpr double fcthr = 1.0e-3;  // Force constant threshold (Hartree)
+                const double fcthr = T().gen.fcthr;  // Force constant threshold (Hartree), runtime table
                 if (std::abs(params.barrier_height) >= fcthr) {
                     if (CurcumaLogger::get_verbosity() >= 3) {
                         CurcumaLogger::info(fmt::format("TORSION_DEBUG | {} | {} | {} | {} | {} | {:.2f} | {:.6f} | {:.6f}",
@@ -1926,9 +1930,9 @@ std::pair<std::vector<Dihedral>, std::vector<Dihedral>> GFNFF::generateTorsionsN
                 // INDEPENDENT of whether primary torsion passed fcthr threshold.
                 // Reuses CORRECTED fij/fkl/fqq from getGFNFFTorsionParameters().
                 {
-                    const double torsf_extra_C = -0.90;
-                    const double torsf_extra_N =  0.70;
-                    const double torsf_extra_O = -2.00;
+                    const double torsf_extra_C = T().gen.torsf_extra_C; // runtime tables (Sep 2026)
+                    const double torsf_extra_N = T().gen.torsf_extra_N;
+                    const double torsf_extra_O = T().gen.torsf_extra_O;
 
                     bool sp3_central = (hybridization[j] == 3) && (hybridization[k] == 3);
                     bool sp3_outer = (hybridization[i] == 3) && (hybridization[l] == 3);

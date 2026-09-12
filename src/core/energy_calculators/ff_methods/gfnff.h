@@ -23,6 +23,7 @@
 #pragma once
 
 #include "json.hpp"
+#include <map>  // rev-gfnff per-element overrides (Sep 2026)
 #include "src/core/config_manager.h"
 #include "src/core/parameter_macros.h"
 #include "src/core/energy_calculators/ff_methods/forcefield.h"
@@ -30,6 +31,7 @@
 #include "src/core/energy_calculators/ff_methods/ff_workspace.h"  // Claude Generated (Mar 2026): Unified workspace
 #include "src/core/energy_calculators/ff_methods/eeq_solver.h"  // EEQ charge calculation (Dec 2025 - Phase 3)
 #include "src/core/energy_calculators/ff_methods/huckel_solver.h"  // Full Hückel calculation (Jan 2026 - Phase 1)
+#include "src/core/energy_calculators/ff_methods/gfnff_param_tables.h"  // Claude Generated (Sep 2026): runtime parameter tables (rev-gfnff WP1a)
 #include "src/core/energy_calculators/dispersion/d4param_generator.h"  // Claude Generated (Feb 15, 2026): D4 for dc6dcn gradient
 #include "src/core/energy_calculators/ff_methods/alpb_solvation.h"  // Claude Generated (Mar 2026): ALPB solvation
 #include "src/core/global.h"
@@ -117,6 +119,7 @@ struct GFNFFEnergyReport {
     double bond = 0, angle = 0, dihedral = 0, inversion = 0, stors = 0;
     double dispersion = 0, bonded_rep = 0, nonbonded_rep = 0;
     double coulomb = 0, hbond = 0, xbond = 0, atm = 0, batm = 0;
+    double over_coord = 0;   // rev-gfnff stage 1 (Sep 2026)
     // Claude Generated (May 2026, HB-investigation): per-case HB diagnostic split.
     // hbond = case1 + case2 + case3 + case4. Counts compare against Fortran nhb1/nhb2.
     double hbond_case1 = 0, hbond_case2 = 0, hbond_case3 = 0, hbond_case4 = 0;
@@ -327,7 +330,38 @@ PARAM(react_refractory_scans, Int, 10, "React mode: a pair whose bond just broke
 PARAM(react_valence_cap, Bool, true, "React mode: refuse a new bond while an atom already uses its element valence plus one exchange slack, counting bond orders so multiple bonds consume valence. Prevents unphysical agglomerates; disable to sample unconstrained formation. Refused formations are logged at verbosity 2.", "Reactive", {})
 PARAM(react_exchange_scans, Int, 20, "React mode: an atom may stay above its nominal valence for at most this many scans, then its weakest bond is broken. Forces exchange intermediates like a hydrogen bridging two heavy atoms to resolve instead of staying geometrically locked. 0 disables.", "Reactive", {})
 PARAM(react_slack_form_factor, Double, 1.2, "React mode: tighter formation radius factor for bonds that push an atom above its nominal sigma valence into the exchange slack. A genuine exchange intermediate has the extra partner near bond distance; the ordinary optimistic factor would re-create bridges endlessly.", "Reactive", {})
+PARAM(rev_enabled, Bool, false, "rev-gfnff stage 1: continuous bond order on every bonded term, blended bonded/non-bonded repulsion and an over-coordination energy (set by -method revgfnff).", "Reactive", {})
+PARAM(rev_bond_weight, Bool, true, "rev-gfnff: multiply the bond well by the continuous bond order b_ij(r).", "Reactive", {})
+PARAM(rev_term_weights, Bool, true, "rev-gfnff: multiply angle, torsion and inversion terms by the product of their bond weights.", "Reactive", {})
+PARAM(rev_blend_repulsion, Bool, true, "rev-gfnff: evaluate the repulsion of every pair as b E_bonded + (1-b) E_nonbonded.", "Reactive", {})
+PARAM(rev_over_coord, Bool, true, "rev-gfnff: add the over-coordination energy p_Z softplus(sum_j b_ij BO_ij - Val_Z)^2 (replaces the react valence cap).", "Reactive", {})
+PARAM(rev_bo_center, Double, 2.0, "rev-gfnff: switching radius factor f_b of the bond order, R = f_b (rcov_i + rcov_j) fat_i fat_j.", "Reactive", {})
+PARAM(rev_bo_width, Double, -7.5, "rev-gfnff: steepness k of the erf bond-order switch b = 0.5 (1 + erf(k (r - R)/R)); negative so b -> 1 inside R.", "Reactive", {})
+PARAM(rev_bo2_center, Double, 1.4, "rev-gfnff: switching radius factor of the BOND ORDER used by the over-coordination sum and the repulsion blend (1 at the bond, 0 at 1,3 and hydrogen-bond distances).", "Reactive", {})
+PARAM(rev_bo2_width, Double, -6.0, "rev-gfnff: steepness of the bond-order switch.", "Reactive", {})
+PARAM(rev_over_shift, Double, 0.5, "rev-gfnff: the penalty argument is bo_sum - valence - shift, so a saturated atom pays nothing.", "Reactive", {})
+PARAM(rev_blend, Bool, true, "rev-gfnff stage 1b: blend the bonded terms of the old and the new topology while the transition pair crosses its weight window instead of swapping them at the event.", "Reactive", {})
+PARAM(rev_bo3_center, Double, 1.6, "rev-gfnff stage 1b: centre of the TRANSITION coordinate switch in units of the covalent sum (x fat_i fat_j). The re-parametrisation of the neighbours blends in over rev_tr_begin..rev_tr_end of this switch, i.e. between 1.63x (1,3 pairs read 0.02) and 1.31x (equilibrium bonds read above 0.95); the pair's own well keeps the wide weight.", "Reactive", {})
+PARAM(rev_bo3_width, Double, -8.0, "rev-gfnff stage 1b: steepness k of the transition coordinate switch (negative: 1 inside the centre).", "Reactive", {})
+PARAM(rev_bo4_center, Double, 1.7, "rev-gfnff: centre of the REPULSION BLEND switch (b E_bonded + (1-b) E_nonbonded) in units of the covalent sum; 1 at a bond (0.99992 at 1.1x), ~0 at 1,3 and H-bond distances. Separate from the E_over switch, which a fit may soften.", "Reactive", {})
+PARAM(rev_bo4_width, Double, -12.0, "rev-gfnff: steepness k of the repulsion blend switch.", "Reactive", {})
+PARAM(rev_bo5_center, Double, 1.3, "rev-gfnff: centre of the repulsion blend switch of NON-BONDED-list pairs (units of the covalent sum): ~0 at 1,4 and H-bond distances, so nothing leaks at equilibrium; bonded-list pairs use rev_bo4_*.", "Reactive", {})
+PARAM(rev_bo5_width, Double, -12.0, "rev-gfnff: steepness of the non-bonded repulsion blend switch.", "Reactive", {})
+PARAM(rev_tr_begin, Double, 0.02, "rev-gfnff stage 1b: transition coordinate at which a forming pair starts its re-parametrisation (s = 0) and at which a breaking pair has finished it (s = 1); also the formation threshold of a fading well or of a 1,3 pair.", "Reactive", {})
+PARAM(rev_tr_end, Double, 0.8, "rev-gfnff stage 1b: transition coordinate at which a formation is complete (s = 1) and below which a bond starts breaking (s = 0).", "Reactive", {})
+PARAM(rev_tr_revert, Double, 0.75, "rev-gfnff stage 1b: a breaking transition still at s = 0 is undone once the coordinate climbs back above this value (hysteresis against vibrational chatter).", "Reactive", {})
+PARAM(rev_tr_prebreak, Double, 0.5, "rev-gfnff stage 1b: a topology bond starts its breaking transition (s = 0) once its transition coordinate falls below this value; lower than rev_tr_end so that a hot bond vibrating around the formation end does not chatter.", "Reactive", {})
+PARAM(rev_demote_cooldown, Int, 0, "rev-gfnff stage 1b: a transition interrupted below s = 0.5 is demoted (old topology restored, jump s dE) and its pair may not start again for this many scans; above 0.5 it is promoted (jump (1 - s) dE).", "Reactive", {})
+PARAM(rev_bo13_form, Double, 0.1, "rev-gfnff stage 1b: a topological 1,3 pair becomes a bond (ring closure) once its bond order on the E_over switch exceeds this value; its transition then runs on that switch from here to 0.9.", "Reactive", {})
+PARAM(rev_max_transitions, Int, 4, "rev-gfnff stage 1b: transitions blended at the same time (2^k topology corners are evaluated per step); a further event snaps the transition closest to either end of its window.", "Reactive", {})
+PARAM(rev_bo_form, Double, 0.05, "rev-gfnff react scan: a non-bonded pair (never a 1,3 pair) joins the bond list once its term WEIGHT exceeds this value, i.e. where its terms are still ~0.", "Reactive", {})
+PARAM(rev_bo_break, Double, 0.02, "rev-gfnff react scan: a bond leaves the list once its term weight falls below this value.", "Reactive", {})
+PARAM(rev_over_p, Double, 0.3, "rev-gfnff: default over-coordination prefactor p_Z in Eh (per-element values via the rev.p_over override).", "Reactive", {})
+PARAM(rev_over_k, Double, 10.0, "rev-gfnff: softplus steepness of the over-coordination penalty.", "Reactive", {})
 PARAM(storsion_reference_loop_bug, Bool, false, "Reproduce the reference implementation's triple-bond-torsion (sTors) loop bug bit-for-bit. Both pprcht/gfnff and xtb 6.7.1 call sTors_eg(m,...) with the array SIZE m instead of the loop index, so they evaluate only the LAST detected C-triplebond-C torsion, m times, and drop all others (and give exactly zero whenever the last slot was never filled). Curcuma sums every detected torsion, which is what the term is meant to do - its erefhalf is a DLPNO-CCSD(T) diphenylacetylene reference value, not a fitted parameter. Enable only to reproduce reference totals exactly.", "Advanced", {})
+PARAM(param_file, String, "", "rev-gfnff: JSON file with sparse parameter overrides ({gen:{...}, tables:{name:{Z:value}}, rev:{...}}) deep-merged over the built-in GFN-FF tables; unknown keys abort.", "Advanced", {})
+PARAM(param_json, String, "", "rev-gfnff: the same override document given inline as a JSON string; merged after param_file.", "Advanced", {})
+PARAM(dump_params, String, "", "rev-gfnff: write the generated per-term force-field parameters (bonds fc/r0/alpha, angles, torsions, ...) of the current molecule to this JSON file after initialisation.", "Advanced", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {
@@ -932,6 +966,8 @@ public:
     /// A run that never consumes them (the CLI) keeps only the most recent
     /// kReactEventLimit; the log line of every event is written regardless.
     std::vector<ReactEvent> consumeReactEvents() { return std::exchange(m_react_events, {}); }
+    /// Number of events not yet consumed (diagnostics). Claude Generated (Sep 2026).
+    size_t pendingReactEvents() const { return m_react_events.size(); }
     static constexpr size_t kReactEventLimit = 4096;
 
     const std::vector<GFNFFHydrogenBond>& getLastHBonds() const { return m_last_hbonds; }
@@ -2074,6 +2110,8 @@ public:
      * Claude Generated (Jan 17, 2026): Batm energy accessor for 1,4-pairs
      */
     double BatmEnergy() const;
+    /// rev-gfnff stage 1: over-coordination energy of the last calculation (0 unless enabled)
+    double OverCoordEnergy() const { return m_workspace ? m_workspace->energyComponents().over_coord : 0.0; }
 
     // Claude Generated (April 2026): PBC accessors for GPU path
     bool hasPBC() const { return m_has_pbc; }
@@ -2357,6 +2395,42 @@ private:
 
     // GFN-FF specific
     json m_parameters; ///< GFN-FF parameters
+    std::shared_ptr<const GFNFFTables> m_tables = GFNFFTables::defaults(); ///< Claude Generated (Sep 2026): runtime parameter tables (defaults or -gfnff.param_file overrides)
+    const GFNFFTables& T() const { return *m_tables; } ///< the tables this instance evaluates with
+    RevSettings m_rev_settings;                 ///< rev-gfnff stage 1 (Sep 2026): kernel switches and per-atom data
+    double m_rev_bo_form = 0.05, m_rev_bo_break = 0.02; ///< rev-gfnff react scan thresholds on the term weight
+    double m_rev_tr_begin = 0.02, m_rev_tr_end = 0.8, m_rev_tr_revert = 0.75;
+    double m_rev_tr_prebreak = 0.5;    ///< stage 1b: a bond starts breaking below this coordinate (below the formation end: a formed bond sticks)
+    double m_rev_bo13_form = 0.1;      ///< stage 1b: a 1,3 pair closes a ring once its bond order (E_over switch) exceeds this
+    std::vector<Bond> m_rev_fading; ///< stage 1b: wells of broken bonds, kept in the bond list (weight w) until w < rev_bo_break
+    std::map<std::pair<int, int>, long> m_rev_cooldown; ///< stage 1b: demoted pair -> first scan call at which it may start a transition again
+    int m_rev_demote_cooldown = 0;                      ///< stage 1b: scans a demoted pair has to wait
+    // stage 1b multi-transition state (Sep 12, 2026): corner bond lists / EEQ inputs by mask
+    struct CornerEEQ {
+        Vector topology_charges;
+        std::vector<int> hybridization;
+        std::optional<EEQSolver::TopologyInput> topo;
+        std::optional<Vector> alpeeq;
+    };
+    bool m_rev_pending = false;                    ///< the next rebuild starts m_rev_pending_tr
+    RevTransition m_rev_pending_tr;
+    int m_rev_max_transitions = 4;                 ///< 2^k corners at most
+    std::vector<std::vector<std::pair<int, int>>> m_rev_corner_bonds; ///< bond list of every corner (index = mask)
+    std::vector<CornerEEQ> m_rev_corner_eeq;       ///< per-corner EEQ inputs for the per-step solve
+    std::vector<std::pair<int, int>> m_rev_base_bonds; ///< topology before the first transition of a set
+    CornerEEQ m_rev_base_eeq;
+    void loadParameterOverrides();                 ///< param_file / param_json tables + rev settings (ctor and setParameters)
+    CornerEEQ captureCornerEEQ();                  ///< EEQ inputs of the currently cached topology
+    bool prepareTransitionCorners(std::vector<GFNFFParameterSet>& out); ///< generate the new corners except the all-ones one
+    void appendFadingWells(GFNFFParameterSet& params) const;
+    void installCornerPrepare();                   ///< per-corner EEQ solve callback into the workspace
+    void dropTransitionCorners(int t, bool keep_new);
+    void finishTransition(int t, bool keep_new, const char* why); ///< complete / revert / snap one transition (measured jump)
+    void snapTransition(int t, const char* why, std::vector<std::pair<int, int>>* next);
+    std::map<int, double> m_rev_p_over, m_rev_valence;  ///< per-element overrides from the rev section of the tables
+    void setupRevSettings();                    ///< fill m_rev_settings from PARAMs + tables (ctor) 
+    void fillRevPerAtom();                      ///< per-atom rcov/fat/p/valence (after the atoms are known)
+    double revValence(int Z) const;             ///< nominal sigma valence of an element
     int m_threads = 1; ///< Claude Generated (WP1, May 2026): cached thread count, kept in sync with m_parameters["threads"]
     std::unique_ptr<CxxThreadPool> m_pool; ///< Shared worker pool (topology setup, EEQ, workspace kernels)
     std::unique_ptr<FFWorkspace> m_workspace; ///< Claude Generated (Mar 2026): Unified workspace (replaces ForceField path)

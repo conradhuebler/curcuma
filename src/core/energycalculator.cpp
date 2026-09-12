@@ -412,17 +412,22 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
             CurcumaLogger::info("Calling computational method calculateEnergy...");
         }
 
-        // Temporarily override global verbosity for submodule calculations
-        int original_verbosity = CurcumaLogger::get_verbosity();
+        // Temporarily override the verbosity for the submodule calculation. Claude
+        // Generated (Sep 2026): this must act on the per-THREAD level (llm-core WP4 made
+        // the thread override shadow the process default), otherwise a run whose thread
+        // level is set (every CurcumaMethod sets it) sees no effect here at all — the
+        // MD path then either floods (calculator at the run's level) or, when a nested
+        // silent helper left the thread level at 0, mutes the run's own messages.
+        const int saved_thread_verbosity = CurcumaLogger::thread_verbosity();
         if (m_verbosity_override >= 0) {
-            CurcumaLogger::set_verbosity(m_verbosity_override);
+            CurcumaLogger::set_thread_verbosity(m_verbosity_override);
         }
 
         // Perform calculation using computational method
         m_energy = m_method->calculateEnergy(gradient);
 
-        // Restore original verbosity
-        CurcumaLogger::set_verbosity(original_verbosity);
+        // Restore the thread level that was in force before the call
+        CurcumaLogger::set_thread_verbosity(saved_thread_verbosity);
 
         if (getEffectiveVerbosity() >= 3) {
             CurcumaLogger::info("Energy calculation completed");

@@ -231,6 +231,9 @@ extra_torsion_full.txt
 xtb_*.log
 xtbrestart
 
+# rev-gfnff parameter fitter scratch (scripts/revgfnff_fit.py, WP1d)
+test_cases/revgfnff/fit_work/
+
 # FetchContent-populated external dependencies (populated by cmake, not tracked by git)
 external/CxxThreadPool/
 external/LBFGSpp/
@@ -245,3 +248,32 @@ external/plumed2/
 external/ulysses-main/
 external/ulysses.zip
 src/version.h
+# rev-gfnff reference campaign (scripts/revgfnff_ref.py): keep inputs, energies, gradients,
+# geometries and metadata; ORCA scratch and raw outputs stay local
+test_cases/revgfnff/ref/**/*.gbw
+test_cases/revgfnff/ref/**/*.gbw_hs
+test_cases/revgfnff/ref/**/*.bas0
+test_cases/revgfnff/ref/**/*.bas1
+test_cases/revgfnff/ref/**/*.uco
+test_cases/revgfnff/ref/**/*.uno
+test_cases/revgfnff/ref/**/*.unso
+test_cases/revgfnff/ref/**/*.unoloc
+test_cases/revgfnff/ref/**/*.qro
+test_cases/revgfnff/ref/**/*.tmp
+test_cases/revgfnff/ref/**/*.densities
+test_cases/revgfnff/ref/**/*.engrad
+test_cases/revgfnff/ref/**/*.opt
+test_cases/revgfnff/ref/**/*.property.txt
+test_cases/revgfnff/ref/**/*.out.gz
+test_cases/revgfnff/ref/[A-Z]/*/*.log
+test_cases/revgfnff/ref/_geom/*/*.log
+test_cases/revgfnff/ref/_md/
+test_cases/revgfnff/react_baseline/*/*.log
+test_cases/revgfnff/react_baseline/*/*.xyz
+test_cases/revgfnff/react_baseline/*/*.trj
+test_cases/revgfnff/react_baseline/*/*.json.gz
+test_cases/revgfnff/ref/**/*.bas[0-9]
+test_cases/revgfnff/ref/**/*.hostnames
+test_cases/revgfnff/**/curcuma_citations.bib
+curcuma_citations.bib
+test_cases/MOR41-testset/curcuma_citations.bib

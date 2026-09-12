@@ -170,6 +170,17 @@ add_test(NAME gfnff_react_filters
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(gfnff_react_filters PROPERTIES TIMEOUT 120 LABELS "gfnff;react")
 
+# rev-gfnff stage 1 (Claude Generated, Sep 2026): analytic vs FD gradient of the new terms
+add_executable(test_gfnff_rev_fd test_gfnff_rev_fd.cpp)
+target_link_libraries(test_gfnff_rev_fd curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_rev_fd REUSE_FROM curcuma_core)
+endif()
+add_test(NAME gfnff_rev_fd
+         COMMAND test_gfnff_rev_fd
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(gfnff_rev_fd PROPERTIES TIMEOUT 120 LABELS "gfnff;rev")
+
 # Copy reference data to build tree so tests can find them
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/reference_data
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
