@@ -159,16 +159,36 @@ used to dissociate hot H2 is gone). Completions,
 reverts and demotes cost exactly 0.0 kJ/mol; the Coulomb jump of a fragment merge (up to -50
 kJ/mol at s = 0 before) is gone because the EEQ is solved per corner.
 
-**Scope of these numbers: diatomics only.** Every cell above is 2 H2, 4 H or N2 + 3 H2, where a
-bond event cannot re-parametrise a molecular fragment - so the smoothness they show does not
-transfer. Measured 2026-09-12 on methanol (react MD, CSVR, 1 ps, dt 0.25, one run per
-temperature): 1000 K gives 3 rebuilds with median |dE_jump| 44.5 and max 69.2 kJ/mol, 2000 K
-gives 43 rebuilds with median 0.00 but max **130.9** kJ/mol and 7 above 5. The class-A bond scans
-agree - 8 polyatomic bonds at -25..-85 kJ/mol per rebuild, negative, i.e. the new topology is
-lower and the event heats the dynamics (`test_cases/revgfnff/_log/CLASSA_FROZENCN.md`). n is
-small; a proper polyatomic baseline is being measured into
-`test_cases/revgfnff/_log/POLY_JUMP_BASELINE.md`. Until it exists, no acceptance criterion may
-rest on the table above.
+**Scope of these numbers: diatomics only, and the tail does not transfer.** Every cell above is
+2 H2, 4 H or N2 + 3 H2, where a bond event cannot re-parametrise a molecular fragment. The full
+polyatomic baseline is now measured (5 systems spanning C-O / C-N / C-C / N-N / O-O bonds,
+1000/2000/3000 K, 3 start frames each, 5 ps, 11527 rebuilds; full tables in
+`test_cases/revgfnff/_log/POLY_JUMP_BASELINE.md`):
+
+| | n | median | max | < 1 kJ | < 5 kJ |
+|---|---:|---:|---:|---:|---:|
+| polyatomic, all (order criterion) | 11527 | 0.00 | **423.5** | 0.966 | 0.986 |
+| ... formations only | 5617 | 0.00 | 78.7 | 0.996 | - |
+| ... breaks only | 5630 | 0.00 | **423.5** | 0.934 | 0.974 |
+| diatomic (cells above, 12 runs, older binary) | - | 0.0-0.4 | 0.7-45.3 | - | - |
+
+So the **bulk matches** (median 0.00 kJ/mol, 96.6 % below 1) and the **tail is ~10x larger**:
+423.5 vs 45.3 kJ/mol. The sharp result is that the roughness is almost entirely on the
+**break** side - 58 of the 61 events >= 50 kJ/mol are bond breaks, formations are effectively
+smooth (3 of 5617 above 50 kJ, 99.6 % below 1), and the three worst events are all H-H breaks in
+ethane (3000 K: +423.5 at t = 1849 fs and +394.4 at t = 2011 fs; 2000 K: +310.3), where the bond
+term carries +452 kJ/mol and the bonded/non-bonded repulsion partially cancels it. The worst
+temperature dependence is equally clear: 1000 K max 2.9, 2000 K max 310.3, 3000 K max 423.5
+kJ/mol. **Stage 3 must therefore measure the break side, not the formation side.**
+
+Two earlier numbers in this file were wrong and are superseded: a methanol run reported "median
+44.5 / max 69.2 kJ/mol at 1000 K" from **n = 3 events**, which a 5 ps re-measurement over 84
+events at the same temperature (median 0.00, max 0.00) shows was unrepresentative - a median from
+three events is not a statistic. The class-A bond scans remain valid as *signed* per-term
+information (8 polyatomic bonds at -25..-85 kJ/mol per rebuild, the new topology lower, i.e.
+spurious heating) but they sample single stretched bonds, not MD event distributions.
+`-method revgfnff` without `-gfnff.topology_mode react` produces **zero** rebuilds - the jump
+statistics exist only in react mode.
 
 **Remaining tail.** (1) The 4 H square start geometry (1.3 A, all pairs at w = 0.5) begins with
 six wells joining at half weight - a property of the test input (seeding the initial topology with
