@@ -2034,7 +2034,12 @@ void SimpleMD::prepareRun()
 
     m_Epot = Energy();
     EKin();
-    m_Etot = m_Epot + m_Ekin;
+    // Claude Generated (Sep 13, 2026): the conserved total is Epot + Ekin + Wall. Epot stays the
+    // PURE force-field energy (ConfSearch, optimisers and energy printouts rank on it), so the
+    // wall contribution is added here and never into Epot. At t=0 no wall energy has been
+    // evaluated yet and the wall force is not part of the starting gradient either, so the wall
+    // term of this row is 0 - the same number the table's Wall column prints.
+    m_Etot = m_Epot + m_Ekin + m_wall_potential;
     AverageQuantities();
     m_step = 0;
 
@@ -2726,7 +2731,12 @@ bool SimpleMD::step()
             InitVelocities(-1);
             Energy();
             EKin();
-            m_Etot = m_Epot + m_Ekin;
+            // The rescued state carries a freshly computed PURE force-field gradient (the wall
+            // force is not applied to it), so the wall has done no work on this state. The wall
+            // value still in m_wall_potential belongs to the geometry that exploded - carrying it
+            // into Etot would be stale, so it is cleared before the total is assembled.
+            m_wall_potential = 0.0;
+            m_Etot = m_Epot + m_Ekin + m_wall_potential;
             m_current_rescue++;
             PrintStatus();
             m_time_step = 0;
@@ -2765,7 +2775,11 @@ bool SimpleMD::step()
         restart_file << restart << std::endl;
     }
     if ((m_step && static_cast<int>(m_step * m_dT) % m_print == 0)) {
-        m_Etot = m_Epot + m_Ekin;
+        // Assembled fresh from the members (never accumulated into the previous Etot), so the wall
+        // energy enters exactly once per printed row. m_wall_potential was set by WallPotential()
+        // inside Verlet()/Rattle() during the step that has just been integrated, i.e. it belongs
+        // to the printed geometry - same as m_Epot and m_Ekin.
+        m_Etot = m_Epot + m_Ekin + m_wall_potential;
         PrintStatus();
         // Reset RATTLE diagnostics after printing
         m_rattle_max_err_12 = 0;
@@ -2815,7 +2829,11 @@ void SimpleMD::finalizeRun()
     // Fixes trajectory file generation for short simulations where dump_frequency > total_steps
     WriteGeometry();
 
-    m_Etot = m_Epot + m_Ekin; // Claude Generated (Sep 12, 2026): the final row used to print the Etot of the last periodic print (stale by up to print_frequency); Epot/Ekin are refreshed every step in Verlet()
+    // Claude Generated (Sep 12, 2026): the final row used to print the Etot of the last periodic
+    // print (stale by up to print_frequency); Epot/Ekin are refreshed every step in Verlet().
+    // Claude Generated (Sep 13, 2026): + m_wall_potential - the wall energy of that same last
+    // integrated step, so the row is Etot = Epot + Ekin + Wall like every other row.
+    m_Etot = m_Epot + m_Ekin + m_wall_potential;
 
     PrintStatus();
     flushReactEvents();
@@ -4900,7 +4918,13 @@ json SimpleMD::Results() const
     result["time_fs"] = m_currentStep;
     result["potential_energy"] = m_Epot;
     result["kinetic_energy"] = m_Ekin;
-    result["total_energy"] = m_Epot + m_Ekin;
+    // Claude Generated (Sep 13, 2026): same convention as the printed table -
+    // total_energy = Epot + Ekin + Wall, with potential_energy staying PURE force-field.
+    // wall_energy is emitted only when a wall is configured, so a wall-free run's JSON is
+    // unchanged (there the wall term is 0 anyway) and the three fields still add up.
+    result["total_energy"] = m_Epot + m_Ekin + m_wall_potential;
+    if (m_wall_type != 0)
+        result["wall_energy"] = m_wall_potential;
     result["temperature"] = m_T;
     result["target_temperature"] = m_T0;
     // What the external potentials did. The work is the number a Jarzynski or
