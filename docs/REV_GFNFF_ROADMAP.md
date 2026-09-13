@@ -232,6 +232,35 @@ well does not have. Stage-3 target therefore: a bond form with the Gaussian's cu
 (equilibrium fidelity) and a Morse-like tail out to 2.5 r_eq with the right D_e, fitted on the
 55 class-A curves with the conformer / class-D guards; H-Cl and O-H first.
 
+## The valence-share design question — parked 2026-09-14
+
+Stage 3a (ii) exposes a conflict that parameter work cannot settle, so it is recorded rather than
+tuned away. The share must **vanish** when a second bond competes for one valence (that is the
+exchange transition state, and it takes the `rkt06` path rms from 15.79 to **2.71** kcal/mol);
+"how many bonds does this atom have" must **not** come from a distance count (GFN-FF's perception
+calls 1.867 A F...F a bond — BF4- at a realistic B-F distance costs **+569.7** kcal/mol, falling to
++27.5 once the contacts leave the switch's range); and it must **not** switch discretely (the
+1.20-1.30 r_eq band is where the exchange transition states live). A discrete count satisfies two of
+the three, a distance weight the third. Current status of the three requirements:
+
+| requirement | status |
+|---|---|
+| exact for hypervalent equilibria | NH4+/H3O+/ClO4- fixed, **BF4- not** |
+| exact (c = 1) at ordinary equilibria | met, bit-identical |
+| smooth under a topology event | **not met**: max \|dE_jump\| 10.7 -> **479.4** kJ/mol, 0 -> 4 events >= 50 kJ |
+
+**The underlying question**: is a term-weight switch the right carrier for "which bonds exist" at
+all? Every smooth quantity in GFN-FF is a function of distance, so any threshold on it is a hidden
+switch, and the model has no bond-existence variable — ReaxFF and the bond-order literature do. The
+adjacent repulsion blend asks the same question ("is this pair bonded?") and hands the H-H pair to
+the non-bonded branch at 1.6 r_eq.
+
+**Written up for the operator as an open question, with the acceptance criteria an answer must
+meet**: `~/Nextcloud/Obsidan/Wissen/Offene Fragen/Valenzanteil im reaktiven GFN-FF - was ist ein
+Bindungszustand.md` (linked from `Projekte/curcuma rev-gfnff.md`). One cheap test may halve it first
+— whether the **settled** weight in the valence sum fixes hypervalency *and* smoothness together
+(valfix iteration 2, 2026-09-14).
+
 **Post-r0-fix attribution (2026-09-13, `test_cases/revgfnff/_log/OUTLIER_STATUS.md`)**, measured
 after stage 3a (i) on the remaining X-H residuals at 1.6 r_eq. The per-term decomposition, not
 the well-shape table, is what assigns the owner:
