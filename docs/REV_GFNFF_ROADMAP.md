@@ -232,6 +232,34 @@ well does not have. Stage-3 target therefore: a bond form with the Gaussian's cu
 (equilibrium fidelity) and a Morse-like tail out to 2.5 r_eq with the right D_e, fitted on the
 55 class-A curves with the conformer / class-D guards; H-Cl and O-H first.
 
+**Post-r0-fix attribution (2026-09-13, `test_cases/revgfnff/_log/OUTLIER_STATUS.md`)**, measured
+after stage 3a (i) on the remaining X-H residuals at 1.6 r_eq. The per-term decomposition, not
+the well-shape table, is what assigns the owner:
+
+| bond | 1.6 residual | owner | mechanism -> which stage |
+|---|---:|---|---|
+| HC-H (HCN) | +19.3 | Bond | D_e +8 % too deep **and** r90 -19 % too narrow; the model rises faster -> **well form (iii)** |
+| H-H | +16.3 | Bond **+ RepulsionNonbonded +13.5** (zero in every other mode) | the rev repulsion blend has already handed the pair to the non-bonded branch at 1.6 r_eq -> **stage-1 blend, NOT the well** |
+| H-F | -10.5 | Bond (+ Coulomb +10.5) | D_e -28 %, k -20 %: too flat and too shallow -> **depth/curvature (iii)** |
+| H-Cl | -24.5 | Bond | D_e -43 %, k -49 %, r50 +22 %; identical in react/rtopo/fast, i.e. the static fc, not the r0 fix -> **depth/curvature (iii)** |
+| C-H | +5.9 | Bond | D_e -12 % yet the bond term is +9.2 above the reference: two errors of opposite sign cancelling only partly -> **well form (iii)** |
+| O-H | -2.2 | Bond/Coulomb | the 1.6 number itself is fine; the failure is later - the react bond drop at ~1.9 r_eq truncates the well (D_e 58.2 vs 121.5) -> **tail + join radius**, part of the (iii) package |
+| N-H | +7.9 | Bond | curvature/width at 1.6 plus the same bond drop at ~2.0 r_eq -> **(iii)** |
+
+So **(iii) owns five of the seven outright and contributes to the other two**; the exceptions are
+the H-H repulsion blend (a stage-1 switch, to be looked at separately) and the join radius, which
+the review already predicted must move out (~2.6x) once the tail is real - and which `c_ij` is
+what makes safe. Two riders for (iii): it must fix the *depth* as well as the width (H-Cl -43 %,
+H-F -28 %, O-H -52 %), and its acceptance must be judged on the break side (see the polyatomic
+jump corpus).
+
+**Protocol caveat, quantified**: the react and fast columns depend on which frame seeded the
+bond graph - `-batch_reuse_topology true` takes it from frame 0, and a scan whose frame 0 is
+already stretched does not perceive the pair as a bond at all, moving the energy by 18-117
+kcal/mol. The kept-topology (r_eq-seeded) number is the lower one and is the one a bond-stretch
+scan means to measure; the fresh column agrees with the other protocol. This is the
+stale-`*.topo.json` hazard of Known Issue #11, quantified.
+
 - [ ] Parameter groups bond -> repulsion -> angle -> torsion -> charge, L2 to the defaults,
       guards (conformers <= 1.6, NCI <= 10, MOR41 reaction MAD <= 70, S30L-CI not worse than
       gfnff), held-out 20 % of WP2 plus BHDIV10 and INV24.
