@@ -196,3 +196,28 @@ types of H/C/N/O/F/Cl, (C) hyper-coordinated species for the over-coordination t
 off-equilibrium samples, (B) NEB-TS paths for a subset of BH76 H-transfer, PX13 and the N2 + 3
 H2 steps, (E) the charged cases for stage 2. Every run keeps input, output, geometries and a
 `meta.json`; the lost r2SCAN-3c scans are the reason.
+
+## 7. Reference-data quality (2026-09-13)
+
+**Read `test_cases/revgfnff/ref/QUALITY.md` before fitting anything to class A/H UKS data.**
+It is the authoritative record of what in `ref/` is verifiable and what is not, derived from the
+per-series inspection in `test_cases/revgfnff/_log/UKS_INSPECTION.md`.
+
+Headlines: the **31 class-H RKS series are complete (20/20)** and everything that rests on RKS —
+including the charge-drift table and the conclusion that the -20..-35 kcal/mol Coulomb drift is a
+charge-model artefact, not physics — is unaffected. Where class A and class H both converged they
+agree in state to 0.052 mEh and `dS^2 <= 7.2e-5`, so the `--slowconv` retries of `of2`/`clf` are
+the same electronic state. But **five UKS series carry 12 points where two runs of the same input
+land on different broken-symmetry solutions** (up to 55 kcal/mol, `dS^2` up to 1.09) — class H
+cannot stand in for class A at those radii, and they are listed individually in `QUALITY.md`.
+Two further weaknesses are recorded there: `of2`/`clf`'s pre-retry class-A trees were overwritten
+by the retry (recompute rather than substitute RKS; the substitution biases the reference `D_e`
+upward by ~53 / ~52 kcal/mol), and `revgfnff_hirshfeld.py:pick()` accepts non-converged points, so
+the published UKS "near-r_eq" column for four series is its own far point.
+
+**Operator decision (2026-09-13): label these weaknesses, do not recompute.**
+
+**Why this section exists:** the well-shape numbers that stage 3a (iii) is aimed by use a pointwise
+`min(RKS, UKS)` convention, and a missing UKS point silently substitutes the higher RKS value —
+which biases the reference well deeper and spuriously strengthens a "the model's well is too
+shallow" conclusion.
