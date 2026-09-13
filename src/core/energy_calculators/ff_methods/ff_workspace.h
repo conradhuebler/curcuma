@@ -505,6 +505,8 @@ private:
     void swapState(TopologyState& st);             ///< O(1) exchange of the slot with a stored corner
     double calculateSingle(bool gradient);         ///< one topology (the pre-stage-1b calculate())
     Vector m_eeq_charges, m_topology_charges, m_d3_cn;
+    /// rev-gfnff stage 3a(i): GFN-FF CN radii in Bohr (CNCalculator::gfnffCNRadiusBohr), set once
+    std::vector<double> m_rev_cn_rcov;
     Vector m_cn, m_cnf;
     CNDerivStore m_dcn;  // Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
     const Matrix* m_dc6dcn_ptr = nullptr;

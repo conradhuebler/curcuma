@@ -18,6 +18,7 @@
 #pragma once
 
 #include "src/core/global.h"
+#include "src/core/math_compat.h"   // curcuma_erf / curcuma_exp (portable-math aware)
 
 #include <vector>
 #include <Eigen/Dense>
@@ -127,6 +128,43 @@ public:
      * @return Covalent radius in Ångström
      */
     static double getCovalentRadius(int atomic_number);
+
+    /// rev-gfnff stage 3a(i) (Claude Generated, Sep 2026): the radii and the pair term the CN
+    /// itself is built from, exposed so that a caller which needs "what would this pair
+    /// contribute to my coordination number" gets the SAME numbers as the CN, not a second
+    /// approximation. calculateGFNFFCN()/calculateGFNFFCNWithNeighbors() below use both.
+    ///
+    /// GFN-FF CN (Fortran gfnff_param.f90:551 / gfnff_rab.f90): the raw per-pair count is
+    ///     c_ij(r) = 0.5 * (1 + erf(kn * (r - R)/R)),   R = rcov_i + rcov_j,  kn = -7.5
+    /// with r, R in Bohr and rcov = 4/3 * covalent_radii(Z) converted to Bohr, and the atom's
+    /// CN is the log-compressed sum of c_ij over its neighbours.
+
+    /// rcov of one atom in Bohr, exactly as the CN build computes it. An element outside the
+    /// table keeps the 0.0 sentinel the CN build uses to exclude the atom.
+    static double gfnffCNRadiusBohr(int atomic_number)
+    {
+        constexpr double k_scaled = 4.0 / 3.0;      // gfnff_param.f90 covalentRadD3 scaling
+        constexpr double ANG2BOHR = 1.8897259886;   // as in calculateGFNFFCN()
+        const int idx = atomic_number - 1;
+        if (idx < 0 || idx >= static_cast<int>(COVALENT_RADII.size()))
+            return 0.0;
+        return k_scaled * COVALENT_RADII[idx] * ANG2BOHR;
+    }
+
+    /// this pair's own contribution to the raw CN of either atom (symmetric in i, j)
+    static double pairCNContribution(double r_bohr, double rcov_sum_bohr, double kn = -7.5)
+    {
+        const double dr = (r_bohr - rcov_sum_bohr) / rcov_sum_bohr;
+        return 0.5 * (1.0 + curcuma_erf(kn * dr));
+    }
+
+    /// d c_ij / dr of the same expression (Bohr^-1):  erf'(kn*dr) * kn / R
+    static double pairCNContributionDerivative(double r_bohr, double rcov_sum_bohr, double kn = -7.5)
+    {
+        constexpr double INV_SQRTPI = 0.56418958354775628695;  // 1/sqrt(pi)
+        const double dr = (r_bohr - rcov_sum_bohr) / rcov_sum_bohr;
+        return (kn * INV_SQRTPI) * curcuma_exp(-(kn * dr) * (kn * dr)) / rcov_sum_bohr;
+    }
 
     /**
      * Add D3 CN chain-rule gradient to Cartesian gradient matrix.

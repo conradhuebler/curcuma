@@ -129,23 +129,16 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
     // WP-D (May 2026): optional out_cn_raw lets callers reuse the raw N²-erf
     // result for dcn computation instead of recomputing it.
 
-    const double ANG2BOHR = 1.8897259886;  // 1 Angstrom = 1.8897259886 Bohr
-
     const int natoms = static_cast<int>(atoms.size());
     std::vector<double> cn_values(natoms, 0.0);
     if (out_cn_raw) out_cn_raw->assign(natoms, 0.0);
 
     // GFN-FF CN scaling factor (Reference: gfnff_param.f90:381-404)
-    const double k_scaled = 4.0 / 3.0;
-
-    // Pre-compute scaled covalent radii in Bohr (avoids repeated lookup in inner loop)
+    // Pre-compute scaled covalent radii in Bohr (avoids repeated lookup in inner loop).
+    // gfnffCNRadiusBohr() is the one place that defines the scaling (Sep 2026).
     std::vector<double> rcov_bohr(natoms, 0.0);
-    for (int i = 0; i < natoms; ++i) {
-        int elem = atoms[i] - 1;
-        if (elem >= 0 && elem < static_cast<int>(COVALENT_RADII.size())) {
-            rcov_bohr[i] = k_scaled * COVALENT_RADII[elem] * ANG2BOHR;
-        }
-    }
+    for (int i = 0; i < natoms; ++i)
+        rcov_bohr[i] = gfnffCNRadiusBohr(atoms[i]);
 
     // Claude Generated (Mar 2026, Phase 4): Parallelized outer loop — each atom independent
     #pragma omp parallel for schedule(dynamic, 32)
@@ -164,8 +157,7 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
 
             double distance = std::sqrt(distance_sq);
             double rcov_ij = rcov_bohr[i] + rcov_bohr[j];
-            double dr = (distance - rcov_ij) / rcov_ij;
-            cn_raw += 0.5 * (1.0 + curcuma_erf(kn * dr));
+            cn_raw += pairCNContribution(distance, rcov_ij, kn);
         }
 
         // Log transformation for numerical stability: CN in [0, cnmax]
@@ -282,18 +274,12 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
      *    No cutoff, full O(N²) calculation. For verification only.
      */
 
-    const double ANG2BOHR = 1.8897259886;
     const int natoms = static_cast<int>(atoms.size());
-    const double k_scaled = 4.0 / 3.0;
 
     // Pre-compute scaled covalent radii in Bohr
     std::vector<double> rcov_bohr(natoms, 0.0);
-    for (int i = 0; i < natoms; ++i) {
-        int elem = atoms[i] - 1;
-        if (elem >= 0 && elem < static_cast<int>(COVALENT_RADII.size())) {
-            rcov_bohr[i] = k_scaled * COVALENT_RADII[elem] * ANG2BOHR;
-        }
-    }
+    for (int i = 0; i < natoms; ++i)
+        rcov_bohr[i] = gfnffCNRadiusBohr(atoms[i]);
 
     // Mode selection
     if (cn_cutoff_bohr > 0.0) {
@@ -335,8 +321,7 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
                 double dist_sq = dx*dx + dy*dy + dz*dz;
                 double dist = std::sqrt(dist_sq);
                 double rcov_ij = rcov_bohr[i] + rcov_bohr[j];
-                double dr = (dist - rcov_ij) / rcov_ij;
-                cn_raw += 0.5 * (1.0 + curcuma_erf(kn * dr));
+                cn_raw += pairCNContribution(dist, rcov_ij, kn);
             }
             cn_values[i] = curcuma_log(1.0 + curcuma_exp(cnmax)) - curcuma_log(1.0 + curcuma_exp(cnmax - cn_raw));
         }
@@ -373,15 +358,10 @@ CNCalculator::CNResult CNCalculator::calculateGFNFFCNWithNeighbors(
     double cnmax)
 {
     const int natoms = static_cast<int>(atoms.size());
-    const double ANG2BOHR = 1.8897259886;
-    const double k_scaled = 4.0 / 3.0;
 
     std::vector<double> rcov_bohr(natoms, 0.0);
-    for (int i = 0; i < natoms; ++i) {
-        int elem = atoms[i] - 1;
-        if (elem >= 0 && elem < static_cast<int>(COVALENT_RADII.size()))
-            rcov_bohr[i] = k_scaled * COVALENT_RADII[elem] * ANG2BOHR;
-    }
+    for (int i = 0; i < natoms; ++i)
+        rcov_bohr[i] = gfnffCNRadiusBohr(atoms[i]);
 
     CNResult result;
     result.cn_values.resize(natoms, 0.0);
@@ -417,8 +397,7 @@ CNCalculator::CNResult CNCalculator::calculateGFNFFCNWithNeighbors(
             double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
             double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
             double rcov_ij = rcov_bohr[i] + rcov_bohr[j];
-            double dr = (dist - rcov_ij) / rcov_ij;
-            cn_raw_i += 0.5 * (1.0 + curcuma_erf(kn * dr));
+            cn_raw_i += pairCNContribution(dist, rcov_ij, kn);
         }
         result.cn_raw[i] = cn_raw_i;
         result.cn_values[i] = curcuma_log(1.0 + curcuma_exp(cnmax))

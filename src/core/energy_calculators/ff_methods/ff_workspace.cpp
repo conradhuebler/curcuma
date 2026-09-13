@@ -19,6 +19,7 @@
  */
 
 #include "ff_workspace.h"
+#include "cn_calculator.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/units.h"
 
@@ -136,6 +137,11 @@ void FFWorkspace::setAtomTypes(const std::vector<int>& atoms)
 {
     m_atom_types = atoms;
     m_natoms = static_cast<int>(atoms.size());
+    // rev-gfnff stage 3a(i) (Claude Generated, Sep 2026): the CN radii the pair correction in
+    // calcBonds() needs. Built here (not lazily in a kernel) so that no worker thread writes it.
+    m_rev_cn_rcov.resize(atoms.size());
+    for (size_t i = 0; i < atoms.size(); ++i)
+        m_rev_cn_rcov[i] = CNCalculator::gfnffCNRadiusBohr(atoms[i]);
 }
 
 void FFWorkspace::partition()

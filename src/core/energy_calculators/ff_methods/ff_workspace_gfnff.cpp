@@ -25,6 +25,7 @@
  */
 
 #include "ff_workspace.h"
+#include "cn_calculator.h"
 #include "gfnff_par.h"
 #include "forcefieldfunctions.h"
 #include "gfnff_geometry.h"
@@ -120,6 +121,11 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
     if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
 
     bool use_dynamic_r0 = (m_d3_cn.size() > 0);
+    // rev-gfnff stage 3a(i) (Claude Generated, Sep 2026): take the pair's OWN erf-CN
+    // contribution out of the CN that builds its r0 (see the block below). rev-only: with
+    // rev disabled the r0 is bit-identical to before.
+    const bool rev_cn_pair = m_rev.enabled && use_dynamic_r0
+                             && m_rev_cn_rcov.size() == static_cast<size_t>(m_natoms);
 
     for (int idx = begin; idx < end; ++idx) {
         const auto& bond = list[idx];
@@ -129,11 +135,36 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
         Matrix derivate;
         double rij = UFF::BondStretching(vi, vj, derivate, m_do_gradient);
 
+        double dcpair_dr = 0.0;   // d cn_ij / dr, needed by the gradient below
         double r0_ij;
         if (use_dynamic_r0 && bond.z_i > 0 && bond.z_j > 0 &&
             bond.i < m_d3_cn.size() && bond.j < m_d3_cn.size()) {
             double cn_i = m_d3_cn(bond.i);
             double cn_j = m_d3_cn(bond.j);
+            if (rev_cn_pair) {
+                // rev-gfnff stage 3a(i): r0 = (r0_base + cnfak*CN)*ff is built from
+                //     CN_i' = CN_i - cn_ij(r) + 1,
+                // i.e. the partner counts as PRESENT even while the pair stretches, where
+                // cn_ij is the pair's own contribution to the raw CN
+                //     cn_ij(r) = 0.5*(1 + erf(kn*(r - R)/R)),  R = rcov_i + rcov_j  (Bohr)
+                // (CNCalculator::pairCNContribution — the same expression the CN itself is built
+                // from). Without it, atom i loses j's count as the bond opens, r0 shrinks and the
+                // well retreats from the departing atom: a positive feedback with no physical
+                // counterpart (a real C-H bond SHORTENS by ~0.012 A when stretched), worth
+                // +9..+22 kcal/mol on every X-H bond at 1.3-1.4 r_eq. At r_eq cn_ij is 0.97-0.99,
+                // so the correction is +0.01..0.03 in CN and r0 barely moves. This is the
+                // continuous form of the frozen-CN (gfnff-fast) reference: it removes only the
+                // pair's own fading, not the neighbour re-parametrisation a real topology change
+                // produces. 0 new parameters; smooth in r (no branch).
+                const double rcov_sum = m_rev_cn_rcov[bond.i] + m_rev_cn_rcov[bond.j];
+                if (rcov_sum > 0.0) {
+                    const double cpair = CNCalculator::pairCNContribution(rij, rcov_sum);
+                    cn_i += 1.0 - cpair;
+                    cn_j += 1.0 - cpair;
+                    if (m_do_gradient)
+                        dcpair_dr = CNCalculator::pairCNContributionDerivative(rij, rcov_sum);
+                }
+            }
             double ra = bond.r0_base_i + bond.cnfak_i * cn_i;
             double rb = bond.r0_base_j + bond.cnfak_j * cn_j;
             r0_ij = (ra + rb + bond.rabshift) * bond.ff;
@@ -196,6 +227,17 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
                 acc.dEdcn(bond.j) += yy * bond.ff * bond.cnfak_j;
                 acc.dEdcn_bond(bond.i) += yy * bond.ff * bond.cnfak_i;
                 acc.dEdcn_bond(bond.j) += yy * bond.ff * bond.cnfak_j;
+
+                // rev-gfnff stage 3a(i): with CN_i' = CN_i - cn_ij(r) + 1 the CN chain rule above
+                // still supplies dE/dCN * dCN_i/dx (which contains the pair's own contribution),
+                // so only its pair part has to be removed again: dCN_i'/dx = dCN_i/dx - d cn_ij/dx,
+                // with d cn_ij/dx_i = +(dcn/dr) * d r/dx_i. The same dE/dCN coefficient is used,
+                // hence dE/dx_i = -(dE/dCN_i + dE/dCN_j) * (dcn/dr) * dr/dx_i.
+                if (rev_cn_pair && dcpair_dr != 0.0) {
+                    const double coef = -(yy * bond.ff * (bond.cnfak_i + bond.cnfak_j)) * dcpair_dr;
+                    acc.gradient.row(bond.i) += coef * derivate.row(0);
+                    acc.gradient.row(bond.j) += coef * derivate.row(1);
+                }
             }
         }
     }
