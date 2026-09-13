@@ -582,6 +582,7 @@ GFNFF::GFNFF(const json& parameters)
     m_react_valence_cap = m_parameters.value("react_valence_cap", true);
     m_react_exchange_scans = m_parameters.value("react_exchange_scans", 20);
     m_react_slack_form_factor = m_parameters.value("react_slack_form_factor", 1.2);
+    m_reuse_topology_check = m_parameters.value("reuse_topology_check", false);
     if (m_topology_mode == "react" && m_react_break_factor <= m_react_form_factor) {
         CurcumaLogger::warn(fmt::format(
             "GFNFF react: break factor {:.3f} <= form factor {:.3f} leaves no hysteresis; resetting to defaults 1.6/2.6",
@@ -1095,59 +1096,7 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
             if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::info(fmt::format("GFNFF: Using {} bonds from external topology (geometric detection skipped)", bonds.size()));
         } else {
-            // Fortran getnb bond criterion (Claude Generated, Jul 2026).
-            // Ports gfnff_ini2.f90:111-126 (rtmp setup) + :361-419 (getnb, icase=1):
-            //
-            //   rtmp(i,j) = gfnffrab(Z_i, Z_j, normcn_i, normcn_j)       ! R0 at "normal" CN
-            //   rtmp     -= qa_i*f1 + qa_j*f2                            ! charge shrink, fq doubled for metals
-            //   rtmp     *= fat(Z_i)*fat(Z_j)                            ! element hacks
-            //   bonded if  r < fm * rthr * rtmp
-            //
-            // This replaces the older heuristic `1.3*(rcov_i+rcov_j)*fat_i*fat_j`, which
-            // agreed with Fortran on 94/95 MOR41 structures but over-bonded agostic
-            // contacts to heavy metals (ED07: an extra C-H...W pair).
-            using GFNFFParameters::metal_type;
-            using GFNFFParameters::normcn;
-
-            constexpr double rthr = 1.25;    // gen%rthr    (gfnff_param.f90:718)
-            constexpr double rthr2 = 1.00;   // gen%rthr2   (gfnff_param.f90:720) - no-op for TMs
-            constexpr double rqshrink = 0.23; // gen%rqshrink (gfnff_param.f90:721)
-
-            std::vector<double> fat_val(m_atomcount);
-            std::vector<double> qshift(m_atomcount, 0.0);
-            std::vector<double> fm_atom(m_atomcount, 1.0);
-            const bool have_qa = (static_cast<int>(m_bond_qa.size()) == m_atomcount);
-            for (int i = 0; i < m_atomcount; ++i) {
-                const int z = m_atoms[i];
-                fat_val[i] = fat[z];
-                const int mt = (z >= 1 && z <= 86) ? metal_type[z - 1] : 0;
-                // f1 = fq, doubled for metals (gfnff_ini2.f90:115/119)
-                const double f1 = rqshrink * (mt > 0 ? 2.0 : 1.0);
-                qshift[i] = have_qa ? m_bond_qa[i] * f1 : 0.0;
-                // icase=1 metal radius scaling (gfnff_ini2.f90:379-384)
-                if (mt == 2) fm_atom[i] = rthr2;
-                else if (mt == 1) fm_atom[i] = rthr2 + 0.025;
-            }
-
-            for (int i = 0; i < m_atomcount; ++i) {
-                const int zi = m_atoms[i];
-                const double ncn_i = (zi >= 1 && zi <= 86) ? static_cast<double>(normcn[zi - 1]) : 4.0;
-                for (int j = i + 1; j < m_atomcount; ++j) {
-                    const int zj = m_atoms[j];
-                    const double ncn_j = (zj >= 1 && zj <= 86) ? static_cast<double>(normcn[zj - 1]) : 4.0;
-
-                    double rco = GFNFFParameters::computeRabEstimate(zi, zj, ncn_i, ncn_j);
-                    rco -= qshift[i] + qshift[j];
-                    rco *= fat_val[i] * fat_val[j];
-
-                    const double threshold = fm_atom[i] * fm_atom[j] * rthr * rco;
-                    const double distance = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
-
-                    if (distance < threshold) {
-                        bonds.emplace_back(i, j);
-                    }
-                }
-            }
+            bonds = perceiveGeometricBonds();
         }
 
         if (CurcumaLogger::get_verbosity() >= 2) {
@@ -1164,6 +1113,68 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
         fmt::print("GETCACHEDBONDLIST call#{} -> {} bonds\n", ++call_no, m_cached_bond_list->size());
     }
     return *m_cached_bond_list;
+}
+
+// Geometric bond perception on the CURRENT m_geometry_bohr, uncached: the geometric half of
+// getCachedBondList(), factored out so the reused-topology check can perceive without
+// touching the shared geometry tracker or the bond-list cache. Claude Generated (Sep 2026).
+std::vector<std::pair<int,int>> GFNFF::perceiveGeometricBonds() const
+{
+    // Fortran getnb bond criterion (Claude Generated, Jul 2026).
+    // Ports gfnff_ini2.f90:111-126 (rtmp setup) + :361-419 (getnb, icase=1):
+    //
+    //   rtmp(i,j) = gfnffrab(Z_i, Z_j, normcn_i, normcn_j)       ! R0 at "normal" CN
+    //   rtmp     -= qa_i*f1 + qa_j*f2                            ! charge shrink, fq doubled for metals
+    //   rtmp     *= fat(Z_i)*fat(Z_j)                            ! element hacks
+    //   bonded if  r < fm * rthr * rtmp
+    //
+    // This replaces the older heuristic `1.3*(rcov_i+rcov_j)*fat_i*fat_j`, which
+    // agreed with Fortran on 94/95 MOR41 structures but over-bonded agostic
+    // contacts to heavy metals (ED07: an extra C-H...W pair).
+    using GFNFFParameters::metal_type;
+    using GFNFFParameters::normcn;
+
+    constexpr double rthr = 1.25;    // gen%rthr    (gfnff_param.f90:718)
+    constexpr double rthr2 = 1.00;   // gen%rthr2   (gfnff_param.f90:720) - no-op for TMs
+    constexpr double rqshrink = 0.23; // gen%rqshrink (gfnff_param.f90:721)
+
+    std::vector<std::pair<int,int>> bonds;
+    std::vector<double> fat_val(m_atomcount);
+    std::vector<double> qshift(m_atomcount, 0.0);
+    std::vector<double> fm_atom(m_atomcount, 1.0);
+    const bool have_qa = (static_cast<int>(m_bond_qa.size()) == m_atomcount);
+    for (int i = 0; i < m_atomcount; ++i) {
+        const int z = m_atoms[i];
+        fat_val[i] = fat[z];
+        const int mt = (z >= 1 && z <= 86) ? metal_type[z - 1] : 0;
+        // f1 = fq, doubled for metals (gfnff_ini2.f90:115/119)
+        const double f1 = rqshrink * (mt > 0 ? 2.0 : 1.0);
+        qshift[i] = have_qa ? m_bond_qa[i] * f1 : 0.0;
+        // icase=1 metal radius scaling (gfnff_ini2.f90:379-384)
+        if (mt == 2) fm_atom[i] = rthr2;
+        else if (mt == 1) fm_atom[i] = rthr2 + 0.025;
+    }
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        const int zi = m_atoms[i];
+        const double ncn_i = (zi >= 1 && zi <= 86) ? static_cast<double>(normcn[zi - 1]) : 4.0;
+        for (int j = i + 1; j < m_atomcount; ++j) {
+            const int zj = m_atoms[j];
+            const double ncn_j = (zj >= 1 && zj <= 86) ? static_cast<double>(normcn[zj - 1]) : 4.0;
+
+            double rco = GFNFFParameters::computeRabEstimate(zi, zj, ncn_i, ncn_j);
+            rco -= qshift[i] + qshift[j];
+            rco *= fat_val[i] * fat_val[j];
+
+            const double threshold = fm_atom[i] * fm_atom[j] * rthr * rco;
+            const double distance = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
+
+            if (distance < threshold) {
+                bonds.emplace_back(i, j);
+            }
+        }
+    }
+    return bonds;
 }
 
 // ---------------------------------------------------------------------------
@@ -2373,6 +2384,84 @@ bool GFNFF::detectReactiveBondChanges()
     return true;
 }
 
+// Canonical i<j bond graph of a neighbour list, for the reused-topology comparison.
+// Claude Generated (Sep 2026).
+std::vector<std::pair<int,int>> GFNFF::canonicalBondGraph(const std::vector<std::vector<int>>& neighbor_lists)
+{
+    std::vector<std::pair<int,int>> graph;
+    const int n = static_cast<int>(neighbor_lists.size());
+    for (int i = 0; i < n; ++i) {
+        for (int j : neighbor_lists[i]) {
+            if (j > i && j < n)
+                graph.emplace_back(i, j);
+        }
+    }
+    std::sort(graph.begin(), graph.end());
+    graph.erase(std::unique(graph.begin(), graph.end()), graph.end());
+    return graph;
+}
+
+// Rebuild the whole force-field interaction list from the CURRENT geometry/topology.
+// Claude Generated (Sep 2026).
+//
+// Called by Calculation() when the perceived bond graph differs from the one the interaction
+// lists were built for. It is deliberately the same sequence initializeForceField() runs -
+// reset the topology
+// caches, perceive, generate, hand the new lists to the workspace, re-partition - and not a
+// second, parallel mechanism: the >0.5 Bohr displacement track (needsFullTopologyUpdate)
+// decides WHEN, this decides WHAT.
+//
+// gfnff-fast (static_charges/static_cn) frozen CN and charges are meaningless for a topology
+// that has moved, so the capture is dropped and retaken at the new geometry; that is the same
+// invalidation, extended over the state it must cover. A homogeneous series never reaches
+// this function (the bond graph matches), so its numbers and cost are unchanged.
+bool GFNFF::rebuildForceFieldForCurrentGeometry()
+{
+    if (!m_initialized || !m_workspace)
+        return false;
+
+    // Force the full topology path and a fresh parameter generation.
+    m_cached_bond_list.reset();
+    m_geometry_tracker.reset();
+    m_static_topology_valid = false;
+    if (m_eeq_solver) {
+        m_eeq_solver->invalidateCholeskyCache();
+        m_eeq_solver->invalidateMatrixCache();
+    }
+    // gfnff-fast: frozen CN/charges belong to the old topology.
+    if ((m_static_charges || m_static_cn) && m_static_state_captured) {
+        m_static_state_captured = false;
+        CurcumaLogger::warn("GFN-FF fast mode: frozen CN/charges re-captured - the geometry moved far "
+                            "enough to change the bond topology, so the frozen state no longer applies");
+    }
+
+    GFNFFParameterSet ff_params;
+    try {
+        ff_params = generateGFNFFParameterSet();
+    } catch (const std::exception& e) {
+        CurcumaLogger::error(std::string("GFN-FF reused-topology rebuild: parameter generation failed, "
+                                         "keeping the previous topology: ") + e.what());
+        return false;
+    }
+    if (m_topology_mode == "react")
+        refreshReactBondOrders();
+
+    ff_params.dispersion_enabled = m_parameters.value("dispersion", true);
+    ff_params.hbond_enabled      = m_parameters.value("hbond", true);
+    ff_params.repulsion_enabled  = m_parameters.value("repulsion", true);
+    ff_params.coulomb_enabled    = m_parameters.value("coulomb", true);
+
+    m_cached_parameter_set = makeParameterSetCache(ff_params);
+    m_workspace->rebuildInteractionLists(std::move(ff_params));
+    m_hbxb_updated = true;   // HB/XB lists were re-detected inside parameter generation
+
+    // The rebuild is the answer to a silently wrong number, so it is never silent.
+    CurcumaLogger::warn(fmt::format(
+        "GFN-FF: force field re-perceived for the current geometry ({} topology bonds) - the "
+        "carried-over topology no longer described this frame", m_ff_bond_graph.size()));
+    return true;
+}
+
 void GFNFF::updateReactiveTopologyIfNeeded()
 {
     if (m_topology_mode != "react" || !m_initialized)
@@ -2614,6 +2703,37 @@ double GFNFF::Calculation(bool gradient)
     computeSharedDistances();
     if (m_eeq_solver) {
         m_eeq_solver->setExternalDistances(&m_shared_srab);
+    }
+
+    // Reused-topology invalidation (Claude Generated Sep 2026). One GFNFF object may be
+    // handed a series of geometries that are not one molecule's trajectory (batch single
+    // points, bond-stretch scans, dissociation curves, conformer series,
+    // -batch_reuse_topology true). The force-field interaction lists (bonds, angles,
+    // torsions, the bonded/non-bonded repulsion partition, the EEQ fragments) are built
+    // once in generateGFNFFParameterSet and were previously never rebuilt: the existing
+    // needsFullTopologyUpdate() / geometry-tracker machinery only refreshed the
+    // *TopologyInfo*, so every frame ran on the first frame's bond graph (measured
+    // 18-117 kcal/mol at one geometry, OUTLIER_STATUS.md section F). The fix is to compare
+    // the bond graph the lists were built for against the graph the current geometry
+    // yields, and rebuild when they differ - the same criterion the on-disk topology cache
+    // uses, evaluated per frame because the 0.5 Bohr trigger is too coarse: a bond can
+    // appear and vanish again between two of its ticks (H2 in a bond-stretch scan).
+    // A homogeneous series never differs, so its numbers and its cost are unchanged; the
+    // check reuses the perception only when the geometry actually moved.
+    if (m_topology_mode == "auto" && m_reuse_topology_check && m_cached_parameter_set
+        && m_forced_bonds.empty() && !m_react_owns_bonds) {
+        if (m_reuse_seen_geometry.rows() != m_geometry_bohr.rows()
+            || (m_geometry_bohr - m_reuse_seen_geometry).array().abs().maxCoeff() > 1e-6) {
+            m_reuse_seen_bonds = perceiveGeometricBonds();
+            m_reuse_seen_geometry = m_geometry_bohr;
+            if (CurcumaLogger::get_verbosity() >= 2 && m_reuse_seen_bonds != m_ff_bond_graph) {
+                CurcumaLogger::info(fmt::format(
+                    "GFNFF: reused topology no longer describes this geometry ({} bonds -> {}), "
+                    "rebuilding the force field", m_ff_bond_graph.size(), m_reuse_seen_bonds.size()));
+            }
+        }
+        if (m_reuse_seen_bonds != m_ff_bond_graph)
+            rebuildForceFieldForCurrentGeometry();
     }
 
     // Phase A: CN + EEQ calculation (delegated to extracted helper)
@@ -3856,6 +3976,15 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     params.e0 = 0.0;
 
     const TopologyInfo& topo_info = getCachedTopology();
+
+    // Reused-topology invalidation (Claude Generated Sep 2026): remember the bond graph the
+    // interaction lists built below belong to, so Calculation() can tell whether a
+    // carried-over topology still describes the geometry it is used on. m_reuse_seen_* is
+    // primed with it too, so the first evaluation at this geometry (single point, first
+    // frame, an MD step that does not move) costs no extra perception.
+    m_ff_bond_graph = canonicalBondGraph(topo_info.neighbor_lists);
+    m_reuse_seen_bonds = m_ff_bond_graph;
+    m_reuse_seen_geometry = m_geometry_bohr;
 
     // Validate charges
     for (int i = 0; i < topo_info.eeq_charges.size(); ++i) {

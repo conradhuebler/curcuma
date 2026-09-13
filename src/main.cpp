@@ -1748,6 +1748,31 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         }
         const bool reuse_topology = read_bool(controller, "batch_reuse_topology")
             || (controller.contains("opt") && read_bool(controller["opt"], "batch_reuse_topology"));
+        if (reuse_topology) {
+            // Claude Generated (Sep 13, 2026): a reused calculator's frames are NOT necessarily
+            // one trajectory - a bond-stretch scan, a dissociation curve, a conformer series and
+            // a multi-molecule batch all reuse it, and reusing the frame-0 force field for them
+            // is a different physics at the same geometry (18-117 kcal/mol, OUTLIER_STATUS.md
+            // section F). The carried-over topology is therefore re-validated against every
+            // frame by default (PARAM reuse_topology_check); a homogeneous series never trips it,
+            // so its numbers and its cost are unchanged. The CLI is scanned directly because the
+            // resolved controller already carries the registry default for the key, so its
+            // presence cannot distinguish an explicit -gfnff.reuse_topology_check false.
+            bool opted_out = false;
+            for (int i = 1; i < argc; ++i) {
+                const std::string a = argv[i];
+                const bool names_it = a.find("reuse_topology_check") != std::string::npos;
+                if (!names_it) continue;
+                if (a.find("=false") != std::string::npos
+                    || (i + 1 < argc && std::string(argv[i + 1]) == "false"))
+                    opted_out = true;
+            }
+            if (!opted_out) {
+                if (!energy_controller.contains("gfnff") || !energy_controller["gfnff"].is_object())
+                    energy_controller["gfnff"] = json::object();
+                energy_controller["gfnff"]["reuse_topology_check"] = true;
+            }
+        }
         if (!reuse_topology) {
             // Claude Generated (Sep 12, 2026): frames that are re-perceived must not hit the on-disk
             // topology cache: its fingerprint is the element list plus the bond graph, so a transition

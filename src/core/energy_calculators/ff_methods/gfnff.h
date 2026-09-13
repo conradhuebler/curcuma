@@ -323,6 +323,7 @@ PARAM(solvent_model, String, "alpb",
 // Bonds may form and break during MD; all bonded terms are rebuilt at change events.
 // See docs/GFNFF_REACT_TOPOLOGY.md. PARAMs stay single-line, see note above.
 PARAM(topology_mode, String, "auto", "Topology mode: auto = adaptive two-tier caching, constant = frozen after init, react = bond topology is re-detected with hysteresis during MD and all bonded terms are rebuilt at change events. default is accepted as an alias for auto.", "Basic", {})
+PARAM(reuse_topology_check, Bool, false, "Re-validate a carried-over force-field topology against the geometry it is used on: the bond graph the interaction lists (bonds, angles, torsions, repulsion partition, EEQ fragments) were built from is compared with the one the current geometry yields, and they are rebuilt for this frame - with a warning - when the two differ. Enabled automatically by -batch_reuse_topology true, which is what makes calculator reuse safe for bond-stretch scans, dissociation curves, conformer series and multi-molecule batches; a homogeneous series (frames of one MD trajectory of one molecule) never trips it, so its numbers and cost are unchanged. false (the default, and the pre-Sep-2026 behaviour) trusts the first frame's topology unconditionally, which is silently wrong for structurally different frames by 18-117 kcal/mol at one geometry (test_cases/revgfnff/_log/OUTLIER_STATUS.md section F); pass -gfnff.reuse_topology_check false to opt back into that. MD and geometry optimisation freeze the topology on purpose (one molecule, one trajectory) and never enable it.", "Basic", {})
 PARAM(react_bond_form_factor, Double, 1.6, "React mode: a non-bonded pair becomes a bond when r < factor * covalent-radius sum * element fat scaling. Optimistic on purpose: the Gaussian bond well is weak at this distance and formation is expected mid-collision. Must stay below react_bond_break_factor and below typical hydrogen-bond contact distances.", "Reactive", {})
 PARAM(react_bond_break_factor, Double, 2.6, "React mode: an existing bond is removed when r > factor * covalent-radius sum * element fat scaling. Conservative on purpose: the bond is kept until its Gaussian well has largely decayed, so removal causes only a small energy jump. The wide gap to react_bond_form_factor is the hysteresis that prevents flicker.", "Reactive", {})
 PARAM(react_check_every, Int, 5, "React mode: run the O N^2 hysteresis bond scan every N energy calls. 0 = displacement-triggered only.", "Reactive", {})
@@ -935,6 +936,29 @@ public:
         m_full_topology_recalculated = false;
         return r;
     }
+
+    // === Reused-topology invalidation (Claude Generated Sep 2026) ===
+    // A force-field topology is perceived once (initializeForceField ->
+    // generateGFNFFParameterSet) and then reused. needsFullTopologyUpdate() + the geometry
+    // tracker already refresh the *TopologyInfo* on a >0.5 Bohr displacement, but that never
+    // touched the interaction lists the energy is actually built from, so a calculator reused
+    // across structurally different frames (-batch_reuse_topology true) silently ran every
+    // frame on the first frame's bond graph (18-117 kcal/mol at the same geometry;
+    // OUTLIER_STATUS.md section F). Calculation() now compares the perceived bond graph with
+    // the one the lists were built for and rebuilds when they differ; the PARAM
+    // reuse_topology_check turns that off.
+
+    /// Rebuild the whole force-field interaction list from the current geometry/topology.
+    /// Returns false (and leaves the previous lists in place) if parameter generation failed.
+    bool rebuildForceFieldForCurrentGeometry();
+
+    /// Geometric bond perception on the CURRENT geometry, uncached. The geometric half of
+    /// getCachedBondList(), shared so the reuse check needs no second implementation.
+    std::vector<std::pair<int,int>> perceiveGeometricBonds() const;
+
+    /// Canonical i<j bond graph of a neighbour list, for the reuse comparison.
+    static std::vector<std::pair<int, int>>
+    canonicalBondGraph(const std::vector<std::vector<int>>& neighbor_lists);
 
     // === React topology mode (Claude Generated Aug 2026) ===
     // Event-driven reactive bond topology: the bond list is re-detected with a distance
@@ -2623,6 +2647,15 @@ private:
     mutable std::optional<std::vector<std::pair<int,int>>> m_cached_bond_list;
 
     std::vector<std::pair<int,int>> m_forced_bonds; ///< External bonds merged with geometric detection
+
+    // Reused-topology invalidation (Claude Generated Sep 2026). m_ff_bond_graph is the
+    // canonical bond graph of the topology the CURRENT interaction lists were built from
+    // (recorded in generateGFNFFParameterSet); m_reuse_seen_bonds caches the perception of
+    // the current geometry that is compared against it each energy call.
+    std::vector<std::pair<int,int>> m_ff_bond_graph;
+    std::vector<std::pair<int,int>> m_reuse_seen_bonds;
+    Eigen::MatrixXd m_reuse_seen_geometry;
+    bool m_reuse_topology_check = false; ///< PARAM reuse_topology_check (parsed in the ctor; false = trust the first frame)
 
     // React topology mode state (Claude Generated Aug 2026). See docs/GFNFF_REACT_TOPOLOGY.md.
     std::vector<std::pair<int,int>> m_react_bonds; ///< Authoritative bond set (canonical i<j), owns m_forced_bonds in react mode
