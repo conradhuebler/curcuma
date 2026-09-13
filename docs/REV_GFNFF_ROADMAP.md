@@ -48,6 +48,25 @@ decompositions, 3 barrier CSVs, 6 jump-stat cells, 1 water-dimer run).
    a real tail. The wide weight stays a term-list/blend device, the join decision moves to the
    narrow switch. Details and numbers in `docs/REV_GFNFF_STAGE1.md`.
 
+8. **The equilibrium guard is a RELATIVE criterion, not an absolute one (2026-09-13).** Stage 3a
+   (i) (the r0 fix, commit `e36d9925`) makes `revgfnff`'s equilibrium energy differ from `gfnff`'s
+   by a size-extensive offset of roughly **-0.02 kcal/mol per bond** (H2O -0.082, CH4 -0.112,
+   CH3OH -0.207, C6H6 -0.238, caffeine -0.494 kcal/mol; on caffeine the entire delta is in the
+   Bond term with every other term bit-identical). The review's "revgfnff vs gfnff <= 0.01
+   kcal/mol at rest" was written as an absolute number and therefore no longer holds.
+   **Decision: keep the absolute offset and state the guard in relative terms.** Justification,
+   measured rather than argued: the shift is equal for different conformers of the same molecule,
+   so the RELATIVE energy moves by only 0.0010 kcal/mol (butane B_T vs B_G) and 0.0013 (hexane
+   H_ttt vs H_ggg). It is an offset, not a distortion, so conformer ranking, non-covalent
+   interaction energies (where the bond count is the same on both sides) and isomerisation
+   energies are unaffected. The alternative - anchoring the correction to a fixed reference
+   length so that it vanishes at the calibrated point - was considered and rejected: the anchor
+   choice is arbitrary, it adds a hidden dependence, and it can reintroduce the feedback at the
+   anchor itself.
+   *The guard for any future bond-term change is therefore: relative energies (conformers,
+   non-covalent interactions, isomerisation) must not move, measured on at least two conformer
+   pairs; an absolute revgfnff-vs-gfnff offset is expected and acceptable.*
+
 Corrections to earlier numbers in this file (measured, trust these): the WP3 "bond +48.7
 kcal/mol on hydrogen transfer" holds only with `hcnts` in the set - RKT-only (n=38) is bond
 +43.2, MAD 40.5; and the WP5 "H-H k 2.2x too stiff" is mostly the bonded H-H repulsion (the
