@@ -257,6 +257,11 @@ double FFWorkspace::calculateSingle(bool gradient)
     if (m_method_type == FFMethodType::GFN_FF)
         computeHBCoordinationNumbers(0);
 
+    // rev-gfnff stage 3a(ii) (Sep 2026): the valence share of a bond needs the atom's complete
+    // bond-order sum, so it is built once per corner on the main thread, before the partitions.
+    if (m_rev.enabled && m_rev.valence_share && m_method_type == FFMethodType::GFN_FF)
+        prepareValenceShare();
+
     auto t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if (m_num_threads == 1) {
         // T=1: Direct call, zero pool overhead
@@ -270,6 +275,8 @@ double FFWorkspace::calculateSingle(bool gradient)
             m_result_gradient.swap(m_accumulators[0].gradient);
             m_dEdcn_total = m_accumulators[0].dEdcn;
             m_dEdcn_bond_total = m_accumulators[0].dEdcn_bond;
+        m_dEdshare_total = m_accumulators[0].dEdshare;
+            m_dEdshare_total = m_accumulators[0].dEdshare;
         }
         if (m_store_components && gradient) {
             m_result_grad_bond.swap(m_accumulators[0].grad_bond);
@@ -309,6 +316,11 @@ double FFWorkspace::calculateSingle(bool gradient)
     // bond-order sums, so it runs once on the main thread after the partitions.
     if (m_rev.enabled && m_rev.over_coord && m_method_type == FFMethodType::GFN_FF)
         calcOverCoordination(gradient);
+    // rev-gfnff stage 3a(ii) (Sep 2026): the valence share's own chain rule - the share factor of
+    // every bond depends on the sum over both atoms' OTHER pairs, so each pair also carries the
+    // derivative of those. Same place as E_over: after the complete sums exist.
+    if (gradient && m_rev.enabled && m_rev.valence_share && m_method_type == FFMethodType::GFN_FF)
+        applyValenceShareGradient();
     // rev-gfnff stage 2 (Sep 2026): the bond-hardness term of the split-charge model. Same
     // place as E_over: it is a per-pair term over the whole corner, not a partitioned list.
     if (m_rev.enabled && !m_sqe_pairs.empty() && m_method_type == FFMethodType::GFN_FF)

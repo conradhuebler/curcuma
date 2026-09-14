@@ -149,6 +149,7 @@ struct FFAccumulator {
     /// rev-gfnff stage 1b: acc += scale * o for everything a bonded kernel writes (energies, gradient, dEdcn, components)
     Vector dEdcn;             ///< N dE/dCN for chain-rule
     Vector dEdcn_bond;        ///< N bond-only dE/dCN for per-component attribution
+    Vector dEdshare;          ///< rev-gfnff 3a(ii): N dE/d(sum_i w_ik) of the valence share
     FFEnergyComponents energy;
     FFTermTimings timings;    ///< Claude Generated (May 2026): per-term ms (this partition only)
 
@@ -169,6 +170,8 @@ struct FFAccumulator {
             dEdcn.setZero();
             if (dEdcn_bond.size() != natoms) dEdcn_bond.resize(natoms);
             dEdcn_bond.setZero();
+            if (dEdshare.size() != natoms) dEdshare.resize(natoms);
+            dEdshare.setZero();
         }
         has_components = store_components;
         if (store_components && do_gradient) {
@@ -224,6 +227,23 @@ struct RevSettings {
     bool term_weights = true;     ///< angle/torsion/inversion damping  x  product of bond weights
     bool blend_repulsion = true;  ///< E_rep = b E_bonded + (1-b) E_nonbonded on every pair that carries both sets
     bool over_coord = true;       ///< E_over,i = p_Z sp(sum_j b_ij BO_ij - Val_Z)^2
+    /// rev-gfnff stage 3a(ii) (Sep 2026): valence share of the bond well,
+    ///     E_ij = -k_b e^{-a dr^2} * w_ij * c_ij,   c_ij = 1/2 (f_i + f_j),
+    ///     f_i = clip((Val_i - sum_{k != j} w_ik) / w_ij, 0, 1)   (C1 soft clip)
+    /// with S = the term weight w of the pair (the same switch the well is multiplied with) and
+    ///     Val_i = Val_Z(i) + softplus(sum_k shareClip(b_ik) - Val_Z(i))
+    /// the HYPERVALENT-CORRECT effective valence: the nominal sigma valence plus a smooth,
+    /// saturating term in the settled-partner count (b = the tight bond order). It equals the
+    /// nominal valence bit-for-bit for every atom with at most Val_Z partners (all ordinary
+    /// chemistry, saturated or not), so an ammonium, hydronium or perchlorate keeps c = 1 on its
+    /// genuine bonds, while a migrating H that hangs two partial bonds off the same valence still
+    /// shares them. Removes the missing valence conservation of pairwise wells: two wells that
+    /// share one valence sum to one well's worth instead of two.
+    bool valence_share = true;
+    /// rev-gfnff stage 3a(ii) (Sep 2026): "an H is never sp" - an sp hydrogen is not treated as
+    /// a bridging atom, so its bond keeps the full strength instead of the reference's 0.30
+    /// scaling. See the comment at the rule in gfnff_method.cpp.
+    bool h_not_sp = true;
     bool blend = true;            ///< stage 1b: dual-topology blending of the bonded terms over a transition
     double bo_center = 2.0;       ///< term WEIGHT switch: R = f_b (rcov_i + rcov_j) fat_i fat_j (wide: the well decays by itself)
     double bo_width = -7.5;       ///< k of the weight switch (negative: w -> 1 inside R)
@@ -557,6 +577,43 @@ private:
     FFEnergyComponents m_result_energy;
     FFTermTimings m_result_timings;  // Claude Generated (May 2026): aggregated per-term timing
     Vector m_dEdcn_total, m_dEdcn_bond_total;
+    /// rev-gfnff 3a(ii): sum_k w_ik per atom - the CLAIM of i's other partners - plus the reduced
+    /// dE/d(sum_i w_ik) coefficient of the Lambda chain rule
+    Vector m_rev_share_sum;
+    /// rev-gfnff 3a(ii): the reduced dE/d(sum_i w_ik) coefficient of the Lambda chain rule
+    Vector m_dEdshare_total;
+    /// rev-gfnff 3a(ii): the effective valence of the corner and its derivative w.r.t. the
+    /// settled count. val_i = Val_Z + G(settled_i - Val_Z) (see shareExcess); dval_i = dG/dx.
+    /// Both are consumed by calcBonds, which carries their whole chain rule locally.
+    Vector m_rev_share_val, m_rev_share_dval;
+    /// rev-gfnff 3a(ii) (Claude Generated, Sep 14, 2026): the SMOOTH 1,3 proxy - the genuineness
+    /// g_p of every pair of the corner's bond list, in m_bonds order. A compact polyhedron's
+    /// perception carries 1,3 contacts as bonds - the six F...F contacts of a tetrahedral BF4-
+    /// (1.867 A, tight bond order 0.4739) are the clearest case - and the wide term weight reads
+    /// ~1 for them, so without a mask they claim the full valence of both ends and halve every
+    /// genuine bond (BF4- at B-F = 1.143 A: +569.7 kcal/mol). The discrete test "the two ends
+    /// share a BONDED neighbour" separates them from the migrating pair of an exchange transition
+    /// state (tight bond order 0.4985, every continuous quantity within 5 % - see
+    /// test_cases/revgfnff/_log/CIJ_STATUS.md), but a topology test is a switch, so this is its
+    /// continuous stand-in: the BOND-ORDER LEAK
+    ///     t_p = sum_{k != i,j} sigma_ik sigma_jk,   sigma = shareSettled(b) in [0, 1],
+    ///     g_p = shareClip(1 - t_p)                  (1 = genuine bond, 0 = pure 1,3 contact),
+    /// i.e. how much the bond order of i's and j's SHARED settled partner leaks onto this pair.
+    /// sigma is the settled weight of the tight switch, so a 1,3 contact of two ends that are only
+    /// contacts themselves (sigma = 0, e.g. B in BF4-) does not create a leak: the six F...F pairs
+    /// read t = sigma_BF^2 = 1 exactly while the four B-F bonds read t = 0 exactly. Nothing is
+    /// counted and no threshold is applied - t is a smooth function of the existing bond orders,
+    /// C1 in every coordinate (shareClip is C1 and exactly 0/1 outside [0,1]).
+    /// Consumed as: the claim of a pair on its ends' valence is w_p g_p (so a 1,3 contact consumes
+    /// nothing), and its own well is multiplied by c_p = 1 - g_p (1 - (f_i + f_j)/2), which reads
+    /// exactly 1 for a 1,3 contact and reduces to the plain share for a genuine bond. A pair with
+    /// g = 0 keeps its own term, exactly as the over-coordination term keeps its 1,3 repulsion.
+    std::vector<double> m_rev_share_g;      ///< g_p (per pair, m_bonds order)
+    std::vector<double> m_rev_share_dg;     ///< dE/dg_p, accumulated by calcBonds
+    std::vector<double> m_rev_share_gclip;  ///< dg_p/d t_p = -shareClipD(1 - t_p)
+    std::vector<double> m_rev_share_sig;    ///< sigma_p = shareSettled(b_p)
+    std::vector<double> m_rev_share_dsig;   ///< d sigma_p / d r_p (the three-body chain rule)
+    std::vector<int> m_rev_share_stamp;     ///< scratch for the common-neighbour lookup
     GeoGradMatrix m_grad_before_cn;  ///< Gradient snapshot before CN chain-rule (diagnostic) — WP-G: RowMajor
     bool m_store_components = false;
     bool m_do_gradient = false;
@@ -620,6 +677,66 @@ private:
     double revCoord(int i, int j, double r, double* dc) const {
         return RevGFNFF::bondOrder(r, m_rev.R3(i, j), m_rev.bo3_width, dc);
     }
+    /// rev-gfnff 3a(ii): C1 soft clip on [0, 1] — exactly 0 below and exactly 1 above, so an
+    /// equilibrium bond (f > 1) is multiplied by exactly 1.0 and the term stays bit-identical.
+    /// No free width: the smoothstep runs over the whole unit interval of f.
+    static double shareClip(double x)
+    {
+        if (x <= 0.0) return 0.0;
+        if (x >= 1.0) return 1.0;
+        return x * x * (3.0 - 2.0 * x);
+    }
+    /// d shareClip / dx (0 at both ends, so the force is continuous)
+    static double shareClipD(double x)
+    {
+        if (x <= 0.0 || x >= 1.0) return 0.0;
+        return 6.0 * x * (1.0 - x);
+    }
+    /// rev-gfnff 3a(ii) (Claude Generated, Sep 2026): smooth excess valence - the softplus
+    ///     G(x) = ln(1 + e^(beta x)) / beta,   0 for x <= 0, x for x >> 1/beta.
+    /// The effective valence of an atom is Val_Z + G(sum_k sigma(b_ik) - Val_Z) with sigma the
+    /// settled-partner weight (shareClip of the TIGHT bond order b, the same switch the
+    /// over-coordination term sums). While an atom carries at most Val_Z partners the sum stays
+    /// at or below Val_Z, G is 0 and the nominal valence is untouched - which is every ordinary
+    /// equilibrium, including a bond stretched inside a molecule (fewer bonds, not more). G only
+    /// grows once an atom has MORE partners than its nominal valence, which is also the only case
+    /// in which the share can bite at all (f_i >= 1 follows from n_i <= Val_Z). It is what makes
+    /// the valence hypervalent-correct: the fourth bond of an ammonium, the third of a hydronium
+    /// and the fourth of a perchlorate are settled partners and are credited instead of halving
+    /// the genuine bonds. beta is the one new GLOBAL constant of stage 3a(ii) - it sets how
+    /// sharply the settled count crosses the nominal valence - and no element data is added.
+    static constexpr double kShareExcessBeta = 50.0;
+    static double shareExcess(double x)
+    {
+        const double y = kShareExcessBeta * x;
+        if (y > 700.0) return x;                       // exp() overflow guard: G -> x
+        return std::log1p(std::exp(y)) / kShareExcessBeta;
+    }
+    /// d G / dx = sigmoid(beta x) (0 and 1 at the ends, no kink anywhere)
+    static double shareExcessD(double x)
+    {
+        const double y = kShareExcessBeta * x;
+        if (y > 700.0) return 1.0;
+        if (y < -700.0) return 0.0;
+        return 1.0 / (1.0 + std::exp(-y));
+    }
+    /// rev-gfnff 3a(ii): the settled weight of ONE partner - the same unit-interval smoothstep,
+    /// applied to the RESCALED tight bond order 2b - 1. "Settled" therefore means "past the middle
+    /// of this pair's switching radius" (b > 1/2, i.e. r < R2), and the transition is a wide,
+    /// C1-continuous ramp (b runs 0.05..0.95 over 0.39 R2), not a threshold. Rescaling matters:
+    /// shareClip(b) itself credits a HALF-formed bond with half a valence, so at a 5-coordinate
+    /// exchange carbon (four full bonds + one half-formed) the settled count already exceeds the
+    /// nominal valence and the effective valence rises with it, cancelling the share exactly where
+    /// it is needed. With 2b - 1 the four full bonds still read 0.9997 each while the half-formed
+    /// one reads 0, so N_i stays below Val_Z and the share keeps its full strength. No new
+    /// parameter: same smoothstep, rescaled argument.
+    static double shareSettled(double b_order) { return shareClip(2.0 * b_order - 1.0); }
+    /// d shareSettled / db (chain rule of the 2b - 1 rescaling)
+    static double shareSettledD(double b_order) { return 2.0 * shareClipD(2.0 * b_order - 1.0); }
+    /// rev-gfnff 3a(ii): per-atom sum_k m_ik w_ik of the corner's bond list (main thread, per step)
+    void prepareValenceShare();
+    /// rev-gfnff 3a(ii): the chain rule of that sum and of the effective valence (after the partitions)
+    void applyValenceShareGradient();
     /// rev-gfnff: over-coordination energy + gradient, main thread, after the partitions (Sep 2026)
     void calcOverCoordination(bool gradient);
     /// rev-gfnff stage 2: bond-hardness energy + gradient of the split charges (Sep 2026)

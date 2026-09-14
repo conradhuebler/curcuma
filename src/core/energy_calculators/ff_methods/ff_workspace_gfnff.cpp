@@ -126,6 +126,13 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
     // rev disabled the r0 is bit-identical to before.
     const bool rev_cn_pair = m_rev.enabled && use_dynamic_r0
                              && m_rev_cn_rcov.size() == static_cast<size_t>(m_natoms);
+    // rev-gfnff stage 3a(ii) (Claude Generated, Sep 2026): the valence share factor c_ij. It
+    // needs the per-atom bond-order sums of THIS corner, built by prepareValenceShare() on the
+    // main thread (see the block in calcBonds below).
+    const bool rev_share = m_rev.enabled && m_rev.valence_share
+                           && m_rev_share_sum.size() == m_natoms
+                           && m_rev_share_val.size() == m_natoms
+                           && static_cast<int>(m_rev.valence.size()) == m_natoms;
 
     for (int idx = begin; idx < end; ++idx) {
         const auto& bond = list[idx];
@@ -194,6 +201,42 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
             w = revWeight(bond.i, bond.j, rij, &dwdr);
             energy *= w;
         }
+        // rev-gfnff stage 3a(ii) (Claude Generated, Sep 2026): valence share.
+        //     E = -k_b e^{-a dr^2} w c,     c = 1/2 (f_i + f_j),
+        //     f_i = clip((Val_i - sum_{k != j} w_ik) / w_ij, 0, 1),
+        // w_ij is the pair's OWN term weight, so f_i reads how much of atom i's valence the OTHER
+        // partners already claim. A lone bond always has f > 1 (sum = 0) and a saturated
+        // equilibrium atom has sum_{k != j} w = (n_i - 1) w < Val_i - w at w <= 1, so both are
+        // clipped to exactly 1 and the equilibrium term stays bit-identical. It bites where two
+        // partners share one valence (the exchange transition state), where the two wells then add
+        // to one well's worth instead of two. Zero element data: the clip width is the unit
+        // interval itself (shareClip) and Val_i is the over-coordination term's own valence table,
+        // made hypervalent-correct by the settled-partner count (see prepareValenceShare).
+        double cshare = 1.0, dcdw = 0.0;
+        if (rev_share && w > 1e-12) {
+            const double inv = 1.0 / w;
+            const double gi = (m_rev_share_val(bond.i) - m_rev_share_sum(bond.i) + w) * inv;
+            const double gj = (m_rev_share_val(bond.j) - m_rev_share_sum(bond.j) + w) * inv;
+            const double fi = shareClip(gi), fj = shareClip(gj);
+            cshare = 0.5 * (fi + fj);
+            energy *= cshare;
+            if (m_do_gradient) {
+                const double di = shareClipD(gi), dj = shareClipD(gj);
+                // Claude Generated (Sep 13, 2026): d c / d w at fixed SUMS - the sum's own
+                // w-dependence is supplied by the Lambda pass of applyValenceShareGradient.
+                // With g_i = (Val_i - sum_i + w)/w = (Val_i - sum_i)/w + 1 at constant sum_i,
+                // dg_i/dw = -(g_i - 1)/w. The "sums free" form -g_i/w (the previous code, whose
+                // comment already claimed "fixed sums") double-counts Lambda: at the rkt06
+                // exchange TS the analytic gradient was then 0.4 % short of the FD of the share
+                // energy (1.4e-04 vs 4.7e-06 Eh/Angstrom after the fix).
+                dcdw = -0.5 * (di * (gi - 1.0) + dj * (gj - 1.0)) * inv;
+                // dE_pair/d sum_i = -K f_i' / 2 with K = k_b e^{-a dr^2} (the pair's own S does
+                // not enter its own sum, so no extra own-pair term here)
+                const double K = k_b * exp_term;
+                acc.dEdshare(bond.i) += -0.5 * K * di;
+                acc.dEdshare(bond.j) += -0.5 * K * dj;
+            }
+        }
         acc.energy.bond += energy;
 
         if (m_do_gradient) {
@@ -202,7 +245,10 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
             // Gaussian derivative for the chain rule below, the weight part goes to the
             // Cartesian gradient directly.
             double dEdr = -2.0 * alpha * dr * energy;
-            double dEdr_cart = dEdr + ((w != 1.0 || dwdr != 0.0) ? (k_b * exp_term) * dwdr : 0.0);
+            // dE/dr through the term weight: K (c + w dc/dw) dw/dr (K = k_b e^{-a dr^2}); the
+            // share factor only adds the dc/dw part, c = 1 and dc/dw = 0 when it is off.
+            const double wfac = cshare + (dcdw != 0.0 ? w * dcdw : 0.0);
+            double dEdr_cart = dEdr + ((w != 1.0 || dwdr != 0.0) ? (k_b * exp_term) * wfac * dwdr : 0.0);
             acc.gradient.row(bond.i) += dEdr_cart * derivate.row(0);
             acc.gradient.row(bond.j) += dEdr_cart * derivate.row(1);
 
@@ -1950,6 +1996,122 @@ void FFWorkspace::calcBATM(int p)
 
     if (acc.has_components && m_do_gradient)
         acc.grad_batm += (acc.gradient - grad_before);
+}
+
+// ============================================================================
+// rev-gfnff stage 3a(ii) (Claude Generated, Sep 2026): valence share of the bond well
+//   E_ij = -k_b e^{-a dr^2} w_ij c_ij,  c_ij = 1/2 (f_i + f_j),
+//   f_i  = clip((Val_i - sum_{k != j} w_ik) / w_ij, 0, 1),
+//   Val_i = Val_Z(i) + softplus(sum_k shareClip(b_ik) - Val_Z(i))      (b = the tight bond order)
+// Pairwise wells carry no valence conservation: at an exchange transition state the well of the
+// breaking and the well of the forming bond are both evaluated at full depth, so the pair sum is
+// two wells where one bond's worth of valence is available. c_ij makes the two wells share it.
+//
+// The per-atom sums are built HERE, once per topology corner, from the corner's own bond list -
+// so the stage-1b corner blend carries a change of the sums in over s exactly like every other
+// neighbour re-parameterisation of a topology swap (a pair joins the list at s = 0, where its
+// corner has weight 0). Val_Z is the per-element sigma valence the over-coordination term already
+// uses (revValence(Z), no second table); the clip is C1 and exactly 0/1 outside [0,1].
+//
+// Val_i is the HYPERVALENT-CORRECT reading of that table: the nominal valence plus a saturating
+// term in the settled-partner count. Since sum_k shareClip(b_ik) <= n_i (the bond count) and
+// shareClip <= 1, Val_i equals Val_Z(i) EXACTLY whenever n_i <= Val_Z(i) - so a saturated
+// equilibrium, an unsaturated atom and a stretched bond all keep the nominal valence and the
+// term stays bit-identical - and it grows only for an atom with MORE partners than its nominal
+// valence. An ammonium's fourth bond, a hydronium's third and a perchlorate's fourth are settled
+// partners and are credited (c = 1 on every genuine bond); a migrating H that hangs two PARTIAL
+// bonds off one valence has a settled count at or below 1, so it still shares them.
+// ============================================================================
+
+void FFWorkspace::prepareValenceShare()
+{
+    const int N = m_natoms;
+    if (N == 0 || static_cast<int>(m_rev.valence.size()) != N) {
+        m_rev_share_sum.resize(0);
+        m_rev_share_val.resize(0);
+        m_rev_share_dval.resize(0);
+        return;
+    }
+    if (m_rev_share_sum.size() != N) {
+        m_rev_share_sum.resize(N);
+        m_rev_share_val.resize(N);
+        m_rev_share_dval.resize(N);
+    }
+    m_rev_share_sum.setZero();
+    m_rev_share_val.setZero();
+    m_rev_share_dval.setZero();
+    // Pass 1: the two per-atom sums of the corner's own bond list - the term weight sum (the
+    // share's "already claimed" quantity) and the settled-partner count (shareClip of the TIGHT
+    // bond order b, the switch the over-coordination term already sums).
+    for (const Bond& b : m_bonds) {
+        if (b.i < 0 || b.j < 0 || b.i >= N || b.j >= N)
+            continue;
+        const Eigen::Vector3d d = m_geometry.row(b.i) - m_geometry.row(b.j);
+        const double r = d.norm();
+        if (r < 1e-8)
+            continue;
+        const double w = revWeight(b.i, b.j, r, nullptr);
+        m_rev_share_sum(b.i) += w;
+        m_rev_share_sum(b.j) += w;
+        const double s = shareSettled(revOrder(b.i, b.j, r, nullptr));
+        m_rev_share_val(b.i) += s;
+        m_rev_share_val(b.j) += s;
+    }
+    // Pass 2: the effective valence. Val_Z + G(settled - Val_Z) is exactly the nominal valence
+    // for every atom with at most Val_Z partners (a saturated atom, a stretched bond, a radical)
+    // and only grows for an atom that carries MORE partners than its nominal valence - the only
+    // case in which the share can bite at all.
+    for (int i = 0; i < N; ++i) {
+        const double x = m_rev_share_val(i) - m_rev.valence[i];
+        m_rev_share_dval(i) = shareExcessD(x);
+        m_rev_share_val(i) = m_rev.valence[i] + shareExcess(x);
+    }
+}
+
+void FFWorkspace::applyValenceShareGradient()
+{
+    if (m_dEdshare_total.size() != m_natoms || m_natoms == 0)
+        return;
+    if (m_rev_share_val.size() != m_natoms || m_rev_share_dval.size() != m_natoms)
+        return;
+    // Lambda_i = sum over i's pairs of dE_pair/d sum_i. Every sum depends on the geometry only
+    // through the term weights of the atom's own pairs, so the second pass is the same dw/dr
+    // switch over the same bond list - d sum_i/dx = sum_k (dw_ik/dr) d r_ik/dx.
+    // The effective valence adds a second chain: dE/dVal_i = -Lambda_i (the pair carries
+    // +1/2 K f_i' for Val_i and -1/2 K f_i' for sum_i, i.e. the two are exact negatives), and
+    // dVal_i/dr = dG/dx * shareClipD(b_ik) * db_ik/dr, so the same bond list carries it too.
+    for (const Bond& b : m_bonds) {
+        if (b.i < 0 || b.j < 0 || b.i >= m_natoms || b.j >= m_natoms)
+            continue;
+        const Eigen::Vector3d d = m_geometry.row(b.i) - m_geometry.row(b.j);
+        const double r = d.norm();
+        if (r < 1e-8)
+            continue;
+        double dwdr = 0.0;
+        revWeight(b.i, b.j, r, &dwdr);
+        double dbdr = 0.0;
+        const double bo = revOrder(b.i, b.j, r, &dbdr);
+        // dE/d sum: the term weight of this pair feeds both atoms' sums.
+        double dEdr_sum = 0.0;
+        if (dwdr != 0.0)
+            dEdr_sum = (m_dEdshare_total(b.i) + m_dEdshare_total(b.j)) * dwdr;
+        // dE/d Val: only the SETTLED part of the pair changes Val (shareSettledD is 0 outside the
+        // unit interval of b, so a pair that is fully or barely bonded contributes nothing).
+        double dEdr_val = 0.0;
+        if (dbdr != 0.0) {
+            const double scd = shareSettledD(bo);
+            if (scd != 0.0)
+                dEdr_val = -(m_dEdshare_total(b.i) * m_rev_share_dval(b.i)
+                             + m_dEdshare_total(b.j) * m_rev_share_dval(b.j)) * scd * dbdr;
+        }
+        const double dEdr = dEdr_sum + dEdr_val;
+        if (dEdr == 0.0)
+            continue;
+        const double f = dEdr / r;
+        const Eigen::Vector3d g = f * d;
+        m_result_gradient.row(b.i) += g.transpose();
+        m_result_gradient.row(b.j) -= g.transpose();
+    }
 }
 
 // ============================================================================

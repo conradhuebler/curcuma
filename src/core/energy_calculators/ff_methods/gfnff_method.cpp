@@ -25,6 +25,7 @@
 #include "src/core/periodic_table.h"
 #include "src/core/functional_groups.h"  // Claude Generated (January 10, 2026): Amide detection
 #include <chrono>
+#include <cstdlib>  // Claude Generated (Sep 13, 2026): std::getenv for the CURCUMA_REVDUMP dump
 #include <cstring>
 #include <map>
 #include <set>
@@ -888,11 +889,13 @@ bool GFNFF::InitialiseMolecule()
             CurcumaLogger::result(fmt::format(
                 "GFN-FF react filters: valence cap {}, refractory {} scans, exchange {} scans, slack factor {:.2f}{}",
                 m_react_valence_cap ? "on" : "off", m_react_refractory_scans, m_react_exchange_scans, m_react_slack_form_factor,
-                m_rev_settings.enabled ? fmt::format("; rev form switch {} (order: bond order bo2 > {:.3f}); weights: form at w > {:.3f}, break at w < {:.3f}; transition coordinate bo3 {:.2f}x k {:.1f}, window {:.2f}..{:.2f}, revert {:.2f}; E_over shift {:.3f} k {:.1f} p(H,C,N,O) {:.3f} {:.3f} {:.3f} {:.3f} valence(N,O) {:.2f} {:.2f} preset {}",
+                m_rev_settings.enabled ? fmt::format("; rev form switch {} (order: bond order bo2 > {:.3f}); weights: form at w > {:.3f}, break at w < {:.3f}; transition coordinate bo3 {:.2f}x k {:.1f}, window {:.2f}..{:.2f}, revert {:.2f}; E_over shift {:.3f} k {:.1f} p(H,C,N,O) {:.3f} {:.3f} {:.3f} {:.3f} valence(N,O) {:.2f} {:.2f} preset {}; valence share {}; H never sp {}",
                     m_rev_form_order ? "order" : "weight", m_rev_bo2_form,
                     m_rev_bo_form, m_rev_bo_break, m_rev_settings.bo3_center, m_rev_settings.bo3_width, m_rev_tr_begin, m_rev_tr_end, m_rev_tr_revert,
                     m_rev_settings.over_shift, m_rev_settings.over_k, revOverP(1), revOverP(6), revOverP(7), revOverP(8), revValence(7), revValence(8),
-                    m_parameters.value("rev_over_preset", std::string("stage1a"))) : ""));
+                    m_parameters.value("rev_over_preset", std::string("stage1a")),
+                    m_rev_settings.valence_share ? "on" : "off",
+                    m_rev_settings.h_not_sp ? "on" : "off") : ""));
         }
     }
 
@@ -4659,11 +4662,23 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         int grp1 = (z1 >= 1 && z1 <= 86) ? periodic_group[z1 - 1] : 0;
         int grp2 = (z2 >= 1 && z2 <= 86) ? periodic_group[z2 - 1] : 0;
 
-        if ((grp1 == 7 || z1 == 1) && hyb1_value == 1) {
+        // rev-gfnff stage 3a(ii) (Claude Generated, Sep 2026): "an H is never sp". The rule
+        // below reads sp hybridization of a group-7 atom OR of hydrogen as a BRIDGING bond and
+        // scales its strength by 0.30 (Fortran gfnff_ini.f90:1170-1201). For a hydrogen that is
+        // only ever an exchange intermediate between two partners the reference's 0.30 makes the
+        // shared well unnaturally shallow - measured on the rkt06 H + H2 path the two H-H wells
+        // at the transition state carry fc = -0.0538 Eh against -0.1788 for the same bond in H2,
+        // i.e. 3.3x too weak, and the barrier comes out +39.8 against +2.6 kcal/mol. Without the
+        // scaling the wells are full depth and the barrier lands at +3.4, but the pair sum is then
+        // two full wells where one valence is available (the c_ij rule of rev_valence_share
+        // halves them). The two rules are complementary; together H + H2 gives rms 2.71 kcal/mol
+        // over the 11-point r2SCAN-3c path (15.79 before). rev-only: gfnff keeps the reference.
+        const bool h_sp = !(m_rev_settings.enabled && m_rev_settings.h_not_sp);
+        if ((grp1 == 7 || (z1 == 1 && h_sp)) && hyb1_value == 1) {
             bbtyp = 3;  // linear halogen → no torsion
             is_bridge = true;
         }
-        if ((grp2 == 7 || z2 == 1) && hyb2_value == 1) {
+        if ((grp2 == 7 || (z2 == 1 && h_sp)) && hyb2_value == 1) {
             bbtyp = 3;
             is_bridge = true;
         }
@@ -4673,8 +4688,8 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
             if (grp1 == 7) bstrength = bstren[1] * 0.50;
             if (grp2 == 7) bstrength = bstren[1] * 0.50;
             // Bridging H (Z=1) or F (Z=9): bstrength = bstren[1] * 0.30
-            if (z1 == 1 || z1 == 9) bstrength = bstren[1] * 0.30;
-            if (z2 == 1 || z2 == 9) bstrength = bstren[1] * 0.30;
+            if (z1 == 9 || (z1 == 1 && h_sp)) bstrength = bstren[1] * 0.30;
+            if (z2 == 9 || (z2 == 1 && h_sp)) bstrength = bstren[1] * 0.30;
         }
     }
 
@@ -12044,6 +12059,11 @@ void GFNFF::setupRevSettings()
     rv.term_weights = m_parameters.value("rev_term_weights", true);
     rv.blend_repulsion = m_parameters.value("rev_blend_repulsion", true);
     rv.over_coord = m_parameters.value("rev_over_coord", true);
+    rv.valence_share = m_parameters.value("rev_valence_share", true);
+    // Claude Generated (Sep 13, 2026): rv.h_not_sp was declared and printed but NEVER assigned,
+    // so -gfnff.rev_h_not_sp had no effect at all (in -sp and in -batch alike). Read it here with
+    // the rest of the struct fields.
+    rv.h_not_sp = m_parameters.value("rev_h_not_sp", true);
     rv.bo_center = m_parameters.value("rev_bo_center", 2.0);
     rv.bo_width = m_parameters.value("rev_bo_width", -7.5);
     rv.w_join = m_parameters.value("rev_bo_form", 0.05);
@@ -12122,6 +12142,7 @@ void GFNFF::setupRevSettings()
     if (rev.contains("bo2_center")) rv.bo2_center = rev["bo2_center"].get<double>();
     if (rev.contains("bo2_width")) rv.bo2_width = rev["bo2_width"].get<double>();
     if (rev.contains("over_k")) rv.over_k = rev["over_k"].get<double>();
+    if (rev.contains("valence_share")) rv.valence_share = rev["valence_share"].get<bool>();
     if (rev.contains("over_shift")) rv.over_shift = rev["over_shift"].get<double>();
     if (rev.contains("bo_form")) { m_rev_bo_form = rev["bo_form"].get<double>(); rv.w_join = m_rev_bo_form; }
     if (rev.contains("bo2_form")) m_rev_bo2_form = rev["bo2_form"].get<double>();
@@ -12192,6 +12213,31 @@ void GFNFF::setupRevSettings()
     }
     if (rv.bo_width >= 0.0 || rv.bo2_width >= 0.0)
         throw std::runtime_error("rev-gfnff: rev_bo_width and rev_bo2_width must be negative (b -> 1 inside the switching radius)");
+    // Claude Generated (Sep 13, 2026): CURCUMA_REVDUMP=1 prints every rev setting this run
+    // actually resolved. Added because the rev PARAMs are read in two places - PARAMs first, then
+    // the rev section of the parameter tables - and a PARAM that is declared but never read into
+    // the struct shows up in no other log line: -gfnff.rev_h_not_sp was one, inert in -sp AND in
+    // -batch. Same convention as CURCUMA_NBDIAG / CURCUMA_HYBDIFF: zero cost when unset.
+    if (const char* d = std::getenv("CURCUMA_REVDUMP"); d && d[0] == '1') {
+        CurcumaLogger::result(fmt::format(
+            "rev dump (struct): enabled {} bond_weight {} term_weights {} blend_repulsion {} over_coord {} "
+            "valence_share {} h_not_sp {} blend {}",
+            rv.enabled, rv.bond_weight, rv.term_weights, rv.blend_repulsion, rv.over_coord,
+            rv.valence_share, rv.h_not_sp, rv.blend));
+        CurcumaLogger::result(fmt::format(
+            "rev dump (scalars): bo {:.4f}/{:.4f} bo2 {:.4f}/{:.4f} bo3 {:.4f}/{:.4f} bo4 {:.4f}/{:.4f} "
+            "bo5 {:.4f}/{:.4f} over_k {:.4f} over_shift {:.4f} w_join {:.4f}",
+            rv.bo_center, rv.bo_width, rv.bo2_center, rv.bo2_width, rv.bo3_center, rv.bo3_width,
+            rv.bo4_center, rv.bo4_width, rv.bo5_center, rv.bo5_width,
+            rv.over_k, rv.over_shift, rv.w_join));
+        CurcumaLogger::result(fmt::format(
+            "rev dump (flags): form {} bo2_form {:.4f} bo_form {:.4f} bo_break {:.4f} bo13_form {:.4f} "
+            "tr {:.4f}/{:.4f}/{:.4f}/{:.4f} cooldown {} max_transitions {} sqe {} sqe_bmin {:.5f} preset {}",
+            m_rev_form_order ? "order" : "weight", m_rev_bo2_form, m_rev_bo_form, m_rev_bo_break,
+            m_rev_bo13_form, m_rev_tr_begin, m_rev_tr_end, m_rev_tr_revert, m_rev_tr_prebreak,
+            m_rev_demote_cooldown, m_rev_max_transitions, m_rev_sqe, m_rev_sqe_bmin,
+            m_parameters.value("rev_over_preset", std::string("stage1a"))));
+    }
 }
 
 void GFNFF::fillRevPerAtom()
