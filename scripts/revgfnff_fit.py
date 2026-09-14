@@ -74,7 +74,8 @@ def _topology_index(cls, points):
     """Index of the topology-defining frame within one system's point list.
 
     A/E/L (dissociation-type curves): smallest scan value (bonded geometry).
-    C (hyper-coordination): largest scan value (fragments separated).
+    C (hyper-coordination) and S (rigid intermolecular contact): largest scan value
+    (fragments separated) -- a class-S contact scan is a dissociation curve in reverse.
     D (MD snapshots): the first point, unconditionally.
     Falls back to index 0 if the labels don't carry a parseable scan value.
     """
@@ -82,7 +83,7 @@ def _topology_index(cls, points):
         return 0
     values = [_scan_value(p["label"]) for p in points]
     if all(v is not None for v in values):
-        if cls == "C":
+        if cls in ("C", "S"):
             return max(range(len(points)), key=lambda i: values[i])
         return min(range(len(points)), key=lambda i: values[i])
     return 0
@@ -100,13 +101,15 @@ def _order_points(cls, mode, pts, idx):
     react mode needs a monotonic reaction-coordinate trajectory so the react topology
     machinery (bond formation/breaking, WP-react) sees a continuous scan instead of jumps:
     class A/E/L go shortest -> longest scan value, class C longest -> shortest (fragments
-    approaching). static mode (and any class whose labels don't carry a scan value) keeps
+    approaching), class S likewise (a contact scan run in the association direction, so that
+    frame 0 is the separated geometry the _topology_index helper names as the topology frame).
+    static mode (and any class whose labels don't carry a scan value) keeps
     the topology frame first and the rest in discovery order, as order is immaterial there.
     """
     if mode == "react" and cls != "D":
         values = [_scan_value(p["label"]) for p in pts]
         if all(v is not None for v in values):
-            order = sorted(range(len(pts)), key=lambda i: values[i], reverse=(cls == "C"))
+            order = sorted(range(len(pts)), key=lambda i: values[i], reverse=(cls in ("C", "S")))
             return [pts[i] for i in order]
     return [pts[idx]] + [p for i, p in enumerate(pts) if i != idx]
 

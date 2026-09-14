@@ -89,6 +89,15 @@ MOL = {
     "ch3cl":  (0, 1, [("C", 0, 0, 0), ("Cl", 1.78, 0, 0), ("H", -0.36, 1.03, 0), ("H", -0.36, -0.51, 0.89), ("H", -0.36, -0.51, -0.89)]),
     "nh2oh":  (0, 1, [("N", 0, 0, 0), ("O", 1.45, 0, 0), ("H", 1.80, 0.90, 0), ("H", -0.40, 0.90, 0.40), ("H", -0.40, -0.90, 0.40)]),
     "hocl":   (0, 1, [("O", 0, 0, 0), ("H", 0.97, 0, 0), ("Cl", -0.60, 1.58, 0)]),
+    # class A, the four missing element pairs N-F / N-Cl / O-F / F-Cl (the 21-pair table,
+    # FABLE_ROADMAP_REVIEW.md item 6). Claude Generated (Sep 2026). N-F and N-Cl from the
+    # experimental F-N-F 102 deg / Cl-N-Cl 107 deg pyramidal cones, O-F from F-O-F 103 deg.
+    "nf3":    (0, 1, [("N", 0, 0, 0), ("F", 1.2294, 0, -0.6046),
+                      ("F", -0.6147, 1.0647, -0.6046), ("F", -0.6147, -1.0647, -0.6046)]),
+    "ncl3":   (0, 1, [("N", 0, 0, 0), ("Cl", 1.6337, 0, -0.6544),
+                      ("Cl", -0.8169, 1.4149, -0.6544), ("Cl", -0.8169, -1.4149, -0.6544)]),
+    "of2":    (0, 1, [("O", 0, 0, 0), ("F", 1.2742, 0, -0.6038), ("F", -0.6371, 1.1035, -0.6038)]),
+    "clf":    (0, 1, [("Cl", 0, 0, 0), ("F", 0, 0, 1.63)]),
     # class C partners / class E species
     "ch3":    (0, 2, [("C", 0, 0, 0), ("H", 1.08, 0, 0), ("H", -0.54, 0.94, 0), ("H", -0.54, -0.94, 0)]),
     "cl2m":   (-1, 2, [("Cl", 0, 0, 0), ("Cl", 0, 0, 2.60)]),
@@ -111,6 +120,9 @@ CURVES = [
     ("c2h2", 0, 1, "C#C"), ("hcn", 0, 1, "C#N"), ("hcn", 0, 2, "HC-H"), ("h2co", 0, 1, "C=O"), ("ch3oh", 0, 1, "C-O"),
     ("ch3oh", 1, 2, "HO-H"), ("ch3nh2", 0, 1, "C-N"), ("ch2nh", 0, 1, "C=N"), ("n2h4", 0, 1, "N-N"), ("n2h2", 0, 1, "N=N"),
     ("h2o2", 0, 1, "O-O"), ("ch3f", 0, 1, "C-F"), ("ch3cl", 0, 1, "C-Cl"), ("nh2oh", 0, 1, "N-O"), ("hocl", 0, 2, "O-Cl"),
+    # the four missing element pairs (FABLE_ROADMAP_REVIEW.md item 6, completes the 21-pair
+    # table); Claude Generated (Sep 2026)
+    ("nf3", 0, 1, "N-F"), ("ncl3", 0, 1, "N-Cl"), ("of2", 0, 1, "O-F"), ("clf", 0, 1, "F-Cl"),
 ]
 CURVE_GRID = [0.75, 0.80, 0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.20, 1.30, 1.40, 1.50, 1.60, 1.80, 2.00, 2.25, 2.50, 2.75, 3.00, 3.50]
 
@@ -130,6 +142,30 @@ APPROACH = [
     ("nh3_Hp", "nh3", "H", 0, ("lonepair",), 1, 1),
     ("h2o_Hp", "h2o", "H", 0, ("lonepair",), 1, 1),
     ("h2_Hp", "h2", "H", 1, ("opposite", 0), 1, 1),
+]
+
+# ------------------------------------------------------------------ class S: rigid contact scans
+# Claude Generated (Sep 2026) -- FABLE_ROADMAP_REVIEW.md item 8: the intermolecular SEPARATION of
+# a fixed contact pair is scanned rigidly (no bond is stretched, so this does not run through the
+# class-A `stretched()` machinery). Purpose: falsify the stage-3a(ii) valence-share factor c_ij --
+# the rev-gfnff interaction curve must stay within ~1 kcal/mol of plain gfnff's.
+# Layout: fragment A's anchor sits at the origin with A's contact direction along +z, fragment B's
+# anchor at (0,0,d) with B's direction along -z, so the anchor-anchor distance is exactly d.
+CONTACT_GRID = [2.30, 2.40, 2.50, 2.60, 2.70, 2.80, 2.90, 3.00, 3.10, 3.25,
+                3.40, 3.60, 3.80, 4.00, 4.25, 4.50, 4.80, 5.10, 5.50, 6.00]
+# The scan variable d is the HEAVY-ATOM separation of the contact pair (O...O, F...F, N...O,
+# C...O) -- the hydrogen sits rigidly along the axis in between, so the contact H...Y distance
+# is d minus the donor X-H bond length (0.96 A for O-H, 0.92 for H-F, 1.01 for N-H, 1.09 for
+# C-H). Anchoring on the H instead would drive the two heavy atoms 0.96 A apart at d = 2 A.
+# (name, (moleculeA, anchorA, dirA), (moleculeB, anchorB, dirB), contact label)
+# dir spec: ("atoms", k, sign) = sign * unit(atom_k - anchor);  ("lonepair",) = the class-C rule
+# (negative mean of the anchor's bond vectors), reused so S and C agree on lone-pair directions.
+# A's direction is placed along +z, B's along -z, so B's donor hydrogen points back at A.
+CONTACTS = [
+    ("water_dimer_OO", ("h2o", 0, ("lonepair",)), ("h2o", 0, ("atoms", 1, 1)), "O...H-O"),
+    ("hf_dimer_FF", ("hf", 1, ("atoms", 0, -1)), ("hf", 1, ("atoms", 0, 1)), "F...H-F"),
+    ("nh3_h2o_NO", ("h2o", 0, ("lonepair",)), ("nh3", 0, ("atoms", 1, 1)), "O...H-N"),
+    ("ch4_h2o_CO", ("h2o", 0, ("lonepair",)), ("ch4", 0, ("atoms", 1, 1)), "O...H-C"),
 ]
 
 # class D: molecules sampled by GFN-FF MD
@@ -260,6 +296,49 @@ def approach(host, attacker_atoms, anchor, rule, dist):
             rel = rotate_onto(rel, axis, u)
         placed.append((s, pa[0] + dist * u[0] + rel[0], pa[1] + dist * u[1] + rel[1], pa[2] + dist * u[2] + rel[2]))
     return host + placed
+
+
+def contact_direction(atoms, anchor, spec):
+    """Unit contact direction of a fragment, in the fragment's own frame (class S)."""
+    pa = atoms[anchor][1:]
+    if spec[0] == "lonepair":
+        rcov = {"H": 0.32, "C": 0.75, "N": 0.71, "O": 0.63, "F": 0.64, "Cl": 0.99}
+        v = [0.0, 0.0, 0.0]
+        for b, (s, x, y, z) in enumerate(atoms):
+            if b == anchor:
+                continue
+            if math.dist(pa, (x, y, z)) < 1.3 * (rcov[atoms[anchor][0]] + rcov[s]):
+                for c, q in enumerate((x, y, z)):
+                    v[c] -= q - pa[c]
+    else:
+        _, k, sign = spec
+        pk = atoms[k][1:]
+        v = [sign * (pk[c] - pa[c]) for c in range(3)]
+    n = math.sqrt(sum(c * c for c in v))
+    if n < 1e-9:
+        raise RuntimeError("degenerate contact direction")
+    return [c / n for c in v]
+
+
+def place_fragment(atoms, anchor, spec, target_dir, target_pos):
+    """Rigidly rotate+translate a fragment: its anchor to `target_pos`, its contact direction to
+    `target_dir`. The rotation about that axis is the minimal one (deterministic)."""
+    v = contact_direction(atoms, anchor, spec)
+    pa = atoms[anchor][1:]
+    out = []
+    for s, x, y, z in atoms:
+        rel = rotate_onto([x - pa[0], y - pa[1], z - pa[2]], v, target_dir)
+        out.append((s, target_pos[0] + rel[0], target_pos[1] + rel[1], target_pos[2] + rel[2]))
+    return out
+
+
+def contact_dimer(a_atoms, a_anchor, a_spec, b_atoms, b_anchor, b_spec, d):
+    """Fragment A anchored at the origin with its direction along +z, fragment B anchored at
+    (0,0,d) with its direction along -z (class S). Atom order: A's atoms, then B's atoms, so
+    A's contact atom is index `a_anchor` and B's is `len(a_atoms) + b_anchor`."""
+    a = place_fragment(a_atoms, a_anchor, a_spec, [0.0, 0.0, 1.0], [0.0, 0.0, 0.0])
+    b = place_fragment(b_atoms, b_anchor, b_spec, [0.0, 0.0, -1.0], [0.0, 0.0, d])
+    return a + b
 
 
 def rotate_onto(vec, a, b):
@@ -1197,27 +1276,66 @@ def build_lost_scan_jobs(only, nprocs, log):
 # ------------------------------------------------------------------ plan
 
 
+def curve_points(mol, i, j, nprocs, log):
+    """The 20 rigid-stretch points of one class-A curve (shared by classes A and H)."""
+    atoms, charge, mult = reference_geometry(mol, nprocs, log)
+    req = math.dist(atoms[i][1:], atoms[j][1:])
+    pts = [stretched(atoms, i, j, f * req) for f in CURVE_GRID]
+    labels = [f"r={f * req:.4f}" for f in CURVE_GRID]
+    return atoms, charge, mult, req, pts, labels
+
+
 def build_jobs(classes, only, nprocs, log, b_mode="neb"):
     jobs = []
-    if "A" in classes:
+    for acls in ("A", "H"):
+        # class H (Claude Generated, Sep 2026): the class-A rigid stretches re-run with
+        # `%output Print[P_Hirshfeld] 1` and written to their own directory tree, so the
+        # existing class-A energies.json stays valid and untouched. Same cached reference
+        # geometries, same CURVE_GRID -> point k of H/<sys> is exactly point k of A/<sys>.
+        # Purpose: the far-point fragment charges that decide whether the -20..-35 kcal/mol
+        # X-Y Coulomb drift is chi(CN)/EEQ or physics (FABLE_ROADMAP_REVIEW.md item 7).
+        if acls not in classes:
+            continue
+        h = acls == "H"
         for mol, i, j, label in CURVES:
             if only and mol not in only and f"{mol}_{label}" not in only:
                 continue
-            atoms, charge, mult = reference_geometry(mol, nprocs, log)
-            req = math.dist(atoms[i][1:], atoms[j][1:])
-            pts = [stretched(atoms, i, j, f * req) for f in CURVE_GRID]
-            labels = [f"r={f * req:.4f}" for f in CURVE_GRID]
+            atoms, charge, mult, req, pts, labels = curve_points(mol, i, j, nprocs, log)
             sysname = f"{mol}_{label.replace('#', 'T').replace('=', 'D')}"
+            suffix = ", Hirshfeld charges" if h else ""
             if mult == 1:
-                jobs.append(Job("A", sysname + "_rks", pts, charge, 1, labels=labels, tag=f"{label} rigid stretch, RKS"))
+                jobs.append(Job(acls, sysname + "_rks", pts, charge, 1, hirshfeld=h, labels=labels,
+                                tag=f"{label} rigid stretch, RKS{suffix}"))
                 if UKS_INSIDE_OUT:  # retry strategy: flip the spins near r_eq and follow the curve outward
-                    jobs.append(Job("A", sysname + "_uks", pts, charge, 1, uks=True, broken_sym=True,
-                                    labels=labels, tag=f"{label} rigid stretch, UKS broken symmetry, inside out"))
+                    jobs.append(Job(acls, sysname + "_uks", pts, charge, 1, uks=True, broken_sym=True, hirshfeld=h,
+                                    labels=labels, tag=f"{label} rigid stretch, UKS broken symmetry, inside out{suffix}"))
                 else:
-                    jobs.append(Job("A", sysname + "_uks", list(reversed(pts)), charge, 1, uks=True, broken_sym=True,
-                                    labels=list(reversed(labels)), tag=f"{label} rigid stretch, UKS broken symmetry, outside in"))
+                    jobs.append(Job(acls, sysname + "_uks", list(reversed(pts)), charge, 1, uks=True, broken_sym=True, hirshfeld=h,
+                                    labels=list(reversed(labels)), tag=f"{label} rigid stretch, UKS broken symmetry, outside in{suffix}"))
             else:
-                jobs.append(Job("A", sysname + "_uks", pts, charge, mult, uks=True, labels=labels, tag=f"{label} rigid stretch, UKS mult {mult}"))
+                jobs.append(Job(acls, sysname + "_uks", pts, charge, mult, uks=True, hirshfeld=h, labels=labels,
+                                tag=f"{label} rigid stretch, UKS mult {mult}{suffix}"))
+    if "S" in classes:
+        # class S: rigid intermolecular separation scans (see CONTACTS)
+        for name, (ma, aa, sa), (mb, ab, sb), clab in CONTACTS:
+            if only and name not in only:
+                continue
+            a_atoms, _, _ = reference_geometry(ma, nprocs, log)
+            b_atoms, _, _ = reference_geometry(mb, nprocs, log)
+            pts = [contact_dimer(a_atoms, aa, sa, b_atoms, ab, sb, d) for d in CONTACT_GRID]
+            labels = [f"d={d:.2f}" for d in CONTACT_GRID]
+            # The two isolated monomers must NOT ride along in this ORCA chain: the chain carries
+            # the MOs from one `$new_job` to the next, and a job with a different atom count
+            # fails in GUESS ("Input geometry does not match current geometry", ORCA 6.1) --
+            # measured on the first two contacts, which came out 20/22 with exactly the two
+            # monomer points missing. The interaction energy therefore uses the largest
+            # separation (6.0 A) as its zero, where the interaction is < 0.05 kcal/mol for all
+            # four contacts (rigid monomers, no relaxation, so the curve stays exact).
+            jobs.append(Job("S", name, pts, 0, 1, labels=labels,
+                            tag=f"rigid contact scan {clab}: heavy-atom separation "
+                                f"{CONTACT_GRID[0]}-{CONTACT_GRID[-1]} A ({ma} atom {aa} / {mb} atom {ab}); "
+                                f"A contact atom index {aa}, B contact atom index {len(a_atoms) + ab}; "
+                                f"interaction energy referenced to the d={CONTACT_GRID[-1]} point"))
     if "C" in classes:
         for name, host, att, anchor, rule, charge, mult in APPROACH:
             if only and name not in only:
@@ -1279,7 +1397,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["plan", "run", "status"])
     ap.add_argument("--classes", nargs="+", default=["A", "C"],
-                     help="A dissociation curves, C hyper-coordination, D off-eq MD snapshots, "
+                     help="A dissociation curves, H the same class-A curves re-run with Hirshfeld "
+                          "charges (own directory tree), S rigid intermolecular contact scans, "
+                          "C hyper-coordination, D off-eq MD snapshots, "
                           "E charged/proton-transfer (Hirshfeld), L lost-scan reproductions, B NEB-TS paths")
     ap.add_argument("--only", nargs="*", help="system names (molecule for A/D/E, approach name for C, "
                                               "job name for E-extra/L/B)")
