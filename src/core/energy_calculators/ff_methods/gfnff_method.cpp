@@ -12060,6 +12060,15 @@ void GFNFF::setupRevSettings()
     rv.blend_repulsion = m_parameters.value("rev_blend_repulsion", true);
     rv.over_coord = m_parameters.value("rev_over_coord", true);
     rv.valence_share = m_parameters.value("rev_valence_share", true);
+    // Claude Generated (Sep 14, 2026): the smooth 1,3 proxy of the share - the claim of a pair is
+    // w_p g_p with g the bond-order leak of a settled shared partner (see FFWorkspace). Off = the
+    // plain, unmasked share (bit-identical to the state before the proxy).
+    // Claude Generated (Sep 14, 2026): the proxy is an opt-in experiment and DEFAULT OFF, so the
+    // hardcoded fallback here is the default. Measured (Sep 14): this new key does not arrive
+    // through ParameterRegistry::getDefaultJson() in this build - m_parameters lacks it, so with no
+    // CLI flag the fallback decides (with default true the proxy was silently ON); both explicit
+    // forms (-gfnff.rev_share_onethree true|false) do reach it, so the switch itself works.
+    rv.share_onethree = m_parameters.value("rev_share_onethree", false);
     // Claude Generated (Sep 13, 2026): rv.h_not_sp was declared and printed but NEVER assigned,
     // so -gfnff.rev_h_not_sp had no effect at all (in -sp and in -batch alike). Read it here with
     // the rest of the struct fields.
@@ -12221,9 +12230,9 @@ void GFNFF::setupRevSettings()
     if (const char* d = std::getenv("CURCUMA_REVDUMP"); d && d[0] == '1') {
         CurcumaLogger::result(fmt::format(
             "rev dump (struct): enabled {} bond_weight {} term_weights {} blend_repulsion {} over_coord {} "
-            "valence_share {} h_not_sp {} blend {}",
+            "valence_share {} share_onethree {} h_not_sp {} blend {}",
             rv.enabled, rv.bond_weight, rv.term_weights, rv.blend_repulsion, rv.over_coord,
-            rv.valence_share, rv.h_not_sp, rv.blend));
+            rv.valence_share, rv.share_onethree, rv.h_not_sp, rv.blend));
         CurcumaLogger::result(fmt::format(
             "rev dump (scalars): bo {:.4f}/{:.4f} bo2 {:.4f}/{:.4f} bo3 {:.4f}/{:.4f} bo4 {:.4f}/{:.4f} "
             "bo5 {:.4f}/{:.4f} over_k {:.4f} over_shift {:.4f} w_join {:.4f}",

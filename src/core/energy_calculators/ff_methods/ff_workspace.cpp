@@ -275,7 +275,6 @@ double FFWorkspace::calculateSingle(bool gradient)
             m_result_gradient.swap(m_accumulators[0].gradient);
             m_dEdcn_total = m_accumulators[0].dEdcn;
             m_dEdcn_bond_total = m_accumulators[0].dEdcn_bond;
-        m_dEdshare_total = m_accumulators[0].dEdshare;
             m_dEdshare_total = m_accumulators[0].dEdshare;
         }
         if (m_store_components && gradient) {
@@ -446,6 +445,11 @@ void FFWorkspace::reduce()
         m_result_gradient = m_accumulators[0].gradient;
         m_dEdcn_total = m_accumulators[0].dEdcn;
         m_dEdcn_bond_total = m_accumulators[0].dEdcn_bond;
+        // Claude Generated (Sep 14, 2026): dEdshare was never reduced, so with more than one
+        // thread the valence share's chain rule (applyValenceShareGradient) read a stale or empty
+        // m_dEdshare_total - the share gradient was silently thread-count dependent. The T=1 path
+        // always took the accumulator directly, which is why only the threaded path was wrong.
+        m_dEdshare_total = m_accumulators[0].dEdshare;
     }
     if (m_store_components && m_do_gradient) {
         m_result_grad_bond = m_accumulators[0].grad_bond;
@@ -467,6 +471,8 @@ void FFWorkspace::reduce()
             m_result_gradient += m_accumulators[t].gradient;
             m_dEdcn_total += m_accumulators[t].dEdcn;
             m_dEdcn_bond_total += m_accumulators[t].dEdcn_bond;
+            if (m_dEdshare_total.size() == m_accumulators[t].dEdshare.size())
+                m_dEdshare_total += m_accumulators[t].dEdshare;
         }
         if (m_store_components && m_do_gradient) {
             m_result_grad_bond += m_accumulators[t].grad_bond;

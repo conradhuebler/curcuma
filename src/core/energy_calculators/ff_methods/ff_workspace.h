@@ -240,6 +240,20 @@ struct RevSettings {
     /// shares them. Removes the missing valence conservation of pairwise wells: two wells that
     /// share one valence sum to one well's worth instead of two.
     bool valence_share = true;
+    /// rev-gfnff stage 3a(ii) (Claude Generated, Sep 14, 2026): the SMOOTH 1,3 proxy of the share
+    /// - a pair does not claim valence for the bond order that leaks onto it from a SETTLED
+    /// shared partner (g_p = shareClip(1 - sum_k sigma_ik sigma_jk), sigma = shareSettled(b)),
+    /// which is what separates a 1,3 contact (the F...F pairs of a compressed BF4-) from the
+    /// migrating pair of an exchange transition state without a discrete topology test. See the
+    /// member documentation.
+    /// DEFAULT OFF (measured, test_cases/revgfnff/_log/PROXY_STATUS.md): it fixes the BF4- probe
+    /// exactly (0.0000 vs +569.70 kcal/mol), is FD-exact and preserves every bit-identity, but it
+    /// gives a 1,3 contact pair the FULL well of its pair (c = 1) where the plain share suppresses
+    /// it, and in hot react MD those wells appear and vanish -> max |dE_jump| 3331 vs 471 kJ/mol
+    /// and 24 vs 3 events >= 50 kJ/mol on the 22-cell grid. So it is an opt-in experiment, not the
+    /// default; the design decision it feeds is recorded in the vault note of
+    /// docs/REV_GFNFF_ROADMAP.md.
+    bool share_onethree = false;
     /// rev-gfnff stage 3a(ii) (Sep 2026): "an H is never sp" - an sp hydrogen is not treated as
     /// a bridging atom, so its bond keeps the full strength instead of the reference's 0.30
     /// scaling. See the comment at the rule in gfnff_method.cpp.
@@ -614,6 +628,9 @@ private:
     std::vector<double> m_rev_share_sig;    ///< sigma_p = shareSettled(b_p)
     std::vector<double> m_rev_share_dsig;   ///< d sigma_p / d r_p (the three-body chain rule)
     std::vector<int> m_rev_share_stamp;     ///< scratch for the common-neighbour lookup
+    std::vector<std::vector<int>> m_rev_adj; ///< per atom, the bond indices of the corner (m_bonds order)
+    /// the other end of bond q as seen from atom a (rev-gfnff 3a(ii) 1,3 proxy)
+    int otherEndOf(int q, int a) const { return (m_bonds[q].i == a) ? m_bonds[q].j : m_bonds[q].i; }
     GeoGradMatrix m_grad_before_cn;  ///< Gradient snapshot before CN chain-rule (diagnostic) — WP-G: RowMajor
     bool m_store_components = false;
     bool m_do_gradient = false;

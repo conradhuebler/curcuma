@@ -213,28 +213,42 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
         // interval itself (shareClip) and Val_i is the over-coordination term's own valence table,
         // made hypervalent-correct by the settled-partner count (see prepareValenceShare).
         double cshare = 1.0, dcdw = 0.0;
-        if (rev_share && w > 1e-12) {
+        if (rev_share && w > 1e-12 && idx < static_cast<int>(m_rev_share_g.size())) {
             const double inv = 1.0 / w;
-            const double gi = (m_rev_share_val(bond.i) - m_rev_share_sum(bond.i) + w) * inv;
-            const double gj = (m_rev_share_val(bond.j) - m_rev_share_sum(bond.j) + w) * inv;
+            // rev-gfnff stage 3a(ii) Sep 14, 2026: g = the genuineness of THIS pair (the smooth
+            // 1,3 proxy, m_bonds order). It enters twice - the pair claims only w g of valence on
+            // each end (so it is inside the sums, built by prepareValenceShare), and its own well
+            // is multiplied by c = 1 - g (1 - (f_i + f_j)/2): g = 1 gives the plain share, g = 0
+            // (a 1,3 contact) leaves the well exactly as it is.
+            const double g = m_rev_share_g[idx];
+            const double gi = (m_rev_share_val(bond.i) - m_rev_share_sum(bond.i) + w * g) * inv;
+            const double gj = (m_rev_share_val(bond.j) - m_rev_share_sum(bond.j) + w * g) * inv;
             const double fi = shareClip(gi), fj = shareClip(gj);
-            cshare = 0.5 * (fi + fj);
+            cshare = 1.0 - g * (1.0 - 0.5 * (fi + fj));
             energy *= cshare;
             if (m_do_gradient) {
                 const double di = shareClipD(gi), dj = shareClipD(gj);
                 // Claude Generated (Sep 13, 2026): d c / d w at fixed SUMS - the sum's own
                 // w-dependence is supplied by the Lambda pass of applyValenceShareGradient.
-                // With g_i = (Val_i - sum_i + w)/w = (Val_i - sum_i)/w + 1 at constant sum_i,
-                // dg_i/dw = -(g_i - 1)/w. The "sums free" form -g_i/w (the previous code, whose
-                // comment already claimed "fixed sums") double-counts Lambda: at the rkt06
-                // exchange TS the analytic gradient was then 0.4 % short of the FD of the share
-                // energy (1.4e-04 vs 4.7e-06 Eh/Angstrom after the fix).
-                dcdw = -0.5 * (di * (gi - 1.0) + dj * (gj - 1.0)) * inv;
-                // dE_pair/d sum_i = -K f_i' / 2 with K = k_b e^{-a dr^2} (the pair's own S does
-                // not enter its own sum, so no extra own-pair term here)
+                // With u_i = (Val_i - sum_i + w g)/w = (Val_i - sum_i)/w + g at constant sum_i,
+                // du_i/dw = -(u_i - g)/w, and c = 1 - g (1 - (f_i + f_j)/2) carries the g in front:
+                //     dc/dw = -(g/2) [ f_i'(u_i - g) + f_j'(u_j - g) ] / w.
+                // The "sums free" form -g_i/w (the earlier code, whose comment already claimed
+                // "fixed sums") double-counts Lambda: at the rkt06 exchange TS the analytic
+                // gradient was then 0.4 % short of the FD of the share energy (1.4e-04 vs
+                // 4.7e-06 Eh/Angstrom after the fix).
+                dcdw = -0.5 * g * (di * (gi - g) + dj * (gj - g)) * inv;
+                // dE_pair/d sum_i = -K g f_i' / 2 with K = k_b e^{-a dr^2} (the pair's own S
+                // does not enter its own sum, so no extra own-pair term here)
                 const double K = k_b * exp_term;
-                acc.dEdshare(bond.i) += -0.5 * K * di;
-                acc.dEdshare(bond.j) += -0.5 * K * dj;
+                acc.dEdshare(bond.i) += -0.5 * K * g * di;
+                acc.dEdshare(bond.j) += -0.5 * K * g * dj;
+                // dE_pair/d g = K w d c/d g, with f_i = clip((Val_i - sum_i)/w + g) so that
+                // d f_i/d g = f_i' = shareClipD(g_i) = di:
+                //     d c/d g = -(1 - (f_i + f_j)/2) + (g/2)(di + dj).
+                // The g-dependence of the SUMS is the second half of the same derivative and is
+                // applied in applyValenceShareGradient (it spans three atoms).
+                m_rev_share_dg[idx] += K * w * (-(1.0 - 0.5 * (fi + fj)) + 0.5 * g * (di + dj));
             }
         }
         acc.energy.bond += energy;
@@ -2026,10 +2040,16 @@ void FFWorkspace::calcBATM(int p)
 void FFWorkspace::prepareValenceShare()
 {
     const int N = m_natoms;
+    const int nb = static_cast<int>(m_bonds.size());
     if (N == 0 || static_cast<int>(m_rev.valence.size()) != N) {
         m_rev_share_sum.resize(0);
         m_rev_share_val.resize(0);
         m_rev_share_dval.resize(0);
+        m_rev_share_g.clear();
+        m_rev_share_dg.clear();
+        m_rev_share_gclip.clear();
+        m_rev_share_sig.clear();
+        m_rev_share_dsig.clear();
         return;
     }
     if (m_rev_share_sum.size() != N) {
@@ -2040,24 +2060,84 @@ void FFWorkspace::prepareValenceShare()
     m_rev_share_sum.setZero();
     m_rev_share_val.setZero();
     m_rev_share_dval.setZero();
-    // Pass 1: the two per-atom sums of the corner's own bond list - the term weight sum (the
-    // share's "already claimed" quantity) and the settled-partner count (shareClip of the TIGHT
-    // bond order b, the switch the over-coordination term already sums).
-    for (const Bond& b : m_bonds) {
+    m_rev_share_g.assign(nb, 1.0);
+    m_rev_share_dg.assign(nb, 0.0);
+    m_rev_share_gclip.assign(nb, 0.0);
+    m_rev_share_sig.assign(nb, 0.0);
+    m_rev_share_dsig.assign(nb, 0.0);
+    // rev-gfnff stage 3a(ii) (Claude Generated, Sep 14, 2026): the smooth 1,3 proxy needs, per
+    // pair, the settled weights of the pairs that share a partner with it, so the corner's bond
+    // list is indexed by atom once. `adj` holds BOND INDICES (m_bonds order); the pair's own
+    // weight w and settled weight sigma are computed in the same pass.
+    m_rev_adj.assign(N, {});
+    std::vector<double> wp(nb, 0.0);
+    for (int p = 0; p < nb; ++p) {
+        const Bond& b = m_bonds[p];
         if (b.i < 0 || b.j < 0 || b.i >= N || b.j >= N)
             continue;
         const Eigen::Vector3d d = m_geometry.row(b.i) - m_geometry.row(b.j);
         const double r = d.norm();
         if (r < 1e-8)
             continue;
-        const double w = revWeight(b.i, b.j, r, nullptr);
-        m_rev_share_sum(b.i) += w;
-        m_rev_share_sum(b.j) += w;
-        const double s = shareSettled(revOrder(b.i, b.j, r, nullptr));
-        m_rev_share_val(b.i) += s;
-        m_rev_share_val(b.j) += s;
+        m_rev_adj[b.i].push_back(p);
+        m_rev_adj[b.j].push_back(p);
+        double dbdr = 0.0;
+        const double bo = revOrder(b.i, b.j, r, &dbdr);
+        m_rev_share_sig[p] = shareSettled(bo);
+        m_rev_share_dsig[p] = shareSettledD(bo) * dbdr;
+        wp[p] = revWeight(b.i, b.j, r, nullptr);
     }
-    // Pass 2: the effective valence. Val_Z + G(settled - Val_Z) is exactly the nominal valence
+    // Pass 2: the genuineness g_p of every pair - g = shareClip(1 - t) with
+    //     t_p = sum_{k != i,j} sigma_ik sigma_jk
+    // the bond-order leak of a SETTLED shared partner (k is a neighbour of BOTH ends). The two
+    // ends themselves are never counted: a bond index of i's list whose other end is j cannot be
+    // matched by an entry of j's list (whose other ends are != j). With the proxy off, g = 1 and
+    // t = 0 for every pair, i.e. exactly the unmasked share.
+    const bool onethree = m_rev.share_onethree;
+    if (onethree) {
+        if (static_cast<int>(m_rev_share_stamp.size()) != N)
+            m_rev_share_stamp.assign(N, -1);
+        else
+            std::fill(m_rev_share_stamp.begin(), m_rev_share_stamp.end(), -1);
+        for (int p = 0; p < nb; ++p) {
+            const Bond& b = m_bonds[p];
+            if (b.i < 0 || b.j < 0 || b.i >= N || b.j >= N)
+                continue;
+            // stamp[k] = the BOND INDEX of the pair (i, k) while k is a neighbour of i, -1
+            // otherwise. The entries are cleared again after the pair, so the array is all -1
+            // between pairs (the invariant the membership test relies on).
+            for (int qa : m_rev_adj[b.i])
+                m_rev_share_stamp[otherEndOf(qa, b.i)] = qa;
+            double t = 0.0;
+            for (int qb : m_rev_adj[b.j]) {
+                const int k = otherEndOf(qb, b.j);
+                const int qa = m_rev_share_stamp[k];
+                if (qa >= 0)
+                    t += m_rev_share_sig[qa] * m_rev_share_sig[qb];
+            }
+            for (int qa : m_rev_adj[b.i])
+                m_rev_share_stamp[otherEndOf(qa, b.i)] = -1;
+            const double leak = 1.0 - t;
+            m_rev_share_g[p] = shareClip(leak);
+            m_rev_share_gclip[p] = -shareClipD(leak);
+        }
+    }
+    // Pass 3: the per-atom sums. sum_i = sum_k w_ik g_ik - the CLAIM of i's partners on its
+    // valence, which a 1,3 contact (g = 0) does not make. The settled count that drives the
+    // effective valence below stays over ALL partners: sigma is exactly 0 for a 1,3 contact of
+    // two ends that are not themselves settled (the F...F pairs of a compressed BF4-), and where
+    // it is not, the partner genuinely carries bond order toward both ends.
+    for (int p = 0; p < nb; ++p) {
+        const Bond& b = m_bonds[p];
+        if (b.i < 0 || b.j < 0 || b.i >= N || b.j >= N)
+            continue;
+        const double claim = wp[p] * m_rev_share_g[p];
+        m_rev_share_sum(b.i) += claim;
+        m_rev_share_sum(b.j) += claim;
+        m_rev_share_val(b.i) += m_rev_share_sig[p];
+        m_rev_share_val(b.j) += m_rev_share_sig[p];
+    }
+    // Pass 4: the effective valence. Val_Z + G(settled - Val_Z) is exactly the nominal valence
     // for every atom with at most Val_Z partners (a saturated atom, a stretched bond, a radical)
     // and only grows for an atom that carries MORE partners than its nominal valence - the only
     // case in which the share can bite at all.
@@ -2065,6 +2145,36 @@ void FFWorkspace::prepareValenceShare()
         const double x = m_rev_share_val(i) - m_rev.valence[i];
         m_rev_share_dval(i) = shareExcessD(x);
         m_rev_share_val(i) = m_rev.valence[i] + shareExcess(x);
+    }
+    // Claude Generated (Sep 14, 2026): CURCUMA_SHAREDUMP=1 prints the per-pair share table of the
+    // corner that is being evaluated - the only place the 1,3 proxy and the share's argument are
+    // visible (same convention as CURCUMA_NBDIAG / CURCUMA_BONDDUMP / CURCUMA_REVDUMP: zero cost
+    // when unset). Columns: pair, r, w, tight b, g, sum/Val at both ends, the share arguments and
+    // the resulting c.
+    if (const char* d = std::getenv("CURCUMA_SHAREDUMP"); d && d[0] == '1') {
+        CurcumaLogger::result(fmt::format(
+            "share dump: corner with {} bonds, onethree {}", nb, onethree ? 1 : 0));
+        for (int p = 0; p < nb; ++p) {
+            const Bond& b = m_bonds[p];
+            if (b.i < 0 || b.j < 0 || b.i >= N || b.j >= N)
+                continue;
+            const double r = (m_geometry.row(b.i) - m_geometry.row(b.j)).norm();
+            const double w = revWeight(b.i, b.j, r, nullptr);
+            const double bo = revOrder(b.i, b.j, r, nullptr);
+            const double c1 = (m_rev_share_val(b.i) - m_rev_share_sum(b.i) + w * m_rev_share_g[p])
+                              / (w > 1e-12 ? w : 1e-12);
+            const double c2 = (m_rev_share_val(b.j) - m_rev_share_sum(b.j) + w * m_rev_share_g[p])
+                              / (w > 1e-12 ? w : 1e-12);
+            CurcumaLogger::result(fmt::format(
+                "share {:3d} {:3d}-{:3d} r {:8.4f} w {:7.4f} b {:7.4f} sig {:7.4f} g {:7.4f} "
+                "sum {:7.4f}/{:7.4f} Val {:7.4f}/{:7.4f} u {:7.4f}/{:7.4f} f {:7.4f}/{:7.4f} c {:7.4f}",
+                p, b.i + 1, b.j + 1, r, w, bo,
+                m_rev_share_sig[p], m_rev_share_g[p],
+                m_rev_share_sum(b.i), m_rev_share_sum(b.j),
+                m_rev_share_val(b.i), m_rev_share_val(b.j), c1, c2,
+                shareClip(c1), shareClip(c2),
+                1.0 - m_rev_share_g[p] * (1.0 - 0.5 * (shareClip(c1) + shareClip(c2)))));
+        }
     }
 }
 
@@ -2078,9 +2188,11 @@ void FFWorkspace::applyValenceShareGradient()
     // through the term weights of the atom's own pairs, so the second pass is the same dw/dr
     // switch over the same bond list - d sum_i/dx = sum_k (dw_ik/dr) d r_ik/dx.
     // The effective valence adds a second chain: dE/dVal_i = -Lambda_i (the pair carries
-    // +1/2 K f_i' for Val_i and -1/2 K f_i' for sum_i, i.e. the two are exact negatives), and
-    // dVal_i/dr = dG/dx * shareClipD(b_ik) * db_ik/dr, so the same bond list carries it too.
-    for (const Bond& b : m_bonds) {
+    // +1/2 K g f_i' for Val_i and -1/2 K g f_i' for sum_i, i.e. the two are exact negatives), and
+    // dVal_i/dr = dG/dx * shareSettledD(b_ik) * db_ik/dr, so the same bond list carries it too.
+    const bool share_masked = m_rev_share_g.size() == m_bonds.size();
+    for (int p = 0; p < static_cast<int>(m_bonds.size()); ++p) {
+        const Bond& b = m_bonds[p];
         if (b.i < 0 || b.j < 0 || b.i >= m_natoms || b.j >= m_natoms)
             continue;
         const Eigen::Vector3d d = m_geometry.row(b.i) - m_geometry.row(b.j);
@@ -2091,10 +2203,18 @@ void FFWorkspace::applyValenceShareGradient()
         revWeight(b.i, b.j, r, &dwdr);
         double dbdr = 0.0;
         const double bo = revOrder(b.i, b.j, r, &dbdr);
-        // dE/d sum: the term weight of this pair feeds both atoms' sums.
+        // dE/d sum: the term weight of this pair feeds both atoms' sums, and the pair may only be
+        // CLAIMED in proportion to its genuineness, so the whole channel carries g_p (g = 1 for an
+        // ordinary bond, and the pair's own g enters its own f through the credit-back term, which
+        // calcBonds' dcdw carries). Verified against the FD of the energy with g = 1 and g < 1:
+        // without the factor the share's sum channel is short by (1 - g_p) times the atoms' claims.
         double dEdr_sum = 0.0;
-        if (dwdr != 0.0)
-            dEdr_sum = (m_dEdshare_total(b.i) + m_dEdshare_total(b.j)) * dwdr;
+        if (dwdr != 0.0) {
+            const double coeff = share_masked ? m_rev_share_g[p]
+                                                    * (m_dEdshare_total(b.i) + m_dEdshare_total(b.j))
+                                              : (m_dEdshare_total(b.i) + m_dEdshare_total(b.j));
+            dEdr_sum = coeff * dwdr;
+        }
         // dE/d Val: only the SETTLED part of the pair changes Val (shareSettledD is 0 outside the
         // unit interval of b, so a pair that is fully or barely bonded contributes nothing).
         double dEdr_val = 0.0;
@@ -2111,6 +2231,63 @@ void FFWorkspace::applyValenceShareGradient()
         const Eigen::Vector3d g = f * d;
         m_result_gradient.row(b.i) += g.transpose();
         m_result_gradient.row(b.j) -= g.transpose();
+    }
+    // rev-gfnff stage 3a(ii) (Claude Generated, Sep 14, 2026): the THREE-BODY chain rule of the
+    // smooth 1,3 proxy. g_p = shareClip(1 - t_p) with t_p = sum_k sigma_ik sigma_jk, so
+    //     dg_p/dx = (dg_p/dt_p) * sum_k [ sigma_jk (d sigma_ik/dr_ik) dr_ik/dx
+    //                                     + sigma_ik (d sigma_jk/dr_jk) dr_jk/dx ],
+    // i.e. every shared settled partner k of a pair pulls on the two bonds i-k and j-k. The
+    // coefficient of g_p in the energy is the pair's own dE/dg (accumulated by calcBonds) PLUS the
+    // second half of the same derivative - g_p also feeds the SUMS of its two atoms, which the
+    // sum chain above carries as dE/d sum_i = dEdshare(i) - so
+    //     Lambda_p = dE/dg_p + w_p (dEdshare(i) + dEdshare(j)).
+    // Same place and the same per-corner bond list as the sum chain, so the corner blend carries
+    // it identically.
+    {
+        bool any = false;
+        for (const double v : m_rev_share_dg)
+            if (v != 0.0) { any = true; break; }
+        if (any && m_rev_share_gclip.size() == m_bonds.size()
+            && m_rev_share_stamp.size() == static_cast<size_t>(m_natoms)) {
+            std::fill(m_rev_share_stamp.begin(), m_rev_share_stamp.end(), -1);
+            auto addRadial = [&](int a, int c, double dEdr) {
+                const Eigen::Vector3d d = m_geometry.row(a) - m_geometry.row(c);
+                const double r = d.norm();
+                if (r < 1e-8 || dEdr == 0.0)
+                    return;
+                const double f = dEdr / r;
+                m_result_gradient.row(a) += (f * d).transpose();
+                m_result_gradient.row(c) -= (f * d).transpose();
+            };
+            for (int p = 0; p < static_cast<int>(m_bonds.size()); ++p) {
+                const Bond& b = m_bonds[p];
+                if (b.i < 0 || b.j < 0 || b.i >= m_natoms || b.j >= m_natoms)
+                    continue;
+                const Eigen::Vector3d d = m_geometry.row(b.i) - m_geometry.row(b.j);
+                const double r = d.norm();
+                if (r < 1e-8)
+                    continue;
+                const double wp = revWeight(b.i, b.j, r, nullptr);
+                const double lam = m_rev_share_dg[p]
+                                   + wp * (m_dEdshare_total(b.i) + m_dEdshare_total(b.j));
+                const double cd = m_rev_share_gclip[p] * lam;
+                if (cd == 0.0)
+                    continue;
+                for (int qa : m_rev_adj[b.i])
+                    m_rev_share_stamp[otherEndOf(qa, b.i)] = qa;
+                for (int qb : m_rev_adj[b.j]) {
+                    const int k = otherEndOf(qb, b.j);
+                    const int qa = m_rev_share_stamp[k];
+                    if (qa < 0)
+                        continue;
+                    // d sigma_ik / dr_ik dr_ik/dx  and  d sigma_jk / dr_jk dr_jk/dx
+                    addRadial(b.i, k, cd * m_rev_share_sig[qb] * m_rev_share_dsig[qa]);
+                    addRadial(b.j, k, cd * m_rev_share_sig[qa] * m_rev_share_dsig[qb]);
+                }
+                for (int qa : m_rev_adj[b.i])
+                    m_rev_share_stamp[otherEndOf(qa, b.i)] = -1;
+            }
+        }
     }
 }
 
