@@ -232,6 +232,40 @@ well does not have. Stage-3 target therefore: a bond form with the Gaussian's cu
 (equilibrium fidelity) and a Morse-like tail out to 2.5 r_eq with the right D_e, fitted on the
 55 class-A curves with the conformer / class-D guards; H-Cl and O-H first.
 
+## Acceptance criteria refined by measurement (2026-09-14)
+
+Two criteria as written in the design review turned out to include the deliberate stage-1
+deviations, so they could not be met by the stage they were meant to judge. Both were restated on
+operator decision, on measured grounds:
+
+**9. The contact-scan tolerance applies where the over-coordination term is not the intended
+physics.** The review's second falsifier for stage 3a (ii) is "revgfnff's interaction curve within
+1 kcal/mol of gfnff's" on the rigid contact scans (`scripts/revgfnff_contact.py`, class S). Measured
+on the pre-`c_ij` baseline: the verdict is **FAIL, 1/4** — worst CH4...H2O **32.741** kcal/mol at
+d = 2.30 A — but the per-term attribution is *exactly* OverCoord + RepulsionNonbonded and nothing
+else above 0.001 kcal/mol (CH4 +65.109 - 32.367 = 32.742; NH3 +29.371 - 13.834 = 15.537; water
++10.731 - 5.335 = 5.396; HF +2.235 - 1.296 = 0.939). That is the deliberate stage-1
+over-coordination term acting inside the reference's own hard wall (E_int >= +1 kcal/mol there), not
+a bond-term error. **Restated: the tolerance applies for d >= 2.50 A, where the worst is 0.115
+kcal/mol for all four systems; the deviation below that is reported as the intended E_over
+behaviour, with the term decomposition as the evidence.**
+
+**10. Radical H-transfer acceptance is path *shape*, and 8 of the 18 RKT reactions have no barrier
+to place.** The path-shape decision (2026-09-12) needed reference paths, and they now exist:
+**18/18** BH76 RKT reactions have a relaxed r2SCAN-3c NEB path (`ref/P/<rkt>/`), from ~6. But
+**8 of the 18 are barrierless at r2SCAN-3c** (rkt01/07/08/09/10/12/16/17, maximum at the reactant
+endpoint), verified as the reference surface and not the driver: OptTS at the RKT01 benchmark
+geometry converges in place as a genuine saddle (one imaginary mode, -1016 cm^-1) while RKT10's is
+not even a saddle. **Restated: those 8 support only the rms half of the criterion**; the barrier
+position is judged on the 10 that have an interior barrier (rkt02 1.47, rkt03 9.22, rkt04 0.84,
+rkt06 2.52, rkt11 4.09, rkt14 3.35, rkt18 5.98, rkt19 6.99, rkt20 6.81, rkt21 9.69 kcal/mol).
+
+**A third, not a criterion change but a methodology warning**: ORCA's chained `$new_job` is
+unreliable on these radicals — every geometry is now its own job, and rkt02's chain was **11.4**
+kcal/mol high on two images (its first-reported 12.6 kcal/mol barrier is 1.47). The class-H UKS
+"state instability" recorded in `ref/QUALITY.md` may be the same artefact rather than SCF
+nondeterminism; that hypothesis is open.
+
 ## The valence-share design question — parked 2026-09-14
 
 Stage 3a (ii) exposes a conflict that parameter work cannot settle, so it is recorded rather than
