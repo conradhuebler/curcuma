@@ -1409,9 +1409,19 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, size_t atom_i, 
 
     // Lever 3 Opt B fast path: c6(i,j) = Σ_b g_i[Zj][b]·w_j[b] using the per-atom
     // half-contraction (7 FMA instead of up to 49). Reassociates the FP sum vs the
-    // flat loop below (~1e-16). Skipped at verbosity>=3 so the per-term debug print
-    // in the flat path still works. Falls through to the exact path otherwise.
-    if (m_c6_half_valid && CurcumaLogger::get_verbosity() < 3
+    // flat loop below (~1e-16).
+    //
+    // Claude Generated (Sep 2026): this used to be skipped at verbosity >= 3 so that the
+    // per-term C6_DEBUG print in the flat path below would still fire. That made a NUMERICAL
+    // path depend on the print level: the two summation orders differ in the last ulp, so
+    // C6 — and with it the dispersion energy — changed with -verbosity. In a react-mode MD
+    // that ulp amplifies (Lyapunov) until the topology decisions themselves differ: the
+    // c2h6/2000 K/frame-16 cell gave 90 rebuilds and max |dE_jump| +471.1 kJ/mol at
+    // verbosity 1-3 against 136 and +0.6 at verbosity 4. The debug fall-through is now
+    // opened by CURCUMA_C6DEBUG instead (same convention as CURCUMA_BONDDUMP /
+    // CURCUMA_HUCKELDUMP), so the trajectory is verbosity-independent.
+    static const bool s_c6_debug = (std::getenv("CURCUMA_C6DEBUG") != nullptr);
+    if (m_c6_half_valid && !s_c6_debug
         && static_cast<int>(atom_i) < m_c6_half_natoms) {
         const int slot_j = m_elem_slot[Zj];
         if (slot_j >= 0 && atom_j < m_gaussian_weights.size()) {
@@ -1441,8 +1451,11 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, size_t atom_i, 
 
     double c6_weighted = 0.0;
 
-    // Claude Generated (Feb 8, 2026): DEBUG: Log C6 computation for small molecules (verbosity >= 3 only)
-    bool log_c6 = (CurcumaLogger::get_verbosity() >= 3 && atom_i == 0 && atom_j <= 1);
+    // Claude Generated (Feb 8, 2026): DEBUG: Log C6 computation for small molecules.
+    // Claude Generated (Sep 2026): gated on CURCUMA_C6DEBUG, not on the verbosity level —
+    // see the fast-path comment above (a verbosity-selected summation order made the
+    // trajectory depend on -verbosity).
+    bool log_c6 = (s_c6_debug && atom_i == 0 && atom_j <= 1);
 
     // Base offset for elem_i and elem_j in flat cache
     const size_t base_ij = static_cast<size_t>(elem_i) * MAX_ELEM * MAX_REF * MAX_REF
