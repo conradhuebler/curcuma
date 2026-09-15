@@ -55,8 +55,16 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 
 ## Live agents
 
-| task | tier | what it does | status file | tree |
-|---|---|---|---|---|
+**None running (2026-09-15 evening).** Five agents closed today (qp-bondstate, break-tail,
+scan-cadence, verbosity-traj, h-budget) — Finished table below. Worktree `curcuma-head/` is on
+branch `fix/h-valence-budget` with a clean tree (its patch is in the main tree as `35d7bb52`);
+its `build/curcuma` (md5 a4b9de6e) is the h-budget agent's binary and now differs from the
+worktree source, rebuild before reuse.
+
+**Operator decisions pending**: (1) make `rev_budget_fix_h` the default; (2) which elements may
+grow a share budget at all (the carbon of CH4 + H reaches 4.95 — likely the class-B root);
+(3) adopt max |dEpot| per MD step outside rebuilds + hard-swap count as the smoothness
+falsifier; (4) recalibrate `cli_simplemd_16/18/19` after (1).
 
 qp-bondstate is DONE (gate not cleared; see the Finished table); its tree is committed as
 `a474be89` together with the attribution correction below.
