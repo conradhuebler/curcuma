@@ -2157,7 +2157,22 @@ void FFWorkspace::prepareValenceShare()
     // for every atom with at most Val_Z partners (a saturated atom, a stretched bond, a radical)
     // and only grows for an atom that carries MORE partners than its nominal valence - the only
     // case in which the share can bite at all.
+    // Claude Generated (Sep 15, 2026): -gfnff.rev_budget_fix_h true exempts HYDROGEN from that
+    // growth. The softplus is right for a hypervalent centre but wrong for an H: a hydrogen has one
+    // valence, and a bridging H (a just-formed H2 still bonded to its carbon) is a 3c-2e bond whose
+    // two partial wells must SHARE that one valence. Without the exemption its budget reaches 2 as
+    // soon as the second partner's tight bond order crosses the settled window, and BOTH wells jump
+    // from half share to full share inside one step with no topology event - the measured origin of
+    // the hot react-MD blow-ups (see the RevSettings member documentation). The derivative channel
+    // is zeroed with it: m_rev_share_dval is read only as the dVal_i/d(settled) factor of
+    // applyValenceShareGradient, so a constant budget must contribute exactly nothing there.
+    const bool fix_h = m_rev.budget_fix_h && static_cast<int>(m_atom_types.size()) == N;
     for (int i = 0; i < N; ++i) {
+        if (fix_h && m_atom_types[i] == 1) {
+            m_rev_share_dval(i) = 0.0;
+            m_rev_share_val(i) = m_rev.valence[i];
+            continue;
+        }
         const double x = m_rev_share_val(i) - m_rev.valence[i];
         m_rev_share_dval(i) = shareExcessD(x);
         m_rev_share_val(i) = m_rev.valence[i] + shareExcess(x);

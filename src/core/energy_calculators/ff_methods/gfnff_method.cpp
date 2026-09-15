@@ -12206,6 +12206,12 @@ void GFNFF::setupRevSettings()
     // CLI flag the fallback decides (with default true the proxy was silently ON); both explicit
     // forms (-gfnff.rev_share_onethree true|false) do reach it, so the switch itself works.
     rv.share_onethree = m_parameters.value("rev_share_onethree", false);
+    // Claude Generated (Sep 15, 2026): hydrogen keeps its nominal valence 1 in the share budget.
+    // Same registry caveat as rev_share_onethree above - a new key may not arrive through
+    // getDefaultJson() in this build, so the hardcoded fallback here IS the default (false = the
+    // delivered behaviour); both explicit forms -gfnff.rev_budget_fix_h true|false do reach it.
+    m_rev_budget_fix_h = m_parameters.value("rev_budget_fix_h", false);
+    rv.budget_fix_h = m_rev_budget_fix_h;
     // Claude Generated (Sep 13, 2026): rv.h_not_sp was declared and printed but NEVER assigned,
     // so -gfnff.rev_h_not_sp had no effect at all (in -sp and in -batch alike). Read it here with
     // the rest of the struct fields.
@@ -12379,10 +12385,11 @@ void GFNFF::setupRevSettings()
             rv.over_k, rv.over_shift, rv.w_join));
         CurcumaLogger::result(fmt::format(
             "rev dump (flags): form {} bo2_form {:.4f} bo_form {:.4f} bo_break {:.4f} bo13_form {:.4f} "
-            "bo13_ordinary_join {} "
+            "bo13_ordinary_join {} budget_fix_h {} "
             "tr {:.4f}/{:.4f}/{:.4f}/{:.4f} cooldown {} max_transitions {} sqe {} sqe_bmin {:.5f} preset {}",
             m_rev_form_order ? "order" : "weight", m_rev_bo2_form, m_rev_bo_form, m_rev_bo_break,
-            m_rev_bo13_form, m_rev_bo13_ordinary_join, m_rev_tr_begin, m_rev_tr_end, m_rev_tr_revert, m_rev_tr_prebreak,
+            m_rev_bo13_form, m_rev_bo13_ordinary_join, m_rev_budget_fix_h,
+            m_rev_tr_begin, m_rev_tr_end, m_rev_tr_revert, m_rev_tr_prebreak,
             m_rev_demote_cooldown, m_rev_max_transitions, m_rev_sqe, m_rev_sqe_bmin,
             m_parameters.value("rev_over_preset", std::string("stage1a"))));
     }

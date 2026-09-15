@@ -254,6 +254,18 @@ struct RevSettings {
     /// default; the design decision it feeds is recorded in the vault note of
     /// docs/REV_GFNFF_ROADMAP.md.
     bool share_onethree = false;
+    /// rev-gfnff stage 3a(ii) (Claude Generated, Sep 15, 2026): hydrogen keeps its NOMINAL valence
+    /// 1 in the share budget. The softplus budget Val_i = Val_Z + G(settled_i - Val_Z) is right for
+    /// a hypervalent centre (an ammonium N really does carry four bonds) but wrong for hydrogen: an
+    /// H between two partners is a 3c-2e bridge with ONE valence, and letting its budget grow to 2
+    /// hands both of its partial wells a full share the moment the second partner's tight bond
+    /// order crosses the settled window - a step change of the bond energy with no topology event
+    /// (measured: c2h6/T2000 frame 16, Val(H) 1.06 -> 1.93 and the bond term -1.05 -> -1.52 Eh
+    /// inside one 0.25 fs step, which then drives the pair to r = 0.56 a0 and 62 000 K). With the
+    /// flag on, Val_H = Val_Z(H) = 1 exactly and its derivative channel is 0, so a bridging H
+    /// shares its one valence between its two wells. Every other element is untouched.
+    /// DEFAULT OFF (the delivered behaviour).
+    bool budget_fix_h = false;
     /// rev-gfnff stage 3a(ii) (Sep 2026): "an H is never sp" - an sp hydrogen is not treated as
     /// a bridging atom, so its bond keeps the full strength instead of the reference's 0.30
     /// scaling. See the comment at the rule in gfnff_method.cpp.
