@@ -2032,10 +2032,18 @@ bool GFNFF::detectReactiveBondChanges()
             const double c_ij = rev ? RevGFNFF::bondOrder(r, m_rev_settings.bo3_center * thr, m_rev_settings.bo3_width) : 0.0;
             const bool fading = rev && fading_set.count({ i, j }) > 0;
             const double o_ij = rev ? RevGFNFF::bondOrder(r, m_rev_settings.bo2_center * thr, m_rev_settings.bo2_width) : 0.0; // bond order (E_over switch): 1,3 pairs read ~0
-            bool one_three = false;
+            bool one_three_raw = false;
             if (rev && settled_adj[i].count(j) == 0)
                 for (int kk : settled_adj[i])
-                    if (settled_adj[j].count(kk)) { one_three = true; break; }
+                    if (settled_adj[j].count(kk)) { one_three_raw = true; break; }
+            // rev-gfnff stage 3a(ii) diagnostic (Claude Generated, Sep 14, 2026):
+            // -gfnff.rev_bo13_ordinary_join true drops the SPECIAL treatment of a topological 1,3
+            // pair in the scan - it then joins on the ordinary formation criterion and gets the
+            // ordinary transition window, so the "shares a SETTLED neighbour" classification (a
+            // discrete graph bit that can flip while the pair is already inside its window) no
+            // longer selects which switch a formation runs on. The classification itself is still
+            // computed, for the scan trace only. DEFAULT OFF: the delivered behaviour is unchanged.
+            const bool one_three = one_three_raw && !m_rev_bo13_ordinary_join;
             // rev-gfnff stage 1b: the pair whose transition is in flight is neither a break nor a
             // formation candidate - its window is followed by the blend, not by the scan
             const bool in_transition = rev_blend && in_tr.count({ i, j }) > 0;
@@ -2064,7 +2072,7 @@ bool GFNFF::detectReactiveBondChanges()
                 }
             } else if (rev && s_react_scan_trace && b_ij > 0.5 * m_rev_bo_form
                 && (CurcumaLogger::info(fmt::format("REACT scan call {}: pair {}-{} r {:.4f} w {:.4f} c {:.4f} fading {} one_three {} in_transition {} cooled {}",
-                       m_react_calls, i + 1, j + 1, r, b_ij, c_ij, fading ? 1 : 0, one_three ? 1 : 0, in_transition ? 1 : 0,
+                       m_react_calls, i + 1, j + 1, r, b_ij, c_ij, fading ? 1 : 0, one_three_raw ? 1 : 0, in_transition ? 1 : 0,
                        (m_rev_cooldown.count({ i, j }) && m_react_calls < m_rev_cooldown[{ i, j }]) ? 1 : 0)), false)) {
             } else if (rev ? (!in_transition && (one_three ? (o_ij > m_rev_bo13_form) : fading ? (c_ij > m_rev_tr_begin)
                                                                                               : (m_rev_form_order ? (o_ij > m_rev_bo2_form) : (b_ij > m_rev_bo_form))))
@@ -12270,6 +12278,7 @@ void GFNFF::setupRevSettings()
     m_rev_tr_revert = m_parameters.value("rev_tr_revert", 0.75);
     m_rev_tr_prebreak = m_parameters.value("rev_tr_prebreak", 0.5);
     m_rev_bo13_form = m_parameters.value("rev_bo13_form", 0.1);
+    m_rev_bo13_ordinary_join = m_parameters.value("rev_bo13_ordinary_join", false);
     m_rev_demote_cooldown = m_parameters.value("rev_demote_cooldown", 0);
     m_rev_max_transitions = std::max(1, m_parameters.value("rev_max_transitions", 4));
     // (the preset's per-element values stay; the rev section below overrides them - Sep 12, 2026)
@@ -12370,9 +12379,10 @@ void GFNFF::setupRevSettings()
             rv.over_k, rv.over_shift, rv.w_join));
         CurcumaLogger::result(fmt::format(
             "rev dump (flags): form {} bo2_form {:.4f} bo_form {:.4f} bo_break {:.4f} bo13_form {:.4f} "
+            "bo13_ordinary_join {} "
             "tr {:.4f}/{:.4f}/{:.4f}/{:.4f} cooldown {} max_transitions {} sqe {} sqe_bmin {:.5f} preset {}",
             m_rev_form_order ? "order" : "weight", m_rev_bo2_form, m_rev_bo_form, m_rev_bo_break,
-            m_rev_bo13_form, m_rev_tr_begin, m_rev_tr_end, m_rev_tr_revert, m_rev_tr_prebreak,
+            m_rev_bo13_form, m_rev_bo13_ordinary_join, m_rev_tr_begin, m_rev_tr_end, m_rev_tr_revert, m_rev_tr_prebreak,
             m_rev_demote_cooldown, m_rev_max_transitions, m_rev_sqe, m_rev_sqe_bmin,
             m_parameters.value("rev_over_preset", std::string("stage1a"))));
     }

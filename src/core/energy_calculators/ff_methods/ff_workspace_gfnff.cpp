@@ -121,6 +121,12 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
     if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
 
     bool use_dynamic_r0 = (m_d3_cn.size() > 0);
+    // Claude Generated (Sep 14, 2026): the per-pair well-depth dump, same env gate as the share
+    // table of prepareValenceShare(). Read once per process.
+    static const bool s_share_dump = [] {
+        const char* d = std::getenv("CURCUMA_SHAREDUMP");
+        return d && d[0] == '1';
+    }();
     // rev-gfnff stage 3a(i) (Claude Generated, Sep 2026): take the pair's OWN erf-CN
     // contribution out of the CN that builds its r0 (see the block below). rev-only: with
     // rev disabled the r0 is bit-identical to before.
@@ -252,6 +258,16 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
             }
         }
         acc.energy.bond += energy;
+        // Claude Generated (Sep 14, 2026): CURCUMA_SHAREDUMP=1 also prints the per-pair WELL DEPTH
+        // D_p = -k_b e^{-a dr^2} w (positive) next to the share factor it is multiplied by. The
+        // prepareValenceShare() dump above cannot print it: the dynamic r0 (and hence the Gaussian)
+        // is formed here, not there. D_p and the per-atom budget Val are the two inputs the
+        // offline QP prototype of FABLE_BOND_STATE 3.2 needs. Env-gated, zero cost when unset;
+        // with -threads 1 the order is the bond-list order.
+        if (s_share_dump)
+            CurcumaLogger::result(fmt::format(
+                "shareD {:3d} {:3d}-{:3d} r {:9.5f} D {:14.8f} w {:9.6f} c {:9.6f} E {:14.8f}",
+                idx, bond.i + 1, bond.j + 1, rij, -(k_b * exp_term) * w, w, cshare, energy));
 
         if (m_do_gradient) {
             // d(w E_gauss)/dr = w dE_gauss/dr + E_gauss dw/dr, E_gauss = energy / w.

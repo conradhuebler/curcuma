@@ -359,6 +359,7 @@ PARAM(rev_tr_revert, Double, 0.75, "rev-gfnff stage 1b: a breaking transition st
 PARAM(rev_tr_prebreak, Double, 0.5, "rev-gfnff stage 1b: a topology bond starts its breaking transition (s = 0) once its transition coordinate falls below this value; lower than rev_tr_end so that a hot bond vibrating around the formation end does not chatter.", "Reactive", {})
 PARAM(rev_demote_cooldown, Int, 0, "rev-gfnff stage 1b: a transition interrupted below s = 0.5 is demoted (old topology restored, jump s dE) and its pair may not start again for this many scans; above 0.5 it is promoted (jump (1 - s) dE).", "Reactive", {})
 PARAM(rev_bo13_form, Double, 0.1, "rev-gfnff stage 1b: a topological 1,3 pair becomes a bond (ring closure) once its bond order on the E_over switch exceeds this value; its transition then runs on that switch from here to 0.9.", "Reactive", {})
+PARAM(rev_bo13_ordinary_join, Bool, false, "rev-gfnff stage 3a(ii) diagnostic: let a topological 1,3 pair join the bond list on the ORDINARY formation criterion rev_bo2_form with the ordinary transition window, instead of the special 1,3 window rev_bo13_form .. 0.9. The special window exists to stop a geminal pair from stealing valence early; it is keyed on the discrete graph bit 'shares a SETTLED neighbour', which can flip while the pair is already inside its window and then applies the formation as a hard swap at s = 1. Set this true to measure how much of the hot-MD jump tail that classification carries. DEFAULT OFF: the delivered scan behaviour is unchanged.", "Reactive", {})
 PARAM(rev_max_transitions, Int, 4, "rev-gfnff stage 1b: transitions blended at the same time (2^k topology corners are evaluated per step); a further event snaps the transition closest to either end of its window.", "Reactive", {})
 PARAM(rev_bo_form, Double, 0.05, "rev-gfnff react scan: a non-bonded pair (never a 1,3 pair) joins the bond list once its term WEIGHT exceeds this value, i.e. where its terms are still ~0.", "Reactive", {})
 PARAM(rev_bo_break, Double, 0.02, "rev-gfnff react scan: a bond leaves the list once its term weight falls below this value.", "Reactive", {})
@@ -2451,6 +2452,7 @@ private:
     double m_rev_tr_begin = 0.02, m_rev_tr_end = 0.8, m_rev_tr_revert = 0.75;
     double m_rev_tr_prebreak = 0.5;    ///< stage 1b: a bond starts breaking below this coordinate (below the formation end: a formed bond sticks)
     double m_rev_bo13_form = 0.1;      ///< stage 1b: a 1,3 pair closes a ring once its bond order (E_over switch) exceeds this
+    bool m_rev_bo13_ordinary_join = false; ///< stage 3a(ii) diagnostic: drop the special 1,3 window, join on the ordinary criterion
     std::vector<Bond> m_rev_fading; ///< stage 1b: wells of broken bonds, kept in the bond list (weight w) until w < rev_bo_break
     std::map<std::pair<int, int>, long> m_rev_cooldown; ///< stage 1b: demoted pair -> first scan call at which it may start a transition again
     int m_rev_demote_cooldown = 0;                      ///< stage 1b: scans a demoted pair has to wait
