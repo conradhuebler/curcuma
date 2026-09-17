@@ -764,6 +764,7 @@ double XTB::Calculation(bool gradient)
     // steady_clock reads per phase — negligible vs the ms-scale work — so they
     // run unconditionally, matching the existing per-iter timer. Claude Generated.
     double acc_pot = 0.0, acc_fock = 0.0, acc_solve = 0.0, acc_mull = 0.0, acc_energy = 0.0;
+    double acc_e_coul = 0.0, acc_e_third = 0.0, acc_e_mp = 0.0, acc_e_band = 0.0;
     double acc_disp = 0.0;   // D4 in-SCF potential subset of acc_pot (GFN2), verbosity 3
     m_t_xfx = m_t_diag = m_t_back = m_t_dens = m_t_xfx_copy = 0.0;
     m_eig_calls_native = m_eig_calls_fp32 = m_eig_calls_lapack = 0;
@@ -773,19 +774,23 @@ double XTB::Calculation(bool gradient)
     // CxxThreadPool; effectiveIntraThreads() gates it (serial under molecule-level
     // parallelism or for small bases). nao is constant over the SCF. Claude Generated.
     //
-    // The D&C eigensolve is memory-bandwidth-bound and plateaus / REGRESSES past ~8
-    // threads (measured complex/231: dsyevd 215 ms @8 vs 290 ms @16 on a 16-core Ryzen),
-    // so a -threads 16/32 run would slow the eigensolve while still helping the
-    // hand-threaded regions (Fock/gradient/setup). Cap the eigensolve at a memory-safe
-    // count while the rest keeps all threads. Override with CURCUMA_EIG_MAX_THREADS.
-    int eig_cap = 8;
+    // `-threads N` decides (operator, Sep 2026): the eigensolve gets the same intra-molecule
+    // budget as everything else. It used to be capped at 8 because the reduction ran in FP32
+    // and dominated (see docs/SQM_PERFORMANCE.md); with the FP64 reduction the optimum moved
+    // and is machine-dependent - polymer/nao 3222 on this 36-core box: 8 threads 27.1 s,
+    // 16 threads 23.8 s, 24 threads 26.5 s, 36 threads 28.6 s. The D&C eigensolve is
+    // memory-bandwidth-bound, so more threads than memory channels can still lose; that is now
+    // a `-threads` choice. CURCUMA_EIG_MAX_THREADS still caps it independently of -threads.
+    int eig_cap = 0;   // 0 = no cap, follow -threads
     if (const char* env = std::getenv("CURCUMA_EIG_MAX_THREADS")) {
         const int v = std::atoi(env);
         if (v > 0) eig_cap = v;
     }
-    const int eig_threads = std::min(effectiveIntraThreads(m_basis.nao), eig_cap);
+    const int eig_intra = effectiveIntraThreads(m_basis.nao);
+    const int eig_threads = eig_cap > 0 ? std::min(eig_intra, eig_cap) : eig_intra;
     if (verb >= 3 && eig_threads > 1)
-        CurcumaLogger::info_fmt("Eigensolve MKL threads: {} (cap {})", eig_threads, eig_cap);
+        CurcumaLogger::info_fmt("Eigensolve BLAS/LAPACK threads: {}{}", eig_threads,
+                                eig_cap > 0 ? " (CURCUMA_EIG_MAX_THREADS cap)" : " (from -threads)");
 
     // Device-resident SCF (Claude Generated, GPU port Stage 2). Enabled with the
     // default Broyden charge mixing and an available lower Cholesky factor L
@@ -1254,15 +1259,26 @@ double XTB::Calculation(bool gradient)
             t_mull = clock::now();
         }
 
-        // Energies for this iteration
+        // Energies for this iteration (Claude Generated, Sep 2026: timed individually, the
+        // "energy/mix" bucket used to be one opaque number).
+        const auto t_e0 = clock::now();
         m_E_coulomb_shell = energyCoulombShell();
+        const auto t_e1 = clock::now();
         m_E_third_order   = energyThirdOrder();
+        const auto t_e2 = clock::now();
         m_E_multipole     = energyMultipole();
+        const auto t_e3 = clock::now();
 
         // Band energy: Tr(P · H0). Device-resident path returns it from the GPU
         // (P is not on the host during the loop); CPU path sums P⊙H0 directly.
         m_E_electronic = use_gpu_resident ? gpu_band
                                           : (m_wfn.P.cwiseProduct(m_H0)).sum();
+
+        const auto t_e4 = clock::now();
+        acc_e_coul  += ms(t_e0, t_e1);
+        acc_e_third += ms(t_e1, t_e2);
+        acc_e_mp    += ms(t_e2, t_e3);
+        acc_e_band  += ms(t_e3, t_e4);
 
         // Total SCC = band + coulomb + third-order + multipole
         const double e_scc = m_E_electronic + m_E_coulomb_shell
@@ -1629,6 +1645,10 @@ double XTB::Calculation(bool gradient)
                                 solve_sum, acc_solve - solve_sum);
         CurcumaLogger::info_fmt("  populations     : {:8.2f} ms ({:5.2f}/it)", acc_mull,   acc_mull / it);
         CurcumaLogger::info_fmt("  energy/mix      : {:8.2f} ms ({:5.2f}/it)", acc_energy, acc_energy / it);
+        CurcumaLogger::info_fmt("    - coulomb {:.2f}/it, third order {:.2f}/it, multipole {:.2f}/it, "
+                                "band Tr(P H0) {:.2f}/it, rest (mixing) {:.2f}/it",
+                                acc_e_coul / it, acc_e_third / it, acc_e_mp / it, acc_e_band / it,
+                                (acc_energy - acc_e_coul - acc_e_third - acc_e_mp - acc_e_band) / it);
     }
 
     // Reject a converged solution whose charges are physically impossible and redo the

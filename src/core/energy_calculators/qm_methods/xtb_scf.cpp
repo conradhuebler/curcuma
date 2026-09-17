@@ -177,6 +177,46 @@ Matrix XTB::buildFock(const Matrix& H0,
 }
 
 /* ------------------------------------------------------------------ *
+ *  reduceToStandardForm() (Claude Generated, Sep 2026)               *
+ *                                                                    *
+ *  A <- L^-1 A L^-T with the cached lower Cholesky factor L of S.    *
+ *  Two equivalent routes, chosen by the thread count because their   *
+ *  scaling differs (measured n = 3222 on 36 cores, OpenMP OpenBLAS,  *
+ *  CURCUMA_XTB_REDUCE_PROBE=1 reprints this per machine):            *
+ *                                                                    *
+ *    threads:        1      8     16     36                          *
+ *    dsygst      620 ms  195 ms 190 ms 308 ms                        *
+ *    2x dtrsm    900 ms  192 ms 123 ms 156 ms                        *
+ *                                                                    *
+ *  dsygst does half the flops (n^3/3 vs 2 n^3) but threads poorly;   *
+ *  the triangular solves are BLAS3 and keep scaling. The two agree   *
+ *  to 8e-15 elementwise, so the choice is a rounding-level change.   *
+ * ------------------------------------------------------------------ */
+int XTB::blasThreadsNow()
+{
+#ifdef _OPENMP
+    return omp_get_max_threads();   // what MklThreadScope set for this eigensolve
+#else
+    return 1;
+#endif
+}
+
+void XTB::reduceToStandardForm(Eigen::MatrixXd& A, int n, int threads, bool& ok) const
+{
+    ok = true;
+    if (threads >= 8) {
+        // A <- L^-1 A, then A <- A L^-T (BLAS dtrsm through Eigen's triangular solve).
+        m_X.triangularView<Eigen::Lower>().solveInPlace(A);
+        m_X.triangularView<Eigen::Lower>().transpose().template solveInPlace<Eigen::OnTheRight>(A);
+        return;
+    }
+    const char uplo = 'L';
+    int itype = 1, info = 0;
+    dsygst_(&itype, &uplo, &n, A.data(), &n, m_X.data(), &n, &info);
+    ok = (info == 0);
+}
+
+/* ------------------------------------------------------------------ *
  *  Solve generalized eigenvalue problem: F C = ε S C                 *
  *  using Eigen's GeneralizedSelfAdjointEigenSolver.                  *
  *                                                                    *
@@ -374,9 +414,9 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
             ++m_eig_calls_fp32;
             A = F;                               // row-major Matrix -> column-major (transpose copy)
             const auto te0b = clk::now();
-            int itype = 1;
-            dsygst_(&itype, &uplo, &n, A.data(), &n, m_X.data(), &n, &info);
-            if (info != 0) return false;
+            bool red_ok = true;
+            reduceToStandardForm(A, n, blasThreadsNow(), red_ok);
+            if (!red_ok) return false;
             Eigen::MatrixXf Af = A.cast<float>();
             const auto te1 = clk::now();
             m_t_xfx_copy += ms(te0, te0b);
@@ -445,9 +485,9 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
             ++m_eig_calls_lapack;
             A = F;                               // row-major Matrix -> column-major (transpose copy)
             const auto te0b = clk::now();
-            int itype = 1;
-            dsygst_(&itype, &uplo, &n, A.data(), &n, m_X.data(), &n, &info);
-            if (info != 0) return false;
+            bool red_ok = true;
+            reduceToStandardForm(A, n, blasThreadsNow(), red_ok);
+            if (!red_ok) return false;
             const auto te1 = clk::now();
             m_t_xfx_copy += ms(te0, te0b);
 #ifdef _OPENMP
@@ -646,9 +686,24 @@ void XTB::updatePopulations(const Matrix& S)
 
     // GFN2 atomic multipoles via Mulliken on tblite-convention integrals
     if (m_method == MethodType::GFN2 && m_mp_initialized) {
+        // Claude Generated (Sep 2026): parallel over the AO mu. Each mu contributes to the atom
+        // that owns it, so threads accumulate into private per-atom blocks that are summed in a
+        // fixed thread order afterwards. The per-mu inner sums keep their original order, but an
+        // atom whose AOs land on different threads is summed in a different order than serially,
+        // so this is NOT bit-identical: measured over polymer, -threads 1 vs 16 gives the same
+        // energy to 12 decimals and gradients within 1.5e-14 Eh/Angstrom.
+        // Measured on polymer (nao 3222, gfn2, -threads 16): the populations phase went
+        // 214 -> 76 ms per SCF iteration - the loop streams ten row-major matrices at stride nao,
+        // so it is memory bound rather than compute bound.
         m_wfn.dp_at.setZero(3, m_atomcount);
         m_wfn.qp_at.setZero(6, m_atomcount);
-        for (int mu = 0; mu < nao; ++mu) {
+        const int mp_threads = effectiveIntraThreads(nao);
+        std::vector<Eigen::MatrixXd> dp_part(mp_threads > 1 ? mp_threads : 0);
+        std::vector<Eigen::MatrixXd> qp_part(mp_threads > 1 ? mp_threads : 0);
+        parallelStripes(mp_threads, [&](int tid, int nth) {
+        Eigen::MatrixXd dp_loc = Eigen::MatrixXd::Zero(3, m_atomcount);
+        Eigen::MatrixXd qp_loc = Eigen::MatrixXd::Zero(6, m_atomcount);
+        for (int mu = tid; mu < nao; mu += nth) {
             const int iat = m_basis.ao2at[mu];
             double d0 = 0, d1 = 0, d2 = 0;
             double q0 = 0, q1 = 0, q2 = 0, q3 = 0, q4 = 0, q5 = 0;
@@ -665,15 +720,22 @@ void XTB::updatePopulations(const Matrix& S)
                 q5 += Pji * m_qp_int[5](nu, mu);
             }
             // Sign: multipoles are valence deviations (like q_sh)
-            m_wfn.dp_at(0, iat) -= d0;
-            m_wfn.dp_at(1, iat) -= d1;
-            m_wfn.dp_at(2, iat) -= d2;
-            m_wfn.qp_at(0, iat) -= q0;
-            m_wfn.qp_at(1, iat) -= q1;
-            m_wfn.qp_at(2, iat) -= q2;
-            m_wfn.qp_at(3, iat) -= q3;
-            m_wfn.qp_at(4, iat) -= q4;
-            m_wfn.qp_at(5, iat) -= q5;
+            dp_loc(0, iat) -= d0;
+            dp_loc(1, iat) -= d1;
+            dp_loc(2, iat) -= d2;
+            qp_loc(0, iat) -= q0;
+            qp_loc(1, iat) -= q1;
+            qp_loc(2, iat) -= q2;
+            qp_loc(3, iat) -= q3;
+            qp_loc(4, iat) -= q4;
+            qp_loc(5, iat) -= q5;
+        }
+        if (nth > 1) { dp_part[tid] = std::move(dp_loc); qp_part[tid] = std::move(qp_loc); }
+        else         { m_wfn.dp_at = std::move(dp_loc); m_wfn.qp_at = std::move(qp_loc); }
+        });
+        for (int t = 0; t < static_cast<int>(dp_part.size()); ++t) {
+            if (dp_part[t].size()) m_wfn.dp_at += dp_part[t];
+            if (qp_part[t].size()) m_wfn.qp_at += qp_part[t];
         }
     }
 }

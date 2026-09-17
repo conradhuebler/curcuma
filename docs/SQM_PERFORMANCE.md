@@ -424,13 +424,58 @@ tests pass, full suite shows only the four documented pre-existing failures.
 (sizes and thread counts as used) - worth doing once per machine, since the
 verdict depends entirely on the BLAS build.
 
-**Measured on this machine, not yet a default**: with the reduction no longer
-dominating, the eigensolve thread cap of 8 (`CURCUMA_EIG_MAX_THREADS`, see
-[SQM_THREADING.md](SQM_THREADING.md)) is no longer the optimum. polymer, 36-core
-machine: cap 8 -> 27.1 s, **cap 16 -> 23.8 s**, cap 24 -> 26.5 s (gfn1: 29.4 ->
-24.4 s at cap 16); complex/231 is unaffected (1.11 s either way, the size gate
-keeps it serial). Raising the default is an operator decision because the
-optimum is machine-dependent.
+## `-threads` now decides the eigensolve too (2026-09)
+
+The eigensolve used to be capped at 8 threads regardless of `-threads`, because
+the FP32 reduction dominated and regressed past that. With the FP64 reduction the
+optimum moved, and it is machine-dependent, so the cap is gone and `-threads`
+decides (`CURCUMA_EIG_MAX_THREADS` still caps it independently if wanted).
+polymer, gfn2, this 36-core box: `-threads 8` 28.8 s, **`-threads 16` 24.9 s**,
+`-threads 24` 27.0 s, `-threads 36` 30.2 s; complex/231 is unaffected (1.11 s,
+the size gate keeps it serial). The D&C eigensolve is memory-bandwidth-bound, so
+more threads than memory channels still lose - that is now a user choice.
+
+## The three memory-bound O(nat^2)/O(nao^2) SCF loops (2026-09)
+
+Profiling polymer (1410 atoms, nao 3222) instead of complex (231) changed the
+picture: three loops that were "too small to thread" at 231 atoms dominated
+everything except the eigensolve. All three sweep many separate nat x nat or
+nao x nao matrices at the same index pair, so they are memory bound, not compute
+bound (the multipole ones touch 18 matrices, i.e. ~286 MB per call at nat = 1410).
+
+| polymer, gfn2, -threads 16 | before | after |
+|---|---:|---:|
+| potential build (`addMultipolePotential`) | 172 ms/it | **55 ms/it** |
+| `energyMultipole` (inside "energy/mix") | 158 ms/it | **18 ms/it** |
+| populations (GFN2 multipole moments) | 214 ms/it | **77 ms/it** |
+| reduce (`dsygst` -> two `dtrsm` above 8 threads) | 231 ms/it | **169 ms/it** |
+| **wall** | 24.9 s | **21.0 s** |
+
+The potential build is threaded over the target atom with disjoint writes, so it
+stays bit-identical. The energy and the populations use per-thread partial sums
+added in a fixed thread order, which reassociates the outer sum: over polymer the
+energy stays identical to 12 decimals and the gradient moves by 1.5e-14, and the
+converged FP64 result was in fact unchanged (diff 0.0). Switching the reduction
+to triangular solves is a rounding-level change (3.9e-14 on the gradient).
+
+## What is left on the CPU (polymer, gfn2, -threads 16, 21.0 s)
+
+setup 1.5 s, SCF 15.3 s, post-SCF 1.6 s. Inside the SCF per iteration: `dsyevd`
+694 ms (54 %), reduce 169, Fock 100, populations 77, density 64, potential 55,
+back-transform 50, energies 34. So the eigensolve IS the CPU floor now, and the
+alternatives were measured rather than assumed:
+
+| n = 3222, 16 threads | time |
+|---|---:|
+| `dsyevd` (all vectors, what curcuma uses) | **1021 ms** |
+| `dsyevr` (all vectors) | 2122 ms |
+| `dsyevr` (lowest 1699 = occupied + 5 %) | 2228 ms |
+| curcuma's own D&C (`-eigensolver native`, in-run) | 5144 ms/it |
+
+Partial diagonalisation does not pay even when only the occupied block is
+requested, which is the same conclusion the GPU reached (AP1) for a different
+reason. No MKL is installed on this machine; with MKL the floor would likely be
+lower.
 
 ## The iteration-count gap is a criterion artifact, not slower iterations
 

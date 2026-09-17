@@ -1165,6 +1165,12 @@ private:
     void parallelStripes(int n_threads,
                          const std::function<void(int, int)>& worker) const; // xtb_native.cpp
 
+    /// A <- L^-1 A L^-T with the cached Cholesky factor; picks dsygst or two triangular solves
+    /// by thread count (see xtb_scf.cpp for the measurements). Claude Generated (Sep 2026).
+    void reduceToStandardForm(Eigen::MatrixXd& A, int n, int threads, bool& ok) const;
+    /// BLAS/LAPACK threads in force right now (what MklThreadScope set).
+    static int blasThreadsNow();
+
 private:
     MethodType m_method;
 

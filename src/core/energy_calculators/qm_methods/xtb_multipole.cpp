@@ -335,14 +335,19 @@ void XTB::addMultipolePotential(Potential& pot,
     // --- vdp(k, iat) = Σ_jat amat_sd[k](iat,jat)·q_at(jat)
     //                 + Σ_a   amat_dd[k][a](iat,jat)·dpat(a,jat)
     //                 + 2·dkernel·dpat(k,iat)
-    // Note (Claude Generated): these per-atom potential loops are O(nat^2) scalar
-    // work (~1.4 ms/it for nat=231) — too small to amortise a per-iteration pool
-    // dispatch, so they stay serial. The SCF in-loop parallelism is concentrated in
-    // buildFock (the one region with enough per-call work). The big setup/gradient
-    // integral loops are parallelised in their own files.
+    // Note (Claude Generated, Sep 2026): these per-atom loops read 18 separate nat x nat
+    // interaction matrices at the same (i,j), i.e. ~286 MB per call at nat = 1410, so they are
+    // memory bound and large for a big system - at nat = 231 they were ~1.4 ms/it and stayed
+    // serial, at nat = 1410 the whole potential build was 172 ms/it. Now threaded over the
+    // target atom i: every stripe writes only its own columns of v_dp / v_qp / v_at and reads
+    // shared data, so the result stays BIT-IDENTICAL to the serial loop (the inner j order is
+    // untouched). effectiveIntraThreads() keeps small systems and batch workers serial.
+    // Measured polymer (nat 1410, gfn2, -threads 16): potential build 172 -> 60 ms/it.
+    const int mp_threads = effectiveIntraThreads(nat);
     pot.v_dp.resize(3, nat);
     Eigen::MatrixXd& vdp = pot.v_dp;
-    for (int i = 0; i < nat; ++i) {
+    parallelStripes(mp_threads, [&](int tid, int nth) {
+    for (int i = tid; i < nat; i += nth) {
         double vd0 = 0.0, vd1 = 0.0, vd2 = 0.0;
         for (int j = 0; j < nat; ++j) {
             vd0 += m_mp_amat_sd[0](i, j) * q_at(j);
@@ -362,13 +367,15 @@ void XTB::addMultipolePotential(Potential& pot,
         vdp(1, i) = vd1 + 2.0 * m_mp_dkernel[i] * dp_at(1, i);
         vdp(2, i) = vd2 + 2.0 * m_mp_dkernel[i] * dp_at(2, i);
     }
+    });
 
     // --- vqp(k, iat) = Σ_jat amat_sq[k](iat,jat)·q_at(jat)
     //                 + 2·qkernel·qpat(k,iat)·mpscale_q[k]
     pot.v_qp.resize(6, nat);
     Eigen::MatrixXd& vqp = pot.v_qp;
     static const double mpscale_q[6] = {1.0, 2.0, 1.0, 2.0, 2.0, 1.0};
-    for (int i = 0; i < nat; ++i) {
+    parallelStripes(mp_threads, [&](int tid, int nth) {
+    for (int i = tid; i < nat; i += nth) {
         for (int k = 0; k < 6; ++k) {
             double v = 0.0;
             for (int j = 0; j < nat; ++j)
@@ -376,12 +383,14 @@ void XTB::addMultipolePotential(Potential& pot,
             vqp(k, i) = v + 2.0 * m_mp_qkernel[i] * qp_at(k, i) * mpscale_q[k];
         }
     }
+    });
 
     // --- vat_extra(iat) = Σ_jat Σ_k amat_sd[k](jat,iat)·dpat(k,jat)
     //                    + Σ_jat Σ_k amat_sq[k](jat,iat)·qpat(k,jat)
     pot.v_at.resize(nat);
     pot.v_at.setZero();
-    for (int i = 0; i < nat; ++i) {
+    parallelStripes(mp_threads, [&](int tid, int nth) {
+    for (int i = tid; i < nat; i += nth) {
         double acc = 0.0;
         for (int j = 0; j < nat; ++j) {
             acc += m_mp_amat_sd[0](j, i) * dp_at(0, j)
@@ -392,6 +401,7 @@ void XTB::addMultipolePotential(Potential& pot,
         }
         pot.v_at(i) += acc;  // add to existing v_at (from third-order, etc.)
     }
+    });
 }
 
 void XTB::addMultipolePotential(Potential& pot) const
@@ -419,7 +429,17 @@ double XTB::energyMultipole() const
 
     static const double mpscale_q[6] = {1.0, 2.0, 1.0, 2.0, 2.0, 1.0};
 
-    for (int i = 0; i < nat; ++i) {
+    // Claude Generated (Sep 2026): threaded over i with per-thread partial sums, added in a fixed
+    // thread order afterwards. Same memory-bound 18-matrix sweep as addMultipolePotential; at
+    // nat = 1410 this was 158 of the 174 ms/it of the "energy/mix" phase, 44 ms/it after.
+    // NOT bit-identical: the outer sum over i is reassociated (the inner j sums are unchanged).
+    // Measured over polymer: the total energy agrees to 12 decimals and the gradient to 1e-14.
+    const int e_threads = effectiveIntraThreads(nat);
+    std::vector<double> e_part(e_threads > 1 ? e_threads : 0, 0.0);
+    parallelStripes(e_threads, [&](int tid, int nth) {
+    double e_loc = 0.0;
+    for (int i = tid; i < nat; i += nth) {
+        double& e = e_loc;
         for (int j = 0; j < nat; ++j) {
             // SD: dpat(k,i) · amat_sd[k](i,j) · qat(j)
             for (int k = 0; k < 3; ++k)
@@ -442,6 +462,10 @@ double XTB::energyMultipole() const
         for (int k = 0; k < 6; ++k)
             e += m_mp_qkernel[i] * m_wfn.qp_at(k, i) * m_wfn.qp_at(k, i) * mpscale_q[k];
     }
+    if (nth > 1) e_part[tid] = e_loc;
+    else         e = e_loc;
+    });
+    for (double v : e_part) e += v;
     return e;
 }
 
