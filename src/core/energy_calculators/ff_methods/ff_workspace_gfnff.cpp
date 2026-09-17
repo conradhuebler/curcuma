@@ -139,6 +139,11 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
                            && m_rev_share_sum.size() == m_natoms
                            && m_rev_share_val.size() == m_natoms
                            && static_cast<int>(m_rev.valence.size()) == m_natoms;
+    // rev-gfnff 3a(ii) (Sep 18, 2026): the conserving share reads the PER-ATOM f built by
+    // prepareConservingShare; if that vector is missing the delivered branch is taken.
+    const bool rev_share_conserving = rev_share && m_rev.share_conserving
+                                      && m_rev_share_f.size() == m_natoms
+                                      && m_rev_share_dfdS.size() == m_natoms;
 
     for (int idx = begin; idx < end; ++idx) {
         const auto& bond = list[idx];
@@ -227,6 +232,25 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
             // is multiplied by c = 1 - g (1 - (f_i + f_j)/2): g = 1 gives the plain share, g = 0
             // (a 1,3 contact) leaves the well exactly as it is.
             const double g = m_rev_share_g[idx];
+            if (rev_share_conserving) {
+                // rev-gfnff 3a(ii) "conserving" (Claude Generated, Sep 18, 2026, FABLE_REVIEW_2
+                // A.5): f is a PER-ATOM factor, f_i = min(1, Val_i/S_i), and the pair takes the
+                // PRODUCT. Both f and df/dS come from prepareConservingShare; the pair's own w
+                // enters only through S_i, which the Lambda pass of applyValenceShareGradient
+                // already carries, so there is no dc/dw term here and no settled-count channel.
+                const double fi = m_rev_share_f(bond.i), fj = m_rev_share_f(bond.j);
+                cshare = 1.0 - g * (1.0 - fi * fj);
+                energy *= cshare;
+                if (m_do_gradient) {
+                    const double K = k_b * exp_term;
+                    // dE/dS_i = (dE/df_i) (df_i/dS_i) = K w g f_j * dfdS_i - stored directly as
+                    // dE/d sum_i, which is what the Lambda pass multiplies by g_p dw/dr.
+                    acc.dEdshare(bond.i) += K * w * g * fj * m_rev_share_dfdS(bond.i);
+                    acc.dEdshare(bond.j) += K * w * g * fi * m_rev_share_dfdS(bond.j);
+                    // dE/dg at fixed sums: c = 1 - g (1 - f_i f_j)
+                    m_rev_share_dg[idx] += K * w * (-(1.0 - fi * fj));
+                }
+            } else {
             const double gi = (m_rev_share_val(bond.i) - m_rev_share_sum(bond.i) + w * g) * inv;
             const double gj = (m_rev_share_val(bond.j) - m_rev_share_sum(bond.j) + w * g) * inv;
             const double fi = shareClip(gi), fj = shareClip(gj);
@@ -255,6 +279,7 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
                 // The g-dependence of the SUMS is the second half of the same derivative and is
                 // applied in applyValenceShareGradient (it spans three atoms).
                 m_rev_share_dg[idx] += K * w * (-(1.0 - 0.5 * (fi + fj)) + 0.5 * g * (di + dj));
+            }
             }
         }
         acc.energy.bond += energy;
@@ -2214,15 +2239,28 @@ void FFWorkspace::prepareValenceShare()
     // is zeroed with it: m_rev_share_dval is read only as the dVal_i/d(settled) factor of
     // applyValenceShareGradient, so a constant budget must contribute exactly nothing there.
     const bool fix_h = m_rev.budget_fix_h && static_cast<int>(m_atom_types.size()) == N;
-    for (int i = 0; i < N; ++i) {
-        if (fix_h && m_atom_types[i] == 1) {
-            m_rev_share_dval(i) = 0.0;
-            m_rev_share_val(i) = m_rev.valence[i];
-            continue;
+    // Claude Generated (Sep 18, 2026): the "conserving" share of FABLE_REVIEW_2 A.5 replaces this
+    // whole pass (see RevSettings::share_conserving). Its budget is built from the SAME wide sum
+    // S_i that the share divides by, not from the settled count - that is what makes NH4+ / H3O+
+    // come out at exactly Val = S, i.e. f = 1 and a bit-identical energy, instead of the +0.17 /
+    // +0.05 kcal/mol the review measured offline with the settled-count budget.
+    const bool conserving = m_rev.share_conserving;
+    if (conserving) {
+        prepareConservingShare(fix_h);
+    } else {
+        m_rev_share_f.resize(0);
+        m_rev_share_dfdS.resize(0);
+        m_rev_share_cap.resize(0);
+        for (int i = 0; i < N; ++i) {
+            if (fix_h && m_atom_types[i] == 1) {
+                m_rev_share_dval(i) = 0.0;
+                m_rev_share_val(i) = m_rev.valence[i];
+                continue;
+            }
+            const double x = m_rev_share_val(i) - m_rev.valence[i];
+            m_rev_share_dval(i) = shareExcessD(x);
+            m_rev_share_val(i) = m_rev.valence[i] + shareExcess(x);
         }
-        const double x = m_rev_share_val(i) - m_rev.valence[i];
-        m_rev_share_dval(i) = shareExcessD(x);
-        m_rev_share_val(i) = m_rev.valence[i] + shareExcess(x);
     }
     // Claude Generated (Sep 14, 2026): CURCUMA_SHAREDUMP=1 prints the per-pair share table of the
     // corner that is being evaluated - the only place the 1,3 proxy and the share's argument are
@@ -2239,20 +2277,155 @@ void FFWorkspace::prepareValenceShare()
             const double r = (m_geometry.row(b.i) - m_geometry.row(b.j)).norm();
             const double w = revWeight(b.i, b.j, r, nullptr);
             const double bo = revOrder(b.i, b.j, r, nullptr);
-            const double c1 = (m_rev_share_val(b.i) - m_rev_share_sum(b.i) + w * m_rev_share_g[p])
-                              / (w > 1e-12 ? w : 1e-12);
-            const double c2 = (m_rev_share_val(b.j) - m_rev_share_sum(b.j) + w * m_rev_share_g[p])
-                              / (w > 1e-12 ? w : 1e-12);
+            double c1, c2, fi, fj, cshare;
+            if (conserving) {
+                // u = Val/S (the argument of the smooth min), f = the per-atom share factor
+                c1 = m_rev_share_sum(b.i) > 1e-12 ? m_rev_share_val(b.i) / m_rev_share_sum(b.i) : 1.0;
+                c2 = m_rev_share_sum(b.j) > 1e-12 ? m_rev_share_val(b.j) / m_rev_share_sum(b.j) : 1.0;
+                fi = m_rev_share_f(b.i);
+                fj = m_rev_share_f(b.j);
+                cshare = 1.0 - m_rev_share_g[p] * (1.0 - fi * fj);
+            } else {
+                c1 = (m_rev_share_val(b.i) - m_rev_share_sum(b.i) + w * m_rev_share_g[p])
+                     / (w > 1e-12 ? w : 1e-12);
+                c2 = (m_rev_share_val(b.j) - m_rev_share_sum(b.j) + w * m_rev_share_g[p])
+                     / (w > 1e-12 ? w : 1e-12);
+                fi = shareClip(c1);
+                fj = shareClip(c2);
+                cshare = 1.0 - m_rev_share_g[p] * (1.0 - 0.5 * (fi + fj));
+            }
             CurcumaLogger::result(fmt::format(
                 "share {:3d} {:3d}-{:3d} r {:8.4f} w {:7.4f} b {:7.4f} sig {:7.4f} g {:7.4f} "
                 "sum {:7.4f}/{:7.4f} Val {:7.4f}/{:7.4f} u {:7.4f}/{:7.4f} f {:7.4f}/{:7.4f} c {:7.4f}",
                 p, b.i + 1, b.j + 1, r, w, bo,
                 m_rev_share_sig[p], m_rev_share_g[p],
                 m_rev_share_sum(b.i), m_rev_share_sum(b.j),
-                m_rev_share_val(b.i), m_rev_share_val(b.j), c1, c2,
-                shareClip(c1), shareClip(c2),
-                1.0 - m_rev_share_g[p] * (1.0 - 0.5 * (shareClip(c1) + shareClip(c2)))));
+                m_rev_share_val(b.i), m_rev_share_val(b.j), c1, c2, fi, fj, cshare));
         }
+        if (conserving && m_rev_share_cap.size() == N) {
+            for (int i = 0; i < N; ++i)
+                CurcumaLogger::result(fmt::format(
+                    "shareA {:3d} Z {:3d} S {:9.5f} ValZ {:6.3f} cap {:7.4f} Val {:9.5f} "
+                    "f {:9.6f} dfdS {:12.6e}",
+                    i + 1, (static_cast<int>(m_atom_types.size()) == N ? m_atom_types[i] : 0),
+                    m_rev_share_sum(i), m_rev.valence[i], m_rev_share_cap(i),
+                    m_rev_share_val(i), m_rev_share_f(i), m_rev_share_dfdS(i)));
+        }
+    }
+}
+
+// ============================================================================
+// rev-gfnff stage 3a(ii), the "conserving" share (Claude Generated, Sep 18, 2026)
+// FABLE_REVIEW_2 A.5. Per atom:
+//     S_i    = sum_k w_ik g_ik                       (built by Pass 3 above)
+//     X_i    = the excess-budget cap, element/charge rule (capForAtom below)
+//     Val_i  = Val_Z + min(G(S_i - Val_Z), X_i)      G = shareExcess, min = shareMinOne
+//     f_i    = min(1, Val_i / S_i)                   shareMinOne again
+//     c_ij   = 1 - g_ij (1 - f_i f_j)                = f_i f_j for an ordinary pair (g = 1)
+// and d f_i / d S_i is stored, because EVERY geometry dependence of this mode runs through the
+// term weights w that build S_i - the budget included. That is why m_rev_share_dval is 0 here:
+// the settled-count channel of the delivered rule has no counterpart, and the existing Lambda
+// pass over dw/dr carries the whole chain rule (applyValenceShareGradient).
+// ============================================================================
+void FFWorkspace::prepareConservingShare(bool fix_h)
+{
+    const int N = m_natoms;
+    if (m_rev_share_f.size() != N) {
+        m_rev_share_f.resize(N);
+        m_rev_share_dfdS.resize(N);
+        m_rev_share_cap.resize(N);
+    }
+    const bool have_types = static_cast<int>(m_atom_types.size()) == N;
+    const bool have_q = m_topology_charges.size() == N;
+    // Q_i = the topological (phase-1 EEQ) charge of atom i plus that of its H partners IN THIS
+    // CORNER. It is what separates NH4+ from NH3 + H: the +1 of an ammonium sits on the N-H4
+    // group as a whole (the N itself is negative), and a neutral CH4 + H group carries 0 however
+    // close the radical is. Built from the corner's own bond list, so it is a constant inside a
+    // corner and a change is carried by the s-blend, exactly like every other corner quantity.
+    std::vector<double> qgroup(N, 0.0);
+    if (have_q) {
+        for (int i = 0; i < N; ++i)
+            qgroup[i] = m_topology_charges(i);
+        if (have_types) {
+            for (int p = 0; p < static_cast<int>(m_bonds.size()); ++p) {
+                const Bond& b = m_bonds[p];
+                if (b.i < 0 || b.j < 0 || b.i >= N || b.j >= N)
+                    continue;
+                if (m_atom_types[b.j] == 1)
+                    qgroup[b.i] += m_topology_charges(b.j);
+                if (m_atom_types[b.i] == 1)
+                    qgroup[b.j] += m_topology_charges(b.i);
+            }
+        }
+    }
+    const double a = m_rev.share_min_width > 1e-6 ? m_rev.share_min_width : 1e-6;
+    for (int i = 0; i < N; ++i) {
+        const double S = m_rev_share_sum(i);
+        const double valz = m_rev.valence[i];
+        const int Z = have_types ? m_atom_types[i] : 0;
+        // --- the cap X_i ---------------------------------------------------------------
+        double cap = 0.0;
+        bool delivered_growth = false;   // transition metals, see below
+        if (Z == 1 || Z == 9) {
+            cap = 0.0;                   // H is never hypervalent; F is never hypervalent
+        } else {
+            const int grp = (Z >= 1 && Z <= 86) ? GFNFFParameters::periodic_group[Z - 1] : 0;
+            const int period = Z <= 2 ? 1 : Z <= 10 ? 2 : Z <= 18 ? 3 : Z <= 36 ? 4 : Z <= 54 ? 5 : 6;
+            if (grp < 0) {
+                // A d-block element: periodic_group is negative for it, and FABLE_REVIEW_2 A.5
+                // does not cover metals. Their coordination numbers routinely exceed any sigma
+                // valence, so the charge rule would scale EVERY metal-ligand well by Val_Z/CN.
+                // Deliberate, documented carve-out: a transition metal keeps the delivered
+                // growth (cap = the softplus itself), i.e. this mode does not touch it. NOT
+                // measured - no metal is in any rev-gfnff reference set.
+                delivered_growth = true;
+            } else if (grp == 3) {
+                // NB: GFNFFParameters::periodic_group uses MAIN-GROUP numbering 1-8, not IUPAC
+                // 1-18 - so "group 13" of FABLE_REVIEW_2 A.5 (B, Al, Ga, In, Tl) is 3 here and
+                // "groups 15-17" (N/P/As.., O/S/Se.., F/Cl/Br..) are 5-7. Measured the hard way:
+                // with the IUPAC numbers no rule ever fired and ClO4- fell to the charge rule
+                // (cap 0.65 instead of 5), costing +164 kcal/mol.
+                cap = 1.0;               // the empty orbital: BF4-, BH4-, AlCl4-, H3N-BH3
+            } else if (period >= 3 && grp >= 5 && grp <= 7) {
+                cap = 6.0 - valz;        // the octet expansion the valence table already grants P/S
+            } else {
+                cap = shareClip(qgroup[i]);   // C, N, O and the rest: granted by charge
+            }
+        }
+        if (fix_h && Z == 1)
+            cap = 0.0;
+        m_rev_share_cap(i) = delivered_growth ? 99.0 : cap;
+        // --- the budget ----------------------------------------------------------------
+        const double exc_arg = S - valz;
+        const double G = shareExcess(exc_arg);
+        const double dG = shareExcessD(exc_arg);          // d G / d S
+        double val, dval_dS;
+        if (delivered_growth) {
+            val = valz + G;
+            dval_dS = dG;
+        } else if (cap <= 1e-12) {
+            val = valz;
+            dval_dS = 0.0;
+        } else {
+            // min(G, cap) = cap * shareMinOne(G/cap): exactly G below cap (1 - a), exactly cap
+            // above it, C1 in between - and, crucially, EXACTLY cap once the softplus has
+            // saturated, which is what makes an ammonium's Val equal its S to the last bit.
+            const double t = G / cap;
+            val = valz + cap * shareMinOne(t, a);
+            dval_dS = shareMinOneD(t, a) * dG;
+        }
+        m_rev_share_val(i) = val;
+        m_rev_share_dval(i) = 0.0;       // the settled-count channel does not exist in this mode
+        // --- the share factor ----------------------------------------------------------
+        if (S <= 1e-12) {
+            m_rev_share_f(i) = 1.0;
+            m_rev_share_dfdS(i) = 0.0;
+            continue;
+        }
+        const double x = val / S;
+        m_rev_share_f(i) = shareMinOne(x, a);
+        // d f/d S = f'(x) * (val' S - val)/S^2
+        m_rev_share_dfdS(i) = shareMinOneD(x, a) * (dval_dS * S - val) / (S * S);
     }
 }
 

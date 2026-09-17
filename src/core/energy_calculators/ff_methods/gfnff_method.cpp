@@ -12356,6 +12356,20 @@ void GFNFF::setupRevSettings()
     rv.blend_repulsion = m_parameters.value("rev_blend_repulsion", true);
     rv.over_coord = m_parameters.value("rev_over_coord", true);
     rv.valence_share = m_parameters.value("rev_valence_share", true);
+    // Claude Generated (Sep 18, 2026): the share FORM. "delivered" = the left-over rule
+    // c = 1/2 (f_i + f_j) with f_i = clip((Val_i - sum_{k != j} w_ik)/w_ij); "conserving" =
+    // FABLE_REVIEW_2 A.5, f_i = min(1, Val_i/S_i) per atom, c = f_i f_j, with the excess budget
+    // granted by charge instead of by element. Same registry caveat as the flags around it: a new
+    // key may not arrive through getDefaultJson(), so the fallback here IS the default.
+    {
+        const std::string form = m_parameters.value("rev_share_form", std::string("delivered"));
+        rv.share_conserving = (form == "conserving");
+        if (form != "delivered" && form != "conserving")
+            CurcumaLogger::warn(fmt::format(
+                "rev_share_form '{}' is not delivered|conserving - using delivered", form));
+        m_rev_share_form = rv.share_conserving ? "conserving" : "delivered";
+        rv.share_min_width = m_parameters.value("rev_share_min_width", 0.1);
+    }
     // Claude Generated (Sep 14, 2026): the smooth 1,3 proxy of the share - the claim of a pair is
     // w_p g_p with g the bond-order leak of a settled shared partner (see FFWorkspace). Off = the
     // plain, unmasked share (bit-identical to the state before the proxy).
@@ -12546,10 +12560,10 @@ void GFNFF::setupRevSettings()
             rv.over_k, rv.over_shift, rv.w_join));
         CurcumaLogger::result(fmt::format(
             "rev dump (flags): form {} bo2_form {:.4f} bo_form {:.4f} bo_break {:.4f} bo13_form {:.4f} "
-            "bo13_ordinary_join {} budget_fix_h {} "
+            "bo13_ordinary_join {} budget_fix_h {} share_form {} "
             "tr {:.4f}/{:.4f}/{:.4f}/{:.4f} cooldown {} max_transitions {} sqe {} sqe_bmin {:.5f} preset {}",
             m_rev_form_order ? "order" : "weight", m_rev_bo2_form, m_rev_bo_form, m_rev_bo_break,
-            m_rev_bo13_form, m_rev_bo13_ordinary_join, m_rev_budget_fix_h,
+            m_rev_bo13_form, m_rev_bo13_ordinary_join, m_rev_budget_fix_h, m_rev_share_form,
             m_rev_tr_begin, m_rev_tr_end, m_rev_tr_revert, m_rev_tr_prebreak,
             m_rev_demote_cooldown, m_rev_max_transitions, m_rev_sqe, m_rev_sqe_bmin,
             m_parameters.value("rev_over_preset", std::string("stage1a"))));

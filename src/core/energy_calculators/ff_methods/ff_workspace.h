@@ -267,6 +267,29 @@ struct RevSettings {
     /// DEFAULT ON since Sep 18, 2026 (operator decision after FABLE_REVIEW_2 A.2); false
     /// reproduces the pre-Sep-18 behaviour.
     bool budget_fix_h = true;
+    /// rev-gfnff stage 3a(ii) (Claude Generated, Sep 18, 2026): the "conserving" share of
+    /// FABLE_REVIEW_2 A.5, selected by -gfnff.rev_share_form conserving. Two changes at once,
+    /// because neither works without the other (A.5 measured both halves separately):
+    ///   (1) f_i = min(1, Val_i / S_i) per ATOM with S_i = sum_k w_ik g_ik, c_ij = f_i f_j.
+    ///       The delivered rule is a LEFT-OVER rule, f_i = clip((Val_i - sum_{k != j} w_ik)/w_ij):
+    ///       with w ~ 1 on every partner, one partner too many makes every pair of that atom see
+    ///       "nothing left", so a 5-coordinate carbon hands out 0 of its 4 valences instead of
+    ///       4/5 each. The conserving form satisfies sum_j f_i w_ij = min(Val_i, S_i) exactly.
+    ///       The PRODUCT, not the mean: with the mean the rkt06 exchange TS pair gets c = 0.75
+    ///       and the path breaks (A.5).
+    ///   (2) the excess budget is granted by CHARGE, not by element:
+    ///       Val_i = Val_Z + min(G(S_i - Val_Z), X_i), X_i = 0 for H and F, 1 for group 13,
+    ///       6 - Val_Z for period >= 3 groups 15-17, and clip(Q_i) otherwise, with Q_i the
+    ///       topological (phase-1 EEQ) charge of atom i plus that of its H partners in this
+    ///       corner - a per-corner constant, so no chain rule runs through it and a change is
+    ///       carried by the existing s-blend. What separates NH4+ (four real bonds) from
+    ///       NH3 + H (no bond) is neither the element nor the geometry but the electron count,
+    ///       and the only electron-count information a force field has is the charge.
+    /// DEFAULT OFF; the delivered behaviour is unchanged.
+    bool share_conserving = false;
+    /// rev-gfnff 3a(ii) "conserving": half-width of the C1 smooth min in Val/S units. The min is
+    /// exactly 1 above 1 and exactly Val/S below 1 - a, so this only smooths the corner between.
+    double share_min_width = 0.1;
     /// rev-gfnff stage 3a(ii) (Sep 2026): "an H is never sp" - an sp hydrogen is not treated as
     /// a bridging atom, so its bond keeps the full strength instead of the reference's 0.30
     /// scaling. See the comment at the rule in gfnff_method.cpp.
@@ -621,6 +644,17 @@ private:
     /// settled count. val_i = Val_Z + G(settled_i - Val_Z) (see shareExcess); dval_i = dG/dx.
     /// Both are consumed by calcBonds, which carries their whole chain rule locally.
     Vector m_rev_share_val, m_rev_share_dval;
+    /// rev-gfnff 3a(ii) "conserving" share (Claude Generated, Sep 18, 2026, FABLE_REVIEW_2 A.5).
+    /// f_i = smoothmin(1, Val_i / S_i) is a PER-ATOM quantity there (the delivered rule's f is
+    /// per pair), so it is computed once per corner next to the sums and read by calcBonds.
+    /// m_rev_share_dfdS(i) = d f_i / d S_i, which already contains d Val_i / d S_i - the excess
+    /// budget of this mode is built from the same wide sum S_i, not from the settled count, so
+    /// the whole chain rule rides the existing Lambda pass over the term weights and
+    /// m_rev_share_dval is exactly 0 in this mode.
+    Vector m_rev_share_f, m_rev_share_dfdS;
+    /// rev-gfnff 3a(ii) "conserving": the per-atom excess budget cap X_i (element/charge rule).
+    /// Diagnostic only after prepareValenceShare; kept for the CURCUMA_SHAREDUMP table.
+    Vector m_rev_share_cap;
     /// rev-gfnff 3a(ii) (Claude Generated, Sep 14, 2026): the SMOOTH 1,3 proxy - the genuineness
     /// g_p of every pair of the corner's bond list, in m_bonds order. A compact polyhedron's
     /// perception carries 1,3 contacts as bonds - the six F...F contacts of a tetrahedral BF4-
@@ -771,8 +805,34 @@ private:
     static double shareSettled(double b_order) { return shareClip(2.0 * b_order - 1.0); }
     /// d shareSettled / db (chain rule of the 2b - 1 rescaling)
     static double shareSettledD(double b_order) { return 2.0 * shareClipD(2.0 * b_order - 1.0); }
+    /// rev-gfnff 3a(ii) "conserving" share (Claude Generated, Sep 18, 2026): a C1 smooth min(1, x)
+    /// that is EXACTLY 1 for x >= 1 and EXACTLY x for x <= 1 - a, with a cubic joining the two.
+    /// The exactness on both sides is the point, not a nicety: an equilibrium atom has
+    /// Val_i >= S_i, i.e. x >= 1, so its share factor must come out as the literal 1.0 for the
+    /// term to stay bit-identical; and an over-claimed atom must get the literal Val_i/S_i for
+    /// sum_j f_i w_ij = min(Val_i, S_i) - the valence conservation the mode exists for - to hold.
+    /// A softplus-based min satisfies neither (it is off by ln(2)/beta at x = 1).
+    /// h(u) = -u^3/a^2 - 2u^2/a on [-a, 0] is the unique cubic with h(-a) = -a, h'(-a) = 1,
+    /// h(0) = h'(0) = 0; it is monotone there (h' = -(u/a)(3u/a + 4) > 0).
+    static double shareMinOne(double x, double a)
+    {
+        const double u = x - 1.0;
+        if (u >= 0.0) return 1.0;
+        if (u <= -a) return x;
+        return 1.0 - u * u * u / (a * a) - 2.0 * u * u / a;
+    }
+    /// d shareMinOne / dx
+    static double shareMinOneD(double x, double a)
+    {
+        const double u = x - 1.0;
+        if (u >= 0.0) return 0.0;
+        if (u <= -a) return 1.0;
+        return -3.0 * u * u / (a * a) - 4.0 * u / a;
+    }
     /// rev-gfnff 3a(ii): per-atom sum_k m_ik w_ik of the corner's bond list (main thread, per step)
     void prepareValenceShare();
+    /// rev-gfnff 3a(ii) "conserving": per-atom budget cap, effective valence, f_i and df_i/dS_i
+    void prepareConservingShare(bool fix_h);
     /// rev-gfnff 3a(ii): the chain rule of that sum and of the effective valence (after the partitions)
     void applyValenceShareGradient();
     /// rev-gfnff: over-coordination energy + gradient, main thread, after the partitions (Sep 2026)
