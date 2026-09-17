@@ -37,9 +37,9 @@ The per-iteration full-spectrum eigensolve of the device-resident SCF can be spr
 
 | Option | Default | Effect / when to change |
 |---|---|---|
-| `-gpu_eigensolver_devices all\|0,1,2,3` | off | Devices for the eigensolve (at least two). May include the calculation's own device. Do not combine with a batch pool on the same devices. |
+| `-gpu_eigensolver_devices all\|0,1,2,3\|none` | **all visible devices** when more than one is visible and this calculation does not run inside a batch worker, else off | Devices for the eigensolve (at least two); may include the calculation's own device. `none` switches it off. Batch workers keep it off: each of them already owns one device. |
 | `-gpu_eigensolver_backend auto\|mp\|mg` | auto | `mp` = cuSOLVERMp over NCCL, `mg` = cusolverMg (CUDA toolkit, deprecated in CUDA 13). `auto` tries mp, then mg. |
-| `-gpu_eigensolver_min_nao N` | 4000 | Below N basis functions the single-GPU solver is used: the column scatter/gather and NCCL collectives cost more than they save for small matrices. |
+| `-gpu_eigensolver_min_nao N` | 4000 | Below N basis functions the single-GPU solver is used: the column scatter/gather and NCCL collectives cost more than they save for small matrices. This gate is what keeps the default harmless for everyday molecules. |
 | `-gpu_eigensolver_block N` | 128 | Column block size of the 1 x ndev distribution. Standalone n = 15444, 4 GPUs: nb 64/128/256 -> FP64 21.9/20.7/20.9 s, FP32 5.50/5.24/5.36 s. |
 | `-gpu_eigensolver_fp32 true\|false` | true | Also distribute the FP32 iterations of the mixed-precision SCF (`mp` only; `mg` never gets FP32 solves, see below). Set false to keep FP32 on the calculation's own GPU. |
 
@@ -61,6 +61,8 @@ Measured, polymer_2x GFN2 single point + gradient (7320 atoms, nao 15444), 4x RT
 | `-gpu_eigensolver_devices 1,2,3` (device 0 not in the solver) | 244 s | 11+1 | 10.3 s | 48.5 s | 12.3 GB | 7.0 GB |
 
 - Iteration counts differ between rows because the FP32 path lands at slightly different points; compare the per-iteration columns.
+- Both features are ON by default from 4000 basis functions up when several GPUs are visible (operator decision, Sep 2026); the rows above with fewer devices need the explicit option.
+- Measure on idle GPUs: the `mem` column of the profiler is device-wide, so a concurrent job (e.g. `ctest -L gpu`) inflates it and slows the run - one comparison in this file was repeated for that reason.
 - FP64 iteration split (all 4 GPUs): sygst 3.8 s (single GPU: two trsm 21 s), syevd 19.5 s (49 s), trsm back-transform 10.9 s (10.5 s). FP32: syevd 4.6 s (7.5 s).
 - Including device 0 is ~10 % faster per iteration; excluding it lowers device 0 by ~1.2 GB and raises the others by ~2 GB. Use `1,2,3` when device 0 is the one that does not fit.
 - The pattern density is distributed separately, see the next section.
@@ -71,9 +73,10 @@ Measured, polymer_2x GFN2 single point + gradient (7320 atoms, nao 15444), 4x RT
 
 | Option | Default | Effect / when to change |
 |---|---|---|
-| `-gpu_density_devices all\|0,1,2\|solver` | off | Helper devices for the density (the calculation's own device is always one of the workers and is skipped in the list). `solver` reuses `-gpu_eigensolver_devices`. Needs the screened storage (`-gpu_sparse_integrals`, automatic for large systems). |
+| `-gpu_density_devices all\|0,1,2\|solver\|none` | **all visible devices** under the same condition as the eigensolve above, else off | Helper devices for the density (the calculation's own device is always one of the workers and is skipped in the list). `solver` reuses `-gpu_eigensolver_devices`, `none` switches it off. Needs the screened storage (`-gpu_sparse_integrals`, automatic for large systems). |
+| `-gpu_density_min_nao N` | 4000 | Below N basis functions the single-device kernel is used (polymer, nao 2975: the split is 10 % slower). |
 
-- Measured, polymer_2x GFN2 on 4x RTX A4500 with `-gpu_eigensolver_devices all -gpu_density_devices solver`: density 3.35 -> **0.85 s per SCF step** (46.9 -> 10.2 s total), FP32 iteration 9.4 -> 6.9 s, wall **242 -> 194 s**, energy identical. Device 0 peak 13.5 -> 13.9 GB, helpers 5.0 -> 5.8 GB.
+- Measured, polymer_2x GFN2 on 4x RTX A4500 (identical with the defaults and with explicit `-gpu_eigensolver_devices all -gpu_density_devices solver`, both 194 s): density 3.35 -> **0.85 s per SCF step** (46.9 -> 10.2 s total), FP32 iteration 9.4 -> 6.9 s, wall **242 -> 194 s**, energy identical. Device 0 peak 13.5 -> 13.9 GB, helpers 5.0 -> 5.8 GB.
 - Too small to pay: polymer (1410 atoms, nao 2975) goes 50 -> 55 ms per step, i.e. the transfers cost more than the split saves. The split needs at least 16 columns per worker and falls back to the single device otherwise.
 - On any failure it falls back to the single-device kernel for the rest of the run and warns (at verbosity >= 1).
 - Rejected alternatives for the same kernel: a row-major variant (contiguous rows, occupations applied in the kernel) was **8x slower** (4.69 vs 0.60 s over 12 steps on polymer); a banded GEMM does not help because the atom order of polymer_2x is not spatially local - a column block spans 93-99 % of the rows although only 7.9 % of the atom pairs are inside the cutoff.

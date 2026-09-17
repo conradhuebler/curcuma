@@ -701,7 +701,7 @@ json CLI2Json(int argc, char** argv)
         // Claude Generated (Sep 2026, multi-GPU step 3): multi-GPU eigensolve (docs/GPU_TUNING.md)
         "gpu_eigensolver_devices", "gpu_eigensolver_backend", "gpu_eigensolver_block",
         "gpu_eigensolver_min_nao", "gpu_eigensolver_fp32",
-        "gpu_density_devices",   // split the screened-pattern density over GPUs (docs/GPU_TUNING.md)
+        "gpu_density_devices", "gpu_density_min_nao",  // split the pattern density (docs/GPU_TUNING.md)
         "charge", "spin",  // molecular charge/spin (top-level, not module-scoped)
         "export_run", // Export current run configuration
         "import_config", // Import custom configuration

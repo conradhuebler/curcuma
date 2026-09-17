@@ -26,6 +26,8 @@
 
 #include "xtb_gpu_method.h"
 
+#include "src/core/gpu_device_pool.h"
+
 #include <algorithm>
 #include <cstring>
 #include <sstream>
@@ -534,17 +536,36 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                                     : (m == "off" || m == "false" || m == "dense") ? 0 : 1);
         }
 
-        // Claude Generated (Sep 2026, multi-GPU step 3): multi-GPU eigensolve of the resident
-        // SCF. `-gpu_eigensolver_devices all|0,1,2,3` switches it on (off by default);
-        // backend auto|mp|mg, column block, minimum nao and FP32 use are tunable. See
-        // docs/GPU_TUNING.md for measured numbers.
-        if (config.contains("gpu_eigensolver_devices")) {
-            const auto& v = config["gpu_eigensolver_devices"];
+        auto num = [&](const char* key, double def) {
+            if (!config.contains(key)) return def;
+            const auto& x = config[key];
+            if (x.is_number()) return x.get<double>();
+            if (x.is_string()) { try { return std::stod(x.get<std::string>()); } catch (...) {} }
+            return def;
+        };
+
+        // Claude Generated (Sep 2026, multi-GPU step 3; default ON per operator decision):
+        // multi-GPU eigensolve of the resident SCF, `-gpu_eigensolver_devices all|0,1,2,3|none`.
+        // With more than one visible device it defaults to ALL of them - unless this calculation
+        // runs inside a batch worker that leased one device (then every worker already owns a
+        // device and must not grab the others).
+        // Both multi-GPU paths only engage from gpu_eigensolver_min_nao / gpu_density_min_nao
+        // (4000) basis functions up; below that they cost more than they save.
+        // See docs/GPU_TUNING.md for the measured numbers.
+        const bool several_devices = XtbGpuContext::deviceCount() > 1
+            && curcuma::leasedGpuDevice() < 0;
+        if (config.contains("gpu_eigensolver_devices") || several_devices) {
             std::vector<int> devs;
-            std::string spec = v.is_string() ? v.get<std::string>() : std::string();
-            if (v.is_array()) {
-                for (const auto& d : v) if (d.is_number()) devs.push_back(static_cast<int>(d.get<double>()));
-            } else if (spec == "all" || spec == "auto") {
+            std::string spec = "all";
+            if (config.contains("gpu_eigensolver_devices")) {
+                const auto& v = config["gpu_eigensolver_devices"];
+                spec = v.is_string() ? v.get<std::string>() : std::string();
+                if (v.is_array()) {
+                    spec.clear();
+                    for (const auto& d : v) if (d.is_number()) devs.push_back(static_cast<int>(d.get<double>()));
+                }
+            }
+            if (spec == "all" || spec == "auto") {
                 devs.push_back(-1);   // the context expands this to every visible device
             } else if (!spec.empty() && spec != "none" && spec != "off") {
                 std::stringstream ss(spec);
@@ -554,13 +575,6 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                     }
                 }
             }
-            auto num = [&](const char* key, double def) {
-                if (!config.contains(key)) return def;
-                const auto& x = config[key];
-                if (x.is_number()) return x.get<double>();
-                if (x.is_string()) { try { return std::stod(x.get<std::string>()); } catch (...) {} }
-                return def;
-            };
             std::string backend = "auto";
             if (config.contains("gpu_eigensolver_backend") && config["gpu_eigensolver_backend"].is_string())
                 backend = config["gpu_eigensolver_backend"].get<std::string>();
@@ -577,16 +591,22 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                                                static_cast<int>(num("gpu_eigensolver_min_nao", 4000)), fp32);
         }
 
-        // Claude Generated (Sep 2026, multi-GPU): `-gpu_density_devices all|0,1,..|solver` splits
-        // the screened-pattern density of the resident SCF over several GPUs (exact, see
+        // Claude Generated (Sep 2026, multi-GPU): `-gpu_density_devices all|0,1,..|solver|none`
+        // splits the screened-pattern density of the resident SCF over several GPUs (exact, see
         // XtbGpuContext::densityPatternDistributed). "solver" reuses the eigensolver's devices.
-        if (config.contains("gpu_density_devices")) {
-            const auto& v = config["gpu_density_devices"];
+        // Defaults to all visible devices under the same condition as the eigensolve above.
+        if (config.contains("gpu_density_devices") || several_devices) {
             std::vector<int> devs;
-            const std::string spec = v.is_string() ? v.get<std::string>() : std::string();
-            if (v.is_array()) {
-                for (const auto& d : v) if (d.is_number()) devs.push_back(static_cast<int>(d.get<double>()));
-            } else if (spec == "all" || spec == "auto") {
+            std::string spec = "all";
+            if (config.contains("gpu_density_devices")) {
+                const auto& v = config["gpu_density_devices"];
+                spec = v.is_string() ? v.get<std::string>() : std::string();
+                if (v.is_array()) {
+                    spec.clear();
+                    for (const auto& d : v) if (d.is_number()) devs.push_back(static_cast<int>(d.get<double>()));
+                }
+            }
+            if (spec == "all" || spec == "auto") {
                 devs.push_back(-1);
             } else if (spec == "solver" && config.contains("gpu_eigensolver_devices")
                        && config["gpu_eigensolver_devices"].is_string()) {
@@ -607,7 +627,8 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                     }
                 }
             }
-            if (!devs.empty()) ctx->setDensityDevices(devs);
+            if (!devs.empty())
+                ctx->setDensityDevices(devs, static_cast<int>(num("gpu_density_min_nao", 4000)));
         }
 
         // Stage 1: install the GPU eigensolver. solveEigen() delegates the per-iteration

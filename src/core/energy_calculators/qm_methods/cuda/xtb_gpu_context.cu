@@ -321,6 +321,7 @@ struct XtbGpuContext::Impl {
     std::vector<int>           dens_devices;    // helper devices (never the context's own)
     std::vector<DensityHelper> dens_helpers;
     bool                       dens_failed = false;
+    int                        dens_min_nao = 4000;
     std::string                dens_error;
     int                        dens_steps = 0;
     long                       pattern_generation = 0;   // bumped when the screened pattern changes
@@ -2375,6 +2376,12 @@ bool XtbGpuContext::deviceAvailable()
     return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
 }
 
+int XtbGpuContext::deviceCount()
+{
+    int count = 0;
+    return cudaGetDeviceCount(&count) == cudaSuccess ? count : 0;
+}
+
 bool XtbGpuContext::solveGeneralizedEigenF64(const double* F, const double* L, int n,
                                              double* C, double* eps)
 {
@@ -2779,8 +2786,9 @@ bool XtbGpuContext::residentDensity(const double* occ, int ncol, int n,
 bool XtbGpuContext::densityPatternDistributed(int n, int ncol)
 {
     Impl& I = *m_impl;
-    if (I.dens_failed || I.dens_devices.empty() || !I.sparse || I.sp_nnz <= 0 || ncol <= 0)
-        return false;
+    if (I.dens_failed || I.dens_devices.empty() || !I.sparse || I.sp_nnz <= 0 || ncol <= 0
+        || n < I.dens_min_nao)
+        return false;   // below ~3000 basis functions the transfers cost more than the split saves
 
     const int nhelp = static_cast<int>(I.dens_devices.size());
     const int nworker = nhelp + 1;               // the helpers plus this device
@@ -3177,7 +3185,7 @@ void XtbGpuContext::setDistributedEigensolver(const std::vector<int>& devices,
     m_impl->dist_status.clear();
 }
 
-void XtbGpuContext::setDensityDevices(const std::vector<int>& devices)
+void XtbGpuContext::setDensityDevices(const std::vector<int>& devices, int min_nao)
 {
     if (!m_impl) return;
     bindDevice();
@@ -3185,6 +3193,7 @@ void XtbGpuContext::setDensityDevices(const std::vector<int>& devices)
     m_impl->dens_devices.clear();
     m_impl->dens_failed = false;
     m_impl->dens_steps = 0;
+    m_impl->dens_min_nao = std::max(0, min_nao);
     int count = 0;
     cudaGetDeviceCount(&count);
     for (int d : devices) {
@@ -3204,6 +3213,8 @@ void XtbGpuContext::setDensityDevices(const std::vector<int>& devices)
 std::string XtbGpuContext::densityDevicesStatus() const
 {
     if (!m_impl || m_impl->dens_devices.empty()) return {};
+    if (m_impl->dens_steps == 0 && !m_impl->dens_failed)
+        return "not used (nao below gpu_density_min_nao = " + std::to_string(m_impl->dens_min_nao) + ")";
     if (m_impl->dens_failed)
         return "failed (" + m_impl->dens_error + "); single-device density from here on";
     std::string list = std::to_string(m_impl->device);

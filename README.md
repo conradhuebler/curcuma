@@ -49,8 +49,10 @@ system dependencies (one backend per build dir: `release_cuda/`, `release_rocm/`
   device; batch runs (`-sp`/`-opt` on a multi-XYZ file, ConfSearch, Hessian) spread their
   workers over all visible GPUs (`-gpu_devices 0,2`, `-gpu_workers_per_device 2`).
   `curcuma -methods` lists the devices. One large GFN1/GFN2 molecule can spread its
-  eigensolve over several GPUs with `-gpu_eigensolver_devices all` (needs cuSOLVERMp, cuBLASMp
-  and NCCL at build time, see [docs/GPU_TUNING.md](docs/GPU_TUNING.md)).
+  eigensolve and its density over several GPUs; with more than one device visible this is the
+  default from 4000 basis functions up (`-gpu_eigensolver_devices none` / `-gpu_density_devices
+  none` to disable; needs cuSOLVERMp, cuBLASMp and NCCL at build time, see
+  [docs/GPU_TUNING.md](docs/GPU_TUNING.md)).
   See [docs/MULTI_GPU.md](docs/MULTI_GPU.md).
 
 ## Validation Status Labels

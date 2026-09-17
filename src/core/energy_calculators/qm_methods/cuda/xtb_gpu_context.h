@@ -63,6 +63,9 @@ public:
     /// True if at least one CUDA device is visible (static probe, no allocation).
     static bool deviceAvailable();
 
+    /// Number of visible CUDA devices (0 when none / no driver).
+    static int deviceCount();
+
     /**
      * @brief Solve the generalized symmetric eigenproblem F C = S C ε on the GPU,
      * with S = L·Lᵀ, reusing the host-supplied lower Cholesky factor L.
@@ -242,7 +245,7 @@ public:
      * the whole pattern over its own slice of columns and the partials are added here - exact, not
      * an approximation. Per SCF step only the column slices of C travel. Claude Generated (Sep 2026).
      */
-    void setDensityDevices(const std::vector<int>& devices);
+    void setDensityDevices(const std::vector<int>& devices, int min_nao = 4000);
 
     /// "" when not configured, else the devices used and the number of split steps.
     std::string densityDevicesStatus() const;

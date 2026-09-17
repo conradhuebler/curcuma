@@ -248,3 +248,13 @@ Energies unchanged at the printed precision (complex -329.52714784, polymer -208
 - polymer_2x GFN2: density 46.9 -> 10.2 s, wall 242 -> **194 s** (single GPU 419 s), energy identical; complex at `-scf_threshold 1e-9` agrees with the single-GPU run to 1.2e-9; `ctest -L gpu` 200/200.
 - Not worth it below ~3000 basis functions (polymer, nao 2975: 50 -> 55 ms per step).
 - Trap found here: `cudaDeviceEnablePeerAccess` leaves `cudaErrorPeerAccessAlreadyEnabled` pending, and the next `cudaGetLastError()` reported it as a kernel-launch failure - the peer calls now consume it.
+
+## Defaults (operator decision, Sep 17, 2026)
+
+Both multi-GPU paths for one large molecule are ON when more than one device is visible and the
+calculation does not run inside a batch worker (`leasedGpuDevice() < 0`), gated at 4000 basis
+functions (`gpu_eigensolver_min_nao`, `gpu_density_min_nao`). `-gpu_eigensolver_devices none` /
+`-gpu_density_devices none` switch them off. polymer_2x with no flags at all: 194.2 s, device-0
+peak 13.9 GB, energy identical to the single-GPU run - the same numbers as with the options set
+explicitly. Below the gate the status line says so ("not used (nao below ...)"), and
+`ctest -L gpu` (200 tests, all small molecules) is unaffected: 200/200.
