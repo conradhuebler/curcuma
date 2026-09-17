@@ -164,6 +164,11 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dD4C6Flat;              // reference C6 block (MAX_ELEM²·MAX_REF²)
     CudaBuffer<double> dD4W, dD4dWq;           // per-iter weights (nat·MAX_REF)
     CudaBuffer<double> dD4Dedq;                // output dE_D4/dq (nat)
+    // Claude Generated (Sep 2026): post-SCF 2-body gradient + ATM on the device.
+    CudaBuffer<double> dD4dWc, dD4Eat, dD4Grad, dD4Dcn;   // nat*7 / nat / 3 nat / nat
+    CudaBuffer<double> dD4AtmC6, dD4AtmDc6;               // nat^2 each (q=0 reference)
+    CudaBuffer<int>    dD4NbPtr, dD4Nb;                   // ATM neighbour list
+    std::vector<double> h_d4_xyz;                         // host copy of the D4 geometry
 
     // Stage 6 (S6.2b): q-independent per-atom reference data so the device rebuilds
     // W/dWq from the resident SCF charges (k_d4_build_refw), removing the host
@@ -1247,6 +1252,161 @@ __global__ void k_multipole_moments_spP(double* dp_at, double* qp_at, const doub
         for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) acc += Psp[e] * qk[e];
         atomicAdd(&qp_at[k + iat * 6], -acc);
     }
+}
+
+// Post-SCF: the whole 2-body D4 (energy + nuclear gradient + dE/dCN + dE/dq) in one per-atom
+// GATHER — a superset of k_d4_dedq. No atomics: the pair force is antisymmetric (atom j's own
+// thread accumulates the mirror term) and the energy is per-atom (host halves Σ e_atom). Port of
+// D4Evaluator::computeEnergyAndGradient's per-reference 2-body path: the direct radial gradient is
+// dE_dr = -C6·ddisp_dr2·(R_i-R_j) with ddisp_dr2 = s6·(-6r⁴t6²) + s8·r4r2·(-8r⁶t8²) (the C6·ζc6
+// rescale cancels in the per-reference path), dEdcn_i = -dc6dcn_i·disp_sum, dEdq_i = -dc6dq_i·disp_sum.
+// Claude Generated. CUDA port of the ROCm kernel (Sep 2026), unchanged.
+__global__ void k_d4_grad(int nat, int max_elem, int max_ref,
+                          const int* __restrict__ Z, const int* __restrict__ nref,
+                          const double* __restrict__ sqrtZr4r2, const double* __restrict__ xyz,
+                          const double* __restrict__ c6_flat,
+                          const double* __restrict__ W, const double* __restrict__ dWq,
+                          const double* __restrict__ dWc,
+                          double s6, double s8, double a1, double a2, double cut2,
+                          double* __restrict__ e_atom, double* __restrict__ grad,
+                          double* __restrict__ dEdcn, double* __restrict__ dEdq)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const int ei = Z[i] - 1;
+    const int nri = nref[i];
+    if (ei < 0 || ei >= max_elem || nri <= 0) {
+        e_atom[i] = 0.0; grad[3*i+0] = grad[3*i+1] = grad[3*i+2] = 0.0; dEdcn[i] = 0.0; dEdq[i] = 0.0;
+        return;
+    }
+    const double xi = xyz[3 * i + 0], yi = xyz[3 * i + 1], zi = xyz[3 * i + 2];
+    const double sq_i = sqrtZr4r2[i];
+    const double* Wi   = W   + static_cast<size_t>(i) * max_ref;
+    const double* dWqi = dWq + static_cast<size_t>(i) * max_ref;
+    const double* dWci = dWc + static_cast<size_t>(i) * max_ref;
+
+    double eacc = 0.0, gx = 0.0, gy = 0.0, gz = 0.0, cnacc = 0.0, qacc = 0.0;
+    for (int j = 0; j < nat; ++j) {
+        if (j == i) continue;
+        const double dx = xi - xyz[3 * j + 0];
+        const double dy = yi - xyz[3 * j + 1];
+        const double dz = zi - xyz[3 * j + 2];
+        const double r2 = dx * dx + dy * dy + dz * dz;
+        if (r2 > cut2 || r2 < 1.0e-20) continue;
+        const int ej = Z[j] - 1;
+        const int nrj = nref[j];
+        if (ej < 0 || ej >= max_elem || nrj <= 0) continue;
+
+        const double r4r2ij = 3.0 * sq_i * sqrtZr4r2[j];
+        const double r0 = a1 * sqrt(r4r2ij) + a2;
+        const double r0_2 = r0 * r0;
+        const double r0_6 = r0_2 * r0_2 * r0_2;
+        const double r0_8 = r0_6 * r0_2;
+        const double r6 = r2 * r2 * r2;
+        const double r8 = r6 * r2;
+        const double t6 = 1.0 / (r6 + r0_6);
+        const double t8 = 1.0 / (r8 + r0_8);
+        const double disp_sum = s6 * t6 + s8 * r4r2ij * t8;
+        const double d6 = -6.0 * r2 * r2 * t6 * t6;            // -6·r⁴·t6²
+        const double d8 = -8.0 * r2 * r2 * r2 * t8 * t8;       // -8·r⁶·t8²
+        const double ddisp_dr2 = s6 * d6 + s8 * r4r2ij * d8;
+
+        const double* Wj = W + static_cast<size_t>(j) * max_ref;
+        const size_t base = (static_cast<size_t>(ei) * max_elem + ej)
+                          * static_cast<size_t>(max_ref) * max_ref;
+        double C6 = 0.0, dc6dcni = 0.0, dc6dqi = 0.0;
+        for (int a = 0; a < nri; ++a) {
+            const size_t basea = base + static_cast<size_t>(a) * max_ref;
+            double sW = 0.0;
+            for (int b = 0; b < nrj; ++b) sW += Wj[b] * c6_flat[basea + b];
+            C6      += Wi[a]   * sW;
+            dc6dcni += dWci[a] * sW;
+            dc6dqi  += dWqi[a] * sW;
+        }
+        eacc  += -C6 * disp_sum;                 // per-atom energy (host: E = ½·Σ e_atom)
+        const double f = -C6 * ddisp_dr2;        // dE_dr = f·(R_i-R_j)
+        gx += f * dx; gy += f * dy; gz += f * dz;
+        cnacc += -dc6dcni * disp_sum;            // CN chain (host distributes via ∂CN/∂R)
+        qacc  += -dc6dqi  * disp_sum;            // q-response first half (host folds ∂q/∂R)
+    }
+    e_atom[i] = eacc;
+    grad[3 * i + 0] = gx; grad[3 * i + 1] = gy; grad[3 * i + 2] = gz;
+    dEdcn[i] = cnacc;
+    dEdq[i]  = qacc;
+}
+
+// D4 ATM 3-body (energy + nuclear gradient + dE/dCN), CUDA port of the ROCm k_d4_atm (Claude
+// Generated, Sep 2026) with one change: the pair loops run over a host-built neighbour list of
+// atoms within the ATM cutoff (nb[nbptr[a]..nbptr[a+1]), ascending) instead of all atoms. Every
+// skipped pair failed the r2 > cut2 test in the ROCm kernel and contributed nothing, and the
+// remaining pairs are visited in the same (ascending) order, so the sums are the same. At 7320
+// atoms this turns ~2e11 distance tests into ~5e8.
+__global__ void k_d4_atm_nl(int nat, const double* __restrict__ xyz, const double* __restrict__ r4r2,
+                            const double* __restrict__ c6, const double* __restrict__ dc6dcn,
+                            const int* __restrict__ nbptr, const int* __restrict__ nb,
+                            double s9, double a1, double a2, double alp, double cut2,
+                            double* __restrict__ e_atom, double* __restrict__ grad,
+                            double* __restrict__ dEdcn)
+{
+    const int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= nat) return;
+    const double eps = 2.220446049250313e-16;
+    const double xa = xyz[3*a+0], ya = xyz[3*a+1], za = xyz[3*a+2];
+    const double r4r2a = r4r2[a];
+    const size_t nat_s = static_cast<size_t>(nat);
+    const bool alp16 = (alp == 16.0);
+    double eacc = 0.0, gx = 0.0, gy = 0.0, gz = 0.0, cnacc = 0.0;
+    for (int ix = nbptr[a]; ix < nbptr[a + 1]; ++ix) {
+        const int x = nb[ix];
+        const double vaxx = xyz[3*x+0]-xa, vaxy = xyz[3*x+1]-ya, vaxz = xyz[3*x+2]-za;
+        const double r2ax = vaxx*vaxx + vaxy*vaxy + vaxz*vaxz;
+        if (r2ax > cut2 || r2ax < eps) continue;
+        const double c6ax = c6[a*nat_s + x];
+        const double r0ax = a1*sqrt(3.0*r4r2a*r4r2[x]) + a2;
+        for (int iy = nbptr[a]; iy < ix; ++iy) {        // y < x (list ascending)
+            const int y = nb[iy];
+            const double vayx = xyz[3*y+0]-xa, vayy = xyz[3*y+1]-ya, vayz = xyz[3*y+2]-za;
+            const double r2ay = vayx*vayx + vayy*vayy + vayz*vayz;
+            if (r2ay > cut2 || r2ay < eps) continue;
+            const double dxyx = xyz[3*y+0]-xyz[3*x+0], dxyy = xyz[3*y+1]-xyz[3*x+1], dxyz_ = xyz[3*y+2]-xyz[3*x+2];
+            const double r2xy = dxyx*dxyx + dxyy*dxyy + dxyz_*dxyz_;
+            if (r2xy > cut2 || r2xy < eps) continue;
+
+            const double c6ay = c6[a*nat_s + y];
+            const double c6xy = c6[x*nat_s + y];
+            const double c9 = -s9 * sqrt(fabs(c6ax*c6ay*c6xy));
+            const double r0ay = a1*sqrt(3.0*r4r2a*r4r2[y]) + a2;
+            const double r0xy = a1*sqrt(3.0*r4r2[x]*r4r2[y]) + a2;
+            const double r0 = r0ax*r0ay*r0xy;
+            const double r2 = r2ax*r2ay*r2xy;
+            const double r1 = sqrt(r2);
+            const double r3 = r2*r1;
+            const double r5 = r3*r2;
+            // alp = 16 (GFN2): (r0/r1)^(16/3) = q^5 * cbrt(q), far cheaper than pow on the device.
+            const double q = r0/r1;
+            const double pw = alp16 ? (q*q*q*q*q) * cbrt(q) : pow(q, alp/3.0);
+            const double fdmp = 1.0/(1.0 + 6.0*pw);
+            const double ang = 0.375*(r2ax + r2xy - r2ay)*(r2ax - r2xy + r2ay)*(-r2ax + r2xy + r2ay)/r5 + 1.0/r3;
+            const double dE = ang*fdmp*c9;
+            eacc += -dE;
+
+            const double dfdmp = -2.0*alp*pw*fdmp*fdmp;
+            const double dang_ax = -0.375*(r2ax*r2ax*r2ax + r2ax*r2ax*(r2xy+r2ay)
+                          + r2ax*(3.0*r2xy*r2xy + 2.0*r2xy*r2ay + 3.0*r2ay*r2ay)
+                          - 5.0*(r2xy-r2ay)*(r2xy-r2ay)*(r2xy+r2ay))/r5;
+            const double gcax = c9*(-dang_ax*fdmp + ang*dfdmp)/r2ax;
+            gx += -gcax*vaxx; gy += -gcax*vaxy; gz += -gcax*vaxz;
+            const double dang_ay = -0.375*(r2ay*r2ay*r2ay + r2ay*r2ay*(r2xy+r2ax)
+                          + r2ay*(3.0*r2xy*r2xy + 2.0*r2xy*r2ax + 3.0*r2ax*r2ax)
+                          - 5.0*(r2xy-r2ax)*(r2xy-r2ax)*(r2xy+r2ax))/r5;
+            const double gcay = c9*(-dang_ay*fdmp + ang*dfdmp)/r2ay;
+            gx += -gcay*vayx; gy += -gcay*vayy; gz += -gcay*vayz;
+            cnacc += -dE*0.5*(dc6dcn[a*nat_s+x]/c6ax + dc6dcn[a*nat_s+y]/c6ay);
+        }
+    }
+    e_atom[a] = eacc;
+    grad[3*a+0] = gx; grad[3*a+1] = gy; grad[3*a+2] = gz;
+    dEdcn[a] = cnacc;
 }
 
 // ====================================================================== *
@@ -3501,6 +3661,7 @@ bool XtbGpuContext::beginDispersion(int nat, const int* Z, const double* sqrtZr4
     m_impl->dD4Nref.upload(nref, nat, stream);
     m_impl->dD4Sqrt.upload(sqrtZr4r2, nat, stream);
     m_impl->dD4Xyz.upload(xyz_bohr, 3 * nat, stream);
+    m_impl->h_d4_xyz.assign(xyz_bohr, xyz_bohr + 3 * nat);
     // The reference C6 block is element data (geometry- AND molecule-independent):
     // upload it only once per process. ensure() keeps the allocation across steps.
     if (!m_impl->d4_c6_uploaded) {
@@ -3532,6 +3693,113 @@ bool XtbGpuContext::dispersionDedq(int nat, const double* W, const double* dWq, 
     if (cudaGetLastError() != cudaSuccess) return false;
     m_impl->dD4Dedq.download(dEdq_out, nat, stream);
     return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+// Claude Generated (Sep 2026): post-SCF D4 on the device (CUDA twins of the ROCm path). For a
+// 7k-atom GFN2 run the host ATM term alone was ~90 % of the 40 s post-SCF phase.
+bool XtbGpuContext::dispersionGradient(int nat, const double* W, const double* dWq, const double* dWc,
+                                       double* e_atom_out, double* grad_out,
+                                       double* dEdcn_out, double* dEdq_out)
+{
+    if (!ok() || nat <= 0 || nat != m_impl->d4_nat || !W || !dWq || !dWc || !e_atom_out
+        || !grad_out || !dEdcn_out || !dEdq_out || m_impl->dD4C6Flat.empty())
+        return false;
+    Impl& I = *m_impl;
+    cudaStream_t stream = I.stream;
+    const int wlen = nat * Impl::D4_MAX_REF;
+    try {
+        I.dD4dWc.ensure(wlen);
+        I.dD4Eat.ensure(nat);
+        I.dD4Grad.ensure(3 * nat);
+        I.dD4Dcn.ensure(nat);
+    } catch (...) {
+        return false;
+    }
+    I.dD4W.upload(W, wlen, stream);
+    I.dD4dWq.upload(dWq, wlen, stream);
+    I.dD4dWc.upload(dWc, wlen, stream);
+    const double cut2 = I.d4_cut * I.d4_cut;
+    const int b = 128;
+    k_d4_grad<<<(nat + b - 1) / b, b, 0, stream>>>(
+        nat, 118, Impl::D4_MAX_REF, I.dD4Z.ptr, I.dD4Nref.ptr, I.dD4Sqrt.ptr, I.dD4Xyz.ptr,
+        I.dD4C6Flat.ptr, I.dD4W.ptr, I.dD4dWq.ptr, I.dD4dWc.ptr,
+        I.d4_s6, I.d4_s8, I.d4_a1, I.d4_a2, cut2,
+        I.dD4Eat.ptr, I.dD4Grad.ptr, I.dD4Dcn.ptr, I.dD4Dedq.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    I.dD4Eat.download(e_atom_out, nat, stream);
+    I.dD4Grad.download(grad_out, 3 * nat, stream);
+    I.dD4Dcn.download(dEdcn_out, nat, stream);
+    I.dD4Dedq.download(dEdq_out, nat, stream);
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+bool XtbGpuContext::dispersionATM(int nat, const double* c6, const double* dc6dcn,
+                                  double s9, double a1, double a2, double alp, double cutoff,
+                                  double* e_atom_out, double* grad_out, double* dEdcn_out)
+{
+    Impl& I = *m_impl;
+    if (!ok() || nat <= 0 || nat != I.d4_nat || !c6 || !dc6dcn || !e_atom_out || !grad_out
+        || !dEdcn_out || static_cast<int>(I.h_d4_xyz.size()) != 3 * nat)
+        return false;
+    cudaStream_t stream = I.stream;
+    const double cut2 = cutoff * cutoff;
+
+    // Neighbour list (host, threaded): atoms within the cutoff, ascending, self excluded.
+    std::vector<std::vector<int>> nbl(nat);
+    {
+        const double* xyz = I.h_d4_xyz.data();
+        const unsigned hw = std::max(1u, std::min(std::thread::hardware_concurrency(), 32u));
+        std::vector<std::thread> pool;
+        for (unsigned t = 0; t < hw; ++t)
+            pool.emplace_back([&, t]() {
+                for (int a = static_cast<int>(t); a < nat; a += static_cast<int>(hw))
+                    for (int x = 0; x < nat; ++x) {
+                        if (x == a) continue;
+                        const double dx = xyz[3*x] - xyz[3*a], dy = xyz[3*x+1] - xyz[3*a+1], dz = xyz[3*x+2] - xyz[3*a+2];
+                        if (dx*dx + dy*dy + dz*dz <= cut2) nbl[a].push_back(x);
+                    }
+            });
+        for (auto& th : pool) th.join();
+    }
+    std::vector<int> nbptr(nat + 1, 0), nb;
+    size_t total = 0;
+    for (int a = 0; a < nat; ++a) total += nbl[a].size();
+    if (total > static_cast<size_t>(INT_MAX)) return false;
+    nb.reserve(total);
+    for (int a = 0; a < nat; ++a) {
+        nbptr[a] = static_cast<int>(nb.size());
+        nb.insert(nb.end(), nbl[a].begin(), nbl[a].end());
+    }
+    nbptr[nat] = static_cast<int>(nb.size());
+
+    const size_t nn = static_cast<size_t>(nat) * nat;
+    if (nn > static_cast<size_t>(INT_MAX)) return false;
+    try {
+        I.dD4AtmC6.ensure(static_cast<int>(nn));
+        I.dD4AtmDc6.ensure(static_cast<int>(nn));
+        I.dD4Eat.ensure(nat);
+        I.dD4Grad.ensure(3 * nat);
+        I.dD4Dcn.ensure(nat);
+        I.dD4NbPtr.upload(nbptr.data(), nat + 1, stream);
+        I.dD4Nb.upload(nb.empty() ? nbptr.data() : nb.data(), std::max<int>(1, static_cast<int>(nb.size())), stream);
+    } catch (...) {
+        return false;
+    }
+    I.dD4AtmC6.upload(c6, static_cast<int>(nn), stream);
+    I.dD4AtmDc6.upload(dc6dcn, static_cast<int>(nn), stream);
+    const int b = 64;
+    k_d4_atm_nl<<<(nat + b - 1) / b, b, 0, stream>>>(
+        nat, I.dD4Xyz.ptr, I.dD4Sqrt.ptr, I.dD4AtmC6.ptr, I.dD4AtmDc6.ptr, I.dD4NbPtr.ptr, I.dD4Nb.ptr,
+        s9, a1, a2, alp, cut2, I.dD4Eat.ptr, I.dD4Grad.ptr, I.dD4Dcn.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    I.dD4Eat.download(e_atom_out, nat, stream);
+    I.dD4Grad.download(grad_out, 3 * nat, stream);
+    I.dD4Dcn.download(dEdcn_out, nat, stream);
+    const bool okk = cudaStreamSynchronize(stream) == cudaSuccess;
+    // The nat^2 reference matrices are only needed for this call.
+    I.dD4AtmC6.free();
+    I.dD4AtmDc6.free();
+    return okk;
 }
 
 /* ====================================================================== *

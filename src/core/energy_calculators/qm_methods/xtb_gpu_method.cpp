@@ -352,6 +352,23 @@ public:
         return m_ctx->dispersionDedq(nat, W, dWq, dEdq_out);
     }
 
+    // Claude Generated (Sep 2026): post-SCF D4 2-body gradient + ATM on the device.
+    bool dispersionGradient(int nat, const double* W, const double* dWq, const double* dWc,
+                            double* e_atom_out, double* grad_out,
+                            double* dEdcn_out, double* dEdq_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->dispersionGradient(nat, W, dWq, dWc, e_atom_out, grad_out, dEdcn_out, dEdq_out);
+    }
+    bool dispersionATM(int nat, const double* c6, const double* dc6dcn,
+                       double s9, double a1, double a2, double alp, double cutoff,
+                       double* e_atom_out, double* grad_out, double* dEdcn_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->dispersionATM(nat, c6, dc6dcn, s9, a1, a2, alp, cutoff,
+                                    e_atom_out, grad_out, dEdcn_out);
+    }
+
     // ---- Device D4 reference weights from resident q_at (Stage 6, S6.2b) ---
     bool beginDispersionWeights(const std::vector<double>& cn, const std::vector<double>& gi,
                                 const std::vector<double>& zeff, const std::vector<double>& refcn,

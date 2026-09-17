@@ -984,6 +984,8 @@ double XTB::Calculation(bool gradient)
     if (!use_resident_loop)
         ensureHostMultipoleIntegrals();
 
+    double resident_band = 0.0;   // Tr(P H0) of the last device-resident step
+    double resident_ecoul = 0.0, resident_ethird = 0.0, resident_emp = 0.0;  // its SCC energies
     const auto t_scf_start = clock::now();
     int iter;
     for (iter = 0; iter < max_iter; ++iter) {
@@ -1005,6 +1007,7 @@ double XTB::Calculation(bool gradient)
                 return m_E_total;
             }
             m_E_electronic = eb; m_E_coulomb_shell = ecoul;
+            resident_band = eb; resident_ecoul = ecoul; resident_ethird = ethird; resident_emp = emp;
             m_E_third_order = ethird; m_E_multipole = emp;
             const double e_scc = eb + ecoul + ethird + emp;
             const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
@@ -1374,6 +1377,15 @@ double XTB::Calculation(bool gradient)
                                     m_scf_iterations, ms(t_scf_start, t_scf_end));
     }
 
+    // Claude Generated (Sep 2026): post-SCF host phase timings (printed with CURCUMA_GPU_PROFILE
+    // or verbosity 3) - on a 7k-atom GPU run this block took 40 s.
+    std::vector<std::pair<const char*, double>> post_t;
+    auto post_mark = [&, tp = clock::now()](const char* name) mutable {
+        const auto now = clock::now();
+        post_t.emplace_back(name, ms(tp, now));
+        tp = now;
+    };
+
     // Stage 6 (S6.5): the fused device loop kept the converged charges/moments
     // resident — download them once into the host wavefunction so the post-SCF
     // potential rebuild + energies + gradient below run unchanged. Claude Generated.
@@ -1389,8 +1401,19 @@ double XTB::Calculation(bool gradient)
     // Device-resident path: download the converged density and MO coefficients
     // once, so the post-SCF energies (band Tr(P·H0)) and the (still CPU) gradient
     // read them from the host. Claude Generated, GPU port Stage 2.
-    if (use_gpu_resident && m_gpu_scf)
-        m_gpu_scf->finalize(m_wfn.P, m_wfn.C);
+    post_mark("download charges/moments/eps");
+    // Claude Generated (Sep 2026): a large single point on the device-resident path does not
+    // need the dense P and C on the host (band energy comes from the device, the gradient is
+    // on the device). Rebuilding and downloading them took 16 s at 7320 atoms; they are fetched
+    // on demand (host gradient fallback, property accessors after ensureHostWavefunction).
+    m_wfn_on_device = false;
+    if (use_gpu_resident && m_gpu_scf) {
+        if (use_resident_loop && m_mp_ints_deferred && !gradient)
+            m_wfn_on_device = true;
+        else
+            m_gpu_scf->finalize(m_wfn.P, m_wfn.C);
+    }
+    post_mark("finalize: download P and C");
 
     // GPU paths (device eigensolve and the fully-resident loop) keep the
     // occupations on-device: solveEigen is the only writer of m_wfn.focc and it
@@ -1404,12 +1427,14 @@ double XTB::Calculation(bool gradient)
         occupationsFromEps(m_wfn.eps, occ, ncol);
         m_wfn.focc = occ;
     }
+    post_mark("host occupations");
 
     // Persist converged Fock matrix for gradient / debug. On the device-potential
     // path (Stage 5 B3/B4) the host m_pot was skipped during the loop, so rebuild
     // it once at the converged charges before forming m_F (the gradient block below
     // rebuilds it again, but m_F must be consistent here too).
-    if (use_device_potential) {
+    // (not needed when the wavefunction stays on the device: no host Fock, no host gradient)
+    if (use_device_potential && !m_wfn_on_device) {
         m_pot.reset();
         addCoulombShellPotential(m_pot);
         addThirdOrderPotential(m_pot);
@@ -1417,6 +1442,7 @@ double XTB::Calculation(bool gradient)
         addDispersionPotential(m_pot);
         addSolvationPotential(m_pot);
     }
+    post_mark("host potential rebuild");
     // Claude Generated (Sep 2026): m_F is only read by debug dumps / consistency audits. With
     // deferred host multipole integrals (large system on the GPU) skip the O(nao^2) host
     // rebuild instead of forcing the 17 GB integral build just for it.
@@ -1424,11 +1450,24 @@ double XTB::Calculation(bool gradient)
         m_F.resize(0, 0);
     else
         m_F = buildFock(m_H0, m_S, m_pot);
+    post_mark("host Fock matrix");
 
     // Final energies
-    m_E_electronic    = energyCoulombShell() + energyThirdOrder() + energyMultipole();
-    // Band energy: Tr(P · H0) for electronic part
-    m_E_electronic   += (m_wfn.P.cwiseProduct(m_H0)).sum();
+    // Claude Generated (Sep 2026): the device-resident step already evaluated these SCC energies
+    // from the same converged output charges/moments the host would use (7320 atoms: 5 s of
+    // O(nat^2) host work). Reused when the wavefunction stays on the device.
+    if (m_wfn_on_device) {
+        m_E_coulomb_shell = resident_ecoul;
+        m_E_third_order   = resident_ethird;
+        m_E_multipole     = resident_emp;
+        m_E_electronic    = resident_ecoul + resident_ethird + resident_emp;
+    } else {
+        m_E_electronic    = energyCoulombShell() + energyThirdOrder() + energyMultipole();
+    }
+    post_mark("Coulomb/third-order/multipole energies");
+    // Band energy: Tr(P · H0) for electronic part (from the device when P stayed there)
+    m_E_electronic   += m_wfn_on_device ? resident_band : (m_wfn.P.cwiseProduct(m_H0)).sum();
+    post_mark("band energy Tr(P H0)");
     // Electronic free-energy (Mermin/Fermi entropy) term g = -T*S. Zero for
     // gapped systems (occ ∈ {0,2}); only bites on small-gap systems with
     // fractional occupations. Folded into the electronic container so it matches
@@ -1437,6 +1476,7 @@ double XTB::Calculation(bool gradient)
     m_E_electronic   += m_E_entropy;
     m_E_repulsion     = calcRepulsionEnergy();
     m_E_halogen_bond  = calcHalogenBondEnergy();
+    post_mark("entropy/repulsion/halogen bond");
     // Exact GFN2 self-consistent-D4 q-response (F5): d4_charge_source="mulliken" (default)
     // handles dE_D4/dq·dq/dR variationally through the gradient charge-Pulay + W — dE_D4/dq
     // is folded into the gradient v_at (as tblite does in dispersion%get_potential), so the
@@ -1448,6 +1488,7 @@ double XTB::Calculation(bool gradient)
         && (m_d4_charge_source == "mulliken")
         && !std::getenv("CURCUMA_D4_NONVARIATIONAL");
     m_E_dispersion    = calcDispersionEnergy(gradient);
+    post_mark("dispersion (D4, incl. gradient prep)");
     // Implicit solvation free energy (Born + CDS + shift). Added separately to the
     // total — NOT into Tr(P·H0) — mirroring the Coulomb ES2 handling, so there is no
     // double counting (the in-SCF v_at only polarized the density). Claude Generated.
@@ -1455,7 +1496,14 @@ double XTB::Calculation(bool gradient)
 
     m_E_total = m_E_electronic + m_E_repulsion
               + m_E_halogen_bond + m_E_dispersion + m_E_solvation;
+    post_mark("solvation + total");
     const auto t_energies = clock::now();
+    if (verb >= 3 || std::getenv("CURCUMA_GPU_PROFILE")) {
+        std::string rep = "Post-SCF host phases:\n";
+        for (const auto& [name, t] : post_t)
+            rep += fmt::format("  {:<40s} {:10.1f} ms\n", name, t);
+        CurcumaLogger::result(rep);
+    }
 
     if (verb >= 2) {
         CurcumaLogger::info("Energy decomposition:");
@@ -1481,7 +1529,8 @@ double XTB::Calculation(bool gradient)
     }
 
     // Mirror the converged wavefunction for the wrapper accessors
-    m_mo = m_wfn.C;
+    if (!m_wfn_on_device) m_mo = m_wfn.C;
+    else m_mo.resize(0, 0);
     m_energies = m_wfn.eps;
     m_num_electrons = static_cast<int>(m_wfn.nocc);
     m_coordination_numbers = cn;
@@ -1518,6 +1567,7 @@ double XTB::Calculation(bool gradient)
         if (use_gpu_resident && m_gpu_scf && m_gpu_scf->supportsGradient())
             gpu_grad = calculateGradientGpu();
         if (!gpu_grad) {
+            ensureHostWavefunction();
             ensureHostMultipoleIntegrals();
             calculateGradient();   // fills m_gradient in Eh/Bohr
         }
@@ -2440,7 +2490,10 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
     if (disp_grad_device && m_gpu_scf) {
         const int nat = m_atomcount;
         std::vector<double> c6f, dc6f;
+        const auto ta0 = d4clk::now();
         m_d4_generator->buildAtmC6Flat(m_atoms, c6f, dc6f);
+        if (CurcumaLogger::get_verbosity() >= 3)
+            CurcumaLogger::info_fmt("  D4 ATM C6 build  : {:8.2f} ms (host)", d4ms(ta0, d4clk::now()));
         std::vector<double> e_at(nat, 0.0), g_at(3 * nat, 0.0), dcn_at(nat, 0.0);
         if (m_gpu_scf->dispersionATM(nat, c6f.data(), dc6f.data(),
                                      /*s9=*/5.0, /*a1=*/0.52, /*a2=*/5.0, /*alp=*/16.0,
@@ -2455,6 +2508,8 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
             }
             E += esum / 3.0;   // each triple counted by its 3 members
             atm_device = true;
+            if (CurcumaLogger::get_verbosity() >= 3)
+                CurcumaLogger::info("  D4 ATM 3-body on the device");
         }
     }
     if (!atm_device) {

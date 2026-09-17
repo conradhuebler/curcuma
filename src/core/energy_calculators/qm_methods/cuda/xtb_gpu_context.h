@@ -337,6 +337,14 @@ public:
     /// beginDispersion for the same geometry. Returns false on error.
     bool dispersionDedq(int nat, const double* W, const double* dWq, double* dEdq_out);
 
+    /// Post-SCF 2-body D4 energy/gradient/dEdcn/dEdq and ATM 3-body on the device (see the
+    /// GpuScfBackend docs in xtb_native.h). Claude Generated (Sep 2026).
+    bool dispersionGradient(int nat, const double* W, const double* dWq, const double* dWc,
+                            double* e_atom_out, double* grad_out, double* dEdcn_out, double* dEdq_out);
+    bool dispersionATM(int nat, const double* c6, const double* dc6dcn,
+                       double s9, double a1, double a2, double alp, double cutoff,
+                       double* e_atom_out, double* grad_out, double* dEdcn_out);
+
     /* ----- Stage 5 (Part B3/B4): full device GFN2 potential build -------- *
      * Move the WHOLE per-iteration isotropic+anisotropic potential build onto the
      * device so the SCF loop uploads only q_sh/dp_at/qp_at (+ host D4 weights)

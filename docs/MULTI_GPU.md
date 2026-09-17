@@ -127,6 +127,22 @@ polymer_2x GFN2, one A4500, before -> after these three:
 
 Energy identical to the CPU reference (-11784.87804452 Eh). Remaining host hot spots: post-SCF energies (40 s) and setup (21 s). ctest: 207/208 GPU/SQM/CPSCF/gradient tests pass; `xtb_cpscf` fails identically without these changes (pre-existing, CLAUDE.md known failures).
 
+### Post-SCF host phase (Sep 17, 2026)
+Breakdown printed with `CURCUMA_GPU_PROFILE=1` or `-verbosity 3`. Changes:
+- **D4 on the device (CUDA)**: 2-body energy/gradient/dEdcn/dEdq (`k_d4_grad`, port of the ROCm kernel) and ATM 3-body (`k_d4_atm_nl`, ROCm kernel + host neighbour list within the 25 Bohr cutoff; for alp = 16 the damping power uses q^5 cbrt(q) instead of pow). polymer: D4 2-body 173 -> 7 ms, ATM 2130 ms (host, 8 threads) -> 1840 ms (device; the A4500 is FP64-weak). Energies and gradients unchanged (max 3e-16).
+- **Large single point keeps the wavefunction on the device**: with deferred host multipole integrals and no gradient requested, P and C are not rebuilt/downloaded (16 s), the host potential is not rebuilt (5 s) and the Coulomb/third-order/multipole/band energies are taken from the last device-resident step (5 s of O(nat^2) host work). `ensureHostWavefunction()` downloads them on demand (host gradient fallback). `MolecularOrbitals()` is empty in that case.
+
+polymer_2x GFN2, one A4500:
+
+| | 3 steps ago | now |
+|---|---|---|
+| post-SCF | 40 s | **4.9 s** |
+| total wall | 410 s | **375 s** |
+| host peak RSS | 22 GB | **15.6 GB** |
+| device peak | 17.1 GB | 16.1 GB |
+
+All energy components identical to 8 dp (Electronic, Coulomb, third-order, multipole, repulsion, dispersion; total -11784.87804452 Eh). 208/208 GPU/SQM/D4/gradient ctests pass. Remaining post-SCF: D4 4.1 s, repulsion 0.8 s.
+
 ### FP32 threshold (decided: 1e-5 on the GPU)
 polymer GFN2, one A4500, `-scf_fp32_threshold`:
 

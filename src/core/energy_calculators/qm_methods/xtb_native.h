@@ -998,6 +998,9 @@ private:
     /// because a large system runs the fully device-resident GPU SCF (Claude Generated,
     /// Sep 2026). Every host path that reads m_dp_int/m_qp_int calls this first.
     void ensureHostMultipoleIntegrals();
+    /// Download the converged density P and MO coefficients C from the device if a large
+    /// GPU single point skipped that (Claude Generated, Sep 2026).
+    void ensureHostWavefunction();
     Vector computeCoordinationNumbers() const;           // xtb_native.cpp
     void buildReferenceOccupations();                    // xtb_native.cpp
 
@@ -1212,6 +1215,7 @@ private:
     std::vector<double> m_mp_qkernel;
     bool m_mp_initialized = false;
     bool m_mp_ints_deferred = false;   // host m_dp_int/m_qp_int not built yet (GPU large system)
+    bool m_wfn_on_device = false;      // converged P/C not downloaded yet (GPU large system)
 
     // B0 (Jul 2026): setupMultipole() sub-phase timings (ms), for the verbosity-3
     // setup report. The single "multipole setup" bucket could not be attributed.

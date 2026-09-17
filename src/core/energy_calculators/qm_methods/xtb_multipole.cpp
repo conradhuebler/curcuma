@@ -41,6 +41,16 @@ namespace MI = multipole_ints;
  *  2. CN-dependent damping radii mrad                                *
  *  3. Interaction matrices amat_sd, amat_dd, amat_sq                 *
  * ------------------------------------------------------------------ */
+void XTB::ensureHostWavefunction()
+{
+    if (!m_wfn_on_device) return;
+    m_wfn_on_device = false;
+    if (m_gpu_scf) {
+        m_gpu_scf->finalize(m_wfn.P, m_wfn.C);
+        m_mo = m_wfn.C;
+    }
+}
+
 void XTB::ensureHostMultipoleIntegrals()
 {
     if (!m_mp_ints_deferred) return;
