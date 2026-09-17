@@ -1,6 +1,8 @@
 # Multi-GPU (work in progress, branch `feature/multi-gpu`)
 
 > 🤖 AI-generated, not human-tested. Numbers below are measurements, not guarantees.
+>
+> All user-facing options and environment variables with defaults and when to change them: [GPU_TUNING.md](GPU_TUNING.md).
 
 Plan: `~/.claude/plans/neuer-branch-wir-wollen-happy-marshmallow.md` (phases 0-6).
 Two cases: (A) batch of structures distributed over GPUs, (B) one large system on several GPUs.
