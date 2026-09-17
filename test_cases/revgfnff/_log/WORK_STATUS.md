@@ -1,5 +1,5 @@
 # WORK_STATUS — rev-gfnff work packages 1-5 (2026-09-18)
-Packages done: 2/5
+Packages done: 3/5
 
 AI-generated, machine-tested. Repository `/home/conrad/src/curcuma_branches/curcuma`, branch
 `reactff2-llm`, start HEAD `265a18b0`. Every measurement was taken with a FROZEN copy of the
@@ -220,3 +220,157 @@ Two things move, both predicted by `FABLE_REVIEW_2` section C:
 `build_rev/CMakeCache.txt` has `USE_CUDA:BOOL=OFF`, `USE_ROCM:BOOL=OFF`, `USE_VULKAN:BOOL=OFF`.
 None of the merged GPU code is compiled in this build directory, so every GPU claim of the
 remote branch is carried over unverified.
+
+---
+
+## Package 3 — the valence-conserving share with a charge-granted excess budget
+
+New mode `-gfnff.rev_share_form delivered|conserving` (+ `-gfnff.rev_share_min_width`, default
+0.1). **Default unchanged (`delivered`) and inert**: the 20-cell grid is identical to the
+package-2 binary cell by cell (only the two wall-clock columns of the status rows differ), the
+equilibrium set and the gfnff yardsticks are bit-identical. Binary `01e9b4e6862f8558a28a0f51e67f5e42`.
+
+### 3.1 What `conserving` is
+
+    S_i   = sum_k w_ik g_ik                         (the atom's whole claim, as before)
+    X_i   = 0 (H, F) | 1 (group 13) | 6 - Val_Z (period >= 3, groups 15-17) | clip(Q_i)
+    Val_i = Val_Z + min(G(S_i - Val_Z), X_i)
+    f_i   = min(1, Val_i / S_i)                     PER ATOM
+    c_ij  = 1 - g_ij (1 - f_i f_j)                  = f_i f_j for an ordinary pair
+
+`Q_i` = the topological (phase-1 EEQ) charge of atom i plus that of its H partners in this
+corner — a per-corner constant, so no chain rule runs through it. The delivered rule is a
+LEFT-OVER rule and forfeits ALL of an atom's valence at one partner too many; this one spreads
+it (`sum_j f_i w_ij = min(Val_i, S_i)` exactly). The PRODUCT, not the mean: A.5 measured that the
+mean gives the rkt06 TS pair c = 0.75 and breaks the path.
+
+**Two implementation points that matter**, both measured rather than assumed:
+- The budget is built from the same **wide** `S_i` the share divides by, not from the settled
+  count. That is what makes NH4+ come out at `Val = S` exactly: its residual is **0.0013
+  kcal/mol**, not the +0.17 the review predicted from the settled-count budget.
+- The smooth min (`shareMinOne`, a cubic join) is **exact on both sides**: literally 1 for
+  `Val >= S` (so an equilibrium atom's term stays bit-identical) and literally `Val/S` below
+  `1 - width` (so the conservation identity holds where the share bites). A softplus min
+  satisfies neither — it is off by ln(2)/beta at x = 1.
+- **`GFNFFParameters::periodic_group` uses MAIN-GROUP numbering 1-8, not IUPAC 1-18.** The
+  review's "group 13 / groups 15-17" are 3 / 5-7 in that table. With the IUPAC numbers no
+  element rule ever fired and ClO4- cost **+164 kcal/mol**; caught by the new `shareA` line of
+  `CURCUMA_SHAREDUMP` (it prints Z, S, Val_Z, cap, Val, f, df/dS per atom).
+
+### 3.2 Falsifiers, both modes side by side (same binary)
+
+| falsifier | delivered | conserving | difference |
+|---|---|---|---|
+| NH4+ | 0.827303406347 | 0.827301258361 | **-0.00135 kcal/mol** |
+| H3O+ | 1.207219902415 | 1.207219745650 | -0.0001 |
+| CH5+ | 0.782692121320 | 0.781425328593 | **-0.795** |
+| ClO4- | 0.039597768947 | 0.039597767376 | -0.000001 |
+| BF4- 1.394 A | -1.470184046880 | -1.470184050200 | -0.000002 |
+| BF4- 1.143 A (compressed) | 0.118269033480 | 0.147985923798 | **+18.6** |
+| caffeine / benzene / 2h2 / n2_3h2 / ch4_H (equilibria) | — | — | **bit-identical, 0.000000000** |
+| `gfnff` caffeine / benzene + dump_params md5 | — | — | untouched |
+| rkt06_h_h2, 11 points | rms **2.7140** | rms **2.7614** | barrier +3.41 @pt4 in both |
+| rkt03 (H + CH4 -> CH3 + H2, class P, 14 points) | rms 19.55 | rms 19.55 | max abs(dE) 3.6e-5 Eh over the path |
+
+The BF4--compressed **+18.6** reproduces the review's offline prediction (+588.4 vs +569.7 =
++18.7) to 0.1 kcal/mol — an independent cross-check of both the review's arithmetic and this
+implementation. CH5+ was "not evaluable offline" in A.5 (two corners); it is -0.795 kcal/mol.
+
+### 3.3 The class-C adduct falsifier — this is what the mode is for
+
+model minus r2SCAN-3c reference, kcal/mol, both curves referenced to their own d = 3.00 A point:
+
+| scan | delivered at 1.0/1.2/1.3 A | conserving at 1.0/1.2/1.3 A | dev min del -> con | rms del -> con |
+|---|---|---|---|---|
+| CH4 + H | -87.0 / -78.0 / -68.6 | **+16.5 / +24.0 / +23.3** | -87.0 -> -1.5 | 41.8 -> **12.1** |
+| NH3 + H | -107.0 / -91.9 / -58.2 | **+2.0 / +12.7 / +12.9** | -107.0 -> -1.4 | 47.1 -> **5.1** |
+| H2O + H | -54.1 / -53.7 / +5.4 | **+32.4 / +23.9 / +5.4** | -54.6 -> -3.0 | 24.3 -> **13.3** |
+| N2H4 + H | -90.4 / -82.3 / -52.5 | **+11.6 / +15.2 / +12.6** | -90.4 -> +0.0 | 41.0 -> **7.0** |
+
+The artificial adduct is gone: the model goes from 54-107 kcal/mol BELOW the reference to
+2-32 kcal/mol above it — exactly the "+2..+32" A.5 predicted offline, now measured from a build.
+
+### 3.4 Gradient
+
+Analytic vs central FD (dx 1e-4 A, fresh directory per displacement), worst component:
+
+| geometry | delivered | conserving |
+|---|---|---|
+| rkt06 point 10 | 1.194e-08 | **1.360e-08** |
+| c2h6 runaway-window frame (t = 3207.0 fs) | 1.210e-07 | **1.218e-07** |
+| ch4_H frame 10 (the class-C MD start) | 2.689e-07 | **1.421e-08** |
+| class-C adduct point CH4 + H, d = 1.20 A | 8.681e-09 | **3.815e-09** |
+
+All far below the 1e-6 Eh/A acceptance. In `conserving` the whole geometry dependence rides the
+existing Lambda pass over the term weights (the budget included), so `m_rev_share_dval` is 0 and
+there is no `dc/dw` term — a simpler chain rule than the delivered rule's, which the FD confirms.
+
+### 3.5 The 20-cell grid
+
+| arm | rebuilds | step max / kJ | n >= 50 | hard swaps | jump max / kJ | T_max / K |
+|---|---:|---:|---:|---:|---:|---:|
+| delivered | 1186 | 391.44 | **487** | 0 of 591 | 48.6 | 8 306 |
+| conserving | 902 | **216.62** | **72** | 0 of 449 | **21.3** | 11 139 |
+
+**The review's INFERENCE about the two `f10` cells is confirmed by measurement**:
+
+| cell | delivered | conserving |
+|---|---|---|
+| ch4_H/T1000_f10 | step max **388.4** kJ, **40** events, T_max 6812 | **33.5** kJ, **0** events, T_max 3196 |
+| ch4_H/T2000_f10 | 391.4 kJ, 398 events, 84 rebuilds, jump max 48.6 | **216.6** kJ, **6** events, 12 rebuilds, jump max 21.3 |
+
+The carbon-budget snap of the first MD step disappears. Cost, honestly: the three `ch3nh2`
+T = 2000 K cells get *worse* on the per-step metric (3 -> 8, 6 -> 35, 7 -> 18 events; step max
+53 -> 97 and 67 -> 87 kJ), and `ch4_H/T2000_f10`'s T_max rises 8306 -> 11139 K — the radical H
+is no longer held in the artificial adduct well, so it leaves with its kinetic energy instead.
+Net over the grid the metric improves by a factor of 6.8.
+
+### 3.6 The systems A.5 names as NOT covered — measured, and the cost is real
+
+Geometries built here and optimised with gfn2 (N-B 1.658 A, N-O 1.345, N-C 1.450, symmetric
+O-H-O 1.225/1.225 and N-H-N 1.288/1.288 — all chemically sensible). Energies in Eh, differences
+in kcal/mol; "share OFF" is `-gfnff.rev_valence_share false`, which isolates the share itself.
+
+| system | chg | `gfnff` (pinned) | rev share OFF | rev delivered | rev conserving | del-off | **con-off** | con-del |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| H3N-BH3 | 0 | -0.897038980 | -0.765756400 | -0.765730080 | -0.615248850 | 0.017 | **+94.4** | +94.4 |
+| H3N-O (amine oxide) | 0 | -0.667945910 | -0.600342710 | -0.600339100 | -0.483440260 | 0.002 | **+73.4** | +73.4 |
+| H3N-CH2 (N-ylide) | 0 | -1.008339380 | -0.941139510 | -0.941134510 | -0.766636920 | 0.003 | **+109.5** | +109.5 |
+| H5O2+ (Zundel) | 1 | 0.708382040 | 0.528414250 | 0.747824070 | 0.720470080 | +137.7 | +120.5 | **-17.2** |
+| N2H7+ | 1 | 0.266793700 | 0.044595910 | 0.321976850 | 0.296027390 | +174.1 | +157.8 | **-16.3** |
+
+- **The dative/ylide neutrals are the price.** Their donor N has four partners at a group charge
+  well below 1, so `Val_N ~ 3.2` against `S_N ~ 4` and all four of its wells are scaled by ~0.8.
+  The delivered share is inert there (0.002-0.017 kcal/mol), so this is a pure regression of the
+  new mode: 73-110 kcal/mol on a 7-8 atom molecule.
+- **The proton-shared dimers go the other way**: both modes deviate strongly from the pinned
+  `gfnff` value (the bridging H genuinely is a 3c-2e case, which is what the share exists for),
+  and conserving is 16-17 kcal/mol LESS repulsive, i.e. closer to `gfnff`.
+
+### 3.7 Tests
+
+`ctest -R "gfnff|sqm_val|react"` 95/98, `ctest -R cli_simplemd_` 19/22 — the same three known
+failures, unchanged. The default path is inert, so this is expected rather than reassuring.
+
+### 3.8 Recommendation
+
+**Do not flip the default yet.** The mode does exactly what A.5 said on everything A.5 measured
+— the adducts, the f10 cells, the grid metric, rkt06, the hypervalent ions — and the two
+implementation refinements above make its hypervalent residuals smaller than predicted. But the
+dative/ylide family is a 73-110 kcal/mol regression on molecules that are neither exotic nor
+rare (amine boranes, amine oxides, ylides, and by extension sulfoxides/phosphine oxides, which
+are NOT covered by the period >= 3 rule either because their donor is the period-2 partner).
+
+What would close it, in order of cost:
+1. **Extend the charge rule to a donor rule.** The missing physics is that a dative bond puts a
+   full valence into the acceptor's empty orbital; the donor's *formal* charge is +1 even when
+   its EEQ charge is +0.2. A per-corner test "this atom has a partner of group 13 or an
+   sp3 partner with a formal octet deficit" would grant X = 1 there and cost nothing elsewhere.
+   Cheap, but it is a new rule, so it needs its own falsifier set.
+2. **Raise X_i by the charge of the WHOLE connected group, not just the H partners.** For
+   H3N-BH3 the N-B-H6 group is neutral, so this does not help by itself.
+3. Accept the regression and restrict the mode to the reactive path (it is already opt-in).
+
+My recommendation to the operator: keep `delivered` as the default, and treat `conserving` as
+the candidate for stage 3b, to be adopted together with (1). The adduct falsifier of 1.4 is now
+the acceptance criterion for that work — nothing else in the reference sets measures it.
