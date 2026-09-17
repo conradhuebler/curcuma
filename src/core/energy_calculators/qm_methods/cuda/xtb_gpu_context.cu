@@ -44,6 +44,12 @@ namespace curcuma {
 namespace xtb {
 namespace gpu {
 
+// Claude Generated (Sep 2026): used by Impl::distSolve below, defined with the other kernels.
+__global__ void k_probe_fill(float* v, int n, unsigned seed);
+__global__ void k_scale_by(float* x, const float* s, int n);
+__global__ void k_probe_filld(double* v, int n, unsigned seed);
+__global__ void k_scale_byd(double* x, const double* s, int n);
+
 struct XtbGpuContext::Impl {
     cudaStream_t       stream   = nullptr;
     cublasHandle_t     cublas   = nullptr;
@@ -353,6 +359,16 @@ struct XtbGpuContext::Impl {
     int              dist_min_nao = 4000;
     bool             dist_fp32 = true;
     bool             dist_failed = false;
+    // Claude Generated (Sep 2026): -1 = this backend's FP32 solve was verified WRONG on this
+    // machine, 1 = verified correct, 0 = not tested yet. cusolverMg FP32 failed here (4x A4500,
+    // CUDA 13.3, n = 15444: the SCF diverged from the first iteration while the eigenvalue sum
+    // still matched, so a trace check does not catch it) - but that is one library version on one
+    // machine, so it is measured per run instead of hard-coded.
+    int              dist_fp32_state = 0;
+    int              dist_fp64_state = 0;   // same, for the FP64 solves (see verifyDistributed)
+    bool             dist_verify = true;    // -gpu_eigensolver_verify
+    CudaBuffer<float>  dProbeV, dProbeY, dProbeT, dProbeA;   // FP32 probe vectors + copy of A
+    CudaBuffer<double> dProbeVd, dProbeYd, dProbeTd, dProbeAd, dProbeSd;
     int              dist_solves = 0;
     long             l_generation = 0;   // bumped whenever dL (Cholesky factor of S) is rewritten
     std::string      dist_status;
@@ -364,7 +380,68 @@ struct XtbGpuContext::Impl {
     {
         if (!distReady(n, fp32)) return 0;
         if (cudaStreamSynchronize(stream) != cudaSuccess) return 0;
-        const bool solved = dist->solve(n, A, eig, fp32, device);
+        // First FP32 solve on this machine: keep a copy of the input so the returned eigenpairs
+        // can be checked against it, and so this call can be redone on this device if they are
+        // wrong. One n x n FP32 copy, once per run; if it does not fit, FP32 is not distributed
+        // (an unverified FP32 backend could return silently wrong eigenvectors).
+        // CURCUMA_GPU_EIG_VERIFY_ALWAYS=1 verifies EVERY distributed FP32 solve, not just the
+        // first. Diagnostic: cusolverMg passed the first check here and still made the SCF
+        // diverge, i.e. a later call went wrong. Claude Generated (Sep 2026).
+        // EVERY distributed solve is verified, not just the first: cusolverMg passed the first
+        // check here and degraded later (solve 1 residual 1.4e-6, solve 2 8.7e-2), which a one-shot
+        // gate cannot catch - the run then converged to an energy 1.65 kcal/mol off. The check is
+        // three matrix-vector products plus one n x n copy, i.e. well under a percent of a solve.
+        bool verify = fp32 && dist_verify && dist_fp32_state >= 0;
+        bool verify64 = !fp32 && dist_verify && dist_fp64_state >= 0;
+        if (verify64) {
+            try {
+                dProbeAd.ensure(static_cast<int>(static_cast<size_t>(n) * n));
+                dProbeVd.ensure(n); dProbeYd.ensure(n); dProbeTd.ensure(n);
+            } catch (...) {
+                dProbeAd.free(); dProbeVd.free(); dProbeYd.free(); dProbeTd.free();
+                dist_fp64_state = -1;
+                dist_status = std::string(dist->name()) + ": FP64 verification needs one more n x n "
+                    "buffer than fits on device " + std::to_string(device)
+                    + "; the eigensolve stays on that device";
+                return 0;
+            }
+            const int b = 256;
+            k_probe_filld<<<(n + b - 1) / b, b, 0, stream>>>(dProbeVd.ptr, n, 0x85EBCA6Bu);
+            if (cudaGetLastError() != cudaSuccess
+                || cudaMemcpyAsync(dProbeAd.ptr, A, sizeof(double) * static_cast<size_t>(n) * n,
+                                   cudaMemcpyDeviceToDevice, stream) != cudaSuccess
+                || cudaStreamSynchronize(stream) != cudaSuccess)
+                verify64 = false;
+        }
+        if (verify) {
+            try {
+                dProbeA.ensure(static_cast<int>(static_cast<size_t>(n) * n));
+                dProbeV.ensure(n); dProbeY.ensure(n); dProbeT.ensure(n);
+            } catch (...) {
+                dProbeA.free(); dProbeV.free(); dProbeY.free(); dProbeT.free();
+                dist_fp32_state = -1;
+                dist_status = std::string(dist->name()) + ": FP32 verification needs one more "
+                    "n x n buffer than fits on device " + std::to_string(device)
+                    + "; only FP64 is distributed";
+                return 0;
+            }
+            const int b = 256;
+            k_probe_fill<<<(n + b - 1) / b, b, 0, stream>>>(dProbeV.ptr, n, 0x9E3779B9u);
+            if (cudaGetLastError() != cudaSuccess
+                || cudaMemcpyAsync(dProbeA.ptr, A, sizeof(float) * static_cast<size_t>(n) * n,
+                                   cudaMemcpyDeviceToDevice, stream) != cudaSuccess
+                || cudaStreamSynchronize(stream) != cudaSuccess)
+                verify = false;
+        }
+        bool solved = dist->solve(n, A, eig, fp32, device);
+        // Claude Generated (Sep 2026): CURCUMA_GPU_EIG_CORRUPT=1 deliberately damages the returned
+        // eigenvectors, to check that verifyDistributedFp32() actually notices. A detector that is
+        // never tested against a known-bad input is not a detector.
+        if (solved && verify && std::getenv("CURCUMA_GPU_EIG_CORRUPT")) {
+            const size_t ncorrupt = static_cast<size_t>(n) * std::max(1, n / 20);
+            cudaMemsetAsync(A, 0, sizeof(float) * ncorrupt, stream);
+            cudaStreamSynchronize(stream);
+        }
         cudaSetDevice(device);
         if (prof) {
             double sc = 0.0, so = 0.0, ga = 0.0;
@@ -375,6 +452,31 @@ struct XtbGpuContext::Impl {
         }
         if (solved) {
             ++dist_solves;
+            bool rejected = false;
+            if (verify && verifyDistributedFp32(n, static_cast<const float*>(A),
+                                                static_cast<const float*>(eig))
+                && dist_fp32_state < 0) {
+                // Wrong eigenpairs: put the input back and let the caller solve on this device.
+                rejected = (cudaMemcpyAsync(A, dProbeA.ptr, sizeof(float) * static_cast<size_t>(n) * n,
+                                            cudaMemcpyDeviceToDevice, stream) == cudaSuccess
+                            && cudaStreamSynchronize(stream) == cudaSuccess);
+                --dist_solves;
+            }
+            if (verify64 && verifyDistributedFp64(n, static_cast<const double*>(A),
+                                                  static_cast<const double*>(eig), false)
+                && dist_fp64_state < 0) {
+                rejected = (cudaMemcpyAsync(A, dProbeAd.ptr, sizeof(double) * static_cast<size_t>(n) * n,
+                                            cudaMemcpyDeviceToDevice, stream) == cudaSuccess
+                            && cudaStreamSynchronize(stream) == cudaSuccess);
+                --dist_solves;
+            }
+            // The probe buffers stay allocated: re-allocating ~1 GB per solve cost 38 s of the
+            // 222 s polymer_2x run (measured), while keeping them costs one n x n buffer.
+            // releaseEigenWorkspaces() frees them when the SCF is over.
+            if (rejected) return 0;            // input restored -> single-GPU path
+            // Only THIS call's precision decides: an earlier FP32 rejection must not fail a
+            // perfectly good FP64 solve (it did, and aborted the SCF at the first FP64 iteration).
+            if ((fp32 && dist_fp32_state < 0) || (!fp32 && dist_fp64_state < 0)) return -1;
             return 1;
         }
         dist_failed = true;
@@ -391,7 +493,153 @@ struct XtbGpuContext::Impl {
     {
         dWork.free(); lwork = 0;
         dCf.free(); dLf.free(); dWorkf.free(); lwork_f32 = 0;
+        dProbeA.free(); dProbeV.free(); dProbeY.free(); dProbeT.free();
+        dProbeAd.free(); dProbeVd.free(); dProbeYd.free(); dProbeTd.free(); dProbeSd.free();
         if (dist) { dist->releaseBuffers(); cudaSetDevice(device); }
+    }
+
+    /**
+     * @brief Check that a distributed FP32 solve returned eigenpairs of the matrix it was given.
+     *
+     * A random vector v is pushed through the matrix twice: y = A v from a copy of the input
+     * (symv, lower triangle) and y2 = Q (eps .* (Q^T v)) from what the solver returned. They must
+     * agree. Three matrix-vector products plus one n x n copy, done ONCE per run: cusolverMg's
+     * FP32 eigenvectors were wrong here (4x A4500, CUDA 13.3, n = 15444 - the SCF diverged from
+     * the first iteration while the eigenvalue SUM still matched, so a trace check does not catch
+     * it), but that is one library version on one machine, so it is measured rather than assumed.
+     * @return true when the verdict was reached (dist_fp32_state set), false when it could not run
+     */
+    bool verifyDistributedFp32(int n, const float* Q, const float* eps_dev)
+    {
+        if (dProbeA.n < n || dProbeV.n < n) return false;
+        const float one = 1.0f, zero = 0.0f, minus = -1.0f;
+        const int b = 256;
+        if (cublasSsymv(cublas, CUBLAS_FILL_MODE_LOWER, n, &one, dProbeA.ptr, n, dProbeV.ptr, 1,
+                        &zero, dProbeY.ptr, 1) != CUBLAS_STATUS_SUCCESS)                 // y = A v
+            return false;
+        if (cublasSgemv(cublas, CUBLAS_OP_T, n, n, &one, Q, n, dProbeV.ptr, 1, &zero,
+                        dProbeT.ptr, 1) != CUBLAS_STATUS_SUCCESS)                        // t = Q^T v
+            return false;
+        k_scale_by<<<(n + b - 1) / b, b, 0, stream>>>(dProbeT.ptr, eps_dev, n);          // t *= eps
+        if (cudaGetLastError() != cudaSuccess) return false;
+        if (cublasSgemv(cublas, CUBLAS_OP_N, n, n, &one, Q, n, dProbeT.ptr, 1, &minus,
+                        dProbeY.ptr, 1) != CUBLAS_STATUS_SUCCESS)                        // y := Q t - y
+            return false;
+        float res = 0.0f, ref = 0.0f;
+        if (cublasSnrm2(cublas, n, dProbeY.ptr, 1, &res) != CUBLAS_STATUS_SUCCESS
+            || cublasSnrm2(cublas, n, dProbeT.ptr, 1, &ref) != CUBLAS_STATUS_SUCCESS
+            || cudaStreamSynchronize(stream) != cudaSuccess)
+            return false;
+        const double rel = (ref > 0.0f) ? static_cast<double>(res) / static_cast<double>(ref) : 1.0;
+        // A = Q L Q^T alone is NOT enough: it is invariant under a consistent permutation of the
+        // eigenpairs, while the SCF fills the LEADING columns and therefore needs the eigenvalues
+        // ascending. Measured here (polymer, nao 3222, cusolverMg FP32): the residual check passed
+        // at 1e-6 while the SCF diverged, which is exactly what a permuted spectrum looks like.
+        std::vector<float> eps_host(n);
+        if (cudaMemcpy(eps_host.data(), eps_dev, sizeof(float) * n, cudaMemcpyDeviceToHost) != cudaSuccess)
+            return false;
+        // Only count inversions that MATTER: in FP32 two nearly degenerate orbitals can come back
+        // swapped by ~1e-7 Eh, which changes nothing for the occupation, while a genuinely permuted
+        // spectrum shows up as large steps in the wrong direction. Measured: cuSOLVERMp at
+        // nao = 15444 returns exactly one such harmless swap, and rejecting it cost 36 s.
+        const double span = std::fabs(static_cast<double>(eps_host[n - 1]) - static_cast<double>(eps_host[0]));
+        const double ord_tol = std::max(1.0e-6, 1.0e-6 * span);
+        int inversions = 0;
+        for (int i = 1; i < n; ++i)
+            if (static_cast<double>(eps_host[i - 1]) - static_cast<double>(eps_host[i]) > ord_tol)
+                ++inversions;
+        // FP32 over n ~ 1e4 accumulations lands well below 1e-3 when the solve is correct; the
+        // observed failure was O(1), so the threshold does not need to be tight.
+        if (std::getenv("CURCUMA_GPU_EIG_VERIFY_ALWAYS"))
+            std::fprintf(stderr, "[eig verify] solve %d: relative residual %.3e, %d inversions\n",
+                         dist_solves, rel, inversions);
+        dist_fp32_state = (rel < 1.0e-3 && inversions == 0) ? 1 : -1;
+        if (dist_fp32_state < 0)
+            dist_status = std::string(dist->name()) + ": its FP32 eigenpairs failed verification "
+                "here (relative residual " + std::to_string(rel) + ", " + std::to_string(inversions)
+                + " eigenvalues out of ascending order); FP32 iterations stay on device "
+                + std::to_string(device) + " and only FP64 is distributed";
+        else
+            dist_status = std::string(dist->name()) + ": FP32 eigenpairs verified (relative "
+                "residual " + std::to_string(rel) + ", spectrum ascending)";
+        return true;
+    }
+
+    /**
+     * @brief FP64 twin of verifyDistributedFp32, for both the plain and the generalized solve.
+     *
+     * plain:       A v  ==  C (eps .* (C^T v))
+     * generalized: F v  ==  S C (eps .* (C^T (S v)))  with S = L L^T applied by two trmv calls,
+     *              which is the identity F = S C diag(eps) C^T S for  F C = S C diag(eps),
+     *              C^T S C = I.
+     * dProbeAd holds the copy of A (plain) or F (generalized) taken before the solve.
+     */
+    bool verifyDistributedFp64(int n, const double* C, const double* eps_dev, bool generalized)
+    {
+        if (dProbeAd.n < n || dProbeVd.n < n) return false;
+        const double one = 1.0, zero = 0.0, minus = -1.0;
+        const int b = 256;
+        // y = M v   (M = A or F, symmetric, lower triangle)
+        if (cublasDsymv(cublas, CUBLAS_FILL_MODE_LOWER, n, &one, dProbeAd.ptr, n, dProbeVd.ptr, 1,
+                        &zero, dProbeYd.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+            return false;
+        // u = v (plain) or u = S v = L (L^T v) (generalized), kept in dProbeTd
+        if (cudaMemcpyAsync(dProbeTd.ptr, dProbeVd.ptr, sizeof(double) * n,
+                            cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+            return false;
+        if (generalized) {
+            if (cublasDtrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n,
+                            dL.ptr, n, dProbeTd.ptr, 1) != CUBLAS_STATUS_SUCCESS
+                || cublasDtrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n,
+                               dL.ptr, n, dProbeTd.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+                return false;
+        }
+        // t = C^T u ; t *= eps ; w = C t   (w reuses dProbeTd)
+        // Scratch for C^T u; kept across calls with the other probe buffers.
+        try { dProbeSd.ensure(n); } catch (...) { return false; }
+        CudaBuffer<double>& tmp = dProbeSd;
+        if (cublasDgemv(cublas, CUBLAS_OP_T, n, n, &one, C, n, dProbeTd.ptr, 1, &zero,
+                        tmp.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+            return false;
+        k_scale_byd<<<(n + b - 1) / b, b, 0, stream>>>(tmp.ptr, eps_dev, n);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        if (cublasDgemv(cublas, CUBLAS_OP_N, n, n, &one, C, n, tmp.ptr, 1, &zero,
+                        dProbeTd.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+            return false;
+        if (generalized) {   // y2 = S w
+            if (cublasDtrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n,
+                            dL.ptr, n, dProbeTd.ptr, 1) != CUBLAS_STATUS_SUCCESS
+                || cublasDtrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n,
+                               dL.ptr, n, dProbeTd.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+                return false;
+        }
+        double res = 0.0, ref = 0.0;
+        if (cublasDaxpy(cublas, n, &minus, dProbeYd.ptr, 1, dProbeTd.ptr, 1) != CUBLAS_STATUS_SUCCESS
+            || cublasDnrm2(cublas, n, dProbeTd.ptr, 1, &res) != CUBLAS_STATUS_SUCCESS
+            || cublasDnrm2(cublas, n, dProbeYd.ptr, 1, &ref) != CUBLAS_STATUS_SUCCESS
+            || cudaStreamSynchronize(stream) != cudaSuccess)
+            return false;
+        std::vector<double> eps_host(n);
+        if (cudaMemcpy(eps_host.data(), eps_dev, sizeof(double) * n, cudaMemcpyDeviceToHost) != cudaSuccess)
+            return false;
+        // FP64 rounding is ~1e-16, so anything above a tiny tolerance is a real permutation.
+        const double span = std::fabs(eps_host[n - 1] - eps_host[0]);
+        const double ord_tol = std::max(1.0e-12, 1.0e-12 * span);
+        int inversions = 0;
+        for (int i = 1; i < n; ++i)
+            if (eps_host[i - 1] - eps_host[i] > ord_tol) ++inversions;
+        const double rel = (ref > 0.0) ? res / ref : 1.0;
+        if (std::getenv("CURCUMA_GPU_EIG_VERIFY_ALWAYS"))
+            std::fprintf(stderr, "[eig verify] FP64 solve %d: relative residual %.3e, %d inversions\n",
+                         dist_solves, rel, inversions);
+        // FP64 has ~1e-16 per operation, so a correct solve lands far below 1e-8 even at n = 15444.
+        dist_fp64_state = (rel < 1.0e-8 && inversions == 0) ? 1 : -1;
+        if (dist_fp64_state < 0)
+            dist_status = std::string(dist->name()) + ": its FP64 eigenpairs failed verification "
+                "here (relative residual " + std::to_string(rel) + ", " + std::to_string(inversions)
+                + " eigenvalues out of ascending order); the eigensolve stays on device "
+                + std::to_string(device);
+        return true;
     }
 
     /// Create the multi-GPU solver on first use; false when it is not to be used for this call.
@@ -409,9 +657,11 @@ struct XtbGpuContext::Impl {
                 return false;
             }
         }
-        // cusolverMg FP32 returned unusable eigenvectors at n = 15444 (polymer_2x: SCF diverged from
-        // the first iteration while the eigenvalue sum still matched); only FP64 goes to Mg.
-        if (fp32 && std::string(dist->name()) == "cusolverMg") return false;
+        // FP32 correctness is a per-machine question (see dist_fp32_state): the first FP32 solve
+        // is verified, and only a failed verification turns FP32 off for the rest of the run.
+        // the wrapper reports dist_status; a backend that failed verification is not used again
+        if (fp32 && dist_fp32_state < 0) return false;
+        if (!fp32 && dist_fp64_state < 0) return false;
         return true;
     }
 
@@ -421,6 +671,32 @@ struct XtbGpuContext::Impl {
     {
         if (!distReady(n, fp32) || !dist->supportsGeneralized()) return 0;
         if (cudaStreamSynchronize(stream) != cudaSuccess) return 0;
+        // Same verification as the plain path, on the generalized residual F c = eps S c with
+        // S = L L^T. A backend that passes once is trusted for the rest of the run; one that fails
+        // is dropped and the solve returns to this device. CURCUMA_GPU_EIG_VERIFY_ALWAYS=1 checks
+        // every call - which is how the cusolverMg reuse defect was found (first call exact, second
+        // call wrong).
+        bool verify64 = !fp32 && dist_verify && dist_fp64_state >= 0;
+        if (verify64) {
+            try {
+                dProbeAd.ensure(static_cast<int>(static_cast<size_t>(n) * n));
+                dProbeVd.ensure(n); dProbeYd.ensure(n); dProbeTd.ensure(n);
+            } catch (...) {
+                dProbeAd.free(); dProbeVd.free(); dProbeYd.free(); dProbeTd.free();
+                dist_fp64_state = -1;
+                dist_status = std::string(dist->name()) + ": FP64 verification needs one more n x n "
+                    "buffer than fits on device " + std::to_string(device)
+                    + "; the eigensolve stays on that device";
+                return 0;
+            }
+            const int b = 256;
+            k_probe_filld<<<(n + b - 1) / b, b, 0, stream>>>(dProbeVd.ptr, n, 0x85EBCA6Bu);
+            if (cudaGetLastError() != cudaSuccess
+                || cudaMemcpyAsync(dProbeAd.ptr, A, sizeof(double) * static_cast<size_t>(n) * n,
+                                   cudaMemcpyDeviceToDevice, stream) != cudaSuccess
+                || cudaStreamSynchronize(stream) != cudaSuccess)
+                verify64 = false;
+        }
         const bool solved = dist->solveGeneralized(n, A, L, l_generation, eig, fp32, device);
         cudaSetDevice(device);
         if (prof) {
@@ -436,6 +712,17 @@ struct XtbGpuContext::Impl {
         }
         if (solved) {
             ++dist_solves;
+            bool rejected = false;
+            if (verify64 && verifyDistributedFp64(n, static_cast<const double*>(A),
+                                                  static_cast<const double*>(eig), true)
+                && dist_fp64_state < 0) {
+                rejected = (cudaMemcpyAsync(A, dProbeAd.ptr, sizeof(double) * static_cast<size_t>(n) * n,
+                                            cudaMemcpyDeviceToDevice, stream) == cudaSuccess
+                            && cudaStreamSynchronize(stream) == cudaSuccess);
+                --dist_solves;
+            }
+            if (rejected) return 0;
+            if (dist_fp64_state < 0) return -1;
             return 1;
         }
         dist_failed = true;
@@ -1087,6 +1374,39 @@ __global__ void k_d2f(const double* __restrict__ in, float* __restrict__ out, si
     const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < n) out[i] = static_cast<float>(in[i]);
 }
+// Claude Generated (Sep 2026): deterministic pseudo-random probe vector and elementwise scale,
+// used by verifyDistributedFp32() to check that a distributed eigensolve really returned
+// eigenpairs of the matrix it was given.
+__global__ void k_probe_fill(float* __restrict__ v, int n, unsigned seed)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    unsigned h = seed ^ (static_cast<unsigned>(i) * 2654435761u);
+    h ^= h >> 13; h *= 1274126177u; h ^= h >> 16;
+    v[i] = (static_cast<float>(h & 0xFFFFFu) / 524288.0f) - 1.0f;   // in [-1, 1)
+}
+
+__global__ void k_scale_by(float* __restrict__ x, const float* __restrict__ s, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] *= s[i];
+}
+
+__global__ void k_probe_filld(double* __restrict__ v, int n, unsigned seed)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    unsigned h = seed ^ (static_cast<unsigned>(i) * 2654435761u);
+    h ^= h >> 13; h *= 1274126177u; h ^= h >> 16;
+    v[i] = (static_cast<double>(h & 0xFFFFFu) / 524288.0) - 1.0;
+}
+
+__global__ void k_scale_byd(double* __restrict__ x, const double* __restrict__ s, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] *= s[i];
+}
+
 __global__ void k_f2d(const float* __restrict__ in, double* __restrict__ out, size_t n)
 {
     const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -3158,7 +3478,7 @@ double XtbGpuContext::sparseCutoffBohr() const { return m_impl ? m_impl->sp_rmax
 
 void XtbGpuContext::setDistributedEigensolver(const std::vector<int>& devices,
                                               const std::string& backend, int block, int min_nao,
-                                              bool fp32)
+                                              bool fp32, bool verify)
 {
     if (!m_impl) return;
     m_impl->dist.reset();
@@ -3180,6 +3500,9 @@ void XtbGpuContext::setDistributedEigensolver(const std::vector<int>& devices,
     m_impl->dist_block = block > 0 ? block : 128;
     m_impl->dist_min_nao = std::max(0, min_nao);
     m_impl->dist_fp32 = fp32;
+    m_impl->dist_verify = verify;
+    m_impl->dist_fp32_state = 0;
+    m_impl->dist_fp64_state = 0;
     m_impl->dist_failed = false;
     m_impl->dist_solves = 0;
     m_impl->dist_status.clear();
@@ -3229,7 +3552,8 @@ std::string XtbGpuContext::distributedEigensolverStatus() const
     if (!m_impl->dist)
         return "not used (nao below gpu_eigensolver_min_nao = " + std::to_string(m_impl->dist_min_nao) + ")";
     return std::string(m_impl->dist->name()) + " on " + std::to_string(m_impl->dist->deviceCount())
-        + " GPUs, " + std::to_string(m_impl->dist_solves) + " solves";
+        + " GPUs, " + std::to_string(m_impl->dist_solves) + " solves"
+        + (m_impl->dist_verify ? " (each verified)" : " (verification off)");
 }
 
 void XtbGpuContext::setMemoryCheck(bool on)

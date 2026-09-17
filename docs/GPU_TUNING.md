@@ -47,7 +47,9 @@ The per-iteration full-spectrum eigensolve of the device-resident SCF can be spr
 - The solvers live in `libcurcuma_cuda_mgpu.so` next to `libcurcuma_cuda.so` and are loaded on first use, so a host without cuSOLVERMp/NCCL still runs all single-GPU calculations.
 - What is distributed: FP64 iterations run the whole generalized solve on the GPUs (reduction `sygst`, `syevd`, back-transform `trsm`; the Cholesky factor is distributed once per geometry). FP32 iterations distribute only `syevd`: the cuSOLVERMp FP32 reduction is not faster than one GPU (0.56 vs 0.57 s) and the cuBLASMp FP32 back-transform is slower (1.74 vs 0.38 s).
 - Memory: the eigensolver workspaces and the per-GPU solver buffers are released as soon as the SCF has converged, before the post-SCF phase and the gradient.
-- `mg` is FP64-only: cusolverMg FP32 returned unusable eigenvectors at n = 15444 (polymer_2x SCF diverged from the first iteration while the eigenvalue sum still matched). On complex (n ~600) it was correct, so the failure is size-dependent and not caught by a trace check.
+- **Every distributed solve is verified** (`-gpu_eigensolver_verify`, default true). A random vector is pushed through the matrix twice - once directly and once through the returned eigenpairs (for the generalized path with the metric S = L L^T) - and the eigenvalues are checked for a genuinely permuted spectrum. A backend that fails is dropped for that precision, the input is restored and the solve returns to the calculation's own device, with a warning naming the residual. Measured cost: polymer_2x 183.3 s with verification vs 184.9 s without, i.e. inside the noise; the gradients agree to 1.2e-14.
+- Why it is not a one-off check: **cusolverMg passes the first solve and degrades afterwards** (polymer, nao 3222: solve 1 residual 1.4e-6, solve 2 8.7e-2 with buffer reuse, 1.2e-3 with everything rebuilt per call). A single gate at the start let a run converge to an energy **1.65 kcal/mol wrong**; with per-solve verification the same run is rejected and lands on the correct energy. cusolverMg is therefore useful only where it verifies: at nao 558 it passes every solve, at 3222 its FP32 is rejected and only its FP64 is used.
+- `CURCUMA_GPU_EIG_VERIFY_ALWAYS=1` prints the residual of every verification, `CURCUMA_GPU_EIG_CORRUPT=1` deliberately damages the eigenvectors once to prove the check reacts (it reports residual 0.43 and falls back, and the run still gives the correct energy).
 - Results: energies identical to the single-GPU run at the printed precision; with `-scf_threshold 1e-9` energies and gradients agree to <= 1.2e-9 (complex, 231 atoms, gfn1 and gfn2, mp and mg). At the loose default threshold the gradients differ by up to 1e-5 Eh/A, because the FP32 iterations take a slightly different path inside the tolerance (same as GPU vs CPU).
 
 Measured, polymer_2x GFN2 single point + gradient (7320 atoms, nao 15444), 4x RTX A4500 (PCIe, P2P), SCF on device 0, `CURCUMA_GPU_PROFILE=1`, energy -11784.87804452 Eh in every row:
@@ -67,6 +69,39 @@ Measured, polymer_2x GFN2 single point + gradient (7320 atoms, nao 15444), 4x RT
 - Including device 0 is ~10 % faster per iteration; excluding it lowers device 0 by ~1.2 GB and raises the others by ~2 GB. Use `1,2,3` when device 0 is the one that does not fit.
 - The pattern density is distributed separately, see the next section.
 - Gradients at the default `scf_threshold` differ from the single-GPU run by up to 4.6e-4 Eh/A (different FP32 path inside the loose tolerance, same as GPU vs CPU); with `-scf_threshold 1e-9` they agree to <= 1.2e-9 (complex).
+### Checklist: making ONE calculation use several GPUs
+
+What is distributed inside a single point / optimisation step:
+
+| part | device | share of an A4500 run (polymer_2x, 4 GPUs) |
+|---|---|---|
+| eigensolve (FP32 and FP64 iterations) | all listed GPUs | 86 of 194 s |
+| screened-pattern density | all listed GPUs | 10 s |
+| integrals, Fock build, potential, charges, gradient, post-SCF | the calculation's own device only | ~98 s |
+
+So the ceiling for one calculation is set by the part that stays on one device - on the A4500 box the whole single point went 419 -> 194 s (2.16x on 4 GPUs), not 4x, and that is the honest expectation.
+
+**Prerequisites, in the order they bite:**
+
+1. **cuSOLVERMp, cuBLASMp and NCCL at build time.** Without them only `cusolverMg` (CUDA toolkit) is available, and curcuma gives Mg **FP64 solves only** - its FP32 eigenvectors are wrong at large n (measured: polymer_2x diverged from the first iteration). Since mixed precision is the default, that means roughly one of twenty iterations is distributed and the run looks single-GPU. Verify at configure time:
+   `cmake .. -DCUSOLVERMP_ROOT=... -DCUBLASMP_ROOT=... -DNCCL_ROOT=...` must print
+   `-- Multi-GPU eigensolver: cuSOLVERMp <path>, NCCL <path>`.
+2. **The devices must be listed as INDICES.** `-gpu_devices 2` means "device number 2", not "two GPUs" - use `-gpu_devices all` or `0,1`. Same for `-gpu_eigensolver_devices` / `-gpu_density_devices` (`all`, `solver` or a list).
+3. **Check what actually ran**, at `-verbosity 2`, after the SCF:
+   `GPU multi-GPU eigensolver: cuSOLVERMp on 2 GPUs, 20 solves` - the backend name and the solve count are the test. `cusolverMg on 2 GPUs, 1 solves` means prerequisite 1 is missing.
+   `GPU distributed density: pattern density on devices [0,1], 21 steps`.
+4. **The libraries must be found at run time too**: their directories are baked into the RPATH of `libcurcuma_cuda_mgpu.so`, so a compute node needs the same paths (shared file system) or `LD_LIBRARY_PATH`.
+
+**Measuring it on a new machine** (nothing here is measured on H200 yet - PCIe A4500 numbers do not transfer to NVLink):
+
+```
+CURCUMA_GPU_PROFILE=1 curcuma -sp big.xyz -method gfn2 -gpu cuda -verbosity 2 \
+    -gpu_eigensolver_devices none -gpu_density_devices none      # baseline, one GPU
+CURCUMA_GPU_PROFILE=1 curcuma -sp big.xyz -method gfn2 -gpu cuda -verbosity 2   # defaults
+```
+
+The profile's `eig FP32 / eig FP64 / density P` rows say how much of the run is distributable at all; if they are not the majority, more GPUs cannot help much and the answer is a bigger share on the device instead (integrals, Fock, gradient are all single-device today).
+
 ### Distributed pattern density
 
 `P(r,c) = sum_k Cw(r,k) C(c,k)` is a sum over the occupied columns, so each GPU can evaluate the whole screened pattern over its own slice of columns and the partials are added on the calculation's device. This is exact, not an approximation. Only a column slice of C (n x kn) and one partial pattern array travel per SCF step; the pattern indices are uploaded once per geometry.

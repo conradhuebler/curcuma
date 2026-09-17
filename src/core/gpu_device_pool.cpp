@@ -101,7 +101,12 @@ void GpuDevicePool::configure(const nlohmann::json& controller)
     }
     for (int d : wanted) {
         if (d < 0 || d >= visible) {
-            CurcumaLogger::warn(fmt::format("gpu_devices: device {} ignored ({} visible)", d, visible));
+            // Claude Generated (Sep 2026): "-gpu_devices 2" reads as "two GPUs" but the option is
+            // a list of device INDICES, which is the mistake this warning has to name.
+            CurcumaLogger::warn(fmt::format(
+                "gpu_devices: device {} ignored ({} visible, indices 0..{}). This option takes "
+                "device INDICES (e.g. -gpu_devices 0,1) or 'all', not a device COUNT.",
+                d, visible, visible - 1));
             continue;
         }
         if (std::find(m_devices.begin(), m_devices.end(), d) == m_devices.end())

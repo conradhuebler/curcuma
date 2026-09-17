@@ -233,7 +233,7 @@ public:
      * Claude Generated (Sep 2026, multi-GPU step 3).
      */
     void setDistributedEigensolver(const std::vector<int>& devices, const std::string& backend,
-                                   int block, int min_nao, bool fp32);
+                                   int block, int min_nao, bool fp32, bool verify = true);
 
     /// "" when not configured, else backend/device/solve summary or the reason it is not used.
     std::string distributedEigensolverStatus() const;

@@ -243,6 +243,38 @@ std::vector<T> runMg(const std::vector<int>& devs, int n, int block, const std::
     copyPieces(false, vecs.data());
     const double t_d2h = secondsSince(t0);
 
+    // Claude Generated (Sep 2026): is the result actually usable? A correct syevd returns
+    // eigenvalues in ASCENDING order with column k belonging to w[k]. A permutation-invariant
+    // check (trace, or A ~ Q L Q^T) does not catch a wrong order, but the SCF does: it fills the
+    // leading columns. Report both the order and a per-column residual.
+    {
+        int desc_asc = 0;
+        for (int i = 1; i < n; ++i)
+            if (w[i] < w[i - 1]) ++desc_asc;
+        // Residual ||A x_k - w_k x_k|| / |w_k| for a few k, recomputing A x_k on the host would be
+        // O(n^2) per column: do 3 columns only.
+        double worst = 0.0;
+        for (int kk : { 0, n / 2, n - 1 }) {
+            std::vector<double> y(n, 0.0);
+            for (int j = 0; j < n; ++j) {
+                const double xj = static_cast<double>(vecs[static_cast<size_t>(j) + static_cast<size_t>(kk) * n]);
+                if (xj == 0.0) continue;
+                for (int i = 0; i < n; ++i)
+                    y[i] += static_cast<double>(host[static_cast<size_t>(i) + static_cast<size_t>(j) * n]) * xj;
+            }
+            double num = 0.0, den = 0.0;
+            for (int i = 0; i < n; ++i) {
+                const double xi = static_cast<double>(vecs[static_cast<size_t>(i) + static_cast<size_t>(kk) * n]);
+                const double r = y[i] - static_cast<double>(w[kk]) * xi;
+                num += r * r; den += xi * xi;
+            }
+            const double rel = std::sqrt(num) / (std::sqrt(den) * std::max(1e-30, std::fabs(static_cast<double>(w[kk]))));
+            if (rel > worst) worst = rel;
+        }
+        std::printf("     check: %d of %d eigenvalues out of ascending order, worst column residual %.3e\n",
+                    desc_asc, n - 1, worst);
+    }
+
     std::printf("MG   ndev=%d n=%d %s block=%d lwork/dev=%.2f GB solve=%.2f s  h2d=%.2f s d2h=%.2f s"
                 "  used_MiB=[%s]\n",
                 ndev, n, sizeof(T) == 8 ? "fp64" : "fp32", block,

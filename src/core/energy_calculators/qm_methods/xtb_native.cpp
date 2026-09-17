@@ -706,6 +706,36 @@ double XTB::Calculation(bool gradient)
     const ScfMode mode       = m_scf_mode;
     Matrix P_old;
     double dq_prev = 1.0e30;   // last max|dq| — controls the level-shift fade-out
+    // Claude Generated (Sep 2026): FP32 stagnation guard. The mixed-precision phase reverts to
+    // FP64 once max|dq| < scf_fp32_threshold, but FP32 eigenvectors carry ~1e-7 relative noise,
+    // which shows up as a floor of ~1e-5 in dq for a large system. With the GPU defaults
+    // (scf_fp32_threshold = scf_threshold = 1e-5) the SCF then hovers AT that floor and only
+    // converges when an iteration happens to dip below it - observed on 2x H200, polymer_2x:
+    // 15 vs 21 iterations for runs that differ only by rounding. So: if dq stops improving while
+    // still in FP32, switch to FP64 for the rest, where the iteration is exact and convergence
+    // is monotone again. Costs nothing when the FP32 phase is converging normally.
+    double dq_best_fp32 = 1.0e30;
+    int    fp32_stall = 0;
+    bool   fp32_exhausted = false;
+    auto fp32_wanted = [&](double dq_last) {
+        return m_scf_mixed_precision && !fp32_exhausted && (dq_last > m_scf_fp32_threshold);
+    };
+    // Call after every iteration that ran in FP32, with that iteration's max|dq|.
+    auto note_fp32_progress = [&](double dq_now) {
+        if (!m_eig_fp32) return;
+        if (dq_now < 0.7 * dq_best_fp32) {     // still making real progress
+            dq_best_fp32 = dq_now;
+            fp32_stall = 0;
+            return;
+        }
+        if (++fp32_stall >= 3) {
+            fp32_exhausted = true;
+            if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::info_fmt("SCF: FP32 phase stalled at max|dq| = {:.2e} "
+                                        "(>= scf_fp32_threshold {:.1e}); continuing in FP64",
+                                        dq_now, m_scf_fp32_threshold);
+        }
+    };
 
     // DIIS and Broyden are member variables so history can optionally survive
     // across geometry steps (m_keep_diis=true, set via -keep_diis true). Default
@@ -1003,7 +1033,7 @@ double XTB::Calculation(bool gradient)
         // precision (FP32→FP64) decision, the convergence test, and the verbosity
         // line — the rest (incl. the Broyden mix) is device-resident. Claude Generated.
         if (use_resident_loop) {
-            m_eig_fp32 = m_scf_mixed_precision && (dq_prev > m_scf_fp32_threshold);
+            m_eig_fp32 = fp32_wanted(dq_prev);
             double dq = 0.0, eb = 0.0, ecoul = 0.0, ethird = 0.0, emp = 0.0;
             if (!m_gpu_scf->residentScfStep(m_eig_fp32, dq, eb, ecoul, ethird, emp)) {
                 CurcumaLogger::warn("XTB::Calculation: GPU resident SCF step failed at iteration "
@@ -1017,6 +1047,7 @@ double XTB::Calculation(bool gradient)
             m_E_third_order = ethird; m_E_multipole = emp;
             const double e_scc = eb + ecoul + ethird + emp;
             const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
+            note_fp32_progress(dq);
             dq_prev = dq;
             if (verb >= scf_min) {
                 const double t_iter_ms = ms(t_iter0, clock::now());
@@ -1089,7 +1120,7 @@ double XTB::Calculation(bool gradient)
             // Mixed precision (GPU): solve in FP32 while far from convergence
             // (max|dq| above the threshold; iter 0 starts FP32 via dq_prev=1e30),
             // reverting to FP64 near convergence so the converged energy is FP64.
-            m_eig_fp32 = m_scf_mixed_precision && (dq_prev > m_scf_fp32_threshold);
+            m_eig_fp32 = fp32_wanted(dq_prev);
             bool solve_ok;
             Eigen::VectorXd v_ao;  // host-expanded potential (non-device-potential path)
             if (use_device_potential) {
@@ -1220,7 +1251,7 @@ double XTB::Calculation(bool gradient)
             // Mixed precision (opt-in, MKL path): solve in FP32 while far from convergence
             // (previous max|dq| above the threshold; iter 0 starts in FP32 via dq_prev=1e30),
             // reverting to FP64 near convergence so the converged energy is FP64. Claude Generated.
-            m_eig_fp32 = m_scf_mixed_precision && (dq_prev > m_scf_fp32_threshold);
+            m_eig_fp32 = fp32_wanted(dq_prev);
 
             // Diagonalize. Let MKL thread the eigensolve (dsygst/dsyevd/dtrsm) for a
             // single large molecule; the surrounding MklSerialScope keeps MKL serial
@@ -1301,6 +1332,7 @@ double XTB::Calculation(bool gradient)
         // the analytic gradient came out 0.0330 instead of 0.0211 Eh/Bohr (60 % off,
         // while the energy still matched xtb to 1e-8). Claude Generated.
         const double dq = (packSCC() - x_in).cwiseAbs().maxCoeff();
+        note_fp32_progress(dq);
         dq_prev = dq;   // drives the LevelShift fade-out on the next iteration
         const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
         const double t_iter_ms = ms(t_iter0, clock::now());

@@ -585,10 +585,18 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                      : x.is_number()  ? x.get<double>() != 0.0
                      : !(x.is_string() && (x.get<std::string>() == "false" || x.get<std::string>() == "0"));
             }
+            bool verify = true;
+            if (config.contains("gpu_eigensolver_verify")) {
+                const auto& x = config["gpu_eigensolver_verify"];
+                verify = x.is_boolean() ? x.get<bool>()
+                       : x.is_number()  ? x.get<double>() != 0.0
+                       : !(x.is_string() && (x.get<std::string>() == "false" || x.get<std::string>() == "0"));
+            }
             if (!devs.empty())
                 ctx->setDistributedEigensolver(devs, backend,
                                                static_cast<int>(num("gpu_eigensolver_block", 128)),
-                                               static_cast<int>(num("gpu_eigensolver_min_nao", 4000)), fp32);
+                                               static_cast<int>(num("gpu_eigensolver_min_nao", 4000)),
+                                               fp32, verify);
         }
 
         // Claude Generated (Sep 2026, multi-GPU): `-gpu_density_devices all|0,1,..|solver|none`
