@@ -12208,9 +12208,11 @@ void GFNFF::setupRevSettings()
     rv.share_onethree = m_parameters.value("rev_share_onethree", false);
     // Claude Generated (Sep 15, 2026): hydrogen keeps its nominal valence 1 in the share budget.
     // Same registry caveat as rev_share_onethree above - a new key may not arrive through
-    // getDefaultJson() in this build, so the hardcoded fallback here IS the default (false = the
-    // delivered behaviour); both explicit forms -gfnff.rev_budget_fix_h true|false do reach it.
-    m_rev_budget_fix_h = m_parameters.value("rev_budget_fix_h", false);
+    // getDefaultJson() in this build, so the hardcoded fallback here IS the default; both explicit
+    // forms -gfnff.rev_budget_fix_h true|false do reach it.
+    // Claude Generated (Sep 18, 2026): the fallback is now TRUE, i.e. the fix is the default
+    // (operator decision after FABLE_REVIEW_2 A.2: no falsifier moves, both react-MD runaways go).
+    m_rev_budget_fix_h = m_parameters.value("rev_budget_fix_h", true);
     rv.budget_fix_h = m_rev_budget_fix_h;
     // Claude Generated (Sep 13, 2026): rv.h_not_sp was declared and printed but NEVER assigned,
     // so -gfnff.rev_h_not_sp had no effect at all (in -sp and in -batch alike). Read it here with

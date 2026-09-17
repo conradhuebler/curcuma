@@ -264,8 +264,9 @@ struct RevSettings {
     /// inside one 0.25 fs step, which then drives the pair to r = 0.56 a0 and 62 000 K). With the
     /// flag on, Val_H = Val_Z(H) = 1 exactly and its derivative channel is 0, so a bridging H
     /// shares its one valence between its two wells. Every other element is untouched.
-    /// DEFAULT OFF (the delivered behaviour).
-    bool budget_fix_h = false;
+    /// DEFAULT ON since Sep 18, 2026 (operator decision after FABLE_REVIEW_2 A.2); false
+    /// reproduces the pre-Sep-18 behaviour.
+    bool budget_fix_h = true;
     /// rev-gfnff stage 3a(ii) (Sep 2026): "an H is never sp" - an sp hydrogen is not treated as
     /// a bridging atom, so its bond keeps the full strength instead of the reference's 0.30
     /// scaling. See the comment at the rule in gfnff_method.cpp.
