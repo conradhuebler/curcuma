@@ -1,5 +1,5 @@
 # WORK_STATUS — rev-gfnff work packages 1-5 (2026-09-18)
-Packages done: 1/5
+Packages done: 2/5
 
 AI-generated, machine-tested. Repository `/home/conrad/src/curcuma_branches/curcuma`, branch
 `reactff2-llm`, start HEAD `265a18b0`. Every measurement was taken with a FROZEN copy of the
@@ -135,3 +135,88 @@ whose default was OFF. They are the stage-3a calibration debt and are recalibrat
 - The 49 events of the other 18 cells have no budget change and sit inside the thermal amplitude
   (`FABLE_REVIEW_2` A.3); a 50 kJ threshold at 5000-7000 K and dt = 0.25 fs is at the thermal
   ceiling. Scaling the threshold with 3N k T was suggested and is NOT done here.
+
+---
+
+## Package 2 — merge `origin/feature/multi-gpu`
+
+Two commits: the merge itself with `coulomb_implicit` pinned **false**, then the flip to the
+remote's default **true**. Binaries: P1 `5bfccf51` -> merge `e88c25235dbee736c2ca3d6bd420d0ae`
+-> flip `6c0b0db0f1b422a7327163eaee689cbf` (three distinct md5s, so every "did not change"
+below is on a proven rebuild).
+
+### 2.1 The five conflicts
+
+| file | resolution |
+|---|---|
+| `gfnff_method.cpp` | kept our `perceiveGeometricBonds()` call, moved the remote's row-parallel loop INTO that function. One implementation; the list stays (i, j) ascending because react and the topology-reuse check compare bond graphs. |
+| `gfnff_gpu_method_impl.h` | both accessors kept (`getGFNFF`/`gfnffInstance` and `gpuDevice`). |
+| `src/main.cpp` | our explicit `-batch true` block first (it returns), the remote's automatic multi-frame batch after it. |
+| `.gitignore`, `AIChangelog.md` | both sides kept. |
+
+**The `-sp` semantic change, checked rather than assumed**: a multi-frame `-sp` WITHOUT
+`-batch` used to evaluate the first structure only and now evaluates all frames on `-threads`
+workers. Every rev harness that passes a multi-frame file uses `-batch true`
+(`revgfnff_classa/curves/contact/fit`); the ones on the plain path
+(`revgfnff_barrier_terms.py`, `pathB.py`, `adduct.py`, `scan.py`, the ctest scripts) all write a
+single structure. No script changes meaning.
+
+**One build break in the remote, fixed here**: `XTB::reduceToStandardForm()` (065e2a29) called
+`dsygst_` unconditionally, but that symbol is declared only inside the
+`EIGEN_USE_BLAS || USE_BLAS || USE_MKL` guard — so a BLAS-less configuration did not compile,
+and `build_rev` is one. The call now sits inside the same guard with the documented
+triangular-solve route as the fallback (the two agree to 8e-15 elementwise per the function's
+own comment, and both call sites are themselves inside the LAPACK guard, so the BLAS build is
+untouched and the BLAS-less build never reaches the LAPACK branch).
+
+### 2.2 Identity of the merge (`coulomb_implicit false`), all at `-threads 1`
+
+| check | result |
+|---|---|
+| 20-cell grid, per cell | **identical in every field** (n_rebuild, step_max, n>=50, jump_max, n_hard/n_begin, T_max): 0 of 160 compared fields differ |
+| 20-cell grid, aggregate | 1186 rebuilds / step max 391.44 / 487 events / 0 of 591 hard swaps / jump max 48.6 / T_max 8306 K = package 1 |
+| grid logs, byte level | 143 799 status rows differ, and **only in columns 13 and 14** — `remaining` (wall-clock estimate) and accumulated wall ms/1000. All 13 physical columns bit-identical. |
+| caffeine/benzene 12 digits, `revgfnff` + `gfnff` | bit-identical, `dump_params` md5 d297bc3b / 77c134bb unchanged |
+| 6 hypervalent ions + BF4-, equilibrium toggle set | bit-identical |
+| rkt06 | rms **2.7140**, max abs(dE) over 11 points **0.000e+00 Eh** |
+| FD gradient at rkt06 pt 10 | **1.194e-08 Eh/A** |
+| 4 class-C adduct scans | max difference **0.000e+00 kcal/mol** |
+| class-A `ch4_C-H`, `--mode kept` + `-gfnff.topology_mode react` | rms **5.87**, D_e dev **-13.32**, r90 dev **-0.351** = the `BASELINE_HEAD` record (this is the `-batch` path through the merged `main.cpp`) |
+| `ctest -R "gfnff|sqm_val|react"` | 95/98 |
+| `ctest -R cli_simplemd_` | 19/22 — the same three known failures |
+
+**Harness note**: `--mode kept` alone is NOT the `BASELINE_HEAD` protocol. `revgfnff_classa.py`
+needs `--extra "-gfnff.topology_mode react"` as well; without it `ch4_C-H` reads 5.23 / -11.43 /
+-0.335 instead of 5.87 / -13.32 / -0.351 (consistent with `BASELINE_HEAD` section 1c, which
+records that the literal command without react differs on 30/32 bonds).
+
+### 2.3 `-threads 4` — the merge does not change the thread dependence
+
+| cell | T1 | T4 before merge | T4 after merge | T4 with `coulomb_implicit true` |
+|---|---|---|---|---|
+| c2h6/T2000_f16 | 136 reb / 59.26 kJ / 17 | 114 / 65.77 / 20 | **114 / 65.77 / 20** | 138 / 62.19 / 5 |
+| ch4_H/T2000_f10 | 84 / 391.44 / 398 | 76 / 391.44 / 458 | **76 / 391.44 / 458** | 80 / 391.44 / 365 |
+
+So: `-threads 4` already differed from `-threads 1` before the merge (pre-existing, Known Issue
+#33 class), the merge leaves the T4 trajectories bit-identical to the pre-merge ones (again only
+the two wall-clock columns differ), and the `coulomb_implicit` flip is what moves them.
+
+### 2.4 The `coulomb_implicit true` flip, measured alone
+
+At `-threads 1` **nothing** moves: grid identical cell by cell, hypervalent ions, equilibrium
+set, 12-digit energies, rkt06 (2.7140, max dE 0.000e+00), FD gradient 1.194e-08, the four adduct
+scans (0.000e+00) and class-A ch4_C-H (5.87 / -13.32 / -0.351) all unchanged; `ctest` unchanged.
+
+Two things move, both predicted by `FABLE_REVIEW_2` section C:
+1. **`-gfnff.dump_params` md5, by construction** — the Coulomb pair list is no longer built, so
+   it is no longer dumped: caffeine **d297bc3b -> 4013d6fcd3398eb317af0543a0ea90d5**, benzene
+   **77c134bb -> 6c3a87c8efa39c6c7b32718dd70065b2**. The energies behind them are bit-identical.
+   **These are the yardstick md5s from here on.**
+2. **The last ulp at `-threads` > 1** — the partition is by atom range instead of pair range, so
+   the reduction order changes; a react MD trajectory amplifies it (table above).
+
+### 2.5 GPU: merged, NOT verified
+
+`build_rev/CMakeCache.txt` has `USE_CUDA:BOOL=OFF`, `USE_ROCM:BOOL=OFF`, `USE_VULKAN:BOOL=OFF`.
+None of the merged GPU code is compiled in this build directory, so every GPU claim of the
+remote branch is carried over unverified.
