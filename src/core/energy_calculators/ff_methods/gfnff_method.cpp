@@ -3448,7 +3448,11 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
 
     // Phase 6: Coulomb (native — no JSON)
     t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
-    if (m_implicit_coulomb_pairs && m_parameters.value("eeq_distance_cutoff", 0.0) <= 0.0) {
+    // Claude Generated (Sep 2026): implicit on the CPU too. The GPU wrapper sets
+    // m_implicit_coulomb_pairs for the device path (-gfnff.gpu_coulomb_implicit); on the CPU the
+    // `coulomb_implicit` PARAM decides, and FFWorkspace::calcCoulomb enumerates the pairs.
+    const bool coulomb_implicit = m_implicit_coulomb_pairs || m_parameters.value("coulomb_implicit", true);
+    if (coulomb_implicit && m_parameters.value("eeq_distance_cutoff", 0.0) <= 0.0) {
         params.coulombs.clear();
         params.coulomb_implicit = true;
         params.coulomb_implicit_rcut = 100.0;   // same effective cutoff as generateCoulombPairsNative

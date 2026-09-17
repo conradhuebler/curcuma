@@ -191,6 +191,9 @@ struct PartitionRanges {
     std::pair<int,int> bonded_reps = {0,0};
     std::pair<int,int> nonbonded_reps = {0,0};
     std::pair<int,int> coulombs = {0,0};
+    /// Implicit Coulomb (no stored pair list): the ATOM range [first, second) this partition
+    /// owns as the outer index i, balanced by pair count. Claude Generated (Sep 2026).
+    std::pair<int,int> coulomb_atoms = {0,0};
     std::pair<int,int> hbonds = {0,0};
     std::pair<int,int> xbonds = {0,0};
     std::pair<int,int> atm_triples = {0,0};
@@ -345,6 +348,11 @@ private:
 
     // Coulomb self-energy parameters (O(N), extracted at init)
     Vector m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_cnf, m_coul_chi_static;
+    /// Claude Generated (Sep 2026): evaluate the N^2/2 Coulomb pairs on the fly from the per-atom
+    /// data (charges + alpeeq) instead of reading a stored pair list. Set from the parameter set
+    /// (GFN-FF only); see calcCoulomb().
+    bool   m_coulomb_implicit = false;
+    double m_coulomb_implicit_rcut = 100.0;
 
     // Term-enable flags
     bool m_dispersion_enabled = true;
