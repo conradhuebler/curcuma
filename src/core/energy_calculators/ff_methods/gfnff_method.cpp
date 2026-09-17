@@ -24,6 +24,7 @@
 #include "src/core/blas_threads.h"
 #include "src/core/intra_parallel_context.h"
 
+#include <array>
 #include <cstdlib>
 #include <mutex>
 
@@ -1134,6 +1135,11 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
                 else if (mt == 1) fm_atom[i] = rthr2 + 0.025;
             }
 
+            // Claude Generated (Sep 2026): rows fill private buffers in parallel and are appended
+            // in row order, so the bond list is identical to the serial one (7320 atoms: 26.8 M
+            // pair tests, previously serial in both q-loop passes).
+            std::vector<std::vector<std::pair<int,int>>> row_bonds(m_atomcount);
+            #pragma omp parallel for schedule(dynamic, 64)
             for (int i = 0; i < m_atomcount; ++i) {
                 const int zi = m_atoms[i];
                 const double ncn_i = (zi >= 1 && zi <= 86) ? static_cast<double>(normcn[zi - 1]) : 4.0;
@@ -1149,10 +1155,12 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
                     const double distance = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
 
                     if (distance < threshold) {
-                        bonds.emplace_back(i, j);
+                        row_bonds[i].emplace_back(i, j);
                     }
                 }
             }
+            for (const auto& rb : row_bonds)
+                bonds.insert(bonds.end(), rb.begin(), rb.end());
         }
 
         if (CurcumaLogger::get_verbosity() >= 2) {
@@ -8944,8 +8952,12 @@ std::vector<std::vector<int>> GFNFF::computeBpairNbondmat(const std::vector<std:
         }
     }
 
+    // Claude Generated (Sep 2026): every loop below writes row-local data (inL[i], added[i],
+    // lst[i]; pairsbond writes pair[i][j] and pair[j][i] for j < i, which no other row i'
+    // touches), so the rows run in parallel with an identical result.
     for (int tag = 2; tag <= 3; ++tag) {
         std::vector<std::vector<int>> added(n);
+        #pragma omp parallel for schedule(dynamic, 64)
         for (int i = 0; i < n; ++i) {
             for (int i1 : lst[i]) {
                 if (i1 < 0 || i1 >= static_cast<int>(nb.size())) continue;
@@ -8960,6 +8972,7 @@ std::vector<std::vector<int>> GFNFF::computeBpairNbondmat(const std::vector<std:
             lst[i].insert(lst[i].end(), added[i].begin(), added[i].end());
 
         // pairsbond: first tag wins, and both directions must see each other.
+        #pragma omp parallel for schedule(dynamic, 64)
         for (int i = 0; i < n; ++i) {
             for (int j = 0; j < i; ++j) {
                 if (pair[i][j] != 0) continue;
@@ -8969,6 +8982,7 @@ std::vector<std::vector<int>> GFNFF::computeBpairNbondmat(const std::vector<std:
     }
 
     // Anything still unassigned is "further than 3 bonds" -> 5 (gfnff_ini2.f90:1351-1355).
+    #pragma omp parallel for schedule(static)
     for (int i = 0; i < n; ++i)
         for (int j = 0; j < n; ++j)
             if (i != j && pair[i][j] == 0) pair[i][j] = 5;
@@ -9010,7 +9024,9 @@ std::vector<std::vector<int>> GFNFF::calculateTopologyDistances(const std::vecto
         distances[i][i] = 0;
     }
 
-    // Depth-limited BFS from each atom
+    // Depth-limited BFS from each atom. Claude Generated (Sep 2026): a BFS only writes its own
+    // row distances[start][*], so the sources run in parallel with an identical result.
+    #pragma omp parallel for schedule(dynamic, 64)
     for (int start = 0; start < N; ++start) {
         std::queue<int> queue;
         std::vector<bool> visited(N, false);
@@ -10174,9 +10190,10 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         CurcumaLogger::info("Generating bonded ATM (batm) triples for 1,4-pairs");
     }
 
-    // First, let's debug-check for 1,4-pairs in the molecule
+    // First, let's debug-check for 1,4-pairs in the molecule (verbosity 3 only: an O(N^2) scan
+    // whose result is only printed - Claude Generated, Sep 2026).
     int pairs_14_count = 0;
-    for (int i = 0; i < m_atomcount; ++i) {
+    for (int i = 0; i < m_atomcount && CurcumaLogger::get_verbosity() >= 3; ++i) {
         for (int j = 0; j < i; ++j) {
             if (topo_info.topo_distances[i][j] == 3) {  // bpair == 3
                 pairs_14_count++;
@@ -10216,22 +10233,27 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     topo_info.b3list.clear();
     topo_info.nbatm = 0;
 
-    // Loop over all atom pairs
+    // Loop over all atom pairs. Claude Generated (Sep 2026): rows fill private buffers in
+    // parallel and are appended in row order, so b3list has exactly the serial order.
+    std::vector<std::vector<std::array<int, 3>>> b3_rows(m_atomcount);
+    #pragma omp parallel for schedule(dynamic, 64)
     for (int i = 0; i < m_atomcount; ++i) {
         for (int j = 0; j < i; ++j) {
             // Check if i-j is a 1,4-pair (bpair[i][j] == 3), eta-free distance
             if (batm_bpair[i][j] == 3) {
                 // Add all neighbors of j as batm triples (i, j, k)
-                for (int k : topo_info.adjacency_list[j]) {
-                    topo_info.b3list.push_back({i, j, k});
-                    topo_info.nbatm++;
-                }
+                for (int k : topo_info.adjacency_list[j])
+                    b3_rows[i].push_back({i, j, k});
                 // Add all neighbors of i as batm triples (i, j, k)
-                for (int k : topo_info.adjacency_list[i]) {
-                    topo_info.b3list.push_back({i, j, k});
-                    topo_info.nbatm++;
-                }
+                for (int k : topo_info.adjacency_list[i])
+                    b3_rows[i].push_back({i, j, k});
             }
+        }
+    }
+    for (const auto& row : b3_rows) {
+        for (const auto& t : row) {
+            topo_info.b3list.push_back({t[0], t[1], t[2]});
+            topo_info.nbatm++;
         }
     }
 

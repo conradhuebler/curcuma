@@ -2889,7 +2889,12 @@ std::vector<Vector> EEQSolver::calculateTopologyChargesMultiRHS(
         // Reference: XTB gfnff_ini2.f90:1189-1199 uses same 'pair' array for both phases
         // Phase 2 must NOT recalculate with geometric distances!
 
-        // Setup off-diagonal Coulomb matrix with topological distances
+        // Setup off-diagonal Coulomb matrix with topological distances.
+        // Claude Generated (Sep 2026): each (i,j)/(j,i) pair is written by exactly one row i,
+        // so the rows can run in parallel with an identical result (7320 atoms: 26.8 M erf
+        // evaluations, previously serial in both q-loop passes). The OpenMP team size is the
+        // GFN-FF budget opened by GFNFF::calculateTopologyInfo.
+        #pragma omp parallel for schedule(dynamic, 32)
         for (int i = 0; i < natoms; ++i) {
             for (int j = 0; j < i; ++j) {
                 double r = topo_dist(i, j);  // Topological distance in Bohr

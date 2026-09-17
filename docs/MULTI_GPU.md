@@ -172,7 +172,18 @@ Findings on polymer_2x (7320 atoms, 1502 fragments):
 
 Energies: CPU -898.805534472558 identical; GPU pair list vs implicit -898.805533905291 / ...292, gradients <= 2e-15 (complex, polymer, polymer_2x). ctest gfnff/GPU/MD/opt: 215/216 (only the known `cli_curcumaopt_07` golden drift).
 
-Remaining setup costs (GPU run): EEQ phase 1 + 2 ~3.3 s (projected PCG, 1502 fragment constraints), dispersion pairs 0.64 s, topo distances + BATM list 0.52 s, bond list 0.32 s.
+Second round (same day), all row-parallel with per-row buffers appended in row order, results identical:
+- EEQ phase 1 Coulomb matrix fill (26.8 M erf): 1.61 -> 0.99 s (both passes)
+- bond list: 342 -> 43 ms; topo distances (BFS) + nbondmat + BATM list: 522 -> 292 ms; the verbosity-3-only 1,4-pair debug count no longer runs at lower verbosity
+- GPU workspace upload 1427 -> 402 ms (no Coulomb pair list)
+
+| polymer_2x GFN-FF single point, 1x A4500 | start of step 2 | now |
+|---|---|---|
+| wall | 13.2 s | **6.8 s** |
+| with `-gpu_disp_pairs_on_device true` (existing option, default off) | - | **5.6 s** (energy identical, gradient 5e-16) |
+| host peak RSS | 11.0 GB | 4.8 GB (4.1 GB with device dispersion pairs) |
+
+Remaining: EEQ solves ~2.6 s (projected PCG, 32 + 71 iterations per pass, matvec already threaded BLAS and memory-bandwidth bound), distance matrix 0.16 s, torsions 0.19 s.
 
 ## GPU phase profiler
 `CURCUMA_GPU_PROFILE=1 curcuma -sp mol.xyz -method gfn2 -gpu cuda -verbosity 1` prints stream-synchronised per-phase device timings (integrals, potential, Fock, reduce / syevd / back-transform for FP32 and FP64, density, charges, energy, Broyden). Off by default (no synchronisation cost). `-verbosity 2` additionally shows a `pre-SCF` line (device uploads, EEQ guess) that was previously only inside TOTAL.
