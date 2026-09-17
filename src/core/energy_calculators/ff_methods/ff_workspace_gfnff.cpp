@@ -27,6 +27,7 @@
 #include "ff_workspace.h"
 #include "cn_calculator.h"
 #include "gfnff_par.h"
+#include "rev_well_table.h"   // rev-gfnff 3a(iii): AI-fitted per-element-pair well parameters
 #include "forcefieldfunctions.h"
 #include "gfnff_geometry.h"
 #include "src/core/units.h"
@@ -144,6 +145,11 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
     const bool rev_share_conserving = rev_share && m_rev.share_conserving
                                       && m_rev_share_f.size() == m_natoms
                                       && m_rev_share_dfdS.size() == m_natoms;
+    // rev-gfnff stage 3a(iii) (Sep 18, 2026): the per-bond well-form parameters of this corner,
+    // built by prepareWellForms() on the main thread (the erf-Morse bisection must not run per
+    // energy call). Bonds whose element pair has no class-A entry keep form = 0 = the Gaussian.
+    const bool rev_well_on = m_rev.enabled && m_rev.well_form != 0
+                             && m_rev_well.size() == list.size();
 
     for (int idx = begin; idx < end; ++idx) {
         const auto& bond = list[idx];
@@ -208,10 +214,44 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
         // rev-gfnff stage 1 (Sep 2026): the well is switched off smoothly by the continuous
         // bond order instead of being dropped when the bond leaves the topology.
         double w = 1.0, dwdr = 0.0;
-        if (m_rev.enabled && m_rev.bond_weight) {
+        if (m_rev.enabled && m_rev.bond_weight)
             w = revWeight(bond.i, bond.j, rij, &dwdr);
-            energy *= w;
+        // rev-gfnff stage 3a(iii) (Claude Generated, Sep 18, 2026): the two alternative well
+        // forms. `well` is the pair's well BEFORE the term weight and the valence share;
+        // `dwell_dx` its derivative in x = r - r0. The new forms are NOT multiplied by w (they
+        // decay by themselves - see RevSettings::well_form), the delivered Gaussian is.
+        double well = k_b * exp_term;
+        double dwell_dx = -2.0 * alpha * dr * well;
+        bool new_form = false;
+        if (rev_well_on && idx < static_cast<int>(m_rev_well.size()) && m_rev_well[idx].form != 0) {
+            const RevWellPar& wp = m_rev_well[idx];
+            double y, dy_dx;
+            if (wp.form == 1) {
+                // MG: y = exp(-(a x + beta x^2))
+                const double phi = wp.p1 * dr + wp.p2 * dr * dr;
+                const double yr = std::exp(-std::min(std::max(phi, -50.0), 200.0));
+                y = yr;
+                dy_dx = -(wp.p1 + 2.0 * wp.p2 * dr) * yr;
+            } else {
+                // erf-Morse: y = erfc((x - u)/sigma) / erfc(-u/sigma)
+                const double n0 = std::erfc(-wp.p1 / wp.p2);
+                const double z = (dr - wp.p1) / wp.p2;
+                y = std::erfc(z) / n0;
+                dy_dx = -2.0 / (1.7724538509055159 * wp.p2 * n0) * std::exp(-z * z);
+            }
+            // The inner side is capped at y = 2 (C1, exact below y = 1.6, so the fitted region
+            // and the minimum itself are untouched): E = -D(2y - y^2) = D((y-1)^2 - 1) is then
+            // bounded in [-D, 0] exactly as the Gaussian is in [k_b, 0]. The repulsive wall stays
+            // the repulsion term's job, as it is for the Gaussian.
+            constexpr double kYCap = 2.0, kYCapWidth = 0.2;
+            const double t = y / kYCap;
+            const double yc = kYCap * shareMinOne(t, kYCapWidth);
+            const double dyc_dy = shareMinOneD(t, kYCapWidth);
+            well = -wp.D * (2.0 * yc - yc * yc);
+            dwell_dx = -wp.D * (2.0 - 2.0 * yc) * dyc_dy * dy_dx;
+            new_form = true;
         }
+        energy = new_form ? well : well * w;
         // rev-gfnff stage 3a(ii) (Claude Generated, Sep 2026): valence share.
         //     E = -k_b e^{-a dr^2} w c,     c = 1/2 (f_i + f_j),
         //     f_i = clip((Val_i - sum_{k != j} w_ik) / w_ij, 0, 1),
@@ -223,9 +263,20 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
         // to one well's worth instead of two. Zero element data: the clip width is the unit
         // interval itself (shareClip) and Val_i is the over-coordination term's own valence table,
         // made hypervalent-correct by the settled-partner count (see prepareValenceShare).
+        // What the share factor multiplies: the delivered Gaussian TIMES the term weight, or the
+        // new well form on its own. Every dE/d(share input) below is this number times a purely
+        // share-side derivative, so the two well forms share one code path from here on.
+        const double base = energy;
         double cshare = 1.0, dcdw = 0.0;
         if (rev_share && w > 1e-12 && idx < static_cast<int>(m_rev_share_g.size())) {
             const double inv = 1.0 / w;
+            // the "K" of the share formulas below is base/w: the share's own derivatives carry a
+            // 1/w (f_i has w in its denominator), which is a property of the share, not the well.
+            // For the delivered Gaussian that is the well itself - written that way rather than as
+            // base*inv, because (K*w)*(1/w) is NOT bitwise K and the react MD amplifies one ulp
+            // (Known Issue #33): measured, the round trip alone moved the 20-cell grid from 1186
+            // to 1263 rebuilds.
+            const double Kshare = new_form ? base * inv : well;
             // rev-gfnff stage 3a(ii) Sep 14, 2026: g = the genuineness of THIS pair (the smooth
             // 1,3 proxy, m_bonds order). It enters twice - the pair claims only w g of valence on
             // each end (so it is inside the sums, built by prepareValenceShare), and its own well
@@ -242,13 +293,12 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
                 cshare = 1.0 - g * (1.0 - fi * fj);
                 energy *= cshare;
                 if (m_do_gradient) {
-                    const double K = k_b * exp_term;
-                    // dE/dS_i = (dE/df_i) (df_i/dS_i) = K w g f_j * dfdS_i - stored directly as
+                    // dE/dS_i = (dE/df_i) (df_i/dS_i) = base g f_j * dfdS_i - stored directly as
                     // dE/d sum_i, which is what the Lambda pass multiplies by g_p dw/dr.
-                    acc.dEdshare(bond.i) += K * w * g * fj * m_rev_share_dfdS(bond.i);
-                    acc.dEdshare(bond.j) += K * w * g * fi * m_rev_share_dfdS(bond.j);
+                    acc.dEdshare(bond.i) += base * g * fj * m_rev_share_dfdS(bond.i);
+                    acc.dEdshare(bond.j) += base * g * fi * m_rev_share_dfdS(bond.j);
                     // dE/dg at fixed sums: c = 1 - g (1 - f_i f_j)
-                    m_rev_share_dg[idx] += K * w * (-(1.0 - fi * fj));
+                    m_rev_share_dg[idx] += base * (-(1.0 - fi * fj));
                 }
             } else {
             const double gi = (m_rev_share_val(bond.i) - m_rev_share_sum(bond.i) + w * g) * inv;
@@ -268,17 +318,16 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
                 // gradient was then 0.4 % short of the FD of the share energy (1.4e-04 vs
                 // 4.7e-06 Eh/Angstrom after the fix).
                 dcdw = -0.5 * g * (di * (gi - g) + dj * (gj - g)) * inv;
-                // dE_pair/d sum_i = -K g f_i' / 2 with K = k_b e^{-a dr^2} (the pair's own S
-                // does not enter its own sum, so no extra own-pair term here)
-                const double K = k_b * exp_term;
-                acc.dEdshare(bond.i) += -0.5 * K * g * di;
-                acc.dEdshare(bond.j) += -0.5 * K * g * dj;
+                // dE_pair/d sum_i = -Kshare g f_i' / 2 (the pair's own S does not enter its own
+                // sum, so no extra own-pair term here)
+                acc.dEdshare(bond.i) += -0.5 * Kshare * g * di;
+                acc.dEdshare(bond.j) += -0.5 * Kshare * g * dj;
                 // dE_pair/d g = K w d c/d g, with f_i = clip((Val_i - sum_i)/w + g) so that
                 // d f_i/d g = f_i' = shareClipD(g_i) = di:
                 //     d c/d g = -(1 - (f_i + f_j)/2) + (g/2)(di + dj).
                 // The g-dependence of the SUMS is the second half of the same derivative and is
                 // applied in applyValenceShareGradient (it spans three atoms).
-                m_rev_share_dg[idx] += K * w * (-(1.0 - 0.5 * (fi + fj)) + 0.5 * g * (di + dj));
+                m_rev_share_dg[idx] += base * (-(1.0 - 0.5 * (fi + fj)) + 0.5 * g * (di + dj));
             }
             }
         }
@@ -292,23 +341,31 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
         if (s_share_dump)
             CurcumaLogger::result(fmt::format(
                 "shareD {:3d} {:3d}-{:3d} r {:9.5f} D {:14.8f} w {:9.6f} c {:9.6f} E {:14.8f}",
-                idx, bond.i + 1, bond.j + 1, rij, -(k_b * exp_term) * w, w, cshare, energy));
+                idx, bond.i + 1, bond.j + 1, rij, -base, w, cshare, energy));
 
         if (m_do_gradient) {
             // d(w E_gauss)/dr = w dE_gauss/dr + E_gauss dw/dr, E_gauss = energy / w.
             // Only the first part depends on r0 and therefore on CN: dEdr stays the
             // Gaussian derivative for the chain rule below, the weight part goes to the
             // Cartesian gradient directly.
-            double dEdr = -2.0 * alpha * dr * energy;
-            // dE/dr through the term weight: K (c + w dc/dw) dw/dr (K = k_b e^{-a dr^2}); the
-            // share factor only adds the dc/dw part, c = 1 and dc/dw = 0 when it is off.
-            const double wfac = cshare + (dcdw != 0.0 ? w * dcdw : 0.0);
-            double dEdr_cart = dEdr + ((w != 1.0 || dwdr != 0.0) ? (k_b * exp_term) * wfac * dwdr : 0.0);
+            // dE/dr at fixed w and c. Both well forms depend on r only through x = r - r0, so
+            // this is also -dE/dr0 and the CN chain rule below is unchanged.
+            // Same ulp caveat as Kshare above: for the Gaussian the delivered association
+            // (-2 alpha dr) * energy is kept verbatim, which is bitwise what it always was.
+            double dEdr = new_form ? (dwell_dx * cshare) : (-2.0 * alpha * dr * energy);
+            // dE/dr through the term weight. Delivered: E = K w c, so dE/dw = K (c + w dc/dw).
+            // New forms: E = well c and the weight is NOT on the well, so only the share's own
+            // dc/dw survives, dE/dw = base dc/dw.
+            const double dEdw = new_form ? (dcdw != 0.0 ? base * dcdw : 0.0)
+                                         : well * (cshare + (dcdw != 0.0 ? w * dcdw : 0.0));
+            double dEdr_cart = dEdr + ((w != 1.0 || dwdr != 0.0) ? dEdw * dwdr : 0.0);
             acc.gradient.row(bond.i) += dEdr_cart * derivate.row(0);
             acc.gradient.row(bond.j) += dEdr_cart * derivate.row(1);
 
-            // HB alpha-modulation chain-rule gradient
-            if (bond.nr_hb >= 1) {
+            // HB alpha-modulation chain-rule gradient. Not applicable to the new well forms:
+            // they do not use the modulated alpha (see prepareWellForms), so there is nothing to
+            // differentiate - and applying the Gaussian's dE/d hb_cn_H to them would be wrong.
+            if (bond.nr_hb >= 1 && !new_form) {
                 constexpr double t1 = 0.1;
                 double zz = t1 * alpha_orig * dr * dr * energy;
                 int H = (m_atom_types[bond.i] == 1) ? bond.i : bond.j;
@@ -2327,6 +2384,123 @@ void FFWorkspace::prepareValenceShare()
 // the settled-count channel of the delivered rule has no counterpart, and the existing Lambda
 // pass over dw/dr carries the whole chain rule (applyValenceShareGradient).
 // ============================================================================
+// ============================================================================
+// rev-gfnff stage 3a(iii): the bond-well forms (Claude Generated, Sep 18, 2026)
+// FABLE_REVIEW_2 B. Both new forms are E = -D (2y - y^2) with E(r0) = -D and E'(r0) = 0
+// identically, and both are curvature-pinned to the delivered Gaussian's 2 alpha |k_b|, so a
+// (MG) resp. u (erf-Morse) follows from the depth. Only the depth scale s = D/|k_b| and the tail
+// are fitted, per element pair (rev_well_table.h, from scripts/revgfnff_wellfit.py).
+//
+// The bisection for u is the erf-Morse form's extra setup cost (the MG form has a closed form)
+// and is the reason this runs once per corner, on the main thread, instead of per energy call.
+// ============================================================================
+double FFWorkspace::wellErfMorseU(double D, double sigma, double K)
+{
+    // g(u) = (2/(sigma sqrt(pi))) e^{-z^2}/erfc(z) at z = -u/sigma is |y'(0)| and decreases
+    // monotonically in u; the pinned curvature 2 D g^2 = K gives g = sqrt(K/(2D)).
+    const double tgt = std::sqrt(K / (2.0 * D));
+    auto g = [&](double u) {
+        const double z = -u / sigma;
+        if (z > 25.0)
+            return 2.0 * z / sigma;                     // erfc asymptotics, avoids 0/0
+        return 2.0 / (sigma * 1.7724538509055159) * std::exp(-z * z) / std::erfc(z);
+    };
+    double lo = -40.0 * sigma, hi = 8.0 * sigma;
+    if (g(lo) < tgt || g(hi) > tgt)
+        return std::numeric_limits<double>::quiet_NaN();
+    for (int it = 0; it < 80; ++it) {
+        const double mid = 0.5 * (lo + hi);
+        if (g(mid) > tgt)
+            lo = mid;
+        else
+            hi = mid;
+    }
+    return 0.5 * (lo + hi);
+}
+
+void FFWorkspace::prepareWellForms()
+{
+    const int nb = static_cast<int>(m_bonds.size());
+    if (!m_rev.enabled || m_rev.well_form == 0 || nb == 0) {
+        m_rev_well.clear();
+        m_rev_well_stamp.clear();
+        m_rev_well_stamp_form = -1;
+        return;
+    }
+    // Cache: the inputs are per-bond constants (fc, exponent and the two element numbers), so
+    // the whole pass - and in particular the erf-Morse bisection - only has to run when the bond
+    // list or its parameters change, not on every energy call.
+    bool same = (m_rev_well_stamp_form == m_rev.well_form)
+                && m_rev_well_stamp.size() == static_cast<size_t>(nb)
+                && m_rev_well.size() == static_cast<size_t>(nb);
+    if (same) {
+        for (int p = 0; p < nb; ++p) {
+            const Bond& b = m_bonds[p];
+            const auto& st = m_rev_well_stamp[p];
+            if (st[0] != b.fc || st[1] != b.exponent
+                || st[2] != static_cast<double>(b.z_i) || st[3] != static_cast<double>(b.z_j)) {
+                same = false;
+                break;
+            }
+        }
+    }
+    if (same)
+        return;
+    m_rev_well_stamp.resize(nb);
+    m_rev_well_stamp_form = m_rev.well_form;
+    for (int p = 0; p < nb; ++p) {
+        const Bond& b = m_bonds[p];
+        m_rev_well_stamp[p] = { b.fc, b.exponent, static_cast<double>(b.z_i), static_cast<double>(b.z_j) };
+    }
+    m_rev_well.assign(nb, RevWellPar{});
+    // The table is in Angstrom units (that is how the class-A fit reports it and how the header
+    // reads); the workspace works in Bohr. beta [1/A^2] -> [1/Bohr^2] multiplies by (A/Bohr)^2
+    // and sigma [A] -> [Bohr] divides by it.
+    constexpr double kBohrPerAng = 1.8897261246257702;
+    std::vector<std::pair<int, int>> missing;
+    for (int p = 0; p < nb; ++p) {
+        const Bond& b = m_bonds[p];
+        if (b.z_i <= 0 || b.z_j <= 0)
+            continue;
+        const RevWellTable::Entry* e = RevWellTable::find(b.z_i, b.z_j);
+        if (!e) {
+            const int z1 = std::min(b.z_i, b.z_j), z2 = std::max(b.z_i, b.z_j);
+            if (std::find(missing.begin(), missing.end(), std::make_pair(z1, z2)) == missing.end())
+                missing.emplace_back(z1, z2);
+            continue;                                   // form stays 0 -> Gaussian for this bond
+        }
+        const double kb = std::abs(b.fc);
+        if (kb <= 0.0)
+            continue;
+        // The HB alpha modulation (egbond_hb) is DELIBERATELY not applied to the new forms: it
+        // would enter through a resp. u and its chain rule (dE/d hb_cn_H) has no counterpart
+        // there. Using alpha_orig keeps the well and its gradient exactly consistent; the cost is
+        // that a hydrogen-bond donor's X-H bond is not softened in these forms. Documented, not
+        // measured against a reference (the class-A set has no hydrogen bond).
+        const double alpha = b.exponent;
+        const double K = 2.0 * alpha * kb;
+        if (m_rev.well_form == 1) {
+            const double D = e->mg_s * kb;
+            m_rev_well[p] = RevWellPar{ D, std::sqrt(alpha / e->mg_s),
+                                        e->mg_beta / (kBohrPerAng * kBohrPerAng), 1 };
+        } else {
+            const double D = e->em_s * kb;
+            const double sigma = e->em_sigma * kBohrPerAng;
+            const double u = wellErfMorseU(D, sigma, K);
+            if (std::isfinite(u))
+                m_rev_well[p] = RevWellPar{ D, u, sigma, 2 };
+        }
+    }
+    if (!missing.empty() && CurcumaLogger::get_verbosity() >= 2) {
+        std::string s;
+        for (const auto& m : missing)
+            s += fmt::format("{}{}-{}", s.empty() ? "" : ", ", m.first, m.second);
+        CurcumaLogger::warn(fmt::format(
+            "rev-gfnff well form: no class-A parameters for element pair(s) {} - those bonds keep "
+            "the delivered Gaussian", s));
+    }
+}
+
 void FFWorkspace::prepareConservingShare(bool fix_h)
 {
     const int N = m_natoms;

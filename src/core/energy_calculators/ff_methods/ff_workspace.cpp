@@ -282,6 +282,11 @@ double FFWorkspace::calculateSingle(bool gradient)
     // bond-order sum, so it is built once per corner on the main thread, before the partitions.
     if (m_rev.enabled && m_rev.valence_share && m_method_type == FFMethodType::GFN_FF)
         prepareValenceShare();
+    // rev-gfnff stage 3a(iii) (Sep 2026): the per-bond well-form parameters of this corner. Same
+    // place and the same reason - the erf-Morse form needs a bisection for its offset, which must
+    // not run inside the per-partition energy loop.
+    if (m_rev.enabled && m_rev.well_form != 0 && m_method_type == FFMethodType::GFN_FF)
+        prepareWellForms();
 
     auto t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if (m_num_threads == 1) {

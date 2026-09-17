@@ -36,6 +36,7 @@
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include <Eigen/Dense>
+#include <array>
 #include <functional>
 #include <Eigen/Sparse>
 
@@ -290,6 +291,19 @@ struct RevSettings {
     /// rev-gfnff 3a(ii) "conserving": half-width of the C1 smooth min in Val/S units. The min is
     /// exactly 1 above 1 and exactly Val/S below 1 - a, so this only smooths the corner between.
     double share_min_width = 0.1;
+    /// rev-gfnff stage 3a(iii) (Claude Generated, Sep 18, 2026): the BOND WELL FORM.
+    /// 0 = gauss (delivered, bit-identical), 1 = MG, 2 = erf-Morse. Both new forms are
+    ///     E = -D (2y - y^2)
+    /// with y = exp(-(a x + beta x^2)) (MG) or y = erfc((x - u)/sigma)/erfc(-u/sigma)
+    /// (erf-Morse), x = r - r0. Both have E(r0) = -D and E'(r0) = 0 identically, and both are
+    /// CURVATURE-PINNED: a (MG) resp. u (erf-Morse, by bisection) is chosen so that
+    /// E''(r0) = 2 alpha |k_b|, the delivered Gaussian's own force constant. So r_min and the
+    /// force constant are reproduced by construction and only the DEPTH (s = D/|k_b|) and the
+    /// TAIL are fitted, per element pair, from the class-A reference scans (rev_well_table.h).
+    /// The term weight w is NOT applied to these wells: they decay by themselves (the fit
+    /// measures |E_pair| at the last grid point as median 0.000, max 0.69 kcal/mol), so
+    /// multiplying by w would truncate the tail the fit just put there.
+    int well_form = 0;
     /// rev-gfnff stage 3a(ii) (Sep 2026): "an H is never sp" - an sp hydrogen is not treated as
     /// a bridging atom, so its bond keeps the full strength instead of the reference's 0.30
     /// scaling. See the comment at the rule in gfnff_method.cpp.
@@ -655,6 +669,17 @@ private:
     /// rev-gfnff 3a(ii) "conserving": the per-atom excess budget cap X_i (element/charge rule).
     /// Diagnostic only after prepareValenceShare; kept for the CURCUMA_SHAREDUMP table.
     Vector m_rev_share_cap;
+    /// rev-gfnff 3a(iii): per BOND (m_bonds order) the well-form parameters of this corner.
+    /// D > 0 = the depth, p1 = a (MG) or u (erf-Morse), p2 = beta (MG) or sigma (erf-Morse),
+    /// all in ATOMIC units. form = 0 means "no table entry, use the Gaussian" for that bond.
+    struct RevWellPar { double D = 0.0, p1 = 0.0, p2 = 0.0; int form = 0; };
+    std::vector<RevWellPar> m_rev_well;
+    /// rev-gfnff 3a(iii): the (fc, exponent, z_i, z_j) the current m_rev_well was built from.
+    /// prepareWellForms() runs on every energy call (next to the share's own pass), but its
+    /// inputs are per-bond CONSTANTS, so recomputing the erf-Morse bisection every step is pure
+    /// cost - measured at 1.4x the whole react-MD wall time before this cache.
+    std::vector<std::array<double, 4>> m_rev_well_stamp;
+    int m_rev_well_stamp_form = -1;
     /// rev-gfnff 3a(ii) (Claude Generated, Sep 14, 2026): the SMOOTH 1,3 proxy - the genuineness
     /// g_p of every pair of the corner's bond list, in m_bonds order. A compact polyhedron's
     /// perception carries 1,3 contacts as bonds - the six F...F contacts of a tetrahedral BF4-
@@ -833,6 +858,10 @@ private:
     void prepareValenceShare();
     /// rev-gfnff 3a(ii) "conserving": per-atom budget cap, effective valence, f_i and df_i/dS_i
     void prepareConservingShare(bool fix_h);
+    /// rev-gfnff 3a(iii): per-bond well-form parameters of the corner (D, a/u, tail), main thread
+    void prepareWellForms();
+    /// rev-gfnff 3a(iii): the erf-Morse offset u from 2 D h(-u/sigma)^2/sigma^2 = K (bisection)
+    static double wellErfMorseU(double D, double sigma, double K);
     /// rev-gfnff 3a(ii): the chain rule of that sum and of the effective valence (after the partitions)
     void applyValenceShareGradient();
     /// rev-gfnff: over-coordination energy + gradient, main thread, after the partitions (Sep 2026)

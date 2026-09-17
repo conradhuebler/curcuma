@@ -12370,6 +12370,15 @@ void GFNFF::setupRevSettings()
         m_rev_share_form = rv.share_conserving ? "conserving" : "delivered";
         rv.share_min_width = m_parameters.value("rev_share_min_width", 0.1);
     }
+    // Claude Generated (Sep 18, 2026): stage 3a(iii), the bond-well form.
+    {
+        const std::string form = m_parameters.value("rev_well_form", std::string("gauss"));
+        rv.well_form = (form == "mg") ? 1 : (form == "erfmorse") ? 2 : 0;
+        if (form != "gauss" && form != "mg" && form != "erfmorse")
+            CurcumaLogger::warn(fmt::format(
+                "rev_well_form '{}' is not gauss|mg|erfmorse - using gauss", form));
+        m_rev_well_form = form;
+    }
     // Claude Generated (Sep 14, 2026): the smooth 1,3 proxy of the share - the claim of a pair is
     // w_p g_p with g the bond-order leak of a settled shared partner (see FFWorkspace). Off = the
     // plain, unmasked share (bit-identical to the state before the proxy).
@@ -12560,10 +12569,10 @@ void GFNFF::setupRevSettings()
             rv.over_k, rv.over_shift, rv.w_join));
         CurcumaLogger::result(fmt::format(
             "rev dump (flags): form {} bo2_form {:.4f} bo_form {:.4f} bo_break {:.4f} bo13_form {:.4f} "
-            "bo13_ordinary_join {} budget_fix_h {} share_form {} "
+            "bo13_ordinary_join {} budget_fix_h {} share_form {} well_form {} "
             "tr {:.4f}/{:.4f}/{:.4f}/{:.4f} cooldown {} max_transitions {} sqe {} sqe_bmin {:.5f} preset {}",
             m_rev_form_order ? "order" : "weight", m_rev_bo2_form, m_rev_bo_form, m_rev_bo_break,
-            m_rev_bo13_form, m_rev_bo13_ordinary_join, m_rev_budget_fix_h, m_rev_share_form,
+            m_rev_bo13_form, m_rev_bo13_ordinary_join, m_rev_budget_fix_h, m_rev_share_form, m_rev_well_form,
             m_rev_tr_begin, m_rev_tr_end, m_rev_tr_revert, m_rev_tr_prebreak,
             m_rev_demote_cooldown, m_rev_max_transitions, m_rev_sqe, m_rev_sqe_bmin,
             m_parameters.value("rev_over_preset", std::string("stage1a"))));
