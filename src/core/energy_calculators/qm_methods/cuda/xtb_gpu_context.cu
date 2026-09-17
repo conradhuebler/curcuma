@@ -299,6 +299,51 @@ struct XtbGpuContext::Impl {
 
     // Claude Generated (Sep 2026): screened (sparse) AO-pair storage for S, H0, dp_int, qp_int.
     // See the "Screened (sparse) AO-pair storage" kernel block for the layout.
+    // Claude Generated (Sep 2026, multi-GPU): the pattern density P(r,c) = sum_k Cw(r,k) C(c,k)
+    // is a sum over the occupied columns, so it splits over GPUs without any approximation: every
+    // device evaluates the SAME pattern over its own slice of k and the partial results are added.
+    // Only a column slice of C (n x kn) travels per step, not the whole matrix.
+    struct DensityHelper {
+        int          device = -1;
+        cudaStream_t stream = nullptr;
+        cudaEvent_t  done   = nullptr;
+        double*      dC     = nullptr;   // n x kn slice of the eigenvectors
+        double*      dCw    = nullptr;   // the same slice scaled by the occupations
+        double*      dOcc   = nullptr;   // kn occupations
+        double*      dPsp   = nullptr;   // partial density on the pattern (nnz)
+        int*         dRow   = nullptr;   // pattern (geometry-constant)
+        int*         dCol   = nullptr;
+        int          cap_cols = 0;
+        int          cap_nnz  = 0;
+        long         pattern_gen = -1;
+        double*      stage  = nullptr;   // nnz staging buffer on the PRIMARY device
+    };
+    std::vector<int>           dens_devices;    // helper devices (never the context's own)
+    std::vector<DensityHelper> dens_helpers;
+    bool                       dens_failed = false;
+    std::string                dens_error;
+    int                        dens_steps = 0;
+    long                       pattern_generation = 0;   // bumped when the screened pattern changes
+
+    void releaseDensityHelpers()
+    {
+        for (DensityHelper& h : dens_helpers) {
+            cudaSetDevice(h.device);
+            for (void** p : { reinterpret_cast<void**>(&h.dC), reinterpret_cast<void**>(&h.dCw),
+                              reinterpret_cast<void**>(&h.dOcc), reinterpret_cast<void**>(&h.dPsp),
+                              reinterpret_cast<void**>(&h.dRow), reinterpret_cast<void**>(&h.dCol) })
+                if (*p) { cudaFree(*p); *p = nullptr; }
+            if (h.done) { cudaEventDestroy(h.done); h.done = nullptr; }
+            if (h.stream) { cudaStreamDestroy(h.stream); h.stream = nullptr; }
+            cudaSetDevice(device);
+            if (h.stage) { cudaFree(h.stage); h.stage = nullptr; }
+            h.cap_cols = h.cap_nnz = 0;
+            h.pattern_gen = -1;
+        }
+        dens_helpers.clear();
+        cudaSetDevice(device);
+    }
+
     // Claude Generated (Sep 2026, multi-GPU step 3): optional multi-GPU eigensolve, created on
     // first use. dist_failed latches after a failure so the SCF does not retry every iteration.
     std::vector<int> dist_devices;
@@ -430,6 +475,7 @@ struct XtbGpuContext::Impl {
             b->free();
         for (CudaBuffer<double>* b : { &dSpS, &dSpH0, &dSpDp, &dSpQp, &dSpTmp, &dSpP })
             b->free();
+        releaseDensityHelpers();
         mp_otf = false;
         p_dense_valid = true;
         for (CudaBuffer<int>* b : { &dSpRow, &dSpCol, &dSpColPtr, &dSpPerm })
@@ -2298,6 +2344,7 @@ XtbGpuContext::~XtbGpuContext()
         return;
     // The multi-GPU solver switches devices while it tears down; drop it first.
     m_impl->dist.reset();
+    m_impl->releaseDensityHelpers();
     // Free the handles and every CudaBuffer (destroyed with m_impl) on OUR device.
     bindDevice();
     if (m_impl->cusolver) cusolverDnDestroy(m_impl->cusolver);
@@ -2720,6 +2767,157 @@ bool XtbGpuContext::residentDensity(const double* occ, int ncol, int n,
 // Stage 6: density + Mulliken-AO from the RESIDENT occupations (dOcc, set by
 // k_occupations) — no occ upload, no pop_ao download (dPop stays resident for the
 // device q_sh/q_at reductions). band_out = Σ P⊙H0 (host scalar). Claude Generated.
+// Claude Generated (Sep 2026, multi-GPU): pattern density over several GPUs.
+//
+// P(r,c) = sum_k Cw(r,k) C(c,k) is a plain sum over the occupied columns, so each device can
+// evaluate the full pattern over its own contiguous slice of k and the partials are added on the
+// primary device. Per SCF step only the column slices of C (n x kn each) and the partial pattern
+// arrays travel; the pattern indices are geometry-constant and uploaded once.
+//
+// Returns false when the split is not set up or fails, and leaves dSpP untouched in that case, so
+// the caller falls back to the single-device kernel.
+bool XtbGpuContext::densityPatternDistributed(int n, int ncol)
+{
+    Impl& I = *m_impl;
+    if (I.dens_failed || I.dens_devices.empty() || !I.sparse || I.sp_nnz <= 0 || ncol <= 0)
+        return false;
+
+    const int nhelp = static_cast<int>(I.dens_devices.size());
+    const int nworker = nhelp + 1;               // the helpers plus this device
+    if (ncol < 16 * nworker) return false;       // too few columns to be worth splitting
+    // The pattern density buffer is normally allocated by the single-device branch, which this
+    // function replaces.
+    try { I.dSpP.ensure(I.sp_nnz); I.dCw.ensure(n * ncol); } catch (...) { return false; }
+
+    // Create the helpers (streams, events, pattern buffers) on first use.
+    if (I.dens_helpers.empty()) {
+        for (int d : I.dens_devices) {
+            Impl::DensityHelper h;
+            h.device = d;
+            cudaSetDevice(d);
+            int can = 0;
+            if (cudaDeviceCanAccessPeer(&can, d, I.device) == cudaSuccess && can)
+                cudaDeviceEnablePeerAccess(I.device, 0);
+            cudaGetLastError();   // "already enabled" is expected and must not linger
+            if (cudaStreamCreate(&h.stream) != cudaSuccess
+                || cudaEventCreateWithFlags(&h.done, cudaEventDisableTiming) != cudaSuccess) {
+                cudaSetDevice(I.device);
+                I.dens_failed = true;
+                I.dens_error = "stream/event creation failed";
+                I.releaseDensityHelpers();
+                return false;
+            }
+            I.dens_helpers.push_back(h);
+        }
+        cudaSetDevice(I.device);
+        for (int d : I.dens_devices) {
+            int can = 0;
+            if (cudaDeviceCanAccessPeer(&can, I.device, d) == cudaSuccess && can)
+                cudaDeviceEnablePeerAccess(d, 0);
+            cudaGetLastError();
+        }
+    }
+
+    // Column split: contiguous slices, the primary device takes the first one.
+    const int per = (ncol + nworker - 1) / nworker;
+    const int own_cols = std::min(per, ncol);
+
+    auto fail = [&](const char* where, cudaError_t err = cudaGetLastError()) {
+        cudaSetDevice(I.device);
+        I.dens_failed = true;
+        I.dens_error = std::string(where) + ": " + cudaGetErrorString(err);
+        I.releaseDensityHelpers();
+        return false;
+    };
+
+    // Launch the helpers first so they overlap with this device's own slice.
+    for (int i = 0; i < nhelp; ++i) {
+        Impl::DensityHelper& h = I.dens_helpers[i];
+        const int k0 = std::min(ncol, (i + 1) * per);
+        const int kn = std::min(per, ncol - k0);
+        if (kn <= 0) continue;
+        cudaSetDevice(h.device);
+        // Buffers: column slice (grown to the largest slice seen) and the pattern.
+        if (h.cap_cols < kn) {
+            if (h.dC) cudaFree(h.dC);
+            if (h.dCw) cudaFree(h.dCw);
+            if (h.dOcc) cudaFree(h.dOcc);
+            const size_t bytes = sizeof(double) * static_cast<size_t>(n) * kn;
+            if (cudaMalloc(reinterpret_cast<void**>(&h.dC), bytes) != cudaSuccess
+                || cudaMalloc(reinterpret_cast<void**>(&h.dCw), bytes) != cudaSuccess
+                || cudaMalloc(reinterpret_cast<void**>(&h.dOcc), sizeof(double) * kn) != cudaSuccess)
+                return fail("alloc column slice");
+            h.cap_cols = kn;
+        }
+        if (h.cap_nnz < I.sp_nnz) {
+            if (h.dPsp) cudaFree(h.dPsp);
+            if (h.dRow) cudaFree(h.dRow);
+            if (h.dCol) cudaFree(h.dCol);
+            if (cudaMalloc(reinterpret_cast<void**>(&h.dPsp), sizeof(double) * I.sp_nnz) != cudaSuccess
+                || cudaMalloc(reinterpret_cast<void**>(&h.dRow), sizeof(int) * I.sp_nnz) != cudaSuccess
+                || cudaMalloc(reinterpret_cast<void**>(&h.dCol), sizeof(int) * I.sp_nnz) != cudaSuccess)
+                return fail("alloc pattern");
+            h.cap_nnz = I.sp_nnz;
+            h.pattern_gen = -1;
+            cudaSetDevice(I.device);
+            if (h.stage) cudaFree(h.stage);
+            if (cudaMalloc(reinterpret_cast<void**>(&h.stage), sizeof(double) * I.sp_nnz) != cudaSuccess)
+                return fail("alloc staging");
+            cudaSetDevice(h.device);
+        }
+        if (h.pattern_gen != I.pattern_generation) {
+            if (cudaMemcpyPeerAsync(h.dRow, h.device, I.dSpRow.ptr, I.device,
+                                    sizeof(int) * I.sp_nnz, h.stream) != cudaSuccess
+                || cudaMemcpyPeerAsync(h.dCol, h.device, I.dSpCol.ptr, I.device,
+                                       sizeof(int) * I.sp_nnz, h.stream) != cudaSuccess)
+                return fail("copy pattern");
+            h.pattern_gen = I.pattern_generation;
+        }
+        // Column slice of C and the matching occupations.
+        if (cudaMemcpyPeerAsync(h.dC, h.device, I.dC.ptr + static_cast<size_t>(k0) * n, I.device,
+                                sizeof(double) * static_cast<size_t>(n) * kn, h.stream) != cudaSuccess
+            || cudaMemcpyPeerAsync(h.dOcc, h.device, I.dOcc.ptr + k0, I.device,
+                                   sizeof(double) * kn, h.stream) != cudaSuccess)
+            return fail("copy column slice");
+        const dim3 block(16, 16);
+        const dim3 grid((n + block.x - 1) / block.x, (kn + block.y - 1) / block.y);
+        k_scale_cols<<<grid, block, 0, h.stream>>>(h.dCw, h.dC, h.dOcc, n, kn);
+        const int bs = 256;
+        k_density_sp<<<(I.sp_nnz + bs - 1) / bs, bs, 0, h.stream>>>(
+            I.sp_nnz, h.dRow, h.dCol, h.dCw, h.dC, n, kn, h.dPsp);
+        if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess) return fail("helper kernels", e);
+        if (cudaMemcpyPeerAsync(h.stage, I.device, h.dPsp, h.device,
+                                sizeof(double) * I.sp_nnz, h.stream) != cudaSuccess
+            || cudaEventRecord(h.done, h.stream) != cudaSuccess)
+            return fail("copy partial back");
+    }
+
+    // This device's own slice, into dSpP.
+    cudaSetDevice(I.device);
+    {
+        const dim3 block(16, 16);
+        const dim3 grid((n + block.x - 1) / block.x, (own_cols + block.y - 1) / block.y);
+        k_scale_cols<<<grid, block, 0, I.stream>>>(I.dCw.ptr, I.dC.ptr, I.dOcc.ptr, n, own_cols);
+        const int bs = 256;
+        k_density_sp<<<(I.sp_nnz + bs - 1) / bs, bs, 0, I.stream>>>(
+            I.sp_nnz, I.dSpRow.ptr, I.dSpCol.ptr, I.dCw.ptr, I.dC.ptr, n, own_cols, I.dSpP.ptr);
+        if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess) return fail("own slice", e);
+    }
+
+    // Add the partials once each helper has written its staging buffer.
+    const double one = 1.0;
+    for (int i = 0; i < nhelp; ++i) {
+        Impl::DensityHelper& h = I.dens_helpers[i];
+        const int k0 = std::min(ncol, (i + 1) * per);
+        if (std::min(per, ncol - k0) <= 0) continue;
+        if (cudaStreamWaitEvent(I.stream, h.done, 0) != cudaSuccess) return fail("wait event");
+        if (cublasDaxpy(I.cublas, I.sp_nnz, &one, h.stage, 1, I.dSpP.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+            return fail("reduce partials");
+    }
+    ++I.dens_steps;
+    return true;
+}
+
 bool XtbGpuContext::residentDensityResident(int n, int ncol, double* band_out)
 {
     if (!ok() || n <= 0 || n != m_impl->resident_n || !band_out) return false;
@@ -2729,12 +2927,20 @@ bool XtbGpuContext::residentDensityResident(int n, int ncol, double* band_out)
     I.last_ncol = ncol;
     if (ncol > 0) {
         try { I.dCw.ensure(n * ncol); } catch (...) { return false; }   // n x ncol
+    }
+    // Claude Generated (Sep 2026): pattern density split over several GPUs (see
+    // densityPatternDistributed); falls through to the single-device kernels below when it is
+    // not configured or fails.
+    const bool split_done = I.sparse && ncol > 0 && densityPatternDistributed(n, ncol);
+    if (ncol > 0 && !split_done) {
         const dim3 block(16, 16);
         const dim3 grid((n + block.x - 1) / block.x, (ncol + block.y - 1) / block.y);
         k_scale_cols<<<grid, block, 0, stream>>>(I.dCw.ptr, I.dC.ptr, I.dOcc.ptr, n, ncol);
         if (cudaGetLastError() != cudaSuccess) return false;
     }
-    if (I.sparse) {
+    if (split_done) {
+        I.p_dense_valid = false;
+    } else if (I.sparse) {
         // Claude Generated (Sep 2026): pattern-only density (see k_density_sp). A row-major
         // variant (contiguous rows, occ applied in the kernel) was measured 8x slower on polymer
         // (4.69 vs 0.60 s over 12 SCF steps) and dropped.
@@ -2969,6 +3175,40 @@ void XtbGpuContext::setDistributedEigensolver(const std::vector<int>& devices,
     m_impl->dist_failed = false;
     m_impl->dist_solves = 0;
     m_impl->dist_status.clear();
+}
+
+void XtbGpuContext::setDensityDevices(const std::vector<int>& devices)
+{
+    if (!m_impl) return;
+    bindDevice();
+    m_impl->releaseDensityHelpers();
+    m_impl->dens_devices.clear();
+    m_impl->dens_failed = false;
+    m_impl->dens_steps = 0;
+    int count = 0;
+    cudaGetDeviceCount(&count);
+    for (int d : devices) {
+        if (d < 0) {   // "all"
+            m_impl->dens_devices.clear();
+            for (int i = 0; i < count; ++i)
+                if (i != m_impl->device) m_impl->dens_devices.push_back(i);
+            return;
+        }
+        if (d >= 0 && d < count && d != m_impl->device
+            && std::find(m_impl->dens_devices.begin(), m_impl->dens_devices.end(), d)
+                   == m_impl->dens_devices.end())
+            m_impl->dens_devices.push_back(d);
+    }
+}
+
+std::string XtbGpuContext::densityDevicesStatus() const
+{
+    if (!m_impl || m_impl->dens_devices.empty()) return {};
+    if (m_impl->dens_failed)
+        return "failed (" + m_impl->dens_error + "); single-device density from here on";
+    std::string list = std::to_string(m_impl->device);
+    for (int d : m_impl->dens_devices) list += "," + std::to_string(d);
+    return "pattern density on devices [" + list + "], " + std::to_string(m_impl->dens_steps) + " steps";
 }
 
 std::string XtbGpuContext::distributedEigensolverStatus() const
@@ -3234,6 +3474,7 @@ bool XtbGpuContext::buildScreenedPairs(const double* xyz_bohr, bool& use_sparse)
         return false;
     }
     I.sp_nnz = static_cast<int>(nnz);
+    ++I.pattern_generation;
     use_sparse = true;
     return true;
 }

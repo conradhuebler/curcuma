@@ -241,3 +241,10 @@ Energies unchanged at the printed precision (complex -329.52714784, polymer -208
 - Also fixed on the way: the gradient allocated W before releasing the eigensolver workspaces (raised the device peak); workspaces are now released when the SCF ends.
 - Validation: complex (gfn1, gfn2) at `-scf_threshold 1e-9` vs single GPU, energy and gradient <= 1.2e-9 for mp (4 GPUs, 2 GPUs not including device 0) and mg (FP64); polymer_2x energy identical at the printed 8 decimals; 200/200 `ctest -L gpu`.
 - Numbers and options: [GPU_TUNING.md](GPU_TUNING.md#multi-gpu-eigensolve-one-large-molecule-on-several-gpus).
+
+## Step 3b: distributed pattern density (implemented, Sep 17, 2026)
+
+- `-gpu_density_devices all|list|solver`: the screened-pattern density is a sum over the occupied columns, so every device evaluates the full pattern over its own column slice and the partials are added with a daxpy on the calculation's device (exact).
+- polymer_2x GFN2: density 46.9 -> 10.2 s, wall 242 -> **194 s** (single GPU 419 s), energy identical; complex at `-scf_threshold 1e-9` agrees with the single-GPU run to 1.2e-9; `ctest -L gpu` 200/200.
+- Not worth it below ~3000 basis functions (polymer, nao 2975: 50 -> 55 ms per step).
+- Trap found here: `cudaDeviceEnablePeerAccess` leaves `cudaErrorPeerAccessAlreadyEnabled` pending, and the next `cudaGetLastError()` reported it as a kernel-launch failure - the peer calls now consume it.

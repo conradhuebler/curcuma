@@ -235,6 +235,18 @@ public:
     /// "" when not configured, else backend/device/solve summary or the reason it is not used.
     std::string distributedEigensolverStatus() const;
 
+    /**
+     * @brief Spread the screened-pattern density of the resident SCF over several GPUs.
+     * @param devices helper devices (this context's own device is skipped); empty disables it
+     * P(r,c) = sum_k Cw(r,k) C(c,k) is a sum over the occupied columns, so every device evaluates
+     * the whole pattern over its own slice of columns and the partials are added here - exact, not
+     * an approximation. Per SCF step only the column slices of C travel. Claude Generated (Sep 2026).
+     */
+    void setDensityDevices(const std::vector<int>& devices);
+
+    /// "" when not configured, else the devices used and the number of split steps.
+    std::string densityDevicesStatus() const;
+
     /// Per-geometry: upload xyz_bohr (3·nat) and run the CN kernel (cn_exp/cn_gfn
     /// per is_gfn2 from beginBasis) + the self-energy kernel. Results resident;
     /// download with downloadCn / downloadSelfEnergy. Requires a prior beginBasis.
@@ -474,6 +486,9 @@ private:
     // use_sparse when the screened storage should be used. Claude Generated (Sep 2026).
     bool buildScreenedPairs(const double* xyz_bohr, bool& use_sparse);
     size_t estimateStorageBytes(int nat, int nsh, int nao, bool is_gfn2, double nnz) const;
+
+    /// Pattern density over the helper devices of setDensityDevices(); false = caller falls back.
+    bool densityPatternDistributed(int n, int ncol);
     // Storage-independent building blocks (dense or screened). Claude Generated (Sep 2026).
     bool buildFockIntoC(int n, bool multipole);
     bool populationsAndBand(int n, double* band_out);

@@ -416,6 +416,14 @@ public:
         const bool ok = m_ctx->residentLoopCharges(q_sh.data(), q_at.data(), dp_at.data(),
                                                    qp_at.data(), eps.data());
         reportDistributedEigensolver();
+        const std::string dens = m_ctx ? m_ctx->densityDevicesStatus() : std::string();
+        if (!dens.empty() && dens != m_dens_reported) {
+            m_dens_reported = dens;
+            if (dens.rfind("failed", 0) == 0)
+                CurcumaLogger::warn("GPU distributed density " + dens);
+            else if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::info("GPU distributed density: " + dens);
+        }
         return ok;
     }
 
@@ -483,6 +491,7 @@ private:
     bool           m_fallback_warned = false;
     bool           m_storage_reported = false;
     std::string    m_dist_reported;
+    std::string    m_dens_reported;
 };
 
 } // namespace
@@ -566,6 +575,39 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                 ctx->setDistributedEigensolver(devs, backend,
                                                static_cast<int>(num("gpu_eigensolver_block", 128)),
                                                static_cast<int>(num("gpu_eigensolver_min_nao", 4000)), fp32);
+        }
+
+        // Claude Generated (Sep 2026, multi-GPU): `-gpu_density_devices all|0,1,..|solver` splits
+        // the screened-pattern density of the resident SCF over several GPUs (exact, see
+        // XtbGpuContext::densityPatternDistributed). "solver" reuses the eigensolver's devices.
+        if (config.contains("gpu_density_devices")) {
+            const auto& v = config["gpu_density_devices"];
+            std::vector<int> devs;
+            const std::string spec = v.is_string() ? v.get<std::string>() : std::string();
+            if (v.is_array()) {
+                for (const auto& d : v) if (d.is_number()) devs.push_back(static_cast<int>(d.get<double>()));
+            } else if (spec == "all" || spec == "auto") {
+                devs.push_back(-1);
+            } else if (spec == "solver" && config.contains("gpu_eigensolver_devices")
+                       && config["gpu_eigensolver_devices"].is_string()) {
+                const std::string es = config["gpu_eigensolver_devices"].get<std::string>();
+                if (es == "all" || es == "auto") {
+                    devs.push_back(-1);
+                } else {
+                    std::stringstream ss(es);
+                    for (std::string tok; std::getline(ss, tok, ',');) {
+                        try { devs.push_back(std::stoi(tok)); } catch (...) {}
+                    }
+                }
+            } else if (!spec.empty() && spec != "none" && spec != "off") {
+                std::stringstream ss(spec);
+                for (std::string tok; std::getline(ss, tok, ',');) {
+                    try { devs.push_back(std::stoi(tok)); } catch (...) {
+                        CurcumaLogger::warn("gpu_density_devices: cannot parse '" + tok + "'");
+                    }
+                }
+            }
+            if (!devs.empty()) ctx->setDensityDevices(devs);
         }
 
         // Stage 1: install the GPU eigensolver. solveEigen() delegates the per-iteration

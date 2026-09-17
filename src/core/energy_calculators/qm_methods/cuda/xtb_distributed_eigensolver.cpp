@@ -83,7 +83,8 @@ void enablePeers(const std::vector<int>& devs)
         for (int b : devs) {
             int can = 0;
             if (a != b && cudaDeviceCanAccessPeer(&can, a, b) == cudaSuccess && can)
-                cudaDeviceEnablePeerAccess(b, 0);   // "already enabled" is harmless
+                cudaDeviceEnablePeerAccess(b, 0);
+            cudaGetLastError();   // "already enabled" is expected; do not leave it pending
         }
     }
 }
