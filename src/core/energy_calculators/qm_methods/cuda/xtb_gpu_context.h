@@ -182,6 +182,24 @@ public:
     /// per molecule, before the per-geometry compute. Returns false on any error.
     bool beginBasis(const XtbGpuBasisData& basis);
 
+    /**
+     * @brief Device memory the resident SCF + gradient path will need for this basis.
+     *
+     * Sums every buffer the resident path allocates (S/H0/L, C/P/Cw, the GFN2 dipole and
+     * quadrupole integrals, gamma, the cuSOLVER syevd/potrf workspaces for FP64 and the FP32
+     * mixed-precision copies, the GFN2 multipole interaction matrices, the D4-EEQ system and
+     * the gradient's energy-weighted density). The workspace sizes are queried from cuSOLVER,
+     * not guessed. Used by beginBasis() to refuse a basis that cannot fit instead of failing
+     * half-way through the allocation. Claude Generated (Sep 2026, multi-GPU/large systems).
+     */
+    size_t estimateResidentBytes(int nat, int nsh, int nao, bool is_gfn2) const;
+
+    /// Enable/disable the pre-allocation memory check in beginBasis (default on).
+    void setMemoryCheck(bool on);
+
+    /// Reason for the last refused/failed beginBasis ("" when it succeeded).
+    std::string lastError() const;
+
     /// Per-geometry: upload xyz_bohr (3·nat) and run the CN kernel (cn_exp/cn_gfn
     /// per is_gfn2 from beginBasis) + the self-energy kernel. Results resident;
     /// download with downloadCn / downloadSelfEnergy. Requires a prior beginBasis.

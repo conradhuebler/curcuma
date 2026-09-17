@@ -696,6 +696,7 @@ json CLI2Json(int argc, char** argv)
         "verbosity", "threads", "method", "gpu",  // energy_method and gpu apply to all capabilities
         "gpu_device",   // Claude Generated (Sep 2026, multi-GPU): device index for -gpu (see docs/MULTI_GPU.md)
         "gpu_devices", "gpu_workers_per_device",  // batch workers spread over these devices
+        "gpu_memory_check",  // native gfn1/gfn2 GPU: refuse a basis that does not fit (default true)
         "charge", "spin",  // molecular charge/spin (top-level, not module-scoped)
         "export_run", // Export current run configuration
         "import_config", // Import custom configuration

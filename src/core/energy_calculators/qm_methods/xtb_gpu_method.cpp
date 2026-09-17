@@ -167,14 +167,34 @@ public:
         bd.rep_zeff    = m_bf.rep_zeff.empty() ? nullptr : m_bf.rep_zeff.data();
         m_n = m_bf.nao;
         m_nat = m_bf.nat;
-        return m_ctx->beginBasis(bd);
+        const bool ok = m_ctx->beginBasis(bd);
+        if (!ok) warnDeviceFallback("basis setup");
+        else if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info(fmt::format("GPU device {}: estimated resident memory {:.2f} GB (nao={}, nat={})",
+                m_ctx->deviceId(), m_ctx->estimateResidentBytes(bd.nat, bd.nsh, bd.nao, bd.is_gfn2 != 0) / 1073741824.0,
+                bd.nao, bd.nat));
+        return ok;
     }
 
     bool beginComputed(const std::vector<double>& xyz_bohr) override
     {
         if (!m_ctx || m_n <= 0) return false;
-        return m_ctx->computeIntegrals(xyz_bohr.data())
+        const bool ok = m_ctx->computeIntegrals(xyz_bohr.data())
             && m_ctx->residentBeginComputed();
+        if (!ok) warnDeviceFallback("integral build");
+        return ok;
+    }
+
+    // Claude Generated (Sep 2026): a GPU run that falls back to the CPU must say so at the
+    // default verbosity - for a large system that fallback turns a minutes-long GPU job into
+    // hours on the host. Warned once per backend object.
+    void warnDeviceFallback(const char* stage)
+    {
+        if (m_fallback_warned) return;
+        m_fallback_warned = true;
+        const std::string why = m_ctx->lastError();
+        CurcumaLogger::warn(fmt::format("GPU {} on device {} failed{}; this calculation runs on the CPU",
+                                        stage, m_ctx->deviceId(), why.empty() ? std::string() : " - " + why));
     }
 
     bool downloadGamma(Eigen::MatrixXd& gamma_out) override
@@ -410,6 +430,7 @@ private:
     int            m_nat = 0;
     curcuma::xtb::GpuBasisFlat m_bf;
     curcuma::xtb::GpuH0Flat    m_hf;
+    bool           m_fallback_warned = false;
 };
 
 } // namespace
@@ -433,6 +454,16 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
     // (GPU + large_system_mode is not yet wired and runs on the CPU fragment driver).
     if (curcuma::xtb::XTB* xtb = cpuSolver()) {
         XtbGpuContext* ctx = context();
+
+        // Claude Generated (Sep 2026): `-gpu_memory_check false` skips the pre-allocation
+        // estimate (e.g. when the estimate is too conservative for a card that just fits).
+        if (config.contains("gpu_memory_check")) {
+            const auto& v = config["gpu_memory_check"];
+            const bool on = v.is_boolean() ? v.get<bool>()
+                          : v.is_number()  ? v.get<double>() != 0.0
+                          : !(v.is_string() && (v.get<std::string>() == "false" || v.get<std::string>() == "0"));
+            ctx->setMemoryCheck(on);
+        }
 
         // Stage 1: install the GPU eigensolver. solveEigen() delegates the per-iteration
         // generalized eigenproblem (F, S=L·Lᵀ)→(C, eps) to the device; everything else

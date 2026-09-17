@@ -65,6 +65,16 @@ Tool: `test_cases/cuda/bench_syevd_mg.cpp` (standalone, build line in its header
 - The xTB `__constant__` tables are now uploaded per device (was once per process -> uninitialised tables on any second device).
 - ROCm and Vulkan changes are compile-unverified (no SDK on the dev box).
 
+## H200 report (operator, Sep 17, 2026)
+- GFN2 on the ~7k-atom molecule: **110 s on one H200** (so it did run on the GPU; the missing sm_90 architecture was NOT the problem there).
+- 1 -> 2 GPUs gave no speedup: expected, nothing used a second device (no device selection existed).
+
+## Large-system GPU memory (case B, step 1a implemented)
+- `XtbGpuContext::estimateResidentBytes()` sums every resident buffer with cuSOLVER-queried workspace sizes; `beginBasis()` refuses a basis that does not fit and frees partial allocations (previously: silent partial allocation, leak, CPU fallback visible only at verbosity 2).
+- The refusal is a warning at default verbosity, e.g. polymer_2x GFN2 on an A4500: `needs about 49.9 GB ... only 19.4 of 19.6 GB are free on device 2; this calculation runs on the CPU`. `-gpu_memory_check false` disables the check.
+- Estimate vs nvidia-smi peak: complex 0.31 GB vs 0.49 GB, polymer 2.36 GB vs 2.51 GB (peak includes ~0.2-0.4 GB CUDA context).
+- Which matrices are really needed per SCF iteration: dense only C (holds F), L, the syevd workspace and a transient P; H0, S and the 9 multipole integrals can share one screened AO-pair list (16 % of pairs within 40 Bohr on polymer_2x). The host currently also builds dense copies of the multipole integrals (17 GB) and S/H0/L/gamma on the CUDA path. Next steps.
+
 ## Case A: batch of structures over several GPUs (implemented)
 
 - **Pool**: `src/core/gpu_device_pool.{h,cpp}`. `main()` configures it from `-gpu`, `-gpu_devices` ("0,2", default all visible), `-gpu_workers_per_device` (default 1). Batch workers take a `GpuDeviceLease` (blocks until a slot is free, least-loaded device); `EnergyCalculator::createMethod` passes the leased device as `gpu_device`.

@@ -18,6 +18,7 @@
 #include <cusolverDn.h>
 
 #include <cmath>
+#include <cstdio>
 #include <mutex>
 #include <set>
 
@@ -226,6 +227,28 @@ struct XtbGpuContext::Impl {
     int    loop_nsh = 0, loop_nat = 0, loop_nao = 0, loop_nocc_pairs = 0;
     double loop_Tele = 0.0, loop_nelec = 0.0;
     CudaBuffer<double> dDq;         // max|q_sh_out − q_sh_in| (1 double)
+
+    // Claude Generated (Sep 2026): pre-allocation memory check (beginBasis).
+    bool        memory_check = true;
+    std::string last_error;
+
+    /// Free every nao²- and nat²-sized buffer. Called when a basis cannot be set up, so a
+    /// refused or half-allocated basis does not keep gigabytes of device memory pinned for the
+    /// rest of the process (the CPU fallback then runs with a clean device).
+    void releaseLarge()
+    {
+        for (CudaBuffer<double>* b : { &dH0, &dS, &dL, &dC, &dP, &dCw, &dWork, &dDpInt, &dQpInt,
+                                       &dSdR, &dPotrfWork, &dW, &dGamma, &dMpAmatSD, &dMpAmatDD,
+                                       &dMpAmatSQ, &dSolvB, &dEeqM, &dEeqWork })
+            b->free();
+        for (CudaBuffer<float>* b : { &dCf, &dLf, &dWorkf })
+            b->free();
+        lwork = 0;
+        lwork_f32 = 0;
+        potrf_lwork = 0;
+        resident_n = 0;
+        basis_nao = 0;
+    }
 };
 
 // ---- Stage 3 element parameter tables in __constant__ memory --------------
@@ -2026,6 +2049,44 @@ bool XtbGpuContext::residentMultipoleMoments(double* dp_at3, double* qp_at6, int
  *  Device-side integral build (Stage 3).
  * ====================================================================== */
 
+size_t XtbGpuContext::estimateResidentBytes(int nat, int nsh, int nao, bool is_gfn2) const
+{
+    if (!ok() || nao <= 0) return 0;
+    const double nn = static_cast<double>(nao) * nao;
+    // cuSOLVER workspace sizes for this n (queries only; the array arguments are not read).
+    int lw_syevd = 0, lw_ssyevd = 0, lw_potrf = 0;
+    cusolverDnDsyevd_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
+                                nao, nullptr, nao, nullptr, &lw_syevd);
+    cusolverDnSsyevd_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
+                                nao, nullptr, nao, nullptr, &lw_ssyevd);
+    cusolverDnDpotrf_bufferSize(m_impl->cusolver, CUBLAS_FILL_MODE_LOWER, nao, nullptr, nao, &lw_potrf);
+
+    double doubles = 0.0;
+    doubles += 3.0 * nn;                                  // S, H0, L
+    doubles += 3.0 * nn;                                  // C, P, Cw (resident SCF)
+    doubles += nn;                                        // W (gradient)
+    doubles += static_cast<double>(lw_syevd) + lw_potrf;  // FP64 workspaces
+    doubles += nn + 0.5 * lw_ssyevd;                      // FP32 F + L copies (2 x nn/2) + ssyevd work
+    doubles += static_cast<double>(nsh) * nsh;            // Coulomb gamma
+    doubles += 2.0 * (static_cast<double>(nat) + 1.0) * (nat + 1.0);  // D4-EEQ LU + getrf work
+    if (is_gfn2) {
+        doubles += 9.0 * nn;                              // dipole (3) + quadrupole (6) integrals
+        doubles += 18.0 * static_cast<double>(nat) * nat; // multipole interaction matrices
+    }
+    doubles += 64.0 * (nao + nsh + nat) + 32.0 * 1024 * 1024;  // vectors + slack
+    return static_cast<size_t>(doubles * sizeof(double));
+}
+
+void XtbGpuContext::setMemoryCheck(bool on)
+{
+    if (m_impl) m_impl->memory_check = on;
+}
+
+std::string XtbGpuContext::lastError() const
+{
+    return m_impl ? m_impl->last_error : std::string();
+}
+
 bool XtbGpuContext::beginBasis(const XtbGpuBasisData& b)
 {
     if (!ok() || b.nat <= 0 || b.nsh <= 0 || b.nao <= 0 || b.nprim_total <= 0
@@ -2033,6 +2094,29 @@ bool XtbGpuContext::beginBasis(const XtbGpuBasisData& b)
         || !b.sh_nprim || !b.sh_prim_off || !b.prim_alpha || !b.prim_coeff
         || !b.sh_zeta || !b.selfenergy || !b.kcn || !b.shpoly)
         return false;
+    m_impl->last_error.clear();
+
+    // Claude Generated (Sep 2026): refuse a basis that cannot fit BEFORE allocating anything.
+    // Without this, a too-large system allocated S/H0/L and the dipole integrals, threw on the
+    // quadrupoles, left those gigabytes allocated and silently ran the whole SCF on the CPU.
+    // Only checked when the basis size changes (a new geometry of the same molecule reuses
+    // the buffers it already holds, which the free-memory figure no longer contains).
+    if (m_impl->memory_check && b.nao != m_impl->basis_nao) {
+        m_impl->releaseLarge();
+        const size_t need = estimateResidentBytes(b.nat, b.nsh, b.nao, b.is_gfn2 != 0);
+        size_t free_b = 0, total_b = 0;
+        if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess && need > free_b) {
+            char msg[320];
+            std::snprintf(msg, sizeof(msg),
+                          "needs about %.1f GB of device memory for nao=%d, nat=%d, but only %.1f of "
+                          "%.1f GB are free on device %d",
+                          need / 1073741824.0, b.nao, b.nat, free_b / 1073741824.0,
+                          total_b / 1073741824.0, m_impl->device);
+            m_impl->last_error = msg;
+            return false;
+        }
+    }
+
     ensureStage3Constants();
     try {
         // Molecule-constant uploads (synchronous memcpy inside CudaBuffer::upload).
@@ -2088,7 +2172,9 @@ bool XtbGpuContext::beginBasis(const XtbGpuBasisData& b)
         m_impl->potrf_lwork = lwork;
         m_impl->dPotrfWork.ensure(lwork > 0 ? lwork : 1);
         if (m_impl->dInfo.n < 1) m_impl->dInfo.alloc(1);
-    } catch (...) {
+    } catch (const std::exception& e) {
+        m_impl->last_error = std::string("device allocation failed: ") + e.what();
+        m_impl->releaseLarge();
         return false;
     }
     m_impl->basis_nat     = b.nat;
@@ -2209,7 +2295,9 @@ bool XtbGpuContext::residentBeginComputed()
         m_impl->lwork = lwork;
         m_impl->dWork.ensure(lwork > 0 ? lwork : 1);
         if (m_impl->dInfo.n < 1) m_impl->dInfo.alloc(1);
-    } catch (...) {
+    } catch (const std::exception& e) {
+        m_impl->last_error = std::string("device allocation failed: ") + e.what();
+        m_impl->releaseLarge();
         return false;
     }
     m_impl->resident_n = n;
