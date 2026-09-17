@@ -55,7 +55,41 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 
 ## Live agents
 
-**None running (2026-09-15 evening).** Five agents closed today (qp-bondstate, break-tail,
+**None running (2026-09-17).** fable-review-2 is DONE — `FABLE_REVIEW_2.md`, 360 lines, 9/9 sections;
+headline results (orchestrator spot-checked the two corrections to the briefing, both hold):
+(1) H-budget mechanism and "no falsifier moves" reproduced to the digit -> make `rev_budget_fix_h`
+the default. (2) **The residual after the H fix is the same defect on CARBON**, not thermal: ch4_H
+f10 starts as CH4 with an H in a face, Val(C) 4.53 -> 4.99, all five C-H shares 0.77 -> 1.00 in the
+first step (orchestrator: c 0.773 -> 0.945 -> 0.999, Val(C) 4.98); 438 of 487 grid events >= 50 kJ
+sit in the two f10 cells, the other 49 are thermal. (3) **The carbon budget is NOT the class-B
+root** (corrects the 2026-09-15 briefing): on `ref/P/rkt03` Val(C) = 4.00 throughout (orchestrator:
+4.000-4.012 on 4 frames), TS error -13.5 kcal/mol, capping C changes 0.00; the "78 kcal/mol" was a
+pre-share estimate. The budget's real damage is on class-C approach scans: radical adducts 54-107
+kcal/mol too deep (CH4+H, NH3+H, H2O+H, N2H4+H, n = 4). (4) **Proposed rule**: valence-conserving
+share `f_i = min(1, Val_i/S_i)`, `c = f_i f_j`, plus excess budget by CHARGE not element (H, F
+never; B/Al +1; period >= 3 groups 15-17 as today; C/N/O by positive topological group charge) —
+offline: adducts +2..+32 of the reference, rkt06 2.71 -> 2.8, NH4+/H3O+ +0.17/+0.05 (0 if built
+from w), ClO4-/BF4- 0.00; not covered: neutral dative N, H5O2+, N2H7+; MD effect inferred, not
+run. (5) **erf wells (operator's question)**: only erf-Morse `E = -D(2y - y^2)`, `y =
+erfc((r-R)/sigma)/erfc((r0-R)/sigma)` satisfies E'(r0) = 0; on all 32 class-A curves median rms
+delivered 19.2 -> MG 1.32 / erf-Morse 1.36 (never > 0.12 apart), curvature-pinned 2-parameter
+variant 2.1 for both; no unification with the share (fitted erfc centre lies inside r0); fit depth
+on charge-frozen rests. Verdict: build 3a(iii) as the curvature-pinned step first; MG or erf-Morse
+is the operator's taste. (6) multi-gpu: no OpenMP reduction in `ff_methods`, thread-count
+independent; `coulomb_implicit` serves the rev corners but breaks the `dump_params` md5 yardstick;
+merge order `origin/reactff2-llm` first, then decide the H fix and re-baseline, then multi-gpu with
+`coulomb_implicit` pinned false. Also: the grid has 20 live cells, not 22.
+
+Launch record:
+
+| task | tier | what it does | status file | tree |
+|---|---|---|---|---|
+| fable-review-2 (DONE) | **Fable** (operator-requested 2026-09-17) | Independent review seeded ONLY with the 2026-09-15 briefing, free to read everything, read-only on the repo. (A) check the diagnosis chain link by link and recommend the rule for which elements may grow a share budget (H fix, carbon 4.95 in CH4 + H / class B, residual 222 kJ per step). (B) **the operator's question: can the bond wells be realised through erf functions** — candidates, equilibrium constraints, parameters, relation to the erf bond order and the share, offline test against class-A curves; verdict for stage 3a(iii). (C) what `origin/feature/multi-gpu` (16 commits, 3 in the GFN-FF core: on-the-fly CPU Coulomb pairs, parallel topology loops, setup speed-up; dry-run merge conflicts in `gfnff_method.cpp`, `gfnff_gpu_method_impl.h`, `main.cpp`, `AIChangelog.md`, `.gitignore`) means for rev-gfnff and what to re-measure after a merge | `FABLE_REVIEW_2.md` | frozen binary `scratchpad/fable2/curcuma_frozen` (md5 f7a37866 = HEAD 4d5287bc) |
+
+Also noted 2026-09-17: `origin/reactff2-llm` has 3 commits this checkout lacks (`ca71d8c0` addPair,
+`3f60ea31` CIF, `13eb736d` ANCOpt hold); local is 37 ahead and unpushed. No merge done yet.
+
+**Before that (2026-09-15 evening).** Five agents closed (qp-bondstate, break-tail,
 scan-cadence, verbosity-traj, h-budget) — Finished table below. Worktree `curcuma-head/` is on
 branch `fix/h-valence-budget` with a clean tree (its patch is in the main tree as `35d7bb52`);
 its `build/curcuma` (md5 a4b9de6e) is the h-budget agent's binary and now differs from the
