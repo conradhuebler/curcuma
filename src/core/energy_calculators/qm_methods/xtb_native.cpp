@@ -1499,11 +1499,18 @@ double XTB::Calculation(bool gradient)
     if (verb >= 2) {
         CurcumaLogger::info("Timing breakdown:");
         CurcumaLogger::info_fmt("  setup        : {:8.2f} ms", ms(t0, t_setup));
+        // Claude Generated (Sep 2026): the device uploads/EEQ guess/D4 warm-up between the
+        // integral setup and the first SCF iteration were counted nowhere but TOTAL.
+        CurcumaLogger::info_fmt("  pre-SCF      : {:8.2f} ms", ms(t_setup, t_scf_start));
         CurcumaLogger::info_fmt("  SCF ({:3d} it) : {:8.2f} ms", m_scf_iterations, ms(t_scf_start, t_scf_end));
         CurcumaLogger::info_fmt("  post-SCF E   : {:8.2f} ms", ms(t_scf_end, t_energies));
         if (gradient)
             CurcumaLogger::info_fmt("  gradient     : {:8.2f} ms", ms(t_grad0, t_end));
         CurcumaLogger::info_fmt("  TOTAL        : {:8.2f} ms", ms(t0, t_end));
+    }
+    if (m_gpu_scf && verb >= 1) {
+        const std::string prof = m_gpu_scf->profileReport();
+        if (!prof.empty()) CurcumaLogger::result(prof);
     }
 
     if (verb >= 3) {

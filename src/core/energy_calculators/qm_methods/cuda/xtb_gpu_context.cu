@@ -17,7 +17,9 @@
 #include <cuda_runtime.h>
 #include <cusolverDn.h>
 
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <mutex>
 #include <set>
@@ -231,6 +233,36 @@ struct XtbGpuContext::Impl {
     // Claude Generated (Sep 2026): pre-allocation memory check (beginBasis).
     bool        memory_check = true;
     std::string last_error;
+
+    // Claude Generated (Sep 2026): phase profiler for the device path, enabled by the
+    // environment variable CURCUMA_GPU_PROFILE. Each mark synchronises the stream (kernels are
+    // asynchronous, so host clocks are meaningless without it) and accumulates the wall time
+    // since the previous mark under a phase name. Disabled = no synchronisation, no cost.
+    bool prof = std::getenv("CURCUMA_GPU_PROFILE") != nullptr;
+    std::vector<std::string> prof_names;
+    std::vector<double>      prof_ms;
+    std::vector<int>         prof_calls;
+    std::chrono::steady_clock::time_point prof_t;
+    void profStart()
+    {
+        if (!prof) return;
+        cudaStreamSynchronize(stream);
+        prof_t = std::chrono::steady_clock::now();
+    }
+    void profMark(const char* name)
+    {
+        if (!prof) return;
+        cudaStreamSynchronize(stream);
+        const auto t = std::chrono::steady_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(t - prof_t).count();
+        prof_t = t;
+        for (size_t i = 0; i < prof_names.size(); ++i) {
+            if (prof_names[i] == name) { prof_ms[i] += ms; ++prof_calls[i]; return; }
+        }
+        prof_names.emplace_back(name);
+        prof_ms.push_back(ms);
+        prof_calls.push_back(1);
+    }
 
     /// Free every nao²- and nat²-sized buffer. Called when a basis cannot be set up, so a
     /// refused or half-allocated basis does not keep gigabytes of device memory pinned for the
@@ -1750,6 +1782,7 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
                         CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, n, &onef,
                         m_impl->dLf.ptr, n, m_impl->dCf.ptr, n) != CUBLAS_STATUS_SUCCESS)
             return false;
+        m_impl->profMark("eig FP32: copy + reduce");
         int lwork = 0;
         if (partial) {
             const float vl = 0.0f, vu = 0.0f; int h_meig = 0;
@@ -1782,6 +1815,7 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
                                  m_impl->lwork_f32, m_impl->dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
                 return false;
         }
+        m_impl->profMark("eig FP32: syevd");
         // Back-transform only the neig computed eigenvectors (columns 0..neig-1).
         if (cublasStrsm(m_impl->cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
                         CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, neig, &onef,
@@ -1792,6 +1826,7 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
         k_f2d<<<static_cast<int>((conv + b - 1) / b), b, 0, stream>>>(m_impl->dCf.ptr, m_impl->dC.ptr, conv);
         k_f2d<<<(neig + b - 1) / b, b, 0, stream>>>(m_impl->dEpsf.ptr, m_impl->dEps.ptr, neig);
         if (cudaGetLastError() != cudaSuccess) return false;
+        m_impl->profMark("eig FP32: back-transform + to FP64");
 
         int info = 1;
         if (cudaMemcpyAsync(&info, m_impl->dInfo.ptr, sizeof(int),
@@ -1812,6 +1847,7 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
                     CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, n, &one,
                     m_impl->dL.ptr, n, m_impl->dC.ptr, n) != CUBLAS_STATUS_SUCCESS)
         return false;
+    m_impl->profMark("eig FP64: reduce");
     if (partial) {
         const double vl = 0.0, vu = 0.0; int h_meig = 0; int lwork_dx = 0;
         if (cusolverDnDsyevdx_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR,
@@ -1835,11 +1871,13 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
                              m_impl->lwork, m_impl->dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
             return false;
     }
+    m_impl->profMark("eig FP64: syevd");
     // Back-transform only the neig computed eigenvectors (columns 0..neig-1).
     if (cublasDtrsm(m_impl->cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
                     CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, neig, &one,
                     m_impl->dL.ptr, n, m_impl->dC.ptr, n) != CUBLAS_STATUS_SUCCESS)
         return false;
+    m_impl->profMark("eig FP64: back-transform");
 
     int info = 1;
     if (cudaMemcpyAsync(&info, m_impl->dInfo.ptr, sizeof(int),
@@ -2077,6 +2115,24 @@ size_t XtbGpuContext::estimateResidentBytes(int nat, int nsh, int nao, bool is_g
     return static_cast<size_t>(doubles * sizeof(double));
 }
 
+std::string XtbGpuContext::profileReport() const
+{
+    if (!m_impl || !m_impl->prof || m_impl->prof_names.empty()) return {};
+    std::string out = "GPU phase profile (CURCUMA_GPU_PROFILE, stream-synchronised):\n";
+    double total = 0.0;
+    for (double v : m_impl->prof_ms) total += v;
+    char line[160];
+    for (size_t i = 0; i < m_impl->prof_names.size(); ++i) {
+        std::snprintf(line, sizeof(line), "  %-44s %11.1f ms %6.1f %%  %5d calls\n",
+                      m_impl->prof_names[i].c_str(), m_impl->prof_ms[i],
+                      total > 0 ? 100.0 * m_impl->prof_ms[i] / total : 0.0, m_impl->prof_calls[i]);
+        out += line;
+    }
+    std::snprintf(line, sizeof(line), "  %-44s %11.1f ms\n", "sum", total);
+    out += line;
+    return out;
+}
+
 void XtbGpuContext::setMemoryCheck(bool on)
 {
     if (m_impl) m_impl->memory_check = on;
@@ -2216,7 +2272,9 @@ bool XtbGpuContext::computeIntegrals(const double* xyz_bohr)
     cudaStream_t stream = m_impl->stream;
 
     // CN + self-energies (uploads xyz, runs k_cn + k_self_energy, syncs).
+    m_impl->profStart();
     if (!computeCnSelfEnergy(xyz_bohr)) return false;
+    m_impl->profMark("integrals: CN + self-energies");
 
     // Overlap S + bare Hamiltonian H0 (one thread per shell-pair).
     const dim3 block(16, 16);
@@ -2229,6 +2287,7 @@ bool XtbGpuContext::computeIntegrals(const double* xyz_bohr)
         m_impl->dSE.ptr, m_impl->dZ.ptr, m_impl->dValence.ptr, m_impl->dXyz.ptr,
         m_impl->dS.ptr, m_impl->dH0.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
+    m_impl->profMark("integrals: overlap + H0");
 
     // Coulomb γ matrix (independent of S; one thread per shell-pair).
     if (!m_impl->dHardness.empty()) {
@@ -2252,6 +2311,7 @@ bool XtbGpuContext::computeIntegrals(const double* xyz_bohr)
             m_impl->dDpInt.ptr, m_impl->dQpInt.ptr);
         if (cudaGetLastError() != cudaSuccess) return false;
     }
+    m_impl->profMark("integrals: gamma + multipole");
 
     // L = chol(S): copy S → L, factor the lower triangle in place (matches the
     // CPU Eigen matrixL() convention; the trsm path reads fill=LOWER only).
@@ -2268,6 +2328,7 @@ bool XtbGpuContext::computeIntegrals(const double* xyz_bohr)
                         cudaMemcpyDeviceToHost, stream) != cudaSuccess)
         return false;
     if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    m_impl->profMark("integrals: Cholesky of S");
     return info == 0;
 }
 
@@ -2883,6 +2944,7 @@ bool XtbGpuContext::beginResidentLoop(int nsh, int nat, int nao, double Tele, do
         m_impl->dQat.ensure(nat); m_impl->dQsh.ensure(nsh);
         m_impl->dN0sh.ensure(nsh); m_impl->dN0at.ensure(nat);
         m_impl->dDq.ensure(1);
+        m_impl->dOccMu.ensure(1); m_impl->dOccNcol.ensure(1);   // occupied-column count (density)
     } catch (...) {
         return false;
     }
@@ -2908,6 +2970,7 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
     cudaStream_t stream = m_impl->stream;
     const int nsh = m_impl->loop_nsh, nat = m_impl->loop_nat, nao = m_impl->loop_nao;
     const int b = 128;
+    m_impl->profStart();
 
     // 1. D4 reference weights from the current (previous-output) resident q_at.
     k_d4_build_refw<<<(nat + b - 1) / b, b, 0, stream>>>(
@@ -2915,6 +2978,7 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
         m_impl->dD4Zeff.ptr, m_impl->dD4Nref.ptr, m_impl->dD4Refcn.ptr,
         m_impl->dD4Refcovcn.ptr, m_impl->dD4Refq.ptr, m_impl->dD4W.ptr, m_impl->dD4dWq.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
+    m_impl->profMark("scf: D4 reference weights");
 
     // 2. Potential build (overwrites dQat with the input-derived q_at) + Fock +
     //    eigensolve; eps stays resident (no download).
@@ -2928,11 +2992,21 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
     const int blk = 256;
     k_occupations<<<1, blk, blk * sizeof(double), stream>>>(
         m_impl->dEps.ptr, m_impl->dOcc.ptr, nao, kT, m_impl->loop_nelec,
-        m_impl->loop_nocc_pairs, use_fermi, nullptr, nullptr);
+        m_impl->loop_nocc_pairs, use_fermi, m_impl->dOccMu.ptr, m_impl->dOccNcol.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
+    // Claude Generated (Sep 2026): build P from the occupied columns only (last column with
+    // occ > 1e-12, reported by the kernel), exactly like the CPU density (xtb_scf.cpp,
+    // leftCols(ncol)). The dropped columns weigh < 1e-12; the GEMM shrinks from nao^3 to
+    // nao^2 * ncol (polymer: 26 % of the SCF time was this product over all nao columns).
+    int ncol = nao;
+    m_impl->dOccNcol.download(&ncol, 1, stream);
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    if (ncol <= 0 || ncol > nao) ncol = nao;
+    m_impl->profMark("scf: occupations");
 
-    // 4. Density + Mulliken-AO (full columns; occ is 0 past the Fermi window).
-    if (!residentDensityResident(nao, nao, e_band)) return false;
+    // 4. Density + Mulliken-AO over the occupied columns.
+    if (!residentDensityResident(nao, ncol, e_band)) return false;
+    m_impl->profMark("scf: density P + populations");
 
     // 5. Output charges/moments from the resident density.
     // q_sh = n0_sh − Σ_{μ∈s} pop_ao; q_at = n0_at − Σ_{μ∈A} pop_ao.
@@ -2952,9 +3026,11 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
         m_impl->dDpAt.ptr, m_impl->dQpAt.ptr, m_impl->dP.ptr,
         m_impl->dDpInt.ptr, m_impl->dQpInt.ptr, m_impl->dAo2at.ptr, nao);
     if (cudaGetLastError() != cudaSuccess) return false;
+    m_impl->profMark("scf: charges + multipole moments");
 
     // 6. SCC energy components (resident charges/moments).
     if (!sccEnergy(nat, nsh, e_coulomb, e_third, e_multipole)) return false;
+    m_impl->profMark("scf: SCC energy");
 
     // 7. Convergence dq = max|q_sh_out − q_sh_in| (q_sh_in = current dPotQsh).
     k_maxabsdiff<<<1, blk, blk * sizeof(double), stream>>>(m_impl->dQsh.ptr, m_impl->dPotQsh.ptr,
@@ -2980,6 +3056,7 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
         cudaMemcpyAsync(m_impl->dInDpAt.ptr, m_impl->dBroyVnext.ptr + off_dp, sizeof(double) * 3 * nat, cudaMemcpyDeviceToDevice, stream);
         cudaMemcpyAsync(m_impl->dInQpAt.ptr, m_impl->dBroyVnext.ptr + off_qp, sizeof(double) * 6 * nat, cudaMemcpyDeviceToDevice, stream);
     }
+    m_impl->profMark("scf: dq + Broyden");
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
 
@@ -3148,6 +3225,7 @@ bool XtbGpuContext::buildDevicePotentialAndSolve(int n, bool fp32, int n_eig,
                                                     m_impl->dVao.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
 
+    m_impl->profMark("scf: potential (D4 dE/dq, gamma, multipole)");
     // F = H0 − ½·S·(v_ao⊕v_ao) + GFN2 multipole; then eigensolve (shared path).
     const dim3 block(16, 16);
     const dim3 grid((n + block.x - 1) / block.x, (n + block.y - 1) / block.y);
@@ -3158,6 +3236,7 @@ bool XtbGpuContext::buildDevicePotentialAndSolve(int n, bool fp32, int n_eig,
                                                      m_impl->dQpInt.ptr, m_impl->dVdp.ptr,
                                                      m_impl->dVqp.ptr, m_impl->dAo2at.ptr, n);
     if (cudaGetLastError() != cudaSuccess) return false;
+    m_impl->profMark("scf: Fock build");
 
     return eigensolveResidentFock(eps_out, fp32, n_eig, download_eps);
 }

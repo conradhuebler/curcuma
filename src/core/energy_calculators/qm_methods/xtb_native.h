@@ -508,6 +508,10 @@ struct GpuScfBackend {
     { (void)q_sh0; (void)dp_at0; (void)qp_at0; (void)q_at0; (void)n0_sh; (void)n0_at;
       (void)Tele; (void)n_elec; (void)nocc_pairs; (void)alpha; (void)max_hist; (void)w0;
       return false; }
+    /// Per-phase device timings (CURCUMA_GPU_PROFILE), "" when unsupported/disabled.
+    /// Claude Generated (Sep 2026).
+    virtual std::string profileReport() const { return {}; }
+
     virtual bool residentScfStep(bool fp32, double& dq, double& e_band, double& e_coulomb,
                                  double& e_third, double& e_multipole)
     { (void)fp32; (void)dq; (void)e_band; (void)e_coulomb; (void)e_third; (void)e_multipole;

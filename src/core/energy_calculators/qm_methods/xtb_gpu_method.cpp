@@ -185,6 +185,8 @@ public:
         return ok;
     }
 
+    std::string profileReport() const override { return m_ctx ? m_ctx->profileReport() : std::string(); }
+
     // Claude Generated (Sep 2026): a GPU run that falls back to the CPU must say so at the
     // default verbosity - for a large system that fallback turns a minutes-long GPU job into
     // hours on the host. Warned once per backend object.

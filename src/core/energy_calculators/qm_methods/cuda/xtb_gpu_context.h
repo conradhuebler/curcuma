@@ -200,6 +200,9 @@ public:
     /// Reason for the last refused/failed beginBasis ("" when it succeeded).
     std::string lastError() const;
 
+    /// Accumulated per-phase device timings when CURCUMA_GPU_PROFILE is set, else "".
+    std::string profileReport() const;
+
     /// Per-geometry: upload xyz_bohr (3·nat) and run the CN kernel (cn_exp/cn_gfn
     /// per is_gfn2 from beginBasis) + the self-energy kernel. Results resident;
     /// download with downloadCn / downloadSelfEnergy. Requires a prior beginBasis.

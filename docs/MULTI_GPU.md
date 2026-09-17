@@ -75,6 +75,21 @@ Tool: `test_cases/cuda/bench_syevd_mg.cpp` (standalone, build line in its header
 - Estimate vs nvidia-smi peak: complex 0.31 GB vs 0.49 GB, polymer 2.36 GB vs 2.51 GB (peak includes ~0.2-0.4 GB CUDA context).
 - Which matrices are really needed per SCF iteration: dense only C (holds F), L, the syevd workspace and a transient P; H0, S and the 9 multipole integrals can share one screened AO-pair list (16 % of pairs within 40 Bohr on polymer_2x). The host currently also builds dense copies of the multipole integrals (17 GB) and S/H0/L/gamma on the CUDA path. Next steps.
 
+## GPU phase profiler
+`CURCUMA_GPU_PROFILE=1 curcuma -sp mol.xyz -method gfn2 -gpu cuda -verbosity 1` prints stream-synchronised per-phase device timings (integrals, potential, Fock, reduce / syevd / back-transform for FP32 and FP64, density, charges, energy, Broyden). Off by default (no synchronisation cost). `-verbosity 2` additionally shows a `pre-SCF` line (device uploads, EEQ guess) that was previously only inside TOTAL.
+
+polymer (1410 atoms, nao 3222), GFN2, one A4500, before -> after the occupied-column density:
+
+| phase | before | after |
+|---|---|---|
+| eig FP64 syevd (4 calls) | 2665 ms | same |
+| density P + populations (11 calls) | 2138 ms | **1227 ms** |
+| eig FP32 syevd (7 calls) | 1026 ms | same |
+| eig FP64 reduce (4 calls) | 891 ms | same |
+| SCF total | 7670 ms | **6765 ms** |
+
+Energies unchanged at the printed precision (complex -329.52714784, polymer -2088.25340678). The density GEMM now uses the occupied columns only (last occ > 1e-12), as the CPU path always did. Observation: 4 of 11 iterations run in FP64 and cost 43 % of the SCF on this consumer card.
+
 ## Case A: batch of structures over several GPUs (implemented)
 
 - **Pool**: `src/core/gpu_device_pool.{h,cpp}`. `main()` configures it from `-gpu`, `-gpu_devices` ("0,2", default all visible), `-gpu_workers_per_device` (default 1). Batch workers take a `GpuDeviceLease` (blocks until a slot is free, least-loaded device); `EnergyCalculator::createMethod` passes the leased device as `gpu_device`.
