@@ -583,6 +583,15 @@ struct GpuScfBackend {
                                 const double* qkernel, const double* gamma3)
     { (void)nat; (void)nsh; (void)amat_sd; (void)amat_dd; (void)amat_sq;
       (void)dkernel; (void)qkernel; (void)gamma3; return false; }
+    /// Device potential without the stored multipole interaction matrices (the backend
+    /// rebuilds them from geometry + damping radii). Claude Generated (Sep 2026).
+    virtual bool supportsOnTheFlyMultipole() const { return false; }
+    virtual bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr,
+                                        const double* mrad, double dmp3, double dmp5,
+                                        const double* dkernel, const double* qkernel,
+                                        const double* gamma3)
+    { (void)nat; (void)nsh; (void)xyz_bohr; (void)mrad; (void)dmp3; (void)dmp5;
+      (void)dkernel; (void)qkernel; (void)gamma3; return false; }
     /// q_sh (nsh), dp_at (3×nat), qp_at (6×nat) are the mixed SCC input; W/dWq
     /// (each nat·7) the host-built D4 reference weights at those charges. Builds
     /// the potential + Fock on the device and writes the eigenvalues to eps.

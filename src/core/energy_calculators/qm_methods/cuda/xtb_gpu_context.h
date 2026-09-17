@@ -203,6 +203,20 @@ public:
     /// Accumulated per-phase device timings when CURCUMA_GPU_PROFILE is set, else "".
     std::string profileReport() const;
 
+    /**
+     * @brief Storage of S, H0 and the GFN2 multipole integrals on the device.
+     * @param mode 0 = always dense (nao^2 each), 1 = auto (screened pair list when fewer than
+     *             half of the AO pairs survive the distance screen), 2 = always screened.
+     * The screen drops integrals below 1e-20 (atom-pair cutoff derived from the smallest
+     * primitive exponent and largest coefficient of each element). Claude Generated (Sep 2026).
+     */
+    void setSparseIntegrals(int mode);
+
+    /// Screened storage in use for the last geometry, and its fill fraction / largest cutoff.
+    bool sparseIntegrals() const;
+    double sparseFraction() const;
+    double sparseCutoffBohr() const;
+
     /// Per-geometry: upload xyz_bohr (3·nat) and run the CN kernel (cn_exp/cn_gfn
     /// per is_gfn2 from beginBasis) + the self-energy kernel. Results resident;
     /// download with downloadCn / downloadSelfEnergy. Requires a prior beginBasis.
@@ -335,6 +349,13 @@ public:
                         const double* amat_sd, const double* amat_dd, const double* amat_sq,
                         const double* dkernel, const double* qkernel, const double* gamma3);
 
+    /// Same as beginPotential, but without the 18 nat² interaction matrices: the device
+    /// rebuilds their elements per iteration from the geometry (Bohr) and the damping radii.
+    /// Claude Generated (Sep 2026, large systems).
+    bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr, const double* mrad,
+                                double dmp3, double dmp5, const double* dkernel,
+                                const double* qkernel, const double* gamma3);
+
     /* ----- WP4b: in-SCF implicit solvation on the device potential path ----- *
      * Upload the nat×nat Born interaction matrix B (keps-scaled, symmetric) once per
      * geometry, after beginPotential; the device build then adds v_at += B·q_at so the
@@ -423,6 +444,15 @@ public:
                              double* eps);
 
 private:
+    // Screened AO-pair list for the current geometry (host build + device upload). Sets
+    // use_sparse when the screened storage should be used. Claude Generated (Sep 2026).
+    bool buildScreenedPairs(const double* xyz_bohr, bool& use_sparse);
+    size_t estimateStorageBytes(int nat, int nsh, int nao, bool is_gfn2, double nnz) const;
+    // Storage-independent building blocks (dense or screened). Claude Generated (Sep 2026).
+    bool buildFockIntoC(int n, bool multipole);
+    bool populationsAndBand(int n, double* band_out);
+    bool multipoleMomentsResident(int n, int nat);
+
     /// Device-pointer Broyden update core (S6.4); shared by broydenUpdate (test
     /// upload/download) and the fused resident loop. Queues all work on the stream.
     bool runBroydenUpdate(const double* dvin, const double* dvout, double* dvnext);

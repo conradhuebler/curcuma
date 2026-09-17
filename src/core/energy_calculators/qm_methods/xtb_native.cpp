@@ -867,20 +867,36 @@ double XTB::Calculation(bool gradient)
         // blocks), the on-site XC kernels, and the per-shell third-order hardness
         // Γ_s (= ½·thirdOrderKernelDiag at q_sh=1, GFN2 shell-resolved).
         const size_t nn = static_cast<size_t>(nat) * static_cast<size_t>(nat);
-        std::vector<double> sd(3 * nn), dd(9 * nn), sq(6 * nn), dk(nat), qk(nat), g3(nsh);
-        for (int k = 0; k < 3; ++k)
-            std::memcpy(sd.data() + static_cast<size_t>(k) * nn, m_mp_amat_sd[k].data(), nn * sizeof(double));
-        for (int a = 0; a < 3; ++a)
-            for (int bb = 0; bb < 3; ++bb)
-                std::memcpy(dd.data() + (static_cast<size_t>(a) * 3 + bb) * nn,
-                            m_mp_amat_dd[a][bb].data(), nn * sizeof(double));
-        for (int k = 0; k < 6; ++k)
-            std::memcpy(sq.data() + static_cast<size_t>(k) * nn, m_mp_amat_sq[k].data(), nn * sizeof(double));
+        std::vector<double> dk(nat), qk(nat), g3(nsh);
         for (int i = 0; i < nat; ++i) { dk[i] = m_mp_dkernel[i]; qk[i] = m_mp_qkernel[i]; }
         const Vector g3diag = thirdOrderKernelDiag(Vector::Ones(nsh), m_wfn.q_at);  // = 2·Γ_s
         for (int s = 0; s < nsh; ++s) g3[s] = 0.5 * g3diag(s);
-        use_device_potential = m_gpu_scf->beginPotential(nat, nsh, sd.data(), dd.data(),
-                                                         sq.data(), dk.data(), qk.data(), g3.data());
+        // Claude Generated (Sep 2026): above ~1 GB of interaction matrices (nat > ~2700) the
+        // device rebuilds the matrix elements per iteration instead of storing 18 nat^2 doubles
+        // (7.7 GB at 7320 atoms, plus the same again as host upload copies).
+        // CURCUMA_GPU_MP_OTF=1/0 forces the choice (validation).
+        bool otf = 18.0 * static_cast<double>(nn) * sizeof(double) > 1.0e9;
+        if (const char* e = std::getenv("CURCUMA_GPU_MP_OTF")) otf = (e[0] == '1');
+        if (otf && m_gpu_scf->supportsOnTheFlyMultipole()) {
+            std::vector<double> xyzb(3 * static_cast<size_t>(nat));
+            for (int i = 0; i < nat; ++i)
+                for (int k = 0; k < 3; ++k) xyzb[3 * i + k] = m_geometry(i, k) * AA_TO_AU;
+            use_device_potential = m_gpu_scf->beginPotentialOnTheFly(
+                nat, nsh, xyzb.data(), m_mp_mrad.data(), gfn2_params::mp_dmp3, gfn2_params::mp_dmp5,
+                dk.data(), qk.data(), g3.data());
+        } else {
+            std::vector<double> sd(3 * nn), dd(9 * nn), sq(6 * nn);
+            for (int k = 0; k < 3; ++k)
+                std::memcpy(sd.data() + static_cast<size_t>(k) * nn, m_mp_amat_sd[k].data(), nn * sizeof(double));
+            for (int a = 0; a < 3; ++a)
+                for (int bb = 0; bb < 3; ++bb)
+                    std::memcpy(dd.data() + (static_cast<size_t>(a) * 3 + bb) * nn,
+                                m_mp_amat_dd[a][bb].data(), nn * sizeof(double));
+            for (int k = 0; k < 6; ++k)
+                std::memcpy(sq.data() + static_cast<size_t>(k) * nn, m_mp_amat_sq[k].data(), nn * sizeof(double));
+            use_device_potential = m_gpu_scf->beginPotential(nat, nsh, sd.data(), dd.data(),
+                                                             sq.data(), dk.data(), qk.data(), g3.data());
+        }
         // WP4b: upload the Born matrix so the device build adds v_at += B·q_at in-SCF.
         // On failure, drop to the host-driven loop (which still applies solvation).
         if (use_device_potential && solv_born) {

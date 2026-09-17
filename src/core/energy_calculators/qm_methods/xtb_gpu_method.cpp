@@ -169,10 +169,6 @@ public:
         m_nat = m_bf.nat;
         const bool ok = m_ctx->beginBasis(bd);
         if (!ok) warnDeviceFallback("basis setup");
-        else if (CurcumaLogger::get_verbosity() >= 2)
-            CurcumaLogger::info(fmt::format("GPU device {}: estimated resident memory {:.2f} GB (nao={}, nat={})",
-                m_ctx->deviceId(), m_ctx->estimateResidentBytes(bd.nat, bd.nsh, bd.nao, bd.is_gfn2 != 0) / 1073741824.0,
-                bd.nao, bd.nat));
         return ok;
     }
 
@@ -182,6 +178,14 @@ public:
         const bool ok = m_ctx->computeIntegrals(xyz_bohr.data())
             && m_ctx->residentBeginComputed();
         if (!ok) warnDeviceFallback("integral build");
+        else if (!m_storage_reported && CurcumaLogger::get_verbosity() >= 2) {
+            m_storage_reported = true;
+            CurcumaLogger::info(m_ctx->sparseIntegrals()
+                ? fmt::format("GPU integrals: screened pair storage, {:.1f} % of AO pairs (largest cutoff {:.1f} Bohr)",
+                              100.0 * m_ctx->sparseFraction(), m_ctx->sparseCutoffBohr())
+                : fmt::format("GPU integrals: dense storage ({:.1f} % of AO pairs within the screening cutoff)",
+                              100.0 * m_ctx->sparseFraction()));
+        }
         return ok;
     }
 
@@ -406,6 +410,16 @@ public:
                                      dkernel, qkernel, gamma3);
     }
 
+    bool supportsOnTheFlyMultipole() const override { return true; }
+    bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr, const double* mrad,
+                                double dmp3, double dmp5, const double* dkernel,
+                                const double* qkernel, const double* gamma3) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->beginPotentialOnTheFly(nat, nsh, xyz_bohr, mrad, dmp3, dmp5,
+                                             dkernel, qkernel, gamma3);
+    }
+
     // WP4b: in-SCF implicit solvation on the device potential path.
     bool supportsDeviceSolvation() const override { return true; }
     bool beginSolvation(int nat, const double* born_mat) override
@@ -433,6 +447,7 @@ private:
     curcuma::xtb::GpuBasisFlat m_bf;
     curcuma::xtb::GpuH0Flat    m_hf;
     bool           m_fallback_warned = false;
+    bool           m_storage_reported = false;
 };
 
 } // namespace
@@ -465,6 +480,14 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                           : v.is_number()  ? v.get<double>() != 0.0
                           : !(v.is_string() && (v.get<std::string>() == "false" || v.get<std::string>() == "0"));
             ctx->setMemoryCheck(on);
+        }
+        // Claude Generated (Sep 2026): `-gpu_sparse_integrals auto|on|off` - screened pair
+        // storage for S/H0/multipole integrals (auto = when < 50 % of the AO pairs survive).
+        if (config.contains("gpu_sparse_integrals")) {
+            const auto& v = config["gpu_sparse_integrals"];
+            std::string m = v.is_string() ? v.get<std::string>() : (v.is_boolean() ? (v.get<bool>() ? "on" : "off") : "auto");
+            ctx->setSparseIntegrals(m == "on" || m == "true" || m == "sparse" ? 2
+                                    : (m == "off" || m == "false" || m == "dense") ? 0 : 1);
         }
 
         // Stage 1: install the GPU eigensolver. solveEigen() delegates the per-iteration

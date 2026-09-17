@@ -75,6 +75,49 @@ Tool: `test_cases/cuda/bench_syevd_mg.cpp` (standalone, build line in its header
 - Estimate vs nvidia-smi peak: complex 0.31 GB vs 0.49 GB, polymer 2.36 GB vs 2.51 GB (peak includes ~0.2-0.4 GB CUDA context).
 - Which matrices are really needed per SCF iteration: dense only C (holds F), L, the syevd workspace and a transient P; H0, S and the 9 multipole integrals can share one screened AO-pair list (16 % of pairs within 40 Bohr on polymer_2x). The host currently also builds dense copies of the multipole integrals (17 GB) and S/H0/L/gamma on the CUDA path. Next steps.
 
+## Large-system GPU memory, steps 1b/1c (implemented, Sep 17, 2026)
+
+Result: **GFN2 on polymer_2x (7320 atoms, nao 15444) runs on ONE RTX A4500 (20 GB)**: device peak 17.0 GB (was ~50 GB), 619 s total, E = -11784.87804452 Eh (CPU reference pending). Host peak RSS 39 GB.
+
+What changed (all CUDA, `xtb_gpu_context.cu`):
+- **Screened pair storage** for S, H0 and the 9 GFN2 multipole integrals (`-gpu_sparse_integrals auto|on|off`, auto = when < 50 % of AO pairs survive). Atom-pair cutoff from each element's smallest primitive exponent and largest coefficient, integrals < 1e-20 dropped (~30-36 Bohr). Kernels `k_multipole_ints_sp`, `k_build_fock_sp`, `k_pop_ao_sp`, `k_multipole_moments_sp`, `k_grad_h0_pulay_sp` perform the same arithmetic as the dense ones.
+- **On-the-fly multipole interaction**: the 18 nat^2 matrices (7.7 GB at 7320 atoms) are rebuilt per pair in `k_multipole_potential_otf` / `k_energy_multipole_otf` above 1 GB of matrices (`CURCUMA_GPU_MP_OTF=0/1` forces it). Also removes the host upload copy.
+- **Exclusive eigensolver workspaces**: FP32 and FP64 syevd buffers never coexist; the gradient frees both before allocating W. Cw is n x ncol.
+- Memory estimate follows the peak (max of the two workspaces, screened sizes).
+
+Validation (A4500, `-gradient`):
+
+| system | method | dense vs screened E | max abs gradient diff | screened fraction |
+|---|---|---|---|---|
+| complex | gfn2 / gfn1 | identical (8 dp) | 1.0e-15 / 1.1e-15 | 93.8 % / 98.4 % (forced) |
+| polymer | gfn2 / gfn1 | identical (8 dp) | 7.4e-16 / 7.6e-16 | 41.4 % / 54.5 % |
+| complex / polymer | gfn2 OTF on vs off | identical (8 dp) | 6.0e-15 / 9.4e-15 | - |
+
+GPU peak polymer GFN2 2509 -> 1813 MiB. OTF costs ~50 ms per iteration at 1410 atoms (hence only for large systems). 205/205 GPU + sqm validation ctests pass.
+
+polymer_2x GFN2 profile on one A4500 (11 iterations, 4 in FP64):
+
+| phase | time | share |
+|---|---|---|
+| eig FP64 syevd (4) | 200 s | 36 % |
+| density P + populations (11) | 143 s | 26 % |
+| eig FP64 reduce (4) | 86 s | 16 % |
+| eig FP32 syevd (7) | 53 s | 10 % |
+| eig FP64 back-transform (4) | 43 s | 8 % |
+| host setup / post-SCF | 47 s / 30 s | - |
+
+### FP32 threshold (open decision)
+polymer GFN2, one A4500, `-scf_fp32_threshold`:
+
+| threshold | iterations | FP64 syevd calls | SCF | energy | max abs gradient diff vs CPU |
+|---|---|---|---|---|---|
+| 1e-3 (default) | 11 | 4 | 6.71 s | -2088.25340678 | 2.6e-6 |
+| 1e-4 | 11 | 2 | 5.05 s | same | - |
+| 1e-5 | 12 | 1 | 4.50 s | same (1e-12) | 7.0e-6 |
+| 3e-6 | 15 | 1 | 5.41 s | same | - |
+
+complex: 3.5e-4 Eh/A GPU-vs-CPU gradient difference at both thresholds (known: the loose default `scf_threshold` lands the device Broyden at a different point; use `-scf_threshold 1e-8` for gradients).
+
 ## GPU phase profiler
 `CURCUMA_GPU_PROFILE=1 curcuma -sp mol.xyz -method gfn2 -gpu cuda -verbosity 1` prints stream-synchronised per-phase device timings (integrals, potential, Fock, reduce / syevd / back-transform for FP32 and FP64, density, charges, energy, Broyden). Off by default (no synchronisation cost). `-verbosity 2` additionally shows a `pre-SCF` line (device uploads, EEQ guess) that was previously only inside TOTAL.
 
