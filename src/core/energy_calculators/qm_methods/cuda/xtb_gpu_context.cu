@@ -38,6 +38,7 @@
 // the host element-parameter tables that seed __constant__ memory.
 #include "xtb_gpu_integrals_device.cuh"
 #include "../parameters/xtb_params_extra.hpp"
+#include "xtb_distributed_eigensolver.h"
 
 namespace curcuma {
 namespace xtb {
@@ -257,6 +258,7 @@ struct XtbGpuContext::Impl {
     std::vector<std::string> prof_names;
     std::vector<double>      prof_ms;
     std::vector<int>         prof_calls;
+    std::vector<double>      prof_mem_mib;   // largest device memory in use at a mark of that phase
     std::chrono::steady_clock::time_point prof_t;
     void profStart()
     {
@@ -271,16 +273,131 @@ struct XtbGpuContext::Impl {
         const auto t = std::chrono::steady_clock::now();
         const double ms = std::chrono::duration<double, std::milli>(t - prof_t).count();
         prof_t = t;
+        profAdd(name, ms);
+    }
+    /// Add a timing without moving the mark (sub-phases measured elsewhere, e.g. inside the
+    /// multi-GPU eigensolver). Also records the device memory in use on this context's device.
+    void profAdd(const char* name, double ms)
+    {
+        if (!prof) return;
+        size_t free_b = 0, total_b = 0;
+        double used = 0.0;
+        if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess)
+            used = static_cast<double>(total_b - free_b) / (1024.0 * 1024.0);
         for (size_t i = 0; i < prof_names.size(); ++i) {
-            if (prof_names[i] == name) { prof_ms[i] += ms; ++prof_calls[i]; return; }
+            if (prof_names[i] == name) {
+                prof_ms[i] += ms; ++prof_calls[i];
+                prof_mem_mib[i] = std::max(prof_mem_mib[i], used);
+                return;
+            }
         }
         prof_names.emplace_back(name);
         prof_ms.push_back(ms);
         prof_calls.push_back(1);
+        prof_mem_mib.push_back(used);
     }
 
     // Claude Generated (Sep 2026): screened (sparse) AO-pair storage for S, H0, dp_int, qp_int.
     // See the "Screened (sparse) AO-pair storage" kernel block for the layout.
+    // Claude Generated (Sep 2026, multi-GPU step 3): optional multi-GPU eigensolve, created on
+    // first use. dist_failed latches after a failure so the SCF does not retry every iteration.
+    std::vector<int> dist_devices;
+    std::string      dist_backend = "auto";
+    int              dist_block = 128;
+    int              dist_min_nao = 4000;
+    bool             dist_fp32 = true;
+    bool             dist_failed = false;
+    int              dist_solves = 0;
+    long             l_generation = 0;   // bumped whenever dL (Cholesky factor of S) is rewritten
+    std::string      dist_status;
+    std::unique_ptr<DistributedEigensolver> dist;
+
+    /// 1 = solved on several GPUs, 0 = not used (input intact, run the single-GPU solver),
+    /// -1 = failed after the input was overwritten.
+    int distSolve(int n, void* A, void* eig, bool fp32)
+    {
+        if (!distReady(n, fp32)) return 0;
+        if (cudaStreamSynchronize(stream) != cudaSuccess) return 0;
+        const bool solved = dist->solve(n, A, eig, fp32, device);
+        cudaSetDevice(device);
+        if (prof) {
+            double sc = 0.0, so = 0.0, ga = 0.0;
+            dist->lastTimings(sc, so, ga);
+            profAdd(fp32 ? "  multi-GPU FP32: scatter" : "  multi-GPU FP64: scatter", sc);
+            profAdd(fp32 ? "  multi-GPU FP32: solve" : "  multi-GPU FP64: solve", so);
+            profAdd(fp32 ? "  multi-GPU FP32: gather" : "  multi-GPU FP64: gather", ga);
+        }
+        if (solved) {
+            ++dist_solves;
+            return 1;
+        }
+        dist_failed = true;
+        dist_status = std::string(dist->name()) + " failed (n = " + std::to_string(n)
+            + (fp32 ? ", FP32" : ", FP64") + "); single-GPU solver from here on";
+        return dist->inputIntact() ? 0 : -1;
+    }
+
+    /// Claude Generated (Sep 2026): drop every eigensolver workspace and FP32 copy on this device
+    /// and the multi-GPU solver's per-device buffers. Called once the SCF has converged: the
+    /// post-SCF phase (dense P rebuild, D4, gradient W) otherwise stacks on top of them (polymer_2x:
+    /// the device peak sat between SCF end and gradient start while ~3.5 GB per GPU were idle).
+    void releaseEigenWorkspaces()
+    {
+        dWork.free(); lwork = 0;
+        dCf.free(); dLf.free(); dWorkf.free(); lwork_f32 = 0;
+        if (dist) { dist->releaseBuffers(); cudaSetDevice(device); }
+    }
+
+    /// Create the multi-GPU solver on first use; false when it is not to be used for this call.
+    bool distReady(int n, bool fp32)
+    {
+        if (dist_devices.size() < 2 || dist_failed || n < dist_min_nao || (fp32 && !dist_fp32))
+            return false;
+        if (!dist) {
+            std::string why;
+            dist = DistributedEigensolver::create(dist_backend, dist_devices, dist_block, why);
+            cudaSetDevice(device);
+            if (!dist) {
+                dist_failed = true;
+                dist_status = "unavailable: " + why;
+                return false;
+            }
+        }
+        // cusolverMg FP32 returned unusable eigenvectors at n = 15444 (polymer_2x: SCF diverged from
+        // the first iteration while the eigenvalue sum still matched); only FP64 goes to Mg.
+        if (fp32 && std::string(dist->name()) == "cusolverMg") return false;
+        return true;
+    }
+
+    /// Generalized variant (reduction + solve + back-transform on the devices). Same return codes
+    /// as distSolve(); 0 also when the backend has no generalized path.
+    int distSolveGeneralized(int n, void* A, const void* L, void* eig, bool fp32)
+    {
+        if (!distReady(n, fp32) || !dist->supportsGeneralized()) return 0;
+        if (cudaStreamSynchronize(stream) != cudaSuccess) return 0;
+        const bool solved = dist->solveGeneralized(n, A, L, l_generation, eig, fp32, device);
+        cudaSetDevice(device);
+        if (prof) {
+            double sc = 0.0, so = 0.0, ga = 0.0, re = 0.0, ba = 0.0;
+            dist->lastTimings(sc, so, ga);
+            dist->lastGeneralizedTimings(re, ba);
+            const std::string p = fp32 ? "  multi-GPU FP32: " : "  multi-GPU FP64: ";
+            profAdd((p + "scatter F (+L)").c_str(), sc);
+            profAdd((p + "sygst").c_str(), re);
+            profAdd((p + "syevd").c_str(), so - re - ba);
+            profAdd((p + "trsm back-transform").c_str(), ba);
+            profAdd((p + "gather C").c_str(), ga);
+        }
+        if (solved) {
+            ++dist_solves;
+            return 1;
+        }
+        dist_failed = true;
+        dist_status = std::string(dist->name()) + " generalized solve failed (n = " + std::to_string(n)
+            + (fp32 ? ", FP32" : ", FP64") + "); single-GPU solver from here on";
+        return dist->inputIntact() ? 0 : -1;
+    }
+
     int    sparse_mode = 1;          // 0 = always dense, 1 = auto, 2 = always sparse
     bool   sparse = false;           // storage used for the current geometry
     double sparse_eps = 1.0e-20;     // integrals below this are dropped
@@ -2179,6 +2296,8 @@ XtbGpuContext::~XtbGpuContext()
 {
     if (!m_impl)
         return;
+    // The multi-GPU solver switches devices while it tears down; drop it first.
+    m_impl->dist.reset();
     // Free the handles and every CudaBuffer (destroyed with m_impl) on OUR device.
     bindDevice();
     if (m_impl->cusolver) cusolverDnDestroy(m_impl->cusolver);
@@ -2303,6 +2422,7 @@ bool XtbGpuContext::residentBegin(const double* H0, const double* S,
         m_impl->dH0.upload(H0, static_cast<int>(nn), m_impl->stream);
         m_impl->dS.upload(S, static_cast<int>(nn), m_impl->stream);
         m_impl->dL.upload(L, static_cast<int>(nn), m_impl->stream);
+        ++m_impl->l_generation;
         // Resident work buffers, reused across iterations.
         m_impl->dC.alloc(static_cast<int>(nn));
         m_impl->dP.alloc(static_cast<int>(nn));
@@ -2361,6 +2481,27 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
     const bool partial = (n_eig > 0 && n_eig < n);
     const int neig = partial ? n_eig : n;
 
+    // Claude Generated (Sep 2026, multi-GPU step 3): FP64 iterations run the whole generalized
+    // solve on several GPUs (sygst + syevd + trsm; L is distributed once per geometry). This device
+    // only sends F and receives C, and allocates no cuSOLVER workspace. FP32 iterations distribute
+    // only the eigensolve (distSolve in the FP32 branch below): measured on polymer_2x (n = 15444,
+    // 4x A4500) the distributed reduction wins in FP64 (sygst 3.7 s vs two single-GPU trsm 21 s)
+    // but not in FP32 (0.56 vs 0.57 s), and the cuBLASMp FP32 back-transform is slower than the
+    // single-GPU trsm (1.74 vs 0.38 s).
+    if (!partial && !fp32 && m_impl->distReady(n, false) && m_impl->dist->supportsGeneralized()) {
+        // No single-GPU workspaces or FP32 copies while the FP64 solve is distributed.
+        m_impl->dCf.free(); m_impl->dLf.free(); m_impl->dWorkf.free(); m_impl->lwork_f32 = 0;
+        if (!m_impl->dWork.empty()) { m_impl->dWork.free(); m_impl->lwork = 0; }
+        const int rc = m_impl->distSolveGeneralized(n, m_impl->dC.ptr, m_impl->dL.ptr, m_impl->dEps.ptr, false);
+        if (rc < 0) return false;
+        if (rc == 1) {
+            m_impl->profMark("eig FP64: multi-GPU sygst+syevd+trsm");
+            if (download_eps && eps_out) m_impl->dEps.download(eps_out, n, stream);
+            return cudaStreamSynchronize(stream) == cudaSuccess;
+        }
+        // rc == 0: F is intact, continue with the single-GPU path below.
+    }
+
     if (fp32) {
         // Mixed precision: reduce + diagonalise + back-transform in FP32, then
         // convert the eigenvectors/values back to FP64 so the resident density
@@ -2388,8 +2529,12 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
                         m_impl->dLf.ptr, n, m_impl->dCf.ptr, n) != CUBLAS_STATUS_SUCCESS)
             return false;
         m_impl->profMark("eig FP32: copy + reduce");
+        const int dist_rc = partial ? 0 : m_impl->distSolve(n, m_impl->dCf.ptr, m_impl->dEpsf.ptr, true);
+        if (dist_rc < 0) return false;
         int lwork = 0;
-        if (partial) {
+        if (dist_rc == 1) {
+            m_impl->profMark("eig FP32: syevd (multi-GPU)");
+        } else if (partial) {
             const float vl = 0.0f, vu = 0.0f; int h_meig = 0;
             if (cusolverDnSsyevdx_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR,
                                              CUSOLVER_EIG_RANGE_I, CUBLAS_FILL_MODE_LOWER, n,
@@ -2406,6 +2551,7 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
                                   m_impl->dEpsf.ptr, m_impl->dWorkf.ptr, m_impl->lwork_f32,
                                   m_impl->dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
                 return false;
+            m_impl->profMark("eig FP32: syevd");
         } else {
             if (cusolverDnSsyevd_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR,
                                             CUBLAS_FILL_MODE_LOWER, n, m_impl->dCf.ptr, n,
@@ -2419,8 +2565,8 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
                                  n, m_impl->dCf.ptr, n, m_impl->dEpsf.ptr, m_impl->dWorkf.ptr,
                                  m_impl->lwork_f32, m_impl->dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
                 return false;
+            m_impl->profMark("eig FP32: syevd");
         }
-        m_impl->profMark("eig FP32: syevd");
         // Back-transform only the neig computed eigenvectors (columns 0..neig-1).
         if (cublasStrsm(m_impl->cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
                         CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, neig, &onef,
@@ -2433,9 +2579,10 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
         if (cudaGetLastError() != cudaSuccess) return false;
         m_impl->profMark("eig FP32: back-transform + to FP64");
 
-        int info = 1;
-        if (cudaMemcpyAsync(&info, m_impl->dInfo.ptr, sizeof(int),
-                            cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+        int info = 0;
+        if (dist_rc != 1
+            && cudaMemcpyAsync(&info, m_impl->dInfo.ptr, sizeof(int),
+                               cudaMemcpyDeviceToHost, stream) != cudaSuccess)
             return false;
         if (download_eps && eps_out) m_impl->dEps.download(eps_out, neig, stream);
         if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
@@ -2453,7 +2600,11 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
                     m_impl->dL.ptr, n, m_impl->dC.ptr, n) != CUBLAS_STATUS_SUCCESS)
         return false;
     m_impl->profMark("eig FP64: reduce");
-    if (partial) {
+    const int dist_rc = partial ? 0 : m_impl->distSolve(n, m_impl->dC.ptr, m_impl->dEps.ptr, false);
+    if (dist_rc < 0) return false;
+    if (dist_rc == 1) {
+        m_impl->profMark("eig FP64: syevd (multi-GPU)");
+    } else if (partial) {
         const double vl = 0.0, vu = 0.0; int h_meig = 0; int lwork_dx = 0;
         if (cusolverDnDsyevdx_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR,
                                          CUSOLVER_EIG_RANGE_I, CUBLAS_FILL_MODE_LOWER, n,
@@ -2470,6 +2621,7 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
                               m_impl->dEps.ptr, m_impl->dWork.ptr, m_impl->lwork,
                               m_impl->dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
             return false;
+        m_impl->profMark("eig FP64: syevd");
     } else {
         // Claude Generated (Sep 2026): FP64 workspace on demand; drop the FP32 copies first.
         if (m_impl->lwork <= 0 || m_impl->dWork.empty()) {
@@ -2486,8 +2638,8 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
                              n, m_impl->dC.ptr, n, m_impl->dEps.ptr, m_impl->dWork.ptr,
                              m_impl->lwork, m_impl->dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
             return false;
+        m_impl->profMark("eig FP64: syevd");
     }
-    m_impl->profMark("eig FP64: syevd");
     // Back-transform only the neig computed eigenvectors (columns 0..neig-1).
     if (cublasDtrsm(m_impl->cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
                     CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, neig, &one,
@@ -2495,9 +2647,10 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
         return false;
     m_impl->profMark("eig FP64: back-transform");
 
-    int info = 1;
-    if (cudaMemcpyAsync(&info, m_impl->dInfo.ptr, sizeof(int),
-                        cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+    int info = 0;
+    if (dist_rc != 1
+        && cudaMemcpyAsync(&info, m_impl->dInfo.ptr, sizeof(int),
+                           cudaMemcpyDeviceToHost, stream) != cudaSuccess)
         return false;
     if (download_eps && eps_out) m_impl->dEps.download(eps_out, neig, stream);
     if (cudaStreamSynchronize(stream) != cudaSuccess)
@@ -2582,7 +2735,9 @@ bool XtbGpuContext::residentDensityResident(int n, int ncol, double* band_out)
         if (cudaGetLastError() != cudaSuccess) return false;
     }
     if (I.sparse) {
-        // Claude Generated (Sep 2026): pattern-only density (see k_density_sp).
+        // Claude Generated (Sep 2026): pattern-only density (see k_density_sp). A row-major
+        // variant (contiguous rows, occ applied in the kernel) was measured 8x slower on polymer
+        // (4.69 vs 0.60 s over 12 SCF steps) and dropped.
         try { I.dSpP.ensure(I.sp_nnz); } catch (...) { return false; }
         if (ncol > 0) {
             const int bs = 256;
@@ -2640,6 +2795,7 @@ bool XtbGpuContext::residentFinalize(double* P_colmajor, double* C_colmajor, int
         return false;
     cudaStream_t stream = m_impl->stream;
     const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
+    m_impl->releaseEigenWorkspaces();   // SCF finished; see releaseEigenWorkspaces
     if (!ensureDenseDensity(n)) return false;
     m_impl->dP.download(P_colmajor, static_cast<int>(nn), stream);
     m_impl->dC.download(C_colmajor, static_cast<int>(nn), stream);
@@ -2760,14 +2916,17 @@ size_t XtbGpuContext::estimateStorageBytes(int nat, int nsh, int nao, bool is_gf
 std::string XtbGpuContext::profileReport() const
 {
     if (!m_impl || !m_impl->prof || m_impl->prof_names.empty()) return {};
-    std::string out = "GPU phase profile (CURCUMA_GPU_PROFILE, stream-synchronised):\n";
+    std::string out = "GPU phase profile (CURCUMA_GPU_PROFILE, stream-synchronised; indented rows are\n"
+                      "sub-phases already counted in the row above; mem = device memory in use):\n";
     double total = 0.0;
-    for (double v : m_impl->prof_ms) total += v;
-    char line[160];
+    for (size_t i = 0; i < m_impl->prof_ms.size(); ++i)
+        if (m_impl->prof_names[i].rfind("  ", 0) != 0) total += m_impl->prof_ms[i];
+    char line[200];
     for (size_t i = 0; i < m_impl->prof_names.size(); ++i) {
-        std::snprintf(line, sizeof(line), "  %-44s %11.1f ms %6.1f %%  %5d calls\n",
+        std::snprintf(line, sizeof(line), "  %-44s %11.1f ms %6.1f %%  %5d calls  mem %7.0f MiB\n",
                       m_impl->prof_names[i].c_str(), m_impl->prof_ms[i],
-                      total > 0 ? 100.0 * m_impl->prof_ms[i] / total : 0.0, m_impl->prof_calls[i]);
+                      total > 0 ? 100.0 * m_impl->prof_ms[i] / total : 0.0, m_impl->prof_calls[i],
+                      m_impl->prof_mem_mib[i]);
         out += line;
     }
     std::snprintf(line, sizeof(line), "  %-44s %11.1f ms\n", "sum", total);
@@ -2782,6 +2941,45 @@ void XtbGpuContext::setSparseIntegrals(int mode)
 bool XtbGpuContext::sparseIntegrals() const { return m_impl && m_impl->sparse; }
 double XtbGpuContext::sparseFraction() const { return m_impl ? m_impl->sp_fraction : 1.0; }
 double XtbGpuContext::sparseCutoffBohr() const { return m_impl ? m_impl->sp_rmax : 0.0; }
+
+void XtbGpuContext::setDistributedEigensolver(const std::vector<int>& devices,
+                                              const std::string& backend, int block, int min_nao,
+                                              bool fp32)
+{
+    if (!m_impl) return;
+    m_impl->dist.reset();
+    bindDevice();
+    m_impl->dist_devices.clear();
+    int count = 0;
+    cudaGetDeviceCount(&count);
+    for (int d : devices) {
+        if (d < 0) {   // "all"
+            m_impl->dist_devices.clear();
+            for (int i = 0; i < count; ++i) m_impl->dist_devices.push_back(i);
+            break;
+        }
+        if (d < count && std::find(m_impl->dist_devices.begin(), m_impl->dist_devices.end(), d)
+                             == m_impl->dist_devices.end())
+            m_impl->dist_devices.push_back(d);
+    }
+    m_impl->dist_backend = backend.empty() ? std::string("auto") : backend;
+    m_impl->dist_block = block > 0 ? block : 128;
+    m_impl->dist_min_nao = std::max(0, min_nao);
+    m_impl->dist_fp32 = fp32;
+    m_impl->dist_failed = false;
+    m_impl->dist_solves = 0;
+    m_impl->dist_status.clear();
+}
+
+std::string XtbGpuContext::distributedEigensolverStatus() const
+{
+    if (!m_impl || m_impl->dist_devices.size() < 2) return {};
+    if (!m_impl->dist_status.empty()) return m_impl->dist_status;
+    if (!m_impl->dist)
+        return "not used (nao below gpu_eigensolver_min_nao = " + std::to_string(m_impl->dist_min_nao) + ")";
+    return std::string(m_impl->dist->name()) + " on " + std::to_string(m_impl->dist->deviceCount())
+        + " GPUs, " + std::to_string(m_impl->dist_solves) + " solves";
+}
 
 void XtbGpuContext::setMemoryCheck(bool on)
 {
@@ -3216,6 +3414,7 @@ bool XtbGpuContext::computeIntegrals(const double* xyz_bohr)
                         cudaMemcpyDeviceToHost, stream) != cudaSuccess)
         return false;
     if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    ++I.l_generation;
     I.profMark("integrals: Cholesky of S");
     (void)nat;
     return info == 0;
@@ -4179,6 +4378,7 @@ bool XtbGpuContext::residentLoopCharges(double* q_sh, double* q_at, double* dp_a
                                         double* qp_at, double* eps)
 {
     if (!ok() || m_impl->loop_nao <= 0) return false;
+    m_impl->releaseEigenWorkspaces();   // the resident loop is over (called once after it)
     cudaStream_t stream = m_impl->stream;
     const int nsh = m_impl->loop_nsh, nat = m_impl->loop_nat, nao = m_impl->loop_nao;
     if (q_sh)  m_impl->dQsh.download(q_sh, nsh, stream);
@@ -4445,11 +4645,11 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     const double one = 1.0, zero = 0.0;
 
     try {
-        if (m_impl->dW.n < static_cast<int>(nn)) m_impl->dW.alloc(static_cast<int>(nn));
         // Claude Generated (Sep 2026): the eigensolver workspaces are not needed by the gradient;
-        // release them before allocating W so the gradient phase does not add to the SCF peak.
-        m_impl->dWork.free(); m_impl->lwork = 0;
-        m_impl->dCf.free(); m_impl->dLf.free(); m_impl->dWorkf.free(); m_impl->lwork_f32 = 0;
+        // release them BEFORE allocating W so the gradient phase does not add to the SCF peak
+        // (the allocation used to come first).
+        m_impl->releaseEigenWorkspaces();
+        if (m_impl->dW.n < static_cast<int>(nn)) m_impl->dW.alloc(static_cast<int>(nn));
         if (m_impl->dCw.n < static_cast<int>(nn)) m_impl->dCw.alloc(static_cast<int>(nn));
         if (m_impl->dP.n  < static_cast<int>(nn)) m_impl->dP.alloc(static_cast<int>(nn));
         if (m_impl->dC.n  < static_cast<int>(nn)) m_impl->dC.alloc(static_cast<int>(nn));

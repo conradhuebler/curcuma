@@ -698,6 +698,9 @@ json CLI2Json(int argc, char** argv)
         "gpu_devices", "gpu_workers_per_device",  // batch workers spread over these devices
         "gpu_memory_check",  // native gfn1/gfn2 GPU: refuse a basis that does not fit (default true)
         "gpu_sparse_integrals",  // native gfn1/gfn2 GPU: screened S/H0/multipole storage auto|on|off
+        // Claude Generated (Sep 2026, multi-GPU step 3): multi-GPU eigensolve (docs/GPU_TUNING.md)
+        "gpu_eigensolver_devices", "gpu_eigensolver_backend", "gpu_eigensolver_block",
+        "gpu_eigensolver_min_nao", "gpu_eigensolver_fp32",
         "charge", "spin",  // molecular charge/spin (top-level, not module-scoped)
         "export_run", // Export current run configuration
         "import_config", // Import custom configuration

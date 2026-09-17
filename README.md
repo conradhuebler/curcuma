@@ -48,7 +48,10 @@ system dependencies (one backend per build dir: `release_cuda/`, `release_rocm/`
 - **Multi-GPU** (Sep 2026, AI-generated, machine-tested): `-gpu_device N` pins a run to one
   device; batch runs (`-sp`/`-opt` on a multi-XYZ file, ConfSearch, Hessian) spread their
   workers over all visible GPUs (`-gpu_devices 0,2`, `-gpu_workers_per_device 2`).
-  `curcuma -methods` lists the devices. See [docs/MULTI_GPU.md](docs/MULTI_GPU.md).
+  `curcuma -methods` lists the devices. One large GFN1/GFN2 molecule can spread its
+  eigensolve over several GPUs with `-gpu_eigensolver_devices all` (needs cuSOLVERMp, cuBLASMp
+  and NCCL at build time, see [docs/GPU_TUNING.md](docs/GPU_TUNING.md)).
+  See [docs/MULTI_GPU.md](docs/MULTI_GPU.md).
 
 ## Validation Status Labels
 

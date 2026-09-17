@@ -52,7 +52,8 @@ Tool: `test_cases/cuda/bench_syevd_mg.cpp` (standalone, build line in its header
 - Gate G0d (Mg 4 GPU >= 1.3x Dn 1 GPU): **FP64 passes (1.9x)**, **FP32 fails** - single-GPU Dn FP32 (7.6 s) beats every Mg configuration.
 - On the A4500 FP32 is 6.6x faster than FP64. Multi-GPU therefore only helps the FP64 iterations (the final polishing steps of the mixed-precision SCF) and as a memory enabler (4.0 vs 9.1 GB per device).
 - PCIe topology (PIX vs NODE) makes no measurable difference here.
-- `cusolverMg` is marked **deprecated** in CUDA 13.3 (successor: cuSOLVERMp on NCCL/CAL). Mg integration only as a fallback; NCCL/cuSOLVERMp path to be evaluated once NCCL is installed.
+- `cusolverMg` is marked **deprecated** in CUDA 13.3 (successor: cuSOLVERMp on NCCL/CAL). Integrated as FP64-only fallback; the eigenvalue-sum check used here did not catch its unusable FP32 eigenvectors at this size (see step 3).
+- cuSOLVERMp 0.9.1 (same matrix): FP64 1 GPU 50.2 s, 2 GPUs 36.3 s, 4 GPUs 20.7 s (nb 128); FP32 4 GPUs 5.24 s, 2 GPUs 7.36 s; 1.5-2.7 GB per GPU. Tool: `test_cases/cuda/bench_syevd_mp.cpp`.
 - Cusolver Mg layout pitfall: the column blocks are dealt out **cyclically** (block b -> device b % ndev). A contiguous layout returns wrong eigenvalues without any error.
 
 ### Not yet measured
@@ -230,3 +231,13 @@ Energies unchanged at the printed precision (complex -329.52714784, polymer -208
 
 ### Pre-existing build issue
 - `test_cases/sqm_reference/test_xtb_cuda_*` do not compile (`curcuma::xtb::gpu` undeclared) since `USE_CUDA` was removed from the core definitions; main binary and `libcurcuma_cuda.so` build fine.
+
+## Step 3: multi-GPU eigensolve (implemented, Sep 17, 2026)
+
+- `DistributedEigensolver` (`qm_methods/cuda/xtb_distributed_eigensolver.{h,cpp}`) in its own library `libcurcuma_cuda_mgpu.so`, loaded on first use by `libcurcuma_cuda.so` (`xtb_distributed_eigensolver_loader.cpp`), so a host without cuSOLVERMp/NCCL keeps single-GPU runs.
+- Backends: `mp` = cuSOLVERMp + cuBLASMp over NCCL (one host thread per GPU, communicators from `ncclCommInitAll`); `mg` = cusolverMg, FP64 only.
+- Hook: `XtbGpuContext::eigensolveResidentFock`. FP64: scatter F (and L once per geometry), `sygst` + `syevd` + `trsm` on the GPUs, gather C. FP32: `syevd` only. Falls back to the single-GPU cuSOLVER path on any failure, with a warning.
+- Pitfalls found: cuBLASMp grid destruction is collective (a sequential teardown deadlocks at exit); stdout redirected to a file is block-buffered, so a long run looks hung (use `stdbuf -oL`).
+- Also fixed on the way: the gradient allocated W before releasing the eigensolver workspaces (raised the device peak); workspaces are now released when the SCF ends.
+- Validation: complex (gfn1, gfn2) at `-scf_threshold 1e-9` vs single GPU, energy and gradient <= 1.2e-9 for mp (4 GPUs, 2 GPUs not including device 0) and mg (FP64); polymer_2x energy identical at the printed 8 decimals; 200/200 `ctest -L gpu`.
+- Numbers and options: [GPU_TUNING.md](GPU_TUNING.md#multi-gpu-eigensolve-one-large-molecule-on-several-gpus).

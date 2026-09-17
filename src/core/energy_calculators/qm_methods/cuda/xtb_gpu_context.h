@@ -21,6 +21,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace curcuma {
 namespace xtb {
@@ -216,6 +217,23 @@ public:
     bool sparseIntegrals() const;
     double sparseFraction() const;
     double sparseCutoffBohr() const;
+
+    /**
+     * @brief Spread the per-iteration full-spectrum eigensolve of the resident SCF over several
+     *        GPUs (the rest of the SCF stays on this context's device).
+     * @param devices  CUDA device indices; fewer than two disables it
+     * @param backend  "auto" (cuSOLVERMp, else cusolverMg), "mp" or "mg"
+     * @param block    column block size of the 1 x ndev distribution
+     * @param min_nao  only for bases with at least this many AOs
+     * @param fp32     also for the mixed-precision FP32 iterations
+     * Falls back to the single-GPU cuSOLVER solve when the backend is missing or fails.
+     * Claude Generated (Sep 2026, multi-GPU step 3).
+     */
+    void setDistributedEigensolver(const std::vector<int>& devices, const std::string& backend,
+                                   int block, int min_nao, bool fp32);
+
+    /// "" when not configured, else backend/device/solve summary or the reason it is not used.
+    std::string distributedEigensolverStatus() const;
 
     /// Per-geometry: upload xyz_bohr (3·nat) and run the CN kernel (cn_exp/cn_gfn
     /// per is_gfn2 from beginBasis) + the self-energy kernel. Results resident;

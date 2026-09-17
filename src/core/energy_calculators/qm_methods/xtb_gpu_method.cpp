@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <sstream>
 #include <thread>
 #include <vector>
 
@@ -82,6 +83,7 @@ public:
         if (!m_ctx) return false;
         Eigen::MatrixXd Pcm(m_n, m_n), Ccm(m_n, m_n);  // column-major device layout
         if (!m_ctx->residentFinalize(Pcm.data(), Ccm.data(), m_n)) return false;
+        reportDistributedEigensolver();
         P = Pcm;   // → row-major project Matrix, values preserved (P symmetric)
         C = Ccm;   // col-major eigenvectors → row-major, values preserved
         return true;
@@ -411,8 +413,23 @@ public:
                              Eigen::MatrixXd& qp_at, Vector& eps) override
     {
         if (!m_ctx) return false;
-        return m_ctx->residentLoopCharges(q_sh.data(), q_at.data(), dp_at.data(),
-                                          qp_at.data(), eps.data());
+        const bool ok = m_ctx->residentLoopCharges(q_sh.data(), q_at.data(), dp_at.data(),
+                                                   qp_at.data(), eps.data());
+        reportDistributedEigensolver();
+        return ok;
+    }
+
+    // Claude Generated (Sep 2026, multi-GPU step 3): say whether the multi-GPU eigensolve ran
+    // (info at verbosity 2) or why it did not (warning). Called at the end of every SCF.
+    void reportDistributedEigensolver()
+    {
+        const std::string dist = m_ctx ? m_ctx->distributedEigensolverStatus() : std::string();
+        if (dist.empty() || dist == m_dist_reported) return;
+        m_dist_reported = dist;
+        if (dist.rfind("unavailable", 0) == 0 || dist.find("failed") != std::string::npos)
+            CurcumaLogger::warn("GPU multi-GPU eigensolver " + dist);
+        else if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info("GPU multi-GPU eigensolver: " + dist);
     }
 
     // ---- Full device GFN2 potential build (Stage 5, Part B3/B4) -----------
@@ -465,6 +482,7 @@ private:
     curcuma::xtb::GpuH0Flat    m_hf;
     bool           m_fallback_warned = false;
     bool           m_storage_reported = false;
+    std::string    m_dist_reported;
 };
 
 } // namespace
@@ -505,6 +523,49 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
             std::string m = v.is_string() ? v.get<std::string>() : (v.is_boolean() ? (v.get<bool>() ? "on" : "off") : "auto");
             ctx->setSparseIntegrals(m == "on" || m == "true" || m == "sparse" ? 2
                                     : (m == "off" || m == "false" || m == "dense") ? 0 : 1);
+        }
+
+        // Claude Generated (Sep 2026, multi-GPU step 3): multi-GPU eigensolve of the resident
+        // SCF. `-gpu_eigensolver_devices all|0,1,2,3` switches it on (off by default);
+        // backend auto|mp|mg, column block, minimum nao and FP32 use are tunable. See
+        // docs/GPU_TUNING.md for measured numbers.
+        if (config.contains("gpu_eigensolver_devices")) {
+            const auto& v = config["gpu_eigensolver_devices"];
+            std::vector<int> devs;
+            std::string spec = v.is_string() ? v.get<std::string>() : std::string();
+            if (v.is_array()) {
+                for (const auto& d : v) if (d.is_number()) devs.push_back(static_cast<int>(d.get<double>()));
+            } else if (spec == "all" || spec == "auto") {
+                devs.push_back(-1);   // the context expands this to every visible device
+            } else if (!spec.empty() && spec != "none" && spec != "off") {
+                std::stringstream ss(spec);
+                for (std::string tok; std::getline(ss, tok, ',');) {
+                    try { devs.push_back(std::stoi(tok)); } catch (...) {
+                        CurcumaLogger::warn("gpu_eigensolver_devices: cannot parse '" + tok + "'");
+                    }
+                }
+            }
+            auto num = [&](const char* key, double def) {
+                if (!config.contains(key)) return def;
+                const auto& x = config[key];
+                if (x.is_number()) return x.get<double>();
+                if (x.is_string()) { try { return std::stod(x.get<std::string>()); } catch (...) {} }
+                return def;
+            };
+            std::string backend = "auto";
+            if (config.contains("gpu_eigensolver_backend") && config["gpu_eigensolver_backend"].is_string())
+                backend = config["gpu_eigensolver_backend"].get<std::string>();
+            bool fp32 = true;
+            if (config.contains("gpu_eigensolver_fp32")) {
+                const auto& x = config["gpu_eigensolver_fp32"];
+                fp32 = x.is_boolean() ? x.get<bool>()
+                     : x.is_number()  ? x.get<double>() != 0.0
+                     : !(x.is_string() && (x.get<std::string>() == "false" || x.get<std::string>() == "0"));
+            }
+            if (!devs.empty())
+                ctx->setDistributedEigensolver(devs, backend,
+                                               static_cast<int>(num("gpu_eigensolver_block", 128)),
+                                               static_cast<int>(num("gpu_eigensolver_min_nao", 4000)), fp32);
         }
 
         // Stage 1: install the GPU eigensolver. solveEigen() delegates the per-iteration
