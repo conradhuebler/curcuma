@@ -29,6 +29,7 @@
 
 #include <Eigen/Dense>
 
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -604,6 +605,10 @@ struct FFWorkspaceGPUImpl {
     RepulsionSoA   bonded_rep;      ///< Bonded repulsion pairs
     RepulsionSoA   nonbonded_rep;   ///< Non-bonded repulsion pairs
     CoulombSoA     coulomb;         ///< Coulomb pairs (gamma + cutoff only; charges dynamic)
+    // Claude Generated (Sep 2026): implicit all-pairs Coulomb (no pair list).
+    bool               coulomb_implicit = false;
+    double             coulomb_rcut = 100.0;
+    // (per-atom alpeeq: the existing self-energy buffer d_coul_alp, same values)
     BondSoA        bonds;           ///< Bond stretching
     AngleSoA       angles;          ///< Angle bending
     DihedralSoA    dihedrals;       ///< Standard + extra torsions (combined)
@@ -968,11 +973,29 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
         }
     }
 
+    // Claude Generated (Sep 2026): upload phase timings with CURCUMA_GFNFF_PROFILE.
+    const bool up_prof = std::getenv("CURCUMA_GFNFF_PROFILE") != nullptr;
+    auto up_t = std::chrono::high_resolution_clock::now();
+    auto up_mark = [&](const char* name) {
+        if (!up_prof) return;
+        const auto t = std::chrono::high_resolution_clock::now();
+        CurcumaLogger::result(fmt::format("  gpu upload: {:<32s} {:9.1f} ms", name,
+                                          std::chrono::duration<double, std::milli>(t - up_t).count()));
+        up_t = t;
+    };
+    up_mark("start (after validation)");
     // --- Upload static SoA interaction lists ---
     m_impl->disp.upload(params.dispersions, stream);
+    up_mark("dispersion pairs");
     m_impl->bonded_rep.upload(params.bonded_repulsions, stream);
     m_impl->nonbonded_rep.upload(params.nonbonded_repulsions, stream);
+    up_mark("repulsion pairs");
     m_impl->coulomb.upload(params.coulombs, stream);
+    if (params.coulomb_implicit && params.coul_self_alp.size() == natoms) {
+        m_impl->coulomb_implicit = true;
+        m_impl->coulomb_rcut = params.coulomb_implicit_rcut;
+    }
+    up_mark("coulomb pairs");
     m_impl->bonds.upload(params.bonds, atom_types, stream);
     m_impl->angles.upload(params.angles, atom_types, stream);
     m_impl->dihedrals.upload(params.dihedrals, params.extra_dihedrals, atom_types, stream);
@@ -986,6 +1009,7 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_last_xbonds = params.xbonds;   // init CPU mirror for debug comparison
     m_impl->hbonds.upload(params.hbonds, atom_types, stream);
     m_last_hbonds = params.hbonds;   // init CPU mirror for debug comparison
+    up_mark("bonded + HB/XB/ATM/BATM lists");
 
     // --- Allocate dynamic per-step buffers ---
     const int N3 = 3 * natoms;
@@ -1070,7 +1094,15 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
 
     // --- Extract per-atom Coulomb self-energy params (for CPU postProcess TERM 2+3) ---
     // Mirrors FFWorkspace::setInteractionLists() lines 90-118
-    if (!params.coulombs.empty()) {
+    if (params.coulomb_implicit && params.coul_self_alp.size() == natoms) {
+        // No pair list to scan: the per-atom self-energy inputs come straight from the
+        // parameter set (GFNFF::generateCoulombSelfEnergyNative, same formulas as fillPair).
+        m_coul_chi_base   = params.coul_self_chi_base;
+        m_coul_gam        = params.coul_self_gam;
+        m_coul_alp        = params.coul_self_alp;
+        m_coul_chi_static = params.coul_self_chi_static;
+        setCoulombSelfEnergyParams(m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_chi_static);
+    } else if (!params.coulombs.empty()) {
         m_coul_chi_base  = Vector::Zero(natoms);
         m_coul_gam       = Vector::Zero(natoms);
         m_coul_alp       = Vector::Zero(natoms);
@@ -1104,6 +1136,7 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
         m_eeq_charges = params.eeq_charges;
     m_e0 = params.e0;
 
+    up_mark("buffers + HB alpha + coulomb self-energy scan");
     // Synchronise: wait for all uploads to finish
     checkCuda(cudaStreamSynchronize(stream), "init sync");
 
@@ -2389,7 +2422,14 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     }
 
     // k_coulomb (needs EEQ charges)
-    if (m_coulomb_enabled && impl.coulomb.n > 0) {
+    if (m_coulomb_enabled && impl.coulomb_implicit) {
+        LaunchConfig cfg = getLaunchConfig(m_natoms, m_block_size);
+        k_coulomb_implicit<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
+            m_natoms, impl.d_coul_alp.ptr, impl.coulomb_rcut,
+            impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+            impl.d_charges.ptr, impl.d_grad.ptr, &impl.d_energies.ptr[impl.E_COUL]);
+        checkCuda(cudaGetLastError(), "k_coulomb_implicit launch");
+    } else if (m_coulomb_enabled && impl.coulomb.n > 0) {
         LaunchConfig cfg = getLaunchConfig(impl.coulomb.n, m_block_size);
         k_coulomb<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
             impl.coulomb.n,

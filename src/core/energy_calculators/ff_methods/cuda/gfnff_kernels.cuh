@@ -111,6 +111,23 @@ __global__ GFNFF_KERNEL_BOUNDS void k_coulomb(
     double*                    energy
 );
 
+/// Implicit all-pairs Coulomb (Claude Generated, Sep 2026): one thread per atom i, gathering
+/// over every j != i instead of reading a stored pair list. gamma_ij = 1/sqrt(alp_i + alp_j)
+/// exactly as GFNFF::generateCoulombPairsNative builds it; each thread adds only its own atom's
+/// force and half of every pair energy. Removes the N^2/2 host pair list (7320 atoms: 24.5 M
+/// pairs, 2.7 GB, ~1.5 s to build/upload/scan) and the per-pair atomic gradient adds.
+__global__ GFNFF_KERNEL_BOUNDS void k_coulomb_implicit(
+    int natoms,
+    const double* __restrict__ alp,      ///< [N] charge-corrected alpeeq
+    double                     r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ charges,  ///< [N] EEQ charges per atom
+    double*                    grad,
+    double*                    energy
+);
+
 // ============================================================================
 // Bonded kernels: 1 thread = 1 interaction
 // ============================================================================

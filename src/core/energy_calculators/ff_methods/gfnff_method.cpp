@@ -21,6 +21,55 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/elements.h"
 #include "src/core/units.h"
+#include "src/core/blas_threads.h"
+#include "src/core/intra_parallel_context.h"
+
+#include <cstdlib>
+#include <mutex>
+
+// Claude Generated (Sep 2026, large systems): CURCUMA_GFNFF_PROFILE=1 accumulates the wall time
+// of every setup phase over BOTH q-loop topology passes and prints it once per molecule set-up
+// (the verbosity-2 parameter report only shows the last pass). Zero cost when unset.
+namespace {
+struct GfnffSetupProfile {
+    bool on = std::getenv("CURCUMA_GFNFF_PROFILE") != nullptr;
+    std::mutex mtx;
+    std::vector<std::pair<std::string, double>> acc;
+    void add(const char* name, double ms)
+    {
+        if (!on) return;
+        std::lock_guard<std::mutex> lock(mtx);
+        for (auto& e : acc)
+            if (e.first == name) { e.second += ms; return; }
+        acc.emplace_back(name, ms);
+    }
+    void report()
+    {
+        if (!on || acc.empty()) return;
+        std::lock_guard<std::mutex> lock(mtx);
+        std::string out = "GFN-FF setup profile (CURCUMA_GFNFF_PROFILE, summed over q-loop passes):\n";
+        for (const auto& e : acc)
+            out += fmt::format("  {:<50s} {:10.1f} ms\n", e.first, e.second);
+        CurcumaLogger::result(out);
+        acc.clear();
+    }
+};
+GfnffSetupProfile& setupProfile()
+{
+    static GfnffSetupProfile p;
+    return p;
+}
+struct SetupScope {
+    const char* name;
+    std::chrono::high_resolution_clock::time_point t0 = std::chrono::high_resolution_clock::now();
+    explicit SetupScope(const char* n) : name(n) {}
+    ~SetupScope()
+    {
+        setupProfile().add(name, std::chrono::duration<double, std::milli>(
+                                     std::chrono::high_resolution_clock::now() - t0).count());
+    }
+};
+} // namespace
 #include "src/core/math_compat.h"
 #include "src/core/periodic_table.h"
 #include "src/core/functional_groups.h"  // Claude Generated (January 10, 2026): Amide detection
@@ -786,6 +835,7 @@ bool GFNFF::InitialiseMolecule(const Mol& molecule)
 
 bool GFNFF::InitialiseMolecule()
 {
+    const auto init_t0 = std::chrono::high_resolution_clock::now();
     // F-Q4 (Claude Generated): fresh molecule -> clear the EEQ fail-loud state. The
     // solver is (re)created and exercised below; calculateTopologyInfo() sets the flag
     // if it falls back to placeholder charges.
@@ -931,6 +981,9 @@ bool GFNFF::InitialiseMolecule()
         CurcumaLogger::success("GFN-FF initialization complete");
         CurcumaLogger::param("initialized", "true");
     }
+    setupProfile().add("TOTAL InitialiseMolecule", std::chrono::duration<double, std::milli>(
+                                                     std::chrono::high_resolution_clock::now() - init_t0).count());
+    setupProfile().report();
 
     return true;
 }
@@ -3329,6 +3382,10 @@ bool GFNFF::initializeForceField()
 // Uses native generators for bonds/angles, converts JSON for remaining terms (incremental migration)
 GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
 {
+    SetupScope total_scope("TOTAL parameter set generation");
+    // Same OpenMP budget as calculateTopologyInfo (dispersion pair generation uses OpenMP).
+    const int gen_threads = curcuma::intraParallelSuppressed() ? curcuma::intraThreadBudget() : m_threads;
+    curcuma::ScopedBlasThreads gen_omp_threads(gen_threads);
     auto start_time = std::chrono::high_resolution_clock::now();
     const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
     double t_bonds = 0.0, t_angles = 0.0, t_torsions = 0.0, t_inversions = 0.0,
@@ -3383,7 +3440,13 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
 
     // Phase 6: Coulomb (native — no JSON)
     t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
-    params.coulombs = generateCoulombPairsNative();
+    if (m_implicit_coulomb_pairs && m_parameters.value("eeq_distance_cutoff", 0.0) <= 0.0) {
+        params.coulombs.clear();
+        params.coulomb_implicit = true;
+        params.coulomb_implicit_rcut = 100.0;   // same effective cutoff as generateCoulombPairsNative
+    } else {
+        params.coulombs = generateCoulombPairsNative();
+    }
     {
         // Claude Generated (Sep 2026): per-atom self-energy, independent of the
         // pair list above (fixes E=0 for isolated charged atoms — see
@@ -3513,6 +3576,13 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     m_param_gen_report.t_batm       = pos(t_batm);
     m_param_gen_report.t_hbxb       = pos(t_hbxb);
     m_param_gen_report.t_crossref   = pos(t_crossref);
+    for (const auto& [name, v] : { std::pair<const char*, double>{"param: bonds", pos(t_bonds)},
+                                   {"param: angles", pos(t_angles)}, {"param: torsions", pos(t_torsions)},
+                                   {"param: inversions", pos(t_inversions)}, {"param: coulomb pairs", pos(t_coulomb)},
+                                   {"param: repulsion pairs", pos(t_repulsion)}, {"param: dispersion pairs", pos(t_dispersion)},
+                                   {"param: BATM", pos(t_batm)}, {"param: HB/XB detection", pos(t_hbxb)},
+                                   {"param: HB cross-reference", pos(t_crossref)} })
+        setupProfile().add(name, v);
     m_param_gen_report.t_param_gen_total = m_param_gen_time_ms;
     m_param_gen_report.n_atoms     = m_atomcount;
     m_param_gen_report.n_threads   = m_threads;  // WP1
@@ -7624,7 +7694,10 @@ void GFNFF::buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<in
         topo.nb_full[b].push_back(a);
     }
 
-    topo.metallic_character = computeMetallicCharacter();
+    {
+        SetupScope sc("topo:     metallic character");
+        topo.metallic_character = computeMetallicCharacter();
+    }
 
     // icase 2 and 3 are NOT filtered views of icase 1 — they re-run the distance test.
     // Claude Generated (Sep 2026, GMTKN55 AL2X6/al2f6): getnb (gfnff_ini2.f90:361-419)
@@ -7666,7 +7739,12 @@ void GFNFF::buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<in
     // --- nb_hc: no highly-coordinated atoms (icase=2) ---
     // Fortran cycles the pair if EITHER endpoint's FULL CN exceeds its cap, so the
     // bond disappears from both rows.
+    auto t_hc0 = std::chrono::high_resolution_clock::now();
     topo.nb_hc.assign(m_atomcount, {});
+    // Claude Generated (Sep 2026): row i only writes nb_hc[i] and scans j in ascending order,
+    // so the parallel loop produces exactly the serial lists (7320 atoms: ~1 s per list, twice
+    // per q-loop -> the largest single topology cost).
+    #pragma omp parallel for schedule(dynamic, 16)
     for (int i = 0; i < m_atomcount; ++i) {
         if (static_cast<int>(topo.nb_full[i].size()) > hc_crit(m_atoms[i])) continue;
         for (int j = 0; j < m_atomcount; ++j) {
@@ -7679,6 +7757,9 @@ void GFNFF::buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<in
         }
     }
 
+    setupProfile().add("topo:     nb_hc list", std::chrono::duration<double, std::milli>(
+                                              std::chrono::high_resolution_clock::now() - t_hc0).count());
+    auto t_nbm0 = std::chrono::high_resolution_clock::now();
     // --- nbm: no metals and unusually coordinated stuff (icase=3) ---
     auto nbm_excluded = [&](int a) -> bool {
         const int z = m_atoms[a];
@@ -7688,6 +7769,7 @@ void GFNFF::buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<in
         return false;
     };
     topo.nb_nometal.assign(m_atomcount, {});
+    #pragma omp parallel for schedule(dynamic, 16)   // row-local writes, see nb_hc above
     for (int i = 0; i < m_atomcount; ++i) {
         if (nbm_excluded(i)) continue;
         for (int j = 0; j < m_atomcount; ++j) {
@@ -7700,8 +7782,13 @@ void GFNFF::buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<in
         }
     }
 
+    setupProfile().add("topo:     nb_nometal list", std::chrono::duration<double, std::milli>(
+                                                   std::chrono::high_resolution_clock::now() - t_nbm0).count());
     // --- itag: eta detection needs nbf and nbm (gfnff_ini2.f90:170-195) ---
-    topo.itag = computeEtaCoordination(topo.nb_full, topo.nb_nometal);
+    {
+        SetupScope sc("topo:     eta coordination");
+        topo.itag = computeEtaCoordination(topo.nb_full, topo.nb_nometal);
+    }
 
     // --- nbdum: per-atom mixture (gfnff_ini2.f90:197-202) ---
     nbdum.assign(m_atomcount, {});
@@ -9011,6 +9098,15 @@ std::pair<int, std::vector<int>> GFNFF::detectMolecularFragments(const std::vect
 
 GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
 {
+    SetupScope total_scope("TOTAL topology (both passes)");
+    // Claude Generated (Sep 2026): CxxThreadPool pins OpenMP to one thread process-wide (to keep
+    // molecule-parallel batches from oversubscribing), so every `omp parallel for` in the topology
+    // (distance matrix, CN, Dijkstra, neighbour lists) silently ran serial even with -threads 36.
+    // Open the GFN-FF thread budget for the topology; inside a molecule-level batch worker the
+    // budget is the batch's intra-thread share. All these loops write row-/atom-local results,
+    // so the output does not depend on the thread count.
+    const int topo_threads = curcuma::intraParallelSuppressed() ? curcuma::intraThreadBudget() : m_threads;
+    curcuma::ScopedBlasThreads topo_omp_threads(topo_threads);
     /**
      * Fortran q-loop (external/gfnff/src/gfnff_ini.f90:258-263, closes :632):
      *
@@ -9151,6 +9247,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     {
         std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
         m_param_gen_report.t_distance_matrix = static_cast<double>(dt.count());
+        setupProfile().add("topo: distance matrix", static_cast<double>(static_cast<double>(dt.count())));
         phase_timer = std::chrono::high_resolution_clock::now();
     }
 
@@ -9159,7 +9256,10 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Phase 2.2: Building adjacency list");
     }
-    const auto& bond_list = getCachedBondList();
+    const auto& bond_list = [&]() -> const std::vector<std::pair<int,int>>& {
+        SetupScope sc("topo:   bond list");
+        return getCachedBondList();
+    }();
 
     if (std::getenv("CURCUMA_BONDDUMP")) {
         for (const auto& [ai, aj] : bond_list) {
@@ -9174,7 +9274,10 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // eta-aware mixture nbdum, which becomes the working adjacency exactly as Fortran
     // does at gfnff_ini2.f90:335 (topo%nb = nbdum). Claude Generated (Jul 2026).
     std::vector<std::vector<int>> nbdum;
-    buildNeighborListSet(topo_info, nbdum);
+    {
+        SetupScope sc("topo:   neighbour list set (nbf/nb_hc/nb_nometal)");
+        buildNeighborListSet(topo_info, nbdum);
+    }
     topo_info.adjacency_list = nbdum;
 
     // Optional diff of the two hybridization assignments (energies unaffected).
@@ -9218,6 +9321,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         topo_info.fraglist = m_frag_carry_list;
         topo_info.qfrag = m_frag_carry_qfrag;
     } else {
+        SetupScope sc("topo:   fragments");
         auto frag_res = detectMolecularFragments(topo_info.nb_full);
         topo_info.nfrag = frag_res.first;
         topo_info.fraglist = frag_res.second;
@@ -9234,13 +9338,18 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
 
     // Calculate all topology information (Phase 2 implementations)
     // Phase 2C: Migrate to shared CNCalculator for GFN-FF CN calculation
-    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+    std::vector<double> cn_vec;
+    {
+        SetupScope sc("topo:   GFN-FF CN (full O(N^2))");
+        cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+    }
     topo_info.coordination_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
 
     // Hybridization. The Fortran-faithful path reads all four lists (gfnff_ini2.f90:211-333)
     // and additionally writes itag (+1 for carbenes / NO2 nitrogen) on top of the -1 eta tags
     // already set by buildNeighborListSet. Claude Generated (Jul 2026).
     if (m_use_fortran_hyb) {
+        SetupScope sc("topo:   hybridization");
         topo_info.hybridization = determineHybridizationFortran(
             topo_info, nbdum, topo_info.distance_matrix, topo_info.itag);
     } else {
@@ -9250,12 +9359,18 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // NOTE: Removed std::async parallelization (May 2026) to prevent nested thread
     // creation when GFN-FF is called from an external thread pool (e.g. ConfSearch).
     // The overhead is negligible for parameter generation; thread safety is critical.
-    topo_info.pi_fragments = detectPiSystems(topo_info.hybridization, topo_info.adjacency_list, topo_info.nb_full);
+    {
+        SetupScope sc("topo:   pi systems");
+        topo_info.pi_fragments = detectPiSystems(topo_info.hybridization, topo_info.adjacency_list, topo_info.nb_full);
+    }
     // neighbor_lists is an alias of adjacency_list (== Fortran topo%nb after gfnff_ini2.f90:335).
     // itag is already set by buildNeighborListSet (eta) and determineHybridizationFortran (carbene/NO2).
     topo_info.neighbor_lists = topo_info.adjacency_list;
     // Fortran perceives rings on the metal-free list (gfnff_ini.f90:692 getring36(...,nbm,...)).
-    topo_info.ring_sizes = findSmallestRings(topo_info.nb_nometal, topo_info);
+    {
+        SetupScope sc("topo:   rings");
+        topo_info.ring_sizes = findSmallestRings(topo_info.nb_nometal, topo_info);
+    }
 
     // Calculate simple neighbor counts for XTB compatibility in torsions
     // XTB uses raw neighbor count (topo%nb(20,i)) rather than effective CN for torsion correction
@@ -9268,6 +9383,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     {
         std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
         m_param_gen_report.t_cn_hyb_pi_rings = static_cast<double>(dt.count());
+        setupProfile().add("topo: CN + hyb + pi + rings (block)", static_cast<double>(static_cast<double>(dt.count())));
         phase_timer = std::chrono::high_resolution_clock::now();
     }
 
@@ -9541,6 +9657,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         {
             std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
             m_param_gen_report.t_eeq_phase1 = static_cast<double>(dt.count());
+            setupProfile().add("topo: EEQ phase 1", static_cast<double>(static_cast<double>(dt.count())));
             phase_timer = std::chrono::high_resolution_clock::now();
         }
 
@@ -9595,6 +9712,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         {
             std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
             m_param_gen_report.t_eeq_phase1_corr = static_cast<double>(dt.count());
+            setupProfile().add("topo: EEQ phase 1 corrections", static_cast<double>(static_cast<double>(dt.count())));
             phase_timer = std::chrono::high_resolution_clock::now();
         }
         } // end if (!topology_from_cache)
@@ -9701,6 +9819,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         // A0 (Jul 2026): sub-ms resolution, matching the per-step PrepTiming idiom.
         std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
         m_param_gen_report.t_eeq_phase2 = dt.count();
+        setupProfile().add("topo: EEQ phase 2", static_cast<double>(dt.count()));
         phase_timer = std::chrono::high_resolution_clock::now();
     }
 
@@ -9858,6 +9977,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         // A0: ipis per-pi-system EEQ re-solves (one full topology-charge solve each)
         std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
         m_param_gen_report.t_pi_charges_eeq = dt.count();
+        setupProfile().add("topo: pi charges ipis EEQ", static_cast<double>(dt.count()));
         phase_timer = std::chrono::high_resolution_clock::now();
     }
 
@@ -9905,6 +10025,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         // A0: the FT-HMO (Hueckel) solve itself
         std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
         m_param_gen_report.t_huckel = dt.count();
+        setupProfile().add("topo: Hueckel pi bond orders", static_cast<double>(dt.count()));
         phase_timer = std::chrono::high_resolution_clock::now();
     }
 
@@ -10030,6 +10151,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         // A0: bond-type classification loop (is_metal/is_aromatic + classifyBondType)
         std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
         m_param_gen_report.t_bond_types = dt.count();
+        setupProfile().add("topo: bond types", static_cast<double>(dt.count()));
         phase_timer = std::chrono::high_resolution_clock::now();
     }
 
@@ -10121,6 +10243,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     {
         std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
         m_param_gen_report.t_topo_distances = static_cast<double>(dt.count());
+        setupProfile().add("topo: topo distances + BATM list", static_cast<double>(static_cast<double>(dt.count())));
     }
 
     // Claude Generated (March 2026): Timing summary

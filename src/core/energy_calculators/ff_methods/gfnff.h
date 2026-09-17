@@ -297,6 +297,7 @@ PARAM(hb_update_rmsd_bohr, Double, 0.3, "Task 11: per-atom RMSD (Bohr) that trig
 PARAM(hb_update_force_every, Int, 0, "Task 11: force an HB/XB list rebuild every N gradient steps (0 = RMSD-triggered only). Use for continuous MD where near-threshold pairs must be re-classified promptly.", "Performance", {})
 PARAM(eeq_mixed_precision, Bool, false, "WP-B GPU only: factor the EEQ Coulomb matrix in FP32 then refine the solution with the FP64 residual, dsposv-style, for full FP64 accuracy at a fraction of the FP64-factor cost on FP64-weak GPUs. Opt-in on CUDA and ROCm (default OFF; enable per card after measuring). Applies to the factor-dominated few-fragment solve paths; the many-fragment general path stays FP64.", "Performance", {})
 PARAM(eeq_mixed_precision_iters, Int, 2, "WP-B GPU only: number of FP64-residual / FP32-correction refinement steps for eeq_mixed_precision. Minimum 1. Two steps reach FP64 accuracy on the validation set.", "Performance", {})
+PARAM(gpu_coulomb_implicit, Bool, true, "GPU only: the device enumerates all Coulomb atom pairs itself (per-atom gather, gamma_ij from per-atom alpeeq) instead of reading an N^2/2 pair list built on the host. Saves the host list (24.5 M pairs / 2.7 GB and ~1.5 s at 7320 atoms). Not used with eeq_distance_cutoff > 0. Set false for the stored pair list.", "Performance", {})
 PARAM(gpu_disp_pairs_on_device, Bool, false, "WP-A GPU only: build the D4 dispersion pair list on the device via a two-pass enumeration plus per-pair C6 contraction, replacing the host O(N^2) GenerateDispersionPairsNative loop and the per-build H2D upload. Default OFF keeps the proven host build. Bit-identical to the host list up to the FP order of the device Gaussian weights.", "Performance", {})
 PARAM(eeq_rocm_cpu_fragment_threshold, Int, 16, "ROCm GFN-FF only: fragment count at or above which the device EEQ solve is replaced by the exact CPU PCG block-Jacobi warm-start solver, whose O(N^2 k) cost beats the device dense N x N Cholesky O(N^3) for solvent boxes and keeps ROCm charges identical to the CPU path. Set 0 to always use the device solve.", "Performance", {})
 // Implicit solvation (WP5, Claude Generated June 2026). Registering these here is
@@ -699,6 +700,11 @@ public:
     /// pair loop (the GPU builds the pair list on device). Must be set before
     /// InitialiseMolecule. No effect on the CPU path.
     void setSkipHostDispPairs(bool v) { m_skip_host_disp_pairs = v; }
+
+    /// Claude Generated (Sep 2026): set by the GPU method so the host does not build the
+    /// N^2/2 Coulomb pair list (the device enumerates the pairs). Only honoured without an
+    /// EEQ distance cutoff. Must be set before InitialiseMolecule. No effect on the CPU path.
+    void setImplicitCoulombPairs(bool v) { m_implicit_coulomb_pairs = v; }
 
     /**
      * @brief Export topology information for restart/topology I/O
@@ -2510,6 +2516,7 @@ private:
     // Claude Generated (March 2026): Topology persistence in param.json
     bool m_cache_topology = true;   ///< Cache Phase-1 EEQ topology in param.json (opt-out)
     bool m_skip_host_disp_pairs = false;  ///< WP-A: GPU builds D4 pairs; skip host O(N^2) loop
+    bool m_implicit_coulomb_pairs = false; ///< GPU enumerates Coulomb pairs; skip host list
     bool m_print_timing = true;     ///< Print init timing summary at verbosity >= 1
 
     // Claude Generated (April 2026): Timing for consolidated summary

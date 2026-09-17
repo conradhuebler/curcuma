@@ -262,6 +262,11 @@ struct GFNFFParameterSet {
     Eigen::VectorXd coul_self_chi_base, coul_self_gam, coul_self_alp,
         coul_self_cnf, coul_self_chi_static;
 
+    // Claude Generated (Sep 2026): the GPU enumerates all Coulomb pairs itself (no `coulombs`
+    // list); cutoff for that implicit loop (100 Bohr = the no-cutoff reference value).
+    bool   coulomb_implicit = false;
+    double coulomb_implicit_rcut = 100.0;
+
     // Three-body terms
     std::vector<GFNFFHydrogenBond> hbonds;
     std::vector<GFNFFHalogenBond> xbonds;

@@ -155,6 +155,25 @@ polymer GFN2, one A4500, `-scf_fp32_threshold`:
 
 complex: 3.5e-4 Eh/A GPU-vs-CPU gradient difference at both thresholds (known: the loose default `scf_threshold` lands the device Broyden at a different point; use `-scf_threshold 1e-8` for gradients).
 
+## Step 2: GFN-FF setup (Sep 17, 2026, in progress)
+
+`CURCUMA_GFNFF_PROFILE=1` prints every setup phase summed over both q-loop passes (the verbosity-2 report shows only the last pass) and the GPU upload phases.
+
+Findings on polymer_2x (7320 atoms, 1502 fragments):
+- **OpenMP was pinned to one thread**: `CxxThreadPool` calls `omp_set_num_threads(1)` process-wide, so every `omp parallel for` in the topology (distance matrix, CN, Dijkstra) ran serially even with `-threads 36`. Topology and parameter generation now open the GFN-FF thread budget with `ScopedBlasThreads` (inside a batch worker the batch's intra budget). All affected loops write row/atom-local results; energy identical to 12 digits.
+- **nb_hc / nb_nometal** neighbour lists (2 x ~1 s per pass) parallelised over rows: 2.2 s -> 0.29 s. GFN-FF CN 0.33 -> 0.02 s.
+- **Implicit Coulomb pairs on the GPU** (`-gpu_coulomb_implicit`, default true): the device gathers over all atom pairs (`k_coulomb_implicit`, gamma_ij = 1/sqrt(alp_i + alp_j) from per-atom alpeeq) instead of reading the host-built N^2/2 list (24.5 M pairs, 2.7 GB, kept twice on the host). Not used with `eeq_distance_cutoff > 0`.
+
+| polymer_2x GFN-FF single point | before | now |
+|---|---|---|
+| CPU (-threads 36), wall | 9.5 s | 6.9 s |
+| GPU (1x A4500), wall | 13.2 s | **7.4 s** |
+| GPU, host peak RSS | 11.0 GB | **4.8 GB** |
+
+Energies: CPU -898.805534472558 identical; GPU pair list vs implicit -898.805533905291 / ...292, gradients <= 2e-15 (complex, polymer, polymer_2x). ctest gfnff/GPU/MD/opt: 215/216 (only the known `cli_curcumaopt_07` golden drift).
+
+Remaining setup costs (GPU run): EEQ phase 1 + 2 ~3.3 s (projected PCG, 1502 fragment constraints), dispersion pairs 0.64 s, topo distances + BATM list 0.52 s, bond list 0.32 s.
+
 ## GPU phase profiler
 `CURCUMA_GPU_PROFILE=1 curcuma -sp mol.xyz -method gfn2 -gpu cuda -verbosity 1` prints stream-synchronised per-phase device timings (integrals, potential, Fock, reduce / syevd / back-transform for FP32 and FP64, density, charges, energy, Broyden). Off by default (no synchronisation cost). `-verbosity 2` additionally shows a `pre-SCF` line (device uploads, EEQ guess) that was previously only inside TOTAL.
 

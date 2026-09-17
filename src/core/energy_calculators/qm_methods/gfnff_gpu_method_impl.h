@@ -329,6 +329,12 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
         if (m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
             disp_dev = disp_dev || m_parameters["gfnff"].value("gpu_disp_pairs_on_device", false);
         m_gfnff->setSkipHostDispPairs(disp_dev);
+        // Claude Generated (Sep 2026): the device enumerates the Coulomb pairs itself;
+        // `-gpu_coulomb_implicit false` restores the host pair list.
+        bool coul_implicit = m_parameters.value("gpu_coulomb_implicit", true);
+        if (m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
+            coul_implicit = m_parameters["gfnff"].value("gpu_coulomb_implicit", coul_implicit);
+        m_gfnff->setImplicitCoulombPairs(coul_implicit);
         m_gfnff->setKeepFullParameterSet(true);  // consumeCachedParameterSet() needs every pair list
     }
 
