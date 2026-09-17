@@ -391,6 +391,47 @@ For scale, the 1e-8 tblite gate is 10000x looser than the energy shift, and the
 default `scf_threshold=1e-5` already costs 1.1e-6 Eh/Bohr on its own — four times
 more. Use `-scf_mixed_precision false` when maximum gradient precision matters.
 
+## Mixed precision: reduce in FP64, diagonalise in FP32 (2026-09)
+
+The mixed-precision branch above did the WHOLE generalized reduction in FP32
+(`ssygst`) as well. On a larger basis and with threads that is a severe
+pessimization, because this machine's OpenMP OpenBLAS has no optimised
+single-precision triangular kernels:
+
+| n = 3222, 8 threads (polymer, in-process probe) | FP64 | FP32 |
+|---|---:|---:|
+| `?sygst` (reduce) | **193 ms** | 2430 ms |
+| two `?trsm` (same reduction) | **203 ms** | 2558 ms |
+| `?syevd` (eigensolve) | 1341 ms | **920 ms** |
+
+So FP32 is the right choice for the eigensolve and the wrong one for the
+reduction, by more than a factor of ten. The branch now reduces with `dsygst`,
+casts the reduced matrix once, and calls `ssyevd`:
+
+| polymer (1410 atoms, nao 3222), gfn2, 36 threads | wall | reduce/it | syevd/it |
+|---|---:|---:|---:|
+| before, `-scf_mixed_precision true` (default) | 44.2 s | 1523 ms | 921 ms |
+| before, `-scf_mixed_precision false` | 33.8 s | 221 ms | 1346 ms |
+| **after, default** | **29.3 s** | 230 ms | 920 ms |
+| after, `-scf_mixed_precision false` | 34.3 s | 223 ms | 1341 ms |
+
+Energies identical to the printed 8 decimals in all four; the FP64 path is
+bit-identical to before (gradient diff 0.0), and the mixed-precision gradient
+moved *closer* to it (1.9e-7 -> 6.3e-8 Eh/Angstrom). `ctest`: the 65 validation
+tests pass, full suite shows only the four documented pre-existing failures.
+
+`CURCUMA_XTB_REDUCE_PROBE=1` prints the table above for the running system
+(sizes and thread counts as used) - worth doing once per machine, since the
+verdict depends entirely on the BLAS build.
+
+**Measured on this machine, not yet a default**: with the reduction no longer
+dominating, the eigensolve thread cap of 8 (`CURCUMA_EIG_MAX_THREADS`, see
+[SQM_THREADING.md](SQM_THREADING.md)) is no longer the optimum. polymer, 36-core
+machine: cap 8 -> 27.1 s, **cap 16 -> 23.8 s**, cap 24 -> 26.5 s (gfn1: 29.4 ->
+24.4 s at cap 16); complex/231 is unaffected (1.11 s either way, the size gate
+keeps it serial). Raising the default is an operator decision because the
+optimum is machine-dependent.
+
 ## The iteration-count gap is a criterion artifact, not slower iterations
 
 gxtb converges `complex` in **15** iterations, curcuma in **19** — but per

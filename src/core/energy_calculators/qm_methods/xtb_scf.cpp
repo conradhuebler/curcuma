@@ -16,6 +16,10 @@
  * Claude Generated. GPL-3.0.
  */
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include <limits>
 #include "xtb_native.h"
 #include "native_eigensolver.h"
@@ -343,6 +347,7 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
             // Native path (no LAPACK eigensolve): reduce A = L⁻¹·F·L⁻ᵀ with Eigen
             // triangular solves (BLAS dtrsm), then diagonalise with our own self-contained
             // solver. Y = L⁻¹·F; A = L⁻¹·Yᵀ = L⁻¹·F·L⁻ᵀ (F symmetric). Claude Generated.
+            ++m_eig_calls_native;
             const Eigen::MatrixXd Y = m_X.triangularView<Eigen::Lower>().solve(F);
             A = m_X.triangularView<Eigen::Lower>().solve(Y.transpose());
             const auto te1 = clk::now();
@@ -356,17 +361,25 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
             m_t_xfx  += ms(te0, te1);            // reduce (triangular solves)
             m_t_diag += ms(te1, te2);            // native eigensolve
         } else if (!lobpcg_done && m_eig_fp32 && !use_lobpcg) {
-            // Mixed-precision early iteration (opt-in): FP32 reduce (ssygst) + FP32
-            // divide-and-conquer (ssyevd), ~2x faster. The FP64 back-transform below runs on
-            // the FP32-quality eigenvectors; the SCF loop reverts to the FP64 branch once
-            // max|dq| < scf_fp32_threshold, so the converged fixed point — and the energy —
-            // is FP64. Claude Generated.
-            Eigen::MatrixXf Af = F.cast<float>();
-            Eigen::MatrixXf Lf = m_X.cast<float>();
+            // Mixed-precision iteration (opt-in): the REDUCTION stays FP64 (dsygst) and only the
+            // divide-and-conquer eigensolve runs in FP32 (ssyevd). Reducing in FP32 as well
+            // (ssygst) was measured 12x SLOWER than FP64 with the OpenMP OpenBLAS build used
+            // here - its single-precision triangular kernels are not optimised: n = 3222,
+            // 8 threads, ssygst 2430 ms vs dsygst 193 ms, strsm-pair 2558 vs dtrsm-pair 203 ms
+            // (CURCUMA_XTB_REDUCE_PROBE=1 prints this on any machine). ssyevd, in contrast, is
+            // the faster one (polymer: 0.92 vs 1.35 s per iteration), so the split pays.
+            // The FP64 back-transform below runs on the FP32-quality eigenvectors; the SCF
+            // reverts to the FP64 branch once max|dq| < scf_fp32_threshold, so the converged
+            // fixed point - and the energy - is FP64. Claude Generated.
+            ++m_eig_calls_fp32;
+            A = F;                               // row-major Matrix -> column-major (transpose copy)
+            const auto te0b = clk::now();
             int itype = 1;
-            ssygst_(&itype, &uplo, &n, Af.data(), &n, Lf.data(), &n, &info);
+            dsygst_(&itype, &uplo, &n, A.data(), &n, m_X.data(), &n, &info);
             if (info != 0) return false;
+            Eigen::MatrixXf Af = A.cast<float>();
             const auto te1 = clk::now();
+            m_t_xfx_copy += ms(te0, te0b);
             int lwork = 1 + 6 * n + 2 * n * n, liwork = 3 + 5 * n;
             // Persistent scratch (Claude Generated, Sep 2026): the ~2·nao² work
             // array was allocated (and zero-filled) on every SCF iteration.
@@ -378,18 +391,68 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
                     m_lapack_work_f.data(), &lwork, m_lapack_iwork.data(), &liwork, &info);
             if (info != 0) return false;
             const auto te2 = clk::now();
-            A   = Af.cast<double>();             // standard-form eigenvectors → FP64 for the shared back-transform
+            A   = Af.cast<double>();             // standard-form eigenvectors → FP64 back-transform
             eps = epsf.cast<double>();
-            m_t_xfx  += ms(te0, te1);            // reduce (ssygst)
+            m_t_xfx  += ms(te0, te1);            // reduce (dsygst) + cast to FP32
             m_t_diag += ms(te1, te2);            // ssyevd
         } else if (!lobpcg_done) {
             // MKL path (default, and the LOBPCG dense fallback): reduce F to standard form
             // (dsygst, in-place lower triangle) then solve with the divide-and-conquer dsyevd.
-            A = F;
+            // Claude Generated (Sep 2026): CURCUMA_XTB_REDUCE_PROBE=1 times the reduction in this
+            // process once (dsygst at 1/8/all OMP threads and the equivalent pair of dtrsm calls),
+            // to tell a slow LAPACK path apart from a starved BLAS thread pool.
+            if (std::getenv("CURCUMA_XTB_REDUCE_PROBE") && m_t_xfx_copy == 0.0) {
+                Eigen::MatrixXd P0 = F, Lc = m_X;
+                const int itype_p = 1;
+                int info_p = 0;
+#ifdef _OPENMP
+                const int omp_now = omp_get_max_threads();
+                const int hw = omp_get_num_procs();
+#else
+                const int omp_now = 1, hw = 1;
+#endif
+                for (int nt : { 0, 1, 8, hw }) {   // 0 = leave the thread count untouched
+#ifdef _OPENMP
+                    if (nt > 0) omp_set_num_threads(nt);
+#endif
+                    Eigen::MatrixXd Ap = P0;
+                    const auto p0 = clk::now();
+                    dsygst_(&itype_p, &uplo, &n, Ap.data(), &n, Lc.data(), &n, &info_p);
+                    const double t_sygst = ms(p0, clk::now());
+                    Eigen::MatrixXd Bp = P0;
+                    const auto p1 = clk::now();
+                    Lc.triangularView<Eigen::Lower>().solveInPlace(Bp);
+                    Lc.triangularView<Eigen::Lower>().transpose().template solveInPlace<Eigen::OnTheRight>(Bp);
+                    const double t_trsm = ms(p1, clk::now());
+                    // FP32 equivalents (the mixed-precision branch uses ssygst).
+                    Eigen::MatrixXf Afp = P0.cast<float>(), Lfp = Lc.cast<float>();
+                    const auto p2 = clk::now();
+                    ssygst_(&itype_p, &uplo, &n, Afp.data(), &n, Lfp.data(), &n, &info_p);
+                    const double t_ssygst = ms(p2, clk::now());
+                    Eigen::MatrixXf Bfp = P0.cast<float>();
+                    const auto p3 = clk::now();
+                    Lfp.triangularView<Eigen::Lower>().solveInPlace(Bfp);
+                    Lfp.triangularView<Eigen::Lower>().transpose().template solveInPlace<Eigen::OnTheRight>(Bfp);
+                    const double t_strsm = ms(p3, clk::now());
+                    CurcumaLogger::info_fmt("reduce probe n={} omp={}: dsygst {:.1f} / 2x dtrsm {:.1f} / "
+                                            "ssygst {:.1f} / 2x strsm {:.1f} ms",
+                                            n, nt, t_sygst, t_trsm, t_ssygst, t_strsm);
+                }
+#ifdef _OPENMP
+                omp_set_num_threads(omp_now);
+#endif
+            }
+            ++m_eig_calls_lapack;
+            A = F;                               // row-major Matrix -> column-major (transpose copy)
+            const auto te0b = clk::now();
             int itype = 1;
             dsygst_(&itype, &uplo, &n, A.data(), &n, m_X.data(), &n, &info);
             if (info != 0) return false;
             const auto te1 = clk::now();
+            m_t_xfx_copy += ms(te0, te0b);
+#ifdef _OPENMP
+            m_blas_threads = omp_get_max_threads();
+#endif
             int lwork = 1 + 6 * n + 2 * n * n, liwork = 3 + 5 * n;
             // Persistent scratch (Claude Generated, Sep 2026): for nao=4000 the
             // work array is 256 MB; allocating + zero-filling it per iteration

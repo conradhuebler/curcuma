@@ -1286,6 +1286,12 @@ private:
     // solveEigen() and printed at verbosity >= 3. Reset in Calculation().
     // Claude Generated 2026-06 (SCF profiling).
     mutable double m_t_xfx = 0.0;   // X·F·X transform (two GEMMs)
+    // Claude Generated (Sep 2026): the reduce timer above covers a row-major -> column-major
+    // copy of F plus the LAPACK call; they are timed separately here because the copy turned out
+    // to be a large share. m_blas_threads records what the BLAS actually had during the solve.
+    mutable double m_t_xfx_copy = 0.0;
+    mutable int    m_blas_threads = 0;
+    mutable int    m_eig_calls_native = 0, m_eig_calls_fp32 = 0, m_eig_calls_lapack = 0;
     mutable double m_t_diag = 0.0;  // dsyevd standard eigensolve
     mutable double m_t_back = 0.0;  // back-transform C = X·C~ (one GEMM)
     mutable double m_t_dens = 0.0;  // density P = C·occ·Cᵀ

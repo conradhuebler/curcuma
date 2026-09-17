@@ -765,7 +765,8 @@ double XTB::Calculation(bool gradient)
     // run unconditionally, matching the existing per-iter timer. Claude Generated.
     double acc_pot = 0.0, acc_fock = 0.0, acc_solve = 0.0, acc_mull = 0.0, acc_energy = 0.0;
     double acc_disp = 0.0;   // D4 in-SCF potential subset of acc_pot (GFN2), verbosity 3
-    m_t_xfx = m_t_diag = m_t_back = m_t_dens = 0.0;
+    m_t_xfx = m_t_diag = m_t_back = m_t_dens = m_t_xfx_copy = 0.0;
+    m_eig_calls_native = m_eig_calls_fp32 = m_eig_calls_lapack = 0;
 
     // Intra-molecule thread count for the per-iteration eigensolve. The eigensolve
     // (dsygst/dsyevd/dtrsm) is the one region handed to MKL rather than the
@@ -1614,6 +1615,13 @@ double XTB::Calculation(bool gradient)
         CurcumaLogger::info_fmt("  build Fock      : {:8.2f} ms ({:5.2f}/it)", acc_fock,   acc_fock / it);
         CurcumaLogger::info_fmt("  solve eigen     : {:8.2f} ms ({:5.2f}/it)", acc_solve,  acc_solve / it);
         CurcumaLogger::info_fmt("    - reduce      : {:8.2f} ms ({:5.2f}/it)", m_t_xfx,    m_t_xfx / it);
+        if (m_t_xfx_copy > 0.0)
+            CurcumaLogger::info_fmt("      - of which F copy (row->col major) : {:8.2f} ms ({:5.2f}/it)",
+                                    m_t_xfx_copy, m_t_xfx_copy / it);
+        CurcumaLogger::info_fmt("      - eigensolve branch calls: lapack {}, native {}, fp32 {}",
+                                m_eig_calls_lapack, m_eig_calls_native, m_eig_calls_fp32);
+        if (m_blas_threads > 0)
+            CurcumaLogger::info_fmt("      - BLAS/LAPACK threads in the solve : {}", m_blas_threads);
         CurcumaLogger::info_fmt("    - dsyevd      : {:8.2f} ms ({:5.2f}/it)", m_t_diag,   m_t_diag / it);
         CurcumaLogger::info_fmt("    - back-transf : {:8.2f} ms ({:5.2f}/it)", m_t_back,   m_t_back / it);
         CurcumaLogger::info_fmt("    - density P   : {:8.2f} ms ({:5.2f}/it)", m_t_dens,   m_t_dens / it);
