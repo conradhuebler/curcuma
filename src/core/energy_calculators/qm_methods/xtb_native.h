@@ -994,6 +994,10 @@ private:
     // (already filled by GpuScfBackend::downloadMultipoleInts); only the CN-damping
     // radii + atom-pair interaction matrices are computed. Claude Generated (Stage 3m).
     void setupMultipole(bool integrals_on_device = false);   // xtb_multipole.cpp (GFN2)
+    /// Build the host dense dipole/quadrupole AO integrals if their build was deferred
+    /// because a large system runs the fully device-resident GPU SCF (Claude Generated,
+    /// Sep 2026). Every host path that reads m_dp_int/m_qp_int calls this first.
+    void ensureHostMultipoleIntegrals();
     Vector computeCoordinationNumbers() const;           // xtb_native.cpp
     void buildReferenceOccupations();                    // xtb_native.cpp
 
@@ -1207,6 +1211,7 @@ private:
     std::vector<double> m_mp_dkernel;
     std::vector<double> m_mp_qkernel;
     bool m_mp_initialized = false;
+    bool m_mp_ints_deferred = false;   // host m_dp_int/m_qp_int not built yet (GPU large system)
 
     // B0 (Jul 2026): setupMultipole() sub-phase timings (ms), for the verbosity-3
     // setup report. The single "multipole setup" bucket could not be attributed.

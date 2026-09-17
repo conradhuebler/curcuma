@@ -41,6 +41,13 @@ namespace MI = multipole_ints;
  *  2. CN-dependent damping radii mrad                                *
  *  3. Interaction matrices amat_sd, amat_dd, amat_sq                 *
  * ------------------------------------------------------------------ */
+void XTB::ensureHostMultipoleIntegrals()
+{
+    if (!m_mp_ints_deferred) return;
+    m_mp_ints_deferred = false;
+    setupMultipole(false);   // full host build (integrals + radii + interaction matrices)
+}
+
 void XTB::setupMultipole(bool integrals_on_device)
 {
     const int nat = m_atomcount;

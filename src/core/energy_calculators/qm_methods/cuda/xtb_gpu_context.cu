@@ -284,6 +284,11 @@ struct XtbGpuContext::Impl {
     double sp_rmax = 0.0;            // largest element-pair cutoff (Bohr)
     CudaBuffer<int>    dSpRow, dSpCol, dSpColPtr, dSpPerm;
     CudaBuffer<double> dSpS, dSpH0, dSpDp, dSpQp, dSpTmp;
+    // Density: the resident screened loop keeps P only on the pattern (dSpP) and rebuilds the
+    // dense dP on demand (gradient, host download). p_dense_valid says which one is current.
+    CudaBuffer<double> dSpP;
+    bool               p_dense_valid = true;
+    int                last_ncol = 0;
     std::vector<int>   h_sp_row, h_sp_col;       // host copy (dense downloads)
     // Per-atom screening data captured in beginBasis (geometry independent).
     std::vector<int>    h_z, h_at_ao0, h_at_nao;
@@ -301,9 +306,10 @@ struct XtbGpuContext::Impl {
             b->free();
         for (CudaBuffer<float>* b : { &dCf, &dLf, &dWorkf })
             b->free();
-        for (CudaBuffer<double>* b : { &dSpS, &dSpH0, &dSpDp, &dSpQp, &dSpTmp })
+        for (CudaBuffer<double>* b : { &dSpS, &dSpH0, &dSpDp, &dSpQp, &dSpTmp, &dSpP })
             b->free();
         mp_otf = false;
+        p_dense_valid = true;
         for (CudaBuffer<int>* b : { &dSpRow, &dSpCol, &dSpColPtr, &dSpPerm })
             b->free();
         h_sp_row.clear(); h_sp_row.shrink_to_fit();
@@ -1180,6 +1186,65 @@ __global__ void k_multipole_moments_sp(double* dp_at, double* qp_at, const doubl
         const double* qk = qp_sp + static_cast<size_t>(k) * ne;
         double acc = 0.0;
         for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) acc += P[col + row[e]] * qk[e];
+        atomicAdd(&qp_at[k + iat * 6], -acc);
+    }
+}
+
+// Density on the screened pattern only (Claude Generated, Sep 2026). Populations, multipole
+// moments and the band energy read P exclusively at stored pairs, so the SCF loop never needs
+// the dense nao x nao product: P(row,col) = sum_k Cw(row,k) C(col,k) with Cw = C diag(occ),
+// the same sum the dense GEMM P = Cw C^T performs for that element. polymer_2x: 6 % of the
+// elements (the dense GEMM was 26 % of the SCF time) and no dense P buffer during the loop.
+__global__ void k_density_sp(int nnz, const int* __restrict__ row, const int* __restrict__ col,
+                             const double* __restrict__ Cw, const double* __restrict__ C,
+                             int n, int ncol, double* __restrict__ Psp)
+{
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= nnz) return;
+    const size_t r = static_cast<size_t>(row[e]), c = static_cast<size_t>(col[e]);
+    double acc = 0.0;
+    for (int k = 0; k < ncol; ++k) {
+        const size_t off = static_cast<size_t>(k) * n;
+        acc += Cw[r + off] * C[c + off];
+    }
+    Psp[e] = acc;
+}
+
+// pop(mu) = sum_nu P(mu,nu) S(mu,nu) from pattern-only P (both at the transposed entry).
+__global__ void k_pop_ao_spP(double* __restrict__ pop, const double* __restrict__ Psp,
+                             const double* __restrict__ Ssp, const int* __restrict__ colptr,
+                             const int* __restrict__ perm, int n)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mu >= n) return;
+    double s = 0.0;
+    for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) {
+        const int t = perm[e];
+        s += Psp[t] * Ssp[t];
+    }
+    pop[mu] = s;
+}
+
+// Multipole moments from pattern-only P: column mu, P(row,mu) = Psp[e].
+__global__ void k_multipole_moments_spP(double* dp_at, double* qp_at, const double* __restrict__ Psp,
+                                        const double* __restrict__ dp_sp, const double* __restrict__ qp_sp,
+                                        const int* __restrict__ colptr, const int* __restrict__ ao2at,
+                                        int n, int nnz)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mu >= n) return;
+    const size_t ne = static_cast<size_t>(nnz);
+    const int iat = ao2at[mu];
+    for (int k = 0; k < 3; ++k) {
+        const double* dk = dp_sp + static_cast<size_t>(k) * ne;
+        double acc = 0.0;
+        for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) acc += Psp[e] * dk[e];
+        atomicAdd(&dp_at[k + iat * 3], -acc);
+    }
+    for (int k = 0; k < 6; ++k) {
+        const double* qk = qp_sp + static_cast<size_t>(k) * ne;
+        double acc = 0.0;
+        for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) acc += Psp[e] * qk[e];
         atomicAdd(&qp_at[k + iat * 6], -acc);
     }
 }
@@ -2306,6 +2371,8 @@ bool XtbGpuContext::residentDensity(const double* occ, int ncol, int n,
     cudaStream_t stream = m_impl->stream;
     const double one = 1.0, zero = 0.0;
 
+    try { m_impl->dP.ensure(static_cast<int>(static_cast<size_t>(n) * n)); } catch (...) { return false; }
+    m_impl->p_dense_valid = true;
     if (ncol > 0) {
         m_impl->dOcc.upload(occ, ncol, stream);
         // Cw(:,k) = occ[k]·C(:,k)  for k < ncol  (n x ncol; Claude Generated Sep 2026: sized to
@@ -2343,24 +2410,68 @@ bool XtbGpuContext::residentDensity(const double* occ, int ncol, int n,
 bool XtbGpuContext::residentDensityResident(int n, int ncol, double* band_out)
 {
     if (!ok() || n <= 0 || n != m_impl->resident_n || !band_out) return false;
-    cudaStream_t stream = m_impl->stream;
+    Impl& I = *m_impl;
+    cudaStream_t stream = I.stream;
     const double one = 1.0, zero = 0.0;
+    I.last_ncol = ncol;
     if (ncol > 0) {
-        try { m_impl->dCw.ensure(n * ncol); } catch (...) { return false; }   // n x ncol
+        try { I.dCw.ensure(n * ncol); } catch (...) { return false; }   // n x ncol
         const dim3 block(16, 16);
         const dim3 grid((n + block.x - 1) / block.x, (ncol + block.y - 1) / block.y);
-        k_scale_cols<<<grid, block, 0, stream>>>(m_impl->dCw.ptr, m_impl->dC.ptr,
-                                                 m_impl->dOcc.ptr, n, ncol);
+        k_scale_cols<<<grid, block, 0, stream>>>(I.dCw.ptr, I.dC.ptr, I.dOcc.ptr, n, ncol);
         if (cudaGetLastError() != cudaSuccess) return false;
-        if (cublasDgemm(m_impl->cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, n, ncol,
-                        &one, m_impl->dCw.ptr, n, m_impl->dC.ptr, n,
-                        &zero, m_impl->dP.ptr, n) != CUBLAS_STATUS_SUCCESS)
+    }
+    if (I.sparse) {
+        // Claude Generated (Sep 2026): pattern-only density (see k_density_sp).
+        try { I.dSpP.ensure(I.sp_nnz); } catch (...) { return false; }
+        if (ncol > 0) {
+            const int bs = 256;
+            k_density_sp<<<(I.sp_nnz + bs - 1) / bs, bs, 0, stream>>>(
+                I.sp_nnz, I.dSpRow.ptr, I.dSpCol.ptr, I.dCw.ptr, I.dC.ptr, n, ncol, I.dSpP.ptr);
+            if (cudaGetLastError() != cudaSuccess) return false;
+        } else {
+            I.dSpP.zero(I.sp_nnz, stream);
+        }
+        I.p_dense_valid = false;
+    } else if (ncol > 0) {
+        if (cublasDgemm(I.cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, n, ncol,
+                        &one, I.dCw.ptr, n, I.dC.ptr, n,
+                        &zero, I.dP.ptr, n) != CUBLAS_STATUS_SUCCESS)
             return false;
-    } else if (cudaMemsetAsync(m_impl->dP.ptr, 0, sizeof(double) * static_cast<size_t>(n) * n,
-                               stream) != cudaSuccess) {
-        return false;
+        I.p_dense_valid = true;
+    } else {
+        if (cudaMemsetAsync(I.dP.ptr, 0, sizeof(double) * static_cast<size_t>(n) * n, stream) != cudaSuccess)
+            return false;
+        I.p_dense_valid = true;
     }
     return populationsAndBand(n, band_out);
+}
+
+// Claude Generated (Sep 2026): rebuild the dense density from the resident eigenvectors and
+// occupations of the last step when the loop only kept it on the screened pattern.
+bool XtbGpuContext::ensureDenseDensity(int n)
+{
+    Impl& I = *m_impl;
+    if (!I.sparse || I.p_dense_valid) return true;
+    cudaStream_t stream = I.stream;
+    const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
+    try { I.dP.ensure(static_cast<int>(nn)); } catch (...) { return false; }
+    const int ncol = I.last_ncol;
+    if (ncol > 0) {
+        try { I.dCw.ensure(n * ncol); } catch (...) { return false; }
+        const dim3 block(16, 16);
+        const dim3 grid((n + block.x - 1) / block.x, (ncol + block.y - 1) / block.y);
+        k_scale_cols<<<grid, block, 0, stream>>>(I.dCw.ptr, I.dC.ptr, I.dOcc.ptr, n, ncol);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        const double one = 1.0, zero = 0.0;
+        if (cublasDgemm(I.cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, n, ncol,
+                        &one, I.dCw.ptr, n, I.dC.ptr, n, &zero, I.dP.ptr, n) != CUBLAS_STATUS_SUCCESS)
+            return false;
+    } else if (cudaMemsetAsync(I.dP.ptr, 0, sizeof(double) * nn, stream) != cudaSuccess) {
+        return false;
+    }
+    I.p_dense_valid = true;
+    return true;
 }
 
 bool XtbGpuContext::residentFinalize(double* P_colmajor, double* C_colmajor, int n)
@@ -2369,6 +2480,7 @@ bool XtbGpuContext::residentFinalize(double* P_colmajor, double* C_colmajor, int
         return false;
     cudaStream_t stream = m_impl->stream;
     const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
+    if (!ensureDenseDensity(n)) return false;
     m_impl->dP.download(P_colmajor, static_cast<int>(nn), stream);
     m_impl->dC.download(C_colmajor, static_cast<int>(nn), stream);
     return cudaStreamSynchronize(stream) == cudaSuccess;
@@ -2986,6 +3098,13 @@ bool XtbGpuContext::populationsAndBand(int n, double* band_out)
     Impl& I = *m_impl;
     cudaStream_t stream = I.stream;
     const int b1 = 128;
+    if (I.sparse && !I.p_dense_valid) {
+        k_pop_ao_spP<<<(n + b1 - 1) / b1, b1, 0, stream>>>(I.dPop.ptr, I.dSpP.ptr, I.dSpS.ptr,
+                                                           I.dSpColPtr.ptr, I.dSpPerm.ptr, n);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        return cublasDdot(I.cublas, I.sp_nnz, I.dSpP.ptr, 1, I.dSpH0.ptr, 1, band_out)
+            == CUBLAS_STATUS_SUCCESS;
+    }
     if (I.sparse) {
         k_pop_ao_sp<<<(n + b1 - 1) / b1, b1, 0, stream>>>(I.dPop.ptr, I.dP.ptr, I.dSpS.ptr,
                                                           I.dSpRow.ptr, I.dSpColPtr.ptr, I.dSpPerm.ptr, n);
@@ -3013,7 +3132,11 @@ bool XtbGpuContext::multipoleMomentsResident(int n, int nat)
     if (cudaMemsetAsync(I.dDpAt.ptr, 0, sizeof(double) * 3 * nat, stream) != cudaSuccess) return false;
     if (cudaMemsetAsync(I.dQpAt.ptr, 0, sizeof(double) * 6 * nat, stream) != cudaSuccess) return false;
     const int b1 = 128;
-    if (I.sparse) {
+    if (I.sparse && !I.p_dense_valid) {
+        k_multipole_moments_spP<<<(n + b1 - 1) / b1, b1, 0, stream>>>(
+            I.dDpAt.ptr, I.dQpAt.ptr, I.dSpP.ptr, I.dSpDp.ptr, I.dSpQp.ptr,
+            I.dSpColPtr.ptr, I.dAo2at.ptr, n, I.sp_nnz);
+    } else if (I.sparse) {
         k_multipole_moments_sp<<<(n + b1 - 1) / b1, b1, 0, stream>>>(
             I.dDpAt.ptr, I.dQpAt.ptr, I.dP.ptr, I.dSpDp.ptr, I.dSpQp.ptr,
             I.dSpRow.ptr, I.dSpColPtr.ptr, I.dAo2at.ptr, n, I.sp_nnz);
@@ -3037,7 +3160,9 @@ bool XtbGpuContext::residentBeginComputed()
         // are allocated on first use by the density build and eigensolveResidentFock, which
         // keep only one precision's workspace at a time.
         m_impl->dC.ensure(static_cast<int>(nn));
-        m_impl->dP.ensure(static_cast<int>(nn));
+        // Screened storage keeps P on the pattern during the loop; dense P only on demand.
+        if (!m_impl->sparse) m_impl->dP.ensure(static_cast<int>(nn));
+        else m_impl->dP.free();
         m_impl->dEps.ensure(n);
         m_impl->dVao.ensure(n);
         m_impl->dOcc.ensure(n);
@@ -4072,6 +4197,9 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     if (!pc_resident) {
         m_impl->dP.upload(P, static_cast<int>(nn), stream);
         m_impl->dC.upload(C, static_cast<int>(nn), stream);
+        m_impl->p_dense_valid = true;
+    } else if (!ensureDenseDensity(nao)) {
+        return false;   // screened loop kept P on the pattern only: rebuild dense P
     }
     m_impl->dVao.upload(v_ao, nao, stream);
     m_impl->dQsh.upload(q_sh, nsh, stream);

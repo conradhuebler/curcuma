@@ -547,6 +547,7 @@ Matrix XTB::applyLevelShift(const Matrix& F, const Matrix& S,
  * ------------------------------------------------------------------ */
 void XTB::updatePopulations(const Matrix& S)
 {
+    ensureHostMultipoleIntegrals();
     const int nao = m_basis.nao;
     const int nsh = m_basis.nsh;
 

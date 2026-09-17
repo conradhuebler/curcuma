@@ -506,7 +506,20 @@ double XTB::Calculation(bool gradient)
                 CurcumaLogger::info("SCF: GFN2 multipole integrals built on GPU device "
                                     "(dp_int/qp_int downloaded; host build skipped)");
         }
-        setupMultipole(mp_on_device);
+        // Claude Generated (Sep 2026): a large GFN2 system on the CUDA device-resident path
+        // never reads the host dense multipole integrals (9 nao^2 doubles, 17 GB and a long
+        // O(nao^2) host loop at nao = 15444). Defer them; the host fallbacks (host SCF loop,
+        // host gradient, CPSCF D4 response) build them on demand. Small systems (< ~2 GB of
+        // integrals) keep the eager build, so their results and debug dumps are unchanged.
+        const double mp_bytes = 9.0 * static_cast<double>(m_basis.nao) * m_basis.nao * sizeof(double);
+        const bool defer = !mp_on_device && integrals_from_device && m_gpu_scf
+            && m_gpu_scf->supportsResidentLoop() && m_scf_mode == ScfMode::Broyden
+            && m_d4_charge_source != "cpscf" && mp_bytes > 2.0e9;
+        setupMultipole(mp_on_device || defer);
+        m_mp_ints_deferred = defer;
+        if (defer && verb >= 2)
+            CurcumaLogger::info(fmt::format("SCF: host GFN2 multipole integrals deferred ({:.1f} GB; "
+                                            "the device-resident loop builds its own)", mp_bytes / 1.0e9));
     }
 
     // Implicit solvation: refresh the geometry-dependent state (Born radii, SASA,
@@ -967,6 +980,10 @@ double XTB::Calculation(bool gradient)
             + " of " + std::to_string(m_basis.nao) + " eigenpairs (occupied " +
             std::to_string(static_cast<int>(std::floor(m_wfn.nocc / 2.0))) + " + buffer)");
 
+    // Deferred host multipole integrals are needed as soon as any iteration runs on the host.
+    if (!use_resident_loop)
+        ensureHostMultipoleIntegrals();
+
     const auto t_scf_start = clock::now();
     int iter;
     for (iter = 0; iter < max_iter; ++iter) {
@@ -1400,7 +1417,13 @@ double XTB::Calculation(bool gradient)
         addDispersionPotential(m_pot);
         addSolvationPotential(m_pot);
     }
-    m_F = buildFock(m_H0, m_S, m_pot);
+    // Claude Generated (Sep 2026): m_F is only read by debug dumps / consistency audits. With
+    // deferred host multipole integrals (large system on the GPU) skip the O(nao^2) host
+    // rebuild instead of forcing the 17 GB integral build just for it.
+    if (m_mp_ints_deferred)
+        m_F.resize(0, 0);
+    else
+        m_F = buildFock(m_H0, m_S, m_pot);
 
     // Final energies
     m_E_electronic    = energyCoulombShell() + energyThirdOrder() + energyMultipole();
@@ -1494,8 +1517,10 @@ double XTB::Calculation(bool gradient)
         bool gpu_grad = false;
         if (use_gpu_resident && m_gpu_scf && m_gpu_scf->supportsGradient())
             gpu_grad = calculateGradientGpu();
-        if (!gpu_grad)
+        if (!gpu_grad) {
+            ensureHostMultipoleIntegrals();
             calculateGradient();   // fills m_gradient in Eh/Bohr
+        }
 
         // Explicit solvation nuclear gradient ∂E_solv/∂R at the converged charges
         // (Born radii / SASA / HB-surface / CM5 derivatives). Added in Eh/Bohr,
@@ -2469,6 +2494,7 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
         // The energy weighting stays on the SCF Mulliken charges in all cases, so this
         // choice only affects the gradient, never the energy.
         if (m_d4_charge_source == "cpscf") {
+            // (never deferred: the deferral is disabled for d4_charge_source=cpscf)
             computeMullikenChargeResponse(m_disp_dEdq, m_disp_gradient);
         } else if (m_gpu_scf && m_gpu_scf->supportsDeviceEeq()) {
             // Stage 5 (Part A): device EEQ charges + adjoint dq/dx response. The

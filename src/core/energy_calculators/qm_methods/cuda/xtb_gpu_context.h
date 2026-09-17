@@ -452,6 +452,7 @@ private:
     bool buildFockIntoC(int n, bool multipole);
     bool populationsAndBand(int n, double* band_out);
     bool multipoleMomentsResident(int n, int nat);
+    bool ensureDenseDensity(int n);
 
     /// Device-pointer Broyden update core (S6.4); shared by broydenUpdate (test
     /// upload/download) and the fused resident loop. Queues all work on the stream.

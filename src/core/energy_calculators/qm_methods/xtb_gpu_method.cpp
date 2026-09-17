@@ -536,6 +536,19 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
         // FP64 near convergence (max|dq| < threshold) so the converged energy
         // stays FP64 (gpu_gfn{1,2}_validation @1e-8 holds). Claude Generated.
         xtb->setMixedPrecision(true);
+        // Claude Generated (Sep 2026, operator decision): on the GPU switch to FP64 only once
+        // max|dq| < 1e-5 (CPU default stays 1e-3). Measured on polymer (1410 atoms, RTX A4500):
+        // FP64 eigensolves 4 -> 1, SCF 6.7 -> 4.5 s, energy identical to 1e-12 Eh, gradient vs
+        // CPU 2.6e-6 -> 7.0e-6 Eh/A (within the loose default scf_threshold). An explicit
+        // -scf_fp32_threshold (or its alias fp32_threshold) wins. See docs/MULTI_GPU.md.
+        {
+            auto has = [&](const char* key) {
+                return config.contains(key)
+                    || (config.contains("xtb") && config["xtb"].is_object() && config["xtb"].contains(key));
+            };
+            if (!has("scf_fp32_threshold") && !has("fp32_threshold"))
+                xtb->setFp32Threshold(1.0e-5);
+        }
         if (CurcumaLogger::get_verbosity() >= 2)
             CurcumaLogger::info(fmt::format(
                 "{}: GPU device-resident SCF backend active (Broyden; "

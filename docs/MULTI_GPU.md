@@ -106,7 +106,28 @@ polymer_2x GFN2 profile on one A4500 (11 iterations, 4 in FP64):
 | eig FP64 back-transform (4) | 43 s | 8 % |
 | host setup / post-SCF | 47 s / 30 s | - |
 
-### FP32 threshold (open decision)
+### Pattern-only density, deferred host integrals, GPU FP32 threshold 1e-5 (Sep 17, 2026)
+- **`k_density_sp`**: with screened storage the SCF loop computes P only at stored pairs (populations, moments and band energy read nothing else); dense P is rebuilt on demand for the gradient and the host download. complex/polymer: energies identical to 12 digits, gradients <= 1e-15. polymer density+populations 1357 -> 744 ms (41 % pattern).
+- **Deferred host multipole integrals**: for nao above ~5000 (> 2 GB of integrals) on the CUDA resident path the host no longer builds the 9 dense nao^2 dipole/quadrupole matrices, nor the post-SCF host Fock matrix (only read by debug dumps; `getFock()` is empty then). Host fallbacks (host SCF loop, host gradient) build them on demand; deferral is off for `d4_charge_source=cpscf`.
+- **GPU default `scf_fp32_threshold` = 1e-5** (operator decision; CPU stays 1e-3; an explicit value wins).
+
+polymer_2x GFN2, one A4500, before -> after these three:
+
+| | before | after |
+|---|---|---|
+| total wall | 619 s | **410 s** |
+| host peak RSS | 39 GB | **22 GB** |
+| device peak | 17.0 GB | 17.1 GB |
+| host setup | 47 s | 21 s |
+| SCF iterations (FP64) | 11 (4) | 16 (2) |
+| density P + populations | 143 s | 53 s |
+| eig FP32 syevd | 53 s (7) | 106 s (14) |
+| eig FP64 syevd / reduce / back-transform | 200 / 86 / 43 s | 100 / 43 / 21 s |
+| post-SCF host energies | 30 s | 40 s |
+
+Energy identical to the CPU reference (-11784.87804452 Eh). Remaining host hot spots: post-SCF energies (40 s) and setup (21 s). ctest: 207/208 GPU/SQM/CPSCF/gradient tests pass; `xtb_cpscf` fails identically without these changes (pre-existing, CLAUDE.md known failures).
+
+### FP32 threshold (decided: 1e-5 on the GPU)
 polymer GFN2, one A4500, `-scf_fp32_threshold`:
 
 | threshold | iterations | FP64 syevd calls | SCF | energy | max abs gradient diff vs CPU |
