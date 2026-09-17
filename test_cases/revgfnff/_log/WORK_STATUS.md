@@ -1,5 +1,5 @@
 # WORK_STATUS — rev-gfnff work packages 1-5 (2026-09-18)
-Packages done: 3/5
+Packages done: 4/5
 
 AI-generated, machine-tested. Repository `/home/conrad/src/curcuma_branches/curcuma`, branch
 `reactff2-llm`, start HEAD `265a18b0`. Every measurement was taken with a FROZEN copy of the
@@ -374,3 +374,138 @@ What would close it, in order of cost:
 My recommendation to the operator: keep `delivered` as the default, and treat `conserving` as
 the candidate for stage 3b, to be adopted together with (1). The adduct falsifier of 1.4 is now
 the acceptance criterion for that work — nothing else in the reference sets measures it.
+
+---
+
+## Package 4 — stage 3a(iii) wells: MG and erf-Morse, both, switchable
+
+`-gfnff.rev_well_form gauss|mg|erfmorse`. **Default `gauss`, bit-identical** (20-cell grid, the
+falsifier set to 12 digits and the gfnff yardsticks unchanged on a proven rebuild). Final binary
+**`7fef81bd9ef52d337d631a65c446f7e7`**; every number in this section is from that one binary.
+
+### 4.1 The forms and where the parameters come from
+
+Both new forms are `E = -D (2y - y^2)` with `y = exp(-(a x + beta x^2))` (MG) resp.
+`y = erfc((x - u)/sigma) / erfc(-u/sigma)` (erf-Morse), `x = r - r0`. Both have `E(r0) = -D` and
+`E'(r0) = 0` identically, and both are **curvature-pinned**: `a` (closed form) resp. `u`
+(bisection) is set so that `E''(r0) = 2 alpha |k_b|`, the delivered Gaussian's own force
+constant. So r_min and the force constant are reproduced by construction and only the depth scale
+`s = D/|k_b|` and the tail are fitted — the review's step (1), two parameters per bond type.
+
+`scripts/revgfnff_wellfit.py` (new) does the fit: a kept-topology scan per class-A bond type with
+`CURCUMA_SHAREDUMP=1`, `E_rest = E_total - E_pair` frozen, `r0/alpha/k_b` recovered from
+`ln(D/w)`, objective = break-side RMS against the r2SCAN-3c curve, **on the charge-frozen rest**
+(the Coulomb drift's sign flips between the static and the react protocol, so a depth fitted on
+the raw rest absorbs a charge-model error that is not the well's — `FABLE_REVIEW_2` B.2). It
+aggregates to element pairs (median) and writes `rev_well_table.h`.
+
+**The fit reproduces the review's offline B.2 table independently**, which is the best available
+check on both:
+
+| n = 32, medians | this fit | FABLE_REVIEW_2 B.2 |
+|---|---:|---:|
+| delivered Gaussian, break rms | **19.24** | 19.24 |
+| MG, curvature pinned | **2.07** | 2.10 |
+| erf-Morse, curvature pinned | **2.13** | 2.17 |
+| n(rms < 3) | **19 / 19** | 19 / 19 |
+| depth scale s, median (range) | **1.016 (0.459-2.357)** | 1.02 (0.46-2.36) |
+| join, median / max abs(E_pair) at the last grid point | **0.000 / 0.69, 0.57** | 0.000 / 0.57-0.69 |
+
+The well therefore ends by itself, so **the term weight `w` is taken OFF the well** in the two new
+forms (`TOPO_REUSE_STATUS` part B's truncation); `w` stays on the angle/torsion terms and on the
+share's own sums.
+
+**Unit check, done rather than assumed**: the table is in Angstrom and the workspace in Bohr. The
+implemented well reproduces the offline form to 0.36 kcal/mol on `ch3cl_C-Cl`, and the delivered
+Gaussian reproduces its own offline form to 0.30 on the same scan — i.e. the residual is the
+`ln(D/w)` recovery (0.91 % on D), not the conversion. The wrong-unit control (beta left in
+Bohr^-2) is 23.5 kcal/mol off, 66x worse.
+
+### 4.2 MG vs erf-Morse vs gauss, every acceptance row
+
+| row | gauss | MG | erf-Morse |
+|---|---:|---:|---:|
+| class-A median rms (`--mode kept` + react, 32 bonds) | 24.49 | **19.50** | **19.21** |
+| class-A median dev D_e | -25.53 | **-12.74** | **-13.13** |
+| class-A median dev r90 | -0.330 | **-0.058** | **-0.068** |
+| guard, pooled MAD (167 reactions) | **1.0341** | 1.0439 | 1.0427 |
+| guard, worst set movement | — | ICONF +0.10 | ICONF +0.09 |
+| max equilibrium bond-length shift (4 molecules, opt) | — | **0.0063 A** | **0.0067 A** |
+| class D dE_MAD | **4.980** | 5.152 | 5.184 |
+| class D grad_RMS | 16.599 | **16.376** | 16.494 |
+| rkt06 rms | 2.7140 | 2.67 | 2.71 |
+| adducts, dev min (CH4/NH3/H2O/N2H4 + H) | -87 / -107 / -55 / -90 | -89 / -110 / -89 / -94 | -89 / -110 / -88 / -93 |
+| 20-cell grid: rebuilds / step max / n >= 50 / jump max | 1186 / 391.4 / 487 / 48.6 | 1073 / 396.9 / 458 / 49.7 | 1012 / 395.5 / 567 / **58.3** |
+| grid wall time (20 cells, cached setup) | 17.39 s | 17.03 s | 17.33 s |
+| FD gradient, worst of 4 geometries | 2.69e-07 | 2.77e-07 | 2.76e-07 |
+
+Class-A reference: `BASELINE_HEAD` records 24.68 / -25.27 / -0.318 for the delivered form. Our
+gauss arm gives 24.49 / -25.53 / -0.330, i.e. within 1 %. **Not the code**: the same run with
+`-gfnff.rev_budget_fix_h false` is identical to the digit, so the package-1 flip is inert here;
+the residual is the class-A reference set itself, which gained the rks/uks branches of four bonds
+(untracked additions in this working tree) since that baseline.
+
+**The guard does not open** (+0.9 % on a 1.03 kcal/mol MAD = 0.01 kcal/mol), but the review's
+inferred r_eq shift is real and **twice its estimate**: measured by optimising four molecules,
+c2h6 C-C 1.51301 -> 1.51930 / 1.51967 A, ch4 C-H 1.08854 -> 1.09269 / 1.09314, h2o O-H 0.97274 ->
+**0.96690** / 0.96852 (the only one that shortens).
+
+### 4.3 The adducts get worse before the share compensates — measured
+
+As the package brief predicted: a deeper, wider well makes the partial-well sum at a radical
+approach WORSE. `h2o_H` goes -54.6 -> -88.5 kcal/mol under the **delivered** share. With the
+package-3 **conserving** share the well form is fully compensated and one scan improves further:
+
+| scan, dev min / rms | gauss + delivered | mg + delivered | gauss + conserving | **mg + conserving** |
+|---|---|---|---|---|
+| CH4 + H | -87.0 / 41.8 | -89.4 / 43.1 | -1.5 / 12.1 | **-1.5 / 11.8** |
+| NH3 + H | -107.0 / 47.1 | -110.1 / 48.7 | -1.4 / 5.1 | **-1.4 / 5.1** |
+| H2O + H | -54.6 / 24.3 | -88.5 / 39.0 | -3.0 / 13.3 | **-3.0 / 13.3** |
+| N2H4 + H | -90.4 / 41.0 | -93.6 / 42.8 | +0.0 / 7.0 | **+0.0 / 2.9** |
+
+rkt06 is 2.7140 / 2.67 / 2.7614 / 2.72 across the same four combinations — unmoved either way.
+
+### 4.4 MG or erf-Morse?
+
+**They are indistinguishable on the data and MG is the cheaper one.** On the 32 class-A curves the
+fitted rms differs by at most 0.85 and the medians by 0.06; every acceptance row above agrees to
+within its own noise except two, and both favour MG: erf-Morse has the one 20-cell jump above
+50 kJ/mol (58.3 vs 49.7) and its class-D dE_MAD is marginally worse.
+
+**Cost**: after caching the per-bond setup, the two forms and the Gaussian are within noise of
+each other (17.03 / 17.33 / 17.39 s over the grid). **Before** the cache, erf-Morse cost
+**1.42x** the whole react-MD wall time and MG 1.02x — the entire erf-Morse penalty is its
+bisection for `u`, which has to run once per bond and not once per energy call. MG needs no cache
+at all (its `a` is a closed form). That is the practical content of the review's "MG brings closed
+forms where erf-Morse needs a bisection".
+
+**Recommendation**: if a new well form is adopted, take **MG**. erf-Morse buys nothing the data
+can see, and it is the form that has to be cached to be affordable.
+
+### 4.5 Method note — one ulp, 77 rebuilds
+
+The first version of this change moved the 20-cell grid from 1186 to **1263** rebuilds with the
+default `gauss` form, while every single-point energy stayed bit-identical to 12 digits. Cause:
+the restructuring had written `(-2 alpha dr) * energy` as `dwell_dx * w * cshare` and the share's
+`K` as `(K w) * (1/w)` — algebraically equal, one ulp apart, and a react MD amplifies one ulp
+(Known Issue #33). Both are back to the delivered association, with a comment saying why.
+**An energy-level identity check does not catch this; the trajectory fingerprint does.**
+
+### 4.6 Known limitations of this step
+
+- The table is keyed on the element **pair**, so it cannot distinguish C-C from C=C from C#C. The
+  per-system fits differ substantially (s = 1.180 / 1.008 / 0.906; beta 0.564 / 0.488 / 0.934), and
+  the median is used for all three. That is the stage-3b element factorisation and is why the
+  class-A median rms lands at 19.5 rather than at the 2.07 the per-system fit reaches.
+- The HB alpha modulation (`egbond_hb`, a softened alpha for a hydrogen-bond donor's X-H bond) is
+  **not applied** in the new forms: it would enter through `a` resp. `u` and its chain rule has no
+  counterpart there. Using `alpha_orig` keeps the well and its gradient exactly consistent and
+  continuous; the cost is that such an X-H bond is not softened. Not measured against a reference —
+  the class-A set contains no hydrogen bond.
+- The inner side is capped at `y = 2` (C1, exact below y = 1.6, so the fitted region and the
+  minimum are untouched), which bounds the well in [-D, 0] exactly as the Gaussian is in [k_b, 0].
+  The repulsive wall stays the repulsion term's job, as it is for the Gaussian.
+- Element pairs with no class-A data keep the Gaussian and say so at verbosity 2.
+- Step (2) of the review's plan — freeing the curvature with an r0 re-solve — is NOT done.
+
+`ctest`: 95/98 and 19/22, the same three known failures.
