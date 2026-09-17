@@ -69,12 +69,14 @@ XTB::~XTB() = default;
 int XTB::effectiveIntraThreads(int work_units) const
 {
     if (m_intra_threads <= 1) return 1;
-    // Already running under molecule-level parallelism → stay serial (no N^2).
-    if (curcuma::intraParallelSuppressed()) return 1;
+    // Already running under molecule-level parallelism → stay within the batch budget
+    // (1 = serial for CPU batches, no N^2; cores/GPU-slots for GPU batch workers).
+    const int cap = curcuma::intraParallelSuppressed() ? curcuma::intraThreadBudget() : m_intra_threads;
+    if (cap <= 1) return 1;
     // Size guard: keep at least kMinWorkPerThread items per thread; tiny systems
     // are dominated by dispatch overhead (tuned in the benchmark step).
     const int by_work = work_units / kMinWorkPerThread;
-    const int t = std::min(m_intra_threads, std::max(1, by_work));
+    const int t = std::min(std::min(m_intra_threads, cap), std::max(1, by_work));
     return t;
 }
 

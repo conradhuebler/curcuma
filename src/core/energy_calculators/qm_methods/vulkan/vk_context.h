@@ -26,13 +26,17 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace curcuma {
 namespace vk {
 
 class VkContext {
 public:
-    VkContext();
+    /// @param preferred_index physical-device index (vkEnumeratePhysicalDevices order) to use;
+    ///        -1 = best-scored device (discrete > integrated). A preferred device that lacks a
+    ///        compute queue or shaderFloat64 leaves ok() false. Claude Generated (Sep 2026).
+    explicit VkContext(int preferred_index = -1);
     ~VkContext();
 
     VkContext(const VkContext&) = delete;
@@ -55,6 +59,18 @@ public:
     /// queue + shaderFloat64 is visible (static probe; creates and tears down a probe
     /// instance). Claude Generated.
     static bool deviceAvailable();
+
+    /// One entry per physical device (vkEnumeratePhysicalDevices order). `usable` = has a
+    /// compute queue and shaderFloat64. Creates and destroys a probe instance.
+    /// Claude Generated (Sep 2026, multi-GPU).
+    struct DeviceSummary {
+        int         index = -1;
+        std::string name;
+        uint64_t    memory_bytes = 0;   ///< largest device-local heap
+        bool        usable = false;
+        bool        discrete = false;
+    };
+    static std::vector<DeviceSummary> enumerateDevices();
 
     // ---- Opaque device handles (Stage 1+ engines cast these back) -----------
     // Returned as void* so this header needs no <vulkan/vulkan.h>. nullptr when !ok().

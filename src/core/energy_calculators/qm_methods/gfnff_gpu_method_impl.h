@@ -118,7 +118,13 @@ public:
     json getStreamTimings() const override;
     void setForcePhaseTiming(bool on) override;
 
+    /// Device index this method is pinned to (-1 = runtime default). Claude Generated (Sep 2026).
+    int gpuDevice() const { return m_gpu_device; }
+
 private:
+    /// Make the pinned device current on the calling thread (no-op when unpinned).
+    void bindDevice() const { if (m_gpu_device >= 0) Backend::setDevice(m_gpu_device); }
+
     /**
      * @brief Initialize GPU workspace from GFNFF parameter set.
      * Called after m_gfnff->InitialiseMolecule() succeeds.
@@ -155,6 +161,7 @@ private:
     bool             m_skip_phase2 = false;               ///< Skip Phase 2 EEQ refinement, use Phase 1 topology charges (Claude Generated Apr 2026)
     bool             m_initialized   = false;
     bool             m_has_error     = false;
+    int              m_gpu_device    = -1;   ///< pinned device (-1 = runtime default)
     std::string      m_error_message;
     double           m_last_energy   = 0.0;
     double           m_gpu_upload_time_ms = 0.0;
@@ -259,6 +266,22 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
     m_eeq_pcg_tolerance  = gfnff_cfg.value("pcg_tolerance", 1e-10);
     m_eeq_pcg_threshold  = gfnff_cfg.value("pcg_large_threshold", 500);
 
+    // Claude Generated (Sep 2026, multi-GPU): `gpu_device` (global CLI key, set per worker by
+    // the batch capabilities) pins this method to one device. Everything below that allocates
+    // on the device (workspace, EEQ solver, constant tables) is created after this bind.
+    // An invalid index throws; the plugin entry point turns that into nullptr -> CPU fallback.
+    if (config.contains("gpu_device")) {
+        const auto& v = config["gpu_device"];
+        if (v.is_number()) m_gpu_device = static_cast<int>(v.get<double>());   // CLI stores 3.0
+        else if (v.is_string() && !v.get<std::string>().empty()) m_gpu_device = std::stoi(v.get<std::string>());
+    }
+    if (m_gpu_device >= 0) {
+        const int count = Backend::deviceCount();
+        if (m_gpu_device >= count || !Backend::setDevice(m_gpu_device))
+            throw std::runtime_error(std::string(Backend::name) + " device " + std::to_string(m_gpu_device)
+                                     + " is not available (" + std::to_string(count) + " visible)");
+    }
+
     m_gfnff = std::make_unique<GFNFF>(config);
 }
 
@@ -269,7 +292,8 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
 template <class Backend>
 GFNFFGpuMethodImpl<Backend>::~GFNFFGpuMethodImpl()
 {
-    // Destroy GPU workspace first (holds CUDA resources)
+    // Destroy GPU workspace first (holds CUDA resources) - on the device that owns them.
+    bindDevice();
     m_gpu_workspace.reset();
 
     // Leak GFNFF instance — its Eigen member destructors (m_last_cn, m_charges, etc.)
@@ -284,6 +308,7 @@ GFNFFGpuMethodImpl<Backend>::~GFNFFGpuMethodImpl()
 template <class Backend>
 bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
 {
+    bindDevice();
     if (!m_gfnff) {
         m_has_error = true;
         m_error_message = "GFNFFGPUMethod: m_gfnff is nullptr";
@@ -550,6 +575,7 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
 template <class Backend>
 double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 {
+    bindDevice();
     CitationRegistry::cite("gfnff");
     CitationRegistry::cite("d4", "gfnff");
     CitationRegistry::cite("eeq", "gfnff");
@@ -1456,6 +1482,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 template <class Backend>
 bool GFNFFGpuMethodImpl<Backend>::updateGeometry(const Matrix& geometry)
 {
+    bindDevice();
     if (!m_gfnff) return false;
     return m_gfnff->UpdateMolecule(geometry);
 }
@@ -1464,21 +1491,32 @@ template <class Backend>
 Matrix GFNFFGpuMethodImpl<Backend>::getGradient() const
 {
     // Return cached gradient (copied immediately after calculate() to avoid
-    // heap corruption issues when copying from GPU workspace later)
-    return m_cached_gradient;
+    // heap corruption issues when copying from GPU workspace later).
+    //
+    // Claude Generated (Sep 2026): the ComputationalMethod::getGradient() contract is
+    // Eh/Angstrom (Known Issue #28). The CPU GFN-FF wrapper got the Bohr->Angstrom
+    // conversion in that fix, this GPU wrapper (CUDA + ROCm) did not: the workspace works in
+    // Bohr like the Fortran reference, so GPU MD forces were 1/au = 1.89x too small and every
+    // gfnff_gpu_vs_cpu ctest reported a gradient norm ratio of 0.529. m_cached_gradient stays
+    // in Eh/Bohr (internal); only the two public accessors convert.
+    return m_cached_gradient / au;
 }
 
 template <class Backend>
 void GFNFFGpuMethodImpl<Backend>::copyGradientTo(Matrix& target) const
 {
-    // Claude Generated (March 2026): Direct memcpy into pre-allocated target.
+    // Claude Generated (March 2026): Direct copy into pre-allocated target.
     // Avoids temporary Matrix creation (heap alloc) that crashes on CUDA-corrupted heap.
+    // Sep 2026: converted to Eh/Angstrom in place, same contract as getGradient().
     if (m_cached_gradient.size() > 0 && target.rows() == m_cached_gradient.rows()
         && target.cols() == m_cached_gradient.cols()) {
-        std::memcpy(target.data(), m_cached_gradient.data(),
-                     m_cached_gradient.size() * sizeof(double));
+        const double* src = m_cached_gradient.data();
+        double* dst = target.data();
+        const Eigen::Index n = m_cached_gradient.size();
+        for (Eigen::Index k = 0; k < n; ++k)
+            dst[k] = src[k] / au;
     } else {
-        target = m_cached_gradient;
+        target = m_cached_gradient / au;
     }
 }
 

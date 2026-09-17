@@ -45,6 +45,10 @@ system dependencies (one backend per build dir: `release_cuda/`, `release_rocm/`
   `vulkan-headers` + an FP64-capable driver (AMD `vulkan-radeon`/RADV — **no ROCm needed**,
   NVIDIA `nvidia-utils`, Intel `vulkan-intel`); `shaderc`/`glslang` only to regenerate the
   (committed) SPIR-V. Needs a device with `shaderFloat64`. See [docs/SQM_VULKAN.md](docs/SQM_VULKAN.md).
+- **Multi-GPU** (Sep 2026, AI-generated, machine-tested): `-gpu_device N` pins a run to one
+  device; batch runs (`-sp`/`-opt` on a multi-XYZ file, ConfSearch, Hessian) spread their
+  workers over all visible GPUs (`-gpu_devices 0,2`, `-gpu_workers_per_device 2`).
+  `curcuma -methods` lists the devices. See [docs/MULTI_GPU.md](docs/MULTI_GPU.md).
 
 ## Validation Status Labels
 

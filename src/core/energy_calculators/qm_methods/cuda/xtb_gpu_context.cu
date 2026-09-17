@@ -18,6 +18,8 @@
 #include <cusolverDn.h>
 
 #include <cmath>
+#include <mutex>
+#include <set>
 
 // CudaBuffer<T> (RAII cudaMalloc/cudaFree) — the project's established device
 // allocation helper; routing every allocation through it is the mitigation for
@@ -235,10 +237,18 @@ __constant__ double c_covrad_d3[86];   // covalent_rad_d3_au(z), index z-1
 __constant__ double c_pauling[86];     // pauling_en[z-1]
 __constant__ double c_atomic_rad[86];  // atomic_rad_au(z), index z-1
 
+// Claude Generated (Sep 2026, multi-GPU): __constant__ memory belongs to ONE device, so the
+// tables must be uploaded once PER DEVICE, not once per process. The old `static bool`
+// left every device but the first with uninitialised tables (wrong CN/EEQ, no error)
+// and was a data race when several workers built contexts at the same time.
 void ensureStage3Constants()
 {
-    static bool loaded = false;
-    if (loaded) return;
+    static std::mutex mtx;
+    static std::set<int> loaded_devices;
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess) return;
+    std::lock_guard<std::mutex> lock(mtx);
+    if (loaded_devices.count(dev)) return;
     double covrad[86], pauling[86], arad[86];
     for (int z = 1; z <= 86; ++z) {
         covrad[z - 1]  = curcuma::xtb::covalent_rad_d3_au(z);
@@ -248,7 +258,7 @@ void ensureStage3Constants()
     cudaMemcpyToSymbol(c_covrad_d3, covrad, sizeof(covrad));
     cudaMemcpyToSymbol(c_pauling, pauling, sizeof(pauling));
     cudaMemcpyToSymbol(c_atomic_rad, arad, sizeof(arad));
-    loaded = true;
+    loaded_devices.insert(dev);
 }
 } // namespace
 
@@ -1473,13 +1483,21 @@ __global__ void k_maxabsdiff(const double* __restrict__ a, const double* __restr
     if (tid == 0) *out = sdata[0];
 }
 
-XtbGpuContext::XtbGpuContext()
+XtbGpuContext::XtbGpuContext(int device)
     : m_impl(std::make_unique<Impl>())
 {
     int count = 0;
     if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0)
         return; // no device — caller falls back to CPU
 
+    // Claude Generated (Sep 2026, multi-GPU): device < 0 keeps the historical behaviour
+    // (whatever device is current on this thread, normally 0). An explicit index binds the
+    // calling thread to that device BEFORE the stream and the cuBLAS/cuSOLVER handles are
+    // created, because CUDA ties all of them to the device that is current at creation.
+    if (device >= count)
+        return; // invalid index — caller falls back to CPU (the adapter warns)
+    if (device >= 0 && cudaSetDevice(device) != cudaSuccess)
+        return;
     if (cudaGetDevice(&m_impl->device) != cudaSuccess)
         return;
 
@@ -1505,6 +1523,8 @@ XtbGpuContext::~XtbGpuContext()
 {
     if (!m_impl)
         return;
+    // Free the handles and every CudaBuffer (destroyed with m_impl) on OUR device.
+    bindDevice();
     if (m_impl->cusolver) cusolverDnDestroy(m_impl->cusolver);
     if (m_impl->cublas)   cublasDestroy(m_impl->cublas);
     if (m_impl->stream)   cudaStreamDestroy(m_impl->stream);
@@ -1518,6 +1538,14 @@ std::string XtbGpuContext::deviceName() const
 }
 
 int XtbGpuContext::deviceId() const { return m_impl ? m_impl->device : -1; }
+
+bool XtbGpuContext::bindDevice() const
+{
+    if (!m_impl || m_impl->device < 0) return false;
+    int cur = -1;
+    if (cudaGetDevice(&cur) == cudaSuccess && cur == m_impl->device) return true;
+    return cudaSetDevice(m_impl->device) == cudaSuccess;
+}
 
 bool XtbGpuContext::deviceAvailable()
 {

@@ -35,7 +35,10 @@ namespace gpu {
  */
 class XtbGpuContext {
 public:
-    XtbGpuContext();
+    /// @param device CUDA device index to bind this context to; -1 = the calling thread's
+    ///               current device (historical behaviour). An out-of-range index leaves
+    ///               ok() false so the caller falls back to the CPU. Claude Generated (Sep 2026).
+    explicit XtbGpuContext(int device = -1);
     ~XtbGpuContext();
 
     XtbGpuContext(const XtbGpuContext&) = delete;
@@ -49,6 +52,12 @@ public:
 
     /// Selected CUDA device id, or -1 if none.
     int deviceId() const;
+
+    /// Make this context's device current on the CALLING thread (no-op when it already is).
+    /// The CUDA current device is per host thread, so every entry point that may run on a
+    /// different thread than the constructor (thread pools, MD workers) calls this first.
+    /// Claude Generated (Sep 2026, multi-GPU).
+    bool bindDevice() const;
 
     /// True if at least one CUDA device is visible (static probe, no allocation).
     static bool deviceAvailable();

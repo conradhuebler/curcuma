@@ -65,7 +65,8 @@ struct XtbHipBasisData {
 
 class XtbHipContext {
 public:
-    XtbHipContext();
+    /// @param device HIP device index; -1 = device 0 (historical default). Claude Generated (Sep 2026).
+    explicit XtbHipContext(int device = -1);
     ~XtbHipContext();
 
     XtbHipContext(const XtbHipContext&) = delete;
@@ -80,6 +81,10 @@ public:
 
     /// Selected HIP device id, or -1 if none.
     int deviceId() const;
+
+    /// Make this context's device current on the calling thread (per-thread in HIP, as in
+    /// CUDA). Claude Generated (Sep 2026, multi-GPU).
+    bool bindDevice() const;
 
     /// True if at least one HIP device is visible (static probe, no allocation).
     static bool deviceAvailable();

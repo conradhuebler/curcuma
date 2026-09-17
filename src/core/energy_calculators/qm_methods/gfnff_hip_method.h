@@ -52,6 +52,11 @@ struct GFNFFRocmBackend {
     /// Blocking device->host copy of n doubles (GPU-Schur charge download).
     /// Defined in gfnff_hip_method.cpp so <hip/hip_runtime.h> stays out of this header.
     static void downloadDoubles(double* host, const double* device, int n);
+
+    /// Multi-GPU (Claude Generated, Sep 2026): number of visible devices, and make `device`
+    /// current on the calling thread (the runtime's current device is per host thread).
+    static int  deviceCount();
+    static bool setDevice(int device);
 };
 
 // The wrapper is instantiated in exactly one translation unit (gfnff_hip_method.cpp),

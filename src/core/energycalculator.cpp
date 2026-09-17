@@ -20,6 +20,7 @@
 
 #include "energycalculator.h"
 #include "energy_calculators/ff_methods/forcefield_method.h"
+#include "gpu_device_pool.h"
 #include "energy_calculators/gpu_plugin.h"
 #include "src/tools/general.h"
 #include "src/core/curcuma_logger.h"
@@ -177,6 +178,11 @@ bool EnergyCalculator::createMethod(const std::string& method_name, const json& 
         // Prepare configuration for method creation
         json method_config = config;
         method_config["method"] = method_name;
+
+        // Claude Generated (Sep 2026, multi-GPU case A): a batch worker holding a GPU lease
+        // pins its method to the leased device (see src/core/gpu_device_pool.h).
+        if (curcuma::leasedGpuDevice() >= 0)
+            method_config["gpu_device"] = curcuma::leasedGpuDevice();
         method_config["multiplicity"] = m_mult;
         
         // Add geometry file for parameter caching

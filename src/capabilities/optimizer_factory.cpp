@@ -25,6 +25,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
 #include "src/core/intra_parallel_context.h"
+#include "src/core/gpu_device_pool.h"
 #include "src/core/molecule.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
@@ -347,6 +348,8 @@ public:
     int execute() override
     {
         curcuma::SuppressIntraParallel intra_guard;
+        // Multi-GPU batch (Sep 2026): borrow a device slot for this task; no-op without a GPU pool.
+        curcuma::GpuDeviceLease gpu_lease;
 
         EnergyCalculator energy_calc(m_method, m_energy_controller);
         energy_calc.setIterativeMode(true);

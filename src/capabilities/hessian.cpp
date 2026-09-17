@@ -27,6 +27,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
 #include "src/core/intra_parallel_context.h"
+#include "src/core/gpu_device_pool.h"
 
 #include "hessian.h"
 
@@ -83,6 +84,8 @@ int HessianThread::execute()
     // concurrently across these workers; suppress intra-molecule threading so the
     // cores stay with the coarse parallelism (no N x N oversubscription). Claude Generated.
     curcuma::SuppressIntraParallel intra_guard;
+    // Multi-GPU batch (Sep 2026): borrow a device slot for this task; no-op without a GPU pool.
+    curcuma::GpuDeviceLease gpu_lease;
     m_schema();
     return 0;
 }

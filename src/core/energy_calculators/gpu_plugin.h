@@ -64,4 +64,18 @@ std::string firstAvailable();
 /// The backend names the loader knows, in priority order.
 const std::vector<std::string>& knownBackends();
 
+/**
+ * @brief Number of devices the backend's runtime can see (after CUDA_VISIBLE_DEVICES etc.).
+ * Returns 0 when the plugin is not loadable. A plugin built before the multi-GPU ABI
+ * (no `curcuma_<backend>_device_count` symbol) reports 1. Claude Generated (Sep 2026).
+ */
+int deviceCount(const std::string& backend);
+
+/**
+ * @brief Static properties of one device: {"index","name","memory_total_bytes",
+ * "compute_capability", ...}. Empty object when unavailable. Creates no device context.
+ * Claude Generated (Sep 2026).
+ */
+json deviceInfo(const std::string& backend, int index);
+
 } // namespace gpu_plugin

@@ -540,6 +540,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/ulyssesinterface.cpp
         src/core/energy_calculators/method_factory.cpp
         src/core/energy_calculators/gpu_plugin.cpp
+        src/core/gpu_device_pool.cpp
         src/core/energy_calculators/qm_methods/eht_method.cpp
         src/core/energy_calculators/qm_methods/native_xtb_method.cpp
         src/core/energy_calculators/qm_methods/nddo.cpp
@@ -1019,11 +1020,31 @@ endif()
 # Requires: CUDA toolkit, compute capability >= 6.0 (Pascal / GTX 10xx)
 # Build: cmake -DUSE_CUDA=ON && make -j4
 if(USE_CUDA)
-    enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
+    # Claude Generated (Sep 2026, multi-GPU): toolkit-aware default architecture list.
+    #   Turing 7.5, Ampere 8.0 (A100) / 8.6 (RTX 30xx, RTX A4500), Ada 8.9,
+    #   Hopper 9.0 (H100/H200, needs CUDA >= 11.8), Blackwell 10.0 (B200) / 12.0 (RTX 50xx,
+    #   both need CUDA >= 12.8). CUDA 13 dropped Pascal 6.x and Volta 7.0.
+    # Without a native entry a device falls back to PTX JIT (slow first start) or refuses the
+    # kernels, i.e. a silent CPU fallback - the likely cause of "no GPU speedup" on H200.
+    # Override for fast local builds, e.g. -DCMAKE_CUDA_ARCHITECTURES=86.
+    if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+        set(_curcuma_cuda_archs "75;80;86;89;90;100;120")
+    elseif(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+        set(_curcuma_cuda_archs "60;70;75;80;86;89;90;100;120")
+    elseif(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 11.8)
+        set(_curcuma_cuda_archs "60;70;75;80;86;89;90")
+    else()
+        set(_curcuma_cuda_archs "60;70;75;80;86")
+    endif()
+    # Must be decided BEFORE enable_language(CUDA): that call otherwise seeds the cache with
+    # the compiler's own default and a later set(... CACHE) is ignored.
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+        set(CMAKE_CUDA_ARCHITECTURES "${_curcuma_cuda_archs}" CACHE STRING "CUDA architectures")
+    endif()
+    enable_language(CUDA)
     set(CMAKE_CUDA_STANDARD 17)
-    # Target: Pascal(6.0), Volta(7.0), Turing(7.5), Ampere(8.0/8.6), Ada(8.9)
-    set(CMAKE_CUDA_ARCHITECTURES "60;70;75;80;86;89;120" CACHE STRING "CUDA architectures")
+    message(STATUS "CUDA ${CUDAToolkit_VERSION}: building device code for architectures ${CMAKE_CUDA_ARCHITECTURES}")
 
     # CUDA source files - compiled as part of curcuma_core
     set(CUDA_SOURCES
