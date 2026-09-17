@@ -1,6 +1,6 @@
 /*
  * <Molecular data structures and computational chemistry methods>
- * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *               2024 Gerd Gehrisch
  *
  * This program is free software: you can redistribute it and/or modify
@@ -420,10 +420,15 @@ bool Molecule::addPair(const std::pair<int, Position>& atom)
     m_atoms.push_back(atom.first);
     m_mass += Elements::AtomicMass[atom.first];
 
-    for (std::size_t i = 0; i < AtomCount(); ++i)
-        for (std::size_t j = i + 1; j < AtomCount(); ++j)
-            if (CalculateDistance(i, j) < 1e-6)
-                exist = false;
+    // Claude Generated (Sep 2026): compare only the NEW atom against the existing
+    // ones. The old check re-tested every pair on every call, so building a molecule
+    // atom by atom was O(N^3): 16 s for 3400 atoms. The pairs among the existing
+    // atoms were already tested when they were added, and the one caller that reads
+    // the result (rmsd.cpp) asks exactly this: does the new atom sit on another one.
+    const std::size_t added = AtomCount() - 1;
+    for (std::size_t i = 0; i < added; ++i)
+        if (CalculateDistance(i, added) < 1e-6)
+            exist = false;
 
     invalidateCaches();
 

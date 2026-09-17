@@ -1,5 +1,17 @@
 # Known Bugs in CLI Tests
 
+## cli_curcumaopt_07_opt_multixyz: frames 02 and 12 off the reference (P3)
+
+**Entdeckt**: 2026-09-11
+**Status**: beobachtet, Referenz nicht geprüft
+
+18 von 20 Prüfungen bestehen; Frame 02 und 12 enden bei −9,295184 bzw. −9,295183 Eh,
+die Referenz nennt −9,126721 bzw. −9,141227 Eh. Die Optimierung landet also *tiefer*,
+auf demselben Wert wie die übrigen Frames — eher eine veraltete Referenz (damals in
+einem höheren Minimum steckengeblieben) als ein Fehler. Nicht verursacht durch die
+ANCOpt-Änderung für gehaltene Atome vom selben Tag: mit zurückgenommenen
+`ancopt_optimizer.{h,cpp}` gebaut, dasselbe Ergebnis.
+
 ## cli_simplemd_13_rmsd_mtd_legacy_ab passes only on a repeat run (P2)
 
 **Entdeckt**: 2026-09-04

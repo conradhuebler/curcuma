@@ -145,7 +145,7 @@ The following features existed in `curcumaopt.cpp` but are **not yet ported** to
 
 1. **Parallel batch optimization** (`curcumaopt.cpp:276`) — `ProcessMolecules()` used `CxxThreadPool` (SPThread/OptThread) to optimize multiple molecules in parallel. The new system processes batches serially (loop over single-molecule calls). Implement `OptimizationBatchRunner` using CxxThreadPool.
 
-2. **Hydrogen-only optimization** (`opt_h`, `curcumaopt.cpp:521`) — per-atom constraints derived from element type (element==1 → movable). Useful for optimizing H positions while heavy atoms are fixed. Needs integration into `OptimizerDriver` constraint system.
+2. **Hydrogen-only optimization** (`opt_h`, `curcumaopt.cpp:521`) — per-atom constraints derived from element type (element==1 → movable). The driver side exists since Sep 2026: `OptimizerDriver::setConstraints` (0 = held, call after `LoadConfiguration`) is honoured by every optimizer incl. ANCOpt (qurcuma's "Hold atoms" uses it). Left: map `opt_h` onto it in the CLI path.
 
 3. **Hessian after optimization** (`hessian=1/2`, `curcumaopt.cpp:237,323`) — computes normal modes using `Hessian` class after optimization, saves `hessian.json` and `scf.json`. Port by calling `Hessian` class inside `executeOptimization()` in `main.cpp` when `hessian` parameter is set.
 
