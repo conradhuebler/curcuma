@@ -54,7 +54,7 @@ Tool: `test_cases/cuda/bench_syevd_mg.cpp` (standalone, build line in its header
 - Cusolver Mg layout pitfall: the column blocks are dealt out **cyclically** (block b -> device b % ndev). A contiguous layout returns wrong eigenvalues without any error.
 
 ### Not yet measured
-- gfn2/gfn1 polymer_2x on CPU (~45 GB RAM, estimated > 1 h; running) and on GPU (needs ~45 GB -> silent CPU fallback expected on 20 GB).
+- gfn2 polymer_2x CPU reference: -11784.87804452 Eh, 11 SCF iterations at ~320-430 s each, 4468 s wall (24 threads, shared machine), 49 GB RSS. gfn1 polymer_2x not yet measured.
 
 ## Device selection (Phase 1, implemented)
 
@@ -77,7 +77,7 @@ Tool: `test_cases/cuda/bench_syevd_mg.cpp` (standalone, build line in its header
 
 ## Large-system GPU memory, steps 1b/1c (implemented, Sep 17, 2026)
 
-Result: **GFN2 on polymer_2x (7320 atoms, nao 15444) runs on ONE RTX A4500 (20 GB)**: device peak 17.0 GB (was ~50 GB), 619 s total, E = -11784.87804452 Eh (CPU reference pending). Host peak RSS 39 GB.
+Result: **GFN2 on polymer_2x (7320 atoms, nao 15444) runs on ONE RTX A4500 (20 GB)**: device peak 17.0 GB (was ~50 GB), 619 s total, E = -11784.87804452 Eh, **identical to the CPU reference** (-11784.87804452 Eh, 24 threads, 4468 s wall while other jobs ran). Host peak RSS 39 GB (CPU run: 49 GB).
 
 What changed (all CUDA, `xtb_gpu_context.cu`):
 - **Screened pair storage** for S, H0 and the 9 GFN2 multipole integrals (`-gpu_sparse_integrals auto|on|off`, auto = when < 50 % of AO pairs survive). Atom-pair cutoff from each element's smallest primitive exponent and largest coefficient, integrals < 1e-20 dropped (~30-36 Bohr). Kernels `k_multipole_ints_sp`, `k_build_fock_sp`, `k_pop_ao_sp`, `k_multipole_moments_sp`, `k_grad_h0_pulay_sp` perform the same arithmetic as the dense ones.
