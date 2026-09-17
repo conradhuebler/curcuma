@@ -27,6 +27,7 @@
 
 #include "src/core/molecule.h"
 #include "src/core/intra_parallel_context.h"
+#include "src/core/gpu_device_pool.h"
 
 #include "json.hpp"
 
@@ -56,6 +57,8 @@ public:
         // Suppress intra-molecule fan-out so methods that honor the flag (native
         // gfn1/gfn2) stay serial and the cores are not oversubscribed.
         curcuma::SuppressIntraParallel intra_guard;
+        // Multi-GPU batch (Sep 2026): borrow a device slot for this task; no-op without a GPU pool.
+        curcuma::GpuDeviceLease gpu_lease;
 
         // Sync the global logger level with the json verbosity so GFN-FF init,
         // EnergyCalculator setup, and optimizer messages respect the requested level.

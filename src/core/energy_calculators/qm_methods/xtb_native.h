@@ -508,6 +508,10 @@ struct GpuScfBackend {
     { (void)q_sh0; (void)dp_at0; (void)qp_at0; (void)q_at0; (void)n0_sh; (void)n0_at;
       (void)Tele; (void)n_elec; (void)nocc_pairs; (void)alpha; (void)max_hist; (void)w0;
       return false; }
+    /// Per-phase device timings (CURCUMA_GPU_PROFILE), "" when unsupported/disabled.
+    /// Claude Generated (Sep 2026).
+    virtual std::string profileReport() const { return {}; }
+
     virtual bool residentScfStep(bool fp32, double& dq, double& e_band, double& e_coulomb,
                                  double& e_third, double& e_multipole)
     { (void)fp32; (void)dq; (void)e_band; (void)e_coulomb; (void)e_third; (void)e_multipole;
@@ -578,6 +582,15 @@ struct GpuScfBackend {
                                 const double* amat_sq, const double* dkernel,
                                 const double* qkernel, const double* gamma3)
     { (void)nat; (void)nsh; (void)amat_sd; (void)amat_dd; (void)amat_sq;
+      (void)dkernel; (void)qkernel; (void)gamma3; return false; }
+    /// Device potential without the stored multipole interaction matrices (the backend
+    /// rebuilds them from geometry + damping radii). Claude Generated (Sep 2026).
+    virtual bool supportsOnTheFlyMultipole() const { return false; }
+    virtual bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr,
+                                        const double* mrad, double dmp3, double dmp5,
+                                        const double* dkernel, const double* qkernel,
+                                        const double* gamma3)
+    { (void)nat; (void)nsh; (void)xyz_bohr; (void)mrad; (void)dmp3; (void)dmp5;
       (void)dkernel; (void)qkernel; (void)gamma3; return false; }
     /// q_sh (nsh), dp_at (3×nat), qp_at (6×nat) are the mixed SCC input; W/dWq
     /// (each nat·7) the host-built D4 reference weights at those charges. Builds
@@ -981,6 +994,13 @@ private:
     // (already filled by GpuScfBackend::downloadMultipoleInts); only the CN-damping
     // radii + atom-pair interaction matrices are computed. Claude Generated (Stage 3m).
     void setupMultipole(bool integrals_on_device = false);   // xtb_multipole.cpp (GFN2)
+    /// Build the host dense dipole/quadrupole AO integrals if their build was deferred
+    /// because a large system runs the fully device-resident GPU SCF (Claude Generated,
+    /// Sep 2026). Every host path that reads m_dp_int/m_qp_int calls this first.
+    void ensureHostMultipoleIntegrals();
+    /// Download the converged density P and MO coefficients C from the device if a large
+    /// GPU single point skipped that (Claude Generated, Sep 2026).
+    void ensureHostWavefunction();
     Vector computeCoordinationNumbers() const;           // xtb_native.cpp
     void buildReferenceOccupations();                    // xtb_native.cpp
 
@@ -1145,6 +1165,12 @@ private:
     void parallelStripes(int n_threads,
                          const std::function<void(int, int)>& worker) const; // xtb_native.cpp
 
+    /// A <- L^-1 A L^-T with the cached Cholesky factor; picks dsygst or two triangular solves
+    /// by thread count (see xtb_scf.cpp for the measurements). Claude Generated (Sep 2026).
+    void reduceToStandardForm(Eigen::MatrixXd& A, int n, int threads, bool& ok) const;
+    /// BLAS/LAPACK threads in force right now (what MklThreadScope set).
+    static int blasThreadsNow();
+
 private:
     MethodType m_method;
 
@@ -1194,6 +1220,8 @@ private:
     std::vector<double> m_mp_dkernel;
     std::vector<double> m_mp_qkernel;
     bool m_mp_initialized = false;
+    bool m_mp_ints_deferred = false;   // host m_dp_int/m_qp_int not built yet (GPU large system)
+    bool m_wfn_on_device = false;      // converged P/C not downloaded yet (GPU large system)
 
     // B0 (Jul 2026): setupMultipole() sub-phase timings (ms), for the verbosity-3
     // setup report. The single "multipole setup" bucket could not be attributed.
@@ -1264,6 +1292,12 @@ private:
     // solveEigen() and printed at verbosity >= 3. Reset in Calculation().
     // Claude Generated 2026-06 (SCF profiling).
     mutable double m_t_xfx = 0.0;   // X·F·X transform (two GEMMs)
+    // Claude Generated (Sep 2026): the reduce timer above covers a row-major -> column-major
+    // copy of F plus the LAPACK call; they are timed separately here because the copy turned out
+    // to be a large share. m_blas_threads records what the BLAS actually had during the solve.
+    mutable double m_t_xfx_copy = 0.0;
+    mutable int    m_blas_threads = 0;
+    mutable int    m_eig_calls_native = 0, m_eig_calls_fp32 = 0, m_eig_calls_lapack = 0;
     mutable double m_t_diag = 0.0;  // dsyevd standard eigensolve
     mutable double m_t_back = 0.0;  // back-transform C = X·C~ (one GEMM)
     mutable double m_t_dens = 0.0;  // density P = C·occ·Cᵀ

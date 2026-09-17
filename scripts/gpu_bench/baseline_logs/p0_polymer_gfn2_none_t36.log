@@ -1,0 +1,128 @@
+**************************************************************
+*         Curcuma - Simple Molecular Modelling tool!         *
+*                                                            *
+*                Curcuma - Version:  0.0.263                 *
+*                                                            *
+*            Written by Conrad Hübler TU Freiberg            *
+*                                                            *
+*            Visit the website for initial usage             *
+*          https://github.com/conradhuebler/curcuma          *
+*                                                            *
+*          This program comes without any warranty           *
+*               It might even be total useless               *
+*                                                            *
+*          If you obtain some usefull results with           *
+*                    curcuma, please cite                    *
+*           http://doi.org/10.5281/zenodo.4302722            *
+*                                                            *
+*                 Git Commit Hash: c4cde7f2                  *
+*                                                            *
+**************************************************************
+
+Curcuma was started as:
+[1m[38;2;144;238;144m/home/conrad/src/curcuma/release/curcuma [0m[1m[38;2;144;238;144m-sp [0m[1m[38;2;144;238;144mpolymer.xyz [0m[1m[38;2;144;238;144m-method [0m[1m[38;2;144;238;144mgfn2 [0m[1m[38;2;144;238;144m-gpu [0m[1m[38;2;144;238;144mnone [0m[1m[38;2;144;238;144m-threads [0m[1m[38;2;144;238;144m36 [0m[1m[38;2;144;238;144m-no_bmt [0m[1m[38;2;144;238;144m-verbosity [0m[1m[38;2;144;238;144m2 [0m
+
+Started computation at Thu Sep 17 13:14:53 2026
+
+        Initializing EnergyCalculator (ConfigManager)
+[38;2;100;149;237m[PARAM] method: gfn2
+[0m[38;2;100;149;237m[PARAM] geometry_file: polymer.xyz
+[0m[38;2;100;149;237m[PARAM] multiplicity: 1
+[0m        Creating computational method
+[38;2;100;149;237m[PARAM] requested_method: gfn2
+[0m        Calling MethodFactory::create...
+        MethodFactory::create called
+[38;2;100;149;237m[PARAM] requested_method: gfn2
+[0m[38;2;100;149;237m[PARAM] normalized_method: gfn2
+[0m        GFN2: using native xTB implementation
+        gfn2 initialized (native xTB)
+[38;2;050;205;050m[OK]    EnergyCalculator initialized successfully
+[0m[38;2;100;149;237m[PARAM] actual_method: gfn2
+[0m        Setting molecule in EnergyCalculator
+[38;2;100;149;237m[PARAM] atoms: 1410
+[0m[38;2;100;149;237m[PARAM] charge: 0
+[0m[38;2;100;149;237m[PARAM] spin: 0
+[0m[38;2;050;205;050m[OK]    Molecule set: 1410 atoms, method: gfn2
+[0m        Starting energy calculation
+[38;2;100;149;237m[PARAM] gradient: false
+[0m[38;2;100;149;237m[PARAM] method: gfn2
+[0m[38;2;000;255;255m=======================
+[0m[38;2;000;255;255m  native-gfn2-xtb SCF
+[0m[38;2;000;255;255m=======================
+[0m[38;2;100;149;237m[PARAM] atoms: 1410
+[0m[38;2;100;149;237m[PARAM] shells: 2014
+[0m[38;2;100;149;237m[PARAM] basis_fns: 3222
+[0m[38;2;100;149;237m[PARAM] electrons: 3626
+[0m[38;2;255;255;255m[RESULT]SCF iterations (mode=broyden, guess=eeq):
+[0m[38;2;255;255;255m[RESULT]  iter             E(SCC)/Eh            dE        max|dq|     t/ms
+[0m[38;2;255;255;255m[RESULT]SCF initial guess: single-shot EEQ shell charges
+[0m[38;2;050;205;050m[OK]    D4: Loaded reference CN data from Fortran dftd3param.f90
+[0m[38;2;050;205;050m[OK]    D4: Complete data loaded (alphaiw + corrections)
+[0m        === D4 Parameter Generation with EEQ Charges ===
+[38;2;100;149;237m[PARAM] Number of atoms: 1410
+[0m[38;2;050;205;050m[OK]    D4: Molecular CN calculated in 18.83 ms
+[0m[38;2;050;205;050m[OK]    D4: Reused topology charges in 0.01 ms (skipped EEQ solve)
+[0m        === D4 C6 Reference Matrix Pre-computation (PHASE 1 OPTIMIZED) ===
+[38;2;050;205;050m[OK]    D4: Pre-computed 119 C6 reference values in 1.35 ms
+[0m          Cache size: 682276 entries (flat array, 5.2 MB)
+        D4: Weight pre-computation took 0.20 ms (1410 atoms × avg 4 refs)
+        D4: C6 interpolation for 0 pairs took 0.00 ms (0.0000 ms/pair)
+[38;2;050;205;050m[OK]    D4 parameter generation completed in 30.42 ms
+[0m          └─ Breakdown: CN=18.8ms, EEQ=0.0ms, Weights=0.2ms, C6Interp=0.0ms
+[38;2;255;255;255m[RESULT]     0     -2098.2136461981     0.00e+00     4.80e-01   4093.9
+[0m[38;2;255;255;255m[RESULT]     1     -2099.3752549150     1.16e+00     2.81e-01   3832.1
+[0m[38;2;255;255;255m[RESULT]     2     -2099.4335415594     5.83e-02     6.49e-02   3838.3
+[0m[38;2;255;255;255m[RESULT]     3     -2099.4455255243     1.20e-02     1.77e-02   3849.7
+[0m[38;2;255;255;255m[RESULT]     4     -2099.4459166047     3.91e-04     5.58e-03   3829.6
+[0m[38;2;255;255;255m[RESULT]     5     -2099.4462766218     3.60e-04     2.37e-03   3888.2
+[0m[38;2;255;255;255m[RESULT]     6     -2099.4461625431     1.14e-04     6.49e-04   3903.3
+[0m[38;2;255;255;255m[RESULT]     7     -2099.4460117387     1.51e-04     2.71e-04   2402.8
+[0m[38;2;255;255;255m[RESULT]     8     -2099.4460254647     1.37e-05     9.02e-05   2406.3
+[0m[38;2;255;255;255m[RESULT]     9     -2099.4460291643     3.70e-06     3.19e-05   2390.7
+[0m[38;2;255;255;255m[RESULT]    10     -2099.4460269792     2.19e-06     1.58e-05   2376.4
+[0m[38;2;255;255;255m[RESULT]    11     -2099.4460269332     4.60e-08     5.18e-06   2359.6
+[0m[38;2;050;205;050m[OK]    SCF converged in 12 iterations (39174.4 ms)
+[0m[38;2;100;149;237m[PARAM] dispersion_d4_native: -1.851446 Eh
+[0m        Energy decomposition:
+          Electronic   = -2099.44602693 Eh
+          Coulomb ES2  =  3.04491010 Eh
+          Third-order  =  0.29683469 Eh
+          Multipole    =  0.88782420 Eh
+          Free E (-TS) =  0.00000000 Eh (folded into Electronic)
+          Repulsion    =  13.04406638 Eh
+          Dispersion   = -1.85144623 Eh
+[38;2;255;255;255m[RESULT]  Total        = -2088.25340678 Eh
+[0m        HOMO = -0.284166 Eh   LUMO = -0.076638 Eh   gap = 5.6471 eV
+        Timing breakdown:
+          setup        :  1326.06 ms
+          SCF ( 12 it) : 39174.38 ms
+          post-SCF E   :  1243.27 ms
+          TOTAL        : 41841.96 ms
+[38;2;100;149;237m[ENERGY]gfn2 Final Energy: -2088.25340678 Eh
+[0m
+Charge 0 Spin 0
+Single Point Energy = -2088.25340678 Eh
+
+
+Finished after 41 seconds!
+Finished computation at Thu Sep 17 13:15:34 2026
+
+
+[38;2;000;128;000m===============================================================
+[0m[38;2;000;128;000m  Please cite the following references for methods used in this run:
+[0m[38;2;000;128;000m===============================================================
+[0m[38;2;000;128;000m  [CITE]  Curcuma — Molecular Modelling Toolkit
+[0m[38;2;000;128;000m          Hübler, C. Curcuma (DOI: 10.5281/zenodo.4302722)
+[0m[38;2;000;128;000m  [CITE]  Extended Tight-Binding (Bannwarth et al. 2020)
+[0m[38;2;000;128;000m          Bannwarth, C. et al., WIREs Comput. Mol. Sci. 2020, 10, e01493 (DOI: 10.1002/wcms.1493)
+[0m[38;2;000;128;000m  [CITE]    -> GFN2-xTB (Bannwarth, Ehlert, Grimme 2019)
+[0m[38;2;000;128;000m          Bannwarth, C.; Ehlert, S.; Grimme, S. J. Chem. Theory Comput. 2019, 15, 1652-1671 (DOI: 10.1021/acs.jctc.8b01176)
+[0m[38;2;000;128;000m  [CITE]    ->   -> DFT-D4 Dispersion Correction (Caldeweyher et al. 2017, 2019, 2020)
+[0m[38;2;000;128;000m          Caldeweyher, E.; Bannwarth, C.; Grimme, S. J. Chem. Phys. 2017, 147, 034112 (DOI: 10.1063/1.4993215)
+[0m[38;2;000;128;000m          Caldeweyher, E. et al. J. Chem. Phys. 2019, 150, 154122 (DOI: 10.1063/1.5090222)
+[0m[38;2;000;128;000m          Caldeweyher, E. et al. Phys. Chem. Chem. Phys. 2020, 22, 8499-8512 (DOI: 10.1039/D0CP00502A)
+[0m[38;2;000;128;000m  [CITE]    ->   -> Direct Inversion in the Iterative Subspace (Pulay 1980)
+[0m[38;2;000;128;000m          Pulay, P. Chem. Phys. Lett. 1980, 73, 393–398 (DOI: 10.1016/0009-2614(80)80396-4)
+[0m[38;2;000;128;000m===============================================================
+[0m        BibTeX written to: curcuma_citations.bib
+WALL 42.00 s MAXRSS 2.19 GB GPU_PEAK_MiB {0: 12629, 1: 9385, 2: 9761, 3: 10363} RC 0

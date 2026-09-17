@@ -391,6 +391,92 @@ For scale, the 1e-8 tblite gate is 10000x looser than the energy shift, and the
 default `scf_threshold=1e-5` already costs 1.1e-6 Eh/Bohr on its own — four times
 more. Use `-scf_mixed_precision false` when maximum gradient precision matters.
 
+## Mixed precision: reduce in FP64, diagonalise in FP32 (2026-09)
+
+The mixed-precision branch above did the WHOLE generalized reduction in FP32
+(`ssygst`) as well. On a larger basis and with threads that is a severe
+pessimization, because this machine's OpenMP OpenBLAS has no optimised
+single-precision triangular kernels:
+
+| n = 3222, 8 threads (polymer, in-process probe) | FP64 | FP32 |
+|---|---:|---:|
+| `?sygst` (reduce) | **193 ms** | 2430 ms |
+| two `?trsm` (same reduction) | **203 ms** | 2558 ms |
+| `?syevd` (eigensolve) | 1341 ms | **920 ms** |
+
+So FP32 is the right choice for the eigensolve and the wrong one for the
+reduction, by more than a factor of ten. The branch now reduces with `dsygst`,
+casts the reduced matrix once, and calls `ssyevd`:
+
+| polymer (1410 atoms, nao 3222), gfn2, 36 threads | wall | reduce/it | syevd/it |
+|---|---:|---:|---:|
+| before, `-scf_mixed_precision true` (default) | 44.2 s | 1523 ms | 921 ms |
+| before, `-scf_mixed_precision false` | 33.8 s | 221 ms | 1346 ms |
+| **after, default** | **29.3 s** | 230 ms | 920 ms |
+| after, `-scf_mixed_precision false` | 34.3 s | 223 ms | 1341 ms |
+
+Energies identical to the printed 8 decimals in all four; the FP64 path is
+bit-identical to before (gradient diff 0.0), and the mixed-precision gradient
+moved *closer* to it (1.9e-7 -> 6.3e-8 Eh/Angstrom). `ctest`: the 65 validation
+tests pass, full suite shows only the four documented pre-existing failures.
+
+`CURCUMA_XTB_REDUCE_PROBE=1` prints the table above for the running system
+(sizes and thread counts as used) - worth doing once per machine, since the
+verdict depends entirely on the BLAS build.
+
+## `-threads` now decides the eigensolve too (2026-09)
+
+The eigensolve used to be capped at 8 threads regardless of `-threads`, because
+the FP32 reduction dominated and regressed past that. With the FP64 reduction the
+optimum moved, and it is machine-dependent, so the cap is gone and `-threads`
+decides (`CURCUMA_EIG_MAX_THREADS` still caps it independently if wanted).
+polymer, gfn2, this 36-core box: `-threads 8` 28.8 s, **`-threads 16` 24.9 s**,
+`-threads 24` 27.0 s, `-threads 36` 30.2 s; complex/231 is unaffected (1.11 s,
+the size gate keeps it serial). The D&C eigensolve is memory-bandwidth-bound, so
+more threads than memory channels still lose - that is now a user choice.
+
+## The three memory-bound O(nat^2)/O(nao^2) SCF loops (2026-09)
+
+Profiling polymer (1410 atoms, nao 3222) instead of complex (231) changed the
+picture: three loops that were "too small to thread" at 231 atoms dominated
+everything except the eigensolve. All three sweep many separate nat x nat or
+nao x nao matrices at the same index pair, so they are memory bound, not compute
+bound (the multipole ones touch 18 matrices, i.e. ~286 MB per call at nat = 1410).
+
+| polymer, gfn2, -threads 16 | before | after |
+|---|---:|---:|
+| potential build (`addMultipolePotential`) | 172 ms/it | **55 ms/it** |
+| `energyMultipole` (inside "energy/mix") | 158 ms/it | **18 ms/it** |
+| populations (GFN2 multipole moments) | 214 ms/it | **77 ms/it** |
+| reduce (`dsygst` -> two `dtrsm` above 8 threads) | 231 ms/it | **169 ms/it** |
+| **wall** | 24.9 s | **21.0 s** |
+
+The potential build is threaded over the target atom with disjoint writes, so it
+stays bit-identical. The energy and the populations use per-thread partial sums
+added in a fixed thread order, which reassociates the outer sum: over polymer the
+energy stays identical to 12 decimals and the gradient moves by 1.5e-14, and the
+converged FP64 result was in fact unchanged (diff 0.0). Switching the reduction
+to triangular solves is a rounding-level change (3.9e-14 on the gradient).
+
+## What is left on the CPU (polymer, gfn2, -threads 16, 21.0 s)
+
+setup 1.5 s, SCF 15.3 s, post-SCF 1.6 s. Inside the SCF per iteration: `dsyevd`
+694 ms (54 %), reduce 169, Fock 100, populations 77, density 64, potential 55,
+back-transform 50, energies 34. So the eigensolve IS the CPU floor now, and the
+alternatives were measured rather than assumed:
+
+| n = 3222, 16 threads | time |
+|---|---:|
+| `dsyevd` (all vectors, what curcuma uses) | **1021 ms** |
+| `dsyevr` (all vectors) | 2122 ms |
+| `dsyevr` (lowest 1699 = occupied + 5 %) | 2228 ms |
+| curcuma's own D&C (`-eigensolver native`, in-run) | 5144 ms/it |
+
+Partial diagonalisation does not pay even when only the occupied block is
+requested, which is the same conclusion the GPU reached (AP1) for a different
+reason. No MKL is installed on this machine; with MKL the floor would likely be
+lower.
+
 ## The iteration-count gap is a criterion artifact, not slower iterations
 
 gxtb converges `complex` in **15** iterations, curcuma in **19** — but per

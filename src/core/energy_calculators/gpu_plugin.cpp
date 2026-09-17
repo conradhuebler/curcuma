@@ -151,6 +151,43 @@ std::unique_ptr<ComputationalMethod> createGfnff(const std::string& backend, con
     return std::unique_ptr<ComputationalMethod>(method);
 }
 
+int deviceCount(const std::string& backend)
+{
+    void* handle = pluginHandle(backend, /*quiet=*/true);
+    if (!handle)
+        return 0;
+    using count_fn = int (*)();
+    count_fn fn = resolveSymbol<count_fn>(handle, "curcuma_" + backend + "_device_count");
+    return fn ? fn() : 1;   // pre-multi-GPU plugin: one (default) device
+}
+
+json deviceInfo(const std::string& backend, int index)
+{
+    void* handle = pluginHandle(backend, /*quiet=*/true);
+    if (!handle)
+        return json::object();
+    using info_fn = int (*)(int, char*, int);
+    info_fn fn = resolveSymbol<info_fn>(handle, "curcuma_" + backend + "_device_info");
+    if (!fn)
+        return json::object();
+    std::string buf(1024, '\0');
+    int need = fn(index, buf.data(), static_cast<int>(buf.size()));
+    if (need < 0)
+        return json::object();
+    if (need >= static_cast<int>(buf.size())) {
+        buf.assign(static_cast<size_t>(need) + 1, '\0');
+        need = fn(index, buf.data(), static_cast<int>(buf.size()));
+        if (need < 0)
+            return json::object();
+    }
+    buf.resize(static_cast<size_t>(need));
+    try {
+        return json::parse(buf);
+    } catch (...) {
+        return json::object();
+    }
+}
+
 bool available(const std::string& backend)
 {
     return pluginHandle(backend, /*quiet=*/true) != nullptr;

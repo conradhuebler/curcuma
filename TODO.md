@@ -99,6 +99,11 @@
 - **Verweis**: src/core/CLAUDE.md:113, CLAUDE.md:296
 - **Gewinn**: Centralized, documented, CODATA-2018 compliant constants
 
+### GFN-FF EEQ warm start across the q-loop passes (Sep 2026, operator: TODO)
+- The two topology passes solve nearly identical EEQ systems with projected PCG from scratch (polymer_2x, 1502 fragments: 32 + 71 iterations per pass, ~2.6 s of the GFN-FF setup).
+- Idea: start pass 2 (and phase 2 from phase 1) from the previous solution. Expected ~1 s on polymer_2x.
+- Caveat: changes the converged charges at the ~1e-11 level (PCG stops at |Pr| < 1e-10), so golden values / MD reproducibility need re-checking. See [docs/MULTI_GPU.md](docs/MULTI_GPU.md) step 2.
+
 ### Memory Optimization for Large Systems (>1000 atoms)
 - **Status**: ⏳ PLANNED
 - **Task**: Optimize Molecule data structure and distance matrix caching

@@ -27,6 +27,7 @@
 #include "src/core/fileiterator.h"
 #include "src/core/global.h"
 #include "src/core/intra_parallel_context.h"
+#include "src/core/gpu_device_pool.h"
 #include "src/core/molecule.h"
 
 #include <LBFGS.h>
@@ -101,6 +102,8 @@ int SPThread::execute()
     // (ProcessMolecules pool). Suppress intra-molecule threading inside the energy
     // method so the cores are not oversubscribed N_molecules x N_intra. Claude Generated.
     curcuma::SuppressIntraParallel intra_guard;
+    // Multi-GPU batch (Sep 2026): borrow a device slot for this task; no-op without a GPU pool.
+    curcuma::GpuDeviceLease gpu_lease;
     auto start = std::chrono::system_clock::now();
     Vector charges;
     double energy = m_curcumaOpt->SinglePoint(&m_molecule, m_result, charges);
@@ -120,6 +123,8 @@ int OptThread::execute()
     // Concurrent molecule-level batch task — keep the energy method serial (see
     // SPThread::execute). Claude Generated.
     curcuma::SuppressIntraParallel intra_guard;
+    // Multi-GPU batch (Sep 2026): borrow a device slot for this task; no-op without a GPU pool.
+    curcuma::GpuDeviceLease gpu_lease;
     Vector charges;
     if (m_optimethod == 0)
         m_final = m_curcumaOpt->LBFGSOptimise(&m_molecule, m_result, &m_intermediate, charges, getThreadId(), outputPath(Basename() + ".opt.trj"));
