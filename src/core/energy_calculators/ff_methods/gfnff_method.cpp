@@ -4110,12 +4110,11 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     // Claude Generated (Sep 2026): implicit on the CPU too. The GPU wrapper sets
     // m_implicit_coulomb_pairs for the device path (-gfnff.gpu_coulomb_implicit); on the CPU the
     // `coulomb_implicit` PARAM decides, and FFWorkspace::calcCoulomb enumerates the pairs.
-    // Claude Generated (Sep 18, 2026, multi-gpu merge): the remote default is TRUE; it is pinned
-    // FALSE here for the merge so that the merge itself can be proven identical to the pre-merge
-    // binary. An implicit Coulomb list removes the pair list from -gfnff.dump_params, so the
-    // recorded md5 yardsticks (d297bc3b / 77c134bb) cannot survive the flip by construction.
-    // The flip and its measurement are a SEPARATE commit.
-    const bool coulomb_implicit = m_implicit_coulomb_pairs || m_parameters.value("coulomb_implicit", false);
+    // Claude Generated (Sep 18, 2026, multi-gpu merge): the merge pinned this FALSE so that the
+    // merge itself could be proven identical; it is now TRUE, the remote's default. Measured
+    // consequence: -gfnff.dump_params loses its Coulomb list (md5 yardstick changes by
+    // construction), the energies do not.
+    const bool coulomb_implicit = m_implicit_coulomb_pairs || m_parameters.value("coulomb_implicit", true);
     if (coulomb_implicit && m_parameters.value("eeq_distance_cutoff", 0.0) <= 0.0) {
         params.coulombs.clear();
         params.coulomb_implicit = true;
