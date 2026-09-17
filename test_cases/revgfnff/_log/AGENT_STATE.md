@@ -55,7 +55,22 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 
 ## Live agents
 
-**None running (2026-09-17).** fable-review-2 is DONE — `FABLE_REVIEW_2.md`, 360 lines, 9/9 sections;
+**RUNNING since 2026-09-18: `work-packages` (Opus), the ONLY agent in the main tree, builds in
+`build_rev/`, measures with frozen copies, commits locally per logical change, never pushes.**
+Operator decisions 2026-09-18: H fix default ON; build the charge-based budget rule; build BOTH
+well forms (MG and erf-Morse) and compare in real use; merges in the reviewed order; the agent
+works through without hand-backs. `origin/reactff2-llm` already merged by the orchestrator
+(`6530631f`; caffeine SPs and the c2h6 trajectory bit-identical). Packages, status in
+`WORK_STATUS.md` (`Packages done: n/5`): (1) `rev_budget_fix_h` default true + new baseline on the
+20 live cells with the three smoothness columns, all falsifiers, and the four class-C radical
+adduct scans as a new falsifier; (2) merge `origin/feature/multi-gpu` with `coulomb_implicit`
+pinned false, prove identity, flip it as a separate commit; (3) share mode `conserving`
+(`f_i = min(1, Val_i/S_i)`, `c = f_i f_j`, excess budget by charge), default unchanged; (4)
+`rev_well_form gauss|mg|erfmorse`, curvature-pinned two-parameter step, `w` off the well, default
+`gauss`; (5) recalibrate `cli_simplemd_16/18/19`, new ctests, docs. It stops early only on a
+failed acceptance. **A fresh session resumes it from `WORK_STATUS.md`.**
+
+**Before that (2026-09-17).** fable-review-2 is DONE — `FABLE_REVIEW_2.md`, 360 lines, 9/9 sections;
 headline results (orchestrator spot-checked the two corrections to the briefing, both hold):
 (1) H-budget mechanism and "no falsifier moves" reproduced to the digit -> make `rev_budget_fix_h`
 the default. (2) **The residual after the H fix is the same defect on CARBON**, not thermal: ch4_H
