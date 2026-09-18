@@ -34,7 +34,18 @@ Caveat: the polymer (1410 atoms) runs had ollama occupying 9-12 GB per GPU; the 
 | CPU | 355 s | ~6.9 s | 9.7 GB RSS |
 | 1x A4500 | 83 s | ~1.4 s | 10.9 GB RSS, 2.2 GB GPU |
 
-- CPU MD heats up (T 298 -> 20476 K at 40 fs) while the GPU run stays near 300 K. polymer_2x is **not pre-optimized** (operator note), so large initial forces make divergent trajectories plausible; not treated as a bug. Use an optimized structure for MD timings.
+- CPU MD heats up (T 298 -> 20476 K at 40 fs) while the GPU run stays near 300 K. **That
+  CPU-vs-GPU asymmetry was the Eh/Bohr vs Eh/Angstrom gradient unit bug (Known Issue #28) and
+  is gone since it was fixed** (operator, Sep 2026) - with the fixed binary both paths behave
+  the same. What remains is a blow-up that is NOT a CPU/GPU difference; see
+  [MD_LARGE_SYSTEMS.md](MD_LARGE_SYSTEMS.md). **The explanation first given here - "polymer_2x is not pre-optimized, so large initial forces make
+  divergent trajectories plausible" - was measured and is WRONG** (Sep 18, 2026): the cause is
+  the 1 fs time step, not the structure. GFN-FF-optimising polymer_2x (-901.94 -> -917.34 Eh,
+  gradient norm 2.35 -> 0.175) does not fix it - at dt = 1 fs the optimised structure heats to
+  <T> = 18527 K where the raw one reaches 2936 K. The time step does fix it: NVE over 100 fs
+  drifts +11.58 Eh at dt = 1.0 and -0.25 Eh at dt = 0.25, i.e. a factor 46 for a 4x smaller step
+  where dt^2 integration error would give 16 - dt = 1 fs is past the stability limit for GFN-FF's
+  X-H stretches here. See [MD_LARGE_SYSTEMS.md](MD_LARGE_SYSTEMS.md) for the verified settings.
 - ~1.4 s/step on GPU for 7320 atoms is far above the 23 ms/step measured at 1410 atoms -> per-step cost does not come from the force kernels alone (suspects: CN pair-list rebuild each step, dense EEQ potrf, syncs; see plan Phase 6).
 
 ### Dense eigensolver, n = 15444 (GFN2 nao of polymer_2x), random symmetric matrix

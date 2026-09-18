@@ -3455,7 +3455,7 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     if (coulomb_implicit && m_parameters.value("eeq_distance_cutoff", 0.0) <= 0.0) {
         params.coulombs.clear();
         params.coulomb_implicit = true;
-        params.coulomb_implicit_rcut = 100.0;   // same effective cutoff as generateCoulombPairsNative
+        params.coulomb_implicit_rcut = m_parameters.value("coulomb_r_cut", 100.0);
     } else {
         params.coulombs = generateCoulombPairsNative();
     }
@@ -10348,7 +10348,8 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
 
     const double eeq_cut = m_parameters.value("eeq_distance_cutoff", 0.0);
     const bool cutoff_active = (eeq_cut > 0.0);
-    const double effective_r_cut = cutoff_active ? eeq_cut : 100.0;
+    const double effective_r_cut = cutoff_active ? eeq_cut
+                                                 : m_parameters.value("coulomb_r_cut", 100.0);
     const double cutoff_sq = cutoff_active ? eeq_cut * eeq_cut : 0.0;
 
     if (cutoff_active) {
