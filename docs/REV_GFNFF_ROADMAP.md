@@ -266,6 +266,40 @@ kcal/mol high on two images (its first-reported 12.6 kcal/mol barrier is 1.47). 
 "state instability" recorded in `ref/QUALITY.md` may be the same artefact rather than SCF
 nondeterminism; that hypothesis is open.
 
+## Stage 3a status — 2026-09-18
+
+Details, every measured number and the "what was not tested" list: **[REV_GFNFF_STAGE3A.md](REV_GFNFF_STAGE3A.md)**.
+
+| part | state | flag |
+|---|---|---|
+| 3a (i) dynamic-r0 pair term | delivered, default on | — |
+| 3a (ii) valence share, `delivered` formula | delivered, default on | `-gfnff.rev_valence_share` |
+| 3a (ii) hydrogen keeps one valence | **DEFAULT ON since 2026-09-18** | `-gfnff.rev_budget_fix_h` |
+| 3a (ii) valence-CONSERVING share + charge-granted budget | built, **default off**, operator decision pending | `-gfnff.rev_share_form conserving` |
+| 3a (iii) well form MG / erf-Morse, curvature-pinned | built, **default off**, operator decision pending | `-gfnff.rev_well_form mg\|erfmorse` |
+| 3a (iii) step 2, free curvature + r0 re-solve | not started | — |
+
+### The smoothness falsifier — two numbers per arm, always with the rebuild count and T_max
+
+The `dE_jump` statistic alone is NOT a smoothness measure: the 2026-09-15 runaway carried no
+topology event at all, so every jump statistic booked 0.0 while the potential moved 2.6 kJ/mol per
+*step*. Since then an arm is reported as:
+
+  (a) **max abs(Epot(t+dt) - Epot(t))** over adjacent steps, intervals containing a `REACT rebuild`
+      line excluded, together with the count >= 50 kJ/mol — from runs with `-md.print_frequency 1`;
+  (b) **hard swaps**: `begin_form`/`begin_break` lines with `s >= 0.99`, over all `begin_*`
+      (needs `CURCUMA_VERB=3`);
+  (c) the old max abs(`dE_jump`) and its count >= 50 kJ/mol, kept for continuity.
+
+### The grid has 20 live cells, not 22
+
+`{c2h6, ch3nh2, ch4_H} x {1000, 2000 K} x {frames 0, 8, 16}` plus `ch4_H` frames 5 and 10 at both
+temperatures. `ch4_H.xyz` holds 15 frames, so `ch4_H/T1000_f16` and `ch4_H/T2000_f16` exit with
+rc = 1 and an empty log — they never ran. Every "22-cell" statement before 2026-09-18 is n = 20.
+5 ps, dt 0.25 fs, CSVR coupling 10, seed 42, `-threads 1` (a react trajectory amplifies one ulp).
+Current default arm: **1186 rebuilds, per-step max 391.4 kJ/mol, 487 events >= 50, 0 of 591 hard
+swaps, max dE_jump 48.6, T_max 8306 K.**
+
 ## The valence-share design question — parked 2026-09-14
 
 Stage 3a (ii) exposes a conflict that parameter work cannot settle, so it is recorded rather than
