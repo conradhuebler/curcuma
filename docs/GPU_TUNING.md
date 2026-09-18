@@ -276,6 +276,32 @@ Two things to know before trusting a sweep:
 
 ## 6. Build
 
+### Did this build get cuSOLVERMp, or only the fallback?
+
+The distributed eigensolver is **optional**, and a build without it is easy to miss - that is
+how the Sep 2026 H200 run ended up measuring the cusolverMg fallback (15x slower than a single
+GPU on polymer_2x) while looking like "multi-GPU does not help". Three ways to check, in the
+order they are cheap:
+
+```bash
+cmake .. ... 2>&1 | grep "=== curcuma multi-GPU eigensolver"   # one grep-able summary line
+ldd release/libcurcuma_cuda_mgpu.so | grep -Ei "cusolvermp|cublasmp|nccl"   # the built artifact
+curcuma -methods            # "multi-GPU eigensolver: mp (cuSOLVERMp)" vs "mg (cusolverMg fallback)"
+```
+
+The configure summary is one of
+`cuSOLVERMp + NCCL`, `cusolverMg only - optional cuSOLVERMp missing`, or
+`none - one molecule stays on one GPU (everything else works)`, and the "not found" branch names
+each missing variable individually plus the pip/HPC-SDK command that supplies it.
+
+**What is lost without them**: only the split of ONE molecule's eigensolve. Single-GPU runs,
+batch distribution over several GPUs (`-gpu_devices`) and the distributed density
+(`-gpu_density_devices`) are unaffected - and where only `mg` is available,
+`-gpu_eigensolver_devices none` is faster than using it.
+
+`-DCURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER=ON` turns the "not found" case into a configure error,
+for machines where the distributed eigensolve is the point of the build. Default is OFF.
+
 - Multi-GPU eigensolver (`CURCUMA_MULTI_GPU_EIGENSOLVER`, default ON): cusolverMg is found in the CUDA toolkit. cuSOLVERMp, cuBLASMp and NCCL are not part of the toolkit; pass their locations, e.g. from the pip wheels `nvidia-cusolvermp-cu13`, `nvidia-cublasmp-cu13`, `nvidia-nccl-cu13`:
   `cmake .. -DCUSOLVERMP_ROOT=<site-packages>/nvidia/cu13 -DCUBLASMP_ROOT=<site-packages>/nvidia/cublasmp/cu13 -DNCCL_ROOT=<nccl prefix>`
   (or an NVIDIA HPC SDK `math_libs` / `comm_libs` directory). The library directories are baked into the RPATH of `libcurcuma_cuda_mgpu.so`, so the run host must see the same paths (shared file system) or have them on `LD_LIBRARY_PATH`. `cmake` prints which backends were found.

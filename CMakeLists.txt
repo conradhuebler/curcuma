@@ -1091,6 +1091,12 @@ if(USE_CUDA)
     #     an NVIDIA HPC SDK math_libs directory; NCCL from the system or NCCL_ROOT.
     #   cusolverMg (fallback): ships with the CUDA toolkit, deprecated since CUDA 13.
     option(CURCUMA_MULTI_GPU_EIGENSOLVER "Link cuSOLVERMp/NCCL and cusolverMg when found" ON)
+    # Claude Generated (Sep 2026): turn "not found" from a STATUS line into a configure error.
+    # Use it on any machine where the distributed eigensolve is the point of the build.
+    # Default OFF: the libraries stay OPTIONAL and a machine without them builds and runs
+    # (single GPU, batch over GPUs, distributed density - only the split eigensolve is lost).
+    option(CURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER
+           "Fail the configure when cuSOLVERMp/cuBLASMp/NCCL are not found (default OFF: optional)" OFF)
     if(CURCUMA_MULTI_GPU_EIGENSOLVER)
         # Separate library, dlopen'ed by libcurcuma_cuda.so on first use: a run host without
         # cuSOLVERMp/NCCL keeps the single-GPU plugin working.
@@ -1130,9 +1136,62 @@ if(USE_CUDA)
             set_property(TARGET curcuma_cuda_mgpu APPEND PROPERTY BUILD_RPATH "${_mp_dir};${_bmp_dir}")
             set_property(TARGET curcuma_cuda_mgpu APPEND PROPERTY INSTALL_RPATH "${_mp_dir};${_bmp_dir}")
             message(STATUS "Multi-GPU eigensolver: cuSOLVERMp ${CURCUMA_CUSOLVERMP_LIB}, NCCL ${CURCUMA_NCCL_LIB}")
+            set(CURCUMA_MGPU_BACKEND "cuSOLVERMp + NCCL")
         else()
-            message(STATUS "Multi-GPU eigensolver: cuSOLVERMp/cuBLASMp/NCCL not found (set CUSOLVERMP_ROOT, CUBLASMP_ROOT, NCCL_ROOT)")
+            # Claude Generated (Sep 2026): say WHICH piece is missing, and offer to fail here.
+            # A single STATUS line in a long configure log is how a cluster build ends up
+            # silently Mg-only - and cusolverMg measured 15x slower than one GPU on
+            # polymer_2x (docs/GPU_TUNING.md), i.e. that build looks like "multi-GPU does
+            # not help" while nothing multi-GPU ever ran.
+            set(_mgpu_missing "")
+            foreach(_v CURCUMA_CUSOLVERMP_INCLUDE CURCUMA_CUSOLVERMP_LIB
+                       CURCUMA_CUBLASMP_INCLUDE CURCUMA_CUBLASMP_LIB
+                       CURCUMA_NCCL_INCLUDE CURCUMA_NCCL_LIB)
+                if(NOT ${_v})
+                    string(APPEND _mgpu_missing "\n     missing: ${_v}")
+                endif()
+            endforeach()
+            set(CURCUMA_MGPU_BACKEND "cusolverMg only (FALLBACK)")
+            if(CURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER)
+                message(FATAL_ERROR
+                    "CURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER=ON, but the distributed eigensolver "
+                    "cannot be built:${_mgpu_missing}\n"
+                    "   Set CUSOLVERMP_ROOT, CUBLASMP_ROOT and NCCL_ROOT (pip wheels "
+                    "nvidia-cusolvermp-cuXX / nvidia-cublasmp-cuXX / nvidia-nccl-cuXX, or an "
+                    "NVIDIA HPC SDK math_libs/comm_libs directory), or configure with "
+                    "-DCURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER=OFF to accept the cusolverMg "
+                    "fallback (measured 15x SLOWER than a single GPU on polymer_2x).")
+            endif()
+            message(STATUS "Multi-GPU eigensolver: cuSOLVERMp/cuBLASMp/NCCL not found - OPTIONAL, the build continues.${_mgpu_missing}")
+            message(STATUS "   Unaffected without them: every single-GPU run, the batch spread over "
+                           "several GPUs (-gpu_devices), and the distributed density "
+                           "(-gpu_density_devices). Only ONE molecule's eigensolve cannot be split.")
+            if(CURCUMA_CUSOLVERMG_LIB)
+                message(STATUS "   This build falls back to cusolverMg for that one case; it works "
+                               "and stays exact, but measured 15x slower than a single GPU on "
+                               "polymer_2x, so prefer -gpu_eigensolver_devices none there.")
+            endif()
+            message(STATUS "   To enable: pip install nvidia-cusolvermp-cu13 nvidia-cublasmp-cu13 "
+                           "nvidia-nccl-cu13, then -DCUSOLVERMP_ROOT=<site-packages>/nvidia/cu13 "
+                           "-DCUBLASMP_ROOT=<site-packages>/nvidia/cublasmp/cu13 -DNCCL_ROOT=<prefix>; "
+                           "or point them at an NVIDIA HPC SDK math_libs/comm_libs directory.")
+            message(STATUS "   To make this a configure error instead: "
+                           "-DCURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER=ON")
         endif()
+        # One summary block, after the individual lines, so the outcome is visible at the end
+        # of a long configure and can be grepped: `cmake .. | grep "multi-GPU eigensolver"`.
+        if(CURCUMA_MGPU_BACKEND STREQUAL "cuSOLVERMp + NCCL")
+            if(CURCUMA_CUSOLVERMG_LIB)
+                set(_mgpu_summary "cuSOLVERMp + NCCL (cusolverMg also linked as fallback)")
+            else()
+                set(_mgpu_summary "cuSOLVERMp + NCCL")
+            endif()
+        elseif(CURCUMA_CUSOLVERMG_LIB)
+            set(_mgpu_summary "cusolverMg only - optional cuSOLVERMp missing, see above")
+        else()
+            set(_mgpu_summary "none - one molecule stays on one GPU (everything else works)")
+        endif()
+        message(STATUS "=== curcuma multi-GPU eigensolver: ${_mgpu_summary} ===")
     endif()
     # Match curcuma_core's compile definitions EXACTLY so every shared class (XTB, ...) has
     # an identical ABI on both sides of the dlopen boundary. Generator expression captures

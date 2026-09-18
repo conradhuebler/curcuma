@@ -161,6 +161,23 @@ int deviceCount(const std::string& backend)
     return fn ? fn() : 1;   // pre-multi-GPU plugin: one (default) device
 }
 
+// Claude Generated (Sep 2026): which distributed-eigensolver backends this plugin can reach
+// ("mp", "mg", "mp,mg", "none ..."). Optional symbol - an older plugin returns "" and the
+// caller stays silent. The point is that `curcuma -methods` answers "was this build linked
+// against cuSOLVERMp, or is it the 15x-slower cusolverMg fallback?" without a calculation.
+std::string mgpuBackends(const std::string& backend)
+{
+    void* handle = pluginHandle(backend, /*quiet=*/true);
+    if (!handle)
+        return {};
+    using str_fn = const char* (*)();
+    str_fn fn = resolveSymbol<str_fn>(handle, "curcuma_" + backend + "_mgpu_backends");
+    if (!fn)
+        return {};
+    const char* s = fn();
+    return s ? std::string(s) : std::string();
+}
+
 json deviceInfo(const std::string& backend, int index)
 {
     void* handle = pluginHandle(backend, /*quiet=*/true);

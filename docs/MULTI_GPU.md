@@ -266,8 +266,10 @@ needs a code change. Bring back the `.json` files and the profile output.
 
 **0. Check the build first - without this the rest measures the wrong thing.**
 ```bash
-cmake .. -DCMAKE_CUDA_ARCHITECTURES=90 -DCUSOLVERMP_ROOT=... -DCUBLASMP_ROOT=... -DNCCL_ROOT=...
-curcuma -methods            # must list the H200s AND the mgpu plugin
+cmake .. -DCMAKE_CUDA_ARCHITECTURES=90 -DCUSOLVERMP_ROOT=... -DCUBLASMP_ROOT=... -DNCCL_ROOT=... \
+      -DCURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER=ON        # fails the configure if they are missing
+cmake .. ... 2>&1 | grep "=== curcuma multi-GPU eigensolver"   # or check the summary by hand
+curcuma -methods            # "multi-GPU eigensolver: mp (cuSOLVERMp)", plus the H200s
 ```
 The Sep 17 H200 run fell back to cusolverMg because cuSOLVERMp/NCCL were missing, and Mg is 15x
 slower than the single-GPU path on our own measurement - a build without them looks like

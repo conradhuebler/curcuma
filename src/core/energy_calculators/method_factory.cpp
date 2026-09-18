@@ -613,6 +613,21 @@ void MethodFactory::printAvailableMethods() {
         if (!gpu_plugin::available(b)) continue;
         const int n = gpu_plugin::deviceCount(b);
         fmt::print("  {}: {} device(s)\n", b, n);
+        // Claude Generated (Sep 2026): which distributed-eigensolver backend this build can
+        // use for ONE large molecule on several GPUs. "mg" alone is the deprecated fallback
+        // and measured 15x slower than a single GPU on polymer_2x, so a cluster build that
+        // ends up there should be rebuilt with cuSOLVERMp/cuBLASMp/NCCL.
+        const std::string mgpu = gpu_plugin::mgpuBackends(b);
+        if (!mgpu.empty()) {
+            const bool has_mp = mgpu.find("mp") != std::string::npos;
+            fmt::print("    multi-GPU eigensolver: {}{}\n", mgpu,
+                       has_mp ? " (cuSOLVERMp)" : " (cusolverMg fallback)");
+            if (!has_mp)
+                fmt::print("      optional; single-GPU runs, -gpu_devices batches and "
+                           "-gpu_density_devices are unaffected. To split ONE molecule's "
+                           "eigensolve, rebuild with cuSOLVERMp/cuBLASMp/NCCL; otherwise "
+                           "-gpu_eigensolver_devices none is the faster choice here.\n");
+        }
         for (int i = 0; i < n; ++i) {
             const json info = gpu_plugin::deviceInfo(b, i);
             if (info.empty()) continue;
