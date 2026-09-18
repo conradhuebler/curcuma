@@ -455,6 +455,7 @@ public:
     }
 
     bool supportsOnTheFlyMultipole() const override { return true; }
+    std::string lastError() const override { return m_ctx ? m_ctx->lastError() : std::string(); }
     bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr, const double* mrad,
                                 double dmp3, double dmp5, const double* dkernel,
                                 const double* qkernel, const double* gamma3) override

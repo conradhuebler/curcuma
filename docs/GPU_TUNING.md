@@ -220,6 +220,53 @@ run's energy against the baseline** - a setting that moves the energy by more th
 `--energy-tol` kcal/mol is printed as SUSPECT and never recommended. `--json` keeps the full
 table including a hardware note, so a result from the cluster can be read here.
 
+### A full sweep, measured
+
+polymer_2x (7320 atoms, nao 15444), gfn2, 4x RTX A4500, 45 runs (`--repeats 1`), about 3 h.
+Baseline 143.95 s, 12 SCF iterations, E = -11784.87804452 Eh. **All 43 runs that completed
+returned that same energy to the last printed digit**, including the distributed eigensolve
+and the distributed density.
+
+| Knob | values (wall time) |
+|---|---|
+| `-threads` | 1 / 2 / 4 / 8 / 16 / 32 / 36: **144 s throughout** |
+| `-eigensolver_max_threads` | 0 / 4 / 8 / 16: 144 s |
+| `-scf_reduce` | auto 143, sygst 144, trsm 144 |
+| `-scf_mixed_precision` | true 145, **false 420 (0.34x)** |
+| `-scf_fp32_threshold` | 1e-3 **223**, 1e-4 **166**, 1e-5 **144** |
+| `-scf_guess` | eeq 144, h0 157 (14 instead of 12 iterations) |
+| `-gpu_eigensolver_devices` | all 144, **none 220 (1.53x for the split)**, 0,1 207 |
+| `-gpu_eigensolver_backend` | auto 144, mp 144, **mg 2226 (0.06x), 37 iterations** |
+| `-gpu_eigensolver_block` | 64 183, 128 145, 256 **140**, 512 148 |
+| `-gpu_eigensolver_fp32` | true 145, false 176 |
+| `-gpu_eigensolver_verify` | true 144.26, false 144.32 - **free** |
+| `-gpu_density_devices` | all 144, **none 193 (1.34x for the split)** |
+| `-gpu_multipole_otf` | auto 144, on 144, off: does not fit the card (see below) |
+| `-gpu_sparse_integrals` | auto 144, on 144, off: no result within 40 min |
+
+What this says beyond the individual numbers:
+
+- **Both multi-GPU defaults earn their keep at this size** (1.53x eigensolve, 1.34x density)
+  and only at this size - at 1410 atoms the same knobs measured flat, which is what the
+  4000-basis-function gate is for.
+- **`-threads` is irrelevant on the GPU path here.** The integrals are built on the device
+  and the host multipole integrals are never built at all ("deferred, 17.2 GB"), so the whole
+  setup phase measures 20.63 s at 1 thread and 20.53 s at 36, inside a run whose SCF alone is
+  113 s on the device. This says nothing against threading on the CPU path, where the same method on
+  polymer measured 44.2 -> 18.8 s.
+- **Mixed precision is the one large lever on a consumer/workstation card** (2.9x), and
+  `-scf_fp32_threshold` is a real dial rather than a safety switch: 1e-3 costs 55 % over the
+  GPU default of 1e-5.
+- **`mg` (cusolverMg) is a memory fallback, never a performance option**: 15x slower and 37
+  instead of 12 iterations, because the per-solve verification keeps rejecting its
+  eigenvectors. The energy is still exact, which is the verification doing its job.
+- **Two `off` settings simply cannot run this system**, which is the empirical case for both
+  `auto` defaults. `-gpu_multipole_otf off` is instructive about where the limit sits: the 7.2 GB
+  of stored matrices still fit the 20 GB card, and the resident SCF loop's own buffers then do
+  not, so the failure arrives one step later. It now says so ("the stored GFN2 multipole
+  interaction matrices hold 7.2 GB of device memory - rebuild them per iteration instead")
+  instead of the bare "GPU resident SCF step failed at iteration 0".
+
 Two things to know before trusting a sweep:
 - Run it the way the production job runs (same allocation, same `CUDA_VISIBLE_DEVICES`). The
   multi-GPU knobs in particular only mean something for what the process actually sees.

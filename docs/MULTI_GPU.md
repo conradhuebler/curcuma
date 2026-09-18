@@ -259,6 +259,57 @@ peak 13.9 GB, energy identical to the single-GPU run - the same numbers as with 
 explicitly. Below the gate the status line says so ("not used (nao below ...)"), and
 `ctest -L gpu` (200 tests, all small molecules) is unaffected: 200/200.
 
+## What to measure on the H200 node (Sep 18, 2026)
+
+Ordered by what curcuma cannot answer here. Everything below runs from the repository; nothing
+needs a code change. Bring back the `.json` files and the profile output.
+
+**0. Check the build first - without this the rest measures the wrong thing.**
+```bash
+cmake .. -DCMAKE_CUDA_ARCHITECTURES=90 -DCUSOLVERMP_ROOT=... -DCUBLASMP_ROOT=... -DNCCL_ROOT=...
+curcuma -methods            # must list the H200s AND the mgpu plugin
+```
+The Sep 17 H200 run fell back to cusolverMg because cuSOLVERMp/NCCL were missing, and Mg is 15x
+slower than the single-GPU path on our own measurement - a build without them looks like
+"multi-GPU does not help" when nothing multi-GPU ran.
+
+**1. The sweep, for the record.** `python scripts/tuning_sweep.py
+test_cases/molecules/larger/polymer_2x.xyz --method gfn2 --gpu cuda --repeats 2 --json h200.json`
+(~2 h). It checks every energy against the baseline, so a divergence shows up as SUSPECT rather
+than as a number to be believed.
+
+**2. Is mixed precision really the wrong default there?** The current default is FP64-only on
+full-rate-FP64 cards, decided from one operator log (5.29 s FP32 vs 3.36 s FP64 per iteration,
+and an FP32 phase converging 1.1 kcal/mol off). Measure `-scf_mixed_precision true|false` x
+`-scf_fp32_threshold 1e-5|1e-6` and watch the ITERATION COUNT as much as the wall time: if
+`true` now converges in the same number of iterations as `false`, the false-fixed-point guard
+has removed the reason for the default and it should be reconsidered.
+
+**3. The per-phase profile - the one measurement that is still missing everywhere.**
+`CURCUMA_GPU_PROFILE=1 curcuma -sp polymer_2x.xyz -method gfn2 -gpu cuda -verbosity 3`. It says
+how much of the run is eigensolve, density, Fock, integrals. That decides whether distributing
+the integrals and the Fock build (column-block ownership) is worth writing at all: if the
+eigensolve plus density is already 80 % of the run on that hardware, the answer is no.
+
+**4. Does the split scale past 2 GPUs on NVLink?** `-gpu_eigensolver_devices 0 | 0,1 | 0,1,2,3`
+(and the same for `-gpu_density_devices`). On PCIe we measured 1.53x and 1.34x at 4 devices with
+7320 atoms. NVLink should do better per device - or the far faster single card may leave nothing
+to win, which is equally worth knowing.
+
+**5. What the 141 GB card allows that ours does not.** `-gpu_multipole_otf off` and
+`-gpu_sparse_integrals off` both fail or time out on a 20 GB A4500. If they run there, compare
+them against the defaults: storing the multipole matrices may well beat rebuilding them when
+memory is free, and that would justify making the `auto` threshold device-memory-aware instead
+of a fixed ~2700 atoms.
+
+**6. How large can a system get now?** polymer_2x needs about 14 GB on one device. With 141 GB
+the interesting question is where the next wall is (nao^2 buffers, the int32 indexing noted in
+the size-guard work), so: one run on the largest structure you have.
+
+**7. Batch throughput**, if the node has 4 or 8 cards: `-sp` on a multi-XYZ file with
+`-gpu_devices 0,1,2,3 -gpu_workers_per_device 1|2`. Independent of everything above and the
+easiest real-world win.
+
 ## Operator runs on other hardware (Sep 17/18, 2026)
 
 - **2x H200 NVL, build without cuSOLVERMp/NCCL**: the eigensolve fell back to cusolverMg, which
@@ -282,6 +333,11 @@ explicitly. Below the gate the status line says so ("not used (nao below ...)"),
   from the distributed density plus the one distributed FP64 solve. On 2 GPUs the FP32 eigensolve
   is worth little anyway (A4500: 12.2 -> 11.7 s per iteration on two devices), so the way to more
   on that machine is more devices or a build with cuSOLVERMp, not the current backend.
+- **Full knob sweep on the A4500 box** (Sep 18, 2026): all 15 knobs on polymer_2x, 45 runs, one
+  energy for all of them; the numbers and what they mean are in
+  [GPU_TUNING.md](GPU_TUNING.md#a-full-sweep-measured). The same sweep is the thing to run on the
+  H200 node: `python scripts/tuning_sweep.py test_cases/molecules/larger/polymer_2x.xyz --method
+  gfn2 --gpu cuda --repeats 2 --json h200.json`.
 - Nothing here is a curcuma measurement on NVLink hardware: the per-phase profile
   (`CURCUMA_GPU_PROFILE=1`) has not been taken on either machine, so how much of those runs is
   distributable at all is still unknown.

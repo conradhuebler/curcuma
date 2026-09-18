@@ -585,6 +585,9 @@ struct GpuScfBackend {
       (void)dkernel; (void)qkernel; (void)gamma3; return false; }
     /// Device potential without the stored multipole interaction matrices (the backend
     /// rebuilds them from geometry + damping radii). Claude Generated (Sep 2026).
+    /// Why the last begin*/step call returned false, when the backend can say. Empty
+    /// otherwise. Claude Generated (Sep 2026).
+    virtual std::string lastError() const { return {}; }
     virtual bool supportsOnTheFlyMultipole() const { return false; }
     virtual bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr,
                                         const double* mrad, double dmp3, double dmp5,

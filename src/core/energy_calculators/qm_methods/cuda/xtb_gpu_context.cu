@@ -4996,6 +4996,27 @@ bool XtbGpuContext::beginPotential(int nat, int nsh,
         return false;
     cudaStream_t stream = m_impl->stream;
     const size_t nn = static_cast<size_t>(nat) * static_cast<size_t>(nat);
+    // Claude Generated (Sep 2026): the STORED multipole path holds 18 nat^2 doubles on the
+    // device - 7.7 GB at 7320 atoms - on top of everything the SCF already has resident.
+    // Without this check the allocation (or a later one starved by it) failed deep inside the
+    // SCF and the user saw only "GPU resident SCF step failed at iteration 0". Measured on
+    // polymer_2x with `-gpu_multipole_otf off` on a 20 GB A4500.
+    {
+        const size_t need = 18 * nn * sizeof(double);
+        size_t free_b = 0, total_b = 0;
+        if (m_impl->memory_check && cudaMemGetInfo(&free_b, &total_b) == cudaSuccess
+            && need + (64ull << 20) > free_b) {
+            char msg[420];
+            std::snprintf(msg, sizeof(msg),
+                          "the stored GFN2 multipole interaction matrices need %.1f GB on device %d "
+                          "for nat=%d, but only %.1f of %.1f GB are free - rebuild them per "
+                          "iteration instead (-gpu_multipole_otf auto, the default above ~2700 atoms)",
+                          need / 1073741824.0, m_impl->device, nat,
+                          free_b / 1073741824.0, total_b / 1073741824.0);
+            m_impl->last_error = msg;
+            return false;
+        }
+    }
     try {
         m_impl->dMpAmatSD.ensure(static_cast<int>(3 * nn));
         m_impl->dMpAmatDD.ensure(static_cast<int>(9 * nn));
@@ -5010,6 +5031,8 @@ bool XtbGpuContext::beginPotential(int nat, int nsh,
         m_impl->dVat.ensure(nat);
         m_impl->dQat.ensure(nat);
     } catch (...) {
+        m_impl->last_error = "device allocation for the stored GFN2 multipole interaction "
+                             "matrices failed (try -gpu_multipole_otf auto)";
         return false;
     }
     m_impl->mp_otf = false;

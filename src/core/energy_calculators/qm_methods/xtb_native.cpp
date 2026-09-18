@@ -925,6 +925,11 @@ double XTB::Calculation(bool gradient)
     const bool solv_blocks_device =
         m_solvation && !(solv_born && m_gpu_scf && m_gpu_scf->supportsDeviceSolvation());
     bool use_device_potential = false;
+    // Claude Generated (Sep 2026): whether the 18 nat^2 multipole interaction matrices sit on
+    // the device (stored path) and how much that is - used to explain a device-memory failure
+    // of the resident loop, which is where the shortage actually surfaces.
+    bool   mp_stored_on_device = false;
+    double mp_stored_bytes     = 0.0;
     if (use_gpu_resident && gpu_multipole && m_method == MethodType::GFN2 && m_mp_initialized
         && !solv_blocks_device
         && m_gpu_scf->supportsDeviceDispersion() && m_gpu_scf->supportsDevicePotential()) {
@@ -945,6 +950,7 @@ double XTB::Calculation(bool gradient)
         // (7.7 GB at 7320 atoms, plus the same again as host upload copies).
         // `-gpu_multipole_otf on|off` forces the choice (CURCUMA_GPU_MP_OTF=1/0 still wins).
         bool otf = 18.0 * static_cast<double>(nn) * sizeof(double) > 1.0e9;
+        mp_stored_bytes = 18.0 * static_cast<double>(nn) * sizeof(double);
         if (m_gpu_mp_otf == "on" || m_gpu_mp_otf == "true")  otf = true;
         else if (m_gpu_mp_otf == "off" || m_gpu_mp_otf == "false") otf = false;
         if (const char* e = std::getenv("CURCUMA_GPU_MP_OTF")) otf = (e[0] == '1');
@@ -965,8 +971,27 @@ double XTB::Calculation(bool gradient)
                                 m_mp_amat_dd[a][bb].data(), nn * sizeof(double));
             for (int k = 0; k < 6; ++k)
                 std::memcpy(sq.data() + static_cast<size_t>(k) * nn, m_mp_amat_sq[k].data(), nn * sizeof(double));
+            mp_stored_on_device = true;
             use_device_potential = m_gpu_scf->beginPotential(nat, nsh, sd.data(), dd.data(),
                                                              sq.data(), dk.data(), qk.data(), g3.data());
+            // Claude Generated (Sep 2026): the stored path needs 18 nat^2 doubles on the device
+            // (7.7 GB at 7320 atoms) and the same again here on the host. If that does not fit,
+            // say so and rebuild the matrices per iteration instead of walking into an SCF that
+            // cannot run - `-gpu_multipole_otf off` on polymer_2x used to fail at iteration 0
+            // with no indication of the cause.
+            if (!use_device_potential && m_gpu_scf->supportsOnTheFlyMultipole()) {
+                const std::string why = m_gpu_scf->lastError();
+                CurcumaLogger::warn("SCF: storing the GFN2 multipole matrices failed"
+                                    + (why.empty() ? std::string() : " (" + why + ")")
+                                    + "; rebuilding them per iteration instead");
+                std::vector<double> xyzb(3 * static_cast<size_t>(nat));
+                for (int i = 0; i < nat; ++i)
+                    for (int k = 0; k < 3; ++k) xyzb[3 * i + k] = m_geometry(i, k) * AA_TO_AU;
+                use_device_potential = m_gpu_scf->beginPotentialOnTheFly(
+                    nat, nsh, xyzb.data(), m_mp_mrad.data(), gfn2_params::mp_dmp3,
+                    gfn2_params::mp_dmp5, dk.data(), qk.data(), g3.data());
+                mp_stored_on_device = !use_device_potential;
+            }
         }
         // WP4b: upload the Born matrix so the device build adds v_at += B·q_at in-SCF.
         // On failure, drop to the host-driven loop (which still applies solvation).
@@ -1058,8 +1083,21 @@ double XTB::Calculation(bool gradient)
             m_eig_fp32 = fp32_wanted(dq_prev);
             double dq = 0.0, eb = 0.0, ecoul = 0.0, ethird = 0.0, emp = 0.0;
             if (!m_gpu_scf->residentScfStep(m_eig_fp32, dq, eb, ecoul, ethird, emp)) {
+                std::string why = m_gpu_scf->lastError();
+                // The classic cause on a large system: the stored multipole matrices fit, and
+                // then the loop's own buffers no longer do. Name the flag that avoids it -
+                // measured on polymer_2x (nat 7320, 7.7 GB stored) on a 20 GB card, where the
+                // failure used to arrive with no indication of the cause. Claude Generated.
+                if (iter == 0 && mp_stored_on_device && mp_stored_bytes > 1.0e9) {
+                    if (!why.empty()) why += "; ";
+                    why += "the stored GFN2 multipole interaction matrices hold "
+                        + fmt::format("{:.1f}", mp_stored_bytes / 1073741824.0)
+                        + " GB of device memory - rebuild them per iteration instead "
+                          "(-gpu_multipole_otf auto, the default above ~2700 atoms)";
+                }
                 CurcumaLogger::warn("XTB::Calculation: GPU resident SCF step failed at iteration "
-                                    + std::to_string(iter));
+                                    + std::to_string(iter)
+                                    + (why.empty() ? std::string() : ": " + why));
                 m_scf_converged = false; m_scf_iterations = iter;
                 setHardError("native GPU-resident SCF solve failed (see warning above) at iteration " + std::to_string(iter));
                 return m_E_total;
