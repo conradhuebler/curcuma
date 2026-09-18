@@ -12361,8 +12361,10 @@ void GFNFF::setupRevSettings()
     // FABLE_REVIEW_2 A.5, f_i = min(1, Val_i/S_i) per atom, c = f_i f_j, with the excess budget
     // granted by charge instead of by element. Same registry caveat as the flags around it: a new
     // key may not arrive through getDefaultJson(), so the fallback here IS the default.
+    // Claude Generated (Sep 19, 2026): the fallback is now "conserving", i.e. the conserving share
+    // is the default (operator decision, taken together with the donor rule below).
     {
-        const std::string form = m_parameters.value("rev_share_form", std::string("delivered"));
+        const std::string form = m_parameters.value("rev_share_form", std::string("conserving"));
         rv.share_conserving = (form == "conserving");
         if (form != "delivered" && form != "conserving")
             CurcumaLogger::warn(fmt::format(

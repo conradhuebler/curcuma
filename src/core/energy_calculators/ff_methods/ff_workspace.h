@@ -286,8 +286,13 @@ struct RevSettings {
     ///       carried by the existing s-blend. What separates NH4+ (four real bonds) from
     ///       NH3 + H (no bond) is neither the element nor the geometry but the electron count,
     ///       and the only electron-count information a force field has is the charge.
-    /// DEFAULT OFF; the delivered behaviour is unchanged.
-    bool share_conserving = false;
+    /// DEFAULT ON since Sep 19, 2026 (operator decision), together with share_donor_rule below -
+    /// which is what made the flip possible: the dative/ylide regression that held it back
+    /// (+73 to +110 kcal/mol on H3N-BH3, amine oxides, N-ylides) is 0.00 with the donor rule, and
+    /// what the mode buys is the artificial radical adducts (class-C dev min -87..-107 -> -1.5..
+    /// +0.0 kcal/mol) and the grid's per-step continuity (487 -> 72 events >= 50 kJ/mol over the
+    /// 20 react-MD cells). `-gfnff.rev_share_form delivered` reproduces the old behaviour.
+    bool share_conserving = true;
     /// rev-gfnff 3a(ii) "conserving": half-width of the C1 smooth min in Val/S units. The min is
     /// exactly 1 above 1 and exactly Val/S below 1 - a, so this only smooths the corner between.
     double share_min_width = 0.1;
