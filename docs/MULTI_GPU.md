@@ -258,3 +258,19 @@ functions (`gpu_eigensolver_min_nao`, `gpu_density_min_nao`). `-gpu_eigensolver_
 peak 13.9 GB, energy identical to the single-GPU run - the same numbers as with the options set
 explicitly. Below the gate the status line says so ("not used (nao below ...)"), and
 `ctest -L gpu` (200 tests, all small molecules) is unaffected: 200/200.
+
+## Operator runs on other hardware (Sep 17/18, 2026)
+
+- **2x H200 NVL, build without cuSOLVERMp/NCCL**: the eigensolve fell back to cusolverMg, which
+  curcuma then only used for FP64 - one distributed solve out of 21, so the run looked
+  single-GPU. polymer_2x gfn2: 15 iterations / 52 s before the distributed density, 21 / 66 s
+  with it; the extra iterations are the FP32 noise-floor effect that the stagnation guard now
+  addresses (`scf_fp32_threshold` == `scf_threshold` == 1e-5), not a defect of the density path.
+  What that machine needs is a build WITH cuSOLVERMp + cuBLASMp + NCCL.
+- **2x RTX PRO 5000 Blackwell, Mg-only build, current code**: the per-solve verification rejected
+  Mg's FP32 eigenpairs (relative residual 3.5e-3), kept FP64 distributed, and the run converged in
+  12 iterations to -11784.87804452 Eh - the same energy as our 4x A4500 runs - in 91 s, with
+  ~4.0 s per FP32 iteration on one GPU and 25.3 s for the single FP64 one.
+- Nothing here is a curcuma measurement on NVLink hardware: the per-phase profile
+  (`CURCUMA_GPU_PROFILE=1`) has not been taken on either machine, so how much of those runs is
+  distributable at all is still unknown.

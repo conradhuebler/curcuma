@@ -49,6 +49,13 @@ The per-iteration full-spectrum eigensolve of the device-resident SCF can be spr
 - Memory: the eigensolver workspaces and the per-GPU solver buffers are released as soon as the SCF has converged, before the post-SCF phase and the gradient.
 - **Every distributed solve is verified** (`-gpu_eigensolver_verify`, default true). A random vector is pushed through the matrix twice - once directly and once through the returned eigenpairs (for the generalized path with the metric S = L L^T) - and the eigenvalues are checked for a genuinely permuted spectrum. A backend that fails is dropped for that precision, the input is restored and the solve returns to the calculation's own device, with a warning naming the residual. Measured cost: polymer_2x 183.3 s with verification vs 184.9 s without, i.e. inside the noise; the gradients agree to 1.2e-14.
 - Why it is not a one-off check: **cusolverMg passes the first solve and degrades afterwards** (polymer, nao 3222: solve 1 residual 1.4e-6, solve 2 8.7e-2 with buffer reuse, 1.2e-3 with everything rebuilt per call). A single gate at the start let a run converge to an energy **1.65 kcal/mol wrong**; with per-solve verification the same run is rejected and lands on the correct energy. cusolverMg is therefore useful only where it verifies: at nao 558 it passes every solve, at 3222 its FP32 is rejected and only its FP64 is used.
+- **Second machine, same verdict** (operator, Sep 18, 2026, 2x RTX PRO 5000 Blackwell, a build
+  where only cusolverMg was found): `cusolverMg: its FP32 eigenpairs failed verification here
+  (relative residual 0.003513, 0 eigenvalues out of ascending order); FP32 iterations stay on
+  device 0 and only FP64 is distributed`. The run then converged in 12 iterations to
+  -11784.87804452 Eh, i.e. exactly the reference energy, in 91 s (FP32 iteration ~4.0 s on one
+  Blackwell, the single FP64 one 25.3 s). So Mg's FP32 defect is not specific to the A4500 box,
+  and the fallback does what it is supposed to do on hardware we cannot test here.
 - `CURCUMA_GPU_EIG_VERIFY_ALWAYS=1` prints the residual of every verification, `CURCUMA_GPU_EIG_CORRUPT=1` deliberately damages the eigenvectors once to prove the check reacts (it reports residual 0.43 and falls back, and the run still gives the correct energy).
 - Results: energies identical to the single-GPU run at the printed precision; with `-scf_threshold 1e-9` energies and gradients agree to <= 1.2e-9 (complex, 231 atoms, gfn1 and gfn2, mp and mg). At the loose default threshold the gradients differ by up to 1e-5 Eh/A, because the FP32 iterations take a slightly different path inside the tolerance (same as GPU vs CPU).
 
@@ -91,6 +98,10 @@ So the ceiling for one calculation is set by the part that stays on one device -
    `GPU multi-GPU eigensolver: cuSOLVERMp on 2 GPUs, 20 solves` - the backend name and the solve count are the test. `cusolverMg on 2 GPUs, 1 solves` means prerequisite 1 is missing.
    `GPU distributed density: pattern density on devices [0,1], 21 steps`.
 4. **The libraries must be found at run time too**: their directories are baked into the RPATH of `libcurcuma_cuda_mgpu.so`, so a compute node needs the same paths (shared file system) or `LD_LIBRARY_PATH`.
+
+Note that the status lines for the density and for a successful eigensolve verification are
+`info` (verbosity >= 2); only a failed verification is a warning. A run at the default verbosity
+that prints nothing about the density did not necessarily skip it - use `-verbosity 2`.
 
 **Measuring it on a new machine** (nothing here is measured on H200 yet - PCIe A4500 numbers do not transfer to NVLink):
 
