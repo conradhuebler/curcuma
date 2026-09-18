@@ -51,6 +51,16 @@ public:
     /// Selected device name (e.g. "NVIDIA GeForce RTX 5080"); empty if none.
     std::string deviceName() const;
 
+    /**
+     * @brief True when this device's FP64 throughput is a HALF of its FP32 (datacenter parts),
+     *        false for the 1:32 / 1:64 consumer and workstation parts.
+     *
+     * Decides whether the mixed-precision SCF pays: on an H200 the FP32 iterations were measured
+     * SLOWER than the FP64 ones (5.29 vs 3.36 s on polymer_2x), while on an A4500 FP64 costs 4x
+     * an FP32 iteration. Claude Generated (Sep 2026).
+     */
+    bool deviceHasFastFp64() const;
+
     /// Selected CUDA device id, or -1 if none.
     int deviceId() const;
 

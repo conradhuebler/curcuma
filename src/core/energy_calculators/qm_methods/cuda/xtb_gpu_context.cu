@@ -2675,6 +2675,18 @@ XtbGpuContext::~XtbGpuContext()
 
 bool XtbGpuContext::ok() const { return m_impl && m_impl->ok; }
 
+bool XtbGpuContext::deviceHasFastFp64() const
+{
+    if (!m_impl || m_impl->device < 0) return false;
+    cudaDeviceProp prop{};
+    if (cudaGetDeviceProperties(&prop, m_impl->device) != cudaSuccess) return false;
+    // FP64:FP32 is 1:2 on the datacenter parts and 1:32 / 1:64 elsewhere. By compute capability:
+    // 6.0 P100, 7.0 V100, 8.0 A100, 9.x H100/H200/GH200, 10.x B200 - all 1:2. Consumer/workstation
+    // (7.5, 8.6, 8.9, 12.x incl. the RTX PRO Blackwell parts) are not.
+    const int cc = prop.major * 10 + prop.minor;
+    return cc == 60 || cc == 70 || cc == 80 || prop.major == 9 || prop.major == 10;
+}
+
 std::string XtbGpuContext::deviceName() const
 {
     return m_impl ? m_impl->name : std::string();

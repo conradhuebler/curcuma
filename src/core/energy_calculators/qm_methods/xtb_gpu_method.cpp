@@ -684,7 +684,19 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
         // path: far-from-convergence iterations solve in FP32, reverting to
         // FP64 near convergence (max|dq| < threshold) so the converged energy
         // stays FP64 (gpu_gfn{1,2}_validation @1e-8 holds). Claude Generated.
-        xtb->setMixedPrecision(true);
+        // Claude Generated (Sep 2026, measured on H200): mixed precision is a CONSUMER-GPU trick.
+        // Where FP64 runs at half the FP32 rate it does not pay - polymer_2x on an H200 NVL took
+        // 5.29 s per FP32 iteration and 3.36 s per FP64 one - and it is worse than that: at
+        // nao = 15444 the FP32 phase converged to a fixed point 1.1 kcal/mol off (dq 7.1e-6 while
+        // the truth was 9.4e-3), so the SCF had to discover that through its FP64 check and spent
+        // 42 iterations instead of 15. On such a device the default is therefore FP64 throughout;
+        // -scf_mixed_precision true overrides it.
+        const bool fast_fp64 = ctx->deviceHasFastFp64();
+        xtb->setMixedPrecision(!fast_fp64);
+        if (fast_fp64 && CurcumaLogger::get_verbosity() >= 1)
+            CurcumaLogger::info(fmt::format(
+                "{}: {} has full-rate FP64 - mixed precision OFF by default "
+                "(-scf_mixed_precision true to force it)", getMethodName(), ctx->deviceName()));
         // Claude Generated (Sep 2026, operator decision): on the GPU switch to FP64 only once
         // max|dq| < 1e-5 (CPU default stays 1e-3). Measured on polymer (1410 atoms, RTX A4500):
         // FP64 eigensolves 4 -> 1, SCF 6.7 -> 4.5 s, energy identical to 1e-12 Eh, gradient vs

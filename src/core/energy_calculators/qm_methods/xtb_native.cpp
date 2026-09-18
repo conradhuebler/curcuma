@@ -720,9 +720,27 @@ double XTB::Calculation(bool gradient)
     auto fp32_wanted = [&](double dq_last) {
         return m_scf_mixed_precision && !fp32_exhausted && (dq_last > m_scf_fp32_threshold);
     };
+    // Claude Generated (Sep 2026, measured on H200): the FP32 phase can converge to a fixed point
+    // that is not the FP64 one. polymer_2x, nao 15444: FP32 reported max|dq| = 7.1e-6 at an energy
+    // 1.1 kcal/mol off, and the next FP64 iteration - taken only because convergence is never
+    // accepted on an FP32 step - showed the true residual to be 9.4e-3. Left alone the SCF then
+    // bounces between the two precisions. So: if an FP64 iteration finds a residual far above what
+    // FP32 last claimed, FP32 has been lying and the rest of the SCF runs in FP64.
+    double dq_fp32_last = -1.0;
+    auto note_fp64_reality_check = [&](double dq_now) {
+        if (m_eig_fp32 || fp32_exhausted || dq_fp32_last < 0.0) return;
+        if (dq_now > 10.0 * std::max(dq_fp32_last, 1.0e-12)) {
+            fp32_exhausted = true;
+            if (CurcumaLogger::get_verbosity() >= 1)
+                CurcumaLogger::warn_fmt("SCF: the FP32 phase converged to a false fixed point "
+                                        "(FP32 max|dq| {:.2e}, FP64 says {:.2e}); continuing in FP64",
+                                        dq_fp32_last, dq_now);
+        }
+    };
     // Call after every iteration that ran in FP32, with that iteration's max|dq|.
     auto note_fp32_progress = [&](double dq_now) {
-        if (!m_eig_fp32) return;
+        if (!m_eig_fp32) { note_fp64_reality_check(dq_now); return; }
+        dq_fp32_last = dq_now;
         if (dq_now < 0.7 * dq_best_fp32) {     // still making real progress
             dq_best_fp32 = dq_now;
             fp32_stall = 0;
