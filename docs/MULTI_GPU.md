@@ -268,9 +268,20 @@ explicitly. Below the gate the status line says so ("not used (nao below ...)"),
   addresses (`scf_fp32_threshold` == `scf_threshold` == 1e-5), not a defect of the density path.
   What that machine needs is a build WITH cuSOLVERMp + cuBLASMp + NCCL.
 - **2x RTX PRO 5000 Blackwell, Mg-only build, current code**: the per-solve verification rejected
-  Mg's FP32 eigenpairs (relative residual 3.5e-3), kept FP64 distributed, and the run converged in
-  12 iterations to -11784.87804452 Eh - the same energy as our 4x A4500 runs - in 91 s, with
-  ~4.0 s per FP32 iteration on one GPU and 25.3 s for the single FP64 one.
+  Mg's FP32 eigenpairs (relative residual 3.5e-3) and kept FP64 distributed. Both runs below
+  converged in 12 iterations to -11784.87804452 Eh, the same energy as our 4x A4500 runs:
+
+  | polymer_2x gfn2, same machine | one GPU | `-gpu_density_devices all` |
+  |---|---:|---:|
+  | FP32 iteration | 4.62 s | **4.00 s** |
+  | FP64 iteration | 32.5 s | **25.3 s** |
+  | total | 100 s | **91 s** |
+
+  This is the first multi-GPU measurement on hardware other than the A4500 box, and it is worth
+  reading carefully: the 9 % came WITHOUT a distributed FP32 eigensolve (Mg was rejected), i.e.
+  from the distributed density plus the one distributed FP64 solve. On 2 GPUs the FP32 eigensolve
+  is worth little anyway (A4500: 12.2 -> 11.7 s per iteration on two devices), so the way to more
+  on that machine is more devices or a build with cuSOLVERMp, not the current backend.
 - Nothing here is a curcuma measurement on NVLink hardware: the per-phase profile
   (`CURCUMA_GPU_PROFILE=1`) has not been taken on either machine, so how much of those runs is
   distributable at all is still unknown.
