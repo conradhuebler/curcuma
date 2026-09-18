@@ -16,15 +16,19 @@
 # is of the approach PROFILE and no absolute energy zero enters.
 #
 # Two arms, and the second is what makes this a falsifier rather than a golden value:
-#   1. the DEFAULT (delivered share) must reproduce its recorded profile - measured min deviation
-#      -87.0 kcal/mol, at 1.0/1.2/1.3 A: -87.0 / -78.0 / -68.6 - within 5 kcal/mol. That is a
-#      regression pin, not an endorsement: the model IS 87 kcal/mol too deep there.
-#   2. -gfnff.rev_share_form conserving must lift the whole curve above -10 kcal/mol (measured
-#      min -1.5, at 1.0/1.2/1.3 A: +16.5 / +24.0 / +23.3). This is the acceptance criterion for
-#      the conserving share; if it ever stops holding, that mode has regressed.
+#   1. the DEFAULT (the valence-conserving share since Sep 19, 2026) must keep the whole curve
+#      above -10 kcal/mol - measured min -1.5, at 1.0/1.2/1.3 A: +16.8 / +23.9 / +22.4. This is
+#      the acceptance criterion for the conserving share; if it stops holding, that mode has
+#      regressed.
+#   2. -gfnff.rev_share_form delivered must still show the old, bad profile - measured min
+#      deviation -89.4 kcal/mol - within 5 kcal/mol. That is a regression pin on the OLD
+#      behaviour, kept so that the arm cannot silently become the good one and hide a
+#      dispatch bug that routes both arms to the same code.
 #
-# When the operator makes `conserving` the default, swap the two expectations (the numbers for
-# both arms are in WORK_STATUS package 3).
+# UPDATED Sep 19, 2026 (WORK_STATUS package 6): the arms were swapped when `conserving` became
+# the default, and the delivered pin moved -87.0 -> -89.4 because `mg` became the default WELL
+# form in the same session (a deeper, wider well makes the artificial adduct slightly deeper).
+# The tolerance is unchanged at 5 kcal/mol.
 
 set -e
 
@@ -34,7 +38,7 @@ source "$SCRIPT_DIR/../test_utils.sh"
 TEST_NAME="gfnff - 03: rev-gfnff class-C radical-adduct falsifier (CH4 + H)"
 TEST_DIR="$SCRIPT_DIR"
 
-DELIVERED_MIN=-87.0      # kcal/mol, measured Sep 18, 2026
+DELIVERED_MIN=-89.4      # kcal/mol, measured Sep 19, 2026 (binary 916847ff, mg well + delivered share)
 DELIVERED_TOL=5.0
 CONSERVING_FLOOR=-10.0
 
@@ -84,8 +88,9 @@ def sp(frame, extra):
 Eref = [p["energy_eh"] for p in info["points"]]
 dref = [(e - Eref[-1]) * H2K for e in Eref]
 ok, reasons = True, []
-for label, extra, expect in (("delivered", [], None),
-                             ("conserving", ["-gfnff.rev_share_form", "conserving"], "floor")):
+# the DEFAULT arm passes no flag at all - that is the point of the swap: it must be the good one
+for label, extra, expect in (("default", [], "floor"),
+                             ("delivered", ["-gfnff.rev_share_form", "delivered"], None)):
     E = [sp(f, extra) for f in frames]
     if any(e is None for e in E):
         print(f"FAIL: {label} arm has {sum(e is None for e in E)} failed single points")
@@ -113,7 +118,7 @@ PYEOF
     set -e
     echo "$py_out"
     if [ $py_rc -eq 0 ]; then
-        echo -e "${GREEN}✓ PASS${NC}: adduct profile as recorded, conserving share above the floor"
+        echo -e "${GREEN}✓ PASS${NC}: the default is above the floor, the delivered arm still shows the old profile"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
         echo -e "${RED}✗ FAIL${NC}: class-C adduct falsifier"

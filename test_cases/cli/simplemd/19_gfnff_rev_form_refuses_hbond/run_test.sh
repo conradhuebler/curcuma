@@ -81,6 +81,15 @@ EPOT_TOL_KCAL=0.01
 # exactly free, which is what this test exists to assert - so the reference arm becomes
 # `-method revgfnff -gfnff.topology_mode static`, keeping the 0.01 kcal/mol tolerance, and the
 # gfnff arm stays as a loose sanity bound on the rev-vs-gfnff equilibrium offset.
+#
+# UPDATED Sep 19, 2026 (WORK_STATUS package 6): the operator made `-gfnff.rev_well_form mg` the
+# default, and an MG well has its own fitted depth D = s |k_b|, so revgfnff's ABSOLUTE energy
+# moves away from plain gfnff by design - measured on this dimer -133.5616 kcal/mol, against
+# -0.5555 with the Gaussian. That offset is not what this bound is for (relative energies are
+# unaffected: the 167-reaction conformer/S66 guard moves 1.0341 -> 1.0439 kcal/mol MAD), so the
+# bound now compares the GAUSSIAN rev arm against gfnff, where it keeps its original meaning and
+# its original 2.0 kcal/mol threshold. The mg-vs-gauss offset is printed, not gated - it is an
+# AI-fitted table value and will move when the table is refitted.
 GFNFF_OFFSET_TOL_KCAL=2.0
 HARTREE_KCAL=627.5094740631
 
@@ -102,11 +111,13 @@ run_one() {
 
 run_test() {
     cd "$TEST_DIR"
-    rm -rf gstatic static order weight
+    rm -rf gstatic static gaussstatic order weight
     cleanup_bmt_dirs
     local rc=0
     run_one gstatic -method gfnff   -gfnff.topology_mode static          || rc=$?
     run_one static -method revgfnff -gfnff.topology_mode static          || rc=$?
+    run_one gaussstatic -method revgfnff -gfnff.topology_mode static \
+                   -gfnff.rev_well_form gauss                            || rc=$?
     run_one order  -method revgfnff -gfnff.topology_mode react           || rc=$?
     run_one weight -method revgfnff -gfnff.topology_mode react \
                    -gfnff.rev_form_switch weight                         || rc=$?
@@ -175,6 +186,7 @@ if f_o != 0 or r_o != 0:
 
 e_static = mean_epot("static/stdout.log")
 e_gstatic = mean_epot("gstatic/stdout.log")
+e_gaussstatic = mean_epot("gaussstatic/stdout.log")
 e_order = mean_epot("order/stdout.log")
 d_kcal = (e_order - e_static) * hartree_kcal
 if not (abs(d_kcal) <= tol_kcal):
@@ -183,8 +195,9 @@ if not (abs(d_kcal) <= tol_kcal):
                    f"(tolerance {tol_kcal})")
 # loose sanity bound on the rev-vs-gfnff equilibrium offset (stage 3a (i)'s r0 fix): it is
 # -0.5555 kcal/mol here and is NOT what this test gates, but a tenfold change would mean the
-# equilibrium form moved and should be looked at.
-d_gfnff = (e_static - e_gstatic) * hartree_kcal
+# equilibrium form moved and should be looked at. Measured on the GAUSSIAN rev arm, so that a
+# fitted well depth (the mg / erfmorse tables) cannot trip it - see the header.
+d_gfnff = (e_gaussstatic - e_gstatic) * hartree_kcal
 if not (abs(d_gfnff) <= gfnff_tol):
     ok = False
     reasons.append(f"revgfnff static is {d_gfnff:+.4f} kcal/mol from plain gfnff static "
@@ -197,7 +210,8 @@ if f_w < 1:
                    f"test no longer proves anything")
 
 print(f"static : formed={f_s} (revgfnff)  gfnff static formed={f_gs}")
-print(f"offsets: react-revstatic={d_kcal:+.4f}  revstatic-gfnff={d_gfnff:+.4f} kcal/mol")
+print(f"offsets: react-revstatic={d_kcal:+.4f}  revstatic(gauss)-gfnff={d_gfnff:+.4f}  "
+      f"revstatic(default well)-gfnff={(e_static - e_gstatic) * hartree_kcal:+.4f} kcal/mol")
 print(f"order  : formed={f_o} broken={b_o} rebuilds={r_o}")
 print(f"weight : formed={f_w} broken={b_w} rebuilds={r_w} (negative control)")
 print(f"mean Epot: static={e_static:.8f} Eh order={e_order:.8f} Eh "

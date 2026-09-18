@@ -21,14 +21,31 @@
 # System: frame 16 of test_cases/revgfnff/fit_work/c2h6_1000K.xyz - the cell in which the runaway
 # was first isolated - 5 ps at 2000 K, CSVR, dt 0.25 fs, seed 42, one thread.
 #
-# Measured (Sep 18, 2026, binary 7fef81bd):
+# UPDATED Sep 19, 2026 (WORK_STATUS package 6). The operator flipped two defaults in that
+# session - `-gfnff.rev_share_form conserving` and `-gfnff.rev_well_form mg` - and EITHER of them
+# removes this runaway on its own, so with the new defaults the negative control no longer
+# violates anything and the test stopped exercising what it exists for:
 #
-#   arm                          max per-step dEpot     min r(H-H)
-#   default (fix_h on)                 59.26 kJ/mol       1.770 a0
-#   control (-...fix_h false)        2593.60 kJ/mol       0.559 a0
+#   * under `conserving` the hydrogen budget cannot grow at all - the excess-budget cap is
+#     X = 0 for H by element (not by the fix_h flag), so -gfnff.rev_budget_fix_h is a NO-OP
+#     there. Both arms measured 70.77 kJ/mol and 1.536 a0.
+#   * under `mg` + `delivered` the control is 53.38 kJ/mol / 1.839 a0, i.e. also inside the
+#     bounds: the deeper, wider MG well removes this particular runaway too.
 #
-# Thresholds: 150 kJ/mol (2.5x margin on the default, 17x below the control) and 1.0 a0 (1.77x
-# margin, 1.8x above the control). Two hydrogens at 0.559 a0 = 0.30 Angstrom is not chemistry.
+# So the two-armed hydrogen-budget statement is now made in the mode where the budget EXISTS -
+# both arms pin `-gfnff.rev_well_form gauss -gfnff.rev_share_form delivered` - and a third arm
+# asserts that the SHIPPED DEFAULT is inside the same bounds. No threshold was changed.
+#
+# Measured (Sep 19, 2026, binary 916847ff; the first two reproduce the Sep 18 numbers exactly):
+#
+#   arm                                        max per-step dEpot     min r(H-H)
+#   gauss+delivered, fix_h on                        59.26 kJ/mol       1.770 a0
+#   gauss+delivered, fix_h false (control)         2593.60 kJ/mol       0.559 a0
+#   shipped default (mg + conserving)                70.77 kJ/mol       1.536 a0
+#
+# Thresholds: 150 kJ/mol (2.1x margin on the shipped default, 17x below the control) and 1.0 a0
+# (1.54x margin, 1.8x above the control). Two hydrogens at 0.559 a0 = 0.30 Angstrom is not
+# chemistry.
 #
 # The per-step metric EXCLUDES intervals containing a "REACT rebuild" line: a topology change has
 # its own dE_jump statistic (tests 16/17) and is not what this test is about. That exclusion is
@@ -60,13 +77,19 @@ run_one() {
     return $?
 }
 
+# the hydrogen budget only exists in the delivered share, and only the Gaussian well exposes
+# this runaway - so the two-armed statement pins both (see the header). The third arm is the
+# shipped default, with no flag at all.
+GAUSS_DELIVERED=(-gfnff.rev_well_form gauss -gfnff.rev_share_form delivered)
+
 run_test() {
     cd "$TEST_DIR"
-    rm -rf fixed free
+    rm -rf fixed free shipped
     cleanup_bmt_dirs
     local rc=0
-    run_one fixed || rc=$?
-    run_one free -gfnff.rev_budget_fix_h false || rc=$?
+    run_one fixed "${GAUSS_DELIVERED[@]}" || rc=$?
+    run_one free "${GAUSS_DELIVERED[@]}" -gfnff.rev_budget_fix_h false || rc=$?
+    run_one shipped || rc=$?
     return $rc
 }
 
@@ -133,28 +156,29 @@ def min_hh_bohr(path):
 
 
 res = {}
-for arm in ("fixed", "free"):
+for arm in ("fixed", "free", "shipped"):
     s, nrows = step_max(f"{arm}/stdout.log")
     hh = min_hh_bohr(f"{arm}/input.snapshots/input.trj.xyz")
     res[arm] = (s, hh, nrows)
     print(f"{arm:6s}: max per-step dEpot {s:9.2f} kJ/mol  min r(H-H) {hh:7.3f} a0  rows {nrows}")
 
 ok, reasons = True, []
-s, hh, nrows = res["fixed"]
-if nrows < 1000:
-    ok = False
-    reasons.append(f"only {nrows} status rows parsed for the default arm")
-if s > max_step_kj:
-    ok = False
-    reasons.append(f"default arm: max per-step dEpot {s:.2f} > {max_step_kj} kJ/mol")
-if hh < min_hh:
-    ok = False
-    reasons.append(f"default arm: min r(H-H) {hh:.3f} < {min_hh} a0")
+for arm, label in (("fixed", "gauss+delivered, fix_h on"), ("shipped", "shipped default")):
+    s, hh, nrows = res[arm]
+    if nrows < 1000:
+        ok = False
+        reasons.append(f"only {nrows} status rows parsed for the {label} arm")
+    if s > max_step_kj:
+        ok = False
+        reasons.append(f"{label}: max per-step dEpot {s:.2f} > {max_step_kj} kJ/mol")
+    if hh < min_hh:
+        ok = False
+        reasons.append(f"{label}: min r(H-H) {hh:.3f} < {min_hh} a0")
 sf, hf, _ = res["free"]
 if sf <= max_step_kj and hf >= min_hh:
     ok = False
-    reasons.append("negative control (-gfnff.rev_budget_fix_h false) stayed inside BOTH bounds "
-                   "- the test is no longer exercising the hydrogen budget")
+    reasons.append("negative control (gauss + delivered + -gfnff.rev_budget_fix_h false) stayed "
+                   "inside BOTH bounds - the test is no longer exercising the hydrogen budget")
 if not ok:
     print("FAIL reasons: " + "; ".join(reasons))
 sys.exit(0 if ok else 1)
@@ -164,7 +188,7 @@ PYEOF
     set -e
     echo "$py_out"
     if [ $py_rc -eq 0 ]; then
-        echo -e "${GREEN}✓ PASS${NC}: hydrogen budget bounded, control violates both bounds"
+        echo -e "${GREEN}✓ PASS${NC}: hydrogen budget bounded in both the pinned and the shipped arm, control violates both bounds"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
         echo -e "${RED}✗ FAIL${NC}: hydrogen budget check"
