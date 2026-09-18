@@ -1,5 +1,5 @@
 # WORK_STATUS — rev-gfnff work packages 1-5 (2026-09-18)
-Packages done: 4/5
+Packages done: 5/5
 
 AI-generated, machine-tested. Repository `/home/conrad/src/curcuma_branches/curcuma`, branch
 `reactff2-llm`, start HEAD `265a18b0`. Every measurement was taken with a FROZEN copy of the
@@ -509,3 +509,93 @@ the restructuring had written `(-2 alpha dr) * energy` as `dwell_dx * w * cshare
 - Step (2) of the review's plan — freeing the curvature with an r0 re-solve — is NOT done.
 
 `ctest`: 95/98 and 19/22, the same three known failures.
+
+---
+
+## Package 5 — calibration, tests, documentation
+
+Done on the defaults as they stand: **`rev_budget_fix_h true`, `rev_share_form delivered`,
+`rev_well_form gauss`**. If the operator flips the share or the well form, `cli_simplemd_16/18/20`
+and `cli_gfnff_03` need another pass — their numbers are calibrations of the *current* default and
+each test says so in its own header.
+
+### 5.1 A harness finding that invalidates every "ctest unchanged" line above
+
+`test_cases/cli/test_utils.sh` picks the binary from `release, debug, build, release_rocm,
+release_cuda, release_vulkan, build_rocm` — **`build_rev` is not in that list**. So every
+`cli_*` ctest run in packages 1-4 measured `release/curcuma` (Sep 14, md5 `e2f4a72a`), not the
+package binary, unless `CURCUMA` is exported. The C++ tests (`gfnff_val_*`, `sqm_val_*`,
+`react`, ...) are executables built in `build_rev` and were always testing the right thing; only
+the bash `cli_*` tests were not.
+
+**Run correctly** (`CURCUMA=build_rev/curcuma ctest -R "gfnff|sqm_val|react|cli_simplemd_"`):
+**111 of 113 pass.** The two failures are `cli_simplemd_08/09` (acetic-acid dimer, `-method
+gfnff`, "Total energy drift 0.446525 Eh >= 0.10"), which
+
+- `HBUDGET_STATUS` section 5 already recorded on Sep 15 with the **same** 0.4465 Eh, before any
+  of this work, and
+- **pass** with `release/curcuma`, i.e. they are a property of this branch's build that predates
+  these five packages. `-method gfnff` energies are bit-identical throughout (12 digits and the
+  `dump_params` md5), so it is not an energy change.
+
+The three tests that the package brief listed as "known failures, recalibrated in package 5"
+(`cli_simplemd_16/18/19`) now **pass** against the build_rev binary.
+
+### 5.2 Recalibrations
+
+| test | what was wrong | what it is now |
+|---|---|---|
+| `cli_simplemd_16` | "T never exceeds 1.6x the target" measured the SAMPLING: at the default print frequency the run prints **17 rows**, and the max over 17 samples of a 6-DOF Maxwell-Boltzmann came out 2.17 / 1.23 / 1.79 / 1.74 / 1.91 over 3600-4400 K — the test passed or failed on which sample was printed | `-md.print_frequency 10` (1601 rows, identical trajectory and event counts), gate the **mean** at 1.5x (measured 1.14-1.17, 28 % margin) and keep a loose max at 8x (measured 5.5-6.0) as an instability guard. dE_jump thresholds untouched: measured median **0.00** and max **0.50-1.50** kJ/mol against 2.0 and 60.0 |
+| `cli_simplemd_18` | the operating point moved, not the criterion: at 11500 K the 12-H2 bath now makes **568-592** rebuilds where the Sep-13 calibration measured 16-52, and the NVE slope scales with the event count (real topology changes, each with its own dE_jump) | temperature **11500 -> 8000 K**, where the count is back at 38-52, and the floor re-derived by the same rule — 4x the largest |slope_rev| (6.37e-04) and 7x the largest SE (3.6e-04): **1.6e-3 -> 2.5e-3 Eh/ps**. MAX_T_K keeps its 1.3x meaning, 15000 -> 10400 |
+| `cli_simplemd_19` | its reference arm was `-method gfnff` at a 0.01 kcal/mol tolerance, but stage 3a (i)'s r0 fix gives revgfnff a constant equilibrium offset — measured **-0.5555 kcal/mol** on this very dimer | reference arm becomes `-method revgfnff -gfnff.topology_mode static` at the same tolerance. Measured: revgfnff **react == revgfnff static to 0.0000 kcal/mol** (-0.66200626 Eh both), i.e. the join is still exactly free, which is what the test exists to assert. The gfnff arm stays as a loose 2.0 kcal/mol bound on the offset |
+
+Full calibration sweep for test 18 (10 ps, 0.1 ps buckets, seed 42, same bath):
+
+| T / K | dt | slope_rev Eh/ps | SE | rebuilds | slope_gfnff |
+|---:|---:|---:|---:|---:|---:|
+| 8000 | 0.25 | **6.372e-04** | 3.6e-04 | 38 | 5.5e-05 |
+| 8000 | 0.125 | **6.230e-04** | 3.6e-04 | 52 | 4.2e-06 |
+| 9500 | 0.25 | 1.766e-03 | 7.6e-04 | 3274 | -1.1e-05 |
+| 10500 | 0.25 | 2.521e-03 | 1.2e-03 | 188 | -7.6e-05 |
+| 11500 | 0.25 | 4.311e-03 | 1.7e-03 | 568 | -9.5e-06 |
+| 12500 | 0.125 | 4.375e-03 | 1.7e-03 | 422 | 8.8e-06 |
+
+### 5.3 New tests
+
+| test | asserts | measured |
+|---|---|---|
+| `cli_simplemd_20_gfnff_rev_h_budget` | the c2h6 runaway cell, 5 ps: max per-step abs(dEpot) outside rebuild intervals <= **150 kJ/mol** and min r(H-H) >= **1.0 a0**, AND a `-gfnff.rev_budget_fix_h false` control that must violate both | default **59.26** kJ / **1.770** a0; control **2593.60** kJ / **0.559** a0 |
+| `cli_gfnff_03_rev_adduct_falsifier` | the class-C CH4 + H approach vs r2SCAN-3c: the delivered profile within 5 kcal/mol of its recorded min dev **-87.0**, and `conserving` above a **-10** kcal/mol floor | delivered -87.0, conserving **-1.5** |
+| `cli_gfnff_04_rev_well_form` | gauss == default == the recorded 12-digit caffeine energy, gfnff untouched, and mg/erfmorse each differ from gauss and from each other by > 1e-6 Eh | mg - gauss +0.1266 Eh, erfmorse - gauss +0.1344, erfmorse - mg 7.81e-03 |
+
+The second arm of tests 20 and 03 is the point: without it both would pass on a build where the
+share is switched off entirely, and test 04's liveness clause is what stops a switchable well form
+from dying silently. Test 04 reads the energy from the `-batch` JSONL because the printed
+"Single Point Energy" carries 8 decimals and cannot express a 1e-11 identity statement.
+
+### 5.4 Documentation
+
+- **new** `docs/REV_GFNFF_STAGE3A.md` — the share, the hydrogen budget, the conserving mode and
+  the two well forms, with every measured number, an explicit **what was NOT tested** list (no
+  metals, no periodic systems, no hydrogen-bonded X-H under the new forms, no MD beyond 5 ps per
+  cell, not every flag combination) and a **not implemented** list (free curvature + r0 re-solve,
+  a bond-order-resolved well table, a donor rule for the conserving budget).
+- `docs/REV_GFNFF_ROADMAP.md` — a stage-3a status table, the restated smoothness falsifier (three
+  columns, with the reason the `dE_jump` statistic alone is not one) and the 20-cell correction.
+- `CLAUDE.md` — links the new document from the rev-gfnff bullet.
+- `AIChangelog.md` — one entry per delivered fact (H budget default, conserving share, well forms,
+  the multi-gpu merge).
+
+### 5.5 Open for the operator
+
+1. **`rev_share_form conserving`** — flip or not. It is the only thing measured that removes the
+   artificial radical adducts (package 3.3) and it costs 73-110 kcal/mol on dative/ylidic neutrals
+   (package 3.6). My recommendation: not yet, and adopt it together with a donor rule.
+2. **`rev_well_form mg`** — flip or not. MG and erf-Morse are indistinguishable on the data
+   (package 4.4) and MG is the cheaper one; the guard does not open but equilibrium bond lengths
+   move by up to 0.0067 A.
+3. `cli_simplemd_08/09` — a pre-existing 0.4465 Eh NVE drift of plain `gfnff` on the acetic-acid
+   dimer in this branch's build, recorded since Sep 15 and never chased.
+4. Adding `build_rev` to `test_cases/cli/test_utils.sh`'s search list would not help (it comes
+   after `release`, which exists); the reliable form is `CURCUMA=<path> ctest ...` and it is worth
+   putting in the project's test instructions.
