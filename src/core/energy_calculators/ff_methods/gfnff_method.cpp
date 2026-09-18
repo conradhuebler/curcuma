@@ -12378,8 +12378,12 @@ void GFNFF::setupRevSettings()
         rv.share_donor_rule = m_rev_share_donor_rule;
     }
     // Claude Generated (Sep 18, 2026): stage 3a(iii), the bond-well form.
+    // Claude Generated (Sep 19, 2026): the fallback is now "mg", i.e. the MG well is the default
+    // (operator decision). Same registry caveat as the flags around it - the fallback IS the
+    // default. Scoped by construction: every rev path is gated on rev_enabled, so plain
+    // -method gfnff never reaches the well form.
     {
-        const std::string form = m_parameters.value("rev_well_form", std::string("gauss"));
+        const std::string form = m_parameters.value("rev_well_form", std::string("mg"));
         rv.well_form = (form == "mg") ? 1 : (form == "erfmorse") ? 2 : 0;
         if (form != "gauss" && form != "mg" && form != "erfmorse")
             CurcumaLogger::warn(fmt::format(

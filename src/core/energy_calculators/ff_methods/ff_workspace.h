@@ -324,7 +324,9 @@ struct RevSettings {
     /// The term weight w is NOT applied to these wells: they decay by themselves (the fit
     /// measures |E_pair| at the last grid point as median 0.000, max 0.69 kcal/mol), so
     /// multiplying by w would truncate the tail the fit just put there.
-    int well_form = 0;
+    /// DEFAULT 1 (MG) since Sep 19, 2026 (operator decision). Scope: the whole rev path is gated
+    /// on `enabled`, so plain -method gfnff cannot see this - verified, not assumed.
+    int well_form = 1;
     /// rev-gfnff stage 3a(ii) (Sep 2026): "an H is never sp" - an sp hydrogen is not treated as
     /// a bridging atom, so its bond keeps the full strength instead of the reference's 0.30
     /// scaling. See the comment at the rule in gfnff_method.cpp.
