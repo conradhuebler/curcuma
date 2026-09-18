@@ -71,6 +71,17 @@ MAXTIME_FS=1000         # 1 ps
 DT=0.25
 PRINT_FREQUENCY_FS=100  # 0.1 ps, enough rows for a stable block mean
 EPOT_TOL_KCAL=0.01
+# RECALIBRATED Sep 18, 2026 (stage 3a; test_cases/revgfnff/_log/WORK_STATUS.md package 5).
+# Assertion 3 used to compare the react run against a plain `-method gfnff` static run with a
+# 0.01 kcal/mol tolerance. Stage 3a (i)'s r0 fix gives revgfnff a small CONSTANT equilibrium
+# offset against gfnff - measured on this very dimer, -0.5555 kcal/mol over 1 ps - so that
+# comparison now fails for a reason that has nothing to do with the join. Measured with the
+# stage-3a default: revgfnff REACT and revgfnff STATIC have the SAME mean Epot to 0.0000
+# kcal/mol (-0.66200626 Eh both), while gfnff static is -0.66112094. The join is therefore still
+# exactly free, which is what this test exists to assert - so the reference arm becomes
+# `-method revgfnff -gfnff.topology_mode static`, keeping the 0.01 kcal/mol tolerance, and the
+# gfnff arm stays as a loose sanity bound on the rev-vs-gfnff equilibrium offset.
+GFNFF_OFFSET_TOL_KCAL=2.0
 HARTREE_KCAL=627.5094740631
 
 COMMON_ARGS="-temperature $TEMPERATURE -maxtime $MAXTIME_FS -md.time_step $DT \
@@ -91,10 +102,11 @@ run_one() {
 
 run_test() {
     cd "$TEST_DIR"
-    rm -rf static order weight
+    rm -rf gstatic static order weight
     cleanup_bmt_dirs
     local rc=0
-    run_one static -method gfnff    -gfnff.topology_mode static          || rc=$?
+    run_one gstatic -method gfnff   -gfnff.topology_mode static          || rc=$?
+    run_one static -method revgfnff -gfnff.topology_mode static          || rc=$?
     run_one order  -method revgfnff -gfnff.topology_mode react           || rc=$?
     run_one weight -method revgfnff -gfnff.topology_mode react \
                    -gfnff.rev_form_switch weight                         || rc=$?
@@ -121,10 +133,10 @@ validate_results() {
     TESTS_RUN=$((TESTS_RUN + 1))
     local py_out py_rc
     set +e
-    py_out=$(python3 - "$EPOT_TOL_KCAL" "$HARTREE_KCAL" <<'PYEOF'
+    py_out=$(python3 - "$EPOT_TOL_KCAL" "$HARTREE_KCAL" "$GFNFF_OFFSET_TOL_KCAL" <<'PYEOF'
 import re, sys
 
-tol_kcal, hartree_kcal = (float(x) for x in sys.argv[1:3])
+tol_kcal, hartree_kcal, gfnff_tol = (float(x) for x in sys.argv[1:4])
 ROW_RE = re.compile(r"\s+\d+\.\d+\s+[-\d.]+\s+[-\d.]+\s+[-\d.]+\s+[-\d.]+")
 
 def counts(path):
@@ -149,9 +161,12 @@ reasons = []
 f_o, b_o, r_o = counts("order/stdout.log")
 f_w, b_w, r_w = counts("weight/stdout.log")
 f_s, _, _ = counts("static/stdout.log")
+f_gs, _, _ = counts("gstatic/stdout.log")
 
 if f_s != 0:
-    ok = False; reasons.append(f"plain gfnff static formed {f_s} bonds (must be 0)")
+    ok = False; reasons.append(f"revgfnff static formed {f_s} bonds (must be 0)")
+if f_gs:
+    ok = False; reasons.append(f"plain gfnff static formed {f_gs} bonds (must be 0)")
 
 if f_o != 0 or r_o != 0:
     ok = False
@@ -159,12 +174,21 @@ if f_o != 0 or r_o != 0:
                    f"the H bond was joined")
 
 e_static = mean_epot("static/stdout.log")
+e_gstatic = mean_epot("gstatic/stdout.log")
 e_order = mean_epot("order/stdout.log")
 d_kcal = (e_order - e_static) * hartree_kcal
 if not (abs(d_kcal) <= tol_kcal):
     ok = False
-    reasons.append(f"mean Epot {d_kcal:+.4f} kcal/mol from the static run "
+    reasons.append(f"mean Epot {d_kcal:+.4f} kcal/mol from the revgfnff static run "
                    f"(tolerance {tol_kcal})")
+# loose sanity bound on the rev-vs-gfnff equilibrium offset (stage 3a (i)'s r0 fix): it is
+# -0.5555 kcal/mol here and is NOT what this test gates, but a tenfold change would mean the
+# equilibrium form moved and should be looked at.
+d_gfnff = (e_static - e_gstatic) * hartree_kcal
+if not (abs(d_gfnff) <= gfnff_tol):
+    ok = False
+    reasons.append(f"revgfnff static is {d_gfnff:+.4f} kcal/mol from plain gfnff static "
+                   f"(tolerance {gfnff_tol}) - the equilibrium offset moved")
 
 if f_w < 1:
     ok = False
@@ -172,7 +196,8 @@ if f_w < 1:
                    f"-- the old criterion is no longer being exercised, so this "
                    f"test no longer proves anything")
 
-print(f"static : formed={f_s}")
+print(f"static : formed={f_s} (revgfnff)  gfnff static formed={f_gs}")
+print(f"offsets: react-revstatic={d_kcal:+.4f}  revstatic-gfnff={d_gfnff:+.4f} kcal/mol")
 print(f"order  : formed={f_o} broken={b_o} rebuilds={r_o}")
 print(f"weight : formed={f_w} broken={b_w} rebuilds={r_w} (negative control)")
 print(f"mean Epot: static={e_static:.8f} Eh order={e_order:.8f} Eh "

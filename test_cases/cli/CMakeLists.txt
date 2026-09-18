@@ -73,6 +73,13 @@ set_tests_properties(cli_curcumaopt_07_opt_multixyz PROPERTIES TIMEOUT 300 LABEL
 
 add_cli_test(gfnff 01_complex_gfnff_singlepoint)
 add_cli_test(gfnff 02_caffeine_gfnff_energy_components)
+# Claude Generated (Sep 18, 2026): rev-gfnff stage 3a falsifiers (docs/REV_GFNFF_STAGE3A.md).
+# 03 is a two-armed falsifier for the valence share, 04 pins the well-form default AND asserts
+# that the two new forms are actually reachable.
+add_cli_test(gfnff 03_rev_adduct_falsifier)
+set_tests_properties(cli_gfnff_03_rev_adduct_falsifier PROPERTIES TIMEOUT 600 LABELS "gfnff;react;rev")
+add_cli_test(gfnff 04_rev_well_form)
+set_tests_properties(cli_gfnff_04_rev_well_form PROPERTIES TIMEOUT 300 LABELS "gfnff;react;rev")
 
 # =============================================================================
 # GPU GFN-FF Tests — only registered when USE_CUDA=ON
@@ -183,6 +190,10 @@ add_cli_test(simplemd 18_gfnff_rev_nve_vs_gfnff)
 set_tests_properties(cli_simplemd_18_gfnff_rev_nve_vs_gfnff PROPERTIES TIMEOUT 600 LABELS "simplemd;gfnff;react;rev")
 add_cli_test(simplemd 19_gfnff_rev_form_refuses_hbond)
 set_tests_properties(cli_simplemd_19_gfnff_rev_form_refuses_hbond PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;react;rev")
+# Claude Generated (Sep 18, 2026): rev-gfnff stage 3a(ii) - the hydrogen valence budget
+# (docs/REV_GFNFF_STAGE3A.md). Two-armed; the -gfnff.rev_budget_fix_h false control must fail.
+add_cli_test(simplemd 20_gfnff_rev_h_budget)
+set_tests_properties(cli_simplemd_20_gfnff_rev_h_budget PROPERTIES TIMEOUT 600 LABELS "simplemd;gfnff;react;rev")
 # Claude Generated (Jul 2026): RMSD-MTD strided-scheme regression tests (docs/RMSD_MTD_TEXTBOOK.md 6)
 add_cli_test(simplemd 13_rmsd_mtd_legacy_ab)
 set_tests_properties(cli_simplemd_13_rmsd_mtd_legacy_ab PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;rmsd_mtd")
