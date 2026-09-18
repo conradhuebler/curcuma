@@ -55,7 +55,37 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 
 ## Live agents
 
-**RUNNING since 2026-09-18: `work-packages` (Opus), the ONLY agent in the main tree, builds in
+**2026-09-18 evening: `work-packages` DONE — 5/5 packages, 12 local commits `378a13cc..64f0109f`,
+`WORK_STATUS.md` (601 lines). Orchestrator-verified on the final binary (md5 bd82dff3): c2h6 cell
+default 59.3 kJ/step (136 rebuilds), `rev_budget_fix_h false` 2593.6 (90), `rev_share_form
+conserving` 54.4, `rev_well_form mg` 51.2; caffeine SPs unchanged.** Delivered: (1) H fix default
+ON, 20-cell baseline, adduct falsifier; (2) multi-gpu merged, identity at T=1 proven,
+`coulomb_implicit true` adopted (new dump_params md5s 4013d6fc / 6c3a87c8), a remote build break
+fixed (`dsygst_` outside its BLAS guard), GPU code merged but not compiled here; (3) `conserving`
+share built, default off — adducts −87..−107 → +2..+32, ch4_H f10 388 → 34 kJ, but dative/ylide
+neutrals +73..+110 kcal/mol (H3N-BH3, amine oxide, N-ylide) → recommendation: adopt only with a
+donor rule; (4) `rev_well_form gauss|mg|erfmorse`, default gauss bit-identical — class-A median
+rms 24.5 → 19.5/19.2, r90 dev −0.33 → −0.06, guard 1.034 → 1.044 (holds), r_eq shifts up to 0.0067
+A, MG and erf-Morse indistinguishable, MG cheaper (erf-Morse bisection cost 1.42x before caching)
+→ recommendation MG if any, but the pair table (no C-C/C=C/C#C split) is why 19.5 not 2.1; (5)
+tests 16/18/19 recalibrated, three new two-armed tests (20, gfnff_03, gfnff_04),
+`docs/REV_GFNFF_STAGE3A.md`. **Harness finding**: `test_utils.sh` prefers `release/curcuma`; run
+`CURCUMA=build_rev/curcuma ctest ...` — then 111/113. **The two failures `cli_simplemd_08/09`
+(plain gfnff, acetic-acid dimer, 0.4465 Eh NVE drift) are a BLAS-less-build defect, not a branch
+regression**: orchestrator rebuilt `release/` (USE_BLAS ON) from HEAD → 3/3 pass (md5 831bb4fb);
+`build_rev` is USE_BLAS OFF. Method note from the agent: an algebraically equal re-association in
+the bond gradient cost 1 ulp and 77 grid rebuilds at bit-identical single points — the trajectory
+fingerprint catches what the energy identity cannot.
+
+**RUNNING: `blasless-drift` (Opus)** — root-cause the 0.4465 Eh NVE drift of plain gfnff in the
+USE_BLAS=OFF build (gradient vs FD, EEQ state path, gated sites); status `BLASLESS_DRIFT_STATUS.md`;
+works in `build_rev/` + a new `build_blas/`, no commits.
+
+**Operator decisions pending**: `rev_share_form conserving` (recommendation: only with a donor
+rule), `rev_well_form mg` (recommendation: after the 3b pair-table factorisation), whether to
+commission the donor rule next. Nothing pushed; local branch 50 commits ahead of origin.
+
+**Earlier the same day: `work-packages` (Opus), the ONLY agent in the main tree, builds in
 `build_rev/`, measures with frozen copies, commits locally per logical change, never pushes.**
 Operator decisions 2026-09-18: H fix default ON; build the charge-based budget rule; build BOTH
 well forms (MG and erf-Morse) and compare in real use; merges in the reviewed order; the agent
