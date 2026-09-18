@@ -80,8 +80,11 @@ where both single flips had 0; the per-step event COUNT still improves 487 -> 27
 pre-flip default. Four cells carry it (worst: `c2h6/T2000_f0`, untested by any single-flip
 measurement so far since it was not a top-3 cell before), hard swaps stay 0 of 583, the hot cells
 recover under the thermostat — a smooth overshoot, not a crash or a discrete pathology. Not
-root-caused. **This is now an open operator decision** (see the pending-decisions line below), not
-just a TODO. Two smaller findings: `ncl3_N-Cl` is the single class-A bond type the conserving
+root-caused. **Operator decision (2026-09-19): ship as-is (both flips stay), investigate as its own task.**
+Delegated to an Opus agent (`package-7`, running): reproduce + localize the worst cell
+(`c2h6/T2000_f0`), attribute per term/per bond, isolate what differs about the COMBINATION vs
+either flip alone, fix only if a minimal genuine defect turns up (not a redesign) — otherwise
+characterize the design tension precisely with costed options. Status: `WORK_STATUS.md` package 7. Two smaller findings: `ncl3_N-Cl` is the single class-A bond type the conserving
 share makes worse (rms 20.10 -> 23.57, 30 of 32 bit-identical), and an MG well moves `revgfnff`'s
 ABSOLUTE energy away from `gfnff` by construction (-133.6 kcal/mol on the acetic-acid dimer, -0.56
 before) while relative energies do not move.
