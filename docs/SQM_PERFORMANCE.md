@@ -477,6 +477,40 @@ requested, which is the same conclusion the GPU reached (AP1) for a different
 reason. No MKL is installed on this machine; with MKL the floor would likely be
 lower.
 
+## D4 ATM: neighbour lists, and why threading looked broken (2026-09)
+
+The post-SCF D4 three-body (ATM) term scaled badly with threads - polymer, 1410 atoms:
+3904 ms at 1 thread, 1700 at 16, 770 at 36 (5.1x on 18 cores / 36 hardware threads).
+Measurements ruled out the obvious suspects one at a time: the thread count in force is
+the requested one (printed at verbosity 3), the machine is a single NUMA node, and the
+stride partitioning over the outer atom balances a triangular loop. What is left is the
+loop itself: it is O(N^3) over ALL triples with three distance tests inside, i.e. the
+work is dominated by tests that fail.
+
+The CUDA kernel (`k_d4_atm_nl`) has used a neighbour list for this since Jun 2026; the
+CPU now does the same. `j` and `k` are taken from the neighbours of `i` instead of from
+all atoms below it, the lists are ascending and scanned in the dense loop's order, so the
+triple set and the accumulation order are unchanged - gradients are **bit-identical**
+(polymer and complex, gfn1 and gfn2).
+
+| polymer, ATM phase | dense | neighbour list |
+|---|---:|---:|
+| 16 threads | 1719 / 1564 ms | 1524 / 1543 ms |
+| 36 threads | 956 / 896 ms | 802 / 821 ms |
+
+Only ~10 %, because polymer is compact: at the 25 Bohr ATM cutoff **34 %** of all atom
+pairs are neighbours (482 per atom), so the dense loop was not wasting much. The gain is
+a function of that fraction, and it falls fast with size - polymer_2x (7320 atoms) has
+**4.8 %** (352 neighbours per atom), where the dense loop visits ~433x more triples than
+contribute. That case is not timed here: a gfn2 single point on 7320 atoms takes over an
+hour on this CPU.
+
+`CURCUMA_D4_ATM_DENSE=1` restores the dense scan for an A/B measurement.
+
+A second idea did NOT pay and was kept only because it is free: factorising
+`r0_ij = a1*sqrt(3*r4r2_i*r4r2_j) + a2` into per-atom square roots removes three `sqrt`
+per triple, and changed nothing measurable - the loop is not sqrt-bound.
+
 ## The iteration-count gap is a criterion artifact, not slower iterations
 
 gxtb converges `complex` in **15** iterations, curcuma in **19** — but per
