@@ -146,6 +146,11 @@ add_test(
 set_tests_properties(cli_capability_XX_test_name PROPERTIES TIMEOUT 30)
 ```
 
+**Zwei Fallen (Sep 2026)**: `test_utils.sh` sucht das Binary in `release, debug, build, ...` —
+ein anderes Build-Verzeichnis wird nur mit `CURCUMA=/pfad/zum/curcuma ctest ...` getestet; und
+`ctest` läuft auf den KOPIEN der `run_test.sh` im Build-Baum, nach einer Skript-Änderung also
+`cmake .` im Build-Verzeichnis ausführen, sonst wird die alte Kopie getestet.
+
 **Ausführung**:
 ```bash
 # Alle CLI Tests

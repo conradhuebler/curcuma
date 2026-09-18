@@ -77,9 +77,19 @@ regression**: orchestrator rebuilt `release/` (USE_BLAS ON) from HEAD → 3/3 pa
 the bond gradient cost 1 ulp and 77 grid rebuilds at bit-identical single points — the trajectory
 fingerprint catches what the energy identity cannot.
 
-**RUNNING: `blasless-drift` (Opus)** — root-cause the 0.4465 Eh NVE drift of plain gfnff in the
-USE_BLAS=OFF build (gradient vs FD, EEQ state path, gated sites); status `BLASLESS_DRIFT_STATUS.md`;
-works in `build_rev/` + a new `build_blas/`, no commits.
+**CORRECTION (same evening): the "BLAS-less-build defect" above was the orchestrator's wrong
+inference** — `release` and `build_rev` differ in FOUR options, not one, and a `build_blas/`
+(= build_rev + USE_BLAS ON) fails too. `blasless-drift` (Opus, `BLASLESS_DRIFT_STATUS.md`) showed:
+gradients of the two builds agree to 1e-15 Eh/A and both match FD; the NVE drift shrinks as dt^2
+(0.67 / 8.7e-4 / 1.7e-4 / 6.4e-5 Eh at dt 1.0 / 0.5 / 0.25 / 0.125 fs, identical in both builds);
+at dt = 1 fs the free O-H stretch (`rattle_12 false`) sits at the Verlet stability edge since the
+gradient-unit fix (Known Issue #28) and the 10 ps run diverges for 4 of 30 (build_rev) resp. 6 of
+30 (release) perturbed starts — a coin flip decided by 1 ulp, not a code defect. Test 09 runs test
+08's trajectory bit-for-bit (`xtb-gfnff` falls back to native gfnff here), so it was n = 1.
+Orchestrator confirmed release == build_rev on the trajectory to the printed digit, then set
+`cli_simplemd_08/09` to `-md.time_step 0.5` (0 of 30 fail there, 17x margin): both pass against
+both builds. Note: `ctest` runs the COPIES of the scripts in the build tree — re-run `cmake .`
+after editing a `run_test.sh`, or the old copy is tested.
 
 **Operator decisions pending**: `rev_share_form conserving` (recommendation: only with a donor
 rule), `rev_well_form mg` (recommendation: after the 3b pair-table factorisation), whether to

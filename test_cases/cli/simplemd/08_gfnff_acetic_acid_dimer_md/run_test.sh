@@ -25,6 +25,7 @@ TEST_DIR="$SCRIPT_DIR"
 MD_MAXTIME=10000          # 10 ps
 MD_SEED=42
 MD_THREADS=1
+MD_DT=0.5                 # fs. Claude Generated (Sep 2026): 1.0 fs is at the Verlet stability edge for the free O-H stretch since the gradient-unit fix (Known Issue #28, forces 1.89x stiffer); at 1 fs the 10 ps run diverges for 4-6 of 30 perturbed starts in BOTH release and build_rev (BLASLESS_DRIFT_STATUS.md), at 0.5 fs 0 of 30 with a 17x margin
 MD_PRINT=1000             # print every 1000 steps → ~10 output lines for 10 ps
 TRJ_FILE=""  # resolved after curcuma run via find_output_file
 
@@ -43,7 +44,7 @@ run_test() {
     cleanup_bmt_dirs
 
     echo "Running: $CURCUMA -md input.xyz -method gfnff -maxtime $MD_MAXTIME -threads $MD_THREADS"
-    echo "         -md.seed $MD_SEED -md.no_restart -md.rattle_12 false -md.print_frequency $MD_PRINT"
+    echo "         -md.seed $MD_SEED -md.no_restart -md.rattle_12 false -md.time_step $MD_DT -md.print_frequency $MD_PRINT"
     timeout 300 $CURCUMA \
         -md input.xyz \
         -method gfnff \
@@ -52,6 +53,7 @@ run_test() {
         -md.seed $MD_SEED \
         -md.no_restart \
         -md.rattle_12 false \
+        -md.time_step $MD_DT \
         -md.print_frequency $MD_PRINT \
         > stdout.log 2> stderr.log
     local exit_code=$?
