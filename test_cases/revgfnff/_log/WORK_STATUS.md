@@ -1,5 +1,5 @@
-# WORK_STATUS — rev-gfnff work packages 1-5 (2026-09-18)
-Packages done: 5/5
+# WORK_STATUS — rev-gfnff work packages 1-6 (2026-09-18 / 19)
+Packages done: 6/6
 
 AI-generated, machine-tested. Repository `/home/conrad/src/curcuma_branches/curcuma`, branch
 `reactff2-llm`, start HEAD `265a18b0`. Every measurement was taken with a FROZEN copy of the
@@ -599,3 +599,184 @@ from dying silently. Test 04 reads the energy from the `-batch` JSONL because th
 4. Adding `build_rev` to `test_cases/cli/test_utils.sh`'s search list would not help (it comes
    after `release`, which exists); the reliable form is `CURCUMA=<path> ctest ...` and it is worth
    putting in the project's test instructions.
+
+
+---
+
+## Package 6 — the donor rule and the two default flips (2026-09-19)
+
+Operator decision of 2026-09-19: build the donor rule, flip `rev_share_form` to `conserving` if it
+closes the dative/ylide regression, and flip `rev_well_form` to `mg` unconditionally. **Both flips
+were taken.** Four local commits: `118b289c` (donor rule), `a4712e83` (share default),
+`1327aaee` (well default), `33199345` (four ctests re-pointed).
+
+Binaries, all frozen before use: **`e53baabb`** (donor rule, defaults still delivered+gauss) ->
+**`890457ed`** (share default flipped) -> **`916847ff`** (both flipped; every "final" number below
+is from that copy). `-threads 1` everywhere, `*.topo.json` never reused, fresh directory per
+structure.
+
+### 6.1 The donor rule (`-gfnff.rev_share_donor_rule`, default true, `conserving` only)
+
+An atom is granted `X_i >= 1` if, in the corner being evaluated, it has a partner that is either a
+**group-13** element (empty p orbital — no bond count can reveal it) or an atom carrying **fewer
+partners than its own nominal sigma valence** (a free coordination site). `max()` against the
+charge rule, never a replacement, and only in the charge branch. Per-corner constant like `Q_i`,
+so no new chain-rule term. Implemented in `FFWorkspace::prepareConservingShare`.
+
+The package-3.6 table, re-measured arm by arm (dev against `-gfnff.rev_valence_share false`,
+kcal/mol; binary `e53baabb`, i.e. the gauss well, so it is directly comparable with package 3):
+
+| system | chg | `gfnff` (pinned) | rev share OFF | delivered | conserving, no rule | **conserving + rule** |
+|---|---:|---:|---:|---:|---:|---:|
+| H3N-BH3 | 0 | -0.897038980 | -0.765756400 | +0.02 | **+94.44** | **+0.00** |
+| H3N-O | 0 | -0.667945910 | -0.600342710 | +0.00 | **+73.36** | **+0.00** |
+| H3N-CH2 | 0 | -1.008339380 | -0.941139510 | +0.00 | **+109.50** | **+0.00** |
+| H5O2+ | 1 | 0.708382040 | 0.528414250 | +137.68 | +120.52 | +120.52 |
+| N2H7+ | 1 | 0.266793700 | 0.044595910 | +174.06 | +157.78 | +157.78 |
+
+The "no rule" column reproduces WORK_STATUS 3.6 to the printed digit (+94.4 / +73.4 / +109.5 /
++120.5 / +157.8), which is the independent check on both. All three dative/ylide neutrals become
+**bit-identical to the share-off energy**; the two proton-shared dimers are untouched by the rule
+and stay 16-17 kcal/mol closer to the pinned `gfnff` value than `delivered` is.
+
+**Nothing else moves.** Every falsifier is bit-identical to conserving without the rule:
+
+| falsifier | conserving, no rule | conserving + rule |
+|---|---|---|
+| NH4+ / H3O+ / CH5+ / ClO4- / BF4- 1.394 / BF4- 1.143 | 0.827301258361 / 1.207219745650 / 0.781425328593 / 0.039597767376 / -1.470184050200 / 0.147985923798 | identical, 12 digits |
+| class-C adducts, dev min / rms | -1.5/12.1, -1.4/5.1, -3.0/13.3, +0.0/7.0 | identical |
+| rkt06, 11 points | rms 2.7614 | 2.7614 |
+| 20-cell grid | 902 reb / 216.62 kJ / 72 / 0 of 449 / jump 21.3 / T 11139 | identical in every column |
+| equilibrium toggle set (20 combinations x 5 molecules) | dE = 0.000000000 | identical |
+| `gfnff` caffeine / benzene + dump md5 | -4.672737068614 / -2.362725526194, 4013d6fc / 6c3a87c8 | identical |
+| FD gradient (rkt06 pt10 / c2h6 runaway / ch4_H f10 / adduct d=1.20) | 1.360e-08 / 1.218e-07 / 1.421e-08 / 3.815e-09 | identical |
+| FD gradient at the rule's own geometry, H3N-BH3 | — | **1.713e-08** Eh/A |
+
+**Scope checked while there**: DMSO and Me3P=O are inert in EVERY arm (+0.00 kcal/mol) — the
+period >= 3 octet expansion already caps a sulfoxide's / phosphine oxide's donor, so the worry
+recorded in package 3.8 was unfounded. Metals are still untouched by this mode (the d-block keeps
+the delivered growth) and no rev-gfnff reference set contains one.
+
+### 6.2 `rev_share_form` -> `conserving` (four sites: PARAM, GFNFF member, `setupRevSettings`
+fallback, `RevSettings::share_conserving`)
+
+Verified on `890457ed`: the DEFAULT arm reproduces the explicit `conserving` arm bit for bit on
+the whole battery above, and `gfnff` is untouched.
+
+### 6.3 `rev_well_form` -> `mg` (same four sites)
+
+Verified on `916847ff`. **Scoping proven rather than assumed**: `-method gfnff` gives caffeine
+-4.672737068614, benzene -2.362725526194 and the two `dump_params` md5s 4013d6fc / 6c3a87c8, i.e.
+the whole rev path stays behind `rev_enabled`. The three forms are live and distinct on caffeine:
+gauss -4.673521653477, mg (default) -4.546943898047, erfmorse -4.539136588545.
+
+**MG alone** (i.e. against `-gfnff.rev_share_form delivered`, so it is comparable with package 4),
+measured on `916847ff` — every row reproduces package 4.2:
+
+| row | gauss+delivered (pkg 4) | mg+delivered (pkg 4) | mg+delivered (final binary) |
+|---|---:|---:|---:|
+| class-A median rms | 24.49 | 19.50 | **19.50** |
+| class-A median dev D_e | -25.53 | -12.74 | **-12.74** |
+| class-A median dev r90 | -0.330 | -0.058 | **-0.058** |
+| guard, pooled MAD (167 reactions) | 1.0341 | 1.0439 | **1.0439** |
+| class D dE_MAD / grad_RMS | 4.980 / 16.599 | 5.152 / 16.376 | **5.152 / 16.376** |
+| rkt06 rms | 2.7140 | 2.67 | **2.67** |
+| adducts dev min (CH4/NH3/H2O/N2H4 + H) | -87 / -107 / -55 / -90 | -89 / -110 / -89 / -94 | **-89.4 / -110.1 / -88.5 / -93.6** |
+| 20-cell grid: reb / step max / n>=50 / jump max | 1186 / 391.4 / 487 / 48.6 | 1073 / 396.9 / 458 / 49.7 | **1073 / 396.88 / 458 / 49.7** |
+
+### 6.4 BOTH flips together — one real interaction, and it is the grid
+
+Packages 3 and 4 only ever measured the two pieces alone. On the 20-cell grid the combination is
+**worse than either one**:
+
+| arm | rebuilds | step max / kJ | n >= 50 | hard | jump max / kJ | n >= 50 | T_max / K |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| gauss + delivered (pre-flip default) | 1186 | 391.44 | 487 | 0/591 | 48.6 | 0 | 8 306 |
+| gauss + conserving | 902 | 216.62 | 72 | 0/449 | 21.3 | 0 | 11 139 |
+| mg + delivered | 1073 | 396.88 | 458 | 0/535 | 49.7 | 0 | 8 178 |
+| **mg + conserving (NEW DEFAULT)** | **1169** | **800.12** | **271** | **0/583** | **190.9** | **5** | **28 392** |
+
+Four cells carry all of it — `c2h6/T2000_f0` 800.1 kJ (jump 190.9, T 28392), `c2h6/T2000_f8`
+366.6 (101.8, 11505), `ch4_H/T2000_f0` 341.6 (183.6, 16919), `ch4_H/T1000_f10` 184.5 (132.1) —
+while `ch4_H/T2000_f10`, the cell that motivated the share flip, is the BEST of the three arms in
+the combined state (75.0 kJ, 5 events, jump 0.4, T 7445). Hard swaps stay 0 of 583, so this is
+smooth-window overrun and not a discrete topology event, and both hot cells recover: mean T over
+the last 0.5 ps is 2247 and 2347 K at a 2000 K setpoint. Net against the pre-flip default the
+per-step event count improves 487 -> 271 and the tail gets worse. **Not root-caused.**
+`-gfnff.rev_well_form gauss` recovers 216.62 / 72 / 21.3, `-gfnff.rev_share_form delivered`
+recovers 396.88 / 458 / 49.7.
+
+**Everything else is unaffected by the combination** (all on `916847ff`, DEFAULT arm):
+
+| falsifier | value | vs mg alone |
+|---|---|---|
+| guard, pooled MAD / RMSD | **1.0439 / 2.0588** (ACONF 0.1966, ICONF 3.4077, MCONF 0.5868, PCONF21 1.6060, S66 0.8276) | identical |
+| class D, 500 frames | dE_MAD **5.152**, grad_RMS **16.376** | identical |
+| rkt06, 11 points | rms **2.72** (mg alone 2.67) | package 4.3's mg+conserving value |
+| class-C adducts, dev min / rms | **-1.5/11.8, -1.4/5.1, -3.0/13.3, +0.0/2.9** | mg+delivered is -89.4/43.1, -110.1/48.7, -88.5/39.0, -93.6/42.8 |
+| equilibrium toggle set | 20/20 at dE = **0.000000000** | — |
+| `gfnff` identity | **-4.672737068614 / -2.362725526194**, md5 4013d6fc / 6c3a87c8 | — |
+| FD gradient, 5 geometries | 1.539e-08 / 1.238e-07 / 1.404e-08 / 4.033e-09 / 1.725e-08 Eh/A | — |
+| dative/ylide table on the final binary | +96.78 / +68.77 / +106.50 -> **+0.00 / +0.00 / +0.00** | the donor rule still closes it under mg |
+
+**The strongest claim of the prior work is re-confirmed on the current code**: the conserving
+share fully compensates the deeper, wider MG well on the adducts, which the delivered share does
+not (the two adduct rows above).
+
+**Class A is the one other mover**, and it is the share, not the well and not the donor rule:
+
+| arm | median rms | median dev D_e | median dev r90 | mean rms |
+|---|---:|---:|---:|---:|
+| gauss + delivered | 24.49 | -25.53 | -0.330 | 28.39 |
+| mg + delivered | 19.50 | -12.74 | -0.058 | 22.48 |
+| **mg + conserving (DEFAULT)** | **20.52** | **-16.09** | **-0.120** | **22.51** |
+
+**30 of the 32 bond types are bit-identical** between the last two rows. Only `ncl3_N-Cl` (rms
+20.10 -> 23.57, dev D_e +17.98 -> -30.21, r90 +0.076 -> -0.319) and `hocl_O-Cl` (35.86 -> 33.30,
+an improvement) move, so the median shift is rank re-ordering under one large mover, not a broad
+degradation — the mean moves 22.48 -> 22.51. Attributed by ablation: identical with
+`-gfnff.rev_share_donor_rule false`, and `delivered` gives 20.10 / +17.98 back. `ncl3_N-Cl` is
+left open.
+
+Also recorded, because it will surprise anyone comparing absolute numbers: **an MG well moves
+`revgfnff`'s absolute energy away from `gfnff` by construction** — caffeine -4.5469 against
+-4.6727, and -133.56 kcal/mol on the acetic-acid dimer of `cli_simplemd_19` where the Gaussian
+gave -0.56. Relative energies do not move (the guard is 1.0439). And the compressed-BF4- probe
+costs +33.4 kcal/mol under mg against +18.6 under gauss (that geometry is a perception question,
+`FABLE_BOND_STATE.md`, not a share gate).
+
+### 6.5 Tests — 113/113
+
+`export CURCUMA=$PWD/build_rev/curcuma; cmake .; ctest -R "gfnff|sqm_val|react|cli_simplemd_|cli_gfnff_"`
+gives **113 of 113**. (Package 5's baseline was 111/113; the two failures there,
+`cli_simplemd_08/09`, were fixed at HEAD by `63ec8de3`.) Four tests needed re-pointing, none by
+weakening a threshold — commit `33199345`:
+
+| test | what changed |
+|---|---|
+| `cli_gfnff_03` | arms swapped: the default (no flag) must clear the -10 kcal/mol floor (measured -1.5), `-gfnff.rev_share_form delivered` carries the old-behaviour pin, which MOVED -87.0 -> **-89.4** because the delivered share is now evaluated with the MG well. Tolerance unchanged at 5.0 |
+| `cli_gfnff_04` | identity is now default == explicit `mg`; the 12-digit PIN stays on `gauss` (-4.673521653477); liveness re-aimed at gauss/erfmorse vs the default |
+| `cli_simplemd_20` | the negative control stopped firing. **EITHER flip removes this runaway alone**: under `conserving` `-gfnff.rev_budget_fix_h` is a NO-OP (H's cap is 0 by element — both arms 70.77 kJ / 1.536 a0), and mg+delivered gives the control 53.38 / 1.839. Both arms now pin `gauss` + `delivered` and reproduce 59.26 / 1.770 and 2593.60 / 0.559 exactly; a third arm asserts the shipped default (70.77 / 1.536) is inside the same bounds. Thresholds unchanged (150 kJ, 1.0 a0) |
+| `cli_simplemd_19` | its three real assertions passed (react == static to 0.0000 kcal/mol, 0 formations under `order`, the `weight` control fires). Only the loose 2.0 kcal/mol rev-vs-gfnff offset bound broke, at -133.56 — the MG depth. A fourth sub-run with `-gfnff.rev_well_form gauss` now carries that bound at its original threshold |
+
+### 6.6 Open after package 6
+
+1. **The grid interaction of 6.4** — 800 kJ/mol per-step against 216 / 397 for the single flips,
+   and 5 rebuild jumps >= 50 kJ where both single flips had 0. Not root-caused. This is the one
+   thing a user could notice in hot react MD.
+2. **`ncl3_N-Cl`** — the single class-A bond type the conserving share makes worse.
+3. **The stage-3b bond-order-resolved well table** — the reason the class-A median is 19.5 and not
+   the 2.07 a per-system fit reaches; the remaining half of the MG flip's benefit.
+4. **H5O2+ / N2H7+** — the charge is split over two groups, so neither the charge rule nor the
+   donor rule grants a full budget; `conserving` is only the smaller of two large errors there.
+5. `-gfnff.rev_budget_fix_h` is now dead code in the default configuration. Worth either removing
+   or documenting as delivered-only; it is documented here and in the PARAM help, not removed.
+
+### 6.7 Method note
+
+The zsh trap of the `cij` session recurred and was caught by a sanity check rather than by
+discipline: a probe loop that bundled `-gfnff.rev_well_form gauss` into ONE shell variable made
+all four well forms report the same energy, because the shell does not word-split it and the
+parser drops a single argv element it cannot parse. Every harness call in this package passes flag
+and value as separate literal tokens (or through a Python list). **If a switch appears to have no
+effect, check the argv before the code.**

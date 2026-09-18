@@ -266,18 +266,29 @@ kcal/mol high on two images (its first-reported 12.6 kcal/mol barrier is 1.47). 
 "state instability" recorded in `ref/QUALITY.md` may be the same artefact rather than SCF
 nondeterminism; that hypothesis is open.
 
-## Stage 3a status — 2026-09-18
+## Stage 3a status — 2026-09-19
 
 Details, every measured number and the "what was not tested" list: **[REV_GFNFF_STAGE3A.md](REV_GFNFF_STAGE3A.md)**.
 
 | part | state | flag |
 |---|---|---|
 | 3a (i) dynamic-r0 pair term | delivered, default on | — |
-| 3a (ii) valence share, `delivered` formula | delivered, default on | `-gfnff.rev_valence_share` |
-| 3a (ii) hydrogen keeps one valence | **DEFAULT ON since 2026-09-18** | `-gfnff.rev_budget_fix_h` |
-| 3a (ii) valence-CONSERVING share + charge-granted budget | built, **default off**, operator decision pending | `-gfnff.rev_share_form conserving` |
-| 3a (iii) well form MG / erf-Morse, curvature-pinned | built, **default off**, operator decision pending | `-gfnff.rev_well_form mg\|erfmorse` |
+| 3a (ii) valence share | delivered, default on | `-gfnff.rev_valence_share` |
+| 3a (ii) valence-CONSERVING share + charge-granted budget | **DEFAULT since 2026-09-19** | `-gfnff.rev_share_form delivered\|conserving` |
+| 3a (ii) donor rule for the conserving budget | **DEFAULT ON since 2026-09-19** (new) | `-gfnff.rev_share_donor_rule` |
+| 3a (ii) hydrogen keeps one valence | default on since 2026-09-18; **a no-op under `conserving`** (H's cap is 0 by element there) | `-gfnff.rev_budget_fix_h` |
+| 3a (iii) well form MG, curvature-pinned | **DEFAULT since 2026-09-19** | `-gfnff.rev_well_form gauss\|mg\|erfmorse` |
 | 3a (iii) step 2, free curvature + r0 re-solve | not started | — |
+| 3b bond-order-resolved well table | not started — the reason the class-A median is 19.5 and not 2.1 | — |
+
+**One interaction, measured 2026-09-19 and not root-caused**: the two flips are better than the
+old default on the 20-cell grid's event COUNT (487 -> 271 steps >= 50 kJ/mol) and worse on its
+TAIL (per-step max 391 -> 800 kJ/mol, rebuild dE_jump max 48.6 -> 190.9 with 5 events >= 50 where
+both single flips had 0, T_max 8306 -> 28392 K). Each flip alone is better than both together
+(gauss+conserving 216.6 / 72 / 21.3; mg+delivered 396.9 / 458 / 49.7). Hard swaps stay 0 of 583,
+so it is smooth-window overrun, not a discrete event, and the hot cells recover under the
+thermostat. `-gfnff.rev_well_form gauss` or `-gfnff.rev_share_form delivered` each recover their
+own profile.
 
 ### The smoothness falsifier — two numbers per arm, always with the rebuild count and T_max
 
@@ -297,8 +308,10 @@ topology event at all, so every jump statistic booked 0.0 while the potential mo
 temperatures. `ch4_H.xyz` holds 15 frames, so `ch4_H/T1000_f16` and `ch4_H/T2000_f16` exit with
 rc = 1 and an empty log — they never ran. Every "22-cell" statement before 2026-09-18 is n = 20.
 5 ps, dt 0.25 fs, CSVR coupling 10, seed 42, `-threads 1` (a react trajectory amplifies one ulp).
-Current default arm: **1186 rebuilds, per-step max 391.4 kJ/mol, 487 events >= 50, 0 of 591 hard
-swaps, max dE_jump 48.6, T_max 8306 K.**
+Default arm since the 2026-09-19 flips (`mg` + `conserving`): **1169 rebuilds, per-step max
+800.1 kJ/mol, 271 events >= 50, 0 of 583 hard swaps, max dE_jump 190.9 with 5 events >= 50,
+T_max 28392 K.** The pre-flip default (`gauss` + `delivered`) was 1186 / 391.4 / 487 / 0 of 591 /
+48.6 / 0 / 8306 K; see the interaction note in the status section above.
 
 ## The valence-share design question — parked 2026-09-14
 

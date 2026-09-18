@@ -4,14 +4,24 @@
 this line). Every number below was measured with one frozen binary per package; the run logs and
 the per-cell tables are in `test_cases/revgfnff/_log/WORK_STATUS.md`.
 
-Stage 3a modifies the GFN-FF **bond term** so that it survives a bond being made or broken. It has
-three parts, and only the first is on by default:
+Stage 3a modifies the GFN-FF **bond term** so that it survives a bond being made or broken. All
+three parts are on by default since Sep 19, 2026:
 
 | part | what it changes | flag | default |
 |---|---|---|---|
 | 3a(i) | the pair's own CN contribution is taken out of its own r0 | — | on |
-| 3a(ii) | a valence SHARE factor multiplies the well; hydrogen keeps one valence | `-gfnff.rev_valence_share`, `-gfnff.rev_budget_fix_h`, `-gfnff.rev_share_form` | on, on, `delivered` |
-| 3a(iii) | the SHAPE of the well | `-gfnff.rev_well_form` | `gauss` |
+| 3a(ii) | a valence SHARE factor multiplies the well | `-gfnff.rev_valence_share` | on |
+| 3a(ii) | which share formula | `-gfnff.rev_share_form` | **`conserving`** (was `delivered`) |
+| 3a(ii) | a dative donor may grow a budget | `-gfnff.rev_share_donor_rule` | **on** (new) |
+| 3a(ii) | hydrogen keeps one valence | `-gfnff.rev_budget_fix_h` | on — but a **no-op** under `conserving` |
+| 3a(iii) | the SHAPE of the well | `-gfnff.rev_well_form` | **`mg`** (was `gauss`) |
+
+**Absolute energies moved with the `mg` flip and relative ones did not.** An MG well carries its
+own fitted depth `D = s |k_b|`, so `revgfnff` is now further from plain `gfnff` in absolute terms
+— caffeine -4.546943898047 against `gauss` -4.673521653477 and `gfnff` -4.672737068614, and
+-133.6 kcal/mol on the acetic-acid dimer of `cli_simplemd_19` against -0.56 before. The pooled
+167-reaction conformer/S66 guard moves only 1.0341 -> 1.0439 kcal/mol MAD. Do not compare an
+absolute `revgfnff` energy with an absolute `gfnff` one.
 
 ---
 
@@ -39,7 +49,10 @@ bridging H — a just-formed H2 still bonded to its carbon — is a 3c-2e bond w
 the softplus lets its budget reach 2 as soon as the second partner's tight bond order crosses the
 settled window, and BOTH of its partial wells go from half share to full share inside one 0.25 fs
 step with **no topology event**. With the flag on, `Val_H = 1` exactly and its derivative channel
-is zero.
+is zero. **Under the `conserving` share below the flag does nothing**: hydrogen's excess-budget
+cap there is `X = 0` by element, so its budget cannot grow whatever the flag says. The numbers in
+this section are therefore measured with `-gfnff.rev_share_form delivered -gfnff.rev_well_form
+gauss`, which is also how `cli_simplemd_20` now pins its two arms.
 
 Measured on the 20-cell react-MD grid (5 ps, dt 0.25 fs, CSVR, `-threads 1`), on vs off:
 
@@ -57,7 +70,7 @@ the FD gradient at rkt06 point 10 (1.194e-08 Eh/A) are bit-identical in both arm
 untouched. Regression test: `cli_simplemd_20_gfnff_rev_h_budget` (two-armed — the `false` control
 must violate both bounds).
 
-### 1.3 `conserving` — the valence-conserving share (OPT-IN, `-gfnff.rev_share_form conserving`)
+### 1.3 `conserving` — the valence-conserving share (DEFAULT since Sep 19, 2026)
 
 The left-over rule **forfeits** valence: with `w ~ 1` on every partner, one partner too many makes
 every pair of that atom see "nothing left", so a five-coordinate carbon hands out 0 of its 4
@@ -94,24 +107,56 @@ and on the grid, 487 -> **72** per-step events >= 50 kJ/mol, with `ch4_H/T1000_f
 388.4 -> 33.5 kJ/mol and 40 -> 0 events (the carbon-budget snap of the first MD step disappears).
 rkt06 rms 2.7140 -> 2.7614; equilibria, ClO4- and BF4- unmoved; FD gradients <= 1.2e-07 Eh/A.
 
-**What it costs, and why it is not the default**: a dative or ylidic neutral has a donor with four
-partners at a group charge well below 1, so `Val ~ 3.2` against `S ~ 4` and all four of its wells
-are scaled by ~0.8 — where the delivered share is inert (0.002-0.017 kcal/mol):
+**What it cost until Sep 19, 2026**: a dative or ylidic neutral has a donor with four partners at
+a group charge well below 1, so `Val ~ 3.2` against `S ~ 4` and all four of its wells were scaled
+by ~0.8 — where the delivered share is inert (0.002-0.017 kcal/mol). The missing physics is that a
+dative bond puts a full valence into the acceptor's empty orbital, which the donor's EEQ charge
+(~+0.2) cannot express.
 
-| system | conserving minus share-off |
-|---|---:|
-| H3N-BH3 | **+94.4** kcal/mol |
-| H3N-O (amine oxide) | **+73.4** |
-| H3N-CH2 (N-ylide) | **+109.5** |
-| H5O2+ (Zundel) | -17.2 (closer to the pinned-topology `gfnff` value) |
-| N2H7+ | -16.3 (likewise) |
+### 1.4 The donor rule (`-gfnff.rev_share_donor_rule`, DEFAULT ON, `conserving` only)
 
-The missing physics is that a dative bond puts a full valence into the acceptor's empty orbital,
-which the donor's EEQ charge (~+0.2) does not express. Closing that is the open item.
+An atom is granted `X_i >= 1` if, **in the corner being evaluated**, it has a partner that is
+either
+
+- a **group-13** element (B, Al, ...) — an empty p orbital, which no bond count can reveal; or
+- an atom carrying **fewer partners than its own nominal sigma valence**, i.e. a free
+  coordination site: the amine oxide's 1-coordinate O, the N-ylide's 3-coordinate C.
+
+It is a `max()` against the charge rule, never a replacement, and it applies only where the charge
+rule decides — group 13 and the period >= 3 octet expansion already carry a larger cap. Both tests
+read the corner's own bond list, so the cap stays a per-corner constant: no new chain-rule term,
+and a change is carried by the existing s-blend.
+
+Measured (dev against the share-off arm, kcal/mol; geometries gfn2-optimised):
+
+| system | delivered | conserving, no donor rule | conserving + donor rule |
+|---|---:|---:|---:|
+| H3N-BH3 | +0.02 | +94.4 | **+0.00** |
+| H3N-O (amine oxide) | +0.00 | +73.4 | **+0.00** |
+| H3N-CH2 (N-ylide) | +0.00 | +109.5 | **+0.00** |
+| H5O2+ (Zundel) | +137.7 | +120.5 | +120.5 (unchanged) |
+| N2H7+ | +174.1 | +157.8 | +157.8 (unchanged) |
+
+All three dative/ylide neutrals are bit-identical to the share-off energy with the rule on. The
+two proton-shared dimers are not touched by it and stay 16-24 kcal/mol *closer* to the pinned
+`gfnff` value than the delivered share is — the bridging H there genuinely is a 3c-2e case, which
+is what the share exists for.
+
+**Nothing else moves.** With the rule on, every falsifier is bit-identical to conserving without
+it: the four class-C adducts, rkt06 (rms 2.7614), the six hypervalent ions, the 20-cell grid
+(902 rebuilds / 216.62 kJ per-step max / 72 events >= 50 / 0 of 449 hard swaps / T_max 11139 K),
+the equilibrium toggle set and `gfnff` itself. FD gradient at the new rule's own geometry
+(H3N-BH3) is 1.7e-08 Eh/A.
+
+**Scope**: sulfoxides and phosphine oxides need no donor rule — DMSO and Me3P=O are inert in every
+arm (+0.00 kcal/mol), because the period >= 3 octet expansion already caps their donor. The rule
+is not exercised by any metal (no rev-gfnff reference set contains one) and the proton-shared
+dimers remain an open residual: their charge is split over two groups, so neither the charge rule
+nor the donor rule grants them a full budget.
 
 ---
 
-## 2. The bond-well form (`-gfnff.rev_well_form`, DEFAULT `gauss`)
+## 2. The bond-well form (`-gfnff.rev_well_form`, DEFAULT `mg` since Sep 19, 2026)
 
 The delivered well is `k_b exp(-alpha (r - r0)^2)` times the reactive term weight. Against the
 class-A r2SCAN-3c bond scans its break-side RMS is **19.2 kcal/mol** (median over 32 bond types):
@@ -151,7 +196,49 @@ the repulsion term's job.
 **The two forms are indistinguishable on the data** (the fitted rms differs by at most 0.85 over
 32 curves) and **MG is the cheaper one**: its `a` is a closed form, while erf-Morse needs a
 bisection for `u`. That bisection is a per-bond SETUP cost and must be cached — before the cache
-it cost **1.42x** the whole react-MD wall time against MG's 1.02x.
+it cost **1.42x** the whole react-MD wall time against MG's 1.02x. That is why `mg` is the
+default and `erfmorse` is not.
+
+The table above is measured with each piece ALONE, i.e. `mg` against the then-default `delivered`
+share; it was re-measured on the Sep 19 binary and reproduces row for row.
+
+---
+
+## 2.1 The two flips together — one interaction, measured and not root-caused
+
+Packages 3 and 4 measured the conserving share and the MG well independently. With both defaults
+active the 20-cell react-MD grid is **worse than with either one**:
+
+| arm | rebuilds | per-step max / kJ | n >= 50 | dE_jump max / kJ | n >= 50 | T_max / K |
+|---|---:|---:|---:|---:|---:|---:|
+| gauss + delivered (pre-Sep-19 default) | 1186 | 391.44 | 487 | 48.6 | 0 | 8 306 |
+| gauss + conserving | 902 | 216.62 | 72 | 21.3 | 0 | 11 139 |
+| mg + delivered | 1073 | 396.88 | 458 | 49.7 | 0 | 8 178 |
+| **mg + conserving (DEFAULT)** | **1169** | **800.12** | **271** | **190.9** | **5** | **28 392** |
+
+Net against the old default the per-step event count still improves (487 -> 271) and the worst
+single step and the rebuild-jump tail get worse. Four cells carry all of it — `c2h6/T2000_f0`
+(800 kJ), `c2h6/T2000_f8` (367), `ch4_H/T2000_f0` (342), `ch4_H/T1000_f10` (185) — while the cell
+that motivated the share flip, `ch4_H/T2000_f10`, is the best of the three arms in the combined
+state (75.0 kJ, 5 events, jump 0.4, T_max 7445). Hard swaps stay **0 of 583**, so this is smooth
+window overrun, not a discrete topology event, and both hot cells recover under the thermostat
+(mean T over the last 0.5 ps is 2247 and 2347 K at a 2000 K setpoint). `-gfnff.rev_well_form
+gauss` recovers 216.62 / 72 / 21.3 and `-gfnff.rev_share_form delivered` recovers 396.88 / 458 /
+49.7.
+
+**Everything else is unaffected by the combination** and equals the MG-alone row: guard 1.0439,
+class D 5.152 / 16.376, rkt06 2.72, the equilibrium toggle set 20/20 at dE = 0.000000000,
+`gfnff` bit-identical, FD gradients 1.4e-08 to 1.24e-07 Eh/A over five geometries. The four
+class-C adducts re-confirm package 4.3's strongest claim — **the conserving share fully
+compensates the deeper MG well where the delivered share does not**: dev min / rms
+-1.5 / 11.8, -1.4 / 5.1, -3.0 / 13.3, +0.0 / 2.9 under the default, against -89.4 / 43.1,
+-110.1 / 48.7, -88.5 / 39.0, -93.6 / 42.8 for `mg + delivered`.
+
+Class A moves **19.50 -> 20.52** median rms (dev D_e -12.74 -> -16.09, r90 -0.058 -> -0.120) under
+the combination, and that is **two bond types out of 32**: `ncl3_N-Cl` 20.10 -> 23.57 (worse) and
+`hocl_O-Cl` 35.86 -> 33.30 (better), the other 30 bit-identical; the mean rms moves 22.48 ->
+22.51. It is the conserving share, not the well form and not the donor rule (identical with
+`-gfnff.rev_share_donor_rule false`). The median is a fragile statistic under one large mover.
 
 ---
 
@@ -166,15 +253,29 @@ class-C radical approaches.
 
 **NOT tested**: anything containing a metal (the conserving share's element rules do not cover the
 d block — a transition metal deliberately keeps the delivered growth, and that carve-out is not
-measured); periodic systems; charged species beyond the six hypervalent ions and the two
-proton-shared dimers; any well form on a hydrogen-bonded X-H (the HB alpha modulation is not
-applied in the new forms, and the class-A set contains no hydrogen bond); long-time MD stability
-beyond 5 ps per cell; every combination of the three flags except the ones tabulated above.
+measured; the donor rule is likewise unexercised by any metal); periodic systems; charged species
+beyond the six hypervalent ions and the two proton-shared dimers; any well form on a
+hydrogen-bonded X-H (the HB alpha modulation is not applied in the new forms, and the class-A set
+contains no hydrogen bond); long-time MD stability beyond 5 ps per cell; every combination of the
+flags except the ones tabulated above.
+
+**OPEN, measured, not root-caused**:
+- the grid interaction of section 2.1 — the two flips together are worse on the per-step tail than
+  either alone (800 kJ/mol against 216 and 397);
+- `ncl3_N-Cl`, the one class-A bond type the conserving share makes worse (rms 20.10 -> 23.57);
+- the proton-shared dimers H5O2+ and N2H7+, where the charge is split over two groups so that
+  neither the charge rule nor the donor rule grants a full budget — both modes stay 120-158
+  kcal/mol from the share-off arm, and `conserving` is only the smaller of the two errors;
+- the compressed-BF4- probe, where the share costs +33.4 kcal/mol under `mg` against +18.6 under
+  `gauss`. That geometry is documented as a perception question, not a share question
+  (`FABLE_BOND_STATE.md`), and is not a regression gate.
 
 **NOT implemented** relative to the plan: the second step of stage 3a(iii) (freeing the curvature
-with an r0 re-solve); a bond-order-resolved well table (the current one is keyed on the element
-pair, so C-C, C=C and C#C share one median — their per-system fits differ by `s` 1.18 / 1.01 /
-0.91); a donor rule for the conserving budget, which is what the dative/ylide regression needs.
+with an r0 re-solve); a **bond-order-resolved well table** — the current one is keyed on the
+element pair, so C-C, C=C and C#C share one median (their per-system fits differ by `s`
+1.18 / 1.01 / 0.91), and that is exactly why the class-A harness median lands at 19.50 rather than
+at the 2.07 a per-system fit reaches. That stage-3b work is the remaining half of the MG flip's
+benefit.
 
 ---
 
@@ -188,6 +289,6 @@ pair, so C-C, C=C and C#C share one median — their per-system fits differ by `
 | the AI-fitted well table | `src/core/energy_calculators/ff_methods/rev_well_table.h` (generated) |
 | the fit | `scripts/revgfnff_wellfit.py` |
 | the class-A harness | `scripts/revgfnff_classa.py` (`--mode kept --extra "-gfnff.topology_mode react"`) |
-| diagnostics | `CURCUMA_SHAREDUMP=1` (per-pair `share`/`shareD` rows and, in `conserving`, a per-atom `shareA` row), `CURCUMA_REVDUMP=1` (the resolved settings) |
+| diagnostics | `CURCUMA_SHAREDUMP=1` (per-pair `share`/`shareD` rows and, in `conserving`, a per-atom `shareA` row whose `cap` column shows the donor grant), `CURCUMA_REVDUMP=1` (the resolved settings, incl. `share_form` / `share_donor_rule` / `well_form`) |
 | measurements | `test_cases/revgfnff/_log/WORK_STATUS.md`, `HBUDGET_STATUS.md`, `RUNAWAY_STATUS.md`, `FABLE_REVIEW_2.md` |
 | regression tests | `cli_simplemd_20_gfnff_rev_h_budget`, `cli_gfnff_03_rev_adduct_falsifier`, `cli_gfnff_04_rev_well_form` |

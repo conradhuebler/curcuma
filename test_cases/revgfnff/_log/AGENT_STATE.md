@@ -55,6 +55,30 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 
 ## Live agents
 
+**2026-09-19: `package-6` DONE — the donor rule and BOTH default flips are in.** No agent is
+running in this tree. Final default state of rev-gfnff:
+`rev_budget_fix_h true` (now a NO-OP under conserving), **`rev_share_form conserving`**,
+**`rev_share_donor_rule true`** (new), **`rev_well_form mg`**. Four local commits
+`118b289c` / `a4712e83` / `1327aaee` / `33199345`; nothing pushed. Full detail and every number:
+`WORK_STATUS.md` package 6 (`Packages done: 6/6`). Final binary md5 **`916847ff`**.
+
+Headlines: (1) the **donor rule** (a group-13 partner, or a partner with fewer partners than its
+own nominal valence, grants X_i >= 1) takes the dative/ylide regression H3N-BH3 / H3N-O / H3N-CH2
+from +94.4 / +73.4 / +109.5 kcal/mol to **bit-identical with the share-off arm**, and moves NO
+other falsifier; sulfoxides/phosphine oxides never needed it. (2) `conserving` is the default:
+class-C adducts -87..-107 -> -1.5..+0.0 kcal/mol. (3) `mg` is the default: class-A median rms
+24.49 -> 19.50, dev r90 -0.330 -> -0.058, guard 1.0341 -> 1.0439. (4) `ctest` 113/113.
+
+**The one finding nobody had measured**: the two flips INTERACT on the 20-cell react-MD grid and
+the combination is worse than either alone — per-step max 800.1 kJ/mol against 216.6
+(gauss+conserving) and 396.9 (mg+delivered), and 5 rebuild jumps >= 50 kJ where both single flips
+had 0; the per-step event COUNT still improves 487 -> 271 against the pre-flip default. Four cells
+carry it, hard swaps stay 0 of 583, the hot cells recover under the thermostat. Not root-caused —
+top of the open list. Two smaller ones: `ncl3_N-Cl` is the single class-A bond type the conserving
+share makes worse (rms 20.10 -> 23.57, 30 of 32 bit-identical), and an MG well moves `revgfnff`'s
+ABSOLUTE energy away from `gfnff` by construction (-133.6 kcal/mol on the acetic-acid dimer, -0.56
+before) while relative energies do not move.
+
 **2026-09-18 evening: `work-packages` DONE — 5/5 packages, 12 local commits `378a13cc..64f0109f`,
 `WORK_STATUS.md` (601 lines). Orchestrator-verified on the final binary (md5 bd82dff3): c2h6 cell
 default 59.3 kJ/step (136 rebuilds), `rev_budget_fix_h false` 2593.6 (90), `rev_share_form
@@ -91,9 +115,9 @@ Orchestrator confirmed release == build_rev on the trajectory to the printed dig
 both builds. Note: `ctest` runs the COPIES of the scripts in the build tree — re-run `cmake .`
 after editing a `run_test.sh`, or the old copy is tested.
 
-**Operator decisions pending**: `rev_share_form conserving` (recommendation: only with a donor
-rule), `rev_well_form mg` (recommendation: after the 3b pair-table factorisation), whether to
-commission the donor rule next. Nothing pushed; local branch 50 commits ahead of origin.
+~~**Operator decisions pending**: `rev_share_form conserving`, `rev_well_form mg`, whether to
+commission the donor rule.~~ **All three DECIDED and DELIVERED 2026-09-19 — see the block at the
+top of this section.** The donor rule was built, both defaults were flipped. Nothing pushed.
 
 **Earlier the same day: `work-packages` (Opus), the ONLY agent in the main tree, builds in
 `build_rev/`, measures with frozen copies, commits locally per logical change, never pushes.**
