@@ -73,21 +73,41 @@ other falsifier; sulfoxides/phosphine oxides never needed it. (2) `conserving` i
 class-C adducts -87..-107 -> -1.5..+0.0 kcal/mol. (3) `mg` is the default: class-A median rms
 24.49 -> 19.50, dev r90 -0.330 -> -0.058, guard 1.0341 -> 1.0439. (4) `ctest` 113/113.
 
-**The one finding nobody had measured, now independently confirmed**: the two flips INTERACT on
-the 20-cell react-MD grid and the combination is worse than either alone — per-step max 800.1
-kJ/mol against 216.6 (gauss+conserving) and 396.9 (mg+delivered), and 5 rebuild jumps >= 50 kJ
-where both single flips had 0; the per-step event COUNT still improves 487 -> 271 against the
-pre-flip default. Four cells carry it (worst: `c2h6/T2000_f0`, untested by any single-flip
-measurement so far since it was not a top-3 cell before), hard swaps stay 0 of 583, the hot cells
-recover under the thermostat — a smooth overshoot, not a crash or a discrete pathology. Not
-root-caused. **Operator decision (2026-09-19): ship as-is (both flips stay), investigate as its own task.**
-Delegated to an Opus agent (`package-7`, running): reproduce + localize the worst cell
-(`c2h6/T2000_f0`), attribute per term/per bond, isolate what differs about the COMBINATION vs
-either flip alone, fix only if a minimal genuine defect turns up (not a redesign) — otherwise
-characterize the design tension precisely with costed options. Status: `WORK_STATUS.md` package 7. Two smaller findings: `ncl3_N-Cl` is the single class-A bond type the conserving
-share makes worse (rms 20.10 -> 23.57, 30 of 32 bit-identical), and an MG well moves `revgfnff`'s
-ABSOLUTE energy away from `gfnff` by construction (-133.6 kcal/mol on the acetic-acid dimer, -0.56
-before) while relative energies do not move.
+**2026-09-19: `package-7` DONE — the "grid interaction" was a 20-cell sampling artefact, and the
+real tail is root-caused.** One local commit (diagnostic only), nothing pushed. `WORK_STATUS.md`
+package 7 (`Packages done: 7/7`), `docs/REV_GFNFF_STAGE3A.md` 2.1 rewritten.
+
+- **The tail belongs to `conserving`, not to the combination.** Over **130 cells** (the same three
+  systems, every frame, both T, one frozen binary `24a57b1c`) `gauss + conserving` reaches
+  **1071.3 kJ/mol** per step and **T_max 46 601 K** — worse in the maximum than the shipped
+  default's 800.1 / 28 392. Its worst cell `c2h6/T2000_f7` is simply not in the 20-cell grid. MG
+  adds FREQUENCY (27 vs 16 cells above 100 kJ; on c2h6 at 2000 K 20/25 vs 9/25), not mechanism
+  (0.6 kJ/mol on the corner gap; the H-H well is within 2-3.5 % of the Gaussian at every r).
+- **Mechanism**: the conserving share keeps a transient geminal H2 (both H still on the same C) at
+  `c = f_H^2 = 0.2531` of a 0.204 Eh well = **-136 kJ/mol**, where the delivered left-over rule
+  gives that pair exactly 0. Same geometry, bond term of the bridged corner minus the unbridged
+  one: **+124.4 / +128.6 (delivered) vs -10.6 / -11.2 (conserving) kJ/mol** — free instead of
+  forbidden, so the molecule visits it 1.5-2.8x as often.
+- **The jump is a blend-window resolution failure, not a step in the potential**: the new
+  `CURCUMA_BLENDDUMP=1` shows the break transition moving `s` 0.000000 -> 0.515777 in ONE 0.25 fs
+  step (window ~0.175 a0 wide in distance for H-H, ~2 steps at 2000 K; corner gap median 153, max
+  390 kJ/mol). **dt 0.25 -> 0.125 -> 0.0625 fs gives 800.1 -> 38.7 -> 13.5 kJ and T_max 28 392 ->
+  5 579 -> 5 441 K** on the worst cell; a discontinuity would survive a smaller step.
+- **Verdict: design tension, no minimal defect, nothing changed.** Five costed options in
+  `WORK_STATUS.md` 7.8; the cheapest honest mitigation is `dt <= 0.125 fs` with `conserving`.
+  Both brief-suggested hypotheses were falsified by measurement (share `min` width has no effect
+  over 130 cells; `gauss + conserving` keeps `w` on the well and is still worst).
+- The only source change is an env-gated `blendD` log line in `FFWorkspace::updateTransitions()`.
+  Verified inert: `gfnff` caffeine -4.6727370686 / benzene -2.3627255262 and `revgfnff` caffeine
+  -4.5469438980 unchanged, the 20-cell grid x 4 arms identical in **80/80** cells, `ctest` 113/113.
+- **Correction to package 6.4**: the `step max` of the two DELIVERED arms (391.44 / 396.88) came
+  from an older binary; on the current one the same cells give **222.53 / 190.23** with the event
+  counts matching to 2. The two conserving rows reproduce exactly.
+
+Two smaller findings from package 6 still open: `ncl3_N-Cl` is the single class-A bond type the
+conserving share makes worse (rms 20.10 -> 23.57, 30 of 32 bit-identical), and an MG well moves
+`revgfnff`'s ABSOLUTE energy away from `gfnff` by construction (-133.6 kcal/mol on the acetic-acid
+dimer, -0.56 before) while relative energies do not move.
 
 **2026-09-18 evening: `work-packages` DONE — 5/5 packages, 12 local commits `378a13cc..64f0109f`,
 `WORK_STATUS.md` (601 lines). Orchestrator-verified on the final binary (md5 bd82dff3): c2h6 cell

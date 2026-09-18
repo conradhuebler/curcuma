@@ -1,5 +1,5 @@
-# WORK_STATUS — rev-gfnff work packages 1-6 (2026-09-18 / 19)
-Packages done: 6/6
+# WORK_STATUS — rev-gfnff work packages 1-7 (2026-09-18 / 19)
+Packages done: 7/7
 
 AI-generated, machine-tested. Repository `/home/conrad/src/curcuma_branches/curcuma`, branch
 `reactff2-llm`, start HEAD `265a18b0`. Every measurement was taken with a FROZEN copy of the
@@ -780,3 +780,220 @@ all four well forms report the same energy, because the shell does not word-spli
 parser drops a single argv element it cannot parse. Every harness call in this package passes flag
 and value as separate literal tokens (or through a Python list). **If a switch appears to have no
 effect, check the argv before the code.**
+
+---
+
+## Package 7 — the grid interaction of 6.4, root-caused (2026-09-19)
+
+Task: reproduce the `mg + conserving` grid tail, localize it, attribute it per term and per bond,
+isolate what the COMBINATION does that neither flip does alone, and fix only a minimal genuine
+defect. **Result: it is not an interaction of the two flips.** The tail belongs to the
+`conserving` share alone; the 20-cell grid was too small to show that. The energy jump itself is a
+stage-1b blend-window resolution failure at `dt = 0.25 fs`. One commit, diagnostic only.
+
+Binaries, both frozen before use: **`24a57b1c`** (HEAD `589443c3`, no source change — reproduces
+the shipped table exactly, see 7.1) and **`fa09bcac`** (same plus the new `CURCUMA_BLENDDUMP`
+log line). `-threads 1`, fresh directory per run, `*.topo.json` never reused, `-md.print_frequency 1`.
+
+### 7.1 Reproduction, and one correction to the shipped table
+
+The 20 grid cells, all four arms, binary `24a57b1c`:
+
+| arm | rebuilds | step max / kJ | n >= 50 | T_max / K | package 6.4 said |
+|---|---:|---:|---:|---:|---|
+| gauss + delivered | 1186 | **222.53** | 485 | 8 305.9 | 1186 / 391.44 / 487 / 8 306 |
+| gauss + conserving | 902 | **216.62** | 72 | 11 139.3 | 902 / 216.62 / 72 / 11 139 |
+| mg + delivered | 1073 | **190.23** | 456 | 8 177.8 | 1073 / 396.88 / 458 / 8 178 |
+| mg + conserving (DEFAULT) | 1169 | **800.12** | 271 | 28 391.5 | 1169 / 800.12 / 271 / 28 392 |
+
+Rebuild counts and T_max reproduce exactly in all four arms; the two conserving arms reproduce in
+every column. The two DELIVERED arms' `step max` does not: 222.53 / 190.23 here against the
+recorded 391.44 / 396.88, with the event counts matching to 2 (485/487, 456/458). Checked by
+re-running `ch4_H/T2000_f10` (the cell that carries both) with the orchestrator's own
+`stepmax.py`: **222.53**, and the max is the same with and without the rebuild-interval exclusion.
+The 391/397 figures come from an older binary (package 3.5 records 391.44 for the same cell), so
+they are not comparable with the post-donor-rule build. **Every number in this package comes from
+one binary.**
+
+### 7.2 The event, localized
+
+`c2h6/T2000_f0`, the worst cell: one event at t = 1.9595-1.9610 ps carries the whole cell
+(+393.4, +707.1, +214.5, -800.1 kJ/mol on four consecutive steps, T_max 28 392 K at 1.96125).
+Per-term (`terms2.py`): the first step is **bond** +320.7 kJ and angle +65; the +707 and the -800
+are **bonded repulsion** (0.0576 -> 0.2657 -> 0.3251 -> 0.0791 Eh) plus the over-coordination term
+(0 -> 0.15 Eh), i.e. the aftermath of a collision, not its cause. Every rebuild in the window
+reports `dE_jump = 0.000000 Eh`; hard swaps are 0 in the whole run. The geometry (frames extracted
+from the MD by truncated re-runs, exact to 1.8e-05 a0 against the status rows): H3 and H4 both sit
+on C1 and have formed a transient H2, r(H3-H4) = 2.09 a0; two steps later it is **0.86 a0** —
+the same artificial-H2 collapse as `RUNAWAY_STATUS.md`, but reached without any budget jump
+(under `conserving` a hydrogen's cap is 0, so `Val_H = 1` always).
+
+### 7.3 Per bond: what the two share rules do to that H2
+
+Same geometry, fresh single point, all four arms (`CURCUMA_SHAREDUMP`), bond H3-H4 at r = 1.98 a0:
+
+| arm | D (well) / Eh | c | E_pair / Eh |
+|---|---:|---:|---:|
+| gauss + delivered | 0.19724 | **0.0000** | **-0.00000** |
+| mg + delivered | 0.20431 | **0.0000** | **-0.00000** |
+| gauss + conserving | 0.19724 | 0.2531 | **-0.04993** |
+| mg + conserving | 0.20431 | 0.2531 | **-0.05172** |
+
+`f_H3 = f_H4 = Val/S = 1/1.9875 = 0.5031`, `c = f_H3 f_H4 = 0.2531`. The delivered left-over rule
+gives the same pair `c = 0.000000` exactly. Both rules give the two C-H bonds the same
+`c ~ 0.50`, so **the entire difference between the share rules on this motif is that one pair**.
+Consequence, measured as the bond-term difference between the corner WITH the H3-H4 bond and the
+corner without it, at the same geometry:
+
+| arm | corner gap (bridged - unbridged) / kJ/mol |
+|---|---:|
+| gauss + delivered | **+124.4** |
+| mg + delivered | **+128.6** |
+| gauss + conserving | **-10.6** |
+| mg + conserving | **-11.2** |
+
+Under `delivered` the artificial geminal-H2 state costs 124 kJ/mol and the dynamics is pushed out
+of it; under `conserving` it is isoenergetic. The well form moves this by 0.6 kJ/mol.
+
+### 7.4 The jump itself: a blend window two steps wide
+
+New `CURCUMA_BLENDDUMP=1` prints the stage-1b transition table per energy call (pair, forming,
+tight, window `[w_a, w_b]`, r, coordinate c, corner weight s). Across the +393 kJ step:
+
+| t / ps | pair | w_a -> w_b | r / a0 | c | s |
+|---|---|---|---:|---:|---:|
+| 1.959500 | 3-4 break | 0.32670 -> 0.02000 | 2.09317 | 0.326696 | **0.000000** |
+| 1.959750 | 3-4 break | 0.32670 -> 0.02000 | 2.18296 | 0.170122 | **0.515777** |
+| 1.960000 | 3-4 break | 0.32670 -> 0.02000 | 1.44075 | 0.999353 | 0.000000 (revert) |
+
+**Half the break's blend window is traversed in one 0.25 fs step for a distance change of
+0.09 a0.** The window is a fixed interval in the bo3 ORDER (0.327 -> 0.02), and the bo3 switch is
+steepest for the smallest covalent sum, so for an H-H pair it is only ~0.175 a0 = 0.093 A wide in
+DISTANCE - about two steps for a hydrogen at 2000 K. The energy it has to carry over that window
+is the corner gap, measured per step over the whole trajectory (`spread.py`, max-min bond term
+over the corners evaluated in that step): median **153.2**, p90 209.2, max **389.7** kJ/mol for
+this arm. Reconstructing the corner weights from the corner sums and the blended bond term gives
+s(C2-H3 formation) 0.0159 -> 0.9682 across the same step, i.e. **0.95 x 353 kJ/mol = 337 kJ of the
+measured +321 kJ bond change**. The rest of the event is the collision that energy causes.
+
+**The window, not the potential, is what fails.** Halving the time step on the same cell:
+
+| dt / fs | rebuilds | step max / kJ | n >= 50 | T_max / K |
+|---:|---:|---:|---:|---:|
+| 0.25 | 76 | **800.1** | 62 | **28 392** |
+| 0.125 | 102 | **38.7** | **0** | 5 579 |
+| 0.0625 | 44 | **13.5** | **0** | 5 441 |
+
+A discontinuity of the potential would survive a smaller step; this does not. The static potential
+along the same path is smooth there: the fresh-perception single point changes by **+5.9 kJ/mol**
+between the two frames where the MD jumps by +393.
+
+### 7.5 The 20-cell grid was too small — 130 cells change the conclusion
+
+Same three systems, ALL frames (c2h6 25, ch3nh2 25, ch4_H 15) at both temperatures = **130 cells
+per arm**, one binary, same protocol:
+
+| arm | sum reb | H-H formations | median step | p90 | max / kJ | cells > 100 kJ | T_max / K |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| gauss + delivered | 9473 | 402 | 45.5 | 88.4 | 222.5 | 9 | 8 306 |
+| gauss + conserving | 9022 | 138 | 42.9 | 116.2 | **1071.3** | 16 | **46 601** |
+| mg + delivered | 8636 | 385 | 46.8 | 80.6 | 362.6 | 8 | 11 035 |
+| mg + conserving | 9708 | 204 | 49.4 | 213.5 | 800.1 | **27** | 28 392 |
+
+**`gauss + conserving` reaches 1071.3 kJ/mol and 46 601 K — worse in the maximum than the shipped
+default.** Its worst cell is `c2h6/T2000_f7` (reproduced: 1071.3 kJ, 309 events, 172 rebuilds,
+T_max 26 265); the 20-cell grid does not contain it. So the heavy tail is a property of the
+**conserving share**, not of the combination. What MG adds is FREQUENCY: 27 cells above 100 kJ
+against 16, p90 213.5 against 116.2, and on c2h6 at 2000 K (25 cells each) 20/25 cells above
+100 kJ against 9/25 with 125 H-H formations against 70. Its mechanism contribution is ~0: the
+corner gap moves 0.6 kJ/mol (7.3) and the H-H well itself is within 2.0-3.5 % of the Gaussian over
+the whole perceived range (isolated-H2 scan, `mg/gauss` 1.020-1.035 at every r) because the fitted
+`beta` for H-H is 1.135 /A^2 - the MG tail is wide for C-H, not for H-H.
+
+The two share rules have **disjoint failure modes**, and each arm's worst cells say which:
+every worst cell of the two delivered arms is `ch4_H` (the artificial radical adduct - 282 -> 20
+H-H formations and 570 -> 76 rebuilds when the share is flipped, which is exactly what `conserving`
+was built for), every worst cell of the two conserving arms is `c2h6` (the intramolecular geminal
+H2). At `dt = 0.125 fs` over the same 130 cells the four arms are nearly indistinguishable in the
+median (21.0 / 20.7 / 22.3 / 20.9) and the tail shrinks by 3-9x (max 134.9 / 312.5 / 124.0 / 591.6,
+cells > 100 kJ 4 / 7 / 4 / 3).
+
+### 7.6 The two structural hypotheses of the task brief — both falsified by measurement
+
+- **(a) "the conserving share's smooth `min` is steeper than the delivered clip"**. True in
+  principle (`shareMinOne` joins over `rev_share_min_width` = 0.1 in `Val/S`, `shareClip` over the
+  whole unit interval), **but it never fires here**: the bridging hydrogen has `Val/S = 0.5031`,
+  deep inside `shareMinOne`'s exactly-linear branch; the cubic join lives only on
+  0.9 < Val/S < 1. Measured over the same 130 cells: `-gfnff.rev_share_min_width` 0.02 / 0.10
+  (default) / 0.30 gives median step **49.4 / 49.4 / 48.9** and cells > 100 kJ **27 / 27 / 32**.
+  No effect.
+- **(b) "the new well forms lost the `w` damping, so a transition is smoothed once instead of
+  twice"**. `gauss + conserving` keeps `w` on the well and produces the worst event of the whole
+  ensemble, so `w` is not what is missing. **Latent, though**: for the new forms `E = well * c`
+  and `calcBonds` skips the share when `w <= 1e-12`, so `c` would jump from `f_i f_j` to 1 on a
+  pair whose own `w` dies while its atom stays over-claimed by others. **Not reached**: over
+  126 290 `shareD` rows of the worst cell's trajectory, 6 956 have `w < 1e-3` and **0 of those have
+  `c < 0.999`** - because the over-claim is carried by the pair's own `w`, so `f -> 1` as `w -> 0`.
+  One cell, so the scope of that check is one trajectory.
+
+### 7.7 Context: the share is worth a factor 15, either rule
+
+Same 130 cells, `-gfnff.rev_valence_share false` (the only switch that removes the share):
+median step **744.4** kJ, p90 2234.3, max **7738.5**, 87/130 cells above 100 kJ, T_max 9.96e+07.
+So this is a choice between two second-order failure modes inside a large win, not between a good
+and a bad option. Also measured and **negative**: `-gfnff.rev_share_onethree true`, which would
+treat the geminal H-H as a 1,3 contact, is catastrophic (median 973.3 / 980.5 kJ, max 22 642 /
+6 271, 84/130 cells above 100) - it removes the pair's claim on the hydrogen's valence AND leaves
+its well at full depth.
+
+### 7.8 Verdict and the option list (nothing implemented)
+
+**Design tension, no minimal defect.** The share rules and the well forms do exactly what their
+specifications say; the conserving rule's `c = f_i f_j` on a pair whose two partners are both
+fully committed elsewhere IS the specification, and the delivered rule's exact zero there was an
+accident of the left-over rule that happened to suppress the geminal-H2 artefact. The options, each
+with what it would cost against the falsifiers that currently pass — **none of these was built**:
+
+1. **Widen the transition window, or define it in distance instead of bond order.** This is what
+   actually fails (7.4). The window `[c_seen, tr_begin]` is set at detection precisely because a
+   hot X-H moves the coordinate by up to 0.15 per scan, and it is clamped to at least 0.10 in `c` —
+   both deliberate. A distance-based window would be ~constant in steps across element pairs
+   instead of narrowest for H. Cost: touches every rev-gfnff trajectory, so the whole class-D /
+   NVE / react ctest calibration (tests 13-20) has to be re-measured; the equilibrium and
+   single-point falsifiers are unaffected by construction.
+2. **Require `dt <= 0.125 fs` when `conserving` is active**, or warn. Measured: removes the worst
+   cell entirely and cuts the ensemble tail 3-9x (7.4, 7.5). Cost: 2x wall time, and it contradicts
+   the documented "reactive MD needs dt <= 0.25 fs" — which is exactly the step at which the tail
+   lives. No falsifier moves. Cheapest honest mitigation.
+3. **Deny the share's product to a pair whose BOTH partners are over-claimed** (e.g. multiply `c`
+   by the pair's settled weight `sig_p`; at the event `sig = 0.0000` while its well is credited
+   with 25 % of full depth, so the share's own bookkeeping already disagrees with itself). Cost:
+   `sig = 0` is also what a half-formed bond has at an exchange TS by construction (that is what
+   the `2b - 1` rescaling was designed for, 3.1), so this is very likely to undo package 3's
+   rkt06 path and the class-C adducts. Needs the full class-A/C + rkt06 set re-measured.
+4. **Fix the perception rather than the share**: the geminal H-H is admitted as a bond at
+   `r/rcov = 1.6` with a tight order of 0.147. Narrowing `rev_bo_center` for H-H would remove the
+   artefact at its source. Cost: every bond-order-dependent quantity moves; largest re-validation.
+5. **Do nothing.** The tail is bounded (thermostat recovers, hard swaps 0, no crash), it is 15x
+   better than share-off, and it needs 2000 K react MD of a saturated hydrocarbon to appear.
+   Cost: a user doing hot react MD sees 100-1000 kJ/mol per-step excursions.
+
+### 7.9 Verification of the one commit (diagnostic only)
+
+`CURCUMA_BLENDDUMP=1` in `FFWorkspace::updateTransitions()`, log-only, env-gated, inside a
+rev-only function. Binary `fa09bcac` against `24a57b1c`: `gfnff` caffeine **-4.6727370686** /
+benzene **-2.3627255262**, `revgfnff` caffeine **-4.5469438980** / benzene **-2.4079121860**,
+all identical; the 20-cell grid x 4 arms is identical in **80 of 80** cells (rebuilds, step max,
+n >= 50, T_max); `export CURCUMA=$PWD/build_rev/curcuma; ctest -R "gfnff|sqm_val|react|cli_simplemd_|cli_gfnff_"`
+gives **113/113**.
+
+### 7.10 Method note
+
+The finding that the two flips "interact" came from a 20-cell grid with one seed per cell. Six and
+a half times that many cells of the same three systems put `gauss + conserving` above the shipped
+default in the maximum and moved the whole conclusion. Before attributing a tail to a specific
+combination of options, check how many independent cells the tail actually rests on — here it was
+one cell per arm. Second: a per-step energy jump that disappears when the time step is halved is
+not a discontinuity of the potential; that one command separates "the model has a step in it" from
+"the integrator cannot resolve a smooth switch" and should be the first thing run on any future
+react-MD smoothness complaint.

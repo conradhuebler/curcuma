@@ -204,27 +204,52 @@ share; it was re-measured on the Sep 19 binary and reproduces row for row.
 
 ---
 
-## 2.1 The two flips together — one interaction, measured and not root-caused
+## 2.1 The react-MD tail — the share, not the combination (root-caused Sep 19, 2026)
 
-Packages 3 and 4 measured the conserving share and the MG well independently. With both defaults
-active the 20-cell react-MD grid is **worse than with either one**:
+Packages 3 and 4 measured the conserving share and the MG well independently, and on the 20-cell
+react-MD grid the two defaults together looked worse than either alone (per-step max 800.12 kJ/mol
+against 216.62 and 396.88, T_max 28 392 K). **Package 7 shows that reading was a 20-cell sampling
+artefact.** Over 130 cells of the same three systems (every frame, both temperatures, one frozen
+binary) the heavy tail belongs to `conserving` with EITHER well form:
 
-| arm | rebuilds | per-step max / kJ | n >= 50 | dE_jump max / kJ | n >= 50 | T_max / K |
+| arm (130 cells) | sum reb | median step / kJ | p90 | max / kJ | cells > 100 kJ | T_max / K |
 |---|---:|---:|---:|---:|---:|---:|
-| gauss + delivered (pre-Sep-19 default) | 1186 | 391.44 | 487 | 48.6 | 0 | 8 306 |
-| gauss + conserving | 902 | 216.62 | 72 | 21.3 | 0 | 11 139 |
-| mg + delivered | 1073 | 396.88 | 458 | 49.7 | 0 | 8 178 |
-| **mg + conserving (DEFAULT)** | **1169** | **800.12** | **271** | **190.9** | **5** | **28 392** |
+| gauss + delivered | 9473 | 45.5 | 88.4 | 222.5 | 9 | 8 306 |
+| gauss + conserving | 9022 | 42.9 | 116.2 | **1071.3** | 16 | **46 601** |
+| mg + delivered | 8636 | 46.8 | 80.6 | 362.6 | 8 | 11 035 |
+| **mg + conserving (DEFAULT)** | 9708 | 49.4 | 213.5 | 800.1 | **27** | 28 392 |
 
-Net against the old default the per-step event count still improves (487 -> 271) and the worst
-single step and the rebuild-jump tail get worse. Four cells carry all of it — `c2h6/T2000_f0`
-(800 kJ), `c2h6/T2000_f8` (367), `ch4_H/T2000_f0` (342), `ch4_H/T1000_f10` (185) — while the cell
-that motivated the share flip, `ch4_H/T2000_f10`, is the best of the three arms in the combined
-state (75.0 kJ, 5 events, jump 0.4, T_max 7445). Hard swaps stay **0 of 583**, so this is smooth
-window overrun, not a discrete topology event, and both hot cells recover under the thermostat
-(mean T over the last 0.5 ps is 2247 and 2347 K at a 2000 K setpoint). `-gfnff.rev_well_form
-gauss` recovers 216.62 / 72 / 21.3 and `-gfnff.rev_share_form delivered` recovers 396.88 / 458 /
-49.7.
+`gauss + conserving` reaches 1071.3 kJ/mol on `c2h6/T2000_f7`, a cell the 20-cell grid does not
+contain. MG adds **frequency**, not mechanism: 27 cells above 100 kJ against 16 (on c2h6 at 2000 K,
+20/25 against 9/25), while its contribution to the mechanism is ~0.6 kJ/mol (below).
+
+**Mechanism**, measured per bond at the worst cell's own event geometry. A transient geminal H2
+forms inside the molecule (both hydrogens still on the same carbon). The delivered left-over rule
+gives that pair `c = 0.000000` exactly; the conserving rule gives it `c = f_H f_H = 0.5031^2 =
+0.2531` on a 0.204 Eh well, i.e. **-136 kJ/mol**. Both rules give the two C-H bonds the same
+`c ~ 0.50`, so that one pair is the whole difference. Bond-term energy of the bridged corner
+relative to the unbridged one, same geometry: **+124.4** (gauss+delivered) / **+128.6**
+(mg+delivered) / **-10.6** (gauss+conserving) / **-11.2** (mg+conserving) kJ/mol. Under
+`delivered` the artefact costs 124 kJ/mol and the dynamics is pushed out of it; under `conserving`
+it is free, so the molecule visits it 1.5-2.8x as often (125 H-H formations against 52 on 25 c2h6
+cells).
+
+**The jump is a blend-window resolution failure, not a step in the potential.** `CURCUMA_BLENDDUMP=1`
+shows the break transition of that H-H pair moving `s` from 0.000000 to 0.515777 — half its window —
+in ONE 0.25 fs step, for a distance change of 0.09 a0, because the window is a fixed interval in the
+bo3 ORDER and the bo3 switch is steepest for the smallest covalent sum: for H-H it is only ~0.175 a0
+wide in distance, about two steps for a hydrogen at 2000 K. The corner gap it has to carry is a
+median 153 and up to 390 kJ/mol. Halving the time step removes the event completely
+(`c2h6/T2000_f0`: 800.1 -> 38.7 -> 13.5 kJ/mol and T_max 28 392 -> 5 579 -> 5 441 K at
+dt = 0.25 / 0.125 / 0.0625 fs), and the static potential along the same path changes by only
++5.9 kJ/mol where the MD jumps by +393 — a discontinuity would survive a smaller step.
+
+Context: `-gfnff.rev_valence_share false` on the same 130 cells is median **744.4** kJ/mol, max
+7738.5, 87/130 cells above 100 — the share of either form is worth a factor ~15, so this is a choice
+between two second-order failure modes. The two rules fail on disjoint motifs: every worst cell of
+the delivered arms is `ch4_H` (the artificial radical adduct, 282 -> 20 H-H formations when the
+share is flipped), every worst cell of the conserving arms is `c2h6` (the geminal H2). Full
+measurement, the falsified hypotheses and a costed option list: `WORK_STATUS.md` package 7.
 
 **Everything else is unaffected by the combination** and equals the MG-alone row: guard 1.0439,
 class D 5.152 / 16.376, rkt06 2.72, the equilibrium toggle set 20/20 at dE = 0.000000000,
@@ -259,9 +284,12 @@ hydrogen-bonded X-H (the HB alpha modulation is not applied in the new forms, an
 contains no hydrogen bond); long-time MD stability beyond 5 ps per cell; every combination of the
 flags except the ones tabulated above.
 
-**OPEN, measured, not root-caused**:
-- the grid interaction of section 2.1 — the two flips together are worse on the per-step tail than
-  either alone (800 kJ/mol against 216 and 397);
+**OPEN, measured**:
+- the react-MD tail of section 2.1 — **root-caused** (the conserving share makes a transient
+  geminal H2 free instead of +124 kJ/mol unfavourable, and the stage-1b break window for an H-H
+  pair is only ~2 time steps wide at dt = 0.25 fs), **not fixed**: every remedy is a redesign of
+  either the share rule or the transition window. `dt = 0.125 fs` removes it. Five costed options
+  in `WORK_STATUS.md` 7.8;
 - `ncl3_N-Cl`, the one class-A bond type the conserving share makes worse (rms 20.10 -> 23.57);
 - the proton-shared dimers H5O2+ and N2H7+, where the charge is split over two groups so that
   neither the charge rule nor the donor rule grants a full budget — both modes stay 120-158
@@ -289,6 +317,6 @@ benefit.
 | the AI-fitted well table | `src/core/energy_calculators/ff_methods/rev_well_table.h` (generated) |
 | the fit | `scripts/revgfnff_wellfit.py` |
 | the class-A harness | `scripts/revgfnff_classa.py` (`--mode kept --extra "-gfnff.topology_mode react"`) |
-| diagnostics | `CURCUMA_SHAREDUMP=1` (per-pair `share`/`shareD` rows and, in `conserving`, a per-atom `shareA` row whose `cap` column shows the donor grant), `CURCUMA_REVDUMP=1` (the resolved settings, incl. `share_form` / `share_donor_rule` / `well_form`) |
+| diagnostics | `CURCUMA_SHAREDUMP=1` (per-pair `share`/`shareD` rows and, in `conserving`, a per-atom `shareA` row whose `cap` column shows the donor grant), `CURCUMA_BLENDDUMP=1` (per energy call a `blendD` row per stage-1b transition: pair, forming/tight, window `[w_a, w_b]`, r, coordinate c, corner weight s), `CURCUMA_REVDUMP=1` (the resolved settings, incl. `share_form` / `share_donor_rule` / `well_form`) |
 | measurements | `test_cases/revgfnff/_log/WORK_STATUS.md`, `HBUDGET_STATUS.md`, `RUNAWAY_STATUS.md`, `FABLE_REVIEW_2.md` |
 | regression tests | `cli_simplemd_20_gfnff_rev_h_budget`, `cli_gfnff_03_rev_adduct_falsifier`, `cli_gfnff_04_rev_well_form` |

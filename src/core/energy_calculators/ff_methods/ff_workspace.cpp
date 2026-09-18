@@ -701,6 +701,21 @@ void FFWorkspace::updateTransitions()
         tr.dwdr = dc;
         tr.s = s;
         tr.dsdw = dsdw;
+        // Claude Generated (Sep 2026): CURCUMA_BLENDDUMP=1 prints the stage-1b transition table
+        // of every energy call - the only place the blend coordinate c, its window [w_a, w_b]
+        // and the resulting corner weight s are visible per step. Same env-gate convention as
+        // CURCUMA_SHAREDUMP / CURCUMA_BONDDUMP: read once, zero cost when unset, log only (no
+        // numerical path depends on it - see Known Issue #33).
+        static const bool s_blend_dump = [] {
+            const char* d = std::getenv("CURCUMA_BLENDDUMP");
+            return d && d[0] == '1';
+        }();
+        if (s_blend_dump)
+            CurcumaLogger::result(fmt::format(
+                "blendD {:3d}-{:3d} form {} tight {} wblend {} w_a {:8.5f} w_b {:8.5f} "
+                "r {:9.5f} c {:9.6f} s {:9.6f}",
+                tr.i + 1, tr.j + 1, tr.forming ? 1 : 0, tr.tight ? 1 : 0, tr.well_blend ? 1 : 0,
+                tr.w_a, tr.w_b, r, c, s));
     }
 }
 
