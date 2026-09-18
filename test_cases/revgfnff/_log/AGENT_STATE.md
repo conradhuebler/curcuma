@@ -58,9 +58,13 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 **2026-09-19: `package-6` DONE — the donor rule and BOTH default flips are in.** No agent is
 running in this tree. Final default state of rev-gfnff:
 `rev_budget_fix_h true` (now a NO-OP under conserving), **`rev_share_form conserving`**,
-**`rev_share_donor_rule true`** (new), **`rev_well_form mg`**. Four local commits
-`118b289c` / `a4712e83` / `1327aaee` / `33199345`; nothing pushed. Full detail and every number:
-`WORK_STATUS.md` package 6 (`Packages done: 6/6`). Final binary md5 **`916847ff`**.
+**`rev_share_donor_rule true`** (new), **`rev_well_form mg`**. Five local commits
+`118b289c` / `a4712e83` / `1327aaee` / `33199345` / `e688254b`; nothing pushed. Full detail:
+`WORK_STATUS.md` package 6 (`Packages done: 6/6`). **Orchestrator-verified independently** (own
+rebuild, md5 `8f03e0c5`; `ctest` 113/113 reconfirmed): caffeine revgfnff **-4.54694390** / gfnff
+-4.67273707 Eh (the absolute-energy-shift claim); the 20-cell grid aggregate reproduces **to the
+digit** — 1169 rebuilds, step max **800.12** kJ/mol, 271 events >= 50 kJ, T_max **28391.5** K,
+worst cell `c2h6/T2000_f0`.
 
 Headlines: (1) the **donor rule** (a group-13 partner, or a partner with fewer partners than its
 own nominal valence, grants X_i >= 1) takes the dative/ylide regression H3N-BH3 / H3N-O / H3N-CH2
@@ -69,12 +73,15 @@ other falsifier; sulfoxides/phosphine oxides never needed it. (2) `conserving` i
 class-C adducts -87..-107 -> -1.5..+0.0 kcal/mol. (3) `mg` is the default: class-A median rms
 24.49 -> 19.50, dev r90 -0.330 -> -0.058, guard 1.0341 -> 1.0439. (4) `ctest` 113/113.
 
-**The one finding nobody had measured**: the two flips INTERACT on the 20-cell react-MD grid and
-the combination is worse than either alone — per-step max 800.1 kJ/mol against 216.6
-(gauss+conserving) and 396.9 (mg+delivered), and 5 rebuild jumps >= 50 kJ where both single flips
-had 0; the per-step event COUNT still improves 487 -> 271 against the pre-flip default. Four cells
-carry it, hard swaps stay 0 of 583, the hot cells recover under the thermostat. Not root-caused —
-top of the open list. Two smaller ones: `ncl3_N-Cl` is the single class-A bond type the conserving
+**The one finding nobody had measured, now independently confirmed**: the two flips INTERACT on
+the 20-cell react-MD grid and the combination is worse than either alone — per-step max 800.1
+kJ/mol against 216.6 (gauss+conserving) and 396.9 (mg+delivered), and 5 rebuild jumps >= 50 kJ
+where both single flips had 0; the per-step event COUNT still improves 487 -> 271 against the
+pre-flip default. Four cells carry it (worst: `c2h6/T2000_f0`, untested by any single-flip
+measurement so far since it was not a top-3 cell before), hard swaps stay 0 of 583, the hot cells
+recover under the thermostat — a smooth overshoot, not a crash or a discrete pathology. Not
+root-caused. **This is now an open operator decision** (see the pending-decisions line below), not
+just a TODO. Two smaller findings: `ncl3_N-Cl` is the single class-A bond type the conserving
 share makes worse (rms 20.10 -> 23.57, 30 of 32 bit-identical), and an MG well moves `revgfnff`'s
 ABSOLUTE energy away from `gfnff` by construction (-133.6 kcal/mol on the acetic-acid dimer, -0.56
 before) while relative energies do not move.
