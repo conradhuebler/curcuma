@@ -284,10 +284,31 @@ GPU on polymer_2x) while looking like "multi-GPU does not help". Three ways to c
 order they are cheap:
 
 ```bash
+bash scripts/find_mgpu_libs.sh     # BEFORE configuring: what is on this machine, and the -D flags
 cmake .. ... 2>&1 | grep "=== curcuma multi-GPU eigensolver"   # one grep-able summary line
 ldd release/libcurcuma_cuda_mgpu.so | grep -Ei "cusolvermp|cublasmp|nccl"   # the built artifact
 curcuma -methods            # "multi-GPU eigensolver: mp (cuSOLVERMp)" vs "mg (cusolverMg fallback)"
 ```
+
+### Where the three libraries come from
+
+They are NOT Python-only, and only one of them is in the CUDA toolkit:
+
+| | in the CUDA toolkit? | other channels |
+|---|---|---|
+| cusolverMg (the fallback) | **yes** - a plain `module load cuda` has it | - |
+| cuSOLVERMp | no | NVIDIA HPC SDK (`math_libs`), standalone tarball, conda `nvidia::libcusolvermp-dev`, PyPI `nvidia-cusolvermp-cu13` |
+| cuBLASMp | no | HPC SDK, tarball, conda `nvidia::libcublasmp-dev`, PyPI `nvidia-cublasmp-cu13` |
+| NCCL | no, but many clusters put it in the CUDA module or offer its own | HPC SDK (`comm_libs`), distribution package (this box: `/usr/lib/libnccl.so`), conda `nvidia::nccl`, PyPI `nvidia-nccl-cu13` |
+
+On a cluster the least work is usually `module load nvhpc`, which carries all three.
+`scripts/find_mgpu_libs.sh` searches `CUDA_HOME`/`NVHPC_ROOT`/conda/site-packages/`ldconfig` and
+prints the matching `-DCUSOLVERMP_ROOT=... -DCUBLASMP_ROOT=... -DNCCL_ROOT=...`.
+
+Two PyPI traps, checked against the index in Sep 2026: **`nvidia-cusolver` is the single-GPU
+cuSOLVER** (its `-cu13` spelling is deprecated in favour of the unified name) and has nothing to
+do with cuSOLVER**Mp**, whose package `nvidia-cusolvermp-cu13` is current and keeps the suffix;
+and the suffix-less `nvidia-nccl` is a placeholder package that exists only to warn you.
 
 The configure summary is one of
 `cuSOLVERMp + NCCL`, `cusolverMg only - optional cuSOLVERMp missing`, or

@@ -266,6 +266,7 @@ needs a code change. Bring back the `.json` files and the profile output.
 
 **0. Check the build first - without this the rest measures the wrong thing.**
 ```bash
+bash scripts/find_mgpu_libs.sh        # what this node has (try `module load nvhpc` first)
 cmake .. -DCMAKE_CUDA_ARCHITECTURES=90 -DCUSOLVERMP_ROOT=... -DCUBLASMP_ROOT=... -DNCCL_ROOT=... \
       -DCURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER=ON        # fails the configure if they are missing
 cmake .. ... 2>&1 | grep "=== curcuma multi-GPU eigensolver"   # or check the summary by hand
