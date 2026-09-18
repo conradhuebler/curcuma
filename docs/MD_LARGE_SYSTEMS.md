@@ -74,6 +74,70 @@ this is not a gradual drift: it is a cliff that the optimiser walks off after a 
 rearrangement. **Check the maximum per-atom gradient of any GFN-FF-optimised solvated
 structure before using it** - `-dump_gradient` and look at the largest row, not the norm.
 
+## The actual mechanism, on three atoms (Sep 19, 2026)
+
+Everything above was measured on systems of 300 to 7320 atoms. The cause reproduces on **one
+water molecule**, and that is where it should be read.
+
+**A single water, unconstrained, dt = 1 fs, NVE over 5 ps:**
+
+| start T | dt = 1.0 fs | dt = 0.5 fs |
+|---|---:|---:|
+| 1200 K | -0.0024 Eh | +0.0004 Eh |
+| **1500 K** | **+4.54 Eh** | +0.0006 Eh |
+| 1750 K | **+9.69 Eh** | +0.0007 Eh |
+| 2000 K | **+2.24 Eh** | +0.0007 Eh |
+
+There is a **threshold in amplitude**, not a drift: below it the energy is conserved for 10 ps
+(1 water +0.0007 Eh, 40 waters -0.013 Eh - the same magnitude at 2 ps and at 10 ps, i.e. the
+integrator is a correct symplectic Verlet and pumps nothing), above it the run explodes.
+
+**Why the threshold is at dt = 1 fs.** The GFN-FF O-H bond stiffens steeply under compression.
+Curvature of E(r) along the bond, converted to a frequency and the Verlet limit `dt < 2/omega`:
+
+| r(O-H) | E - E0 | omega | dt_stab |
+|---|---:|---:|---:|
+| 0.70 A | 0.144 Eh | **10758 cm-1** | **0.99 fs** |
+| 0.75 A | 0.080 Eh | 8773 cm-1 | 1.21 fs |
+| 0.80 A | 0.040 Eh | 7139 cm-1 | 1.49 fs |
+| 0.90 A | 0.005 Eh | 4753 cm-1 | 2.23 fs |
+| **0.971 A (eq)** | 0 | **3817 cm-1** | **2.78 fs** |
+| 1.15 A | 0.020 Eh | 2669 cm-1 | 3.98 fs |
+
+At the equilibrium length dt = 1 fs has a factor 2.8 of margin. Compressed to 0.70 A the margin
+is **gone** - and then the feedback closes: more compression -> higher omega -> larger
+integration error -> more energy -> more compression.
+
+**Why that makes large systems fail and small ones not.** The per-oscillator probability of
+crossing the threshold at 300 K is small but not zero. polymer_2x has **4612 hydrogens**, so
+over a few hundred steps the crossing is a certainty; 40 waters (80 O-H) usually get away with
+it. The observed pattern - 40 waters clean, 100 waters exploding, 200 clean, 400 and 800
+exploding - is exactly that lottery, and it is **not** a size effect in the code. It was
+verified step by step in the 100-water case: one O-H oscillation grows over ~10 fs
+(1.06 -> 0.81 -> 1.28 -> 0.72 A), the hydrogen then leaves its own oxygen (1.87 A) and hits a
+neighbouring one at 0.42 A, where the EEQ charges diverge to -5.45/+4.53 e and produce a force
+of order 100 Eh/A. One Verlet step with that force injected 262 Eh into a system whose entire
+kinetic energy was 0.43 Eh.
+
+**What was ruled out on the way** (each by measurement, not by argument): the starting structure
+(optimised heats *worse* than raw), outlier forces (max |g| 0.046 vs 0.079 in a stable system),
+a thread race (gradients agree to 1.7e-14 between 1 and 36 threads), an energy/force
+inconsistency (finite differences agree to 1e-6 at the start geometry *and* inside the heating
+trajectory), the Coulomb cutoff (removing it makes the drift *worse*: +22.97 vs +11.58 Eh),
+water as such (1 and 40 waters conserve energy at dt = 1 fs), stale internal MD state (frozen
+topology reproduces the fresh single point to the last digit at the collapsed geometry), and a
+CPU/GPU difference (that was the Eh/Bohr unit bug, fixed earlier).
+
+**The guard that was added.** The diverging EEQ charges are a known pathology of
+electronegativity equalisation at short range - the off-diagonal erf(gamma*r)/r rises towards
+the diagonal hardness and the 2x2 block becomes near-singular. The reference has the same
+property; xtb never meets it because its MD defaults are `hmass=4` and `shake=2` (all bonds),
+with a 4 fs step. curcuma now rejects an EEQ solution with |q| above 4 e + |molecular charge|
+and falls back to the topology charges for that evaluation, the same rule the xTB SCF has used
+since Known Issue #9. It cuts the damage by a factor of 5 (100 waters at dt = 1 fs: 20953 K /
++29.7 Eh -> 4036 K / +5.5 Eh) but it is a safety net, not a cure: the step that put two atoms
+0.42 A apart was already unphysical.
+
 ## Why it is the time step and not the structure
 
 Three measurements, each of which the "bad structure" explanation fails:
