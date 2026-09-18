@@ -2532,6 +2532,47 @@ void FFWorkspace::prepareConservingShare(bool fix_h)
             }
         }
     }
+    // rev-gfnff stage 3a(ii), the DONOR RULE (Claude Generated, Sep 19, 2026; FABLE_REVIEW_2
+    // A.5's open item, WORK_STATUS 3.8(1)). A dative bond puts a WHOLE valence into the
+    // acceptor's empty orbital, and the donor's EEQ charge does not show it (~+0.2, not +1), so
+    // the charge rule alone leaves an amine borane's nitrogen at Val ~ 3.2 against S ~ 4 and
+    // scales all four of its wells by ~0.8. donor[i] is true when i has a partner IN THIS CORNER
+    // that is either
+    //   (a) a group-13 element - an empty p orbital, which no bond count can reveal (BH3, AlCl3),
+    //   (b) an atom with FEWER partners than its own nominal sigma valence, i.e. a free
+    //       coordination site: the amine oxide's 1-coordinate O (Val_Z 2), the N-ylide's
+    //       3-coordinate C (Val_Z 4).
+    // Both tests read the corner's bond list only, so donor[] is a per-corner CONSTANT exactly
+    // like qgroup above - no chain rule runs through it and a change is carried by the s-blend.
+    // It grants X_i >= 1, and only in the charge branch below: group 13 and the period >= 3
+    // octet expansion already carry a larger cap. A one-coordinate hydrogen is NOT deficient
+    // (nb == Val_Z == 1), which is why a radical adduct (CH4 + H, NH3 + H, ...) is untouched.
+    std::vector<char> donor(N, 0);
+    if (m_rev.share_donor_rule && have_types) {
+        std::vector<int> nb_count(N, 0);
+        for (int p = 0; p < static_cast<int>(m_bonds.size()); ++p) {
+            const Bond& b = m_bonds[p];
+            if (b.i < 0 || b.j < 0 || b.i >= N || b.j >= N)
+                continue;
+            ++nb_count[b.i];
+            ++nb_count[b.j];
+        }
+        auto acceptor = [&](int j) {
+            const int Zj = m_atom_types[j];
+            if (Zj >= 1 && Zj <= 86 && GFNFFParameters::periodic_group[Zj - 1] == 3)
+                return true;                                  // (a) group 13, main-group numbering
+            return nb_count[j] < m_rev.valence[j] - 0.5;      // (b) a free coordination site
+        };
+        for (int p = 0; p < static_cast<int>(m_bonds.size()); ++p) {
+            const Bond& b = m_bonds[p];
+            if (b.i < 0 || b.j < 0 || b.i >= N || b.j >= N)
+                continue;
+            if (acceptor(b.j))
+                donor[b.i] = 1;
+            if (acceptor(b.i))
+                donor[b.j] = 1;
+        }
+    }
     const double a = m_rev.share_min_width > 1e-6 ? m_rev.share_min_width : 1e-6;
     for (int i = 0; i < N; ++i) {
         const double S = m_rev_share_sum(i);
@@ -2564,6 +2605,11 @@ void FFWorkspace::prepareConservingShare(bool fix_h)
                 cap = 6.0 - valz;        // the octet expansion the valence table already grants P/S
             } else {
                 cap = shareClip(qgroup[i]);   // C, N, O and the rest: granted by charge
+                // ... and, on top of it, by the donor rule: a full valence goes into the
+                // acceptor's empty orbital whatever the donor's charge says. max(), never a
+                // replacement - a charged donor keeps whichever cap is larger.
+                if (donor[i])
+                    cap = std::max(cap, 1.0);
             }
         }
         if (fix_h && Z == 1)

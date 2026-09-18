@@ -12369,6 +12369,11 @@ void GFNFF::setupRevSettings()
                 "rev_share_form '{}' is not delivered|conserving - using delivered", form));
         m_rev_share_form = rv.share_conserving ? "conserving" : "delivered";
         rv.share_min_width = m_parameters.value("rev_share_min_width", 0.1);
+        // Claude Generated (Sep 19, 2026): the DONOR RULE of the conserving share (see
+        // RevSettings::share_donor_rule). Same registry caveat as the flags around it - a new key
+        // may not arrive through getDefaultJson(), so this fallback IS the default.
+        m_rev_share_donor_rule = m_parameters.value("rev_share_donor_rule", true);
+        rv.share_donor_rule = m_rev_share_donor_rule;
     }
     // Claude Generated (Sep 18, 2026): stage 3a(iii), the bond-well form.
     {
@@ -12569,10 +12574,11 @@ void GFNFF::setupRevSettings()
             rv.over_k, rv.over_shift, rv.w_join));
         CurcumaLogger::result(fmt::format(
             "rev dump (flags): form {} bo2_form {:.4f} bo_form {:.4f} bo_break {:.4f} bo13_form {:.4f} "
-            "bo13_ordinary_join {} budget_fix_h {} share_form {} well_form {} "
+            "bo13_ordinary_join {} budget_fix_h {} share_form {} share_donor_rule {} well_form {} "
             "tr {:.4f}/{:.4f}/{:.4f}/{:.4f} cooldown {} max_transitions {} sqe {} sqe_bmin {:.5f} preset {}",
             m_rev_form_order ? "order" : "weight", m_rev_bo2_form, m_rev_bo_form, m_rev_bo_break,
-            m_rev_bo13_form, m_rev_bo13_ordinary_join, m_rev_budget_fix_h, m_rev_share_form, m_rev_well_form,
+            m_rev_bo13_form, m_rev_bo13_ordinary_join, m_rev_budget_fix_h, m_rev_share_form,
+            m_rev_share_donor_rule, m_rev_well_form,
             m_rev_tr_begin, m_rev_tr_end, m_rev_tr_revert, m_rev_tr_prebreak,
             m_rev_demote_cooldown, m_rev_max_transitions, m_rev_sqe, m_rev_sqe_bmin,
             m_parameters.value("rev_over_preset", std::string("stage1a"))));

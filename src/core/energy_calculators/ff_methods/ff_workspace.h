@@ -291,6 +291,22 @@ struct RevSettings {
     /// rev-gfnff 3a(ii) "conserving": half-width of the C1 smooth min in Val/S units. The min is
     /// exactly 1 above 1 and exactly Val/S below 1 - a, so this only smooths the corner between.
     double share_min_width = 0.1;
+    /// rev-gfnff stage 3a(ii) (Claude Generated, Sep 19, 2026): the DONOR RULE of the conserving
+    /// share, FABLE_REVIEW_2 A.5's open item and WORK_STATUS 3.8(1). The charge rule above cannot
+    /// see a DATIVE bond: a dative bond puts a whole valence into the acceptor's empty orbital,
+    /// but the donor's EEQ charge is ~+0.2, not +1, so X_i stays ~0.2 and all four wells of an
+    /// amine borane's nitrogen are scaled by ~0.8 - measured as +73 to +110 kcal/mol on H3N-BH3,
+    /// amine oxides and N-ylides, where the delivered rule is inert. The rule: atom i is granted
+    /// X_i >= 1 if, IN THIS CORNER, it has a partner j that is either (a) a group-13 element
+    /// (B, Al, ... - an empty p orbital, which no bond count can show) or (b) carries fewer
+    /// partners than its own nominal sigma valence, i.e. a free coordination site (the amine
+    /// oxide's one-coordinate O, the ylide's three-coordinate C). It is granted ON TOP of the
+    /// charge rule (X_i = max(clip(Q_i), 1)), never below it, and only in the charge branch -
+    /// group 13 and the period >= 3 expansion already have a larger cap. Both tests read the
+    /// corner's own bond list, so this is a per-corner constant exactly like Q_i: no chain rule,
+    /// and a change is carried by the existing s-blend. DEFAULT ON, and only read when
+    /// share_conserving is on; -gfnff.rev_share_donor_rule false is the ablation arm.
+    bool share_donor_rule = true;
     /// rev-gfnff stage 3a(iii) (Claude Generated, Sep 18, 2026): the BOND WELL FORM.
     /// 0 = gauss (delivered, bit-identical), 1 = MG, 2 = erf-Morse. Both new forms are
     ///     E = -D (2y - y^2)
