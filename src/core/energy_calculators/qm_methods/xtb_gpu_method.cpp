@@ -691,9 +691,18 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
         // the truth was 9.4e-3), so the SCF had to discover that through its FP64 check and spent
         // 42 iterations instead of 15. On such a device the default is therefore FP64 throughout;
         // -scf_mixed_precision true overrides it.
+        // The user's own -scf_mixed_precision (applied by applyXtbScfConfig before this
+        // point) wins over the device-class default. Claude Generated (Sep 2026): this used
+        // to be an unconditional assignment, so the flag the message below advertises had
+        // no effect on a full-rate-FP64 device.
+        auto cfg_has = [&](const char* key) {
+            return config.contains(key)
+                || (config.contains("xtb") && config["xtb"].is_object() && config["xtb"].contains(key));
+        };
         const bool fast_fp64 = ctx->deviceHasFastFp64();
-        xtb->setMixedPrecision(!fast_fp64);
-        if (fast_fp64 && CurcumaLogger::get_verbosity() >= 1)
+        const bool mp_explicit = cfg_has("scf_mixed_precision") || cfg_has("mixed_precision");
+        if (!mp_explicit) xtb->setMixedPrecision(!fast_fp64);
+        if (fast_fp64 && !mp_explicit && CurcumaLogger::get_verbosity() >= 2)   // info() is level >= 2
             CurcumaLogger::info(fmt::format(
                 "{}: {} has full-rate FP64 - mixed precision OFF by default "
                 "(-scf_mixed_precision true to force it)", getMethodName(), ctx->deviceName()));
@@ -702,14 +711,8 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
         // FP64 eigensolves 4 -> 1, SCF 6.7 -> 4.5 s, energy identical to 1e-12 Eh, gradient vs
         // CPU 2.6e-6 -> 7.0e-6 Eh/A (within the loose default scf_threshold). An explicit
         // -scf_fp32_threshold (or its alias fp32_threshold) wins. See docs/MULTI_GPU.md.
-        {
-            auto has = [&](const char* key) {
-                return config.contains(key)
-                    || (config.contains("xtb") && config["xtb"].is_object() && config["xtb"].contains(key));
-            };
-            if (!has("scf_fp32_threshold") && !has("fp32_threshold"))
-                xtb->setFp32Threshold(1.0e-5);
-        }
+        if (!cfg_has("scf_fp32_threshold") && !cfg_has("fp32_threshold"))
+            xtb->setFp32Threshold(1.0e-5);
         if (CurcumaLogger::get_verbosity() >= 2)
             CurcumaLogger::info(fmt::format(
                 "{}: GPU device-resident SCF backend active (Broyden; "

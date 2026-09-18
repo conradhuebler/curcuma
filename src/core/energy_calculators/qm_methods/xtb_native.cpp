@@ -729,7 +729,8 @@ double XTB::Calculation(bool gradient)
     double dq_fp32_last = -1.0;
     auto note_fp64_reality_check = [&](double dq_now) {
         if (m_eig_fp32 || fp32_exhausted || dq_fp32_last < 0.0) return;
-        if (dq_now > 10.0 * std::max(dq_fp32_last, 1.0e-12)) {
+        if (m_fp32_false_fixpoint <= 0.0) return;   // check disabled
+        if (dq_now > m_fp32_false_fixpoint * std::max(dq_fp32_last, 1.0e-12)) {
             fp32_exhausted = true;
             if (CurcumaLogger::get_verbosity() >= 1)
                 CurcumaLogger::warn_fmt("SCF: the FP32 phase converged to a false fixed point "
@@ -746,7 +747,7 @@ double XTB::Calculation(bool gradient)
             fp32_stall = 0;
             return;
         }
-        if (++fp32_stall >= 3) {
+        if (m_fp32_stall_patience > 0 && ++fp32_stall >= m_fp32_stall_patience) {
             fp32_exhausted = true;
             if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::info_fmt("SCF: FP32 phase stalled at max|dq| = {:.2e} "
@@ -828,17 +829,18 @@ double XTB::Calculation(bool gradient)
     // and is machine-dependent - polymer/nao 3222 on this 36-core box: 8 threads 27.1 s,
     // 16 threads 23.8 s, 24 threads 26.5 s, 36 threads 28.6 s. The D&C eigensolve is
     // memory-bandwidth-bound, so more threads than memory channels can still lose; that is now
-    // a `-threads` choice. CURCUMA_EIG_MAX_THREADS still caps it independently of -threads.
-    int eig_cap = 0;   // 0 = no cap, follow -threads
+    // a `-threads` choice. `-eigensolver_max_threads N` caps the eigensolve independently of
+    // -threads (CURCUMA_EIG_MAX_THREADS is the older spelling and still wins over the flag).
+    int eig_cap = m_eig_max_threads;   // 0 = no cap, follow -threads (-eigensolver_max_threads)
     if (const char* env = std::getenv("CURCUMA_EIG_MAX_THREADS")) {
         const int v = std::atoi(env);
-        if (v > 0) eig_cap = v;
+        if (v > 0) eig_cap = v;        // the environment variable still wins
     }
     const int eig_intra = effectiveIntraThreads(m_basis.nao);
     const int eig_threads = eig_cap > 0 ? std::min(eig_intra, eig_cap) : eig_intra;
     if (verb >= 3 && eig_threads > 1)
         CurcumaLogger::info_fmt("Eigensolve BLAS/LAPACK threads: {}{}", eig_threads,
-                                eig_cap > 0 ? " (CURCUMA_EIG_MAX_THREADS cap)" : " (from -threads)");
+                                eig_cap > 0 ? " (eigensolver_max_threads cap)" : " (from -threads)");
 
     // Device-resident SCF (Claude Generated, GPU port Stage 2). Enabled with the
     // default Broyden charge mixing and an available lower Cholesky factor L
@@ -941,8 +943,10 @@ double XTB::Calculation(bool gradient)
         // Claude Generated (Sep 2026): above ~1 GB of interaction matrices (nat > ~2700) the
         // device rebuilds the matrix elements per iteration instead of storing 18 nat^2 doubles
         // (7.7 GB at 7320 atoms, plus the same again as host upload copies).
-        // CURCUMA_GPU_MP_OTF=1/0 forces the choice (validation).
+        // `-gpu_multipole_otf on|off` forces the choice (CURCUMA_GPU_MP_OTF=1/0 still wins).
         bool otf = 18.0 * static_cast<double>(nn) * sizeof(double) > 1.0e9;
+        if (m_gpu_mp_otf == "on" || m_gpu_mp_otf == "true")  otf = true;
+        else if (m_gpu_mp_otf == "off" || m_gpu_mp_otf == "false") otf = false;
         if (const char* e = std::getenv("CURCUMA_GPU_MP_OTF")) otf = (e[0] == '1');
         if (otf && m_gpu_scf->supportsOnTheFlyMultipole()) {
             std::vector<double> xyzb(3 * static_cast<size_t>(nat));

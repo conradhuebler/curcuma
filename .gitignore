@@ -248,3 +248,6 @@ src/version.h
 
 # Multi-GPU benchmark scratch runs (outputs, binaries)
 scripts/gpu_bench/run/
+
+# scripts/tuning_sweep.py scratch directory (default workdir)
+tuning_sweep_run/

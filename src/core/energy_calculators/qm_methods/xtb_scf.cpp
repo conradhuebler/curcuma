@@ -204,7 +204,11 @@ int XTB::blasThreadsNow()
 void XTB::reduceToStandardForm(Eigen::MatrixXd& A, int n, int threads, bool& ok) const
 {
     ok = true;
-    if (threads >= 8) {
+    // -scf_reduce auto|sygst|trsm, -scf_reduce_threads N (Claude Generated, Sep 2026).
+    // 'auto' with the default threshold of 8 is what this function did before.
+    const bool use_trsm = (m_scf_reduce == "trsm")
+        || (m_scf_reduce != "sygst" && threads >= m_scf_reduce_threads);
+    if (use_trsm) {
         // A <- L^-1 A, then A <- A L^-T (BLAS dtrsm through Eigen's triangular solve).
         m_X.triangularView<Eigen::Lower>().solveInPlace(A);
         m_X.triangularView<Eigen::Lower>().transpose().template solveInPlace<Eigen::OnTheRight>(A);

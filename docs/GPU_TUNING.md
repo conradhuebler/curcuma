@@ -127,6 +127,7 @@ The profile's `eig FP32 / eig FP64 / density P` rows say how much of the run is 
 |---|---|---|
 | `-gpu_density_devices all\|0,1,2\|solver\|none` | **all visible devices** under the same condition as the eigensolve above, else off | Helper devices for the density (the calculation's own device is always one of the workers and is skipped in the list). `solver` reuses `-gpu_eigensolver_devices`, `none` switches it off. Needs the screened storage (`-gpu_sparse_integrals`, automatic for large systems). |
 | `-gpu_density_min_nao N` | 4000 | Below N basis functions the single-device kernel is used (polymer, nao 2975: the split is 10 % slower). |
+| `-gpu_multipole_otf auto\|on\|off` | auto | GFN2 multipole interaction matrices: stored, or rebuilt per iteration in the kernel. `auto` rebuilds above ~1 GB of matrices (~2700 atoms), which is what makes 7320 atoms fit a 20 GB card (18 nat^2 doubles = 7.7 GB, plus the same again as host upload copies). Costs ~50 ms/iteration at 1410 atoms, where storing is the better choice (measured: 9.13 s stored vs 9.87 s on the fly). Energies identical either way. Replaces `CURCUMA_GPU_MP_OTF`, which still works and wins over the flag. |
 
 - Measured, polymer_2x GFN2 on 4x RTX A4500 (identical with the defaults and with explicit `-gpu_eigensolver_devices all -gpu_density_devices solver`, both 194 s): density 3.35 -> **0.85 s per SCF step** (46.9 -> 10.2 s total), FP32 iteration 9.4 -> 6.9 s, wall **242 -> 194 s**, energy identical. Device 0 peak 13.5 -> 13.9 GB, helpers 5.0 -> 5.8 GB.
 - Too small to pay: polymer (1410 atoms, nao 2975) goes 50 -> 55 ms per step, i.e. the transfers cost more than the split saves. The split needs at least 16 columns per worker and falls back to the single device otherwise.
@@ -140,7 +141,7 @@ Environment variables:
 | Variable | Effect |
 |---|---|
 | `CURCUMA_GPU_PROFILE=1` | Stream-synchronised per-phase device timings (integrals, potential, Fock, reduce/syevd/back-transform per precision, density, charges, Broyden) plus the post-SCF host phases. Adds synchronisation cost; for diagnosis only. |
-| `CURCUMA_GPU_MP_OTF=0\|1` | Force the GFN2 multipole interaction matrices to be stored (0) or rebuilt per iteration on the device (1). Default: rebuilt above ~1 GB of matrices (~2700 atoms). On-the-fly costs ~50 ms/iteration at 1410 atoms. |
+| `CURCUMA_GPU_MP_OTF=0\|1` | The old form of `-gpu_multipole_otf`. Still honoured and still wins over the flag, for reproducing older runs. |
 
 Automatic large-system behaviour (no option; triggered above ~5000 basis functions on the CUDA device-resident path):
 - the host does not build the dense dipole/quadrupole integrals or the post-SCF host Fock matrix (host fallbacks build them on demand; disabled for `-d4_charge_source cpscf`);
@@ -170,7 +171,63 @@ Threading note: GFN-FF topology and parameter generation use OpenMP with the GFN
 
 Reference numbers, polymer_2x GFN-FF single point (7320 atoms, 1502 fragments), one A4500: 6.8 s (5.6 s with `gpu_disp_pairs_on_device`), 4.8 GB host. CPU with 36 threads: ~6 s.
 
-## 4. Build
+## 4. CPU knobs of the native GFN1/GFN2 SCF
+
+These apply with and without a GPU (the eigensolve and the reduction run on the host
+whenever the device-resident path is not active). Defaults are the measured optimum on the
+36-core development box; the optimum is machine-dependent, which is what section 5 is for.
+
+| Option | Default | Effect / when to change |
+|---|---|---|
+| `-threads N` | 1 | Intra-molecule threads, including the eigensolve. The dense divide-and-conquer eigensolve is memory-bandwidth-bound, so more threads than memory channels can lose: polymer (nao 3222) on 36 cores measured 8 threads 27.1 s, **16 threads 23.8 s**, 24 threads 26.5 s, 36 threads 28.6 s. |
+| `-eigensolver_max_threads N` | 0 (follow `-threads`) | Caps the eigensolve alone. Use it when the integrals and the gradient want all cores but the eigensolve peaks earlier. Replaces `CURCUMA_EIG_MAX_THREADS`, which still works and still wins. |
+| `-scf_reduce auto\|sygst\|trsm` | auto | Reduction of F to standard form with the cached Cholesky factor of S. `sygst` does half the flops but threads poorly, `trsm` does twice the flops as two BLAS3 solves and keeps scaling; `auto` takes `trsm` from `-scf_reduce_threads` up. Measured n=3222 on 36 cores (OpenMP OpenBLAS), dsygst vs 2x dtrsm: 620/900 ms at 1 thread, 195/192 at 8, 190/**123** at 16, 308/**156** at 36. The two agree to 8e-15 elementwise. |
+| `-scf_reduce_threads N` | 8 | Where `auto` switches. Measure with `sygst` vs `trsm` at your thread count before changing it. |
+| `-scf_mixed_precision true\|false` | true on CPU and on consumer GPUs, **false on full-rate-FP64 GPUs** (compute capability 6.0/7.0/8.0/9.x/10.x, e.g. H100/H200/Blackwell) | FP32 eigensolves far from convergence, FP64 near it. On an RTX A4500 turning it off costs a factor 1.9 (polymer, 9.2 -> 17.7 s); on an H200 it *is* the slower path (5.29 s vs 3.36 s per iteration) and can converge to a false fixed point. An explicit flag always wins over the device default. |
+| `-scf_fp32_threshold X` | 1e-3 (CPU), 1e-5 (GPU) | Where the FP32 phase ends. Smaller = longer in FP32 = faster and less safe. Must stay above `-scf_threshold`. |
+| `-scf_fp32_stall_patience N` | 3 | FP32 iterations without real progress (max\|dq\| not improving by 30 %) before the rest of the SCF runs in FP64. FP32 eigenvectors carry ~1e-7 noise, which puts a floor under dq on a large system; without the guard the SCF hovers there. 0 disables. |
+| `-scf_fp32_false_fixpoint_factor X` | 10 | If an FP64 iteration reports a residual more than X times what FP32 last claimed, FP32 converged to a false fixed point and the rest runs in FP64. Measured on an H200: FP32 claimed 7.1e-6 at an energy 1.1 kcal/mol off while the truth was 9.4e-3. 0 disables. |
+| `-eigensolver mkl\|native\|purify\|lobpcg` | mkl | `mkl` (LAPACK dsyevd) is the fastest on CPU; the others are the GPU-portable / research paths. |
+
+What is deliberately NOT a flag, and why:
+
+| Variable | Why it stays an environment variable |
+|---|---|
+| `CURCUMA_EIG_PROFILE`, `CURCUMA_GPU_PROFILE`, `CURCUMA_XTB_REDUCE_PROBE`, `CURCUMA_GPU_EIG_VERIFY_ALWAYS`, `CURCUMA_GPU_EIG_CORRUPT` | Diagnostics. They print or inject, they do not tune. |
+| `CURCUMA_EIG_TRED2=eigen\|blocked\|scalar` | Only reachable with `-eigensolver native`, itself an opt-in research path. All three are bit-identical; see [SQM_EIGENSOLVE_GPU.md](SQM_EIGENSOLVE_GPU.md). |
+| `CURCUMA_GPU_EIG_MG_REUSE=1` | Restores a known-wrong behaviour (cusolverMg returns bad eigenvectors on a reused descriptor) for testing. Making it a documented flag would advertise a setting nobody should use. |
+| `CURCUMA_GFNFF_GPU_RESIDENT_HBQ=1` | A deliberate deviation from the reference (live instead of frozen H-bond charges), i.e. a physics experiment, not a performance knob. |
+
+## 5. Measuring it on your own machine
+
+`scripts/tuning_sweep.py` scans these knobs on the hardware it runs on and prints a command
+line. Every value it tries is a CLI flag, so nothing has to be rebuilt:
+
+```bash
+python scripts/tuning_sweep.py test_cases/molecules/larger/polymer.xyz --method gfn2
+python scripts/tuning_sweep.py big.xyz --method gfn2 --gpu cuda --repeats 3 --json sweep.json
+python scripts/tuning_sweep.py big.xyz --gpu cuda --knobs gpu_eigensolver_devices,threads
+python scripts/tuning_sweep.py big.xyz --gpu cuda --dry-run     # what would be measured
+```
+
+`--dry-run` lists the settings and the number of runs without starting any (15 knobs / 92
+runs for gfn2 on a 4-GPU 36-core box), and after the baseline the script prints a rough
+total time, so an unattended cluster run can be sized before it is submitted.
+
+It runs a baseline, then each knob on its own, then the winners together (a combination can
+be slower than its parts, so that is measured rather than assumed), and it **checks every
+run's energy against the baseline** - a setting that moves the energy by more than
+`--energy-tol` kcal/mol is printed as SUSPECT and never recommended. `--json` keeps the full
+table including a hardware note, so a result from the cluster can be read here.
+
+Two things to know before trusting a sweep:
+- Run it the way the production job runs (same allocation, same `CUDA_VISIBLE_DEVICES`). The
+  multi-GPU knobs in particular only mean something for what the process actually sees.
+- The result is for that structure, method and mode. A knob that wins on a 7000-atom single
+  point can lose on a 200-atom optimisation - the multi-GPU paths for instance do nothing
+  below 4000 basis functions by design, and a sweep on a small molecule will say so.
+
+## 6. Build
 
 - Multi-GPU eigensolver (`CURCUMA_MULTI_GPU_EIGENSOLVER`, default ON): cusolverMg is found in the CUDA toolkit. cuSOLVERMp, cuBLASMp and NCCL are not part of the toolkit; pass their locations, e.g. from the pip wheels `nvidia-cusolvermp-cu13`, `nvidia-cublasmp-cu13`, `nvidia-nccl-cu13`:
   `cmake .. -DCUSOLVERMP_ROOT=<site-packages>/nvidia/cu13 -DCUBLASMP_ROOT=<site-packages>/nvidia/cublasmp/cu13 -DNCCL_ROOT=<nccl prefix>`

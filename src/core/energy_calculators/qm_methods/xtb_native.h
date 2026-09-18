@@ -873,6 +873,14 @@ public:
     void setMixedPrecision(bool b)      { m_scf_mixed_precision = b; }
     void setFp32Threshold(double t)     { if (t > 0.0) m_scf_fp32_threshold = t; }
     void setGpuPartialDiag(bool b)      { m_gpu_partial_diag = b; }
+    // Performance knobs, all with their measured defaults (see the PARAM help in
+    // native_xtb_method.h). Claude Generated (Sep 2026).
+    void setEigensolverMaxThreads(int n)    { m_eig_max_threads = std::max(0, n); }
+    void setScfReduce(const std::string& r) { m_scf_reduce = r; }
+    void setScfReduceThreads(int n)         { m_scf_reduce_threads = std::max(1, n); }
+    void setFp32StallPatience(int n)        { m_fp32_stall_patience = std::max(0, n); }
+    void setFp32FalseFixpointFactor(double f) { m_fp32_false_fixpoint = f; }
+    void setGpuMultipoleOtf(const std::string& m) { m_gpu_mp_otf = m; }
 
     // Warm-start: reuse converged charges from the previous geometry step.
     // Activated by MD/opt capabilities; also settable via -warm_start false.
@@ -1341,6 +1349,14 @@ private:
     bool        m_scf_mixed_precision = true;
     double      m_scf_fp32_threshold  = 1.0e-3;  // switch FP32→FP64 once max|dq| < this
     bool        m_gpu_partial_diag    = false;   // opt-in GPU partial diagonalisation (AP1; net-neutral, see PARAM)
+    // Tunables that were environment variables / hard-coded heuristics until Sep 2026.
+    // Defaults reproduce the previous behaviour exactly. Claude Generated.
+    int         m_eig_max_threads     = 0;       // 0 = follow -threads (CURCUMA_EIG_MAX_THREADS overrides)
+    std::string m_scf_reduce          = "auto";  // auto | sygst | trsm
+    int         m_scf_reduce_threads  = 8;       // 'auto' takes trsm from this thread count up
+    int         m_fp32_stall_patience = 3;       // FP32 iterations without progress before FP64 (0 = off)
+    double      m_fp32_false_fixpoint = 10.0;    // FP64/FP32 residual ratio that unmasks a false fixed point (0 = off)
+    std::string m_gpu_mp_otf          = "auto";  // GFN2 GPU multipole matrices: auto | on | off
     // Optional GPU eigensolver; default unset → CPU path unchanged. Claude Generated.
     ExternalEigensolver m_external_eigensolver;
     bool        m_eig_fp32 = false;              // per-iteration flag set by the SCF loop
@@ -1496,6 +1512,14 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_mixed_precision", [&](const json& v){ if (v.is_boolean()) xtb.setMixedPrecision(v.get<bool>()); });
     lookup("scf_fp32_threshold",  [&](const json& v){ if (v.is_number()) xtb.setFp32Threshold(v.get<double>()); });
     lookup("scf_gpu_partial_diag",[&](const json& v){ if (v.is_boolean()) xtb.setGpuPartialDiag(v.get<bool>()); });
+    // Performance knobs (Claude Generated, Sep 2026). Defaults are the measured ones;
+    // these exist so a machine can be tuned without a rebuild (scripts/tuning_sweep.py).
+    lookup("eigensolver_max_threads", [&](const json& v){ if (v.is_number()) xtb.setEigensolverMaxThreads(static_cast<int>(v.get<double>())); });
+    lookup("scf_reduce",              [&](const json& v){ if (v.is_string()) xtb.setScfReduce(v.get<std::string>()); });
+    lookup("scf_reduce_threads",      [&](const json& v){ if (v.is_number()) xtb.setScfReduceThreads(static_cast<int>(v.get<double>())); });
+    lookup("scf_fp32_stall_patience", [&](const json& v){ if (v.is_number()) xtb.setFp32StallPatience(static_cast<int>(v.get<double>())); });
+    lookup("scf_fp32_false_fixpoint_factor", [&](const json& v){ if (v.is_number()) xtb.setFp32FalseFixpointFactor(v.get<double>()); });
+    lookup("gpu_multipole_otf",       [&](const json& v){ if (v.is_string()) xtb.setGpuMultipoleOtf(v.get<std::string>()); });
     lookup("scf_extrapolation",      [&](const json& v){ if (v.is_string())          xtb.setScfExtrapolation(v.get<std::string>()); });
     lookup("scf_extrapolation_order",[&](const json& v){ if (v.is_number_integer())  xtb.setScfExtrapolationOrder(v.get<int>()); });
     lookup("scf_extrapolation_apply",[&](const json& v){ if (v.is_string())          xtb.setScfExtrapolationApply(v.get<std::string>()); });

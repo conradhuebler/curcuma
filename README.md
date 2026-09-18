@@ -54,6 +54,12 @@ system dependencies (one backend per build dir: `release_cuda/`, `release_rocm/`
   none` to disable; needs cuSOLVERMp, cuBLASMp and NCCL at build time, see
   [docs/GPU_TUNING.md](docs/GPU_TUNING.md)).
   See [docs/MULTI_GPU.md](docs/MULTI_GPU.md).
+- **Performance tuning** (Sep 2026, AI-generated, machine-tested): every performance knob
+  is a CLI flag - thread counts, the eigensolve reduction route, the mixed-precision
+  guards, the GPU multipole storage. `python scripts/tuning_sweep.py mol.xyz --method gfn2
+  [--gpu cuda]` measures them on the machine it runs on, verifies that no setting changes
+  the energy, and prints the fastest command line. Options and measured numbers:
+  [docs/GPU_TUNING.md](docs/GPU_TUNING.md).
 
 ## Validation Status Labels
 

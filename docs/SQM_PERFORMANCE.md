@@ -429,11 +429,13 @@ verdict depends entirely on the BLAS build.
 The eigensolve used to be capped at 8 threads regardless of `-threads`, because
 the FP32 reduction dominated and regressed past that. With the FP64 reduction the
 optimum moved, and it is machine-dependent, so the cap is gone and `-threads`
-decides (`CURCUMA_EIG_MAX_THREADS` still caps it independently if wanted).
+decides (`-eigensolver_max_threads N` caps it independently if wanted;
+`CURCUMA_EIG_MAX_THREADS` is the older spelling and still wins over the flag).
 polymer, gfn2, this 36-core box: `-threads 8` 28.8 s, **`-threads 16` 24.9 s**,
 `-threads 24` 27.0 s, `-threads 36` 30.2 s; complex/231 is unaffected (1.11 s,
 the size gate keeps it serial). The D&C eigensolve is memory-bandwidth-bound, so
-more threads than memory channels still lose - that is now a user choice.
+more threads than memory channels still lose - that is now a user choice, and
+`scripts/tuning_sweep.py` measures it per machine (docs/GPU_TUNING.md section 5).
 
 ## The three memory-bound O(nat^2)/O(nao^2) SCF loops (2026-09)
 
@@ -448,14 +450,17 @@ bound (the multipole ones touch 18 matrices, i.e. ~286 MB per call at nat = 1410
 | potential build (`addMultipolePotential`) | 172 ms/it | **55 ms/it** |
 | `energyMultipole` (inside "energy/mix") | 158 ms/it | **18 ms/it** |
 | populations (GFN2 multipole moments) | 214 ms/it | **77 ms/it** |
-| reduce (`dsygst` -> two `dtrsm` above 8 threads) | 231 ms/it | **169 ms/it** |
+| reduce (`dsygst` -> two `dtrsm` above 8 threads, `-scf_reduce`) | 231 ms/it | **169 ms/it** |
 | **wall** | 24.9 s | **21.0 s** |
 
 The potential build is threaded over the target atom with disjoint writes, so it
 stays bit-identical. The energy and the populations use per-thread partial sums
 added in a fixed thread order, which reassociates the outer sum: over polymer the
 energy stays identical to 12 decimals and the gradient moves by 1.5e-14, and the
-converged FP64 result was in fact unchanged (diff 0.0). Switching the reduction
+converged FP64 result was in fact unchanged (diff 0.0). The reduction route is
+`-scf_reduce auto|sygst|trsm` with the switch point at `-scf_reduce_threads`
+(default 8), so a machine with a different BLAS can be measured rather than
+guessed. Switching the reduction
 to triangular solves is a rounding-level change (3.9e-14 on the gradient).
 
 ## What is left on the CPU (polymer, gfn2, -threads 16, 21.0 s)
