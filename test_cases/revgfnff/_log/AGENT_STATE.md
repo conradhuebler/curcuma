@@ -55,6 +55,20 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 
 ## Live agents
 
+**RUNNING since 2026-09-20: `package-10` (Opus)** — operator decision: pull in (re-implement, not
+cherry-pick) the MD time-step unit fix found on `origin/feature/multi-gpu` (`ef462fcf`: `m_dT`
+needs the unit `sqrt(amu*A^2/Eh) = 1.9516144 fs`, not 1 fs; confirmed present in our tree, the
+`m_dt2 = m_dT*m_dT` pre-fix pattern is still there). Scope deliberately narrow: the core
+unit-conversion fix only, NOT the adaptive step-rejecting integrator or the rest of that branch's
+large-system/GPU work (not requested). Three parts: (A) implement + independently validate via a
+Hessian-cross-checked vibrational period, not by trusting the remote's numbers; (B) full `ctest`,
+mechanical recalibration where the fix just changes an old wrong-timescale expectation, STOP and
+report anything unclear; (C) re-derive every rev-gfnff dt number this week in TRUE physical fs —
+the package-7 resolution-failure table, the package-8 warning threshold/wording, whether the
+shipped `rev_dt_cap` default (0.25) now falls inside or outside the safe band, and the mg/mg2/mg3
+smoothness-tail comparison package 9 needs for the operator's still-open adopt-or-not decision.
+Status: `WORK_STATUS.md` package 10.
+
 **2026-09-20: `package-9` DONE — 3a(iii) step 2 and 3b BOTH delivered, both OPT-IN, no default
 flipped.** No agent running. Four local commits, nothing pushed. Binary `89a587bb` — note that
 `build_rev/curcuma` embeds `git describe`, so the md5 changes on every commit with no source
