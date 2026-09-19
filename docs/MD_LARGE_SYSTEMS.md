@@ -33,9 +33,58 @@ That attribution was wrong. This page is what the measurement says instead.
 > of it goes into kinetic energy, i.e. the atoms simply get faster while the structure holds.
 >
 > **It scales as dt².** NVE gains +191 Eh in 200 fs at dt = 1.0 and +67.6 Eh in 300 fs at
-> dt = 0.5, which is +45 Eh per 200 fs - a ratio of **4.24** against the expected 4. That is an
-> ordinary velocity-Verlet truncation error, and it means the step needed for a given drift is
-> fixed by the arithmetic: getting 300 fs below ~4 Eh on this system needs dt ~ 0.125 fs.
+> dt = 0.5, which is +45 Eh per 200 fs - a ratio of **4.24** against the expected 4.
+>
+> > **Correction (Sep 19, 2026, later the same night): that dt² ratio is real but the conclusion
+> > drawn from it - "ordinary velocity-Verlet truncation error" - was wrong.** Truncation error
+> > is a property of the whole system and grows with it; this is one molecule. Four measurements
+> > settle it, all NVE, dt = 0.5, 200 fs, seed 1, from the same GFN-FF-optimised geometry:
+> >
+> > | system | atoms | dE |
+> > |---|---:|---:|
+> > | water cut out of polymer_2x, alone | 4500 | **-0.176 Eh** |
+> > | the polymer alone, water removed | 2820 | **+0.021 Eh** |
+> > | both together | 7320 | **+45 Eh** |
+> > | pure water, 300 / 1200 / 2400 atoms | | +0.002 / +0.009 / +0.165 Eh |
+> >
+> > Each half conserves the energy, and 4500 atoms of water conserve it as well as 300 do - so it
+> > is neither the size nor a generic integration error. **It is a single water molecule
+> > collapsing.** In the frame where the run breaks, 12 of the 7320 atoms hold **99.0 %** of the
+> > kinetic energy, and the hottest two are the hydrogens of one water (indices 6522/6523/6524);
+> > in every healthy frame before it the hottest atom sits at a steady 15-23x the per-atom mean,
+> > at the event it reaches **3733x**. That molecule's H-O-H angle has gone from 103.4° to
+> > **3.6°** and its O-H bonds to 0.806/0.859 A; the molecule **alone** is then worth **+10.96 Eh**
+> > against -0.327 Eh in its normal geometry, which is the entire energy gain of the run.
+> >
+> > **The force field is not at fault.** A rigid H-O-H scan of a single water (3 atoms, GFN-FF)
+> > is smooth and monotonic across the whole range, including through the 1/sin(theta) point at
+> > 180° where the gradient stays at 0.087 Eh/A: -0.3275 Eh at 103.4°, -0.2847 at 180°, and
+> > going the other way +0.594 at 20°, +3.311 at 10°, +13.69 at 3.6° with the gradient rising
+> > 0.009 -> 6.6 -> 34.9 -> 261.8 Eh/A. That is correct H-H repulsion. Reaching 40° already costs
+> > **120 kcal/mol** and the observed geometry far more - 250 to 430 kT for a single molecule at
+> > the 245 K the run was actually at, i.e. thermally unreachable. So the collapse was driven by
+> > the integration, and once the angle is below ~30° every further step is unresolvable: at
+> > 34.9 Eh/A a 0.5 fs step displaces a hydrogen by 1.1 A.
+> >
+> > Two candidate explanations were tested and **eliminated**: `-cleanenergy true`, which rebuilds
+> > the energy calculator every step, makes it *worse* (+173.7 Eh against +53.2 on a 300-atom
+> > cluster), so it is not stale state between steps; and the frozen setup topology gives bit-
+> > identical forces to a freshly perceived one at the breaking geometry (max|g| 176.1013 Eh/A
+> > either way), so it is not a missing pair in a cutoff list. On a healthy 120-atom system the
+> > MD's own energy and a fresh single point on the written geometry agree to 6e-6 Eh.
+> >
+> > **And the dt² ratio itself does not survive a matched measurement.** Run the full 7320-atom
+> > system at dt = 0.5 for **200 fs** (NVE, seed 1) and it gives **+0.069 Eh, `<T>` = 225.6 K** -
+> > conserved. The "+45 Eh per 200 fs" above was not measured; it was the 300 fs number scaled by
+> > 200/300, which silently assumes the drift accumulates linearly. It does not: for 250 fs
+> > nothing happens, then one molecule collapses and the run gains 67 Eh in the last 50. So the
+> > ratio 4.24 compared a real 200 fs run at dt = 1.0 against a scaled number dominated by a
+> > single event, and it means nothing. **Never scale a drift to a different window without
+> > checking that it is linear in time.**
+> >
+> > What this changes practically: the step needed is set by the *worst* local event, not by an
+> > arithmetic that applies everywhere, so lowering dt globally is the wrong lever. The right one
+> > is to reject the individual step - see the local criterion in the next section.
 
 ```bash
 # what we verified, from the GFN-FF-optimised structure
@@ -257,10 +306,17 @@ healthy step to the median is 3.4 for the 120-atom cluster but only 1.7 for the 
 polymer, so the same factor is far more generous on the large system - at factor 1.5 the polymer
 rejects exactly one step out of 120.
 
-### The size limit, and why polymer_2x is NOT rescued
+### The size limit of the GLOBAL criterion (superseded by the local one below)
 
-**This is the important caveat, and it is the system this whole page is about.** On
-`polymer_2x` itself, 7320 atoms, the feature does not help - it makes the run **worse**:
+> **Superseded (Sep 19, 2026).** Everything in this section is still the correct description of
+> the **global energy** criterion and of why it fails at 7320 atoms - keep it, it is the
+> measurement the local channel was designed from. What is no longer true is the conclusion:
+> the local criterion of the following section does rescue polymer_2x
+> (+67.59 -> +0.53 Eh, 2175 -> 246 K), and 92 of its 104 rejections are ones the global
+> criterion accepted.
+
+On `polymer_2x` itself, 7320 atoms, the **global** criterion does not help - it makes the run
+**worse**:
 
 | t | `-dt 1.0` without | `-dt 1.0` with `-adaptive_step` (factor 5) |
 |---|---:|---:|
@@ -292,14 +348,62 @@ fluctuation of 0.5 to 3 Eh. The contrast is ~600 at 300 atoms and ~1 at 7320.
 
 **So the rule is**: a global energy criterion discriminates while the system is small enough
 that one bad bond dominates the total energy error - measured here up to ~1400 atoms. Beyond
-that it needs to be **local** (per atom, per bond, or per fragment), which is not implemented.
-For polymer_2x this leaves **no demonstrated recipe**: `-dt 0.5` holds the setpoint for 100 fs
-and reaches `<T>` = 717 K by 300 fs (see the correction at the top of this page), and the other
-two rows of that table were never measured past 100 fs.
+that it needs to be **local** (per atom, per bond, or per fragment).
+
+### The local criterion (`-adaptive_step_local`, on by default, Sep 19, 2026)
+
+That local channel now exists. The observable is the plainest one available: the kinetic energy
+of the **hottest atom divided by the per-atom mean**. It needs no decomposition of the potential,
+it is dimensionless, and it is almost size-independent, because the maximum of N samples of a
+chi-squared distribution grows only logarithmically in N. It is calibrated by its own running
+median over accepted steps, exactly as the energy drift is, so no absolute number is baked in.
+
+Why it separates where the total energy does not - both observables measured over the same 60
+healthy steps of polymer_2x, 7320 atoms, dt = 0.5:
+
+| observable | median | healthy maximum | max / median | default factor | threshold sits at |
+|---|---:|---:|---:|---|---|
+| total energy drift | 48.96 kcal/mol | 190.45 kcal/mol | **3.89** | 5 | 245, i.e. **1.29x** the healthy maximum |
+| hottest atom / mean | 9.70 | 12.19 | **1.26** | 10 | 97, i.e. **8x** the healthy maximum |
+
+The global threshold sits at the edge of the legitimate distribution - that is the failure
+documented just above, in one number. The local one has room to spare in both directions, and
+the event it has to catch is not marginally above the healthy range but three orders of
+magnitude above it: in the frame where the run breaks, the hottest atom reaches **3733x** the
+per-atom mean against a steady 15-23x in every frame before it (measured on a 25 fs frame
+proxy, so the per-step contrast is larger still).
+
+It is a pure addition: it can only reject a step that the global criterion accepted, never
+accept one it rejected. On the deterministic single-water regression case the trajectories with
+and without it are **bit-identical to twelve decimals** (dE = -0.007933244988 Eh,
+`<T>` = 641.099708218 K either way), and on a 300-atom cluster, where the global criterion
+already works, the local one fires **zero** times - it does not misfire on healthy systems.
+
+**What it does on the system this page is about.** polymer_2x, 7320 atoms, 300 fs NVE at
+dt = 0.5, same seed, same thread count:
+
+| | dE | `<T>` | rejections |
+|---|---:|---:|---|
+| without | **+67.59 Eh** | **2175.1 K** | - |
+| `-adaptive_step true` | **+0.53 Eh** | **246.2 K** | 104 of 600 steps, **92 of them caught by the local channel alone** |
+
+Those 92 are the measurement that matters: the global energy criterion would have accepted
+them. It is also visible in the trajectory - the hottest-atom ratio runs at a flat 15-23 through
+frame 12 in both runs (the accepted steps are the same ones), and in the frame where the plain
+run reaches 3733 with 12 atoms holding 99.0 % of the kinetic energy, the rejecting run reaches
+911 with those atoms holding 24.2 %. So the event is **damped, not eliminated**, which is what
+the residual +0.53 Eh is. The run costs about 1.9x the wall time of the plain one.
+
+`-adaptive_step_hot_factor` (default 10) sets the multiple of the running median.
+`-adaptive_step_local false` restores the previous behaviour exactly.
 
 ### What it does not do
 
-- It does not scale to arbitrary system size - see the section above.
+- The **global** channel does not scale to arbitrary system size - see the section above. The
+  local one was measured to 7320 atoms and nowhere beyond; the observable is only weakly
+  size-dependent by construction, but that is an argument, not a measurement.
+- It damps a violating event, it does not undo one. On polymer_2x the rejecting run still shows
+  the event at 911x the per-atom mean instead of 3733x, and keeps +0.53 Eh of the +67.59.
 - It cannot rescue a step that is already unphysical in the potential, only one that is
   unphysical in the integration. A geometry with two atoms 0.42 A apart is wrong either way.
 - It costs one extra force evaluation per subdivided step times the number of substeps
