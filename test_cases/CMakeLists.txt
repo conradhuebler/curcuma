@@ -519,4 +519,17 @@ if(Python3_Interpreter_FOUND)
                      $<TARGET_FILE:curcuma>)
     set_tests_properties(md_adaptive_step
         PROPERTIES TIMEOUT 300 LABELS "md;integrator;gfnff")
+
+    # Claude Generated (Sep 2026): the MD clock. SimpleMD integrates in Angstrom/amu/Hartree,
+    # whose time unit is 1.9516 fs, so a step given in femtoseconds has to be converted before
+    # it multiplies a velocity. Until Sep 2026 it was not, and every MD ran 1.9516x too fast
+    # while energies, forces, temperature and energy conservation all stayed correct - which is
+    # why nothing noticed. This test ties the reported time to a vibrational period taken from
+    # the (independently validated) Hessian path. See docs/MD_LARGE_SYSTEMS.md.
+    add_test(NAME md_time_axis
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/check_md_time_axis.py
+                     $<TARGET_FILE:curcuma>)
+    set_tests_properties(md_time_axis
+        PROPERTIES TIMEOUT 300 LABELS "md;integrator;gfnff;units")
 endif()

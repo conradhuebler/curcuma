@@ -530,7 +530,7 @@ private:
     int m_respa = 1;
     int m_rattle_dynamic_tol_iter = 100;
     double m_pos_conv = 0, m_scale_velo = 1.0, m_coupling = 10;
-    double m_impuls = 0, m_impuls_scaling = 0.75, m_dt2 = 0;
+    double m_impuls = 0, m_impuls_scaling = 0.75;
     double m_rattle_tol_12 = 1e-4, m_rattle_tol_13 = 1e-3;
     double m_wall_spheric_radius = 6, m_wall_temp = 298.15, m_wall_beta = 6;
     double m_wall_x_min = 0, m_wall_x_max = 0, m_wall_y_min = 0, m_wall_y_max = 0, m_wall_z_min = 0, m_wall_z_max = 0;
