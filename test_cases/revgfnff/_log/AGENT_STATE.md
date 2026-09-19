@@ -56,8 +56,13 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 ## Live agents
 
 **2026-09-20: `package-8` DONE — package 7's option (ii) shipped as a WARNING, no default changed.**
-No agent running. One local commit, nothing pushed. Detail `WORK_STATUS.md` 8.1-8.5
+No agent running. One local commit `84c540d5`, nothing pushed. Detail `WORK_STATUS.md` 8.1-8.5
 (`Packages done: 8/8`), `docs/REV_GFNFF_STAGE3A.md` new section 2.2 "Recommended MD settings".
+**Orchestrator-independently verified** (own rebuild, md5 `4c323b80`): the `rev_dt_cap` PARAM
+(default 0.25, `simplemd.h:779`) pre-dates this work and does clamp `-method revgfnff`'s time
+step, confirming the "effective default is 0.25 fs" claim; a plain no-flag react run prints the
+warning exactly once with the reported text; `ctest -R "gfnff|sqm_val|react|cli_simplemd_|
+cli_gfnff_"` reconfirmed **113/113**.
 
 - **Operator decision (2026-09-20)**: adopt `-md.time_step <= 0.125 fs` for react-mode MD with the
   conserving share as an **operating recommendation** — warn at run start and document it — and do
