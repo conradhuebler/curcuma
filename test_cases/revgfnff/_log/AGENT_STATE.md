@@ -29,6 +29,8 @@ Commits since 2026-09-13 (newest last):
 | `0bd3c80a` | **Cherry-picked** the batch topology-reuse fix (`76e7f83a` from `fix/topo-cache-reuse`) |
 | `95d879a2` | Fable consultation recorded (its .md files were only added in `a474be89`) + full-ctest verification |
 | `a474be89` | **QP gate not cleared** + `rev_bo13_ordinary_join` (default off) + `shareD` dump; **3331 kJ event re-attributed to the proxy**, FABLE_BOND_STATE/PROXY_STATUS corrected |
+| `1b7e5ff0` | **MD time-step unit fix (general curcuma)**: `-md.time_step 1.0` integrated 1.9516 fs; new `MD_TIME_UNIT_FS`, ctest `md_time_axis` |
+| `cd8c64d9` | **rev-gfnff re-derived in true fs**: warning threshold 0.125 -> 0.0625, `rev_dt_cap` help, mg/mg2/mg3 ordering falsified, `cli_simplemd_20` flagged |
 
 **FULL `ctest` at HEAD (2026-09-14 night, release/ rebuilt after the cherry-pick): 14 failures out
 of the whole suite, none caused by the cherry-pick — orchestrator-verified each one.**
@@ -55,19 +57,63 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 
 ## Live agents
 
-**RUNNING since 2026-09-20: `package-10` (Opus)** — operator decision: pull in (re-implement, not
-cherry-pick) the MD time-step unit fix found on `origin/feature/multi-gpu` (`ef462fcf`: `m_dT`
-needs the unit `sqrt(amu*A^2/Eh) = 1.9516144 fs`, not 1 fs; confirmed present in our tree, the
-`m_dt2 = m_dT*m_dT` pre-fix pattern is still there). Scope deliberately narrow: the core
-unit-conversion fix only, NOT the adaptive step-rejecting integrator or the rest of that branch's
-large-system/GPU work (not requested). Three parts: (A) implement + independently validate via a
-Hessian-cross-checked vibrational period, not by trusting the remote's numbers; (B) full `ctest`,
-mechanical recalibration where the fix just changes an old wrong-timescale expectation, STOP and
-report anything unclear; (C) re-derive every rev-gfnff dt number this week in TRUE physical fs —
-the package-7 resolution-failure table, the package-8 warning threshold/wording, whether the
-shipped `rev_dt_cap` default (0.25) now falls inside or outside the safe band, and the mg/mg2/mg3
-smoothness-tail comparison package 9 needs for the operator's still-open adopt-or-not decision.
-Status: `WORK_STATUS.md` package 10.
+**2026-09-20: `package-10` DONE — a general curcuma bug fixed (the MD clock), and every rev-gfnff
+"fs" re-derived.** No agent running. Two local commits, nothing pushed. Detail `WORK_STATUS.md`
+package 10 (`Packages done: 10/10`).
+
+- **The core fix (general curcuma, not rev-gfnff)**: `SimpleMD` integrates in Angstrom/amu/Hartree,
+  whose implied time unit is `sqrt(amu*A^2/Eh) = 1.9516144204 fs` (derived three ways from
+  curcuma's own CODATA-2018 constants; new `CurcumaUnit::Constants::MD_TIME_UNIT_FS`). The user's
+  step was handed over unconverted, so **every curcuma MD ran 1.9516144x faster than requested**
+  and `-MaxTime` was stretched by the same factor — every method, every caller (ConfSearch's
+  exploration MD and polymerbuild included). Re-implemented here rather than cherry-picked, because
+  `ef462fcf`'s diff also touches an adaptive integrator this branch does not have. Converted only
+  in `Verlet()` / `Rattle()` / `NoseHover()`; everything that counts or schedules time stays in fs.
+- **Evidence**: water local-mode period against the Hessian (a path validated to 0.13 % vs xtb
+  6.7.1) — gfnff / gfn2 / gfn1 ratios **1.9536 / 1.9520 / 1.9511** before, **-0.09 / -0.01 /
+  +0.02 %** after. The scheme is untouched, proven exactly: pre-fix `-dt 0.25` and post-fix
+  `-dt 0.4879036051` give **bit-identical** trajectories (202 frames, max |dx| = 0.000e+00).
+  Static paths byte-identical (9/9 `-dump_gradient` files, 12-digit energies, `diff -r` clean).
+  NVE still scales dt^2 (CH4 rms ratios 4.01 gfnff / 4.17 gfn2). New ctest **`md_time_axis`**,
+  verified to fail on the pre-fix binary.
+- **`ctest` blast radius: exactly ONE new failure.** Full suite 12/304 both before and after —
+  before = 11 pre-existing + `md_time_axis` (failing by design), after = the same 11 +
+  **`cli_simplemd_20_gfnff_rev_h_budget`**. `cli_simplemd_16/18/19` pass unchanged (their slope /
+  mean / count criteria turned out to be time-scale robust).
+- **Test 20 is FLAGGED, not recalibrated — operator decision.** Its negative control
+  (`-gfnff.rev_budget_fix_h false`) went 2593.60 kJ / 0.559 a0 -> 32.68 / 2.120 and no longer
+  violates. Not the fix's fault: restoring the OLD physical regime on the FIXED binary (every
+  dt-derived setting x 1.9516144204) reproduces all three arms **exactly** (59.26 / 2593.60 /
+  70.77 kJ, 1.770 / 0.559 / 1.536 a0). And there is no dt to recalibrate to — with the discrete
+  dynamics held fixed, the violation appears only at 0.4879 and 0.60 fs while 0.45, 0.50 and 0.55
+  stay inside, so it is one chaotic trajectory, not a threshold in dt (`-md.seed` is inert on this
+  path, 8 seeds bit-identical). The falsifier for `rev_budget_fix_h` now exists only ABOVE the
+  shipped 0.25 fs cap; it needs a new cell/temperature or a re-scoped assertion. A dated header
+  block in `run_test.sh` records all of this; no threshold or flag was touched.
+- **True-fs re-characterization** (130 cells, 9.758 ps each = package 7's actual physical exposure;
+  the protocol was anchored first by reproducing package 7's shipped-default row exactly — 9708
+  rebuilds, median 49.4, p90 214.2, max 800.1, 27 cells >100 kJ, T_max 28392): per-step |dEpot|
+  median / cells above 100 kJ/mol = 97.8/64 at true 1.0 fs, 51.8/25 at 0.5, **27.5/11 at 0.25**,
+  13.1/10 at 0.125, **6.3/0 at 0.0625**. Warning threshold `rev_react_dt_advice` **0.125 ->
+  0.0625** — the first true step at which NO cell exceeds 100 kJ/mol, which also happens to equal
+  the old value rescaled (0.125/1.9516 = 0.0640). Warning text rewritten with the table and an
+  explicit "these are real femtoseconds" note; gate re-verified (fires at 0.25 and 0.125, silent at
+  0.0625 and 0.05, silent for `delivered` and for plain `gfnff`).
+- **`rev_dt_cap` 0.25 now means a genuine 0.25 fs** (it used to integrate 0.488). That alone halved
+  every robust tail statistic for free — median 51.8 -> 27.5, cells >100 kJ 25 -> 11, T_max 18928
+  -> 11948 K — but 0.25 fs is still **outside** the band where the whole sample is bounded, so the
+  warning still fires for a plain react run. **Default NOT changed; operator decides.**
+- **mg/mg2/mg3: package 9's ordering does NOT survive the corrected clock.** Rebuild `dE_jump`
+  events >= 50 kJ per 1000 rebuilds: old clock mg 1.65 < mg2 2.87 < mg3 **5.78**; true 0.25 fs
+  **mg 0.62 < mg3 1.36 < mg2 1.78**; true 0.0625 fs mg2 0.08 < mg3 0.22 < mg 0.35, with **zero**
+  cells above 100 kJ/mol per step for all three. At true 0.25 fs `mg3` is the BEST of the three on
+  the per-step statistics (max 316.5 vs 483.0 / 447.8 kJ, 9 cells >100 vs 11 / 14). **The "mg3 has
+  a clearly worse tail" argument is an artefact of the old clock and should not weigh against mg3**
+  in the pending adoption decision; the conformer/S66 guard (1.0543/1.0547) and the 0.0212 A
+  equilibrium shift are time-step independent and stand unchanged.
+- **Not done**: no default value changed; nothing else imported from `origin/feature/multi-gpu`
+  (no adaptive integrator, no GPU eigensolver, no `MD_LARGE_SYSTEMS.md`); `test_cases/revgfnff/_log/*.md`
+  other than `WORK_STATUS`/`AGENT_STATE` still quote the OLD time scale.
 
 **2026-09-20: `package-9` DONE — 3a(iii) step 2 and 3b BOTH delivered, both OPT-IN, no default
 flipped.** No agent running. Four local commits, nothing pushed. Binary `89a587bb` — note that
