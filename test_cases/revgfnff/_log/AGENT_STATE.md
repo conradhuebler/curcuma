@@ -55,6 +55,15 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 
 ## Live agents
 
+**RUNNING since 2026-09-20: `package-9` (Opus)** — 3a(iii) step 2 (free curvature + r0 re-solve,
+instead of pinning to the Gaussian's `k_b`/`alpha`/`r0`) then 3b (bond-order-resolved well table,
+keyed continuously to avoid a new hidden-switch smoothness bug) on top of it. **Guardrail: lands
+as a new opt-in `rev_well_form` path, does NOT alter what `mg`/`erfmorse`/`gauss` compute today**
+and does NOT flip any default — the operator decides after seeing the numbers, same as every
+other package this week. Smoothness re-verification must use the wider (~130-cell) sample from
+package 7, not just the 20-cell grid, which package 7 showed under-samples the real tail. Status:
+`WORK_STATUS.md` packages 9a/9b.
+
 **2026-09-20: `package-8` DONE — package 7's option (ii) shipped as a WARNING, no default changed.**
 No agent running. One local commit `84c540d5`, nothing pushed. Detail `WORK_STATUS.md` 8.1-8.5
 (`Packages done: 8/8`), `docs/REV_GFNFF_STAGE3A.md` new section 2.2 "Recommended MD settings".
