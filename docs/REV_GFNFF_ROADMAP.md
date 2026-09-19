@@ -281,14 +281,31 @@ Details, every measured number and the "what was not tested" list: **[REV_GFNFF_
 | 3a (iii) step 2, free curvature + r0 re-solve | not started | — |
 | 3b bond-order-resolved well table | not started — the reason the class-A median is 19.5 and not 2.1 | — |
 
-**One interaction, measured 2026-09-19 and not root-caused**: the two flips are better than the
-old default on the 20-cell grid's event COUNT (487 -> 271 steps >= 50 kJ/mol) and worse on its
-TAIL (per-step max 391 -> 800 kJ/mol, rebuild dE_jump max 48.6 -> 190.9 with 5 events >= 50 where
-both single flips had 0, T_max 8306 -> 28392 K). Each flip alone is better than both together
-(gauss+conserving 216.6 / 72 / 21.3; mg+delivered 396.9 / 458 / 49.7). Hard swaps stay 0 of 583,
-so it is smooth-window overrun, not a discrete event, and the hot cells recover under the
-thermostat. `-gfnff.rev_well_form gauss` or `-gfnff.rev_share_form delivered` each recover their
-own profile.
+**Superseded 2026-09-19 night**: the paragraph below described this as an unattributed
+"interaction" between the two flips. It was a 20-cell sampling artefact. Over 130 cells
+`gauss+conserving` ALONE reaches 1071.3 kJ/mol and T_max 46601 K on `c2h6/T2000_f7`, a cell
+outside the 20-cell grid and worse than the shipped default's 800.1/28392 — the tail belongs to
+`conserving`, `mg` only changes how often the configuration is visited (27 vs 16 of 130 cells
+above 100 kJ/step). Mechanism: a transient geminal H2 gets a quarter of its well under
+`conserving` where the delivered rule gives exactly 0, so a normally-forbidden configuration
+becomes cheap. The jump itself is a RESOLUTION failure, not a discontinuity: the transition
+window is fixed in bond order, hence only ~2 MD steps wide in distance for a hot H-H pair at
+2000 K; halving `dt` collapses it (800.1 -> 38.7 kJ/mol, T_max 28392 -> 5579 K on the worst 20-cell
+example). No source defect found — this is a design tension between the conserving share and a
+fixed-width transition window, characterized in full in `REV_GFNFF_STAGE3A.md` section 2.1, with
+five costed options none of which is built. **Shipped mitigation (2026-09-20, zero cost, no
+default changed)**: `SimpleMD` warns once at run start when react-mode MD uses
+`rev_share_form conserving` with `-md.time_step > 0.125` fs — see STAGE3A.md section 2.2. The
+structural fix (the transition window in distance, not bond order) stays deferred until a real
+run needs a larger time step and hits the warning.
+
+Original (2026-09-19, kept for the numbers): the two flips looked better than the old default on
+the 20-cell grid's event COUNT (487 -> 271 steps >= 50 kJ/mol) and worse on its TAIL (per-step max
+391 -> 800 kJ/mol, rebuild dE_jump max 48.6 -> 190.9 with 5 events >= 50 where both single flips
+had 0, T_max 8306 -> 28392 K). Each flip alone LOOKED better than both together
+(gauss+conserving 216.6 / 72 / 21.3 on the 20-cell grid; mg+delivered 396.9 / 458 / 49.7) — this
+comparison is what the 130-cell measurement above shows to be incomplete, not wrong on the cells
+it covered. Hard swaps stay 0 of 583 in every arm.
 
 ### The smoothness falsifier — two numbers per arm, always with the rebuild count and T_max
 
