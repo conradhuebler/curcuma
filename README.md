@@ -753,6 +753,16 @@ curcuma -md input.xyz -method gfnff -temperature 300 -temp_ramp true -temp_sched
 ```
 See [docs/TEMPERATURE_RAMP.md](docs/TEMPERATURE_RAMP.md) for the schedule grammar (`steps`/`reach`), the `temp_regions` JSON array, live temperature control, and per-thermostat support.
 
+On a large solvated system the default 1 fs step can be too long for a momentarily compressed X-H
+bond, and a single such step heats the whole trajectory. Instead of lowering `-dt` or raising the
+hydrogen mass for the whole run, the integrator can redo just that step with a subdivided one:
+```sh
+curcuma -md input.xyz -method gfnff -dt 1.0 -adaptive_step true
+```
+It is off by default and adds no constraint and no mass modification. See
+[docs/MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md) for the mechanism, the calibration and what it
+does not do.
+
 With
 ```sh
 curcuma -md input.xyz -mtd

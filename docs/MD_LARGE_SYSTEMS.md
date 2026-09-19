@@ -128,15 +128,121 @@ water as such (1 and 40 waters conserve energy at dt = 1 fs), stale internal MD 
 topology reproduces the fresh single point to the last digit at the collapsed geometry), and a
 CPU/GPU difference (that was the Eh/Bohr unit bug, fixed earlier).
 
-**The guard that was added.** The diverging EEQ charges are a known pathology of
+**A guard that was tried and REJECTED.** The diverging EEQ charges are a known pathology of
 electronegativity equalisation at short range - the off-diagonal erf(gamma*r)/r rises towards
 the diagonal hardness and the 2x2 block becomes near-singular. The reference has the same
 property; xtb never meets it because its MD defaults are `hmass=4` and `shake=2` (all bonds),
-with a 4 fs step. curcuma now rejects an EEQ solution with |q| above 4 e + |molecular charge|
-and falls back to the topology charges for that evaluation, the same rule the xTB SCF has used
-since Known Issue #9. It cuts the damage by a factor of 5 (100 waters at dt = 1 fs: 20953 K /
-+29.7 Eh -> 4036 K / +5.5 Eh) but it is a safety net, not a cure: the step that put two atoms
-0.42 A apart was already unphysical.
+with a 4 fs step. Rejecting an EEQ solution with |q| above 4 e + |molecular charge| and falling
+back to the topology charges (the rule the xTB SCF uses since Known Issue #9) does cut the
+damage by a factor of 5 (100 waters at dt = 1 fs: 20953 K / +29.7 Eh -> 4036 K / +5.5 Eh) -
+**but it is not in the code, because it breaks the reference sets**: GMTKN55 gfnff went to
+MAD 0.198 / max 166 kcal/mol, and the worst case, `IL16/229`, legitimately carries 4.63 e. The
+4 e bound is safe for an SCF and is not safe for EEQ topology charges. The patch was reverted
+and GMTKN55 verified back to zero differences. It would also have been a safety net rather than
+a cure: the step that put two atoms 0.42 A apart was already unphysical.
+
+## The fix: a step-rejecting integrator (`-adaptive_step`, Sep 19, 2026)
+
+Everything above says the same thing: **single steps** violate the integrator's accuracy limit,
+and one such step is enough to ruin a trajectory. Lowering `dt` globally or raising the hydrogen
+mass both work, but they pay for a handful of bad steps with every step of the run, and the mass
+trick changes the dynamics by construction.
+
+Step rejection is the ordinary numerical answer and neither a constraint nor a mass change:
+measure the quantity the step is supposed to conserve, and if the step violated it, throw the
+step away and redo it with a subdivided time step. The physics is untouched - a smaller step is
+still velocity-Verlet on the same potential - and the cost is paid only where it is needed.
+
+```bash
+curcuma -md polymer_2x_gfnff_opt.xyz -method gfnff -threads 36 -T 300 \
+        -dt 1.0 -thermostat csvr -adaptive_step true
+```
+
+**It is off by default** and an explicit `false` is bit-identical to a binary that never had the
+feature (`md_adaptive_step` checks exactly that).
+
+### What is measured, and against what
+
+The conserved quantity is `E_pot + E_kin`, with the kinetic energy taken **before** the
+thermostat touched the velocities - the thermostat legitimately changes `E_kin` and must not
+count as a violation. When a thermostat is active its work over the step is measured and
+subtracted, so the criterion is exact for every thermostat, not only CSVR.
+
+### Why the threshold is not a fixed energy
+
+The energy error of velocity-Verlet is not a drift but a bounded oscillation whose amplitude is
+the sum over all modes, so it grows with the system. Median per-step `|dE|` at 300 K, dt = 1 fs:
+
+All numbers below are over the **first 40 steps** of the same run, so median and maximum come from
+the same window; the last two columns are the worst step of the whole 150-step run.
+
+| system | atoms | median | p90 | max | max/median | worst step | /median |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 water | 3 | 0.35 | 0.52 | 0.58 | **1.7** | 0.6 | 1.7 |
+| 40 waters | 120 | 6.27 | 13.7 | 21.4 | **3.4** | 21.4 | 3.4 |
+| 100 waters | 300 | 17.2 | 33.3 | 56.6 | **3.3** | 32943.6 | **1919** |
+| 200 waters | 600 | 33.5 | 62.7 | 105.3 | **3.2** | 71411.6 | **2134** |
+| polymer | 1410 | 195.1 | 255.7 | 326.8 | **1.7** | 326.7 | 1.7 |
+
+(kcal/mol. Measured with `CURCUMA_ADAPTIVE_DEBUG=1`, which prints the drift of every step.) A
+fixed number would reject every step of the polymer or no step of the water. What **is**
+system-independent is the spread *within* a run: the largest healthy step is 1.7 to 3.4 times the
+median across all five systems, while the step that destroys a trajectory is **1919x** resp.
+**2134x** it. Almost three orders of magnitude separate the two, and the two systems that survive
+the 150 steps never produce anything above their own healthy maximum.
+
+The threshold is therefore `adaptive_step_factor` (default 10) times the **running median of the
+steps accepted so far**, capped at `adaptive_step_tol` (default 1.0) times the thermal energy
+`N_dof*kB*T/2`. The cap also covers the warm-up, before enough steps exist to form a median; the
+healthy maximum measured over all five systems is 0.65 of it, the destructive steps 124 and 134.
+
+**Only a step accepted on the first attempt calibrates the median.** A subdivided step has a
+smaller drift than the one it replaced but still a larger one than an ordinary step, so feeding
+those back lets a degenerating trajectory raise its own threshold. That was measured, not
+argued: on the 100-water cluster the unanchored version left +1.50 Eh with 89 rejections, the
+anchored one -0.01 Eh with 8.
+
+### What it does
+
+200 fs of NVE at `dt = 1.0` from the same structure and the same seed, so a row with zero
+rejections must reproduce the `off` column exactly - and does. `dE` in Eh, `<T>` in K, the
+number in brackets is how many of the 200 steps (120 for the polymer) were redone subdivided.
+
+| system | atoms | off | factor 1.5 | factor 2 | factor 3 | **factor 5** | factor 10 | factor 20 |
+|---|---:|---|---|---|---|---|---|---|
+| 1 water | 3 | -0.0005 | - | - | - | **-0.0005 (0)** | -0.0005 (0) | -0.0005 (0) |
+| 40 waters | 120 | -0.0163 | -0.0166 (74) | -0.0127 (44) | -0.0080 (28) | **-0.0163 (0)** | -0.0163 (0) | -0.0163 (0) |
+| polymer | 1410 | +0.0999 | -0.0708 (1) | +0.0999 (0) | +0.0999 (0) | **+0.0999 (0)** | +0.0999 (0) | +0.0999 (0) |
+| 100 waters | 300 | **+53.26** / 37303 | +0.051 (143) | +0.222 (129) | +0.507 (105) | **+1.104 (107)** | +2.808 (77) | +3.035 (73) |
+| 200 waters | 600 | **+81.37** / 28710 | +0.043 (145) | +0.087 (80) | +0.243 (73) | **+0.456 (75)** | +0.952 (20) | +3.578 (53) |
+
+Read the table as two halves. The upper three systems are healthy at 1 fs: at the default
+factor the feature rejects **nothing** there and the trajectory is bit-identical to a run
+without it - which is the point, since a rejection on a healthy system is pure cost (40 waters
+at factor 1.5 pays 74 rejections for a `dE` that gets *worse*, -0.0166 against -0.0163). The
+lower two destroy themselves without it and are brought back to the setpoint with it.
+
+**Why the default is 5**: it is the smallest factor that rejects nothing on any healthy system
+measured, while still cutting the two blown-up runs by a factor of 50 to 180. Tightening it to
+**2** buys another factor of 5 on a system that still gains energy (100 waters +1.10 -> +0.22 Eh)
+and costs 22 % of the steps of a healthy 120-atom system. Loosening it is not useful: 10 and 20
+reject *fewer* steps but conserve *worse*, because the steps they let through accumulate.
+
+The false positives are a small-system effect, not a general one: the ratio of the largest
+healthy step to the median is 3.4 for the 120-atom cluster but only 1.7 for the 1410-atom
+polymer, so the same factor is far more generous on the large system - at factor 1.5 the polymer
+rejects exactly one step out of 120.
+
+### What it does not do
+
+- It cannot rescue a step that is already unphysical in the potential, only one that is
+  unphysical in the integration. A geometry with two atoms 0.42 A apart is wrong either way.
+- It costs one extra force evaluation per subdivided step times the number of substeps
+  (`adaptive_step_substeps`, default 8), so a run in which most steps are rejected is slower
+  than simply halving `dt`. The rejection count is reported at the end of the run; if it is a
+  large fraction of the steps, `dt` is wrong for the system and the feature is only papering
+  over it.
+- It has not been tested with RATTLE, with metadynamics, or across a restart.
 
 ## Why it is the time step and not the structure
 

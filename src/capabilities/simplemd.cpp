@@ -1,6 +1,6 @@
 /*
  * <Simple MD Module for Cucuma. >
- * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *               2024 Gerd Gehrisch
  *
  * This program is free software: you can redistribute it and/or modify
@@ -325,6 +325,15 @@ void SimpleMD::LoadControlJson()
     m_wall_render = m_config.get<bool>("wall_render", false);  // Not in PARAM block - legacy
     m_coupling = m_config.get<double>("coupling");
     m_andersen = m_config.get<double>("andersen_probability");
+
+    // Claude Generated (Sep 2026): adaptive step rejection, opt-in
+    m_adaptive_step = m_config.get<bool>("adaptive_step");
+    m_adaptive_step_tol = m_config.get<double>("adaptive_step_tol");
+    m_adaptive_step_factor = m_config.get<double>("adaptive_step_factor");
+    m_adaptive_history = std::max(4, m_config.get<int>("adaptive_step_history"));
+    m_adaptive_warmup = std::max(1, m_config.get<int>("adaptive_step_warmup"));
+    m_adaptive_substeps = std::max(2, m_config.get<int>("adaptive_step_substeps"));
+    m_adaptive_max_retry = std::max(0, m_config.get<int>("adaptive_step_max_retry"));
 
     if (m_coupling < m_dT)
         m_coupling = m_dT;
@@ -2276,6 +2285,35 @@ void SimpleMD::ResolveThermalRegions()
  * chain state) and None fall back to the global path. */
 void SimpleMD::ApplyThermostat()
 {
+    // Claude Generated (Sep 2026): with the step-rejecting integrator the drift criterion has to
+    // subtract the work the bath did in this step, otherwise legitimate thermostat coupling looks
+    // like an integration failure. m_Ekin_exchange only covers CSVR (and is an analytic expression
+    // there, not a measurement), so measure it generically here - but only when the feature is on,
+    // so every existing run keeps its exact code path and its reported heat exchange.
+    double ekin_before = 0.0;
+    if (m_adaptive_step) {
+        for (int i = 0; i < m_natoms; ++i)
+            ekin_before += m_eigen_masses.data()[3 * i]
+                * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i]
+                    + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1]
+                    + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+        ekin_before *= 0.5;
+    }
+    ApplyThermostatImpl();
+    if (m_adaptive_step) {
+        double ekin_after = 0.0;
+        for (int i = 0; i < m_natoms; ++i)
+            ekin_after += m_eigen_masses.data()[3 * i]
+                * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i]
+                    + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1]
+                    + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+        ekin_after *= 0.5;
+        m_thermostat_work += ekin_after - ekin_before;
+    }
+}
+
+void SimpleMD::ApplyThermostatImpl()
+{
     if (m_thermal_regions.empty()) {
         ThermostatFunction();
         return;
@@ -2408,11 +2446,11 @@ bool SimpleMD::step()
     double integrator_ms = 0.0;
     if (m_md_diagnostics_timing) {
         auto t0 = std::chrono::high_resolution_clock::now();
-        Integrator();
+        IntegratorStep();
         auto t1 = std::chrono::high_resolution_clock::now();
         integrator_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     } else {
-        Integrator();
+        IntegratorStep();
     }
     m_last_integrator_ms = integrator_ms;
     AverageQuantities();
@@ -2646,6 +2684,12 @@ void SimpleMD::finalizeRun()
     PrintStatus();
     if (m_thermostat == "csvr" && m_verbosity >= 1)
         std::cout << "Exchange with heat bath " << m_Ekin_exchange << "Eh" << std::endl;
+    // Claude Generated (Sep 2026): report how often the adaptive integrator had to act
+    if (m_adaptive_step && m_verbosity >= 1) {
+        CurcumaLogger::result("Adaptive step: " + std::to_string(m_adaptive_rejections)
+            + " step(s) redone subdivided, " + std::to_string(m_adaptive_failed)
+            + " still above the tolerance of " + std::to_string(m_adaptive_step_tol) + " kcal/mol");
+    }
     if (m_dipole && m_verbosity >= 1) {
         std::cout << "Calculated averaged dipole moment " << m_aver_dipol_linear * 2.5418 << " Debye and " << m_aver_dipol_linear * 2.5418 * 3.3356 << " Cm [e-30]" << std::endl;
     }
@@ -2875,6 +2919,128 @@ void SimpleMD::applyPeriodicBoundaryConditions()
     m_molecule.setGeometry(m_eigen_geometry);
 }
 
+/* Claude Generated (Sep 2026): threshold of the step-rejection criterion, in Hartree.
+ *
+ * An absolute per-step tolerance is not usable as a default. The energy error of velocity-Verlet
+ * is not a drift but a bounded oscillation whose amplitude is the sum over all modes, so it grows
+ * with the system: measured at 300 K and dt = 1 fs, the median per-step |dE| is 0.30 kcal/mol for
+ * a single water, 2.7 for 40 waters and 136 for a healthy 1410-atom polymer. A fixed number would
+ * reject every step of the polymer or no step of the water.
+ *
+ * What IS system-independent is the spread within a run. Over the same three systems plus two
+ * water clusters, the largest |dE| of a healthy phase is 1.7 to 3.4 times the median of that
+ * phase, while the step that destroys a trajectory is 2600 to 5000 times it. Three orders of
+ * magnitude separate the two, so the threshold is taken as a multiple of the RUNNING MEDIAN of
+ * the steps accepted so far (adaptive_step_factor) - self-calibrating, with no number the user
+ * has to know about their system.
+ *
+ * Until enough steps have been accepted to form that median, and as a ceiling afterwards, the
+ * thermal energy N_dof * kB * T / 2 is used (adaptive_step_tol as a fraction of it); the healthy
+ * maximum measured over all five systems is 0.65 of it, the destructive steps 124 and 134.
+ */
+double SimpleMD::adaptiveStepTolerance() const
+{
+    const double T_ref = std::max(m_T0, 1.0);
+    const double cap = m_adaptive_step_tol * 0.5 * kb_Eh * T_ref * static_cast<double>(m_dof);
+    if (static_cast<int>(m_drift_history.size()) < m_adaptive_warmup)
+        return cap;
+    std::vector<double> sorted(m_drift_history.begin(), m_drift_history.end());
+    const std::size_t mid = sorted.size() / 2;
+    std::nth_element(sorted.begin(), sorted.begin() + mid, sorted.end());
+    return std::min(cap, m_adaptive_step_factor * sorted[mid]);
+}
+
+/* Claude Generated (Sep 2026): one integration step, optionally with step rejection.
+ *
+ * Velocity-Verlet is accurate only while dt stays well inside the period of the stiffest mode,
+ * and that mode is a property of the CURRENT geometry rather than of the molecule: a GFN-FF O-H
+ * bond stiffens from 3817 to 10758 cm^-1 when it is compressed to 0.70 A (docs/MD_LARGE_SYSTEMS.md).
+ * With thousands of hydrogens such a compression happens somewhere eventually, and the one
+ * violating step injects energy that the thermostat then spreads over the whole system - the
+ * heating this file's users reported on 7320-atom systems.
+ *
+ * The remedy is ordinary numerics, not a constraint and not a mass modification: measure the
+ * quantity the step is supposed to conserve, and if the step violated it, discard the step and
+ * redo it with a subdivided time step. The physics is unchanged - a smaller step is still
+ * velocity-Verlet on the same potential - and the cost is paid only where it is needed.
+ *
+ * Conserved quantity: E_pot + E_kin with the kinetic energy taken BEFORE the thermostat
+ * (m_ekin_pre_thermostat), because the thermostat legitimately changes E_kin and must not count
+ * as a violation; the bath work over the step is measured in ApplyThermostat() and subtracted,
+ * so the criterion is exact for every thermostat. The threshold is adaptiveStepTolerance().
+ */
+void SimpleMD::IntegratorStep()
+{
+    if (!m_adaptive_step) {
+        Integrator();
+        return;
+    }
+
+    const double E_before = m_Epot + m_Ekin;
+    const Geometry geo_save = m_eigen_geometry;
+    const Geometry vel_save = m_eigen_velocities;
+    const Geometry grad_save = m_eigen_gradient;
+    const double epot_save = m_Epot, ekin_save = m_Ekin, temp_save = m_T;
+    const double ekin_exchange_save = m_Ekin_exchange;
+    const double exchange_save = m_thermostat_work;
+    const std::vector<double> xi_save = m_xi;
+
+    Integrator();
+
+    const double tol = adaptiveStepTolerance();
+    static const bool debug = std::getenv("CURCUMA_ADAPTIVE_DEBUG") != nullptr;
+    int substeps = m_adaptive_substeps;
+    for (int retry = 0; retry <= m_adaptive_max_retry; ++retry) {
+        const double bath_work = m_thermostat_work - exchange_save;
+        const double drift = std::abs((m_Epot + m_ekin_pre_thermostat) - E_before - bath_work);
+        if (debug)
+            std::cerr << "ADAPT " << m_step << " retry " << retry << " drift "
+                      << drift * 627.5094740631 << " kcal/mol  tol "
+                      << tol * 627.5094740631 << std::endl;
+        if (!m_unstable && std::isfinite(drift) && drift <= tol) {
+            // Only a step accepted on the FIRST attempt calibrates the running median. A
+            // subdivided step has a smaller drift than the one it replaced but still a larger
+            // one than an ordinary step, so feeding those back would let a degenerating
+            // trajectory raise its own threshold - measured on a 100-water cluster: doing so
+            // left +1.50 Eh over 200 fs with 89 rejections, against -0.01 Eh with 8 when the
+            // threshold stayed anchored.
+            if (retry == 0) {
+                m_drift_history.push_back(drift);
+                if (static_cast<int>(m_drift_history.size()) > m_adaptive_history)
+                    m_drift_history.pop_front();
+            }
+            return;
+        }
+        if (retry == m_adaptive_max_retry) {
+            ++m_adaptive_failed;  // keep the last attempt; normal instability handling follows
+            return;
+        }
+        ++m_adaptive_rejections;
+
+        m_eigen_geometry = geo_save;
+        m_eigen_velocities = vel_save;
+        m_eigen_gradient = grad_save;
+        m_Epot = epot_save;
+        m_Ekin = ekin_save;
+        m_T = temp_save;
+        m_Ekin_exchange = ekin_exchange_save;
+        m_thermostat_work = exchange_save;
+        m_xi = xi_save;
+        m_unstable = false;
+
+        const double dT_full = m_dT, dt2_full = m_dt2;
+        m_dT = dT_full / substeps;
+        m_dt2 = m_dT * m_dT;
+        m_in_adaptive_substep = true;
+        for (int s = 0; s < substeps && !m_unstable; ++s)
+            Integrator();
+        m_in_adaptive_substep = false;
+        m_dT = dT_full;
+        m_dt2 = dt2_full;
+        substeps *= m_adaptive_substeps;
+    }
+}
+
 void SimpleMD::Verlet()
 {
     // CRITICAL FIX (Feb 2026): Check gradient for NaN/Inf BEFORE integration
@@ -2964,6 +3130,7 @@ void SimpleMD::Verlet()
     m_unstable = T > 10000 * m_T || std::isnan(T);
     m_T = T;
     m_Ekin = ekin;
+    m_ekin_pre_thermostat = ekin;  // Claude Generated (Sep 2026): step-rejection reference
     ApplyThermostat();
     EKin();
 
@@ -3305,6 +3472,7 @@ void SimpleMD::Rattle()
     m_unstable = T > 10000 * m_T || std::isnan(T);
     m_T = T;
     m_Ekin = ekin;
+    m_ekin_pre_thermostat = ekin;  // Claude Generated (Sep 2026): step-rejection reference
     ApplyThermostat();
     EKin();
 
@@ -3322,7 +3490,11 @@ void SimpleMD::ApplyHeldBias()
     if (m_rmsd_mtd_scheme == "legacy") {
         // Legacy: evaluate + apply directly every call. EvaluateBias adds the bias force straight into
         // m_eigen_gradient (same FP order as the pre-M2 path), so this branch is bit-identical.
-        EvaluateBias(true);
+        // Claude Generated (Sep 2026): inside a subdivided (rejected) step the bias force is still
+        // needed, but the step is being repeated - depositing once per substep would put N hills
+        // where the trajectory advanced once. m_in_adaptive_substep is false unless adaptive_step
+        // is on AND a step is currently being redone, so nothing changes without that flag.
+        EvaluateBias(!m_in_adaptive_substep);
         return;
     }
 
@@ -3338,7 +3510,7 @@ void SimpleMD::ApplyHeldBias()
     bool gap = m_gap_guard && gapGuardTriggered();
     if (stride_elapsed || gap) {
         m_bias_force_old = m_bias_force_target; // glide from the previous target to the new one
-        EvaluateBias(true);                     // do_deposit = true on an eval step
+        EvaluateBias(!m_in_adaptive_substep);   // do_deposit = true on an eval step (see legacy branch)
         m_bias_ramp_start_step = m_step;
         m_last_deposit_eval_step = m_step;
     }
