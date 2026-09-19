@@ -84,6 +84,15 @@ flipped.** No agent running. Three local commits, nothing pushed. Binary `89a587
   COMMITTED `mg` table bit-for-bit.
 - **Operator decision open**: whether to flip `rev_well_form` to `mg2` or `mg3`. Detail:
   `WORK_STATUS.md` packages 9a/9b, `docs/REV_GFNFF_STAGE3A.md` section 2.3.
+- **Correction (orchestrator, own rebuild md5 `7f2e2504`)**: the agent's hand-back message (not
+  written into `WORK_STATUS.md`, so no file needed fixing) claimed "package 7's 130-cell tail does
+  not reproduce on the current HEAD binary" (`gauss+conserving` on `c2h6/T2000_f7` giving 96.6 kJ /
+  4983 K instead of the recorded 1071.3 / 26265). **That claim is false** — re-run independently on
+  the current binary, same protocol: **1071.3 kJ / 172 rebuilds / 309 events / T_max 26265**,
+  matching package 7 exactly. Likely a probe slip on the agent's side (wrong flags/binary), not a
+  regression — the actual guardrail claim (shipped default + `gfnff`/`revgfnff` single points
+  untouched) WAS independently reconfirmed separately: `c2h6/T2000_f0` shipped default still gives
+  800.1 kJ / 76 rebuilds / 62 events / T_max 28392, caffeine energies unchanged.
 
 **2026-09-20: `package-8` DONE — package 7's option (ii) shipped as a WARNING, no default changed.**
 No agent running. One local commit `84c540d5`, nothing pushed. Detail `WORK_STATUS.md` 8.1-8.5
