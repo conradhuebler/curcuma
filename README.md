@@ -759,9 +759,11 @@ hydrogen mass for the whole run, the integrator can redo just that step with a s
 ```sh
 curcuma -md input.xyz -method gfnff -dt 1.0 -adaptive_step true
 ```
-It is off by default and adds no constraint and no mass modification. See
-[docs/MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md) for the mechanism, the calibration and what it
-does not do.
+It is off by default and adds no constraint and no mass modification. It was measured to work up
+to about 1400 atoms and **not** beyond: the per-step energy fluctuation it compares against grows
+with the system, so on a 7320-atom system the threshold falls inside the normal distribution and
+the run gets worse rather than better. See [docs/MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md) for
+the mechanism, the calibration tables and the size limit.
 
 With
 ```sh

@@ -233,8 +233,47 @@ healthy step to the median is 3.4 for the 120-atom cluster but only 1.7 for the 
 polymer, so the same factor is far more generous on the large system - at factor 1.5 the polymer
 rejects exactly one step out of 120.
 
+### The size limit, and why polymer_2x is NOT rescued
+
+**This is the important caveat, and it is the system this whole page is about.** On
+`polymer_2x` itself, 7320 atoms, the feature does not help - it makes the run **worse**:
+
+| t | `-dt 1.0` without | `-dt 1.0` with `-adaptive_step` (factor 5) |
+|---|---:|---:|
+| 0 fs | -917.34 Eh | -917.34 Eh |
+| 50 fs | -911.96 | -909.78 |
+| 100 fs | **-911.08** | **-894.57** |
+
+(E_pot, 200 fs NVE, same seed.) And it costs about 45 s per step instead of a few, because
+roughly half the steps are subdivided.
+
+The reason is measurable and it is not a bug. The criterion works by contrast: the destructive
+step has to stand out from the legitimate per-step fluctuation. That fluctuation is a sum over
+all modes, so it **grows with the system**, while a local defect - one O-H bond collapsing -
+stays local. Healthy phase, first 40 steps, dt = 1 fs, 300 K:
+
+| system | atoms | median drift | max / median (healthy) | destructive step / median |
+|---|---:|---:|---:|---:|
+| 40 waters | 120 | 0.010 Eh | 3.4 | - |
+| 100 waters | 300 | 0.027 Eh | 3.3 | **1919** |
+| 200 waters | 600 | 0.053 Eh | 3.2 | **2134** |
+| polymer | 1410 | 0.311 Eh | 1.7 | - |
+| **polymer_2x** | **7320** | **0.505 Eh** | **5.94** | - |
+
+At 7320 atoms the **healthy** spread alone is 5.94 times the median - wider than the default
+factor of 5. The threshold therefore sits *inside* the legitimate distribution: about half the
+steps are rejected essentially at random, which changes the trajectory without removing the one
+event that matters, and a local collapse worth a few Eh is indistinguishable from a normal
+fluctuation of 0.5 to 3 Eh. The contrast is ~600 at 300 atoms and ~1 at 7320.
+
+**So the rule is**: a global energy criterion discriminates while the system is small enough
+that one bad bond dominates the total energy error - measured here up to ~1400 atoms. Beyond
+that it needs to be **local** (per atom, per bond, or per fragment), which is not implemented.
+For polymer_2x the working recipes remain `-dt 0.5` / `-dt 0.25`, or `-hydrogen_mass 4`.
+
 ### What it does not do
 
+- It does not scale to arbitrary system size - see the section above.
 - It cannot rescue a step that is already unphysical in the potential, only one that is
   unphysical in the integration. A geometry with two atoms 0.42 A apart is wrong either way.
 - It costs one extra force evaluation per subdivided step times the number of substeps
