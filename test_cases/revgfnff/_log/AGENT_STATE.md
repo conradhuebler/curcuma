@@ -55,7 +55,39 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 
 ## Live agents
 
-**2026-09-19: `package-6` DONE — the donor rule and BOTH default flips are in.** No agent is
+**2026-09-19 night: `package-7` DONE — CORRECTS package 6's framing.** No agent running. One
+local commit `7d028e8a` (diagnostic only, no default changed), parent `df928122`. Full detail
+`WORK_STATUS.md` 7.1-7.10, `docs/REV_GFNFF_STAGE3A.md` 2.1 rewritten.
+
+**Package 6's "mg+conserving interact" was a 20-cell sampling artefact — the tail belongs to
+`conserving` alone, `mg` only changes how often it is visited.** Over 130 cells (same 3 systems,
+every frame, both T) `gauss+conserving` alone reaches **1071.3 kJ/mol, T_max 46601 K** on
+`c2h6/T2000_f7` — a cell outside the 20-cell grid, worse than the shipped default's 800.1/28392.
+**Orchestrator-independently reproduced** (own rebuild, md5 `fa09bcac`): `c2h6/T2000_f7` under
+`gauss+conserving` gives exactly **1071.3 kJ / 309 events / T_max 26265** (own run); the shipped
+arm on the SAME cell gives only 299.6/132/9571, i.e. `mg` does not create this cell's extreme,
+`conserving` alone already has it. Mechanism: a transient geminal H2 (both H still on one carbon)
+gets `c = f_H^2 = 0.2531` of its well under `conserving` where the delivered left-over rule gives
+exactly 0 — a forbidden configuration becomes cheap, visited 1.5-2.8x more often. **It is a
+resolution failure, not a discontinuity**: the corner weight `s` moves 0.000 -> 0.516 in ONE 0.25
+fs step (the transition window is ~0.175 a0 wide in distance, ~2 MD steps at 2000 K); halving `dt`
+collapses it. **Orchestrator-reproduced on `c2h6/T2000_f0`**: dt 0.25 -> 0.125 fs gives
+**800.1 -> 38.7 kJ**, T_max **28392 -> 5579** — matches the agent's report to the digit. Both
+share-mechanism hypotheses from the package-7 brief were tested and falsified (the min-width
+smoothing parameter has no effect; `gauss+conserving`, which keeps `w` on its well, is the WORST
+arm, so a missing `w` on the new well forms is not the cause). No minimal defect found — **this is
+a design tension between the conserving share and the fixed-width bo3 transition window**, not a
+bug. Options (none built): (i) widen/redefine the transition window in distance not bond order —
+fixes it, re-calibrates ctests 13-20; (ii) **`-md.time_step <= 0.125 fs` with `conserving`** —
+measured, zero falsifier cost, 2x wall time, cheapest honest mitigation; (iii) multiply `c` by the
+settled weight `sig_p` — likely breaks rkt06 (a half-formed TS bond also has sig=0 by
+construction); (iv) fix the H-H perception itself (admitted at r/rcov 1.6) — largest
+re-validation; (v) do nothing (context: `rev_valence_share false` is 15x worse, median 744 kJ).
+Also measured and rejected: `rev_share_onethree true` is catastrophic (median 973, max 22642).
+**Operator decision pending**: adopt (ii) as a documented/default react-mode MD time-step
+recommendation with `conserving`, or leave as characterized and move on.
+
+**Earlier, superseded framing (2026-09-19 evening): `package-6` DONE — the donor rule and BOTH default flips are in.** No agent is
 running in this tree. Final default state of rev-gfnff:
 `rev_budget_fix_h true` (now a NO-OP under conserving), **`rev_share_form conserving`**,
 **`rev_share_donor_rule true`** (new), **`rev_well_form mg`**. Five local commits
