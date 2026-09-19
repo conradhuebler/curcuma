@@ -21,12 +21,21 @@ That attribution was wrong. This page is what the measurement says instead.
 > gives `<T>` = **716.6 K**: the running-average potential goes -916.30 -> -913.76 Eh and the
 > kinetic 9.55 -> 24.91 Eh, i.e. the total energy rises by about **+8 Eh** *while the thermostat
 > is actively trying to remove it*. The potential itself only oscillates (-917.3 at 0 fs, -911.5
-> at 100 fs, -918.5 at 300 fs) - it is the kinetic energy that grows monotonically. So halving
-> the step slows the heating by more than an order of magnitude (NVE at dt = 1.0 gains +191 Eh
-> in 200 fs) but does not stop it, and the 100 fs row above simply ends before the effect is
-> visible. `-dt 0.25` and `-hydrogen_mass 4` were **only** measured over 100 fs and are
-> therefore equally unproven at 300 fs. **Do not read any row of this table as a validated
-> production setting for this system.**
+> at 100 fs, -918.5 at 300 fs) - it is the kinetic energy that grows monotonically, and the
+> 100 fs row above simply ends before the effect is visible. `-dt 0.25` and `-hydrogen_mass 4`
+> were **only** measured over 100 fs and are therefore equally unproven at 300 fs. **Do not read
+> any row of this table as a validated production setting for this system.**
+>
+> **And the thermostat is not the problem.** The same case without one - plain NVE, dt = 0.5,
+> 300 fs - gains **+67.6 Eh** and reaches `<T>` = **2175 K** (from 273). So energy is created by
+> the integration itself, not merely left in by a thermostat that cannot keep up. The potential
+> stays flat throughout (-916.3 at the start, -915.2 at the end, never outside -917…-912): all
+> of it goes into kinetic energy, i.e. the atoms simply get faster while the structure holds.
+>
+> **It scales as dt².** NVE gains +191 Eh in 200 fs at dt = 1.0 and +67.6 Eh in 300 fs at
+> dt = 0.5, which is +45 Eh per 200 fs - a ratio of **4.24** against the expected 4. That is an
+> ordinary velocity-Verlet truncation error, and it means the step needed for a given drift is
+> fixed by the arithmetic: getting 300 fs below ~4 Eh on this system needs dt ~ 0.125 fs.
 
 ```bash
 # what we verified, from the GFN-FF-optimised structure
