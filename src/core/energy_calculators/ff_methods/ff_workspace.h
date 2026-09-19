@@ -327,6 +327,9 @@ struct RevSettings {
     /// DEFAULT 1 (MG) since Sep 19, 2026 (operator decision). Scope: the whole rev path is gated
     /// on `enabled`, so plain -method gfnff cannot see this - verified, not assumed.
     int well_form = 1;
+    /// rev-gfnff 3b diagnostic: when >= 0, every bond's continuous order is replaced by this
+    /// value before the order-resolved well table is read (PARAM rev_well_order_override).
+    double well_order_override = -1.0;
     /// rev-gfnff stage 3a(ii) (Sep 2026): "an H is never sp" - an sp hydrogen is not treated as
     /// a bridging atom, so its bond keeps the full strength instead of the reference's 0.30
     /// scaling. See the comment at the rule in gfnff_method.cpp.
@@ -695,13 +698,21 @@ private:
     /// rev-gfnff 3a(iii): per BOND (m_bonds order) the well-form parameters of this corner.
     /// D > 0 = the depth, p1 = a (MG) or u (erf-Morse), p2 = beta (MG) or sigma (erf-Morse),
     /// all in ATOMIC units. form = 0 means "no table entry, use the Gaussian" for that bond.
-    struct RevWellPar { double D = 0.0, p1 = 0.0, p2 = 0.0; int form = 0; };
+    /// rev-gfnff 3a(iii): one bond's well parameters. form 1 = MG (p1 = a, p2 = beta),
+    /// 2 = erf-Morse (p1 = u, p2 = sigma), 3 = the free-curvature MG of stage 3a(iii) step 2 /
+    /// stage 3b (same p1/p2 meaning, plus dr0). dr0 is the fitted r0 OFFSET in Bohr, added to the
+    /// model's own (dynamic) r0 before the well coordinate x = r - r0 - dr0 is formed; it is 0
+    /// for forms 1 and 2, which inherit r0 unchanged.
+    struct RevWellPar { double D = 0.0, p1 = 0.0, p2 = 0.0; int form = 0; double dr0 = 0.0; };
     std::vector<RevWellPar> m_rev_well;
     /// rev-gfnff 3a(iii): the (fc, exponent, z_i, z_j) the current m_rev_well was built from.
     /// prepareWellForms() runs on every energy call (next to the share's own pass), but its
     /// inputs are per-bond CONSTANTS, so recomputing the erf-Morse bisection every step is pure
     /// cost - measured at 1.4x the whole react-MD wall time before this cache.
-    std::vector<std::array<double, 4>> m_rev_well_stamp;
+    /// (fc, exponent, z_i, z_j, rev_order) - rev_order is in the stamp because the
+    /// bond-order-resolved table (form 3 / 'mg3') keys on it, and a rebuild can change it while
+    /// leaving everything else alone. Claude Generated (Sep 20, 2026).
+    std::vector<std::array<double, 5>> m_rev_well_stamp;
     int m_rev_well_stamp_form = -1;
     /// rev-gfnff 3a(ii) (Claude Generated, Sep 14, 2026): the SMOOTH 1,3 proxy - the genuineness
     /// g_p of every pair of the corner's bond list, in m_bonds order. A compact polyhedron's

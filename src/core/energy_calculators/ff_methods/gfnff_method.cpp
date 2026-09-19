@@ -2723,6 +2723,39 @@ void GFNFF::refreshReactBondOrders()
     }
 }
 
+// rev-gfnff stage 3b (Claude Generated, Sep 2026): the CONTINUOUS bond order that keys the
+// bond-order-resolved well table.
+//
+//     order = 1 + pibo * (hyb_i == 1 && hyb_j == 1 ? 2 : 1),   clamped to [1, 3]
+//
+// This is refreshReactBondOrders()'s expression with two deliberate differences:
+//
+//   * no rounding - the table is interpolated between the single/double/triple endpoints, so a
+//     benzene C-C (pibo ~ 0.67 -> order 1.67) gets a well BETWEEN the single and the double fit
+//     instead of being forced onto one of them;
+//   * no `pi > 0.5` threshold on the sp-sp doubling - the second, degenerate pi system of a
+//     linear sp-sp bond is added as a smooth FACTOR on pibo, so the order goes to exactly 1 as
+//     the pi order vanishes instead of stepping by 1 at pibo = 0.5. A threshold here would be a
+//     hidden switch of the well depth, the failure mode REV_GFNFF_STAGE3A.md 2.1 documents.
+//
+// The hybridisation itself is a topology quantity (per rebuild, per stage-1b corner), exactly
+// like the bond's fc/exponent, so nothing here varies with the geometry inside one energy call.
+double GFNFF::continuousBondOrder(int i, int j, const TopologyInfo& topo) const
+{
+    const int need = m_atomcount * (m_atomcount + 1) / 2;
+    if (static_cast<int>(topo.pi_bond_orders.size()) < need)
+        return 1.0;
+    const int idx = lin(i, j);
+    if (idx < 0 || idx >= static_cast<int>(topo.pi_bond_orders.size()))
+        return 1.0;
+    const double pi = std::max(0.0, topo.pi_bond_orders[idx]);
+    double factor = 1.0;
+    if (static_cast<int>(topo.hybridization.size()) > std::max(i, j)
+        && topo.hybridization[i] == 1 && topo.hybridization[j] == 1)
+        factor = 2.0;
+    return std::min(3.0, std::max(1.0, 1.0 + pi * factor));
+}
+
 double GFNFF::Calculation(bool gradient)
 {
     // Claude Generated (February 2026): Start total calculation timer for verbosity 1+
@@ -8715,10 +8748,11 @@ std::vector<Bond> GFNFF::generateBondsNative(const TopologyInfo& topo_info) cons
                     // here makes the headroom of a given system measurable.
                     double qa_i = (i < topo_info.topology_charges.size()) ? topo_info.topology_charges[i] : 0.0;
                     double qa_j = (j < topo_info.topology_charges.size()) ? topo_info.topology_charges[j] : 0.0;
-                    fmt::print("BONDPARAM {}({})-{}({}) R={:.4f} r0_dyn={:.4f} fc={:.6f} alpha={:.4f} fqq={:.4f} ff={:.4f} rabshift={:.4f} cn_i={:.4f} cn_j={:.4f} qaprod={:.4f}\n",
+                    fmt::print("BONDPARAM {}({})-{}({}) R={:.4f} r0_dyn={:.4f} fc={:.6f} alpha={:.4f} fqq={:.4f} ff={:.4f} rabshift={:.4f} cn_i={:.4f} cn_j={:.4f} qaprod={:.4f} order={:.6f}\n",
                                i+1, m_atoms[i], j+1, m_atoms[j], distance, r0_dyn,
                                bond_params.force_constant, bond_params.alpha, bond_params.fqq,
-                               bond_params.ff, bond_params.rabshift, cn_i, cn_j, qa_i * qa_j);
+                               bond_params.ff, bond_params.rabshift, cn_i, cn_j, qa_i * qa_j,
+                               continuousBondOrder(i, j, topo_info));
                 }
 
                 Bond b;
@@ -8740,6 +8774,14 @@ std::vector<Bond> GFNFF::generateBondsNative(const TopologyInfo& topo_info) cons
                 b.cnfak_i = bond_params.cnfak_i;
                 b.cnfak_j = bond_params.cnfak_j;
                 b.ff = bond_params.ff;
+                // rev-gfnff stage 3b (Claude Generated, Sep 2026): the continuous bond order that
+                // keys the bond-order-resolved well table. Same expression as
+                // refreshReactBondOrders() WITHOUT its rounding and without its `pi > 0.5`
+                // threshold: the sp-sp doubling is applied as a smooth factor on pibo itself, so
+                // the quantity is continuous in pibo and a vanishing pi order gives exactly 1.
+                // Filled unconditionally (it costs one table lookup per bond); only the mg3 well
+                // form reads it.
+                b.rev_order = continuousBondOrder(i, j, topo_info);
 
                 bonds.push_back(b);
             }
@@ -12383,12 +12425,17 @@ void GFNFF::setupRevSettings()
     // default. Scoped by construction: every rev path is gated on rev_enabled, so plain
     // -method gfnff never reaches the well form.
     {
+        // Claude Generated (Sep 20, 2026): 'mg2' (free curvature + r0 re-solve, element-pair
+        // keyed) and 'mg3' (the same form, bond-order-resolved) are stage 3a(iii) step 2 resp.
+        // stage 3b and are OPT-IN: gauss/mg/erfmorse are untouched by them, bit-for-bit.
         const std::string form = m_parameters.value("rev_well_form", std::string("mg"));
-        rv.well_form = (form == "mg") ? 1 : (form == "erfmorse") ? 2 : 0;
-        if (form != "gauss" && form != "mg" && form != "erfmorse")
+        rv.well_form = (form == "mg") ? 1 : (form == "erfmorse") ? 2
+            : (form == "mg2") ? 3 : (form == "mg3") ? 4 : 0;
+        if (form != "gauss" && form != "mg" && form != "erfmorse" && form != "mg2" && form != "mg3")
             CurcumaLogger::warn(fmt::format(
-                "rev_well_form '{}' is not gauss|mg|erfmorse - using gauss", form));
+                "rev_well_form '{}' is not gauss|mg|erfmorse|mg2|mg3 - using gauss", form));
         m_rev_well_form = form;
+        rv.well_order_override = m_parameters.value("rev_well_order_override", -1.0);
     }
     // Claude Generated (Sep 14, 2026): the smooth 1,3 proxy of the share - the claim of a pair is
     // w_p g_p with g the bond-order leak of a settled shared partner (see FFWorkspace). Off = the

@@ -28,6 +28,7 @@
 #include "cn_calculator.h"
 #include "gfnff_par.h"
 #include "rev_well_table.h"   // rev-gfnff 3a(iii): AI-fitted per-element-pair well parameters
+#include "rev_well_table_v2.h" // rev-gfnff 3a(iii) step 2 + 3b: free-curvature / bond-order table
 #include "forcefieldfunctions.h"
 #include "gfnff_geometry.h"
 #include "src/core/units.h"
@@ -225,19 +226,25 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
         bool new_form = false;
         if (rev_well_on && idx < static_cast<int>(m_rev_well.size()) && m_rev_well[idx].form != 0) {
             const RevWellPar& wp = m_rev_well[idx];
+            // rev-gfnff 3a(iii) step 2 (Claude Generated, Sep 20, 2026): the well coordinate. The
+            // curvature-pinned forms (1, 2) inherit the model's r0 exactly and have dr0 == 0, so
+            // `xw` is bitwise `dr` for them; the free-curvature forms add the fitted r0 offset.
+            // dr0 is a CONSTANT, so dx/dr = 1 and d x/d r0 = -1 exactly as before: the gradient
+            // and the CN chain rule below are untouched by it.
+            const double xw = (wp.dr0 != 0.0) ? (dr - wp.dr0) : dr;
             double y, dy_dx;
-            if (wp.form == 1) {
-                // MG: y = exp(-(a x + beta x^2))
-                const double phi = wp.p1 * dr + wp.p2 * dr * dr;
-                const double yr = std::exp(-std::min(std::max(phi, -50.0), 200.0));
-                y = yr;
-                dy_dx = -(wp.p1 + 2.0 * wp.p2 * dr) * yr;
-            } else {
+            if (wp.form == 2) {
                 // erf-Morse: y = erfc((x - u)/sigma) / erfc(-u/sigma)
                 const double n0 = std::erfc(-wp.p1 / wp.p2);
-                const double z = (dr - wp.p1) / wp.p2;
+                const double z = (xw - wp.p1) / wp.p2;
                 y = std::erfc(z) / n0;
                 dy_dx = -2.0 / (1.7724538509055159 * wp.p2 * n0) * std::exp(-z * z);
+            } else {
+                // MG (form 1 curvature-pinned, form 3 free curvature): y = exp(-(a x + beta x^2))
+                const double phi = wp.p1 * xw + wp.p2 * xw * xw;
+                const double yr = std::exp(-std::min(std::max(phi, -50.0), 200.0));
+                y = yr;
+                dy_dx = -(wp.p1 + 2.0 * wp.p2 * xw) * yr;
             }
             // The inner side is capped at y = 2 (C1, exact below y = 1.6, so the fitted region
             // and the minimum itself are untouched): E = -D(2y - y^2) = D((y-1)^2 - 1) is then
@@ -2438,7 +2445,8 @@ void FFWorkspace::prepareWellForms()
             const Bond& b = m_bonds[p];
             const auto& st = m_rev_well_stamp[p];
             if (st[0] != b.fc || st[1] != b.exponent
-                || st[2] != static_cast<double>(b.z_i) || st[3] != static_cast<double>(b.z_j)) {
+                || st[2] != static_cast<double>(b.z_i) || st[3] != static_cast<double>(b.z_j)
+                || st[4] != b.rev_order) {
                 same = false;
                 break;
             }
@@ -2450,7 +2458,10 @@ void FFWorkspace::prepareWellForms()
     m_rev_well_stamp_form = m_rev.well_form;
     for (int p = 0; p < nb; ++p) {
         const Bond& b = m_bonds[p];
-        m_rev_well_stamp[p] = { b.fc, b.exponent, static_cast<double>(b.z_i), static_cast<double>(b.z_j) };
+        m_rev_well_stamp[p] = { b.fc, b.exponent, static_cast<double>(b.z_i),
+                                static_cast<double>(b.z_j),
+                                (m_rev.well_order_override >= 0.0) ? m_rev.well_order_override
+                                                                   : b.rev_order };
     }
     m_rev_well.assign(nb, RevWellPar{});
     // The table is in Angstrom units (that is how the class-A fit reports it and how the header
@@ -2462,8 +2473,32 @@ void FFWorkspace::prepareWellForms()
         const Bond& b = m_bonds[p];
         if (b.z_i <= 0 || b.z_j <= 0)
             continue;
-        const RevWellTable::Entry* e = RevWellTable::find(b.z_i, b.z_j);
-        if (!e) {
+        const bool v2 = (m_rev.well_form >= 3);
+        const RevWellTable::Entry* e = v2 ? nullptr : RevWellTable::find(b.z_i, b.z_j);
+        // rev-gfnff 3a(iii) step 2 / 3b (Claude Generated, Sep 20, 2026): the free-curvature
+        // table. Form 3 ('mg2') keys on the element pair, form 4 ('mg3') on the element pair AND
+        // the continuous bond order, interpolated between the class-A orders of that pair.
+        double v2_s = 0.0, v2_ca = 0.0, v2_beta = 0.0, v2_dr0 = 0.0;
+        bool have_v2 = false;
+        if (v2) {
+            const double ord = (m_rev.well_order_override >= 0.0) ? m_rev.well_order_override
+                                                                  : b.rev_order;
+            if (m_rev.well_form == 4 && ord > 0.0)
+                have_v2 = RevWellTableV2::findOrder(b.z_i, b.z_j, ord,
+                                                    v2_s, v2_ca, v2_beta, v2_dr0);
+            if (!have_v2) {
+                // form 3, or form 4 on a pair the ORDER table does not cover: the element-pair
+                // fit of the same (free-curvature) form.
+                if (const RevWellTableV2::Entry* p2e = RevWellTableV2::find(b.z_i, b.z_j)) {
+                    v2_s = p2e->s;
+                    v2_ca = p2e->ca;
+                    v2_beta = p2e->beta;
+                    v2_dr0 = p2e->dr0;
+                    have_v2 = true;
+                }
+            }
+        }
+        if (!e && !have_v2) {
             const int z1 = std::min(b.z_i, b.z_j), z2 = std::max(b.z_i, b.z_j);
             if (std::find(missing.begin(), missing.end(), std::make_pair(z1, z2)) == missing.end())
                 missing.emplace_back(z1, z2);
@@ -2479,7 +2514,16 @@ void FFWorkspace::prepareWellForms()
         // measured against a reference (the class-A set has no hydrogen bond).
         const double alpha = b.exponent;
         const double K = 2.0 * alpha * kb;
-        if (m_rev.well_form == 1) {
+        if (v2) {
+            // E = -D (2y - y^2), y = exp(-(a x + beta x^2)), x = r - r0 - dr0, with
+            //     D = s |k_b|,  a = ca sqrt(alpha / s),  i.e.  K_well = 2 D a^2 = ca^2 K_gauss.
+            // ca = 1 and dr0 = 0 reproduce the curvature-pinned branch below BIT-FOR-BIT
+            // (x * 1.0 == x, dr - 0.0 == dr), which is how this path was verified.
+            const double D = v2_s * kb;
+            m_rev_well[p] = RevWellPar{ D, v2_ca * std::sqrt(alpha / v2_s),
+                                        v2_beta / (kBohrPerAng * kBohrPerAng), 3,
+                                        v2_dr0 * kBohrPerAng };
+        } else if (m_rev.well_form == 1) {
             const double D = e->mg_s * kb;
             m_rev_well[p] = RevWellPar{ D, std::sqrt(alpha / e->mg_s),
                                         e->mg_beta / (kBohrPerAng * kBohrPerAng), 1 };

@@ -111,6 +111,17 @@ struct Bond {
     // For X-H bonds participating in HB: alpha_modified = (1 - 0.1*hb_cn_H) * alpha
     int nr_hb = 0;           // Number of HB interactions this bond participates in
     double hb_cn_H = 0.0;    // HB coordination number for hydrogen atom (used if nr_hb >= 1)
+
+    // rev-gfnff stage 3b (Claude Generated, Sep 2026): the CONTINUOUS bond order of this pair,
+    //     order = 1 + pibo * (both ends sp ? 2 : 1),   clamped to [1, 3],
+    // with pibo the FT-HMO pi bond order of the pair (the same quantity refreshReactBondOrders()
+    // rounds to 1/2/3 for the public API, minus its pi > 0.5 threshold - see the comment there
+    // for why an sp-sp bond counts its pi order twice).  0 = not computed (non-GFN-FF bonds, or
+    // a topology without a Hueckel solve), which makes the bond-order-resolved well table fall
+    // back to its element-pair entry.  It is a TOPOLOGY quantity, constant between rebuilds and
+    // per stage-1b corner, so it carries no geometry derivative: the well parameters it selects
+    // are constants inside one energy call, exactly like fc and exponent.
+    double rev_order = 0.0;
 };
 
 struct Angle {
