@@ -334,6 +334,15 @@ void SimpleMD::LoadControlJson()
     m_adaptive_warmup = std::max(1, m_config.get<int>("adaptive_step_warmup"));
     m_adaptive_substeps = std::max(2, m_config.get<int>("adaptive_step_substeps"));
     m_adaptive_max_retry = std::max(0, m_config.get<int>("adaptive_step_max_retry"));
+    m_adaptive_local = m_config.get<bool>("adaptive_step_local");
+    m_adaptive_hot_factor = m_config.get<double>("adaptive_step_hot_factor");
+    // Both running medians calibrate THIS run. A SimpleMD object that is prepared a second
+    // time (ConfSearch drives many trajectories) must not inherit the previous one's window.
+    m_drift_history.clear();
+    m_hot_history.clear();
+    m_adaptive_rejections = 0;
+    m_adaptive_failed = 0;
+    m_adaptive_local_rejections = 0;
 
     if (m_coupling < m_dT)
         m_coupling = m_dT;
@@ -2689,6 +2698,9 @@ void SimpleMD::finalizeRun()
         CurcumaLogger::result("Adaptive step: " + std::to_string(m_adaptive_rejections)
             + " step(s) redone subdivided, " + std::to_string(m_adaptive_failed)
             + " still above the tolerance of " + std::to_string(m_adaptive_step_tol) + " kcal/mol");
+        if (m_adaptive_local)
+            CurcumaLogger::result("Adaptive step: " + std::to_string(m_adaptive_local_rejections)
+                + " of them caught by the hottest-atom criterion alone");
     }
     if (m_dipole && m_verbosity >= 1) {
         std::cout << "Calculated averaged dipole moment " << m_aver_dipol_linear * 2.5418 << " Debye and " << m_aver_dipol_linear * 2.5418 * 3.3356 << " Cm [e-30]" << std::endl;
@@ -2950,6 +2962,26 @@ double SimpleMD::adaptiveStepTolerance() const
     return std::min(cap, m_adaptive_step_factor * sorted[mid]);
 }
 
+/*! \brief Claude Generated (Sep 2026): kinetic energy of the hottest atom over the per-atom
+ *  mean. See hottestAtomRatio() in the header for why this is the observable that keeps its
+ *  contrast at 7320 atoms where the total energy does not. */
+double SimpleMD::hottestAtomRatio() const
+{
+    double total = 0.0, hottest = 0.0;
+    for (int i = 0; i < m_natoms; ++i) {
+        const double vx = m_eigen_velocities.data()[3 * i + 0];
+        const double vy = m_eigen_velocities.data()[3 * i + 1];
+        const double vz = m_eigen_velocities.data()[3 * i + 2];
+        const double e = m_eigen_masses.data()[3 * i] * (vx * vx + vy * vy + vz * vz);
+        total += e;
+        if (e > hottest)
+            hottest = e;
+    }
+    if (!(total > 0.0) || m_natoms <= 1)
+        return 0.0;
+    return hottest / (total / static_cast<double>(m_natoms));
+}
+
 /* Claude Generated (Sep 2026): one integration step, optionally with step rejection.
  *
  * Velocity-Verlet is accurate only while dt stays well inside the period of the stiffest mode,
@@ -2993,11 +3025,33 @@ void SimpleMD::IntegratorStep()
     for (int retry = 0; retry <= m_adaptive_max_retry; ++retry) {
         const double bath_work = m_thermostat_work - exchange_save;
         const double drift = std::abs((m_Epot + m_ekin_pre_thermostat) - E_before - bath_work);
+
+        // Local channel: the hottest atom relative to the per-atom mean. Its own running
+        // median calibrates it, exactly as the drift does above, so no absolute energy enters.
+        double hot = 0.0, hot_tol = 0.0;
+        bool hot_violation = false;
+        if (m_adaptive_local) {
+            hot = hottestAtomRatio();
+            // No fixed ceiling during the warm-up: the healthy value of this ratio depends on
+            // the setup (thermal regions hold different temperatures, so one atom may legally
+            // sit far above the GLOBAL per-atom mean), and a ceiling that a run starts above
+            // would reject every step forever without the median ever filling. Until there is
+            // enough history the local channel only observes; the global one still guards.
+            if (static_cast<int>(m_hot_history.size()) >= m_adaptive_warmup) {
+                std::vector<double> sorted(m_hot_history.begin(), m_hot_history.end());
+                const std::size_t mid = sorted.size() / 2;
+                std::nth_element(sorted.begin(), sorted.begin() + mid, sorted.end());
+                hot_tol = m_adaptive_hot_factor * sorted[mid];
+                hot_violation = !std::isfinite(hot) || hot > hot_tol;
+            }
+        }
+
         if (debug)
             std::cerr << "ADAPT " << m_step << " retry " << retry << " drift "
                       << drift * 627.5094740631 << " kcal/mol  tol "
-                      << tol * 627.5094740631 << std::endl;
-        if (!m_unstable && std::isfinite(drift) && drift <= tol) {
+                      << tol * 627.5094740631 << "  hot " << hot << "  hot_tol " << hot_tol
+                      << std::endl;
+        if (!m_unstable && std::isfinite(drift) && drift <= tol && !hot_violation) {
             // Only a step accepted on the FIRST attempt calibrates the running median. A
             // subdivided step has a smaller drift than the one it replaced but still a larger
             // one than an ordinary step, so feeding those back would let a degenerating
@@ -3008,6 +3062,11 @@ void SimpleMD::IntegratorStep()
                 m_drift_history.push_back(drift);
                 if (static_cast<int>(m_drift_history.size()) > m_adaptive_history)
                     m_drift_history.pop_front();
+                if (m_adaptive_local) {
+                    m_hot_history.push_back(hot);
+                    if (static_cast<int>(m_hot_history.size()) > m_adaptive_history)
+                        m_hot_history.pop_front();
+                }
             }
             return;
         }
@@ -3016,6 +3075,8 @@ void SimpleMD::IntegratorStep()
             return;
         }
         ++m_adaptive_rejections;
+        if (hot_violation && std::isfinite(drift) && drift <= tol)
+            ++m_adaptive_local_rejections;  // the global channel would have let this one pass
 
         m_eigen_geometry = geo_save;
         m_eigen_velocities = vel_save;
@@ -4567,6 +4628,14 @@ void SimpleMD::EKin()
 
 void SimpleMD::AverageQuantities()
 {
+    // Claude Generated (Sep 2026): refresh the conserved quantity here, not only at print
+    // steps. m_Etot used to be assembled just before PrintStatus(), while this function runs
+    // every step -- so <Etot> averaged a value that was hundreds of steps old, and the final
+    // status line (printed from a path that does not refresh it) reported a stale, apparently
+    // conserved Etot for a run whose Epot + Ekin had long since diverged. m_Etot is purely
+    // diagnostic (this average, the status line and the restart JSON), so this cannot move a
+    // trajectory.
+    m_Etot = m_Epot + m_Ekin;
     m_aver_Temp = (m_T + (m_currentStep)*m_aver_Temp) / (m_currentStep + 1);
     m_aver_Epot = (m_Epot + (m_currentStep)*m_aver_Epot) / (m_currentStep + 1);
     m_aver_Ekin = (m_Ekin + (m_currentStep)*m_aver_Ekin) / (m_currentStep + 1);

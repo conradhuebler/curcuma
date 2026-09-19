@@ -2,7 +2,7 @@
 # Claude Generated (Sep 2026)
 """Contract test for the adaptive (step-rejecting) integrator.
 
-Three things, on a SINGLE water molecule so the test costs a second:
+Four things, on a SINGLE water molecule so the test costs a second:
 
   1. `adaptive_step` is off by default and changes nothing when it is off. The step
      wrapper (`SimpleMD::IntegratorStep`) must be a plain call to `Integrator()` in
@@ -18,6 +18,10 @@ Three things, on a SINGLE water molecule so the test costs a second:
 
   3. With it, the same run conserves energy (measured -0.003 Eh) without a single
      constraint and without touching the masses.
+
+  4. The local (hottest-atom) channel only ever ADDS rejections: on a system the
+     global energy criterion already handles, `-adaptive_step_local false` must give
+     a bit-identical trajectory.
 
 The initial velocities of a 3-atom system are deterministic here (verified over
 three different seeds), so the numbers are reproducible.
@@ -113,6 +117,21 @@ def main():
         if T_on > 5000.0:
             failures.append(
                 f"step rejection did not keep the trajectory bounded: <T> = {T_on:.0f} K")
+
+        # 4: the local (hottest-atom) channel is a PURE ADDITION. It may only reject a step
+        # the global energy criterion accepted, never accept one it rejected - so on a system
+        # where the global criterion already suffices, switching it off must leave the
+        # trajectory bit-identical. Guards against the local threshold drifting into the
+        # legitimate distribution, which would silently change every adaptive_step run.
+        dE_gl, T_gl = run_md(binary, workdir, "globalonly",
+                             ["-adaptive_step", "true", "-adaptive_step_local", "false"])
+        if dE_gl is None:
+            return 1
+        if abs(dE_gl - dE_on) > 1e-10 or abs(T_gl - T_on) > 1e-8:
+            failures.append(
+                f"the local criterion changed a trajectory the global one already handles: "
+                f"dE {dE_on:+.12f} with it vs {dE_gl:+.12f} without, "
+                f"<T> {T_on:.6f} vs {T_gl:.6f} K. It must only ever add rejections.")
 
     if failures:
         print("\nFAILED:")

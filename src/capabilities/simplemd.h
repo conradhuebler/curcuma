@@ -328,6 +328,10 @@ private:
     /*! \brief Claude Generated (Sep 2026): step-rejection tolerance in Hartree, derived from
      *  adaptive_step_tol and the system's thermal energy. */
     double adaptiveStepTolerance() const;
+    /*! \brief Claude Generated (Sep 2026): kinetic energy of the hottest atom divided by the
+     *  per-atom mean. Dimensionless and nearly size-independent (the maximum of N samples of a
+     *  chi-squared grows logarithmically in N), so one threshold covers 3 and 7320 atoms. */
+    double hottestAtomRatio() const;
     void Verlet();
     void Rattle();
     void EvaluateBias(bool do_deposit); // Claude Generated (Jul 2026): bias force -> m_bias_force_target
@@ -451,6 +455,16 @@ private:
     int m_adaptive_max_retry = 2;
     int m_adaptive_rejections = 0;      ///< how often a step had to be subdivided
     int m_adaptive_failed = 0;          ///< how often subdivision did not help either
+    // Claude Generated (Sep 2026): the LOCAL rejection channel. The global energy criterion
+    // above loses contrast with system size, because the legitimate per-step fluctuation is a
+    // sum over all modes while a violating step stays on a handful of atoms. Measured on the
+    // 7320-atom polymer_2x trajectory: in the frame where the run breaks, 12 atoms hold 99 %
+    // of the kinetic energy and the hottest sits at 3733x the per-atom mean, against a steady
+    // 15-23x in every healthy frame before it. That ratio is what this channel watches.
+    bool m_adaptive_local = true;
+    double m_adaptive_hot_factor = 10.0;
+    std::deque<double> m_hot_history;   ///< hottest-atom ratio of the accepted steps
+    int m_adaptive_local_rejections = 0;  ///< rejections the local channel alone triggered
 //    std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient, m_rmass, m_virial, m_gradient_bias, m_scaling_vector_linear, m_scaling_vector_nonlinear, m_rt_geom_1, m_rt_geom_2, m_rt_velo;
     std::vector<double>  m_virial, m_gradient_bias, m_scaling_vector_linear, m_scaling_vector_nonlinear, m_rt_geom_1, m_rt_geom_2, m_rt_velo;
 
@@ -690,6 +704,8 @@ private:
     PARAM(adaptive_step_warmup, Int, 10, "Accepted steps required before the running median replaces the thermal ceiling.", "Algorithm", {})
     PARAM(adaptive_step_substeps, Int, 8, "Number of substeps a rejected step is redone with.", "Algorithm", {})
     PARAM(adaptive_step_max_retry, Int, 2, "How often a step may be subdivided again when the redone step still violates the tolerance (substeps multiply each time).", "Algorithm", {})
+    PARAM(adaptive_step_local, Bool, true, "In addition to the total-energy criterion, reject a step in which one atom becomes far hotter than the rest. The global criterion loses contrast with system size; this one does not, because a violating step stays local. Only has an effect while adaptive_step is on.", "Algorithm", {})
+    PARAM(adaptive_step_hot_factor, Double, 10.0, "Reject a step whose hottest atom exceeds this multiple of the running median of that same ratio. Measured on polymer_2x (7320 atoms): healthy steps sit at 15-23x the per-atom mean and hold that value steadily, the breaking step reaches 3733x - so the separation is about two orders of magnitude and 10 is far from both ends.", "Algorithm", {})
     PARAM(initial_velocity_scale, Double, 1.0, "Initial velocity scaling factor.", "System", {"velo"})
 
     // --- Output & Restart ---

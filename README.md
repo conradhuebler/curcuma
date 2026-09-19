@@ -759,11 +759,13 @@ hydrogen mass for the whole run, the integrator can redo just that step with a s
 ```sh
 curcuma -md input.xyz -method gfnff -dt 1.0 -adaptive_step true
 ```
-It is off by default and adds no constraint and no mass modification. It was measured to work up
-to about 1400 atoms and **not** beyond: the per-step energy fluctuation it compares against grows
-with the system, so on a 7320-atom system the threshold falls inside the normal distribution and
-the run gets worse rather than better. See [docs/MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md) for
-the mechanism, the calibration tables and the size limit.
+It is off by default and adds no constraint and no mass modification. Two things are watched: the
+total energy of the step, and - because that one loses its contrast as the system grows, while a
+violating step stays on a handful of atoms - the kinetic energy of the **hottest atom relative to
+the per-atom mean**. On a 7320-atom solvated polymer over 300 fs the second channel is what works:
++67.59 Eh and 2175 K become **+0.53 Eh and 246 K**, and 92 of the 104 rejected steps were ones the
+energy criterion accepted. See [docs/MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md) for the
+mechanism (one water molecule collapsing), the calibration tables and what it does not do.
 
 With
 ```sh
