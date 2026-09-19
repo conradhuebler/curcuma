@@ -422,7 +422,6 @@ void SimpleMD::LoadControlJson()
     }
     m_initfile = m_config.get<std::string>("restart_file");
     m_norestart = m_config.get<bool>("no_restart");
-    m_dt2 = m_dT * m_dT;
 
     // Claude Generated (Nov 2025): CG-specific parameters
     m_cg_write_vtf = m_config.get<bool>("cg_write_vtf");
@@ -676,7 +675,6 @@ bool SimpleMD::Initialise()
         if (m_cg_timestep_factor > 1.0) {
             double orig_dt = m_dT;
             m_dT *= m_cg_timestep_factor;
-            m_dt2 = m_dT * m_dT;
             int verbosity_ts = m_config.get<int>("verbosity", 0);
             if (verbosity_ts >= 1) {
                 CurcumaLogger::success("CG timestep scaling applied: "
@@ -3271,16 +3269,28 @@ void SimpleMD::Verlet()
         }
     }
 
+    // Claude Generated (Sep 2026): -md.time_step, -md.MaxTime and every reported time are REAL
+    // femtoseconds. The integrator works in Angstrom / amu / Hartree, whose own time unit is
+    // sqrt(amu*A^2/Eh) = 1.9516144 fs (CurcumaUnit::Constants::MD_TIME_UNIT_FS). This is one of
+    // the three places where a user time meets the integrator (Verlet, Rattle, NoseHover), so the
+    // conversion belongs here and nowhere else: every other use of m_dT (m_currentStep, m_maxtime,
+    // the m_coupling/m_dT ratios of Berendsen/CSVR/Andersen, print/dump cadence, rm_COM, the MTD
+    // deposit stride, COLVAR and restart) only counts or schedules time and stays in femtoseconds.
+    // Before this conversion existed, -md.time_step 1.0 integrated 1.9516 fs; the error is silent
+    // in the energy, because a consistent integrator conserves energy in ANY time unit.
+    const double dt = m_dT * CurcumaUnit::Constants::FS_TO_MD_TIME;
+    const double dt2 = dt * dt;
+
     double ekin = 0;
     //std::cout << m_eigen_inv_masses << std::endl;
     for (int i = 0; i < m_natoms; ++i) {
-        m_eigen_geometry.data()[3 * i + 0] = m_eigen_geometry.data()[3 * i + 0] + m_dT * m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0] * m_dt2;
-        m_eigen_geometry.data()[3 * i + 1] = m_eigen_geometry.data()[3 * i + 1] + m_dT * m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1] * m_dt2;
-        m_eigen_geometry.data()[3 * i + 2] = m_eigen_geometry.data()[3 * i + 2] + m_dT * m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2] * m_dt2;
+        m_eigen_geometry.data()[3 * i + 0] = m_eigen_geometry.data()[3 * i + 0] + dt * m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0] * dt2;
+        m_eigen_geometry.data()[3 * i + 1] = m_eigen_geometry.data()[3 * i + 1] + dt * m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1] * dt2;
+        m_eigen_geometry.data()[3 * i + 2] = m_eigen_geometry.data()[3 * i + 2] + dt * m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2] * dt2;
 
-        m_eigen_velocities.data()[3 * i + 0] = m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
-        m_eigen_velocities.data()[3 * i + 1] = m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
-        m_eigen_velocities.data()[3 * i + 2] = m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
+        m_eigen_velocities.data()[3 * i + 0] = m_eigen_velocities.data()[3 * i + 0] - 0.5 * dt * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
+        m_eigen_velocities.data()[3 * i + 1] = m_eigen_velocities.data()[3 * i + 1] - 0.5 * dt * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
+        m_eigen_velocities.data()[3 * i + 2] = m_eigen_velocities.data()[3 * i + 2] - 0.5 * dt * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
         ekin += m_eigen_masses.data()[3 * i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
     }
 
@@ -3333,9 +3343,9 @@ void SimpleMD::Verlet()
     ekin = 0.0;
 
     for (int i = 0; i < m_natoms; ++i) {
-        m_eigen_velocities.data()[3 * i + 0] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
-        m_eigen_velocities.data()[3 * i + 1] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
-        m_eigen_velocities.data()[3 * i + 2] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
+        m_eigen_velocities.data()[3 * i + 0] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
+        m_eigen_velocities.data()[3 * i + 1] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
+        m_eigen_velocities.data()[3 * i + 2] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
 
         ekin += m_eigen_masses.data()[3 * i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
         //m_gradient[3 * i + 0] = m_eigen_gradient.data()[3 * i + 0];
@@ -3373,19 +3383,25 @@ void SimpleMD::Rattle()
     TriggerWriteRestart();
 
     auto* coord = new double[3 * m_natoms];
-    double m_dT_inverse = 1 / m_dT;
+    // Claude Generated (Sep 2026): see Verlet(). -md.time_step is in real femtoseconds; the
+    // integrator's own time unit is sqrt(amu*A^2/Eh) = 1.9516144 fs. The RATTLE velocity
+    // correction divides by the SAME converted step, so constraint forces stay consistent
+    // with the position update they correct.
+    const double dt = m_dT * CurcumaUnit::Constants::FS_TO_MD_TIME;
+    const double dt2 = dt * dt;
+    double m_dT_inverse = 1 / dt;
     std::set<int> constrained_atoms;
     bool move = false;
     double max_mu = 10;
     double max_err_12 = 0, max_err_13 = 0;
     for (int i = 0; i < m_natoms; ++i) {
-        coord[3 * i + 0] = m_eigen_geometry.data()[3 * i + 0] + m_dT * m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0] * m_dt2;
-        coord[3 * i + 1] = m_eigen_geometry.data()[3 * i + 1] + m_dT * m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1] * m_dt2;
-        coord[3 * i + 2] = m_eigen_geometry.data()[3 * i + 2] + m_dT * m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2] * m_dt2;
+        coord[3 * i + 0] = m_eigen_geometry.data()[3 * i + 0] + dt * m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0] * dt2;
+        coord[3 * i + 1] = m_eigen_geometry.data()[3 * i + 1] + dt * m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1] * dt2;
+        coord[3 * i + 2] = m_eigen_geometry.data()[3 * i + 2] + dt * m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2] * dt2;
 
-        m_eigen_velocities.data()[3 * i + 0] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
-        m_eigen_velocities.data()[3 * i + 1] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
-        m_eigen_velocities.data()[3 * i + 2] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
+        m_eigen_velocities.data()[3 * i + 0] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
+        m_eigen_velocities.data()[3 * i + 1] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
+        m_eigen_velocities.data()[3 * i + 2] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
     }
 
     double iter = 0;
@@ -3580,9 +3596,9 @@ void SimpleMD::Rattle()
     ApplyExternalPotentials();
 
     for (int i = 0; i < m_natoms; ++i) {
-        m_eigen_velocities.data()[3 * i + 0] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
-        m_eigen_velocities.data()[3 * i + 1] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
-        m_eigen_velocities.data()[3 * i + 2] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
+        m_eigen_velocities.data()[3 * i + 0] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
+        m_eigen_velocities.data()[3 * i + 1] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
+        m_eigen_velocities.data()[3 * i + 2] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
 
         //m_gradient[3 * i + 0] = m_eigen_gradient.data()[3 * i + 0];
         //m_gradient[3 * i + 1] = m_eigen_gradient.data()[3 * i + 1];
@@ -4896,14 +4912,19 @@ void SimpleMD::NoseHover()
     for (int i = 0; i < m_natoms; ++i) {
         kinetic_energy += 0.5 * m_eigen_masses.data()[3 * i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
     }
+    // Claude Generated (Sep 2026): see Verlet(). The Nose-Hoover chain propagates in the SAME
+    // time unit as the integrator it scales, so it takes the converted step too. m_Q is an
+    // ad-hoc energy scale (kb*T0*dof*100), so the chain's effective time constant carries this
+    // unit; it is unchanged relative to the integrator, which is what matters for stability.
+    const double dt = m_dT * CurcumaUnit::Constants::FS_TO_MD_TIME;
     // Update der Thermostatkette
-    m_xi[0] += 0.5 * m_dT * (2.0 * kinetic_energy - m_dof * m_T0 * kb_Eh) / m_Q[0];
+    m_xi[0] += 0.5 * dt * (2.0 * kinetic_energy - m_dof * m_T0 * kb_Eh) / m_Q[0];
     for (int j = 1; j < m_chain_length; ++j) {
-        m_xi[j] += 0.5 * m_dT * (m_Q[j - 1] * m_xi[j - 1] * m_xi[j - 1] - m_T0 * kb_Eh) / m_Q[j];
+        m_xi[j] += 0.5 * dt * (m_Q[j - 1] * m_xi[j - 1] * m_xi[j - 1] - m_T0 * kb_Eh) / m_Q[j];
     }
 
     // Update der Geschwindigkeiten
-    double scale = exp(-m_xi[0] * m_dT);
+    double scale = exp(-m_xi[0] * dt);
     for (int i = 0; i < m_natoms; ++i) {
         m_eigen_velocities.data()[3 * i + 0] *= scale;
         m_eigen_velocities.data()[3 * i + 1] *= scale;

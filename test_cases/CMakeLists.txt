@@ -571,3 +571,20 @@ if(Python3_Interpreter_FOUND)
     set_tests_properties(gradient_unit_contract
         PROPERTIES TIMEOUT 300 LABELS "gradient;frequencies;native_xtb;gfnff")
 endif()
+
+# Claude Generated (Sep 2026): MD time-axis contract — one reported femtosecond must be
+# one femtosecond. SimpleMD integrates in Angstrom/amu/Hartree, whose implied time unit is
+# sqrt(amu*A^2/Eh) = 1.9516144 fs; until Sep 2026 the user's -md.time_step was handed to the
+# integrator unconverted, so every MD ran 1.9516x faster than requested and -MaxTime was
+# stretched by the same factor. Energy conservation CANNOT see this (a consistent integrator
+# conserves energy in any time unit), so the test ties the MD clock to the Hessian frequency,
+# which is measured outside MD and is itself validated against xtb 6.7.1 to 0.13 %.
+# Verified to FAIL on a pre-fix binary: gfnff 1.9536, gfn2 1.9520 (method-independent).
+if(Python3_Interpreter_FOUND)
+    add_test(NAME md_time_axis
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/check_md_time_axis.py
+                     $<TARGET_FILE:curcuma>)
+    set_tests_properties(md_time_axis
+        PROPERTIES TIMEOUT 600 LABELS "md;frequencies;native_xtb;gfnff")
+endif()
