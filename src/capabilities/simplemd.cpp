@@ -942,6 +942,36 @@ bool SimpleMD::Initialise()
     // A nested silent helper constructed during setup leaves the thread level at 0
     // otherwise, and every level-1 message of this run (REACT events included) is lost.
     CurcumaLogger::set_thread_verbosity(m_verbosity);
+    // Claude Generated (Sep 2026): rev-gfnff react MD, time-step advisory. Under the conserving
+    // valence share a topology transition is blended over a fixed window in the bond ORDER; the
+    // bo3 switch is steepest for the smallest covalent sum, so for an H-H pair that window is only
+    // ~0.09 A wide in DISTANCE - about two MD steps for a hot hydrogen. One step then carries the
+    // whole corner gap as a large but SMOOTH spike (no discontinuity: halving dt removes it, the
+    // static potential along the same path changes by +5.9 kJ/mol where the MD jumps by +393).
+    // Measured, WORK_STATUS package 7 / docs/REV_GFNFF_STAGE3A.md 2.1. This is an operating
+    // recommendation only - the default time step is deliberately NOT changed here.
+    // The condition is the share form alone; the well form (rev_well_form) is not the mechanism.
+    if (m_method == "revgfnff" || m_method == "gfnff-rev") {
+        std::string topology_mode = ec_config.value("topology_mode", std::string("auto"));
+        std::string share_form = ec_config.value("rev_share_form", std::string("conserving"));
+        if (ec_config.contains("gfnff") && ec_config["gfnff"].is_object()) {
+            topology_mode = ec_config["gfnff"].value("topology_mode", topology_mode);
+            share_form = ec_config["gfnff"].value("rev_share_form", share_form);
+        }
+        constexpr double rev_react_dt_advice = 0.125; // fs, the measured safe point
+        if (topology_mode == "react" && share_form == "conserving" && m_dT > rev_react_dt_advice) {
+            CurcumaLogger::warn(fmt::format(
+                "rev-gfnff react MD at time_step {:.3f} fs with rev_share_form=conserving (the default): "
+                "a topology transition is blended over a fixed window in BOND ORDER, which for an H-H pair "
+                "is only ~0.09 A wide in distance - about 2 MD steps for a hot hydrogen. A single step can "
+                "then carry the whole corner gap (median 153, max 390 kJ/mol) as a large but SMOOTH energy "
+                "spike; the thermostat recovers and no rebuild is discontinuous. Measured on c2h6 at 2000 K, "
+                "dt 0.25 -> 0.125 fs takes the per-step maximum from 800.1 to 38.7 kJ/mol and T_max from "
+                "28392 to 5579 K. For quantitative react-mode runs use -md.time_step {:.3f} (2x wall time). "
+                "Detail: docs/REV_GFNFF_STAGE3A.md section 2.1",
+                m_dT, rev_react_dt_advice));
+        }
+    }
     // The energy calculator runs one level below the run: quiet at the default -v 1,
     // its own per-call output appears from -v 2. Reaction events are reported by
     // SimpleMD itself (flushReactEvents), independent of this level.

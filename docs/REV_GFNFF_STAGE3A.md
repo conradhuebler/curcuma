@@ -265,6 +265,40 @@ the combination, and that is **two bond types out of 32**: `ncl3_N-Cl` 20.10 -> 
 22.51. It is the conserving share, not the well form and not the donor rule (identical with
 `-gfnff.rev_share_donor_rule false`). The median is a fragile statistic under one large mover.
 
+### 2.2 Recommended MD settings (operating recommendation, not a default change)
+
+**Use `-md.time_step 0.125` for quantitative react-mode MD with the conserving share.** This is the
+mitigation option 2 of `WORK_STATUS.md` 7.8, adopted by the operator on 2026-09-20 as a
+**recommendation only**: no default value changed, and the transition-window code of section 2.1
+was deliberately left alone (redefining the window in distance instead of bond order is a separate,
+deferred decision).
+
+Why 0.125 fs: the jump of section 2.1 is a resolution failure of the integrator, not a step in the
+potential, so halving the step removes it. Measured on the worst known cell, `c2h6/T2000_f0` with
+the shipped defaults (`conserving` + `mg`), 5 ps, `-threads 1`:
+
+| `-md.time_step` / fs | rebuilds | per-step max / kJ/mol | steps >= 50 kJ/mol | T_max / K |
+|---:|---:|---:|---:|---:|
+| 0.25 (the effective default, see below) | 76 | **800.1** | 62 | **28 392** |
+| **0.125 (recommended)** | 102 | **38.7** | **0** | 5 579 |
+| 0.0625 | 44 | 13.5 | 0 | 5 441 |
+
+Cost: 2x wall time per picosecond. No falsifier moves (the equilibrium, class-A, class-C and
+gradient checks are time-step independent by construction), and nothing about the model changes.
+
+**The effective default is 0.25 fs, so this applies to a plain react run with no flags.**
+`-md.time_step` itself defaults to 1.0 fs, but `-method revgfnff` clamps it to `-md.rev_dt_cap`
+(default **0.25 fs**, stage 1, `docs/REV_GFNFF_STAGE1.md`) with a warning. 0.25 fs is exactly the
+step at which the tail of section 2.1 lives.
+
+`SimpleMD` therefore prints a one-time startup warning (Claude Generated, Sep 2026,
+`simplemd.cpp::Initialise`) when **all** of these hold: `-method revgfnff` (or `gfnff-rev`),
+`-gfnff.topology_mode react`, `-gfnff.rev_share_form conserving` (the default), and an effective
+time step above 0.125 fs. The gate is the share form alone — the well form is not the mechanism
+(section 2.1) — so `-gfnff.rev_share_form delivered` does not warn with any well form, and neither
+does a non-react run. The warning is advisory: the spikes are smooth and bounded, the thermostat
+recovers, hard swaps stay 0 and every rebuild reports `dE_jump 0.000000`.
+
 ---
 
 ## 3. What was tested, what was not, what is not implemented
@@ -288,8 +322,9 @@ flags except the ones tabulated above.
 - the react-MD tail of section 2.1 — **root-caused** (the conserving share makes a transient
   geminal H2 free instead of +124 kJ/mol unfavourable, and the stage-1b break window for an H-H
   pair is only ~2 time steps wide at dt = 0.25 fs), **not fixed**: every remedy is a redesign of
-  either the share rule or the transition window. `dt = 0.125 fs` removes it. Five costed options
-  in `WORK_STATUS.md` 7.8;
+  either the share rule or the transition window. `dt = 0.125 fs` removes it and is now the
+  documented recommendation (section 2.2) plus a startup warning; the window redesign is deferred.
+  Five costed options in `WORK_STATUS.md` 7.8;
 - `ncl3_N-Cl`, the one class-A bond type the conserving share makes worse (rms 20.10 -> 23.57);
 - the proton-shared dimers H5O2+ and N2H7+, where the charge is split over two groups so that
   neither the charge rule nor the donor rule grants a full budget — both modes stay 120-158

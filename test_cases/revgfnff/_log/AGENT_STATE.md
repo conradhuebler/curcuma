@@ -55,7 +55,28 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 
 ## Live agents
 
-**2026-09-19 night: `package-7` DONE — CORRECTS package 6's framing.** No agent running. One
+**2026-09-20: `package-8` DONE — package 7's option (ii) shipped as a WARNING, no default changed.**
+No agent running. One local commit, nothing pushed. Detail `WORK_STATUS.md` 8.1-8.5
+(`Packages done: 8/8`), `docs/REV_GFNFF_STAGE3A.md` new section 2.2 "Recommended MD settings".
+
+- **Operator decision (2026-09-20)**: adopt `-md.time_step <= 0.125 fs` for react-mode MD with the
+  conserving share as an **operating recommendation** — warn at run start and document it — and do
+  NOT change the default time step. The structural fix (transition window in distance instead of
+  bond order, package 7 option 1) stays **deferred**; the window code was not touched.
+- **The effective default time step is 0.25 fs, not 1.0**: `-md.time_step` defaults to 1.0 but
+  `-method revgfnff` clamps it to `-md.rev_dt_cap` (default 0.25, stage 1). So the warning fires
+  for a plain no-flag react run — 0.25 fs is exactly where package 7's tail lives.
+- **Warning gate** (`SimpleMD::Initialise`, `CurcumaLogger::warn`, once per run, verbosity >= 1):
+  `revgfnff|gfnff-rev` AND `topology_mode == react` AND `rev_share_form == conserving` AND
+  `dt > 0.125`. The **well form is deliberately not in the gate** (package 7.5: `mg` changes the
+  frequency, not the mechanism). Verified on 10 cases: fires for conserving at dt 0.25 (explicit,
+  clamped-default, `gauss` well, flat `-rev_share_form conserving`), silent for dt 0.1, for
+  `delivered` with either well form, for `topology_mode auto` and for plain `gfnff`.
+- **Inert**: `gfnff` caffeine -4.6727370686 unchanged, `ctest -R "gfnff|sqm_val|react|cli_simplemd_|cli_gfnff_"`
+  **113/113** (tests 16/18/20 run the warning's own trigger combination and pass unchanged).
+  Binary `4c323b80`.
+
+**Earlier, 2026-09-19 night: `package-7` DONE — CORRECTS package 6's framing.** No agent running. One
 local commit `7d028e8a` (diagnostic only, no default changed), parent `df928122`. Full detail
 `WORK_STATUS.md` 7.1-7.10, `docs/REV_GFNFF_STAGE3A.md` 2.1 rewritten.
 

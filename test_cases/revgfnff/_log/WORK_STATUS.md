@@ -1,5 +1,5 @@
-# WORK_STATUS — rev-gfnff work packages 1-7 (2026-09-18 / 19)
-Packages done: 7/7
+# WORK_STATUS — rev-gfnff work packages 1-8 (2026-09-18 / 20)
+Packages done: 8/8
 
 AI-generated, machine-tested. Repository `/home/conrad/src/curcuma_branches/curcuma`, branch
 `reactff2-llm`, start HEAD `265a18b0`. Every measurement was taken with a FROZEN copy of the
@@ -997,3 +997,79 @@ one cell per arm. Second: a per-step energy jump that disappears when the time s
 not a discontinuity of the potential; that one command separates "the model has a step in it" from
 "the integrator cannot resolve a smooth switch" and should be the first thing run on any future
 react-MD smoothness complaint.
+
+---
+
+## Package 8 — the time-step recommendation, warned and documented (2026-09-20)
+
+Operator decision on package 7's option 2: **adopt `dt <= 0.125 fs` as an operating recommendation
+for react-mode MD with the conserving share — warn and document, do NOT change the default
+`-md.time_step`.** The structural fix (redefining the transition window in distance rather than in
+bond order, option 1) stays deferred; the window code was not touched. Binary `4c323b80`
+(HEAD `c72ee621` + this change).
+
+### 8.1 The effective default time step — it is 0.25 fs, not 1.0
+
+`-md.time_step` has PARAM default **1.0 fs** (`simplemd.h`), but `LoadControlJson` clamps it for
+`-method revgfnff|gfnff-rev` to `-md.rev_dt_cap`, PARAM default **0.25 fs** (`simplemd.cpp:309-315`,
+stage 1), printing its own warning. So a react run with no time-step flag runs at **0.25 fs** —
+exactly the step at which package 7's tail lives, and the warning below therefore fires for the
+common no-flag case rather than for an exotic one. It is worded accordingly.
+
+### 8.2 The warning
+
+One-time, at MD initialisation (`SimpleMD::Initialise`, right after the thread verbosity is
+re-asserted — earlier is unsafe, Known Issue #31), `CurcumaLogger::warn`, i.e. verbosity >= 1,
+plain ASCII. Gate, all four required:
+
+`m_method in {revgfnff, gfnff-rev}` AND `topology_mode == react` AND `rev_share_form == conserving`
+AND `m_dT > 0.125` (the measured safe point, a named constant next to the test).
+
+`topology_mode` and `rev_share_form` are read from `ec_config` exactly the way the existing RATTLE
+refusal reads `topology_mode` — the `gfnff` sub-scope first, the flat key as fallback — so both
+`-gfnff.rev_share_form X` and the auto-routed flat `-rev_share_form X` are seen (verified, 8.3 g/h).
+**The well form is deliberately NOT in the gate**: package 7.5 showed `mg` changes how often the
+tail is visited, not the mechanism, and `gauss + conserving` reaches the larger maximum.
+
+Text (one line in the log):
+
+> rev-gfnff react MD at time_step 0.250 fs with rev_share_form=conserving (the default): a topology
+> transition is blended over a fixed window in BOND ORDER, which for an H-H pair is only ~0.09 A
+> wide in distance - about 2 MD steps for a hot hydrogen. A single step can then carry the whole
+> corner gap (median 153, max 390 kJ/mol) as a large but SMOOTH energy spike; the thermostat
+> recovers and no rebuild is discontinuous. Measured on c2h6 at 2000 K, dt 0.25 -> 0.125 fs takes
+> the per-step maximum from 800.1 to 38.7 kJ/mol and T_max from 28392 to 5579 K. For quantitative
+> react-mode runs use -md.time_step 0.125 (2x wall time). Detail: docs/REV_GFNFF_STAGE3A.md
+> section 2.1
+
+### 8.3 Verification — 10 cases, `c2h6` frame 16, 2000 K, `-maxtime 10`, binary `4c323b80`
+
+| case | invocation (beyond `-md input.xyz`) | warning |
+|---|---|---:|
+| a | `-method revgfnff -gfnff.topology_mode react -md.time_step 0.25` | **1** |
+| a2 | same, NO time-step flag (clamped 1.0 -> 0.25) | **1** |
+| b | `... react -md.time_step 0.1` | 0 |
+| c1 | `... react -gfnff.rev_share_form delivered -gfnff.rev_well_form mg -md.time_step 0.25` | 0 |
+| c2 | `... react -gfnff.rev_share_form delivered -gfnff.rev_well_form gauss -md.time_step 0.25` | 0 |
+| d | `-method gfnff -md.time_step 0.25` (no react, not rev) | 0 |
+| e | `... react -gfnff.rev_well_form gauss -md.time_step 0.25` (conserving default) | **1** |
+| f | `-method revgfnff -md.time_step 0.25`, topology_mode auto | 0 |
+| g | `... react -rev_share_form delivered -md.time_step 0.25` (flat flag) | 0 |
+| h | `... react -rev_share_form conserving -md.time_step 0.25` (flat flag) | **1** |
+
+Exit code 0 in all ten; the count is the number of matching lines in the whole run log, i.e. the
+warning is printed once per run, not per step.
+
+### 8.4 Inertness and regression
+
+Logging and documentation only, no numerical path touched: `gfnff` caffeine **-4.6727370686** Eh
+(`-sp -verbosity 3`), unchanged. `export CURCUMA=$PWD/build_rev/curcuma;
+ctest -R "gfnff|sqm_val|react|cli_simplemd_|cli_gfnff_"` gives **113/113** — no test greps the MD
+startup block strictly enough to notice a new warning line (tests 16/18/20 run exactly the
+warning's trigger combination and pass unchanged).
+
+### 8.5 Files
+
+`src/capabilities/simplemd.cpp` (the warning), `docs/REV_GFNFF_STAGE3A.md` (new section 2.2
+"Recommended MD settings" + the open-item bullet of section 3 now points at it), `AIChangelog.md`
+(one line), this file.
