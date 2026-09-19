@@ -56,7 +56,10 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 ## Live agents
 
 **2026-09-20: `package-9` DONE — 3a(iii) step 2 and 3b BOTH delivered, both OPT-IN, no default
-flipped.** No agent running. Three local commits, nothing pushed. Binary `89a587bb`.
+flipped.** No agent running. Four local commits, nothing pushed. Binary `89a587bb` — note that
+`build_rev/curcuma` embeds `git describe`, so the md5 changes on every commit with no source
+change (`89a587bb` -> `7f2e2504`, verified identical: 5/5 well forms to 12 digits, 9/9 react-MD
+cells). Use the trajectory fingerprint, not the md5, to compare builds across commits here.
 
 - `-gfnff.rev_well_form mg2` (free curvature + r0 re-solve) and `mg3` (bond-order-resolved),
   table `src/core/energy_calculators/ff_methods/rev_well_table_v2.h`.

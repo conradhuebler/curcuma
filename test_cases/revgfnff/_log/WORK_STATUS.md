@@ -1084,6 +1084,15 @@ Operator decision 2026-09-20: build the two pieces the roadmap lists as "not sta
 Binary for every number below: **`89a587bb0eb7bb60ba86608f8aed8129`** (`cur_v6`), frozen before
 use. The fit that produced the table ran on `04fd1882`/`dc1bbd90` (same gauss/mg behaviour).
 
+**Provenance caveat, measured rather than assumed**: the binary's md5 is NOT reproducible across
+commits. `build_rev/curcuma` embeds `git describe` (`curcuma -version`), so re-linking the SAME
+source after a commit changes the md5 — here `89a587bb` (`...-117-ge688254b`) became `7f2e2504`
+(`...-125-gfa161a06`) with no source change at all. Checked, not inferred: all five well forms
+agree to 12 digits on the four reference single points, and 9 of 9 react-MD cells (c2h6 T2000
+f0/f10/f23 x {mg, mg2, mg3}) reproduce rebuild count, per-step max, n >= 50 and T_max exactly.
+So "same md5" is the wrong identity test for this tree; the trajectory fingerprint is the right
+one (memory `revgfnff-run-provenance-fingerprint`).
+
 ### 9a.0 The guardrail, verified at the level that can actually see it
 
 `gauss`, `mg` and `erfmorse` are **bit-identical to the pre-session binary `4c323b80`**:
