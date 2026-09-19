@@ -3,6 +3,30 @@
 > 🤖 AI-generated, machine-tested. Measurements from Sep 18, 2026 on 36 cores / 4x RTX A4500,
 > commit 05d40030. Human production testing pending.
 
+> # ⚠ EVERY TIME ON THIS PAGE IS IN THE OLD, WRONG SCALE
+>
+> **Commit `ef462fcf` (Sep 19, 2026) fixed the MD time step.** Until then SimpleMD advanced
+> **1.9516 fs per requested femtosecond**, because the step multiplied a velocity in
+> sqrt(Eh/amu) as though it were Angstrom per femtosecond. The integrator was internally
+> consistent, so energies, forces, temperature and energy conservation were all correct - only
+> the clock was wrong. Proof: an O-H stretch whose Hessian frequency is 3635.7 cm^-1 (period
+> 9.1745 fs) completed one oscillation in **4.6961 fs** of reported time; after the fix it takes
+> 9.1663 fs. Measured for GFN-FF, GFN2 and GFN1 alike - the integrator never sees the method.
+>
+> **Consequence for this page**: every `-dt` and every duration below has to be multiplied by
+> **1.9516** to read as what was actually simulated. `-dt 1.0` was 1.95 fs, `-dt 0.5` was
+> 0.98 fs, `-dt 0.25` was 0.49 fs, and a "300 fs" run covered 586 fs. That also **explains the
+> whole page**: the GFN-FF O-H period is 9.17 fs, so the failing runs were sampling it 4.7 times
+> per period, far below the ~20 that an unconstrained X-H bond needs, while `-dt 0.25` reached
+> 18.8 and behaved. The `-hydrogen_mass 4` row worked for the same arithmetic - four times the
+> mass halves the frequency and restores the sampling.
+>
+> The *physics* described below (a single water molecule collapsing, the per-atom energy
+> concentration, the local rejection criterion) is unchanged and was measured on real
+> trajectories. Only the labels on the time axis are wrong. **The numbers have not yet been
+> re-measured with the corrected clock**; until they are, do not take any recipe here as a
+> production setting.
+
 `docs/MULTI_GPU.md` recorded that an MD of `test_cases/molecules/larger/polymer_2x.xyz` heats
 from 298 K to 20476 K within 40 fs, and attributed it to the structure not being pre-optimised.
 That attribution was wrong. This page is what the measurement says instead.
@@ -37,18 +61,27 @@ That attribution was wrong. This page is what the measurement says instead.
 >
 > > **Correction (Sep 19, 2026, later the same night): that dt² ratio is real but the conclusion
 > > drawn from it - "ordinary velocity-Verlet truncation error" - was wrong.** Truncation error
-> > is a property of the whole system and grows with it; this is one molecule. Four measurements
-> > settle it, all NVE, dt = 0.5, 200 fs, seed 1, from the same GFN-FF-optimised geometry:
+> > is a property of the whole system and grows with it; this is one molecule.
 > >
-> > | system | atoms | dE |
+> > **A split experiment, and the trap in it.** All NVE, dt = 0.5, seed 1, from the same
+> > GFN-FF-optimised geometry:
+> >
+> > | system | atoms | dE over 200 fs |
 > > |---|---:|---:|
-> > | water cut out of polymer_2x, alone | 4500 | **-0.176 Eh** |
-> > | the polymer alone, water removed | 2820 | **+0.021 Eh** |
-> > | both together | 7320 | **+45 Eh** |
+> > | water cut out of polymer_2x, alone | 4500 | -0.176 Eh |
+> > | the polymer alone, water removed | 2820 | +0.021 Eh |
 > > | pure water, 300 / 1200 / 2400 atoms | | +0.002 / +0.009 / +0.165 Eh |
+> > | **both together** | **7320** | **+0.069 Eh** |
 > >
-> > Each half conserves the energy, and 4500 atoms of water conserve it as well as 300 do - so it
-> > is neither the size nor a generic integration error. **It is a single water molecule
+> > **Read that last row before drawing the obvious conclusion.** The full system conserves over
+> > 200 fs just as well as its halves do - the event happens at about 260 fs. An earlier version
+> > of this table put "+45 Eh" in that row, which was the 300 fs number scaled by 200/300 rather
+> > than a measurement, and so appeared to show that only the *combination* fails. It does not
+> > show that: at 200 fs nothing fails, and the halves were never run to 300 fs. What the table
+> > does establish is the weaker but still useful statement that **4500 atoms of water behave
+> > exactly like 300 over the same window**, i.e. there is no size-driven drift.
+> >
+> > The real evidence is per atom. **It is a single water molecule
 > > collapsing.** In the frame where the run breaks, 12 of the 7320 atoms hold **99.0 %** of the
 > > kinetic energy, and the hottest two are the hydrogens of one water (indices 6522/6523/6524);
 > > in every healthy frame before it the hottest atom sits at a steady 15-23x the per-atom mean,
@@ -65,6 +98,21 @@ That attribution was wrong. This page is what the measurement says instead.
 > > the 245 K the run was actually at, i.e. thermally unreachable. So the collapse was driven by
 > > the integration, and once the angle is below ~30° every further step is unresolvable: at
 > > 34.9 Eh/A a 0.5 fs step displaces a hydrogen by 1.1 A.
+> >
+> > **And the energy is not accumulated - it appears in one window.** Cutting that same water
+> > out of every frame and computing its INTERNAL GFN-FF energy (3 atoms, against the lowest of
+> > 60 comparison waters as the zero) gives its excitation over the run:
+> >
+> > | t [fs] | 0 | 25 | 50 | 75 | 100 | 125 | 150 | 175 | 200 | 225 | 250 | **275** |
+> > |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+> > | kcal/mol | 0.01 | 0.10 | 0.01 | 0.27 | 0.24 | 0.41 | 0.27 | 0.34 | 0.33 | 0.05 | **0.18** | **7084** |
+> >
+> > Twenty randomly chosen other waters sit at a median of 0.26 and a maximum of 3.7 kcal/mol in
+> > the same frames. So 25 fs (50 steps) before it is destroyed, this molecule is not merely
+> > normal, it is **colder than average**. There is no slow build-up and no ratchet: the whole
+> > 7084 kcal/mol appears inside one 50-step window. An earlier version of this page said the
+> > molecule "was already fed ~120 kcal/mol by earlier bad steps" - that was inference, and this
+> > measurement contradicts it.
 > >
 > > Two candidate explanations were tested and **eliminated**: `-cleanenergy true`, which rebuilds
 > > the energy calculator every step, makes it *worse* (+173.7 Eh against +53.2 on a 300-atom
