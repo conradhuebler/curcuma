@@ -312,9 +312,17 @@ example). No source defect found — this is a design tension between the conser
 fixed-width transition window, characterized in full in `REV_GFNFF_STAGE3A.md` section 2.1, with
 five costed options none of which is built. **Shipped mitigation (2026-09-20, zero cost, no
 default changed)**: `SimpleMD` warns once at run start when react-mode MD uses
-`rev_share_form conserving` with `-md.time_step > 0.125` fs — see STAGE3A.md section 2.2. The
-structural fix (the transition window in distance, not bond order) stays deferred until a real
-run needs a larger time step and hits the warning.
+`rev_share_form conserving` with a time step above the measured safe point — see STAGE3A.md
+section 2.2. The structural fix (the transition window in distance, not bond order) stays
+deferred until a real run needs a larger time step and hits the warning.
+**Re-derived in TRUE femtoseconds (2026-09, package 10)**: every time above is in the old scale
+and must be multiplied by **1.9516144** (the MD time-step unit fix, `AIChangelog`) — the
+"dt 0.25 -> 0.125" collapse was really 0.488 -> 0.244 fs. Re-measured over all 130 cells at the
+same physical exposure, the warning threshold is now **0.0625 fs** (median per-step |dEpot| /
+cells above 100 kJ/mol: 51.8 / 25 at true 0.5 fs, 27.5 / 11 at 0.25, 13.1 / 10 at 0.125,
+6.3 / 0 at 0.0625). `rev_dt_cap`'s 0.25 default is now a genuine 0.25 fs, which halves every
+robust tail statistic for free but still sits above the safe point, so the warning still fires
+for a plain react run; the default was left unchanged for the operator to decide.
 
 Original (2026-09-19, kept for the numbers): the two flips looked better than the old default on
 the 20-cell grid's event COUNT (487 -> 271 steps >= 50 kJ/mol) and worse on its TAIL (per-step max

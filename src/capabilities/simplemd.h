@@ -778,7 +778,7 @@ private:
         "unit=K")
     PARAM(time_step, Double, 1.0, "Integration time step in femtoseconds.", "Basic", {"dt"},
         "tier=primary; unit=fs; min=0")
-    PARAM(rev_dt_cap, Double, 0.25, "Largest time step (fs) used with -method revgfnff; larger requested steps are clamped with a warning because the reactive blend is not integrable at 0.5 fs for hot X-H bonds. 0 disables the cap.", "Basic", {})
+    PARAM(rev_dt_cap, Double, 0.25, "Largest time step (fs) used with -method revgfnff; larger requested steps are clamped with a warning because the reactive blend is not integrable at ~1 fs for hot X-H bonds. 0 disables the cap. NOTE (Sep 2026): the value is unchanged but now means a REAL 0.25 fs - before the MD time-step unit fix the same number integrated 0.488 fs. For quantitative react-mode runs 0.0625 fs is the measured safe point (docs/REV_GFNFF_STAGE3A.md 2.2).", "Basic", {})
     PARAM(max_time, Double, 1000.0, "Maximum simulation time in femtoseconds.", "Basic", {"MaxTime"},
         "tier=primary; unit=fs; min=0")
     PARAM(charge, Int, 0, "Total charge of the system.", "Basic", {},

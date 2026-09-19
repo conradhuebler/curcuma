@@ -51,6 +51,47 @@
 # its own dE_jump statistic (tests 16/17) and is not what this test is about. That exclusion is
 # also why the metric is meaningful at all - the runaway carries NO topology event, which is
 # exactly why the dE_jump statistics of the 22-cell grid never saw it.
+#
+# ============================================================================================
+# KNOWN FAILING since the MD time-step unit fix (Sep 2026) - OPERATOR DECISION PENDING.
+# Nothing was changed here; the failure is left visible on purpose. Claude Generated (Sep 2026).
+#
+# SimpleMD's step is now converted from real femtoseconds into the integrator's own time unit
+# sqrt(amu*A^2/Eh) = 1.9516144 fs. Before that, "-md.time_step 0.25" above really integrated
+# 0.4879 fs and "-maxtime 5000" really ran 9.76 ps; the CSVR coupling and the COM-removal
+# interval are ratios/cadences in the same nominal fs and were stretched with it. The three arms
+# therefore now run at a genuinely 0.25 fs step, and the negative control no longer violates:
+#
+#   arm                                   pre-fix (real 0.4879 fs)     now (real 0.25 fs)
+#   gauss+delivered, fix_h on                59.26 kJ / 1.770 a0        25.40 kJ / 2.080 a0
+#   gauss+delivered, fix_h false (control) 2593.60 kJ / 0.559 a0        32.68 kJ / 2.120 a0
+#   shipped default (mg + conserving)        70.77 kJ / 1.536 a0        31.48 kJ / 1.994 a0
+#
+# The time-step fix is NOT implicated, proven rather than argued: restoring the OLD physical
+# regime on the FIXED binary - every dt-derived setting multiplied by 1.9516144204, i.e.
+#   -md.rev_dt_cap 0 -md.time_step 0.4879036051 -maxtime 9758.072102
+#   -md.coupling 19.516144204 -md.remove_com_motion 195.16144204
+# - reproduces all three arms EXACTLY: 59.26 / 2593.60 / 70.77 kJ and 1.770 / 0.559 / 1.536 a0.
+#
+# Why this is not a mechanical recalibration. Holding the discrete dynamics fixed (CSVR per-step
+# ratio 0.025, COM removal every 400 steps, 20000 steps) and varying only the true step length
+# gives, for the control arm (max per-step dEpot / min r(H-H)):
+#
+#   0.125  17.19/1.757   0.20  19.81/2.082   0.25  32.68/2.120   0.30  34.36/2.144
+#   0.35   45.21/1.986   0.40  52.39/2.098   0.45  49.31/1.969   0.4879 2593.60/0.559 VIOLATES
+#   0.50   65.99/1.930   0.55  91.20/1.941   0.60  641.62/0.458 VIOLATES
+#
+# The violation is not a threshold in dt - 0.45 and 0.50 sit on either side of 0.4879 and both
+# stay inside - it is a rare event of ONE chaotic trajectory that the step length reshuffles.
+# (-md.seed does not help: it does not change the initial velocities in this path, verified over
+# 8 seeds, all bit-identical.) Any "recalibrated" step would therefore be a lucky draw, so the
+# thresholds and flags were deliberately left untouched.
+#
+# The substantive question for the operator: the falsifier for -gfnff.rev_budget_fix_h now only
+# exists ABOVE the shipped 0.25 fs cap, so the default's justification needs either a new cell /
+# temperature that exposes the budget at 0.25 fs, or a re-scoping of what this test asserts.
+# Measurement and options: test_cases/revgfnff/_log/WORK_STATUS.md package 10.
+# ============================================================================================
 
 set -e
 

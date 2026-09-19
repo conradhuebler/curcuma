@@ -43,7 +43,17 @@ takes a tetrahedral theta0 - the consistent treatment is stage 3. What did help:
 transition window starts at the coordinate the scan actually saw (s = 0 by construction even
 when c moved 0.15 in one step) and s is a smoothstep in the window (C1 at both ends). So
 `revgfnff` MD is capped at **dt = 0.25 fs** (`-md.rev_dt_cap`, plain-printed warning + clamp, 0
-disables). Final numbers (3 x 3 runs): at 0.25 fs 2 H2 78-97 % of the jumps below 1 kJ/mol and
+disables).
+
+> **Time-scale note (Sep 2026).** Every "fs" on this page predates the MD time-step unit fix
+> (`CurcumaUnit::Constants::MD_TIME_UNIT_FS`, `AIChangelog`), so it must be multiplied by
+> **1.9516144** to read what was actually integrated: the cap's 0.25 was really 0.488 fs and the
+> "0.5 fs with the cap off" runs were 0.976 fs. The **PARAM value was not changed**, so the cap
+> now clamps to a genuine 0.25 fs — a real tightening by that factor, and every stability number
+> below is therefore conservative. Re-measured tail statistics at true fs:
+> `docs/REV_GFNFF_STAGE3A.md` section 2.2.
+
+Final numbers (3 x 3 runs): at 0.25 fs 2 H2 78-97 % of the jumps below 1 kJ/mol and
 100 % below 5 (max 1-3), N2 + 3 H2 96-99 % below 1, 99-100 % below 5 (max 4, one run 43); at 0.5 fs
 with the cap off 2 H2 and N2 + 3 H2 no longer explode (T_max 9.7-12.5 / 3.7-6.3 kK) but only
 80-93 % of the jumps stay below 5 kJ/mol, and the 4 H square still blows up in 1 of 3 runs.

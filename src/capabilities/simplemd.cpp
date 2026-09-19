@@ -949,6 +949,24 @@ bool SimpleMD::Initialise()
     // Measured, WORK_STATUS package 7 / docs/REV_GFNFF_STAGE3A.md 2.1. This is an operating
     // recommendation only - the default time step is deliberately NOT changed here.
     // The condition is the share form alone; the well form (rev_well_form) is not the mechanism.
+    //
+    // RE-DERIVED IN TRUE FEMTOSECONDS (Sep 2026, WORK_STATUS package 10). Every number package 7
+    // and package 8 measured was taken before the MD time-step unit fix, so each nominal "fs" was
+    // really 1.9516144 fs; the old threshold of 0.125 was a real 0.244 fs and was calibrated on a
+    // SINGLE cell. Re-measured over package 7's full 130 cells (3 systems x 2 T x every frame,
+    // 9.758 ps each = the same physical exposure, shipped defaults, one frozen binary):
+    //
+    //   true dt / fs   median   p90     max    cells>100kJ  cells>200kJ  T_max / K
+    //   1.0             97.8   347.1  1133.1        64           31      5.5e7
+    //   0.5             51.8   218.4   453.1        25           16      18928
+    //   0.25            27.5    64.8   483.0        11            9      11948
+    //   0.125           13.1    61.5   204.2        10            1      10405
+    //   0.0625           6.3    16.1    78.5         0            0       9321
+    //
+    // 0.0625 fs is the first true step at which NO cell exceeds 100 kJ/mol in one step; it also
+    // happens to be the old threshold rescaled (0.125 / 1.9516 = 0.0640), which is why the
+    // arithmetic prior and the measurement agree. The gate therefore fires above 0.0625 fs.
+    constexpr double rev_react_dt_advice = 0.0625; // fs, measured over 130 cells (package 10)
     if (m_method == "revgfnff" || m_method == "gfnff-rev") {
         std::string topology_mode = ec_config.value("topology_mode", std::string("auto"));
         std::string share_form = ec_config.value("rev_share_form", std::string("conserving"));
@@ -956,17 +974,20 @@ bool SimpleMD::Initialise()
             topology_mode = ec_config["gfnff"].value("topology_mode", topology_mode);
             share_form = ec_config["gfnff"].value("rev_share_form", share_form);
         }
-        constexpr double rev_react_dt_advice = 0.125; // fs, the measured safe point
         if (topology_mode == "react" && share_form == "conserving" && m_dT > rev_react_dt_advice) {
             CurcumaLogger::warn(fmt::format(
-                "rev-gfnff react MD at time_step {:.3f} fs with rev_share_form=conserving (the default): "
+                "rev-gfnff react MD at time_step {:.4f} fs with rev_share_form=conserving (the default): "
                 "a topology transition is blended over a fixed window in BOND ORDER, which for an H-H pair "
                 "is only ~0.09 A wide in distance - about 2 MD steps for a hot hydrogen. A single step can "
-                "then carry the whole corner gap (median 153, max 390 kJ/mol) as a large but SMOOTH energy "
-                "spike; the thermostat recovers and no rebuild is discontinuous. Measured on c2h6 at 2000 K, "
-                "dt 0.25 -> 0.125 fs takes the per-step maximum from 800.1 to 38.7 kJ/mol and T_max from "
-                "28392 to 5579 K. For quantitative react-mode runs use -md.time_step {:.3f} (2x wall time). "
-                "Detail: docs/REV_GFNFF_STAGE3A.md section 2.1",
+                "then carry the whole corner gap as a large but SMOOTH energy spike; the thermostat recovers "
+                "and no rebuild is discontinuous. Measured over 130 cells (c2h6/ch3nh2/ch4_H, 1000 and "
+                "2000 K, 9.76 ps each), the per-step maximum |dEpot| has median / cells above 100 kJ/mol "
+                "of 51.8 / 25 at 0.5 fs, 27.5 / 11 at 0.25 fs, 13.1 / 10 at 0.125 fs and 6.3 / 0 at "
+                "0.0625 fs. For quantitative react-mode runs use -md.time_step {:.4f} - the smallest step "
+                "at which no cell exceeds 100 kJ/mol (4x the wall time of the 0.25 fs default cap). "
+                "NOTE: every time here is a REAL femtosecond; before Sep 2026 the integrator ran "
+                "1.9516x faster than the requested step, so older recommendations read 1.9516x too large. "
+                "Detail: docs/REV_GFNFF_STAGE3A.md section 2.2",
                 m_dT, rev_react_dt_advice));
         }
     }

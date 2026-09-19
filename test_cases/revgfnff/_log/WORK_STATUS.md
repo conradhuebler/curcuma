@@ -1,5 +1,10 @@
-# WORK_STATUS — rev-gfnff work packages 1-9 (2026-09-18 / 20)
-Packages done: 9/9 (9 = 9a + 9b)
+# WORK_STATUS — rev-gfnff work packages 1-10 (2026-09-18 / 20)
+Packages done: 10/10 (9 = 9a + 9b)
+
+> **Package 10 re-scales the time axis of everything before it.** The MD time step was integrated
+> in the wrong unit until Sep 2026, so every "fs" and every duration written by packages 1-9 is
+> **1.9516144x** larger than stated. Multiply before quoting any of them. Package 10 re-derives the
+> react-MD dt characterization and the mg/mg2/mg3 smoothness comparison in true femtoseconds.
 
 AI-generated, machine-tested. Repository `/home/conrad/src/curcuma_branches/curcuma`, branch
 `reactff2-llm`, start HEAD `265a18b0`. Every measurement was taken with a FROZEN copy of the
@@ -1360,3 +1365,215 @@ change cost more" mechanism, with mg2 (same form, no order dimension) already at
   `-batch_reuse_topology true`, which keeps the reactant image's topology for the whole path and
   gives 8.06 on this binary. All arms above use the same (fresh-perception) protocol, so the
   comparison between them is valid; the absolute value is not comparable with package 4's.
+
+---
+
+# Package 10 — the MD time-step unit fix, and everything rev-gfnff measured re-derived in TRUE fs
+
+AI-generated, machine-tested. Branch `reactff2-llm`, start HEAD `f1ea50d5` (clean). Binaries frozen
+per phase: `curcuma_pre` md5 `7f2e2504` (HEAD, pre-fix), `curcuma_post` md5 `46dbfbef` (core fix),
+`curcuma_final` (fix + warning re-threshold + PARAM help). Harness in
+`.../scratchpad/p10/` (`rundt.sh`, `sweep.sh`, `agg.py`, `jump.py`, `probe_clock.py`, `nve.py`,
+`t20fix.sh`). Every number below was taken with a frozen copy; the md5 stands in each run
+directory's `wall.txt`.
+
+## 10.1 The bug and the constant
+
+`SimpleMD` integrates in Angstrom / amu / Hartree. Velocities are `sqrt(kb_Eh*T/m)`, i.e.
+`sqrt(Eh/amu)`, so the step multiplying a velocity to give an Angstrom carries the unit
+`A*sqrt(amu/Eh) = sqrt(amu*A^2/Eh)`. Derived three independent ways from curcuma's own CODATA-2018
+constants, all agreeing to 10 digits:
+
+| route | value |
+|---|---|
+| `sqrt(ATOMIC_MASS_UNIT * 1e-20 / (HARTREE_TO_KJMOL*1000/AVOGADRO))` | 1.9516144204 fs |
+| `sqrt(1.66053906660e-27 * 1e-20 / 4.3597447222071e-18)` (CODATA Eh) | 1.9516144204 fs |
+| `sqrt(AMU_TO_AU) * ANGSTROM_TO_BOHR` = 80.68242 atomic time units | 1.95161442 fs |
+
+The user's `-md.time_step` was handed to the integrator unconverted, so **every curcuma MD ran at
+1.9516144x the requested step and `-MaxTime` was stretched by the same factor**, for every method
+and every caller of `SimpleMD`. Found on `origin/feature/multi-gpu` (`ef462fcf`); re-implemented
+here directly rather than cherry-picked, because that commit's diff also touches an adaptive
+step-rejecting integrator this branch does not have.
+
+(Noticed while there, **not** changed: `CurcumaUnit::Constants::ATOMIC_TIME_TO_FS` and
+`CurcumaUnit::Time::ATOMIC_TIME_TO_FS` are both `24.188843265857`, which is aut -> ATTOseconds, not
+femtoseconds — off by 1000. Neither has a single use site anywhere in `src/`, so nothing is wrong
+today; it is a loaded gun for the next person who reaches for it.)
+
+## 10.2 The evidence (A.2 / A.3 / A.4)
+
+**Frequency cross-check** — water relaxed with the method under test (`-opt.optimizer lbfgs`),
+Hessian frequencies (a path validated against xtb 6.7.1 to 0.13 %, Known Issue #28), one O-H
+stretched by 0.006 A, the local-mode period read off an NVE trajectory at ~0 K:
+
+| method | local mode / cm-1 | period expected / fs | MD reports, PRE | ratio | MD reports, POST | dev |
+|---|---:|---:|---:|---:|---:|---:|
+| gfnff | 3635.9 | 9.1742 | 4.6961 | 1.9536 | 9.1663 | -0.09 % |
+| gfn2 | 3646.6 | 9.1474 | 4.6861 | 1.9520 | 9.1466 | -0.01 % |
+| gfn1 | 3730.8 | 8.9409 | 4.5825 | 1.9511 | 8.9428 | +0.02 % |
+
+Method-independent, as it must be: the integrator only ever sees a gradient in Eh/Angstrom.
+
+**The scheme is untouched, proven not argued**: the pre-fix binary at `-dt 0.25` and the fixed one
+at `-dt 0.4879036051` (= 0.25 x 1.9516144204) give **bit-identical** trajectories — CH4 / gfnff /
+NVE / 202 frames, max |dx| = **0.000e+00 Angstrom**.
+
+**NVE conservation still scales as dt^2** (rms fluctuation of Etot over 1 ps, `-thermostat none`):
+CH4 gfnff 4.14e-06 / 1.03e-06 at dt 0.5 / 0.25 (ratio 4.01), CH4 gfn2 7.01e-06 / 1.68e-06 (4.17),
+H2O gfn2 1.16e-05 / 4.06e-06 (2.87). Below dt 0.125 the series flattens against the 1e-6 Eh print
+precision. H2O + gfnff shows a dt-independent ~1.3e-5 Eh floor — **pre-existing**, reproduced on
+the pre-fix binary at matched native steps (1.65e-05 / 1.40e-05 / 9.3e-06 / 1.33e-05), not related
+to this fix.
+
+**Every static path is byte-identical**: `-dump_gradient` files (12-digit energy, 15-digit
+gradients) for gfnff / revgfnff / gfn2 on caffeine, C6H6 and H2O — 9 of 9, `diff -r` clean.
+
+**New ctest `md_time_axis`** (`test_cases/check_md_time_axis.py`) locks the clock to the Hessian
+frequency for gfnff and gfn2; passes on the fixed binary (0.23 s), fails on the pre-fix one with
+the factors above.
+
+## 10.3 ctest blast radius
+
+Full suite, same machine, same `build_rev`, `CURCUMA` pointed at the frozen binary:
+
+| | failures | which |
+|---|---:|---|
+| PRE (baseline) | 12 / 304 | 11 known pre-existing + `md_time_axis` (fails BY DESIGN — that is the test working) |
+| POST | 12 / 304 | the same 11 pre-existing + **`cli_simplemd_20_gfnff_rev_h_budget`** |
+
+The 11 pre-existing: `confscan_dtemplate`, `test_orca_interface`, `xtb_cpscf`,
+`cli_curcumaopt_07_opt_multixyz`, `cli_confscan_01..07`. `cli_simplemd_16/18/19` — the three the
+brief flagged as candidates — **pass unchanged**; their criteria (slope, mean, event counts) turned
+out to be time-scale robust.
+
+**`cli_simplemd_20` is FLAGGED, not recalibrated** (see the new header block in its `run_test.sh`).
+Its negative control (`-gfnff.rev_budget_fix_h false`) must violate both bounds and no longer does:
+
+| arm | PRE (real 0.4879 fs) | POST (real 0.25 fs) |
+|---|---|---|
+| gauss+delivered, fix_h on | 59.26 kJ / 1.770 a0 | 25.40 / 2.080 |
+| gauss+delivered, fix_h false (control) | **2593.60 kJ / 0.559 a0** | 32.68 / 2.120 |
+| shipped default | 70.77 / 1.536 | 31.48 / 1.994 |
+
+The time-step fix is not implicated: restoring the OLD physical regime on the FIXED binary
+(`-md.rev_dt_cap 0 -md.time_step 0.4879036051 -maxtime 9758.072102 -md.coupling 19.516144204
+-md.remove_com_motion 195.16144204`, i.e. every dt-derived setting x 1.9516144204) reproduces all
+three arms **exactly**: 59.26 / 2593.60 / 70.77 kJ and 1.770 / 0.559 / 1.536 a0.
+
+It is **not** a mechanical recalibration, because there is no dt to recalibrate TO. Holding the
+discrete dynamics fixed (CSVR per-step ratio 0.025, COM removal every 400 steps, 20000 steps) and
+varying only the true step length, the control arm gives max per-step dEpot / min r(H-H):
+
+| 0.125 | 0.20 | 0.25 | 0.30 | 0.35 | 0.40 | 0.45 | 0.4879 | 0.50 | 0.55 | 0.60 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 17.19/1.757 | 19.81/2.082 | 32.68/2.120 | 34.36/2.144 | 45.21/1.986 | 52.39/2.098 | 49.31/1.969 | **2593.60/0.559** | 65.99/1.930 | 91.20/1.941 | **641.62/0.458** |
+
+0.45 and 0.50 bracket 0.4879 and both stay inside, so the violation is a rare event of ONE chaotic
+trajectory that the step length reshuffles, not a threshold in dt. (`-md.seed` does not help: it
+does not change the initial velocities on this path — 8 seeds, all bit-identical.) **Operator
+question**: the falsifier for `-gfnff.rev_budget_fix_h` now exists only ABOVE the shipped 0.25 fs
+cap, so the default needs either a new cell/temperature that exposes the budget at 0.25 fs, or a
+re-scoping of what test 20 asserts.
+
+## 10.4 The react-MD time step in TRUE femtoseconds (C.1 / C.2 / C.3)
+
+Protocol anchored first: the pre-fix binary at nominal dt 0.25 over package 7's 130 cells
+reproduces package 7's shipped-default row **exactly** — sum rebuilds 9708, median 49.4, p90 214.2,
+max 800.1 kJ, 27 cells above 100 kJ, T_max 28 392 K, worst cell `c2h6_T2000_f0`.
+
+Re-measured on the fixed binary, 130 cells (c2h6 / ch3nh2 / ch4_H, every frame, 1000 and 2000 K),
+**9.758 ps each = the same physical exposure as package 7**, shipped defaults, `-threads 1`,
+`-md.print_frequency 1`, fresh directory per cell:
+
+| true dt / fs | sum reb | median / kJ | p90 | max | cells>100 | cells>200 | steps>=50 per 1e4 | T_max / K |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| (old nominal 0.25 = real 0.488) | 9708 | 49.4 | 214.2 | 800.1 | 27 | 15 | 10.2 | 28 392 |
+| 1.0 | 9209 | 97.8 | 347.1 | 1133.1 | 64 | 31 | 159.6 | 5.5e7 |
+| 0.5 | 10475 | 51.8 | 218.4 | 453.1 | 25 | 16 | 13.1 | 18 928 |
+| 0.25 | 9677 | 27.5 | 64.8 | 483.0 | 11 | 9 | 1.2 | 11 948 |
+| 0.125 | 13597 | 13.1 | 61.5 | 204.2 | 10 | 1 | 1.9 | 10 405 |
+| **0.0625** | 20922 | **6.3** | **16.1** | **78.5** | **0** | **0** | **0.2** | 9 321 |
+
+Median, p90, cells>100, cells>200 and T_max are all monotone in dt; the single-cell maximum and the
+raw event count are not (chaotic scatter of one cell). **0.0625 fs is the first true step at which
+no cell of the 130 exceeds 100 kJ/mol in a single step**, which is the direct analogue of what
+package 8's 0.125 claimed on its ONE cell. It also equals the old threshold rescaled
+(0.125 / 1.9516 = 0.0640) — the arithmetic prior and the measurement agree, but the recommendation
+rests on the measurement.
+
+Worst cell of package 7, same discrete dynamics, only the step length varying:
+0.4879 fs -> 76 reb / **800.1** kJ / 62 events / **28 392** K; 0.25 -> 102 / 47.8 / 0 / 5 206;
+0.125 -> 170 / 20.1 / 0 / 5 520; 0.0625 -> 82 / 13.2 / 0 / 5 602.
+
+**C.3 — what `rev_dt_cap` = 0.25 means now.** It clamps to a genuine 0.25 fs where it used to
+integrate 0.488 fs, so the shipped default improved by roughly a factor two in every robust
+statistic for free (median 51.8 -> 27.5, cells>100 25 -> 11, T_max 18 928 -> 11 948 K). It is still
+**outside** the band where the whole sample is bounded (11 of 130 cells above 100 kJ, max 483), so
+the warning still fires for a plain react run with no flags. **The PARAM default was NOT changed**;
+only its help text now says what the number means. Operator decision.
+
+**Shipped change**: `rev_react_dt_advice` 0.125 -> **0.0625** in `SimpleMD::Initialise`, and the
+warning text now carries the 130-cell table plus an explicit note that every time in it is a real
+femtosecond. Gate re-verified: fires at 0.25 and 0.125, silent at 0.0625 and 0.05, silent for
+`-gfnff.rev_share_form delivered` and for plain `gfnff`.
+
+## 10.5 mg / mg2 / mg3 at the corrected clock (C.4) — package 9's ordering does NOT survive
+
+Same 130 cells, same 9.758 ps, one frozen binary per phase. `n>=50` is the count of rebuild
+`dE_jump` events above 50 kJ/mol; the rate normalises it by the rebuild count, which differs
+between arms.
+
+| clock / arm | rebuilds | max dE_jump | n>=50 | rate / 1000 reb | step median | step p90 | step max | cells>100 | T_max |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **old (real 0.488 fs)** mg | 14551 | 304.4 | 24 | 1.65 | 49.4 | 214.2 | 800.1 | 27 | 28 392 |
+| old mg2 | 12882 | 352.8 | 37 | 2.87 | 48.3 | 183.3 | 460.9 | 27 | 23 040 |
+| old mg3 | 12459 | 440.5 | 72 | **5.78** | 47.3 | 182.7 | 700.1 | 22 | 56 270 |
+| **true 0.25 fs** mg | 14506 | 260.5 | 9 | **0.62** | 27.5 | 64.8 | 483.0 | 11 | 11 948 |
+| true 0.25 mg2 | 11801 | 300.6 | 21 | **1.78** | 25.2 | 120.8 | 447.8 | 14 | 15 480 |
+| true 0.25 mg3 | 11780 | 283.5 | 16 | 1.36 | 25.7 | **60.3** | **316.5** | **9** | 15 738 |
+| **true 0.0625 fs** mg | 31371 | 317.2 | 11 | 0.35 | 6.3 | 16.1 | 78.5 | 0 | 9 321 |
+| true 0.0625 mg2 | 23695 | 254.4 | 2 | **0.08** | 6.7 | 17.8 | 81.6 | 0 | 9 380 |
+| true 0.0625 mg3 | 26712 | 354.0 | 6 | 0.22 | 6.9 | 18.6 | 79.5 | 0 | 9 380 |
+
+The old-clock rows reproduce package 9's **ordering** (mg < mg2 < mg3, mg3 ~3.5x mg's rate) on this
+binary; the absolute values differ from package 9's table (272.3/14, 359.8/26, 456.3/89) because
+that table was taken on a different binary and does not reproduce package 7's own shipped-default
+row either, while the measurement here does, exactly.
+
+**At the corrected clock the ordering breaks.** At true 0.25 fs: mg (0.62) < mg3 (1.36) < mg2
+(1.78) by jump rate, and on the per-step statistics **mg3 is the best of the three** (max 316.5
+against 483.0 / 447.8, 9 cells above 100 kJ against 11 / 14). At true 0.0625 fs: mg2 (0.08) < mg3
+(0.22) < mg (0.35), and **all three have zero cells above 100 kJ/mol per step**. mg3's penalty
+relative to mg falls from 3.5x to 2.2x and it is never the worst arm again.
+
+**Consequence for the pending adoption decision**: the "mg3 has a clearly worse smoothness tail"
+argument was an artefact of the too-coarse clock and should not weigh against `mg3`. The other two
+costs recorded in package 9 — the conformer/S66 guard opening 1.0341 -> 1.0543/1.0547 and the
+0.0212 A equilibrium bond-length shift — are time-step independent and stand unchanged.
+
+## 10.6 Files touched
+
+- `src/core/units.h` — `MD_TIME_UNIT_FS` / `FS_TO_MD_TIME` with the derivation in the comment.
+- `src/capabilities/simplemd.cpp` — conversion in `Verlet()`, `Rattle()` (incl. the `1/dt` of the
+  constraint velocity correction) and `NoseHover()`; `m_dt2` removed; `rev_react_dt_advice`
+  0.125 -> 0.0625 and the warning text rewritten.
+- `src/capabilities/simplemd.h` — `m_dt2` member removed; `rev_dt_cap` help text.
+- `test_cases/check_md_time_axis.py` + `test_cases/CMakeLists.txt` — new ctest `md_time_axis`.
+- `test_cases/cli/simplemd/20_gfnff_rev_h_budget/run_test.sh` — header note only, **no threshold or
+  flag changed**, left failing on purpose.
+- `docs/REV_GFNFF_STAGE3A.md` 2.1 / 2.2 / 2.3, `docs/REV_GFNFF_STAGE1.md`,
+  `docs/REV_GFNFF_ROADMAP.md`, `AIChangelog.md`.
+
+## 10.7 What was NOT done
+
+- No default value changed (`rev_dt_cap` 0.25, `rev_well_form mg`, `rev_share_form conserving`,
+  `time_step` 1.0 all untouched).
+- Nothing imported from `origin/feature/multi-gpu` beyond the idea: no adaptive integrator, no GPU
+  eigensolver, no `docs/MD_LARGE_SYSTEMS.md`, no electrostatics-cutoff or optimizer change.
+- `cli_simplemd_20` not recalibrated (10.3).
+- The mg/mg2/mg3 comparison re-ran only the smoothness axis; the class-A / guard / class-D
+  falsifiers are time-step independent by construction and were not re-run.
+- Everything packages 1-9 wrote in "fs" outside the files listed in 10.6 still carries the old
+  scale. The two `docs/` pages most read (STAGE1 2.x, STAGE3A 2.1/2.3) now carry an explicit
+  conversion box; `test_cases/revgfnff/_log/*.md` do not.

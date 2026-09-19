@@ -206,6 +206,12 @@ share; it was re-measured on the Sep 19 binary and reproduces row for row.
 
 ## 2.1 The react-MD tail — the share, not the combination (root-caused Sep 19, 2026)
 
+> **Every time in this section is in the OLD time scale.** It was measured before the MD
+> time-step unit fix of Sep 2026, so multiply every "fs" and every duration by **1.9516144** to
+> read what was actually simulated: the "dt 0.25 / 0.125 / 0.0625 fs" scan below was really
+> 0.488 / 0.244 / 0.122 fs and the "5 ps" cells were 9.76 ps. The mechanism and every relative
+> statement are unaffected; the true-fs re-measurement is in section 2.2.
+
 Packages 3 and 4 measured the conserving share and the MG well independently, and on the 20-cell
 react-MD grid the two defaults together looked worse than either alone (per-step max 800.12 kJ/mol
 against 216.62 and 396.88, T_max 28 392 K). **Package 7 shows that reading was a 20-cell sampling
@@ -267,37 +273,77 @@ the combination, and that is **two bond types out of 32**: `ncl3_N-Cl` 20.10 -> 
 
 ### 2.2 Recommended MD settings (operating recommendation, not a default change)
 
-**Use `-md.time_step 0.125` for quantitative react-mode MD with the conserving share.** This is the
-mitigation option 2 of `WORK_STATUS.md` 7.8, adopted by the operator on 2026-09-20 as a
+> **Every time in this section is a REAL femtosecond.** Sections 2.1 and 2.3 above, and everything
+> packages 1 and 6-9 measured, were taken **before** the MD time-step unit fix of Sep 2026
+> (`CurcumaUnit::Constants::MD_TIME_UNIT_FS`, `AIChangelog`): `SimpleMD` handed the requested step
+> to the integrator without converting femtoseconds into the integrator's own time unit
+> `sqrt(amu*A^2/Eh) = 1.9516144 fs`, so **every nominal "fs" in those sections is really
+> 1.9516144 fs** and every duration is stretched by the same factor. Section 2.1's dt scan
+> "0.25 / 0.125 / 0.0625" was really 0.488 / 0.244 / 0.122 fs, and its "5 ps" cells were 9.76 ps.
+> The numbers below replace the recommendation in true femtoseconds.
+
+**Use `-md.time_step 0.0625` for quantitative react-mode MD with the conserving share.** This is
+still mitigation option 2 of `WORK_STATUS.md` 7.8, adopted by the operator on 2026-09-20 as a
 **recommendation only**: no default value changed, and the transition-window code of section 2.1
 was deliberately left alone (redefining the window in distance instead of bond order is a separate,
-deferred decision).
+deferred decision). Only the number changed, and it was re-measured rather than rescaled.
 
-Why 0.125 fs: the jump of section 2.1 is a resolution failure of the integrator, not a step in the
-potential, so halving the step removes it. Measured on the worst known cell, `c2h6/T2000_f0` with
-the shipped defaults (`conserving` + `mg`), 5 ps, `-threads 1`:
+Why 0.0625 fs: the jump of section 2.1 is a resolution failure of the integrator, not a step in the
+potential, so a smaller step removes it. The old recommendation of "0.125" was calibrated on a
+SINGLE cell and was really 0.244 fs. Re-measured on package 7's **full 130 cells** (c2h6 / ch3nh2 /
+ch4_H, every frame, 1000 and 2000 K, 9.758 ps each = the same physical exposure as package 7,
+shipped defaults `conserving` + `mg` + donor rule, `-threads 1`, one frozen binary; per-step
+|dEpot| with rebuild-containing intervals excluded):
 
-| `-md.time_step` / fs | rebuilds | per-step max / kJ/mol | steps >= 50 kJ/mol | T_max / K |
-|---:|---:|---:|---:|---:|
-| 0.25 (the effective default, see below) | 76 | **800.1** | 62 | **28 392** |
-| **0.125 (recommended)** | 102 | **38.7** | **0** | 5 579 |
-| 0.0625 | 44 | 13.5 | 0 | 5 441 |
+| true `-md.time_step` / fs | sum rebuilds | median / kJ | p90 | max | cells > 100 kJ | cells > 200 kJ | T_max / K |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1.0 | 9209 | 97.8 | 347.1 | 1133.1 | 64 | 31 | 5.5e7 |
+| 0.5 | 10475 | 51.8 | 218.4 | 453.1 | 25 | 16 | 18 928 |
+| 0.25 (the effective default, see below) | 9677 | 27.5 | 64.8 | 483.0 | 11 | 9 | 11 948 |
+| 0.125 | 13597 | 13.1 | 61.5 | 204.2 | 10 | 1 | 10 405 |
+| **0.0625 (recommended)** | 20922 | **6.3** | **16.1** | **78.5** | **0** | **0** | 9 321 |
 
-Cost: 2x wall time per picosecond. No falsifier moves (the equilibrium, class-A, class-C and
-gradient checks are time-step independent by construction), and nothing about the model changes.
+0.0625 fs is the first true step at which **no** cell exceeds 100 kJ/mol in a single step. It is
+also the old threshold rescaled (0.125 / 1.9516 = 0.0640), so the arithmetic prior and the
+measurement agree — but the measurement is what the recommendation rests on, because the old value
+was a one-cell number. Cost: 4x wall time per picosecond relative to the 0.25 fs cap. No falsifier
+moves (the equilibrium, class-A, class-C and gradient checks are time-step independent by
+construction), and nothing about the model changes.
 
-**The effective default is 0.25 fs, so this applies to a plain react run with no flags.**
-`-md.time_step` itself defaults to 1.0 fs, but `-method revgfnff` clamps it to `-md.rev_dt_cap`
-(default **0.25 fs**, stage 1, `docs/REV_GFNFF_STAGE1.md`) with a warning. 0.25 fs is exactly the
-step at which the tail of section 2.1 lives.
+**The effective default is 0.25 fs, and that is now a genuine 0.25 fs** (before the unit fix the
+same setting integrated 0.488 fs). `-md.time_step` itself defaults to 1.0 fs, but `-method
+revgfnff` clamps it to `-md.rev_dt_cap` (default **0.25 fs**, stage 1,
+`docs/REV_GFNFF_STAGE1.md`) with a warning. The clock fix therefore improved the default by about
+a factor of two in every robust statistic for free — on the same 130 cells the effective default
+went from median 51.8 / 25 cells above 100 kJ / T_max 18 928 K (what 0.25 used to integrate) to
+27.5 / 11 / 11 948 — but 0.25 fs still sits **outside** the band where the sample is bounded, so
+the warning still fires for a plain react run with no flags. `rev_dt_cap`'s default was **not**
+changed here; whether to lower it is an operator decision.
 
-`SimpleMD` therefore prints a one-time startup warning (Claude Generated, Sep 2026,
+`SimpleMD` prints a one-time startup warning (Claude Generated, Sep 2026,
 `simplemd.cpp::Initialise`) when **all** of these hold: `-method revgfnff` (or `gfnff-rev`),
 `-gfnff.topology_mode react`, `-gfnff.rev_share_form conserving` (the default), and an effective
-time step above 0.125 fs. The gate is the share form alone — the well form is not the mechanism
-(section 2.1) — so `-gfnff.rev_share_form delivered` does not warn with any well form, and neither
-does a non-react run. The warning is advisory: the spikes are smooth and bounded, the thermostat
-recovers, hard swaps stay 0 and every rebuild reports `dE_jump 0.000000`.
+time step above **0.0625 fs**. The gate is the share form alone — the well form is not the
+mechanism (section 2.1) — so `-gfnff.rev_share_form delivered` does not warn with any well form,
+and neither does a non-react run. Verified: fires at 0.25 and 0.125, silent at 0.0625 and 0.05,
+silent for `delivered` and for plain `gfnff`. The warning is advisory: the spikes are smooth and
+bounded, the thermostat recovers, hard swaps stay 0 and every rebuild reports `dE_jump 0.000000`.
+
+**The worst cell of section 2.1 at the corrected clock.** `c2h6/T2000_f0` with the shipped
+defaults, the SAME discrete dynamics as package 7 (CSVR per-step ratio 0.025, COM removal every
+400 steps, 9.758 ps), varying only the physical step length:
+
+| true dt / fs | rebuilds | per-step max / kJ/mol | steps >= 50 kJ/mol | T_max / K |
+|---:|---:|---:|---:|---:|
+| 0.4879 (what package 7 called "0.25") | 76 | 800.1 | 62 | 28 392 |
+| 0.25 | 102 | 47.8 | 0 | 5 206 |
+| 0.125 | 170 | 20.1 | 0 | 5 520 |
+| 0.0625 | 82 | 13.2 | 0 | 5 602 |
+
+The first row is reproduced **exactly** on the post-fix binary by scaling every dt-derived setting
+by 1.9516144204 (`-md.rev_dt_cap 0 -md.time_step 0.4879036051 -maxtime 9758.072102 -md.coupling
+19.516144204 -md.remove_com_motion 195.16144204`), which is the proof that the unit fix changed the
+clock and nothing else.
 
 ---
 
@@ -343,7 +389,36 @@ The free curvature buys the INNER branch (dev k -158 -> -44) and the bond-order 
 depth (dev D_e -14.32 -> -6.86). The equilibrium bond lengths move more than `mg`'s **towards the
 reference**: the median error against r2SCAN-3c falls by a factor 5-7.
 
-**The two costs, stated plainly**: the conformer/S66 guard opens from 1.0341 to 1.0543/1.0547,
+> **The two 130-cell rows above are in the OLD time scale** (see the box in section 2.2): their
+> "dt 0.25 fs" was really 0.488 fs. Re-measured in TRUE femtoseconds (package 10, same 130 cells,
+> 9.758 ps each, one frozen binary), **the smoothness ordering does not survive** — `mg3` is no
+> longer the worst arm, and the absolute severity collapses for all three:
+>
+> | arm | rebuilds | max dE_jump / kJ | n(jump) >= 50 | rate per 1000 rebuilds | step median | step max | cells > 100 kJ |
+> |---|---:|---:|---:|---:|---:|---:|---:|
+> | **old clock (real 0.488 fs)** ||||||||
+> | mg | 14551 | 304.4 | 24 | 1.65 | 49.4 | 800.1 | 27 |
+> | mg2 | 12882 | 352.8 | 37 | 2.87 | 48.3 | 460.9 | 27 |
+> | mg3 | 12459 | 440.5 | 72 | **5.78** | 47.3 | 700.1 | 22 |
+> | **true 0.25 fs (the effective default)** ||||||||
+> | mg | 14506 | 260.5 | 9 | 0.62 | 27.5 | 483.0 | 11 |
+> | mg2 | 11801 | 300.6 | 21 | **1.78** | 25.2 | 447.8 | 14 |
+> | mg3 | 11780 | 283.5 | 16 | 1.36 | 25.7 | **316.5** | **9** |
+> | **true 0.0625 fs (the recommended point)** ||||||||
+> | mg | 31371 | 317.2 | 11 | 0.35 | 6.3 | 78.5 | 0 |
+> | mg2 | 23695 | 254.4 | 2 | **0.08** | 6.7 | 81.6 | 0 |
+> | mg3 | 26712 | 354.0 | 6 | 0.22 | 6.9 | 79.5 | 0 |
+>
+> At the corrected clock `mg3`'s jump-event rate falls from 3.5x `mg`'s to 2.2x and it swaps places
+> with `mg2`; on the per-step statistics `mg3` is the **best** of the three at true 0.25 fs
+> (max 316.5 vs 483.0/447.8, 9 cells above 100 kJ vs 11/14). At the recommended 0.0625 fs all three
+> have **zero** cells above 100 kJ/mol per step and the ordering is `mg2 < mg3 < mg`, i.e. noise.
+> **The "mg3 has a clearly worse tail" argument was an artefact of the too-coarse clock and should
+> not weigh in the adoption decision.** The class-A / guard / class-D rows above are time-step
+> independent and are unaffected.
+
+**The two costs, stated plainly** (in the old time scale, see the box): the conformer/S66 guard
+opens from 1.0341 to 1.0543/1.0547,
 twice the +0.0098 the `mg` flip cost; and `mg3`'s rebuild `dE_jump` tail grows to 89 events above
 50 kJ/mol against `mg`'s 14. The tail is **not** the new dimension — over 259 rebuilds in five
 independent cells, 0 of the 10 rebuilds above 50 kJ/mol involves any change of `rev_order`, while
