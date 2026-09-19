@@ -159,7 +159,10 @@ curcuma -md polymer_2x_gfnff_opt.xyz -method gfnff -threads 36 -T 300 \
 ```
 
 **It is off by default** and an explicit `false` is bit-identical to a binary that never had the
-feature (`md_adaptive_step` checks exactly that).
+feature (`md_adaptive_step` checks exactly that). Full `ctest` after the change: 496 tests, 485
+passed, 7 disabled and **4 failed - the same four this repository already had**
+(`confscan_dtemplate` flaky, `test_orca_interface`, `xtb_cpscf`,
+`cli_curcumaopt_07_opt_multixyz` golden-value drift). No new failure.
 
 ### What is measured, and against what
 
