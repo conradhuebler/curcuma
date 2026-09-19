@@ -7,7 +7,7 @@
 from 298 K to 20476 K within 40 fs, and attributed it to the structure not being pre-optimised.
 That attribution was wrong. This page is what the measurement says instead.
 
-## The settings that work
+## The settings that work - over 100 fs, and that is not long enough
 
 | Setting | `<T>` over 100 fs, target 300 K |
 |---|---:|
@@ -15,6 +15,18 @@ That attribution was wrong. This page is what the measurement says instead.
 | `-dt 0.5` | 288.7 K |
 | **`-dt 0.25`** | **296.1 K** |
 | `-dt 1.0 -hydrogen_mass 4` | 273.1 K |
+
+> **Correction (Sep 19, 2026): 100 fs is too short a window, and `-dt 0.5` does not hold.**
+> Re-running the same case for **300 fs** (GFN-FF-optimised structure, CSVR at 300 K, seed 1)
+> gives `<T>` = **716.6 K**: the running-average potential goes -916.30 -> -913.76 Eh and the
+> kinetic 9.55 -> 24.91 Eh, i.e. the total energy rises by about **+8 Eh** *while the thermostat
+> is actively trying to remove it*. The potential itself only oscillates (-917.3 at 0 fs, -911.5
+> at 100 fs, -918.5 at 300 fs) - it is the kinetic energy that grows monotonically. So halving
+> the step slows the heating by more than an order of magnitude (NVE at dt = 1.0 gains +191 Eh
+> in 200 fs) but does not stop it, and the 100 fs row above simply ends before the effect is
+> visible. `-dt 0.25` and `-hydrogen_mass 4` were **only** measured over 100 fs and are
+> therefore equally unproven at 300 fs. **Do not read any row of this table as a validated
+> production setting for this system.**
 
 ```bash
 # what we verified, from the GFN-FF-optimised structure
@@ -272,7 +284,9 @@ fluctuation of 0.5 to 3 Eh. The contrast is ~600 at 300 atoms and ~1 at 7320.
 **So the rule is**: a global energy criterion discriminates while the system is small enough
 that one bad bond dominates the total energy error - measured here up to ~1400 atoms. Beyond
 that it needs to be **local** (per atom, per bond, or per fragment), which is not implemented.
-For polymer_2x the working recipes remain `-dt 0.5` / `-dt 0.25`, or `-hydrogen_mass 4`.
+For polymer_2x this leaves **no demonstrated recipe**: `-dt 0.5` holds the setpoint for 100 fs
+and reaches `<T>` = 717 K by 300 fs (see the correction at the top of this page), and the other
+two rows of that table were never measured past 100 fs.
 
 ### What it does not do
 
