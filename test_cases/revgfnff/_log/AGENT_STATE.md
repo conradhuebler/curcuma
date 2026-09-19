@@ -103,14 +103,21 @@ package 10 (`Packages done: 10/10`).
   every robust tail statistic for free — median 51.8 -> 27.5, cells >100 kJ 25 -> 11, T_max 18928
   -> 11948 K — but 0.25 fs is still **outside** the band where the whole sample is bounded, so the
   warning still fires for a plain react run. **Default NOT changed; operator decides.**
-- **mg/mg2/mg3: package 9's ordering does NOT survive the corrected clock.** Rebuild `dE_jump`
-  events >= 50 kJ per 1000 rebuilds: old clock mg 1.65 < mg2 2.87 < mg3 **5.78**; true 0.25 fs
-  **mg 0.62 < mg3 1.36 < mg2 1.78**; true 0.0625 fs mg2 0.08 < mg3 0.22 < mg 0.35, with **zero**
-  cells above 100 kJ/mol per step for all three. At true 0.25 fs `mg3` is the BEST of the three on
-  the per-step statistics (max 316.5 vs 483.0 / 447.8 kJ, 9 cells >100 vs 11 / 14). **The "mg3 has
-  a clearly worse tail" argument is an artefact of the old clock and should not weigh against mg3**
-  in the pending adoption decision; the conformer/S66 guard (1.0543/1.0547) and the 0.0212 A
-  equilibrium shift are time-step independent and stand unchanged.
+- **mg/mg2/mg3 tail claim: DISPUTED — orchestrator spot-check contradicts the "mg3 is vindicated"
+  punchline on the single most-scrutinised cell.** The package's own 130-cell AGGREGATE numbers
+  (rebuild `dE_jump` events >= 50 kJ per 1000 rebuilds: old clock mg 1.65 < mg2 2.87 < mg3 5.78;
+  true 0.25 fs mg 0.62 < mg3 1.36 < mg2 1.78) are not disputed as raw numbers, but the summary drawn
+  from them ("mg3 is the BEST of the three... should not weigh against mg3 in the adoption
+  decision") does NOT hold on direct re-check. **Orchestrator, true dt = 0.25 fs on the current
+  `build_rev` binary (no conversion needed, the fix makes `-md.time_step 0.25` genuinely 0.25 fs),
+  on `c2h6/T2000_f0`** (the single cell every prior package used as the worst-case reference,
+  package 7's original finding): **mg 28.3 kJ / 0 events, mg2 32.2 kJ / 0 events, mg3 256.8 kJ / 12
+  events.** `mg3` is 8-9x worse than `mg`/`mg2` on exactly the cell that matters most, not
+  comparable or better. **Do not adopt `mg3` on the strength of package 10's aggregate summary
+  alone — the aggregate and the single-cell picture disagree, and a proper full re-sweep (not just
+  one summary statistic) is needed before this decision is safe to make.** The conformer/S66 guard
+  (1.0543/1.0547) and the 0.0212 A equilibrium shift are unaffected by any of this (they are
+  time-step independent, static-energy quantities) and stand as previously measured.
 - **Not done**: no default value changed; nothing else imported from `origin/feature/multi-gpu`
   (no adaptive integrator, no GPU eigensolver, no `MD_LARGE_SYSTEMS.md`); `test_cases/revgfnff/_log/*.md`
   other than `WORK_STATUS`/`AGENT_STATE` still quote the OLD time scale.
