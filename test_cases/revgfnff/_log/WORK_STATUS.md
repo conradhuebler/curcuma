@@ -1,5 +1,5 @@
-# WORK_STATUS — rev-gfnff work packages 1-8 (2026-09-18 / 20)
-Packages done: 8/8
+# WORK_STATUS — rev-gfnff work packages 1-9 (2026-09-18 / 20)
+Packages done: 9/9 (9 = 9a + 9b)
 
 AI-generated, machine-tested. Repository `/home/conrad/src/curcuma_branches/curcuma`, branch
 `reactff2-llm`, start HEAD `265a18b0`. Every measurement was taken with a FROZEN copy of the
@@ -1073,3 +1073,281 @@ warning's trigger combination and pass unchanged).
 `src/capabilities/simplemd.cpp` (the warning), `docs/REV_GFNFF_STAGE3A.md` (new section 2.2
 "Recommended MD settings" + the open-item bullet of section 3 now points at it), `AIChangelog.md`
 (one line), this file.
+
+---
+
+## Package 9a — stage 3a(iii) step 2: free curvature + r0 re-solve (`rev_well_form mg2`), opt-in
+
+Operator decision 2026-09-20: build the two pieces the roadmap lists as "not started", each as an
+**opt-in** path that does not change what `gauss`/`mg`/`erfmorse` compute and flips no default.
+
+Binary for every number below: **`89a587bb0eb7bb60ba86608f8aed8129`** (`cur_v6`), frozen before
+use. The fit that produced the table ran on `04fd1882`/`dc1bbd90` (same gauss/mg behaviour).
+
+### 9a.0 The guardrail, verified at the level that can actually see it
+
+`gauss`, `mg` and `erfmorse` are **bit-identical to the pre-session binary `4c323b80`**:
+
+- 12 digits on the four reference single points (`gfnff` caffeine -4.672737068614 / benzene
+  -2.362725526194; `revgfnff` caffeine -4.546943898047 / benzene -2.407912185968 under `mg`,
+  -4.673521653477 / -2.363224128930 under `gauss`, -4.539136588545 / -2.404586308482 under
+  `erfmorse`), and
+- **8 react-MD cells** (`c2h6` T2000 frames 0/7/15/23 x {gauss, mg}, 5 ps, dt 0.25, seed 42,
+  `-threads 1`) reproduce the OLD binary's rebuild count, per-step maximum, n >= 50 kJ and T_max
+  **exactly, all 8 of 8**. This is the check package 4.5 says an energy identity cannot replace:
+  a one-ulp change survives 12 printed digits but not a react trajectory. The new `Bond` member
+  and the reordered form dispatch pass it.
+
+### 9a.1 What the form is
+
+Same MG well `E = -D (2y - y^2)`, `y = exp(-(a x + beta x^2))`, but `x = r - (r0_model + dr0)` and
+
+| parameter | 'mg' (pinned) | 'mg2' (this step) |
+|---|---|---|
+| depth `s = D/\|k_b\|` | fitted | fitted |
+| tail `beta` | fitted | fitted |
+| curvature `ca` (`K_well = ca^2 * 2 alpha \|k_b\|`) | **1 by construction** | **solved from the reference** |
+| minimum offset `dr0` | **0 by construction** | **solved from the reference** |
+
+`ca = 1, dr0 = 0` reproduces `mg` bit-for-bit, which is how the code path was verified before any
+fit was run (`mg2` == `mg` to 12 digits with a seeded table).
+
+### 9a.2 The curvature is SOLVED, not fitted — and why that had to be measured first
+
+Freeing `ca` as a fit parameter on the break-side objective **does not work**: the well's second
+derivative at its own minimum is one point of a 15-point branch, so the simplex uses it as a spare
+tail knob and drives it to zero. 8 of 32 bonds came out with a flat, QUARTIC bottom
+(`ca -> 0` means `E''(r_min) = 0`) — an excellent break-side rms (median 1.10 vs MG's 2.36) and a
+destroyed vibrational force constant. Fitting on the whole grid instead constrains it but drags in
+the five COMPRESSED points, where the repulsion term carries the error and the well cannot absorb
+it: `f2_F-F` went from a 1.42 break-side rms to 13.10.
+
+The well is the only term whose curvature the form changes and that curvature is exactly
+`ca^2 K_gauss` (beta enters only at `x^3`), so
+
+    ca^2 = 1 + (k_ref - k_model) / (2 alpha |k_b|)
+
+with `k_ref`/`k_model` the measured 3-point curvatures of the reference and of the delivered model
+at their own sampled minima — the same quantity the class-A harness prints as "k ref/model". Zero
+knobs, one closed form, both inputs measured. Fitted range `ca` = 0.30-1.96, one clamp
+(`ncl3_N-Cl` at the 0.30 floor).
+
+### 9a.3 The r0 re-solve: the rigid scan cannot do it, the relaxed geometry can
+
+**First attempt, rejected by measurement.** Solving `dr0` so the candidate curve's sub-grid minimum
+sits on the reference's (bisection inside the fit, exact to the digit *within the fit*) gives
+`dr0(H-O) = -0.052 ... -0.166 A` and moves the optimised water O-H **0.9727 -> 0.9179 A** against a
+reference 0.9644 — further from the reference than the pinned form and **5x** the equilibrium
+shift of the package-4 precedent. Cause: a class-A scan is RIGID (the rest of the molecule is held
+at the r2SCAN-3c geometry) and its minimum responds to `dr0` with `d r*/d dr0 = K_well/k_total`,
+which is ~0.1 there, while a relaxed optimisation responds with ~0.33-1.0. The rigid-scan minimum
+and the equilibrium bond length are simply not the same quantity.
+
+**Shipped solve.** The class-A r_eq frame IS the r2SCAN-3c minimum, so the distance of the
+stretched pair in that frame is the reference equilibrium bond length. Per class-A bond type,
+
+    dr0 = (b_ref - b_model) / response,   response = d b_model / d dr0 measured with a +0.05 probe
+
+(`optbond.py`: optimise the molecule, measure the same pair; `mkdr0.py`: one Newton step, median
+per key). Measured response 0.30-1.0 for 31 of 32 bonds (`h2o2_O-O` 3.7), fitted `dr0` range
+-0.174 ... +0.235 A, none at the +-0.40 A bound. `(D, beta)` are then re-fitted at that fixed
+offset.
+
+**Result, over all 32 class-A systems, |b_model - b_r2SCAN-3c| in Angstrom:**
+
+| arm | median | mean | max |
+|---|---:|---:|---:|
+| gauss | 0.0293 | 0.0390 | 0.124 |
+| mg | 0.0246 | 0.0395 | 0.207 |
+| **mg2** | **0.0060** | **0.0170** | 0.179 |
+| **mg3** | **0.0044** | **0.0087** | 0.043 |
+
+The equilibrium bond lengths move MORE than `mg`'s and they move **towards** the reference: the
+median error against r2SCAN-3c drops by a factor 5-7. That is the honest way to read the guard row
+below.
+
+### 9a.4 / 9b.4 Acceptance, every row, one binary
+
+Class-A harness (`--mode kept` + `-gfnff.topology_mode react`, `-method revgfnff`, 32 bond types;
+the rms is over the WHOLE common grid, which is why the inner branch matters):
+
+| arm | rms median | rms max | dev D_e median | dev r90 median | dev k median |
+|---|---:|---:|---:|---:|---:|
+| gauss | 24.68 | 58.80 | -25.79 | -0.341 | -169 |
+| mg (shipped default) | 22.15 | 63.56 | -14.32 | -0.066 | -158 |
+| erfmorse | 22.16 | 63.47 | -14.86 | -0.079 | -163 |
+| **mg2** | **15.83** | 64.62 | -16.17 | -0.101 | **-44** |
+| **mg3** | **13.22** | 59.07 | **-6.86** | -0.131 | -82 |
+
+Note the mechanism: the offline BREAK-SIDE fit rms is unchanged by the free curvature (MG 2.158,
+MG2 2.157 median over 32), while the harness rms drops 22.15 -> 15.83. The free curvature buys the
+INNER branch (dev k -158 -> -44), which the break-side objective never saw and the harness rms
+does. The bond-order split (9b) then buys the depth (dev D_e -14.32 -> -6.86).
+
+Everything else, same binary:
+
+| row | gauss | mg | erfmorse | mg2 | mg3 |
+|---|---:|---:|---:|---:|---:|
+| guard, pooled MAD (167 reactions, ACONF+ICONF+MCONF+PCONF21+S66) | **1.0341** | 1.0439 | 1.0427 | 1.0543 | 1.0547 |
+| max equilibrium bond-length shift vs gauss (4 molecules, opt) | - | 0.0063 | 0.0067 | **0.0212** | **0.0212** |
+| median \|b - b_r2SCAN-3c\| over 32 class-A systems [A] | 0.0293 | 0.0246 | - | **0.0060** | **0.0044** |
+| class D dE_MAD (20 systems, mean) | 4.980 | 5.152 | 5.184 | **4.590** | **4.555** |
+| class D grad_RMS (mean) | 14.575 | 14.428 | 14.635 | **11.397** | **11.313** |
+| rkt06 path rms, ref = image 0 (conserving) | 2.3840 | 2.3788 | 2.3932 | **2.2665** | **2.2665** |
+| rkt06 path rms (delivered) | 2.3505 | 2.3447 | 2.3589 | **2.2599** | **2.2599** |
+| FD gradient, worst of the 4 standard points [Eh/A] | - | 1.02e-07 | - | **1.14e-07** | **1.14e-07** |
+
+Class-C adducts, dev min / rms per scan, **under the shipped `conserving` share**:
+
+| scan | mg | mg2 | mg3 |
+|---|---|---|---|
+| CH4 + H | -1.53 / 11.79 | -1.53 / 11.81 | -1.53 / 11.81 |
+| NH3 + H | -1.36 / 6.29 | -1.33 / 6.49 | -1.33 / 6.49 |
+| H2O + H | -3.04 / 14.19 | -3.05 / **13.47** | -3.05 / **13.47** |
+| N2H4 + H | +0.00 / **2.91** | +0.00 / 3.43 | +0.00 / 3.78 |
+
+Under `delivered` all three arms are the known -90 / -109 / -94 / -91 kcal/mol: the well form does
+not fix that, the share does (package 3.3), and mg2/mg3 do not make it worse
+(mg -89.4/-110.1/-88.5/-93.6 vs mg2 -90.2/-108.8/-94.2/-91.8).
+
+`ctest -R "gfnff|sqm_val|react|cli_simplemd_|cli_gfnff_"` with `CURCUMA=build_rev/curcuma`:
+**113/113**, unchanged.
+
+**The guard opens by 2x the package-4 precedent and this is the one row that is worse.**
+gauss -> mg was 1.0341 -> 1.0439 (+0.0098); gauss -> mg2/mg3 is 1.0341 -> 1.0543/1.0547
+(+0.0202/+0.0206), i.e. +2.0 % on a 1.03 kcal/mol MAD. No subset collapses; the worst reaction is
+unchanged at -20.2 kcal/mol (ICONF) in every arm. The r0 re-solve is what pays for it: the
+curvature-only variant (same table with `dr0 = 0`) gives 1.0508/1.0490 but leaves the relaxed bond
+lengths 0.0135-0.024 A from gauss and 0.020 A from the reference, so the cheaper guard buys a worse
+equilibrium. Both variants are measured; the operator picks.
+
+### 9a.5 A defect in `scripts/revgfnff_wellfit.py`, found and fixed here
+
+The scan that feeds the fit did not pass `-gfnff.rev_well_form gauss`. `prepare()` recovers
+`(r0, alpha, k_b)` by fitting a quadratic to `ln(D/w)`, which is exact **only if D is the
+Gaussian**. When the script was written `gauss` was the default and the omission was invisible; the
+Sep 19 flip to `mg` made it silently wrong. Symptom: the reported "delivered" break rms came out
+**9.4** (that is MG's) instead of 19.2, and the first free-curvature table built on it made the
+class-A harness WORSE (17.88/14.84 -> the corrected fit gives 15.83/13.22). Fixed; the script now
+forces `gauss` in the scan and says why.
+
+**Cross-check of the whole pipeline**: with the fix, regenerating `rev_well_table.h` from scratch
+reproduces the COMMITTED `mg` table **exactly** (21 element pairs, max |ds| = 0.0000,
+max |dbeta| = 0.0000), and the per-system medians reproduce package 4.6's quoted C-C values
+(s 1.180 / 1.008 / 0.906, beta 0.564 / 0.488 / 0.934 for single / double / triple).
+
+### 9a.6 Known limitations of this step
+
+- `dr0` is one Newton step from a linearised response; the residual median |b - b_ref| is 0.0060 A
+  (mg2), not 0. A second iteration was not run.
+- The `ca` solve uses the class-A curvature of a RIGID scan; for a bond whose molecule relaxes
+  strongly that is not exactly the vibrational force constant. No frequency was measured.
+- `ncl3_N-Cl` sits on the `ca = 0.30` floor: its reference curvature is far below the model's and
+  the closed form asks for a smaller one than the floor allows.
+- The pair table takes an INDEPENDENT median per parameter, so a pair with n > 1 can get a
+  combination no single system had. Inherited from package 4; 9b removes it for the pairs that
+  have more than one order.
+- The HB alpha modulation is still not applied (package 4.6), the y-cap at 2 is unchanged, and an
+  element pair with no class-A data still keeps the Gaussian.
+
+---
+
+## Package 9b — stage 3b: the bond-order-resolved well table (`rev_well_form mg3`), opt-in
+
+### 9b.1 The key is a CONTINUOUS order, and it is the one the model already computes
+
+The design risk named in the task brief is a discrete single/double/triple classification that can
+flip during a trajectory — the failure mode of `RUNAWAY_STATUS.md` and of package 7. It is avoided
+by construction:
+
+    order = 1 + pibo * (hyb_i == 1 && hyb_j == 1 ? 2 : 1),   clamped to [1, 3]
+
+`Bond::rev_order`, `GFNFF::continuousBondOrder()`. This is `refreshReactBondOrders()`'s expression
+with its ROUNDING and its `pi > 0.5` threshold removed: the second, degenerate pi system of a
+linear sp-sp bond enters as a smooth FACTOR on `pibo`, so the order goes to exactly 1 as the pi
+order vanishes instead of stepping by 1. The table is then interpolated **linearly between the
+fitted orders of that pair and clamped at the outermost**, so a benzene C-C (order **1.666**,
+measured) gets a well between the single and the double fit rather than being forced onto one.
+
+`pibo` is a topology quantity (per rebuild, per stage-1b corner), exactly like `fc` and `alpha`, so
+the selected parameters are constants inside one energy call: no geometry derivative, no new term
+in the gradient (confirmed by the FD row above).
+
+**The table is keyed on the RUNTIME order, not on a chemical label.** Measured at every class-A
+r_eq frame: c2h6 1.000, c2h4 2.000, c2h2 3.000, ch2nh 1.993, hcn 2.992, co 2.989, n2 2.998,
+h2co 1.994, n2h2 1.997 — and **o2 3.000, not 2**, because GFN-FF gives both oxygens hyb = 1 and the
+sp-sp doubling applies. Keying on the label would have put O2's fit at an order the force field
+never asks for.
+
+### 9b.2 What the class-A set can and cannot resolve
+
+| pair | orders with data | members |
+|---|---|---|
+| C-C, C-N, C-O, N-N | 1, 2, 3 | c2h6/c2h4/c2h2, ch3nh2/ch2nh/hcn, ch3oh/h2co/co, n2h4/n2h2/n2 |
+| O-O | 1 and 3 | h2o2, o2 (order 2 is interpolated between them) |
+| C-H | 1 only, n = 2 | ch4 + hcn (sp3 vs sp C-H; a HYBRIDISATION difference, not an order one) |
+| H-O | 1 only, n = 2 | h2o + ch3oh |
+| the other 15 pairs | 1 only, n = 1 | exact per-system fit |
+
+So 30 of the 32 class-A bonds now have their OWN key (n = 1) and only 4 bonds still share two
+keys. The two that remain (C-H, H-O) are averaged over a hybridisation difference, which a bond
+ORDER dimension cannot separate — that is why the class-A median lands at 13.22 and not at the
+per-system floor.
+
+### 9b.3 The smoothness re-verification (130 cells, not 20)
+
+Package 7's method: the same 3 systems x 2 temperatures x EVERY frame = 130 cells per arm, 5 ps,
+dt 0.25 fs, CSVR 10, seed 42, `-threads 1`, `-md.print_frequency 1`.
+
+| arm | cells | sum rebuilds | median step | p90 | max / kJ | cells > 100 kJ | T_max / K | n >= 50 | max dE_jump | n(jump) >= 50 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| gauss | 130 | 9713 | 44.1 | 154.3 | 417.2 | 19 | 11 964 | 2355 | 259.4 | 35 |
+| mg (default) | 130 | 9881 | 50.3 | 215.7 | 446.8 | 27 | 16 919 | 2567 | 272.3 | 14 |
+| mg2 | 130 | 8684 | 51.2 | 214.9 | 432.6 | **21** | 22 002 | 2412 | 359.8 | 26 |
+| mg3 | 130 | 8656 | 47.4 | 254.2 | 441.3 | 24 | 22 002 | 2718 | **456.3** | **89** |
+
+Hard swaps (`CURCUMA_VERB=3`, `begin_form`/`begin_break` with `s >= 0.99`), 20-cell grid:
+**0 of 623 (mg), 0 of 497 (mg2), 0 of 469 (mg3)**.
+
+Reading: the per-step statistic is comparable to `mg` (median and p90 within noise, MAX slightly
+lower, 3-6 fewer cells above 100 kJ than `mg`, 12 % fewer rebuilds), T_max is ~30 % higher, and the
+**rebuild `dE_jump` tail is clearly worse for mg3** — 89 events >= 50 kJ/mol against 14 for `mg`.
+
+### 9b.4 Is that tail the order variable? Measured: no.
+
+Two independent checks.
+
+**(a) The response to the order is exactly linear.** New DIAGNOSTIC PARAM
+`-gfnff.rev_well_order_override` (Double, default -1 = off, read only by `mg3`; verified inert -
+all five forms bit-identical with and without the PARAM in the build) forces every bond's order, so
+`dE/d(order)` is measurable. Scanning c2h6 frame 0 from order 1.00 to 3.00 in steps of 0.05:
+E rises monotonically by 26.33 kcal/mol, `|dE/d(order)|` is 10.5-15.9 kcal/mol per unit order, and
+the **largest single step is 0.7930 kcal/mol against a linear prediction of 0.7929** — i.e. the
+well's response to a drifting pi order is as smooth as the drift itself, with no step anywhere in
+the interval.
+
+**(b) The large rebuild jumps carry NO order change.** 5 independent cells (c2h6 f4/f10,
+ch3nh2 f7/f19, ch4_H f10 at 2000 K, 1.5 ps each) re-run with `CURCUMA_BONDDUMP=1`, correlating each
+rebuild's `dE_jump` with the maximum |change of `rev_order`| over the bonds that survive that
+rebuild: **259 rebuilds, 10 with `dE_jump` >= 50 kJ/mol, 0 of them with any order change at all**
+(max |d order| = 0.0000). Conversely the 4 rebuilds that DO move an order carry a maximum
+`dE_jump` of **0.1 kJ/mol**.
+
+So the mg3 tail is not the new dimension; it is the ordinary "a deeper, wider well makes a topology
+change cost more" mechanism, with mg2 (same form, no order dimension) already at 359.8/26 between
+`mg`'s 272.3/14 and mg3's 456.3/89.
+
+### 9b.5 Known limitations of this step
+
+- C-H and H-O still average two systems each; that difference is hybridisation, not bond order.
+- O-O has no order-2 datum; order 2 is a straight interpolation between h2o2 and o2.
+- Every pair with a single class-A member has an n = 1 fit and no cross-validation whatsoever.
+- The interpolation is C0 in the order (piecewise-linear, knots at the fitted orders). The order is
+  constant within an energy call, so this never enters a force; it would matter only if a future
+  design made the order a continuous function of the geometry.
+- No metal, no charged system, no hydrogen bond, no periodic system was tested; the class-A set is
+  H/C/N/O/F/Cl only.
+- `rkt06`'s absolute number here (2.27-2.38) does not reproduce package 4's 2.71 — that table used
+  `-batch_reuse_topology true`, which keeps the reactant image's topology for the whole path and
+  gives 8.06 on this binary. All arms above use the same (fresh-perception) protocol, so the
+  comparison between them is valid; the absolute value is not comparable with package 4's.

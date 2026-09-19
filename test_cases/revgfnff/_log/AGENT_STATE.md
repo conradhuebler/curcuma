@@ -55,14 +55,35 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 
 ## Live agents
 
-**RUNNING since 2026-09-20: `package-9` (Opus)** — 3a(iii) step 2 (free curvature + r0 re-solve,
-instead of pinning to the Gaussian's `k_b`/`alpha`/`r0`) then 3b (bond-order-resolved well table,
-keyed continuously to avoid a new hidden-switch smoothness bug) on top of it. **Guardrail: lands
-as a new opt-in `rev_well_form` path, does NOT alter what `mg`/`erfmorse`/`gauss` compute today**
-and does NOT flip any default — the operator decides after seeing the numbers, same as every
-other package this week. Smoothness re-verification must use the wider (~130-cell) sample from
-package 7, not just the 20-cell grid, which package 7 showed under-samples the real tail. Status:
-`WORK_STATUS.md` packages 9a/9b.
+**2026-09-20: `package-9` DONE — 3a(iii) step 2 and 3b BOTH delivered, both OPT-IN, no default
+flipped.** No agent running. Three local commits, nothing pushed. Binary `89a587bb`.
+
+- `-gfnff.rev_well_form mg2` (free curvature + r0 re-solve) and `mg3` (bond-order-resolved),
+  table `src/core/energy_calculators/ff_methods/rev_well_table_v2.h`.
+- **Guardrail verified at the level that can see it**: `gauss`/`mg`/`erfmorse` are bit-identical
+  to the pre-session binary `4c323b80` — 12 digits on the four reference single points AND
+  8 of 8 react-MD cells reproduce rebuild count / per-step max / n>=50 / T_max exactly.
+- Class-A harness rms 24.68 (gauss) / 22.15 (mg) -> **15.83 (mg2) / 13.22 (mg3)**; median dev D_e
+  -25.79 / -14.32 -> -16.17 / **-6.86**; median dev k -169 / -158 -> **-44** / -82; median
+  |b_model - b_r2SCAN-3c| over 32 class-A bonds 0.0293 / 0.0246 -> **0.0060 / 0.0044** A.
+  Class D 4.980 / 5.152 -> **4.590 / 4.555** (grad_RMS 14.6 / 14.4 -> **11.4 / 11.3**).
+  rkt06 2.384 / 2.379 -> **2.267**. Adducts under `conserving` unchanged. FD gradient 1.14e-07.
+  `ctest` 113/113.
+- **Two costs, flagged**: the conformer/S66 guard opens 1.0341 -> **1.0543 / 1.0547**, i.e. **2x**
+  the package-4 precedent (1.0341 -> 1.0439); and `mg3`'s rebuild `dE_jump` tail over 130 cells is
+  **456.3 kJ / 89 events >= 50** against `mg`'s 272.3 / 14. The tail was checked against the
+  design risk and is NOT the order dimension (0 of the 10 largest jumps over 259 rebuilds carries
+  any order change; the forced-order response is linear to 1 part in 8000).
+- Measured and REJECTED alternatives, both recorded: a fitted curvature (runs to a flat quartic
+  bottom on 8 of 32 bonds) and an r0 solved on the rigid scan (optimised water O-H 0.9179 A
+  against a reference 0.9644). A `dr0 = 0` variant gives a gentler guard (1.0508/1.0490) and a
+  worse equilibrium (0.020 A from the reference) — also recorded.
+- **Bug found and fixed in `scripts/revgfnff_wellfit.py`**: its scan did not force
+  `-gfnff.rev_well_form gauss`, so after the Sep 19 default flip the Gaussian recovery of
+  (r0, alpha, k_b) was being run against an MG curve. With the fix the script regenerates the
+  COMMITTED `mg` table bit-for-bit.
+- **Operator decision open**: whether to flip `rev_well_form` to `mg2` or `mg3`. Detail:
+  `WORK_STATUS.md` packages 9a/9b, `docs/REV_GFNFF_STAGE3A.md` section 2.3.
 
 **2026-09-20: `package-8` DONE — package 7's option (ii) shipped as a WARNING, no default changed.**
 No agent running. One local commit `84c540d5`, nothing pushed. Detail `WORK_STATUS.md` 8.1-8.5

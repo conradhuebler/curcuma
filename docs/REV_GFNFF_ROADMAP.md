@@ -224,6 +224,23 @@ r2SCAN-3c, model = gfnff static / revgfnff react, energies relative to each curv
 | C-F | 114 / 85 | 1.45 / 1.33 | 2.09 / 1.56 | 806 / 747 |
 | H-Cl | 104 / 59 | 1.48 / 1.33 | 1.88 / 1.70 | 755 / 396 |
 
+**Status 2026-09-20 (packages 9a / 9b, `test_cases/revgfnff/_log/WORK_STATUS.md`)**: the well
+form of this sketch is built and measured, as two OPT-IN values of `-gfnff.rev_well_form` that
+change no default. `mg2` frees the curvature (solved in closed form from the reference's own
+measured `k`, not fitted — a fitted curvature runs to a flat quartic bottom on 8 of 32 bonds) and
+re-solves `r0` (as an offset on the model's dynamic r0, solved against the RELAXED class-A bond
+length; the rigid-scan minimum does not transfer). `mg3` adds the bond-order dimension this table
+calls for, keyed on the continuous order `1 + pibo*(both ends sp ? 2 : 1)` so that no discrete
+single/double/triple switch can fire during a trajectory. Measured: class-A harness rms
+24.68 (gauss) / 22.15 (mg) -> 15.83 (mg2) / **13.22** (mg3); median dev D_e -25.79 / -14.32 ->
+-16.17 / **-6.86**; median dev k -169 / -158 -> **-44** / -82; median |b_model - b_r2SCAN-3c| over
+all 32 class-A bonds 0.0293 / 0.0246 -> **0.0060 / 0.0044** A. Costs: the conformer/S66 guard
+1.0341 / 1.0439 -> 1.0543 / 1.0547 (twice the `mg` flip's precedent) and, for `mg3` only, a
+rebuild-jump tail of 89 events >= 50 kJ/mol over 130 react-MD cells against `mg`'s 14 — shown by
+measurement NOT to come from the order variable (0 of the 10 largest jumps over 259 rebuilds
+involves any order change; the forced-order response is linear to 1 part in 8000).
+**What this table's "k ref/model" column measured is now the thing `mg2` solves for.**
+
 The Gaussian well saturates 0.2-0.5 r_eq too early and its depth (with all other terms) is
 12-25 % too small for C-H/C-C/C=C/N-H/C-F and 43-52 % for O-H/H-Cl; beyond 1.6 r_eq both
 models sit 15-65 kcal/mol below the reference. The react blend removes the static per-frame
@@ -278,8 +295,8 @@ Details, every measured number and the "what was not tested" list: **[REV_GFNFF_
 | 3a (ii) donor rule for the conserving budget | **DEFAULT ON since 2026-09-19** (new) | `-gfnff.rev_share_donor_rule` |
 | 3a (ii) hydrogen keeps one valence | default on since 2026-09-18; **a no-op under `conserving`** (H's cap is 0 by element there) | `-gfnff.rev_budget_fix_h` |
 | 3a (iii) well form MG, curvature-pinned | **DEFAULT since 2026-09-19** | `-gfnff.rev_well_form gauss\|mg\|erfmorse` |
-| 3a (iii) step 2, free curvature + r0 re-solve | not started | — |
-| 3b bond-order-resolved well table | not started — the reason the class-A median is 19.5 and not 2.1 | — |
+| 3a (iii) step 2, free curvature + r0 re-solve | **delivered 2026-09-20, OPT-IN, no default flipped** — class-A rms 22.15 -> 15.83, dev k -158 -> -44, median \|b - b_r2SCAN-3c\| 0.025 -> 0.006 A; guard 1.0439 -> 1.0543 | `-gfnff.rev_well_form mg2` |
+| 3b bond-order-resolved well table | **delivered 2026-09-20, OPT-IN, no default flipped** — class-A rms 22.15 -> **13.22**, dev D_e -14.32 -> **-6.86**; keyed on the CONTINUOUS order `1 + pibo*(both sp ? 2 : 1)`, no discrete switch; guard 1.0547, rebuild dE_jump tail 14 -> 89 events >= 50 kJ (measured NOT to be the order dimension) | `-gfnff.rev_well_form mg3` |
 
 **Superseded 2026-09-19 night**: the paragraph below described this as an unattributed
 "interaction" between the two flips. It was a 20-cell sampling artefact. Over 130 cells
