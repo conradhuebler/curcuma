@@ -9,14 +9,21 @@ Four things, on a SINGLE water molecule so the test costs a second:
      that case - the run has to be bit-identical to one that never knew about the
      feature.
 
-  2. Without it, one water at 1750 K with dt = 1 fs in NVE DESTROYS itself: the
-     GFN-FF O-H bond stiffens under compression (3817 cm^-1 at the equilibrium
-     length, 10758 cm^-1 at 0.70 A), so the Verlet stability limit drops below the
-     time step and the energy runs away. Measured: +8.78 Eh over 1 ps, with an
-     average "temperature" of 1.8 million K. This is the failure mode the feature
-     exists for, reproduced on three atoms.
+  2. Without it, one water at 1750 K with dt = 2 fs in NVE DESTROYS itself: the
+     GFN-FF O-H period is 9.17 fs, so 2 fs samples it 4.6 times per period - below
+     what velocity-Verlet can follow for an unconstrained X-H bond - and the bond
+     stiffens further under compression (3817 cm^-1 at the equilibrium length,
+     10758 cm^-1 at 0.70 A), which takes it the rest of the way. Measured: +0.63 Eh
+     over 1 ps, with an average "temperature" of 77211 K. This is the failure mode
+     the feature exists for, reproduced on three atoms.
 
-  3. With it, the same run conserves energy (measured -0.003 Eh) without a single
+     The step used to be 1 fs here. That was before commit ef462fcf, when SimpleMD
+     advanced 1.9516 fs per requested femtosecond, so the old -dt 1.0 was physically
+     1.95 fs - which is why 2 fs is the right replacement rather than a weakening of
+     the test. With a correct clock, 1.0 and 1.5 fs both conserve (+0.0002 and
+     -0.0011 Eh), the run breaks at 2.0, and 2.5 gives +11.1 Eh.
+
+  3. With it, the same run conserves energy (measured -0.006 Eh) without a single
      constraint and without touching the masses.
 
   4. The local (hottest-atom) channel only ever ADDS rejections: on a system the
@@ -46,7 +53,7 @@ VERBOSE = "--verbose" in sys.argv
 
 
 def run_md(binary, workdir, label, extra):
-    """One NVE run at 1750 K / dt = 1 fs. Returns (dE in Eh, average T in K)."""
+    """One NVE run at 1750 K / dt = 2 fs. Returns (dE in Eh, average T in K)."""
     xyz = Path(workdir) / f"{label}.xyz"
     with open(xyz, "w") as f:
         f.write(f"{len(H2O)}\n\n")
@@ -54,7 +61,7 @@ def run_md(binary, workdir, label, extra):
             f.write(f"{el} {x:.12f} {y:.12f} {z:.12f}\n")
 
     cmd = [binary, "-md", str(xyz), "-method", "gfnff", "-threads", "1",
-           "-T", "1750", "-dt", "1.0", "-MaxTime", "1000", "-thermostat", "none",
+           "-T", "1750", "-dt", "2.0", "-MaxTime", "1000", "-thermostat", "none",
            "-no_bmt", "-verbosity", "1", "-seed", "1"] + extra
     proc = subprocess.run(cmd, capture_output=True, text=True, cwd=workdir)
     if VERBOSE:
@@ -90,11 +97,13 @@ def main():
         if dE_off is None:
             return 1
         print(f"  default (adaptive_step off): dE = {dE_off:+.4f} Eh, <T> = {T_off:.0f} K")
-        if dE_off < 1.0:
+        if dE_off < 0.1:
             failures.append(
                 f"the reference failure mode did not reproduce: dE = {dE_off:+.4f} Eh, "
-                "expected > +1 Eh. Either GFN-FF changed, or adaptive_step is no longer "
-                "off by default - check which, the second would be a silent default change.")
+                "expected > +0.1 Eh (measured +0.63). Either GFN-FF changed, or adaptive_step "
+                "is no longer off by default, or the MD time step changed again - check which, "
+                "the second would be a silent default change and the third is what ef462fcf "
+                "fixed (see md_time_axis).")
 
         # An explicit false must behave exactly like the default.
         dE_false, T_false = run_md(binary, workdir, "false", ["-adaptive_step", "false"])
