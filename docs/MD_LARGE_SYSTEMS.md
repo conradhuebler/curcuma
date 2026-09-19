@@ -397,6 +397,12 @@ the residual +0.53 Eh is. The run costs about 1.9x the wall time of the plain on
 `-adaptive_step_hot_factor` (default 10) sets the multiple of the running median.
 `-adaptive_step_local false` restores the previous behaviour exactly.
 
+**The factor is not the limiting element here, which was checked rather than assumed.**
+Tightening it from 10 to 4 on the same polymer_2x run changes nothing measurable: +0.5189 Eh /
+245.8 K against +0.5305 Eh / 246.2 K, the same 104 rejections, 85 local-alone instead of 92. So
+the residual is structural - the event is damped rather than prevented - and not a threshold
+that was set too loose. Do not tune the factor expecting the residual to move.
+
 ### What it does not do
 
 - The **global** channel does not scale to arbitrary system size - see the section above. The
