@@ -9,7 +9,7 @@
  * Claude Generated - December 20, 2025
  */
 
-#include <vector>
+#include <array>
 
 // C6 dispersion coefficient reference data (262,444 values)
 // Format: Flat array of C6 values for all element pair/reference combinations
@@ -17,7 +17,10 @@
 //   flat[ref_i + ref_j*MAX_REF + pair_idx*MAX_REF*MAX_REF]
 // Element pairs: Triangular indexing for 103 elements = 5,356 unique pairs
 // References: 7×7 combinations per pair (MAX_REF=7 from s-dftd3)
-std::vector<double> reference_c6_data_complete = {
+// Claude Generated (Jul 2026): const std::array (constant-initialized into .rodata, ~2 MB
+// read-only) instead of a global std::vector that heap-allocated + copied the whole table at
+// every process start (~1 ms static-init tax even when D3 is never used). See d3_reference_data.h.
+extern const std::array<double, 262444> reference_c6_data_complete = {
     3.0267000, 4.7379000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 4.7379000,
     7.5916000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000,
     0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000,

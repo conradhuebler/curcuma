@@ -4,23 +4,33 @@
  *
  * This program is free software under GPL-3.0.
  *
- * Claude Generated (2026-06): Stage-0 pass-through. Forwards the whole
- * ComputationalMethod interface to an owned NativeXtbMethod and initializes the
- * GPU context. Host-compiled (no device code) — the CUDA kernels live in the
- * .cu translation units.
+ * Claude Generated (2026-06, restructured Sep 2026): the ComputationalMethod half of this
+ * wrapper — the forwarding, the device handshake/logging and the CPU fallback — is shared
+ * with the ROCm and Vulkan wrappers and lives in xtb_gpu_adapter.h. What stays here is
+ * CUDA-specific: the cuSOLVER eigensolver hook, the host-thread default, and the
+ * device-resident SCF backend below.
+ *
+ * Why the backend class is NOT on the shared XtbGpuResidentBackend template: the CUDA
+ * context drives device stages the other two backends do not have — the fused resident SCF
+ * loop (Stage 6 S6.5: beginResidentLoop/residentScfStep/residentLoopCharges), the full
+ * device GFN2 potential build (beginPotential/solvePotential), in-SCF solvation, device
+ * atomic + shell Mulliken charges and the device SCC energy — and it passes the dimension
+ * `n` explicitly to most calls plus keeps its own copy of the flattened basis. Templating
+ * it would mean a dozen trait hooks with one user each; the seam it implements is the same
+ * GpuScfBackend, so nothing is lost by writing it out.
+ *
+ * Host-compiled (no device code) — the CUDA kernels live in the .cu translation units.
  */
 
-#ifdef USE_CUDA_XTB
+#ifdef USE_CUDA
 
 #include "xtb_gpu_method.h"
-#include "cuda/xtb_gpu_context.h"
 
-#include "src/core/curcuma_logger.h"
-
-#include <fmt/format.h>
+#include "src/core/gpu_device_pool.h"
 
 #include <algorithm>
 #include <cstring>
+#include <sstream>
 #include <thread>
 #include <vector>
 
@@ -75,6 +85,7 @@ public:
         if (!m_ctx) return false;
         Eigen::MatrixXd Pcm(m_n, m_n), Ccm(m_n, m_n);  // column-major device layout
         if (!m_ctx->residentFinalize(Pcm.data(), Ccm.data(), m_n)) return false;
+        reportDistributedEigensolver();
         P = Pcm;   // → row-major project Matrix, values preserved (P symmetric)
         C = Ccm;   // col-major eigenvectors → row-major, values preserved
         return true;
@@ -160,14 +171,40 @@ public:
         bd.rep_zeff    = m_bf.rep_zeff.empty() ? nullptr : m_bf.rep_zeff.data();
         m_n = m_bf.nao;
         m_nat = m_bf.nat;
-        return m_ctx->beginBasis(bd);
+        const bool ok = m_ctx->beginBasis(bd);
+        if (!ok) warnDeviceFallback("basis setup");
+        return ok;
     }
 
     bool beginComputed(const std::vector<double>& xyz_bohr) override
     {
         if (!m_ctx || m_n <= 0) return false;
-        return m_ctx->computeIntegrals(xyz_bohr.data())
+        const bool ok = m_ctx->computeIntegrals(xyz_bohr.data())
             && m_ctx->residentBeginComputed();
+        if (!ok) warnDeviceFallback("integral build");
+        else if (!m_storage_reported && CurcumaLogger::get_verbosity() >= 2) {
+            m_storage_reported = true;
+            CurcumaLogger::info(m_ctx->sparseIntegrals()
+                ? fmt::format("GPU integrals: screened pair storage, {:.1f} % of AO pairs (largest cutoff {:.1f} Bohr)",
+                              100.0 * m_ctx->sparseFraction(), m_ctx->sparseCutoffBohr())
+                : fmt::format("GPU integrals: dense storage ({:.1f} % of AO pairs within the screening cutoff)",
+                              100.0 * m_ctx->sparseFraction()));
+        }
+        return ok;
+    }
+
+    std::string profileReport() const override { return m_ctx ? m_ctx->profileReport() : std::string(); }
+
+    // Claude Generated (Sep 2026): a GPU run that falls back to the CPU must say so at the
+    // default verbosity - for a large system that fallback turns a minutes-long GPU job into
+    // hours on the host. Warned once per backend object.
+    void warnDeviceFallback(const char* stage)
+    {
+        if (m_fallback_warned) return;
+        m_fallback_warned = true;
+        const std::string why = m_ctx->lastError();
+        CurcumaLogger::warn(fmt::format("GPU {} on device {} failed{}; this calculation runs on the CPU",
+                                        stage, m_ctx->deviceId(), why.empty() ? std::string() : " - " + why));
     }
 
     bool downloadGamma(Eigen::MatrixXd& gamma_out) override
@@ -209,6 +246,9 @@ public:
 
     // ---- Device nuclear gradient (Stage 4) --------------------------------
     bool supportsGradient() const override { return true; }
+    // X-I1: the CUDA integral/SCF/gradient kernels handle d shells (cartesian->
+    // spherical dtrafo in xtb_gpu_integrals_device.cuh). Claude Generated.
+    bool supportsDshell() const override { return true; }
 
     bool gradient(const Matrix& P, const Eigen::MatrixXd& C, const Vector& eps,
                   int nocc_orbs, const Vector& v_ao, const Vector& q_sh,
@@ -316,6 +356,23 @@ public:
         return m_ctx->dispersionDedq(nat, W, dWq, dEdq_out);
     }
 
+    // Claude Generated (Sep 2026): post-SCF D4 2-body gradient + ATM on the device.
+    bool dispersionGradient(int nat, const double* W, const double* dWq, const double* dWc,
+                            double* e_atom_out, double* grad_out,
+                            double* dEdcn_out, double* dEdq_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->dispersionGradient(nat, W, dWq, dWc, e_atom_out, grad_out, dEdcn_out, dEdq_out);
+    }
+    bool dispersionATM(int nat, const double* c6, const double* dc6dcn,
+                       double s9, double a1, double a2, double alp, double cutoff,
+                       double* e_atom_out, double* grad_out, double* dEdcn_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->dispersionATM(nat, c6, dc6dcn, s9, a1, a2, alp, cutoff,
+                                    e_atom_out, grad_out, dEdcn_out);
+    }
+
     // ---- Device D4 reference weights from resident q_at (Stage 6, S6.2b) ---
     bool beginDispersionWeights(const std::vector<double>& cn, const std::vector<double>& gi,
                                 const std::vector<double>& zeff, const std::vector<double>& refcn,
@@ -358,8 +415,31 @@ public:
                              Eigen::MatrixXd& qp_at, Vector& eps) override
     {
         if (!m_ctx) return false;
-        return m_ctx->residentLoopCharges(q_sh.data(), q_at.data(), dp_at.data(),
-                                          qp_at.data(), eps.data());
+        const bool ok = m_ctx->residentLoopCharges(q_sh.data(), q_at.data(), dp_at.data(),
+                                                   qp_at.data(), eps.data());
+        reportDistributedEigensolver();
+        const std::string dens = m_ctx ? m_ctx->densityDevicesStatus() : std::string();
+        if (!dens.empty() && dens != m_dens_reported) {
+            m_dens_reported = dens;
+            if (dens.rfind("failed", 0) == 0)
+                CurcumaLogger::warn("GPU distributed density " + dens);
+            else if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::info("GPU distributed density: " + dens);
+        }
+        return ok;
+    }
+
+    // Claude Generated (Sep 2026, multi-GPU step 3): say whether the multi-GPU eigensolve ran
+    // (info at verbosity 2) or why it did not (warning). Called at the end of every SCF.
+    void reportDistributedEigensolver()
+    {
+        const std::string dist = m_ctx ? m_ctx->distributedEigensolverStatus() : std::string();
+        if (dist.empty() || dist == m_dist_reported) return;
+        m_dist_reported = dist;
+        if (dist.rfind("unavailable", 0) == 0 || dist.find("failed") != std::string::npos)
+            CurcumaLogger::warn("GPU multi-GPU eigensolver " + dist);
+        else if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info("GPU multi-GPU eigensolver: " + dist);
     }
 
     // ---- Full device GFN2 potential build (Stage 5, Part B3/B4) -----------
@@ -372,6 +452,17 @@ public:
         if (!m_ctx) return false;
         return m_ctx->beginPotential(nat, nsh, amat_sd, amat_dd, amat_sq,
                                      dkernel, qkernel, gamma3);
+    }
+
+    bool supportsOnTheFlyMultipole() const override { return true; }
+    std::string lastError() const override { return m_ctx ? m_ctx->lastError() : std::string(); }
+    bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr, const double* mrad,
+                                double dmp3, double dmp5, const double* dkernel,
+                                const double* qkernel, const double* gamma3) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->beginPotentialOnTheFly(nat, nsh, xyz_bohr, mrad, dmp3, dmp5,
+                                             dkernel, qkernel, gamma3);
     }
 
     // WP4b: in-SCF implicit solvation on the device potential path.
@@ -400,6 +491,10 @@ private:
     int            m_nat = 0;
     curcuma::xtb::GpuBasisFlat m_bf;
     curcuma::xtb::GpuH0Flat    m_hf;
+    bool           m_fallback_warned = false;
+    bool           m_storage_reported = false;
+    std::string    m_dist_reported;
+    std::string    m_dens_reported;
 };
 
 } // namespace
@@ -414,101 +509,226 @@ createXtbGpuScfBackend(curcuma::xtb::gpu::XtbGpuContext* ctx)
 }
 
 XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const json& config)
-    : m_method(method)
+    : XtbGpuAdapter(method, config, "GPU", "CUDA device")
 {
-    // Device handshake (non-throwing; ok() is false when no usable device).
-    m_gpu = std::make_unique<XtbGpuContext>();
+    if (!gpuActive()) return;   // the adapter already warned; the CPU path stands
 
-    // Full validated CPU pipeline (config, large-system modes, errors, properties).
-    m_cpu = std::make_unique<NativeXtbMethod>(method, config);
+    // The dense XTB exists at construction; when a large_system_mode driver is active
+    // solver() is the (unused) dense instance, so the hooks below are harmless there
+    // (GPU + large_system_mode is not yet wired and runs on the CPU fragment driver).
+    if (curcuma::xtb::XTB* xtb = cpuSolver()) {
+        XtbGpuContext* ctx = context();
 
-    if (m_gpu->ok()) {
-        if (CurcumaLogger::get_verbosity() >= 1)
-            CurcumaLogger::success(fmt::format(
-                "{}: GPU context ready on device {} ({})",
-                getMethodName(), m_gpu->deviceId(), m_gpu->deviceName()));
-
-        // Stage 1: install the GPU eigensolver. solveEigen() delegates the
-        // per-iteration generalized eigenproblem (F, S=L·Lᵀ)→(C, eps) to the
-        // device; everything else (integrals, Fock build, density, gradient)
-        // still runs on the CPU pipeline. The dense XTB exists at construction;
-        // when a large_system_mode driver is active solver() is the (unused)
-        // dense instance, so the hook is harmless there (GPU + large_system_mode
-        // is not yet wired and runs on the CPU fragment driver).
-        if (curcuma::xtb::XTB* xtb = m_cpu->solver()) {
-            XtbGpuContext* ctx = m_gpu.get();
-            xtb->setExternalEigensolver(
-                [ctx](const Matrix& F, const Eigen::MatrixXd& L,
-                      Matrix& C, Vector& eps) -> bool {
-                    const int n = static_cast<int>(F.rows());
-                    if (n <= 0 || L.rows() != n || L.cols() != n)
-                        return false;
-                    // cuSOLVER/cuBLAS are column-major. F (row-major Matrix) is
-                    // symmetric, so its buffer already reads as column-major F.
-                    // The eigenvectors come back column-major in Ccm; assigning to
-                    // the row-major m_wfn.C (C) lets Eigen transpose-convert, values
-                    // preserved. eps is a plain vector (no storage-order ambiguity).
-                    Eigen::MatrixXd Fcm = F;     // guaranteed contiguous column-major
-                    Eigen::MatrixXd Ccm(n, n);   // column-major eigenvector output
-                    eps.resize(n);
-                    if (!ctx->solveGeneralizedEigenF64(Fcm.data(), L.data(), n,
-                                                       Ccm.data(), eps.data()))
-                        return false;
-                    C = Ccm;                     // col-major → row-major, values kept
-                    return true;
-                });
-            if (CurcumaLogger::get_verbosity() >= 2)
-                CurcumaLogger::info(fmt::format(
-                    "{}: GPU eigensolver active (cuSOLVER Dsyevd, FP64); "
-                    "SCF/integrals/gradient on CPU (Stage 1)", getMethodName()));
-
-            // Stage 2: install the device-resident SCF backend. With the default
-            // Broyden charge mixing, XTB::Calculation keeps H0/S/L and the
-            // density/MO matrices on the device for the whole SCF (begin/solve/
-            // density/finalize), so only length-nao vectors cross the bus each
-            // iteration instead of the per-iteration Fock upload of Stage 1. GFN1
-            // runs the isotropic loop (Stage 2a); GFN2 additionally keeps the
-            // multipole integrals resident and adds the anisotropic Fock + atomic
-            // moments on the device (Stage 2b). Non-Broyden modes keep the
-            // Stage-1 eigensolver hook above.
-            m_scf_backend = std::make_unique<XtbGpuScfBackend>(ctx);
-            xtb->setGpuScfBackend(m_scf_backend.get());
-            // FP64 is ~1/64 of FP32 on consumer GPUs, so the per-iteration FP64
-            // eigensolve is the bottleneck. Default mixed precision ON for the GPU
-            // path: far-from-convergence iterations solve in FP32, reverting to
-            // FP64 near convergence (max|dq| < threshold) so the converged energy
-            // stays FP64 (gpu_gfn{1,2}_validation @1e-8 holds). Claude Generated.
-            xtb->setMixedPrecision(true);
-            if (CurcumaLogger::get_verbosity() >= 2)
-                CurcumaLogger::info(fmt::format(
-                    "{}: GPU device-resident SCF backend active (Broyden; "
-                    "GFN1 Stage 2a, GFN2 Stage 2b)", getMethodName()));
+        // Claude Generated (Sep 2026): `-gpu_memory_check false` skips the pre-allocation
+        // estimate (e.g. when the estimate is too conservative for a card that just fits).
+        if (config.contains("gpu_memory_check")) {
+            const auto& v = config["gpu_memory_check"];
+            const bool on = v.is_boolean() ? v.get<bool>()
+                          : v.is_number()  ? v.get<double>() != 0.0
+                          : !(v.is_string() && (v.get<std::string>() == "false" || v.get<std::string>() == "0"));
+            ctx->setMemoryCheck(on);
         }
-        // Default the host work to several cores (the SCF/gradient are on the GPU,
-        // but the host integral build + per-iter potential are not). Overridden by
-        // an explicit -threads via setThreadCount. Claude Generated.
-        setThreadCount(0);
-    } else {
-        CurcumaLogger::warn(fmt::format(
-            "{}: no usable CUDA device; running CPU path", getMethodName()));
+        // Claude Generated (Sep 2026): `-gpu_sparse_integrals auto|on|off` - screened pair
+        // storage for S/H0/multipole integrals (auto = when < 50 % of the AO pairs survive).
+        if (config.contains("gpu_sparse_integrals")) {
+            const auto& v = config["gpu_sparse_integrals"];
+            std::string m = v.is_string() ? v.get<std::string>() : (v.is_boolean() ? (v.get<bool>() ? "on" : "off") : "auto");
+            ctx->setSparseIntegrals(m == "on" || m == "true" || m == "sparse" ? 2
+                                    : (m == "off" || m == "false" || m == "dense") ? 0 : 1);
+        }
+
+        auto num = [&](const char* key, double def) {
+            if (!config.contains(key)) return def;
+            const auto& x = config[key];
+            if (x.is_number()) return x.get<double>();
+            if (x.is_string()) { try { return std::stod(x.get<std::string>()); } catch (...) {} }
+            return def;
+        };
+
+        // Claude Generated (Sep 2026, multi-GPU step 3; default ON per operator decision):
+        // multi-GPU eigensolve of the resident SCF, `-gpu_eigensolver_devices all|0,1,2,3|none`.
+        // With more than one visible device it defaults to ALL of them - unless this calculation
+        // runs inside a batch worker that leased one device (then every worker already owns a
+        // device and must not grab the others).
+        // Both multi-GPU paths only engage from gpu_eigensolver_min_nao / gpu_density_min_nao
+        // (4000) basis functions up; below that they cost more than they save.
+        // See docs/GPU_TUNING.md for the measured numbers.
+        const bool several_devices = XtbGpuContext::deviceCount() > 1
+            && curcuma::leasedGpuDevice() < 0;
+        if (config.contains("gpu_eigensolver_devices") || several_devices) {
+            std::vector<int> devs;
+            std::string spec = "all";
+            if (config.contains("gpu_eigensolver_devices")) {
+                const auto& v = config["gpu_eigensolver_devices"];
+                spec = v.is_string() ? v.get<std::string>() : std::string();
+                if (v.is_array()) {
+                    spec.clear();
+                    for (const auto& d : v) if (d.is_number()) devs.push_back(static_cast<int>(d.get<double>()));
+                }
+            }
+            if (spec == "all" || spec == "auto") {
+                devs.push_back(-1);   // the context expands this to every visible device
+            } else if (!spec.empty() && spec != "none" && spec != "off") {
+                std::stringstream ss(spec);
+                for (std::string tok; std::getline(ss, tok, ',');) {
+                    try { devs.push_back(std::stoi(tok)); } catch (...) {
+                        CurcumaLogger::warn("gpu_eigensolver_devices: cannot parse '" + tok + "'");
+                    }
+                }
+            }
+            std::string backend = "auto";
+            if (config.contains("gpu_eigensolver_backend") && config["gpu_eigensolver_backend"].is_string())
+                backend = config["gpu_eigensolver_backend"].get<std::string>();
+            bool fp32 = true;
+            if (config.contains("gpu_eigensolver_fp32")) {
+                const auto& x = config["gpu_eigensolver_fp32"];
+                fp32 = x.is_boolean() ? x.get<bool>()
+                     : x.is_number()  ? x.get<double>() != 0.0
+                     : !(x.is_string() && (x.get<std::string>() == "false" || x.get<std::string>() == "0"));
+            }
+            bool verify = true;
+            if (config.contains("gpu_eigensolver_verify")) {
+                const auto& x = config["gpu_eigensolver_verify"];
+                verify = x.is_boolean() ? x.get<bool>()
+                       : x.is_number()  ? x.get<double>() != 0.0
+                       : !(x.is_string() && (x.get<std::string>() == "false" || x.get<std::string>() == "0"));
+            }
+            if (!devs.empty())
+                ctx->setDistributedEigensolver(devs, backend,
+                                               static_cast<int>(num("gpu_eigensolver_block", 128)),
+                                               static_cast<int>(num("gpu_eigensolver_min_nao", 4000)),
+                                               fp32, verify);
+        }
+
+        // Claude Generated (Sep 2026, multi-GPU): `-gpu_density_devices all|0,1,..|solver|none`
+        // splits the screened-pattern density of the resident SCF over several GPUs (exact, see
+        // XtbGpuContext::densityPatternDistributed). "solver" reuses the eigensolver's devices.
+        // Defaults to all visible devices under the same condition as the eigensolve above.
+        if (config.contains("gpu_density_devices") || several_devices) {
+            std::vector<int> devs;
+            std::string spec = "all";
+            if (config.contains("gpu_density_devices")) {
+                const auto& v = config["gpu_density_devices"];
+                spec = v.is_string() ? v.get<std::string>() : std::string();
+                if (v.is_array()) {
+                    spec.clear();
+                    for (const auto& d : v) if (d.is_number()) devs.push_back(static_cast<int>(d.get<double>()));
+                }
+            }
+            if (spec == "all" || spec == "auto") {
+                devs.push_back(-1);
+            } else if (spec == "solver" && config.contains("gpu_eigensolver_devices")
+                       && config["gpu_eigensolver_devices"].is_string()) {
+                const std::string es = config["gpu_eigensolver_devices"].get<std::string>();
+                if (es == "all" || es == "auto") {
+                    devs.push_back(-1);
+                } else {
+                    std::stringstream ss(es);
+                    for (std::string tok; std::getline(ss, tok, ',');) {
+                        try { devs.push_back(std::stoi(tok)); } catch (...) {}
+                    }
+                }
+            } else if (!spec.empty() && spec != "none" && spec != "off") {
+                std::stringstream ss(spec);
+                for (std::string tok; std::getline(ss, tok, ',');) {
+                    try { devs.push_back(std::stoi(tok)); } catch (...) {
+                        CurcumaLogger::warn("gpu_density_devices: cannot parse '" + tok + "'");
+                    }
+                }
+            }
+            if (!devs.empty())
+                ctx->setDensityDevices(devs, static_cast<int>(num("gpu_density_min_nao", 4000)));
+        }
+
+        // Stage 1: install the GPU eigensolver. solveEigen() delegates the per-iteration
+        // generalized eigenproblem (F, S=L·Lᵀ)→(C, eps) to the device; everything else
+        // (integrals, Fock build, density, gradient) still runs on the CPU pipeline.
+        // CUDA-SPECIFIC: cuSOLVER takes the Cholesky factor L directly.
+        xtb->setExternalEigensolver(
+            [ctx](const Matrix& F, const Eigen::MatrixXd& L,
+                  Matrix& C, Vector& eps) -> bool {
+                const int n = static_cast<int>(F.rows());
+                if (n <= 0 || L.rows() != n || L.cols() != n)
+                    return false;
+                // cuSOLVER/cuBLAS are column-major. F (row-major Matrix) is
+                // symmetric, so its buffer already reads as column-major F.
+                // The eigenvectors come back column-major in Ccm; assigning to
+                // the row-major m_wfn.C (C) lets Eigen transpose-convert, values
+                // preserved. eps is a plain vector (no storage-order ambiguity).
+                Eigen::MatrixXd Fcm = F;     // guaranteed contiguous column-major
+                Eigen::MatrixXd Ccm(n, n);   // column-major eigenvector output
+                eps.resize(n);
+                if (!ctx->solveGeneralizedEigenF64(Fcm.data(), L.data(), n,
+                                                   Ccm.data(), eps.data()))
+                    return false;
+                C = Ccm;                     // col-major → row-major, values kept
+                return true;
+            });
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info(fmt::format(
+                "{}: GPU eigensolver active (cuSOLVER Dsyevd, FP64); "
+                "SCF/integrals/gradient on CPU (Stage 1)", getMethodName()));
+
+        // Stage 2: install the device-resident SCF backend. With the default
+        // Broyden charge mixing, XTB::Calculation keeps H0/S/L and the
+        // density/MO matrices on the device for the whole SCF (begin/solve/
+        // density/finalize), so only length-nao vectors cross the bus each
+        // iteration instead of the per-iteration Fock upload of Stage 1. GFN1
+        // runs the isotropic loop (Stage 2a); GFN2 additionally keeps the
+        // multipole integrals resident and adds the anisotropic Fock + atomic
+        // moments on the device (Stage 2b). Non-Broyden modes keep the
+        // Stage-1 eigensolver hook above.
+        m_scf_backend = std::make_unique<XtbGpuScfBackend>(ctx);
+        xtb->setGpuScfBackend(m_scf_backend.get());
+        // CUDA-SPECIFIC: FP64 is ~1/64 of FP32 on consumer GPUs, so the per-iteration
+        // FP64 eigensolve is the bottleneck. Default mixed precision ON for the GPU
+        // path: far-from-convergence iterations solve in FP32, reverting to
+        // FP64 near convergence (max|dq| < threshold) so the converged energy
+        // stays FP64 (gpu_gfn{1,2}_validation @1e-8 holds). Claude Generated.
+        // Claude Generated (Sep 2026, measured on H200): mixed precision is a CONSUMER-GPU trick.
+        // Where FP64 runs at half the FP32 rate it does not pay - polymer_2x on an H200 NVL took
+        // 5.29 s per FP32 iteration and 3.36 s per FP64 one - and it is worse than that: at
+        // nao = 15444 the FP32 phase converged to a fixed point 1.1 kcal/mol off (dq 7.1e-6 while
+        // the truth was 9.4e-3), so the SCF had to discover that through its FP64 check and spent
+        // 42 iterations instead of 15. On such a device the default is therefore FP64 throughout;
+        // -scf_mixed_precision true overrides it.
+        // The user's own -scf_mixed_precision (applied by applyXtbScfConfig before this
+        // point) wins over the device-class default. Claude Generated (Sep 2026): this used
+        // to be an unconditional assignment, so the flag the message below advertises had
+        // no effect on a full-rate-FP64 device.
+        auto cfg_has = [&](const char* key) {
+            return config.contains(key)
+                || (config.contains("xtb") && config["xtb"].is_object() && config["xtb"].contains(key));
+        };
+        const bool fast_fp64 = ctx->deviceHasFastFp64();
+        const bool mp_explicit = cfg_has("scf_mixed_precision") || cfg_has("mixed_precision");
+        if (!mp_explicit) xtb->setMixedPrecision(!fast_fp64);
+        if (fast_fp64 && !mp_explicit && CurcumaLogger::get_verbosity() >= 2)   // info() is level >= 2
+            CurcumaLogger::info(fmt::format(
+                "{}: {} has full-rate FP64 - mixed precision OFF by default "
+                "(-scf_mixed_precision true to force it)", getMethodName(), ctx->deviceName()));
+        // Claude Generated (Sep 2026, operator decision): on the GPU switch to FP64 only once
+        // max|dq| < 1e-5 (CPU default stays 1e-3). Measured on polymer (1410 atoms, RTX A4500):
+        // FP64 eigensolves 4 -> 1, SCF 6.7 -> 4.5 s, energy identical to 1e-12 Eh, gradient vs
+        // CPU 2.6e-6 -> 7.0e-6 Eh/A (within the loose default scf_threshold). An explicit
+        // -scf_fp32_threshold (or its alias fp32_threshold) wins. See docs/MULTI_GPU.md.
+        if (!cfg_has("scf_fp32_threshold") && !cfg_has("fp32_threshold"))
+            xtb->setFp32Threshold(1.0e-5);
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info(fmt::format(
+                "{}: GPU device-resident SCF backend active (Broyden; "
+                "GFN1 Stage 2a, GFN2 Stage 2b)", getMethodName()));
     }
+    // Default the host work to several cores (the SCF/gradient are on the GPU,
+    // but the host integral build + per-iter potential are not). Overridden by
+    // an explicit -threads via setThreadCount. Claude Generated.
+    setThreadCount(0);
 }
 
 XtbGpuComputationalMethod::~XtbGpuComputationalMethod() = default;
 
-// ---- forwarding (Stage 0) -------------------------------------------------
-bool XtbGpuComputationalMethod::setMolecule(const Mol& mol) { return m_cpu->setMolecule(mol); }
-bool XtbGpuComputationalMethod::updateGeometry(const Matrix& g) { return m_cpu->updateGeometry(g); }
-double XtbGpuComputationalMethod::calculateEnergy(bool gradient) { return m_cpu->calculateEnergy(gradient); }
-
-Matrix XtbGpuComputationalMethod::getGradient() const { return m_cpu->getGradient(); }
-Vector XtbGpuComputationalMethod::getCharges() const { return m_cpu->getCharges(); }
-Vector XtbGpuComputationalMethod::getBondOrders() const { return m_cpu->getBondOrders(); }
-Position XtbGpuComputationalMethod::getDipole() const { return m_cpu->getDipole(); }
-bool XtbGpuComputationalMethod::hasGradient() const { return m_cpu->hasGradient(); }
-
-std::string XtbGpuComputationalMethod::getMethodName() const { return m_cpu->getMethodName(); }
-bool XtbGpuComputationalMethod::isThreadSafe() const { return m_cpu->isThreadSafe(); }
+// ---- CUDA-SPECIFIC override: host-thread default --------------------------
+// Everything else in the ComputationalMethod interface is forwarded by XtbGpuAdapter.
 void XtbGpuComputationalMethod::setThreadCount(int threads)
 {
     // On the GPU path the eigensolve + gradient run on the device, but the host
@@ -526,21 +746,4 @@ void XtbGpuComputationalMethod::setThreadCount(int threads)
     m_cpu->setThreadCount(threads);
 }
 
-void XtbGpuComputationalMethod::setParameters(const json& params) { m_cpu->setParameters(params); }
-json XtbGpuComputationalMethod::getParameters() const { return m_cpu->getParameters(); }
-
-bool XtbGpuComputationalMethod::hasError() const { return m_cpu->hasError(); }
-void XtbGpuComputationalMethod::clearError() { m_cpu->clearError(); }
-std::string XtbGpuComputationalMethod::getErrorMessage() const { return m_cpu->getErrorMessage(); }
-
-Vector XtbGpuComputationalMethod::getOrbitalEnergies() const { return m_cpu->getOrbitalEnergies(); }
-int XtbGpuComputationalMethod::getNumElectrons() const { return m_cpu->getNumElectrons(); }
-json XtbGpuComputationalMethod::getEnergyDecomposition() const { return m_cpu->getEnergyDecomposition(); }
-bool XtbGpuComputationalMethod::saveToFile(const std::string& f) const { return m_cpu->saveToFile(f); }
-
-void XtbGpuComputationalMethod::setWarmStart(bool on) { m_cpu->setWarmStart(on); }
-void XtbGpuComputationalMethod::setIterativeMode(bool on) { m_cpu->setIterativeMode(on); }
-
-bool XtbGpuComputationalMethod::gpuActive() const { return m_gpu && m_gpu->ok(); }
-
-#endif // USE_CUDA_XTB
+#endif // USE_CUDA

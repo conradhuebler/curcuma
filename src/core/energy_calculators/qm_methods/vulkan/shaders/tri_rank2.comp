@@ -1,0 +1,19 @@
+#version 450
+// Householder tridiagonalization, step k: symmetric rank-2 update of the trailing block.
+//   A_sub[i,j] -= v[i]·w[j] + w[i]·v[j],   A_sub = A[k+1:n, k+1:n]
+//   v = V[:,k] (Householder vector), w = host-built (w = β·A·v − K·v).
+// Column-major n×n. One thread per trailing element (i,j). Claude Generated.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(std430, binding = 0)          buffer Ab { double A[]; };
+layout(std430, binding = 1) readonly buffer Vb { double V[]; };   // Householder vectors (col k)
+layout(std430, binding = 2) readonly buffer Wb { double w[]; };
+layout(push_constant) uniform PC { uint n; uint k; uint m; } pc;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    uint j = gl_GlobalInvocationID.y;
+    if (i >= pc.m || j >= pc.m) return;
+    uint n = pc.n, base = pc.k + 1u, vc = pc.k * n;
+    A[(base + i) + (base + j) * n] -= V[vc + i] * w[j] + w[i] * V[vc + j];
+}

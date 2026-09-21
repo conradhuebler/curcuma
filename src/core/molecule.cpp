@@ -289,13 +289,43 @@ void Molecule::Initialise(const int* attyp, const double* coord, const int natom
     }
 }
 
-void Molecule::ApplyReorderRule(const std::vector<int>& rule)
+/* Claude Generated (Aug 2026): the loop used to be bounded by rule.size() with no
+   precondition check, so a rule that did not cover the whole molecule silently rewrote it
+   with rule.size() atoms - ConfScan's heavy-atom mode (rule sized to the heavy subset,
+   indices pointing into the compacted heavy list) produced truncated AND scrambled
+   structures, and its plain-RMSD rejection path (empty rule) produced 0-atom structures.
+   The rule is now validated as a complete permutation; anything else is a no-op. */
+bool Molecule::ApplyReorderRule(const std::vector<int>& rule)
 {
+    const std::size_t n = AtomCount();
+    if (rule.size() != n || n == 0)
+        return false;
+
+    std::vector<bool> seen(n, false);
+    for (int i : rule) {
+        if (i < 0 || static_cast<std::size_t>(i) >= n || seen[i])
+            return false;
+        seen[i] = true;
+    }
+
     Molecule mol;
     for (auto& i : rule)
         mol.addPair(Atom(i));
     m_geometry = mol.m_geometry;
     m_atoms = mol.m_atoms;
+    invalidateCaches();
+    return true;
+}
+
+Molecule Molecule::ProtonDepletedCopy() const
+{
+    Molecule depleted;
+    for (std::size_t i = 0; i < AtomCount(); ++i) {
+        std::pair<int, Position> atom = Atom(i);
+        if (atom.first != 1)
+            depleted.addPair(atom);
+    }
+    return depleted;
 }
 
 // Claude Generated: Temporary fallback to std::cout to fix SegFault

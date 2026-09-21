@@ -46,7 +46,7 @@ FileIterator::FileIterator(const std::string& filename, bool silent)
     }
 
     if (!silent)
-        std::cerr << "Opening file " << m_filename << std::endl;
+        CurcumaLogger::info_fmt("Opening file {}", m_filename); // Claude Generated: verbosity >=2 only
     m_basename = filename;
     m_basename.erase(m_basename.end() - 4, m_basename.end());
     m_file = new std::ifstream(m_filename);
@@ -80,7 +80,7 @@ FileIterator::FileIterator(const char* filename, bool silent)
     }
 
     if (!silent)
-        std::cerr << "Opening file " << m_filename << std::endl;
+        CurcumaLogger::info_fmt("Opening file {}", m_filename); // Claude Generated: verbosity >=2 only
     m_basename = std::string(filename);
     m_basename.erase(m_basename.end() - 4, m_basename.end());
     m_file = new std::ifstream(m_filename);

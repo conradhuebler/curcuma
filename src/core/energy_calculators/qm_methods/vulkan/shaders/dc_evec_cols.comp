@@ -1,0 +1,25 @@
+#version 450
+// EIG-3 Cuppen divide-and-conquer, merge step 3: secular eigenvector columns
+//   W(i,j) = z̃_i / (D_i − λ_j) = z̃_i / dml(i,j),   normalized per column.
+// ONE THREAD per column j; serial O(ksz) build + norm + scale, no shared memory / barriers.
+// Verbatim port of the secularSolve W loop in native_eigensolver.cpp. Claude Generated (EIG-3).
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Tb { double zt[]; };     // ksz reconstructed weights
+layout(std430, binding = 1) readonly buffer Mb { double dml[]; };    // ksz×ksz col-major
+layout(std430, binding = 2)          buffer Wb { double W[]; };      // ksz×ksz col-major (out)
+layout(push_constant) uniform PC { uint k; } pc;
+
+void main()
+{
+    uint j = gl_GlobalInvocationID.x;
+    uint k = pc.k;
+    if (j >= k) return;
+    double nrm = 0.0lf;
+    for (uint i = 0u; i < k; ++i) {
+        double w = zt[i] / dml[i + j * k];
+        W[i + j * k] = w;
+        nrm += w * w;
+    }
+    nrm = sqrt(nrm);
+    if (nrm > 0.0lf) for (uint i = 0u; i < k; ++i) W[i + j * k] /= nrm;
+}

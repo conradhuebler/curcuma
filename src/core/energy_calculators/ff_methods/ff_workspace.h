@@ -29,7 +29,7 @@
 
 #include "src/core/global.h"
 #include "gfnff_parameters.h"
-#include "forcefieldthread.h"  // For Bond, Angle, Dihedral, Inversion struct definitions
+#include "ff_terms.h"  // Bond, Angle, Dihedral, Inversion, vdW, EQ, CNDerivStore, GeoGradMatrix
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
@@ -191,6 +191,9 @@ struct PartitionRanges {
     std::pair<int,int> bonded_reps = {0,0};
     std::pair<int,int> nonbonded_reps = {0,0};
     std::pair<int,int> coulombs = {0,0};
+    /// Implicit Coulomb (no stored pair list): the ATOM range [first, second) this partition
+    /// owns as the outer index i, balanced by pair count. Claude Generated (Sep 2026).
+    std::pair<int,int> coulomb_atoms = {0,0};
     std::pair<int,int> hbonds = {0,0};
     std::pair<int,int> xbonds = {0,0};
     std::pair<int,int> atm_triples = {0,0};
@@ -310,6 +313,16 @@ public:
     void setBondHBData(const std::vector<BondHBEntry>& data) { m_bond_hb_data = data; }
 
     // Dynamic HB/XB list updates (for MD simulations)
+    /**
+     * @brief Full interaction-list swap + re-partition for a live workspace.
+     *
+     * Claude Generated (Aug 2026): used by the GFN-FF react topology mode when the
+     * bond topology changed. Atom types, thread pool and partition count survive;
+     * all master lists (incl. the bonded/non-bonded repulsion partition and the
+     * Coulomb self-energy params) are replaced by the freshly generated set.
+     */
+    void rebuildInteractionLists(GFNFFParameterSet&& params);
+
     void updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds);
     void updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds);
 
@@ -335,6 +348,11 @@ private:
 
     // Coulomb self-energy parameters (O(N), extracted at init)
     Vector m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_cnf, m_coul_chi_static;
+    /// Claude Generated (Sep 2026): evaluate the N^2/2 Coulomb pairs on the fly from the per-atom
+    /// data (charges + alpeeq) instead of reading a stored pair list. Set from the parameter set
+    /// (GFN-FF only); see calcCoulomb().
+    bool   m_coulomb_implicit = false;
+    double m_coulomb_implicit_rcut = 100.0;
 
     // Term-enable flags
     bool m_dispersion_enabled = true;
@@ -361,6 +379,9 @@ private:
     std::vector<GFNFFBatmTriple> m_batm_triples;
     std::vector<BondHBEntry> m_bond_hb_data;
     std::vector<HBGradEntry> m_hb_grad_entries;
+    // CSR index of m_hb_grad_entries by H atom, insertion order preserved (B3, Sep 2026):
+    // calcBonds() visits only the entries of its own H instead of scanning all of them.
+    std::vector<int> m_hb_grad_offsets, m_hb_grad_list;
     std::vector<vdW> m_vdws;                    ///< UFF/QMDFF LJ non-bonded pairs
 
     // Cached bonded pairs for fast repulsion lookup
@@ -388,6 +409,8 @@ private:
     // === Core execution ===
     void executeGFNFF(int partition);
     void executeUFF(int partition);    ///< Claude Generated (March 2026): UFF energy/gradient
+    void executeCG(int partition);     ///< Sep 2026: coarse-grained LJ spheres/ellipsoids (ff_workspace_cg.cpp)
+    void calcCGPairs(int partition);
     void executeQMDFF(int partition);  ///< Claude Generated (March 2026): QMDFF energy/gradient
     void postProcess(bool gradient);
     void reduce();

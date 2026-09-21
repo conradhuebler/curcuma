@@ -48,15 +48,15 @@ int SharedBiasPool::depositBatch(const std::vector<BiasStructure>& structures)
     return first_index;
 }
 
-void SharedBiasPool::registerVisits(const std::vector<std::pair<int, double>>& updates)
+void SharedBiasPool::registerVisits(const std::vector<std::tuple<int, double, double>>& updates)
 {
     if (updates.empty())
         return;
     std::unique_lock<std::shared_mutex> lock(m_mutex);
-    for (const auto& [idx, wt_weight] : updates) {
+    for (const auto& [idx, counter_inc, wt_weight] : updates) {
         if (idx >= 0 && idx < static_cast<int>(m_structures.size())) {
-            m_structures[idx].counter++;          // exploration: hill height W = k*counter
-            m_structures[idx].factor += wt_weight; // opt-in well-tempered output weight
+            m_structures[idx].counter += counter_inc; // exploration: +1 (legacy) or += expr (strided)
+            m_structures[idx].factor += wt_weight;     // opt-in well-tempered output weight
         }
     }
 }
@@ -87,6 +87,49 @@ void SharedBiasPool::pruneNonPersistent()
     for (int i = 0; i < static_cast<int>(m_structures.size()); ++i)
         m_structures[i].index = i;
     m_global_count.store(static_cast<int>(m_structures.size()), std::memory_order_release);
+}
+
+int SharedBiasPool::capToSize(int max_size)
+{
+    // Claude Generated (Jul 2026): enforce rmsd_mtd_max_gaussians. Keep every persistent (fed-back
+    // optimised) minimum plus the highest-counter non-persistent snapshots up to max_size total.
+    if (max_size <= 0)
+        return 0;
+    std::unique_lock<std::shared_mutex> lock(m_mutex);
+    const int n = static_cast<int>(m_structures.size());
+    if (n <= max_size)
+        return 0;
+
+    std::vector<int> nonpersistent;
+    int persistent_count = 0;
+    for (int i = 0; i < n; ++i) {
+        if (m_structures[i].persistent)
+            ++persistent_count;
+        else
+            nonpersistent.push_back(i);
+    }
+    int keep_np = max_size - persistent_count; // how many non-persistent snapshots we may keep
+    if (keep_np < 0)
+        keep_np = 0;                            // persistent minima alone already fill (or exceed) the cap
+
+    // Highest-counter (most-visited) non-persistent snapshots first; drop the tail.
+    std::sort(nonpersistent.begin(), nonpersistent.end(),
+        [this](int a, int b) { return m_structures[a].counter > m_structures[b].counter; });
+    std::vector<char> drop(n, 0);
+    for (int k = keep_np; k < static_cast<int>(nonpersistent.size()); ++k)
+        drop[nonpersistent[k]] = 1;
+
+    std::vector<BiasStructure> kept;
+    kept.reserve(n);
+    for (int i = 0; i < n; ++i)
+        if (!drop[i])
+            kept.push_back(m_structures[i]);
+    const int removed = n - static_cast<int>(kept.size());
+    m_structures = std::move(kept);
+    for (int i = 0; i < static_cast<int>(m_structures.size()); ++i)
+        m_structures[i].index = i; // re-index (safe between cycles; each MD run re-Initialises)
+    m_global_count.store(static_cast<int>(m_structures.size()), std::memory_order_release);
+    return removed;
 }
 
 void SharedBiasPool::setPermutations(const std::vector<std::vector<int>>& permutations)
@@ -171,7 +214,7 @@ void SharedBiasPool::deserializeMetadata(const nlohmann::json& metadata)
         bs.energy = entry.value("energy", 0.0);
         bs.factor = entry.value("factor", 1.0);
         bs.index = entry.value("index", 0);
-        bs.counter = entry.value("counter", 0);
+        bs.counter = entry.value("counter", 0.0);
         bs.temperature = entry.value("temperature", 0.0);
         bs.persistent = entry.value("persistent", false);
         m_structures.push_back(std::move(bs));
@@ -186,4 +229,14 @@ void SharedBiasPool::deserializeGeometry(const std::string& xyz_data)
     // for the full serialization path.
     // For cross-temperature propagation, geometries are passed via BiasStructure
     // objects directly, not through string serialization.
+}
+
+void SharedBiasPool::restoreStructures(const std::vector<BiasStructure>& structures)
+{
+    // Claude Generated (Jun 2026): one-shot full-state restore for ConfSearch restart.
+    // The caller has already rebuilt complete BiasStructure objects (geometry + counter +
+    // energy + index + persistent flag) from the checkpoint, so we just take them verbatim.
+    std::unique_lock<std::shared_mutex> lock(m_mutex);
+    m_structures = structures;
+    m_global_count.store(static_cast<int>(m_structures.size()), std::memory_order_release);
 }

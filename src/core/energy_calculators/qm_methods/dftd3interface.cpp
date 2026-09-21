@@ -69,8 +69,8 @@ DFTD3Interface::~DFTD3Interface()
     dftd3_delete_error(&m_error);
     dftd3_delete_param(&m_param);
 
-    delete m_coord;
-    delete m_attyp;
+    delete[] m_coord;
+    delete[] m_attyp;
 #endif
 }
 
@@ -83,15 +83,15 @@ void DFTD3Interface::CreateParameter()
 {
 #ifdef USE_D3
     if (m_d3_a1 > 1e-8 || m_d3_a2 > 1e-8 || m_d3_s6 > 1e-8 || m_d3_s8 > 1e-8 || m_d3_s9 > 1e-8) {
-        if (m_damping.compare("bj")) {
+        if (m_damping.compare("bj") == 0) {
             m_param = dftd3_new_rational_damping(m_error, m_d3_s6, m_d3_s8, m_d3_s9, m_d3_a1, m_d3_a2, m_d3_alp);
-        } else if (m_damping.compare("zero")) {
+        } else if (m_damping.compare("zero") == 0) {
             m_param = dftd3_new_zero_damping(m_error, m_d3_s6, m_d3_s8, m_d3_s9, m_d3_a1, m_d3_a2, m_d3_alp);
-        } else if (m_damping.compare("bjm")) {
+        } else if (m_damping.compare("bjm") == 0) {
             m_param = dftd3_new_mrational_damping(m_error, m_d3_s6, m_d3_s8, m_d3_s9, m_d3_a1, m_d3_a2, m_d3_alp);
-        } else if (m_damping.compare("zerom")) {
+        } else if (m_damping.compare("zerom") == 0) {
             m_param = dftd3_new_mzero_damping(m_error, m_d3_s6, m_d3_s8, m_d3_s9, m_d3_a1, m_d3_a2, m_d3_alp, m_bet);
-        } else if (m_damping.compare("op")) {
+        } else if (m_damping.compare("op") == 0) {
             m_param = dftd3_new_optimizedpower_damping(m_error, m_d3_s6, m_d3_s8, m_d3_s9, m_d3_a1, m_d3_a2, m_d3_alp, m_bet);
         }
     } else {

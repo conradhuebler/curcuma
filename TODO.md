@@ -99,6 +99,16 @@
 - **Verweis**: src/core/CLAUDE.md:113, CLAUDE.md:296
 - **Gewinn**: Centralized, documented, CODATA-2018 compliant constants
 
+### GFN-FF EEQ warm start across the q-loop passes — DONE, entry was stale (re-measured Sep 18, 2026)
+- The warm start is in place and works: polymer_2x with the topology cache deleted, 7320 atoms /
+  1502 fragments, pass 1 needs **75 PCG iterations / 877 ms**, pass 2 **0 iterations / 26 ms** —
+  it starts from the pass-1 solution and is converged immediately. The "32 + 71 iterations,
+  ~2.6 s" this entry used to quote no longer happens.
+- What is left of the EEQ cost is the FIRST solve (75 iterations, 877 ms of the GFN-FF setup).
+  Reducing that needs a better preconditioner or a better initial guess, not a warm start.
+- Reproduce: `rm <name>.topo.json && CURCUMA_GFNFF_PROFILE=1 curcuma -sp <xyz> -method gfnff
+  -verbosity 2` and read the two `projected PCG converged in N iterations` lines.
+
 ### Memory Optimization for Large Systems (>1000 atoms)
 - **Status**: ⏳ PLANNED
 - **Task**: Optimize Molecule data structure and distance matrix caching

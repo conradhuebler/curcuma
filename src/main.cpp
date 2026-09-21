@@ -17,6 +17,9 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  */
+#include "src/core/gpu_device_pool.h"
+#include "src/core/intra_parallel_context.h"
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 #include "src/core/energy_calculators/qm_methods/eht.h"
 #include "src/core/energy_calculators/qm_methods/orcainterface.h"
 #include "src/core/fileiterator.h"
@@ -51,6 +54,7 @@
 
 #include "src/tools/general.h"
 #include "src/tools/info.h"
+#include "src/core/units.h"
 
 // Claude Generated: Parameter registry system
 #include "generated/parameter_registry.h"
@@ -58,9 +62,11 @@
 
 #include "src/capabilities/optimiser/OptimiseDipoleScaling.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -678,14 +684,42 @@ json CLI2Json(int argc, char** argv)
     // Claude Generated (October 2025): Global parameters that should be accessible
     // both at top level (controller[param]) and module level (controller[module][param])
     // ENHANCED: Added "method" to support global energy method specification
-    // Claude Generated (March 2026): Added "gpu" for GPU acceleration control
+    // Claude Generated (March 2026): Added "gpu" for GPU acceleration control.
+    //   -gpu <backend>: none (default, CPU) | cuda | rocm | vulkan | auto.
+    //   "auto" picks the first compiled GPU backend (cuda > rocm > vulkan), else CPU.
+    //   Applies to gfn1/gfn2 (USE_*_XTB builds) and gfnff (USE_* builds); an explicit
+    //   backend not compiled in warns and falls back to CPU.
+    // Claude Generated (Jul 2026): Added "charge","spin" — molecular charge/spin must reach
+    // top-level controller["charge"] so -sp/-opt can apply them to the molecule
+    // (setCharge reads controller["charge"], not the command-module namespace).
     std::set<std::string> global_params = {
         "verbosity", "threads", "method", "gpu",  // energy_method and gpu apply to all capabilities
-        "export_run", "export-run", // Export current run configuration
-        "import_config", "import-config", // Import custom configuration
+        "gpu_device",   // Claude Generated (Sep 2026, multi-GPU): device index for -gpu (see docs/MULTI_GPU.md)
+        "gpu_devices", "gpu_workers_per_device",  // batch workers spread over these devices
+        "gpu_memory_check",  // native gfn1/gfn2 GPU: refuse a basis that does not fit (default true)
+        "gpu_sparse_integrals",  // native gfn1/gfn2 GPU: screened S/H0/multipole storage auto|on|off
+        // Claude Generated (Sep 2026, multi-GPU step 3): multi-GPU eigensolve (docs/GPU_TUNING.md)
+        "gpu_eigensolver_devices", "gpu_eigensolver_backend", "gpu_eigensolver_block",
+        "gpu_eigensolver_min_nao", "gpu_eigensolver_fp32", "gpu_eigensolver_verify",
+        "gpu_density_devices", "gpu_density_min_nao",  // split the pattern density (docs/GPU_TUNING.md)
+        "charge", "spin",  // molecular charge/spin (top-level, not module-scoped)
+        "export_run", // Export current run configuration
+        "import_config", // Import custom configuration
         "bak",   // Files to copy back from BMT output directory to CWD
-        "no_bmt" // Disable BMT output directory (legacy: write to CWD)
+        "no_bmt", // Disable BMT output directory (legacy: write to CWD)
+        "noprogress" // Disable live progress bars globally (e.g. when redirecting to a file)
     };
+
+    // Claude Generated (Jul 2026): modules that are sub-scopes of a calculation rather than
+    // commands in their own right. Auto-routing a flat flag into one of these is the intended,
+    // everyday behaviour ("-sp mol.xyz -cn_cutoff_bohr 5.5" -> controller["gfnff"]), so it is
+    // only reported at info level. Moving a flag into another CAPABILITY module means the user
+    // almost certainly aimed it at the active command and it silently went elsewhere -> warn.
+    // This is the safety net for the class of bug where ConfSearch (unregistered) lost
+    // -opt_method to polymerbuild and -thermostat to simplemd without any diagnostic.
+    std::set<std::string> scope_modules(MethodFactory::methodParameterScopes().begin(),
+                                        MethodFactory::methodParameterScopes().end());
+    scope_modules.insert({"ripser", "rmsd", "ancopt", "modern_optimizer", "native_lbfgs"});
 
     // Claude Generated (October 2025): CLI keyword to module name mapping
     // Maps command-line keywords (e.g., -md) to actual module names (e.g., simplemd)
@@ -693,6 +727,7 @@ json CLI2Json(int argc, char** argv)
         {"md", "simplemd"},
         {"opt", "opt"},
         {"sp", "opt"},  // single point also uses opt module
+        {"interaction", "interaction"},
         {"confscan", "confscan"},
         {"rmsd", "rmsd"},
         {"analysis", "analysis"},
@@ -706,12 +741,30 @@ json CLI2Json(int argc, char** argv)
         module_name = keyword_to_module[keyword];
     }
 
+    // Claude Generated (Jul 2026, F2): a token starting with '-' followed by a digit or '.'
+    // is a negative NUMBER value (e.g. "-charge -1", "-threshold -1e-6"), not a flag. The
+    // value-consume logic below treats any '-'-prefixed next arg as a flag, which silently
+    // drops negative numeric values (charge became boolean true -> get<int>()=1, breaking
+    // all negatively-charged species). isFlag() returns false for negative numbers so they
+    // flow into the stod() value branch instead.
+    auto isFlag = [](const std::string& s) -> bool {
+        if (s.empty() || s[0] != '-') return false;
+        if (s.size() < 2) return true;             // lone "-"
+        char c = s[1];
+        // "-3", "-1.5", "-.5", "-1e-6" are numbers, not flags
+        if (std::isdigit(static_cast<unsigned char>(c)) || c == '.') return false;
+        return true;
+    };
+
     for (int i = 2; i < argc; ++i) {
         std::string current = argv[i];
         std::string sub = current.substr(0, 1);
 
         if (sub == "-") {
             current.erase(0, 1);
+            // Claude Generated (Jun 2026): canonicalize hyphens to underscores in CLI
+            // parameter names so "-opt-method" matches the JSON key "opt_method".
+            std::replace(current.begin(), current.end(), '-', '_');
 
             // Handle special verbosity shortcuts - Claude Generated
             if (current == "silent" || current == "quiet") {
@@ -763,7 +816,7 @@ json CLI2Json(int argc, char** argv)
                 }
             }
 
-            if ((i + 1) >= argc || argv[i + 1][0] == '-' || argv[i + 1] == std::string("true") || argv[i + 1] == std::string("+")) {
+            if ((i + 1) >= argc || isFlag(argv[i + 1]) || argv[i + 1] == std::string("true") || argv[i + 1] == std::string("+")) {
                 // Claude Generated (May 2026): Multi-value accumulation for -bak flag
                 if (current == "bak" && key.contains("bak")) {
                     if (key["bak"].is_array()) {
@@ -800,6 +853,34 @@ json CLI2Json(int argc, char** argv)
                 }
                 // std::cout << "isNumber: " << isNumber << std::endl
                 //             << "isVector: " << isVector << std::endl;
+
+                // Claude Generated (Jul 2026): a numeric-looking token (e.g. "1.0", "2.0")
+                // must still be stored as a JSON STRING when the target parameter is
+                // declared String (e.g. confscan.slx: "1.0" or "1.0,2.0" per confscan.h).
+                // Otherwise setNestedJsonValue() below stores a JSON number, and the later
+                // ConfigManager::get<std::string>() -> nlohmann from_json<string> merge
+                // throws json::type_error.302 ("type must be string, but is number"),
+                // which is uncaught in ConfigManager::getFromModule() and aborts (signal 6).
+                // Comma/pipe/colon-separated values ("1.0,2.0") already take the string path
+                // via isVector above; this closes the gap for single bare numbers.
+                if (isNumber) {
+                    std::string mod = module_name, param = current;
+                    size_t dot = current.find('.');
+                    if (dot != std::string::npos) {
+                        std::string pfx = current.substr(0, dot);
+                        mod = keyword_to_module.count(pfx) ? keyword_to_module[pfx] : pfx;
+                        param = current.substr(dot + 1);
+                    }
+                    const ParameterDefinition* def = ParameterRegistry::getInstance().findDefinition(mod, param);
+                    if (!def) {
+                        for (const auto& owner : ParameterRegistry::getInstance().findOwnerModules(param)) {
+                            if ((def = ParameterRegistry::getInstance().findDefinition(owner, param)))
+                                break;
+                        }
+                    }
+                    if (def && def->type == ParamType::String)
+                        isNumber = false;
+                }
                 if (isNumber) {
                     // Claude Generated (May 2026): Multi-value accumulation for -bak
                     if (current == "bak" && key.contains("bak")) {
@@ -881,6 +962,17 @@ json CLI2Json(int argc, char** argv)
                 continue;
             }
 
+            // Claude Generated (Jul 2026): announce the move. Silent rerouting hid the fact that
+            // -opt_method / -thermostat / -restart never reached ConfSearch for months.
+            {
+                const std::string msg = "CLI flag -" + pname + " is not a parameter of the active"
+                    " command's module \"" + module_name + "\"; it is owned by \"" + owners[0]
+                    + "\" and was routed to -" + owners[0] + "." + pname + ".";
+                if (scope_modules.count(owners[0]) > 0)
+                    CurcumaLogger::info(msg);
+                else
+                    CurcumaLogger::warn(msg + " Use the dotted form if that is not what you meant.");
+            }
             reroute_targets[owners[0]][pname] = it.value();
             reroute_remove.push_back(pname);
         }
@@ -938,7 +1030,21 @@ json CLI2Json(int argc, char** argv)
         } else if (is_nested_object && param_name != keyword) {
             // Handle nested structure for OTHER modules (not this command's keyword)
             // param_name = "rmsd", param_value = {"method": "subspace"}
-            module_params[param_name] = param_value;
+            //
+            // Claude Generated (Jul 2026): map CLI keywords to module names here too. Because
+            // setNestedJsonValue() already split "md.rmsd_mtd" into key["md"]["rmsd_mtd"], this
+            // branch (not the flat-dotted one above) is what handles "-md.x" issued from another
+            // command -- and it used to store it verbatim under controller["md"], which no module
+            // reads. So "curcuma -confsearch mol.xyz -md.rmsd_mtd false" was silently ignored.
+            std::string target_module = param_name;
+            if (keyword_to_module.count(param_name) > 0)
+                target_module = keyword_to_module[param_name];
+            if (module_params.contains(target_module) && module_params[target_module].is_object()) {
+                for (auto& [k, v] : param_value.items())
+                    module_params[target_module][k] = v; // merge, do not clobber a sibling block
+            } else {
+                module_params[target_module] = param_value;
+            }
             keys_to_remove.push_back(param_name);
         }
         // NOTE: We KEEP nested structures where param_name == keyword!
@@ -1577,10 +1683,9 @@ int executeRMSD(const json& controller, int argc, char** argv) {
         }
         rmsd_result["permutation"] = permutation;
         rmsd_result["reference_xyz"] = driver->ReferenceAligned().XYZString();
-        // Use TargetAligned as fallback when reordering was skipped (TargetReorderd is empty)
-        rmsd_result["reorder_xyz"] = (driver->TargetReorderd().AtomCount() > 0)
-            ? driver->TargetReorderd().XYZString()
-            : driver->TargetAligned().XYZString();
+        // Geometry whose deviation equals RMSD() (reordered+aligned, or plain best-fit when
+        // no reorder ran). Same result as the old TargetReorderd()/TargetAligned() fallback.
+        rmsd_result["reorder_xyz"] = driver->TargetForRMSD().XYZString();
         rmsd_result["reference_file"] = reffile;
         rmsd_result["target_file"] = tarfile;
 
@@ -1594,6 +1699,120 @@ int executeRMSD(const json& controller, int argc, char** argv) {
     driver->processBakFiles();
     delete driver;
     return 0;
+}
+
+// Claude Generated (Sep 2026, multi-GPU case A): one single point of a multi-structure batch.
+// Each worker owns its EnergyCalculator (stateful GFN-FF/xTB backends stay thread-local),
+// suppresses intra-molecule threading (coarse parallelism owns the cores) and leases a GPU
+// device slot, so N workers on N GPUs run N molecules at once.
+class SinglePointBatchThread : public CxxThread {
+public:
+    SinglePointBatchThread(size_t index, const Molecule& molecule, const std::string& method, const json& controller)
+        : m_index(index)
+        , m_molecule(molecule)
+        , m_method(method)
+        , m_controller(controller)
+    {
+    }
+
+    int execute() override
+    {
+        curcuma::SuppressIntraParallel intra_guard;
+        curcuma::GpuDeviceLease gpu_lease;
+        m_device = gpu_lease.device();
+        const auto t0 = std::chrono::steady_clock::now();
+        EnergyCalculator energy_calc(m_method, m_controller);
+        energy_calc.setMolecule(m_molecule.getMolInfo());
+        m_energy = energy_calc.CalculateEnergy(false);
+        m_error = energy_calc.Error();
+        if (m_error)
+            m_message = energy_calc.ErrorMessage();
+        m_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        return 0;
+    }
+
+    size_t m_index;
+    Molecule m_molecule;
+    std::string m_method;
+    json m_controller;
+    double m_energy = 0.0;
+    double m_seconds = 0.0;
+    int m_device = -1;
+    bool m_error = false;
+    std::string m_message;
+};
+
+/**
+ * @brief Single points for every frame of a multi-structure file (batch mode of -sp).
+ *
+ * Workers = -threads (at least the number of GPU slots when a device pool is active, so
+ * `-sp many.xyz -gpu cuda` on a 4-GPU node uses all four without an extra flag). Energies are
+ * printed in input order and written as a multi-XYZ file with the energy in the comment line.
+ * Claude Generated (Sep 2026).
+ */
+int executeSinglePointBatch(const std::vector<Molecule>& frames, const std::string& method,
+                            const json& energy_controller, const json& controller, const std::string& filename)
+{
+    int threads = controller.value("threads", 1);
+    const auto& gpu_pool = curcuma::GpuDevicePool::instance();
+    if (gpu_pool.active())
+        threads = std::max(threads, gpu_pool.capacity());
+    threads = std::max(1, std::min<int>(threads, static_cast<int>(frames.size())));
+
+    CurcumaLogger::info(fmt::format("Single point batch: {} structures, {} worker(s){}", frames.size(), threads,
+        gpu_pool.active() ? fmt::format(", {} GPU slot(s)", gpu_pool.capacity()) : std::string()));
+
+    json worker_controller = energy_controller;
+    worker_controller["verbosity"] = 0;
+
+    CxxThreadPool pool;
+    pool.setProgressBar(controller.value("noprogress", false) ? CxxThreadPool::ProgressBarType::None
+                                                              : CxxThreadPool::ProgressBarType::Continously);
+    pool.setActiveThreadCount(threads);
+    std::vector<SinglePointBatchThread*> workers;
+    for (size_t i = 0; i < frames.size(); ++i) {
+        // The pool owns and deletes the workers (auto-delete default); results are read below
+        // while the pool is still alive.
+        auto* th = new SinglePointBatchThread(i, frames[i], method, worker_controller);
+        workers.push_back(th);
+        pool.addThread(th);
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const int saved_verbosity = CurcumaLogger::get_verbosity();
+    CurcumaLogger::set_verbosity(0);   // the logger level is global; workers would interleave
+    pool.StartAndWait();
+    CurcumaLogger::set_verbosity(saved_verbosity);
+    const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+    std::string basename = BMTUtils::stripExtension(filename);
+    std::string bmt_dir;
+    if (!controller.value("no_bmt", false)) {
+        bmt_dir = BMTUtils::createBMTDir(basename, "sp");
+        BMTUtils::writeMetadata(bmt_dir, basename, "sp", filename);
+    }
+    const std::string out_file = BMTUtils::outputPath(bmt_dir, basename + ".sp.xyz");
+    { std::ofstream clear_file(out_file); }
+
+    int failed = 0;
+    double sum_task = 0.0;
+    for (auto* th : workers) {
+        sum_task += th->m_seconds;
+        if (th->m_error) {
+            ++failed;
+            CurcumaLogger::error(fmt::format("Structure {}: {}", th->m_index + 1, th->m_message));
+        } else {
+            fmt::print("Structure {:5d}  Single Point Energy = {:.8f} Eh  ({:.2f} s{})\n", th->m_index + 1, th->m_energy,
+                th->m_seconds, th->m_device >= 0 ? fmt::format(", device {}", th->m_device) : std::string());
+            Molecule out = th->m_molecule;
+            out.setEnergy(th->m_energy);
+            out.appendXYZFile(out_file);
+        }
+    }
+    fmt::print("\nBatch: {} structures in {:.2f} s wall ({:.2f} s summed task time), {} failed\n",
+               frames.size(), wall, sum_task, failed);
+    fmt::print("Energies written to: {}\n", out_file);
+    return failed > 0 ? 1 : 0;
 }
 
 int executeSinglePoint(const json& controller, int argc, char** argv) {
@@ -1613,17 +1832,98 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         CurcumaLogger::set_verbosity(verbosity);
     }
 
+    // -sp is energy-only by default (Claude Generated, June 2026): the gradient is
+    // computed only when the user asks for it with -gradient. This avoids the cost of
+    // an unused gradient and lets energy-only large-system modes (dc/sparse) serve a
+    // single-point energy without tripping the gradient-unavailable hard error (X-L4).
+    auto read_bool = [](const json& j, const char* k) -> bool {
+        if (!j.is_object() || !j.contains(k)) return false;
+        const auto& v = j[k];
+        if (v.is_boolean()) return v.get<bool>();
+        if (v.is_number())  return v.get<double>() != 0.0;
+        if (v.is_string())  { auto s = v.get<std::string>(); return s == "true" || s == "1" || s == "yes"; }
+        return false;
+    };
+    // Claude Generated (Jul 2026): -dump_gradient <path> writes the full analytic
+    // gradient vector (Eh/Bohr, one "gx gy gz" row per atom) to a file, so external
+    // scripts can compare gradients component-wise across backends (CPU vs GPU) or
+    // against a reference (xtb/gxtb TM gradient file). Setting it implies -gradient.
+    std::string dump_gradient_path;
+    auto read_dump_path = [&](const json& j) {
+        if (j.is_object() && j.contains("dump_gradient") && j["dump_gradient"].is_string())
+            dump_gradient_path = j["dump_gradient"].get<std::string>();
+    };
+    read_dump_path(controller);                                    // top-level (dotted -opt.dump_gradient)
+    if (controller.contains("opt")) read_dump_path(controller["opt"]); // sp routes flat flags into "opt"
+    const bool want_gradient = read_bool(controller, "gradient")
+        || (controller.contains("opt") && read_bool(controller["opt"], "gradient"))
+        || !dump_gradient_path.empty();
+
+    // Claude Generated (Sep 2026, multi-GPU case A): a multi-structure input is evaluated as a
+    // batch - one energy per frame, spread over -threads workers and, with -gpu, over the
+    // GPU device pool. A single structure takes the unchanged path below.
+    {
+        std::vector<Molecule> frames;
+        FileIterator file(argv[2]);
+        while (!file.AtEnd()) {
+            Molecule mol = file.Next();
+            if (mol.AtomCount() == 0)
+                continue;
+            if (controller.contains("charge"))
+                mol.setCharge(controller["charge"].get<int>());
+            if (controller.contains("spin"))
+                mol.setSpin(controller["spin"].get<int>());
+            frames.push_back(mol);
+        }
+        if (frames.size() > 1)
+            return executeSinglePointBatch(frames, method, energy_controller, controller, argv[2]);
+    }
+
     Molecule molecule(argv[2]);
+    // Claude Generated (Jul 2026): Apply charge/spin from CLI controller to the molecule
+    // before the energy calculation. Mirrors the -opt path (see below). Without this,
+    // GFN-FF reads m_charge=0 from the file-parsed molecule (XYZ/Coord set no charge),
+    // giving wrong EEQ charges and energies for charged species (S30L systems 23-30).
+    if (controller.contains("charge"))
+        molecule.setCharge(controller["charge"].get<int>());
+    if (controller.contains("spin"))
+        molecule.setSpin(controller["spin"].get<int>());
     EnergyCalculator energy_calc(method, energy_controller);
     energy_calc.setMolecule(molecule.getMolInfo());
-    double energy = energy_calc.CalculateEnergy(true);
+    double energy = energy_calc.CalculateEnergy(want_gradient);
+
+    // Fail-loud (D-2/A1/A2, Claude Generated): refuse to report a result when the
+    // method reported an error (e.g. unsupported d-shell element, SCF/eigensolver
+    // breakdown, EEQ fallback). Returning a non-zero exit avoids scripts treating a
+    // bogus 0.0 Eh as a valid single-point energy.
+    if (energy_calc.Error()) {
+        CurcumaLogger::error("Single-point calculation failed: " + energy_calc.ErrorMessage());
+        return 1;
+    }
 
     fmt::print("\nCharge {} Spin {}\n", molecule.Charge(), molecule.Spin());
     fmt::print("Single Point Energy = {:.8f} Eh\n", energy);
 
-    Geometry gradient = energy_calc.Gradient();
-    double grad_norm = Eigen::Map<Eigen::VectorXd>(gradient.data(), gradient.size()).norm();
-    CurcumaLogger::param("Gradient norm", fmt::format("{:.6e} Eh/Bohr", grad_norm));
+    if (want_gradient) {
+        Geometry gradient = energy_calc.Gradient();
+        double grad_norm = Eigen::Map<Eigen::VectorXd>(gradient.data(), gradient.size()).norm();
+        CurcumaLogger::param("Gradient norm", fmt::format("{:.6e} Eh/Ang", grad_norm));
+
+        // Claude Generated (Jul 2026): full-vector dump for backend comparison.
+        if (!dump_gradient_path.empty()) {
+            std::ofstream gf(dump_gradient_path);
+            if (gf) {
+                gf << "# GFN-FF/xTB analytic gradient dE/dx [Eh/Angstrom], one atom per row\n";
+                gf << "# energy " << fmt::format("{:.12f}", energy) << " Eh, gnorm "
+                   << fmt::format("{:.12e}", grad_norm) << " Eh/Angstrom\n";
+                for (int i = 0; i < gradient.rows(); ++i)
+                    gf << fmt::format("{:.14e} {:.14e} {:.14e}\n",
+                                      gradient(i, 0), gradient(i, 1), gradient(i, 2));
+            } else {
+                CurcumaLogger::error("Could not open -dump_gradient file: " + dump_gradient_path);
+            }
+        }
+    }
 
     return 0;
 }
@@ -1633,7 +1933,10 @@ int executeOptimization(const json& controller, int argc, char** argv) {
     if (argc < 3) {
         fmt::print("\nUsage: curcuma -opt input.xyz [parameters]\n\n");
         fmt::print("Basic:\n");
-        fmt::print("  -method <name>       Energy method: uff, gfnff, gfn2, ... (default: gfnff)\n");
+        fmt::print("  -method <name>       Energy method (default: gfnff)\n");
+        fmt::print("                         gfnff     - fast: native GFN-FF, the general-purpose default\n");
+        fmt::print("                         gfn2      - accurate: native GFN2-xTB, ~100x slower than gfnff\n");
+        fmt::print("                         gfn1, eht, pm3, uff, qmdff, ... (see docs/)\n");
         fmt::print("  -optimizer <name>    Optimization algorithm (default: auto)\n");
         fmt::print("                         auto      - automatic selection based on system size\n");
         fmt::print("                         lbfgspp   - external LBFGSpp library (robust, recommended)\n");
@@ -1696,12 +1999,27 @@ int executeOptimization(const json& controller, int argc, char** argv) {
     json opt_config = MergeJson(opt_defaults, controller.contains("opt") ? controller["opt"] : json{});
 
     try {
-        auto molecule = std::make_unique<Molecule>(argv[2]);
-        // Apply charge/spin from CLI controller to the molecule before optimization
-        if (controller.contains("charge"))
-            molecule->setCharge(controller["charge"].get<int>());
-        if (controller.contains("spin"))
-            molecule->setSpin(controller["spin"].get<int>());
+        // Claude Generated (Jun 2026): Load all structures from input file. Multi-XYZ
+        // trajectories are now optimised frame-by-frame instead of only the first frame.
+        FileIterator file(argv[2]);
+        std::vector<Molecule> molecules;
+        while (!file.AtEnd()) {
+            Molecule mol = file.Next();
+            if (mol.AtomCount() == 0)
+                continue;
+            // Apply charge/spin from CLI controller to every frame
+            if (controller.contains("charge"))
+                mol.setCharge(controller["charge"].get<int>());
+            if (controller.contains("spin"))
+                mol.setSpin(controller["spin"].get<int>());
+            molecules.push_back(mol);
+        }
+
+        if (molecules.empty()) {
+            CurcumaLogger::error("No valid molecules loaded from input file");
+            return 1;
+        }
+
         std::string method = controller.value("method", "gfnff");
         json energy_controller = controller;
         energy_controller["geometry_file"] = std::string(argv[2]);
@@ -1725,27 +2043,83 @@ int executeOptimization(const json& controller, int argc, char** argv) {
             energy_calc.setWarmStart(true);
 
         Optimization::OptimizerType opt_type = Optimization::parseOptimizerType(optimizer_method);
-        auto result = Optimization::OptimizationDispatcher::optimizeStructure(
-            molecule.get(), opt_type, &energy_calc, opt_config);
+        std::string output_file = BMTUtils::outputPath(bmt_dir, basename + ".opt.xyz");
 
-        if (result.success) {
-            std::string output_file = BMTUtils::outputPath(bmt_dir, basename + ".opt.xyz");
-            molecule->writeXYZFile(output_file);
-            CurcumaLogger::success_fmt("Optimized structure written to: {}", output_file);
-            // Process -bak files
-            std::vector<std::string> bak_files = BMTUtils::collectBakFiles(controller);
-            BMTUtils::processBakFiles(bmt_dir, bak_files);
-            return 0;
+        if (molecules.size() == 1) {
+            // Single-structure path: preserve exact existing behavior
+            auto result = Optimization::OptimizationDispatcher::optimizeStructure(
+                &molecules[0], opt_type, &energy_calc, opt_config);
+
+            if (result.success) {
+                molecules[0].writeXYZFile(output_file);
+                CurcumaLogger::success_fmt("Optimized structure written to: {}", output_file);
+                // Process -bak files
+                std::vector<std::string> bak_files = BMTUtils::collectBakFiles(controller);
+                BMTUtils::processBakFiles(bmt_dir, bak_files);
+                return 0;
+            } else {
+                // Claude Generated (Sep 2026): write the geometry even when the optimiser did
+                // not converge. It is the best structure found and often hours of compute - a
+                // GFN2 optimisation of polymer_2x (7320 atoms) ran 1.8 h, hit max_iterations
+                // and left NOTHING behind. The multi-structure path below already writes
+                // non-converged results; this makes the single-structure path agree.
+                CurcumaLogger::warn_fmt("{} optimizer did not converge: {}", optimizer_method,
+                                        result.error_message);
+                // result.final_molecule, NOT molecules[0]: the optimiser does not update the
+                // input molecule in place, so writing molecules[0] would silently hand back the
+                // INPUT geometry dressed as a result (caught by measurement: the "optimised"
+                // water500 had exactly the input's single-point energy). The multi-structure
+                // path below uses final_molecule for the same reason.
+                if (result.final_molecule.AtomCount() > 0) {
+                    result.final_molecule.writeXYZFile(output_file);
+                    CurcumaLogger::warn_fmt("Last geometry written anyway to: {} (E = {:.8f} Eh, "
+                                            "|grad| = {:.6f}) - NOT a converged minimum",
+                                            output_file, result.final_energy,
+                                            result.final_gradient_norm);
+                    std::vector<std::string> bak_files = BMTUtils::collectBakFiles(controller);
+                    BMTUtils::processBakFiles(bmt_dir, bak_files);
+                } else {
+                    CurcumaLogger::error("No geometry available from the failed optimisation");
+                }
+            }
         } else {
-            CurcumaLogger::warn_fmt("{} optimizer failed: {}", optimizer_method, result.error_message);
-            CurcumaLogger::info("Falling back to legacy CurcumaOpt optimizer");
+            // Multi-structure path: optimise each frame and collect final geometries.
+            // Non-converged optimisations still produce a final geometry and are written
+            // out, matching the legacy CurcumaOpt behaviour for multi-XYZ inputs.
+            int opt_threads = controller.value("threads", 1);
+            CurcumaLogger::info_fmt("Optimising {} structures from input file (threads={})",
+                molecules.size(), opt_threads);
+            auto results = Optimization::OptimizationDispatcher::optimizeBatch(
+                molecules, opt_type, &energy_calc, opt_config, opt_threads, energy_controller);
+
+            int written = 0;
+            int failed = 0;
+            { std::ofstream clear_file(output_file); } // truncate output file once
+            for (size_t i = 0; i < results.size(); ++i) {
+                if (results[i].final_molecule.AtomCount() > 0) {
+                    results[i].final_molecule.appendXYZFile(output_file);
+                    ++written;
+                } else {
+                    CurcumaLogger::warn_fmt("Structure {} optimisation failed: {}",
+                        i + 1, results[i].error_message);
+                    ++failed;
+                }
+            }
+
+            if (written > 0) {
+                CurcumaLogger::success_fmt("{} optimized structures written to: {}", written, output_file);
+                // Process -bak files
+                std::vector<std::string> bak_files = BMTUtils::collectBakFiles(controller);
+                BMTUtils::processBakFiles(bmt_dir, bak_files);
+                return 0;
+            } else {
+                CurcumaLogger::error("All structure optimisations failed");
+            }
         }
     } catch (const std::exception& e) {
         CurcumaLogger::warn_fmt("{} optimizer threw exception: {}", optimizer_method, e.what());
-        CurcumaLogger::info("Falling back to legacy CurcumaOpt optimizer");
     }
 
-    // No legacy fallback — all optimization goes through OptimizerFactory
     return 1;
 }
 
@@ -1773,9 +2147,28 @@ int executeConfScan(const json& controller, int argc, char** argv) {
     scan_controller["geometry_file"] = std::string(argv[2]);
 
     auto* scan = new ConfScan(scan_controller, false);  // Claude Generated: Explicit false for default verbosity level 1
+    // initializeBMT calls setFile(), which in ConfScan's override also calls openFile() to
+    // load the ensemble. No separate setFileName() call needed — that would call openFile()
+    // a second time, causing ripser to crash on the already-consumed state.
     initializeBMT(scan, argv[2], "confscan", controller);
+    // Copy the primary results back to the CWD so a plain `curcuma -confscan file.xyz`
+    // run is never silent (the rest stays in the BMT output directory).
+    scan->addBakFile(scan->Basename() + ".accepted.xyz");
+    scan->addBakFile(scan->Basename() + ".rejected.xyz");
+    // Claude Generated (June 2026): Capture the user's verbosity before the scan; the RMSD
+    // machinery lowers the global logger level to 0 mid-scan and leaves it there.
+    int announce_verbosity = CurcumaLogger::get_verbosity();
     scan->start();
     scan->processBakFiles();
+    // Tell the user where the output went. createBMTDir only logs the directory at verbosity
+    // >= 2; surface it (and the files copied back to the CWD) at the default verbosity 1 so a
+    // plain run is never silent about its results.
+    if (announce_verbosity >= 1 && !scan->OutputDir().empty()) {
+        CurcumaLogger::set_verbosity(announce_verbosity);
+        CurcumaLogger::success_fmt("ConfScan output written to: {}", scan->OutputDir());
+        CurcumaLogger::result_fmt("Copied to current directory: {}.accepted.xyz, {}.rejected.xyz",
+            scan->Basename(), scan->Basename());
+    }
     int accepted = scan->AcceptedCount();
     int reorder_success = scan->ReorderSuccessfull();
     int reuse_count = scan->ReuseCount();
@@ -1941,6 +2334,235 @@ int executePolymerBuild(const json& controller, int argc, char** argv)
     return 0;
 }
 
+// ============================================================================
+// Interaction (association) energy capability: -interaction  — Claude Generated 2026
+// ----------------------------------------------------------------------------
+// dE_int = E(AB) - E(A) - E(B), computed with any curcuma energy method.
+// Built for the S30L host-guest benchmark (Sure & Grimme, J. Chem. Theory
+// Comput. 2015, 11, 3785; doi:10.1021/acs.jctc.5b00296): each complex is a
+// directory with A/ B/ AB/ subfolders holding Turbomole `coord` files (atomic
+// units, read via Coord2Mol -> Bohr converted to Angstrom) and an optional
+// `.CHRG` integer-charge file.
+//
+//   curcuma -interaction <s30l_root> [-reference reference_s30l]  batch dirs 1..N
+//   curcuma -interaction <complex_dir>                            single A/B/AB dir
+//   curcuma -interaction AB.xyz -fragA A.xyz -fragB B.xyz         explicit fragments
+//   curcuma -interaction AB.xyz                                   auto-split 2 fragments
+// ============================================================================
+namespace InteractionEnergy {
+
+// Read an integer charge from <dir>/.CHRG (S30L convention, e.g. "+2"); 0 if absent.
+inline int readCharge(const std::string& dir)
+{
+    std::filesystem::path p = std::filesystem::path(dir) / ".CHRG";
+    if (!std::filesystem::exists(p))
+        return 0;
+    std::ifstream in(p.string());
+    int q = 0;
+    in >> q;
+    return q;
+}
+
+// Locate the coordinate file in a fragment directory: prefer Turbomole `coord`,
+// else the first .xyz found.
+inline std::string structureFile(const std::string& dir)
+{
+    std::filesystem::path coord = std::filesystem::path(dir) / "coord";
+    if (std::filesystem::exists(coord))
+        return coord.string();
+    for (const auto& e : std::filesystem::directory_iterator(dir)) {
+        const std::string s = e.path().string();
+        if (s.find(".xyz") != std::string::npos)
+            return s;
+    }
+    return "";
+}
+
+// Single-point energy [Hartree] for one structure file at a given total charge.
+inline double pointEnergy(const std::string& method, const json& controller,
+    const std::string& file, int charge)
+{
+    Molecule mol(file);
+    mol.setCharge(charge);
+    EnergyCalculator calc(method, controller);
+    calc.setMolecule(mol.getMolInfo());
+    return calc.CalculateEnergy(false);
+}
+
+// dE_int [Hartree] from three fragment directories (each: coord/xyz + optional .CHRG).
+inline bool fromDirs(const std::string& method, const json& controller,
+    const std::string& aDir, const std::string& bDir, const std::string& abDir, double& dE)
+{
+    const std::string fa = structureFile(aDir), fb = structureFile(bDir), fab = structureFile(abDir);
+    if (fa.empty() || fb.empty() || fab.empty())
+        return false;
+    const double eA = pointEnergy(method, controller, fa, readCharge(aDir));
+    const double eB = pointEnergy(method, controller, fb, readCharge(bDir));
+    const double eAB = pointEnergy(method, controller, fab, readCharge(abDir));
+    dE = eAB - eA - eB;
+    return true;
+}
+
+inline bool hasABDirs(const std::string& d)
+{
+    namespace fs = std::filesystem;
+    return fs::is_directory(fs::path(d) / "A") && fs::is_directory(fs::path(d) / "B")
+        && fs::is_directory(fs::path(d) / "AB");
+}
+
+inline bool isNumeric(const std::string& s)
+{
+    return !s.empty() && s.find_first_not_of("0123456789") == std::string::npos;
+}
+
+} // namespace InteractionEnergy
+
+int executeInteraction(const json& controller, int argc, char** argv)
+{
+    using namespace InteractionEnergy;
+    namespace fs = std::filesystem;
+
+    if (argc < 3) {
+        std::cerr << "Interaction (association) energy:  dE = E(AB) - E(A) - E(B)\n"
+                  << "Usage:\n"
+                  << "  curcuma -interaction <s30l_root> [-reference reference_s30l]   batch over dirs 1..N\n"
+                  << "  curcuma -interaction <complex_dir>                             single A/B/AB directory\n"
+                  << "  curcuma -interaction AB.xyz -fragA A.xyz -fragB B.xyz          explicit fragment files\n"
+                  << "  curcuma -interaction AB.xyz                                    auto-split into 2 fragments\n";
+        return 1;
+    }
+
+    const std::string method = controller.value("method", "gfnff");
+    const double H2KCAL = CurcumaUnit::Energy::HARTREE_TO_KCALMOL;
+
+    std::string fragA, fragB, reference;
+    for (int i = 3; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "-fragA" && i + 1 < argc)
+            fragA = argv[++i];
+        else if (a == "-fragB" && i + 1 < argc)
+            fragB = argv[++i];
+        else if (a == "-reference" && i + 1 < argc)
+            reference = argv[++i];
+    }
+
+    const std::string input = argv[2];
+
+    // ---- Mode A: explicit fragment files (AB given as argv[2]) ----
+    if (!fragA.empty() && !fragB.empty()) {
+        const double eAB = pointEnergy(method, controller, input, 0);
+        const double eA = pointEnergy(method, controller, fragA, 0);
+        const double eB = pointEnergy(method, controller, fragB, 0);
+        const double dE = eAB - eA - eB;
+        fmt::print("\nMethod: {}\n", method);
+        fmt::print("E(AB) = {:>16.8f} Eh\nE(A)  = {:>16.8f} Eh\nE(B)  = {:>16.8f} Eh\n", eAB, eA, eB);
+        fmt::print("dE_int = {:.8f} Eh = {:.4f} kcal/mol\n", dE, dE * H2KCAL);
+        return 0;
+    }
+
+    if (fs::is_directory(input)) {
+        // ---- Mode B: single complex directory (has A/ B/ AB/) ----
+        if (hasABDirs(input)) {
+            double dE = 0.0;
+            if (!fromDirs(method, controller, (fs::path(input) / "A").string(),
+                    (fs::path(input) / "B").string(), (fs::path(input) / "AB").string(), dE)) {
+                std::cerr << "Could not read A/B/AB structures in " << input << std::endl;
+                return 1;
+            }
+            fmt::print("\nMethod: {}\nComplex: {}\n", method, input);
+            fmt::print("dE_int = {:.8f} Eh = {:.4f} kcal/mol\n", dE, dE * H2KCAL);
+            return 0;
+        }
+
+        // ---- Mode C: batch root (numbered subdirs, each with A/B/AB) ----
+        if (reference.empty()) {
+            fs::path defref = fs::path(input) / "reference_s30l";
+            if (fs::exists(defref))
+                reference = defref.string();
+        }
+        std::vector<double> refvals;
+        if (!reference.empty()) {
+            std::ifstream rin(reference);
+            double v;
+            while (rin >> v)
+                refvals.push_back(v);
+        }
+
+        std::vector<std::pair<int, std::string>> complexes;
+        for (const auto& e : fs::directory_iterator(input)) {
+            if (!e.is_directory())
+                continue;
+            const std::string name = e.path().filename().string();
+            if (!isNumeric(name) || !hasABDirs(e.path().string()))
+                continue;
+            complexes.emplace_back(std::stoi(name), e.path().string());
+        }
+        std::sort(complexes.begin(), complexes.end());
+        if (complexes.empty()) {
+            std::cerr << "No numbered A/B/AB complex directories found under " << input << std::endl;
+            return 1;
+        }
+
+        CurcumaLogger::set_verbosity(0); // quiet per-structure setup; print only the table
+        fmt::print("\nS30L-style interaction energies   method = {}\n", method);
+        fmt::print("{:>4}  {:>14}  {:>14}  {:>12}\n", "idx", "dE [kcal/mol]", "ref [kcal/mol]", "error");
+        fmt::print("------------------------------------------------------------\n");
+
+        double sum_abs = 0.0, sum_sq = 0.0;
+        int n_ref = 0;
+        for (const auto& [idx, dir] : complexes) {
+            double dE = 0.0;
+            if (!fromDirs(method, controller, (fs::path(dir) / "A").string(),
+                    (fs::path(dir) / "B").string(), (fs::path(dir) / "AB").string(), dE)) {
+                fmt::print("{:>4}  read failed\n", idx);
+                continue;
+            }
+            const double dE_kcal = dE * H2KCAL;
+            if (idx - 1 < static_cast<int>(refvals.size())) {
+                const double ref = refvals[idx - 1];
+                const double err = dE_kcal - ref;
+                sum_abs += std::abs(err);
+                sum_sq += err * err;
+                ++n_ref;
+                fmt::print("{:>4}  {:>14.4f}  {:>14.4f}  {:>12.4f}\n", idx, dE_kcal, ref, err);
+            } else {
+                fmt::print("{:>4}  {:>14.4f}  {:>14}  {:>12}\n", idx, dE_kcal, "-", "-");
+            }
+        }
+        if (n_ref > 0) {
+            fmt::print("------------------------------------------------------------\n");
+            fmt::print("MAD  = {:.4f} kcal/mol   RMSD = {:.4f} kcal/mol   (N={})\n",
+                sum_abs / n_ref, std::sqrt(sum_sq / n_ref), n_ref);
+        }
+        return 0;
+    }
+
+    // ---- Mode D: single AB file, auto-split into exactly two fragments ----
+    Molecule ab(input);
+    auto frags = ab.GetFragments();
+    if (frags.size() != 2) {
+        std::cerr << "Auto-split needs exactly 2 fragments, found " << frags.size()
+                  << ". Use -fragA/-fragB to specify them explicitly." << std::endl;
+        return 1;
+    }
+    Molecule a = ab.getFragmentMolecule(frags[0]);
+    Molecule b = ab.getFragmentMolecule(frags[1]);
+    EnergyCalculator cAB(method, controller);
+    cAB.setMolecule(ab.getMolInfo());
+    EnergyCalculator cA(method, controller);
+    cA.setMolecule(a.getMolInfo());
+    EnergyCalculator cB(method, controller);
+    cB.setMolecule(b.getMolInfo());
+    const double eAB = cAB.CalculateEnergy(false);
+    const double eA = cA.CalculateEnergy(false);
+    const double eB = cB.CalculateEnergy(false);
+    const double dE = eAB - eA - eB;
+    fmt::print("\nMethod: {}\nFragments: {} + {} atoms\n", method, static_cast<int>(frags[0].size()),
+        static_cast<int>(frags[1].size()));
+    fmt::print("dE_int = {:.8f} Eh = {:.4f} kcal/mol\n", dE, dE * H2KCAL);
+    return 0;
+}
+
 // Capability registry - Claude Generated
 const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
     {"analysis", {"Unified molecular analysis (all formats, all properties)", "analysis",
@@ -1949,6 +2571,8 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
               {"XYZ", "VTF", "MOL2", "SDF"}, executeRMSD}},
     {"sp", {"Single point energy calculation", "calculation",
             {"XYZ", "VTF", "MOL2", "SDF"}, executeSinglePoint}},
+    {"interaction", {"Supramolecular interaction energy E(AB)-E(A)-E(B), incl. S30L batch", "calculation",
+            {"XYZ", "coord", "DIR"}, executeInteraction}},
     {"opt", {"Geometry optimization with various algorithms", "optimization",
              {"XYZ", "VTF", "MOL2", "SDF"}, executeOptimization}},
     {"confscan", {"Conformational scanning along reaction coordinates", "conformational",
@@ -2300,41 +2924,7 @@ int main(int argc, char **argv) {
 
     // Phase 2: List available computational methods - Claude Generated 2025
     if (command == "methods") {
-        auto methods = MethodFactory::getAvailableMethods();
-        std::cout << "Available computational methods in this build:\n\n";
-
-        std::cout << "Quantum Methods:\n";
-        for (const auto& method : methods) {
-            if (method.find("gfn") != std::string::npos ||
-                method.find("eht") != std::string::npos ||
-                method.find("pm") != std::string::npos ||
-                method.find("am") != std::string::npos ||
-                method.find("mndo") != std::string::npos ||
-                method.find("-3c") != std::string::npos ||
-                method == "orca" ||
-                method == "hf" || method == "lda" ||
-                method == "pbe" || method == "b3lyp") {
-                std::cout << "  - " << method << "\n";
-            }
-        }
-
-        std::cout << "\nForce Fields:\n";
-        for (const auto& method : methods) {
-            if (method.find("uff") != std::string::npos ||
-                method.find("ff") != std::string::npos ||
-                method.find("qmdff") != std::string::npos) {
-                std::cout << "  - " << method << "\n";
-            }
-        }
-
-        std::cout << "\nDispersion Corrections:\n";
-        for (const auto& method : methods) {
-            if (method.find("d3") != std::string::npos ||
-                method.find("d4") != std::string::npos) {
-                std::cout << "  - " << method << "\n";
-            }
-        }
-
+        MethodFactory::printAvailableMethods();   // table-driven listing (family, providers)
         return 0;
     }
 
@@ -2411,6 +3001,11 @@ int main(int argc, char **argv) {
         std::cout << "Loaded configuration from: " << config_file << std::endl;
     }
 
+    // Claude Generated (Sep 2026, multi-GPU case A): one process-wide pool of GPU device slots
+    // for molecule-level batch workers (-gpu_devices, -gpu_workers_per_device). No-op for CPU
+    // runs and for a single visible device without explicit pool flags.
+    curcuma::GpuDevicePool::instance().configure(controller);
+
     // Handle run export - Claude Generated (October 2025)
     // Export current configuration AFTER all merging/importing
     // Now global parameter, always in controller["export_run"] if present
@@ -2479,6 +3074,17 @@ int main(int argc, char **argv) {
         outfile.close();
 
         std::cout << "Exported current run configuration to: " << export_file << std::endl;
+    }
+
+    // Claude Generated (June 2026): Global progress-bar switch. Disabled when -noprogress is
+    // given or when stdout is not a TTY, so redirected output / tests carry no carriage-return
+    // noise. Set once here, before dispatch, for every command.
+    {
+        bool show_progress = !controller.value("noprogress", false);
+#ifndef _WIN32
+        show_progress = show_progress && isatty(fileno(stdout));
+#endif
+        CurcumaLogger::set_progress_enabled(show_progress);
     }
 
     // Try structured dispatch first - Claude Generated

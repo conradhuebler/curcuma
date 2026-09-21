@@ -50,6 +50,11 @@ D4ParameterGenerator::D4ParameterGenerator(const ConfigManager& config)
     ConfigManager eeq_config("eeq_solver", config.exportConfig());
     m_eeq_solver = std::make_unique<EEQSolver>(eeq_config);
 
+    // Lever 3 Opt B (Jun 2026): per-atom half-contraction fast path for C6/dc6dcn.
+    // Plumbed down from the gfnff PARAM disp_half_contraction (default true).
+    m_use_half_contraction = m_config.get<bool>("d4_disp_half_contraction", true);
+    m_elem_slot.fill(-1);
+
     initializeReferenceData();
 
     // Initialize the shared global polarizability/correction tables exactly once for the
@@ -70,10 +75,10 @@ D4ParameterGenerator::D4ParameterGenerator(const ConfigManager& config)
         CurcumaLogger::success("D4: Complete data loaded (alphaiw + corrections)");
     }
 
-    // Claude Generated (Dec 27, 2025): Pre-compute C6 reference matrix
-    // This is done ONCE at initialization, independent of molecular geometry
-    // Expected to eliminate ~98% of D4 parameter generation time for large molecules
-    precomputeC6ReferenceMatrix();
+    // Claude Generated (Jul 2026): the C6 reference matrix is NO LONGER precomputed here.
+    // At construction the molecule (m_atoms) is unknown, which forced a full 118-element sweep
+    // (~9.7 ms fixed). It is now built lazily from GenerateParameters — restricted to the
+    // elements actually present — via the c6CacheCoversAtoms() guard.
 }
 
 void D4ParameterGenerator::initializeReferenceData()
@@ -135,8 +140,13 @@ void D4ParameterGenerator::initializeReferenceData()
     m_r4_over_r2.resize(MAX_ELEM, 0.0);
     m_sqrt_z_r4_r2.resize(MAX_ELEM, 0.0);
 
-    // GFN-FF Moment Ratios (r4Overr2) from dftd4param.f90:134-157
-    // These are essential for correct damping radii R0 in GFN-FF
+    // D4 Moment Ratios (r4Overr2), full 118-element table from
+    // external/gfnff/src/dftd4param.f90:134-157 (identical to dftd4 / tblite).
+    // These set the C8/C6 ratio and the BJ damping radius R0 for every element.
+    // NOTE (2026-07): previously only H-Kr (Z<=36) were provided and everything
+    // heavier was silently filled with a placeholder 10.0, which made native D4
+    // dispersion wrong for I and all 4d/5d elements (too-large R0 -> underbinding).
+    // The full array below fixes heavy elements without touching Z<=36.
     m_r4_over_r2 = {
         8.0589, 3.4698,  // H-He
         29.0974, 14.8517, 11.8799, 7.8715, 5.5588, 4.7566, 3.8025, 3.1036,  // Li-Ne
@@ -144,7 +154,23 @@ void D4ParameterGenerator::initializeReferenceData()
         29.2012, 22.3934, // K-Ca
         19.0598, 16.8590, 15.4023, 12.5589, 13.4788, // Sc-Mn
         12.2309, 11.2809, 10.5569, 10.1428, 9.4907,  // Fe-Zn
-        13.4606, 10.8544, 8.9386, 8.1350, 7.1251, 6.1971 // Ga-Kr
+        13.4606, 10.8544, 8.9386, 8.1350, 7.1251, 6.1971, // Ga-Kr
+        30.0162, 24.4103, // Rb-Sr
+        20.3537, 17.4780, 13.5528, 11.8451, 11.0355, // Y-Tc
+        10.1997, 9.5414, 9.0061, 8.6417, 8.9975,     // Ru-Cd
+        14.0834, 11.8333, 10.0179, 9.3844, 8.4110, 7.5152, // In-Xe
+        32.7622, 27.5708, // Cs-Ba
+        23.1671, 21.6003, 20.9615, 20.4562, 20.1010, 19.7475, 19.4828, // La-Eu
+        15.6013, 19.2362, 17.4717, 17.8321, 17.4237, 17.1954, 17.1631, // Gd-Yb
+        14.5716, 15.8758, 13.8989, 12.4834, 11.4421, // Lu-Re
+        10.2671, 8.3549, 7.8496, 7.3278, 7.4820,     // Os-Hg
+        13.5124, 11.6554, 10.0959, 9.7340, 8.8584, 8.0125, // Tl-Rn
+        29.8135, 26.3157, // Fr-Ra
+        19.1885, 15.8542, 16.1305, 15.6161, 15.1226, 16.1576, 0.0000, // Ac-Am
+        0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, // Cm-No
+        0.0000, 0.0000, 0.0000, 0.0000, 0.0000, // Lr-Bh
+        0.0000, 0.0000, 0.0000, 0.0000, 5.4929, // Hs-Cn
+        6.7286, 6.5144, 10.9169, 10.3600, 9.4723, 8.6641 // Nh-Og
     };
     if (m_r4_over_r2.size() < MAX_ELEM) m_r4_over_r2.resize(MAX_ELEM, 10.0);
 
@@ -367,7 +393,7 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     // the source of the CH4/triose C-path residual (see docs/GFN2_D4_STATUS.md,
     // diag_curcuma_d4_c6). GFN-FF (flag off) is unaffected: computeC6Reference's
     // zeta correction is gated by m_use_d4_covalent_cn.
-    if (!m_c6_reference_cached) precomputeC6ReferenceMatrix();
+    if (!c6CacheCoversAtoms()) precomputeC6ReferenceMatrix();
 
     // Claude Generated (Dec 27, 2025): Pre-compute Gaussian weights ONCE for all atoms
     // This eliminates redundant exp() calls in getChargeWeightedC6()
@@ -429,9 +455,11 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
         // NOTE: Cannot use collapse(2) with triangular loops (j = i + 1)
         // Parallelize outer loop only, still provides good speedup
+        // Claude Generated 2026 - MSVC's OpenMP (2.0 semantics) requires a signed
+        // loop index; GCC/Clang accept size_t fine, so this was never caught before.
         #pragma omp for schedule(dynamic, 10)
-        for (size_t i = 0; i < m_atoms.size(); ++i) {
-            for (size_t j = i + 1; j < m_atoms.size(); ++j) {
+        for (int i = 0; i < static_cast<int>(m_atoms.size()); ++i) {
+            for (int j = i + 1; j < static_cast<int>(m_atoms.size()); ++j) {
             int atom_i = m_atoms[i];
             int atom_j = m_atoms[j];
 
@@ -742,8 +770,10 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
         {
             std::vector<json> local_triples;
 
+            // Claude Generated 2026 - MSVC's OpenMP (2.0 semantics) requires a signed
+            // loop index; GCC/Clang accept size_t fine, so this was never caught before.
             #pragma omp for schedule(dynamic, 10)
-            for (size_t idx = 0; idx < triplet_vec.size(); ++idx) {
+            for (int idx = 0; idx < static_cast<int>(triplet_vec.size()); ++idx) {
                 int i = std::get<0>(triplet_vec[idx]);
                 int j = std::get<1>(triplet_vec[idx]);
                 int k = std::get<2>(triplet_vec[idx]);
@@ -869,6 +899,24 @@ double D4ParameterGenerator::getAtomicPolarizability(int atom, int frequency_ind
     return 1.0; // Default value
 }
 
+// Claude Generated (Jul 2026): true iff the C6 reference cache already covers every element in
+// the current molecule. Returns false (→ rebuild) when the cache is empty or a molecule with a
+// new element is seen, so restricting the precompute to present elements stays correct even when
+// the same generator instance is reused across molecules with different element sets.
+bool D4ParameterGenerator::c6CacheCoversAtoms() const
+{
+    if (!m_c6_reference_cached)
+        return false;
+    for (int z : m_atoms) {
+        const int e = z - 1;
+        if (e < 0 || e >= MAX_ELEM)
+            continue;
+        if (!std::binary_search(m_c6_present_signature.begin(), m_c6_present_signature.end(), e))
+            return false;
+    }
+    return true;
+}
+
 void D4ParameterGenerator::precomputeC6ReferenceMatrix()
 {
     // Claude Generated (Dec 27, 2025): Pre-compute C6 reference values via Casimir-Polder integration
@@ -901,12 +949,33 @@ void D4ParameterGenerator::precomputeC6ReferenceMatrix()
     const size_t flat_size = static_cast<size_t>(MAX_ELEM) * MAX_ELEM * MAX_REF * MAX_REF;
     m_c6_flat_cache.assign(flat_size, 0.0);
 
-    // Pre-compute C6 for all element-pair combinations that have alphaiw data
-    for (int elem_i = 0; elem_i < MAX_ELEM && elem_i < static_cast<int>(d4_alphaiw_data.size()); ++elem_i) {
+    // Claude Generated (Jul 2026): only compute C6 references for the elements PRESENT in the
+    // molecule. The full 118-element sweep was a fixed ~9.7 ms per geometry (36k Casimir-Polder
+    // integrations) regardless of size; a typical molecule has ~5 element types → ~25× fewer
+    // combinations, sub-ms. Callers only ever look up C6 for atoms in the molecule (present
+    // elements), so absent-element entries staying 0 is safe; c6CacheCoversAtoms() rebuilds if a
+    // later molecule adds a new element. m_atoms is empty at construction (the ctor no longer
+    // precomputes) — the real build runs lazily from GenerateParameters once m_atoms is set.
+    std::vector<int> present;
+    present.reserve(16);
+    {
+        std::vector<char> seen(MAX_ELEM, 0);
+        for (int z : m_atoms) {
+            const int e = z - 1;
+            if (e >= 0 && e < MAX_ELEM && !seen[e]) { seen[e] = 1; present.push_back(e); }
+        }
+    }
+    std::sort(present.begin(), present.end());
+    m_c6_present_signature = present;
+
+    // Pre-compute C6 for present element-pair combinations that have alphaiw data
+    for (size_t ii = 0; ii < present.size(); ++ii) {
+        const int elem_i = present[ii];
         int nref_i = (elem_i < static_cast<int>(m_refn.size())) ? m_refn[elem_i] : 0;
         if (nref_i == 0 || elem_i >= static_cast<int>(d4_alphaiw_data.size())) continue;
 
-        for (int elem_j = 0; elem_j <= elem_i; ++elem_j) {  // Symmetric, only compute lower triangle
+        for (size_t jj = 0; jj <= ii; ++jj) {  // present sorted → elem_j <= elem_i (lower triangle)
+            const int elem_j = present[jj];
             int nref_j = (elem_j < static_cast<int>(m_refn.size())) ? m_refn[elem_j] : 0;
             if (nref_j == 0 || elem_j >= static_cast<int>(d4_alphaiw_data.size())) continue;
 
@@ -1118,13 +1187,22 @@ void D4ParameterGenerator::precomputeGaussianWeights(CxxThreadPool* pool, int nu
         w_arr.head(n) = w_arr.head(n).exp();
         const double sum_weights = w_arr.head(n).sum();
 
+        // Normalize by the finite sum — faithful port of s-dftd4 weight_references:
+        // 1/sum is finite for ANY nonzero sum (e.g. 1/2.3e-18 for an atom whose
+        // reference CNs are far from the actual CN), so always divide, then guard
+        // EACH normalized weight against NaN/Inf (true underflow: sum rounded to 0),
+        // in which case the reference with the maximal CN gets weight 1. The old
+        // `sum_weights > 1e-10` guard wrongly took the fallback for atoms with sparse
+        // reference CNs, collapsing C6 onto one reference and biasing dispersion
+        // (e.g. GFN2 Ti in MOR41 PR40 over-bound by ~2e-3 Eh).
+        double max_cn_ref = refcn_row[0];
+        for (int ref = 1; ref < n; ++ref) max_cn_ref = std::max(max_cn_ref, refcn_row[ref]);
         std::vector<double> weights(n, 0.0);
-        if (sum_weights > 1e-10) {
-            const double inv = 1.0 / sum_weights;
-            for (int ref = 0; ref < n; ++ref) weights[ref] = w_arr(ref) * inv;
-        } else {
-            // Exceptional case: set first reference to 1.0 (neutral state fallback)
-            weights[0] = 1.0;
+        const double inv = 1.0 / sum_weights;
+        for (int ref = 0; ref < n; ++ref) {
+            double gwk = w_arr(ref) * inv;
+            if (!std::isfinite(gwk)) gwk = (refcn_row[ref] == max_cn_ref) ? 1.0 : 0.0;
+            weights[ref] = gwk;
         }
 
         m_gaussian_weights[i] = std::move(weights);
@@ -1200,6 +1278,99 @@ void D4ParameterGenerator::precomputeGaussianWeights(CxxThreadPool* pool, int nu
     }
 }
 
+// Claude Generated (Lever 3 Opt B, Jun 2026): collect the distinct elements present
+// in m_atoms and map Z -> compact slot. Used to size the per-atom × partner-element
+// half-contraction tables. K = number of distinct elements (small in practice).
+void D4ParameterGenerator::buildPresentElementMap()
+{
+    m_elem_slot.fill(-1);
+    m_present_elems.clear();
+    for (int Z : m_atoms) {
+        if (Z < 1 || Z > MAX_ELEM) continue;
+        if (m_elem_slot[Z] < 0) {
+            m_elem_slot[Z] = static_cast<int>(m_present_elems.size());
+            m_present_elems.push_back(Z);
+        }
+    }
+    m_c6_half_K = static_cast<int>(m_present_elems.size());
+}
+
+// Claude Generated (Lever 3 Opt B, Jun 2026): per-atom half-contraction of the C6
+// reference block over the FIRST ref index, for every partner element present.
+//   g_i[e][b]  = Σ_a w_i[a]·c6ref[Zi][e][a][b]      (from m_gaussian_weights)
+//   dg_i[e][b] = Σ_a dw_i[a]·c6ref[Zi][e][a][b]     (from m_gaussian_weight_derivatives)
+// Requires both weight arrays. O(N·K·49) — ~1% of the O(N²·49) it removes from the
+// energy loop and computeDC6DCN. Disabled (m_c6_half_valid=false) when the flag is off.
+void D4ParameterGenerator::precomputeC6HalfContraction(CxxThreadPool* pool, int num_threads)
+{
+    m_c6_half_valid = false;
+    if (!m_use_half_contraction) return;
+
+    buildPresentElementMap();
+    const int N = static_cast<int>(m_atoms.size());
+    const int K = m_c6_half_K;
+    if (N == 0 || K == 0) return;
+
+    m_c6_half_g.assign(static_cast<size_t>(N) * K * MAX_REF, 0.0);
+    m_c6_half_dg.assign(static_cast<size_t>(N) * K * MAX_REF, 0.0);
+    m_c6_half_natoms = N;
+
+    auto worker = [&](int t_id, int T) {
+        for (int i = t_id; i < N; i += T) {
+            int Zi = m_atoms[i];
+            int elem_i = Zi - 1;
+            if (elem_i < 0 || elem_i >= MAX_ELEM) continue;
+            if (i >= static_cast<int>(m_gaussian_weights.size())) continue;
+            const auto& wi  = m_gaussian_weights[i];
+            const auto& dwi = m_gaussian_weight_derivatives[i];
+            if (wi.empty() || dwi.empty()) continue;
+            const int nref_i = std::min<int>(wi.size(), MAX_REF);
+
+            for (int s = 0; s < K; ++s) {
+                int elem_e = m_present_elems[s] - 1;
+                const size_t base = static_cast<size_t>(elem_i) * MAX_ELEM * MAX_REF * MAX_REF
+                                  + static_cast<size_t>(elem_e) * MAX_REF * MAX_REF;
+                const int nref_e = std::min<int>(
+                    (elem_e < static_cast<int>(m_refn.size())) ? m_refn[elem_e] : 0, MAX_REF);
+                double* gout  = &m_c6_half_g [c6HalfIndex(i, s)];
+                double* dgout = &m_c6_half_dg[c6HalfIndex(i, s)];
+                for (int b = 0; b < nref_e; ++b) {
+                    double gv = 0.0, dgv = 0.0;
+                    for (int a = 0; a < nref_i; ++a) {
+                        double c6ref = m_c6_flat_cache[base + static_cast<size_t>(a) * MAX_REF + b];
+                        gv  += wi[a]  * c6ref;
+                        dgv += dwi[a] * c6ref;
+                    }
+                    gout[b] = gv;
+                    dgout[b] = dgv;
+                }
+            }
+        }
+    };
+
+    if (num_threads > 1 && N > 64) {
+        int T = std::min(num_threads, N);
+        if (pool) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t)
+                futures.push_back(pool->enqueue(worker, t, T));
+            worker(0, T);
+            for (auto& f : futures) f.get();
+        } else {
+            std::vector<std::thread> threads(T - 1);
+            for (int t = 1; t < T; ++t)
+                threads[t - 1] = std::thread(worker, t, T);
+            worker(0, T);
+            for (auto& th : threads) th.join();
+        }
+    } else {
+        worker(0, 1);
+    }
+
+    m_c6_half_valid = true;
+}
+
 /**
  * @brief Calculate charge-weighted C6 coefficient using Gaussian charge-state weighting
  *
@@ -1234,6 +1405,23 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, size_t atom_i, 
     // Validate (rare path)
     if (elem_i < 0 || elem_i >= MAX_ELEM || elem_j < 0 || elem_j >= MAX_ELEM) {
         return 0.0;
+    }
+
+    // Lever 3 Opt B fast path: c6(i,j) = Σ_b g_i[Zj][b]·w_j[b] using the per-atom
+    // half-contraction (7 FMA instead of up to 49). Reassociates the FP sum vs the
+    // flat loop below (~1e-16). Skipped at verbosity>=3 so the per-term debug print
+    // in the flat path still works. Falls through to the exact path otherwise.
+    if (m_c6_half_valid && CurcumaLogger::get_verbosity() < 3
+        && static_cast<int>(atom_i) < m_c6_half_natoms) {
+        const int slot_j = m_elem_slot[Zj];
+        if (slot_j >= 0 && atom_j < m_gaussian_weights.size()) {
+            const auto& wj = m_gaussian_weights[atom_j];
+            const double* g = &m_c6_half_g[c6HalfIndex(static_cast<int>(atom_i), slot_j)];
+            const int nb = std::min<int>(wj.size(), MAX_REF);
+            double c6 = 0.0;
+            for (int b = 0; b < nb; ++b) c6 += g[b] * wj[b];
+            return c6;
+        }
     }
 
     const auto& weights_i = m_gaussian_weights[atom_i];
@@ -1447,6 +1635,52 @@ void D4ParameterGenerator::buildRefWFlat(const std::vector<int>& atoms, const Ve
     }
 }
 
+// Overload that also emits dWc = ∂W/∂CN (for the device 2-body D4 gradient kernel).
+void D4ParameterGenerator::buildRefWFlat(const std::vector<int>& atoms, const Vector& q,
+                                         std::vector<double>& W_out,
+                                         std::vector<double>& dWq_out,
+                                         std::vector<double>& dWc_out) const
+{
+    const int nat = static_cast<int>(atoms.size());
+    W_out.assign(static_cast<size_t>(nat) * MAX_REF, 0.0);
+    dWq_out.assign(static_cast<size_t>(nat) * MAX_REF, 0.0);
+    dWc_out.assign(static_cast<size_t>(nat) * MAX_REF, 0.0);
+    for (int a = 0; a < nat; ++a) {
+        const double qa = (a < q.size()) ? q(a) : 0.0;
+        const RefW r = buildAtomRefW(atoms[a], static_cast<size_t>(a), qa, true, false);
+        const int nr = (r.nref < MAX_REF) ? r.nref : MAX_REF;
+        for (int ref = 0; ref < nr; ++ref) {
+            const size_t idx = static_cast<size_t>(a) * MAX_REF + ref;
+            W_out[idx]   = r.W[ref];
+            dWq_out[idx] = r.dWq[ref];
+            dWc_out[idx] = r.dWc[ref];
+        }
+    }
+}
+
+// q=0 reference C6 (+ ∂C6/∂CN) matrices for the device ATM kernel. Mirrors the c6/dc6dcn
+// build at the top of D4Evaluator::computeATM (buildAtomRefW at q=0 + contractC6Gfn2).
+void D4ParameterGenerator::buildAtmC6Flat(const std::vector<int>& atoms,
+                                          std::vector<double>& c6_out,
+                                          std::vector<double>& dc6dcn_out) const
+{
+    const int nat = static_cast<int>(atoms.size());
+    c6_out.assign(static_cast<size_t>(nat) * nat, 0.0);
+    dc6dcn_out.assign(static_cast<size_t>(nat) * nat, 0.0);
+    std::vector<RefW> refw0(nat);
+    for (int a = 0; a < nat; ++a)
+        refw0[a] = buildAtomRefW(atoms[a], static_cast<size_t>(a), /*q=*/0.0, true, false);
+    for (int a = 0; a < nat; ++a) {
+        for (int b = 0; b <= a; ++b) {
+            const C6Gfn2 g = contractC6Gfn2(refw0[a], refw0[b], atoms[a], atoms[b], true, false);
+            c6_out[static_cast<size_t>(a) * nat + b] = g.c6;
+            c6_out[static_cast<size_t>(b) * nat + a] = g.c6;
+            dc6dcn_out[static_cast<size_t>(a) * nat + b] = g.dc6dcni;   // ∂C6(a,b)/∂CN_a
+            dc6dcn_out[static_cast<size_t>(b) * nat + a] = g.dc6dcnj;   // ∂C6(a,b)/∂CN_b
+        }
+    }
+}
+
 // Stage 6 (S6.2b, Claude Generated 2026-06): export the q-independent per-atom
 // reference data for the device W/dWq rebuild (k_d4_build_refw). Mirrors the
 // per-atom setup at the top of buildAtomRefW (gc=2 → gi=eta·gc; the refcovcn
@@ -1564,12 +1798,16 @@ void D4ParameterGenerator::computeGaussianWeightDerivatives(CxxThreadPool* pool,
         const double norm = expw.head(n).sum();
         const double dnorm = dexpw.head(n).sum();
 
+        // Divide by the finite norm and guard each derivative against NaN/Inf (true
+        // underflow), mirroring the energy-weight fix above so the CN chain-rule is
+        // consistent for atoms with sparse reference CNs (the old `norm > 1e-10`
+        // zeroed legitimate finite derivatives).
         std::vector<double> dgwdcn(n, 0.0);
-        if (norm > 1e-10) {
-            const double inv_norm2 = 1.0 / (norm * norm);
-            for (int ref = 0; ref < n; ++ref) {
-                dgwdcn[ref] = (dexpw(ref) * norm - expw(ref) * dnorm) * inv_norm2;
-            }
+        const double inv_norm2 = 1.0 / (norm * norm);
+        for (int ref = 0; ref < n; ++ref) {
+            double dgwk = (dexpw(ref) * norm - expw(ref) * dnorm) * inv_norm2;
+            if (!std::isfinite(dgwk)) dgwk = 0.0;
+            dgwdcn[ref] = dgwk;
         }
 
         m_gaussian_weight_derivatives[i] = std::move(dgwdcn);
@@ -1608,40 +1846,45 @@ void D4ParameterGenerator::computeDC6DCN(CxxThreadPool* pool, int num_threads)
     int natoms = static_cast<int>(m_atoms.size());
     m_dc6dcn = Matrix::Zero(natoms, natoms);
 
-    // Thread safety proof: Each (i,j) pair with j >= i is processed by exactly the thread
-    // owning row i. Writes: m_dc6dcn(i,j) = dc6_di (row i, thread's own row) and
-    // m_dc6dcn(j,i) = dc6_dj (row j, column i). No other thread writes to (j,i) because
-    // the pair (i,j) is only processed once by the thread owning row i.
-    // Therefore direct writes to m_dc6dcn are safe without buffering.
-    auto dc6_worker = [&](int t_id, int T) {
-    for (int i = t_id; i < natoms; i += T) {
+    // Per-pair dc6/dCN kernel. For i<j writes (i,j)=dC6(i,j)/dCN(i) and
+    // (j,i)=dC6(i,j)/dCN(j); for i==j (full-N² fallback only) writes the diagonal
+    // sum. Each unordered pair is the sole writer of its two cells, so any
+    // partition over pairs/rows is race-free without buffering.
+    auto pair_kernel = [&](int i, int j) {
         int Zi = m_atoms[i];
         int elem_i = Zi - 1;
-        if (elem_i < 0 || elem_i >= MAX_ELEM) continue;
-
+        if (elem_i < 0 || elem_i >= MAX_ELEM) return;
         const auto& gw_i = m_gaussian_weights[i];
         const auto& dgw_i = m_gaussian_weight_derivatives[i];
-        if (gw_i.empty() || dgw_i.empty()) continue;
-
+        if (gw_i.empty() || dgw_i.empty()) return;
         int nref_i = static_cast<int>(gw_i.size());
 
-        for (int j = i; j < natoms; ++j) {
-            int Zj = m_atoms[j];
-            int elem_j = Zj - 1;
-            if (elem_j < 0 || elem_j >= MAX_ELEM) continue;
+        int Zj = m_atoms[j];
+        int elem_j = Zj - 1;
+        if (elem_j < 0 || elem_j >= MAX_ELEM) return;
+        const auto& gw_j = m_gaussian_weights[j];
+        const auto& dgw_j = m_gaussian_weight_derivatives[j];
+        if (gw_j.empty() || dgw_j.empty()) return;
+        int nref_j = static_cast<int>(gw_j.size());
 
-            const auto& gw_j = m_gaussian_weights[j];
-            const auto& dgw_j = m_gaussian_weight_derivatives[j];
-            if (gw_j.empty() || dgw_j.empty()) continue;
+        double dc6_di = 0.0;
+        double dc6_dj = 0.0;
 
-            int nref_j = static_cast<int>(gw_j.size());
-
+        const int slot_j = m_c6_half_valid ? m_elem_slot[Zj] : -1;
+        if (slot_j >= 0 && i < m_c6_half_natoms) {
+            // Lever 3 Opt B half-contraction: 7 FMA instead of up to 49.
+            //   dc6_di = Σ_b dg_i[Zj][b]·w_j[b];  dc6_dj = Σ_b g_i[Zj][b]·dw_j[b]
+            const double* g  = &m_c6_half_g [c6HalfIndex(i, slot_j)];
+            const double* dg = &m_c6_half_dg[c6HalfIndex(i, slot_j)];
+            const int nb = std::min<int>(nref_j, MAX_REF);
+            for (int b = 0; b < nb; ++b) {
+                dc6_di += dg[b] * gw_j[b];
+                dc6_dj += g[b]  * dgw_j[b];
+            }
+        } else {
+            // Exact flat path (also the disp_half_contraction=false reproduction).
             const size_t base_ij = static_cast<size_t>(elem_i) * MAX_ELEM * MAX_REF * MAX_REF
                                  + static_cast<size_t>(elem_j) * MAX_REF * MAX_REF;
-
-            double dc6_di = 0.0;
-            double dc6_dj = 0.0;
-
             for (int ri = 0; ri < nref_i && ri < MAX_REF; ++ri) {
                 size_t base_ri = base_ij + static_cast<size_t>(ri) * MAX_REF;
                 for (int rj = 0; rj < nref_j && rj < MAX_REF; ++rj) {
@@ -1652,16 +1895,59 @@ void D4ParameterGenerator::computeDC6DCN(CxxThreadPool* pool, int num_threads)
                     dc6_dj += gw_i[ri] * dgw_j[rj] * c6ref;
                 }
             }
-
-            if (i == j) {
-                m_dc6dcn(i, i) = dc6_di + dc6_dj;
-            } else {
-                m_dc6dcn(i, j) = dc6_di;  // dC6(i,j)/dCN(i)
-                m_dc6dcn(j, i) = dc6_dj;  // dC6(i,j)/dCN(j) — safe, unique writer
-            }
         }
+
+        if (i == j) {
+            m_dc6dcn(i, i) = dc6_di + dc6_dj;
+        } else {
+            m_dc6dcn(i, j) = dc6_di;  // dC6(i,j)/dCN(i)
+            m_dc6dcn(j, i) = dc6_dj;  // dC6(i,j)/dCN(j) — unique writer
+        }
+    };
+
+    // Lever 3 Opt A: iterate only the in-cutoff pair list — exactly the dc6dcn
+    // entries the gradient consumer reads. Beyond-cutoff cells and the diagonal
+    // stay 0 (never read). Bit-identical for every consumed entry. Falls back to
+    // the full-N² double loop when the list is unavailable (GPU skip / first call).
+    if (m_dc6dcn_pairs_valid) {
+        const int P = static_cast<int>(m_dc6dcn_pairs.size());
+        auto pl_worker = [&](int t_id, int T) {
+            for (int p = t_id; p < P; p += T)
+                pair_kernel(m_dc6dcn_pairs[p].first, m_dc6dcn_pairs[p].second);
+        };
+        if (num_threads > 1 && P > 64) {
+            int T = std::min(num_threads, P);
+            if (pool) {
+                std::vector<std::future<void>> futures;
+                futures.reserve(T - 1);
+                for (int t = 1; t < T; ++t)
+                    futures.push_back(pool->enqueue(pl_worker, t, T));
+                pl_worker(0, T);
+                for (auto& f : futures) f.get();
+            } else {
+                std::vector<std::thread> threads(T - 1);
+                for (int t = 1; t < T; ++t)
+                    threads[t - 1] = std::thread(pl_worker, t, T);
+                pl_worker(0, T);
+                for (auto& th : threads) th.join();
+            }
+        } else {
+            pl_worker(0, 1);
+        }
+        m_dc6dcn_computed = true;
+        return;
     }
-    };  // end dc6_worker lambda
+
+    // Fallback: original full-N² row-partitioned loop. Each thread owns row i and
+    // iterates j >= i, so it is the sole writer of cells (i,j) and (j,i).
+    auto dc6_worker = [&](int t_id, int T) {
+        for (int i = t_id; i < natoms; i += T) {
+            int elem_i = m_atoms[i] - 1;
+            if (elem_i < 0 || elem_i >= MAX_ELEM) continue;
+            if (m_gaussian_weights[i].empty() || m_gaussian_weight_derivatives[i].empty()) continue;
+            for (int j = i; j < natoms; ++j) pair_kernel(i, j);
+        }
+    };
 
     if (num_threads > 1 && natoms > 64) {
         int T = std::min(num_threads, natoms);
@@ -1708,6 +1994,9 @@ void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& 
     // Claude Generated (March 2026): Phase 2 GPU dc6dcn — skip O(N²) matrix when
     // GPU will compute dc6dcn per dispersion pair directly.
     if (!skip_dc6dcn) {
+        // Lever 3 Opt B: rebuild the half-contraction (CN changed → weights changed)
+        // before computeDC6DCN. Reuses m_dc6dcn_pairs from the last pair-list build.
+        precomputeC6HalfContraction(pool, num_threads);
         computeDC6DCN(pool, num_threads);
     }
 
@@ -1764,8 +2053,24 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
 
     // Step 3: Pre-compute Gaussian weights and C6 reference matrix
     if (!m_data_initialized) initializeReferenceData();
-    if (!m_c6_reference_cached) precomputeC6ReferenceMatrix();
+    if (!c6CacheCoversAtoms()) precomputeC6ReferenceMatrix();
     precomputeGaussianWeights();
+
+    // WP-A (Jun 2026): with gpu_disp_pairs_on_device the GPU builds the pair list +
+    // dc6dcn on the device, reusing only the CN + Gaussian weights computed above.
+    // Skip the host O(N²) pair loop and the host dc6dcn entirely; return empty.
+    if (m_skip_pair_loop) {
+        m_dc6dcn_pairs_valid = false;  // GPU owns dc6dcn; keep host fallback exact (full N²)
+        m_c6_half_valid = false;       // GPU path: no host half-contraction
+        return {};
+    }
+
+    // Lever 3 Opt B: derivatives + half-contraction BEFORE the energy loop, because
+    // both the energy loop's getChargeWeightedC6 fast path and computeDC6DCN consume
+    // the per-atom half-contraction. computeGaussianWeightDerivatives moved up from
+    // after the loop (it depends only on CN, always ran unconditionally).
+    computeGaussianWeightDerivatives();
+    precomputeC6HalfContraction();
 
     // Step 4: Generate pairs as native structs (no JSON!)
     double a1 = m_config.get<double>("d4_a1", 0.58);
@@ -1790,9 +2095,11 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     {
         std::vector<GFNFFDispersion> local_pairs;
 
+        // Claude Generated 2026 - MSVC's OpenMP (2.0 semantics) requires a signed
+        // loop index; GCC/Clang accept size_t fine, so this was never caught before.
         #pragma omp for schedule(dynamic, 10)
-        for (size_t i = 0; i < m_atoms.size(); ++i) {
-            for (size_t j = i + 1; j < m_atoms.size(); ++j) {
+        for (int i = 0; i < static_cast<int>(m_atoms.size()); ++i) {
+            for (int j = i + 1; j < static_cast<int>(m_atoms.size()); ++j) {
                 double r2 = (geometry_bohr.row(i) - geometry_bohr.row(j)).squaredNorm();
                 if (r2 > disp_cutoff_sq) continue;
 
@@ -1825,7 +2132,12 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
                 d.C6 = c6;
                 d.r4r2ij = r4r2ij;
                 d.r0_squared = r0_sq;
-                d.r_cut = 50.0;  // D4 pair-energy cutoff (struct default; verified by XTB comparison May 2026)
+                // D4 two-body cutoff, tblite's realspace_cutoff(disp2=50) (disp/d4.f90:82).
+                // xtb passes 60.0 (scf_module.F90:766) but the difference is unmeasurable:
+                // with 60 instead of 50 the worst GMTKN55 gfn2 deviation moves 0.01667 ->
+                // 0.01666 kcal/mol. The whole deviation is the THREE-body cutoff instead
+                // (-xtb.d4_atm_cutoff). Measured Sep 2026; Claude Generated.
+                d.r_cut = 50.0;
                 d.zetac6 = zetac6;
                 // P1c (Apr 2026): Legacy D3 fields removed from GFNFFDispersion
 
@@ -1839,8 +2151,15 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
         }
     }
 
-    // Also compute dc6dcn for gradient computation
-    computeGaussianWeightDerivatives();
+    // Lever 3 Opt A (Jun 2026): capture the in-cutoff pair list. computeDC6DCN only
+    // needs entries the gradient consumer reads — exactly the dispersion pairs (i<j,
+    // within the 60 Bohr cutoff) collected above. updateCNValuesForGradient reuses it.
+    m_dc6dcn_pairs.clear();
+    m_dc6dcn_pairs.reserve(all_pairs.size());
+    for (const auto& d : all_pairs) m_dc6dcn_pairs.emplace_back(d.i, d.j);
+    m_dc6dcn_pairs_valid = true;
+
+    // dc6dcn for the gradient (derivatives + half-contraction already built above).
     computeDC6DCN();
 
     if (CurcumaLogger::get_verbosity() >= 3) {

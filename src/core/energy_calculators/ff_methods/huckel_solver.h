@@ -86,6 +86,11 @@ public:
      * @param bonds List of bonded atom pairs (0-based indices)
      * @param geometry_bohr N×3 geometry matrix in Bohr (P2a: replaces distance matrix)
      * @param itag Special atom tags (1=carbene for C, 1=NO₂ for N)
+     * @param pi_atoms_final Optional out: Fortran's post-Hückel `piadr` (gfnff_ini.f90:1016,
+     *        `piadr = itmp`). Resized to natoms and set to 1 for both ends of every bond whose
+     *        two atoms sit in the same SOLVED π-system, 0 otherwise. This is what every
+     *        consumer after the Hückel section tests, and it is stricter than pi_fragments:
+     *        atoms of a π-system that was skipped (npi<2 or nel<1) stay 0.
      * @return π-bond orders in triangular format [huckel_lin(i,j)]
      */
     std::vector<double> calculatePiBondOrders(
@@ -95,7 +100,9 @@ public:
         const std::vector<double>& charges,
         const std::vector<std::pair<int,int>>& bonds,
         const Eigen::MatrixXd& geometry_bohr,
-        const std::vector<int>& itag = {}
+        const std::vector<int>& itag = {},
+        const std::vector<int>& pi_system_charge = {},
+        std::vector<int>* pi_atoms_final = nullptr
     );
 
     /**
@@ -229,9 +236,14 @@ private:
      *
      * @param H Hamiltonian matrix (input), density matrix (output)
      * @param nel Number of electrons
+     * @param pisip_out Optional: receives the HOMO orbital energy (eV, scaled),
+     *        i.e. the eps of the highest orbital with occupation > 0.5. Used by
+     *        the caller for the pisip>0.40 "wrong pi occupation" fallback
+     *        (gfnff_ini.f90:1082). Pass nullptr if not needed.
      * @return Electronic energy (for convergence check)
      */
-    double solveAndBuildDensity(Eigen::MatrixXd& H, int nel) const;
+    double solveAndBuildDensity(Eigen::MatrixXd& H, int nel, double* pisip_out = nullptr,
+                                double et = fermi_temp) const;
 
     /**
      * @brief Compute Fermi-Dirac occupations at given temperature

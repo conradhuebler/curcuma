@@ -13,13 +13,14 @@
  *
  * AP4: repulsion + H0/Pulay (s/p only) + Coulomb + CN chain-rule.
  * AP5: GFN2 direct multipole gradient (SD/DD/SQ) + mrad/CN chain-rule.
- * AP5 (TODO): integral Pulay term (multipole integral derivatives × v_dp/v_qp).
+ * AP5b: integral Pulay term (multipole integral derivatives × v_dp/v_qp), section 5.
  *
  * Claude Generated. GPL-3.0.
  */
 
 #include "xtb_native.h"
 #include "STO_CGTO.hpp"
+#include "xtb_ao_utils.hpp"
 #include "xtb_coulomb.hpp"
 #include "xtb_multipole_ints.hpp"
 
@@ -33,29 +34,7 @@
 
 namespace curcuma::xtb {
 
-/* ---- local helpers shared with xtb_h0.cpp -------------------------------- */
-
-// Convert internal CGTOShell → CGTO::Shell (duplicate of xtb_h0.cpp)
-static CGTO::Shell as_cgto_shell_g(const CGTOShell& cg)
-{
-    CGTO::Shell s;
-    s.ang   = cg.ang;
-    s.nprim = static_cast<int>(cg.alpha.size());
-    s.alpha = cg.alpha;
-    s.coeff = cg.coeff;
-    return s;
-}
-
-// AO-type within a shell (matching xtb_h0.cpp convention)
-static inline int ao_to_type_g(int ang, int local_ao)
-{
-    if (ang == 0) return 0;
-    if (ang == 1) {
-        static const int p_map[3] = {2, 3, 1};  // py, pz, px (tblite ordering)
-        return p_map[local_ao];
-    }
-    return -1;  // d not handled
-}
+/* as_cgto_shell() and ao_to_type() now live in xtb_ao_utils.hpp (X-I5). */
 
 /* ========================================================================== *
  *  XTB::calculateGradient()                                                   *
@@ -95,7 +74,21 @@ void XTB::calculateGradient()
     Matrix W;
     if (m_wfn.W_valid && m_wfn.W.rows() == nao && m_wfn.W.cols() == nao) {
         W = m_wfn.W;
+    } else if (m_wfn.focc.size() == nao && m_wfn.C.cols() == nao) {
+        // X-G3 (Claude Generated): occupation-consistent W = Σ_i f_i·ε_i·C_i·C_iᵀ using the
+        // same per-MO occupations that built the density. At electronic_temperature > 0 these
+        // are fractional (Fermi) so the Pulay term matches the fractional density; at T = 0
+        // f_i ∈ {2,0}, so W is bit-identical to the previous integer build. Restrict to the
+        // leading columns with non-negligible occupation (eigenvalues ascending).
+        int ncol = 0;
+        for (int i = 0; i < nao; ++i)
+            if (m_wfn.focc(i) > 1.0e-12) ncol = i + 1;
+        const auto Cocc = m_wfn.C.leftCols(ncol);
+        const Eigen::VectorXd we =
+            (m_wfn.focc.head(ncol).array() * m_wfn.eps.head(ncol).array()).matrix();
+        W = (Cocc * we.asDiagonal()) * Cocc.transpose();
     } else {
+        // Fallback when focc was not populated (e.g. a device density path): integer occupation.
         const auto Cocc = m_wfn.C.leftCols(nocc_orbs);
         const Eigen::VectorXd w2 = 2.0 * m_wfn.eps.head(nocc_orbs);
         W = (Cocc * w2.asDiagonal()) * Cocc.transpose();
@@ -133,6 +126,7 @@ void XTB::calculateGradient()
     //      E_rep_ij = Z_i·Z_j / R^rexp * exp(-sqrt(α_i·α_j) * R^kexp_ij)
     //      dE/dr    = -(rexp/R + alpha_pair*kexp_ij*R^(kexp_ij-1)) * E_pair
     // ==========================================================================
+    if (!m_repulsion_grad_off)
     for (int i = 0; i < nat; ++i) {
         const int zi = m_atoms[i];
         double alfi, zeffi, kexp, rexp;
@@ -186,6 +180,11 @@ void XTB::calculateGradient()
     }
 
     // ==========================================================================
+    //  1b.  GFN1 halogen-bond gradient (classical B–X···A term, no density)
+    // ==========================================================================
+    addHalogenBondGradient(m_gradient);
+
+    // ==========================================================================
     //  2a.  On-site CN contribution: dEdcn[iat] += (-kcn[ish]) · P(μ,μ)
     //       (diagonal H0 elements: H0_μμ = se[ish]; dH0/dCN = -kcn[ish])
     // ==========================================================================
@@ -222,6 +221,13 @@ void XTB::calculateGradient()
     // which span thread boundaries — so threads write into private grad/dEdcn
     // partials that are summed afterwards. Bit-identical to the serial sum up to
     // floating-point reassociation (validated against the serial reference).
+    // Shells are geometry-independent: convert once instead of once per shell
+    // pair in the inner loop (as_cgto_shell copies two std::vectors). Same hoist
+    // as B1 in getHamiltonianH0(); identical values. Claude Generated, Sep 2026.
+    std::vector<CGTO::Shell> shells(nsh);
+    for (int ish = 0; ish < nsh; ++ish)
+        shells[ish] = as_cgto_shell(m_basis.cgto[ish]);
+
     const int grad_threads = effectiveIntraThreads(nat);
     std::vector<Matrix> grad_parts(grad_threads, Matrix::Zero(nat, 3));
     std::vector<Vector> dEdcn_parts(grad_threads, Vector::Zero(nat));
@@ -254,7 +260,7 @@ void XTB::calculateGradient()
                 const int ia_nao   = m_basis.nao_sh[ish_a];
                 const double pi_a  = 1.0 + m_h0.shpoly[ish_a] * rr;
                 const double zeta_a = m_basis.cgto[ish_a].slater_exp;
-                const CGTO::Shell sh_a = as_cgto_shell_g(m_basis.cgto[ish_a]);
+                const CGTO::Shell& sh_a = shells[ish_a];
 
                 for (int ib = 0; ib < nsh_jat; ++ib) {
                     const int ish_b    = m_basis.ish_at[jat] + ib;
@@ -262,7 +268,36 @@ void XTB::calculateGradient()
                     const int jb_nao   = m_basis.nao_sh[ish_b];
                     const double pi_b  = 1.0 + m_h0.shpoly[ish_b] * rr;
                     const double zeta_b = m_basis.cgto[ish_b].slater_exp;
-                    const CGTO::Shell sh_b = as_cgto_shell_g(m_basis.cgto[ish_b]);
+                    const CGTO::Shell& sh_b = shells[ish_b];
+
+                    // X-I1: d-touching shell pair uses the spherical-transform
+                    // gradient blocks (computed once per shell pair); pure s/p
+                    // pairs keep the scalar kernels below (byte-identical).
+                    const int ang_a_g = m_basis.ang_sh[ish_a];
+                    const int ang_b_g = m_basis.ang_sh[ish_b];
+                    const bool dpair = (ang_a_g >= 2 || ang_b_g >= 2);
+                    double dSblk[5*5*3];
+                    double dDblk[5*5*9], dQblk[5*5*18];
+                    if (dpair) {
+                        sphericalOverlapGradBlock(sh_a, ang_a_g, sh_b, ang_b_g,
+                            xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
+                            xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], dSblk, 5);
+                        if (m_method == MethodType::GFN2 && m_mp_initialized)
+                            sphericalMultipoleGradBlock(sh_a, ang_a_g, sh_b, ang_b_g,
+                                xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
+                                xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], dDblk, dQblk, 5);
+                    }
+
+                    // B8 (Jul 2026): the s/p overlap-gradient kernel used to redo
+                    // the whole primitive loop -- including its pow() and exp() --
+                    // once per AO COMPONENT pair. Those scalars depend only on the
+                    // primitive pair, so build them once per shell pair here.
+                    CGTO::OverlapPrimPair pp[CGTO::kMaxPrimPairs];
+                    int npp = 0;
+                    if (!dpair)
+                        npp = CGTO::buildOverlapPrimPairs(sh_a, sh_b,
+                            xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
+                            xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], pp);
 
                     // ── hscale hs ────────────────────────────────────────────
                     double hs;
@@ -300,7 +335,10 @@ void XTB::calculateGradient()
                                                 + m_h0.shpoly[ish_b] / pi_b) * rr / (2.0 * r2);
 
                     // ── v_ao for this shell pair ─────────────────────────────
-                    // All AOs in shell ish_a share the same v_ao value.
+                    // All AOs in shell ish_a share the same v_ao value. v_at carries the
+                    // ES2/3rd-order/AES-monopole AND (GFN2 gradient) the self-consistent-D4
+                    // dE_D4/dq shift, so the charge-Pulay −P·(v_a+v_b)·dS reproduces the full
+                    // Mulliken charge response of every SCC term.
                     const double v_a = m_pot.v_sh(ish_a) + m_pot.v_at(iat);
                     const double v_b = m_pot.v_sh(ish_b) + m_pot.v_at(jat);
 
@@ -311,13 +349,13 @@ void XTB::calculateGradient()
 
                     for (int iao = 0; iao < ia_nao; ++iao) {
                         const int mu   = ia_start + iao;
-                        const int t_a  = ao_to_type_g(m_basis.ang_sh[ish_a], iao);
-                        if (t_a < 0) continue;   // d-type: gradient = 0
+                        const int t_a  = dpair ? 0 : ao_to_type(m_basis.ang_sh[ish_a], iao);
+                        if (!dpair && t_a < 0) continue;
 
                         for (int jao = 0; jao < jb_nao; ++jao) {
                             const int nu  = jb_start + jao;
-                            const int t_b = ao_to_type_g(m_basis.ang_sh[ish_b], jao);
-                            if (t_b < 0) continue;
+                            const int t_b = dpair ? 0 : ao_to_type(m_basis.ang_sh[ish_b], jao);
+                            if (!dpair && t_b < 0) continue;
 
                             const double Pmn  = m_wfn.P(mu, nu);
                             const double Smn  = m_S(mu, nu);
@@ -326,14 +364,24 @@ void XTB::calculateGradient()
 
                             // Overlap gradient dS/dR_iat (Obara-Saika)
                             double dS[3];
-                            CGTO::cgto_overlap_grad(sh_a, sh_b,
-                                                    xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
-                                                    xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2],
-                                                    t_a, t_b, dS);
+                            if (dpair) {
+                                const int o = (iao*5 + jao) * 3;
+                                dS[0] = dSblk[o]; dS[1] = dSblk[o+1]; dS[2] = dSblk[o+2];
+                            } else if (npp >= 0) {
+                                CGTO::cgto_overlap_grad_pre(pp, npp, t_a, t_b, dS);
+                            } else {
+                                // Shell pair exceeded the pair-table capacity.
+                                CGTO::cgto_overlap_grad(sh_a, sh_b,
+                                                        xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
+                                                        xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2],
+                                                        t_a, t_b, dS);
+                            }
 
                             // sval: coefficient for the overlap-gradient term
                             // sval = 2·P·h_av - 2·W - P·(v_a+v_b)
-                            const double sval = 2.0*Pmn*h_av - 2.0*Wmn - Pmn*(v_a + v_b);
+                            const double sval = m_sval_h0_only
+                                ? 2.0*Pmn*h_av                                  // Tr(P·dH0) band only
+                                : 2.0*Pmn*h_av - 2.0*Wmn - Pmn*(v_a + v_b);
 
                             G_sval[0] += sval * dS[0];
                             G_sval[1] += sval * dS[1];
@@ -347,18 +395,32 @@ void XTB::calculateGradient()
                             //   term = d(dp_jat)/dRiat · v_dp(jat) + d(dp_iat)/dRiat · v_dp(iat)
                             //        + d(qp_jat)/dRiat · v_qp(jat) + d(qp_iat)/dRiat · v_qp(iat)
                             // Reference: tblite h0.f90:get_hamiltonian_gradient
-                            if (m_method == MethodType::GFN2 && m_mp_initialized) {
-                                double S_mp, D_mp[3], Q_mp[6];
-                                double dD_dA[3][3], dD_dB[3][3];
-                                double dQ_dA[3][6], dQ_dB[3][6];
-                                using namespace curcuma::xtb::multipole_ints;
-                                cgto_multipole_grad_transformed(
-                                    sh_a, sh_b,
-                                    xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
-                                    xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2],
-                                    t_a, t_b,
-                                    S_mp, D_mp, Q_mp,
-                                    dD_dA, dD_dB, dQ_dA, dQ_dB);
+                            if (m_method == MethodType::GFN2 && m_mp_initialized && !m_mp_grad_off) {
+                                double D_mp[3], Q_mp[6];
+                                double dD_dA[3][3], dQ_dA[3][6];
+                                if (dpair) {
+                                    // Transformed integral values come from the stored
+                                    // m_dp_int/m_qp_int (origin at column atom = jat);
+                                    // their A-gradients from the d block (X-I1).
+                                    for (int k = 0; k < 3; ++k) D_mp[k] = m_dp_int[k](mu, nu);
+                                    for (int q = 0; q < 6; ++q) Q_mp[q] = m_qp_int[q](mu, nu);
+                                    const int od = (iao*5 + jao) * 9;
+                                    const int oq = (iao*5 + jao) * 18;
+                                    for (int l = 0; l < 3; ++l) {
+                                        for (int k = 0; k < 3; ++k) dD_dA[l][k] = dDblk[od + l*3 + k];
+                                        for (int q = 0; q < 6; ++q) dQ_dA[l][q] = dQblk[oq + l*6 + q];
+                                    }
+                                } else {
+                                    double S_mp, dD_dB[3][3], dQ_dB[3][6];
+                                    using namespace curcuma::xtb::multipole_ints;
+                                    cgto_multipole_grad_transformed(
+                                        sh_a, sh_b,
+                                        xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
+                                        xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2],
+                                        t_a, t_b,
+                                        S_mp, D_mp, Q_mp,
+                                        dD_dA, dD_dB, dQ_dA, dQ_dB);
+                                }
 
                                 // ΔR = Rjat - Riat (origin-shift vector)
                                 const double dR[3] = {
@@ -456,7 +518,7 @@ void XTB::calculateGradient()
     //      Klopman-Ohno kernel: γ(r) = (r^g + gam^{-g})^{-1/g}
     //      dγ/dr = −r^{g−2} · γ^{g+1}
     // ==========================================================================
-    {
+    if (!m_coulomb_grad_off) {
         const double gexp = (m_method == MethodType::GFN1)
                           ? gfn1_params::gexp
                           : gfn2_params::gexp;
@@ -548,7 +610,7 @@ void XTB::calculateGradient()
     //
     //  Must run BEFORE section 4 so that dEdcn is complete when CN loop executes.
     // ==========================================================================
-    if (m_method == MethodType::GFN2 && m_mp_initialized) {
+    if (m_method == MethodType::GFN2 && m_mp_initialized && !m_mp_grad_off) {
         using namespace gfn2_params;
 
         Vector dEdr_mp = Vector::Zero(nat);
@@ -692,7 +754,7 @@ void XTB::calculateGradient()
     //  is not yet implemented; zetac6 is treated as a static prefactor (sub-mEh
     //  residual on the AP test set). See dispersion/CLAUDE.md.
     // ==========================================================================
-    if (m_disp_gradient_valid
+    if (m_disp_gradient_valid && !m_d4_grad_off
         && m_disp_gradient.rows() == nat && m_disp_gradient.cols() == 3) {
         m_gradient += m_disp_gradient;
         if (m_disp_dEdcn.size() == nat) {
@@ -713,7 +775,7 @@ void XTB::calculateGradient()
     //  Covalent radii: D3 parametrisation via covalent_rad_d3_au().
     //  Note: dEdcn now includes H0/Pulay + GFN2 multipole mrad contributions.
     // ==========================================================================
-    {
+    if (!m_cnchain_off) {
         std::vector<double> rcov(nat);
         for (int i = 0; i < nat; ++i)
             rcov[i] = covalent_rad_d3_au(m_atoms[i]);
@@ -776,7 +838,9 @@ void XTB::calculateGradient()
  * ============================================================================ */
 bool XTB::calculateGradientGpu()
 {
-    if (!m_gpu_scf || !m_gpu_scf->supportsGradient()) return false;
+    // X-I1: d device gradient is backend-gated (CUDA yes; ROCm/Vulkan -> CPU).
+    if (!m_gpu_scf || !m_gpu_scf->supportsGradient()
+        || (m_has_dshell && !m_gpu_scf->supportsDshell())) return false;
     const int nat = m_atomcount;
     const int nao = m_basis.nao;
 
@@ -816,6 +880,10 @@ bool XTB::calculateGradientGpu()
         xyz[3*i+2] = m_geometry(i, 2) * AA_TO_AU;
     }
 
+    // 1b. GFN1 halogen-bond gradient (classical, host-side — the device kernels
+    // cover sections 1/2/3 only).
+    addHalogenBondGradient(m_gradient);
+
     // 3b. Dispersion gradient (host-cached) + its CN chain-rule contribution.
     if (m_disp_gradient_valid
         && m_disp_gradient.rows() == nat && m_disp_gradient.cols() == 3) {
@@ -826,7 +894,7 @@ bool XTB::calculateGradientGpu()
     // 5. GFN2 direct multipole interaction gradient (host; O(nat²) over the
     // atomic moments dp_at/qp_at — identical to section 5 in calculateGradient).
     // Must precede section 4 so dEdcn carries the mrad/CN chain contribution.
-    if (m_method == MethodType::GFN2 && m_mp_initialized) {
+    if (m_method == MethodType::GFN2 && m_mp_initialized && !m_mp_grad_off) {
         using namespace gfn2_params;
         Vector dEdr_mp = Vector::Zero(nat);
         for (int iat = 0; iat < nat; ++iat) {

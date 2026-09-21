@@ -1,0 +1,46 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : enable
+// GFN2 atomic dipole/quadrupole moments from the resident density (Stage 2b / V-AP3):
+//   dp_at(k,iat) -= Sum_{mu in iat} Sum_nu P(nu,mu)*dp_int[k](nu,mu)   (3*nat)
+//   qp_at(k,iat) -= Sum_{mu in iat} Sum_nu P(nu,mu)*qp_int[k](nu,mu)   (6*nat)
+// Per-atom GATHER (one thread per atom iat) so no FP64 atomics are needed (Vulkan has
+// none) — the CUDA k_multipole_moments scatters per-mu with atomicAdd; here each atom
+// thread sums over its own AOs. P/dp_int/qp_int column-major (a,b) at a+b*nao. Claude Generated.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer B0 { double P[]; };
+layout(std430, binding = 1) readonly  buffer B1 { double dp_int[]; };
+layout(std430, binding = 2) readonly  buffer B2 { double qp_int[]; };
+layout(std430, binding = 3) readonly  buffer B3 { int    ao2at[]; };
+layout(std430, binding = 4) writeonly buffer B4 { double dp_at[]; };   // 3*nat, k+iat*3
+layout(std430, binding = 5) writeonly buffer B5 { double qp_at[]; };   // 6*nat, k+iat*6
+layout(push_constant) uniform PC { uint nao; uint nat; } pc;
+
+void main()
+{
+    uint iat = gl_GlobalInvocationID.x;
+    if (iat >= pc.nat) return;
+    uint n = pc.nao;
+    uint nn = n * n;
+    double d0 = 0.0lf, d1 = 0.0lf, d2 = 0.0lf;
+    double q0 = 0.0lf, q1 = 0.0lf, q2 = 0.0lf, q3 = 0.0lf, q4 = 0.0lf, q5 = 0.0lf;
+    for (uint mu = 0u; mu < n; ++mu) {
+        if (uint(ao2at[mu]) != iat) continue;
+        uint col = mu * n;        // start of column mu (nu varies)
+        for (uint nu = 0u; nu < n; ++nu) {
+            double pnm = P[col + nu];                 // P(nu,mu)
+            uint idx = col + nu;                      // (nu,mu)
+            d0 += pnm * dp_int[0u*nn + idx];
+            d1 += pnm * dp_int[1u*nn + idx];
+            d2 += pnm * dp_int[2u*nn + idx];
+            q0 += pnm * qp_int[0u*nn + idx];
+            q1 += pnm * qp_int[1u*nn + idx];
+            q2 += pnm * qp_int[2u*nn + idx];
+            q3 += pnm * qp_int[3u*nn + idx];
+            q4 += pnm * qp_int[4u*nn + idx];
+            q5 += pnm * qp_int[5u*nn + idx];
+        }
+    }
+    dp_at[0u + iat*3u] = -d0; dp_at[1u + iat*3u] = -d1; dp_at[2u + iat*3u] = -d2;
+    qp_at[0u + iat*6u] = -q0; qp_at[1u + iat*6u] = -q1; qp_at[2u + iat*6u] = -q2;
+    qp_at[3u + iat*6u] = -q3; qp_at[4u + iat*6u] = -q4; qp_at[5u + iat*6u] = -q5;
+}

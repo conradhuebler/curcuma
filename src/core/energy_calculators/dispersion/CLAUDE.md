@@ -71,6 +71,17 @@ the evaluator:
 - `getDC6DCN()`, `getGaussianWeights()`, `getC6FlatCache()`, `getRefN()`,
   `getRefCN()` (used by the GFN-FF GPU pipeline)
 
+**C6 precompute is lazy and present-elements-only (Jul 2026).**
+`precomputeC6ReferenceMatrix()` used to sweep all 118 elements (~36 644
+Casimir-Polder integrations) in the **constructor**, before the molecule was
+known — a fixed ~9.7 ms on every run, including CPU-only single points. It is now
+built from `GenerateParameters()` for the elements actually in `m_atoms`, with
+`c6CacheCoversAtoms()` triggering a rebuild when a new element appears (so
+reusing one generator across molecules stays correct). complex/231: **9.68 → 0.79
+ms** (209 values). The cost was serial and fixed, so the relative win grows with
+thread count (Amdahl) — it mattered most for `gfnff`, whose whole `-sp` is ~44 ms.
+Energies bit-identical.
+
 ### `D4Evaluator` (new)
 
 The math kernel. Holds a non-owning `D4ParameterGenerator*` and a
@@ -159,12 +170,57 @@ to plug it in without touching the CPU evaluator.
    implemented** — the mulliken gradient currently uses the static-prefactor
    approximation for the q-term (same sub-mEh residual as before). Until 3b
    lands, prefer `d4_charge_source="eeq"` (default) for gradient work.
-2. **GFN1 D3 still missing in `xtb_native.cpp`.** `calcDispersionEnergy()`
-   returns 0 for GFN1; native D3 integration is a follow-up AP (the
-   infrastructure in `D3ParameterGenerator` already exists).
+2. **GFN1 D3 is wired** (`xtb_native.cpp:~1823`, via
+   `D3ParameterGenerator::createForGFN1()`: s6=1, s8=2.4, a1=0.63, a2=5.0)
+   — the earlier "returns 0 / still missing" note was stale and is removed.
 3. **`D4ParameterGenerator` PARAM defaults are GFN-FF values** (a1=0.58,
    a2=4.80, s8=2.0). The `D4Evaluator` constructor asserts so silent
    misuse cannot pass — each call site populates `D4Params` explicitly.
+
+## TODO — expose native D3/D4 as a general add-on dispersion correction
+
+**Befund (2026-06-26).** Both native dispersion kernels are method-agnostic
+and standalone-callable, but only wired into GFN-FF/GFN1/GFN2 internally —
+not exposed as a correction to attach to arbitrary host methods (UFF/HF/DFT).
+
+- **D3 — largely ready.** `D3ParameterGenerator` (`ff_methods/d3param_generator.{h,cpp}`,
+  built unconditionally, `CMakeLists.txt:535`) already has functional factory
+  presets: `createForGFN1/GFNFF/UFFD3/PBE0/BLYP/B3LYP/TPSS/PBE/BP86` +
+  `createForMethod(string)`. Params PARAM-overridable (`d3_s6/s8/rs6/rs8/a1/a2`).
+  Standalone energy+gradient via `prepareForEnergyGradient()` +
+  `getEnergyAndGradient()` + `CNCalculator::addD3CNGradient()`. D3 is
+  charge-**independent** (CN-only C6) → works for any host without charges.
+  `createForUFFD3()` exists explicitly for UFF.
+- **D4 — kernel ready, presets missing.** `curcuma::dispersion::D4Evaluator` +
+  `D4Params` (`dispersion/`, built unconditionally) is fully parameterizable
+  (`s6/s8/s9/a1/a2/alpha`, `DampingFormula::StandardBJ_D4`, ATM via
+  `computeATM`), energy+analytic gradient. But the only populated `D4Params`
+  are hardcoded GFN2/GFN-FF values in `xtb_native.cpp:1885-1889`; there are
+  **no functional presets** (no `createForPBE0-D4` etc., no dftd4 functional
+  database). D4 is charge-**dependent** (ζc6) → needs a charge source: native
+  EEQ (`D4ChargeModel`, standalone, no SCF) or host Mulliken/CPSCF.
+- **Missing glue.** `DispersionMethod` (`qm_methods/dispersion_method.cpp`)
+  routes to the **legacy** external libs (`DFTD3Interface`/s-dftd3 `USE_D3`,
+  `DFTD4Interface`/cpp-d4 `USE_D4`), NOT to the native generators.
+
+**Potential plan.**
+1. Add a native-backed dispersion add-on: either re-point `DispersionMethod`
+   at the native generators, or add a `NativeDispersionMethod` that picks
+   `D3ParameterGenerator::createForMethod(functional)` / a new
+   `D4ParameterGenerator::createForMethod(functional)` and adds `E_disp + ∇E_disp`
+   onto the host energy/gradient.
+2. D4: add functional presets (PBE0-D4, B3LYP-D4, …) or a dftd4-style
+   functional lookup table; decide charge source (EEQ default, host-Mulliken
+   opt-in). D4Evaluator already asserts on silent defaults, so presets must
+   set `D4Params` explicitly.
+3. Wire a CLI flag on UFF/HF/DFT hosts (e.g. `-disp d3bj -disp_functional b3lyp`
+   or `-d4`) that constructs the add-on and folds its contribution into
+   `calculateEnergy()`/`getGradient()`.
+4. Validate against the legacy s-dftd3/cpp-d4 paths (which remain as the
+   reference per the third-party-libs legacy status, `docs/TECHNICAL_DEBT.md`
+   §5) before deprecating them.
+
+**Closest win:** D3 + UFF — `createForUFFD3()` exists and D3 needs no charges.
 
 ## Verification
 

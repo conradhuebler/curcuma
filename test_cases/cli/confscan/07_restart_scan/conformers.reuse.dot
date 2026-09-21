@@ -1,5 +1,0 @@
-digraph graphname 
- {
-"#1" -> "#34" [style=bold,label=0.889254];
-
-}

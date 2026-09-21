@@ -1,0 +1,71 @@
+**************************************************************
+*         Curcuma - Simple Molecular Modelling tool!         *
+*                                                            *
+*                Curcuma - Version:  0.0.263                 *
+*                                                            *
+*            Written by Conrad Hübler TU Freiberg            *
+*                                                            *
+*            Visit the website for initial usage             *
+*          https://github.com/conradhuebler/curcuma          *
+*                                                            *
+*          This program comes without any warranty           *
+*               It might even be total useless               *
+*                                                            *
+*          If you obtain some usefull results with           *
+*                    curcuma, please cite                    *
+*           http://doi.org/10.5281/zenodo.4302722            *
+*                                                            *
+*                 Git Commit Hash: c4cde7f2                  *
+*                                                            *
+**************************************************************
+
+Curcuma was started as:
+[1m[38;2;144;238;144m/home/conrad/src/curcuma/release/curcuma [0m[1m[38;2;144;238;144m-md [0m[1m[38;2;144;238;144mpolymer_2x.xyz [0m[1m[38;2;144;238;144m-method [0m[1m[38;2;144;238;144mgfnff [0m[1m[38;2;144;238;144m-gpu [0m[1m[38;2;144;238;144mcuda [0m[1m[38;2;144;238;144m-threads [0m[1m[38;2;144;238;144m36 [0m[1m[38;2;144;238;144m-max_time [0m[1m[38;2;144;238;144m50 [0m[1m[38;2;144;238;144m-dt [0m[1m[38;2;144;238;144m1 [0m[1m[38;2;144;238;144m-print [0m[1m[38;2;144;238;144m10 [0m[1m[38;2;144;238;144m-dump [0m[1m[38;2;144;238;144m1000 [0m[1m[38;2;144;238;144m-no_bmt [0m[1m[38;2;144;238;144m-verbosity [0m[1m[38;2;144;238;144m1 [0m
+
+Started computation at Thu Sep 17 13:29:52 2026
+
+Energy Calculator will NOT be set up for each step! Fast energy calculation! This is the default way and should not be changed unless the energy and gradient calculation are unstable (happens with GFN2 and solvation).
+Random seed is 1789644592
+Random seed is 1789644592
+Move stucture to the origin ... 
+[38;2;255;255;255m[RESULT]COM/rot removal (mode 1): -6 DOF | effective DOF = 21954
+[0m     Time            Epot           <Epot>           Ekin           <Ekin>           Etot           <Etot>             T              <T>            Wall           <Wall>          Virial         <Virial>        Remaining          dt       
+      ps              Eh              Eh              Eh              Eh              Eh              Eh               K               K              Eh              Eh              Eh              Eh               s              ps       
+   0.000000       -898.805534     -898.805534      10.364449       10.364449      -888.441085     -888.441085     298.153841      298.153841       0.000000        0.000000        0.000000        0.000000          -nan          0.000000    
+   0.010000       -895.339418     -895.820114      9.512088        9.455061       -885.827330     -888.441085     273.633997      271.993500       0.000000        0.000000        0.000000        0.000000        1.066667        14.063000   
+   0.020000       -898.760673     -896.538205      10.978305       9.890843       -887.782368     -887.196440     315.812612      284.529635       0.000000        0.000000        0.000000        0.000000        45.000000       13.955000   
+   0.030000       -897.641067     -896.957970      10.351364       10.124223      -887.289703     -887.385449     297.777429      291.243263       0.000000        0.000000        0.000000        0.000000        29.333333       14.006000   
+   0.040000       -899.118057     -897.165721      10.858241       10.197909      -888.259816     -887.362096     312.358756      293.362980       0.000000        0.000000        0.000000        0.000000        14.500000       14.029000   
+   0.050000       -898.826444     -897.341766      10.737097       10.236667      -888.259816     -887.523686     308.873800      294.477938       0.000000        0.000000        0.000000        0.000000        0.000000        14.043000   
+Exchange with heat bath 0.175452Eh
+
+
+Finished after 82 seconds!
+Finished computation at Thu Sep 17 13:31:15 2026
+
+
+[38;2;000;128;000m===============================================================
+[0m[38;2;000;128;000m  Please cite the following references for methods used in this run:
+[0m[38;2;000;128;000m===============================================================
+[0m[38;2;000;128;000m  [CITE]  Curcuma — Molecular Modelling Toolkit
+[0m[38;2;000;128;000m          Hübler, C. Curcuma (DOI: 10.5281/zenodo.4302722)
+[0m[38;2;000;128;000m  [CITE]  GFN-FF Force Field (Spicher & Grimme 2020)
+[0m[38;2;000;128;000m          Spicher, S.; Grimme, S. Angew. Chem. Int. Ed. 2020, 59, 15665–15673 (DOI: 10.1002/anie.202004239)
+[0m[38;2;000;128;000m  [CITE]    -> DFT-D4 Dispersion Correction (Caldeweyher et al. 2017, 2019, 2020)
+[0m[38;2;000;128;000m          Caldeweyher, E.; Bannwarth, C.; Grimme, S. J. Chem. Phys. 2017, 147, 034112 (DOI: 10.1063/1.4993215)
+[0m[38;2;000;128;000m          Caldeweyher, E. et al. J. Chem. Phys. 2019, 150, 154122 (DOI: 10.1063/1.5090222)
+[0m[38;2;000;128;000m          Caldeweyher, E. et al. Phys. Chem. Chem. Phys. 2020, 22, 8499-8512 (DOI: 10.1039/D0CP00502A)
+[0m[38;2;000;128;000m  [CITE]    ->   -> Casimir-Polder Integration (Casimir & Polder 1948)
+[0m[38;2;000;128;000m          Casimir, H. B. G.; Polder, D. Phys. Rev. 1948, 73, 360–372 (DOI: 10.1103/PhysRev.73.360)
+[0m[38;2;000;128;000m  [CITE]    -> Electronegativity Equalization Method (Mortier, Ghosh, Shankar 1986)
+[0m[38;2;000;128;000m          Mortier, W. J.; Ghosh, S. K.; Shankar, S. J. Am. Chem. Soc. 1986, 108, 5708–5711 (DOI: 10.1021/ja00279a008)
+[0m[38;2;000;128;000m  [CITE]    -> Covalent Radii (Pyykko & Atsumi 2009)
+[0m[38;2;000;128;000m          Pyykko, P.; Atsumi, M. Chem. Eur. J. 2009, 15, 186-197 (DOI: 10.1002/chem.200800987)
+[0m[38;2;000;128;000m  [CITE]    -> Electronegativity Equalization Principle (Sanderson 1976)
+[0m[38;2;000;128;000m          Sanderson, R. T. Chemical Bonds and Bond Energy, Academic Press, 1976
+[0m[38;2;000;128;000m  [CITE]    -> Chemical Hardness Parameters (Ghosh & Islam 2009)
+[0m[38;2;000;128;000m          Ghosh, D. C.; Islam, N. Int. J. Quantum Chem. 2009, 109, 1435–1454 (DOI: 10.1002/qua.22202)
+[0m[38;2;000;128;000m  [CITE]  Canonical Sampling through Velocity Rescaling (Bussi et al. 2007)
+[0m[38;2;000;128;000m          Bussi, G. et al., J. Chem. Phys. 2007, 126, 014101 (DOI: 10.1063/1.2408420)
+[0m[38;2;000;128;000m===============================================================
+[0mWALL 83.07 s MAXRSS 10.85 GB GPU_PEAK_MiB {0: 2195, 1: 4, 2: 4, 3: 4} RC 0

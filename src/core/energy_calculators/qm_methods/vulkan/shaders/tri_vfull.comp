@@ -1,0 +1,25 @@
+#version 450
+// EIG-2B WY back-transform, step 1: scatter the compact Householder vectors of a panel
+// of reflectors [k0, k0+b) into a full-layout n×b matrix Vfull (column-major, ld = n).
+// The reflector v_{kc} (kc = k0+c) is stored compactly in tV column kc at offsets 0..m-1
+// (m = n-kc-1) = rows kc+1..n-1. Vfull[row, c] places it at its true row, zero elsewhere.
+// Degenerate reflectors (β = 0 → H = I) get a zero column so they drop out of the WY T and
+// the V·T·Vᵀ product. Claude Generated (EIG-2B).
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) readonly  buffer Vc { double Vcomp[]; };   // compact tV (n×n, col-major)
+layout(std430, binding = 1) writeonly buffer Vf { double Vfull[]; };   // full panel (n×b, ld=n)
+layout(std430, binding = 2) readonly  buffer Sb { double scal[]; };    // β at [2n+k]
+layout(push_constant) uniform PC { uint n; uint k0; uint b; } pc;
+
+void main()
+{
+    uint row = gl_GlobalInvocationID.x;   // 0..n-1
+    uint c   = gl_GlobalInvocationID.y;   // 0..b-1 (panel column)
+    if (row >= pc.n || c >= pc.b) return;
+    uint kc = pc.k0 + c;
+    double val = 0.0lf;
+    double beta = scal[2u * pc.n + kc];
+    if (beta != 0.0lf && row >= kc + 1u)
+        val = Vcomp[kc * pc.n + (row - kc - 1u)];
+    Vfull[row + c * pc.n] = val;
+}

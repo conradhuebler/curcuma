@@ -64,6 +64,8 @@ add_cli_test(curcumaopt 03_invalid_method)
 add_cli_test(curcumaopt 04_lbfgs_params)
 add_cli_test(curcumaopt 05_alias_singlepoint)
 add_cli_test(curcumaopt 06_opth_only)
+add_cli_test(curcumaopt 07_opt_multixyz)
+set_tests_properties(cli_curcumaopt_07_opt_multixyz PROPERTIES TIMEOUT 300 LABELS "curcumaopt;gfnff;multixyz")
 
 # =============================================================================
 # GFN-FF Tests (2 scenarios)
@@ -80,6 +82,31 @@ if(USE_CUDA)
     add_cli_test(gfnff_gpu 01_gfnff_gpu_singlepoint)
     set_tests_properties(cli_gfnff_gpu_01_gfnff_gpu_singlepoint
         PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;cli")
+endif()
+
+# ROCm GFN-FF — only when USE_ROCM=ON. Self-skips at runtime if no HIP device.
+if(USE_ROCM)
+    add_cli_test(gfnff_gpu 02_rocm_singlepoint)
+    set_tests_properties(cli_gfnff_gpu_02_rocm_singlepoint
+        PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;rocm;cli")
+endif()
+
+# =============================================================================
+# Vulkan native-xTB nuclear gradient (V-AP1) — only when USE_VULKAN=ON.
+# Self-skips at runtime if no FP64 Vulkan device is present.
+# =============================================================================
+if(USE_VULKAN)
+    add_cli_test(gpu_gradient 01_vulkan_gfn1_gradient)
+    set_tests_properties(cli_gpu_gradient_01_vulkan_gfn1_gradient
+        PROPERTIES TIMEOUT 120 LABELS "gpu_gradient;gpu;vulkan;cli")
+    # X-AP4: GFN2 D4 EEQ charge-response gradient on the device (q-response).
+    add_cli_test(gpu_gradient 02_vulkan_gfn2_qresponse)
+    set_tests_properties(cli_gpu_gradient_02_vulkan_gfn2_qresponse
+        PROPERTIES TIMEOUT 120 LABELS "gpu_gradient;gpu;vulkan;cli")
+    # V-AP2: GFN2 AO multipole integrals on the device.
+    add_cli_test(gpu_multipole 01_vulkan_gfn2_multipole)
+    set_tests_properties(cli_gpu_multipole_01_vulkan_gfn2_multipole
+        PROPERTIES TIMEOUT 120 LABELS "gpu_multipole;gpu;vulkan;cli")
 endif()
 
 # =============================================================================
@@ -105,6 +132,20 @@ add_cli_test(confscan 05_hybrid_rmsd_elements)
 add_cli_test(confscan 06_heavy_only)
 add_cli_test(confscan 07_restart_scan)
 
+# Claude Generated (June 2026): ConfScan scenarios run a real multi-pass scan over 44
+# conformers (04 runs three reorder passes; 07 runs the scan twice). The 120 s macro
+# default is tight on a loaded machine - give them headroom so a busy host doesn't cause
+# spurious timeouts.
+set_tests_properties(
+    cli_confscan_01_default_scan
+    cli_confscan_02_get_rmsd
+    cli_confscan_03_invalid_rmsd_method
+    cli_confscan_04_slx_logic
+    cli_confscan_05_hybrid_rmsd_elements
+    cli_confscan_06_heavy_only
+    cli_confscan_07_restart_scan
+    PROPERTIES TIMEOUT 300)
+
 # =============================================================================
 # SimpleMD Tests (7 scenarios)
 # =============================================================================
@@ -116,6 +157,7 @@ add_cli_test(simplemd 04_rattle_all)
 add_cli_test(simplemd 05_spheric_wall)
 add_cli_test(simplemd 06_alias_temperature)
 add_cli_test(simplemd 07_restart_simulation)
+add_cli_test(simplemd 08_cg_spheres)
 add_cli_test(simplemd 08_gfnff_acetic_acid_dimer_md)
 add_cli_test(simplemd 09_xtbgfnff_acetic_acid_dimer_md)
 add_cli_test(simplemd 10_gfnff_polymer_md)
@@ -123,7 +165,22 @@ set_tests_properties(cli_simplemd_10_gfnff_polymer_md PROPERTIES TIMEOUT 3600 LA
 add_cli_test(simplemd 11_diagnostics_dump)
 set_tests_properties(cli_simplemd_11_diagnostics_dump PROPERTIES TIMEOUT 180 LABELS "simplemd;gfnff;diagnostics")
 add_cli_test(simplemd 12_eeq_cutoff_auto)
+add_cli_test(simplemd 13_gfnff_react_noevent)
+add_cli_test(simplemd 14_gfnff_react_h_recombination)
+set_tests_properties(cli_simplemd_13_gfnff_react_noevent PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;react")
+set_tests_properties(cli_simplemd_14_gfnff_react_h_recombination PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;react")
 set_tests_properties(cli_simplemd_12_eeq_cutoff_auto PROPERTIES TIMEOUT 180 LABELS "simplemd;gfnff;eeq_cutoff")
+# Claude Generated (Jul 2026): RMSD-MTD strided-scheme regression tests (docs/RMSD_MTD_TEXTBOOK.md 6)
+add_cli_test(simplemd 13_rmsd_mtd_legacy_ab)
+set_tests_properties(cli_simplemd_13_rmsd_mtd_legacy_ab PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;rmsd_mtd")
+add_cli_test(simplemd 14_rmsd_mtd_coverage)
+set_tests_properties(cli_simplemd_14_rmsd_mtd_coverage PROPERTIES TIMEOUT 200 LABELS "simplemd;gfnff;rmsd_mtd")
+
+# =============================================================================
+# ConfSearch Tests (Claude Generated, Jul 2026)
+# =============================================================================
+add_cli_test(confsearch 01_gfnff_smoke)
+set_tests_properties(cli_confsearch_01_gfnff_smoke PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;rmsd_mtd")
 
 # =============================================================================
 # CG (Coarse Graining) Tests — disabled: -vtf command not implemented in main.cpp
@@ -146,6 +203,7 @@ set_tests_properties(cli_analysis_01_parallel_equivalence PROPERTIES TIMEOUT 120
 
 add_cli_test(routing 01_flat_param_routing)
 add_cli_test(routing 02_roundtrip_replay)
+add_cli_test(routing 03_confsearch_param_routing)   # ConfSearch registry migration guard
 
 # =============================================================================
 # Error Handling Tests (6 scenarios) - Phase 1-2 Implementation
@@ -190,6 +248,15 @@ set_tests_properties(cli_sqm_06_gfn2_extended_singlepoint PROPERTIES DISABLED TR
 set_tests_properties(cli_sqm_07_gfn1_extended_singlepoint PROPERTIES DISABLED TRUE)
 # AP3: gfn2 -opt still broken (gradient = zero), disable until AP4 restores gradient.
 set_tests_properties(cli_sqm_10_gfn2_optimization_smoke PROPERTIES DISABLED TRUE)
+
+# Claude Generated (Sep 2026): test 11 asserts `-method ipea1` routes to and matches
+# TBLite (ipea1 has no other provider, MethodFactory throws without USE_TBLITE) -
+# disable it when this build wasn't configured with TBLite, same DISABLED pattern
+# as the tests above, instead of a permanent hard failure.
+if(NOT USE_TBLITE)
+    set_tests_properties(cli_sqm_11_gfn2_provider_check PROPERTIES DISABLED TRUE)
+    message(STATUS "cli_sqm_11_gfn2_provider_check: disabled - USE_TBLITE is OFF (ipea1 has no other provider)")
+endif()
 
 # Allow the optimization test more wall-clock — caffeine -opt can run > 30 s
 # (kept for reference; test is currently DISABLED)

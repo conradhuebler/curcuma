@@ -66,7 +66,7 @@ constexpr double pCoeff3[3][15] = {
 constexpr double pAlpha4[4][15] = {
     {5.216844534e+0, 1.161525551e+1, 1.513265591e+0, 3.242212833e-1, 8.602284252e-1, 1.798260992e+0, 1.853180239e+0, 1.492607880e+0, 3.962838833e-1, 9.185846715e-1, 1.995825422e+0, 4.230617826e-1, 5.691670217e-1, 2.017831152e-1, 3.945205573e-1},
     {9.546182760e-1, 2.000243111e+0, 4.262497508e-1, 1.663217177e-1, 1.189050200e-1, 4.662622228e-1, 1.915075719e-1, 4.327619272e-1, 1.838858552e-1, 2.920461109e-1, 1.823461280e-1, 8.293863702e-2, 2.074585819e-1, 1.001952178e-1, 1.588100623e-1},
-    {2.652034102e-1, 1.607280687e-1, 7.643320863e-2, 5.081097451e-2, 3.446076176e-2, 1.643718620e-1, 8.655487938e-2, 7.553156064e-2, 4.958248334e-2, 1.187568890e-1, 8.197240896e-2, 4.590326388e-2, 9.298346885e-2, 5.447006630e-2, 7.646521729e-2},
+    {2.652034102e-1, 1.607280687e-1, 7.643320863e-2, 5.081097451e-2, 3.446076176e-2, 1.643718620e-1, 8.655487938e-2, 7.553156064e-2, 4.943555157e-2, 1.187568890e-1, 8.197240896e-2, 4.590326388e-2, 9.298346885e-2, 5.447006630e-2, 7.646521729e-2},
     {8.801862774e-2, 6.125744532e-2, 3.760545063e-2, 2.829066600e-2, 1.974798796e-2, 6.543927065e-2, 4.184253862e-2, 3.706272183e-2, 2.750222273e-2, 5.286755896e-2, 4.000634951e-2, 2.628744797e-2, 4.473508853e-2, 3.037569283e-2, 3.898703611e-2}
 };
 constexpr double pCoeff4[4][15] = {
@@ -102,13 +102,65 @@ constexpr double pAlpha5[5][15] = {
     {1.975724573e-1, 8.806345634e-2, 7.732370620e-2, 5.002110360e-2, 3.726907315e-2, 1.273309895e-1, 8.809647701e-2, 4.786503860e-2, 3.367775277e-2, 9.424112917e-2, 5.836797641e-2, 4.833708379e-2, 7.506099109e-2, 5.537913898e-2, 6.254074479e-2},
     {7.445271746e-2, 4.249068522e-2, 3.800708627e-2, 2.789361681e-2, 2.241490836e-2, 5.606243164e-2, 4.234835707e-2, 2.730479990e-2, 2.091949042e-2, 4.569058269e-2, 3.206682246e-2, 2.751899341e-2, 3.892475795e-2, 3.072866652e-2, 3.411243214e-2}
 };
+// NOTE (Claude Generated, Sep 2026): the 4f/5f/5g columns (ityp 12-14) of this
+// table were previously copied from pCoeff3 by mistake — 12 wrong values. They
+// were inert (GFN1/GFN2 use no f/g shells, and no element requests STO-5G), but
+// wrong; corrected verbatim against tblite basis/slater.f90 pCoeff5.
 constexpr double pCoeff5[5][15] = {
-    {2.214055312e-2, -1.596349096e-2, -3.920358850e-3, 1.513948997e-3, 1.375523371e-2, 2.079051117e-2, -2.329023747e-3, -1.143929558e-2, -3.113958289e-2, 2.020869128e-2, -3.673711876e-3, -3.231527611e-3, 1.999839052e-2, 1.909729355e-1, 1.780980905e-1},
-    {1.135411520e-1, -5.685884883e-2, -4.168430506e-2, -7.316801518e-2, -3.097344179e-1, 1.235472099e-1, -1.357395221e-2, -6.322651538e-2, -1.374007017e-1, 1.321157923e-1, 1.167122499e-1, -2.434931372e-2, 1.395427440e-1, 6.146060459e-1, 6.063757846e-1},
-    {3.318161484e-1, 3.698265599e-1, -1.637440990e-1, -3.143703799e-1, -3.199192259e-1, 3.667738886e-1, 2.632185383e-1, 4.398907721e-1, 5.573881018e-1, 3.911240346e-1, 4.216476416e-1, 3.440817054e-1, 4.091508237e-1, 3.059611271e-1, 3.828552923e-1},
-    {4.825700713e-1, 5.480512593e-1, 7.419373723e-1, 9.032615169e-1, 1.084547038e+0, 4.834930290e-1, 5.880427024e-1, 5.245859166e-1, 4.855428100e-1, 4.779609701e-1, 4.547673415e-1, 5.693674376e-1, 4.779609701e-1, 1.254001522e-1, 2.171122608e-1},
-    {1.935721966e-1, 1.472634893e-1, 3.724364929e-1, 3.294210848e-1, 3.345288361e-1, 1.653444074e-1, 2.242794445e-1, 1.017072253e-1, 6.605423564e-2, 1.463662294e-1, 1.037803318e-1, 1.511340183e-1, 1.463662294e-1, 5.077063693e-2, 6.974153145e-2}
+    {2.214055312e-2, -1.596349096e-2, -3.920358850e-3, 1.513948997e-3, 1.375523371e-2, 2.079051117e-2, -2.329023747e-3, -1.143929558e-2, -3.113958289e-2, 2.020869128e-2, -3.673711876e-3, -3.231527611e-3, 1.999839052e-2, -7.301193568e-4, 1.998085812e-2},
+    {1.135411520e-1, -5.685884883e-2, -4.168430506e-2, -7.316801518e-2, -3.097344179e-1, 1.235472099e-1, -1.357395221e-2, -6.322651538e-2, -1.374007017e-1, 1.321157923e-1, 1.167122499e-1, -2.434931372e-2, 1.395427440e-1, 8.414991343e-2, 1.460384050e-1},
+    {3.318161484e-1, 3.698265599e-1, -1.637440990e-1, -3.143703799e-1, -3.199192259e-1, 3.667738886e-1, 2.632185383e-1, 4.398907721e-1, 5.573881018e-1, 3.911240346e-1, 4.216476416e-1, 3.440817054e-1, 4.091508237e-1, 3.923683153e-1, 4.230565459e-1},
+    {4.825700713e-1, 5.480512593e-1, 7.419373723e-1, 9.032615169e-1, 1.084547038e+0, 4.834930290e-1, 5.880427024e-1, 5.245859166e-1, 4.855428100e-1, 4.779609701e-1, 4.547673415e-1, 5.693674376e-1, 4.708252119e-1, 5.040033146e-1, 4.635699665e-1},
+    {1.935721966e-1, 1.472634893e-1, 3.724364929e-1, 3.294210848e-1, 3.345288361e-1, 1.653444074e-1, 2.242794445e-1, 1.017072253e-1, 6.605423564e-2, 1.463662294e-1, 1.037803318e-1, 1.511340183e-1, 1.328082566e-1, 1.328979300e-1, 1.226411691e-1}
 };
+
+// --- STO-6G for the 6s and 6p shells (principal quantum number n=6), needed for
+//     5d transition metals (W, Ir, Pt: shells 5d/6s/6p). Stewart's main STO-NG
+//     tables above stop at n=5; these dedicated arrays are a verbatim port of
+//     TBLite basis/slater.f90 (pAlpha6s/pCoeff6s/pAlpha6p/pCoeff6p). Only ng=6 is
+//     supported for n=6 (matching tblite's guard n==6 .and. ng==6). Claude Generated.
+constexpr double pAlpha6s[6] = {
+    5.800292686e-1, 2.718262251e-1, 7.938523262e-2,
+    4.975088254e-2, 2.983643556e-2, 1.886067216e-2};
+constexpr double pCoeff6s[6] = {
+    4.554359511e-3, 5.286443143e-2, -7.561016358e-1,
+    -2.269803820e-1, 1.332494651e+0, 3.622518293e-1};
+constexpr double pAlpha6p[6] = {
+    6.696537714e-1, 1.395089793e-1, 8.163894960e-2,
+    4.586329272e-2, 2.961305556e-2, 1.882221321e-2};
+constexpr double pCoeff6p[6] = {
+    2.782723680e-3, -1.282887780e-1, -2.266255943e-1,
+    4.682259383e-1, 6.752048848e-1, 1.091534212e-1};
+
+// --- Legacy STO-6G 4s/4p tables (xtb's variant) -----------------------------
+// The STO-6G tables above are tblite's. xtb (src/slater.f90:286-298, 324-336)
+// still carries an OLDER 4s/4p set; each file keeps the other variant present
+// but commented out, so the two references genuinely disagree here — and only
+// here (every other n/l entry, and every other STO-NG order, is identical).
+//
+// tblite's values are the better expansion, measured against the exact Slater
+// function (L2 error of the normalized radial fit at zeta=1):
+//     4s  tblite 7.7e-5  xtb 4.1e-4       4p  tblite 1.2e-4  xtb 3.4e-4
+// for scale, the shared 3s/3p/5p entries sit at 2.0e-4 / 2.8e-4 / 6.3e-5.
+// The legacy set also gives 4s and 4p bit-identical exponents (and carries only
+// 7 significant digits against 10 everywhere else), which no genuine Stewart
+// optimisation produces — it is a stale transcription.
+//
+// curcuma therefore keeps tblite's values as the default. These arrays exist so
+// a run can be made bit-comparable to the xtb binary (-xtb.sto6g_legacy_4sp
+// true); they affect K, Ca and Ge-Kr only. Claude Generated.
+constexpr double pAlpha6_legacy_4s[6] = {
+    1.365346e+00, 4.393213e-01, 1.877069e-01,
+    9.360270e-02, 5.052263e-02, 2.809354e-02};
+constexpr double pCoeff6_legacy_4s[6] = {
+    3.775056e-03, -5.585965e-02, -3.192946e-01,
+    -2.764780e-02, 9.049199e-01, 3.406258e-01};
+constexpr double pAlpha6_legacy_4p[6] = {
+    1.365346e+00, 4.393213e-01, 1.877069e-01,
+    9.360270e-02, 5.052263e-02, 2.809354e-02};
+constexpr double pCoeff6_legacy_4p[6] = {
+    -7.052075e-03, -5.259505e-02, -3.773450e-02,
+    3.874773e-01, 5.791672e-01, 1.221817e-01};
 
 /**
  * @brief Convert an STO basis function to a contracted GTO (STO-NG expansion)
@@ -121,15 +173,39 @@ constexpr double pCoeff5[5][15] = {
  * @param l Angular momentum (0=s, 1=p, 2=d)
  * @param zeta Slater exponent
  * @param ng Number of Gaussians (3, 4, 5, or 6)
+ * @param legacy_4sp Use xtb's older STO-6G 4s/4p tables instead of tblite's
+ *                   (see pAlpha6_legacy_4s above). Default false = tblite.
  * @return CGTO Shell with normalized coefficients
  */
-inline Shell slater_to_gauss(int n, int l, double zeta, int ng)
+inline Shell slater_to_gauss(int n, int l, double zeta, int ng, bool legacy_4sp = false)
 {
     Shell s;
     s.ang = l;
     s.nprim = ng;
     s.alpha.resize(ng);
     s.coeff.resize(ng);
+
+    // n=6 (6s/6p) is absent from Stewart's STO-NG tables; use the dedicated
+    // STO-6G arrays (tblite basis/slater.f90 supports n=6 only with ng=6). This
+    // path is reached by 5d transition metals (W/Ir/Pt: shells 5d/6s/6p). Without
+    // it, nlm_to_ityp(6,0)=5 (2p slot) / nlm_to_ityp(6,1)=9 (3d slot) silently used
+    // the wrong Gaussians -> ~0.1-0.5 Eh band error per 5d atom.
+    if (n == 6 && (l == 0 || l == 1)) {
+        const double* a6 = (l == 0) ? pAlpha6s : pAlpha6p;
+        const double* c6 = (l == 0) ? pCoeff6s : pCoeff6p;
+        const double zeta2_6 = zeta * zeta;
+        s.nprim = 6;
+        s.alpha.assign(6, 0.0);
+        s.coeff.assign(6, 0.0);
+        for (int i = 0; i < 6; ++i) {
+            const double a = a6[i] * zeta2_6;
+            s.alpha[i] = a;
+            s.coeff[i] = c6[i] * std::pow(two_over_pi * a, 0.75)
+                              * std::pow(4.0 * a, 0.5 * l)
+                              / std::sqrt(dfactorial[l]);
+        }
+        return s;
+    }
 
     int ityp = nlm_to_ityp(n, l);
     if (ityp < 0 || ityp >= 15) {
@@ -160,6 +236,17 @@ inline Shell slater_to_gauss(int n, int l, double zeta, int ng)
     for (int i = 0; i < ng; ++i) {
         s.alpha[i] = alpha_table[i][ityp] * zeta2;
         s.coeff[i] = coeff_table[i][ityp];
+    }
+
+    // Opt-in: reproduce the xtb binary's older STO-6G 4s/4p contraction
+    // (ityp 3 = 4s, 7 = 4p). Only STO-6G differs between the two references.
+    if (legacy_4sp && ng == 6 && (ityp == 3 || ityp == 7)) {
+        const double* a_leg = (ityp == 3) ? pAlpha6_legacy_4s : pAlpha6_legacy_4p;
+        const double* c_leg = (ityp == 3) ? pCoeff6_legacy_4s : pCoeff6_legacy_4p;
+        for (int i = 0; i < 6; ++i) {
+            s.alpha[i] = a_leg[i] * zeta2;
+            s.coeff[i] = c_leg[i];
+        }
     }
 
     // Apply normalization (TBLite basis/slater.f90 line 504-505, norm=.true.)
@@ -298,6 +385,92 @@ inline double cgto_overlap(const Shell& shell_a, const Shell& shell_b,
 }
 
 /**
+ * @brief Shell-pair-blocked contracted overlap (B2, Jul 2026)
+ *
+ * cgto_overlap() above is called once per AO-COMPONENT pair, so a p-p shell pair
+ * runs the whole nprim_a x nprim_b primitive loop nine times, and each leaf
+ * (primitive_ss/sp/pp_overlap) recomputes gamma and
+ * S00 = pow(pi/gamma, 1.5) * exp(-ai*aj/gamma * R2) from scratch -- even though
+ * S00 depends only on the primitive pair, not on the cartesian powers. The
+ * pow() is the expensive part (a libm call per primitive pair per component).
+ *
+ * This emits the whole component block from a single pass over primitive pairs:
+ * gamma, the product centre and S00 are computed once per pair, then every
+ * component is assembled from them.
+ *
+ * Bit-identity notes (why the emitted values match the per-component path):
+ *   - gamma = ai + aj and the exponent -ai*aj/gamma*R2 are invariant under
+ *     swapping the two primitives (IEEE + and * are commutative), so the single
+ *     S00 also serves the transposed p-s branch, which passed (aj, ai).
+ *   - pow(M_PI/gamma, 1.5) is kept verbatim; rewriting it as t*sqrt(t) would
+ *     round differently.
+ *   - Px = (ai*xa + aj*xb) / gamma stays a division (cgto_overlap_grad uses
+ *     * invg instead -- a DIFFERENT rounding; do not unify the two kernels).
+ *   - ci * cj * prim already parses as (ci*cj) * prim, so hoisting cc = ci*cj
+ *     is exact, and accumulation stays i-major/j-minor.
+ * The residual difference versus the per-component path is GCC's FMA
+ * contraction, which the -mfma build enables; see the B3 commit message.
+ *
+ * Layout: component (ia, jb) at c = ia*ncb + jb, ncb = 2*ang_b + 1.
+ * s/p only (ang <= 1); d-touching pairs go through sphericalOverlapBlock().
+ */
+inline void cgto_overlap_block(const Shell& shell_a, int ang_a,
+                               const Shell& shell_b, int ang_b,
+                               double xa, double ya, double za,
+                               double xb, double yb, double zb,
+                               double* out_S)
+{
+    const int nca = 2 * ang_a + 1;
+    const int ncb = 2 * ang_b + 1;
+    for (int c = 0; c < nca * ncb; ++c) out_S[c] = 0.0;
+
+    // Local AO index -> cartesian axis, tblite p ordering [py, pz, px].
+    // axis < 0 marks an s function.
+    static const int p_axis[3] = {1, 2, 0};
+    int axa[3], axb[3];
+    for (int ia = 0; ia < nca; ++ia) axa[ia] = (ang_a == 0) ? -1 : p_axis[ia];
+    for (int jb = 0; jb < ncb; ++jb) axb[jb] = (ang_b == 0) ? -1 : p_axis[jb];
+
+    const double dx = xb - xa, dy = yb - ya, dz = zb - za;   // as in cgto_overlap
+    const double R2 = dx * dx + dy * dy + dz * dz;
+
+    for (int i = 0; i < shell_a.nprim; ++i) {
+        const double ai = shell_a.alpha[i];
+        const double ci = shell_a.coeff[i];
+        for (int j = 0; j < shell_b.nprim; ++j) {
+            const double aj = shell_b.alpha[j];
+            const double cj = shell_b.coeff[j];
+
+            const double gamma = ai + aj;
+            const double Px = (ai * xa + aj * xb) / gamma;
+            const double Py = (ai * ya + aj * yb) / gamma;
+            const double Pz = (ai * za + aj * zb) / gamma;
+            const double S00 = std::pow(M_PI / gamma, 1.5)
+                             * std::exp(-ai * aj / gamma * R2);
+
+            const double PA[3] = {Px - xa, Py - ya, Pz - za};
+            const double PB[3] = {Px - xb, Py - yb, Pz - zb};
+            const double half_inv_g = 0.5 / gamma;
+            const double cc = ci * cj;
+
+            for (int ia = 0; ia < nca; ++ia) {
+                const int aa = axa[ia];
+                for (int jb = 0; jb < ncb; ++jb) {
+                    const int ab = axb[jb];
+                    double v;
+                    if (aa < 0 && ab < 0)        v = S00;                       // s-s
+                    else if (aa < 0)             v = S00 * PB[ab];              // s-p
+                    else if (ab < 0)             v = S00 * PA[aa];              // p-s
+                    else if (aa == ab)           v = S00 * (PA[aa] * PB[ab] + half_inv_g);
+                    else                         v = S00 * PA[aa] * PB[ab];
+                    out_S[ia * ncb + jb] += cc * v;
+                }
+            }
+        }
+    }
+}
+
+/**
  * @brief Gram-Schmidt orthogonalize shell_b to shell_a (same angular momentum)
  *
  * TBLite basis/ortho.f90: When an atom has two shells with the same angular momentum
@@ -349,6 +522,228 @@ inline void orthogonalize(const Shell& shell_a, Shell& shell_b)
     double inv_sqrt_norm = 1.0 / std::sqrt(norm);
     for (int i = 0; i < shell_b.nprim; ++i) {
         shell_b.coeff[i] *= inv_sqrt_norm;
+    }
+}
+
+
+/**
+ * @brief Per-primitive-pair scalars shared by every AO component of a shell pair
+ *
+ * B8 (Jul 2026). cgto_overlap_grad() is called once per AO-COMPONENT pair, so a
+ * p-p shell pair re-ran the nprim_a x nprim_b primitive loop nine times and with
+ * it the libm pow() + exp() in S00 -- even though none of these scalars depend on
+ * type_a/type_b. Build them once per shell pair and pass them in.
+ *
+ * NOTE the deliberate asymmetry with cgto_overlap_block(): this kernel forms the
+ * product centre as (ai*xa + aj*xb) * invg, i.e. multiply-by-reciprocal, whereas
+ * the energy kernel divides by gamma. Those round differently, so the two are
+ * kept separate on purpose - do not "unify" them.
+ */
+struct OverlapPrimPair {
+    double ai;      // exponent on centre A (needed by the Obara-Saika 2*alpha term)
+    double fac;     // ci * cj
+    double invg;    // 1 / (ai + aj)
+    double Px, Py, Pz;
+    double PAx, PAy, PAz;
+    double PBx, PBy, PBz;
+    double S00;     // pow(pi*invg, 1.5) * exp(-ai*aj*invg*R2)
+    double h;       // 0.5 * invg
+};
+
+/// Upper bound on nprim for one shell. STO-NG gives at most 6, but
+/// orthogonalize() APPENDS the partner shell's primitives when an atom carries
+/// two shells of the same angular momentum (GFN1 hydrogen: 1s + 2s), so a
+/// contracted shell can reach 12. Pair capacity is therefore 12*12.
+inline constexpr int kMaxPrimPerShell = 12;
+inline constexpr int kMaxPrimPairs    = kMaxPrimPerShell * kMaxPrimPerShell;
+
+/// Fill `out` (capacity >= kMaxPrimPairs) and return the count, or -1 if the
+/// shell pair exceeds the capacity (caller must fall back to cgto_overlap_grad).
+inline int buildOverlapPrimPairs(const Shell& shell_a, const Shell& shell_b,
+                                 double xa, double ya, double za,
+                                 double xb, double yb, double zb,
+                                 OverlapPrimPair* out)
+{
+    if (shell_a.nprim * shell_b.nprim > kMaxPrimPairs) return -1;
+    const double dx = xb - xa, dy = yb - ya, dz = zb - za;
+    const double R2 = dx*dx + dy*dy + dz*dz;
+
+    int n = 0;
+    for (int ip = 0; ip < shell_a.nprim; ++ip) {
+        const double ai = shell_a.alpha[ip];
+        const double ci = shell_a.coeff[ip];
+        for (int jp = 0; jp < shell_b.nprim; ++jp) {
+            const double aj = shell_b.alpha[jp];
+            const double cj = shell_b.coeff[jp];
+            OverlapPrimPair& q = out[n++];
+            q.ai   = ai;
+            q.fac  = ci * cj;
+            const double g = ai + aj;
+            q.invg = 1.0 / g;
+            q.Px   = (ai*xa + aj*xb) * q.invg;
+            q.Py   = (ai*ya + aj*yb) * q.invg;
+            q.Pz   = (ai*za + aj*zb) * q.invg;
+            q.PAx  = q.Px - xa; q.PAy = q.Py - ya; q.PAz = q.Pz - za;
+            q.PBx  = q.Px - xb; q.PBy = q.Py - yb; q.PBz = q.Pz - zb;
+            q.S00  = std::pow(M_PI * q.invg, 1.5) * std::exp(-ai*aj * q.invg * R2);
+            q.h    = 0.5 * q.invg;
+        }
+    }
+    return n;
+}
+
+/**
+ * @brief Overlap gradient dS/dA for one AO component, from precomputed pair data
+ *
+ * Body is the primitive-loop interior of cgto_overlap_grad() verbatim; only the
+ * per-pair setup is replaced by reads from `pp`.
+ */
+inline void cgto_overlap_grad_pre(const OverlapPrimPair* pp, int npp,
+                                  int type_a, int type_b,
+                                  double grad[3])
+{
+    grad[0] = grad[1] = grad[2] = 0.0;
+    if (type_a > 3 || type_b > 3) return;   // d-type or higher: gradient = 0
+
+    const int nk[3] = { (type_a == 1) ? 1 : 0,
+                        (type_a == 2) ? 1 : 0,
+                        (type_a == 3) ? 1 : 0 };
+
+    for (int k_pp = 0; k_pp < npp; ++k_pp) {
+        const double ai   = pp[k_pp].ai;
+        const double fac  = pp[k_pp].fac;
+        const double invg = pp[k_pp].invg;
+        const double PAx = pp[k_pp].PAx, PAy = pp[k_pp].PAy, PAz = pp[k_pp].PAz;
+        const double PBx = pp[k_pp].PBx, PBy = pp[k_pp].PBy, PBz = pp[k_pp].PBz;
+        const double S00 = pp[k_pp].S00;
+        const double h   = pp[k_pp].h;
+
+        // Raised primitive overlaps: (type_a_raised_k | type_b) for k=x,y,z
+        double Sr[3];
+
+        // -------- type_a = 0 (s on A) ---------
+        if (type_a == 0) {
+            // raise s→p_k;  (p_k | type_b)
+            if (type_b == 0) {
+                Sr[0] = PAx * S00;
+                Sr[1] = PAy * S00;
+                Sr[2] = PAz * S00;
+            } else if (type_b == 1) {   // px
+                Sr[0] = (PAx*PBx + h) * S00;
+                Sr[1] = PAy * PBx * S00;
+                Sr[2] = PAz * PBx * S00;
+            } else if (type_b == 2) {   // py
+                Sr[0] = PAx * PBy * S00;
+                Sr[1] = (PAy*PBy + h) * S00;
+                Sr[2] = PAz * PBy * S00;
+            } else {                    // pz
+                Sr[0] = PAx * PBz * S00;
+                Sr[1] = PAy * PBz * S00;
+                Sr[2] = (PAz*PBz + h) * S00;
+            }
+        }
+        // -------- type_a = 1 (px on A) ---------
+        else if (type_a == 1) {
+            if (type_b == 0) {
+                // raise x: (d_xx|s);  raise y: (d_xy|s);  raise z: (d_xz|s)
+                Sr[0] = (PAx*PAx + h) * S00;
+                Sr[1] = PAx * PAy * S00;
+                Sr[2] = PAx * PAz * S00;
+            } else if (type_b == 1) {   // px
+                // raise x: (d_xx|px) — N_x^a=1,N_x^b=1
+                // = PAx*(PAx*PBx+h)*S00 + h*(PBx+PAx)*S00
+                Sr[0] = (PAx*PAx*PBx + PAx*invg + PBx*h) * S00;
+                // raise y: (d_xy|px) — N_y^a=0,N_y^b=0
+                Sr[1] = PAy * (PAx*PBx + h) * S00;
+                // raise z: (d_xz|px) — N_z^a=0,N_z^b=0
+                Sr[2] = PAz * (PAx*PBx + h) * S00;
+            } else if (type_b == 2) {   // py
+                // raise x: (d_xx|py) — N_x^a=1,N_x^b=0
+                Sr[0] = (PAx*PAx + h) * PBy * S00;
+                // raise y: (d_xy|py) — N_y^a=0,N_y^b=1
+                Sr[1] = PAx * (PAy*PBy + h) * S00;
+                // raise z: (d_xz|py) — N_z^a=0,N_z^b=0
+                Sr[2] = PAz * PAx * PBy * S00;
+            } else {                    // pz
+                // raise x: (d_xx|pz) — N_x^a=1,N_x^b=0
+                Sr[0] = (PAx*PAx + h) * PBz * S00;
+                // raise y: (d_xy|pz) — N_y^a=0,N_y^b=0
+                Sr[1] = PAy * PAx * PBz * S00;
+                // raise z: (d_xz|pz) — N_z^a=0,N_z^b=1
+                Sr[2] = PAx * (PAz*PBz + h) * S00;
+            }
+        }
+        // -------- type_a = 2 (py on A) ---------
+        else if (type_a == 2) {
+            if (type_b == 0) {
+                Sr[0] = PAy * PAx * S00;
+                Sr[1] = (PAy*PAy + h) * S00;
+                Sr[2] = PAy * PAz * S00;
+            } else if (type_b == 1) {   // px
+                // raise x: (d_xy|px) — N_x^a=0,N_x^b=1
+                Sr[0] = PAy * (PAx*PBx + h) * S00;
+                // raise y: (d_yy|px) — N_y^a=1,N_y^b=0
+                Sr[1] = (PAy*PAy + h) * PBx * S00;
+                // raise z: (d_yz|px) — N_z^a=0,N_z^b=0
+                Sr[2] = PAz * PAy * PBx * S00;
+            } else if (type_b == 2) {   // py
+                // raise x: (d_xy|py) — N_x^a=0,N_x^b=0
+                Sr[0] = PAx * (PAy*PBy + h) * S00;
+                // raise y: (d_yy|py) — N_y^a=1,N_y^b=1
+                Sr[1] = (PAy*PAy*PBy + PAy*invg + PBy*h) * S00;
+                // raise z: (d_yz|py) — N_z^a=0,N_z^b=0
+                Sr[2] = PAz * (PAy*PBy + h) * S00;
+            } else {                    // pz
+                // raise x: (d_xy|pz) — N_x^a=0,N_x^b=0
+                Sr[0] = PAx * PAy * PBz * S00;
+                // raise y: (d_yy|pz) — N_y^a=1,N_y^b=0
+                Sr[1] = (PAy*PAy + h) * PBz * S00;
+                // raise z: (d_yz|pz) — N_z^a=0,N_z^b=1
+                Sr[2] = PAy * (PAz*PBz + h) * S00;
+            }
+        }
+        // -------- type_a = 3 (pz on A) ---------
+        else {   // type_a == 3
+            if (type_b == 0) {
+                Sr[0] = PAz * PAx * S00;
+                Sr[1] = PAz * PAy * S00;
+                Sr[2] = (PAz*PAz + h) * S00;
+            } else if (type_b == 1) {   // px
+                // raise x: (d_xz|px) — N_x^a=0,N_x^b=1
+                Sr[0] = PAz * (PAx*PBx + h) * S00;
+                // raise y: (d_yz|px) — N_y^a=0,N_y^b=0
+                Sr[1] = PAy * PAz * PBx * S00;
+                // raise z: (d_zz|px) — N_z^a=1,N_z^b=0
+                Sr[2] = (PAz*PAz + h) * PBx * S00;
+            } else if (type_b == 2) {   // py
+                // raise x: (d_xz|py) — N_x^a=0,N_x^b=0
+                Sr[0] = PAx * PAz * PBy * S00;
+                // raise y: (d_yz|py) — N_y^a=0,N_y^b=1
+                Sr[1] = PAz * (PAy*PBy + h) * S00;
+                // raise z: (d_zz|py) — N_z^a=1,N_z^b=0
+                Sr[2] = (PAz*PAz + h) * PBy * S00;
+            } else {                    // pz
+                // raise x: (d_xz|pz) — N_x^a=0,N_x^b=0
+                Sr[0] = PAx * (PAz*PBz + h) * S00;
+                // raise y: (d_yz|pz) — N_y^a=0,N_y^b=0
+                Sr[1] = PAy * (PAz*PBz + h) * S00;
+                // raise z: (d_zz|pz) — N_z^a=1,N_z^b=1
+                Sr[2] = (PAz*PAz*PBz + PAz*invg + PBz*h) * S00;
+            }
+        }
+
+        // Lowered primitive overlap: (s | type_b) — non-zero only when n_k > 0
+        double S_s_b = 0.0;
+        if (type_a >= 1) {   // p-type: lower gives s
+            if      (type_b == 0) S_s_b = S00;
+            else if (type_b == 1) S_s_b = PBx * S00;
+            else if (type_b == 2) S_s_b = PBy * S00;
+            else                  S_s_b = PBz * S00;
+        }
+
+        // Obara-Saika:  dS/dA_k = 2α * S_raised_k - n_k * S_lower_k
+        for (int k = 0; k < 3; ++k)
+            grad[k] += fac * (2.0 * ai * Sr[k] - nk[k] * S_s_b);
     }
 }
 

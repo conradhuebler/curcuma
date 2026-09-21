@@ -42,6 +42,16 @@ bool GFNFFComputationalMethod::setMolecule(const Mol& mol) {
         return false;
     }
 
+    // F-Q4 (Claude Generated): refuse a topology built on EEQ placeholder charges
+    // instead of letting a wrong Coulomb energy/gradient propagate silently.
+    if (m_gfnff->eeqSolveFailed()) {
+        m_has_error = true;
+        m_error_message = "GFN-FF EEQ solver fell back to placeholder charges during "
+                          "topology setup; refusing to return an energy built on wrong charges";
+        CurcumaLogger::error(m_error_message);
+        return false;
+    }
+
     return true;
 }
 
@@ -70,6 +80,16 @@ double GFNFFComputationalMethod::calculateEnergy(bool gradient) {
 
     m_last_energy = m_gfnff->Calculation(gradient);
 
+    // F-Q4 (Claude Generated): a per-step EEQ fallback (opt/MD) means the charges — and
+    // hence the Coulomb energy/gradient — are wrong. Flag it so EnergyCalculator refuses
+    // the result instead of feeding E to an optimiser/integrator.
+    if (m_gfnff->eeqSolveFailed()) {
+        m_has_error = true;
+        m_error_message = "GFN-FF EEQ solver fell back to placeholder charges; the Coulomb "
+                          "energy/gradient is unreliable";
+        CurcumaLogger::error(m_error_message);
+    }
+
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success("GFNFFComputationalMethod::calculateEnergy complete");
         CurcumaLogger::energy_abs(m_last_energy, "GFN-FF Energy");
@@ -79,7 +99,24 @@ double GFNFFComputationalMethod::calculateEnergy(bool gradient) {
 }
 
 Matrix GFNFFComputationalMethod::getGradient() const {
-    return m_gfnff->Gradient();
+    // The unit contract of ComputationalMethod::getGradient() is Eh/Angstrom: the
+    // native xTB path converts explicitly (xtb_native.cpp:1480, "m_gradient /= au")
+    // and every consumer — SimpleMD's Verlet integrator, the LBFGS interfaces, the
+    // finite-difference Hessian — takes the returned matrix raw, with coordinates in
+    // Angstrom. GFN-FF works internally in Bohr like its Fortran reference, so the
+    // conversion has to happen here. It was missing (Claude Generated fix, Sep 2026).
+    //
+    // Consequence while it was missing: MD forces were a factor 1/au = 1.8897 too
+    // small. The signature was an NVE total-energy drift INDEPENDENT of the time
+    // step — 3.4e-3 Eh on CH4 over 500 fs at dt = 0.5, 0.25 and 0.125 fs alike —
+    // where gfn2 on the same system drifts with dt^2 as an integrator should. After
+    // the fix GFN-FF drifts 7.6e-5 / 1.9e-5 / 5.0e-6 Eh at those three step sizes
+    // (ratios 4.0 and 3.8), matching gfn2's 7.7e-5 / 2.2e-5 / 6.0e-6.
+    //
+    // Energies were never affected, and neither were optimised geometries: a uniform
+    // scale on the gradient does not move a stationary point (it does change how soon
+    // a gradient-norm convergence test fires, so optimiser step counts shift).
+    return m_gfnff->Gradient() / au;
 }
 
 Vector GFNFFComputationalMethod::getCharges() const {

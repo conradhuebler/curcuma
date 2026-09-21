@@ -547,7 +547,14 @@ Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates
     // The B matrix is dimensionless (eigenvectors), so g_int = B^T · g_cart_ang
     // inherits the Eh/Ang unit.  With H [Eh/Ang²] and g [Eh/Ang], the Newton
     // step p/s has units Ang — consistent with ANC coordinates stored in Ang.
-    const Vector gradient_ang = gradient * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
+    // Claude Generated 2026 - Interactive force injection (mouse grab): add the
+    // external bias (Cartesian Eh/Bohr, atom-major) to the Cartesian gradient
+    // before it is transformed into ANC internal coordinates. A zeroed/empty
+    // bias is a no-op (size mismatch), so non-interactive runs are unaffected.
+    Vector gradient_cart = gradient;
+    if (m_external_forces.size() == gradient_cart.size())
+        gradient_cart += m_external_forces;
+    const Vector gradient_ang = gradient_cart * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
     m_gint_old = m_gint;
     m_gint = m_anc->transformGradientToInternal(gradient_ang);
     m_gnorm_old = m_gnorm;

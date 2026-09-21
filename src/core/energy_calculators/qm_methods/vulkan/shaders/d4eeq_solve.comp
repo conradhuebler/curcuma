@@ -1,0 +1,39 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : enable
+// Dense solve M·x = b for the D4 EEQ augmented system, FP64, ONE workgroup (no cross-group sync).
+// Gaussian elimination WITHOUT pivoting + back substitution: the EEQ matrix is a positive-definite
+// hardness/screened-Coulomb block A plus the charge-constraint border, so every pivot is non-zero
+// without row swaps (the host/ROCm use partial-pivoted LU; the no-pivot factor agrees to rounding
+// for this structure). M (m·m col-major) is destroyed in place; b (m) is overwritten with x.
+// Forward elimination parallelises the trailing rows over the 256 lanes (inner column loop serial
+// per lane); back substitution is the sequential dependency chain on lane 0. Claude Generated.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Mb { double M[]; };   // m·m col-major (LU in place, destroyed)
+layout(std430, binding = 1) buffer Xb { double x[]; };   // m: in = b, out = solution
+layout(push_constant) uniform PC { uint m; } pc;
+
+void main()
+{
+    uint lane = gl_LocalInvocationID.x;
+    uint m = pc.m;
+    // Forward elimination: for each pivot column k, eliminate rows i>k.
+    for (uint k = 0u; k < m; ++k) {
+        double pivot = M[k + k * m];
+        for (uint i = k + 1u + lane; i < m; i += 256u) {
+            double f = M[i + k * m] / pivot;
+            for (uint j = k + 1u; j < m; ++j)
+                M[i + j * m] -= f * M[k + j * m];
+            x[i] -= f * x[k];
+        }
+        barrier();
+    }
+    // Back substitution: x[i] = (x[i] − Σ_{j>i} M[i,j]·x[j]) / M[i,i], descending i (serial).
+    if (lane == 0u) {
+        for (int i = int(m) - 1; i >= 0; --i) {
+            double s = x[i];
+            for (uint j = uint(i) + 1u; j < m; ++j)
+                s -= M[uint(i) + j * m] * x[j];
+            x[i] = s / M[uint(i) + uint(i) * m];
+        }
+    }
+}

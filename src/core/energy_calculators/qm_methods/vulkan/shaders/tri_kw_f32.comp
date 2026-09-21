@@ -1,0 +1,30 @@
+#version 450
+// Householder tridiagonalization, step k: finish the trailing-block update vector w on the
+// GPU (EIG-1 — replaces the host pᵀv reduction + w build between tri_matvec and tri_rank2).
+// ONE workgroup: a shared-memory tree reduces pᵀv (p = praw = A_sub·v, already on device),
+// then w[i] = β·praw[i] − K·v[i] with K = β²·(pᵀv)/2. β read from scal[2n+k]. Claude
+// Generated (EIG-1).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer Pb { float praw[]; };
+layout(std430, binding = 1) readonly  buffer Vb { float V[]; };     // Householder vec col k
+layout(std430, binding = 2) readonly  buffer Sb { float scal[]; };  // β at [2n+k]
+layout(std430, binding = 3) writeonly buffer Wb { float w[]; };
+layout(push_constant) uniform PC { uint n; uint k; uint m; } pc;
+
+shared float red[256];
+shared float Ksh;
+
+void main()
+{
+    uint n = pc.n, k = pc.k, m = pc.m, col = k * n;
+    uint lane = gl_LocalInvocationID.x;
+    float beta = scal[2u * n + k];
+    float s = 0.0;
+    for (uint i = lane; i < m; i += 256u) s += praw[i] * V[col + i];
+    red[lane] = s; barrier();
+    for (uint t = 128u; t > 0u; t >>= 1u) { if (lane < t) red[lane] += red[lane + t]; barrier(); }
+    if (lane == 0u) Ksh = beta * beta * red[0] * 0.5;
+    barrier();
+    float K = Ksh;
+    for (uint i = lane; i < m; i += 256u) w[i] = beta * praw[i] - K * V[col + i];
+}

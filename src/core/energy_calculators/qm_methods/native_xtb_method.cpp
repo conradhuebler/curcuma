@@ -55,6 +55,11 @@ json NativeXtbMethod::getDefaultConfig(MethodType method)
         { "scf_damping", 0.4 },          // Density damping factor
         { "scf_mode", "broyden" },       // broyden(default) | diis | plain | level-shift
         { "scf_guess", "eeq" },          // Initial charge guess: eeq(default) | h0
+        { "sto6g_legacy_4sp", false },   // false(default) = tblite's STO-6G 4s/4p tables;
+                                         // true = xtb's older ones (K, Ca, Ge-Kr only).
+                                         // The two references disagree here and nowhere
+                                         // else; tblite's fit the exact Slater function
+                                         // better. See STO_CGTO.hpp.
         { "eigensolver", "mkl" },        // Eigensolve backend: mkl(default, dsyevd) | native/dnc
                                          // (self-contained Householder+QL, no LAPACK; WP4)
                                          // eeq seeds shell charges from a single-shot dftd4 EEQ
@@ -77,7 +82,7 @@ json NativeXtbMethod::getDefaultConfig(MethodType method)
         cfg["dispersion"] = "d3";        // GFN1: D3(BJ)
     } else {
         cfg["dispersion"] = "d4";        // GFN2: D4
-        cfg["d4_charge_source"] = "eeq"; // D4 zeta charges: "eeq" | "mulliken"
+        cfg["d4_charge_source"] = "mulliken"; // D4 q-response: "mulliken"(variational, exact) | "eeq" | "cpscf"
         cfg["save_orbitals"] = false;
     }
     return cfg;
@@ -87,15 +92,16 @@ void NativeXtbMethod::applyConfig()
 {
     if (!m_xtb) return;
 
-    // D4 charge-response source ("eeq" default, or "mulliken" via CPSCF). The CLI
-    // flag -d4_charge_source auto-routes to the "xtb" scope; fall back to a
-    // top-level key, then the default. No-op for GFN1 (D3 ignores it).
-    std::string d4src = "eeq";
+    // D4 charge-response source (default "mulliken" = variational charge-Pulay, exact;
+    // "eeq" = single-shot EEQ, approximate; "cpscf" = explicit Z-vector solve). The CLI
+    // flag -d4_charge_source auto-routes to the "xtb" scope; fall back to a top-level
+    // key, then the default. No-op for GFN1 (D3 ignores it).
+    std::string d4src = "mulliken";
     if (m_parameters.contains("xtb") && m_parameters["xtb"].is_object()
         && m_parameters["xtb"].contains("d4_charge_source"))
         d4src = m_parameters["xtb"]["d4_charge_source"].get<std::string>();
     else
-        d4src = m_parameters.value("d4_charge_source", std::string("eeq"));
+        d4src = m_parameters.value("d4_charge_source", std::string("mulliken"));
     m_xtb->setD4ChargeSource(d4src);
 
     // SCF-convergence settings (mode, guess, damping, DIIS, level shift) from the
@@ -195,7 +201,10 @@ bool NativeXtbMethod::setMolecule(const Mol& mol)
         m_c1_driver.reset();
 
         if (!m_xtb->QMInterface::InitialiseMolecule(mol)) {
-            handleError("molecule initialization");
+            // Surface the engine's specific reason (e.g. unsupported d-shell element)
+            // rather than a generic message. Claude Generated.
+            handleError(m_xtb->hasError() ? m_xtb->errorMessage()
+                                          : std::string("molecule initialization"));
             return false;
         }
         return true;
@@ -269,6 +278,16 @@ double NativeXtbMethod::calculateEnergy(bool gradient)
 
         m_last_energy = m_xtb->Calculation(gradient);
         m_calculation_done = true;
+
+        // Fail-loud (Claude Generated): a genuine solve breakdown (singular overlap,
+        // eigensolver/density failure, NaN) must not be reported as a valid E=0. The
+        // engine sets a hard-error flag distinct from benign max-iter non-convergence;
+        // surface it so EnergyCalculator refuses the result instead of handing E=0 to
+        // an optimiser/MD.
+        if (m_xtb->hasError()) {
+            handleError(m_xtb->errorMessage());
+            return 0.0;
+        }
 
         if (m_parameters.value("print_orbitals", false)
             && CurcumaLogger::get_verbosity() >= 2) {

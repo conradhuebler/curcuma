@@ -1,0 +1,110 @@
+**************************************************************
+*         Curcuma - Simple Molecular Modelling tool!         *
+*                                                            *
+*                Curcuma - Version:  0.0.263                 *
+*                                                            *
+*            Written by Conrad Hübler TU Freiberg            *
+*                                                            *
+*            Visit the website for initial usage             *
+*          https://github.com/conradhuebler/curcuma          *
+*                                                            *
+*          This program comes without any warranty           *
+*               It might even be total useless               *
+*                                                            *
+*          If you obtain some usefull results with           *
+*                    curcuma, please cite                    *
+*           http://doi.org/10.5281/zenodo.4302722            *
+*                                                            *
+*                 Git Commit Hash: c4cde7f2                  *
+*                                                            *
+**************************************************************
+
+Curcuma was started as:
+[1m[38;2;144;238;144m/home/conrad/src/curcuma/release/curcuma [0m[1m[38;2;144;238;144m-sp [0m[1m[38;2;144;238;144mpolymer.xyz [0m[1m[38;2;144;238;144m-method [0m[1m[38;2;144;238;144mgfn1 [0m[1m[38;2;144;238;144m-gpu [0m[1m[38;2;144;238;144mnone [0m[1m[38;2;144;238;144m-threads [0m[1m[38;2;144;238;144m36 [0m[1m[38;2;144;238;144m-no_bmt [0m[1m[38;2;144;238;144m-verbosity [0m[1m[38;2;144;238;144m2 [0m
+
+Started computation at Thu Sep 17 13:15:48 2026
+
+        Initializing EnergyCalculator (ConfigManager)
+[38;2;100;149;237m[PARAM] method: gfn1
+[0m[38;2;100;149;237m[PARAM] geometry_file: polymer.xyz
+[0m[38;2;100;149;237m[PARAM] multiplicity: 1
+[0m        Creating computational method
+[38;2;100;149;237m[PARAM] requested_method: gfn1
+[0m        Calling MethodFactory::create...
+        MethodFactory::create called
+[38;2;100;149;237m[PARAM] requested_method: gfn1
+[0m[38;2;100;149;237m[PARAM] normalized_method: gfn1
+[0m        GFN1: using native xTB implementation
+        gfn1 initialized (native xTB)
+[38;2;050;205;050m[OK]    EnergyCalculator initialized successfully
+[0m[38;2;100;149;237m[PARAM] actual_method: gfn1
+[0m        Setting molecule in EnergyCalculator
+[38;2;100;149;237m[PARAM] atoms: 1410
+[0m[38;2;100;149;237m[PARAM] charge: 0
+[0m[38;2;100;149;237m[PARAM] spin: 0
+[0m[38;2;050;205;050m[OK]    Molecule set: 1410 atoms, method: gfn1
+[0m        Starting energy calculation
+[38;2;100;149;237m[PARAM] gradient: false
+[0m[38;2;100;149;237m[PARAM] method: gfn1
+[0m[38;2;000;255;255m=======================
+[0m[38;2;000;255;255m  native-gfn1-xtb SCF
+[0m[38;2;000;255;255m=======================
+[0m[38;2;100;149;237m[PARAM] atoms: 1410
+[0m[38;2;100;149;237m[PARAM] shells: 2820
+[0m[38;2;100;149;237m[PARAM] basis_fns: 4028
+[0m[38;2;100;149;237m[PARAM] electrons: 3626
+[0m[38;2;255;255;255m[RESULT]SCF iterations (mode=broyden, guess=eeq):
+[0m[38;2;255;255;255m[RESULT]  iter             E(SCC)/Eh            dE        max|dq|     t/ms
+[0m[38;2;255;255;255m[RESULT]SCF initial guess: single-shot EEQ shell charges
+[0m[38;2;255;255;255m[RESULT]     0     -2237.9551129241     0.00e+00     1.02e+00   5832.4
+[0m[38;2;255;255;255m[RESULT]     1     -2242.1918197697     4.24e+00     5.55e-01   5699.4
+[0m[38;2;255;255;255m[RESULT]     2     -2242.1943551171     2.54e-03     1.08e-01   5651.4
+[0m[38;2;255;255;255m[RESULT]     3     -2242.2265206640     3.22e-02     5.41e-03   5689.0
+[0m[38;2;255;255;255m[RESULT]     4     -2242.2267755854     2.55e-04     2.43e-03   5712.2
+[0m[38;2;255;255;255m[RESULT]     5     -2242.2267869439     1.14e-05     8.62e-04   5734.2
+[0m[38;2;255;255;255m[RESULT]     6     -2242.2266202533     1.67e-04     1.79e-04   3630.8
+[0m[38;2;255;255;255m[RESULT]     7     -2242.2266203015     4.82e-08     4.18e-05   3599.7
+[0m[38;2;255;255;255m[RESULT]     8     -2242.2266203040     2.42e-09     1.09e-05   3582.9
+[0m[38;2;255;255;255m[RESULT]     9     -2242.2266203041     1.66e-10     2.73e-06   3613.4
+[0m[38;2;050;205;050m[OK]    SCF converged in 10 iterations (48746.2 ms)
+[0m        Energy decomposition:
+          Electronic   = -2242.22662030 Eh
+          Coulomb ES2  =  7.74329478 Eh
+          Third-order  =  0.11499507 Eh
+          Free E (-TS) =  0.00000000 Eh (folded into Electronic)
+          Repulsion    =  12.99545509 Eh
+          Halogen bond =  0.00000000 Eh
+          Dispersion   = -1.41043745 Eh
+[38;2;255;255;255m[RESULT]  Total        = -2230.64160266 Eh
+[0m        HOMO = -0.324341 Eh   LUMO = -0.178882 Eh   gap = 3.9581 eV
+        Timing breakdown:
+          setup        :  1592.69 ms
+          SCF ( 10 it) : 48746.16 ms
+          post-SCF E   :   195.09 ms
+          TOTAL        : 50643.63 ms
+[38;2;100;149;237m[ENERGY]gfn1 Final Energy: -2230.64160266 Eh
+[0m
+Charge 0 Spin 0
+Single Point Energy = -2230.64160266 Eh
+
+
+Finished after 50 seconds!
+Finished computation at Thu Sep 17 13:16:39 2026
+
+
+[38;2;000;128;000m===============================================================
+[0m[38;2;000;128;000m  Please cite the following references for methods used in this run:
+[0m[38;2;000;128;000m===============================================================
+[0m[38;2;000;128;000m  [CITE]  Curcuma — Molecular Modelling Toolkit
+[0m[38;2;000;128;000m          Hübler, C. Curcuma (DOI: 10.5281/zenodo.4302722)
+[0m[38;2;000;128;000m  [CITE]  Extended Tight-Binding (Bannwarth et al. 2020)
+[0m[38;2;000;128;000m          Bannwarth, C. et al., WIREs Comput. Mol. Sci. 2020, 10, e01493 (DOI: 10.1002/wcms.1493)
+[0m[38;2;000;128;000m  [CITE]    -> GFN1-xTB (Grimme, Bannwarth, Shushkov 2017)
+[0m[38;2;000;128;000m          Grimme, S.; Bannwarth, C.; Shushkov, P. J. Chem. Theory Comput. 2017, 13, 1989-2009 (DOI: 10.1021/acs.jctc.7b00118)
+[0m[38;2;000;128;000m  [CITE]    ->   -> DFT-D3 Dispersion Correction (Grimme et al. 2010)
+[0m[38;2;000;128;000m          Grimme, S. et al., J. Chem. Phys. 2010, 132, 154104 (DOI: 10.1063/1.3382344)
+[0m[38;2;000;128;000m  [CITE]    ->   -> Direct Inversion in the Iterative Subspace (Pulay 1980)
+[0m[38;2;000;128;000m          Pulay, P. Chem. Phys. Lett. 1980, 73, 393–398 (DOI: 10.1016/0009-2614(80)80396-4)
+[0m[38;2;000;128;000m===============================================================
+[0m        BibTeX written to: curcuma_citations.bib
+WALL 50.87 s MAXRSS 1.77 GB GPU_PEAK_MiB {0: 12629, 1: 9385, 2: 9761, 3: 10363} RC 0

@@ -675,6 +675,17 @@ double LBFGS::getEnergyGradient(const Vector& x)
         m_gradient[3 * i + 1] = gradient(i, 1) * (m_constraints[i]);
         m_gradient[3 * i + 2] = gradient(i, 2) * (m_constraints[i]);
     }
+    // Claude Generated 2026 - Interactive force injection (mouse grab): add the
+    // external bias (Cartesian Eh/Bohr, atom-major) to the gradient native
+    // L-BFGS/DIIS/RFO actually step on. Respect constraints (fixed atoms stay
+    // fixed); a zeroed/empty bias is a no-op.
+    if (m_external_forces && m_external_forces->size() == m_gradient.size()) {
+        for (int i = 0; i < m_atoms; ++i) {
+            m_gradient[3 * i + 0] += (*m_external_forces)[3 * i + 0] * (m_constraints[i]);
+            m_gradient[3 * i + 1] += (*m_external_forces)[3 * i + 1] * (m_constraints[i]);
+            m_gradient[3 * i + 2] += (*m_external_forces)[3 * i + 2] * (m_constraints[i]);
+        }
+    }
     m_energy = fx;
     return fx;
 }

@@ -2,6 +2,10 @@ package.json
 package-lock.json
 node_modules/
 
+# Python
+__pycache__/
+*.pyc
+
 # C++ objects and libs
 *.slo
 *.lo
@@ -93,6 +97,19 @@ test_cases/**/curcuma_*.json
 test_cases/**/*.log
 test_cases/**/*.dat
 !test_cases/**/baseline.dat
+!test_cases/MOR41-testset/reactions.dat
+
+# MOR41 validation: track the driver data, ignore generated run artifacts
+test_cases/MOR41-testset/_run/
+
+# Grimme-group benchmark test-set data fetched on demand (scripts/fetch_testset.py,
+# docs/TESTSET_RETRIEVAL.md) - raw structures are not committed, only the small
+# hand-curated driver/reference files (reactions.dat, reference_s30l, ...).
+test_cases/MOR41-testset/*/
+test_cases/s30l_test_set/*/
+test_cases/s30lci_test_set/*/
+test_cases/GMTKN55-testset/
+test_cases/**/PROVENANCE.txt
 
 # GFN-FF / MD topology dumps (generated during runs) - Claude Generated May 2026
 *.topo.json
@@ -110,9 +127,24 @@ test_cases/molecules/**/*.reorder.*.xyz
 test_cases/molecules/**/*.reuse.xyz
 test_cases/molecules/**/*.thresh.xyz
 
+# ConfSearch run artifacts (MD/opt trajectories, restart checkpoints) - Claude Generated Jul 2026
+test_cases/**/.snapshots/
+test_cases/**/*_step_*.json
+test_cases/**/*.final.json
+test_cases/**/*.bias.xyz
+test_cases/**/*.bias.opt.accepted.xyz
+test_cases/**/*.cumulative.xyz
+test_cases/**/*.cumulative.opt.accepted.xyz
+test_cases/**/*.input.xyz
+test_cases/**/*_md_params.json
+test_cases/**/*.confsearch.restart.json
+
 # Root-level output files (optimization and trajectory outputs)
 *.opt.xyz
 *.trj.xyz
+
+# Test fixture (committed): scf_extrapolation_caffeine interpolation endpoint
+!test_cases/sqm_reference/molecules/caffeine.opt.xyz
 
 # ConfSearch exported MD parameter dump (run artifact) - Claude Generated May 2026
 confsearch_md_params.json
@@ -213,3 +245,9 @@ external/plumed2/
 external/ulysses-main/
 external/ulysses.zip
 src/version.h
+
+# Multi-GPU benchmark scratch runs (outputs, binaries)
+scripts/gpu_bench/run/
+
+# scripts/tuning_sweep.py scratch directory (default workdir)
+tuning_sweep_run/

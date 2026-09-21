@@ -281,10 +281,12 @@ std::string OrcaInterface::buildGeometryBlock(const Mol& mol) const
 {
     const int natoms = mol.m_number_atoms;
     const int charge = mol.m_charge;
-    // Multiplicity: 2S+1. Default singlet (1); use mol.m_spin if non-zero.
+    // Multiplicity = 2S+1. mol.m_spin holds 2S (= multiplicity - 1, see
+    // abstract_interface.h setMult: m_spin = multi - 1), so multiplicity = m_spin + 1.
+    // (Claude Generated fix, 2026-06 — was 2*m_spin+1 = 4S+1, wrong for open-shell)
     int multiplicity = 1;
     if (mol.m_spin > 0) {
-        multiplicity = static_cast<int>(2.0 * mol.m_spin + 1.0 + 0.5);
+        multiplicity = static_cast<int>(mol.m_spin) + 1;
     }
 
     std::ostringstream block;

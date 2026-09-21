@@ -14,6 +14,14 @@
  * from non-CUDA translation units.  All CUDA types are hidden in the Pimpl
  * (FFWorkspaceGPUImpl, defined in ff_workspace_gpu.cu).
  *
+ * Claude Generated (Sep 2026): SHARED by the CUDA and the ROCm backend - the Pimpl
+ * keeps every runtime type out of this file, so the two copies differed only in the
+ * class name.  The ROCm build gets this exact declaration under its hipified names via
+ * rocm/ff_workspace_hip.h (FFWorkspaceGPU -> FFWorkspaceHip); the names stay distinct
+ * because libcurcuma_cuda.so and libcurcuma_rocm.so are dlopen'd with RTLD_GLOBAL and
+ * must not export colliding symbols.  Device implementations: ff_workspace_gpu.cu (nvcc)
+ * resp. rocm/gfnff_rocm.hip (hipcc).
+ *
  * Minimum compute capability: 6.0 (Pascal) — native double atomicAdd.
  *
  * Reference: Spicher/Grimme J. Chem. Theory Comput. 2020 (GFN-FF)
@@ -21,7 +29,7 @@
 
 #pragma once
 
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
 
 #include "src/core/global.h"
 #include "../ff_workspace.h"           // FFEnergyComponents, Matrix, Vector, SpMatrix
@@ -307,6 +315,33 @@ public:
      */
     void computeGaussianWeightsOnGPU(bool use_cn_final = false);
 
+    /**
+     * @brief WP-A (Jun 2026): build the D4 dispersion pair list on the device.
+     *
+     * Two-pass (count + build) replacement for the host
+     * D4ParameterGenerator::GenerateDispersionPairsNative O(N²) loop and the
+     * per-build H2D upload of the pair arrays. Enumerates i<j within
+     * cutoff_bohr, then fills the DispersionSoA (idx + C6 contraction + r4r2ij
+     * + R0² + zetac6 + r_cut) entirely on the GPU. Requires CN + gw already on
+     * the device (the caller runs computeCN + computeGaussianWeightsOnGPU first)
+     * and the C6 reference table uploaded (uploadC6ReferenceTable).
+     *
+     * Opt-in (gated by -gfnff.gpu_disp_pairs_on_device); the host build path
+     * stays the default. Bit-identical to the host list up to the FP-order of
+     * the device gw vs host gw (~1e-14 per pair).
+     *
+     * @param gw_flat      [N*D4_MAX_REF] host Gaussian weights (D4ParameterGenerator::
+     *                     getGaussianWeights, flattened atom*MAX_REF+ref, zero-padded)
+     * @param sqrtzr4r2    [118] sqrt(Z·r4/r2) per element (D4ParameterGenerator::getSqrtZr4r2)
+     * @param topo_charges [N]   Phase-1 topology charges (for zetac6)
+     * @param a1,a2        GFN-FF D4 BJ damping params (0.58 / 4.80)
+     * @param cutoff_bohr  pair distance cutoff (60.0, matching the host)
+     */
+    void generateDispersionPairListOnGPU(const std::vector<double>& gw_flat,
+                                         const std::vector<double>& sqrtzr4r2,
+                                         const std::vector<double>& topo_charges,
+                                         double a1, double a2, double cutoff_bohr);
+
     // =========================================================================
     // Term enable flags (match FFWorkspace API)
     // =========================================================================
@@ -332,6 +367,12 @@ public:
     /// 512 maximizes occupancy but may be slower for small systems.
     void setBlockSize(int block_size) { m_block_size = block_size; }
     int getBlockSize() const { return m_block_size; }
+
+    /// Task #10 (Jun 2026): cutoff factor for the CN-derivative pair list
+    /// (cutoff = factor * (rcov_i + rcov_j)). Default 2.5; larger widens toward the
+    /// CPU 40 Bohr reach. Read from the gpu_cn_pair_cutoff_factor PARAM.
+    void setCNPairCutoffFactor(double f) { m_cn_pair_cutoff_factor = f; }
+    double getCNPairCutoffFactor() const { return m_cn_pair_cutoff_factor; }
 
     // =========================================================================
     // GPU Topology Displacement Check (Claude Generated March 2026)
@@ -413,6 +454,14 @@ public:
      * @return Total GFN-FF energy in Hartree
      */
     double launchChargeDependentAndFinish(bool gradient);
+
+    /// Claude Generated (June 2026): OPT-IN device-resident HB charges (default OFF —
+    /// enable with CURCUMA_GFNFF_GPU_RESIDENT_HBQ=1). Gathers the live per-atom EEQ charges
+    /// into the HB SoA q arrays for the NEXT step's HB term. Default-off because the
+    /// reference + CPU freeze the HB charges at topology build, so the GPU's frozen HB
+    /// charges already match and live charges make MD diverge (verified). Call post-step
+    /// (impl.stream idle, d_charges final) → no graph/stream hazard.
+    void refreshHBChargesFromDevice();
 
     // =========================================================================
     // Results
@@ -572,6 +621,9 @@ private:
     // G3a (Apr 2026): GPU kernel block size override (0 = adaptive default)
     int  m_block_size         = 0;
 
+    // Task #10 (Jun 2026): CN-derivative pair-list cutoff factor (× rcov sum)
+    double m_cn_pair_cutoff_factor = 2.5;
+
     // Pre-allocated pinned staging buffers for async DMA transfers.
     // Claude Generated (March 2026): Pinned memory enables true async H2D/D2H via
     // cudaMemcpyAsync without CPU page-fault overhead. This is the primary per-step
@@ -602,4 +654,4 @@ private:
     FFTermTimings m_kernel_timings;
 };
 
-#endif // USE_CUDA
+#endif // USE_CUDA || USE_ROCM

@@ -1,0 +1,49 @@
+# MOR41 reactions (Dohm, Hansen, Steinmetz, Grimme, Checinski, JCTC 2018).
+# Source: mor41_si.pdf Table S1 (p.4). All structures are closed-shell singlets,
+# charge 0. Reference = DLPNO-CCSD(T)/TightPNO/CBS reaction energies [kcal/mol].
+#
+# Format per line:  id  ref_kcal   <products> | <reactants>
+# where each species is "<coeff> <name>" (coeff positive; sign fixed by side).
+# dE = sum(coeff*E_product) - sum(coeff*E_reactant).
+#
+ 1  -43.1   1 PR01 | 1 ED01 1 CO
+ 2  -46.6   1 PR02 | 1 ED02 1 CO
+ 3  -27.6   1 PR03 | 1 ED03 1 CO
+ 4  -62.5   1 PR04 | 1 ED04 1 CO
+ 5    3.7   1 PR05 | 1 ED05 1 CO
+ 6  -23.2   1 PR06 | 1 ED01 1 H2
+ 7  -16.2   1 PR07 | 1 ED07 1 H2
+ 8  -17.2   1 PR08 | 1 ED08 1 H2
+ 9  -18.7   1 PR09 | 1 ED09 1 H2
+10  -22.6   1 PR10 | 1 ED10 1 C3H8
+11   27.0   1 PR11 | 1 ED11 1 C2H6
+12  -29.8   1 PR12 | 1 ED01 1 C2H4
+13  -43.2   1 PR13 | 1 ED13 1 C2H4
+14  -52.0   1 PR14 | 1 ED14 1 COD
+15   -4.1   1 PR15 | 1 ED15 1 CO2
+16  -39.8   1 PR16 | 1 ED16a 1 ED16b
+17  -16.1   1 PR17 | 1 ED17 1 MeOH
+18  -34.2   1 PR18 | 1 ED18 1 MeI
+19  -40.1   1 PR19 | 1 ED18 1 AcI
+20  -30.2   1 PR20 | 1 ED18 1 AcCl
+21  -15.1   1 PR21 | 1 ED21 1 MeI
+22  -35.9   1 PR22 | 1 ED22 1 I2
+23  -55.0   1 PR23 | 1 ED18 1 I2
+24  -41.6   1 PR24 | 1 ED24 1 PCy3
+25  -45.9   1 PR25 | 1 ED25 1 PCy3
+26  -36.4   1 PR26 1 COD | 1 ED26 2 PMe3
+27  -21.8   1 PR27 1 COD | 1 ED26 1 ED27
+28  -36.3   1 PR28 1 COD | 1 ED26 1 ED28
+29  -28.3   1 PR29 1 COD | 1 ED29 1 ED28
+30  -14.0   1 PR30 1 COD | 1 ED29 1 ED30
+31  -29.9   1 PR31 1 COD | 1 ED29 1 ED31
+32   -1.8   1 PR32 2 C2H4 | 1 ED32 1 COD
+33  -10.7   1 PR33 1 C2H4 | 1 ED33 1 PhOH
+34  -25.6   1 PR34 1 C2H4 | 1 ED33 1 PhSH
+35  -30.9   1 PR35 1 C2H4 | 1 ED33 1 PhSeH
+36  -39.8   1 PR36 1 C2H4 | 1 ED36 1 I2
+37  -14.0   1 PR37 1 Bz | 1 ED37 3 MeCN
+38  -64.4   1 PR38 1 Bz | 1 ED37 3 PMe3
+39  -63.9   1 PR39 | 2 ED39
+40  -65.8   1 PR40 | 1 ED40a 1 ED40b
+41   -3.2   1 PR41 | 1 EDPR41

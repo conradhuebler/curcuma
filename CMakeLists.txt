@@ -1,6 +1,20 @@
 cmake_minimum_required(VERSION 3.18)
 project(curcuma)
 
+# Claude Generated 2026 - MSVC doesn't define M_PI (and friends) from <cmath>
+# unless _USE_MATH_DEFINES is set before the first include; 20+ files across
+# the codebase use M_PI directly (gcc/clang define it unconditionally), so
+# set this project-wide instead of patching every translation unit.
+if(MSVC)
+    add_compile_definitions(_USE_MATH_DEFINES)
+    # Claude Generated 2026 - the codebase uses non-ASCII UTF-8 characters in a few
+    # identifiers/comments (e.g. "double Δqraw[6];" in xtb_gradient.cpp). Without
+    # /utf-8, MSVC falls back to the system codepage to interpret the source file,
+    # misreading the multi-byte UTF-8 sequence as unrelated characters (observed:
+    # "error C3872: 'U+201d' is not allowed in an identifier" for what is actually Δ).
+    add_compile_options(/utf-8)
+endif()
+
 option (USE_XTB
     "Compile XTB and use as library" OFF)
 
@@ -40,6 +54,20 @@ option(USE_AVX2
 option(USE_AVX512
     "Enable AVX-512 instructions (Skylake-X+, not portable)" OFF)
 
+# Claude Generated (Aug 2026): self-contained erf()/acos()/exp()/log() (see
+# src/core/portable_{erf,acos,exp,log}.h and src/core/math_compat.h) instead
+# of the platform CRT/libm. On MinGW/Windows, these dynamically import from
+# api-ms-win-crt-math-l1-1-0.dll; Wine's reimplementation of that DLL rounds
+# them differently in the last bit than native Windows' ucrtbase, which can
+# flip GFN-FF/EEQ's angle- and CN-based classification thresholds
+# (hybridisation, bond type, HB donor/acceptor, pi-membership) into a
+# different discrete decision for the same geometry. See docs/PORTABLE_ERF.md.
+# Off by default to keep existing validated golden-value tests bit-for-bit
+# unchanged; the Windows build turns it on (scripts/build_windows.bat) since
+# that is where the divergence was observed.
+option(USE_PORTABLE_MATH
+    "Use vendored fdlibm-derived erf()/acos()/exp()/log() instead of platform CRT/libm (deterministic across Wine/native-Windows)" OFF)
+
 option(USE_BLAS
     "Enable BLAS" OFF)
 
@@ -74,13 +102,32 @@ option(USE_PCH
     "Enable Precompiled Headers for faster compilation" ON)
 
 option(USE_CUDA
-    "Enable CUDA-accelerated GFN-FF (gfnff -gpu cuda, requires CUDA toolkit)" OFF)
+    "Build the CUDA GPU plugin libcurcuma_cuda.so (gfnff + gfn1/gfn2 -gpu cuda, requires CUDA toolkit)" OFF)
 
-# Claude Generated (2026-06): CUDA-accelerated native xTB (gfn1/gfn2 -gpu cuda).
-# Defaults to USE_CUDA. Controls only which xTB GPU sources are added; the runtime
-# code gates on USE_CUDA, the factory offers the GPU path when USE_CUDA_XTB is set.
-option(USE_CUDA_XTB
-    "Enable CUDA-accelerated native xTB SCF/integrals/gradient (gfn1/gfn2 -gpu cuda)" ${USE_CUDA})
+# Claude Generated (June 2026): ROCm/HIP-accelerated GFN-FF + native xTB (-gpu rocm).
+# Requires the ROCm toolkit (hipcc, hipBLAS, rocSOLVER). Separate HIP source tree
+# under .../rocm/ mirrors the CUDA .../cuda/ kernels.
+option(USE_ROCM
+    "Build the ROCm GPU plugin libcurcuma_rocm.so (gfnff/gfn1/gfn2 -gpu rocm, requires ROCm toolkit)" OFF)
+
+# Claude Generated (June 2026): Vulkan-compute-accelerated native xTB (-gpu vulkan).
+# Hand-written SPIR-V compute shaders (no BLAS/LAPACK on Vulkan).
+# Requires the Vulkan SDK (loader + headers + glslc/glslangValidator).
+option(USE_VULKAN
+    "Build the Vulkan GPU plugin libcurcuma_vulkan.so (gfn1/gfn2 -gpu vulkan, requires Vulkan SDK)" OFF)
+
+# ---------------------------------------------------------------------------
+# GPU backends are runtime-loaded plugins (Sep 2026)
+# ---------------------------------------------------------------------------
+# One umbrella flag per backend (USE_CUDA / USE_ROCM / USE_VULKAN) builds ONE shared
+# library, libcurcuma_<backend>.so, placed next to the curcuma executable. It holds the
+# device code plus the concrete GPU ComputationalMethods and exports a tiny C ABI
+# (see src/core/energy_calculators/gpu_plugin.h). curcuma_core and the executable
+# contain NO backend symbol and NO backend #ifdef: `-gpu <backend>` dlopen's the plugin
+# on demand and falls back to the CPU method (with a warning) when it is absent. So a
+# single CPU binary serves every machine; the plugins are optional add-ons, and any
+# subset of them can be built into the same tree. Each plugin mirrors curcuma_core's
+# compile definitions so shared classes have one ABI on both sides of dlopen.
 
 # WP-D Stage B (May 2026): hand-rolled AVX2 exp(-x^2) for GFN-FF dcn step 3 hot loop.
 # Opt-in. Default OFF keeps the build bit-identical to pre-WP. Requires AVX2 (set
@@ -134,13 +181,16 @@ FetchContent_Declare(LBFGSpp
 )
 FetchContent_Declare(CxxThreadPool
     GIT_REPOSITORY https://github.com/conradhuebler/CxxThreadPool.git
-    GIT_TAG        140625c509f245185ec486b5f5424b318c8ccef6
+    # 8b38c00: lost wakeup in the worker pool - m_wp_pending was decremented and
+    # notified without m_wp_mutex, hanging StartAndWait() forever. See AIChangelog
+    # 2026-08-03; ConfScan's threaded reorder was the reproducer.
+    GIT_TAG        8b38c0019f67f5efa33ffd773e132d2c8857adc4
     SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/CxxThreadPool
 )
 # ripser: header-only, no CMakeLists.txt at root — use Populate to avoid add_subdirectory
 FetchContent_Declare(ripser
     GIT_REPOSITORY https://github.com/conradhuebler/ripser
-    GIT_TAG        c2abee3a44ce6d9942824c09b83671b600db8d49
+    GIT_TAG        dcb13c22db2017ef80e68bdf9bed6ec3b77ad70d
     SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/ripser
 )
 # cpp-d4: headers always needed, library only when USE_D4=ON
@@ -262,6 +312,21 @@ if (OPENMP_FOUND)
     set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
     set (openMP ON)
+    # Claude Generated 2026 - OpenMP_CXX_FLAGS is only the compiler flag (e.g. Apple
+    # Clang's "-Xclang -fopenmp"); it does NOT carry omp.h's include path. On Linux/
+    # GCC omp.h ships with the compiler itself so this was never missed, but Apple
+    # Clang has no OpenMP runtime at all -- Homebrew's libomp is keg-only, and without
+    # this, any TU that includes omp.h (directly, or via Eigen's OpenMP integration)
+    # fails with "fatal error: 'omp.h' file not found".
+    include_directories(${OpenMP_CXX_INCLUDE_DIRS})
+    # Claude Generated 2026 - similarly, OpenMP_EXE_LINKER_FLAGS alone is not enough
+    # to actually link the OpenMP runtime on Apple Clang: on GCC, -fopenmp at link
+    # time makes the driver pull in libgomp itself, but Apple Clang's "-Xclang
+    # -fopenmp" carries no such magic -- the actual "-lomp" comes from
+    # OpenMP_CXX_LIBRARIES, which the old flags-only approach here never added.
+    # Without it, every executable failed at link with "symbol(s) not found for
+    # architecture arm64" (_omp_get_thread_num, _omp_set_num_threads, ...).
+    link_libraries(${OpenMP_CXX_LIBRARIES})
 endif()
 
 IF(CMAKE_COMPILER_IS_GNUCXX)
@@ -316,6 +381,25 @@ elseif(USE_AVX2)
     endif()
 endif()
 
+# Eigen ABI alignment (Jun 2026): pin EIGEN_MAX_ALIGN_BYTES to ONE value derived from the
+# active CPU-vectorization switch, applied IDENTICALLY to the g++ build (here) and the
+# hipcc/nvcc-compiled GPU TUs below. A mismatch (e.g. g++ AVX-512 → 64 vs hipcc clang
+# default → 16) gives Eigen objects a different allocator alignment AND a different sizeof
+# for over-aligned fixed-size types across the TU boundary → aligned-load SIGSEGV / silent
+# corruption (this was the GFN-FF gradient-norm crash on multi-fragment systems). Both sides
+# reference ${CURCUMA_EIGEN_ALIGN}, so they can never diverge. 0 = leave Eigen's default (16)
+# on both sides (no override) — only set it when a vectorization switch is actually on.
+set(CURCUMA_EIGEN_ALIGN 0)
+if(USE_MARCH_NATIVE OR USE_AVX512)
+    set(CURCUMA_EIGEN_ALIGN 64)
+elseif(USE_AVX2)
+    set(CURCUMA_EIGEN_ALIGN 32)
+endif()
+if(NOT CURCUMA_EIGEN_ALIGN EQUAL 0)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DEIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN}")
+    message(STATUS "Eigen: EIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN} (pinned for g++/GPU-TU ABI parity)")
+endif()
+
 # WP-D Stage B (May 2026): USE_GFNFF_FAST_EXP requires AVX2. Either USE_AVX2 or
 # USE_MARCH_NATIVE (or USE_AVX512) must be set so __AVX2__ is defined.
 if(USE_GFNFF_FAST_EXP)
@@ -334,9 +418,11 @@ if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/json.hpp)
 endif()
 
 if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/stb_image_write.h)
-  file(DOWNLOAD https://raw.githubusercontent.com/syoyo/tinygltf/refs/heads/release/stb_image_write.h ${PROJECT_SOURCE_DIR}/external/stb_image_write.h
+  # Pinned to a commit (not "master") so the URL can't move under us again like the
+  # previous tinygltf mirror did (its "release" branch/path was removed upstream).
+  file(DOWNLOAD https://raw.githubusercontent.com/nothings/stb/1ee679ca2ef753a528db5ba6801e1067b40481b8/stb_image_write.h ${PROJECT_SOURCE_DIR}/external/stb_image_write.h
        TIMEOUT 60  # seconds
-       EXPECTED_HASH SHA256=bdbaa2c548ac9bde2913b6b46c4d315a04d2624c81ee1553390eb8fb2de2835d
+       EXPECTED_HASH SHA256=cbd5f0ad7a9cf4468affb36354a1d2338034f2c12473cf1a8e32053cb6914a05
        TLS_VERIFY ON)
 endif()
 
@@ -441,18 +527,20 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/xtb_gradient.cpp
         src/core/energy_calculators/qm_methods/nddo_params.cpp
         src/core/energy_calculators/ff_methods/gfnff_method.cpp
-        src/core/energy_calculators/ff_methods/gfnff_advanced.cpp
         src/core/energy_calculators/ff_methods/gfnff_torsions.cpp
         src/core/energy_calculators/ff_methods/gfnff_inversions.cpp
         src/core/energy_calculators/ff_methods/ff_workspace.cpp
         src/core/energy_calculators/ff_methods/ff_workspace_gfnff.cpp
         src/core/energy_calculators/ff_methods/ff_workspace_uff.cpp
+        src/core/energy_calculators/ff_methods/ff_workspace_cg.cpp
         src/core/energy_calculators/ff_methods/alpb_solvation.cpp
         src/core/energy_calculators/ff_methods/eeq_solver.cpp
         src/core/energy_calculators/ff_methods/huckel_solver.cpp
         src/core/energy_calculators/qm_methods/qm_driver.cpp
         src/core/energy_calculators/qm_methods/ulyssesinterface.cpp
         src/core/energy_calculators/method_factory.cpp
+        src/core/energy_calculators/gpu_plugin.cpp
+        src/core/gpu_device_pool.cpp
         src/core/energy_calculators/qm_methods/eht_method.cpp
         src/core/energy_calculators/qm_methods/native_xtb_method.cpp
         src/core/energy_calculators/qm_methods/nddo.cpp
@@ -472,7 +560,6 @@ set(curcuma_core_SRC
         src/core/molecule.cpp
         src/core/xyz_comment_parser.cpp
         src/core/fileiterator.cpp
-        src/core/energy_calculators/ff_methods/forcefieldthread.cpp
         src/core/energy_calculators/ff_methods/forcefield.cpp
         src/core/energy_calculators/ff_methods/forcefieldfunctions.h
         src/core/energy_calculators/ff_methods/forcefieldgenerator.cpp
@@ -585,6 +672,12 @@ if(USE_MKL)
     target_compile_definitions(curcuma_core PRIVATE USE_MKL)
 endif()
 
+# Claude Generated (Aug 2026): see USE_PORTABLE_MATH option above / src/core/math_compat.h
+if(USE_PORTABLE_MATH)
+    target_compile_definitions(curcuma_core PRIVATE CURCUMA_PORTABLE_MATH)
+    message(STATUS "erf()/acos()/exp()/log(): using vendored portable implementations (USE_PORTABLE_MATH=ON)")
+endif()
+
 add_library(curcuma_cap  ${curcuma_cap_SRC})
 
 # Enable precompiled headers for faster compilation
@@ -605,12 +698,20 @@ if(USE_PCH)
     endif()
 endif()
 
+# Claude Generated 2026 - km (Kuhn-Munkres/Hungarian assignment, c_code/hungarian.c)
+# is dead code: nothing in the codebase includes its public interface.c::assign()
+# outside c_code/ itself (RMSD reordering uses the header-only Eigen Munkres in
+# rmsd/munkres.h instead). It also relies on C99 VLAs throughout (Boolean col_covered[m],
+# a flexible array member, etc.), which MSVC's cl.exe has never supported. Skip it
+# entirely on MSVC rather than porting a vendored library nothing calls.
+if(NOT MSVC)
     set(km_SRC
-    src/capabilities/c_code/hungarian.c
-    src/capabilities/c_code/interface.c
-)
-add_library(km ${km_SRC})
-target_link_libraries(curcuma_core km)
+        src/capabilities/c_code/hungarian.c
+        src/capabilities/c_code/interface.c
+    )
+    add_library(km ${km_SRC})
+    target_link_libraries(curcuma_core km)
+endif()
 
 if(USE_ULYSSES)
     add_library(ulysses_lib
@@ -630,7 +731,7 @@ if(USE_ULYSSES)
     )
     target_link_libraries(ulysses_helper PUBLIC ulysses_lib curcuma_core)
 
-    target_link_libraries(curcuma_core km ulysses_lib)
+    target_link_libraries(curcuma_core ulysses_lib)
 endif()
 
 add_executable(curcuma
@@ -927,11 +1028,31 @@ endif()
 # Requires: CUDA toolkit, compute capability >= 6.0 (Pascal / GTX 10xx)
 # Build: cmake -DUSE_CUDA=ON && make -j4
 if(USE_CUDA)
-    enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
+    # Claude Generated (Sep 2026, multi-GPU): toolkit-aware default architecture list.
+    #   Turing 7.5, Ampere 8.0 (A100) / 8.6 (RTX 30xx, RTX A4500), Ada 8.9,
+    #   Hopper 9.0 (H100/H200, needs CUDA >= 11.8), Blackwell 10.0 (B200) / 12.0 (RTX 50xx,
+    #   both need CUDA >= 12.8). CUDA 13 dropped Pascal 6.x and Volta 7.0.
+    # Without a native entry a device falls back to PTX JIT (slow first start) or refuses the
+    # kernels, i.e. a silent CPU fallback - the likely cause of "no GPU speedup" on H200.
+    # Override for fast local builds, e.g. -DCMAKE_CUDA_ARCHITECTURES=86.
+    if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+        set(_curcuma_cuda_archs "75;80;86;89;90;100;120")
+    elseif(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+        set(_curcuma_cuda_archs "60;70;75;80;86;89;90;100;120")
+    elseif(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 11.8)
+        set(_curcuma_cuda_archs "60;70;75;80;86;89;90")
+    else()
+        set(_curcuma_cuda_archs "60;70;75;80;86")
+    endif()
+    # Must be decided BEFORE enable_language(CUDA): that call otherwise seeds the cache with
+    # the compiler's own default and a later set(... CACHE) is ignored.
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+        set(CMAKE_CUDA_ARCHITECTURES "${_curcuma_cuda_archs}" CACHE STRING "CUDA architectures")
+    endif()
+    enable_language(CUDA)
     set(CMAKE_CUDA_STANDARD 17)
-    # Target: Pascal(6.0), Volta(7.0), Turing(7.5), Ampere(8.0/8.6), Ada(8.9)
-    set(CMAKE_CUDA_ARCHITECTURES "60;70;75;80;86;89;120" CACHE STRING "CUDA architectures")
+    message(STATUS "CUDA ${CUDAToolkit_VERSION}: building device code for architectures ${CMAKE_CUDA_ARCHITECTURES}")
 
     # CUDA source files - compiled as part of curcuma_core
     set(CUDA_SOURCES
@@ -940,43 +1061,367 @@ if(USE_CUDA)
         src/core/energy_calculators/ff_methods/cuda/eeq_solver_gpu.cu
         src/core/energy_calculators/ff_methods/cuda/gpu_utils.cpp
         src/core/energy_calculators/qm_methods/gfnff_gpu_method.cpp
+        # Claude Generated (2026-06): native xTB GPU kernels (compiled by nvcc).
+        # The host-side wrapper (xtb_gpu_method.cpp) is added below as a normal source.
+        src/core/energy_calculators/qm_methods/cuda/xtb_gpu_context.cu
     )
-    # Claude Generated (2026-06): native xTB GPU kernels (compiled by nvcc).
-    # The host-side wrapper (xtb_gpu_method.cpp) is added below as a normal source.
-    if(USE_CUDA_XTB)
-        list(APPEND CUDA_SOURCES
-            src/core/energy_calculators/qm_methods/cuda/xtb_gpu_context.cu)
-    endif()
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY LANGUAGE CUDA)
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 
-    # Add CUDA sources to curcuma_core
-    target_sources(curcuma_core PRIVATE ${CUDA_SOURCES})
-    target_include_directories(curcuma_core PRIVATE ${PROJECT_SOURCE_DIR})
-    target_link_libraries(curcuma_core CUDA::cudart CUDA::cusolver CUDA::cublas)
-    target_compile_definitions(curcuma_core PUBLIC USE_CUDA)
-    # curcuma_core is created before this block, so its CUDA_ARCHITECTURES target
-    # property is still empty (CMP0104). Set it explicitly from the global list.
-    # CUDA_RESOLVE_DEVICE_SYMBOLS: resolve device code within the static library so
-    # the final curcuma binary does not need a device-link step and links as plain PIC.
-    set_target_properties(curcuma_core PROPERTIES
-        CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
-        CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+    # Claude Generated (Jul 2026): CUDA is a RUNTIME-LOADED PLUGIN, not baked into
+    # curcuma_core. cuBLAS/cuSOLVER run ~40 ms of DT_INIT (kernel dispatch tables) at load
+    # time; linking them into the main binary taxed EVERY CPU-only run's startup (~50 ms
+    # vs gxtb's ~1 ms). curcuma_core stays CUDA-symbol-free (it drives the GPU only
+    # through the CUDA-free GpuScfBackend seam) and dlopen's libcurcuma_cuda.so on demand
+    # via gpu_plugin.cpp. Sep 2026: the core no longer carries USE_CUDA at all - the
+    # method factory probes the plugin at runtime, so the CPU objects are byte-identical
+    # whether or not any GPU plugin is built. USE_CUDA is defined for the plugin only.
 
-    # Claude Generated (2026-06): native xTB GPU host wrapper + feature flag.
-    if(USE_CUDA_XTB)
-        target_sources(curcuma_core PRIVATE
-            src/core/energy_calculators/qm_methods/xtb_gpu_method.cpp)
-        target_compile_definitions(curcuma_core PUBLIC USE_CUDA_XTB)
-        message(STATUS "CUDA native xTB enabled: gfn1/gfn2 -gpu cuda available")
+    # The loadable GPU plugin: a shared library holding all CUDA device/host code plus the
+    # concrete GPU ComputationalMethods. It links the CUDA runtime; its undefined core
+    # symbols (XTB, ComputationalMethod, CurcumaLogger, ...) resolve against the curcuma
+    # executable at dlopen time (the executable is built -rdynamic, CMAKE_CXX_FLAGS above).
+    add_library(curcuma_cuda SHARED
+        ${CUDA_SOURCES}
+        src/core/energy_calculators/qm_methods/xtb_gpu_method.cpp
+        src/core/energy_calculators/qm_methods/cuda/gpu_plugin_entry_cuda.cpp)
+    target_include_directories(curcuma_cuda PRIVATE ${PROJECT_SOURCE_DIR})
+    target_link_libraries(curcuma_cuda PRIVATE CUDA::cudart CUDA::cusolver CUDA::cublas)
+    target_sources(curcuma_cuda PRIVATE
+        src/core/energy_calculators/qm_methods/cuda/xtb_distributed_eigensolver_loader.cpp)
+
+    # Claude Generated (Sep 2026, multi-GPU step 3): optional multi-GPU eigensolvers for the
+    # resident GFN1/GFN2 SCF (-gpu_eigensolver_devices). Both are optional; the plugin builds
+    # and runs single-GPU without them.
+    #   cuSOLVERMp + NCCL (default backend): not part of the CUDA toolkit. Point
+    #     CUSOLVERMP_ROOT / CUBLASMP_ROOT at the pip wheels nvidia-cusolvermp-cu13 /
+    #     nvidia-cublasmp-cu13 (.../site-packages/nvidia/cu13, .../nvidia/cublasmp/cu13) or at
+    #     an NVIDIA HPC SDK math_libs directory; NCCL from the system or NCCL_ROOT.
+    #   cusolverMg (fallback): ships with the CUDA toolkit, deprecated since CUDA 13.
+    option(CURCUMA_MULTI_GPU_EIGENSOLVER "Link cuSOLVERMp/NCCL and cusolverMg when found" ON)
+    # Claude Generated (Sep 2026): turn "not found" from a STATUS line into a configure error.
+    # Use it on any machine where the distributed eigensolve is the point of the build.
+    # Default OFF: the libraries stay OPTIONAL and a machine without them builds and runs
+    # (single GPU, batch over GPUs, distributed density - only the split eigensolve is lost).
+    option(CURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER
+           "Fail the configure when cuSOLVERMp/cuBLASMp/NCCL are not found (default OFF: optional)" OFF)
+    if(CURCUMA_MULTI_GPU_EIGENSOLVER)
+        # Separate library, dlopen'ed by libcurcuma_cuda.so on first use: a run host without
+        # cuSOLVERMp/NCCL keeps the single-GPU plugin working.
+        add_library(curcuma_cuda_mgpu SHARED
+            src/core/energy_calculators/qm_methods/cuda/xtb_distributed_eigensolver.cpp)
+        target_include_directories(curcuma_cuda_mgpu PRIVATE ${PROJECT_SOURCE_DIR})
+        target_link_libraries(curcuma_cuda_mgpu PRIVATE CUDA::cudart)
+        target_compile_definitions(curcuma_cuda_mgpu PRIVATE USE_CUDA)
+        set_target_properties(curcuma_cuda_mgpu PROPERTIES
+            POSITION_INDEPENDENT_CODE ON
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+        add_dependencies(curcuma curcuma_cuda_mgpu)
+        find_library(CURCUMA_CUSOLVERMG_LIB NAMES cusolverMg HINTS ${CUDAToolkit_LIBRARY_DIR})
+        if(CURCUMA_CUSOLVERMG_LIB)
+            target_link_libraries(curcuma_cuda_mgpu PRIVATE ${CURCUMA_CUSOLVERMG_LIB})
+            target_compile_definitions(curcuma_cuda_mgpu PRIVATE CURCUMA_HAVE_CUSOLVERMG)
+            message(STATUS "Multi-GPU eigensolver: cusolverMg ${CURCUMA_CUSOLVERMG_LIB}")
+        endif()
+        find_path(CURCUMA_CUSOLVERMP_INCLUDE cusolverMp.h
+            HINTS $ENV{CUSOLVERMP_ROOT} ${CUSOLVERMP_ROOT} PATH_SUFFIXES include)
+        find_library(CURCUMA_CUSOLVERMP_LIB NAMES cusolverMp libcusolverMp.so.0
+            HINTS $ENV{CUSOLVERMP_ROOT} ${CUSOLVERMP_ROOT} PATH_SUFFIXES lib lib64)
+        find_library(CURCUMA_CUBLASMP_LIB NAMES cublasmp libcublasmp.so.0
+            HINTS $ENV{CUBLASMP_ROOT} ${CUBLASMP_ROOT} PATH_SUFFIXES lib lib64)
+        find_path(CURCUMA_CUBLASMP_INCLUDE cublasmp.h
+            HINTS $ENV{CUBLASMP_ROOT} ${CUBLASMP_ROOT} PATH_SUFFIXES include)
+        find_path(CURCUMA_NCCL_INCLUDE nccl.h HINTS $ENV{NCCL_ROOT} ${NCCL_ROOT} PATH_SUFFIXES include)
+        find_library(CURCUMA_NCCL_LIB NAMES nccl HINTS $ENV{NCCL_ROOT} ${NCCL_ROOT} PATH_SUFFIXES lib lib64)
+        if(CURCUMA_CUSOLVERMP_INCLUDE AND CURCUMA_CUSOLVERMP_LIB AND CURCUMA_CUBLASMP_LIB
+           AND CURCUMA_CUBLASMP_INCLUDE AND CURCUMA_NCCL_INCLUDE AND CURCUMA_NCCL_LIB)
+            target_include_directories(curcuma_cuda_mgpu PRIVATE ${CURCUMA_CUSOLVERMP_INCLUDE} ${CURCUMA_CUBLASMP_INCLUDE} ${CURCUMA_NCCL_INCLUDE})
+            target_link_libraries(curcuma_cuda_mgpu PRIVATE ${CURCUMA_CUSOLVERMP_LIB} ${CURCUMA_CUBLASMP_LIB} ${CURCUMA_NCCL_LIB})
+            target_compile_definitions(curcuma_cuda_mgpu PRIVATE CURCUMA_HAVE_CUSOLVERMP)
+            get_filename_component(_mp_dir ${CURCUMA_CUSOLVERMP_LIB} DIRECTORY)
+            get_filename_component(_bmp_dir ${CURCUMA_CUBLASMP_LIB} DIRECTORY)
+            # The wheels are not on the loader path; bake their directories into the library.
+            set_property(TARGET curcuma_cuda_mgpu APPEND PROPERTY BUILD_RPATH "${_mp_dir};${_bmp_dir}")
+            set_property(TARGET curcuma_cuda_mgpu APPEND PROPERTY INSTALL_RPATH "${_mp_dir};${_bmp_dir}")
+            message(STATUS "Multi-GPU eigensolver: cuSOLVERMp ${CURCUMA_CUSOLVERMP_LIB}, NCCL ${CURCUMA_NCCL_LIB}")
+            set(CURCUMA_MGPU_BACKEND "cuSOLVERMp + NCCL")
+        else()
+            # Claude Generated (Sep 2026): say WHICH piece is missing, and offer to fail here.
+            # A single STATUS line in a long configure log is how a cluster build ends up
+            # silently Mg-only - and cusolverMg measured 15x slower than one GPU on
+            # polymer_2x (docs/GPU_TUNING.md), i.e. that build looks like "multi-GPU does
+            # not help" while nothing multi-GPU ever ran.
+            set(_mgpu_missing "")
+            foreach(_v CURCUMA_CUSOLVERMP_INCLUDE CURCUMA_CUSOLVERMP_LIB
+                       CURCUMA_CUBLASMP_INCLUDE CURCUMA_CUBLASMP_LIB
+                       CURCUMA_NCCL_INCLUDE CURCUMA_NCCL_LIB)
+                if(NOT ${_v})
+                    string(APPEND _mgpu_missing "\n     missing: ${_v}")
+                endif()
+            endforeach()
+            set(CURCUMA_MGPU_BACKEND "cusolverMg only (FALLBACK)")
+            if(CURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER)
+                message(FATAL_ERROR
+                    "CURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER=ON, but the distributed eigensolver "
+                    "cannot be built:${_mgpu_missing}\n"
+                    "   Set CUSOLVERMP_ROOT, CUBLASMP_ROOT and NCCL_ROOT (pip wheels "
+                    "nvidia-cusolvermp-cuXX / nvidia-cublasmp-cuXX / nvidia-nccl-cuXX, or an "
+                    "NVIDIA HPC SDK math_libs/comm_libs directory), or configure with "
+                    "-DCURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER=OFF to accept the cusolverMg "
+                    "fallback (measured 15x SLOWER than a single GPU on polymer_2x).")
+            endif()
+            message(STATUS "Multi-GPU eigensolver: cuSOLVERMp/cuBLASMp/NCCL not found - OPTIONAL, the build continues.${_mgpu_missing}")
+            message(STATUS "   Unaffected without them: every single-GPU run, the batch spread over "
+                           "several GPUs (-gpu_devices), and the distributed density "
+                           "(-gpu_density_devices). Only ONE molecule's eigensolve cannot be split.")
+            if(CURCUMA_CUSOLVERMG_LIB)
+                message(STATUS "   This build falls back to cusolverMg for that one case; it works "
+                               "and stays exact, but measured 15x slower than a single GPU on "
+                               "polymer_2x, so prefer -gpu_eigensolver_devices none there.")
+            endif()
+            message(STATUS "   To enable: pip install nvidia-cusolvermp-cu13 nvidia-cublasmp-cu13 "
+                           "nvidia-nccl-cu13, then -DCUSOLVERMP_ROOT=<site-packages>/nvidia/cu13 "
+                           "-DCUBLASMP_ROOT=<site-packages>/nvidia/cublasmp/cu13 -DNCCL_ROOT=<prefix>; "
+                           "or point them at an NVIDIA HPC SDK math_libs/comm_libs directory.")
+            message(STATUS "   To make this a configure error instead: "
+                           "-DCURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER=ON")
+        endif()
+        # One summary block, after the individual lines, so the outcome is visible at the end
+        # of a long configure and can be grepped: `cmake .. | grep "multi-GPU eigensolver"`.
+        if(CURCUMA_MGPU_BACKEND STREQUAL "cuSOLVERMp + NCCL")
+            if(CURCUMA_CUSOLVERMG_LIB)
+                set(_mgpu_summary "cuSOLVERMp + NCCL (cusolverMg also linked as fallback)")
+            else()
+                set(_mgpu_summary "cuSOLVERMp + NCCL")
+            endif()
+        elseif(CURCUMA_CUSOLVERMG_LIB)
+            set(_mgpu_summary "cusolverMg only - optional cuSOLVERMp missing, see above")
+        else()
+            set(_mgpu_summary "none - one molecule stays on one GPU (everything else works)")
+        endif()
+        message(STATUS "=== curcuma multi-GPU eigensolver: ${_mgpu_summary} ===")
     endif()
+    # Match curcuma_core's compile definitions EXACTLY so every shared class (XTB, ...) has
+    # an identical ABI on both sides of the dlopen boundary. Generator expression captures
+    # the final set (incl. USE_GFNFF/USE_MKL/USE_D4/... set elsewhere in this file).
+    target_compile_definitions(curcuma_cuda PRIVATE USE_CUDA
+        $<TARGET_PROPERTY:curcuma_core,COMPILE_DEFINITIONS>)
+    set_target_properties(curcuma_cuda PROPERTIES
+        CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        POSITION_INDEPENDENT_CODE ON
+        # co-locate the .so with the curcuma executable so gpu_plugin (which looks next to
+        # /proc/self/exe) finds it without LD_LIBRARY_PATH.
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    # Build the plugin whenever the executable is built.
+    add_dependencies(curcuma curcuma_cuda)
 
-    message(STATUS "CUDA support enabled: gfnff -gpu cuda available")
+    message(STATUS "CUDA enabled: gfn1/gfn2/gfnff -gpu cuda via loadable libcurcuma_cuda.so")
     message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 endif()
 
-target_link_libraries(curcuma_core pthread fmt::fmt-header-only )
-target_link_libraries(curcuma_cap pthread fmt::fmt-header-only )
+# Claude Generated (June 2026): ROCm/HIP backend (gfnff/gfn1/gfn2 -gpu rocm).
+# Build: cmake -DUSE_ROCM=ON -DCMAKE_PREFIX_PATH=/opt/rocm && make -j4
+# (USE_ROCM is the single switch - it builds both the native-xTB and GFN-FF GPU paths
+#  into ONE plugin, libcurcuma_rocm.so, mirroring CUDA. ROCM_GPU_ARCH is auto-detected
+#  from rocminfo; override only if wrong.)
+# The two HIP TUs (xTB context: device handshake + rocSOLVER eigensolver + resident-SCF
+# __global__ kernels; GFN-FF: single-TU port of the CUDA kernels) are compiled by hipcc
+# into plain relocatable objects via custom commands, then linked into the plugin as
+# EXTERNAL_OBJECTs with g++. This builds the device kernels while keeping the HIP-only
+# --offload-arch / --hip-link flags off the GNU link (which otherwise flips the link to
+# ld.lld and drops the GNU OpenMP runtime libgomp). Only the plugin links libamdhip64 +
+# rocSOLVER + rocBLAS; no enable_language(HIP) / CMake HIP machinery is used.
+# Sep 2026: converted from `target_sources(curcuma_core ...)` to a dlopen plugin - the
+# core and the executable are HIP-free (see the GPU-plugin note near the USE_* options).
+if(USE_ROCM)
+    find_library(ROCM_HIP_RT amdhip64 REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64)
+    # rocSOLVER/rocBLAS are MANDATORY: eeq_solver_hip.hiph calls rocblas_create_handle /
+    # rocsolver_dpotrf unconditionally and the xTB eigensolver is rocSOLVER dsygvd.
+    # Search /usr too so a distro that installs ROCm under /usr links without
+    # -DCMAKE_PREFIX_PATH=/opt/rocm.
+    find_library(ROCM_ROCSOLVER rocsolver REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64 /usr/lib /usr/lib64)
+    find_library(ROCM_ROCBLAS   rocblas   REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64 /usr/lib /usr/lib64)
+    find_program(HIPCC_EXECUTABLE hipcc REQUIRED PATHS /opt/rocm/bin)
+
+    # Auto-detect the HIP offload arch from rocminfo so the compiled code object
+    # matches the installed GPU. A wrong arch (--offload-arch=gfx1150 on a gfx1101
+    # RX 7800 XT, etc.) builds fine but the runtime cannot load the kernel and aborts
+    # in hip::StatCO::getStatFunc ("Assertion `err == hipSuccess' failed"). Override
+    # explicitly with -DROCM_GPU_ARCH=gfxXXXX if auto-detection picks the wrong device
+    # (e.g. multi-GPU). Falls back to gfx1150 only if rocminfo is unavailable.
+    if(NOT DEFINED ROCM_GPU_ARCH)
+        set(_curcuma_gfx "")
+        find_program(ROCMINFO_EXECUTABLE rocminfo PATHS /opt/rocm/bin)
+        if(ROCMINFO_EXECUTABLE)
+            execute_process(
+                COMMAND ${ROCMINFO_EXECUTABLE}
+                OUTPUT_VARIABLE _rocminfo_out
+                RESULT_VARIABLE _rocminfo_rc
+                OUTPUT_STRIP_TRAILING_WHITESPACE)
+            if(_rocminfo_rc EQUAL 0)
+                string(REGEX MATCH "Name:[ \t]+gfx[0-9a-zA-Z]+" _m "${_rocminfo_out}")
+                if(_m)
+                    string(REGEX REPLACE "Name:[ \t]+" "" _curcuma_gfx "${_m}")
+                endif()
+            endif()
+        endif()
+        if(_curcuma_gfx)
+            set(ROCM_GPU_ARCH "${_curcuma_gfx}" CACHE STRING "HIP offload arch (auto-detected from rocminfo; override with -DROCM_GPU_ARCH=gfxXXXX)")
+            message(STATUS "ROCm: auto-detected GPU offload arch ${ROCM_GPU_ARCH}")
+        else()
+            message(FATAL_ERROR
+                "ROCm: could not auto-detect the GPU offload arch (rocminfo unavailable or "
+                "reported no gfx device). Set it explicitly, e.g. "
+                "-DROCM_GPU_ARCH=gfx1101 (RX 7800 XT) or -DROCM_GPU_ARCH=gfx1150 (Radeon 890M). "
+                "A wrong arch compiles fine but the runtime aborts in hip::StatCO::getStatFunc.")
+        endif()
+    endif()
+
+
+    # hipcc compile defines shared by both device TUs. Match the g++ build's Eigen
+    # alignment (CURCUMA_EIGEN_ALIGN, set with the march/AVX switch above) so Eigen
+    # objects crossing the hipcc TU <-> g++ boundary share one ABI. FMT_HEADER_ONLY:
+    # the plugin's g++ sources get it through the mirrored curcuma_core definitions
+    # (fmt::fmt-header-only INTERFACE define), but a custom command inherits nothing,
+    # so it is spelled out here - otherwise the device TU references the non-inline
+    # fmt::vprint and the link fails.
+    set(_hipcc_defs -DUSE_ROCM -D__HIP_PLATFORM_AMD__ -DHAVE_ROCSOLVER -DHAVE_ROCBLAS -DFMT_HEADER_ONLY)
+    if(NOT CURCUMA_EIGEN_ALIGN EQUAL 0)
+        list(APPEND _hipcc_defs -DEIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN})
+    endif()
+    # USE_D3/USE_D4 are NOT passed - the GFN-FF .hip pulls them from this build's
+    # generated global_config.h (-I${PROJECT_BINARY_DIR}), so the device TU and the
+    # core never disagree on the dispersion backend. GFN-FF uses its own D4
+    # (dispersion/), so configure with -DUSE_D4=ON -DUSE_D3=OFF.
+    set(_hipcc_incs
+        -I${CMAKE_SOURCE_DIR} -I${PROJECT_SOURCE_DIR} -I${PROJECT_BINARY_DIR}
+        -I${PROJECT_SOURCE_DIR}/external
+        -I${PROJECT_SOURCE_DIR}/external/fmt/include
+        -I${PROJECT_SOURCE_DIR}/external/eigen-3.4.0
+        -I${PROJECT_SOURCE_DIR}/external/cpp-d4/include
+        -I${PROJECT_SOURCE_DIR}/external/LBFGSpp/include
+        -I${PROJECT_SOURCE_DIR}/external/ripser
+        -I/opt/rocm/include)
+
+    # ---- native xTB device TU: hipcc -c xtb_hip_context.hip -> .o ----------------
+    set(_hip_ctx_src ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.hip)
+    # Claude Generated (Sep 2026): add_custom_command does no implicit header scanning
+    # (unlike normal target_sources compilation), so every header this .hip transitively
+    # #includes must be listed explicitly in DEPENDS or an edit to one silently leaves a
+    # stale .hip.o linked into libcurcuma_rocm.so — an ABI mismatch against the freshly
+    # recompiled g++ host objects (struct layout drift, e.g. GFNFFParameterSet growing a
+    # field, corrupts memory at runtime instead of failing to build). `rm
+    # release/*.hip.o` forces a rebuild if a header is missing from either list below.
+    set(_hip_ctx_hdrs
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/rocm/xtb_hip_integrals.hiph
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/parameters/xtb_params_extra.hpp)
+    set(_hip_ctx_obj ${CMAKE_CURRENT_BINARY_DIR}/xtb_hip_context.hip.o)
+    add_custom_command(
+        OUTPUT  ${_hip_ctx_obj}
+        COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 --offload-arch=${ROCM_GPU_ARCH}
+                ${_hipcc_defs} ${_hipcc_incs}
+                ${_hip_ctx_src} -o ${_hip_ctx_obj}
+        DEPENDS ${_hip_ctx_src} ${_hip_ctx_hdrs}
+        COMMENT "Compiling HIP xTB context with hipcc (arch ${ROCM_GPU_ARCH})"
+        VERBATIM)
+    add_custom_target(curcuma_hip_ctx DEPENDS ${_hip_ctx_obj})
+    set_source_files_properties(${_hip_ctx_obj} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+
+    # ---- GFN-FF device TU: hipcc -c gfnff_rocm.hip -> .o ---------------------------
+    # Single-TU HIP port of cuda/{gfnff_kernels,ff_workspace_gpu,eeq_solver_gpu,gpu_utils}.
+    # See the DEPENDS comment above the xTB context command — same hazard, same fix.
+    set(_hip_ff_src ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/gfnff_rocm.hip)
+    set(_hip_ff_hdrs
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/ff_workspace_hip.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/eeq_solver_hip.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/eeq_solver_hip.hiph
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/gfnff_soa_hip.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/gfnff_kernels_hip.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/gpu_utils_hip.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/gfnff_parameters.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/ff_terms.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/gfnff_par.h
+        ${PROJECT_SOURCE_DIR}/src/core/curcuma_logger.h)
+    set(_hip_ff_obj ${CMAKE_CURRENT_BINARY_DIR}/gfnff_rocm.hip.o)
+    add_custom_command(
+        OUTPUT  ${_hip_ff_obj}
+        COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 --offload-arch=${ROCM_GPU_ARCH}
+                ${_hipcc_defs} ${_hipcc_incs}
+                ${_hip_ff_src} -o ${_hip_ff_obj}
+        DEPENDS ${_hip_ff_src} ${_hip_ff_hdrs}
+        COMMENT "Compiling HIP GFN-FF kernels with hipcc (arch ${ROCM_GPU_ARCH})"
+        VERBATIM)
+    add_custom_target(curcuma_hip_gfnff DEPENDS ${_hip_ff_obj})
+    set_source_files_properties(${_hip_ff_obj} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+
+    # ---- the loadable plugin: g++ host wrappers + C entry points + the two hipcc objects
+    # Undefined core symbols (XTB, FFWorkspace, CurcumaLogger, ...) resolve against the
+    # -rdynamic curcuma executable at dlopen time, exactly like libcurcuma_cuda.so.
+    add_library(curcuma_rocm SHARED
+        src/core/energy_calculators/qm_methods/xtb_hip_method.cpp
+        src/core/energy_calculators/qm_methods/gfnff_hip_method.cpp
+        src/core/energy_calculators/qm_methods/rocm/gpu_plugin_entry_rocm.cpp
+        ${_hip_ctx_obj}
+        ${_hip_ff_obj})
+    add_dependencies(curcuma_rocm curcuma_hip_ctx curcuma_hip_gfnff)
+    target_include_directories(curcuma_rocm PRIVATE ${PROJECT_SOURCE_DIR} /opt/rocm/include)
+    target_link_libraries(curcuma_rocm PRIVATE ${ROCM_HIP_RT} ${ROCM_ROCSOLVER} ${ROCM_ROCBLAS})
+    # __HIP_PLATFORM_AMD__: the g++-compiled wrappers include <hip/hip_runtime.h> (host-side
+    # hipMemcpy for the GPU-Schur charge download). Mirror curcuma_core's definitions for
+    # a single ABI across the dlopen boundary (see the CUDA plugin).
+    target_compile_definitions(curcuma_rocm PRIVATE
+        USE_ROCM __HIP_PLATFORM_AMD__ HAVE_ROCSOLVER HAVE_ROCBLAS
+        $<TARGET_PROPERTY:curcuma_core,COMPILE_DEFINITIONS>)
+    set_target_properties(curcuma_rocm PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    add_dependencies(curcuma curcuma_rocm)
+
+    message(STATUS "ROCm enabled: gfn1/gfn2/gfnff -gpu rocm via loadable libcurcuma_rocm.so (arch ${ROCM_GPU_ARCH})")
+endif()
+
+# Claude Generated (June 2026): Vulkan compute backend (gfn1/gfn2 -gpu vulkan).
+# Build: cmake -DUSE_VULKAN=ON && make -j4
+# Host Vulkan context (instance/device/queue handshake) + native-xTB wrapper; the
+# hand-written SPIR-V compute shaders under vulkan/shaders/ are embedded by the
+# context sources. GFN-FF has no Vulkan port yet (the plugin's GFN-FF entry point
+# returns nullptr and the core falls back to CPU).
+# Sep 2026: converted from `target_sources(curcuma_core ...)` to the dlopen plugin
+# libcurcuma_vulkan.so - the core and the executable are Vulkan-loader-free (see the
+# GPU-plugin note near the USE_* options).
+if(USE_VULKAN)
+    find_package(Vulkan REQUIRED)
+
+    add_library(curcuma_vulkan SHARED
+        src/core/energy_calculators/qm_methods/vulkan/vk_context.cpp
+        src/core/energy_calculators/qm_methods/vulkan/xtb_vulkan_context.cpp
+        src/core/energy_calculators/qm_methods/xtb_vulkan_method.cpp
+        src/core/energy_calculators/qm_methods/vulkan/gpu_plugin_entry_vulkan.cpp)
+    target_include_directories(curcuma_vulkan PRIVATE ${PROJECT_SOURCE_DIR} ${Vulkan_INCLUDE_DIRS})
+    target_link_libraries(curcuma_vulkan PRIVATE Vulkan::Vulkan)
+    target_compile_definitions(curcuma_vulkan PRIVATE USE_VULKAN
+        $<TARGET_PROPERTY:curcuma_core,COMPILE_DEFINITIONS>)
+    set_target_properties(curcuma_vulkan PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    add_dependencies(curcuma curcuma_vulkan)
+
+    message(STATUS "Vulkan enabled: gfn1/gfn2 -gpu vulkan via loadable libcurcuma_vulkan.so")
+endif()
+
+# Claude Generated 2026 - MSVC has no pthread (threads come from the CRT); MinGW
+# (winpthreads), Linux and macOS still need -lpthread. Guard the link item so MSVC
+# doesn't try to open a nonexistent pthread.lib (LNK1181) when anything links
+# curcuma_core/curcuma_cap (parallel_scf, qurcuma, ...).
+if(MSVC)
+    set(CURCUMA_PTHREAD "")
+else()
+    set(CURCUMA_PTHREAD pthread)
+endif()
+target_link_libraries(curcuma_core ${CURCUMA_PTHREAD} fmt::fmt-header-only )
+target_link_libraries(curcuma_cap ${CURCUMA_PTHREAD} fmt::fmt-header-only )
 
 # Link BLAS/LAPACK for curcuma_core.
 # EIGEN_USE_BLAS: per-file in eeq_solver.cpp (avoids Eigen 3.4 complex-type conflict).
@@ -1122,7 +1567,15 @@ add_test(NAME confscan_subspace COMMAND confscan_test subspace WORKING_DIRECTORY
 add_test(NAME confscan_free COMMAND confscan_test free WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME confscan_dtemplate COMMAND confscan_test dtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME confscan_template COMMAND confscan_test template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME confscan_molalign COMMAND confscan_test molalign WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+# Claude Generated (June 2026): The molalign scenario shells out to the external
+# 'molalign' binary. Only register it when that binary is found, otherwise the
+# test fails on machines without the optional dependency (false negative).
+find_program(MOLALIGN_BIN molalign)
+if(MOLALIGN_BIN)
+    add_test(NAME confscan_molalign COMMAND confscan_test molalign WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+else()
+    message(STATUS "molalign binary not found - skipping confscan_molalign test")
+endif()
 add_test(NAME confscan_sLX1 COMMAND confscan_test sLX1 WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME confscan_sLX2 COMMAND confscan_test sLX2 WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME confscan_sLX2Reset COMMAND confscan_test sLX2Reset WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
@@ -1174,5 +1627,13 @@ target_include_directories(curcuma_core SYSTEM BEFORE PUBLIC ${CMAKE_CURRENT_BIN
 
 # --- End of Auto-generated Parameter Registry ---
 
-install(TARGETS curcuma RUNTIME DESTINATION bin)
-install(TARGETS curcuma_helper RUNTIME DESTINATION bin)
+# Claude Generated 2026 - only install curcuma's own standalone executables when
+# curcuma is the top-level project (its own release/ build), not when it's
+# consumed as a FetchContent dependency (e.g. by qurcuma, which excludes both
+# targets from the default build via EXCLUDE_FROM_ALL). Otherwise the consuming
+# project's own `install`/`cpack` aggregates this rule and fails trying to
+# install a curcuma_helper binary that was never built.
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+    install(TARGETS curcuma RUNTIME DESTINATION bin)
+    install(TARGETS curcuma_helper RUNTIME DESTINATION bin)
+endif()

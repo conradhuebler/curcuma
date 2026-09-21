@@ -17,6 +17,8 @@
 #pragma once
 
 #include <cmath>
+#include <initializer_list>
+#include <utility>
 #include <vector>
 
 namespace GFNFFParameters {
@@ -40,10 +42,14 @@ static const std::vector<double> chi_eeq = {
     0.967863, 1.002901, 1.037940, 1.072978, 1.108017, // Nb-Rh
     1.143055, 1.178094, 1.213132, 1.205076, 1.075529, // Pd-Sn
     1.206919, 1.303658, 1.332656, 1.179317, 0.789115, // Sb-Cs
-    0.798704, 0.993208, 0.907847, 0.836114, 0.778008, // Ba-Nd
-    0.733529, 0.702678, 0.685455, 0.681858, 0.691889, // Pm-Tb
-    0.715548, 0.752834, 0.803747, 0.868288, 0.946457, // Dy-Yb
-    1.038252, 1.128780, 1.129764, 1.130747, 1.131731, // Lu-Re
+    // Claude Generated (Jul 2026): Z=57-71 (La-Lu) were wrong (interpolated dip to
+    // ~0.68); replaced with the verbatim Fortran chi_angewChem2020(57:71) (~1.1278,
+    // nearly flat). Ba(56)/Hf(72)/W(74) already matched. No MOR41 lanthanides, but
+    // same heavy-element array-error class as the gam fix below.
+    0.798704, 1.127797, 1.127863, 1.127928, 1.127994, // Ba-Nd
+    1.128059, 1.128125, 1.128190, 1.128256, 1.128322, // Pm-Tb
+    1.128387, 1.128453, 1.128518, 1.128584, 1.128649, // Dy-Yb
+    1.128715, 1.128780, 1.129764, 1.130747, 1.131731, // Lu-Re
     1.132714, 1.133698, 1.134681, 1.135665, 1.136648, // Os-Hg
     1.061832, 1.053084, 1.207830, 1.236314, 1.310129, // Tl-At
     1.157380, 0.789115, 0.798704, 1.053384, 1.056040, // Rn-Ra
@@ -68,13 +74,19 @@ static const std::vector<double> gam_eeq = {
     -0.010869, -0.000951, 0.008967, 0.018884, 0.028802, // Nb-Rh
     0.038720, 0.048638, 0.058556, 0.036488, 0.077711, // Pd-Sn
     0.077025, 0.004547, 0.039909, 0.082630, 0.485375, // Sb-Cs
-    0.498677, 0.192222, 0.221806, 0.229117, 0.236428, // Ba-Nd
-    0.243740, 0.251051, 0.258362, 0.265673, 0.272984, // Pm-Tb
-    0.280296, 0.287607, 0.294918, 0.302229, 0.309540, // Dy-Yb
-    0.316851, 0.324163, 0.068830, 0.064240, 0.059650, // Lu-Re
-    0.055060, 0.050471, 0.045881, 0.041291, 0.036701, // Os-Hg
-    0.032111, 0.027521, 0.010600, 0.004800, 0.053600, // Tl-At
-    0.072000, 0.485375, 0.498677, 0.192222, 0.221806, // Rn-Ra
+    // Claude Generated (Jul 2026): Z=56-86 were placeholder/interpolated garbage
+    // (Z>=87 even repeated the Z=55-56 chunk). Replaced with the verbatim Fortran
+    // gam_angewChem2020(56:86) (gfnff_param.f90). curcuma's W gam was +0.064240 vs
+    // the reference -0.003724 -> wrong 5d-metal EEQ charge (W qa 0.326 vs 0.351) ->
+    // wrong Coulomb + metal-bond fqq (ED07 +8.5 kcal). Z=87-103 stay untouched
+    // (GFN-FF is only defined Z<=86; those slots are never used for valid elements).
+    0.416264, -0.011212, -0.011046, -0.010879, -0.010713, // Ba-Nd
+    -0.010546, -0.010380, -0.010214, -0.010047, -0.009881, // Pm-Tb
+    -0.009714, -0.009548, -0.009382, -0.009215, -0.009049, // Dy-Yb
+    -0.008883, -0.008716, -0.006220, -0.003724, -0.001228, // Lu-Re
+    0.001267, 0.003763, 0.006259, 0.008755, 0.011251, // Os-Hg
+    0.020477, -0.056566, 0.051943, 0.076708, 0.000273, // Tl-At
+    -0.068929, 0.485375, 0.498677, 0.192222, 0.221806, // Rn-Ra
     0.229117, 0.236428, 0.243740, 0.251051, 0.258362, // Ac-Am
     0.265673, 0.272984, 0.280296, 0.287607, 0.294918, // Cm-Cf
     0.302229, 0.309540, 0.316851                       // Es-Lr
@@ -359,12 +371,20 @@ static const double bsmat[4][4] = {
 
 // Metal type classification
 // 0=non-metal, 1=main group metal, 2=transition metal
+// Claude Generated (Jul 2026, F3 fix): corrected to match xtb metal(86) EXACTLY
+// (external/xtb/src/gfnff/gfnff_param.f90:318-325). The previous array had only 83
+// entries — the K-Kr row was missing Kr(36)=0 and the Rb-Xe row was missing I(53)=0
+// and Xe(54)=0, plus Ag(47) was 1 instead of 2. The 3-element shortfall shifted
+// every Z>=36 index by 1-3, so I(Z=53) read index 52 (=2, TM) instead of 0. That
+// made calculateDgam use the TM ff=-0.9 for I instead of the halogen ff=-0.07,
+// giving dgam(I)=-0.176 instead of -0.0137, gameeq(I)=-0.136 (negative hardness)
+// and over-polarised iodine by ~0.19 e (S30L 15/16 Coulomb -14 kcal/mol).
 static const int metal_type[86] = {
-    0, 0, // H-He
-    1, 1, 0, 0, 0, 0, 0, 0, // Li-Ne
-    1, 1, 1, 0, 0, 0, 0, 0, // Na-Ar
-    1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, // K-Kr
-    1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 0, 0, 0, 0, // Rb-Xe
+    0, 0,                                                                      // H-He
+    1, 1, 0, 0, 0, 0, 0, 0,                                                    // Li-Ne
+    1, 1, 1, 0, 0, 0, 0, 0,                                                    // Na-Ar
+    1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0,                     // K-Kr   (Kr=0 added)
+    1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 0, 0, 0, 0, 0,                     // Rb-Xe  (Ag=2, I=0, Xe=0 added)
     1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 0, 0 // Cs-Rn
 };
 
@@ -377,6 +397,37 @@ static const int periodic_group[86] = {
     1, 2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, 3, 4, 5, 6, 7, 8, // K-Kr
     1, 2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, 3, 4, 5, 6, 7, 8, // Rb-Xe
     1, 2, -3, -3, -3, -3, -3, -3, -3, -3, -3, -3, -3, -3, -3, -3, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, 3, 4, 5, 6, 7, 8 // Cs-Rn
+};
+
+// "Normal" coordination number per element, used only by the metal-reduced
+// neighbour list (nbm, getnb icase=3) to drop unusually coordinated heavy atoms.
+// Verbatim port of gfnff_param.f90:425-432 ("only for non metals well defined").
+// Claude Generated (Jul 2026) - metal-reduced neighbour list port
+static const int normcn[86] = {
+    1, 0,                                                                      // H-He
+    4, 4, 4, 4, 4, 2, 1, 0,                                                    // Li-Ne
+    4, 4, 4, 4, 4, 2, 1, 0,                                                    // Na-Ar
+    4, 4, 4, 4, 6, 6, 6, 6, 6, 6, 4, 4, 4, 4, 4, 4, 1, 0,                      // K-Kr
+    4, 4, 4, 4, 6, 6, 6, 6, 6, 6, 4, 4, 4, 4, 4, 4, 1, 0,                      // Rb-Xe
+    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,                         // Cs-Lu
+    4, 6, 6, 6, 6, 6, 6, 6, 4, 4, 4, 4, 4, 1, 0                                // Hf-Rn
+};
+
+// Pauling-like electronegativity used by GFN-FF for the "metallic character"
+// estimate mchar (gfnff_ini.f90:249). Verbatim port of gfnff_param.f90:315-324.
+// NOTE: this is param%en and is NOT the same array as rab_en (from gfnffrab.f90)
+// used by computeRabEstimate - do not substitute one for the other.
+// Claude Generated (Jul 2026) - metal-reduced neighbour list port
+static const double gfnff_en[86] = {
+    2.200, 3.000, 0.980, 1.570, 2.040, 2.550, 3.040, 3.440, 3.980,             // H-F
+    4.500, 0.930, 1.310, 1.610, 1.900, 2.190, 2.580, 3.160, 3.500,             // Ne-Ar
+    0.820, 1.000, 1.360, 1.540, 1.630, 1.660, 1.550, 1.830, 1.880,             // K-Co
+    1.910, 1.900, 1.650, 1.810, 2.010, 2.180, 2.550, 2.960, 3.000,             // Ni-Kr
+    0.820, 0.950, 1.220, 1.330, 1.600, 2.160, 1.900, 2.200, 2.280,             // Rb-Rh
+    2.200, 1.930, 1.690, 1.780, 1.960, 2.050, 2.100, 2.660, 2.600,             // Pd-Xe
+    0.79, 0.89, 1.10, 1.12, 1.13, 1.14, 1.15, 1.17, 1.18, 1.20, 1.21, 1.22,    // Cs-Dy
+    1.23, 1.24, 1.25, 1.26, 1.27, 1.3, 1.5, 1.7, 1.9, 2.1, 2.2, 2.2, 2.2,      // Ho-Au (W-Au modified)
+    2.00, 1.62, 2.33, 2.02, 2.0, 2.2, 2.2                                      // Hg-Rn
 };
 
 // ============================================================================
@@ -680,85 +731,66 @@ static constexpr double XHACI_GLOBABH = 0.268;  // A-H...B general scaling
 static constexpr double XHACI_COH = 0.350;      // A-H...O=C scaling
 static constexpr double XHACI_GLOB = 1.50;      // Baseline acidity
 
-// --- Element-Specific Basicity (xhbas) ---
-// For both HB and XB - acceptor atom B
-// Index: atomic number (0-based, index 0 unused)
-// Reference: gfnff_param.f90:488-502
-static const std::vector<double> hb_basicity = {
-    0.0,    // Z=0 (placeholder)
-    0.0,    // H (1)
-    0.0,    // He (2)
-    0.0, 0.0, 0.0,                              // Li, Be, B (3-5)
-    0.80,   // C (6)
-    1.68,   // N (7)
-    0.67,   // O (8)
-    0.52,   // F (9)
-    0.0,    // Ne (10)
-    0.0, 0.0, 0.0,                              // Na, Mg, Al (11-13)
-    4.0,    // Si (14)
-    3.5,    // P (15)
-    2.0,    // S (16)
-    1.5,    // Cl (17)
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // Ar-As (18-32)
-    3.5,    // As (33) = param%xhbas(15)
-    2.0,    // Se (34) = param%xhbas(16)
-    1.5,    // Br (35)
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // Kr-Sn (36-50)
-    3.5,    // Sb (51) = param%xhbas(15)
-    2.0,    // Te (52) = param%xhbas(16)
-    1.9,    // I (53)
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // Xe-At (54-85)
-    0.0     // Rn (86)
-};
+// --- HB / XB element tables (xhbas, xhaci, xbaci) ---
+//
+// The Fortran writes these as a zero fill plus a handful of assignments
+// (`param%xhbas(:) = 0; param%xhbas(6) = 0.80; ...`, gfnff_param.f90:488-522).
+// They used to be spelled out here as dense literals with the zero runs written by
+// hand, and that miscounted: the final "Xe-At (54-85)" run held 17 zeros where 32 are
+// needed, so ALL THREE vectors ended at index 71 while every use site indexes them by
+// atomic number up to 86. Reading `hb_basicity[83]` for a bismuth was therefore an
+// out-of-bounds `std::vector::operator[]` — undefined behaviour that happened to return
+// a nonzero value, which admitted Bi as a valid halogen-bond base and put a spurious
+// -0.0015 Eh X-bond into every GMTKN55 HEAVY28 BiH3 complex. Affected every element
+// from Z=72 (Hf) upward, i.e. the 5d metals of MOR41 as well.
+// Building them sparsely, exactly the way the reference does, removes the whole failure
+// mode. Claude Generated (Sep 2026).
+inline std::vector<double> gfnffElementTable(std::initializer_list<std::pair<int, double>> entries)
+{
+    std::vector<double> table(87, 0.0);   // index == atomic number; 1..86 used, 0 unused
+    for (const auto& e : entries) {
+        if (e.first >= 0 && e.first < 87) table[e.first] = e.second;
+    }
+    return table;
+}
 
-// --- Element-Specific HB Acidity (xhaci) ---
-// For hydrogen bond donor atom (bonded to H)
-// Reference: gfnff_param.f90:503-512
-static const std::vector<double> hb_acidity = {
-    0.0,    // Z=0 (placeholder)
-    0.0,    // H (1)
-    0.0,    // He (2)
-    0.0, 0.0, 0.0,                                      // Li, Be, B (3-5)
-    0.75,                                                // C (6) - weaker
-    XHACI_GLOB + 0.1,                                   // N (7) = 1.60
-    XHACI_GLOB,                                         // O (8) = 1.50
-    XHACI_GLOB,                                         // F (9) = 1.50
-    0.0, 0.0, 0.0, 0.0, 0.0,                            // Ne-Al (10-14)
-    XHACI_GLOB,                                         // P (15) = 1.50
-    XHACI_GLOB,                                         // S (16) = 1.50
-    XHACI_GLOB + 1.0,                                   // Cl (17) = 2.50
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // Ar-As (18-32)
-    XHACI_GLOB,                                         // As (33) = 1.50 (via pattern)
-    XHACI_GLOB,                                         // Se (34) = 1.50
-    XHACI_GLOB + 1.0,                                   // Br (35) = 2.50
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // Kr-Sn (36-50)
-    XHACI_GLOB,                                         // Sb (51) = 1.50
-    XHACI_GLOB,                                         // Te (52) = 1.50
-    XHACI_GLOB + 1.0,                                   // I (53) = 2.50
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // Xe-At (54-85)
-    0.0     // Rn (86)
-};
+// Global acidity baseline is XHACI_GLOB above (param%xhaci_glob, gfnff_param.f90:487).
 
-// --- Element-Specific XB Acidity (xbaci) ---
-// For halogen atom X in X...B interaction
-// Reference: gfnff_param.f90:513-522
-static const std::vector<double> xb_acidity = {
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // Z=0-9
-    0.0, 0.0, 0.0, 0.0, 0.0,                            // Z=10-14
-    1.0,    // P (15)
-    1.0,    // S (16)
-    0.5,    // Cl (17)
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // Ar-As (18-32)
-    1.2,    // As (33)
-    1.2,    // Se (34)
-    0.9,    // Br (35)
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // Kr-Sn (36-50)
-    1.2,    // Sb (51)
-    1.2,    // Te (52)
-    1.2,    // I (53)
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // Xe-At (54-85)
-    0.0     // Rn (86)
-};
+// Basicity of the acceptor atom B, used by BOTH the HB and the XB term
+// (B...X-A and B...H-A). Reference: gfnff_param.f90:488-502.
+static const std::vector<double> hb_basicity = gfnffElementTable({
+    { 6, 0.80}, { 7, 1.68}, { 8, 0.67}, { 9, 0.52},
+    {14, 4.00}, {15, 3.50}, {16, 2.00}, {17, 1.50},
+    {33, 3.50},  // = xhbas(15)
+    {34, 2.00},  // = xhbas(16)
+    {35, 1.50},
+    {51, 3.50},  // = xhbas(15)
+    {52, 2.00},  // = xhbas(16)
+    {53, 1.90},
+});
+
+// HB acidity of the donor atom A (the one carrying the H).
+// Reference: gfnff_param.f90:503-512. NOTE: unlike xhbas, this table has NO entries for
+// As/Se/Sb/Te — curcuma used to mirror the xhbas pattern onto them and gave all four
+// XHACI_GLOB, which the reference does not. Corrected Sep 2026.
+static const std::vector<double> hb_acidity = gfnffElementTable({
+    { 6, 0.75},                  // weaker for C-H
+    { 7, XHACI_GLOB + 0.1},
+    { 8, XHACI_GLOB},
+    { 9, XHACI_GLOB},
+    {15, XHACI_GLOB},
+    {16, XHACI_GLOB},
+    {17, XHACI_GLOB + 1.0},
+    {35, XHACI_GLOB + 1.0},
+    {53, XHACI_GLOB + 1.0},
+});
+
+// XB acidity of the halogen X in X...B. Reference: gfnff_param.f90:513-522.
+static const std::vector<double> xb_acidity = gfnffElementTable({
+    {15, 1.0}, {16, 1.0}, {17, 0.5},
+    {33, 1.2}, {34, 1.2}, {35, 0.9},
+    {51, 1.2}, {52, 1.2}, {53, 1.2},
+});
 
 // ============================================================================
 // Metal Bond Shift Factors (Claude Generated - January 2026)

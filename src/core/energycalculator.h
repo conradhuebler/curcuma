@@ -460,7 +460,7 @@ private:
     bool m_containsNaN = false;                      ///< NaN detection flag
     bool m_error = false;                            ///< Error state flag
     std::string m_error_message;                     ///< Error description
-    bool m_gpu_fallback = false;                    ///< GPU requested but CUDA unavailable
+    bool m_gpu_fallback = false;                    ///< GPU requested but its plugin is absent (CPU used)
     bool m_gpu_fallback_warned = false;              ///< Final GPU warning already printed
     int m_atoms = 0;                                 ///< Number of atoms
     int m_mult = 1;                                  ///< Multiplicity
@@ -476,20 +476,13 @@ private:
      * Claude Generated: Phase 3C - Native ConfigManager support
      * @param config ConfigManager configuration
      */
-    void initializeCommonFromConfig(const ConfigManager& config);
+    void initializeCommonFromConfig(const ConfigManager& config, const json* raw_controller = nullptr);
 
     /**
      * @brief Initialize EnergyCalculator with JSON settings (backward compatible)
      * @param controller Configuration JSON
      */
     void initializeCommon(const json& controller);
-
-    /**
-     * @brief Re-attach method-specific sub-scopes (gfnff, eeq_solver, …) onto
-     * m_controller after ConfigManager initialization, then rebuild the method
-     * if any new scope was carried over. Claude Generated (WP6, May 2026).
-     */
-    void reattachMethodScopes(const json& controller);
 
     /**
      * @brief Create computational method using factory

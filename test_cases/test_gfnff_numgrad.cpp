@@ -170,10 +170,15 @@ int main(int argc, char* argv[])
             xyz_file = arg;
     }
 
-    // fixed-charges: tests gradient formula correctness → tight tolerance
-    // full EEQ:     analytical gradient uses frozen-charge approximation (no dq/dr),
-    //               numerical gradient fully re-optimises charges → ~1-3 mEh/Bohr gap
-    //               is expected and matches the Fortran GFN-FF reference behaviour.
+    // full EEQ (default, the pass/fail gate): the analytical Gradient() is the TOTAL
+    //   derivative (incl. the Coulomb charge response, Term-1b / dynamic charges added
+    //   Feb 2026); NumGrad() re-solves EEQ + CN each step, so the two agree to a few
+    //   mEh/Bohr. This is the gradient an optimiser/MD actually uses.
+    // fixed-charges (--fixed-charges): DIAGNOSTIC ONLY, not a pass/fail gate. NumGradFixedCharges
+    //   freezes EEQ → a PARTIAL derivative, which the (total) analytical gradient correctly does
+    //   NOT match for polar systems (the charge-response term is large and opposite, e.g. H2O
+    //   total -1.2e-2 vs partial +2.9e-2 Eh/Bohr). The 1e-4 tolerance here is therefore expected
+    //   to "fail" and the corresponding ctest was retired — see test_cases/CMakeLists.txt.
     const double tol = fixed_charges ? 1e-4 : 5e-3; // Eh/Bohr
 
     std::cout << "GFN-FF CPU Gradient Validation (analytical vs numerical)\n"

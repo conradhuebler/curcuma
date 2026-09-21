@@ -1,0 +1,36 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : enable
+// GFN2 anisotropic (dipole/quadrupole) Fock contribution, added in place to the resident
+// isotropic Fock (Stage 2b / V-AP3). One thread per AO pair (mu,nu):
+//   F(mu,nu) -= 0.5*[ Sum_k dp_int[k](mu,nu)*v_dp(k,jat) + dp_int[k](nu,mu)*v_dp(k,iat)
+//                   + Sum_k qp_int[k](mu,nu)*v_qp(k,jat) + qp_int[k](nu,mu)*v_qp(k,iat) ]
+// with iat=ao2at[mu], jat=ao2at[nu]. Verbatim port of CUDA k_add_fock_multipole. dp_int
+// 3*nn / qp_int 6*nn / F column-major (mu,nu) at mu+nu*nao. Claude Generated.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(std430, binding = 0) readonly buffer B0 { double dp_int[]; };
+layout(std430, binding = 1) readonly buffer B1 { double qp_int[]; };
+layout(std430, binding = 2) readonly buffer B2 { double v_dp[]; };   // 3*nat, k+iat*3
+layout(std430, binding = 3) readonly buffer B3 { double v_qp[]; };   // 6*nat, k+iat*6
+layout(std430, binding = 4) readonly buffer B4 { int    ao2at[]; };
+layout(std430, binding = 5)          buffer B5 { double F[]; };      // resident Fock (in place)
+layout(push_constant) uniform PC { uint nao; } pc;
+
+void main()
+{
+    uint mu = gl_GlobalInvocationID.x;
+    uint nu = gl_GlobalInvocationID.y;
+    if (mu >= pc.nao || nu >= pc.nao) return;
+    uint n = pc.nao;
+    uint nn = n * n;
+    uint mn = mu + nu * n;     // (mu,nu)
+    uint nm = nu + mu * n;     // (nu,mu)
+    int iat = ao2at[mu];
+    int jat = ao2at[nu];
+    double dd = 0.0lf;
+    for (uint k = 0u; k < 3u; ++k)
+        dd += dp_int[k*nn + mn] * v_dp[k + uint(jat)*3u] + dp_int[k*nn + nm] * v_dp[k + uint(iat)*3u];
+    double qq = 0.0lf;
+    for (uint k = 0u; k < 6u; ++k)
+        qq += qp_int[k*nn + mn] * v_qp[k + uint(jat)*6u] + qp_int[k*nn + nm] * v_qp[k + uint(iat)*6u];
+    F[mn] -= 0.5lf * (dd + qq);
+}

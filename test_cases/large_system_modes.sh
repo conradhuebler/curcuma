@@ -47,19 +47,18 @@ check() {
         'BEGIN{d=a-b; if(d<0)d=-d; if(d<=t){printf "PASS  %s : |%.8f-%.8f|=%.2e <= %.0e\n",n,a,b,d,t} else {printf "FAIL  %s : |%.8f-%.8f|=%.2e > %.0e\n",n,a,b,d,t; exit 1}}' \
         || fail=1
 }
-# Assert a hard-error by checking that the energy line is "0.00000000 Eh"
-# (curcuma doesn't propagate the wrapper's hasError() into the exit code; the
-# fallback is to print 0.00000000 Eh when the method refused to compute, which
-# is the observable signal of a clean rejection in the run log).
+# Assert a hard-error. Fail-loud (June 2026): -sp now returns a non-zero exit code
+# and an [ERROR] line when the method refuses to compute (and no longer prints a
+# bogus "Single Point Energy = 0.0"). Accept the exit code or any of the legacy /
+# new rejection signals so the check is robust across versions.
 assert_hard_error() {
     local name="$1"; shift
-    local out
-    out=$("$@" 2>/dev/null \
-        | sed -r 's/\x1b\[[0-9;]*m//g')
-    if echo "$out" | grep -q 'Single Point Energy = 0.00000000 Eh'; then
-        echo "PASS  $name : rejected with 0.00000000 Eh (hard-error path)"
-    elif echo "$out" | grep -q 'Failed to set molecule'; then
-        echo "PASS  $name : rejected with 'Failed to set molecule'"
+    local out rc
+    out=$("$@" 2>&1); rc=$?
+    out=$(echo "$out" | sed -r 's/\x1b\[[0-9;]*m//g')
+    if [ "$rc" -ne 0 ] \
+       || echo "$out" | grep -qE 'Single Point Energy = 0\.00000000 Eh|Failed to set molecule|calculation failed|energy-only|does not yet support'; then
+        echo "PASS  $name : rejected (rc=$rc)"
     else
         echo "FAIL  $name : expected hard-error, got a real energy:"; echo "$out" | grep 'Single Point' | head -1; fail=1
     fi
@@ -128,5 +127,15 @@ if [ -z "$DC_PURIFY_T0" ] || [ "$DC_PURIFY_T0" = "0.00000000" ]; then
 else
     echo "PASS  fragments+eigensolver=purify+T=0 computes (got $DC_PURIFY_T0 Eh)"
 fi
+
+# --- X-L4 (June 2026): dc/sparse are energy-only. -sp is energy-only by default,
+#     so the energy checks above pass; but requesting forces (-gradient, as -opt/-md
+#     do) must hard-error instead of silently returning a zero gradient. -----------
+assert_hard_error "dc + -gradient hard-errors (energy-only)" \
+    "$CURCUMA" -sp "$MOL" -method gfn2 -large_system_mode dc \
+        -large_system_cell_bohr 200 -large_system_buffer_bohr 200 -gradient
+assert_hard_error "sparse + -gradient hard-errors (energy-only)" \
+    "$CURCUMA" -sp "$MOL" -method gfn2 -large_system_mode sparse \
+        -large_system_sparse_threshold 0 -xtb.electronic_temperature 0 -gradient
 
 if [ "$fail" -eq 0 ]; then echo "ALL large_system_modes CHECKS PASSED"; exit 0; else echo "large_system_modes CHECKS FAILED"; exit 1; fi

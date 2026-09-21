@@ -17,10 +17,11 @@
 
 #pragma once
 
-#ifdef USE_CUDA_XTB
+#ifdef USE_CUDA
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace curcuma {
 namespace xtb {
@@ -35,7 +36,10 @@ namespace gpu {
  */
 class XtbGpuContext {
 public:
-    XtbGpuContext();
+    /// @param device CUDA device index to bind this context to; -1 = the calling thread's
+    ///               current device (historical behaviour). An out-of-range index leaves
+    ///               ok() false so the caller falls back to the CPU. Claude Generated (Sep 2026).
+    explicit XtbGpuContext(int device = -1);
     ~XtbGpuContext();
 
     XtbGpuContext(const XtbGpuContext&) = delete;
@@ -47,11 +51,30 @@ public:
     /// Selected device name (e.g. "NVIDIA GeForce RTX 5080"); empty if none.
     std::string deviceName() const;
 
+    /**
+     * @brief True when this device's FP64 throughput is a HALF of its FP32 (datacenter parts),
+     *        false for the 1:32 / 1:64 consumer and workstation parts.
+     *
+     * Decides whether the mixed-precision SCF pays: on an H200 the FP32 iterations were measured
+     * SLOWER than the FP64 ones (5.29 vs 3.36 s on polymer_2x), while on an A4500 FP64 costs 4x
+     * an FP32 iteration. Claude Generated (Sep 2026).
+     */
+    bool deviceHasFastFp64() const;
+
     /// Selected CUDA device id, or -1 if none.
     int deviceId() const;
 
+    /// Make this context's device current on the CALLING thread (no-op when it already is).
+    /// The CUDA current device is per host thread, so every entry point that may run on a
+    /// different thread than the constructor (thread pools, MD workers) calls this first.
+    /// Claude Generated (Sep 2026, multi-GPU).
+    bool bindDevice() const;
+
     /// True if at least one CUDA device is visible (static probe, no allocation).
     static bool deviceAvailable();
+
+    /// Number of visible CUDA devices (0 when none / no driver).
+    static int deviceCount();
 
     /**
      * @brief Solve the generalized symmetric eigenproblem F C = S C ε on the GPU,
@@ -173,6 +196,70 @@ public:
     /// per molecule, before the per-geometry compute. Returns false on any error.
     bool beginBasis(const XtbGpuBasisData& basis);
 
+    /**
+     * @brief Device memory the resident SCF + gradient path will need for this basis.
+     *
+     * Sums every buffer the resident path allocates (S/H0/L, C/P/Cw, the GFN2 dipole and
+     * quadrupole integrals, gamma, the cuSOLVER syevd/potrf workspaces for FP64 and the FP32
+     * mixed-precision copies, the GFN2 multipole interaction matrices, the D4-EEQ system and
+     * the gradient's energy-weighted density). The workspace sizes are queried from cuSOLVER,
+     * not guessed. Used by beginBasis() to refuse a basis that cannot fit instead of failing
+     * half-way through the allocation. Claude Generated (Sep 2026, multi-GPU/large systems).
+     */
+    size_t estimateResidentBytes(int nat, int nsh, int nao, bool is_gfn2) const;
+
+    /// Enable/disable the pre-allocation memory check in beginBasis (default on).
+    void setMemoryCheck(bool on);
+
+    /// Reason for the last refused/failed beginBasis ("" when it succeeded).
+    std::string lastError() const;
+
+    /// Accumulated per-phase device timings when CURCUMA_GPU_PROFILE is set, else "".
+    std::string profileReport() const;
+
+    /**
+     * @brief Storage of S, H0 and the GFN2 multipole integrals on the device.
+     * @param mode 0 = always dense (nao^2 each), 1 = auto (screened pair list when fewer than
+     *             half of the AO pairs survive the distance screen), 2 = always screened.
+     * The screen drops integrals below 1e-20 (atom-pair cutoff derived from the smallest
+     * primitive exponent and largest coefficient of each element). Claude Generated (Sep 2026).
+     */
+    void setSparseIntegrals(int mode);
+
+    /// Screened storage in use for the last geometry, and its fill fraction / largest cutoff.
+    bool sparseIntegrals() const;
+    double sparseFraction() const;
+    double sparseCutoffBohr() const;
+
+    /**
+     * @brief Spread the per-iteration full-spectrum eigensolve of the resident SCF over several
+     *        GPUs (the rest of the SCF stays on this context's device).
+     * @param devices  CUDA device indices; fewer than two disables it
+     * @param backend  "auto" (cuSOLVERMp, else cusolverMg), "mp" or "mg"
+     * @param block    column block size of the 1 x ndev distribution
+     * @param min_nao  only for bases with at least this many AOs
+     * @param fp32     also for the mixed-precision FP32 iterations
+     * Falls back to the single-GPU cuSOLVER solve when the backend is missing or fails.
+     * Claude Generated (Sep 2026, multi-GPU step 3).
+     */
+    void setDistributedEigensolver(const std::vector<int>& devices, const std::string& backend,
+                                   int block, int min_nao, bool fp32, bool verify = true);
+
+    /// "" when not configured, else backend/device/solve summary or the reason it is not used.
+    std::string distributedEigensolverStatus() const;
+
+    /**
+     * @brief Spread the screened-pattern density of the resident SCF over several GPUs.
+     * @param devices helper devices (this context's own device is skipped); empty disables it
+     * P(r,c) = sum_k Cw(r,k) C(c,k) is a sum over the occupied columns, so every device evaluates
+     * the whole pattern over its own slice of columns and the partials are added here - exact, not
+     * an approximation. Per SCF step only the column slices of C travel. Claude Generated (Sep 2026).
+     */
+    void setDensityDevices(const std::vector<int>& devices, int min_nao = 4000);
+
+    /// "" when not configured, else the devices used and the number of split steps.
+    std::string densityDevicesStatus() const;
+
     /// Per-geometry: upload xyz_bohr (3·nat) and run the CN kernel (cn_exp/cn_gfn
     /// per is_gfn2 from beginBasis) + the self-energy kernel. Results resident;
     /// download with downloadCn / downloadSelfEnergy. Requires a prior beginBasis.
@@ -293,6 +380,14 @@ public:
     /// beginDispersion for the same geometry. Returns false on error.
     bool dispersionDedq(int nat, const double* W, const double* dWq, double* dEdq_out);
 
+    /// Post-SCF 2-body D4 energy/gradient/dEdcn/dEdq and ATM 3-body on the device (see the
+    /// GpuScfBackend docs in xtb_native.h). Claude Generated (Sep 2026).
+    bool dispersionGradient(int nat, const double* W, const double* dWq, const double* dWc,
+                            double* e_atom_out, double* grad_out, double* dEdcn_out, double* dEdq_out);
+    bool dispersionATM(int nat, const double* c6, const double* dc6dcn,
+                       double s9, double a1, double a2, double alp, double cutoff,
+                       double* e_atom_out, double* grad_out, double* dEdcn_out);
+
     /* ----- Stage 5 (Part B3/B4): full device GFN2 potential build -------- *
      * Move the WHOLE per-iteration isotropic+anisotropic potential build onto the
      * device so the SCF loop uploads only q_sh/dp_at/qp_at (+ host D4 weights)
@@ -304,6 +399,13 @@ public:
     bool beginPotential(int nat, int nsh,
                         const double* amat_sd, const double* amat_dd, const double* amat_sq,
                         const double* dkernel, const double* qkernel, const double* gamma3);
+
+    /// Same as beginPotential, but without the 18 nat² interaction matrices: the device
+    /// rebuilds their elements per iteration from the geometry (Bohr) and the damping radii.
+    /// Claude Generated (Sep 2026, large systems).
+    bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr, const double* mrad,
+                                double dmp3, double dmp5, const double* dkernel,
+                                const double* qkernel, const double* gamma3);
 
     /* ----- WP4b: in-SCF implicit solvation on the device potential path ----- *
      * Upload the nat×nat Born interaction matrix B (keps-scaled, symmetric) once per
@@ -393,6 +495,19 @@ public:
                              double* eps);
 
 private:
+    // Screened AO-pair list for the current geometry (host build + device upload). Sets
+    // use_sparse when the screened storage should be used. Claude Generated (Sep 2026).
+    bool buildScreenedPairs(const double* xyz_bohr, bool& use_sparse);
+    size_t estimateStorageBytes(int nat, int nsh, int nao, bool is_gfn2, double nnz) const;
+
+    /// Pattern density over the helper devices of setDensityDevices(); false = caller falls back.
+    bool densityPatternDistributed(int n, int ncol);
+    // Storage-independent building blocks (dense or screened). Claude Generated (Sep 2026).
+    bool buildFockIntoC(int n, bool multipole);
+    bool populationsAndBand(int n, double* band_out);
+    bool multipoleMomentsResident(int n, int nat);
+    bool ensureDenseDensity(int n);
+
     /// Device-pointer Broyden update core (S6.4); shared by broydenUpdate (test
     /// upload/download) and the fused resident loop. Queues all work on the stream.
     bool runBroydenUpdate(const double* dvin, const double* dvout, double* dvnext);
@@ -428,4 +543,4 @@ private:
 } // namespace xtb
 } // namespace curcuma
 
-#endif // USE_CUDA_XTB
+#endif // USE_CUDA

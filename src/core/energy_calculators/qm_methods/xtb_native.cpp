@@ -52,8 +52,7 @@ namespace curcuma::xtb {
  *  Lifecycle
  * ------------------------------------------------------------------------- */
 XTB::XTB(MethodType method)
-    : QMDriver()
-    , m_method(method)
+    : m_method(method)
 {
 }
 
@@ -70,12 +69,14 @@ XTB::~XTB() = default;
 int XTB::effectiveIntraThreads(int work_units) const
 {
     if (m_intra_threads <= 1) return 1;
-    // Already running under molecule-level parallelism → stay serial (no N^2).
-    if (curcuma::intraParallelSuppressed()) return 1;
+    // Already running under molecule-level parallelism → stay within the batch budget
+    // (1 = serial for CPU batches, no N^2; cores/GPU-slots for GPU batch workers).
+    const int cap = curcuma::intraParallelSuppressed() ? curcuma::intraThreadBudget() : m_intra_threads;
+    if (cap <= 1) return 1;
     // Size guard: keep at least kMinWorkPerThread items per thread; tiny systems
     // are dominated by dispatch overhead (tuned in the benchmark step).
     const int by_work = work_units / kMinWorkPerThread;
-    const int t = std::min(m_intra_threads, std::max(1, by_work));
+    const int t = std::min(std::min(m_intra_threads, cap), std::max(1, by_work));
     return t;
 }
 
@@ -106,6 +107,13 @@ void XTB::parallelStripes(int n_threads,
 
 bool XTB::InitialiseMolecule()
 {
+    // Reset hard-error state for the new molecule (Claude Generated): the B0
+    // d-shell guard below sets it, so a stale flag must not leak from a previous
+    // (rejected) system into a later valid one.
+    m_has_error = false;
+    m_error_message.clear();
+    m_cn_cache_valid = false;  // X-I3: invalidate CN cache for the new system
+
     if (m_atomcount <= 0) {
         CurcumaLogger::error("XTB::InitialiseMolecule: no atoms set");
         return false;
@@ -128,6 +136,15 @@ bool XTB::InitialiseMolecule()
     CitationRegistry::cite("diis", meth);         // SCF convergence (DIIS/Broyden)
 
     buildBasis();
+
+    // X-I1 (Claude Generated): d-shell basis functions are now supported on the CPU
+    // path (cartesian->spherical dtrafo overlap/H0/multipole + gradients, validated to
+    // <=1e-8 Eh vs tblite on H2S/PH3/HCl/SiH4). The former B0 loud-error guard was
+    // removed here once d was implemented. Main-group d (S/P/Cl/Si/...) is validated;
+    // transition metals are enabled but NOT validated (no reference set) -- see
+    // docs/SQM_DSHELL_WP.md. GPU device d kernels are pending; d systems fall back to
+    // the CPU integral/SCF/gradient path (m_has_dshell gate in buildBasis).
+
     buildH0Data();
     buildReferenceOccupations();
     // A fresh molecule invalidates any SCC-extrapolation history from a previous
@@ -185,10 +202,12 @@ double XTB::energySolvation() const
 
 // Non-member helper for convergence check (must be defined before Calculation)
 namespace {
-    bool checkConvergence_impl(const Vector& q_old, const Vector& q_new,
-                                double e_old, double e_new, double thresh)
+    // dq is the max-abs residual of the SCC vector the mixer works on: shell charges
+    // for GFN1, shell charges + atomic dipole/quadrupole moments for GFN2. tblite
+    // converges on the same two conditions (xtb/singlepoint.f90:254-256:
+    // `econverged = |sum(eelec) - elast| < econv`, `pconverged = mixer%get_error() < pconv`).
+    bool checkConvergence_impl(double dq, double e_old, double e_new, double thresh)
     {
-        const double dq = (q_new - q_old).cwiseAbs().maxCoeff();
         const double de = std::fabs(e_new - e_old);
         return (dq < thresh && de < thresh * 100.0);
     }
@@ -341,8 +360,21 @@ bool XTB::xlbomdCoefficients(int K, double& kappa, double& alpha, std::vector<do
     }
 }
 
+void XTB::setHardError(const std::string& msg)
+{
+    m_has_error = true;
+    if (m_error_message.empty())
+        m_error_message = msg;
+    CurcumaLogger::error("XTB engine: " + msg);
+}
+
 double XTB::Calculation(bool gradient)
 {
+    // Reset the hard-error state for this evaluation (Claude Generated): genuine
+    // solve breakdowns below set it so the wrapper refuses to return E=0 silently.
+    m_has_error = false;
+    m_error_message.clear();
+
     // Pin MKL to one thread for the whole native SCF (see MklSerialScope in
     // xtb_native.h): the serial iteration over small/medium matrices is faster
     // without MKL's per-call thread team up to at least 231 atoms.
@@ -391,7 +423,20 @@ double XTB::Calculation(bool gradient)
     Matrix S, H0;
     bool gpu_computed = false;        // device integral build succeeded (reused below)
     bool integrals_from_device = false;
-    if (m_gpu_scf && m_scf_mode == ScfMode::Broyden) {
+    // X-I1: device d kernels are backend-gated. CUDA supports them; ROCm/Vulkan
+    // do not yet, so for those d systems use the validated CPU integral/SCF/gradient
+    // path (atom-based D4/EEQ stay on device).
+    const bool gpu_d_ok = (m_gpu_scf && m_gpu_scf->supportsDshell());
+    if (m_gpu_scf && m_has_dshell && !gpu_d_ok) {
+        static bool warned = false;
+        if (!warned && verb >= 1) {
+            warned = true;
+            CurcumaLogger::warn("native xTB: d-shell system - integrals/SCF/gradient "
+                                "run on CPU (device d kernels pending for this backend); "
+                                "D4/EEQ stay on device");
+        }
+    }
+    if (m_gpu_scf && m_scf_mode == ScfMode::Broyden && (!m_has_dshell || gpu_d_ok)) {
         GpuBasisFlat gbf;
         GpuH0Flat    gh0;
         exportGpuBasis(gbf, gh0);
@@ -411,27 +456,70 @@ double XTB::Calculation(bool gradient)
                 m_X     = Lcm;   // m_X is column-major Eigen::MatrixXd → direct
                 m_gamma = Gcm;
                 integrals_from_device = true;
+                if (verb >= 2)
+                    CurcumaLogger::info("SCF: integrals built on GPU device "
+                                        "(S/H0/Lowdin/gamma downloaded; host build skipped)");
             }
         }
     }
+    // B0 (Jul 2026): time the three host build steps separately. They used to share
+    // one stamp (t_h0 == t_gamma), so "overlap + H0" silently also contained
+    // buildOrthonormalizer() + buildGammaMatrix() and "Coulomb gamma" always read
+    // 0.00 ms — which hid how much of the bucket the integral kernel actually owns.
+    auto t_h0 = t_cn;
+    auto t_ortho = t_cn;
+    auto t_gamma = t_cn;
     if (!integrals_from_device) {
         // Full host integral build (CPU path, or device build unavailable).
         getHamiltonianH0(se, S, H0);
         m_S  = S;
         m_H0 = H0;
+        t_h0 = clock::now();
         // Orthonormalizer X = S^{-1/2}, built once here so every SCF iteration solves
         // the cheap standard eigenproblem instead of re-factorizing the constant S.
         buildOrthonormalizer();
+        t_ortho = clock::now();
         buildGammaMatrix();   // Coulomb gamma (once per geometry)
+        t_gamma = clock::now();
+    } else {
+        // Device path: S/H0/Lowdin/gamma were fused in the device build above.
+        t_h0 = t_ortho = t_gamma = clock::now();
     }
-    const auto t_h0 = clock::now();
-    const auto t_gamma = clock::now();   // S/H0/L/gamma fused above (AP4 device path)
 
     // 5. Multipole setup (GFN2 only) — fills m_dp_int, m_qp_int, interaction matrices.
-    // Always on the host: the AP4 device path uploads dp_int/qp_int, it does not build
-    // the AO multipole integrals.
+    // Stage 3m (Claude Generated): on the non-resident device GFN2 path (Vulkan/ROCm),
+    // build dp_int/qp_int ON the device and download them, skipping the host O(nao²)
+    // integral loop. CUDA's resident multipole loop (supportsMultipole) builds AND
+    // consumes them on-device, so it is excluded here and keeps the full host build.
     if (m_method == MethodType::GFN2) {
-        setupMultipole();
+        bool mp_on_device = false;
+        // The device built dp_int/qp_int during the integral build (computeIntegrals);
+        // download them for the host GFN2 gradient (multipole Pulay term) and skip the
+        // host O(nao²) integral loop. Independent of whether the SCF runs the resident
+        // multipole loop (Stage 2b) — that is set up in the SCF block below. CUDA's
+        // adapter does not override downloadMultipoleInts (its gradient is on-device), so
+        // this is a no-op there and CUDA keeps its full host build (unchanged).
+        if (integrals_from_device && m_gpu_scf
+            && m_gpu_scf->downloadMultipoleInts(m_dp_int, m_qp_int)) {
+            mp_on_device = true;
+            if (verb >= 2)
+                CurcumaLogger::info("SCF: GFN2 multipole integrals built on GPU device "
+                                    "(dp_int/qp_int downloaded; host build skipped)");
+        }
+        // Claude Generated (Sep 2026): a large GFN2 system on the CUDA device-resident path
+        // never reads the host dense multipole integrals (9 nao^2 doubles, 17 GB and a long
+        // O(nao^2) host loop at nao = 15444). Defer them; the host fallbacks (host SCF loop,
+        // host gradient, CPSCF D4 response) build them on demand. Small systems (< ~2 GB of
+        // integrals) keep the eager build, so their results and debug dumps are unchanged.
+        const double mp_bytes = 9.0 * static_cast<double>(m_basis.nao) * m_basis.nao * sizeof(double);
+        const bool defer = !mp_on_device && integrals_from_device && m_gpu_scf
+            && m_gpu_scf->supportsResidentLoop() && m_scf_mode == ScfMode::Broyden
+            && m_d4_charge_source != "cpscf" && mp_bytes > 2.0e9;
+        setupMultipole(mp_on_device || defer);
+        m_mp_ints_deferred = defer;
+        if (defer && verb >= 2)
+            CurcumaLogger::info(fmt::format("SCF: host GFN2 multipole integrals deferred ({:.1f} GB; "
+                                            "the device-resident loop builds its own)", mp_bytes / 1.0e9));
     }
 
     // Implicit solvation: refresh the geometry-dependent state (Born radii, SASA,
@@ -445,9 +533,17 @@ double XTB::Calculation(bool gradient)
         CurcumaLogger::info("Setup timing:");
         CurcumaLogger::info_fmt("  coordination numbers : {:8.2f} ms", ms(t0, t_cn));
         CurcumaLogger::info_fmt("  overlap + H0         : {:8.2f} ms", ms(t_cn, t_h0));
-        CurcumaLogger::info_fmt("  Coulomb gamma matrix : {:8.2f} ms", ms(t_h0, t_gamma));
-        if (m_method == MethodType::GFN2)
+        CurcumaLogger::info_fmt("  orthonormalizer      : {:8.2f} ms", ms(t_h0, t_ortho));
+        CurcumaLogger::info_fmt("  Coulomb gamma matrix : {:8.2f} ms", ms(t_ortho, t_gamma));
+        if (m_method == MethodType::GFN2) {
             CurcumaLogger::info_fmt("  multipole setup      : {:8.2f} ms", ms(t_gamma, t_setup));
+            // B0: attribute the multipole bucket to its five sub-phases.
+            CurcumaLogger::info_fmt("    AO dp/qp integrals : {:8.2f} ms", m_mp_t_ao_ints);
+            CurcumaLogger::info_fmt("    d-shell block      : {:8.2f} ms", m_mp_t_d_block);
+            CurcumaLogger::info_fmt("    origin shift       : {:8.2f} ms", m_mp_t_shift);
+            CurcumaLogger::info_fmt("    CN + mrad          : {:8.2f} ms", m_mp_t_cn_mrad);
+            CurcumaLogger::info_fmt("    interaction mats   : {:8.2f} ms", m_mp_t_amat);
+        }
     }
 
     // 6. SCF loop with DIIS acceleration (Pulay 1980/1982)
@@ -552,7 +648,19 @@ double XTB::Calculation(bool gradient)
         }
     }
 
-    if (guess_set) {
+    if (m_force_h0_guess) {
+        // Runaway retry: start from the bare H0, i.e. do NOT take the extrapolated or
+        // warm-started charges — those ARE the runaway solution we are trying to escape.
+        // Claude Generated (Sep 2026).
+        guess_set = false;
+        q_sh_old.setZero(nsh);
+        m_wfn.q_sh.setZero(nsh);
+        m_wfn.q_at.setZero(m_atomcount);
+        if (m_method == MethodType::GFN2) {
+            m_wfn.dp_at.setZero(3, m_atomcount);
+            m_wfn.qp_at.setZero(6, m_atomcount);
+        }
+    } else if (guess_set) {
         // extrapolation already populated m_wfn / q_sh_old
     } else if (m_warmstart && m_warmstart_q_sh.size() == nsh) {
         q_sh_old   = m_warmstart_q_sh;
@@ -572,7 +680,7 @@ double XTB::Calculation(bool gradient)
         }
         if (verb >= scf_min)
             CurcumaLogger::result("SCF initial guess: warm-start from previous step");
-    } else if (m_scf_guess == "eeq") {
+    } else if (m_scf_guess == "eeq" && !m_force_h0_guess) {
         Vector q_sh_guess;
         if (seedEEQGuess(q_sh_guess)) {
             q_sh_old   = q_sh_guess;
@@ -598,6 +706,55 @@ double XTB::Calculation(bool gradient)
     const ScfMode mode       = m_scf_mode;
     Matrix P_old;
     double dq_prev = 1.0e30;   // last max|dq| — controls the level-shift fade-out
+    // Claude Generated (Sep 2026): FP32 stagnation guard. The mixed-precision phase reverts to
+    // FP64 once max|dq| < scf_fp32_threshold, but FP32 eigenvectors carry ~1e-7 relative noise,
+    // which shows up as a floor of ~1e-5 in dq for a large system. With the GPU defaults
+    // (scf_fp32_threshold = scf_threshold = 1e-5) the SCF then hovers AT that floor and only
+    // converges when an iteration happens to dip below it - observed on 2x H200, polymer_2x:
+    // 15 vs 21 iterations for runs that differ only by rounding. So: if dq stops improving while
+    // still in FP32, switch to FP64 for the rest, where the iteration is exact and convergence
+    // is monotone again. Costs nothing when the FP32 phase is converging normally.
+    double dq_best_fp32 = 1.0e30;
+    int    fp32_stall = 0;
+    bool   fp32_exhausted = false;
+    auto fp32_wanted = [&](double dq_last) {
+        return m_scf_mixed_precision && !fp32_exhausted && (dq_last > m_scf_fp32_threshold);
+    };
+    // Claude Generated (Sep 2026, measured on H200): the FP32 phase can converge to a fixed point
+    // that is not the FP64 one. polymer_2x, nao 15444: FP32 reported max|dq| = 7.1e-6 at an energy
+    // 1.1 kcal/mol off, and the next FP64 iteration - taken only because convergence is never
+    // accepted on an FP32 step - showed the true residual to be 9.4e-3. Left alone the SCF then
+    // bounces between the two precisions. So: if an FP64 iteration finds a residual far above what
+    // FP32 last claimed, FP32 has been lying and the rest of the SCF runs in FP64.
+    double dq_fp32_last = -1.0;
+    auto note_fp64_reality_check = [&](double dq_now) {
+        if (m_eig_fp32 || fp32_exhausted || dq_fp32_last < 0.0) return;
+        if (m_fp32_false_fixpoint <= 0.0) return;   // check disabled
+        if (dq_now > m_fp32_false_fixpoint * std::max(dq_fp32_last, 1.0e-12)) {
+            fp32_exhausted = true;
+            if (CurcumaLogger::get_verbosity() >= 1)
+                CurcumaLogger::warn_fmt("SCF: the FP32 phase converged to a false fixed point "
+                                        "(FP32 max|dq| {:.2e}, FP64 says {:.2e}); continuing in FP64",
+                                        dq_fp32_last, dq_now);
+        }
+    };
+    // Call after every iteration that ran in FP32, with that iteration's max|dq|.
+    auto note_fp32_progress = [&](double dq_now) {
+        if (!m_eig_fp32) { note_fp64_reality_check(dq_now); return; }
+        dq_fp32_last = dq_now;
+        if (dq_now < 0.7 * dq_best_fp32) {     // still making real progress
+            dq_best_fp32 = dq_now;
+            fp32_stall = 0;
+            return;
+        }
+        if (m_fp32_stall_patience > 0 && ++fp32_stall >= m_fp32_stall_patience) {
+            fp32_exhausted = true;
+            if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::info_fmt("SCF: FP32 phase stalled at max|dq| = {:.2e} "
+                                        "(>= scf_fp32_threshold {:.1e}); continuing in FP64",
+                                        dq_now, m_scf_fp32_threshold);
+        }
+    };
 
     // DIIS and Broyden are member variables so history can optionally survive
     // across geometry steps (m_keep_diis=true, set via -keep_diis true). Default
@@ -656,16 +813,34 @@ double XTB::Calculation(bool gradient)
     // steady_clock reads per phase — negligible vs the ms-scale work — so they
     // run unconditionally, matching the existing per-iter timer. Claude Generated.
     double acc_pot = 0.0, acc_fock = 0.0, acc_solve = 0.0, acc_mull = 0.0, acc_energy = 0.0;
+    double acc_e_coul = 0.0, acc_e_third = 0.0, acc_e_mp = 0.0, acc_e_band = 0.0;
     double acc_disp = 0.0;   // D4 in-SCF potential subset of acc_pot (GFN2), verbosity 3
-    m_t_xfx = m_t_diag = m_t_back = m_t_dens = 0.0;
+    m_t_xfx = m_t_diag = m_t_back = m_t_dens = m_t_xfx_copy = 0.0;
+    m_eig_calls_native = m_eig_calls_fp32 = m_eig_calls_lapack = 0;
 
     // Intra-molecule thread count for the per-iteration eigensolve. The eigensolve
     // (dsygst/dsyevd/dtrsm) is the one region handed to MKL rather than the
     // CxxThreadPool; effectiveIntraThreads() gates it (serial under molecule-level
     // parallelism or for small bases). nao is constant over the SCF. Claude Generated.
-    const int eig_threads = effectiveIntraThreads(m_basis.nao);
+    //
+    // `-threads N` decides (operator, Sep 2026): the eigensolve gets the same intra-molecule
+    // budget as everything else. It used to be capped at 8 because the reduction ran in FP32
+    // and dominated (see docs/SQM_PERFORMANCE.md); with the FP64 reduction the optimum moved
+    // and is machine-dependent - polymer/nao 3222 on this 36-core box: 8 threads 27.1 s,
+    // 16 threads 23.8 s, 24 threads 26.5 s, 36 threads 28.6 s. The D&C eigensolve is
+    // memory-bandwidth-bound, so more threads than memory channels can still lose; that is now
+    // a `-threads` choice. `-eigensolver_max_threads N` caps the eigensolve independently of
+    // -threads (CURCUMA_EIG_MAX_THREADS is the older spelling and still wins over the flag).
+    int eig_cap = m_eig_max_threads;   // 0 = no cap, follow -threads (-eigensolver_max_threads)
+    if (const char* env = std::getenv("CURCUMA_EIG_MAX_THREADS")) {
+        const int v = std::atoi(env);
+        if (v > 0) eig_cap = v;        // the environment variable still wins
+    }
+    const int eig_intra = effectiveIntraThreads(m_basis.nao);
+    const int eig_threads = eig_cap > 0 ? std::min(eig_intra, eig_cap) : eig_intra;
     if (verb >= 3 && eig_threads > 1)
-        CurcumaLogger::info_fmt("Eigensolve MKL threads: {}", eig_threads);
+        CurcumaLogger::info_fmt("Eigensolve BLAS/LAPACK threads: {}{}", eig_threads,
+                                eig_cap > 0 ? " (eigensolver_max_threads cap)" : " (from -threads)");
 
     // Device-resident SCF (Claude Generated, GPU port Stage 2). Enabled with the
     // default Broyden charge mixing and an available lower Cholesky factor L
@@ -680,7 +855,7 @@ double XTB::Calculation(bool gradient)
     // GPU eigensolver hook (Stage 1) instead.
     bool use_gpu_resident = false;
     bool gpu_multipole    = false;
-    if (m_gpu_scf && mode == ScfMode::Broyden
+    if (m_gpu_scf && mode == ScfMode::Broyden && (!m_has_dshell || m_gpu_scf->supportsDshell())
         && m_X.rows() == m_basis.nao && m_X.cols() == m_basis.nao) {
         // Stage 3: the device-computed integral build (beginBasis once + beginComputed
         // per geometry: CN/S/H0/L on the device, no nao² upload) was hoisted into the
@@ -750,6 +925,11 @@ double XTB::Calculation(bool gradient)
     const bool solv_blocks_device =
         m_solvation && !(solv_born && m_gpu_scf && m_gpu_scf->supportsDeviceSolvation());
     bool use_device_potential = false;
+    // Claude Generated (Sep 2026): whether the 18 nat^2 multipole interaction matrices sit on
+    // the device (stored path) and how much that is - used to explain a device-memory failure
+    // of the resident loop, which is where the shortage actually surfaces.
+    bool   mp_stored_on_device = false;
+    double mp_stored_bytes     = 0.0;
     if (use_gpu_resident && gpu_multipole && m_method == MethodType::GFN2 && m_mp_initialized
         && !solv_blocks_device
         && m_gpu_scf->supportsDeviceDispersion() && m_gpu_scf->supportsDevicePotential()) {
@@ -761,20 +941,58 @@ double XTB::Calculation(bool gradient)
         // blocks), the on-site XC kernels, and the per-shell third-order hardness
         // Γ_s (= ½·thirdOrderKernelDiag at q_sh=1, GFN2 shell-resolved).
         const size_t nn = static_cast<size_t>(nat) * static_cast<size_t>(nat);
-        std::vector<double> sd(3 * nn), dd(9 * nn), sq(6 * nn), dk(nat), qk(nat), g3(nsh);
-        for (int k = 0; k < 3; ++k)
-            std::memcpy(sd.data() + static_cast<size_t>(k) * nn, m_mp_amat_sd[k].data(), nn * sizeof(double));
-        for (int a = 0; a < 3; ++a)
-            for (int bb = 0; bb < 3; ++bb)
-                std::memcpy(dd.data() + (static_cast<size_t>(a) * 3 + bb) * nn,
-                            m_mp_amat_dd[a][bb].data(), nn * sizeof(double));
-        for (int k = 0; k < 6; ++k)
-            std::memcpy(sq.data() + static_cast<size_t>(k) * nn, m_mp_amat_sq[k].data(), nn * sizeof(double));
+        std::vector<double> dk(nat), qk(nat), g3(nsh);
         for (int i = 0; i < nat; ++i) { dk[i] = m_mp_dkernel[i]; qk[i] = m_mp_qkernel[i]; }
         const Vector g3diag = thirdOrderKernelDiag(Vector::Ones(nsh), m_wfn.q_at);  // = 2·Γ_s
         for (int s = 0; s < nsh; ++s) g3[s] = 0.5 * g3diag(s);
-        use_device_potential = m_gpu_scf->beginPotential(nat, nsh, sd.data(), dd.data(),
-                                                         sq.data(), dk.data(), qk.data(), g3.data());
+        // Claude Generated (Sep 2026): above ~1 GB of interaction matrices (nat > ~2700) the
+        // device rebuilds the matrix elements per iteration instead of storing 18 nat^2 doubles
+        // (7.7 GB at 7320 atoms, plus the same again as host upload copies).
+        // `-gpu_multipole_otf on|off` forces the choice (CURCUMA_GPU_MP_OTF=1/0 still wins).
+        bool otf = 18.0 * static_cast<double>(nn) * sizeof(double) > 1.0e9;
+        mp_stored_bytes = 18.0 * static_cast<double>(nn) * sizeof(double);
+        if (m_gpu_mp_otf == "on" || m_gpu_mp_otf == "true")  otf = true;
+        else if (m_gpu_mp_otf == "off" || m_gpu_mp_otf == "false") otf = false;
+        if (const char* e = std::getenv("CURCUMA_GPU_MP_OTF")) otf = (e[0] == '1');
+        if (otf && m_gpu_scf->supportsOnTheFlyMultipole()) {
+            std::vector<double> xyzb(3 * static_cast<size_t>(nat));
+            for (int i = 0; i < nat; ++i)
+                for (int k = 0; k < 3; ++k) xyzb[3 * i + k] = m_geometry(i, k) * AA_TO_AU;
+            use_device_potential = m_gpu_scf->beginPotentialOnTheFly(
+                nat, nsh, xyzb.data(), m_mp_mrad.data(), gfn2_params::mp_dmp3, gfn2_params::mp_dmp5,
+                dk.data(), qk.data(), g3.data());
+        } else {
+            std::vector<double> sd(3 * nn), dd(9 * nn), sq(6 * nn);
+            for (int k = 0; k < 3; ++k)
+                std::memcpy(sd.data() + static_cast<size_t>(k) * nn, m_mp_amat_sd[k].data(), nn * sizeof(double));
+            for (int a = 0; a < 3; ++a)
+                for (int bb = 0; bb < 3; ++bb)
+                    std::memcpy(dd.data() + (static_cast<size_t>(a) * 3 + bb) * nn,
+                                m_mp_amat_dd[a][bb].data(), nn * sizeof(double));
+            for (int k = 0; k < 6; ++k)
+                std::memcpy(sq.data() + static_cast<size_t>(k) * nn, m_mp_amat_sq[k].data(), nn * sizeof(double));
+            mp_stored_on_device = true;
+            use_device_potential = m_gpu_scf->beginPotential(nat, nsh, sd.data(), dd.data(),
+                                                             sq.data(), dk.data(), qk.data(), g3.data());
+            // Claude Generated (Sep 2026): the stored path needs 18 nat^2 doubles on the device
+            // (7.7 GB at 7320 atoms) and the same again here on the host. If that does not fit,
+            // say so and rebuild the matrices per iteration instead of walking into an SCF that
+            // cannot run - `-gpu_multipole_otf off` on polymer_2x used to fail at iteration 0
+            // with no indication of the cause.
+            if (!use_device_potential && m_gpu_scf->supportsOnTheFlyMultipole()) {
+                const std::string why = m_gpu_scf->lastError();
+                CurcumaLogger::warn("SCF: storing the GFN2 multipole matrices failed"
+                                    + (why.empty() ? std::string() : " (" + why + ")")
+                                    + "; rebuilding them per iteration instead");
+                std::vector<double> xyzb(3 * static_cast<size_t>(nat));
+                for (int i = 0; i < nat; ++i)
+                    for (int k = 0; k < 3; ++k) xyzb[3 * i + k] = m_geometry(i, k) * AA_TO_AU;
+                use_device_potential = m_gpu_scf->beginPotentialOnTheFly(
+                    nat, nsh, xyzb.data(), m_mp_mrad.data(), gfn2_params::mp_dmp3,
+                    gfn2_params::mp_dmp5, dk.data(), qk.data(), g3.data());
+                mp_stored_on_device = !use_device_potential;
+            }
+        }
         // WP4b: upload the Born matrix so the device build adds v_at += B·q_at in-SCF.
         // On failure, drop to the host-driven loop (which still applies solvation).
         if (use_device_potential && solv_born) {
@@ -824,15 +1042,16 @@ double XTB::Calculation(bool gradient)
     // nao spectrum. OPT-IN (m_gpu_partial_diag, -gpu_partial_diag): measured
     // net-neutral on an RTX 5080 (the tridiagonalization, not the eigenvector count,
     // dominates the dense eigensolve), so the default GPU path stays the full solve.
-    // Disabled when virtuals are genuinely required: the Mulliken-CPSCF D4 charge
-    // response (d4_charge_source=mulliken) and the verbosity>=3 orbital listing both
-    // read virtual orbitals. The buffer covers the LUMO plus a few-kT Fermi tail; if
-    // the occupied tail ever reaches the window edge (tiny-gap/metallic), the loop
-    // widens to the full solve once so the 1e-8 energy is never at risk. Disabled on
-    // the device-potential path (its re-solve would need the host D4 weights again).
+    // Disabled when virtuals are genuinely required: the explicit Mulliken-CPSCF D4
+    // charge response (d4_charge_source=cpscf) and the verbosity>=3 orbital listing both
+    // read virtual orbitals. (The default variational D4 q-response needs no virtuals.)
+    // The buffer covers the LUMO plus a few-kT Fermi tail; if the occupied tail ever
+    // reaches the window edge (tiny-gap/metallic), the loop widens to the full solve once
+    // so the 1e-8 energy is never at risk. Disabled on the device-potential path (its
+    // re-solve would need the host D4 weights again).
     int gpu_n_eig = 0;  // 0 = full spectrum
     bool gpu_partial_diag = m_gpu_partial_diag && use_gpu_resident && !use_device_potential
-        && (m_d4_charge_source != "mulliken") && (verb < 3);
+        && (m_d4_charge_source != "cpscf") && (verb < 3);
     if (gpu_partial_diag) {
         const int nocc_orbs = static_cast<int>(std::floor(m_wfn.nocc / 2.0));
         const int buffer = std::max(8, (m_basis.nao + 19) / 20);  // ~5% of nao, >= 8
@@ -844,6 +1063,12 @@ double XTB::Calculation(bool gradient)
             + " of " + std::to_string(m_basis.nao) + " eigenpairs (occupied " +
             std::to_string(static_cast<int>(std::floor(m_wfn.nocc / 2.0))) + " + buffer)");
 
+    // Deferred host multipole integrals are needed as soon as any iteration runs on the host.
+    if (!use_resident_loop)
+        ensureHostMultipoleIntegrals();
+
+    double resident_band = 0.0;   // Tr(P H0) of the last device-resident step
+    double resident_ecoul = 0.0, resident_ethird = 0.0, resident_emp = 0.0;  // its SCC energies
     const auto t_scf_start = clock::now();
     int iter;
     for (iter = 0; iter < max_iter; ++iter) {
@@ -855,17 +1080,34 @@ double XTB::Calculation(bool gradient)
         // precision (FP32→FP64) decision, the convergence test, and the verbosity
         // line — the rest (incl. the Broyden mix) is device-resident. Claude Generated.
         if (use_resident_loop) {
-            m_eig_fp32 = m_scf_mixed_precision && (dq_prev > m_scf_fp32_threshold);
+            m_eig_fp32 = fp32_wanted(dq_prev);
             double dq = 0.0, eb = 0.0, ecoul = 0.0, ethird = 0.0, emp = 0.0;
             if (!m_gpu_scf->residentScfStep(m_eig_fp32, dq, eb, ecoul, ethird, emp)) {
+                std::string why = m_gpu_scf->lastError();
+                // The classic cause on a large system: the stored multipole matrices fit, and
+                // then the loop's own buffers no longer do. Name the flag that avoids it -
+                // measured on polymer_2x (nat 7320, 7.7 GB stored) on a 20 GB card, where the
+                // failure used to arrive with no indication of the cause. Claude Generated.
+                if (iter == 0 && mp_stored_on_device && mp_stored_bytes > 1.0e9) {
+                    if (!why.empty()) why += "; ";
+                    why += "the stored GFN2 multipole interaction matrices hold "
+                        + fmt::format("{:.1f}", mp_stored_bytes / 1073741824.0)
+                        + " GB of device memory - rebuild them per iteration instead "
+                          "(-gpu_multipole_otf auto, the default above ~2700 atoms)";
+                }
                 CurcumaLogger::warn("XTB::Calculation: GPU resident SCF step failed at iteration "
-                                    + std::to_string(iter));
-                m_scf_converged = false; m_scf_iterations = iter; return m_E_total;
+                                    + std::to_string(iter)
+                                    + (why.empty() ? std::string() : ": " + why));
+                m_scf_converged = false; m_scf_iterations = iter;
+                setHardError("native GPU-resident SCF solve failed (see warning above) at iteration " + std::to_string(iter));
+                return m_E_total;
             }
             m_E_electronic = eb; m_E_coulomb_shell = ecoul;
+            resident_band = eb; resident_ecoul = ecoul; resident_ethird = ethird; resident_emp = emp;
             m_E_third_order = ethird; m_E_multipole = emp;
             const double e_scc = eb + ecoul + ethird + emp;
             const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
+            note_fp32_progress(dq);
             dq_prev = dq;
             if (verb >= scf_min) {
                 const double t_iter_ms = ms(t_iter0, clock::now());
@@ -882,12 +1124,13 @@ double XTB::Calculation(bool gradient)
             continue;
         }
 
-        // Broyden mixes the SCC charge vector: capture the input x_in (current
-        // m_wfn charges) before the potential is built and the populations are
-        // overwritten by the diagonalisation.
-        Vector x_in;
-        if (mode == ScfMode::Broyden)
-            x_in = packSCC();
+        // Capture the SCC input vector x_in (current m_wfn charges, and for GFN2 the
+        // atomic multipole moments) before the potential is built and the populations
+        // are overwritten by the diagonalisation. Broyden mixes it; the convergence
+        // test below measures the residual packSCC() - x_in on the SAME vector, which
+        // is what tblite does (`pconverged = mixer%get_error() < pconv`,
+        // xtb/singlepoint.f90:255). Captured for every mode, not just Broyden.
+        Vector x_in = packSCC();
 
         // Reset and build potentials. On the device-potential path (Stage 5 B3/B4)
         // the whole potential is built inside the GPU solve below, so the host
@@ -937,7 +1180,7 @@ double XTB::Calculation(bool gradient)
             // Mixed precision (GPU): solve in FP32 while far from convergence
             // (max|dq| above the threshold; iter 0 starts FP32 via dq_prev=1e30),
             // reverting to FP64 near convergence so the converged energy is FP64.
-            m_eig_fp32 = m_scf_mixed_precision && (dq_prev > m_scf_fp32_threshold);
+            m_eig_fp32 = fp32_wanted(dq_prev);
             bool solve_ok;
             Eigen::VectorXd v_ao;  // host-expanded potential (non-device-potential path)
             if (use_device_potential) {
@@ -972,7 +1215,9 @@ double XTB::Calculation(bool gradient)
             if (!solve_ok) {
                 CurcumaLogger::warn("XTB::Calculation: GPU resident solve failed at iteration "
                                     + std::to_string(iter));
-                m_scf_converged = false; m_scf_iterations = iter; return m_E_total;
+                m_scf_converged = false; m_scf_iterations = iter;
+                setHardError("native GPU-resident SCF solve failed (see warning above) at iteration " + std::to_string(iter));
+                return m_E_total;
             }
             // Occupations on the host (shared Fermi/integer logic with the CPU path).
             Eigen::VectorXd occ; int ncol = 0;
@@ -993,7 +1238,9 @@ double XTB::Calculation(bool gradient)
                 if (!re_ok) {
                     CurcumaLogger::warn("XTB::Calculation: GPU resident full re-solve failed at "
                                         "iteration " + std::to_string(iter));
-                    m_scf_converged = false; m_scf_iterations = iter; return m_E_total;
+                    m_scf_converged = false; m_scf_iterations = iter;
+                setHardError("native GPU-resident SCF solve failed (see warning above) at iteration " + std::to_string(iter));
+                return m_E_total;
                 }
                 occupationsFromEps(m_wfn.eps, occ, ncol);
             }
@@ -1002,7 +1249,9 @@ double XTB::Calculation(bool gradient)
             if (!m_gpu_scf->density(occ, ncol, pop_ao, gpu_band)) {
                 CurcumaLogger::warn("XTB::Calculation: GPU resident density failed at iteration "
                                     + std::to_string(iter));
-                m_scf_converged = false; m_scf_iterations = iter; return m_E_total;
+                m_scf_converged = false; m_scf_iterations = iter;
+                setHardError("native GPU-resident SCF solve failed (see warning above) at iteration " + std::to_string(iter));
+                return m_E_total;
             }
             t_solve = clock::now();
             // Broyden never mixes the density, so there is no P damping here.
@@ -1013,7 +1262,9 @@ double XTB::Calculation(bool gradient)
             if (gpu_multipole && !m_gpu_scf->multipoleMoments(m_wfn.dp_at, m_wfn.qp_at)) {
                 CurcumaLogger::warn("XTB::Calculation: GPU resident multipole moments failed at iteration "
                                     + std::to_string(iter));
-                m_scf_converged = false; m_scf_iterations = iter; return m_E_total;
+                m_scf_converged = false; m_scf_iterations = iter;
+                setHardError("native GPU-resident SCF solve failed (see warning above) at iteration " + std::to_string(iter));
+                return m_E_total;
             }
             q_sh_new = m_wfn.q_sh;
             t_mull = clock::now();
@@ -1060,7 +1311,7 @@ double XTB::Calculation(bool gradient)
             // Mixed precision (opt-in, MKL path): solve in FP32 while far from convergence
             // (previous max|dq| above the threshold; iter 0 starts in FP32 via dq_prev=1e30),
             // reverting to FP64 near convergence so the converged energy is FP64. Claude Generated.
-            m_eig_fp32 = m_scf_mixed_precision && (dq_prev > m_scf_fp32_threshold);
+            m_eig_fp32 = fp32_wanted(dq_prev);
 
             // Diagonalize. Let MKL thread the eigensolve (dsygst/dsyevd/dtrsm) for a
             // single large molecule; the surrounding MklSerialScope keeps MKL serial
@@ -1074,6 +1325,8 @@ double XTB::Calculation(bool gradient)
                 CurcumaLogger::warn("XTB::Calculation: eigen solve failed at iteration " + std::to_string(iter));
                 m_scf_converged = false;
                 m_scf_iterations = iter;
+                setHardError("native SCF eigensolver failed at iteration " + std::to_string(iter)
+                             + " (often a singular overlap, e.g. an unsupported basis shell)");
                 return m_E_total;
             }
             t_solve = clock::now();
@@ -1097,15 +1350,26 @@ double XTB::Calculation(bool gradient)
             t_mull = clock::now();
         }
 
-        // Energies for this iteration
+        // Energies for this iteration (Claude Generated, Sep 2026: timed individually, the
+        // "energy/mix" bucket used to be one opaque number).
+        const auto t_e0 = clock::now();
         m_E_coulomb_shell = energyCoulombShell();
+        const auto t_e1 = clock::now();
         m_E_third_order   = energyThirdOrder();
+        const auto t_e2 = clock::now();
         m_E_multipole     = energyMultipole();
+        const auto t_e3 = clock::now();
 
         // Band energy: Tr(P · H0). Device-resident path returns it from the GPU
         // (P is not on the host during the loop); CPU path sums P⊙H0 directly.
         m_E_electronic = use_gpu_resident ? gpu_band
                                           : (m_wfn.P.cwiseProduct(m_H0)).sum();
+
+        const auto t_e4 = clock::now();
+        acc_e_coul  += ms(t_e0, t_e1);
+        acc_e_third += ms(t_e1, t_e2);
+        acc_e_mp    += ms(t_e2, t_e3);
+        acc_e_band  += ms(t_e3, t_e4);
 
         // Total SCC = band + coulomb + third-order + multipole
         const double e_scc = m_E_electronic + m_E_coulomb_shell
@@ -1118,8 +1382,17 @@ double XTB::Calculation(bool gradient)
         acc_mull   += ms(t_solve, t_mull);
         acc_energy += ms(t_mull,  clock::now());
 
-        // Per-iteration diagnostics
-        const double dq = (q_sh_new - q_sh_old).cwiseAbs().maxCoeff();
+        // Per-iteration diagnostics. dq is the residual of the FULL SCC vector the
+        // mixer works on: shell charges for GFN1, shell charges + atomic dipole and
+        // quadrupole moments for GFN2. Measuring only the shell charges (as this did
+        // until Sep 2026) lets GFN2 stop while the moments are still moving — the
+        // energy is then still right to O(dP^2) but the GRADIENT only to O(dP).
+        // H2 is the extreme case: symmetry pins its shell charges to 0 from the first
+        // iteration, so the SCF exited after 2 cycles with the moments unconverged and
+        // the analytic gradient came out 0.0330 instead of 0.0211 Eh/Bohr (60 % off,
+        // while the energy still matched xtb to 1e-8). Claude Generated.
+        const double dq = (packSCC() - x_in).cwiseAbs().maxCoeff();
+        note_fp32_progress(dq);
         dq_prev = dq;   // drives the LevelShift fade-out on the next iteration
         const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
         const double t_iter_ms = ms(t_iter0, clock::now());
@@ -1145,8 +1418,10 @@ double XTB::Calculation(bool gradient)
         // density beyond the loose threshold. Default 1 = no effect. Claude Generated.
         if (iter > 0 && !m_eig_fp32
             && (!xlbomd_corrector_step || iter + 1 >= m_scf_xlbomd_correctors)) {
-            if (checkConvergence_impl(q_sh_old, q_sh_new,
-                                       e_total_old, e_scc, thresh)) {
+            // dq is the full-SCC-vector residual computed above (shell charges for
+            // GFN1, + atomic multipole moments for GFN2), matching what the mixer
+            // acts on and what tblite converges on.
+            if (checkConvergence_impl(dq, e_total_old, e_scc, thresh)) {
                 m_scf_converged = true;
                 break;
             }
@@ -1211,6 +1486,15 @@ double XTB::Calculation(bool gradient)
                                     m_scf_iterations, ms(t_scf_start, t_scf_end));
     }
 
+    // Claude Generated (Sep 2026): post-SCF host phase timings (printed with CURCUMA_GPU_PROFILE
+    // or verbosity 3) - on a 7k-atom GPU run this block took 40 s.
+    std::vector<std::pair<const char*, double>> post_t;
+    auto post_mark = [&, tp = clock::now()](const char* name) mutable {
+        const auto now = clock::now();
+        post_t.emplace_back(name, ms(tp, now));
+        tp = now;
+    };
+
     // Stage 6 (S6.5): the fused device loop kept the converged charges/moments
     // resident — download them once into the host wavefunction so the post-SCF
     // potential rebuild + energies + gradient below run unchanged. Claude Generated.
@@ -1226,14 +1510,40 @@ double XTB::Calculation(bool gradient)
     // Device-resident path: download the converged density and MO coefficients
     // once, so the post-SCF energies (band Tr(P·H0)) and the (still CPU) gradient
     // read them from the host. Claude Generated, GPU port Stage 2.
-    if (use_gpu_resident && m_gpu_scf)
-        m_gpu_scf->finalize(m_wfn.P, m_wfn.C);
+    post_mark("download charges/moments/eps");
+    // Claude Generated (Sep 2026): a large single point on the device-resident path does not
+    // need the dense P and C on the host (band energy comes from the device, the gradient is
+    // on the device). Rebuilding and downloading them took 16 s at 7320 atoms; they are fetched
+    // on demand (host gradient fallback, property accessors after ensureHostWavefunction).
+    m_wfn_on_device = false;
+    if (use_gpu_resident && m_gpu_scf) {
+        if (use_resident_loop && m_mp_ints_deferred && !gradient)
+            m_wfn_on_device = true;
+        else
+            m_gpu_scf->finalize(m_wfn.P, m_wfn.C);
+    }
+    post_mark("finalize: download P and C");
+
+    // GPU paths (device eigensolve and the fully-resident loop) keep the
+    // occupations on-device: solveEigen is the only writer of m_wfn.focc and it
+    // is skipped there. Rebuild focc on the host from the downloaded eps so the
+    // electronic free-energy term below AND the gradient's energy-weighted
+    // density W use the fractional Fermi occupations instead of the integer
+    // fallback (xtb_gradient.cpp). occupationsFromEps is bit-faithful to
+    // solveEigen, so this is identical to the CPU path. Claude Generated.
+    if ((use_gpu_resident || use_resident_loop) && m_wfn.eps.size() == m_basis.nao) {
+        Eigen::VectorXd occ; int ncol = 0;
+        occupationsFromEps(m_wfn.eps, occ, ncol);
+        m_wfn.focc = occ;
+    }
+    post_mark("host occupations");
 
     // Persist converged Fock matrix for gradient / debug. On the device-potential
     // path (Stage 5 B3/B4) the host m_pot was skipped during the loop, so rebuild
     // it once at the converged charges before forming m_F (the gradient block below
     // rebuilds it again, but m_F must be consistent here too).
-    if (use_device_potential) {
+    // (not needed when the wavefunction stays on the device: no host Fock, no host gradient)
+    if (use_device_potential && !m_wfn_on_device) {
         m_pot.reset();
         addCoulombShellPotential(m_pot);
         addThirdOrderPotential(m_pot);
@@ -1241,15 +1551,53 @@ double XTB::Calculation(bool gradient)
         addDispersionPotential(m_pot);
         addSolvationPotential(m_pot);
     }
-    m_F = buildFock(m_H0, m_S, m_pot);
+    post_mark("host potential rebuild");
+    // Claude Generated (Sep 2026): m_F is only read by debug dumps / consistency audits. With
+    // deferred host multipole integrals (large system on the GPU) skip the O(nao^2) host
+    // rebuild instead of forcing the 17 GB integral build just for it.
+    if (m_mp_ints_deferred)
+        m_F.resize(0, 0);
+    else
+        m_F = buildFock(m_H0, m_S, m_pot);
+    post_mark("host Fock matrix");
 
     // Final energies
-    m_E_electronic    = energyCoulombShell() + energyThirdOrder() + energyMultipole();
-    // Band energy: Tr(P · H0) for electronic part
-    m_E_electronic   += (m_wfn.P.cwiseProduct(m_H0)).sum();
+    // Claude Generated (Sep 2026): the device-resident step already evaluated these SCC energies
+    // from the same converged output charges/moments the host would use (7320 atoms: 5 s of
+    // O(nat^2) host work). Reused when the wavefunction stays on the device.
+    if (m_wfn_on_device) {
+        m_E_coulomb_shell = resident_ecoul;
+        m_E_third_order   = resident_ethird;
+        m_E_multipole     = resident_emp;
+        m_E_electronic    = resident_ecoul + resident_ethird + resident_emp;
+    } else {
+        m_E_electronic    = energyCoulombShell() + energyThirdOrder() + energyMultipole();
+    }
+    post_mark("Coulomb/third-order/multipole energies");
+    // Band energy: Tr(P · H0) for electronic part (from the device when P stayed there)
+    m_E_electronic   += m_wfn_on_device ? resident_band : (m_wfn.P.cwiseProduct(m_H0)).sum();
+    post_mark("band energy Tr(P H0)");
+    // Electronic free-energy (Mermin/Fermi entropy) term g = -T*S. Zero for
+    // gapped systems (occ ∈ {0,2}); only bites on small-gap systems with
+    // fractional occupations. Folded into the electronic container so it matches
+    // tblite/xtb, which report the free energy A = E - T*S. Claude Generated.
+    m_E_entropy       = electronicFreeEnergy();
+    m_E_electronic   += m_E_entropy;
     m_E_repulsion     = calcRepulsionEnergy();
     m_E_halogen_bond  = calcHalogenBondEnergy();
+    post_mark("entropy/repulsion/halogen bond");
+    // Exact GFN2 self-consistent-D4 q-response (F5): d4_charge_source="mulliken" (default)
+    // handles dE_D4/dq·dq/dR variationally through the gradient charge-Pulay + W — dE_D4/dq
+    // is folded into the gradient v_at (as tblite does in dispersion%get_potential), so the
+    // −P·(v_a+v_b)·dS overlap-Pulay plus W = Σf·ε·ccᵀ (ε already carry the in-SCF D4 potential)
+    // reproduce the full Mulliken charge response with no separate solve. "eeq"/"cpscf" fall
+    // back to the explicit single-shot-EEQ / Z-vector response. Set BEFORE calcDispersionEnergy
+    // (so its q-response branch is skipped) and BEFORE the gradient m_pot rebuild.
+    m_d4_variational_qresp = (m_method == MethodType::GFN2)
+        && (m_d4_charge_source == "mulliken")
+        && !std::getenv("CURCUMA_D4_NONVARIATIONAL");
     m_E_dispersion    = calcDispersionEnergy(gradient);
+    post_mark("dispersion (D4, incl. gradient prep)");
     // Implicit solvation free energy (Born + CDS + shift). Added separately to the
     // total — NOT into Tr(P·H0) — mirroring the Coulomb ES2 handling, so there is no
     // double counting (the in-SCF v_at only polarized the density). Claude Generated.
@@ -1257,7 +1605,14 @@ double XTB::Calculation(bool gradient)
 
     m_E_total = m_E_electronic + m_E_repulsion
               + m_E_halogen_bond + m_E_dispersion + m_E_solvation;
+    post_mark("solvation + total");
     const auto t_energies = clock::now();
+    if (verb >= 3 || std::getenv("CURCUMA_GPU_PROFILE")) {
+        std::string rep = "Post-SCF host phases:\n";
+        for (const auto& [name, t] : post_t)
+            rep += fmt::format("  {:<40s} {:10.1f} ms\n", name, t);
+        CurcumaLogger::result(rep);
+    }
 
     if (verb >= 2) {
         CurcumaLogger::info("Energy decomposition:");
@@ -1266,6 +1621,7 @@ double XTB::Calculation(bool gradient)
         CurcumaLogger::info(fmt::format("  Third-order  = {: .8f} Eh", m_E_third_order));
         if (m_method == MethodType::GFN2)
             CurcumaLogger::info(fmt::format("  Multipole    = {: .8f} Eh", m_E_multipole));
+        CurcumaLogger::info(fmt::format("  Free E (-TS) = {: .8f} Eh (folded into Electronic)", m_E_entropy));
         CurcumaLogger::info(fmt::format("  Repulsion    = {: .8f} Eh", m_E_repulsion));
         if (m_method == MethodType::GFN1)
             CurcumaLogger::info(fmt::format("  Halogen bond = {: .8f} Eh", m_E_halogen_bond));
@@ -1281,8 +1637,9 @@ double XTB::Calculation(bool gradient)
                                         homo, lumo, (lumo - homo) * 27.211386245988));
     }
 
-    // Update QMDriver state for wrapper compatibility
-    m_mo = m_wfn.C;
+    // Mirror the converged wavefunction for the wrapper accessors
+    if (!m_wfn_on_device) m_mo = m_wfn.C;
+    else m_mo.resize(0, 0);
     m_energies = m_wfn.eps;
     m_num_electrons = static_cast<int>(m_wfn.nocc);
     m_coordination_numbers = cn;
@@ -1295,6 +1652,13 @@ double XTB::Calculation(bool gradient)
         addCoulombShellPotential(m_pot);
         addThirdOrderPotential(m_pot);
         if (m_method == MethodType::GFN2) addMultipolePotential(m_pot);
+        // Exact GFN2 self-consistent-D4 q-response (F5): tblite folds dE_D4/dq into
+        // pot%vat (dispersion%get_potential) so the charge-Pulay -P·(v_a+v_b)·dS + the
+        // W = Σf·ε·ccᵀ term (ε already carry the in-SCF D4 potential) reproduce the full
+        // dE_D4/dq·dq/dR variationally — no separate CPSCF/EEQ response. Mirror it here
+        // (m_d4_variational_qresp set above, before calcDispersionEnergy).
+        if (m_method == MethodType::GFN2 && m_d4_variational_qresp)
+            addDispersionPotential(m_pot);
         // Solvation v_at must be in m_pot here too: calculateGradient's overlap-
         // derivative (Pulay) term uses -P·(v_ao(μ)+v_ao(ν))·dS/dR with the FULL
         // converged potential, and W is built from the solvation-polarized orbital
@@ -1311,14 +1675,22 @@ double XTB::Calculation(bool gradient)
         bool gpu_grad = false;
         if (use_gpu_resident && m_gpu_scf && m_gpu_scf->supportsGradient())
             gpu_grad = calculateGradientGpu();
-        if (!gpu_grad)
+        if (!gpu_grad) {
+            ensureHostWavefunction();
+            ensureHostMultipoleIntegrals();
             calculateGradient();   // fills m_gradient in Eh/Bohr
+        }
 
         // Explicit solvation nuclear gradient ∂E_solv/∂R at the converged charges
         // (Born radii / SASA / HB-surface / CM5 derivatives). Added in Eh/Bohr,
         // i.e. in the SAME space as calculateGradient, BEFORE the unit conversion.
         if (m_solvation)
             m_solvation->addGradient(m_atoms, m_geometry * AA_TO_AU, m_wfn.q_at, m_gradient);
+
+        // Debug (Jul 2026, F5): env-gated GFN2 multipole-gradient audit. Runs in
+        // Eh/Bohr (before the unit conversion), restores m_gradient on exit.
+        if (m_method == MethodType::GFN2 && std::getenv("CURCUMA_MP_GRAD_AUDIT"))
+            auditGfn2GradientTerms();
 
         m_gradient /= au;          // Eh/Bohr → Eh/Å: 1 Eh/Bohr = (1/au) Eh/Å
     }
@@ -1327,11 +1699,18 @@ double XTB::Calculation(bool gradient)
     if (verb >= 2) {
         CurcumaLogger::info("Timing breakdown:");
         CurcumaLogger::info_fmt("  setup        : {:8.2f} ms", ms(t0, t_setup));
+        // Claude Generated (Sep 2026): the device uploads/EEQ guess/D4 warm-up between the
+        // integral setup and the first SCF iteration were counted nowhere but TOTAL.
+        CurcumaLogger::info_fmt("  pre-SCF      : {:8.2f} ms", ms(t_setup, t_scf_start));
         CurcumaLogger::info_fmt("  SCF ({:3d} it) : {:8.2f} ms", m_scf_iterations, ms(t_scf_start, t_scf_end));
         CurcumaLogger::info_fmt("  post-SCF E   : {:8.2f} ms", ms(t_scf_end, t_energies));
         if (gradient)
             CurcumaLogger::info_fmt("  gradient     : {:8.2f} ms", ms(t_grad0, t_end));
         CurcumaLogger::info_fmt("  TOTAL        : {:8.2f} ms", ms(t0, t_end));
+    }
+    if (m_gpu_scf && verb >= 1) {
+        const std::string prof = m_gpu_scf->profileReport();
+        if (!prof.empty()) CurcumaLogger::result(prof);
     }
 
     if (verb >= 3) {
@@ -1344,6 +1723,13 @@ double XTB::Calculation(bool gradient)
         CurcumaLogger::info_fmt("  build Fock      : {:8.2f} ms ({:5.2f}/it)", acc_fock,   acc_fock / it);
         CurcumaLogger::info_fmt("  solve eigen     : {:8.2f} ms ({:5.2f}/it)", acc_solve,  acc_solve / it);
         CurcumaLogger::info_fmt("    - reduce      : {:8.2f} ms ({:5.2f}/it)", m_t_xfx,    m_t_xfx / it);
+        if (m_t_xfx_copy > 0.0)
+            CurcumaLogger::info_fmt("      - of which F copy (row->col major) : {:8.2f} ms ({:5.2f}/it)",
+                                    m_t_xfx_copy, m_t_xfx_copy / it);
+        CurcumaLogger::info_fmt("      - eigensolve branch calls: lapack {}, native {}, fp32 {}",
+                                m_eig_calls_lapack, m_eig_calls_native, m_eig_calls_fp32);
+        if (m_blas_threads > 0)
+            CurcumaLogger::info_fmt("      - BLAS/LAPACK threads in the solve : {}", m_blas_threads);
         CurcumaLogger::info_fmt("    - dsyevd      : {:8.2f} ms ({:5.2f}/it)", m_t_diag,   m_t_diag / it);
         CurcumaLogger::info_fmt("    - back-transf : {:8.2f} ms ({:5.2f}/it)", m_t_back,   m_t_back / it);
         CurcumaLogger::info_fmt("    - density P   : {:8.2f} ms ({:5.2f}/it)", m_t_dens,   m_t_dens / it);
@@ -1351,6 +1737,33 @@ double XTB::Calculation(bool gradient)
                                 solve_sum, acc_solve - solve_sum);
         CurcumaLogger::info_fmt("  populations     : {:8.2f} ms ({:5.2f}/it)", acc_mull,   acc_mull / it);
         CurcumaLogger::info_fmt("  energy/mix      : {:8.2f} ms ({:5.2f}/it)", acc_energy, acc_energy / it);
+        CurcumaLogger::info_fmt("    - coulomb {:.2f}/it, third order {:.2f}/it, multipole {:.2f}/it, "
+                                "band Tr(P H0) {:.2f}/it, rest (mixing) {:.2f}/it",
+                                acc_e_coul / it, acc_e_third / it, acc_e_mp / it, acc_e_band / it,
+                                (acc_energy - acc_e_coul - acc_e_third - acc_e_mp - acc_e_band) / it);
+    }
+
+    // Reject a converged solution whose charges are physically impossible and redo the
+    // whole calculation from the bare-H0 guess. See the note on m_force_h0_guess in the
+    // header. The bound is generous: GFN Mulliken charges of a real system stay well
+    // inside +-2 e, and a bare monoatomic ion cannot exceed its own formal charge, so
+    // 4 e on top of the molecular charge can only be reached by a runaway.
+    if (!m_in_scf_retry && m_wfn.q_at.size() == m_atomcount) {
+        const double q_max = m_wfn.q_at.cwiseAbs().maxCoeff();
+        const double q_bound = 4.0 + std::abs(static_cast<double>(m_charge));
+        if (q_max > q_bound) {
+            CurcumaLogger::warn_fmt(
+                "SCF converged to an implausible charge distribution (max |q| = {:.2f} e > "
+                "{:.2f}); repeating from the bare-H0 guess", q_max, q_bound);
+            m_in_scf_retry = true;
+            m_force_h0_guess = true;
+            m_warmstart_q_sh.resize(0);
+            m_scf_history.clear();
+            const double e_retry = Calculation(gradient);
+            m_in_scf_retry = false;
+            m_force_h0_guess = false;
+            return e_retry;
+        }
     }
 
     return m_E_total;
@@ -1457,6 +1870,180 @@ bool XTB::evaluateComponentsAtFixedDensity(
 }
 
 /* ------------------------------------------------------------------------- *
+ *  auditGfn2GradientTerms() — Claude Generated (Jul 2026, F5 diagnosis)
+ *
+ *  Isolate each gfn2-specific analytic gradient term (multipole/AES, ES2 Coulomb,
+ *  D4 dispersion) via the per-term gates and FD-check it against a frozen-DENSITY
+ *  numerical derivative. The FD freezes the density matrix P and holds the atomic
+ *  CHARGES q FIXED at q0 — the charge response ∂E/∂q·∂q/∂R belongs to the global
+ *  energy-weighted-density term, not the per-term gradient — while recomputing the
+ *  multipole MOMENTS from P0 (so the multipole FD carries §5 + AP5b + mrad/CN).
+ *  A term whose ratio ≠ 1.000 carries the ~1.3% gfn2 metal gradient residual.
+ *  Debug only; leaves m_gradient and the geometry restored on exit.
+ * ------------------------------------------------------------------------- */
+void XTB::auditGfn2GradientTerms()
+{
+    if (m_method != MethodType::GFN2 || !m_mp_initialized) {
+        CurcumaLogger::warn("auditGfn2GradientTerms: needs a converged GFN2 + multipole state");
+        return;
+    }
+    const int nat = m_atomcount;
+
+    // Consistency probe (Jul 2026, F5): the −Tr(W·dS) gradient term uses W = Cᵒᶜᶜ·diag(f·ε)·Cᵒᶜᶜᵀ,
+    // which cancels the density response ONLY if the stored density P equals Cᵒᶜᶜ·diag(f)·Cᵒᶜᶜᵀ.
+    // A mismatch (e.g. a Broyden/device density not rebuilt from the final C) breaks that
+    // cancellation and would show up exactly as the ~1.3% electronic-response residual.
+    if (m_wfn.C.rows() == m_wfn.P.rows() && m_wfn.focc.size() == m_wfn.C.cols()) {
+        const int nao_ = m_wfn.P.rows();
+        int ncol = 0; for (int i = 0; i < nao_; ++i) if (m_wfn.focc(i) > 1e-12) ncol = i + 1;
+        Matrix Prec = m_wfn.C.leftCols(ncol)
+                    * m_wfn.focc.head(ncol).asDiagonal()
+                    * m_wfn.C.leftCols(ncol).transpose();
+        CurcumaLogger::result(fmt::format(
+            "  [consistency] ||P - C·f·Cᵀ|| = {:.3e}  (||P||={:.3e})  ncol={}",
+            (m_wfn.P - Prec).norm(), m_wfn.P.norm(), ncol));
+    }
+    // Generalized-eigenproblem residual: do the stored eps/C satisfy F·C = S·C·diag(eps)
+    // for the FINAL full Fock m_F? W = C·(f·eps)·Cᵀ is only the correct energy-weighted
+    // density (so −Tr(W·dS) cancels the response) if they do. A nonzero residual means the
+    // eps used for W are inconsistent with the converged Fock — the −Tr(W·dS) bug.
+    if (m_F.rows() == m_wfn.C.rows() && m_S.rows() == m_wfn.C.rows()
+        && m_wfn.eps.size() == m_wfn.C.cols()) {
+        Matrix lhs = m_F * m_wfn.C;
+        Matrix rhs = m_S * m_wfn.C * m_wfn.eps.asDiagonal();
+        CurcumaLogger::result(fmt::format(
+            "  [consistency] ||F·C - S·C·ε|| = {:.3e}  (||F·C||={:.3e})",
+            (lhs - rhs).norm(), lhs.norm()));
+    }
+
+    const Matrix geom0   = m_geometry;   // Angstrom
+    const Matrix P0      = m_wfn.P;
+    const Vector q0      = m_wfn.q_at;    // converged charges — FIXED in the FD
+    const Vector qsh0    = m_wfn.q_sh;
+    const Eigen::MatrixXd dp0 = m_wfn.dp_at;
+    const Eigen::MatrixXd qp0 = m_wfn.qp_at;
+    const Matrix g_saved = m_gradient;   // caller's gradient — restored on exit
+
+    // --- analytic per-term gradients (Eh/Bohr) via the per-term gates ---
+    auto grad_with = [&](bool mp, bool coul, bool d4, bool rep, bool h0only,
+                         bool cnoff = false) -> Matrix {
+        m_mp_grad_off = mp; m_coulomb_grad_off = coul; m_d4_grad_off = d4;
+        m_repulsion_grad_off = rep; m_sval_h0_only = h0only; m_cnchain_off = cnoff;
+        calculateGradient();
+        m_mp_grad_off = m_coulomb_grad_off = m_d4_grad_off = false;
+        m_repulsion_grad_off = m_sval_h0_only = m_cnchain_off = false;
+        return m_gradient;
+    };
+    const Matrix g_full = grad_with(false, false, false, false, false);
+    const Matrix g_mp   = g_full - grad_with(true , false, false, false, false);
+    const Matrix g_coul = g_full - grad_with(false, true , false, false, false);
+    const Matrix g_d4   = g_full - grad_with(false, false, true , false, false);
+    // Band term Tr(P·dH0/dR): all potential terms off + sval reduced to 2·P·h_av
+    // (drops −2W and the charge-Pulay), leaving 2·P·h_av·dS + G_shpoly + H0/CN chain.
+    const Matrix g_band = grad_with(true, true, true, true, true);
+    // Band decomposition (Jul 2026, F5): the CN chain (section 4) OFF isolates the
+    // direct band part 2·P·h_av·dS + G_shpoly (frozen-CN); the remainder is the
+    // H0/CN chain that flows through dEdcn → section 4.
+    const Matrix g_band_nocn = grad_with(true, true, true, true, true, /*cnoff=*/true);
+    const Matrix g_band_cn   = g_band - g_band_nocn;
+
+    // --- frozen-P, fixed-q component energies at a geometry ---
+    auto e_mp = [&](const Matrix& geom) -> double {          // §5 + AP5b + mrad/CN
+        m_geometry = geom;
+        Vector cn = computeCoordinationNumbers(); Vector se; getSelfEnergies(cn, se);
+        Matrix S, H0; getHamiltonianH0(se, S, H0); m_S = S; m_H0 = H0; m_coordination_numbers = cn;
+        buildGammaMatrix(); setupMultipole();
+        m_wfn.P = P0; updatePopulations(m_S);                // recompute moments from P0
+        m_wfn.q_at = q0; m_wfn.q_sh = qsh0;                  // freeze charges
+        return energyMultipole();
+    };
+    // evaluateComponentsAtFixedDensity injects (P0, q0, moments0) and rebuilds at the
+    // current geometry; E_coulomb_shell = explicit ES2 (fixed q), E_dispersion = D4
+    // direct+CN (audit mode, no q-response). Moments do not enter either energy.
+    auto e_coul = [&](const Matrix& geom) -> double {
+        m_geometry = geom; evaluateComponentsAtFixedDensity(P0, q0, qsh0, dp0, qp0);
+        return m_E_coulomb_shell;
+    };
+    auto e_d4 = [&](const Matrix& geom) -> double {
+        m_geometry = geom; evaluateComponentsAtFixedDensity(P0, q0, qsh0, dp0, qp0);
+        return m_E_dispersion;
+    };
+    // Band energy Tr(P0·H0(R)) at the frozen density: evaluateComponentsAtFixedDensity
+    // rebuilds m_H0 at R and injects m_wfn.P = P0, so this is exactly the band term.
+    auto e_band = [&](const Matrix& geom) -> double {
+        m_geometry = geom; evaluateComponentsAtFixedDensity(P0, q0, qsh0, dp0, qp0);
+        return (m_wfn.P.cwiseProduct(m_H0)).sum();
+    };
+    // Band energy with the self-energies FROZEN at the R0 coordination number
+    // (se0 = getSelfEnergies(cn0)). H0(R) still carries the geometry-dependence of
+    // S and the shpoly factor pi_ij, but NOT the CN-dependence of avg_eps. Its FD
+    // is therefore the direct band part (2·P·h_av·dS + G_shpoly), matching the
+    // analytic g_band_nocn. FD(e_band) − FD(e_band_fixedcn) = the H0/CN chain part.
+    m_geometry = geom0;                              // (already geom0 here; explicit)
+    const Vector cn0 = computeCoordinationNumbers();
+    Vector se0; getSelfEnergies(cn0, se0);
+    auto e_band_fixedcn = [&](const Matrix& geom) -> double {
+        m_geometry = geom;
+        Matrix S, H0; getHamiltonianH0(se0, S, H0);
+        return (P0.cwiseProduct(H0)).sum();
+    };
+
+    const double h = 1.0e-4;   // Angstrom
+    // CRITICAL (Jul 2026, F5): computeCoordinationNumbers() memoises on m_cn_cache,
+    // invalidated only by UpdateMolecule/InitialiseMolecule. The FD sets m_geometry
+    // DIRECTLY, so the cache must be force-invalidated before each evaluation or the
+    // FD silently freezes CN at geom0 (dropping the H0/CN chain from every component).
+    auto fd = [&](auto efn) -> Matrix {
+        Matrix g = Matrix::Zero(nat, 3);
+        for (int i = 0; i < nat; ++i)
+            for (int j = 0; j < 3; ++j) {
+                Matrix gp = geom0, gm = geom0; gp(i, j) += h; gm(i, j) -= h;
+                m_cn_cache_valid = false; const double ep = efn(gp);
+                m_cn_cache_valid = false; const double em = efn(gm);
+                g(i, j) = (ep - em) / (2.0 * h) / AA_TO_AU;   // Eh/Ang -> Eh/Bohr
+            }
+        return g;
+    };
+    const Matrix fd_mp   = fd(e_mp);
+    const Matrix fd_coul = fd(e_coul);
+    const Matrix fd_d4   = fd(e_d4);
+    const Matrix fd_band = fd(e_band);
+    const Matrix fd_band_nocn = fd(e_band_fixedcn);     // direct (overlap+shpoly) only
+    const Matrix fd_band_cn   = fd_band - fd_band_nocn; // H0/CN chain only
+
+    // NOTE: a frozen-P TOTAL-energy FD is deliberately NOT reported. ∂E_total/∂R|_P omits
+    // the −Tr(W·dS) orthonormality term (from the C†SC=I constraint, not from ∂E/∂R|_P), so
+    // it does not equal the true gradient and cannot audit the band/charge-response terms.
+    // The per-component energies above are free of that constraint, so their FDs are valid.
+
+    // --- restore consistent geom0 state + caller's gradient ---
+    m_geometry = geom0;
+    m_cn_cache_valid = false;   // FD left a perturbed-geom CN cached; force recompute
+    { Vector cn = computeCoordinationNumbers(); Vector se; getSelfEnergies(cn, se);
+      Matrix S, H0; getHamiltonianH0(se, S, H0); m_S = S; m_H0 = H0; m_coordination_numbers = cn;
+      buildGammaMatrix(); setupMultipole(); m_wfn.P = P0; updatePopulations(m_S);
+      m_wfn.q_at = q0; m_wfn.q_sh = qsh0; m_wfn.dp_at = dp0; m_wfn.qp_at = qp0; }
+    m_gradient = g_saved;
+
+    auto report = [&](const char* name, const Matrix& a, const Matrix& f) {
+        double num = 0.0, maxa = 0.0;
+        for (int i = 0; i < nat; ++i) for (int j = 0; j < 3; ++j) {
+            const double d = a(i,j) - f(i,j); num += d*d; maxa = std::max(maxa, std::fabs(d)); }
+        CurcumaLogger::result(fmt::format(
+            "  {:<11} RMS(ana-FD)={:.3e}  max={:.3e}  |ana|={:.3e}  |FD|={:.3e}  ratio={:.5f}",
+            name, std::sqrt(num / (3.0 * nat)), maxa, a.norm(), f.norm(),
+            std::sqrt(a.squaredNorm() / std::max(1e-30, f.squaredNorm()))));
+    };
+    CurcumaLogger::result("GFN2 per-term gradient audit [Eh/Bohr]  analytic vs frozen-density(fixed-q) FD   ratio 1.000 = exact");
+    report("multipole",   g_mp,   fd_mp);
+    report("coulomb-ES2", g_coul, fd_coul);
+    report("d4(dir+CN)",  g_d4,   fd_d4);
+    report("band Tr(PdH0)", g_band, fd_band);
+    report("band:ovlp+shp", g_band_nocn, fd_band_nocn);
+    report("band:H0-CN",    g_band_cn,   fd_band_cn);
+}
+
+/* ------------------------------------------------------------------------- *
  *  Build-once state (stub implementations)
  * ------------------------------------------------------------------------- */
 void XTB::buildBasis()
@@ -1515,7 +2102,8 @@ void XTB::buildBasis()
                 principalFor(z, ish),
                 angFor(z, ish),
                 zetaFor(z, ish),
-                nprimFor(z, ish));
+                nprimFor(z, ish),
+                m_sto6g_legacy_4sp);
         }
         // Gram-Schmidt orthogonalize same-l shells
         for (int ish = 1; ish < nshell; ++ish) {
@@ -1554,6 +2142,12 @@ void XTB::buildBasis()
     m_basis.nsh = shell_cursor;
     m_basis.nao = ao_cursor;
     m_gpu_basis_dirty = true;   // basis changed → re-upload to the device once
+
+    // X-I1: detect d shells. The device integral/SCF/gradient kernels are s/p-only,
+    // so d systems use the CPU integral path (gated below). Claude Generated.
+    m_has_dshell = false;
+    for (int s = 0; s < m_basis.nsh; ++s)
+        if (m_basis.ang_sh[s] > 1) { m_has_dshell = true; break; }
 }
 
 void XTB::buildH0Data()
@@ -1571,14 +2165,26 @@ void XTB::buildH0Data()
         const int z = m_basis.z[iat];
         for (int ish = 0; ish < m_basis.nsh_at[iat]; ++ish) {
             const int sh_idx = m_basis.ish_at[iat] + ish;
+            // GFN2 stores p_kcn and p_shpoly indexed by ANGULAR MOMENTUM (tblite
+            // gfn2.f90: p_kcn(0:2), p_shpoly(0:2)); its shells never repeat an
+            // angular momentum, so mapping shell->l reorders the [d,s,p] transition-
+            // metal shells correctly (main-group is unaffected: ang_sh==ish).
+            // GFN1 must NOT do this: its basis has valence+polarisation shells that
+            // share an angular momentum (e.g. H = two s shells with distinct p_kcn),
+            // and tblite gfn1.f90 keeps p_kcn shell-indexed (max_shell); indexing by
+            // l would collapse those shells. GFN1 keeps its historic [ish] indexing.
+            const int l = m_basis.ang_sh[sh_idx];
             if (m_method == MethodType::GFN1) {
+                // GFN1: p_selfenergy and p_kcn are shell-indexed (tblite gfn1.f90
+                // max_shell); p_shpoly is angular-momentum-indexed (0:2), applied to
+                // every shell incl. polarisation (tblite get_shpoly). ang-index shpoly.
                 m_h0.selfenergy[sh_idx] = gfn1_params::p_selfenergy[z - 1][ish];
                 m_h0.kcn       [sh_idx] = gfn1_params::p_kcn       [z - 1][ish];
-                m_h0.shpoly    [sh_idx] = gfn1_params::p_shpoly    [z - 1][ish];
+                m_h0.shpoly    [sh_idx] = gfn1_params::p_shpoly    [z - 1][l];
             } else {
                 m_h0.selfenergy[sh_idx] = gfn2_params::p_selfenergy[z - 1][ish];
-                m_h0.kcn       [sh_idx] = gfn2_params::p_kcn       [z - 1][ish];
-                m_h0.shpoly    [sh_idx] = gfn2_params::p_shpoly    [z - 1][ish];
+                m_h0.kcn       [sh_idx] = gfn2_params::p_kcn       [z - 1][l];
+                m_h0.shpoly    [sh_idx] = gfn2_params::p_shpoly    [z - 1][l];
             }
         }
     }
@@ -1597,17 +2203,47 @@ void XTB::buildReferenceOccupations()
     double total = -static_cast<double>(m_charge);
     for (int iat = 0; iat < m_basis.nat; ++iat) {
         const int z = m_basis.z[iat];
+        // reference_occ is indexed by ANGULAR MOMENTUM (tblite gfn{1,2}.f90 (0:2,elem),
+        // refocc = reference_occ(shell%ang)); indexing by shell position scrambles the
+        // [d,s,p] transition-metal shells (main-group [s,p(,d)] is unaffected: ang==pos).
+        // GFN1 additionally has valence+polarisation shells that share an angular
+        // momentum (only H: two s-shells): the occupation goes to the VALENCE shell
+        // (first of each l), polarisation shells get 0 (tblite gfn1 get_reference_occ).
+        bool seen_l[3] = {false, false, false};
         for (int ish = 0; ish < m_basis.nsh_at[iat]; ++ish) {
             const int sh_idx = m_basis.ish_at[iat] + ish;
-            const double refocc = (m_method == MethodType::GFN1)
-                                    ? gfn1_params::reference_occ[z - 1][ish]
-                                    : gfn2_params::reference_occ[z - 1][ish];
+            const int l = m_basis.ang_sh[sh_idx];
+            double refocc;
+            if (m_method == MethodType::GFN1) {
+                const bool is_valence = (l < 0 || l > 2) ? true : !seen_l[l];
+                refocc = is_valence ? gfn1_params::reference_occ[z - 1][l] : 0.0;
+            } else {
+                refocc = gfn2_params::reference_occ[z - 1][l];
+            }
+            if (l >= 0 && l <= 2) seen_l[l] = true;
             m_wfn.n0_sh(sh_idx) += refocc;
             m_wfn.n0_at(iat)    += refocc;
             total               += refocc;
         }
     }
     m_wfn.nocc = total;
+    // Split into alpha/beta, verbatim from tblite get_alpha_beta_occupation
+    // (src/tblite/wavefunction/type.f90:162-176). m_spin carries multiplicity - 1,
+    // i.e. the number of unpaired electrons (tblite nuhf). Closed shell (nuhf = 0)
+    // gives nalpha = nbeta = nocc/2, and the open-shell code paths then never run.
+    // Claude Generated (Sep 2026).
+    {
+        const double nuhf = nUhf();
+        const double diff = std::min(nuhf, m_wfn.nocc);
+        const double ntmp = m_wfn.nocc - diff;
+        m_nalpha = ntmp / 2.0 + diff;
+        m_nbeta = ntmp / 2.0;
+        if (nuhf > 0.0 && CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::param("open_shell_nuhf", static_cast<int>(std::lround(nuhf)));
+            CurcumaLogger::param("n_alpha", m_nalpha);
+            CurcumaLogger::param("n_beta", m_nbeta);
+        }
+    }
     m_wfn.q_at.setZero(m_basis.nat);
     m_wfn.q_sh.setZero(m_basis.nsh);
     if (m_method == MethodType::GFN2) {
@@ -1657,6 +2293,9 @@ bool XTB::UpdateMolecule(const Matrix& geometry)
 
     // 4. Gamma matrix depends on interatomic distances (Klopman-Ohno R_AB)
     m_gamma.resize(0, 0);
+
+    // X-I3: coordination numbers depend on the geometry — drop the memoised CN.
+    m_cn_cache_valid = false;
 
     // 5. Multipole interaction matrices depend on distances and damping radii
     m_mp_initialized = false;
@@ -1730,6 +2369,7 @@ nlohmann::json XTB::getEnergyDecomposition() const
     j["repulsion"]      = m_E_repulsion;
     j["halogen_bond"]   = m_E_halogen_bond;
     j["dispersion"]     = m_E_dispersion;
+    j["entropy"]        = m_E_entropy;   // -T*S, already included in "electronic"
     j["total"]          = m_E_total;
     j["scf_converged"]  = m_scf_converged;
     j["scf_iterations"] = m_scf_iterations;
@@ -1914,12 +2554,46 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
         return std::chrono::duration<double, std::milli>(b - a).count();
     };
     const auto td0 = d4clk::now();
-    // WP2-ext: let the D4 pair loop fan out over the same gated intra-thread budget.
-    m_d4_evaluator->setThreads(effectiveIntraThreads(m_atomcount));
-    double E = m_d4_evaluator->computeEnergyAndGradient(
-        m_atoms, geom_bohr,
-        /*with_gradient=*/true,
-        m_disp_gradient, m_disp_dEdcn, m_disp_dEdq, want_dEdq);
+    double E = 0.0;
+    bool disp_grad_device = false;
+    // Stage 5 (Part B2): the whole 2-body D4 (energy + gradient + dE/dCN + dE/dq) on the
+    // device in one gather, reusing the geometry-fixed reference data uploaded during the SCF
+    // (beginDispersion). The host then adds ATM + the CN-distribution + the q-response on top,
+    // exactly as for the host evaluator. buildRefWFlat uses the same converged charges
+    // (m_wfn.q_at == getZetaCharges, set above) and CN (m_cn_values) the host path uses, so the
+    // result matches the host D4Evaluator to FP-reassociation (~1e-12 energy, gradient FD-grade).
+    // Returns false → host fallback (CUDA, or if the device reference was not uploaded).
+    if (m_gpu_scf && m_gpu_scf->supportsDeviceDispersion()) {
+        const int nat = m_atomcount;
+        std::vector<double> W, dWq, dWc;
+        m_d4_generator->buildRefWFlat(m_atoms, m_wfn.q_at, W, dWq, dWc);
+        std::vector<double> e_atom(nat, 0.0), gflat(3 * nat, 0.0), dcn(nat, 0.0), dq(nat, 0.0);
+        if (m_gpu_scf->dispersionGradient(nat, W.data(), dWq.data(), dWc.data(),
+                                          e_atom.data(), gflat.data(), dcn.data(), dq.data())) {
+            m_disp_gradient = Matrix::Zero(nat, 3);
+            m_disp_dEdcn = Vector::Zero(nat);
+            m_disp_dEdq = Vector::Zero(nat);
+            double Esum = 0.0;
+            for (int a = 0; a < nat; ++a) {
+                Esum += e_atom[a];                       // total 2-body E = ½·Σ (gather double-counts)
+                m_disp_gradient(a, 0) = gflat[3 * a + 0];
+                m_disp_gradient(a, 1) = gflat[3 * a + 1];
+                m_disp_gradient(a, 2) = gflat[3 * a + 2];
+                m_disp_dEdcn(a) = dcn[a];
+                m_disp_dEdq(a)  = dq[a];
+            }
+            E = 0.5 * Esum;
+            disp_grad_device = true;
+        }
+    }
+    if (!disp_grad_device) {
+        // WP2-ext: let the D4 pair loop fan out over the same gated intra-thread budget.
+        m_d4_evaluator->setThreads(effectiveIntraThreads(m_atomcount));
+        E = m_d4_evaluator->computeEnergyAndGradient(
+            m_atoms, geom_bohr,
+            /*with_gradient=*/true,
+            m_disp_gradient, m_disp_dEdcn, m_disp_dEdq, want_dEdq);
+    }
     const auto td1 = d4clk::now();
 
     // ATM three-body term (GFN2 s9=5.0). Charge-independent (dftd4 evaluates it at
@@ -1927,8 +2601,42 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
     // ACCUMULATES into m_disp_gradient and m_disp_dEdcn (the latter folded together
     // with the 2-body dEdcn via the D4 covalent CN below). Closes the triose C-path
     // remainder (see docs/GFN2_D4_STATUS.md). Claude Generated 2026-05-29.
-    E += m_d4_evaluator->computeATM(
-        m_atoms, geom_bohr, /*with_gradient=*/true, m_disp_gradient, m_disp_dEdcn);
+    // ATM 3-body: device when the 2-body went to the device (so beginDispersion's geometry +
+    // √r4r2 are resident) and the backend implements it; else the host evaluator. The device
+    // gather sums each unique triple once per member → total ATM E = ⅓·Σ e_atom; grad/dEdcn
+    // accumulate on top of the 2-body. Params mirror the D4Params block above (GFN2: s9=5.0,
+    // a1=0.52, a2=5.0, alpha=16.0; computeATM cutoff default 25.0 Bohr). Returns false → host.
+    bool atm_device = false;
+    if (disp_grad_device && m_gpu_scf) {
+        const int nat = m_atomcount;
+        std::vector<double> c6f, dc6f;
+        const auto ta0 = d4clk::now();
+        m_d4_generator->buildAtmC6Flat(m_atoms, c6f, dc6f);
+        if (CurcumaLogger::get_verbosity() >= 3)
+            CurcumaLogger::info_fmt("  D4 ATM C6 build  : {:8.2f} ms (host)", d4ms(ta0, d4clk::now()));
+        std::vector<double> e_at(nat, 0.0), g_at(3 * nat, 0.0), dcn_at(nat, 0.0);
+        if (m_gpu_scf->dispersionATM(nat, c6f.data(), dc6f.data(),
+                                     /*s9=*/5.0, /*a1=*/0.52, /*a2=*/5.0, /*alp=*/16.0,
+                                     /*cutoff=*/m_d4_atm_cutoff, e_at.data(), g_at.data(), dcn_at.data())) {
+            double esum = 0.0;
+            for (int a = 0; a < nat; ++a) {
+                esum += e_at[a];
+                m_disp_gradient(a, 0) += g_at[3 * a + 0];
+                m_disp_gradient(a, 1) += g_at[3 * a + 1];
+                m_disp_gradient(a, 2) += g_at[3 * a + 2];
+                m_disp_dEdcn(a) += dcn_at[a];
+            }
+            E += esum / 3.0;   // each triple counted by its 3 members
+            atm_device = true;
+            if (CurcumaLogger::get_verbosity() >= 3)
+                CurcumaLogger::info("  D4 ATM 3-body on the device");
+        }
+    }
+    if (!atm_device) {
+        E += m_d4_evaluator->computeATM(
+            m_atoms, geom_bohr, /*with_gradient=*/true, m_disp_gradient, m_disp_dEdcn,
+            m_d4_atm_cutoff);
+    }
     const auto td2 = d4clk::now();
 
     // CN chain rule: fold Σ_A dE_D4/dCN_A · ∂CN_A/∂R into the cached gradient using
@@ -1946,18 +2654,22 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
     // gradient. The per-reference path is Mulliken-self-consistent, so ∂q/∂x comes
     // from the GFN2 CPSCF/Z-vector response. Skipped in audit mode (no MO state).
     const auto td3 = d4clk::now();
-    if (m_disp_dEdq.size() == m_atomcount && !m_disp_audit_mode) {
-        // q-response source (m_d4_charge_source, default "eeq"):
-        //   "eeq"      — analytic ∂q/∂x from the single-shot dftd4 EEQ model
-        //                (one LU solve + adjoint contraction, ~ms). dftd4-conform
-        //                and the validated default. ~100x cheaper than the CPSCF.
-        //   "mulliken" — exact ∂q_Mulliken/∂x via the GFN2 CPSCF/Z-vector solve
-        //                (computeMullikenChargeResponse). Self-consistent with the
-        //                Mulliken-charge D4 energy but expensive (dominates the
-        //                post-SCF time on large systems: ~88% of D4 on complex).
-        // The energy weighting stays on the SCF Mulliken charges either way, so
-        // this choice only affects the gradient, never the energy.
-        if (m_d4_charge_source == "mulliken") {
+    // When m_d4_variational_qresp is set (exact GFN2, F5), the dE_D4/dq·dq/dR term is
+    // handled by the gradient charge-Pulay + W (dE_D4/dq folded into m_pot.v_at), so the
+    // separate eeq/CPSCF response here is skipped to avoid double-counting.
+    if (m_disp_dEdq.size() == m_atomcount && !m_disp_audit_mode && !m_d4_variational_qresp) {
+        // q-response source (m_d4_charge_source) — reached only when NOT variational:
+        //   "eeq"   — analytic ∂q/∂x from the single-shot dftd4 EEQ model (one LU solve
+        //             + adjoint contraction, ~ms). dftd4-conform, approximate (uses EEQ
+        //             not Mulliken charges): ~1% gradient residual on TM complexes.
+        //   "cpscf" — explicit ∂q_Mulliken/∂x via the GFN2 CPSCF/Z-vector solve
+        //             (computeMullikenChargeResponse). Exact but expensive (~88% of D4
+        //             on complex). Superseded by the default variational path, which
+        //             gets the same Mulliken response for free through the charge-Pulay.
+        // The energy weighting stays on the SCF Mulliken charges in all cases, so this
+        // choice only affects the gradient, never the energy.
+        if (m_d4_charge_source == "cpscf") {
+            // (never deferred: the deferral is disabled for d4_charge_source=cpscf)
             computeMullikenChargeResponse(m_disp_dEdq, m_disp_gradient);
         } else if (m_gpu_scf && m_gpu_scf->supportsDeviceEeq()) {
             // Stage 5 (Part A): device EEQ charges + adjoint dq/dx response. The
@@ -2165,18 +2877,6 @@ void XTB::addDispersionPotential(Potential& pot) const
         return;
     for (int A = 0; A < m_atomcount; ++A)
         pot.v_at(A) += dEdq(A);
-}
-
-/* ------------------------------------------------------------------------- *
- *  Legacy QMDriver hooks — not used yet; we go through buildH0Data() instead.
- * ------------------------------------------------------------------------- */
-Matrix XTB::MakeOverlap(std::vector<STO::Orbital>& /*basisset*/)
-{
-    return Matrix::Identity(m_basis.nao, m_basis.nao);
-}
-Matrix XTB::MakeH(const Matrix& /*S*/, const std::vector<STO::Orbital>& /*basisset*/)
-{
-    return Matrix::Zero(m_basis.nao, m_basis.nao);
 }
 
 } // namespace curcuma::xtb

@@ -16,6 +16,11 @@
  * Claude Generated. GPL-3.0.
  */
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+#include <limits>
 #include "xtb_native.h"
 #include "native_eigensolver.h"
 #include "src/core/curcuma_logger.h"
@@ -169,6 +174,50 @@ Matrix XTB::buildFock(const Matrix& H0,
     }
     });  // parallelStripes over mu
     return F;
+}
+
+/* ------------------------------------------------------------------ *
+ *  reduceToStandardForm() (Claude Generated, Sep 2026)               *
+ *                                                                    *
+ *  A <- L^-1 A L^-T with the cached lower Cholesky factor L of S.    *
+ *  Two equivalent routes, chosen by the thread count because their   *
+ *  scaling differs (measured n = 3222 on 36 cores, OpenMP OpenBLAS,  *
+ *  CURCUMA_XTB_REDUCE_PROBE=1 reprints this per machine):            *
+ *                                                                    *
+ *    threads:        1      8     16     36                          *
+ *    dsygst      620 ms  195 ms 190 ms 308 ms                        *
+ *    2x dtrsm    900 ms  192 ms 123 ms 156 ms                        *
+ *                                                                    *
+ *  dsygst does half the flops (n^3/3 vs 2 n^3) but threads poorly;   *
+ *  the triangular solves are BLAS3 and keep scaling. The two agree   *
+ *  to 8e-15 elementwise, so the choice is a rounding-level change.   *
+ * ------------------------------------------------------------------ */
+int XTB::blasThreadsNow()
+{
+#ifdef _OPENMP
+    return omp_get_max_threads();   // what MklThreadScope set for this eigensolve
+#else
+    return 1;
+#endif
+}
+
+void XTB::reduceToStandardForm(Eigen::MatrixXd& A, int n, int threads, bool& ok) const
+{
+    ok = true;
+    // -scf_reduce auto|sygst|trsm, -scf_reduce_threads N (Claude Generated, Sep 2026).
+    // 'auto' with the default threshold of 8 is what this function did before.
+    const bool use_trsm = (m_scf_reduce == "trsm")
+        || (m_scf_reduce != "sygst" && threads >= m_scf_reduce_threads);
+    if (use_trsm) {
+        // A <- L^-1 A, then A <- A L^-T (BLAS dtrsm through Eigen's triangular solve).
+        m_X.triangularView<Eigen::Lower>().solveInPlace(A);
+        m_X.triangularView<Eigen::Lower>().transpose().template solveInPlace<Eigen::OnTheRight>(A);
+        return;
+    }
+    const char uplo = 'L';
+    int itype = 1, info = 0;
+    dsygst_(&itype, &uplo, &n, A.data(), &n, m_X.data(), &n, &info);
+    ok = (info == 0);
 }
 
 /* ------------------------------------------------------------------ *
@@ -342,6 +391,7 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
             // Native path (no LAPACK eigensolve): reduce A = L⁻¹·F·L⁻ᵀ with Eigen
             // triangular solves (BLAS dtrsm), then diagonalise with our own self-contained
             // solver. Y = L⁻¹·F; A = L⁻¹·Yᵀ = L⁻¹·F·L⁻ᵀ (F symmetric). Claude Generated.
+            ++m_eig_calls_native;
             const Eigen::MatrixXd Y = m_X.triangularView<Eigen::Lower>().solve(F);
             A = m_X.triangularView<Eigen::Lower>().solve(Y.transpose());
             const auto te1 = clk::now();
@@ -355,44 +405,107 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
             m_t_xfx  += ms(te0, te1);            // reduce (triangular solves)
             m_t_diag += ms(te1, te2);            // native eigensolve
         } else if (!lobpcg_done && m_eig_fp32 && !use_lobpcg) {
-            // Mixed-precision early iteration (opt-in): FP32 reduce (ssygst) + FP32
-            // divide-and-conquer (ssyevd), ~2x faster. The FP64 back-transform below runs on
-            // the FP32-quality eigenvectors; the SCF loop reverts to the FP64 branch once
-            // max|dq| < scf_fp32_threshold, so the converged fixed point — and the energy —
-            // is FP64. Claude Generated.
-            Eigen::MatrixXf Af = F.cast<float>();
-            Eigen::MatrixXf Lf = m_X.cast<float>();
-            int itype = 1;
-            ssygst_(&itype, &uplo, &n, Af.data(), &n, Lf.data(), &n, &info);
-            if (info != 0) return false;
+            // Mixed-precision iteration (opt-in): the REDUCTION stays FP64 (dsygst) and only the
+            // divide-and-conquer eigensolve runs in FP32 (ssyevd). Reducing in FP32 as well
+            // (ssygst) was measured 12x SLOWER than FP64 with the OpenMP OpenBLAS build used
+            // here - its single-precision triangular kernels are not optimised: n = 3222,
+            // 8 threads, ssygst 2430 ms vs dsygst 193 ms, strsm-pair 2558 vs dtrsm-pair 203 ms
+            // (CURCUMA_XTB_REDUCE_PROBE=1 prints this on any machine). ssyevd, in contrast, is
+            // the faster one (polymer: 0.92 vs 1.35 s per iteration), so the split pays.
+            // The FP64 back-transform below runs on the FP32-quality eigenvectors; the SCF
+            // reverts to the FP64 branch once max|dq| < scf_fp32_threshold, so the converged
+            // fixed point - and the energy - is FP64. Claude Generated.
+            ++m_eig_calls_fp32;
+            A = F;                               // row-major Matrix -> column-major (transpose copy)
+            const auto te0b = clk::now();
+            bool red_ok = true;
+            reduceToStandardForm(A, n, blasThreadsNow(), red_ok);
+            if (!red_ok) return false;
+            Eigen::MatrixXf Af = A.cast<float>();
             const auto te1 = clk::now();
+            m_t_xfx_copy += ms(te0, te0b);
             int lwork = 1 + 6 * n + 2 * n * n, liwork = 3 + 5 * n;
-            std::vector<float> work(static_cast<size_t>(lwork));
-            std::vector<int>   iwork(static_cast<size_t>(liwork));
+            // Persistent scratch (Claude Generated, Sep 2026): the ~2·nao² work
+            // array was allocated (and zero-filled) on every SCF iteration.
+            if (m_lapack_work_f.size() < static_cast<size_t>(lwork)) m_lapack_work_f.resize(lwork);
+            if (m_lapack_iwork.size()  < static_cast<size_t>(liwork)) m_lapack_iwork.resize(liwork);
             Eigen::VectorXf epsf(n);
             const char jobz = 'V';
             ssyevd_(&jobz, &uplo, &n, Af.data(), &n, epsf.data(),
-                    work.data(), &lwork, iwork.data(), &liwork, &info);
+                    m_lapack_work_f.data(), &lwork, m_lapack_iwork.data(), &liwork, &info);
             if (info != 0) return false;
             const auto te2 = clk::now();
-            A   = Af.cast<double>();             // standard-form eigenvectors → FP64 for the shared back-transform
+            A   = Af.cast<double>();             // standard-form eigenvectors → FP64 back-transform
             eps = epsf.cast<double>();
-            m_t_xfx  += ms(te0, te1);            // reduce (ssygst)
+            m_t_xfx  += ms(te0, te1);            // reduce (dsygst) + cast to FP32
             m_t_diag += ms(te1, te2);            // ssyevd
         } else if (!lobpcg_done) {
             // MKL path (default, and the LOBPCG dense fallback): reduce F to standard form
             // (dsygst, in-place lower triangle) then solve with the divide-and-conquer dsyevd.
-            A = F;
-            int itype = 1;
-            dsygst_(&itype, &uplo, &n, A.data(), &n, m_X.data(), &n, &info);
-            if (info != 0) return false;
+            // Claude Generated (Sep 2026): CURCUMA_XTB_REDUCE_PROBE=1 times the reduction in this
+            // process once (dsygst at 1/8/all OMP threads and the equivalent pair of dtrsm calls),
+            // to tell a slow LAPACK path apart from a starved BLAS thread pool.
+            if (std::getenv("CURCUMA_XTB_REDUCE_PROBE") && m_t_xfx_copy == 0.0) {
+                Eigen::MatrixXd P0 = F, Lc = m_X;
+                const int itype_p = 1;
+                int info_p = 0;
+#ifdef _OPENMP
+                const int omp_now = omp_get_max_threads();
+                const int hw = omp_get_num_procs();
+#else
+                const int omp_now = 1, hw = 1;
+#endif
+                for (int nt : { 0, 1, 8, hw }) {   // 0 = leave the thread count untouched
+#ifdef _OPENMP
+                    if (nt > 0) omp_set_num_threads(nt);
+#endif
+                    Eigen::MatrixXd Ap = P0;
+                    const auto p0 = clk::now();
+                    dsygst_(&itype_p, &uplo, &n, Ap.data(), &n, Lc.data(), &n, &info_p);
+                    const double t_sygst = ms(p0, clk::now());
+                    Eigen::MatrixXd Bp = P0;
+                    const auto p1 = clk::now();
+                    Lc.triangularView<Eigen::Lower>().solveInPlace(Bp);
+                    Lc.triangularView<Eigen::Lower>().transpose().template solveInPlace<Eigen::OnTheRight>(Bp);
+                    const double t_trsm = ms(p1, clk::now());
+                    // FP32 equivalents (the mixed-precision branch uses ssygst).
+                    Eigen::MatrixXf Afp = P0.cast<float>(), Lfp = Lc.cast<float>();
+                    const auto p2 = clk::now();
+                    ssygst_(&itype_p, &uplo, &n, Afp.data(), &n, Lfp.data(), &n, &info_p);
+                    const double t_ssygst = ms(p2, clk::now());
+                    Eigen::MatrixXf Bfp = P0.cast<float>();
+                    const auto p3 = clk::now();
+                    Lfp.triangularView<Eigen::Lower>().solveInPlace(Bfp);
+                    Lfp.triangularView<Eigen::Lower>().transpose().template solveInPlace<Eigen::OnTheRight>(Bfp);
+                    const double t_strsm = ms(p3, clk::now());
+                    CurcumaLogger::info_fmt("reduce probe n={} omp={}: dsygst {:.1f} / 2x dtrsm {:.1f} / "
+                                            "ssygst {:.1f} / 2x strsm {:.1f} ms",
+                                            n, nt, t_sygst, t_trsm, t_ssygst, t_strsm);
+                }
+#ifdef _OPENMP
+                omp_set_num_threads(omp_now);
+#endif
+            }
+            ++m_eig_calls_lapack;
+            A = F;                               // row-major Matrix -> column-major (transpose copy)
+            const auto te0b = clk::now();
+            bool red_ok = true;
+            reduceToStandardForm(A, n, blasThreadsNow(), red_ok);
+            if (!red_ok) return false;
             const auto te1 = clk::now();
+            m_t_xfx_copy += ms(te0, te0b);
+#ifdef _OPENMP
+            m_blas_threads = omp_get_max_threads();
+#endif
             int lwork = 1 + 6 * n + 2 * n * n, liwork = 3 + 5 * n;
-            std::vector<double> work(static_cast<size_t>(lwork));
-            std::vector<int>    iwork(static_cast<size_t>(liwork));
+            // Persistent scratch (Claude Generated, Sep 2026): for nao=4000 the
+            // work array is 256 MB; allocating + zero-filling it per iteration
+            // cost more than the reduction step itself. Bit-identical.
+            if (m_lapack_work.size()  < static_cast<size_t>(lwork))  m_lapack_work.resize(lwork);
+            if (m_lapack_iwork.size() < static_cast<size_t>(liwork)) m_lapack_iwork.resize(liwork);
             const char jobz = 'V';
             dsyevd_(&jobz, &uplo, &n, A.data(), &n, eps.data(),
-                    work.data(), &lwork, iwork.data(), &liwork, &info);
+                    m_lapack_work.data(), &lwork, m_lapack_iwork.data(), &liwork, &info);
             if (info != 0) return false;
             const auto te2 = clk::now();
             m_t_xfx  += ms(te0, te1);            // reduce (dsygst)
@@ -430,7 +543,29 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
     }
 
     const auto t_dens0 = std::chrono::steady_clock::now();
-    if (m_electronic_temp > 0.0) {
+    if (openShell()) {
+        // Open shell: one set of orbitals, two Fermi fillings, summed occupations —
+        // tblite's nspin == 1 branch (src/tblite/scf/iterator.f90:309-323). This is the
+        // restricted-open / fractional-occupation treatment that `xtb --uhf` uses for
+        // GFN1 and GFN2; it is NOT a UHF with two Fock matrices. Claude Generated
+        // (Sep 2026). The closed-shell branches below are untouched and stay
+        // bit-identical.
+        Eigen::VectorXd occ_a, occ_b;
+        double s_a = 0.0, s_b = 0.0;
+        const double kT_uhf = m_electronic_temp * 3.166808e-6;
+        fermiFillingChannel(m_wfn.eps, m_nalpha, kT_uhf, occ_a, s_a);
+        fermiFillingChannel(m_wfn.eps, m_nbeta, kT_uhf, occ_b, s_b);
+        Eigen::VectorXd occ = occ_a + occ_b;
+        m_ts_uhf = s_a + s_b;
+        int ncol = 0;
+        for (int i = 0; i < nao; ++i)
+            if (occ(i) > 1.0e-12) ncol = i + 1;
+        if (ncol == 0) return false;
+        const auto Cocc = m_wfn.C.leftCols(ncol);
+        const Matrix Cw = Cocc * occ.head(ncol).asDiagonal();
+        m_wfn.P.noalias() = Cw * Cocc.transpose();
+        m_wfn.focc = occ;
+    } else if (m_electronic_temp > 0.0) {
         // Fermi-Dirac smearing: bisect for Fermi level, build fractional-occupation density
         const double kT = m_electronic_temp * 3.166808e-6;  // K → Hartree
         const double n_elec = m_wfn.nocc;
@@ -465,12 +600,18 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
         const auto Cocc = m_wfn.C.leftCols(ncol);
         const Matrix Cw = Cocc * occ.head(ncol).asDiagonal();
         m_wfn.P.noalias() = Cw * Cocc.transpose();
+        // X-G3: keep the fractional occupations so the gradient builds an
+        // occupation-consistent energy-weighted density W (matches this P).
+        m_wfn.focc = occ;
     } else {
         // Integer occupation: closed-shell, 2 electrons per occupied orbital
         const int nocc = static_cast<int>(std::floor(m_wfn.nocc / 2.0));
         if (nocc < 0 || nocc > nao) return false;
         m_wfn.P.noalias() =
             2.0 * m_wfn.C.leftCols(nocc) * m_wfn.C.leftCols(nocc).transpose();
+        // X-G3: integer occupations {2,…,2,0,…} for the gradient's W build.
+        m_wfn.focc = Eigen::VectorXd::Zero(nao);
+        m_wfn.focc.head(nocc).setConstant(2.0);
     }
     m_t_dens += std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - t_dens0).count();
@@ -513,6 +654,7 @@ Matrix XTB::applyLevelShift(const Matrix& F, const Matrix& S,
  * ------------------------------------------------------------------ */
 void XTB::updatePopulations(const Matrix& S)
 {
+    ensureHostMultipoleIntegrals();
     const int nao = m_basis.nao;
     const int nsh = m_basis.nsh;
 
@@ -548,9 +690,24 @@ void XTB::updatePopulations(const Matrix& S)
 
     // GFN2 atomic multipoles via Mulliken on tblite-convention integrals
     if (m_method == MethodType::GFN2 && m_mp_initialized) {
+        // Claude Generated (Sep 2026): parallel over the AO mu. Each mu contributes to the atom
+        // that owns it, so threads accumulate into private per-atom blocks that are summed in a
+        // fixed thread order afterwards. The per-mu inner sums keep their original order, but an
+        // atom whose AOs land on different threads is summed in a different order than serially,
+        // so this is NOT bit-identical: measured over polymer, -threads 1 vs 16 gives the same
+        // energy to 12 decimals and gradients within 1.5e-14 Eh/Angstrom.
+        // Measured on polymer (nao 3222, gfn2, -threads 16): the populations phase went
+        // 214 -> 76 ms per SCF iteration - the loop streams ten row-major matrices at stride nao,
+        // so it is memory bound rather than compute bound.
         m_wfn.dp_at.setZero(3, m_atomcount);
         m_wfn.qp_at.setZero(6, m_atomcount);
-        for (int mu = 0; mu < nao; ++mu) {
+        const int mp_threads = effectiveIntraThreads(nao);
+        std::vector<Eigen::MatrixXd> dp_part(mp_threads > 1 ? mp_threads : 0);
+        std::vector<Eigen::MatrixXd> qp_part(mp_threads > 1 ? mp_threads : 0);
+        parallelStripes(mp_threads, [&](int tid, int nth) {
+        Eigen::MatrixXd dp_loc = Eigen::MatrixXd::Zero(3, m_atomcount);
+        Eigen::MatrixXd qp_loc = Eigen::MatrixXd::Zero(6, m_atomcount);
+        for (int mu = tid; mu < nao; mu += nth) {
             const int iat = m_basis.ao2at[mu];
             double d0 = 0, d1 = 0, d2 = 0;
             double q0 = 0, q1 = 0, q2 = 0, q3 = 0, q4 = 0, q5 = 0;
@@ -567,15 +724,22 @@ void XTB::updatePopulations(const Matrix& S)
                 q5 += Pji * m_qp_int[5](nu, mu);
             }
             // Sign: multipoles are valence deviations (like q_sh)
-            m_wfn.dp_at(0, iat) -= d0;
-            m_wfn.dp_at(1, iat) -= d1;
-            m_wfn.dp_at(2, iat) -= d2;
-            m_wfn.qp_at(0, iat) -= q0;
-            m_wfn.qp_at(1, iat) -= q1;
-            m_wfn.qp_at(2, iat) -= q2;
-            m_wfn.qp_at(3, iat) -= q3;
-            m_wfn.qp_at(4, iat) -= q4;
-            m_wfn.qp_at(5, iat) -= q5;
+            dp_loc(0, iat) -= d0;
+            dp_loc(1, iat) -= d1;
+            dp_loc(2, iat) -= d2;
+            qp_loc(0, iat) -= q0;
+            qp_loc(1, iat) -= q1;
+            qp_loc(2, iat) -= q2;
+            qp_loc(3, iat) -= q3;
+            qp_loc(4, iat) -= q4;
+            qp_loc(5, iat) -= q5;
+        }
+        if (nth > 1) { dp_part[tid] = std::move(dp_loc); qp_part[tid] = std::move(qp_loc); }
+        else         { m_wfn.dp_at = std::move(dp_loc); m_wfn.qp_at = std::move(qp_loc); }
+        });
+        for (int t = 0; t < static_cast<int>(dp_part.size()); ++t) {
+            if (dp_part[t].size()) m_wfn.dp_at += dp_part[t];
+            if (qp_part[t].size()) m_wfn.qp_at += qp_part[t];
         }
     }
 }
@@ -591,12 +755,90 @@ void XTB::updatePopulations(const Matrix& S)
  *    T = 0 : integer closed-shell (2 per occupied orbital).           *
  *  Keep in sync with solveEigen (xtb_scf.cpp).                        *
  * ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ *
+ *  fermiFillingChannel()  (Claude Generated, Sep 2026)               *
+ *                                                                    *
+ *  One spin channel, occupations in [0,1]. Verbatim port of tblite    *
+ *  get_fermi_filling / get_aufbau_filling / get_fermi_filling_        *
+ *  (src/tblite/wavefunction/fermi.f90) plus get_electronic_entropy    *
+ *  (src/tblite/scf/iterator.f90:341-346).                             *
+ *                                                                    *
+ *  NOTE the target of the Newton iteration is the INTEGER homo count  *
+ *  from the aufbau step, not `nel` itself - that is what the          *
+ *  reference does, and it matters for fractional nel.                 *
+ * ------------------------------------------------------------------ */
+void XTB::fermiFillingChannel(const Vector& eps, double nel, double kT,
+                              Eigen::VectorXd& occ_ch, double& entropy)
+{
+    const int n = static_cast<int>(eps.size());
+    occ_ch.setZero(n);
+    entropy = 0.0;
+    if (n == 0 || nel <= 0.0) return;
+
+    // get_aufbau_filling
+    int homo = static_cast<int>(std::floor(nel));
+    for (int i = 0; i < std::min(homo, n); ++i) occ_ch(i) = 1.0;
+    const double frac = nel - std::floor(nel);
+    if (homo < n) occ_ch(homo) = frac;
+    if (frac > 0.5) ++homo;
+    if (homo <= 0) return;
+    if (kT <= 0.0) return;   // T = 0: aufbau filling is the answer
+
+    // get_fermi_filling_ : Newton on the Fermi level, target occt = homo
+    double e_fermi = 0.5 * (eps(std::max(homo, 1) - 1) + eps(std::min(homo + 1, n) - 1));
+    const double occt = static_cast<double>(homo);
+    const double thr = std::sqrt(std::numeric_limits<double>::epsilon());
+    for (int cycle = 0; cycle < 200; ++cycle) {
+        double total_number = 0.0, total_dfermi = 0.0;
+        for (int i = 0; i < n; ++i) {
+            double fermifunct = 0.0, dfermifunct = 0.0;
+            const double x = (eps(i) - e_fermi) / kT;
+            if (x < 50.0) {
+                const double ex = std::exp(x);
+                fermifunct = 1.0 / (ex + 1.0);
+                dfermifunct = ex / (kT * (ex + 1.0) * (ex + 1.0));
+            }
+            occ_ch(i) = fermifunct;
+            total_number += fermifunct;
+            total_dfermi += dfermifunct;
+        }
+        if (total_dfermi == 0.0) break;
+        const double change_fermi = (occt - total_number) / total_dfermi;
+        e_fermi += change_fermi;
+        if (std::abs(occt - total_number) <= thr) break;
+    }
+
+    // get_electronic_entropy: s = sum(log(f^f * (1-f)^(1-f))) * kT
+    for (int i = 0; i < n; ++i) {
+        const double f = occ_ch(i);
+        if (f > 1.0e-14 && (1.0 - f) > 1.0e-14)
+            entropy += f * std::log(f) + (1.0 - f) * std::log(1.0 - f);
+    }
+    entropy *= kT;
+}
+
 void XTB::occupationsFromEps(const Vector& eps,
                              Eigen::VectorXd& occ, int& ncol) const
 {
     const int nao = m_basis.nao;
     occ.setZero(nao);
     ncol = 0;
+    // Open shell: two Fermi fillings over the SAME orbitals, summed - tblite's
+    // nspin == 1 branch (src/tblite/scf/iterator.f90:309-323). Closed shell keeps the
+    // original single-channel code below untouched, so those results stay bit-identical.
+    // Claude Generated (Sep 2026).
+    if (openShell()) {
+        Eigen::VectorXd occ_a, occ_b;
+        double s_a = 0.0, s_b = 0.0;
+        const double kT_uhf = m_electronic_temp * 3.166808e-6;
+        fermiFillingChannel(eps, m_nalpha, kT_uhf, occ_a, s_a);
+        fermiFillingChannel(eps, m_nbeta, kT_uhf, occ_b, s_b);
+        occ = occ_a + occ_b;
+        m_ts_uhf = s_a + s_b;
+        for (int i = 0; i < nao; ++i)
+            if (occ(i) > 1.0e-12) ncol = i + 1;
+        return;
+    }
     if (m_electronic_temp > 0.0) {
         const double kT = m_electronic_temp * 3.166808e-6;  // K → Hartree
         const double n_elec = m_wfn.nocc;
@@ -625,6 +867,48 @@ void XTB::occupationsFromEps(const Vector& eps,
         for (int i = 0; i < n; ++i) occ(i) = 2.0;
         ncol = n;
     }
+}
+
+/* ------------------------------------------------------------------ *
+ *  electronicFreeEnergy()  (Claude Generated)                        *
+ *                                                                    *
+ *  Electronic free-energy (Mermin) term g = -T*S from the fractional *
+ *  Fermi occupations, a port of xtb's fermismear entropy             *
+ *  (external/xtb/src/scc_core.f90:1047-1058):                        *
+ *                                                                    *
+ *    s  = Σ_i [ f_i·ln f_i + (1-f_i)·ln(1-f_i) ]   (per spin channel,*
+ *              only thr < f_i < 1-thr, f_i in [0,1])                 *
+ *    g  = s · kB·T                                                    *
+ *                                                                    *
+ *  xtb sums both spin channels (ga+gb); for the restricted           *
+ *  closed-shell path the channels are identical, so with m_wfn.focc  *
+ *  stored as 0..2 and the per-channel occupation f = focc/2:         *
+ *                                                                    *
+ *    g = 2 · kB·T · Σ_i [ f·ln f + (1-f)·ln(1-f) ]                   *
+ *                                                                    *
+ *  s ≤ 0, so g ≤ 0 and it lowers the total energy: xtb/tblite report *
+ *  the free energy A = E - T*S. kB·T uses the same constant as the   *
+ *  smearing (solveEigen/occupationsFromEps) so the Fermi level and   *
+ *  entropy are mutually consistent. Returns 0 at T=0 (integer occ).  *
+ * ------------------------------------------------------------------ */
+double XTB::electronicFreeEnergy() const
+{
+    if (m_electronic_temp <= 0.0 || m_wfn.focc.size() == 0)
+        return 0.0;
+    // Open shell: the two channels have different occupations, so the entropy cannot be
+    // recovered from the summed focc. The occupation routine stores it (tblite sums the
+    // per-channel get_electronic_entropy, src/tblite/scf/iterator.f90:319-322).
+    // Claude Generated (Sep 2026).
+    if (openShell()) return m_ts_uhf;
+    const double kT  = m_electronic_temp * 3.166808e-6;  // K → Hartree (matches smearing)
+    const double thr = 1.0e-9;                            // xtb fermismear cutoff
+    double s = 0.0;
+    for (int i = 0; i < m_wfn.focc.size(); ++i) {
+        const double f = 0.5 * m_wfn.focc(i);            // per spin channel, 0..1
+        if (f > thr && (1.0 - f) > thr)
+            s += f * std::log(f) + (1.0 - f) * std::log(1.0 - f);
+    }
+    return 2.0 * kT * s;   // g = ga + gb (restricted closed shell); ≤ 0
 }
 
 /* ------------------------------------------------------------------ *
@@ -657,19 +941,11 @@ void XTB::updatePopulationsFromPopAo(const Eigen::VectorXd& pop_ao)
         m_wfn.q_at(i) = m_wfn.n0_at(i) - m_wfn.n_at(i);
 }
 
-/* ------------------------------------------------------------------ *
- *  SCF convergence check.                                            *
- *  Returns true when max |Δq| < threshold and |ΔE| < threshold.      *
- * ------------------------------------------------------------------ */
-static bool checkConvergence(const Vector& q_sh_old,
-                             const Vector& q_sh_new,
-                             double e_old, double e_new,
-                             double threshold)
-{
-    const double dq = (q_sh_new - q_sh_old).cwiseAbs().maxCoeff();
-    const double de = std::fabs(e_new - e_old);
-    return (dq < threshold && de < threshold);
-}
+/* X-S2 (Claude Generated): the dead `static bool checkConvergence(...)` with the
+ * strict `de < threshold` criterion was removed here. The live SCF loop uses
+ * XTB::checkConvergence_impl (xtb_native.cpp) with `de < thresh*100` — keeping the
+ * unused strict variant around was a wiring hazard (a 100x convergence change if
+ * someone called the wrong one). */
 
 /* ------------------------------------------------------------------ *
  *  buildFockFromPotential()                                          *

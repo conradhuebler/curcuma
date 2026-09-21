@@ -1,0 +1,55 @@
+#version 450
+// EIG-2B WY back-transform, step 2: build the b×b compact-WY triangular factor T for a
+// panel of reflectors [k0, k0+b), so that  H_{k0}·H_{k0+1}·…·H_{k0+b-1} = I − V·T·Vᵀ
+// (V = the full-layout panel Vfull from tri_vfull). LAPACK dlarft forward/columnwise
+// recurrence with τ_c = β_{k0+c}:
+//   T(c,c) = β_c ;  T(0:c-1, c) = −β_c · T(0:c-1, 0:c-1) · ( V(:,0:c-1)ᵀ V(:,c) ).
+// One workgroup: a parallel pass fills the Gram entries G(s,c) = V(:,s)·V(:,c) (s<c) in
+// shared memory, then the sequential column recurrence fills T (upper-triangular, columns
+// r in parallel). Output tT is b×b column-major (ld = b); lower triangle zeroed.
+// β = 0 columns are already zero in Vfull, so G(·,c)=0 → T(·,c)=0 (reflector drops out).
+// b is bounded by MAXB = 32. Claude Generated (EIG-2B).
+const uint MAXB = 32u;
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer Vf { double Vfull[]; };   // n×b, ld = n
+layout(std430, binding = 1) readonly  buffer Sb { double scal[]; };    // β at [2n+k]
+layout(std430, binding = 2) writeonly buffer Tb { double T[]; };       // b×b, ld = b (upper)
+layout(push_constant) uniform PC { uint n; uint k0; uint b; } pc;
+
+shared double Gsh[MAXB][MAXB];   // Gsh[s][c] = V(:,s)·V(:,c), used for s<c
+shared double Tsh[MAXB][MAXB];   // accumulated WY factor (upper-triangular)
+
+void main()
+{
+    uint lane = gl_LocalInvocationID.x;
+    uint n = pc.n, b = pc.b, base = 2u * pc.n + pc.k0;
+
+    // Gram entries G(s,c) for s<c (strict upper) — each lane owns whole (s,c) dot products.
+    for (uint idx = lane; idx < b * b; idx += 256u) {
+        uint s = idx % b, c = idx / b;
+        if (s < c) {
+            double g = 0.0lf;
+            for (uint row = 0u; row < n; ++row) g += Vfull[row + s * n] * Vfull[row + c * n];
+            Gsh[s][c] = g;
+        }
+    }
+    // Diagonal T(c,c) = β_c.
+    if (lane < b) Tsh[lane][lane] = scal[base + lane];
+    barrier();
+
+    // Column recurrence: T(r,c) = −β_c · Σ_{s=r}^{c-1} T(r,s)·G(s,c).  Rows r<c in parallel.
+    for (uint c = 1u; c < b; ++c) {
+        if (lane < c) {
+            double t = 0.0lf;
+            for (uint s = lane; s < c; ++s) t += Tsh[lane][s] * Gsh[s][c];
+            Tsh[lane][c] = -scal[base + c] * t;
+        }
+        barrier();
+    }
+
+    // Write b×b column-major (ld = b); zero the strict lower triangle.
+    for (uint idx = lane; idx < b * b; idx += 256u) {
+        uint r = idx % b, c = idx / b;
+        T[r + c * b] = (r <= c) ? Tsh[r][c] : 0.0lf;
+    }
+}

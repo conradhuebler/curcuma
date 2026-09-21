@@ -29,8 +29,8 @@
 
 #include "src/core/global.h"
 #include "src/core/solvation/implicit_solvation.h"
-#include "qm_driver.h"
-#include "STOIntegrals.hpp"
+#include "interface/abstract_interface.h"
+#include "json.hpp"
 
 #include <Eigen/Dense>
 #include <array>
@@ -40,6 +40,10 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 // Forward declarations — the D3/D4 stack only lives in xtb_native.cpp /
 // xtb_gradient.cpp, so we keep this header free of the dispersion include.
@@ -68,22 +72,49 @@ namespace curcuma::xtb {
  *  is the per-iteration generalized eigensolve (dsygst/dsyevd/dtrsm), so we bump
  *  MKL up only around solveEigen for a single large molecule.
  *
- *  MklThreadScope(n) sets the thread-local MKL count to n and restores the
- *  previous value on scope exit (nesting-safe: an inner scope restores the outer
- *  count). It only affects the calling thread, so running many calculations in
- *  parallel through CxxThreadPool keeps each one independent. No-op without MKL.
+ *  MklThreadScope(n) sets the thread-local BLAS/LAPACK thread count to n and
+ *  restores the previous value on scope exit (nesting-safe: an inner scope restores
+ *  the outer count). It only affects the calling thread, so running many calculations
+ *  in parallel through CxxThreadPool keeps each one independent.
+ *
+ *  Covers BOTH backends (Jun 2026): MKL via the thread-local MKL_Set_Num_Threads_Local,
+ *  AND OpenMP-threaded OpenBLAS via omp_set_num_threads (per-thread). The latter is the
+ *  ONLY knob the OpenMP OpenBLAS build honours (openblas_set_num_threads is a no-op there),
+ *  and curcuma's global OMP=1 pin (CxxThreadPool/main.cpp) otherwise starves the eigensolve.
+ *  See src/core/blas_threads.h for the standalone (non-per-thread) version.
  * ------------------------------------------------------------------------- */
 #ifdef USE_MKL
 extern "C" int MKL_Set_Num_Threads_Local(int nt);
-struct MklThreadScope {
-    int prev;
-    explicit MklThreadScope(int n) : prev(MKL_Set_Num_Threads_Local(n < 1 ? 1 : n)) {}
-    ~MklThreadScope() { MKL_Set_Num_Threads_Local(prev); }
-};
-#else
-struct MklThreadScope { explicit MklThreadScope(int) {} };
 #endif
-// Back-compat alias: pin MKL to one thread for the enclosing scope.
+struct MklThreadScope {
+#ifdef USE_MKL
+    int prev_mkl;
+#endif
+#ifdef _OPENMP
+    int  prev_omp = 1;
+    bool omp_active = false;
+#endif
+    explicit MklThreadScope(int n)
+#ifdef USE_MKL
+        : prev_mkl(MKL_Set_Num_Threads_Local(n < 1 ? 1 : n))
+#endif
+    {
+        if (n < 1) n = 1;
+#ifdef _OPENMP
+        prev_omp = omp_get_max_threads();
+        if (n != prev_omp) { omp_set_num_threads(n); omp_active = true; }
+#endif
+    }
+    ~MklThreadScope() {
+#ifdef USE_MKL
+        MKL_Set_Num_Threads_Local(prev_mkl);
+#endif
+#ifdef _OPENMP
+        if (omp_active) omp_set_num_threads(prev_omp);
+#endif
+    }
+};
+// Back-compat alias: pin BLAS/LAPACK to one thread for the enclosing scope.
 struct MklSerialScope { MklThreadScope s{1}; };
 
 /* ------------------------------------------------------------------------- *
@@ -264,6 +295,15 @@ struct Wavefunction {
     Matrix  C;        // MO coefficients, nao × nao
     Vector  eps;      // MO energies, length nao
 
+    // Per-MO occupation numbers used to build P (length nao). X-G3 (Claude Generated):
+    // at electronic_temperature > 0 these are the fractional Fermi occupations, so the
+    // gradient's energy-weighted density W = Σ_i f_i·ε_i·C_i·C_iᵀ matches the fractional
+    // density (the old integer W mismatched the Pulay term for small-gap systems). At
+    // T = 0 they are exactly {2,…,2,0,…} so W is bit-identical to the old integer build.
+    // Empty when the density came from a path that did not set it (gradient then falls
+    // back to the integer build).
+    Vector  focc;
+
     // Energy-weighted density matrix (AO basis): W_μν = 2·Σ_occ ε_i C_μi C_νi. Normally the
     // gradient rebuilds this from C/eps; the purification density path (eigensolver="purify",
     // no eigenpairs) instead stores it here as W = 2·L⁻ᵀ·(P̃·Ã·P̃)·L⁻¹ and sets W_valid so the
@@ -384,6 +424,14 @@ struct GpuScfBackend {
     /// dp_int/qp_int (no upload of the 9 nao² matrices). Returns false → caller
     /// falls back to beginMultipole (upload). Claude Generated (Stage 3d).
     virtual bool beginMultipoleComputed() { return false; }
+    /// Fetch the device-built AO multipole integrals dp_int (3) / qp_int (6), each
+    /// nao×nao column-major, after beginMultipoleComputed — so the HOST GFN2 SCF (the
+    /// non-resident Vulkan/ROCm path) consumes the device integrals and skips its own
+    /// O(nao²) setupMultipole integral loop. Returns false if unavailable (caller keeps
+    /// the CPU build). Claude Generated (Stage 3m / R-AP1 / V-AP2).
+    virtual bool downloadMultipoleInts(std::array<Eigen::MatrixXd, 3>& dp_int,
+                                       std::array<Eigen::MatrixXd, 6>& qp_int)
+    { (void)dp_int; (void)qp_int; return false; }
     virtual bool solveMultipole(const Eigen::VectorXd& v_ao,
                                 const Eigen::MatrixXd& v_dp,
                                 const Eigen::MatrixXd& v_qp,
@@ -447,6 +495,11 @@ struct GpuScfBackend {
      * converged charges once at the end (finalize() still downloads P/C). Default
      * false → the per-iteration host-driven loop. GFN2 device-potential path. */
     virtual bool supportsResidentLoop() const { return false; }
+    /* X-I1: true if the backend's device integral/SCF/gradient kernels handle d
+     * shells. Default false -> the XTB engine routes d systems to the CPU path
+     * (m_has_dshell gate). The CUDA backend overrides to true; ROCm/Vulkan keep
+     * the CPU fallback until their kernels are ported. Claude Generated. */
+    virtual bool supportsDshell() const { return false; }
     virtual bool beginResidentLoop(const Vector& q_sh0, const Eigen::MatrixXd& dp_at0,
                                    const Eigen::MatrixXd& qp_at0, const Vector& q_at0,
                                    const Vector& n0_sh, const Vector& n0_at,
@@ -455,6 +508,10 @@ struct GpuScfBackend {
     { (void)q_sh0; (void)dp_at0; (void)qp_at0; (void)q_at0; (void)n0_sh; (void)n0_at;
       (void)Tele; (void)n_elec; (void)nocc_pairs; (void)alpha; (void)max_hist; (void)w0;
       return false; }
+    /// Per-phase device timings (CURCUMA_GPU_PROFILE), "" when unsupported/disabled.
+    /// Claude Generated (Sep 2026).
+    virtual std::string profileReport() const { return {}; }
+
     virtual bool residentScfStep(bool fp32, double& dq, double& e_band, double& e_coulomb,
                                  double& e_third, double& e_multipole)
     { (void)fp32; (void)dq; (void)e_band; (void)e_coulomb; (void)e_third; (void)e_multipole;
@@ -479,6 +536,29 @@ struct GpuScfBackend {
     /// Per iteration: host-built W/∂W/∂q (each nat·7) → device dE_D4/dq (nat).
     virtual bool dispersionDedq(int nat, const double* W, const double* dWq, double* dEdq_out)
     { (void)nat; (void)W; (void)dWq; (void)dEdq_out; return false; }
+    /// Post-SCF: the whole 2-body D4 (energy + nuclear gradient + dE/dCN + dE/dq) on the
+    /// device in one gather, reusing the geometry-fixed reference data from beginDispersion.
+    /// Inputs W/dWq/dWc each nat·7 (the converged-charge reference weights + their q/CN
+    /// derivatives). Outputs: e_atom (nat; total 2-body E = ½·Σ e_atom — each pair counted
+    /// twice by the gather), grad (3·nat, [3*i+k], Eh/Bohr), dEdcn (nat), dEdq (nat). The
+    /// host adds ATM + the CN-distribution + the q-response on top. Default false → host
+    /// D4Evaluator. Claude Generated.
+    virtual bool dispersionGradient(int nat, const double* W, const double* dWq, const double* dWc,
+                                    double* e_atom_out, double* grad_out,
+                                    double* dEdcn_out, double* dEdq_out)
+    { (void)nat; (void)W; (void)dWq; (void)dWc; (void)e_atom_out; (void)grad_out;
+      (void)dEdcn_out; (void)dEdq_out; return false; }
+    /// Post-SCF: the D4 ATM 3-body (energy + nuclear gradient + dE/dCN) on the device in a
+    /// per-atom gather over pairs, reusing the resident geometry + √r4r2 from beginDispersion.
+    /// c6 / dc6dcn are the q=0 reference C6 + ∂C6/∂CN matrices (nat·nat, from buildAtmC6Flat).
+    /// Outputs: e_atom (nat; total ATM E = ⅓·Σ — each triple counted by its 3 members), grad
+    /// (3·nat, [3*i+k], accumulated on top of the 2-body), dEdcn (nat). s9/a1/a2/alp/cutoff are
+    /// the D4 ATM params (GFN2: 5.0/0.52/5.0/16.0/25.0). Default false → host computeATM.
+    virtual bool dispersionATM(int nat, const double* c6, const double* dc6dcn,
+                               double s9, double a1, double a2, double alp, double cutoff,
+                               double* e_atom_out, double* grad_out, double* dEdcn_out)
+    { (void)nat; (void)c6; (void)dc6dcn; (void)s9; (void)a1; (void)a2; (void)alp; (void)cutoff;
+      (void)e_atom_out; (void)grad_out; (void)dEdcn_out; return false; }
     /// Stage 6 (S6.2b): upload the q-independent D4 reference tables once per
     /// geometry so the fused resident loop rebuilds W/dWq on the device from the
     /// resident SCF charges (no host buildRefWFlat per iteration). Arrays are
@@ -502,6 +582,18 @@ struct GpuScfBackend {
                                 const double* amat_sq, const double* dkernel,
                                 const double* qkernel, const double* gamma3)
     { (void)nat; (void)nsh; (void)amat_sd; (void)amat_dd; (void)amat_sq;
+      (void)dkernel; (void)qkernel; (void)gamma3; return false; }
+    /// Device potential without the stored multipole interaction matrices (the backend
+    /// rebuilds them from geometry + damping radii). Claude Generated (Sep 2026).
+    /// Why the last begin*/step call returned false, when the backend can say. Empty
+    /// otherwise. Claude Generated (Sep 2026).
+    virtual std::string lastError() const { return {}; }
+    virtual bool supportsOnTheFlyMultipole() const { return false; }
+    virtual bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr,
+                                        const double* mrad, double dmp3, double dmp5,
+                                        const double* dkernel, const double* qkernel,
+                                        const double* gamma3)
+    { (void)nat; (void)nsh; (void)xyz_bohr; (void)mrad; (void)dmp3; (void)dmp5;
       (void)dkernel; (void)qkernel; (void)gamma3; return false; }
     /// q_sh (nsh), dp_at (3×nat), qp_at (6×nat) are the mixed SCC input; W/dWq
     /// (each nat·7) the host-built D4 reference weights at those charges. Builds
@@ -551,12 +643,12 @@ inline int solventModelCode(const std::string& s)
     return -1;
 }
 
-class XTB : public QMDriver {
+class XTB : public QMInterface {
 public:
     explicit XTB(MethodType method);
     ~XTB() override;
 
-    // QMDriver API
+    // QMInterface API
     using QMInterface::InitialiseMolecule;   // unhide base-class overloads (Mol& / Mol*)
     bool   InitialiseMolecule() override;
     double Calculation(bool gradient = false) override;
@@ -594,6 +686,9 @@ public:
                                 std::vector<int>& nref) const;            // xtb_native.cpp
     Vector  getOrbitalEnergies() const { return m_wfn.eps; }
     Matrix  getMOCoefficients() const { return m_wfn.C; }
+    Matrix  MolecularOrbitals() const { return m_mo; }
+    Vector  Energies() const { return m_energies; }
+    int     NumElectrons() const { return m_num_electrons; }
     Matrix  getDensity() const { return m_wfn.P; }
     // Converged per-iteration SCC energy components (Eh), cached from the last
     // SCF iteration. Reference for the device SCC-energy reductions (Stage 6,
@@ -629,6 +724,7 @@ public:
     double getMultipoleEnergy() const    { return m_E_multipole; }
     double getHalogenBondEnergy() const  { return m_E_halogen_bond; }
     double getDispersionEnergy() const   { return m_E_dispersion; }
+    double getEntropyEnergy() const      { return m_E_entropy; }
     double getTotalEnergy() const        { return m_E_total; }
 
     nlohmann::json getEnergyDecomposition() const;
@@ -668,6 +764,13 @@ public:
     bool isConverged() const { return m_scf_converged; }
     int  scfIterations() const { return m_scf_iterations; }
 
+    // Hard-error state (Claude Generated): set on genuine solve failures
+    // (eigensolver/Cholesky breakdown, singular overlap, NaN/Inf) — distinct from a
+    // benign max-iteration non-convergence, which still yields a usable energy. A
+    // caller must refuse to consume the energy/gradient when hasError() is true.
+    bool hasError() const { return m_has_error; }
+    const std::string& errorMessage() const { return m_error_message; }
+
     // D4 charge-response source: "eeq" (single-shot dftd4 EEQ, default) or
     // "mulliken" (GFN2 SCF charges + CPSCF response). Set by the wrapper.
     void setD4ChargeSource(const std::string& s) { m_d4_charge_source = s; }
@@ -698,6 +801,13 @@ public:
     void setDiisSubspace(int n)           { if (n >= 2) m_diis_subspace = n; }
     void setLevelShift(double b)          { m_level_shift = b; }
     void setScfGuess(const std::string& g){ m_scf_guess = g; }
+    // Opt-in: build the 4s/4p shells from xtb's older STO-6G tables instead of
+    // tblite's (K, Ca, Ge-Kr only). See STO_CGTO.hpp pAlpha6_legacy_4s.
+    void setSto6gLegacy4sp(bool b)        { m_sto6g_legacy_4sp = b; }
+    // D4 three-body (ATM) real-space cutoff in Bohr. tblite uses 25.0 (the default,
+    // since tblite is curcuma's reference for GFN1/GFN2), xtb passes 40.0. Set 40.0
+    // to reproduce the xtb binary on molecules extending past ~25 Bohr.
+    void setD4AtmCutoff(double c)         { m_d4_atm_cutoff = c; }
     ScfMode scfMode() const               { return m_scf_mode; }
 
     // Electronic temperature in Kelvin (0 → integer occupation, no Fermi smearing).
@@ -766,6 +876,14 @@ public:
     void setMixedPrecision(bool b)      { m_scf_mixed_precision = b; }
     void setFp32Threshold(double t)     { if (t > 0.0) m_scf_fp32_threshold = t; }
     void setGpuPartialDiag(bool b)      { m_gpu_partial_diag = b; }
+    // Performance knobs, all with their measured defaults (see the PARAM help in
+    // native_xtb_method.h). Claude Generated (Sep 2026).
+    void setEigensolverMaxThreads(int n)    { m_eig_max_threads = std::max(0, n); }
+    void setScfReduce(const std::string& r) { m_scf_reduce = r; }
+    void setScfReduceThreads(int n)         { m_scf_reduce_threads = std::max(1, n); }
+    void setFp32StallPatience(int n)        { m_fp32_stall_patience = std::max(0, n); }
+    void setFp32FalseFixpointFactor(double f) { m_fp32_false_fixpoint = f; }
+    void setGpuMultipoleOtf(const std::string& m) { m_gpu_mp_otf = m; }
 
     // Warm-start: reuse converged charges from the previous geometry step.
     // Activated by MD/opt capabilities; also settable via -warm_start false.
@@ -829,6 +947,16 @@ public:
         const Eigen::MatrixXd& dp_at,
         const Eigen::MatrixXd& qp_at);
 
+    // Debug (Jul 2026): audit the GFN2 multipole (AES) analytic gradient against a
+    // frozen-density finite difference. Must be called on a converged GFN2 state
+    // (after Calculation(gradient=true)). Isolates the analytic multipole gradient
+    // as g(full)-g(mp_off) [Eh/Bohr], then FDs the multipole energy at R±h with the
+    // density matrix P frozen (moments RECOMPUTED from P via updatePopulations, so
+    // the FD carries both the §5 interaction and the AP5b integral-Pulay response).
+    // Prints a per-term analytic-vs-FD table (multipole/AES, ES2 Coulomb, D4).
+    // GFN2 only; no effect on results.
+    void auditGfn2GradientTerms();
+
     // --- large_system_mode=dc divide-and-conquer DC-SCF (Claude Generated, June 2026) -
     // Energy-only large-system SCF that exploits locality: each outer iteration
     // builds the GLOBAL potential + Fock from the current density (so severed
@@ -873,7 +1001,17 @@ private:
     void buildBasis();                                   // xtb_native.cpp
     void buildH0Data();                                  // xtb_h0.cpp
     void buildGammaMatrix();                             // xtb_coulomb.cpp
-    void setupMultipole();                               // xtb_multipole.cpp (GFN2)
+    // integrals_on_device=true: skip the O(nao²) CPU dp_int/qp_int integral build
+    // (already filled by GpuScfBackend::downloadMultipoleInts); only the CN-damping
+    // radii + atom-pair interaction matrices are computed. Claude Generated (Stage 3m).
+    void setupMultipole(bool integrals_on_device = false);   // xtb_multipole.cpp (GFN2)
+    /// Build the host dense dipole/quadrupole AO integrals if their build was deferred
+    /// because a large system runs the fully device-resident GPU SCF (Claude Generated,
+    /// Sep 2026). Every host path that reads m_dp_int/m_qp_int calls this first.
+    void ensureHostMultipoleIntegrals();
+    /// Download the converged density P and MO coefficients C from the device if a large
+    /// GPU single point skipped that (Claude Generated, Sep 2026).
+    void ensureHostWavefunction();
     Vector computeCoordinationNumbers() const;           // xtb_native.cpp
     void buildReferenceOccupations();                    // xtb_native.cpp
 
@@ -908,6 +1046,17 @@ private:
                                const Eigen::MatrixXd& dp_at,
                                const Eigen::MatrixXd& qp_at) const;
     double energyMultipole() const;                                      // xtb_multipole.cpp
+    // Electronic free-energy (Mermin/Fermi entropy) term g = -T*S from the
+    // fractional occupations m_wfn.focc (xtb fermismear, scc_core.f90). Claude Generated.
+    double electronicFreeEnergy() const;                                 // xtb_scf.cpp
+
+    // Alpha/beta electron counts (tblite get_alpha_beta_occupation). Equal to
+    // nocc/2 each in the closed-shell case, in which none of the open-shell code runs.
+    double m_nalpha = 0.0;
+    double m_nbeta = 0.0;
+    // Electronic entropy accumulated by the two-channel occupation; consumed by
+    // electronicFreeEnergy(). Only meaningful while openShell() is true.
+    mutable double m_ts_uhf = 0.0;
 
     // Assemble full Fock matrix: F = H0 + isotropic potential + multipole.
     // Isotropic: F_μν = H0_μν - 0.5·S_μν·(v_ao(μ) + v_ao(ν))
@@ -932,6 +1081,24 @@ private:
     //     m_electronic_temp, or integer closed-shell at T=0). Mirrors solveEigen.
     //   updatePopulationsFromPopAo: shell/atom Mulliken charges from precomputed
     //     AO populations pop_ao(μ)=Σ_ν P_μν·S_μν (GFN1: no multipole moments).
+    /**
+     * @brief Fermi occupations of ONE spin channel, max 1.0 per orbital.
+     *
+     * Verbatim port of tblite's get_fermi_filling / get_aufbau_filling /
+     * get_fermi_filling_ (src/tblite/wavefunction/fermi.f90): aufbau to obtain the
+     * channel's HOMO index, then a Newton iteration on the Fermi level that targets
+     * exactly that integer electron count. `entropy` returns this channel's
+     * sum(f ln f + (1-f) ln(1-f)) * kT, i.e. tblite's get_electronic_entropy.
+     * Claude Generated (Sep 2026, open-shell support).
+     */
+    static void fermiFillingChannel(const Vector& eps, double nel, double kT,
+                                    Eigen::VectorXd& occ_ch, double& entropy);
+
+    /// Number of unpaired electrons (tblite nuhf). m_spin carries multiplicity - 1.
+    double nUhf() const { return (m_spin > 0.0) ? m_spin : 0.0; }
+    /// True when the SCF must run the two-channel (open-shell) occupation.
+    bool openShell() const { return nUhf() > 0.0; }
+
     void occupationsFromEps(const Vector& eps,
                             Eigen::VectorXd& occ, int& ncol) const;      // xtb_scf.cpp
     void updatePopulationsFromPopAo(const Eigen::VectorXd& pop_ao);      // xtb_scf.cpp
@@ -969,7 +1136,10 @@ private:
 
     // Repulsion + (GFN1) halogen-bond energies.
     double calcRepulsionEnergy() const;                                  // xtb_native.cpp
-    double calcHalogenBondEnergy() const;                                // xtb_native.cpp
+    double calcHalogenBondEnergy() const;                                // xtb_h0.cpp
+    // Analytic gradient of the GFN1 halogen-bond correction; adds into `gradient`
+    // (nat×3, Eh/Bohr). No-op for GFN2. Claude Generated.
+    void   addHalogenBondGradient(Matrix& gradient) const;               // xtb_h0.cpp
 
     // GFN2 D4 dispersion (optional — requires USE_D4 at compile time).
     // need_gradient gates the (expensive) GFN1 D3 finite-difference geometry
@@ -1006,13 +1176,27 @@ private:
     void parallelStripes(int n_threads,
                          const std::function<void(int, int)>& worker) const; // xtb_native.cpp
 
-    /* ----- legacy QMDriver hooks (still routed through MakeOverlap/H) */
-    Matrix MakeOverlap(std::vector<STO::Orbital>& basisset) override;
-    Matrix MakeH(const Matrix& S,
-                 const std::vector<STO::Orbital>& basisset) override;
+    /// A <- L^-1 A L^-T with the cached Cholesky factor; picks dsygst or two triangular solves
+    /// by thread count (see xtb_scf.cpp for the measurements). Claude Generated (Sep 2026).
+    void reduceToStandardForm(Eigen::MatrixXd& A, int n, int threads, bool& ok) const;
+    /// BLAS/LAPACK threads in force right now (what MklThreadScope set).
+    static int blasThreadsNow();
 
 private:
     MethodType m_method;
+
+    // Converged MO coefficients / orbital energies / occupied-orbital count,
+    // mirrored from m_wfn after every Calculation() for the wrapper accessors
+    // MolecularOrbitals()/Energies()/NumElectrons() (formerly inherited from
+    // the QMDriver base, which this class no longer derives from).
+    Matrix m_mo;
+    Vector m_energies;
+    int    m_num_electrons = 0;
+
+    // LAPACK dsyevd/ssyevd scratch, reused across SCF iterations (xtb_scf.cpp).
+    std::vector<double> m_lapack_work;
+    std::vector<float>  m_lapack_work_f;
+    std::vector<int>    m_lapack_iwork;
 
     BasisMap     m_basis;
     H0Data       m_h0;
@@ -1047,6 +1231,38 @@ private:
     std::vector<double> m_mp_dkernel;
     std::vector<double> m_mp_qkernel;
     bool m_mp_initialized = false;
+    bool m_mp_ints_deferred = false;   // host m_dp_int/m_qp_int not built yet (GPU large system)
+    bool m_wfn_on_device = false;      // converged P/C not downloaded yet (GPU large system)
+
+    // B0 (Jul 2026): setupMultipole() sub-phase timings (ms), for the verbosity-3
+    // setup report. The single "multipole setup" bucket could not be attributed.
+    double m_mp_t_ao_ints = 0.0;   ///< pass 1: O(nao^2) AO dipole/quadrupole integrals
+    double m_mp_t_d_block = 0.0;   ///< pass 1b: d-touching shell pairs (serial)
+    double m_mp_t_shift   = 0.0;   ///< pass 2: origin shift + traceless transform
+    double m_mp_t_cn_mrad = 0.0;   ///< steps 3-4: CN + damping radii
+    double m_mp_t_amat    = 0.0;   ///< step 5: O(nat^2) interaction matrices
+    // Debug (Jul 2026): when true, calculateGradient() skips the GFN2 multipole
+    // (AES) gradient (§5 direct interaction + mrad/CN chain + AP5b integral Pulay).
+    // Used by auditMultipoleGradient() to isolate the analytic multipole gradient
+    // as g(full) - g(mp_off) and FD-check it against the frozen-density multipole
+    // energy. Zero effect on the default path.
+    bool m_mp_grad_off = false;
+    bool m_coulomb_grad_off = false;   // debug: skip the ES2 Coulomb gradient (section 3)
+    bool m_d4_grad_off = false;        // debug: skip the D4 dispersion gradient (section 3b)
+    bool m_repulsion_grad_off = false; // debug: skip the repulsion gradient (section 1)
+    bool m_sval_h0_only = false;       // debug: sval = 2·P·h_av (drop −2W and the charge-Pulay)
+                                       //   -> with all potential terms gated off, the gradient
+                                       //      becomes exactly Tr(P·dH0/dR) (the band term).
+    bool m_cnchain_off = false;        // debug: skip section 4 (the CN chain-rule that
+                                       //   distributes dEdcn into forces). With m_sval_h0_only
+                                       //   this isolates the band term's overlap+shpoly part
+                                       //   (2·P·h_av·dS + G_shpoly) from its H0/CN chain part.
+    bool m_d4_variational_qresp = false;  // F5: handle the GFN2 self-consistent-D4 q-response
+                                       //   variationally (dE_D4/dq in the gradient v_at → charge-Pulay
+                                       //   + W, exactly like tblite) instead of the separate eeq/cpscf
+                                       //   response. Default ON for d4_charge_source="mulliken" (set in
+                                       //   Calculation before calcDispersionEnergy). CURCUMA_D4_NONVARIATIONAL
+                                       //   forces the legacy separate-response path for A/B validation.
 
     // Energy components
     double m_E_electronic    = 0.0;
@@ -1057,6 +1273,11 @@ private:
     double m_E_halogen_bond  = 0.0;
     double m_E_dispersion    = 0.0;
     double m_E_total         = 0.0;
+    // Electronic free-energy term -T*S (Mermin/Fermi entropy). Only non-zero when
+    // Fermi smearing produces fractional occupations (small-gap systems). Folded
+    // into the electronic container to match tblite/xtb, which report the free
+    // energy A = E - T*S. Claude Generated.
+    double m_E_entropy       = 0.0;
 
     // SCF config / state
     int    m_scf_max_iter    = 150;
@@ -1066,10 +1287,28 @@ private:
     bool   m_scf_converged   = false;
     int    m_scf_iterations  = 0;
 
+    // X-I3 (Claude Generated): geometry-keyed cache for computeCoordinationNumbers()
+    // (called up to 3× per Calculation). Invalidated in UpdateMolecule/InitialiseMolecule.
+    mutable Vector m_cn_cache;
+    mutable bool   m_cn_cache_valid = false;
+
+    // Hard-error state (Claude Generated). Reset at the top of Calculation(), set by
+    // setHardError() at genuine solve breakdowns so the wrapper / EnergyCalculator can
+    // refuse the result instead of silently returning E=0.
+    bool        m_has_error = false;
+    std::string m_error_message;
+    void setHardError(const std::string& msg);
+
     // Intra-SCF eigensolve timing buckets (ms), summed over iterations by
     // solveEigen() and printed at verbosity >= 3. Reset in Calculation().
     // Claude Generated 2026-06 (SCF profiling).
     mutable double m_t_xfx = 0.0;   // X·F·X transform (two GEMMs)
+    // Claude Generated (Sep 2026): the reduce timer above covers a row-major -> column-major
+    // copy of F plus the LAPACK call; they are timed separately here because the copy turned out
+    // to be a large share. m_blas_threads records what the BLAS actually had during the solve.
+    mutable double m_t_xfx_copy = 0.0;
+    mutable int    m_blas_threads = 0;
+    mutable int    m_eig_calls_native = 0, m_eig_calls_fp32 = 0, m_eig_calls_lapack = 0;
     mutable double m_t_diag = 0.0;  // dsyevd standard eigensolve
     mutable double m_t_back = 0.0;  // back-transform C = X·C~ (one GEMM)
     mutable double m_t_dens = 0.0;  // density P = C·occ·Cᵀ
@@ -1082,16 +1321,57 @@ private:
     int         m_diis_subspace = 6;     // DIIS history depth (Fock matrices kept)
     double      m_level_shift   = 0.2;   // virtual-orbital shift magnitude (Eh), LevelShift mode
     std::string m_scf_guess     = "eeq"; // initial charge guess: "eeq" (default, dftd4 EEQ) | "h0" (bare)
+    // xtb and tblite disagree on the STO-6G 4s/4p expansion; curcuma follows
+    // tblite (the better fit to the exact Slater function). Set true to
+    // reproduce the xtb binary bit-for-bit on K, Ca and Ge-Kr. STO_CGTO.hpp.
+    bool        m_sto6g_legacy_4sp = false;
+    // D4 ATM cutoff (Bohr). 25.0 = tblite (default), 40.0 = xtb. Carries the ENTIRE
+    // GFN2 energy deviation against xtb on molecules extending past ~25 Bohr, and
+    // ~45 % of the gfn2 runtime on a 231-atom system. Claude Generated (Sep 2026).
+    double      m_d4_atm_cutoff = 25.0;
+    // Runaway-solution recovery (Claude Generated, Sep 2026). The GFN third-order term
+    // scales as q^3 and is unbounded below, so an SCF started far from the ground state
+    // can converge to a spurious stationary point with absurd charges. Observed on
+    // GMTKN55 W4-11/so3 with gfn1: the single-shot EEQ guess put iteration 0 at
+    // -32.7 Eh (SO2, the closest analogue, starts at -11.7), and the SCF settled at
+    // -108.066 Eh against xtb's -17.649, with a third-order term of -134.6 Eh. Starting
+    // from the bare-H0 guess instead reproduces xtb to 1e-8. The reference's own default
+    // guess is "sad" (q = charge/nat, i.e. zero for a neutral molecule; tblite
+    // app/cli.f90:585), which is what H0 amounts to here. Rather than change curcuma's
+    // faster EEQ default for everyone, the converged charges are checked and the whole
+    // calculation is redone from H0 when they are physically impossible.
+    bool m_force_h0_guess = false;   ///< set by the retry; suppresses the EEQ guess
+    bool m_in_scf_retry   = false;   ///< guards against recursing more than once
     std::string m_eigensolver   = "mkl"; // eigensolve backend: "mkl" (dsyevd) | "native"/"dnc"
-    bool        m_scf_mixed_precision = false;   // opt-in FP32 early-iteration eigensolve (MKL path)
+    // FP32 early-iteration eigensolve (MKL path), ON by default since Jul 2026.
+    // The eigensolve is ~58% of native-GFN runtime after the shell-pair-blocked
+    // integrals, so this is the largest single CPU lever: complex/231 single core
+    // gfn2 1077 -> 916 ms, gfn1 1027 -> 787 ms. Convergence is never accepted on an
+    // FP32 step, so the fixed point stays FP64. NOTE the Vulkan wrapper explicitly
+    // turns this back OFF — it is measured net-negative there (see xtb_vulkan_method.cpp).
+    bool        m_scf_mixed_precision = true;
     double      m_scf_fp32_threshold  = 1.0e-3;  // switch FP32→FP64 once max|dq| < this
     bool        m_gpu_partial_diag    = false;   // opt-in GPU partial diagonalisation (AP1; net-neutral, see PARAM)
+    // Tunables that were environment variables / hard-coded heuristics until Sep 2026.
+    // Defaults reproduce the previous behaviour exactly. Claude Generated.
+    int         m_eig_max_threads     = 0;       // 0 = follow -threads (CURCUMA_EIG_MAX_THREADS overrides)
+    std::string m_scf_reduce          = "auto";  // auto | sygst | trsm
+    int         m_scf_reduce_threads  = 8;       // 'auto' takes trsm from this thread count up
+    int         m_fp32_stall_patience = 3;       // FP32 iterations without progress before FP64 (0 = off)
+    double      m_fp32_false_fixpoint = 10.0;    // FP64/FP32 residual ratio that unmasks a false fixed point (0 = off)
+    std::string m_gpu_mp_otf          = "auto";  // GFN2 GPU multipole matrices: auto | on | off
     // Optional GPU eigensolver; default unset → CPU path unchanged. Claude Generated.
     ExternalEigensolver m_external_eigensolver;
     bool        m_eig_fp32 = false;              // per-iteration flag set by the SCF loop
     // Optional device-resident SCF backend (GPU port Stage 2); non-owning, set by
     // the GPU wrapper, default null → CPU SCF unchanged. Claude Generated.
     GpuScfBackend* m_gpu_scf = nullptr;
+    // X-I1: true when the basis contains a d shell. The device integral / SCF /
+    // gradient kernels are s/p-only, so for d-containing systems those device
+    // paths fall back to the (validated) CPU path; the atom-based D4/EEQ device
+    // paths stay (d-independent). Set in buildBasis. Device d kernels are a
+    // follow-up (see docs/SQM_DSHELL_WP.md B6). Claude Generated.
+    bool m_has_dshell = false;
     // GPU: the molecule-constant flattened basis is uploaded to the device only
     // when the basis is (re)built (set in buildBasis), not every geometry — so
     // MD/opt steps re-upload only xyz and recompute the integrals. Claude Generated.
@@ -1129,7 +1409,7 @@ private:
     // D4 charge-response source: "eeq" (dftd4-conform, default) or "mulliken"
     // (CPSCF response on the GFN2 SCF). Empty disables the q-response term
     // (static-prefactor mode). Set from config in the constructor.
-    std::string m_d4_charge_source = "eeq";
+    std::string m_d4_charge_source = "mulliken";
 
     // ── Implicit solvation (Claude Generated, June 2026) ──
     // Self-consistent ALPB (later GBSA/CPCM) coupled into the SCF. The model is
@@ -1222,6 +1502,8 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
 
     lookup("scf_mode",     [&](const json& v){ if (v.is_string()) xtb.setScfMode(v.get<std::string>()); });
     lookup("scf_guess",    [&](const json& v){ if (v.is_string()) xtb.setScfGuess(v.get<std::string>()); });
+    lookup("sto6g_legacy_4sp", [&](const json& v){ if (v.is_boolean()) xtb.setSto6gLegacy4sp(v.get<bool>()); });
+    lookup("d4_atm_cutoff", [&](const json& v){ if (v.is_number()) xtb.setD4AtmCutoff(v.get<double>()); });
     lookup("eigensolver",  [&](const json& v){ if (v.is_string()) xtb.setEigensolver(v.get<std::string>()); });
     lookup("scf_damping",  [&](const json& v){ if (v.is_number()) xtb.setScfDamping(v.get<double>()); });
     lookup("scf_threshold",[&](const json& v){ if (v.is_number()) xtb.setScfThreshold(v.get<double>()); });
@@ -1233,6 +1515,14 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_mixed_precision", [&](const json& v){ if (v.is_boolean()) xtb.setMixedPrecision(v.get<bool>()); });
     lookup("scf_fp32_threshold",  [&](const json& v){ if (v.is_number()) xtb.setFp32Threshold(v.get<double>()); });
     lookup("scf_gpu_partial_diag",[&](const json& v){ if (v.is_boolean()) xtb.setGpuPartialDiag(v.get<bool>()); });
+    // Performance knobs (Claude Generated, Sep 2026). Defaults are the measured ones;
+    // these exist so a machine can be tuned without a rebuild (scripts/tuning_sweep.py).
+    lookup("eigensolver_max_threads", [&](const json& v){ if (v.is_number()) xtb.setEigensolverMaxThreads(static_cast<int>(v.get<double>())); });
+    lookup("scf_reduce",              [&](const json& v){ if (v.is_string()) xtb.setScfReduce(v.get<std::string>()); });
+    lookup("scf_reduce_threads",      [&](const json& v){ if (v.is_number()) xtb.setScfReduceThreads(static_cast<int>(v.get<double>())); });
+    lookup("scf_fp32_stall_patience", [&](const json& v){ if (v.is_number()) xtb.setFp32StallPatience(static_cast<int>(v.get<double>())); });
+    lookup("scf_fp32_false_fixpoint_factor", [&](const json& v){ if (v.is_number()) xtb.setFp32FalseFixpointFactor(v.get<double>()); });
+    lookup("gpu_multipole_otf",       [&](const json& v){ if (v.is_string()) xtb.setGpuMultipoleOtf(v.get<std::string>()); });
     lookup("scf_extrapolation",      [&](const json& v){ if (v.is_string())          xtb.setScfExtrapolation(v.get<std::string>()); });
     lookup("scf_extrapolation_order",[&](const json& v){ if (v.is_number_integer())  xtb.setScfExtrapolationOrder(v.get<int>()); });
     lookup("scf_extrapolation_apply",[&](const json& v){ if (v.is_string())          xtb.setScfExtrapolationApply(v.get<std::string>()); });

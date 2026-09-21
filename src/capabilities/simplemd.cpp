@@ -1,6 +1,6 @@
 /*
  * <Simple MD Module for Cucuma. >
- * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *               2024 Gerd Gehrisch
  *
  * This program is free software: you can redistribute it and/or modify
@@ -18,6 +18,7 @@
  *
  */
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -27,6 +28,7 @@
 #include <map>
 #include <random>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -38,6 +40,7 @@
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 #include "src/capabilities/shared_bias_pool.h"  // Claude Generated (Apr 2026)
+#include "src/capabilities/rmsd_mtd_core.h"      // Claude Generated (Jul 2026): strided-scheme decision helpers
 
 #include "src/core/elements.h"
 #include "src/core/energycalculator.h"
@@ -45,6 +48,7 @@
 #include "src/core/global.h"
 #include "src/core/molecule.h"
 #include "src/core/parameter_registry.h"  // Claude Generated 2025: For ParameterRegistry::getInstance()
+#include "src/core/units.h"               // Claude Generated (Sep 2026): CurcumaUnit::Constants::FS_TO_MD_TIME
 
 #include "src/tools/geometry.h"
 
@@ -59,6 +63,30 @@
 // Claude Generated: Unit conversion constants for wall statistics
 const double au2eV = 1.0 / eV2Eh; // Convert Hartree to eV
 const double au2N = 8.2387225e-8; // Convert atomic force units (Eh/bohr) to Newton
+
+// Claude Generated (Jul 2026): RMSD-MTD Gaussian-cutoff screen helpers.
+// Geometric-centered copy of a subset geometry -- identical convention to
+// RMSDDriver::CenterMolecule(const Geometry&), so the fast (pre-centered) Kabsch path stays
+// numerically consistent with BestFitRMSD.
+static Geometry MTDCenterSubset(const Geometry& g)
+{
+    return GeometryTools::TranslateGeometry(g, GeometryTools::Centroid(g), Position{ 0, 0, 0 });
+}
+
+// Principal radii of gyration (sorted descending) = singular values of the centered N x 3
+// coordinate matrix = sqrt of the eigenvalues of the 3x3 gyration tensor X^T X. These give a
+// RIGOROUS lower bound on the Kabsch-minimised RMSD via Mirsky's singular-value inequality:
+//   RMSD_min(X,Y) >= || sigma(X) - sigma(Y) ||_2 / sqrt(N)   (rotation leaves sigma unchanged).
+// Rotation/translation/permutation invariant, so one value screens all symmetry images of a hill.
+static Eigen::Vector3d MTDPrincipalRadii(const Geometry& centered)
+{
+    Eigen::Matrix3d C = centered.transpose() * centered; // unnormalised 3x3 gyration tensor
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(C);
+    Eigen::Vector3d ev = es.eigenvalues(); // ascending
+    Eigen::Vector3d s;
+    s << std::sqrt(std::max(0.0, ev(2))), std::sqrt(std::max(0.0, ev(1))), std::sqrt(std::max(0.0, ev(0)));
+    return s;
+}
 
 BiasThread::BiasThread(const Molecule& reference, const json& rmsdconfig, bool nocolvarfile, bool nohillsfile,
                        const std::string& colvar_base)
@@ -88,6 +116,8 @@ int BiasThread::execute()
     m_current_bias = 0;    // exploration bias V(x): drives the force and deposition
     m_current_bias_wt = 0; // optional well-tempered energy (opt-in, output only)
     m_counter = 0;
+    m_last_screened = 0;
+    m_last_evaluated = 0;
     m_driver.setReference(m_reference); // reference = current walker geometry
     m_gradient = Eigen::MatrixXd::Zero(m_reference.AtomCount(), 3);
 
@@ -97,11 +127,59 @@ int BiasThread::execute()
     //   V(x) = Sum_i W_i * exp(-alpha * RMSD(x, x_i)^2)
     // and the force below is its EXACT negative gradient. Claude Generated (Jun 2026).
     std::vector<int> visited;
+    std::vector<std::pair<int, double>> soft_visits; // strided: (hill index, Gaussian weight expr)
+
+    // Claude Generated (Jul 2026): Gaussian-cutoff screen setup (see SimpleMD::m_rmsd_mtd_screen).
+    // Center the walker once per step and cache each hill's centered subset + principal radii so far
+    // hills are skipped before the Kabsch. eps <= (#hills)/econv keeps the visited gate exact.
+    const int Nsub = m_reference.AtomCount();
+    Eigen::Vector3d sigma_walker = Eigen::Vector3d::Zero();
+    double eps = 0.0;
+    if (m_screen) {
+        Geometry wc = MTDCenterSubset(m_reference.getGeometry());
+        sigma_walker = MTDPrincipalRadii(wc);
+        Molecule ref_centered = m_reference;
+        ref_centered.setGeometry(wc);
+        m_driver.setReference(ref_centered); // pre-centered reference for BestFitRMSDCentered
+        eps = std::min(m_cutoff_tol, static_cast<double>(m_biased_structures.size()) / m_rmsd_econv);
+    }
+    auto ensureDescriptor = [&](int i) {
+        if (static_cast<int>(m_desc_ok.size()) <= i) {
+            m_desc_ok.resize(i + 1, 0);
+            m_sigma_cache.resize(i + 1);
+            m_centered_cache.resize(i + 1);
+        }
+        if (!m_desc_ok[i]) {
+            Geometry centered = MTDCenterSubset(m_biased_structures[i].geometry);
+            m_centered_cache[i] = centered;
+            m_sigma_cache[i] = MTDPrincipalRadii(centered);
+            m_desc_ok[i] = 1;
+        }
+    };
 
     for (int i = 0; i < m_biased_structures.size(); ++i) {
-        m_target.setGeometry(m_biased_structures[i].geometry);
+        // Structure 0 supplies the COLVAR reference RMSD, so it is never skipped.
+        bool centered = false;
+        if (m_screen) {
+            ensureDescriptor(i);
+            if (i != 0) {
+                double L2 = (sigma_walker - m_sigma_cache[i]).squaredNorm() / static_cast<double>(Nsub);
+                double Leff = std::sqrt(L2) - m_screen_margin;
+                if (Leff < 0.0)
+                    Leff = 0.0;
+                if (std::exp(-m_alpha * Leff * Leff) < eps) {
+                    m_last_screened++;
+                    continue; // provably negligible Gaussian -> skip the Kabsch
+                }
+            }
+            m_target.setGeometry(m_centered_cache[i]);
+            centered = true;
+        } else {
+            m_target.setGeometry(m_biased_structures[i].geometry);
+        }
+        m_last_evaluated++;
         m_driver.setTarget(m_target);
-        double rmsd = m_driver.BestFitRMSD();
+        double rmsd = centered ? m_driver.BestFitRMSDCentered() : m_driver.BestFitRMSD();
         double expr = exp(-rmsd * rmsd * m_alpha);
         double height = m_k * m_biased_structures[i].counter; // W_i = k * counter_i
         double bias_energy = height * expr;
@@ -126,20 +204,33 @@ int BiasThread::execute()
             colvarfile.close();
         }
 
-        // Visited if the walker sits inside this Gaussian (heuristic deposition gate).
-        if (expr * m_rmsd_econv > static_cast<double>(m_biased_structures.size()))
+        // Strided scheme: soft residence-weighted growth for every evaluated hill (gate deleted).
+        // Legacy: binary visited gate.
+        if (m_soft_counter)
+            soft_visits.emplace_back(i, expr);
+        else if (expr * m_rmsd_econv > static_cast<double>(m_biased_structures.size()))
             visited.push_back(i);
 
         m_counter += m_biased_structures[i].counter;
     }
 
-    // Phase 2: update visited references. Exploration (counter) is ALWAYS undamped so
-    // well-tempering never slows the search. WT (opt-in) only feeds the separate output
-    // weight 'factor' with the standard W*exp(-V/(kB*Delta_T)) damping.
-    for (int i : visited) {
-        m_biased_structures[i].counter++;
-        if (m_wtmtd)
-            m_biased_structures[i].factor += exp(-m_current_bias / (kb_Eh * m_DT));
+    // Phase 2: grow hill heights. Legacy: hard +1 per visited hill, every call. Strided: soft
+    // += expr per evaluated hill, only on a deposit-stride step (m_grow_counter). WT (opt-in) only
+    // feeds the separate output weight 'factor'.
+    if (m_soft_counter) {
+        if (m_grow_counter) {
+            for (const auto& [i, e] : soft_visits) {
+                m_biased_structures[i].counter += e;
+                if (m_wtmtd)
+                    m_biased_structures[i].factor += exp(-m_current_bias / (kb_Eh * m_DT));
+            }
+        }
+    } else {
+        for (int i : visited) {
+            m_biased_structures[i].counter++;
+            if (m_wtmtd)
+                m_biased_structures[i].factor += exp(-m_current_bias / (kb_Eh * m_DT));
+        }
     }
     return 1;
 }
@@ -180,7 +271,7 @@ SimpleMD::~SimpleMD()
 static const std::map<std::string, ThermostatType> thermostat_map = {
     {"berendsen", ThermostatType::Berendsen},
     {"berendson", ThermostatType::Berendsen},  // Legacy typo support
-    {"anderson", ThermostatType::Anderson},
+    {"andersen", ThermostatType::Andersen},
     {"nosehover", ThermostatType::NoseHover},
     {"csvr", ThermostatType::CSVR},
     {"none", ThermostatType::None}
@@ -210,6 +301,9 @@ void SimpleMD::LoadControlJson()
     m_dT = m_config.get<double>("time_step");
     m_maxtime = m_config.get<double>("max_time");
     m_T0 = m_config.get<double>("temperature");
+    m_T_init = m_config.get<double>("initial_temperature");
+    if (m_T_init < 0) m_T_init = m_T0;
+    if (m_T_init <= 0) m_T_init = m_T0; // defensive: reject non-positive explicit values
     m_rmrottrans = m_config.get<int>("remove_com_mode");
     m_nocenter = m_config.get<bool>("no_center");
     m_COM = m_config.get<bool>("use_com");
@@ -231,7 +325,25 @@ void SimpleMD::LoadControlJson()
     m_rescue = m_config.get<bool>("rescue", false);  // Not in PARAM block - legacy
     m_wall_render = m_config.get<bool>("wall_render", false);  // Not in PARAM block - legacy
     m_coupling = m_config.get<double>("coupling");
-    m_anderson = m_config.get<double>("anderson_probability");
+    m_andersen = m_config.get<double>("andersen_probability");
+
+    // Claude Generated (Sep 2026): adaptive step rejection, opt-in
+    m_adaptive_step = m_config.get<bool>("adaptive_step");
+    m_adaptive_step_tol = m_config.get<double>("adaptive_step_tol");
+    m_adaptive_step_factor = m_config.get<double>("adaptive_step_factor");
+    m_adaptive_history = std::max(4, m_config.get<int>("adaptive_step_history"));
+    m_adaptive_warmup = std::max(1, m_config.get<int>("adaptive_step_warmup"));
+    m_adaptive_substeps = std::max(2, m_config.get<int>("adaptive_step_substeps"));
+    m_adaptive_max_retry = std::max(0, m_config.get<int>("adaptive_step_max_retry"));
+    m_adaptive_local = m_config.get<bool>("adaptive_step_local");
+    m_adaptive_hot_factor = m_config.get<double>("adaptive_step_hot_factor");
+    // Both running medians calibrate THIS run. A SimpleMD object that is prepared a second
+    // time (ConfSearch drives many trajectories) must not inherit the previous one's window.
+    m_drift_history.clear();
+    m_hot_history.clear();
+    m_adaptive_rejections = 0;
+    m_adaptive_failed = 0;
+    m_adaptive_local_rejections = 0;
 
     if (m_coupling < m_dT)
         m_coupling = m_dT;
@@ -249,6 +361,29 @@ void SimpleMD::LoadControlJson()
     m_rmsd_DT = m_config.get<double>("rmsd_mtd_dt");
     m_rmsd_mtd_max_height = m_config.get<int>("rmsd_mtd_max_height", 0);  // Claude Generated (Jun 2026): cap on hill height
     m_freeze_inherited = m_config.get<bool>("rmsd_mtd_freeze_inherited", false);  // Claude Generated (Jun 2026)
+    m_rmsd_mtd_screen = m_config.get<bool>("rmsd_mtd_screen", true);            // Claude Generated (Jul 2026): Gaussian-cutoff screen
+    m_rmsd_mtd_cutoff_tol = m_config.get<double>("rmsd_mtd_cutoff_tol", 1.0e-8);
+    m_rmsd_mtd_screen_margin = m_config.get<double>("rmsd_mtd_screen_margin", 0.0);
+    // Claude Generated (Jul 2026): strided scheme resolution. See docs/RMSD_MTD_TEXTBOOK.md.
+    m_rmsd_mtd_scheme = m_config.get<std::string>("rmsd_mtd_scheme");
+    double rmsd_mtd_deposit_stride_fs = m_config.get<double>("rmsd_mtd_deposit_stride");
+    m_transition_fraction = m_config.get<double>("rmsd_mtd_transition_fraction");
+    m_r_dep = m_config.get<double>("rmsd_mtd_r_dep");
+    m_gap_guard = m_config.get<bool>("rmsd_mtd_gap_guard");
+    m_rmsd_mtd_diag = m_config.get<bool>("rmsd_mtd_diag");
+    if (m_r_dep < 0.0)
+        m_r_dep = RMSDMTD::autoRdep(m_alpha_rmsd);
+    m_vmin = RMSDMTD::vMin(m_k_rmsd, m_alpha_rmsd, m_r_dep);
+    // Note: uses the pre-CG-scaling time step (m_dT here); CG timestep scaling + rmsd_mtd is not a target.
+    m_deposit_stride_steps = std::max(1, static_cast<int>(std::llround(rmsd_mtd_deposit_stride_fs / m_dT)));
+    if (m_rmsd_mtd_scheme != "legacy")
+        m_mtd_steps = 1; // strided: evaluate the bias force every step; deposition is gated internally
+    if (m_rmsd_mtd_scheme != "legacy") {
+        if (m_config.has("rmsd_econv") || m_config.has("econv"))
+            CurcumaLogger::warn("econv is deprecated and ignored under rmsd_mtd_scheme=strided; hill spacing is set by rmsd_mtd_r_dep (V_min).");
+        if (m_config.has("rmsd_mtd_pace") || m_config.has("mtd_steps"))
+            CurcumaLogger::warn("rmsd_mtd_pace/mtd_steps is deprecated and ignored under rmsd_mtd_scheme=strided; use rmsd_mtd_deposit_stride.");
+    }
     m_wtmtd = m_config.get<bool>("wtmtd", false);  // Not in PARAM block - legacy
     m_rmsd_ref_file = m_config.get<std::string>("rmsd_mtd_ref_file");
     m_rmsd_fix_structure = m_config.get<bool>("rmsd_fix_structure", false);  // Not in PARAM block - legacy
@@ -265,6 +400,13 @@ void SimpleMD::LoadControlJson()
     m_temp_abort = m_config.get<bool>("temp_abort", false);
     m_temp_abort_factor = m_config.get<double>("temp_abort_factor", 1.5);
     m_temp_abort_delta = m_config.get<double>("temp_abort_delta", 300.0);
+
+    // Claude Generated (2026): global temperature ramp + per-atom-subset regions
+    m_temp_ramp = m_config.get<bool>("temp_ramp");
+    m_global_ramp.schedule.clear();
+    m_global_ramp.enabled = m_temp_ramp
+        && ParseSchedule(m_config.get<std::string>("temp_schedule"), m_global_ramp.schedule, "temp_schedule");
+    ParseThermalRegions();
 
     // Claude Generated 2025: Output & Restart Parameters
     m_writerestart = m_config.get<int>("write_restart_frequency");
@@ -283,7 +425,6 @@ void SimpleMD::LoadControlJson()
     }
     m_initfile = m_config.get<std::string>("restart_file");
     m_norestart = m_config.get<bool>("no_restart");
-    m_dt2 = m_dT * m_dT;
 
     // Claude Generated (Nov 2025): CG-specific parameters
     m_cg_write_vtf = m_config.get<bool>("cg_write_vtf");
@@ -329,11 +470,13 @@ void SimpleMD::LoadControlJson()
 
         // m_coupling = m_dT;
         m_rattle = m_config.get<int>("rattle");
-        std::cout << "Using rattle to constrain bonds!" << std::endl;
-        if (m_rattle_12)
-            std::cout << "Using rattle to constrain 1,2 distances!" << std::endl;
-        if (m_rattle_13)
-            std::cout << "Using rattle to constrain 1,3 distances between two bonds!" << std::endl;
+        if (m_verbosity >= 1) {
+            std::cout << "Using rattle to constrain bonds!" << std::endl;
+            if (m_rattle_12)
+                std::cout << "Using rattle to constrain 1,2 distances!" << std::endl;
+            if (m_rattle_13)
+                std::cout << "Using rattle to constrain 1,3 distances between two bonds!" << std::endl;
+        }
 
     } else {
         Integrator = [=]() {
@@ -346,12 +489,14 @@ void SimpleMD::LoadControlJson()
         Energy = [=]() -> double {
             return this->CleanEnergy();
         };
-        std::cout << "Energy Calculator will be set up for each step! Single steps are slower, but more reliable. Recommended for the combination of GFN2 and solvation." << std::endl;
+        if (m_verbosity >= 1)
+            std::cout << "Energy Calculator will be set up for each step! Single steps are slower, but more reliable. Recommended for the combination of GFN2 and solvation." << std::endl;
     } else {
         Energy = [=]() -> double {
             return this->FastEnergy();
         };
-        std::cout << "Energy Calculator will NOT be set up for each step! Fast energy calculation! This is the default way and should not be changed unless the energy and gradient calculation are unstable (happens with GFN2 and solvation)." << std::endl;
+        if (m_verbosity >= 1)
+            std::cout << "Energy Calculator will NOT be set up for each step! Fast energy calculation! This is the default way and should not be changed unless the energy and gradient calculation are unstable (happens with GFN2 and solvation)." << std::endl;
     }
 
     // Claude Generated 2025: Wall Potential Parameters - Enum-based selection
@@ -381,7 +526,8 @@ void SimpleMD::LoadControlJson()
                 };
                 break;
         }
-        std::cout << "Setting up spherical potential" << std::endl;
+        if (m_verbosity >= 1)
+            std::cout << "Setting up spherical potential" << std::endl;
 
     } else if (wall_geom == WallGeometry::Rect) {
         switch (wall_pot) {
@@ -400,7 +546,8 @@ void SimpleMD::LoadControlJson()
                 };
                 break;
         }
-        std::cout << "Setting up rectangular potential" << std::endl;
+        if (m_verbosity >= 1)
+            std::cout << "Setting up rectangular potential" << std::endl;
     } else {
         WallPotential = [=]() -> double {
             return 0;
@@ -476,7 +623,8 @@ bool SimpleMD::Initialise()
         m_seed = std::chrono::duration_cast<std::chrono::seconds>(start.time_since_epoch()).count();
     } else if (m_seed == 0)
         m_seed = m_natoms * m_T0;
-    std::cout << "Random seed is " << m_seed << std::endl;
+    if (m_verbosity >= 1)
+        std::cout << "Random seed is " << m_seed << std::endl;
     gen.seed(m_seed);
 
     if (m_initfile != "none") {
@@ -516,7 +664,6 @@ bool SimpleMD::Initialise()
         if (m_cg_timestep_factor > 1.0) {
             double orig_dt = m_dT;
             m_dT *= m_cg_timestep_factor;
-            m_dt2 = m_dT * m_dT;
             int verbosity_ts = m_config.get<int>("verbosity", 0);
             if (verbosity_ts >= 1) {
                 CurcumaLogger::success("CG timestep scaling applied: "
@@ -563,7 +710,8 @@ bool SimpleMD::Initialise()
         m_seed = std::chrono::duration_cast<std::chrono::seconds>(start.time_since_epoch()).count();
     } else if (m_seed == 0)
         m_seed = m_T0 * m_natoms;
-    std::cout << "Random seed is " << m_seed << std::endl;
+    if (m_verbosity >= 1)
+        std::cout << "Random seed is " << m_seed << std::endl;
     gen.seed(m_seed);
 
 
@@ -597,9 +745,10 @@ bool SimpleMD::Initialise()
 
     m_molecule.setCharge(0);
     if (!m_nocenter) {
-        std::cout << "Move stucture to the origin ... " << std::endl;
+        if (m_verbosity >= 1)
+            std::cout << "Move stucture to the origin ... " << std::endl;
         m_molecule.Center(m_COM);
-    } else
+    } else if (m_verbosity >= 1)
         std::cout << "Move stucture NOT to the origin ... " << std::endl;
 
 
@@ -722,10 +871,7 @@ bool SimpleMD::Initialise()
     // constructor never sees flat flags like -static_all true or -eeq_distance_cutoff_auto
     // true that the registry routed into controller["gfnff"]. Mirrors the
     // EnergyCalculator::reattachMethodScopes fix used by the opt/sp path (WP6).
-    static const std::vector<std::string> kMethodScopes = {
-        "gfnff", "eeq_solver", "tblite", "xtb", "ulysses", "eht", "dftd3", "dftd4", "orca"
-    };
-    for (const auto& scope : kMethodScopes) {
+    for (const auto& scope : MethodFactory::methodParameterScopes()) {
         if (m_controller.contains(scope) && m_controller[scope].is_object()
             && !ec_config.contains(scope)) {
             ec_config[scope] = m_controller[scope];
@@ -741,8 +887,18 @@ bool SimpleMD::Initialise()
     }
 
     m_interface = new EnergyCalculator(m_method, ec_config, Basename());
+    // Fail loud (Sep 2026): an unknown/unavailable method used to leave a calculator without a
+    // backend and the first FastEnergy() call segfaulted. Abort the setup with the reason.
+    if (m_interface->Error()) {
+        CurcumaLogger::error("MD setup failed: " + m_interface->ErrorMessage());
+        return false;
+    }
 
     m_interface->setMolecule(m_molecule.getMolInfo());
+    if (m_interface->Error()) {
+        CurcumaLogger::error("MD setup failed while setting the molecule: " + m_interface->ErrorMessage());
+        return false;
+    }
     // Energy-method-setup boundary (Claude Generated, Jun 2026): EnergyCalculator construction +
     // setMolecule (e.g. GFN-FF parameter generation) leaves the global CurcumaLogger verbosity
     // clamped to 0 (it captures/restores around an already-clamped level), so the remaining setup
@@ -816,6 +972,13 @@ bool SimpleMD::Initialise()
         m_shared_pool_driver.setReference(m_rmsd_mtd_molecule);
         m_shared_pool_target = m_rmsd_mtd_molecule;
 
+        // Claude Generated (Jul 2026): reset the per-walker Gaussian-cutoff screen cache. Descriptors
+        // are keyed by BiasStructure::index, which is stable only within a single MD run (a fresh
+        // Initialise() precedes each ConfSearch MD run), so we clear it here.
+        m_hill_sigma.clear();
+        m_hill_centered.clear();
+        m_hill_desc_ok.clear();
+
         for (int i = 0; i < m_threads; ++i) {
             auto* thread = new BiasThread(m_rmsd_mtd_molecule, config, m_nocolvarfile, m_nohillsfile, outputPath("COLVAR"));
             thread->setDT(m_rmsd_DT);
@@ -823,18 +986,25 @@ bool SimpleMD::Initialise()
             thread->setalpha(m_alpha_rmsd);
             thread->setEnergyConv(m_rmsd_econv);
             thread->setWTMTD(m_wtmtd);
+            thread->setScreen(m_rmsd_mtd_screen);         // Claude Generated (Jul 2026)
+            thread->setCutoffTol(m_rmsd_mtd_cutoff_tol);
+            thread->setScreenMargin(m_rmsd_mtd_screen_margin);
+            thread->setSoftCounter(m_rmsd_mtd_scheme != "legacy");  // Claude Generated (Jul 2026)
             m_bias_threads.push_back(thread);
             m_bias_pool->addThread(thread);
         }
         if (m_restart) {
-            std::cout << "Reading structure files from " << m_rmsd_ref_file << std::endl;
-            for (const auto& i : m_bias_json)
-                std::cout << i << std::endl;
+            if (m_verbosity >= 1) {
+                std::cout << "Reading structure files from " << m_rmsd_ref_file << std::endl;
+                for (const auto& i : m_bias_json)
+                    std::cout << i << std::endl;
+            }
             FileIterator file(m_rmsd_ref_file);
             int index = 0;
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
-                std::cout << m_bias_json[index] << std::endl;
+                if (m_verbosity >= 1)
+                    std::cout << m_bias_json[index] << std::endl;
                 int thread_index = index % m_bias_threads.size();
                 m_bias_threads[thread_index]->addGeometry(mol.getGeometry(), m_bias_json[index]);
                 ++index;
@@ -842,7 +1012,8 @@ bool SimpleMD::Initialise()
             m_bias_structure_count = index;
         } else {
             if (m_rmsd_ref_file != "none") {
-                std::cout << "Reading structure files from " << m_rmsd_ref_file << std::endl;
+                if (m_verbosity >= 1)
+                    std::cout << "Reading structure files from " << m_rmsd_ref_file << std::endl;
                 int index = 0;
 
                 FileIterator file(m_rmsd_ref_file);
@@ -897,25 +1068,43 @@ void SimpleMD::InitConstrainedBonds()
             }
     }
 
-    // Subtract constrained DOF: each bond/angle constraint removes 1 degree of freedom
+    // Step 1: subtract RATTLE constraints (each bond/angle constraint = 1 DOF)
     int n_constraints = static_cast<int>(m_bond_constrained.size() + m_bond_13_constrained.size());
-    const int total_dof = m_dof; // 3N before removing constraints
+    const int total_dof = m_dof; // 3N before any correction
     m_dof -= n_constraints;
-    if (m_dof < 1)
-        m_dof = 1;
+    if (m_dof < 1) m_dof = 1;
+    const int dof_after_rattle = m_dof;
 
-    // Claude Generated (Jun 2026): clean RATTLE constraint report. The per-bond list the user asked
-    // for is element-labelled (e.g. C5-H12) with the constrained distance, wrapped 5 per line, and a
-    // one-line summary gives constrained/total bonds, angles, and the DOF before -> after (delta).
-    //
-    // Verbosity is now scoped (CurcumaMethod base RAII + thread-pool boundary restores), and the
-    // energy-method setup (gfnff param-gen) restores the level after itself, so the global level is
-    // correct here again — this report uses CurcumaLogger. The summary shows at verbosity >= 1; the
-    // element-labelled per-bond/angle lists are gated at verbosity >= 3. Claude Generated (Jun 2026).
+    // Step 2: subtract frozen COM/rotation modes. Both RemoveRotation() and
+    // RemoveRotations() zero translation AND rotation simultaneously (the
+    // mode labels in remove_com_mode are misleading — all non-zero modes
+    // remove both). Frozen DOF must be subtracted so that
+    //   T = 2*Ekin / (kB * m_dof)
+    // reflects only the active internal modes, otherwise the thermostat
+    // overdrives kinetic energy and the reported temperature is wrong.
+    // Non-linear assumption for 3+ atoms (linear-check is too expensive here).
+    int dof_com_removed = 0;
+    if (m_rmrottrans > 0) {
+        auto dof_for_fragment = [](size_t n) -> int {
+            if (n == 1) return 3;  // translation only (no rotational DOF)
+            if (n == 2) return 5;  // 3 trans + 2 rot (linear diatomic)
+            return 6;              // 3 trans + 3 rot (non-linear)
+        };
+        if (m_rmrottrans == 1) {
+            dof_com_removed = dof_for_fragment(static_cast<size_t>(m_natoms));
+        } else {
+            for (const auto& frag : m_molecule.GetFragments())
+                dof_com_removed += dof_for_fragment(frag.size());
+        }
+        m_dof -= dof_com_removed;
+        if (m_dof < 1) m_dof = 1;
+    }
+
+    // Report
     if (m_rattle) {
         CurcumaLogger::result_fmt("RATTLE: {} constraints | {} of {} 1-2 bonds{} + {} 1-3 angles | DOF {} -> {} ({:+d})",
             n_constraints, m_bond_constrained.size(), total_bonds, m_rattle == 2 ? " (X-H only)" : "",
-            m_bond_13_constrained.size(), total_dof, m_dof, m_dof - total_dof);
+            m_bond_13_constrained.size(), total_dof, dof_after_rattle, dof_after_rattle - total_dof);
         if (CurcumaLogger::get_verbosity() >= 3) {
             if (!m_bond_constrained.empty()) {
                 std::string line = "  1-2:";
@@ -941,29 +1130,62 @@ void SimpleMD::InitConstrainedBonds()
                 CurcumaLogger::result(line);
             }
         }
-    } else {
-        CurcumaLogger::result_fmt("{} degrees of freedom (no constraints)", m_dof);
     }
+    if (dof_com_removed > 0)
+        CurcumaLogger::result_fmt("COM/rot removal (mode {}): -{} DOF | effective DOF = {}",
+            m_rmrottrans, dof_com_removed, m_dof);
+    else if (!m_rattle)
+        CurcumaLogger::result_fmt("{} degrees of freedom (no constraints)", m_dof);
 }
 
 void SimpleMD::InitVelocities(double scaling)
 {
     static std::default_random_engine generator;
     for (size_t i = 0; i < m_natoms; ++i) {
-        std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 * m_eigen_inv_masses.data()[3 * i]));
+        // Claude Generated (Jun 2026): sample from m_T_init (initial
+        // temperature) rather than m_T0 (thermostat target) so callers can
+        // anneal into the target temperature or start cold/warm without
+        // touching the thermostat target. m_T_init defaults to m_T0 when
+        // -initial_temperature is not set (backward compatible).
+        std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T_init * m_eigen_inv_masses.data()[3 * i]));
         m_eigen_velocities.data()[3 * i + 0] = distribution(generator);
         m_eigen_velocities.data()[3 * i + 1] = distribution(generator);
         m_eigen_velocities.data()[3 * i + 2] = distribution(generator);
     }
 
-    RemoveRotation();
+    // Match per-step removal logic exactly so initial velocities are
+    // consistent with what the integrator loop enforces each step.
+    if (m_rmrottrans == 1)
+        RemoveRotation();
+    else if (m_rmrottrans == 2)
+        RemoveRotations();
+    else if (m_rmrottrans == 3) {
+        RemoveRotations();
+        RemoveRotation();
+    }
     EKin();
-    double coupling = m_coupling;
-    m_coupling = m_dT;
-    Berendson();
-    Berendson();
-    EKin();
-    m_coupling = coupling;
+    // Normalize initial velocities to the requested sampling temperature.
+    // When T_init == T0 (default): use two tight Berendson steps to remove
+    // statistical fluctuations from the MB draw (original behavior).
+    // When T_init != T0: simple velocity rescaling to exactly T_init — the
+    // thermostat will then drive toward T0 during the run. Calling Berendson
+    // here (which targets m_T0) would immediately destroy the T_init setting.
+    if (m_T_init == m_T0) {
+        double coupling = m_coupling;
+        m_coupling = m_dT;
+        Berendson();
+        Berendson();
+        EKin();
+        m_coupling = coupling;
+    } else if (m_T > 0.0) {
+        double scale = std::sqrt(m_T_init / m_T);
+        for (int i = 0; i < m_natoms; ++i) {
+            m_eigen_velocities.data()[3 * i + 0] *= scale;
+            m_eigen_velocities.data()[3 * i + 1] *= scale;
+            m_eigen_velocities.data()[3 * i + 2] *= scale;
+        }
+        EKin();
+    }
 
     // If RATTLE is active, project velocities onto constraint manifold
     // and rescale to target temperature using reduced DOF.
@@ -1143,7 +1365,8 @@ void SimpleMD::InitialiseWalls()
         m_wall_spheric_radius = radius;
     }
     if (m_wall_render) {
-        std::cout << "render walls" << std::endl;
+        if (m_verbosity >= 1)
+            std::cout << "render walls" << std::endl;
         if (m_wall_type == 1) {
             Position x0 = Position{ m_wall_spheric_radius, 0, 0 };
             Position x1 = Position{ -m_wall_spheric_radius, 0, 0 };
@@ -1250,7 +1473,7 @@ void SimpleMD::InitialiseWalls()
         m_molecular_density = 1.0 / volume; // molecules per Å³
     }
     // Claude Generated: Wall configuration summary in PrintStatus() - show once every 10000 steps
-    if (m_wall_geometry != "none" && m_wall_geometry != "") {
+    if (m_wall_geometry != "none" && m_wall_geometry != "" && m_verbosity >= 1) {
         std::cout << "\n--- Wall Setup ---\n";
         std::cout << "Geometry: " << m_wall_geometry << " | Potential: " << m_wall_potential_type;
         if (m_wall_auto_configured)
@@ -1322,13 +1545,17 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["Q"] = Tools::DoubleVector2String(m_Q);
 
     if (m_rmsd_mtd) {
+        restart["rmsd_mtd_scheme_version"] = 2;  // Claude Generated (Jul 2026): strided soft-counter format
+        restart["rmsd_mtd_scheme"] = m_rmsd_mtd_scheme;
         restart["k_rmsd"] = m_k_rmsd;
         restart["alpha_rmsd"] = m_alpha_rmsd;
         restart["mtd_steps"] = m_mtd_steps;
         restart["rmsd_econv"] = m_rmsd_econv;
         restart["wtmtd"] = m_wtmtd;
         restart["rmsd_DT"] = m_rmsd_DT;
-        restart["rmsd_ref_file"] = Basename() + ".mtd.xyz";
+        // The deposits are written through outputPath(), so record that same path - a bare
+        // basename resolves against the CWD, where the file does not exist in BMT mode.
+        restart["rmsd_ref_file"] = outputPath(Basename() + ".mtd.xyz");
         restart["counter"] = m_bias_structure_count;
         restart["rmsd_atoms"] = m_rmsd_atoms;
         std::vector<json> bias(m_bias_structure_count);
@@ -1570,6 +1797,16 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     try {
         m_rmsd_mtd = state["rmsd_mtd"];
         if (m_rmsd_mtd) {
+            // Claude Generated (Jul 2026): reject a legacy (v1) bias when running the strided scheme --
+            // old integer visit counters are not comparable to the strided soft counter, so drop the
+            // old bias pool (the trajectory restart above still applies) rather than misinterpret it.
+            int mtd_ver = state.value("rmsd_mtd_scheme_version", 1);
+            if (m_rmsd_mtd_scheme != "legacy" && mtd_ver < 2) {
+                CurcumaLogger::error("Restart holds a legacy (v1) counter-scheme RMSD-MTD bias, "
+                    "incompatible with the strided soft counter; the old bias pool was NOT loaded. "
+                    "Re-run with -rmsd_mtd_scheme legacy to reuse it, or continue with a fresh bias.");
+                return false;
+            }
             m_k_rmsd = state["k_rmsd"];
             m_alpha_rmsd = state["alpha_rmsd"];
             m_mtd_steps = state["mtd_steps"];
@@ -1685,6 +1922,7 @@ void SimpleMD::start()
 void SimpleMD::prepareRun()
 {
     if (m_initialised == false) {
+        CurcumaLogger::error("MD not initialised (setup failed, see the messages above) - nothing to run");
         m_run_prepared = false;
         return;
     }
@@ -1707,12 +1945,14 @@ void SimpleMD::prepareRun()
             CitationRegistry::cite("berendsen");
             ThermostatFunction = [this] { Berendson(); };
             break;
-        case ThermostatType::Anderson:
-            fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Anderson Thermostat\n ... \n\n");
-            ThermostatFunction = [this] { Anderson(); };
+        case ThermostatType::Andersen:
+            if (m_verbosity >= 1)
+                fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Andersen Thermostat\n ... \n\n");
+            ThermostatFunction = [this] { Andersen(); };
             break;
         case ThermostatType::NoseHover:
-            fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Nosé-Hoover-Chain Thermostat\n ... \n\n");
+            if (m_verbosity >= 1)
+                fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Nosé-Hoover-Chain Thermostat\n ... \n\n");
             ThermostatFunction = [this] { NoseHover(); };
             break;
         case ThermostatType::None:
@@ -1722,8 +1962,9 @@ void SimpleMD::prepareRun()
 
     if (thermo == ThermostatType::None) {
         ThermostatFunction = [this] { None(); };
-        std::cout << "No Thermostat applied\n"
-                  << std::endl;
+        if (m_verbosity >= 1)
+            std::cout << "No Thermostat applied\n"
+                      << std::endl;
     }
 
     m_Epot = Energy();
@@ -1731,6 +1972,21 @@ void SimpleMD::prepareRun()
     m_Etot = m_Epot + m_Ekin;
     AverageQuantities();
     m_step = 0;
+
+    // Claude Generated (2026): start the global ramp from the initial setpoint and resolve the
+    // thermal regions (atom indices + default complement). A fresh prepareRun() clears any prior
+    // manual override so a re-run honours the schedule.
+    m_global_ramp.idx = 0;
+    m_global_ramp.seg_start_step = 0;
+    m_global_ramp.seg_start_T = m_T0;
+    m_global_ramp.overridden = false;
+    ResolveThermalRegions();
+    if (!m_thermal_regions.empty()) {
+        auto thermo_it_r = thermostat_map.find(m_thermostat);
+        if (thermo_it_r != thermostat_map.end() && thermo_it_r->second == ThermostatType::NoseHover)
+            CurcumaLogger::warn("Thermal regions: Nose-Hoover regional thermostatting is not supported; "
+                                "applying the global Nose-Hoover chain to all atoms (region targets ignored).");
+    }
 
     // Claude Generated (Jun 2026): reference state for the opt-in robustness gates.
     // epot_ref is the bare starting potential; the topology check interval defaults to dump.
@@ -1829,7 +2085,8 @@ void SimpleMD::prepareRun()
             header += fmt::format(" {: ^15}", "nUnique");
             units  += fmt::format(" {: ^15}", "#");
         }
-        std::cout << header << "\n" << units << "\n";
+        if (m_verbosity >= 1)
+            std::cout << header << "\n" << units << "\n";
     }
     if (m_rmsd_mtd) {
         CurcumaLogger::result_fmt("RMSD-MTD: k={} Eh, alpha={} Bohr^-2, pace={} steps",
@@ -1846,6 +2103,299 @@ void SimpleMD::prepareRun()
     }
     PrintStatus();
     m_run_prepared = true;
+}
+
+/* Claude Generated 2026 - Parse a schedule string into a vector of RampSegments.
+ * Grammar: "target:mode:value [; target:mode:value ...]"
+ *   target [K], mode = steps|reach, value = step count (steps) or tolerance K (reach).
+ * Whitespace around tokens is tolerated. Returns false (and clears `out`) on any malformed
+ * segment (fail-safe: a constant-T run is safer than a wrong ramp). `ctx` labels warnings. */
+bool SimpleMD::ParseSchedule(const std::string& spec, std::vector<RampSegment>& out, const std::string& ctx)
+{
+    out.clear();
+
+    auto trim = [](std::string s) -> std::string {
+        const char* ws = " \t\r\n";
+        const auto b = s.find_first_not_of(ws);
+        if (b == std::string::npos)
+            return std::string();
+        const auto e = s.find_last_not_of(ws);
+        return s.substr(b, e - b + 1);
+    };
+
+    std::stringstream segments(spec);
+    std::string seg;
+    while (std::getline(segments, seg, ';')) {
+        seg = trim(seg);
+        if (seg.empty())
+            continue;
+        std::stringstream fields(seg);
+        std::string t_str, mode_str, v_str;
+        if (!std::getline(fields, t_str, ':') || !std::getline(fields, mode_str, ':')
+            || !std::getline(fields, v_str, ':')) {
+            CurcumaLogger::warn_fmt("{}: malformed segment '{}', schedule disabled.", ctx, seg);
+            out.clear();
+            return false;
+        }
+        mode_str = trim(mode_str);
+        RampSegment rs;
+        try {
+            rs.target = std::stod(trim(t_str));
+            rs.value = std::stod(trim(v_str));
+        } catch (...) {
+            CurcumaLogger::warn_fmt("{}: non-numeric value in segment '{}', schedule disabled.", ctx, seg);
+            out.clear();
+            return false;
+        }
+        if (mode_str == "steps")
+            rs.mode = RampSegment::Steps;
+        else if (mode_str == "reach")
+            rs.mode = RampSegment::Reach;
+        else {
+            CurcumaLogger::warn_fmt("{}: unknown mode '{}' (use steps|reach), schedule disabled.", ctx, mode_str);
+            out.clear();
+            return false;
+        }
+        out.push_back(rs);
+    }
+
+    return !out.empty();
+}
+
+/* Claude Generated 2026 - Advance one schedule (global or per-region) by one step, writing the
+ * current setpoint into T0. `measuredT` is the realized temperature used by the "reach" mode.
+ * On segment completion the next segment is anchored at the current step/setpoint and logged.
+ * Segment modes:
+ *   Steps: linearly interpolate the setpoint from the segment's start value to its target over
+ *          `value` integration steps, then advance.
+ *   Reach: hold the setpoint at the target and advance once `measuredT` is within `value` K. */
+void SimpleMD::StepRamp(RampState& rs, double& T0, double measuredT)
+{
+    if (!rs.enabled || rs.overridden || rs.schedule.empty())
+        return;
+    if (rs.idx >= static_cast<int>(rs.schedule.size()))
+        return;  // schedule finished: hold the last setpoint
+
+    const RampSegment& seg = rs.schedule[rs.idx];
+    bool advance = false;
+    if (seg.mode == RampSegment::Steps) {
+        const double span = std::max(1.0, seg.value);
+        const double frac = std::min(1.0, (m_step - rs.seg_start_step) / span);
+        T0 = rs.seg_start_T + (seg.target - rs.seg_start_T) * frac;
+        advance = (frac >= 1.0);
+    } else {  // Reach: jump the setpoint, then wait for the system to equilibrate
+        T0 = seg.target;
+        const bool warmed = (m_step - rs.seg_start_step) > 10;
+        advance = warmed && std::abs(measuredT - seg.target) < std::max(1e-6, seg.value);
+    }
+
+    if (advance) {
+        rs.idx++;
+        rs.seg_start_step = m_step;
+        rs.seg_start_T = T0;
+        if (rs.idx < static_cast<int>(rs.schedule.size())) {
+            const RampSegment& next = rs.schedule[rs.idx];
+            CurcumaLogger::info_fmt("Temperature ramp: segment {} target {:.0f} K ({}).",
+                rs.idx, next.target, next.mode == RampSegment::Steps ? "steps" : "reach");
+        } else {
+            CurcumaLogger::info_fmt("Temperature ramp: schedule complete, holding {:.0f} K.", T0);
+        }
+    }
+}
+
+/* Claude Generated 2026 - Drive the global setpoint and every region setpoint one step.
+ * Called at the top of step() (before the integrator/thermostat). The global ramp uses the
+ * running-mean temperature for "reach"; each region uses its own instantaneous temperature. */
+void SimpleMD::UpdateTemperatureRamp()
+{
+    StepRamp(m_global_ramp, m_T0, m_aver_Temp);
+    for (auto& reg : m_thermal_regions)
+        StepRamp(reg.ramp, reg.T0, RegionTemperature(reg.atoms, reg.dof));
+}
+
+/* Claude Generated 2026 - Instantaneous temperature [K] of an atom subset from its kinetic
+ * energy and `dof` degrees of freedom (= 3*N_subset; inter-region constraints not subtracted). */
+double SimpleMD::RegionTemperature(const std::vector<int>& atoms, int dof) const
+{
+    if (dof <= 0)
+        return 0.0;
+    double ekin = 0.0;
+    for (int i : atoms) {
+        ekin += m_eigen_masses.data()[3 * i]
+            * (m_eigen_velocities.data()[3 * i + 0] * m_eigen_velocities.data()[3 * i + 0]
+                + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1]
+                + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+    }
+    ekin *= 0.5;
+    return 2.0 * ekin / (kb_Eh * dof);
+}
+
+/* Claude Generated 2026 - Read the temp_regions JSON array from the merged controller.
+ * Each element: {atoms (FragString2Indicies grammar), temperature, temp_schedule?}. Only the
+ * specs are stored here; atom indices are resolved in prepareRun() once the molecule is known. */
+void SimpleMD::ParseThermalRegions()
+{
+    m_thermal_regions.clear();
+    json cfg = m_config.exportConfig();
+    if (!cfg.contains("temp_regions") || !cfg["temp_regions"].is_array())
+        return;
+
+    for (const auto& el : cfg["temp_regions"]) {
+        if (!el.is_object())
+            continue;
+        ThermalRegion reg;
+        reg.atoms_spec = el.value("atoms", std::string("-1"));
+        reg.T0 = el.value("temperature", m_T0);
+        const std::string sched = el.value("temp_schedule", std::string(""));
+        if (!sched.empty())
+            reg.ramp.enabled = ParseSchedule(sched, reg.ramp.schedule, "temp_regions[" + reg.atoms_spec + "]");
+        m_thermal_regions.push_back(reg);
+    }
+    if (!m_thermal_regions.empty())
+        CurcumaLogger::info_fmt("Thermal regions: {} region(s) configured.", m_thermal_regions.size());
+}
+
+/* Claude Generated 2026 - Resolve region atom indices (needs the molecule) and the default
+ * complement (atoms in no region, thermostatted to the global setpoint). First-region-wins
+ * dedup for overlapping selections so the per-region DOF accounting stays consistent. */
+void SimpleMD::ResolveThermalRegions()
+{
+    m_default_region_atoms.clear();
+    m_default_region_dof = 0;
+    if (m_thermal_regions.empty())
+        return;
+
+    std::vector<char> covered(m_natoms, 0);
+    for (auto& reg : m_thermal_regions) {
+        reg.atoms.clear();
+        for (int a : m_molecule.FragString2Indicies(reg.atoms_spec)) {
+            if (a < 0 || a >= m_natoms || covered[a])  // skip out-of-range + already-claimed atoms
+                continue;
+            covered[a] = 1;
+            reg.atoms.push_back(a);
+        }
+        reg.dof = 3 * static_cast<int>(reg.atoms.size());
+        reg.ramp.idx = 0;
+        reg.ramp.seg_start_step = 0;
+        reg.ramp.seg_start_T = reg.T0;
+        CurcumaLogger::info_fmt("Thermal region '{}': {} atoms, T0={:.0f} K{}.",
+            reg.atoms_spec, reg.atoms.size(), reg.T0, reg.ramp.enabled ? " (ramped)" : "");
+    }
+    for (int a = 0; a < m_natoms; ++a)
+        if (!covered[a])
+            m_default_region_atoms.push_back(a);
+    m_default_region_dof = 3 * static_cast<int>(m_default_region_atoms.size());
+}
+
+/* Claude Generated 2026 - Thermostat dispatch. With no regions defined this calls the unchanged
+ * global ThermostatFunction() so single-thermostat runs stay byte-identical. With regions, each
+ * region (and the default complement) is thermostatted to its own setpoint. Nosé-Hoover (global
+ * chain state) and None fall back to the global path. */
+void SimpleMD::ApplyThermostat()
+{
+    // Claude Generated (Sep 2026): with the step-rejecting integrator the drift criterion has to
+    // subtract the work the bath did in this step, otherwise legitimate thermostat coupling looks
+    // like an integration failure. m_Ekin_exchange only covers CSVR (and is an analytic expression
+    // there, not a measurement), so measure it generically here - but only when the feature is on,
+    // so every existing run keeps its exact code path and its reported heat exchange.
+    double ekin_before = 0.0;
+    if (m_adaptive_step) {
+        for (int i = 0; i < m_natoms; ++i)
+            ekin_before += m_eigen_masses.data()[3 * i]
+                * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i]
+                    + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1]
+                    + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+        ekin_before *= 0.5;
+    }
+    ApplyThermostatImpl();
+    if (m_adaptive_step) {
+        double ekin_after = 0.0;
+        for (int i = 0; i < m_natoms; ++i)
+            ekin_after += m_eigen_masses.data()[3 * i]
+                * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i]
+                    + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1]
+                    + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+        ekin_after *= 0.5;
+        m_thermostat_work += ekin_after - ekin_before;
+    }
+}
+
+void SimpleMD::ApplyThermostatImpl()
+{
+    if (m_thermal_regions.empty()) {
+        ThermostatFunction();
+        return;
+    }
+    auto it = thermostat_map.find(m_thermostat);
+    const ThermostatType type = (it != thermostat_map.end()) ? it->second : ThermostatType::CSVR;
+    if (type == ThermostatType::NoseHover || type == ThermostatType::None) {
+        ThermostatFunction();  // regional NH unsupported (see prepareRun warning); None = no-op
+        return;
+    }
+    for (auto& reg : m_thermal_regions)
+        ApplyThermostatRegion(reg.atoms, reg.T0, reg.dof, type);
+    if (!m_default_region_atoms.empty())
+        ApplyThermostatRegion(m_default_region_atoms, m_T0, m_default_region_dof, type);
+}
+
+/* Claude Generated 2026 - Apply Berendsen / CSVR / Andersen to a single atom subset using its own
+ * target temperature `T0` and `dof`. Velocity-only updates on the subset's entries; identical math
+ * to the global thermostats (Berendson()/CSVR()/Andersen()) restricted to `atoms`. */
+void SimpleMD::ApplyThermostatRegion(const std::vector<int>& atoms, double T0, int dof, ThermostatType type)
+{
+    if (atoms.empty() || dof <= 0)
+        return;
+
+    if (type == ThermostatType::Berendsen) {
+        const double T = RegionTemperature(atoms, dof);
+        if (T <= 1e-12)
+            return;  // no kinetic energy yet: lambda would be singular
+        const double lambda = std::sqrt(1.0 + (m_dT / 2.0 * (T0 - T)) / (T * m_coupling));
+        for (int i : atoms) {
+            m_eigen_velocities.data()[3 * i + 0] *= lambda;
+            m_eigen_velocities.data()[3 * i + 1] *= lambda;
+            m_eigen_velocities.data()[3 * i + 2] *= lambda;
+        }
+    } else if (type == ThermostatType::CSVR) {
+        double Ekin = 0.0;
+        for (int i : atoms) {
+            Ekin += m_eigen_masses.data()[3 * i]
+                * (m_eigen_velocities.data()[3 * i + 0] * m_eigen_velocities.data()[3 * i + 0]
+                    + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1]
+                    + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+        }
+        Ekin *= 0.5;
+        if (Ekin <= 1e-12)
+            return;
+        const double Ekin_target = 0.5 * kb_Eh * T0 * dof;
+        const double c = std::exp(-(m_dT / 2.0 * m_respa) / m_coupling);
+        static std::mt19937 gen{ std::random_device{}() };
+        std::normal_distribution<double> dnorm{ 0.0, 1.0 };
+        std::chi_squared_distribution<double> dchi{ static_cast<double>(dof) };
+        const double R = dnorm(gen);
+        const double SNf = dchi(gen);
+        const double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (dof * Ekin)
+            + 2 * R * std::sqrt(c * (1 - c) * Ekin_target / (dof * Ekin));
+        const double alpha = std::sqrt(std::max(0.0, alpha2));
+        m_Ekin_exchange += Ekin * (alpha2 - 1.0);
+        for (int i : atoms) {
+            m_eigen_velocities.data()[3 * i + 0] *= alpha;
+            m_eigen_velocities.data()[3 * i + 1] *= alpha;
+            m_eigen_velocities.data()[3 * i + 2] *= alpha;
+        }
+    } else if (type == ThermostatType::Andersen) {
+        static std::default_random_engine generator;
+        const double probability = m_andersen * m_dT;
+        std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
+        for (int i : atoms) {
+            if (uniform_dist(generator) < probability) {
+                std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * T0 * m_eigen_inv_masses.data()[3 * i]));
+                m_eigen_velocities.data()[3 * i + 0] = (m_eigen_velocities.data()[3 * i + 0] + distribution(generator)) / 2.0;
+                m_eigen_velocities.data()[3 * i + 1] = (m_eigen_velocities.data()[3 * i + 1] + distribution(generator)) / 2.0;
+                m_eigen_velocities.data()[3 * i + 2] = (m_eigen_velocities.data()[3 * i + 2] + distribution(generator)) / 2.0;
+            }
+        }
+    }
 }
 
 /* Claude Generated 2026 - One iteration of the MD loop.
@@ -1884,6 +2434,11 @@ bool SimpleMD::step()
         m_external_forces_pending = false;
     }
 
+    // Claude Generated 2026 - advance the multi-stage temperature ramp BEFORE the
+    // integrator/thermostat runs this step, so the thermostat tracks the updated m_T0.
+    // No-op unless temp_ramp is enabled; a live setTargetTemperature() overrides it.
+    UpdateTemperatureRamp();
+
     if (m_rm_COM_step > 0 && m_step % m_rm_COM_step == 0) {
         if (m_rmrottrans == 1)
             RemoveRotation();
@@ -1899,11 +2454,11 @@ bool SimpleMD::step()
     double integrator_ms = 0.0;
     if (m_md_diagnostics_timing) {
         auto t0 = std::chrono::high_resolution_clock::now();
-        Integrator();
+        IntegratorStep();
         auto t1 = std::chrono::high_resolution_clock::now();
         integrator_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     } else {
-        Integrator();
+        IntegratorStep();
     }
     m_last_integrator_ms = integrator_ms;
     AverageQuantities();
@@ -1922,9 +2477,10 @@ bool SimpleMD::step()
         // fmt::print (not CurcumaLogger): abort diagnostics must stay visible even when the
         // global logger verbosity is clamped to 0 by the energy-setup path (see roadmap issue #3),
         // mirroring the "Simulation got unstable" message below.
-        fmt::print(fg(fmt::color::orange) | fmt::emphasis::bold,
-            "MD aborted: <Epot> climbed {:.1f} kJ/mol above start (window {:.1f})\n",
-            (m_aver_Epot - m_epot_ref) * 2625.5, m_epot_abort_window);
+        if (m_verbosity >= 1)
+            fmt::print(fg(fmt::color::orange) | fmt::emphasis::bold,
+                "MD aborted: <Epot> climbed {:.1f} kJ/mol above start (window {:.1f})\n",
+                (m_aver_Epot - m_epot_ref) * 2625.5, m_epot_abort_window);
         m_run_aborted = true;
         return false;
     }
@@ -1938,9 +2494,10 @@ bool SimpleMD::step()
         const bool over_delta = (m_temp_abort_delta > 0 && m_aver_Temp > m_T0 + m_temp_abort_delta);
         if (over_factor || over_delta) {
             // fmt::print: stay visible despite the verbosity clamp (see epot_abort note above).
-            fmt::print(fg(fmt::color::orange) | fmt::emphasis::bold,
-                "MD aborted: <T>={:.0f} K ran away from target {:.0f} K (factor limit {}x, delta limit {} K)\n",
-                m_aver_Temp, m_T0, m_temp_abort_factor, m_temp_abort_delta);
+            if (m_verbosity >= 1)
+                fmt::print(fg(fmt::color::orange) | fmt::emphasis::bold,
+                    "MD aborted: <T>={:.0f} K ran away from target {:.0f} K (factor limit {}x, delta limit {} K)\n",
+                    m_aver_Temp, m_T0, m_temp_abort_factor, m_temp_abort_delta);
             m_run_aborted = true;
             return false;
         }
@@ -1953,9 +2510,10 @@ bool SimpleMD::step()
         int nfrag = static_cast<int>(m_molecule.GetFragments().size());
         if (nfrag > m_start_fragment_count) {
             // fmt::print: stay visible despite the verbosity clamp (see epot_abort note above).
-            fmt::print(fg(fmt::color::orange) | fmt::emphasis::bold,
-                "MD aborted: topology broke (fragments {} -> {})\n",
-                m_start_fragment_count, nfrag);
+            if (m_verbosity >= 1)
+                fmt::print(fg(fmt::color::orange) | fmt::emphasis::bold,
+                    "MD aborted: topology broke (fragments {} -> {})\n",
+                    m_start_fragment_count, nfrag);
             m_run_aborted = true;
             return false;
         }
@@ -1965,7 +2523,8 @@ bool SimpleMD::step()
         if (!m_eval_mtd) {
             if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
                 m_eval_mtd = true;
-                std::cout << "Starting with MetaDynamics ..." << std::endl;
+                if (m_verbosity >= 1)
+                    std::cout << "Starting with MetaDynamics ..." << std::endl;
             }
         }
     }
@@ -2028,7 +2587,8 @@ bool SimpleMD::step()
                     timing);
             }
         } else if (!write && m_rescue && m_run_states.size() > (1 - m_current_rescue)) {
-            std::cout << "Molecule exploded, resetting to previous state ..." << std::endl;
+            if (m_verbosity >= 1)
+                std::cout << "Molecule exploded, resetting to previous state ..." << std::endl;
             LoadRestartInformation(m_run_states[m_run_states.size() - 1 - m_current_rescue]);
             Geometry geometry = m_molecule.getGeometry();
             for (int i = 0; i < m_natoms; ++i) {
@@ -2050,7 +2610,8 @@ bool SimpleMD::step()
 
     if (m_unstable || m_interface->Error() || m_interface->HasNan()) {
         PrintStatus();
-        fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Simulation got unstable, exiting!\n");
+        if (m_verbosity >= 1)
+            fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Simulation got unstable, exiting!\n");
 
         // Per-instance filename (Basename() carries the ConfSearch ".t<id>" suffix) so concurrent
         // MD workers do not clobber each other's crash dump during simultaneous instability cleanup.
@@ -2103,7 +2664,8 @@ bool SimpleMD::step()
     */
 
     if (m_current_rescue >= m_max_rescue) {
-        fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Nothing really helps");
+        if (m_verbosity >= 1)
+            fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Nothing really helps");
         return false;
     }
     m_step++;
@@ -2128,9 +2690,18 @@ void SimpleMD::finalizeRun()
     WriteGeometry();
 
     PrintStatus();
-    if (m_thermostat == "csvr")
+    if (m_thermostat == "csvr" && m_verbosity >= 1)
         std::cout << "Exchange with heat bath " << m_Ekin_exchange << "Eh" << std::endl;
-    if (m_dipole) {
+    // Claude Generated (Sep 2026): report how often the adaptive integrator had to act
+    if (m_adaptive_step && m_verbosity >= 1) {
+        CurcumaLogger::result("Adaptive step: " + std::to_string(m_adaptive_rejections)
+            + " step(s) redone subdivided, " + std::to_string(m_adaptive_failed)
+            + " still above the tolerance of " + std::to_string(m_adaptive_step_tol) + " kcal/mol");
+        if (m_adaptive_local)
+            CurcumaLogger::result("Adaptive step: " + std::to_string(m_adaptive_local_rejections)
+                + " of them caught by the hottest-atom criterion alone");
+    }
+    if (m_dipole && m_verbosity >= 1) {
         std::cout << "Calculated averaged dipole moment " << m_aver_dipol_linear * 2.5418 << " Debye and " << m_aver_dipol_linear * 2.5418 * 3.3356 << " Cm [e-30]" << std::endl;
     }
 
@@ -2140,11 +2711,13 @@ void SimpleMD::finalizeRun()
     }
 #endif
     if (m_rmsd_mtd) {
-        std::cout << "Sum of Energy of COLVARs:" << std::endl;
+        if (m_verbosity >= 1)
+            std::cout << "Sum of Energy of COLVARs:" << std::endl;
         for (int i = 0; i < m_bias_threads.size(); ++i) {
             auto structures = m_bias_threads[i]->getBiasStructure();
             for (int j = 0; j < structures.size(); ++j) {
-                std::cout << structures[j].rmsd_reference << "\t" << structures[j].energy << "\t" << structures[j].counter / static_cast<double>(m_colvar_incr) * 100 << std::endl;
+                if (m_verbosity >= 1)
+                    std::cout << structures[j].rmsd_reference << "\t" << structures[j].energy << "\t" << structures[j].counter / static_cast<double>(m_colvar_incr) * 100 << std::endl;
 
                 m_rmsd_mtd_molecule.setGeometry(structures[j].geometry);
                 m_rmsd_mtd_molecule.setEnergy(structures[j].energy);
@@ -2155,6 +2728,16 @@ void SimpleMD::finalizeRun()
                     m_rmsd_mtd_molecule.appendXYZFile(outputPath(Basename() + ".mtd.xyz"));
             }
         }
+        // Claude Generated (Jul 2026): RMSD-MTD screen accounting -- how many bias hills the
+        // Gaussian-cutoff screen skipped (Kabsch fits avoided) over the run. Direct measure of the
+        // per-step bias-evaluation speedup for large pools. Printed once at run end.
+        long long bias_total = m_bias_hills_evaluated + m_bias_hills_screened;
+        double screen_pct = bias_total > 0 ? 100.0 * static_cast<double>(m_bias_hills_screened) / static_cast<double>(bias_total) : 0.0;
+        if (m_verbosity >= 1)
+            std::cout << fmt::format(
+                "RMSD-MTD screen: {} hills computed, {} screened ({:.1f}% Kabsch fits skipped); MTD wall time {} ms",
+                m_bias_hills_evaluated, m_bias_hills_screened, screen_pct, m_mtd_time) << std::endl;
+        writeMtdProvenance();
     }
     // Per-instance filename so concurrent MD workers don't overwrite each other's final dump.
     std::ofstream restart_file(snapshotPath(Basename() + ".final.json"));
@@ -2165,6 +2748,122 @@ void SimpleMD::finalizeRun()
         std::remove(snapshotPath("curcuma_restart.json").c_str());
 
     m_run_prepared = false;
+}
+
+// Claude Generated (Jul 2026): RMSD-MTD provenance diagnostics. Writes, via the BMT output path,
+// <base>.mtd_hills.csv (one row per deposited hill: where/why it was born + final height),
+// <base>.mtd_coverage.csv (+ _statistics) with the nearest-neighbour RMSD spacing, and gnuplot
+// scripts (deposition map + coverage histogram). Mirrors the scattering .csv/.gnu pattern and does
+// NOT invoke gnuplot. See docs/RMSD_MTD_TEXTBOOK.md section 7.
+void SimpleMD::writeMtdProvenance()
+{
+    if (!m_rmsd_mtd || !m_rmsd_mtd_diag || m_verbosity < 1 || m_mtd_deposits.empty())
+        return;
+
+    // Final hill set (index, counter, geometry) from whichever path was active this run.
+    std::vector<BiasStructure> final_hills;
+    if (m_shared_pool) {
+        final_hills = m_shared_pool->snapshot();
+    } else {
+        for (auto* t : m_bias_threads) {
+            auto s = t->getBiasStructure();
+            final_hills.insert(final_hills.end(), s.begin(), s.end());
+        }
+    }
+    std::unordered_map<int, double> final_counter;
+    for (const auto& h : final_hills)
+        final_counter[h.index] = h.counter;
+
+    const std::string base = Basename();
+
+    // 1. Provenance table: one row per deposited hill.
+    {
+        std::ofstream f(outputPath(base + ".mtd_hills.csv"));
+        f << "# index,step,time_fs,energy_Eh,rmsd_ref,trigger,counter_final,cycle,persistent\n";
+        for (const auto& d : m_mtd_deposits) {
+            auto it = final_counter.find(d.index);
+            double cf = (it != final_counter.end()) ? it->second : 0.0;
+            const char* trig = d.trigger == 'I' ? "initial"
+                : (d.trigger == 'D' ? "displacement" : "bias_below_vmin");
+            f << d.index << ',' << static_cast<long long>(d.step) << ',' << d.time_fs << ','
+              << d.energy << ',' << d.rmsd_ref << ',' << trig << ',' << cf << ','
+              << d.cycle << ',' << (d.persistent ? 1 : 0) << '\n';
+        }
+    }
+
+    // 2. Coverage: nearest-neighbour best-fit RMSD among the final hills (doubles as a spacing check).
+    std::vector<double> nn;
+    if (final_hills.size() >= 2) {
+        RMSDDriver driver;
+        Molecule a(m_molecule), b(m_molecule);
+        std::ofstream f(outputPath(base + ".mtd_coverage.csv"));
+        f << "# index,nn_rmsd\n";
+        for (size_t i = 0; i < final_hills.size(); ++i) {
+            a.setGeometry(final_hills[i].geometry);
+            driver.setReference(a);
+            double best = -1.0;
+            for (size_t j = 0; j < final_hills.size(); ++j) {
+                if (i == j)
+                    continue;
+                b.setGeometry(final_hills[j].geometry);
+                driver.setTarget(b);
+                double r = driver.BestFitRMSD();
+                if (best < 0 || r < best)
+                    best = r;
+            }
+            if (best >= 0) {
+                nn.push_back(best);
+                f << final_hills[i].index << ',' << best << '\n';
+            }
+        }
+    }
+    if (!nn.empty()) {
+        double mn = nn[0], mx = nn[0], sum = 0.0;
+        int above = 0;
+        for (double v : nn) {
+            mn = std::min(mn, v);
+            mx = std::max(mx, v);
+            sum += v;
+            if (v > m_r_dep)
+                ++above;
+        }
+        std::ofstream f(outputPath(base + ".mtd_coverage_statistics.csv"));
+        f << "# n,min,mean,max,r_dep,count_above_r_dep\n";
+        f << nn.size() << ',' << mn << ',' << (sum / static_cast<double>(nn.size())) << ',' << mx
+          << ',' << m_r_dep << ',' << above << '\n';
+    }
+
+    // 3. gnuplot scripts (leave .gnu + .csv; do not invoke gnuplot, like the scattering handler).
+    {
+        std::ofstream g(outputPath(base + ".mtd_hills.gnu"));
+        g << "set terminal pngcairo size 1000,700\n";
+        g << "set output '" << base << ".mtd_hills_plot.png'\n";
+        g << "set datafile separator ','\n";
+        g << "set title 'RMSD-MTD deposition map: origin of stored structures'\n";
+        g << "set xlabel 'MD step'\n";
+        g << "set ylabel 'RMSD to reference (A)'\n";
+        g << "set cblabel 'final counter (hill height / k)'\n";
+        g << "plot '" << base << ".mtd_hills.csv' using 2:5:7 with points pt 7 ps 1.2 palette title 'hills'\n";
+    }
+    if (!nn.empty()) {
+        std::ofstream g(outputPath(base + ".mtd_coverage.gnu"));
+        g << "set terminal pngcairo size 900,600\n";
+        g << "set output '" << base << ".mtd_coverage_plot.png'\n";
+        g << "set datafile separator ','\n";
+        g << "binw=0.05\n";
+        g << "bin(x)=binw*floor(x/binw)\n";
+        g << "set title 'Nearest-neighbour hill spacing (target r_dep=" << m_r_dep << " A)'\n";
+        g << "set xlabel 'nearest-neighbour RMSD (A)'\n";
+        g << "set ylabel 'count'\n";
+        g << "set boxwidth binw\n";
+        g << "set style fill solid 0.5\n";
+        g << "set arrow from " << m_r_dep << ", graph 0 to " << m_r_dep << ", graph 1 nohead lc rgb 'red' lw 2\n";
+        g << "plot '" << base << ".mtd_coverage.csv' using (bin($2)):(1.0) smooth freq with boxes title 'nn RMSD'\n";
+    }
+
+    if (m_verbosity >= 1)
+        std::cout << "RMSD-MTD provenance: " << m_mtd_deposits.size() << " deposits written to "
+                  << base << ".mtd_hills.csv (+ coverage, gnuplot)" << std::endl;
 }
 
 /* Claude Generated 2026 - Queue external per-atom force contribution for the
@@ -2193,7 +2892,8 @@ void SimpleMD::AdjustRattleTolerance()
         m_rattle_tol_12 -= 0.01;
     else if (m_aver_rattle_Temp < m_T0)
         m_rattle_tol_12 += 0.01;
-    std::cout << m_rattle_counter << " " << m_aver_rattle_Temp << " " << m_rattle_tol_12 << std::endl;
+    if (m_verbosity >= 1)
+        std::cout << m_rattle_counter << " " << m_aver_rattle_Temp << " " << m_rattle_tol_12 << std::endl;
     m_rattle_tol_12 = std::abs(m_rattle_tol_12);
     m_rattle_counter = 0;
     m_aver_rattle_Temp = 0;
@@ -2230,6 +2930,175 @@ void SimpleMD::applyPeriodicBoundaryConditions()
     m_molecule.setGeometry(m_eigen_geometry);
 }
 
+/* Claude Generated (Sep 2026): threshold of the step-rejection criterion, in Hartree.
+ *
+ * An absolute per-step tolerance is not usable as a default. The energy error of velocity-Verlet
+ * is not a drift but a bounded oscillation whose amplitude is the sum over all modes, so it grows
+ * with the system: measured at 300 K and dt = 1 fs, the median per-step |dE| is 0.30 kcal/mol for
+ * a single water, 2.7 for 40 waters and 136 for a healthy 1410-atom polymer. A fixed number would
+ * reject every step of the polymer or no step of the water.
+ *
+ * What IS system-independent is the spread within a run. Over the same three systems plus two
+ * water clusters, the largest |dE| of a healthy phase is 1.7 to 3.4 times the median of that
+ * phase, while the step that destroys a trajectory is 2600 to 5000 times it. Three orders of
+ * magnitude separate the two, so the threshold is taken as a multiple of the RUNNING MEDIAN of
+ * the steps accepted so far (adaptive_step_factor) - self-calibrating, with no number the user
+ * has to know about their system.
+ *
+ * Until enough steps have been accepted to form that median, and as a ceiling afterwards, the
+ * thermal energy N_dof * kB * T / 2 is used (adaptive_step_tol as a fraction of it); the healthy
+ * maximum measured over all five systems is 0.65 of it, the destructive steps 124 and 134.
+ */
+double SimpleMD::adaptiveStepTolerance() const
+{
+    const double T_ref = std::max(m_T0, 1.0);
+    const double cap = m_adaptive_step_tol * 0.5 * kb_Eh * T_ref * static_cast<double>(m_dof);
+    if (static_cast<int>(m_drift_history.size()) < m_adaptive_warmup)
+        return cap;
+    std::vector<double> sorted(m_drift_history.begin(), m_drift_history.end());
+    const std::size_t mid = sorted.size() / 2;
+    std::nth_element(sorted.begin(), sorted.begin() + mid, sorted.end());
+    return std::min(cap, m_adaptive_step_factor * sorted[mid]);
+}
+
+/*! \brief Claude Generated (Sep 2026): kinetic energy of the hottest atom over the per-atom
+ *  mean. See hottestAtomRatio() in the header for why this is the observable that keeps its
+ *  contrast at 7320 atoms where the total energy does not. */
+double SimpleMD::hottestAtomRatio() const
+{
+    double total = 0.0, hottest = 0.0;
+    for (int i = 0; i < m_natoms; ++i) {
+        const double vx = m_eigen_velocities.data()[3 * i + 0];
+        const double vy = m_eigen_velocities.data()[3 * i + 1];
+        const double vz = m_eigen_velocities.data()[3 * i + 2];
+        const double e = m_eigen_masses.data()[3 * i] * (vx * vx + vy * vy + vz * vz);
+        total += e;
+        if (e > hottest)
+            hottest = e;
+    }
+    if (!(total > 0.0) || m_natoms <= 1)
+        return 0.0;
+    return hottest / (total / static_cast<double>(m_natoms));
+}
+
+/* Claude Generated (Sep 2026): one integration step, optionally with step rejection.
+ *
+ * Velocity-Verlet is accurate only while dt stays well inside the period of the stiffest mode,
+ * and that mode is a property of the CURRENT geometry rather than of the molecule: a GFN-FF O-H
+ * bond stiffens from 3817 to 10758 cm^-1 when it is compressed to 0.70 A (docs/MD_LARGE_SYSTEMS.md).
+ * With thousands of hydrogens such a compression happens somewhere eventually, and the one
+ * violating step injects energy that the thermostat then spreads over the whole system - the
+ * heating this file's users reported on 7320-atom systems.
+ *
+ * The remedy is ordinary numerics, not a constraint and not a mass modification: measure the
+ * quantity the step is supposed to conserve, and if the step violated it, discard the step and
+ * redo it with a subdivided time step. The physics is unchanged - a smaller step is still
+ * velocity-Verlet on the same potential - and the cost is paid only where it is needed.
+ *
+ * Conserved quantity: E_pot + E_kin with the kinetic energy taken BEFORE the thermostat
+ * (m_ekin_pre_thermostat), because the thermostat legitimately changes E_kin and must not count
+ * as a violation; the bath work over the step is measured in ApplyThermostat() and subtracted,
+ * so the criterion is exact for every thermostat. The threshold is adaptiveStepTolerance().
+ */
+void SimpleMD::IntegratorStep()
+{
+    if (!m_adaptive_step) {
+        Integrator();
+        return;
+    }
+
+    const double E_before = m_Epot + m_Ekin;
+    const Geometry geo_save = m_eigen_geometry;
+    const Geometry vel_save = m_eigen_velocities;
+    const Geometry grad_save = m_eigen_gradient;
+    const double epot_save = m_Epot, ekin_save = m_Ekin, temp_save = m_T;
+    const double ekin_exchange_save = m_Ekin_exchange;
+    const double exchange_save = m_thermostat_work;
+    const std::vector<double> xi_save = m_xi;
+
+    Integrator();
+
+    const double tol = adaptiveStepTolerance();
+    static const bool debug = std::getenv("CURCUMA_ADAPTIVE_DEBUG") != nullptr;
+    int substeps = m_adaptive_substeps;
+    for (int retry = 0; retry <= m_adaptive_max_retry; ++retry) {
+        const double bath_work = m_thermostat_work - exchange_save;
+        const double drift = std::abs((m_Epot + m_ekin_pre_thermostat) - E_before - bath_work);
+
+        // Local channel: the hottest atom relative to the per-atom mean. Its own running
+        // median calibrates it, exactly as the drift does above, so no absolute energy enters.
+        double hot = 0.0, hot_tol = 0.0;
+        bool hot_violation = false;
+        if (m_adaptive_local) {
+            hot = hottestAtomRatio();
+            // No fixed ceiling during the warm-up: the healthy value of this ratio depends on
+            // the setup (thermal regions hold different temperatures, so one atom may legally
+            // sit far above the GLOBAL per-atom mean), and a ceiling that a run starts above
+            // would reject every step forever without the median ever filling. Until there is
+            // enough history the local channel only observes; the global one still guards.
+            if (static_cast<int>(m_hot_history.size()) >= m_adaptive_warmup) {
+                std::vector<double> sorted(m_hot_history.begin(), m_hot_history.end());
+                const std::size_t mid = sorted.size() / 2;
+                std::nth_element(sorted.begin(), sorted.begin() + mid, sorted.end());
+                hot_tol = m_adaptive_hot_factor * sorted[mid];
+                hot_violation = !std::isfinite(hot) || hot > hot_tol;
+            }
+        }
+
+        if (debug)
+            std::cerr << "ADAPT " << m_step << " retry " << retry << " drift "
+                      << drift * 627.5094740631 << " kcal/mol  tol "
+                      << tol * 627.5094740631 << "  hot " << hot << "  hot_tol " << hot_tol
+                      << std::endl;
+        if (!m_unstable && std::isfinite(drift) && drift <= tol && !hot_violation) {
+            // Only a step accepted on the FIRST attempt calibrates the running median. A
+            // subdivided step has a smaller drift than the one it replaced but still a larger
+            // one than an ordinary step, so feeding those back would let a degenerating
+            // trajectory raise its own threshold - measured on a 100-water cluster: doing so
+            // left +1.50 Eh over 200 fs with 89 rejections, against -0.01 Eh with 8 when the
+            // threshold stayed anchored.
+            if (retry == 0) {
+                m_drift_history.push_back(drift);
+                if (static_cast<int>(m_drift_history.size()) > m_adaptive_history)
+                    m_drift_history.pop_front();
+                if (m_adaptive_local) {
+                    m_hot_history.push_back(hot);
+                    if (static_cast<int>(m_hot_history.size()) > m_adaptive_history)
+                        m_hot_history.pop_front();
+                }
+            }
+            return;
+        }
+        if (retry == m_adaptive_max_retry) {
+            ++m_adaptive_failed;  // keep the last attempt; normal instability handling follows
+            return;
+        }
+        ++m_adaptive_rejections;
+        if (hot_violation && std::isfinite(drift) && drift <= tol)
+            ++m_adaptive_local_rejections;  // the global channel would have let this one pass
+
+        m_eigen_geometry = geo_save;
+        m_eigen_velocities = vel_save;
+        m_eigen_gradient = grad_save;
+        m_Epot = epot_save;
+        m_Ekin = ekin_save;
+        m_T = temp_save;
+        m_Ekin_exchange = ekin_exchange_save;
+        m_thermostat_work = exchange_save;
+        m_xi = xi_save;
+        m_unstable = false;
+
+        const double dT_full = m_dT;
+        m_dT = dT_full / substeps;
+        m_in_adaptive_substep = true;
+        for (int s = 0; s < substeps && !m_unstable; ++s)
+            Integrator();
+        m_in_adaptive_substep = false;
+        m_dT = dT_full;
+        substeps *= m_adaptive_substeps;
+    }
+}
+
 void SimpleMD::Verlet()
 {
     // CRITICAL FIX (Feb 2026): Check gradient for NaN/Inf BEFORE integration
@@ -2244,16 +3113,26 @@ void SimpleMD::Verlet()
         }
     }
 
+    // Claude Generated (Sep 2026): -dt, -MaxTime and every reported time are REAL
+    // femtoseconds. The integrator, however, works in Angstrom / amu / Hartree, whose
+    // own time unit is sqrt(amu*A^2/Eh) = 1.9516 fs (Constants::MD_TIME_UNIT_FS). This is
+    // the one place the two meet, so the conversion belongs here and nowhere else: every
+    // other use of m_dT (m_currentStep, m_maxtime, m_coupling/m_dT ratios, print/dump
+    // cadence, COLVAR and deposit times) is bookkeeping and stays in femtoseconds.
+    // Getting this wrong is silent in the energy but doubles the physical step - see
+    // docs/MD_LARGE_SYSTEMS.md.
+    const double dt = m_dT * CurcumaUnit::Constants::FS_TO_MD_TIME;
+    const double dt2 = dt * dt;
     double ekin = 0;
     //std::cout << m_eigen_inv_masses << std::endl;
     for (int i = 0; i < m_natoms; ++i) {
-        m_eigen_geometry.data()[3 * i + 0] = m_eigen_geometry.data()[3 * i + 0] + m_dT * m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0] * m_dt2;
-        m_eigen_geometry.data()[3 * i + 1] = m_eigen_geometry.data()[3 * i + 1] + m_dT * m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1] * m_dt2;
-        m_eigen_geometry.data()[3 * i + 2] = m_eigen_geometry.data()[3 * i + 2] + m_dT * m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2] * m_dt2;
+        m_eigen_geometry.data()[3 * i + 0] = m_eigen_geometry.data()[3 * i + 0] + dt * m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0] * dt2;
+        m_eigen_geometry.data()[3 * i + 1] = m_eigen_geometry.data()[3 * i + 1] + dt * m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1] * dt2;
+        m_eigen_geometry.data()[3 * i + 2] = m_eigen_geometry.data()[3 * i + 2] + dt * m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2] * dt2;
 
-        m_eigen_velocities.data()[3 * i + 0] = m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
-        m_eigen_velocities.data()[3 * i + 1] = m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
-        m_eigen_velocities.data()[3 * i + 2] = m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
+        m_eigen_velocities.data()[3 * i + 0] = m_eigen_velocities.data()[3 * i + 0] - 0.5 * dt * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
+        m_eigen_velocities.data()[3 * i + 1] = m_eigen_velocities.data()[3 * i + 1] - 0.5 * dt * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
+        m_eigen_velocities.data()[3 * i + 2] = m_eigen_velocities.data()[3 * i + 2] - 0.5 * dt * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
         ekin += m_eigen_masses.data()[3 * i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
     }
 
@@ -2275,7 +3154,7 @@ void SimpleMD::Verlet()
     m_Epot = Energy();
     if (m_rmsd_mtd) {
         if (m_step % m_mtd_steps == 0) {
-            ApplyRMSDMTD();
+            ApplyHeldBias();
         }
     }
 #ifdef USE_Plumed
@@ -2295,7 +3174,8 @@ void SimpleMD::Verlet()
         } else {
             if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
                 m_eval_mtd = true;
-                std::cout << "Starting with MetaDynamics ..." << std::endl;
+                if (m_verbosity >= 1)
+                    std::cout << "Starting with MetaDynamics ..." << std::endl;
             }
         }
     }
@@ -2304,9 +3184,9 @@ void SimpleMD::Verlet()
     ekin = 0.0;
 
     for (int i = 0; i < m_natoms; ++i) {
-        m_eigen_velocities.data()[3 * i + 0] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
-        m_eigen_velocities.data()[3 * i + 1] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
-        m_eigen_velocities.data()[3 * i + 2] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
+        m_eigen_velocities.data()[3 * i + 0] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
+        m_eigen_velocities.data()[3 * i + 1] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
+        m_eigen_velocities.data()[3 * i + 2] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
 
         ekin += m_eigen_masses.data()[3 * i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
         //m_gradient[3 * i + 0] = m_eigen_gradient.data()[3 * i + 0];
@@ -2318,7 +3198,8 @@ void SimpleMD::Verlet()
     m_unstable = T > 10000 * m_T || std::isnan(T);
     m_T = T;
     m_Ekin = ekin;
-    ThermostatFunction();
+    m_ekin_pre_thermostat = ekin;  // Claude Generated (Sep 2026): step-rejection reference
+    ApplyThermostat();
     EKin();
 
     // Claude Generated (Oct 2025): Apply PBC wrapping after integration step
@@ -2343,19 +3224,29 @@ void SimpleMD::Rattle()
     TriggerWriteRestart();
 
     auto* coord = new double[3 * m_natoms];
-    double m_dT_inverse = 1 / m_dT;
+    // Claude Generated (Sep 2026): -dt, -MaxTime and every reported time are REAL
+    // femtoseconds. The integrator, however, works in Angstrom / amu / Hartree, whose
+    // own time unit is sqrt(amu*A^2/Eh) = 1.9516 fs (Constants::MD_TIME_UNIT_FS). This is
+    // the one place the two meet, so the conversion belongs here and nowhere else: every
+    // other use of m_dT (m_currentStep, m_maxtime, m_coupling/m_dT ratios, print/dump
+    // cadence, COLVAR and deposit times) is bookkeeping and stays in femtoseconds.
+    // Getting this wrong is silent in the energy but doubles the physical step - see
+    // docs/MD_LARGE_SYSTEMS.md.
+    const double dt = m_dT * CurcumaUnit::Constants::FS_TO_MD_TIME;
+    const double dt2 = dt * dt;
+    double m_dT_inverse = 1 / dt;
     std::set<int> constrained_atoms;
     bool move = false;
     double max_mu = 10;
     double max_err_12 = 0, max_err_13 = 0;
     for (int i = 0; i < m_natoms; ++i) {
-        coord[3 * i + 0] = m_eigen_geometry.data()[3 * i + 0] + m_dT * m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0] * m_dt2;
-        coord[3 * i + 1] = m_eigen_geometry.data()[3 * i + 1] + m_dT * m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1] * m_dt2;
-        coord[3 * i + 2] = m_eigen_geometry.data()[3 * i + 2] + m_dT * m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2] * m_dt2;
+        coord[3 * i + 0] = m_eigen_geometry.data()[3 * i + 0] + dt * m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0] * dt2;
+        coord[3 * i + 1] = m_eigen_geometry.data()[3 * i + 1] + dt * m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1] * dt2;
+        coord[3 * i + 2] = m_eigen_geometry.data()[3 * i + 2] + dt * m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2] * dt2;
 
-        m_eigen_velocities.data()[3 * i + 0] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
-        m_eigen_velocities.data()[3 * i + 1] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
-        m_eigen_velocities.data()[3 * i + 2] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
+        m_eigen_velocities.data()[3 * i + 0] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
+        m_eigen_velocities.data()[3 * i + 1] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
+        m_eigen_velocities.data()[3 * i + 2] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
     }
 
     double iter = 0;
@@ -2398,7 +3289,7 @@ void SimpleMD::Rattle()
                 }
 
                 double lambda = r / ((m_eigen_inv_masses.data()[3 * i] + m_eigen_inv_masses.data()[3 * j]) * scalarproduct);
-                if (std::isinf(lambda) || std::isnan(lambda)) {
+                if ((std::isinf(lambda) || std::isnan(lambda)) && m_verbosity >= 1) {
                     std::cout << "RATTLE 1-2: " << i << " " << j << " lambda=" << lambda
                               << " r=" << r << " sp=" << scalarproduct << " dc=" << distance_current << std::endl;
                 }
@@ -2456,7 +3347,7 @@ void SimpleMD::Rattle()
                 }
 
                 double lambda = r / ((m_eigen_inv_masses.data()[3 * i] + m_eigen_inv_masses.data()[3 * j]) * scalarproduct);
-                if (std::isinf(lambda) || std::isnan(lambda)) {
+                if ((std::isinf(lambda) || std::isnan(lambda)) && m_verbosity >= 1) {
                     std::cout << "RATTLE 1-3: " << i << " " << j << " lambda=" << lambda
                               << " r=" << r << " sp=" << scalarproduct << " dc=" << distance_current << std::endl;
                 }
@@ -2520,7 +3411,7 @@ void SimpleMD::Rattle()
 
     if (m_rmsd_mtd) {
         if (m_step % m_mtd_steps == 0) {
-            ApplyRMSDMTD();
+            ApplyHeldBias();
         }
     }
 #ifdef USE_Plumed
@@ -2540,7 +3431,8 @@ void SimpleMD::Rattle()
         } else {
             if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
                 m_eval_mtd = true;
-                std::cout << "Starting with MetaDynamics ..." << std::endl;
+                if (m_verbosity >= 1)
+                    std::cout << "Starting with MetaDynamics ..." << std::endl;
             }
         }
     }
@@ -2548,9 +3440,9 @@ void SimpleMD::Rattle()
     WallPotential();
 
     for (int i = 0; i < m_natoms; ++i) {
-        m_eigen_velocities.data()[3 * i + 0] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
-        m_eigen_velocities.data()[3 * i + 1] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
-        m_eigen_velocities.data()[3 * i + 2] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
+        m_eigen_velocities.data()[3 * i + 0] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
+        m_eigen_velocities.data()[3 * i + 1] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
+        m_eigen_velocities.data()[3 * i + 2] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
 
         //m_gradient[3 * i + 0] = m_eigen_gradient.data()[3 * i + 0];
         //m_gradient[3 * i + 1] = m_eigen_gradient.data()[3 * i + 1];
@@ -2658,14 +3550,85 @@ void SimpleMD::Rattle()
     m_unstable = T > 10000 * m_T || std::isnan(T);
     m_T = T;
     m_Ekin = ekin;
-    ThermostatFunction();
+    m_ekin_pre_thermostat = ekin;  // Claude Generated (Sep 2026): step-rejection reference
+    ApplyThermostat();
     EKin();
 
     // Claude Generated (Oct 2025): Apply PBC wrapping after integration step
     applyPeriodicBoundaryConditions();
 }
 
-void SimpleMD::ApplyRMSDMTD()
+// Claude Generated (Jul 2026): Milestone 2 held-force wrapper, called every step. The expensive bias
+// evaluation (EvaluateBias -- the Kabsch fleet) runs only on a deposit_stride step or when the gap
+// guard fires; between evaluations the bias force is held and smoothstep-interpolated from the previous
+// target to the current one, so it acts every step without recomputing every step. Legacy: evaluate +
+// apply every call (w=1, bit-identical to the pre-M2 direct path). See docs/RMSD_MTD_TEXTBOOK.md 5.1.
+void SimpleMD::ApplyHeldBias()
+{
+    if (m_rmsd_mtd_scheme == "legacy") {
+        // Legacy: evaluate + apply directly every call. EvaluateBias adds the bias force straight into
+        // m_eigen_gradient (same FP order as the pre-M2 path), so this branch is bit-identical.
+        // Claude Generated (Sep 2026): inside a subdivided (rejected) step the bias force is still
+        // needed, but the step is being repeated - depositing once per substep would put N hills
+        // where the trajectory advanced once. m_in_adaptive_substep is false unless adaptive_step
+        // is on AND a step is currently being redone, so nothing changes without that flag.
+        EvaluateBias(!m_in_adaptive_substep);
+        return;
+    }
+
+    // Strided: run the expensive fleet (EvaluateBias) only on a deposit_stride step or when the gap
+    // guard fires; hold + smoothstep-interpolate the bias force in between so it acts every step.
+    if (m_bias_force_target.rows() != m_natoms)
+        m_bias_force_target = Geometry::Zero(m_natoms, 3);
+    if (m_bias_force_old.rows() != m_natoms)
+        m_bias_force_old = Geometry::Zero(m_natoms, 3);
+
+    bool stride_elapsed = m_last_deposit_eval_step < 0
+        || (m_step - m_last_deposit_eval_step) >= m_deposit_stride_steps;
+    bool gap = m_gap_guard && gapGuardTriggered();
+    if (stride_elapsed || gap) {
+        m_bias_force_old = m_bias_force_target; // glide from the previous target to the new one
+        EvaluateBias(!m_in_adaptive_substep);   // do_deposit = true on an eval step (see legacy branch)
+        m_bias_ramp_start_step = m_step;
+        m_last_deposit_eval_step = m_step;
+    }
+
+    double denom = std::max(1.0, m_transition_fraction * static_cast<double>(m_deposit_stride_steps));
+    double lambda = (m_bias_ramp_start_step < 0) ? 1.0
+        : static_cast<double>(m_step - m_bias_ramp_start_step) / denom;
+    double w = RMSDMTD::smoothstep(lambda);
+    for (int k = 0; k < 3 * m_natoms; ++k)
+        m_eigen_gradient.data()[k] += m_bias_force_old.data()[k]
+            + w * (m_bias_force_target.data()[k] - m_bias_force_old.data()[k]);
+}
+
+// Claude Generated (Jul 2026): Milestone 2 gap guard. True when the walker has moved more than r_dep
+// (best-fit RMSD over the RMSD subset) from the geometry at the last force evaluation -- one Kabsch per
+// step, O(1) vs the O(N_hills) fleet. Bounds held-force staleness and closes coverage gaps when the
+// walker moves fast, without shortening deposit_stride.
+bool SimpleMD::gapGuardTriggered()
+{
+    const int nsub = static_cast<int>(m_rmsd_indicies.size());
+    if (nsub == 0 || m_last_eval_subset.rows() != nsub)
+        return false;
+    Geometry walker(nsub, 3);
+    for (int i = 0; i < nsub; ++i) {
+        walker(i, 0) = m_eigen_geometry.data()[3 * m_rmsd_indicies[i] + 0];
+        walker(i, 1) = m_eigen_geometry.data()[3 * m_rmsd_indicies[i] + 1];
+        walker(i, 2) = m_eigen_geometry.data()[3 * m_rmsd_indicies[i] + 2];
+    }
+    if (m_gap_ref.AtomCount() != nsub)
+        m_gap_ref = m_rmsd_mtd_molecule;
+    if (m_gap_tgt.AtomCount() != nsub)
+        m_gap_tgt = m_rmsd_mtd_molecule;
+    m_gap_ref.setGeometry(walker);
+    m_gap_tgt.setGeometry(m_last_eval_subset);
+    m_gap_driver.setReference(m_gap_ref);
+    m_gap_driver.setTarget(m_gap_tgt);
+    return m_gap_driver.BestFitRMSD() > m_r_dep;
+}
+
+void SimpleMD::EvaluateBias(bool do_deposit)
 {
     std::chrono::time_point<std::chrono::system_clock> m_start, m_end;
     m_start = std::chrono::system_clock::now();
@@ -2691,6 +3654,20 @@ void SimpleMD::ApplyRMSDMTD()
     double current_bias_wt = 0; // optional well-tempered energy (opt-in, COLVAR output only)
     double rmsd_reference = 0;
 
+    // Claude Generated (Jul 2026): strided routes the bias force through m_bias_force_target, which
+    // ApplyHeldBias applies every step (held + smoothstep-interpolated). Legacy adds it straight into
+    // m_eigen_gradient (same FP accumulation order -> bit-identical to the pre-M2 path). counter growth
+    // + deposition run only when do_deposit (the deposit_stride / gap-guard cadence).
+    const bool strided = (m_rmsd_mtd_scheme != "legacy");
+    double* bias_accum;
+    if (strided) {
+        m_bias_force_target = Geometry::Zero(m_natoms, 3);
+        m_last_eval_subset = current_geometry; // gap guard: geometry at this force evaluation
+        bias_accum = m_bias_force_target.data();
+    } else {
+        bias_accum = m_eigen_gradient.data();
+    }
+
     // Claude Generated (Apr 2026): Shared bias pool path for parallel ConfSearch
     // When a shared pool is set, read bias structures from the pool and evaluate locally.
     // Deposit new structures back to the shared pool when the deposition criterion is met.
@@ -2707,6 +3684,7 @@ void SimpleMD::ApplyRMSDMTD()
             initial.index = 0;
             initial.temperature = m_T0;
             int deposited = m_shared_pool->depositBiasStructure(initial);
+            m_mtd_deposits.push_back({deposited, double(m_step), m_step * m_dT, m_Epot, 0.0, 'I', 0, false});
             m_bias_structure_count++;
             CurcumaLogger::result_fmt("RMSD-MTD: Initial bias structure {} deposited (pool total: {})",
                 deposited, m_shared_pool->biasStructureCount());
@@ -2714,7 +3692,7 @@ void SimpleMD::ApplyRMSDMTD()
             Molecule out_mol(m_molecule);
             out_mol.setGeometry(full_geometry);
             out_mol.setName(std::to_string(m_currentStep));
-            out_mol.writeXYZFile(Basename() + ".mtd.xyz");
+            out_mol.writeXYZFile(outputPath(Basename() + ".mtd.xyz"));
             if (m_nocolvarfile == false) {
                 std::ofstream colvarfile;
                 colvarfile.open(outputPath("COLVAR"));
@@ -2739,6 +3717,7 @@ void SimpleMD::ApplyRMSDMTD()
 
         // Visited references to bump after the loop (the WT weight needs the full V).
         std::vector<int> visited;
+        std::vector<std::pair<int, double>> soft_visits; // strided: (index, summed Gaussian weight)
 
         // Symmetry/atom-permutation set discovered by ConfScan (full-atom reorder rules), set
         // on the shared pool between cycles. Empty -> identity only -> bit-identical to before.
@@ -2755,13 +3734,56 @@ void SimpleMD::ApplyRMSDMTD()
         // Claude Generated (Jun 2026): flexibility/RMSF weights (Phase C "weighted"). Empty ->
         // uniform -> standard best-fit RMSD (bit-identical). Only when the RMSD subset is the full
         // molecule (the weights are full-atom). Set once here; persists for every image below.
+        bool weights_active = false;
         if (static_cast<int>(m_rmsd_indicies.size()) == m_natoms) {
             std::vector<double> w = m_shared_pool->weights();
-            if (static_cast<int>(w.size()) == m_natoms)
+            if (static_cast<int>(w.size()) == m_natoms) {
                 m_shared_pool_driver.setRMSDWeights(w);
-            else
+                weights_active = true;
+            } else
                 m_shared_pool_driver.clearRMSDWeights();
         }
+
+        // Claude Generated (Jul 2026): Gaussian-cutoff screen setup. Disabled when RMSF weights are
+        // active (the unweighted principal-radii bound is not valid for weighted RMSD).
+        const int Nsub = static_cast<int>(m_rmsd_indicies.size());
+        const bool screen_enabled = m_rmsd_mtd_screen && !weights_active && Nsub > 0;
+        const int n_images = 1 + static_cast<int>(perms.size());
+        // A hill whose summed Gaussian falls below eps_step is provably neither "visited" nor a
+        // meaningful force contributor. Tying eps_step <= global_count/econv keeps the visited /
+        // deposition gate (expr_sum*econv > global_count) exact.
+        const double eps_step = std::min(m_rmsd_mtd_cutoff_tol,
+            static_cast<double>(global_count) / m_rmsd_econv);
+        Eigen::Vector3d sigma_walker = Eigen::Vector3d::Zero();
+        if (screen_enabled) {
+            Geometry walker_centered = MTDCenterSubset(current_geometry);
+            sigma_walker = MTDPrincipalRadii(walker_centered);
+            // The fast Kabsch path (BestFitRMSDCentered) needs the driver reference pre-centered.
+            m_rmsd_mtd_molecule.setGeometry(walker_centered);
+            m_shared_pool_driver.setReference(m_rmsd_mtd_molecule);
+            m_rmsd_mtd_molecule.setGeometry(current_geometry); // restore for COLVAR / bookkeeping
+        }
+        // Lazily fill+cache a hill's descriptor (centered subset + principal radii), keyed by its
+        // stable index. One-time O(Nsub) per hill; reused every step until Initialise() clears it.
+        auto ensureHillDescriptor = [&](const BiasStructure& b) {
+            if (static_cast<int>(m_hill_desc_ok.size()) <= b.index) {
+                m_hill_desc_ok.resize(b.index + 1, 0);
+                m_hill_sigma.resize(b.index + 1);
+                m_hill_centered.resize(b.index + 1);
+            }
+            if (!m_hill_desc_ok[b.index]) {
+                Geometry subset(Nsub, 3);
+                for (int i = 0; i < Nsub; ++i) {
+                    subset(i, 0) = b.geometry(m_rmsd_indicies[i], 0);
+                    subset(i, 1) = b.geometry(m_rmsd_indicies[i], 1);
+                    subset(i, 2) = b.geometry(m_rmsd_indicies[i], 2);
+                }
+                Geometry centered = MTDCenterSubset(subset);
+                m_hill_centered[b.index] = centered;
+                m_hill_sigma[b.index] = MTDPrincipalRadii(centered);
+                m_hill_desc_ok[b.index] = 1;
+            }
+        };
 
         // Evaluate the bias from the snapshot — hill height W_i = k * counter_i,
         // V(x) = Sum_i Sum_p W_i * exp(-alpha*RMSD_{i,p}^2) (p over identity + symmetry images),
@@ -2770,24 +3792,27 @@ void SimpleMD::ApplyRMSDMTD()
             // Effective hill counter: frozen if inherited at run start (only this run's deposits
             // grow), then capped by rmsd_mtd_max_height. Both default-off -> eff = bs.counter
             // (legacy W_i = k * counter_i). Claude Generated (Jun 2026).
-            int eff_counter = bs.counter;
+            double eff_counter = bs.counter;
             if (m_freeze_inherited) {
                 auto it = m_frozen_height.find(bs.index);
                 if (it != m_frozen_height.end())
                     eff_counter = it->second;
             }
             if (m_rmsd_mtd_max_height > 0)
-                eff_counter = std::min(eff_counter, m_rmsd_mtd_max_height);
+                eff_counter = std::min(eff_counter, static_cast<double>(m_rmsd_mtd_max_height));
             const double height = m_k_rmsd * eff_counter; // W_i = k * counter_i
             double expr_sum = 0.0;      // Sum over images: drives deposition/visited bookkeeping
             double rmsd_identity = 0.0; // identity-image RMSD for COLVAR / rmsd_reference
 
             // Evaluate one image (a reordered copy of the bias structure subset) and accumulate
             // its Gaussian into the bias + its analytic force into the walker gradient.
-            auto eval_image = [&](const Geometry& subset, bool is_identity) {
+            auto eval_image = [&](const Geometry& subset, bool is_identity, bool centered) {
                 m_shared_pool_target.setGeometry(subset);
                 m_shared_pool_driver.setTarget(m_shared_pool_target);
-                double rmsd = m_shared_pool_driver.BestFitRMSD();
+                // centered=true: reference+target are pre-centered (screen fast path) -> skip the
+                // two CenterMolecule passes; else the legacy self-centering BestFitRMSD.
+                double rmsd = centered ? m_shared_pool_driver.BestFitRMSDCentered()
+                                       : m_shared_pool_driver.BestFitRMSD();
                 double expr = exp(-rmsd * rmsd * m_alpha_rmsd);
                 current_bias += height * expr;
                 if (m_wtmtd)
@@ -2795,23 +3820,47 @@ void SimpleMD::ApplyRMSDMTD()
                 double dEdR = -2.0 * m_alpha_rmsd * height * rmsd * expr;
                 Geometry grad = m_shared_pool_driver.Gradient();
                 for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
-                    m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 0] += dEdR * grad(j, 0);
-                    m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 1] += dEdR * grad(j, 1);
-                    m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 2] += dEdR * grad(j, 2);
+                    bias_accum[3 * m_rmsd_indicies[j] +0] += dEdR * grad(j, 0);
+                    bias_accum[3 * m_rmsd_indicies[j] +1] += dEdR * grad(j, 1);
+                    bias_accum[3 * m_rmsd_indicies[j] +2] += dEdR * grad(j, 2);
                 }
                 expr_sum += expr;
                 if (is_identity)
                     rmsd_identity = rmsd;
             };
 
-            // Identity image (bs.geometry is full-atom; project onto the RMSD subset).
-            Geometry bs_rmsd_subset = m_shared_pool_target.getGeometry();
-            for (int i = 0; i < m_rmsd_indicies.size(); ++i) {
-                bs_rmsd_subset(i, 0) = bs.geometry(m_rmsd_indicies[i], 0);
-                bs_rmsd_subset(i, 1) = bs.geometry(m_rmsd_indicies[i], 1);
-                bs_rmsd_subset(i, 2) = bs.geometry(m_rmsd_indicies[i], 2);
+            // Claude Generated (Jul 2026): Gaussian-cutoff screen. A rigorous, permutation-invariant
+            // RMSD lower bound (principal-radii distance) bounds every image of this hill at once, so
+            // when the largest possible summed Gaussian is below eps_step the whole hill is skipped
+            // before any Kabsch. Structure 0 is never skipped -- it supplies the COLVAR reference RMSD.
+            if (screen_enabled) {
+                ensureHillDescriptor(bs);
+                if (bs.index != 0) {
+                    double L2 = (sigma_walker - m_hill_sigma[bs.index]).squaredNorm() / static_cast<double>(Nsub);
+                    double Leff = std::sqrt(L2) - m_rmsd_mtd_screen_margin;
+                    if (Leff < 0.0)
+                        Leff = 0.0;
+                    if (n_images * std::exp(-m_alpha_rmsd * Leff * Leff) < eps_step) {
+                        m_bias_hills_screened++;
+                        continue; // provably negligible -> skip identity + all symmetry images
+                    }
+                }
             }
-            eval_image(bs_rmsd_subset, true);
+            m_bias_hills_evaluated++; // hills whose Kabsch actually runs this step (screen on or off)
+
+            // Identity image (bs.geometry is full-atom; project onto the RMSD subset).
+            if (screen_enabled) {
+                // Reuse the cached geometric-centered subset (already built for the descriptor).
+                eval_image(m_hill_centered[bs.index], true, true);
+            } else {
+                Geometry bs_rmsd_subset = m_shared_pool_target.getGeometry();
+                for (int i = 0; i < m_rmsd_indicies.size(); ++i) {
+                    bs_rmsd_subset(i, 0) = bs.geometry(m_rmsd_indicies[i], 0);
+                    bs_rmsd_subset(i, 1) = bs.geometry(m_rmsd_indicies[i], 1);
+                    bs_rmsd_subset(i, 2) = bs.geometry(m_rmsd_indicies[i], 2);
+                }
+                eval_image(bs_rmsd_subset, true, false);
+            }
 
             // Symmetry images: position j holds atom rule[j] (same convention as ConfScan's
             // Rules2RMSD). Reference (walker) stays in canonical order, so this measures the
@@ -2828,11 +3877,17 @@ void SimpleMD::ApplyRMSDMTD()
                     bs_perm(j, 1) = bs.geometry(src, 1);
                     bs_perm(j, 2) = bs.geometry(src, 2);
                 }
-                if (ok)
-                    eval_image(bs_perm, false);
+                if (ok) {
+                    if (screen_enabled)
+                        eval_image(MTDCenterSubset(bs_perm), false, true);
+                    else
+                        eval_image(bs_perm, false, false);
+                }
             }
 
-            if (expr_sum * m_rmsd_econv > static_cast<double>(global_count))
+            if (strided)
+                soft_visits.emplace_back(bs.index, expr_sum);
+            else if (expr_sum * m_rmsd_econv > static_cast<double>(global_count))
                 visited.push_back(bs.index);
 
             if (bs.index == 0)
@@ -2841,16 +3896,23 @@ void SimpleMD::ApplyRMSDMTD()
 
         // Phase 2: bump the visited references in the shared pool. counter++ always (drives
         // exploration); the well-tempered weight 'factor' grows only when opt-in (output-only).
-        {
-            std::vector<std::pair<int, double>> visit_updates;
-            visit_updates.reserve(visited.size());
+        if (do_deposit) {
+            std::vector<std::tuple<int, double, double>> visit_updates; // (index, counter_inc, wt_inc)
             double wt_inc = m_wtmtd ? exp(-current_bias / (kb_Eh * m_rmsd_DT)) : 0.0;
-            for (int idx : visited) {
-                // When freezing inherited heights, do not bump structures this run inherited:
-                // their height stays fixed so the run's cumulative bias does not escalate.
-                if (m_freeze_inherited && m_frozen_height.count(idx))
-                    continue;
-                visit_updates.emplace_back(idx, wt_inc);
+            if (strided) {
+                visit_updates.reserve(soft_visits.size());
+                for (const auto& [idx, e] : soft_visits) {
+                    if (m_freeze_inherited && m_frozen_height.count(idx))
+                        continue;
+                    visit_updates.emplace_back(idx, e, wt_inc);
+                }
+            } else {
+                visit_updates.reserve(visited.size());
+                for (int idx : visited) {
+                    if (m_freeze_inherited && m_frozen_height.count(idx))
+                        continue;
+                    visit_updates.emplace_back(idx, 1.0, wt_inc);
+                }
             }
             m_shared_pool->registerVisits(visit_updates);
         }
@@ -2879,7 +3941,8 @@ void SimpleMD::ApplyRMSDMTD()
         // First structure (pool empty) is always accepted.
         int pool_count = m_shared_pool->biasStructureCount();
         bool deposit = !m_rmsd_fix_structure
-            && (pool_count == 0 || current_bias * m_rmsd_econv < static_cast<double>(pool_count));
+            && (strided ? (do_deposit && RMSDMTD::shouldDeposit(current_bias, m_vmin, pool_count))
+                        : (pool_count == 0 || current_bias * m_rmsd_econv < static_cast<double>(pool_count)));
         // Claude Generated (Jun 2026): never deposit a fragmented structure into the shared
         // pool (only relevant when topo_check is on; the run aborts shortly after anyway).
         if (deposit && m_topo_check) {
@@ -2895,12 +3958,13 @@ void SimpleMD::ApplyRMSDMTD()
             new_bs.counter = 1;
             new_bs.temperature = m_T0;
             int new_count = m_shared_pool->depositBiasStructure(new_bs);
+            m_mtd_deposits.push_back({new_count, double(m_step), m_step * m_dT, m_Epot, rmsd_reference, 'B', 0, false});
             m_bias_structure_count++;
             // Write full molecule to per-thread .mtd.xyz
             Molecule out_mol(m_molecule);
             out_mol.setGeometry(full_geometry);
             out_mol.setName(std::to_string(m_currentStep));
-            out_mol.appendXYZFile(Basename() + ".mtd.xyz");
+            out_mol.appendXYZFile(outputPath(Basename() + ".mtd.xyz"));
             if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::result_fmt("RMSD-MTD: Deposited bias structure {} (pool total: {})",
                     new_count, m_shared_pool->biasStructureCount());
@@ -2914,6 +3978,7 @@ void SimpleMD::ApplyRMSDMTD()
     // Original local-only bias path (unchanged)
     if (m_bias_structure_count == 0) {
         m_bias_threads[0]->addGeometry(current_geometry, 0, m_currentStep, 0);
+        m_mtd_deposits.push_back({0, double(m_step), m_step * m_dT, m_Epot, 0.0, 'I', 0, false});
         m_bias_structure_count++;
         m_rmsd_mtd_molecule.writeXYZFile(outputPath(Basename() + ".mtd.xyz"));
         if (m_nocolvarfile == false) {
@@ -2925,25 +3990,30 @@ void SimpleMD::ApplyRMSDMTD()
     if (m_threads == 1 || m_bias_structure_count == 1) {
         for (auto & m_bias_thread : m_bias_threads) {
             m_bias_thread->setCurrentGeometry(current_geometry, m_currentStep);
+            m_bias_thread->setGrowCounter(do_deposit);
             m_bias_thread->start();
             current_bias += m_bias_thread->BiasEnergy();
             current_bias_wt += m_bias_thread->BiasEnergyWT();
             for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
-                m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 0] += m_bias_thread->Gradient()(j, 0);
-                m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 1] += m_bias_thread->Gradient()(j, 1);
-                m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 2] += m_bias_thread->Gradient()(j, 2);
+                bias_accum[3 * m_rmsd_indicies[j] +0] += m_bias_thread->Gradient()(j, 0);
+                bias_accum[3 * m_rmsd_indicies[j] +1] += m_bias_thread->Gradient()(j, 1);
+                bias_accum[3 * m_rmsd_indicies[j] +2] += m_bias_thread->Gradient()(j, 2);
             }
             m_colvar_incr += m_bias_thread->Counter();
+            m_bias_hills_evaluated += m_bias_thread->LastEvaluated();
+            m_bias_hills_screened += m_bias_thread->LastScreened();
             m_loop_time += m_bias_thread->getExecutionTime();
         }
     } else {
         if (m_bias_structure_count < m_threads) {
             for (int i = 0; i < m_bias_structure_count; ++i) {
                 m_bias_threads[i]->setCurrentGeometry(current_geometry, m_currentStep);
+                m_bias_threads[i]->setGrowCounter(do_deposit);
             }
         } else {
             for (auto & m_bias_thread : m_bias_threads) {
                 m_bias_thread->setCurrentGeometry(current_geometry, m_currentStep);
+                m_bias_thread->setGrowCounter(do_deposit);
             }
         }
 
@@ -2958,11 +4028,13 @@ void SimpleMD::ApplyRMSDMTD()
                 current_bias += m_bias_thread->BiasEnergy();
                 current_bias_wt += m_bias_thread->BiasEnergyWT();
                 for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
-                    m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 0] += m_bias_thread->Gradient()(j, 0);
-                    m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 1] += m_bias_thread->Gradient()(j, 1);
-                    m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 2] += m_bias_thread->Gradient()(j, 2);
+                    bias_accum[3 * m_rmsd_indicies[j] +0] += m_bias_thread->Gradient()(j, 0);
+                    bias_accum[3 * m_rmsd_indicies[j] +1] += m_bias_thread->Gradient()(j, 1);
+                    bias_accum[3 * m_rmsd_indicies[j] +2] += m_bias_thread->Gradient()(j, 2);
                 }
                 m_colvar_incr += m_bias_thread->Counter();
+                m_bias_hills_evaluated += m_bias_thread->LastEvaluated();
+                m_bias_hills_screened += m_bias_thread->LastScreened();
             }
             m_loop_time += m_bias_thread->getExecutionTime();
         }
@@ -2989,12 +4061,17 @@ void SimpleMD::ApplyRMSDMTD()
     m_bias_energy += current_bias;
 
     // Deposition uses the exploration bias only (well-tempering never gates the search).
-    if (current_bias * m_rmsd_econv < m_bias_structure_count && m_rmsd_fix_structure == false) {
+    bool local_deposit = (m_rmsd_fix_structure == false)
+        && (strided ? (do_deposit && RMSDMTD::shouldDeposit(current_bias, m_vmin, m_bias_structure_count))
+                    : (current_bias * m_rmsd_econv < m_bias_structure_count));
+    if (local_deposit) {
         int thread_index = m_bias_structure_count % m_bias_threads.size();
         m_bias_threads[thread_index]->addGeometry(current_geometry, rmsd_reference, m_currentStep, m_bias_structure_count);
+        m_mtd_deposits.push_back({m_bias_structure_count, double(m_step), m_step * m_dT, m_Epot, rmsd_reference, 'B', 0, false});
         m_bias_structure_count++;
         m_rmsd_mtd_molecule.appendXYZFile(outputPath(Basename() + ".mtd.xyz"));
-        std::cout << m_bias_structure_count << " stored structures currently" << std::endl;
+        if (m_verbosity >= 1)
+            std::cout << m_bias_structure_count << " stored structures currently" << std::endl;
     }
     m_end = std::chrono::system_clock::now();
     int m_time = std::chrono::duration_cast<std::chrono::milliseconds>(m_end - m_start).count();
@@ -3035,16 +4112,20 @@ double SimpleMD::ApplySphericLogFermiWalls()
         double curr_pot = kbT * log(1 + exp_expr);
         // counter += distance > m_wall_radius;
         // std::cout << m_wall_beta*m_eigen_geometry.data()[3 * i + 0]*exp_expr/(distance*(1-exp_expr)) << " ";
-        // Claude Generated: Fix log-Fermi forces - correct denominator (1 + exp) for derivative of log(1 + e^x)
+        // Claude Generated 2026: fx/fy/fz are dV/dr (the gradient of V = kbT·log(1+exp(β(s-R)))
+        // projected radially: dV/dx = kbT·β·exp/(1+exp)·(x/s)). m_eigen_gradient holds dE/dr
+        // (force = -gradient), so the wall gradient must be ADDED. The previous `gradient -= fx`
+        // subtracted it — flipping the wall force outward (atoms outside the sphere were expelled
+        // instead of confined). Mirrors ApplyRectLogFermiWalls, which already adds dV/dr.
         // Add numerical stability check for distance = 0
         if (distance > 1e-10) {
             double fx = kbT * m_wall_beta * m_eigen_geometry.data()[3 * i + 0] * exp_expr / (distance * (1 + exp_expr));
             double fy = kbT * m_wall_beta * m_eigen_geometry.data()[3 * i + 1] * exp_expr / (distance * (1 + exp_expr));
             double fz = kbT * m_wall_beta * m_eigen_geometry.data()[3 * i + 2] * exp_expr / (distance * (1 + exp_expr));
 
-            m_eigen_gradient.data()[3 * i + 0] -= fx;
-            m_eigen_gradient.data()[3 * i + 1] -= fy;
-            m_eigen_gradient.data()[3 * i + 2] -= fz;
+            m_eigen_gradient.data()[3 * i + 0] += fx;
+            m_eigen_gradient.data()[3 * i + 1] += fy;
+            m_eigen_gradient.data()[3 * i + 2] += fz;
 
             // Track wall force magnitude
             sum_grad += std::sqrt(fx * fx + fy * fy + fz * fz);
@@ -3064,7 +4145,7 @@ double SimpleMD::ApplySphericLogFermiWalls()
     // Only report if violations exceed 5% of atoms OR it's been 1000 steps since last report
     bool should_report = (counter > m_natoms * 0.05) || (counter > 0 && (m_currentStep - m_wall_violation_last_reported) > 1000) || (sum_grad > 0.01); // Or if wall forces are very high
 
-    if (should_report) {
+    if (should_report && m_verbosity >= 1) {
         std::cout << "Wall stats - Atoms outside sphere: " << counter << "/" << m_natoms
                   << ", Total wall force: " << sum_grad * au2N << " N"
                   << ", Wall potential: " << potential * au2eV << " eV" << std::endl;
@@ -3127,7 +4208,7 @@ double SimpleMD::ApplyRectLogFermiWalls()
     // Only report if violations exceed 5% of atoms OR it's been 1000 steps since last report
     bool should_report = (counter > m_natoms * 0.05) || (counter > 0 && (m_currentStep - m_wall_violation_last_reported) > 1000) || (sum_grad > 0.01); // Or if wall forces are very high
 
-    if (should_report) {
+    if (should_report && m_verbosity >= 1) {
         std::cout << "Wall stats - Atoms outside rectangular: " << counter << "/" << m_natoms
                   << ", Total wall force: " << sum_grad * au2N << " N"
                   << ", Wall potential: " << potential * au2eV << " eV" << std::endl;
@@ -3179,7 +4260,7 @@ double SimpleMD::ApplySphericHarmonicWalls()
     // Only report if violations exceed 5% of atoms OR it's been 1000 steps since last report
     bool should_report = (counter > m_natoms * 0.05) || (counter > 0 && (m_currentStep - m_wall_violation_last_reported) > 1000) || (sum_grad > 0.01); // Or if wall forces are very high
 
-    if (should_report) {
+    if (should_report && m_verbosity >= 1) {
         std::cout << "Wall stats - Atoms outside sphere: " << counter << "/" << m_natoms
                   << ", Total wall force: " << sum_grad * au2N << " N"
                   << ", Wall potential: " << potential * au2eV << " eV" << std::endl;
@@ -3213,16 +4294,23 @@ double SimpleMD::ApplyRectHarmonicWalls()
 
         // std::cout << i << " " << counter << std::endl;
 
-        // Claude Generated: Fix harmonic wall forces - remove std::abs() for correct force direction
-        // Force = -k * displacement, where displacement is signed distance from boundary
-        double dx = k * ((m_eigen_geometry.data()[3 * i + 0] - m_wall_x_min) * (m_eigen_geometry.data()[3 * i + 0] < m_wall_x_min) - (m_eigen_geometry.data()[3 * i + 0] - m_wall_x_max) * (m_eigen_geometry.data()[3 * i + 0] > m_wall_x_max));
-
-        double dy = k * ((m_eigen_geometry.data()[3 * i + 1] - m_wall_y_min) * (m_eigen_geometry.data()[3 * i + 1] < m_wall_y_min) - (m_eigen_geometry.data()[3 * i + 1] - m_wall_y_max) * (m_eigen_geometry.data()[3 * i + 1] > m_wall_y_max));
-
-        double dz = k * ((m_eigen_geometry.data()[3 * i + 2] - m_wall_z_min) * (m_eigen_geometry.data()[3 * i + 2] < m_wall_z_min) - (m_eigen_geometry.data()[3 * i + 2] - m_wall_z_max) * (m_eigen_geometry.data()[3 * i + 2] > m_wall_z_max));
-        m_eigen_gradient.data()[3 * i + 0] -= dx;
-        m_eigen_gradient.data()[3 * i + 1] -= dy;
-        m_eigen_gradient.data()[3 * i + 2] -= dz;
+        // Claude Generated 2026: Correct harmonic wall gradient.
+        // m_eigen_gradient holds dE/dr (the integrator does v -= ½·dT·grad/m,
+        // i.e. force = -gradient). The wall adds V = ½k·d² to the energy, so its
+        // gradient contribution dV/dr = k·((r-r_min)·(r<r_min) + (r-r_max)·(r>r_max))
+        // must be ADDED. The previous form used `gradient -= dx` with a minus between
+        // the min/max terms: that added the max-wall gradient (correct) but SUBTRACTED
+        // the min-wall gradient (sign error — atoms below r_min were pushed further out
+        // instead of back in). Symmetric `+` with `gradient +=` fixes both walls.
+        double gx = m_eigen_geometry.data()[3 * i + 0];
+        double gy = m_eigen_geometry.data()[3 * i + 1];
+        double gz = m_eigen_geometry.data()[3 * i + 2];
+        double dx = k * ((gx - m_wall_x_min) * (gx < m_wall_x_min) + (gx - m_wall_x_max) * (gx > m_wall_x_max));
+        double dy = k * ((gy - m_wall_y_min) * (gy < m_wall_y_min) + (gy - m_wall_y_max) * (gy > m_wall_y_max));
+        double dz = k * ((gz - m_wall_z_min) * (gz < m_wall_z_min) + (gz - m_wall_z_max) * (gz > m_wall_z_max));
+        m_eigen_gradient.data()[3 * i + 0] += dx;
+        m_eigen_gradient.data()[3 * i + 1] += dy;
+        m_eigen_gradient.data()[3 * i + 2] += dz;
         /* if(out)
          {
              std::cout << m_eigen_geometry.data()[3 * i + 0]  << " " << m_eigen_geometry.data()[3 * i + 1]  << " " << m_eigen_geometry.data()[3 * i + 2] << std::endl;
@@ -3239,7 +4327,7 @@ double SimpleMD::ApplyRectHarmonicWalls()
     // Only report if violations exceed 5% of atoms OR it's been 1000 steps since last report
     bool should_report = (counter > m_natoms * 0.05) || (counter > 0 && (m_currentStep - m_wall_violation_last_reported) > 1000) || (sum_grad > 0.01); // Or if wall forces are very high
 
-    if (should_report) {
+    if (should_report && m_verbosity >= 1) {
         std::cout << "Wall stats - Atoms outside rectangular: " << counter << "/" << m_natoms
                   << ", Total wall force: " << sum_grad * au2N << " N"
                   << ", Wall potential: " << potential * au2eV << " eV" << std::endl;
@@ -3257,13 +4345,15 @@ void SimpleMD::RemoveRotations()
      * https://github.com/grimme-lab/xtb/blob/main/src/rmrottr.f90
      * Special thanks to the developers
      */
-    double mass = 0;
-    Position pos = { 0, 0, 0 }, angom{ 0, 0, 0 };
     Geometry geom(m_natoms, 3);
 
     std::vector<std::vector<int>> fragments = m_molecule.GetFragments();
-    // std::cout << fragments.size() << std::endl;
     for (auto & fragment : fragments) {
+        // Reset per-fragment accumulators so each fragment's COM and angular
+        // momentum are computed independently (pre-existing bug: these were
+        // declared outside the loop and accumulated across fragments).
+        double mass = 0;
+        Position pos = { 0, 0, 0 }, angom{ 0, 0, 0 };
         for (const int i : fragment) {
             const double m = m_eigen_masses.data()[3 * i];
             mass += m;
@@ -3306,7 +4396,27 @@ void SimpleMD::RemoveRotations()
         matrix(2, 0) = matrix(0, 2);
         matrix(2, 1) = matrix(1, 2);
 
-        Position omega = matrix.inverse() * angom;
+        // Robust solve for singular/near-singular inertia tensors (linear
+        // molecules, single atoms). A naive matrix.inverse() returns NaN/Inf
+        // when one or more principal moments of inertia vanish, which is
+        // exactly the case for 2-atom systems (rotation about the bond axis
+        // has zero moment). Use a JacobiSVD and clamp small singular values
+        // so that the corresponding rotational DOF is correctly frozen
+        // instead of producing NaN velocities.
+        // Guard checks fragment size, not total atom count: a single-atom
+        // fragment inside a larger system must also be skipped.
+        Position omega = { 0, 0, 0 };
+        if (fragment.size() > 1) {
+            Eigen::JacobiSVD<Geometry> svd(matrix, Eigen::ComputeFullU | Eigen::ComputeFullV);
+            const double sv0 = svd.singularValues()(0);
+            const double sv_tol = 1e-12 * std::max(sv0, 1e-300);
+            Eigen::Vector3d inv_sv = Eigen::Vector3d::Zero();
+            for (int k = 0; k < 3; ++k) {
+                const double sv = svd.singularValues()(k);
+                inv_sv(k) = (sv > sv_tol) ? 1.0 / sv : 0.0;
+            }
+            omega = svd.matrixU() * inv_sv.asDiagonal() * svd.matrixV().transpose() * angom;
+        }
 
         Position rlm = { 0, 0, 0 }, ram = { 0, 0, 0 };
         for (const int i : fragment) {
@@ -3380,7 +4490,22 @@ void SimpleMD::RemoveRotation()
     matrix(2, 0) = matrix(0, 2);
     matrix(2, 1) = matrix(1, 2);
 
-    Position omega = matrix.inverse() * angom;
+    // Robust solve for singular/near-singular inertia tensors (linear
+    // molecules, single atoms). See SimpleMD::RemoveRotations above for the
+    // rationale. Required so that 2-atom systems do not get NaN velocities
+    // at step 0 and crash the integrator with "NaN/Inf velocity".
+    Position omega = { 0, 0, 0 };
+    if (m_natoms > 1) {
+        Eigen::JacobiSVD<Geometry> svd(matrix, Eigen::ComputeFullU | Eigen::ComputeFullV);
+        const double sv0 = svd.singularValues()(0);
+        const double sv_tol = 1e-12 * std::max(sv0, 1e-300);
+        Eigen::Vector3d inv_sv = Eigen::Vector3d::Zero();
+        for (int k = 0; k < 3; ++k) {
+            const double sv = svd.singularValues()(k);
+            inv_sv(k) = (sv > sv_tol) ? 1.0 / sv : 0.0;
+        }
+        omega = svd.matrixU() * inv_sv.asDiagonal() * svd.matrixV().transpose() * angom;
+    }
 
     Position rlm = { 0, 0, 0 }, ram = { 0, 0, 0 };
     for (int i = 0; i < m_natoms; ++i) {
@@ -3437,7 +4562,8 @@ void SimpleMD::PrintStatus() const
             line += fmt::format(" {: ^15}", m_bias_structure_count);
         else if (m_writeUnique)
             line += fmt::format(" {: ^15}", m_unqiue->StoredStructures());
-        std::cout << line << "\n";
+        if (m_verbosity >= 1)
+            std::cout << line << "\n";
     }
 
     // RATTLE constraint summary (only when RATTLE is active)
@@ -3519,6 +4645,14 @@ void SimpleMD::EKin()
 
 void SimpleMD::AverageQuantities()
 {
+    // Claude Generated (Sep 2026): refresh the conserved quantity here, not only at print
+    // steps. m_Etot used to be assembled just before PrintStatus(), while this function runs
+    // every step -- so <Etot> averaged a value that was hundreds of steps old, and the final
+    // status line (printed from a path that does not refresh it) reported a stale, apparently
+    // conserved Etot for a run whose Epot + Ekin had long since diverged. m_Etot is purely
+    // diagnostic (this average, the status line and the restart JSON), so this cannot move a
+    // trajectory.
+    m_Etot = m_Epot + m_Ekin;
     m_aver_Temp = (m_T + (m_currentStep)*m_aver_Temp) / (m_currentStep + 1);
     m_aver_Epot = (m_Epot + (m_currentStep)*m_aver_Epot) / (m_currentStep + 1);
     m_aver_Ekin = (m_Ekin + (m_currentStep)*m_aver_Ekin) / (m_currentStep + 1);
@@ -3556,7 +4690,8 @@ bool SimpleMD::WriteGeometry()
     }
     if (m_writeUnique) {
         if (m_unqiue->CheckMolecule(new Molecule(m_molecule))) {
-            std::cout << " ** new structure was added **" << std::endl;
+            if (m_verbosity >= 1)
+                std::cout << " ** new structure was added **" << std::endl;
             PrintStatus();
             m_time_step = 0;
             m_unique_structures.push_back(new Molecule(m_molecule));
@@ -3586,7 +4721,15 @@ void SimpleMD::CSVR()
     static std::default_random_engine rd{};
     static std::mt19937 gen{ rd() };
     static std::normal_distribution<> d{ 0, 1 };
-    static std::chi_squared_distribution<float> dchi{ static_cast<float>(m_dof) };
+    // Lazy-reinit when m_dof changes (e.g. after RATTLE constraint setup or
+    // first call with a different molecule). A stale static distribution with
+    // the wrong DOF produces wrong fluctuation widths in the CSVR rescaling.
+    static int csvr_last_dof = -1;
+    static std::chi_squared_distribution<float> dchi{ 1.0f };
+    if (m_dof != csvr_last_dof) {
+        dchi = std::chi_squared_distribution<float>(static_cast<float>(m_dof));
+        csvr_last_dof = m_dof;
+    }
     double R = d(gen);
     double SNf = dchi(gen);
     double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (m_dof * m_Ekin) + 2 * R * sqrt(c * (1 - c) * Ekin_target / (m_dof * m_Ekin));
@@ -3602,10 +4745,10 @@ void SimpleMD::CSVR()
     m_seed++;
 }
 
-void SimpleMD::Anderson()
+void SimpleMD::Andersen()
 {
     static std::default_random_engine generator;
-    double probability = m_anderson * m_dT;
+    double probability = m_andersen * m_dT;
     std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
     for (size_t i = 0; i < m_natoms; ++i) {
         if (uniform_dist(generator) < probability) {
@@ -3625,13 +4768,22 @@ void SimpleMD::NoseHover()
         kinetic_energy += 0.5 * m_eigen_masses.data()[3 * i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
     }
     // Update der Thermostatkette
-    m_xi[0] += 0.5 * m_dT * (2.0 * kinetic_energy - m_dof * m_T0 * kb_Eh) / m_Q[0];
+    // Claude Generated (Sep 2026): -dt, -MaxTime and every reported time are REAL
+    // femtoseconds. The integrator, however, works in Angstrom / amu / Hartree, whose
+    // own time unit is sqrt(amu*A^2/Eh) = 1.9516 fs (Constants::MD_TIME_UNIT_FS). This is
+    // the one place the two meet, so the conversion belongs here and nowhere else: every
+    // other use of m_dT (m_currentStep, m_maxtime, m_coupling/m_dT ratios, print/dump
+    // cadence, COLVAR and deposit times) is bookkeeping and stays in femtoseconds.
+    // Getting this wrong is silent in the energy but doubles the physical step - see
+    // docs/MD_LARGE_SYSTEMS.md.
+    const double dt = m_dT * CurcumaUnit::Constants::FS_TO_MD_TIME;
+    m_xi[0] += 0.5 * dt * (2.0 * kinetic_energy - m_dof * m_T0 * kb_Eh) / m_Q[0];
     for (int j = 1; j < m_chain_length; ++j) {
-        m_xi[j] += 0.5 * m_dT * (m_Q[j - 1] * m_xi[j - 1] * m_xi[j - 1] - m_T0 * kb_Eh) / m_Q[j];
+        m_xi[j] += 0.5 * dt * (m_Q[j - 1] * m_xi[j - 1] * m_xi[j - 1] - m_T0 * kb_Eh) / m_Q[j];
     }
 
     // Update der Geschwindigkeiten
-    double scale = exp(-m_xi[0] * m_dT);
+    double scale = exp(-m_xi[0] * dt);
     for (int i = 0; i < m_natoms; ++i) {
         m_eigen_velocities.data()[3 * i + 0] *= scale;
         m_eigen_velocities.data()[3 * i + 1] *= scale;
@@ -3640,7 +4792,7 @@ void SimpleMD::NoseHover()
 
     // Rückwärts-Update der Thermostatkette
     for (int j = m_chain_length - 1; j >= 1; --j) {
-        m_xi[j] += 0.5 * m_dT * (m_Q[j - 1] * m_xi[j - 1] * m_xi[j - 1] - m_T0 * kb_Eh) / m_Q[j];
+        m_xi[j] += 0.5 * dt * (m_Q[j - 1] * m_xi[j - 1] * m_xi[j - 1] - m_T0 * kb_Eh) / m_Q[j];
     }
-    m_xi[0] += 0.5 * m_dT * (2.0 * kinetic_energy - m_dof * m_T0 * kb_Eh) / m_Q[0];
+    m_xi[0] += 0.5 * dt * (2.0 * kinetic_energy - m_dof * m_T0 * kb_Eh) / m_Q[0];
 }

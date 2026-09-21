@@ -141,7 +141,7 @@ void ConfStat::calculateStatistics()
 void ConfStat::printStatistics() const
 {
     // Always show critical ConfStat results - these are primary outputs
-    CurcumaLogger::success("═══ Conformer Statistics Analysis ═══");
+    CurcumaLogger::success("=== Conformer Statistics Analysis ===");
 
     // Parameters - show at level 1 as they're essential for understanding results
     if (CurcumaLogger::get_verbosity() >= 1) {
@@ -152,25 +152,30 @@ void ConfStat::printStatistics() const
 
     CurcumaLogger::energy_abs(m_stats.lowest_energy, "Lowest energy");
 
-    // Conformer table - critical data, always visible at level 1
-    fmt::print("\n{:^5} | {:^15} | {:^15} | {:^12} | {:^10}\n",
-        "Conf", "ΔE (kJ/mol)", "Population (%)", "Cumulative (%)", "Degeneracy");
-    fmt::print("--------------------------------------------------------------\n");
+    // Claude Generated (June 2026): the detailed per-conformer table is verbosity >= 2; the
+    // summary below stays at verbosity 1 (user request: at least the summary at level 1).
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        fmt::print("\n{:^5} | {:^15} | {:^15} | {:^12} | {:^10}\n",
+            "Conf", "dE (kJ/mol)", "Population (%)", "Cumulative (%)", "Degeneracy");
+        fmt::print("--------------------------------------------------------------\n");
 
-    int conf_number = 1;
-    for (const auto& [diff, pop, cum, deg] : m_stats.conformer_data) {
-        if (pop >= m_print_threshold) {
-            fmt::print("{:5d} | {:15.2f} | {:15.2f} | {:12.2f} | {:10d}\n",
-                conf_number, diff * 2625.5, pop, cum, deg);
+        int conf_number = 1;
+        for (const auto& [diff, pop, cum, deg] : m_stats.conformer_data) {
+            if (pop >= m_print_threshold) {
+                fmt::print("{:5d} | {:15.2f} | {:15.2f} | {:12.2f} | {:10d}\n",
+                    conf_number, diff * 2625.5, pop, cum, deg);
+            }
+            conf_number++;
         }
-        conf_number++;
     }
 
-    // Summary statistics - always visible as they are key results
-    fmt::print("\nEnergy span: {:.2f} kJ/mol\n", m_stats.energy_span);
-    fmt::print("Total states (including degeneracy): {}\n", m_stats.total_states);
-    fmt::print("Free Energy: {:.2f} kJ/mol\n", m_stats.free_energy_contribution);
-    fmt::print("Entropy (T*S): {:.2f} kJ/mol\n", m_stats.entropy_contribution);
+    // Summary statistics - shown at verbosity >= 1 (key results)
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        fmt::print("\nEnergy span: {:.2f} kJ/mol\n", m_stats.energy_span);
+        fmt::print("Total states (including degeneracy): {}\n", m_stats.total_states);
+        fmt::print("Free Energy: {:.2f} kJ/mol\n", m_stats.free_energy_contribution);
+        fmt::print("Entropy (T*S): {:.2f} kJ/mol\n", m_stats.entropy_contribution);
+    }
 
     // Detailed distributions only at higher verbosity
     if (CurcumaLogger::get_verbosity() >= 2) {

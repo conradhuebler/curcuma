@@ -20,13 +20,16 @@
 #include "gfnff_kernels.cuh"
 
 #include "../gfnff_parameters.h"
-#include "../forcefieldthread.h"   // Bond, Angle, Dihedral, Inversion structs
+#include "../ff_terms.h"   // Bond, Angle, Dihedral, Inversion structs
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"  // covalent_rad_d3
+
+#include <cstdlib>  // std::getenv (CURCUMA_GFNFF_GPU_FREEZE_HBQ opt-out)
 
 #include "src/core/curcuma_logger.h"
 
 #include <Eigen/Dense>
 
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -44,38 +47,13 @@ extern __constant__ double d_lattice_inv[9];
 extern __constant__ int    d_has_pbc;
 
 // ============================================================================
-// D3 Covalent radii for angle/dihedral distance damping (Bohr, WITHOUT 4/3 factor)
-// Copied from gfnff_par.h since nvcc has trouble linking static const std::vector
-// Reference: Pyykkö & Atsumi, Chem. Eur. J. 15, 2009, 188-197
-// Values × aatoau where aatoau = 1/0.52917726 (Bohr conversion)
-// ============================================================================
-static const double s_rcov_d3_bohr[87] = {
-    0.32/0.52917726, 0.46/0.52917726,                                         // H, He
-    1.20/0.52917726, 0.94/0.52917726, 0.77/0.52917726, 0.75/0.52917726,       // Li-C
-    0.71/0.52917726, 0.63/0.52917726, 0.64/0.52917726, 0.67/0.52917726,       // N-Ne
-    1.40/0.52917726, 1.25/0.52917726, 1.13/0.52917726, 1.04/0.52917726,       // Na-Si
-    1.10/0.52917726, 1.02/0.52917726, 0.99/0.52917726, 0.96/0.52917726,       // P-Ar
-    1.76/0.52917726, 1.54/0.52917726,                                         // K, Ca
-    1.33/0.52917726, 1.22/0.52917726, 1.21/0.52917726, 1.10/0.52917726,       // Sc-Cr
-    1.07/0.52917726, 1.04/0.52917726, 1.00/0.52917726, 0.99/0.52917726,       // Mn-Ni
-    1.01/0.52917726, 1.09/0.52917726,                                         // Cu, Zn
-    1.12/0.52917726, 1.09/0.52917726, 1.15/0.52917726, 1.10/0.52917726,       // Ga-Se
-    1.14/0.52917726, 1.17/0.52917726,                                         // Br, Kr
-    1.64/0.52917726, 1.46/0.52917726, 1.31/0.52917726, 1.26/0.52917726,       // Rb-Sr
-    1.23/0.52917726, 1.22/0.52917726, 1.22/0.52917726, 1.20/0.52917726,       // Y-Mo
-    1.19/0.52917726, 1.19/0.52917726, 1.18/0.52917726, 1.17/0.52917726,       // Tc-Pd
-    1.18/0.52917726, 1.20/0.52917726, 1.21/0.52917726, 1.23/0.52917726,       // Ag-Cd
-    1.28/0.52917726, 1.28/0.52917726, 1.28/0.52917726, 1.27/0.52917726,       // In-Te
-    1.27/0.52917726, 1.34/0.52917726,                                         // I, Xe
-    1.94/0.52917726, 1.71/0.52917726, 1.58/0.52917726, 1.51/0.52917726,       // Cs-Nd
-    1.44/0.52917726, 1.44/0.52917726, 1.44/0.52917726, 1.43/0.52917726,       // Pm-Eu
-    1.43/0.52917726, 1.43/0.52917726, 1.43/0.52917726, 1.40/0.52917726,       // Gd-Dy
-    1.39/0.52917726, 1.39/0.52917726, 1.40/0.52917726, 1.41/0.52917726,       // Ho-Hg
-    1.39/0.52917726, 1.39/0.52917726, 1.38/0.52917726, 1.38/0.52917726,       // Tl-Po
-    1.38/0.52917726, 1.42/0.52917726,                                         // At, Rn
-    2.01/0.52917726, 1.81/0.52917726,                                         // Fr, Ra
-    1.67/0.52917726, 1.58/0.52917726                                          // Ac, Th
-};
+// GFN-FF covalent radii for the CN and the angle/dihedral distance damping.
+// Built at init from the single source of truth GFNFFParameters::covalent_rad_d3
+// (Å) so it can never drift from the CPU. See buildRcovD3Bohr() at the upload site.
+// (Jul 2026) The previous hand-copied s_rcov_d3_bohr[] had drifted to the *Grimme
+// D3* radii for Z>=37 (metals: Pt 1.38 vs GFN-FF 1.12 Å), so the GPU CN — and thus
+// the metal bond-r0 and angle terms — diverged from the CPU by up to ~8 kcal/mol on
+// MOR41 transition-metal complexes while main-group (identical radii) matched.
 
 // ============================================================================
 // GPU thread launch helpers (Phase 6: Dynamic block size optimization)
@@ -627,6 +605,10 @@ struct FFWorkspaceGPUImpl {
     RepulsionSoA   bonded_rep;      ///< Bonded repulsion pairs
     RepulsionSoA   nonbonded_rep;   ///< Non-bonded repulsion pairs
     CoulombSoA     coulomb;         ///< Coulomb pairs (gamma + cutoff only; charges dynamic)
+    // Claude Generated (Sep 2026): implicit all-pairs Coulomb (no pair list).
+    bool               coulomb_implicit = false;
+    double             coulomb_rcut = 100.0;
+    // (per-atom alpeeq: the existing self-energy buffer d_coul_alp, same values)
     BondSoA        bonds;           ///< Bond stretching
     AngleSoA       angles;          ///< Angle bending
     DihedralSoA    dihedrals;       ///< Standard + extra torsions (combined)
@@ -705,6 +687,14 @@ struct FFWorkspaceGPUImpl {
     // d_refn and d_refcn moved to __constant__ memory (Phase 8: March 2026)
     // Uploaded via upload_refn_const() / upload_refcn_const() at init
     bool               dc6dcn_gpu_ready = false; ///< true after C6 table + refn uploaded
+
+    // WP-A (Jun 2026): on-device D4 dispersion pair-list build buffers.
+    CudaBuffer<double> d_sqrtzr4r2;    ///< [118] sqrt(Z·r4/r2) per element
+    CudaBuffer<double> d_topo_q;       ///< [N] Phase-1 topology charges (for zetac6)
+    CudaBuffer<double> d_zeta_zeff;    ///< [86] zeta zeff per element
+    CudaBuffer<double> d_zeta_c;       ///< [86] zeta c per element
+    CudaBuffer<int>    d_disp_pair_counter; ///< [1] atomic counter for the two-pass build
+    bool               disp_built_on_gpu = false; ///< true when disp SoA was device-built
 
     // Diagnostic snapshot buffers (GPU-side, no pipeline stall)
     // Claude Generated (March 2026): Device-to-device copy instead of sync+download
@@ -865,8 +855,13 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     checkCuda(cudaEventCreate(&m_impl->timing_p2_end),   "cudaEventCreate timing_p2_end");
     cudaStream_t stream = m_impl->stream;
 
-    // Upload covalent radii to constant memory (used by angle/dihedral distance damping)
-    upload_rcov_d3(s_rcov_d3_bohr, 87);
+    // Upload covalent radii to constant memory (used by the GPU CN and the
+    // angle/dihedral distance damping). Taken directly from GFNFFParameters::covalent_rad_d3,
+    // which is ALREADY in Bohr (raw_Å * gfnff_aatoau) — the SAME table the CPU CN
+    // (CNCalculator::COVALENT_RADII * aatoau, identical values for Z 1..86) and the CPU
+    // damping/ATM use — so the GPU and CPU CN now agree for metals too. The kernel applies
+    // the 4/3 factor itself, matching the CPU's k_scaled.
+    upload_rcov_d3(GFNFFParameters::covalent_rad_d3.data(), 87);
 
     // Upload covalent radii for HB/XB vdW radii lookup (Å units)
     upload_covalent_radii(GFNFFParameters::covalent_radii.data(),
@@ -978,11 +973,29 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
         }
     }
 
+    // Claude Generated (Sep 2026): upload phase timings with CURCUMA_GFNFF_PROFILE.
+    const bool up_prof = std::getenv("CURCUMA_GFNFF_PROFILE") != nullptr;
+    auto up_t = std::chrono::high_resolution_clock::now();
+    auto up_mark = [&](const char* name) {
+        if (!up_prof) return;
+        const auto t = std::chrono::high_resolution_clock::now();
+        CurcumaLogger::result(fmt::format("  gpu upload: {:<32s} {:9.1f} ms", name,
+                                          std::chrono::duration<double, std::milli>(t - up_t).count()));
+        up_t = t;
+    };
+    up_mark("start (after validation)");
     // --- Upload static SoA interaction lists ---
     m_impl->disp.upload(params.dispersions, stream);
+    up_mark("dispersion pairs");
     m_impl->bonded_rep.upload(params.bonded_repulsions, stream);
     m_impl->nonbonded_rep.upload(params.nonbonded_repulsions, stream);
+    up_mark("repulsion pairs");
     m_impl->coulomb.upload(params.coulombs, stream);
+    if (params.coulomb_implicit && params.coul_self_alp.size() == natoms) {
+        m_impl->coulomb_implicit = true;
+        m_impl->coulomb_rcut = params.coulomb_implicit_rcut;
+    }
+    up_mark("coulomb pairs");
     m_impl->bonds.upload(params.bonds, atom_types, stream);
     m_impl->angles.upload(params.angles, atom_types, stream);
     m_impl->dihedrals.upload(params.dihedrals, params.extra_dihedrals, atom_types, stream);
@@ -996,6 +1009,7 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_last_xbonds = params.xbonds;   // init CPU mirror for debug comparison
     m_impl->hbonds.upload(params.hbonds, atom_types, stream);
     m_last_hbonds = params.hbonds;   // init CPU mirror for debug comparison
+    up_mark("bonded + HB/XB/ATM/BATM lists");
 
     // --- Allocate dynamic per-step buffers ---
     const int N3 = 3 * natoms;
@@ -1080,7 +1094,15 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
 
     // --- Extract per-atom Coulomb self-energy params (for CPU postProcess TERM 2+3) ---
     // Mirrors FFWorkspace::setInteractionLists() lines 90-118
-    if (!params.coulombs.empty()) {
+    if (params.coulomb_implicit && params.coul_self_alp.size() == natoms) {
+        // No pair list to scan: the per-atom self-energy inputs come straight from the
+        // parameter set (GFNFF::generateCoulombSelfEnergyNative, same formulas as fillPair).
+        m_coul_chi_base   = params.coul_self_chi_base;
+        m_coul_gam        = params.coul_self_gam;
+        m_coul_alp        = params.coul_self_alp;
+        m_coul_chi_static = params.coul_self_chi_static;
+        setCoulombSelfEnergyParams(m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_chi_static);
+    } else if (!params.coulombs.empty()) {
         m_coul_chi_base  = Vector::Zero(natoms);
         m_coul_gam       = Vector::Zero(natoms);
         m_coul_alp       = Vector::Zero(natoms);
@@ -1114,6 +1136,7 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
         m_eeq_charges = params.eeq_charges;
     m_e0 = params.e0;
 
+    up_mark("buffers + HB alpha + coulomb self-energy scan");
     // Synchronise: wait for all uploads to finish
     checkCuda(cudaStreamSynchronize(stream), "init sync");
 
@@ -1480,7 +1503,7 @@ void FFWorkspaceGPU::generateCNPairListOnGPU()
         N,
         impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
         impl.d_atom_types.ptr,
-        2.5,  // cutoff_factor
+        m_cn_pair_cutoff_factor,  // cutoff_factor (Task #10: tunable)
         impl.d_cn_pair_counter.ptr);
     checkCuda(cudaStreamSynchronize(impl.stream), "k_generate_cn_pairs_count sync");
 
@@ -1510,7 +1533,7 @@ void FFWorkspaceGPU::generateCNPairListOnGPU()
         N,
         impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
         impl.d_atom_types.ptr,
-        2.5,  // cutoff_factor
+        m_cn_pair_cutoff_factor,  // cutoff_factor (Task #10: tunable)
         impl.d_cn_pair_counter.ptr,
         impl.d_cn_idx_i.ptr,
         impl.d_cn_idx_j.ptr,
@@ -1521,6 +1544,116 @@ void FFWorkspaceGPU::generateCNPairListOnGPU()
 
     if (CurcumaLogger::get_verbosity() >= 3)
         CurcumaLogger::info(fmt::format("  GPU CN pair list: {} pairs generated on GPU", h_count));
+}
+
+// ============================================================================
+// WP-A (Jun 2026): on-device D4 dispersion pair-list build.
+// Two-pass (count + build) device replacement for the host
+// GenerateDispersionPairsNative O(N²) loop + per-build H2D upload. Opt-in.
+// ============================================================================
+void FFWorkspaceGPU::generateDispersionPairListOnGPU(
+    const std::vector<double>& gw_flat,
+    const std::vector<double>& sqrtzr4r2,
+    const std::vector<double>& topo_charges,
+    double a1, double a2, double cutoff_bohr)
+{
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+    if (N <= 0) return;
+    if (!impl.dc6dcn_gpu_ready) {
+        if (CurcumaLogger::get_verbosity() >= 1)
+            CurcumaLogger::warn("GPU disp pair build skipped: C6 reference table not uploaded");
+        return;
+    }
+
+    // Use the HOST Gaussian weights (the same m_gaussian_weights getChargeWeightedC6
+    // uses) for the C6 contraction so the result is bit-identical to the host list.
+    // The host CN/gw is O(N) and cheap; only the O(N^2) pair loop is offloaded. The
+    // device gw (computeGaussianWeightsOnGPU) is recomputed later for dc6dcn and may
+    // use a slightly different CN, so we must NOT rely on it here. gw_flat is laid out
+    // [atom*D4_MAX_REF + ref], zero-padded to D4_MAX_REF.
+    if (static_cast<int>(gw_flat.size()) >= N * D4_MAX_REF)
+        impl.d_gw.upload(gw_flat.data(), N * D4_MAX_REF);
+
+    // Upload the element/atom tables the build kernel needs.
+    impl.d_sqrtzr4r2.upload(sqrtzr4r2.data(), static_cast<int>(sqrtzr4r2.size()));
+    impl.d_zeta_zeff.upload(GFNFFParameters::zeta_zeff.data(),
+                            static_cast<int>(GFNFFParameters::zeta_zeff.size()));
+    impl.d_zeta_c.upload(GFNFFParameters::zeta_c.data(),
+                         static_cast<int>(GFNFFParameters::zeta_c.size()));
+    {
+        std::vector<double> q(N, 0.0);
+        for (int i = 0; i < N && i < static_cast<int>(topo_charges.size()); ++i)
+            q[i] = topo_charges[i];
+        impl.d_topo_q.upload(q.data(), N);
+    }
+
+    if (!impl.d_disp_pair_counter.ptr) impl.d_disp_pair_counter.alloc(1);
+
+    const double cutoff_sq = cutoff_bohr * cutoff_bohr;
+    const int n_total = N * (N - 1) / 2;
+    auto cfg = getLaunchConfig(n_total, m_block_size);
+
+    // Pass 1: count surviving pairs.
+    int h_count = 0;
+    impl.d_disp_pair_counter.upload(&h_count, 1);
+    k_disp_pairs_count<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+        impl.d_atom_types.ptr, cutoff_sq, impl.d_disp_pair_counter.ptr);
+    checkCuda(cudaStreamSynchronize(impl.stream), "k_disp_pairs_count sync");
+    impl.d_disp_pair_counter.download(&h_count, 1);
+    checkCuda(cudaStreamSynchronize(impl.stream), "download disp pair count");
+
+    // (Re)allocate the DispersionSoA to the device-counted pair count.
+    impl.disp.n = h_count;
+    impl.disp.idx_i.alloc(h_count);
+    impl.disp.idx_j.alloc(h_count);
+    impl.disp.C6.alloc(h_count);
+    impl.disp.r4r2ij.alloc(h_count);
+    impl.disp.r0_sq.alloc(h_count);
+    impl.disp.zetac6.alloc(h_count);
+    impl.disp.r_cut.alloc(h_count);
+    impl.disp.dc6dcn_ij.alloc(h_count);
+    impl.disp.dc6dcn_ji.alloc(h_count);
+
+    if (h_count == 0) {
+        impl.disp_built_on_gpu = true;
+        m_disp_idx_i_host.clear();
+        m_disp_idx_j_host.clear();
+        return;
+    }
+
+    // Pass 2: write idx + per-pair static data (C6 contraction, r4r2ij, R0², zetac6).
+    int h_zero = 0;
+    impl.d_disp_pair_counter.upload(&h_zero, 1);
+    k_disp_pairs_build<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+        impl.d_atom_types.ptr, cutoff_sq,
+        impl.d_gw.ptr, impl.d_c6_flat.ptr,
+        impl.d_sqrtzr4r2.ptr, impl.d_topo_q.ptr,
+        impl.d_zeta_zeff.ptr, impl.d_zeta_c.ptr,
+        a1, a2,
+        impl.d_disp_pair_counter.ptr,
+        impl.disp.idx_i.ptr, impl.disp.idx_j.ptr,
+        impl.disp.C6.ptr, impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr,
+        impl.disp.zetac6.ptr, impl.disp.r_cut.ptr);
+    checkCuda(cudaStreamSynchronize(impl.stream), "k_disp_pairs_build sync");
+
+    // Keep the host idx mirror + dc6dcn staging consistent (CPU dc6dcn fallback /
+    // displacement consumers). One download per build (topology-change frequency).
+    m_disp_idx_i_host.resize(h_count);
+    m_disp_idx_j_host.resize(h_count);
+    impl.disp.idx_i.download(m_disp_idx_i_host.data(), h_count);
+    impl.disp.idx_j.download(m_disp_idx_j_host.data(), h_count);
+    checkCuda(cudaStreamSynchronize(impl.stream), "download disp idx mirror");
+    m_h_dc6dcn_ij.assign(h_count, 0.0);
+    m_h_dc6dcn_ji.assign(h_count, 0.0);
+
+    impl.disp_built_on_gpu = true;
+
+    if (CurcumaLogger::get_verbosity() >= 2)
+        CurcumaLogger::info(fmt::format(
+            "  GPU D4 dispersion pair list: {} pairs built on GPU (was host O(N^2) + upload)", h_count));
 }
 
 void FFWorkspaceGPU::updateDispersionDC6DCN(const Matrix& dc6dcn)
@@ -2160,6 +2293,35 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // Returns immediately — charge-independent kernels run asynchronously on GPU
 }
 
+// Claude Generated (June 2026): OPT-IN device-resident HB charge refresh.
+// IMPORTANT — default is OFF. The GFN-FF reference (Fortran) and the curcuma CPU path
+// both evaluate the H-bond term with the charges FROZEN at topology build (CPU uses the
+// stored hb.q_H/q_A/q_B, forcefieldthread.cpp:2525+), NOT live per-step EEQ charges. The
+// GPU's frozen HB charges therefore MATCH the reference; refreshing them to live charges
+// makes MD diverge from CPU/Fortran (verified: acetic-dimer 1000 fs heat-exchange CPU
+// 0.00709227 / GPU-frozen 0.00707467 / GPU-resident 0.00658143). This path is kept only
+// as an opt-in experiment — enable with CURCUMA_GFNFF_GPU_RESIDENT_HBQ=1.
+// Called by the orchestrator AFTER launchChargeDependentAndFinish() returns (impl.stream
+// idle, d_charges final) → no stream hazard with the captured graphs.
+void FFWorkspaceGPU::refreshHBChargesFromDevice()
+{
+    static const bool resident = (std::getenv("CURCUMA_GFNFF_GPU_RESIDENT_HBQ") != nullptr);
+    if (!resident || !m_hbond_enabled)
+        return;
+    auto& impl = *m_impl;
+    if (impl.hbonds.n <= 0)
+        return;
+    LaunchConfig cfg = getLaunchConfig(impl.hbonds.n, m_block_size);
+    k_gather_hb_charges<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        impl.hbonds.n,
+        impl.hbonds.idx_i.ptr, impl.hbonds.idx_j.ptr, impl.hbonds.idx_k.ptr,
+        impl.d_charges.ptr,
+        impl.hbonds.q_A.ptr, impl.hbonds.q_H.ptr, impl.hbonds.q_B.ptr);
+    checkCuda(cudaGetLastError(), "k_gather_hb_charges launch");
+    // Ensure the q arrays are fully written before the next step's HB (Phase 1) reads them.
+    cudaStreamSynchronize(impl.stream);
+}
+
 double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
 {
     auto& impl = *m_impl;
@@ -2260,7 +2422,14 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     }
 
     // k_coulomb (needs EEQ charges)
-    if (m_coulomb_enabled && impl.coulomb.n > 0) {
+    if (m_coulomb_enabled && impl.coulomb_implicit) {
+        LaunchConfig cfg = getLaunchConfig(m_natoms, m_block_size);
+        k_coulomb_implicit<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
+            m_natoms, impl.d_coul_alp.ptr, impl.coulomb_rcut,
+            impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+            impl.d_charges.ptr, impl.d_grad.ptr, &impl.d_energies.ptr[impl.E_COUL]);
+        checkCuda(cudaGetLastError(), "k_coulomb_implicit launch");
+    } else if (m_coulomb_enabled && impl.coulomb.n > 0) {
         LaunchConfig cfg = getLaunchConfig(impl.coulomb.n, m_block_size);
         k_coulomb<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
             impl.coulomb.n,

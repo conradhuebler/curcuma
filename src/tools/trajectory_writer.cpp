@@ -7,6 +7,7 @@
 #include "trajectory_writer.h"
 #include "../capabilities/trajectory_statistics.h"
 #include <iomanip>
+#include <sstream>
 #include <algorithm>
 #include "../core/curcuma_logger.h"
 

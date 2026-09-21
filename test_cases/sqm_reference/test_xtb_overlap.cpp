@@ -20,6 +20,7 @@
 #include "src/core/energy_calculators/qm_methods/parameters/gfn1_params.hpp"
 #include "src/core/energy_calculators/qm_methods/parameters/gfn2_params.hpp"
 #include "src/core/energy_calculators/qm_methods/STO_CGTO.hpp"
+#include "src/core/energy_calculators/qm_methods/xtb_ao_utils.hpp"  // X-I1: d block
 
 #include "external/json.hpp"
 
@@ -111,33 +112,6 @@ std::vector<ShellRef> buildBasis(const std::vector<int>& z_atoms,
     return shells;
 }
 
-// Map a global AO index to (shell_index, type_in_STO_CGTO).
-// type encoding: 0=s, 1=px, 2=py, 3=pz.  Only s and p handled so far.
-void aoToType(const std::vector<ShellRef>& shells, int ao, int& ish_out, int& type_out)
-{
-    for (size_t i = 0; i < shells.size(); ++i) {
-        const auto& sr = shells[i];
-        if (ao >= sr.ao_start && ao < sr.ao_start + sr.nao) {
-            ish_out = static_cast<int>(i);
-            const int local = ao - sr.ao_start;
-            if (sr.ang == 0) {
-                type_out = 0;   // s
-            } else if (sr.ang == 1) {
-                // tblite p-shell AO ordering is (py, pz, px) — spherical m=(-1,0,+1),
-                // see external/tblite/src/tblite/integral/multipole.f90 lx table (comment
-                // "x (+1), y (-1), z (0) in [-1, 0, 1] sorting").
-                static const int p_map[3] = { 2, 3, 1 };   // py, pz, px in STO_CGTO types
-                type_out = p_map[local];
-            } else {
-                type_out = -1;  // d not handled
-            }
-            return;
-        }
-    }
-    ish_out  = -1;
-    type_out = -1;
-}
-
 } // namespace
 
 int main(int argc, char** argv)
@@ -181,24 +155,43 @@ int main(int argc, char** argv)
         for (int j = 0; j < nao; ++j)
             Sref[i * nao + j] = d["overlap"][i][j];
 
-    // Compute S via CGTO; one s/p pair at a time.
+    // Compute S via shell-pair blocks, mirroring xtb_h0.cpp: pure s/p pairs use
+    // the scalar CGTO::cgto_overlap path, d-touching pairs use the production
+    // curcuma::xtb::sphericalOverlapBlock (cartesian->spherical dtrafo, X-I1).
     std::vector<double> S(static_cast<size_t>(nao) * nao, 0.0);
-    for (int mu = 0; mu < nao; ++mu) {
-        int ish_a = -1, type_a = -1;
-        aoToType(shells, mu, ish_a, type_a);
-        const auto& sa = shells[ish_a];
-        for (int nu = 0; nu < nao; ++nu) {
-            int ish_b = -1, type_b = -1;
-            aoToType(shells, nu, ish_b, type_b);
-            const auto& sb = shells[ish_b];
-            if (type_a < 0 || type_b < 0) continue; // d unsupported here
-            const int ia = sa.atom, ib = sb.atom;
-            const double s = CGTO::cgto_overlap(
-                sa.cg, sb.cg,
-                xyz[ia][0], xyz[ia][1], xyz[ia][2],
-                xyz[ib][0], xyz[ib][1], xyz[ib][2],
-                type_a, type_b);
-            S[mu * nao + nu] = s;
+    for (size_t ai = 0; ai < shells.size(); ++ai) {
+        const auto& sa = shells[ai];
+        const int A = sa.atom;
+        for (size_t bi = 0; bi < shells.size(); ++bi) {
+            const auto& sb = shells[bi];
+            const int B = sb.atom;
+            if (sa.ang < 2 && sb.ang < 2) {
+                for (int ia = 0; ia < sa.nao; ++ia) {
+                    const int t_a = curcuma::xtb::ao_to_type(sa.ang, ia);
+                    for (int jb = 0; jb < sb.nao; ++jb) {
+                        const int t_b = curcuma::xtb::ao_to_type(sb.ang, jb);
+                        const double s = (A == B && ai == bi && t_a == t_b)
+                            ? 1.0
+                            : CGTO::cgto_overlap(sa.cg, sb.cg,
+                                                 xyz[A][0], xyz[A][1], xyz[A][2],
+                                                 xyz[B][0], xyz[B][1], xyz[B][2],
+                                                 t_a, t_b);
+                        S[(sa.ao_start + ia) * nao + (sb.ao_start + jb)] = s;
+                    }
+                }
+            } else {
+                double blk[6 * 6];
+                curcuma::xtb::sphericalOverlapBlock(
+                    sa.cg, sa.ang, sb.cg, sb.ang,
+                    xyz[A][0], xyz[A][1], xyz[A][2],
+                    xyz[B][0], xyz[B][1], xyz[B][2], blk, 6);
+                for (int ia = 0; ia < sa.nao; ++ia)
+                    for (int jb = 0; jb < sb.nao; ++jb) {
+                        double s = blk[ia * 6 + jb];
+                        if (A == B && ai == bi && ia == jb) s = 1.0;
+                        S[(sa.ao_start + ia) * nao + (sb.ao_start + jb)] = s;
+                    }
+            }
         }
     }
 

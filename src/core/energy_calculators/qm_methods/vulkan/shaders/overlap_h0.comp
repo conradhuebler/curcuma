@@ -1,0 +1,123 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : enable
+#extension GL_GOOGLE_include_directive : enable
+#include "vk_integrals.glsl"
+// Overlap S + bare Hamiltonian H0: one thread per shell-pair (a,b). Mirrors
+// XTB::getHamiltonianH0 (s/p contracted Gaussian overlap + GFN1/GFN2 shell-pair scaling).
+// Column-major nao×nao (S, H0 symmetric). Claude Generated (Stage 3).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(std430, binding = 0)  readonly  buffer B0  { int    sh2at[]; };
+layout(std430, binding = 1)  readonly  buffer B1  { int    ang_sh[]; };
+layout(std430, binding = 2)  readonly  buffer B2  { int    iao_sh[]; };
+layout(std430, binding = 3)  readonly  buffer B3  { int    nao_sh[]; };
+layout(std430, binding = 4)  readonly  buffer B4  { int    sh_nprim[]; };
+layout(std430, binding = 5)  readonly  buffer B5  { int    sh_prim_off[]; };
+layout(std430, binding = 6)  readonly  buffer B6  { double prim_alpha[]; };
+layout(std430, binding = 7)  readonly  buffer B7  { double prim_coeff[]; };
+layout(std430, binding = 8)  readonly  buffer B8  { double sh_zeta[]; };
+layout(std430, binding = 9)  readonly  buffer B9  { double shpoly[]; };
+layout(std430, binding = 10) readonly  buffer B10 { double se[]; };
+layout(std430, binding = 11) readonly  buffer B11 { int    z[]; };
+layout(std430, binding = 12) readonly  buffer B12 { int    valence[]; };
+layout(std430, binding = 13) readonly  buffer B13 { double xyz[]; };
+layout(std430, binding = 14) readonly  buffer B14 { double atomic_rad[]; };
+layout(std430, binding = 15) readonly  buffer B15 { double pauling[]; };
+layout(std430, binding = 16) writeonly buffer B16 { double Sout[]; };
+layout(std430, binding = 17) writeonly buffer B17 { double H0out[]; };
+layout(push_constant) uniform PC { uint nsh; uint nao; uint is_gfn2; } pc;
+
+// Contracted s/p overlap reading the flattened primitive SSBOs.
+double cgto_overlap(int offa, int npa, int offb, int npb,
+                    double xa, double ya, double za, double xb, double yb, double zb,
+                    int ta, int tb)
+{
+    double dx = xb - xa, dy = yb - ya, dz = zb - za;
+    double R2 = dx*dx + dy*dy + dz*dz;
+    double S = 0.0lf;
+    for (int i = 0; i < npa; ++i) {
+        double ai = prim_alpha[offa + i], ci = prim_coeff[offa + i];
+        for (int j = 0; j < npb; ++j) {
+            double aj = prim_alpha[offb + j], cj = prim_coeff[offb + j];
+            double g = ai + aj;
+            double Px = (ai*xa + aj*xb) / g, Py = (ai*ya + aj*yb) / g, Pz = (ai*za + aj*zb) / g;
+            if (ta == 0 && tb == 0) {
+                S += ci*cj * prim_ss(ai, aj, R2);
+            } else if (ta == 0 && tb >= 1 && tb <= 3) {
+                double PB = (tb == 1) ? Px - xb : (tb == 2) ? Py - yb : Pz - zb;
+                S += ci*cj * prim_sp(ai, aj, R2, PB);
+            } else if (ta >= 1 && ta <= 3 && tb == 0) {
+                double PA = (ta == 1) ? Px - xa : (ta == 2) ? Py - ya : Pz - za;
+                S += ci*cj * prim_sp(aj, ai, R2, PA);
+            } else if (ta >= 1 && ta <= 3 && tb >= 1 && tb <= 3) {
+                double PA, PB; int axa, axb;
+                if (ta == 1) { PA = Px - xa; axa = 0; } else if (ta == 2) { PA = Py - ya; axa = 1; } else { PA = Pz - za; axa = 2; }
+                if (tb == 1) { PB = Px - xb; axb = 0; } else if (tb == 2) { PB = Py - yb; axb = 1; } else { PB = Pz - zb; axb = 2; }
+                S += ci*cj * prim_pp(ai, aj, R2, PA, PB, axa == axb);
+            }
+        }
+    }
+    return S;
+}
+
+void main()
+{
+    uint a = gl_GlobalInvocationID.x;
+    uint b = gl_GlobalInvocationID.y;
+    if (a >= pc.nsh || b >= pc.nsh) return;
+
+    int iat = sh2at[a], jat = sh2at[b];
+    int la = ang_sh[a], lb = ang_sh[b];
+    double xa = xyz[3*iat+0], ya = xyz[3*iat+1], za = xyz[3*iat+2];
+    double xb = xyz[3*jat+0], yb = xyz[3*jat+1], zb = xyz[3*jat+2];
+    double avg_eps = 0.5lf * (se[a] + se[b]);
+
+    double h_factor;
+    if (iat == jat) {
+        h_factor = 1.0lf;
+    } else {
+        int zi = z[iat], zj = z[jat];
+        double dx = xa - xb, dy = ya - yb, dz = za - zb;
+        double r2 = dx*dx + dy*dy + dz*dz;
+        double rr = sqrt(sqrt(r2) / (atomic_rad[zi-1] + atomic_rad[zj-1]));
+        double pi_ij = (1.0lf + shpoly[a]*rr) * (1.0lf + shpoly[b]*rr);
+        double hs;
+        if (pc.is_gfn2 == 0u) {
+            bool vi = valence[a] != 0, vj = valence[b] != 0;
+            if (vi && vj) {
+                double den = pauling[zi-1] - pauling[zj-1]; den *= den;
+                hs = kpair_gfn1(zi, zj) * kshell_gfn1(la, lb) * (1.0lf + (-7.0e-3lf) * den);
+            } else if (vi && !vj) hs = 0.5lf * (kshell_gfn1(la, la) + 2.85lf);
+            else if (!vi && vj)   hs = 0.5lf * (kshell_gfn1(lb, lb) + 2.85lf);
+            else                  hs = 2.85lf;
+        } else {
+            double den = pauling[zi-1] - pauling[zj-1]; den *= den;
+            double enp = 1.0lf + 2.0e-2lf * den;
+            double km = kshell_gfn2(la, lb) * enp;
+            double za_ = sh_zeta[a], zb_ = sh_zeta[b];
+            hs = sqrt(2.0lf * sqrt(za_ * zb_) / (za_ + zb_)) * km;   // ^0.5
+        }
+        h_factor = hs * pi_ij;
+    }
+
+    int ia_start = iao_sh[a], ia_nao = nao_sh[a];
+    int jb_start = iao_sh[b], jb_nao = nao_sh[b];
+    int offa = sh_prim_off[a], npa = sh_nprim[a];
+    int offb = sh_prim_off[b], npb = sh_nprim[b];
+
+    for (int ia = 0; ia < ia_nao; ++ia) {
+        int mu = ia_start + ia;
+        int ta = ao_to_type(la, ia);
+        if (ta < 0) continue;
+        for (int jb = 0; jb < jb_nao; ++jb) {
+            int nu = jb_start + jb;
+            int tb = ao_to_type(lb, jb);
+            if (tb < 0) continue;
+            double s_ab = (iat == jat && a == b && ta == tb)
+                ? 1.0lf
+                : cgto_overlap(offa, npa, offb, npb, xa, ya, za, xb, yb, zb, ta, tb);
+            uint idx = uint(mu) + uint(nu) * pc.nao;
+            Sout[idx]  = s_ab;
+            H0out[idx] = avg_eps * h_factor * s_ab;
+        }
+    }
+}

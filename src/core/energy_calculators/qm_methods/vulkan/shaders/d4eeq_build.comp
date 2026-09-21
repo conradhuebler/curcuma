@@ -1,0 +1,39 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : enable
+#extension GL_GOOGLE_include_directive : enable
+#include "vk_integrals.glsl"
+// D4 EEQ augmented matrix M = [[A,1],[1ᵀ,0]], column-major (N+1)×(N+1). One invocation per
+// (row r, col c): A_ii = γ_i + √(2/π)/√α_i²; A_ij = erf(γ_ij·r)/r, γ_ij = 1/√(α_i²+α_j²);
+// border = 1; corner = 0. Verbatim port of CUDA k_d4eeq_build. Claude Generated.
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) readonly buffer B0 { double xyz[]; };       // 3N
+layout(std430, binding = 1) readonly buffer B1 { double alpha_sq[]; };  // N
+layout(std430, binding = 2) readonly buffer B2 { double gam[]; };       // N
+layout(std430, binding = 3)          buffer B3 { double M[]; };         // m·m col-major
+layout(push_constant) uniform PC { uint N; } pc;
+
+const double TSQRT2PI = 0.797884560802866lf;   // sqrt(2/π)
+
+void main()
+{
+    uint r = gl_GlobalInvocationID.x;
+    uint c = gl_GlobalInvocationID.y;
+    uint N = pc.N, m = N + 1u;
+    if (r >= m || c >= m) return;
+    double val;
+    if (r == N && c == N) {
+        val = 0.0lf;
+    } else if (r == N || c == N) {
+        val = 1.0lf;
+    } else if (r == c) {
+        val = gam[r] + TSQRT2PI / sqrt(alpha_sq[r]);
+    } else {
+        double dx = xyz[3u*r+0u] - xyz[3u*c+0u];
+        double dy = xyz[3u*r+1u] - xyz[3u*c+1u];
+        double dz = xyz[3u*r+2u] - xyz[3u*c+2u];
+        double rr = sqrt(dx*dx + dy*dy + dz*dz);
+        double gammij = 1.0lf / sqrt(alpha_sq[r] + alpha_sq[c]);
+        val = derf(gammij * rr) / rr;
+    }
+    M[r + c * m] = val;
+}

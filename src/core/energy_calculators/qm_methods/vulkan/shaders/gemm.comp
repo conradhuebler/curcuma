@@ -1,0 +1,46 @@
+#version 450
+// FP64 dense GEMM for n×n column-major matrices: C = A · op(B),
+// op(B) = B (transB=0) or Bᵀ (transB=1). Column-major: M[i,j] = M[i + j*n].
+// Used by the resident SCF: Ã = X·F·X, C = X·C̃, P = Cw·Cᵀ, X = (U·Λ⁻¹ᐟ²)·Uᵀ.
+//
+// Shared-memory tiled (TILE×TILE). The k-loop walks tiles in order and, within a
+// tile, local index kk = 0..TILE-1, so the accumulation order over k is identical
+// to the naive single-loop (k = 0,1,2,...,n-1). Out-of-range loads are padded with
+// 0.0 (acc += a·0.0 = acc exactly), so the result is BIT-IDENTICAL to the naive
+// GEMM — only the global-memory traffic drops ~TILE× (cooperative tile loads).
+const uint TILE = 16u;
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) readonly  buffer Ab { double A[]; };
+layout(std430, binding = 1) readonly  buffer Bb { double B[]; };
+layout(std430, binding = 2) writeonly buffer Cb { double C[]; };
+layout(push_constant) uniform PC { uint n; uint transB; } pc;
+
+shared double As[TILE][TILE];   // As[i_local][k_local] = A[i, k]
+shared double Bs[TILE][TILE];   // Bs[k_local][j_local] = op(B)[k, j]
+
+void main()
+{
+    uint n  = pc.n;
+    uint tx = gl_LocalInvocationID.x;       // 0..TILE-1
+    uint ty = gl_LocalInvocationID.y;
+    uint i  = gl_WorkGroupID.x * TILE + tx; // C row
+    uint j  = gl_WorkGroupID.y * TILE + ty; // C col
+
+    double acc = 0.0lf;
+    uint ntiles = (n + TILE - 1u) / TILE;
+    for (uint t = 0u; t < ntiles; ++t) {
+        uint ka = t * TILE + ty;            // k for the A load (this thread)
+        As[tx][ty] = (i < n && ka < n) ? A[i + ka * n] : 0.0lf;
+
+        uint kb = t * TILE + tx;            // k for the B load (this thread)
+        if (pc.transB == 0u)
+            Bs[tx][ty] = (kb < n && j < n) ? B[kb + j * n] : 0.0lf;   // B[k,j]
+        else
+            Bs[tx][ty] = (kb < n && j < n) ? B[j + kb * n] : 0.0lf;   // Bᵀ[k,j] = B[j,k]
+
+        barrier();
+        for (uint kk = 0u; kk < TILE; ++kk) acc += As[tx][kk] * Bs[kk][ty];
+        barrier();
+    }
+    if (i < n && j < n) C[i + j * n] = acc;
+}

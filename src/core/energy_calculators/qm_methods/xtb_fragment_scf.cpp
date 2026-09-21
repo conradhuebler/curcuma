@@ -342,10 +342,17 @@ double FragmentScfDriver::runDivideConquer(bool gradient)
     m_decomp["large_system_mode"]      = "dc";
     m_decomp["large_system_subsystems"] = m_num_fragments;
 
-    // Energy-only first cut: no analytic DC gradient yet.
+    // Energy-only first cut: no analytic DC gradient yet. X-L4 (Claude Generated):
+    // a requested gradient is unavailable here, so fail loud instead of returning a
+    // zero gradient an optimiser/MD would mistake for "converged".
     m_gradient = Matrix::Zero(nat, 3);
-    if (gradient)
-        CurcumaLogger::warn("large_system_mode=dc is energy-only — gradient returned as zero (use large_system_mode=none for forces)");
+    if (gradient) {
+        m_has_error = true;
+        m_error_message = "large_system_mode=dc is energy-only — no gradient/forces; "
+                          "use large_system_mode=none (or fragments) for -opt/-md";
+        CurcumaLogger::error(m_error_message);
+        return E;
+    }
 
     return E;
 }
@@ -395,9 +402,16 @@ double FragmentScfDriver::runSparse(bool gradient)
     m_decomp["large_system_mode"]      = "sparse";
     m_decomp["large_system_nnz_fraction"] = nnz;
 
+    // X-L4 (Claude Generated): energy-only mode; a requested gradient is unavailable,
+    // so fail loud rather than hand back a zero gradient.
     m_gradient = Matrix::Zero(nat, 3);
-    if (gradient)
-        CurcumaLogger::warn("large_system_mode=sparse is energy-only — gradient returned as zero (use large_system_mode=none for forces)");
+    if (gradient) {
+        m_has_error = true;
+        m_error_message = "large_system_mode=sparse is energy-only — no gradient/forces; "
+                          "use large_system_mode=none for -opt/-md";
+        CurcumaLogger::error(m_error_message);
+        return E;
+    }
 
     return E;
 }

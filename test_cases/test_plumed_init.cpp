@@ -46,12 +46,12 @@ void test_plumed_unit_conversions()
 
     // Energy: 1 Hartree = 2625.5 kJ/mol (CODATA 2018: 2625.49962)
     double plumed_energyUnits = 2625.5;
-    double expected_energy = CurcumaUnit::Eh2kJmol(1.0);
+    double expected_energy = CurcumaUnit::Energy::hartree_to_kjmol(1.0);
     TEST_ASSERT(std::abs(plumed_energyUnits - expected_energy) < 0.1,
                 "PLUMED energyUnits matches Eh2kJmol conversion (Hartree -> kJ/mol)");
 
     // Length: 1 Bohr = 0.529177 Angstrom
-    double bohr_to_angstrom = CurcumaUnit::bohr2angstroms(1.0);
+    double bohr_to_angstrom = CurcumaUnit::Length::bohr_to_angstrom(1.0);
     TEST_ASSERT(std::abs(bohr_to_angstrom - 0.529177) < 0.001,
                 "Bohr to Angstrom conversion factor is correct");
 
@@ -102,8 +102,10 @@ void test_plumed_init_smoke()
 
     // Minimal PLUMED instance creation to verify the build path works.
     // This tests that plumed2 headers and libraries are correctly linked.
+    // `plumed` is a plain C struct (Plumed.h), not a pointer - plumed_valid()
+    // is the API-provided way to check the handle, not != nullptr.
     plumed plumed_main = plumed_create();
-    TEST_ASSERT(plumed_main != nullptr, "plumed_create() returns non-null handle");
+    TEST_ASSERT(plumed_valid(plumed_main), "plumed_create() returns a valid handle");
 
     // Verify we can set basic parameters without crashing
     int real_precision = 8;  // double precision

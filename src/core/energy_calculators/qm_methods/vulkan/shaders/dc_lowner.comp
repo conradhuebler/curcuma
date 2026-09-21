@@ -1,0 +1,24 @@
+#version 450
+// EIG-3 Cuppen divide-and-conquer, merge step 2: Gu–Eisenstat (Löwner) reconstructed weights.
+//   z̃_i² = ∏_j (λ_j − D_i) / ∏_{j≠i} (D_j − D_i),   each ratio O(1),
+// giving eigenvectors that stay orthogonal even for tight (post-deflation) gaps. Uses the
+// accurate dml from step 1 (λ_j − D_i = −dml(i,j)). ONE THREAD per i; serial O(ksz) product,
+// no shared memory / barriers. Verbatim port of the secularSolve weights loop in
+// native_eigensolver.cpp. Claude Generated (EIG-3).
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer Db { double D[]; };     // ksz, ascending
+layout(std430, binding = 1) readonly  buffer Zb { double zw[]; };    // ksz, normalized weights (sign)
+layout(std430, binding = 2) readonly  buffer Mb { double dml[]; };   // ksz×ksz col-major
+layout(std430, binding = 3) writeonly buffer Tb { double zt[]; };    // ksz reconstructed weights
+layout(push_constant) uniform PC { uint k; } pc;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    uint k = pc.k;
+    if (i >= k) return;
+    double prod = -dml[i + i * k];                                   // λ_i − D_i
+    for (uint j = 0u; j < k; ++j)
+        if (j != i) prod *= (-dml[i + j * k]) / (D[j] - D[i]);       // (λ_j−D_i)/(D_j−D_i)
+    zt[i] = sqrt(max(prod, 0.0lf)) * ((zw[i] >= 0.0lf) ? 1.0lf : -1.0lf);
+}

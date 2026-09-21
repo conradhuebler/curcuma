@@ -39,6 +39,7 @@
 
 #include "src/core/curcuma_logger.h"
 #include "src/core/elements.h"
+#include "src/core/math_compat.h"
 
 #include <Eigen/Dense>
 #include <atomic>
@@ -55,7 +56,176 @@
 #include <omp.h>
 #endif
 
+#include "src/core/blas_threads.h"  // ScopedBlasThreads — give threaded LAPACK the EnergyCalculator budget
+
 using namespace GFNFFParameters;  // Access to chi_eeq, gam_eeq, alpha_eeq, cnf_eeq
+
+// ===== Threaded Cholesky for the EEQ Schur solve (Claude Generated, Jun 2026) =====
+//
+// The EEQ Schur-Cholesky solve (factorize A_nn once, back-substitute the nfrag+1
+// RHS columns) dominated the cost on large many-fragment systems (mixture: 6200
+// atoms / 1400 fragments → ~4.4 s, serial). Eigen's LLT runs single-threaded here
+// (EIGEN_USE_BLAS does not route the dense Cholesky; EIGEN_USE_LAPACKE is off),
+// and OpenBLAS thread count had no effect. Route the factorization AND the
+// multi-RHS back-substitution through the threaded LAPACK (dpotrf/dpotrs) that
+// the already-linked BLAS/LAPACK (OpenBLAS/MKL) provides — portable to any
+// BLAS/LAPACK, not tied to the lapacke C interface. Falls back to Eigen LLT when
+// built without BLAS.
+//
+// LAPACK is column-major; curcuma's `Matrix` is row-major, so the LAPACK path uses
+// column-major Eigen::MatrixXd (`ColMatrix`) and converts at the boundaries (O(N²),
+// negligible vs the O(N³) factorization).
+namespace {
+#ifdef USE_BLAS
+extern "C" {
+    void dpotrf_(const char* uplo, const int* n, double* a, const int* lda, int* info);
+    void dpotrs_(const char* uplo, const int* n, const int* nrhs, const double* a,
+                 const int* lda, double* b, const int* ldb, int* info);
+    // Bunch-Kaufman LDL^T for symmetric-INDEFINITE A_nn (fallback when the SPD Cholesky
+    // fails; physical GFN-FF A_nn is SPD so this is rarely reached). Claude Generated (Jun 2026).
+    void dsytrf_(const char* uplo, const int* n, double* a, const int* lda, int* ipiv,
+                 double* work, const int* lwork, int* info);
+    void dsytrs_(const char* uplo, const int* n, const int* nrhs, const double* a,
+                 const int* lda, const int* ipiv, double* b, const int* ldb, int* info);
+}
+#endif
+using ColMatrix = Eigen::MatrixXd;  // column-major (LAPACK layout)
+
+/// Cholesky-factorize SPD A (column-major) in place → lower factor. true on success.
+inline bool eeqCholeskyFactorize(ColMatrix& A)
+{
+#ifdef USE_BLAS
+    const char uplo = 'L';
+    int n = static_cast<int>(A.rows()), lda = n, info = 0;
+    dpotrf_(&uplo, &n, A.data(), &lda, &info);
+    return info == 0;
+#else
+    Eigen::LLT<ColMatrix> llt(A);
+    if (llt.info() != Eigen::Success) return false;
+    A = llt.matrixL();   // store L in the lower triangle (fallback path)
+    return true;
+#endif
+}
+
+/// Solve A·X = B in place (B column-major, overwritten with X) using the factor
+/// produced by eeqCholeskyFactorize().
+inline void eeqCholeskySolve(const ColMatrix& Afac, ColMatrix& B)
+{
+#ifdef USE_BLAS
+    const char uplo = 'L';
+    int n = static_cast<int>(Afac.rows()), nrhs = static_cast<int>(B.cols()),
+        lda = n, ldb = n, info = 0;
+    dpotrs_(&uplo, &n, &nrhs, Afac.data(), &lda, B.data(), &ldb, &info);
+#else
+    B = Afac.triangularView<Eigen::Lower>().solve(B);
+    B = Afac.triangularView<Eigen::Lower>().adjoint().solve(B);
+#endif
+}
+
+/// Vector RHS overload (single column).
+inline void eeqCholeskySolve(const ColMatrix& Afac, Eigen::VectorXd& b)
+{
+#ifdef USE_BLAS
+    const char uplo = 'L';
+    int n = static_cast<int>(Afac.rows()), nrhs = 1, lda = n, ldb = n, info = 0;
+    dpotrs_(&uplo, &n, &nrhs, Afac.data(), &lda, b.data(), &ldb, &info);
+#else
+    b = Afac.triangularView<Eigen::Lower>().solve(b);
+    b = Afac.triangularView<Eigen::Lower>().adjoint().solve(b);
+#endif
+}
+
+#ifdef USE_BLAS
+/// Bunch-Kaufman LDL^T factorize symmetric-INDEFINITE A (column-major) in place; ipiv (size n)
+/// receives the pivots. true on success. Claude Generated (Jun 2026).
+inline bool eeqLDLTFactorize(ColMatrix& A, std::vector<int>& ipiv)
+{
+    const char uplo = 'L';
+    int n = static_cast<int>(A.rows()), lda = n, info = 0;
+    ipiv.assign(n, 0);
+    double wkopt = 0.0; int lwork = -1;
+    dsytrf_(&uplo, &n, A.data(), &lda, ipiv.data(), &wkopt, &lwork, &info);  // workspace query
+    if (info != 0) return false;
+    lwork = std::max(1, static_cast<int>(wkopt));
+    std::vector<double> work(lwork);
+    dsytrf_(&uplo, &n, A.data(), &lda, ipiv.data(), work.data(), &lwork, &info);
+    return info == 0;
+}
+
+/// Solve A·X = B in place using the LDL^T factor from eeqLDLTFactorize().
+inline void eeqLDLTSolve(const ColMatrix& Afac, const std::vector<int>& ipiv, ColMatrix& B)
+{
+    const char uplo = 'L';
+    int n = static_cast<int>(Afac.rows()), nrhs = static_cast<int>(B.cols()),
+        lda = n, ldb = n, info = 0;
+    dsytrs_(&uplo, &n, &nrhs, Afac.data(), &lda, ipiv.data(), B.data(), &ldb, &info);
+}
+
+/// Vector RHS overload.
+inline void eeqLDLTSolve(const ColMatrix& Afac, const std::vector<int>& ipiv, Eigen::VectorXd& b)
+{
+    const char uplo = 'L';
+    int n = static_cast<int>(Afac.rows()), nrhs = 1, lda = n, ldb = n, info = 0;
+    dsytrs_(&uplo, &n, &nrhs, Afac.data(), &lda, ipiv.data(), b.data(), &ldb, &info);
+}
+#endif  // USE_BLAS
+
+/// Schur complement S = C·Z2 exploiting that the constraint matrix C is a per-fragment
+/// membership matrix (one nonzero per atom column). S(f,g) = Σ_i C(f,i)·Z2(i,g) reduces
+/// to a per-fragment row accumulation: O(N·nfrag) instead of the dense product's
+/// O(nfrag²·N). For many-fragment systems (mixture: 6200 atoms / 1400 fragments) the dense
+/// C·Z2 (~1.2e13 flops, ~2.4 s serial) was the dominant EEQ-solve cost; this makes it
+/// negligible. Mirrors the GPU path (k_eeq_reduce_fragment_sums). Claude Generated (Jun 2026).
+inline Matrix schurComplementCZ(const Matrix& C, const Matrix& Z2, int natoms, int nfrag)
+{
+    Matrix S = Matrix::Zero(nfrag, nfrag);
+    for (int f = 0; f < nfrag; ++f) {
+        for (int i = 0; i < natoms; ++i) {
+            const double c = C(f, i);
+            if (c != 0.0) S.row(f).noalias() += c * Z2.row(i);
+        }
+    }
+    return S;
+}
+
+/// Symmetric-indefinite Schur solve of the constrained EEQ system: factor the N×N A_nn block
+/// with LDL^T (Bunch-Kaufman, USE_BLAS) or a PartialPivLU (no BLAS) — both handle an indefinite
+/// A_nn, unlike the SPD Cholesky — then apply the per-fragment charge constraint via the
+/// nfrag×nfrag Schur complement (identical structure to solveWithSchurCholesky). Empty on
+/// failure. Used as the LLT-failure fallback and via -eeq_solver.solve_method ldlt.
+/// Claude Generated (Jun 2026).
+inline Vector solveSchurLDLT(const Matrix& A_nn, const Vector& rhs_atoms,
+                             const Matrix& C, const Vector& rhs_constraints,
+                             int natoms, int nfrag)
+{
+    Vector z1;
+    Matrix Z2;
+#ifdef USE_BLAS
+    ColMatrix Afac = A_nn;                 // row-major → column-major (symmetric: same values)
+    std::vector<int> ipiv;
+    if (!eeqLDLTFactorize(Afac, ipiv)) return Vector();
+    z1 = rhs_atoms;
+    eeqLDLTSolve(Afac, ipiv, z1);          // z1 = A_nn^{-1}·b
+    ColMatrix Z2cm = C.transpose();        // N×nfrag RHS
+    eeqLDLTSolve(Afac, ipiv, Z2cm);        // Z2 = A_nn^{-1}·C^T
+    Z2 = Z2cm;
+#else
+    Eigen::PartialPivLU<ColMatrix> lu((ColMatrix(A_nn)));
+    z1 = lu.solve(Eigen::VectorXd(rhs_atoms));
+    Z2 = lu.solve(ColMatrix(C.transpose()));
+#endif
+    Matrix S = schurComplementCZ(C, Z2, natoms, nfrag);
+    Vector schur_rhs = C * z1 - rhs_constraints;
+    Vector lambda;
+    if (nfrag == 1)
+        lambda = Vector::Constant(1, schur_rhs(0) / S(0, 0));
+    else
+        lambda = S.partialPivLu().solve(schur_rhs);
+    Vector q = z1 - Z2 * lambda;
+    if (!q.allFinite()) return Vector();
+    return q;
+}
+}  // namespace
 
 // ===== Element Group Classification (XTB Compatible) =====
 // Based on XTB param%group classification in gfnff_ini2.f90
@@ -190,7 +360,7 @@ static inline double calculateBondAngle(const Matrix& geometry_bohr,
     if (cos_angle > 1.0) cos_angle = 1.0;
     if (cos_angle < -1.0) cos_angle = -1.0;
 
-    return std::acos(cos_angle);
+    return curcuma_acos(cos_angle);
 }
 
 /**
@@ -644,70 +814,14 @@ static inline int detectElementSpecificHybridization(int Z, double cn,
     return 5; // sp3d2
 }
 
-// ===== Test Function for Element-Specific Hybridization =====
-// Simple test to verify the element-specific hybridization logic
-// Claude Generated - December 2025 (Phase 2 Validation)
-// NOTE: This test function is currently unused but kept for future validation
-// If needed, it can be called with proper verbosity guard in main code
-static void testElementSpecificHybridizationLogic() {
-    std::vector<int> dummy_atoms = {0};
-    int passed = 0;
-    int failed = 0;
-
-    // Test cases: {Z, CN, expected_hyb, description}
-    std::vector<std::tuple<int, double, int, std::string>> test_cases = {
-        {8, 2.0, 3, "Oxygen CN=2 (CRITICAL: should be sp3)"},
-        {6, 2.0, 1, "Carbon CN=2 (should be sp)"},
-        {7, 3.0, 3, "Nitrogen CN=3 (should be sp3)"},
-        {1, 2.0, 1, "Hydrogen CN=2 (should be sp)"},
-        {17, 2.0, 1, "Chlorine CN=2 (should be sp)"},
-        {17, 1.0, 0, "Chlorine CN=1 (should be unknown)"},
-        {26, 4.0, 3, "Iron CN=4 (should be sp3)"},
-        {8, 1.0, 2, "Oxygen CN=1 (should be sp2)"},
-        {6, 3.0, 2, "Carbon CN=3 (should be sp2)"},
-        {7, 2.0, 2, "Nitrogen CN=2 (should be sp2)"},
-        {9, 2.0, 1, "Fluorine CN=2 (should be sp)"}
-    };
-
-    // Guarded by verbosity check - disabled by default
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        std::cout << "\n=== Element-Specific Hybridization Validation ===" << std::endl;
-
-        for (const auto& test_case : test_cases) {
-            int Z = std::get<0>(test_case);
-            double cn = std::get<1>(test_case);
-            int expected = std::get<2>(test_case);
-            std::string desc = std::get<3>(test_case);
-
-            int actual = detectElementSpecificHybridization(Z, cn, dummy_atoms, std::nullopt, 0);
-
-            if (actual == expected) {
-                std::cout << "✅ " << desc << " → " << actual << " (PASS)" << std::endl;
-                passed++;
-            } else {
-                std::cout << "❌ " << desc << " → " << actual << " (FAIL, expected " << expected << ")" << std::endl;
-                failed++;
-            }
-        }
-
-        std::cout << "\n=== Test Results ===" << std::endl;
-        std::cout << "Passed: " << passed << "/" << test_cases.size() << std::endl;
-        std::cout << "Failed: " << failed << "/" << test_cases.size() << std::endl;
-
-        if (failed == 0) {
-            std::cout << "🎉 All element-specific hybridization tests passed!" << std::endl;
-        } else {
-            std::cout << "⚠️  Some tests failed. Review implementation." << std::endl;
-        }
-    }
-}
-
 // ===== Original EEQSolver Implementation =====
 
 // Claude Generated - March 2026
 EEQSolveMethod EEQSolver::parseSolveMethod(const std::string& method_str) {
     if (method_str == "lu") return EEQSolveMethod::LU;
+    if (method_str == "ldlt") return EEQSolveMethod::LDLT;
     if (method_str == "pcg") return EEQSolveMethod::PCG;
+    if (method_str == "ppcg" || method_str == "projected_pcg") return EEQSolveMethod::ProjectedPCG;
     if (method_str == "batched") return EEQSolveMethod::Batched;
     // "cholesky" (canonical) and "schur_cholesky" (legacy) both map to SchurCholesky
     if (method_str == "cholesky" || method_str == "schur_cholesky")
@@ -725,15 +839,24 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     m_calculate_cn = m_config.get<bool>("calculate_cn", true);
     m_allow_unconverged = m_config.get<bool>("allow_unconverged_charges", false);
     m_skip_phase2 = m_config.get<bool>("skip_phase2", false);
-    m_solve_method = parseSolveMethod(m_config.get<std::string>("solve_method", "pcg"));
+    m_solve_method = parseSolveMethod(m_config.get<std::string>("solve_method", "cholesky"));
+    // Read the Int PARAMs through double: CLI values arrive as JSON numbers (0.0), which a
+    // strict get<int>() rejects in favour of the default.
+    m_ppcg_min_nfrag = static_cast<int>(m_config.get<double>("eeq_ppcg_min_nfrag", 1.0));
+    m_ppcg_min_atoms = static_cast<int>(m_config.get<double>("eeq_ppcg_min_atoms", 500.0));
+    m_ppcg_tol       = m_config.get<double>("eeq_ppcg_tol", 1e-12);
+    m_ppcg_max_iter  = static_cast<int>(m_config.get<double>("eeq_ppcg_max_iter", 500.0));
+    if (m_config.get<int>("verbosity", 0) >= 2)
+        CurcumaLogger::info(fmt::format("EEQ solver config: solve_method={}, ppcg auto at nfrag>={} & N>={}, tol={:.0e}, max_iter={}",
+            m_config.get<std::string>("solve_method", "cholesky"), m_ppcg_min_nfrag, m_ppcg_min_atoms, m_ppcg_tol, m_ppcg_max_iter));
     m_refactor_eps         = m_config.get<double>("eeq_refactor_eps_bohr", 0.05);
     m_refactor_force_every = m_config.get<int>("eeq_refactor_force_every", 0);
+    m_refine_iters         = m_config.get<int>("eeq_refine_iters", 1);
     m_matrix_rebuild_eps   = m_config.get<double>("eeq_matrix_rebuild_eps_bohr", 0.0);
     m_eeq_extrapolation    = m_config.get<std::string>("eeq_extrapolation", "none");
     m_eeq_extrap_order     = m_config.get<int>("eeq_extrapolation_order", 3);
 
     // Initialize EEQ caching system
-    m_eeq_cache = std::make_unique<EEQSolverCache>();
 
     if (m_verbosity >= 2) {
         CurcumaLogger::info("EEQSolver initialized with parameters:");
@@ -742,13 +865,17 @@ EEQSolver::EEQSolver(const ConfigManager& config)
         CurcumaLogger::param("verbosity", std::to_string(m_verbosity));
         CurcumaLogger::param("calculate_cn", m_calculate_cn ? "true" : "false");
         CurcumaLogger::param("allow_unconverged_charges", m_allow_unconverged ? "true" : "false");
-        CurcumaLogger::param("solve_method", m_config.get<std::string>("solve_method", "pcg"));
+        CurcumaLogger::param("solve_method", m_config.get<std::string>("solve_method", "cholesky"));
     }
 }
 
 // Claude Generated (March 2026): Fallback charges for graceful degradation
 Vector EEQSolver::generateFallbackCharges(int natoms, int total_charge, const std::string& context) const
 {
+    // F-Q4 (Claude Generated): flag the degradation so callers (GFN-FF) can refuse to
+    // return an energy/gradient built on these placeholder charges instead of silently
+    // propagating a wrong charge set into the Coulomb term.
+    m_last_solve_failed = true;
     CurcumaLogger::warn(fmt::format("EEQ solver failed ({}): using uniform fallback charges q_i = {:.4f}",
                                     context, static_cast<double>(total_charge) / natoms));
     return Vector::Constant(natoms, static_cast<double>(total_charge) / natoms);
@@ -898,14 +1025,13 @@ Vector EEQSolver::calculateCharges(
         return topology_charges;
     }
 
-    // Claude Generated (Apr 2026): If Phase 2 was historically implausible for this system
-    // size, skip it forever (until atom count changes, indicating a new molecule).
-    if (m_phase2_historically_implausible && m_phase2_implausible_natoms == natoms) {
-        if (m_verbosity >= 2) {
-            CurcumaLogger::info("EEQSolver: Phase 2 was historically implausible for this system — skipping, using Phase 1 topology charges");
-        }
-        return topology_charges;
-    }
+    // Claude Generated (Jun 2026): a previously-implausible Phase-2 result no longer
+    // permanently freezes the charges. We always re-attempt Phase-2 so a single transient
+    // bad geometry (a close contact during a hot MD or aggressive opt step) does not demote
+    // the run to fixed Phase-1 charges forever — the force field stays polarizing. A bad
+    // individual step still falls back to Phase-1 via the per-step plausibility guard, and
+    // m_phase2_historically_implausible is reset on the next plausible solve.
+    // See docs/GFNFF_POLARIZATION_AUDIT.md.
 
     // Initialize cache with Phase 1 charges if not yet set.
     // Without this, m_last_successful_charges starts empty (size 0), so Tier 1/2
@@ -1202,7 +1328,7 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
             } else {
                 // J_ij = erf(gamma_ij * r) / r
                 double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
-                double erf_gamma = std::erf(gamma_ij * r);
+                double erf_gamma = curcuma_erf(gamma_ij * r);
                 double coulomb = erf_gamma / r;
 
                 A(i, j) = coulomb;
@@ -1227,42 +1353,6 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
                 A(j, row) = 1.0;
             }
         }
-    }
-
-    return A;
-}
-
-// Enhanced EEQ matrix construction with intelligent caching
-Matrix EEQSolver::buildSmartEEQMatrix(
-    const std::vector<int>& atoms,
-    const Matrix& geometry_bohr,
-    const Vector& cn,
-    const Vector& current_charges,
-    const Vector& dxi,
-    const Vector& dgam,
-    const std::vector<int>& hybridization,
-    const std::optional<TopologyInput>& topology,
-    EEQDistanceMode distance_mode)
-{
-    // Check if we can reuse cached computation
-    if (m_eeq_cache && !m_eeq_cache->isGeometryChanged(geometry_bohr)) {
-        if (m_verbosity >= 2) {
-            CurcumaLogger::info("EEQSolver: Using cached EEQ matrix (geometry unchanged)");
-        }
-        // For identical geometries, return cached matrix with possible adjustments
-        return m_eeq_cache->getCachedAMatrix();
-    }
-
-    if (m_verbosity >= 3) {
-        CurcumaLogger::info("EEQSolver: Building EEQ matrix from scratch");
-    }
-
-    // Build matrix using existing logic, passing through distance mode
-    Matrix A = buildCorrectedEEQMatrix(atoms, geometry_bohr, cn, current_charges, dxi, dgam, hybridization, topology, distance_mode);
-
-    // Cache the result for future use
-    if (m_eeq_cache) {
-        m_eeq_cache->cacheResults(geometry_bohr, A, Vector::Zero(atoms.size())); // Charges cached separately
     }
 
     return A;
@@ -1309,14 +1399,43 @@ Vector EEQSolver::dispatchSolve(
     // van-der-Waals complexes), where the global EEQ matrix is poorly conditioned and
     // inter-fragment Coulomb is small compared to intra-fragment hardness. Threshold:
     // nfrag/N > 20% AND nfrag >= 16 (avoids tripping on small molecules with few atoms).
+    //
+    // WP7-D (Jun 2026, Claude Generated): contact-aware. The batched solver DROPS
+    // cross-fragment Coulomb, so it is only correct for well-separated fragments. When
+    // fragments are in contact (m_contact_min_dist < eeq_batched_min_distance, or unknown),
+    // prefer the exact path instead: for explicit -solve_method pcg force PCG (block-Jacobi,
+    // built below for nfrag>=2); for Auto fall through to the exact auto-selector (which
+    // picks SchurCholesky/PCG, both retaining cross-fragment Coulomb).
     if ((m_solve_method == EEQSolveMethod::Auto || m_solve_method == EEQSolveMethod::PCG) &&
         method_to_use != EEQSolveMethod::Batched &&
         nfrag >= 16 && nfrag * 5 > natoms) {
-        method_to_use = EEQSolveMethod::Batched;
-        if (m_verbosity >= 1) {
-            CurcumaLogger::info(fmt::format(
-                "EEQ: highly fragmented system (nfrag={}, N={}, density={}%); using batched per-fragment solve",
-                nfrag, natoms, (100 * nfrag) / natoms));
+        const bool   prefer_exact = m_config.get<bool>("eeq_contact_prefer_exact", true);
+        const double contact_thr  = m_config.get<double>("eeq_batched_min_distance", 15.0);
+        const bool   in_contact   = (m_contact_min_dist < 0.0)  // unknown → be safe
+                                 || (contact_thr > 0.0 && m_contact_min_dist < contact_thr);
+        const std::string dist_str = (m_contact_min_dist < 0.0)
+                                         ? std::string("unknown")
+                                         : fmt::format("{:.2f}", m_contact_min_dist);
+        if (prefer_exact && in_contact) {
+            // Keep the exact solver. Explicit PCG → PCG+block-Jacobi; Auto → leave
+            // method_to_use for the exact auto-selector below.
+            if (m_solve_method == EEQSolveMethod::PCG)
+                method_to_use = EEQSolveMethod::PCG;
+            if (m_verbosity >= 1) {
+                CurcumaLogger::info(fmt::format(
+                    "EEQ: fragmented system (nfrag={}, N={}) with fragments in contact "
+                    "(min inter-fragment distance {} Bohr < {}); using exact solver "
+                    "(cross-fragment Coulomb retained) instead of approximate batched",
+                    nfrag, natoms, dist_str, contact_thr));
+            }
+        } else {
+            method_to_use = EEQSolveMethod::Batched;
+            if (m_verbosity >= 1) {
+                CurcumaLogger::info(fmt::format(
+                    "EEQ: highly fragmented system (nfrag={}, N={}, density={}%, "
+                    "min inter-fragment distance {} Bohr); using batched per-fragment solve",
+                    nfrag, natoms, (100 * nfrag) / natoms, dist_str));
+            }
         }
     }
 
@@ -1414,12 +1533,33 @@ Vector EEQSolver::dispatchSolve(
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         const char* method_name = (method_to_use == EEQSolveMethod::PCG) ? "PCG"
-            : (method_to_use == EEQSolveMethod::SchurCholesky) ? "SchurCholesky" : "LU";
+            : (method_to_use == EEQSolveMethod::SchurCholesky) ? "SchurCholesky"
+            : (method_to_use == EEQSolveMethod::LDLT) ? "LDL^T" : "LU";
         const char* mode_str = (m_solve_method == EEQSolveMethod::Auto) ? " (auto)" : "";
         CurcumaLogger::info(fmt::format("[EEQ] dispatchSolve: Using {} solver{} (N={})", method_name, mode_str, natoms));
     }
 
     Vector charges;
+
+    // Explicit symmetric-indefinite LDL^T (Bunch-Kaufman) Schur solve. Selectable via
+    // -eeq_solver.solve_method ldlt — mainly to exercise/validate the path, since physical
+    // A_nn is SPD so SchurCholesky handles it; LDL^T is otherwise the auto-fallback inside
+    // solveWithSchurCholesky when the SPD factorization fails. Claude Generated (Jun 2026).
+    if (method_to_use == EEQSolveMethod::LDLT) {
+        Matrix A_nn = A.topLeftCorner(natoms, natoms);
+        Vector rhs_atoms = x.head(natoms);
+        Matrix C = Matrix::Zero(nfrag, natoms);
+        for (int f = 0; f < nfrag; ++f)
+            for (int j = 0; j < natoms; ++j)
+                C(f, j) = A(natoms + f, j);
+        Vector rhs_constraints = x.tail(nfrag);
+        charges = solveSchurLDLT(A_nn, rhs_atoms, C, rhs_constraints, natoms, nfrag);
+        if (charges.size() == natoms)
+            goto end_dispatch;
+        if (m_verbosity >= 1)
+            CurcumaLogger::warn("EEQ: explicit LDL^T solve failed/unavailable, falling back to LU");
+        goto lu_solve;
+    }
 
     // Claude Generated (June 2026): EEQSolveMethod::LU must be in this guard too —
     // otherwise an explicit `-eeq_solver.solve_method lu` makes this whole block fall
@@ -1427,17 +1567,30 @@ Vector EEQSolver::dispatchSolve(
     // and the `else if (method_to_use == LU)` branch below stays dead code. With LU in
     // the guard, explicit-LU routes through that branch's `goto lu_solve`.
     if (method_to_use == EEQSolveMethod::SchurCholesky || method_to_use == EEQSolveMethod::PCG
-        || method_to_use == EEQSolveMethod::LU || m_solve_method == EEQSolveMethod::Auto) {
-        Matrix A_nn = A.topLeftCorner(natoms, natoms);
+        || method_to_use == EEQSolveMethod::LU || method_to_use == EEQSolveMethod::ProjectedPCG
+        || m_solve_method == EEQSolveMethod::Auto) {
+        // Views into the augmented matrix (B3, Sep 2026): the former N x N copy of A_nn and
+        // the dense nfrag x N rebuild of C cost O(N^2) per solve for nothing — C is exactly
+        // the constraint block of A.
+        const MatrixCRef A_nn = A.topLeftCorner(natoms, natoms);
         Vector rhs_atoms = x.head(natoms);
-
-        Matrix C = Matrix::Zero(nfrag, natoms);
-        for (int f = 0; f < nfrag; ++f) {
-            for (int j = 0; j < natoms; ++j) {
-                C(f, j) = A(natoms + f, j);
-            }
-        }
+        const MatrixCRef C = A.block(natoms, 0, nfrag, natoms);
         Vector rhs_constraints = x.tail(nfrag);
+
+        // Many-fragment path (Sep 2026): one projected-CG solve instead of nfrag+1 direct
+        // solves. Forced by solve_method=ppcg, automatic for large many-fragment systems.
+        const bool ppcg_forced = (method_to_use == EEQSolveMethod::ProjectedPCG);
+        const bool ppcg_auto = (method_to_use == EEQSolveMethod::SchurCholesky || m_solve_method == EEQSolveMethod::Auto)
+            && m_ppcg_min_nfrag > 0 && nfrag >= m_ppcg_min_nfrag && natoms >= m_ppcg_min_atoms;
+        if (ppcg_forced || ppcg_auto) {
+            Vector q_ppcg = solveWithProjectedPCG(A_nn, rhs_atoms, C, rhs_constraints, natoms, nfrag);
+            if (q_ppcg.size() == natoms) {
+                charges = q_ppcg;
+                goto end_dispatch;
+            }
+            if (m_verbosity >= 1)
+                CurcumaLogger::warn("EEQ: projected PCG did not converge, using the exact Schur-Cholesky solve for this step");
+        }
 
         // Auto-benchmark on first call
         // Claude Generated (March 2026): Skip benchmark for large N — PCG always wins above ~500 atoms.
@@ -1861,10 +2014,96 @@ Vector EEQSolver::dispatchSolve(
 // from hardness terms + positive off-diagonal Coulomb terms).
 // Cholesky is O(N³/6) vs O(N³/3) for LU — roughly 2× faster.
 
-Vector EEQSolver::solveWithSchurCholesky(
-    const Matrix& A_nn,
+// ---------------------------------------------------------------------------
+// Projected preconditioned CG (many-fragment EEQ). See the header for the maths.
+// ---------------------------------------------------------------------------
+Vector EEQSolver::solveWithProjectedPCG(
+    const MatrixCRef& A_nn,
     const Vector& rhs_atoms,
-    const Matrix& C,
+    const MatrixCRef& C,
+    const Vector& rhs_constraints,
+    int natoms,
+    int nfrag)
+{
+    // Fragment membership from the 0/1 constraint block.
+    std::vector<int> frag(natoms, 0);
+    std::vector<double> nfrag_atoms(nfrag, 0.0);
+    for (int f = 0; f < nfrag; ++f)
+        for (int j = 0; j < natoms; ++j)
+            if (C(f, j) != 0.0) { frag[j] = f; nfrag_atoms[f] += 1.0; }
+    for (int f = 0; f < nfrag; ++f)
+        if (nfrag_atoms[f] == 0.0) return Vector();   // empty fragment: leave it to the direct solver
+
+    // Jacobi preconditioner and its per-fragment sums (for the projected preconditioner).
+    const Vector Minv = A_nn.diagonal().cwiseInverse();
+    std::vector<double> sM(nfrag, 0.0);
+    for (int i = 0; i < natoms; ++i) sM[frag[i]] += Minv(i);
+
+    std::vector<double> s(nfrag);
+    // P v = v - C^T (C C^T)^{-1} C v : subtract the per-fragment mean.
+    auto project = [&](Vector& v) {
+        std::fill(s.begin(), s.end(), 0.0);
+        for (int i = 0; i < natoms; ++i) s[frag[i]] += v(i);
+        for (int i = 0; i < natoms; ++i) v(i) -= s[frag[i]] / nfrag_atoms[frag[i]];
+    };
+    // z = M^{-1} r - M^{-1} C^T mu with mu = (C M^{-1} C^T)^{-1} C M^{-1} r, so that C z = 0.
+    auto precondition = [&](const Vector& r, Vector& z) {
+        z = Minv.cwiseProduct(r);
+        std::fill(s.begin(), s.end(), 0.0);
+        for (int i = 0; i < natoms; ++i) s[frag[i]] += z(i);
+        for (int i = 0; i < natoms; ++i) z(i) -= Minv(i) * s[frag[i]] / sM[frag[i]];
+    };
+
+    // Feasible start: previous charges (warm start) or zero, shifted per fragment onto qfrag.
+    Vector q = (m_ppcg_last_q.size() == natoms) ? m_ppcg_last_q : Vector::Zero(natoms);
+    std::fill(s.begin(), s.end(), 0.0);
+    for (int i = 0; i < natoms; ++i) s[frag[i]] += q(i);
+    for (int i = 0; i < natoms; ++i) q(i) += (rhs_constraints(frag[i]) - s[frag[i]]) / nfrag_atoms[frag[i]];
+
+    const double tol_abs = m_ppcg_tol * (rhs_atoms.norm() + 1.0);
+    Vector r = rhs_atoms - A_nn * q;
+    project(r);
+    Vector z(natoms), p(natoms), Ap(natoms);
+    precondition(r, z);
+    p = z;
+    double rz = r.dot(z);
+    double r_norm = r.norm();
+    int iters = 0;
+    bool converged = (r_norm <= tol_abs);
+    while (!converged && iters < m_ppcg_max_iter) {
+        Ap.noalias() = A_nn * p;                 // dense matvec: the only O(N^2) step per iteration
+        const double pAp = p.dot(Ap);
+        if (!(pAp > 0.0)) break;                 // lost positive definiteness on the tangent space
+        const double alpha = rz / pAp;
+        q += alpha * p;
+        r -= alpha * Ap;
+        project(r);                              // keeps the residual in the tangent space
+        ++iters;
+        r_norm = r.norm();
+        if (r_norm <= tol_abs) { converged = true; break; }
+        precondition(r, z);
+        const double rz_new = r.dot(z);
+        p = z + (rz_new / rz) * p;
+        rz = rz_new;
+    }
+    m_pcg_total_calls++;
+    m_pcg_total_iters += iters;
+    if (!converged) {
+        m_pcg_nonconv_calls++;
+        if (r_norm > m_pcg_worst_residual) m_pcg_worst_residual = r_norm;
+        return Vector();
+    }
+    if (m_verbosity >= 2)
+        CurcumaLogger::info(fmt::format("[EEQ] projected PCG converged in {} iterations (|Pr|={:.2e}, nfrag={})",
+                                        iters, r_norm, nfrag));
+    m_ppcg_last_q = q;
+    return q;
+}
+
+Vector EEQSolver::solveWithSchurCholesky(
+    const MatrixCRef& A_nn,
+    const Vector& rhs_atoms,
+    const MatrixCRef& C,
     const Vector& rhs_constraints,
     int natoms,
     int nfrag)
@@ -1881,7 +2120,14 @@ Vector EEQSolver::solveWithSchurCholesky(
     // m_refactor_eps <= 0 disables the cache entirely (every call refactors —
     // bit-identical to pre-WP behavior).
 
+    // BUGFIX (Jun 2026): the cache key is geometry + CN only, but the factorized matrix is
+    // A_nn(geometry,CN) + B(reaction field). With implicit solvation B changes (self-consistent
+    // reaction field) while geometry/CN do not, so a geometry-keyed cache hit reuses a STALE
+    // factor → wrong solvated charges (~3 mEh on gfnff+ALPB). The freeze that used to mask this
+    // is gone (transient now), so bypass the cache whenever a reaction field is active. Solvation
+    // is not the perf-critical large-system path. !m_reaction_field == gas phase (B==0).
     const bool cache_size_ok = (m_refactor_eps > 0.0)
+        && !m_reaction_field
         && m_chol_cache.valid
         && m_chol_cache.cached_natoms == natoms
         && m_chol_cache.cached_nfrag  == nfrag
@@ -1904,12 +2150,29 @@ Vector EEQSolver::solveWithSchurCholesky(
         need_refactor = true;
 
     if (need_refactor) {
-        Eigen::LLT<Matrix> llt(A_nn);
-        if (llt.info() != Eigen::Success) {
+        // Threaded LAPACK Cholesky (column-major copy of the row-major A_nn). The
+        // factorization and the nfrag+1 RHS back-substitutions run on the linked
+        // BLAS/LAPACK (OpenBLAS/MKL); see the eeqCholesky* helpers above. The BLAS
+        // thread count for this region is set by the ScopedBlasThreads guard in
+        // calculateFinalCharges (driven by the EnergyCalculator budget).
+        ColMatrix chol = A_nn;  // row-major → column-major copy (symmetric: same values)
+        if (!eeqCholeskyFactorize(chol)) {
+            // A_nn not SPD. In practice this only happens with the implicit-solvation
+            // reaction field (A_nn += Born matrix B can be indefinite); gas-phase A_nn is SPD
+            // by construction. Fall back to the augmented-system LU (PartialPivLU on the full
+            // (N+nfrag) saddle-point KKT), the numerically robust, xtb-validated path for the
+            // constrained indefinite solve.
+            //
+            // NOTE (Jun 2026): a Schur-on-A_nn LDL^T (Bunch-Kaufman) was tried here, but it
+            // gives a different (~3 mEh-off) constrained solution when A_nn is indefinite —
+            // forming the Schur complement requires inverting the indefinite N×N block, which
+            // is ill-conditioned — and it broke gfnff+ALPB validation vs xtb. So LDL^T must
+            // NOT replace the augmented LU here; it remains available only as the explicit
+            // -eeq_solver.solve_method ldlt (intended for SPD A_nn, where it equals cholesky).
             if (m_verbosity >= 1)
-                CurcumaLogger::warn("EEQ Schur-Cholesky: A matrix not SPD, falling back to LU");
+                CurcumaLogger::warn("EEQ Schur-Cholesky: A_nn not SPD, falling back to augmented LU");
             m_chol_cache.reset();
-            return Vector();  // Empty = signal to fall back
+            return Vector();  // Empty = signal to fall back to LU
         }
 
         // Persist into cache ONLY when (a) the cache is enabled (eps > 0) and
@@ -1917,13 +2180,16 @@ Vector EEQSolver::solveWithSchurCholesky(
         // Phase 1 has empty m_pending_geometry — local-solve path keeps the cache
         // clean so the next Phase 2 call sees valid=false and refactors normally.
         const bool can_persist = (m_refactor_eps > 0.0)
+            && !m_reaction_field   // do not store a solvated factor (would poison a later gas-phase solve)
             && (m_pending_geometry.rows() == natoms)
             && (m_pending_cn.size()       == natoms);
 
         if (can_persist) {
-            m_chol_cache.llt              = std::move(llt);
-            m_chol_cache.Z2               = m_chol_cache.llt.solve(C.transpose());
-            m_chol_cache.S                = C * m_chol_cache.Z2;
+            m_chol_cache.chol_factor      = std::move(chol);
+            ColMatrix Z2cm                = C.transpose();   // col-major N×nfrag RHS
+            eeqCholeskySolve(m_chol_cache.chol_factor, Z2cm); // Z2 = A_nn^{-1}·C^T
+            m_chol_cache.Z2               = Z2cm;            // store as row-major Matrix
+            m_chol_cache.S                = schurComplementCZ(C, m_chol_cache.Z2, natoms, nfrag);
             m_chol_cache.last_geometry    = m_pending_geometry;
             m_chol_cache.last_cn          = m_pending_cn;
             m_chol_cache.cached_natoms    = natoms;
@@ -1939,9 +2205,12 @@ Vector EEQSolver::solveWithSchurCholesky(
             if (m_verbosity >= 3)
                 fmt::print(stderr, "[EEQ-Cache] Local solve (Phase 1 or cache off, N={})\n",
                            natoms);
-            Vector z1_local = llt.solve(rhs_atoms);
-            Matrix Z2_local = llt.solve(C.transpose());
-            Matrix S_local  = C * Z2_local;
+            Vector z1_local = rhs_atoms;
+            eeqCholeskySolve(chol, z1_local);
+            ColMatrix Z2cm_local = C.transpose();
+            eeqCholeskySolve(chol, Z2cm_local);
+            Matrix Z2_local = Z2cm_local;   // col-major → row-major
+            Matrix S_local  = schurComplementCZ(C, Z2_local, natoms, nfrag);
             Vector schur_rhs_local = C * z1_local - rhs_constraints;
             Vector lambda_local;
             if (nfrag == 1) {
@@ -1959,7 +2228,8 @@ Vector EEQSolver::solveWithSchurCholesky(
 
     // Cache-hit path: factor was either freshly persisted above OR carried over.
     // O(N^2) triangular solve with cached factorization.
-    Vector z1 = m_chol_cache.llt.solve(rhs_atoms);
+    Vector z1 = rhs_atoms;
+    eeqCholeskySolve(m_chol_cache.chol_factor, z1);
     ++m_chol_cache.steps_since_refactor;
 
     // Schur complement with cached Z2 and S (both constant when A is cached)
@@ -1970,7 +2240,41 @@ Vector EEQSolver::solveWithSchurCholesky(
     } else {
         lambda = m_chol_cache.S.partialPivLu().solve(schur_rhs);
     }
-    return z1 - m_chol_cache.Z2 * lambda;
+    Vector q = z1 - m_chol_cache.Z2 * lambda;
+
+    // A4 (Jul 2026): iterative refinement against the FRESH matrix.
+    //
+    // On a cache hit the factor describes A_old but the RHS and A_nn are current,
+    // so q solves the OLD system exactly, not the new one. That is the
+    // Hellmann-Feynman hazard flagged in docs/wp4/WP-EEQ-Cholesky-Cache.md: q is
+    // not the exact EEQ charge for this geometry, so dE/dR is inconsistent and MD
+    // drifts. Refinement removes the error while keeping the O(N^2) cost.
+    //
+    // The augmented system is  A q + C^T lambda = b ,  C q = c.
+    // The cached solve satisfies the SECOND row exactly (C q = C z1 - S lambda =
+    // C z1 - schur_rhs = c holds for any factor), so the constraint residual is
+    // identically zero and only the first row needs correcting:
+    //     r = b - A_new q - C^T lambda      (= (A_old - A_new) q )
+    // Solving the same augmented system for the correction with the cached factor
+    // reuses Z2 and S unchanged.
+    if (m_refine_iters > 0 && m_chol_cache.valid) {
+        for (int it = 0; it < m_refine_iters; ++it) {
+            Vector r = rhs_atoms - A_nn * q - C.transpose() * lambda;
+            Vector dz = r;
+            eeqCholeskySolve(m_chol_cache.chol_factor, dz);
+            Vector dschur = C * dz;                      // constraint residual is 0
+            Vector dlambda;
+            if (nfrag == 1) {
+                dlambda = Vector::Constant(1, dschur(0) / m_chol_cache.S(0, 0));
+            } else {
+                dlambda = m_chol_cache.S.partialPivLu().solve(dschur);
+            }
+            q      += dz - m_chol_cache.Z2 * dlambda;
+            lambda += dlambda;
+        }
+    }
+
+    return q;
 }
 
 // ===== Block-Jacobi Preconditioner =====
@@ -2000,7 +2304,7 @@ Vector EEQSolver::BlockJacobiPC::apply(const Vector& r) const {
     return z;
 }
 
-EEQSolver::BlockJacobiPC EEQSolver::buildBlockJacobi(const Matrix& A_nn, const Matrix& C) {
+EEQSolver::BlockJacobiPC EEQSolver::buildBlockJacobi(const MatrixCRef& A_nn, const MatrixCRef& C) {
     BlockJacobiPC pc;
     const int nfrag = static_cast<int>(C.rows());
     const int natoms = static_cast<int>(C.cols());
@@ -2048,7 +2352,7 @@ EEQSolver::BlockJacobiPC EEQSolver::buildBlockJacobi(const Matrix& A_nn, const M
 // dominant EEQ matrices. Block-Jacobi (Stage 2) drops k further when nfrag>1.
 
 Vector EEQSolver::solveWithPCG(
-    const Matrix& A,
+    const MatrixCRef& A,
     const Vector& b,
     const Vector& x0,
     int max_iter,
@@ -2154,7 +2458,7 @@ Vector EEQSolver::solveWithPCG(
 // updated harmlessly until all columns reach tolerance or max_iter is hit.
 
 Matrix EEQSolver::solveWithPCG_multiRHS(
-    const Matrix& A,
+    const MatrixCRef& A,
     const Matrix& B,
     const Matrix& X0,
     int max_iter,
@@ -2258,29 +2562,6 @@ Matrix EEQSolver::solveWithPCG_multiRHS(
     }
 
     return X;
-}
-
-void EEQSolver::printConvergenceSummary() {
-    if (m_pcg_total_calls == 0) return;
-    if (m_pcg_nonconv_calls > 0 && m_verbosity >= 1) {
-        int conv = m_pcg_total_calls - m_pcg_nonconv_calls;
-        CurcumaLogger::warn(fmt::format(
-            "EEQ PCG: {}/{} converged, {} not (worst |r|={:.2e}, {} iters total)",
-            conv, m_pcg_total_calls, m_pcg_nonconv_calls,
-            m_pcg_worst_residual, m_pcg_total_iters));
-    } else if (m_pcg_nonconv_calls == 0 && m_verbosity >= 2) {
-        CurcumaLogger::info(fmt::format(
-            "EEQ PCG: {}/{} converged ({} iters total)",
-            m_pcg_total_calls, m_pcg_total_calls, m_pcg_total_iters));
-    }
-    resetConvergenceStats();
-}
-
-void EEQSolver::resetConvergenceStats() {
-    m_pcg_total_calls = 0;
-    m_pcg_nonconv_calls = 0;
-    m_pcg_total_iters = 0;
-    m_pcg_worst_residual = 0.0;
 }
 
 /**
@@ -2401,7 +2682,13 @@ Vector EEQSolver::solveEEQ(
     }
 
     // Claude Generated (March 2026): Use unified dispatchSolve instead of duplicated solver logic
-    Vector charges = dispatchSolve(A, x, natoms, nfrag, total_charge);
+    // Sep 2026: pin the BLAS to one thread here (this legacy single-phase path passes no
+    // thread budget) so the LAPACK result does not depend on the machine load.
+    Vector charges;
+    {
+        curcuma::ScopedBlasThreads _blas_threads(1);
+        charges = dispatchSolve(A, x, natoms, nfrag, total_charge);
+    }
 
     // DEBUG: Verify linear solve accuracy
     if (m_verbosity >= 3) {
@@ -2427,6 +2714,7 @@ Vector EEQSolver::solveEEQ(
 
 // ===== Phase 1: Topology Charges ===== (DEPRECATED - use single-solve instead)
 
+// A1 (Jul 2026): thin wrapper — one solve with the topology's own qfrag.
 Vector EEQSolver::calculateTopologyCharges(
     const std::vector<int>& atoms,
     const Matrix& geometry_bohr,
@@ -2437,8 +2725,47 @@ Vector EEQSolver::calculateTopologyCharges(
     CxxThreadPool* pool,
     int num_threads)
 {
+    auto res = calculateTopologyChargesMultiRHS(atoms, geometry_bohr, total_charge, cn,
+                                                topology, {}, use_corrections, pool, num_threads);
+    return res.empty() ? Vector() : res.front();
+}
+
+std::vector<Vector> EEQSolver::calculateTopologyChargesMultiRHS(
+    const std::vector<int>& atoms,
+    const Matrix& geometry_bohr,
+    int total_charge,
+    const Vector& cn,
+    const std::optional<TopologyInput>& topology,
+    const std::vector<std::vector<double>>& qfrag_variants,
+    bool use_corrections,
+    CxxThreadPool* pool,
+    int num_threads)
+{
     const int natoms = atoms.size();
+    // An empty variant list means "one solve, using topology->qfrag as-is" — the
+    // historical single-solve behaviour.
+    const int n_variants = qfrag_variants.empty() ? 1 : static_cast<int>(qfrag_variants.size());
     const double TSQRT2PI = 0.797884560802866;  // sqrt(2/π)
+
+    // BUGFIX (Jul 2026): re-arm the Phase-1 contract of solveWithSchurCholesky.
+    // That function has no explicit notion of which phase called it — it infers
+    // "this is Phase 2" from m_pending_geometry/m_pending_cn being non-empty
+    // (see eeq_solver.cpp:2113-2119 cache_size_ok and :2166-2169 can_persist).
+    // Those buffers are written ONLY by calculateFinalCharges (Phase 2) and were
+    // never cleared, so from the second topology build onward Phase 1 looked like
+    // Phase 2 and either consumed the Phase-2 geometric factor or — after an
+    // invalidateCholeskyCache(), which is exactly what GFNFF::getCachedTopology()
+    // does before every full MD/opt topology rebuild — persisted its own
+    // TOPOLOGICAL-distance factor, which Phase 2 of the same call then consumed
+    // (max_dr == 0 => cache hit). Either way Phase 1 qa is wrong, and the error
+    // propagates through dgam/alpeeq/gam_corrected into the Phase-2 charges and
+    // the GFN-FF Coulomb energy.
+    //
+    // Clearing here restores the documented invariant "Phase 1 reaches
+    // solveWithSchurCholesky with empty pending buffers" for EVERY call, not just
+    // the first one on a fresh solver.
+    m_pending_geometry.resize(0, 0);
+    m_pending_cn.resize(0);
 
     // Augmented system size: n atoms + n fragments
     int nfrag = topology.has_value() ? topology->nfrag : 1;
@@ -2479,6 +2806,25 @@ Vector EEQSolver::calculateTopologyCharges(
         double cnf_term = params_i.cnf * std::sqrt(nb_count);
 
         chi(i) = -params_i.chi + dxi(i) + cnf_term;
+
+        // Metal chi-shift (Phase 1 topology charges ONLY) — Claude Generated (Jul 2026)
+        // Reference: Fortran gfnff_ini.f90:413-418
+        //   if (imetal(i).eq.2) topo%chieeq(i) = topo%chieeq(i) - gen%mchishift
+        //   gen%mchishift = -0.09 (gfnff_param.f90:756), so chieeq += 0.09
+        // Rationale (Fortran comment): the "true" charges of transition metals are small, so the
+        // non-geometry-dependent topology charges use a LESS electronegative metal → more q+ on the
+        // metal, which better reflects the polarity used for guessing bond/angle parameters.
+        // imetal==2 (metal_type==2) are the d-block TMs; all have periodic group <=2 or negative, so
+        // the Fortran line-274 caveat (nb<=4 & group>3 → imetal=0) can never clear a "2", making the
+        // metal_type[z-1]==2 test faithful. Phase 2 overwrites chieeq WITHOUT this shift
+        // (gfnff_ini.f90:715), so this is deliberately Phase-1 only. Missing here caused metal
+        // complexes (e.g. RhCl(CO)2) to put too little topology charge on the metal → wrong fqq bond
+        // factor + Coulomb (ED39 native gfnff 12.9 mEh above xtb --gfnff).
+        if (z_i >= 1 && z_i <= 86 && metal_type[z_i - 1] == 2) {
+            constexpr double MCHISHIFT = -0.09;  // gfnff_param.f90:756
+            chi(i) -= MCHISHIFT;  // effectively += 0.09
+        }
+
         gam(i) = params_i.gam;
         alpha(i) = params_i.alp;  // Already squared
     }
@@ -2542,9 +2888,13 @@ Vector EEQSolver::calculateTopologyCharges(
         // CRITICAL FIX (Jan 2, 2026): Cache topological distances for Phase 2 reuse
         // Reference: XTB gfnff_ini2.f90:1189-1199 uses same 'pair' array for both phases
         // Phase 2 must NOT recalculate with geometric distances!
-        m_cached_topological_distances = topo_dist;
 
-        // Setup off-diagonal Coulomb matrix with topological distances
+        // Setup off-diagonal Coulomb matrix with topological distances.
+        // Claude Generated (Sep 2026): each (i,j)/(j,i) pair is written by exactly one row i,
+        // so the rows can run in parallel with an identical result (7320 atoms: 26.8 M erf
+        // evaluations, previously serial in both q-loop passes). The OpenMP team size is the
+        // GFN-FF budget opened by GFNFF::calculateTopologyInfo.
+        #pragma omp parallel for schedule(dynamic, 32)
         for (int i = 0; i < natoms; ++i) {
             for (int j = 0; j < i; ++j) {
                 double r = topo_dist(i, j);  // Topological distance in Bohr
@@ -2559,7 +2909,7 @@ Vector EEQSolver::calculateTopologyCharges(
                 // J_ij = erf(gamma_ij * r) / r
                 // gamma_ij = 1/sqrt(alpha_i + alpha_j)
                 double gammij = 1.0 / std::sqrt(alpha(i) + alpha(j));
-                double erf_gamma = std::erf(gammij * r);
+                double erf_gamma = curcuma_erf(gammij * r);
                 double coulomb = erf_gamma / r;
 
                 A(i, j) = coulomb;
@@ -2588,7 +2938,8 @@ Vector EEQSolver::calculateTopologyCharges(
 
                 if (r < 1e-10) {
                     CurcumaLogger::error("EEQSolver::calculateTopologyCharges: Zero distance between atoms");
-                    return generateFallbackCharges(natoms, total_charge, "zero distance in Phase 1");
+                    return std::vector<Vector>(
+                        n_variants, generateFallbackCharges(natoms, total_charge, "zero distance in Phase 1"));
                 }
 
                 // Store distance for both Coulomb matrix and cache
@@ -2598,7 +2949,7 @@ Vector EEQSolver::calculateTopologyCharges(
                 // J_ij = erf(gamma_ij * r) / r
                 // gamma_ij = 1/sqrt(alpha_i + alpha_j)
                 double gammij = 1.0 / std::sqrt(alpha(i) + alpha(j));
-                double erf_gamma = std::erf(gammij * r);
+                double erf_gamma = curcuma_erf(gammij * r);
                 double coulomb = erf_gamma / r;
 
                 A(i, j) = coulomb;
@@ -2607,10 +2958,12 @@ Vector EEQSolver::calculateTopologyCharges(
         }
 
         // Cache geometric distances for Phase 2 reuse
-        m_cached_topological_distances = geom_dist;
     }
 
     // 3. Setup fragment charge constraints
+    // A1 (Jul 2026): the constraint PATTERN depends on fraglist/nfrag only. The
+    // qfrag-dependent part is the RHS entry x(natoms+f), which is (re)written per
+    // variant in the solve loop below — that is what makes multi-RHS reuse exact.
     for (int f = 0; f < nfrag; ++f) {
         int row = natoms + f;
         double q_target = (topology.has_value() && f < static_cast<int>(topology->qfrag.size()))
@@ -2665,7 +3018,7 @@ Vector EEQSolver::calculateTopologyCharges(
                 double gammij = 1.0 / std::sqrt(alpha(i) + alpha(j));
                 double r = topology.has_value() ? topo_dist(i, j) : 0.0;
                 std::cerr << fmt::format("  A[{},{}] = {:12.6f}  (gammij={:12.6f}, r={:12.6f}, erf={:12.6f})",
-                    i, j, A(i, j), gammij, r, std::erf(gammij * r)) << std::endl;
+                    i, j, A(i, j), gammij, r, curcuma_erf(gammij * r)) << std::endl;
             }
         }
 
@@ -2687,10 +3040,33 @@ Vector EEQSolver::calculateTopologyCharges(
         std::cerr << "==================================================" << std::endl;
     }
 
+    // A1 (Jul 2026): solve the SAME system for each fragment-charge assignment.
+    // Only the constraint rows of the RHS differ between variants.
+    std::vector<Vector> results;
+    results.reserve(n_variants);
+
+    for (int v = 0; v < n_variants; ++v) {
+    if (!qfrag_variants.empty()) {
+        const std::vector<double>& qf = qfrag_variants[v];
+        for (int f = 0; f < nfrag; ++f) {
+            x(natoms + f) = (f < static_cast<int>(qf.size()))
+                                ? qf[f]
+                                : (f == 0 ? static_cast<double>(total_charge) : 0.0);
+        }
+    }
+
     // Claude Generated (March 2026): Use configurable solver dispatch instead of hardcoded LU
     // This allows the user to select solve_method (lu, schur_cholesky, pcg, auto) for Phase 1 too
     // Claude Generated (WP2, May 2026): forward pool/num_threads so Stage-4 batched LU runs in parallel
-    Vector topology_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads);
+    // Sep 2026: same BLAS-thread guard as the Phase-2 solve. Without it the Phase-1 dpotrf/
+    // dpotrs ran with OpenBLAS's default thread count (all cores), which made the topology
+    // charges differ by ~1e-13 depending on machine load (threaded kernels reassociate) and
+    // turned the 10 ps MD tests into load-dependent coin flips.
+    Vector topology_charges;
+    {
+        curcuma::ScopedBlasThreads _blas_threads(num_threads > 0 ? num_threads : 1);
+        topology_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads);
+    }
 
     // Claude Generated (March 2026): Print Phase 1 charge summary
     if (m_verbosity >= 3 && natoms <= 10) {
@@ -2709,10 +3085,12 @@ Vector EEQSolver::calculateTopologyCharges(
         } else {
             CurcumaLogger::error(fmt::format("Phase 1 EEQ: solver failed for N={}", natoms));
         }
-        return generateFallbackCharges(natoms, total_charge, "Phase 1 solver failure");
+        results.push_back(generateFallbackCharges(natoms, total_charge, "Phase 1 solver failure"));
+        continue;
     }
 
     // Check for NaN/Inf - fallback to uniform charges instead of hard fail
+    bool invalid_charge = false;
     for (int i = 0; i < natoms; ++i) {
         if (std::isnan(topology_charges[i]) || std::isinf(topology_charges[i])) {
             if (m_allow_unconverged) {
@@ -2722,8 +3100,14 @@ Vector EEQSolver::calculateTopologyCharges(
                 CurcumaLogger::error(fmt::format("Phase 1 EEQ: Invalid charge[{}] = {} (Z={})",
                                                  i, topology_charges[i], atoms[i]));
             }
-            return generateFallbackCharges(natoms, total_charge, "NaN/Inf in Phase 1 solution");
+            topology_charges = generateFallbackCharges(natoms, total_charge, "NaN/Inf in Phase 1 solution");
+            invalid_charge = true;
+            break;
         }
+    }
+    if (invalid_charge) {
+        results.push_back(topology_charges);
+        continue;
     }
 
     // Phase 1 charge diagnostic output (Claude Generated February 2026)
@@ -2743,93 +3127,10 @@ Vector EEQSolver::calculateTopologyCharges(
         CurcumaLogger::info(fmt::format("EEQ_PHASE1_CHARGES: sum = {:.6f}", sum_q));
     }
 
-    return topology_charges;
-}
+    results.push_back(std::move(topology_charges));
+    }  // end variant loop (A1)
 
-// ===== Floyd-Warshall Topological Distances =====
-
-Matrix EEQSolver::computeTopologicalDistances(
-    const std::vector<int>& atoms,
-    const TopologyInput& topology
-) const {
-    const int natoms = atoms.size();
-
-    // Claude Generated (Feb 20, 2026): float32 Floyd-Warshall matching Fortran real(sp)
-    //
-    // Fortran declares: real(sp) :: rabd(nat,nat)  (gfnff_ini.f90:432)
-    // Using float32 here is CRITICAL for EEQ charge accuracy:
-    //   - float32 rounding accumulates along shortest paths
-    //   - Different topological distances → different Phase-1 qa → different fqq/alpha/zetac6
-    //   - Without float32: bond/torsion/repulsion/dispersion errors of 1e-3 to 1e-2 Eh
-    //   - With float32: near-exact match with Fortran reference
-    const float RABD_CUTOFF_F = 13.0f;   // Fortran gfnff_ini.f90:88, real(sp)
-    const float TDIST_THR_F   = 12.0f;   // Fortran gfnff_param.f90:776, real(sp)
-
-    // Reference: external/gfnff/src/gfnff_param.f90:817 (gen%rfgoed1 = 1.175)
-    const double RFGOED1 = 1.175;
-    const double BOHR_TO_ANGSTROM = 0.52917726;
-
-    // 1. Initialize with cutoff value (flat float32 array for cache efficiency)
-    // Reference: gfnff_ini.f90:431-442
-    std::vector<float> rabd(natoms * natoms, RABD_CUTOFF_F);
-
-    // 2. Set diagonal to zero
-    for (int i = 0; i < natoms; ++i)
-        rabd[i * natoms + i] = 0.0f;
-
-    // 3. Set bonded distances (sum of covalent radii, cast to float32)
-    // Reference: gfnff_ini.f90:438-448
-    for (int i = 0; i < natoms; ++i) {
-        float rad_i = static_cast<float>(topology.covalent_radii[i]);
-        for (int j : topology.neighbor_lists[i]) {
-            float bond = rad_i + static_cast<float>(topology.covalent_radii[j]);
-            rabd[i * natoms + j] = bond;
-            rabd[j * natoms + i] = bond;
-        }
-    }
-
-    // 4. Floyd-Warshall shortest path in float32, matching Fortran real(sp) arithmetic
-    // Reference: gfnff_ini.f90:462-471
-    for (int k = 0; k < natoms; ++k) {
-        for (int i = 0; i < natoms; ++i) {
-            float rik = rabd[i * natoms + k];
-            if (rik > TDIST_THR_F) continue;
-            for (int j = 0; j < natoms; ++j) {
-                float rkj = rabd[k * natoms + j];
-                if (rkj > TDIST_THR_F) continue;
-                float candidate = rik + rkj;   // float32 addition like Fortran
-                if (rabd[i * natoms + j] > candidate)
-                    rabd[i * natoms + j] = candidate;
-            }
-        }
-    }
-
-    // 5. Convert to double Matrix with cutoff and Angstrom→Bohr scaling
-    // Reference: gfnff_ini.f90:474-480
-    Matrix result(natoms, natoms);
-    for (int i = 0; i < natoms; ++i) {
-        for (int j = 0; j < natoms; ++j) {
-            float rij = rabd[i * natoms + j];
-            double val = (rij > TDIST_THR_F)
-                ? static_cast<double>(RABD_CUTOFF_F)
-                : static_cast<double>(rij);
-            result(i, j) = RFGOED1 * val / BOHR_TO_ANGSTROM;
-        }
-    }
-
-    if (m_verbosity >= 3) {
-        std::cerr << "\n=== Floyd-Warshall Topological Distances (float32, Bohr) ===" << std::endl;
-        for (int i = 0; i < std::min(5, natoms); ++i) {
-            for (int j = 0; j < i; ++j) {
-                double d = result(i, j);
-                if (d < RFGOED1 * RABD_CUTOFF_F / BOHR_TO_ANGSTROM - 1.0)
-                    std::cerr << fmt::format("  d_topo[{},{}] = {:.6f} Bohr", i, j, d) << std::endl;
-            }
-        }
-        std::cerr << "========================================\n" << std::endl;
-    }
-
-    return result;
+    return results;
 }
 
 // ===== Multi-Source Dijkstra Topological Distances (Performance Replacement) =====
@@ -2856,7 +3157,16 @@ Matrix EEQSolver::computeTopologicalDistancesSparse(
         float rad_i = static_cast<float>(topology.covalent_radii[i]);
         for (int j : topology.neighbor_lists[i]) {
             float bond = rad_i + static_cast<float>(topology.covalent_radii[j]);
+            // BUGFIX (Jul 2026): symmetrize the graph, matching Fortran
+            // (gfnff_ini.f90:438-441 sets BOTH rabd(k,i) and rabd(i,k)) and the
+            // Floyd-Warshall variant of this function. neighbor_lists (== Fortran
+            // nbdum/topo%nb) is ASYMMETRIC for eta bonds: the metal lists the eta
+            // ligand (nbf) but the eta ligand omits the metal (nbm, gfnff_ini2.f90:199).
+            // A directed adjacency therefore left the eta ligand disconnected from the
+            // metal in the topological graph, so its Phase-1 topology charge (qa) — and
+            // hence the metal-bond fqq — was wrong (e.g. PR15 eta C: +0.030 vs -0.070).
             adj[i].push_back({j, bond});
+            adj[j].push_back({i, bond});
         }
     }
 
@@ -2944,6 +3254,30 @@ Matrix EEQSolver::computeTopologicalDistancesSparse(
 // Reference: XTB gfnff_ini.f90:693-707, gfnff_ini2.f90:1140-1246
 // Claude Generated - December 2025, Updated January 2, 2026
 
+// PCG convergence bookkeeping (printed once per Phase-2 solve, verbosity-gated).
+void EEQSolver::printConvergenceSummary() {
+    if (m_pcg_total_calls == 0) return;
+    if (m_pcg_nonconv_calls > 0 && m_verbosity >= 1) {
+        int conv = m_pcg_total_calls - m_pcg_nonconv_calls;
+        CurcumaLogger::warn(fmt::format(
+            "EEQ PCG: {}/{} converged, {} not (worst |r|={:.2e}, {} iters total)",
+            conv, m_pcg_total_calls, m_pcg_nonconv_calls,
+            m_pcg_worst_residual, m_pcg_total_iters));
+    } else if (m_pcg_nonconv_calls == 0 && m_verbosity >= 2) {
+        CurcumaLogger::info(fmt::format(
+            "EEQ PCG: {}/{} converged ({} iters total)",
+            m_pcg_total_calls, m_pcg_total_calls, m_pcg_total_iters));
+    }
+    resetConvergenceStats();
+}
+
+void EEQSolver::resetConvergenceStats() {
+    m_pcg_total_calls = 0;
+    m_pcg_nonconv_calls = 0;
+    m_pcg_total_iters = 0;
+    m_pcg_worst_residual = 0.0;
+}
+
 Vector EEQSolver::calculateFinalCharges(
     const std::vector<int>& atoms,
     const Matrix& geometry_bohr,
@@ -2968,15 +3302,15 @@ Vector EEQSolver::calculateFinalCharges(
         return topology_charges;
     }
 
-    // Claude Generated (Apr 2026): If Phase 2 was historically implausible for this system
-    // size, skip it forever (until atom count changes, indicating a new molecule).
-    if (m_phase2_historically_implausible && m_phase2_implausible_natoms == natoms) {
-        if (m_verbosity >= 2) {
-            CurcumaLogger::info("EEQSolver: Phase 2 was historically implausible for this system — skipping, using Phase 1 topology charges");
-        }
-        return topology_charges;
-    }
+    // Claude Generated (Jun 2026): a previously-implausible Phase-2 result no longer
+    // permanently freezes the charges. We always re-attempt Phase-2 so a single transient
+    // bad geometry (a close contact during a hot MD or aggressive opt step) does not demote
+    // the run to fixed Phase-1 charges forever — the force field stays polarizing. A bad
+    // individual step still falls back to Phase-1 via the per-step plausibility guard, and
+    // m_phase2_historically_implausible is reset on the next plausible solve.
+    // See docs/GFNFF_POLARIZATION_AUDIT.md.
 
+    const auto t_p2_start = std::chrono::high_resolution_clock::now();
     if (m_verbosity >= 2) {
         fmt::print(stderr, "[EEQ] Phase 2: preparing corrections (dxi, dgam, pi/amide detection)...\n");
     }
@@ -2992,7 +3326,17 @@ Vector EEQSolver::calculateFinalCharges(
     // Claude Generated (February 2026): Proper amideH detection for Phase 2 chi correction
     // Reference: Fortran gfnff_ini.f90:717 uses amideH() function from gfnff_ini2.f90:1575
     // Requires: H with 1 neighbor, that neighbor is amide N, amide N has exactly 1 sp3 C
-    std::vector<bool> is_amide_h = use_corrections ? detectAmideHydrogens(atoms, hybridization, is_amide, topology) : std::vector<bool>(natoms, false);
+    // Claude Generated (Sep 2026, S30L-CI system 17): amideH()'s internal amide() call uses
+    // piadr2 (true pi membership), NOT the piadr index-cutoff `is_amide` above - reusing
+    // `is_amide` here silently dropped the -0.02 amide-H chi correction whenever a
+    // molecule's pi atoms weren't exactly atoms 1..npiall (e.g. a plain cyclic bis-amide
+    // with an sp3 CH2 interleaved between the two amide units), overpolarizing the amide N
+    // and its H by ~0.03-0.04 e and costing ~5 kcal/mol in the Coulomb term. See
+    // detectAmideNitrogens()'s exact_pi_membership parameter for the full explanation.
+    std::vector<bool> is_amide_for_h = use_corrections
+        ? detectAmideNitrogens(atoms, hybridization, is_pi_atom, topology, cn, /*exact_pi_membership=*/true)
+        : std::vector<bool>(natoms, false);
+    std::vector<bool> is_amide_h = use_corrections ? detectAmideHydrogens(atoms, hybridization, is_amide_for_h, topology) : std::vector<bool>(natoms, false);
 
     Vector dgam = use_corrections ? calculateDgam(atoms, topology_charges, hybridization, is_pi_atom, is_amide) : Vector::Zero(natoms);
 
@@ -3148,6 +3492,30 @@ Vector EEQSolver::calculateFinalCharges(
         return m_phase2_distances[i * (i + 1) / 2 + j];
     };
 
+    // WP7-D (Jun 2026, Claude Generated): contact metric for the dispatcher. The approximate
+    // batched solver (per-fragment Cholesky) drops cross-fragment Coulomb, so it is only valid
+    // for well-separated fragments. Compute the minimum inter-fragment atom distance from the
+    // packed distances just built (fragment membership from topology->fraglist, 1-indexed) so
+    // dispatchSolve can prefer the exact path when fragments are in contact. O(N^2), same order
+    // as the distance build it piggybacks on. -1 = unknown (no multi-fragment topology).
+    m_contact_min_dist = -1.0;
+    if (nfrag >= 2 && topology.has_value()
+        && static_cast<int>(topology->fraglist.size()) >= natoms) {
+        const auto& fraglist = topology->fraglist;
+        double min_d = -1.0;
+        for (int i = 1; i < natoms; ++i) {
+            const int fi = fraglist[i];
+            const int ii = i * (i + 1) / 2;
+            for (int j = 0; j < i; ++j) {
+                if (fraglist[j] != fi) {
+                    const double r = m_phase2_distances[ii + j];
+                    if (min_d < 0.0 || r < min_d) min_d = r;
+                }
+            }
+        }
+        m_contact_min_dist = min_d;  // -1 only if every atom shares one fragment id
+    }
+
     if (m_verbosity >= 3) {
         CurcumaLogger::info("EEQ Phase 2: Using geometric distances from xyz coordinates (matches Fortran goed_gfnff)");
     }
@@ -3189,6 +3557,7 @@ Vector EEQSolver::calculateFinalCharges(
 
     if (m_verbosity >= 3) {
         const char* solver_name = (m_solve_method == EEQSolveMethod::PCG) ? "PCG"
+            : (m_solve_method == EEQSolveMethod::ProjectedPCG) ? "projected PCG"
             : (m_solve_method == EEQSolveMethod::SchurCholesky) ? "Cholesky"
             : (m_solve_method == EEQSolveMethod::Auto) ? "auto (benchmark)" : "LU";
         if (use_iterative)
@@ -3252,10 +3621,16 @@ Vector EEQSolver::calculateFinalCharges(
 
         // ===== Build A Matrix with Current Alpha =====
         // Claude Generated (Mar 2026): Pre-allocated A buffer — avoids 13 MB alloc per step
-        m_phase2_A.setZero();
-        m_phase2_rhs.setZero();
         Matrix& A = m_phase2_A;
         Vector& x = m_phase2_rhs;
+        // Only the constraint rows/columns need clearing: every entry of the natoms x natoms
+        // block is (re)written below (diagonal, both triangles, cutoff zeros, or the cached
+        // off-diagonal copy). Zeroing the full (N+nfrag)^2 matrix cost O(N^2) per solve.
+        if (nfrag > 0) {
+            A.bottomRows(nfrag).setZero();
+            A.rightCols(nfrag).setZero();
+        }
+        x.setZero();
 
         // WP-EEQ-Matrix-Cache (May 2026): check if we can reuse the cached
         // Coulomb off-diagonal from a previous step.  Off-diag values are
@@ -3323,7 +3698,7 @@ Vector EEQSolver::calculateFinalCharges(
                             continue;
                         }
                         double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
-                        double coulomb = std::erf(gamma_ij * r) / r;
+                        double coulomb = curcuma_erf(gamma_ij * r) / r;
                         A(i, j) = coulomb;
                         A(j, i) = coulomb;
                     }
@@ -3356,7 +3731,7 @@ Vector EEQSolver::calculateFinalCharges(
                         continue;
                     }
                     double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
-                    double coulomb = std::erf(gamma_ij * r) / r;
+                    double coulomb = curcuma_erf(gamma_ij * r) / r;
                     A(i, j) = coulomb;
                     A(j, i) = coulomb;
                 }
@@ -3459,7 +3834,7 @@ Vector EEQSolver::calculateFinalCharges(
                     double gammij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
                     double r = dist(i, j);  // packed lookup
                     std::cerr << fmt::format("  A[{},{}] = {:12.6f}  (gammij={:12.6f}, r={:12.6f}, erf={:12.6f})",
-                        i, j, A(i, j), gammij, r, std::erf(gammij * r)) << std::endl;
+                        i, j, A(i, j), gammij, r, curcuma_erf(gammij * r)) << std::endl;
                 }
             }
 
@@ -3509,7 +3884,23 @@ Vector EEQSolver::calculateFinalCharges(
         // 6. Solve system — unified dispatch (March 2026)
         // Claude Generated (WP2, May 2026): forward pool/num_threads to dispatchSolve so the
         // Stage-4 batched per-fragment LU loop (eeq_solver.cpp:1294-1387) runs in parallel.
+        //
+        // Threaded-LAPACK lever (Jun 2026): the SchurCholesky dpotrf/dpotrs (and any BLAS-backed
+        // solve) scale ~4-5x with the BLAS thread count, but curcuma pins OMP/MKL to 1 globally
+        // (CxxThreadPool, main.cpp). Give the BLAS the EnergyCalculator's intra-molecule budget
+        // (num_threads) for the duration of the solve; restored on scope exit. The parallel
+        // matrix build above has already joined, so there is no thread nesting. See
+        // src/core/blas_threads.h.
+        curcuma::ScopedBlasThreads _blas_threads(num_threads > 0 ? num_threads : 1);
+        const auto t_p2_solve = std::chrono::high_resolution_clock::now();
         Vector new_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads);
+        if (m_verbosity >= 2) {
+            const auto t_p2_end = std::chrono::high_resolution_clock::now();
+            const double ms_prep  = std::chrono::duration<double, std::milli>(t_p2_solve - t_p2_start).count();
+            const double ms_solve = std::chrono::duration<double, std::milli>(t_p2_end - t_p2_solve).count();
+            CurcumaLogger::info(fmt::format("[EEQ] Phase 2 timing: corrections+matrix {:.1f} ms, solve {:.1f} ms (N={}, nfrag={})",
+                                            ms_prep, ms_solve, natoms, nfrag));
+        }
 
         // Empty return from dispatchSolve signals all solvers failed.
         // Prefer the last successful Phase 2 charges (from a prior step) over Phase 1
@@ -3628,9 +4019,8 @@ Vector EEQSolver::calculateFinalCharges(
                 // Do NOT overwrite m_last_successful_charges — the Phase 2 result was
                 // garbage, but the cache still holds a good result from a previous step.
                 // Phase 1 topology_charges are used for THIS step but must not poison
-                // the cache for future steps.
-                // Claude Generated (Apr 2026): Remember that Phase 2 is garbage for this
-                // system size so we can skip the expensive solve on all future calls.
+                // the cache for future steps. Transient hint only (reset on the next plausible
+                // solve); no longer a permanent freeze (Claude Generated, Jun 2026).
                 m_phase2_historically_implausible = true;
                 m_phase2_implausible_natoms = natoms;
                 break;
@@ -3643,13 +4033,17 @@ Vector EEQSolver::calculateFinalCharges(
                     "EEQ Phase 2: Coulomb energy ratio {:.1f} (P2={:.2e}, P1={:.2e}), using Phase 1",
                     e_diff_ratio, e_coul_p2, e_coul_p1));
                 current_charges = topology_charges;
-                // Same as above — keep the cache intact.
-                // Claude Generated (Apr 2026): Remember that Phase 2 is garbage for this
-                // system size so we can skip the expensive solve on all future calls.
+                // Per-step fallback only; keep the cache intact. The flag is a transient hint
+                // (drives the Auto many-fragment Batched route) and is reset on the next
+                // plausible solve — it no longer permanently freezes Phase-2 (Jun 2026).
                 m_phase2_historically_implausible = true;
                 m_phase2_implausible_natoms = natoms;
                 break;
             }
+
+            // Plausible Phase-2 this step → clear the transient implausible flag so a single
+            // bad geometry never permanently demotes the run (Claude Generated, Jun 2026).
+            m_phase2_historically_implausible = false;
         }
 
         // Check convergence for iterative case
@@ -3713,57 +4107,6 @@ Vector EEQSolver::calculateFinalCharges(
     printConvergenceSummary();
 
     return final_charges;
-}
-
-// ===== Energy Calculation =====
-
-double EEQSolver::calculateEEQEnergy(
-    const Vector& charges,
-    const std::vector<int>& atoms,
-    const Matrix& geometry_bohr,
-    const Vector& cn)
-{
-    const int natoms = atoms.size();
-    double energy = 0.0;
-
-    // Pairwise Coulomb energy with erf damping
-    for (int i = 0; i < natoms; ++i) {
-        for (int j = 0; j < i; ++j) {
-            double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
-            double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
-            double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
-            double r = std::sqrt(dx*dx + dy*dy + dz*dz);
-
-            if (r < 1e-10) continue;
-
-            EEQParameters params_i = getParameters(atoms[i], cn(i));
-            EEQParameters params_j = getParameters(atoms[j], cn(j));
-
-            double gamma_ij = 1.0 / std::sqrt(params_i.alp + params_j.alp);
-            double erf_gamma = std::erf(gamma_ij * r);
-            double coulomb = erf_gamma / r;
-
-            energy += charges(i) * charges(j) * coulomb;
-        }
-    }
-
-    // Self-energy terms
-    const double TSQRT2PI = 0.797884560802866;
-    for (int i = 0; i < natoms; ++i) {
-        EEQParameters params_i = getParameters(atoms[i], cn(i));
-
-        // CRITICAL FIX (Session 11): chi_i must include dxi term!
-        // Reference: XTB gfnff_engrad.F90:1581
-        // chi = -χ + dxi + CNF·√CN (NOT just -χ + CNF·√CN!)
-        double dxi_i = (m_dxi_stored.size() > i) ? m_dxi_stored(i) : 0.0;
-        double chi_i = -params_i.chi + dxi_i + params_i.cnf * std::sqrt(cn(i));
-        double self_energy = -charges(i) * chi_i
-                           + 0.5 * charges(i) * charges(i) * (params_i.gam + TSQRT2PI / std::sqrt(params_i.alp));
-
-        energy += self_energy;
-    }
-
-    return energy;  // Hartree
 }
 
 // ===== Correction Terms =====
@@ -3839,9 +4182,22 @@ Vector EEQSolver::calculateDxi(
             for (int j : topology->neighbor_lists[i]) {
                 int Z_j = atoms[j];
                 if (Z_j == 1) nh++;
-                // Metal check
-                if (Z_j > 20 && (Z_j <= 30 || (Z_j >= 39 && Z_j <= 48) || (Z_j >= 72 && Z_j <= 80))) {
-                    nm++;
+                // Metal check. CORRECTED (Sep 2026): this was a hardcoded transition-metal
+                // range (3d/4d/5d only), but the reference counts `imetal(j) /= 0`
+                // (gfnff_ini.f90:372), and imetal is `param%metal(Z)` - which includes the
+                // MAIN-GROUP metals - demoted to 0 only for a low-coordinate element of
+                // group > 3 (gfnff_ini.f90:273-274, "Sn, Pb, Bi with small CN are better
+                // described as non-metals"). Missing the main-group metals flipped the sign
+                // of the polyvalent-halogen dxi rule below: the bridging chlorines of
+                // GMTKN55 AL2X6/al2cl6 took -nn*0.021 instead of +nn*0.05, a 0.142 shift in
+                // chieeq that inverted their topology charge (-0.261 vs the reference
+                // +0.158) and, through fqq, cost 52 kcal/mol in the bond term.
+                if (Z_j >= 1 && Z_j <= 86) {
+                    int imetal_j = metal_type[Z_j - 1];
+                    const int group_j = periodic_group[Z_j - 1];
+                    const int nb_j = static_cast<int>(topology->neighbor_lists[j].size());
+                    if (nb_j <= 4 && group_j > 3) imetal_j = 0;
+                    if (imetal_j != 0) nm++;
                 }
                 // Sum electronegativities for averaging
                 if (Z_j < static_cast<int>(pauling_en.size())) {
@@ -3873,7 +4229,19 @@ Vector EEQSolver::calculateDxi(
             // Previous code applied dxi=-0.15 to ALL C with nn==2, causing HCN charge error.
             if (nn == 2) {
                 bool is_carbene = false;  // Equivalent of itag==1
-                if (topology.has_value() && topology->neighbor_lists[i].size() == 2) {
+                // CORRECTED (Sep 2026): prefer the REAL itag whenever the caller supplies it.
+                // Re-deriving "carbene" from the angle reproduces only the first half of
+                // gfnff_ini2.f90:244-253 and misses two later corrections the reference makes
+                // to the same array: the qa < -0.4 override (:251-254) and the aryne rule
+                // (:341-351, two bonded carbene carbons cancel each other's tag). On GMTKN55
+                // DC13/c20bowl every rim carbon of the cage therefore kept a spurious
+                // dxi = -0.15, which drove the EEQ charges ~18x too large and the Coulomb term
+                // from -0.0003 to -0.1017 Eh (64 kcal/mol).
+                const bool have_itag = topology.has_value()
+                    && static_cast<int>(topology->itag.size()) == natoms;
+                if (have_itag) {
+                    is_carbene = (topology->itag[i] == 1);
+                } else if (topology.has_value() && topology->neighbor_lists[i].size() == 2) {
                     int nb1 = topology->neighbor_lists[i][0];
                     int nb2 = topology->neighbor_lists[i][1];
                     // Calculate bond angle at atom i
@@ -3888,7 +4256,7 @@ Vector EEQSolver::calculateDxi(
                     if (r1 > 1e-10 && r2 > 1e-10) {
                         double cos_angle = (dx1*dx2 + dy1*dy2 + dz1*dz2) / (r1 * r2);
                         cos_angle = std::max(-1.0, std::min(1.0, cos_angle));
-                        double angle_deg = std::acos(cos_angle) * 180.0 / M_PI;
+                        double angle_deg = curcuma_acos(cos_angle) * 180.0 / M_PI;
                         is_carbene = (angle_deg < 150.0);  // Fortran: phi*180/pi < 150
                     }
                 }
@@ -4075,19 +4443,23 @@ Vector EEQSolver::calculateDgam(
             if (Z == 17) ff = -0.02;  // Cl
             if (Z == 35) ff = -0.11;  // Br
             if (Z == 53) ff = -0.07;  // I
+        }
 
-            // Metal corrections (requires metal_type array)
-            if (Z >= 1 && Z <= 86) {
-                int imetal_val = metal_type[Z - 1];
-                if (imetal_val == 1) ff = -0.08;   // Main group metals
-                if (imetal_val == 2) ff = -0.9;    // Transition metals (XTB comment: "too large")
-            }
+        // Claude Generated (Sep 2026): metal + noble-gas corrections are unconditional
+        // in the Fortran reference (gfnff_ini.f90:658-660: independent `if`s, not
+        // `else if`s, so they overwrite ff for ANY element, not just Z>10). They were
+        // nested inside the `else if (Z > 10)` branch above, which made them
+        // unreachable for the only two metals with Z<=10 (Li Z=3, Be Z=4 -
+        // metal_type[]==1): isolated Li+/Be+/Be2+ silently got dgam=0 instead of
+        // qa*(-0.08), a 25-200 kcal/mol self-energy error found via GMTKN55
+        // (DIPCS10/G21IP/ALK8 single-ion structures; Na+/Mg2+, Z>10, were unaffected).
+        if (Z >= 1 && Z <= 86) {
+            int imetal_val = metal_type[Z - 1];
+            if (imetal_val == 1) ff = -0.08;   // Main group metals
+            if (imetal_val == 2) ff = -0.9;    // Transition metals (XTB comment: "too large")
 
-            // Noble gases (Group 8)
-            if (Z >= 1 && Z <= 86) {
-                int group = periodic_group[Z - 1];
-                if (group == 8) ff = 0.0;  // Noble gases
-            }
+            int group = periodic_group[Z - 1];
+            if (group == 8) ff = 0.0;  // Noble gases
         }
 
         dgam(i) = qa * ff;
@@ -4129,7 +4501,9 @@ std::vector<bool> EEQSolver::detectAmideHydrogensFull(
     const std::optional<TopologyInput>& topology) const
 {
     auto is_pi = detectPiSystem(atoms, hybridization, topology);
-    auto is_amide = detectAmideNitrogens(atoms, hybridization, is_pi, topology, cn);
+    // exact_pi_membership=true: matches amideH()'s own internal amide() call in Fortran
+    // (piadr2, not piadr) - see detectAmideNitrogens()'s doc comment.
+    auto is_amide = detectAmideNitrogens(atoms, hybridization, is_pi, topology, cn, /*exact_pi_membership=*/true);
     return detectAmideHydrogens(atoms, hybridization, is_amide, topology);
 }
 
@@ -4200,6 +4574,20 @@ std::vector<bool> EEQSolver::detectPiSystem(
     const int natoms = atoms.size();
     std::vector<bool> is_pi_atom(natoms, false);
 
+    // Prefer the force field's own pi-candidate list when the caller supplies it. That
+    // array is the verbatim port of gfnff_ini.f90:312-336; the inference below predates it
+    // and differs in three ways that matter — it has no NR3-X and no SO3 veto, its pi
+    // element set is missing B and Cl, and its picon branch covers only N/O/F and only for
+    // hyb == 3. Claude Generated (Sep 2026, GMTKN55 BHROT27/methylamine): a nitrogen with
+    // four neighbours is vetoed by the reference but counted here, which pushes npiall from
+    // 1 to 2 and flips the dgam nitrogen branch from ff = -0.13 to -0.14 through the
+    // replicated piadr index-cutoff bug — 0.15 kcal/mol in the Coulomb term of a 7-atom
+    // molecule, and the same wherever an amine sits next to an sp/sp2 centre.
+    if (topology.has_value() && static_cast<int>(topology->is_pi.size()) == natoms) {
+        for (int i = 0; i < natoms; ++i) is_pi_atom[i] = (topology->is_pi[i] != 0);
+        return is_pi_atom;
+    }
+
     auto is_pi_element = [](int Z) {
         return (Z == 6 || Z == 7 || Z == 8 || Z == 9 || Z == 16);  // C, N, O, F, S
     };
@@ -4232,7 +4620,8 @@ std::vector<bool> EEQSolver::detectAmideNitrogens(
     const std::vector<int>& hybridization,
     const std::vector<bool>& is_pi_atom,
     const std::optional<TopologyInput>& topology,
-    const Vector& cn) const
+    const Vector& cn,
+    bool exact_pi_membership) const
 {
     const int natoms = atoms.size();
     std::vector<bool> is_amide(natoms, false);
@@ -4243,16 +4632,36 @@ std::vector<bool> EEQSolver::detectAmideNitrogens(
     // Fortran amide() (gfnff_ini2.f90:1553) receives piadr (NOT piadr2) as the pi array.
     // piadr(i)!=0 is equivalent to i_fortran <= npiall, i.e. i_cpp < npiall.
     // This means the "pi check" in amide() tests atom INDEX, not actual pi membership.
+    //
+    // Claude Generated (Sep 2026, S30L-CI system 17): Fortran actually calls amide() with
+    // TWO different pi arrays depending on the caller, and they disagree whenever a
+    // molecule's pi atoms are not exactly atoms 1..npiall by original numbering (true for
+    // any molecule where a non-pi atom - e.g. an sp3 CH2 - is interleaved with pi atoms,
+    // as in a simple cyclic bis-amide):
+    //   - gfnff_ini.f90:651 (the ff=-0.16 dgam branch) passes `piadr`  -> the buggy
+    //     index-cutoff behaviour above. GFN-FF's parameters were fit against this
+    //     quirk, so it must be preserved exactly for that caller.
+    //   - gfnff_ini2.f90:1499's amideH(), called from gfnff_ini.f90:673 for the
+    //     "chieeq(H) -= 0.02" Phase-2 chi correction, passes `piadr2` instead - the
+    //     CORRECT atom-indexed pi-membership array (piadr2(i)!=0 iff atom i truly is a
+    //     pi atom). That call must use real pi membership, not the index cutoff.
+    // Both call this same nc/no counting logic, so `exact_pi_membership` switches between
+    // them: false (default) reproduces the piadr bug for the dgam ff branch; true gives
+    // the piadr2-correct answer for the amideH()-derived hydrogen chi correction.
     int npiall = 0;
     for (int k = 0; k < natoms; ++k) {
         if (is_pi_atom[k]) npiall++;
     }
 
+    auto is_pi = [&](int idx) {
+        return exact_pi_membership ? is_pi_atom[idx] : (idx < npiall);
+    };
+
     for (int i = 0; i < natoms; ++i) {
         // FIX (Mar 7, 2026): Match Fortran amide() from gfnff_ini2.f90:1553-1580
         // Updated (Mar 19, 2026): Use Fortran-compatible piadr index check
         // Fortran: if (pi(a) .eq. 0 ...) → piadr(a)==0 → a > npiall → 0-based: i >= npiall
-        if (atoms[i] != 7 || i >= npiall) continue;
+        if (atoms[i] != 7 || !is_pi(i)) continue;
         if (i < static_cast<int>(hybridization.size()) && hybridization[i] != 3) continue;
 
         // Count pi-C neighbors (Fortran: nc)
@@ -4260,7 +4669,7 @@ std::vector<bool> EEQSolver::detectAmideNitrogens(
         int nc = 0;
         int ic = -1;  // The single pi-C neighbor (if nc==1)
         for (int neighbor : topology->neighbor_lists[i]) {
-            if (atoms[neighbor] == 6 && neighbor < npiall) {
+            if (atoms[neighbor] == 6 && is_pi(neighbor)) {
                 nc++;
                 ic = neighbor;
             }
@@ -4271,7 +4680,7 @@ std::vector<bool> EEQSolver::detectAmideNitrogens(
         // Fortran: at(j)==8 .and. pi(j).ne.0 .and. nb(20,j)==1 → piadr(j)!=0 → j < npiall
         int no = 0;
         for (int n2 : topology->neighbor_lists[ic]) {
-            if (atoms[n2] == 8 && n2 < npiall &&
+            if (atoms[n2] == 8 && is_pi(n2) &&
                 static_cast<int>(topology->neighbor_lists[n2].size()) == 1) {
                 no++;
             }
@@ -4314,29 +4723,3 @@ std::vector<bool> EEQSolver::detectAmideHydrogens(
     return is_amide_h;
 }
 
-std::vector<std::vector<int>> EEQSolver::buildNeighborLists(
-    const std::vector<int>& atoms,
-    const Matrix& geometry_bohr,
-    double cutoff_radius) const
-{
-    const int natoms = atoms.size();
-    std::vector<std::vector<int>> neighbors(natoms);
-
-    double cutoff_sq = cutoff_radius * cutoff_radius;
-
-    for (int i = 0; i < natoms; ++i) {
-        for (int j = 0; j < natoms; ++j) {
-            if (i == j) continue;
-
-            Vector ri = geometry_bohr.row(i);
-            Vector rj = geometry_bohr.row(j);
-            double distance_sq = (ri - rj).squaredNorm();
-
-            if (distance_sq < cutoff_sq) {
-                neighbors[i].push_back(j);
-            }
-        }
-    }
-
-    return neighbors;
-}

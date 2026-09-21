@@ -62,7 +62,7 @@ namespace {
     BEGIN_PARAMETER_DEFINITION(opt)
 
     // Basic
-    PARAM(method, String, "gfnff", "Energy/gradient method (uff, gfnff, gfn2, eht, ...)", "Basic", {})
+    PARAM(method, String, "gfnff", "Energy/gradient method. Default gfnff: the fast general-purpose choice (native GFN-FF). gfn2 is the accurate one (native GFN2-xTB, ~100x slower); gfn1, eht, pm3, uff, qmdff also available.", "Basic", {})
     PARAM(optimizer, String, "auto", "Optimizer algorithm: auto, lbfgspp, lbfgs, diis, rfo, ancopt", "Basic", {})
     PARAM(threads, Int, 1, "Number of parallel threads", "Basic", {})
     PARAM(charge, Int, 0, "Total molecular charge", "Basic", { "Charge" })

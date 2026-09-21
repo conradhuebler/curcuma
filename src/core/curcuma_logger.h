@@ -45,6 +45,7 @@ private:
     static bool m_use_colors;
     static OutputFormat m_format;
     static std::chrono::high_resolution_clock::time_point m_start_time;
+    static bool m_progress_enabled; // Claude Generated: global on/off for live progress bars
 
 public:
     // Configuration methods
@@ -53,6 +54,11 @@ public:
     static void set_format(OutputFormat fmt) { m_format = fmt; }
     static int get_verbosity() { return m_verbosity; }
     static bool colors_enabled() { return m_use_colors; }
+
+    // Claude Generated: global progress-bar switch. Disabled via -noprogress or when
+    // stdout is not a TTY (so redirected output / tests stay free of carriage-return noise).
+    static void set_progress_enabled(bool enable) { m_progress_enabled = enable; }
+    static bool progress_enabled() { return m_progress_enabled; }
 
     // Plain mode convenience methods - Claude Generated
     static void set_plain_mode(bool enable)
@@ -91,6 +97,12 @@ public:
     // Special formatting functions
     static void result_raw(const std::string& data);
     static void progress(int current, int total, const std::string& msg);
+    // Claude Generated: live in-place progress bar (carriage-return). No-op when the global
+    // switch is off (set_progress_enabled). The caller handles verbosity gating, because the
+    // logger's verbosity is lowered by sub-objects mid-task. Call progress_done() once to close
+    // the line with '\n'.
+    static void progress_bar(int current, int total, const std::string& label);
+    static void progress_done();
     static void header(const std::string& title);
 
     // Unit-aware output functions

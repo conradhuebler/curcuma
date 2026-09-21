@@ -73,6 +73,10 @@ public:
     // Configuration setters
     void setEnergyCalculator(EnergyCalculator* calculator) { m_interface = calculator; }
     void setConstraints(const Vector& constraints) { m_constraints = constraints; }
+    // Claude Generated 2026 - Bind the driver's external-force bias (interactive
+    // mouse grab, Cartesian Eh/Bohr, atom-major) added to every gradient
+    // evaluation in getEnergyGradient(). Pointer stays valid for the run.
+    void bindExternalForces(const Vector* forces) { m_external_forces = forces; }
     void setOptimizationMethod(Method method) { m_method = method; }
     void setOptimMethod(int method)
     { // Legacy compatibility - Claude Generated
@@ -151,6 +155,7 @@ private:
 
     // Core data members
     EnergyCalculator* m_interface = nullptr;
+    const Vector* m_external_forces = nullptr;  // Claude Generated 2026 - interactive grab bias
 
     // State variables
     bool m_error = false;

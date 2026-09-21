@@ -12,6 +12,8 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
+#include <unistd.h>
 #include <iomanip>
 #include <iostream>
 
@@ -100,7 +102,7 @@ int main(int argc, char* argv[])
     std::cout << "\nResult: " << (pass ? "PASS" : "FAIL") << " (max_diff=" << std::scientific << max_diff << ")\n";
 
     std::cout.flush();
-    _exit(pass ? 0 : 1);
+    std::_Exit(pass ? 0 : 1);
 }
 
 #else
