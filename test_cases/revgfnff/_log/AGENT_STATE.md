@@ -60,6 +60,19 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 
 ## Live agents
 
+**Orchestrator verification of package 11 (own rebuild, own code, 2026-09-22):** (a) the primary
+table recomputed independently from the 11 700 raw CSV rows with an own cluster bootstrap matches
+to 4 decimals (mg 0.0410 / mg2 0.0513 / mg3 0.0423 at 0.25 fs; 0.0449 / 0.0359 / 0.0513 at 0.125;
+0/780 for all five arms at 0.0625; only `gauss+delivered` at 0.125 has a CI excluding 0,
+[-0.056, -0.003]); (b) three raw rows re-run with the orchestrator's own harness/parser
+(`c2h6_f10 mg`, `ch3nh2_f6 mg2`, `ch4_H_f14 gauss_delivered`) reproduce max step, n >= 50, rebuild
+count and T_max exactly; (c) the anchor-cell claim holds in the data: `mg3` 256.8 / 43.4 / 35.8 /
+49.9 / 44.7 / 38.5 kJ over six replicates, i.e. **256.8 is a singleton**. **Own correction**: the
+orchestrator's "mg3 is 8-9x worse" of 2026-09-20 rested on that one unperturbed trajectory (n = 1) —
+it correctly disputed package 10's aggregate summary, but its own counter-claim was the same kind of
+overreach. Tail statement now supported by n = 780 per arm and dt: neither `mg2` nor `mg3` is
+distinguishable from `mg` at any dt; the tail argues neither for nor against them.
+
 **2026-09-22: `package-11` DONE — measurement only, no source/default change.** No agent running.
 Three local commits (pre-registration, harness + raw CSV, results), nothing pushed. Detail
 `WORK_STATUS.md` 11.0-11.5 (`Packages done: 11/11`), harness `scripts/revgfnff_tail_sweep.py`, raw
