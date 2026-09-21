@@ -31,6 +31,9 @@ Commits since 2026-09-13 (newest last):
 | `a474be89` | **QP gate not cleared** + `rev_bo13_ordinary_join` (default off) + `shareD` dump; **3331 kJ event re-attributed to the proxy**, FABLE_BOND_STATE/PROXY_STATUS corrected |
 | `1b7e5ff0` | **MD time-step unit fix (general curcuma)**: `-md.time_step 1.0` integrated 1.9516 fs; new `MD_TIME_UNIT_FS`, ctest `md_time_axis` |
 | `cd8c64d9` | **rev-gfnff re-derived in true fs**: warning threshold 0.125 -> 0.0625, `rev_dt_cap` help, mg/mg2/mg3 ordering falsified, `cli_simplemd_20` flagged |
+| `ae0569e2` | **package 11 pre-registration**: the react-MD tail decision statistic, committed before the sweep |
+| `3949a93d` | package 11 harness `scripts/revgfnff_tail_sweep.py` + raw `tail_remeasure.csv` (11 700 rows) |
+| (this file) | **package 11 results**: mg2/mg3 NOT distinguishable from mg on the smoothness tail (780 paired trajectories per arm per dt) |
 
 **FULL `ctest` at HEAD (2026-09-14 night, release/ rebuilt after the cherry-pick): 14 failures out
 of the whole suite, none caused by the cherry-pick — orchestrator-verified each one.**
@@ -57,22 +60,52 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 
 ## Live agents
 
-**RUNNING since 2026-09-21: `package-11` (Opus), measurement only** — clean re-measurement of the
-`mg` / `mg2` / `mg3` react-MD tail in TRUE fs, commissioned by the operator after the orchestrator's
-spot-check disputed package 10's "mg3's tail was a clock artefact" summary (`c2h6/T2000_f0`, true
-0.25 fs: mg 28.3 kJ/0 events, mg2 32.2/0, mg3 256.8/12 — these three rows are the agent's ANCHOR and
-must reproduce exactly before anything counts). Design safeguards, all because the previous
-aggregate misled: (1) the decision statistic is PRE-REGISTERED in `WORK_STATUS.md` and committed
-before the sweep's results exist; (2) replicates by paired ~1e-5 A geometry perturbation (`-md.seed`
-does not vary the start; a react trajectory is chaotic, one run per cell is one sample); (3) raw
-per-(cell, replicate, arm, dt) CSV `test_cases/revgfnff/_log/tail_remeasure.csv` next to any
-aggregate, plus harness `scripts/revgfnff_tail_sweep.py`; (4) three true dt (0.25 / 0.125 /
-0.0625) at a fixed 5 ps true duration; (5) one bounded attribution of the `mg3` f0 event (same
-mechanism as package 7 amplified by a deeper well, or specific to `mg3`'s order dimension). No
-source change, no default change, no adoption recommendation — the operator decides. Still open
-from before, unchanged: `cli_simplemd_20` (flagged, control no longer violates below the 0.25 fs
-cap), whether to lower `rev_dt_cap` to 0.0625, and the `ATOMIC_TIME_TO_FS` constant in `units.h`
-that is really aut -> attoseconds (zero use sites, not touched).
+**2026-09-22: `package-11` DONE — measurement only, no source/default change.** No agent running.
+Three local commits (pre-registration, harness + raw CSV, results), nothing pushed. Detail
+`WORK_STATUS.md` 11.0-11.5 (`Packages done: 11/11`), harness `scripts/revgfnff_tail_sweep.py`, raw
+data `test_cases/revgfnff/_log/tail_remeasure.csv` (11 700 rows). Binary: `build_rev` rebuilt at
+`d60fae2b`, md5 `cc6aace6dcbc4800aaf4b6c5cbcc7a13`.
+
+- **ANCHOR REPRODUCED EXACTLY** through the harness before anything else was measured:
+  `c2h6/T2000_f0`, true dt 0.25, unperturbed, 5 ps — mg 28 rebuilds / 28.3 kJ / 0 events / 5206 K,
+  mg2 26 / 32.2 / 0 / 5069, mg3 42 / 256.8 / 12 / 7030. The orchestrator's three disputed rows are
+  correct measurements.
+- **The DISPUTE is resolved, and neither side's conclusion survives.** 130 cells x **6 replicates**
+  (replicate 0 unperturbed, 1-5 a paired 1e-5 A displacement) x 5 arms x 3 true dt = **11 700
+  trajectories**, decision statistic PRE-REGISTERED and committed before the sweep (`ae0569e2`).
+  Primary: fraction of trajectories with max per-step |dEpot| >= 100 kJ/mol, paired against `mg`,
+  95 % cluster bootstrap over cells. **Neither `mg2` nor `mg3` is distinguishable from `mg` at any
+  dt**: dt 0.25 p = 0.0410 (mg) / 0.0513 (mg2) / 0.0423 (mg3), dp CIs [-0.017, +0.035] and
+  [-0.026, +0.026]; dt 0.125 0.0449 / 0.0359 / 0.0513, CIs contain 0; dt 0.0625 **0/780 for every
+  arm**. A post-hoc mg3-vs-mg2 comparison is null too. So package 9's "mg3's tail is clearly worse"
+  AND package 10's "mg3 is the best of the three" are both unsupported — each read an ordering out
+  of one trajectory per cell.
+- **The anchor event is a singleton.** Same cell, same arm, six replicates: mg3 gives **256.8**,
+  43.4, 35.8, 49.9, 44.7, 38.5 kJ. A 1e-5 A displacement removes it five times out of five, and
+  mg / mg2 / gauss stay in 28-57 kJ on the same cell. Generally: ~75 % of failing cells fail in
+  exactly 1 of 6 replicates, and two arms' failing-cell sets overlap by a Jaccard of only 0.09-0.28
+  — "which cell is worst" is mostly the trajectory, not the arm. That is how the aggregate and the
+  single-cell check could both be right and still disagree.
+- **The one effect that IS resolved is the SHARE rule, not the well form**: `gauss + delivered`
+  (the pre-2026-09-19 default) is better than `mg` at dt 0.125, dp = **-0.0295 [-0.0564, -0.0026]**,
+  the only interval in the whole sweep that excludes 0 — and its 3 failing cells fail in **all six**
+  replicates (the `ch4_H` radical adducts), i.e. reproducible where `conserving`'s tail is sporadic.
+  Same conclusion as package 7, now replicated.
+- **Attribution of the mg3 anchor event (n = 1)**: bond term +199.8 of 256.8 kJ (angle +54.1);
+  the transition in flight is the **break of a transient geminal H3-H4 on C1**, corner weight `s`
+  0.000000 -> **0.756416 in one 0.25 fs step**; the 283.3 kJ corner gap is the `fc` re-derivation
+  of the three C-H bonds on that carbon (C1-H3 +139.2, C1-H4 +121.6, C1-H5 +21.6), while the H-H
+  pair's own well contributes **0.00** (a transitioning pair's well is in every corner by
+  construction). At that geometry `mg3`'s C-H wells differ from `mg`'s by **-0.19 to +0.37 %** and
+  are bit-identical to `mg2`'s; the only pair its order dimension moves is C-C (+19.1 %), worth
+  0.02 kJ of the 283. **So: package 7's `conserving` mechanism verbatim, NOT amplified by a deeper
+  well and NOT the order dimension.**
+- **Still open, unchanged**: `cli_simplemd_20` (flagged), whether to lower `rev_dt_cap` to 0.0625
+  (11.2 now backs 0.0625 on 780 trajectories per arm instead of one per cell), the `ATOMIC_TIME_TO_FS`
+  constant in `units.h`, and **the `rev_well_form` adoption decision itself** — package 11 only
+  removes the smoothness tail from the arguments on both sides; the conformer/S66 guard
+  (1.0439 -> 1.0543/1.0547) and the 0.0212 A equilibrium shift are static and stand as package 9
+  measured them.
 
 **2026-09-20: `package-10` DONE — a general curcuma bug fixed (the MD clock), and every rev-gfnff
 "fs" re-derived.** No agent running. Two local commits, nothing pushed. Detail `WORK_STATUS.md`

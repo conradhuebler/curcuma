@@ -1,5 +1,5 @@
 # WORK_STATUS — rev-gfnff work packages 1-11 (2026-09-18 / 21)
-Packages done: 10/11 (9 = 9a + 9b; 11 pre-registered, sweep pending)
+Packages done: 11/11 (9 = 9a + 9b)
 
 > **Package 10 re-scales the time axis of everything before it.** The MD time step was integrated
 > in the wrong unit until Sep 2026, so every "fs" and every duration written by packages 1-9 is
@@ -1651,3 +1651,188 @@ deleted immediately. Logs are kept only for the handful of runs used in the 11.C
 recorded in package 9 — the conformer/S66 guard opening 1.0439 -> 1.0543/1.0547 and the 0.0212 A
 equilibrium bond-length shift — are static, time-step-independent quantities and are not re-run
 here. The adoption decision is the operator's.
+
+## 11.1 What was run
+
+11 700 trajectories, all `rc = 0`, 19 750 s of CPU in 2 471 s wall at 8 concurrent single-thread
+processes. Binary `cur11` = a frozen copy of `build_rev/curcuma` rebuilt at HEAD `d60fae2b`
+(`MAKE_EXIT=0`, md5 `cc6aace6dcbc4800aaf4b6c5cbcc7a13`); harness
+`scripts/revgfnff_tail_sweep.py`; raw data `tail_remeasure.csv` (11 700 rows, 1.2 MB). **Nothing
+was cut** — the full design of 11.0 was executed (130 cells x 6 replicates x 5 arms x 3 dt, 5 ps
+true each). No raw MD log was written: stdout was parsed as it streamed and each run directory
+deleted. The `rev dump (flags)` line confirms the shipped defaults were active
+(`share_form conserving`, `share_donor_rule true`, `budget_fix_h true`).
+
+**Anchor: reproduced exactly**, through the harness itself (`revgfnff_tail_sweep.py anchor`):
+mg 28 rebuilds / 28.3 kJ / 0 steps >= 50 / 5206 K, mg2 26 / 32.2 / 0 / 5069, mg3 42 / 256.8 / 12 /
+7030 — the orchestrator's three rows to the digit. It reproduces again after the parser was
+optimised, and the three rows are also IN the CSV as `c2h6_T2000_f0, replicate 0, dt 0.25`.
+
+**Validity check on the perturbation.** It does change the trajectory (`c2h6/T2000_f0`, mg3,
+dt 0.25: rebuilds 42 / 98 / 34 / 64 / 52 / 80 over the six replicates) and it does not bias the
+statistic: at dt 0.25 the unperturbed replicate 0 alone gives p = 0.0385 / 0.0615 / 0.0385 /
+0.0385 / 0.0231 for mg / mg2 / mg3 / gauss / gauss_delivered against 0.0415 / 0.0492 / 0.0431 /
+0.0462 / 0.0231 for the five perturbed replicates. So replicate 0 is a sample from the same
+distribution as the others — which is precisely why a single one of them cannot decide anything.
+
+## 11.2 PRIMARY result — no well form is distinguishable from `mg`
+
+Fraction of the 780 trajectories per arm whose max per-step |dEpot| (rebuild steps excluded)
+reaches 100 kJ/mol; `dp` is the paired difference against `mg` with its 95 % cluster-bootstrap
+interval over the 130 cells (10 000 draws); `*` marks an interval that excludes 0.
+
+| dt / fs | arm | bad / 780 | p | dp vs mg [95 % CI] | McNemar | median | p90 | p99 | max |
+|---:|---|---:|---:|---|---:|---:|---:|---:|---:|
+| 0.25 | **mg** | 32 | 0.0410 | (reference) | | 22.4 | 51.0 | 300.5 | 434.0 |
+| 0.25 | mg2 | 40 | 0.0513 | +0.0103 [-0.0167, +0.0346] | 0.396 | 22.1 | 52.8 | 307.3 | 493.3 |
+| 0.25 | mg3 | 33 | 0.0423 | +0.0013 [-0.0256, +0.0256] | 1.0 | 21.9 | 51.3 | 303.0 | 390.8 |
+| 0.25 | gauss | 35 | 0.0449 | +0.0038 [-0.0231, +0.0333] | 0.788 | 21.6 | 49.3 | 294.6 | 530.0 |
+| 0.25 | gauss+delivered | 18 | 0.0231 | -0.0179 [-0.0513, +0.0167] | 0.065 | 23.3 | 41.4 | 127.8 | 129.7 |
+| 0.125 | **mg** | 35 | 0.0449 | (reference) | | 9.8 | 29.3 | 152.3 | 204.2 |
+| 0.125 | mg2 | 28 | 0.0359 | -0.0090 [-0.0359, +0.0167] | 0.419 | 9.9 | 26.9 | 162.8 | 228.5 |
+| 0.125 | mg3 | 40 | 0.0513 | +0.0064 [-0.0192, +0.0295] | 0.615 | 9.9 | 30.5 | 163.3 | 220.4 |
+| 0.125 | gauss | 19 | 0.0244 | -0.0205 [-0.0474, +0.0064] | 0.037 | 9.3 | 23.8 | 143.5 | 232.9 |
+| 0.125 | gauss+delivered | 12 | 0.0154 | **-0.0295 [-0.0564, -0.0026]\*** | 2.8e-06 | 10.0 | 19.9 | 136.6 | 136.8 |
+| 0.0625 | all five | 0 | 0.0000 | +0.0000 [0, 0] | 1.0 | 5.4-5.8 | 9.7-13.0 | 51-73 | 72-100 |
+
+**By the pre-registered rule: neither `mg2` nor `mg3` (nor `gauss`) is distinguishable from `mg`
+at any of the three time steps.** Every interval contains 0 and every McNemar p is >= 0.037. The
+one arm that IS distinguishable is `gauss + delivered` at dt 0.125, and it is **better** than `mg`
+(dp = -0.0295, CI [-0.0564, -0.0026]) — the pre-2026-09-19 default, i.e. the share rule, not the
+well form, is the only lever this measurement resolves. That is the same conclusion package 7
+reached by a different route ("the tail belongs to `conserving`, the well form only changes how
+often it is visited") and it survives replication.
+
+At the secondary 50 kJ/mol threshold the picture is identical (mg 0.1064, mg2 0.1141, mg3 0.1077
+at dt 0.25; all CIs contain 0; only `gauss + delivered` separates). A post-hoc `mg3` vs `mg2`
+comparison (NOT pre-registered) is also null at every dt and threshold: the largest effect is
+dp = +0.0154 [-0.0013, +0.0321] at dt 0.125 / 100 kJ.
+
+**At true dt 0.0625 fs no arm produces a single trajectory above 100 kJ/mol** in 780 tries — this
+confirms package 10's 0.0625 recommendation on 30x the sample it was measured on, and it holds for
+every well form and both share rules.
+
+## 11.3 Why the aggregate and the single cell disagreed — the failures are sporadic
+
+Number of the 130 cells that fail (>= 1 of their 6 replicates above 100 kJ/mol), and how many
+replicates of a failing cell fail:
+
+| dt | arm | failing cells | k=1 | k=2 | k=3 | k=4 | k=5 | k=6 | shared with mg (Jaccard) |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---|
+| 0.25 | mg | 21 | 15 | 4 | 1 | 0 | 0 | 1 | — |
+| 0.25 | mg2 | 31 | 24 | 5 | 2 | 0 | 0 | 0 | 9 / 43 (0.21) |
+| 0.25 | mg3 | 26 | 19 | 7 | 0 | 0 | 0 | 0 | 8 / 39 (0.21) |
+| 0.25 | gauss | 22 | 17 | 3 | 0 | 0 | 0 | 2 | 9 / 34 (0.26) |
+| 0.25 | gauss+delivered | 3 | 0 | 0 | 0 | 0 | 0 | **3** | 0 / 24 (0.00) |
+| 0.125 | mg | 19 | 11 | 4 | 1 | 2 | 1 | 0 | — |
+| 0.125 | mg2 | 18 | 12 | 3 | 2 | 1 | 0 | 0 | 3 / 34 (0.09) |
+| 0.125 | mg3 | 31 | 24 | 6 | 0 | 1 | 0 | 0 | 11 / 39 (0.28) |
+| 0.125 | gauss+delivered | 2 | 0 | 0 | 0 | 0 | 0 | **2** | 1 / 20 (0.05) |
+
+Two things follow.
+
+**(a) The failing cells barely overlap between arms** (Jaccard 0.09-0.28). "Which cell is the
+worst cell" is mostly a property of the trajectory, not of the arm — which is exactly how package
+10's aggregate and the orchestrator's single-cell check could both be right and still contradict
+each other.
+
+**(b) Under `conserving`, ~75 % of failing cells fail in exactly ONE of six replicates.** No cell
+fails in 5 or 6 replicates for `mg2` or `mg3`, and only one does for `mg` (`c2h6_T2000_f6` at
+0.25, `c2h6_T2000_f24` at 0.125). Under `delivered` it is the opposite: 3 cells fail, and each
+fails in **all six** replicates (`ch4_H_T1000_f10`, `ch4_H_T2000_f10`, `ch4_H_T2000_f14` — the
+artificial radical-adduct cells package 7 named). So the two share rules fail in qualitatively
+different ways: `delivered` has a small, reproducible, identifiable set of bad configurations;
+`conserving` has a diffuse, chaotic tail spread over a fifth of all cells. A single run can find
+the first reliably and the second only by luck.
+
+**The anchor cell is the textbook case.** `c2h6/T2000_f0` at dt 0.25, max per-step |dEpot| over
+the six replicates:
+
+| arm | rep 0 (unperturbed) | rep 1 | rep 2 | rep 3 | rep 4 | rep 5 |
+|---|---:|---:|---:|---:|---:|---:|
+| mg | 28.4 | 37.1 | 29.6 | 33.6 | 42.8 | 55.0 |
+| mg2 | 32.2 | 35.9 | 29.1 | 47.4 | 33.1 | 37.2 |
+| mg3 | **256.8** | 43.4 | 35.8 | 49.9 | 44.7 | 38.5 |
+| gauss | 36.1 | 28.6 | 50.8 | 50.5 | 49.4 | 57.2 |
+
+The 256.8 kJ that the orchestrator's spot-check found is a **singleton**: a 1e-5 A displacement of
+the start removes it, five times out of five, and every other arm stays in the same 28-57 kJ band
+on the same cell. It is a real event of a real trajectory — it is not evidence about `mg3`.
+
+## 11.4 The `mg3` anchor event, attributed (n = 1)
+
+`c2h6/T2000_f0`, replicate 0, mg3, dt 0.25, the +256.8 kJ step t = 2.98825 -> 2.98850 ps. All
+twelve of that trajectory's >= 50 kJ steps lie in one 6 fs window (2.9845-2.9905 ps); this is one
+event, not twelve.
+
+**Which term.** Per-step decomposition (`terms2.py` on a verbosity-3 replay, which reproduces the
+event to the digit): **bond +199.8 kJ/mol**, angle +54.1, non-bonded repulsion +19.4, bonded
+repulsion -16.5, everything else < 0.1 — sum +256.8. Over-coordination is exactly 0 across the
+step; every rebuild in the window reports `dE_jump = 0.000000 Eh`, so there is no hard swap.
+
+**Which pair, and what the blend does.** `CURCUMA_BLENDDUMP=1`: the transition in flight is the
+**break of a transient geminal H3-H4** (both hydrogens on C1; C2-H4 had broken 59 fs earlier),
+window `[w_a, w_b] = [0.32344, 0.02000]` in bond ORDER. Across the jump step the corner weight `s`
+goes **0.000000 -> 0.756416** — 76 % of the window in one 0.25 fs step — for a distance change of
+only 2.09478 -> 2.22454 a0.
+
+**What the corner gap is made of.** `CURCUMA_SHAREDUMP=1` prints both corners of the same energy
+call. Bond-term difference (unbridged minus bridged) at the pre-jump geometry, per pair:
+
+| pair | r / a0 | E bridged | E unbridged | gap / kJ |
+|---|---:|---:|---:|---:|
+| C1-H3 | 2.19426 | -0.13570535 | -0.08268342 | **+139.2** |
+| C1-H4 | 2.53478 | -0.11871910 | -0.07242078 | **+121.6** |
+| C1-H5 | 2.10546 | -0.17413552 | -0.16590890 | +21.6 |
+| C1-C2 + the three C2-H | — | — | — | +0.09 total |
+| **H3-H4 (the transitioning pair)** | 2.09478 | -0.05107869 | -0.05107869 | **0.00** |
+| | | | **total** | **+283.3** |
+
+`0.756416 x 283.3 = 214 kJ` against the measured bond change of +200 (the rest is the geometry
+moving within the step). **The gap is the re-derivation of the force constant `fc` of the three
+C-H bonds on the carbon that hosts the geminal pair** — the same quantity `BREAK_TAIL_STATUS.md`
+isolated — and **not** the H-H pair's own well, which is bit-identical in both corners by
+construction (a transitioning pair's well belongs to every corner, `ff_workspace.cpp`).
+
+**How much of this is `mg3`?** Single points at the *same* geometry with the three well forms
+(`CURCUMA_SHAREDUMP=1`): the six C-H wells are **bit-identical between `mg2` and `mg3`** and
+differ from `mg` by **-0.19 % to +0.37 %** (C1-H3 0.16150247 mg / 0.16188876 mg2 = mg3; C1-H4
+0.14192413 / 0.14164877). The only pair `mg3` changes appreciably is **C-C** (0.13395966 mg /
+0.13470578 mg2 / 0.15957860 mg3, +19.1 % over mg) — and C-C contributes **0.02 kJ/mol** to the
+283 kJ corner gap. The `mg3`-specific order dimension therefore touches nothing that carries this
+event: on ethane the order table differs from the element-pair table only for C-C (H-H and C-H
+have a single order-1 row, verified in `rev_well_table_v2.h` and against a live dump).
+
+**Verdict: mechanism (a), without the "amplified by a deeper well" part.** It is package 7's
+`conserving` mechanism verbatim — a transient geminal H-H whose fixed-width bond-order transition
+window is about two MD steps wide in distance at 0.25 fs and 2000 K, so one step carries three
+quarters of a 283 kJ corner gap. At the event geometry the well form is worth **under 1 kJ/mol of
+that 283**, so it cannot be the amplifier; what `mg3` changed is which trajectory arrives at that
+configuration. **n = 1** — this is one event of one trajectory, and 11.3 shows five sibling
+trajectories of the same cell and arm that never reach it.
+
+One caveat on the classic "halve dt and the event disappears" check: on this cell it does
+(256.8 -> 12.0 kJ at 0.125), but a different dt is a *different* trajectory after the first
+divergence — at 0.0625 the same cell/arm gives 1096 rebuilds and 128 steps >= 50 kJ with a max of
+79.5. The dt statement is only safe as the 780-trajectory statement of 11.2, not per cell.
+
+## 11.5 What this does and does not settle
+
+- **Does**: on the react-MD smoothness axis, at 780 paired trajectories per arm and dt, `mg2` and
+  `mg3` are **not distinguishable from `mg`** — neither better nor worse. Package 9's "`mg3` has a
+  clearly worse tail" and package 10's "`mg3` is the best of the three" are BOTH unsupported; each
+  read an ordering out of a sample of one trajectory per cell. The orchestrator's spot-check is a
+  correct measurement of a singleton.
+- **Does**: `gauss + delivered` is measurably smoother than any `conserving` arm at dt 0.125
+  (the only result whose CI excludes 0), and its failures are reproducible where `conserving`'s
+  are sporadic.
+- **Does**: true 0.0625 fs bounds every arm (0 of 780 above 100 kJ/mol each).
+- **Does not**: touch the two other costs of `mg2`/`mg3` — the conformer/S66 guard (1.0439 ->
+  1.0543/1.0547) and the 0.0212 A equilibrium shift — or their class-A/class-D benefits. Those are
+  static and stand as package 9 measured them. **The adoption decision is the operator's**; this
+  package only removes the smoothness tail from the list of arguments in either direction.
+- **Method note.** The decisive number was not any aggregate but the per-cell replicate table:
+  ~75 % of failing cells fail in 1 of 6 replicates, and the failing-cell sets of two arms overlap
+  by a Jaccard of 0.2. Any future react-MD tail claim should report that ratio before reporting a
+  maximum — a maximum over one trajectory per cell is a draw from a distribution whose spread this
+  package measures for the first time.
