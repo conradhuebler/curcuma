@@ -744,6 +744,16 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dSpP;
     bool               p_dense_valid = true;
     int                last_ncol = 0;
+    // Point 2 (Claude Generated, Sep 2026): the device gradient's H0-Pulay and CN-onsite
+    // kernels read P and W ONLY at stored screened pairs (verified exhaustively - see
+    // computeGradient) and at the AO diagonal (always in-pattern by construction, see
+    // buildScreenedPairs). dSpW is the pattern-only twin of dSpP for the energy-weighted
+    // density W (built by the *_spP gradient kernels below via k_density_sp, weight 2*eps
+    // instead of occ); dSpDiagIdx[mu] is the pair-storage index e of the (mu,mu) entry,
+    // computed once in buildScreenedPairs (same loop that builds dSpRow/dSpCol, no extra
+    // scan). Neither is needed when the geometry is small enough to stay dense.
+    CudaBuffer<double> dSpW;
+    CudaBuffer<int>    dSpDiagIdx;
     std::vector<int>   h_sp_row, h_sp_col;       // host copy (dense downloads)
     // Per-atom screening data captured in beginBasis (geometry independent).
     std::vector<int>    h_z, h_at_ao0, h_at_nao;
@@ -761,12 +771,12 @@ struct XtbGpuContext::Impl {
             b->free();
         for (CudaBuffer<float>* b : { &dCf, &dLf, &dWorkf })
             b->free();
-        for (CudaBuffer<double>* b : { &dSpS, &dSpH0, &dSpDp, &dSpQp, &dSpTmp, &dSpP })
+        for (CudaBuffer<double>* b : { &dSpS, &dSpH0, &dSpDp, &dSpQp, &dSpTmp, &dSpP, &dSpW })
             b->free();
         releaseDensityHelpers();
         mp_otf = false;
         p_dense_valid = true;
-        for (CudaBuffer<int>* b : { &dSpRow, &dSpCol, &dSpColPtr, &dSpPerm })
+        for (CudaBuffer<int>* b : { &dSpRow, &dSpCol, &dSpColPtr, &dSpPerm, &dSpDiagIdx })
             b->free();
         h_sp_row.clear(); h_sp_row.shrink_to_fit();
         h_sp_col.clear(); h_sp_col.shrink_to_fit();
@@ -1138,22 +1148,40 @@ __global__ void k_grad_cn_onsite(int nao, const double* __restrict__ P,
     atomicAdd(&dEdcn[ao2at[mu]], (-kcn[ao2sh[mu]]) * Pmm);
 }
 
+// Point 2 (Claude Generated, Sep 2026): pattern-only twin - P(mu,mu) read straight out of the
+// compact dSpP array via the diagonal index dSpDiagIdx[mu] (built once in buildScreenedPairs;
+// the AO diagonal is always in the screened pattern - an atom is always its own neighbour).
+__global__ void k_grad_cn_onsite_spP(int nao, const double* __restrict__ Psp,
+                                     const int* __restrict__ diag_idx,
+                                     const double* __restrict__ kcn, const int* __restrict__ ao2sh,
+                                     const int* __restrict__ ao2at, double* __restrict__ dEdcn)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mu >= nao) return;
+    const double Pmm = Psp[diag_idx[mu]];
+    atomicAdd(&dEdcn[ao2at[mu]], (-kcn[ao2sh[mu]]) * Pmm);
+}
+
 // Section 2b: H0/Pulay off-site gradient. One thread per AO pair (μ,ν) with iat<jat.
 // Mirrors xtb_gradient.cpp:228-438 (GFN1/GFN2 isotropic part; the GFN2 multipole
 // integral Pulay block is Stage 4b and handled separately).
-// Pair body of the H0/Pulay gradient, shared by the dense kernel (every (mu,nu)) and the
-// screened-pair kernel (stored pairs only; S and H0 come from the sparse arrays).
-// Claude Generated (Sep 2026): factored out of k_grad_h0_pulay unchanged.
+// Pair body of the H0/Pulay gradient, shared by the dense kernel (every (mu,nu)), the
+// screened-pair kernel (stored pairs only; S and H0 come from the sparse arrays, P/W from
+// the dense buffers at the pattern position) and the pattern-only screened-pair kernel
+// (S/H0/P/W all come from the sparse arrays - Point 2, Sep 2026).
+// Claude Generated (Sep 2026): factored out of k_grad_h0_pulay unchanged. Pmn/Wmn are now
+// passed in by the caller (was a dense P[mn]/W[mn] lookup here) so the same body serves a
+// dense buffer, a dense buffer read at a pattern index, or a pattern-only array - the caller
+// decides where Pmn/Wmn come from, this function no longer knows or cares.
 __device__ __forceinline__ void d_grad_h0_pulay_pair(
-    int mu, int nu, double Smn, double H0mn,
-    int nao, int is_gfn2,
+    int mu, int nu, double Smn, double H0mn, double Pmn, double Wmn,
+    int is_gfn2,
     const int* __restrict__ ao2sh, const int* __restrict__ ao2at, const int* __restrict__ ang,
     const int* __restrict__ iao_sh, const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
     const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
     const double* __restrict__ sh_zeta, const double* __restrict__ shpoly, const double* __restrict__ kcn,
     const int* __restrict__ valence, const int* __restrict__ z, const double* __restrict__ se,
-    const double* __restrict__ xyz, const double* __restrict__ P,
-    const double* __restrict__ W, const double* __restrict__ v_ao,
+    const double* __restrict__ xyz, const double* __restrict__ v_ao,
     const double* __restrict__ v_dp, const double* __restrict__ v_qp,
     double* __restrict__ grad, double* __restrict__ dEdcn)
 {
@@ -1202,8 +1230,6 @@ __device__ __forceinline__ void d_grad_h0_pulay_pair(
     const double h_av = 0.5 * (se[isha] + se[ishb]) * h_factor;
     const double dlog_pi_dr_r = (shpoly[isha] / pi_a + shpoly[ishb] / pi_b) * rr / (2.0 * r2);
 
-    const size_t mn = static_cast<size_t>(mu) + static_cast<size_t>(nu) * nao;
-    const double Pmn = P[mn], Wmn = W[mn];
     double dS[3];
     if (dpair) {
         d_overlap_grad_elem(la, sa, lb, sb,
@@ -1298,12 +1324,15 @@ __global__ void k_grad_h0_pulay(
     if (mu >= nao || nu >= nao) return;
     if (ao2at[mu] >= ao2at[nu]) return;  // unique atom pairs, off-site only
     const size_t mn = static_cast<size_t>(mu) + static_cast<size_t>(nu) * nao;
-    d_grad_h0_pulay_pair(mu, nu, S[mn], H0[mn], nao, is_gfn2, ao2sh, ao2at, ang, iao_sh,
+    d_grad_h0_pulay_pair(mu, nu, S[mn], H0[mn], P[mn], W[mn], is_gfn2, ao2sh, ao2at, ang, iao_sh,
                          sh_nprim, sh_prim_off, prim_alpha, prim_coeff, sh_zeta, shpoly, kcn,
-                         valence, z, se, xyz, P, W, v_ao, v_dp, v_qp, grad, dEdcn);
+                         valence, z, se, xyz, v_ao, v_dp, v_qp, grad, dEdcn);
 }
 
-// Screened-pair twin: one thread per stored pair e = (row, col).
+// Screened-pair twin: one thread per stored pair e = (row, col). P and W are dense (a full
+// nao x nao buffer) but only ever read at the pattern position (mu,nu) - kept as the
+// reference/fallback for callers that upload P/C explicitly (pc_resident=false in
+// computeGradient) rather than reuse the resident screened-pattern density.
 __global__ void k_grad_h0_pulay_sp(
     int nnz, const int* __restrict__ row, const int* __restrict__ col,
     const double* __restrict__ Ssp, const double* __restrict__ H0sp,
@@ -1321,9 +1350,38 @@ __global__ void k_grad_h0_pulay_sp(
     if (e >= nnz) return;
     const int mu = row[e], nu = col[e];
     if (ao2at[mu] >= ao2at[nu]) return;
-    d_grad_h0_pulay_pair(mu, nu, Ssp[e], H0sp[e], nao, is_gfn2, ao2sh, ao2at, ang, iao_sh,
+    const size_t mn = static_cast<size_t>(mu) + static_cast<size_t>(nu) * nao;
+    d_grad_h0_pulay_pair(mu, nu, Ssp[e], H0sp[e], P[mn], W[mn], is_gfn2, ao2sh, ao2at, ang, iao_sh,
                          sh_nprim, sh_prim_off, prim_alpha, prim_coeff, sh_zeta, shpoly, kcn,
-                         valence, z, se, xyz, P, W, v_ao, v_dp, v_qp, grad, dEdcn);
+                         valence, z, se, xyz, v_ao, v_dp, v_qp, grad, dEdcn);
+}
+
+// Point 2 (Claude Generated, Sep 2026): pattern-only twin of k_grad_h0_pulay_sp - P and W
+// come from the compact nnz-sized dSpP/dSpW arrays (same pair index e that already indexes
+// Ssp/H0sp), no dense nao x nao buffer at all. Used on the device-resident path
+// (pc_resident=true) where dSpP is already the converged density from the SCF loop's last
+// iteration and dSpW is built once per gradient call (see computeGradient).
+__global__ void k_grad_h0_pulay_spP(
+    int nnz, const int* __restrict__ row, const int* __restrict__ col,
+    const double* __restrict__ Ssp, const double* __restrict__ H0sp,
+    const double* __restrict__ Psp, const double* __restrict__ Wsp,
+    int is_gfn2,
+    const int* __restrict__ ao2sh, const int* __restrict__ ao2at, const int* __restrict__ ang,
+    const int* __restrict__ iao_sh, const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
+    const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
+    const double* __restrict__ sh_zeta, const double* __restrict__ shpoly, const double* __restrict__ kcn,
+    const int* __restrict__ valence, const int* __restrict__ z, const double* __restrict__ se,
+    const double* __restrict__ xyz,
+    const double* __restrict__ v_ao, const double* __restrict__ v_dp, const double* __restrict__ v_qp,
+    double* __restrict__ grad, double* __restrict__ dEdcn)
+{
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= nnz) return;
+    const int mu = row[e], nu = col[e];
+    if (ao2at[mu] >= ao2at[nu]) return;
+    d_grad_h0_pulay_pair(mu, nu, Ssp[e], H0sp[e], Psp[e], Wsp[e], is_gfn2, ao2sh, ao2at, ang, iao_sh,
+                         sh_nprim, sh_prim_off, prim_alpha, prim_coeff, sh_zeta, shpoly, kcn,
+                         valence, z, se, xyz, v_ao, v_dp, v_qp, grad, dEdcn);
 }
 
 // Section 3: isotropic Coulomb gradient. One thread per shell is, inner js<is.
@@ -3783,6 +3841,13 @@ bool XtbGpuContext::buildScreenedPairs(const double* xyz_bohr, bool& use_sparse)
     I.h_sp_row.assign(static_cast<size_t>(nnz), 0);
     I.h_sp_col.assign(static_cast<size_t>(nnz), 0);
     std::vector<int> perm(static_cast<size_t>(nnz), 0);
+    // Point 2 (Claude Generated, Sep 2026): diag_idx[mu] = the pair-storage index e of the
+    // (mu,mu) entry, so the gradient's CN-onsite kernel can read P(mu,mu) straight out of the
+    // pattern-only dSpP instead of needing a dense nao x nao buffer. The diagonal AO block is
+    // always in the pattern (an atom is its own neighbour, cut2[same-kind] > 0), and the loop
+    // below already visits it - when the neighbour atom a equals the column atom b, r==k is
+    // exactly mu==nu. Captured in the SAME pass, no extra scan.
+    std::vector<int> diag_idx(nao, -1);
     {
         std::vector<std::thread> pool;
         for (unsigned t = 0; t < hw; ++t)
@@ -3803,6 +3868,7 @@ bool XtbGpuContext::buildScreenedPairs(const double* xyz_bohr, bool& use_sparse)
                                 I.h_sp_col[e] = nu;
                                 // transpose (nu, mu): column mu (atom a), row nu (atom b)
                                 perm[e] = colptr[mu] + boff + k;
+                                if (a == b && r == k) diag_idx[nu] = static_cast<int>(e);
                             }
                         }
                     }
@@ -3816,6 +3882,7 @@ bool XtbGpuContext::buildScreenedPairs(const double* xyz_bohr, bool& use_sparse)
         I.dSpCol.upload(I.h_sp_col.data(), static_cast<int>(nnz), I.stream);
         I.dSpPerm.upload(perm.data(), static_cast<int>(nnz), I.stream);
         I.dSpColPtr.upload(colptr.data(), nao + 1, I.stream);
+        I.dSpDiagIdx.upload(diag_idx.data(), nao, I.stream);
     } catch (const std::exception& ex) {
         I.last_error = std::string("screened pair upload failed: ") + ex.what();
         return false;
@@ -5255,6 +5322,15 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     const size_t nn = static_cast<size_t>(nao) * static_cast<size_t>(nao);
     const double one = 1.0, zero = 0.0;
 
+    // Points 1+2 (Claude Generated, Sep 2026): on the device-resident sparse path
+    // (pc_resident=true, screened pattern in use) P and W are only ever read at stored
+    // pattern positions by the kernels below (k_grad_h0_pulay_spP, k_grad_cn_onsite_spP -
+    // verified exhaustively, see the *_spP kernels above) - so neither needs the dense
+    // nao x nao buffer at all. use_pattern_pw selects that fast path; pc_resident=false
+    // (explicit P/C upload) and the small/dense-geometry case keep the original dense
+    // buffers unchanged as the reference/fallback.
+    const bool use_pattern_pw = pc_resident && m_impl->sparse;
+
     // Claude Generated (Sep 2026): phase marks for the device gradient, same
     // profMark/CURCUMA_GPU_PROFILE mechanism as the integral build and the resident
     // SCF loop (env-gated; no cost when unset — see profMark()).
@@ -5265,9 +5341,19 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
         // release them BEFORE allocating W so the gradient phase does not add to the SCF peak
         // (the allocation used to come first).
         m_impl->releaseEigenWorkspaces();
-        if (m_impl->dW.n < static_cast<int>(nn)) m_impl->dW.alloc(static_cast<int>(nn));
-        if (m_impl->dCw.n < static_cast<int>(nn)) m_impl->dCw.alloc(static_cast<int>(nn));
-        if (m_impl->dP.n  < static_cast<int>(nn)) m_impl->dP.alloc(static_cast<int>(nn));
+        // Point 2: dW/dP (dense, nao x nao) are only needed by the dense-buffer paths.
+        if (!use_pattern_pw) {
+            if (m_impl->dW.n < static_cast<int>(nn)) m_impl->dW.alloc(static_cast<int>(nn));
+            if (m_impl->dP.n  < static_cast<int>(nn)) m_impl->dP.alloc(static_cast<int>(nn));
+        } else {
+            m_impl->dSpW.ensure(m_impl->sp_nnz);
+        }
+        // dCw only ever holds nao x nocc_orbs (k_scale_cols/k_density_sp write no more than
+        // that) - was allocated at the full nao x nao here although residentDensityResident
+        // already sizes it correctly; fixed while touching this block (memory only, no
+        // measured time effect - flagged by the operator, not a separate optimisation).
+        const size_t cw_n = nocc_orbs > 0 ? static_cast<size_t>(nao) * nocc_orbs : 0;
+        if (cw_n > 0 && m_impl->dCw.n < static_cast<int>(cw_n)) m_impl->dCw.alloc(static_cast<int>(cw_n));
         if (m_impl->dC.n  < static_cast<int>(nn)) m_impl->dC.alloc(static_cast<int>(nn));
         if (m_impl->dVao.n < nao) m_impl->dVao.alloc(nao);
         if (m_impl->dOcc.n < nao) m_impl->dOcc.alloc(nao);
@@ -5283,9 +5369,13 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
         m_impl->dP.upload(P, static_cast<int>(nn), stream);
         m_impl->dC.upload(C, static_cast<int>(nn), stream);
         m_impl->p_dense_valid = true;
-    } else if (!ensureDenseDensity(nao)) {
-        return false;   // screened loop kept P on the pattern only: rebuild dense P
+    } else if (!use_pattern_pw) {
+        if (!ensureDenseDensity(nao)) return false;   // dense geometry: rebuild if stale
     }
+    // use_pattern_pw: nothing to do - dSpP already holds the converged pattern density
+    // from the SCF loop's last iteration (built by the SAME k_density_sp call the loop
+    // already ran for the population/band energy, from the SAME dCw/dC this call reuses
+    // via pc_resident). Point 1+2 together: no dense P, no download, no DGEMM rebuild.
     m_impl->profMark("grad: dense density rebuild (ensureDenseDensity)");
     m_impl->dVao.upload(v_ao, nao, stream);
     m_impl->dQsh.upload(q_sh, nsh, stream);
@@ -5302,6 +5392,9 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     m_impl->profMark("grad: upload v_ao/q_sh/v_dp/v_qp");
 
     // Energy-weighted density W = C_occ · diag(2·ε_occ) · C_occᵀ.
+    // Point 2 (Claude Generated, Sep 2026): on the pattern path, build W ONLY at the stored
+    // screened pairs with the same SDDMM kernel (k_density_sp) the SCF loop already uses for
+    // P, weight swapped for 2*eps - no nao x nao DGEMM. polymer_2x: 12.75 s -> measured below.
     if (nocc_orbs > 0) {
         std::vector<double> occ2(nocc_orbs);
         for (int k = 0; k < nocc_orbs; ++k) occ2[k] = 2.0 * eps[k];
@@ -5311,10 +5404,18 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
         k_scale_cols<<<grid, block, 0, stream>>>(m_impl->dCw.ptr, m_impl->dC.ptr,
                                                  m_impl->dOcc.ptr, nao, nocc_orbs);
         if (cudaGetLastError() != cudaSuccess) return false;
-        if (cublasDgemm(m_impl->cublas, CUBLAS_OP_N, CUBLAS_OP_T, nao, nao, nocc_orbs,
+        if (use_pattern_pw) {
+            const int bs = 256;
+            k_density_sp<<<(m_impl->sp_nnz + bs - 1) / bs, bs, 0, stream>>>(
+                m_impl->sp_nnz, m_impl->dSpRow.ptr, m_impl->dSpCol.ptr,
+                m_impl->dCw.ptr, m_impl->dC.ptr, nao, nocc_orbs, m_impl->dSpW.ptr);
+            if (cudaGetLastError() != cudaSuccess) return false;
+        } else if (cublasDgemm(m_impl->cublas, CUBLAS_OP_N, CUBLAS_OP_T, nao, nao, nocc_orbs,
                         &one, m_impl->dCw.ptr, nao, m_impl->dC.ptr, nao,
                         &zero, m_impl->dW.ptr, nao) != CUBLAS_STATUS_SUCCESS)
             return false;
+    } else if (use_pattern_pw) {
+        m_impl->dSpW.zero(m_impl->sp_nnz, stream);
     } else {
         if (cudaMemsetAsync(m_impl->dW.ptr, 0, sizeof(double) * nn, stream) != cudaSuccess)
             return false;
@@ -5336,15 +5437,35 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
         m_impl->dRepAlpha.ptr, m_impl->dRepZeff.ptr, kexp, rexp, kexp_light, m_impl->dGrad.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
 
-    k_grad_cn_onsite<<<(nao + b1 - 1) / b1, b1, 0, stream>>>(
-        nao, m_impl->dP.ptr, m_impl->dKcn.ptr, m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr,
-        m_impl->dEdcn.ptr);
+    // Point 2 (Claude Generated, Sep 2026): CN-onsite reads only P(mu,mu); on the pattern
+    // path it comes from dSpP via the diagonal index instead of the dense buffer.
+    if (use_pattern_pw) {
+        k_grad_cn_onsite_spP<<<(nao + b1 - 1) / b1, b1, 0, stream>>>(
+            nao, m_impl->dSpP.ptr, m_impl->dSpDiagIdx.ptr, m_impl->dKcn.ptr,
+            m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr, m_impl->dEdcn.ptr);
+    } else {
+        k_grad_cn_onsite<<<(nao + b1 - 1) / b1, b1, 0, stream>>>(
+            nao, m_impl->dP.ptr, m_impl->dKcn.ptr, m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr,
+            m_impl->dEdcn.ptr);
+    }
     if (cudaGetLastError() != cudaSuccess) return false;
     m_impl->profMark("grad: repulsion + CN onsite");
 
     const dim3 block(16, 16);
     const dim3 grid((nao + block.x - 1) / block.x, (nao + block.y - 1) / block.y);
-    if (m_impl->sparse) {
+    if (use_pattern_pw) {
+        const int bs = 256;
+        k_grad_h0_pulay_spP<<<(m_impl->sp_nnz + bs - 1) / bs, bs, 0, stream>>>(
+            m_impl->sp_nnz, m_impl->dSpRow.ptr, m_impl->dSpCol.ptr, m_impl->dSpS.ptr, m_impl->dSpH0.ptr,
+            m_impl->dSpP.ptr, m_impl->dSpW.ptr,
+            m_impl->basis_is_gfn2, m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr, m_impl->dAng.ptr,
+            m_impl->dIaoSh.ptr, m_impl->dShNprim.ptr, m_impl->dShPrimOff.ptr, m_impl->dPrimAlpha.ptr,
+            m_impl->dPrimCoeff.ptr, m_impl->dShZeta.ptr, m_impl->dShpoly.ptr, m_impl->dKcn.ptr,
+            m_impl->dValence.ptr, m_impl->dZ.ptr, m_impl->dSE.ptr, m_impl->dXyz.ptr,
+            m_impl->dVao.ptr,
+            with_mp ? m_impl->dVdp.ptr : nullptr, with_mp ? m_impl->dVqp.ptr : nullptr,
+            m_impl->dGrad.ptr, m_impl->dEdcn.ptr);
+    } else if (m_impl->sparse) {
         const int bs = 256;
         k_grad_h0_pulay_sp<<<(m_impl->sp_nnz + bs - 1) / bs, bs, 0, stream>>>(
             m_impl->sp_nnz, m_impl->dSpRow.ptr, m_impl->dSpCol.ptr, m_impl->dSpS.ptr, m_impl->dSpH0.ptr,
@@ -5366,8 +5487,9 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
             m_impl->dGrad.ptr, m_impl->dEdcn.ptr);
     }
     if (cudaGetLastError() != cudaSuccess) return false;
-    m_impl->profMark(m_impl->sparse ? "grad: H0 Pulay (screened pair kernel)"
-                                     : "grad: H0 Pulay (dense)");
+    m_impl->profMark(use_pattern_pw ? "grad: H0 Pulay (screened pair kernel, pattern-only P/W)"
+                      : m_impl->sparse ? "grad: H0 Pulay (screened pair kernel)"
+                                       : "grad: H0 Pulay (dense)");
 
     k_grad_coulomb<<<(nsh + b1 - 1) / b1, b1, 0, stream>>>(
         nsh, m_impl->basis_is_gfn2, m_impl->dSh2at.ptr, m_impl->dHardness.ptr,

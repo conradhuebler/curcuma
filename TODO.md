@@ -116,9 +116,14 @@
 - **Verweis**: src/core/CLAUDE.md:106, CLAUDE.md - Performance Notes
 - **Performance Impact**: Critical for large molecular systems
 
-### GPU-Gradient GFN1/GFN2: 96 s von 345 s je MD-Schritt (2026-09)
-- **Status**: ⏳ ANALYSIERT, nicht implementiert
-- **Messung** (polymer_2x, 7320 Atome, nao 15444, 1x RTX A4500): `-sp` 249 s,
+### GPU-Gradient GFN1/GFN2 — Punkte 1-3 UMGESETZT, 38 s -> 7 s (2026-09)
+- **Status**: Punkte 1-3 implementiert und gemessen; Punkte 4-6 offen
+- **Ergebnis** (polymer_2x, 1x A4500, selbst nachgemessen): `-sp -gradient` **287.1 -> 256 s**,
+  Gradientenblock **18747 -> 6499 ms**, W-DGEMM **12748 -> 3309 ms**, `finalize: download P and C`
+  **15332 -> 0.0 ms**, Geraetespeicher im Gradienten **12337 -> 8143 MiB**. Energie unveraendert
+  (`-11799.19965134 Eh`), Gradient gegen den Referenzbau **1.4e-14** bei Standard-SCF-Schwelle.
+  ctest: gpu 200/200, gpu_gradient 24/24, sqm 335/335.
+- **Messung vorher** (polymer_2x, 7320 Atome, nao 15444, 1x RTX A4500): `-sp` 249 s,
   `-sp -gradient` **287.1 s** -> der Gradient kostet **38 s**, nicht die 96 s, die eine
   fruehere Fassung dieses Eintrags aus MD-Schritt minus Einzelpunkt gebildet hatte.
   Davon: Geraet **13.6 s** (94 % davon EINE DGEMM, s. Punkt 3), Host-Gradientenarbeit
@@ -128,7 +133,7 @@
   "The GPU gradient at 7320 atoms: where the 96 s go"
 - **Reihenfolge ist wichtig** — erst messen, dann bauen; Schritt 3 zuletzt:
 
-1. **`-gradient` schaltet einen Sparpfad ab, den der Gradient nicht braucht — GEMESSEN 19.1 s,
+1. **ERLEDIGT** — **`-gradient` schaltet einen Sparpfad ab, den der Gradient nicht braucht — GEMESSEN 19.1 s,
    und zwar in JEDEM MD-Schritt** (Download P/C 15.3 s, Potential 1.86 s, Energien 1.67 s,
    Bandenergie 0.28 s; ohne Gradient sind alle vier exakt 0.0 ms). `xtb_native.cpp:1519-1523` faellt bei
    `gradient == true` in `finalize()` und laedt P und C herunter, obwohl
@@ -137,13 +142,13 @@
    unveraendert.** Gate: Gradient muss bit-identisch bleiben.
 2. **ERLEDIGT**: `computeGradient` hat jetzt 8 `profMark`-Aufrufe (env-gated, ohne Kosten wenn
    `CURCUMA_GPU_PROFILE` nicht gesetzt ist). Damit sind die Punkte 3-5 beziffert statt geschaetzt.
-3. **GEMESSEN, groesster Hebel: die `W`-DGEMM ist 12.75 s = 94 % des Geraetegradienten.**
+3. **ERLEDIGT** — **die `W`-DGEMM ist 12.75 s = 94 % des Geraetegradienten.**
    `W = C_occ*diag(2 eps)*C_occ^T` (`:5306`) wird dicht ueber nao^2 gebaut, gelesen wird es nur
    an den 6.1 % gespeicherten Paaren (`:1218-1219`). `k_density_sp` (`:1687`) ist dieselbe
    SDDMM und kann `W` mit Gewicht `2*eps` auf dem Muster bauen — ~16x weniger Flops und ~1.9 GB
    weniger. `ensureDenseDensity` (`:5280`) kostet dagegen **0.0 ms** (P ist nach dem residenten
    finalize schon dicht), die urspruengliche Vermutung dazu war falsch.
-4. **Zwei `nat^2`-Schleifen auf einem Host-Kern**: GFN2-Multipol-Wechselwirkungsgradient
+4. **ERLEDIGT** (gethreadet ueber `parallelStripes`, Abweichung 2.1e-14) — **Zwei `nat^2`-Schleifen auf einem Host-Kern**: GFN2-Multipol-Wechselwirkungsgradient
    (`xtb_gradient.cpp:894-968`) und CN-Kettenregel (`:970-1000`), 2.68e7 Paare, kein Cutoff,
    nicht gethreadet — waehrend Host-Abschnitt 2b via `parallelStripes` (`:231-234`) sehr wohl
    threadet. Die CN-Kettenregel hat zudem keinen Cutoff, wo die Energie bei 25 Bohr
@@ -192,14 +197,17 @@
 ### `make` in release/ scheitert: fuenf CUDA-Unittests ohne `USE_CUDA` (2026-09)
 - **Status**: ⏳ OFFEN, vorbestehend (nicht von der Gradienten-Instrumentierung verursacht)
 - **Symptom**: `cd release && make -j8` endet mit **Exit 2**. Die Hauptziele bauen
-  (`curcuma_cuda` 7 %, `curcuma_core` 59 %, `curcuma` 62 %); es scheitern nur
-  `test_xtb_cuda_{cn,gamma,h0,multipole,overlap}` mit
+  (`curcuma_cuda` 7 %, `curcuma_core` 62 %, `curcuma` 63 %); es scheitern nur
+  `test_xtb_cuda_{cn,eeq,gamma,gradient,h0,multipole,overlap,qat}` mit
   „`gpu` in Namensbereich `curcuma::xtb` bezeichnet keinen Typ".
 - **Ursache**: `namespace gpu` in `cuda/xtb_gpu_context.h:28` steht hinter `#ifdef USE_CUDA`
   (`:20`); diesen Testzielen fehlt das Define. Konfigurationsfehler in
   `test_cases/sqm_reference/CMakeLists.txt`, nicht im Quelltext.
-- **Warum es lange unbemerkt blieb**: `ctest -L gpu` meldet 200/200 und `ctest -R sqm` 331/331,
-  weil diese fuenf Binaries dort nicht registriert sind bzw. nie gebaut werden. Ein gruener
+- **Anzahl korrigiert (21.9.2026)**: hier stand „fuenf". Das war aus einem ABGEBROCHENEN
+  `make -j8`-Protokoll gezaehlt — der Lauf haelt an, sobald eine Zielgruppe scheitert, und
+  welche Ziele ueberhaupt versucht werden, schwankt. Ein vollstaendiger Lauf zeigt acht.
+- **Warum es lange unbemerkt blieb**: `ctest -L gpu` meldet 200/200 und `ctest -R sqm` 335/335,
+  weil diese Binaries dort nicht registriert sind bzw. nie gebaut werden. Ein gruener
   `ctest` beweist hier also **nicht**, dass `make` durchlaeuft — den Exit-Status separat pruefen
   (dieselbe Falle wie Known Issue #15).
 

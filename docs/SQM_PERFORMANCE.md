@@ -665,6 +665,50 @@ numbers to an H200.
   overwrote the `setForcePhaseTiming(true)` that `-md_diagnostics_timing` had set once. Any
   GFN-FF GPU MD below verbosity 2 lost its kernel timings every step. Fixed by OR-ing the two.
 
+### Implemented (2026-09): the gradient is now 7 s instead of 38 s
+
+Three changes, each measured separately, all on the same structure and one device:
+
+| | before | after |
+|---|---:|---:|
+| `-sp -gradient` wall | 287.1 s | **256 s** |
+| `gradient :` block | 18747 ms | **6499 ms** |
+| `grad: W = C_occ*diag(2 eps)*C_occ^T` | 12748 ms | **3309 ms** |
+| `finalize: download P and C` | 15332 ms | **0.0 ms** |
+| device memory during the gradient | 12337 MiB | **8143 MiB** |
+
+1. **The host P/C download is skipped when the device gradient will run.** The gate at
+   `xtb_native.cpp:1525-1531` now mirrors the caller's own gate exactly. Note there are TWO
+   `m_pot` rebuild sites: `:1555` (kept for the debug `m_F`, now skipped) and `:1656`, which is
+   unconditional under `if (gradient)` and is the one the gradient reads — so the gradient's
+   potential is unaffected.
+2. **P and W are read straight off the screened pattern; no dense `nao^2` matrix is built.**
+   `dSpP` is already the SCF's converged pattern density and needed no new computation at all;
+   `dSpW` is built once per gradient by the existing `k_density_sp` SDDMM with the weight set to
+   `2*eps`. The precondition was verified exhaustively: the only readers of `dP`/`dW` in the
+   gradient are `k_grad_cn_onsite` (diagonal only, always in-pattern by construction,
+   `buildScreenedPairs:3735-3746`) and `d_grad_h0_pulay_pair` via `k_grad_h0_pulay_sp` (stored
+   pairs only). The dense path is kept untouched as the reference for small systems.
+   **Measured 3309 ms against the 3273 ms of `scf: density P + populations`** — the SDDMM's own
+   cost for the same shape, i.e. the pattern build costs what the identical existing operation
+   costs, not the naive "16x fewer flops".
+3. **The two `nat^2` host loops are threaded** (`xtb_gradient.cpp:894-1024`, `parallelStripes`,
+   same idiom as host section 2b at `:231-234`). Not bit-identical by construction; measured
+   `-threads 1` vs `-threads 16` on 7320 atoms: **2.06e-14**.
+
+**Validation**: energy bit-identical (`-11799.19965134 Eh`); gradient vs a separate reference
+build **1.36e-14** at the DEFAULT `-scf_threshold`; `ctest` gpu 200/200, gpu_gradient 24/24,
+sqm 335/335.
+
+**A measurement trap worth recording.** The first comparison put the deviation at 1.1e-05 and
+appeared to scale with `scf_threshold`, which looked like a stale input. It was neither: the two
+runs had used **different eigensolver configurations**. This box has 4 GPUs and the multi-GPU
+eigensolve auto-activates above 4000 basis functions, and the distributed solve is less
+run-to-run reproducible than the single-GPU one — **the unmodified binary differs from itself by
+2.8e-05 between the two configurations**. Always pin `-gpu_eigensolver_devices` and
+`-gpu_density_devices` before diffing gradients on a multi-GPU box, and compare a run against
+itself first to establish the noise floor.
+
 ### GFN-FF for comparison: the EEQ solve dominates, more so on the GPU
 
 Same structure, GFN-FF MD, per step: CPU 16 threads **1095 ms** of which `eeq_solve`

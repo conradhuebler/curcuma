@@ -1515,9 +1515,18 @@ double XTB::Calculation(bool gradient)
     // need the dense P and C on the host (band energy comes from the device, the gradient is
     // on the device). Rebuilding and downloading them took 16 s at 7320 atoms; they are fetched
     // on demand (host gradient fallback, property accessors after ensureHostWavefunction).
+    //
+    // Point 1 (Claude Generated, Sep 2026): the above previously forced finalize() whenever a
+    // gradient was requested, even though calculateGradientGpu() (called below with the SAME
+    // gate as device_grad_will_run) never reads m_wfn.P/C - it passes pc_resident=true and
+    // reads dP/dC straight off the device (xtb_gradient.cpp:859-868). Skip finalize() there too;
+    // ensureHostWavefunction() downloads on demand for the few paths that still need the host
+    // matrices (host gradient fallback, property accessors) - see xtb_multipole.cpp:44.
+    const bool device_grad_will_run = gradient && use_gpu_resident && m_gpu_scf
+        && m_gpu_scf->supportsGradient();
     m_wfn_on_device = false;
     if (use_gpu_resident && m_gpu_scf) {
-        if (use_resident_loop && m_mp_ints_deferred && !gradient)
+        if (use_resident_loop && m_mp_ints_deferred && (!gradient || device_grad_will_run))
             m_wfn_on_device = true;
         else
             m_gpu_scf->finalize(m_wfn.P, m_wfn.C);
