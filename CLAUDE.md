@@ -393,6 +393,7 @@ ctest -R "cli_rmsd_01" --verbose
 
 ## Project Management
 
+- **Knowledge store (Obsidian vault)**: `~/Nextcloud/Obsidan/Wissen/` — German, operator-owned. Holds the curcuma **project notes** (`Projekte/curcuma *.md`: status, open points), the **lab journal** for computational campaigns (`Labor/curcuma *.md`, append-only, mandatory fields incl. commit + dirty state + diff), and the **reusable method knowledge** (`Wissen/curcuma.md`, `Wissen/Governance-Regeln für KI-Coding-Agenten an wissenschaftlichem Code.md`, `Wissen/Agentisches Arbeiten.md`). **Read `00 Regeln.md` there before writing anything into it.** Division of labour: code, changelog and bug history stay in this repository; method knowledge, campaign records and project status go to the vault. Cross-project agent rules are in `~/.claude/CLAUDE.md`, which links the vault.
 - **Prioritized TODO List**: See [TODO.md](TODO.md)
 - **Module Docs**: Each `src/` subdirectory has CLAUDE.md with specific tasks
 - **GFN-FF Status**: See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md) for implementation details
