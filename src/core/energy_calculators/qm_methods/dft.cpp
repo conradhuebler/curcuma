@@ -123,6 +123,8 @@ DFT::DFT(DFTFunctional functional, const json& config)
         m_scf_threshold = config["scf_threshold"].get<double>();
     if (config.contains("scf_mode") && config["scf_mode"].is_string())
         m_scf_mode = config["scf_mode"].get<std::string>();
+    if (config.contains("scf_guess") && config["scf_guess"].is_string())
+        m_scf_guess = config["scf_guess"].get<std::string>();
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format("Initializing native DFT engine (functional={}, basis={})",

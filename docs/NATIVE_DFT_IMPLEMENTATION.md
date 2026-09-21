@@ -15,8 +15,8 @@ production test, and the validation set is 10 molecules in a H-Ne basis.
 
 ## WP3 -- HF-SCF vs ORCA 6.1 (July 2026)
 
-`curcuma -sp <mol>.xyz -method hf` (def2-SVP, default spherical 5d), against
-`orca ! HF def2-SVP TightSCF`:
+`curcuma -sp <mol>.xyz -method hf` (def2-SVP, default spherical 5d, default SAD
+guess), against `orca ! HF def2-SVP TightSCF`:
 
 | molecule | curcuma | ORCA | diff |
 |---|---|---|---|
@@ -29,14 +29,44 @@ production test, and the validation set is 10 molecules in a H-Ne basis.
 | H2O | -75.95751380 | -75.957513799019 | -9.8e-10 |
 | HF | -99.93249914 | -99.932499138781 | -1.2e-09 |
 | Ne | -128.37640681 | -128.376406809861 | -1.4e-10 |
-| BH | -24.87163094 | -24.871630934948 | -5e-09 (ORCA `! HCore`) |
+| BH | -25.09917485 | -25.099174849888 | -1.1e-10 |
 
-The residual is the SCF threshold (1e-6 default on dP), not an integral error.
-**BH caveat**: BH has more than one closed-shell RHF stationary point. ORCA's
-default model-potential guess lands on the lower one (-25.099174849888); from a
-core (H0) guess -- the only guess curcuma has -- both codes land on
--24.871630934. curcuma is not wrong, it is on the other branch; a proper
-guess/SOSCF is a later WP item.
+The residual (≈1e-11 relative) does not respond to a tighter SCF threshold
+(`-dft.scf_threshold 1e-11` leaves it unchanged), and ORCA's own
+TightSCF↔VeryTightSCF shift is only 0-2e-10, so it is **curcuma's**, not ORCA's
+convergence: ≈4e-9 Eh is the honest agreement figure, and where exactly it comes
+from is not yet pinned down (accumulated roundoff in the Fock/eigensolve path, or
+the Boys/Hermite kernels at the 1e-11 level, are the candidates).
+
+**BH and the initial guess.** BH has more than one closed-shell RHF stationary
+point: ORCA's default model-potential guess finds -25.099174849888 and ORCA with
+`! HCore` finds -24.871630934. The fix is the guess, not the SCF: the default is
+now **`-dft.scf_guess sad`** (superposition of atomic densities), which reaches
+ORCA's lower solution reproducibly (-25.09917485, 1.1e-10) and leaves every other
+molecule bit-unchanged. Implemented in `buildAtomicGuess()`: per atom, diagonalize
+that atom's block of the core Hamiltonian in its own atomic basis and fill the
+atom's electrons into the resulting atomic orbitals (aufbau, fractional occupation
+of the last when Z is odd), then sum. `Tr(P S) = N` by construction (rescaled for
+charged systems).
+
+`-dft.scf_guess h0` restores the bare-core start and usually reaches the *higher*
+solution (-24.871630934, i.e. ORCA's `! HCore` branch, matching to 5e-9), but it is
+**not a reliable way to select a BH solution**: the zero-density start sits near a
+bifurcation there, and both outcomes were observed for the *identical* command and
+binary -- 8/8 runs at -24.871630934, and separately a 10-run streak at
+-25.09917485, at every threshold, mixer and thread count tried (the flag itself was
+verified to arrive: verbosity 3 prints `SCF guess: h0 (Tr(PS) = 0.000000)`). SAD
+reached the lower solution in **every** observation, so use `sad` and treat the h0
+branch's BH basin as unreproducible. No other molecule in the set shows this: they
+have a single solution and are stable run to run (H2O 5/5, all ten at ≤4e-9). The
+bistability is a BH property plus floating-point detail; whether MKL's dynamic
+thread count is the trigger was not established.
+
+**Note (fixed July 2026)**: `DFTMethod` used to merge only the controller's *top*
+level into its defaults, so **every `-dft.*` flag was silently ignored** --
+`-dft.scf_mode`, `-dft.scf_threshold` and `-dft.scf_guess` all had no effect. The
+CLI routes them into `controller["dft"]` (the `dft` module scope), which is now
+merged explicitly, top level first, matching the other method wrappers.
 
 ### What was wrong until July 2026 (three kernel defects)
 
@@ -83,9 +113,11 @@ against ORCA belongs in `dft_1e` from the start.
 ### WP3 limits / not implemented
 
 Only closed-shell (even electron count); no open-shell, no charged systems beyond
-what the closed-shell code path supports. One guess (core/H0) and DIIS only -- no
-SOSCF, no secondary solutions. No dispersion (D3/D4) coupling, no solvation, no
-gradient (`hasGradient() == false` until WP8). Basis scope is H-Ne (`def2-SVP.dat`).
+what the closed-shell code path supports. Two guesses (`sad`, `h0`) and DIIS or
+plain damping -- no SOSCF, and no verification that a converged solution is a
+minimum (a secondary solution could still be reported). No dispersion (D3/D4)
+coupling, no solvation, no gradient (`hasGradient() == false` until WP8). Basis
+scope is H-Ne (`def2-SVP.dat`).
 The `dft_1e`/`dft_2e` graders' ORCA reference JSONs carry MO energies only, so the
 new total-energy agreement is currently checked by hand, not in CI.
 

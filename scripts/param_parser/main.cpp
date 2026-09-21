@@ -161,6 +161,7 @@ int main(int argc, char* argv[])
     std::regex param_regex(R"(PARAM\s*\(\s*(\w+)\s*,\s*(\w+)\s*,\s*(.*?)\s*,\s*\"(.*?)\"\s*,\s*\"(.*?)\"\s*,\s*\{(.*?)\}\s*\))", std::regex::ECMAScript);
 
     bool in_param_block = false;
+    bool pending_param = false;   // accumulated_line holds a PARAM( that has not matched yet
     std::string current_module;
 
     for (const auto& filepath : input_files) {
@@ -206,6 +207,30 @@ int main(int argc, char* argv[])
             }
 
             if (in_param_block) {
+                // Comment lines are not part of any PARAM: skip them so a commented-out
+                // PARAM( cannot be mistaken for an unterminated one. Claude Generated
+                // (July 2026) -- gfnff.h keeps a deliberately commented-out
+                // "// PARAM(eeq_distance_cutoff, ...) -- REMOVED" note, which used to
+                // raise a spurious "Malformed PARAM" warning.
+                const std::string trimmed = trim(line);
+                if (trimmed.rfind("//", 0) == 0) continue;
+
+                // A new PARAM( starts while an earlier one is still unmatched: that earlier
+                // entry can never complete, so report it and restart from this line.
+                // Claude Generated (July 2026): this replaces a heuristic that reset the
+                // accumulation as soon as it contained a ')'. That fired on any HELP TEXT
+                // with a parenthesis, so a multi-line PARAM whose help has one never
+                // completed and every later PARAM in the block was parsed out of a
+                // corrupted accumulation -- which is how the whole `dft` module was lost
+                // (0 definitions generated, so neither -list_modules nor the flat-flag
+                // routing ever saw its parameters, and every -dft.* flag was ignored).
+                if (pending_param && line.find("PARAM(") != std::string::npos) {
+                    std::cerr << "Warning: Malformed PARAM in " << filepath
+                              << " around line " << line_number << "\n";
+                    accumulated_line.clear();
+                    pending_param = false;
+                }
+
                 // Accumulate lines for multi-line PARAM definitions
                 accumulated_line += " " + line;
 
@@ -221,11 +246,9 @@ int main(int argc, char* argv[])
                         std::string(match[6]) // aliases - DON'T trim! We need quotes for parsing
                     });
                     accumulated_line.clear();
-                } else if (accumulated_line.find("PARAM") != std::string::npos && accumulated_line.find(')') != std::string::npos && match.size() == 0) {
-                    // PARAM found but didn't match - likely syntax error
-                    std::cerr << "Warning: Malformed PARAM in " << filepath
-                              << " around line " << line_number << "\n";
-                    accumulated_line.clear();
+                    pending_param = false;
+                } else if (accumulated_line.find("PARAM(") != std::string::npos) {
+                    pending_param = true;   // an entry is in flight; see the reset above
                 }
             }
         }

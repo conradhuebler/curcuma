@@ -65,6 +65,9 @@ BEGIN_PARAMETER_DEFINITION(dft)
     PARAM(scf_mode, String, "diis",
           "SCF convergence driver: diis|plain (DIIS Pulay or plain damping).",
           "SCF", {})
+    PARAM(scf_guess, String, "sad",
+          "SCF initial guess: sad (superposition of atomic densities) | h0 (bare core Hamiltonian, i.e. zero density).",
+          "SCF", {})
     PARAM(cartesian_d, Bool, false,
           "Use cartesian 6d (true) instead of spherical 5d (false, ORCA def2-SVP default).",
           "Basis", {})
@@ -161,6 +164,7 @@ private:
     int m_scf_max_iter = 100;
     double m_scf_threshold = 1.0e-6;
     std::string m_scf_mode = "diis";         // diis | plain
+    std::string m_scf_guess = "sad";         // sad | h0
     bool m_scf_converged = false;
     int m_scf_iterations = 0;
     int m_diis_start = 3;                    // plain iters before DIIS kicks in
@@ -194,6 +198,19 @@ private:
 
     // Build the Lowdin orthonormalizer X = S^{-1/2} (S eigen-decomposition).
     void buildOrthonormalizer();
+
+    // --- WP3 SCF initial guess ---
+    // Atom index of each ACTIVE basis function (the spherical transform is
+    // block-diagonal per shell, so every active AO belongs to exactly one atom).
+    std::vector<int> activeAtomIndex() const;
+    // SAD guess (Claude Generated): per atom, diagonalize that atom's block of the
+    // core Hamiltonian in its own atomic basis, then fill the atom's electrons into
+    // those atomic orbitals (aufbau, fractional occupation of the last one). The
+    // summed density starts the SCF far closer to the physical solution than the
+    // bare core guess, which is what keeps the HF SCF off secondary solutions.
+    Matrix buildAtomicGuess() const;
+    // Density the SCF starts from, selected by m_scf_guess.
+    Matrix buildInitialGuess() const;
 
     // ERI in the active basis (cartesian, or the cartesian tensor transformed by
     // Q to spherical 5d). Built lazily on first SCF; empty Q -> unchanged tensor.

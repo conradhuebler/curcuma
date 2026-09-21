@@ -18,9 +18,17 @@ DFTMethod::DFTMethod(DFTFunctional functional, const json& config)
     , m_last_energy(0.0)
 {
     json full_config = getDefaultConfig();
-    if (!config.empty()) {
+    // The CLI auto-routes every -dft.<param> (and its flat form) into the "dft"
+    // module scope, i.e. controller["dft"], which is the ONLY place they land --
+    // so the scope has to be merged explicitly. Reading the controller's top level
+    // alone (as this wrapper used to) silently dropped every -dft.* flag:
+    // -dft.scf_mode, -dft.scf_threshold and -dft.scf_guess all had no effect.
+    // Top level is merged first so the scope wins; a flat/legacy top-level key
+    // still works as a fallback, matching the other method wrappers.
+    if (!config.empty())
         full_config.merge_patch(config);
-    }
+    if (config.contains("dft") && config["dft"].is_object())
+        full_config.merge_patch(config["dft"]);
 
     m_dft = std::make_unique<DFT>(functional, full_config);
     m_method_name = m_dft->getMethodNameStr();
@@ -92,6 +100,7 @@ json DFTMethod::getDefaultConfig()
         { "scf_max_iterations", 100 },
         { "scf_threshold", 1.0e-6 },
         { "scf_mode", "diis" },
+        { "scf_guess", "sad" },
         { "threads", 1 },
         { "cartesian_d", false }
     };

@@ -129,8 +129,13 @@ bool DFT::runSCF()
     const bool use_diis = (m_scf_mode != "plain");
     const double damping = use_diis ? 0.0 : 0.5;  // plain mode needs density damping
 
-    // Core guess: zero initial density -> first Fock = H.
-    m_density = Matrix::Zero(n, n);
+    // Initial guess (m_scf_guess): SAD (default) or the bare core Hamiltonian
+    // (zero density -> first Fock = H).
+    m_density = buildInitialGuess();
+    if (CurcumaLogger::get_verbosity() >= 3)
+        CurcumaLogger::param("SCF guess",
+                             fmt::format("{} (Tr(PS) = {:.6f})", m_scf_guess,
+                                         m_density.cwiseProduct(m_S).sum()));
 
     DIISAccelerator diis(m_diis_subspace);
 
@@ -230,6 +235,93 @@ bool DFT::runSCF()
     m_fock = buildFock(m_density);
     m_e_elec = 0.5 * m_density.cwiseProduct(m_H + m_fock).sum();
     return false;
+}
+
+// =================================================================================
+// SCF initial guess
+// =================================================================================
+
+// Atom index of each active basis function. The cartesian -> spherical transform is
+// block-diagonal per shell (Q's column j has nonzeros only in its own shell's
+// cartesian rows), so every active AO belongs to exactly one atom.
+std::vector<int> DFT::activeAtomIndex() const
+{
+    const int n = m_nbf;
+    std::vector<int> ao_atom(n, -1);
+    const int ncart = static_cast<int>(m_gto_basis.size());
+    if (m_Q.size() == 0) {
+        for (int i = 0; i < n && i < ncart; ++i) ao_atom[i] = m_gto_basis[i].atom;
+        return ao_atom;
+    }
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < ncart; ++i) {
+            if (std::abs(m_Q(i, j)) > 1.0e-10) { ao_atom[j] = m_gto_basis[i].atom; break; }
+        }
+    }
+    return ao_atom;
+}
+
+// Claude Generated: SAD (superposition of atomic densities) initial guess.
+// For every atom, diagonalize that atom's block of the core Hamiltonian in its own
+// atomic basis and fill the atom's electrons into the resulting atomic orbitals
+// (aufbau; the last orbital is fractionally occupied when Z is odd). Summing the
+// atomic densities gives Tr(P S) = N and a start far closer to the physical
+// solution than the bare core guess -- which is what keeps the HF SCF from settling
+// on a secondary solution (BH is the case in the validation set).
+Matrix DFT::buildAtomicGuess() const
+{
+    const int n = m_nbf;
+    const std::vector<int> ao_atom = activeAtomIndex();
+    Matrix P = Matrix::Zero(n, n);
+    double occupied = 0.0;
+
+    const Eigen::MatrixXd Hcol(m_H);   // RowMajor -> ColMajor for Eigen
+    const Eigen::MatrixXd Scol(m_S);
+
+    for (int a = 0; a < m_atomcount; ++a) {
+        std::vector<int> idx;
+        for (int i = 0; i < n; ++i)
+            if (ao_atom[i] == a) idx.push_back(i);
+        const int m = static_cast<int>(idx.size());
+        if (m == 0) continue;
+
+        Eigen::MatrixXd Hs(m, m), Ss(m, m);
+        for (int p = 0; p < m; ++p)
+            for (int q = 0; q < m; ++q) {
+                Hs(p, q) = Hcol(idx[p], idx[q]);
+                Ss(p, q) = Scol(idx[p], idx[q]);
+            }
+        Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXd> ges(Hs, Ss);
+        if (ges.info() != Eigen::Success) continue;   // skip: keep the atom's block empty
+        const Eigen::MatrixXd C = ges.eigenvectors();
+
+        // Aufbau over this atom's orbitals with fractional occupation of the last.
+        double z = static_cast<double>(m_atoms[a]);
+        for (int k = 0; k < m && z > 0.0; ++k) {
+            const double f = std::min(2.0, z);
+            z -= f;
+            occupied += f;
+            for (int p = 0; p < m; ++p)
+                for (int q = 0; q < m; ++q)
+                    P(idx[p], idx[q]) += f * C(p, k) * C(q, k);
+        }
+    }
+
+    // Charged systems: scale so the guess carries exactly the right electron count.
+    const double nelec = static_cast<double>(m_num_electrons);
+    if (occupied > 1.0e-12 && std::abs(occupied - nelec) > 1.0e-12)
+        P *= nelec / occupied;
+    return P;
+}
+
+Matrix DFT::buildInitialGuess() const
+{
+    if (m_scf_guess == "h0")
+        return Matrix::Zero(m_nbf, m_nbf);   // bare core: first Fock = H
+    if (m_scf_guess != "sad" && CurcumaLogger::get_verbosity() >= 1)
+        CurcumaLogger::warn(fmt::format(
+            "DFT: unknown -dft.scf_guess '{}' (use sad|h0); using sad", m_scf_guess));
+    return buildAtomicGuess();
 }
 
 // =================================================================================
