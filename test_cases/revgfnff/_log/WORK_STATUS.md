@@ -1,5 +1,5 @@
-# WORK_STATUS — rev-gfnff work packages 1-10 (2026-09-18 / 20)
-Packages done: 10/10 (9 = 9a + 9b)
+# WORK_STATUS — rev-gfnff work packages 1-11 (2026-09-18 / 21)
+Packages done: 10/11 (9 = 9a + 9b; 11 pre-registered, sweep pending)
 
 > **Package 10 re-scales the time axis of everything before it.** The MD time step was integrated
 > in the wrong unit until Sep 2026, so every "fs" and every duration written by packages 1-9 is
@@ -1577,3 +1577,77 @@ costs recorded in package 9 — the conformer/S66 guard opening 1.0341 -> 1.0543
 - Everything packages 1-9 wrote in "fs" outside the files listed in 10.6 still carries the old
   scale. The two `docs/` pages most read (STAGE1 2.x, STAGE3A 2.1/2.3) now carry an explicit
   conversion box; `test_cases/revgfnff/_log/*.md` do not.
+
+---
+
+# Package 11 — the mg / mg2 / mg3 react-MD tail, re-measured with paired replicates (2026-09-21)
+
+Measurement only. No source change, no default change, no adoption recommendation.
+
+## 11.0 PRE-REGISTRATION (written and committed BEFORE the sweep was run)
+
+**Why a pre-registration.** The react-MD tail is a rare-event statistic of a CHAOTIC trajectory
+(a 1-ulp change is amplified — Known Issue #33 — and `-md.seed` does not vary the initial
+velocities on this path), so ONE run per (cell, arm) is ONE sample. Package 9 and package 10
+each drew an ordering of `mg`/`mg2`/`mg3` from a single 130-cell aggregate, and package 10's
+summary was then contradicted by the orchestrator's direct spot-check on the single
+most-scrutinised cell. With several plausible summary statistics available after the fact, the
+statistic that decides is fixed here, in advance, in writing.
+
+**Anchor (the identity check for the harness, reproduced before anything else was run).**
+`c2h6/T2000_f0`, true `-md.time_step 0.25`, unperturbed start, `-maxtime 5000` (5 ps true),
+`-threads 1`, shipped defaults otherwise, binary `build_rev` at HEAD `d60fae2b`
+(md5 `cc6aace6dcbc4800aaf4b6c5cbcc7a13`): **mg 28 rebuilds / 28.3 kJ / 0 steps >= 50 / 5206 K;
+mg2 26 / 32.2 / 0 / 5069; mg3 42 / 256.8 / 12 / 7030** — all three reproduce exactly through the
+harness `scripts/revgfnff_tail_sweep.py` (md5 `d4b3b0fe96d6f37e81d5f61b88be558f` at the time of
+this pre-registration; `revgfnff_tail_sweep.py anchor` re-checks it).
+
+**Design.**
+- Cells: the 130-cell set of packages 7/10 — `{c2h6, ch3nh2, ch4_H}` x `{1000, 2000 K}` x every
+  frame (25 / 25 / 15).
+- Replicates: **6 per cell** — replicate 0 is the UNPERTURBED start (so the historical numbers
+  are rows of the CSV), replicates 1-5 displace every atom by a vector of exactly **1e-5 A** in a
+  uniformly random direction. The seed depends only on (cell, replicate), so the SAME six start
+  geometries are used for every arm and every dt: every comparison is **paired** on
+  (cell, replicate). Verified in advance that the perturbation does change the trajectory
+  (`c2h6/T2000_f0`, mg3, dt 0.25: rebuilds 42 / 98 / 34 / 64 / 52 / 80 over the six replicates).
+- Arms: `mg` (reference), `mg2`, `mg3`, `gauss`, and `gauss + -gfnff.rev_share_form delivered`
+  (the pre-2026-09-19 default) as historical context. Everything else stays at the shipped
+  default (`rev_share_form conserving`, `rev_share_donor_rule true`, `rev_budget_fix_h true`),
+  confirmed via `CURCUMA_REVDUMP=1`.
+- dt (true fs): 0.25 (the shipped `rev_dt_cap`), 0.125, 0.0625, each at a FIXED true duration of
+  5 ps, so the step count scales with 1/dt and exposure is not confounded with dt.
+- 130 x 6 x 5 x 3 = **11 700 trajectories**, `-threads 1`, 8 concurrent processes.
+
+**Per-trajectory quantity.** `max_step_kj` = the maximum over steps of |Epot(i+1) - Epot(i)| in
+kJ/mol, with every interval whose end row is preceded by a `REACT rebuild` line excluded —
+byte-for-byte the quantity packages 7/9/10 reported as "per-step max |dEpot|".
+
+**PRIMARY decision statistic.** A trajectory is **bad** iff `max_step_kj >= 100 kJ/mol` (the same
+threshold package 8/10 used for "cells above 100 kJ/mol", chosen because it is the criterion the
+existing dt recommendation rests on). Per (arm, dt): `p = #bad / #trajectories` over all
+130 x 6 = 780 trajectories.
+
+**PRIMARY decision rule.** Arm X is declared **worse than `mg`** at a given dt iff the paired
+difference `dp = p_X - p_mg` is positive AND its 95 % **cluster-bootstrap** confidence interval
+excludes 0. The bootstrap resamples the **130 cells** with replacement (10 000 draws, fixed
+RNG seed 20260921), keeping all replicates of a drawn cell and keeping the pairing — cells are
+the independent unit, replicates inside one cell are not. Anything else is reported as **"not
+distinguishable at 6 replicates"**. The exact McNemar binomial p-value on the discordant
+(cell, replicate) pairs is reported alongside as descriptive only (it ignores the clustering).
+
+**SECONDARY, also fixed here**: the same bad-fraction at a 50 kJ/mol threshold; the distribution
+of `max_step_kj` per arm (median / p90 / p99 / max); steps >= 50 kJ/mol per ps of trajectory and
+the fraction of trajectories with at least one; the rebuild `dE_jump` tail (max, n >= 50);
+`T_max`; and the **overlap of the failing-cell sets** between arms (a cell fails for an arm if at
+least one of its six replicates is bad) with its Jaccard index.
+
+**Raw data.** One CSV row per (cell, replicate, arm, dt) in
+`test_cases/revgfnff/_log/tail_remeasure.csv`. No raw MD log is stored (a verbosity-1 log of a
+5 ps / 0.0625 fs run is ~19 MB): stdout is parsed while it streams and the run directory is
+deleted immediately. Logs are kept only for the handful of runs used in the 11.C attribution.
+
+**What this measurement cannot answer.** It is the smoothness axis only. The two other costs
+recorded in package 9 — the conformer/S66 guard opening 1.0439 -> 1.0543/1.0547 and the 0.0212 A
+equilibrium bond-length shift — are static, time-step-independent quantities and are not re-run
+here. The adoption decision is the operator's.
