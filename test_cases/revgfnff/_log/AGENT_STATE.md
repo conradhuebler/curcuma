@@ -57,6 +57,23 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 
 ## Live agents
 
+**RUNNING since 2026-09-21: `package-11` (Opus), measurement only** — clean re-measurement of the
+`mg` / `mg2` / `mg3` react-MD tail in TRUE fs, commissioned by the operator after the orchestrator's
+spot-check disputed package 10's "mg3's tail was a clock artefact" summary (`c2h6/T2000_f0`, true
+0.25 fs: mg 28.3 kJ/0 events, mg2 32.2/0, mg3 256.8/12 — these three rows are the agent's ANCHOR and
+must reproduce exactly before anything counts). Design safeguards, all because the previous
+aggregate misled: (1) the decision statistic is PRE-REGISTERED in `WORK_STATUS.md` and committed
+before the sweep's results exist; (2) replicates by paired ~1e-5 A geometry perturbation (`-md.seed`
+does not vary the start; a react trajectory is chaotic, one run per cell is one sample); (3) raw
+per-(cell, replicate, arm, dt) CSV `test_cases/revgfnff/_log/tail_remeasure.csv` next to any
+aggregate, plus harness `scripts/revgfnff_tail_sweep.py`; (4) three true dt (0.25 / 0.125 /
+0.0625) at a fixed 5 ps true duration; (5) one bounded attribution of the `mg3` f0 event (same
+mechanism as package 7 amplified by a deeper well, or specific to `mg3`'s order dimension). No
+source change, no default change, no adoption recommendation — the operator decides. Still open
+from before, unchanged: `cli_simplemd_20` (flagged, control no longer violates below the 0.25 fs
+cap), whether to lower `rev_dt_cap` to 0.0625, and the `ATOMIC_TIME_TO_FS` constant in `units.h`
+that is really aut -> attoseconds (zero use sites, not touched).
+
 **2026-09-20: `package-10` DONE — a general curcuma bug fixed (the MD clock), and every rev-gfnff
 "fs" re-derived.** No agent running. Two local commits, nothing pushed. Detail `WORK_STATUS.md`
 package 10 (`Packages done: 10/10`).
