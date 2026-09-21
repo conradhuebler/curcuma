@@ -167,6 +167,26 @@ private:
     double           m_gpu_upload_time_ms = 0.0;
     Matrix           m_cached_gradient; ///< Cached gradient (copied from GPU workspace after calculate)
 
+    // Claude Generated (Sep 2026): GPU-path per-phase wall-clock breakdown, so
+    // getLastPrepTiming() reports real numbers instead of the CPU PrepTiming's zeros
+    // (prepareCNAndEEQ is always called with skip_eeq=true on this path — see
+    // calculateEnergy() below — so its own m_last_prep_timing.eeq_solve etc. stay 0).
+    // These std::chrono timestamps were already taken unconditionally on every step
+    // (used only for the verbosity>=2 printout below); storing them costs nothing
+    // extra and the fields are populated every call — zero-cost is enforced at the
+    // CALLER (simplemd.cpp only invokes LastPrepTiming() when md_diagnostics_timing
+    // is set), not here.
+    struct GpuPrepTiming {
+        double cn = 0.0;              ///< GPU CN kernel launch (host wall-clock)
+        double dlogdcn = 0.0;         ///< dlogdcn / CN-pair-list setup (gradient only)
+        double hb_cn = 0.0;           ///< per-bond HB coordination number kernel
+        double hbxb = 0.0;            ///< dynamic HB/XB re-detection
+        double launch = 0.0;          ///< charge-independent GPU kernel launch overhead
+        double eeq_solve = 0.0;       ///< EEQ Phase 2 solve — GPU Schur/PCG or CPU fallback
+        double coulomb_postprocess = 0.0; ///< Coulomb kernel + postprocess + D2H download
+        double total = 0.0;           ///< calculateEnergy() wall time (excl. topology/paramgen)
+    } m_last_gpu_prep_timing;
+
     // CN chain-rule pair list (generated once at init, used every gradient step)
     // Claude Generated (March 2026): Full GPU gradient consistency
     std::vector<int>    m_cn_pair_i;        ///< atom i indices
@@ -218,6 +238,13 @@ private:
     int    m_eeq_cpu_fragment_threshold = Backend::default_eeq_cpu_fragment_threshold;
 
     int  m_calc_count = 0;  ///< counts calculateEnergy() calls; first 5 always print timing
+
+    // Claude Generated (Sep 2026): setForcePhaseTiming(true) (from -md_diagnostics_timing)
+    // used to be silently overridden every step by the unconditional
+    // `setRecordKernelTimings(verbosity >= 2)` at the top of calculateEnergy() below, so a
+    // GFN-FF MD run at the normal (< 2) MD verbosity never recorded GPU kernel timings even
+    // though it had asked to. Mirrors GFNFF::m_force_phase_timing's do_timing OR-pattern.
+    bool m_force_phase_timing = false;
 
     /**
      * @brief Generate CN pair list from geometry and covalent radii.
@@ -604,8 +631,13 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 
     // Claude Generated (May 2026): Enable per-stream kernel timing at verbosity >= 2.
     // This disables CUDA Graph replay so events get recorded each step.
+    // Claude Generated (Sep 2026): OR with m_force_phase_timing (set by
+    // setForcePhaseTiming(), driven by -md_diagnostics_timing) — this used to be an
+    // unconditional overwrite, so a diagnostics run below verbosity 2 silently lost
+    // GPU kernel timing every step even though it had asked to force it on.
     if (m_gpu_workspace) {
-        m_gpu_workspace->setRecordKernelTimings(CurcumaLogger::get_verbosity() >= 2);
+        m_gpu_workspace->setRecordKernelTimings(
+            CurcumaLogger::get_verbosity() >= 2 || m_force_phase_timing);
         // Static-Mode (WP-S1, May 2026): propagate frozen-state flags so GPU kernels for
         // CN / Gaussian-weights / dc6dcn / EEQ-charge-upload are skipped this step.
         m_gpu_workspace->setStaticFlags(
@@ -1345,6 +1377,24 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     m_gpu_workspace->refreshHBChargesFromDevice();
     auto t4 = std::chrono::high_resolution_clock::now();
 
+    // Claude Generated (Sep 2026): store the per-phase breakdown for getLastPrepTiming()
+    // (WP-P1 MD diagnostics). These are the SAME std::chrono timestamps the verbosity>=2
+    // printout below already computed durations from on every step — storing them here is
+    // a handful of subtractions, not a new measurement, and costs nothing beyond what this
+    // function already paid. "eeq_solve" is the actual EEQ Phase 2 solve, wherever it ran
+    // (GPU Schur/PCG in the normal case, CPU PCG/Cholesky fallback for the high-fragment or
+    // skip_phase2 branches above) — this is what m_gfnff->getLastPrepTiming().eeq_solve
+    // cannot report on this path (prepareCNAndEEQ is only ever called here with
+    // skip_eeq=true, so its own eeq_solve timer never fires).
+    m_last_gpu_prep_timing.cn        = std::chrono::duration<double, std::milli>(t_cn_end - t_cn_start).count();
+    m_last_gpu_prep_timing.dlogdcn   = std::chrono::duration<double, std::milli>(t_dlogdcn_end - t_cn_end).count();
+    m_last_gpu_prep_timing.hb_cn     = std::chrono::duration<double, std::milli>(t_hb_cn_end - t_dlogdcn_end).count();
+    m_last_gpu_prep_timing.hbxb      = std::chrono::duration<double, std::milli>(t_hbxb_end - t_hbxb_start).count();
+    m_last_gpu_prep_timing.launch    = std::chrono::duration<double, std::milli>(t_launch_end - t_prep_end).count();
+    m_last_gpu_prep_timing.eeq_solve = std::chrono::duration<double, std::milli>(t_eeq_end - t_launch_end).count();
+    m_last_gpu_prep_timing.coulomb_postprocess = std::chrono::duration<double, std::milli>(t4 - t_eeq_end).count();
+    m_last_gpu_prep_timing.total     = std::chrono::duration<double, std::milli>(t4 - t0).count();
+
     ++m_calc_count;
 
     if (CurcumaLogger::get_verbosity() >= 2) {
@@ -1602,16 +1652,31 @@ template <class Backend>
 json GFNFFGpuMethodImpl<Backend>::getLastPrepTiming() const
 {
     if (!m_gfnff) return {};
+    // Claude Generated (Sep 2026): the GPU path calls GFNFF::prepareCNAndEEQ ONLY with
+    // skip_eeq=true (CN passed in externally too), so m_gfnff's own PrepTiming has real
+    // numbers for "eeq_topo" (topology-input caching) and "cnf" (per-atom CNF fill, still
+    // done CPU-side for the gradient) but "cn"/"eeq_solve"/"dcn"/"d4_gw" are structurally
+    // always 0 there — those steps happen on the GPU (or, for eeq_solve, sometimes on the
+    // CPU fallback path) and are measured in m_last_gpu_prep_timing instead. Report the
+    // real number for each field regardless of where it was measured.
     const auto& t = m_gfnff->getLastPrepTiming();
+    const auto& g = m_last_gpu_prep_timing;
     return {
-        {"cn",          t.cn},
-        {"eeq_topo",    t.eeq_topo},
-        {"cnf",         t.cnf},
-        {"dcn",         t.dcn},
-        {"d4_gw",       t.d4_gw},
-        {"eeq_solve",   t.eeq_solve},
-        {"charge_dist", t.charge_dist},
-        {"total",       t.total},
+        {"cn",          g.cn},              // GPU CN kernel (host wall-clock around the launch)
+        {"eeq_topo",    t.eeq_topo},         // CPU: topology-input cache (real)
+        {"cnf",         t.cnf},              // CPU: per-atom CNF fill (real, gradient only)
+        {"dcn",         t.dcn},              // 0 on this path: CN derivatives live GPU-side (WP5-B)
+        {"d4_gw",       t.d4_gw},            // 0 on this path: Gaussian weights computed on GPU
+        {"eeq_solve",   g.eeq_solve},        // EEQ Phase 2 solve, GPU Schur/PCG or CPU fallback
+        {"charge_dist", t.charge_dist},      // 0 on this path: charges set directly on GPU
+        {"total",       g.total},            // full calculateEnergy() wall time (GPU step == "prep")
+        // GPU-only sub-phases with no CPU-path analogue (additive; harmless for any
+        // consumer that only reads the fields above).
+        {"gpu_dlogdcn",             g.dlogdcn},
+        {"gpu_hb_cn",               g.hb_cn},
+        {"gpu_hbxb_update",         g.hbxb},
+        {"gpu_kernel_launch",       g.launch},
+        {"gpu_coulomb_postprocess", g.coulomb_postprocess},
     };
 }
 
@@ -1619,6 +1684,7 @@ template <class Backend>
 void GFNFFGpuMethodImpl<Backend>::setForcePhaseTiming(bool on)
 {
     if (m_gfnff) m_gfnff->setForcePhaseTiming(on);
+    m_force_phase_timing = on;
     if (m_gpu_workspace) m_gpu_workspace->setRecordKernelTimings(on);
 }
 

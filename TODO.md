@@ -118,25 +118,31 @@
 
 ### GPU-Gradient GFN1/GFN2: 96 s von 345 s je MD-Schritt (2026-09)
 - **Status**: ⏳ ANALYSIERT, nicht implementiert
-- **Messung**: polymer_2x (7320 Atome, nao 15444), 1x RTX A4500 — `-sp` 249 s,
-  MD-Schritt mit Gradient 344.5 s, Host-Overhead je Schritt 33 ms, einmaliges Setup 25 s.
+- **Messung** (polymer_2x, 7320 Atome, nao 15444, 1x RTX A4500): `-sp` 249 s,
+  `-sp -gradient` **287.1 s** -> der Gradient kostet **38 s**, nicht die 96 s, die eine
+  fruehere Fassung dieses Eintrags aus MD-Schritt minus Einzelpunkt gebildet hatte.
+  Davon: Geraet **13.6 s** (94 % davon EINE DGEMM, s. Punkt 3), Host-Gradientenarbeit
+  ~5.2 s, Host-Rueckholung **19.1 s** (Punkt 1). MD-Schritt 332.4 s; die restlichen 45 s
+  sind eine zusaetzliche FP64-Eigenloesung, kein Gradient (docs/SQM_PERFORMANCE.md).
 - **Vollstaendige Analyse mit Zeilennummern**: [docs/SQM_PERFORMANCE.md](docs/SQM_PERFORMANCE.md)
   "The GPU gradient at 7320 atoms: where the 96 s go"
 - **Reihenfolge ist wichtig** — erst messen, dann bauen; Schritt 3 zuletzt:
 
-1. **`-gradient` schaltet einen Sparpfad ab, den der Gradient nicht braucht** (~26 s laut
-   `docs/MULTI_GPU.md:147`, nicht selbst nachgemessen). `xtb_native.cpp:1519-1523` faellt bei
+1. **`-gradient` schaltet einen Sparpfad ab, den der Gradient nicht braucht — GEMESSEN 19.1 s,
+   und zwar in JEDEM MD-Schritt** (Download P/C 15.3 s, Potential 1.86 s, Energien 1.67 s,
+   Bandenergie 0.28 s; ohne Gradient sind alle vier exakt 0.0 ms). `xtb_native.cpp:1519-1523` faellt bei
    `gradient == true` in `finalize()` und laedt P und C herunter, obwohl
    `xtb_gradient.cpp:862-868` leere Matrizen mit `pc_resident=true` uebergibt. Host-Rueckfall
    ist abgesichert (`xtb_native.cpp:1678-1681`). **~15 Zeilen, eine Datei, Gradient-Mathematik
    unveraendert.** Gate: Gradient muss bit-identisch bleiben.
-2. **Profiler blind im Gradienten**: `XtbGpuContext::computeGradient`
-   (`xtb_gpu_context.cu:5237-5368`) hat null `profMark`. Fuenf Aufrufe an `:5281/5312/5331/5359/5364`
-   teilen die 96 s auf und entscheiden alles Weitere. **Voraussetzung fuer 3-5.**
-3. **Dichte und energiegewichtete Dichte dicht aufgebaut**, obwohl nur das gescreente Muster
-   gelesen wird (`:5280`, `:5306` gegen `:1218-1219`): bei 6.1 % Musterdichte ~16x zu viele
-   Flops und ~3.8 GB unnoetig. `k_density_sp` (`:1687`) kann `W` mit Gewicht `2*eps` bauen.
-   Geschaetzt ~20 s, **nicht gemessen**.
+2. **ERLEDIGT**: `computeGradient` hat jetzt 8 `profMark`-Aufrufe (env-gated, ohne Kosten wenn
+   `CURCUMA_GPU_PROFILE` nicht gesetzt ist). Damit sind die Punkte 3-5 beziffert statt geschaetzt.
+3. **GEMESSEN, groesster Hebel: die `W`-DGEMM ist 12.75 s = 94 % des Geraetegradienten.**
+   `W = C_occ*diag(2 eps)*C_occ^T` (`:5306`) wird dicht ueber nao^2 gebaut, gelesen wird es nur
+   an den 6.1 % gespeicherten Paaren (`:1218-1219`). `k_density_sp` (`:1687`) ist dieselbe
+   SDDMM und kann `W` mit Gewicht `2*eps` auf dem Muster bauen — ~16x weniger Flops und ~1.9 GB
+   weniger. `ensureDenseDensity` (`:5280`) kostet dagegen **0.0 ms** (P ist nach dem residenten
+   finalize schon dicht), die urspruengliche Vermutung dazu war falsch.
 4. **Zwei `nat^2`-Schleifen auf einem Host-Kern**: GFN2-Multipol-Wechselwirkungsgradient
    (`xtb_gradient.cpp:894-968`) und CN-Kettenregel (`:970-1000`), 2.68e7 Paare, kein Cutoff,
    nicht gethreadet — waehrend Host-Abschnitt 2b via `parallelStripes` (`:231-234`) sehr wohl
@@ -154,6 +160,48 @@
   (docs/SQM_PERFORMANCE.md "Blocking the multipole GRADIENT: tried, measured, reverted").
 - **Validierung**: `ctest -L gpu_gradient` (`sqm_cuda_gradient_*`, tol 1e-7),
   `scripts/gradient_compare.py`, `gradient_unit_contract`.
+
+### GFN-FF-MD: der EEQ-Loeser ist 69 % des Schritts — Stand explorativ, nicht optimiert (2026-09)
+- **Status**: ⏳ OFFEN, Kostenanteil gemessen, Optimalitaet **unbekannt**
+- **Messung** (polymer_2x, 7320 Atome, ~1500 Fragmente, CPU 16 Threads, MD dt 1 fs,
+  `-md_diagnostics_timing`): Schritt 1095 ms, davon **`eeq_solve` 758.7 ms**. Naechstgroesster
+  Posten `d4_gw` 65.7 ms. Das ist Pro-Schritt-Arbeit (Ladungen haengen an der Geometrie),
+  **kein** Setup.
+- **Was bereits da ist** (nachgelesen, nicht nachgemessen): die Voreinstellung `cholesky`
+  routet fuer dieses System automatisch auf projiziertes PCG (`eeq_solver.cpp:1583-1584`,
+  `ppcg_auto` bei `nfrag >= 1 && natoms >= 500`), und dieser Pfad hat einen Warmstart aus den
+  Ladungen des Vorschritts (`m_ppcg_last_q`, in `solveWithProjectedPCG`). Die 758.7 ms sind
+  also **mit** Warmstart.
+- **Was NICHT gezeigt ist**: dass dieser Stand nahe am Erreichbaren liegt. Die Auswahl ist eine
+  Heuristik mit handgesetzten Schwellen (`eeq_pcg_expected_iters` 30, `eeq_pcg_nfrag_threshold` 4,
+  `pcg_large_threshold` 500), und die einzige dokumentierte Skalierungszahl ist
+  „polymer/1410: 44 -> 16 ms" aus der PARAM-Beschreibung (`eeq_solver.h:1099`) — ein 5x
+  kleineres System. Ob 758.7 ms bei 7320 Atomen gut oder schlecht sind, ist unbelegt.
+- **Naechster Schritt, billig**: ein Lauf mit `-verbosity 2` gibt die Iterationszahl aus
+  (`[EEQ] projected PCG converged in N iterations (|Pr|=..., nfrag=...)`). Wenige Iterationen
+  = der Warmstart traegt und die Kosten liegen im Matrixprodukt; viele = die Projektion auf
+  ~1500 Nebenbedingungen dominiert und ist der Hebel.
+- **Bereits gemessen und erledigt**: `-eeq_solver.solve_method pcg` ist hier **78x langsamer**
+  (59.4 s gegen 761 ms je Loesung), weil einfaches PCG `nfrag+1` Loesungen braucht — im Code
+  bei `:1600-1603` vorhergesagt. `ppcg` explizit zu setzen aendert nichts (identischer Pfad,
+  bit-identische Energie). Kein Flag-Gewinn abzuholen.
+- **Relevanz fuer Hardware**: solange 69 % des Schritts in einem nebenbedingungs-behafteten
+  linearen Loeser stecken, entscheidet dessen Implementierung, ob eine schnellere GPU bei
+  GFN-FF etwas bringt — nicht die Kraftfeld-Kernel.
+
+### `make` in release/ scheitert: fuenf CUDA-Unittests ohne `USE_CUDA` (2026-09)
+- **Status**: ⏳ OFFEN, vorbestehend (nicht von der Gradienten-Instrumentierung verursacht)
+- **Symptom**: `cd release && make -j8` endet mit **Exit 2**. Die Hauptziele bauen
+  (`curcuma_cuda` 7 %, `curcuma_core` 59 %, `curcuma` 62 %); es scheitern nur
+  `test_xtb_cuda_{cn,gamma,h0,multipole,overlap}` mit
+  „`gpu` in Namensbereich `curcuma::xtb` bezeichnet keinen Typ".
+- **Ursache**: `namespace gpu` in `cuda/xtb_gpu_context.h:28` steht hinter `#ifdef USE_CUDA`
+  (`:20`); diesen Testzielen fehlt das Define. Konfigurationsfehler in
+  `test_cases/sqm_reference/CMakeLists.txt`, nicht im Quelltext.
+- **Warum es lange unbemerkt blieb**: `ctest -L gpu` meldet 200/200 und `ctest -R sqm` 331/331,
+  weil diese fuenf Binaries dort nicht registriert sind bzw. nie gebaut werden. Ein gruener
+  `ctest` beweist hier also **nicht**, dass `make` durchlaeuft — den Exit-Status separat pruefen
+  (dieselbe Falle wie Known Issue #15).
 
 ### `gpu_strict` fehlt — stiller CPU-Rueckfall (2026-09)
 - **Status**: ⏳ PLANNED

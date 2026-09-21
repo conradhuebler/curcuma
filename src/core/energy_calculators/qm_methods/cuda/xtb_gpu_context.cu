@@ -5255,6 +5255,11 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     const size_t nn = static_cast<size_t>(nao) * static_cast<size_t>(nao);
     const double one = 1.0, zero = 0.0;
 
+    // Claude Generated (Sep 2026): phase marks for the device gradient, same
+    // profMark/CURCUMA_GPU_PROFILE mechanism as the integral build and the resident
+    // SCF loop (env-gated; no cost when unset — see profMark()).
+    m_impl->profStart();
+
     try {
         // Claude Generated (Sep 2026): the eigensolver workspaces are not needed by the gradient;
         // release them BEFORE allocating W so the gradient phase does not add to the SCF peak
@@ -5270,6 +5275,7 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
         m_impl->dGrad.ensure(3 * nat);
         m_impl->dEdcn.ensure(nat);
     } catch (...) { return false; }
+    m_impl->profMark("grad: workspace alloc");
 
     // Upload the converged SCF state (P/C symmetric-or-column-major from host).
     // AP8: skip the nao²-sized P/C uploads when they are already resident.
@@ -5280,6 +5286,7 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     } else if (!ensureDenseDensity(nao)) {
         return false;   // screened loop kept P on the pattern only: rebuild dense P
     }
+    m_impl->profMark("grad: dense density rebuild (ensureDenseDensity)");
     m_impl->dVao.upload(v_ao, nao, stream);
     m_impl->dQsh.upload(q_sh, nsh, stream);
     // GFN2 multipole potentials (converged) for the multipole-integral Pulay term.
@@ -5292,6 +5299,7 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
         m_impl->dVdp.upload(v_dp, 3 * nat, stream);
         m_impl->dVqp.upload(v_qp, 6 * nat, stream);
     }
+    m_impl->profMark("grad: upload v_ao/q_sh/v_dp/v_qp");
 
     // Energy-weighted density W = C_occ · diag(2·ε_occ) · C_occᵀ.
     if (nocc_orbs > 0) {
@@ -5311,6 +5319,7 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
         if (cudaMemsetAsync(m_impl->dW.ptr, 0, sizeof(double) * nn, stream) != cudaSuccess)
             return false;
     }
+    m_impl->profMark("grad: W = C_occ*diag(2eps)*C_occ^T (DGEMM)");
 
     if (cudaMemsetAsync(m_impl->dGrad.ptr, 0, sizeof(double) * 3 * nat, stream) != cudaSuccess)
         return false;
@@ -5331,6 +5340,7 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
         nao, m_impl->dP.ptr, m_impl->dKcn.ptr, m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr,
         m_impl->dEdcn.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
+    m_impl->profMark("grad: repulsion + CN onsite");
 
     const dim3 block(16, 16);
     const dim3 grid((nao + block.x - 1) / block.x, (nao + block.y - 1) / block.y);
@@ -5356,15 +5366,20 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
             m_impl->dGrad.ptr, m_impl->dEdcn.ptr);
     }
     if (cudaGetLastError() != cudaSuccess) return false;
+    m_impl->profMark(m_impl->sparse ? "grad: H0 Pulay (screened pair kernel)"
+                                     : "grad: H0 Pulay (dense)");
 
     k_grad_coulomb<<<(nsh + b1 - 1) / b1, b1, 0, stream>>>(
         nsh, m_impl->basis_is_gfn2, m_impl->dSh2at.ptr, m_impl->dHardness.ptr,
         m_impl->dQsh.ptr, m_impl->dXyz.ptr, 2.0, m_impl->dGrad.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
+    m_impl->profMark("grad: Coulomb");
 
     m_impl->dGrad.download(grad_out, 3 * nat, stream);
     m_impl->dEdcn.download(dEdcn_out, nat, stream);
-    return cudaStreamSynchronize(stream) == cudaSuccess;
+    const bool ok_sync = cudaStreamSynchronize(stream) == cudaSuccess;
+    m_impl->profMark("grad: download + sync");
+    return ok_sync;
 }
 
 // Stage 6 (S6.1): device occupation. Component-test entry — uploads a frozen eps
