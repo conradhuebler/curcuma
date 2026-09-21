@@ -1,158 +1,317 @@
-# Stable MD on a large system (polymer_2x, 7320 atoms)
+# MD on a large system (polymer_2x, 7320 atoms)
 
-> 🤖 AI-generated, machine-tested. Measurements from Sep 18, 2026 on 36 cores / 4x RTX A4500,
-> commit 05d40030. Human production testing pending.
+> 🤖 AI-generated, machine-tested. Re-measured Sep 21, 2026 at commit `4a72e194` on 36 cores /
+> 4x RTX A4500. Human production testing pending.
 
-> # ⚠ EVERY TIME ON THIS PAGE IS IN THE OLD, WRONG SCALE
->
-> **Commit `ef462fcf` (Sep 19, 2026) fixed the MD time step.** Until then SimpleMD advanced
-> **1.9516 fs per requested femtosecond**, because the step multiplied a velocity in
-> sqrt(Eh/amu) as though it were Angstrom per femtosecond. The integrator was internally
-> consistent, so energies, forces, temperature and energy conservation were all correct - only
-> the clock was wrong. Proof: an O-H stretch whose Hessian frequency is 3635.7 cm^-1 (period
-> 9.1745 fs) completed one oscillation in **4.6961 fs** of reported time; after the fix it takes
-> 9.1663 fs. Measured for GFN-FF, GFN2 and GFN1 alike - the integrator never sees the method.
->
-> **Consequence for this page**: every `-dt` and every duration below has to be multiplied by
-> **1.9516** to read as what was actually simulated. `-dt 1.0` was 1.95 fs, `-dt 0.5` was
-> 0.98 fs, `-dt 0.25` was 0.49 fs, and a "300 fs" run covered 586 fs. That also **explains the
-> whole page**: the GFN-FF O-H period is 9.17 fs, so the failing runs were sampling it 4.7 times
-> per period, far below the ~20 that an unconstrained X-H bond needs, while `-dt 0.25` reached
-> 18.8 and behaved. The `-hydrogen_mass 4` row worked for the same arithmetic - four times the
-> mass halves the frequency and restores the sampling.
->
-> The *physics* described below (a single water molecule collapsing, the per-atom energy
-> concentration, the local rejection criterion) is unchanged and was measured on real
-> trajectories. Only the labels on the time axis are wrong. **The numbers have not yet been
-> re-measured with the corrected clock**; until they are, do not take any recipe here as a
-> production setting.
+## Why this page exists, and what the problem actually was
 
-`docs/MULTI_GPU.md` recorded that an MD of `test_cases/molecules/larger/polymer_2x.xyz` heats
-from 298 K to 20476 K within 40 fs, and attributed it to the structure not being pre-optimised.
-That attribution was wrong. This page is what the measurement says instead.
+`docs/MULTI_GPU.md` recorded that a GFN-FF MD of `test_cases/molecules/larger/polymer_2x.xyz`
+heats from 298 K to 20476 K within 40 fs and blamed the structure for not being pre-optimised.
+Three rounds of investigation then blamed, in turn, the thermostat, velocity-Verlet truncation
+error, and a single collapsing water molecule.
 
-## The settings that work - over 100 fs, and that is not long enough
+**The actual cause was the clock.** Until commit `ef462fcf` SimpleMD advanced **1.9516 fs per
+requested femtosecond**: the step multiplied a velocity in sqrt(Eh/amu) as though it were
+Angstrom per femtosecond, so `-dt 1.0` integrated 1.95 fs and `-MaxTime 300` covered 586 fs.
+The integrator was internally consistent - energies, forces, temperature and energy conservation
+were all correct - which is why nothing caught it for years. See the entry in `AIChangelog.md`
+and the ctest `md_time_axis`, which ties the reported time to a Hessian frequency.
 
-| Setting | `<T>` over 100 fs, target 300 K |
-|---|---:|
-| `-dt 1.0` (the default) | **18527 K** - blows up |
-| `-dt 0.5` | 288.7 K |
-| **`-dt 0.25`** | **296.1 K** |
-| `-dt 1.0 -hydrogen_mass 4` | 273.1 K |
+The GFN-FF O-H period is 9.17 fs. A 1.95 fs step samples it 4.7 times per period; an
+unconstrained X-H bond needs roughly 20. So the page was never about a 1 fs step.
 
-> **Correction (Sep 19, 2026): 100 fs is too short a window, and `-dt 0.5` does not hold.**
-> Re-running the same case for **300 fs** (GFN-FF-optimised structure, CSVR at 300 K, seed 1)
-> gives `<T>` = **716.6 K**: the running-average potential goes -916.30 -> -913.76 Eh and the
-> kinetic 9.55 -> 24.91 Eh, i.e. the total energy rises by about **+8 Eh** *while the thermostat
-> is actively trying to remove it*. The potential itself only oscillates (-917.3 at 0 fs, -911.5
-> at 100 fs, -918.5 at 300 fs) - it is the kinetic energy that grows monotonically, and the
-> 100 fs row above simply ends before the effect is visible. `-dt 0.25` and `-hydrogen_mass 4`
-> were **only** measured over 100 fs and are therefore equally unproven at 300 fs. **Do not read
-> any row of this table as a validated production setting for this system.**
->
-> **And the thermostat is not the problem.** The same case without one - plain NVE, dt = 0.5,
-> 300 fs - gains **+67.6 Eh** and reaches `<T>` = **2175 K** (from 273). So energy is created by
-> the integration itself, not merely left in by a thermostat that cannot keep up. The potential
-> stays flat throughout (-916.3 at the start, -915.2 at the end, never outside -917…-912): all
-> of it goes into kinetic energy, i.e. the atoms simply get faster while the structure holds.
->
-> **It scales as dt².** NVE gains +191 Eh in 200 fs at dt = 1.0 and +67.6 Eh in 300 fs at
-> dt = 0.5, which is +45 Eh per 200 fs - a ratio of **4.24** against the expected 4.
->
-> > **Correction (Sep 19, 2026, later the same night): that dt² ratio is real but the conclusion
-> > drawn from it - "ordinary velocity-Verlet truncation error" - was wrong.** Truncation error
-> > is a property of the whole system and grows with it; this is one molecule.
-> >
-> > **A split experiment, and the trap in it.** All NVE, dt = 0.5, seed 1, from the same
-> > GFN-FF-optimised geometry:
-> >
-> > | system | atoms | dE over 200 fs |
-> > |---|---:|---:|
-> > | water cut out of polymer_2x, alone | 4500 | -0.176 Eh |
-> > | the polymer alone, water removed | 2820 | +0.021 Eh |
-> > | pure water, 300 / 1200 / 2400 atoms | | +0.002 / +0.009 / +0.165 Eh |
-> > | **both together** | **7320** | **+0.069 Eh** |
-> >
-> > **Read that last row before drawing the obvious conclusion.** The full system conserves over
-> > 200 fs just as well as its halves do - the event happens at about 260 fs. An earlier version
-> > of this table put "+45 Eh" in that row, which was the 300 fs number scaled by 200/300 rather
-> > than a measurement, and so appeared to show that only the *combination* fails. It does not
-> > show that: at 200 fs nothing fails, and the halves were never run to 300 fs. What the table
-> > does establish is the weaker but still useful statement that **4500 atoms of water behave
-> > exactly like 300 over the same window**, i.e. there is no size-driven drift.
-> >
-> > The real evidence is per atom. **It is a single water molecule
-> > collapsing.** In the frame where the run breaks, 12 of the 7320 atoms hold **99.0 %** of the
-> > kinetic energy, and the hottest two are the hydrogens of one water (indices 6522/6523/6524);
-> > in every healthy frame before it the hottest atom sits at a steady 15-23x the per-atom mean,
-> > at the event it reaches **3733x**. That molecule's H-O-H angle has gone from 103.4° to
-> > **3.6°** and its O-H bonds to 0.806/0.859 A; the molecule **alone** is then worth **+10.96 Eh**
-> > against -0.327 Eh in its normal geometry, which is the entire energy gain of the run.
-> >
-> > **The force field is not at fault.** A rigid H-O-H scan of a single water (3 atoms, GFN-FF)
-> > is smooth and monotonic across the whole range, including through the 1/sin(theta) point at
-> > 180° where the gradient stays at 0.087 Eh/A: -0.3275 Eh at 103.4°, -0.2847 at 180°, and
-> > going the other way +0.594 at 20°, +3.311 at 10°, +13.69 at 3.6° with the gradient rising
-> > 0.009 -> 6.6 -> 34.9 -> 261.8 Eh/A. That is correct H-H repulsion. Reaching 40° already costs
-> > **120 kcal/mol** and the observed geometry far more - 250 to 430 kT for a single molecule at
-> > the 245 K the run was actually at, i.e. thermally unreachable. So the collapse was driven by
-> > the integration, and once the angle is below ~30° every further step is unresolvable: at
-> > 34.9 Eh/A a 0.5 fs step displaces a hydrogen by 1.1 A.
-> >
-> > **And the energy is not accumulated - it appears in one window.** Cutting that same water
-> > out of every frame and computing its INTERNAL GFN-FF energy (3 atoms, against the lowest of
-> > 60 comparison waters as the zero) gives its excitation over the run:
-> >
-> > | t [fs] | 0 | 25 | 50 | 75 | 100 | 125 | 150 | 175 | 200 | 225 | 250 | **275** |
-> > |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-> > | kcal/mol | 0.01 | 0.10 | 0.01 | 0.27 | 0.24 | 0.41 | 0.27 | 0.34 | 0.33 | 0.05 | **0.18** | **7084** |
-> >
-> > Twenty randomly chosen other waters sit at a median of 0.26 and a maximum of 3.7 kcal/mol in
-> > the same frames. So 25 fs (50 steps) before it is destroyed, this molecule is not merely
-> > normal, it is **colder than average**. There is no slow build-up and no ratchet: the whole
-> > 7084 kcal/mol appears inside one 50-step window. An earlier version of this page said the
-> > molecule "was already fed ~120 kcal/mol by earlier bad steps" - that was inference, and this
-> > measurement contradicts it.
-> >
-> > Two candidate explanations were tested and **eliminated**: `-cleanenergy true`, which rebuilds
-> > the energy calculator every step, makes it *worse* (+173.7 Eh against +53.2 on a 300-atom
-> > cluster), so it is not stale state between steps; and the frozen setup topology gives bit-
-> > identical forces to a freshly perceived one at the breaking geometry (max|g| 176.1013 Eh/A
-> > either way), so it is not a missing pair in a cutoff list. On a healthy 120-atom system the
-> > MD's own energy and a fresh single point on the written geometry agree to 6e-6 Eh.
-> >
-> > **And the dt² ratio itself does not survive a matched measurement.** Run the full 7320-atom
-> > system at dt = 0.5 for **200 fs** (NVE, seed 1) and it gives **+0.069 Eh, `<T>` = 225.6 K** -
-> > conserved. The "+45 Eh per 200 fs" above was not measured; it was the 300 fs number scaled by
-> > 200/300, which silently assumes the drift accumulates linearly. It does not: for 250 fs
-> > nothing happens, then one molecule collapses and the run gains 67 Eh in the last 50. So the
-> > ratio 4.24 compared a real 200 fs run at dt = 1.0 against a scaled number dominated by a
-> > single event, and it means nothing. **Never scale a drift to a different window without
-> > checking that it is linear in time.**
-> >
-> > What this changes practically: the step needed is set by the *worst* local event, not by an
-> > arithmetic that applies everywhere, so lowering dt globally is the wrong lever. The right one
-> > is to reject the individual step - see the local criterion in the next section.
+**Everything below was re-measured after the fix. Every time on this page is a real
+femtosecond.**
+
+## The headline: 1 fs works
+
+polymer_2x, 7320 atoms, from the GFN-FF-optimised structure, 500 fs, seed 1, 9 threads:
+
+| setting | dE | `<T>` | hottest atom at the end | result |
+|---|---:|---:|---:|---|
+| `-dt 0.25` NVE | -0.089 Eh | 240 K | - | stable |
+| `-dt 0.5` NVE | -0.098 Eh | 233 K | - | stable |
+| **`-dt 1.0` NVE** | **+0.049 Eh** | 222 K | 16x | **stable** |
+| `-dt 2.0` NVE | - | - | - | diverges, and used to take the process with it (see below) |
+| `-dt 0.5` CSVR 300 K | +8.10 Eh | 418 K | **6201x** | **one water collapses at ~480 fs** |
+| `-dt 1.0` CSVR 300 K | +6.62 Eh | 360 K | **2121x** | **the same water collapses** |
+| `-dt 1.0` CSVR 300 K, `-hydrogen_mass 4` | +4.59 Eh | 296 K | 22x | stable |
+
+"Hottest atom" is the kinetic energy of the hottest atom over the per-atom mean, the local
+criterion of `-adaptive_step_local`. A healthy frame of this system sits at 15-23.
+
+Read `dE` only for the NVE rows. **With a thermostat, `dE` is bath work and is supposed to be
+nonzero** - the right measure there is whether `<T>` holds the setpoint. NVE settles at 222 K
+because the structure starts at a minimum and equipartition puts half the initial kinetic energy
+into the potential; the thermostat puts that energy back, which is the +6.6 resp. +4.6 Eh.
+
+So the original goal - **1 fs, unmodified masses, no constraints** - is met in NVE.
+
+**The thermostatted rows are not a step-size problem, and that is the surprise.** Halving the
+step makes it *worse* (418 K at 0.5 fs against 360 K at 1.0 fs), and both runs fail at the **same
+pair of water molecules** - indices 6522/6523/6524 and 6936/6937/6938. What separates the stable
+from the failing runs is not dt but temperature: NVE settles at 222-240 K and holds, the
+thermostat keeps 300 K and the site gives way. `-hydrogen_mass 4` holds at 300 K because it
+halves the X-H frequency.
+
+That site is a property of *this geometry*, not of the method: water 6522 has **zero oxygen
+neighbours within 3.5 A** - it sits free in a cavity, and 342 of the 1904 oxygens in this
+structure do. Over 500 fs it crosses 9-11 A and meets another water. A minimised solvated
+structure is not an equilibrated one; the cavities are left over from the packing and a local
+optimiser cannot close them.
+
+## Using polymer_2x as an MD benchmark
+
+This system exists to measure hardware, not chemistry: how does a GFN-FF or GFN2 MD step scale.
+A benchmark runs tens of steps, so none of the long-run behaviour above matters for it - the
+first 500 fs are clean in NVE at every step size up to 1.5 fs.
+
+Two structures are kept next to the raw one, both produced with curcuma itself:
+
+| file | method | E | state |
+|---|---|---:|---|
+| `polymer_2x.xyz` | - | - | raw, as packed |
+| `polymer_2x_gfnff_opt.xyz` | GFN-FF | -917.336755 Eh | minimum, max per-atom \|g\| = 0.045 Eh/A |
+| `polymer_2x_gfn2_opt.xyz` | GFN2 | -11811.591679 Eh | 400 LBFGS steps, \|grad\| = 0.204, **not converged** |
+
+The recipe. Three step counts and a straight-line fit, so the slope is the pure step cost, the
+intercept is the setup and the residual says whether the measurement was worth anything:
 
 ```bash
-# what we verified, from the GFN-FF-optimised structure
-curcuma -md polymer_2x_gfnff_opt.xyz -method gfnff -threads 36 -T 300 \
-        -dt 0.25 -thermostat csvr
-# same stability at the full 1 fs step, by making the X-H oscillation slower:
-curcuma -md polymer_2x_gfnff_opt.xyz -method gfnff -threads 36 -T 300 \
-        -dt 1.0 -hydrogen_mass 4 -thermostat csvr
+for n in 10 30 50; do
+  cp polymer_2x_gfnff_opt.xyz bench.xyz
+  time curcuma -md bench.xyz -method gfnff -threads $T -T 300 -dt 1.0 \
+       -MaxTime $((n)) -thermostat none -seed 1 -no_bmt -verbosity 0
+done
+# slope of t(n) = s per step, intercept = setup
 ```
 
-## Two defects found while investigating this (Sep 19, 2026)
+**Measure on an idle machine.** The first attempt at the table below ran while a GFN2
+optimisation held 8 threads and four GPUs, and came out non-monotonic (8 threads slower than 4,
+36 slower than 16). That is not a scaling curve, it is contention.
 
-The time-step story below is the *practical* recipe. It is not the whole truth: two genuine
-defects came out of chasing it, and both matter beyond this system.
+### Baseline: 36 cores (2x Xeon), GFN-FF, 7320 atoms, dt = 1.0 fs
+
+| threads | setup | s/step | speedup | fit residual |
+|---:|---:|---:|---:|---:|
+| 1 | 22.5 s | 5.05 | 1.00x | +-0.0 s |
+| 2 | 13.5 s | 2.95 | 1.71x | +-0.0 s |
+| 4 | 8.9 s | 1.93 | 2.62x | +-0.3 s |
+| 8 | 5.5 s | 1.45 | 3.48x | +-0.0 s |
+| **16** | 6.5 s | **1.25** | **4.04x** | +-0.0 s |
+| 24 | 5.8 s | 1.28 | 3.96x | +-1.0 s |
+| 36 | 5.0 s | 1.30 | 3.88x | +-0.0 s |
+
+**GFN-FF MD saturates at about 4x around 16 threads and does not improve past it.** By Amdahl
+that is a serial fraction of roughly 25 %, and it is the number a GPU has to beat - not the
+single-thread time.
+
+### And one GPU does not beat it
+
+| configuration | setup | s/step | against 16 CPU threads |
+|---|---:|---:|---:|
+| 16 threads, CPU only | 6.5 s | **1.25** | 1.00x |
+| 8 threads + 1x RTX A4500 (`-gpu cuda`) | 6.4 s | **1.475** | **0.85x** |
+| 16 threads + 1x RTX A4500 | 6.1 s | **1.475** | 0.85x |
+
+One A4500 lands between 8 (1.45) and 16 (1.25) CPU threads, i.e. **the GPU buys nothing for a
+GFN-FF MD step at this size** - it is not even breaking even against the CPU saturation point.
+Doubling the host threads under the GPU changes the step time by nothing at all (1.475 either
+way), so whatever the step is waiting for, it is neither more CPU cores nor more GPU.
+The GPU is genuinely used (nvidia-smi shows 100 % utilisation, 1.6 GB), so this is not a silent
+fallback; the step simply is not force-kernel bound. `docs/MULTI_GPU.md` reached the same
+conclusion from the other side: 1.4 s/step at 7320 atoms against 23 ms/step at 1410 atoms is far
+from the ratio the kernels alone would give. The suspects listed there - CN pair-list rebuild
+every step, dense EEQ factorisation, per-step synchronisations - are where a faster card would
+be wasted.
+
+**What that means for evaluating an H200**: for GFN-FF, the per-step cost has to be attacked in
+the code before a faster card can show anything. For GFN2 the picture is the opposite - there
+the SCF is dense-linear-algebra bound and memory limited (see below), which is exactly what a
+141 GB card changes.
+
+**A trap worth knowing before benchmarking GFN2 here.** A GFN2 optimisation of this system
+launched with `-gpu cuda` ran for two hours without completing a single step: it had allocated
+19.5 GB on GPU 0, left the GPUs at 0 % utilisation, and was computing on the CPU with 53 GB RSS.
+The GPU context for GFN2 at nao = 15444 does not fit on a 20 GB card, the code falls back to the
+CPU **silently**, and a CPU GFN2 single point on 7320 atoms takes over an hour. Check
+`nvidia-smi` utilisation, not just memory, before trusting a GFN2 GPU timing.
+
+## Where the step limit is, on three atoms and on clusters
+
+A single water, NVE, 5 ps, no constraints. `dE` in Eh:
+
+| start T | dt=0.5 | dt=1.0 | dt=1.5 | dt=2.0 | dt=2.5 |
+|---|---:|---:|---:|---:|---:|
+| 300 K | -0.0000 | +0.0000 | -0.0001 | -0.0004 | **+1.70** |
+| 1200 K | +0.0001 | +0.0002 | -0.0003 | **+1.55** | **+1.07** |
+| 1500 K | +0.0002 | +0.0003 | -0.0008 | **+2.24** | **+5.15** |
+| 1750 K | +0.0002 | +0.0004 | -0.0009 | **+0.71** | **+12.53** |
+| 2000 K | +0.0002 | +0.0004 | -0.0012 | **+1.25** | **+216.42** |
+| 2500 K | +0.0001 | +0.0005 | -0.0017 | **+4.55** | **+1.00** |
+
+The limit is between **1.5 and 2.0 fs** and above 1200 K it barely depends on temperature. At
+1.0 fs the energy is conserved to 5e-4 Eh even at 2500 K.
+
+The same limit, with the size varied instead of the temperature. Water clusters carved from
+polymer_2x, NVE, 200 fs, 300 K, `dE` [Eh] / `<T>` [K]:
+
+| waters | atoms | dt=1.0 | dt=1.5 | dt=2.0 |
+|---|---:|---|---|---|
+| 40 | 120 | +0.0007 / 191 | -0.0029 / 193 | **+6.30 / 10815** |
+| 100 | 300 | +0.0021 / 193 | -0.0097 / 195 | **+11.89 / 7628** |
+| 200 | 600 | +0.0040 / 189 | -0.0173 / 192 | **+6.86 / 2324** |
+| 400 | 1200 | +0.0074 / 183 | -0.0410 / 186 | **+6742 / 1182349** |
+| 800 | 2400 | +0.0055 / 217 | -0.0517 / 215 | **+865 / 74397** |
+| 1500 | 4500 | -0.4088 / 222 | -0.5465 / 220 | **+1433 / 65871** |
+
+At 1.0 and 1.5 fs every size conserves; at 2.0 fs every size fails. **There is no size
+threshold and no lottery** - an earlier version of this page described a pattern of "40 clean,
+100 exploding, 200 clean, 400 and 800 exploding" and read it as a per-oscillator probability.
+That pattern was the *marginal* regime at the then-effective 1.95 fs, where the outcome does
+depend on the draw. One step further from the limit, it is gone.
+
+What does grow with size is the ordinary accumulation of truncation error, and it is small:
++0.0007 Eh at 120 atoms against +0.0074 at 1200, i.e. 5.8e-6 Eh per atom either way.
+
+**Which limit is this?** The stiffest mode was measured directly (power iteration on the
+mass-weighted Hessian, two gradients per iteration) and converges to **3608 cm-1**, an O-H
+stretch, period **9.24 fs**. That gives a Verlet *stability* limit `dt < 2/omega` = **2.94 fs**
+and the usual *accuracy* rule of thumb `dt <~ T/20` = **0.46 fs**. The measured breakdown sits
+at 1.5-2.0 fs, i.e. at about T/5 - conservative against the stability limit and generous
+against the rule of thumb. `-hydrogen_mass 4` halves omega and doubles the period, which is why
+it buys back the factor of two.
+
+## What breaks when the step is too large
+
+Not the whole system - **one molecule**. In the frame where the `-dt 1.0` CSVR run breaks, **12
+of the 7320 atoms hold 75 % of the kinetic energy** and the hottest sits at **2121x** the
+per-atom mean, against a steady 15-23x in every healthy frame before it and in the whole NVE and
+`hydrogen_mass 4` runs. The atoms are the same ones every time: the waters 6522/6523/6524 and
+6936/6937/6938, plus 2100/2101/2102.
+
+At the previously measured collapse the geometry is unambiguous: that water's H-O-H angle has
+gone from 103.4° to **3.6°** and its O-H bonds to 0.806/0.859 A. The molecule **alone** is then
+worth **+10.96 Eh** against -0.327 Eh in its normal geometry.
+
+**The force field is not at fault.** A rigid H-O-H scan of a single water is smooth and
+monotonic across the whole range, including through the 1/sin(theta) point at 180° where the
+gradient stays at 0.087 Eh/A: -0.3275 Eh at 103.4°, -0.2847 at 180°, and the other way +0.594 at
+20°, +3.311 at 10°, +13.69 at 3.6°, with the gradient rising 0.009 -> 6.6 -> 34.9 -> 261.8 Eh/A.
+That is correct H-H repulsion. Reaching 40° already costs 120 kcal/mol, so the geometry is
+thermally unreachable and was produced by the integration: at 34.9 Eh/A a 0.5 fs step displaces a
+hydrogen by 1.1 A.
+
+**The energy appears in one window, it does not accumulate.** Cutting that water out of every
+frame and computing its internal GFN-FF energy gives 0.01 to 0.41 kcal/mol of excitation for the
+first 250 fs of the old run - *below* the 0.26 median of twenty other waters - and then 7084
+kcal/mol in the next frame.
+
+### A diverging run used to kill the process
+
+At `-dt 2.0` polymer_2x did not merely heat: it crashed inside `SpatialCellList::build()`,
+reached from `GFNFF::detectHydrogenBondsNative()`. The cell grid is sized from the bounding box
+of the coordinates, that box grows without bound on a diverging trajectory, and the cell count is
+its cube - so the allocation cannot be served and the process dies, losing the run together with
+its last snapshot.
+
+Fixed in `4a72e194` by giving the grid a budget (cell size doubles until the count fits, in the
+worst case down to a single cell). Coarsening is safe: `forEachNeighbor` scans the 3x3x3 block
+and filters on the true squared distance, so larger cells only cost time. Reproduced standalone
+against both versions of the header, 4 atoms pushed to +-f in all three directions, cutoff 5 A:
+
+| extent | before | after |
+|---|---|---|
+| 2e3 A | ok | ok |
+| **2e4 A** | **abort** (6.4e10 cells requested) | ok |
+| 2e5 A | abort | ok |
+| 2e6 A | abort | ok |
+| NaN | ok | ok |
+
+(The first suspicion was the undefined `static_cast<int>` of a non-finite extent. That turned
+out to be harmless by accident - the cast yields a negative number that `std::max(1, ...)`
+collapses to one cell - and it is guarded anyway, but it is not what caused the crash.)
+
+## Thermostats
+
+All of them hold the setpoint where the step is safe. 40 waters, `-dt 1.0`, 5 ps, 300 K:
+
+| thermostat | coupling | `<T>` | T at 5 ps | dE |
+|---|---:|---:|---:|---:|
+| none | - | 281.7 K | 342.4 K | -0.0003 Eh |
+| CSVR | 10 fs | 298.2 K | 292.5 K | +0.0201 Eh |
+| CSVR | 50 fs | 295.4 K | 274.5 K | +0.0310 Eh |
+| CSVR | 200 fs | 300.8 K | 270.5 K | +0.0099 Eh |
+| Berendsen | 10 fs | 299.7 K | 278.5 K | +0.0584 Eh |
+| Berendsen | 50 fs | 300.5 K | 293.5 K | +0.0110 Eh |
+| Nose-Hoover | 10 fs | 299.9 K | 342.1 K | +0.0275 Eh |
+
+So the `-dt 1.0` CSVR failure on polymer_2x is not a thermostat defect. What the thermostat does
+is hold the system at 300 K where NVE settles at 222 K, and at 1 fs this system is close enough
+to its limit that the difference decides.
+
+**One defect found while checking this, not yet fixed**: `SimpleMD::CSVR()` draws its
+chi-squared variate with `m_dof` degrees of freedom where the Bussi-Donadio-Parrinello scheme
+uses `m_dof - 1`. The expected kinetic energy then grows by `(1-c)/N_f` per step instead of
+staying put. For polymer_2x that is 2.2e-6 per step and cannot explain anything here, but it
+scales as 1/N_f, so it is worth 1.6 % per step on a single water. Not measured on a small system
+yet.
+
+## The step-rejecting integrator (`-adaptive_step`)
+
+Still useful, but for a different question than before: it does not rescue a correct step, it
+rescues a step that is too large. `-dt 2.0` is that regime now.
+
+The design is unchanged and is described in the code (`SimpleMD::IntegratorStep`): measure the
+quantity the step is supposed to conserve, and if the step violated it, discard the step and redo
+it with a subdivided one. Neither a constraint nor a mass change, and off by default; an explicit
+`false` is bit-identical to a binary that never had the feature (`md_adaptive_step` checks that).
+
+Two channels, both calibrated on a running median of the accepted steps rather than on an
+absolute energy, because the per-step energy error is a sum over all modes and therefore grows
+with the system:
+
+- the **total energy** of the step (`adaptive_step_factor`, default 5), with the kinetic energy
+  taken before the thermostat and the bath work subtracted, so the criterion is exact for every
+  thermostat;
+- the **hottest atom relative to the per-atom mean** (`adaptive_step_local`, on by default,
+  `adaptive_step_hot_factor` default 10). This one keeps its contrast at 7320 atoms where the
+  global channel loses it, because a violating step stays on a handful of atoms while the
+  legitimate fluctuation does not.
+
+Re-measured with the corrected clock, over the first 40 steps of a healthy `dt = 1.0` NVE run
+at 300 K:
+
+| system | atoms | median drift | max/median | median hottest-atom ratio |
+|---|---:|---:|---:|---:|
+| 1 water | 3 | 0.04 kcal/mol | 1.4 | 1.94 |
+| 40 waters | 120 | 0.85 | 2.2 | 4.70 |
+| 100 waters | 300 | 2.72 | 2.0 | 6.11 |
+| 200 waters | 600 | 5.50 | 1.9 | 6.29 |
+| polymer | 1410 | 29.02 | 1.4 | 4.53 |
+| **polymer_2x** | **7320** | **61.72** | **3.0** | **9.28** |
+
+The median drift spans a factor of 1500 across these systems, which is why an absolute threshold
+cannot work. The *relative* spread stays at 1.4-3.0, and the hottest-atom ratio at 1.9-9.3.
+
+On polymer_2x specifically, measured over 60 healthy steps at `dt = 0.5`, the local observable
+has the tighter band: drift max/median **3.89** against hottest-atom max/median **1.26**. With
+the default factors that puts the global threshold 1.29x above the healthy maximum and the local
+one 8x above it - which is the whole argument for the second channel.
+
+> **Not re-measured**: how large the *first* departing step is relative to the healthy band, for
+> each system. A first attempt reported the maximum over an entire already-diverged `dt = 2.0`
+> run (2.6e6 times the median on polymer_2x), which is not a warning margin and says nothing
+> about how much notice a rejection criterion gets. The factors in the code were calibrated
+> before the clock fix and are unchanged.
+
+## Two defects found on the way
 
 ### 1. The GFN-FF electrostatics cutoff is hard, and it is reachable
 
 `coulomb_r_cut` defaults to 100 Bohr (52.9 A) and the pair loop is a bare
 `if (rij > r_cut) continue;` - no switching function. The reference (Fortran `goed_gfnff`) has
-**no** cutoff at all; 100 Bohr was picked as "effective no-cutoff" because no pair in any
+**no** cutoff at all; 100 Bohr was picked as "effectively no cutoff" because no pair in any
 validation set reaches it. A system wider than ~53 A breaks that assumption.
 
 Measured on a 500-water cluster carved from polymer_2x, moving ONE oxygen by 0.0005 A:
@@ -168,340 +327,41 @@ right size. At that geometry the analytic gradient is **0.96 Eh/A wrong** in x a
 difference +0.954 against analytic -0.012). With `-gfnff.coulomb_r_cut 1e9` the scan is smooth
 and the same gradient check passes at 1e-6.
 
-`-gfnff.coulomb_r_cut` now exposes it; the default stays 100.0, so nothing below ~53 A changes
-and every reference set is untouched. The price of switching it off on polymer_2x (7320 atoms)
-is a single point 3.6 -> 5.4 s. A switching shell (smooth between r_on and r_c) would keep both
-the performance and the continuity - not implemented yet.
+`-gfnff.coulomb_r_cut` exposes it; the default stays 100.0, so nothing below ~53 A changes and
+every reference set is untouched. Switching it off on polymer_2x costs a single point
+3.6 -> 5.4 s. A switching shell (smooth between r_on and r_c) would keep both the performance and
+the continuity - not implemented.
 
-**This is not the main cause of the heating**: removing the cutoff took the 500-water NVE drift
-from +18.8 to +16.0 Eh per 200 fs. It is a real defect found on the way, not the explanation.
+**It is not a source of heating.** Re-measured on that 500-water cluster, NVE, 200 fs:
+
+| | dE | `<T>` |
+|---|---:|---:|
+| `-dt 1.0`, default cutoff | -0.0264 Eh | 223.1 K |
+| `-dt 1.0`, `coulomb_r_cut 1e9` | +0.0097 Eh | 223.1 K |
+| `-dt 2.0`, default cutoff | +94.2 Eh | 12512 K |
+| `-dt 2.0`, `coulomb_r_cut 1e9` | +669.2 Eh | 93227 K |
+
+At a usable step both conserve and the cutoff is worth 0.036 Eh. An earlier version of this page
+reported "removing the cutoff takes the drift from +18.8 to +16.0 Eh per 200 fs" - both of those
+were measured in the already-diverged regime, where the number says nothing about the cutoff.
 
 ### 2. The optimiser can pull a hydrogen into a foreign oxygen
 
 Optimising the same 500-water cluster produced a structure with **H456 0.531 A from O1438** -
 half an O-H bond length, and those two waters were **5 A apart** in the input. Two atoms carry
 6.5 and 5.7 Eh/A of residual force where the median is 0.0035. An MD started there explodes
-immediately (5e6 K within 200 fs), which is *worse* than starting from the unoptimised cluster.
+immediately.
 
-The potential itself is not to blame: pushing that hydrogen towards that oxygen with a freshly
-built topology raises the energy monotonically, as it must. The optimiser's own energy at its
-final geometry (-170.018 Eh) differs from a fresh single point of the same coordinates
-(-168.695 Eh) by 1.32 Eh - the frozen topology of the iterative path is no longer valid once an
-atom has changed its bonding partner. Over 5, 20 and 60 steps the two agree to 0.2 kJ/mol, so
-this is not a gradual drift: it is a cliff that the optimiser walks off after a large
-rearrangement. **Check the maximum per-atom gradient of any GFN-FF-optimised solvated
-structure before using it** - `-dump_gradient` and look at the largest row, not the norm.
+The potential is not to blame: pushing that hydrogen towards that oxygen with a freshly built
+topology raises the energy monotonically, as it must. The optimiser's own energy at its final
+geometry (-170.018 Eh) differs from a fresh single point of the same coordinates (-168.695 Eh) by
+1.32 Eh - the frozen topology of the iterative path is no longer valid once an atom has changed
+its bonding partner. Over 5, 20 and 60 steps the two agree to 0.2 kJ/mol, so this is not a
+gradual drift but a cliff the optimiser walks off after a large rearrangement.
 
-## The actual mechanism, on three atoms (Sep 19, 2026)
-
-Everything above was measured on systems of 300 to 7320 atoms. The cause reproduces on **one
-water molecule**, and that is where it should be read.
-
-**A single water, unconstrained, dt = 1 fs, NVE over 5 ps:**
-
-| start T | dt = 1.0 fs | dt = 0.5 fs |
-|---|---:|---:|
-| 1200 K | -0.0024 Eh | +0.0004 Eh |
-| **1500 K** | **+4.54 Eh** | +0.0006 Eh |
-| 1750 K | **+9.69 Eh** | +0.0007 Eh |
-| 2000 K | **+2.24 Eh** | +0.0007 Eh |
-
-There is a **threshold in amplitude**, not a drift: below it the energy is conserved for 10 ps
-(1 water +0.0007 Eh, 40 waters -0.013 Eh - the same magnitude at 2 ps and at 10 ps, i.e. the
-integrator is a correct symplectic Verlet and pumps nothing), above it the run explodes.
-
-**Why the threshold is at dt = 1 fs.** The GFN-FF O-H bond stiffens steeply under compression.
-Curvature of E(r) along the bond, converted to a frequency and the Verlet limit `dt < 2/omega`:
-
-| r(O-H) | E - E0 | omega | dt_stab |
-|---|---:|---:|---:|
-| 0.70 A | 0.144 Eh | **10758 cm-1** | **0.99 fs** |
-| 0.75 A | 0.080 Eh | 8773 cm-1 | 1.21 fs |
-| 0.80 A | 0.040 Eh | 7139 cm-1 | 1.49 fs |
-| 0.90 A | 0.005 Eh | 4753 cm-1 | 2.23 fs |
-| **0.971 A (eq)** | 0 | **3817 cm-1** | **2.78 fs** |
-| 1.15 A | 0.020 Eh | 2669 cm-1 | 3.98 fs |
-
-At the equilibrium length dt = 1 fs has a factor 2.8 of margin. Compressed to 0.70 A the margin
-is **gone** - and then the feedback closes: more compression -> higher omega -> larger
-integration error -> more energy -> more compression.
-
-**Why that makes large systems fail and small ones not.** The per-oscillator probability of
-crossing the threshold at 300 K is small but not zero. polymer_2x has **4612 hydrogens**, so
-over a few hundred steps the crossing is a certainty; 40 waters (80 O-H) usually get away with
-it. The observed pattern - 40 waters clean, 100 waters exploding, 200 clean, 400 and 800
-exploding - is exactly that lottery, and it is **not** a size effect in the code. It was
-verified step by step in the 100-water case: one O-H oscillation grows over ~10 fs
-(1.06 -> 0.81 -> 1.28 -> 0.72 A), the hydrogen then leaves its own oxygen (1.87 A) and hits a
-neighbouring one at 0.42 A, where the EEQ charges diverge to -5.45/+4.53 e and produce a force
-of order 100 Eh/A. One Verlet step with that force injected 262 Eh into a system whose entire
-kinetic energy was 0.43 Eh.
-
-**What was ruled out on the way** (each by measurement, not by argument): the starting structure
-(optimised heats *worse* than raw), outlier forces (max |g| 0.046 vs 0.079 in a stable system),
-a thread race (gradients agree to 1.7e-14 between 1 and 36 threads), an energy/force
-inconsistency (finite differences agree to 1e-6 at the start geometry *and* inside the heating
-trajectory), the Coulomb cutoff (removing it makes the drift *worse*: +22.97 vs +11.58 Eh),
-water as such (1 and 40 waters conserve energy at dt = 1 fs), stale internal MD state (frozen
-topology reproduces the fresh single point to the last digit at the collapsed geometry), and a
-CPU/GPU difference (that was the Eh/Bohr unit bug, fixed earlier).
-
-**A guard that was tried and REJECTED.** The diverging EEQ charges are a known pathology of
-electronegativity equalisation at short range - the off-diagonal erf(gamma*r)/r rises towards
-the diagonal hardness and the 2x2 block becomes near-singular. The reference has the same
-property; xtb never meets it because its MD defaults are `hmass=4` and `shake=2` (all bonds),
-with a 4 fs step. Rejecting an EEQ solution with |q| above 4 e + |molecular charge| and falling
-back to the topology charges (the rule the xTB SCF uses since Known Issue #9) does cut the
-damage by a factor of 5 (100 waters at dt = 1 fs: 20953 K / +29.7 Eh -> 4036 K / +5.5 Eh) -
-**but it is not in the code, because it breaks the reference sets**: GMTKN55 gfnff went to
-MAD 0.198 / max 166 kcal/mol, and the worst case, `IL16/229`, legitimately carries 4.63 e. The
-4 e bound is safe for an SCF and is not safe for EEQ topology charges. The patch was reverted
-and GMTKN55 verified back to zero differences. It would also have been a safety net rather than
-a cure: the step that put two atoms 0.42 A apart was already unphysical.
-
-## The fix: a step-rejecting integrator (`-adaptive_step`, Sep 19, 2026)
-
-Everything above says the same thing: **single steps** violate the integrator's accuracy limit,
-and one such step is enough to ruin a trajectory. Lowering `dt` globally or raising the hydrogen
-mass both work, but they pay for a handful of bad steps with every step of the run, and the mass
-trick changes the dynamics by construction.
-
-Step rejection is the ordinary numerical answer and neither a constraint nor a mass change:
-measure the quantity the step is supposed to conserve, and if the step violated it, throw the
-step away and redo it with a subdivided time step. The physics is untouched - a smaller step is
-still velocity-Verlet on the same potential - and the cost is paid only where it is needed.
-
-```bash
-curcuma -md polymer_2x_gfnff_opt.xyz -method gfnff -threads 36 -T 300 \
-        -dt 1.0 -thermostat csvr -adaptive_step true
-```
-
-**It is off by default** and an explicit `false` is bit-identical to a binary that never had the
-feature (`md_adaptive_step` checks exactly that). Full `ctest` after the change: 496 tests, 485
-passed, 7 disabled and **4 failed - the same four this repository already had**
-(`confscan_dtemplate` flaky, `test_orca_interface`, `xtb_cpscf`,
-`cli_curcumaopt_07_opt_multixyz` golden-value drift). No new failure.
-
-### What is measured, and against what
-
-The conserved quantity is `E_pot + E_kin`, with the kinetic energy taken **before** the
-thermostat touched the velocities - the thermostat legitimately changes `E_kin` and must not
-count as a violation. When a thermostat is active its work over the step is measured and
-subtracted, so the criterion is exact for every thermostat, not only CSVR.
-
-### Why the threshold is not a fixed energy
-
-The energy error of velocity-Verlet is not a drift but a bounded oscillation whose amplitude is
-the sum over all modes, so it grows with the system. Median per-step `|dE|` at 300 K, dt = 1 fs:
-
-All numbers below are over the **first 40 steps** of the same run, so median and maximum come from
-the same window; the last two columns are the worst step of the whole 150-step run.
-
-| system | atoms | median | p90 | max | max/median | worst step | /median |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| 1 water | 3 | 0.35 | 0.52 | 0.58 | **1.7** | 0.6 | 1.7 |
-| 40 waters | 120 | 6.27 | 13.7 | 21.4 | **3.4** | 21.4 | 3.4 |
-| 100 waters | 300 | 17.2 | 33.3 | 56.6 | **3.3** | 32943.6 | **1919** |
-| 200 waters | 600 | 33.5 | 62.7 | 105.3 | **3.2** | 71411.6 | **2134** |
-| polymer | 1410 | 195.1 | 255.7 | 326.8 | **1.7** | 326.7 | 1.7 |
-
-(kcal/mol. Measured with `CURCUMA_ADAPTIVE_DEBUG=1`, which prints the drift of every step.) A
-fixed number would reject every step of the polymer or no step of the water. What **is**
-system-independent is the spread *within* a run: the largest healthy step is 1.7 to 3.4 times the
-median across all five systems, while the step that destroys a trajectory is **1919x** resp.
-**2134x** it. Almost three orders of magnitude separate the two, and the two systems that survive
-the 150 steps never produce anything above their own healthy maximum.
-
-The threshold is therefore `adaptive_step_factor` (default 10) times the **running median of the
-steps accepted so far**, capped at `adaptive_step_tol` (default 1.0) times the thermal energy
-`N_dof*kB*T/2`. The cap also covers the warm-up, before enough steps exist to form a median; the
-healthy maximum measured over all five systems is 0.65 of it, the destructive steps 124 and 134.
-
-**Only a step accepted on the first attempt calibrates the median.** A subdivided step has a
-smaller drift than the one it replaced but still a larger one than an ordinary step, so feeding
-those back lets a degenerating trajectory raise its own threshold. That was measured, not
-argued: on the 100-water cluster the unanchored version left +1.50 Eh with 89 rejections, the
-anchored one -0.01 Eh with 8.
-
-### What it does
-
-200 fs of NVE at `dt = 1.0` from the same structure and the same seed, so a row with zero
-rejections must reproduce the `off` column exactly - and does. `dE` in Eh, `<T>` in K, the
-number in brackets is how many of the 200 steps (120 for the polymer) were redone subdivided.
-
-| system | atoms | off | factor 1.5 | factor 2 | factor 3 | **factor 5** | factor 10 | factor 20 |
-|---|---:|---|---|---|---|---|---|---|
-| 1 water | 3 | -0.0005 | - | - | - | **-0.0005 (0)** | -0.0005 (0) | -0.0005 (0) |
-| 40 waters | 120 | -0.0163 | -0.0166 (74) | -0.0127 (44) | -0.0080 (28) | **-0.0163 (0)** | -0.0163 (0) | -0.0163 (0) |
-| polymer | 1410 | +0.0999 | -0.0708 (1) | +0.0999 (0) | +0.0999 (0) | **+0.0999 (0)** | +0.0999 (0) | +0.0999 (0) |
-| 100 waters | 300 | **+53.26** / 37303 | +0.051 (143) | +0.222 (129) | +0.507 (105) | **+1.104 (107)** | +2.808 (77) | +3.035 (73) |
-| 200 waters | 600 | **+81.37** / 28710 | +0.043 (145) | +0.087 (80) | +0.243 (73) | **+0.456 (75)** | +0.952 (20) | +3.578 (53) |
-
-Read the table as two halves. The upper three systems are healthy at 1 fs: at the default
-factor the feature rejects **nothing** there and the trajectory is bit-identical to a run
-without it - which is the point, since a rejection on a healthy system is pure cost (40 waters
-at factor 1.5 pays 74 rejections for a `dE` that gets *worse*, -0.0166 against -0.0163). The
-lower two destroy themselves without it and are brought back to the setpoint with it.
-
-**Why the default is 5**: it is the smallest factor that rejects nothing on any healthy system
-measured, while still cutting the two blown-up runs by a factor of 50 to 180. Tightening it to
-**2** buys another factor of 5 on a system that still gains energy (100 waters +1.10 -> +0.22 Eh)
-and costs 22 % of the steps of a healthy 120-atom system. Loosening it is not useful: 10 and 20
-reject *fewer* steps but conserve *worse*, because the steps they let through accumulate.
-
-The false positives are a small-system effect, not a general one: the ratio of the largest
-healthy step to the median is 3.4 for the 120-atom cluster but only 1.7 for the 1410-atom
-polymer, so the same factor is far more generous on the large system - at factor 1.5 the polymer
-rejects exactly one step out of 120.
-
-### The size limit of the GLOBAL criterion (superseded by the local one below)
-
-> **Superseded (Sep 19, 2026).** Everything in this section is still the correct description of
-> the **global energy** criterion and of why it fails at 7320 atoms - keep it, it is the
-> measurement the local channel was designed from. What is no longer true is the conclusion:
-> the local criterion of the following section does rescue polymer_2x
-> (+67.59 -> +0.53 Eh, 2175 -> 246 K), and 92 of its 104 rejections are ones the global
-> criterion accepted.
-
-On `polymer_2x` itself, 7320 atoms, the **global** criterion does not help - it makes the run
-**worse**:
-
-| t | `-dt 1.0` without | `-dt 1.0` with `-adaptive_step` (factor 5) |
-|---|---:|---:|
-| 0 fs | -917.34 Eh | -917.34 Eh |
-| 50 fs | -911.96 | -909.78 |
-| 100 fs | **-911.08** | **-894.57** |
-
-(E_pot, 200 fs NVE, same seed.) And it costs about 45 s per step instead of a few, because
-roughly half the steps are subdivided.
-
-The reason is measurable and it is not a bug. The criterion works by contrast: the destructive
-step has to stand out from the legitimate per-step fluctuation. That fluctuation is a sum over
-all modes, so it **grows with the system**, while a local defect - one O-H bond collapsing -
-stays local. Healthy phase, first 40 steps, dt = 1 fs, 300 K:
-
-| system | atoms | median drift | max / median (healthy) | destructive step / median |
-|---|---:|---:|---:|---:|
-| 40 waters | 120 | 0.010 Eh | 3.4 | - |
-| 100 waters | 300 | 0.027 Eh | 3.3 | **1919** |
-| 200 waters | 600 | 0.053 Eh | 3.2 | **2134** |
-| polymer | 1410 | 0.311 Eh | 1.7 | - |
-| **polymer_2x** | **7320** | **0.505 Eh** | **5.94** | - |
-
-At 7320 atoms the **healthy** spread alone is 5.94 times the median - wider than the default
-factor of 5. The threshold therefore sits *inside* the legitimate distribution: about half the
-steps are rejected essentially at random, which changes the trajectory without removing the one
-event that matters, and a local collapse worth a few Eh is indistinguishable from a normal
-fluctuation of 0.5 to 3 Eh. The contrast is ~600 at 300 atoms and ~1 at 7320.
-
-**So the rule is**: a global energy criterion discriminates while the system is small enough
-that one bad bond dominates the total energy error - measured here up to ~1400 atoms. Beyond
-that it needs to be **local** (per atom, per bond, or per fragment).
-
-### The local criterion (`-adaptive_step_local`, on by default, Sep 19, 2026)
-
-That local channel now exists. The observable is the plainest one available: the kinetic energy
-of the **hottest atom divided by the per-atom mean**. It needs no decomposition of the potential,
-it is dimensionless, and it is almost size-independent, because the maximum of N samples of a
-chi-squared distribution grows only logarithmically in N. It is calibrated by its own running
-median over accepted steps, exactly as the energy drift is, so no absolute number is baked in.
-
-Why it separates where the total energy does not - both observables measured over the same 60
-healthy steps of polymer_2x, 7320 atoms, dt = 0.5:
-
-| observable | median | healthy maximum | max / median | default factor | threshold sits at |
-|---|---:|---:|---:|---|---|
-| total energy drift | 48.96 kcal/mol | 190.45 kcal/mol | **3.89** | 5 | 245, i.e. **1.29x** the healthy maximum |
-| hottest atom / mean | 9.70 | 12.19 | **1.26** | 10 | 97, i.e. **8x** the healthy maximum |
-
-The global threshold sits at the edge of the legitimate distribution - that is the failure
-documented just above, in one number. The local one has room to spare in both directions, and
-the event it has to catch is not marginally above the healthy range but three orders of
-magnitude above it: in the frame where the run breaks, the hottest atom reaches **3733x** the
-per-atom mean against a steady 15-23x in every frame before it (measured on a 25 fs frame
-proxy, so the per-step contrast is larger still).
-
-It is a pure addition: it can only reject a step that the global criterion accepted, never
-accept one it rejected. On the deterministic single-water regression case the trajectories with
-and without it are **bit-identical to twelve decimals** (dE = -0.007933244988 Eh,
-`<T>` = 641.099708218 K either way), and on a 300-atom cluster, where the global criterion
-already works, the local one fires **zero** times - it does not misfire on healthy systems.
-
-**What it does on the system this page is about.** polymer_2x, 7320 atoms, 300 fs NVE at
-dt = 0.5, same seed, same thread count:
-
-| | dE | `<T>` | rejections |
-|---|---:|---:|---|
-| without | **+67.59 Eh** | **2175.1 K** | - |
-| `-adaptive_step true` | **+0.53 Eh** | **246.2 K** | 104 of 600 steps, **92 of them caught by the local channel alone** |
-
-Those 92 are the measurement that matters: the global energy criterion would have accepted
-them. It is also visible in the trajectory - the hottest-atom ratio runs at a flat 15-23 through
-frame 12 in both runs (the accepted steps are the same ones), and in the frame where the plain
-run reaches 3733 with 12 atoms holding 99.0 % of the kinetic energy, the rejecting run reaches
-911 with those atoms holding 24.2 %. So the event is **damped, not eliminated**, which is what
-the residual +0.53 Eh is. The run costs about 1.9x the wall time of the plain one.
-
-`-adaptive_step_hot_factor` (default 10) sets the multiple of the running median.
-`-adaptive_step_local false` restores the previous behaviour exactly.
-
-**The factor is not the limiting element here, which was checked rather than assumed.**
-Tightening it from 10 to 4 on the same polymer_2x run changes nothing measurable: +0.5189 Eh /
-245.8 K against +0.5305 Eh / 246.2 K, the same 104 rejections, 85 local-alone instead of 92. So
-the residual is structural - the event is damped rather than prevented - and not a threshold
-that was set too loose. Do not tune the factor expecting the residual to move.
-
-### What it does not do
-
-- The **global** channel does not scale to arbitrary system size - see the section above. The
-  local one was measured to 7320 atoms and nowhere beyond; the observable is only weakly
-  size-dependent by construction, but that is an argument, not a measurement.
-- It damps a violating event, it does not undo one. On polymer_2x the rejecting run still shows
-  the event at 911x the per-atom mean instead of 3733x, and keeps +0.53 Eh of the +67.59.
-- It cannot rescue a step that is already unphysical in the potential, only one that is
-  unphysical in the integration. A geometry with two atoms 0.42 A apart is wrong either way.
-- It costs one extra force evaluation per subdivided step times the number of substeps
-  (`adaptive_step_substeps`, default 8), so a run in which most steps are rejected is slower
-  than simply halving `dt`. The rejection count is reported at the end of the run; if it is a
-  large fraction of the steps, `dt` is wrong for the system and the feature is only papering
-  over it.
-- It has not been tested with RATTLE, with metadynamics, or across a restart.
-
-## Why it is the time step and not the structure
-
-Three measurements, each of which the "bad structure" explanation fails:
-
-1. **Optimising does not help.** A GFN-FF optimisation takes polymer_2x from -901.94 to
-   **-917.34 Eh** and the gradient norm from 2.35 to **0.175**. At `-dt 1.0` that optimised
-   structure still heats to `<T>` = 18527 K - **worse** than the raw structure's 2936 K.
-2. **The step size does help**, in the same structure and the same thermostat: 0.5 fs and
-   0.25 fs both stay at the setpoint.
-3. **The NVE drift has a threshold between 0.5 and 1.0 fs.** Over 100 fs without a thermostat:
-
-   | dt | steps per period | dE |
-   |---|---:|---:|
-   | 0.25 fs | 37 | -0.25 Eh |
-   | 0.50 fs | 18 | **-0.05 Eh** |
-   | 1.00 fs | 9.2 | **+11.58 Eh** |
-
-**Which limit is this?** The stiffest mode was measured directly - power iteration on the
-mass-weighted Hessian, two gradients per iteration, no Hessian needed - and converges to
-**3608 cm⁻¹**, a plain X-H (here O-H of water) stretch, period 9.24 fs. That gives
-
-- Verlet **stability** `dt < 2/omega` = **2.94 fs**, so 1 fs has a factor 2.9 of margin, and
-- **accuracy** `dt <~ T/20` = **0.46 fs**, which 1 fs misses by a factor 2.
-
-So dt = 1 fs is stable but not accurate here, and the measured table is exactly what that
-predicts: clean at 18 steps per period, drifting at 9. `-hydrogen_mass 4` halves omega and
-doubles the period, moving `T/20` to 0.92 fs - which is why it restores the 1 fs step.
-
-An earlier version of this page called the 1 fs behaviour "beyond the stability limit". That
-was wrong; the stability limit is 2.94 fs and was never reached.
-
-**Size matters, but only as the trigger.** The same NVE at dt = 1.0 on `polymer.xyz` (1410
-atoms) drifts **+0.10 Eh**, against +11.58 Eh at 7320 atoms - 22x more per atom for the large
-system. So 1 fs is marginal for GFN-FF generally and crosses into instability as the system
-grows. Do not read a stable small-molecule MD as evidence that the setting is safe.
+**Check the maximum per-atom gradient of any GFN-FF-optimised solvated structure before using
+it** - `-dump_gradient` and look at the largest row, not the norm. For reference, the structure
+used throughout this page has max |g| = 0.045 Eh/A, RMS 0.0021 and no atom above 0.05.
 
 ## Optimising a system of this size
 
@@ -510,9 +370,9 @@ Two convergence controls are **absolute** and therefore unusable at 7320 atoms u
 | Parameter | Default | What happens at 7320 atoms |
 |---|---|---|
 | `max_energy_rise` | 100 kJ/mol | A single LBFGS step raises the energy by ~260 kJ/mol, so the optimiser aborts immediately with "Energy rise exceeded maximum allowed". |
-| `gradient_threshold` | 5e-4 Eh/Bohr | It is a norm over all 3N components. At the relaxed structure the norm is 0.175, i.e. 0.0012 per component - so the gradient criterion can never be met and the run does not terminate: it keeps taking ~20 s line-search steps that change nothing, up to `max_iterations` (5000). |
+| `gradient_threshold` | 5e-4 Eh/Bohr | It is a norm over all 3N components. At the relaxed structure the norm is 0.175, i.e. 0.0012 per component - so the criterion can never be met and the run does not terminate. |
 
-The recipe that works, and the numbers it produced:
+The recipe that works:
 
 ```bash
 curcuma -opt polymer_2x.xyz -method gfnff -threads 36 -optimizer lbfgs \
@@ -520,8 +380,8 @@ curcuma -opt polymer_2x.xyz -method gfnff -threads 36 -optimizer lbfgs \
 # convergence_count 3 = energy + RMSD, dropping the unreachable gradient-norm criterion
 ```
 
-Restarting the optimiser from its own output (fresh LBFGS memory) is what actually makes
-progress - each round stalls in a line search well before a minimum:
+Restarting the optimiser from its own output (fresh LBFGS memory) is what makes progress - each
+round stalls in a line search well before a minimum:
 
 | round | E [Eh] | steps | grad norm |
 |---|---|---|---|
@@ -533,23 +393,33 @@ progress - each round stalls in a line search well before a minimum:
 | 5 | -917.34 | 14 | 0.27 |
 | 6 | -917.337 | 5 | 0.175 |
 
-Both defaults should arguably scale with system size; that is a code change, not a
-documentation matter, and is not made here.
+Both defaults should arguably scale with system size; that is a code change, not a documentation
+matter, and is not made here.
 
 ## GFN2
 
 Starting GFN2 from the GFN-FF-optimised structure is worth **14.65 Eh (38500 kJ/mol)**: GFN2
 gives -11784.88 Eh on the raw structure and -11799.53 Eh on the GFN-FF-optimised one, before a
 single GFN2 step. At ~160 s per step (4x A4500) a GFN2 optimisation of this system is a
-multi-hour job, so pre-optimising with GFN-FF is not a convenience, it is the only affordable
-route.
+multi-hour job, so pre-optimising with GFN-FF is not a convenience but the only affordable route.
+
+A GFN2 optimisation is in progress; 400 iterations took it to -11811.59 Eh with a gradient norm
+of 0.204, moving the structure by 1.99 A on average and 7.46 A at most from the GFN-FF minimum -
+mostly the 1500 waters rearranging. It has not converged.
+
+> **Watch out for an optimiser result that is the input.** Before the Sep 2026 fix, a
+> non-converged single-structure `-opt` wrote `molecules[0]` - the *input* geometry - dressed as
+> a result, with a stale energy in the comment line. A 6.8 h GFN2 run was lost that way. It now
+> writes `result.final_molecule`; if you have `.opt.xyz` files from before that, check them
+> against their input before trusting them.
 
 ## What was not tested
 
-- Longer than 200 fs, and no production trajectory - these runs answer "does it stay at the
+- Longer than 500 fs, and no production trajectory - these runs answer "does it stay at the
   setpoint", not "is the sampling correct".
-- Thermostats other than CSVR, and `-dt 0.75`, so the stability limit is only bracketed
-  between 0.5 and 1.0 fs.
-- `-hydrogen_mass` was used at 4 amu only, and its effect on dynamics (it changes the
-  time scale of X-H motion by construction) was not examined.
+- `-dt 0.75` and `-dt 1.25`, so the limit is bracketed between 1.5 and 2.0 fs and not resolved.
+- `-hydrogen_mass` at values other than 4, and its effect on the dynamics (it changes the time
+  scale of X-H motion by construction) was not examined.
 - GFN2 MD at this size.
+- The `adaptive_step` calibration with the corrected clock (see the note in that section).
+- Whether the CSVR chi-squared off-by-one matters on a small system.
