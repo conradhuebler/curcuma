@@ -25,16 +25,22 @@ struct DirectionCosines {
     double l, m, n;
 };
 
+// Cartesian angular-momentum orbital types.
+// Claude Generated (WP1): the d set is the proper 6 cartesian components
+// (xx, yy, zz, xy, xz, yz) -- replaces the previous broken 5-d approximation.
+// Spherical 5d is handled at matrix-assembly time via a Cartesian->spherical
+// transformation in dft_integrals.cpp, not here.
 enum OrbitalType {
     S = 0,
     PX = 1,
     PY = 2,
     PZ = 3,
-    DXY = 4,
-    DYZ = 5,
-    DZX = 6,
-    DX2Y2 = 7,
-    DZ2 = 8
+    DXX = 4,
+    DYY = 5,
+    DZZ = 6,
+    DXY = 7,
+    DXZ = 8,
+    DYZ = 9
 };
 
 // Structure for a contracted Gaussian function
@@ -107,64 +113,41 @@ static inline double calculatePrimitiveOverlap(double alpha1, double alpha2, dou
     return prefactor * overlap_x * overlap_y * overlap_z;
 }
 
-// Convert orbital type to angular momentum components
+// Convert orbital type to cartesian angular-momentum components (l, m, n)
+// where the Gaussian is x^l y^m z^n. Claude Generated (WP1): 6-d cartesian set.
 static inline void orbitalTypeToComponents(OrbitalType type, int& l, int& m, int& n)
 {
     switch (type) {
     case S:
-        l = 0;
-        m = 0;
-        n = 0;
-        break;
+        l = 0; m = 0; n = 0; break;
     case PX:
-        l = 1;
-        m = 0;
-        n = 0;
-        break;
+        l = 1; m = 0; n = 0; break;
     case PY:
-        l = 0;
-        m = 1;
-        n = 0;
-        break;
+        l = 0; m = 1; n = 0; break;
     case PZ:
-        l = 0;
-        m = 0;
-        n = 1;
-        break;
+        l = 0; m = 0; n = 1; break;
+    case DXX:
+        l = 2; m = 0; n = 0; break;
+    case DYY:
+        l = 0; m = 2; n = 0; break;
+    case DZZ:
+        l = 0; m = 0; n = 2; break;
     case DXY:
-        l = 1;
-        m = 1;
-        n = 0;
-        break;
+        l = 1; m = 1; n = 0; break;
+    case DXZ:
+        l = 1; m = 0; n = 1; break;
     case DYZ:
-        l = 0;
-        m = 1;
-        n = 1;
-        break;
-    case DZX:
-        l = 1;
-        m = 0;
-        n = 1;
-        break;
-    case DX2Y2:
-        l = 2;
-        m = 0;
-        n = 0;
-        break; // This is an approximation - we need proper linear combinations
-    case DZ2:
-        l = 0;
-        m = 0;
-        n = 2;
-        break; // This is an approximation - we need proper linear combinations
+        l = 0; m = 1; n = 1; break;
     default:
-        l = 0;
-        m = 0;
-        n = 0;
-        break;
+        l = 0; m = 0; n = 0; break;
     }
 }
 
-// Calculate overlap between two contracted Gaussian orbitals
+// Calculate overlap between two contracted Gaussian orbitals.
+// NOTE (Claude Generated, WP1): the production DFT path uses the Obara-Saika
+// kernels in dft_integrals.cpp with pre-normalized coefficients. This legacy
+// helper is kept for the STO-3G factory / parser test path; coefficients here
+// are expected to be raw and primitives are normalized inside the loop.
 static inline double calculateOverlap(const Orbital& orb1, const Orbital& orb2)
 {
     // Calculate distance between centers
@@ -173,34 +156,17 @@ static inline double calculateOverlap(const Orbital& orb1, const Orbital& orb2)
     double dz = orb2.z - orb1.z;
     double R2 = dx * dx + dy * dy + dz * dz;
 
+#ifdef DEBUG_ON
     std::cout << "Calculating GTO overlap between orbitals at positions: "
               << "(" << orb1.x << "," << orb1.y << "," << orb1.z << ") and "
               << "(" << orb2.x << "," << orb2.y << "," << orb2.z << ")"
-              << " with R² = " << R2 << std::endl;
-
-    // Special case for identical orbitals at the same center
-    if (R2 < 1e-10 && orb1.type == orb2.type && orb1.exponents.size() == orb2.exponents.size()) {
-        bool identical = true;
-        for (size_t i = 0; i < orb1.exponents.size(); i++) {
-            if (std::abs(orb1.exponents[i] - orb2.exponents[i]) > 1e-10 || std::abs(orb1.coefficients[i] - orb2.coefficients[i]) > 1e-10) {
-                identical = false;
-                break;
-            }
-        }
-        if (identical) {
-            std::cout << "Identical orbitals detected - returning 1.0" << std::endl;
-            return 1.0;
-        }
-    }
+              << " with R2 = " << R2 << std::endl;
+#endif
 
     // Convert orbital types to angular momentum components
     int l1, m1, n1, l2, m2, n2;
     orbitalTypeToComponents(orb1.type, l1, m1, n1);
     orbitalTypeToComponents(orb2.type, l2, m2, n2);
-
-    // Special handling for d orbitals (linear combinations)
-    // For simplicity we've approximated them above, but proper treatment involves
-    // linear combinations of cartesian GTOs
 
     // Calculate overlap for each pair of primitive Gaussians
     double overlap = 0.0;
@@ -227,17 +193,21 @@ static inline double calculateOverlap(const Orbital& orb1, const Orbital& orb2)
             // Add contribution from this pair of primitives
             overlap += c1 * c2 * norm1 * norm2 * primitive_overlap;
 
+#ifdef DEBUG_ON
             std::cout << "  Primitive overlap: alpha1=" << alpha1 << ", alpha2=" << alpha2
                       << ", c1=" << c1 << ", c2=" << c2
                       << ", norm1=" << norm1 << ", norm2=" << norm2
                       << ", primitive_overlap=" << primitive_overlap
                       << ", contribution=" << c1 * c2 * norm1 * norm2 * primitive_overlap
                       << std::endl;
+#endif
         }
     }
 
+#ifdef DEBUG_ON
     std::cout << "Final GTO overlap result: " << overlap << std::endl
               << std::endl;
+#endif
     return overlap;
 }
 

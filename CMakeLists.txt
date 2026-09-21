@@ -457,6 +457,10 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/native_xtb_method.cpp
         src/core/energy_calculators/qm_methods/nddo.cpp
         src/core/energy_calculators/qm_methods/nddo_method.cpp
+        src/core/energy_calculators/qm_methods/dft.cpp
+        src/core/energy_calculators/qm_methods/dft_integrals.cpp
+        src/core/energy_calculators/qm_methods/dft_method.cpp
+        src/core/energy_calculators/qm_methods/dft_scf.cpp
         src/core/energy_calculators/qm_methods/gfnff_method.cpp
         src/core/energy_calculators/qm_methods/xtb_method.cpp
         src/core/energy_calculators/qm_methods/tblite_method.cpp
@@ -540,6 +544,10 @@ set(curcuma_cap_SRC
 )
 
 add_library(curcuma_core  ${curcuma_core_SRC})
+
+# Claude Generated (WP1): bake the source dir so DFT can locate shipped basis
+# .dat files at runtime (resolveBasisFile falls back to this path).
+target_compile_definitions(curcuma_core PRIVATE CURCUMA_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 # Claude Generated (October 2025): Add feature flag compile definitions to curcuma_core target
 # These are required for method_factory.cpp #ifdef checks to work properly

@@ -1,0 +1,35 @@
+{
+  "molecule": {
+    "name": "Ne atom (WP1 validation)",
+    "natoms": 1,
+    "atoms": [
+      {
+        "z": 10,
+        "symbol": "Ne"
+      }
+    ]
+  },
+  "method": "HF",
+  "basis": "def2-SVP",
+  "charge": 0,
+  "multiplicity": 1,
+  "nmo": 14,
+  "s_min_eigenvalue": 0.1911,
+  "mo_energies": [
+    -32.75284176645755,
+    -1.8822375242222293,
+    -0.8388878911589603,
+    -0.8388878911589601,
+    -0.8388878911589545,
+    1.634897147216511,
+    1.6962511417997752,
+    1.6962511417997768,
+    1.696251141799781,
+    4.51836826036174,
+    4.518368260361758,
+    4.518368260361762,
+    4.518368260361764,
+    4.518368260361771
+  ],
+  "mo_energies_note": "SCF-converged Fock eigenvalues (Hc+2J-K), NOT 1e Hcore; WP3+ comparison"
+}

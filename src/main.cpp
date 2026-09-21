@@ -2311,7 +2311,9 @@ int main(int argc, char **argv) {
                 method.find("am") != std::string::npos ||
                 method.find("mndo") != std::string::npos ||
                 method.find("-3c") != std::string::npos ||
-                method == "orca") {
+                method == "orca" ||
+                method == "hf" || method == "lda" ||
+                method == "pbe" || method == "b3lyp") {
                 std::cout << "  - " << method << "\n";
             }
         }

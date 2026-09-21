@@ -45,9 +45,9 @@ WP0 (Gerüst/Setup)
 
 | WP | Titel | Status | Datei |
 |----|-------|--------|-------|
-| WP0 | Gerüst, Quellenangabe, Setup | ⚠️ offen | `WP0_geruest_setup.md` |
-| WP1 | GTO-1e-Integrale (S/T/V) | ⚠️ offen | `WP1_gto_1e_integrale.md` |
-| WP2 | 4-Zentren-ERI (McMurchie-Davidson) | ⚠️ offen | `WP2_eri_mcmurchie_davidson.md` |
+| WP0 | Gerüst, Quellenangabe, Setup | ⚙️ machine-tested | `WP0_geruest_setup.md` |
+| WP1 | GTO-1e-Integrale (S/T/V) | ⚙️ machine-tested (`ctest -L dft_1e` 10/10) | `WP1_gto_1e_integrale.md` |
+| WP2 | 4-Zentren-ERI (McMurchie-Davidson) | ⚙️ machine-tested (`ctest -L dft_2e` 10/10) | `WP2_eri_mcmurchie_davidson.md` |
 | WP3 | HF-SCF (rung 666) — hartes Gate | ⚠️ offen | `WP3_hf_scf_gate.md` |
 | WP4 | DFT-Grid (Euler-Maclaurin + Lebedev + Becke) | ⚠️ offen | `WP4_dft_grid_becke.md` |
 | WP5 | LDA (Slater-Dirac + VWN5) | ⚠️ offen | `WP5_lda_vwn5.md` |

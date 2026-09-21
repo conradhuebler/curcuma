@@ -10,8 +10,10 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
+#include "dft_integrals.hpp"  // primitiveNorm, normalizeOrbitalSelfOverlap (WP1)
 #include "GTOIntegrals.hpp"
 #include "STOIntegrals.hpp"
 
@@ -112,7 +114,15 @@ inline std::string toUpper(std::string str)
     return str;
 }
 
-// Parse a TURBOMOLE/ORCA basis set file
+// Parse a TURBOMOLE/ORCA basis set file in the curcuma $DATA format.
+// Claude Generated (WP1): rewritten as a single-pass line parser. The previous
+// implementation misclassified indented shell lines (e.g. "S   3") as element
+// headers and used a seekg-by-trimmed-length hack that broke on leading
+// whitespace, so it never parsed the shipped def2-SV(P)/def2-SVP files. This
+// version detects element headers (a single all-alpha token with no digits --
+// full names like HYDROGEN or standard symbols like H/He) and keys the result
+// map by the standard element symbol, so DFT can look up by symbol derived
+// from the atomic number.
 inline BasisSetMap parseBasisSetFile(const std::string& filename)
 {
     std::ifstream file(filename);
@@ -123,161 +133,147 @@ inline BasisSetMap parseBasisSetFile(const std::string& filename)
     BasisSetMap basisSetMap;
     std::string line;
 
-    // Skip header until $DATA is found
+    // Skip header until the $DATA marker is found. Match the marker itself (a
+    // line whose trimmed content starts with "$DATA"), not just any line that
+    // happens to contain the substring in a comment.
     bool foundData = false;
     while (std::getline(file, line)) {
-        if (line.find("$DATA") != std::string::npos) {
+        std::string t = trim(line);
+        if (t == "$DATA" || t.rfind("$DATA", 0) == 0) {
             foundData = true;
             break;
         }
     }
-
     if (!foundData) {
         throw std::runtime_error("Invalid basis set file format, $DATA not found.");
     }
 
-    // Parse basis sets for each element
+    // Full element name / symbol (any case) -> standard symbol. Scope: H-Ne,
+    // the elements present in the shipped def2-SVP file. Keys are uppercase;
+    // looked up via toUpper(first).
+    static const std::map<std::string, std::string> nameToSymbol = {
+        { "HYDROGEN", "H" }, { "HELIUM", "He" }, { "LITHIUM", "Li" },
+        { "BERYLLIUM", "Be" }, { "BORON", "B" }, { "CARBON", "C" },
+        { "NITROGEN", "N" }, { "OXYGEN", "O" }, { "FLUORINE", "F" },
+        { "NEON", "Ne" },
+        { "H", "H" }, { "HE", "He" }, { "LI", "Li" }, { "BE", "Be" },
+        { "B", "B" }, { "C", "C" }, { "N", "N" }, { "O", "O" },
+        { "F", "F" }, { "NE", "Ne" }
+    };
+    // VSIP defaults per symbol (used only by the Hückel STO path; the DFT 1e
+    // integrals ignore VSIP).
+    static const std::map<std::string, std::tuple<int, double, double, double>> elemInfo = {
+        { "H", { 1, -13.6, 0.0, 0.0 } }, { "He", { 2, -24.6, 0.0, 0.0 } },
+        { "Li", { 3, -5.39, -3.67, 0.0 } }, { "Be", { 4, -9.32, -4.0, 0.0 } },
+        { "B", { 5, -15.2, -8.3, 0.0 } }, { "C", { 6, -19.44, -10.67, 0.0 } },
+        { "N", { 7, -26.0, -13.4, 0.0 } }, { "O", { 8, -32.3, -14.8, 0.0 } },
+        { "F", { 9, -40.0, -18.0, 0.0 } }, { "Ne", { 10, -48.0, -23.0, 0.0 } }
+    };
+
+    auto isAllAlpha = [](const std::string& s) {
+        if (s.empty()) return false;
+        for (char c : s)
+            if (!std::isalpha((unsigned char)c)) return false;
+        return true;
+    };
+
+    ElementBasis current;
+    bool haveCurrent = false;
+    auto flush = [&]() {
+        if (!haveCurrent) return;
+        basisSetMap[current.symbol] = current;
+        haveCurrent = false;
+    };
+
     while (std::getline(file, line)) {
-        std::cout << line << std::endl;
-
         line = trim(line);
-        if (line.empty())
-            continue;
+        if (line.empty()) continue;
+        if (line.find("$END") != std::string::npos) { flush(); break; }
+        if (line[0] == '!') continue;  // comment
 
-        // Check for end of file
-        if (line.find("$END") != std::string::npos) {
-            break;
-        }
+        std::istringstream iss(line);
+        std::string first, second;
+        iss >> first >> second;
 
-        // Read element name
-        std::string elementName = line;
-        ElementBasis elementBasis;
-        elementBasis.symbol = elementName;
-
-        // Set default VSIP values (can be overridden later)
-        // These are approximate values based on common Extended Hückel parameters
-        if (elementName == "HYDROGEN" || elementName == "H") {
-            elementBasis.atomicNumber = 1;
-            elementBasis.vsip_s = -13.6; // eV
-            elementBasis.vsip_p = 0.0; // Not applicable
-            elementBasis.vsip_d = 0.0; // Not applicable
-        } else if (elementName == "CARBON" || elementName == "C") {
-            elementBasis.atomicNumber = 6;
-            elementBasis.vsip_s = -19.44; // eV
-            elementBasis.vsip_p = -10.67; // eV
-            elementBasis.vsip_d = 0.0; // Not commonly used
-        } else if (elementName == "NITROGEN" || elementName == "N") {
-            elementBasis.atomicNumber = 7;
-            elementBasis.vsip_s = -26.0; // eV
-            elementBasis.vsip_p = -13.4; // eV
-            elementBasis.vsip_d = 0.0; // Not commonly used
-        } else if (elementName == "OXYGEN" || elementName == "O") {
-            elementBasis.atomicNumber = 8;
-            elementBasis.vsip_s = -32.3; // eV
-            elementBasis.vsip_p = -14.8; // eV
-            elementBasis.vsip_d = 0.0; // Not commonly used
-        } else if (elementName == "SODIUM" || elementName == "Na") {
-            elementBasis.atomicNumber = 11;
-            elementBasis.vsip_s = -5.14; // eV
-            elementBasis.vsip_p = -3.04; // eV
-            elementBasis.vsip_d = 0.0; // Not commonly used
-        } else {
-            // For other elements, use approximate values
-            elementBasis.atomicNumber = 0; // Unknown
-            elementBasis.vsip_s = -10.0; // Placeholder
-            elementBasis.vsip_p = -5.0; // Placeholder
-            elementBasis.vsip_d = 0.0; // Placeholder
-        }
-
-        // Parse shells
-        while (std::getline(file, line)) {
-            line = trim(line);
-            if (line.empty())
-                continue;
-
-            // Check if we've reached the next element
-            if (line.find("$END") != std::string::npos || (std::isalpha(line[0]) && line.length() > 1 && !std::isdigit(line[1]))) {
-                file.seekg(-static_cast<int>(line.length()) - 1, std::ios_base::cur);
-                break;
-            }
-
-            // Parse shell type and number of primitive functions
-            std::istringstream iss(line);
-            std::string shellTypeStr;
-            int numPrimitives;
-
-            // Lese Shell-Typ und Anzahl der primitiven Funktionen
-            if (!(iss >> shellTypeStr >> numPrimitives)) {
-                throw std::runtime_error("Failed to parse shell type and number: " + line);
-            }
-
-            if (shellTypeStr.empty()) {
-                throw std::runtime_error("Empty shell type string");
-            }
-
-            // Nur den ersten Buchstaben des Shell-Typs verwenden
-            ShellType shellType = charToShellType(shellTypeStr[0]);
-
-            BasisShell shell;
-            shell.type = shellType;
-
-            // Second number, if present, is the number of contractions
-            shell.numContractions = 1; // Default: one contraction
-            if (iss >> shell.numContractions) {
-                // If present, it indicates the number of contractions
-            }
-
-            // Resize the coefficients vector based on number of contractions
-            shell.coefficients.resize(shell.numContractions);
-
-            // Read exponents and coefficients
-            for (int i = 0; i < numPrimitives; ++i) {
-                if (!std::getline(file, line)) {
-                    throw std::runtime_error("Unexpected end of file while parsing basis set.");
-                }
-
-                line = trim(line);
-                iss.clear();
-                iss.str(line);
-
-                int idx;
-                double exponent;
-                iss >> idx >> exponent;
-
-                shell.exponents.push_back(exponent);
-
-                // Read coefficients for each contraction
-                for (int j = 0; j < shell.numContractions; ++j) {
-                    double coefficient;
-                    if (!(iss >> coefficient)) {
-                        throw std::runtime_error("Missing coefficient for contraction " + std::to_string(j + 1) + " in primitive " + std::to_string(i + 1));
-                    }
-                    shell.coefficients[j].push_back(coefficient);
-                }
-            }
-
-            elementBasis.shells.push_back(shell);
-        }
-
-        // Add the element basis to the map
-        basisSetMap[elementName] = elementBasis;
-        // Also add the element symbol as a key if it's different
-        if (elementName.length() > 2) {
-            // Extract standard element symbol (first or first two letters)
-            std::string symbol;
-            if (elementName.length() > 1 && std::islower(elementName[1])) {
-                symbol = elementName.substr(0, 2);
+        // Element header: a single all-alpha token (no digits, no count). A bare
+        // shell letter (S/P/D/F/G) with no count is NOT a header in this format.
+        bool isHeader = false;
+        if (isAllAlpha(first)) {
+            std::string up = toUpper(first);
+            bool shellLetter = (up == "S" || up == "P" || up == "D" || up == "F" || up == "G");
+            if (second.empty()) {
+                isHeader = !shellLetter;
             } else {
-                symbol = elementName.substr(0, 1);
+                isHeader = !std::isdigit((unsigned char)second[0]);
             }
-            symbol[0] = std::toupper(symbol[0]);
-            if (symbol.length() > 1) {
-                symbol[1] = std::tolower(symbol[1]);
-            }
-            basisSetMap[symbol] = elementBasis;
+            if (isHeader && nameToSymbol.find(up) == nameToSymbol.end())
+                isHeader = false;
         }
-    }
 
+        if (isHeader) {
+            flush();
+            std::string sym = nameToSymbol.at(toUpper(first));
+            current = ElementBasis();
+            current.symbol = sym;
+            auto ei = elemInfo.find(sym);
+            if (ei != elemInfo.end()) {
+                current.atomicNumber = std::get<0>(ei->second);
+                current.vsip_s = std::get<1>(ei->second);
+                current.vsip_p = std::get<2>(ei->second);
+                current.vsip_d = std::get<3>(ei->second);
+            } else {
+                current.atomicNumber = 0;
+                current.vsip_s = -10.0;
+                current.vsip_p = -5.0;
+                current.vsip_d = 0.0;
+            }
+            haveCurrent = true;
+            continue;
+        }
+
+        // Shell line: "<S|P|D|F|G> <numPrim> [<numContractions>]"
+        if (!haveCurrent)
+            throw std::runtime_error("Shell line before any element header: " + line);
+        if (first.empty())
+            throw std::runtime_error("Empty shell type string");
+        ShellType shellType = charToShellType(first[0]);
+        int numPrimitives = 0;
+        if (!(std::istringstream(second) >> numPrimitives))
+            throw std::runtime_error("Failed to parse shell primitive count: " + line);
+
+        BasisShell shell;
+        shell.type = shellType;
+        shell.numContractions = 1;
+        {
+            std::istringstream iss2(line);
+            std::string tmp;
+            int np2;
+            iss2 >> tmp >> np2;
+            if (iss2 >> shell.numContractions) { /* general contraction */ }
+        }
+        shell.coefficients.resize(shell.numContractions);
+
+        for (int i = 0; i < numPrimitives; ++i) {
+            if (!std::getline(file, line))
+                throw std::runtime_error("Unexpected end of file while parsing basis set.");
+            line = trim(line);
+            std::istringstream pss(line);
+            int idx;
+            double exponent;
+            if (!(pss >> idx >> exponent))
+                throw std::runtime_error("Failed to parse primitive line: " + line);
+            shell.exponents.push_back(exponent);
+            for (int j = 0; j < shell.numContractions; ++j) {
+                double coefficient;
+                if (!(pss >> coefficient))
+                    throw std::runtime_error("Missing coefficient for contraction "
+                        + std::to_string(j + 1) + " in primitive " + std::to_string(i + 1));
+                shell.coefficients[j].push_back(coefficient);
+            }
+        }
+        current.shells.push_back(shell);
+    }
+    flush();
     return basisSetMap;
 }
 
@@ -423,7 +419,15 @@ inline std::vector<STO::Orbital> createSTOFromGTOBasis(
     return stoOrbitals;
 }
 
-// Create GTO orbitals from the parsed basis set
+// Create GTO orbitals from the parsed basis set.
+// Claude Generated (WP1): iterates ALL contractions of each shell (forward-
+// correct for generally-contracted bases such as cc-pVnZ; def2-SVP has
+// numContractions==1 so numerically unchanged), emits the proper 6 cartesian d
+// components in the order [DXX, DYY, DZZ, DXY, DXZ, DYZ] expected by the
+// spherical transform, and pre-normalizes primitives (Turbomole basis files
+// give coefficients for already-normalized primitives, so we multiply by the
+// primitive norm to recover coefficients for the raw x^l exp(-a r^2) kernels)
+// and then renormalizes each contracted AO so S_ii = 1. f/g shells throw.
 inline std::vector<GTO::Orbital> createGTOFromBasis(
     const ElementBasis& basis,
     double x, double y, double z,
@@ -431,116 +435,70 @@ inline std::vector<GTO::Orbital> createGTOFromBasis(
 {
     std::vector<GTO::Orbital> gtoOrbitals;
 
+    // Build one pre-normalized contracted AO for a given cartesian component.
+    auto makeOrbital = [&](GTO::OrbitalType type, int l, int m, int n,
+                           const std::vector<double>& exps,
+                           const std::vector<double>& rawCoeffs,
+                           double vsip) {
+        GTO::Orbital orbital;
+        orbital.x = x;
+        orbital.y = y;
+        orbital.z = z;
+        orbital.type = type;
+        orbital.exponents = exps;
+        orbital.coefficients.resize(exps.size());
+        // Turbomole convention: rawCoeffs are for normalized primitives; multiply
+        // by primitiveNorm to express the contraction over unnormalized primitives.
+        for (size_t a = 0; a < exps.size(); ++a)
+            orbital.coefficients[a] = rawCoeffs[a] * dft1e::primitiveNorm(exps[a], l, m, n);
+        orbital.VSIP = vsip;
+        orbital.atom = atomIndex;
+        // Renormalize the whole contracted function so S_ii = 1 (matches ORCA).
+        dft1e::normalizeOrbitalSelfOverlap(orbital);
+        return orbital;
+    };
+
     for (const BasisShell& shell : basis.shells) {
         switch (shell.type) {
         case S_SHELL: {
-            GTO::Orbital orbital;
-            orbital.x = x;
-            orbital.y = y;
-            orbital.z = z;
-            orbital.type = GTO::OrbitalType::S;
-            orbital.exponents = shell.exponents;
-            // Use the first contraction by default
-            orbital.coefficients = shell.coefficients[0];
-            orbital.VSIP = basis.vsip_s;
-            orbital.atom = atomIndex;
-            gtoOrbitals.push_back(orbital);
+            for (int c = 0; c < shell.numContractions; ++c)
+                gtoOrbitals.push_back(
+                    makeOrbital(GTO::OrbitalType::S, 0, 0, 0,
+                                shell.exponents, shell.coefficients[c], basis.vsip_s));
         } break;
         case P_SHELL: {
-            // For each contraction, create three p-orbitals (px, py, pz)
-            GTO::Orbital orbital_px;
-            orbital_px.x = x;
-            orbital_px.y = y;
-            orbital_px.z = z;
-            orbital_px.type = GTO::OrbitalType::PX;
-            orbital_px.exponents = shell.exponents;
-            orbital_px.coefficients = shell.coefficients[0];
-            orbital_px.VSIP = basis.vsip_p;
-            orbital_px.atom = atomIndex;
-            gtoOrbitals.push_back(orbital_px);
-
-            GTO::Orbital orbital_py;
-            orbital_py.x = x;
-            orbital_py.y = y;
-            orbital_py.z = z;
-            orbital_py.type = GTO::OrbitalType::PY;
-            orbital_py.exponents = shell.exponents;
-            orbital_py.coefficients = shell.coefficients[0];
-            orbital_py.VSIP = basis.vsip_p;
-            orbital_py.atom = atomIndex;
-            gtoOrbitals.push_back(orbital_py);
-
-            GTO::Orbital orbital_pz;
-            orbital_pz.x = x;
-            orbital_pz.y = y;
-            orbital_pz.z = z;
-            orbital_pz.type = GTO::OrbitalType::PZ;
-            orbital_pz.exponents = shell.exponents;
-            orbital_pz.coefficients = shell.coefficients[0];
-            orbital_pz.VSIP = basis.vsip_p;
-            orbital_pz.atom = atomIndex;
-            gtoOrbitals.push_back(orbital_pz);
+            for (int c = 0; c < shell.numContractions; ++c) {
+                gtoOrbitals.push_back(makeOrbital(GTO::OrbitalType::PX, 1, 0, 0,
+                                                  shell.exponents, shell.coefficients[c], basis.vsip_p));
+                gtoOrbitals.push_back(makeOrbital(GTO::OrbitalType::PY, 0, 1, 0,
+                                                  shell.exponents, shell.coefficients[c], basis.vsip_p));
+                gtoOrbitals.push_back(makeOrbital(GTO::OrbitalType::PZ, 0, 0, 1,
+                                                  shell.exponents, shell.coefficients[c], basis.vsip_p));
+            }
         } break;
         case D_SHELL: {
-            // Create five d-orbitals
-            GTO::Orbital orbital_dxy;
-            orbital_dxy.x = x;
-            orbital_dxy.y = y;
-            orbital_dxy.z = z;
-            orbital_dxy.type = GTO::OrbitalType::DXY;
-            orbital_dxy.exponents = shell.exponents;
-            orbital_dxy.coefficients = shell.coefficients[0];
-            orbital_dxy.VSIP = basis.vsip_d;
-            orbital_dxy.atom = atomIndex;
-            gtoOrbitals.push_back(orbital_dxy);
-
-            GTO::Orbital orbital_dyz;
-            orbital_dyz.x = x;
-            orbital_dyz.y = y;
-            orbital_dyz.z = z;
-            orbital_dyz.type = GTO::OrbitalType::DYZ;
-            orbital_dyz.exponents = shell.exponents;
-            orbital_dyz.coefficients = shell.coefficients[0];
-            orbital_dyz.VSIP = basis.vsip_d;
-            orbital_dyz.atom = atomIndex;
-            gtoOrbitals.push_back(orbital_dyz);
-
-            GTO::Orbital orbital_dzx;
-            orbital_dzx.x = x;
-            orbital_dzx.y = y;
-            orbital_dzx.z = z;
-            orbital_dzx.type = GTO::OrbitalType::DZX;
-            orbital_dzx.exponents = shell.exponents;
-            orbital_dzx.coefficients = shell.coefficients[0];
-            orbital_dzx.VSIP = basis.vsip_d;
-            orbital_dzx.atom = atomIndex;
-            gtoOrbitals.push_back(orbital_dzx);
-
-            GTO::Orbital orbital_dx2y2;
-            orbital_dx2y2.x = x;
-            orbital_dx2y2.y = y;
-            orbital_dx2y2.z = z;
-            orbital_dx2y2.type = GTO::OrbitalType::DX2Y2;
-            orbital_dx2y2.exponents = shell.exponents;
-            orbital_dx2y2.coefficients = shell.coefficients[0];
-            orbital_dx2y2.VSIP = basis.vsip_d;
-            orbital_dx2y2.atom = atomIndex;
-            gtoOrbitals.push_back(orbital_dx2y2);
-
-            GTO::Orbital orbital_dz2;
-            orbital_dz2.x = x;
-            orbital_dz2.y = y;
-            orbital_dz2.z = z;
-            orbital_dz2.type = GTO::OrbitalType::DZ2;
-            orbital_dz2.exponents = shell.exponents;
-            orbital_dz2.coefficients = shell.coefficients[0];
-            orbital_dz2.VSIP = basis.vsip_d;
-            orbital_dz2.atom = atomIndex;
-            gtoOrbitals.push_back(orbital_dz2);
+            // Order MUST match dft_integrals.cpp buildSphericalTransform:
+            //   [DXX, DYY, DZZ, DXY, DXZ, DYZ]
+            for (int c = 0; c < shell.numContractions; ++c) {
+                gtoOrbitals.push_back(makeOrbital(GTO::OrbitalType::DXX, 2, 0, 0,
+                                                  shell.exponents, shell.coefficients[c], basis.vsip_d));
+                gtoOrbitals.push_back(makeOrbital(GTO::OrbitalType::DYY, 0, 2, 0,
+                                                  shell.exponents, shell.coefficients[c], basis.vsip_d));
+                gtoOrbitals.push_back(makeOrbital(GTO::OrbitalType::DZZ, 0, 0, 2,
+                                                  shell.exponents, shell.coefficients[c], basis.vsip_d));
+                gtoOrbitals.push_back(makeOrbital(GTO::OrbitalType::DXY, 1, 1, 0,
+                                                  shell.exponents, shell.coefficients[c], basis.vsip_d));
+                gtoOrbitals.push_back(makeOrbital(GTO::OrbitalType::DXZ, 1, 0, 1,
+                                                  shell.exponents, shell.coefficients[c], basis.vsip_d));
+                gtoOrbitals.push_back(makeOrbital(GTO::OrbitalType::DYZ, 0, 1, 1,
+                                                  shell.exponents, shell.coefficients[c], basis.vsip_d));
+            }
         } break;
-        // Higher angular momentum orbitals can be added as needed
+        case F_SHELL:
+        case G_SHELL:
+            throw std::runtime_error(
+                "createGTOFromBasis: f/g shells not supported (def2-SVP H-Ne has none).");
         default:
-            // Skip unsupported shell types
             break;
         }
     }

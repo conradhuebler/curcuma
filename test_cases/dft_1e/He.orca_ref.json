@@ -1,0 +1,26 @@
+{
+  "molecule": {
+    "name": "He atom (WP1 validation)",
+    "natoms": 1,
+    "atoms": [
+      {
+        "z": 2,
+        "symbol": "He"
+      }
+    ]
+  },
+  "method": "HF",
+  "basis": "def2-SVP",
+  "charge": 0,
+  "multiplicity": 1,
+  "nmo": 5,
+  "s_min_eigenvalue": 0.3658,
+  "mo_energies": [
+    -0.9141510044330171,
+    1.3973292380402151,
+    1.987291994590961,
+    1.987291994590964,
+    1.9872919945909644
+  ],
+  "mo_energies_note": "SCF-converged Fock eigenvalues (Hc+2J-K), NOT 1e Hcore; WP3+ comparison"
+}

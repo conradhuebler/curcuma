@@ -1,0 +1,39 @@
+{
+  "molecule": {
+    "name": "LiH molecule (WP1 validation)",
+    "natoms": 2,
+    "atoms": [
+      {
+        "z": 3,
+        "symbol": "Li"
+      },
+      {
+        "z": 1,
+        "symbol": "H"
+      }
+    ]
+  },
+  "method": "HF",
+  "basis": "def2-SVP",
+  "charge": 0,
+  "multiplicity": 1,
+  "nmo": 14,
+  "s_min_eigenvalue": 0.05776,
+  "mo_energies": [
+    -2.443500015834849,
+    -0.29778047129059065,
+    0.01446418568413826,
+    0.1021288027093497,
+    0.11806078442512934,
+    0.11806078442513057,
+    0.25350953597529025,
+    0.6542119440694157,
+    0.7189573126191574,
+    0.7189573126191585,
+    0.9611434094713499,
+    1.826947230568599,
+    1.8269472305686063,
+    2.0236152402828744
+  ],
+  "mo_energies_note": "SCF-converged Fock eigenvalues (Hc+2J-K), NOT 1e Hcore; WP3+ comparison"
+}

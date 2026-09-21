@@ -31,6 +31,7 @@
 #include "qm_methods/native_xtb_method.h"
 #include "qm_methods/gfnff_method.h"
 #include "qm_methods/nddo_method.h"
+#include "qm_methods/dft_method.h"  // Claude Generated: native KS-DFT (WP0 scaffold, hf/lda/pbe/b3lyp)
 #ifdef USE_CUDA
 #include "qm_methods/gfnff_gpu_method.h"
 #endif
@@ -389,6 +390,25 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
         return std::make_unique<NDDOMethod>(NDDOMethodType::PM6, config);
     }
 
+    // Native KS-DFT (WP0 scaffold: nuclear repulsion only, no integrals/SCF/XC yet).
+    // Each functional is its own method name; functional is NOT a parameter.
+    if (method == "hf") {
+        CurcumaLogger::success("Method 'hf' resolved to native DFT (HF, WP0 scaffold)");
+        return std::make_unique<DFTMethod>(DFTFunctional::HF, config);
+    }
+    if (method == "lda") {
+        CurcumaLogger::success("Method 'lda' resolved to native DFT (LDA, WP0 scaffold)");
+        return std::make_unique<DFTMethod>(DFTFunctional::LDA, config);
+    }
+    if (method == "pbe") {
+        CurcumaLogger::success("Method 'pbe' resolved to native DFT (PBE, WP0 scaffold)");
+        return std::make_unique<DFTMethod>(DFTFunctional::PBE, config);
+    }
+    if (method == "b3lyp") {
+        CurcumaLogger::success("Method 'b3lyp' resolved to native DFT (B3LYP, WP0 scaffold)");
+        return std::make_unique<DFTMethod>(DFTFunctional::B3LYP, config);
+    }
+
     // Native GFN-FF (always available, Curcuma's own implementation)
     // GPU acceleration via -gpu cuda flag
     if (method == "gfnff") {
@@ -512,7 +532,8 @@ std::vector<std::string> MethodFactory::getAvailableMethods() {
     // Always available: native methods, force fields, and native xTB (gfn1/gfn2)
     available.insert(available.end(), {"eht", "pm3", "mndo", "am1", "pm6",
                                        "gfn1", "gfn2",
-                                       "gfnff", "uff", "uff-d3", "qmdff"});
+                                       "gfnff", "uff", "uff-d3", "qmdff",
+                                       "hf", "lda", "pbe", "b3lyp"});
 
     if (hasTBLite()) {
         available.push_back("ipea1");
@@ -592,6 +613,13 @@ json MethodFactory::getMethodInfo(const std::string& method_name) {
         info["providers"].push_back({{"name", "Native"}, {"available", true}});
         return info;
     }
+    // Native KS-DFT (WP0 scaffold, always available)
+    if (method_name == "hf" || method_name == "lda" ||
+        method_name == "pbe" || method_name == "b3lyp") {
+        info["type"] = "explicit";
+        info["providers"].push_back({{"name", "Native DFT (scaffold)"}, {"available", true}});
+        return info;
+    }
     if (method_name == "uff" || method_name == "uff-d3" || method_name == "qmdff") {
         info["type"] = "explicit";
         info["providers"].push_back({{"name", "ForceField"}, {"available", true}});
@@ -646,6 +674,7 @@ void MethodFactory::printAvailableMethods() {
     fmt::print("    (GPU acceleration: use '-gpu cuda' or '-gpu auto')\n");
 #endif
     fmt::print("  - uff, uff-d3, qmdff: Force field methods\n");
+    fmt::print("  - hf, lda, pbe, b3lyp: Native KS-DFT (WP0 scaffold -- nuclear repulsion only)\n");
 
     fmt::print("\nOptional External Libraries:\n");
     fmt::print("  - TBLite: {}\n", hasTBLite() ? "YES" : "NO");

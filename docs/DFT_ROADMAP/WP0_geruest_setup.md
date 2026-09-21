@@ -1,6 +1,6 @@
 # WP0 — Gerüst, Quellenangabe, Setup
 
-- **Status:** ⚠️ AI-generated / offen — ⚙️ machine-tested (nach Erfüllung)
+- **Status:** ⚙️ machine-tested (Gerüst läuft; ✅ TESTED/APPROVED nur durch Mensch)
 - **Abhängigkeit:** keine
 - **Validierung:** manueller Smoke-Test + ORCA-Aufrufbarkeit
 
@@ -60,8 +60,18 @@ Quellenangabe; ORCA-Referenzumgebung nutzbar.
 ## Validierungsergebnisse (nach Ausführung eintragen)
 
 ```
-make -j4:           [ ]
-make GenerateParams:[ ]
-curcuma -methods (hf/lda/pbe/b3lyp): [ ]
-ORCA --version:     [ ]
+make -j4:           [x]  (rc=0, no DFT-related warnings; pre-existing -Winline Mol::~Mol in test_xtb_cpscf unrelated)
+make GenerateParams:[x]  (clean; no validation warning mentioning the dft module)
+curcuma -methods (hf/lda/pbe/b3lyp): [x]  (listed under Quantum Methods)
+ORCA --version:     [x]  (ORCA 6.1.0 at /opt/orca_6_1/orca)
 ```
+
+Smoke-test (2026-06-20, release/ build):
+- `curcuma -sp test_cases/he.xyz -method {hf,lda,pbe,b3lyp}` -> prints
+  "native DFT -- nur Geruest", E = 0.00000000 Eh (single atom, E_nn = 0).
+- `curcuma -sp test_cases/water.xyz -method pbe` -> E_nn = 9.64357925 Eh
+  (physically sensible nuclear repulsion for H2O).
+- Full `ctest`: pre-existing failures (d4_diag_*, ecomp_* / gfn{1,2}_align,
+  sqm_scf_*_gfn2) are NOT regressions — reproduced identically on a clean
+  baseline (stash + rebuild). None touch DFT; GFN2/D4/SCF paths are outside
+  the additive WP0 scaffold.

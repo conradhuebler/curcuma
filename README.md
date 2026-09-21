@@ -52,6 +52,9 @@ Native GFN methods (no external dependency required, canonical backends since AP
 - **gfn1** : Native GFN1-xTB — 10/12 validation molecules at 1e-8 vs tblite
 - **gfn2** : Native GFN2-xTB — 11/12 validation molecules at 1e-8 vs tblite (only `complex` open at 6.95e-5)
 
+Native KS-DFT (no external dependency required, **WP0 scaffold + WP1 1e integrals + WP2 4-centre ERI** — S/T/V and McMurchie-Davidson ERI (chemists' (μν|λσ), 8-fold symmetry) + Coulomb J / exchange K built over contracted cartesian GTOs; no SCF/XC yet, `ctest -L dft_1e` + `ctest -L dft_2e` 10/10 each):
+- **hf**, **lda**, **pbe**, **b3lyp** : each functional is its own `-method` name (no umbrella `dft`); ported from xcDFT (TCC 2019), ORCA 6.1 reference — see [docs/NATIVE_DFT_IMPLEMENTATION.md](docs/NATIVE_DFT_IMPLEMENTATION.md) and the [DFT roadmap](docs/DFT_ROADMAP/)
+
 > Native GFN1/GFN2 are validated against tblite to a 1e-8 Eh target — see [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md). For explicit tblite or xtb backends use `tblite-gfn1`/`tblite-gfn2` or `xtb-gfn1`/`xtb-gfn2`.
 
 > Native GFN1/GFN2 can use multiple cores **within one calculation** of a single large molecule: pass `-threads N` to a `-sp`/`-opt`/MD run (default is serial and bit-identical). Integral setup, gradient and Fock build scale ~3–5×; see [docs/SQM_THREADING.md](docs/SQM_THREADING.md).

@@ -428,3 +428,12 @@ add_subdirectory(cli)
 # Claude Generated (Phase 0, Apr 2026): reference SCC dumps from tblite
 # for native GFN1/GFN2 validation (see scripts/extract_xtb_params.py + xtb_native.*)
 add_subdirectory(sqm_reference)
+
+# Claude Generated (WP1, June 2026): native DFT 1e-integral validation
+# (S/T/V vs Python witness + ORCA MO-energy reference). See dft_1e/CMakeLists.txt.
+add_subdirectory(dft_1e)
+
+# Claude Generated (WP2, June 2026): native DFT 4-centre ERI validation
+# (MD ERI + J/K vs Python witness + 8-fold symmetry / Tr(PJ)==Tr(PK)). See
+# dft_2e/CMakeLists.txt. Reuses the dft_1e .xyz geometries (no new inputs).
+add_subdirectory(dft_2e)

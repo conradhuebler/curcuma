@@ -1,0 +1,35 @@
+{
+  "molecule": {
+    "name": "H2 molecule (WP1 validation)",
+    "natoms": 2,
+    "atoms": [
+      {
+        "z": 1,
+        "symbol": "H"
+      },
+      {
+        "z": 1,
+        "symbol": "H"
+      }
+    ]
+  },
+  "method": "HF",
+  "basis": "def2-SVP",
+  "charge": 0,
+  "multiplicity": 1,
+  "nmo": 10,
+  "s_min_eigenvalue": 0.04689,
+  "mo_energies": [
+    -0.592006946208052,
+    0.1971692694405298,
+    0.479416063965733,
+    0.9609895269915092,
+    1.4208544574459645,
+    1.4208544574459676,
+    2.0966808100161574,
+    2.221560917809737,
+    2.2215609178097426,
+    3.7864953287296723
+  ],
+  "mo_energies_note": "SCF-converged Fock eigenvalues (Hc+2J-K), NOT 1e Hcore; WP3+ comparison"
+}
