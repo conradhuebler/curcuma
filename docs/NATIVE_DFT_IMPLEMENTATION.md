@@ -123,6 +123,71 @@ new total-energy agreement is currently checked by hand, not in CI.
 
 ---
 
+## HF-3c (work in progress, December 2026)
+
+`HF-3c` (R. Sure, S. Grimme, J. Comput. Chem. 34, 1672 (2013)) exists in curcuma
+only as an **external ORCA process** (`-method hf-3c` → `createOrca()`). Making it
+native is in progress on the `dft` branch. Plan and full derivation:
+`/home/conrad/.claude/plans/sleepy-skipping-stonebraker.md`.
+
+**The basis is MINIX, not def2-SVP** — a *minimal* basis (ORCA: `! HF-3c` ≡
+`! HF MINIX D3BJ GCP(HF/MINIX) PATOM`; 7 functions for H2O where def2-SVP needs 24,
+no d shells). `src/core/energy_calculators/qm_methods/MINIX.dat` was exported
+verbatim from ORCA (`orca_exportbasis -b minix`) and **is validated**:
+
+| | curcuma HF/MINIX | ORCA HF/MINIX | diff |
+|---|---|---|---|
+| H2 / LiH / CH4 | — | — | ≤3.8e-09 |
+| H2O | −75.48881665 | −75.48881664772478 | −2.3e-09 |
+| all 10 dft_1e molecules | | | **≤4.9e-09** |
+
+So the basis needs no engine change: `-method hf -dft.basis MINIX` already works.
+Validated against ORCA's `Total Energy` line from an HF-3c run (which ORCA prints
+*before* applying the corrections).
+
+**Reference data (oracle).** ORCA prints the full decomposition, so each term is
+checkable on its own; for H2O (Eh): HF/MINIX = −75.48881664772478,
+E_D3(BJ) = −0.002646402235, `gCP+bas` = −0.010026411, HF-3c = −75.501489461360.
+Additionally ORCA ships `otool_gcp`, the reference gCP program, which reports the
+gCP term alone with its parameter table and per-atom BSSE.
+
+- **D3**: ORCA prints the parameters — DFTD3 V3.1 Rev 1, Becke-Johnson damping,
+  "HF/MINIX parameters": s6 = 1.0000, a1 = 0.4171, s8 = 0.8777, a2 = 2.9149.
+  Two-body only (ORCA reports E6/E8, no ATM term). The native
+  `D3ParameterGenerator` can take these as a plain parameter set.
+- **gCP**: ported in `scripts/gcp_reference_witness.py` from the reference
+  implementation (dftd3/simple-dftd3 `gcp.f90` + `gcp/param.f90`; the gCP model
+  itself is Kruse & Grimme, J. Chem. Phys. 136, 154101 (2012)). Parameters for
+  hf/minix: σ = 0.1290, α = 1.1549, β = 1.1763, η = 1.1526, plus the per-element
+  `emiss`/`nbas` tables; `xv = 1/sqrt(nbas − nel/2)` (NOT `nbas − nel/2`), no
+  damping (`damp = false` for this level). Verified against `otool_gcp`: H2 exact
+  to 4.6e-10, all 10 molecules within 2.5e-7 Eh, six within 1e-8. Three traps
+  found on the way, all documented in the script header: `xv = 1/sqrt(...)`; the
+  Fortran case-insensitivity that makes the `<1s|2s>` norm use the *swapped*
+  exponents (worth ~8x on the overlap); and that `B_n` must use its closed form
+  rather than the truncated `bint` series (worth ~1e-4 Eh on BeH2/BH).
+  **Open**: the residual ~1e-7 on BeH2/BH/HF/NH3/H2O is not explained by the
+  auxiliaries (verified against quadrature) nor by the constants (H2 pins them);
+  the leading hypothesis is that `otool_gcp` v1.06 (2014) carries older
+  per-element tables than the current `param.f90`. Settle this before trusting a
+  C++ port.
+- **SRB / "bas"** (the short-range term ORCA folds into `gCP+bas`):
+  `E = −s Σ_{A≠B} (Z_A Z_B)^{3/2} exp(−γ (R⁰_AB)^{3/4} R_AB)` with s = 0.03,
+  γ = 0.7 (`qscal`/`rscal` in the reference, plus t1 = 1.5, t2 = 0.75); R⁰ is the
+  D3 r0ab radius (Å → Bohr). Cross-checked numerically: the SRB implied by ORCA's
+  H2 value requires R⁰(H,H) = 2.1823 Å, exactly the first `setr0ab` entry in
+  CP2K's D3 table (`src/cp2k/src/qs_dispersion_pairpot.F`) — the cleanest available
+  local copy of that table.
+- gCP and SRB are **one term** in ORCA's output and are exposed as one term here.
+
+**Not implemented yet**: the `HF3CMethod` composer wrapper (a `DFT(HF, MINIX)` plus
+the three corrections, mirroring how `XTB` sums its terms), the `createForHF3C()`
+D3 preset, the gCP/SRB C++ module, the method wiring (`hf-3c` native canonical,
+ORCA path renamed `orca-hf-3c`), tests and the docs/README status lines. The DFT
+engine itself is untouched. No gradient (WP8), element scope H-Ne.
+
+---
+
 
 ---
 
