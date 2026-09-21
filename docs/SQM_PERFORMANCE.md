@@ -558,6 +558,114 @@ After the 2026-07 integral work the setup is 91 ms and the gradient 175 ms, so
 count is the dominant remaining lever — not the integrals. A looser convergence
 (`-scf_threshold 5e-5` → 16 it, energy-identical) closes most of what is left.
 
+## The GPU gradient at 7320 atoms: where the 96 s go (2026-09)
+
+> 🤖 AI-generated. The three timings under "Measured" are machine-measured; everything
+> under "Read off the code" was verified line by line against the source; the flop
+> estimate is explicitly an estimate. Human production testing pending.
+
+### Measured (1x RTX A4500, CUDA 13.3, `polymer_2x_gfnff_opt.xyz`, 7320 atoms, nao 15444, screened pairs 6.1 %)
+
+| | wall | of which the energy+gradient call |
+|---|---:|---:|
+| `-sp`, energy only | 249 s | (SCF 220.8 s, 12 iterations) |
+| `-md` step 0, energy+gradient | 369.4 s | 369.3 s |
+| `-md` step 1, energy+gradient | 344.5 s | 344.4 s |
+
+Two numbers fall out of this and both matter:
+
+- **The gradient costs ~96 s, about 28 % of an MD step** (344.5 vs 249).
+- **The per-step host overhead is 33 ms** — integrator, HB/XB update and output together,
+  out of 344 s. There is nothing serial between the steps; `ff_total` is the step.
+- **The one-time setup is 25 s** (369.4 - 344.5) and matches the ~30 s non-SCF part of the
+  single point. Over an MD it is amortised to nothing. An earlier claim in this project that
+  "the step hangs on the serial host setup" was a wrong generalisation of the *single-point*
+  finding and is retracted; see `docs/MD_LARGE_SYSTEMS.md` and the note under GFN-FF below.
+
+Measured with `-md_diagnostics true -md_diagnostics_timing true -dump_frequency 1`, which
+writes per-step `timing_ms` (`ff_total`, `integrator`, `hbxb_update`, `step_total`) into
+`<basename>.diag.jsonl` (`simplemd.cpp:2567-2576`). **The field is `timing_ms`, not
+`timing`** — a parser looking for the latter silently reports zeros.
+
+### Read off the code (verified, with line numbers)
+
+**1. Requesting a gradient switches off a saving the gradient does not need.**
+`xtb_native.cpp:1519-1523`:
+
+```cpp
+if (use_resident_loop && m_mp_ints_deferred && !gradient)
+    m_wfn_on_device = true;
+else
+    m_gpu_scf->finalize(m_wfn.P, m_wfn.C);
+```
+
+The comment immediately above it already says *"the gradient is on the device … Rebuilding
+and downloading them took 16 s at 7320 atoms; they are fetched on demand"*. And the device
+gradient indeed never reads them: `xtb_gradient.cpp:862-868` passes empty matrices with
+`pc_resident=true`, commented *"Bit-identical (the gradient only reads dP/dC)"*. The host
+fallback is safe — `xtb_native.cpp:1678-1681` calls `ensureHostWavefunction()` before
+`calculateGradient()`. So with `gradient == true` every step pays an extra `nao^2 * nocc`
+DGEMM, two 1.91 GB D2H copies into pageable memory, two transposing host copies of the same
+size, the host potential rebuild and the `O(nat^2)` host SCC energies — for data nobody reads.
+`docs/MULTI_GPU.md:147` puts those three posts at **16 + 5 + 5 s on this system**.
+
+**2. The gradient is the one phase the profiler cannot resolve.** `XtbGpuContext::computeGradient`
+(`xtb_gpu_context.cu:5237-5368`) contains **zero** `profMark` calls, so `profileReport`
+(`:3462`) can never attribute anything inside it. `-verbosity 2` gives one lumped
+`gradient : X ms` line (`xtb_native.cpp:1645,1702,1709`). Five `profMark` calls would split
+it into the two DGEMMs, the pair kernel and the two triangular kernels.
+
+**3. Dense `nao^2` matrices are built although only the screened pattern is read.**
+`ensureDenseDensity` (`:5280`) and the energy-weighted `W` (`:5306`) are both dense
+`nao^2 * nocc` DGEMMs, but `d_grad_h0_pulay_pair` only ever indexes `P[mn]`/`W[mn]` at stored
+pairs (`:1218-1219`), and the diagonal `k_grad_cn_onsite` needs is inside the pattern by
+construction (`buildScreenedPairs` keeps `a == b`, `:3735-3746`). At 6.1 % density that is
+~16x more flops than needed plus ~3.8 GB of device memory — which is also the device peak.
+The SDDMM that would build `W` on the pattern already exists (`k_density_sp`, `:1687`); only
+the weight changes from `occ` to `2*eps`.
+
+**4. Two `nat^2` loops run on a single host core.** The GFN2 direct SD/DD/SQ multipole
+interaction gradient (`xtb_gradient.cpp:894-968`) and the CN chain rule (`:970-1000`) are
+plain `for iat / for jat<iat` loops over 2.68e7 pairs with `std::pow`/`exp` and **no cutoff**,
+neither threaded (host section 2b *is* threaded via `parallelStripes`, `:231-234`; these are
+not). The same pair sum exists as a device kernel for the energy and the potential
+(`k_energy_multipole_otf` `:2364`, `k_multipole_potential_otf` `:2323`). The CN energy kernel
+uses a 25 Bohr cutoff (`:832`) while its chain rule uses none, so the gradient currently sums
+pairs the energy never counted.
+
+**5. Cheap arithmetic in the triangular kernels.** `k_grad_coulomb` (`:1330`) is only ever
+called with `gexp = 2.0` (`:5362`) yet evaluates four FP64 `pow` per shell pair, on a card
+whose FP64 rate is 1/64 of FP32. `k_grad_repulsion` (`:1102`) has three `pow` per atom pair
+and no cutoff. Both use the `for j<i` form (load-imbalance tail) with `atomicAdd`;
+`docs/SQM_GPU_ROADMAP.md:39-46` already specifies the gather restructuring that removes both.
+
+**6. The gradient is the last big single-device block**, and it is a better multi-GPU
+candidate than the eigensolve: `k_grad_h0_pulay_sp` is a pure reduction over the pair range
+whose only outputs are `grad` (3*nat) and `dEdcn` (nat) — **176 KB to reduce**, against the
+eigensolve's `nao^2` traffic. `densityPatternDistributed` (`:3118-3258`) already provides the
+scatter/solve/gather skeleton.
+
+### Estimated, not measured
+
+The two DGEMMs are `4 * nao^2 * nocc` FP64 flops, about 7.4e12 at nao 15444 with
+nocc ~ nao/2. At the A4500's ~0.37 TFLOP/s FP64 that is **of order 20 s**, i.e. roughly a
+fifth of the 96 s. This has not been measured; item 2 above is what would settle it.
+
+### Before touching the multipole gradient, read the negative result
+
+"Blocking the multipole GRADIENT: tried, measured, reverted" (above, `:202-227`) found the
+shell-pair-blocked formulation **slower** on the CPU (173 -> 202/239 ms) and concluded the
+cost is the *assembly*, not the moment evaluation. The GPU occupancy trade-off differs, but
+the same restructuring is the obvious idea and it has already lost once.
+
+### Order of work
+
+1. Measure: `CURCUMA_GPU_PROFILE=1 ... -verbosity 3` with and without a gradient. The
+   `Post-SCF host phases:` rows (`xtb_native.cpp:1610-1615`) quantify item 1 exactly.
+2. Then the five `profMark` calls, which decide between items 3 and 5 — and whether item 6
+   is worth the effort at all.
+3. Item 6 last: item 3 changes exactly the data a device split would have to ship.
+
 ## Verification
 
 ```bash

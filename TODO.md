@@ -116,6 +116,54 @@
 - **Verweis**: src/core/CLAUDE.md:106, CLAUDE.md - Performance Notes
 - **Performance Impact**: Critical for large molecular systems
 
+### GPU-Gradient GFN1/GFN2: 96 s von 345 s je MD-Schritt (2026-09)
+- **Status**: ⏳ ANALYSIERT, nicht implementiert
+- **Messung**: polymer_2x (7320 Atome, nao 15444), 1x RTX A4500 — `-sp` 249 s,
+  MD-Schritt mit Gradient 344.5 s, Host-Overhead je Schritt 33 ms, einmaliges Setup 25 s.
+- **Vollstaendige Analyse mit Zeilennummern**: [docs/SQM_PERFORMANCE.md](docs/SQM_PERFORMANCE.md)
+  "The GPU gradient at 7320 atoms: where the 96 s go"
+- **Reihenfolge ist wichtig** — erst messen, dann bauen; Schritt 3 zuletzt:
+
+1. **`-gradient` schaltet einen Sparpfad ab, den der Gradient nicht braucht** (~26 s laut
+   `docs/MULTI_GPU.md:147`, nicht selbst nachgemessen). `xtb_native.cpp:1519-1523` faellt bei
+   `gradient == true` in `finalize()` und laedt P und C herunter, obwohl
+   `xtb_gradient.cpp:862-868` leere Matrizen mit `pc_resident=true` uebergibt. Host-Rueckfall
+   ist abgesichert (`xtb_native.cpp:1678-1681`). **~15 Zeilen, eine Datei, Gradient-Mathematik
+   unveraendert.** Gate: Gradient muss bit-identisch bleiben.
+2. **Profiler blind im Gradienten**: `XtbGpuContext::computeGradient`
+   (`xtb_gpu_context.cu:5237-5368`) hat null `profMark`. Fuenf Aufrufe an `:5281/5312/5331/5359/5364`
+   teilen die 96 s auf und entscheiden alles Weitere. **Voraussetzung fuer 3-5.**
+3. **Dichte und energiegewichtete Dichte dicht aufgebaut**, obwohl nur das gescreente Muster
+   gelesen wird (`:5280`, `:5306` gegen `:1218-1219`): bei 6.1 % Musterdichte ~16x zu viele
+   Flops und ~3.8 GB unnoetig. `k_density_sp` (`:1687`) kann `W` mit Gewicht `2*eps` bauen.
+   Geschaetzt ~20 s, **nicht gemessen**.
+4. **Zwei `nat^2`-Schleifen auf einem Host-Kern**: GFN2-Multipol-Wechselwirkungsgradient
+   (`xtb_gradient.cpp:894-968`) und CN-Kettenregel (`:970-1000`), 2.68e7 Paare, kein Cutoff,
+   nicht gethreadet — waehrend Host-Abschnitt 2b via `parallelStripes` (`:231-234`) sehr wohl
+   threadet. Die CN-Kettenregel hat zudem keinen Cutoff, wo die Energie bei 25 Bohr
+   abschneidet (`xtb_gpu_context.cu:832`) — inkonsistent **und** langsam.
+5. **`gexp == 2.0` hart am einzigen Aufrufer** (`:5362`), aber vier FP64 `pow` je Schalenpaar
+   in `k_grad_coulomb` (`:1330`); `k_grad_repulsion` (`:1102`) drei `pow` je Atompaar ohne
+   Cutoff. Beide in der `for j<i`-Form mit `atomicAdd` — Gather-Umbau steht bereits in
+   [docs/SQM_GPU_ROADMAP.md](docs/SQM_GPU_ROADMAP.md):39-46.
+6. **Gradient ueber GPUs verteilen** (zuletzt): `k_grad_h0_pulay_sp` ist eine reine Reduktion
+   ueber den Paarbereich, Ausgabe nur `grad` (3*nat) + `dEdcn` (nat) = **176 KB** — billiger zu
+   verteilen als der Eigenloeser. Skelett existiert in `densityPatternDistributed` (`:3118-3258`).
+- **Warnung vor dem naheliegenden Ansatz**: die schalenpaar-blockierte Form des
+  Multipol-Gradienten wurde auf der CPU gemessen und **als langsamer verworfen**
+  (docs/SQM_PERFORMANCE.md "Blocking the multipole GRADIENT: tried, measured, reverted").
+- **Validierung**: `ctest -L gpu_gradient` (`sqm_cuda_gradient_*`, tol 1e-7),
+  `scripts/gradient_compare.py`, `gradient_unit_contract`.
+
+### `gpu_strict` fehlt — stiller CPU-Rueckfall (2026-09)
+- **Status**: ⏳ PLANNED
+- **Problem**: `xtb_gpu_context.cu:3875` warnt nur, wenn eine Rechnung nicht auf die Karte
+  passt, und rechnet dann auf der CPU weiter. Bei Laufzeitmessungen auf fremder Hardware
+  kostet das Stunden, bevor es auffaellt.
+- **Task**: PARAM `gpu_strict` (Bool, default false) — GPU-Fehler/OOM als harter Fehler.
+  Im Multi-GPU-Plan vorgesehen, nie implementiert.
+- **Verweis**: [docs/MULTI_GPU.md](docs/MULTI_GPU.md):88, Testprotokoll H200
+
 ---
 
 ## 🔵 CAPABILITIES & ANALYSIS (src/capabilities/)
