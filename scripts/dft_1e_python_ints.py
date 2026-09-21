@@ -92,33 +92,48 @@ def prim_overlap_shifted(la,ma,na, lb,mb,nb, gamma, K, PAx,PBx, PAy,PBy, PAz,PBz
     return pref * Sx[la][lb] * Sy[ma][mb] * Sz[na][nb]
 
 def hermite_coeffs(iA, iB, PA, PB, gamma, K):
-    """E[t][i][j] Hermite expansion coefficients (K folded into E[0][0][0])."""
+    """E[t][i][j] Hermite expansion coefficients (K folded into E[0][0][0]).
+
+    Standard McMurchie-Davidson forward recursion (Helgaker 9.5.5/9.5.6): raise
+    the polynomial powers i then j, filling every Hermite order t at once.
+      E^{i+1,j}_t = (1/(2p)) E^{i,j}_{t-1} + PA E^{i,j}_t + (t+1) E^{i,j}_{t+1}
+      E^{i,j+1}_t = (1/(2p)) E^{i,j}_{t-1} + PB E^{i,j}_t + (t+1) E^{i,j}_{t+1}
+    (The earlier "raise t" variant matched only t<=1: E[2][0][0] came out 0.5
+    instead of 0.0 and E[2][1][1] 0.25 instead of 0.0625.)
+    """
     tmax = iA+iB
     g2 = 0.5/gamma
     E = [[[0.0]*(iB+1) for _ in range(iA+1)] for _ in range(tmax+1)]
     if K == 0.0: return E
     E[0][0][0] = K
+
+    def at(t, i, j):
+        if t < 0 or t > tmax or i < 0 or j < 0 or i > iA or j > iB: return 0.0
+        return E[t][i][j]
     for i in range(1, iA+1):
-        prev = E[0][i-2][0] if i >= 2 else 0.0
-        E[0][i][0] = PA*E[0][i-1][0] + g2*(i-1)*prev
+        for t in range(tmax+1):
+            E[t][i][0] = g2*at(t-1, i-1, 0) + PA*at(t, i-1, 0) + (t+1)*at(t+1, i-1, 0)
     for j in range(1, iB+1):
         for i in range(iA+1):
-            ei = E[0][i-1][j-1] if i >= 1 else 0.0
-            ej = E[0][i][j-2]   if j >= 2 else 0.0
-            E[0][i][j] = PB*E[0][i][j-1] + g2*(i*ei + (j-1)*ej)
-    for t in range(1, tmax+1):
-        for i in range(iA+1):
-            for j in range(iB+1):
-                ei = E[t-1][i-1][j] if i >= 1 else 0.0
-                ej = E[t-1][i][j-1] if j >= 1 else 0.0
-                et = E[t-2][i][j]   if t >= 2 else 0.0
-                E[t][i][j] = PA*E[t-1][i][j] + g2*(i*ei + j*ej + t*et)
+            for t in range(tmax+1):
+                E[t][i][j] = g2*at(t-1, i, j-1) + PB*at(t, i, j-1) + (t+1)*at(t+1, i, j-1)
     return E
 
 def boys_array(maxN, T):
     F = [0.0]*(maxN+1)
     if T < 1e-14:
         for n in range(maxN+1): F[n] = 1.0/(2*n+1)
+        return F
+    # Large T: the downward recursion needs a start index far above T; a fixed
+    # maxN+25 start collapses for T >~ 15 (F_0(37) 50x too small, F_0(T>=50)
+    # exactly 0). Use the closed form F_0(T) = 0.5 sqrt(pi/T) erf(sqrt(T)) and
+    # recur UPWARD -- the stable direction once e^{-T} is small (its subtraction
+    # cancels at small T, hence the split at T = 1).
+    if T >= 1.0:
+        F[0] = 0.5*math.sqrt(math.pi/T)*math.erf(math.sqrt(T))
+        eT = math.exp(-T)
+        for n in range(maxN):
+            F[n+1] = ((2*n+1)*F[n] - eT)/(2*T)
         return F
     M = maxN + 25
     G = [0.0]*(M+1)
@@ -133,22 +148,32 @@ def build_R(tmax, umax, vmax, Nmax, PC, gamma, boys):
     Px,Py,Pz = PC
     R = [[[[0.0]*(Nmax+1) for _ in range(vmax+1)] for _ in range(umax+1)] for _ in range(tmax+1)]
     pref = 2.0*PI/gamma
+    # base R^N_{000} = (2 pi / gamma) (-2 gamma)^N F_N(T): the (-2 gamma)^N factor is
+    # required by the t >= 2 recurrence (whose R^{n+1} carries one more (-2 gamma)).
+    # It was missing, so R^0_{200} came out +(2 pi/gamma) F_1 instead of
+    # -(2 pi/gamma) 2 gamma F_1 -- wrong magnitude AND sign.
+    neg2p = 1.0
     for N in range(Nmax+1):
-        R[0][0][0][N] = pref*boys[N]
+        R[0][0][0][N] = pref*neg2p*boys[N]
+        neg2p *= -2.0*gamma
+    # Displacement term carries a PLUS sign: this is the bra recurrence
+    # (differentiation w.r.t. P), same form as the ERI's build_R_eri. The former
+    # minus reproduced every on-centre integral (P-C == 0) but inverted the sign of
+    # off-centre elements.
     for t in range(tmax+1):
         if t >= 1:
             for N in range(Nmax):
                 low = (t-1)*R[t-2][0][0][N+1] if t >= 2 else 0.0
-                R[t][0][0][N] = low - Px*R[t-1][0][0][N+1]
+                R[t][0][0][N] = low + Px*R[t-1][0][0][N+1]
         for u in range(1, umax+1):
             for N in range(Nmax):
                 low = (u-1)*R[t][u-2][0][N+1] if u >= 2 else 0.0
-                R[t][u][0][N] = low - Py*R[t][u-1][0][N+1]
+                R[t][u][0][N] = low + Py*R[t][u-1][0][N+1]
         for u in range(umax+1):
             for v in range(1, vmax+1):
                 for N in range(Nmax):
                     low = (v-1)*R[t][u][v-2][N+1] if v >= 2 else 0.0
-                    R[t][u][v][N] = low - Pz*R[t][u][v-1][N+1]
+                    R[t][u][v][N] = low + Pz*R[t][u][v-1][N+1]
     return R
 
 def prim_nuclear(la,ma,na, lb,mb,nb, a1,a2, A, B, C):

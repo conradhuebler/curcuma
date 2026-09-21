@@ -95,33 +95,43 @@ def prim_overlap(la,ma,na, lb,mb,nb, a1,a2, A, B):
     return pref * Sx[la][lb] * Sy[ma][mb] * Sz[na][nb]
 
 def hermite_coeffs(iA, iB, PA, PB, gamma, K):
-    """E[t][i][j] Hermite expansion coefficients (K folded into E[0][0][0])."""
+    """E[t][i][j] Hermite expansion coefficients (K folded into E[0][0][0]).
+
+    Standard McMurchie-Davidson forward recursion (Helgaker 9.5.5/9.5.6); see the
+    note in scripts/dft_1e_python_ints.py -- the earlier "raise t" variant was
+    wrong for t >= 2 (E[2][0][0] 0.5 instead of 0.0, E[2][1][1] 0.25 instead of
+    0.0625), which corrupted every ERI with total angular momentum >= 2.
+    """
     tmax = iA+iB
     g2 = 0.5/gamma
     E = [[[0.0]*(iB+1) for _ in range(iA+1)] for _ in range(tmax+1)]
     if K == 0.0: return E
     E[0][0][0] = K
+
+    def at(t, i, j):
+        if t < 0 or t > tmax or i < 0 or j < 0 or i > iA or j > iB: return 0.0
+        return E[t][i][j]
     for i in range(1, iA+1):
-        prev = E[0][i-2][0] if i >= 2 else 0.0
-        E[0][i][0] = PA*E[0][i-1][0] + g2*(i-1)*prev
+        for t in range(tmax+1):
+            E[t][i][0] = g2*at(t-1, i-1, 0) + PA*at(t, i-1, 0) + (t+1)*at(t+1, i-1, 0)
     for j in range(1, iB+1):
         for i in range(iA+1):
-            ei = E[0][i-1][j-1] if i >= 1 else 0.0
-            ej = E[0][i][j-2]   if j >= 2 else 0.0
-            E[0][i][j] = PB*E[0][i][j-1] + g2*(i*ei + (j-1)*ej)
-    for t in range(1, tmax+1):
-        for i in range(iA+1):
-            for j in range(iB+1):
-                ei = E[t-1][i-1][j] if i >= 1 else 0.0
-                ej = E[t-1][i][j-1] if j >= 1 else 0.0
-                et = E[t-2][i][j]   if t >= 2 else 0.0
-                E[t][i][j] = PA*E[t-1][i][j] + g2*(i*ei + j*ej + t*et)
+            for t in range(tmax+1):
+                E[t][i][j] = g2*at(t-1, i, j-1) + PB*at(t, i, j-1) + (t+1)*at(t+1, i, j-1)
     return E
 
 def boys_array(maxN, T):
     F = [0.0]*(maxN+1)
     if T < 1e-14:
         for n in range(maxN+1): F[n] = 1.0/(2*n+1)
+        return F
+    # Large T branch (see scripts/dft_1e_python_ints.py): the fixed maxN+25
+    # downward start collapses for T >~ 15.
+    if T >= 1.0:
+        F[0] = 0.5*math.sqrt(math.pi/T)*math.erf(math.sqrt(T))
+        eT = math.exp(-T)
+        for n in range(maxN):
+            F[n+1] = ((2*n+1)*F[n] - eT)/(2*T)
         return F
     M = maxN + 25
     G = [0.0]*(M+1)

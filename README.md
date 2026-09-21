@@ -97,7 +97,7 @@ Native GFN methods (no external dependency required, canonical backends since AP
 - **gfn1** : Native GFN1-xTB — 14/16 validation molecules at 1e-8 vs tblite; includes the GFN1-only halogen-bond correction (B–X···A, added Sep 2026)
 - **gfn2** : Native GFN2-xTB — 15/16 validation molecules at 1e-8 vs tblite (only `complex` open at 7.3e-8)
 
-Native KS-DFT (no external dependency required, **work in progress — not usable for production**; WP1 1e integrals (S/T/V) + WP2 4-centre ERI (McMurchie-Davidson, chemists' (μν|λσ), 8-fold symmetry) + Coulomb J / exchange K over contracted cartesian GTOs; the WP3 HF SCF does not converge yet and `lda`/`pbe`/`b3lyp` still return the nuclear repulsion only):
+Native KS-DFT (**`hf` usable, LDA/PBE/B3LYP not yet** — no external dependency required; WP1 1e integrals (S/T/V) + WP2 4-centre ERI (McMurchie-Davidson, chemists' (μν|λσ), 8-fold symmetry) + Coulomb J / exchange K over contracted cartesian GTOs; the WP3 closed-shell HF SCF matches ORCA 6.1 HF/def2-SVP on 10/10 validation molecules within 4e-9 Eh, while `lda`/`pbe`/`b3lyp` still return the nuclear repulsion only — no V_xc yet, and there is no gradient):
 - **hf**, **lda**, **pbe**, **b3lyp** : each functional is its own `-method` name (no umbrella `dft`); ported from xcDFT (TCC 2019), ORCA 6.1 reference — see [docs/NATIVE_DFT_IMPLEMENTATION.md](docs/NATIVE_DFT_IMPLEMENTATION.md) and the [DFT roadmap](docs/DFT_ROADMAP/)
 
 > Native GFN1/GFN2 are validated against tblite to a 1e-8 Eh target — see [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md). For explicit tblite or xtb backends use `tblite-gfn1`/`tblite-gfn2` or `xtb-gfn1`/`xtb-gfn2`.

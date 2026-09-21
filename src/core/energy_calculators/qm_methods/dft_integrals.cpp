@@ -301,29 +301,26 @@ static std::vector<std::vector<std::vector<double>>> hermiteCoeffs(int iA, int i
         tmax + 1, std::vector<std::vector<double>>(iA + 1, std::vector<double>(iB + 1, 0.0)));
     if (K == 0.0) return E;
     E[0][0][0] = K;
-    // t = 0: raise i (B-side held at 0), then raise j.
-    for (int i = 1; i <= iA; ++i) {
-        double prev = (i >= 2) ? E[0][i - 2][0] : 0.0;
-        E[0][i][0] = PA * E[0][i - 1][0] + g2 * (i - 1) * prev;
-    }
-    for (int j = 1; j <= iB; ++j) {
-        for (int i = 0; i <= iA; ++i) {
-            double ei = (i >= 1) ? E[0][i - 1][j - 1] : 0.0;  // i*E(i-1,j-1)
-            double ej = (j >= 2) ? E[0][i][j - 2] : 0.0;      // (j-1)*E(i,j-2)
-            E[0][i][j] = PB * E[0][i][j - 1] + g2 * (i * ei + (j - 1) * ej);
-        }
-    }
-    // raise t
-    for (int t = 1; t <= tmax; ++t) {
-        for (int i = 0; i <= iA; ++i) {
-            for (int j = 0; j <= iB; ++j) {
-                double ei = (i >= 1) ? E[t - 1][i - 1][j] : 0.0;  // i*E_{t-1}(i-1,j)
-                double ej = (j >= 1) ? E[t - 1][i][j - 1] : 0.0;  // j*E_{t-1}(i,j-1)
-                double et = (t >= 2) ? E[t - 2][i][j] : 0.0;     // t*E_{t-2}(i,j)
-                E[t][i][j] = PA * E[t - 1][i][j] + g2 * (i * ei + j * ej + t * et);
-            }
-        }
-    }
+    // Standard McMurchie-Davidson forward recursion (Helgaker 9.5.5/9.5.6). It
+    // raises the polynomial powers i and j and fills every Hermite order t at
+    // once:
+    //   E^{i+1,j}_t = (1/(2p)) E^{i,j}_{t-1} + PA E^{i,j}_t + (t+1) E^{i,j}_{t+1}
+    //   E^{i,j+1}_t = (1/(2p)) E^{i,j}_{t-1} + PB E^{i,j}_t + (t+1) E^{i,j}_{t+1}
+    // Only rows (i-1,j) and (i,j-1) are read, both already complete, so no entry
+    // is read before it is written.
+    auto at = [&](int t, int i, int j) -> double {
+        if (t < 0 || t > tmax || i < 0 || j < 0 || i > iA || j > iB) return 0.0;
+        return E[t][i][j];
+    };
+    for (int i = 1; i <= iA; ++i)
+        for (int t = 0; t <= tmax; ++t)
+            E[t][i][0] = g2 * at(t - 1, i - 1, 0) + PA * at(t, i - 1, 0)
+                       + (t + 1) * at(t + 1, i - 1, 0);
+    for (int j = 1; j <= iB; ++j)
+        for (int i = 0; i <= iA; ++i)
+            for (int t = 0; t <= tmax; ++t)
+                E[t][i][j] = g2 * at(t - 1, i, j - 1) + PB * at(t, i, j - 1)
+                           + (t + 1) * at(t + 1, i, j - 1);
     return E;
 }
 
@@ -333,6 +330,23 @@ static std::vector<double> boysArray(int maxN, double T)
     std::vector<double> F(maxN + 1, 0.0);
     if (T < 1e-14) {
         for (int n = 0; n <= maxN; ++n) F[n] = 1.0 / (2.0 * n + 1.0);
+        return F;
+    }
+    // Large T: the downward recurrence below needs a starting index far above T,
+    // and a fixed maxN+25 start is NOT enough -- F_0(37) came out 50x too small and
+    // F_0(T >= 50) as exactly 0, which silently wrecked every integral whose
+    // Gaussian pair sits away from the nucleus (i.e. every real molecule; the
+    // single-atom T == 0 cases were the only ones this survived). For T >= 1 use
+    // the closed form F_0(T) = 0.5 sqrt(pi/T) erf(sqrt(T)) and recur UPWARD,
+    // F_{n+1} = ((2n+1) F_n - e^{-T}) / (2T), which is the stable direction there
+    // (the subtraction cancels only at small T, hence the split at T = 1).
+    // Worst relative error over T in [1e-14, 800] and n <= 5: 4.7e-14.
+    if (T >= 1.0) {
+        const long double Tl = (long double)T;
+        const long double eT = expl(-Tl);
+        F[0] = (double)(0.5L * sqrtl(PI / Tl) * erfl(sqrtl(Tl)));
+        for (int n = 0; n < maxN; ++n)
+            F[n + 1] = (double)(((2.0L * n + 1.0L) * (long double)F[n] - eT) / (2.0L * Tl));
         return F;
     }
     const int M = maxN + 25;
@@ -356,21 +370,40 @@ static void buildRblock(int tmax, int umax, int vmax, int Nmax,
     };
     std::fill(R.begin(), R.end(), 0.0);
     const double pref = 2.0 * PI / gamma;
-    // base R_000^(N)
-    for (int N = 0; N <= Nmax; ++N) R[idx(0, 0, 0, N)] = pref * boys[N];
+    // base R_000^(N) = (2 pi / gamma) (-2 gamma)^N F_N(T). The (-2 gamma)^N factor is
+    // required by the t >= 2 recurrence below (Helgaker 9.9.13: R^n_{t+1} =
+    // X_PC R^n_t + t R^{n+1}_{t-1}, whose R^{n+1} carries one more (-2 gamma)).
+    // Without it R^0_{200} came out +(2 pi/gamma) F_1 instead of -(2 pi/gamma) 2 gamma
+    // F_1 -- wrong magnitude AND sign -- so every nuclear-attraction element with
+    // total angular momentum >= 2 was wrong (V_pp exactly 2x too large on He) and
+    // the HF SCF had no fixed point. Verified against the exact pi/6 for <px|1/r|px>
+    // and against ORCA's He core Hamiltonian (h_pp = +0.372308 Eh).
+    //
+    // The displacement term carries a PLUS sign: this is the bra recurrence
+    // (differentiation w.r.t. P), identical in form to buildRblockERI's. The former
+    // minus reproduced every on-centre integral (P-C == 0 kills the term) but gave
+    // off-centre elements the right magnitude with an inverted sign -- e.g.
+    // <pz_A|1/r_B|s_A> came out -0.238696 instead of +0.238695.
+    {
+        double neg2p = 1.0;  // (-2 gamma)^N
+        for (int N = 0; N <= Nmax; ++N) {
+            R[idx(0, 0, 0, N)] = pref * neg2p * boys[N];
+            neg2p *= -2.0 * gamma;
+        }
+    }
     for (int t = 0; t <= tmax; ++t) {
         // R[t][0][0]: base if t==0 else raise t
         if (t >= 1) {
             for (int N = 0; N <= Nmax - 1; ++N) {
                 double low = (t >= 2) ? (t - 1) * R[idx(t - 2, 0, 0, N + 1)] : 0.0;
-                R[idx(t, 0, 0, N)] = low - PCx * R[idx(t - 1, 0, 0, N + 1)];
+                R[idx(t, 0, 0, N)] = low + PCx * R[idx(t - 1, 0, 0, N + 1)];
             }
         }
         // raise u (v = 0)
         for (int u = 1; u <= umax; ++u) {
             for (int N = 0; N <= Nmax - 1; ++N) {
                 double low = (u >= 2) ? (u - 1) * R[idx(t, u - 2, 0, N + 1)] : 0.0;
-                R[idx(t, u, 0, N)] = low - PCy * R[idx(t, u - 1, 0, N + 1)];
+                R[idx(t, u, 0, N)] = low + PCy * R[idx(t, u - 1, 0, N + 1)];
             }
         }
         // raise v for all u
@@ -378,7 +411,7 @@ static void buildRblock(int tmax, int umax, int vmax, int Nmax,
             for (int v = 1; v <= vmax; ++v) {
                 for (int N = 0; N <= Nmax - 1; ++N) {
                     double low = (v >= 2) ? (v - 1) * R[idx(t, u, v - 2, N + 1)] : 0.0;
-                    R[idx(t, u, v, N)] = low - PCz * R[idx(t, u, v - 1, N + 1)];
+                    R[idx(t, u, v, N)] = low + PCz * R[idx(t, u, v - 1, N + 1)];
                 }
             }
         }
@@ -607,8 +640,11 @@ Matrix applySphericalTransform(const Matrix& Mcart, const Matrix& Q)
 //   prefactor (-2*rho)^n, never as a recurrence coefficient.
 //
 //   This is a DIFFERENT auxiliary from the WP1 nuclear buildRblock (which uses
-//   base (2*pi/g)*F_n and displacement (C-P), i.e. differentiation w.r.t. the
-//   source C); the two are not interchangeable, so the ERI gets its own R build.
+//   base (2*pi/g)*(-2g)^n*F_n and displacement (C-P), i.e. differentiation w.r.t.
+//   the source C); the two are not interchangeable, so the ERI gets its own R
+//   build. Both carry the (-2*rho)^n / (-2*gamma)^n factor in the base -- the WP1
+//   build was missing it until Jul 2026, which made every nuclear-attraction
+//   element with total angular momentum >= 2 wrong (see the note in buildRblock).
 //   The Hermite expansion coefficients hermiteCoeffs (Helgaker 9.9.2-9.9.8) and
 //   the Boys function boysArray are reused unchanged from WP1.
 // ===========================================================================

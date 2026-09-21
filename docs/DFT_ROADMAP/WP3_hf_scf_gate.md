@@ -1,8 +1,17 @@
 # WP3 — HF-SCF (rung 666) — hartes ERI-Gate
 
-- **Status:** ⚠️ AI-generated / offen — ⚙️ machine-tested (nach Erfüllung)
+- **Status:** ⚠️ AI-generated / **erfüllt (Jul 2026)** — ⚙️ machine-tested (kein ✅ TESTED)
 - **Abhängigkeit:** WP2
 - **Validierung:** ORCA HF + xcDFT rung=666 (zwei Referenzen)
+
+> **Ergebnis (Jul 2026):** 10/10 Moleküle innerhalb 4e-9 Eh vs ORCA 6.1
+> `! HF def2-SVP TightSCF` (BH auf demselben SCF-Zweig wie ORCA `! HCore`).
+> `ctest -R 'dft_1e|dft_2e'` 20/20. Die SCF-Schleife war von Anfang an korrekt --
+> die drei Fehler lagen in den WP1/WP2-Kerneln (`boysArray`-Startindex,
+> `hermiteCoeffs` t≥2, 1e-R-Hilfsfunktion Basis+Vorzeichen); Details und Beweise
+> in [docs/NATIVE_DFT_IMPLEMENTATION.md](../NATIVE_DFT_IMPLEMENTATION.md#wp3----hf-scf-vs-orca-61-july-2026).
+> Offen geblieben: nur Core-Guess + DIIS (kein SOSCF/Sekundärlösungen), xcDFT-Gate
+> weiterhin nicht gefahren (Referenzdatei fehlt im Repo).
 
 ## Ziel
 

@@ -4,18 +4,93 @@
 (HF / LDA / PBE / B3LYP), ported/extended from the xcDFT TCC winter school 2019 code with
 ORCA 6.1 as the validation reference.
 
-**Status**: WP0 scaffold done. **WP1 done** (June 2026): real 1e GTO integrals
-(S/T/V over contracted cartesian Gaussian, Obara-Saika 1986 + McMurchie-Davidson/Boys,
-`def2-SVP.dat` for H-Ne); `MakeOverlap`→S, `MakeH`→Hc=T+V; `Calculation()` still
-returns E_nn+0 (no SCF/XC yet). Validation: `ctest -L dft_1e` 10/10 (kernel vs
-independent Python witness ≤1e-14, internal consistency, ORCA smallest spherical
-S eigenvalue ≤1e-4). **WP2 done** (June 2026): 4-centre ERI engine
-(McMurchie-Davidson, chemists' (μν|λσ), 8-fold symmetry) + Coulomb J / HF exchange K
-from a dummy closed-shell density; `DFT::cartesianERI()` built lazily (NOT on the
-scaffold `-sp` path). Validation: `ctest -L dft_2e` 10/10 (kernel vs independent
-Python MD witness ≤2.1e-14, 8-fold symmetry exact, Tr(PJ)==Tr(PK) ≤1.8e-13,
-(ss|ss) closed form 2.2e-16). All later work packages (WP3-WP8) fill in the SCF
-loop, the XC functionals, and the gradient. ⚠️ AI-generated / ⚙️ machine-tested only.
+**Status**: WP1 + WP2 + **WP3 working** (July 2026). The closed-shell HF SCF now
+converges and reproduces ORCA 6.1 HF/def2-SVP on all 10 validation molecules —
+9 of them to ≤4e-9 Eh with ORCA's default guess, BH on the same SCF branch (see
+"What was wrong until July 2026" below; three real kernel defects were found and
+fixed). `ctest -L dft_1e` + `ctest -L dft_2e` 20/20. LDA/PBE/B3LYP (WP5-WP7) and
+the analytic gradient (WP8) are still open: those methods intentionally return the
+nuclear repulsion only. ⚠️ AI-generated / ⚙️ machine-tested only — no human
+production test, and the validation set is 10 molecules in a H-Ne basis.
+
+## WP3 -- HF-SCF vs ORCA 6.1 (July 2026)
+
+`curcuma -sp <mol>.xyz -method hf` (def2-SVP, default spherical 5d), against
+`orca ! HF def2-SVP TightSCF`:
+
+| molecule | curcuma | ORCA | diff |
+|---|---|---|---|
+| H2 | -1.12890672 | -1.128906716206 | -3.8e-09 |
+| He | -2.85516048 | -2.855160479342 | -6.6e-10 |
+| LiH | -7.97866220 | -7.978662196021 | -4.0e-09 |
+| BeH2 | -15.75349906 | -15.753499058370 | -1.6e-09 |
+| CH4 | -40.16917039 | -40.169170388185 | -1.8e-09 |
+| NH3 | -56.14009755 | -56.140097551803 | +1.8e-09 |
+| H2O | -75.95751380 | -75.957513799019 | -9.8e-10 |
+| HF | -99.93249914 | -99.932499138781 | -1.2e-09 |
+| Ne | -128.37640681 | -128.376406809861 | -1.4e-10 |
+| BH | -24.87163094 | -24.871630934948 | -5e-09 (ORCA `! HCore`) |
+
+The residual is the SCF threshold (1e-6 default on dP), not an integral error.
+**BH caveat**: BH has more than one closed-shell RHF stationary point. ORCA's
+default model-potential guess lands on the lower one (-25.099174849888); from a
+core (H0) guess -- the only guess curcuma has -- both codes land on
+-24.871630934. curcuma is not wrong, it is on the other branch; a proper
+guess/SOSCF is a later WP item.
+
+### What was wrong until July 2026 (three kernel defects)
+
+The WP3 SCF loop was never the problem: an independent Python RHF written on the
+WP1/WP2 witness integrals reproduced curcuma's iteration trace *bit for bit*
+(including its period-2 oscillation), so the defect had to be in the integrals.
+All three defects lived in `dft_integrals.cpp` and were invisible to the WP1/WP2
+gates because the "independent" Python witness shared the same algorithms.
+
+1. **`boysArray` -- the dominant error.** The downward recursion started at a fixed
+   `M = maxN + 25`, which is only enough for small T. For T >~ 15 it collapses:
+   `F_0(37)` came out 50x too small and `F_0(T >= 50)` exactly 0. Every integral
+   whose Gaussian pair sits away from the nucleus was therefore wrong -- i.e. every
+   real molecule (a single atom has T = 0, which is why the atom-only cases looked
+   fine). Fix: `F_0(T) = 0.5 sqrt(pi/T) erf(sqrt(T))` plus the **upward** recursion
+   for T >= 1 (stable there; its subtraction cancels at small T). Worst relative
+   error over T in [1e-14, 800], n <= 5: 4.7e-14 (was 1.0).
+2. **`hermiteCoeffs` -- wrong from t = 2 on.** The "raise t" recursion reproduced
+   only the t <= 1 coefficients: `E[2][0][0]` came out 0.5 instead of 0.0 and
+   `E[2][1][1]` 0.25 instead of 0.0625. Fix: the standard McMurchie-Davidson
+   forward recursion over i then j (Helgaker 9.5.5/9.5.6). Shared by the 1e
+   nuclear attraction and the 4-centre ERI -- so the WP2 ERI was affected too.
+3. **1e nuclear-attraction R auxiliary.** The base was missing its `(-2 gamma)^N`
+   factor, and the displacement term had the wrong sign. On-centre both defects
+   are invisible (P - C = 0, base index 0); off-centre they gave the right
+   magnitude with an inverted sign, e.g. `<pz_A|1/r_B|s_A>` came out -0.238696
+   instead of +0.238695. Fix: base `(2 pi/gamma)(-2 gamma)^N F_N(T)` and the PLUS
+   sign of the bra recurrence (matching `buildRblockERI`).
+
+Evidence for the fixes: exact closed forms (`<px|1/r|px>` = pi/6, formerly pi/3;
+`<ss|1/r|ss>` = pi unchanged), deterministic 3D quadrature for off-centre
+elements, and ORCA's own core Hamiltonian (He `h_pp` = +0.372308 Eh, and the
+generalised (H,S) spectrum for BH/CH4 matching to ORCA's 6-decimal printout).
+Before the fixes the HF energies were off by up to 19 Eh (H2O) and the SCF had no
+fixed point at all.
+
+**Lesson for the gates**: a witness that shares the algorithm cannot catch a
+conceptual error in that algorithm. The WP1/WP2 gates validated the kernels
+against a second implementation of the *same* recursions, and the one genuinely
+independent reference they carried (ORCA, via the S eigenvalue and MO energies)
+only covered quantities that were already right. A total-energy comparison
+against ORCA belongs in `dft_1e` from the start.
+
+### WP3 limits / not implemented
+
+Only closed-shell (even electron count); no open-shell, no charged systems beyond
+what the closed-shell code path supports. One guess (core/H0) and DIIS only -- no
+SOSCF, no secondary solutions. No dispersion (D3/D4) coupling, no solvation, no
+gradient (`hasGradient() == false` until WP8). Basis scope is H-Ne (`def2-SVP.dat`).
+The `dft_1e`/`dft_2e` graders' ORCA reference JSONs carry MO energies only, so the
+new total-energy agreement is currently checked by hand, not in CI.
+
+---
+
 
 ---
 
@@ -83,9 +158,9 @@ Full plan: [`docs/DFT_ROADMAP/`](DFT_ROADMAP/) (README + WP0..WP9) and the maste
 | WP | Title | Status |
 |----|-------|--------|
 | WP0 | Geruest, Quellenangabe, Setup | WP0 scaffold done (this doc) |
-| WP1 | GTO 1e integrals (S/T/V) | done — `ctest -L dft_1e` 10/10 |
-| WP2 | 4-centre ERI (McMurchie-Davidson) | done — `ctest -L dft_2e` 10/10 |
-| WP3 | HF-SCF (rung 666, hard ERI gate) | open |
+| WP1 | GTO 1e integrals (S/T/V) | done — `ctest -L dft_1e` 10/10 (kernels corrected Jul 2026) |
+| WP2 | 4-centre ERI (McMurchie-Davidson) | done — `ctest -L dft_2e` 10/10 (kernels corrected Jul 2026) |
+| WP3 | HF-SCF (rung 666, hard ERI gate) | **done (Jul 2026)** — 10/10 molecules ≤4e-9 Eh vs ORCA, see above |
 | WP4 | DFT grid (Euler-Maclaurin + Lebedev + Becke) | open |
 | WP5 | LDA (Slater-Dirac + VWN5) | open |
 | WP6 | PBE-GGA (+ grad rho) | open |
