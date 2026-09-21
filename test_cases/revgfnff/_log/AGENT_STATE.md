@@ -98,7 +98,7 @@ data `test_cases/revgfnff/_log/tail_remeasure.csv` (11 700 rows). Binary: `build
   pair's own well contributes **0.00** (a transitioning pair's well is in every corner by
   construction). At that geometry `mg3`'s C-H wells differ from `mg`'s by **-0.19 to +0.37 %** and
   are bit-identical to `mg2`'s; the only pair its order dimension moves is C-C (+19.1 %), worth
-  0.02 kJ of the 283. **So: package 7's `conserving` mechanism verbatim, NOT amplified by a deeper
+  0.19 kJ of the 283. **So: package 7's `conserving` mechanism verbatim, NOT amplified by a deeper
   well and NOT the order dimension.**
 - **Still open, unchanged**: `cli_simplemd_20` (flagged), whether to lower `rev_dt_cap` to 0.0625
   (11.2 now backs 0.0625 on 780 trajectories per arm instead of one per cell), the `ATOMIC_TIME_TO_FS`

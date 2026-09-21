@@ -1696,7 +1696,11 @@ interval over the 130 cells (10 000 draws); `*` marks an interval that excludes 
 | 0.0625 | all five | 0 | 0.0000 | +0.0000 [0, 0] | 1.0 | 5.4-5.8 | 9.7-13.0 | 51-73 | 72-100 |
 
 **By the pre-registered rule: neither `mg2` nor `mg3` (nor `gauss`) is distinguishable from `mg`
-at any of the three time steps.** Every interval contains 0 and every McNemar p is >= 0.037. The
+at any of the three time steps.** Every interval contains 0; the smallest McNemar p among them is
+0.0365 (`gauss`, dt 0.125), and that one is exactly the case the clustering matters for — the
+unclustered test would call it significant at 0.05 while the cluster-bootstrap CI
+([-0.0474, +0.0064]) does not, because `gauss`'s 12 failing cells are not 780 independent draws.
+The
 one arm that IS distinguishable is `gauss + delivered` at dt 0.125, and it is **better** than `mg`
 (dp = -0.0295, CI [-0.0564, -0.0026]) — the pre-2026-09-19 default, i.e. the share rule, not the
 well form, is the only lever this measurement resolves. That is the same conclusion package 7
@@ -1784,7 +1788,7 @@ call. Bond-term difference (unbridged minus bridged) at the pre-jump geometry, p
 | C1-H3 | 2.19426 | -0.13570535 | -0.08268342 | **+139.2** |
 | C1-H4 | 2.53478 | -0.11871910 | -0.07242078 | **+121.6** |
 | C1-H5 | 2.10546 | -0.17413552 | -0.16590890 | +21.6 |
-| C1-C2 + the three C2-H | — | — | — | +0.09 total |
+| C1-C2 (+0.19) + the three C2-H (+0.72) | — | — | — | +0.91 total |
 | **H3-H4 (the transitioning pair)** | 2.09478 | -0.05107869 | -0.05107869 | **0.00** |
 | | | | **total** | **+283.3** |
 
@@ -1798,7 +1802,7 @@ construction (a transitioning pair's well belongs to every corner, `ff_workspace
 (`CURCUMA_SHAREDUMP=1`): the six C-H wells are **bit-identical between `mg2` and `mg3`** and
 differ from `mg` by **-0.19 % to +0.37 %** (C1-H3 0.16150247 mg / 0.16188876 mg2 = mg3; C1-H4
 0.14192413 / 0.14164877). The only pair `mg3` changes appreciably is **C-C** (0.13395966 mg /
-0.13470578 mg2 / 0.15957860 mg3, +19.1 % over mg) — and C-C contributes **0.02 kJ/mol** to the
+0.13470578 mg2 / 0.15957860 mg3, +19.1 % over mg) — and C-C contributes **0.19 kJ/mol** to the
 283 kJ corner gap. The `mg3`-specific order dimension therefore touches nothing that carries this
 event: on ethane the order table differs from the element-pair table only for C-C (H-H and C-H
 have a single order-1 row, verified in `rev_well_table_v2.h` and against a live dump).
