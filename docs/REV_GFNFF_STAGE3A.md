@@ -475,15 +475,23 @@ alternative stays available:
   best guard (1.0341) and no tail at all on the break side (class-A median rms 24.68). Use it to
   reproduce pre-Sep-19 behaviour or to attribute anything to the well form as a whole.
 
-**Open against this default** (`test_cases/revgfnff/_log/WORK_STATUS.md` package 12):
-`cli_simplemd_18_gfnff_rev_nve_vs_gfnff` fails on its dt = 0.125 arm at the `mg3` default
-(|slope| 2.95e-3 against a 2.5e-3 floor). Two things are mixed there: its committed calibration
-predates package 10's MD clock fix and the pre-flip `mg` arm already sat at 0.74x of that floor,
-AND `mg3` is reproducibly more dissipative on that particular bath (8 paired replicates, mg
-1.854-1.986e-3 vs mg3 2.946-3.235e-3, 8/8 positive, no overlap). That is a cumulative NVE drift
-rate on one 12-H2 bath, a different statistic from package 11's per-step spike tail; it neither
-contradicts nor is contradicted by it. No threshold was changed — the test carries the
-measurement in its header and awaits an operator decision.
+**Open against this default, DIAGNOSED (package 13) — not a defect, the test's statistic is
+misleading on this bath.** `cli_simplemd_18_gfnff_rev_nve_vs_gfnff` fails on its dt = 0.125 arm
+at the `mg3` default (|slope| 2.95e-3 against a 2.5e-3 floor); the measurement reproduces (also
+independently by the orchestrator on two fresh replicates). But `Etot(t)` on this 12-H2/8000K NVE
+bath is NOT a drift ramp — it is a step function: one H2 dissociates within the first ~1 ps,
+injecting an amount of energy set by its bond well's depth, and the trajectory is then FLAT
+(late-window slope consistent with 0) for the remaining 9 ps. The test's fixed-window OLS slope
+is therefore a one-time plateau HEIGHT divided by the window, not an ongoing rate, and `mg3`'s
+deeper H-H well (`D_e` larger by 0.0141 Eh, 98 % of the observed amplitude difference) makes that
+single release bigger — exactly reproducing the "1.6-1.7x higher slope" without any higher
+dissipation. Measured separately (dt-scaling, n = 6 replicates/cell), the actual energy-injection
+rate scales as dt^2 and is 19-34 % LOWER for `mg3` than `mg` at every dt below 0.25, never higher.
+The 2.5e-3 floor also fails the DELIVERED `gauss` well at small dt (1.21e-2 at 0.03125 fs, the
+worst of all four arms) and is non-monotone in dt for every arm — it is not diagnosing `mg3`
+specifically, or well-posed for any of the new forms. No source change; the test still carries the
+old measurement and awaits an operator decision on a better statistic, not a defect fix.
+Full detail: `test_cases/revgfnff/_log/MG3_DISSIPATION_STATUS.md`.
 
 ---
 
