@@ -33,7 +33,8 @@ Commits since 2026-09-13 (newest last):
 | `cd8c64d9` | **rev-gfnff re-derived in true fs**: warning threshold 0.125 -> 0.0625, `rev_dt_cap` help, mg/mg2/mg3 ordering falsified, `cli_simplemd_20` flagged |
 | `ae0569e2` | **package 11 pre-registration**: the react-MD tail decision statistic, committed before the sweep |
 | `3949a93d` | package 11 harness `scripts/revgfnff_tail_sweep.py` + raw `tail_remeasure.csv` (11 700 rows) |
-| (this file) | **package 11 results**: mg2/mg3 NOT distinguishable from mg on the smoothness tail (780 paired trajectories per arm per dt) |
+| `3e220d74` | **package 11 results**: mg2/mg3 NOT distinguishable from mg on the smoothness tail (780 paired trajectories per arm per dt) |
+| (package 12) | **`-gfnff.rev_well_form mg3` is the DEFAULT** (operator decision 2026-09-22) + the two re-pointed ctests + docs |
 
 **FULL `ctest` at HEAD (2026-09-14 night, release/ rebuilt after the cherry-pick): 14 failures out
 of the whole suite, none caused by the cherry-pick — orchestrator-verified each one.**
@@ -60,13 +61,44 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 
 ## Live agents
 
-**RUNNING since 2026-09-22: `package-12` (Opus)** — operator decision: `rev_well_form` default
-flips `mg` -> `mg3` (bond-order-resolved wells). Basis: package 9's accuracy gains (class-A rms
-22.15 -> 13.22, bond-length error vs r2SCAN-3c 0.025 -> 0.004 A) at the guard cost 1.0439 -> 1.0547,
-now that package 11 (11 700 trajectories) settled the smoothness tail as indistinguishable from
-`mg`. Full falsifier re-verification against package 9's recorded `mg3` numbers, ctest, test/doc
-re-pointing. Explicitly out of scope: `cli_simplemd_20` (still flagged since package 10, separate
-decision) and `rev_dt_cap` (still 0.25, separate decision). Status: `WORK_STATUS.md` package 12.
+**2026-09-22: `package-12` DONE — `-gfnff.rev_well_form mg3` is the DEFAULT.** No agent running.
+Three local commits (the flip, the two re-pointed ctests, docs+status), nothing pushed. Detail
+`WORK_STATUS.md` package 12 (`Packages done: 12/12`). Binaries: `cur_pre`
+`cc6aace6dcbc4800aaf4b6c5cbcc7a13` (== HEAD `33c1acb3`, package 11's binary), `cur_post`
+`1a142b9c1dc9b1aa7009e455ac8aec3b`.
+
+- **The flip is four default values and their comments, no logic** (`gfnff.h` PARAM + member,
+  `gfnff_method.cpp` `setupRevSettings()` fallback, `ff_workspace.h` `RevSettings::well_form`
+  1 -> 4, the last one inert). `make GenerateParams` re-run, registry carries `"mg3"`.
+- **Identity, not md5**: `cur_pre -gfnff.rev_well_form mg3` and `cur_post` with NO flag both give
+  caffeine **-4.789915106585** / benzene **-2.510708470577** = package 9's `cur_v6` `mg3` values.
+  Plain `gfnff` untouched (-4.672737068614 / -2.362725526194, identical `dump_params` md5), and
+  `gauss`/`mg`/`erfmorse`/`mg2` all still at their package-9 values to 12 digits.
+- **Every falsifier reproduces package 9's `mg3` arm exactly**: class-A median rms **13.22**
+  (max 59.07, dev D_e -6.86, r90 -0.131, k -82; **bit-identical per bond type**, max diff 0.000e+00
+  over 32 x 5 quantities), guard **1.0547** (RMSD 2.0831, n 167/167), class D **4.555 / 11.313**,
+  rkt06 **2.2665 / 2.2599**, the four class-C adducts **-1.53/11.81, -1.33/6.49, -3.05/13.47,
+  +0.00/3.78** (and the `delivered` arm still bad at -90/-109/-94/-91), FD gradient worst
+  **1.136e-07** Eh/A, median |b - b_r2SCAN-3c| **0.0044** A. The six hypervalent/BF4- points equal
+  their `rev_budget_fix_h false` control to 12 digits and the equilibrium toggle set is
+  **20/20 at dE = 0.000000000**.
+- **ctest 111/113** (`gfnff|sqm_val|react|cli_simplemd_|cli_gfnff_`). `cli_gfnff_04` re-pointed
+  (default == `mg3`, liveness widened from 2 to 4 forms + all-pairs distinctness, no tolerance
+  touched) and `cli_gfnff_03` re-pointed (the `delivered` regression pin re-measured
+  -89.4 -> -90.2, tolerance still 5.0); both pass.
+- **`cli_simplemd_18` now FAILS and was deliberately NOT recalibrated** — see WORK_STATUS 12.4.
+  Its dt=0.125 arm gives |slope| 2.95e-3 against a 2.5e-3 floor. Two effects: its calibration is
+  stale since package 10's clock fix (the `mg` arm already sat at 0.74x of the floor with 70/190
+  rebuilds where the table records 38/52), AND `mg3` is reproducibly more dissipative on that bath
+  (8 paired 1e-5 A replicates, mg 1.854-1.986e-3 vs mg3 2.946-3.235e-3, 8/8 positive, no overlap;
+  `-md.seed` does not perturb this run). That is a cumulative NVE drift rate on one 12-H2 bath, a
+  DIFFERENT statistic from package 11's per-step spike tail — not a re-litigation of package 11.
+  A 5000-16000 K scan finds no robust alternative operating point, and the documented floor rule
+  would give ~1.2e-2 Eh/ps, so the judgement call was left to the operator. **Two tests now await
+  an operator decision: `cli_simplemd_18` and `cli_simplemd_20`.**
+- **Pre-existing, out of scope, recorded**: `-gfnff.rev_well_form` reaches `-sp` and `-md` but
+  **not `-opt`** (all forms give identical optimised geometries within one binary; only the
+  registry default decides there).
 
 **Orchestrator verification of package 11 (own rebuild, own code, 2026-09-22):** (a) the primary
 table recomputed independently from the 11 700 raw CSV rows with an own cluster bootstrap matches
@@ -122,11 +154,12 @@ data `test_cases/revgfnff/_log/tail_remeasure.csv` (11 700 rows). Binary: `build
   0.19 kJ of the 283. **So: package 7's `conserving` mechanism verbatim, NOT amplified by a deeper
   well and NOT the order dimension.**
 - **Still open, unchanged**: `cli_simplemd_20` (flagged), whether to lower `rev_dt_cap` to 0.0625
-  (11.2 now backs 0.0625 on 780 trajectories per arm instead of one per cell), the `ATOMIC_TIME_TO_FS`
-  constant in `units.h`, and **the `rev_well_form` adoption decision itself** — package 11 only
-  removes the smoothness tail from the arguments on both sides; the conformer/S66 guard
-  (1.0439 -> 1.0543/1.0547) and the 0.0212 A equilibrium shift are static and stand as package 9
-  measured them.
+  (11.2 now backs 0.0625 on 780 trajectories per arm instead of one per cell), and the
+  `ATOMIC_TIME_TO_FS` constant in `units.h`. **The `rev_well_form` adoption decision was taken by
+  the operator on 2026-09-22 and executed in package 12: `mg3` is the default.** Package 11 only
+  removed the smoothness tail from the arguments on both sides; the conformer/S66 guard
+  (1.0439 -> 1.0547) and the 0.0212 A equilibrium shift are static, stand as package 9 measured
+  them, and were accepted as the cost.
 
 **2026-09-20: `package-10` DONE — a general curcuma bug fixed (the MD clock), and every rev-gfnff
 "fs" re-derived.** No agent running. Two local commits, nothing pushed. Detail `WORK_STATUS.md`

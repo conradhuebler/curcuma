@@ -1,5 +1,5 @@
-# WORK_STATUS — rev-gfnff work packages 1-11 (2026-09-18 / 21)
-Packages done: 11/11 (9 = 9a + 9b)
+# WORK_STATUS — rev-gfnff work packages 1-12 (2026-09-18 / 22)
+Packages done: 12/12 (9 = 9a + 9b)
 
 > **Package 10 re-scales the time axis of everything before it.** The MD time step was integrated
 > in the wrong unit until Sep 2026, so every "fs" and every duration written by packages 1-9 is
@@ -1840,3 +1840,188 @@ divergence — at 0.0625 the same cell/arm gives 1096 rebuilds and 128 steps >= 
   by a Jaccard of 0.2. Any future react-MD tail claim should report that ratio before reporting a
   maximum — a maximum over one trajectory per cell is a draw from a distribution whose spread this
   package measures for the first time.
+
+---
+
+# Package 12 — `mg3` is the default bond well (2026-09-22)
+
+Operator decision: make `-gfnff.rev_well_form mg3` the default, replacing `mg`. This package is
+the flip plus its verification; **no physics was changed and no new measurement was invented** —
+every falsifier below was re-run only to confirm that the flip reproduces package 9's `mg3` arm
+and nothing else moved.
+
+Binaries, both frozen before use:
+
+| | md5 | what it is |
+|---|---|---|
+| `cur_pre` | `cc6aace6dcbc4800aaf4b6c5cbcc7a13` | HEAD `33c1acb3` unmodified (== package 11's binary) |
+| `cur_post` | `1a142b9c1dc9b1aa7009e455ac8aec3b` | the same source with the default flipped |
+
+Identity fingerprint rather than md5, per the provenance rule: `cur_pre` with an explicit
+`-gfnff.rev_well_form mg3` and `cur_post` with **no flag at all** give caffeine
+**-4.789915106585** and benzene **-2.510708470577** — the values package 9 recorded for `mg3` with
+its own binary `cur_v6` (`89a587bb...`). So "the default is now mg3" is a measured statement.
+
+## 12.1 The change
+
+Four lines, all of them a default value or its comment; no logic:
+
+| file | change |
+|---|---|
+| `gfnff.h` | `PARAM(rev_well_form, String, "mg" -> "mg3", ...)` + help text |
+| `gfnff.h` | `std::string m_rev_well_form = "mg" -> "mg3"` |
+| `gfnff_method.cpp` | `setupRevSettings()`: `m_parameters.value("rev_well_form", "mg" -> "mg3")` |
+| `ff_workspace.h` | `RevSettings::well_form = 1 -> 4` (inert: `setupRevSettings()` assigns it unconditionally in the ctor and the whole rev path is gated on `enabled`, which is false there) |
+
+`make GenerateParams` re-run: `parameter_registry.h` carries `defaultValue = std::string("mg3")`,
+760 definitions, no validation warning.
+
+**Guardrail, measured not assumed**: plain `-method gfnff` is untouched — caffeine
+**-4.672737068614**, benzene **-2.362725526194** to 12 digits, and the `-gfnff.dump_params` md5 is
+identical (`4013d6fcd3...` / `6c3a87c8ef...`) across the default, the `mg` arm and the
+`rev_budget_fix_h false` control. The four non-default forms are also unchanged, 12 digits, on the
+post-flip binary: `gauss` -4.673521653477 / -2.363224128930, `mg` -4.546943898047 /
+-2.407912185968, `erfmorse` -4.539136588545 / -2.404586308482, `mg2` -4.550323010840 /
+-2.425005140081 — each equal to package 9's `cur_v6` value.
+
+## 12.2 Falsifier re-verification: every row reproduces package 9's `mg3`
+
+One binary (`cur_post`), the new default reached by passing **no flag**, against package 9's
+recorded `mg` (the old default) and `mg3` columns.
+
+| row | `mg` (pkg 9) | `mg3` (pkg 9) | measured here | |
+|---|---:|---:|---:|---|
+| class-A harness rms, median | 22.15 | 13.22 | **13.22** | exact |
+| class-A rms, max | 63.56 | 59.07 | **59.07** | exact |
+| class-A dev D_e, median | -14.32 | -6.86 | **-6.86** | exact |
+| class-A dev r90, median | -0.066 | -0.131 | **-0.131** | exact |
+| class-A dev k, median | -158 | -82 | **-82** | exact |
+| guard, pooled MAD (167 reactions) | 1.0439 | 1.0547 | **1.0547** | RMSD 2.0831, max -20.195, n 167/167, 0 missing |
+| class D dE_MAD (20 systems, mean) | 5.152 | 4.555 | **4.555** | median 3.303 |
+| class D grad_RMS (mean) | 14.428 | 11.313 | **11.313** | median 9.218 |
+| rkt06 path rms (conserving) | 2.3788 | 2.2665 | **2.2665** | n 12 |
+| rkt06 path rms (delivered) | 2.3447 | 2.2599 | **2.2599** | n 12 |
+| class C, ch4_H dev min / rms | -1.53 / 11.79 | -1.53 / 11.81 | **-1.53 / 11.81** | exact |
+| class C, nh3_H | -1.36 / 6.29 | -1.33 / 6.49 | **-1.33 / 6.49** | exact |
+| class C, h2o_H | -3.04 / 14.19 | -3.05 / 13.47 | **-3.05 / 13.47** | exact |
+| class C, n2h4_H | +0.00 / 2.91 | +0.00 / 3.78 | **+0.00 / 3.78** | exact |
+| class C under `delivered` (the bad arm) | — | ~-90/-109/-94/-91 | **-90.19 / -108.83 / -94.19 / -90.52** | still bad, as it must be |
+| FD gradient, worst of the 4 standard points | 1.02e-07 | 1.14e-07 | **1.136e-07** Eh/A | rkt06 pt10; the other three 5.7e-08 / 6.3e-08 / 5.0e-09 |
+| median \|b_model - b_r2SCAN-3c\|, 32 class-A bonds | 0.0246 | 0.0044 | **0.0044** | mean 0.0087, max 0.0434 (`o2_ODO`), n 31 |
+
+Per **bond type** rather than per median, the class-A run is bit-identical to package 9's
+`v5_mg3.json`: max |difference| over 32 bond types x {rms, dev D_e, dev r90, dev k, dev r_eq} =
+**0.000e+00**.
+
+Two rows package 9 did not record, measured here for the new default:
+
+- **six hypervalent ions / BF4- geometries**: the falsifier is "default == the
+  `-gfnff.rev_budget_fix_h false` control to 12 digits" (fix_h is a no-op under `conserving`), and
+  it holds on all six — NH4+ 0.807526616296, H3O+ 1.031714440146, CH5+ 0.755099570035,
+  ClO4- 0.101984569552, BF4- 1.143 A 0.173997608973, BF4- 1.394 A -1.470184050200 Eh, identical in
+  both arms, all gradients finite. (Under `mg` the same six are 0.807435121310 / 1.045025308677 /
+  0.757759301350 / 0.079669455482 / 0.171538393522 / -1.470184050200; BF4- at 1.394 A is
+  arm-independent because B-F has no class-A datum and keeps the Gaussian in every form.)
+- **equilibrium toggle set** (`rev_valence_share` x `rev_budget_fix_h`, 4 combinations x 5
+  molecules): **20/20 at dE = +0.000000000 kcal**, under `mg3` and under `mg`. Reference energies
+  under the new default: caffeine -4.789915106585, benzene -2.510708470577, 2h2 -0.362174464938,
+  n2_3h2 -0.881449717705, ch4_H -0.651609359614.
+
+### A protocol trap that cost an hour, recorded so the next agent does not pay it again
+
+The first class-C run disagreed with package 9 on **two of the four scans** (nh3_H rms 5.27 vs
+6.49, h2o_H 12.37 vs 13.47) while ch4_H and n2h4_H matched to the digit. It was not a code change:
+package 9's own binary `cur_v6` reproduces *today's* numbers exactly, and the reference files are
+untouched since Sep 11. The cause was an extra `-gfnff.topology_mode react` that package 9 did not
+pass to `adduct.py` — ch4_H and n2h4_H are insensitive to it, nh3_H and h2o_H are not
+(`static` == no flag == 6.49/13.47, `react` == 5.27/12.37). **`adduct.py` is run with no topology
+flag.** The lesson is the general one: when a re-run disagrees on a subset of rows, suspect the
+invocation before the code, and test the suspicion against the ORIGINAL binary.
+
+## 12.3 `ctest`
+
+`CURCUMA=build_rev/curcuma`, `cmake .` re-run after the script edits.
+`ctest -R "gfnff|sqm_val|react|cli_simplemd_|cli_gfnff_"`: **111/113**.
+
+- `cli_gfnff_04_rev_well_form` — **re-pointed, passes.** The identity clause now asserts
+  `default == explicit mg3`; the 12-digit pin stays on `gauss` (-4.673521653477) and on `gfnff`
+  (-4.672737068614). The liveness clause was **widened** from two forms to four (gauss, mg,
+  erfmorse, mg2 must each differ from the default by > 1e-6 Eh) plus an all-pairs distinctness
+  check over all five forms. `IDENTITY_TOL` (1e-11) and `LIVENESS_MIN` (1e-6) unchanged. Measured
+  closest pair mg/mg2 = 3.38e-03 Eh, i.e. 3400x the bound.
+- `cli_gfnff_03_rev_adduct_falsifier` — **re-pointed, passes.** The default (conserving) arm's
+  floor is untouched and it measures -1.5 against a -10 floor. The `delivered` arm pins no well
+  form of its own, so it is now evaluated with the mg3 well and its regression pin moved
+  **-89.4 -> -90.2** kcal/mol. Tolerance unchanged at 5.0. Same kind of move as the Sep 19 one
+  (-87.0 -> -89.4 when `mg` became the default).
+- `cli_simplemd_20_gfnff_rev_h_budget` — the known failure flagged by package 10, out of scope.
+  Verified to fail **identically on `cur_pre`**, i.e. not touched by this flip.
+- `cli_simplemd_18_gfnff_rev_nve_vs_gfnff` — **FAILS at the new default; flagged, NOT
+  recalibrated.** See 12.4.
+
+## 12.4 `cli_simplemd_18`: what was measured and why nothing was changed
+
+The test fits the slope of Etot(t) over a 10 ps NVE run of a 12-H2 bath at 8000 K, at two time
+steps, and requires |slope_rev| <= max(1.5 x |slope_gfnff|, 2.5e-3 Eh/ps). Its dt = 0.125 arm now
+comes out at 2.95e-3.
+
+| arm | dt 0.25 | dt 0.125 |
+|---|---|---|
+| committed calibration (Sep 18, OLD MD clock) | 6.37e-4 / 38 rebuilds | 6.23e-4 / 52 rebuilds |
+| HEAD pre-flip, `mg` | 1.00e-3 / 70 | 1.85e-3 / 190 |
+| HEAD post-flip, `mg3` | 1.17e-3 / 74 | **2.95e-3 / 244** |
+
+Two separate effects, and they must not be conflated:
+
+1. **The calibration is stale for a reason that predates this flip.** Package 10's MD clock fix
+   changed what `-maxtime 10000` and `-md.time_step 0.125` mean, so the *same* `mg` arm now gives
+   70/190 rebuilds where the table records 38/52, and its dt = 0.125 slope sits at **0.74x of the
+   floor** where the file's own rule ("~4x the largest measured slope") asks for 0.25x. The test
+   only still passed pre-flip because of that 26 % of headroom.
+2. **`mg3` is nevertheless reproducibly more dissipative on this bath.** `-md.seed` does not
+   perturb this run (7 seeds give bit-identical trajectories, rebuild counts and slopes), so the
+   replicates were made package-11 style, with a 1e-5 A displacement, **paired** across arms:
+
+   | arm | n | \|slope\| median | min | max | rebuilds | above the 2.5e-3 floor |
+   |---|---:|---:|---:|---:|---|---:|
+   | mg, dt 0.125 | 8 | 1.902e-3 | 1.854e-3 | 1.986e-3 | 190-204 | **0/8** |
+   | mg3, dt 0.125 | 8 | 3.078e-3 | 2.946e-3 | 3.235e-3 | 244-256 | **8/8** |
+   | mg, dt 0.25 | 5 | 8.607e-4 | 8.104e-4 | 1.003e-3 | 64-76 | 0/5 |
+   | mg3, dt 0.25 | 5 | 1.170e-3 | 1.126e-3 | 1.348e-3 | 74-82 | 0/5 |
+
+   Paired d(|slope|) at dt 0.125 is +1.04e-3 to +1.25e-3 with **8/8 positive and no overlap**
+   between the two distributions. This is a *cumulative NVE drift rate on one bath*, a different
+   statistic from the per-step |dEpot| spike tail package 11 settled (130 cells, 780
+   trajectories/arm/dt, no distinguishable difference). It neither contradicts nor is contradicted
+   by package 11, and it is **not** a re-litigation of it.
+
+**Why no recalibration was applied.** Neither route the test's own history offers is available
+without a judgement call, so per the standing rule the guess was not made:
+
+- Re-deriving the floor by the documented rule (~4x the largest measured |slope_rev|) from the mg3
+  numbers gives **~1.2e-2 Eh/ps** — the "gates almost nothing" outcome the file's own Sep 18 note
+  warns against.
+- Moving the operating point does not work. A scan of 5000-16000 K (both dt, `cur_post`) finds no
+  temperature where the event count returns to the calibrated band: **<= 5100 K gives 0 rebuilds**
+  (MIN_REBUILDS would fail), **5200-5400 K is a knife edge** (6 / 2758 / 164 rebuilds at dt 0.25
+  over 200 K), **6000-12000 K falls smoothly** from 108/376 to 46/138 rebuilds with slopes
+  1.95e-3/5.58e-3 down to 5.70e-4/1.28e-3, and at **13000 K the intramolecular break/re-form
+  channel opens** and it jumps back to 248/696 with slopes 5.18e-3/9.76e-3. The widest margin
+  inside the smooth stretch is 12000 K (4.4x / 2.0x below the floor) and it sits directly under
+  that cliff, so it is not a robust operating point in the sense the file demands.
+
+The measurement is recorded in the test's own header (a comment block; no threshold, temperature
+or count was touched) so it survives a context clear. **Operator decision pending**, same status
+as `cli_simplemd_20`.
+
+## 12.5 An unrelated, pre-existing observation
+
+`-gfnff.rev_well_form` reaches `-sp` and `-md` (verified: `cur_post` with an explicit `mg`
+reproduces `cur_pre`'s default-`mg` MD trajectory exactly — 70/190 rebuilds, slopes 1.0033e-3 /
+1.8538e-3), but **it does not reach `-opt`**: all four forms give bit-identical optimised
+geometries within one binary, while `cur_pre` and `cur_post` differ (c2h6 C-C 1.5193140 vs
+1.5231500 A), i.e. the `-opt` path is decided by the registry default alone. This is why package
+9's own per-arm `ob_*.json` files could only have been produced with per-arm defaults, and it is
+how the 0.0044 A row above is valid (it is the new *default*). Not investigated further, not in
+scope, no fix attempted — recorded because the next agent measuring an equilibrium geometry per
+arm will otherwise get four identical numbers and not know why.

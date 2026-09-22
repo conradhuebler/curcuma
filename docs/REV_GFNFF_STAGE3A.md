@@ -14,14 +14,14 @@ three parts are on by default since Sep 19, 2026:
 | 3a(ii) | which share formula | `-gfnff.rev_share_form` | **`conserving`** (was `delivered`) |
 | 3a(ii) | a dative donor may grow a budget | `-gfnff.rev_share_donor_rule` | **on** (new) |
 | 3a(ii) | hydrogen keeps one valence | `-gfnff.rev_budget_fix_h` | on — but a **no-op** under `conserving` |
-| 3a(iii) | the SHAPE of the well | `-gfnff.rev_well_form` | **`mg`** (was `gauss`) |
+| 3a(iii) | the SHAPE of the well | `-gfnff.rev_well_form` | **`mg3`** (was `mg`, before that `gauss`) |
 
-**Absolute energies moved with the `mg` flip and relative ones did not.** An MG well carries its
-own fitted depth `D = s |k_b|`, so `revgfnff` is now further from plain `gfnff` in absolute terms
-— caffeine -4.546943898047 against `gauss` -4.673521653477 and `gfnff` -4.672737068614, and
--133.6 kcal/mol on the acetic-acid dimer of `cli_simplemd_19` against -0.56 before. The pooled
-167-reaction conformer/S66 guard moves only 1.0341 -> 1.0439 kcal/mol MAD. Do not compare an
-absolute `revgfnff` energy with an absolute `gfnff` one.
+**Absolute energies moved with the well-form flips and relative ones did not.** An MG well carries
+its own fitted depth `D = s |k_b|`, so `revgfnff` is further from plain `gfnff` in absolute terms
+— caffeine **-4.789915106585** under the current `mg3` default, -4.546943898047 under `mg`,
+against `gauss` -4.673521653477 and `gfnff` -4.672737068614. The pooled 167-reaction conformer/S66
+guard moves only 1.0341 (`gauss`) -> 1.0439 (`mg`) -> 1.0547 (`mg3`) kcal/mol MAD. Do not compare
+an absolute `revgfnff` energy with an absolute `gfnff` one.
 
 ---
 
@@ -156,7 +156,11 @@ nor the donor rule grants them a full budget.
 
 ---
 
-## 2. The bond-well form (`-gfnff.rev_well_form`, DEFAULT `mg` since Sep 19, 2026)
+## 2. The bond-well form (`-gfnff.rev_well_form`, DEFAULT `mg3` since Sep 22, 2026)
+
+> The default was `gauss` until Sep 19, 2026, `mg` from Sep 19 to Sep 22, and is **`mg3`** since.
+> This section describes the `gauss` -> `mg` step (it is the one that introduced the MG well);
+> section 2.3 describes `mg2`/`mg3` and the flip to `mg3`.
 
 The delivered well is `k_b exp(-alpha (r - r0)^2)` times the reactive term weight. Against the
 class-A r2SCAN-3c bond scans its break-side RMS is **19.2 kcal/mol** (median over 32 bond types):
@@ -347,10 +351,11 @@ clock and nothing else.
 
 ---
 
-## 2.3 Free curvature, r0 re-solve and the bond-order dimension (`mg2` / `mg3`, OPT-IN, Sep 20, 2026)
+## 2.3 Free curvature, r0 re-solve and the bond-order dimension (`mg3` is the DEFAULT since Sep 22, 2026)
 
-Stage 3a(iii) step 2 and stage 3b, both **opt-in and both flipping no default**. Same MG well, but
-`x = r - (r0_model + dr0)` and four parameters per key instead of two:
+Stage 3a(iii) step 2 and stage 3b. Delivered opt-in on Sep 20, 2026; **`mg3` became the default on
+Sep 22, 2026** (operator decision, `test_cases/revgfnff/_log/WORK_STATUS.md` package 12).
+Same MG well, but `x = r - (r0_model + dr0)` and four parameters per key instead of two:
 
     s    = D / |k_b|                   depth scale      (fitted)
     beta = the MG tail                                  (fitted)
@@ -430,6 +435,55 @@ response (largest step over d(order) = 0.05 is 0.7930 kcal/mol against a linear 
 Every number: `test_cases/revgfnff/_log/WORK_STATUS.md` packages 9a / 9b, including the rejected
 r0-solve variant and the `dr0 = 0` variant (guard 1.0508/1.0490, but the relaxed bond lengths stay
 0.020 A from the reference).
+
+### 2.3.1 The default flip to `mg3` (Sep 22, 2026) and what the alternatives are for
+
+The operator made `mg3` the default on the package-9 accuracy rows, which are time-step
+independent, once package 11 had removed the smoothness argument from both sides: over **11 700
+paired-replicate react-MD trajectories (780 per arm and per true time step)** neither `mg2` nor
+`mg3` is distinguishable from `mg` on the per-step |dEpot| tail at any time step, and the single
+trajectory that had been read as "mg3's tail is clearly worse" is a singleton (same cell and arm,
+six replicates: 256.8 / 43.4 / 35.8 / 49.9 / 44.7 / 38.5 kJ). What remains is the package-9
+accuracy/guard trade, restated for the flip that was actually made, `mg` -> `mg3`:
+
+| row | `mg` (old default) | `mg3` (new default) |
+|---|---:|---:|
+| class-A harness rms, median | 22.15 | **13.22** |
+| class-A dev D_e, median [kcal/mol] | -14.32 | **-6.86** |
+| median \|b_model - b_r2SCAN-3c\| over 32 class-A bonds [A] | 0.0246 | **0.0044** |
+| class D dE_MAD / grad_RMS (20 systems, mean) | 5.152 / 14.428 | **4.555 / 11.313** |
+| rkt06 path rms (conserving / delivered) | 2.3788 / 2.3447 | **2.2665 / 2.2599** |
+| guard, pooled MAD over 167 conformer/S66 reactions | **1.0439** | 1.0547 |
+| max equilibrium bond-length shift vs `gauss` (4 molecules) | **0.0063 A** | 0.0212 A |
+
+The guard is the one row that gets worse, by +0.011 kcal/mol on a 1.04 kcal/mol MAD; the
+equilibrium shift is larger but moves **towards** the reference (the row above it). Every
+alternative stays available:
+
+- **`mg`** — the Sep 19 - Sep 22 default, the two-parameter MG well with the curvature and the
+  minimum pinned to the delivered Gaussian's. Keep it to reproduce anything measured in that
+  window, or when the +0.011 kcal/mol guard cost matters more than the class-A/class-D gain.
+- **`mg2`** — the same four-parameter family as `mg3` but keyed on the element pair only, without
+  the bond-order dimension. It costs the same guard (1.0543) and is equal or worse than `mg3` on
+  every package-9 row, so it is not preferred; it exists to separate "free curvature + r0" from
+  "bond order" when attributing a change.
+- **`erfmorse`** — the erf-Morse alternative of the same curvature-pinned family as `mg`;
+  indistinguishable from `mg` on the data (fitted rms differs by at most 0.85 over 32 curves) but
+  more expensive (a per-bond bisection for `u` instead of a closed form). Kept as the independent
+  check that the MG functional form is not itself doing the work.
+- **`gauss`** — the delivered GFN-FF Gaussian, i.e. the state before stage 3a(iii). It has the
+  best guard (1.0341) and no tail at all on the break side (class-A median rms 24.68). Use it to
+  reproduce pre-Sep-19 behaviour or to attribute anything to the well form as a whole.
+
+**Open against this default** (`test_cases/revgfnff/_log/WORK_STATUS.md` package 12):
+`cli_simplemd_18_gfnff_rev_nve_vs_gfnff` fails on its dt = 0.125 arm at the `mg3` default
+(|slope| 2.95e-3 against a 2.5e-3 floor). Two things are mixed there: its committed calibration
+predates package 10's MD clock fix and the pre-flip `mg` arm already sat at 0.74x of that floor,
+AND `mg3` is reproducibly more dissipative on that particular bath (8 paired replicates, mg
+1.854-1.986e-3 vs mg3 2.946-3.235e-3, 8/8 positive, no overlap). That is a cumulative NVE drift
+rate on one 12-H2 bath, a different statistic from package 11's per-step spike tail; it neither
+contradicts nor is contradicted by it. No threshold was changed — the test carries the
+measurement in its header and awaits an operator decision.
 
 ---
 
