@@ -59,6 +59,20 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 
 **Not yet decided**: merge to `master`, or keep developing on `reactff2-llm`.
 
+**mg3 is now the `rev_well_form` default (package 12, 2026-09-22).** Orchestrator-independently
+verified: caffeine revgfnff **-4.78991511** / gfnff -4.67273707 Eh (matches package 9's `mg3`
+exactly, `gfnff` unchanged), `ctest -R "gfnff|sqm_val|react|cli_simplemd_|cli_gfnff_"` gives
+**111/113**, the same two failures the agent named. **`cli_simplemd_18`'s new failure is a real,
+independently reproduced effect, not a stale calibration**: on the test's own 12-H2/8000K/dt=0.125fs
+bath, two fresh 1e-5 A perturbed replicates give `mg` slope 1.79e-3 / 1.83e-3 Eh/ps and `mg3` slope
+**3.00e-3 / 3.14e-3** — squarely inside the agent's reported ranges (1.854-1.986e-3 / 2.946-3.235e-3),
+both above the 2.5e-3 floor. **mg3 is genuinely ~1.6-1.7x more dissipative than mg on this specific
+bath; this is not a re-litigation of package 11's per-step tail (a different statistic, cumulative
+NVE drift vs single-step spikes) and not something to explain away.** Two tests now await an
+operator decision: `cli_simplemd_18` (recalibrate the floor for mg3, or treat the extra dissipation
+as a real cost to weigh, or something else — the agent found no robust re-derived floor, see
+`WORK_STATUS.md` package 12) and `cli_simplemd_20` (flagged since package 10, separate issue).
+
 ## Live agents
 
 **2026-09-22: `package-12` DONE — `-gfnff.rev_well_form mg3` is the DEFAULT.** No agent running.
