@@ -250,6 +250,20 @@ public:
     void updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,
                       const std::vector<int>& atom_types);
 
+    /**
+     * @brief Re-upload the bonded/non-bonded repulsion SoA after a periodic rebuild.
+     *
+     * Claude Generated (Sep 2026): counterpart to updateHBonds()/updateXBonds() for the
+     * repulsion pair lists (see GFNFF::updateNonbondedRepulsionIfNeeded()). RepulsionSoA::n
+     * is set from the passed vector's size on every call, so this is resize-aware in both
+     * directions (growing or shrinking pair count) without any extra bookkeeping — the
+     * underlying CudaBuffer reallocates only when the new count exceeds its current
+     * capacity, and the SoA's own `n` (used for every kernel launch bound) always reflects
+     * the just-uploaded count.
+     */
+    void updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
+                          const std::vector<GFNFFRepulsion>& nonbonded_reps);
+
     /// Get last uploaded HBond list (for CPU vs GPU comparison debugging)
     const std::vector<GFNFFHydrogenBond>& getLastHBonds() const { return m_last_hbonds; }
 

@@ -326,6 +326,20 @@ public:
     void updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds);
     void updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds);
 
+    /**
+     * @brief Replace the bonded/non-bonded repulsion pair lists and re-partition.
+     *
+     * Claude Generated (Sep 2026): the non-bonded repulsion list is built once from a
+     * hard 20 Bohr distance cutoff (GFNFF::generateRepulsionPairsNative()) and, unlike
+     * HB/XB, was never refreshed during MD — a pair that starts beyond the cutoff and
+     * diffuses inside it is never added, so it can pass through the geometric wall with
+     * zero repulsive force (see GFNFF::updateNonbondedRepulsionIfNeeded()). Mirrors
+     * updateHBonds()/updateXBonds(): cheap vector swap + range re-partition, no other
+     * workspace state touched.
+     */
+    void updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
+                          const std::vector<GFNFFRepulsion>& nonbonded_reps);
+
     // Access master interaction list sizes (for diagnostics)
     int bondCount() const { return static_cast<int>(m_bonds.size()); }
     int dispersionPairCount() const { return static_cast<int>(m_dispersions.size() + m_d4_dispersions.size()); }

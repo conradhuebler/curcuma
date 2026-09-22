@@ -1834,6 +1834,52 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
     }
 }
 
+// ---------------------------------------------------------------------------
+// updateNonbondedRepulsionIfNeeded — periodic repulsion pair-list refresh
+// Claude Generated (Sep 2026): see the declaration in gfnff.h for the bug this fixes.
+// ---------------------------------------------------------------------------
+
+void GFNFF::updateNonbondedRepulsionIfNeeded(FFWorkspace* extra_ws)
+{
+    const int rebuild_every = std::max(1, m_parameters.value("nonbonded_rebuild_every", 1));
+    const bool do_rebuild = (m_nb_rep_update_calls % rebuild_every) == 0;
+    ++m_nb_rep_update_calls;
+    if (!do_rebuild)
+        return;
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    int old_bonded_count = static_cast<int>(m_last_bonded_reps.size());
+    int old_nonbonded_count = static_cast<int>(m_last_nonbonded_reps.size());
+
+    // Side-effect-free: reads the cached bond list + topology, returns fresh vectors.
+    // Deliberately NOT generateGFNFFParameterSet() (see the doxygen comment on the
+    // declaration) — that function must not be called a third time per its own
+    // "heap corruption" warning at its FFWorkspace-construction call site, and it would
+    // regenerate every term (bonds/angles/torsions/...), not just the two we need.
+    auto [bonded_rep, nonbonded_rep] = generateRepulsionPairsNative();
+
+    if (m_workspace)
+        m_workspace->updateRepulsion(bonded_rep, nonbonded_rep);
+    if (extra_ws)
+        extra_ws->updateRepulsion(bonded_rep, nonbonded_rep);
+
+    m_last_bonded_reps = std::move(bonded_rep);
+    m_last_nonbonded_reps = std::move(nonbonded_rep);
+    m_nb_rep_updated = true;
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::high_resolution_clock::now() - start_time);
+        CurcumaLogger::info("GFNFF: non-bonded repulsion pair list rebuilt");
+        CurcumaLogger::param("bonded repulsion pairs",
+            fmt::format("{} → {}", old_bonded_count, m_last_bonded_reps.size()));
+        CurcumaLogger::param("non-bonded repulsion pairs",
+            fmt::format("{} → {}", old_nonbonded_count, m_last_nonbonded_reps.size()));
+        CurcumaLogger::param("rebuild time", fmt::format("{:.3f} ms", duration.count() / 1000.0));
+    }
+}
+
 bool GFNFF::detectReactiveBondChanges()
 {
     const std::set<std::pair<int, int>> current(m_react_bonds.begin(), m_react_bonds.end());
@@ -2269,6 +2315,11 @@ double GFNFF::Calculation(bool gradient)
         t_hbxb_update = std::chrono::duration<double, std::milli>(
             std::chrono::high_resolution_clock::now() - t0).count();
     }
+
+    // Periodic non-bonded repulsion pair-list refresh (Claude Generated, Sep 2026): the
+    // list is otherwise built once from a hard 20 Bohr cutoff and never revisited — see
+    // updateNonbondedRepulsionIfNeeded() for the bug this closes.
+    updateNonbondedRepulsionIfNeeded(nullptr);
 
     // Claude Generated (Feb 21, 2026): Enable per-component gradient storage for invariance diagnosis
     // Apr 2026: enabled unconditionally when gradient is requested so the NaN trap below

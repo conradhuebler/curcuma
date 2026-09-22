@@ -1,6 +1,6 @@
 /*
  * <GFN-FF Implementation for Curcuma>
- * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -295,6 +295,7 @@ PARAM(hb_thr1_bohr2, Double, 0.0, "Task 11: direct override of hbthr1, the A-B d
 PARAM(hb_thr2_bohr2, Double, 0.0, "Task 11: direct override of hbthr2, the A-H-B sum-of-squares cutoff for nhb1 detection (Bohr^2). 0 = derive from hb_accuracy.", "Performance", {})
 PARAM(hb_update_rmsd_bohr, Double, 0.3, "Task 11: per-atom RMSD (Bohr) that triggers an HB/XB list rebuild. 0.3 reproduces the gfnff reference (gfnff_ini2.f90:717). Smaller = rebuild more often = less near-threshold staleness in MD but slower.", "Performance", {})
 PARAM(hb_update_force_every, Int, 0, "Task 11: force an HB/XB list rebuild every N gradient steps (0 = RMSD-triggered only). Use for continuous MD where near-threshold pairs must be re-classified promptly.", "Performance", {})
+PARAM(nonbonded_rebuild_every, Int, 1, "The non-bonded repulsion pair list is built from a hard 20 Bohr distance cutoff; a pair that starts beyond it and diffuses closer during MD was never re-evaluated (fixed Sep 2026 - see GFNFF::updateNonbondedRepulsionIfNeeded). This rebuilds it from the current geometry every N energy evaluations. 1 (default) = every step, unconditionally correct - no pair can cross the cutoff undetected. Raise only after confirming the rebuild cost matters for your system size; a stale list can let two atoms pass through the repulsive wall with zero force, which is far more expensive to debug than the rebuild.", "Performance", {})
 PARAM(eeq_mixed_precision, Bool, false, "WP-B GPU only: factor the EEQ Coulomb matrix in FP32 then refine the solution with the FP64 residual, dsposv-style, for full FP64 accuracy at a fraction of the FP64-factor cost on FP64-weak GPUs. Opt-in on CUDA and ROCm (default OFF; enable per card after measuring). Applies to the factor-dominated few-fragment solve paths; the many-fragment general path stays FP64.", "Performance", {})
 PARAM(eeq_mixed_precision_iters, Int, 2, "WP-B GPU only: number of FP64-residual / FP32-correction refinement steps for eeq_mixed_precision. Minimum 1. Two steps reach FP64 accuracy on the validation set.", "Performance", {})
 PARAM(coulomb_r_cut, Double, 100.0, "GFN-FF electrostatics: per-pair distance cutoff in Bohr. The reference (Fortran goed_gfnff) has NO cutoff; 100 Bohr was chosen as an 'effective no-cutoff' because no pair of the validation sets reaches it. That assumption breaks for a system wider than ~53 Angstrom: the cutoff is HARD (no switching), so a pair crossing it changes the energy discontinuously - measured on a 500-water cluster, moving one oxygen by 0.0005 Angstrom jumped the energy by 5 kJ/mol and made the analytic gradient wrong by 0.96 Eh/Angstrom at that atom. In MD such crossings inject energy. Raise it (or set a very large value) for systems above ~50 Angstrom; the price on polymer_2x (7320 atoms) is a single point 3.6 -> 5.4 s. Below ~53 Angstrom nothing changes, so every reference set is unaffected. See docs/MD_LARGE_SYSTEMS.md.", "Performance", {})
@@ -879,6 +880,45 @@ public:
 
     /// True if updateHBXBIfNeeded() ran and changed lists since last call
     bool consumeHBXBUpdate() { bool r = m_hbxb_updated; m_hbxb_updated = false; return r; }
+
+    /**
+     * @brief Periodically rebuild the bonded/non-bonded repulsion pair lists from the
+     * current geometry.
+     *
+     * Claude Generated (Sep 2026): generateRepulsionPairsNative() builds the non-bonded
+     * repulsion list ONCE, at InitialiseMolecule() time, using a hard 20 Bohr distance
+     * cutoff (NB_REP_RCUT in gfnff_method.cpp) — a pair further apart than that at t=0
+     * contributes exactly zero repulsion for the rest of the run, even after the two
+     * atoms diffuse within bonding distance of each other. Unlike the HB/XB list
+     * (updateHBXBIfNeeded()) there was no periodic refresh at all, so an atom pair that
+     * starts outside the cutoff (common in a large, loosely packed system — see
+     * docs/MD_LARGE_SYSTEMS.md, the isolated-water-in-a-cavity case) can pass straight
+     * through the repulsive wall in MD, producing an unphysical near-zero contact
+     * distance and, eventually, an EEQ/energy blow-up.
+     *
+     * Fix (design 1 of the two considered — see the task write-up): re-derive the pair
+     * list from the CURRENT geometry every `nonbonded_rebuild_every` energy evaluations
+     * (default 1 = every step). generateRepulsionPairsNative() is side-effect-free (reads
+     * the already-cached bond list + topology, returns fresh vectors) and does not touch
+     * generateGFNFFParameterSet() (the "third call causes heap corruption" function noted
+     * at its call site) — it regenerates only the two repulsion vectors, nothing else.
+     * Rebuilding unconditionally at the default interval is simplest and provably correct
+     * (no pair can be missed for longer than one rebuild interval); a Verlet-style skin
+     * list (rebuild at a wider cutoff, trigger on max displacement) was the documented
+     * fallback if the per-call cost turned out to be prohibitive — measured cheap enough
+     * on the reference case that the fallback was not needed.
+     *
+     * @param ws External workspace to update as well (e.g. CPU residual workspace for the
+     *           GPU path, mirroring updateHBXBIfNeeded()'s `ws` parameter).
+     */
+    void updateNonbondedRepulsionIfNeeded(FFWorkspace* ws);
+
+    /// True if updateNonbondedRepulsionIfNeeded() rebuilt the lists since last check
+    bool consumeNonbondedRepulsionUpdate() { bool r = m_nb_rep_updated; m_nb_rep_updated = false; return r; }
+
+    /// Last rebuilt bonded/non-bonded repulsion pair lists (for GPU SoA re-upload)
+    const std::vector<GFNFFRepulsion>& getLastBondedRepulsions() const { return m_last_bonded_reps; }
+    const std::vector<GFNFFRepulsion>& getLastNonbondedRepulsions() const { return m_last_nonbonded_reps; }
 
     // Claude Generated (Apr 2026): Timing accessors for GPU orchestrator
     double getParamGenTimeMs() const { return m_param_gen_time_ms; }
@@ -2551,6 +2591,13 @@ private:
     bool m_hbxb_updated = false;  ///< True if updateHBXBIfNeeded() ran since last check
     bool m_hbxb_fresh = false;    ///< True if HB/XB lists were freshly built during init and geometry is unchanged
     long m_hbxb_update_calls = 0; ///< Task #11: call counter for hb_update_force_every periodic rebuild
+
+    // Claude Generated (Sep 2026): Last rebuilt repulsion pair lists from
+    // updateNonbondedRepulsionIfNeeded() — see gfnff_method.cpp and the declaration above.
+    std::vector<GFNFFRepulsion> m_last_bonded_reps;
+    std::vector<GFNFFRepulsion> m_last_nonbonded_reps;
+    bool m_nb_rep_updated = false;    ///< True if updateNonbondedRepulsionIfNeeded() rebuilt the lists since last check
+    long m_nb_rep_update_calls = 0;   ///< Call counter for nonbonded_rebuild_every periodic rebuild
 
     // Claude Generated (March 2026): State from last prepareCNAndEEQ() call
     Vector m_last_cn;    ///< Coordination numbers

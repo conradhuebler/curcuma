@@ -790,6 +790,19 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     }
     auto t_hbxb_end = std::chrono::high_resolution_clock::now();
 
+    // --- Step 2d: Periodic non-bonded repulsion pair-list refresh ---
+    // Claude Generated (Sep 2026): the repulsion pair list is otherwise built ONCE from a
+    // hard 20 Bohr cutoff at setMolecule() time and never revisited (identical bug on
+    // CPU and GPU, since both go through GFNFF::InitialiseMolecule() -> initGPUWorkspace()
+    // once). See GFNFF::updateNonbondedRepulsionIfNeeded() for the full rationale.
+    m_gfnff->updateNonbondedRepulsionIfNeeded(nullptr);
+    if (m_gfnff->consumeNonbondedRepulsionUpdate()) {
+        m_gpu_workspace->updateRepulsion(m_gfnff->getLastBondedRepulsions(),
+                                          m_gfnff->getLastNonbondedRepulsions());
+        // Repulsion SoA n-values changed → captured graph is stale (same reasoning as HB/XB).
+        m_gpu_workspace->invalidateGraph();
+    }
+
     // HB/XB pair list consistency: CPU vs GPU (verbosity >= 3)
     if (CurcumaLogger::get_verbosity() >= 3) {
         const auto& hb_cpu = m_gfnff->getLastHBonds();

@@ -1422,6 +1422,17 @@ void FFWorkspaceGPU::updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,
     m_last_xbonds = xbonds;
 }
 
+void FFWorkspaceGPU::updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
+                                       const std::vector<GFNFFRepulsion>& nonbonded_reps)
+{
+    // Claude Generated (Sep 2026): RepulsionSoA::upload() sets its own `n` (the count used
+    // by every kernel launch) from the passed vector on every call and grows the backing
+    // CudaBuffer only if the new count exceeds current capacity — safe for both a growing
+    // and a shrinking pair count, no separate resize path needed.
+    m_impl->bonded_rep.upload(bonded_reps, m_impl->stream);
+    m_impl->nonbonded_rep.upload(nonbonded_reps, m_impl->stream);
+}
+
 void FFWorkspaceGPU::setDispersionEnabled(bool v)  { m_dispersion_enabled = v; }
 void FFWorkspaceGPU::setHBondEnabled(bool v)        { m_hbond_enabled = v; }
 void FFWorkspaceGPU::setRepulsionEnabled(bool v)    { m_repulsion_enabled = v; }

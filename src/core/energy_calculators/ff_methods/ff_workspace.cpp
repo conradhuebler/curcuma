@@ -231,6 +231,19 @@ void FFWorkspace::updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds)
     }
 }
 
+void FFWorkspace::updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
+                                   const std::vector<GFNFFRepulsion>& nonbonded_reps)
+{
+    m_bonded_reps = bonded_reps;
+    m_nonbonded_reps = nonbonded_reps;
+    // Re-partition repulsion ranges only (same pattern as updateHBonds/updateXBonds)
+    int T = m_num_threads;
+    for (int t = 0; t < T; ++t) {
+        m_partitions[t].bonded_reps = linearRange(m_bonded_reps.size(), t, T);
+        m_partitions[t].nonbonded_reps = linearRange(m_nonbonded_reps.size(), t, T);
+    }
+}
+
 void FFWorkspace::setCoulombSelfEnergyParams(const Vector& chi_base, const Vector& gam,
                                                const Vector& alp, const Vector& cnf,
                                                const Vector& chi_static)
