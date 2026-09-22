@@ -289,6 +289,35 @@
   `ctest` beweist hier also **nicht**, dass `make` durchlaeuft — den Exit-Status separat pruefen
   (dieselbe Falle wie Known Issue #15).
 
+### GFN-FF: Dispersionspaarliste hat denselben Architekturfehler wie die Repulsion (2026-09)
+- **Status**: ⏳ OFFEN, bestaetigt, nicht behoben
+- Nach `ba0319dd` (Repulsions-Paarliste periodisch neu aufgebaut): die Dispersionspaarliste teilt
+  denselben Aufbau — einmalig bei `InitialiseMolecule()`, nie neu aufgebaut. Bestaetigt durch
+  den bestehenden `updateHBXBIfNeeded()`-Verbose-Log, der explizit `"Dispersion pairs" ... "(static)"`
+  ausgibt.
+- **Task**: analog zu `GFNFF::updateNonbondedRepulsionIfNeeded()` einen Rebuild-und-Re-Upload-Pfad
+  fuer die Dispersion bauen, eigene Kostenmessung (Dispersion hat andere Paarzahlen/Cutoffs als
+  Repulsion, die 3 ms/Schritt von dort uebertragen sich nicht automatisch).
+- **Regressionsmassstab bereits etabliert**: `scripts/refset_regression.py` gegen MOR41/GMTKN55,
+  muss wie bei der Repulsion bit-identisch bleiben.
+
+### GFN-FF/xTB: `shouldUpdateHBXB()`s RMSD-Formel ist bei grossen Systemen praktisch wirkungslos (2026-09)
+- **Status**: ⏳ OFFEN, quantifiziert, nicht behoben
+- **Messung**: `rmsd = sqrt(sum_sq_diff) / natoms` (`gfnff_method.cpp:2630-2658`) statt der
+  korrekten Pro-Atom-RMSD `sqrt(sum_sq_diff / natoms)` — es fehlt ein Faktor `sqrt(natoms)`.
+  Bei `natoms=7320` braucht es **~13.6 Angstroem** mittlere Verschiebung pro Atom, bis der
+  Standard-Schwellwert (`hb_update_rmsd_bohr` 0.3 Bohr, „pro Atom" gemeint) ueberhaupt feuert —
+  praktisch nie in einer realen MD.
+- **Herkunft**: treue Portierung der Fortran-Referenz (`gfnff_ini2.f90:717`), der Fehler steckt
+  vermutlich auch dort — nicht curcuma-eigen, aber unbehoben.
+- **Folge**: HB/XB-Paare werden bei grossen Systemen ebenso selten neu klassifiziert wie vorher
+  die Repulsion es war — nur ohne die katastrophale Konsequenz, weil HB/XB energetisch schwaecher
+  ist. Nicht als Ursache des polymer_2x-Absturzes bestaetigt, aber derselbe Fehlerklasse.
+- **Task**: korrekte Formel (`sqrt(sum_sq_diff / natoms)`), gegen MOR41/GMTKN55 pruefen — HB/XB-
+  Paarzahlen duerfen sich fuer kleine Systeme nicht aendern (dort ist der Faktor `sqrt(N)` klein
+  genug, dass der Unterschied meist unter der Schwelle bleibt, aber nicht garantiert unter allen
+  MOR41/GMTKN55-Strukturen).
+
 ### `gpu_strict` fehlt — stiller CPU-Rueckfall (2026-09)
 - **Status**: ⏳ PLANNED
 - **Problem**: `xtb_gpu_context.cu:3875` warnt nur, wenn eine Rechnung nicht auf die Karte

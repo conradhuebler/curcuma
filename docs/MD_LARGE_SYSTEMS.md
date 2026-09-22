@@ -3,6 +3,12 @@
 > 🤖 AI-generated, machine-tested. Re-measured Sep 21, 2026 at commit `4a72e194` on 36 cores /
 > 4x RTX A4500. Human production testing pending.
 
+> ⚠️ **The CSVR/300K rows in the table below predate a real bug fix (`ba0319dd`, Sep 22, 2026):
+> the non-bonded repulsion pair list was silently missing for atom pairs that started more than
+> 20 Bohr apart, letting the colliding water pass through with zero repulsive force. See the
+> "Correction" subsection further down for the mechanism. Those rows have not been re-measured
+> with the fix in place - do not treat them as current until they are.**
+
 ## Why this page exists, and what the problem actually was
 
 `docs/MULTI_GPU.md` recorded that a GFN-FF MD of `test_cases/molecules/larger/polymer_2x.xyz`
@@ -206,6 +212,32 @@ hydrogen by 1.1 A.
 frame and computing its internal GFN-FF energy gives 0.01 to 0.41 kcal/mol of excitation for the
 first 250 fs of the old run - *below* the 0.26 median of twenty other waters - and then 7084
 kcal/mol in the next frame.
+
+### Correction (Sep 2026): what actually triggers the window, fixed in `ba0319dd`
+
+Everything above this line was correct as far as it went - that water's H-O-H angle really does
+go through 3.6 deg, the intramolecular scan really is smooth, and the collapse really is
+localised to one frame. What it did not ask is why an intramolecular angle would ever reach a
+point costing 120 kcal/mol in the first place. The answer was a real bug, not thermal noise: the
+non-bonded repulsion pair list (`GFNFF::generateRepulsionPairsNative()`, hard 20 Bohr cutoff) is
+built once, at `t=0`, and was never rebuilt during MD - identically on CPU and GPU. A water
+oxygen and a hydrogen from a *different*, never-bonded water that start further apart than 20
+Bohr (exactly this structure's "isolated water crosses 9-13 A" scenario, still accurate) get
+**zero repulsion between them, permanently**, however close they get later. Measured directly on
+this system: the colliding pair passed to 0.4953 A with no deflection at all before the pair-list
+fix - not a rare geometry the force field handles badly, but a force field term that was silently
+absent. The "gradient rising to 261.8 Eh/A at 3.6 deg" above is what happens *inside* the water
+once something else has already pushed it there with no repulsive wall in the way; it is not what
+caused the push.
+
+Fixed in `ba0319dd`: `GFNFF::updateNonbondedRepulsionIfNeeded()` rebuilds the pair list from the
+current geometry every step by default (`nonbonded_rebuild_every`, new PARAM). Validated
+bit-identical against MOR41 (95/95) and GMTKN55 gfnff (2462/2462) - every reference structure is
+small enough that the fix is a complete no-op there, as it must be - and the specific colliding
+pair on this structure now bottoms out at a physically sane 1.72 A instead of 0.50 A. Whether the
+thermostatted rows in the table above still show the same water event, a different one, or none
+at all with the fix in place has **not been re-measured** since the fix landed; the table's
+numbers predate it and should not be read as still-current until they are re-run.
 
 ### A diverging run used to kill the process
 
