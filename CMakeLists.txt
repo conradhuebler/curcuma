@@ -1041,6 +1041,20 @@ if(USE_CUDA)
     # the compiler's own default and a later set(... CACHE) is ignored.
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
         set(CMAKE_CUDA_ARCHITECTURES "${_curcuma_cuda_archs}" CACHE STRING "CUDA architectures")
+    else()
+        # Claude Generated (Sep 2026): a CACHE STRING is only ever written once - if this
+        # build directory already has ANY value (from a prior -DCMAKE_CUDA_ARCHITECTURES=...,
+        # an inherited env var, or a cluster module/toolchain file), the branch above never
+        # runs again on any later `cmake`/`make` in the same directory, and the toolkit-aware
+        # default (which already includes 90 for H100/H200) is silently skipped forever - the
+        # likely cause of "no GPU speedup on H200" when the cached value predates that card.
+        # This is not a curcuma bug, just CMake CACHE semantics; make it visible instead of
+        # silent. Fix: wipe this build dir (or `cmake --fresh`) to let the default apply, or
+        # pass an explicit -DCMAKE_CUDA_ARCHITECTURES=<your target, e.g. 90 for H200>.
+        message(STATUS "CMAKE_CUDA_ARCHITECTURES already cached as '${CMAKE_CUDA_ARCHITECTURES}' "
+                       "(NOT curcuma's toolkit-aware default '${_curcuma_cuda_archs}') - "
+                       "if this build targets a different GPU, wipe this build directory "
+                       "or pass -DCMAKE_CUDA_ARCHITECTURES explicitly.")
     endif()
     enable_language(CUDA)
     set(CMAKE_CUDA_STANDARD 17)
