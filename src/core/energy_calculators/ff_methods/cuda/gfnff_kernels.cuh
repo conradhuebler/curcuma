@@ -518,8 +518,11 @@ __global__ GFNFF_KERNEL_BOUNDS void k_dc6dcn_per_pair(
     const double* __restrict__ dgw,            ///< [N * MAX_REF] weight derivatives
     const double* __restrict__ c6_flat,        ///< [MAX_ELEM² * MAX_REF²] C6 reference table
     double*       __restrict__ dc6dcn_ij,      ///< [n] output: dC6(i,j)/dCN(i)
-    double*       __restrict__ dc6dcn_ji       ///< [n] output: dC6(i,j)/dCN(j)
+    double*       __restrict__ dc6dcn_ji,      ///< [n] output: dC6(i,j)/dCN(j)
+    double*       __restrict__ c6_out          ///< [n] output: C6(i,j) at the current CN, or nullptr
     // refn read from d_refn_const (constant memory, uploaded via upload_refn_const)
+    // Claude Generated (Sep 2026): c6_out = sum gw_i gw_j C6ref — the per-step C6 refresh
+    // (GFNFF::refreshDispersionC6()); nullptr keeps the stored C6 (dispersion_c6_update=false).
 );
 
 // ============================================================================

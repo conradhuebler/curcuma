@@ -294,8 +294,10 @@ PARAM(hb_accuracy, Double, 0.1, "Task 11: HB-list accuracy driving the Fortran t
 PARAM(hb_thr1_bohr2, Double, 0.0, "Task 11: direct override of hbthr1, the A-B distance-squared cutoff for nhb2 detection (Bohr^2). 0 = derive from hb_accuracy.", "Performance", {})
 PARAM(hb_thr2_bohr2, Double, 0.0, "Task 11: direct override of hbthr2, the A-H-B sum-of-squares cutoff for nhb1 detection (Bohr^2). 0 = derive from hb_accuracy.", "Performance", {})
 PARAM(hb_update_rmsd_bohr, Double, 0.3, "Task 11: per-atom RMSD (Bohr) that triggers an HB/XB list rebuild. 0.3 reproduces the gfnff reference (gfnff_ini2.f90:717). Smaller = rebuild more often = less near-threshold staleness in MD but slower.", "Performance", {})
-PARAM(hb_update_force_every, Int, 0, "Task 11: force an HB/XB list rebuild every N gradient steps (0 = RMSD-triggered only). Use for continuous MD where near-threshold pairs must be re-classified promptly.", "Performance", {})
-PARAM(nonbonded_rebuild_every, Int, 1, "The non-bonded repulsion pair list is built from a hard 20 Bohr distance cutoff; a pair that starts beyond it and diffuses closer during MD was never re-evaluated (fixed Sep 2026 - see GFNFF::updateNonbondedRepulsionIfNeeded). This rebuilds it from the current geometry every N energy evaluations. 1 (default) = every step, unconditionally correct - no pair can cross the cutoff undetected. Raise only after confirming the rebuild cost matters for your system size; a stale list can let two atoms pass through the repulsive wall with zero force, which is far more expensive to debug than the rebuild.", "Performance", {})
+PARAM(hb_update_force_every, Int, 10, "Force an HB/XB list rebuild every N energy evaluations, in addition to the RMSD trigger (0 = RMSD-triggered only). Default 10 since Sep 2026: the RMSD trigger computes sqrt(sum d^2)/N (faithful to gfnff_ini2.f90:717, kept unchanged pending a reference check - see TODO.md), which is sqrt(N) smaller than a per-atom RMSD, so it practically never fires beyond a few dozen atoms (triose, 66 atoms, 200 fs at 800 K: per-atom RMSD 2.2 Bohr, trigger value 0.27, no rebuild; the stale list held 1602 H-bond triples against 1488 in a fresh build, 6e-6 Eh apart). One rebuild costs ~100 ms on polymer_2x (7320 atoms, 150k triples, ~20-50 triples change per 0.5 fs step), so every 10 steps is ~0.7 percent of an MD step. 1 = every step (exact classification, ~7 percent there).", "Performance", {})
+PARAM(nonbonded_rebuild_every, Int, 1, "The non-bonded repulsion pair list is built from a hard 20 Bohr distance cutoff; a pair that starts beyond it and diffuses closer during MD was never re-evaluated (fixed Sep 2026 - see GFNFF::updateNonbondedRepulsionIfNeeded). This rebuilds it from the current geometry every N energy evaluations. 1 (default) = every step, unconditionally correct - no pair can cross the cutoff undetected. The same schedule drives the explicit Coulomb list of eeq_distance_cutoff > 0 and the D4 list when dispersion_cutoff_bohr <= 50 leaves it without a skin. Raise only after confirming the rebuild cost matters for your system size; a stale list can let two atoms pass through the repulsive wall with zero force, which is far more expensive to debug than the rebuild.", "Performance", {})
+PARAM(nonbonded_skin_bohr, Double, 0.0, "Verlet skin (Bohr) for the non-bonded repulsion list and the explicit Coulomb list of eeq_distance_cutoff > 0. 0 (default) = rebuild on the nonbonded_rebuild_every step count. > 0 = build the lists that much wider than their kernel cutoff (20 Bohr repulsion, eeq_distance_cutoff Coulomb) and rebuild only once some atom moved more than skin/2 since the last build - exact, since no pair can then cross the kernel cutoff unseen (Verlet 1967). Energies are unchanged up to floating-point summation order (the longer list shifts the thread partition); only the rebuild schedule and the list length change. See docs/GFNFF_PAIR_LIST_REFRESH.md for measured costs.", "Performance", {})
+PARAM(dispersion_c6_update, Bool, true, "Recompute every stored D4 pair C6 from the current coordination numbers whenever the geometry changed (GFNFF::refreshDispersionC6). Before Sep 2026 C6 stayed at the setup geometry while the dispersion gradient already used dC6/dCN at the current CN, so MD and optimisation energies drifted away from a single point at the same geometry (triose: 0.18 kcal/mol after 200 fs at 800 K). Single points are unaffected. false restores the old frozen-C6 behaviour for comparisons.", "Algorithm", {})
 PARAM(eeq_mixed_precision, Bool, false, "WP-B GPU only: factor the EEQ Coulomb matrix in FP32 then refine the solution with the FP64 residual, dsposv-style, for full FP64 accuracy at a fraction of the FP64-factor cost on FP64-weak GPUs. Opt-in on CUDA and ROCm (default OFF; enable per card after measuring). Applies to the factor-dominated few-fragment solve paths; the many-fragment general path stays FP64.", "Performance", {})
 PARAM(eeq_mixed_precision_iters, Int, 2, "WP-B GPU only: number of FP64-residual / FP32-correction refinement steps for eeq_mixed_precision. Minimum 1. Two steps reach FP64 accuracy on the validation set.", "Performance", {})
 PARAM(coulomb_r_cut, Double, 100.0, "GFN-FF electrostatics: per-pair distance cutoff in Bohr. The reference (Fortran goed_gfnff) has NO cutoff; 100 Bohr was chosen as an 'effective no-cutoff' because no pair of the validation sets reaches it. That assumption breaks for a system wider than ~53 Angstrom: the cutoff is HARD (no switching), so a pair crossing it changes the energy discontinuously - measured on a 500-water cluster, moving one oxygen by 0.0005 Angstrom jumped the energy by 5 kJ/mol and made the analytic gradient wrong by 0.96 Eh/Angstrom at that atom. In MD such crossings inject energy. Raise it (or set a very large value) for systems above ~50 Angstrom; the price on polymer_2x (7320 atoms) is a single point 3.6 -> 5.4 s. Below ~53 Angstrom nothing changes, so every reference set is unaffected. See docs/MD_LARGE_SYSTEMS.md.", "Performance", {})
@@ -920,6 +922,101 @@ public:
     const std::vector<GFNFFRepulsion>& getLastBondedRepulsions() const { return m_last_bonded_reps; }
     const std::vector<GFNFFRepulsion>& getLastNonbondedRepulsions() const { return m_last_nonbonded_reps; }
 
+    /**
+     * @brief Rebuild the D4 dispersion pair list when an atom may have crossed into its
+     * evaluation cutoff.
+     *
+     * Claude Generated (Sep 2026): the D4 pair list (D4ParameterGenerator::
+     * GenerateDispersionPairsNative()) is built ONCE, at InitialiseMolecule() time, from every
+     * pair closer than R_build = 60 Bohr, and the kernel evaluates each stored pair up to
+     * r_cut = R_eval = 50 Bohr. A pair further apart than 60 Bohr at t=0 was absent for the
+     * rest of the run, even after its atoms diffused together — the same one-shot architecture
+     * as the repulsion list (updateNonbondedRepulsionIfNeeded()); the HB/XB update log even
+     * labelled the dispersion count "(static)".
+     *
+     * Unlike repulsion, this list already carries a skin of R_build - R_eval = 10 Bohr. A pair
+     * that was outside R_build at the last build can only come inside R_eval after the two
+     * atoms approached each other by the full skin, which needs at least one of them to move
+     * half of it (|dr_ij| <= |d_i| + |d_j| <= 2 max_k |d_k|). Rebuilding whenever the largest
+     * single-atom displacement since the last build exceeds skin/2 = 5 Bohr is therefore
+     * exact — the classic Verlet neighbour-list argument (L. Verlet, Phys. Rev. 159, 98
+     * (1967)) — and costs one O(N) displacement scan per step. A step-count trigger like
+     * the repulsion one was rejected on measurement: the build takes ~670 ms at 7320 atoms
+     * (9.5 M pairs), about half of an MD step, while the displacement trigger fires a few
+     * times per picosecond at most.
+     *
+     * The size-dependent RMSD formula of shouldUpdateHBXB() is deliberately NOT used (it is a
+     * port-fidelity question of its own, see TODO.md); the trigger here is a true per-atom
+     * maximum. When `dispersion_cutoff_bohr` shrinks the skin to zero (cutoff <= 50 Bohr)
+     * the list falls back to the `nonbonded_rebuild_every` step count.
+     *
+     * The generator is reused, NOT recreated: the workspace holds a pointer into its dC6/dCN
+     * matrix (setDC6DCNPtr()). Must run before prepareCNAndEEQ() so that the per-step Gaussian
+     * weights, dC6/dCN and C6 refresh of that step already see the new pair list.
+     *
+     * @param ws External workspace to update as well (mirrors updateHBXBIfNeeded()).
+     */
+    void updateDispersionPairsIfNeeded(FFWorkspace* ws);
+
+    /// True if updateDispersionPairsIfNeeded() rebuilt the list since the last check
+    bool consumeDispersionPairsUpdate() { bool r = m_disp_pairs_updated; m_disp_pairs_updated = false; return r; }
+
+    /**
+     * @brief Recompute every stored D4 pair's C6 from the current-step coordination numbers.
+     *
+     * Claude Generated (Sep 2026): C6_ij = sum_ab W_i^a(CN_i) W_j^b(CN_j) C6ref_ab depends on
+     * the geometry through the CN-Gaussian weights W (D4: Caldeweyher et al., J. Chem. Phys.
+     * 150, 154122 (2019); GFN-FF CN-only weighting, gfnff_gdisp0.f90:405). The pair list
+     * stored C6 at the SETUP geometry and nothing ever updated it, while the per-step
+     * dispersion gradient already used dC6/dCN at the CURRENT CN (updateCNValuesForGradient()
+     * -> dc6dcn). After any geometry change the energy and its own gradient therefore
+     * described two different functions. Measured (Sep 2026, triose, 66 atoms): after 200 fs of
+     * 800 K MD the MD dispersion energy was 2.83e-4 Eh (0.18 kcal/mol) away from a fresh
+     * single point at the same geometry, and a geometry optimisation converged 3.0e-4 Eh away
+     * from the single point at its own final geometry — in both cases the entire difference
+     * sat in the dispersion term. Single points are unaffected: there the setup geometry is
+     * the evaluation geometry.
+     *
+     * Reads the Gaussian weights / half-contraction the generator holds for this step, so it
+     * must run right after updateCNValuesForGradient(). It inherits that function's
+     * `d4_cn_cache_threshold` skip: when no CN changed by more than the threshold, the weights
+     * (and therefore C6 and dC6/dCN) are left at the previous step, consistently for both.
+     * Controlled by the `dispersion_c6_update` PARAM (default on).
+     */
+    void refreshDispersionC6();
+
+    /// Claude Generated (Sep 2026): true if the stored D4 C6 were computed at a different
+    /// geometry than the current one (and the C6 refresh is enabled). See refreshDispersionC6().
+    bool dispersionC6Stale() const;
+
+    /**
+     * @brief Periodically rebuild the explicit Coulomb pair list (distance-truncated EEQ only).
+     *
+     * Claude Generated (Sep 2026): with `eeq_distance_cutoff > 0` the Coulomb term is evaluated
+     * from an explicit pair list built ONCE (generateCoulombPairsNative(), cell list at the
+     * cutoff) whose kernel cutoff equals its build radius — zero skin, so any pair that moves
+     * inside the cutoff after setup is simply never evaluated. The default implicit path
+     * (`coulomb_implicit`, and the GPU `gpu_coulomb_implicit`) enumerates every pair every step
+     * and has no list to go stale, and the explicit list with no distance cutoff contains all
+     * N(N-1)/2 pairs, so neither needs this. Same schedule as the repulsion list
+     * (`nonbonded_rebuild_every`, default every step).
+     *
+     * @param ws External workspace to update as well (mirrors updateHBXBIfNeeded()).
+     */
+    void updateCoulombPairsIfNeeded(FFWorkspace* ws);
+
+    /// True if updateCoulombPairsIfNeeded() rebuilt the list since the last check
+    bool consumeCoulombPairsUpdate() { bool r = m_coul_pairs_updated; m_coul_pairs_updated = false; return r; }
+
+    /**
+     * @brief Largest single-atom displacement (3D norm, same unit as the inputs) between two
+     * geometries of equal shape; +infinity if the shapes differ.
+     *
+     * Claude Generated (Sep 2026): the size-independent quantity a neighbour-list skin is
+     * compared against (see updateDispersionPairsIfNeeded()).
+     */
+    static double maxAtomDisplacement(const Eigen::MatrixXd& a, const Eigen::MatrixXd& b);
+
     // Claude Generated (Apr 2026): Timing accessors for GPU orchestrator
     double getParamGenTimeMs() const { return m_param_gen_time_ms; }
     double getTopologyTimeMs() const { return m_topology_time_ms; }
@@ -1289,6 +1386,18 @@ private:
 
     /// Generate dispersion pair parameters as native GFNFFDispersion structs + ATM triples + method name
     std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> generateDispersionPairsNative() const;
+
+    /// Claude Generated (Sep 2026): user `dispersion_cutoff_bohr` (0 = none), top-level or gfnff scope
+    double dispersionCutoffBohr() const;
+    /// Claude Generated (Sep 2026): the WP-Disp distance filter on a D4 pair list (no-op without a cutoff)
+    void applyDispersionCutoff(std::vector<GFNFFDispersion>& dispersions, bool report) const;
+    /// Claude Generated (Sep 2026): build radius minus evaluation radius of the D4 pair list (Bohr)
+    double dispersionSkinBohr() const;
+    /// Claude Generated (Sep 2026): Verlet skin of the repulsion / explicit-Coulomb lists (nonbonded_skin_bohr)
+    double nonbondedSkinBohr() const;
+    /// Claude Generated (Sep 2026): true if the repulsion list is cell-list built (distance-filtered),
+    /// false if the O(N^2) build stores every pair (N < nb_cell_list_min_atoms) and so cannot go stale
+    bool repulsionListIsDistanceFiltered() const;
 
     /// Detect hydrogen bonds as native GFNFFHydrogenBond structs
     std::vector<GFNFFHydrogenBond> detectHydrogenBondsNative(const Vector& charges) const;
@@ -2598,6 +2707,20 @@ private:
     std::vector<GFNFFRepulsion> m_last_nonbonded_reps;
     bool m_nb_rep_updated = false;    ///< True if updateNonbondedRepulsionIfNeeded() rebuilt the lists since last check
     long m_nb_rep_update_calls = 0;   ///< Call counter for nonbonded_rebuild_every periodic rebuild
+
+    // Claude Generated (Sep 2026): D4 pair-list skin tracking (updateDispersionPairsIfNeeded()).
+    Eigen::MatrixXd m_disp_list_ref_geometry; ///< Geometry (Bohr) the current D4 pair list was built at
+    Eigen::MatrixXd m_disp_c6_geometry;        ///< Geometry (Bohr) the stored D4 C6 belong to (refreshDispersionC6())
+    bool m_disp_pairs_updated = false;         ///< True if the D4 list was rebuilt since last check
+    long m_disp_update_calls = 0;              ///< Call counter for the zero-skin step-count fallback
+    long m_disp_rebuild_count = 0;             ///< Number of displacement-triggered rebuilds (diagnostic)
+
+    // Claude Generated (Sep 2026): explicit Coulomb list refresh (updateCoulombPairsIfNeeded()).
+    bool m_coul_pairs_updated = false;         ///< True if the Coulomb list was rebuilt since last check
+    Eigen::MatrixXd m_coul_list_ref_geometry;  ///< Geometry (Bohr) the explicit Coulomb list was built at
+    Eigen::MatrixXd m_rep_list_ref_geometry;   ///< Geometry (Bohr) the repulsion list was built at (skin mode)
+    long m_rep_rebuild_count = 0;              ///< Number of repulsion-list rebuilds (diagnostic)
+    long m_coul_update_calls = 0;              ///< Call counter for nonbonded_rebuild_every
 
     // Claude Generated (March 2026): State from last prepareCNAndEEQ() call
     Vector m_last_cn;    ///< Coordination numbers

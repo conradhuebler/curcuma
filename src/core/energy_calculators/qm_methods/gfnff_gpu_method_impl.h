@@ -251,6 +251,12 @@ private:
      * Called once after initGPUWorkspace(). Pairs with rcov_sum < 2*max contribution.
      */
     void generateCNPairList(const Matrix& geom_bohr);
+
+    /// Claude Generated (Sep 2026): WP-A on-device D4 pair-list build from the host generator's
+    /// current CN + Gaussian weights (factored out of initGPUWorkspace() so the skin-triggered
+    /// rebuild of GFNFF::updateDispersionPairsIfNeeded() can repeat it).
+    void buildDispersionPairsOnDevice();
+    bool m_disp_pairs_on_device = false;  ///< WP-A mode active (gpu_disp_pairs_on_device)
 };
 
 // ---------------------------------------------------------------------------
@@ -501,6 +507,9 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         m_cn_pair_regen_every   = cfg_get_int("gpu_cn_pair_regen_every", 0);
         m_cn_pair_cutoff_factor = cfg_get_dbl("gpu_cn_pair_cutoff_factor", 2.5);
         m_gpu_workspace->setCNPairCutoffFactor(m_cn_pair_cutoff_factor);
+        // Claude Generated (Sep 2026): per-step D4 C6 refresh on the device, same switch as the
+        // CPU path (GFNFF::refreshDispersionC6()).
+        m_gpu_workspace->setDispersionC6Update(cfg_get_bool("dispersion_c6_update", true));
 
         // Deliverable 3 (Jun 2026): route high-fragment EEQ to the exact CPU PCG.
         // Backend default: 0 on CUDA (device Schur handles it), 16 on ROCm.
@@ -521,20 +530,8 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
             // proven host build stays the reference; the ROCm workspace additionally rebuilds
             // the gather CSR. See docs/GFNFF_PERFORMANCE_LEVERS.md.
             if (cfg_get_bool("gpu_disp_pairs_on_device", false)) {
-                const int Nd = static_cast<int>(m_atom_types.size());
-                // Host Gaussian weights (same as getChargeWeightedC6 uses) -> flat [N*MAX_REF].
-                const auto& hgw = d4->getGaussianWeights();
-                std::vector<double> gw_flat(static_cast<size_t>(Nd) * D4ParameterGenerator::MAX_REF, 0.0);
-                for (int a = 0; a < Nd && a < static_cast<int>(hgw.size()); ++a) {
-                    int nref = std::min<int>(static_cast<int>(hgw[a].size()), D4ParameterGenerator::MAX_REF);
-                    for (int r = 0; r < nref; ++r) gw_flat[static_cast<size_t>(a) * D4ParameterGenerator::MAX_REF + r] = hgw[a][r];
-                }
-                std::vector<double> sqrtzr4r2(118, 0.0);
-                for (int z = 1; z <= 118; ++z) sqrtzr4r2[z - 1] = d4->getSqrtZr4r2(z);
-                const Vector& tc = m_gfnff->getTopologyInfo().topology_charges;
-                std::vector<double> topo_q(tc.data(), tc.data() + tc.size());
-                // GFN-FF D4: a1=0.58, a2=4.80, 60 Bohr cutoff (matches the host generator).
-                m_gpu_workspace->generateDispersionPairListOnGPU(gw_flat, sqrtzr4r2, topo_q, 0.58, 4.80, 60.0);
+                m_disp_pairs_on_device = true;
+                buildDispersionPairsOnDevice();
                 if (CurcumaLogger::get_verbosity() >= 1)
                     CurcumaLogger::info("GFN-FF GPU: D4 dispersion pair list built on device (gpu_disp_pairs_on_device)");
             }
@@ -800,6 +797,27 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         m_gpu_workspace->updateRepulsion(m_gfnff->getLastBondedRepulsions(),
                                           m_gfnff->getLastNonbondedRepulsions());
         // Repulsion SoA n-values changed → captured graph is stale (same reasoning as HB/XB).
+        m_gpu_workspace->invalidateGraph();
+    }
+
+    // --- Step 2e: D4 dispersion pair-list skin check + explicit Coulomb list refresh ---
+    // Claude Generated (Sep 2026): same one-shot-list bug as the repulsion list above; see
+    // GFNFF::updateDispersionPairsIfNeeded() / updateCoulombPairsIfNeeded(). Must precede
+    // prepareAndLaunchChargeIndependent() and computeGaussianWeightsOnGPU(), which read the
+    // dispersion SoA (k_dc6dcn_per_pair, k_dispersion). Both lists change their SoA n ->
+    // the captured CUDA graph is stale and must be invalidated, exactly like HB/XB/repulsion.
+    m_gfnff->updateDispersionPairsIfNeeded(nullptr);
+    if (m_gfnff->consumeDispersionPairsUpdate()) {
+        if (m_disp_pairs_on_device) {
+            buildDispersionPairsOnDevice();   // host generator refreshed CN + weights; device builds pairs
+        } else if (m_gfnff->getWorkspace()) {
+            m_gpu_workspace->updateDispersion(m_gfnff->getWorkspace()->d4Dispersions());
+        }
+        m_gpu_workspace->invalidateGraph();
+    }
+    m_gfnff->updateCoulombPairsIfNeeded(nullptr);
+    if (m_gfnff->consumeCoulombPairsUpdate() && m_gfnff->getWorkspace()) {
+        m_gpu_workspace->updateCoulombPairs(m_gfnff->getWorkspace()->coulombPairs());
         m_gpu_workspace->invalidateGraph();
     }
 
@@ -1729,6 +1747,29 @@ json GFNFFGpuMethodImpl<Backend>::getStreamTimings() const
 // Generate CN pair list for GPU CN chain-rule kernel
 // Claude Generated (March 2026): Replaces sparse dcn matrices
 // ---------------------------------------------------------------------------
+
+template <class Backend>
+void GFNFFGpuMethodImpl<Backend>::buildDispersionPairsOnDevice()
+{
+    // WP-A (Jun 2026) device build, moved here unchanged from initGPUWorkspace() (Sep 2026).
+    D4ParameterGenerator* d4 = m_gfnff->getD4Generator();
+    if (!d4) return;
+    const int Nd = static_cast<int>(m_atom_types.size());
+    // Host Gaussian weights (same as getChargeWeightedC6 uses) -> flat [N*MAX_REF].
+    const auto& hgw = d4->getGaussianWeights();
+    std::vector<double> gw_flat(static_cast<size_t>(Nd) * D4ParameterGenerator::MAX_REF, 0.0);
+    for (int a = 0; a < Nd && a < static_cast<int>(hgw.size()); ++a) {
+        int nref = std::min<int>(static_cast<int>(hgw[a].size()), D4ParameterGenerator::MAX_REF);
+        for (int r = 0; r < nref; ++r) gw_flat[static_cast<size_t>(a) * D4ParameterGenerator::MAX_REF + r] = hgw[a][r];
+    }
+    std::vector<double> sqrtzr4r2(118, 0.0);
+    for (int z = 1; z <= 118; ++z) sqrtzr4r2[z - 1] = d4->getSqrtZr4r2(z);
+    const Vector& tc = m_gfnff->getTopologyInfo().topology_charges;
+    std::vector<double> topo_q(tc.data(), tc.data() + tc.size());
+    // GFN-FF D4: a1=0.58, a2=4.80, 60 Bohr cutoff (matches the host generator).
+    m_gpu_workspace->generateDispersionPairListOnGPU(gw_flat, sqrtzr4r2, topo_q, 0.58, 4.80,
+                                                     D4ParameterGenerator::PAIR_BUILD_CUTOFF_BOHR);
+}
 
 template <class Backend>
 void GFNFFGpuMethodImpl<Backend>::generateCNPairList(const Matrix& geom_bohr)

@@ -1,6 +1,6 @@
 /*
  * <GFN-FF Implementation for Curcuma>
- * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -1526,6 +1526,9 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             std::vector<double> cn_std(m_last_cn.data(), m_last_cn.data() + m_last_cn.size());
             m_d4_generator->updateCNValuesForGradient(cn_std, pool, total_threads,
                                                        /*skip_dc6dcn=*/false);
+            // Claude Generated (Sep 2026): the energy's C6 must follow the same weights the
+            // gradient's dC6/dCN was just built from — see refreshDispersionC6().
+            refreshDispersionC6();
             if (do_timing) {
                 t_d4_gw = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
             }
@@ -1616,6 +1619,19 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
                     CurcumaLogger::warn("GFN-FF: invalid EEQ charges (energy-only path, NaN/Inf or |q|>50), keeping previous m_charges");
                 }
             }
+        }
+
+        // Claude Generated (Sep 2026): an energy-only call at a NEW geometry (optimizer line
+        // search, energy finite-difference Hessian, ConfScan) needs the C6 of that geometry
+        // too, or its energy belongs to a different function than the gradient calls around
+        // it. Same weight update as the gradient path; skipped at the geometry the stored C6
+        // already belong to (a single point's first call), which keeps that bit-identical.
+        if (m_d4_generator && !gpu_only && !reuse_cn && dispersionC6Stale()) {
+            auto* pool = threadPool();
+            if (pool) pool->setActiveThreadCount(m_threads);
+            std::vector<double> cn_std(m_last_cn.data(), m_last_cn.data() + m_last_cn.size());
+            m_d4_generator->updateCNValuesForGradient(cn_std, pool, m_threads, /*skip_dc6dcn=*/false);
+            refreshDispersionC6();
         }
     }
 
@@ -1775,7 +1791,7 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
 {
     // Task #11 (Jun 2026): optional periodic forced rebuild for continuous MD where
     // near-threshold pairs must be re-classified faster than the RMSD trigger fires.
-    const int force_every = m_parameters.value("hb_update_force_every", 0);
+    const int force_every = m_parameters.value("hb_update_force_every", 10);
     const bool force_update = (force_every > 0) && (m_hbxb_update_calls % force_every == 0);
     ++m_hbxb_update_calls;
 
@@ -1813,6 +1829,19 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
         extra_ws->updateXBonds(new_xbonds_native);
     }
 
+    // Claude Generated (Sep 2026): the HB-modified X-H bond term (egbond_hb) reads the bond-HB
+    // cross reference (bond.nr_hb + the A-H-B entries of the H-bond CN). The GPU path rebuilt it
+    // after every re-detection (rebuildBondHBData() -> updateBondHBMetadata()); the CPU engine
+    // kept the setup-time one, so CPU and GPU diverged from the first re-detection on. Same
+    // cross-reference as generateGFNFFParameterSet(), applied to the CPU workspace(s) here.
+    if (m_parameters.value("hbond", true)) {
+        for (FFWorkspace* ws : { m_workspace.get(), extra_ws }) {
+            if (!ws) continue;
+            auto hb_update = rebuildBondHBData(new_hbonds_native, ws->bonds());
+            ws->updateBondHBData(hb_update.bond_nr_hb, std::move(hb_update.bond_hb_data));
+        }
+    }
+
     // Store re-detected lists for external consumers (e.g. GPU SoA re-upload)
     m_last_hbonds = std::move(new_hbonds_native);
     m_last_xbonds = std::move(new_xbonds_native);
@@ -1841,11 +1870,33 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
 
 void GFNFF::updateNonbondedRepulsionIfNeeded(FFWorkspace* extra_ws)
 {
-    const int rebuild_every = std::max(1, m_parameters.value("nonbonded_rebuild_every", 1));
-    const bool do_rebuild = (m_nb_rep_update_calls % rebuild_every) == 0;
+    // Claude Generated (Sep 2026, follow-up): below nb_cell_list_min_atoms the list is built by
+    // the O(N^2) double loop WITHOUT a distance filter (generateRepulsionPairsNative()), so it
+    // already holds every non-bonded pair and cannot go stale — a rebuild would reproduce it
+    // exactly. Skipping it is therefore exact, and it is not free: measured on complex
+    // (231 atoms, 400 MD steps) the every-step rebuild was 18% of the wall time.
+    if (!repulsionListIsDistanceFiltered())
+        return;
+
+    // Trigger: with a skin (nonbonded_skin_bohr > 0) the list is built at 20 + skin Bohr and
+    // only rebuilt once some atom moved more than skin/2 since the last build — exact by the
+    // same Verlet argument as the D4 list (see updateDispersionPairsIfNeeded()). Without a
+    // skin, the unconditional step count of the original fix.
+    const double skin = nonbondedSkinBohr();
+    bool do_rebuild = false;
+    double max_disp = 0.0;
+    if (skin > 0.0) {
+        max_disp = maxAtomDisplacement(m_geometry_bohr, m_rep_list_ref_geometry);
+        do_rebuild = (max_disp > 0.5 * skin);
+    } else {
+        const int rebuild_every = std::max(1, m_parameters.value("nonbonded_rebuild_every", 1));
+        do_rebuild = (m_nb_rep_update_calls % rebuild_every) == 0;
+    }
     ++m_nb_rep_update_calls;
     if (!do_rebuild)
         return;
+    m_rep_list_ref_geometry = m_geometry_bohr;
+    ++m_rep_rebuild_count;
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
@@ -1871,11 +1922,194 @@ void GFNFF::updateNonbondedRepulsionIfNeeded(FFWorkspace* extra_ws)
     if (CurcumaLogger::get_verbosity() >= 2) {
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::high_resolution_clock::now() - start_time);
-        CurcumaLogger::info("GFNFF: non-bonded repulsion pair list rebuilt");
+        CurcumaLogger::info(fmt::format("GFNFF: non-bonded repulsion pair list rebuilt (#{})", m_rep_rebuild_count));
+        if (skin > 0.0)
+            CurcumaLogger::param("max displacement since last build",
+                fmt::format("{:.3f} Bohr (half-skin {:.3f} Bohr)", max_disp, 0.5 * skin));
         CurcumaLogger::param("bonded repulsion pairs",
             fmt::format("{} → {}", old_bonded_count, m_last_bonded_reps.size()));
         CurcumaLogger::param("non-bonded repulsion pairs",
             fmt::format("{} → {}", old_nonbonded_count, m_last_nonbonded_reps.size()));
+        CurcumaLogger::param("rebuild time", fmt::format("{:.3f} ms", duration.count() / 1000.0));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// maxAtomDisplacement — the quantity a neighbour-list skin is compared against
+// Claude Generated (Sep 2026)
+// ---------------------------------------------------------------------------
+
+double GFNFF::maxAtomDisplacement(const Eigen::MatrixXd& a, const Eigen::MatrixXd& b)
+{
+    if (a.rows() == 0 || a.rows() != b.rows() || a.cols() != b.cols())
+        return std::numeric_limits<double>::infinity();
+    return (a - b).rowwise().norm().maxCoeff();
+}
+
+// ---------------------------------------------------------------------------
+// updateDispersionPairsIfNeeded — Verlet-skin refresh of the D4 pair list
+// Claude Generated (Sep 2026): see the declaration in gfnff.h for the bug and the skin argument.
+// ---------------------------------------------------------------------------
+
+void GFNFF::updateDispersionPairsIfNeeded(FFWorkspace* extra_ws)
+{
+    if (!m_d4_generator || !m_parameters.value("dispersion", true))
+        return;
+
+    // Trigger. With a positive skin the rule is exact (see gfnff.h); with no skin (a user
+    // dispersion_cutoff_bohr <= 50 Bohr makes build radius == evaluation radius) no
+    // displacement is small enough, so fall back to the repulsion list's step count.
+    const double skin = dispersionSkinBohr();
+    bool do_rebuild = false;
+    double max_disp = 0.0;
+    if (skin > 0.0) {
+        max_disp = maxAtomDisplacement(m_geometry_bohr, m_disp_list_ref_geometry);
+        do_rebuild = (max_disp > 0.5 * skin);
+    } else {
+        const int rebuild_every = std::max(1, m_parameters.value("nonbonded_rebuild_every", 1));
+        do_rebuild = (m_disp_update_calls % rebuild_every) == 0;
+    }
+    ++m_disp_update_calls;
+    if (!do_rebuild)
+        return;
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+    const int old_count = m_workspace ? static_cast<int>(m_workspace->d4Dispersions().size()) : 0;
+
+    // Same generator, same filter as the setup build (generateDispersionPairsNative()):
+    // C6 from the current CN, r4r2/R0 per element pair, zetac6 from the fixed Phase-1
+    // topology charges, r_cut stamped by the generator. In the WP-A GPU mode
+    // (m_skip_host_disp_pairs) the generator refreshes only CN + Gaussian weights and
+    // returns an empty list — the GPU wrapper then rebuilds the list on the device.
+    auto pairs = m_d4_generator->GenerateDispersionPairsNative(m_atoms, m_geometry_bohr);
+    applyDispersionCutoff(pairs, false);
+    const int new_count = static_cast<int>(pairs.size());
+
+    if (!m_skip_host_disp_pairs) {
+        if (extra_ws)
+            extra_ws->updateD4Dispersions(std::vector<GFNFFDispersion>(pairs));
+        if (m_workspace)
+            m_workspace->updateD4Dispersions(std::move(pairs));
+    }
+
+    m_disp_list_ref_geometry = m_geometry_bohr;
+    m_disp_c6_geometry = m_geometry_bohr;  // the generator just filled C6 at this geometry
+    m_disp_pairs_updated = true;
+    ++m_disp_rebuild_count;
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::high_resolution_clock::now() - start_time);
+        CurcumaLogger::info(fmt::format("GFNFF: D4 dispersion pair list rebuilt (#{})", m_disp_rebuild_count));
+        CurcumaLogger::param("max displacement since last build",
+            skin > 0.0 ? fmt::format("{:.3f} Bohr (half-skin {:.3f} Bohr)", max_disp, 0.5 * skin)
+                       : std::string("n/a (zero skin, step-count fallback)"));
+        CurcumaLogger::param("D4 dispersion pairs", fmt::format("{} -> {}", old_count, new_count));
+        CurcumaLogger::param("rebuild time", fmt::format("{:.3f} ms", duration.count() / 1000.0));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// refreshDispersionC6 — per-step C6 from the current CN (Claude Generated, Sep 2026)
+// ---------------------------------------------------------------------------
+
+bool GFNFF::dispersionC6Stale() const
+{
+    if (!m_workspace || !m_d4_generator || !m_parameters.value("dispersion_c6_update", true))
+        return false;
+    // Exact comparison on purpose: at the geometry the stored C6 were computed at (the setup
+    // geometry of a single point, or a repeated evaluation) nothing is recomputed, so those
+    // results stay bit-identical to the pre-fix code.
+    return !(m_disp_c6_geometry.rows() == m_geometry_bohr.rows()
+             && m_disp_c6_geometry.cols() == m_geometry_bohr.cols()
+             && m_disp_c6_geometry == m_geometry_bohr);
+}
+
+void GFNFF::refreshDispersionC6()
+{
+    if (!dispersionC6Stale())
+        return;
+
+    // C6_ij = sum_ab W_i^a W_j^b C6ref_ab from the Gaussian weights the generator holds for
+    // THIS step (updateCNValuesForGradient() just rebuilt them). getChargeWeightedC6() is the
+    // exact function that filled C6 at setup (same weights, same half-contraction path), so
+    // the only difference to a fresh single point is the CN feeding the weights: the setup
+    // build uses the full O(N^2) CN, the per-step path the neighbour-list CN (cn_cutoff_bohr),
+    // which agree to rounding.
+    m_disp_c6_geometry = m_geometry_bohr;
+    auto& pairs = m_workspace->d4DispersionsForC6Refresh();
+    const int P = static_cast<int>(pairs.size());
+    if (P == 0)
+        return;
+    const D4ParameterGenerator& gen = *m_d4_generator;
+    auto worker = [&](int t_id, int T) {
+        for (int p = t_id; p < P; p += T) {
+            GFNFFDispersion& d = pairs[p];
+            d.C6 = gen.getChargeWeightedC6(m_atoms[d.i], m_atoms[d.j], d.i, d.j);
+        }
+    };
+    const int T = std::max(1, std::min(m_threads, P));
+    auto* pool = threadPool();
+    if (T > 1 && pool && P > 4096) {
+        std::vector<std::future<void>> futures;
+        futures.reserve(T - 1);
+        for (int t = 1; t < T; ++t)
+            futures.push_back(pool->enqueue(worker, t, T));
+        worker(0, T);
+        for (auto& f : futures) f.get();
+    } else {
+        worker(0, 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// updateCoulombPairsIfNeeded — refresh of the distance-truncated explicit Coulomb list
+// Claude Generated (Sep 2026): see the declaration in gfnff.h.
+// ---------------------------------------------------------------------------
+
+void GFNFF::updateCoulombPairsIfNeeded(FFWorkspace* extra_ws)
+{
+    // Only the explicit list with a spatial EEQ cutoff can go stale. The implicit path has
+    // no list; the explicit list without a cutoff already holds all N(N-1)/2 pairs.
+    if (!m_workspace || m_parameters.value("eeq_distance_cutoff", 0.0) <= 0.0)
+        return;
+    if (!m_parameters.value("coulomb", true))
+        return;
+
+    // Same trigger as the repulsion list: Verlet skin when nonbonded_skin_bohr > 0,
+    // otherwise the unconditional nonbonded_rebuild_every step count.
+    const double skin = nonbondedSkinBohr();
+    bool do_rebuild = false;
+    if (skin > 0.0) {
+        do_rebuild = (maxAtomDisplacement(m_geometry_bohr, m_coul_list_ref_geometry) > 0.5 * skin);
+    } else {
+        const int rebuild_every = std::max(1, m_parameters.value("nonbonded_rebuild_every", 1));
+        do_rebuild = (m_coul_update_calls % rebuild_every) == 0;
+    }
+    ++m_coul_update_calls;
+    if (!do_rebuild)
+        return;
+    m_coul_list_ref_geometry = m_geometry_bohr;
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+    const int old_count = static_cast<int>(m_workspace->coulombPairs().size());
+
+    // Side-effect-free, like generateRepulsionPairsNative(): per-atom chi/gam/alpha/cnf come
+    // from the cached topology, the pair set from a cell list at eeq_distance_cutoff on the
+    // CURRENT geometry. The stored q_i/q_j are only a NaN fallback — the kernel uses the
+    // per-step Phase-2 charges.
+    auto pairs = generateCoulombPairsNative();
+    const int new_count = static_cast<int>(pairs.size());
+    if (extra_ws)
+        extra_ws->updateCoulombPairs(std::vector<GFNFFCoulomb>(pairs));
+    m_workspace->updateCoulombPairs(std::move(pairs));
+    m_coul_pairs_updated = true;
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::high_resolution_clock::now() - start_time);
+        CurcumaLogger::info("GFNFF: explicit Coulomb pair list rebuilt (eeq_distance_cutoff)");
+        CurcumaLogger::param("Coulomb pairs", fmt::format("{} -> {}", old_count, new_count));
         CurcumaLogger::param("rebuild time", fmt::format("{:.3f} ms", duration.count() / 1000.0));
     }
 }
@@ -2299,6 +2533,11 @@ double GFNFF::Calculation(bool gradient)
         m_eeq_solver->setExternalDistances(&m_shared_srab);
     }
 
+    // D4 pair-list skin check (Claude Generated, Sep 2026): must precede prepareCNAndEEQ(),
+    // whose Gaussian-weight / dC6dCN / C6 refresh then already runs over the new pair list.
+    // See updateDispersionPairsIfNeeded() for the bug this closes.
+    updateDispersionPairsIfNeeded(nullptr);
+
     // Phase A: CN + EEQ calculation (delegated to extracted helper)
     PrepTiming prep_timing{};  // zero-initialize so unused fields are 0.0
     {
@@ -2320,6 +2559,10 @@ double GFNFF::Calculation(bool gradient)
     // list is otherwise built once from a hard 20 Bohr cutoff and never revisited — see
     // updateNonbondedRepulsionIfNeeded() for the bug this closes.
     updateNonbondedRepulsionIfNeeded(nullptr);
+
+    // Same refresh for the explicit Coulomb list, which exists only with eeq_distance_cutoff > 0
+    // (Claude Generated, Sep 2026) — see updateCoulombPairsIfNeeded().
+    updateCoulombPairsIfNeeded(nullptr);
 
     // Claude Generated (Feb 21, 2026): Enable per-component gradient storage for invariance diagnosis
     // Apr 2026: enabled unconditionally when gradient is requested so the NaN trap below
@@ -3510,6 +3753,7 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     } else {
         params.coulombs = generateCoulombPairsNative();
     }
+    m_coul_list_ref_geometry = m_geometry_bohr;  // Claude Generated (Sep 2026): skin reference
     {
         // Claude Generated (Sep 2026): per-atom self-energy, independent of the
         // pair list above (fixes E=0 for isolated charged atoms — see
@@ -3526,6 +3770,7 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     // Phase 7: Repulsion (native — no JSON)
     t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     auto [bonded_rep, nonbonded_rep] = generateRepulsionPairsNative();
+    m_rep_list_ref_geometry = m_geometry_bohr;  // Claude Generated (Sep 2026): skin reference
     params.bonded_repulsions = std::move(bonded_rep);
     params.nonbonded_repulsions = std::move(nonbonded_rep);
     if (do_timing) t_repulsion = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
@@ -3537,6 +3782,11 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
         params.dispersions = std::move(disp_pairs);
         params.atm_triples = std::move(atm_triples);
         params.dispersion_method = disp_method;
+        // Claude Generated (Sep 2026): the geometry this pair list was built at — the
+        // reference of the skin trigger in updateDispersionPairsIfNeeded() — and the geometry
+        // its C6 belong to (refreshDispersionC6()).
+        m_disp_list_ref_geometry = m_geometry_bohr;
+        m_disp_c6_geometry = m_geometry_bohr;
     }
     if (do_timing) t_dispersion = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
 
@@ -10401,7 +10651,10 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
     const bool cutoff_active = (eeq_cut > 0.0);
     const double effective_r_cut = cutoff_active ? eeq_cut
                                                  : m_parameters.value("coulomb_r_cut", 100.0);
-    const double cutoff_sq = cutoff_active ? eeq_cut * eeq_cut : 0.0;
+    // Claude Generated (Sep 2026): build radius = cutoff + optional Verlet skin
+    // (nonbonded_skin_bohr, default 0); the kernel still cuts at effective_r_cut.
+    const double build_cut = cutoff_active ? eeq_cut + nonbondedSkinBohr() : 0.0;
+    const double cutoff_sq = cutoff_active ? build_cut * build_cut : 0.0;
 
     if (cutoff_active) {
         // Heuristic: typical neighbour density ~64 pairs per atom inside a finite cutoff.
@@ -10471,7 +10724,7 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
         if (nb_threshold == 0 || m_atomcount >= nb_threshold) {
             // O(N) cell-list path: only neighbours within eeq_distance_cutoff are emitted.
             SpatialCellList cell_list;
-            cell_list.build(m_geometry_bohr, eeq_cut);
+            cell_list.build(m_geometry_bohr, build_cut);
             cell_list.forEachPair([&](int i, int j, double /*r2*/) {
                 coulombs.push_back(fillPair(i, j));
             });
@@ -10674,10 +10927,13 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
         }
     };
 
-    const int nb_rep_cell_threshold = m_parameters.value("nb_cell_list_min_atoms", 800);
-    if (nb_rep_cell_threshold == 0 || m_atomcount >= nb_rep_cell_threshold) {
+    if (repulsionListIsDistanceFiltered()) {
+        // Claude Generated (Sep 2026): build radius = kernel cutoff + optional Verlet skin
+        // (nonbonded_skin_bohr, default 0). Pairs between 20 and 20+skin are stored but the
+        // kernel still skips them (r.r_cut stays NB_REP_RCUT); they are the reserve that lets
+        // updateNonbondedRepulsionIfNeeded() rebuild only after skin/2 of atomic motion.
         SpatialCellList rep_cells;
-        rep_cells.build(m_geometry_bohr, NB_REP_RCUT);
+        rep_cells.build(m_geometry_bohr, NB_REP_RCUT + nonbondedSkinBohr());
         rep_cells.forEachPair([&](int i, int j, double /*r2*/) { make_nb_rep(i, j); });
     } else {
         for (int i = 0; i < m_atomcount; ++i)
@@ -10720,6 +10976,15 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
         d4_input["d4_s9"] = 1.00;
         // Lever 3 Opt B: plumb the user-facing gfnff flag down to the generator.
         d4_input["d4_disp_half_contraction"] = m_parameters.value("disp_half_contraction", true);
+        // Claude Generated (Sep 2026): with the per-step C6 refresh (dispersion_c6_update) the
+        // Gaussian weights feed the ENERGY, not only dC6/dCN. The generator's CN-change cache
+        // (d4_cn_cache_threshold, default 0.01) then lets C6 lag the geometry and jump when it
+        // finally refreshes: measured on triose, an optimisation then stops 5.7e-6 Eh away from
+        // the single point at its own minimum (within the printed 1e-6 with the cache off), and the CPU trajectory
+        // departs from the GPU one at the first step (the GPU path never used the cache). So
+        // GFN-FF disables it unless the user set it explicitly (-d4param.d4_cn_cache_threshold).
+        if (m_parameters.value("dispersion_c6_update", true) && !d4_input.contains("d4_cn_cache_threshold"))
+            d4_input["d4_cn_cache_threshold"] = 0.0;
 
         ConfigManager d4_config("d4param", d4_input);
         m_d4_generator = std::make_unique<D4ParameterGenerator>(d4_config);
@@ -10736,31 +11001,9 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
         dispersions = m_d4_generator->GenerateDispersionPairsNative(m_atoms, m_geometry_bohr);
 
         // WP-Disp (Mai 2026): optional distance cutoff on D4 pair list.
-        // Read cutoff — top-level first (promotion loop), then nested fallback.
-        {
-            double disp_cut = m_parameters.value("dispersion_cutoff_bohr", 0.0);
-            if (disp_cut <= 0.0 && m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
-                disp_cut = m_parameters["gfnff"].value("dispersion_cutoff_bohr", 0.0);
-            if (disp_cut > 0.0) {
-                const double disp_cut_sq = disp_cut * disp_cut;
-                const size_t n_full = dispersions.size();
-                dispersions.erase(
-                    std::remove_if(dispersions.begin(), dispersions.end(),
-                        [&](const GFNFFDispersion& d) {
-                            Eigen::Vector3d ri = m_geometry_bohr.row(d.i);
-                            Eigen::Vector3d rj = m_geometry_bohr.row(d.j);
-                            return (ri - rj).squaredNorm() > disp_cut_sq;
-                        }),
-                    dispersions.end());
-                for (auto& d : dispersions)
-                    d.r_cut = std::min(d.r_cut, disp_cut);
-                if (CurcumaLogger::get_verbosity() >= 2) {
-                    CurcumaLogger::param("dispersion_cutoff_bohr",
-                        fmt::format("{:.1f} Bohr  ({} / {} pairs retained)",
-                            disp_cut, dispersions.size(), n_full));
-                }
-            }
-        }
+        // Sep 2026: moved into applyDispersionCutoff() so the MD pair-list rebuild
+        // (updateDispersionPairsIfNeeded()) applies the identical filter.
+        applyDispersionCutoff(dispersions, CurcumaLogger::get_verbosity() >= 2);
 
         // ATM triples: Generate natively from bonded topology (O(N·bonds), fast)
         double s9 = 1.0, atm_a1 = 0.58, atm_a2 = 4.80, atm_alp = 14.0;
@@ -10808,6 +11051,69 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
     (void)disp_start;
 
     return {std::move(dispersions), std::move(atm_triples), disp_method};
+}
+
+double GFNFF::dispersionCutoffBohr() const
+{
+    // WP-Disp (Mai 2026): top-level first (promotion loop), then the nested gfnff scope.
+    double disp_cut = m_parameters.value("dispersion_cutoff_bohr", 0.0);
+    if (disp_cut <= 0.0 && m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
+        disp_cut = m_parameters["gfnff"].value("dispersion_cutoff_bohr", 0.0);
+    return disp_cut;
+}
+
+void GFNFF::applyDispersionCutoff(std::vector<GFNFFDispersion>& dispersions, bool report) const
+{
+    // WP-Disp (Mai 2026) filter, unchanged; extracted Sep 2026 (Claude Generated) so that the
+    // setup build and the MD rebuild produce the same list.
+    const double disp_cut = dispersionCutoffBohr();
+    if (disp_cut <= 0.0)
+        return;
+    const double disp_cut_sq = disp_cut * disp_cut;
+    const size_t n_full = dispersions.size();
+    dispersions.erase(
+        std::remove_if(dispersions.begin(), dispersions.end(),
+            [&](const GFNFFDispersion& d) {
+                Eigen::Vector3d ri = m_geometry_bohr.row(d.i);
+                Eigen::Vector3d rj = m_geometry_bohr.row(d.j);
+                return (ri - rj).squaredNorm() > disp_cut_sq;
+            }),
+        dispersions.end());
+    for (auto& d : dispersions)
+        d.r_cut = std::min(d.r_cut, disp_cut);
+    if (report) {
+        CurcumaLogger::param("dispersion_cutoff_bohr",
+            fmt::format("{:.1f} Bohr  ({} / {} pairs retained)",
+                disp_cut, dispersions.size(), n_full));
+    }
+}
+
+double GFNFF::dispersionSkinBohr() const
+{
+    // Claude Generated (Sep 2026): skin = build radius - evaluation radius of the D4 list.
+    // Default 60 - 50 = 10 Bohr; an active dispersion_cutoff_bohr caps both radii.
+    double build = D4ParameterGenerator::PAIR_BUILD_CUTOFF_BOHR;
+    double eval  = D4ParameterGenerator::PAIR_EVAL_CUTOFF_BOHR;
+    const double disp_cut = dispersionCutoffBohr();
+    if (disp_cut > 0.0) {
+        build = std::min(build, disp_cut);
+        eval  = std::min(eval, disp_cut);
+    }
+    return std::max(0.0, build - eval);
+}
+
+double GFNFF::nonbondedSkinBohr() const
+{
+    // Claude Generated (Sep 2026): Verlet skin of the repulsion and explicit-Coulomb lists.
+    return std::max(0.0, m_parameters.value("nonbonded_skin_bohr", 0.0));
+}
+
+bool GFNFF::repulsionListIsDistanceFiltered() const
+{
+    // Claude Generated (Sep 2026): same gate generateRepulsionPairsNative() uses to choose the
+    // cell-list build (distance-filtered) over the O(N^2) build (every pair, no filter).
+    const int threshold = m_parameters.value("nb_cell_list_min_atoms", 800);
+    return threshold == 0 || m_atomcount >= threshold;
 }
 
 ConfigManager GFNFF::extractDispersionConfig(const std::string& method) const

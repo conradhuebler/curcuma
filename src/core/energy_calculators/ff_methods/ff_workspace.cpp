@@ -244,6 +244,34 @@ void FFWorkspace::updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps
     }
 }
 
+void FFWorkspace::updateD4Dispersions(std::vector<GFNFFDispersion>&& pairs)
+{
+    // Claude Generated (Sep 2026): same swap + re-partition pattern as updateRepulsion().
+    m_d4_dispersions = std::move(pairs);
+    int T = m_num_threads;
+    for (int t = 0; t < T; ++t)
+        m_partitions[t].d4_dispersions = linearRange(m_d4_dispersions.size(), t, T);
+}
+
+void FFWorkspace::updateCoulombPairs(std::vector<GFNFFCoulomb>&& pairs)
+{
+    // Claude Generated (Sep 2026): same swap + re-partition pattern as updateRepulsion().
+    // The per-atom self-energy parameters (m_coul_*) are topology-only and stay untouched.
+    m_coulombs = std::move(pairs);
+    int T = m_num_threads;
+    for (int t = 0; t < T; ++t)
+        m_partitions[t].coulombs = linearRange(m_coulombs.size(), t, T);
+}
+
+void FFWorkspace::updateBondHBData(const std::vector<int>& nr_hb, std::vector<BondHBEntry>&& data)
+{
+    // Claude Generated (Sep 2026): see the declaration. nr_hb is indexed like m_bonds.
+    const size_t nb = std::min(nr_hb.size(), m_bonds.size());
+    for (size_t b = 0; b < nb; ++b)
+        m_bonds[b].nr_hb = nr_hb[b];
+    m_bond_hb_data = std::move(data);
+}
+
 void FFWorkspace::setCoulombSelfEnergyParams(const Vector& chi_base, const Vector& gam,
                                                const Vector& alp, const Vector& cnf,
                                                const Vector& chi_static)

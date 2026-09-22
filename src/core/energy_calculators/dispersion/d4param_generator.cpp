@@ -2088,7 +2088,7 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     // (Curcuma-vs-XTB diff: +0.92969 Eh @ cutoff=60.0  →  +0.92993 Eh @ cutoff=38.73).
     // Fortran's dispthr appears to apply only to D3, not D4 — D4's effective cutoff is larger.
     // 60 Bohr stays as the empirical Curcuma D4 default.
-    constexpr double disp_cutoff_bohr = 60.0;
+    constexpr double disp_cutoff_bohr = PAIR_BUILD_CUTOFF_BOHR;  // 60.0 (header constant, Sep 2026)
     constexpr double disp_cutoff_sq = disp_cutoff_bohr * disp_cutoff_bohr;
 
     #pragma omp parallel
@@ -2137,7 +2137,7 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
                 // with 60 instead of 50 the worst GMTKN55 gfn2 deviation moves 0.01667 ->
                 // 0.01666 kcal/mol. The whole deviation is the THREE-body cutoff instead
                 // (-xtb.d4_atm_cutoff). Measured Sep 2026; Claude Generated.
-                d.r_cut = 50.0;
+                d.r_cut = PAIR_EVAL_CUTOFF_BOHR;  // 50.0 (header constant, Sep 2026)
                 d.zetac6 = zetac6;
                 // P1c (Apr 2026): Legacy D3 fields removed from GFNFFDispersion
 

@@ -290,7 +290,16 @@
   (dieselbe Falle wie Known Issue #15).
 
 ### GFN-FF: Dispersionspaarliste hat denselben Architekturfehler wie die Repulsion (2026-09)
-- **Status**: ⏳ OFFEN, bestaetigt, nicht behoben
+- **Status**: 🤖 BEHOBEN (uncommitted, zur Pruefung), siehe docs/GFNFF_PAIR_LIST_REFRESH.md. Offen: GPU-C6-Refresh nur in Gradientenaufrufen; Eintritt eines Paares von >60 Bohr nicht durch einen Test erzeugt.
+- **Beim Review gefunden, vom Fix NICHT erfasst**: die ATM-Dreikoerperterme des D4-Terms
+  (`t.C6_ij`/`t.C6_ik`/`t.C6_jk` auf jedem `ATMTriple`) teilen denselben Architekturfehler wie
+  der Zweikoerperterm — einmalig bei `generateDispersionPairsNative()` berechnet, nirgends im
+  Fix aktualisiert. Die Tripel-**Zugehoerigkeit** ist bindungsbasiert und korrekt unveraenderlich;
+  die **C6-Werte** darauf nicht. Gemessen an einem kleinen Molekuel (Koffein, GFN-FF `-sp`):
+  ATM-Term -7.5e-9 Eh gegen -1.8e-2 Eh Zweikoerperterm (~4e-7) — vermutlich meist vernachlaessigbar,
+  aber nicht allgemein geprueft (grosse, dicht gepackte Systeme koennten anders liegen). Nicht
+  weiterverfolgt angesichts der Groessenordnung und der Kosten einer erneuten vollen
+  MOR41/GMTKN55/ctest-Validierung.
 - Nach `ba0319dd` (Repulsions-Paarliste periodisch neu aufgebaut): die Dispersionspaarliste teilt
   denselben Aufbau — einmalig bei `InitialiseMolecule()`, nie neu aufgebaut. Bestaetigt durch
   den bestehenden `updateHBXBIfNeeded()`-Verbose-Log, der explizit `"Dispersion pairs" ... "(static)"`

@@ -340,6 +340,57 @@ public:
     void updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
                           const std::vector<GFNFFRepulsion>& nonbonded_reps);
 
+    /**
+     * @brief Replace the D4 dispersion pair list and re-partition.
+     *
+     * Claude Generated (Sep 2026): counterpart to updateRepulsion() for the D4 pair list
+     * (see GFNFF::updateDispersionPairsIfNeeded()). Takes the list by rvalue: at 7320 atoms
+     * it holds ~9.5 M pairs (~0.7 GB), so a copy per rebuild is not affordable.
+     */
+    void updateD4Dispersions(std::vector<GFNFFDispersion>&& pairs);
+
+    /// Current D4 pair list (read-only; GPU re-upload source after a rebuild)
+    const std::vector<GFNFFDispersion>& d4Dispersions() const { return m_d4_dispersions; }
+
+    /**
+     * @brief Mutable access to the D4 pair list, for the per-step C6 refresh only.
+     *
+     * Claude Generated (Sep 2026): GFNFF::refreshDispersionC6() rewrites each pair's C6 from
+     * the current-step Gaussian weights. The pair set itself must not be changed through this
+     * accessor (the partition ranges would go stale) — use updateD4Dispersions() for that.
+     */
+    std::vector<GFNFFDispersion>& d4DispersionsForC6Refresh() { return m_d4_dispersions; }
+
+    /**
+     * @brief Replace the explicit Coulomb pair list and re-partition.
+     *
+     * Claude Generated (Sep 2026): only used when an explicit, distance-truncated Coulomb list
+     * exists (eeq_distance_cutoff > 0, or coulomb_implicit=false). The implicit path enumerates
+     * every pair every step and has no list to go stale. See GFNFF::updateCoulombPairsIfNeeded().
+     */
+    void updateCoulombPairs(std::vector<GFNFFCoulomb>&& pairs);
+
+    /// Current explicit Coulomb pair list (read-only; GPU re-upload source)
+    const std::vector<GFNFFCoulomb>& coulombPairs() const { return m_coulombs; }
+
+    /// Master bond list (read-only; used to re-derive the bond-HB cross reference)
+    const std::vector<Bond>& bonds() const { return m_bonds; }
+
+    /**
+     * @brief Replace the bond-HB cross reference after an HB re-detection.
+     *
+     * Claude Generated (Sep 2026): the HB-modified bond term (egbond_hb, bond.nr_hb >= 1) and
+     * the H-bond coordination number (computeHBCoordinationNumbers) read m_bond_hb_data and
+     * bond.nr_hb. Both were filled once at setup and never refreshed on the CPU after
+     * updateHBXBIfNeeded() replaced the HB list — the GPU path already did this
+     * (GFNFF::rebuildBondHBData() -> updateBondHBMetadata()), so the two engines diverged
+     * after the first HB re-detection. Mirrors the GPU update.
+     *
+     * @param nr_hb  One entry per bond in m_bonds order (number of N/O acceptors of its A-H)
+     * @param data   The (A, H, B-atoms) entries for all bonds with nr_hb >= 1
+     */
+    void updateBondHBData(const std::vector<int>& nr_hb, std::vector<BondHBEntry>&& data);
+
     // Access master interaction list sizes (for diagnostics)
     int bondCount() const { return static_cast<int>(m_bonds.size()); }
     int dispersionPairCount() const { return static_cast<int>(m_dispersions.size() + m_d4_dispersions.size()); }

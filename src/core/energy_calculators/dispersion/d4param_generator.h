@@ -1,6 +1,6 @@
 /*
  * DFT-D4 Parameter Generator for Curcuma
- * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -147,6 +147,15 @@ public:
     // struct below — and external callers — can size against MAX_REF).
     static constexpr int MAX_ELEM = 118;
     static constexpr int MAX_REF = 7;
+
+    // Claude Generated (Sep 2026): the two radii of the GFN-FF D4 pair list, named so the
+    // caller can derive the list's skin. GenerateDispersionPairsNative() keeps every pair
+    // closer than PAIR_BUILD_CUTOFF_BOHR and stamps r_cut = PAIR_EVAL_CUTOFF_BOHR on it; the
+    // kernel skips pairs beyond r_cut. The 10 Bohr difference is a Verlet skin: a pair absent
+    // from the list needs >= 10 Bohr of relative motion before it can contribute
+    // (see GFNFF::updateDispersionPairsIfNeeded()). Values unchanged from the former literals.
+    static constexpr double PAIR_BUILD_CUTOFF_BOHR = 60.0;
+    static constexpr double PAIR_EVAL_CUTOFF_BOHR  = 50.0;
 
     // Claude Generated (AP2 perf, 2026-06): split weightedC6Gfn2 into a per-atom
     // weight build + a per-pair contraction so the O(N) atom weights are computed

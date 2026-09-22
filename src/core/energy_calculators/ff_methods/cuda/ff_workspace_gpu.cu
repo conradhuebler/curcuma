@@ -1433,6 +1433,37 @@ void FFWorkspaceGPU::updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_r
     m_impl->nonbonded_rep.upload(nonbonded_reps, m_impl->stream);
 }
 
+void FFWorkspaceGPU::updateDispersion(const std::vector<GFNFFDispersion>& pairs)
+{
+    // Claude Generated (Sep 2026): see the declaration. DispersionSoA::upload() sets disp.n from
+    // the vector (also for 0 pairs) and grows each buffer only when needed.
+    auto& impl = *m_impl;
+    impl.disp.upload(pairs, impl.stream);
+    const int nd = impl.disp.n;
+
+    // Per-pair dc6dcn outputs of k_dc6dcn_per_pair (allocated once in uploadC6ReferenceTable()).
+    if (impl.dc6dcn_gpu_ready && nd > 0) {
+        impl.disp.dc6dcn_ij.ensure(nd);
+        impl.disp.dc6dcn_ji.ensure(nd);
+    }
+
+    // Host mirrors for the host-dc6dcn fallback (updateDispersionDC6DCN()).
+    m_disp_idx_i_host.resize(nd);
+    m_disp_idx_j_host.resize(nd);
+    m_h_dc6dcn_ij.assign(nd, 0.0);
+    m_h_dc6dcn_ji.assign(nd, 0.0);
+    for (int k = 0; k < nd; ++k) {
+        m_disp_idx_i_host[k] = pairs[k].i;
+        m_disp_idx_j_host[k] = pairs[k].j;
+    }
+}
+
+void FFWorkspaceGPU::updateCoulombPairs(const std::vector<GFNFFCoulomb>& pairs)
+{
+    // Claude Generated (Sep 2026): CoulombSoA::upload() sets coulomb.n from the vector.
+    m_impl->coulomb.upload(pairs, m_impl->stream);
+}
+
 void FFWorkspaceGPU::setDispersionEnabled(bool v)  { m_dispersion_enabled = v; }
 void FFWorkspaceGPU::setHBondEnabled(bool v)        { m_hbond_enabled = v; }
 void FFWorkspaceGPU::setRepulsionEnabled(bool v)    { m_repulsion_enabled = v; }
@@ -1761,7 +1792,8 @@ void FFWorkspaceGPU::computeDC6DCNOnGPU(const std::vector<std::vector<double>>& 
         impl.d_dgw.ptr,
         impl.d_c6_flat.ptr,
         impl.disp.dc6dcn_ij.ptr,
-        impl.disp.dc6dcn_ji.ptr
+        impl.disp.dc6dcn_ji.ptr,
+        m_disp_c6_update ? impl.disp.C6.ptr : nullptr   // Sep 2026: per-step C6 refresh
     );
 
     // No sync needed here: k_dc6dcn_per_pair runs on impl.stream (main stream).
@@ -1837,7 +1869,8 @@ void FFWorkspaceGPU::computeGaussianWeightsOnGPU(bool use_cn_final)
         impl.d_dgw.ptr,
         impl.d_c6_flat.ptr,
         impl.disp.dc6dcn_ij.ptr,
-        impl.disp.dc6dcn_ji.ptr);
+        impl.disp.dc6dcn_ji.ptr,
+        m_disp_c6_update ? impl.disp.C6.ptr : nullptr);  // Sep 2026: per-step C6 refresh
     // No explicit sync needed: stream ordering + event_upload fence in
     // prepareAndLaunchChargeIndependent guarantees dc6dcn is ready before k_dispersion on sA.
 }
