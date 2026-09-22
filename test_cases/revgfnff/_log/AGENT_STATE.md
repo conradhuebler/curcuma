@@ -75,6 +75,20 @@ as a real cost to weigh, or something else — the agent found no robust re-deri
 
 ## Live agents
 
+**RUNNING since 2026-09-22: `package-13` (Opus), diagnosis first, no test/default change** —
+operator chose to find the cause of `mg3`'s extra NVE dissipation on `cli_simplemd_18`'s 12-H2/
+8000K bath before deciding what to do about the test. Plan: dt-scaling of the excess (mg3 minus
+mg) to tell a genuine dt^2 truncation effect from a force/energy inconsistency; whether the excess
+lives in the `dE_jump`-attributed rebuild events or the ordinary steps between them; per-event
+normalisation (mg3 also has more rebuilds on this bath, ~250 vs ~190); an `mg2` control (same
+deeper-well family, no bond-order dimension) to see if the cause is the well generally or the order
+interpolation specifically; a non-reactive control; a targeted FD gradient check mid-transition on
+this exact system (every prior FD check was at a static "standard point", never during an actual
+corner-blend). Fixes only a clear minimal defect if found; otherwise characterizes the cost and
+reports a data point for a later recalibration decision, without touching the test itself. Status:
+`test_cases/revgfnff/_log/MG3_DISSIPATION_STATUS.md`, `WORK_STATUS.md` package 13.
+
+
 **2026-09-22: `package-12` DONE — `-gfnff.rev_well_form mg3` is the DEFAULT.** No agent running.
 Three local commits (the flip, the two re-pointed ctests, docs+status), nothing pushed. Detail
 `WORK_STATUS.md` package 12 (`Packages done: 12/12`). Binaries: `cur_pre`
