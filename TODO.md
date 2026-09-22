@@ -132,15 +132,27 @@
   `eig FP64 reduce` 21.4, `eig FP64 back-transform` 10.5, `eig FP32 copy+reduce` 6.2,
   `eig FP32 back-transform` 4.1.
 
-**1. Weniger FP64-Iterationen — 81.2 s je Stueck, der billigste Versuch**
+**1. Weniger FP64-Iterationen — GEMESSEN, gemischtes Bild, Fixpunkt-Frage offen**
 - Eine FP64-Iteration kostet 49.3 + 21.4 + 10.5 = **81.2 s**, eine FP32-Iteration **8.5 s**
-  (Faktor 9.6). Dieser Lauf: 11 FP32 + 1 FP64. **Jede vermiedene FP64-Runde ist ein Drittel
-  der Gesamtzeit.**
-- Die FP32-Phase bleibt bei `max|dq| = 9.50e-06` stehen — die Rauschgrenze von FP32 bei
-  nao 15444, keine Einstellung.
-- Vorhandene Schrauben, **kein Codeeingriff noetig**: `-scf_fp32_threshold`,
-  `-scf_fp32_stall_patience`, `-scf_fp32_false_fixpoint_factor`. `scripts/tuning_sweep.py`
-  scannt sie und prueft jede Energie gegen die Basislinie.
+  (Faktor 9.6). Der Einzelpunkt braucht 11 FP32 + 1 FP64.
+- **Im Einzelpunkt (kalter SCF) ist `scf_fp32_stall_patience` wirkungslos.** Sweep 1/2/3/5
+  liefert exakt dieselbe Aufteilung (11 FP32 + 1 FP64, `stall 0` in allen vier) und dieselbe
+  Zeit auf die Sekunde. Der Waechter feuert dort nicht — FP32 macht echte Arbeit bis zur
+  Konvergenz. `-scf_fp32_threshold 1e-6` (enger als die FP32-Rauschgrenze) kostet **+38 s**
+  (3 zusaetzliche FP32-Iterationen, dann greift der Waechter doch): Beleg fuer die Rauschgrenze,
+  keine brauchbare Schraube.
+- **Im MD-Schritt (extrapolierter Start) feuert der Waechter, und `patience=1` spart 33 %**
+  (325.0 -> 216.1 s, 1 FP64-Runde weniger, 5 FP32-Iterationen weniger). Mechanismus: nach
+  `-scf_extrapolation aspc` startet der SCF bereits unterhalb der FP32-Rauschgrenze, FP32
+  kann dort nichts mehr leisten, und `patience` bestimmt nur, wie schnell das bemerkt wird.
+  `mixed_precision=false` (reines FP64) ist dagegen katastrophal: 716.4 s, 28 FP64-Runden.
+- **Offen, nicht kleinreden**: Schritt 0 (kalt, Waechter feuert nicht) ist bit-identisch
+  zwischen Vorgabe und `patience=1` — die Geometrie fuer Schritt 1 ist also gleich. Schritt 1
+  selbst unterscheidet sich um 2.7e-6 Eh. Ob das derselbe Fixpunkt in einem groesseren
+  Konvergenzfenster ist oder ein anderer, ist **noch nicht geklaert** (Test bei
+  `-scf_threshold 1e-7` lief methodisch falsch — fehlendes `-dump_frequency 1`, `Final Energy`
+  existiert im MD-Log nicht, nur die 6-Nachkommastellen-Tabelle — und wird wiederholt).
+  **Bis zur Klaerung `patience` nicht als Vorgabe aendern.**
 - **Nur Consumer-Karten.** Auf vollwertigem FP64 ist gemischte Genauigkeit standardmaessig aus
   (`xtb_gpu_method.cpp:703`), dort existiert der Effekt nicht.
 
