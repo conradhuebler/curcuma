@@ -1,5 +1,5 @@
-# WORK_STATUS — rev-gfnff work packages 1-12 (2026-09-18 / 22)
-Packages done: 12/12 (9 = 9a + 9b)
+# WORK_STATUS — rev-gfnff work packages 1-13 (2026-09-18 / 22)
+Packages done: 13/13 (9 = 9a + 9b)
 
 > **Package 10 re-scales the time axis of everything before it.** The MD time step was integrated
 > in the wrong unit until Sep 2026, so every "fs" and every duration written by packages 1-9 is
@@ -2025,3 +2025,78 @@ geometries within one binary, while `cur_pre` and `cur_post` differ (c2h6 C-C 1.
 how the 0.0044 A row above is valid (it is the new *default*). Not investigated further, not in
 scope, no fix attempted — recorded because the next agent measuring an equilibrium geometry per
 arm will otherwise get four identical numbers and not know why.
+
+# Package 13 — `cli_simplemd_18`'s mg3 failure, diagnosed (2026-09-22)
+
+Operator task: find the cause of the reproducible ~1.6-1.7x higher NVE Etot slope under the new
+`mg3` default on the test-18 bath, before deciding what to do about the test. **Diagnosis only — no
+source change was needed and none was made; the test, its threshold, its temperature and its dt are
+untouched.** Full detail, tables and sample sizes: [MG3_DISSIPATION_STATUS.md](MG3_DISSIPATION_STATUS.md).
+
+Binary: frozen copy of `build_rev/curcuma` at HEAD `b20d22fd`, md5 `7cb23db338f37bdfab869cd9faf00cf0`,
+fingerprinted by caffeine `revgfnff` **-4.78991511** Eh with no flag (= package 9's `mg3`). The
+harness reproduces package 12's own numbers on the test's unperturbed `input.xyz`: mg **1.8531e-3**
+/ 190 rebuilds, mg3 **2.9437e-3** / 244 (package 12: 1.8538e-3 / 190, 2.95e-3 / 244).
+
+## 13.1 Verdict — a property of the statistic, not a defect and not extra dissipation
+
+`Etot(t)` on this bath is **not a linear drift**: it is a ramp that **saturates**, at a plateau that
+is the same at every time step. The test fits an OLS slope over a fixed 10 ps window, so what it
+measures is **where the knee falls inside the window**, i.e. `t_knee = D / R` with `D` the transient
+amplitude and `R` the injection rate. Both were measured separately:
+
+- **`R` scales as dt^2** (exponent 1.80 / 1.88 / 1.95 for mg / gauss / mg3 over an 8x dt range,
+  n = 6 replicates per cell) — velocity-Verlet truncation, the project's standard signature.
+- **mg3's `R` is 19-34 % LOWER than mg's at dt 0.125 / 0.0625 / 0.03125** (non-overlapping
+  replicate ranges) and equal at 0.25 fs — never higher, so mg3's "excess" is **negative**.
+- **mg3's `D` is larger**, and by exactly the right amount: its H-H well is **0.01441 Eh
+  (9.0 kcal/mol) deeper** than mg's and its transient is **0.0141 Eh larger** — 98 % of it.
+
+So the larger fitted slope is the deeper well showing up through a statistic that is sensitive to
+the knee position. The statistic is **non-monotone in dt** and, at dt 0.0625 / 0.03125, the
+**delivered `gauss` well exceeds the same 2.5e-3 floor too** (5.38e-3 / 1.21e-2; at 0.03125 fs it is
+the worst arm of all) — the criterion is not diagnosing the new wells.
+
+## 13.2 The mechanism
+
+The 12 H2 disperse in ~0.2 ps (no wall). Exactly one pair stays at the reactive threshold and
+chatters; its blend window is ~2 MD steps wide for a hot H-H pair — the warning the binary itself
+prints. The integrator cannot resolve that window and pumps energy at `R ~ dt^2`, **and the pumping
+stops the moment that one H2 dissociates** (measured: exactly 2 free H of 24 at 3 ps in **12/12**
+runs, 4 arms x 3 replicates). A deeper bond needs more pumped energy before it breaks, so the ramp
+runs longer. Within the MG family `D = D_e(H-H) - 0.0786 Eh`, arm-independent to 3 digits.
+
+## 13.3 Where the energy is NOT
+
+- **Not at the topology events.** Reported `dE_jump` summed over all rebuilds is -0.0005..-0.0011 Eh
+  against a +0.10 Eh total (**-0.6 %**, and negative), every arm and dt, n = 6. Per-step budget
+  (1.5 ps, dt 0.125, n = 4): **78 % (mg) / 85 % (mg3)** of the gain lands on steps with **no**
+  rebuild, and mg3's cost per rebuild step (0.064 mEh) is **lower** than mg's (0.099 mEh) — it
+  simply has 1.3x more events.
+- **Not the bond-order dimension.** `mg2` and `mg3` are **bit-identical** here — every numeric
+  column of every log, 4 dt x 6 replicates, and H2 at 0.74 A is -0.18106066 Eh in both. Mechanism:
+  `rev_well_table_v2.h` has exactly **one** H-H order entry whose four parameters equal the
+  pair-keyed H-H entry, and `findOrder` clamps to it.
+- **Not the well's own numerics.** Under `-gfnff.topology_mode static` every arm conserves to
+  **<= 0.001 Eh over 3 ps at every dt from 0.25 to 0.03125**; same with `-gfnff.rev_blend false`.
+- **Not a force/energy inconsistency.** FD gradient, dx 1e-4 A, all 72 coordinates, 3 frames from
+  this bath's own churn, both arms: worst **7.3e-9 to 2.0e-8 Eh/A**. The dt^2 scaling bounds any
+  dt-independent (i.e. chain-rule) contribution below ~4e-4 Eh/ps, 800x under `R` at the test's dt.
+
+## 13.4 Two facts the next agent should not have to re-derive
+
+- **A fresh single point cannot reproduce a mid-window blend state.** `w_a` is latched to the
+  transition coordinate at the instant the transition begins (`CURCUMA_BLENDDUMP` prints
+  `w_a 0.42585 ... c 0.425849 s 0.000000` on a transition's first call), so an SP always starts at
+  s = 0. An FD check "at a mid-transition frame" via fresh SPs is therefore not well-posed; the
+  corner-blend chain rule has to be tested by dt scaling instead.
+- **`CURCUMA_BLENDDUMP` needs `-verbosity 2` under `-md`**, not 1: SimpleMD runs the calculator one
+  level below the run (Known Issue #31), so `CurcumaLogger::result` inside the FF is muted at 1.
+
+## 13.5 Data point for the operator's recalibration decision (NOT applied)
+
+mg3 clears the 2.5e-3 floor only at **dt >= 0.25 fs** (1.29e-3 — the test's own passing arm) or at
+**dt <= 0.015625 fs** (9.54e-4, n = 4; 3.72e-4 at 0.0078125 fs, n = 3). The band 0.03125-0.125 fs
+fails. **Halving the test's dt is not a fix** — 0.0625 fs is worse (9.00e-3). A 0.015625 fs arm
+costs 40 s per 10 ps run against 5 s at 0.125 fs. `mg` fails at 0.0625/0.03125 too, and `gauss` at
+both, so no floor derived from one well form will hold for the others.

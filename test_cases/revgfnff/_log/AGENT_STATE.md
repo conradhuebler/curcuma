@@ -66,27 +66,63 @@ exactly, `gfnff` unchanged), `ctest -R "gfnff|sqm_val|react|cli_simplemd_|cli_gf
 independently reproduced effect, not a stale calibration**: on the test's own 12-H2/8000K/dt=0.125fs
 bath, two fresh 1e-5 A perturbed replicates give `mg` slope 1.79e-3 / 1.83e-3 Eh/ps and `mg3` slope
 **3.00e-3 / 3.14e-3** — squarely inside the agent's reported ranges (1.854-1.986e-3 / 2.946-3.235e-3),
-both above the 2.5e-3 floor. **mg3 is genuinely ~1.6-1.7x more dissipative than mg on this specific
-bath; this is not a re-litigation of package 11's per-step tail (a different statistic, cumulative
-NVE drift vs single-step spikes) and not something to explain away.** Two tests now await an
-operator decision: `cli_simplemd_18` (recalibrate the floor for mg3, or treat the extra dissipation
-as a real cost to weigh, or something else — the agent found no robust re-derived floor, see
-`WORK_STATUS.md` package 12) and `cli_simplemd_20` (flagged since package 10, separate issue).
+both above the 2.5e-3 floor. The *measurement* stands and reproduces. **Its reading as "mg3 is
+~1.6-1.7x more dissipative" is CORRECTED by package 13**: the statistic is an OLS slope over a fixed
+10 ps window, `Etot(t)` on this bath is a ramp that SATURATES, and the slope measures the knee
+position `D/R`. mg3's injection rate `R` is in fact **19-34 % LOWER** than mg's at the three
+smallest dt and equal at 0.25 fs, never higher; its
+amplitude `D` is larger by **98 % of its deeper H-H well** (0.0141 vs 0.01441 Eh). See 13.1 below.
+Two tests still await an operator decision: `cli_simplemd_18` (now with a diagnosis in hand —
+`MG3_DISSIPATION_STATUS.md`, `WORK_STATUS.md` package 13) and `cli_simplemd_20` (since package 10).
 
 ## Live agents
 
-**RUNNING since 2026-09-22: `package-13` (Opus), diagnosis first, no test/default change** —
-operator chose to find the cause of `mg3`'s extra NVE dissipation on `cli_simplemd_18`'s 12-H2/
-8000K bath before deciding what to do about the test. Plan: dt-scaling of the excess (mg3 minus
-mg) to tell a genuine dt^2 truncation effect from a force/energy inconsistency; whether the excess
-lives in the `dE_jump`-attributed rebuild events or the ordinary steps between them; per-event
-normalisation (mg3 also has more rebuilds on this bath, ~250 vs ~190); an `mg2` control (same
-deeper-well family, no bond-order dimension) to see if the cause is the well generally or the order
-interpolation specifically; a non-reactive control; a targeted FD gradient check mid-transition on
-this exact system (every prior FD check was at a static "standard point", never during an actual
-corner-blend). Fixes only a clear minimal defect if found; otherwise characterizes the cost and
-reports a data point for a later recalibration decision, without touching the test itself. Status:
-`test_cases/revgfnff/_log/MG3_DISSIPATION_STATUS.md`, `WORK_STATUS.md` package 13.
+**2026-09-22: `package-13` DONE — `cli_simplemd_18`'s mg3 failure is diagnosed. NO defect, NO source
+change, the test untouched.** No agent running. Detail `MG3_DISSIPATION_STATUS.md` (96 lines) and
+`WORK_STATUS.md` package 13. Binary: frozen copy of `build_rev/curcuma` at HEAD `b20d22fd`, md5
+`7cb23db338f37bdfab869cd9faf00cf0`; the harness reproduces package 12's own numbers on the test's
+unperturbed input (mg 1.8531e-3 / 190 reb, mg3 2.9437e-3 / 244).
+
+- **The statistic, not the physics.** `Etot(t)` is a ramp that **saturates**; the test's OLS slope
+  over a fixed 10 ps window measures the knee position `t = D/R`. Measured separately, n = 6
+  replicates per cell: `R` scales as **dt^2** (exponent 1.80 mg / 1.88 gauss / 1.95 mg3 over an 8x
+  dt range) and **mg3's `R` is 19-34 % BELOW mg's at the three smallest dt** (ranges
+  non-overlapping) and equal at 0.25 fs, never higher. mg3's
+  amplitude `D` is larger by **0.0141 Eh = 98 % of its 0.01441 Eh deeper H-H well**.
+- **The floor is not about the well form.** At dt 0.0625 / 0.03125 the **delivered `gauss`** well
+  exceeds the same 2.5e-3 floor too (5.38e-3 / **1.21e-2**; at 0.03125 fs it is the worst arm of
+  all), and `mg` fails at both as well. The statistic is **non-monotone in dt**.
+- **Orchestrator-independently verified the two most consequential claims.** (1) The ramp genuinely
+  saturates — rerun of the unperturbed `mg`/`mg3` trajectories at fine print resolution: `dE(t)`
+  rises to +0.0892 (`mg`) / +0.1012 (`mg3`) Eh within the first ~1 ps and is then FLAT (late-window
+  8-10 ps slope -3.7e-6 / +3.0e-7 Eh/ps, both consistent with zero) for the remaining 9 ps — the
+  test's OLS slope is entirely a plateau-height artefact on this trajectory, not an ongoing rate.
+  (2) `mg2` and `mg3` give the bit-identical H-H single-point energy at r = 0.74 A, **-0.18106066
+  Eh both** — the bond-order table genuinely does not distinguish H-H. **The orchestrator's own
+  "mg3 is 1.6-1.7x more dissipative" of two turns ago was itself the same trap this project's
+  memory `revgfnff-tail-needs-replicates` and the vault note `Agentisches Arbeiten` warn about**:
+  a correctly-computed derived statistic (an OLS slope) mistaken for the physical quantity it does
+  not actually measure on a saturating curve. Recorded as its own lesson, see the memory update.
+- **Mechanism**: one of the 12 H2 stays at the reactive threshold and chatters; its blend window is
+  ~2 MD steps wide (the binary prints that warning itself), the integrator cannot resolve it and
+  pumps energy at `R ~ dt^2` — **until that H2 dissociates**, which ends the transient (exactly 2
+  free H of 24 at 3 ps in **12/12** runs, 4 arms x 3 replicates). A deeper well needs more pumped
+  energy first, so the ramp runs longer.
+- **Ruled out, each with its own control**: the topology events (reported `dE_jump` sums to -0.6 %
+  of the total, negative; 78-85 % of the gain is on non-rebuild steps, n = 4; mg3's per-event cost
+  is *lower* than mg's); the bond-order dimension (`mg2` and `mg3` are **bit-identical** on this
+  bath — `rev_well_table_v2.h` has one H-H order entry equal to the pair entry); the well's own
+  numerics (`-gfnff.topology_mode static`: every arm <= 0.001 Eh over 3 ps at every dt); a
+  force/energy inconsistency (FD over all 72 coordinates of 3 churn frames, both arms, worst
+  **7.3e-9..2.0e-8 Eh/A**; the dt^2 scaling bounds any chain-rule term below ~4e-4 Eh/ps).
+- **Data point for the operator, NOT applied**: mg3 clears the floor only at **dt >= 0.25 fs**
+  (1.29e-3, the test's own passing arm) or **dt <= 0.015625 fs** (9.54e-4, n = 4). The band
+  0.03125-0.125 fs fails, so **halving the test's dt makes it worse** (0.0625 -> 9.00e-3). A
+  0.015625 fs arm costs 40 s per 10 ps run against 5 s at 0.125 fs.
+- **Two traps recorded for the next agent**: a fresh single point **cannot** reproduce a mid-window
+  blend state (`w_a` is latched to the transition coordinate when the transition begins), so an FD
+  check "at a mid-transition frame" via fresh SPs is not well-posed; and `CURCUMA_BLENDDUMP` needs
+  `-verbosity 2` under `-md` (Known Issue #31 mutes the calculator one level).
 
 
 **2026-09-22: `package-12` DONE — `-gfnff.rev_well_form mg3` is the DEFAULT.** No agent running.
