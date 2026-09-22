@@ -116,6 +116,67 @@
 - **Verweis**: src/core/CLAUDE.md:106, CLAUDE.md - Performance Notes
 - **Performance Impact**: Critical for large molecular systems
 
+### GPU-SCF GFN1/GFN2: der Eigenloeser ist 73 % des Laufs (2026-09)
+- **Status**: ⏳ OFFEN, Zerlegung gemessen, kein Punkt umgesetzt
+- **Messung** (polymer_2x, 7320 Atome, nao 15444, GFN2, 1x RTX A4500, `-sp -gradient` 254 s,
+  `CURCUMA_GPU_PROFILE=1`, Geraete festgenagelt):
+
+  | Phase | s | Anteil |
+  |---|---:|---:|
+  | **Eigenloeser gesamt** | **174.2** | **73 %** |
+  | Dichte + Populationen | 39.8 | 17 % |
+  | Setup + Integrale | 32.0 | 13 % |
+  | Gradient (nach der Optimierung) | 6.3 | 2.6 % |
+
+  Einzeln: `eig FP32 syevd` 82.7 s / 11 Aufrufe, `eig FP64 syevd` 49.3 s / 1,
+  `eig FP64 reduce` 21.4, `eig FP64 back-transform` 10.5, `eig FP32 copy+reduce` 6.2,
+  `eig FP32 back-transform` 4.1.
+
+**1. Weniger FP64-Iterationen — 81.2 s je Stueck, der billigste Versuch**
+- Eine FP64-Iteration kostet 49.3 + 21.4 + 10.5 = **81.2 s**, eine FP32-Iteration **8.5 s**
+  (Faktor 9.6). Dieser Lauf: 11 FP32 + 1 FP64. **Jede vermiedene FP64-Runde ist ein Drittel
+  der Gesamtzeit.**
+- Die FP32-Phase bleibt bei `max|dq| = 9.50e-06` stehen — die Rauschgrenze von FP32 bei
+  nao 15444, keine Einstellung.
+- Vorhandene Schrauben, **kein Codeeingriff noetig**: `-scf_fp32_threshold`,
+  `-scf_fp32_stall_patience`, `-scf_fp32_false_fixpoint_factor`. `scripts/tuning_sweep.py`
+  scannt sie und prueft jede Energie gegen die Basislinie.
+- **Nur Consumer-Karten.** Auf vollwertigem FP64 ist gemischte Genauigkeit standardmaessig aus
+  (`xtb_gpu_method.cpp:703`), dort existiert der Effekt nicht.
+
+**2. Teildiagonalisierung ist implementiert, wird aber nicht benutzt**
+- `eigensolveResidentFock` kann das Teilspektrum (`xtb_gpu_context.cu:2943-2950`, AP1,
+  `cusolverDnDsyevdx/Ssyevdx`, `il=1..n_eig`). Die Dichte braucht nur die besetzten Spalten,
+  `syevd` rechnet alle 15444 Eigenpaare.
+- **Der residente Loop uebergibt `n_eig = 0`** (`:4994`), also volles Spektrum. Warum, ist
+  **unbekannt** — Versaeumnis oder verworfener Versuch; erst nachsehen, dann messen.
+- **Vorbehalt aus dem Code**: die verteilte FP64-Loesung ist auf `!partial` gegattert
+  (`:2959`) — Teilspektrum und Mehrkartenloesung schliessen sich derzeit aus. Fuer eine Karte
+  waere es ein Gewinn, fuer mehrere muss man waehlen.
+
+**3. Schwellen der vorhandenen Verteilung nachmessen**
+- Eigenloeser verteilt: **1.95x** auf 4 PCIe-Karten gemessen. Dichte verteilt: **3.4x** gemessen
+  (39758/12 -> 11558/13 Aufrufe).
+- Die Gates `gpu_eigensolver_min_nao` (4000) und `gpu_density_min_nao` sind gesetzt, aber
+  **nie nachgemessen** worden. Wo genau sich Verteilen lohnt, ist offen.
+- Auf einer H200 ist NVLink der einzige Unterschied, der hier nicht simulierbar ist — der
+  Datenweg zwischen den Karten ist die gemessene Bremse.
+
+**4. Struktureller Hebel: gar nicht diagonalisieren**
+- `purify` und `lobpcg` existieren in curcuma, aber **nur auf der CPU** — im CUDA-Pfad kein
+  einziger Treffer (geprueft). Dichtematrix-Purifikation (McWeeny) kommt ohne Diagonalisierung
+  aus und nutzt Duennbesetzung.
+- **Der einzige Punkt dieser Liste, der die SKALIERUNG aendert** statt der Konstanten, und
+  entsprechend der aufwendigste.
+
+**5. Setup und Integrale (32 s) sind nie im Detail profiliert worden**
+- Im Einzelpunkt einmalig, in einer **MD pro Schritt**. `integrals: overlap + H0` 11.4 s,
+  `setup` 20.6 s — was darin steckt, ist unbekannt.
+
+**6. GFN-FF ist ein voellig anderer Fall**
+- Dort sind **93 % des Schritts der EEQ-Loeser** (1345 von 1474 ms auf der GPU, 758.7 von
+  1095 ms auf 16 CPU-Kernen). Keiner der Punkte 1-5 greift. Siehe den eigenen TODO-Eintrag.
+
 ### GPU-Gradient GFN1/GFN2 — Punkte 1-6 UMGESETZT (2026-09)
 - **Status**: alle sechs Punkte implementiert und gemessen. Offen geblieben: der H0-Paar-Kernel
   (454 ms) ist noch einzelkartig, und `densityPatternDistributed` kopiert die C-Spaltenscheiben
