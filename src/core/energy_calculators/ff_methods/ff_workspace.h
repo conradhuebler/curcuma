@@ -324,9 +324,12 @@ struct RevSettings {
     /// The term weight w is NOT applied to these wells: they decay by themselves (the fit
     /// measures |E_pair| at the last grid point as median 0.000, max 0.69 kcal/mol), so
     /// multiplying by w would truncate the tail the fit just put there.
-    /// DEFAULT 1 (MG) since Sep 19, 2026 (operator decision). Scope: the whole rev path is gated
-    /// on `enabled`, so plain -method gfnff cannot see this - verified, not assumed.
-    int well_form = 1;
+    /// 0 = gauss, 1 = mg, 2 = erfmorse, 3 = mg2, 4 = mg3 (the bond-order-resolved MG well).
+    /// DEFAULT 4 (MG3) since Sep 22, 2026 (operator decision; 1 = MG from Sep 19 to Sep 22).
+    /// This in-class initializer is inert: GFNFF::setupRevSettings() assigns well_form
+    /// unconditionally in the constructor, and the whole rev path is gated on `enabled`
+    /// (false here), so plain -method gfnff cannot see this - verified, not assumed.
+    int well_form = 4;
     /// rev-gfnff 3b diagnostic: when >= 0, every bond's continuous order is replaced by this
     /// value before the order-resolved well table is read (PARAM rev_well_order_override).
     double well_order_override = -1.0;
