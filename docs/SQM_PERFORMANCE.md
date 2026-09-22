@@ -709,6 +709,49 @@ run-to-run reproducible than the single-GPU one — **the unmodified binary diff
 `-gpu_density_devices` before diffing gradients on a multi-GPU box, and compare a run against
 itself first to establish the noise floor.
 
+### Implemented (2026-09, second round): the Coulomb kernel and a distributed W
+
+| phase | before | after |
+|---|---:|---:|
+| `grad: Coulomb` | 233.8 ms | **27.4 ms** (1 GPU) |
+| `grad: W = C_occ*diag(2 eps)*C_occ^T` | 3308.7 ms | **855.2 ms** (4 GPUs) |
+| `gradient :` block | 6499 ms | 6286 ms (1 GPU) / **3754 ms** (4 GPUs) |
+| `scf: density P + populations` | 39758 ms / 12 calls | **11558 ms** / 13 calls (4 GPUs) |
+
+**4. `k_grad_coulomb` specialised for `gexp == 2`.** The only call site passes 2.0, and the
+kernel then evaluated four FP64 `pow` per shell pair on a card whose FP64 transcendental path
+runs at 1/64 rate. Replaced by `r2`, a reciprocal, `rsqrt` and `gamma*gamma*gamma`; the general
+path is kept for any other exponent. **233.8 -> 27.4 ms, a factor 8.5**, energy bit-identical.
+
+**5. W is built through `densityPatternDistributed`.** Since W became the same SDDMM as the
+density (previous round), the existing distributed density path takes it with one extra
+argument: the weight vector holds `2*eps` and the output goes to `dSpW` instead of `dSpP`. The
+P path is unchanged. **3308.7 -> 855.2 ms on 4 GPUs (3.9x)**, and `-gpu_density_devices` now
+accelerates the SCF density as well.
+
+**Correctness**: at `-scf_threshold 1e-9`, 1 GPU vs 4 GPUs agree to **2.13e-10 Eh/Angstrom**
+with identical energies. `ctest` gpu 200/200, gpu_gradient 24/24, sqm 335/335.
+
+**Why the wall-clock of the 4-GPU run is WORSE (307 s vs 254 s), and why that is not a
+regression.** The two runs differ by one FP64 eigensolve — 11 FP32 + **1** FP64 against
+11 FP32 + **2** FP64 — and on this card that one iteration costs 49.3 + 21.4 + 10.5 = **81.2 s**,
+which swamps the ~30 s the distributed density and W actually save. It is the same FP32
+noise-floor lottery documented above under "Why an MD step is not a single point": the FP32
+phase stalls at ~9.5e-6 and a bit-level change decides whether one more FP64 round is needed.
+**The phase timings are meaningful, the run totals on this card are not.** On a full-rate-FP64
+device mixed precision is off by default and the effect cannot occur.
+
+**Measured and deliberately NOT changed**: `k_grad_repulsion` has no distance cutoff — but
+neither does the repulsion ENERGY (`XTB::calcRepulsionEnergy`, `xtb_h0.cpp:369-400`, a plain
+O(N^2) pair loop with only a degenerate-pair guard). Screening only the gradient would make the
+two inconsistent, which is worse than slow. Same class as the CN chain rule, opposite direction.
+
+**Known inefficiency in the path point 5 now uses**: `densityPatternDistributed` re-copies the
+helper devices' `C` column slices with `cudaMemcpyPeerAsync` on **every** call; only the pattern
+indices are cached (keyed on `pattern_generation`). Between the SCF's last P call and the
+gradient's W call only the weight vector changes, yet the full column slice is shipped again.
+Not fixed here: it touches state shared with the SCF's own P path.
+
 ### GFN-FF for comparison: the EEQ solve dominates, more so on the GPU
 
 Same structure, GFN-FF MD, per step: CPU 16 threads **1095 ms** of which `eeq_solve`

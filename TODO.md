@@ -116,8 +116,10 @@
 - **Verweis**: src/core/CLAUDE.md:106, CLAUDE.md - Performance Notes
 - **Performance Impact**: Critical for large molecular systems
 
-### GPU-Gradient GFN1/GFN2 — Punkte 1-3 UMGESETZT, 38 s -> 7 s (2026-09)
-- **Status**: Punkte 1-3 implementiert und gemessen; Punkte 4-6 offen
+### GPU-Gradient GFN1/GFN2 — Punkte 1-6 UMGESETZT (2026-09)
+- **Status**: alle sechs Punkte implementiert und gemessen. Offen geblieben: der H0-Paar-Kernel
+  (454 ms) ist noch einzelkartig, und `densityPatternDistributed` kopiert die C-Spaltenscheiben
+  bei jedem Aufruf neu auf die Helferkarten (nur die Musterindizes sind zwischengespeichert).
 - **Ergebnis** (polymer_2x, 1x A4500, selbst nachgemessen): `-sp -gradient` **287.1 -> 256 s**,
   Gradientenblock **18747 -> 6499 ms**, W-DGEMM **12748 -> 3309 ms**, `finalize: download P and C`
   **15332 -> 0.0 ms**, Geraetespeicher im Gradienten **12337 -> 8143 MiB**. Energie unveraendert
@@ -153,11 +155,14 @@
    nicht gethreadet — waehrend Host-Abschnitt 2b via `parallelStripes` (`:231-234`) sehr wohl
    threadet. Die CN-Kettenregel hat zudem keinen Cutoff, wo die Energie bei 25 Bohr
    abschneidet (`xtb_gpu_context.cu:832`) — inkonsistent **und** langsam.
-5. **`gexp == 2.0` hart am einzigen Aufrufer** (`:5362`), aber vier FP64 `pow` je Schalenpaar
+5. **ERLEDIGT** (Coulomb 233.8 -> 27.4 ms, Faktor 8.5; Repulsions-Cutoff geprueft und BEWUSST
+   NICHT gemacht, weil `calcRepulsionEnergy` (`xtb_h0.cpp:369-400`) selbst keinen hat) — **`gexp == 2.0` hart am einzigen Aufrufer** (`:5362`), aber vier FP64 `pow` je Schalenpaar
    in `k_grad_coulomb` (`:1330`); `k_grad_repulsion` (`:1102`) drei `pow` je Atompaar ohne
    Cutoff. Beide in der `for j<i`-Form mit `atomicAdd` — Gather-Umbau steht bereits in
    [docs/SQM_GPU_ROADMAP.md](docs/SQM_GPU_ROADMAP.md):39-46.
-6. **Gradient ueber GPUs verteilen** (zuletzt): `k_grad_h0_pulay_sp` ist eine reine Reduktion
+6. **ERLEDIGT fuer W** (3308.7 -> 855.2 ms auf 4 Karten, 1-vs-4-GPU-Gradient 2.13e-10 bei
+   `-scf_threshold 1e-9`; der H0-Paar-Kernel mit 454 ms ist weiterhin einzelkartig und waere der
+   naechste Kandidat) — **Gradient ueber GPUs verteilen**: `k_grad_h0_pulay_sp` ist eine reine Reduktion
    ueber den Paarbereich, Ausgabe nur `grad` (3*nat) + `dEdcn` (nat) = **176 KB** — billiger zu
    verteilen als der Eigenloeser. Skelett existiert in `densityPatternDistributed` (`:3118-3258`).
 - **Warnung vor dem naheliegenden Ansatz**: die schalenpaar-blockierte Form des

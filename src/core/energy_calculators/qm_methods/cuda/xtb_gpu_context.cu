@@ -1385,6 +1385,24 @@ __global__ void k_grad_h0_pulay_spP(
 }
 
 // Section 3: isotropic Coulomb gradient. One thread per shell is, inner js<is.
+//
+// Point 5a (Claude Generated, Sep 2026): the only call site (computeGradient, below) always
+// passes gexp=2.0 (xtb_coulomb.hpp:98, Klopman-Ohno kernel, both GFN1/GFN2 - the energy-side
+// gamma-matrix kernel a few hundred lines up already hardcodes the same 2.0 for the same
+// reason). The general path costs 4 FP64 pow() per shell pair; on this card (Ampere-class)
+// FP64 transcendentals run at a fraction of the FP64 add/mul rate, so this loop was
+// essentially the whole measured 234 ms Coulomb-gradient phase on polymer_2x (7320 atoms).
+//
+// For gexp==2 exactly, let X = r^2 + gam_bar^-2, so gamma = X^(-1/2). The code's "dgamma_dr"
+// is actually d(gamma)/dr * (1/r) (that 1/r is what lets grad += force*dx work directly on
+// the raw coordinate difference, no separate normalisation below) - algebraically
+// dgamma/dr * (1/r) = -r^(gexp-2)*gamma^(gexp+1), and r^(gexp-2) = r^0 = 1 identically for
+// gexp=2, leaving -gamma^3 with no r-dependence left to evaluate at all. Verified against the
+// general formula symbolically (both reduce to the same closed form) and numerically at
+// several (r, gam_bar) points before wiring in. NOT bit-identical to the general path -
+// gamma*gamma*gamma rounds one ULP differently than pow(gamma,3.0) at some inputs - see the
+// noise-floor/validation numbers in the report; treat this the same way the shell-pair-blocked
+// integral kernels' FMA-contraction note is treated (docs/SQM_PERFORMANCE.md).
 __global__ void k_grad_coulomb(int nsh, int is_gfn2, const int* __restrict__ sh2at,
                                const double* __restrict__ g, const double* __restrict__ q_sh,
                                const double* __restrict__ xyz, double gexp, double* __restrict__ grad)
@@ -1392,6 +1410,7 @@ __global__ void k_grad_coulomb(int nsh, int is_gfn2, const int* __restrict__ sh2
     const int is = blockIdx.x * blockDim.x + threadIdx.x;
     if (is >= nsh) return;
     const int iat = sh2at[is];
+    const bool fast_gexp2 = (gexp == 2.0);
     for (int js = 0; js < is; ++js) {
         const int jat = sh2at[js];
         if (iat == jat) continue;
@@ -1400,10 +1419,16 @@ __global__ void k_grad_coulomb(int nsh, int is_gfn2, const int* __restrict__ sh2
         const double dz = xyz[3*iat+2] - xyz[3*jat+2];
         const double r2 = dx*dx + dy*dy + dz*dz;
         if (r2 < 1.0e-12) continue;
-        const double r1 = sqrt(r2);
         const double gam_bar = d_coulomb_average(g[is], g[js], is_gfn2 != 0);
-        const double gamma = pow(pow(r1, gexp) + pow(gam_bar, -gexp), -1.0 / gexp);
-        const double dgamma_dr = -pow(r1, gexp - 2.0) * pow(gamma, gexp + 1.0);
+        double dgamma_dr;
+        if (fast_gexp2) {
+            const double gamma = 1.0 / sqrt(r2 + 1.0 / (gam_bar * gam_bar));
+            dgamma_dr = -(gamma * gamma * gamma);
+        } else {
+            const double r1 = sqrt(r2);
+            const double gamma = pow(pow(r1, gexp) + pow(gam_bar, -gexp), -1.0 / gexp);
+            dgamma_dr = -pow(r1, gexp - 2.0) * pow(gamma, gexp + 1.0);
+        }
         const double force = q_sh[is] * q_sh[js] * dgamma_dr;
         atomicAdd(&grad[3*iat+0], force*dx); atomicAdd(&grad[3*jat+0], -force*dx);
         atomicAdd(&grad[3*iat+1], force*dy); atomicAdd(&grad[3*jat+1], -force*dy);
@@ -3171,9 +3196,17 @@ bool XtbGpuContext::residentDensity(const double* occ, int ncol, int n,
 // primary device. Per SCF step only the column slices of C (n x kn each) and the partial pattern
 // arrays travel; the pattern indices are geometry-constant and uploaded once.
 //
-// Returns false when the split is not set up or fails, and leaves dSpP untouched in that case, so
-// the caller falls back to the single-device kernel.
-bool XtbGpuContext::densityPatternDistributed(int n, int ncol)
+// Returns false when the split is not set up or fails, and leaves the target buffer untouched
+// in that case, so the caller falls back to the single-device kernel.
+//
+// Point 6 (Claude Generated, Sep 2026): for_weighted_density retargets the same column-split
+// SDDMM at the gradient's W = C_occ*diag(2eps)*C_occ^T instead of the SCF loop's P. Both are
+// the identical sum-over-occupied-columns pattern (k_density_sp doesn't know or care what the
+// weight vector means), so nothing below needs duplicating - only which CudaBuffer the result
+// lands in changes. The caller (computeGradient) uploads its own weight vector (2*eps) into
+// the SAME dOcc buffer the SCF loop uses before calling this, so dOcc itself needs no
+// generalisation either.
+bool XtbGpuContext::densityPatternDistributed(int n, int ncol, bool for_weighted_density)
 {
     Impl& I = *m_impl;
     if (I.dens_failed || I.dens_devices.empty() || !I.sparse || I.sp_nnz <= 0 || ncol <= 0
@@ -3183,9 +3216,10 @@ bool XtbGpuContext::densityPatternDistributed(int n, int ncol)
     const int nhelp = static_cast<int>(I.dens_devices.size());
     const int nworker = nhelp + 1;               // the helpers plus this device
     if (ncol < 16 * nworker) return false;       // too few columns to be worth splitting
+    CudaBuffer<double>& target = for_weighted_density ? I.dSpW : I.dSpP;
     // The pattern density buffer is normally allocated by the single-device branch, which this
     // function replaces.
-    try { I.dSpP.ensure(I.sp_nnz); I.dCw.ensure(n * ncol); } catch (...) { return false; }
+    try { target.ensure(I.sp_nnz); I.dCw.ensure(n * ncol); } catch (...) { return false; }
 
     // Create the helpers (streams, events, pattern buffers) on first use.
     if (I.dens_helpers.empty()) {
@@ -3290,7 +3324,7 @@ bool XtbGpuContext::densityPatternDistributed(int n, int ncol)
             return fail("copy partial back");
     }
 
-    // This device's own slice, into dSpP.
+    // This device's own slice, into the target pattern buffer (dSpP or dSpW).
     cudaSetDevice(I.device);
     {
         const dim3 block(16, 16);
@@ -3298,7 +3332,7 @@ bool XtbGpuContext::densityPatternDistributed(int n, int ncol)
         k_scale_cols<<<grid, block, 0, I.stream>>>(I.dCw.ptr, I.dC.ptr, I.dOcc.ptr, n, own_cols);
         const int bs = 256;
         k_density_sp<<<(I.sp_nnz + bs - 1) / bs, bs, 0, I.stream>>>(
-            I.sp_nnz, I.dSpRow.ptr, I.dSpCol.ptr, I.dCw.ptr, I.dC.ptr, n, own_cols, I.dSpP.ptr);
+            I.sp_nnz, I.dSpRow.ptr, I.dSpCol.ptr, I.dCw.ptr, I.dC.ptr, n, own_cols, target.ptr);
         if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess) return fail("own slice", e);
     }
 
@@ -3309,7 +3343,7 @@ bool XtbGpuContext::densityPatternDistributed(int n, int ncol)
         const int k0 = std::min(ncol, (i + 1) * per);
         if (std::min(per, ncol - k0) <= 0) continue;
         if (cudaStreamWaitEvent(I.stream, h.done, 0) != cudaSuccess) return fail("wait event");
-        if (cublasDaxpy(I.cublas, I.sp_nnz, &one, h.stage, 1, I.dSpP.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+        if (cublasDaxpy(I.cublas, I.sp_nnz, &one, h.stage, 1, target.ptr, 1) != CUBLAS_STATUS_SUCCESS)
             return fail("reduce partials");
     }
     ++I.dens_steps;
@@ -5395,6 +5429,11 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     // Point 2 (Claude Generated, Sep 2026): on the pattern path, build W ONLY at the stored
     // screened pairs with the same SDDMM kernel (k_density_sp) the SCF loop already uses for
     // P, weight swapped for 2*eps - no nao x nao DGEMM. polymer_2x: 12.75 s -> measured below.
+    // Point 6 (Claude Generated, Sep 2026): W is this same SDDMM, so it can go through
+    // densityPatternDistributed exactly like the SCF loop's P does - see its
+    // for_weighted_density flag. dOcc already holds 2*eps (uploaded just above) and the
+    // full-nao dCw computed here is kept as the fallback the single-device k_density_sp below
+    // still needs when the split is not configured or the geometry is too small to split.
     if (nocc_orbs > 0) {
         std::vector<double> occ2(nocc_orbs);
         for (int k = 0; k < nocc_orbs; ++k) occ2[k] = 2.0 * eps[k];
@@ -5405,11 +5444,14 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
                                                  m_impl->dOcc.ptr, nao, nocc_orbs);
         if (cudaGetLastError() != cudaSuccess) return false;
         if (use_pattern_pw) {
-            const int bs = 256;
-            k_density_sp<<<(m_impl->sp_nnz + bs - 1) / bs, bs, 0, stream>>>(
-                m_impl->sp_nnz, m_impl->dSpRow.ptr, m_impl->dSpCol.ptr,
-                m_impl->dCw.ptr, m_impl->dC.ptr, nao, nocc_orbs, m_impl->dSpW.ptr);
-            if (cudaGetLastError() != cudaSuccess) return false;
+            const bool w_split = densityPatternDistributed(nao, nocc_orbs, /*for_weighted_density=*/true);
+            if (!w_split) {
+                const int bs = 256;
+                k_density_sp<<<(m_impl->sp_nnz + bs - 1) / bs, bs, 0, stream>>>(
+                    m_impl->sp_nnz, m_impl->dSpRow.ptr, m_impl->dSpCol.ptr,
+                    m_impl->dCw.ptr, m_impl->dC.ptr, nao, nocc_orbs, m_impl->dSpW.ptr);
+                if (cudaGetLastError() != cudaSuccess) return false;
+            }
         } else if (cublasDgemm(m_impl->cublas, CUBLAS_OP_N, CUBLAS_OP_T, nao, nao, nocc_orbs,
                         &one, m_impl->dCw.ptr, nao, m_impl->dC.ptr, nao,
                         &zero, m_impl->dW.ptr, nao) != CUBLAS_STATUS_SUCCESS)

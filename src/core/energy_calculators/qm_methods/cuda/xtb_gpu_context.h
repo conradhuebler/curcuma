@@ -501,7 +501,14 @@ private:
     size_t estimateStorageBytes(int nat, int nsh, int nao, bool is_gfn2, double nnz) const;
 
     /// Pattern density over the helper devices of setDensityDevices(); false = caller falls back.
-    bool densityPatternDistributed(int n, int ncol);
+    /// Point 6 (Claude Generated, Sep 2026): for_weighted_density selects the target pattern
+    /// buffer - false (default, SCF loop) writes P into dSpP from the resident dOcc
+    /// (occupation weights); true (gradient's W = C_occ*diag(2eps)*C_occ^T) writes into dSpW
+    /// instead, reading whatever the caller has already uploaded into dOcc (computeGradient
+    /// uploads 2*eps there before calling this). Same SDDMM, same column split, only the
+    /// weight vector's content and the output buffer differ - both already live in Impl, so no
+    /// new device buffers are needed for this.
+    bool densityPatternDistributed(int n, int ncol, bool for_weighted_density = false);
     // Storage-independent building blocks (dense or screened). Claude Generated (Sep 2026).
     bool buildFockIntoC(int n, bool multipole);
     bool populationsAndBand(int n, double* band_out);
