@@ -33,7 +33,7 @@ CLI flags are global keys (`-gpu_device 2`) unless written with a scope (`-gfnff
 
 ### Multi-GPU eigensolve (one large molecule on several GPUs)
 
-The per-iteration full-spectrum eigensolve of the device-resident SCF can be spread over several GPUs; integrals, Fock build, density, mixing and gradient stay on the calculation's own device (`-gpu_device`, default 0). Off by default.
+The per-iteration full-spectrum eigensolve of the device-resident SCF can be spread over several GPUs; integrals, Fock build, mixing and most of the gradient stay on the calculation's own device (`-gpu_device`, default 0). Off by default. **Since Sep 2026 the gradient's energy-weighted density W also goes through the distributed density path** (`-gpu_density_devices`), because it is the same SDDMM as the density itself: 3309 -> 855 ms on 4 GPUs at nao 15444.
 
 | Option | Default | Effect / when to change |
 |---|---|---|
@@ -90,7 +90,7 @@ What is distributed inside a single point / optimisation step:
 |---|---|---|
 | eigensolve (FP32 and FP64 iterations) | all listed GPUs | 86 of 194 s |
 | screened-pattern density | all listed GPUs | 10 s |
-| integrals, Fock build, potential, charges, gradient, post-SCF | the calculation's own device only | ~98 s |
+| integrals, Fock build, potential, charges, post-SCF, and the gradient except its W build | the calculation's own device only | ~98 s |
 
 So the ceiling for one calculation is set by the part that stays on one device - on the A4500 box the whole single point went 419 -> 194 s (2.16x on 4 GPUs), not 4x, and that is the honest expectation.
 
@@ -117,7 +117,7 @@ CURCUMA_GPU_PROFILE=1 curcuma -sp big.xyz -method gfn2 -gpu cuda -verbosity 2 \
 CURCUMA_GPU_PROFILE=1 curcuma -sp big.xyz -method gfn2 -gpu cuda -verbosity 2   # defaults
 ```
 
-The profile's `eig FP32 / eig FP64 / density P` rows say how much of the run is distributable at all; if they are not the majority, more GPUs cannot help much and the answer is a bigger share on the device instead (integrals, Fock, gradient are all single-device today).
+The profile's `eig FP32 / eig FP64 / density P` rows say how much of the run is distributable at all; if they are not the majority, more GPUs cannot help much and the answer is a bigger share on the device instead (integrals and the Fock build are single-device; of the gradient only the W build is distributed, the H0-Pulay pair kernel is the next candidate at 454 ms and a 176 KB reduction).
 
 ### Distributed pattern density
 
