@@ -129,6 +129,44 @@ TEST_DIR="$SCRIPT_DIR"
 # measured |slope_rev| (6.37e-04 -> 2.5e-03) and ~7x the largest fit SE (3.6e-04 -> 2.5e-03).
 # The relative 1.5x term is unchanged and is still what carries the physics (gfnff's own slope
 # is ~5e-05 here). MAX_T_K keeps its 1.3x-of-target meaning: 8373/8410 K measured -> 10400.
+# ---------------------------------------------------------------------------
+# FLAGGED, NOT RECALIBRATED (Sep 22, 2026, WORK_STATUS package 12): this test FAILS at the
+# mg3 default on its dt = 0.125 arm, and the decision on what to do about it is the operator's.
+# Nothing below was changed. What was measured, all on the same bath/protocol/binary:
+#
+#   arm                          dt 0.25              dt 0.125
+#   committed calibration        6.37e-4 /  38 reb    6.23e-4 /  52 reb   (OLD MD clock)
+#   HEAD pre-flip  (mg)          1.00e-3 /  70 reb    1.85e-3 / 190 reb
+#   HEAD post-flip (mg3)         1.17e-3 /  74 reb    2.95e-3 / 244 reb   <- floor 2.5e-3
+#
+# Two separate things are visible here and they should not be conflated:
+#
+# 1. The committed calibration is STALE FOR A REASON THAT PREDATES THE WELL-FORM FLIP. Package
+#    10's MD time-step unit fix changed what "-maxtime 10000" and "-md.time_step 0.125" mean, so
+#    the same mg arm now produces 70/190 rebuilds where the Sep-18 table recorded 38/52, and its
+#    dt = 0.125 slope sits at 0.74x of the floor where this file's own rule ("~4x the largest
+#    measured slope") asks for 0.25x. The test only still passed pre-flip because of that 26 %
+#    of headroom.
+# 2. On top of that, mg3 IS reproducibly more dissipative on this particular bath. Measured with
+#    8 paired replicates (a 1e-5 A displacement; -md.seed does NOT perturb this run - 7 seeds give
+#    bit-identical trajectories): |slope| mg 1.854-1.986e-3 vs mg3 2.946-3.235e-3, paired
+#    difference +1.04e-3 to +1.25e-3 with 8/8 positive and no overlap; mg3 is above the floor in
+#    8/8 replicates, mg in 0/8. At dt = 0.25 (5 replicates) both arms stay below the floor.
+#    This is a DIFFERENT statistic from the one package 11 settled (that one is the per-step
+#    |dEpot| spike tail over 130 cells, where mg/mg2/mg3 are indistinguishable at n = 780/arm);
+#    it neither contradicts nor is contradicted by it.
+#
+# Why no recalibration was applied here: neither of the two routes this file's own history
+# offers is available without a judgement call. Re-deriving the floor by the documented rule
+# from the mg3 numbers gives ~1.2e-2 Eh/ps, which is the "gates almost nothing" outcome the
+# Sep-18 note above warns against. Moving the operating point does not work either - a scan of
+# 5000-16000 K (WORK_STATUS package 12) finds no temperature where the event count returns to
+# the calibrated band: below ~5200 K the bath produces zero events (MIN_REBUILDS would fail),
+# 5300-5500 K is a knife edge (2-2758 rebuilds over 100 K), 6000-12000 K falls smoothly from
+# 108/376 to 46/138 rebuilds, and at 13000 K the intramolecular break/re-form channel opens and
+# it jumps back to 248/696. The widest margin inside the smooth stretch is at 12000 K
+# (5.70e-4 / 1.28e-3, i.e. 4.4x / 2.0x below the floor), but it sits directly under that cliff.
+# ---------------------------------------------------------------------------
 TEMPERATURE=8000
 MAXTIME_FS=10000        # 10 ps, see calibration above
 PRINT_FREQUENCY_FS=100  # 0.1 ps -- dense enough for a determined slope fit

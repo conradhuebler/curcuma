@@ -21,14 +21,19 @@
 #      the acceptance criterion for the conserving share; if it stops holding, that mode has
 #      regressed.
 #   2. -gfnff.rev_share_form delivered must still show the old, bad profile - measured min
-#      deviation -89.4 kcal/mol - within 5 kcal/mol. That is a regression pin on the OLD
+#      deviation -90.2 kcal/mol - within 5 kcal/mol. That is a regression pin on the OLD
 #      behaviour, kept so that the arm cannot silently become the good one and hide a
 #      dispatch bug that routes both arms to the same code.
 #
 # UPDATED Sep 19, 2026 (WORK_STATUS package 6): the arms were swapped when `conserving` became
 # the default, and the delivered pin moved -87.0 -> -89.4 because `mg` became the default WELL
 # form in the same session (a deeper, wider well makes the artificial adduct slightly deeper).
-# The tolerance is unchanged at 5 kcal/mol.
+# UPDATED Sep 22, 2026 (WORK_STATUS package 12): `mg3` became the default well form, so the
+# delivered arm - which pins no well form of its own - is now evaluated with the mg3 well and its
+# min deviation moved -89.4 -> -90.2 kcal/mol. Same cause as the Sep 19 move, and again a
+# RE-MEASUREMENT of the old-bad behaviour, not a relaxation: the pin tracks the arm, the arm is
+# still the bad one, and the conserving default arm still comes out at -1.53 (floor -10).
+# The tolerance is unchanged at 5 kcal/mol in both updates.
 
 set -e
 
@@ -38,7 +43,7 @@ source "$SCRIPT_DIR/../test_utils.sh"
 TEST_NAME="gfnff - 03: rev-gfnff class-C radical-adduct falsifier (CH4 + H)"
 TEST_DIR="$SCRIPT_DIR"
 
-DELIVERED_MIN=-89.4      # kcal/mol, measured Sep 19, 2026 (binary 916847ff, mg well + delivered share)
+DELIVERED_MIN=-90.2      # kcal/mol, measured Sep 22, 2026 (mg3 well + delivered share; was -89.4 under mg)
 DELIVERED_TOL=5.0
 CONSERVING_FLOOR=-10.0
 
