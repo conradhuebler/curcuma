@@ -60,6 +60,14 @@ of the whole suite, none caused by the cherry-pick — orchestrator-verified eac
 
 ## Live agents
 
+**RUNNING since 2026-09-22: `package-12` (Opus)** — operator decision: `rev_well_form` default
+flips `mg` -> `mg3` (bond-order-resolved wells). Basis: package 9's accuracy gains (class-A rms
+22.15 -> 13.22, bond-length error vs r2SCAN-3c 0.025 -> 0.004 A) at the guard cost 1.0439 -> 1.0547,
+now that package 11 (11 700 trajectories) settled the smoothness tail as indistinguishable from
+`mg`. Full falsifier re-verification against package 9's recorded `mg3` numbers, ctest, test/doc
+re-pointing. Explicitly out of scope: `cli_simplemd_20` (still flagged since package 10, separate
+decision) and `rev_dt_cap` (still 0.25, separate decision). Status: `WORK_STATUS.md` package 12.
+
 **Orchestrator verification of package 11 (own rebuild, own code, 2026-09-22):** (a) the primary
 table recomputed independently from the 11 700 raw CSV rows with an own cluster bootstrap matches
 to 4 decimals (mg 0.0410 / mg2 0.0513 / mg3 0.0423 at 0.25 fs; 0.0449 / 0.0359 / 0.0513 at 0.125;
