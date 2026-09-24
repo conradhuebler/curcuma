@@ -206,18 +206,30 @@ void XTB::reduceToStandardForm(Eigen::MatrixXd& A, int n, int threads, bool& ok)
     ok = true;
     // -scf_reduce auto|sygst|trsm, -scf_reduce_threads N (Claude Generated, Sep 2026).
     // 'auto' with the default threshold of 8 is what this function did before.
+#ifdef CURCUMA_XTB_HAVE_LAPACK_SYEVD
     const bool use_trsm = (m_scf_reduce == "trsm")
         || (m_scf_reduce != "sygst" && threads >= m_scf_reduce_threads);
+#else
+    // No LAPACK in this build (dsygst_ is only declared under the BLAS guard
+    // above): the triangular-solve route is the only one available.
+    // Claude Generated (Sep 2026): fixes the non-BLAS build.
+    (void)threads;
+    const bool use_trsm = true;
+#endif
     if (use_trsm) {
         // A <- L^-1 A, then A <- A L^-T (BLAS dtrsm through Eigen's triangular solve).
         m_X.triangularView<Eigen::Lower>().solveInPlace(A);
         m_X.triangularView<Eigen::Lower>().transpose().template solveInPlace<Eigen::OnTheRight>(A);
         return;
     }
+#ifdef CURCUMA_XTB_HAVE_LAPACK_SYEVD
     const char uplo = 'L';
     int itype = 1, info = 0;
     dsygst_(&itype, &uplo, &n, A.data(), &n, m_X.data(), &n, &info);
     ok = (info == 0);
+#else
+    (void)n;
+#endif
 }
 
 /* ------------------------------------------------------------------ *
