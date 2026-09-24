@@ -1,22 +1,23 @@
 /*
  * <Native KS-DFT 1-Electron GTO Integrals -- implementation>
- * Copyright (C) 2019 - 2026 Conrad Hbler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * Claude Generated (WP1): Obara-Saika overlap, gradient-form kinetic,
  * McMurchie-Davidson nuclear attraction, and the cartesian->spherical d
- * transform. See dft_integrals.hpp for conventions and literature.
+ * transform. See qm_integrals.hpp for conventions and literature.
  *
  * This program is free software under GPL-3.0
  */
 
-#include "dft_integrals.hpp"
+#include "qm_integrals.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <map>
 #include <vector>
 
-namespace dft1e {
+namespace qmint {
 
 // Full-precision pi (the global.h `pi` is only 12 digits).
 static const double PI = 3.14159265358979323846264338327950288;
@@ -776,8 +777,10 @@ static double primitiveERI(int la, int ma, int na, int lb, int mb, int nb,
     return pref * val;
 }
 
-// Contracted (a b | c d) over the primitive contractions of the four AOs.
-static double contractedERIPair(const GTO::Orbital& a, const GTO::Orbital& b,
+// Contracted (a b | c d) over the primitive contractions of the four AOs -- the
+// textbook one-integral-at-a-time form. buildERI() below computes the same numbers
+// shell-quartet-blocked; this function stays as the readable reference.
+double contractedERI(const GTO::Orbital& a, const GTO::Orbital& b,
                                 const GTO::Orbital& c, const GTO::Orbital& d)
 {
     int la, ma, na, lb, mb, nb, lc, mc, nc, ld, md, nd;
@@ -820,98 +823,422 @@ void ERITensor::set8(int mu, int nu, int lam, int sig, double v)
     at(sig, lam, nu, mu) = v;
 }
 
-ERITensor buildERI(const std::vector<GTO::Orbital>& basis)
+// ---------------------------------------------------------------------------
+// Shell-quartet-blocked ERI build (Claude Generated, Sep 2026)
+//
+// The one-integral-at-a-time form above (contractedERI) recomputes, for every
+// AO *component* quartet, the Gaussian products, all six Hermite tables, the
+// Boys function and the whole R block -- although none of these depends on the
+// cartesian powers, only on the shells. A d-shell quartet thus repeats the same
+// primitive work 6^4 = 1296 times. This is the same pattern the native xTB
+// overlap/multipole kernels had (see docs/SQM_PERFORMANCE.md, "shell-pair-blocked
+// integral kernels"), and it is fixed the same way:
+//
+//   1. group the flat AO list into shells (same centre, exponents, L);
+//   2. precompute, ONCE per shell pair and primitive pair, the product exponent,
+//      product centre and the three Hermite tables up to the shell maxima
+//      (a table built for (LA, LB) holds every lower (i, j) as well);
+//   3. per shell quartet and primitive quartet, evaluate Boys + R once and
+//      contract it with the tables for every component quartet.
+//
+// On top: Schwarz screening |(ab|cd)| <= sqrt((ab|ab)) sqrt((cd|cd)) at shell-pair
+// level, and threads over bra shell pairs. Distinct canonical quartets write
+// disjoint tensor entries, so the threads need no synchronisation. The layout is
+// what a GPU port needs too: flat pair tables, one work item per quartet.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct EriShell {
+    int first = 0;                              ///< first AO index in the flat basis
+    int L = 0;                                  ///< total angular momentum
+    double x = 0, y = 0, z = 0;                 ///< centre (Bohr)
+    std::vector<double> exps;                   ///< primitive exponents
+    std::vector<std::array<int, 3>> lmn;        ///< cartesian powers per component
+    std::vector<std::vector<double>> coef;      ///< [component][primitive], pre-normalised
+};
+
+std::vector<EriShell> groupShells(const std::vector<GTO::Orbital>& basis)
 {
-    const int n = (int)basis.size();
-    ERITensor eri(n);
-    if (n == 0) return eri;
-    // Canonical quartet loop: mu<=nu, lam<=sig, and pair(mu,nu) <= pair(lam,sig).
-    // Each canonical value is computed once and written to all 8 permutations.
-    for (int mu = 0; mu < n; ++mu) {
-        for (int nu = mu; nu < n; ++nu) {
-            const long p1 = (long)mu * n + nu;  // pair index, mu<=nu
-            for (int lam = 0; lam < n; ++lam) {
-                for (int sig = lam; sig < n; ++sig) {
-                    const long p2 = (long)lam * n + sig;  // pair index, lam<=sig
-                    if (p1 > p2) continue;  // enforce pair(mu,nu) <= pair(lam,sig)
-                    const double v = contractedERIPair(basis[mu], basis[nu],
-                                                       basis[lam], basis[sig]);
-                    eri.set8(mu, nu, lam, sig, v);
+    std::vector<EriShell> shells;
+    const int n = static_cast<int>(basis.size());
+    for (int i = 0; i < n; ++i) {
+        int l, m, k;
+        GTO::orbitalTypeToComponents(basis[i].type, l, m, k);
+        const int L = l + m + k;
+        bool join = false;
+        if (!shells.empty()) {
+            const EriShell& s = shells.back();
+            const GTO::Orbital& prev = basis[i - 1];
+            join = s.L == L && prev.atom == basis[i].atom && prev.exponents == basis[i].exponents
+                && prev.x == basis[i].x && prev.y == basis[i].y && prev.z == basis[i].z
+                && static_cast<int>(s.lmn.size()) < (L + 1) * (L + 2) / 2;
+        }
+        if (!join) {
+            EriShell s;
+            s.first = i;
+            s.L = L;
+            s.x = basis[i].x; s.y = basis[i].y; s.z = basis[i].z;
+            s.exps = basis[i].exponents;
+            shells.push_back(std::move(s));
+        }
+        shells.back().lmn.push_back({ l, m, k });
+        shells.back().coef.push_back(basis[i].coefficients);
+    }
+    return shells;
+}
+
+/// One primitive pair of a shell pair: everything the quartet loop needs.
+struct PrimPair {
+    int ia = 0, ib = 0;
+    double p = 0, Px = 0, Py = 0, Pz = 0;
+    std::vector<double> Ex, Ey, Ez;  ///< flat [t][i][j], dims (LA+LB+1)(LA+1)(LB+1); K folded into Ex
+};
+
+struct ShellPair {
+    int A = 0, B = 0;
+    std::vector<PrimPair> prims;
+    double schwarz = 0.0;  ///< max over components of sqrt(|(ab|ab)|)
+};
+
+std::vector<double> flattenHermite(const std::vector<std::vector<std::vector<double>>>& E)
+{
+    std::vector<double> f;
+    for (const auto& t : E)
+        for (const auto& i : t)
+            f.insert(f.end(), i.begin(), i.end());
+    return f;
+}
+
+ShellPair makeShellPair(const std::vector<EriShell>& sh, int A, int B)
+{
+    ShellPair sp;
+    sp.A = A;
+    sp.B = B;
+    const EriShell& a = sh[A];
+    const EriShell& b = sh[B];
+    for (size_t ia = 0; ia < a.exps.size(); ++ia)
+        for (size_t ib = 0; ib < b.exps.size(); ++ib) {
+            PrimPair pp;
+            pp.ia = static_cast<int>(ia);
+            pp.ib = static_cast<int>(ib);
+            const double K = gaussianProductK(a.exps[ia], b.exps[ib], a.x, a.y, a.z, b.x, b.y, b.z,
+                                              pp.p, pp.Px, pp.Py, pp.Pz);
+            if (K == 0.0) continue;  // underflow: contributes exactly 0, as in primitiveERI
+            pp.Ex = flattenHermite(hermiteCoeffs(a.L, b.L, pp.Px - a.x, pp.Px - b.x, pp.p, K));
+            pp.Ey = flattenHermite(hermiteCoeffs(a.L, b.L, pp.Py - a.y, pp.Py - b.y, pp.p, 1.0));
+            pp.Ez = flattenHermite(hermiteCoeffs(a.L, b.L, pp.Pz - a.z, pp.Pz - b.z, pp.p, 1.0));
+            sp.prims.push_back(std::move(pp));
+        }
+    return sp;
+}
+
+/// Contracted (AB|CD) for every component quartet of four shells, written to
+/// out[((ca*ncB + cb)*ncC + cc)*ncD + cd]. Per primitive quartet the Boys
+/// function and R block are built once for all components.
+void shellQuartet(const std::vector<EriShell>& sh, const ShellPair& bra, const ShellPair& ket,
+                  std::vector<double>& out, std::vector<double>& R)
+{
+    const EriShell& A = sh[bra.A];
+    const EriShell& B = sh[bra.B];
+    const EriShell& C = sh[ket.A];
+    const EriShell& D = sh[ket.B];
+    const int nA = (int)A.lmn.size(), nB = (int)B.lmn.size(), nC = (int)C.lmn.size(), nD = (int)D.lmn.size();
+    out.assign((size_t)nA * nB * nC * nD, 0.0);
+
+    const int LAB = A.L + B.L, LCD = C.L + D.L;
+    const int Ltot = LAB + LCD;
+    // Hermite table strides: E[t][i][j] with i <= LA, j <= LB.
+    const int sAB_t = (A.L + 1) * (B.L + 1), sAB_i = B.L + 1;
+    const int sCD_t = (C.L + 1) * (D.L + 1), sCD_i = D.L + 1;
+    // R block strides (every Cartesian direction up to Ltot).
+    const int strideV = Ltot + 1;
+    const int strideU = (Ltot + 1) * strideV;
+    const int strideN = (Ltot + 1) * strideU;
+    R.resize((size_t)(Ltot + 1) * strideN);
+
+    for (const PrimPair& pb : bra.prims) {
+        for (const PrimPair& pk : ket.prims) {
+            const double p = pb.p, q = pk.p;
+            const double rho = p * q / (p + q);
+            const double Wx = pb.Px - pk.Px, Wy = pb.Py - pk.Py, Wz = pb.Pz - pk.Pz;
+            const double T = rho * (Wx * Wx + Wy * Wy + Wz * Wz);
+            const std::vector<double> F = boysArray(Ltot, T);
+            buildRblockERI(Ltot, Ltot, Ltot, Ltot, Wx, Wy, Wz, rho, F, R);
+            const double pref = 2.0 * std::pow(PI, 2.5) / (p * q * std::sqrt(p + q));
+
+            for (int ca = 0; ca < nA; ++ca) {
+                const double c_a = A.coef[ca][pb.ia];
+                const auto& la = A.lmn[ca];
+                for (int cb = 0; cb < nB; ++cb) {
+                    const double c_ab = c_a * B.coef[cb][pb.ib];
+                    const auto& lb = B.lmn[cb];
+                    const int tmax = la[0] + lb[0], umax = la[1] + lb[1], vmax = la[2] + lb[2];
+                    for (int cc = 0; cc < nC; ++cc) {
+                        const auto& lc = C.lmn[cc];
+                        for (int cd = 0; cd < nD; ++cd) {
+                            const auto& ld = D.lmn[cd];
+                            const double cprod = c_ab * C.coef[cc][pk.ia] * D.coef[cd][pk.ib];
+                            const int taumax = lc[0] + ld[0], upsmax = lc[1] + ld[1], ommax = lc[2] + ld[2];
+                            double val = 0.0;
+                            for (int t = 0; t <= tmax; ++t) {
+                                const double et = pb.Ex[t * sAB_t + la[0] * sAB_i + lb[0]];
+                                if (et == 0.0) continue;
+                                for (int u = 0; u <= umax; ++u) {
+                                    const double eu = pb.Ey[u * sAB_t + la[1] * sAB_i + lb[1]];
+                                    if (eu == 0.0) continue;
+                                    for (int v = 0; v <= vmax; ++v) {
+                                        const double ev = pb.Ez[v * sAB_t + la[2] * sAB_i + lb[2]];
+                                        if (ev == 0.0) continue;
+                                        const double braE = et * eu * ev;
+                                        for (int tau = 0; tau <= taumax; ++tau) {
+                                            const double et2 = pk.Ex[tau * sCD_t + lc[0] * sCD_i + ld[0]];
+                                            if (et2 == 0.0) continue;
+                                            for (int ups = 0; ups <= upsmax; ++ups) {
+                                                const double eu2 = pk.Ey[ups * sCD_t + lc[1] * sCD_i + ld[1]];
+                                                if (eu2 == 0.0) continue;
+                                                for (int om = 0; om <= ommax; ++om) {
+                                                    const double ev2 = pk.Ez[om * sCD_t + lc[2] * sCD_i + ld[2]];
+                                                    if (ev2 == 0.0) continue;
+                                                    const double sgn = ((tau + ups + om) & 1) ? -1.0 : 1.0;
+                                                    val += braE * et2 * eu2 * ev2 * sgn
+                                                         * R[(t + tau) * strideN + (u + ups) * strideU + (v + om) * strideV];
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            out[((size_t)(ca * nB + cb) * nC + cc) * nD + cd] += cprod * pref * val;
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+}  // namespace
+
+ERITensor buildERI(const std::vector<GTO::Orbital>& basis, int threads, double screening,
+                   const Matrix* Q)
+{
+    const int ncart = (int)basis.size();
+    const bool spherical = (Q != nullptr && Q->size() != 0);
+    const int n = spherical ? (int)Q->cols() : ncart;
+    ERITensor eri(n);
+    if (n == 0) return eri;
+
+    const std::vector<EriShell> sh = groupShells(basis);
+    const int ns = (int)sh.size();
+
+    // Output block of every shell: first output index, width, and (spherical
+    // only) the cartesian -> output transform T (ncomp x width) cut out of Q.
+    // Q is block-diagonal per shell, so the transform can be applied to each
+    // shell quartet right after it is computed -- the full cartesian tensor is
+    // never formed. For s/p shells T is the identity.
+    std::vector<int> ofirst(ns), owidth(ns);
+    std::vector<Eigen::MatrixXd> T(ns);
+    std::vector<bool> identity(ns, true);
+    for (int A = 0; A < ns; ++A) {
+        const int nc = (int)sh[A].lmn.size();
+        if (!spherical) { ofirst[A] = sh[A].first; owidth[A] = nc; continue; }
+        int lo = n, hi = -1;
+        for (int j = 0; j < n; ++j)
+            for (int a = 0; a < nc; ++a)
+                if ((*Q)(sh[A].first + a, j) != 0.0) { lo = std::min(lo, j); hi = std::max(hi, j); }
+        ofirst[A] = lo;
+        owidth[A] = hi - lo + 1;
+        T[A] = Eigen::MatrixXd::Zero(nc, owidth[A]);
+        for (int a = 0; a < nc; ++a)
+            for (int j = 0; j < owidth[A]; ++j)
+                T[A](a, j) = (*Q)(sh[A].first + a, lo + j);
+        identity[A] = (nc == owidth[A]) && T[A].isIdentity(0.0);
+    }
+    // Contract one index of a 4-index block (dims d[0..3]) with T, in place.
+    auto transformAxis = [](std::vector<double>& blk, std::vector<double>& tmp, int d[4], int k,
+                            const Eigen::MatrixXd& Tk) {
+        size_t outer = 1, inner = 1;
+        for (int m = 0; m < k; ++m) outer *= d[m];
+        for (int m = k + 1; m < 4; ++m) inner *= d[m];
+        const int nin = d[k], nout = (int)Tk.cols();
+        tmp.assign(outer * nout * inner, 0.0);
+        for (size_t o = 0; o < outer; ++o)
+            for (int a = 0; a < nin; ++a)
+                for (int j = 0; j < nout; ++j) {
+                    const double t = Tk(a, j);
+                    if (t == 0.0) continue;
+                    const double* x = &blk[(o * nin + a) * inner];
+                    double* y = &tmp[(o * nout + j) * inner];
+                    for (size_t r = 0; r < inner; ++r) y[r] += t * x[r];
+                }
+        blk.swap(tmp);
+        d[k] = nout;
+    };
+
+    // Shell pairs A <= B with their primitive-pair tables.
+    std::vector<ShellPair> pairs;
+    pairs.reserve((size_t)ns * (ns + 1) / 2);
+    for (int A = 0; A < ns; ++A)
+        for (int B = A; B < ns; ++B)
+            pairs.push_back(makeShellPair(sh, A, B));
+    const int np = (int)pairs.size();
+
+    // Schwarz factors from the diagonal quartets (AB|AB).
+    {
+        std::vector<double> buf, R;
+        for (ShellPair& sp : pairs) {
+            shellQuartet(sh, sp, sp, buf, R);
+            const int nA = (int)sh[sp.A].lmn.size(), nB = (int)sh[sp.B].lmn.size();
+            double mx = 0.0;
+            for (int a = 0; a < nA; ++a)
+                for (int b = 0; b < nB; ++b)
+                    mx = std::max(mx, std::abs(buf[((size_t)(a * nB + b) * nA + a) * nB + b]));
+            sp.schwarz = std::sqrt(mx);
+        }
+    }
+
+    // Canonical shell quartets: pair(AB) <= pair(CD). Every AO quartet of a shell
+    // quartet is written with set8, so A==B or AB==CD blocks just rewrite the same
+    // value into already-written entries.
+#ifdef _OPENMP
+#pragma omp parallel num_threads(threads > 0 ? threads : 1)
+#endif
+    {
+        std::vector<double> buf, R, tmp;
+#ifdef _OPENMP
+#pragma omp for schedule(dynamic, 1)
+#endif
+        for (int i = 0; i < np; ++i) {
+            const ShellPair& bra = pairs[i];
+            const EriShell& A = sh[bra.A];
+            const EriShell& B = sh[bra.B];
+            for (int j = i; j < np; ++j) {
+                const ShellPair& ket = pairs[j];
+                if (bra.schwarz * ket.schwarz < screening) continue;
+                shellQuartet(sh, bra, ket, buf, R);
+                const EriShell& C = sh[ket.A];
+                const EriShell& D = sh[ket.B];
+                int d[4] = { (int)A.lmn.size(), (int)B.lmn.size(), (int)C.lmn.size(), (int)D.lmn.size() };
+                const int s4[4] = { bra.A, bra.B, ket.A, ket.B };
+                for (int k = 0; k < 4; ++k)
+                    if (spherical && !identity[s4[k]])
+                        transformAxis(buf, tmp, d, k, T[s4[k]]);
+                const int oA = ofirst[bra.A], oB = ofirst[bra.B], oC = ofirst[ket.A], oD = ofirst[ket.B];
+                for (int a = 0; a < d[0]; ++a)
+                    for (int b = 0; b < d[1]; ++b)
+                        for (int c = 0; c < d[2]; ++c)
+                            for (int e = 0; e < d[3]; ++e)
+                                eri.set8(oA + a, oB + b, oC + c, oD + e,
+                                         buf[((size_t)(a * d[1] + b) * d[2] + c) * d[3] + e]);
+            }
+        }
+    }
+    (void)threads;
     return eri;
 }
 
-Matrix buildCoulomb(const ERITensor& eri, const Matrix& P)
+// J_munu = sum_{lam,sig} (mu nu | lam sig) P_lamsig: with the tensor stored as an
+// (n^2 x n^2) row-major matrix this is one matrix-vector product, J = ERI * vec(P).
+// Written as one dot product per (mu, nu) row so it threads trivially (and maps
+// 1:1 onto a cuBLAS GEMV for a GPU port).
+Matrix buildCoulomb(const ERITensor& eri, const Matrix& P, int threads)
 {
     const int n = eri.n();
+    // Below ~32 functions the OpenMP start-up costs more than the O(n^4) work
+    // (H2O/def2-SVP: 0.6 ms serial vs 3.1 ms on 4 threads).
+    if (n < 32) threads = 1;
     Matrix J = Matrix::Zero(n, n);
-    for (int mu = 0; mu < n; ++mu) {
+    const Matrix Pc = P;  // row-major, contiguous
+    const Eigen::Map<const Eigen::VectorXd> pvec(Pc.data(), (Eigen::Index)n * n);
+    const double* base = eri.data();
+#ifdef _OPENMP
+#pragma omp parallel for num_threads(threads > 0 ? threads : 1) schedule(static)
+#endif
+    for (int mu = 0; mu < n; ++mu)
         for (int nu = 0; nu < n; ++nu) {
-            double s = 0.0;
-            for (int lam = 0; lam < n; ++lam) {
-                for (int sig = 0; sig < n; ++sig) {
-                    s += P(lam, sig) * eri(mu, nu, lam, sig);  // (mu nu | lam sig)
-                }
-            }
-            J(mu, nu) = s;
+            const Eigen::Map<const Eigen::VectorXd> row(base + ((size_t)mu * n + nu) * n * n, (Eigen::Index)n * n);
+            J(mu, nu) = row.dot(pvec);
         }
-    }
+    (void)threads;
     return J;
 }
 
-Matrix buildExchange(const ERITensor& eri, const Matrix& P)
+// K_munu = sum_{lam,sig} (mu lam | nu sig) P_lamsig. For fixed (mu, lam) the block
+// B(nu, sig) = (mu lam | nu sig) is a contiguous n x n row-major matrix, so
+// K.row(mu) += (B * P.row(lam)^T)^T -- one GEMV per (mu, lam).
+Matrix buildExchange(const ERITensor& eri, const Matrix& P, int threads)
 {
     const int n = eri.n();
+    // Below ~32 functions the OpenMP start-up costs more than the O(n^4) work
+    // (H2O/def2-SVP: 0.6 ms serial vs 3.1 ms on 4 threads).
+    if (n < 32) threads = 1;
     Matrix K = Matrix::Zero(n, n);
+    const Matrix Pc = P;
+    const double* base = eri.data();
+    using RowMat = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+#ifdef _OPENMP
+#pragma omp parallel for num_threads(threads > 0 ? threads : 1) schedule(static)
+#endif
     for (int mu = 0; mu < n; ++mu) {
-        for (int nu = 0; nu < n; ++nu) {
-            double s = 0.0;
-            for (int lam = 0; lam < n; ++lam) {
-                for (int sig = 0; sig < n; ++sig) {
-                    s += P(lam, sig) * eri(mu, lam, nu, sig);  // (mu lam | nu sig)
-                }
-            }
-            K(mu, nu) = s;
+        Eigen::VectorXd acc = Eigen::VectorXd::Zero(n);
+        for (int lam = 0; lam < n; ++lam) {
+            const Eigen::Map<const RowMat> B(base + ((size_t)mu * n + lam) * n * n, n, n);
+            acc.noalias() += B * Pc.row(lam).transpose();
         }
+        K.row(mu) = acc.transpose();
     }
+    (void)threads;
     return K;
 }
 
+// 4-index transform ERI_sph[i,j,k,l] = sum Q[a,i] Q[b,j] Q[c,k] Q[d,l] ERI[a,b,c,d]
+// as four one-index transforms (O(n^5) instead of the O(n^8) direct sum), each
+// using only the nonzeros of Q. Q is block-diagonal per shell -- s and p columns
+// have one entry, a 5d column mixes the six cartesian d components of its own
+// shell -- so a pass costs about n^4 multiply-adds, not n^5.
+// Axis k of a tensor with dims (n0,n1,n2,n3) is contracted as
+//   out[o][i][in] = sum_{(a,q) in column i} q * X[o][a][in],
+// with o the indices before k and in the ones after (a contiguous run of length
+// `inner`, so the update is a vectorisable axpy).
 ERITensor applySphericalTransformERI(const ERITensor& eriCart, const Matrix& Q)
 {
     const int ncart = eriCart.n();
     if (Q.size() == 0 || ncart == 0) return eriCart;  // no d -> keep cartesian
     const int nsph = (int)Q.cols();
-    ERITensor eriSph(nsph);
-    // ERI_sph[i,j,k,l] = sum_{a,b,c,d} Q[a,i] Q[b,j] Q[c,k] Q[d,l] ERI_cart[a,b,c,d]
+
+    // Nonzero pattern of Q per spherical column.
+    std::vector<std::vector<std::pair<int, double>>> col(nsph);
     for (int i = 0; i < nsph; ++i)
-        for (int j = 0; j < nsph; ++j)
-            for (int k = 0; k < nsph; ++k)
-                for (int l = 0; l < nsph; ++l) {
-                    double s = 0.0;
-                    for (int a = 0; a < ncart; ++a) {
-                        const double qa = Q(a, i);
-                        if (qa == 0.0) continue;
-                        for (int b = 0; b < ncart; ++b) {
-                            const double qb = Q(b, j);
-                            if (qb == 0.0) continue;
-                            for (int c = 0; c < ncart; ++c) {
-                                const double qc = Q(c, k);
-                                if (qc == 0.0) continue;
-                                for (int d = 0; d < ncart; ++d) {
-                                    const double qd = Q(d, l);
-                                    if (qd == 0.0) continue;
-                                    s += qa * qb * qc * qd * eriCart(a, b, c, d);
-                                }
-                            }
-                        }
-                    }
-                    eriSph.at(i, j, k, l) = s;
+        for (int a = 0; a < ncart; ++a)
+            if (Q(a, i) != 0.0) col[i].push_back({ a, Q(a, i) });
+
+    std::vector<double> cur(eriCart.data(), eriCart.data() + (size_t)ncart * ncart * ncart * ncart);
+    int dims[4] = { ncart, ncart, ncart, ncart };
+    for (int k = 0; k < 4; ++k) {
+        size_t outer = 1, inner = 1;
+        for (int m = 0; m < k; ++m) outer *= dims[m];
+        for (int m = k + 1; m < 4; ++m) inner *= dims[m];
+        const int nin = dims[k];
+        std::vector<double> next(outer * nsph * inner, 0.0);
+        for (size_t o = 0; o < outer; ++o) {
+            const double* X = cur.data() + o * nin * inner;
+            double* Y = next.data() + o * nsph * inner;
+            for (int i = 0; i < nsph; ++i) {
+                double* yi = Y + (size_t)i * inner;
+                for (const auto& aq : col[i]) {
+                    const double* xa = X + (size_t)aq.first * inner;
+                    const double q = aq.second;
+                    for (size_t r = 0; r < inner; ++r) yi[r] += q * xa[r];
                 }
+            }
+        }
+        cur.swap(next);
+        dims[k] = nsph;
+    }
+    ERITensor eriSph(nsph);
+    std::copy(cur.begin(), cur.end(), eriSph.data());
     return eriSph;
 }
 
-}  // namespace dft1e
+}  // namespace qmint

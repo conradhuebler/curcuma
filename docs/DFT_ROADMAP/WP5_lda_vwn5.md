@@ -16,7 +16,7 @@ V_XC-Matrix auf Grid; LDA-SCF.
       fehlerhaftes `lda_correlation_*.f90`, dokumentiert warum); Ex/Ec-Energie +
       Vxc-Potentialmatrix (ρ^(1/3), ρ^(4/3)-Skalare, Summe über Grid).
       Functional-Dispatch `select_rung`-Modell.
-- [ ] SCF LDA-Pfad in `dft_scf.cpp` (Fock = Hc + J + Vxc). LDA = Method-Name
+- [ ] SCF LDA-Pfad in `qm_scf.cpp` (Fock = Hc + J + Vxc). LDA = Method-Name
       `-method lda` (kein `-dft.functional`).
 
 ## Erfolgskriterien

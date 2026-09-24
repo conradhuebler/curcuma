@@ -13,7 +13,8 @@ Slater exponents `eta * slater_exp(Z)`.
 WHAT IS VERIFIED (against /opt/orca_6_1/otool_gcp, the gCP tool ORCA ships):
   - H2 reproduces otool_gcp to 4.6e-10 Eh, which pins sigma/alpha/beta/eta/emiss
     for H and the whole 1s-1s Slater-overlap path.
-  - All 10 dft_1e molecules are within 2.5e-7 Eh, six of them within 1e-8.
+  - All 10 qm_1e molecules were within 2.5e-7 Eh, six of them within 1e-8 (with
+    the old rounded EMISS table, see RESOLVED below).
   - The A_n(x) = int_1^inf t^n e^{-xt} dt and B_n(x) = int_-1^1 t^n e^{-xt} dt
     auxiliaries match numerical quadrature to ~1e-15 for every n used.
   - Fortran is case-insensitive: the ZA/ZB in the source ARE za/zb, so the <1s|2s>
@@ -22,11 +23,11 @@ WHAT IS VERIFIED (against /opt/orca_6_1/otool_gcp, the gCP tool ORCA ships):
   - B_n must use its closed form, NOT the truncated (i<=12) `bint` series, for the
     different-exponent branch; using the series there costs ~1e-4 Eh on BeH2/BH.
 
-OPEN: the residual ~1e-7 on BeH2/BH/HF/NH3/H2O is not explained by the A/B
-auxiliaries (verified) nor by the constants (H2 pins them). The leading
-hypothesis is that otool_gcp v1.06 (Sep 2014) carries older per-element tables for
-the heavier elements than the current param.f90 -- to be settled before the C++
-port is trusted. 12-2026.
+RESOLVED (Sep 2026): the former ~1e-7 residual on BeH2/BH/HF/NH3/H2O came from
+this script's EMISS table, rounded to 5 digits; param.f90 has 6 (e.g. B 0.224237,
+not 0.22424). With the exact values the witness matches the simple-dftd3 1.6
+Python API to <= 7e-10. The remaining ~1e-10 is the reference's single-precision
+Slater-exponent literals (see gcp.cpp). The C++ port is gcp.{h,cpp}.
 
 Usage:  gcp_reference_witness.py <file.xyz> [<file.xyz> ...]
 """
@@ -35,8 +36,8 @@ import math
 # NOTE: Fortran is case-insensitive -- ZA/ZB in the source ARE za/zb, so the norm uses
 # the exponents *after* the <2s|1s> swap.
 ALPHA,BETA,ETA,SIGMA = 1.1549,1.1763,1.1526,0.1290
-EMISS={1:0.04240,2:0.02832,3:0.17787,4:0.17160,5:0.22424,6:0.27995,7:0.35791,
-       8:0.47901,9:0.63852,10:0.83235}
+EMISS={1:0.042400,2:0.028324,3:0.177871,4:0.171596,5:0.224237,6:0.279950,7:0.357906,
+       8:0.479012,9:0.638518,10:0.832349}
 NBAS ={1:1,2:1,3:5,4:5,5:5,6:5,7:5,8:5,9:5,10:5}
 SL_S=[1.2000,1.6469,0.6534,1.0365,1.3990,1.7210,2.0348,2.2399,2.5644,2.8812]
 SL_P=[0.0000,0.0000,0.5305,0.8994,1.2685,1.6105,1.9398,2.0477,2.4022,2.7421]

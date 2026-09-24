@@ -13,7 +13,7 @@
 #include <tuple>
 #include <vector>
 
-#include "dft_integrals.hpp"  // primitiveNorm, normalizeOrbitalSelfOverlap (WP1)
+#include "qm_integrals.hpp"  // primitiveNorm, normalizeOrbitalSelfOverlap (WP1)
 #include "GTOIntegrals.hpp"
 #include "STOIntegrals.hpp"
 
@@ -450,11 +450,11 @@ inline std::vector<GTO::Orbital> createGTOFromBasis(
         // Turbomole convention: rawCoeffs are for normalized primitives; multiply
         // by primitiveNorm to express the contraction over unnormalized primitives.
         for (size_t a = 0; a < exps.size(); ++a)
-            orbital.coefficients[a] = rawCoeffs[a] * dft1e::primitiveNorm(exps[a], l, m, n);
+            orbital.coefficients[a] = rawCoeffs[a] * qmint::primitiveNorm(exps[a], l, m, n);
         orbital.VSIP = vsip;
         orbital.atom = atomIndex;
         // Renormalize the whole contracted function so S_ii = 1 (matches ORCA).
-        dft1e::normalizeOrbitalSelfOverlap(orbital);
+        qmint::normalizeOrbitalSelfOverlap(orbital);
         return orbital;
     };
 
@@ -477,7 +477,7 @@ inline std::vector<GTO::Orbital> createGTOFromBasis(
             }
         } break;
         case D_SHELL: {
-            // Order MUST match dft_integrals.cpp buildSphericalTransform:
+            // Order MUST match qm_integrals.cpp buildSphericalTransform:
             //   [DXX, DYY, DZZ, DXY, DXZ, DYZ]
             for (int c = 0; c < shell.numContractions; ++c) {
                 gtoOrbitals.push_back(makeOrbital(GTO::OrbitalType::DXX, 2, 0, 0,

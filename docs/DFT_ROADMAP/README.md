@@ -10,9 +10,11 @@ aus **xcDFT (TCCM winter school 2019: DFT)** unter
 **Keine Sammel-`-method dft`.** Jedes Funktional ist ein eigener Method-Name
 (wie `gfn1`/`gfn2`/`pm3` in curcuma): `-method hf`, `-method lda`, `-method pbe`,
 `-method b3lyp`. Der Functional-Wert wird im `MethodFactory` auf
-`DFTMethod(DFTFunctional::..., config)` abgebildet. Gemeinsame Parameter (Basis,
-Grid, SCF-Optionen) liegen im Parameter-Modul `dft` (`-dft.basis`,
-`-dft.grid`, `-dft.scf_*`); `functional` ist **kein** Parameter.
+`QMMethod(QMFunctional::..., config)` abgebildet (bis Sep 2026 `DFTMethod`/`DFTFunctional`).
+Gemeinsame Parameter (Basis, Grid, SCF-Optionen) liegen im Parameter-Modul `qm`
+(`-qm.basis`, `-qm.grid`, `-qm.scf_*`; das alte `-dft.*` wird weiter gelesen);
+`functional` ist **kein** Parameter. HF-3c ist seit Sep 2026 nativ (`-method hf-3c`),
+siehe [NATIVE_QM_IMPLEMENTATION.md](../NATIVE_QM_IMPLEMENTATION.md).
 
 ## Quellenangabe
 
@@ -46,9 +48,9 @@ WP0 (Gerüst/Setup)
 | WP | Titel | Status | Datei |
 |----|-------|--------|-------|
 | WP0 | Gerüst, Quellenangabe, Setup | ⚙️ machine-tested | `WP0_geruest_setup.md` |
-| WP1 | GTO-1e-Integrale (S/T/V) | ⚙️ machine-tested (`ctest -L dft_1e` 10/10) | `WP1_gto_1e_integrale.md` |
-| WP2 | 4-Zentren-ERI (McMurchie-Davidson) | ⚙️ machine-tested (`ctest -L dft_2e` 10/10) | `WP2_eri_mcmurchie_davidson.md` |
-| WP3 | HF-SCF (rung 666) — hartes Gate | ⚠️ offen | `WP3_hf_scf_gate.md` |
+| WP1 | GTO-1e-Integrale (S/T/V) | ⚙️ machine-tested (`ctest -L qm_1e` 10/10) | `WP1_gto_1e_integrale.md` |
+| WP2 | 4-Zentren-ERI (McMurchie-Davidson) | ⚙️ machine-tested (`ctest -L qm_2e` 10/10) | `WP2_eri_mcmurchie_davidson.md` |
+| WP3 | HF-SCF (rung 666) — hartes Gate | ⚙️ machine-tested (10/10 vs ORCA ≤4e-9) | `WP3_hf_scf_gate.md` |
 | WP4 | DFT-Grid (Euler-Maclaurin + Lebedev + Becke) | ⚠️ offen | `WP4_dft_grid_becke.md` |
 | WP5 | LDA (Slater-Dirac + VWN5) | ⚠️ offen | `WP5_lda_vwn5.md` |
 | WP6 | PBE-GGA (+ ∇ρ) | ⚠️ offen | `WP6_pbe_gga.md` |

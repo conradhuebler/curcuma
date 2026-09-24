@@ -36,7 +36,7 @@ Hybrid-Functional B3LYP: 0.20·HF + 0.80·B88 + 0.72·LYP + 0.19·VWN5_1
   (Lypsche α=0.81-Formulierung) — in Doku exakt festhalten, Toleranz gegen
   ORCA-Variante prüfen.
 - K_HF: Wiederverwendung aus WP2 (`fock_exchange_potential.f90:22-30` Schema,
-  in curcuma `dft_integrals.cpp`); HF-SCF-Pfad aus WP3 zeigt den K-Build-Loop.
+  in curcuma `qm_integrals.cpp`); HF-SCF-Pfad aus WP3 zeigt den K-Build-Loop.
 - Hybrid-SCF: `xtb_scf.cpp` als Gerüst (geschlossene Schale = direkter K, kein
   CP-KSCF); `xtb_response.cpp` nur Referenz, falls später offene Schale.
 - Theorie-Quellen (Doku): Stephens/Becke/Frisch 1994; Becke 1993 (ursprüngliche

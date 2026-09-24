@@ -11,7 +11,7 @@ Native 1e-Integrale für kontrahierte kartesische Gauß-Basis; Basis-Laden via
 
 ## Deliverables
 
-- [x] `dft_integrals.hpp/.cpp`: Obara-Saika 1986 Rekurrenz (J. Chem. Phys. 84,
+- [x] `qm_integrals.hpp/.cpp`: Obara-Saika 1986 Rekurrenz (J. Chem. Phys. 84,
       3963) für kontrahierte kartesische Gauß-Overlap, kinetische Energie
       (Gradienten-Identität aus verschobenen Overlap-Primitiven) und
       Kernanziehung (McMurchie-Davidson Hermite + Boys-Funktion), je mit
@@ -50,7 +50,7 @@ Native 1e-Integrale für kontrahierte kartesische Gauß-Basis; Basis-Laden via
 
 ## Validierungsergebnisse
 
-`ctest -L dft_1e` — 10/10 PASS (H2, He, LiH, BeH2, BH, CH4, NH3, H2O, HF, Ne).
+`ctest -L qm_1e` — 10/10 PASS (H2, He, LiH, BeH2, BH, CH4, NH3, H2O, HF, Ne).
 Drei unabhängige Gates pro Molekül:
 
 **(a) Kernel-Gate (kartesisch curcuma vs Python-Zeuge, tol 1e-10) — alle 10 ≤1e-14:**
@@ -106,5 +106,5 @@ also unterscheiden sich die Spektren tatsächlich.
 
 ### Referenz-Regeneration (ORCA installiert)
 ```bash
-python3 scripts/dft_1e_reference.py test_cases/dft_1e/H2O.xyz   # -> H2O.orca_ref.json
+python3 scripts/qm_1e_reference.py test_cases/qm_1e/H2O.xyz   # -> H2O.orca_ref.json
 ```

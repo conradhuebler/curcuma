@@ -25,7 +25,8 @@
 // Method implementations
 #include "ff_methods/forcefield_method.h"
 #include "ff_methods/gfnff_method.h"
-#include "qm_methods/dft_method.h"  // Claude Generated: native KS-DFT (hf/lda/pbe/b3lyp)
+#include "qm_methods/qm_method.h"    // Claude Generated: native QM engine (hf/lda/pbe/b3lyp)
+#include "qm_methods/hf3c_method.h"  // Claude Generated: native HF-3c composite (Sep 2026)
 #include "qm_methods/dispersion_method.h"
 #include "qm_methods/eht_method.h"
 #include "qm_methods/external_gfnff_method.h"
@@ -452,18 +453,27 @@ const std::vector<MethodDescriptor>& MethodFactory::methodTable()
           [](const std::string&, const json& c) -> std::unique_ptr<ComputationalMethod> { return std::make_unique<NDDOMethod>(NDDOMethodType::AM1, c); } },
         { {"pm6"}, "Quantum Methods (native)", "PM6 (NDDO)", always, {{"Native", always}},
           [](const std::string&, const json& c) -> std::unique_ptr<ComputationalMethod> { return std::make_unique<NDDOMethod>(NDDOMethodType::PM6, c); } },
-        // Claude Generated: native KS-DFT. Each functional is its own method name; the
-        // functional is fixed here, never a parameter. Shared settings live in -dft.*.
+        // Claude Generated: native ab-initio QM engine. Each level is its own method
+        // name; it is fixed here, never a parameter. Shared settings live in -qm.*
+        // (the pre-Sep-2026 -dft.* scope is still merged).
         { {"hf", "lda", "pbe", "b3lyp"}, "Quantum Methods (native)",
-          "Native KS-DFT (WP1 1e + WP2 ERI; SCF/XC = WP3+, not converging yet)",
+          "Native ab-initio QM: hf = closed-shell RHF (validated vs ORCA); lda/pbe/b3lyp = E_nn only, V_xc pending",
           always, {{"Native", always}},
           [](const std::string& m, const json& c) -> std::unique_ptr<ComputationalMethod> {
-              const DFTFunctional f = (m == "hf")    ? DFTFunctional::HF
-                                    : (m == "lda")   ? DFTFunctional::LDA
-                                    : (m == "pbe")   ? DFTFunctional::PBE
-                                                     : DFTFunctional::B3LYP;
-              CurcumaLogger::success("Method '" + m + "' resolved to native KS-DFT");
-              return std::make_unique<DFTMethod>(f, c); } },
+              const QMFunctional f = (m == "hf")    ? QMFunctional::HF
+                                    : (m == "lda")   ? QMFunctional::LDA
+                                    : (m == "pbe")   ? QMFunctional::PBE
+                                                     : QMFunctional::B3LYP;
+              CurcumaLogger::success("Method '" + m + "' resolved to native QM engine");
+              return std::make_unique<QMMethod>(f, c); } },
+        // Claude Generated (Sep 2026): native HF-3c = HF/MINIX + D3(BJ) + gCP + SRB.
+        // The external ORCA HF-3c is reachable as "orca-hf-3c".
+        { {"hf-3c", "hf3c"}, "Quantum Methods (native)",
+          "Native HF-3c (HF/MINIX + D3BJ + gCP + SRB; H-Ne, closed shell, energy only)",
+          always, {{"Native", always}},
+          [](const std::string&, const json& c) -> std::unique_ptr<ComputationalMethod> {
+              CurcumaLogger::success("Method 'hf-3c' resolved to native HF-3c");
+              return std::make_unique<HF3CMethod>(c); } },
         // ---- native force fields ----
         { {"gfnff", "gfnff-fast"}, "Force Fields (native)", "GFN-FF, native (gfnff-fast: frozen charges/CN; -gpu cuda|rocm)",
           always, {{"Native", always},
@@ -501,7 +511,7 @@ const std::vector<MethodDescriptor>& MethodFactory::methodTable()
         { {"d4"}, "Dispersion Corrections", "DFT-D4 (external cpp-d4)", hasD4, {{"DFT-D4", hasD4}},
           [](const std::string&, const json& c) { return createDFTD4(c); } },
         // ---- ORCA (external process) ----
-        { {"hf-3c", "b97-3c", "r2scan-3c", "pbeh-3c", "orca"}, "ORCA (external process)", "ORCA composite methods / custom input (-orca_input)",
+        { {"orca-hf-3c", "b97-3c", "r2scan-3c", "pbeh-3c", "orca"}, "ORCA (external process)", "ORCA composite methods / custom input (-orca_input)",
           hasOrca, {{"ORCA", hasOrca}},
           [](const std::string& m, const json& c) { return createOrca(m, c); } },
     };
@@ -523,7 +533,7 @@ const std::vector<std::string>& MethodFactory::methodParameterScopes()
     // scopes; consumed by EnergyCalculator, the opt/sp driver, SimpleMD and ConfSearch.
     static const std::vector<std::string> scopes = {
         "gfnff", "eeq_solver", "gfnff_external", "forcefield", "uff", "qmdff",
-        "xtb", "tblite", "ulysses", "eht", "orca", "dft",
+        "xtb", "tblite", "ulysses", "eht", "orca", "qm", "dft",
         "d3", "d4", "dftd3", "dftd4", "d3param", "d4param"
     };
     return scopes;

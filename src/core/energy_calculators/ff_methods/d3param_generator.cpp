@@ -1,6 +1,6 @@
 /*
  * DFT-D3 Parameter Generator for Curcuma
- * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -877,6 +877,25 @@ D3ParameterGenerator D3ParameterGenerator::createForBP86()
     return D3ParameterGenerator(config);
 }
 
+D3ParameterGenerator D3ParameterGenerator::createForHF3C()
+{
+    // Claude Generated (Sep 2026): HF-3c D3(BJ), Sure & Grimme, JCC 34, 1672 (2013).
+    // simple-dftd3 [parameter.hf3c] d3.bj = {a1=0.4171, s8=0.8777, a2=2.9149}; ORCA's
+    // HF-3c prints the same four numbers ("HF/MINIX parameters") and reports only
+    // E6/E8, so the three-body ATM term is off (s9 = 0). With s9 = 0 simple-dftd3
+    // reproduces ORCA's H2O value -0.002646402235 Eh to all 12 printed digits.
+    json config_json;
+    config_json["d3_s6"] = 1.0;
+    config_json["d3_s8"] = 0.8777;
+    config_json["d3_a1"] = 0.4171;
+    config_json["d3_a2"] = 2.9149;
+    config_json["d3_s9"] = 0.0;
+    config_json["d3_alp"] = 14.0;
+
+    ConfigManager config("d3param", config_json);
+    return D3ParameterGenerator(config);
+}
+
 D3ParameterGenerator D3ParameterGenerator::createForMethod(const std::string& method)
 {
     std::string lower_method = method;
@@ -900,10 +919,12 @@ D3ParameterGenerator D3ParameterGenerator::createForMethod(const std::string& me
         return createForPBE();
     } else if (lower_method == "bp86") {
         return createForBP86();
+    } else if (lower_method == "hf3c" || lower_method == "hf-3c") {
+        return createForHF3C();
     } else {
         throw std::invalid_argument(
             "Unknown D3 preset: " + method +
-            ". Supported: pbe0, blyp, b3lyp, tpss, pbe, bp86, gfnff, uff-d3"
+            ". Supported: pbe0, blyp, b3lyp, tpss, pbe, bp86, hf3c, gfnff, uff-d3"
         );
     }
 }

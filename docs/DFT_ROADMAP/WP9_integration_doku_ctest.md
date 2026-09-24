@@ -18,7 +18,7 @@ Method-Funktional-Aliase, Aufräumen.
       Hilfe/Beispiele (`:1636`/`:1678`), `-methods`-Gruppierung (`:2309`).
 - [ ] Parameter final: `make GenerateParams` sauber; `-export_run`/`-import_config`
       Round-Trip für `-method hf`/`lda`/`pbe`/`b3lyp` geprüft.
-- [ ] `docs/NATIVE_DFT_IMPLEMENTATION.md` vollständig (Theorie, Gleichungen,
+- [ ] `docs/NATIVE_QM_IMPLEMENTATION.md` vollständig (Theorie, Gleichungen,
       Literatur, Quellen-Map, Test-Sektion: getestet/nicht getestet/nicht implementiert).
 - [ ] CLAUDE.md-Status (⚠️/⚙️, kein ✅), Haupt-CLAUDE.md Kap. 1, README, AIChangelog.
 - [ ] CTest `cli_dft_*`: sp LDA/HF/PBE/B3LYP auf H2O/CH4 gegen gespeicherte

@@ -486,13 +486,16 @@ add_subdirectory(cli)
 add_subdirectory(sqm_reference)
 
 # Claude Generated (WP1, June 2026): native DFT 1e-integral validation
-# (S/T/V vs Python witness + ORCA MO-energy reference). See dft_1e/CMakeLists.txt.
-add_subdirectory(dft_1e)
+# (S/T/V vs Python witness + ORCA MO-energy reference). See qm_1e/CMakeLists.txt.
+add_subdirectory(qm_1e)
 
 # Claude Generated (WP2, June 2026): native DFT 4-centre ERI validation
 # (MD ERI + J/K vs Python witness + 8-fold symmetry / Tr(PJ)==Tr(PK)). See
-# dft_2e/CMakeLists.txt. Reuses the dft_1e .xyz geometries (no new inputs).
-add_subdirectory(dft_2e)
+# qm_2e/CMakeLists.txt. Reuses the qm_1e .xyz geometries (no new inputs).
+add_subdirectory(qm_2e)
+
+# Native HF-3c (HF/MINIX + D3BJ + gCP + SRB) vs PySCF + simple-dftd3 + ORCA. Sep 2026.
+add_subdirectory(qm_hf3c)
 
 # Claude Generated (Sep 2026): interface-level gradient + frequency contract.
 # Guards two things nothing else covered:

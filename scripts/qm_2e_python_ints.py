@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Independent Python witness for the curcuma native-DFT 4-centre ERI (WP2).
+Independent Python witness for the curcuma native-QM 4-centre ERI (WP2).
 
 Reads an XYZ and the SAME def2-SVP.dat curcuma uses, builds the contracted
 cartesian GTO basis in the SAME AO order as curcuma's
@@ -11,11 +11,11 @@ notation via an independently written McMurchie-Davidson implementation, plus
 the Coulomb matrix J and exchange matrix K built from a dummy closed-shell
 density P.
 
-This mirrors scripts/dft_1e_python_ints.py (same basis parser, same
+This mirrors scripts/qm_1e_python_ints.py (same basis parser, same
 hermite_coeffs / boys_array primitives, same AO order) so the ERI can be
-compared element by element against dump_dft_2e. It is pure-stdlib (no numpy /
+compared element by element against dump_qm_2e. It is pure-stdlib (no numpy /
 scipy / pyscf) to run under any CMake-found Python3, matching the project's
-validate_sqm.py / diff_dft_1e.py convention.
+validate_sqm.py / diff_qm_1e.py convention.
 
 McMurchie-Davidson ERI (Helgaker, Molecular Electronic-Structure Theory, ch. 9.9;
 McMurchie & Davidson, J. Comput. Phys. 26, 218 (1977)):
@@ -29,13 +29,13 @@ McMurchie & Davidson, J. Comput. Phys. 26, 218 (1977)):
   R^n_{0,0,0} = (-2 rho)^n F_n(T); R recurrence with the (P-Q) displacement
   (bra recurrence, plus sign) -- gamma-independent.
 
-Output JSON schema (matches dump_dft_2e.cpp):
+Output JSON schema (matches dump_qm_2e.cpp):
   { "molecule":{...}, "basis","cartesian_d":true, "nbf","num_electrons",
     "nuclear_repulsion", "S":[[...]], "eri_order":"mu_nu_lam_sig",
     "ERI":[...flat n^4...], "P":[[...]], "J":[[...]], "K":[[...]],
     "dummy_density":"2*c*c^T, c=ones normalized so c^T S c=1 (rank-1, no eig)" }
 
-  dft_2e_python_ints.py <input.xyz> [--basis NAME] [--dat FILE] [--charge Q]
+  qm_2e_python_ints.py <input.xyz> [--basis NAME] [--dat FILE] [--charge Q]
 
 Claude Generated (WP2). GPL-3.0.
 """
@@ -98,7 +98,7 @@ def hermite_coeffs(iA, iB, PA, PB, gamma, K):
     """E[t][i][j] Hermite expansion coefficients (K folded into E[0][0][0]).
 
     Standard McMurchie-Davidson forward recursion (Helgaker 9.5.5/9.5.6); see the
-    note in scripts/dft_1e_python_ints.py -- the earlier "raise t" variant was
+    note in scripts/qm_1e_python_ints.py -- the earlier "raise t" variant was
     wrong for t >= 2 (E[2][0][0] 0.5 instead of 0.0, E[2][1][1] 0.25 instead of
     0.0625), which corrupted every ERI with total angular momentum >= 2.
     """
@@ -125,7 +125,7 @@ def boys_array(maxN, T):
     if T < 1e-14:
         for n in range(maxN+1): F[n] = 1.0/(2*n+1)
         return F
-    # Large T branch (see scripts/dft_1e_python_ints.py): the fixed maxN+25
+    # Large T branch (see scripts/qm_1e_python_ints.py): the fixed maxN+25
     # downward start collapses for T >~ 15.
     if T >= 1.0:
         F[0] = 0.5*math.sqrt(math.pi/T)*math.erf(math.sqrt(T))

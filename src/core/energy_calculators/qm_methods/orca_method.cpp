@@ -34,7 +34,9 @@ std::string OrcaMethod::methodToOrcaKeyword(const std::string& method)
     std::string m = method;
     std::transform(m.begin(), m.end(), m.begin(), ::tolower);
 
-    if (m == "hf-3c")     return "HF-3c";
+    // "orca-hf-3c" is the MethodFactory name since Sep 2026 (plain "hf-3c" now
+    // resolves to the native HF3CMethod); the bare name is kept for direct use.
+    if (m == "hf-3c" || m == "orca-hf-3c") return "HF-3c";
     if (m == "b97-3c")    return "B97-3c";
     if (m == "r2scan-3c") return "r2SCAN-3c";
     if (m == "pbeh-3c")   return "PBEh-3c";
@@ -227,5 +229,5 @@ bool OrcaMethod::isAvailable()
 
 std::vector<std::string> OrcaMethod::getSupportedMethods()
 {
-    return {"hf-3c", "b97-3c", "r2scan-3c", "pbeh-3c", "orca"};
+    return {"orca-hf-3c", "b97-3c", "r2scan-3c", "pbeh-3c", "orca"};
 }

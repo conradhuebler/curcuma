@@ -1,13 +1,13 @@
 /*
- * Native DFT 2-electron integral dumper (WP2 validation suite).
+ * Native QM 2-electron integral dumper (WP2 validation suite).
  * Copyright (C) 2019 - 2026 Conrad Huebler <Conrad.Huebler@gmx.net>
  *
- * Standalone binary mirroring dump_dft_1e.cpp: reads an XYZ, builds the native
- * DFT basis + 1e integrals, then builds the 4-centre ERI tensor (chemists'
- * (mu nu | lam sig), McMurchie-Davidson, cartesian 6d) via DFT::cartesianERI(),
+ * Standalone binary mirroring dump_qm_1e.cpp: reads an XYZ, builds the native
+ * QM basis + 1e integrals, then builds the 4-centre ERI tensor (chemists'
+ * (mu nu | lam sig), McMurchie-Davidson, cartesian 6d) via QMEngine::cartesianERI(),
  * and the Coulomb (J) / exchange (K) matrices from a dummy closed-shell density
- * P. Emits everything as JSON on stdout so scripts/diff_dft_2e.py can compare
- * against the independent Python MD witness (scripts/dft_2e_python_ints.py)
+ * P. Emits everything as JSON on stdout so scripts/diff_qm_2e.py can compare
+ * against the independent Python MD witness (scripts/qm_2e_python_ints.py)
  * element-wise, plus run the internal-consistency checks (8-fold ERI symmetry,
  * J/K symmetric, Tr(P.J)==Tr(P.K) single-orbital identity).
  *
@@ -18,7 +18,7 @@
  * spectrum ascending to match). Column norms are sign-invariant, so k -- and
  * hence P, J, K -- are solver-independent and match element-wise.
  *
- *   dump_dft_2e <input.xyz> [--basis NAME] [--charge Q] [--spin S]
+ *   dump_qm_2e <input.xyz> [--basis NAME] [--charge Q] [--spin S]
  *
  * Output schema:
  *   { "molecule":{name,natoms,atoms:[{z,x,y,z(Bohr)}]},
@@ -30,8 +30,8 @@
  * Claude Generated (WP2). GPL-3.0.
  */
 
-#include "src/core/energy_calculators/qm_methods/dft.h"
-#include "src/core/energy_calculators/qm_methods/dft_integrals.hpp"
+#include "src/core/energy_calculators/qm_methods/qm_engine.h"
+#include "src/core/energy_calculators/qm_methods/qm_integrals.hpp"
 #include "src/core/curcuma_logger.h"
 #include "src/core/global.h"
 #include "src/core/units.h"
@@ -131,7 +131,7 @@ int main(int argc, char** argv)
     CurcumaLogger::set_verbosity(0);
 
     if (argc < 2) {
-        std::cerr << "usage: dump_dft_2e <input.xyz> [--basis NAME] [--charge Q] [--spin S]\n";
+        std::cerr << "usage: dump_qm_2e <input.xyz> [--basis NAME] [--charge Q] [--spin S]\n";
         return 2;
     }
 
@@ -154,31 +154,31 @@ int main(int argc, char** argv)
 
     // The ERI kernel gate runs in the CARTESIAN 6d basis (the Python witness
     // builds cartesian too), so force cartesian_d=true here regardless of any
-    // future default. DFT::cartesianERI() always builds in m_gto_basis (the
+    // future default. QMEngine::cartesianERI() always builds in m_gto_basis (the
     // flat cartesian basis), and overlapMatrix() with cartesian_d=true returns
     // the cartesian S -- the two must be in the same AO order for P/J/K.
     json cfg = json::object();
     cfg["basis"] = basis;
     cfg["cartesian_d"] = true;
 
-    DFT dft(DFTFunctional::HF, cfg);
-    if (!dft.QMInterface::InitialiseMolecule(atoms.data(), coord_ang.data(), nat, charge, spin)) {
-        std::cerr << "DFT InitialiseMolecule failed\n";
+    QMEngine engine(QMFunctional::HF, cfg);
+    if (!engine.QMInterface::InitialiseMolecule(atoms.data(), coord_ang.data(), nat, charge, spin)) {
+        std::cerr << "QMEngine InitialiseMolecule failed\n";
         return 1;
     }
 
-    const int n = dft.nbf();
-    const Matrix S = dft.overlapMatrix();  // cartesian (cartesian_d=true)
+    const int n = engine.nbf();
+    const Matrix S = engine.overlapMatrix();  // cartesian (cartesian_d=true)
 
-    const dft1e::ERITensor& eri = dft.cartesianERI();
+    const qmint::ERITensor& eri = engine.cartesianERI();
     if (eri.empty() || eri.n() != n) {
         std::cerr << "ERI build failed or size mismatch (n=" << n << ")\n";
         return 1;
     }
 
     const Matrix P = dummyDensity(S);
-    const Matrix J = dft1e::buildCoulomb(eri, P);
-    const Matrix K = dft1e::buildExchange(eri, P);
+    const Matrix J = qmint::buildCoulomb(eri, P);
+    const Matrix K = qmint::buildExchange(eri, P);
 
     json out;
     json jat = json::array();
@@ -194,10 +194,10 @@ int main(int argc, char** argv)
     out["basis"] = basis;
     out["cartesian_d"] = true;
     out["nbf"] = n;
-    out["num_electrons"] = dft.numElectrons();
+    out["num_electrons"] = engine.numElectrons();
     // Nuclear repulsion from the scaffold Calculation() (sets m_total_energy).
-    dft.Calculation(false);
-    out["nuclear_repulsion"] = dft.TotalEnergy();
+    engine.Calculation(false);
+    out["nuclear_repulsion"] = engine.TotalEnergy();
     out["eri_order"] = "mu_nu_lam_sig";
     out["S"] = matrixToJson(S);
 

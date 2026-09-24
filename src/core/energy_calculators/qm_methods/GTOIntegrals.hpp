@@ -29,7 +29,7 @@ struct DirectionCosines {
 // Claude Generated (WP1): the d set is the proper 6 cartesian components
 // (xx, yy, zz, xy, xz, yz) -- replaces the previous broken 5-d approximation.
 // Spherical 5d is handled at matrix-assembly time via a Cartesian->spherical
-// transformation in dft_integrals.cpp, not here.
+// transformation in qm_integrals.cpp, not here.
 enum OrbitalType {
     S = 0,
     PX = 1,
@@ -145,7 +145,7 @@ static inline void orbitalTypeToComponents(OrbitalType type, int& l, int& m, int
 
 // Calculate overlap between two contracted Gaussian orbitals.
 // NOTE (Claude Generated, WP1): the production DFT path uses the Obara-Saika
-// kernels in dft_integrals.cpp with pre-normalized coefficients. This legacy
+// kernels in qm_integrals.cpp with pre-normalized coefficients. This legacy
 // helper is kept for the STO-3G factory / parser test path; coefficients here
 // are expected to be raw and primitives are normalized inside the loop.
 static inline double calculateOverlap(const Orbital& orb1, const Orbital& orb2)

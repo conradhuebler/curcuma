@@ -1,6 +1,6 @@
 /*
  * <Native KS-DFT 1-Electron GTO Integrals (Overlap, Kinetic, Nuclear Attraction)>
- * Copyright (C) 2019 - 2026 Conrad Hbler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * Obara-Saika / McMurchie-Davidson recurrence relations for contracted
  * cartesian Gaussian-type orbitals. Produces the overlap matrix S, the
@@ -45,7 +45,7 @@
  * produced by BasisSetParser::createGTOFromBasis with pre-normalized
  * coefficients. Atom positions are passed in Bohr.
  */
-namespace dft1e {
+namespace qmint {
 
 // ---------------------------------------------------------------------------
 // Normalization helpers (used by basissetparser at load time)
@@ -177,6 +177,11 @@ public:
     /// {mu,nu}, within the ket pair {lam,sig}, and swap the two pairs.
     void set8(int mu, int nu, int lam, int sig, double v);
 
+    /// Flat storage, index ((mu*n + nu)*n + lam)*n + sig -- i.e. an (n^2 x n^2)
+    /// row-major matrix, which is how J/K and the spherical transform use it.
+    double* data() { return m_data.data(); }
+    const double* data() const { return m_data.data(); }
+
 private:
     int m_n;
     std::vector<double> m_data;
@@ -194,24 +199,39 @@ private:
 /// 2*pi^(5/2) / (p q sqrt(p+q)) sits outside the R sum (p, q are the bra/ket
 /// composite exponents, rho = pq/(p+q) the reduced exponent, Boys arg
 /// T = rho*|P-Q|^2).
-ERITensor buildERI(const std::vector<GTO::Orbital>& basis);
+///
+/// Shell-quartet blocked (Sep 2026): per-shell-pair primitive tables are built
+/// once, Boys/R once per primitive quartet for all components. Quartets with a
+/// Schwarz bound sqrt((ab|ab)(cd|cd)) below `screening` are skipped (left 0).
+/// `threads` > 1 distributes bra shell pairs over OpenMP threads.
+/// If `Q` (cartesian -> spherical transform, buildSphericalTransform) is given
+/// and non-empty, each shell quartet is transformed on the fly and the result is
+/// the spherical tensor (Q.cols()^4) -- the cartesian tensor is never stored.
+ERITensor buildERI(const std::vector<GTO::Orbital>& basis, int threads = 1, double screening = 0.0,
+                   const Matrix* Q = nullptr);
+
+/// @brief One contracted (a b | c d), computed directly -- the readable
+/// reference form of the kernel buildERI blocks over shells.
+double contractedERI(const GTO::Orbital& a, const GTO::Orbital& b,
+                     const GTO::Orbital& c, const GTO::Orbital& d);
 
 /// @brief Coulomb matrix J_munu = sum_{lam,sig} P_lamsig (mu nu | lam sig).
 /// Symmetric for a symmetric density P. (Standard closed-shell Coulomb.)
-Matrix buildCoulomb(const ERITensor& eri, const Matrix& P);
+Matrix buildCoulomb(const ERITensor& eri, const Matrix& P, int threads = 1);
 
 /// @brief Exchange matrix K_munu = sum_{lam,sig} P_lamsig (mu lam | nu sig).
 /// Symmetric for a symmetric density P. The closed-shell Fock exchange
 /// contribution is -0.5*K (factor applied by the SCF in WP3, NOT here);
 /// E_exchange = 0.25*Tr(P*K).
-Matrix buildExchange(const ERITensor& eri, const Matrix& P);
+Matrix buildExchange(const ERITensor& eri, const Matrix& P, int threads = 1);
 
 /// @brief 4-index spherical transform of the ERI tensor:
 /// ERI_sph[i,j,k,l] = sum_{a,b,c,d} Q[a,i] Q[b,j] Q[c,k] Q[d,l] ERI_cart[a,b,c,d].
 /// Returns a tensor with n_sph^4 entries (n_sph = Q.cols()). If Q is empty the
-/// cartesian tensor is returned unchanged (in an n^4 wrapper). Provided for the
+/// cartesian tensor is returned unchanged (in an n^4 wrapper). Evaluated as four
+/// quarter transforms (O(n^5) GEMMs; Sep 2026, was the O(n^8) direct sum). Provided for the
 /// WP3 SCF (ORCA def2-SVP runs spherical 5d); the WP2 kernel gate validates the
 /// cartesian tensor directly.
 ERITensor applySphericalTransformERI(const ERITensor& eriCart, const Matrix& Q);
 
-}  // namespace dft1e
+}  // namespace qmint

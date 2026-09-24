@@ -7,14 +7,14 @@
 > **Ergebnis (Jul 2026):** 10/10 Moleküle innerhalb 4e-9 Eh vs ORCA 6.1
 > `! HF def2-SVP TightSCF` (≈1e-11 relativ; ORCA's eigener Tight↔VeryTight-Shift
 > ist ≤2e-10, die Restdifferenz ist also curcuma's — Ursache noch nicht
-> eingegrenzt). `ctest -R 'dft_1e|dft_2e'` 20/20. Die SCF-Schleife war von Anfang
+> eingegrenzt). `ctest -R 'qm_1e|qm_2e'` 20/20. Die SCF-Schleife war von Anfang
 > an korrekt -- die drei Fehler lagen in den WP1/WP2-Kerneln
 > (`boysArray`-Startindex, `hermiteCoeffs` t≥2, 1e-R-Hilfsfunktion Basis+Vorzeichen).
 > Der Startzustand ist jetzt **SAD** (`-dft.scf_guess sad`, Default), weil der
 > bare-Core-Start bei BH auf einer Sekundärlösung landete; ausserdem las
 > `DFTMethod` nur die oberste Controller-Ebene, sodass **alle `-dft.*`-Flags
 > wirkungslos waren**. Details und Beweise in
-> [docs/NATIVE_DFT_IMPLEMENTATION.md](../NATIVE_DFT_IMPLEMENTATION.md#wp3----hf-scf-vs-orca-61-july-2026).
+> [docs/NATIVE_QM_IMPLEMENTATION.md](../NATIVE_QM_IMPLEMENTATION.md#wp3----hf-scf-vs-orca-61-july-2026).
 > Offen geblieben: kein SOSCF und keine Minimumeigenschafts-Prüfung der Lösung,
 > xcDFT-Gate weiterhin nicht gefahren (Referenzdatei fehlt im Repo).
 
@@ -27,7 +27,7 @@ Validiert den ganzen ERI/J/K-Pfad gegen ORCA HF — entscheidendes Gate.
 
 ## Deliverables
 
-- [ ] `dft_scf.cpp`: SCF-Schleife (xcDFT `RKS.f90` als Struktur-Vorbild, zitiert);
+- [ ] `qm_scf.cpp`: SCF-Schleife (xcDFT `RKS.f90` als Struktur-Vorbild, zitiert);
       eigensolver-Dispatch via `curcuma::eigsolver` (mkl/native/purify/lobpcg)
       analog `xtb_scf.cpp:229/302/327/351`; DIIS mit konfigurierbarer History
       (xcDFT hat nur n_diis=1 → erweitern); Energiekomponenten + Orbitalenergien.

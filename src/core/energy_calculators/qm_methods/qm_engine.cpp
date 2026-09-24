@@ -1,5 +1,5 @@
 /*
- * <Native KS-DFT Engine Implementation>
+ * <Native ab-initio QM Engine Implementation (HF / KS-DFT)>
  * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * WP1: real 1-electron GTO integrals (overlap S, kinetic T, nuclear attraction V)
@@ -19,12 +19,13 @@
  * This program is free software under GPL-3.0
  */
 
-#include "dft.h"
+#include "qm_engine.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/units.h"
 
 #include <fmt/format.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -35,15 +36,15 @@ using namespace CurcumaUnit;
 
 namespace {
 // Lowercase display name for a functional (used for logging / method name).
-std::string functionalName(DFTFunctional f)
+std::string functionalName(QMFunctional f)
 {
     switch (f) {
-        case DFTFunctional::HF:    return "hf";
-        case DFTFunctional::LDA:   return "lda";
-        case DFTFunctional::PBE:   return "pbe";
-        case DFTFunctional::B3LYP: return "b3lyp";
+        case QMFunctional::HF:    return "hf";
+        case QMFunctional::LDA:   return "lda";
+        case QMFunctional::PBE:   return "pbe";
+        case QMFunctional::B3LYP: return "b3lyp";
     }
-    return "dft";
+    return "qm";
 }
 
 // Element number -> standard symbol. WP1 supports H (1) through Ne (10) only,
@@ -64,7 +65,7 @@ bool fileExists(const std::string& path)
 }
 
 // Resolve a basis-set name (e.g. "def2-SVP") to a .dat file path.
-// Order: explicit path/.dat as-is; $CURCUMA_DFT_BASIS/<name>.dat;
+// Order: explicit path/.dat as-is; $CURCUMA_QM_BASIS/<name>.dat;
 // $CURCUMA_DATA/<name>.dat; source-relative
 // <CURCUMA_SOURCE_DIR>/src/core/energy_calculators/qm_methods/<name>.dat;
 // cwd-relative <name>.dat. Returns the first existing candidate, else the
@@ -80,8 +81,10 @@ std::string resolveBasisFile(const std::string& name)
         stem = stem.substr(0, stem.size() - 4);
 
     std::vector<std::string> candidates;
-    if (const char* env = std::getenv("CURCUMA_DFT_BASIS")) {
-        if (env[0] != '\0') candidates.push_back(std::string(env) + "/" + stem + ".dat");
+    // CURCUMA_QM_BASIS (CURCUMA_DFT_BASIS is the pre-Sep-2026 name, still read)
+    for (const char* var : { "CURCUMA_QM_BASIS", "CURCUMA_DFT_BASIS" }) {
+        if (const char* env = std::getenv(var))
+            if (env[0] != '\0') candidates.push_back(std::string(env) + "/" + stem + ".dat");
     }
     if (const char* env = std::getenv("CURCUMA_DATA")) {
         if (env[0] != '\0') candidates.push_back(std::string(env) + "/" + stem + ".dat");
@@ -108,7 +111,7 @@ std::string resolveBasisFile(const std::string& name)
 // Constructor
 // =================================================================================
 
-DFT::DFT(DFTFunctional functional, const json& config)
+QMEngine::QMEngine(QMFunctional functional, const json& config)
     : m_functional(functional)
 {
     if (config.contains("basis") && config["basis"].is_string())
@@ -117,6 +120,8 @@ DFT::DFT(DFTFunctional functional, const json& config)
         m_cartesian_d = config["cartesian_d"].get<bool>();
     if (config.contains("threads") && config["threads"].is_number_integer())
         m_threads = config["threads"].get<int>();
+    if (config.contains("eri_screening") && config["eri_screening"].is_number())
+        m_eri_screening = config["eri_screening"].get<double>();
     if (config.contains("scf_max_iterations") && config["scf_max_iterations"].is_number_integer())
         m_scf_max_iter = config["scf_max_iterations"].get<int>();
     if (config.contains("scf_threshold") && config["scf_threshold"].is_number())
@@ -127,7 +132,7 @@ DFT::DFT(DFTFunctional functional, const json& config)
         m_scf_guess = config["scf_guess"].get<std::string>();
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info(fmt::format("Initializing native DFT engine (functional={}, basis={})",
+        CurcumaLogger::info(fmt::format("Initializing native QM engine (functional={}, basis={})",
                                         functionalName(m_functional), m_basis_name));
         CurcumaLogger::param("functional", functionalName(m_functional));
         CurcumaLogger::param("basis", m_basis_name);
@@ -139,11 +144,11 @@ DFT::DFT(DFTFunctional functional, const json& config)
 // QMDriver Interface
 // =================================================================================
 
-bool DFT::InitialiseMolecule()
+bool QMEngine::InitialiseMolecule()
 {
     // Geometry/atoms/charge are already loaded by QMInterface::InitialiseMolecule(Mol).
     if (m_atoms.empty()) {
-        CurcumaLogger::error("DFT: no atoms in molecule for initialization");
+        CurcumaLogger::error("QM: no atoms in molecule for initialization");
         return false;
     }
     if (m_integrals_ready) return true;  // already built (WP1: static geometry)
@@ -154,7 +159,7 @@ bool DFT::InitialiseMolecule()
         if (m_basis_map_cache.empty())
             m_basis_map_cache = BasisSetParser::parseBasisSetFile(m_basis_file);
     } catch (const std::exception& e) {
-        CurcumaLogger::error(std::string("DFT: basis setup failed: ") + e.what());
+        CurcumaLogger::error(std::string("QM: basis setup failed: ") + e.what());
         return false;
     }
 
@@ -165,13 +170,13 @@ bool DFT::InitialiseMolecule()
         const char* sym = elementSymbol(Z);
         if (sym == nullptr) {
             CurcumaLogger::error(fmt::format(
-                "DFT: element Z={} is outside the WP1 H-Ne scope", Z));
+                "QM: element Z={} is outside the WP1 H-Ne scope", Z));
             return false;
         }
         auto it = m_basis_map_cache.find(sym);
         if (it == m_basis_map_cache.end()) {
             CurcumaLogger::error(fmt::format(
-                "DFT: no basis data for element {} in {}", sym, m_basis_file));
+                "QM: no basis data for element {} in {}", sym, m_basis_file));
             return false;
         }
         const double bx = Length::angstrom_to_bohr(m_geometry(i, 0));
@@ -192,14 +197,27 @@ bool DFT::InitialiseMolecule()
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format(
-            "DFT: basis {} -> {} basis functions ({}), {} electrons",
+            "QM: basis {} -> {} basis functions ({}), {} electrons",
             m_basis_file, m_nbf, m_cartesian_d ? "cartesian 6d" : "spherical 5d",
             m_num_electrons));
     }
     return true;
 }
 
-double DFT::Calculation(bool gradient)
+// Claude Generated (Sep 2026): the base UpdateMolecule() only returned true, so a
+// second geometry (opt step, scan point, trajectory frame) reused the first
+// geometry's integrals and SCF -- m_integrals_ready was never cleared.
+bool QMEngine::UpdateMolecule()
+{
+    m_integrals_ready = false;
+    m_eri_ready = false;
+    m_eri_active_ready = false;
+    m_scf_ready = false;
+    m_scf_converged = false;
+    return InitialiseMolecule();
+}
+
+double QMEngine::Calculation(bool gradient)
 {
     (void)gradient;  // WP8 brings the analytic gradient
 
@@ -212,12 +230,12 @@ double DFT::Calculation(bool gradient)
     // DFT functionals (LDA/PBE/B3LYP) need V_xc (WP4 grid -> WP5-WP7); they stay on
     // the scaffold (E_nn + 0) with a clear notice rather than a silently wrong HF
     // energy. Honest per CLAUDE.md.
-    if (m_functional != DFTFunctional::HF) {
+    if (m_functional != QMFunctional::HF) {
         m_total_energy = e_nn;
         m_scf_converged = false;
         if (CurcumaLogger::get_verbosity() >= 1) {
             CurcumaLogger::result(fmt::format(
-                "native DFT ({}) -- V_xc not yet implemented (WP5-WP7); "
+                "native QM ({}) -- V_xc not yet implemented (WP5-WP7); "
                 "returning nuclear repulsion only", functionalName(m_functional)));
             CurcumaLogger::energy_abs(m_total_energy, "nuclear repulsion energy");
         }
@@ -230,13 +248,13 @@ double DFT::Calculation(bool gradient)
         m_scf_ready = true;
         if (!ok) {
             CurcumaLogger::error(fmt::format(
-                "DFT HF SCF did not converge in {} iterations", m_scf_max_iter));
+                "QM HF SCF did not converge in {} iterations", m_scf_max_iter));
         }
     }
     m_total_energy = m_e_elec + e_nn;
 
     if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::result(fmt::format("native DFT -- HF/{} SCF {} ({} iterations)",
+        CurcumaLogger::result(fmt::format("native QM -- HF/{} SCF {} ({} iterations)",
             m_basis_name, m_scf_converged ? "converged" : "NOT converged",
             m_scf_iterations));
         if (m_scf_converged && CurcumaLogger::get_verbosity() >= 2) {
@@ -248,7 +266,7 @@ double DFT::Calculation(bool gradient)
     return m_total_energy;
 }
 
-std::string DFT::getMethodNameStr() const
+std::string QMEngine::getMethodNameStr() const
 {
     return functionalName(m_functional);
 }
@@ -257,13 +275,13 @@ std::string DFT::getMethodNameStr() const
 // QMDriver pure-virtual hooks
 // =================================================================================
 
-Matrix DFT::MakeOverlap(Basisset& basisset)
+Matrix QMEngine::MakeOverlap(Basisset& basisset)
 {
     (void)basisset;  // DFT uses its own m_gto_basis, not the STO Basisset typedef
     return m_S;
 }
 
-Matrix DFT::MakeH(const Matrix& S, const Basisset& basisset)
+Matrix QMEngine::MakeH(const Matrix& S, const Basisset& basisset)
 {
     (void)S;
     (void)basisset;
@@ -274,7 +292,7 @@ Matrix DFT::MakeH(const Matrix& S, const Basisset& basisset)
 // 1-electron integral assembly (WP1)
 // =================================================================================
 
-void DFT::buildOneElectronIntegrals()
+void QMEngine::buildOneElectronIntegrals()
 {
     // Atom positions in Bohr (the integrals use atomic units).
     Matrix atomPosBohr = Matrix::Zero(m_atomcount, 3);
@@ -282,9 +300,9 @@ void DFT::buildOneElectronIntegrals()
         for (int k = 0; k < 3; ++k)
             atomPosBohr(i, k) = Length::angstrom_to_bohr(m_geometry(i, k));
 
-    const Matrix Scart = dft1e::buildOverlap(m_gto_basis);
-    const Matrix Tcart = dft1e::buildKinetic(m_gto_basis);
-    const Matrix Vcart = dft1e::buildNuclearAttraction(m_gto_basis, m_atoms, atomPosBohr);
+    const Matrix Scart = qmint::buildOverlap(m_gto_basis);
+    const Matrix Tcart = qmint::buildKinetic(m_gto_basis);
+    const Matrix Vcart = qmint::buildNuclearAttraction(m_gto_basis, m_atoms, atomPosBohr);
     const Matrix Hcart = Tcart + Vcart;
 
     // New geometry -> invalidate the WP3 active-basis ERI and SCF caches.
@@ -306,7 +324,7 @@ void DFT::buildOneElectronIntegrals()
     // and the cartesian matrices are kept unchanged. Q is cached in m_Q so the
     // WP3 SCF can build the active-basis ERI (applySphericalTransformERI) without
     // recomputing it.
-    const Matrix Q = dft1e::buildSphericalTransform(m_gto_basis, Scart);
+    const Matrix Q = qmint::buildSphericalTransform(m_gto_basis, Scart);
     m_Q = Q;
     m_eri_active_ready = false;  // geometry change invalidates the active ERI
     if (Q.size() == 0) {
@@ -317,10 +335,10 @@ void DFT::buildOneElectronIntegrals()
         m_nbf = static_cast<int>(Scart.rows());
         return;
     }
-    m_S = dft1e::applySphericalTransform(Scart, Q);
-    m_T = dft1e::applySphericalTransform(Tcart, Q);
-    m_V = dft1e::applySphericalTransform(Vcart, Q);
-    m_H = dft1e::applySphericalTransform(Hcart, Q);
+    m_S = qmint::applySphericalTransform(Scart, Q);
+    m_T = qmint::applySphericalTransform(Tcart, Q);
+    m_V = qmint::applySphericalTransform(Vcart, Q);
+    m_H = qmint::applySphericalTransform(Hcart, Q);
     m_nbf = static_cast<int>(Q.cols());
 }
 
@@ -328,13 +346,13 @@ void DFT::buildOneElectronIntegrals()
 // 2-electron integral assembly (WP2) -- lazy
 // =================================================================================
 
-const dft1e::ERITensor& DFT::cartesianERI() const
+const qmint::ERITensor& QMEngine::cartesianERI() const
 {
     // Built on first request and cached. NOT called by Calculation() (the
     // scaffold -sp path returns E_nn only), so the ERI cost is paid only by the
     // WP2 dumper and (later) the WP3 SCF. Built in the cartesian basis
     // (m_gto_basis); the spherical 5d transform is the caller's job via
-    // dft1e::applySphericalTransformERI.
+    // qmint::applySphericalTransformERI.
     if (!m_eri_ready) {
         if (!m_integrals_ready) {
             // InitialiseMolecule is non-const; the lazy build requires the 1e
@@ -342,13 +360,16 @@ const dft1e::ERITensor& DFT::cartesianERI() const
             // (caller must have called InitialiseMolecule first).
             return m_eri_cart;
         }
-        m_eri_cart = dft1e::buildERI(m_gto_basis);
+        const auto t0 = std::chrono::steady_clock::now();
+        m_eri_cart = qmint::buildERI(m_gto_basis, m_threads, m_eri_screening);
         m_eri_ready = true;
         if (CurcumaLogger::get_verbosity() >= 2) {
             const int nc = (int)m_gto_basis.size();
             CurcumaLogger::info(fmt::format(
-                "DFT: built 4-centre ERI (cartesian, {} basis functions, {} entries)",
-                nc, (size_t)nc * nc * nc * nc));
+                "QM: built 4-centre ERI (cartesian, {} basis functions, {:.1f} MB) in {:.1f} ms ({} threads)",
+                nc, (double)nc * nc * nc * nc * 8.0 / 1.0e6,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
+                m_threads));
         }
     }
     return m_eri_cart;
@@ -358,7 +379,7 @@ const dft1e::ERITensor& DFT::cartesianERI() const
 // Energy components
 // =================================================================================
 
-double DFT::calculateCoreRepulsionEnergy() const
+double QMEngine::calculateCoreRepulsionEnergy() const
 {
     // E_nn = sum_{i<j} Z_i * Z_j / R_ij  in atomic units (Hartree).
     // m_atoms holds nuclear charges (element numbers); m_geometry is in Angstrom.

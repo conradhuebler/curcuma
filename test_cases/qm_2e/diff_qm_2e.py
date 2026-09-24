@@ -3,12 +3,12 @@
 WP2 4-centre-ERI validation orchestrator (Claude Generated, WP2, June 2026).
 
 Pure-stdlib (no numpy) so it runs under any CMake-found Python3, matching the
-project's validate_sqm.py / diff_dft_1e.py convention. Drives three independent
-checks of the curcuma native-DFT 2-electron integrals:
+project's validate_sqm.py / diff_qm_1e.py convention. Drives three independent
+checks of the curcuma native-QM 2-electron integrals:
 
   (a) KERNEL GATE (always run): element-wise ERI (cartesian 6d, chemists'
-      (mu nu | lam sig)) from the curcuma dumper (dump_dft_2e) vs an independent
-      Python McMurchie-Davidson witness (scripts/dft_2e_python_ints.py) that
+      (mu nu | lam sig)) from the curcuma dumper (dump_qm_2e) vs an independent
+      Python McMurchie-Davidson witness (scripts/qm_2e_python_ints.py) that
       shares curcuma's exact cartesian AO order. Tolerance --tol (default 1e-10).
       This validates the ERI KERNEL directly, independent of any density.
 
@@ -31,7 +31,7 @@ checks of the curcuma native-DFT 2-electron integrals:
 
 Exit code 0 = all run checks pass; nonzero otherwise.
 
-  diff_dft_2e.py --dump <dump_dft_2e> --python <witness.py> --xyz <file>
+  diff_qm_2e.py --dump <dump_qm_2e> --python <witness.py> --xyz <file>
                  [--basis NAME] [--tol 1e-10] [--xcDFT-ref FILE] [--quiet]
 
 Copyright (C) 2019 - 2026 Conrad Huebler <Conrad.Huebler@gmx.net>. GPL-3.0.

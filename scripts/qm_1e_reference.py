@@ -7,15 +7,15 @@ to the xyz. The WP1-valid cross-check stored here is the **smallest overlap
 eigenvalue** (parsed from the ORCA output "Diagonalization of the overlap
 matrix"): it is a 1e quantity, AO-order-invariant, and extremely basis-
 sensitive, so it confirms that curcuma's def2-SVP.dat == ORCA's internal
-def2-SVP. diff_dft_1e.py auto-discovers this file and compares it to curcuma's
+def2-SVP. diff_qm_1e.py auto-discovers this file and compares it to curcuma's
 smallest S eigenvalue.
 
 The ORCA MO (orbital) energies are ALSO stored, labelled as Fock eigenvalues
 (they are the SCF-converged HF Fock spectrum Hc + 2J - K, NOT the 1e Hcore
 spectrum). Curcuma at WP1 has no 2e integrals / SCF, so the full MO-spectrum
-comparison vs ORCA is a WP3+ deliverable and is NOT asserted by diff_dft_1e.py.
+comparison vs ORCA is a WP3+ deliverable and is NOT asserted by diff_qm_1e.py.
 
-  dft_1e_reference.py <input.xyz> [--orca /opt/orca_6_1/orca]
+  qm_1e_reference.py <input.xyz> [--orca /opt/orca_6_1/orca]
                  [--basis def2-SVP] [--charge 0] [--spin 1] [--out DIR]
 
 The ORCA input is built inline (`* xyz charge mult` with the xyz atoms in
@@ -61,7 +61,7 @@ def main():
     out_dir = args.out or os.path.dirname(os.path.abspath(args.xyz))
     mult = args.spin + 1  # |2S+1| with S = spin/2
 
-    tmp = tempfile.mkdtemp(prefix="dft1e_orca_")
+    tmp = tempfile.mkdtemp(prefix="qm1e_orca_")
     try:
         inp = os.path.join(tmp, stem + ".inp")
         with open(inp, "w") as f:

@@ -1,15 +1,15 @@
 /*
- * Native DFT 1-electron integral dumper (WP1 validation suite).
+ * Native QM 1-electron integral dumper (WP1 validation suite).
  * Copyright (C) 2019 - 2026 Conrad Huebler <Conrad.Huebler@gmx.net>
  *
  * Standalone binary mirroring dump_tblite_reference.cpp / diag_curcuma_atomic_c6:
- * reads an XYZ, builds the native DFT basis + 1e integrals (S, T, V, Hc=T+V),
- * and emits them as JSON on stdout so scripts/diff_dft_1e.py can compare
- * against the ORCA reference (scripts/dft_1e_reference.py via orca_2json) and
+ * reads an XYZ, builds the native QM basis + 1e integrals (S, T, V, Hc=T+V),
+ * and emits them as JSON on stdout so scripts/diff_qm_1e.py can compare
+ * against the ORCA reference (scripts/qm_1e_reference.py via orca_2json) and
  * an independent Python integral witness, plus run the internal-consistency
  * checks (symmetry, H=T+V, Tr(P*S)=1, nbf match).
  *
- *   dump_dft_1e <input.xyz> [--basis NAME] [--cartesian_d] [--charge Q] [--spin S]
+ *   dump_qm_1e <input.xyz> [--basis NAME] [--cartesian_d] [--charge Q] [--spin S]
  *
  * Output schema:
  *   { "molecule":{name,natoms,atoms:[{z,x,y,z(Bohr)}]},
@@ -19,7 +19,7 @@
  * Claude Generated (WP1). GPL-3.0.
  */
 
-#include "src/core/energy_calculators/qm_methods/dft.h"
+#include "src/core/energy_calculators/qm_methods/qm_engine.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/global.h"
 #include "src/core/units.h"
@@ -98,7 +98,7 @@ int main(int argc, char** argv)
     CurcumaLogger::set_verbosity(0);
 
     if (argc < 2) {
-        std::cerr << "usage: dump_dft_1e <input.xyz> [--basis NAME] [--cartesian_d] [--charge Q] [--spin S]\n";
+        std::cerr << "usage: dump_qm_1e <input.xyz> [--basis NAME] [--cartesian_d] [--charge Q] [--spin S]\n";
         return 2;
     }
 
@@ -125,12 +125,12 @@ int main(int argc, char** argv)
     cfg["basis"] = basis;
     cfg["cartesian_d"] = cartesian_d;
 
-    DFT dft(DFTFunctional::HF, cfg);
+    QMEngine engine(QMFunctional::HF, cfg);
     // The int* QMInterface overload stores geometry (Angstrom) and then calls
     // the virtual (no-arg) InitialiseMolecule(), which builds the basis + 1e
     // integrals.
-    if (!dft.QMInterface::InitialiseMolecule(atoms.data(), coord_ang.data(), nat, charge, spin)) {
-        std::cerr << "DFT InitialiseMolecule failed\n";
+    if (!engine.QMInterface::InitialiseMolecule(atoms.data(), coord_ang.data(), nat, charge, spin)) {
+        std::cerr << "QMEngine InitialiseMolecule failed\n";
         return 1;
     }
 
@@ -147,16 +147,16 @@ int main(int argc, char** argv)
     out["molecule"] = {{"name", name}, {"natoms", nat}, {"atoms", jat}};
     out["basis"] = basis;
     out["cartesian_d"] = cartesian_d;
-    out["nbf"] = dft.nbf();
-    out["num_electrons"] = dft.numElectrons();
+    out["nbf"] = engine.nbf();
+    out["num_electrons"] = engine.numElectrons();
     // Nuclear repulsion from the geometry (independent of the integrals).
     // Recompute here for the record (Calculation would set m_total_energy).
-    dft.Calculation(false);
-    out["nuclear_repulsion"] = dft.TotalEnergy();
-    out["S"] = matrixToJson(dft.overlapMatrix());
-    out["T"] = matrixToJson(dft.kineticMatrix());
-    out["V"] = matrixToJson(dft.nuclearAttractionMatrix());
-    out["H"] = matrixToJson(dft.coreHamiltonian());
+    engine.Calculation(false);
+    out["nuclear_repulsion"] = engine.TotalEnergy();
+    out["S"] = matrixToJson(engine.overlapMatrix());
+    out["T"] = matrixToJson(engine.kineticMatrix());
+    out["V"] = matrixToJson(engine.nuclearAttractionMatrix());
+    out["H"] = matrixToJson(engine.coreHamiltonian());
 
     std::cout << out.dump() << "\n";
     return 0;

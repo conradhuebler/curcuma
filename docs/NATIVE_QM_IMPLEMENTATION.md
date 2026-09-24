@@ -1,14 +1,23 @@
-# Native KS-DFT Implementation Guide
+# Native ab-initio QM Implementation Guide (HF / HF-3c / KS-DFT)
 
-**Document Purpose**: Implementation guide for the native Kohn-Sham DFT engine in Curcuma
-(HF / LDA / PBE / B3LYP), ported/extended from the xcDFT TCC winter school 2019 code with
-ORCA 6.1 as the validation reference.
+**Document Purpose**: Implementation guide for the native Gaussian-basis QM engine in
+Curcuma (HF, HF-3c; LDA / PBE / B3LYP pending), ported/extended from the xcDFT TCC winter
+school 2019 code with ORCA 6.1 as the validation reference.
+
+**Naming (Sep 2026)**: the engine was renamed from `DFT` to **`QMEngine`** because HF and
+HF-3c, not only DFT functionals, run on it. Files `dft*.{h,cpp}` -> `qm_engine`, `qm_scf`,
+`qm_integrals`, `qm_method`; namespace `dft1e` -> `qmint`; `DFTFunctional` -> `QMFunctional`;
+parameter module `dft` -> **`qm`** (`-qm.basis`, `-qm.scf_*`, `-qm.threads`,
+`-qm.eri_screening`; `-dft.*` is still merged as a legacy scope); `CURCUMA_DFT_BASIS` ->
+`CURCUMA_QM_BASIS` (old name still read); tests `dft_1e`/`dft_2e` -> `qm_1e`/`qm_2e`.
+The historical sections below keep the names that were current at the time.
+Performance work and the GPU plan: [QM_GPU_ROADMAP.md](QM_GPU_ROADMAP.md).
 
 **Status**: WP1 + WP2 + **WP3 working** (July 2026). The closed-shell HF SCF now
 converges and reproduces ORCA 6.1 HF/def2-SVP on all 10 validation molecules —
 9 of them to ≤4e-9 Eh with ORCA's default guess, BH on the same SCF branch (see
 "What was wrong until July 2026" below; three real kernel defects were found and
-fixed). `ctest -L dft_1e` + `ctest -L dft_2e` 20/20. LDA/PBE/B3LYP (WP5-WP7) and
+fixed). `ctest -L qm_1e` + `ctest -L qm_2e` 20/20. LDA/PBE/B3LYP (WP5-WP7) and
 the analytic gradient (WP8) are still open: those methods intentionally return the
 nuclear repulsion only. ⚠️ AI-generated / ⚙️ machine-tested only — no human
 production test, and the validation set is 10 molecules in a H-Ne basis.
@@ -73,7 +82,7 @@ merged explicitly, top level first, matching the other method wrappers.
 The WP3 SCF loop was never the problem: an independent Python RHF written on the
 WP1/WP2 witness integrals reproduced curcuma's iteration trace *bit for bit*
 (including its period-2 oscillation), so the defect had to be in the integrals.
-All three defects lived in `dft_integrals.cpp` and were invisible to the WP1/WP2
+All three defects lived in `qm_integrals.cpp` and were invisible to the WP1/WP2
 gates because the "independent" Python witness shared the same algorithms.
 
 1. **`boysArray` -- the dominant error.** The downward recursion started at a fixed
@@ -108,7 +117,7 @@ conceptual error in that algorithm. The WP1/WP2 gates validated the kernels
 against a second implementation of the *same* recursions, and the one genuinely
 independent reference they carried (ORCA, via the S eigenvalue and MO energies)
 only covered quantities that were already right. A total-energy comparison
-against ORCA belongs in `dft_1e` from the start.
+against ORCA belongs in `qm_1e` from the start.
 
 ### WP3 limits / not implemented
 
@@ -118,76 +127,52 @@ plain damping -- no SOSCF, and no verification that a converged solution is a
 minimum (a secondary solution could still be reported). No dispersion (D3/D4)
 coupling, no solvation, no gradient (`hasGradient() == false` until WP8). Basis
 scope is H-Ne (`def2-SVP.dat`).
-The `dft_1e`/`dft_2e` graders' ORCA reference JSONs carry MO energies only, so the
+The `qm_1e`/`qm_2e` graders' ORCA reference JSONs carry MO energies only, so the
 new total-energy agreement is currently checked by hand, not in CI.
 
 ---
 
-## HF-3c (work in progress, December 2026)
+## HF-3c (native, Sep 2026)
 
-`HF-3c` (R. Sure, S. Grimme, J. Comput. Chem. 34, 1672 (2013)) exists in curcuma
-only as an **external ORCA process** (`-method hf-3c` → `createOrca()`). Making it
-native is in progress on the `dft` branch. Plan and full derivation:
-`/home/conrad/.claude/plans/sleepy-skipping-stonebraker.md`.
+`HF-3c` (R. Sure, S. Grimme, J. Comput. Chem. 34, 1672 (2013)) is native since Sep 2026:
+`-method hf-3c` -> `HF3CMethod` (`hf3c_method.{h,cpp}`). The external ORCA version is
+reachable as `-method orca-hf-3c`.
 
-**The basis is MINIX, not def2-SVP** — a *minimal* basis (ORCA: `! HF-3c` ≡
-`! HF MINIX D3BJ GCP(HF/MINIX) PATOM`; 7 functions for H2O where def2-SVP needs 24,
-no d shells). `src/core/energy_calculators/qm_methods/MINIX.dat` was exported
-verbatim from ORCA (`orca_exportbasis -b minix`) and **is validated**:
+    E(HF-3c) = E(HF/MINIX) + E_D3(BJ) + E_gCP + E_SRB
 
-| | curcuma HF/MINIX | ORCA HF/MINIX | diff |
-|---|---|---|---|
-| H2 / LiH / CH4 | — | — | ≤3.8e-09 |
-| H2O | −75.48881665 | −75.48881664772478 | −2.3e-09 |
-| all 10 dft_1e molecules | | | **≤4.9e-09** |
+| term | implementation | parameters |
+|---|---|---|
+| HF/MINIX | `QMEngine(HF)` with the basis forced to `MINIX.dat` (ORCA export, H-Ne) | -- |
+| D3(BJ) | `D3ParameterGenerator::createForHF3C()` | s6=1, s8=0.8777, a1=0.4171, a2=2.9149, **s9=0** (two-body only; ORCA prints only E6/E8) |
+| gCP | `gcp.{h,cpp}`, ported from simple-dftd3 `gcp.f90` + `gcp/param.f90` (hf/minix) | sigma=0.1290, eta=1.1526, alpha=1.1549, beta=1.1763, `emiss`/`nbas` tables |
+| SRB ("bas") | same file (`base` term) | `-qscal sum (Z_A Z_B)^1.5 exp(-rscal R0_AB^0.75 R_AB)`, qscal=0.03, rscal=0.7, R0 = D3 pair radii |
 
-So the basis needs no engine change: `-method hf -dft.basis MINIX` already works.
-Validated against ORCA's `Total Energy` line from an HF-3c run (which ORCA prints
-*before* applying the corrections).
+**Validation** (`ctest -L qm_hf3c`, 17 molecules: the 10 `qm_1e` ones plus benzene,
+water dimer, formaldehyde, HCN, BF3, LiF, He...CH4): each term against programs that share
+no code with curcuma -- PySCF (RHF/MINIX, basis parsed from the same file) and the
+simple-dftd3 Python API (`DispersionModel` + `RationalDampingParam(method="hf3c")`,
+`GeometricCounterpoise(method="hf3c")`), generated by `scripts/hf3c_reference.py`. Largest
+deviations: HF 2.0e-11, D3 3.6e-11, gCP 4.3e-13, SRB 1.6e-12, total 2.6e-11 Eh. H2O
+against ORCA 6.1 `! HF-3c`: -75.501489461789 vs -75.501489461360 (4.3e-10; ORCA's own
+decomposition: HF -75.48881664772478, D3 -0.002646402235, gCP+bas -0.010026411). gCP/SRB
+alone over all 55 H-Ne element pairs: energy <= 2.3e-12, gradient <= 2.3e-12 Eh/Bohr.
 
-**Reference data (oracle).** ORCA prints the full decomposition, so each term is
-checkable on its own; for H2O (Eh): HF/MINIX = −75.48881664772478,
-E_D3(BJ) = −0.002646402235, `gCP+bas` = −0.010026411, HF-3c = −75.501489461360.
-Additionally ORCA ships `otool_gcp`, the reference gCP program, which reports the
-gCP term alone with its parameter table and per-atom BSSE.
+**Traps in the gCP port**, all in the source comments:
+- The reference writes the Slater exponents as `[real(wp) :: 1.2000, ...]` **without
+  `_wp`**, so Fortran reads them as single precision (2.5644 -> 2.5643999576...). Using the
+  exact decimals shifts E_gCP by ~2e-8 relative (6e-10 Eh on F2); the port uses `float`.
+- The ~1e-7 residual the earlier Python witness (`scripts/gcp_reference_witness.py`) showed
+  against `otool_gcp` was **its own rounded `emiss` table** (5 digits instead of 6), not
+  older tables in otool_gcp; with the exact values it matches simple-dftd3 to 7e-10.
+- The like-exponent branch (|zeta_A - zeta_B| < 0.1 -- like-element pairs and He-C) uses
+  the truncated 12-term B_n series, the other branch the closed form; He...CH4 exercises
+  the He-C case.
 
-- **D3**: ORCA prints the parameters — DFTD3 V3.1 Rev 1, Becke-Johnson damping,
-  "HF/MINIX parameters": s6 = 1.0000, a1 = 0.4171, s8 = 0.8777, a2 = 2.9149.
-  Two-body only (ORCA reports E6/E8, no ATM term). The native
-  `D3ParameterGenerator` can take these as a plain parameter set.
-- **gCP**: ported in `scripts/gcp_reference_witness.py` from the reference
-  implementation (dftd3/simple-dftd3 `gcp.f90` + `gcp/param.f90`; the gCP model
-  itself is Kruse & Grimme, J. Chem. Phys. 136, 154101 (2012)). Parameters for
-  hf/minix: σ = 0.1290, α = 1.1549, β = 1.1763, η = 1.1526, plus the per-element
-  `emiss`/`nbas` tables; `xv = 1/sqrt(nbas − nel/2)` (NOT `nbas − nel/2`), no
-  damping (`damp = false` for this level). Verified against `otool_gcp`: H2 exact
-  to 4.6e-10, all 10 molecules within 2.5e-7 Eh, six within 1e-8. Three traps
-  found on the way, all documented in the script header: `xv = 1/sqrt(...)`; the
-  Fortran case-insensitivity that makes the `<1s|2s>` norm use the *swapped*
-  exponents (worth ~8x on the overlap); and that `B_n` must use its closed form
-  rather than the truncated `bint` series (worth ~1e-4 Eh on BeH2/BH).
-  **Open**: the residual ~1e-7 on BeH2/BH/HF/NH3/H2O is not explained by the
-  auxiliaries (verified against quadrature) nor by the constants (H2 pins them);
-  the leading hypothesis is that `otool_gcp` v1.06 (2014) carries older
-  per-element tables than the current `param.f90`. Settle this before trusting a
-  C++ port.
-- **SRB / "bas"** (the short-range term ORCA folds into `gCP+bas`):
-  `E = −s Σ_{A≠B} (Z_A Z_B)^{3/2} exp(−γ (R⁰_AB)^{3/4} R_AB)` with s = 0.03,
-  γ = 0.7 (`qscal`/`rscal` in the reference, plus t1 = 1.5, t2 = 0.75); R⁰ is the
-  D3 r0ab radius (Å → Bohr). Cross-checked numerically: the SRB implied by ORCA's
-  H2 value requires R⁰(H,H) = 2.1823 Å, exactly the first `setr0ab` entry in
-  CP2K's D3 table (`src/cp2k/src/qs_dispersion_pairpot.F`) — the cleanest available
-  local copy of that table.
-- gCP and SRB are **one term** in ORCA's output and are exposed as one term here.
-
-**Not implemented yet**: the `HF3CMethod` composer wrapper (a `DFT(HF, MINIX)` plus
-the three corrections, mirroring how `XTB` sums its terms), the `createForHF3C()`
-D3 preset, the gCP/SRB C++ module, the method wiring (`hf-3c` native canonical,
-ORCA path renamed `orca-hf-3c`), tests and the docs/README status lines. The DFT
-engine itself is untouched. No gradient (WP8), element scope H-Ne.
-
----
-
+**Not implemented / not tested**: no analytic gradient (the HF part is WP8; D3 and gCP/SRB
+gradients exist but are deliberately not exposed, since a partial gradient would drive an
+optimisation to a wrong structure) -- so `-opt`/`-md` with `hf-3c` are not possible yet;
+closed shell only; H-Ne only (MINIX file and gCP tables); no charged/open-shell reference
+comparison; not tested against ORCA beyond H2O. Human production testing pending.
 
 ---
 
@@ -239,11 +224,15 @@ There is **no** `-method dft`. Each functional is its own method name, exactly l
 | `pbe`       | PBE-GGA (+ grad rho)             | 2   | WP6 |
 | `b3lyp`     | B3LYP hybrid (+ exact exchange)   | 4   | WP7 |
 
-The functional is fixed by the method name and mapped in `MethodFactory::create()` to
-`DFTMethod(DFTFunctional::..., config)`. It is **not** a parameter.
+| `hf-3c`    | HF/MINIX + D3(BJ) + gCP + SRB (composite, `HF3CMethod`) | -- | Sep 2026 |
 
-Shared parameters live in the `dft` parameter module (`-dft.basis`, `-dft.grid`,
-`-dft.scf_*`); see `dft.h` (`BEGIN_PARAMETER_DEFINITION(dft)`).
+The functional is fixed by the method name and mapped in `MethodFactory::create()` to
+`QMMethod(QMFunctional::..., config)` (or `HF3CMethod`). It is **not** a parameter.
+
+Shared parameters live in the `qm` parameter module (`-qm.basis`, `-qm.grid`,
+`-qm.scf_*`, `-qm.threads`, `-qm.eri_screening`); see `qm_engine.h`
+(`BEGIN_PARAMETER_DEFINITION(qm)`). The pre-Sep-2026 `-dft.*` scope is still merged
+(below `-qm.*`).
 
 ---
 
@@ -255,8 +244,8 @@ Full plan: [`docs/DFT_ROADMAP/`](DFT_ROADMAP/) (README + WP0..WP9) and the maste
 | WP | Title | Status |
 |----|-------|--------|
 | WP0 | Geruest, Quellenangabe, Setup | WP0 scaffold done (this doc) |
-| WP1 | GTO 1e integrals (S/T/V) | done — `ctest -L dft_1e` 10/10 (kernels corrected Jul 2026) |
-| WP2 | 4-centre ERI (McMurchie-Davidson) | done — `ctest -L dft_2e` 10/10 (kernels corrected Jul 2026) |
+| WP1 | GTO 1e integrals (S/T/V) | done — `ctest -L qm_1e` 10/10 (kernels corrected Jul 2026) |
+| WP2 | 4-centre ERI (McMurchie-Davidson) | done — `ctest -L qm_2e` 10/10 (kernels corrected Jul 2026) |
 | WP3 | HF-SCF (rung 666, hard ERI gate) | **done (Jul 2026)** — 10/10 molecules ≤4e-9 Eh vs ORCA, see above |
 | WP4 | DFT grid (Euler-Maclaurin + Lebedev + Becke) | open |
 | WP5 | LDA (Slater-Dirac + VWN5) | open |
@@ -299,7 +288,7 @@ functionals, the quadrature grid, the analytic gradient, dispersion (D3/D4) coup
 > AI-generated, machine-tested only. No `TESTED` / `APPROVED` label (human-only per CLAUDE.md).
 
 **Implemented (WP2)**:
-- `dft_integrals.{hpp,cpp}` -- `ERITensor` (flat n^4, chemists' (mu nu | lam sig),
+- `qm_integrals.{hpp,cpp}` -- `ERITensor` (flat n^4, chemists' (mu nu | lam sig),
   `operator()` read / `at()` write / `set8()` 8-fold fill); `buildERI` via
   McMurchie-Davidson (reuses WP1 `hermiteCoeffs` + `boysArray`; new ERI R-auxiliary
   `R^n_{000}=(-2 rho)^n F_n(T)` with the (P-Q) displacement, plus the
@@ -311,20 +300,20 @@ functionals, the quadrature grid, the analytic gradient, dispersion (D3/D4) coup
 - `dft.h` / `dft.cpp` -- lazy `DFT::cartesianERI()` builds `m_eri_cart` on first
   request and caches it; NOT called by `Calculation()` (scaffold `-sp` path
   unchanged: E_nn + 0, electronic energy = 0). `eriReady()` query added.
-- `test_cases/dft_2e/` -- `dump_dft_2e.cpp` (emits ERI/J/K + dummy P as JSON),
-  `diff_dft_2e.py` (pure-stdlib orchestrator, three gates), `CMakeLists.txt`
-  (registers `ctest -L dft_2e` for the 10 dft_1e molecules, tol 1e-10).
-- `scripts/dft_2e_python_ints.py` -- independent pure-stdlib (no numpy/scipy/pyscf)
+- `test_cases/qm_2e/` -- `dump_qm_2e.cpp` (emits ERI/J/K + dummy P as JSON),
+  `diff_qm_2e.py` (pure-stdlib orchestrator, three gates), `CMakeLists.txt`
+  (registers `ctest -L qm_2e` for the 10 qm_1e molecules, tol 1e-10).
+- `scripts/qm_2e_python_ints.py` -- independent pure-stdlib (no numpy/scipy/pyscf)
   MD ERI witness sharing curcuma's exact cartesian AO order, plus J/K from the
   same dummy density.
 
-**Tested**: `ctest -L dft_2e` 10/10 on H2, He, LiH, BeH2, BH, CH4, NH3, H2O, HF, Ne
+**Tested**: `ctest -L qm_2e` 10/10 on H2, He, LiH, BeH2, BH, CH4, NH3, H2O, HF, Ne
 (def2-SVP, cartesian 6d). Gates per molecule: (a) element-wise ERI vs the Python MD
 witness max|curc-witness| = 2.1e-14 (worst CH4/NH3/H2O; He/LiH exact 0); (b) 8-fold
 ERI symmetry exact (0.0), J/K symmetric to 1e-12, Tr(P*S)=2, Tr(P*J)==Tr(P*K) to
 1.8e-13 (worst Ne), J/K element-wise vs witness to 7e-14; (ss|ss) primitive spot-check
 vs the closed form `2 pi^{5/2}/(p q sqrt(p+q)) K_AB K_CD F_0(T)` = 2.2e-16 (incl. T=0
-same-centre). `ctest -L dft_1e` regression still 10/10; `make -j4` and
+same-centre). `ctest -L qm_1e` regression still 10/10; `make -j4` and
 `make GenerateParams` warning-free; scaffold `curcuma -sp <mol>.xyz -method hf`
 unchanged (E_nn only, ERI not built).
 
@@ -361,14 +350,15 @@ testing against an external 2e reference (ORCA/xcDFT/libint) is pending.
 
 | File | Role |
 |------|------|
-| `src/core/energy_calculators/qm_methods/dft.h` | `DFTFunctional` enum, `dft` PARAM block, `DFT : public QMDriver` |
-| `src/core/energy_calculators/qm_methods/dft.cpp` | Engine: nuclear repulsion + scaffold notice |
-| `src/core/energy_calculators/qm_methods/dft_method.h` | `DFTMethod : public ComputationalMethod` wrapper |
-| `src/core/energy_calculators/qm_methods/dft_method.cpp` | Wrapper delegation + `getDefaultConfig` |
-| `src/core/energy_calculators/method_factory.cpp` | `hf`/`lda`/`pbe`/`b3lyp` dispatch + listings |
-| `src/core/energy_calculators/qm_methods/dft_integrals.hpp` | WP1 1e + WP2 ERI/J/K + spherical-transform API (`namespace dft1e`) |
-| `src/core/energy_calculators/qm_methods/dft_integrals.cpp` | WP1 1e kernels + WP2 MD ERI / Coulomb / exchange / 4-index spherical |
-| `test_cases/dft_2e/dump_dft_2e.cpp` | WP2 dumper: ERI (cartesian 6d) + J/K + dummy P as JSON |
-| `test_cases/dft_2e/diff_dft_2e.py` | WP2 orchestrator: kernel gate + internal consistency + optional xcDFT |
-| `test_cases/dft_2e/CMakeLists.txt` | `ctest -L dft_2e` registration (10 mols, reuses dft_1e .xyz) |
-| `scripts/dft_2e_python_ints.py` | Independent pure-stdlib MD ERI + J/K witness (shared AO order) |
+| `src/core/energy_calculators/qm_methods/qm_engine.h/.cpp` | `QMFunctional` enum, `qm` PARAM block, `QMEngine : public QMDriver` (basis, 1e integrals, lazy ERI, geometry updates) |
+| `src/core/energy_calculators/qm_methods/qm_scf.cpp` | closed-shell RHF SCF (SAD/H0 guess, DIIS), Fock build, active-basis ERI |
+| `src/core/energy_calculators/qm_methods/qm_integrals.hpp/.cpp` | 1e kernels, shell-quartet-blocked MD ERI (Schwarz, OpenMP, on-the-fly 5d), J/K, spherical transforms (`namespace qmint`) |
+| `src/core/energy_calculators/qm_methods/qm_method.h/.cpp` | `QMMethod : public ComputationalMethod` wrapper, `engineConfig()` scope merge |
+| `src/core/energy_calculators/qm_methods/hf3c_method.h/.cpp` | `HF3CMethod`: HF/MINIX + D3(BJ) + gCP + SRB |
+| `src/core/energy_calculators/qm_methods/gcp.h/.cpp` | gCP + SRB energy and gradient (simple-dftd3 port, H-Ne) |
+| `src/core/energy_calculators/qm_methods/MINIX.dat`, `def2-SVP.dat` | basis sets (H-Ne) |
+| `src/core/energy_calculators/method_factory.cpp` | `hf`/`lda`/`pbe`/`b3lyp`/`hf-3c` dispatch, `qm` scope |
+| `test_cases/qm_1e/`, `test_cases/qm_2e/` | 1e / ERI gates vs Python witnesses (+ `bench_qm_integrals`, timing only) |
+| `test_cases/qm_hf3c/` | HF-3c gate vs PySCF + simple-dftd3 + ORCA, `qm_update_geometry` regression test |
+| `scripts/qm_1e_python_ints.py`, `scripts/qm_2e_python_ints.py` | independent Python integral witnesses |
+| `scripts/hf3c_reference.py`, `scripts/gcp_reference_witness.py` | HF-3c reference generator, standalone gCP witness |

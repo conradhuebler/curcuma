@@ -1,107 +1,110 @@
 /*
- * <Native KS-DFT Method Wrapper Implementation>
+ * <Native ab-initio QM Method Wrapper Implementation>
  * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
- * Claude Generated: Native KS-DFT method wrapper for MethodFactory integration
+ * Claude Generated: Native KS-DFT method wrapper for MethodFactory integration,
+ *                   renamed DFTMethod -> QMMethod (Sep 2026)
  *
  * This program is free software under GPL-3.0
  */
 
-#include "dft_method.h"
+#include "qm_method.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/parameter_registry.h"
 
 #include <algorithm>
 
-DFTMethod::DFTMethod(DFTFunctional functional, const json& config)
-    : m_dft(nullptr)
-    , m_calculation_done(false)
-    , m_last_energy(0.0)
+json QMMethod::engineConfig(const json& config)
 {
-    json full_config = getDefaultConfig();
-    // The CLI auto-routes every -dft.<param> (and its flat form) into the "dft"
-    // module scope, i.e. controller["dft"], which is the ONLY place they land --
+    json full_config = ParameterRegistry::getInstance().getDefaultJson("qm");
+    // The CLI auto-routes every -qm.<param> (and its flat form) into the "qm"
+    // module scope, i.e. controller["qm"], which is the ONLY place they land --
     // so the scope has to be merged explicitly. Reading the controller's top level
-    // alone (as this wrapper used to) silently dropped every -dft.* flag:
-    // -dft.scf_mode, -dft.scf_threshold and -dft.scf_guess all had no effect.
-    // Top level is merged first so the scope wins; a flat/legacy top-level key
-    // still works as a fallback, matching the other method wrappers.
+    // alone (as this wrapper once did) silently dropped every scoped flag.
+    // Order: top level (flat/legacy fallback) < "dft" (the pre-Sep-2026 module
+    // name, kept so old command lines and -import_config files still work) < "qm".
     if (!config.empty())
         full_config.merge_patch(config);
     if (config.contains("dft") && config["dft"].is_object())
         full_config.merge_patch(config["dft"]);
+    if (config.contains("qm") && config["qm"].is_object())
+        full_config.merge_patch(config["qm"]);
+    return full_config;
+}
 
-    m_dft = std::make_unique<DFT>(functional, full_config);
-    m_method_name = m_dft->getMethodNameStr();
+QMMethod::QMMethod(QMFunctional functional, const json& config)
+    : m_engine(nullptr)
+    , m_calculation_done(false)
+    , m_last_energy(0.0)
+{
+    m_engine = std::make_unique<QMEngine>(functional, engineConfig(config));
+    m_method_name = m_engine->getMethodNameStr();
 
     // Convert to lowercase for MethodFactory consistency
     std::transform(m_method_name.begin(), m_method_name.end(),
                    m_method_name.begin(), ::tolower);
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("DFTMethod initialized: " + m_dft->getMethodNameStr());
+        CurcumaLogger::info("QMMethod initialized: " + m_engine->getMethodNameStr());
     }
 }
 
-bool DFTMethod::setMolecule(const Mol& mol)
+bool QMMethod::setMolecule(const Mol& mol)
 {
     m_molecule = mol;
     m_calculation_done = false;
 
-    return m_dft->QMInterface::InitialiseMolecule(mol);
+    return m_engine->QMInterface::InitialiseMolecule(mol);
 }
 
-bool DFTMethod::updateGeometry(const Matrix& geometry)
+bool QMMethod::updateGeometry(const Matrix& geometry)
 {
     m_calculation_done = false;
-    return m_dft->UpdateMolecule(geometry);
+    // QMInterface::UpdateMolecule(Matrix) stores the geometry and calls the
+    // engine's UpdateMolecule(), which invalidates the integral/SCF caches.
+    return m_engine->UpdateMolecule(geometry);
 }
 
-double DFTMethod::calculateEnergy(bool gradient)
+double QMMethod::calculateEnergy(bool gradient)
 {
-    m_last_energy = m_dft->Calculation(gradient);
+    m_last_energy = m_engine->Calculation(gradient);
     m_calculation_done = true;
     return m_last_energy;
 }
 
-Matrix DFTMethod::getGradient() const
+Matrix QMMethod::getGradient() const
 {
     if (!m_calculation_done) {
-        CurcumaLogger::warn("DFTMethod: No calculation done yet");
+        CurcumaLogger::warn("QMMethod: No calculation done yet");
         return Matrix::Zero(m_molecule.AtomCount(), 3);
     }
-    // WP0 scaffold: analytic gradient arrives in WP8.
+    // Analytic gradient arrives in WP8.
     return Matrix::Zero(m_molecule.AtomCount(), 3);
 }
 
-Vector DFTMethod::getCharges() const
+Vector QMMethod::getCharges() const
 {
-    if (!m_calculation_done) {
-        return Vector::Zero(m_molecule.AtomCount());
-    }
-    // WP0 scaffold: no population analysis yet.
+    // No population analysis yet.
     return Vector::Zero(m_molecule.AtomCount());
 }
 
-json DFTMethod::getEnergyDecomposition() const
+json QMMethod::getEnergyDecomposition() const
 {
-    // WP0 scaffold: only the nuclear repulsion component is meaningful.
     json decomp;
-    decomp["nuclear_repulsion"] = m_last_energy;
-    decomp["electronic"] = 0.0;
     decomp["total"] = m_last_energy;
+    if (m_engine->getFunctional() == QMFunctional::HF && m_engine->scfConverged()) {
+        // {ET, EV, EJ, Ex, E_elec}; E_nn is the remainder of the total.
+        const std::vector<double> c = m_engine->energyComponents();
+        decomp["kinetic"] = c[0];
+        decomp["nuclear_attraction"] = c[1];
+        decomp["coulomb"] = c[2];
+        decomp["exchange"] = c[3];
+        decomp["electronic"] = c[4];
+        decomp["nuclear_repulsion"] = m_last_energy - c[4];
+    } else {
+        // DFT functionals without V_xc yet: the total IS the nuclear repulsion.
+        decomp["nuclear_repulsion"] = m_last_energy;
+        decomp["electronic"] = 0.0;
+    }
     return decomp;
-}
-
-json DFTMethod::getDefaultConfig()
-{
-    return json{
-        { "basis", "def2-SVP" },
-        { "grid", "sg1" },
-        { "scf_max_iterations", 100 },
-        { "scf_threshold", 1.0e-6 },
-        { "scf_mode", "diis" },
-        { "scf_guess", "sad" },
-        { "threads", 1 },
-        { "cartesian_d", false }
-    };
 }

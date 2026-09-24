@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Independent Python witness for the curcuma native-DFT 1e integrals (WP1).
+Independent Python witness for the curcuma native-QM 1e integrals (WP1).
 
 Reads an XYZ and the SAME def2-SVP.dat curcuma uses, builds the contracted
 cartesian GTO basis in the SAME AO order as curcuma's
@@ -9,7 +9,7 @@ order; p -> [px,py,pz]; d -> [dxx,dyy,dzz,dxy,dxz,dyz]), and computes the
 overlap S, kinetic T (gradient identity) and nuclear-attraction V (McMurchie-
 Davidson + Boys) via an independently written Obara-Saika implementation.
 
-Output JSON schema (matches dump_dft_1e.cpp):
+Output JSON schema (matches dump_qm_1e.cpp):
   { "molecule":{...}, "basis","cartesian_d":true, "nbf","num_electrons",
     "nuclear_repulsion", "S":[[...]],"T":[[...]],"V":[[...]],"H":[[...]] }
 
@@ -17,9 +17,9 @@ This is the element-wise kernel witness: because curcuma and this script share
 the exact AO ordering (cartesian 6d), the matrices can be compared element by
 element. ORCA (which only exposes MOs, not the AO integral matrices, via
 orca_2json) is validated separately via the generalized-eigenvalue spectrum
-(see diff_dft_1e.py).
+(see diff_qm_1e.py).
 
-  dft_1e_python_ints.py <input.xyz> [--basis NAME] [--dat FILE] [--charge Q]
+  qm_1e_python_ints.py <input.xyz> [--basis NAME] [--dat FILE] [--charge Q]
 
 Claude Generated (WP1). GPL-3.0.
 """
@@ -366,7 +366,7 @@ def read_xyz(path):
 def default_dat(basis):
     here = os.path.dirname(os.path.abspath(__file__))
     src = os.path.join(here, "..", "src", "core", "energy_calculators", "qm_methods")
-    for d in (os.environ.get("CURCUMA_DFT_BASIS"), os.environ.get("CURCUMA_DATA"),
+    for d in (os.environ.get("CURCUMA_QM_BASIS"), os.environ.get("CURCUMA_DFT_BASIS"), os.environ.get("CURCUMA_DATA"),
               src, "."):
         if not d: continue
         p = os.path.join(d, basis+".dat") if not basis.endswith(".dat") else (d if d.endswith(".dat") else os.path.join(d, os.path.basename(basis)))

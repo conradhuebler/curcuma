@@ -4,11 +4,11 @@ WP1 1e-integral validation orchestrator (Claude Generated, WP1, June 2026).
 
 Pure-stdlib (no numpy) so it runs under any CMake-found Python3, matching the
 project's validate_sqm.py convention. Drives three independent checks of the
-curcuma native-DFT 1e integrals:
+curcuma native-QM 1e integrals:
 
   (a) KERNEL GATE (always run): element-wise S/T/V from the curcuma dumper
       (--cartesian_d, 6 cartesian d) vs an independent Python Obara-Saika
-      witness (dft_1e_python_ints.py) that shares curcuma's exact AO order.
+      witness (qm_1e_python_ints.py) that shares curcuma's exact AO order.
       Tolerance --tol (default 1e-10). This validates the integral KERNEL
       directly, independent of the spherical transform.
 
@@ -21,7 +21,7 @@ curcuma native-DFT 1e integrals:
           (idempotency proxy) to 1e-9
 
   (c) ORCA REFERENCE (optional): if <stem>.orca_ref.json sits next to the
-      xyz (produced by scripts/dft_1e_reference.py via ORCA), compare curcuma's
+      xyz (produced by scripts/qm_1e_reference.py via ORCA), compare curcuma's
       smallest SPHERICAL overlap eigenvalue to ORCA's reported "Smallest
       eigenvalue" (from the overlap diagonalisation). ORCA runs def2-SVP in the
       spherical 5d convention, so the spherical dump (without --cartesian_d) is
@@ -32,11 +32,11 @@ curcuma native-DFT 1e integrals:
       cartesian->spherical d transform is correct. The full MO spectrum vs
       ORCA is a WP3+ deliverable (ORCA's orbital energies are the SCF Fock
       spectrum Hc+2J-K, not the 1e Hcore spectrum curcuma has at WP1), so
-      diff_dft_1e.py does NOT assert it.
+      diff_qm_1e.py does NOT assert it.
 
 Exit code 0 = all run checks pass; nonzero otherwise.
 
-  diff_dft_1e.py --dump <dump_dft_1e> --python <witness.py> --xyz <file>
+  diff_qm_1e.py --dump <dump_qm_1e> --python <witness.py> --xyz <file>
                  [--basis NAME] [--tol 1e-10] [--tol-orca 1e-4] [--quiet]
 
 Copyright (C) 2019 - 2026 Conrad Huebler <Conrad.Huebler@gmx.net>. GPL-3.0.
@@ -299,7 +299,7 @@ def main():
         except (KeyError, ValueError) as e:
             failures.append("(c) malformed orca_ref.json: %s" % e)
     elif verbose:
-        log("[%s] no .orca_ref.json -> ORCA comparison skipped (run scripts/dft_1e_reference.py)" % stem)
+        log("[%s] no .orca_ref.json -> ORCA comparison skipped (run scripts/qm_1e_reference.py)" % stem)
 
     if failures:
         for f in failures:

@@ -21,7 +21,7 @@ Quellenangabe; ORCA-Referenzumgebung nutzbar.
       ein eigener Method-Name, jeweils `DFTMethod(DFTFunctional::..., config)`:
       `hf`→HF, `lda`→LDA, `pbe`→PBE, `b3lyp`→B3LYP. Eintrag in `getAvailableMethods`;
       `CMakeLists.txt`: neue `.cpp`; `make GenerateParams` sauber.
-- [ ] `docs/NATIVE_DFT_IMPLEMENTATION.md`-Gerüst mit Herkunfts-Sektion.
+- [ ] `docs/NATIVE_QM_IMPLEMENTATION.md`-Gerüst mit Herkunfts-Sektion.
 - [ ] CLAUDE.md-Status-Zeile (qm_methods + Haupt), README-Link.
 - [ ] ORCA-Check (`ORCA_PATH=/opt/orca_6_1/orca --version`); Test-Geometrien
       festgelegt (He/Be/Ne-XYZ erzeugen, H2O/CH4 vorhanden).

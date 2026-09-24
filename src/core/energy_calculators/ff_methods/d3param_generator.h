@@ -1,6 +1,6 @@
 /*
  * DFT-D3 Parameter Generator for Curcuma
- * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -120,6 +120,15 @@ public:
      * Throws std::invalid_argument if method is unknown
      */
     static D3ParameterGenerator createForMethod(const std::string& method);
+
+    /**
+     * Create D3ParameterGenerator with the HF-3c D3(BJ) parameters
+     * Parameters: s6=1.0, s8=0.8777, a1=0.4171, a2=2.9149 (Bohr), s9=0 (two-body only)
+     * Reference: R. Sure, S. Grimme, J. Comput. Chem. 34, 1672 (2013);
+     *            simple-dftd3 assets/parameters.toml [parameter.hf3c]
+     * Claude Generated (Sep 2026)
+     */
+    static D3ParameterGenerator createForHF3C();
 
     // Main parameter generation interface
     void GenerateParameters(const std::vector<int>& atoms, const Eigen::MatrixXd& geometry);

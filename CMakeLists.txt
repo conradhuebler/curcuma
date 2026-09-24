@@ -545,10 +545,12 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/native_xtb_method.cpp
         src/core/energy_calculators/qm_methods/nddo.cpp
         src/core/energy_calculators/qm_methods/nddo_method.cpp
-        src/core/energy_calculators/qm_methods/dft.cpp
-        src/core/energy_calculators/qm_methods/dft_integrals.cpp
-        src/core/energy_calculators/qm_methods/dft_method.cpp
-        src/core/energy_calculators/qm_methods/dft_scf.cpp
+        src/core/energy_calculators/qm_methods/qm_engine.cpp
+        src/core/energy_calculators/qm_methods/qm_integrals.cpp
+        src/core/energy_calculators/qm_methods/qm_method.cpp
+        src/core/energy_calculators/qm_methods/qm_scf.cpp
+        src/core/energy_calculators/qm_methods/gcp.cpp
+        src/core/energy_calculators/qm_methods/hf3c_method.cpp
         src/core/energy_calculators/qm_methods/gfnff_method.cpp
         src/core/energy_calculators/qm_methods/xtb_method.cpp
         src/core/energy_calculators/qm_methods/tblite_method.cpp
