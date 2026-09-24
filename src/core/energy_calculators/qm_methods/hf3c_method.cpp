@@ -14,6 +14,7 @@
 
 #include "src/core/curcuma_logger.h"
 #include "src/core/units.h"
+#include "src/core/energy_calculators/ff_methods/cn_calculator.h"
 
 #include <fmt/format.h>
 
@@ -61,27 +62,44 @@ bool HF3CMethod::updateGeometry(const Matrix& geometry)
 
 double HF3CMethod::calculateEnergy(bool gradient)
 {
-    (void)gradient;  // HF gradient pending (WP8)
     if (m_error) return 0.0;
+    const int n = static_cast<int>(m_molecule.m_atoms.size());
 
-    // 1) Hartree-Fock in the MINIX basis (prints its own SCF status at verbosity >= 1).
-    m_e_hf = m_engine->Calculation(false);
+    // 1) Hartree-Fock in the MINIX basis (prints its own SCF status at verbosity >= 1);
+    //    with `gradient` the engine also builds the analytic RHF gradient (Eh/Bohr).
+    m_e_hf = m_engine->Calculation(gradient);
 
-    // 2) D3(BJ) dispersion -- geometry in Angstrom, like the GFN1 D3 call site.
+    // 2) D3(BJ) dispersion -- geometry in Angstrom, like the GFN1 D3 call site in
+    //    xtb_native.cpp: the direct pair gradient comes back in Eh/Bohr, the CN chain
+    //    rule dE/dCN * dCN/dR is added by addD3CNGradient (its output scaled by the
+    //    Angstrom->Bohr factor so both parts are Eh/Bohr).
     const std::vector<int>& atoms = m_molecule.m_atoms;
     m_d3->prepareForEnergyGradient(atoms, m_molecule.m_geometry);
-    Matrix g_unused;
-    Vector dcn_unused;
-    m_e_d3 = m_d3->getEnergyAndGradient(/*need_gradient=*/false, g_unused, dcn_unused);
+    Matrix g_d3 = Matrix::Zero(n, 3);
+    Vector dEdcn = Vector::Zero(n);
+    m_e_d3 = m_d3->getEnergyAndGradient(gradient, g_d3, dEdcn);
+    if (gradient && dEdcn.size() == n)
+        CNCalculator::addD3CNGradient(atoms, m_molecule.m_geometry, dEdcn, g_d3,
+                                      /*k1=*/16.0, /*k2=*/4.0 / 3.0,
+                                      /*distance_unit_to_bohr=*/CurcumaUnit::Length::BOHR_TO_ANGSTROM);
 
-    // 3) gCP + SRB -- geometry in Bohr.
+    // 3) gCP + SRB -- geometry in Bohr, gradient in Eh/Bohr.
     const Matrix xyz_bohr = m_molecule.m_geometry * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
-    const double e_gcp_total = gcp::energy(atoms, xyz_bohr, m_gcp_params);
+    Matrix g_gcp;
+    const double e_gcp_total = gcp::energy(atoms, xyz_bohr, m_gcp_params, gradient ? &g_gcp : nullptr);
     m_e_srb = gcp::baseEnergy(atoms, xyz_bohr, m_gcp_params);
     m_e_gcp = e_gcp_total - m_e_srb;
 
     m_e_total = m_e_hf + m_e_d3 + e_gcp_total;
     m_calculation_done = true;
+
+    if (gradient) {
+        if (m_engine->scfConverged())
+            m_gradient_bohr = m_engine->gradientBohr() + g_d3 + g_gcp;
+        else
+            m_gradient_bohr = Matrix::Zero(n, 3);  // engine already warned
+        m_gradient_parts = { m_engine->gradientBohr(), g_d3, g_gcp };
+    }
 
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::result("native HF-3c = HF/MINIX + D3(BJ) + gCP + SRB");
@@ -99,9 +117,10 @@ double HF3CMethod::calculateEnergy(bool gradient)
 
 Matrix HF3CMethod::getGradient() const
 {
-    // The D3 and gCP/SRB gradients exist; the HF gradient (WP8) does not, and a
-    // partial gradient would silently drive an optimisation to a wrong structure.
-    return Matrix::Zero(m_molecule.AtomCount(), 3);
+    if (m_gradient_bohr.rows() != m_molecule.AtomCount())
+        return Matrix::Zero(m_molecule.AtomCount(), 3);
+    // Eh/Bohr internally; the ComputationalMethod contract is Eh/Angstrom.
+    return m_gradient_bohr * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
 }
 
 json HF3CMethod::getEnergyDecomposition() const

@@ -40,6 +40,14 @@ from the kernel ratios it would take minutes (ERI) to tens of minutes (transform
 Validation of the new kernels: `ctest -L qm_2e` (full ERI tensor vs an independent
 Python McMurchie-Davidson witness, 1e-10) and `ctest -L qm_1e`, `-L qm_hf3c` all pass.
 
+**Analytic gradient (WP8, Sep 2026)**: same shell-blocked machinery, derivative tables built
+one angular-momentum step higher on the differentiated centre, two-step McMurchie-Davidson
+contraction (ket Hermite sums folded into R once per ket component), R^0 built on the simplex
+t+u+v <= L instead of the (L+1)^4 box, no per-quartet heap allocation. Benzene HF-3c: 2e gradient
+8.5 s (1 thread) / 2.2 s (4 threads), ~7x the ERI build because it runs every ORDERED bra pair
+against the canonical ket pairs. Next steps there: canonical quartets with translational
+invariance (derivatives on A, B, C; D from their sum) and density-weighted screening.
+
 **What is still slow / the next wall**: the ERI tensor is **stored** (n^4 doubles:
 1.35 GB at 114 functions, 12.8 GB at 200). Beyond ~150 functions the engine runs out of
 memory before it runs out of time.

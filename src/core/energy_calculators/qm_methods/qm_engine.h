@@ -105,6 +105,15 @@ public:
     bool UpdateMolecule() override;
     using QMInterface::UpdateMolecule;  // keep the Mol/Matrix/Vector overloads visible
 
+    /// Analytic nuclear gradient exists for the closed-shell HF level (WP8, Sep 2026).
+    bool hasGradient() const override { return m_functional == QMFunctional::HF; }
+    /// dE/dR in Eh/BOHR (natoms x 3), valid after Calculation(true) with a converged
+    /// HF SCF. NOTE the unit: the ComputationalMethod contract is Eh/Angstrom, the
+    /// wrappers convert (Known Issue #28).
+    const Matrix& gradientBohr() const { return m_gradient; }
+    /// Last gradient split into its parts (Eh/Bohr): {one-electron, two-electron, E_nn}.
+    const std::vector<Matrix>& gradientParts() const { return m_gradient_parts; }
+
     // Property access
     std::string getMethodNameStr() const;
     QMFunctional getFunctional() const { return m_functional; }
@@ -160,6 +169,11 @@ private:
     // Mutable so the const getter can populate the cache.
     mutable qmint::ERITensor m_eri_cart;
     mutable bool m_eri_ready = false;
+
+    // WP8: gradient parts {1e, 2e, nuclear repulsion} of the last computeGradient()
+    std::vector<Matrix> m_gradient_parts;
+    bool computeGradient();  ///< fills m_gradient (Eh/Bohr) from the converged SCF
+    Matrix calculateCoreRepulsionGradient() const;  ///< dE_nn/dR, Eh/Bohr
 
     // WP3: SCF state. The SCF runs in the active basis (m_nbf, spherical 5d by
     // default or cartesian when m_cartesian_d). The active-basis ERI is the

@@ -118,12 +118,15 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
         m_basis_name = config["basis"].get<std::string>();
     if (config.contains("cartesian_d") && config["cartesian_d"].is_boolean())
         m_cartesian_d = config["cartesian_d"].get<bool>();
-    if (config.contains("threads") && config["threads"].is_number_integer())
-        m_threads = config["threads"].get<int>();
+    // is_number(), not is_number_integer(): the CLI and the registry defaults can
+    // deliver integers as floating point (1.0), and the old test then silently kept
+    // QMDriver's default of 4 threads whatever -qm.threads said (Sep 2026).
+    if (config.contains("threads") && config["threads"].is_number())
+        m_threads = std::max(1, static_cast<int>(std::lround(config["threads"].get<double>())));
     if (config.contains("eri_screening") && config["eri_screening"].is_number())
         m_eri_screening = config["eri_screening"].get<double>();
-    if (config.contains("scf_max_iterations") && config["scf_max_iterations"].is_number_integer())
-        m_scf_max_iter = config["scf_max_iterations"].get<int>();
+    if (config.contains("scf_max_iterations") && config["scf_max_iterations"].is_number())
+        m_scf_max_iter = static_cast<int>(std::lround(config["scf_max_iterations"].get<double>()));
     if (config.contains("scf_threshold") && config["scf_threshold"].is_number())
         m_scf_threshold = config["scf_threshold"].get<double>();
     if (config.contains("scf_mode") && config["scf_mode"].is_string())
@@ -219,8 +222,6 @@ bool QMEngine::UpdateMolecule()
 
 double QMEngine::Calculation(bool gradient)
 {
-    (void)gradient;  // WP8 brings the analytic gradient
-
     // Build the 1e integrals if not done yet (the SCF uses them).
     if (!m_integrals_ready) InitialiseMolecule();
 
@@ -252,6 +253,16 @@ double QMEngine::Calculation(bool gradient)
         }
     }
     m_total_energy = m_e_elec + e_nn;
+
+    // WP8: analytic gradient from the converged density (energy-only callers skip it).
+    if (gradient) {
+        if (m_scf_converged)
+            computeGradient();
+        else {
+            m_gradient = Matrix::Zero(m_atomcount, 3);
+            CurcumaLogger::warn("QM: SCF not converged -- no gradient computed (zero returned)");
+        }
+    }
 
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::result(fmt::format("native QM -- HF/{} SCF {} ({} iterations)",
@@ -373,6 +384,73 @@ const qmint::ERITensor& QMEngine::cartesianERI() const
         }
     }
     return m_eri_cart;
+}
+
+// =================================================================================
+// WP8: analytic RHF nuclear gradient (Claude Generated, Sep 2026)
+// =================================================================================
+
+// dE/dR_A of E_nn = sum_{i<j} Z_i Z_j / R_ij:  -Z_A Z_B (R_A - R_B) / R_AB^3  [Eh/Bohr]
+Matrix QMEngine::calculateCoreRepulsionGradient() const
+{
+    Matrix g = Matrix::Zero(m_atomcount, 3);
+    for (int i = 0; i < m_atomcount; ++i)
+        for (int j = i + 1; j < m_atomcount; ++j) {
+            double d[3], r2 = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                d[k] = Length::angstrom_to_bohr(m_geometry(i, k) - m_geometry(j, k));
+                r2 += d[k] * d[k];
+            }
+            if (r2 < 1.0e-24) continue;
+            const double f = -(double)m_atoms[i] * m_atoms[j] / (r2 * std::sqrt(r2));
+            for (int k = 0; k < 3; ++k) {
+                g(i, k) += f * d[k];
+                g(j, k) -= f * d[k];
+            }
+        }
+    return g;
+}
+
+// Gradient = one-electron (T, V incl. Hellmann-Feynman, -W dS) + two-electron
+// + nuclear repulsion; see the WP8 block in qm_integrals.cpp for the formulas.
+// The integrals are differentiated in the CARTESIAN basis, so the active-basis
+// density P and energy-weighted density W are taken back with the 6d->5d map Q:
+// E = Tr(P_sph H_sph) = Tr(P_sph Q^T H_cart Q) = Tr((Q P_sph Q^T) H_cart). Q only
+// mixes components of one shell on one atom, so it does not depend on geometry.
+bool QMEngine::computeGradient()
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    const int n_occ = m_num_electrons / 2;
+    Matrix W = Matrix::Zero(m_nbf, m_nbf);
+    for (int i = 0; i < n_occ; ++i)
+        W += 2.0 * m_energies(i) * (m_mo.col(i) * m_mo.col(i).transpose());
+
+    Matrix Pc = m_density, Wc = W;
+    if (m_Q.size() != 0) {
+        Pc = m_Q * m_density * m_Q.transpose();
+        Wc = m_Q * W * m_Q.transpose();
+    }
+
+    Matrix posBohr = Matrix::Zero(m_atomcount, 3);
+    for (int i = 0; i < m_atomcount; ++i)
+        for (int k = 0; k < 3; ++k)
+            posBohr(i, k) = Length::angstrom_to_bohr(m_geometry(i, k));
+
+    const Matrix g1 = qmint::gradientOneElectron(m_gto_basis, m_atoms, posBohr, Pc, Wc, m_threads);
+    const auto t1 = std::chrono::steady_clock::now();
+    const Matrix g2 = qmint::gradientTwoElectron(m_gto_basis, Pc, m_atomcount, m_threads);
+    const auto t2 = std::chrono::steady_clock::now();
+    const Matrix gn = calculateCoreRepulsionGradient();
+    m_gradient = g1 + g2 + gn;
+    m_gradient_parts = { g1, g2, gn };
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+        CurcumaLogger::info(fmt::format(
+            "QM: analytic gradient |g| = {:.6e} Eh/Bohr (1e {:.1f} ms, 2e {:.1f} ms, {} threads)",
+            m_gradient.norm(), ms(t0, t1), ms(t1, t2), m_threads));
+    }
+    return true;
 }
 
 // =================================================================================

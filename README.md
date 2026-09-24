@@ -97,9 +97,9 @@ Native GFN methods (no external dependency required, canonical backends since AP
 - **gfn1** : Native GFN1-xTB — 14/16 validation molecules at 1e-8 vs tblite; includes the GFN1-only halogen-bond correction (B–X···A, added Sep 2026)
 - **gfn2** : Native GFN2-xTB — 15/16 validation molecules at 1e-8 vs tblite (only `complex` open at 7.3e-8)
 
-Native ab-initio QM engine (**`hf` and `hf-3c` usable, LDA/PBE/B3LYP not yet** — no external dependency required; Gaussian-basis 1e integrals + 4-centre ERIs (McMurchie-Davidson, shell-quartet blocked, Schwarz-screened, OpenMP) and a closed-shell RHF SCF; energy only, no gradient yet; H-Ne):
+Native ab-initio QM engine (**`hf` and `hf-3c` usable, LDA/PBE/B3LYP not yet** — no external dependency required; Gaussian-basis 1e integrals + 4-centre ERIs (McMurchie-Davidson, shell-quartet blocked, Schwarz-screened, OpenMP) and a closed-shell RHF SCF; analytic gradient, so `-opt` works; H-Ne):
 - **hf** : closed-shell RHF, matches ORCA 6.1 HF/def2-SVP on 10/10 validation molecules within 4e-9 Eh; engine settings under `-qm.*` (e.g. `-qm.basis MINIX -qm.threads 4`; the old `-dft.*` scope still works)
-- **hf-3c** : native HF-3c = HF/MINIX + D3(BJ) + gCP + SRB (Sure & Grimme 2013); every term matches PySCF + simple-dftd3 to ≤4e-11 Eh on 17 molecules, H2O total within 4.3e-10 Eh of ORCA 6.1. The external ORCA version is `orca-hf-3c`
+- **hf-3c** : native HF-3c = HF/MINIX + D3(BJ) + gCP + SRB (Sure & Grimme 2013); every term matches PySCF + simple-dftd3 to ≤4e-11 Eh on 17 molecules, H2O total within 4.3e-10 Eh of ORCA 6.1; analytic gradient ≤2e-10 Eh/Bohr vs PySCF + simple-dftd3, `-opt -method hf-3c` reaches their minimum to 1e-6 Å. The external ORCA version is `orca-hf-3c`
 - **lda**, **pbe**, **b3lyp** : method names reserved, currently the nuclear repulsion only (no V_xc yet)
 - see [docs/NATIVE_QM_IMPLEMENTATION.md](docs/NATIVE_QM_IMPLEMENTATION.md), the [DFT roadmap](docs/DFT_ROADMAP/) and the [performance/GPU roadmap](docs/QM_GPU_ROADMAP.md)
 

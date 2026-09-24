@@ -6,7 +6,7 @@
  * (hf/lda/pbe/b3lyp) is passed as a QMFunctional enum set by the method name in
  * MethodFactory, not as a parameter. Engine settings come from the `qm` scope
  * (`-qm.basis`, `-qm.scf_*`); the pre-Sep-2026 `dft` scope is still merged.
- * hasGradient() is false until WP8.
+ * Analytic gradient: `hf` only (WP8, Sep 2026), returned in Eh/Angstrom.
  *
  * Claude Generated: Native KS-DFT method wrapper for MethodFactory integration,
  *                   renamed DFTMethod -> QMMethod (Sep 2026)
@@ -39,7 +39,8 @@ public:
     std::string getMethodName() const override { return m_method_name; }
     bool isThreadSafe() const override { return true; }
 
-    bool hasGradient() const override { return false; }  // WP8
+    /// Analytic gradient for `hf` (WP8, Sep 2026); lda/pbe/b3lyp have none yet.
+    bool hasGradient() const override { return m_engine->hasGradient(); }
     void setThreadCount(int threads) override { (void)threads; }
     void setParameters(const json& params) override { (void)params; }
     json getParameters() const override { return json{}; }

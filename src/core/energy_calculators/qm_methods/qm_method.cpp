@@ -11,6 +11,7 @@
 #include "qm_method.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/parameter_registry.h"
+#include "src/core/units.h"
 
 #include <algorithm>
 
@@ -78,8 +79,11 @@ Matrix QMMethod::getGradient() const
         CurcumaLogger::warn("QMMethod: No calculation done yet");
         return Matrix::Zero(m_molecule.AtomCount(), 3);
     }
-    // Analytic gradient arrives in WP8.
-    return Matrix::Zero(m_molecule.AtomCount(), 3);
+    if (!m_engine->hasGradient())
+        return Matrix::Zero(m_molecule.AtomCount(), 3);  // lda/pbe/b3lyp: no V_xc, no gradient
+    // The engine works in Eh/Bohr; ComputationalMethod::getGradient() is Eh/Angstrom
+    // (dE/dx[A] = dE/dx[Bohr] * Bohr-per-Angstrom), see Known Issue #28.
+    return m_engine->gradientBohr() * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
 }
 
 Vector QMMethod::getCharges() const

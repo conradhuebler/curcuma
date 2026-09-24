@@ -191,7 +191,7 @@ Matrix buildOverlap(const std::vector<GTO::Orbital>& basis)
 // and (lb,mb,nb) on center B. Used by the kinetic kernel (which shifts each axis
 // independently via the gradient identity) -- geometric displacements are tied
 // to the correct axis, unlike a single "shifted x" helper.
-static inline double primitiveOverlapGeneral(int la, int ma, int na,
+static double primitiveOverlapGeneral(int la, int ma, int na,
                                               int lb, int mb, int nb,
                                               double gamma, double K,
                                               double PAx, double PBx,
@@ -206,48 +206,54 @@ static inline double primitiveOverlapGeneral(int la, int ma, int na,
     return pref * Sx[la][lb] * Sy[ma][mb] * Sz[na][nb];
 }
 
+// Primitive kinetic energy <g_a| -1/2 nabla^2 |g_b> for arbitrary cartesian powers,
+// via the gradient identity documented above. Split out of contractedKineticPair
+// (Sep 2026) so the analytic gradient can evaluate it at shifted powers.
+static double primitiveKinetic(int l1, int m1, int n1, int l2, int m2, int n2,
+                               double alpha, double beta,
+                               double Ax, double Ay, double Az,
+                               double Bx, double By, double Bz)
+{
+    double gamma, Px, Py, Pz;
+    double K = gaussianProductK(alpha, beta, Ax, Ay, Az, Bx, By, Bz, gamma, Px, Py, Pz);
+    if (K == 0.0) return 0.0;
+    const double PAx = Px - Ax, PBx = Px - Bx;
+    const double PAy = Py - Ay, PBy = Py - By;
+    const double PAz = Pz - Az, PBz = Pz - Bz;
+
+    // x contribution: <d/dx g_a | d/dx g_b>
+    double tx = 0.0;
+    if (l1 > 0 && l2 > 0) tx += l1 * l2 * primitiveOverlapGeneral(l1 - 1, m1, n1, l2 - 1, m2, n2, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
+    if (l1 > 0)           tx -= 2.0 * beta * l1 * primitiveOverlapGeneral(l1 - 1, m1, n1, l2 + 1, m2, n2, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
+    if (l2 > 0)           tx -= 2.0 * alpha * l2 * primitiveOverlapGeneral(l1 + 1, m1, n1, l2 - 1, m2, n2, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
+                           tx += 4.0 * alpha * beta * primitiveOverlapGeneral(l1 + 1, m1, n1, l2 + 1, m2, n2, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
+    // y contribution: <d/dy g_a | d/dy g_b>
+    double ty = 0.0;
+    if (m1 > 0 && m2 > 0) ty += m1 * m2 * primitiveOverlapGeneral(l1, m1 - 1, n1, l2, m2 - 1, n2, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
+    if (m1 > 0)           ty -= 2.0 * beta * m1 * primitiveOverlapGeneral(l1, m1 - 1, n1, l2, m2 + 1, n2, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
+    if (m2 > 0)           ty -= 2.0 * alpha * m2 * primitiveOverlapGeneral(l1, m1 + 1, n1, l2, m2 - 1, n2, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
+                           ty += 4.0 * alpha * beta * primitiveOverlapGeneral(l1, m1 + 1, n1, l2, m2 + 1, n2, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
+    // z contribution: <d/dz g_a | d/dz g_b>
+    double tz = 0.0;
+    if (n1 > 0 && n2 > 0) tz += n1 * n2 * primitiveOverlapGeneral(l1, m1, n1 - 1, l2, m2, n2 - 1, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
+    if (n1 > 0)           tz -= 2.0 * beta * n1 * primitiveOverlapGeneral(l1, m1, n1 - 1, l2, m2, n2 + 1, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
+    if (n2 > 0)           tz -= 2.0 * alpha * n2 * primitiveOverlapGeneral(l1, m1, n1 + 1, l2, m2, n2 - 1, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
+                           tz += 4.0 * alpha * beta * primitiveOverlapGeneral(l1, m1, n1 + 1, l2, m2, n2 + 1, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
+
+    return 0.5 * (tx + ty + tz);
+}
+
 static double contractedKineticPair(const GTO::Orbital& a, const GTO::Orbital& b)
 {
     int l1, m1, n1, l2, m2, n2;
     GTO::orbitalTypeToComponents(a.type, l1, m1, n1);
     GTO::orbitalTypeToComponents(b.type, l2, m2, n2);
     double sum = 0.0;
-    for (size_t ia = 0; ia < a.exponents.size(); ++ia) {
-        const double alpha = a.exponents[ia];
-        for (size_t ib = 0; ib < b.exponents.size(); ++ib) {
-            const double beta = b.exponents[ib];
-            double gamma, Px, Py, Pz;
-            double K = gaussianProductK(alpha, beta, a.x, a.y, a.z, b.x, b.y, b.z,
-                                        gamma, Px, Py, Pz);
-            if (K == 0.0) continue;
-            const double ca = a.coefficients[ia];
-            const double cb = b.coefficients[ib];
-            const double PAx = Px - a.x, PBx = Px - b.x;
-            const double PAy = Py - a.y, PBy = Py - b.y;
-            const double PAz = Pz - a.z, PBz = Pz - b.z;
-
-            // x contribution: <d/dx g_a | d/dx g_b>
-            double tx = 0.0;
-            if (l1 > 0 && l2 > 0) tx += l1 * l2 * primitiveOverlapGeneral(l1 - 1, m1, n1, l2 - 1, m2, n2, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
-            if (l1 > 0)           tx -= 2.0 * beta * l1 * primitiveOverlapGeneral(l1 - 1, m1, n1, l2 + 1, m2, n2, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
-            if (l2 > 0)           tx -= 2.0 * alpha * l2 * primitiveOverlapGeneral(l1 + 1, m1, n1, l2 - 1, m2, n2, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
-                                   tx += 4.0 * alpha * beta * primitiveOverlapGeneral(l1 + 1, m1, n1, l2 + 1, m2, n2, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
-            // y contribution: <d/dy g_a | d/dy g_b>
-            double ty = 0.0;
-            if (m1 > 0 && m2 > 0) ty += m1 * m2 * primitiveOverlapGeneral(l1, m1 - 1, n1, l2, m2 - 1, n2, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
-            if (m1 > 0)           ty -= 2.0 * beta * m1 * primitiveOverlapGeneral(l1, m1 - 1, n1, l2, m2 + 1, n2, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
-            if (m2 > 0)           ty -= 2.0 * alpha * m2 * primitiveOverlapGeneral(l1, m1 + 1, n1, l2, m2 - 1, n2, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
-                                   ty += 4.0 * alpha * beta * primitiveOverlapGeneral(l1, m1 + 1, n1, l2, m2 + 1, n2, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
-            // z contribution: <d/dz g_a | d/dz g_b>
-            double tz = 0.0;
-            if (n1 > 0 && n2 > 0) tz += n1 * n2 * primitiveOverlapGeneral(l1, m1, n1 - 1, l2, m2, n2 - 1, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
-            if (n1 > 0)           tz -= 2.0 * beta * n1 * primitiveOverlapGeneral(l1, m1, n1 - 1, l2, m2, n2 + 1, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
-            if (n2 > 0)           tz -= 2.0 * alpha * n2 * primitiveOverlapGeneral(l1, m1, n1 + 1, l2, m2, n2 - 1, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
-                                   tz += 4.0 * alpha * beta * primitiveOverlapGeneral(l1, m1, n1 + 1, l2, m2, n2 + 1, gamma, K, PAx, PBx, PAy, PBy, PAz, PBz);
-
-            sum += 0.5 * ca * cb * (tx + ty + tz);
-        }
-    }
+    for (size_t ia = 0; ia < a.exponents.size(); ++ia)
+        for (size_t ib = 0; ib < b.exponents.size(); ++ib)
+            sum += a.coefficients[ia] * b.coefficients[ib] *
+                   primitiveKinetic(l1, m1, n1, l2, m2, n2, a.exponents[ia], b.exponents[ib],
+                                    a.x, a.y, a.z, b.x, b.y, b.z);
     return sum;
 }
 
@@ -326,12 +332,14 @@ static std::vector<std::vector<std::vector<double>>> hermiteCoeffs(int iA, int i
 }
 
 // Boys function array F_0..F_maxN via downward recurrence from a zero asymptote.
-static std::vector<double> boysArray(int maxN, double T)
+// Fills F[0..maxN] (resized, capacity reused) -- the blocked kernels call this once
+// per primitive quartet, so it must not allocate (Claude Generated, Sep 2026).
+static void boysArrayInto(int maxN, double T, std::vector<double>& F)
 {
-    std::vector<double> F(maxN + 1, 0.0);
+    F.assign(maxN + 1, 0.0);
     if (T < 1e-14) {
         for (int n = 0; n <= maxN; ++n) F[n] = 1.0 / (2.0 * n + 1.0);
-        return F;
+        return;
     }
     // Large T: the downward recurrence below needs a starting index far above T,
     // and a fixed maxN+25 start is NOT enough -- F_0(37) came out 50x too small and
@@ -348,14 +356,22 @@ static std::vector<double> boysArray(int maxN, double T)
         F[0] = (double)(0.5L * sqrtl(PI / Tl) * erfl(sqrtl(Tl)));
         for (int n = 0; n < maxN; ++n)
             F[n + 1] = (double)(((2.0L * n + 1.0L) * (long double)F[n] - eT) / (2.0L * Tl));
-        return F;
+        return;
     }
     const int M = maxN + 25;
-    std::vector<long double> G(M + 1, 0.0L);
+    thread_local std::vector<long double> G;
+    G.assign(M + 1, 0.0L);
     const long double eT = expl(-(long double)T);
     for (int n = M - 1; n >= 0; --n)
         G[n] = (2.0L * T * G[n + 1] + eT) / (2.0L * n + 1.0L);
     for (int n = 0; n <= maxN; ++n) F[n] = (double)G[n];
+    return;
+}
+
+static std::vector<double> boysArray(int maxN, double T)
+{
+    std::vector<double> F;
+    boysArrayInto(maxN, T, F);
     return F;
 }
 
@@ -694,6 +710,53 @@ static void buildRblockERI(int tmax, int umax, int vmax, int Nmax,
     }
 }
 
+// R^0_{tuv} for t+u+v <= L only (Claude Generated, Sep 2026). Same recursion as
+// buildRblockERI -- base R^n_{000} = (-2 rho)^n F_n(T), then z before y before x --
+// but built level by level over the simplex t+u+v <= L-n instead of the full
+// (L+1)^4 box, and only level n = 0 is kept. For the blocked ERI and gradient
+// kernels this was the dominant cost (the box holds ~24x more entries than the
+// simplex at L = 5). Output layout: R0[(t*(L+1) + u)*(L+1) + v].
+static void buildR0Simplex(int L, double Wx, double Wy, double Wz, double rho,
+                           const std::vector<double>& boys, std::vector<double>& R0)
+{
+    const int s = L + 1;
+    const size_t sz = (size_t)s * s * s;
+    thread_local std::vector<double> lvl;
+    R0.assign(sz, 0.0);
+    lvl.assign(sz, 0.0);
+    auto at = [s](int t, int u, int v) { return ((size_t)t * s + u) * s + v; };
+    const double b = -2.0 * rho;
+    double bpow[64];  // L = LA+LB+LC+LD (+1 for the gradient); 63 is far beyond any basis here
+    bpow[0] = 1.0;
+    for (int n = 1; n <= L; ++n) bpow[n] = bpow[n - 1] * b;
+
+    // cur = level n+1 (starts at n = L: only R_000), nxt = level n
+    std::vector<double>* cur = &R0;
+    std::vector<double>* nxt = &lvl;
+    (*cur)[0] = bpow[L] * boys[L];
+    for (int n = L - 1; n >= 0; --n) {
+        std::vector<double>& c = *cur;
+        std::vector<double>& x = *nxt;
+        x[0] = bpow[n] * boys[n];
+        const int top = L - n;
+        for (int t = 0; t <= top; ++t)
+            for (int u = 0; u <= top - t; ++u)
+                for (int v = 0; v <= top - t - u; ++v) {
+                    if (t + u + v == 0) continue;
+                    double r;
+                    if (v > 0)
+                        r = (v >= 2 ? (v - 1) * c[at(t, u, v - 2)] : 0.0) + Wz * c[at(t, u, v - 1)];
+                    else if (u > 0)
+                        r = (u >= 2 ? (u - 1) * c[at(t, u - 2, v)] : 0.0) + Wy * c[at(t, u - 1, v)];
+                    else
+                        r = (t >= 2 ? (t - 1) * c[at(t - 2, u, v)] : 0.0) + Wx * c[at(t - 1, u, v)];
+                    x[at(t, u, v)] = r;
+                }
+        std::swap(cur, nxt);
+    }
+    if (cur != &R0) R0.swap(*cur);
+}
+
 // Primitive (ga b gb | gc gd) for cartesian angular momenta (la,ma,na) on A,
 // (lb,mb,nb) on B, (lc,mc,nc) on C, (ld,md,nd) on D. Exponents alpha..delta,
 // centres A..D in Bohr. Returns the chemists' integral (ab|cd).
@@ -910,7 +973,9 @@ std::vector<double> flattenHermite(const std::vector<std::vector<std::vector<dou
     return f;
 }
 
-ShellPair makeShellPair(const std::vector<EriShell>& sh, int A, int B)
+// raiseA = 1 builds the Hermite tables one angular-momentum step higher on A --
+// what the gradient kernel needs for the (l+1) half of d/dA g_l.
+ShellPair makeShellPair(const std::vector<EriShell>& sh, int A, int B, int raiseA = 0)
 {
     ShellPair sp;
     sp.A = A;
@@ -925,9 +990,10 @@ ShellPair makeShellPair(const std::vector<EriShell>& sh, int A, int B)
             const double K = gaussianProductK(a.exps[ia], b.exps[ib], a.x, a.y, a.z, b.x, b.y, b.z,
                                               pp.p, pp.Px, pp.Py, pp.Pz);
             if (K == 0.0) continue;  // underflow: contributes exactly 0, as in primitiveERI
-            pp.Ex = flattenHermite(hermiteCoeffs(a.L, b.L, pp.Px - a.x, pp.Px - b.x, pp.p, K));
-            pp.Ey = flattenHermite(hermiteCoeffs(a.L, b.L, pp.Py - a.y, pp.Py - b.y, pp.p, 1.0));
-            pp.Ez = flattenHermite(hermiteCoeffs(a.L, b.L, pp.Pz - a.z, pp.Pz - b.z, pp.p, 1.0));
+            const int LA = a.L + raiseA;
+            pp.Ex = flattenHermite(hermiteCoeffs(LA, b.L, pp.Px - a.x, pp.Px - b.x, pp.p, K));
+            pp.Ey = flattenHermite(hermiteCoeffs(LA, b.L, pp.Py - a.y, pp.Py - b.y, pp.p, 1.0));
+            pp.Ez = flattenHermite(hermiteCoeffs(LA, b.L, pp.Pz - a.z, pp.Pz - b.z, pp.p, 1.0));
             sp.prims.push_back(std::move(pp));
         }
     return sp;
@@ -952,10 +1018,10 @@ void shellQuartet(const std::vector<EriShell>& sh, const ShellPair& bra, const S
     const int sAB_t = (A.L + 1) * (B.L + 1), sAB_i = B.L + 1;
     const int sCD_t = (C.L + 1) * (D.L + 1), sCD_i = D.L + 1;
     // R block strides (every Cartesian direction up to Ltot).
-    const int strideV = Ltot + 1;
-    const int strideU = (Ltot + 1) * strideV;
+    // R^0 on the simplex, layout [(t*(Ltot+1) + u)*(Ltot+1) + v]
+    const int strideV = 1;
+    const int strideU = Ltot + 1;
     const int strideN = (Ltot + 1) * strideU;
-    R.resize((size_t)(Ltot + 1) * strideN);
 
     for (const PrimPair& pb : bra.prims) {
         for (const PrimPair& pk : ket.prims) {
@@ -963,8 +1029,9 @@ void shellQuartet(const std::vector<EriShell>& sh, const ShellPair& bra, const S
             const double rho = p * q / (p + q);
             const double Wx = pb.Px - pk.Px, Wy = pb.Py - pk.Py, Wz = pb.Pz - pk.Pz;
             const double T = rho * (Wx * Wx + Wy * Wy + Wz * Wz);
-            const std::vector<double> F = boysArray(Ltot, T);
-            buildRblockERI(Ltot, Ltot, Ltot, Ltot, Wx, Wy, Wz, rho, F, R);
+            thread_local std::vector<double> F;
+            boysArrayInto(Ltot, T, F);
+            buildR0Simplex(Ltot, Wx, Wy, Wz, rho, F, R);
             const double pref = 2.0 * std::pow(PI, 2.5) / (p * q * std::sqrt(p + q));
 
             for (int ca = 0; ca < nA; ++ca) {
@@ -1239,6 +1306,289 @@ ERITensor applySphericalTransformERI(const ERITensor& eriCart, const Matrix& Q)
     ERITensor eriSph(nsph);
     std::copy(cur.begin(), cur.end(), eriSph.data());
     return eriSph;
+}
+
+// ===========================================================================
+// Analytic nuclear gradient of the closed-shell RHF energy (WP8, Sep 2026)
+// Claude Generated.
+//
+//   E = sum P_mn H_mn + 1/2 sum D_mnls (mn|ls) + E_nn,
+//   D_mnls = P_mn P_ls - 1/4 (P_ml P_ns + P_ms P_nl)   (spin-summed P)
+//
+//   dE/dA = sum P_mn dH_mn/dA - sum W_mn dS_mn/dA + 1/2 sum D (mn|ls)^A + dE_nn/dA,
+//   W_mn  = 2 sum_i^occ eps_i C_mi C_ni  (energy-weighted density; the -W dS term
+//           is the orbital-orthonormality ("Pulay") contribution).
+//   Pople, Krishnan, Schlegel, Binkley, Int. J. Quantum Chem. S13, 225 (1979);
+//   Helgaker, Jorgensen, Olsen, Molecular Electronic-Structure Theory, ch. 9.
+//
+// Every derivative integral comes from the centre derivative of a cartesian
+// Gaussian,  d/dA_x [x_A^l e^{-a r_A^2}] = 2a x_A^{l+1} e^{..} - l x_A^{l-1} e^{..},
+// i.e. from ordinary integrals with the power on A shifted by +-1 (the
+// normalisation constant of the original function stays attached). Only the
+// derivative with respect to the centre of the FIRST function is ever needed:
+//  - S, T, V (basis part): the matrices are symmetric, so d/dA of <m|O|n> summed
+//    against a symmetric P gives 2 sum_{m on A} P_mn <dm|O|n>;
+//  - V (operator part, the nucleus C itself moving): translational invariance,
+//    d/dC <m|1/r_C|n> = -(d/dA_m + d/dB_n) <m|1/r_C|n>;
+//  - ERI: D and (mn|ls) share the 8-fold symmetry, so the four centre
+//    derivatives contribute equally: 1/2 sum D (mn|ls)^A = 2 sum_{m on A} D (dm n|ls).
+// ===========================================================================
+
+// d/dA_k of one primitive quantity f(l,m,n) evaluated with the powers of the
+// function on A: 2 alpha f(l+1_k) - l_k f(l-1_k).
+template <typename F>
+static inline void centreDerivative(int l, int m, int n, double alpha, F f, double out[3])
+{
+    out[0] = 2.0 * alpha * f(l + 1, m, n) - (l > 0 ? l * f(l - 1, m, n) : 0.0);
+    out[1] = 2.0 * alpha * f(l, m + 1, n) - (m > 0 ? m * f(l, m - 1, n) : 0.0);
+    out[2] = 2.0 * alpha * f(l, m, n + 1) - (n > 0 ? n * f(l, m, n - 1) : 0.0);
+}
+
+Matrix gradientOneElectron(const std::vector<GTO::Orbital>& basis,
+                           const std::vector<int>& atomZ, const Matrix& atomPosBohr,
+                           const Matrix& P, const Matrix& W, int threads)
+{
+    const int n = (int)basis.size();
+    const int natoms = (int)atomZ.size();
+    Matrix grad = Matrix::Zero(natoms, 3);
+#ifdef _OPENMP
+#pragma omp parallel num_threads(threads > 0 ? threads : 1)
+#endif
+    {
+        Matrix g = Matrix::Zero(natoms, 3);
+#ifdef _OPENMP
+#pragma omp for schedule(dynamic, 1)
+#endif
+        for (int mu = 0; mu < n; ++mu) {
+            const GTO::Orbital& a = basis[mu];
+            int l1, m1, n1;
+            GTO::orbitalTypeToComponents(a.type, l1, m1, n1);
+            for (int nu = 0; nu < n; ++nu) {
+                const GTO::Orbital& b = basis[nu];
+                int l2, m2, n2;
+                GTO::orbitalTypeToComponents(b.type, l2, m2, n2);
+                const double pmn = P(mu, nu), wmn = W(mu, nu);
+                double dS[3] = { 0, 0, 0 }, dT[3] = { 0, 0, 0 };
+                std::vector<double> dV(3 * natoms, 0.0);  // <dm| -Z_C/r_C |n> per nucleus C
+                for (size_t ia = 0; ia < a.exponents.size(); ++ia) {
+                    const double alpha = a.exponents[ia];
+                    for (size_t ib = 0; ib < b.exponents.size(); ++ib) {
+                        const double beta = b.exponents[ib];
+                        const double cc = a.coefficients[ia] * b.coefficients[ib];
+                        double d[3];
+                        centreDerivative(l1, m1, n1, alpha, [&](int x, int y, int z) {
+                            return primitiveOverlap(x, y, z, l2, m2, n2, alpha, beta,
+                                                    a.x, a.y, a.z, b.x, b.y, b.z); }, d);
+                        for (int k = 0; k < 3; ++k) dS[k] += cc * d[k];
+                        centreDerivative(l1, m1, n1, alpha, [&](int x, int y, int z) {
+                            return primitiveKinetic(x, y, z, l2, m2, n2, alpha, beta,
+                                                    a.x, a.y, a.z, b.x, b.y, b.z); }, d);
+                        for (int k = 0; k < 3; ++k) dT[k] += cc * d[k];
+                        for (int C = 0; C < natoms; ++C) {
+                            const double Cx = atomPosBohr(C, 0), Cy = atomPosBohr(C, 1), Cz = atomPosBohr(C, 2);
+                            centreDerivative(l1, m1, n1, alpha, [&](int x, int y, int z) {
+                                return primitiveNuclearAttraction(x, y, z, l2, m2, n2, alpha, beta,
+                                                                  a.x, a.y, a.z, b.x, b.y, b.z, Cx, Cy, Cz); }, d);
+                            for (int k = 0; k < 3; ++k) dV[3 * C + k] += -atomZ[C] * cc * d[k];
+                        }
+                    }
+                }
+                const int A = a.atom;
+                for (int k = 0; k < 3; ++k) {
+                    double dVtot = 0.0;
+                    for (int C = 0; C < natoms; ++C) {
+                        dVtot += dV[3 * C + k];
+                        // operator part: nucleus C moves (translational invariance)
+                        g(C, k) -= 2.0 * pmn * dV[3 * C + k];
+                    }
+                    g(A, k) += 2.0 * pmn * (dT[k] + dVtot) - 2.0 * wmn * dS[k];
+                }
+            }
+        }
+#ifdef _OPENMP
+#pragma omp critical
+#endif
+        grad += g;
+    }
+    (void)threads;
+    return grad;
+}
+
+namespace {
+
+/// d/dA_k (AB|CD) for every component quartet: out[k][((a*nB+b)*nC+c)*nD+d].
+/// `bra` must be built with makeShellPair(..., raiseA = 1).
+void shellQuartetDerivA(const std::vector<EriShell>& sh, const ShellPair& bra, const ShellPair& ket,
+                        std::vector<double> out[3], std::vector<double>& R)
+{
+    const EriShell& A = sh[bra.A];
+    const EriShell& B = sh[bra.B];
+    const EriShell& C = sh[ket.A];
+    const EriShell& D = sh[ket.B];
+    const int nA = (int)A.lmn.size(), nB = (int)B.lmn.size(), nC = (int)C.lmn.size(), nD = (int)D.lmn.size();
+    const size_t blk = (size_t)nA * nB * nC * nD;
+    for (int k = 0; k < 3; ++k) out[k].assign(blk, 0.0);
+
+    const int LAr = A.L + 1;                          // tables were built one step higher on A
+    const int Ltot = LAr + B.L + C.L + D.L;
+    const int sAB_t = (LAr + 1) * (B.L + 1), sAB_i = B.L + 1;
+    const int sCD_t = (C.L + 1) * (D.L + 1), sCD_i = D.L + 1;
+    const int strideV = 1, strideU = Ltot + 1, strideN = (Ltot + 1) * strideU;  // R^0 simplex layout
+
+    for (const PrimPair& pb : bra.prims) {
+        const double alpha = A.exps[pb.ia];
+        for (const PrimPair& pk : ket.prims) {
+            const double p = pb.p, q = pk.p;
+            const double rho = p * q / (p + q);
+            const double Wx = pb.Px - pk.Px, Wy = pb.Py - pk.Py, Wz = pb.Pz - pk.Pz;
+            const double T = rho * (Wx * Wx + Wy * Wy + Wz * Wz);
+            thread_local std::vector<double> F;
+            boysArrayInto(Ltot, T, F);
+            buildR0Simplex(Ltot, Wx, Wy, Wz, rho, F, R);
+            const double pref = 2.0 * std::pow(PI, 2.5) / (p * q * std::sqrt(p + q));
+
+            // Two-step contraction (Helgaker 9.9): for each ket component, fold the ket
+            // Hermite coefficients into the R block once,
+            //   h(t,u,v) = sum_{tau,ups,om} (-1)^(tau+ups+om) E_tau E_ups E_om R_{t+tau,u+ups,v+om},
+            // for every bra Hermite index the raised/lowered bra functions can reach;
+            // each of the six shifted bra functions is then a short sum over h.
+            const int Lb = LAr + B.L;                  // highest bra Hermite order
+            const int hs = Lb + 1;
+            thread_local std::vector<double> h;
+            h.resize((size_t)hs * hs * hs);
+            for (int cc = 0; cc < nC; ++cc) {
+                const auto& lc = C.lmn[cc];
+                for (int cd = 0; cd < nD; ++cd) {
+                    const auto& ld = D.lmn[cd];
+                    const int taumax = lc[0] + ld[0], upsmax = lc[1] + ld[1], ommax = lc[2] + ld[2];
+                    for (int t = 0; t <= Lb; ++t)
+                        for (int u = 0; u <= Lb - t; ++u)
+                            for (int v = 0; v <= Lb - t - u; ++v) {
+                                double acc = 0.0;
+                                for (int tau = 0; tau <= taumax; ++tau) {
+                                    const double et2 = pk.Ex[tau * sCD_t + lc[0] * sCD_i + ld[0]];
+                                    if (et2 == 0.0) continue;
+                                    for (int ups = 0; ups <= upsmax; ++ups) {
+                                        const double eu2 = pk.Ey[ups * sCD_t + lc[1] * sCD_i + ld[1]];
+                                        if (eu2 == 0.0) continue;
+                                        for (int om = 0; om <= ommax; ++om) {
+                                            const double ev2 = pk.Ez[om * sCD_t + lc[2] * sCD_i + ld[2]];
+                                            if (ev2 == 0.0) continue;
+                                            const double sgn = ((tau + ups + om) & 1) ? -1.0 : 1.0;
+                                            acc += et2 * eu2 * ev2 * sgn
+                                                 * R[(t + tau) * strideN + (u + ups) * strideU + (v + om) * strideV];
+                                        }
+                                    }
+                                }
+                                h[((size_t)t * hs + u) * hs + v] = acc;
+                            }
+                    for (int cb = 0; cb < nB; ++cb) {
+                        const auto& lb = B.lmn[cb];
+                        // (a'b|cd) for bra powers (ax, ay, az) on A, b/c/d fixed.
+                        auto contract = [&](int ax, int ay, int az) {
+                            double val = 0.0;
+                            for (int t = 0; t <= ax + lb[0]; ++t) {
+                                const double et = pb.Ex[t * sAB_t + ax * sAB_i + lb[0]];
+                                if (et == 0.0) continue;
+                                for (int u = 0; u <= ay + lb[1]; ++u) {
+                                    const double eu = pb.Ey[u * sAB_t + ay * sAB_i + lb[1]];
+                                    if (eu == 0.0) continue;
+                                    const double etu = et * eu;
+                                    const double* hrow = &h[((size_t)t * hs + u) * hs];
+                                    for (int v = 0; v <= az + lb[2]; ++v)
+                                        val += etu * pb.Ez[v * sAB_t + az * sAB_i + lb[2]] * hrow[v];
+                                }
+                            }
+                            return val;
+                        };
+                        for (int ca = 0; ca < nA; ++ca) {
+                            const auto& la = A.lmn[ca];
+                            const double cprod = A.coef[ca][pb.ia] * B.coef[cb][pb.ib]
+                                               * C.coef[cc][pk.ia] * D.coef[cd][pk.ib] * pref;
+                            double d[3];
+                            centreDerivative(la[0], la[1], la[2], alpha, contract, d);
+                            const size_t idx = ((size_t)(ca * nB + cb) * nC + cc) * nD + cd;
+                            for (int k = 0; k < 3; ++k) out[k][idx] += cprod * d[k];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+}  // namespace
+
+Matrix gradientTwoElectron(const std::vector<GTO::Orbital>& basis, const Matrix& P,
+                           int natoms, int threads)
+{
+    Matrix grad = Matrix::Zero(natoms, 3);
+    const int n = (int)basis.size();
+    if (n == 0) return grad;
+    const std::vector<EriShell> sh = groupShells(basis);
+    const int ns = (int)sh.size();
+
+    // Bra pairs: every ORDERED (A, B), tables raised on A. Ket pairs: C <= D, a
+    // C < D block stands for (CD| and (DC| (D and the ERI are symmetric in l<->s).
+    std::vector<ShellPair> bras;
+    bras.reserve((size_t)ns * ns);
+    for (int A = 0; A < ns; ++A)
+        for (int B = 0; B < ns; ++B)
+            bras.push_back(makeShellPair(sh, A, B, 1));
+    std::vector<ShellPair> kets;
+    for (int C = 0; C < ns; ++C)
+        for (int D = C; D < ns; ++D)
+            kets.push_back(makeShellPair(sh, C, D, 0));
+    const int nbra = (int)bras.size(), nket = (int)kets.size();
+
+#ifdef _OPENMP
+#pragma omp parallel num_threads(threads > 0 ? threads : 1)
+#endif
+    {
+        Matrix g = Matrix::Zero(natoms, 3);
+        std::vector<double> dI[3], R;
+#ifdef _OPENMP
+#pragma omp for schedule(dynamic, 1)
+#endif
+        for (int i = 0; i < nbra; ++i) {
+            const ShellPair& bra = bras[i];
+            const EriShell& A = sh[bra.A];
+            const EriShell& B = sh[bra.B];
+            const int atomA = basis[A.first].atom;
+            for (int j = 0; j < nket; ++j) {
+                const ShellPair& ket = kets[j];
+                const EriShell& C = sh[ket.A];
+                const EriShell& Dsh = sh[ket.B];
+                const double mult = (ket.A == ket.B) ? 1.0 : 2.0;
+                shellQuartetDerivA(sh, bra, ket, dI, R);
+                const int nA = (int)A.lmn.size(), nB = (int)B.lmn.size(), nC = (int)C.lmn.size(), nD = (int)Dsh.lmn.size();
+                double acc[3] = { 0, 0, 0 };
+                for (int a = 0; a < nA; ++a) {
+                    const int m = A.first + a;
+                    for (int b = 0; b < nB; ++b) {
+                        const int nn = B.first + b;
+                        for (int c = 0; c < nC; ++c) {
+                            const int l = C.first + c;
+                            for (int d = 0; d < nD; ++d) {
+                                const int s = Dsh.first + d;
+                                const double Dm = P(m, nn) * P(l, s)
+                                                - 0.25 * (P(m, l) * P(nn, s) + P(m, s) * P(nn, l));
+                                const size_t idx = ((size_t)(a * nB + b) * nC + c) * nD + d;
+                                for (int k = 0; k < 3; ++k) acc[k] += Dm * dI[k][idx];
+                            }
+                        }
+                    }
+                }
+                for (int k = 0; k < 3; ++k) g(atomA, k) += 2.0 * mult * acc[k];
+            }
+        }
+#ifdef _OPENMP
+#pragma omp critical
+#endif
+        grad += g;
+    }
+    (void)threads;
+    return grad;
 }
 
 }  // namespace qmint

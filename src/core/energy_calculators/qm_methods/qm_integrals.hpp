@@ -229,9 +229,25 @@ Matrix buildExchange(const ERITensor& eri, const Matrix& P, int threads = 1);
 /// ERI_sph[i,j,k,l] = sum_{a,b,c,d} Q[a,i] Q[b,j] Q[c,k] Q[d,l] ERI_cart[a,b,c,d].
 /// Returns a tensor with n_sph^4 entries (n_sph = Q.cols()). If Q is empty the
 /// cartesian tensor is returned unchanged (in an n^4 wrapper). Evaluated as four
-/// quarter transforms (O(n^5) GEMMs; Sep 2026, was the O(n^8) direct sum). Provided for the
+/// one-index transforms using only the nonzeros of Q (~n^4 per pass; Sep 2026,
+/// was the O(n^8) direct sum). The SCF no longer calls it -- buildERI(..., &Q)
+/// transforms per shell quartet. Provided for the
 /// WP3 SCF (ORCA def2-SVP runs spherical 5d); the WP2 kernel gate validates the
 /// cartesian tensor directly.
 ERITensor applySphericalTransformERI(const ERITensor& eriCart, const Matrix& Q);
+
+/// @brief One-electron part of the RHF nuclear gradient (Eh/Bohr, natoms x 3):
+/// sum P dT + sum P dV (basis and operator/Hellmann-Feynman parts) - sum W dS.
+/// P, W: spin-summed density and energy-weighted density in THIS (cartesian) basis.
+/// Claude Generated (WP8, Sep 2026).
+Matrix gradientOneElectron(const std::vector<GTO::Orbital>& basis,
+                           const std::vector<int>& atomZ, const Matrix& atomPosBohr,
+                           const Matrix& P, const Matrix& W, int threads = 1);
+
+/// @brief Two-electron part 1/2 sum D (mn|ls)^A of the RHF gradient (Eh/Bohr),
+/// D = P_mn P_ls - 1/4 (P_ml P_ns + P_ms P_nl); shell-blocked derivative kernel.
+/// Claude Generated (WP8, Sep 2026).
+Matrix gradientTwoElectron(const std::vector<GTO::Orbital>& basis, const Matrix& P,
+                           int natoms, int threads = 1);
 
 }  // namespace qmint

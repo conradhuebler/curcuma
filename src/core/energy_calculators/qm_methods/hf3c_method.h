@@ -20,8 +20,8 @@
  * The HF part is the native QMEngine with the basis forced to MINIX; the other
  * `-qm.*` settings (SCF threshold, guess, ...) are honoured.
  *
- * Scope: closed shell, H-Ne (MINIX file + gCP tables). No analytic gradient yet
- * (the HF gradient is WP8; the D3 and gCP/SRB gradients already exist).
+ * Scope: closed shell, H-Ne (MINIX file + gCP tables). Analytic gradient (Sep 2026):
+ * HF (QMEngine, WP8) + D3 (with the CN chain rule) + gCP/SRB, returned in Eh/Angstrom.
  *
  * Claude Generated: native HF-3c composite (Sep 2026)
  *
@@ -56,7 +56,7 @@ public:
     std::string getMethodName() const override { return "hf-3c"; }
     bool isThreadSafe() const override { return true; }
 
-    bool hasGradient() const override { return false; }  // HF gradient = WP8
+    bool hasGradient() const override { return true; }
     void setThreadCount(int threads) override { (void)threads; }
     void setParameters(const json& params) override { (void)params; }
     json getParameters() const override { return json{}; }
@@ -73,6 +73,14 @@ private:
     bool m_calculation_done = false;
     bool m_error = false;
 
+    Matrix m_gradient_bohr;                 ///< total dE/dR, Eh/Bohr
+    std::vector<Matrix> m_gradient_parts;   ///< {HF, D3, gCP+SRB}, Eh/Bohr (diagnostics)
+
+public:
+    /// Gradient parts of the last calculateEnergy(true): {HF, D3, gCP+SRB}, Eh/Bohr.
+    const std::vector<Matrix>& gradientParts() const { return m_gradient_parts; }
+
+private:
     // Last energy and its parts (Hartree)
     double m_e_hf = 0.0, m_e_d3 = 0.0, m_e_gcp = 0.0, m_e_srb = 0.0, m_e_total = 0.0;
 };

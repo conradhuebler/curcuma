@@ -497,6 +497,9 @@ add_subdirectory(qm_2e)
 # Native HF-3c (HF/MINIX + D3BJ + gCP + SRB) vs PySCF + simple-dftd3 + ORCA. Sep 2026.
 add_subdirectory(qm_hf3c)
 
+# Native HF / HF-3c analytic gradient vs FD + PySCF (+ simple-dftd3). Sep 2026.
+add_subdirectory(qm_grad)
+
 # Claude Generated (Sep 2026): interface-level gradient + frequency contract.
 # Guards two things nothing else covered:
 #   1. EnergyCalculator::Gradient() must be Eh/Angstrom for EVERY method — SimpleMD

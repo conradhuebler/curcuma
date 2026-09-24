@@ -17,8 +17,9 @@ Performance work and the GPU plan: [QM_GPU_ROADMAP.md](QM_GPU_ROADMAP.md).
 converges and reproduces ORCA 6.1 HF/def2-SVP on all 10 validation molecules —
 9 of them to ≤4e-9 Eh with ORCA's default guess, BH on the same SCF branch (see
 "What was wrong until July 2026" below; three real kernel defects were found and
-fixed). `ctest -L qm_1e` + `ctest -L qm_2e` 20/20. LDA/PBE/B3LYP (WP5-WP7) and
-the analytic gradient (WP8) are still open: those methods intentionally return the
+fixed). `ctest -L qm_1e` + `ctest -L qm_2e` 20/20. The analytic HF gradient (WP8)
+exists since Sep 2026 (see the WP8 section; `-opt` works for `hf` and `hf-3c`).
+LDA/PBE/B3LYP (WP5-WP7) are still open: those methods intentionally return the
 nuclear repulsion only. ⚠️ AI-generated / ⚙️ machine-tested only — no human
 production test, and the validation set is 10 molecules in a H-Ne basis.
 
@@ -125,7 +126,7 @@ Only closed-shell (even electron count); no open-shell, no charged systems beyon
 what the closed-shell code path supports. Two guesses (`sad`, `h0`) and DIIS or
 plain damping -- no SOSCF, and no verification that a converged solution is a
 minimum (a secondary solution could still be reported). No dispersion (D3/D4)
-coupling, no solvation, no gradient (`hasGradient() == false` until WP8). Basis
+coupling, no solvation, no gradient at the time (added Sep 2026, see WP8). Basis
 scope is H-Ne (`def2-SVP.dat`).
 The `qm_1e`/`qm_2e` graders' ORCA reference JSONs carry MO energies only, so the
 new total-energy agreement is currently checked by hand, not in CI.
@@ -168,13 +169,63 @@ alone over all 55 H-Ne element pairs: energy <= 2.3e-12, gradient <= 2.3e-12 Eh/
   the truncated 12-term B_n series, the other branch the closed form; He...CH4 exercises
   the He-C case.
 
-**Not implemented / not tested**: no analytic gradient (the HF part is WP8; D3 and gCP/SRB
-gradients exist but are deliberately not exposed, since a partial gradient would drive an
-optimisation to a wrong structure) -- so `-opt`/`-md` with `hf-3c` are not possible yet;
-closed shell only; H-Ne only (MINIX file and gCP tables); no charged/open-shell reference
-comparison; not tested against ORCA beyond H2O. Human production testing pending.
+**Not implemented / not tested**: closed shell only; H-Ne only (MINIX file and gCP tables);
+no charged/open-shell reference comparison; not tested against ORCA beyond H2O; `-md` with
+`hf-3c` technically possible (gradient exists) but not tested. Human production testing pending.
 
 ---
+
+## WP8 -- Analytic RHF gradient, and `-opt` with `hf` / `hf-3c` (Sep 2026)
+
+`-method hf` and `-method hf-3c` now have an analytic nuclear gradient, so `-opt` works.
+🤖 AI-generated / ⚙️ machine-tested only.
+
+**Formula** (closed-shell RHF, spin-summed density P; Pople, Krishnan, Schlegel, Binkley,
+Int. J. Quantum Chem. S13, 225 (1979); Helgaker/Jørgensen/Olsen ch. 9):
+
+    dE/dA = Σ P_mn d(T+V)_mn/dA − Σ W_mn dS_mn/dA + ½ Σ D_mnls d(mn|ls)/dA + dE_nn/dA
+    W_mn  = 2 Σ_i^occ ε_i C_mi C_ni              (energy-weighted density)
+    D_mnls = P_mn P_ls − ¼ (P_ml P_ns + P_ms P_nl)
+
+Every derivative integral is built from the centre derivative of a cartesian Gaussian,
+`d/dA_x g_l = 2α g_{l+1} − l g_{l−1}`, i.e. from ordinary integrals with a shifted power;
+only derivatives with respect to the first function's centre are needed (symmetry of P and
+of D), and the nuclear-attraction operator term follows from translational invariance.
+The derivatives are taken in the cartesian basis and P/W are mapped back through the
+(geometry-independent) 6d→5d transform. Code: `gradientOneElectron` /
+`gradientTwoElectron` (WP8 block in `qm_integrals.cpp`), `QMEngine::computeGradient()`.
+The 2e part uses the shell-blocked kernel with a two-step McMurchie-Davidson contraction.
+HF-3c adds the D3 gradient (with the CN chain rule, same call pattern as the GFN1 D3) and
+the gCP/SRB gradient. `getGradient()` returns Eh/Å (the `ComputationalMethod` contract).
+
+**Validation** (`ctest -L qm_grad`, 19 tests):
+
+| check | cases | result |
+|---|---|---|
+| analytic vs PySCF analytic RHF gradient (def2-SVP, with d shells) | 8 molecules incl. 2 strongly distorted | ≤ 1.9e-10 Eh/Bohr |
+| analytic vs PySCF RHF/MINIX + simple-dftd3 D3 + gCP gradients (hf-3c) | 9 molecules (H2O…benzene, BF3, LiF, He···CH4) | ≤ 1.5e-10 Eh/Bohr |
+| analytic vs central FD of curcuma's own energy (h = 1e-4 Bohr) | all 17 | ~3e-9 (FD truncation) |
+| `-opt -method hf-3c` vs PySCF + simple-dftd3 minimum (scipy BFGS, |g| < 1e-7) | distorted H2O, distorted formaldehyde | ΔE ≤ 3e-12 Eh, RMSD ≤ 1e-6 Å |
+
+Also checked by hand (not a ctest): `-opt -method hf` (def2-SVP) on distorted formaldehyde
+against the PySCF minimum: RMSD 1.0e-5 Å, energy equal to 8 decimals.
+
+**Cost**: the 2e gradient is the expensive part, ~7x the ERI build (every ordered bra pair
+against the canonical ket pairs, derivative tables one step higher). Benzene HF-3c: ERI
+1.25 s / 2e gradient 8.5 s on 1 thread, 0.33 s / 2.2 s on 4 threads; a full `-opt` from the
+test geometry 40 s on 4 threads. Two cheaper forms are open (see [QM_GPU_ROADMAP.md](QM_GPU_ROADMAP.md)):
+canonical quartets with translational invariance, and density-weighted screening.
+
+**Found on the way**: `-qm.threads` was silently ignored -- the constructor accepted only
+`is_number_integer()`, the CLI/registry deliver `1.0`, and QMDriver's default of 4 threads
+stayed in place for every run. Earlier "4 threads" timings were therefore real; the default
+is now the registry's 1 (or the global `-threads`).
+
+**Not tested / not implemented**: open shell; elements beyond Ne; MD with `hf`/`hf-3c`
+(energy conservation not checked); gradients of `lda`/`pbe`/`b3lyp` (no V_xc yet, they
+report `hasGradient() == false`); no SCF warm start between optimisation steps (each step
+starts from SAD and rebuilds the ERI tensor).
+
 
 ## Attribution and Provenance
 
@@ -251,7 +302,7 @@ Full plan: [`docs/DFT_ROADMAP/`](DFT_ROADMAP/) (README + WP0..WP9) and the maste
 | WP5 | LDA (Slater-Dirac + VWN5) | open |
 | WP6 | PBE-GGA (+ grad rho) | open |
 | WP7 | B3LYP hybrid (+ exact exchange) | open |
-| WP8 | Analytic gradient | open |
+| WP8 | Analytic gradient | **done for `hf`/`hf-3c` (Sep 2026)** — vs PySCF ≤1.9e-10 Eh/Bohr, `-opt` works (`ctest -L qm_grad`) |
 | WP9 | Integration, CLI, parameters, docs, CTest | open |
 
 ---
@@ -360,5 +411,7 @@ testing against an external 2e reference (ORCA/xcDFT/libint) is pending.
 | `src/core/energy_calculators/method_factory.cpp` | `hf`/`lda`/`pbe`/`b3lyp`/`hf-3c` dispatch, `qm` scope |
 | `test_cases/qm_1e/`, `test_cases/qm_2e/` | 1e / ERI gates vs Python witnesses (+ `bench_qm_integrals`, timing only) |
 | `test_cases/qm_hf3c/` | HF-3c gate vs PySCF + simple-dftd3 + ORCA, `qm_update_geometry` regression test |
+| `test_cases/qm_grad/` | gradient gate (analytic vs FD + PySCF/simple-dftd3) and `-opt` vs reference minimum |
 | `scripts/qm_1e_python_ints.py`, `scripts/qm_2e_python_ints.py` | independent Python integral witnesses |
 | `scripts/hf3c_reference.py`, `scripts/gcp_reference_witness.py` | HF-3c reference generator, standalone gCP witness |
+| `scripts/hf_gradient_reference.py`, `scripts/hf3c_opt_reference.py` | reference gradients (PySCF + simple-dftd3), reference HF-3c minima |

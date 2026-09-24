@@ -55,7 +55,7 @@ WP0 (Gerüst/Setup)
 | WP5 | LDA (Slater-Dirac + VWN5) | ⚠️ offen | `WP5_lda_vwn5.md` |
 | WP6 | PBE-GGA (+ ∇ρ) | ⚠️ offen | `WP6_pbe_gga.md` |
 | WP7 | B3LYP-Hybrid (+ exakter Austausch) | ⚠️ offen | `WP7_b3lyp_hybrid.md` |
-| WP8 | Analytischer Gradient | ⚠️ offen | `WP8_analytischer_gradient.md` |
+| WP8 | Analytischer Gradient | ⚙️ machine-tested für `hf`/`hf-3c` (Sep 2026, vs PySCF ≤2e-10 Eh/Bohr); DFT-Anteil offen | `WP8_analytischer_gradient.md` |
 | WP9 | Integration, CLI, Parameter, Doku, CTest | ⚠️ offen | `WP9_integration_doku_ctest.md` |
 
 Vor jedem WP: `make -j4` in `release/` grün ohne Warning. Nach jedem WP: `ctest`.
