@@ -335,7 +335,10 @@ static std::vector<std::vector<std::vector<double>>> hermiteCoeffs(int iA, int i
 // Boys function array F_0..F_maxN via downward recurrence from a zero asymptote.
 // Fills F[0..maxN] (resized, capacity reused) -- the blocked kernels call this once
 // per primitive quartet, so it must not allocate (Claude Generated, Sep 2026).
-static void boysArrayInto(int maxN, double T, std::vector<double>& F)
+// Reference Boys function F_n(T), n = 0..maxN, in long double (expl/erfl). Accurate
+// but slow (x87); since Sep 2026 it only fills the interpolation table below and
+// serves as the reference in test_qm_boys.
+void boysFunctionReference(int maxN, double T, std::vector<double>& F)
 {
     F.assign(maxN + 1, 0.0);
     if (T < 1e-14) {
@@ -368,6 +371,78 @@ static void boysArrayInto(int maxN, double T, std::vector<double>& F)
     for (int n = 0; n <= maxN; ++n) F[n] = (double)G[n];
     return;
 }
+
+// Fast Boys function (Claude Generated, Sep 2026): the standard grid + Taylor scheme.
+// The ERI kernels evaluate F_n(T) once per primitive quartet, millions of times per
+// Fock build; the long-double reference was a measurable share of that.
+//   T <  36: F_N(T) from the nearest grid point T_i (spacing 0.05, |d| <= 0.025) by
+//            F_N(T) = sum_k F_{N+k}(T_i) (T_i - T)^k / k!, k = 0..6 (truncation
+//            ~ d^7/7! = 1.2e-15), then the downward recurrence
+//            F_n = (2T F_{n+1} + e^{-T}) / (2n+1), which does not amplify errors.
+//   T >= 36: F_0 = 0.5 sqrt(pi/T) (erfc(6) = 2e-17) and the upward recurrence
+//            F_{n+1} = ((2n+1) F_n - e^{-T}) / (2T), stable for large T.
+// Table from boysFunctionReference-quality long-double downward recurrence started
+// far above n and T. Accuracy vs the reference: see test_qm_boys.
+namespace {
+struct BoysTable {
+    static constexpr double dT = 0.05;
+    static constexpr double Tmax = 36.0;
+    static constexpr int NTAB = 40;   // n = 0..NTAB tabulated
+    static constexpr int NTAYLOR = 7; // Taylor terms k = 0..6
+    static constexpr int NMAX = NTAB - NTAYLOR + 1; // largest maxN served from the table
+    int npts = 0;
+    std::vector<double> f;  // [i * (NTAB + 1) + n]
+    BoysTable()
+    {
+        npts = (int)std::lround(Tmax / dT) + 2;
+        f.assign((size_t)npts * (NTAB + 1), 0.0);
+        const int M = NTAB + 200;  // start of the downward recurrence (>> n and T)
+        std::vector<long double> G(M + 2, 0.0L);
+        for (int i = 0; i < npts; ++i) {
+            const long double T = (long double)i * dT;
+            const long double eT = expl(-T);
+            G[M + 1] = 0.0L;
+            for (int n = M; n >= 0; --n) G[n] = (2.0L * T * G[n + 1] + eT) / (2.0L * n + 1.0L);
+            for (int n = 0; n <= NTAB; ++n) f[(size_t)i * (NTAB + 1) + n] = (double)G[n];
+        }
+    }
+};
+const BoysTable& boysTable()
+{
+    static const BoysTable table;  // thread-safe one-time init (C++11 magic static)
+    return table;
+}
+}  // namespace
+
+static void boysArrayInto(int maxN, double T, std::vector<double>& F)
+{
+    if (maxN > BoysTable::NMAX || T < 0.0) {
+        boysFunctionReference(maxN, T, F);
+        return;
+    }
+    F.resize(maxN + 1);
+    if (T >= BoysTable::Tmax) {
+        const double eT = std::exp(-T);
+        F[0] = 0.5 * std::sqrt(PI / T);
+        for (int n = 0; n < maxN; ++n) F[n + 1] = ((2.0 * n + 1.0) * F[n] - eT) / (2.0 * T);
+        return;
+    }
+    const BoysTable& tab = boysTable();
+    const int i = (int)(T / BoysTable::dT + 0.5);
+    const double d = i * BoysTable::dT - T;  // T = T_i - d
+    const double* fi = &tab.f[(size_t)i * (BoysTable::NTAB + 1) + maxN];
+    // sum_k F_{maxN+k}(T_i) d^k / k!  (Horner)
+    constexpr double inv[BoysTable::NTAYLOR] = { 1.0, 1.0, 1.0 / 2, 1.0 / 3, 1.0 / 4, 1.0 / 5, 1.0 / 6 };
+    double acc = fi[BoysTable::NTAYLOR - 1];
+    for (int k = BoysTable::NTAYLOR - 2; k >= 0; --k) acc = fi[k] + d * inv[k + 1] * acc;
+    F[maxN] = acc;
+    if (maxN > 0) {
+        const double eT = std::exp(-T), T2 = 2.0 * T;
+        for (int n = maxN - 1; n >= 0; --n) F[n] = (T2 * F[n + 1] + eT) / (2.0 * n + 1.0);
+    }
+}
+
+void boysFunction(int maxN, double T, std::vector<double>& F) { boysArrayInto(maxN, T, F); }
 
 static std::vector<double> boysArray(int maxN, double T)
 {
@@ -723,8 +798,10 @@ static void buildR0Simplex(int L, double Wx, double Wy, double Wz, double rho,
     const int s = L + 1;
     const size_t sz = (size_t)s * s * s;
     thread_local std::vector<double> lvl;
-    R0.assign(sz, 0.0);
-    lvl.assign(sz, 0.0);
+    // No zero fill: every read below stays inside the previous level's simplex, and
+    // the callers only read R0 on the simplex t+u+v <= L.
+    R0.resize(sz);
+    lvl.resize(sz);
     auto at = [s](int t, int u, int v) { return ((size_t)t * s + u) * s + v; };
     const double b = -2.0 * rho;
     double bpow[64];  // L = LA+LB+LC+LD (+1 for the gradient); 63 is far beyond any basis here
@@ -957,7 +1034,21 @@ struct PrimPair {
     int ia = 0, ib = 0;
     double p = 0, Px = 0, Py = 0, Pz = 0;
     std::vector<double> Ex, Ey, Ez;  ///< flat [t][i][j], dims (LA+LB+1)(LA+1)(LB+1); K folded into Ex
+    double schwarz = 0.0;  ///< sqrt(max |(ab|ab)|) of this primitive pair alone, coefficients included
+    // Special members out of line: the implicit inline ones trip -Winline (sorting moves them).
+    PrimPair();
+    PrimPair(const PrimPair&);
+    PrimPair(PrimPair&&) noexcept;
+    PrimPair& operator=(const PrimPair&);
+    PrimPair& operator=(PrimPair&&) noexcept;
+    ~PrimPair();
 };
+PrimPair::PrimPair() = default;
+PrimPair::PrimPair(const PrimPair&) = default;
+PrimPair::PrimPair(PrimPair&&) noexcept = default;
+PrimPair& PrimPair::operator=(const PrimPair&) = default;
+PrimPair& PrimPair::operator=(PrimPair&&) noexcept = default;
+PrimPair::~PrimPair() = default;
 
 struct ShellPair {
     int A = 0, B = 0;
@@ -1001,16 +1092,31 @@ ShellPair makeShellPair(const std::vector<EriShell>& sh, int A, int B, int raise
 }
 
 /// Contracted (AB|CD) for every component quartet of four shells, written to
-/// out[((ca*ncB + cb)*ncC + cc)*ncD + cd]. Per primitive quartet the Boys
-/// function and R block are built once for all components.
+/// out[((ca*ncB + cb)*ncC + cc)*ncD + cd].
+///
+/// McMurchie-Davidson (Helgaker 9.9.33) in three steps (Claude Generated, Sep 2026;
+/// the first blocked version did the six Hermite sums of every component quartet in
+/// one nested loop, which was 78 % of the ERI time):
+///
+///  1. per primitive quartet: Boys function and R^0_tuv on the simplex t+u+v <= L;
+///  2. ket side, per ket component pair (c,d): the ket Hermite sum
+///       h_cd(t,u,v) = sum_{tau,nu,phi} (-1)^(tau+nu+phi) E^cd_tau E^cd_nu E^cd_phi R_{t+tau,u+nu,v+phi}
+///     done one Cartesian direction at a time (z, then y, then x -- three short
+///     sums instead of one triple sum), weighted with the ket contraction
+///     coefficients and the prefactor and ACCUMULATED over the ket primitive pairs
+///     into G_cd(t,u,v) -- the ket primitives are contracted before the bra is touched;
+///  3. bra side, once per bra primitive pair: (ab|cd) += c_a c_b sum_tuv E^ab_t E^ab_u E^ab_v G_cd(t,u,v).
+///
+/// Same arithmetic as before, only regrouped, so the values agree to rounding.
 void shellQuartet(const std::vector<EriShell>& sh, const ShellPair& bra, const ShellPair& ket,
-                  std::vector<double>& out, std::vector<double>& R)
+                  std::vector<double>& out, std::vector<double>& R, double prim_thr = 0.0)
 {
     const EriShell& A = sh[bra.A];
     const EriShell& B = sh[bra.B];
     const EriShell& C = sh[ket.A];
     const EriShell& D = sh[ket.B];
     const int nA = (int)A.lmn.size(), nB = (int)B.lmn.size(), nC = (int)C.lmn.size(), nD = (int)D.lmn.size();
+    const int nCD = nC * nD;
     out.assign((size_t)nA * nB * nC * nD, 0.0);
 
     const int LAB = A.L + B.L, LCD = C.L + D.L;
@@ -1018,68 +1124,129 @@ void shellQuartet(const std::vector<EriShell>& sh, const ShellPair& bra, const S
     // Hermite table strides: E[t][i][j] with i <= LA, j <= LB.
     const int sAB_t = (A.L + 1) * (B.L + 1), sAB_i = B.L + 1;
     const int sCD_t = (C.L + 1) * (D.L + 1), sCD_i = D.L + 1;
-    // R block strides (every Cartesian direction up to Ltot).
-    // R^0 on the simplex, layout [(t*(Ltot+1) + u)*(Ltot+1) + v]
-    const int strideV = 1;
-    const int strideU = Ltot + 1;
-    const int strideN = (Ltot + 1) * strideU;
+    // R^0 (and the intermediates) live in a (Ltot+1)^3 box, index (t*s + u)*s + v.
+    const int s = Ltot + 1;
+    const size_t box = (size_t)s * s * s;
+    auto at = [s](int t, int u, int v) { return ((size_t)t * s + u) * s + v; };
+    // G_cd(t,u,v) for t+u+v <= LAB, in a (LAB+1)^3 box per ket component pair.
+    const int g = LAB + 1;
+    const size_t gsz = (size_t)g * g * g;
 
+    thread_local std::vector<double> F, G, A1, A2;
+    G.resize((size_t)nCD * gsz);
+    A1.resize(box);
+    A2.resize(box);
+
+    // Primitive screening (Sep 2026): the primitive pairs are sorted by their own
+    // Schwarz factor (makeScreeningPairs), and |(ab|cd)| of one primitive quartet is
+    // bounded by pb.schwarz * pk.schwarz (Cauchy-Schwarz per primitive product), so
+    // both loops stop at the first quartet below prim_thr. prim_thr = 0: every quartet.
+    const double ket_max = ket.prims.empty() ? 0.0 : ket.prims.front().schwarz;
     for (const PrimPair& pb : bra.prims) {
+        if (pb.schwarz * ket_max < prim_thr) break;
+        std::fill(G.begin(), G.end(), 0.0);
+
         for (const PrimPair& pk : ket.prims) {
+            if (pb.schwarz * pk.schwarz < prim_thr) break;
             const double p = pb.p, q = pk.p;
             const double rho = p * q / (p + q);
             const double Wx = pb.Px - pk.Px, Wy = pb.Py - pk.Py, Wz = pb.Pz - pk.Pz;
-            const double T = rho * (Wx * Wx + Wy * Wy + Wz * Wz);
-            thread_local std::vector<double> F;
-            boysArrayInto(Ltot, T, F);
+            boysArrayInto(Ltot, rho * (Wx * Wx + Wy * Wy + Wz * Wz), F);
             buildR0Simplex(Ltot, Wx, Wy, Wz, rho, F, R);
             const double pref = 2.0 * std::pow(PI, 2.5) / (p * q * std::sqrt(p + q));
 
-            for (int ca = 0; ca < nA; ++ca) {
-                const double c_a = A.coef[ca][pb.ia];
-                const auto& la = A.lmn[ca];
-                for (int cb = 0; cb < nB; ++cb) {
-                    const double c_ab = c_a * B.coef[cb][pb.ib];
-                    const auto& lb = B.lmn[cb];
-                    const int tmax = la[0] + lb[0], umax = la[1] + lb[1], vmax = la[2] + lb[2];
-                    for (int cc = 0; cc < nC; ++cc) {
-                        const auto& lc = C.lmn[cc];
-                        for (int cd = 0; cd < nD; ++cd) {
-                            const auto& ld = D.lmn[cd];
-                            const double cprod = c_ab * C.coef[cc][pk.ia] * D.coef[cd][pk.ib];
-                            const int taumax = lc[0] + ld[0], upsmax = lc[1] + ld[1], ommax = lc[2] + ld[2];
-                            double val = 0.0;
-                            for (int t = 0; t <= tmax; ++t) {
-                                const double et = pb.Ex[t * sAB_t + la[0] * sAB_i + lb[0]];
-                                if (et == 0.0) continue;
-                                for (int u = 0; u <= umax; ++u) {
-                                    const double eu = pb.Ey[u * sAB_t + la[1] * sAB_i + lb[1]];
-                                    if (eu == 0.0) continue;
-                                    for (int v = 0; v <= vmax; ++v) {
-                                        const double ev = pb.Ez[v * sAB_t + la[2] * sAB_i + lb[2]];
-                                        if (ev == 0.0) continue;
-                                        const double braE = et * eu * ev;
-                                        for (int tau = 0; tau <= taumax; ++tau) {
-                                            const double et2 = pk.Ex[tau * sCD_t + lc[0] * sCD_i + ld[0]];
-                                            if (et2 == 0.0) continue;
-                                            for (int ups = 0; ups <= upsmax; ++ups) {
-                                                const double eu2 = pk.Ey[ups * sCD_t + lc[1] * sCD_i + ld[1]];
-                                                if (eu2 == 0.0) continue;
-                                                for (int om = 0; om <= ommax; ++om) {
-                                                    const double ev2 = pk.Ez[om * sCD_t + lc[2] * sCD_i + ld[2]];
-                                                    if (ev2 == 0.0) continue;
-                                                    const double sgn = ((tau + ups + om) & 1) ? -1.0 : 1.0;
-                                                    val += braE * et2 * eu2 * ev2 * sgn
-                                                         * R[(t + tau) * strideN + (u + ups) * strideU + (v + om) * strideV];
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+            for (int cc = 0; cc < nC; ++cc) {
+                const auto& lc = C.lmn[cc];
+                const double c_c = pref * C.coef[cc][pk.ia];
+                for (int cd = 0; cd < nD; ++cd) {
+                    const double w = c_c * D.coef[cd][pk.ib];
+                    if (w == 0.0) continue;
+                    const auto& ld = D.lmn[cd];
+                    const int tx = lc[0] + ld[0], ty = lc[1] + ld[1], tz = lc[2] + ld[2];
+                    // signed ket Hermite coefficients (-1)^k E_k per direction
+                    double ex[16], ey[16], ez[16];
+                    for (int k = 0; k <= tx; ++k) ex[k] = ((k & 1) ? -1.0 : 1.0) * pk.Ex[k * sCD_t + lc[0] * sCD_i + ld[0]];
+                    for (int k = 0; k <= ty; ++k) ey[k] = ((k & 1) ? -1.0 : 1.0) * pk.Ey[k * sCD_t + lc[1] * sCD_i + ld[1]];
+                    for (int k = 0; k <= tz; ++k) ez[k] = ((k & 1) ? -1.0 : 1.0) * pk.Ez[k * sCD_t + lc[2] * sCD_i + ld[2]];
+
+                    double* Gcd = &G[(size_t)(cc * nD + cd) * gsz];
+                    if (tx + ty + tz == 0) {
+                        // s-type ket pair: the three sums collapse to one scaled R.
+                        const double wk = w * ex[0] * ey[0] * ez[0];
+                        for (int t = 0; t <= LAB; ++t)
+                            for (int u = 0; u <= LAB - t; ++u) {
+                                const double* Rr = &R[at(t, u, 0)];
+                                double* gr = Gcd + ((size_t)t * g + u) * g;
+                                for (int v = 0; v <= LAB - t - u; ++v) gr[v] += wk * Rr[v];
                             }
-                            out[((size_t)(ca * nB + cb) * nC + cc) * nD + cd] += cprod * pref * val;
+                        continue;
+                    }
+                    // Only the index ranges that lead back to t+u+v <= LAB are built:
+                    // x-index t' <= LAB+tx, y-index u' with u'+v <= LAB+ty, z-index v <= LAB.
+                    // z: A1(t,u,v) = sum_phi ez_phi R(t,u,v+phi)
+                    const int m1 = LAB + tx + ty, m2 = LAB + tx;
+                    for (int t = 0; t <= m2; ++t)
+                        for (int u = 0; u <= std::min(m1 - t, LAB + ty); ++u) {
+                            const double* Rr = &R[at(t, u, 0)];
+                            double* a1 = &A1[at(t, u, 0)];
+                            const int vmax = std::min(m1 - t - u, LAB);
+                            for (int v = 0; v <= vmax; ++v) {
+                                double acc = 0.0;
+                                for (int k = 0; k <= tz; ++k) acc += ez[k] * Rr[v + k];
+                                a1[v] = acc;
+                            }
+                        }
+                    // y: A2(t,u,v) = sum_nu ey_nu A1(t,u+nu,v),   u+v <= LAB
+                    for (int t = 0; t <= m2; ++t)
+                        for (int u = 0; u <= std::min(m2 - t, LAB); ++u) {
+                            const int vmax = std::min(m2 - t - u, LAB - u);
+                            for (int v = 0; v <= vmax; ++v) {
+                                double acc = 0.0;
+                                for (int k = 0; k <= ty; ++k) acc += ey[k] * A1[at(t, u + k, v)];
+                                A2[at(t, u, v)] = acc;
+                            }
+                        }
+                    // x: G_cd(t,u,v) += w * sum_tau ex_tau A2(t+tau,u,v),   t+u+v <= LAB
+                    for (int t = 0; t <= LAB; ++t)
+                        for (int u = 0; u <= LAB - t; ++u)
+                            for (int v = 0; v <= LAB - t - u; ++v) {
+                                double acc = 0.0;
+                                for (int k = 0; k <= tx; ++k) acc += ex[k] * A2[at(t + k, u, v)];
+                                Gcd[((size_t)t * g + u) * g + v] += w * acc;
+                            }
+                }
+            }
+        }
+
+        // Bra contraction, once per bra primitive pair.
+        for (int ca = 0; ca < nA; ++ca) {
+            const auto& la = A.lmn[ca];
+            const double c_a = A.coef[ca][pb.ia];
+            for (int cb = 0; cb < nB; ++cb) {
+                const double c_ab = c_a * B.coef[cb][pb.ib];
+                if (c_ab == 0.0) continue;
+                const auto& lb = B.lmn[cb];
+                const int tx = la[0] + lb[0], ty = la[1] + lb[1], tz = la[2] + lb[2];
+                double ex[16], ey[16], ez[16];
+                for (int k = 0; k <= tx; ++k) ex[k] = pb.Ex[k * sAB_t + la[0] * sAB_i + lb[0]];
+                for (int k = 0; k <= ty; ++k) ey[k] = pb.Ey[k * sAB_t + la[1] * sAB_i + lb[1]];
+                for (int k = 0; k <= tz; ++k) ez[k] = pb.Ez[k * sAB_t + la[2] * sAB_i + lb[2]];
+                double* o = &out[(size_t)(ca * nB + cb) * nCD];
+                for (int k = 0; k < nCD; ++k) {
+                    const double* Gcd = &G[(size_t)k * gsz];
+                    double val = 0.0;
+                    for (int t = 0; t <= tx; ++t) {
+                        if (ex[t] == 0.0) continue;
+                        for (int u = 0; u <= ty; ++u) {
+                            const double etu = ex[t] * ey[u];
+                            if (etu == 0.0) continue;
+                            const double* row = Gcd + ((size_t)t * g + u) * g;
+                            double sv = 0.0;
+                            for (int v = 0; v <= tz; ++v) sv += ez[v] * row[v];
+                            val += etu * sv;
                         }
                     }
+                    o[k] += c_ab * val;
                 }
             }
         }
@@ -1154,9 +1321,21 @@ void transformAxis(std::vector<double>& blk, std::vector<double>& tmp, int d[4],
 /// One shell quartet in the ACTIVE basis: buf holds the block with dims d[0..3].
 void activeQuartet(const std::vector<EriShell>& sh, const ShellOutput& o, const ShellPair& bra,
                    const ShellPair& ket, std::vector<double>& buf, std::vector<double>& R,
-                   std::vector<double>& tmp, int d[4])
+                   std::vector<double>& tmp, int d[4], double prim_thr)
 {
-    shellQuartet(sh, bra, ket, buf, R);
+    // shellQuartet does its expensive ket-side work once per PRIMITIVE quartet and
+    // the bra side once per bra primitive, so the pair with more components goes
+    // on the bra side: (ab|cd) = (cd|ab), computed swapped and transposed back.
+    const size_t nab = sh[bra.A].lmn.size() * sh[bra.B].lmn.size();
+    const size_t ncd = sh[ket.A].lmn.size() * sh[ket.B].lmn.size();
+    if (ncd > nab) {
+        shellQuartet(sh, ket, bra, tmp, R, prim_thr);
+        buf.resize(nab * ncd);
+        for (size_t x = 0; x < nab; ++x)
+            for (size_t y = 0; y < ncd; ++y) buf[x * ncd + y] = tmp[y * nab + x];
+    } else {
+        shellQuartet(sh, bra, ket, buf, R, prim_thr);
+    }
     d[0] = (int)sh[bra.A].lmn.size();
     d[1] = (int)sh[bra.B].lmn.size();
     d[2] = (int)sh[ket.A].lmn.size();
@@ -1169,7 +1348,8 @@ void activeQuartet(const std::vector<EriShell>& sh, const ShellOutput& o, const 
 }
 
 /// Shell pairs A <= B with their primitive-pair tables and Schwarz factors
-/// sqrt(max |(ab|ab)|) from the diagonal quartets.
+/// sqrt(max |(ab|ab)|) from the diagonal quartets -- per shell pair and, for the
+/// primitive screening, per primitive pair (then sorted, largest first).
 std::vector<ShellPair> makeScreeningPairs(const std::vector<EriShell>& sh)
 {
     const int ns = (int)sh.size();
@@ -1187,6 +1367,21 @@ std::vector<ShellPair> makeScreeningPairs(const std::vector<EriShell>& sh)
             for (int b = 0; b < nB; ++b)
                 mx = std::max(mx, std::abs(buf[((size_t)(a * nB + b) * nA + a) * nB + b]));
         sp.schwarz = std::sqrt(mx);
+
+        ShellPair one;
+        one.A = sp.A;
+        one.B = sp.B;
+        for (PrimPair& pp : sp.prims) {
+            one.prims.assign(1, pp);
+            shellQuartet(sh, one, one, buf, R);
+            double m1 = 0.0;
+            for (int a = 0; a < nA; ++a)
+                for (int b = 0; b < nB; ++b)
+                    m1 = std::max(m1, std::abs(buf[((size_t)(a * nB + b) * nA + a) * nB + b]));
+            pp.schwarz = std::sqrt(m1);
+        }
+        std::stable_sort(sp.prims.begin(), sp.prims.end(),
+                         [](const PrimPair& x, const PrimPair& y) { return x.schwarz > y.schwarz; });
     }
     return pairs;
 }
@@ -1203,6 +1398,9 @@ ERITensor buildERI(const std::vector<GTO::Orbital>& basis, int threads, double s
 
     const std::vector<ShellPair> pairs = makeScreeningPairs(sh);
     const int np = (int)pairs.size();
+    // Primitive quartets 1000x below the shell-quartet threshold are skipped too;
+    // screening = 0 keeps every quartet (exact).
+    const double prim_thr = screening * 1.0e-3;
 
     // Canonical shell quartets: pair(AB) <= pair(CD). Every AO quartet of a shell
     // quartet is written with set8, so A==B or AB==CD blocks just rewrite the same
@@ -1221,7 +1419,7 @@ ERITensor buildERI(const std::vector<GTO::Orbital>& basis, int threads, double s
                 const ShellPair& ket = pairs[j];
                 if (bra.schwarz * ket.schwarz < screening) continue;
                 int d[4];
-                activeQuartet(sh, o, bra, ket, buf, R, tmp, d);
+                activeQuartet(sh, o, bra, ket, buf, R, tmp, d, prim_thr);
                 const int oA = o.first[bra.A], oB = o.first[bra.B], oC = o.first[ket.A], oD = o.first[ket.B];
                 for (int a = 0; a < d[0]; ++a)
                     for (int b = 0; b < d[1]; ++b)
@@ -1296,6 +1494,7 @@ long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads) const
         }
     const double Pall = Pmax.maxCoeff();
     const double thr = m_screening;
+    const double prim_thr = m_screening * 1.0e-3;  // primitive quartets, as in buildERI
     long computed = 0;
 
 #ifdef _OPENMP
@@ -1317,7 +1516,7 @@ long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads) const
                 const double pq = std::max({ Pmax(A, B), Pmax(C, D), Pmax(A, C), Pmax(A, D), Pmax(B, C), Pmax(B, D) });
                 if (bra.schwarz * ket.schwarz * pq < thr) continue;
                 int d[4];
-                activeQuartet(I.sh, o, bra, ket, buf, R, tmp, d);
+                activeQuartet(I.sh, o, bra, ket, buf, R, tmp, d, prim_thr);
                 ++computed;
                 const double deg = (A != B ? 2.0 : 1.0) * (C != D ? 2.0 : 1.0) * (i != j ? 2.0 : 1.0);
                 const double scale = deg / 8.0;

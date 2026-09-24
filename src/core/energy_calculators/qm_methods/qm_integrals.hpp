@@ -211,6 +211,14 @@ private:
 ERITensor buildERI(const std::vector<GTO::Orbital>& basis, int threads = 1, double screening = 0.0,
                    const Matrix* Q = nullptr);
 
+/// @brief Boys function F_n(T) = int_0^1 t^(2n) exp(-T t^2) dt for n = 0..maxN.
+/// Grid (spacing 0.05) + 7-term Taylor + downward recurrence below T = 36, closed
+/// form + upward recurrence above (Claude Generated, Sep 2026). Used by every ERI.
+void boysFunction(int maxN, double T, std::vector<double>& F);
+/// @brief Long-double reference implementation of the Boys function (slow; for the
+/// table and for tests).
+void boysFunctionReference(int maxN, double T, std::vector<double>& F);
+
 /// @brief Integral-direct Coulomb/exchange build (Claude Generated, Sep 2026).
 ///
 /// Holds the shell-pair tables and Schwarz factors of a basis (built once per

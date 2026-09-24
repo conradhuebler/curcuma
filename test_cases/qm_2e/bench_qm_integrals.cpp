@@ -2,7 +2,7 @@
  * Benchmark: native QM integral / Fock kernels, old one-integral-at-a-time form vs
  * the shell-quartet-blocked kernels (Sep 2026). Also cross-checks that both give
  * the same numbers. Not a ctest (timing only).
- *   bench_qm_integrals <xyz> <basis>
+ *   bench_qm_integrals <xyz> <basis> [skip-old [tensor.bin]] | <xyz> <basis> direct
  * Claude Generated (Sep 2026). GPL-3.0.
  */
 // Old vs new ERI / J / K / spherical transform on the native QM engine basis.
@@ -25,6 +25,20 @@ int main(int argc,char**argv){
   json cfg={{"basis",argv[2]},{"cartesian_d",false},{"eri_screening",0.0}};
   QMEngine e(QMFunctional::HF,cfg); e.QMInterface::InitialiseMolecule(at.data(),xyz.data(),n,0,0);
   const auto& B=e.gtoBasis(); int nc=B.size(); printf("%s %s ncart=%d nbf=%d\n",argv[1],argv[2],nc,e.nbf());
+  // "direct" mode: time only the integral-direct J/K build (no n^4 tensor), which is
+  // pure integral-kernel work -- the stable measure for kernel changes. Prints a J/K
+  // checksum so two builds of the kernel can be compared.
+  if(argc>=4 && std::string(argv[3])=="direct"){
+    Matrix Q=qmint::buildSphericalTransform(B,qmint::buildOverlap(B));
+    Matrix J0,K0;
+    for(double scr: {0.0,1e-12}){
+      const qmint::DirectJK dj(B,scr,Q.size()?&Q:nullptr); const int nb=dj.n();
+      Matrix P(nb,nb); for(int i=0;i<nb;++i)for(int j=0;j<=i;++j)P(i,j)=P(j,i)=std::cos(0.37*i+1.3*j);
+      for(int th: {1,4}){ Matrix J,K; auto t0=clk::now(); dj.build(P,J,K,th); double tm=ms(t0);
+        if(J0.size()==0){J0=J;K0=K;}
+        printf("direct J/K screening %.0e (%d threads) %.1f ms  sum(J)=%.12e sum(K)=%.12e  max|dJ|,|dK| vs unscreened %.1e %.1e\n",
+               scr,th,tm,J.sum(),K.sum(),(J-J0).cwiseAbs().maxCoeff(),(K-K0).cwiseAbs().maxCoeff()); } }
+    return 0; }
   // old: one contracted integral per canonical AO quartet
   auto t=clk::now(); qmint::ERITensor old(run_old?nc:0);
   if(run_old)
@@ -34,6 +48,12 @@ int main(int argc,char**argv){
   t=clk::now(); auto n4=qmint::buildERI(B,4,0.0); double t_n4=ms(t);
   t=clk::now(); auto s12=qmint::buildERI(B,4,1e-12); double t_s=ms(t);
   double mx=0,mxs=0; if(run_old) for(size_t i=0;i<(size_t)nc*nc*nc*nc;++i){mx=std::max(mx,std::abs(old.data()[i]-n1.data()[i]));mxs=std::max(mxs,std::abs(old.data()[i]-s12.data()[i]));}
+  // Optional 4th arg: a tensor file. Written if absent, else compared element-wise --
+  // lets a kernel change be checked against the previous build's tensor.
+  if(argc>=5){ std::ifstream in(argv[4],std::ios::binary); size_t N=(size_t)nc*nc*nc*nc;
+    if(!in){ std::ofstream o(argv[4],std::ios::binary); o.write((const char*)n1.data(),N*sizeof(double)); printf("reference tensor written to %s\n",argv[4]); }
+    else { std::vector<double> r(N); in.read((char*)r.data(),N*sizeof(double)); double d=0,rel=0; for(size_t i=0;i<N;++i){double a=std::abs(r[i]-n1.data()[i]); d=std::max(d,a); if(std::abs(r[i])>1e-8) rel=std::max(rel,a/std::abs(r[i]));}
+      printf("vs reference tensor %s: max|diff| %.2e  max rel %.2e\n",argv[4],d,rel); } }
   printf("ERI  old %.1f ms | blocked 1t %.1f ms (x%.1f) | 4t %.1f ms (x%.1f) | 4t+screen1e-12 %.1f ms | max|diff| %.1e (screened %.1e)\n",t_old,t_n1,t_old/t_n1,t_n4,t_old/t_n4,t_s,mx,mxs);
   Matrix P=Matrix::Random(nc,nc); P=(P+P.transpose()).eval();
   t=clk::now(); Matrix J0=Matrix::Zero(nc,nc),K0=Matrix::Zero(nc,nc);

@@ -70,6 +70,9 @@ naphthalene/def2-SVP (180 functions, stored tensor 8.4 GB) runs in 195 s and mat
 to 8 decimals (print precision). `auto` switches to direct above `-qm.eri_max_memory_mb` (4000). The cost per
 build is now the shell-quartet kernel, which is what stage Q-G2/Q-G3 below would move to
 the device.
+Since then the kernel itself is ~3x faster (tabulated Boys function, ket-primitive-first
+contraction, primitive screening, larger pair on the bra side): benzene direct 28.4 -> 8.6 s,
+naphthalene 195 -> 58 s; details in [NATIVE_QM_IMPLEMENTATION.md](NATIVE_QM_IMPLEMENTATION.md).
 
 ## 3. Proposed GPU stages (mirroring the xTB stages)
 

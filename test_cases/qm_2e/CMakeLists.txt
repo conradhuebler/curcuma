@@ -61,3 +61,11 @@ target_include_directories(test_qm_direct_jk PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE
 target_compile_features(test_qm_direct_jk PRIVATE cxx_std_17)
 add_test(NAME qm_direct_jk COMMAND test_qm_direct_jk)
 set_tests_properties(qm_direct_jk PROPERTIES TIMEOUT 300 LABELS "qm_2e")
+
+# Boys function accuracy (grid + Taylor since Sep 2026) vs an independent series.
+add_executable(test_qm_boys test_qm_boys.cpp)
+target_link_libraries(test_qm_boys PRIVATE curcuma_core)
+target_include_directories(test_qm_boys PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/external)
+target_compile_features(test_qm_boys PRIVATE cxx_std_17)
+add_test(NAME qm_boys COMMAND test_qm_boys)
+set_tests_properties(qm_boys PROPERTIES TIMEOUT 120 LABELS "qm_2e")

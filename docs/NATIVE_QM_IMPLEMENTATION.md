@@ -274,6 +274,31 @@ the quartets; loosening it to 1e-10 did not pay (more DIIS iterations). The per-
 is the integral kernel itself, so direct mode is for systems the stored tensor cannot hold,
 not a speed-up. The 2e gradient was already direct.
 
+**Faster ERI kernel (Sep 2026)**: four changes to `shellQuartet`, each checked element-wise
+against the previous tensor (max |diff| 5e-15 on formaldehyde and water dimer, def2-SVP):
+(1) the Boys function comes from a grid (spacing 0.05) with a 7-term Taylor step and the
+downward recurrence instead of long-double `expl`/`erfl`; vs an independent series it is
+accurate to 2.8e-15 relative (the old routine: 5.9e-14), `ctest -R qm_boys`;
+(2) the ket Hermite sum runs one Cartesian direction at a time and is accumulated over the
+ket primitives before the bra side is touched, with an s-type-ket shortcut;
+(3) primitive screening -- primitive pairs are sorted by their own Schwarz factor and a
+primitive quartet below `eri_screening * 1e-3` is skipped (off with `eri_screening 0`);
+(4) the pair with more components goes on the bra side, `(ab|cd) = (cd|ab)`.
+Profiling note: callgrind (instruction counts) pointed at the Hermite loops, but the
+wall-clock gain came mostly from the Boys function and from the contraction order -- an
+x87 `erfl` is cheap in instructions and expensive in cycles. Measured, def2-SVP:
+
+| | before | after |
+|---|---:|---:|
+| benzene, one full J/K build, 1 / 4 threads (no screening) | 10.5 / 2.6 s | 3.4 / 0.94 s |
+| benzene HF energy, stored tensor (ERI build) | 5.0 s (3.4 s) | 3.6 s (1.9 s) |
+| benzene HF energy, integral-direct | 28.4 s | 8.6 s |
+| naphthalene HF energy, integral-direct | 195 s | 58 s |
+| `-opt` benzene HF-3c / formaldehyde HF | 26.2 / 4.19 s | 19.2 / 3.33 s |
+
+All energies and optimised geometries unchanged at print precision. The 2e gradient kernel
+only picked up the Boys change; the same reordering is open there.
+
 Also fixed: `setMolecule()` with a *different* molecule on a reused method object kept the
 old molecule's integrals (HF-3c water on an object last used for BH: -17.44 instead of
 -75.50 Eh); `resetForNewMolecule()` now runs first. Both covered by `qm_update_geometry`.
