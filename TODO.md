@@ -601,6 +601,66 @@
     Briefing (die verbleibenden O(N²)-Schleifen cell-listen — `nb_hc`/`nb_nometal`,
     BATM-Scan, Bond-BFS, = Phase 5 des Multi-GPU-Plans) ist der naheliegende naechste Schritt.
 
+- **G6-Root-Cause AUFGEKLAERT: der dominante Teil (48s/98.5s Topologie, ueber beide q-Loop-
+  Paesse) ist ein Testdaten-Artefakt von `gen_system.py`, kein GFN-FF-Bug (2026-09-25,
+  verifiziert)**: `CURCUMA_GFNFF_PROFILE=1` (summiert ueber BEIDE q-Loop-Paesse — der normale
+  verbosity-2-Report ueberschreibt Pass 1 mit Pass 2 und zeigt nur die Haelfte) deckte auf:
+  „Hueckel pi bond orders" allein kostet **48.275 s von 98.540 s Gesamttopologie (49%)** —
+  mehr als die urspruenglich vermuteten O(N²)-Nachbarlisten (nb_hc+nb_nometal, 8.8s, 9%)
+  zusammen. Root-Cause-Recherche (per `CURCUMA_HUCKELDUMP=1`): die "4 π-Systeme", die der
+  Report zeigt, sind KEINE kleinen Fragmente — es sind die 4 KOMPLETTEN synthetischen
+  Polymerketten (~2820 Atome je System, 77% des ganzen Molekuels!), weil `GFNFF::
+  detectPiSystems` (`gfnff_method.cpp:6866-6982`) **2816 von 2819 gesaettigten
+  Alkyl-Kohlenstoffen faelschlich als sp2 (hyb=2) statt sp3 klassifiziert** fand. Die 48s
+  kommen exakt aus `HuckelSolver::solveAndBuildDensity` (`huckel_solver.cpp:445`): eine
+  DICHTE O(N³)-Eigenzerlegung (`Eigen::SelfAdjointEigenSolver`) mit ndim≈2820, viermal, mal
+  zwei q-Loop-Paesse = 8 dichte ~2820×2820-Diagonalisierungen — rechnerisch exakt konsistent
+  mit den gemessenen 48s. **Entscheidende Verifikation auf dem ECHTEN Molekuel**
+  (`polymer_2x_gfnff_opt.xyz`, 1410 Atome, reale Geometrie statt synthetisch generiert):
+  derselbe `CURCUMA_HUCKELDUMP`/`CURCUMA_GFNFF_PROFILE`-Lauf findet **0 von 0 π-Systemen**,
+  Hueckel-Kosten **89.1 ms** (statt 48.275.000 ms — Faktor 540000x weniger). **Damit ist
+  geklaert: das ist KEIN GFN-FF-Korrektheitsbug, der bei echten Molekuelen (lange
+  Alkylketten, Lipide, reale Polymere) auftreten wuerde — es ist ein Artefakt der Art, wie
+  `gen_system.py` (Scratchpad-Skript dieser Sitzung, nicht Teil des Repos) seine synthetischen
+  Ketten baut (vermutlich unrealistische Bindungswinkel/-laengen, die die Hybridisierungs-
+  Heuristik taeuschen).** Kein dringender Fix noetig; die 48s aus dem G6-Test sind nicht
+  repraesentativ fuer echte Systeme und sollten nicht als Grundlage fuer weitere
+  Performance-Entscheidungen dienen. **Konsequenz fuer Lever 2**: bleibt der legitime,
+  allgemeingueltige naechste Schritt (nb_hc/nb_nometal cell-listen, 8.5s auf G6, aber
+  distanzbasiert und damit unabhaengig vom Testdaten-Artefakt — gilt genauso auf echten
+  Systemen). Der groessere, weniger cell-list-geeignete Posten dahinter (`bpair`/
+  `topo_distances`, dichte N×N-Matrizen, ~1,7 GB bei N=14640) braucht stattdessen eine
+  Sparse-Umstellung (Aufwand M-L, mittleres Risiko — mehrere Call-Sites mit bereits frueher
+  gefixten Bugs, s. Known Issues #6(i)/#21(l)/#24(a)).
+
+- **Lever 2 umgesetzt: `nb_hc`/`nb_nometal` per SpatialCellList, 17x schneller, korrekt
+  (2026-09-25, AI-implemented, machine-tested)**: `pair_bonded_no_fm` (der distanzbasierte,
+  elementpaar- und ladungsabhaengige Bindungstest hinter icase 2/3) bleibt UNVERAENDERT — nur
+  die Kandidatengenerierung wird von O(N²) auf eine `SpatialCellList` (bereits fuer HB/XB/
+  Repulsion im Einsatz) umgestellt, mit einem strengen, im Code selbst berechneten oberen
+  Abstands-Bound (Scan ueber alle 86 Elementpaare bei grosszuegiger CN-Klammer, `ff`-Faktor
+  NICHT als <=1 angenommen, da `rab_p` negative Eintraege hat, plus 3,5-Bohr-Marge fuer den
+  ladungsabhaengigen `qshift`-Term, der bei negativer Ladung `rco` VERGROESSERT statt
+  verkleinert). Kandidatenreihenfolge innerhalb einer Zeile ist beim Cell-List-Pfad nicht mehr
+  aufsteigend nach Atomindex (anders als der alte O(N²)-Scan) — deshalb `std::sort` nach dem
+  Aufbau, um Bit-Identitaet zu garantieren statt sie anzunehmen. Gated auf
+  `nb_cell_list_min_atoms` (Default 800, dasselbe PARAM wie bei HB/XB), kleine Systeme bleiben
+  auf dem alten O(N²)-Pfad.
+  - **Korrektheit, real getestet**: `triose.xyz` (66 Atome, unter der Schwelle, alter Pfad)
+    bitidentisch zum committeten Stand. `polymer_2x_gfnff_opt.xyz` (1410 Atome, ueber der
+    Schwelle, NEUER Cell-List-Pfad aktiv) — **volle Energie-Dekomposition bitidentisch** zum
+    Vor-Lever-2-Lauf in JEDER Komponente (Bond -820,6570687703 Eh, H-bonds -4,5521241259 Eh,
+    case-1/2-Zaehlungen 10370/43703, alle identisch). `ctest -L gfnff`: **77/78 bestanden**,
+    einziger Fehlschlag der bekannte vorbestehende `cli_curcumaopt_07_opt_multixyz`.
+  - **Performance, auf G6 gemessen** (`CURCUMA_GFNFF_PROFILE=1`, ueber beide q-Loop-Paesse):
+    `nb_hc list` **4309,2 ms → 253,6 ms**, `nb_nometal list` **4153,6 ms → 247,5 ms** — Faktor
+    **~17x** auf beiden, ~8 s gespart, exakt wie aus der Lever-2-Recherche erwartet. Da das
+    Kriterium rein distanzbasiert ist (nicht an das Hueckel-Testdaten-Artefakt gekoppelt),
+    gilt der Gewinn genauso auf echten grossen Systemen.
+  - **Noch offen**: `bpair`/`topo_distances` (dichte N×N-Matrizen) bleibt der groessere,
+    nicht cell-list-geeignete Posten — braucht eine Sparse-Umstellung (s. o.), nicht in
+    dieser Sitzung umgesetzt.
+
 ### SIGSEGV am Ursprung untersucht (Auftrag „fix den SIGSEGV am Ursprung") — nicht gefunden, Werkzeuge sind blind dafuer (2026-09-24)
 - **Status**: ⏳ OFFEN. Root Cause NICHT gefunden trotz gruendlicher Untersuchung mit ASan,
   compute-sanitizer und gdb. Kein Fix umgesetzt.

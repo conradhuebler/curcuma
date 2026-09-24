@@ -8049,24 +8049,73 @@ void GFNFF::buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<in
         return distance < rthr * rco;   // fm == 1 for icase 2 and 3
     };
 
+    // Sep 2026 (Lever 2, docs/GFNFF_PERFORMANCE_LEVERS.md): a conservative, code-computed
+    // upper bound on any distance pair_bonded_no_fm() could accept, so the O(N^2) double
+    // loops below can be replaced by a SpatialCellList (like HB/XB/repulsion already use)
+    // while calling the EXACT SAME unchanged pair_bonded_no_fm predicate inside the
+    // cell-list callback — the cell list only cheapens candidate GENERATION, the bonding
+    // decision itself is untouched. Computed once (magic static) from the true rco formula
+    // (computeRabEstimate, which includes the electronegativity `ff` factor — NOT assumed
+    // <=1, since the rab_p table has negative entries that could in principle push ff above 1
+    // for some row combination) over every element pair 1..86 at a generous CN bracket, times
+    // fat[]*fat[] (measured in [0.95,1.10] per element — cannot blow this bound up), plus a
+    // fixed margin for the charge-dependent qshift term (SHRINKS rco for a positive charge but
+    // GROWS it for a negative one; margin sized for realistic EEQ charge magnitudes, doubled
+    // for metals per qshift_of()'s own factor).
+    static const double nb_cell_cutoff_bohr = [] {
+        using namespace GFNFFParameters;
+        constexpr double rthr_local = 1.25;
+        constexpr double qshift_margin_bohr = 3.5;
+        double max_rco = 0.0;
+        const double cn_samples[] = { 0.0, 2.0, 4.0, 6.0, 8.0, 12.0 };
+        for (int zi = 1; zi <= 86; ++zi) {
+            for (int zj = zi; zj <= 86; ++zj) {
+                for (double cni : cn_samples) {
+                    for (double cnj : cn_samples) {
+                        double rco = computeRabEstimate(zi, zj, cni, cnj) * fat[zi] * fat[zj];
+                        max_rco = std::max(max_rco, rco);
+                    }
+                }
+            }
+        }
+        return rthr_local * max_rco + qshift_margin_bohr;
+    }();
+    const int nb_cell_threshold = m_parameters.value("nb_cell_list_min_atoms", 800);
+    const bool use_nb_cell_list = geometric_nb
+        && (nb_cell_threshold == 0 || m_atomcount >= nb_cell_threshold);
+    SpatialCellList nb_cell_list;
+    if (use_nb_cell_list) {
+        nb_cell_list.build(m_geometry_bohr, nb_cell_cutoff_bohr);
+    }
+    const double nb_cell_cutoff_sq = nb_cell_cutoff_bohr * nb_cell_cutoff_bohr;
+
     // --- nb_hc: no highly-coordinated atoms (icase=2) ---
     // Fortran cycles the pair if EITHER endpoint's FULL CN exceeds its cap, so the
     // bond disappears from both rows.
     auto t_hc0 = std::chrono::high_resolution_clock::now();
     topo.nb_hc.assign(m_atomcount, {});
-    // Claude Generated (Sep 2026): row i only writes nb_hc[i] and scans j in ascending order,
-    // so the parallel loop produces exactly the serial lists (7320 atoms: ~1 s per list, twice
-    // per q-loop -> the largest single topology cost).
+    // Claude Generated (Sep 2026): row i only writes nb_hc[i], so the parallel loop produces
+    // exactly the serial lists regardless of candidate order (cell-list or O(N^2)).
     #pragma omp parallel for schedule(dynamic, 16)
     for (int i = 0; i < m_atomcount; ++i) {
         if (static_cast<int>(topo.nb_full[i].size()) > hc_crit(m_atoms[i])) continue;
-        for (int j = 0; j < m_atomcount; ++j) {
-            if (j == i) continue;
-            if (static_cast<int>(topo.nb_full[j].size()) > hc_crit(m_atoms[j])) continue;
-            const bool bonded = geometric_nb
-                ? pair_bonded_no_fm(i, j)
-                : (std::find(topo.nb_full[i].begin(), topo.nb_full[i].end(), j) != topo.nb_full[i].end());
-            if (bonded) topo.nb_hc[i].push_back(j);
+        if (use_nb_cell_list) {
+            nb_cell_list.forEachNeighbor(i, nb_cell_cutoff_sq, [&](int j, double /*r2*/) {
+                if (static_cast<int>(topo.nb_full[j].size()) > hc_crit(m_atoms[j])) return;
+                if (pair_bonded_no_fm(i, j)) topo.nb_hc[i].push_back(j);
+            });
+            // Cell-list candidate order is not ascending-by-index; sort so the list is
+            // bit-identical to the O(N^2) fallback (some downstream code may rely on order).
+            std::sort(topo.nb_hc[i].begin(), topo.nb_hc[i].end());
+        } else {
+            for (int j = 0; j < m_atomcount; ++j) {
+                if (j == i) continue;
+                if (static_cast<int>(topo.nb_full[j].size()) > hc_crit(m_atoms[j])) continue;
+                const bool bonded = geometric_nb
+                    ? pair_bonded_no_fm(i, j)
+                    : (std::find(topo.nb_full[i].begin(), topo.nb_full[i].end(), j) != topo.nb_full[i].end());
+                if (bonded) topo.nb_hc[i].push_back(j);
+            }
         }
     }
 
@@ -8085,13 +8134,21 @@ void GFNFF::buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<in
     #pragma omp parallel for schedule(dynamic, 16)   // row-local writes, see nb_hc above
     for (int i = 0; i < m_atomcount; ++i) {
         if (nbm_excluded(i)) continue;
-        for (int j = 0; j < m_atomcount; ++j) {
-            if (j == i) continue;
-            if (nbm_excluded(j)) continue;
-            const bool bonded = geometric_nb
-                ? pair_bonded_no_fm(i, j)
-                : (std::find(topo.nb_full[i].begin(), topo.nb_full[i].end(), j) != topo.nb_full[i].end());
-            if (bonded) topo.nb_nometal[i].push_back(j);
+        if (use_nb_cell_list) {
+            nb_cell_list.forEachNeighbor(i, nb_cell_cutoff_sq, [&](int j, double /*r2*/) {
+                if (nbm_excluded(j)) return;
+                if (pair_bonded_no_fm(i, j)) topo.nb_nometal[i].push_back(j);
+            });
+            std::sort(topo.nb_nometal[i].begin(), topo.nb_nometal[i].end());
+        } else {
+            for (int j = 0; j < m_atomcount; ++j) {
+                if (j == i) continue;
+                if (nbm_excluded(j)) continue;
+                const bool bonded = geometric_nb
+                    ? pair_bonded_no_fm(i, j)
+                    : (std::find(topo.nb_full[i].begin(), topo.nb_full[i].end(), j) != topo.nb_full[i].end());
+                if (bonded) topo.nb_nometal[i].push_back(j);
+            }
         }
     }
 
