@@ -65,6 +65,12 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(eri_screening, Double, 1.0e-12,
           "Schwarz screening threshold: shell quartets with sqrt((ab|ab)(cd|cd)) below it are skipped (0 = exact, no screening).",
           "Performance", {})
+    PARAM(scf_direct, String, "auto",
+          "Integral-direct SCF: on (recompute the screened shell quartets in every Fock build and digest them into J/K; memory O(n^2), incremental builds on the density change) | off (store the n^4 ERI tensor once, fast J/K) | auto (direct only when the stored tensor would exceed eri_max_memory_mb).",
+          "Performance", {})
+    PARAM(eri_max_memory_mb, Double, 4000.0,
+          "scf_direct auto: largest stored ERI tensor (n^4 * 8 bytes, in MB) before the SCF switches to integral-direct J/K.",
+          "Performance", {})
     PARAM(scf_max_iterations, Int, 100,
           "Maximum number of SCF iterations.",
           "SCF", {})
@@ -103,7 +109,7 @@ END_PARAMETER_DEFINITION
 class QMEngine : public QMDriver {
 public:
     explicit QMEngine(QMFunctional functional, const json& config = json::object());
-    ~QMEngine() override = default;
+    ~QMEngine() override;  // out of line (-Winline with the DirectJK member)
 
     // QMDriver Interface
     bool InitialiseMolecule() override;
@@ -220,6 +226,12 @@ private:
     int m_scf_iterations = 0;
     int m_diis_start = 1;                    // iteration from which DIIS extrapolates
     int m_diis_subspace = 8;                 // DIIS history depth
+    // Integral-direct SCF (Sep 2026): shell-pair tables for recomputing J/K without
+    // the stored tensor; rebuilt lazily per geometry (reset together with the ERI).
+    std::string m_scf_direct = "auto";       // auto | on | off
+    double m_eri_max_memory_mb = 4000.0;     // auto: largest stored ERI tensor
+    mutable qmint::DirectJK m_direct;
+    mutable long m_direct_quartets = 0;      // shell quartets computed in the last SCF (stats)
     // Energy components for the HF run (Hartree). E_elec = 0.5 Tr(P(H+F)).
     double m_e_elec = 0.0;
     double m_et = 0.0, m_ev = 0.0, m_ej = 0.0, m_ex = 0.0;
@@ -239,6 +251,9 @@ private:
     // Fock build in the active basis: F = H + 2 J(P) - K(P) (closed-shell RHF).
     // J_mu_nu = sum P_lam_sig (mu nu | lam sig); K_mu_nu = sum P_lam_sig (mu lam | nu sig).
     Matrix buildFock(const Matrix& P) const;
+    // J(P), K(P) from the stored tensor or integral-direct (useDirectSCF()).
+    void buildJK(const Matrix& P, Matrix& J, Matrix& K) const;
+    bool useDirectSCF() const;
 
     // Solve the generalized eigenproblem F C = S C eps via the Lowdin reduce:
     //   eps, Ctil = eig(X^T F X);  C = X Ctil.

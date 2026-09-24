@@ -139,6 +139,15 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
         m_scf_mode = config["scf_mode"].get<std::string>();
     if (config.contains("scf_guess") && config["scf_guess"].is_string())
         m_scf_guess = config["scf_guess"].get<std::string>();
+    if (config.contains("scf_direct")) {
+        // Accept a CLI boolean too (-qm.scf_direct true/false).
+        if (config["scf_direct"].is_boolean())
+            m_scf_direct = config["scf_direct"].get<bool>() ? "on" : "off";
+        else if (config["scf_direct"].is_string())
+            m_scf_direct = config["scf_direct"].get<std::string>();
+    }
+    if (config.contains("eri_max_memory_mb") && config["eri_max_memory_mb"].is_number())
+        m_eri_max_memory_mb = config["eri_max_memory_mb"].get<double>();
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format("Initializing native QM engine (functional={}, basis={})",
@@ -148,6 +157,8 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
         CurcumaLogger::param("cartesian_d", m_cartesian_d ? "true" : "false");
     }
 }
+
+QMEngine::~QMEngine() = default;
 
 // =================================================================================
 // QMDriver Interface
@@ -221,6 +232,7 @@ bool QMEngine::UpdateMolecule()
     m_integrals_ready = false;
     m_eri_ready = false;
     m_eri_active_ready = false;
+    m_direct = qmint::DirectJK();
     m_scf_ready = false;
     m_scf_converged = false;
     return InitialiseMolecule();
@@ -234,6 +246,7 @@ void QMEngine::resetForNewMolecule()
     m_integrals_ready = false;
     m_eri_ready = false;
     m_eri_active_ready = false;
+    m_direct = qmint::DirectJK();
     m_scf_ready = false;
     m_scf_converged = false;
     m_warm_C = Matrix();
@@ -338,6 +351,7 @@ void QMEngine::buildOneElectronIntegrals()
 
     // New geometry -> invalidate the WP3 active-basis ERI and SCF caches.
     m_eri_active_ready = false;
+    m_direct = qmint::DirectJK();
     m_scf_ready = false;
     m_Q = Matrix();  // rebuilt in the spherical branch; stays empty for cartesian_d
 
@@ -358,6 +372,7 @@ void QMEngine::buildOneElectronIntegrals()
     const Matrix Q = qmint::buildSphericalTransform(m_gto_basis, Scart);
     m_Q = Q;
     m_eri_active_ready = false;  // geometry change invalidates the active ERI
+    m_direct = qmint::DirectJK();
     if (Q.size() == 0) {
         m_S = Scart;
         m_T = Tcart;

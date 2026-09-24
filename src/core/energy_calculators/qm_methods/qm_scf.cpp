@@ -258,12 +258,17 @@ bool QMEngine::runSCF()
             hvals += fmt::format(" {:.4f}", hv(i));
         CurcumaLogger::info(hvals);
     }
-    const qmint::ERITensor& eri = eriActive();  // builds (and caches) on first call
-    if (eri.n() != n) {
-        CurcumaLogger::error(fmt::format(
-            "QM SCF: active ERI dimension {} != basis dimension {}", eri.n(), n));
-        return false;
+    // Two-electron part: stored tensor (built once here) or integral-direct.
+    const bool direct = useDirectSCF();
+    if (!direct) {
+        const qmint::ERITensor& eri = eriActive();  // builds (and caches) on first call
+        if (eri.n() != n) {
+            CurcumaLogger::error(fmt::format(
+                "QM SCF: active ERI dimension {} != basis dimension {}", eri.n(), n));
+            return false;
+        }
     }
+    m_direct_quartets = 0;
 
     const bool use_diis = (m_scf_mode != "plain");   // diis | adiis
     if (m_scf_mode != "plain" && m_scf_mode != "diis" && m_scf_mode != "adiis" && CurcumaLogger::get_verbosity() >= 1)
@@ -285,19 +290,41 @@ bool QMEngine::runSCF()
     m_scf_converged = false;
     m_scf_iterations = 0;
 
+    // Incremental Fock build (integral-direct only): J and K are linear in P, so
+    // J(P_n) = J(P_ref) + J(P_n - P_ref). The density change shrinks as the SCF
+    // converges and the density-weighted screening then skips most quartets.
+    // A full build every kDirectRebuild iterations bounds the accumulated
+    // screening error; the final energy always comes from a full build.
+    constexpr int kDirectRebuild = 8;
+    Matrix J_acc, K_acc, P_ref;
+    int since_full = 0;
+    auto fockFromDensity = [&](const Matrix& P) -> Matrix {
+        if (!direct || P_ref.size() == 0 || since_full >= kDirectRebuild) {
+            buildJK(P, J_acc, K_acc);
+            since_full = 0;
+        } else {
+            Matrix dJ, dK;
+            buildJK(P - P_ref, dJ, dK);
+            J_acc += dJ;
+            K_acc += dK;
+            ++since_full;
+        }
+        P_ref = P;
+        return m_H + J_acc - 0.5 * K_acc;
+    };
+
     for (int iter = 0; iter < m_scf_max_iter; ++iter) {
         m_scf_iterations = iter + 1;
 
         // Fock from the current density (F = H + J - 1/2 K, spin-summed convention).
         const auto t_f0 = std::chrono::steady_clock::now();
-        Matrix fock = buildFock(m_density);
+        Matrix fock = fockFromDensity(m_density);
         t_fock_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_f0).count();
 
         if (CurcumaLogger::get_verbosity() >= 3 && iter < 2) {
             // Inspect J/K in the MO basis of the *previous* orbitals (m_prev_C).
-            const qmint::ERITensor& eri0 = eriActive();
-            const Matrix Jm = qmint::buildCoulomb(eri0, m_density);
-            const Matrix Km = qmint::buildExchange(eri0, m_density);
+            Matrix Jm, Km;
+            buildJK(m_density, Jm, Km);
             CurcumaLogger::info(fmt::format(
                 "DBG Fock diag[0..3]={:.4} {:.4} {:.4} {:.4}  J_00(AO)={:.4} K_00(AO)={:.4} Tr(PJ)={:.6} Tr(PK)={:.6}",
                 fock(0, 0), n > 1 ? fock(1, 1) : 0, n > 2 ? fock(2, 2) : 0, n > 3 ? fock(3, 3) : 0,
@@ -346,14 +373,15 @@ bool QMEngine::runSCF()
 
         if (delta_P < m_scf_threshold) {
             m_density = density_new;
-            m_fock = buildFock(m_density);  // self-consistent final Fock
+            // Self-consistent final Fock from ONE full J/K build (never incremental).
+            Matrix J, K;
+            buildJK(m_density, J, K);
+            m_fock = m_H + J - 0.5 * K;
             m_scf_converged = true;
 
             // Final energy + components from the converged density and Fock.
             m_et = m_density.cwiseProduct(m_T).sum();
             m_ev = m_density.cwiseProduct(m_V).sum();
-            const Matrix J = qmint::buildCoulomb(eri, m_density, m_threads);
-            const Matrix K = qmint::buildExchange(eri, m_density, m_threads);
             m_ej = 0.5 * m_density.cwiseProduct(J).sum();
             m_ex = -0.25 * m_density.cwiseProduct(K).sum();
             m_e_elec = 0.5 * m_density.cwiseProduct(m_H + m_fock).sum();
@@ -369,9 +397,10 @@ bool QMEngine::runSCF()
                 CurcumaLogger::success(fmt::format(
                     "QM HF SCF converged in {} iterations (dP = {:.3e}, start: {})",
                     iter + 1, delta_P, m_last_warm_start ? "previous geometry" : m_scf_guess));
-                CurcumaLogger::info(fmt::format("QM: SCF loop {:.1f} ms, of which Fock (J/K) builds {:.1f} ms",
+                CurcumaLogger::info(fmt::format("QM: SCF loop {:.1f} ms, of which Fock (J/K) builds {:.1f} ms{}",
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_scf0).count(),
-                    t_fock_ms));
+                    t_fock_ms,
+                    direct ? fmt::format(" (integral-direct, {} shell quartets computed)", m_direct_quartets) : std::string()));
             }
             return true;
         }
@@ -510,10 +539,41 @@ Matrix QMEngine::buildInitialGuess() const
 
 Matrix QMEngine::buildFock(const Matrix& P) const
 {
-    const qmint::ERITensor& eri = eriActive();
-    const Matrix J = qmint::buildCoulomb(eri, P, m_threads);
-    const Matrix K = qmint::buildExchange(eri, P, m_threads);
+    Matrix J, K;
+    buildJK(P, J, K);
     return m_H + J - 0.5 * K;
+}
+
+// Claude Generated (Sep 2026): -qm.scf_direct on|off|auto. auto keeps the stored
+// tensor (fastest J/K) as long as it fits in -qm.eri_max_memory_mb.
+bool QMEngine::useDirectSCF() const
+{
+    if (m_scf_direct == "on" || m_scf_direct == "true") return true;
+    if (m_scf_direct == "off" || m_scf_direct == "false") return false;
+    if (m_scf_direct != "auto" && CurcumaLogger::get_verbosity() >= 1)
+        CurcumaLogger::warn(fmt::format("QM: unknown -qm.scf_direct '{}' (use auto|on|off); using auto", m_scf_direct));
+    const double n = static_cast<double>(m_nbf);
+    return n * n * n * n * 8.0 / 1.0e6 > m_eri_max_memory_mb;
+}
+
+// J(P), K(P) in the active basis: from the stored tensor, or integral-direct
+// (shell-pair tables built on the first call per geometry).
+void QMEngine::buildJK(const Matrix& P, Matrix& J, Matrix& K) const
+{
+    if (!useDirectSCF()) {
+        const qmint::ERITensor& eri = eriActive();
+        J = qmint::buildCoulomb(eri, P, m_threads);
+        K = qmint::buildExchange(eri, P, m_threads);
+        return;
+    }
+    if (!m_direct.ready()) {
+        m_direct = qmint::DirectJK(m_gto_basis, m_eri_screening, m_Q.size() != 0 ? &m_Q : nullptr);
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info(fmt::format(
+                "QM: integral-direct J/K ({} basis functions; stored tensor would need {:.1f} MB)",
+                m_direct.n(), std::pow((double)m_direct.n(), 4) * 8.0 / 1.0e6));
+    }
+    m_direct_quartets += m_direct.build(P, J, K, m_threads);
 }
 
 // =================================================================================

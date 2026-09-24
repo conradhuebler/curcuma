@@ -53,3 +53,11 @@ add_executable(bench_qm_integrals bench_qm_integrals.cpp)
 target_link_libraries(bench_qm_integrals PRIVATE curcuma_core)
 target_include_directories(bench_qm_integrals PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/external)
 target_compile_features(bench_qm_integrals PRIVATE cxx_std_17)
+
+# Integral-direct J/K + SCF (-qm.scf_direct on) vs the stored tensor (Sep 2026).
+add_executable(test_qm_direct_jk test_qm_direct_jk.cpp)
+target_link_libraries(test_qm_direct_jk PRIVATE curcuma_core test_molecule_registry)
+target_include_directories(test_qm_direct_jk PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/external ${CMAKE_SOURCE_DIR}/test_cases)
+target_compile_features(test_qm_direct_jk PRIVATE cxx_std_17)
+add_test(NAME qm_direct_jk COMMAND test_qm_direct_jk)
+set_tests_properties(qm_direct_jk PROPERTIES TIMEOUT 300 LABELS "qm_2e")

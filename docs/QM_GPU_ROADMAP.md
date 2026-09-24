@@ -1,7 +1,7 @@
 # Native ab-initio QM (HF / HF-3c / KS-DFT): performance and GPU roadmap
 
-> Status: 🤖 AI-authored. Section 1 is **implemented and machine-tested** (CPU only,
-> Sep 2026). Sections 2-3 are a **proposed** plan, not implemented. No GPU code for
+> Status: 🤖 AI-authored. Sections 1-2 are **implemented and machine-tested** (CPU only,
+> Sep 2026). Section 3 is a **proposed** plan, not implemented. No GPU code for
 > the QM engine exists yet.
 
 The native xTB GPU work ([SQM_GPU.md](SQM_GPU.md), [SQM_GPU_ROADMAP.md](SQM_GPU_ROADMAP.md),
@@ -50,11 +50,11 @@ invariance (derivatives on A, B, C; D from their sum) -- **done Sep 2026**: 8.5 
 (1 thread), 2.2 -> 1.24 s (4 threads), now ~3.6x the ERI build -- and density-weighted
 screening (open).
 
-**What is still slow / the next wall**: the ERI tensor is **stored** (n^4 doubles:
-1.35 GB at 114 functions, 12.8 GB at 200). Beyond ~150 functions the engine runs out of
-memory before it runs out of time.
+**What was the next wall**: the stored ERI tensor (n^4 doubles: 1.35 GB at 114 functions,
+12.8 GB at 200). Since Sep 2026 the SCF switches to integral-direct J/K above
+`-qm.eri_max_memory_mb` (section 2), so the limit is now time, not memory.
 
-## 2. Proposed next CPU step: integral-direct SCF
+## 2. Integral-direct SCF (done Sep 2026, CPU)
 
 Recompute screened shell quartets every iteration and digest them straight into J and K
 (no stored tensor), with density-weighted screening `Q_ab Q_cd max|P|` and incremental
@@ -62,6 +62,14 @@ Fock builds on dP (Almlöf, Faegri, Korsell, J. Comput. Chem. 3, 385 (1982); Hä
 Ahlrichs, J. Comput. Chem. 10, 104 (1989)). Memory becomes O(n^2); cost per iteration
 grows but shrinks with screening as dP -> 0. This is also the only form that makes sense
 on a GPU (device memory is the binding limit there, as the 7k-atom GFN2 work showed).
+
+**Implemented** (`qmint::DirectJK`, `-qm.scf_direct on|off|auto`): incremental builds on dP
+with a full rebuild every 8 iterations, density-weighted screening, per-thread J/K
+accumulators. Benzene/def2-SVP peak memory 1320 -> 34 MB at 5.6x the time (28.4 vs 5.0 s);
+naphthalene/def2-SVP (180 functions, stored tensor 8.4 GB) runs in 195 s and matches PySCF
+to 8 decimals (print precision). `auto` switches to direct above `-qm.eri_max_memory_mb` (4000). The cost per
+build is now the shell-quartet kernel, which is what stage Q-G2/Q-G3 below would move to
+the device.
 
 ## 3. Proposed GPU stages (mirroring the xTB stages)
 

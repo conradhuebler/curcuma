@@ -34,6 +34,7 @@
 
 #include "GTOIntegrals.hpp"  // GTO::Orbital, GTO::OrbitalType
 
+#include <memory>
 #include <vector>
 
 /**
@@ -209,6 +210,30 @@ private:
 /// the spherical tensor (Q.cols()^4) -- the cartesian tensor is never stored.
 ERITensor buildERI(const std::vector<GTO::Orbital>& basis, int threads = 1, double screening = 0.0,
                    const Matrix* Q = nullptr);
+
+/// @brief Integral-direct Coulomb/exchange build (Claude Generated, Sep 2026).
+///
+/// Holds the shell-pair tables and Schwarz factors of a basis (built once per
+/// geometry); build() recomputes every screened canonical shell quartet and
+/// digests it straight into J(P) and K(P) -- memory O(n^2) instead of the n^4
+/// ERITensor. Screening is density-weighted: a quartet is skipped when
+/// Q_AB Q_CD max|P| (over the shell blocks it touches) < screening, which makes an
+/// incremental build on a small dP cheap. J and K have the same meaning as
+/// buildCoulomb/buildExchange. `Q`: as in buildERI (spherical output when given).
+class DirectJK {
+public:
+    DirectJK() = default;
+    DirectJK(const std::vector<GTO::Orbital>& basis, double screening, const Matrix* Q = nullptr);
+    bool ready() const { return m_impl != nullptr; }
+    int n() const;
+    /// J(P) and K(P); returns the number of shell quartets actually computed.
+    long build(const Matrix& P, Matrix& J, Matrix& K, int threads = 1) const;
+
+private:
+    struct Impl;
+    std::shared_ptr<const Impl> m_impl;
+    double m_screening = 0.0;
+};
 
 /// @brief One contracted (a b | c d), computed directly -- the readable
 /// reference form of the kernel buildERI blocks over shells.

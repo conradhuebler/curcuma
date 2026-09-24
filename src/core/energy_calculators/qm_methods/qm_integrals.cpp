@@ -15,6 +15,7 @@
 #include <array>
 #include <cmath>
 #include <map>
+#include <memory>
 #include <vector>
 
 namespace qmint {
@@ -1085,85 +1086,123 @@ void shellQuartet(const std::vector<EriShell>& sh, const ShellPair& bra, const S
     }
 }
 
-}  // namespace
+/// Where every shell lands in the ACTIVE basis: first output index, width, and
+/// (spherical only) the cartesian -> output transform T (ncomp x width) cut out
+/// of Q. Q is block-diagonal per shell, so the transform can be applied to each
+/// shell quartet right after it is computed -- the full cartesian tensor is never
+/// formed. For s/p shells T is the identity.
+struct ShellOutput {
+    int n = 0;                          ///< active basis dimension
+    bool spherical = false;
+    std::vector<int> first, width;
+    std::vector<Eigen::MatrixXd> T;
+    std::vector<bool> identity;
+    ~ShellOutput();  // out of line: the implicit inline one trips -Winline
+};
+ShellOutput::~ShellOutput() = default;
 
-ERITensor buildERI(const std::vector<GTO::Orbital>& basis, int threads, double screening,
-                   const Matrix* Q)
+ShellOutput makeShellOutput(const std::vector<EriShell>& sh, int ncart, const Matrix* Q)
 {
-    const int ncart = (int)basis.size();
-    const bool spherical = (Q != nullptr && Q->size() != 0);
-    const int n = spherical ? (int)Q->cols() : ncart;
-    ERITensor eri(n);
-    if (n == 0) return eri;
-
-    const std::vector<EriShell> sh = groupShells(basis);
+    ShellOutput o;
+    o.spherical = (Q != nullptr && Q->size() != 0);
+    o.n = o.spherical ? (int)Q->cols() : ncart;
     const int ns = (int)sh.size();
-
-    // Output block of every shell: first output index, width, and (spherical
-    // only) the cartesian -> output transform T (ncomp x width) cut out of Q.
-    // Q is block-diagonal per shell, so the transform can be applied to each
-    // shell quartet right after it is computed -- the full cartesian tensor is
-    // never formed. For s/p shells T is the identity.
-    std::vector<int> ofirst(ns), owidth(ns);
-    std::vector<Eigen::MatrixXd> T(ns);
-    std::vector<bool> identity(ns, true);
+    o.first.assign(ns, 0);
+    o.width.assign(ns, 0);
+    o.T.assign(ns, Eigen::MatrixXd());
+    o.identity.assign(ns, true);
     for (int A = 0; A < ns; ++A) {
         const int nc = (int)sh[A].lmn.size();
-        if (!spherical) { ofirst[A] = sh[A].first; owidth[A] = nc; continue; }
-        int lo = n, hi = -1;
-        for (int j = 0; j < n; ++j)
+        if (!o.spherical) { o.first[A] = sh[A].first; o.width[A] = nc; continue; }
+        int lo = o.n, hi = -1;
+        for (int j = 0; j < o.n; ++j)
             for (int a = 0; a < nc; ++a)
                 if ((*Q)(sh[A].first + a, j) != 0.0) { lo = std::min(lo, j); hi = std::max(hi, j); }
-        ofirst[A] = lo;
-        owidth[A] = hi - lo + 1;
-        T[A] = Eigen::MatrixXd::Zero(nc, owidth[A]);
+        o.first[A] = lo;
+        o.width[A] = hi - lo + 1;
+        o.T[A] = Eigen::MatrixXd::Zero(nc, o.width[A]);
         for (int a = 0; a < nc; ++a)
-            for (int j = 0; j < owidth[A]; ++j)
-                T[A](a, j) = (*Q)(sh[A].first + a, lo + j);
-        identity[A] = (nc == owidth[A]) && T[A].isIdentity(0.0);
+            for (int j = 0; j < o.width[A]; ++j)
+                o.T[A](a, j) = (*Q)(sh[A].first + a, lo + j);
+        o.identity[A] = (nc == o.width[A]) && o.T[A].isIdentity(0.0);
     }
-    // Contract one index of a 4-index block (dims d[0..3]) with T, in place.
-    auto transformAxis = [](std::vector<double>& blk, std::vector<double>& tmp, int d[4], int k,
-                            const Eigen::MatrixXd& Tk) {
-        size_t outer = 1, inner = 1;
-        for (int m = 0; m < k; ++m) outer *= d[m];
-        for (int m = k + 1; m < 4; ++m) inner *= d[m];
-        const int nin = d[k], nout = (int)Tk.cols();
-        tmp.assign(outer * nout * inner, 0.0);
-        for (size_t o = 0; o < outer; ++o)
-            for (int a = 0; a < nin; ++a)
-                for (int j = 0; j < nout; ++j) {
-                    const double t = Tk(a, j);
-                    if (t == 0.0) continue;
-                    const double* x = &blk[(o * nin + a) * inner];
-                    double* y = &tmp[(o * nout + j) * inner];
-                    for (size_t r = 0; r < inner; ++r) y[r] += t * x[r];
-                }
-        blk.swap(tmp);
-        d[k] = nout;
-    };
+    return o;
+}
 
-    // Shell pairs A <= B with their primitive-pair tables.
+/// Contract one index of a 4-index block (dims d[0..3]) with Tk, in place.
+void transformAxis(std::vector<double>& blk, std::vector<double>& tmp, int d[4], int k,
+                   const Eigen::MatrixXd& Tk)
+{
+    size_t outer = 1, inner = 1;
+    for (int m = 0; m < k; ++m) outer *= d[m];
+    for (int m = k + 1; m < 4; ++m) inner *= d[m];
+    const int nin = d[k], nout = (int)Tk.cols();
+    tmp.assign(outer * nout * inner, 0.0);
+    for (size_t o = 0; o < outer; ++o)
+        for (int a = 0; a < nin; ++a)
+            for (int j = 0; j < nout; ++j) {
+                const double t = Tk(a, j);
+                if (t == 0.0) continue;
+                const double* x = &blk[(o * nin + a) * inner];
+                double* y = &tmp[(o * nout + j) * inner];
+                for (size_t r = 0; r < inner; ++r) y[r] += t * x[r];
+            }
+    blk.swap(tmp);
+    d[k] = nout;
+}
+
+/// One shell quartet in the ACTIVE basis: buf holds the block with dims d[0..3].
+void activeQuartet(const std::vector<EriShell>& sh, const ShellOutput& o, const ShellPair& bra,
+                   const ShellPair& ket, std::vector<double>& buf, std::vector<double>& R,
+                   std::vector<double>& tmp, int d[4])
+{
+    shellQuartet(sh, bra, ket, buf, R);
+    d[0] = (int)sh[bra.A].lmn.size();
+    d[1] = (int)sh[bra.B].lmn.size();
+    d[2] = (int)sh[ket.A].lmn.size();
+    d[3] = (int)sh[ket.B].lmn.size();
+    if (!o.spherical) return;
+    const int s4[4] = { bra.A, bra.B, ket.A, ket.B };
+    for (int k = 0; k < 4; ++k)
+        if (!o.identity[s4[k]])
+            transformAxis(buf, tmp, d, k, o.T[s4[k]]);
+}
+
+/// Shell pairs A <= B with their primitive-pair tables and Schwarz factors
+/// sqrt(max |(ab|ab)|) from the diagonal quartets.
+std::vector<ShellPair> makeScreeningPairs(const std::vector<EriShell>& sh)
+{
+    const int ns = (int)sh.size();
     std::vector<ShellPair> pairs;
     pairs.reserve((size_t)ns * (ns + 1) / 2);
     for (int A = 0; A < ns; ++A)
         for (int B = A; B < ns; ++B)
             pairs.push_back(makeShellPair(sh, A, B));
-    const int np = (int)pairs.size();
-
-    // Schwarz factors from the diagonal quartets (AB|AB).
-    {
-        std::vector<double> buf, R;
-        for (ShellPair& sp : pairs) {
-            shellQuartet(sh, sp, sp, buf, R);
-            const int nA = (int)sh[sp.A].lmn.size(), nB = (int)sh[sp.B].lmn.size();
-            double mx = 0.0;
-            for (int a = 0; a < nA; ++a)
-                for (int b = 0; b < nB; ++b)
-                    mx = std::max(mx, std::abs(buf[((size_t)(a * nB + b) * nA + a) * nB + b]));
-            sp.schwarz = std::sqrt(mx);
-        }
+    std::vector<double> buf, R;
+    for (ShellPair& sp : pairs) {
+        shellQuartet(sh, sp, sp, buf, R);
+        const int nA = (int)sh[sp.A].lmn.size(), nB = (int)sh[sp.B].lmn.size();
+        double mx = 0.0;
+        for (int a = 0; a < nA; ++a)
+            for (int b = 0; b < nB; ++b)
+                mx = std::max(mx, std::abs(buf[((size_t)(a * nB + b) * nA + a) * nB + b]));
+        sp.schwarz = std::sqrt(mx);
     }
+    return pairs;
+}
+
+}  // namespace
+
+ERITensor buildERI(const std::vector<GTO::Orbital>& basis, int threads, double screening,
+                   const Matrix* Q)
+{
+    const std::vector<EriShell> sh = groupShells(basis);
+    const ShellOutput o = makeShellOutput(sh, (int)basis.size(), Q);
+    ERITensor eri(o.n);
+    if (o.n == 0) return eri;
+
+    const std::vector<ShellPair> pairs = makeScreeningPairs(sh);
+    const int np = (int)pairs.size();
 
     // Canonical shell quartets: pair(AB) <= pair(CD). Every AO quartet of a shell
     // quartet is written with set8, so A==B or AB==CD blocks just rewrite the same
@@ -1178,20 +1217,12 @@ ERITensor buildERI(const std::vector<GTO::Orbital>& basis, int threads, double s
 #endif
         for (int i = 0; i < np; ++i) {
             const ShellPair& bra = pairs[i];
-            const EriShell& A = sh[bra.A];
-            const EriShell& B = sh[bra.B];
             for (int j = i; j < np; ++j) {
                 const ShellPair& ket = pairs[j];
                 if (bra.schwarz * ket.schwarz < screening) continue;
-                shellQuartet(sh, bra, ket, buf, R);
-                const EriShell& C = sh[ket.A];
-                const EriShell& D = sh[ket.B];
-                int d[4] = { (int)A.lmn.size(), (int)B.lmn.size(), (int)C.lmn.size(), (int)D.lmn.size() };
-                const int s4[4] = { bra.A, bra.B, ket.A, ket.B };
-                for (int k = 0; k < 4; ++k)
-                    if (spherical && !identity[s4[k]])
-                        transformAxis(buf, tmp, d, k, T[s4[k]]);
-                const int oA = ofirst[bra.A], oB = ofirst[bra.B], oC = ofirst[ket.A], oD = ofirst[ket.B];
+                int d[4];
+                activeQuartet(sh, o, bra, ket, buf, R, tmp, d);
+                const int oA = o.first[bra.A], oB = o.first[bra.B], oC = o.first[ket.A], oD = o.first[ket.B];
                 for (int a = 0; a < d[0]; ++a)
                     for (int b = 0; b < d[1]; ++b)
                         for (int c = 0; c < d[2]; ++c)
@@ -1203,6 +1234,138 @@ ERITensor buildERI(const std::vector<GTO::Orbital>& basis, int threads, double s
     }
     (void)threads;
     return eri;
+}
+
+// ---------------------------------------------------------------------------
+// Integral-direct J/K (Claude Generated, Sep 2026)
+//
+// Instead of storing (mu nu|lam sig) (n^4 doubles), every screened canonical shell
+// quartet is recomputed per Fock build and digested straight into J and K
+// (Almloef, Faegri, Korsell, J. Comput. Chem. 3, 385 (1982)). Each canonical
+// quartet stands for up to 8 index orderings; it is applied once with the weight
+// w = v * deg/8, deg = (A!=B ? 2:1)(C!=D ? 2:1)(AB!=CD ? 2:1), and the 8
+// orderings are recovered by
+//     Jt_ab += 4 w P_cd,  Jt_cd += 4 w P_ab,
+//     Kt_ac += 2 w P_bd,  Kt_bd += 2 w P_ac,  Kt_ad += 2 w P_bc,  Kt_bc += 2 w P_ad,
+//     J = (Jt + Jt^T)/2,  K = (Kt + Kt^T)/2
+// (the same scheme as the libint Hartree-Fock example). Screening is
+// density-weighted (Haeser, Ahlrichs, J. Comput. Chem. 10, 104 (1989)): a
+// quartet is skipped when Q_AB Q_CD max(|P| over the six shell blocks it touches)
+// is below the threshold -- so in an incremental build on dP most quartets drop
+// out as the SCF converges.
+// ---------------------------------------------------------------------------
+
+struct DirectJK::Impl {
+    std::vector<EriShell> sh;
+    ShellOutput out;
+    std::vector<ShellPair> pairs;
+    double max_schwarz = 0.0;
+};
+
+DirectJK::DirectJK(const std::vector<GTO::Orbital>& basis, double screening, const Matrix* Q)
+    : m_screening(screening)
+{
+    auto impl = std::make_shared<Impl>();
+    impl->sh = groupShells(basis);
+    impl->out = makeShellOutput(impl->sh, (int)basis.size(), Q);
+    impl->pairs = makeScreeningPairs(impl->sh);
+    for (const ShellPair& sp : impl->pairs)
+        impl->max_schwarz = std::max(impl->max_schwarz, sp.schwarz);
+    m_impl = impl;
+}
+
+int DirectJK::n() const { return m_impl ? m_impl->out.n : 0; }
+
+long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads) const
+{
+    const int n = this->n();
+    J = Matrix::Zero(n, n);
+    K = Matrix::Zero(n, n);
+    if (!m_impl || n == 0) return 0;
+    const Impl& I = *m_impl;
+    const int ns = (int)I.sh.size();
+    const int np = (int)I.pairs.size();
+    const ShellOutput& o = I.out;
+
+    // Shell-block maxima of |P| for the density-weighted screening.
+    Eigen::MatrixXd Pmax = Eigen::MatrixXd::Zero(ns, ns);
+    for (int A = 0; A < ns; ++A)
+        for (int B = A; B < ns; ++B) {
+            const double m = P.block(o.first[A], o.first[B], o.width[A], o.width[B]).cwiseAbs().maxCoeff();
+            Pmax(A, B) = Pmax(B, A) = m;
+        }
+    const double Pall = Pmax.maxCoeff();
+    const double thr = m_screening;
+    long computed = 0;
+
+#ifdef _OPENMP
+#pragma omp parallel num_threads(threads > 0 ? threads : 1) reduction(+ : computed)
+#endif
+    {
+        Matrix Jt = Matrix::Zero(n, n), Kt = Matrix::Zero(n, n);
+        std::vector<double> buf, R, tmp;
+#ifdef _OPENMP
+#pragma omp for schedule(dynamic, 1)
+#endif
+        for (int i = 0; i < np; ++i) {
+            const ShellPair& bra = I.pairs[i];
+            if (bra.schwarz * I.max_schwarz * Pall < thr) continue;
+            const int A = bra.A, B = bra.B;
+            for (int j = i; j < np; ++j) {
+                const ShellPair& ket = I.pairs[j];
+                const int C = ket.A, D = ket.B;
+                const double pq = std::max({ Pmax(A, B), Pmax(C, D), Pmax(A, C), Pmax(A, D), Pmax(B, C), Pmax(B, D) });
+                if (bra.schwarz * ket.schwarz * pq < thr) continue;
+                int d[4];
+                activeQuartet(I.sh, o, bra, ket, buf, R, tmp, d);
+                ++computed;
+                const double deg = (A != B ? 2.0 : 1.0) * (C != D ? 2.0 : 1.0) * (i != j ? 2.0 : 1.0);
+                const double scale = deg / 8.0;
+                const int oA = o.first[A], oB = o.first[B], oC = o.first[C], oD = o.first[D];
+                for (int a = 0; a < d[0]; ++a) {
+                    const int ia = oA + a;
+                    for (int b = 0; b < d[1]; ++b) {
+                        const int ib = oB + b;
+                        const double Pab = P(ia, ib);
+                        double jab = 0.0;
+                        for (int c = 0; c < d[2]; ++c) {
+                            const int ic = oC + c;
+                            const double Pac = P(ia, ic), Pbc = P(ib, ic);
+                            const double* row = &buf[((size_t)(a * d[1] + b) * d[2] + c) * d[3]];
+                            double kac = 0.0, kbc = 0.0;
+                            for (int e = 0; e < d[3]; ++e) {
+                                const double w = scale * row[e];
+                                if (w == 0.0) continue;
+                                const int id = oD + e;
+                                jab += w * P(ic, id);
+                                Jt(ic, id) += 4.0 * w * Pab;
+                                kac += w * P(ib, id);
+                                kbc += w * P(ia, id);
+                                Kt(ib, id) += 2.0 * w * Pac;
+                                Kt(ia, id) += 2.0 * w * Pbc;
+                            }
+                            Kt(ia, ic) += 2.0 * kac;
+                            Kt(ib, ic) += 2.0 * kbc;
+                        }
+                        Jt(ia, ib) += 4.0 * jab;
+                    }
+                }
+            }
+        }
+#ifdef _OPENMP
+#pragma omp critical(qm_direct_jk)
+#endif
+        {
+            J += Jt;
+            K += Kt;
+        }
+    }
+    (void)threads;
+    const Matrix Jsym = 0.5 * (J + J.transpose());
+    const Matrix Ksym = 0.5 * (K + K.transpose());
+    J = Jsym;
+    K = Ksym;
+    return computed;
 }
 
 // J_munu = sum_{lam,sig} (mu nu | lam sig) P_lamsig: with the tensor stored as an

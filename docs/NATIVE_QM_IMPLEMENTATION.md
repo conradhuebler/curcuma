@@ -250,6 +250,30 @@ on this set it has **no measured benefit** (342 / 427 iterations; with the bare-
 348 DIIS vs 369 ADIIS, and BH lands on the same higher RHF solution with both), so it is
 opt-in and only checked for reaching the same energies.
 
+**Integral-direct SCF (Sep 2026)**: `-qm.scf_direct on|off|auto` (default `auto`).
+`qmint::DirectJK` keeps only the shell-pair tables and Schwarz factors and recomputes every
+screened canonical shell quartet per Fock build, digesting it straight into J and K
+(Almloef, Faegri, Korsell 1982; one weight `v*deg/8` per canonical quartet, the eight index
+orderings recovered by symmetrising J and K). Screening is density-weighted: a quartet is
+skipped when `Q_AB Q_CD max|P|` over the six shell blocks it touches is below
+`-qm.eri_screening` (Haeser & Ahlrichs 1989). The SCF builds incrementally,
+`J(P_n) = J(P_ref) + J(P_n - P_ref)`, with a full build every 8 iterations and always a
+full build for the final energy. Memory O(n^2) instead of n^4 doubles. `auto` stays with
+the stored tensor (fastest J/K) as long as it fits in `-qm.eri_max_memory_mb` (4000 MB,
+about 150 functions). Measured, 4 threads:
+
+| system (def2-SVP) | functions | stored | direct |
+|---|---:|---:|---:|
+| benzene, energy | 114 | 5.0 s, peak 1320 MB | 28.4 s, peak 34 MB |
+| naphthalene (auto -> direct) | 180 | would need 8.4 GB | 195 s, E = PySCF to 8 decimals (print precision) |
+
+J/K with screening off equals the stored path to 4e-15 (`qm_direct_jk`); SCF energies agree
+to 1e-13 Eh, including a warm-started geometry sequence, and `-opt` formaldehyde gives
+the identical geometry. Density screening skipped 15 % (benzene) / 42 % (naphthalene) of
+the quartets; loosening it to 1e-10 did not pay (more DIIS iterations). The per-build cost
+is the integral kernel itself, so direct mode is for systems the stored tensor cannot hold,
+not a speed-up. The 2e gradient was already direct.
+
 Also fixed: `setMolecule()` with a *different* molecule on a reused method object kept the
 old molecule's integrals (HF-3c water on an object last used for BH: -17.44 instead of
 -75.50 Eh); `resetForNewMolecule()` now runs first. Both covered by `qm_update_geometry`.
