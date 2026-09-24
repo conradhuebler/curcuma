@@ -295,6 +295,8 @@ PARAM(hb_thr1_bohr2, Double, 0.0, "Task 11: direct override of hbthr1, the A-B d
 PARAM(hb_thr2_bohr2, Double, 0.0, "Task 11: direct override of hbthr2, the A-H-B sum-of-squares cutoff for nhb1 detection (Bohr^2). 0 = derive from hb_accuracy.", "Performance", {})
 PARAM(hb_update_rmsd_bohr, Double, 0.3, "Task 11: per-atom RMSD (Bohr) that triggers an HB/XB list rebuild. 0.3 reproduces the gfnff reference (gfnff_ini2.f90:717). Smaller = rebuild more often = less near-threshold staleness in MD but slower.", "Performance", {})
 PARAM(hb_update_force_every, Int, 10, "Force an HB/XB list rebuild every N energy evaluations, in addition to the RMSD trigger (0 = RMSD-triggered only). Default 10 since Sep 2026: the RMSD trigger computes sqrt(sum d^2)/N (faithful to gfnff_ini2.f90:717, kept unchanged pending a reference check - see TODO.md), which is sqrt(N) smaller than a per-atom RMSD, so it practically never fires beyond a few dozen atoms (triose, 66 atoms, 200 fs at 800 K: per-atom RMSD 2.2 Bohr, trigger value 0.27, no rebuild; the stale list held 1602 H-bond triples against 1488 in a fresh build, 6e-6 Eh apart). One rebuild costs ~100 ms on polymer_2x (7320 atoms, 150k triples, ~20-50 triples change per 0.5 fs step), so every 10 steps is ~0.7 percent of an MD step. 1 = every step (exact classification, ~7 percent there).", "Performance", {})
+PARAM(hb_min_pair_energy_eh, Double, 1e-9, "Sep 2026 (docs/GFNFF_PERFORMANCE_LEVERS.md lever #1): skip allocating a GFNFFHydrogenBond for a case-1 (unbound A...H...B) candidate when the EXACT |E_HB| the energy kernel would compute is below this (Eh), evaluated at detection time from the same formula calcHydrogenBonds uses - not an approximation, and not the rejected raw-distance cut from the same doc (which moved energy 0.79 Eh). Case 2/3/4 (donor-bonded H) are NEVER pruned by this, regardless of value: their acceptor feeds bond_hb_data/hb_cn_H, a geometric quantity uncorrelated with |E_HB| - pruning them shifted the bond term by 0.18 kcal/mol on a test system even though the HB term itself barely moved. 0 disables. On a 3000-water/14640-atom system the case-1 candidate list alone was over 1M entries dominated by long-range, damping-suppressed near-zero contributors.", "Performance", {})
+PARAM(xb_min_pair_energy_eh, Double, 1e-9, "Sep 2026 (docs/GFNFF_PERFORMANCE_LEVERS.md lever #1, XB counterpart): skip allocating a GFNFFHalogenBond when the EXACT |E_XB| the energy kernel would compute is below this (Eh) - the XB formula has no case-dependent branch, so this is exact, not an approximation. 0 disables.", "Performance", {})
 PARAM(nonbonded_rebuild_every, Int, 1, "The non-bonded repulsion pair list is built from a hard 20 Bohr distance cutoff; a pair that starts beyond it and diffuses closer during MD was never re-evaluated (fixed Sep 2026 - see GFNFF::updateNonbondedRepulsionIfNeeded). This rebuilds it from the current geometry every N energy evaluations. 1 (default) = every step, unconditionally correct - no pair can cross the cutoff undetected. The same schedule drives the explicit Coulomb list of eeq_distance_cutoff > 0 and the D4 list when dispersion_cutoff_bohr <= 50 leaves it without a skin. Raise only after confirming the rebuild cost matters for your system size; a stale list can let two atoms pass through the repulsive wall with zero force, which is far more expensive to debug than the rebuild.", "Performance", {})
 PARAM(nonbonded_skin_bohr, Double, 0.0, "Verlet skin (Bohr) for the non-bonded repulsion list and the explicit Coulomb list of eeq_distance_cutoff > 0. 0 (default) = rebuild on the nonbonded_rebuild_every step count. > 0 = build the lists that much wider than their kernel cutoff (20 Bohr repulsion, eeq_distance_cutoff Coulomb) and rebuild only once some atom moved more than skin/2 since the last build - exact, since no pair can then cross the kernel cutoff unseen (Verlet 1967). Energies are unchanged up to floating-point summation order (the longer list shifts the thread partition); only the rebuild schedule and the list length change. See docs/GFNFF_PAIR_LIST_REFRESH.md for measured costs.", "Performance", {})
 PARAM(dispersion_c6_update, Bool, true, "Recompute every stored D4 pair C6 from the current coordination numbers whenever the geometry changed (GFNFF::refreshDispersionC6). Before Sep 2026 C6 stayed at the setup geometry while the dispersion gradient already used dC6/dCN at the current CN, so MD and optimisation energies drifted away from a single point at the same geometry (triose: 0.18 kcal/mol after 200 fs at 800 K). Single points are unaffected. false restores the old frozen-C6 behaviour for comparisons.", "Algorithm", {})
@@ -1404,6 +1406,27 @@ private:
 
     /// Detect halogen bonds as native GFNFFHalogenBond structs
     std::vector<GFNFFHalogenBond> detectHalogenBondsNative(const Vector& charges) const;
+
+    // Sep 2026 (docs/GFNFF_PERFORMANCE_LEVERS.md lever #1): cheap, EXACT pre-struct HB/XB
+    // strength estimates, used by detectHydrogenBondsNative/detectHalogenBondsNative to skip
+    // GFNFFHydrogenBond/GFNFFHalogenBond allocation for candidates whose |E| the energy kernel
+    // (ff_workspace_gfnff.cpp calcHydrogenBonds/calcHalogenBonds) would compute as negligible.
+    // Each reuses the exact same GFNFFParameters damping primitives as that kernel — this is a
+    // reordering of the real formula, not an approximation.
+    // ONLY case 1 HB (below) and XB are pruned this way. Case 2/3/4 HB are intentionally
+    // NEVER pruned by |E_HB|: their acceptor B, when N/O, feeds bond_hb_data / hb_cn_H
+    // (ff_workspace_gfnff.cpp computeHBCoordinationNumbers), a purely GEOMETRIC erf-based
+    // count that rescales the donor-H BOND term (egbond_hb) and does not correlate with
+    // |E_HB| — an earlier attempt at pruning case 2/4 by |E_HB| shifted the bond term by
+    // ~0.18 kcal/mol on a 66-atom test system despite the HB term itself moving by <1e-8 Eh.
+    // Case 1 has no such coupling: a case-1 H is by construction not bonded to either
+    // flanking atom, so it can never match the bond_hb_data lookup key.
+    double estimateHBStrengthCase1(int A, int H, int B,
+                                    double basicity_A, double basicity_B,
+                                    double acidity_A, double acidity_B,
+                                    double q_H, double q_A, double q_B) const;
+    double estimateXBStrength(int A, int X, int B,
+                               double acidity_X, double q_X, double q_B) const;
 
     /// Generate BATM triple parameters as native GFNFFBatmTriple structs
     std::vector<GFNFFBatmTriple> generateBatmTriplesNative(const TopologyInfo& topo_info) const;

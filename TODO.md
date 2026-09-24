@@ -526,9 +526,80 @@
     erreichbar, wie in der urspruenglichen Anweisung gefordert ("Wir akzeptieren
     Ensemblegleichheit erst, wenn wir keine andere Chance haben").
   - **Noch offen / nicht getestet**: laengere MD-Laeufe (Energieerhaltung ueber >8 Schritte),
-    G6-Doppelsystem (14640 Atome) mit WP7-E, ROCm-Portierung, Vergleich CPU-ppcg-Timing vs.
-    GPU-WP7-E-Timing auf derselben Groessenordnung (nur WP7-C-vs-WP7-E GPU-intern gemessen).
+    ROCm-Portierung, Vergleich CPU-ppcg-Timing vs. GPU-WP7-E-Timing auf derselben
+    Groessenordnung (nur WP7-C-vs-WP7-E GPU-intern gemessen).
   - **Verweis**: [[curcuma EEQ-Löser-Benchmark]] (Vault, Projekt + Labor, wird nachgezogen).
+- **G6-Doppelsystem (14640 Atome, nfrag=3004) mit WP7-E getestet — konvergiert korrekt, aber die
+  Gesamtlaufzeit ist fast vollstaendig CPU-Setup, nicht der EEQ-Solve (2026-09-24)**:
+  `g6_polymer4x.xyz` (4x1410-Atom-Ketten + 3000 Wasser), 8-Schritte-GFN-FF-MD,
+  `-gfnff.solve_method auto`. `path=WP7-E GPU-Schur (projected-pcg)` in allen 8 Schritten,
+  Energien/Ladungen plausibel, Gesamtlaufzeit **118 s**. Die eingebaute Timing-Aufschluesselung
+  zeigt: der eigentliche EEQ-Solve kostet nur **~260 ms/Schritt** (~2 s ueber alle 8 Schritte) —
+  WP7-E ist bei dieser Groesse kein Engpass. Die restlichen ~116 s sind **einmaliges CPU-Setup**
+  (`One-time setup topo=49076.7 ms param=103560.0 ms`, identisch in jedem Schritt-Report
+  ausgegeben, also wirklich einmalig, nicht kumulativ pro Schritt): das synthetische
+  3000-Wasser-Sub-System erzeugt **1.028.354 Wasserstoffbruecken-Kandidaten** in der
+  Topologie-Erkennung — derselbe, in `docs/GFNFF_PERFORMANCE_LEVERS.md` ("Lever 1")
+  dokumentierte, vom EEQ-Solver unabhaengige Engpass. **Folge**: der naive Vergleich mit den
+  alten Matrix-Zahlen (CPU-ppcg 77-85 s, GPU-chol 98-106 s, GPU-PCG/WP7-C >180 s Timeout) ist
+  irrefuehrend, weil diese vermutlich denselben solverunabhaengigen Setup-Anteil enthalten —
+  ohne deren eigene Aufschluesselung laesst sich der reine Solver-Unterschied nicht sauber
+  herausrechnen. Sauber belegt ist nur: WP7-E selbst bleibt auch bei doppelter Systemgroesse
+  (gegenueber `polymer_2x`) trivial schnell; der offene Punkt fuer diese Systemklasse (viele
+  kleine Fragmente/grosse Wasserboxen) ist die CPU-Setup-Zeit, ein separates, bereits bekanntes
+  Problem.
+
+- **HB-/XB-Fix (Lever 1) umgesetzt, gebaut, korrekt — loest aber NICHT den G6-Setup-Engpass;
+  eine Kopplung an den Bond-Term erst gefunden und dann korrekt eingegrenzt (2026-09-24,
+  AI-implemented, machine-tested)**: Auftrag „HB-Fix und XB-Fix umsetzen" (energiebasiertes
+  Pruning statt distanzbasiert, s. Briefing oben). Umgesetzt: zwei neue GFNFF-Methoden
+  `estimateHBStrengthCase1`/`estimateXBStrength` (`gfnff_method.cpp`), die die EXAKTE
+  Energie-Formel aus dem Energie-Kernel (`ff_workspace_gfnff.cpp calcHydrogenBonds`/
+  `calcHalogenBonds`) vorzeitig — vor der Struct-Allokation — auswerten und Kandidaten unterhalb
+  eines neuen Schwellenwerts (`hb_min_pair_energy_eh`/`xb_min_pair_energy_eh`, Default 1e-9 Eh)
+  verwerfen. Die vier gemeinsam genutzten Damping-Grundfunktionen (`ws_damping_*`,
+  `ws_charge_scaling`) wurden aus `ff_workspace_gfnff.cpp`s anonymem Namespace in den geteilten
+  Header `gfnff_par.h` verschoben, damit Detektion und Energie-Kernel garantiert dieselbe
+  Implementierung nutzen (kein Drift-Risiko).
+  - **Echter Bug gefunden und korrigiert, BEVOR er unbemerkt geblieben waere**: ein erster
+    Versuch wendete das Pruning auf ALLE HB-Faelle an (case 1 „unbound" UND case 2/3/4
+    „donor-gebunden"). Der HB-Term selbst blieb dabei korrekt (Energieaenderung <1e-8 Eh auf
+    `triose.xyz`), aber die GESAMTENERGIE verschob sich um **0,18 kcal/mol** (2,87e-4 Eh) — fast
+    vollstaendig im BOND-Term. Ursache: jedes case-2/3/4-Kandidat mit N/O-Akzeptor speist
+    `bond_hb_data`/`hb_cn_H` (`ff_workspace_gfnff.cpp computeHBCoordinationNumbers`), eine rein
+    GEOMETRISCHE erf-basierte Zaehlgroesse, die den donor-H-BOND-Term reskaliert (`egbond_hb`,
+    `VBOND_SCALE`) — und diese Groesse korreliert NICHT mit |E_HB| (ein Akzeptor mit schwacher
+    Basizitaet kann geometrisch nah sein und voll zur Zaehlung beitragen, aber wenig zur Energie).
+    Gefunden nur, weil die VOLLE Energie-Dekomposition verglichen wurde, nicht nur der HB-Term
+    selbst — eine reine "HB-Term unveraendert"-Pruefung haette den Bug durchgelassen.
+  - **Fix**: Pruning NUR fuer case 1 (unbound A...H...B) und XB — beide strukturell sicher, da
+    ein case-1-H per Konstruktion an keinen der beiden flankierenden Atome gebunden ist und daher
+    nie den `bond_hb_data`-Lookup-Key treffen kann (kein XB-Analogon zu `hb_cn_H` gefunden).
+    case 2/3/4 werden NIE mehr geprueft, unabhaengig vom Schwellenwert. Die dadurch unsicher
+    gewordene Methode `estimateHBStrengthCase2or4` wurde vollstaendig entfernt (Definition +
+    Deklaration), nicht nur deaktiviert.
+  - **Korrektheit nach dem Fix, real getestet**: `triose.xyz`, volle Energie-Dekomposition,
+    `hb_min_pair_energy_eh 0` (alt) vs. Default (neu) — **bitidentisch** in JEDER Komponente
+    (Bond -9.6737006656 Eh beide, H-bonds -0.0122278523 Eh beide, case-1/2-Zaehlungen 1495/107
+    beide identisch — bei diesem kleinen Molekuel greift die case-1-Schwelle gar nicht). `ctest -L
+    gfnff`: **77/78 bestanden**, einziger Fehlschlag der bereits bekannte vorbestehende
+    `cli_curcumaopt_07_opt_multixyz` (golden-value drift, nicht mit diesem Fix zusammenhaengend).
+  - **Wirkung auf `g6_polymer4x.xyz`**: HB-Kandidaten **1.028.354 -> 205.284 (5x weniger)**,
+    Energien der 8-Schritte-MD gegenueber dem reinen-WP7-E-Lauf um **~1,1e-5 Eh** verschoben
+    (relativ ~5e-9, konsistent mit dem Verwerfen echt vernachlaessigbarer case-1-Kandidaten).
+    **Aber**: Gesamtlaufzeit **124 s vs. 118 s Baseline — keine messbare Verbesserung**, weil
+    (siehe Eintrag oben) die HB-Detektion selbst nur ~1,4 s der ~150 s Setup-Zeit ausmacht; der
+    eigentliche G6-Engpass liegt woanders (Topologie-Erkennung + sonstige Parametergenerierung).
+    Der Fix reduziert aber die PRO-SCHRITT-Kosten des HB-Energie-Kernels (5x weniger Eintraege
+    in `calcHydrogenBonds` pro Aufruf) — bei laengeren MD-Laeufen (viele Schritte statt 8) sollte
+    das kumulativ sichtbar werden, wurde in dieser Sitzung aber nicht gemessen.
+  - **Methodenlehre**: dieselbe Regel wie beim WP7-E-Fix — ein Fix ist erst geprueft, wenn er auf
+    der VOLLEN Rechnung getestet wurde, nicht nur auf dem Term, den er direkt aendert. Ein „der
+    HB-Term aendert sich kaum" waere hier eine stillschweigend falsche Erfolgsmeldung gewesen.
+  - **Noch offen**: der eigentliche G6-Setup-Engpass (Topologie-Erkennung, ~49 s, und
+    sonstige Parametergenerierung, ~100 s abzueglich HB) ist nicht root-caused. Lever 2 aus dem
+    Briefing (die verbleibenden O(N²)-Schleifen cell-listen — `nb_hc`/`nb_nometal`,
+    BATM-Scan, Bond-BFS, = Phase 5 des Multi-GPU-Plans) ist der naheliegende naechste Schritt.
 
 ### SIGSEGV am Ursprung untersucht (Auftrag „fix den SIGSEGV am Ursprung") — nicht gefunden, Werkzeuge sind blind dafuer (2026-09-24)
 - **Status**: ⏳ OFFEN. Root Cause NICHT gefunden trotz gruendlicher Untersuchung mit ASan,

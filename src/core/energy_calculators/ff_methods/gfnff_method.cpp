@@ -8460,6 +8460,83 @@ std::vector<Angle> GFNFF::generateAnglesNative(const TopologyInfo& topo_info) co
     return angles_vec;
 }
 
+// ============================================================================
+// Sep 2026 (docs/GFNFF_PERFORMANCE_LEVERS.md lever #1): pre-struct HB/XB strength estimates.
+// Each reuses the exact GFNFFParameters damping primitives the energy kernel
+// (ff_workspace_gfnff.cpp calcHydrogenBonds/calcHalogenBonds) uses, reordered to run BEFORE a
+// GFNFFHydrogenBond/GFNFFHalogenBond is allocated, so detectHydrogenBondsNative/
+// detectHalogenBondsNative can skip negligible candidates (PARAM hb_min_pair_energy_eh /
+// xb_min_pair_energy_eh) without ever discarding by raw distance — the naive distance cut
+// this doc's own earlier attempt tried moved energy by 0.79 Eh; pruning on the formula's own
+// computed magnitude cannot do that by construction (see gfnff.h PARAM doc).
+// estimateHBStrengthCase1 below is used only for HB case 1 (unbound A...H...B) — see gfnff.h
+// for why case 2/3/4 must never be pruned this way (bond_hb_data / hb_cn_H coupling).
+// ============================================================================
+
+double GFNFF::estimateHBStrengthCase1(int A, int H, int B,
+                                       double basicity_A, double basicity_B,
+                                       double acidity_A, double acidity_B,
+                                       double q_H, double q_A, double q_B) const
+{
+    // Exact mirror of calcHydrogenBonds' case_type==1 branch (ff_workspace_gfnff.cpp).
+    using namespace GFNFFParameters;
+    const Vector pos_A = m_geometry_bohr.row(A);
+    const Vector pos_H = m_geometry_bohr.row(H);
+    const Vector pos_B = m_geometry_bohr.row(B);
+    const double r_AH = (pos_H - pos_A).norm();
+    const double r_HB = (pos_B - pos_H).norm();
+    const double r_AB = (pos_B - pos_A).norm();
+    const double r_vdw_AB = covalent_radii[m_atoms[A] - 1] + covalent_radii[m_atoms[B] - 1];
+
+    const double r_AH_4 = r_AH * r_AH * r_AH * r_AH;
+    const double r_HB_4 = r_HB * r_HB * r_HB * r_HB;
+    const double denom_DA = 1.0 / (r_AH_4 + r_HB_4);
+
+    const double Q_H = ws_charge_scaling(q_H, HB_ST, HB_SF);
+    const double Q_A = ws_charge_scaling(-q_A, HB_ST, HB_SF);
+    const double Q_B = ws_charge_scaling(-q_B, HB_ST, HB_SF);
+
+    const double bas = (Q_A * basicity_A * r_AH_4 + Q_B * basicity_B * r_HB_4) * denom_DA;
+    const double aci = (acidity_B * r_AH_4 + acidity_A * r_HB_4) * denom_DA;
+
+    const double damp_short = ws_damping_short_range(r_AB, r_vdw_AB, HB_SCUT, HB_ALP);
+    const double damp_long = ws_damping_long_range(r_AB, HB_LONGCUT, HB_ALP);
+    const double damp_outl = ws_damping_out_of_line(r_AH, r_HB, r_AB, r_vdw_AB, HB_BACUT);
+    const double rdamp = damp_short * damp_long / (r_AB * r_AB * r_AB);
+    const double qhoutl = Q_H * damp_outl;
+
+    return std::abs(bas * aci * rdamp * qhoutl);
+}
+
+double GFNFF::estimateXBStrength(int A, int X, int B,
+                                  double acidity_X, double q_X, double q_B) const
+{
+    // Exact mirror of calcHalogenBonds (ff_workspace_gfnff.cpp) — the XB formula has no
+    // case-dependent branch, so this is the complete, exact energy magnitude.
+    using namespace GFNFFParameters;
+    const Vector pos_A = m_geometry_bohr.row(A);
+    const Vector pos_X = m_geometry_bohr.row(X);
+    const Vector pos_B = m_geometry_bohr.row(B);
+    const double r_AX = (pos_X - pos_A).norm();
+    const double r_XB = (pos_B - pos_X).norm();
+    const double r_AB = (pos_B - pos_A).norm();
+    const double r_vdw_AB = covalent_radii[m_atoms[A] - 1] + covalent_radii[m_atoms[B] - 1];
+
+    const double damp_short = ws_damping_short_range(r_XB, r_vdw_AB, XB_SCUT, HB_ALP);
+    const double damp_long = ws_damping_long_range(r_XB, HB_LONGCUT_XB, HB_ALP);
+
+    const double ratio_outl = (r_AX + r_XB) / r_AB;
+    const double expo_outl = XB_BACUT * (ratio_outl - 1.0);
+    if (expo_outl > 15.0) return 0.0;  // matches calcHalogenBonds' early "continue"
+    const double damp_outl = 2.0 / (1.0 + std::exp(expo_outl));
+
+    const double Q_X = ws_charge_scaling(q_X, XB_ST, XB_SF);
+    const double Q_B = ws_charge_scaling(-q_B, XB_ST, XB_SF);
+
+    const double R_damp = damp_short * damp_long * damp_outl / (r_XB * r_XB * r_XB);
+    return std::abs(R_damp * Q_B * acidity_X * Q_X);
+}
+
 std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& charges) const
 {
     // Claude Generated (March 2026): Native struct version of detectHydrogenBonds
@@ -8577,6 +8654,10 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
         hbthr2 = (thr2_override > 0.0) ? thr2_override : (400.0 - std::log10(hb_acc) * 50.0);
     }
 
+    // Sep 2026 (lever #1): drop a candidate before allocating its GFNFFHydrogenBond when the
+    // EXACT |E_HB| the energy kernel would compute is below this. 0 disables (old behaviour).
+    const double hb_min_pair_energy = m_parameters.value("hb_min_pair_energy_eh", 1e-9);
+
     // Pre-build bond lookup set for O(1) bonding checks
     std::set<std::pair<int,int>> bond_set;
     for (const auto& bond : bonds) {
@@ -8655,9 +8736,11 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
         }
     }
 
-    // Lambda to create HB native entry for nhb2 (Case 2, 3, or 4)
-    auto create_nhb2_entry = [&](int donor_A, int H, int acceptor_B) {
-        if (is_bonded(donor_A, acceptor_B)) return;
+    // Lambda to create HB native entry for nhb2 (Case 2, 3, or 4). Returns true iff an entry
+    // was actually appended (false on the pre-existing is_bonded skip or the new lever-1
+    // strength skip) so callers can keep the verbosity-3 nhb2_count diagnostic accurate.
+    auto create_nhb2_entry = [&](int donor_A, int H, int acceptor_B) -> bool {
+        if (is_bonded(donor_A, acceptor_B)) return false;
 
         int case_type = 2;
         int acceptor_parent = -1;
@@ -8671,6 +8754,17 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
         } else if (m_atoms[acceptor_B] == 7 && topo_info.neighbor_lists[acceptor_B].size() == 2) {
             case_type = 4;
         }
+
+        // Lever 1 pruning is NOT applied to case 2/3/4 here: every such candidate's acceptor B
+        // (when N/O) feeds bond_hb_data / hb_cn_H (ff_workspace_gfnff.cpp
+        // computeHBCoordinationNumbers), a purely GEOMETRIC erf-based count over B atoms that
+        // then rescales the donor-H BOND term (egbond_hb). That count does not correlate with
+        // |E_HB| (a weak-basicity B can sit geometrically close, contributing fully to the
+        // count while contributing little to the energy) — pruning by |E_HB| here silently
+        // shrank hb_cn_H and shifted the bond term by ~0.18 kcal/mol on a 66-atom test
+        // (triose), caught by comparing the full energy decomposition, not just the HB term
+        // itself. Case 1 (below) has no such coupling — a case-1 H is by construction NOT
+        // bonded to either flanking atom, so it can never match the bond_hb_data lookup key.
 
         GFNFFHydrogenBond hb;
         hb.i = donor_A;
@@ -8699,6 +8793,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
         }
 
         hbonds.push_back(hb);
+        return true;
     };
 
     int nhb1_count = 0, nhb2_count = 0;
@@ -8739,6 +8834,8 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
             } else if (m_atoms[acceptor_B] == 7 && topo_info.neighbor_lists[acceptor_B].size() == 2) {
                 case_type = 4;
             }
+            // No lever-1 pruning for case 2/3/4 — see create_nhb2_entry's comment above
+            // (bond_hb_data / hb_cn_H coupling).
             GFNFFHydrogenBond hb;
             hb.i = donor_A; hb.j = H; hb.k = acceptor_B;
             hb.basicity_A = current_basicity[donor_A];
@@ -8778,6 +8875,13 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                 const Vector r_H = m_geometry_bohr.row(H);
                 const double r_jH_sq = (r_j - r_H).squaredNorm();
                 if (r_AB_sq + r_iH_sq + r_jH_sq < hbthr2) {
+                    if (hb_min_pair_energy > 0.0) {
+                        const double est = estimateHBStrengthCase1(i, H, j,
+                            current_basicity[i], current_basicity[j],
+                            current_acidity[i], current_acidity[j],
+                            charges[H], charges[i], charges[j]);
+                        if (est < hb_min_pair_energy) return;
+                    }
                     GFNFFHydrogenBond hb;
                     hb.case_type = 1;
                     hb.i = i; hb.j = H; hb.k = j;
@@ -8849,7 +8953,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                 this, &ab_pairs, start, end,
                 &current_basicity, &current_acidity, &charges,
                 &topo_info, &hb_hydrogens, &is_bonded,
-                hbthr1, hbthr2
+                hbthr1, hbthr2, hb_min_pair_energy
             ]() {
                 std::vector<GFNFFHydrogenBond> local_hbonds;
                 auto local_create_nhb2 = [&](int donor_A, int H, int acceptor_B,
@@ -8871,6 +8975,8 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                     } else if (m_atoms[acceptor_B] == 7 && ti.neighbor_lists[acceptor_B].size() == 2) {
                         case_type = 4;
                     }
+                    // No lever-1 pruning for case 2/3/4 — see create_nhb2_entry's comment
+                    // above (bond_hb_data / hb_cn_H coupling).
                     GFNFFHydrogenBond hb;
                     hb.i = donor_A; hb.j = H; hb.k = acceptor_B;
                     hb.basicity_A = cb[donor_A];
@@ -8916,6 +9022,13 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                             double r_iH_sq = (r_i - r_H).squaredNorm();
                             double r_jH_sq = (r_j - r_H).squaredNorm();
                             if (r_AB_sq + r_iH_sq + r_jH_sq < hbthr2) {
+                                if (hb_min_pair_energy > 0.0) {
+                                    const double est = estimateHBStrengthCase1(i, H, j,
+                                        current_basicity[i], current_basicity[j],
+                                        current_acidity[i], current_acidity[j],
+                                        charges[H], charges[i], charges[j]);
+                                    if (est < hb_min_pair_energy) continue;
+                                }
                                 GFNFFHydrogenBond hb;
                                 hb.case_type = 1;
                                 hb.i = i; hb.j = H; hb.k = j;
@@ -8965,12 +9078,10 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
 
                 if (h_bonded_to_i && ij_nonbond) {
                     // nhb2: H bonded to i, i is donor → (i, j, H) = (donor, acceptor, H)
-                    create_nhb2_entry(i, H, j);
-                    nhb2_count++;
+                    if (create_nhb2_entry(i, H, j)) nhb2_count++;
                 } else if (h_bonded_to_j && ij_nonbond) {
                     // nhb2: H bonded to j, j is donor → (j, i, H) = (donor, acceptor, H)
-                    create_nhb2_entry(j, H, i);
-                    nhb2_count++;
+                    if (create_nhb2_entry(j, H, i)) nhb2_count++;
                 } else if (!h_bonded_to_i && !h_bonded_to_j) {
                     // nhb1 candidate: H not bonded to either — sum-of-distances criterion
                     // Reference: gfnff_ini2.f90:742 — rab + sqrab(inh) + sqrab(jnh) < hbthr2
@@ -9139,6 +9250,10 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
     }
     const double xb_cutoff = std::sqrt(xb_thr2);
 
+    // Sep 2026 (lever #1, XB counterpart): drop a candidate before allocating its
+    // GFNFFHalogenBond when the EXACT |E_XB| the energy kernel would compute is below this.
+    const double xb_min_pair_energy = m_parameters.value("xb_min_pair_energy_eh", 1e-9);
+
     // Claude Generated (Apr 2026): Spatial cell list for O(N) B-atom lookup.
     // Threshold configurable via nb_cell_list_min_atoms (shared with HB and Coulomb).
     const int xb_cell_threshold = m_parameters.value("nb_cell_list_min_atoms",
@@ -9181,6 +9296,14 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
                     if ((bond.first == X && bond.second == B) || (bond.first == B && bond.second == X))
                         return;
                 }
+            }
+
+            // Lever 1 (XB): skip the allocation for a negligible candidate (exact formula —
+            // the XB energy has no case-dependent branch, see estimateXBStrength).
+            if (xb_min_pair_energy > 0.0) {
+                const double est = estimateXBStrength(A, X, B, xb_acidity[m_atoms[X]],
+                                                       charges[X], charges[B]);
+                if (est < xb_min_pair_energy) return;
             }
 
             GFNFFHalogenBond xb;

@@ -958,37 +958,11 @@ void FFWorkspace::calcCoulomb(int p)
 }
 
 // ============================================================================
-// HB/XB Damping Helper Functions (file-local)
+// HB/XB Damping Helper Functions: ws_damping_short_range/ws_damping_long_range/
+// ws_damping_out_of_line/ws_charge_scaling moved (Sep 2026) to gfnff_par.h under
+// GFNFFParameters, so gfnff_method.cpp's detection-time strength pre-check can share them
+// exactly. Brought into scope here via the `using namespace GFNFFParameters;` below.
 // ============================================================================
-
-namespace {
-
-inline double ws_damping_out_of_line(double r_AH, double r_HB, double r_AB, double radab, double bacut)
-{
-    double ratio = (r_AH + r_HB) / r_AB;
-    double exponent = (bacut / radab) * (ratio - 1.0);
-    if (exponent > 15.0) return 0.0;
-    return 2.0 / (1.0 + std::exp(exponent));
-}
-
-inline double ws_damping_short_range(double r, double r_vdw, double scut, double alp)
-{
-    double ratio = scut * r_vdw / (r * r);
-    return 1.0 / (1.0 + std::pow(ratio, alp));
-}
-
-inline double ws_damping_long_range(double r, double longcut, double alp)
-{
-    return 1.0 / (1.0 + std::pow(r * r / longcut, alp));
-}
-
-inline double ws_charge_scaling(double q, double st, double sf)
-{
-    double exp_term = std::exp(st * q);
-    return exp_term / (exp_term + sf);
-}
-
-} // anonymous namespace
 
 // ============================================================================
 // Hydrogen Bonds (three-body A-H...B)
