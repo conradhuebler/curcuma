@@ -72,7 +72,13 @@ BEGIN_PARAMETER_DEFINITION(qm)
           "SCF energy/charge convergence threshold (Hartree).",
           "SCF", {})
     PARAM(scf_mode, String, "diis",
-          "SCF convergence driver: diis|plain (DIIS Pulay or plain damping).",
+          "SCF convergence driver: diis (Pulay DIIS, orthonormal-basis commutator) | adiis (ADIIS far from convergence, blended into DIIS; Hu/Yang 2010, Garza/Scuseria 2012) | plain (density damping only).",
+          "SCF", {})
+    PARAM(diis_start, Int, 1,
+          "SCF iteration (0-based) from which DIIS/ADIIS extrapolates; 1 = from the second Fock matrix on.",
+          "SCF", {})
+    PARAM(diis_subspace, Int, 8,
+          "Number of Fock/error pairs kept for DIIS/ADIIS.",
           "SCF", {})
     PARAM(scf_guess, String, "sad",
           "SCF initial guess: sad (superposition of atomic densities) | h0 (bare core Hamiltonian, i.e. zero density).",
@@ -201,7 +207,7 @@ private:
     double m_eri_screening = 1.0e-12;        // Schwarz threshold for the ERI build
     int m_scf_max_iter = 100;
     double m_scf_threshold = 1.0e-6;
-    std::string m_scf_mode = "diis";         // diis | plain
+    std::string m_scf_mode = "diis";         // diis | adiis | plain
     std::string m_scf_guess = "sad";         // sad | h0
     // Warm start (Sep 2026): occupied MOs of the last converged SCF and the atoms
     // they belong to; used as the guess for the next geometry of the same molecule.
@@ -212,8 +218,8 @@ private:
     Matrix buildWarmStartGuess() const;       // empty matrix if not applicable
     bool m_scf_converged = false;
     int m_scf_iterations = 0;
-    int m_diis_start = 3;                    // plain iters before DIIS kicks in
-    int m_diis_subspace = 6;                 // DIIS history depth
+    int m_diis_start = 1;                    // iteration from which DIIS extrapolates
+    int m_diis_subspace = 8;                 // DIIS history depth
     // Energy components for the HF run (Hartree). E_elec = 0.5 Tr(P(H+F)).
     double m_e_elec = 0.0;
     double m_et = 0.0, m_ev = 0.0, m_ej = 0.0, m_ex = 0.0;

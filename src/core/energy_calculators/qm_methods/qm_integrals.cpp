@@ -973,9 +973,9 @@ std::vector<double> flattenHermite(const std::vector<std::vector<std::vector<dou
     return f;
 }
 
-// raiseA = 1 builds the Hermite tables one angular-momentum step higher on A --
-// what the gradient kernel needs for the (l+1) half of d/dA g_l.
-ShellPair makeShellPair(const std::vector<EriShell>& sh, int A, int B, int raiseA = 0)
+// raiseA/raiseB = 1 build the Hermite tables one angular-momentum step higher on
+// that shell -- what the gradient kernel needs for the (l+1) half of d/dA g_l.
+ShellPair makeShellPair(const std::vector<EriShell>& sh, int A, int B, int raiseA = 0, int raiseB = 0)
 {
     ShellPair sp;
     sp.A = A;
@@ -990,10 +990,10 @@ ShellPair makeShellPair(const std::vector<EriShell>& sh, int A, int B, int raise
             const double K = gaussianProductK(a.exps[ia], b.exps[ib], a.x, a.y, a.z, b.x, b.y, b.z,
                                               pp.p, pp.Px, pp.Py, pp.Pz);
             if (K == 0.0) continue;  // underflow: contributes exactly 0, as in primitiveERI
-            const int LA = a.L + raiseA;
-            pp.Ex = flattenHermite(hermiteCoeffs(LA, b.L, pp.Px - a.x, pp.Px - b.x, pp.p, K));
-            pp.Ey = flattenHermite(hermiteCoeffs(LA, b.L, pp.Py - a.y, pp.Py - b.y, pp.p, 1.0));
-            pp.Ez = flattenHermite(hermiteCoeffs(LA, b.L, pp.Pz - a.z, pp.Pz - b.z, pp.p, 1.0));
+            const int LA = a.L + raiseA, LB = b.L + raiseB;
+            pp.Ex = flattenHermite(hermiteCoeffs(LA, LB, pp.Px - a.x, pp.Px - b.x, pp.p, K));
+            pp.Ey = flattenHermite(hermiteCoeffs(LA, LB, pp.Py - a.y, pp.Py - b.y, pp.p, 1.0));
+            pp.Ez = flattenHermite(hermiteCoeffs(LA, LB, pp.Pz - a.z, pp.Pz - b.z, pp.p, 1.0));
             sp.prims.push_back(std::move(pp));
         }
     return sp;
@@ -1416,99 +1416,150 @@ Matrix gradientOneElectron(const std::vector<GTO::Orbital>& basis,
 
 namespace {
 
-/// d/dA_k (AB|CD) for every component quartet: out[k][((a*nB+b)*nC+c)*nD+d].
-/// `bra` must be built with makeShellPair(..., raiseA = 1).
-void shellQuartetDerivA(const std::vector<EriShell>& sh, const ShellPair& bra, const ShellPair& ket,
-                        std::vector<double> out[3], std::vector<double>& R)
+/// Cartesian power triples of total angular momentum L (any order; used as a set).
+std::vector<std::array<int, 3>> cartTriples(int L)
+{
+    std::vector<std::array<int, 3>> t;
+    if (L < 0) return t;
+    for (int x = L; x >= 0; --x)
+        for (int y = L - x; y >= 0; --y)
+            t.push_back({ x, y, L - x - y });
+    return t;
+}
+
+/// For one canonical shell quartet (AB|CD): sum over components of
+///   D_abcd * d(ab|cd)/dA,  .../dB,  .../dC     (3 components each),
+/// the derivative with respect to D following from translational invariance.
+/// `bra`/`ket` pairs carry Hermite tables raised by one on BOTH shells
+/// (makeShellPair(..., 1, 1)); D weights are Dq[((a*nB+b)*nC+c)*nD+d].
+/// Claude Generated (Sep 2026).
+void quartetGradient(const std::vector<EriShell>& sh, const ShellPair& bra, const ShellPair& ket,
+                     const std::vector<double>& Dq, double gA[3], double gB[3], double gC[3])
 {
     const EriShell& A = sh[bra.A];
     const EriShell& B = sh[bra.B];
     const EriShell& C = sh[ket.A];
     const EriShell& D = sh[ket.B];
-    const int nA = (int)A.lmn.size(), nB = (int)B.lmn.size(), nC = (int)C.lmn.size(), nD = (int)D.lmn.size();
-    const size_t blk = (size_t)nA * nB * nC * nD;
-    for (int k = 0; k < 3; ++k) out[k].assign(blk, 0.0);
+    const int nA = (int)A.lmn.size(), nB = (int)B.lmn.size(), nD = (int)D.lmn.size();
+    for (int k = 0; k < 3; ++k) gA[k] = gB[k] = gC[k] = 0.0;
 
-    const int LAr = A.L + 1;                          // tables were built one step higher on A
-    const int Ltot = LAr + B.L + C.L + D.L;
-    const int sAB_t = (LAr + 1) * (B.L + 1), sAB_i = B.L + 1;
-    const int sCD_t = (C.L + 1) * (D.L + 1), sCD_i = D.L + 1;
-    const int strideV = 1, strideU = Ltot + 1, strideN = (Ltot + 1) * strideU;  // R^0 simplex layout
+    // Tables were built with (L+1) on both shells of each pair.
+    const int sAB_t = (A.L + 2) * (B.L + 2), sAB_i = B.L + 2;
+    const int sCD_t = (C.L + 2) * (D.L + 2), sCD_i = D.L + 2;
+    const int Ltot = A.L + B.L + C.L + D.L + 1;     // one centre differentiated at a time
+    const int Lb = A.L + B.L + 1;                   // highest bra Hermite order needed
+    const int hs = Lb + 1, hsz = hs * hs * hs;
+    const int strideU = Ltot + 1, strideN = (Ltot + 1) * strideU;  // R^0 simplex layout
+
+    // Ket powers on C that the C derivative needs: totals LC-1, LC, LC+1.
+    const int cdim = C.L + 2;
+    auto ccode = [cdim](int x, int y, int z) { return (x * cdim + y) * cdim + z; };
+    std::vector<std::array<int, 3>> cpow;
+    for (int L = C.L - 1; L <= C.L + 1; ++L)
+        for (const auto& t : cartTriples(L)) cpow.push_back(t);
+
+    thread_local std::vector<double> R, F, hbuf;
+    hbuf.resize((size_t)cdim * cdim * cdim * nD * hsz);
+    auto hptr = [&](int x, int y, int z, int d) { return &hbuf[((size_t)ccode(x, y, z) * nD + d) * hsz]; };
 
     for (const PrimPair& pb : bra.prims) {
-        const double alpha = A.exps[pb.ia];
+        const double alpha = A.exps[pb.ia], beta = B.exps[pb.ib];
         for (const PrimPair& pk : ket.prims) {
+            const double gamma = C.exps[pk.ia];
             const double p = pb.p, q = pk.p;
             const double rho = p * q / (p + q);
             const double Wx = pb.Px - pk.Px, Wy = pb.Py - pk.Py, Wz = pb.Pz - pk.Pz;
-            const double T = rho * (Wx * Wx + Wy * Wy + Wz * Wz);
-            thread_local std::vector<double> F;
-            boysArrayInto(Ltot, T, F);
+            boysArrayInto(Ltot, rho * (Wx * Wx + Wy * Wy + Wz * Wz), F);
             buildR0Simplex(Ltot, Wx, Wy, Wz, rho, F, R);
             const double pref = 2.0 * std::pow(PI, 2.5) / (p * q * std::sqrt(p + q));
 
-            // Two-step contraction (Helgaker 9.9): for each ket component, fold the ket
-            // Hermite coefficients into the R block once,
-            //   h(t,u,v) = sum_{tau,ups,om} (-1)^(tau+ups+om) E_tau E_ups E_om R_{t+tau,u+ups,v+om},
-            // for every bra Hermite index the raised/lowered bra functions can reach;
-            // each of the six shifted bra functions is then a short sum over h.
-            const int Lb = LAr + B.L;                  // highest bra Hermite order
-            const int hs = Lb + 1;
-            thread_local std::vector<double> h;
-            h.resize((size_t)hs * hs * hs);
-            for (int cc = 0; cc < nC; ++cc) {
-                const auto& lc = C.lmn[cc];
-                for (int cd = 0; cd < nD; ++cd) {
-                    const auto& ld = D.lmn[cd];
-                    const int taumax = lc[0] + ld[0], upsmax = lc[1] + ld[1], ommax = lc[2] + ld[2];
-                    for (int t = 0; t <= Lb; ++t)
-                        for (int u = 0; u <= Lb - t; ++u)
-                            for (int v = 0; v <= Lb - t - u; ++v) {
+            // h(t,u,v) = sum over ket Hermite terms of (-1)^(..) E E E R, for every ket
+            // power combination (c', d) any derivative can reach.
+            for (const auto& c : cpow)
+                for (int d = 0; d < nD; ++d) {
+                    const auto& ld = D.lmn[d];
+                    double* h = hptr(c[0], c[1], c[2], d);
+                    const int top = Ltot - (c[0] + c[1] + c[2] + ld[0] + ld[1] + ld[2]);
+                    const int taumax = c[0] + ld[0], upsmax = c[1] + ld[1], ommax = c[2] + ld[2];
+                    for (int t = 0; t <= std::min(top, Lb); ++t)
+                        for (int u = 0; u <= std::min(top, Lb) - t; ++u)
+                            for (int v = 0; v <= std::min(top, Lb) - t - u; ++v) {
                                 double acc = 0.0;
                                 for (int tau = 0; tau <= taumax; ++tau) {
-                                    const double et2 = pk.Ex[tau * sCD_t + lc[0] * sCD_i + ld[0]];
-                                    if (et2 == 0.0) continue;
+                                    const double e1 = pk.Ex[tau * sCD_t + c[0] * sCD_i + ld[0]];
+                                    if (e1 == 0.0) continue;
                                     for (int ups = 0; ups <= upsmax; ++ups) {
-                                        const double eu2 = pk.Ey[ups * sCD_t + lc[1] * sCD_i + ld[1]];
-                                        if (eu2 == 0.0) continue;
+                                        const double e2 = pk.Ey[ups * sCD_t + c[1] * sCD_i + ld[1]];
+                                        if (e2 == 0.0) continue;
                                         for (int om = 0; om <= ommax; ++om) {
-                                            const double ev2 = pk.Ez[om * sCD_t + lc[2] * sCD_i + ld[2]];
-                                            if (ev2 == 0.0) continue;
+                                            const double e3 = pk.Ez[om * sCD_t + c[2] * sCD_i + ld[2]];
+                                            if (e3 == 0.0) continue;
                                             const double sgn = ((tau + ups + om) & 1) ? -1.0 : 1.0;
-                                            acc += et2 * eu2 * ev2 * sgn
-                                                 * R[(t + tau) * strideN + (u + ups) * strideU + (v + om) * strideV];
+                                            acc += e1 * e2 * e3 * sgn
+                                                 * R[(t + tau) * strideN + (u + ups) * strideU + (v + om)];
                                         }
                                     }
                                 }
                                 h[((size_t)t * hs + u) * hs + v] = acc;
                             }
-                    for (int cb = 0; cb < nB; ++cb) {
-                        const auto& lb = B.lmn[cb];
-                        // (a'b|cd) for bra powers (ax, ay, az) on A, b/c/d fixed.
-                        auto contract = [&](int ax, int ay, int az) {
-                            double val = 0.0;
-                            for (int t = 0; t <= ax + lb[0]; ++t) {
-                                const double et = pb.Ex[t * sAB_t + ax * sAB_i + lb[0]];
-                                if (et == 0.0) continue;
-                                for (int u = 0; u <= ay + lb[1]; ++u) {
-                                    const double eu = pb.Ey[u * sAB_t + ay * sAB_i + lb[1]];
-                                    if (eu == 0.0) continue;
-                                    const double etu = et * eu;
-                                    const double* hrow = &h[((size_t)t * hs + u) * hs];
-                                    for (int v = 0; v <= az + lb[2]; ++v)
-                                        val += etu * pb.Ez[v * sAB_t + az * sAB_i + lb[2]] * hrow[v];
+                }
+
+            // (a'b'|c'd) for given bra powers and a ket h block.
+            auto val = [&](const int a[3], const int b[3], const double* h) {
+                double s = 0.0;
+                for (int t = 0; t <= a[0] + b[0]; ++t) {
+                    const double et = pb.Ex[t * sAB_t + a[0] * sAB_i + b[0]];
+                    if (et == 0.0) continue;
+                    for (int u = 0; u <= a[1] + b[1]; ++u) {
+                        const double eu = pb.Ey[u * sAB_t + a[1] * sAB_i + b[1]];
+                        if (eu == 0.0) continue;
+                        const double etu = et * eu;
+                        const double* hrow = h + ((size_t)t * hs + u) * hs;
+                        for (int v = 0; v <= a[2] + b[2]; ++v)
+                            s += etu * pb.Ez[v * sAB_t + a[2] * sAB_i + b[2]] * hrow[v];
+                    }
+                }
+                return s;
+            };
+
+            for (int cc = 0; cc < (int)C.lmn.size(); ++cc) {
+                const auto& lc = C.lmn[cc];
+                for (int cd = 0; cd < nD; ++cd) {
+                    const double* h0 = hptr(lc[0], lc[1], lc[2], cd);
+                    for (int ca = 0; ca < nA; ++ca) {
+                        const auto& la = A.lmn[ca];
+                        for (int cb = 0; cb < nB; ++cb) {
+                            const double w = Dq[((size_t)(ca * nB + cb) * C.lmn.size() + cc) * nD + cd];
+                            if (w == 0.0) continue;
+                            const auto& lb = B.lmn[cb];
+                            const double f = w * pref * A.coef[ca][pb.ia] * B.coef[cb][pb.ib]
+                                           * C.coef[cc][pk.ia] * D.coef[cd][pk.ib];
+                            int a[3] = { la[0], la[1], la[2] }, b[3] = { lb[0], lb[1], lb[2] };
+                            for (int k = 0; k < 3; ++k) {
+                                // d/dA: shift the power on A
+                                a[k] += 1;
+                                double dA = 2.0 * alpha * val(a, b, h0);
+                                a[k] -= 2;
+                                if (la[k] > 0) dA -= la[k] * val(a, b, h0);
+                                a[k] += 1;
+                                // d/dB: shift the power on B
+                                b[k] += 1;
+                                double dB = 2.0 * beta * val(a, b, h0);
+                                b[k] -= 2;
+                                if (lb[k] > 0) dB -= lb[k] * val(a, b, h0);
+                                b[k] += 1;
+                                // d/dC: shift the power on C (different ket h block)
+                                int cp[3] = { lc[0], lc[1], lc[2] };
+                                cp[k] += 1;
+                                double dC = 2.0 * gamma * val(a, b, hptr(cp[0], cp[1], cp[2], cd));
+                                if (lc[k] > 0) {
+                                    cp[k] -= 2;
+                                    dC -= lc[k] * val(a, b, hptr(cp[0], cp[1], cp[2], cd));
                                 }
+                                gA[k] += f * dA;
+                                gB[k] += f * dB;
+                                gC[k] += f * dC;
                             }
-                            return val;
-                        };
-                        for (int ca = 0; ca < nA; ++ca) {
-                            const auto& la = A.lmn[ca];
-                            const double cprod = A.coef[ca][pb.ia] * B.coef[cb][pb.ib]
-                                               * C.coef[cc][pk.ia] * D.coef[cd][pk.ib] * pref;
-                            double d[3];
-                            centreDerivative(la[0], la[1], la[2], alpha, contract, d);
-                            const size_t idx = ((size_t)(ca * nB + cb) * nC + cc) * nD + cd;
-                            for (int k = 0; k < 3; ++k) out[k][idx] += cprod * d[k];
                         }
                     }
                 }
@@ -1519,67 +1570,69 @@ void shellQuartetDerivA(const std::vector<EriShell>& sh, const ShellPair& bra, c
 
 }  // namespace
 
+// 1/2 sum D (mn|ls)^X over canonical shell quartets only (as in buildERI), each
+// weighted by its permutational degeneracy f = (A!=B?2:1)(C!=D?2:1)(AB!=CD?2:1).
+// Per quartet the derivatives on the centres of A, B and C are computed and the
+// one on D follows from translational invariance, d/dD = -(d/dA + d/dB + d/dC);
+// a quartet whose four shells share one atom contributes nothing and is skipped.
+// Compared with the Sep-2026 first version (every ORDERED bra pair against the
+// canonical kets, derivative on A only) this does ~4x fewer quartets.
 Matrix gradientTwoElectron(const std::vector<GTO::Orbital>& basis, const Matrix& P,
                            int natoms, int threads)
 {
     Matrix grad = Matrix::Zero(natoms, 3);
-    const int n = (int)basis.size();
-    if (n == 0) return grad;
+    if (basis.empty()) return grad;
     const std::vector<EriShell> sh = groupShells(basis);
     const int ns = (int)sh.size();
+    std::vector<int> atomOf(ns);
+    for (int s = 0; s < ns; ++s) atomOf[s] = basis[sh[s].first].atom;
 
-    // Bra pairs: every ORDERED (A, B), tables raised on A. Ket pairs: C <= D, a
-    // C < D block stands for (CD| and (DC| (D and the ERI are symmetric in l<->s).
-    std::vector<ShellPair> bras;
-    bras.reserve((size_t)ns * ns);
+    std::vector<ShellPair> pairs;
+    pairs.reserve((size_t)ns * (ns + 1) / 2);
     for (int A = 0; A < ns; ++A)
-        for (int B = 0; B < ns; ++B)
-            bras.push_back(makeShellPair(sh, A, B, 1));
-    std::vector<ShellPair> kets;
-    for (int C = 0; C < ns; ++C)
-        for (int D = C; D < ns; ++D)
-            kets.push_back(makeShellPair(sh, C, D, 0));
-    const int nbra = (int)bras.size(), nket = (int)kets.size();
+        for (int B = A; B < ns; ++B)
+            pairs.push_back(makeShellPair(sh, A, B, 1, 1));
+    const int np = (int)pairs.size();
 
 #ifdef _OPENMP
 #pragma omp parallel num_threads(threads > 0 ? threads : 1)
 #endif
     {
         Matrix g = Matrix::Zero(natoms, 3);
-        std::vector<double> dI[3], R;
+        std::vector<double> Dq;
 #ifdef _OPENMP
 #pragma omp for schedule(dynamic, 1)
 #endif
-        for (int i = 0; i < nbra; ++i) {
-            const ShellPair& bra = bras[i];
+        for (int i = 0; i < np; ++i) {
+            const ShellPair& bra = pairs[i];
             const EriShell& A = sh[bra.A];
             const EriShell& B = sh[bra.B];
-            const int atomA = basis[A.first].atom;
-            for (int j = 0; j < nket; ++j) {
-                const ShellPair& ket = kets[j];
+            for (int j = i; j < np; ++j) {
+                const ShellPair& ket = pairs[j];
+                const int at[4] = { atomOf[bra.A], atomOf[bra.B], atomOf[ket.A], atomOf[ket.B] };
+                if (at[0] == at[1] && at[0] == at[2] && at[0] == at[3]) continue;
                 const EriShell& C = sh[ket.A];
-                const EriShell& Dsh = sh[ket.B];
-                const double mult = (ket.A == ket.B) ? 1.0 : 2.0;
-                shellQuartetDerivA(sh, bra, ket, dI, R);
-                const int nA = (int)A.lmn.size(), nB = (int)B.lmn.size(), nC = (int)C.lmn.size(), nD = (int)Dsh.lmn.size();
-                double acc[3] = { 0, 0, 0 };
-                for (int a = 0; a < nA; ++a) {
-                    const int m = A.first + a;
-                    for (int b = 0; b < nB; ++b) {
-                        const int nn = B.first + b;
-                        for (int c = 0; c < nC; ++c) {
-                            const int l = C.first + c;
+                const EriShell& D = sh[ket.B];
+                const int nA = (int)A.lmn.size(), nB = (int)B.lmn.size(), nC = (int)C.lmn.size(), nD = (int)D.lmn.size();
+                Dq.resize((size_t)nA * nB * nC * nD);
+                for (int a = 0; a < nA; ++a)
+                    for (int b = 0; b < nB; ++b)
+                        for (int c = 0; c < nC; ++c)
                             for (int d = 0; d < nD; ++d) {
-                                const int s = Dsh.first + d;
-                                const double Dm = P(m, nn) * P(l, s)
-                                                - 0.25 * (P(m, l) * P(nn, s) + P(m, s) * P(nn, l));
-                                const size_t idx = ((size_t)(a * nB + b) * nC + c) * nD + d;
-                                for (int k = 0; k < 3; ++k) acc[k] += Dm * dI[k][idx];
+                                const int m = A.first + a, n = B.first + b, l = C.first + c, s = D.first + d;
+                                Dq[((size_t)(a * nB + b) * nC + c) * nD + d] =
+                                    P(m, n) * P(l, s) - 0.25 * (P(m, l) * P(n, s) + P(m, s) * P(n, l));
                             }
-                        }
-                    }
+                const double f = 0.5 * (bra.A != bra.B ? 2.0 : 1.0) * (ket.A != ket.B ? 2.0 : 1.0)
+                               * (i != j ? 2.0 : 1.0);
+                double gA[3], gB[3], gC[3];
+                quartetGradient(sh, bra, ket, Dq, gA, gB, gC);
+                for (int k = 0; k < 3; ++k) {
+                    g(at[0], k) += f * gA[k];
+                    g(at[1], k) += f * gB[k];
+                    g(at[2], k) += f * gC[k];
+                    g(at[3], k) -= f * (gA[k] + gB[k] + gC[k]);
                 }
-                for (int k = 0; k < 3; ++k) g(atomA, k) += 2.0 * mult * acc[k];
             }
         }
 #ifdef _OPENMP

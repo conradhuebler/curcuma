@@ -210,11 +210,16 @@ the gCP/SRB gradient. `getGradient()` returns Eh/Å (the `ComputationalMethod` c
 Also checked by hand (not a ctest): `-opt -method hf` (def2-SVP) on distorted formaldehyde
 against the PySCF minimum: RMSD 1.0e-5 Å, energy equal to 8 decimals.
 
-**Cost**: the 2e gradient is the expensive part, ~7x the ERI build (every ordered bra pair
-against the canonical ket pairs, derivative tables one step higher). Benzene HF-3c: ERI
-1.25 s / 2e gradient 8.5 s on 1 thread, 0.33 s / 2.2 s on 4 threads; a full `-opt` from the
-test geometry 40 s on 4 threads. Two cheaper forms are open (see [QM_GPU_ROADMAP.md](QM_GPU_ROADMAP.md)):
-canonical quartets with translational invariance, and density-weighted screening.
+**Cost**: the 2e gradient runs over the canonical shell quartets only (as the ERI build),
+with derivatives on the centres of A, B and C and the one on D from translational invariance;
+one-centre quartets are skipped. Benzene HF-3c: ERI 1.14 s / 2e gradient 4.5 s on 1 thread,
+0.35 s / 1.24 s on 4 threads (first version: 8.5 s / 2.2 s, every ordered bra pair). Benzene
+HF/def2-SVP (d shells, 4 threads): ERI 6.2 s, 2e gradient 12.3 s; there the gradient agrees
+with PySCF to 3e-11 Eh/Bohr at `-qm.scf_threshold 1e-10` but only 5e-9 at the default
+1e-6 -- the gradient is first order in the SCF error (irrelevant for `-opt`, whose gradient
+threshold is 5e-4). Density-weighted screening is still open.
+Whole optimisations with this gradient, the SCF-DIIS below and the warm start (4 threads):
+benzene HF-3c 42.3 -> 26.2 s, formaldehyde HF/def2-SVP 6.25 -> 4.19 s, same final energies.
 
 **Found on the way**: `-qm.threads` was silently ignored -- the constructor accepted only
 `is_number_integer()`, the CLI/registry deliver `1.0`, and QMDriver's default of 4 threads
@@ -233,6 +238,18 @@ or a near-singular `C^T S C`. Measured: water stepped 5x by 0.01 A, 61 vs 90 SCF
 energies identical to 7e-14 Eh; `-opt` formaldehyde HF/def2-SVP 246 -> 149 iterations,
 benzene HF-3c 110 -> 86, same final energies. **Wall time barely moves** (6.45 -> 6.25 s,
 42.9 -> 42.3 s on 4 threads): per step the ERI rebuild and the gradient dominate, not the SCF.
+**SCF-DIIS (Sep 2026)**: the QM SCF has its own accelerator (`QMScfAccelerator` in
+`qm_scf.cpp`; the shared `DIISAccelerator` stays as it is for native xTB). Pulay DIIS now
+starts at the second Fock matrix (`-qm.diis_start 1`, was 3), keeps 8 entries
+(`-qm.diis_subspace`), uses the commutator in the orthonormal basis `X^T(FPS-SPF)X`
+(Pulay 1982) and drops the oldest entries when the B matrix is near-singular. Over 33
+molecule/basis cases (H-Ne, def2-SVP and MINIX): 357 -> 325 SCF iterations at the default
+threshold, 503 -> 413 at 1e-9, every energy unchanged to 8 decimals. `-qm.scf_mode adiis`
+adds ADIIS (Hu & Yang 2010) far from convergence, blended into DIIS (Garza & Scuseria 2012);
+on this set it has **no measured benefit** (342 / 427 iterations; with the bare-core start
+348 DIIS vs 369 ADIIS, and BH lands on the same higher RHF solution with both), so it is
+opt-in and only checked for reaching the same energies.
+
 Also fixed: `setMolecule()` with a *different* molecule on a reused method object kept the
 old molecule's integrals (HF-3c water on an object last used for BH: -17.44 instead of
 -75.50 Eh); `resetForNewMolecule()` now runs first. Both covered by `qm_update_geometry`.

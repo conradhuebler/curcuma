@@ -42,7 +42,6 @@
 #include "qm_engine.h"
 #include "src/core/curcuma_logger.h"
 
-#include "diis_accelerator.h"
 #include "native_eigensolver.h"
 
 #include <Eigen/Dense>
@@ -70,6 +69,145 @@ bool lowdinOrthonormalizer(const Eigen::MatrixXd& S, Eigen::MatrixXd& X)
     X = U * inv_sqrt.asDiagonal() * U.transpose();
     return true;
 }
+}  // namespace
+
+
+// =================================================================================
+// SCF convergence accelerator for the QM engine: Pulay DIIS and ADIIS
+// (Claude Generated, Sep 2026). Self-contained here on purpose -- the shared
+// DIISAccelerator (diis_accelerator.h) also drives the native xTB SCF, whose
+// energies are gated at 1e-8 against tblite, and stays untouched.
+//
+//  DIIS  (P. Pulay, Chem. Phys. Lett. 73, 393 (1980); J. Comput. Chem. 3, 556 (1982)):
+//        F = sum c_i F_i with sum c_i = 1 minimising |sum c_i e_i|^2, where
+//        e_i = X^T (F_i P_i S - S P_i F_i) X is the commutator in the ORTHONORMAL
+//        basis (X = S^-1/2) -- the AO-basis commutator is not a proper residual
+//        when S is far from the identity, which is the Pulay-1982 recommendation.
+//  ADIIS (X. Hu, W. Yang, J. Chem. Phys. 132, 054109 (2010)): far from convergence
+//        the commutator is a poor guide; instead minimise the quadratic (ARH) model
+//        of the energy over convex combinations of the stored densities,
+//          f(c) = sum c_i Tr[(P_i - P_n) F_n] + 1/2 sum c_i c_j Tr[(P_i - P_n)(F_j - F_n)],
+//        c_i >= 0, sum c_i = 1  (n = newest entry; spin-summed P, so dE = Tr(F dP)).
+//  Blend (R. Garza, G. Scuseria, J. Chem. Phys. 137, 054110 (2012)): ADIIS while
+//        max|e| > 1e-1, DIIS below 1e-4, linear mix of the two Fock matrices between.
+// =================================================================================
+namespace {
+
+class QMScfAccelerator {
+public:
+    QMScfAccelerator(int max_size, bool adiis) : m_max(std::max(2, max_size)), m_adiis(adiis) {}
+
+    /// Store F (built from P) and return max|e| of its orthonormal-basis error.
+    double push(const Matrix& F, const Matrix& P, const Matrix& S, const Matrix& X)
+    {
+        const Matrix FPS = F * P * S;
+        const Matrix e = X.transpose() * (FPS - FPS.transpose()) * X;
+        m_F.push_back(F);
+        m_P.push_back(P);
+        m_e.push_back(e);
+        if ((int)m_F.size() > m_max) {
+            m_F.erase(m_F.begin());
+            m_P.erase(m_P.begin());
+            m_e.erase(m_e.begin());
+        }
+        m_last_err = e.cwiseAbs().maxCoeff();
+        return m_last_err;
+    }
+
+    /// Fock matrix to diagonalise next.
+    Matrix extrapolate()
+    {
+        if (m_F.size() < 2) return m_F.back();
+        if (!m_adiis || m_last_err < 1e-4) return diis();
+        if (m_last_err > 1e-1) return adiis();
+        const double w = (std::log10(m_last_err) + 4.0) / 3.0;  // 0 at 1e-4 .. 1 at 1e-1
+        return w * adiis() + (1.0 - w) * diis();
+    }
+
+private:
+    int m_max;
+    bool m_adiis;
+    double m_last_err = 0.0;
+    std::vector<Matrix> m_F, m_P, m_e;
+
+    Matrix combine(const Eigen::VectorXd& c) const
+    {
+        Matrix F = Matrix::Zero(m_F[0].rows(), m_F[0].cols());
+        for (int i = 0; i < c.size(); ++i) F += c(i) * m_F[m_F.size() - c.size() + i];
+        return F;
+    }
+
+    Matrix diis()
+    {
+        // Solve the bordered Pulay system; if it is singular (nearly dependent error
+        // vectors), drop the oldest entries until it is not.
+        for (int first = 0; first + 2 <= (int)m_F.size(); ++first) {
+            const int n = (int)m_F.size() - first;
+            Eigen::MatrixXd B = Eigen::MatrixXd::Zero(n + 1, n + 1);
+            for (int i = 0; i < n; ++i)
+                for (int j = 0; j <= i; ++j)
+                    B(i, j) = B(j, i) = m_e[first + i].cwiseProduct(m_e[first + j]).sum();
+            const double scale = B.topLeftCorner(n, n).diagonal().maxCoeff();
+            if (scale <= 0.0) return m_F.back();
+            B.topLeftCorner(n, n) /= scale;  // conditioning only; the solution is scale-free
+            for (int i = 0; i < n; ++i) B(i, n) = B(n, i) = -1.0;
+            Eigen::VectorXd rhs = Eigen::VectorXd::Zero(n + 1);
+            rhs(n) = -1.0;
+            Eigen::FullPivLU<Eigen::MatrixXd> lu(B);
+            if (lu.rank() < n + 1 || lu.rcond() < 1e-14) continue;
+            const Eigen::VectorXd c = lu.solve(rhs).head(n);
+            if (!c.allFinite()) continue;
+            return combine(c);
+        }
+        return m_F.back();
+    }
+
+    Matrix adiis() const
+    {
+        const int n = (int)m_F.size();
+        const Matrix& Pn = m_P.back();
+        const Matrix& Fn = m_F.back();
+        Eigen::VectorXd a(n);
+        Eigen::MatrixXd M(n, n);
+        for (int i = 0; i < n; ++i) {
+            const Matrix dP = m_P[i] - Pn;
+            a(i) = dP.cwiseProduct(Fn).sum();
+            for (int j = 0; j < n; ++j)
+                M(i, j) = dP.cwiseProduct(m_F[j] - Fn).sum();
+        }
+        M = 0.5 * (M + M.transpose()).eval();
+        // c_i = t_i^2 / sum t^2 keeps c on the simplex; gradient descent with
+        // backtracking on t (n <= subspace size, so this is cheap).
+        auto fval = [&](const Eigen::VectorXd& c) { return a.dot(c) + 0.5 * c.dot(M * c); };
+        auto toC = [](const Eigen::VectorXd& t) { return Eigen::VectorXd(t.cwiseAbs2() / t.squaredNorm()); };
+        Eigen::VectorXd t = Eigen::VectorXd::Constant(n, 1.0);
+        t(n - 1) = 2.0;  // lean towards the newest density
+        Eigen::VectorXd c = toC(t);
+        double f = fval(c), step = 1.0;
+        for (int it = 0; it < 500; ++it) {
+            const Eigen::VectorXd g = a + M * c;
+            const double cg = c.dot(g);
+            Eigen::VectorXd gt(n);
+            const double S = t.squaredNorm();
+            for (int k = 0; k < n; ++k) gt(k) = 2.0 * t(k) / S * (g(k) - cg);
+            if (gt.norm() < 1e-12) break;
+            bool accepted = false;
+            for (int ls = 0; ls < 40; ++ls) {
+                const Eigen::VectorXd tn = t - step * gt;
+                const Eigen::VectorXd cn = toC(tn);
+                const double fn = fval(cn);
+                if (fn < f - 1e-4 * step * gt.squaredNorm()) {
+                    t = tn; c = cn; f = fn; step *= 2.0; accepted = true;
+                    break;
+                }
+                step *= 0.5;
+            }
+            if (!accepted) break;
+        }
+        return combine(c);
+    }
+};
+
 }  // namespace
 
 // =================================================================================
@@ -127,7 +265,9 @@ bool QMEngine::runSCF()
         return false;
     }
 
-    const bool use_diis = (m_scf_mode != "plain");
+    const bool use_diis = (m_scf_mode != "plain");   // diis | adiis
+    if (m_scf_mode != "plain" && m_scf_mode != "diis" && m_scf_mode != "adiis" && CurcumaLogger::get_verbosity() >= 1)
+        CurcumaLogger::warn(fmt::format("QM: unknown -qm.scf_mode '{}' (use diis|adiis|plain); using diis", m_scf_mode));
     const double damping = use_diis ? 0.0 : 0.5;  // plain mode needs density damping
 
     // Initial guess (m_scf_guess): SAD (default) or the bare core Hamiltonian
@@ -138,7 +278,7 @@ bool QMEngine::runSCF()
                              fmt::format("{} (Tr(PS) = {:.6f})", m_last_warm_start ? "warm start" : m_scf_guess,
                                          m_density.cwiseProduct(m_S).sum()));
 
-    DIISAccelerator diis(m_diis_subspace);
+    QMScfAccelerator diis(m_diis_subspace, m_scf_mode == "adiis");
     const auto t_scf0 = std::chrono::steady_clock::now();
     double t_fock_ms = 0.0;
 
@@ -169,9 +309,8 @@ bool QMEngine::runSCF()
         // history can support it; use the extrapolated Fock for the diagonalization.
         Matrix fock_use = fock;
         if (use_diis && iter >= m_diis_start) {
-            diis.push(fock, m_density, m_S);
-            if (diis.size() >= 2)
-                fock_use = diis.extrapolate();
+            diis.push(fock, m_density, m_S, m_X);
+            fock_use = diis.extrapolate();
         }
 
         // Solve F C = S C eps (Lowdin-reduced standard problem).

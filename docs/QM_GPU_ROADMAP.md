@@ -46,7 +46,9 @@ contraction (ket Hermite sums folded into R once per ket component), R^0 built o
 t+u+v <= L instead of the (L+1)^4 box, no per-quartet heap allocation. Benzene HF-3c: 2e gradient
 8.5 s (1 thread) / 2.2 s (4 threads), ~7x the ERI build because it runs every ORDERED bra pair
 against the canonical ket pairs. Next steps there: canonical quartets with translational
-invariance (derivatives on A, B, C; D from their sum) and density-weighted screening.
+invariance (derivatives on A, B, C; D from their sum) -- **done Sep 2026**: 8.5 -> 4.5 s
+(1 thread), 2.2 -> 1.24 s (4 threads), now ~3.6x the ERI build -- and density-weighted
+screening (open).
 
 **What is still slow / the next wall**: the ERI tensor is **stored** (n^4 doubles:
 1.35 GB at 114 functions, 12.8 GB at 200). Beyond ~150 functions the engine runs out of

@@ -131,6 +131,10 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
         m_scf_threshold = config["scf_threshold"].get<double>();
     if (config.contains("scf_warm_start") && config["scf_warm_start"].is_boolean())
         m_scf_warm_start = config["scf_warm_start"].get<bool>();
+    if (config.contains("diis_start") && config["diis_start"].is_number())
+        m_diis_start = std::max(0, static_cast<int>(std::lround(config["diis_start"].get<double>())));
+    if (config.contains("diis_subspace") && config["diis_subspace"].is_number())
+        m_diis_subspace = std::max(2, static_cast<int>(std::lround(config["diis_subspace"].get<double>())));
     if (config.contains("scf_mode") && config["scf_mode"].is_string())
         m_scf_mode = config["scf_mode"].get<std::string>();
     if (config.contains("scf_guess") && config["scf_guess"].is_string())
