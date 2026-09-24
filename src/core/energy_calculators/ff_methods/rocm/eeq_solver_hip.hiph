@@ -425,7 +425,16 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUSchurGeneral(int, int, const double*,
 bool EEQSolverHip::solveWithDeviceRHSAndGPUPCG(int, int, const double*, const double*, const double*,
                                                const double*, const double*, const double*,
                                                const std::vector<int>&, const std::vector<double>&,
-                                               int, double, double, bool) {
+                                               int, double, double, bool, int, int) {
+    return false;
+}
+
+// WP7-E (Sep 2026): projected-PCG single-solve port, CUDA-only for now — same not-ported
+// convention as the other device-resident variants above.
+bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(int, int, const double*, const double*, const double*,
+                                                        const double*, const double*, const double*,
+                                                        const std::vector<int>&, const std::vector<double>&,
+                                                        int, double, double, bool) {
     return false;
 }
 

@@ -814,6 +814,50 @@ __global__ void k_eeq_block_jacobi_apply(
     const double* __restrict__ d_r,           ///< [N] residual (global order)
     double*       __restrict__ d_z);          ///< [N] preconditioned residual (global order)
 
+// ── WP7-E: GPU projected PCG (Sep 2026) ──────────────────────────────────────
+// Single-solve port of the CPU EEQSolver::solveWithProjectedPCG: the PCG runs
+// directly in the constraint tangent space (Σ_{i∈frag} v_i = 0), avoiding the
+// (nfrag+1)-separate-solves + CPU-Schur-reduction pattern of WP7-C above.
+
+/// Sum a vector by fragment: frag_sum[f] = Σ_{i∈frag_f} v[i]. Caller must zero frag_sum first.
+__global__ void k_frag_sum(
+    int N,
+    const double* __restrict__ v,
+    const int*    __restrict__ atom_frag,
+    double*       __restrict__ frag_sum);
+
+/// Scatter a per-fragment delta back onto every atom of that fragment: v[i] += frag_delta[atom_frag[i]].
+__global__ void k_frag_scatter_add(
+    int N,
+    double*       __restrict__ v,
+    const int*    __restrict__ atom_frag,
+    const double* __restrict__ frag_delta);
+
+/// Projection delta (subtract the per-fragment mean): frag_delta[f] = -frag_sum[f] * inv_frag_atoms[f].
+__global__ void k_frag_project_delta(
+    int nfrag,
+    const double* __restrict__ frag_sum,
+    const double* __restrict__ inv_frag_atoms,
+    double*       __restrict__ frag_delta);
+
+/// Feasibility-shift delta: frag_delta[f] = (rhs_constraints[f] - frag_sum[f]) * inv_frag_atoms[f].
+__global__ void k_frag_feasibility_delta(
+    int nfrag,
+    const double* __restrict__ frag_sum,
+    const double* __restrict__ rhs_constraints,
+    const double* __restrict__ inv_frag_atoms,
+    double*       __restrict__ frag_delta);
+
+/// M-weighted preconditioner correction (in-place): z[i] -= Minv[i]*frag_sum[frag[i]]/frag_sM[frag[i]],
+/// so that C·z = 0 (mirrors CPU EEQSolver::solveWithProjectedPCG's precondition() lambda).
+__global__ void k_frag_precond_correct(
+    int N,
+    const double* __restrict__ Minv,
+    const int*    __restrict__ atom_frag,
+    const double* __restrict__ frag_sum,
+    const double* __restrict__ frag_sM,
+    double*       __restrict__ z);
+
 // ============================================================================
 // WP2: GPU-side EEQ RHS construction
 // ============================================================================

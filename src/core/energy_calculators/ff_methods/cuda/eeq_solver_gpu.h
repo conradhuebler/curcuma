@@ -272,8 +272,52 @@ public:
      * @param max_iter        Per-PCG-call iteration cap (e.g. 200).
      * @param tol             Convergence tolerance on |r| (e.g. 1e-10).
      * @param force_refactor  If true: rebuild A and re-extract Jacobi precond.
+     * @param block_jacobi_max_frag_atoms  Skip the block-Jacobi build for any fragment larger
+     *        than this many atoms (falls back to diagonal Jacobi for that step). See
+     *        eeq_solver.h PARAM gpu_block_jacobi_max_frag_atoms.
+     * @param block_jacobi_max_nfrag       Skip the block-Jacobi build entirely above this many
+     *        fragments — its serial per-fragment cudaStreamSynchronize pair is the dominant
+     *        cost at nfrag~1500+ regardless of fragment size. See PARAM
+     *        gpu_block_jacobi_max_nfrag.
      */
     bool solveWithDeviceRHSAndGPUPCG(
+        int natoms, int nfrag,
+        const double* cx, const double* cy, const double* cz,
+        const double* d_alpha_corrected,
+        const double* d_gam_corrected,
+        const double* d_rhs_atoms,
+        const std::vector<int>& fraglist,
+        const std::vector<double>& rhs_constraints,
+        int    max_iter,
+        double tol,
+        double cutoff_sq    = 0.0,
+        bool   force_refactor = true,
+        int    block_jacobi_max_frag_atoms = 300,
+        int    block_jacobi_max_nfrag = 400
+    );
+
+    /**
+     * @brief WP7-E: GPU projected PCG solver for nfrag>=1 (Sep 2026).
+     *
+     * Single-solve port of the CPU EEQSolver::solveWithProjectedPCG: instead of
+     * (nfrag+1) independent PCG solves + a Schur reduction (WP7-C above), one PCG
+     * runs directly in the constraint tangent space (Σ_{i∈frag} v_i = 0) and
+     * returns the final charges in place at d_rhs[0..N-1] (getDeviceChargesPtr()).
+     * Uses only the diagonal Jacobi preconditioner (no block-Jacobi cost) — this
+     * is the path to use for many-fragment, large systems where WP7-C's
+     * per-fragment solve loop and/or block-Jacobi setup are intractable (see
+     * eeq_solver.h PARAM gpu_block_jacobi_max_nfrag doc / "curcuma EEQ-Löser-
+     * Benchmark" project).
+     *
+     * Returns false on PCG stall (max_iter reached without |r|<=tol) — caller
+     * must fall back to solveWithDeviceRHSAndGPUSchurGeneral (WP7-A).
+     *
+     * @param max_iter        Per-solve iteration cap (e.g. 500).
+     * @param tol             Convergence tolerance on |r| (absolute, e.g. 1e-10).
+     * @param force_refactor  If true: rebuild A and re-extract the Jacobi precond
+     *                        (+ its per-fragment sum, sM).
+     */
+    bool solveWithDeviceRHSAndGPUProjectedPCG(
         int natoms, int nfrag,
         const double* cx, const double* cy, const double* cz,
         const double* d_alpha_corrected,

@@ -327,6 +327,265 @@
   genug, dass der Unterschied meist unter der Schwelle bleibt, aber nicht garantiert unter allen
   MOR41/GMTKN55-Strukturen).
 
+### GFN-FF/EEQ: CPU/GPU-Trajektorien-Divergenz — Ursache direkt gezeigt, kein Fix (2026-09)
+- **Status**: ⏳ OFFEN, Mechanismus bestaetigt, kein Loesungsweg umgesetzt
+- **Befund**: ein 10-ps-GFN-FF-MD-Vergleich CPU vs. GPU auf `polymer_2x` (7320 Atome, nfrag=1500)
+  divergiert reproduzierbar (nahezu deckungsgleich bis ~400 fs, ab ~1200 fs vollstaendig
+  entkoppelt). Ursache **direkt gezeigt, nicht nur vermutet**: bei `nfrag=1500` waehlt der
+  CPU-Pfad automatisch den iterativen PCG-Loeser fuer die EEQ-Gleichung
+  (`eeq_ppcg_min_atoms=500`, `eeq_ppcg_min_nfrag=1`), der GPU-Pfad loest stets dicht/exakt
+  (Schur-Cholesky) — zwei verschiedene, je fuer sich konvergierte numerische Verfahren fuer
+  dieselbe Gleichung. Kontrollexperiment auf einem 8-Wasser-Cluster (24 Atome, nfrag=8),
+  **identisches CPU-Binary**, nur `-eeq_solver.solve_method cholesky` gegen `ppcg`
+  unterschiedlich: |dEpot| > 1e-5 Eh bei 0.18 ps, > 1e-3 Eh bei 0.94 ps, > 1e-2 Eh bei 1.52 ps —
+  dasselbe Muster wie beim 300-fach groesseren CPU/GPU-Fall. Details:
+  `Labor/curcuma MD-Stabilität großer Systeme.md` (Vault, Eintrag 23.9.2026).
+- **Blockierter Loesungsversuch — SIGSEGV auf CUDA**: `-eeq_rocm_cpu_fragment_threshold N`
+  (trotz Namens plattformuebergreifend, auf ROCm bereits validiert) sollte den GPU-Pfad auf den
+  CPU-Loeser zwingen und damit gleiche Physik erzwingen. Auf CUDA stuerzt das reproduzierbar
+  ab (unabhaengig von `-threads`): `Program received signal SIGSEGV` in
+  `Eigen::internal::call_dense_assignment_loop` <- `EEQSolver::calculateFinalCharges` <-
+  `GFNFF::prepareCNAndEEQ` <- `GFNFFGpuMethodImpl<GFNFFCudaBackend>::calculateEnergy` — reiner
+  Eigen-Host-Code, kein CUDA-Kernel.
+- **Root Cause**: `gfnff.h:1128` und `gfnff_method.cpp:1335` dokumentieren explizit „Safe for
+  GPU path where CUDA corrupts heap metadata" — Eigen-Heap-Allokationen sind in einem
+  CUDA-aktiven Prozess nicht sicher, deshalb existieren an mehreren Stellen memcpy-in-
+  vorallozierte-Puffer-Umwege. `EEQSolver::calculateFinalCharges` ist eine grosse, generische
+  Funktion (auch vom reinen CPU-Build genutzt), die frei alloziert — sie wurde nie dafuer
+  gehaertet, weil sie vorher nie aus einem CUDA-Prozess heraus aufgerufen wurde (die
+  `eeq_rocm_cpu_fragment_threshold`-Route war bisher nur auf ROCm/HIP validiert, das dieses
+  Heap-Problem offenbar nicht hat).
+- **Task**: (a) `EEQSolver::calculateFinalCharges` alloc-frei machen fuer den CUDA-Fall (invasiv,
+  geteilter Code, betrifft auch den reinen CPU-Pfad) — dann erneut auf CUDA testen; (b)
+  alternativ ein bezahlbarer dritter Loeser, der auf CPU und GPU identisch reproduzierbar ist,
+  auch bei nfrag~1500; (c) alternativ akzeptieren und Trajektorien ab ~ps-Zeitskala nur noch
+  ensemble-/statistisch statt punktweise vergleichen. Keine Entscheidung getroffen.
+- **Nicht versucht, weil unbezahlbar**: CPU auf den GPU-exakten (dichten) Loeser zwingen
+  (`-eeq_solver.eeq_ppcg_min_nfrag` sehr hoch) — bei nfrag=1500 kostet die exakte Loesung laut
+  eigener Parameterbeschreibung „+nfrag zusaetzliche Faktorisierungen"; >30 Minuten reichten
+  nicht fuer einen einzigen MD-Schritt.
+- **SIGSEGV bestaetigt als Race Condition, kein billiger Fix (2026-09, selbe Sitzung)**:
+  `MALLOC_ARENA_MAX=1` (Standard-Gegenmassnahme fuer CUDA/glibc-Heap-Interaktionen) getestet,
+  nicht nur vermutet — 3 Wiederholungen je Konfiguration: 0/3 erfolgreich MIT der Variable, 1/3
+  erfolgreich OHNE. Kein Unterschied, beide nichtdeterministisch. Bestaetigt exakt die
+  Charakterisierung in `docs/TECHNICAL_DEBT.md` F-Q9/D-26/D-46 („Root cause uninvestigated") —
+  kein neuer Fund, aber eine konkrete Absturzrate fuer diesen Aufruf. Task (a) oben bleibt der
+  einzige echte Loesungsweg fuer diesen Zweig; kein Kurzschluss ueber Umgebungsvariablen.
+- **Toleranz-Straffung getestet und verworfen (2026-09, selbe Sitzung)**: die naheliegende Idee,
+  eine straffere `eeq_ppcg_tol` wuerde die Divergenz verzoegern, ist widerlegt. `eeq_ppcg_tol`
+  1e-6/1e-9/1e-12/1e-14 auf dem 8-Wasser-Kontrollsystem liefern **bit-identische** Trajektorien —
+  PCG konvergiert dort schon bei der lockersten Anforderung in einer Iteration auf
+  Maschinengenauigkeit (|Pr|=2.66e-16, per `-verbosity 3` bestaetigt). PCG ist hier nicht „zu
+  ungenau"; die Abweichung zu Cholesky sitzt in einem winzigen algebraischen/Rundungsunterschied
+  zwischen den Loesungswegen selbst, nicht im PCG-Konvergenzgrad — ein Toleranz-Regler kann diese
+  Klasse Divergenz also nicht beheben, wenn beide Seiten bereits nahe Maschinengenauigkeit loesen.
+- **GPU-eigener PCG-Pfad (WP7-C) getestet und verworfen — nicht an Korrektheit, an Performance
+  (2026-09, selbe Sitzung)**: `-gfnff.solve_method pcg` engagiert sauber den geraeteresidenten
+  PCG-Loeser (`cuda/eeq_solver_gpu.cu`, WP7-C Block-Jacobi, umgeht den SIGSEGV komplett — kein
+  CUDA-Prozess ruft CPU-EEQ-Code auf). Smoke-Test (3 MD-Schritte, `polymer_2x`, nfrag=1502)
+  lief fehlerfrei, aber **~9 Minuten fuer 3 Schritte**; die geplante 2-ps-Zielmessung (2000
+  Schritte) wurde nach 39,5 Minuten ohne einen einzigen fertigen Print-Zyklus abgebrochen
+  (~3 Min/Schritt hochgerechnet, ~100 h fuer 2 ps). Prozess dabei aktiv (113% CPU, GPU-Auslastung
+  96%), nicht haengend. Gegenprobe auf dem 8-Wasser-Cluster (nfrag=8): 100 Schritte in 1.45 s —
+  **dasselbe nfrag-Skalierungsmuster wie der exakte CPU-Loeser** (Known-Issue-Eintrag oben,
+  „+nfrag zusaetzliche Faktorisierungen"). WP7-C ist also fuer nfrag~1500 technisch korrekt,
+  aber praktisch unbezahlbar — kein Kurzschluss fuer dieses System.
+- **WP7-C-Ursache gefunden (2026-09-24, neues Teilprojekt „EEQ-Loeser-Benchmark")**: nicht die
+  Fragmentzahl ist das Problem, sondern die Groesse des **groessten** Fragments.
+  `buildBlockJacobiFactors` (`cuda/eeq_solver_gpu.cu:1441-1516`) baut je Fragment eine explizite
+  dichte Inverse (`cusolverDnDpotrf`+`cusolverDnDpotri`, je 2 `cudaStreamSynchronize` seriell in
+  einer Host-Schleife). Fuer `polymer_2x`s 1410-Atom-Polymerfragment ist das eine dichte
+  1410x1410-Matrixinversion — vergleichbar teuer wie der exakte Loeser selbst. Kontrolliert
+  nachgewiesen: bei **konstanter** Fragmentzahl (500) skaliert die Zeit allein mit der Groesse
+  des groessten Fragments (3 Atome: 5.8s / 500 Atome: 11.4s / 1410 Atome: 52.4s, fuer 2
+  MD-Schritte) — reine Fragmentzahl-Skalierung (uniform klein) ist dagegen mild (250->1000
+  Fragmente: 2.4->20.9s). Die vorhandene Sicherung `GPU_BLOCK_JACOBI_MAX_NF = 2048`
+  (`eeq_solver_gpu.cu:1434`) greift nicht (1410 < 2048). **Naheliegender Fix, nicht umgesetzt**:
+  Schwellenwert deutlich senken oder bei grossen Fragmenten auf den guenstigeren
+  Mittelwert-Projektions-Vorkonditionierer zurueckfallen, den die CPU-Variante
+  `solveWithProjectedPCG` bereits benutzt. Details, Messwerte, Reproduktionskommandos:
+  [[curcuma EEQ-Löser-Benchmark]] (Vault, Projekt + Labor).
+- **Vollstaendige Matrix (2026-09-24, selbe Sitzung, 6 Gruppen, ~50 Systeme) verfeinert den
+  obigen Befund: ZWEI unabhaengige Kostentreiber, nicht einer.** Ein reiner
+  Fragmentgroessen-Schwellenwert (Fix oben) reicht NICHT fuer `polymer_2x`-artige Systeme.
+  - **G1 (reines Wasser, kein Ausreisser)**: GPU-PCG waechst schon bei uniform KLEINEN
+    Fragmenten ueberlinear (~nfrag^1.8) und wird bei nfrag~2440 unbezahlbar (>150s) — rein durch
+    die FragmentANZAHL, kein grosses Fragment beteiligt.
+  - **G3 (feste Polymer-Atomzahl ~2820 + 1500 Wasser, Aufspaltung 1/2/4/8/16 Ketten, nfrag~1500)**:
+    GPU-PCG timeoutet (>120s) bei JEDER Aufspaltung — die hohe Grund-Fragmentzahl allein
+    dominiert schon so stark, dass die Fragmentgroessen-Variation keinen Unterschied mehr macht.
+    CPU-ppcg und GPU-chol werden dagegen mit mehr/kleineren Fragmenten deutlich schneller
+    (>120s bei 1 Riesenfragment -> 7.6-10.0s bei 16 kleinen Ketten) — ein einzelnes sehr grosses
+    Fragment ist auch fuer die "normalen" Loeser schlecht, nicht nur fuer WP7-C.
+  - **G4 (fixe 2x1410-Ketten, Wasser 0->4500)**: scharfer Schwelleneffekt — bei water=0 (nfrag=2)
+    ist GPU-PCG mit 24.75s noch im normalen Bereich; sobald 500 Wassermolekuele dazukommen
+    (nfrag=502), springt es sofort auf >120s.
+  - **G5 (gleiche Atomzahl ~7320, extreme Fragmentzahl-Kontraste, DIREKTER Vergleich wie
+    angefordert)**: 1 Riesenfragment (nfrag=1) -> CPU-ppcg UND GPU-chol timeouten EBENFALLS
+    (>150s, s. separater Befund unten); polymer_2x-artig (nfrag=1502) -> CPU-ppcg 33.4s,
+    GPU-chol 33.2s, GPU-PCG >150s; 2440 reines Wasser -> CPU-ppcg 6.3s (schnellster Fall!),
+    GPU-chol 16.4s, GPU-PCG >150s. Bei GLEICHER Atomzahl variiert CPU-ppcg allein durch
+    Fragmentierung um Faktor >24x.
+  - **G6 (`polymer_2x` verdoppelt, 4x1410+3000 Wasser, 14640 Atome)**: CPU-ppcg 77-85s, GPU-chol
+    98-106s (beide schon spuerbar langsam), GPU-PCG >180s.
+  - **Konsequenz fuer einen Fix**: (a) Fragmentgroessen-Schwellenwert senken UND (b) den
+    seriellen Zwei-Sync-pro-Fragment-Aufbau (`buildBlockJacobiFactors`) umbauen (z. B. batched
+    cuSOLVER statt serieller Host-Schleife, ungeprueft ob cuSOLVER das unterstuetzt) — nur (a)
+    reicht nicht, weil die Fragmentanzahl-Komponente bei `polymer_2x`-typischem nfrag~1500
+    unabhaengig von der Fragmentgroesse schon dominiert.
+  - **Eigenstaendiger Nebenbefund, NICHT Teil der Solver-Frage**: ein einzelnes
+    7320-Atom-Riesenfragment (G5) laesst auch die normalerweise schnellen Pfade (CPU-ppcg,
+    GPU-chol) timeouten. Log-Pruefung: haengt bereits bei "Move structure to the origin...",
+    also VOR jeder EEQ-Solver-Aktivitaet. Eine O(N^3)-Floyd-Warshall-Ursache in
+    `EEQSolver::computeTopologicalDistancesSparse` (`eeq_solver.cpp:3140`) wurde geprueft und
+    beim Codelesen verworfen — die dortige Dijkstra-Variante hat einen fruehen Abbruch bei 12 A
+    topologischem Abstand, sollte fuer eine Kettentopologie schnell sein. **Ursache offen**,
+    eigene Untersuchung noetig, nicht mit WP7-C vermischen.
+  - **Betriebslehre**: ein per Inline-Timeout automatisch in den Hintergrund verschobener
+    Prozess (kein explizites `run_in_background:true`) ueberlebte einen Turn-/Kontextwechsel
+    NICHT zuverlaessig (Sweep brach unbemerkt mitten in einer Gruppe ab). Mit explizitem
+    `run_in_background:true` lief er durch. Fuer kuenftige lange Hintergrundlaeufe: immer
+    explizit `run_in_background:true` verwenden.
+  - **Verweis**: [[curcuma EEQ-Löser-Benchmark]] (Vault, Projekt + Labor, vollstaendige Tabellen).
+- **Fix (a) umgesetzt, gebaut, real getestet — hilft, loest aber NICHT `polymer_2x` (2026-09-24,
+  selbe Sitzung, dirty, nicht committet)**: zwei neue PARAMs (`eeq_solver.h`)
+  `gpu_block_jacobi_max_frag_atoms` (Default 300) und `gpu_block_jacobi_max_nfrag` (Default 400),
+  durchgereicht `buildBlockJacobiFactors` -> `solveWithDeviceRHSAndGPUPCG` ->
+  `GFNFFGpuMethodImpl` (liest per `gfnff_cfg.value(...)`, gleiches Muster wie
+  `max_pcg_iterations`). ROCm-Stub-Signatur mitgezogen (`EEQSolverHip` ist Alias auf
+  `EEQSolverGPU`), unkompiliert (kein SDK hier).
+  - **Validiert (klein, funktioniert wie geplant)**: 8-Wasser-Cluster (nfrag=8), 40 Schritte in
+    1.16s, Block-Jacobi bleibt korrekt aktiv (`EEQ GPU PCG: block-Jacobi preconditioner active`
+    in jedem Schritt) — kein Kollateralschaden.
+  - **KORREKTUR der eigenen Einschaetzung, durch echten Test auf `polymer_2x` gefunden**: bei
+    nfrag=1502 (reales UND synthetisches `polymer_2x`-Aequivalent getestet) bleibt WP7-C
+    weiterhin >120s ohne Abschluss — **keine messbare Verbesserung**. Root Cause im Code
+    gefunden: `solveWithDeviceRHSAndGPUPCG` (`eeq_solver_gpu.cu:1772-1785`) laeuft UNABHAENGIG
+    vom Block-Jacobi-Status eine Schleife `for (f=0; f<nfrag; ++f) { runSinglePCG(...); }` —
+    **(nfrag+1) vollstaendig separate PCG-Solves**, bei nfrag=1502 also 1503 einzelne Laeufe mit
+    je bis zu 200 Iterationen und je einem O(N^2)-Matvec. Das ist die GPU-Entsprechung der
+    "+nfrag zusaetzliche Solves", die der CPU-seitige projizierte Ansatz
+    (`solveWithProjectedPCG`, EIN Solve statt nfrag+1) gezielt vermeidet — laut eigener
+    PARAM-Beschreibung der CPU-Variante, nur nie auf WP7-C uebertragen erkannt. Der gefixte
+    Block-Jacobi-Aufbau war ein ZUSAETZLICHER, nicht der einzige Kostentreiber.
+  - **Der Fix bleibt sinnvoll**, nur enger als gedacht: echte, nie-schlechtere Verbesserung fuer
+    grosse Einzelfragmente bei moderater Fragmentzahl (bis ~400 Fragmente), NICHT fuer
+    `polymer_2x`-Groessenordnungen. Ein Fix dafuer braucht einen GPU-Port des projizierten
+    Ansatzes (ein Solve statt nfrag+1) — eine neue Implementierung, kein Parameter-Tuning mehr,
+    deutlich groesserer Umfang als heute umgesetzt.
+  - **Methodenlehre**: ein Fix ist erst geprueft, wenn er auf dem Fall getestet wurde, der ihn
+    ausgeloest hat (hier: `polymer_2x`) — nicht nur auf dem Fall, den die eigene Diagnose als
+    Ursache identifiziert hatte (hier: Block-Jacobi-Aufbau bei moderatem nfrag). "Fix compiliert
+    und verhaelt sich wie geplant" haette fast zu einer stillschweigend falschen
+    Erfolgsmeldung gefuehrt.
+  - **Verweis**: [[curcuma EEQ-Löser-Benchmark]] (Vault, Projekt + Labor, volles Testprotokoll).
+- **Methodenfalle bei diesem Benchmark**: `-sp` (Einzelpunkt) verfehlt den Block-Jacobi-Aufbau
+  komplett — der laeuft laut Code nur bei einem "PCG refactor", nicht beim ersten Solve. Ein
+  `-sp`-Sweep bis nfrag=1000 zeigte faelschlich "kein Problem" (alle ~15-20ms). Erst ein
+  2-Schritte-MD-Lauf deckte den Effekt auf. Fuer jeden kuenftigen Solver-Benchmark: mindestens
+  2 MD-Schritte, nie nur `-sp`.
+- **Zwischenstand nach drei geprueften Hebeln**: fuer `polymer_2x` (nfrag=1502) sind jetzt alle
+  drei naheliegenden „gleicher Algorithmus auf beiden Seiten"-Wege empirisch gescheitert — zwei
+  an Korrektheit/Stabilitaet (SIGSEGV, Toleranz wirkungslos), einer an Performance (GPU-PCG).
+  Verbleibend realistisch: (a) SIGSEGV am Ursprung fixen — einzige Option ohne zusaetzliche
+  Performance-Baustelle, da nur die ohnehin-PCG-nutzende CPU betroffen waere; (b) WP7-C fuer
+  grosse Fragmentzahlen performant machen (eigenes, ungeschaetztes Arbeitspaket, z. B. warum
+  1502 Fragmente ~2000x langsamer sind als 8 — nicht root-caused); (c) akzeptieren und nur noch
+  ensemble-/statistisch statt punktweise vergleichen. Keine Entscheidung getroffen.
+- **Verweis**: [[Governance-Regeln für KI-Coding-Agenten an wissenschaftlichem Code]] (Vault) —
+  generalisierbare Lehre „zwei numerisch verschiedene, je fuer sich korrekte Loeser lassen
+  dieselbe Physik chaotisch auseinanderlaufen" (inkl. der Toleranz-Korrektur im selben
+  Abschnitt).
+- **GPU-Port des projizierten Ansatzes (WP7-E) umgesetzt, gebaut, real auf `polymer_2x` getestet
+  — loest den nfrag+1-Solves-Engpass (2026-09-24, AI-implemented, machine-tested)**: Option (b)
+  aus obigem Zwischenstand umgesetzt, kein Parameter-Tuning — ein neuer GPU-Loeser
+  `EEQSolverGPU::solveWithDeviceRHSAndGPUProjectedPCG` (`cuda/eeq_solver_gpu.cu`/`.h`), der
+  direkt `EEQSolver::solveWithProjectedPCG` (CPU, `eeq_solver.cpp`) portiert: EIN PCG-Solve im
+  Tangentialraum der Constraints (Projektion `v -= Mittelwert(v)` pro Fragment via 5 neuen
+  Kernen `k_frag_sum/scatter_add/project_delta/feasibility_delta/precond_correct`) statt WP7-Cs
+  `nfrag+1` unabhaengiger Solves + Block-Jacobi-Aufbau. Nur diagonaler Jacobi-Praekonditionierer
+  (wie die CPU-Referenz) — der teure Block-Jacobi-Aufbau (WP7-D) entfaellt komplett, nicht nur
+  fuer grosse Fragmente. Eingehaengt ueber die bestehenden CPU-PARAMs `eeq_ppcg_min_nfrag`/
+  `eeq_ppcg_min_atoms` (Auto-Modus bevorzugt WP7-E ab denselben Schwellen wie die CPU — WP7-C
+  bleibt nur bei explizitem `-gfnff.solve_method pcg` erreichbar); ROCm-Stub (`return false`,
+  wie die anderen unportierten WP7-Pfade).
+  - **Korrektheit**: `-sp` auf `polymer_2x_gfnff_opt.xyz` (7320 Atome), `solve_method cholesky`
+    (WP7-A, exakt) vs. `solve_method ppcg` (WP7-E): **-917.33663023 Eh beide, auf 8 Nachkomma-
+    stellen identisch**. Wasser8-Cluster (nfrag=8, N=24, unter der Auto-Schwelle) bleibt
+    unveraendert auf WP7-A, keine Regression.
+  - **Performance, auf dem tatsaechlich ausloesenden Fall getestet** (nicht nur dem, auf den die
+    eigene Diagnose zeigte — Lehre aus dem vorherigen Fix-Versuch beherzigt): 8-Schritte-GFN-FF-
+    MD auf `polymer_2x_gfnff_opt.xyz` (N=7320, nfrag=1502, `-gpu cuda -gfnff.solve_method auto`,
+    dt=0.5 fs) **fertig nach 23 s**, jeder Schritt zeigt `path=WP7-E GPU-Schur (projected-pcg)`.
+    WP7-C blieb auf demselben System zuvor bei 120 s UND 300 s Timeout ohne jeden Fortschritt
+    haengen (s. Eintrag oben). Energien ueber die 8 Schritte physikalisch plausibel
+    (-917.3 -> -914.1 Eh, glatte Gleichgewichtseinstellung), Ladungen unauffaellig
+    (|q|max ~0.7-0.72, Mittelwert 0).
+  - **Damit vorlaeufig entschieden**: Ensemblegleichheit (Option c) war nicht noetig — echte
+    Loeser-Reproduzierbarkeit (WP7-A cholesky == WP7-E ppcg auf 8 Nachkommastellen) war
+    erreichbar, wie in der urspruenglichen Anweisung gefordert ("Wir akzeptieren
+    Ensemblegleichheit erst, wenn wir keine andere Chance haben").
+  - **Noch offen / nicht getestet**: laengere MD-Laeufe (Energieerhaltung ueber >8 Schritte),
+    G6-Doppelsystem (14640 Atome) mit WP7-E, ROCm-Portierung, Vergleich CPU-ppcg-Timing vs.
+    GPU-WP7-E-Timing auf derselben Groessenordnung (nur WP7-C-vs-WP7-E GPU-intern gemessen).
+  - **Verweis**: [[curcuma EEQ-Löser-Benchmark]] (Vault, Projekt + Labor, wird nachgezogen).
+
+### SIGSEGV am Ursprung untersucht (Auftrag „fix den SIGSEGV am Ursprung") — nicht gefunden, Werkzeuge sind blind dafuer (2026-09-24)
+- **Status**: ⏳ OFFEN. Root Cause NICHT gefunden trotz gruendlicher Untersuchung mit ASan,
+  compute-sanitizer und gdb. Kein Fix umgesetzt.
+- **Eigener ASan-Build von Grund auf gebaut** (`build_asan/`, existierte vorher nicht), passend
+  zu `release/`'s CUDA/GFN-FF/BLAS-Konfiguration. **Dabei einen echten, aber unabhaengigen
+  Werkzeugkettenfehler gefunden und aussortiert**: Eigens AVX-512/AVX2-`pstore`-Intrinsics
+  crashen unter dieser GCC-16.1.1+ASan-Kombination deterministisch bei JEDER vektorisierten
+  `Eigen::Vector`-Zuweisung — reproduzierbar auf einem 24-Atom-System, reinem `-sp -gpu cuda`,
+  ganz ohne MD oder Schwellenwert-Flag. Bestaetigt abwesend im normalen `release/`-Binary,
+  bestaetigt weg bei `-O0` und mit `-DEIGEN_DONT_VECTORIZE`. Kein curcuma-Bug, nicht
+  weiterverfolgt — aber **jeder ASan-Befund aus diesem Baum braucht ab sofort eine Gegenprobe
+  gegen das normale Binary**, bevor er geglaubt wird.
+- **Mit deaktivierter Vektorisierung (ASan nutzbar) reproduziert sich der ECHTE Bug weder unter
+  ASan noch unter `compute-sanitizer --tool memcheck`**: 5/5 bzw. 4/5-abstuerzend-aber-0-Fehler
+  im selben Testlauf, der das normale Binary 4/5-mal crashen laesst. Das ist ein **aussagekraeftiges
+  Negativergebnis**: beide Werkzeuge sind genau fuer diese Fehlerklassen gebaut (ASan fuer
+  Host-Heap-Missbrauch, compute-sanitizer fuer CUDA-Host/Device-Missbrauch) und finden nichts,
+  obwohl der Absturz im selben Lauf mit aehnlicher Rate auftritt.
+- **Ausgeschlossen, jeweils mit Gegenprobe**: CPU-seitige Threading-Race in der O(N^2)
+  EEQ-Matrix-Fuellung (std::thread-parallel ab 64 Atomen) — crasht identisch bei `-threads 1`;
+  GPU-Kernel-seitiger Fehler — `info threads` am Absturzpunkt zeigt genau EINEN Thread; CLI-
+  Parsing des langen `-eeq_rocm_cpu_fragment_threshold`-Flag-Namens — crasht identisch, wenn
+  derselbe Wert per `-import_config`-JSON statt CLI gesetzt wird; Groessen-Mismatch im
+  wiederverwendeten `m_phase2_A`-Puffer — per Breakpoint bestaetigt, dass `ensurePhase2Buffers`
+  bei jedem Aufruf die korrekten, gecachten `natoms`/`nfrag` sieht. **Vor allem: ein reiner
+  CPU-Lauf derselben MD (`-threads 8`, kein `-gpu`) crasht nie (0/3)** — der Fehler braucht
+  zwingend einen aktiven CUDA-Kontext.
+  Kernel-Log (`dmesg`/Xid): kein NVIDIA-Treiberfehler zu irgendeinem Absturz protokolliert
+  (uneindeutig — Xid deckt GPU-Kernel-/Reset-Fehler ab, nicht notwendigerweise Userspace-
+  CUDA-Bibliotheks-Heap-Interaktionen).
+- **Echter Fund, keine reine Ausschlussliste**: gdb am `this`-Zeiger des allerersten
+  `EEQSolver::ensurePhase2Buffers`-Aufrufs nach dem Absturz-ausloesenden CUDA-Sync
+  (`FFWorkspaceGPU::finalizeCNForCPU`s `cudaStreamSynchronize`) zeigt echte Korruption — kein
+  Debugger-Artefakt, denn ein nachfolgendes `print m_phase2_buf_natoms` ueber denselben Zeiger
+  schlaegt mit „Cannot access memory" fehl. Der korrupte Zeigerwert dekodiert zu plausiblen
+  ASCII-Fragmenten; das war NICHT reproduzierbar als festes Muster (aendert sich von Lauf zu
+  Lauf) und die naheliegende Spur (ein langer CLI-Flag-Name) hielt der Gegenprobe oben nicht
+  stand — als zufaelligen Byteinhalt IRGENDEINES nahen Heap-/Rodata-Strings behandeln, nicht
+  als geloeste Spur.
+- **Wo das F-Q9/D-26/D-46 zuruecklaesst** (`docs/TECHNICAL_DEBT.md`): „Root cause
+  uninvestigated" stimmt nicht mehr — es wurde mit den Standardwerkzeugen untersucht, bis
+  bestaetigt war, dass diese Werkzeuge es nicht sehen, und der Ausloeser ist eingegrenzt auf
+  „CPU beruehrt einen grossen heap-residenten Puffer kurz nach einem `cudaStreamSynchronize`,
+  im selben Prozess wie ein aktiver CUDA-Kontext" (deckt sich direkt mit der bestehenden
+  `gfnff.h:1128`-Charakterisierung „CUDA corrupts heap metadata"). Genauer geht es ohne
+  NVIDIA-interne Treiber-Werkzeuge nicht, die hier nicht verfuegbar sind. **Kein Fix
+  umgesetzt** — das bereits vorhandene Umgehungsmuster (vorallozierte Puffer, memcpy statt
+  Eigen-Zuweisung, keine frische Heap-Aktivitaet nahe einem CUDA-Sync) ist die einzige bekannte
+  Gegenmassnahme; es auf `EEQSolver`s Phase-2-Pfad auszuweiten ist der naechste konkrete,
+  abgegrenzte Schritt, kein Ursprungsfix.
+- **Verweis**: `docs/TECHNICAL_DEBT.md` F-Q9 (dortiger datierter Eintrag mit vollen Details),
+  `Labor/curcuma MD-Stabilität großer Systeme.md` (Vault) fuer das vollstaendige Sitzungsprotokoll
+  mit jedem verworfenen Hebel und dem exakten Kommando dazu.
+- **Aufraeumen**: `build_asan/` (4,1 GB, nicht versioniert) steht noch, fuer den Fall, dass die
+  Untersuchung fortgesetzt wird. Kann geloescht werden, wenn nicht.
+
 ### `gpu_strict` fehlt — stiller CPU-Rueckfall (2026-09)
 - **Status**: ⏳ PLANNED
 - **Problem**: `xtb_gpu_context.cu:3875` warnt nur, wenn eine Rechnung nicht auf die Karte

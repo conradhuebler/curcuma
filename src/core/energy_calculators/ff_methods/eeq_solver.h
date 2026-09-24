@@ -1061,6 +1061,33 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "Relative tolerance factor for large systems: tol = max(pcg_tolerance, factor*||rhs||)", "Algorithm", {})
     PARAM(pcg_large_threshold, Int, 500,
           "Atom count threshold above which PCG auto-selection and adaptive scaling activate", "Algorithm", {})
+    PARAM(gpu_block_jacobi_max_frag_atoms, Int, 300,
+          "WP7-C GPU PCG: skip the per-fragment dense Cholesky+inverse block-Jacobi "
+          "preconditioner (falls back to the always-available diagonal Jacobi) for any "
+          "fragment larger than this many atoms. buildBlockJacobiFactors builds an explicit "
+          "dense N_f×N_f inverse per fragment (cusolverDnDpotrf+Dpotri) — for a large single "
+          "fragment (e.g. a polymer chain mixed with many small solvent molecules) this is "
+          "comparable in cost to the exact solver PCG exists to avoid. Benchmarked "
+          "(curcuma EEQ-Löser-Benchmark, Sep 2026, fixed nfrag=500): a 3-atom max fragment "
+          "costs 5.7 s/2 steps, 250 atoms 7.6 s, 500 atoms 11.4 s, 1410 atoms 53.0 s — cost "
+          "grows worse than linearly with the largest fragment. 300 keeps the speedup for "
+          "small-molecule mixtures while excluding polymer/protein-scale outliers. Lower for "
+          "tighter safety, raise (up to gpu_block_jacobi_max_nfrag permitting) if your "
+          "fragments are uniformly larger and you have measured it pays off.", "Algorithm", {})
+    PARAM(gpu_block_jacobi_max_nfrag, Int, 400,
+          "WP7-C GPU PCG: skip the ENTIRE block-Jacobi preconditioner build (not just "
+          "oversized fragments, see gpu_block_jacobi_max_frag_atoms) once the system has more "
+          "than this many fragments, falling back to the diagonal Jacobi. "
+          "buildBlockJacobiFactors runs a serial host loop over every fragment with two "
+          "cudaStreamSynchronize calls each (after potrf and after potri) — at nfrag~1500 "
+          "(a typical solvated-polymer system) that is >3000 GPU↔host round-trips before a "
+          "single PCG iteration runs, independent of how small the fragments are. Benchmarked "
+          "(curcuma EEQ-Löser-Benchmark, Sep 2026): uniform tiny (3-atom) fragments alone cost "
+          "5.8 s/2 steps at nfrag=500, 21.1 s at nfrag=1000, and exceed 150 s by nfrag~2440; a "
+          "polymer_2x-scale system (nfrag≈1500) exceeds 120 s regardless of how the large "
+          "fragment is split. This is the dominant cost for that regime — "
+          "gpu_block_jacobi_max_frag_atoms alone does not fix it. Diagonal Jacobi is always "
+          "correct, just converges in more PCG iterations.", "Algorithm", {})
     PARAM(eeq_pcg_nfrag_threshold, Int, 4,
           "Auto solver: prefer SchurCholesky when nfrag >= this threshold. "
           "Cholesky factorizes A_nn once and amortizes the cost over nfrag back-substitutions "

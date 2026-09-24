@@ -3477,6 +3477,62 @@ __global__ void k_eeq_block_jacobi_apply(
     }
 }
 
+// ── WP7-E: GPU projected PCG kernels (Sep 2026) ──────────────────────────────
+__global__ void k_frag_sum(int N,
+                            const double* __restrict__ v,
+                            const int*    __restrict__ atom_frag,
+                            double*       __restrict__ frag_sum)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    atomicAdd(&frag_sum[atom_frag[i]], v[i]);
+}
+
+__global__ void k_frag_scatter_add(int N,
+                                    double*       __restrict__ v,
+                                    const int*    __restrict__ atom_frag,
+                                    const double* __restrict__ frag_delta)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    v[i] += frag_delta[atom_frag[i]];
+}
+
+__global__ void k_frag_project_delta(int nfrag,
+                                      const double* __restrict__ frag_sum,
+                                      const double* __restrict__ inv_frag_atoms,
+                                      double*       __restrict__ frag_delta)
+{
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= nfrag) return;
+    frag_delta[f] = -frag_sum[f] * inv_frag_atoms[f];
+}
+
+__global__ void k_frag_feasibility_delta(int nfrag,
+                                          const double* __restrict__ frag_sum,
+                                          const double* __restrict__ rhs_constraints,
+                                          const double* __restrict__ inv_frag_atoms,
+                                          double*       __restrict__ frag_delta)
+{
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= nfrag) return;
+    frag_delta[f] = (rhs_constraints[f] - frag_sum[f]) * inv_frag_atoms[f];
+}
+
+__global__ void k_frag_precond_correct(int N,
+                                        const double* __restrict__ Minv,
+                                        const int*    __restrict__ atom_frag,
+                                        const double* __restrict__ frag_sum,
+                                        const double* __restrict__ frag_sM,
+                                        double*       __restrict__ z)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    int f = atom_frag[i];
+    double sM = frag_sM[f];
+    if (sM > 0.0) z[i] -= Minv[i] * frag_sum[f] / sM;
+}
+
 // ============================================================================
 // WP2: k_build_eeq_rhs — GPU-side EEQ RHS construction
 // Claude Generated (May 2026): Eliminates CPU sync for EEQ RHS per MD step.
