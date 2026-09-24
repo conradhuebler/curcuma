@@ -135,7 +135,7 @@ bool QMEngine::runSCF()
     m_density = buildInitialGuess();
     if (CurcumaLogger::get_verbosity() >= 3)
         CurcumaLogger::param("SCF guess",
-                             fmt::format("{} (Tr(PS) = {:.6f})", m_scf_guess,
+                             fmt::format("{} (Tr(PS) = {:.6f})", m_last_warm_start ? "warm start" : m_scf_guess,
                                          m_density.cwiseProduct(m_S).sum()));
 
     DIISAccelerator diis(m_diis_subspace);
@@ -221,12 +221,15 @@ bool QMEngine::runSCF()
 
             // Store the MO spectrum for wrapper compatibility (QMDriver slots).
             m_mo = C;
+            // Keep the occupied orbitals for the next geometry's warm start.
+            m_warm_C = C.leftCols(n_occ);
+            m_warm_atoms = m_atoms;
             m_energies = eps;
 
             if (CurcumaLogger::get_verbosity() >= 2) {
                 CurcumaLogger::success(fmt::format(
-                    "QM HF SCF converged in {} iterations (dP = {:.3e})",
-                    iter + 1, delta_P));
+                    "QM HF SCF converged in {} iterations (dP = {:.3e}, start: {})",
+                    iter + 1, delta_P, m_last_warm_start ? "previous geometry" : m_scf_guess));
                 CurcumaLogger::info(fmt::format("QM: SCF loop {:.1f} ms, of which Fock (J/K) builds {:.1f} ms",
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_scf0).count(),
                     t_fock_ms));
@@ -322,8 +325,38 @@ Matrix QMEngine::buildAtomicGuess() const
     return P;
 }
 
+// Claude Generated (Sep 2026): warm start for the next geometry of the same molecule.
+// The basis functions moved with the atoms, so the old occupied orbitals C are no
+// longer orthonormal in the new metric S. Symmetric (Loewdin) re-orthonormalisation
+//   C' = C (C^T S C)^{-1/2},   P = 2 C' C'^T
+// restores Tr(P S) = N and idempotency (P S P = 2 P) exactly, and is the closest
+// orthonormal set to C -- a much better start than superposed atomic densities once
+// the steps are small (optimisation, MD).
+Matrix QMEngine::buildWarmStartGuess() const
+{
+    const int n_occ = m_num_electrons / 2;
+    if (!m_scf_warm_start || m_warm_C.size() == 0 || m_warm_atoms != m_atoms
+        || m_warm_C.rows() != m_nbf || m_warm_C.cols() != n_occ || n_occ == 0)
+        return Matrix();
+    const Eigen::MatrixXd C(m_warm_C);
+    const Eigen::MatrixXd M = C.transpose() * Eigen::MatrixXd(m_S) * C;
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(M);
+    if (es.info() != Eigen::Success || es.eigenvalues().minCoeff() < 1.0e-8)
+        return Matrix();  // near-singular: the geometry step was too large, fall back
+    const Eigen::MatrixXd Minvsqrt = es.eigenvectors()
+        * es.eigenvalues().cwiseSqrt().cwiseInverse().asDiagonal() * es.eigenvectors().transpose();
+    const Eigen::MatrixXd Cp = C * Minvsqrt;
+    return Matrix(2.0 * Cp * Cp.transpose());
+}
+
 Matrix QMEngine::buildInitialGuess() const
 {
+    m_last_warm_start = false;
+    const Matrix warm = buildWarmStartGuess();
+    if (warm.size() != 0) {
+        m_last_warm_start = true;
+        return warm;
+    }
     if (m_scf_guess == "h0")
         return Matrix::Zero(m_nbf, m_nbf);   // bare core: first Fock = H
     if (m_scf_guess != "sad" && CurcumaLogger::get_verbosity() >= 1)

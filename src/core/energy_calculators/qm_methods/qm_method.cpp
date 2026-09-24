@@ -55,6 +55,7 @@ bool QMMethod::setMolecule(const Mol& mol)
     m_molecule = mol;
     m_calculation_done = false;
 
+    m_engine->resetForNewMolecule();  // a reused object must not keep the old molecule
     return m_engine->QMInterface::InitialiseMolecule(mol);
 }
 

@@ -129,6 +129,8 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
         m_scf_max_iter = static_cast<int>(std::lround(config["scf_max_iterations"].get<double>()));
     if (config.contains("scf_threshold") && config["scf_threshold"].is_number())
         m_scf_threshold = config["scf_threshold"].get<double>();
+    if (config.contains("scf_warm_start") && config["scf_warm_start"].is_boolean())
+        m_scf_warm_start = config["scf_warm_start"].get<bool>();
     if (config.contains("scf_mode") && config["scf_mode"].is_string())
         m_scf_mode = config["scf_mode"].get<std::string>();
     if (config.contains("scf_guess") && config["scf_guess"].is_string())
@@ -218,6 +220,20 @@ bool QMEngine::UpdateMolecule()
     m_scf_ready = false;
     m_scf_converged = false;
     return InitialiseMolecule();
+}
+
+// Claude Generated (Sep 2026): a reused engine object must not keep the previous
+// molecule's integrals (InitialiseMolecule() returns early once they exist) nor
+// warm-start from its orbitals.
+void QMEngine::resetForNewMolecule()
+{
+    m_integrals_ready = false;
+    m_eri_ready = false;
+    m_eri_active_ready = false;
+    m_scf_ready = false;
+    m_scf_converged = false;
+    m_warm_C = Matrix();
+    m_warm_atoms.clear();
 }
 
 double QMEngine::Calculation(bool gradient)

@@ -77,6 +77,9 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(scf_guess, String, "sad",
           "SCF initial guess: sad (superposition of atomic densities) | h0 (bare core Hamiltonian, i.e. zero density).",
           "SCF", {})
+    PARAM(scf_warm_start, Bool, true,
+          "Start the SCF of a new geometry (opt/scan/MD step) from the previous converged occupied orbitals, re-orthonormalised in the new overlap metric, instead of from scf_guess. Same molecule only; the first geometry always uses scf_guess.",
+          "SCF", {})
     PARAM(cartesian_d, Bool, false,
           "Use cartesian 6d (true) instead of spherical 5d (false, ORCA def2-SVP default).",
           "Basis", {})
@@ -104,6 +107,13 @@ public:
     /// integrals and returned its energy for every later geometry.
     bool UpdateMolecule() override;
     using QMInterface::UpdateMolecule;  // keep the Mol/Matrix/Vector overloads visible
+
+    /// Forget everything tied to the previous molecule (integrals, SCF, warm-start
+    /// orbitals). Call before InitialiseMolecule(Mol) when the object is reused for a
+    /// DIFFERENT molecule -- InitialiseMolecule() alone keeps cached integrals.
+    void resetForNewMolecule();
+    /// True if the last SCF started from the previous geometry's orbitals.
+    bool lastScfWarmStarted() const { return m_last_warm_start; }
 
     /// Analytic nuclear gradient exists for the closed-shell HF level (WP8, Sep 2026).
     bool hasGradient() const override { return m_functional == QMFunctional::HF; }
@@ -193,6 +203,13 @@ private:
     double m_scf_threshold = 1.0e-6;
     std::string m_scf_mode = "diis";         // diis | plain
     std::string m_scf_guess = "sad";         // sad | h0
+    // Warm start (Sep 2026): occupied MOs of the last converged SCF and the atoms
+    // they belong to; used as the guess for the next geometry of the same molecule.
+    bool m_scf_warm_start = true;
+    Matrix m_warm_C;                          // nbf x n_occ, active basis
+    std::vector<int> m_warm_atoms;
+    mutable bool m_last_warm_start = false;
+    Matrix buildWarmStartGuess() const;       // empty matrix if not applicable
     bool m_scf_converged = false;
     int m_scf_iterations = 0;
     int m_diis_start = 3;                    // plain iters before DIIS kicks in

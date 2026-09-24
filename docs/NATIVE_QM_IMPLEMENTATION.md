@@ -223,8 +223,19 @@ is now the registry's 1 (or the global `-threads`).
 
 **Not tested / not implemented**: open shell; elements beyond Ne; MD with `hf`/`hf-3c`
 (energy conservation not checked); gradients of `lda`/`pbe`/`b3lyp` (no V_xc yet, they
-report `hasGradient() == false`); no SCF warm start between optimisation steps (each step
-starts from SAD and rebuilds the ERI tensor).
+report `hasGradient() == false`). Every optimisation step still rebuilds the ERI tensor.
+
+**SCF warm start** (Sep 2026, `-qm.scf_warm_start`, default on): the SCF of a new geometry
+of the same molecule starts from the previous converged occupied orbitals, re-orthonormalised
+in the new overlap metric, `C' = C (C^T S C)^{-1/2}`, `P = 2 C' C'^T` (exact electron count
+and idempotency). Falls back to `-qm.scf_guess` for the first geometry, a different molecule,
+or a near-singular `C^T S C`. Measured: water stepped 5x by 0.01 A, 61 vs 90 SCF iterations,
+energies identical to 7e-14 Eh; `-opt` formaldehyde HF/def2-SVP 246 -> 149 iterations,
+benzene HF-3c 110 -> 86, same final energies. **Wall time barely moves** (6.45 -> 6.25 s,
+42.9 -> 42.3 s on 4 threads): per step the ERI rebuild and the gradient dominate, not the SCF.
+Also fixed: `setMolecule()` with a *different* molecule on a reused method object kept the
+old molecule's integrals (HF-3c water on an object last used for BH: -17.44 instead of
+-75.50 Eh); `resetForNewMolecule()` now runs first. Both covered by `qm_update_geometry`.
 
 
 ## Attribution and Provenance

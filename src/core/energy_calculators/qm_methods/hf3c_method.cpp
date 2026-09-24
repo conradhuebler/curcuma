@@ -46,6 +46,7 @@ bool HF3CMethod::setMolecule(const Mol& mol)
         m_error = true;
         return false;
     }
+    m_engine->resetForNewMolecule();  // a reused object must not keep the old molecule
     if (!m_engine->QMInterface::InitialiseMolecule(mol)) {
         m_error = true;
         return false;
