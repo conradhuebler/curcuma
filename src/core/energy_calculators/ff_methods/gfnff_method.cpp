@@ -1633,9 +1633,9 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             std::vector<double> cn_std(m_last_cn.data(), m_last_cn.data() + m_last_cn.size());
             m_d4_generator->updateCNValuesForGradient(cn_std, pool, total_threads,
                                                        /*skip_dc6dcn=*/false);
-            // Claude Generated (Sep 2026): the energy's C6 must follow the same weights the
-            // gradient's dC6/dCN was just built from — see refreshDispersionC6().
-            refreshDispersionC6();
+            // The energy's pair C6 are refreshed at the end of this function ("Stale-CN fix
+            // B"), for gradient AND energy-only calls. (Merge note Sep 25, 2026: multi-gpu's
+            // equivalent refreshDispersionC6() was removed as redundant with that block.)
             if (do_timing) {
                 t_d4_gw = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
             }
@@ -1733,19 +1733,6 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
                 }
             }
         }
-
-        // Claude Generated (Sep 2026): an energy-only call at a NEW geometry (optimizer line
-        // search, energy finite-difference Hessian, ConfScan) needs the C6 of that geometry
-        // too, or its energy belongs to a different function than the gradient calls around
-        // it. Same weight update as the gradient path; skipped at the geometry the stored C6
-        // already belong to (a single point's first call), which keeps that bit-identical.
-        if (m_d4_generator && !gpu_only && !reuse_cn && dispersionC6Stale()) {
-            auto* pool = threadPool();
-            if (pool) pool->setActiveThreadCount(m_threads);
-            std::vector<double> cn_std(m_last_cn.data(), m_last_cn.data() + m_last_cn.size());
-            m_d4_generator->updateCNValuesForGradient(cn_std, pool, m_threads, /*skip_dc6dcn=*/false);
-            refreshDispersionC6();
-        }
     }
 
     // Stale-CN fix B (Claude Generated, Sep 2026): refresh the per-pair D4 C6(CN) at the
@@ -1756,7 +1743,14 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     // FD, batch reuse) the energy was therefore a frozen-C6 energy whose derivative is not the
     // force. Static-CN mode keeps its frozen C6 (reuse_cn). The dc6dcn DERIVATIVE and its P1a
     // CN-change threshold (updateCNValuesForGradient) are untouched.
-    if (!gpu_only && !reuse_cn && m_d4_generator && m_workspace && m_last_cn.size() == m_atomcount) {
+    // Merge note (Sep 25, 2026): feature/multi-gpu fixed the same frozen-C6 bug independently
+    // (GFNFF::refreshDispersionC6, f51f5200). Both recompute d.C6 = getChargeWeightedC6() from
+    // the Gaussian weights at the current CN; this block additionally covers every stored
+    // rev-gfnff corner list (forEachD4PairList), so it was kept and the other one removed. The
+    // multi-gpu `dispersion_c6_update` PARAM (default true) now gates this block on the CPU and
+    // the device-side C6 refresh on the GPU.
+    if (!gpu_only && !reuse_cn && m_d4_generator && m_workspace && m_last_cn.size() == m_atomcount
+        && m_parameters.value("dispersion_c6_update", true)) {
         bool weights_fresh = false;
         auto t_c6 = std::chrono::high_resolution_clock::now();
         auto* pool = threadPool();
@@ -2169,7 +2163,6 @@ void GFNFF::updateDispersionPairsIfNeeded(FFWorkspace* extra_ws)
     }
 
     m_disp_list_ref_geometry = m_geometry_bohr;
-    m_disp_c6_geometry = m_geometry_bohr;  // the generator just filled C6 at this geometry
     m_disp_pairs_updated = true;
     ++m_disp_rebuild_count;
 
@@ -2182,59 +2175,6 @@ void GFNFF::updateDispersionPairsIfNeeded(FFWorkspace* extra_ws)
                        : std::string("n/a (zero skin, step-count fallback)"));
         CurcumaLogger::param("D4 dispersion pairs", fmt::format("{} -> {}", old_count, new_count));
         CurcumaLogger::param("rebuild time", fmt::format("{:.3f} ms", duration.count() / 1000.0));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// refreshDispersionC6 — per-step C6 from the current CN (Claude Generated, Sep 2026)
-// ---------------------------------------------------------------------------
-
-bool GFNFF::dispersionC6Stale() const
-{
-    if (!m_workspace || !m_d4_generator || !m_parameters.value("dispersion_c6_update", true))
-        return false;
-    // Exact comparison on purpose: at the geometry the stored C6 were computed at (the setup
-    // geometry of a single point, or a repeated evaluation) nothing is recomputed, so those
-    // results stay bit-identical to the pre-fix code.
-    return !(m_disp_c6_geometry.rows() == m_geometry_bohr.rows()
-             && m_disp_c6_geometry.cols() == m_geometry_bohr.cols()
-             && m_disp_c6_geometry == m_geometry_bohr);
-}
-
-void GFNFF::refreshDispersionC6()
-{
-    if (!dispersionC6Stale())
-        return;
-
-    // C6_ij = sum_ab W_i^a W_j^b C6ref_ab from the Gaussian weights the generator holds for
-    // THIS step (updateCNValuesForGradient() just rebuilt them). getChargeWeightedC6() is the
-    // exact function that filled C6 at setup (same weights, same half-contraction path), so
-    // the only difference to a fresh single point is the CN feeding the weights: the setup
-    // build uses the full O(N^2) CN, the per-step path the neighbour-list CN (cn_cutoff_bohr),
-    // which agree to rounding.
-    m_disp_c6_geometry = m_geometry_bohr;
-    auto& pairs = m_workspace->d4DispersionsForC6Refresh();
-    const int P = static_cast<int>(pairs.size());
-    if (P == 0)
-        return;
-    const D4ParameterGenerator& gen = *m_d4_generator;
-    auto worker = [&](int t_id, int T) {
-        for (int p = t_id; p < P; p += T) {
-            GFNFFDispersion& d = pairs[p];
-            d.C6 = gen.getChargeWeightedC6(m_atoms[d.i], m_atoms[d.j], d.i, d.j);
-        }
-    };
-    const int T = std::max(1, std::min(m_threads, P));
-    auto* pool = threadPool();
-    if (T > 1 && pool && P > 4096) {
-        std::vector<std::future<void>> futures;
-        futures.reserve(T - 1);
-        for (int t = 1; t < T; ++t)
-            futures.push_back(pool->enqueue(worker, t, T));
-        worker(0, T);
-        for (auto& f : futures) f.get();
-    } else {
-        worker(0, 1);
     }
 }
 
@@ -4606,10 +4546,8 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
         params.atm_triples = std::move(atm_triples);
         params.dispersion_method = disp_method;
         // Claude Generated (Sep 2026): the geometry this pair list was built at — the
-        // reference of the skin trigger in updateDispersionPairsIfNeeded() — and the geometry
-        // its C6 belong to (refreshDispersionC6()).
+        // reference of the skin trigger in updateDispersionPairsIfNeeded().
         m_disp_list_ref_geometry = m_geometry_bohr;
-        m_disp_c6_geometry = m_geometry_bohr;
     }
     if (do_timing) t_dispersion = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
 
@@ -12177,6 +12115,9 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
         // the single point at its own minimum (within the printed 1e-6 with the cache off), and the CPU trajectory
         // departs from the GPU one at the first step (the GPU path never used the cache). So
         // GFN-FF disables it unless the user set it explicitly (-d4param.d4_cn_cache_threshold).
+        // Kept after the Sep 25, 2026 merge: the C6 energy refresh itself ("Stale-CN fix B")
+        // bypasses this cache anyway, but the dC6/dCN derivative still goes through it, so
+        // with the cache off the gradient's dC6/dCN is built at the same CN as the energy's C6.
         if (m_parameters.value("dispersion_c6_update", true) && !d4_input.contains("d4_cn_cache_threshold"))
             d4_input["d4_cn_cache_threshold"] = 0.0;
 

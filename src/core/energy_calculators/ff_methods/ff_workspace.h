@@ -652,15 +652,6 @@ public:
     const std::vector<GFNFFDispersion>& d4Dispersions() const { return m_d4_dispersions; }
 
     /**
-     * @brief Mutable access to the D4 pair list, for the per-step C6 refresh only.
-     *
-     * Claude Generated (Sep 2026): GFNFF::refreshDispersionC6() rewrites each pair's C6 from
-     * the current-step Gaussian weights. The pair set itself must not be changed through this
-     * accessor (the partition ranges would go stale) — use updateD4Dispersions() for that.
-     */
-    std::vector<GFNFFDispersion>& d4DispersionsForC6Refresh() { return m_d4_dispersions; }
-
-    /**
      * @brief Replace the explicit Coulomb pair list and re-partition.
      *
      * Claude Generated (Sep 2026): only used when an explicit, distance-truncated Coulomb list

@@ -540,7 +540,7 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         m_cn_pair_cutoff_factor = cfg_get_dbl("gpu_cn_pair_cutoff_factor", 2.5);
         m_gpu_workspace->setCNPairCutoffFactor(m_cn_pair_cutoff_factor);
         // Claude Generated (Sep 2026): per-step D4 C6 refresh on the device, same switch as the
-        // CPU path (GFNFF::refreshDispersionC6()).
+        // CPU path (the CPU 'Stale-CN fix B' block in GFNFF prepareCNAndEEQ).
         m_gpu_workspace->setDispersionC6Update(cfg_get_bool("dispersion_c6_update", true));
 
         // Deliverable 3 (Jun 2026): route high-fragment EEQ to the exact CPU PCG.

@@ -361,7 +361,7 @@ PARAM(hb_min_pair_energy_eh, Double, 1e-9, "Sep 2026 (docs/GFNFF_PERFORMANCE_LEV
 PARAM(xb_min_pair_energy_eh, Double, 1e-9, "Sep 2026 (docs/GFNFF_PERFORMANCE_LEVERS.md lever #1, XB counterpart): skip allocating a GFNFFHalogenBond when the EXACT |E_XB| the energy kernel would compute is below this (Eh) - the XB formula has no case-dependent branch, so this is exact, not an approximation. 0 disables.", "Performance", {})
 PARAM(nonbonded_rebuild_every, Int, 1, "The non-bonded repulsion pair list is built from a hard 20 Bohr distance cutoff; a pair that starts beyond it and diffuses closer during MD was never re-evaluated (fixed Sep 2026 - see GFNFF::updateNonbondedRepulsionIfNeeded). This rebuilds it from the current geometry every N energy evaluations. 1 (default) = every step, unconditionally correct - no pair can cross the cutoff undetected. The same schedule drives the explicit Coulomb list of eeq_distance_cutoff > 0 and the D4 list when dispersion_cutoff_bohr <= 50 leaves it without a skin. Raise only after confirming the rebuild cost matters for your system size; a stale list can let two atoms pass through the repulsive wall with zero force, which is far more expensive to debug than the rebuild.", "Performance", {})
 PARAM(nonbonded_skin_bohr, Double, 0.0, "Verlet skin (Bohr) for the non-bonded repulsion list and the explicit Coulomb list of eeq_distance_cutoff > 0. 0 (default) = rebuild on the nonbonded_rebuild_every step count. > 0 = build the lists that much wider than their kernel cutoff (20 Bohr repulsion, eeq_distance_cutoff Coulomb) and rebuild only once some atom moved more than skin/2 since the last build - exact, since no pair can then cross the kernel cutoff unseen (Verlet 1967). Energies are unchanged up to floating-point summation order (the longer list shifts the thread partition); only the rebuild schedule and the list length change. See docs/GFNFF_PAIR_LIST_REFRESH.md for measured costs.", "Performance", {})
-PARAM(dispersion_c6_update, Bool, true, "Recompute every stored D4 pair C6 from the current coordination numbers whenever the geometry changed (GFNFF::refreshDispersionC6). Before Sep 2026 C6 stayed at the setup geometry while the dispersion gradient already used dC6/dCN at the current CN, so MD and optimisation energies drifted away from a single point at the same geometry (triose: 0.18 kcal/mol after 200 fs at 800 K). Single points are unaffected. false restores the old frozen-C6 behaviour for comparisons.", "Algorithm", {})
+PARAM(dispersion_c6_update, Bool, true, "Recompute every stored D4 pair C6 from the current coordination numbers on every evaluation (CPU: the 'Stale-CN fix B' block at the end of GFNFF prepare, which also covers stored rev-gfnff corner lists; GPU: the device-side refresh). Before Sep 2026 C6 stayed at the setup geometry while the dispersion gradient already used dC6/dCN at the current CN, so MD and optimisation energies drifted away from a single point at the same geometry (triose: 0.18 kcal/mol after 200 fs at 800 K). Single points are unaffected. false restores the old frozen-C6 behaviour for comparisons.", "Algorithm", {})
 PARAM(eeq_mixed_precision, Bool, false, "WP-B GPU only: factor the EEQ Coulomb matrix in FP32 then refine the solution with the FP64 residual, dsposv-style, for full FP64 accuracy at a fraction of the FP64-factor cost on FP64-weak GPUs. Opt-in on CUDA and ROCm (default OFF; enable per card after measuring). Applies to the factor-dominated few-fragment solve paths; the many-fragment general path stays FP64.", "Performance", {})
 PARAM(eeq_mixed_precision_iters, Int, 2, "WP-B GPU only: number of FP64-residual / FP32-correction refinement steps for eeq_mixed_precision. Minimum 1. Two steps reach FP64 accuracy on the validation set.", "Performance", {})
 PARAM(coulomb_implicit, Bool, true, "CPU: evaluate the N^2/2 Coulomb pairs on the fly from the per-atom EEQ charges and alpeeq instead of building and storing a pair list. The stored list costs 128 bytes per pair - 3.4 GB and ~0.5 s of pure write bandwidth at 7320 atoms, which threading does not remove (measured). Energies agree with the stored path to rounding; set false for the stored list (e.g. to compare). Not used with eeq_distance_cutoff > 0, where the list is already short. DEFAULT TRUE since Sep 18, 2026. Two consequences, both measured: -gfnff.dump_params no longer contains a Coulomb list, so its md5 changes by construction (the energies do not), and the partition is by ATOM instead of by pair, so the reduction order can change at -threads > 1. Set false for the stored list.", "Performance", {})
@@ -1112,33 +1112,6 @@ public:
     /// True if updateDispersionPairsIfNeeded() rebuilt the list since the last check
     bool consumeDispersionPairsUpdate() { bool r = m_disp_pairs_updated; m_disp_pairs_updated = false; return r; }
 
-    /**
-     * @brief Recompute every stored D4 pair's C6 from the current-step coordination numbers.
-     *
-     * Claude Generated (Sep 2026): C6_ij = sum_ab W_i^a(CN_i) W_j^b(CN_j) C6ref_ab depends on
-     * the geometry through the CN-Gaussian weights W (D4: Caldeweyher et al., J. Chem. Phys.
-     * 150, 154122 (2019); GFN-FF CN-only weighting, gfnff_gdisp0.f90:405). The pair list
-     * stored C6 at the SETUP geometry and nothing ever updated it, while the per-step
-     * dispersion gradient already used dC6/dCN at the CURRENT CN (updateCNValuesForGradient()
-     * -> dc6dcn). After any geometry change the energy and its own gradient therefore
-     * described two different functions. Measured (Sep 2026, triose, 66 atoms): after 200 fs of
-     * 800 K MD the MD dispersion energy was 2.83e-4 Eh (0.18 kcal/mol) away from a fresh
-     * single point at the same geometry, and a geometry optimisation converged 3.0e-4 Eh away
-     * from the single point at its own final geometry — in both cases the entire difference
-     * sat in the dispersion term. Single points are unaffected: there the setup geometry is
-     * the evaluation geometry.
-     *
-     * Reads the Gaussian weights / half-contraction the generator holds for this step, so it
-     * must run right after updateCNValuesForGradient(). It inherits that function's
-     * `d4_cn_cache_threshold` skip: when no CN changed by more than the threshold, the weights
-     * (and therefore C6 and dC6/dCN) are left at the previous step, consistently for both.
-     * Controlled by the `dispersion_c6_update` PARAM (default on).
-     */
-    void refreshDispersionC6();
-
-    /// Claude Generated (Sep 2026): true if the stored D4 C6 were computed at a different
-    /// geometry than the current one (and the C6 refresh is enabled). See refreshDispersionC6().
-    bool dispersionC6Stale() const;
 
     /**
      * @brief Periodically rebuild the explicit Coulomb pair list (distance-truncated EEQ only).
@@ -3118,7 +3091,6 @@ private:
 
     // Claude Generated (Sep 2026): D4 pair-list skin tracking (updateDispersionPairsIfNeeded()).
     Eigen::MatrixXd m_disp_list_ref_geometry; ///< Geometry (Bohr) the current D4 pair list was built at
-    Eigen::MatrixXd m_disp_c6_geometry;        ///< Geometry (Bohr) the stored D4 C6 belong to (refreshDispersionC6())
     bool m_disp_pairs_updated = false;         ///< True if the D4 list was rebuilt since last check
     long m_disp_update_calls = 0;              ///< Call counter for the zero-skin step-count fallback
     long m_disp_rebuild_count = 0;             ///< Number of displacement-triggered rebuilds (diagnostic)

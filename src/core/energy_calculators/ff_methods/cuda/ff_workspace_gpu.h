@@ -382,7 +382,7 @@ public:
 
     void setDispersionEnabled(bool v);
     /// Claude Generated (Sep 2026): let k_dc6dcn_per_pair also rewrite the per-pair C6 from the
-    /// current-step Gaussian weights (GFN-FF `dispersion_c6_update`, see GFNFF::refreshDispersionC6()).
+    /// current-step Gaussian weights (GFN-FF `dispersion_c6_update`, see the CPU 'Stale-CN fix B' block in GFNFF prepareCNAndEEQ).
     void setDispersionC6Update(bool v) { m_disp_c6_update = v; }
     void setHBondEnabled(bool v);
     void setRepulsionEnabled(bool v);
