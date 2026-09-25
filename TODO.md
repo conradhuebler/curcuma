@@ -693,6 +693,53 @@
     kann 2/3 liefern, wo bpair 5 liest (z. B. H am Cp-Ring vs. Hydrid am Metall). Betrifft nur
     eta-Komplexe mit solchen H-H-Paaren; ob MOR41 einen Fall enthaelt, ist nicht gemessen.
     Umstellung auf `bpair` waere ein eigener Commit mit MOR41-Arbitrierung gegen pprcht.
+  - **Gemessen per Opt-in `-gfnff.hh_repulsion_bpair true` (2026-09-25, AI-implemented,
+    machine-tested; Default unveraendert BFS)**:
+    - **Die Asymmetrie ist nicht auf eta beschraenkt**: GMTKN55 aendert sich an 5 von 2462
+      Strukturen, alle mit Hauptgruppenmetall (Al/Li/Mg); MOR41 an 0 von 95.
+    - **Gegen xtb 6.7.1** (`~/Downloads/xtb-dist`, kein pprcht verfuegbar — kein gfortran auf
+      dieser Maschine), curcuma − xtb in kcal/mol, BFS → bpair: `AL2X6/al2me5` +0,0664 →
+      **+0,0004**, `ALK8/li2_ch4` +0,0311 → **+0,0001**, `MB16-43/11` +0,0048 → **−0,0001**.
+      `MB16-43/23` −83,633 → −83,641 und `/37` −13,519 → −13,522 liegen in der bekannten
+      pprcht-vs-xtb-Spaltung und sind so nicht beurteilbar. al2me5 war die groesste verbleibende
+      curcuma-vs-pprcht-Abweichung (Known Issue #25: 0,066) — gleiche Groesse wie die Verschiebung,
+      Vorzeichen gegen pprcht aber ungemessen.
+    - **Der BFS-Default ist atomreihenfolgeabhaengig**: der BFS startet beim kleineren Index, und
+      ueber eine einseitig gespeicherte Bindung erreicht er den Partner nur in einer Richtung.
+      Idealisiertes CpFe(CO)2H: Hydrid zuerst −3,05533075, Hydrid zuletzt −3,05561154 Eh
+      (0,18 kcal/mol, nur Nonbond-Repulsion); mit bpair beide −3,05561154. Das Molekuel taugt nur
+      als Schalterkontrolle — curcuma liegt dort 150–177 kcal/mol neben xtb, und xtb selbst gibt
+      fuer die zwei Reihenfolgen 23,6 kcal/mol verschiedene Energien.
+    - **Gegen pprcht/gfnff** (`external/gfnff` @ `0491df2f`, `-Dbuild_exe=ON`, gfortran 16.2.1;
+      Provenienz: `AHB21/21` −2,027888583 = dokumentiert −2,027889), curcuma − pprcht in kcal/mol,
+      BFS → bpair: al2me5 +0,0664 → **+0,0005**, li2_ch4 +0,0311 → **+0,0001**, MB16-43/23
+      +0,0082 → **+0,0008**, MB16-43/11 +0,0048 → **−0,0001**, CpFe(CO)2H Hydrid zuerst
+      +0,1763 → **+0,0001** (Hydrid zuletzt +0,0001 beide; pprcht selbst ist
+      reihenfolgeunabhaengig, curcuma trifft es — die 150–177 kcal/mol oben waren reine
+      xtb-Abweichung). MB16-43/37 +0,0001 → −0,0023: dort wird der Repulsionsterm mit bpair
+      **exakt** (−6e-8 Eh gegen +3,8e-6 mit BFS); die Gesamtuebereinstimmung mit BFS war
+      Fehlerkompensation mit einer Dispersionsabweichung von −3,7e-6 Eh, die jetzt sichtbar ist
+      (alle anderen Terme ≤5e-5 kcal/mol). Diese Dispersionsdifferenz ist ein eigener, offener
+      Kleinstbefund, nicht Folge des Schalters.
+    - **Erledigt (2026-09-25)**: `hh_repulsion_bpair` ist Default. Die dabei sichtbar gewordene
+      MB16-43/37-Dispersionsdifferenz war curcumas eigener ATM-Dreikoerperterm (in der Referenz
+      nicht vorhanden) — jetzt aus (`dispersion_atm`), MOR41+GMTKN55 vs pprcht MAD 0,00014 → 0,00007,
+      Strukturen >0,001 kcal/mol 58 → 8. Ein anschliessender Permutationstest fand den
+      Amid-H-Reihenfolgefehler der Referenz (curcuma korrekt, Opt-in `amideh_acidity_order_bug`)
+      und 911/2557 Strukturen, deren Energie in pprcht UND curcuma von der Atomnummerierung
+      abhaengt — Details: CLAUDE.md Known Issue #32, `docs/REV_GFNFF_TODO.md` #11-#13.
+    - **Offen**: Reihenfolgeabhaengigkeit der Referenz (REV_GFNFF_TODO #12: Ladungsplatzierung,
+      Inversionsterm, Coulomb bei neutralen Molekuelen, Bindungsterm MB16-43); verbleibende
+      Portierungsreste vs pprcht >0,01 kcal/mol: MB16-43/04 +0,0445, HEAVYSB11/pbme3 −0,0389,
+      MB16-43/43 +0,0137, MB16-43/01 +0,0131.
+- **`cli_curcumaopt_07_opt_multixyz` repariert (2026-09-25)**: der Test verglich den Multi-XYZ-Pfad
+  mit einer Golden-Datei vom Juni 2026, die seitdem mit jeder GFN-FF-Korrektur gedriftet war
+  (Frame 02/12 lagen 0,15–0,17 Eh ueber dem echten Minimum, weitere um bis zu 1,9e-5). Einzel- und
+  Multi-XYZ-Optimierung stimmen mit dem aktuellen Binary fuer alle 17 Frames auf <=1e-6 Eh ueberein
+  — der Pfad war nie falsch. Der Test optimiert jetzt jeden Frame selbst einzeln (+6 s) und
+  vergleicht dagegen, `golden_energies.txt` ist entfernt. Dadurch laeuft erstmals auch der zweite
+  Durchlauf mit `-threads 4` (wurde nach dem ersten Fehlschlag nie erreicht): 40/40. Negativkontrolle
+  (eine Referenz um 1e-4 Eh verfaelscht) schlaegt an. `ctest -L gfnff` jetzt **78/78**.
 
 ### SIGSEGV am Ursprung untersucht (Auftrag „fix den SIGSEGV am Ursprung") — nicht gefunden, Werkzeuge sind blind dafuer (2026-09-24)
 - **Status**: ⏳ OFFEN. Root Cause NICHT gefunden trotz gruendlicher Untersuchung mit ASan,

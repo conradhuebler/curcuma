@@ -8653,10 +8653,18 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
     }
 
     // Overrides for acidity (amide scaling)
+    // Claude Generated (Sep 2026): the reference (gfnff_ini.f90:793-798) resets hbaci(i) and
+    // scales hbaci(nb(1,i)) in the SAME loop, so the 0.8 of an amide H survives only when its
+    // nitrogen has the smaller atom index - otherwise the later reset of the nitrogen erases it
+    // and the H-bond comes out 1/0.8 = 1.25x stronger. curcuma applies the factor regardless of
+    // the atom order (the intended rule, and permutation invariant);
+    // -gfnff.amideh_acidity_order_bug true reproduces the reference.
+    const bool amideh_order_bug = m_parameters.value("amideh_acidity_order_bug", false);
     for (int i = 0; i < m_atomcount; ++i) {
         if (detector.isAmideHydrogen(i)) {
             int nitrogen = topo_info.neighbor_lists[i][0];
-            current_acidity[nitrogen] *= 0.80;
+            if (!amideh_order_bug || nitrogen < i)
+                current_acidity[nitrogen] *= 0.80;
         }
     }
 
@@ -11071,6 +11079,14 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
     // path bit-identical.
     constexpr double NB_REP_RCUT = 20.0;
 
+    // Source of the H...H 1,3/1,4 classification below. The reference reads topo%bpair
+    // (gfnff_ini.f90:755-756); curcuma used to read the plain BFS bond count. Over a neighbour
+    // entry stored on one side only (eta bonds, main-group metals) the BFS reaches the partner
+    // in one direction only, so the old value depended on the atom order of the input.
+    // Default since Sep 2026 - Claude Generated; false restores the BFS.
+    const bool hh_use_bpair = m_parameters.value("hh_repulsion_bpair", true);
+    const SparseTopoTable& hh_table = hh_use_bpair ? topo_info.bpair : topo_info.topo_distances;
+
     auto make_nb_rep = [&](int ii, int jj) {
         int i = std::min(ii, jj);
         int j = std::max(ii, jj);
@@ -11103,7 +11119,7 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
 
         if (Z_i == 1 && Z_j == 1) {
             ff = HHFAC;
-            int topo_dist = topo_info.topo_distances.get(i, j);
+            int topo_dist = hh_table.get(i, j);
             if (topo_dist == 2) ff *= HH13REP;
             else if (topo_dist == 3) ff *= HH14REP;
         }
@@ -11213,7 +11229,14 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
         applyDispersionCutoff(dispersions, CurcumaLogger::get_verbosity() >= 2);
 
         // ATM triples: Generate natively from bonded topology (O(N·bonds), fast)
-        double s9 = 1.0, atm_a1 = 0.58, atm_a2 = 4.80, atm_alp = 14.0;
+        // Claude Generated (Sep 2026): OFF by default. The GFN-FF reference has no three-body
+        // dispersion (gfnff_gdisp0.f90 d3_gradient is pairwise); this term came in with the
+        // generic D3/D4 ATM of Dec 2025 (e529b740). Removing it halves the per-structure MAD vs
+        // pprcht over MOR41+GMTKN55 (0.00014 -> 0.00007 kcal/mol, 58 -> 8 structures above 0.001).
+        // Physically it also captures next to nothing: only bonded triples are listed, and those
+        // are the ones the zero damping (alp = 14) suppresses. -gfnff.dispersion_atm true restores it.
+        const bool use_atm = m_parameters.value("dispersion_atm", false);
+        double s9 = use_atm ? 1.0 : 0.0, atm_a1 = 0.58, atm_a2 = 4.80, atm_alp = 14.0;
         if (s9 > 1e-10) {
             const TopologyInfo& ti = getCachedTopology();
             // Build unique bonded triplets

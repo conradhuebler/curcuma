@@ -89,7 +89,7 @@ cached in `GFNFF` per topology version.
 | Halogen Bonds | CalculateGFNFFHalogenBondContribution() | ✅ ACTIVE | ✅ Implemented (Mar 2026) | rbxgfnff_eg |
 | Triple Bond Torsions | CalculateGFNFFSTorsionContribution() | ✅ ACTIVE (Mar 2026) | ✅ Implemented | sTors_eg:3454 |
 | BATM | CalculateGFNFFBatmContribution() | ✅ ACTIVE | ✅ Implemented (Mar 2026) — GradientBATM() | batmgfnff_eg |
-| ATM (D3/D4) | CalculateATMContribution() | ✅ ACTIVE | ✅ Complete | d3_gradient |
+| ATM (D3/D4) | CalculateATMContribution() | OFF by default for GFN-FF since Sep 2026 (`dispersion_atm`) | ✅ Complete | none - the reference has no three-body dispersion; see REV_GFNFF_TODO #13 |
 
 ### Implementation Details
 
@@ -204,7 +204,7 @@ ctest -R test_gfnff_gradients --verbose
 - Coulomb (dynamic EEQ charges) — < 0.1 mEh (< 1 nEh for small molecules)
 - Hydrogen bonds / Halogen bonds — all cases 1-3 + gradients
 - BATM — topology charges distributed after thread creation (fixed Mar 6)
-- ATM (separated to own GradientATM()) — energy ≈ 0, gradient correct
+- ATM (separated to own GradientATM()) — not part of the reference; off by default since Sep 2026 (`-gfnff.dispersion_atm true` restores it)
 
 ### ✅ EEQ Solver Status
 - **EEQSolver**: Standalone in `eeq_solver.{h,cpp}`, two-phase architecture
