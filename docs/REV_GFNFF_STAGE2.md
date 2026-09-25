@@ -591,21 +591,42 @@ n=2 is now n=3. Investigating package 28's past-cutoff finding found something m
 silently defaults to the lower-indexed atom there — breaking the kappa=0-equals-EEQ fidelity
 invariant by up to 108 kcal/mol** (GMTKN55 CHB6/26). Fixed for 12 of 15 tested cases by a new
 opt-in `-gfnff.rev_sqe_virtual_pairs` (zero-hardness charge-path links, the Phase-2 counterpart of
-P2's Phase-1 mechanism) — label gap 0.00 at every scanned point with it on. **The other 3 cases
-are anionic SN2 transition states with a separate, pre-existing constraint-group leak, not fixed
-(would require touching the already-shipped Cl2-/F2- fits)**. Cost of the fix: full-grid rms rises
-by 1.2 (Cl2-)/1.7 (F2-) kcal/mol (Br2- unchanged) — **package 26's "8.50/8.00" was therefore about
-1.5 kcal/mol better than it should have been; the honest number with the invariant correctly
-restored is close to 9.7/9.7.** `X2_SCOPE_STATUS.md` §8-18.
+P2's Phase-1 mechanism) — label gap 0.00 at every scanned point with it on. Package 31's own read
+of the other 3 cases (anionic SN2 transition states, "a separate, pre-existing constraint-group
+leak, would require touching the already-shipped Cl2-/F2- fits") was **corrected by package 33
+below — the leak is neither separate nor SN2-specific**. Cost of the fix as shipped here: full-grid
+rms rises by 1.2 (Cl2-)/1.7 (F2-) kcal/mol (Br2- unchanged) — **package 26's "8.50/8.00" was
+therefore about 1.5 kcal/mol better than it should have been; the honest number with the invariant
+correctly restored is close to 9.7/9.7.** `X2_SCOPE_STATUS.md` §8-18.
+
+**Package 33: the SN2-TS leak is the visible tip of a general Phase-2 pair-list bug, and package
+31's fix was incomplete.** Root cause: an SN2 TS splits into three fragments at pass 1; each
+`frag_charge_model ensemble` variant then re-perceives the C-X bond toward whichever halide
+currently carries the charge, and the SQE pair list (unlike P2's Phase-1 pair list) is **not
+filtered by constraint-group membership** — so that C-X pair leaks 0.62-0.69 e across a boundary
+meant to be hard-constrained. **Package 31's "s_max=1.0 [the default] is unaffected" claim is
+WRONG**: at that setting, with `virtual_pairs` on, 15 GMTKN55 structures fail by up to -137
+kcal/mol (9 of them NEUTRAL — PX13, WCPT18, BH76 RKT, not anionic and not SN2), and Cl2-/F2-/Br2-
+themselves fail by -100/-200/-108 kcal/mol in the untested distance band between the pass-1 split
+and the static bond cutoff. New opt-in `-gfnff.rev_sqe_group_pairs_only` (used with
+`virtual_pairs`) drops any SQE pair spanning two constraint groups — **SQE(kappa=0) now equals
+constrained EEQ EXACTLY (2e-14 e) on all 2462 GMTKN55 structures and all 42 scan cases**, a
+complete closure, not 12/15. In the recommended setting the energy curves barely move (Cl2-/F2-/
+Br2- full-grid rms 9.69/9.73/9.51, unchanged to within 1.25 kcal/mol at 2 band points), but
+`BH76_anionic` — the ORIGINAL stage-2 roadmap target, not an X2- side metric — improves 73.8 ->
+64.3. **Not uniform**: in `harris` WITHOUT the window, the same fix makes `BH76_anionic` WORSE
+(62.4 -> 76.2) — the leak had been accidentally helping SN2 barriers there, so this is a net win
+in the recommended (windowed) configuration specifically, not universally. Not yet merged into
+`reactff2-llm` (worktree-local commit). `SQE_INVARIANT_STATUS.md`.
 
 **Updated status of package 23's "real, open issues" list above**: react-mode collapse — FIXED
 (`rev_excess_react_consistent`, package 24). Broken-symmetry-charge danger to a neighbouring
-molecule — FIXED, but it took THREE further packages (26 fixed the tested geometries, 28 found an
-untested window still broken, 31 found and fixed the deeper cause — a fidelity-invariant
-violation, not just a label-gap symptom, mostly but not entirely, see the SN2-TS residual above).
-The stale-CN gradient-caching finding is FIXED (package 29, plain GFN-FF); a second related bug
-found but not applied (Fix B, awaiting review). The `mu` q0-placement cusp is fixed (package 30)
-for the static rule, and was worse than characterised (a real energy jump, not just a cusp); P2's
-Phase-1 copy and P3's pair-placement/react-corner capture are NOT covered by that fix, not yet
-checked for the same defect class. The n=2-systems scope caveat is resolved to n=3 (Br2-, package
-31); I2-, O2-/S2- (architecturally blocked), ClF-, and anionic SN2 TS remain untested/unfitted.
+molecule — FIXED, but it took FOUR further packages (26 fixed the tested geometries, 28 found an
+untested window still broken, 31 found and partially fixed the deeper cause, 33 found package 31's
+fix was itself incomplete and closed the invariant exactly). The stale-CN gradient-caching finding
+is FIXED (package 29, plain GFN-FF); a second related bug found and also applied (Fix B, package
+32). The `mu` q0-placement cusp is fixed (package 30) for the static rule, and was worse than
+characterised (a real energy jump, not just a cusp); P2's Phase-1 copy and P3's pair-placement/
+react-corner capture are NOT covered by that fix, not yet checked for the same defect class. The
+n=2-systems scope caveat is resolved to n=3 (Br2-, package 31), with I2-/ClF- campaigns and an
+O2-/S2- pi*-detection design in progress as of package 33.

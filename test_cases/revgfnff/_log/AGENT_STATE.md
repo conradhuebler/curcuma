@@ -220,6 +220,21 @@ in place. `rev_sqe_virtual_pairs` was already documented as the package-31 recom
 further action needed for that half of the operator's decision. Full detail:
 `STALE_CN_STATUS.md` §11, `WORK_STATUS.md` §32.
 
+**Package 33 (2026-09-25): the SN2-TS leak was never separate — package 31's fix was
+incomplete, this one is exact.** The 3 SN2-TS cases `rev_sqe_virtual_pairs` couldn't fix are the
+visible tip of a general Phase-2 leak: the SQE pair list isn't filtered by constraint-group
+membership, so charge (0.62-0.69 e) crosses supposedly-fixed group boundaries via a re-perceived
+C-X bond. **Package 31's "s_max=1.0 unaffected" claim is WRONG**: at the default (no-window)
+setting, 15 GMTKN55 structures fail by up to -137 kcal/mol with `virtual_pairs` on, 9 of them
+NEUTRAL; Cl2-/F2-/Br2- themselves fail -100/-200/-108 kcal/mol in an untested distance band. New
+opt-in `rev_sqe_group_pairs_only` (+`virtual_pairs`) achieves the invariant EXACTLY (2e-14 e) on
+all 2462 GMTKN55 structures + 42 scans — a complete fix, not 12/15. In the recommended setting:
+curves barely move, but `BH76_anionic` (the ORIGINAL stage-2 roadmap target) improves 73.8->64.3.
+**Non-uniform**: in `harris` WITHOUT the window, the SAME fix makes `BH76_anionic` WORSE
+(62.4->76.2) — the leak had been accidentally helping there. Committed worktree-local only
+(`b2588309`, branch `worktree-agent-a51e81dadcf7f4b52`), not yet merged into `reactff2-llm`. Full
+detail: `SQE_INVARIANT_STATUS.md`, `WORK_STATUS.md` §33.
+
 Full detail: `docs/REV_GFNFF_STAGE1.md` (package 15), `FABLE_REVIEW_3.md` (Q1-Q4),
 `STAGE2_B2_STATUS.md` (package 18), `P2P3_STATUS.md` (package 23),
 `P2P3_ALTERNATIVES_STATUS.md` (package 24), `P2P3_HARRIS_STATUS.md` (package 25),

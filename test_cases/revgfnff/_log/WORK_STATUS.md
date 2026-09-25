@@ -3244,3 +3244,109 @@ duplicate C6-refresh fixes; deciding the two test re-pins; deciding whether to a
 multi-gpu numeric-affecting defaults (pair-list refresh cadence, H-H-via-bpair, ATM off) on this
 branch. GPU-specific code (CUDA/ROCm/Vulkan, the distributed eigensolve/gradient/EEQ work) was not
 compiled or run anywhere in this - no GPU/SDK available in this environment.
+
+# Package 33 — the SN2-TS invariant leak was not a separate defect, and package 31's fix was incomplete (2026-09-25)
+
+Follow-up to package 31 (the operator chose "deepen the X2- strand", including root-causing the 3
+SN2-TS cases `rev_sqe_virtual_pairs` could not fix). Executed in an isolated worktree
+(`agent-a51e81dadcf7f4b52`, commit `b2588309` on branch `worktree-agent-a51e81dadcf7f4b52`, based
+on `reactff2-llm` `63a3e4de` — not yet merged into the main branch). Full detail:
+`SQE_INVARIANT_STATUS.md` (in that worktree).
+
+**Root cause found**: the 3 SN2 transition states were never a separate, isolated problem — they
+are the most visible members of a much larger class. Pass 1 splits an X-CH3-Y-type TS into THREE
+fragments; each `frag_charge_model ensemble` variant then re-perceives the C-X bond toward
+whichever halide currently carries the charge in that variant. The SQE pair list (which atom pairs
+get split-charge treatment) is simply the bond list, **not filtered by constraint-group
+membership** — so a C-X pair spanning two different fixed-sum charge groups gets included in the
+solve anyway, leaking 0.62-0.69 e across a boundary meant to be hard-constrained. This is the exact
+Phase-2 counterpart of a Phase-1 leak that P2 already guards against — the guard was simply never
+extended to Phase 2's SQE solver.
+
+**The scope is much wider than package 31 reported, and one of its own claims is wrong**:
+package 31's statement "s_max=1.0 [the default, no-window setting] is unaffected" is **incorrect**.
+At the default s_max=1.0 with `virtual_pairs` on, **15 GMTKN55 structures fail by up to -137
+kcal/mol — 9 of them NEUTRAL** (PX13, WCPT18, BH76 RKT reactions), not anionic and not SN2. Cl2-/
+F2-/Br2- themselves also fail, by ~-100/-200/-108 kcal/mol, specifically in the untested distance
+band between the pass-1 fragment split and the static bond cutoff — a range the curve-rms checks
+never happened to sample, which is why this stayed hidden until now.
+
+**The fix, much more complete than package 31's**: `-gfnff.rev_sqe_group_pairs_only` (opt-in, used
+together with `rev_sqe_virtual_pairs`) drops any SQE pair whose atoms lie in different constraint
+groups — about 10 lines in `revSolveSplitCharges`, the core solver untouched. **With both flags,
+SQE(kappa=0) equals constrained EEQ EXACTLY in every corner of all 2462 GMTKN55 structures (worst
+difference 2e-14 e) and in all 42 scan cases** — a complete closure of the invariant, not the 12/15
+partial result package 31 reported.
+
+**Verified, flag off**: bit-identical to the pre-change baseline across GMTKN55 (4 configs)/MOR41/
+S30L-CI/the 1379-frame fit-harness (4 configs)/the Cl2-/F2-/Br2- curves/class-A harness/label gaps.
+`test_gfnff_sqe` 63/63 (two new blocks added). Full `ctest`: 12 failures, exactly package 31's
+pre-existing list (8 additional first-run failures were a worktree artefact — tests hardcoding
+`../release/curcuma`, resolved once that path existed there, not a real regression).
+
+**Verified, flag on, in the currently-recommended setting** (`harris` + `frag_charge_model
+ensemble` + `s_max=1.2` + `virtual_pairs`): Cl2-/F2-/Br2- full-grid rms essentially unchanged
+(9.69/9.73/9.51 kcal/mol — only 2 band points per curve move, +0.01 to +1.25). Fit-harness loss
+5392 -> 5098; **`BH76_anionic` MAD 73.8 -> 64.3 — a real improvement to the ORIGINAL stage-2
+headline target** (the roadmap's actual acceptance metric, not the X2- side investigation).
+Costs: PX13 +2.7 kcal/mol worse, F2- anchored rms +0.7 worse.
+
+**An important non-uniformity, found and reported honestly, not smoothed over**: this trade-off is
+NOT the same in every configuration. In `harris` WITHOUT the window (s_max=1.0), `BH76_anionic`
+gets WORSE with the fix (62.4 -> 76.2) — the leak had been accidentally HELPING SN2 barriers there,
+the same "a bug was masking/compensating for a separate defect" pattern this session has hit
+several times before (Known Issue #17's WATER27/BH76RC, package 26's SIE4x4/BH76RC). So this fix is
+a net win in the recommended (windowed) configuration specifically, not universally.
+
+**Recommendation, awaiting operator decision**: add `rev_sqe_group_pairs_only` to the recommended
+X2- configuration (now: `harris` + `frag_charge_model ensemble` + `s_max=1.2` + `virtual_pairs` +
+`group_pairs_only`) — the numbers favour yes for that specific combination. A small residual
+eeq-side difference (max 0.07 kcal/mol, 21 structures, traced to `eeq` mode reusing
+initialisation-time charges rather than an SQE defect) was found, recorded, not pursued.
+
+**Not yet done**: this commit is worktree-local, not yet merged into `reactff2-llm` (three other
+worktrees were also active on the same branch tip when this ran — reconciling all of today's
+parallel worktree branches together is a separate, later step). Docs (`REV_GFNFF_STAGE2.md`)
+deliberately not touched by the implementing agent, to avoid conflicts with the other parallel
+worktrees — the orchestrator's job next, including correcting package 31's now-superseded "12/15,
+s_max=1.0 unaffected" claim.
+
+# Side-thread, continued — multi-gpu merge finalized on `reactff2-llm` (2026-09-25)
+
+Follow-up to the earlier side-thread. Merged `reactff2-llm-merge-multigpu` into the real
+`reactff2-llm` branch (3 commits: `df839027` merge, `228f5d55` duplicate-fix removal,
+`63e13dc6` re-pins). Not pushed. Full detail: `MULTIGPU_MERGE_STATUS.md`.
+
+**The duplicate C6 fix, resolved as instructed and verified, not assumed**: both branches'
+implementations compute the identical C6 from the current CN; ours ADDITIONALLY refreshes every
+stored rev-gfnff corner list (multi-gpu's did not) — **this directly answers the open vault
+question about stale C6 in inactive topology-blend corners; see below**. Verified: MD trajectories
+and optimised geometries byte-identical (gfnff, triose/caffeine) with only our fix present.
+Multi-gpu's `refreshDispersionC6` removed; the user-facing `dispersion_c6_update` PARAM stays,
+now backed by our implementation.
+
+**Test re-pins done as decided**: `cli_gfnff_04` (ATM off) plus the stage-3 revisit comment at
+`dispersion_atm` in `gfnff.h`. `cli_gfnff_05` was NOT in the original brief but moved for the same
+reason (1.2e-9 Eh) — the agent correctly caught and re-pinned it too, same root cause.
+
+**A NEW, genuine problem found, NOT resolved by any prior decision, flagged for the operator**:
+`cli_simplemd_20`'s SHIPPED-DEFAULT arm (not the control arm, which was already accepted as
+improved) now violates its 150 kJ/mol bound, hitting 224. Investigated properly rather than
+re-pinned reflexively: 12 replicate runs show 1/12 violations before this merge, 2/12 after — not
+statistically distinguishable from the SAME rare, chaotic event the test's own header already
+describes (matching this whole session's own "one trajectory is not a sample" lesson, memory
+`revgfnff-tail-needs-replicates`). Bounds left unchanged; test left failing; genuinely awaiting an
+operator call (tighten the replicate count? loosen the bound to match the true violation rate?
+accept as a rare, known, non-deterministic failure mode?).
+
+**Isolation of the multi-gpu-introduced numeric changes, rigorously checked**: GMTKN55(2462)/
+MOR41(95)/S30L-CI(90) energies do move after the merge — but with FOUR specific multi-gpu
+defaults switched back off (the ATM term, a new H...H repulsion rule via `bpair`, two HB/XB
+pruning cutoffs), **all three sets reproduce the pre-merge binary bit-for-bit**. Every observed
+shift is fully attributable to exactly those four defaults, nothing else leaked in; largest shift
+0.066 kcal/mol; GMTKN55-vs-xtb MAD 0.860->0.859 (unchanged). gfn1/gfn2 (MOR41, GMTKN55-gfn2)
+completely unaffected. GPU code still unverified (no GPU/SDK here, as before).
+
+Cleanup done: old worktree/branch deleted. Known Issue numbering collided a second time (multi-
+gpu's own entries vs. our #34/#35) — renumbered to #36/#37, cross-references fixed in `CLAUDE.md`,
+`AIChangelog.md`, `TODO.md`.
