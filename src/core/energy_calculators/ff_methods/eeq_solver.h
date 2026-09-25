@@ -155,7 +155,90 @@ public:
         int j = -1;         ///< second atom (p_ij flows i -> j: q_i += p, q_j -= p)
         double b = 0.0;     ///< bond order of the pair at the current geometry
         double kappa0 = 0.0;///< 1/2 (kappa_Z(i) + kappa_Z(j)) in Eh
+        /// rev-gfnff P3 (Claude Generated, Sep 23, 2026): a FLAT extra hardness in Eh, added to
+        /// kappa(b) after the form is applied, so it has no b-derivative. It is x_ij kappa_x,
+        /// with x_ij the per-pair "excess electron" perception (GFNFF::revExcessElectrons) and
+        /// kappa_x a PARAM; 0 for every pair of a neutral fragment, so the term is inert there.
+        double kappa_x = 0.0;
+        /// rev-gfnff P3 alternative "frac" (Claude Generated, Sep 23, 2026,
+        /// _log/P2P3_ALTERNATIVES_STATUS.md): fractional-charge correction factor c in [0, 1).
+        /// Adds E_x = 1/2 lambda q_i q_j with lambda = c (A_ii + A_jj - 2 A_ij) to the functional,
+        /// i.e. removes the fraction c of the pair's EEQ curvature WITHOUT localising: the
+        /// minimum of a symmetric pair stays at q_i = q_j and does not depend on q0. 0 = inert.
+        double frac_c = 0.0;
+        /// rev-gfnff P3 alternative "harris" (Claude Generated, Sep 24, 2026,
+        /// _log/P2P3_HARRIS_STATUS.md): the pair's topological excess-electron count x_ij. It is
+        /// CARRIED only (to the workspace, which adds E = x_ij g(r)); the SQE solve ignores it by
+        /// design, so the charges of a harris pair are those of kappa_x = 0.
+        double harris_x = 0.0;
     };
+
+    /**
+     * @brief Functional form of the split-charge bond hardness kappa(b)
+     *
+     * rev-gfnff stage 2 "B2" (Claude Generated, Sep 2026, docs/REV_GFNFF_STAGE2.md).
+     * The original form kappa0/b is flat in the chemically interesting window: it separates a
+     * real single bond (b ~ 0.97) from a stretched/partial one (b ~ 0.6) by only a factor 1.6,
+     * so any kappa_Z large enough to damp a half-broken pair also damps genuine intramolecular
+     * delocalisation (carboxylate resonance, nitro anions). The two alternatives below are
+     * steeper; `Inverse` stays the default so every existing result is bit-identical.
+     *
+     * b is the erf switch RevGFNFF::bondOrder(r, R2, bo2_width) and lives strictly in (0, 1)
+     * (1 inside the switching radius, 0 outside), so `Vanishing` never goes negative in
+     * practice; it is clamped at b >= 1 anyway.
+     */
+    enum class SqeKappaForm {
+        Inverse = 0,   ///< kappa0 / b            (stage-2 original)
+        Power = 1,     ///< kappa0 / b^n          (n = exponent, steeper for n > 1)
+        Vanishing = 2  ///< kappa0 (1 - b) / b    (exactly 0 at b = 1, diverges as b -> 0)
+    };
+
+    /**
+     * @brief kappa(b) and, optionally, dkappa/db for the selected form
+     *
+     * Shared by the SQE solve (EEQSolver::solveSplitChargeSystem, which needs only the value)
+     * and the workspace hardness kernel (FFWorkspace::calcSqeHardness, which needs both) so
+     * that the p the solver produces is stationary for exactly the kappa the kernel
+     * differentiates — the envelope-theorem gradient depends on that.
+     *
+     * @param kappa0   1/2 (kappa_Z(i) + kappa_Z(j)) in Eh
+     * @param b        bond order in (0, 1]; the callers clamp it at bmin first
+     * @param form     SqeKappaForm as an int
+     * @param exponent n of the Power form (ignored otherwise)
+     * @param dkdb     optional out: dkappa/db
+     */
+    static double sqeKappa(double kappa0, double b, int form, double exponent, double* dkdb = nullptr)
+    {
+        if (!(b > 0.0)) {
+            if (dkdb)
+                *dkdb = 0.0;
+            return 0.0;
+        }
+        switch (form) {
+        case static_cast<int>(SqeKappaForm::Power): {
+            const double n = (exponent > 0.0) ? exponent : 1.0;
+            const double k = kappa0 * std::pow(b, -n);
+            if (dkdb)
+                *dkdb = -n * k / b;
+            return k;
+        }
+        case static_cast<int>(SqeKappaForm::Vanishing): {
+            if (b >= 1.0) {
+                if (dkdb)
+                    *dkdb = 0.0;
+                return 0.0;
+            }
+            if (dkdb)
+                *dkdb = -kappa0 / (b * b);
+            return kappa0 * (1.0 - b) / b;
+        }
+        default: {
+            if (dkdb)
+                *dkdb = -kappa0 / (b * b);
+            return kappa0 / b;
+        }
+        }
+    }
 
     /**
      * @brief Construct EEQ solver from configuration
@@ -367,6 +450,8 @@ public:
      *                         of `pairs`, 0 for a dropped pair
      * @param use_corrections  as in calculateFinalCharges (GFN-FF passes true)
      * @param alpeeq           charge-dependent alpha from Phase 1
+     * @param kappa_form       SqeKappaForm as an int (see sqeKappa); 0 = the original kappa0/b
+     * @param kappa_exponent   n of the Power form
      * @return atomic charges q = q0 + B p
      */
     Vector calculateSplitCharges(
@@ -384,8 +469,23 @@ public:
         bool use_corrections = true,
         const std::optional<Vector>& alpeeq = std::nullopt,
         CxxThreadPool* pool = nullptr,
-        int num_threads = 1
+        int num_threads = 1,
+        int kappa_form = 0,
+        double kappa_exponent = 3.0,
+        double* e_model_out = nullptr
     );
+
+    /// rev-gfnff stage 2, soft mu q0 rule (Claude Generated, Sep 24, 2026; _log/MU_CUSP_STATUS.md):
+    /// the geometry-dependent ingredients of the Phase-2 matrix a probe was built with, so the
+    /// caller can differentiate mu_i = x_i(CN) - sum_j A_ij(r) q_j analytically:
+    /// A_ij = erf(r / sqrt(alpha_i + alpha_j)) / r for i != j (0 beyond cutoff_sq when > 0),
+    /// A_ii and every other part of x are topology constants, x_i contains cnf_i sqrt(CN_i).
+    struct ProbeGeometryTerms {
+        Vector alpha;          ///< alpha_corrected (squared), per atom
+        Vector cnf;            ///< CN prefactor of x_i
+        double cutoff_sq = 0.0;///< EEQ distance cutoff squared, 0 = none
+        bool reaction_field = false; ///< a Born matrix (geometry-dependent) was added to A
+    };
 
     /**
      * @brief Per-atom EEQ chemical potential mu_i = chi_i - (A q)_i — rev-gfnff stage 2
@@ -406,7 +506,52 @@ public:
         const std::vector<int>& hybridization,
         const std::optional<TopologyInput>& topology,
         bool use_corrections = true,
-        const std::optional<Vector>& alpeeq = std::nullopt
+        const std::optional<Vector>& alpeeq = std::nullopt,
+        ProbeGeometryTerms* terms_out = nullptr
+    );
+
+    /**
+     * @brief Phase-1 (topology) charges under the split-charge model — rev-gfnff P2
+     *
+     * Claude Generated (Sep 23, 2026), test_cases/revgfnff/_log/P2P3_STATUS.md.
+     *
+     * The same SQE system as calculateSplitCharges(), but on the PHASE-1 matrix (topological
+     * distances, integer neighbour counts, no dgam/alpeeq) that calculateTopologyCharges()
+     * builds, instead of the Phase-2 one. It exists because the Coulomb self-energy's
+     * hardness gam + dgam(qa) + sqrt(2/pi)/sqrt(alpeeq(qa)) is evaluated at the Phase-1 charges
+     * qa: if Phase 2 localises a charge (kappa > 0) while Phase 1 still delocalises it, a
+     * localised -1 sits on an atom whose hardness was built for -0.5 (worth -45.7 kcal/mol for
+     * Cl2-, CL2_COMPRESSED_STATUS.md 3). Solving Phase 1 with the same model makes qa localise
+     * with q. On a connected bond graph at kappa = 0 the result is the constrained Phase-1
+     * minimum (same argument as for Phase 2); the pairs' b should be the TOPOLOGICAL bond order
+     * (the caller passes 1), so qa stays a function of the topology alone.
+     *
+     * @param q0 reference charges (sum = total charge); pairs as in calculateSplitCharges
+     */
+    Vector calculateTopologySplitCharges(
+        const std::vector<int>& atoms,
+        const Matrix& geometry_bohr,
+        int total_charge,
+        const Vector& cn,
+        const std::optional<TopologyInput>& topology,
+        const Vector& q0,
+        const std::vector<SqePair>& pairs,
+        double bmin,
+        int kappa_form = 0,
+        double kappa_exponent = 3.0,
+        CxxThreadPool* pool = nullptr,
+        int num_threads = 1
+    );
+
+    /// rev-gfnff P2 (Claude Generated, Sep 23, 2026): mu_i = chi_i - (A q)_i on the PHASE-1
+    /// matrix, the probe the Phase-1 q0 placement rule needs (see calculateChemicalPotential).
+    Vector calculateTopologyChemicalPotential(
+        const std::vector<int>& atoms,
+        const Matrix& geometry_bohr,
+        int total_charge,
+        const Vector& cn,
+        const std::optional<TopologyInput>& topology,
+        const Vector& q
     );
 
     /**
@@ -541,9 +686,13 @@ private:
         const std::vector<SqePair>* pairs = nullptr; ///< nullptr = probe mode (mu only)
         const Vector* q0 = nullptr;                  ///< reference charges
         double bmin = 1e-3;                          ///< pairs below this bond order are dropped
+        int kappa_form = 0;                          ///< SqeKappaForm (see sqeKappa)
+        double kappa_exponent = 3.0;                 ///< n of the Power form
         Vector p;                                    ///< out: split charge per input pair
         Vector mu;                                   ///< out: chi_i - (A q0)_i per atom
         bool solved = false;                         ///< out: the SQE system was actually solved
+        double e_model = 0.0;                        ///< out (solve mode): 1/2 qAq - chi q + 1/2 sum kappa p^2 at the solution
+        ProbeGeometryTerms* terms = nullptr;         ///< out (optional): see ProbeGeometryTerms
     };
     SqeContext* m_sqe_ctx = nullptr;
 

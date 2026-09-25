@@ -1958,6 +1958,11 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
                         rec["gradient_eh_ang"] = gj;
                     }
                     rec["terms"] = calc->getEnergyDecomposition();
+                    // Claude Generated (Sep 2026): per-frame atomic charges (additive diagnostic
+                    // field; empty for methods that do not provide charges)
+                    const Vector q = calc->Charges();
+                    if (q.size() == frame.AtomCount())
+                        rec["charges"] = std::vector<double>(q.data(), q.data() + q.size());
                 }
             } catch (const std::exception& ex) {
                 rec["error"] = ex.what();

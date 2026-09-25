@@ -220,6 +220,16 @@ struct SqePairData {
     int i = -1, j = -1;    ///< the pair; p flows i -> j
     double p = 0.0;        ///< split charge (e), from the SQE solve of this corner
     double kappa0 = 0.0;   ///< 1/2 (kappa_Z(i) + kappa_Z(j)) in Eh
+    /// rev-gfnff P3 (Claude Generated, Sep 23, 2026): flat excess-electron hardness x_ij kappa_x
+    /// (Eh), added to kappa(b) with no b-derivative - the same number EEQSolver::SqePair carries.
+    double kappa_x = 0.0;
+    /// rev-gfnff P3 alternative "frac" (Claude Generated, Sep 23, 2026): fractional-charge
+    /// correction factor c (see EEQSolver::SqePair::frac_c); E_x = 1/2 c K_ij(r) q_i q_j.
+    double frac_c = 0.0;
+    /// rev-gfnff P3 alternative "harris" (Claude Generated, Sep 24, 2026,
+    /// _log/P2P3_HARRIS_STATUS.md): topological excess-electron count x_ij of the pair (0 = inert).
+    /// Adds E = x_ij g(r_ij) (RevHarrisTable::harrisG) - never enters the charge solve.
+    double harris_x = 0.0;
 };
 
 struct RevSettings {
@@ -498,6 +508,10 @@ public:
     void setSqePairs(std::vector<SqePairData> pairs) { m_sqe_pairs = std::move(pairs); }
     /// rev-gfnff stage 2: pairs with b below this are treated as rigid (no hardness term)
     void setSqeBmin(double b) { m_sqe_bmin = b; }
+    /// rev-gfnff stage 2 "B2": functional form of kappa(b) (EEQSolver::SqeKappaForm as an int)
+    /// and the exponent of the Power form. MUST be the same values the SQE solve used, otherwise
+    /// p is not stationary for the kappa this kernel differentiates and the gradient is wrong.
+    void setSqeKappaForm(int form, double exponent) { m_sqe_kappa_form = form; m_sqe_kappa_exponent = exponent; }
     const std::vector<SqePairData>& sqePairs() const { return m_sqe_pairs; }
     void updateTransitions();
 
@@ -517,6 +531,25 @@ public:
 
     /// Set D3 coordination numbers (for dynamic r0)
     void setD3CN(const Vector& cn) { m_d3_cn = cn; }
+
+    /// Set the CN read by the Coulomb self-energy's chi(CN) = chi_base + cnf*sqrt(CN) term.
+    /// Claude Generated (Sep 2026): must be refreshed on EVERY evaluation, energy-only calls
+    /// included - before, only setCNDerivatives() (gradient calls) wrote m_cn, so an energy-only
+    /// call on a reused calculator evaluated the EN term with the CN of the last gradient
+    /// geometry (see test_cases/revgfnff/_log/STALE_CN_STATUS.md).
+    void setCN(const Vector& cn) { m_cn = cn; }
+
+    /// Visit every D4 pair list - the installed one and each stored rev-gfnff corner's - so
+    /// GFNFF can refresh the per-pair C6(CN) every call (stale-CN package, Sep 2026). Only C6
+    /// may be changed; the lists themselves stay fixed. Returns the number of lists visited.
+    int forEachD4PairList(const std::function<void(std::vector<GFNFFDispersion>&)>& f)
+    {
+        int n = 0;
+        if (!m_d4_dispersions.empty()) { f(m_d4_dispersions); ++n; }
+        for (auto& c : m_corners)
+            if (!c.d4_dispersions.empty()) { f(c.d4_dispersions); ++n; }
+        return n;
+    }
 
     /// Set CN, CNF, and CN derivatives (gradient only)
     /// Claude Generated (WP4, May 2026): dcn now CNDerivStore (pair-list) instead of std::vector<SpMatrix>
@@ -611,6 +644,8 @@ private:
     Vector m_rev_bo_sum;       ///< per-atom sum_j b_ij BO_ij of the last step (rev mode)
     std::vector<SqePairData> m_sqe_pairs; ///< rev-gfnff stage 2: split-charge pairs of the slot corner
     double m_sqe_bmin = 1e-3;  ///< rev-gfnff stage 2: bond-order floor of the hardness term
+    int m_sqe_kappa_form = 0;         ///< rev-gfnff stage 2 "B2": EEQSolver::SqeKappaForm as an int
+    double m_sqe_kappa_exponent = 3.0;///< rev-gfnff stage 2 "B2": n of the Power form
     std::vector<RevTransition> m_transitions;      ///< stage 1b: transitions in flight (bit t of a corner mask)
     std::vector<TopologyState> m_corners;          ///< corner states by mask; the slot's own entry is a placeholder
     int m_slot_mask = 0;                           ///< which corner the member slot currently holds
@@ -706,7 +741,10 @@ private:
     /// stage 3b (same p1/p2 meaning, plus dr0). dr0 is the fitted r0 OFFSET in Bohr, added to the
     /// model's own (dynamic) r0 before the well coordinate x = r - r0 - dr0 is formed; it is 0
     /// for forms 1 and 2, which inherit r0 unchanged.
-    struct RevWellPar { double D = 0.0, p1 = 0.0, p2 = 0.0; int form = 0; double dr0 = 0.0; };
+    struct RevWellPar { double D = 0.0, p1 = 0.0, p2 = 0.0; int form = 0; double dr0 = 0.0;
+        /// rev-gfnff P3 (Sep 23, 2026): weight of the UNCAPPED inner branch (0 = the y = 2 cap as
+        /// always; 1 = a half-order row's full Morse-type wall). RevWellTableV2::halfOrderWeight.
+        double uncap = 0.0; };
     std::vector<RevWellPar> m_rev_well;
     /// rev-gfnff 3a(iii): the (fc, exponent, z_i, z_j) the current m_rev_well was built from.
     /// prepareWellForms() runs on every energy call (next to the share's own pass), but its

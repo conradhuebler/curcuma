@@ -24,7 +24,7 @@
  * ca = 1, dr0 = 0 reproduces rev_well_table.h's mg entry bit-for-bit, which is how the code path
  * was verified before the free-curvature fit was run.
  *
- * Binary that produced the scans: md5 dc1bbd90ff5ef83a5b6a3a01a511de20, rest qfrozen.
+ * Binary that produced the scans: md5 7da448dd82c791f5840d3e70bc8e9ffb, rest qfrozen.
  *
  * kPairEntries is keyed on the ELEMENT PAIR (well form 'mg2'); kOrderEntries adds the nominal
  * bond ORDER (1/2/3) and is interpolated at runtime on the CONTINUOUS order Bond::rev_order
@@ -32,6 +32,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 
 namespace RevWellTableV2 {
@@ -48,65 +49,121 @@ struct OrderEntry {
 };
 
 static constexpr Entry kPairEntries[] = {
-    {  6,  6,   1.009398,   1.184251,   0.352874,   0.033237 },   // C-C (n = 3, fit rms 3.60)
-    {  6, 17,   1.540973,   1.320348,   0.426292,   0.124875 },   // C-Cl (n = 1, fit rms 1.04)
-    {  6,  9,   1.293540,   1.076112,   0.644826,   0.131122 },   // C-F (n = 1, fit rms 2.47)
-    {  1,  6,   1.030660,   1.063125,   0.432171,   0.002198 },   // C-H (n = 2, fit rms 0.78)
-    {  6,  7,   0.800995,   1.227120,   0.897179,   0.068449 },   // C-N (n = 3, fit rms 2.29)
-    {  6,  8,   1.441943,   1.211688,   0.472717,   0.066592 },   // C-O (n = 3, fit rms 8.45)
-    { 17, 17,   2.360922,   1.854655,   0.734334,   0.029828 },   // Cl-Cl (n = 1, fit rms 9.53)
-    {  9, 17,   1.170167,   1.544609,   2.551371,   0.108797 },   // Cl-F (n = 1, fit rms 1.19)
-    {  1, 17,   1.845786,   1.577804,   0.486186,   0.007254 },   // Cl-H (n = 1, fit rms 2.46)
-    {  7, 17,   0.636263,   0.300000,   1.385955,  -0.046140 },   // Cl-N (n = 1, fit rms 1.19)
-    {  8, 17,   0.868520,   1.523319,   1.872198,   0.137170 },   // Cl-O (n = 1, fit rms 1.27)
-    {  9,  9,   0.550657,   1.962998,   3.720819,  -0.027992 },   // F-F (n = 1, fit rms 0.48)
-    {  1,  9,   1.643992,   1.229057,   0.778970,  -0.028521 },   // F-H (n = 1, fit rms 2.14)
-    {  7,  9,   0.672592,   0.958384,   1.100942,   0.116426 },   // F-N (n = 1, fit rms 1.85)
-    {  8,  9,   0.445930,   1.318037,   3.443174,   0.062207 },   // F-O (n = 1, fit rms 1.47)
-    {  1,  1,   1.186460,   1.114444,   0.326230,  -0.174329 },   // H-H (n = 1, fit rms 2.92)
-    {  1,  7,   1.018052,   1.142257,   0.896425,   0.038398 },   // H-N (n = 1, fit rms 0.96)
-    {  1,  8,   1.422789,   1.224739,   0.986362,  -0.014134 },   // H-O (n = 2, fit rms 3.10)
-    {  7,  7,   0.636968,   1.186609,   1.698023,   0.110107 },   // N-N (n = 3, fit rms 2.11)
-    {  7,  8,   0.633875,   1.315561,   0.711070,   0.143563 },   // N-O (n = 1, fit rms 1.15)
-    {  8,  8,   0.882680,   1.064531,   1.691750,   0.112260 },   // O-O (n = 2, fit rms 8.63)
+    {  6,  6,   1.001773,   1.184251,   0.343179,   0.046940 },   // C-C (n = 3, fit rms 3.89)
+    {  6, 17,   1.545489,   1.320348,   0.383334,   0.110113 },   // C-Cl (n = 1, fit rms 0.80)
+    {  6,  9,   1.306356,   1.076112,   0.501862,   0.096872 },   // C-F (n = 1, fit rms 1.55)
+    {  1,  6,   1.031578,   1.063125,   0.426883,   0.000094 },   // C-H (n = 2, fit rms 0.77)
+    {  6,  7,   0.815909,   1.227120,   0.814170,   0.053747 },   // C-N (n = 3, fit rms 1.83)
+    {  6,  8,   1.467046,   1.211688,   0.401442,   0.049790 },   // C-O (n = 3, fit rms 4.65)
+    { 17, 17,   1.825132,   1.854651,   1.235720,   0.034200 },   // Cl-Cl (n = 1, fit rms 1.07)
+    { 35, 35,   1.183487,   1.224448,   1.021135,   0.067712 },   // Br-Br (n = 1, fit rms 0.79) X2BR:pair br2_Br-Br class-A r2SCAN-3c, hand-inserted (_log/X2_SCOPE_STATUS.md)
+    {  9, 17,   1.173822,   1.544609,   2.347998,   0.098277 },   // Cl-F (n = 1, fit rms 1.21)
+    {  1, 17,   1.850313,   1.577804,   0.465050,   0.001089 },   // Cl-H (n = 1, fit rms 2.55)
+    {  7, 17,   0.634339,   0.300000,   1.423038,  -0.036624 },   // Cl-N (n = 1, fit rms 1.22)
+    {  8, 17,   0.870406,   1.523319,   1.727707,   0.127577 },   // Cl-O (n = 1, fit rms 1.26)
+    {  9,  9,   0.550697,   1.962998,   3.696319,  -0.028962 },   // F-F (n = 1, fit rms 0.48)
+    {  1,  9,   1.813339,   1.229057,   0.424163,  -0.150866 },   // F-H (n = 1, fit rms 0.88)
+    {  7,  9,   0.690570,   0.958384,   0.774585,   0.060032 },   // F-N (n = 1, fit rms 1.24)
+    {  8,  9,   0.446244,   1.318037,   3.391268,   0.060920 },   // F-O (n = 1, fit rms 1.46)
+    {  1,  1,   1.412702,   1.114444,   0.135202,  -0.372385 },   // H-H (n = 1, fit rms 3.88)
+    {  1,  7,   1.040014,   1.142257,   0.724591,   0.001348 },   // H-N (n = 1, fit rms 0.45)
+    {  1,  8,   1.551760,   1.224739,   0.591084,  -0.138199 },   // H-O (n = 2, fit rms 3.03)
+    {  7,  7,   0.643307,   1.186609,   1.797371,   0.090836 },   // N-N (n = 3, fit rms 1.86)
+    {  7,  8,   0.637295,   1.315561,   0.613644,   0.130082 },   // N-O (n = 1, fit rms 0.97)
+    {  8,  8,   0.880033,   1.064531,   1.176856,   0.106790 },   // O-O (n = 2, fit rms 7.45)
 };
 
 static constexpr std::size_t kPairCount = sizeof(kPairEntries) / sizeof(kPairEntries[0]);
 
 static constexpr OrderEntry kOrderEntries[] = {
-    {  1,  1, 1,   1.186460,   1.114444,   0.326230,  -0.174329 },   // H-H order 1 (n = 1, h2_H-H, fit rms 2.92)
-    {  1,  6, 1,   1.030660,   1.063125,   0.432171,   0.002198 },   // C-H order 1 (n = 2, ch4_C-H+hcn_HC-H, fit rms 0.78)
-    {  1,  7, 1,   1.018052,   1.142257,   0.896425,   0.038398 },   // H-N order 1 (n = 1, nh3_N-H, fit rms 0.96)
-    {  1,  8, 1,   1.422789,   1.224739,   0.986362,  -0.014134 },   // H-O order 1 (n = 2, ch3oh_HO-H+h2o_O-H, fit rms 3.10)
-    {  1,  9, 1,   1.643992,   1.229057,   0.778970,  -0.028521 },   // F-H order 1 (n = 1, hf_H-F, fit rms 2.14)
-    {  1, 17, 1,   1.845786,   1.577804,   0.486186,   0.007254 },   // Cl-H order 1 (n = 1, hcl_H-Cl, fit rms 2.46)
-    {  6,  6, 1,   1.172113,   1.258156,   0.352874,   0.055841 },   // C-C order 1 (n = 1, c2h6_C-C, fit rms 0.85)
-    {  6,  6, 2,   1.009398,   1.184251,   0.279188,   0.033237 },   // C-C order 2 (n = 1, c2h4_CDC, fit rms 3.60)
-    {  6,  6, 3,   0.908934,   1.024906,   0.868506,  -0.003408 },   // C-C order 3 (n = 1, c2h2_CTC, fit rms 8.27)
-    {  6,  7, 1,   0.976610,   1.330789,   0.613927,   0.078087 },   // C-N order 1 (n = 1, ch3nh2_C-N, fit rms 0.46)
-    {  6,  7, 2,   0.798420,   1.227120,   0.897179,   0.068449 },   // C-N order 2 (n = 1, ch2nh_CDN, fit rms 2.29)
-    {  6,  7, 3,   0.800995,   1.052881,   1.110581,   0.008294 },   // C-N order 3 (n = 1, hcn_CTN, fit rms 7.92)
-    {  6,  8, 1,   1.087798,   1.300313,   0.503879,   0.066592 },   // C-O order 1 (n = 1, ch3oh_C-O, fit rms 2.41)
-    {  6,  8, 2,   1.441943,   1.211688,   0.472717,   0.085735 },   // C-O order 2 (n = 1, h2co_CDO, fit rms 9.57)
-    {  6,  8, 3,   1.466511,   0.998127,   0.437568,   0.046696 },   // C-O order 3 (n = 1, co_CTO, fit rms 8.45)
-    {  6,  9, 1,   1.293540,   1.076112,   0.644826,   0.131122 },   // C-F order 1 (n = 1, ch3f_C-F, fit rms 2.47)
-    {  6, 17, 1,   1.540973,   1.320348,   0.426292,   0.124875 },   // C-Cl order 1 (n = 1, ch3cl_C-Cl, fit rms 1.04)
-    {  7,  7, 1,   0.597782,   1.253018,   1.381088,   0.199961 },   // N-N order 1 (n = 1, n2h4_N-N, fit rms 1.27)
-    {  7,  7, 2,   0.636968,   1.075029,   3.109856,   0.110107 },   // N-N order 2 (n = 1, n2h2_NDN, fit rms 2.11)
-    {  7,  7, 3,   0.809306,   1.186609,   1.698023,  -0.012700 },   // N-N order 3 (n = 1, n2_NTN, fit rms 2.16)
-    {  7,  8, 1,   0.633875,   1.315561,   0.711070,   0.143563 },   // N-O order 1 (n = 1, nh2oh_N-O, fit rms 1.15)
-    {  7,  9, 1,   0.672592,   0.958384,   1.100942,   0.116426 },   // F-N order 1 (n = 1, nf3_N-F, fit rms 1.85)
-    {  7, 17, 1,   0.636263,   0.300000,   1.385955,  -0.046140 },   // Cl-N order 1 (n = 1, ncl3_N-Cl, fit rms 1.19)
-    {  8,  8, 1,   1.167113,   1.341020,   0.209528,  -0.010912 },   // O-O order 1 (n = 1, h2o2_O-O, fit rms 13.41)
-    {  8,  8, 3,   0.598248,   0.788043,   3.173972,   0.235432 },   // O-O order 3 (n = 1, o2_ODO, fit rms 3.86)
-    {  8,  9, 1,   0.445930,   1.318037,   3.443174,   0.062207 },   // F-O order 1 (n = 1, of2_O-F, fit rms 1.47)
-    {  8, 17, 1,   0.868520,   1.523319,   1.872198,   0.137170 },   // Cl-O order 1 (n = 1, hocl_O-Cl, fit rms 1.27)
-    {  9,  9, 1,   0.550657,   1.962998,   3.720819,  -0.027992 },   // F-F order 1 (n = 1, f2_F-F, fit rms 0.48)
-    {  9, 17, 1,   1.170167,   1.544609,   2.551371,   0.108797 },   // Cl-F order 1 (n = 1, clf_F-Cl, fit rms 1.19)
-    { 17, 17, 1,   2.360922,   1.854655,   0.734334,   0.029828 },   // Cl-Cl order 1 (n = 1, cl2_Cl-Cl, fit rms 9.53)
+    {  1,  1, 1,   1.412702,   1.114444,   0.135202,  -0.372385 },   // H-H order 1 (n = 1, h2_H-H, fit rms 3.88)
+    {  1,  6, 1,   1.031578,   1.063125,   0.426883,   0.000094 },   // C-H order 1 (n = 2, ch4_C-H+hcn_HC-H, fit rms 0.77)
+    {  1,  7, 1,   1.040014,   1.142257,   0.724591,   0.001348 },   // H-N order 1 (n = 1, nh3_N-H, fit rms 0.45)
+    {  1,  8, 1,   1.551760,   1.224739,   0.591084,  -0.138199 },   // H-O order 1 (n = 2, ch3oh_HO-H+h2o_O-H, fit rms 3.03)
+    {  1,  9, 1,   1.813339,   1.229057,   0.424163,  -0.150866 },   // F-H order 1 (n = 1, hf_H-F, fit rms 0.88)
+    {  1, 17, 1,   1.850313,   1.577804,   0.465050,   0.001089 },   // Cl-H order 1 (n = 1, hcl_H-Cl, fit rms 2.55)
+    {  6,  6, 1,   1.174617,   1.258156,   0.343179,   0.051077 },   // C-C order 1 (n = 1, c2h6_C-C, fit rms 0.85)
+    {  6,  6, 2,   1.001773,   1.184251,   0.305635,   0.046940 },   // C-C order 2 (n = 1, c2h4_CDC, fit rms 3.89)
+    {  6,  6, 3,   0.920790,   1.024906,   0.786564,  -0.025162 },   // C-C order 3 (n = 1, c2h2_CTC, fit rms 7.84)
+    {  6,  7, 1,   0.979462,   1.330789,   0.587651,   0.071653 },   // C-N order 1 (n = 1, ch3nh2_C-N, fit rms 0.40)
+    {  6,  7, 2,   0.805185,   1.227120,   0.814170,   0.053747 },   // C-N order 2 (n = 1, ch2nh_CDN, fit rms 1.83)
+    {  6,  7, 3,   0.815909,   1.052881,   0.974829,  -0.016531 },   // C-N order 3 (n = 1, hcn_CTN, fit rms 7.31)
+    {  6,  8, 1,   1.095658,   1.300313,   0.446883,   0.049790 },   // C-O order 1 (n = 1, ch3oh_C-O, fit rms 2.47)
+    {  6,  8, 2,   1.467046,   1.211688,   0.401442,   0.052762 },   // C-O order 2 (n = 1, h2co_CDO, fit rms 9.40)
+    {  6,  8, 3,   1.561026,   0.998127,   0.297946,  -0.051941 },   // C-O order 3 (n = 1, co_CTO, fit rms 4.65)
+    {  6,  9, 1,   1.306356,   1.076112,   0.501862,   0.096872 },   // C-F order 1 (n = 1, ch3f_C-F, fit rms 1.55)
+    {  6, 17, 1,   1.545489,   1.320348,   0.383334,   0.110113 },   // C-Cl order 1 (n = 1, ch3cl_C-Cl, fit rms 0.80)
+    {  7,  7, 1,   0.605735,   1.253018,   1.050705,   0.166018 },   // N-N order 1 (n = 1, n2h4_N-N, fit rms 0.82)
+    {  7,  7, 2,   0.643307,   1.075029,   2.640398,   0.090836 },   // N-N order 2 (n = 1, n2h2_NDN, fit rms 1.86)
+    {  7,  7, 3,   0.801500,   1.186609,   1.797371,  -0.001950 },   // N-N order 3 (n = 1, n2_NTN, fit rms 2.41)
+    {  7,  8, 1,   0.637295,   1.315561,   0.613644,   0.130082 },   // N-O order 1 (n = 1, nh2oh_N-O, fit rms 0.97)
+    {  7,  9, 1,   0.690570,   0.958384,   0.774585,   0.060032 },   // F-N order 1 (n = 1, nf3_N-F, fit rms 1.24)
+    {  7, 17, 1,   0.634339,   0.300000,   1.423038,  -0.036624 },   // Cl-N order 1 (n = 1, ncl3_N-Cl, fit rms 1.22)
+    {  8,  8, 1,   1.143136,   1.341020,   0.332648,   0.062740 },   // O-O order 1 (n = 1, h2o2_O-O, fit rms 13.01)
+    {  8,  8, 3,   0.616930,   0.788043,   2.021064,   0.150840 },   // O-O order 3 (n = 1, o2_ODO, fit rms 1.89)
+    {  8,  9, 1,   0.446244,   1.318037,   3.391268,   0.060920 },   // F-O order 1 (n = 1, of2_O-F, fit rms 1.46)
+    {  8, 17, 1,   0.870406,   1.523319,   1.727707,   0.127577 },   // Cl-O order 1 (n = 1, hocl_O-Cl, fit rms 1.26)
+    {  9,  9, 1,   0.550697,   1.962998,   3.696319,  -0.028962 },   // F-F order 1 (n = 1, f2_F-F, fit rms 0.48)
+    {  9, 17, 1,   1.173822,   1.544609,   2.347998,   0.098277 },   // Cl-F order 1 (n = 1, clf_F-Cl, fit rms 1.21)
+    { 17, 17, 1,   1.825132,   1.854651,   1.235720,   0.034200 },   // Cl-Cl order 1 (n = 1, cl2_Cl-Cl, fit rms 1.07)
+    { 35, 35, 1,   1.183487,   1.224448,   1.021135,   0.067712 },   // Br-Br order 1 (n = 1, br2_Br-Br, fit rms 0.79) X2BR:order1 hand-inserted (_log/X2_SCOPE_STATUS.md)
 };
 
 static constexpr std::size_t kOrderCount = sizeof(kOrderEntries) / sizeof(kOrderEntries[0]);
+
+// ================================================================================================
+// HAND-MAINTAINED SECTION - NOT written by scripts/revgfnff_wellfit.py. If that script regenerates
+// this file it must carry this block over verbatim (or the rows below have to be re-added).
+//
+// rev-gfnff P3 (Claude Generated, Sep 23, 2026; test_cases/revgfnff/_log/P2P3_STATUS.md): HALF-
+// ORDER rows. A bond whose fragment carries an excess electron with no bonding slot left (Cl2-,
+// F2-: the third electron sits in sigma*, a 2c-3e bond of order 1/2) has its continuous order
+// lowered by x/2 (GFNFF::revExcessElectrons), and findOrder() below then interpolates between the
+// order-1 row above and the order-0.5 row here. A pair that has NO row here is not eligible for
+// the perception at all (hasHalfOrder()), so the mechanism is confined to where it was fitted.
+//
+// Source: DLPNO-CCSD(T)/aug-cc-pVTZ X2- curves (ref/E/{cl2m_Cl-Cl-,f2m_F-F-}_dlpno_ccsdt), NOT
+// r2SCAN-3c (whose X2- curves carry a self-interaction tail, CL2F2_CCSDT_STATUS.md). Fitted on the
+// full grid against the rest of the model evaluated with rev_sqe_phase1 + rev_excess_electron
+// (localised charges), by the scratch fit recorded in P2P3_STATUS.md. `uncap` = 1: the inner side
+// of this well is NOT capped at y = 2 (see FFWorkspace::calcBonds): the sigma* electron's extra
+// wall has no other term to live in.
+// ================================================================================================
+struct HalfOrderEntry {
+    int z1, z2;
+    double s, ca, beta, dr0;
+};
+
+static constexpr HalfOrderEntry kHalfOrderEntries[] = {
+    // fit of P2P3_STATUS.md section 3 (bonded points weight 1, reference tail beyond the static
+    // bond cutoff weight 0.3), against the rest of the model with localised charges
+    {  9,  9,   0.655464,   1.549085,   0.000000,   0.264120 },   // F-F  order 0.5 (F2-, D 45.2 kcal/mol, r_min 1.690 A)
+    { 17, 17,   1.143785,   1.162928,   0.295217,   0.600037 },   // Cl-Cl order 0.5 (Cl2-, D 34.0 kcal/mol, r_min 2.568 A)
+    { 35, 35,   1.200601,   1.136506,   0.395906,   0.531758 },   // Br-Br order 0.5 (Br2-, DLPNO-CCSD(T), D 55.2 kcal/mol, r_min 2.694 A, fit bonded rms 0.99 LOO 2.62) X2BR:half
+};
+
+static constexpr std::size_t kHalfOrderCount = sizeof(kHalfOrderEntries) / sizeof(kHalfOrderEntries[0]);
+
+/// true when the element pair has a half-order row, i.e. is eligible for the P3 perception
+inline bool hasHalfOrder(int za, int zb)
+{
+    const int z1 = za < zb ? za : zb;
+    const int z2 = za < zb ? zb : za;
+    for (std::size_t k = 0; k < kHalfOrderCount; ++k)
+        if (kHalfOrderEntries[k].z1 == z1 && kHalfOrderEntries[k].z2 == z2)
+            return true;
+    return false;
+}
+
+/// rev-gfnff P3: the half-order blend weight t in [0, 1] of a pair at a continuous order
+/// (0 at order >= 1 or for a pair without a half row, 1 at order <= 0.5). The well kernel
+/// uses it to switch the inner-side cap off in proportion (see FFWorkspace::calcBonds).
+inline double halfOrderWeight(int za, int zb, double order)
+{
+    if (!(order < 1.0) || !hasHalfOrder(za, zb))
+        return 0.0;
+    return std::min(1.0, std::max(0.0, (1.0 - order) / 0.5));
+}
 
 /// The element-pair entry, or nullptr when the class-A set has no data for that pair - the
 /// caller then falls back to the delivered Gaussian and says so at verbosity 2.
@@ -134,6 +191,28 @@ inline bool findOrder(int za, int zb, double order, double& s, double& ca, doubl
 {
     const int z1 = za < zb ? za : zb;
     const int z2 = za < zb ? zb : za;
+    // rev-gfnff P3 (Sep 23, 2026): below order 1, interpolate towards the half-order row of the
+    // pair if it has one. An order >= 1 never reaches this branch, so every existing result is
+    // bit-identical; a pair without a half row falls through to the clamp below (order-1 row).
+    if (order < 1.0) {
+        for (std::size_t h = 0; h < kHalfOrderCount; ++h) {
+            const HalfOrderEntry& he = kHalfOrderEntries[h];
+            if (he.z1 != z1 || he.z2 != z2)
+                continue;
+            const OrderEntry* one = nullptr;
+            for (std::size_t k = 0; k < kOrderCount; ++k)
+                if (kOrderEntries[k].z1 == z1 && kOrderEntries[k].z2 == z2 && kOrderEntries[k].order == 1)
+                    one = &kOrderEntries[k];
+            if (!one)
+                break;
+            const double t = std::min(1.0, std::max(0.0, (1.0 - order) / 0.5)); // 0 at order 1, 1 at 0.5
+            s = one->s + t * (he.s - one->s);
+            ca = one->ca + t * (he.ca - one->ca);
+            beta = one->beta + t * (he.beta - one->beta);
+            dr0 = one->dr0 + t * (he.dr0 - one->dr0);
+            return true;
+        }
+    }
     const OrderEntry* lo = nullptr;
     const OrderEntry* hi = nullptr;
     for (std::size_t k = 0; k < kOrderCount; ++k) {

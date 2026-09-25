@@ -26,9 +26,11 @@
 
 #include "ff_workspace.h"
 #include "cn_calculator.h"
+#include "eeq_solver.h"       // rev-gfnff stage 2 "B2": EEQSolver::sqeKappa, shared with the SQE solve
 #include "gfnff_par.h"
 #include "rev_well_table.h"   // rev-gfnff 3a(iii): AI-fitted per-element-pair well parameters
 #include "rev_well_table_v2.h" // rev-gfnff 3a(iii) step 2 + 3b: free-curvature / bond-order table
+#include "rev_harris_table.h"  // rev-gfnff P3 "harris": non-self-consistent excess-electron correction
 #include "forcefieldfunctions.h"
 #include "gfnff_geometry.h"
 #include "src/core/units.h"
@@ -256,6 +258,19 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
             const double dyc_dy = shareMinOneD(t, kYCapWidth);
             well = -wp.D * (2.0 * yc - yc * yc);
             dwell_dx = -wp.D * (2.0 - 2.0 * yc) * dyc_dy * dy_dx;
+            // rev-gfnff P3 (Claude Generated, Sep 23, 2026): a half-order (2c-3e) row keeps the
+            // Morse-type inner wall instead of the cap. The extra electron in sigma* is what makes
+            // X2- repel at compression where X2 still binds, and no other term knows the electron
+            // count; the plain repulsion term (identical for X2 and X2-) is +51 kcal/mol at
+            // Cl2- r = 1.52 A against a reference of +183. Blended in by the half-order weight u,
+            // so an order >= 1 (u = 0, every existing bond) is bit-identical.
+            if (wp.uncap > 0.0) {
+                const double u = wp.uncap;
+                const double wu = -wp.D * (2.0 * y - y * y);
+                const double dwu = -wp.D * (2.0 - 2.0 * y) * dy_dx;
+                well = (1.0 - u) * well + u * wu;
+                dwell_dx = (1.0 - u) * dwell_dx + u * dwu;
+            }
             new_form = true;
         }
         energy = new_form ? well : well * w;
@@ -2523,6 +2538,12 @@ void FFWorkspace::prepareWellForms()
             m_rev_well[p] = RevWellPar{ D, v2_ca * std::sqrt(alpha / v2_s),
                                         v2_beta / (kBohrPerAng * kBohrPerAng), 3,
                                         v2_dr0 * kBohrPerAng };
+            // rev-gfnff P3 (Sep 23, 2026): 0 for every order >= 1 and every pair without a
+            // half-order row, so only a perceived 2c-3e bond (Bond::rev_order < 1) uncaps.
+            if (m_rev.well_form == 4) {
+                const double ord = (m_rev.well_order_override >= 0.0) ? m_rev.well_order_override : b.rev_order;
+                m_rev_well[p].uncap = RevWellTableV2::halfOrderWeight(b.z_i, b.z_j, ord);
+            }
         } else if (m_rev.well_form == 1) {
             const double D = e->mg_s * kb;
             m_rev_well[p] = RevWellPar{ D, std::sqrt(alpha / e->mg_s),
@@ -2890,7 +2911,57 @@ void FFWorkspace::calcSqeHardness(bool gradient)
     for (const SqePairData& sp : m_sqe_pairs) {
         if (sp.i < 0 || sp.j < 0 || sp.i >= m_natoms || sp.j >= m_natoms)
             continue;
-        if (sp.kappa0 == 0.0 || sp.p == 0.0)
+        // rev-gfnff P3 alternative "frac" (Claude Generated, Sep 23, 2026,
+        // _log/P2P3_ALTERNATIVES_STATUS.md): E_x = 1/2 c K_ij(r) q_i q_j with the pair's EEQ
+        // curvature K_ij = A_ii + A_jj - 2 A_ij(r), A_ii = gam_i + sqrt(2/pi)/sqrt(alp_i),
+        // A_ij = erf(r / sqrt(alp_i + alp_j)) / r - the same matrix the SQE solve used, so q is
+        // stationary for E + E_x and the gradient at fixed q is complete:
+        // dE_x/dr = -c q_i q_j dA_ij/dr.
+        if (sp.frac_c > 0.0 && m_eeq_charges.size() == m_natoms && m_coul_alp.size() == m_natoms
+            && m_coul_gam.size() == m_natoms && m_coul_alp(sp.i) > 0.0 && m_coul_alp(sp.j) > 0.0) {
+            const double sqrt_2_over_pi = 0.797884560802865;
+            const Eigen::Vector3d dvec = m_geometry.row(sp.i) - m_geometry.row(sp.j);
+            const double rr = dvec.norm();
+            if (rr > 1e-8) {
+                const double qi = m_eeq_charges(sp.i), qj = m_eeq_charges(sp.j);
+                const double Aii = m_coul_gam(sp.i) + sqrt_2_over_pi / std::sqrt(m_coul_alp(sp.i));
+                const double Ajj = m_coul_gam(sp.j) + sqrt_2_over_pi / std::sqrt(m_coul_alp(sp.j));
+                const double g = 1.0 / std::sqrt(m_coul_alp(sp.i) + m_coul_alp(sp.j));
+                const double ef = curcuma_erf(g * rr);
+                const double Aij = ef / rr;
+                e_sqe += 0.5 * sp.frac_c * (Aii + Ajj - 2.0 * Aij) * qi * qj;
+                if (gradient) {
+                    const double dAdr = g * std::exp(-g * g * rr * rr) * 1.1283791670955126 / rr - ef / (rr * rr);
+                    const double dEdr = -sp.frac_c * qi * qj * dAdr;
+                    const Eigen::Vector3d gx = (dEdr / rr) * dvec;
+                    m_result_gradient.row(sp.i) += gx.transpose();
+                    m_result_gradient.row(sp.j) -= gx.transpose();
+                }
+            }
+        }
+        // rev-gfnff P3 alternative "harris" (Claude Generated, Sep 24, 2026,
+        // _log/P2P3_HARRIS_STATUS.md): E_h = x_ij g(r_ij). x_ij is the corner's topological
+        // excess-electron count (a constant within the corner), so dE_h/dr = x_ij g'(r) is the
+        // whole derivative - no charge dependence, nothing of it reaches the SQE solve.
+        // The term exists exactly where the pair's charge is free: a pair with b <= bmin is
+        // dropped from the SQE solve (EEQSolver pair selection, same b), its charge is pinned at
+        // q0 and it carries no delocalisation energy to correct (measured in react mode: without
+        // this gate the correction outlived the delocalisation by +147 / +247 kcal/mol).
+        if (sp.harris_x != 0.0 && static_cast<int>(m_atom_types.size()) == m_natoms) {
+            const Eigen::Vector3d dvec = m_geometry.row(sp.i) - m_geometry.row(sp.j);
+            const double rr = dvec.norm();
+            double g = 0.0, dgdr = 0.0;
+            if (rr > 1e-8 && revOrder(sp.i, sp.j, rr, nullptr) > m_sqe_bmin
+                && RevHarrisTable::harrisG(m_atom_types[sp.i], m_atom_types[sp.j], rr, g, dgdr)) {
+                e_sqe += sp.harris_x * g;
+                if (gradient) {
+                    const Eigen::Vector3d gx = (sp.harris_x * dgdr / rr) * dvec;
+                    m_result_gradient.row(sp.i) += gx.transpose();
+                    m_result_gradient.row(sp.j) -= gx.transpose();
+                }
+            }
+        }
+        if ((sp.kappa0 == 0.0 && sp.kappa_x == 0.0) || sp.p == 0.0)
             continue;
         Eigen::Vector3d ri = m_geometry.row(sp.i), rj = m_geometry.row(sp.j);
         const Eigen::Vector3d d = ri - rj;
@@ -2904,10 +2975,19 @@ void FFWorkspace::calcSqeHardness(bool gradient)
         const bool clamped = (b_raw <= bmin);
         const double b = clamped ? bmin : b_raw;
         const double pp = sp.p * sp.p;
-        e_sqe += 0.5 * sp.kappa0 * pp / b;
+        // rev-gfnff stage 2 "B2": kappa(b) and dkappa/db come from the one shared function the
+        // SQE solve used, so p is stationary for exactly this kappa and the envelope-theorem
+        // gradient below is complete. form 0 (kappa0/b, the default) is bit-identical to the
+        // original hard-coded expression.
+        double dkdb = 0.0;
+        const double kap = EEQSolver::sqeKappa(sp.kappa0, b, m_sqe_kappa_form, m_sqe_kappa_exponent,
+                                               gradient ? &dkdb : nullptr);
+        // rev-gfnff P3 (Sep 23, 2026): the flat excess-electron hardness adds energy only - it
+        // does not depend on b, so dkdb above is the whole derivative.
+        e_sqe += 0.5 * (kap + sp.kappa_x) * pp;
         if (!gradient || clamped)
             continue;
-        const double dEdr = -0.5 * pp * sp.kappa0 / (b * b) * dbdr;
+        const double dEdr = 0.5 * pp * dkdb * dbdr;
         const Eigen::Vector3d g = (dEdr / r) * d;
         m_result_gradient.row(sp.i) += g.transpose();
         m_result_gradient.row(sp.j) -= g.transpose();

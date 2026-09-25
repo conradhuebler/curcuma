@@ -532,6 +532,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/ff_methods/gfnff_method.cpp
         src/core/energy_calculators/ff_methods/gfnff_torsions.cpp
         src/core/energy_calculators/ff_methods/gfnff_inversions.cpp
+        src/core/energy_calculators/ff_methods/gfnff_frag_charge.cpp
         src/core/energy_calculators/ff_methods/ff_workspace.cpp
         src/core/energy_calculators/ff_methods/ff_workspace_gfnff.cpp
         src/core/energy_calculators/ff_methods/ff_workspace_uff.cpp

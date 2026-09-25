@@ -86,6 +86,7 @@ struct SetupScope {
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
 #include "src/core/energy_calculators/dispersion/d4param_generator.h"
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"
+#include "src/core/energy_calculators/ff_methods/rev_well_table_v2.h"  // rev-gfnff P3 (Sep 23, 2026): half-order eligibility
 #include "src/core/energy_calculators/ff_methods/fast_exp.h"  // Claude Generated (May 2026, WP-D Stage B): SIMD exp(-x^2) for dcn step 3
 #include "src/core/energy_calculators/ff_methods/param_generator_thread.h"  // Claude Generated (Feb 2026): Parallel parameter generation
 #include "src/core/config_manager.h"
@@ -642,6 +643,34 @@ GFNFF::GFNFF(const json& parameters)
     }
     m_cache_topology = m_parameters.value("cache_topology", true);
     m_print_timing = m_parameters.value("print_timing", true);
+
+    // frag_charge_model (Claude Generated, Sep 24, 2026; default flipped Sep 24, 2026 - see
+    // test_cases/revgfnff/_log/FRAG_CHARGE_STATUS.md section 17): chemistry-aware, continuous
+    // fragment charge placement. Default "ensemble" at frag_charge_s_max 1.0 (placement rule
+    // only, no continuous window) fixes the index bug of section 3a; "reference" reproduces the
+    // pprcht/xtb rule bit for bit. These fallbacks are the ACTUAL default whenever the caller's
+    // json does not carry the key (most CLI paths do not merge full ParameterRegistry defaults
+    // into controller["gfnff"] - see the identical caveat on cache_topology/print_timing above
+    // and the getDefaultJson() comments elsewhere in this file), so they must stay in sync with
+    // the PARAM macro defaults in gfnff.h by hand.
+    {
+        std::string fm = m_parameters.value("frag_charge_model", std::string("ensemble"));
+        std::transform(fm.begin(), fm.end(), fm.begin(), [](unsigned char c) { return std::tolower(c); });
+        if (fm != "reference" && fm != "ensemble") {
+            CurcumaLogger::warn(fmt::format("GFNFF: unknown frag_charge_model '{}', using 'reference'", fm));
+            fm = "reference";
+        }
+        m_frag_ensemble = (fm == "ensemble");
+        m_frag_s_max = std::max(1.0, m_parameters.value("frag_charge_s_max", 1.0));  // 1.0 = no window (placement rule only)
+        m_frag_tau_eh = std::max(1e-6, m_parameters.value("frag_charge_tau", 1.0)) / 627.5094740631;
+        m_frag_sigma = std::max(1e-6, m_parameters.value("frag_charge_sigma", 0.05));
+        m_frag_max_edges = std::max(0, std::min(10, m_parameters.value("frag_charge_max_edges", 4)));
+        m_frag_max_placements = std::max(1, m_parameters.value("frag_charge_max_placements", 6));
+        if (m_frag_ensemble && m_topology_mode == "react") {
+            CurcumaLogger::warn("GFNFF: frag_charge_model ensemble is not available in react topology mode - using the reference rule");
+            m_frag_ensemble = false;
+        }
+    }
 
     // Initialize EEQ solver (Dec 2025 - Phase 3)
     // CRITICAL FIX (Dec 25, 2025): Pass global CurcumaLogger verbosity to EEQSolver
@@ -1465,6 +1494,15 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         if (m_workspace) {
             m_workspace->setGeometry(m_geometry_bohr);
             m_workspace->setD3CN(m_last_cn);
+            // Stale-CN fix (Claude Generated, Sep 2026): the Coulomb self-energy reads
+            // chi(CN) = chi_base + cnf*sqrt(CN) from the workspace's m_cn, which only the
+            // gradient branch below used to set (setCNDerivatives). An energy-only call on a
+            // reused calculator therefore evaluated the EN term with the CN of the last
+            // gradient geometry, or with the topology-build CN (chi_static) if there was none.
+            // Hand the current CN over on every call. Static-CN mode is unaffected: there
+            // m_last_cn is the captured CN (reuse_cn skips the recompute above), which is
+            // exactly what the gradient path would have handed over too.
+            m_workspace->setCN(m_last_cn);
         }
     }
 
@@ -1692,6 +1730,51 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
                 }
             }
         }
+    }
+
+    // Stale-CN fix B (Claude Generated, Sep 2026): refresh the per-pair D4 C6(CN) at the
+    // current CN. The pair list's C6 was baked once in generateGFNFFParameterSet() (Gaussian CN
+    // weights of the topology-build geometry) and never updated, while the analytic gradient
+    // already carries dC6/dCN (m_dc6dcn_ptr) and the reference evaluates C6(CN) every call
+    // (gfnff_engrad.F90:323, d3_gradient(..., cn, dcn, ...)). On a reused calculator (MD, opt,
+    // FD, batch reuse) the energy was therefore a frozen-C6 energy whose derivative is not the
+    // force. Static-CN mode keeps its frozen C6 (reuse_cn). The dc6dcn DERIVATIVE and its P1a
+    // CN-change threshold (updateCNValuesForGradient) are untouched.
+    if (!gpu_only && !reuse_cn && m_d4_generator && m_workspace && m_last_cn.size() == m_atomcount) {
+        bool weights_fresh = false;
+        auto t_c6 = std::chrono::high_resolution_clock::now();
+        auto* pool = threadPool();
+        m_workspace->forEachD4PairList([&](std::vector<GFNFFDispersion>& d4_pairs) {
+            if (!weights_fresh) {
+                if (pool) pool->setActiveThreadCount(m_threads);
+                std::vector<double> cn_std(m_last_cn.data(), m_last_cn.data() + m_atomcount);
+                m_d4_generator->refreshC6WeightsForCN(cn_std, pool, m_threads);
+                weights_fresh = true;
+            }
+            // getChargeWeightedC6 is const and reads only per-atom caches: pairs are independent.
+            const int np = static_cast<int>(d4_pairs.size());
+            auto c6_worker = [&](int t_id, int T) {
+                const int b = static_cast<int>(static_cast<long long>(np) * t_id / T);
+                const int e = static_cast<int>(static_cast<long long>(np) * (t_id + 1) / T);
+                for (int k = b; k < e; ++k) {
+                    auto& d = d4_pairs[k];
+                    d.C6 = m_d4_generator->getChargeWeightedC6(m_atoms[d.i], m_atoms[d.j], d.i, d.j);
+                }
+            };
+            const int T = (pool && m_threads > 1 && np > 4096) ? m_threads : 1;
+            if (T > 1) {
+                std::vector<std::future<void>> futures;
+                futures.reserve(T - 1);
+                for (int t = 1; t < T; ++t)
+                    futures.push_back(pool->enqueue(c6_worker, t, T));
+                c6_worker(0, T);
+                for (auto& f : futures) f.get();
+            } else {
+                c6_worker(0, 1);
+            }
+        });
+        if (do_timing && weights_fresh)
+            t_d4_gw += std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_c6).count();
     }
 
     // WP-P1 (May 2026): cache phase-timings into a member so MD diagnostics can read them
@@ -2758,6 +2841,19 @@ double GFNFF::continuousBondOrder(int i, int j, const TopologyInfo& topo) const
 
 double GFNFF::Calculation(bool gradient)
 {
+    // frag_charge_model ensemble (Claude Generated, Sep 24, 2026): the master runs its own
+    // reference evaluation first (it owns the topology perception and its refresh logic), then
+    // the charge variants are blended on top of it. Nothing below changes when the model is off.
+    m_frag_blend_valid = false;
+    m_frag_last_nvariants = 0;
+    const double e_master = calculationSingle(gradient);
+    if (m_frag_ensemble && !m_frag_is_variant && m_charge != 0 && m_initialized)
+        return fragEnsembleBlend(gradient, e_master);
+    return e_master;
+}
+
+double GFNFF::calculationSingle(bool gradient)
+{
     // Claude Generated (February 2026): Start total calculation timer for verbosity 1+
     auto calc_start = std::chrono::high_resolution_clock::now();
 
@@ -2846,12 +2942,20 @@ double GFNFF::Calculation(bool gradient)
 
     // Phase A: CN + EEQ calculation (delegated to extracted helper)
     PrepTiming prep_timing{};  // zero-initialize so unused fields are 0.0
+    m_rev_q0_blend.reset();    // soft mu q0 rule: set again by this step's slot-corner solve
+    m_rev_q0_blend_de = 0.0;
     {
         auto t0 = std::chrono::high_resolution_clock::now();
         prepareCNAndEEQ(gradient, false, nullptr, false, &prep_timing);
         t_cn = std::chrono::duration<double, std::milli>(
             std::chrono::high_resolution_clock::now() - t0).count();
     }
+    // soft mu q0 rule (Claude Generated, Sep 24, 2026; _log/MU_CUSP_STATUS.md): m_charges stays
+    // placement 0's charges (the ones the workspace's E_0 was evaluated with). Deliberately NOT the
+    // weighted average: m_charges seeds the react-corner q0 rule (revSqeQ0Rounded), and a blended
+    // symmetric X2- (-1/2, -1/2) would put that rounding on its knife edge - measured: up to
+    // 37 kcal/mol moved on class-E react scans. The reported charges can therefore switch at the
+    // point where two placements' weights cross 0.5; energy and force do not.
 
     // Dynamic HB/XB re-detection (delegated to extracted helper)
     {
@@ -2876,6 +2980,14 @@ double GFNFF::Calculation(bool gradient)
     double energy_hartree;
 
     energy_hartree = m_workspace->calculate(gradient);
+    // rev-gfnff stage 2, soft mu q0 rule (Sep 24, 2026): the workspace evaluated placement 0;
+    // the other placements enter as sum_p w_p E_p - E_0 (0 unless placements are near-tied)
+    if (m_rev_q0_blend) {
+        energy_hartree += m_rev_q0_blend_de;
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info(fmt::format("rev SQE soft mu q0 blend: {} placements, energy correction {:+.10f} Eh",
+                m_rev_q0_blend_e.size(), m_rev_q0_blend_de));
+    }
     t_threads = std::chrono::duration<double, std::milli>(
         std::chrono::high_resolution_clock::now() - t_ff_start).count();
 
@@ -2921,6 +3033,9 @@ double GFNFF::Calculation(bool gradient)
         // Previous division by BOHR_TO_ANGSTROM was also incorrect and reduced gradients
         // Correct approach: Use gradient directly as returned by ForceField
         m_gradient = m_workspace->gradient();  // Eh/Bohr, no conversion needed
+        // rev-gfnff stage 2, soft mu q0 rule (Sep 24, 2026): q0's own geometry dependence
+        if (m_rev_q0_blend)
+            m_gradient += revSqeQ0BlendGradient();
 
         // Claude Generated (Mar 2026): Add ALPB solvation gradient
         // WP-G (May 2026): ALPB takes ColumnMajor Matrix; convert at the boundary.
@@ -3592,6 +3707,20 @@ std::string GFNFF::computeTopologyFingerprint() const
         data += fmt::format("|SQE={},{:.6g}", m_rev_sqe ? 1 : 0, m_rev_sqe_bmin);
         for (const auto& kv : m_rev_sqe_kappa)
             data += fmt::format(",k{}={:.6f}", kv.first, kv.second);
+        // B2 (Sep 2026): the kappa(b) form and the q0 placement rule change the charges too
+        data += fmt::format(",kf={},kn={:.4f},q0={}", m_rev_sqe_kappa_form, m_rev_sqe_kappa_exponent,
+            m_rev_sqe_q0_mu ? "mu" : "uniform");
+        if (m_rev_sqe_q0_mu)   // soft mu rule (Sep 24, 2026)
+            data += fmt::format(",q0tau={:.6g}", m_rev_sqe_q0_mu_tau);
+        // P2/P3 (Sep 23, 2026): both change the Phase-1 charges / alpeeq / dgam the cache stores
+        if (m_rev_sqe_phase1 || m_rev_excess)
+            data += fmt::format(",p1={},xs={},xk={:.6f}", m_rev_sqe_phase1 ? 1 : 0, m_rev_excess ? 1 : 0, m_rev_excess_kappa);
+        if (m_rev_excess && m_rev_excess_frac)
+            data += fmt::format(",xm=frac,xc={:.6f}", m_rev_excess_frac_c);
+        if (m_rev_excess && m_rev_excess_harris)
+            data += ",xm=harris";
+        if (m_rev_excess && m_rev_excess_react_consistent)
+            data += ",xrc=1";
     }
     // Use std::hash for a fast, non-cryptographic fingerprint
     size_t hash = std::hash<std::string>{}(data);
@@ -8782,6 +8911,14 @@ std::vector<Bond> GFNFF::generateBondsNative(const TopologyInfo& topo_info) cons
                 // Filled unconditionally (it costs one table lookup per bond); only the mg3 well
                 // form reads it.
                 b.rev_order = continuousBondOrder(i, j, topo_info);
+                // rev-gfnff P3 (Sep 23, 2026): an excess electron in sigma* lowers the order by
+                // x/2 (Cl2-: 1 -> 0.5). A topology constant like the order itself; the pair is
+                // in rev_excess only when perceived, so everything else is untouched.
+                if (m_rev_excess && !topo_info.rev_excess.empty()) {
+                    auto it = topo_info.rev_excess.find({ std::min(i, j), std::max(i, j) });
+                    if (it != topo_info.rev_excess.end())
+                        b.rev_order -= 0.5 * it->second;
+                }
 
                 bonds.push_back(b);
             }
@@ -9886,6 +10023,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     m_frag_carry_list.clear();
     m_frag_carry_qfrag.clear();
     TopologyInfo topo = calculateTopologyInfoOnce();
+    m_frag_split_pass = (topo.nfrag > 1) ? 1 : 0;
 
     if (topo.topology_charges.size() != m_atomcount) return topo;
 
@@ -9944,6 +10082,11 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         m_frag_carry_qfrag = topo.qfrag;
     }
     TopologyInfo topo2 = calculateTopologyInfoOnce();
+    // frag_charge_model ensemble: which q-loop pass decided the fragmentation (1 = pass 1 and
+    // carried, 2 = pass 1 saw one fragment and the charge-shrunk pass 2 split it). The contact
+    // window is anchored at that pass's bond threshold, so lambda = 0 exactly where the perceived
+    // fragment count changes. Claude Generated (Sep 2026).
+    m_frag_split_pass = (topo.nfrag > 1) ? 1 : (topo2.nfrag > 1 ? 2 : 0);
     m_frag_carry_nfrag = 0;
     m_frag_carry_list.clear();
     m_frag_carry_qfrag.clear();
@@ -10061,7 +10204,14 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // 100 kcal/mol on that structure; the same mechanism drove the AHB21/BH76/G21EA/SIE4x4
     // family. See the rev-gfnff TODO for the physics side of this - the reference is not
     // right either, it is simply self-consistent.
-    if (m_frag_carry_nfrag > 1
+    if (m_frag_override.active
+        && static_cast<int>(m_frag_override.fraglist.size()) == m_atomcount) {
+        // frag_charge_model ensemble variant (Sep 2026): grouping and integer group charges are
+        // fixed by the master, in both q-loop passes.
+        topo_info.nfrag = m_frag_override.nfrag;
+        topo_info.fraglist = m_frag_override.fraglist;
+        topo_info.qfrag = m_frag_override.qfrag;
+    } else if (m_frag_carry_nfrag > 1
         && static_cast<int>(m_frag_carry_list.size()) == m_atomcount) {
         topo_info.nfrag = m_frag_carry_nfrag;
         topo_info.fraglist = m_frag_carry_list;
@@ -10334,7 +10484,13 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         // where it looked better was decided against xtb's .CHRG line-2 parsing quirk,
         // a different branch entirely), while it is demonstrably worse here.
         const bool frag_autodetect = m_parameters.value("frag_charge_autodetect", false);
-        if (topo_info.nfrag == 2 && m_charge != 0 && !frag_autodetect) {
+        if (m_frag_override.active) {
+            // frag_charge_model ensemble variant: the group charges are prescribed.
+            eeq_topology_input.qfrag = topo_info.qfrag;
+            topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
+                m_atoms, m_geometry_bohr, m_charge, topo_info.coordination_numbers,
+                eeq_topology_input, true, pool_setup, m_threads);
+        } else if (topo_info.nfrag == 2 && m_charge != 0 && !frag_autodetect) {
             // Reference behaviour: whole charge on fragment 0.
             topo_info.qfrag = {static_cast<double>(m_charge), 0.0};
             eeq_topology_input.qfrag = topo_info.qfrag;
@@ -10440,6 +10596,8 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         topo_info.dgam = m_eeq_solver->calculateDgamFull(
             m_atoms, topo_info.topology_charges, topo_info.hybridization,
             topo_info.coordination_numbers, eeq_topology_input);
+        if (m_rev_sqe_phase1)
+            topo_info.rev_hyb_eeq = topo_info.hybridization; // P2 (Sep 23, 2026), see revApplyPhase1Sqe
         topo_info.is_amide_h = m_eeq_solver->detectAmideHydrogensFull(
             m_atoms, topo_info.hybridization, topo_info.coordination_numbers, eeq_topology_input);
 
@@ -10997,6 +11155,15 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         m_param_gen_report.t_topo_distances = static_cast<double>(dt.count());
         setupProfile().add("topo: topo distances + BATM list", static_cast<double>(static_cast<double>(dt.count())));
     }
+
+    // rev-gfnff P2/P3 (Claude Generated, Sep 23, 2026; test_cases/revgfnff/_log/P2P3_STATUS.md):
+    // Phase-1 qa under the split-charge model + the excess-electron perception. Runs here, at the
+    // END of the pass, because the perception needs the continuous (pi) bond orders, which exist
+    // only after the Hueckel section; the Hueckel electron count (ipis) therefore keeps using the
+    // constrained Phase-1 qa, everything generated from topo_info afterwards (fqq, the Coulomb
+    // self-energy's dgam/alpeeq, the conserving-share charge rule, the corners) sees the new qa.
+    // No-op unless rev_charge_model sqe AND (rev_sqe_phase1 OR rev_excess_electron).
+    revApplyPhase1Sqe(topo_info);
 
     // Claude Generated (March 2026): Timing summary
     auto topo_end = std::chrono::high_resolution_clock::now();
@@ -11616,8 +11783,10 @@ ConfigManager GFNFF::extractDispersionConfig(const std::string& method) const
 }
 
 // Energy component getters (FFWorkspace is the only GFN-FF engine).
+// frag_charge_model ensemble (Sep 2026): when the variant blend is active the components are the
+// same weighted sum as the energy (sum of the components == total), not the master's own workspace.
 #define GFNFF_WS_ENERGY(NAME, FIELD) \
-    double GFNFF::NAME() const { return m_workspace ? m_workspace->energyComponents().FIELD : 0.0; }
+    double GFNFF::NAME() const { return m_frag_blend_valid ? m_frag_blend_comp.FIELD : (m_workspace ? m_workspace->energyComponents().FIELD : 0.0); }
 GFNFF_WS_ENERGY(BondEnergy, bond)
 GFNFF_WS_ENERGY(AngleEnergy, angle)
 GFNFF_WS_ENERGY(DihedralEnergy, dihedral)
@@ -11634,8 +11803,8 @@ GFNFF_WS_ENERGY(HalogenBondEnergy, xbond)
 GFNFF_WS_ENERGY(ATMEnergy, atm)
 #undef GFNFF_WS_ENERGY
 double GFNFF::RepulsionEnergy() const {
-    if (!m_workspace) return 0.0;
-    const auto& c = m_workspace->energyComponents();
+    if (!m_workspace && !m_frag_blend_valid) return 0.0;
+    const auto& c = m_frag_blend_valid ? m_frag_blend_comp : m_workspace->energyComponents();
     return c.bonded_rep + c.nonbonded_rep;
 }
 
@@ -12253,7 +12422,9 @@ Matrix GFNFF::NumGradFixedCharges(double dx)
     auto energy_at = [&]() {
         auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
         m_workspace->setGeometry(m_geometry_bohr);
-        m_workspace->setD3CN(Vector::Map(cn_vec.data(), cn_vec.size()).eval());
+        const Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
+        m_workspace->setD3CN(cn);
+        m_workspace->setCN(cn);  // stale-CN fix (Sep 2026): the chi(CN) self-energy term too
         return m_workspace->calculate(false);
     };
     for (int i = 0; i < m_atomcount; ++i) {
@@ -12378,13 +12549,20 @@ double GFNFF::revValence(int Z) const
     switch (Z) { // nominal sigma valence, no exchange slack (the slack is what the penalty is for)
     case 1: return 1.0;
     case 2: case 10: case 18: return 0.0;
-    case 3: case 11: case 19: return 1.0;
-    case 4: case 12: case 20: return 2.0;
     case 5: case 13: return 3.0;
     case 6: case 14: return 4.0;
     case 7: return 3.0;
     case 8: return 2.0;
     case 9: case 17: case 35: case 53: return 1.0;
+    // Alkali (Li/Na/K, Z=3/11/19) and alkaline-earth (Be/Mg/Ca, Z=4/12/20) metals used to get a
+    // low nominal valence (1.0/2.0) here, aimed at simple molecular compounds like LiH/MgO. That
+    // low valence is wrong for a bare cation: it has no covalent sigma-bonding capacity at all,
+    // so several simultaneous non-covalent contacts (found via GMTKN55 CHB6's Li+/Na+/K+-benzene
+    // cation-pi complexes: OverCoord alone contributed +4.97 Eh where the reference total is
+    // -1.16 Eh, i.e. the entire ~3000 kcal/mol residual) get read as gross over-coordination.
+    // These elements now fall through to the same "effectively no penalty" default as every other
+    // metal (Val=6) - the p_over fit (WP3) never calibrated Val_Z for alkali/alkaline-earth metals
+    // either, so nothing here was tuned against; only the failure mode was.
     default: return 6.0; // hypervalence-capable main group and metals: effectively no penalty
     }
 }
@@ -12604,6 +12782,97 @@ void GFNFF::setupRevSettings()
         for (const auto& kv : m_rev_sqe_kappa)
             if (kv.second < 0.0)
                 throw std::runtime_error("rev-gfnff: rev_sqe_kappa must not be negative (the hardness matrix would lose definiteness)");
+        // ---- B2 (Sep 2026): kappa(b) form and the q0 placement rule -------------------------
+        std::string kform = m_parameters.value("rev_sqe_kappa_form", std::string("inverse"));
+        if (rev.contains("sqe_kappa_form"))
+            kform = rev["sqe_kappa_form"].get<std::string>();
+        std::transform(kform.begin(), kform.end(), kform.begin(), [](unsigned char c) { return std::tolower(c); });
+        if (kform == "inverse")
+            m_rev_sqe_kappa_form = static_cast<int>(EEQSolver::SqeKappaForm::Inverse);
+        else if (kform == "power")
+            m_rev_sqe_kappa_form = static_cast<int>(EEQSolver::SqeKappaForm::Power);
+        else if (kform == "vanishing")
+            m_rev_sqe_kappa_form = static_cast<int>(EEQSolver::SqeKappaForm::Vanishing);
+        else
+            throw std::runtime_error("rev-gfnff: rev_sqe_kappa_form must be inverse, power or vanishing, got '" + kform + "'");
+        m_rev_sqe_kappa_exponent = m_parameters.value("rev_sqe_kappa_exponent", 3.0);
+        if (rev.contains("sqe_kappa_exponent"))
+            m_rev_sqe_kappa_exponent = rev["sqe_kappa_exponent"].get<double>();
+        if (!(m_rev_sqe_kappa_exponent > 0.0))
+            throw std::runtime_error("rev-gfnff: rev_sqe_kappa_exponent must be positive");
+        std::string q0rule = m_parameters.value("rev_sqe_q0_rule", std::string("mu"));
+        if (rev.contains("sqe_q0_rule"))
+            q0rule = rev["sqe_q0_rule"].get<std::string>();
+        std::transform(q0rule.begin(), q0rule.end(), q0rule.begin(), [](unsigned char c) { return std::tolower(c); });
+        if (q0rule == "mu")
+            m_rev_sqe_q0_mu = true;
+        else if (q0rule == "uniform")
+            m_rev_sqe_q0_mu = false;
+        else
+            throw std::runtime_error("rev-gfnff: rev_sqe_q0_rule must be mu or uniform, got '" + q0rule + "'");
+        {   // soft mu rule temperature (Claude Generated, Sep 24, 2026; _log/MU_CUSP_STATUS.md)
+            double tau_kcal = m_parameters.value("rev_sqe_q0_mu_tau", 1.0);
+            if (rev.contains("sqe_q0_mu_tau"))
+                tau_kcal = rev["sqe_q0_mu_tau"].get<double>();
+            if (!(tau_kcal >= 0.0))
+                throw std::runtime_error("rev-gfnff: rev_sqe_q0_mu_tau must not be negative");
+            m_rev_sqe_q0_mu_tau = tau_kcal / CurcumaUnit::Energy::HARTREE_TO_KCALMOL;
+        }
+        // ---- P2/P3 (Claude Generated, Sep 23, 2026; _log/P2P3_STATUS.md) --------------------
+        m_rev_sqe_phase1 = m_parameters.value("rev_sqe_phase1", false);
+        if (rev.contains("sqe_phase1"))
+            m_rev_sqe_phase1 = rev["sqe_phase1"].get<bool>();
+        // Claude Generated (Sep 24, 2026; _log/X2_SCOPE_STATUS.md): Phase-2 virtual pairs
+        m_rev_sqe_virtual = m_parameters.value("rev_sqe_virtual_pairs", false);
+        if (rev.contains("sqe_virtual_pairs"))
+            m_rev_sqe_virtual = rev["sqe_virtual_pairs"].get<bool>();
+        m_rev_excess = m_parameters.value("rev_excess_electron", false);
+        if (rev.contains("excess_electron"))
+            m_rev_excess = rev["excess_electron"].get<bool>();
+        m_rev_excess_kappa = m_parameters.value("rev_excess_kappa", 100.0);
+        if (rev.contains("excess_kappa"))
+            m_rev_excess_kappa = rev["excess_kappa"].get<double>();
+        if (m_rev_excess_kappa < 0.0)
+            throw std::runtime_error("rev-gfnff: rev_excess_kappa must not be negative");
+        {   // P3 alternative (Claude Generated, Sep 23, 2026; _log/P2P3_ALTERNATIVES_STATUS.md)
+            std::string xm = m_parameters.value("rev_excess_mode", std::string("flat"));
+            if (rev.contains("excess_mode"))
+                xm = rev["excess_mode"].get<std::string>();
+            m_rev_excess_harris = false;
+            if (xm == "flat")
+                m_rev_excess_frac = false;
+            else if (xm == "frac")
+                m_rev_excess_frac = true;
+            else if (xm == "harris") {   // Claude Generated (Sep 24, 2026; _log/P2P3_HARRIS_STATUS.md)
+                m_rev_excess_frac = false;
+                m_rev_excess_harris = true;
+            } else
+                throw std::runtime_error("rev-gfnff: rev_excess_mode must be flat, frac or harris, got '" + xm + "'");
+            m_rev_excess_frac_c = m_parameters.value("rev_excess_frac_c", 0.9);
+            if (rev.contains("excess_frac_c"))
+                m_rev_excess_frac_c = rev["excess_frac_c"].get<double>();
+            if (!(m_rev_excess_frac_c >= 0.0 && m_rev_excess_frac_c <= 0.99))
+                throw std::runtime_error("rev-gfnff: rev_excess_frac_c must lie in [0, 0.99]");
+            m_rev_excess_react_consistent = m_parameters.value("rev_excess_react_consistent", true);
+            if (rev.contains("excess_react_consistent"))
+                m_rev_excess_react_consistent = rev["excess_react_consistent"].get<bool>();
+        }
+        if ((m_rev_sqe_phase1 || m_rev_excess) && !m_rev_sqe && rv.enabled)
+            CurcumaLogger::warn("rev-gfnff: rev_sqe_phase1 / rev_excess_electron need rev_charge_model sqe - ignored");
+        if (!m_rev_sqe) {
+            m_rev_sqe_phase1 = false;
+            m_rev_excess = false;
+        }
+        // Claude Generated (Sep 24, 2026; _log/P2P3_HARRIS_STATUS.md): the harris g(r) table is
+        // fitted at kappa_Z = 0; any kappa_Z > 0 localises the charges by itself and g then
+        // over-corrects (measured +128 / +225 kcal/mol in a react-mode Cl2- / F2- scan).
+        if (m_rev_excess && m_rev_excess_harris) {
+            for (const auto& [z, k] : m_rev_sqe_kappa)
+                if (k > 0.0 && (z == 9 || z == 17)) {
+                    CurcumaLogger::warn(fmt::format("rev-gfnff: rev_excess_mode harris is fitted at kappa_Z = 0; kappa_Z({}) = {} makes it over-correct", z, k));
+                    break;
+                }
+        }
         if (cm == "sqe" && !rv.enabled)
             CurcumaLogger::warn("rev-gfnff: rev_charge_model=sqe has no effect while rev_enabled is false (use -method revgfnff)");
     }
@@ -12690,10 +12959,81 @@ GFNFF::CornerEEQ GFNFF::captureCornerEEQ(bool corner_generation)
     if (m_rev_sqe) {
         ce.sqe_pairs = revSqePairs(ce.topo->neighbor_lists);
         const bool have_q = (m_charges.size() == m_atomcount) && m_charges.allFinite();
-        ce.q0 = (corner_generation && have_q) ? revSqeQ0Rounded(ce, m_charges)
-                                              : revSqeQ0Fragments(*ce.topo);
+        ce.q0 = (corner_generation && have_q)
+            ? revSqeQ0Rounded(ce, m_charges)
+            : ((m_rev_sqe_phase1 && topo.rev_sqe_q0.size() == m_atomcount)
+                   ? topo.rev_sqe_q0   // P2: the same q0 Phase 1 localised qa on
+                   : revSqeQ0Fragments(*ce.topo, ce.topology_charges, ce.hybridization, ce.alpeeq));
+        if (m_rev_excess) {
+            ce.sqe_kappa_x.resize(ce.sqe_pairs.size());
+            ce.sqe_frac_c.resize(ce.sqe_pairs.size());
+            if (m_rev_excess_harris)
+                ce.sqe_harris_x.resize(ce.sqe_pairs.size());
+            for (size_t k = 0; k < ce.sqe_pairs.size(); ++k) {
+                ce.sqe_kappa_x[k] = revExcessKappa(topo, ce.sqe_pairs[k].first, ce.sqe_pairs[k].second);
+                ce.sqe_frac_c[k] = revExcessFracC(topo, ce.sqe_pairs[k].first, ce.sqe_pairs[k].second);
+                if (m_rev_excess_harris)
+                    ce.sqe_harris_x[k] = revExcessHarrisX(topo, ce.sqe_pairs[k].first, ce.sqe_pairs[k].second);
+            }
+            if (m_rev_excess_react_consistent)
+                revLocaliseExcessQ0(ce, topo);
+        }
     }
     return ce;
+}
+
+// P3 repair (a) (Claude Generated, Sep 23, 2026; _log/P2P3_ALTERNATIVES_STATUS.md). The flat
+// excess-electron hardness freezes the charge of a perceived pair at q0, so the pair's Coulomb
+// energy is E_EEQ(q0). A corner q0 obtained by the affine/rounding rule can be delocalised
+// (-1/2, -1/2 for a react-formed X2-), which then carries the FULL EEQ delocalisation energy the
+// hardness exists to remove (measured: -88 kcal/mol Cl2-, -169 F2-). Here the pair's summed q0
+// is rounded and placed on the lower-mu atom (index tie-break), i.e. the same placement the static
+// Phase-1 rule makes. A discrete decision, taken when the corner is created (s = 0).
+void GFNFF::revLocaliseExcessQ0(CornerEEQ& ce, const TopologyInfo& topo) const
+{
+    (void)topo;
+    if (ce.q0.size() != m_atomcount || ce.sqe_kappa_x.size() != ce.sqe_pairs.size())
+        return;
+    Vector mu;
+    if (m_eeq_solver && m_last_cn.size() == m_atomcount && ce.topo.has_value()) {
+        try {
+            mu = m_eeq_solver->calculateChemicalPotential(m_atoms, m_geometry_bohr, m_charge, ce.q0,
+                ce.topology_charges, m_last_cn, ce.hybridization, ce.topo, true, ce.alpeeq);
+        } catch (...) {
+            mu = Vector();
+        }
+    }
+    for (size_t k = 0; k < ce.sqe_pairs.size(); ++k) {
+        if (!(ce.sqe_kappa_x[k] > 0.0))
+            continue;
+        const int i = ce.sqe_pairs[k].first, j = ce.sqe_pairs[k].second;
+        const double s = ce.q0(i) + ce.q0(j);
+        const double S = std::round(s);
+        if (std::abs(S) < 0.5)
+            continue;
+        const bool electron = (S < 0.0);
+        int first = i, second = j;
+        // Placement priority: (1) the corner's Phase-1 charges qa - alpeeq/dgam are derived from
+        // them, and a Phase-2 charge localised on the OTHER atom than qa pairs an anion's charge
+        // with a neutral atom's hardness (measured: a 77 kcal/mol swing on Cl2-); (2) the EEQ
+        // chemical potential; (3) the atom index.
+        const bool have_qa = (ce.topology_charges.size() == m_atomcount);
+        const double dqa = have_qa ? (ce.topology_charges(j) - ce.topology_charges(i)) : 0.0;
+        if (std::abs(dqa) > 1e-6) {
+            if (electron ? (dqa < 0.0) : (dqa > 0.0))
+                std::swap(first, second);
+        } else if (mu.size() == m_atomcount && mu.allFinite()) {
+            const bool swap = electron ? (mu(j) < mu(i) - 1e-12) : (mu(j) > mu(i) + 1e-12);
+            if (swap)
+                std::swap(first, second);
+        }
+        const double take = (std::abs(S) > 1.0) ? std::copysign(1.0, S) : S;
+        ce.q0(first) = take;
+        ce.q0(second) = S - take;
+        // the rounding residual stays inside the pair's two atoms, so the total charge is kept
+        ce.q0(first) += (s - S) * 0.5;
+        ce.q0(second) += (s - S) * 0.5;
+    }
 }
 
 // ============================================================================================
@@ -12725,35 +13065,422 @@ std::vector<std::pair<int, int>> GFNFF::revSqePairs(const std::vector<std::vecto
     return std::vector<std::pair<int, int>>(set.begin(), set.end());
 }
 
-Vector GFNFF::revSqeQ0Fragments(const EEQSolver::TopologyInput& ti) const
+Vector GFNFF::revSqeQ0Fragments(const EEQSolver::TopologyInput& ti,
+    const Vector& topology_charges, const std::vector<int>& hybridization,
+    const std::optional<Vector>& alpeeq, std::shared_ptr<RevQ0Blend>* blend_out) const
 {
-    // Initialisation rule: the integer fragment charges (today's reference rule - whole charge
-    // on fragment 0, `-charge` / .CHRG as before) spread uniformly over the fragment's atoms.
-    // Inside a bonded fragment the increments p equalise the charges again, so where exactly
-    // the charge sits is immaterial in the kappa -> 0 limit.
+    if (blend_out)
+        blend_out->reset();
+    // Initialisation rule for the reference charges q0: the integer fragment charges (today's
+    // reference rule - whole charge on fragment 0, `-charge` / .CHRG as before) are placed on
+    // the fragment's atoms. WHERE they are placed inside a connected fragment is immaterial in
+    // the kappa -> 0 limit (the increments p can move charge freely and reach the same EEQ
+    // minimum from any start), and it is the ONLY thing that decides whether kappa has a lever
+    // at all for kappa > 0.
+    //
+    //   "uniform" (the original rule, `-gfnff.rev_sqe_q0_rule uniform`): qfrag[f]/count[f] on
+    //   every atom. For a symmetric charged fragment - Cl2-, F2-, any homonuclear anion - that
+    //   is ALREADY the unconstrained EEQ minimum, so p = 0 for every kappa and the hardness
+    //   term is identically zero. Measured: Cl2- static single point at r = 2.05 A gives the
+    //   same -150 kcal/mol at every kappa from 0 to 2 (FABLE_REVIEW_3.md Q1.2).
+    //
+    //   "mu" (B2, the default): the integer charge is localised, one unit at a time, on the
+    //   atoms with the LOWEST EEQ chemical potential mu_i = chi_i - (A q)_i for an electron
+    //   (negative fragment charge) and the HIGHEST for a hole - the same electron/hole
+    //   convention revSqeQ0Rounded() uses for its residual placement. The delocalised state
+    //   then costs 1/2 kappa(b) p^2 and kappa governs the whole bonded region.
+    //
+    // JUDGMENT CALL (documented in test_cases/revgfnff/_log/STAGE2_B2_STATUS.md): mu needs a
+    // charge vector to evaluate A q at, and this is the COLD-START rule - there is no previous
+    // q. We evaluate mu at the uniform q0, i.e. at the old rule's answer. That is the cheapest
+    // choice that still carries the Coulomb feedback (chi alone would rank a symmetric anion's
+    // two atoms by their bare electronegativity only, which is the same number, and would miss
+    // the environment entirely in an asymmetric fragment). One extra EEQ matrix build per
+    // corner; no iteration.
     Vector q0 = Vector::Zero(m_atomcount);
     const int nfrag = std::max(1, ti.nfrag);
     const bool have_frag = static_cast<int>(ti.fraglist.size()) >= m_atomcount;
+    auto frag_of = [&](int i) {
+        const int f = have_frag ? (ti.fraglist[i] - 1) : 0;
+        return (f >= 0 && f < nfrag) ? f : -1;
+    };
     std::vector<int> count(nfrag, 0);
     for (int i = 0; i < m_atomcount; ++i) {
-        const int f = have_frag ? (ti.fraglist[i] - 1) : 0;
-        if (f >= 0 && f < nfrag)
+        const int f = frag_of(i);
+        if (f >= 0)
             count[f]++;
     }
-    for (int i = 0; i < m_atomcount; ++i) {
-        const int f = have_frag ? (ti.fraglist[i] - 1) : 0;
-        if (f < 0 || f >= nfrag || count[f] == 0)
-            continue;
-        const double qf = (f < static_cast<int>(ti.qfrag.size()))
+    std::vector<double> qf(nfrag, 0.0);
+    for (int f = 0; f < nfrag; ++f)
+        qf[f] = (f < static_cast<int>(ti.qfrag.size()))
             ? ti.qfrag[f]
             : (f == 0 ? static_cast<double>(m_charge) : 0.0);
-        q0(i) = qf / static_cast<double>(count[f]);
+    for (int i = 0; i < m_atomcount; ++i) {
+        const int f = frag_of(i);
+        if (f < 0 || count[f] == 0)
+            continue;
+        q0(i) = qf[f] / static_cast<double>(count[f]);
     }
     // safety net: the sum must be the molecular charge, otherwise the SQE solve would drift
     const double miss = static_cast<double>(m_charge) - q0.sum();
     if (std::abs(miss) > 1e-9 && m_atomcount > 0)
         q0.array() += miss / static_cast<double>(m_atomcount);
-    return q0;
+    if (!m_rev_sqe_q0_mu || m_atomcount == 0)
+        return q0;
+
+    // ---- B2: re-place each fragment's charge on its extreme-mu atoms -----------------------
+    if (!m_eeq_solver || m_last_cn.size() != m_atomcount)
+        return q0;
+    Vector mu;
+    EEQSolver::ProbeGeometryTerms probe_terms;
+    const bool soft = (m_rev_sqe_q0_mu_tau > 0.0);
+    try {
+        mu = m_eeq_solver->calculateChemicalPotential(m_atoms, m_geometry_bohr, m_charge, q0,
+            topology_charges, m_last_cn, hybridization, ti, true, alpeeq,
+            soft ? &probe_terms : nullptr);
+    } catch (...) {
+        return q0; // a failed probe must never change the energy - fall back to uniform
+    }
+    if (mu.size() != m_atomcount || !mu.allFinite())
+        return q0;
+
+    if (soft) {
+        std::vector<int> fr(m_atomcount);
+        for (int i = 0; i < m_atomcount; ++i)
+            fr[i] = frag_of(i);
+        return revSqeQ0MuBlend(q0, mu, probe_terms, qf, count, fr, blend_out);
+    }
+
+    Vector q0_loc = Vector::Zero(m_atomcount);
+    for (int f = 0; f < nfrag; ++f) {
+        if (count[f] == 0)
+            continue;
+        if (std::abs(qf[f]) < 1e-9)
+            continue; // a neutral fragment has nothing to place; q0 = 0 on all its atoms
+        std::vector<int> idx;
+        idx.reserve(count[f]);
+        for (int i = 0; i < m_atomcount; ++i)
+            if (frag_of(i) == f)
+                idx.push_back(i);
+        const bool electron = (qf[f] < 0.0);
+        // lowest mu first for an electron, highest first for a hole; ties broken by atom index
+        // so the result is deterministic (a symmetric anion has an exact tie by construction)
+        std::stable_sort(idx.begin(), idx.end(), [&](int a, int b) {
+            return electron ? (mu(a) < mu(b)) : (mu(a) > mu(b));
+        });
+        // one unit charge per atom, in that order: a second electron prefers the next site over
+        // doubling up on the first, which is what the Coulomb self-energy would say anyway.
+        double left = qf[f];
+        for (size_t k = 0; k < idx.size() && std::abs(left) > 1e-12; ++k) {
+            const double take = (std::abs(left) > 1.0) ? std::copysign(1.0, left) : left;
+            q0_loc(idx[k]) = take;
+            left -= take;
+        }
+        if (std::abs(left) > 1e-12) // more charge than atoms: spread the remainder
+            for (int i : idx)
+                q0_loc(i) += left / static_cast<double>(idx.size());
+    }
+    const double miss2 = static_cast<double>(m_charge) - q0_loc.sum();
+    if (std::abs(miss2) > 1e-9)
+        q0_loc.array() += miss2 / static_cast<double>(m_atomcount);
+    return q0_loc;
+}
+
+// Soft mu q0 rule (Claude Generated, Sep 24, 2026; test_cases/revgfnff/_log/MU_CUSP_STATUS.md).
+//
+// The hard rule above sorts the fragment atoms by mu and hands out whole units: q0 is piecewise
+// constant in the geometry, and where two atoms' mu cross the unit jumps from one atom to the
+// other, so E switches between two smooth branches - an energy cusp and a force jump (package
+// 18: 2.4e-3 Eh/A on a tilted formate).
+//
+// Two ways to make that continuous, both measured (MU_CUSP_STATUS.md section 2):
+//   (a) blend the CHARGE, q0 = a Fermi/softmax average over the atoms. Rejected: E(q0) is a
+//       quadratic form in q0 at kappa > 0, so the average placement is not an average energy -
+//       at the formate tie the half/half q0 is 44 kcal/mol BELOW both whole-unit branches, and
+//       across the blend width that well gives a spurious force of up to 2.2 Eh/A, ~1000x the
+//       cusp it was meant to remove. It also erases B2's lever on a symmetric X2-.
+//   (b) blend the ENERGY over the whole-unit placements (this function + revSolveSplitCharges):
+//       E = sum_p w_p E_p, w_p = exp(mu.q0_p / tau) / Z, i.e. a Boltzmann weight over the hard
+//       rule's own criterion (the placement's summed e_i = +-mu_i). Every E_p is a genuine
+//       whole-unit SQE energy, so E stays between the branches; where one placement dominates
+//       (gap >> tau) the result is the hard rule's to the last bit; at an exact symmetric tie
+//       the branches are equal by symmetry and E is the hard rule's energy too (Cl2-, F2-,
+//       formate at C2v are unchanged), while the force is continuous everywhere.
+// This function returns the best placement's q0 (= the hard rule's, same index tie-break) and,
+// when more than one placement lies within 34 tau (weight > ~1e-15), the full placement set.
+Vector GFNFF::revSqeQ0MuBlend(const Vector& q0u, const Vector& mu,
+    const EEQSolver::ProbeGeometryTerms& terms, const std::vector<double>& qf,
+    const std::vector<int>& count, const std::vector<int>& frag,
+    std::shared_ptr<RevQ0Blend>* blend_out) const
+{
+    const int N = m_atomcount;
+    const double tau = m_rev_sqe_q0_mu_tau;
+    const double cut = 34.0 * tau;   // exp(-34) ~ 1.7e-15: below that a placement cannot matter
+    const size_t cap = 256;
+    const int nfrag = static_cast<int>(qf.size());
+    Vector base = Vector::Zero(N);   // charges no placement choice touches
+    // one placement = (atoms receiving a whole unit, their unit sign, summed e)
+    struct Pl { std::vector<std::pair<int, double>> units; double S = 0.0; };
+    std::vector<Pl> all { Pl{} };
+    for (int f = 0; f < nfrag; ++f) {
+        if (count[f] == 0 || std::abs(qf[f]) < 1e-9)
+            continue;
+        std::vector<int> idx;
+        for (int i = 0; i < N; ++i)
+            if (frag[i] == f)
+                idx.push_back(i);
+        const bool electron = (qf[f] < 0.0);
+        const double n = std::abs(qf[f]);
+        std::stable_sort(idx.begin(), idx.end(), [&](int a, int b) {
+            return electron ? (mu(a) < mu(b)) : (mu(a) > mu(b));
+        });
+        const int k = static_cast<int>(std::lround(n));
+        if (n >= static_cast<double>(idx.size()) - 1e-9 || std::abs(n - k) > 1e-9 || k < 1) {
+            // more charge than atoms, or a fractional fragment charge: exactly the hard rule
+            // (no choice to blend for the first; the second does not occur with integer qfrag)
+            double left = qf[f];
+            for (size_t m = 0; m < idx.size() && std::abs(left) > 1e-12; ++m) {
+                const double take = (std::abs(left) > 1.0) ? std::copysign(1.0, left) : left;
+                base(idx[m]) = take;
+                left -= take;
+            }
+            if (std::abs(left) > 1e-12)
+                for (int i : idx)
+                    base(i) += left / static_cast<double>(idx.size());
+            continue;
+        }
+        const double unit = electron ? -1.0 : 1.0;
+        std::vector<double> e(idx.size());
+        for (size_t m = 0; m < idx.size(); ++m)
+            e[m] = electron ? mu(idx[m]) : -mu(idx[m]);   // ascending by construction
+        double smin = 0.0;
+        for (int m = 0; m < k; ++m)
+            smin += e[m];
+        // subsets of size k in sorted-position order, pruned by S - smin <= cut; the first one
+        // found is positions 0..k-1, i.e. the hard rule's own placement
+        std::vector<Pl> mine;
+        std::vector<int> pick;
+        std::function<void(int, double)> dfs = [&](int start, double s) {
+            if (mine.size() >= cap)
+                return;
+            const int need = k - static_cast<int>(pick.size());
+            if (need == 0) {
+                Pl pl;
+                pl.S = s;
+                for (int m : pick)
+                    pl.units.emplace_back(idx[m], unit);
+                mine.push_back(std::move(pl));
+                return;
+            }
+            for (int m = start; m + need <= static_cast<int>(idx.size()); ++m) {
+                double lb = s + e[m];                    // cheapest completion from here
+                for (int r = 1; r < need; ++r)
+                    lb += e[m + r];
+                if (lb - smin > cut)
+                    break;                               // e ascending: later m only costs more
+                pick.push_back(m);
+                dfs(m + 1, s + e[m]);
+                pick.pop_back();
+            }
+        };
+        dfs(0, 0.0);
+        if (mine.size() >= cap) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                CurcumaLogger::warn(fmt::format("rev-gfnff: soft mu q0 rule truncated to {} placements (highly degenerate fragment)", cap));
+            }
+        }
+        // combine with the placements of the fragments before
+        std::vector<Pl> comb;
+        for (const Pl& a : all)
+            for (const Pl& b : mine) {
+                if (comb.size() >= cap)
+                    break;
+                Pl c = a;
+                c.S = a.S + (b.S - smin);
+                if (c.S > cut)
+                    continue;
+                c.units.insert(c.units.end(), b.units.begin(), b.units.end());
+                comb.push_back(std::move(c));
+            }
+        all = std::move(comb);
+    }
+    auto build = [&](const Pl& pl) {
+        Vector q = base;
+        for (const auto& [i, u] : pl.units)
+            q(i) = u;
+        const double miss2 = static_cast<double>(m_charge) - q.sum();
+        if (std::abs(miss2) > 1e-9)
+            q.array() += miss2 / static_cast<double>(N);
+        return q;
+    };
+    Vector q0best = build(all.front());
+    if (all.size() > 1 && blend_out) {
+        auto bl = std::make_shared<RevQ0Blend>();
+        bl->q0u = q0u;
+        bl->terms = terms;
+        bl->tau = tau;
+        double Z = 0.0;
+        for (const Pl& pl : all)
+            Z += std::exp(-pl.S / tau);
+        // stable order by descending weight keeps the hard rule's placement first on a tie
+        std::vector<size_t> ord(all.size());
+        for (size_t m = 0; m < ord.size(); ++m)
+            ord[m] = m;
+        std::stable_sort(ord.begin(), ord.end(), [&](size_t a, size_t b) { return all[a].S < all[b].S; });
+        for (size_t m : ord) {
+            bl->q0.push_back(build(all[m]));
+            bl->w.push_back(std::exp(-all[m].S / tau) / Z);
+        }
+        q0best = bl->q0.front();
+        *blend_out = std::move(bl);
+    }
+    if (CurcumaLogger::get_verbosity() >= 3 && N <= 12) {
+        std::string sm;
+        for (int i = 0; i < N; ++i)
+            sm += fmt::format(" {:+.6f}", mu(i));
+        std::string sw;
+        if (blend_out && *blend_out)
+            for (double w : (*blend_out)->w)
+                sw += fmt::format(" {:.6f}", w);
+        CurcumaLogger::info(fmt::format("rev SQE soft mu q0 (tau {:.3g} Eh): mu{} ; {} placement(s){}{}", tau, sm,
+            all.size(), sw.empty() ? "" : ", weights", sw));
+    }
+    return q0best;
+}
+
+// Claude Generated (Sep 24, 2026; _log/MU_CUSP_STATUS.md): sum_k v_k dmu_k/dx of the probe
+// mu_k = x_k(CN) - sum_j A_kj(r) q0u_j, i.e. the geometry derivative of the soft mu rule's
+// placement criterion. Everything else in mu (dxi, gam, dgam, alpha) is a topology constant.
+//   CN part   : v_k cnf_k / (2 sqrt(CN_k)) dCN_k/dx          (same form as the Coulomb Term 1b)
+//   pair part : -(v_k q0u_j + v_j q0u_k) dA_kj/dr dr/dx,  A = erf(g r)/r, g = 1/sqrt(a_k + a_j)
+Matrix GFNFF::revSqeMuDerivative(const Vector& v, const Vector& q0u, const EEQSolver::ProbeGeometryTerms& terms) const
+{
+    const int N = m_atomcount;
+    Matrix G = Matrix::Zero(N, 3);
+    if (v.size() != N || q0u.size() != N || terms.alpha.size() != N || terms.cnf.size() != N)
+        return G;
+    if (!m_last_dcn.empty() && m_last_cn.size() == N) {
+        Vector dEdcn(N);
+        for (int i = 0; i < N; ++i)
+            dEdcn(i) = v(i) * terms.cnf(i) / (2.0 * std::sqrt(std::max(m_last_cn(i), 0.0)) + 1e-16);
+        m_last_dcn.applyAdd(dEdcn, G);
+    }
+    const double two_over_sqrtpi = 1.1283791670955126;
+    for (int i = 0; i < N; ++i)
+        for (int j = 0; j < i; ++j) {
+            const double c = -(v(i) * q0u(j) + v(j) * q0u(i));
+            if (c == 0.0)
+                continue;
+            const double dx = m_geometry_bohr(i, 0) - m_geometry_bohr(j, 0);
+            const double dy = m_geometry_bohr(i, 1) - m_geometry_bohr(j, 1);
+            const double dz = m_geometry_bohr(i, 2) - m_geometry_bohr(j, 2);
+            const double r2 = dx * dx + dy * dy + dz * dz;
+            if (terms.cutoff_sq > 0.0 && r2 > terms.cutoff_sq)
+                continue;
+            const double r = std::sqrt(r2);
+            const double g = 1.0 / std::sqrt(terms.alpha(i) + terms.alpha(j));
+            const double dAdr = (two_over_sqrtpi * g * std::exp(-g * g * r2) * r - std::erf(g * r)) / r2;
+            const double s = c * dAdr / r;
+            G(i, 0) += s * dx; G(i, 1) += s * dy; G(i, 2) += s * dz;
+            G(j, 0) -= s * dx; G(j, 1) -= s * dy; G(j, 2) -= s * dz;
+        }
+    return G;
+}
+
+// Claude Generated (Sep 24, 2026; _log/MU_CUSP_STATUS.md): explicit geometry gradient, at fixed
+// (q, p), of the SQE model energy E = 1/2 q A q - x q + 1/2 sum kappa(b) p^2 - the charge-
+// dependent part of the workspace energy (Coulomb + SqeHardness). q and p are variational, so
+// this is the whole gradient of E_p for a placement the workspace did not evaluate. Only
+// differences between placements are used, so the constant diagonal of A drops out.
+Matrix GFNFF::revSqeModelGradient(const Vector& q, const Vector& p, const EEQSolver::ProbeGeometryTerms& terms) const
+{
+    const int N = m_atomcount;
+    Matrix G = Matrix::Zero(N, 3);
+    if (q.size() != N || terms.alpha.size() != N || terms.cnf.size() != N)
+        return G;
+    // x_i contains cnf_i sqrt(CN_i): dE/dCN_i = -q_i cnf_i / (2 sqrt(CN_i))
+    if (!m_last_dcn.empty() && m_last_cn.size() == N) {
+        Vector dEdcn(N);
+        for (int i = 0; i < N; ++i)
+            dEdcn(i) = -q(i) * terms.cnf(i) / (2.0 * std::sqrt(std::max(m_last_cn(i), 0.0)) + 1e-16);
+        m_last_dcn.applyAdd(dEdcn, G);
+    }
+    const double two_over_sqrtpi = 1.1283791670955126;
+    for (int i = 0; i < N; ++i)
+        for (int j = 0; j < i; ++j) {
+            const double c = q(i) * q(j);
+            if (c == 0.0)
+                continue;
+            const double dx = m_geometry_bohr(i, 0) - m_geometry_bohr(j, 0);
+            const double dy = m_geometry_bohr(i, 1) - m_geometry_bohr(j, 1);
+            const double dz = m_geometry_bohr(i, 2) - m_geometry_bohr(j, 2);
+            const double r2 = dx * dx + dy * dy + dz * dz;
+            if (terms.cutoff_sq > 0.0 && r2 > terms.cutoff_sq)
+                continue;
+            const double r = std::sqrt(r2);
+            const double g = 1.0 / std::sqrt(terms.alpha(i) + terms.alpha(j));
+            const double dAdr = (two_over_sqrtpi * g * std::exp(-g * g * r2) * r - std::erf(g * r)) / r2;
+            const double s = c * dAdr / r;
+            G(i, 0) += s * dx; G(i, 1) += s * dy; G(i, 2) += s * dz;
+            G(j, 0) -= s * dx; G(j, 1) -= s * dy; G(j, 2) -= s * dz;
+        }
+    // pair hardness, exactly as FFWorkspace::calcSqeHardness differentiates it
+    const RevSettings& rv = m_rev_settings;
+    const bool have_rcov = static_cast<int>(rv.rcov.size()) == N && static_cast<int>(rv.fat.size()) == N;
+    const double bmin = std::max(m_rev_sqe_bmin, 1e-12);
+    for (int k = 0; k < static_cast<int>(m_rev_q0_blend_pairs.size()) && k < p.size(); ++k) {
+        const EEQSolver::SqePair& sp = m_rev_q0_blend_pairs[k];
+        if ((sp.kappa0 == 0.0 && sp.kappa_x == 0.0) || p(k) == 0.0 || !have_rcov)
+            continue;
+        const double dx = m_geometry_bohr(sp.i, 0) - m_geometry_bohr(sp.j, 0);
+        const double dy = m_geometry_bohr(sp.i, 1) - m_geometry_bohr(sp.j, 1);
+        const double dz = m_geometry_bohr(sp.i, 2) - m_geometry_bohr(sp.j, 2);
+        const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (r < 1e-8)
+            continue;
+        double dbdr = 0.0;
+        const double b = RevGFNFF::bondOrder(r, rv.R2(sp.i, sp.j), rv.bo2_width, &dbdr);
+        if (b <= bmin)
+            continue;
+        double dkdb = 0.0;
+        EEQSolver::sqeKappa(sp.kappa0, b, m_rev_sqe_kappa_form, m_rev_sqe_kappa_exponent, &dkdb);
+        const double s = 0.5 * p(k) * p(k) * dkdb * dbdr / r;
+        G(sp.i, 0) += s * dx; G(sp.i, 1) += s * dy; G(sp.i, 2) += s * dz;
+        G(sp.j, 0) -= s * dx; G(sp.j, 1) -= s * dy; G(sp.j, 2) -= s * dz;
+    }
+    return G;
+}
+
+// Claude Generated (Sep 24, 2026; _log/MU_CUSP_STATUS.md): gradient of E = sum_p w_p E_p on top
+// of the reference placement's workspace gradient dE_0/dx:
+//   sum_p w_p (dE_p/dx - dE_0/dx)                                  (explicit, fixed q_p, p_p)
+// + sum_p E_p dw_p/dx = sum_k v_k dmu_k/dx,  v_k = (1/tau) sum_p w_p (E_p - Ebar) q0_p,k
+// (w_p ~ exp(mu.q0_p / tau), so dw_p/dx = (w_p/tau) (q0_p - sum_r w_r q0_r) . dmu/dx).
+Matrix GFNFF::revSqeQ0BlendGradient() const
+{
+    const int N = m_atomcount;
+    Matrix G = Matrix::Zero(N, 3);
+    if (!m_rev_q0_blend)
+        return G;
+    const RevQ0Blend& B = *m_rev_q0_blend;
+    const size_t np = B.w.size();
+    if (np < 2 || m_rev_q0_blend_q.size() != np || m_rev_q0_blend_p.size() != np || m_rev_q0_blend_e.size() != np)
+        return G;
+    const int r0 = m_rev_q0_blend_ref;
+    const Matrix g0 = revSqeModelGradient(m_rev_q0_blend_q[r0], m_rev_q0_blend_p[r0], B.terms);
+    double ebar = 0.0;
+    for (size_t p = 0; p < np; ++p)
+        ebar += B.w[p] * m_rev_q0_blend_e[p];
+    Vector v = Vector::Zero(N);
+    for (size_t p = 0; p < np; ++p) {
+        if (static_cast<int>(p) != r0 && B.w[p] > 0.0)
+            G += B.w[p] * (revSqeModelGradient(m_rev_q0_blend_q[p], m_rev_q0_blend_p[p], B.terms) - g0);
+        v += (B.w[p] * (m_rev_q0_blend_e[p] - ebar) / B.tau) * B.q0[p];
+    }
+    G += revSqeMuDerivative(v, B.q0u, B.terms);
+    return G;
 }
 
 Vector GFNFF::revSqeQ0Rounded(const CornerEEQ& ce, const Vector& q_now) const
@@ -12763,6 +13490,19 @@ Vector GFNFF::revSqeQ0Rounded(const CornerEEQ& ce, const Vector& q_now) const
     // chemical potential mu_f = mean_i (chi_i - sum_j A_ij q_j) - the most electronegative
     // side keeps the electron. (The design states the electron case; a leftover HOLE is placed
     // symmetrically on the HIGHEST mu, i.e. the least electronegative fragment.)
+    //
+    // Within a fragment the integer target Q[f] is reached by an AFFINE shift of q_now, not a
+    // uniform re-spread: q0_i = q_now_i + (Q[f] - sum_frag(q_now)) / count[f]. This keeps
+    // whatever charge shape the previous step already carried instead of discarding it -
+    // docs/REV_GFNFF_STAGE2.md's measured defect ("the uniform-q0 rule has no lever inside one
+    // perceived fragment"): a corner created by a topology event that merges two fragments (the
+    // SN2 demo's incoming chloride, still too far to carry charge through a pair, b < bmin)
+    // spread the WHOLE integer charge uniformly over every atom of the merged fragment, so the
+    // chloride started at q = -1/6 instead of -1. The affine shift reduces to the old uniform
+    // rule exactly when q_now is itself already uniform inside the fragment - e.g. Cl2- at
+    // r < r_eq, where the two atoms are identical and symmetry leaves no other choice; that case
+    // is unchanged (-0.5/-0.5 either way). q0 is frozen at corner creation (s = 0) in both rules,
+    // so this changes only WHICH value gets frozen, never when - no energy jump can result.
     if (!ce.topo.has_value())
         return Vector::Zero(m_atomcount);
     const EEQSolver::TopologyInput& ti = *ce.topo;
@@ -12808,12 +13548,13 @@ Vector GFNFF::revSqeQ0Rounded(const CornerEEQ& ce, const Vector& q_now) const
         }
         Q[target] += residual;
     }
-    Vector q0 = Vector::Zero(m_atomcount);
-    for (int i = 0; i < m_atomcount; ++i) {
-        const int f = frag_of(i);
+    std::vector<double> shift(nfrag, 0.0);
+    for (int f = 0; f < nfrag; ++f)
         if (count[f] > 0)
-            q0(i) = Q[f] / static_cast<double>(count[f]);
-    }
+            shift[f] = (Q[f] - sum[f]) / static_cast<double>(count[f]);
+    Vector q0 = Vector::Zero(m_atomcount);
+    for (int i = 0; i < m_atomcount; ++i)
+        q0(i) = q_now(i) + shift[frag_of(i)];
     return q0;
 }
 
@@ -12824,12 +13565,39 @@ GFNFF::CornerEEQ GFNFF::revSlotCorner(const TopologyInfo& topo) const
     // q0 is a discrete decision and must NOT be re-taken every step: while a transition set is
     // in flight the all-ones corner's q0 was frozen when that corner was created (s = 0). Only
     // outside a transition (static single point, plain MD step) is it the initialisation rule.
+    const char* q0_src = "uniform";
     if (!m_rev_corner_eeq.empty() && m_rev_corner_eeq.back().q0.size() == m_atomcount) {
         ce.q0 = m_rev_corner_eeq.back().q0;
+        q0_src = "corner";
+    } else if (m_rev_sqe_phase1 && topo.rev_sqe_q0.size() == m_atomcount) {
+        ce.q0 = topo.rev_sqe_q0; // P2 (Sep 23, 2026): the q0 Phase 1 localised qa on
+        q0_src = "phase1";
     } else if (m_eeq_topo_cache.has_value()) {
-        ce.q0 = revSqeQ0Fragments(*m_eeq_topo_cache);
+        ce.q0 = revSqeQ0Fragments(*m_eeq_topo_cache, topo.topology_charges, topo.hybridization, topo.alpeeq,
+            &ce.q0_blend);   // soft mu rule: placements + weights at THIS geometry
+        q0_src = "fragments";
     } else {
         ce.q0 = Vector::Constant(m_atomcount, m_atomcount > 0 ? static_cast<double>(m_charge) / m_atomcount : 0.0);
+    }
+    // Claude Generated (Sep 23, 2026, _log/P2P3_ALTERNATIVES_STATUS.md): which q0 rule fed the
+    // split-charge solve - the P3 flat hardness makes the Coulomb energy follow q0 closely.
+    if (CurcumaLogger::get_verbosity() >= 3 && m_atomcount > 0 && m_atomcount <= 8) {
+        std::string s;
+        for (int i = 0; i < m_atomcount; ++i)
+            s += fmt::format(" {:+.4f}", ce.q0(i));
+        CurcumaLogger::info(fmt::format("rev SQE q0 ({}):{}", q0_src, s));
+    }
+    if (m_rev_excess) {
+        ce.sqe_kappa_x.resize(ce.sqe_pairs.size());
+        ce.sqe_frac_c.resize(ce.sqe_pairs.size());
+        if (m_rev_excess_harris)
+            ce.sqe_harris_x.resize(ce.sqe_pairs.size());
+        for (size_t k = 0; k < ce.sqe_pairs.size(); ++k) {
+            ce.sqe_kappa_x[k] = revExcessKappa(topo, ce.sqe_pairs[k].first, ce.sqe_pairs[k].second);
+            ce.sqe_frac_c[k] = revExcessFracC(topo, ce.sqe_pairs[k].first, ce.sqe_pairs[k].second);
+            if (m_rev_excess_harris)
+                ce.sqe_harris_x[k] = revExcessHarrisX(topo, ce.sqe_pairs[k].first, ce.sqe_pairs[k].second);
+        }
     }
     return ce;
 }
@@ -12856,12 +13624,141 @@ Vector GFNFF::revSolveSplitCharges(const CornerEEQ& ce, const Vector& topology_c
         const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
         sp.b = have_rcov ? RevGFNFF::bondOrder(r, rv.R2(sp.i, sp.j), rv.bo2_width, nullptr) : 1.0;
         sp.kappa0 = 0.5 * (revSqeKappa(m_atoms[sp.i]) + revSqeKappa(m_atoms[sp.j]));
+        const size_t kk = pairs.size();
+        sp.kappa_x = (kk < ce.sqe_kappa_x.size()) ? ce.sqe_kappa_x[kk] : 0.0; // P3, corner constant
+        // P3 repair (b) (Sep 23, 2026; _log/P2P3_ALTERNATIVES_STATUS.md): a pair in flight that
+        // this corner does not call a bond has x = 0 here, but the corner WITH the bond perceives
+        // the excess electron - take the largest value any corner assigns the pair.
+        if (m_rev_excess && m_rev_excess_react_consistent && !m_rev_excess_frac && sp.kappa_x == 0.0) {
+            auto scan = [&](const CornerEEQ& other) {
+                for (size_t m = 0; m < other.sqe_pairs.size() && m < other.sqe_kappa_x.size(); ++m)
+                    if (other.sqe_pairs[m] == pr)
+                        sp.kappa_x = std::max(sp.kappa_x, other.sqe_kappa_x[m]);
+            };
+            for (const CornerEEQ& other : m_rev_corner_eeq)
+                scan(other);
+            scan(m_rev_base_eeq);
+        }
+        sp.frac_c = (kk < ce.sqe_frac_c.size()) ? ce.sqe_frac_c[kk] : 0.0;    // P3 "frac", corner constant
+        sp.harris_x = (kk < ce.sqe_harris_x.size()) ? ce.sqe_harris_x[kk] : 0.0; // P3 "harris", corner constant
+        // P3 "harris" react repair (Claude Generated, Sep 24, 2026; _log/P2P3_HARRIS_STATUS.md),
+        // the harris analogue of repair (b) above: in harris mode the charge of a pair in flight
+        // is free in EVERY corner that lists the pair, so its delocalisation energy is present
+        // in every such corner - the correction x g(r) has to be too. A corner that does not call
+        // the pair a bond perceives x = 0; take the largest x any corner assigns the pair.
+        if (m_rev_excess && m_rev_excess_harris && m_rev_excess_react_consistent && sp.harris_x == 0.0) {
+            auto scan_h = [&](const CornerEEQ& other) {
+                for (size_t m = 0; m < other.sqe_pairs.size() && m < other.sqe_harris_x.size(); ++m)
+                    if (other.sqe_pairs[m] == pr)
+                        sp.harris_x = std::max(sp.harris_x, other.sqe_harris_x[m]);
+            };
+            for (const CornerEEQ& other : m_rev_corner_eeq)
+                scan_h(other);
+            scan_h(m_rev_base_eeq);
+        }
         pairs.push_back(sp);
     }
+    // Phase-2 virtual pairs (Claude Generated, Sep 24, 2026; _log/X2_SCOPE_STATUS.md). The split
+    // charges only move along listed pairs, so two bond-graph components that share ONE EEQ
+    // constraint group cannot exchange charge: each keeps the integer amount q0 gave it. The
+    // frag_charge_model ensemble merged corner produces exactly that case past the static bond
+    // cutoff (X2- at 1.02-1.15 x the pass-1 split: charges pinned at (-1, 0) by the q0 index
+    // tie-break, a neighbouring water sees an atom-order-dependent energy). Chain the components
+    // of each constraint group with zero-hardness pairs (kappa0 = kappa_x = 0, b = 1: always
+    // active in the solve, no energy or gradient term in the workspace) - the same construction
+    // P2 uses for Phase 1. At kappa = 0 the reachable charge space is then the constrained EEQ one.
+    // A pair already listed (active or not) connects its atoms, so the set depends on the corner's
+    // topology only, never on the geometry.
+    if (m_rev_sqe_virtual && m_atomcount > 1) {
+        const bool have_frag = topo.has_value() && static_cast<int>(topo->fraglist.size()) >= m_atomcount
+            && topo->nfrag > 1;
+        std::vector<int> parent(m_atomcount);
+        for (int i = 0; i < m_atomcount; ++i)
+            parent[i] = i;
+        std::function<int(int)> root = [&](int a) { return parent[a] == a ? a : (parent[a] = root(parent[a])); };
+        for (const auto& sp : pairs)
+            parent[root(sp.i)] = root(sp.j);
+        std::map<int, int> rep_of_group;
+        for (int i = 0; i < m_atomcount; ++i) {
+            const int g = have_frag ? topo->fraglist[i] : 0;
+            auto it = rep_of_group.find(g);
+            if (it == rep_of_group.end()) {
+                rep_of_group[g] = i;
+                continue;
+            }
+            if (root(it->second) == root(i))
+                continue;
+            EEQSolver::SqePair sp;       // virtual pair: no hardness, no geometry, no P3 payload
+            sp.i = std::min(it->second, i);
+            sp.j = std::max(it->second, i);
+            sp.b = 1.0;
+            pairs.push_back(sp);
+            parent[root(it->second)] = root(i);
+        }
+    }
     Vector p;
-    Vector q = m_eeq_solver->calculateSplitCharges(m_atoms, m_geometry_bohr, m_charge, ce.q0,
+    double e_model = 0.0;
+    const bool blend = ce.q0_blend && ce.q0_blend->w.size() > 1;
+    Vector q = m_eeq_solver->calculateSplitCharges(m_atoms, m_geometry_bohr, m_charge,
+        blend ? ce.q0_blend->q0.front() : ce.q0,
         topology_charges, m_last_cn, hybridization, topo, pairs, m_rev_sqe_bmin, &p, true,
-        alpeeq, pool, threads);
+        alpeeq, pool, threads, m_rev_sqe_kappa_form, m_rev_sqe_kappa_exponent,
+        blend ? &e_model : nullptr);
+    // soft mu q0 rule (Sep 24, 2026; _log/MU_CUSP_STATUS.md): only the slot corner of a step
+    // without transitions carries a placement set - its q0 is a function of this geometry. The
+    // workspace evaluates placement 0 (the hard rule's); every other placement is solved here
+    // and enters as sum_p w_p E_p - E_0 (energy) and revSqeQ0BlendGradient() (force).
+    if (blend) {
+        bool ok = std::isfinite(e_model);
+        for (const auto& sp : pairs)
+            if (sp.frac_c > 0.0)
+                ok = false;   // the model energy does not carry the frac term
+        if (ce.q0_blend->terms.reaction_field) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                CurcumaLogger::warn("rev-gfnff: soft mu q0 blend with implicit solvation - the Born matrix derivative of the probe mu is not included, the force is not exact");
+            }
+        }
+        std::vector<Vector> qs { q }, ps { p };
+        std::vector<double> es { e_model };
+        for (size_t k = 1; ok && k < ce.q0_blend->w.size(); ++k) {
+            Vector pk;
+            double ek = 0.0;
+            Vector qk = m_eeq_solver->calculateSplitCharges(m_atoms, m_geometry_bohr, m_charge,
+                ce.q0_blend->q0[k], topology_charges, m_last_cn, hybridization, topo, pairs,
+                m_rev_sqe_bmin, &pk, true, alpeeq, pool, threads, m_rev_sqe_kappa_form,
+                m_rev_sqe_kappa_exponent, &ek);
+            if (!std::isfinite(ek) || qk.size() != m_atomcount) {
+                ok = false;
+                break;
+            }
+            qs.push_back(std::move(qk));
+            ps.push_back(std::move(pk));
+            es.push_back(ek);
+        }
+        if (ok) {
+            m_rev_q0_blend = ce.q0_blend;
+            m_rev_q0_blend_q = std::move(qs);
+            m_rev_q0_blend_p = std::move(ps);
+            m_rev_q0_blend_e = std::move(es);
+            m_rev_q0_blend_pairs = pairs;
+            m_rev_q0_blend_ref = 0;
+            double eb = 0.0;
+            for (size_t k = 0; k < m_rev_q0_blend_e.size(); ++k)
+                eb += ce.q0_blend->w[k] * m_rev_q0_blend_e[k];
+            m_rev_q0_blend_de = eb - m_rev_q0_blend_e[0];
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                std::string s;
+                for (size_t k = 0; k < m_rev_q0_blend_e.size(); ++k)
+                    s += fmt::format(" [w {:.6f} dE {:+.8f}]", ce.q0_blend->w[k], m_rev_q0_blend_e[k] - m_rev_q0_blend_e[0]);
+                CurcumaLogger::info(fmt::format("rev SQE soft mu q0 blend: {} placements{}, correction {:+.10f} Eh",
+                    m_rev_q0_blend_e.size(), s, m_rev_q0_blend_de));
+            }
+        } else {
+            CurcumaLogger::warn("rev-gfnff: soft mu q0 blend could not be evaluated (frac pairs or a failed solve) - using the best placement only");
+        }
+    }
     if (m_workspace) {
         std::vector<SqePairData> data;
         data.reserve(pairs.size());
@@ -12871,12 +13768,370 @@ Vector GFNFF::revSolveSplitCharges(const CornerEEQ& ce, const Vector& topology_c
             d.j = pairs[k].j;
             d.p = (p.size() > k) ? p(k) : 0.0;
             d.kappa0 = pairs[k].kappa0;
+            d.kappa_x = pairs[k].kappa_x;
+            d.frac_c = pairs[k].frac_c;
+            d.harris_x = pairs[k].harris_x;
             data.push_back(d);
         }
         m_workspace->setSqeBmin(m_rev_sqe_bmin);
+        m_workspace->setSqeKappaForm(m_rev_sqe_kappa_form, m_rev_sqe_kappa_exponent);
         m_workspace->setSqePairs(std::move(data));
     }
     return q;
+}
+
+// ============================================================================================
+// rev-gfnff P2 + P3 (Claude Generated, Sep 23, 2026) - test_cases/revgfnff/_log/P2P3_STATUS.md
+// ============================================================================================
+
+// P3 perception: excess electrons with no bonding slot left.
+//
+// A force field has the fragment's integer charge and the valence budget, not orbital occupation.
+// Per connected component f of the topology's bond graph:
+//
+//   o_ij        continuous bond order (continuousBondOrder: 1 + pibo * (sp-sp ? 2 : 1))
+//   u_i         sum_j o_ij, the valence atom i's bonds claim
+//   Val_i       Val_Z + clamp(u_i - Val_Z, 0, X_Z)   (the conserving share's budget, ELEMENT part
+//               only: 0 for H/F, 1 for group 13, 6 - Val_Z for period >= 3 groups 15-17, else 0)
+//   f_i         min(1, Val_i / u_i)                  (an over-coordinated atom delivers Val_i)
+//   F_i         max(0, Val_i - sum_j o_ij f_i f_j)   free bonding slots of atom i
+//   x_f         max(0, -Q_f - sum_{i in f} F_i)      Q_f = sum of the Phase-1 charges over f
+//
+// An extra electron first fills a free slot (OH-: the O has one, x = 0; formate: the two O have
+// 0.5 each through their pi order, x = 0; CN-: C has one, x = 0). Only when every slot is taken
+// does it go antibonding (Cl2-, F2-: x = 1). An over-coordinated centre absorbs it through f
+// (FHF-: f_H = 1/2 frees half a slot on each F, x = 0; the [X-CH3-X]- SN2 transition state: f_C =
+// 4/5, x = 0), because the valence share already halves those wells - counting them again here
+// would be a double correction. x_f is spread evenly over the component's bonds that have a
+// calibrated half-order row (RevWellTableV2::hasHalfOrder) - the low-lying sigma* of a dihalogen -
+// and nowhere else: a fragment without such a bond keeps x unapplied. Every input is a topology
+// constant, so x is too (no geometry derivative), and it is continuous in them (the clamps are
+// C0, like the mg3 order key). A neutral or cationic fragment has x = 0 identically.
+std::map<std::pair<int, int>, double> GFNFF::revExcessElectrons(const TopologyInfo& topo) const
+{
+    std::map<std::pair<int, int>, double> out;
+    const int N = m_atomcount;
+    if (!m_rev_excess || N == 0 || static_cast<int>(topo.neighbor_lists.size()) != N
+        || topo.topology_charges.size() != N)
+        return out;
+    const auto& nb = topo.neighbor_lists;
+    // components
+    std::vector<int> comp(N, -1);
+    int ncomp = 0;
+    for (int s0 = 0; s0 < N; ++s0) {
+        if (comp[s0] >= 0)
+            continue;
+        std::vector<int> stack { s0 };
+        comp[s0] = ncomp;
+        while (!stack.empty()) {
+            const int a = stack.back();
+            stack.pop_back();
+            for (int b : nb[a])
+                if (b >= 0 && b < N && comp[b] < 0) {
+                    comp[b] = ncomp;
+                    stack.push_back(b);
+                }
+        }
+        ++ncomp;
+    }
+    std::vector<double> Q(ncomp, 0.0);
+    for (int i = 0; i < N; ++i)
+        Q[comp[i]] += topo.topology_charges(i);
+    bool any_anion = false;
+    for (int c = 0; c < ncomp; ++c)
+        if (Q[c] < -1e-6)
+            any_anion = true;
+    if (!any_anion)
+        return out;
+    // per-atom valence bookkeeping
+    std::vector<double> u(N, 0.0), val(N, 0.0), f(N, 1.0);
+    for (int i = 0; i < N; ++i)
+        for (int j : nb[i])
+            u[i] += continuousBondOrder(i, j, topo);
+    for (int i = 0; i < N; ++i) {
+        const int Z = m_atoms[i];
+        const double vz = revValence(Z);
+        const int grp = (Z >= 1 && Z <= 86) ? GFNFFParameters::periodic_group[Z - 1] : 0;
+        const int period = Z <= 2 ? 1 : Z <= 10 ? 2 : Z <= 18 ? 3 : Z <= 36 ? 4 : Z <= 54 ? 5 : 6;
+        double X = 0.0;
+        if (Z == 1 || Z == 9)
+            X = 0.0;
+        else if (grp == 3)
+            X = 1.0;
+        else if (period >= 3 && grp >= 5 && grp <= 7)
+            X = std::max(0.0, 6.0 - vz);
+        val[i] = vz + std::min(std::max(u[i] - vz, 0.0), X);
+        f[i] = (u[i] > val[i] && u[i] > 0.0) ? val[i] / u[i] : 1.0;
+    }
+    std::vector<double> free_slots(ncomp, 0.0);
+    for (int i = 0; i < N; ++i) {
+        double used = 0.0;
+        for (int j : nb[i])
+            used += continuousBondOrder(i, j, topo) * f[i] * f[j];
+        free_slots[comp[i]] += std::max(0.0, val[i] - used);
+    }
+    // eligible bonds per component
+    std::vector<std::vector<std::pair<int, int>>> elig(ncomp);
+    for (int i = 0; i < N; ++i)
+        for (int j : nb[i])
+            if (j > i && RevWellTableV2::hasHalfOrder(m_atoms[i], m_atoms[j]))
+                elig[comp[i]].emplace_back(i, j);
+    for (int c = 0; c < ncomp; ++c) {
+        const double x = std::max(0.0, -Q[c] - free_slots[c]);
+        if (x < 1e-9 || elig[c].empty())
+            continue;
+        const double xb = x / static_cast<double>(elig[c].size());
+        for (const auto& pr : elig[c])
+            out[pr] = xb;
+    }
+    if (CurcumaLogger::get_verbosity() >= 2)
+        for (const auto& [pr, x] : out)
+            CurcumaLogger::info(fmt::format("rev-gfnff P3: excess electrons x = {:.4f} on bond {}-{} (order {:.3f} -> {:.3f})",
+                x, pr.first + 1, pr.second + 1, continuousBondOrder(pr.first, pr.second, topo),
+                continuousBondOrder(pr.first, pr.second, topo) - 0.5 * x));
+    return out;
+}
+
+double GFNFF::revExcessKappa(const TopologyInfo& topo, int i, int j) const
+{
+    if (!m_rev_excess || m_rev_excess_frac || m_rev_excess_harris || topo.rev_excess.empty())
+        return 0.0;
+    auto it = topo.rev_excess.find({ std::min(i, j), std::max(i, j) });
+    return (it == topo.rev_excess.end()) ? 0.0 : it->second * m_rev_excess_kappa;
+}
+
+// P3 alternative "harris" (Claude Generated, Sep 24, 2026; _log/P2P3_HARRIS_STATUS.md): the
+// pair's topological excess-electron count x_ij. In harris mode the pair gets NO extra hardness
+// (revExcessKappa returns 0, so the charges relax exactly as under flat at kappa_x = 0) and the
+// workspace adds the non-self-consistent energy x_ij g(r_ij) instead (rev_harris_table.h).
+double GFNFF::revExcessHarrisX(const TopologyInfo& topo, int i, int j) const
+{
+    if (!m_rev_excess || !m_rev_excess_harris || topo.rev_excess.empty())
+        return 0.0;
+    auto it = topo.rev_excess.find({ std::min(i, j), std::max(i, j) });
+    return (it == topo.rev_excess.end()) ? 0.0 : it->second;
+}
+
+// P3 alternative "frac" (Claude Generated, Sep 23, 2026; _log/P2P3_ALTERNATIVES_STATUS.md):
+// the fractional-charge correction factor of one pair, min(x_ij, 1) c. Like kappa_x it is a
+// topology constant; unlike kappa_x it does not localise the charge (see EEQSolver::SqePair).
+double GFNFF::revExcessFracC(const TopologyInfo& topo, int i, int j) const
+{
+    if (!m_rev_excess || !m_rev_excess_frac || topo.rev_excess.empty())
+        return 0.0;
+    auto it = topo.rev_excess.find({ std::min(i, j), std::max(i, j) });
+    return (it == topo.rev_excess.end()) ? 0.0 : std::min(it->second, 1.0) * m_rev_excess_frac_c;
+}
+
+// P2: the Phase-1 topology charges under the split-charge model.
+//
+// Why (b) of CL2_COMPRESSED_STATUS.md 6 and not (a) or (c): the Coulomb self-energy's hardness is
+// linearised around qa, gam + dgam(qa) + sqrt(2/pi)/sqrt(alpeeq(qa)). In plain GFN-FF qa and q
+// come from the same constrained model and agree to a few 0.01 e; SQE broke that agreement by
+// localising q (kappa > 0) while qa stayed delocalised. Solving Phase 1 with the same model
+// restores the GFN-FF relationship "qa ~ q" instead of inventing a new one: (a) would put qa := q0,
+// an integer placement that is not a charge the model ever computes and breaks the kappa = 0
+// identity; (c) would make the EEQ nonlinear (new gradient terms) to fix a problem that exists only
+// because the two phases disagree. The pairs use the TOPOLOGICAL bond order 1 - Phase 1 is
+// topological by construction (topological distances, integer neighbour counts), and a geometric b
+// would make qa depend on the geometry the topology was built at, i.e. a history dependence and an
+// energy jump at every topology-cache refresh in MD/opt. The price: at a stretched bond (b < 1)
+// Phase 2 localises more than Phase 1 unless the pair's hardness is dominated by the flat P3 term
+// (x kappa_x), which is b-independent in both phases.
+void GFNFF::revApplyPhase1Sqe(TopologyInfo& topo) const
+{
+    topo.rev_excess.clear();
+    topo.rev_sqe_q0.resize(0);
+    if (!m_rev_settings.enabled || !m_rev_sqe || !(m_rev_sqe_phase1 || m_rev_excess))
+        return;
+    if (topo.topology_charges.size() != m_atomcount || !m_eeq_solver)
+        return;
+    if (m_rev_excess)
+        topo.rev_excess = revExcessElectrons(topo);
+    if (!m_rev_sqe_phase1)
+        return;
+
+    // the same TopologyInput the Phase-1 call site builds
+    EEQSolver::TopologyInput ti;
+    ti.neighbor_lists = topo.neighbor_lists;
+    ti.nfrag = topo.nfrag;
+    ti.fraglist = topo.fraglist;
+    ti.qfrag = topo.qfrag;
+    ti.itag = topo.itag;
+    ti.is_pi.assign(m_atomcount, 0);
+    for (int i = 0; i < m_atomcount && i < static_cast<int>(topo.pi_fragments.size()); ++i)
+        ti.is_pi[i] = (topo.pi_fragments[i] != 0) ? 1 : 0;
+    ti.covalent_radii.resize(m_atomcount);
+    for (int i = 0; i < m_atomcount; ++i) {
+        const int z = m_atoms[i];
+        ti.covalent_radii[i] = (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size()))
+            ? GFNFFParameters::covalent_radii[z - 1] : 1.0;
+    }
+
+    // pairs: the topology's own bonds at the topological order b = 1, restricted to pairs INSIDE
+    // one pass-1 fragment. Measured reason (P2P3_STATUS.md section 5): without the restriction, a
+    // bond that pass 2 perceives between two fragments pass 1 kept apart (Known Issue #17's
+    // merged-fragment case - every proton-transfer / SN2 transition state whose bridge is only
+    // seen with the charge-shrunk radii) lets qa delocalise across the old fragment border even at
+    // kappa = 0, which moved 7 GMTKN55 structures by -97 .. +5 kcal/mol, NEUTRAL ones among them
+    // (PX13/h2o_2_ts -96.9). That is a change of the fragment model, not of the qa/q consistency
+    // this function exists for, so it is kept out: with the restriction, kappa = 0 reproduces the
+    // constrained Phase 1 EXACTLY in every case, and a perceived X2- pair is inside one fragment
+    // whenever pass 1 sees one (r < ~2.6 A for Cl2-) and pinned at (-1, 0) by the constraint
+    // when it sees two.
+    const bool have_frag = static_cast<int>(ti.fraglist.size()) >= m_atomcount;
+    std::set<std::pair<int, int>> pset;
+    for (int i = 0; i < m_atomcount && i < static_cast<int>(topo.neighbor_lists.size()); ++i)
+        for (int j : topo.neighbor_lists[i])
+            if (j >= 0 && j < m_atomcount && j != i
+                && (!have_frag || ti.fraglist[i] == ti.fraglist[j]))
+                pset.emplace(std::min(i, j), std::max(i, j));
+    std::vector<EEQSolver::SqePair> pairs;
+    pairs.reserve(pset.size());
+    for (const auto& pr : pset) {
+        EEQSolver::SqePair sp;
+        sp.i = pr.first;
+        sp.j = pr.second;
+        sp.b = 1.0;
+        sp.kappa0 = 0.5 * (revSqeKappa(m_atoms[sp.i]) + revSqeKappa(m_atoms[sp.j]));
+        sp.kappa_x = revExcessKappa(topo, sp.i, sp.j);
+        sp.frac_c = revExcessFracC(topo, sp.i, sp.j);
+        pairs.push_back(sp);
+    }
+    // The converse case: a pass-1 fragment that the pass-2 bond graph splits into several
+    // components (a bond lost to the charge-shrunk radii). The constrained Phase 1 still lets
+    // charge move freely inside the pass-1 fragment, so the components are chained by VIRTUAL
+    // zero-hardness pairs (kappa0 = kappa_x = 0): with them the reachable charge space is exactly
+    // "fixed sum per pass-1 fragment", i.e. the constrained Phase 1, at kappa = 0 in every case.
+    if (have_frag) {
+        std::vector<int> parent(m_atomcount);
+        for (int i = 0; i < m_atomcount; ++i)
+            parent[i] = i;
+        std::function<int(int)> root = [&](int a) { return parent[a] == a ? a : (parent[a] = root(parent[a])); };
+        for (const auto& pr : pset)
+            parent[root(pr.first)] = root(pr.second);
+        std::map<int, int> first_root_of_frag;   // pass-1 fragment -> a representative atom
+        for (int i = 0; i < m_atomcount; ++i) {
+            auto it = first_root_of_frag.find(ti.fraglist[i]);
+            if (it == first_root_of_frag.end()) {
+                first_root_of_frag[ti.fraglist[i]] = i;
+                continue;
+            }
+            const int rep = it->second;
+            if (root(rep) == root(i))
+                continue;
+            EEQSolver::SqePair sp;       // virtual pair, no hardness, no geometry
+            sp.i = std::min(rep, i);
+            sp.j = std::max(rep, i);
+            sp.b = 1.0;
+            pairs.push_back(sp);
+            parent[root(rep)] = root(i);
+        }
+    }
+
+    // q0: the initialisation rule (uniform per pass-1 fragment, then localised by the PHASE-1
+    // chemical potential if the mu rule is on). Phase 2 reuses this q0 (topo.rev_sqe_q0).
+    Vector q0 = Vector::Zero(m_atomcount);
+    {
+        const int nfrag = std::max(1, ti.nfrag);
+        const bool have_frag = static_cast<int>(ti.fraglist.size()) >= m_atomcount;
+        auto frag_of = [&](int i) {
+            const int fr = have_frag ? (ti.fraglist[i] - 1) : 0;
+            return (fr >= 0 && fr < nfrag) ? fr : -1;
+        };
+        std::vector<int> count(nfrag, 0);
+        for (int i = 0; i < m_atomcount; ++i)
+            if (frag_of(i) >= 0)
+                count[frag_of(i)]++;
+        std::vector<double> qf(nfrag, 0.0);
+        for (int fr = 0; fr < nfrag; ++fr)
+            qf[fr] = (fr < static_cast<int>(ti.qfrag.size())) ? ti.qfrag[fr] : (fr == 0 ? static_cast<double>(m_charge) : 0.0);
+        for (int i = 0; i < m_atomcount; ++i) {
+            const int fr = frag_of(i);
+            if (fr >= 0 && count[fr] > 0)
+                q0(i) = qf[fr] / static_cast<double>(count[fr]);
+        }
+        const double miss = static_cast<double>(m_charge) - q0.sum();
+        if (std::abs(miss) > 1e-9 && m_atomcount > 0)
+            q0.array() += miss / static_cast<double>(m_atomcount);
+        if (m_rev_sqe_q0_mu) {
+            Vector mu;
+            try {
+                mu = m_eeq_solver->calculateTopologyChemicalPotential(m_atoms, m_geometry_bohr, m_charge,
+                    topo.coordination_numbers, ti, q0);
+            } catch (...) {
+                mu = Vector();
+            }
+            if (mu.size() == m_atomcount && mu.allFinite()) {
+                Vector q0_loc = Vector::Zero(m_atomcount);
+                for (int fr = 0; fr < nfrag; ++fr) {
+                    if (count[fr] == 0 || std::abs(qf[fr]) < 1e-9)
+                        continue;
+                    std::vector<int> idx;
+                    for (int i = 0; i < m_atomcount; ++i)
+                        if (frag_of(i) == fr)
+                            idx.push_back(i);
+                    const bool electron = (qf[fr] < 0.0);
+                    std::stable_sort(idx.begin(), idx.end(), [&](int a, int b) {
+                        return electron ? (mu(a) < mu(b)) : (mu(a) > mu(b));
+                    });
+                    double left = qf[fr];
+                    for (size_t k = 0; k < idx.size() && std::abs(left) > 1e-12; ++k) {
+                        const double take = (std::abs(left) > 1.0) ? std::copysign(1.0, left) : left;
+                        q0_loc(idx[k]) = take;
+                        left -= take;
+                    }
+                    if (std::abs(left) > 1e-12)
+                        for (int i : idx)
+                            q0_loc(i) += left / static_cast<double>(idx.size());
+                }
+                const double miss2 = static_cast<double>(m_charge) - q0_loc.sum();
+                if (std::abs(miss2) > 1e-9)
+                    q0_loc.array() += miss2 / static_cast<double>(m_atomcount);
+                q0 = q0_loc;
+            }
+        }
+    }
+
+    Vector qa;
+    try {
+        auto* pool = threadPool();
+        qa = m_eeq_solver->calculateTopologySplitCharges(m_atoms, m_geometry_bohr, m_charge,
+            topo.coordination_numbers, ti, q0, pairs, m_rev_sqe_bmin, m_rev_sqe_kappa_form,
+            m_rev_sqe_kappa_exponent, pool, m_threads);
+    } catch (const std::exception& e) {
+        CurcumaLogger::warn(std::string("rev-gfnff P2: Phase-1 split-charge solve failed, keeping constrained qa: ") + e.what());
+        return;
+    }
+    if (qa.size() != m_atomcount || !qa.allFinite() || std::abs(qa.sum() - static_cast<double>(m_charge)) > 1e-6) {
+        CurcumaLogger::warn("rev-gfnff P2: Phase-1 split-charge solve gave no usable charges, keeping constrained qa");
+        return;
+    }
+    if (CurcumaLogger::get_verbosity() >= 3)
+        for (int i = 0; i < m_atomcount; ++i)
+            CurcumaLogger::info(fmt::format("rev-gfnff P2: atom {} qa {:+.6f} -> {:+.6f} (q0 {:+.3f})",
+                i + 1, topo.topology_charges(i), qa(i), q0(i)));
+    topo.rev_sqe_q0 = q0;
+    // Where the split-charge Phase 1 reproduces the constrained one (kappa = 0 and no perceived
+    // pair, i.e. every molecule this flag is not aimed at) nothing is replaced: alpeeq/dgam are
+    // then exactly the Phase-1B/1C values, bit for bit. Measured reason: re-deriving them here
+    // unconditionally changed a react-mode [F-CH3-F]- umbrella frame by 3.4e-5 Eh at kappa = 0,
+    // because the Phase-1B/1C inputs (the hybridisation before the GEODEP promotion, the metal
+    // flags) are not the ones topo carries at this point.
+    if ((qa - topo.topology_charges).cwiseAbs().maxCoeff() < 1e-12)
+        return;
+    topo.topology_charges = qa;
+    // everything that is a function of qa and was computed before this point, with the inputs
+    // Phase 1C used (hybridisation as of 1C; on a topology-cache hit 1C did not run and the
+    // current array is the only one there is)
+    if (!calculateAlpeeq(topo))
+        CurcumaLogger::warn("rev-gfnff P2: alpeeq refresh failed");
+    const std::vector<int>& hyb_eeq = (static_cast<int>(topo.rev_hyb_eeq.size()) == m_atomcount)
+        ? topo.rev_hyb_eeq : topo.hybridization;
+    topo.dgam = m_eeq_solver->calculateDgamFull(m_atoms, topo.topology_charges, hyb_eeq,
+        topo.coordination_numbers, ti);
+    m_eeq_solver->invalidateCholeskyCache();
+    m_eeq_solver->invalidateMatrixCache();
 }
 
 void GFNFF::appendFadingWells(GFNFFParameterSet& params) const

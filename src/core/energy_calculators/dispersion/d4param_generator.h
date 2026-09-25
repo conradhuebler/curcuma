@@ -105,6 +105,19 @@ public:
                                     int num_threads = 1, bool skip_dc6dcn = false);
     const Matrix& getDC6DCN() const { return m_dc6dcn; }
 
+    /**
+     * @brief Re-evaluate the CN Gaussian weights (and the C6 half-contraction) at @p cn,
+     *        so that getChargeWeightedC6() returns C6(CN) of the CURRENT geometry.
+     *
+     * Claude Generated (Sep 2026, stale-CN package): GFN-FF's pair C6 used to be baked
+     * once at topology build and never refreshed, while the gradient already carried the
+     * dC6/dCN chain rule (Fortran gfnff_engrad.F90:323 evaluates C6(CN) every call).
+     * Exact - no CN-change threshold (the P1a skip in updateCNValuesForGradient only
+     * governs the dc6dcn DERIVATIVE, which this does not touch).
+     */
+    void refreshC6WeightsForCN(const std::vector<double>& cn, CxxThreadPool* pool = nullptr,
+                               int num_threads = 1);
+
     // Claude Generated (March 2026): GPU dc6dcn Phase 2 — expose weight arrays
     const std::vector<std::vector<double>>& getGaussianWeights() const { return m_gaussian_weights; }
     const std::vector<std::vector<double>>& getGaussianWeightDerivatives() const { return m_gaussian_weight_derivatives; }

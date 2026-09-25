@@ -248,6 +248,12 @@ PARAM(skip_phase2, Bool, false, "Skip Phase 2 EEQ refinement and use Phase 1 top
 // take it on merge. The PARAM text below is still byte-identical to confsearch's.
 PARAM(nh_linear_fix, Bool, true, "Do not let the angle-only GEODEP rule (input angle > 160 deg -> sp) promote a 2-coordinate nitrogen that carries a hydrogen to sp hybridisation. Why: the reference rule (gfnff_ini.f90, gen%linthr) declares ANY near-linear input angle linear-by-design, so a thermally stretched =N-H (measured: a guanidine imine N-H at 179 deg in a hot MD snapshot) is re-perceived as sp, gets theta0=180, and the distortion becomes its own equilibrium -- the structure optimises INTO the artefact and appears ~160 kJ/mol too deep (xtb 6.7.1 reproduces this with -276 kJ/mol, so it is an inherited method defect, not a port bug). In a conformer search, where every snapshot optimisation derives its own topology, one such event founds a self-reinforcing family (measured: 75 percent of a WEKLQ pool within three temperature stages). The genuine sp cases of an N-H nitrogen (H-N=C isocyanide-like, R-N=N terminal, metal nitriles, azides) are all caught by the STRUCTURAL rules that run before the angle fallback and are unaffected by this guard. Set false for bit-faithful reference (xtb/pprcht) behaviour, e.g. for validation against the Fortran implementations.", "Advanced", {})
 PARAM(frag_charge_autodetect, Bool, false, "For a CHARGED molecule that falls into exactly TWO fragments, try both placements of the net charge and keep the one with the lower EEQ electrostatic energy. Off by default because that is NOT what the reference does: its auto-detection block (gfnff_ini.f90, nfrag==2 branch) is gated on sum(qfrag(2:nfrag)) > 999 while qfrag is pre-initialised to [charge, 0, ...], so the block is dead code in both pprcht and xtb and the effective rule is 'whole charge on fragment 0'. Enabling the trial changes which fragment carries the charge and can be very wrong: GMTKN55 AHB21/21 (formate ... HF) then puts the -1 on the two-atom HF fragment, giving its hydrogen a charge of -0.52 and shifting the Coulomb term by 237 kcal/mol. Enable only to reproduce curcuma's pre-Sep-2026 behaviour or to experiment with the placement rule.", "Advanced", {})
+PARAM(frag_charge_model, String, "ensemble", "How the net charge of a CHARGED molecule that GFN-FF perceives as several fragments is placed. reference = the pprcht/xtb rule: the whole charge on fragment 0, i.e. on the fragment that contains atom 1, one integer placement, identical to every release so far. ensemble = chemistry-aware and continuous: every integer placement of the charge over the fragments is a complete GFN-FF evaluation with parameters consistent with that placement, placements are chosen by electron-count parity - fewest odd-electron fragments - then weighted by their free Phase-1 EEQ charge, and chemically identical placements by their energy with temperature frag_charge_tau, and fragments that are close to their pass-1 bond threshold are blended continuously with a merged corner that treats them as one EEQ group - weight 1-lambda, lambda = smootherstep of r/r_thr between 1 and frag_charge_s_max - so the energy is continuous where the fragment count changes. Engaged only for charged systems with two or more fragments; CPU; not in react topology mode. See test_cases/revgfnff/_log/FRAG_CHARGE_STATUS.md.", "Advanced", {})
+PARAM(frag_charge_s_max, Double, 1.0, "frag_charge_model ensemble: end of the contact window in units of the pass-1 bond threshold r_thr of each atom pair. Between s = r/r_thr = 1, where pass 1 splits the pair, and s_max two fragments are partly merged; beyond s_max they are fully separated and only integer placements remain. 1.0 switches the window off: only the placement rule acts, and the energy keeps the reference rule's step at the split.", "Advanced", {})
+PARAM(frag_charge_tau, Double, 1.0, "frag_charge_model ensemble: temperature in kcal/mol of the Boltzmann average over integer charge placements. Small = the lowest-energy placement wins; placements closer than a few tau are averaged, which keeps the energy and gradient smooth at degeneracies such as a symmetric X...X- pair.", "Advanced", {})
+PARAM(frag_charge_sigma, Double, 0.05, "frag_charge_model ensemble: width in elementary charges of the weighting between chemically DIFFERENT charge carriers that the electron-count parity rule leaves tied, by the free single-constraint Phase-1 EEQ charge each carrier holds. Chemically identical carriers, e.g. the two ends of a symmetric X...X- pair, are weighted by their energies with frag_charge_tau instead.", "Advanced", {})
+PARAM(frag_charge_max_edges, Int, 4, "frag_charge_model ensemble: maximum number of fragment-fragment contacts inside the window that are blended - 2^n corners are evaluated. Contacts beyond this count, the most separated first, are treated as fully separated and a warning is printed.", "Advanced", {})
+PARAM(frag_charge_max_placements, Int, 6, "frag_charge_model ensemble: maximum number of integer charge placements evaluated per corner. With more groups the candidates are pre-selected by the free single-constraint Phase-1 EEQ charge of each group.", "Advanced", {})
 PARAM(cn_cutoff_bohr, Double, 10.0, "CN neighbor list cutoff radius in Bohr (reference cnthr=100 Bohr^2=10 Bohr). 0 = use accuracy-based threshold instead.", "Advanced", {})
 PARAM(cn_accuracy, Double, 1.0, "CN accuracy for threshold calculation (cnthr = 100 - log10(acc)*50). Only used when cn_cutoff_bohr = 0. Set to 0 for full O(N^2) reference mode.", "Advanced", {})
 PARAM(solve, String, "auto",
@@ -389,6 +395,17 @@ PARAM(rev_sqe_kappa_O, Double, 0.0, "rev-gfnff stage 2: bond-hardness parameter 
 PARAM(rev_sqe_kappa_F, Double, 0.0, "rev-gfnff stage 2: bond-hardness parameter kappa_Z of fluorine (Eh).", "Reactive", {})
 PARAM(rev_sqe_kappa_Cl, Double, 0.0, "rev-gfnff stage 2: bond-hardness parameter kappa_Z of chlorine (Eh).", "Reactive", {})
 PARAM(rev_sqe_bmin, Double, 1e-3, "rev-gfnff stage 2: a pair whose bond order falls below this is dropped from the split-charge system (its hardness kappa0/b would exceed 1000 kappa0, i.e. it is rigid).", "Reactive", {})
+PARAM(rev_sqe_kappa_form, String, "inverse", "rev-gfnff stage 2 B2: functional form of the bond hardness kappa(b). inverse = kappa0/b (the original, factor 1.6 only between b=0.97 and b=0.6); power = kappa0/b^n with n = rev_sqe_kappa_exponent (steeper, still finite at b=1); vanishing = kappa0 (1-b)/b (exactly 0 at b=1, so only a weakened bond is penalised). Default inverse keeps every existing result bit-identical.", "Reactive", {})
+PARAM(rev_sqe_kappa_exponent, Double, 3.0, "rev-gfnff stage 2 B2: exponent n of the power form of kappa(b) = kappa0/b^n. Ignored by the other forms.", "Reactive", {})
+PARAM(rev_sqe_q0_rule, String, "mu", "rev-gfnff stage 2 B2: where a charged fragment's integer charge sits at p = 0 (the static/cold-start reference charges q0). uniform = spread flat over the fragment (the original rule; for a symmetric anion that IS already the EEQ minimum, so kappa has no lever); mu = localised on the fragment atoms with the lowest EEQ chemical potential for an electron, highest for a hole. At kappa = 0 the two are provably identical (the increments p reach the same EEQ minimum from either start).", "Reactive", {})
+PARAM(rev_sqe_q0_mu_tau, Double, 1.0, "rev-gfnff stage 2, rev_sqe_q0_rule mu: temperature in kcal/mol (per elementary charge) of the smooth placement. Instead of the hard argmin over the EEQ chemical potential, the energy is the Boltzmann average sum_p w_p E_p over the whole-unit placements p, w_p ~ exp(mu.q0_p/tau), each E_p a full split-charge solve; the analytic gradient includes dw_p/dx. Placements more than 34 tau above the best carry no weight, so away from a mu crossing the result is the hard rule to the last bit, and at an exact symmetric tie (Cl2-, a C2v carboxylate) the equal branches give the hard energy too; only the force cusp at a crossing is removed. Costs one extra split-charge solve per near-tied placement. 0 = the original hard rule (kept only to reproduce old numbers). See test_cases/revgfnff/_log/MU_CUSP_STATUS.md.", "Reactive", {})
+PARAM(rev_sqe_phase1, Bool, false, "rev-gfnff P2 (Sep 2026, opt-in, needs rev_charge_model sqe): solve the Phase-1 topology charges qa with the same split-charge model as the Phase-2 charges (pairs = the topology bonds at their TOPOLOGICAL bond order 1, same kappa_Z and q0 rule), so the charge-dependent hardness dgam(qa)/alpeeq(qa) of the Coulomb self-energy localises together with the charge instead of staying at the delocalised constrained-EEQ qa. qa stays a function of the topology alone. At kappa = 0 on a connected graph identical to the constrained Phase 1. See test_cases/revgfnff/_log/P2P3_STATUS.md.", "Reactive", {})
+PARAM(rev_sqe_virtual_pairs, Bool, false, "rev-gfnff stage 2 (Sep 24, 2026, opt-in, needs rev_charge_model sqe): the Phase-2 split-charge solve chains every bond-graph component that shares one EEQ constraint group with zero-hardness VIRTUAL pairs, the Phase-2 analogue of the P2 Phase-1 virtual pairs. Without it charge cannot move between two unbonded atoms of the same constraint group and stays at the integer q0 placement - which the frag_charge_model ensemble merged corner creates just past the bond cutoff (X2- label dependence, SQE(kappa 0) != EEQ by up to 108 kcal/mol). At kappa = 0 the reachable charge space is then the constrained EEQ one. See test_cases/revgfnff/_log/X2_SCOPE_STATUS.md.", "Reactive", {})
+PARAM(rev_excess_electron, Bool, false, "rev-gfnff P3 (Sep 2026, opt-in, needs rev_charge_model sqe): perceive excess electrons with no bonding slot left (an anionic fragment whose atoms are valence-saturated, e.g. Cl2-, F2-: x = max(0, -Q_f - free slots)), spread x over the fragment's bonds that have a calibrated half-order well row, lower their bond order by x/2 (the mg3 well table then reads the half-order row) and add x*rev_excess_kappa to their split-charge hardness (the resonance of the 2c-3e bond lives in the well, not in the Coulomb term). A per-topology constant; inert for every neutral fragment. See test_cases/revgfnff/_log/P2P3_STATUS.md.", "Reactive", {})
+PARAM(rev_excess_kappa, Double, 100.0, "rev-gfnff P3: flat split-charge hardness (Eh) per excess electron on a perceived 2c-3e pair (x*rev_excess_kappa, no bond-order dependence). Large = the charge stays on its q0 atom, i.e. the Coulomb term carries no delocalisation energy for that pair.", "Reactive", {})
+PARAM(rev_excess_mode, String, "flat", "rev-gfnff P3 (Sep 2026, opt-in alternative, see test_cases/revgfnff/_log/P2P3_ALTERNATIVES_STATUS.md): how the Coulomb term is kept from double-counting a perceived 2c-3e pair. flat = the shipped x*rev_excess_kappa split-charge hardness (localises the charge on its q0 atom); frac = fractional-charge correction E_x = 1/2 x c K_ij(r) q_i q_j with K_ij the pair EEQ curvature and c = rev_excess_frac_c: removes the fraction c of the pair delocalisation energy while the charges stay symmetric, polarisable and independent of q0; harris = no extra hardness (charges free, as flat at rev_excess_kappa 0) plus a non-self-consistent energy x*g(r) per perceived pair, g fitted to DLPNO-CCSD(T) (rev_harris_table.h, test_cases/revgfnff/_log/P2P3_HARRIS_STATUS.md).", "Reactive", {})
+PARAM(rev_excess_frac_c, Double, 0.9, "rev-gfnff P3, rev_excess_mode frac: fraction c in [0, 0.99] of the pair EEQ curvature removed (1 - c of the EEQ delocalisation energy is kept; the axial polarisability scales as 1/(1 - c)).", "Reactive", {})
+PARAM(rev_excess_react_consistent, Bool, true, "rev-gfnff P3 flat mode (Sep 2026, repair, default on; only acts when rev_excess_electron is on AND in react-mode topology corners, see test_cases/revgfnff/_log/P2P3_ALTERNATIVES_STATUS.md): keep the flat excess-electron hardness consistent across react-mode topology corners. (a) a corner that perceives an excess-electron pair gets its q0 re-localised on that pair (on the atom its Phase-1 qa holds the charge on, then lowest EEQ mu, then index), because the flat hardness freezes the charge at q0 and a delocalised corner q0 would carry the full EEQ delocalisation energy; (b) a pair in flight that is not a bond in one corner inherits the largest x*kappa_x any corner assigns it (the corner that has the bond decides).", "Reactive", {})
 PARAM(storsion_reference_loop_bug, Bool, false, "Reproduce the reference implementation's triple-bond-torsion (sTors) loop bug bit-for-bit. Both pprcht/gfnff and xtb 6.7.1 call sTors_eg(m,...) with the array SIZE m instead of the loop index, so they evaluate only the LAST detected C-triplebond-C torsion, m times, and drop all others (and give exactly zero whenever the last slot was never filled). Curcuma sums every detected torsion, which is what the term is meant to do - its erefhalf is a DLPNO-CCSD(T) diphenylacetylene reference value, not a fitted parameter. Enable only to reproduce reference totals exactly.", "Advanced", {})
 PARAM(param_file, String, "", "rev-gfnff: JSON file with sparse parameter overrides ({gen:{...}, tables:{name:{Z:value}}, rev:{...}}) deep-merged over the built-in GFN-FF tables; unknown keys abort.", "Advanced", {})
 PARAM(param_json, String, "", "rev-gfnff: the same override document given inline as a JSON string; merged after param_file.", "Advanced", {})
@@ -509,6 +526,18 @@ public:
      * Claude Generated (March 2026): Architecture cleanup — inheritance-based split
      */
     struct TopologyInfo : public GFNFFTopology, public GFNFFDynamicState {
+        /// rev-gfnff P3 (Claude Generated, Sep 23, 2026): perceived excess electrons per bond,
+        /// keyed on (min, max) atom index; only pairs with a nonzero x are stored. Empty unless
+        /// rev_excess_electron is on. See GFNFF::revExcessElectrons().
+        std::map<std::pair<int, int>, double> rev_excess;
+        /// rev-gfnff P2: the q0 the Phase-1 split-charge solve used (empty unless
+        /// rev_sqe_phase1). The static Phase-2 q0 reuses it, so both phases localise a charge
+        /// on the SAME atom (their mu probes use different matrices and could disagree).
+        Vector rev_sqe_q0;
+        /// rev-gfnff P2: the hybridisation Phase 1C computed dgam with (the GEODEP sp2 -> sp3
+        /// promotion after the Hueckel section changes topo.hybridization later, so re-deriving
+        /// dgam from the final array would change dgam even where qa did not change).
+        std::vector<int> rev_hyb_eeq;
     };
 
     /**
@@ -638,6 +667,19 @@ public:
      * @return Total energy in Hartree
      */
     double Calculation(bool gradient = false);
+
+    /**
+     * @brief Fix the EEQ fragment grouping and the integer group charges of this instance
+     *
+     * Used by the frag_charge_model ensemble: each charge variant is a GFNFF instance whose
+     * Phase-1/Phase-2 EEQ constraints are given here instead of being perceived + placed by the
+     * reference rule. fraglist is 1-based per atom (group id), qfrag[g-1] the group charge.
+     * Must be called before InitialiseMolecule(). Claude Generated (Sep 2026).
+     */
+    void setFragmentOverride(const std::vector<int>& fraglist, int nfrag, const std::vector<double>& qfrag);
+
+    /// frag_charge_model ensemble: number of charge variants evaluated in the last call (0 = inactive)
+    int fragEnsembleVariantCount() const { return m_frag_last_nvariants; }
 
     /**
      * @brief Get analytical gradients
@@ -2170,9 +2212,9 @@ public:
      */
     double BatmEnergy() const;
     /// rev-gfnff stage 1: over-coordination energy of the last calculation (0 unless enabled)
-    double OverCoordEnergy() const { return m_workspace ? m_workspace->energyComponents().over_coord : 0.0; }
+    double OverCoordEnergy() const { return m_frag_blend_valid ? m_frag_blend_comp.over_coord : (m_workspace ? m_workspace->energyComponents().over_coord : 0.0); }
     /// rev-gfnff stage 2 (Sep 2026): bond-hardness energy of the split-charge model
-    double SqeHardnessEnergy() const { return m_workspace ? m_workspace->energyComponents().sqe_hardness : 0.0; }
+    double SqeHardnessEnergy() const { return m_frag_blend_valid ? m_frag_blend_comp.sqe_hardness : (m_workspace ? m_workspace->energyComponents().sqe_hardness : 0.0); }
 
     // Claude Generated (April 2026): PBC accessors for GPU path
     bool hasPBC() const { return m_has_pbc; }
@@ -2474,6 +2516,16 @@ private:
     std::map<std::pair<int, int>, long> m_rev_cooldown; ///< stage 1b: demoted pair -> first scan call at which it may start a transition again
     int m_rev_demote_cooldown = 0;                      ///< stage 1b: scans a demoted pair has to wait
     // stage 1b multi-transition state (Sep 12, 2026): corner bond lists / EEQ inputs by mask
+    /// soft mu q0 rule (Claude Generated, Sep 24, 2026; _log/MU_CUSP_STATUS.md): the candidate
+    /// integer placements of the mu rule and their weights w_p = exp(mu.q0_p / tau) / Z. The
+    /// energy is the weighted average sum_p w_p E_p over the placements' full SQE energies.
+    struct RevQ0Blend {
+        std::vector<Vector> q0;              ///< q0 of each placement (whole units)
+        std::vector<double> w;               ///< weights, sum 1, descending
+        Vector q0u;                          ///< the uniform charges the probe mu was evaluated at
+        EEQSolver::ProbeGeometryTerms terms; ///< alpha / cnf / cutoff of the probe matrix
+        double tau = 0.0;                    ///< Eh
+    };
     struct CornerEEQ {
         Vector topology_charges;
         std::vector<int> hybridization;
@@ -2486,6 +2538,19 @@ private:
         // bond order b of each pair being taken at the current geometry every step.
         Vector q0;
         std::vector<std::pair<int, int>> sqe_pairs;
+        /// rev-gfnff P3 (Sep 23, 2026): the flat excess-electron hardness per pair of sqe_pairs
+        /// (same order), a corner constant like q0. Empty = all zero.
+        std::vector<double> sqe_kappa_x;
+        /// P3 alternative "frac" (Sep 23, 2026): fractional-charge correction factor per pair
+        /// of sqe_pairs (same order), a corner constant. Empty = all zero.
+        std::vector<double> sqe_frac_c;
+        /// P3 alternative "harris" (Sep 24, 2026): topological excess-electron count x per pair
+        /// of sqe_pairs (same order), a corner constant. Empty = all zero.
+        std::vector<double> sqe_harris_x;
+        /// soft mu q0 rule (Sep 24, 2026, _log/MU_CUSP_STATUS.md): set only when q0 came from the
+        /// geometry-dependent mu rule at THIS step (slot corner, no transition in flight) and more
+        /// than one placement carries weight. Frozen corners leave it empty.
+        std::shared_ptr<RevQ0Blend> q0_blend;
     };
     bool m_rev_pending = false;                    ///< the next rebuild starts m_rev_pending_tr
     RevTransition m_rev_pending_tr;
@@ -2511,11 +2576,66 @@ private:
     bool m_rev_sqe = false;                     ///< rev_charge_model == "sqe"
     double m_rev_sqe_bmin = 1e-3;               ///< pairs below this bond order are rigid
     std::map<int, double> m_rev_sqe_kappa;      ///< Z -> kappa_Z (Eh); absent = 0
+    int m_rev_sqe_kappa_form = 0;               ///< B2: EEQSolver::SqeKappaForm as an int
+    double m_rev_sqe_kappa_exponent = 3.0;      ///< B2: n of the power form
+    bool m_rev_sqe_q0_mu = true;                ///< B2: q0 localised by chemical potential (else uniform)
+    double m_rev_sqe_q0_mu_tau = 1.0 / 627.5094740631; ///< soft mu rule temperature (Eh); 0 = hard rule
+    /// soft mu q0 rule, this step's slot-corner blend (null = single placement, nothing to add)
+    std::shared_ptr<RevQ0Blend> m_rev_q0_blend;
+    std::vector<Vector> m_rev_q0_blend_q;         ///< SQE charges of every placement
+    std::vector<Vector> m_rev_q0_blend_p;         ///< split charges of every placement (pair order)
+    std::vector<double> m_rev_q0_blend_e;         ///< model energy of every placement (Eh)
+    std::vector<EEQSolver::SqePair> m_rev_q0_blend_pairs; ///< the slot corner's pair list
+    int m_rev_q0_blend_ref = 0;                   ///< placement the workspace evaluated
+    double m_rev_q0_blend_de = 0.0;               ///< sum_p w_p E_p - E_ref, added to the energy
+    /// dE/dx of the blend on top of the reference placement's workspace gradient (Eh/Bohr)
+    Matrix revSqeQ0BlendGradient() const;
+    /// explicit geometry gradient of the SQE model energy at fixed (q, p): Coulomb pairs,
+    /// the CN part of chi and the pair hardness (Eh/Bohr)
+    Matrix revSqeModelGradient(const Vector& q, const Vector& p, const EEQSolver::ProbeGeometryTerms& terms) const;
+    /// sum_k v_k dmu_k/dx for the probe mu_k = x_k(CN) - sum_j A_kj(r) q0u_j (Eh/Bohr)
+    Matrix revSqeMuDerivative(const Vector& v, const Vector& q0u, const EEQSolver::ProbeGeometryTerms& terms) const;
+    // ---- rev-gfnff P2/P3 (Claude Generated, Sep 23, 2026; _log/P2P3_STATUS.md) ---------------
+    bool m_rev_sqe_phase1 = false;              ///< P2: Phase-1 qa solved with the SQE model
+    bool m_rev_sqe_virtual = false;             ///< Phase-2 virtual pairs across bond-graph components of one constraint group (X2_SCOPE_STATUS.md)
+    bool m_rev_excess = false;                  ///< P3: excess-electron perception on
+    double m_rev_excess_kappa = 100.0;          ///< P3: flat hardness per excess electron (Eh)
+    bool m_rev_excess_frac = false;             ///< P3 alternative: rev_excess_mode == "frac"
+    double m_rev_excess_frac_c = 0.9;           ///< P3 alternative: c of the fractional-charge correction
+    bool m_rev_excess_harris = false;           ///< P3 alternative: rev_excess_mode == "harris" (_log/P2P3_HARRIS_STATUS.md)
+    bool m_rev_excess_react_consistent = true;  ///< P3 repair: q0 + kappa_x consistent over react corners
+    /// P3 repair (a): re-localise q0 on every perceived excess-electron pair of a corner
+    void revLocaliseExcessQ0(CornerEEQ& ce, const TopologyInfo& topo) const;
+    /// P3: per-bond excess electrons x_ij of a topology (see the PARAM rev_excess_electron).
+    std::map<std::pair<int, int>, double> revExcessElectrons(const TopologyInfo& topo) const;
+    /// P2: re-solve topo.topology_charges with the split-charge model on the Phase-1 matrix and
+    /// refresh alpeeq/dgam from them; also fills topo.rev_excess (P3). Runs at the end of every
+    /// calculateTopologyInfoOnce() pass. No-op unless m_rev_sqe && (m_rev_sqe_phase1 || m_rev_excess).
+    void revApplyPhase1Sqe(TopologyInfo& topo) const;
+    /// P3: x_ij kappa_x for one pair of a topology (0 if not perceived)
+    double revExcessKappa(const TopologyInfo& topo, int i, int j) const;
+    /// P3 alternative "frac": min(x_ij, 1) c for one pair of a topology (0 if not perceived / flat mode)
+    double revExcessFracC(const TopologyInfo& topo, int i, int j) const;
+    /// P3 alternative "harris": x_ij for one pair of a topology (0 if not perceived / not harris mode)
+    double revExcessHarrisX(const TopologyInfo& topo, int i, int j) const;
     double revSqeKappa(int Z) const { auto it = m_rev_sqe_kappa.find(Z); return it == m_rev_sqe_kappa.end() ? 0.0 : it->second; }
     /// the pair set of a corner: its bond graph + the fading wells + the pairs in transition
     std::vector<std::pair<int, int>> revSqePairs(const std::vector<std::vector<int>>& neighbor_lists) const;
-    /// q0 of the initialisation rule: the integer fragment charges of qfrag, uniform per atom
-    Vector revSqeQ0Fragments(const EEQSolver::TopologyInput& ti) const;
+    /// q0 of the initialisation (static / cold-start) rule for the integer fragment charges of
+    /// qfrag. `uniform` spreads them flat; `mu` (B2, default) localises them on the extreme-
+    /// chemical-potential atoms of the fragment, which is what gives kappa a lever at all.
+    /// The mu variant needs the EEQ inputs of the corner the q0 belongs to.
+    Vector revSqeQ0Fragments(const EEQSolver::TopologyInput& ti,
+                             const Vector& topology_charges,
+                             const std::vector<int>& hybridization,
+                             const std::optional<Vector>& alpeeq,
+                             std::shared_ptr<RevQ0Blend>* blend_out = nullptr) const;
+    /// soft mu rule (Sep 24, 2026): the integer placements of the mu rule within 34 tau of the
+    /// best one and their Boltzmann weights over sum_i e_i; returns the best placement's q0
+    Vector revSqeQ0MuBlend(const Vector& q0u, const Vector& mu,
+                           const EEQSolver::ProbeGeometryTerms& terms, const std::vector<double>& qf,
+                           const std::vector<int>& count, const std::vector<int>& frag,
+                           std::shared_ptr<RevQ0Blend>* blend_out) const;
     /// q0 of the corner-generation rule: rounded fragment sums of `q_now`, residual to the
     /// fragment with the lowest (highest) EEQ chemical potential when an electron (a hole) is left over
     Vector revSqeQ0Rounded(const CornerEEQ& ce, const Vector& q_now) const;
@@ -2780,6 +2900,50 @@ private:
     mutable int m_frag_carry_nfrag = 0;
     mutable std::vector<int> m_frag_carry_list;
     mutable std::vector<double> m_frag_carry_qfrag;
+
+    // ===== frag_charge_model ensemble (Claude Generated, Sep 24, 2026) =====
+    // See FRAG_CHARGE_STATUS.md section 1. A charge VARIANT is a complete GFNFF instance whose
+    // EEQ fragment groups and integer group charges are fixed by m_frag_override; the master
+    // blends the variants' energies/gradients: E = sum_c W_c sum_p omega_cp E_cp.
+    struct FragOverride {
+        bool active = false;
+        int nfrag = 0;
+        std::vector<int> fraglist;   // 1-based group id per atom
+        std::vector<double> qfrag;   // integer charge per group
+    };
+    FragOverride m_frag_override;
+    bool m_frag_is_variant = false;      ///< this instance is a variant (never nests)
+    mutable int m_frag_split_pass = 0;   ///< q-loop pass that split the fragments (1 or 2), set by calculateTopologyInfo
+    bool m_frag_ensemble = false;        ///< frag_charge_model == ensemble
+    double m_frag_s_max = 1.1;
+    double m_frag_tau_eh = 1.0 / 627.5094740631;
+    double m_frag_sigma = 0.05;          ///< e, width of the free-charge softmax over carrier classes
+    int m_frag_max_edges = 4;
+    int m_frag_max_placements = 6;
+    struct FragContact { int i, j; double thr, L, dL; };   // dL = dL/ds
+    struct FragEdge { int f, g; double lambda = 1.0; std::vector<FragContact> contacts; };
+    struct FragVariant {
+        std::string key;
+        std::unique_ptr<GFNFF> ff;
+        double energy = 0.0;
+        Matrix gradient;
+        Vector charges;
+        FFEnergyComponents comp;
+        bool ok = false;
+    };
+    std::vector<FragVariant> m_frag_variants;          // cache, keyed by FragVariant::key
+    unsigned m_frag_variants_topo_version = ~0u;
+    Vector m_frag_free_q;                               // free single-constraint Phase-1 charges (placement pre-selection)
+    bool m_frag_blend_valid = false;
+    FFEnergyComponents m_frag_blend_comp;
+    int m_frag_last_nvariants = 0;
+    bool m_frag_warned_edges = false;
+    double fragPass1Threshold(int i, int j) const;     ///< getnb bond threshold of the pass that split the fragments, Bohr
+    std::vector<FragEdge> fragWindowEdges(const std::vector<int>& fraglist, int nfrag) const;
+    GFNFF* fragVariant(const std::string& key, const std::vector<int>& group_of_atom, int ngroups,
+                       const std::vector<double>& qgroup);
+    double fragEnsembleBlend(bool gradient, double e_master);
+    double calculationSingle(bool gradient);            ///< the reference (single-variant) Calculation()
     CNDerivStore m_last_dcn; ///< CN derivatives (gradient only). Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
 
     // WP-FF-DistMatrix-Sharing (May 2026): shared packed-triangular distance arrays.

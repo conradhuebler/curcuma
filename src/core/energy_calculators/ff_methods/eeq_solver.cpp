@@ -3065,7 +3065,17 @@ std::vector<Vector> EEQSolver::calculateTopologyChargesMultiRHS(
     Vector topology_charges;
     {
         curcuma::ScopedBlasThreads _blas_threads(num_threads > 0 ? num_threads : 1);
-        topology_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads);
+        // rev-gfnff P2 (Claude Generated, Sep 23, 2026): the split-charge model on the Phase-1
+        // matrix (calculateTopologySplitCharges / calculateTopologyChemicalPotential install
+        // the context). Same hook, same A/x semantics as the Phase-2 one in
+        // calculateFinalCharges: A q = x with x = chieeq, so kappa = 0 on a connected graph
+        // reproduces the constrained solve below.
+        if (m_sqe_ctx && m_sqe_ctx->q0 && m_sqe_ctx->q0->size() == natoms) {
+            const MatrixCRef A_nn = A.topLeftCorner(natoms, natoms);
+            topology_charges = solveSplitChargeSystem(A_nn, x.head(natoms), natoms, *m_sqe_ctx);
+        } else {
+            topology_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads);
+        }
     }
 
     // Claude Generated (March 2026): Print Phase 1 charge summary
@@ -3900,6 +3910,17 @@ Vector EEQSolver::calculateFinalCharges(
         Vector new_charges;
         if (m_sqe_ctx && m_sqe_ctx->q0 && m_sqe_ctx->q0->size() == natoms) {
             const MatrixCRef A_nn = A.topLeftCorner(natoms, natoms);
+            // soft mu q0 rule (Claude Generated, Sep 24, 2026; _log/MU_CUSP_STATUS.md): hand
+            // out the geometry-dependent ingredients of A and x so the caller can differentiate
+            // the probe mu analytically.
+            if (m_sqe_ctx->terms) {
+                m_sqe_ctx->terms->alpha = alpha_corrected;
+                m_sqe_ctx->terms->cnf.resize(natoms);
+                for (int i = 0; i < natoms; ++i)
+                    m_sqe_ctx->terms->cnf(i) = getParameters(atoms[i], cn(i)).cnf;
+                m_sqe_ctx->terms->cutoff_sq = EEQ_CUTOFF_SQ;
+                m_sqe_ctx->terms->reaction_field = (m_reaction_field && m_reaction_field->rows() == natoms);
+            }
             new_charges = solveSplitChargeSystem(A_nn, x.head(natoms), natoms, *m_sqe_ctx);
         } else {
             new_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads);
@@ -4162,8 +4183,22 @@ Vector EEQSolver::solveSplitChargeSystem(const MatrixCRef& A_nn, const Vector& c
         keep.push_back(k);
     }
     const int np = static_cast<int>(keep.size());
+    // The model energy at the returned q (soft mu q0 rule, Claude Generated Sep 24, 2026;
+    // _log/MU_CUSP_STATUS.md): E = 1/2 q A q - chi q + 1/2 sum kappa p^2. It is exactly the
+    // charge-dependent part of the workspace energy (Coulomb + SqeHardness), so the difference
+    // between two q0 placements of the same corner is E_model(1) - E_model(2). frac pairs are
+    // not included (the caller does not blend placements when a pair has frac_c > 0).
+    auto fill_e_model = [&](const Vector& qv, const Vector& pv, const std::vector<int>& kept_idx) {
+        ctx.e_model = 0.5 * qv.dot(A_nn * qv) - chi.dot(qv);
+        for (int k = 0; k < static_cast<int>(kept_idx.size()); ++k) {
+            const SqePair& pr = all[kept_idx[k]];
+            const double kap = sqeKappa(pr.kappa0, pr.b, ctx.kappa_form, ctx.kappa_exponent) + pr.kappa_x;
+            ctx.e_model += 0.5 * kap * pv(k) * pv(k);
+        }
+    };
     if (np == 0) {
         ctx.solved = true;
+        fill_e_model(q0, Vector(), keep);
         return q0; // nothing can move: every fragment keeps its reference charge
     }
 
@@ -4192,9 +4227,46 @@ Vector EEQSolver::solveSplitChargeSystem(const MatrixCRef& A_nn, const Vector& c
     double kappa_max = 0.0;
     for (int k = 0; k < np; ++k) {
         const SqePair& pr = all[keep[k]];
-        const double kap = pr.kappa0 / pr.b;
+        // Same kappa(b) the workspace hardness kernel differentiates — see sqeKappa(). The P3
+        // excess-electron hardness kappa_x is flat in b and simply added (0 unless perceived).
+        const double kap = sqeKappa(pr.kappa0, pr.b, ctx.kappa_form, ctx.kappa_exponent) + pr.kappa_x;
         M(k, k) += kap;
         kappa_max = std::max(kappa_max, kap);
+    }
+
+    // rev-gfnff P3 alternative "frac" (Claude Generated, Sep 23, 2026,
+    // _log/P2P3_ALTERNATIVES_STATUS.md): E_x = sum_m 1/2 lambda_m q_(i_m) q_(j_m), lambda_m =
+    // c_m (A_ii + A_jj - 2 A_ij), i.e. A -> A + C with C_(i_m j_m) = C_(j_m i_m) = lambda_m / 2.
+    // With q = q0 + B p: M += B^T C B, rhs -= B^T C q0. For one isolated pair this is
+    // kappa -> kappa - lambda plus a q0-antisymmetric linear term, so the minimum is independent
+    // of which atom q0 put the charge on. Inert (bit-identical) unless some pair has frac_c > 0.
+    {
+        std::vector<int> fm;
+        for (int m = 0; m < static_cast<int>(all.size()); ++m) {
+            const SqePair& pm = all[m];
+            if (pm.frac_c > 0.0 && pm.i >= 0 && pm.j >= 0 && pm.i < natoms && pm.j < natoms && pm.i != pm.j)
+                fm.push_back(m);
+        }
+        if (!fm.empty()) {
+            auto bval = [&](int k, int a) {
+                const SqePair& pr = all[keep[k]];
+                return (a == pr.i ? 1.0 : 0.0) - (a == pr.j ? 1.0 : 0.0);
+            };
+            for (int m : fm) {
+                const SqePair& pm = all[m];
+                const double lam = pm.frac_c * (A_nn(pm.i, pm.i) + A_nn(pm.j, pm.j) - 2.0 * A_nn(pm.i, pm.j));
+                const double h = 0.5 * lam;
+                for (int l = 0; l < np; ++l) {
+                    const double bli = bval(l, pm.i), blj = bval(l, pm.j);
+                    if (bli == 0.0 && blj == 0.0)
+                        continue;
+                    // (C q0) restricted to this pair, projected on column l
+                    rhs(l) -= h * (bli * q0(pm.j) + blj * q0(pm.i));
+                    for (int k = 0; k < np; ++k)
+                        M(l, k) += h * (bli * bval(k, pm.j) + blj * bval(k, pm.i));
+                }
+            }
+        }
     }
 
     // --- solve ------------------------------------------------------------------------------
@@ -4229,6 +4301,7 @@ Vector EEQSolver::solveSplitChargeSystem(const MatrixCRef& A_nn, const Vector& c
         q(pr.j) -= p(k);
     }
     ctx.solved = true;
+    fill_e_model(q, p, keep);
     if (m_verbosity >= 3) {
         fmt::print(stderr, "[EEQ/SQE] {} of {} pairs active, max kappa = {:.4f} Eh, max |p| = {:.4f} e\n",
                    np, static_cast<int>(all.size()), kappa_max, p.cwiseAbs().maxCoeff());
@@ -4251,7 +4324,10 @@ Vector EEQSolver::calculateSplitCharges(
     bool use_corrections,
     const std::optional<Vector>& alpeeq,
     CxxThreadPool* pool,
-    int num_threads)
+    int num_threads,
+    int kappa_form,
+    double kappa_exponent,
+    double* e_model_out)
 {
     const int natoms = static_cast<int>(atoms.size());
     if (q0.size() != natoms) {
@@ -4263,6 +4339,8 @@ Vector EEQSolver::calculateSplitCharges(
     ctx.pairs = &pairs;
     ctx.q0 = &q0;
     ctx.bmin = bmin;
+    ctx.kappa_form = kappa_form;
+    ctx.kappa_exponent = kappa_exponent;
 
     // Corner safety (Known Issue #21c class): both caches are keyed on geometry + CN, which
     // every topology corner of the same step shares, while dgam / alpeeq / the pair set are
@@ -4285,6 +4363,8 @@ Vector EEQSolver::calculateSplitCharges(
     invalidateMatrixCache();
     if (p_out)
         *p_out = ctx.p;
+    if (e_model_out)
+        *e_model_out = ctx.solved ? ctx.e_model : std::numeric_limits<double>::quiet_NaN();
     return q;
 }
 
@@ -4298,19 +4378,93 @@ Vector EEQSolver::calculateChemicalPotential(
     const std::vector<int>& hybridization,
     const std::optional<TopologyInput>& topology,
     bool use_corrections,
-    const std::optional<Vector>& alpeeq)
+    const std::optional<Vector>& alpeeq,
+    ProbeGeometryTerms* terms_out)
 {
     const int natoms = static_cast<int>(atoms.size());
     if (q.size() != natoms)
         return Vector();
     SqeContext ctx;      // probe mode: pairs == nullptr, only mu is filled
     ctx.q0 = &q;
+    ctx.terms = terms_out;
     invalidateCholeskyCache();
     invalidateMatrixCache();
     m_sqe_ctx = &ctx;
     try {
         calculateFinalCharges(atoms, geometry_bohr, total_charge, topology_charges, cn,
                               hybridization, topology, use_corrections, alpeeq, nullptr, 1);
+    } catch (...) {
+        m_sqe_ctx = nullptr;
+        invalidateCholeskyCache();
+        invalidateMatrixCache();
+        throw;
+    }
+    m_sqe_ctx = nullptr;
+    invalidateCholeskyCache();
+    invalidateMatrixCache();
+    return ctx.mu;
+}
+
+// rev-gfnff P2 (Claude Generated, Sep 23, 2026): the SQE solve on the Phase-1 matrix.
+Vector EEQSolver::calculateTopologySplitCharges(
+    const std::vector<int>& atoms,
+    const Matrix& geometry_bohr,
+    int total_charge,
+    const Vector& cn,
+    const std::optional<TopologyInput>& topology,
+    const Vector& q0,
+    const std::vector<SqePair>& pairs,
+    double bmin,
+    int kappa_form,
+    double kappa_exponent,
+    CxxThreadPool* pool,
+    int num_threads)
+{
+    const int natoms = static_cast<int>(atoms.size());
+    if (q0.size() != natoms)
+        return calculateTopologyCharges(atoms, geometry_bohr, total_charge, cn, topology, true, pool, num_threads);
+    SqeContext ctx;
+    ctx.pairs = &pairs;
+    ctx.q0 = &q0;
+    ctx.bmin = bmin;
+    ctx.kappa_form = kappa_form;
+    ctx.kappa_exponent = kappa_exponent;
+    invalidateCholeskyCache();
+    invalidateMatrixCache();
+    m_sqe_ctx = &ctx;
+    Vector q;
+    try {
+        q = calculateTopologyCharges(atoms, geometry_bohr, total_charge, cn, topology, true, pool, num_threads);
+    } catch (...) {
+        m_sqe_ctx = nullptr;
+        invalidateCholeskyCache();
+        invalidateMatrixCache();
+        throw;
+    }
+    m_sqe_ctx = nullptr;
+    invalidateCholeskyCache();
+    invalidateMatrixCache();
+    return q;
+}
+
+Vector EEQSolver::calculateTopologyChemicalPotential(
+    const std::vector<int>& atoms,
+    const Matrix& geometry_bohr,
+    int total_charge,
+    const Vector& cn,
+    const std::optional<TopologyInput>& topology,
+    const Vector& q)
+{
+    const int natoms = static_cast<int>(atoms.size());
+    if (q.size() != natoms)
+        return Vector();
+    SqeContext ctx; // probe mode
+    ctx.q0 = &q;
+    invalidateCholeskyCache();
+    invalidateMatrixCache();
+    m_sqe_ctx = &ctx;
+    try {
+        calculateTopologyCharges(atoms, geometry_bohr, total_charge, cn, topology, true, nullptr, 1);
     } catch (...) {
         m_sqe_ctx = nullptr;
         invalidateCholeskyCache();
