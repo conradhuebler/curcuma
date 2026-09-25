@@ -92,6 +92,20 @@
 # temperature that exposes the budget at 0.25 fs, or a re-scoping of what this test asserts.
 # Measurement and options: test_cases/revgfnff/_log/WORK_STATUS.md package 10.
 # ============================================================================================
+#
+# RE-SCOPED Sep 25, 2026 (feature/multi-gpu merge, operator decision): the non-exploding control
+# is accepted as correct/improved behaviour. The control arm is still run and printed, but no
+# longer gates the test; the fixed and shipped arms keep their 150 kJ/mol / 1.0 a0 bounds
+# unchanged. Consequence, stated plainly: this test no longer falsifies -gfnff.rev_budget_fix_h.
+# Measured on the merged binary (max per-step dEpot / min r(H-H)): fixed 38.61 / 2.222,
+# control 25.03 / 2.064, shipped 224.44 / 1.403 -> the SHIPPED arm violates the dEpot bound.
+# That violation is an energy-non-conserving event at t = 1.376-1.380 ps right after an H-H
+# topology event. It was checked on 12 replicate runs (T = 1975..2030 K in 5 K steps; -md.seed
+# does not change the initial velocities), and it is the known rare event of one chaotic
+# trajectory, not a merge regression:
+# the pre-merge binary violates on 1/12, the merged binary on 2/12, the merged binary with the
+# old d4_cn_cache_threshold 0.01 on 3/12. T = 2000 K (this test) happens to be a violating draw
+# now. Left FAILING on purpose for the operator: see MULTIGPU_MERGE_STATUS.md, reconciliation.
 
 set -e
 
@@ -216,10 +230,13 @@ for arm, label in (("fixed", "gauss+delivered, fix_h on"), ("shipped", "shipped 
         ok = False
         reasons.append(f"{label}: min r(H-H) {hh:.3f} < {min_hh} a0")
 sf, hf, _ = res["free"]
+# Sep 25, 2026 (operator decision, multi-gpu merge): the control no longer explodes and that is
+# accepted as the correct/improved behaviour, so it is reported but no longer gates the test.
 if sf <= max_step_kj and hf >= min_hh:
-    ok = False
-    reasons.append("negative control (gauss + delivered + -gfnff.rev_budget_fix_h false) stayed "
-                   "inside BOTH bounds - the test is no longer exercising the hydrogen budget")
+    print("INFO: negative control (gauss + delivered + -gfnff.rev_budget_fix_h false) stays inside "
+          "both bounds (accepted Sep 25, 2026; no longer gating)")
+else:
+    print("INFO: negative control violates a bound (the pre-Sep-2026 behaviour)")
 if not ok:
     print("FAIL reasons: " + "; ".join(reasons))
 sys.exit(0 if ok else 1)
@@ -229,7 +246,7 @@ PYEOF
     set -e
     echo "$py_out"
     if [ $py_rc -eq 0 ]; then
-        echo -e "${GREEN}✓ PASS${NC}: hydrogen budget bounded in both the pinned and the shipped arm, control violates both bounds"
+        echo -e "${GREEN}✓ PASS${NC}: hydrogen budget bounded in both the pinned and the shipped arm (control reported, not gating)"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
         echo -e "${RED}✗ FAIL${NC}: hydrogen budget check"

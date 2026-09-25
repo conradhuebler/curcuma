@@ -29,6 +29,10 @@
 #   5. HISTORY   - Cl2- built at 2.50 A and evaluated at 2.70 A with the topology kept equals the
 #                  fresh evaluation to < 0.01 kcal/mol (explicit reference: ~99 kcal/mol apart).
 #   6. GRADIENT  - analytic vs central FD (h = 1e-4 A) at Cl2- 2.70 A + water, < 1e-5 Eh/A.
+# RE-PINNED Sep 25, 2026 (feature/multi-gpu merge): the H3OpH2O2 identity value moved
+# 0.466545744259 -> 0.466545743025 (-1.23e-9 Eh) solely because the reference-less bonded-triple
+# ATM term is now off by default (-gfnff.dispersion_atm true restores the old value exactly) -
+# the same operator-accepted default change that re-pinned cli_gfnff_04. EA_25 is unaffected.
 
 set -e
 
@@ -80,7 +84,7 @@ ea25 = rd("cl2m_ea25.xyz"); h3o = rd("h3op_h2o2.xyz")
 # 1. identity of the (now explicit) reference rule
 e1 = batch([ea25], -1, REF)[0]["energy_eh"]; e2 = batch([h3o], 1, REF)[0]["energy_eh"]
 check("identity EA_25 (reference)", abs(e1 - (-0.980160564980)) < 1e-10, f"{e1:.12f} vs -0.980160564980")
-check("identity H3OpH2O2 (reference)", abs(e2 - 0.466545744259) < 1e-10, f"{e2:.12f} vs 0.466545744259")
+check("identity H3OpH2O2 (reference)", abs(e2 - 0.466545743025) < 1e-10, f"{e2:.12f} vs 0.466545743025")
 
 # 2. label symmetry at the split
 r = 2.6409

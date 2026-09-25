@@ -113,3 +113,116 @@ Failing in both (11): `confscan_dtemplate`, `test_orca_interface`, `xtb_cpscf`,
   conflicts there) and untested here.
 - Threads > 1 and the `-adaptive_step` integrator on rev systems were not exercised beyond
   ctest.
+
+# Reconciliation onto `reactff2-llm` (Sep 25, 2026, second agent)
+
+Claude Generated. CPU only, not pushed. Done in the main working tree on `reactff2-llm`, whose tip was
+`556490cd` at the start. Method: `git merge --no-ff reactff2-llm-merge-multigpu`, which reuses the
+first agent's conflict resolutions from `4c39e4a1`. A fresh merge of `origin/feature/multi-gpu`
+(`7d2cceb7`, the same commit) would have needed all of them redone.
+
+## Conflicts on top of the first merge
+
+- `CLAUDE.md` / `AIChangelog.md`: both sides kept. **The numbers collided again.** Today's commits
+  already use Known Issues #34 (frag_charge) and #35 (stale CN), so the first agent's #34/#35 for
+  the multi-gpu entries are now **#36** (pair-list refresh) and **#37** (pprcht deviations). Their
+  cross-references in `CLAUDE.md`, `AIChangelog.md` and `TODO.md` were updated to match.
+- `test_cases/cli/curcumaopt/07_opt_multixyz/golden_energies.txt`: our side modified the file, the
+  remote side deleted it. Deleted, because multi-gpu's `run_test.sh` computes the reference at run
+  time and no longer reads it. The test passes.
+
+## Duplicate C6-refresh fix (operator decision 1): equivalent, so multi-gpu's was removed
+
+- **Code comparison.** Both set `d.C6 = getChargeWeightedC6(...)` from Gaussian weights computed at
+  the current CN, on the CPU only, and both are skipped when `gpu_only`/`reuse_cn` is set. The
+  differences:
+  - (a) Ours also refreshes every stored rev-gfnff corner D4 list (`forEachD4PairList`); multi-gpu's
+    refreshes only the slot list. So ours covers more.
+  - (b) Ours reads the weights through `refreshC6WeightsForCN`, which has no CN-change cache.
+    Multi-gpu's goes through `updateCNValuesForGradient` and therefore also forces
+    `d4_cn_cache_threshold = 0`.
+  - (c) Multi-gpu's skips the setup geometry.
+  - (d) Multi-gpu's has an on/off PARAM, `dispersion_c6_update`, which also switches the GPU
+    device-side refresh.
+- **Numerical check.**
+  - The merged binary with only our fix gives trajectories and optimised geometries **byte-identical**
+    to the merged binary with both fixes: 200 fs gfnff MD at 800 K, and gfnff `-opt`, each on triose
+    and caffeine (`in.trj.xyz` / `in.opt.xyz` compared with `cmp`).
+  - At the setup geometry, recomputing the C6 changes nothing: the dispersion term is identical to
+    10 digits with `dispersion_c6_update` true and false (triose -0.0181251182, caffeine
+    -0.0562085554).
+- **What was kept.**
+  - The PARAM `dispersion_c6_update` now gates our block on the CPU; the GPU refresh stays as it was.
+  - The forced `d4_cn_cache_threshold = 0` is kept (with a new comment): it keeps the gradient's
+    dC6/dCN at the same CN as the energy's C6.
+- **What was removed:** `refreshDispersionC6`, `dispersionC6Stale`, `m_disp_c6_geometry` and
+  `FFWorkspace::d4DispersionsForC6Refresh`.
+
+## Tests
+
+- **`cli_gfnff_04` (decision 2):** re-pinned for ATM-off: gauss -4.673521653477 -> -4.673521641282,
+  gfnff -4.672737068614 -> -4.672737056419. With `-gfnff.dispersion_atm true` the old pins come back
+  exactly. The comment asking for a re-evaluation at stage 3 (WP5) is next to `PARAM(dispersion_atm`
+  in `gfnff.h`.
+- **`cli_gfnff_05` (not in the brief, same cause):** this test did not exist on the first merge's base.
+  Its H3OpH2O2 identity value moved 0.466545744259 -> 0.466545743025 (-1.2e-9 Eh), and
+  `-dispersion_atm true` alone restores it, so I re-pinned it under decision 2.
+- **`cli_simplemd_20` (decision 3), NOT green.**
+  - The control arm is now informational and no longer gates the test. It no longer explodes; it
+    already did not explode on the pre-merge binary (22.79 kJ/mol, Fix B), and on the merged binary
+    it gives 25.03.
+  - **But now the SHIPPED-default arm violates**: 224.44 kJ/mol against the 150 bound. Total energy
+    is not conserved at one step, t = 1.3797 ps (+165 kJ/mol), right after an H-H topology event.
+  - Restoring three multi-gpu defaults brings back the pre-merge trajectory bit-for-bit
+    (43.35 kJ/mol): `dispersion_atm true`, `hh_repulsion_bpair false` and
+    `d4_cn_cache_threshold 0.01`.
+  - Replicates, 12 runs each (T = 1975..2030 K in 5 K steps; the seed does not change the start
+    velocities). Violations: pre-merge **1/12**, merged **2/12**, merged with cache 0.01 **3/12**.
+    That is the known rare event of one chaotic trajectory, and n=12 cannot tell these apart. The
+    test's T = 2000 K simply draws a violation now.
+  - The bounds were left unchanged and the test is left failing on purpose. **Operator question.**
+
+## Verification (CPU, same configuration as `build_rev`, which is the package-32 baseline, md5 `999b8f90`)
+
+- **Build:** `make` exit 0; merged binary md5 `3c08e62b`.
+- **`ctest`** (with `CURCUMA=<merged binary>`): **295/307 passed, 12 failed** vs baseline
+  **294/306, 12 failed**. The set of failing tests is identical:
+  - `confscan_dtemplate`, `test_orca_interface`, `xtb_cpscf`
+  - `cli_confscan_01..07`
+  - `cli_simplemd_18`, `cli_simplemd_20`
+
+  The one extra test is the new passing `md_adaptive_step`.
+  - Pitfall: without `CURCUMA`, the CLI tests pick up `<repo>/release/curcuma` (an old Sep 18 binary)
+    and `cli_gfnff_03/04/05/06` fail spuriously.
+  - Pitfall: the test scripts are copied at configure time, so rerun `cmake .` after editing a
+    `run_test.sh`.
+- **Old binary vs new binary, gfnff** (`refset_regression.py`, and a two-binary script for
+  S30L-CI). With the multi-gpu defaults:
+
+  | set | structures | changed | MAD (kcal/mol) | max (kcal/mol) |
+  |---|---:|---:|---:|---:|
+  | GMTKN55 | 2462 | 1782 | 1.2e-4 | 0.066 (`AL2X6/al2me5`) |
+  | MOR41 | 285 | 267 | 5.2e-4 | 2.7e-3 |
+  | S30L-CI | 90 | 89 | 2.0e-4 | 1.3e-3 |
+
+  Adding `-gfnff.dispersion_atm true -gfnff.hh_repulsion_bpair false -gfnff.hb_min_pair_energy_eh 0
+  -gfnff.xb_min_pair_energy_eh 0` makes **all three sets bit-identical** to the old binary. So every
+  energy change comes from those four multi-gpu defaults: ATM off, bpair H...H repulsion, and the
+  HB/XB energy pruning. The first status report listed all of these as number-moving.
+- **GMTKN55 gfnff vs xtb** (`gmtkn55_compare.py`, copied to scratch, curcuma keys recomputed, xtb
+  cache reused): MAD 0.860 -> 0.859, max 131.608 unchanged, n=2460.
+- **gfn1/gfn2, old binary vs new binary:** MOR41 gfn1 285/285 and gfn2 285/285 bit-identical,
+  GMTKN55 gfn2 2462/2462 bit-identical (MAD 0.000).
+- **Not verified:** any GPU code (CUDA/ROCm/Vulkan, multi-GPU eigensolve, WP7-E EEQ); no SDK or
+  GPU here. That includes the GPU C6 refresh, which `dispersion_c6_update` still switches.
+
+## Commits (not pushed)
+
+1. `df839027`: merge commit, conflict resolution and Known Issue renumbering.
+2. `228f5d55`: removes the duplicate C6 refresh; the source code change only.
+3. The commit that adds this section: the test re-pins (04, 05), the re-scoped control arm of
+   test 20, the ATM re-evaluation comment, and the doc notes in `CLAUDE.md` #35/#36 and
+   `AIChangelog.md`.
+
+Left uncommitted on purpose: the orchestrator's concurrent package-33 notes in `AGENT_STATE.md`,
+`WORK_STATUS.md` and `docs/REV_GFNFF_STAGE2.md`. They are not part of this reconciliation.

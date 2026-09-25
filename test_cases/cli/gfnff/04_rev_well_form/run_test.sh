@@ -29,6 +29,11 @@
 #   default = mg3 -4.789915106585, mg -4.546943898047, erfmorse -4.539136588545,
 #   mg2 -4.550323010840 (mg3 - gauss -0.116393 Eh). The closest pair is mg/mg2 at 3.4e-3 Eh,
 #   i.e. 3400x the 1e-6 liveness bound, so the widened clause is not a knife edge.
+# RE-PINNED Sep 25, 2026 (multi-gpu merge, operator decision): feature/multi-gpu switched the
+# reference-less bonded-triple ATM dispersion term off by default (-gfnff.dispersion_atm false).
+# Both pins moved by +1.2195e-8 Eh, nothing else: gauss -4.673521653477 -> -4.673521641282,
+# gfnff -4.672737068614 -> -4.672737056419; with -gfnff.dispersion_atm true the merged binary
+# reproduces the old pins exactly. Thresholds unchanged.
 
 set -e
 
@@ -38,8 +43,8 @@ source "$SCRIPT_DIR/../test_utils.sh"
 TEST_NAME="gfnff - 04: rev-gfnff bond-well form identity and liveness"
 TEST_DIR="$SCRIPT_DIR"
 
-REV_GAUSS_EH=-4.673521653477   # the DELIVERED Gaussian; the default is mg3 since Sep 22, 2026
-GFNFF_EH=-4.672737068614
+REV_GAUSS_EH=-4.673521641282   # the DELIVERED Gaussian; the default is mg3 since Sep 22, 2026
+GFNFF_EH=-4.672737056419
 IDENTITY_TOL=1e-11
 LIVENESS_MIN=1e-6
 
