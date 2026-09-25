@@ -67,6 +67,7 @@ MOL = {
     "hcl":    (0, 1, [("H", 0, 0, 0), ("Cl", 0, 0, 1.27)]),
     "f2":     (0, 1, [("F", 0, 0, 0), ("F", 0, 0, 1.41)]),
     "cl2":    (0, 1, [("Cl", 0, 0, 0), ("Cl", 0, 0, 1.99)]),
+    "br2":    (0, 1, [("Br", 0, 0, 0), ("Br", 0, 0, 2.28)]),   # X2_SCOPE_STATUS.md (Sep 2026): Br-Br order-1 row
     "n2":     (0, 1, [("N", 0, 0, 0), ("N", 0, 0, 1.10)]),
     "co":     (0, 1, [("C", 0, 0, 0), ("O", 0, 0, 1.13)]),
     "o2":     (0, 3, [("O", 0, 0, 0), ("O", 0, 0, 1.21)]),
@@ -123,6 +124,8 @@ CURVES = [
     # the four missing element pairs (FABLE_ROADMAP_REVIEW.md item 6, completes the 21-pair
     # table); Claude Generated (Sep 2026)
     ("nf3", 0, 1, "N-F"), ("ncl3", 0, 1, "N-Cl"), ("of2", 0, 1, "O-F"), ("clf", 0, 1, "F-Cl"),
+    # Br-Br order-1 row, prerequisite of the Br2- half-order row (X2_SCOPE_STATUS.md, Sep 2026)
+    ("br2", 0, 1, "Br-Br"),
 ]
 CURVE_GRID = [0.75, 0.80, 0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.20, 1.30, 1.40, 1.50, 1.60, 1.80, 2.00, 2.25, 2.50, 2.75, 3.00, 3.50]
 
@@ -228,7 +231,7 @@ def meta(extra):
 
 def bonded_side(atoms, i, j):
     """Atoms on j's side of bond i-j (BFS over a 1.3*rcov connectivity, i excluded)."""
-    rcov = {"H": 0.32, "C": 0.75, "N": 0.71, "O": 0.63, "F": 0.64, "Cl": 0.99}
+    rcov = {"H": 0.32, "C": 0.75, "N": 0.71, "O": 0.63, "F": 0.64, "Cl": 0.99, "Br": 1.14}
     n = len(atoms)
     adj = [[] for _ in range(n)]
     for a in range(n):
@@ -272,7 +275,7 @@ def approach(host, attacker_atoms, anchor, rule, dist):
         pk = host[rule[1]][1:]
         v = [pa[c] - pk[c] for c in range(3)]
     else:  # lone pair: opposite to the mean bond vector
-        rcov = {"H": 0.32, "C": 0.75, "N": 0.71, "O": 0.63, "F": 0.64, "Cl": 0.99}
+        rcov = {"H": 0.32, "C": 0.75, "N": 0.71, "O": 0.63, "F": 0.64, "Cl": 0.99, "Br": 1.14}
         v = [0.0, 0.0, 0.0]
         for b, (s, x, y, z) in enumerate(host):
             if b == anchor:
@@ -302,7 +305,7 @@ def contact_direction(atoms, anchor, spec):
     """Unit contact direction of a fragment, in the fragment's own frame (class S)."""
     pa = atoms[anchor][1:]
     if spec[0] == "lonepair":
-        rcov = {"H": 0.32, "C": 0.75, "N": 0.71, "O": 0.63, "F": 0.64, "Cl": 0.99}
+        rcov = {"H": 0.32, "C": 0.75, "N": 0.71, "O": 0.63, "F": 0.64, "Cl": 0.99, "Br": 1.14}
         v = [0.0, 0.0, 0.0]
         for b, (s, x, y, z) in enumerate(atoms):
             if b == anchor:

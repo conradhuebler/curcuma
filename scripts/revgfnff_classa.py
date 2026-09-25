@@ -116,7 +116,13 @@ QUALITY_UNSTABLE = {
 # overwritten by the SlowConv retry and have no far point (16/20).  Filling the gap from the RKS
 # branch would make the reference well too deep by about +53.1 (of2) / +51.5 (clf) kcal/mol, so
 # every radius without a UKS number is dropped rather than substituted.
-QUALITY_REQUIRE_UKS = {"of2_O-F", "clf_F-Cl"}
+# cl2_Cl-Cl added Sep 22, 2026 (CL2_WELLFIT_P1_STATUS.md): its class-A UKS tree originally
+# converged on only 4/20 points (all far); a --uks-inside-out --slowconv recompute raised that
+# to 15/20 (r = 1.52-4.06 A, missing only the far tail r >= 4.57 A). Without this entry the
+# fallback silently used RKS on the whole dissociating side, which cannot dissociate (rises to
+# +34.5 kcal/mol at 4.57 A relative to the minimum) and fitted the Cl-Cl mg well ~15 kcal/mol too
+# deep (D_e 70.1 vs the corrected ~55).
+QUALITY_REQUIRE_UKS = {"of2_O-F", "clf_F-Cl", "cl2_Cl-Cl"}
 
 # Fixed r/r_eq ratios at which the per-point residual is reported (the earlier logs index their
 # tables this way).  The reference grid is r_eq * 1.0668^k, so these land on grid points.
