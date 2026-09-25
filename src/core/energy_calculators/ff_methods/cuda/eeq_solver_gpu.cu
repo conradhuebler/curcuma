@@ -190,6 +190,30 @@ struct EEQSolverGPUImpl {
     std::vector<double> h_Cz1_general;
     std::vector<double> h_S_general;
     std::vector<double> h_lambda_general;
+
+    // ── WP7-E: GPU projected PCG (Sep 2026) ──────────────────────────────────
+    // Single-solve port of the CPU EEQSolver::solveWithProjectedPCG: instead of
+    // (nfrag+1) independent PCG solves + a CPU Schur reduction (WP7-C above), one
+    // PCG runs directly in the constraint tangent space (Σ_{i∈frag} v_i = 0),
+    // returning the final charges without any Schur step. Existing d_pcg_r/z/p/Ap
+    // and d_pcg_M_inv (WP7-C, above) are reused as per-call N-sized scratch; the
+    // buffers here are the small (nfrag-sized) additions the projection needs.
+    //   d_frag_inv_atoms[f]  = 1 / N_f                      (topology-constant)
+    //   d_frag_sM[f]         = Σ_{i∈frag_f} M_inv[i]         (valid with m_pcg_M_inv_valid)
+    //   d_frag_sum_scratch   = per-call Σ_{i∈frag_f} v[i] reduction target
+    //   d_frag_delta_scratch = per-call per-fragment correction to scatter back
+    //   d_rhs_constraints_dev = per-call upload of the (small) host rhs_constraints
+    //   d_ppcg_q_persistent  = warm-start charges, independent of WP7-C's z1/Z2
+    CudaBuffer<double>  d_frag_inv_atoms;
+    CudaBuffer<double>  d_frag_sM;
+    CudaBuffer<double>  d_frag_sum_scratch;
+    CudaBuffer<double>  d_frag_delta_scratch;
+    CudaBuffer<double>  d_rhs_constraints_dev;
+    CudaBuffer<double>  d_ppcg_q_persistent;
+    bool                m_ppcg_warm_valid = false;
+    int                 m_ppcg_total_iters   = 0;
+    int                 m_ppcg_total_calls   = 0;
+    int                 m_ppcg_nonconv_calls = 0;
 };
 
 // ============================================================================
@@ -1431,6 +1455,12 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurGeneral(
 // WP7-D (Jun 2026, Claude Generated): largest fragment a GPU block-Jacobi block may have.
 // Bounds the dynamic shared memory (max_frag_N doubles staged per block) and the O(N_f²)
 // per-thread inner GEMV. Larger fragments fall back to the diagonal Jacobi.
+// Sep 2026: 2048 was found (curcuma EEQ-Löser-Benchmark) to be far too permissive — a single
+// 1410-atom outlier fragment (e.g. one polymer chain among hundreds of water molecules) still
+// passes it, and its dense potrf+potri costs as much as the exact solver PCG exists to avoid.
+// Kept only as the hard ceiling; the tuned default lives in the PARAM
+// gpu_block_jacobi_max_frag_atoms (eeq_solver.h) and is threaded in per call — see
+// buildBlockJacobiFactors's max_frag_atoms/max_nfrag parameters below.
 static constexpr int GPU_BLOCK_JACOBI_MAX_NF = 2048;
 
 // Build the per-fragment block-Jacobi inverse blocks into impl.d_A_blocks (port of the CPU
@@ -1438,14 +1468,24 @@ static constexpr int GPU_BLOCK_JACOBI_MAX_NF = 2048;
 // (potrf), inverts it (potri), and symmetrizes. Sets impl.m_pcg_block_jacobi_valid. On any
 // non-SPD block or a too-large fragment, marks the PC invalid and the caller keeps the
 // (always-extracted) diagonal Jacobi. Runs only at PCG refactor; amortized across MD steps.
+//
+// Sep 2026 (curcuma EEQ-Löser-Benchmark): this function's cost is dominated by TWO independent
+// factors, benchmarked separately — max_frag_atoms guards the first (a single large fragment's
+// dense potrf+potri), max_nfrag guards the second (the serial host loop's two
+// cudaStreamSynchronize calls per fragment, catastrophic by itself at nfrag~1500+ even with
+// uniformly tiny fragments). Both must be checked; neither alone covers a polymer_2x-scale
+// solvated system. See docs/GPU_TUNING.md and eeq_solver.h's PARAM help text for measurements.
 static void buildBlockJacobiFactors(EEQSolverGPUImpl& impl, int nfrag,
                                      const double* cx, const double* cy, const double* cz,
                                      const double* d_alpha, const double* d_gam,
-                                     double cutoff_sq)
+                                     double cutoff_sq,
+                                     int max_frag_atoms, int max_nfrag)
 {
     impl.m_pcg_block_jacobi_valid = false;
     if (nfrag < 2 || !impl.m_frag_topo_valid) return;
-    if (impl.m_max_frag_N <= 0 || impl.m_max_frag_N > GPU_BLOCK_JACOBI_MAX_NF) return;
+    if (nfrag > max_nfrag) return;
+    const int frag_atom_cap = (max_frag_atoms < GPU_BLOCK_JACOBI_MAX_NF) ? max_frag_atoms : GPU_BLOCK_JACOBI_MAX_NF;
+    if (impl.m_max_frag_N <= 0 || impl.m_max_frag_N > frag_atom_cap) return;
 
     const int total_pairs = impl.h_frag_offsets_pair[nfrag];
     if (total_pairs <= 0) return;
@@ -1670,7 +1710,9 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUPCG(
     int    max_iter,
     double tol,
     double cutoff_sq,
-    bool   force_refactor)
+    bool   force_refactor,
+    int    block_jacobi_max_frag_atoms,
+    int    block_jacobi_max_nfrag)
 {
     auto& impl = *m_impl;
     if (nfrag < 1) return false;
@@ -1705,10 +1747,21 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUPCG(
         // WP7-D (Jun 2026): build the per-fragment block-Jacobi inverse (nfrag>=2). On
         // success the PCG applies the exact per-fragment inverse instead of the diagonal
         // Jacobi (sets m_pcg_block_jacobi_valid); on failure the diagonal above is kept.
+        // Sep 2026: size-gated (see buildBlockJacobiFactors) — skipped entirely above
+        // block_jacobi_max_nfrag or when the largest fragment exceeds
+        // block_jacobi_max_frag_atoms, falling back to the diagonal Jacobi (always correct,
+        // just more PCG iterations). See eeq_solver.h PARAM docs for the measurements.
         buildBlockJacobiFactors(impl, nfrag, cx, cy, cz,
-                                d_alpha_corrected, d_gam_corrected, cutoff_sq);
+                                d_alpha_corrected, d_gam_corrected, cutoff_sq,
+                                block_jacobi_max_frag_atoms, block_jacobi_max_nfrag);
         if (impl.m_pcg_block_jacobi_valid) {
             CurcumaLogger::info("EEQ GPU PCG: block-Jacobi preconditioner active");
+        } else if (nfrag >= 2) {
+            CurcumaLogger::info(fmt::format(
+                "EEQ GPU PCG: block-Jacobi skipped (nfrag={}, max_frag_N={}) — "
+                "using diagonal Jacobi (gpu_block_jacobi_max_nfrag={}, "
+                "gpu_block_jacobi_max_frag_atoms={})",
+                nfrag, impl.m_max_frag_N, block_jacobi_max_nfrag, block_jacobi_max_frag_atoms));
         }
         // Note: do NOT touch m_last_N here — it is owned by the cuSOLVER paths
         // (WP5-A / WP7-A) and tracks their workspace allocation. PCG bypasses
@@ -1810,6 +1863,281 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUPCG(
     }
 
     checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after schur_general (pcg)");
+    return true;
+}
+
+// ============================================================================
+// WP7-E: GPU projected PCG (Sep 2026)
+// Single-solve port of the CPU EEQSolver::solveWithProjectedPCG: instead of
+// (nfrag+1) independent PCG solves + a CPU Schur reduction (WP7-C above), one
+// PCG runs directly in the constraint tangent space (Σ_{i∈frag} v_i = 0) and
+// returns the final charges without any Schur step. Motivated by the fact
+// that WP7-C's per-fragment loop (runSinglePCG called nfrag+1 times) and its
+// block-Jacobi setup (buildBlockJacobiFactors) both scale with fragment count
+// / size in ways that make WP7-C intractable for many-fragment, large systems
+// (e.g. a solvated polymer with nfrag~1500) — see the "curcuma EEQ-Löser-
+// Benchmark" project (docs / vault). This path uses only the diagonal Jacobi,
+// exactly mirroring the CPU reference; there is no block-Jacobi cost to skip.
+// Claude Generated.
+// ============================================================================
+
+// r ← P·r, the projection onto the constraint tangent space: subtract the
+// per-fragment mean (mirrors the CPU `project` lambda).
+static inline void ppcgProjectResidual(EEQSolverGPUImpl& impl, int N, int nfrag, double* d_v)
+{
+    cudaMemsetAsync(impl.d_frag_sum_scratch.ptr, 0, (size_t)nfrag * sizeof(double), impl.stream);
+    {
+        int blk = 256, grd = (N + blk - 1) / blk;
+        k_frag_sum<<<grd, blk, 0, impl.stream>>>(
+            N, d_v, impl.d_atom_frag.ptr, impl.d_frag_sum_scratch.ptr);
+    }
+    {
+        int blk = 256, grd = (nfrag + blk - 1) / blk;
+        k_frag_project_delta<<<grd, blk, 0, impl.stream>>>(
+            nfrag, impl.d_frag_sum_scratch.ptr, impl.d_frag_inv_atoms.ptr,
+            impl.d_frag_delta_scratch.ptr);
+    }
+    {
+        int blk = 256, grd = (N + blk - 1) / blk;
+        k_frag_scatter_add<<<grd, blk, 0, impl.stream>>>(
+            N, d_v, impl.d_atom_frag.ptr, impl.d_frag_delta_scratch.ptr);
+    }
+}
+
+// z ← M_inv·r, then an M-weighted per-fragment correction so that C·z = 0
+// (mirrors the CPU `precondition` lambda).
+static inline void ppcgPrecondition(EEQSolverGPUImpl& impl, int N, int nfrag,
+                                     const double* d_r, double* d_z)
+{
+    int blk = 256, grd = (N + blk - 1) / blk;
+    k_pcg_apply_precond<<<grd, blk, 0, impl.stream>>>(N, impl.d_pcg_M_inv.ptr, d_r, d_z);
+    cudaMemsetAsync(impl.d_frag_sum_scratch.ptr, 0, (size_t)nfrag * sizeof(double), impl.stream);
+    k_frag_sum<<<grd, blk, 0, impl.stream>>>(
+        N, d_z, impl.d_atom_frag.ptr, impl.d_frag_sum_scratch.ptr);
+    k_frag_precond_correct<<<grd, blk, 0, impl.stream>>>(
+        N, impl.d_pcg_M_inv.ptr, impl.d_atom_frag.ptr,
+        impl.d_frag_sum_scratch.ptr, impl.d_frag_sM.ptr, d_z);
+}
+
+// One projected PCG solve. d_q is both the (feasibility-shifted, warm-start)
+// input and the final-charges output, in place. Port of
+// EEQSolver::solveWithProjectedPCG (eeq_solver.cpp).
+static bool runProjectedPCG(EEQSolverGPUImpl& impl, int N, int nfrag,
+                             const double* d_rhs_atoms, double* d_q,
+                             int max_iter, double tol)
+{
+    if (impl.d_pcg_r.n  < N) impl.d_pcg_r.alloc(N);
+    if (impl.d_pcg_z.n  < N) impl.d_pcg_z.alloc(N);
+    if (impl.d_pcg_p.n  < N) impl.d_pcg_p.alloc(N);
+    if (impl.d_pcg_Ap.n < N) impl.d_pcg_Ap.alloc(N);
+    if (impl.d_pcg_dot_scratch.n   < 2) impl.d_pcg_dot_scratch.alloc(2);
+    if (impl.d_pcg_rnorm_scratch.n < 1) impl.d_pcg_rnorm_scratch.alloc(1);
+
+    cublasHandle_t blas = impl.cublas_handle;
+    cudaStream_t   s    = impl.stream;
+    const double  one   = 1.0;
+    const double  zero  = 0.0;
+
+    // --- Feasible start: q[i] += (rhs_constraints[frag[i]] − Σ_{j∈frag} q[j]) / N_frag. ---
+    cudaMemsetAsync(impl.d_frag_sum_scratch.ptr, 0, (size_t)nfrag * sizeof(double), s);
+    {
+        int blk = 256, grd = (N + blk - 1) / blk;
+        k_frag_sum<<<grd, blk, 0, s>>>(N, d_q, impl.d_atom_frag.ptr, impl.d_frag_sum_scratch.ptr);
+    }
+    {
+        int blk = 256, grd = (nfrag + blk - 1) / blk;
+        k_frag_feasibility_delta<<<grd, blk, 0, s>>>(
+            nfrag, impl.d_frag_sum_scratch.ptr, impl.d_rhs_constraints_dev.ptr,
+            impl.d_frag_inv_atoms.ptr, impl.d_frag_delta_scratch.ptr);
+    }
+    {
+        int blk = 256, grd = (N + blk - 1) / blk;
+        k_frag_scatter_add<<<grd, blk, 0, s>>>(N, d_q, impl.d_atom_frag.ptr, impl.d_frag_delta_scratch.ptr);
+    }
+
+    // --- r = b − A·q ; project(r) ; z = precondition(r) ; p = z ; rz = r·z ---
+    checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_HOST), "ptr host (ppcg init)");
+    checkCublasEEQ(
+        cublasDsymv(blas, CUBLAS_FILL_MODE_LOWER, N,
+                    &one, impl.d_A.ptr, N, d_q, 1, &zero, impl.d_pcg_Ap.ptr, 1),
+        "cublasDsymv init Aq (ppcg)");
+    {
+        int blk = 256, grd = (N + blk - 1) / blk;
+        k_pcg_init_residual<<<grd, blk, 0, s>>>(N, d_rhs_atoms, impl.d_pcg_Ap.ptr, impl.d_pcg_r.ptr);
+    }
+    ppcgProjectResidual(impl, N, nfrag, impl.d_pcg_r.ptr);
+    ppcgPrecondition(impl, N, nfrag, impl.d_pcg_r.ptr, impl.d_pcg_z.ptr);
+    checkCublasEEQ(cublasDcopy(blas, N, impl.d_pcg_z.ptr, 1, impl.d_pcg_p.ptr, 1), "Dcopy p=z (ppcg)");
+
+    checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_DEVICE), "ptr dev (ppcg)");
+    checkCublasEEQ(cublasDdot(blas, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_z.ptr, 1,
+                              impl.d_pcg_dot_scratch.ptr), "Ddot rz init (ppcg)");
+    double h_rz = 0.0;
+    checkCudaEEQ(cudaMemcpyAsync(&h_rz, impl.d_pcg_dot_scratch.ptr, sizeof(double),
+                                  cudaMemcpyDeviceToHost, s), "D2H rz init (ppcg)");
+
+    checkCublasEEQ(cublasDdot(blas, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_r.ptr, 1,
+                              impl.d_pcg_rnorm_scratch.ptr), "Ddot rnorm init (ppcg)");
+    double h_rnorm_sq = 0.0;
+    checkCudaEEQ(cudaMemcpyAsync(&h_rnorm_sq, impl.d_pcg_rnorm_scratch.ptr, sizeof(double),
+                                  cudaMemcpyDeviceToHost, s), "D2H rnorm init (ppcg)");
+    checkCudaEEQ(cudaStreamSynchronize(s), "sync init (ppcg)");
+
+    bool converged = (h_rnorm_sq <= tol * tol);
+    int  iters     = 0;
+
+    for (int k = 0; k < max_iter && !converged; ++k) {
+        iters = k + 1;
+
+        checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_HOST), "ptr host (ppcg)");
+        checkCublasEEQ(
+            cublasDsymv(blas, CUBLAS_FILL_MODE_LOWER, N,
+                        &one, impl.d_A.ptr, N, impl.d_pcg_p.ptr, 1,
+                        &zero, impl.d_pcg_Ap.ptr, 1),
+            "cublasDsymv Ap (ppcg)");
+
+        checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_DEVICE), "ptr dev (ppcg)");
+        checkCublasEEQ(cublasDdot(blas, N, impl.d_pcg_p.ptr, 1, impl.d_pcg_Ap.ptr, 1,
+                                  impl.d_pcg_dot_scratch.ptr + 1), "Ddot pAp (ppcg)");
+        double h_pAp = 0.0;
+        checkCudaEEQ(cudaMemcpyAsync(&h_pAp, impl.d_pcg_dot_scratch.ptr + 1, sizeof(double),
+                                      cudaMemcpyDeviceToHost, s), "D2H pAp (ppcg)");
+        checkCudaEEQ(cudaStreamSynchronize(s), "sync pAp (ppcg)");
+
+        if (!(h_pAp > 0.0)) break;  // non-descent direction (mirrors CPU `if (!(pAp>0.0)) break;`)
+        double alpha = h_rz / h_pAp;
+        double neg_alpha = -alpha;
+
+        checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_HOST), "ptr host (ppcg)");
+        checkCublasEEQ(cublasDaxpy(blas, N, &alpha, impl.d_pcg_p.ptr, 1, d_q, 1), "Daxpy q+=ap (ppcg)");
+        checkCublasEEQ(cublasDaxpy(blas, N, &neg_alpha, impl.d_pcg_Ap.ptr, 1,
+                                    impl.d_pcg_r.ptr, 1), "Daxpy r-=aAp (ppcg)");
+
+        ppcgProjectResidual(impl, N, nfrag, impl.d_pcg_r.ptr);
+
+        checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_DEVICE), "ptr dev (ppcg)");
+        checkCublasEEQ(cublasDdot(blas, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_r.ptr, 1,
+                                  impl.d_pcg_rnorm_scratch.ptr), "Ddot rnorm (ppcg)");
+        checkCudaEEQ(cudaMemcpyAsync(&h_rnorm_sq, impl.d_pcg_rnorm_scratch.ptr, sizeof(double),
+                                      cudaMemcpyDeviceToHost, s), "D2H rnorm (ppcg)");
+        checkCudaEEQ(cudaStreamSynchronize(s), "sync rnorm (ppcg)");
+
+        if (h_rnorm_sq <= tol * tol) { converged = true; break; }
+
+        ppcgPrecondition(impl, N, nfrag, impl.d_pcg_r.ptr, impl.d_pcg_z.ptr);
+        checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_DEVICE), "ptr dev (ppcg)");
+        checkCublasEEQ(cublasDdot(blas, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_z.ptr, 1,
+                                  impl.d_pcg_dot_scratch.ptr), "Ddot rz_new (ppcg)");
+        double h_rz_new = 0.0;
+        checkCudaEEQ(cudaMemcpyAsync(&h_rz_new, impl.d_pcg_dot_scratch.ptr, sizeof(double),
+                                      cudaMemcpyDeviceToHost, s), "D2H rz_new (ppcg)");
+        checkCudaEEQ(cudaStreamSynchronize(s), "sync rz_new (ppcg)");
+
+        if (std::abs(h_rz) < 1e-30) break;  // degenerate
+        double beta = h_rz_new / h_rz;
+        h_rz = h_rz_new;
+
+        {
+            int blk = 256, grd = (N + blk - 1) / blk;
+            k_pcg_dir_update<<<grd, blk, 0, s>>>(N, impl.d_pcg_z.ptr, beta,
+                                                  impl.d_pcg_p.ptr, impl.d_pcg_p.ptr);
+        }
+    }
+
+    impl.m_ppcg_total_calls += 1;
+    impl.m_ppcg_total_iters += iters;
+    if (!converged) impl.m_ppcg_nonconv_calls += 1;
+    return converged;
+}
+
+bool EEQSolverGPU::solveWithDeviceRHSAndGPUProjectedPCG(
+    int natoms, int nfrag,
+    const double* cx, const double* cy, const double* cz,
+    const double* d_alpha_corrected,
+    const double* d_gam_corrected,
+    const double* d_rhs_atoms,
+    const std::vector<int>& /*fraglist*/,
+    const std::vector<double>& rhs_constraints,
+    int    max_iter,
+    double tol,
+    double cutoff_sq,
+    bool   force_refactor)
+{
+    auto& impl = *m_impl;
+    if (nfrag < 1) return false;
+    if (!impl.m_frag_topo_valid) return false;
+    if (impl.m_nfrag_batched != nfrag) return false;
+    if (impl.d_atom_frag.n < natoms) return false;
+    if (impl.d_frag_inv_atoms.n < nfrag) return false;
+
+    const int N = natoms;
+
+    const bool do_refactor = force_refactor
+                          || !impl.m_pcg_M_inv_valid
+                          || (N != m_last_N);
+
+    if (do_refactor) {
+        {
+            int n_lower = N * (N + 1) / 2;
+            int block   = 256;
+            int grid    = (n_lower + block - 1) / block;
+            k_eeq_build_matrix<<<grid, block, 0, impl.stream>>>(
+                N, cx, cy, cz, d_alpha_corrected, d_gam_corrected, impl.d_A.ptr, cutoff_sq);
+        }
+        if (impl.d_pcg_M_inv.n < N) impl.d_pcg_M_inv.alloc(N);
+        {
+            int blk = 256, grd = (N + blk - 1) / blk;
+            k_pcg_extract_diag_inv<<<grd, blk, 0, impl.stream>>>(
+                N, impl.d_A.ptr, impl.d_pcg_M_inv.ptr);
+        }
+        impl.m_pcg_M_inv_valid = true;
+
+        // Fragment-weighted diagonal sum sM[f] = Σ_{i∈f} M_inv[i] — needed by the
+        // projected preconditioner; rebuilt whenever M_inv itself is rebuilt.
+        cudaMemsetAsync(impl.d_frag_sM.ptr, 0, (size_t)nfrag * sizeof(double), impl.stream);
+        {
+            int blk = 256, grd = (N + blk - 1) / blk;
+            k_frag_sum<<<grd, blk, 0, impl.stream>>>(
+                N, impl.d_pcg_M_inv.ptr, impl.d_atom_frag.ptr, impl.d_frag_sM.ptr);
+        }
+        // No block-Jacobi build here (unlike WP7-C): the CPU algorithm this ports
+        // uses only the diagonal Jacobi, and avoiding the block-Jacobi's per-fragment
+        // dense-inverse cost (and the nfrag+1-solves loop) is the entire point.
+    }
+
+    if (impl.d_rhs.n < N) impl.d_rhs.alloc(N);
+
+    // Warm-start q ← persistent cache (D2D), else zero.
+    if (impl.m_ppcg_warm_valid && impl.d_ppcg_q_persistent.n >= N) {
+        checkCudaEEQ(cudaMemcpyAsync(impl.d_rhs.ptr, impl.d_ppcg_q_persistent.ptr,
+                                      N * sizeof(double), cudaMemcpyDeviceToDevice, impl.stream),
+                     "D2D ppcg warm-start");
+    } else {
+        cudaMemsetAsync(impl.d_rhs.ptr, 0, N * sizeof(double), impl.stream);
+    }
+
+    // Upload the (small, nfrag-sized) per-call constraint RHS.
+    {
+        std::vector<double> h_rc(nfrag, 0.0);
+        for (int f = 0; f < nfrag && f < (int)rhs_constraints.size(); ++f)
+            h_rc[f] = rhs_constraints[f];
+        checkCudaEEQ(cudaMemcpyAsync(impl.d_rhs_constraints_dev.ptr, h_rc.data(),
+                                      nfrag * sizeof(double), cudaMemcpyHostToDevice, impl.stream),
+                     "H2D rhs_constraints (ppcg)");
+    }
+
+    bool ok = runProjectedPCG(impl, N, nfrag, d_rhs_atoms, impl.d_rhs.ptr, max_iter, tol);
+    if (!ok) return false;
+
+    // Persist warm-start (charges are already at d_rhs[0..N-1] — the shared
+    // getDeviceChargesPtr() contract — so just cache a copy for next call).
+    if (impl.d_ppcg_q_persistent.n < N) impl.d_ppcg_q_persistent.alloc(N);
+    checkCudaEEQ(cudaMemcpyAsync(impl.d_ppcg_q_persistent.ptr, impl.d_rhs.ptr,
+                                  N * sizeof(double), cudaMemcpyDeviceToDevice, impl.stream),
+                 "D2D persist ppcg q");
+    impl.m_ppcg_warm_valid = true;
+
+    checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after ppcg");
     return true;
 }
 
@@ -1967,6 +2295,21 @@ void EEQSolverGPU::uploadFragmentTopology(int nfrag,
     // Per-call PCG scratch is grown lazily inside solveSinglePCG.
     impl.d_z1_persistent.alloc(N);
     impl.d_Z2_persistent.alloc(N * nfrag);
+
+    // WP7-E: projected-PCG topology-constant buffers (see EEQSolverGPUImpl for layout).
+    {
+        std::vector<double> h_inv_atoms(nfrag, 0.0);
+        for (int f = 0; f < nfrag; ++f)
+            h_inv_atoms[f] = (impl.h_frag_sizes[f] > 0) ? (1.0 / (double)impl.h_frag_sizes[f]) : 0.0;
+        impl.d_frag_inv_atoms.alloc(nfrag);
+        impl.d_frag_inv_atoms.upload(h_inv_atoms.data(), nfrag);
+    }
+    impl.d_frag_sM.alloc(nfrag);
+    impl.d_frag_sum_scratch.alloc(nfrag);
+    impl.d_frag_delta_scratch.alloc(nfrag);
+    impl.d_rhs_constraints_dev.alloc(nfrag);
+    impl.d_ppcg_q_persistent.alloc(N);
+    impl.m_ppcg_warm_valid = false;  // WP7-E: warm-start invalid after topology change
 
     impl.m_frag_topo_valid = true;
 }

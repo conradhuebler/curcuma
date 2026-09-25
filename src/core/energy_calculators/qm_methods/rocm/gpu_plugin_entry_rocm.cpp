@@ -46,7 +46,9 @@ int curcuma_rocm_device_info(int index, char* buf, int len)
     json j;
     j["index"] = index;
     j["name"] = std::string(prop.name);
-    j["memory_total_bytes"] = static_cast<std::uint64_t>(prop.totalMemory);
+    // hipDeviceProp_t mirrors cudaDeviceProp: the member is totalGlobalMem, there is no
+    // totalMemory (which is what the CUDA twin in cuda/gpu_plugin_entry_cuda.cpp uses).
+    j["memory_total_bytes"] = static_cast<std::uint64_t>(prop.totalGlobalMem);
     j["compute_capability"] = std::string(prop.gcnArchName);
     return writeJson(j, buf, len);
 }

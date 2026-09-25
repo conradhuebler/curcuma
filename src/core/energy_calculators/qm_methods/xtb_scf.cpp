@@ -204,13 +204,19 @@ int XTB::blasThreadsNow()
 void XTB::reduceToStandardForm(Eigen::MatrixXd& A, int n, int threads, bool& ok) const
 {
     ok = true;
-    // Claude Generated (Sep 18, 2026, multi-gpu merge): `dsygst_` is declared only inside the
-    // BLAS/MKL guard at the top of this file, so an unconditional call does not compile in a
-    // BLAS-less configuration (this build_rev: no EIGEN_USE_BLAS / USE_BLAS / USE_MKL). The
-    // triangular-solve route needs no LAPACK and is the documented equivalent (the two agree to
-    // 8e-15 elementwise), so it is also the fallback when dsygst is unavailable.
+    // -scf_reduce auto|sygst|trsm, -scf_reduce_threads N (Claude Generated, Sep 2026).
+    // 'auto' with the default threshold of 8 is what this function did before.
+    //
+    // Merge note (Sep 25, 2026, second multi-gpu merge): feature/multi-gpu brought the
+    // -scf_reduce knob but again called `dsygst_` unconditionally. `dsygst_` is declared only
+    // inside the BLAS/MKL guard at the top of this file, so that does not compile in a
+    // BLAS-less configuration (the Sep 18 merge fixed exactly this). Both are kept: the knob
+    // selects the route, and without LAPACK every request falls back to the triangular solve,
+    // which is the documented equivalent (the two agree to 8e-15 elementwise).
 #ifdef CURCUMA_XTB_HAVE_LAPACK_SYEVD
-    if (threads < 8) {
+    const bool use_trsm = (m_scf_reduce == "trsm")
+        || (m_scf_reduce != "sygst" && threads >= m_scf_reduce_threads);
+    if (!use_trsm) {
         const char uplo = 'L';
         int itype = 1, info = 0;
         dsygst_(&itype, &uplo, &n, A.data(), &n, m_X.data(), &n, &info);

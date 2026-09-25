@@ -79,10 +79,14 @@ validate_results() {
         return 1
     fi
 
-    # Compare every optimised frame against the golden reference obtained by
-    # optimising each frame individually. This ensures the multi-XYZ path reaches
-    # the same minima as the single-structure path.
-    local ref_file="$TEST_DIR/golden_energies.txt"
+    # Compare every optimised frame against the reference obtained by optimising
+    # each frame individually with the SAME binary (compute_single_references).
+    # This ensures the multi-XYZ path reaches the same minima as the
+    # single-structure path. Claude Generated (Sep 2026): this used to read a
+    # golden file written in June 2026; it drifted with every later GFN-FF fix
+    # (frames 02/12 were 0.15-0.17 Eh above the true minimum), so the test
+    # failed without the multi-XYZ path being wrong.
+    local ref_file="$TEST_DIR/single_ref/energies.txt"
     if [ -f "$ref_file" ]; then
         local idx=0
         local all_match=true
@@ -118,20 +122,52 @@ validate_results() {
             echo -e "${GREEN}✓ PASS${NC}: All optimised energies match individual-structure references within $tolerance Eh"
         fi
     else
-        echo -e "${YELLOW}⚠ WARNING${NC}: Golden reference file $ref_file not found; skipping per-frame energy check"
+        echo -e "${RED}✗ FAIL${NC}: Single-structure reference $ref_file missing"
+        TESTS_RUN=$((TESTS_RUN + 1))
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        return 1
     fi
 
     return 0
 }
 
+# Optimise every frame of helicen.xyz on its own (single-structure path) and
+# write "<index> <energy>" lines to single_ref/energies.txt. Each frame gets its
+# own directory so no topology cache is shared between frames.
+# Claude Generated (Sep 2026).
+compute_single_references() {
+    cd "$TEST_DIR"
+    rm -rf single_ref
+    mkdir -p single_ref
+    awk -v dir="single_ref" '
+        state == 0 && NF == 1 { n = $1; k = sprintf("%02d", idx++); f = dir "/f" k ".xyz";
+                                print > f; left = n + 1; state = 1; next }
+        state == 1 { print > f; if (--left == 0) { close(f); state = 0 } }
+    ' helicen.xyz
+
+    local k
+    for xyz in single_ref/f*.xyz; do
+        k=$(basename "$xyz" .xyz)
+        mkdir -p "single_ref/$k"
+        mv "$xyz" "single_ref/$k/"
+        (cd "single_ref/$k" && $CURCUMA -opt "$k.xyz" -method gfnff -threads 1 -no_bmt > stdout.log 2> stderr.log)
+        local e
+        e=$(extract_nth_energy_from_xyz "single_ref/$k/$k.opt.xyz" 1)
+        echo "${k#f} $e" >> single_ref/energies.txt
+    done
+}
+
 cleanup_before() {
     cd "$TEST_DIR"
     cleanup_test_artifacts
+    rm -f *.topo.json
+    rm -rf single_ref
 }
 
 main() {
     test_header "$TEST_NAME"
     cleanup_before
+    compute_single_references
 
     if run_test; then
         validate_results

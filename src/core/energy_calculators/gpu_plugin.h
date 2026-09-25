@@ -78,4 +78,10 @@ int deviceCount(const std::string& backend);
  */
 json deviceInfo(const std::string& backend, int index);
 
+/**
+ * @brief Distributed-eigensolver backends this plugin was built with ("mp", "mg", "mp,mg").
+ * Empty when the plugin does not export the symbol. Claude Generated (Sep 2026).
+ */
+std::string mgpuBackends(const std::string& backend);
+
 } // namespace gpu_plugin

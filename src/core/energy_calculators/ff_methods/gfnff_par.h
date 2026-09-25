@@ -731,6 +731,39 @@ static constexpr double XHACI_GLOBABH = 0.268;  // A-H...B general scaling
 static constexpr double XHACI_COH = 0.350;      // A-H...O=C scaling
 static constexpr double XHACI_GLOB = 1.50;      // Baseline acidity
 
+// --- HB/XB damping primitives ---
+// Moved here (Sep 2026) from ff_workspace_gfnff.cpp's file-local anonymous namespace so that
+// GFNFF::estimateHBStrengthCase1/Case2or4/estimateXBStrength (gfnff_method.cpp, the
+// detection-time early-pruning of negligible HB/XB candidates — see gfnff.h PARAM
+// hb_min_pair_energy_eh/xb_min_pair_energy_eh) can call the EXACT SAME formula the energy
+// kernel (FFWorkspace::calcHydrogenBonds/calcHalogenBonds) uses, with no risk of the two
+// silently diverging. Names/bodies unchanged; ff_workspace_gfnff.cpp's `using namespace
+// GFNFFParameters` already brings these into scope there, so its call sites needed no change.
+inline double ws_damping_out_of_line(double r_AH, double r_HB, double r_AB, double radab, double bacut)
+{
+    double ratio = (r_AH + r_HB) / r_AB;
+    double exponent = (bacut / radab) * (ratio - 1.0);
+    if (exponent > 15.0) return 0.0;
+    return 2.0 / (1.0 + std::exp(exponent));
+}
+
+inline double ws_damping_short_range(double r, double r_vdw, double scut, double alp)
+{
+    double ratio = scut * r_vdw / (r * r);
+    return 1.0 / (1.0 + std::pow(ratio, alp));
+}
+
+inline double ws_damping_long_range(double r, double longcut, double alp)
+{
+    return 1.0 / (1.0 + std::pow(r * r / longcut, alp));
+}
+
+inline double ws_charge_scaling(double q, double st, double sf)
+{
+    double exp_term = std::exp(st * q);
+    return exp_term / (exp_term + sf);
+}
+
 // --- HB / XB element tables (xhbas, xhaci, xbaci) ---
 //
 // The Fortran writes these as a zero fill plus a handful of assignments

@@ -570,6 +570,25 @@ if(Python3_Interpreter_FOUND)
                      $<TARGET_FILE:curcuma>)
     set_tests_properties(gradient_unit_contract
         PROPERTIES TIMEOUT 300 LABELS "gradient;frequencies;native_xtb;gfnff")
+
+    # Claude Generated (Sep 2026): adaptive (step-rejecting) integrator.
+    #   1. adaptive_step is OFF by default and an explicit false is identical to it.
+    #   2. The failure mode it exists for reproduces on ONE water: 1750 K, dt = 1 fs, NVE
+    #      runs away by +8.78 Eh because the GFN-FF O-H bond stiffens under compression.
+    #   3. With the feature the same run conserves energy (-0.003 Eh), with no constraint
+    #      and no mass modification.
+    # See docs/MD_LARGE_SYSTEMS.md.
+    add_test(NAME md_adaptive_step
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/check_adaptive_step.py
+                     $<TARGET_FILE:curcuma>)
+    set_tests_properties(md_adaptive_step
+        PROPERTIES TIMEOUT 300 LABELS "md;integrator;gfnff")
+
+    # Merge note (Sep 2026): feature/multi-gpu registered its own md_time_axis here (ef462fcf,
+    # the same MD-clock fix made independently of 1b7e5ff0). Only the registration below is
+    # kept -- a duplicate add_test NAME is a CMake error -- and check_md_time_axis.py is the
+    # reactff2-llm version, which also covers gfn2.
 endif()
 
 # Claude Generated (Sep 2026): MD time-axis contract — one reported femtosecond must be

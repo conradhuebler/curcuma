@@ -51,6 +51,16 @@ public:
     /// Selected device name (e.g. "NVIDIA GeForce RTX 5080"); empty if none.
     std::string deviceName() const;
 
+    /**
+     * @brief True when this device's FP64 throughput is a HALF of its FP32 (datacenter parts),
+     *        false for the 1:32 / 1:64 consumer and workstation parts.
+     *
+     * Decides whether the mixed-precision SCF pays: on an H200 the FP32 iterations were measured
+     * SLOWER than the FP64 ones (5.29 vs 3.36 s on polymer_2x), while on an A4500 FP64 costs 4x
+     * an FP32 iteration. Claude Generated (Sep 2026).
+     */
+    bool deviceHasFastFp64() const;
+
     /// Selected CUDA device id, or -1 if none.
     int deviceId() const;
 
@@ -233,7 +243,7 @@ public:
      * Claude Generated (Sep 2026, multi-GPU step 3).
      */
     void setDistributedEigensolver(const std::vector<int>& devices, const std::string& backend,
-                                   int block, int min_nao, bool fp32);
+                                   int block, int min_nao, bool fp32, bool verify = true);
 
     /// "" when not configured, else backend/device/solve summary or the reason it is not used.
     std::string distributedEigensolverStatus() const;
@@ -491,7 +501,14 @@ private:
     size_t estimateStorageBytes(int nat, int nsh, int nao, bool is_gfn2, double nnz) const;
 
     /// Pattern density over the helper devices of setDensityDevices(); false = caller falls back.
-    bool densityPatternDistributed(int n, int ncol);
+    /// Point 6 (Claude Generated, Sep 2026): for_weighted_density selects the target pattern
+    /// buffer - false (default, SCF loop) writes P into dSpP from the resident dOcc
+    /// (occupation weights); true (gradient's W = C_occ*diag(2eps)*C_occ^T) writes into dSpW
+    /// instead, reading whatever the caller has already uploaded into dOcc (computeGradient
+    /// uploads 2*eps there before calling this). Same SDDMM, same column split, only the
+    /// weight vector's content and the output buffer differ - both already live in Impl, so no
+    /// new device buffers are needed for this.
+    bool densityPatternDistributed(int n, int ncol, bool for_weighted_density = false);
     // Storage-independent building blocks (dense or screened). Claude Generated (Sep 2026).
     bool buildFockIntoC(int n, bool multipole);
     bool populationsAndBand(int n, double* band_out);

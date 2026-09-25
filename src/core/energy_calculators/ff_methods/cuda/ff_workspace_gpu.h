@@ -250,6 +250,40 @@ public:
     void updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,
                       const std::vector<int>& atom_types);
 
+    /**
+     * @brief Re-upload the bonded/non-bonded repulsion SoA after a periodic rebuild.
+     *
+     * Claude Generated (Sep 2026): counterpart to updateHBonds()/updateXBonds() for the
+     * repulsion pair lists (see GFNFF::updateNonbondedRepulsionIfNeeded()). RepulsionSoA::n
+     * is set from the passed vector's size on every call, so this is resize-aware in both
+     * directions (growing or shrinking pair count) without any extra bookkeeping — the
+     * underlying CudaBuffer reallocates only when the new count exceeds its current
+     * capacity, and the SoA's own `n` (used for every kernel launch bound) always reflects
+     * the just-uploaded count.
+     */
+    void updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
+                          const std::vector<GFNFFRepulsion>& nonbonded_reps);
+
+    /**
+     * @brief Re-upload the D4 dispersion SoA after a skin-triggered rebuild.
+     *
+     * Claude Generated (Sep 2026): counterpart to updateRepulsion() for the D4 pair list (see
+     * GFNFF::updateDispersionPairsIfNeeded()). Besides the pair SoA itself, three pieces of state
+     * are sized by the pair count and must follow it: the per-pair dc6dcn device buffers written
+     * by k_dc6dcn_per_pair, and the host index mirror + staging vectors used by
+     * updateDispersionDC6DCN(). The caller must invalidateGraph() afterwards (disp.n changed).
+     */
+    void updateDispersion(const std::vector<GFNFFDispersion>& pairs);
+
+    /**
+     * @brief Re-upload the explicit Coulomb pair SoA (eeq_distance_cutoff > 0 only).
+     *
+     * Claude Generated (Sep 2026): see GFNFF::updateCoulombPairsIfNeeded(). The per-atom
+     * self-energy parameters are topology-only and are not touched. The caller must
+     * invalidateGraph() afterwards (coulomb.n changed).
+     */
+    void updateCoulombPairs(const std::vector<GFNFFCoulomb>& pairs);
+
     /// Get last uploaded HBond list (for CPU vs GPU comparison debugging)
     const std::vector<GFNFFHydrogenBond>& getLastHBonds() const { return m_last_hbonds; }
 
@@ -347,6 +381,9 @@ public:
     // =========================================================================
 
     void setDispersionEnabled(bool v);
+    /// Claude Generated (Sep 2026): let k_dc6dcn_per_pair also rewrite the per-pair C6 from the
+    /// current-step Gaussian weights (GFN-FF `dispersion_c6_update`, see GFNFF::refreshDispersionC6()).
+    void setDispersionC6Update(bool v) { m_disp_c6_update = v; }
     void setHBondEnabled(bool v);
     void setRepulsionEnabled(bool v);
     void setCoulombEnabled(bool v);
@@ -613,6 +650,7 @@ private:
 
     // Term enable flags
     bool m_dispersion_enabled = true;
+    bool m_disp_c6_update = true;   ///< Claude Generated (Sep 2026): per-step C6 refresh in k_dc6dcn_per_pair
     bool m_hbond_enabled      = true;
     bool m_repulsion_enabled  = true;
     bool m_coulomb_enabled    = true;
