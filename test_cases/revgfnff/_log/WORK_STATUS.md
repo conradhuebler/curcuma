@@ -3198,3 +3198,49 @@ full falsifier record), `AIChangelog.md`, `docs/GFNFF_STATUS.md` Known Limitatio
 entry) — matching the obligation already established for Known Issue #34 (this is a plain-GFN-FF
 change). Known Issue #34's own "8.50/8.00" text also corrected in place with a pointer to package
 31's finding, so CLAUDE.md and `docs/REV_GFNFF_STAGE2.md` no longer disagree.
+
+# Side-thread — feature/multi-gpu merged into a standalone branch, not yet reconciled (2026-09-25)
+
+Separate from the numbered X2- packages above (this is a branch-management task, not stage-2
+physics). Full detail: `MULTIGPU_MERGE_STATUS.md` (in the merge worktree, see below).
+
+Operator instruction: merge the current `origin/feature/multi-gpu` into `reactff2-llm`. Executed
+in an isolated worktree, based on `reactff2-llm`'s pre-session tip (`9c69d40e`) rather than its
+current tip (packages 14-32 were committed on top after the merge task was launched, so this
+result does NOT yet include today's 5 commits) — deliberately, to avoid touching the then-huge
+uncommitted working tree. Result: new local branch `reactff2-llm-merge-multigpu`, merge commit
+`4c39e4a1` (parents `9c69d40e` + multi-gpu's `7d2cceb7`) plus a fixup commit `6a43b238`, in worktree
+`.claude/worktrees/agent-a339a20dbf71e1a21`. Not pushed; `reactff2-llm` itself untouched.
+
+**Builds clean on CPU. ctest 304->305 tests, 12->13 failures** (relative to the pre-session
+9c69d40e baseline, NOT the current package-32 baseline): `cli_curcumaopt_07` now passes (fixed
+independently on the remote); two NEW failures appeared, both needing an operator call, not a code
+fix: `cli_gfnff_04_rev_well_form` off by 1.2e-8 Eh (the remote's ATM three-body term is now OFF by
+default; `-gfnff.dispersion_atm true` restores the pinned value exactly); `cli_simplemd_20_gfnff_
+rev_h_budget` fails because its own control run no longer blows up (probably an improvement, but
+its golden value assumed it would).
+
+**A duplicate-fix collision git could not detect, and cannot resolve automatically**: both
+branches independently fixed the SAME stale-D4-C6 bug found this session (package 29's Fix B,
+commit `837266d8`) — multi-gpu has its own `refreshDispersionC6` (commit `f51f5200`) for the
+identical problem. Both are now present in the merged branch; **only one should stay**, this needs
+a deliberate choice, not just "keep both".
+
+**Numeric-affecting changes coming in from multi-gpu, needing review before adoption**: MD pair
+lists now refreshed during MD (not just at setup); per-step D4 C6 refresh (redundant with the
+above); H...H repulsion switched on via `bpair`; the ATM three-body dispersion term now OFF by
+default. Also: the remote's own copy of the MD clock fix (same constant as ours, no real conflict);
+an adaptive step-rejecting MD integrator (off by default); a new sparse `topo_distances` table that
+rev-gfnff's own code had to be adapted to read; REV_GFNFF_TODO/Known-Issue numbering renumbered to
+avoid colliding with #34/35.
+
+**Flagged as unverified, not covered by any test**: during a rev-gfnff topology-corner blend, the
+new per-step CN/C6/pair-list refreshes only update the CURRENT corner - other corners in flight
+keep stale values. Plausible, not measured, no test exists for it.
+
+**Not done, awaiting operator decision on all of the above**: reconciling this branch with
+`reactff2-llm`'s current tip (5 commits ahead of this merge's base); choosing between the two
+duplicate C6-refresh fixes; deciding the two test re-pins; deciding whether to adopt any of the
+multi-gpu numeric-affecting defaults (pair-list refresh cadence, H-H-via-bpair, ATM off) on this
+branch. GPU-specific code (CUDA/ROCm/Vulkan, the distributed eigensolve/gradient/EEQ work) was not
+compiled or run anywhere in this - no GPU/SDK available in this environment.
