@@ -700,7 +700,7 @@ json CLI2Json(int argc, char** argv)
         "gpu_sparse_integrals",  // native gfn1/gfn2 GPU: screened S/H0/multipole storage auto|on|off
         // Claude Generated (Sep 2026, multi-GPU step 3): multi-GPU eigensolve (docs/GPU_TUNING.md)
         "gpu_eigensolver_devices", "gpu_eigensolver_backend", "gpu_eigensolver_block",
-        "gpu_eigensolver_min_nao", "gpu_eigensolver_fp32",
+        "gpu_eigensolver_min_nao", "gpu_eigensolver_fp32", "gpu_eigensolver_verify",
         "gpu_density_devices", "gpu_density_min_nao",  // split the pattern density (docs/GPU_TUNING.md)
         "charge", "spin",  // molecular charge/spin (top-level, not module-scoped)
         "export_run", // Export current run configuration
@@ -2183,7 +2183,29 @@ int executeOptimization(const json& controller, int argc, char** argv) {
                 BMTUtils::processBakFiles(bmt_dir, bak_files);
                 return 0;
             } else {
-                CurcumaLogger::warn_fmt("{} optimizer failed: {}", optimizer_method, result.error_message);
+                // Claude Generated (Sep 2026): write the geometry even when the optimiser did
+                // not converge. It is the best structure found and often hours of compute - a
+                // GFN2 optimisation of polymer_2x (7320 atoms) ran 1.8 h, hit max_iterations
+                // and left NOTHING behind. The multi-structure path below already writes
+                // non-converged results; this makes the single-structure path agree.
+                CurcumaLogger::warn_fmt("{} optimizer did not converge: {}", optimizer_method,
+                                        result.error_message);
+                // result.final_molecule, NOT molecules[0]: the optimiser does not update the
+                // input molecule in place, so writing molecules[0] would silently hand back the
+                // INPUT geometry dressed as a result (caught by measurement: the "optimised"
+                // water500 had exactly the input's single-point energy). The multi-structure
+                // path below uses final_molecule for the same reason.
+                if (result.final_molecule.AtomCount() > 0) {
+                    result.final_molecule.writeXYZFile(output_file);
+                    CurcumaLogger::warn_fmt("Last geometry written anyway to: {} (E = {:.8f} Eh, "
+                                            "|grad| = {:.6f}) - NOT a converged minimum",
+                                            output_file, result.final_energy,
+                                            result.final_gradient_norm);
+                    std::vector<std::string> bak_files = BMTUtils::collectBakFiles(controller);
+                    BMTUtils::processBakFiles(bmt_dir, bak_files);
+                } else {
+                    CurcumaLogger::error("No geometry available from the failed optimisation");
+                }
             }
         } else {
             // Multi-structure path: optimise each frame and collect final geometries.

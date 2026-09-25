@@ -63,7 +63,9 @@ namespace Constants {
     //
     // Every user-facing time (-md.time_step, -md.MaxTime, -md.coupling, the reported Time
     // column) is in REAL femtoseconds; the conversion is applied only where such a time
-    // enters the integrator.
+    // enters the integrator. Verified against vibrational periods: an O-H stretch whose
+    // Hessian frequency is 3635.7 cm^-1 (period 9.1745 fs) must complete one oscillation in
+    // 9.1745 fs of reported time, and before this conversion existed it did so in 4.6961.
     constexpr double MD_TIME_UNIT_FS = 1.9516144204; // sqrt(amu*A^2/Eh), in fs
     constexpr double FS_TO_MD_TIME = 1.0 / MD_TIME_UNIT_FS; // 0.512396...
 }

@@ -563,6 +563,12 @@ public:
         (void)ndev;
         const bool eig_ok = cudaMemcpy(eig, m_hW.data(), esize * n, cudaMemcpyHostToDevice) == cudaSuccess;
         m_gather_ms = msSince(t0);
+        // Claude Generated (Sep 2026): cusolverMg cannot be called twice on the same descriptor +
+        // workspace here - the FIRST solve is correct and the SECOND returns eigenvectors that fail
+        // verification (measured on polymer, nao 3222: relative residual 1.4e-6 then 8.7e-2, and
+        // the SCF diverges; at nao 558 the reuse happens to work). Everything is therefore rebuilt
+        // for the next call. CURCUMA_GPU_EIG_MG_REUSE=1 keeps the old behaviour for testing.
+        if (!std::getenv("CURCUMA_GPU_EIG_MG_REUSE")) releaseMatrices();
         return eig_ok;
     }
 

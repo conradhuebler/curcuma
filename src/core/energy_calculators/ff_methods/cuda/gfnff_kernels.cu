@@ -2851,7 +2851,8 @@ __global__ void k_dc6dcn_per_pair(
     const double* __restrict__ dgw,
     const double* __restrict__ c6_flat,
     double*       __restrict__ dc6dcn_ij,
-    double*       __restrict__ dc6dcn_ji)
+    double*       __restrict__ dc6dcn_ji,
+    double*       __restrict__ c6_out)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_pairs) return;
@@ -2876,6 +2877,7 @@ __global__ void k_dc6dcn_per_pair(
 
     double dc6_ij = 0.0;
     double dc6_ji = 0.0;
+    double c6     = 0.0;   // Claude Generated (Sep 2026): C6 itself, same double sum
 
     for (int ri = 0; ri < nri; ++ri) {
         double dgw_i_ri = dgw[gw_i_base + ri];
@@ -2890,11 +2892,15 @@ __global__ void k_dc6dcn_per_pair(
 
             // dc6dcn(j,i) = dC6(i,j)/dCN(j) = Σ gw(i,ri) * dgw(j,rj) * C6ref
             dc6_ji += gw_i_ri * dgw[gw_j_base + rj] * c6ref;
+
+            // C6(i,j) = Σ gw(i,ri) * gw(j,rj) * C6ref (Caldeweyher 2019 CN-weighted C6)
+            c6 += gw_i_ri * gw[gw_j_base + rj] * c6ref;
         }
     }
 
     dc6dcn_ij[tid] = dc6_ij;
     dc6dcn_ji[tid] = dc6_ji;
+    if (c6_out) c6_out[tid] = c6;
 }
 
 // ============================================================================
@@ -3469,6 +3475,62 @@ __global__ void k_eeq_block_jacobi_apply(
             acc += Ainv[lj * Nf + li] * s_rf[lj];
         d_z[frag_atom_map[atom_start + li]] = acc;   // scatter local → global
     }
+}
+
+// ── WP7-E: GPU projected PCG kernels (Sep 2026) ──────────────────────────────
+__global__ void k_frag_sum(int N,
+                            const double* __restrict__ v,
+                            const int*    __restrict__ atom_frag,
+                            double*       __restrict__ frag_sum)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    atomicAdd(&frag_sum[atom_frag[i]], v[i]);
+}
+
+__global__ void k_frag_scatter_add(int N,
+                                    double*       __restrict__ v,
+                                    const int*    __restrict__ atom_frag,
+                                    const double* __restrict__ frag_delta)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    v[i] += frag_delta[atom_frag[i]];
+}
+
+__global__ void k_frag_project_delta(int nfrag,
+                                      const double* __restrict__ frag_sum,
+                                      const double* __restrict__ inv_frag_atoms,
+                                      double*       __restrict__ frag_delta)
+{
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= nfrag) return;
+    frag_delta[f] = -frag_sum[f] * inv_frag_atoms[f];
+}
+
+__global__ void k_frag_feasibility_delta(int nfrag,
+                                          const double* __restrict__ frag_sum,
+                                          const double* __restrict__ rhs_constraints,
+                                          const double* __restrict__ inv_frag_atoms,
+                                          double*       __restrict__ frag_delta)
+{
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= nfrag) return;
+    frag_delta[f] = (rhs_constraints[f] - frag_sum[f]) * inv_frag_atoms[f];
+}
+
+__global__ void k_frag_precond_correct(int N,
+                                        const double* __restrict__ Minv,
+                                        const int*    __restrict__ atom_frag,
+                                        const double* __restrict__ frag_sum,
+                                        const double* __restrict__ frag_sM,
+                                        double*       __restrict__ z)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    int f = atom_frag[i];
+    double sM = frag_sM[f];
+    if (sM > 0.0) z[i] -= Minv[i] * frag_sum[f] / sM;
 }
 
 // ============================================================================

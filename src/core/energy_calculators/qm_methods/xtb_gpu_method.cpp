@@ -455,6 +455,7 @@ public:
     }
 
     bool supportsOnTheFlyMultipole() const override { return true; }
+    std::string lastError() const override { return m_ctx ? m_ctx->lastError() : std::string(); }
     bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr, const double* mrad,
                                 double dmp3, double dmp5, const double* dkernel,
                                 const double* qkernel, const double* gamma3) override
@@ -585,10 +586,18 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                      : x.is_number()  ? x.get<double>() != 0.0
                      : !(x.is_string() && (x.get<std::string>() == "false" || x.get<std::string>() == "0"));
             }
+            bool verify = true;
+            if (config.contains("gpu_eigensolver_verify")) {
+                const auto& x = config["gpu_eigensolver_verify"];
+                verify = x.is_boolean() ? x.get<bool>()
+                       : x.is_number()  ? x.get<double>() != 0.0
+                       : !(x.is_string() && (x.get<std::string>() == "false" || x.get<std::string>() == "0"));
+            }
             if (!devs.empty())
                 ctx->setDistributedEigensolver(devs, backend,
                                                static_cast<int>(num("gpu_eigensolver_block", 128)),
-                                               static_cast<int>(num("gpu_eigensolver_min_nao", 4000)), fp32);
+                                               static_cast<int>(num("gpu_eigensolver_min_nao", 4000)),
+                                               fp32, verify);
         }
 
         // Claude Generated (Sep 2026, multi-GPU): `-gpu_density_devices all|0,1,..|solver|none`
@@ -676,20 +685,35 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
         // path: far-from-convergence iterations solve in FP32, reverting to
         // FP64 near convergence (max|dq| < threshold) so the converged energy
         // stays FP64 (gpu_gfn{1,2}_validation @1e-8 holds). Claude Generated.
-        xtb->setMixedPrecision(true);
+        // Claude Generated (Sep 2026, measured on H200): mixed precision is a CONSUMER-GPU trick.
+        // Where FP64 runs at half the FP32 rate it does not pay - polymer_2x on an H200 NVL took
+        // 5.29 s per FP32 iteration and 3.36 s per FP64 one - and it is worse than that: at
+        // nao = 15444 the FP32 phase converged to a fixed point 1.1 kcal/mol off (dq 7.1e-6 while
+        // the truth was 9.4e-3), so the SCF had to discover that through its FP64 check and spent
+        // 42 iterations instead of 15. On such a device the default is therefore FP64 throughout;
+        // -scf_mixed_precision true overrides it.
+        // The user's own -scf_mixed_precision (applied by applyXtbScfConfig before this
+        // point) wins over the device-class default. Claude Generated (Sep 2026): this used
+        // to be an unconditional assignment, so the flag the message below advertises had
+        // no effect on a full-rate-FP64 device.
+        auto cfg_has = [&](const char* key) {
+            return config.contains(key)
+                || (config.contains("xtb") && config["xtb"].is_object() && config["xtb"].contains(key));
+        };
+        const bool fast_fp64 = ctx->deviceHasFastFp64();
+        const bool mp_explicit = cfg_has("scf_mixed_precision") || cfg_has("mixed_precision");
+        if (!mp_explicit) xtb->setMixedPrecision(!fast_fp64);
+        if (fast_fp64 && !mp_explicit && CurcumaLogger::get_verbosity() >= 2)   // info() is level >= 2
+            CurcumaLogger::info(fmt::format(
+                "{}: {} has full-rate FP64 - mixed precision OFF by default "
+                "(-scf_mixed_precision true to force it)", getMethodName(), ctx->deviceName()));
         // Claude Generated (Sep 2026, operator decision): on the GPU switch to FP64 only once
         // max|dq| < 1e-5 (CPU default stays 1e-3). Measured on polymer (1410 atoms, RTX A4500):
         // FP64 eigensolves 4 -> 1, SCF 6.7 -> 4.5 s, energy identical to 1e-12 Eh, gradient vs
         // CPU 2.6e-6 -> 7.0e-6 Eh/A (within the loose default scf_threshold). An explicit
         // -scf_fp32_threshold (or its alias fp32_threshold) wins. See docs/MULTI_GPU.md.
-        {
-            auto has = [&](const char* key) {
-                return config.contains(key)
-                    || (config.contains("xtb") && config["xtb"].is_object() && config["xtb"].contains(key));
-            };
-            if (!has("scf_fp32_threshold") && !has("fp32_threshold"))
-                xtb->setFp32Threshold(1.0e-5);
-        }
+        if (!cfg_has("scf_fp32_threshold") && !cfg_has("fp32_threshold"))
+            xtb->setFp32Threshold(1.0e-5);
         if (CurcumaLogger::get_verbosity() >= 2)
             CurcumaLogger::info(fmt::format(
                 "{}: GPU device-resident SCF backend active (Broyden; "

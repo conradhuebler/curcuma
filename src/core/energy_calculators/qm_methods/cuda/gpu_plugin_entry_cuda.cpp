@@ -29,6 +29,7 @@
 #include <cuda_runtime.h>
 
 #include <cstring>
+#include "xtb_distributed_eigensolver.h"   // availableBackends() for the -methods query
 
 namespace {
 // Copy a JSON dump into the caller's buffer. Returns the length needed (excluding the NUL),
@@ -55,6 +56,17 @@ int curcuma_cuda_device_count()
 {
     int n = 0;
     return cudaGetDeviceCount(&n) == cudaSuccess ? n : 0;
+}
+
+// Claude Generated (Sep 2026): which distributed-eigensolver backends libcurcuma_cuda_mgpu.so
+// was built with - "mp" (cuSOLVERMp + NCCL), "mg" (the deprecated cusolverMg fallback, measured
+// 15x slower than one GPU on polymer_2x), "mp,mg", or "none (<why>)" when the library is
+// missing. Queried by `curcuma -methods`, so a cluster build can be checked without running a
+// calculation. Loading the library here is the same dlopen the SCF would do.
+const char* curcuma_cuda_mgpu_backends()
+{
+    static const std::string s = curcuma::xtb::gpu::DistributedEigensolver::availableBackends();
+    return s.c_str();
 }
 
 // JSON: {"index","name","memory_total_bytes","compute_capability","pci_bus_id","pci_device_id"}.

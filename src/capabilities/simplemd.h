@@ -1,6 +1,6 @@
 /*
  * <Simple MD Module for Curcuma. >
- * Copyright (C) 2023 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2023 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *               2024 Gerd Gehrisch
  *
  * This program is free software: you can redistribute it and/or modify
@@ -25,6 +25,7 @@
 #include <mutex>
 
 #include <chrono>
+#include <deque>
 #include <ctime>
 #include <functional>
 #include <random>
@@ -428,6 +429,16 @@ private:
      * docs/WP-PERIODIC-NONBONDED.md.
      */
     void wrapIntoContainer();
+    /*! \brief Claude Generated (Sep 2026): run one integration step, with optional step
+     *  rejection (adaptive_step). Without it this is a plain call to Integrator(). */
+    void IntegratorStep();
+    /*! \brief Claude Generated (Sep 2026): step-rejection tolerance in Hartree, derived from
+     *  adaptive_step_tol and the system's thermal energy. */
+    double adaptiveStepTolerance() const;
+    /*! \brief Claude Generated (Sep 2026): kinetic energy of the hottest atom divided by the
+     *  per-atom mean. Dimensionless and nearly size-independent (the maximum of N samples of a
+     *  chi-squared grows logarithmically in N), so one threshold covers 3 and 7320 atoms. */
+    double hottestAtomRatio() const;
     void Verlet();
     void Rattle();
     void EvaluateBias(bool do_deposit); // Claude Generated (Jul 2026): bias force -> m_bias_force_target
@@ -485,7 +496,10 @@ private:
     void ApplyExternalPotentials();                              ///< add their energy and gradient, and advance the work
     void ResolveThermalRegions();                                ///< resolve atom indices + default complement (needs molecule)
     double RegionTemperature(const std::vector<int>& atoms, int dof) const;  ///< instantaneous T of an atom subset
-    void ApplyThermostat();                                      ///< per-region dispatch (or legacy global path)
+    void ApplyThermostat();
+    /*! \brief Claude Generated (Sep 2026): the thermostat itself; ApplyThermostat() wraps it to
+     *  measure the bath work for the step-rejection criterion. */
+    void ApplyThermostatImpl();                                      ///< per-region dispatch (or legacy global path)
     void ApplyThermostatRegion(const std::vector<int>& atoms, double T0, int dof, ThermostatType type);
 
     void InitialiseWalls();
@@ -531,6 +545,35 @@ private:
     double m_T_init = -1.0;
     double m_x0 = 0, m_y0 = 0, m_z0 = 0;
     double m_Ekin_exchange = 0.0;
+
+    // Claude Generated (Sep 2026): adaptive (step-rejecting) integrator.
+    // m_ekin_pre_thermostat is the kinetic energy at the end of the integration step but
+    // BEFORE the thermostat touched the velocities - the only kinetic energy for which
+    // E_pot + E_kin is a conserved quantity across a single step, independent of the
+    // thermostat. See docs/MD_LARGE_SYSTEMS.md.
+    double m_ekin_pre_thermostat = 0.0;
+    bool m_adaptive_step = false;
+    double m_adaptive_step_tol = 1.0;   ///< ceiling, as a fraction of N_dof*kB*T/2
+    double m_adaptive_step_factor = 5.0;   ///< threshold = factor * running median drift
+    int m_adaptive_history = 64;
+    int m_adaptive_warmup = 10;
+    double m_thermostat_work = 0.0;      ///< measured bath work, only tracked when adaptive_step is on
+    bool m_in_adaptive_substep = false;  ///< a rejected step is currently being redone
+    std::deque<double> m_drift_history;  ///< per-step energy change of the accepted steps
+    int m_adaptive_substeps = 8;
+    int m_adaptive_max_retry = 2;
+    int m_adaptive_rejections = 0;      ///< how often a step had to be subdivided
+    int m_adaptive_failed = 0;          ///< how often subdivision did not help either
+    // Claude Generated (Sep 2026): the LOCAL rejection channel. The global energy criterion
+    // above loses contrast with system size, because the legitimate per-step fluctuation is a
+    // sum over all modes while a violating step stays on a handful of atoms. Measured on the
+    // 7320-atom polymer_2x trajectory: in the frame where the run breaks, 12 atoms hold 99 %
+    // of the kinetic energy and the hottest sits at 3733x the per-atom mean, against a steady
+    // 15-23x in every healthy frame before it. That ratio is what this channel watches.
+    bool m_adaptive_local = true;
+    double m_adaptive_hot_factor = 10.0;
+    std::deque<double> m_hot_history;   ///< hottest-atom ratio of the accepted steps
+    int m_adaptive_local_rejections = 0;  ///< rejections the local channel alone triggered
 //    std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient, m_rmass, m_virial, m_gradient_bias, m_scaling_vector_linear, m_scaling_vector_nonlinear, m_rt_geom_1, m_rt_geom_2, m_rt_velo;
     std::vector<double>  m_virial, m_gradient_bias, m_scaling_vector_linear, m_scaling_vector_nonlinear, m_rt_geom_1, m_rt_geom_2, m_rt_velo;
 
@@ -807,6 +850,17 @@ private:
     PARAM(use_com, Bool, false, "Use center of mass (otherwise geometric center).", "System", {"COM"})
     PARAM(hydrogen_mass, Int, 1, "Hydrogen mass scaling factor for HMR.", "System", {"hmass"},
         "min=1")
+
+    // --- Adaptive step (Claude Generated, Sep 2026) ---
+    PARAM(adaptive_step, Bool, false, "Repeat an integration step with a subdivided time step when it violates energy conservation. Standard step rejection: neither a constraint nor a mass modification, the trajectory stays the same physics. Off by default.", "Algorithm", {})
+    PARAM(adaptive_step_factor, Double, 5.0, "Reject a step whose energy change exceeds this multiple of the running median of the accepted steps. Self-calibrating: measured over 3 to 1410 atoms, a healthy step stays below 3.4x the median while a destructive one is ~2000x it. 5 is the smallest value that rejects NOTHING on any healthy system measured; lower it (2 is the measured sweet spot) for a system that still gains energy, at the price of rejecting healthy steps too.", "Algorithm", {})
+    PARAM(adaptive_step_tol, Double, 1.0, "Ceiling for the rejection threshold, as a fraction of the thermal energy N_dof*kB*T/2. Also used before enough steps have been accepted to form the running median. The healthy maximum measured is 0.65 of it, destructive steps reach 123.", "Algorithm", {})
+    PARAM(adaptive_step_history, Int, 64, "Number of accepted steps the running median is taken over.", "Algorithm", {})
+    PARAM(adaptive_step_warmup, Int, 10, "Accepted steps required before the running median replaces the thermal ceiling.", "Algorithm", {})
+    PARAM(adaptive_step_substeps, Int, 8, "Number of substeps a rejected step is redone with.", "Algorithm", {})
+    PARAM(adaptive_step_max_retry, Int, 2, "How often a step may be subdivided again when the redone step still violates the tolerance (substeps multiply each time).", "Algorithm", {})
+    PARAM(adaptive_step_local, Bool, true, "In addition to the total-energy criterion, reject a step in which one atom becomes far hotter than the rest. The global criterion loses contrast with system size; this one does not, because a violating step stays local. Only has an effect while adaptive_step is on.", "Algorithm", {})
+    PARAM(adaptive_step_hot_factor, Double, 10.0, "Reject a step whose hottest atom exceeds this multiple of the running median of that same ratio. Measured on polymer_2x (7320 atoms): healthy steps sit at 15-23x the per-atom mean and hold that value steadily, the breaking step reaches 3733x - so the separation is about two orders of magnitude and 10 is far from both ends.", "Algorithm", {})
     PARAM(initial_velocity_scale, Double, 1.0, "Initial velocity scaling factor.", "System", {"velo"})
 
     // --- Output & Restart ---

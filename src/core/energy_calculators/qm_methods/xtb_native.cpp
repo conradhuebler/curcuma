@@ -706,6 +706,55 @@ double XTB::Calculation(bool gradient)
     const ScfMode mode       = m_scf_mode;
     Matrix P_old;
     double dq_prev = 1.0e30;   // last max|dq| — controls the level-shift fade-out
+    // Claude Generated (Sep 2026): FP32 stagnation guard. The mixed-precision phase reverts to
+    // FP64 once max|dq| < scf_fp32_threshold, but FP32 eigenvectors carry ~1e-7 relative noise,
+    // which shows up as a floor of ~1e-5 in dq for a large system. With the GPU defaults
+    // (scf_fp32_threshold = scf_threshold = 1e-5) the SCF then hovers AT that floor and only
+    // converges when an iteration happens to dip below it - observed on 2x H200, polymer_2x:
+    // 15 vs 21 iterations for runs that differ only by rounding. So: if dq stops improving while
+    // still in FP32, switch to FP64 for the rest, where the iteration is exact and convergence
+    // is monotone again. Costs nothing when the FP32 phase is converging normally.
+    double dq_best_fp32 = 1.0e30;
+    int    fp32_stall = 0;
+    bool   fp32_exhausted = false;
+    auto fp32_wanted = [&](double dq_last) {
+        return m_scf_mixed_precision && !fp32_exhausted && (dq_last > m_scf_fp32_threshold);
+    };
+    // Claude Generated (Sep 2026, measured on H200): the FP32 phase can converge to a fixed point
+    // that is not the FP64 one. polymer_2x, nao 15444: FP32 reported max|dq| = 7.1e-6 at an energy
+    // 1.1 kcal/mol off, and the next FP64 iteration - taken only because convergence is never
+    // accepted on an FP32 step - showed the true residual to be 9.4e-3. Left alone the SCF then
+    // bounces between the two precisions. So: if an FP64 iteration finds a residual far above what
+    // FP32 last claimed, FP32 has been lying and the rest of the SCF runs in FP64.
+    double dq_fp32_last = -1.0;
+    auto note_fp64_reality_check = [&](double dq_now) {
+        if (m_eig_fp32 || fp32_exhausted || dq_fp32_last < 0.0) return;
+        if (m_fp32_false_fixpoint <= 0.0) return;   // check disabled
+        if (dq_now > m_fp32_false_fixpoint * std::max(dq_fp32_last, 1.0e-12)) {
+            fp32_exhausted = true;
+            if (CurcumaLogger::get_verbosity() >= 1)
+                CurcumaLogger::warn_fmt("SCF: the FP32 phase converged to a false fixed point "
+                                        "(FP32 max|dq| {:.2e}, FP64 says {:.2e}); continuing in FP64",
+                                        dq_fp32_last, dq_now);
+        }
+    };
+    // Call after every iteration that ran in FP32, with that iteration's max|dq|.
+    auto note_fp32_progress = [&](double dq_now) {
+        if (!m_eig_fp32) { note_fp64_reality_check(dq_now); return; }
+        dq_fp32_last = dq_now;
+        if (dq_now < 0.7 * dq_best_fp32) {     // still making real progress
+            dq_best_fp32 = dq_now;
+            fp32_stall = 0;
+            return;
+        }
+        if (m_fp32_stall_patience > 0 && ++fp32_stall >= m_fp32_stall_patience) {
+            fp32_exhausted = true;
+            if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::info_fmt("SCF: FP32 phase stalled at max|dq| = {:.2e} "
+                                        "(>= scf_fp32_threshold {:.1e}); continuing in FP64",
+                                        dq_now, m_scf_fp32_threshold);
+        }
+    };
 
     // DIIS and Broyden are member variables so history can optionally survive
     // across geometry steps (m_keep_diis=true, set via -keep_diis true). Default
@@ -780,17 +829,18 @@ double XTB::Calculation(bool gradient)
     // and is machine-dependent - polymer/nao 3222 on this 36-core box: 8 threads 27.1 s,
     // 16 threads 23.8 s, 24 threads 26.5 s, 36 threads 28.6 s. The D&C eigensolve is
     // memory-bandwidth-bound, so more threads than memory channels can still lose; that is now
-    // a `-threads` choice. CURCUMA_EIG_MAX_THREADS still caps it independently of -threads.
-    int eig_cap = 0;   // 0 = no cap, follow -threads
+    // a `-threads` choice. `-eigensolver_max_threads N` caps the eigensolve independently of
+    // -threads (CURCUMA_EIG_MAX_THREADS is the older spelling and still wins over the flag).
+    int eig_cap = m_eig_max_threads;   // 0 = no cap, follow -threads (-eigensolver_max_threads)
     if (const char* env = std::getenv("CURCUMA_EIG_MAX_THREADS")) {
         const int v = std::atoi(env);
-        if (v > 0) eig_cap = v;
+        if (v > 0) eig_cap = v;        // the environment variable still wins
     }
     const int eig_intra = effectiveIntraThreads(m_basis.nao);
     const int eig_threads = eig_cap > 0 ? std::min(eig_intra, eig_cap) : eig_intra;
     if (verb >= 3 && eig_threads > 1)
         CurcumaLogger::info_fmt("Eigensolve BLAS/LAPACK threads: {}{}", eig_threads,
-                                eig_cap > 0 ? " (CURCUMA_EIG_MAX_THREADS cap)" : " (from -threads)");
+                                eig_cap > 0 ? " (eigensolver_max_threads cap)" : " (from -threads)");
 
     // Device-resident SCF (Claude Generated, GPU port Stage 2). Enabled with the
     // default Broyden charge mixing and an available lower Cholesky factor L
@@ -875,6 +925,11 @@ double XTB::Calculation(bool gradient)
     const bool solv_blocks_device =
         m_solvation && !(solv_born && m_gpu_scf && m_gpu_scf->supportsDeviceSolvation());
     bool use_device_potential = false;
+    // Claude Generated (Sep 2026): whether the 18 nat^2 multipole interaction matrices sit on
+    // the device (stored path) and how much that is - used to explain a device-memory failure
+    // of the resident loop, which is where the shortage actually surfaces.
+    bool   mp_stored_on_device = false;
+    double mp_stored_bytes     = 0.0;
     if (use_gpu_resident && gpu_multipole && m_method == MethodType::GFN2 && m_mp_initialized
         && !solv_blocks_device
         && m_gpu_scf->supportsDeviceDispersion() && m_gpu_scf->supportsDevicePotential()) {
@@ -893,8 +948,11 @@ double XTB::Calculation(bool gradient)
         // Claude Generated (Sep 2026): above ~1 GB of interaction matrices (nat > ~2700) the
         // device rebuilds the matrix elements per iteration instead of storing 18 nat^2 doubles
         // (7.7 GB at 7320 atoms, plus the same again as host upload copies).
-        // CURCUMA_GPU_MP_OTF=1/0 forces the choice (validation).
+        // `-gpu_multipole_otf on|off` forces the choice (CURCUMA_GPU_MP_OTF=1/0 still wins).
         bool otf = 18.0 * static_cast<double>(nn) * sizeof(double) > 1.0e9;
+        mp_stored_bytes = 18.0 * static_cast<double>(nn) * sizeof(double);
+        if (m_gpu_mp_otf == "on" || m_gpu_mp_otf == "true")  otf = true;
+        else if (m_gpu_mp_otf == "off" || m_gpu_mp_otf == "false") otf = false;
         if (const char* e = std::getenv("CURCUMA_GPU_MP_OTF")) otf = (e[0] == '1');
         if (otf && m_gpu_scf->supportsOnTheFlyMultipole()) {
             std::vector<double> xyzb(3 * static_cast<size_t>(nat));
@@ -913,8 +971,27 @@ double XTB::Calculation(bool gradient)
                                 m_mp_amat_dd[a][bb].data(), nn * sizeof(double));
             for (int k = 0; k < 6; ++k)
                 std::memcpy(sq.data() + static_cast<size_t>(k) * nn, m_mp_amat_sq[k].data(), nn * sizeof(double));
+            mp_stored_on_device = true;
             use_device_potential = m_gpu_scf->beginPotential(nat, nsh, sd.data(), dd.data(),
                                                              sq.data(), dk.data(), qk.data(), g3.data());
+            // Claude Generated (Sep 2026): the stored path needs 18 nat^2 doubles on the device
+            // (7.7 GB at 7320 atoms) and the same again here on the host. If that does not fit,
+            // say so and rebuild the matrices per iteration instead of walking into an SCF that
+            // cannot run - `-gpu_multipole_otf off` on polymer_2x used to fail at iteration 0
+            // with no indication of the cause.
+            if (!use_device_potential && m_gpu_scf->supportsOnTheFlyMultipole()) {
+                const std::string why = m_gpu_scf->lastError();
+                CurcumaLogger::warn("SCF: storing the GFN2 multipole matrices failed"
+                                    + (why.empty() ? std::string() : " (" + why + ")")
+                                    + "; rebuilding them per iteration instead");
+                std::vector<double> xyzb(3 * static_cast<size_t>(nat));
+                for (int i = 0; i < nat; ++i)
+                    for (int k = 0; k < 3; ++k) xyzb[3 * i + k] = m_geometry(i, k) * AA_TO_AU;
+                use_device_potential = m_gpu_scf->beginPotentialOnTheFly(
+                    nat, nsh, xyzb.data(), m_mp_mrad.data(), gfn2_params::mp_dmp3,
+                    gfn2_params::mp_dmp5, dk.data(), qk.data(), g3.data());
+                mp_stored_on_device = !use_device_potential;
+            }
         }
         // WP4b: upload the Born matrix so the device build adds v_at += B·q_at in-SCF.
         // On failure, drop to the host-driven loop (which still applies solvation).
@@ -1003,11 +1080,24 @@ double XTB::Calculation(bool gradient)
         // precision (FP32→FP64) decision, the convergence test, and the verbosity
         // line — the rest (incl. the Broyden mix) is device-resident. Claude Generated.
         if (use_resident_loop) {
-            m_eig_fp32 = m_scf_mixed_precision && (dq_prev > m_scf_fp32_threshold);
+            m_eig_fp32 = fp32_wanted(dq_prev);
             double dq = 0.0, eb = 0.0, ecoul = 0.0, ethird = 0.0, emp = 0.0;
             if (!m_gpu_scf->residentScfStep(m_eig_fp32, dq, eb, ecoul, ethird, emp)) {
+                std::string why = m_gpu_scf->lastError();
+                // The classic cause on a large system: the stored multipole matrices fit, and
+                // then the loop's own buffers no longer do. Name the flag that avoids it -
+                // measured on polymer_2x (nat 7320, 7.7 GB stored) on a 20 GB card, where the
+                // failure used to arrive with no indication of the cause. Claude Generated.
+                if (iter == 0 && mp_stored_on_device && mp_stored_bytes > 1.0e9) {
+                    if (!why.empty()) why += "; ";
+                    why += "the stored GFN2 multipole interaction matrices hold "
+                        + fmt::format("{:.1f}", mp_stored_bytes / 1073741824.0)
+                        + " GB of device memory - rebuild them per iteration instead "
+                          "(-gpu_multipole_otf auto, the default above ~2700 atoms)";
+                }
                 CurcumaLogger::warn("XTB::Calculation: GPU resident SCF step failed at iteration "
-                                    + std::to_string(iter));
+                                    + std::to_string(iter)
+                                    + (why.empty() ? std::string() : ": " + why));
                 m_scf_converged = false; m_scf_iterations = iter;
                 setHardError("native GPU-resident SCF solve failed (see warning above) at iteration " + std::to_string(iter));
                 return m_E_total;
@@ -1017,6 +1107,7 @@ double XTB::Calculation(bool gradient)
             m_E_third_order = ethird; m_E_multipole = emp;
             const double e_scc = eb + ecoul + ethird + emp;
             const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
+            note_fp32_progress(dq);
             dq_prev = dq;
             if (verb >= scf_min) {
                 const double t_iter_ms = ms(t_iter0, clock::now());
@@ -1089,7 +1180,7 @@ double XTB::Calculation(bool gradient)
             // Mixed precision (GPU): solve in FP32 while far from convergence
             // (max|dq| above the threshold; iter 0 starts FP32 via dq_prev=1e30),
             // reverting to FP64 near convergence so the converged energy is FP64.
-            m_eig_fp32 = m_scf_mixed_precision && (dq_prev > m_scf_fp32_threshold);
+            m_eig_fp32 = fp32_wanted(dq_prev);
             bool solve_ok;
             Eigen::VectorXd v_ao;  // host-expanded potential (non-device-potential path)
             if (use_device_potential) {
@@ -1220,7 +1311,7 @@ double XTB::Calculation(bool gradient)
             // Mixed precision (opt-in, MKL path): solve in FP32 while far from convergence
             // (previous max|dq| above the threshold; iter 0 starts in FP32 via dq_prev=1e30),
             // reverting to FP64 near convergence so the converged energy is FP64. Claude Generated.
-            m_eig_fp32 = m_scf_mixed_precision && (dq_prev > m_scf_fp32_threshold);
+            m_eig_fp32 = fp32_wanted(dq_prev);
 
             // Diagonalize. Let MKL thread the eigensolve (dsygst/dsyevd/dtrsm) for a
             // single large molecule; the surrounding MklSerialScope keeps MKL serial
@@ -1301,6 +1392,7 @@ double XTB::Calculation(bool gradient)
         // the analytic gradient came out 0.0330 instead of 0.0211 Eh/Bohr (60 % off,
         // while the energy still matched xtb to 1e-8). Claude Generated.
         const double dq = (packSCC() - x_in).cwiseAbs().maxCoeff();
+        note_fp32_progress(dq);
         dq_prev = dq;   // drives the LevelShift fade-out on the next iteration
         const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
         const double t_iter_ms = ms(t_iter0, clock::now());
@@ -1423,9 +1515,18 @@ double XTB::Calculation(bool gradient)
     // need the dense P and C on the host (band energy comes from the device, the gradient is
     // on the device). Rebuilding and downloading them took 16 s at 7320 atoms; they are fetched
     // on demand (host gradient fallback, property accessors after ensureHostWavefunction).
+    //
+    // Point 1 (Claude Generated, Sep 2026): the above previously forced finalize() whenever a
+    // gradient was requested, even though calculateGradientGpu() (called below with the SAME
+    // gate as device_grad_will_run) never reads m_wfn.P/C - it passes pc_resident=true and
+    // reads dP/dC straight off the device (xtb_gradient.cpp:859-868). Skip finalize() there too;
+    // ensureHostWavefunction() downloads on demand for the few paths that still need the host
+    // matrices (host gradient fallback, property accessors) - see xtb_multipole.cpp:44.
+    const bool device_grad_will_run = gradient && use_gpu_resident && m_gpu_scf
+        && m_gpu_scf->supportsGradient();
     m_wfn_on_device = false;
     if (use_gpu_resident && m_gpu_scf) {
-        if (use_resident_loop && m_mp_ints_deferred && !gradient)
+        if (use_resident_loop && m_mp_ints_deferred && (!gradient || device_grad_will_run))
             m_wfn_on_device = true;
         else
             m_gpu_scf->finalize(m_wfn.P, m_wfn.C);
