@@ -10,6 +10,11 @@
  "n_ok": 20,
  "orca_rc": 0,
  "wall_s": 207.3,
+ "fragment_energies_eh": {
+  "atom": -99.726374651072,
+  "anion": -99.829167088777,
+  "note": "Added Sep 2026 (kappa_Z fit fifth attempt, KAPPA_FIT_STATUS.md) for the class-E diatomic-anion fragment-anchored scoring (docs/REV_GFNFF_STAGE2.md acceptance 3, 'F2- likewise'). No F/F- single point existed anywhere in the repo (unlike Cl/Cl-, test_cases/revgfnff/ref/L/cl_radical, cl_minus) -- newly computed for this task: ORCA 6.0.0, r2SCAN-3c TightSCF, same job.inp style as cl_radical/cl_minus (F atom: UKS doublet charge 0; F-: closed-shell singlet charge -1), single-atom at the origin. Hirshfeld charges came back -0.000007/+0.999982 spin (atom) and -0.999982 (anion), i.e. clean single-atom references. E(F2-)-E(F)-E(F-) at this system's own reference minimum (r=2.0160) = -199.634463506025-(-99.726374651072)-(-99.829167088777) = -0.07892177 Eh = -49.52 kcal/mol; no prior published target for F2- exists in this repo (docs/REV_GFNFF_STAGE2.md only says 'F2- likewise' without a number)."
+ },
  "points": [
   {
    "point": 0,

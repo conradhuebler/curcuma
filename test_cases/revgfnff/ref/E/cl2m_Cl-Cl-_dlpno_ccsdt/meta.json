@@ -1,0 +1,7 @@
+{
+ "date": "2026-09-23T08:29:13",
+ "host": "fjodor",
+ "orca": "/opt/orca/orca",
+ "keywords": "DLPNO-CCSD(T) aug-cc-pVTZ aug-cc-pVTZ/C RIJCOSX def2/J TightSCF",
+ "note": "Additive DLPNO-CCSD(T) reference alongside the existing r2SCAN-3c cl2m_Cl-Cl- data (not modified). See test_cases/revgfnff/_log/CL2F2_CCSDT_STATUS.md."
+}

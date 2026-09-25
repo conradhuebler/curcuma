@@ -1,0 +1,199 @@
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 0.56861775 0.44264775 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 0.60652560 0.47223640 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 0.64443345 0.50182505 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 0.68234130 0.53141370 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 0.72024915 0.56100235 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 0.75815700 0.59059100 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 0.79606485 0.62017965 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 0.83397270 0.64976830 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 0.90978840 0.70894560 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 0.98560410 0.76812290 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 1.06141980 0.82730020 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 1.13723550 0.88647750 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 1.21305120 0.94565480 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 1.36468260 1.06400940 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 1.51631400 1.18236400 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 1.70585325 1.33030725 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 1.89539250 1.47825050 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 2.08493175 1.62619375 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 2.27447100 1.77413700 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad
+%pal nprocs 4 end
+%maxcore 2000
+%output Print[P_Hirshfeld] 1 end
+* xyz 0 1
+O 0.00000000 -0.00118200 0.00000000
+H 2.65354950 2.07002350 0.00000000
+H -0.75815700 0.59059100 0.00000000
+*

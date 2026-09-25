@@ -1,0 +1,15 @@
+! NEB-TS r2SCAN-3c TightSCF UKS
+%pal nprocs 4 end
+%maxcore 2000
+%neb
+  NEB_END_XYZFILE "product.xyz"
+  NImages 10
+  PREOPT_ENDS false
+  NEB_TS_XYZFILE "ts_guess.xyz"
+  MAXITER 300
+end
+* xyz 0 2
+H 0.42662063 -3.26818316 0.00000000
+F 0.00000000 1.21154840 0.00000000
+H 0.14587796 -3.95488889 0.00000000
+*

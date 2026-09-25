@@ -1,0 +1,19 @@
+{
+ "class": "L",
+ "system": "f_radical_dlpno_ccsdt",
+ "tag": "F DLPNO-CCSD(T) single point (CL2F2_CCSDT_STATUS fragment anchor)",
+ "method": "DLPNO-CCSD(T) aug-cc-pVTZ aug-cc-pVTZ/C RIJCOSX def2/J TightSCF",
+ "charge": 0,
+ "mult": 2,
+ "n_points": 1,
+ "n_ok": 1,
+ "points": [
+  {
+   "point": 0,
+   "label": "F",
+   "energy_eh": -99.627867270643,
+   "s2": 0.754133,
+   "hf_type": "UHF"
+  }
+ ]
+}

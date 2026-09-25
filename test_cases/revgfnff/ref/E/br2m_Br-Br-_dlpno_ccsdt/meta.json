@@ -1,0 +1,9 @@
+{
+ "date": "2026-09-24T22:30:10",
+ "host": "fjodor",
+ "orca": "/opt/orca/orca",
+ "orca_version": "6.0.0",
+ "keywords": "DLPNO-CCSD(T) aug-cc-pVTZ aug-cc-pVTZ/C RIJCOSX def2/J TightSCF",
+ "input_extra": "%pal nprocs 8 (4 for the atoms), %maxcore 3000, %shark PGCFlag 0, OMP_NUM_THREADS=1; all-electron, non-relativistic (consistent with cl2m/f2m)",
+ "note": "Operator-authorized Br2- campaign (22 jobs + 1 pilot at r = 2.85 A, not in the grid). See test_cases/revgfnff/_log/X2_SCOPE_STATUS.md."
+}

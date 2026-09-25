@@ -1,0 +1,25 @@
+{
+ "date": "2026-09-13T22:45:08",
+ "host": "fjodor",
+ "curcuma_head": "6ac132aa",
+ "orca": "/opt/orca/orca",
+ "script": "scripts/revgfnff_refpaths.py",
+ "argv": [
+  "run",
+  "--jobs",
+  "4",
+  "--nprocs",
+  "4"
+ ],
+ "status": "ok",
+ "note": "endpoints: O + hcl / oh + cl benchmark fragment files mapped onto the TS (Kabsch rmsd 0.0490/0.0579 A, 1/1 valid permutations), fragments separated to 4.5 A (closest contact 1.273/1.557 A in the TS)",
+ "keywords": "r2SCAN-3c TightSCF NEB-TS then EnGrad",
+ "nprocs": 4,
+ "charge": 0,
+ "mult": 3,
+ "uks": true,
+ "ref_kind": "UKS",
+ "nimages": 10,
+ "attempts": 1,
+ "no_interior_barrier": true
+}

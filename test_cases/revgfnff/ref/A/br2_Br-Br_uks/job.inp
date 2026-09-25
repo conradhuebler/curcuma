@@ -1,0 +1,179 @@
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf BrokenSym 1,1 MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 1.71998800
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 1.83598560
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 1.95198320
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 2.06798080
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 2.18397840
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 2.29997600
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 2.41597360
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 2.53197120
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 2.76396640
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 2.99596160
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 3.22795680
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 3.45995200
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 3.69194720
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 4.15593760
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 4.61992800
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 5.19991600
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 5.77990400
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 6.35989200
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 6.93988000
+*
+$new_job
+! r2SCAN-3c TightSCF EnGrad UKS SlowConv
+%pal nprocs 4 end
+%maxcore 2000
+%scf MaxIter 500 end
+* xyz 0 1
+Br 0.00000000 0.00000000 -0.01997600
+Br 0.00000000 0.00000000 8.09985600
+*

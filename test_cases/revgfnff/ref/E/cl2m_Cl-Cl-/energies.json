@@ -10,6 +10,11 @@
  "n_ok": 20,
  "orca_rc": 0,
  "wall_s": 201.9,
+ "fragment_energies_eh": {
+  "atom": -460.11405131814,
+  "anion": -460.238105393644,
+  "note": "Added Sep 2026 (kappa_Z fit fifth attempt, KAPPA_FIT_STATUS.md) for the class-E diatomic-anion fragment-anchored scoring (docs/REV_GFNFF_STAGE2.md acceptance 3). Not newly computed: read from the pre-existing test_cases/revgfnff/ref/L/cl_radical and cl_minus single points (same r2SCAN-3c TightSCF/UKS/ORCA 6.0.0 settings as this system, see those directories' job.inp/meta.json). E(Cl2-)-E(Cl)-E(Cl-) at this system's own reference minimum (r=2.7282, the EA_25 separation) = -920.418281376414-(-460.11405131814)-(-460.238105393644) = -0.06612466 Eh = -41.49 kcal/mol, matching docs/REV_GFNFF_TODO.md's r2SCAN-3c target of -41.5 kcal/mol to 2 significant figures."
+ },
  "points": [
   {
    "point": 0,

@@ -1,0 +1,169 @@
+{
+ "class": "S",
+ "system": "ch4_h2o_CO",
+ "tag": "rigid contact scan O...H-C: heavy-atom separation 2.3-6.0 A (h2o atom 0 / ch4 atom 0); A contact atom index 0, B contact atom index 3; last two points are the two isolated monomers",
+ "charge": 0,
+ "mult": 1,
+ "uks": false,
+ "broken_sym": false,
+ "n_points": 22,
+ "n_ok": 20,
+ "orca_rc": 0,
+ "wall_s": 197.8,
+ "points": [
+  {
+   "point": 0,
+   "label": "d=2.30",
+   "energy_eh": -116.836746592673,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 1,
+   "label": "d=2.40",
+   "energy_eh": -116.859393190859,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 2,
+   "label": "d=2.50",
+   "energy_eh": -116.875632418904,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 3,
+   "label": "d=2.60",
+   "energy_eh": -116.887306974668,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 4,
+   "label": "d=2.70",
+   "energy_eh": -116.895684856139,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 5,
+   "label": "d=2.80",
+   "energy_eh": -116.901705353933,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 6,
+   "label": "d=2.90",
+   "energy_eh": -116.905986072718,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 7,
+   "label": "d=3.00",
+   "energy_eh": -116.909012094119,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 8,
+   "label": "d=3.10",
+   "energy_eh": -116.911106871357,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 9,
+   "label": "d=3.25",
+   "energy_eh": -116.913047987104,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 10,
+   "label": "d=3.40",
+   "energy_eh": -116.914074053099,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 11,
+   "label": "d=3.60",
+   "energy_eh": -116.914640452648,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 12,
+   "label": "d=3.80",
+   "energy_eh": -116.914755283714,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 13,
+   "label": "d=4.00",
+   "energy_eh": -116.914685773482,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 14,
+   "label": "d=4.25",
+   "energy_eh": -116.914519688311,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 15,
+   "label": "d=4.50",
+   "energy_eh": -116.914362964441,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 16,
+   "label": "d=4.80",
+   "energy_eh": -116.914204898304,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 17,
+   "label": "d=5.10",
+   "energy_eh": -116.914091733505,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 18,
+   "label": "d=5.50",
+   "energy_eh": -116.914004226047,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 19,
+   "label": "d=6.00",
+   "energy_eh": -116.913937611704,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 20,
+   "label": "monomer_A",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  },
+  {
+   "point": 21,
+   "label": "monomer_B",
+   "energy_eh": null,
+   "s2": null,
+   "hirshfeld": null
+  }
+ ]
+}

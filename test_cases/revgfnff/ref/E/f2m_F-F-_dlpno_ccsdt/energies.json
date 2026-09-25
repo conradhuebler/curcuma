@@ -1,0 +1,293 @@
+{
+ "class": "E",
+ "system": "f2m_F-F-_dlpno_ccsdt",
+ "tag": "F-F(-) rigid stretch, DLPNO-CCSD(T) SIE-free reference (Sep 2026 CCSD(T) campaign)",
+ "method": "DLPNO-CCSD(T) aug-cc-pVTZ aug-cc-pVTZ/C RIJCOSX def2/J TightSCF",
+ "charge": -1,
+ "mult": 2,
+ "n_points": 22,
+ "n_ok": 22,
+ "max_wall_s": 96.8,
+ "s2_ideal": 0.75,
+ "s2_flagged_points": [
+  {
+   "r": 3.072,
+   "s2": 0.856799
+  },
+  {
+   "r": 3.456,
+   "s2": 0.87076
+  },
+  {
+   "r": 3.84,
+   "s2": 0.878901
+  },
+  {
+   "r": 4.32,
+   "s2": 0.882342
+  },
+  {
+   "r": 5.76,
+   "s2": 0.867405
+  },
+  {
+   "r": 6.72,
+   "s2": 0.855973
+  },
+  {
+   "r": 7.5,
+   "s2": 0.851127
+  }
+ ],
+ "fragment_energies_eh": {
+  "atom": -99.627867270643,
+  "atom_s2": 0.754133,
+  "atom_hf_type": "UHF",
+  "anion": -99.749111538228,
+  "note": "E(F2-)-E(F)-E(F-) at r_eq=2.016 = -26.15 kcal/mol."
+ },
+ "points": [
+  {
+   "point": 0,
+   "label": "r=1.4400",
+   "energy_eh": -199.338433214978,
+   "s2": 0.763723,
+   "s2_deviation": 0.013723,
+   "s2_linearized": 0.7502749,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 51.6
+  },
+  {
+   "point": 1,
+   "label": "r=1.5360",
+   "energy_eh": -199.377281928271,
+   "s2": 0.767536,
+   "s2_deviation": 0.017536,
+   "s2_linearized": 0.7502601,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 62.8
+  },
+  {
+   "point": 2,
+   "label": "r=1.6320",
+   "energy_eh": -199.400242929259,
+   "s2": 0.771718,
+   "s2_deviation": 0.021718,
+   "s2_linearized": 0.750244,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 52.6
+  },
+  {
+   "point": 3,
+   "label": "r=1.7280",
+   "energy_eh": -199.412677496325,
+   "s2": 0.776374,
+   "s2_deviation": 0.026374,
+   "s2_linearized": 0.7502622,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 68.3
+  },
+  {
+   "point": 4,
+   "label": "r=1.8240",
+   "energy_eh": -199.41837958277,
+   "s2": 0.781505,
+   "s2_deviation": 0.031505,
+   "s2_linearized": 0.7503095,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 46.0
+  },
+  {
+   "point": 5,
+   "label": "r=1.9200",
+   "energy_eh": -199.419614437828,
+   "s2": 0.787071,
+   "s2_deviation": 0.037071,
+   "s2_linearized": 0.7503436,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 59.3
+  },
+  {
+   "point": 6,
+   "label": "r=2.0160",
+   "energy_eh": -199.418653998111,
+   "s2": 0.793,
+   "s2_deviation": 0.043,
+   "s2_linearized": 0.7503622,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 44.2
+  },
+  {
+   "point": 7,
+   "label": "r=2.1120",
+   "energy_eh": -199.416469991236,
+   "s2": 0.799203,
+   "s2_deviation": 0.049203,
+   "s2_linearized": 0.7503855,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 59.2
+  },
+  {
+   "point": 8,
+   "label": "r=2.3040",
+   "energy_eh": -199.409902467139,
+   "s2": 0.81204,
+   "s2_deviation": 0.06204,
+   "s2_linearized": 0.7504501,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 52.4
+  },
+  {
+   "point": 9,
+   "label": "r=2.4960",
+   "energy_eh": -199.40312269217,
+   "s2": 0.824796,
+   "s2_deviation": 0.074796,
+   "s2_linearized": 0.7505149,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 59.7
+  },
+  {
+   "point": 10,
+   "label": "r=2.6880",
+   "energy_eh": -199.397093195994,
+   "s2": 0.836778,
+   "s2_deviation": 0.086778,
+   "s2_linearized": 0.7505873,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 51.2
+  },
+  {
+   "point": 11,
+   "label": "r=2.8800",
+   "energy_eh": -199.392059332231,
+   "s2": 0.847524,
+   "s2_deviation": 0.097524,
+   "s2_linearized": 0.750666,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 62.3
+  },
+  {
+   "point": 12,
+   "label": "r=3.0720",
+   "energy_eh": -199.387978172671,
+   "s2": 0.856799,
+   "s2_deviation": 0.106799,
+   "s2_linearized": 0.7507375,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 49.2
+  },
+  {
+   "point": 13,
+   "label": "r=3.4560",
+   "energy_eh": -199.382121959908,
+   "s2": 0.87076,
+   "s2_deviation": 0.12076,
+   "s2_linearized": 0.7508574,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 62.9
+  },
+  {
+   "point": 14,
+   "label": "r=3.8400",
+   "energy_eh": -199.378218316779,
+   "s2": 0.878901,
+   "s2_deviation": 0.128901,
+   "s2_linearized": 0.7509428,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 49.4
+  },
+  {
+   "point": 15,
+   "label": "r=4.3200",
+   "energy_eh": -199.375544476025,
+   "s2": 0.882342,
+   "s2_deviation": 0.132342,
+   "s2_linearized": 0.7510067,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 61.0
+  },
+  {
+   "point": 16,
+   "label": "r=4.8000",
+   "energy_eh": -199.378164314845,
+   "s2": 0.754162,
+   "s2_deviation": 0.004162,
+   "s2_linearized": 0.7501013,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 34.6
+  },
+  {
+   "point": 17,
+   "label": "r=5.2800",
+   "energy_eh": -199.37784747866,
+   "s2": 0.754154,
+   "s2_deviation": 0.004154,
+   "s2_linearized": 0.7501011,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 30.0
+  },
+  {
+   "point": 18,
+   "label": "r=5.7600",
+   "energy_eh": -199.371692342051,
+   "s2": 0.867405,
+   "s2_deviation": 0.117405,
+   "s2_linearized": 0.7508962,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 64.8
+  },
+  {
+   "point": 19,
+   "label": "r=6.7200",
+   "energy_eh": -199.37125357661,
+   "s2": 0.855973,
+   "s2_deviation": 0.105973,
+   "s2_linearized": 0.7507971,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 64.6
+  },
+  {
+   "point": 20,
+   "label": "r=7.5000",
+   "energy_eh": -199.371074560312,
+   "s2": 0.851127,
+   "s2_deviation": 0.101127,
+   "s2_linearized": 0.7507552,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 96.8
+  },
+  {
+   "point": 21,
+   "label": "r=9.0000",
+   "energy_eh": -199.37713783464,
+   "s2": 0.754137,
+   "s2_deviation": 0.004137,
+   "s2_linearized": 0.7501009,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 54.4
+  }
+ ]
+}
