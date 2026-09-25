@@ -299,6 +299,42 @@ The foundation that enabled rapid angle error debugging:
 
 ## Known Limitations (Documented Architectural Differences)
 
+### Fragment-charge placement for charged multi-fragment species — carrier fix default ON (Sep 2026, `frag_charge_model`)
+
+The old rule (still available as `-gfnff.frag_charge_model reference`) puts a charged molecule's
+entire net charge on "fragment 0" — the fragment containing atom 1 — regardless of chemistry. That
+is only right for a genuinely asymmetric (heterolytic-type) split; for a chemically symmetric or
+near-symmetric split (e.g. a homolytic-type radical-anion dissociation) it is index-dependent and
+wrong, and it also creates a 100+ kcal/mol energy discontinuity at the exact geometry where GFN-FF's
+topology perception decides a pair is "two fragments" rather than one.
+
+**Default is now `-gfnff.frag_charge_model ensemble`** (carrier chosen by electron-count parity +
+chemistry, not atom index) **with `frag_charge_s_max=1.0`** (the continuous cross-threshold window
+stays off by default — it is a net energetic loss for plain GFN-FF alone; see below). This alone
+fixed a real, verified index bug in 18 of 2462 GMTKN55 structures (all 11 `WATER27` ion clusters, 6
+`BH76` SN2 complexes, 1 `PArel` structure) — `WATER27` reaction MAD 58.6 -> 21.4 kcal/mol.
+
+The continuous window (`-gfnff.frag_charge_s_max` > 1.0) additionally closes a label- and
+history-dependence hazard for symmetric radical anions (rev-gfnff's Cl2-/F2- work) but makes plain
+GFN-FF's own energies for such species WORSE inside the window (a separate, pre-existing
+over-delocalisation defect it doesn't fix) — recommended only combined with rev-gfnff's `harris`
+mode (`-gfnff.frag_charge_s_max 1.2`), not as a plain-GFN-FF default. Full detail, every number,
+and the deployment trap found while shipping the carrier-fix default (a PARAM macro's default
+value alone has no runtime effect without a matching hardcoded fallback) — see the top-level
+`CLAUDE.md` Known Issue #34 and `test_cases/revgfnff/_log/FRAG_CHARGE_STATUS.md`.
+
+### Stale-CN / stale-D4-C6 on a reused calculator — both FIXED (Sep 2026)
+
+A reused `GFNFF` instance's energy-only calls (as opposed to gradient calls) used a stale cached
+CN in the Coulomb chi(CN) term and a stale D4 pairwise C6, both only ever refreshed on gradient
+calls. Neither bug is visible to a per-structure single-point benchmark (GMTKN55/MOR41/S30L-CI all
+bit-identical) — only to a calculator instance reused across geometries: batch runs, optimisers,
+finite-difference Hessians. Real, measured wins: the native `-opt.optimizer lbfgs` went from never
+converging on caffeine (5000 iterations) to 44 steps; `cli_curcumaopt_07_opt_multixyz`'s golden
+values had quietly encoded a real ~100 kcal/mol optimiser misconvergence on 2 of 17 frames, now
+regenerated and passing 20/20. Full detail and every number: top-level `CLAUDE.md` Known Issue
+#35, `test_cases/revgfnff/_log/STALE_CN_STATUS.md`.
+
 ### GEODEP angle rule creates artefact minima at N-H centers — guarded (Aug 2026, `nh_linear_fix`, default ON)
 
 > Origin: this guard was developed and validated on the `confsearch` branch (commit

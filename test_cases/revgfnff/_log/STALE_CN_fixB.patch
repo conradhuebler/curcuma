@@ -1,0 +1,119 @@
+diff -ru a/src/core/energy_calculators/dispersion/d4param_generator.cpp b/src/core/energy_calculators/dispersion/d4param_generator.cpp
+--- a/src/core/energy_calculators/dispersion/d4param_generator.cpp	2026-09-24 22:26:01.583328388 +0200
++++ b/src/core/energy_calculators/dispersion/d4param_generator.cpp	2026-09-24 22:23:37.605156373 +0200
+@@ -2018,6 +2018,15 @@
+     m_cn_cached = true;
+ }
+ 
++// Claude Generated (Sep 2026): stale-CN package — see header. Weights + half-contraction
++// only; dgw / dc6dcn (gradient-only) stay owned by updateCNValuesForGradient.
++void D4ParameterGenerator::refreshC6WeightsForCN(const std::vector<double>& cn, CxxThreadPool* pool, int num_threads)
++{
++    m_cn_values = cn;
++    precomputeGaussianWeights(pool, num_threads);
++    precomputeC6HalfContraction(pool, num_threads);
++}
++
+ // Claude Generated (Apr 2026): P1a — CN-change threshold check for Gaussian weight caching
+ bool D4ParameterGenerator::canSkipGaussianWeightsUpdate(const std::vector<double>& new_cn) const
+ {
+diff -ru a/src/core/energy_calculators/dispersion/d4param_generator.h b/src/core/energy_calculators/dispersion/d4param_generator.h
+--- a/src/core/energy_calculators/dispersion/d4param_generator.h	2026-09-24 22:23:37.638490055 +0200
++++ b/src/core/energy_calculators/dispersion/d4param_generator.h	2026-09-24 22:23:37.581822795 +0200
+@@ -105,6 +105,19 @@
+                                     int num_threads = 1, bool skip_dc6dcn = false);
+     const Matrix& getDC6DCN() const { return m_dc6dcn; }
+ 
++    /**
++     * @brief Re-evaluate the CN Gaussian weights (and the C6 half-contraction) at @p cn,
++     *        so that getChargeWeightedC6() returns C6(CN) of the CURRENT geometry.
++     *
++     * Claude Generated (Sep 2026, stale-CN package): GFN-FF's pair C6 used to be baked
++     * once at topology build and never refreshed, while the gradient already carried the
++     * dC6/dCN chain rule (Fortran gfnff_engrad.F90:323 evaluates C6(CN) every call).
++     * Exact - no CN-change threshold (the P1a skip in updateCNValuesForGradient only
++     * governs the dc6dcn DERIVATIVE, which this does not touch).
++     */
++    void refreshC6WeightsForCN(const std::vector<double>& cn, CxxThreadPool* pool = nullptr,
++                               int num_threads = 1);
++
+     // Claude Generated (March 2026): GPU dc6dcn Phase 2 — expose weight arrays
+     const std::vector<std::vector<double>>& getGaussianWeights() const { return m_gaussian_weights; }
+     const std::vector<std::vector<double>>& getGaussianWeightDerivatives() const { return m_gaussian_weight_derivatives; }
+diff -ru a/src/core/energy_calculators/ff_methods/ff_workspace.h b/src/core/energy_calculators/ff_methods/ff_workspace.h
+--- a/src/core/energy_calculators/ff_methods/ff_workspace.h	2026-09-24 22:23:37.638490055 +0200
++++ b/src/core/energy_calculators/ff_methods/ff_workspace.h	2026-09-24 22:23:37.565155954 +0200
+@@ -539,6 +539,18 @@
+     /// geometry (see test_cases/revgfnff/_log/STALE_CN_STATUS.md).
+     void setCN(const Vector& cn) { m_cn = cn; }
+ 
++    /// Visit every D4 pair list - the installed one and each stored rev-gfnff corner's - so
++    /// GFNFF can refresh the per-pair C6(CN) every call (stale-CN package, Sep 2026). Only C6
++    /// may be changed; the lists themselves stay fixed. Returns the number of lists visited.
++    int forEachD4PairList(const std::function<void(std::vector<GFNFFDispersion>&)>& f)
++    {
++        int n = 0;
++        if (!m_d4_dispersions.empty()) { f(m_d4_dispersions); ++n; }
++        for (auto& c : m_corners)
++            if (!c.d4_dispersions.empty()) { f(c.d4_dispersions); ++n; }
++        return n;
++    }
++
+     /// Set CN, CNF, and CN derivatives (gradient only)
+     /// Claude Generated (WP4, May 2026): dcn now CNDerivStore (pair-list) instead of std::vector<SpMatrix>
+     void setCNDerivatives(const Vector& cn, const Vector& cnf,
+diff -ru a/src/core/energy_calculators/ff_methods/gfnff_method.cpp b/src/core/energy_calculators/ff_methods/gfnff_method.cpp
+--- a/src/core/energy_calculators/ff_methods/gfnff_method.cpp	2026-09-24 22:23:37.638490055 +0200
++++ b/src/core/energy_calculators/ff_methods/gfnff_method.cpp	2026-09-24 22:23:37.545155745 +0200
+@@ -1732,6 +1732,51 @@
+         }
+     }
+ 
++    // Stale-CN fix B (Claude Generated, Sep 2026): refresh the per-pair D4 C6(CN) at the
++    // current CN. The pair list's C6 was baked once in generateGFNFFParameterSet() (Gaussian CN
++    // weights of the topology-build geometry) and never updated, while the analytic gradient
++    // already carries dC6/dCN (m_dc6dcn_ptr) and the reference evaluates C6(CN) every call
++    // (gfnff_engrad.F90:323, d3_gradient(..., cn, dcn, ...)). On a reused calculator (MD, opt,
++    // FD, batch reuse) the energy was therefore a frozen-C6 energy whose derivative is not the
++    // force. Static-CN mode keeps its frozen C6 (reuse_cn). The dc6dcn DERIVATIVE and its P1a
++    // CN-change threshold (updateCNValuesForGradient) are untouched.
++    if (!gpu_only && !reuse_cn && m_d4_generator && m_workspace && m_last_cn.size() == m_atomcount) {
++        bool weights_fresh = false;
++        auto t_c6 = std::chrono::high_resolution_clock::now();
++        auto* pool = threadPool();
++        m_workspace->forEachD4PairList([&](std::vector<GFNFFDispersion>& d4_pairs) {
++            if (!weights_fresh) {
++                if (pool) pool->setActiveThreadCount(m_threads);
++                std::vector<double> cn_std(m_last_cn.data(), m_last_cn.data() + m_atomcount);
++                m_d4_generator->refreshC6WeightsForCN(cn_std, pool, m_threads);
++                weights_fresh = true;
++            }
++            // getChargeWeightedC6 is const and reads only per-atom caches: pairs are independent.
++            const int np = static_cast<int>(d4_pairs.size());
++            auto c6_worker = [&](int t_id, int T) {
++                const int b = static_cast<int>(static_cast<long long>(np) * t_id / T);
++                const int e = static_cast<int>(static_cast<long long>(np) * (t_id + 1) / T);
++                for (int k = b; k < e; ++k) {
++                    auto& d = d4_pairs[k];
++                    d.C6 = m_d4_generator->getChargeWeightedC6(m_atoms[d.i], m_atoms[d.j], d.i, d.j);
++                }
++            };
++            const int T = (pool && m_threads > 1 && np > 4096) ? m_threads : 1;
++            if (T > 1) {
++                std::vector<std::future<void>> futures;
++                futures.reserve(T - 1);
++                for (int t = 1; t < T; ++t)
++                    futures.push_back(pool->enqueue(c6_worker, t, T));
++                c6_worker(0, T);
++                for (auto& f : futures) f.get();
++            } else {
++                c6_worker(0, 1);
++            }
++        });
++        if (do_timing && weights_fresh)
++            t_d4_gw += std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_c6).count();
++    }
++
+     // WP-P1 (May 2026): cache phase-timings into a member so MD diagnostics can read them
+     // after every Calculation() pass, independent of whether the caller passed out_timing.
+     m_last_prep_timing.total = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_prep_total).count();

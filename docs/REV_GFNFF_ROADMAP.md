@@ -201,12 +201,31 @@ of late well joins, chatter cost, dt = 0.5 fs, locality for large systems.
       (`-gfnff.rev_over_preset stage1a`, `test_cases/revgfnff/params/`); (3) the earlier
       class-C-only fit is NOT adopted.
 
-## WP4 - stage 2: charge model (design: `docs/REV_GFNFF_STAGE2.md`, 2026-09-12; implementation in progress)
+## WP4 - stage 2: charge model (design + full current status: `docs/REV_GFNFF_STAGE2.md`, 2026-09-12, reconciled 2026-09-22)
 
-- [ ] Split charges `p_ij = -p_ji` on pairs with `b_ij > 0`, hardness `kappa_ij^0 / b_ij`,
-      Coulomb kernel and self-energy unchanged, fragment constraints dropped in the rev mode.
-- [ ] Targets: Cl2- dissociation -41.5 kcal/mol (now -6.6 / -106.3); PX13 barriers 42/21/15/15/17
-      (now 67/138/223/220/293); anionic SN2 in BH76 (+100 to +209 now).
+- [x] Split charges `p_ij = -p_ji` on pairs with `b_ij > 0`, hardness `kappa_ij^0(b_ij)`
+      (2 selectable forms since 2026-09-22, "B2"), Coulomb kernel and self-energy unchanged,
+      fragment constraints dropped in the rev mode. Implemented, fidelity-verified.
+- [x] Five kappa_Z fit attempts (2026-09-22): none produced a calibrated kappa_Z. Three real
+      defects found and fixed along the way (a stage-1 over-coordination bug on bare metal
+      cations, a mis-scoped fitting dataset, a broken class-E scoring metric); "B2" (a second q0
+      placement rule + a second kappa(b) form) then proved the remaining Cl2-/F2- curve-shape
+      error is NOT in the charge model (~104 of ~148 kcal/mol at the compressed geometry sits
+      outside what any kappa_Z can reach). **Targets updated**: Cl2- dissociation -41.5 kcal/mol
+      point target now MET (-41.49 at kappa_Cl~1.92) but the curve shape stays far off (rms
+      63 vs a <=5 gate) for a reason outside stage 2; PX13 was found to be the wrong target
+      entirely (neutral proton transfer, no net charge — demoted to report-only, not a stage-2
+      metric); the real anionic-SN2 target is `BH76_anionic` (16 of BH76's 76 reactions),
+      MAD 48.1 -> 39.4 kcal/mol at the one setting tested (kappa_Cl=0.85, not fitted/calibrated).
+- [ ] **Next, and it belongs to WP5/stage 1-3a, not WP4**: a term-by-term decomposition of
+      compressed Cl2- (r ~ 2.05 A) against its r2SCAN-3c reference (bond? repulsion?
+      over-coordination?) to find where the ~104 kcal/mol not explained by the charge model
+      actually comes from.
+- [ ] `rev_charge_model` stays `eeq` by default (operator decision, `FABLE_REVIEW_3.md` Q3);
+      five-point gate for reconsidering in `docs/REV_GFNFF_STAGE2.md` "Should this be the
+      default?".
+- [ ] Known defect, not fixed: the new `mu` q0-placement rule has a force cusp at a
+      chemical-potential crossing (~2.4e-3 Eh/A) — fix before any kappa>0 MD/`-opt`.
 
 ## WP5 - stage 3: full refit H/C/N/O/F/Cl (sketch)
 

@@ -20,6 +20,27 @@ All switches have the erf form `b(r) = 1/2 (1 + erf(k (r - R)/R))`, `R = f (rcov
 Over-coordination: `E_over,i = p_Z softplus_k(sum_j b2_ij - Val_Z - 0.5)^2`, sigma partners only
 (k = 10, p = 0.3 Eh, per-element overrides via the `rev` section of `-gfnff.param_file`).
 
+**FIXED (Sep 2026, AI/machine-tested): a bare alkali/alkaline-earth cation read as grossly
+over-coordinated.** `revValence()` (`gfnff_method.cpp`) gave Li/Na/K (Z=3/11/19) a nominal
+valence of 1.0 and Be/Mg/Ca (Z=4/12/20) 2.0 - aimed at simple molecular compounds (LiH, MgO) - and
+`revOverP()` falls back to the generic default `p_Z = 0.3 Eh` for any element without its own
+override, which these never got (the WP3 fit only ever touched H/C/N/O). Found via GMTKN55 CHB6
+(charged H-bond / cation-pi complexes) during the stage-2 kappa_Z fit's dataset check: a bare Li+
+sitting non-covalently above a benzene ring accumulates a non-trivial continuous bond order
+`b2_ij` to all six ring carbons simultaneously (none of them a real sigma bond), so `sum_j b2_ij`
+easily exceeds `Val_Z = 1`, and the term contributed **+4.97 Eh** where the correct total energy
+is -1.16 Eh (confirmed against both plain `gfnff`, unaffected, and `xtb --gfnff`, -1.155727 vs
+-1.155726 Eh) - the entire ~3000 kcal/mol CHB6 residual on the three cation-pi reactions. Fixed by
+letting Z=3/4/11/12/19/20 fall through to the same `default: return 6.0` ("hypervalence-capable
+main group and metals: effectively no penalty") every other metal already gets - nothing here was
+ever calibrated against alkali/alkaline-earth chemistry either, so nothing was traded away; only
+the failure mode is gone. CHB6 (all 6 reactions) MAD 1550.6 -> 47.6 kcal/mol, RMS 2161.3 -> 66.1
+(worst single reaction now -145.3, the Li+-benzene case - genuinely hard for any classical force
+field, not a bug). `ctest -L gfnff`: same 66/69 as before the fix (the pre-existing
+`cli_curcumaopt_07`/`cli_simplemd_18`/`cli_simplemd_20`, unrelated) - plain `gfnff` is untouched
+since `revValence()` is only reachable through `-method revgfnff`. See
+`test_cases/revgfnff/_log/WORK_STATUS.md` package 15.
+
 **Why the switches were softened (Sep 12, 2026).** The first version used `b2` at 1.3x/-16 for
 the repulsion blend and E_over. Every `revgfnff` MD run then exploded within 1 ps (T = 1e9 K),
 also with a static topology, while `gfnff` on the same input was fine and dt = 0.25 fs cured it.
