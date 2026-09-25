@@ -9209,18 +9209,16 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
     // only records a distance when reachability is SYMMETRIC (dai .and. daj), and eta
     // bonds are stored asymmetrically (the metal lists the eta-C, the eta-C omits the
     // metal, gfnff_ini2.f90:199), so an eta bond never bridges a >=2-bond path in the
-    // reference bpair. curcuma's bpair is a plain BFS that DOES bridge through the eta
+    // reference bpair. curcuma's bpair WAS a plain BFS that bridged through the eta
     // Ru-C bond, wrongly shortcutting X...B (ED33: P-Ru-C_eta = 2 vs the reference 5) and
-    // dropping the valid far X-bond. Rebuild the distance matrix on an adjacency with the
-    // eta bonds (metal <-> itag==-1 ligand) removed so they no longer bridge. Normal metal
-    // bonds (Ru-P/Ru-S) are kept, so the S-donor filter of PR34 is unchanged. Only built
-    // when the topology actually has eta atoms; otherwise the normal bpair is used.
-    // bpair comes from computeBpairNbondmat(), a verbatim port of the reference's
+    // dropping the valid far X-bond; the first fix rebuilt the distance on an adjacency
+    // with the eta bonds (metal <-> itag==-1 ligand) removed. Normal metal bonds (Ru-P/Ru-S)
+    // stay bonds, so the S-donor filter of PR34 is unchanged. Now bpair comes from computeBpairNbondmat(), a verbatim port of the reference's
     // nbondmat: level 1 records a bond from EITHER direction, levels 2 and 3 require
     // symmetric reachability. That is exactly the eta behaviour this code used to
     // approximate with a hand-built "eta-free" distance matrix, so the approximation is
     // gone. Claude Generated (Sep 2026).
-    const std::vector<std::vector<int>>& xb_bpair = topo_info.bpair;
+    const SparseTopoTable& xb_bpair = topo_info.bpair;
 
     // Pre-calculate atom-specific basicity with overrides
     std::vector<double> current_basicity(m_atomcount);
@@ -9342,11 +9340,10 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
             // previously only excluded B directly bonded to X (topological distance 1), so B
             // atoms 2-3 bonds from X (e.g. the phosphine P and ring C reachable through the
             // Ru center from an S donor in PR34) were wrongly admitted -> ~11x too many
-            // X-bonds (-0.0201 vs the reference -0.0018 Eh). bpair==999 is "unconnected/beyond
-            // BFS depth", correctly > 3 so distant B stay valid. Claude Generated (Jul 2026).
-            if (X < static_cast<int>(xb_bpair.size())
-                && B < static_cast<int>(xb_bpair[X].size())) {
-                if (xb_bpair[X][B] <= 3) return;
+            // X-bonds (-0.0201 vs the reference -0.0018 Eh). bpair==5 is "further than 3
+            // bonds or unconnected", correctly > 3 so distant B stay valid. Claude Generated (Jul 2026).
+            if (X < xb_bpair.n && B < xb_bpair.n) {
+                if (xb_bpair.get(X, B) <= 3) return;
             } else {
                 // Fallback if bpair is unavailable: keep the old direct-bond exclusion.
                 for (const auto& bond : bonds) {
@@ -9409,131 +9406,166 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
     return xbonds;
 }
 
-std::vector<std::vector<int>> GFNFF::computeBpairNbondmat(const std::vector<std::vector<int>>& nb) const
+SparseTopoTable GFNFF::computeBpairNbondmat(const std::vector<std::vector<int>>& nb) const
 {
     // Reference: gfnff_ini2.f90:1280-1357 (nbondmat) + :1360-1387 (pairsbond).
-    // Claude Generated (Sep 2026).
+    // Claude Generated (Sep 2026). Sparse since Sep 2026: the algorithm is unchanged, but
+    // neither the result (tags 1/2/3, everything else 5) nor the per-row reachability sets
+    // are held as dense N x N arrays any more. At N = 14640 the two dense arrays took
+    // ~1.1 GB and their O(N^2) scans dominated the phase.
     const int n = m_atomcount;
-    std::vector<std::vector<int>> pair(n, std::vector<int>(n, 0));
+    const int nbn = std::min(n, static_cast<int>(nb.size()));
+    SparseTopoTable pair;
+    pair.reset(n, 0, 5);  // 0 on the diagonal, 5 = "further than 3 bonds" (gfnff_ini2.f90:1351-1355)
 
     // Level 1: every neighbour EITHER atom lists is a bond (gfnff_ini2.f90:1303-1309).
     // This is why the asymmetric eta storage cannot demote a real bond.
-    for (int i = 0; i < n; ++i) {
-        if (i >= static_cast<int>(nb.size())) break;
+    for (int i = 0; i < nbn; ++i) {
         for (int k : nb[i]) {
             if (k < 0 || k >= n || k == i) continue;
-            pair[i][k] = 1;
-            pair[k][i] = 1;
+            pair.rows[i].push_back({ k, 1 });
+            pair.rows[k].push_back({ i, 1 });
         }
     }
+    for (auto& r : pair.rows) {
+        std::sort(r.begin(), r.end());
+        r.erase(std::unique(r.begin(), r.end()), r.end());
+    }
 
-    // Two expansion rounds, tagging 2 then 3. The frontier grows along the ASYMMETRIC
-    // neighbour list, but a tag is only awarded when the membership is symmetric.
+    // lst[i] = the atoms row i has reached so far (the reference's inL row as a set). The
+    // frontier grows along the ASYMMETRIC neighbour list, but a tag is only awarded when
+    // the membership is symmetric. lst is duplicate-free; sorted_lst is its sorted copy
+    // for the cross-row membership test "is i in lst[j]".
     std::vector<std::vector<int>> lst(n);
-    std::vector<std::vector<char>> inL(n, std::vector<char>(n, 0));
-    for (int i = 0; i < n && i < static_cast<int>(nb.size()); ++i) {
+    for (int i = 0; i < nbn; ++i) {
         for (int k : nb[i]) {
-            if (k >= 0 && k < n && !inL[i][k]) { inL[i][k] = 1; lst[i].push_back(k); }
+            if (k >= 0 && k < n) lst[i].push_back(k);
         }
+        std::sort(lst[i].begin(), lst[i].end());
+        lst[i].erase(std::unique(lst[i].begin(), lst[i].end()), lst[i].end());
     }
 
-    // Claude Generated (Sep 2026): every loop below writes row-local data (inL[i], added[i],
-    // lst[i]; pairsbond writes pair[i][j] and pair[j][i] for j < i, which no other row i'
-    // touches), so the rows run in parallel with an identical result.
+    auto contains = [](const std::vector<int>& sorted, int x) {
+        return std::binary_search(sorted.begin(), sorted.end(), x);
+    };
+
     for (int tag = 2; tag <= 3; ++tag) {
+        // Expansion: every row adds the neighbours of the atoms it already reached. Rows
+        // only write their own set; membership is tracked with a thread-local stamp array
+        // instead of a dense N x N matrix.
         std::vector<std::vector<int>> added(n);
-        #pragma omp parallel for schedule(dynamic, 64)
-        for (int i = 0; i < n; ++i) {
-            for (int i1 : lst[i]) {
-                if (i1 < 0 || i1 >= static_cast<int>(nb.size())) continue;
-                for (int newatom : nb[i1]) {
-                    if (newatom < 0 || newatom >= n || inL[i][newatom]) continue;
-                    inL[i][newatom] = 1;
-                    added[i].push_back(newatom);
+        #pragma omp parallel
+        {
+            std::vector<int> stamp(n, -1);
+            #pragma omp for schedule(dynamic, 64)
+            for (int i = 0; i < n; ++i) {
+                for (int x : lst[i]) stamp[x] = i;
+                for (int i1 : lst[i]) {
+                    if (i1 >= nbn) continue;
+                    for (int newatom : nb[i1]) {
+                        if (newatom < 0 || newatom >= n || stamp[newatom] == i) continue;
+                        stamp[newatom] = i;
+                        added[i].push_back(newatom);
+                    }
                 }
             }
         }
-        for (int i = 0; i < n; ++i)
+        for (int i = 0; i < n; ++i) {
+            if (added[i].empty()) continue;
             lst[i].insert(lst[i].end(), added[i].begin(), added[i].end());
+            std::sort(lst[i].begin(), lst[i].end());
+        }
 
-        // pairsbond: first tag wins, and both directions must see each other.
+        // pairsbond: first tag wins, and both directions must see each other. The new tags
+        // are collected per row against the state BEFORE this round (as in the dense loop,
+        // where row i is the only writer of its j < i entries) and merged serially afterwards,
+        // since a tag is written into two rows.
+        std::vector<std::vector<int>> newtags(n);
         #pragma omp parallel for schedule(dynamic, 64)
         for (int i = 0; i < n; ++i) {
-            for (int j = 0; j < i; ++j) {
-                if (pair[i][j] != 0) continue;
-                if (inL[i][j] && inL[j][i]) { pair[i][j] = tag; pair[j][i] = tag; }
+            for (int j : lst[i]) {
+                if (j >= i) break;  // lst[i] is sorted; the reference loops j < i only
+                if (pair.get(i, j) != 5) continue;
+                if (contains(lst[j], i)) newtags[i].push_back(j);
             }
         }
+        std::vector<char> touched(n, 0);
+        for (int i = 0; i < n; ++i) {
+            for (int j : newtags[i]) {
+                pair.rows[i].push_back({ j, tag });
+                pair.rows[j].push_back({ i, tag });
+                touched[i] = touched[j] = 1;
+            }
+        }
+        for (int i = 0; i < n; ++i)
+            if (touched[i]) std::sort(pair.rows[i].begin(), pair.rows[i].end());
     }
-
-    // Anything still unassigned is "further than 3 bonds" -> 5 (gfnff_ini2.f90:1351-1355).
-    #pragma omp parallel for schedule(static)
-    for (int i = 0; i < n; ++i)
-        for (int j = 0; j < n; ++j)
-            if (i != j && pair[i][j] == 0) pair[i][j] = 5;
 
     return pair;
 }
 
-std::vector<std::vector<int>> GFNFF::calculateTopologyDistances(const std::vector<std::vector<int>>& adjacency_list) const
+SparseTopoTable GFNFF::calculateTopologyDistances(const std::vector<std::vector<int>>& adjacency_list) const
 {
     /**
-     * @brief Calculate topological distances (bond counts) between all atom pairs using BFS
+     * @brief Calculate topological distances (bond counts) between atom pairs using BFS
      *
      * Claude Generated (Dec 24, 2025): Breadth-First Search for shortest paths
      * PERFORMANCE OPTIMIZATION (Jan 17, 2026): Added depth limiting
+     * Sparse storage (Sep 2026): only pairs within MAX_DISTANCE bonds are stored.
      * Reference: NEXT_SESSION_TOPOLOGY_FACTORS.md Phase 1
      *
      * Algorithm: BFS from each atom with early termination at max_distance
-     * Complexity: O(N × B × D) where N = atoms, B = avg bonds, D = max_distance
-     * Original was O(N² × B) - now 5-10x faster for typical molecules
+     * Complexity: O(N × B^D) time and memory, B = avg bonds, D = max_distance
      *
-     * Output: N×N matrix where distances[i][j] = number of bonds in shortest path
+     * Values (via SparseTopoTable::get):
      *   0 = same atom
      *   1 = directly bonded
-     *   2 = separated by 1 bond (e.g., A-B-C: distance(A,C) = 2)
-     *   3 = 1,3-pair (e.g., H-C-H in methane)
-     *   4 = 1,4-pair (e.g., H-C-C-H in ethane)
+     *   2 = 1,3-pair (e.g., H-C-H in methane)
+     *   3 = 1,4-pair (e.g., H-C-C-H in ethane)
      *   999 = not connected OR beyond max_distance (different fragments)
      *
-     * Note: GFN-FF only uses topology factors for 1,3 and 1,4 pairs (distances 2-4)
+     * Note: GFN-FF only uses topology factors for 1,3 and 1,4 pairs (distances 2-3)
      * so we limit BFS to max_distance=5 for efficiency.
      */
 
     const int N = m_atomcount;
-    const int MAX_DISTANCE = 5;  // GFN-FF only needs up to 1,4-pairs (distance 4) + buffer
-    std::vector<std::vector<int>> distances(N, std::vector<int>(N, 999));
+    const int MAX_DISTANCE = 5;  // GFN-FF only needs up to 1,4-pairs + buffer
+    SparseTopoTable distances;
+    distances.reset(N, 0, 999);
 
-    // Distance to self = 0
-    for (int i = 0; i < N; ++i) {
-        distances[i][i] = 0;
-    }
+    // Depth-limited BFS from each atom. A BFS only writes its own row, so the sources run
+    // in parallel. The per-source visited marks are a thread-local stamp array (one O(N)
+    // array per thread instead of one per source).
+    #pragma omp parallel
+    {
+        std::vector<int> stamp(N, -1);
+        std::vector<int> dist(N, 0);
+        std::vector<int> queue;
+        #pragma omp for schedule(dynamic, 64)
+        for (int start = 0; start < N; ++start) {
+            queue.clear();
+            queue.push_back(start);
+            stamp[start] = start;
+            dist[start] = 0;
+            auto& row = distances.rows[start];
 
-    // Depth-limited BFS from each atom. Claude Generated (Sep 2026): a BFS only writes its own
-    // row distances[start][*], so the sources run in parallel with an identical result.
-    #pragma omp parallel for schedule(dynamic, 64)
-    for (int start = 0; start < N; ++start) {
-        std::queue<int> queue;
-        std::vector<bool> visited(N, false);
+            for (size_t head = 0; head < queue.size(); ++head) {
+                const int current = queue[head];
 
-        queue.push(start);
-        visited[start] = true;
+                // Early termination: stop if we've reached max distance
+                if (dist[current] >= MAX_DISTANCE) continue;
 
-        while (!queue.empty()) {
-            int current = queue.front();
-            queue.pop();
-
-            // Early termination: stop if we've reached max distance
-            if (distances[start][current] >= MAX_DISTANCE) continue;
-
-            // Visit all neighbors of current atom
-            for (int neighbor : adjacency_list[current]) {
-                if (!visited[neighbor]) {
-                    visited[neighbor] = true;
-                    distances[start][neighbor] = distances[start][current] + 1;
-                    queue.push(neighbor);
+                // Visit all neighbors of current atom
+                for (int neighbor : adjacency_list[current]) {
+                    if (stamp[neighbor] != start) {
+                        stamp[neighbor] = start;
+                        dist[neighbor] = dist[current] + 1;
+                        queue.push_back(neighbor);
+                        row.push_back({ neighbor, dist[neighbor] });
+                    }
                 }
             }
+            std::sort(row.begin(), row.end());
         }
     }
 
@@ -9543,11 +9575,8 @@ std::vector<std::vector<int>> GFNFF::calculateTopologyDistances(const std::vecto
         for (int i = 0; i < std::min(N, 5); ++i) {
             std::string row = fmt::format("  Atom {}: ", i);
             for (int j = 0; j < N; ++j) {
-                if (distances[i][j] == 999) {
-                    row += "∞ ";
-                } else {
-                    row += fmt::format("{} ", distances[i][j]);
-                }
+                const int d = distances.get(i, j);
+                row += (d == 999) ? std::string("inf ") : fmt::format("{} ", d);
             }
             CurcumaLogger::info(row);
         }
@@ -10667,33 +10696,30 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // Reference: external/gfnff/src/gfnff_ini.f90:745-779
     //
     // Key points:
-    // - bpair matrix is the same as topo_distances (bond counts)
     // - b3list contains triples (i,j,k) where i-j is a 1,4-pair (bpair[i][j] == 3)
+    // - bpair is the reference's topo%bpair (nbondmat), NOT the BFS topo_distances: the
+    //   two agree except across asymmetrically stored eta bonds (see below)
     // - For each 1,4-pair, add all neighbors of both i and j as the third atom k
     // - This is O(N_bonds) not O(N³) - restricted to bonded topology only
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Generating bonded ATM (batm) triples for 1,4-pairs");
     }
 
-    // First, let's debug-check for 1,4-pairs in the molecule (verbosity 3 only: an O(N^2) scan
-    // whose result is only printed - Claude Generated, Sep 2026).
-    int pairs_14_count = 0;
-    for (int i = 0; i < m_atomcount && CurcumaLogger::get_verbosity() >= 3; ++i) {
-        for (int j = 0; j < i; ++j) {
-            if (topo_info.topo_distances[i][j] == 3) {  // bpair == 3
-                pairs_14_count++;
-                if (CurcumaLogger::get_verbosity() >= 3) {
+    // Debug count of the BFS 1,4-pairs (verbosity 3 only; walks the stored near pairs).
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        int pairs_14_count = 0;
+        for (int i = 0; i < m_atomcount; ++i) {
+            for (const auto& [j, d] : topo_info.topo_distances.row(i)) {
+                if (j >= i) break;
+                if (d == 3) {
+                    pairs_14_count++;
                     CurcumaLogger::info(fmt::format("DEBUG: Found 1,4-pair: {}-{} (bpair=3)", i, j));
                 }
             }
         }
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info(fmt::format("DEBUG: Found {} 1,4-pairs in molecule", pairs_14_count));
     }
 
-    // bpair is same as topo_distances (topological distance matrix)
     topo_info.bpair = computeBpairNbondmat(topo_info.adjacency_list);
 
     // eta-aware bpair for the BATM 1,4-pair test. Claude Generated (Jul 24, 2026):
@@ -10704,28 +10730,29 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // >=2-bond path. curcuma's topo_distances is a plain BFS that DOES bridge through
     // the eta Ru-C bond, wrongly shortcutting pairs to bpair==3 and generating hundreds
     // of spurious BATM triples (PR28 1085 vs the reference 656) -> BATM over-binding
-    // (~1 kcal on PR26/PR28/PR27/ED33, entirely in the bonded-ATM term). Rebuild the
-    // distance on an adjacency with the eta bonds (metal <-> itag==-1 ligand) removed;
-    // normal metal bonds (Ru-P/Ru-Cl) are kept. Only built when eta atoms exist.
+    // (~1 kcal on PR26/PR28/PR27/ED33, entirely in the bonded-ATM term).
     // bpair comes from computeBpairNbondmat(), a verbatim port of the reference's
     // nbondmat: level 1 records a bond from EITHER direction, levels 2 and 3 require
     // symmetric reachability. That is exactly the eta behaviour this code used to
     // approximate with a hand-built "eta-free" distance matrix, so the approximation is
     // gone. Claude Generated (Sep 2026).
-    const std::vector<std::vector<int>>& batm_bpair = topo_info.bpair;
+    const SparseTopoTable& batm_bpair = topo_info.bpair;
 
     // Generate b3list for batm calculation
     topo_info.b3list.clear();
     topo_info.nbatm = 0;
 
-    // Loop over all atom pairs. Claude Generated (Sep 2026): rows fill private buffers in
-    // parallel and are appended in row order, so b3list has exactly the serial order.
+    // Loop over the stored near pairs j < i of every row. Rows are sorted by j, so this visits
+    // the 1,4-pairs in exactly the order of the former dense `for (j = 0; j < i; ++j)` scan.
+    // Claude Generated (Sep 2026): rows fill private buffers in parallel and are appended in
+    // row order, so b3list has exactly the serial order.
     std::vector<std::vector<std::array<int, 3>>> b3_rows(m_atomcount);
     #pragma omp parallel for schedule(dynamic, 64)
     for (int i = 0; i < m_atomcount; ++i) {
-        for (int j = 0; j < i; ++j) {
+        for (const auto& [j, tag] : batm_bpair.row(i)) {
+            if (j >= i) break;
             // Check if i-j is a 1,4-pair (bpair[i][j] == 3), eta-free distance
-            if (batm_bpair[i][j] == 3) {
+            if (tag == 3) {
                 // Add all neighbors of j as batm triples (i, j, k)
                 for (int k : topo_info.adjacency_list[j])
                     b3_rows[i].push_back({i, j, k});
@@ -11076,7 +11103,7 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
 
         if (Z_i == 1 && Z_j == 1) {
             ff = HHFAC;
-            int topo_dist = topo_info.topo_distances[i][j];
+            int topo_dist = topo_info.topo_distances.get(i, j);
             if (topo_dist == 2) ff *= HH13REP;
             else if (topo_dist == 3) ff *= HH14REP;
         }
@@ -11101,7 +11128,7 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
         nonbonded_reps.push_back(r);
 
         if (m_rep_diag) {
-            int topo_dist = topo_info.topo_distances[i][j];
+            int topo_dist = topo_info.topo_distances.get(i, j);
             fmt::print(stderr, "nb_rep {:3d}-{:3d} alpha={:.10f} repab={:.10f} qa_i={:.10f} qa_j={:.10f} cn_i={:.0f} cn_j={:.0f} ff={:.4f} bpair={}\n",
                 i+1, j+1, r.alpha, r.repab, qa_i, qa_j, cn_i, cn_j, ff, topo_dist);
         }

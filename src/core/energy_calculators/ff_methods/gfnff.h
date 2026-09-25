@@ -35,6 +35,7 @@
 #include "src/core/global.h"
 #include "src/core/functional_groups.h"
 #include "src/core/periodic_table.h"
+#include <algorithm>
 #include <tuple>
 #include <utility>
 #include <optional>
@@ -79,6 +80,55 @@ inline int lin(int i, int j) {
     int imin = std::min(i, j);
     return imin + imax * (imax + 1) / 2;
 }
+
+/**
+ * @brief Sparse N x N integer table for short-range topological pair data
+ *
+ * Claude Generated (Sep 2026). Holds the topological pair tables of GFN-FF (the
+ * reference's topo%bpair and curcuma's BFS bond-count distance) which are only
+ * informative for pairs a few bonds apart: every other off-diagonal entry has one
+ * and the same "far" value. Storing only the near pairs makes both tables
+ * O(N * k) instead of O(N^2) (two dense tables were ~1.7 GB at N = 14640).
+ *
+ * Row i holds (j, value) sorted by ascending j, so iterating a row visits the
+ * partners in the same order a dense `for (j ...)` loop would.
+ */
+struct SparseTopoTable {
+    int n = 0;
+    int diag_value = 0;       ///< value for i == j
+    int default_value = 0;    ///< value for every pair not stored in a row
+    std::vector<std::vector<std::pair<int, int>>> rows;
+
+    void reset(int size, int diag, int far)
+    {
+        n = size;
+        diag_value = diag;
+        default_value = far;
+        rows.assign(size, {});
+    }
+
+    bool empty() const { return n == 0; }
+
+    /// Value of pair (i, j); binary search in row i (rows hold a few dozen entries).
+    int get(int i, int j) const
+    {
+        if (i == j) return diag_value;
+        const auto& r = rows[i];
+        auto it = std::lower_bound(r.begin(), r.end(), j,
+            [](const std::pair<int, int>& e, int key) { return e.first < key; });
+        return (it != r.end() && it->first == j) ? it->second : default_value;
+    }
+
+    const std::vector<std::pair<int, int>>& row(int i) const { return rows[i]; }
+
+    /// Number of stored (off-diagonal, non-default) entries, both directions counted.
+    size_t storedEntries() const
+    {
+        size_t s = 0;
+        for (const auto& r : rows) s += r.size();
+        return s;
+    }
+};
 
 /**
  * @brief Check if an atom is classified as a metal
@@ -379,7 +429,7 @@ public:
         // Connectivity
         std::vector<std::vector<int>> neighbor_lists;            // Full neighbor connectivity
         std::vector<std::vector<int>> adjacency_list;            // Per-atom bonded neighbor list
-        std::vector<std::vector<int>> topo_distances;            // N×N shortest-path bond counts
+        SparseTopoTable topo_distances;                          // BFS shortest-path bond counts, stored up to 5 bonds (0 = self, 999 = further/unconnected) - sparse since Sep 2026
 
         // Fortran multi-list neighbour construction (gfnff_ini2.f90:128-130, 197-202).
         // Fortran keeps four lists and assigns hybridization from the metal-reduced,
@@ -411,7 +461,7 @@ public:
         std::vector<double> eeq_cnf;                             // CN correction factor per atom
 
         // BATM topology
-        std::vector<std::vector<int>> bpair;                     // Topological distance matrix
+        SparseTopoTable bpair;                                   // Reference topo%bpair (nbondmat): 1/2/3 stored, 5 = further, 0 = self - sparse since Sep 2026
         std::vector<std::tuple<int,int,int>> b3list;             // Batm triples (i,j,k)
         int nbatm = 0;
 
@@ -1255,11 +1305,13 @@ private:
     /**
      * @brief Calculate topological distances (bond counts) between all atom pairs using BFS
      * @param adjacency_list Per-atom neighbor connectivity
-     * @return N×N matrix of shortest path lengths (0=same, 1=bonded, 3=1,3-pair, 4=1,4-pair)
+     * @return Sparse table of shortest path lengths up to 5 bonds (0=same, 1=bonded,
+     *         2=1,3-pair, 3=1,4-pair, ...); every pair further apart or unconnected reads 999
      *
-     * Claude Generated (Dec 24, 2025): Breadth-First Search for 1,3/1,4 topology factors
+     * Claude Generated (Dec 24, 2025): Breadth-First Search for 1,3/1,4 topology factors.
+     * Sparse storage since Sep 2026 (was a dense N x N matrix).
      */
-    std::vector<std::vector<int>> calculateTopologyDistances(const std::vector<std::vector<int>>& adjacency_list) const;
+    SparseTopoTable calculateTopologyDistances(const std::vector<std::vector<int>>& adjacency_list) const;
 
     /**
      * @brief Verbatim port of the reference's nbondmat (gfnff_ini2.f90:1280-1357).
@@ -1274,8 +1326,11 @@ private:
      *
      * @param nb Per-atom neighbour list; the reference passes topo%nb, i.e. the nbdum
      *           mixture that curcuma keeps in TopologyInfo::adjacency_list.
+     * @return Sparse table holding the tags 1/2/3; every other pair reads 5, i == j reads 0.
+     *         Sparse since Sep 2026 (was a dense N x N matrix plus a dense N x N
+     *         membership matrix during construction).
      */
-    std::vector<std::vector<int>> computeBpairNbondmat(const std::vector<std::vector<int>>& nb) const;
+    SparseTopoTable computeBpairNbondmat(const std::vector<std::vector<int>>& nb) const;
 
     /**
      * @brief Detect molecular fragments (connected components)

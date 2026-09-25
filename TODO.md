@@ -616,7 +616,7 @@
   DICHTE O(N³)-Eigenzerlegung (`Eigen::SelfAdjointEigenSolver`) mit ndim≈2820, viermal, mal
   zwei q-Loop-Paesse = 8 dichte ~2820×2820-Diagonalisierungen — rechnerisch exakt konsistent
   mit den gemessenen 48s. **Entscheidende Verifikation auf dem ECHTEN Molekuel**
-  (`polymer_2x_gfnff_opt.xyz`, 1410 Atome, reale Geometrie statt synthetisch generiert):
+  (`polymer_2x_gfnff_opt.xyz`, 7320 Atome [korrigiert 2026-09-25, stand hier faelschlich 1410 = ein Polymerstrang], reale Geometrie statt synthetisch generiert):
   derselbe `CURCUMA_HUCKELDUMP`/`CURCUMA_GFNFF_PROFILE`-Lauf findet **0 von 0 π-Systemen**,
   Hueckel-Kosten **89.1 ms** (statt 48.275.000 ms — Faktor 540000x weniger). **Damit ist
   geklaert: das ist KEIN GFN-FF-Korrektheitsbug, der bei echten Molekuelen (lange
@@ -647,7 +647,7 @@
   `nb_cell_list_min_atoms` (Default 800, dasselbe PARAM wie bei HB/XB), kleine Systeme bleiben
   auf dem alten O(N²)-Pfad.
   - **Korrektheit, real getestet**: `triose.xyz` (66 Atome, unter der Schwelle, alter Pfad)
-    bitidentisch zum committeten Stand. `polymer_2x_gfnff_opt.xyz` (1410 Atome, ueber der
+    bitidentisch zum committeten Stand. `polymer_2x_gfnff_opt.xyz` (7320 Atome [korrigiert 2026-09-25, stand hier faelschlich 1410], ueber der
     Schwelle, NEUER Cell-List-Pfad aktiv) — **volle Energie-Dekomposition bitidentisch** zum
     Vor-Lever-2-Lauf in JEDER Komponente (Bond -820,6570687703 Eh, H-bonds -4,5521241259 Eh,
     case-1/2-Zaehlungen 10370/43703, alle identisch). `ctest -L gfnff`: **77/78 bestanden**,
@@ -657,9 +657,42 @@
     **~17x** auf beiden, ~8 s gespart, exakt wie aus der Lever-2-Recherche erwartet. Da das
     Kriterium rein distanzbasiert ist (nicht an das Hueckel-Testdaten-Artefakt gekoppelt),
     gilt der Gewinn genauso auf echten grossen Systemen.
-  - **Noch offen**: `bpair`/`topo_distances` (dichte N×N-Matrizen) bleibt der groessere,
-    nicht cell-list-geeignete Posten — braucht eine Sparse-Umstellung (s. o.), nicht in
-    dieser Sitzung umgesetzt.
+  - **Noch offen** (zum Zeitpunkt dieses Eintrags): `bpair`/`topo_distances` — erledigt im
+    naechsten Eintrag.
+
+- **`bpair`/`topo_distances` sparse umgestellt — bit-identisch, ~1,75 GB weniger Peak-RSS
+  bei 14640 Atomen (2026-09-25, AI-implemented, machine-tested)**: beide Tabellen (und die
+  dichte `inL`-Hilfsmatrix in `computeBpairNbondmat`) sind jetzt eine `SparseTopoTable`
+  (`gfnff.h`): pro Atom nur die Partner bis 3 (bpair) bzw. 5 (BFS) Bindungen, Zeilen nach j
+  sortiert, alles andere liest den Fernwert (5 bzw. 999). Algorithmen unveraendert (nbondmat
+  Level 1 + zwei pairsbond-Runden, tiefenbegrenzter BFS); die neuen pairsbond-Tags werden pro
+  Zeile gesammelt und danach seriell in beide Zeilen gemischt. BATM-Scan laeuft nur noch ueber
+  gespeicherte Paare `j<i` (gleiche Reihenfolge wie der dichte Scan), XB-Filter und H-H-Repulsion
+  lesen per `get()`.
+  - **Korrektheit**: temporaerer Eintrag-fuer-Eintrag-Vergleich dicht vs. sparse (vor dem
+    Commit entfernt) — **0 Abweichungen** in beiden Tabellen und beiden q-Loop-Paessen auf
+    triose, MOR41 PR26/PR27/PR28/PR34/ED33 (eta-Komplexe, XB) und `polymer_2x` (7320).
+    `scripts/refset_regression.py` gegen ein Referenzbinary aus einem Worktree auf `526fcb8a`:
+    MOR41 **95/95**, GMTKN55 gfnff **2462/2462** ohne jede Abweichung. `polymer_2x` und G6: alle
+    14 Energiekomponenten auf 10 Nachkommastellen identisch, G6 22504 BATM-Tripel beide.
+    `ctest -L gfnff` 77/78 (bekannter `cli_curcumaopt_07`; mit Alt- und Neubinary identische
+    Frame-Energien und Geometrien). S30L-CI nicht geprueft (Strukturen lokal nicht vorhanden).
+  - **Messung** (`-sp -threads 16`, `CURCUMA_GFNFF_PROFILE=1`, beide q-Loop-Paesse): Phase
+    „topo distances + BATM list" G6 (14640) **1083,8 → 11,6 ms**, `polymer_2x` (7320)
+    **309,3 → 7,0 ms**. Peak-RSS G6 **14,49 → 12,74 GB**, `polymer_2x` 3,63 → 3,44 GB. Wandzeit
+    G6 60,5 → 59,9 s — die Phase war nur ~1 s davon; der Gewinn ist hauptsaechlich Speicher.
+  - **Naechste dichte Posten** (nicht umgesetzt): `pi_bond_orders` (Dreiecksarray N(N+1)/2
+    doubles, ~860 MB bei N=14640, 44 Lesestellen in 3 Dateien) und die dichte topologische
+    Abstandsmatrix der EEQ Phase 1 (`computeTopologicalDistancesSparse`, `eeq_solver.cpp:3140`,
+    liefert trotz des Namens eine dichte N×N-`Matrix` plus ein N²-float-Arbeitsfeld).
+  - **Offene Portierungsfrage, gefunden beim Gegenlesen der Referenz, NICHT geaendert**: die
+    H-H-Repulsionsfaktoren `hh13rep`/`hh14rep` liest die Referenz aus `topo%bpair`
+    (`gfnff_ini.f90:755-756`), curcuma aus dem BFS-`topo_distances`. Beide stimmen ueberein,
+    solange die Nachbarliste symmetrisch ist; ueber eine asymmetrisch gespeicherte eta-Bindung
+    (Metall listet das eta-C, das C nicht das Metall) ist der BFS-Abstand richtungsabhaengig und
+    kann 2/3 liefern, wo bpair 5 liest (z. B. H am Cp-Ring vs. Hydrid am Metall). Betrifft nur
+    eta-Komplexe mit solchen H-H-Paaren; ob MOR41 einen Fall enthaelt, ist nicht gemessen.
+    Umstellung auf `bpair` waere ein eigener Commit mit MOR41-Arbitrierung gegen pprcht.
 
 ### SIGSEGV am Ursprung untersucht (Auftrag „fix den SIGSEGV am Ursprung") — nicht gefunden, Werkzeuge sind blind dafuer (2026-09-24)
 - **Status**: ⏳ OFFEN. Root Cause NICHT gefunden trotz gruendlicher Untersuchung mit ASan,
