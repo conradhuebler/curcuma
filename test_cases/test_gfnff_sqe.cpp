@@ -959,6 +959,64 @@ int main(int argc, char* argv[])
                               << ": max|g-gFD| = " << res << " Eh/A (tol 1e-5)\n";
                 }
             }
+            // -- 7f / 7g rev_sqe_group_pairs_only (Claude Generated, Sep 25, 2026;
+            //    test_cases/revgfnff/_log/SQE_INVARIANT_STATUS.md). Between the pass-1 split and the
+            //    static bond cutoff (Cl2- 2.70 A) pass 2 bonds two pass-1 fragments; that pair crosses
+            //    the EEQ constraint groups and leaks charge: sqe(kappa 0) lies ~103 kcal/mol below eeq
+            //    at s_max 1.0 (measured), ~4.7 at s_max 1.2. 7f: with the flag (+ virtual pairs) |dE| <
+            //    1e-8 Eh at both s_max; liveness without it > 50 / > 1 kcal/mol. 7g: FD gradient of the
+            //    recommended setting + virtual pairs + the flag at Cl2- 2.70 A, tol 1e-5 Eh/A.
+            {
+                json sqe0 = revConfig("sqe", 0.0);
+                sqe0["gfnff"]["cache_topology"] = false;
+                const curcuma::Molecule m = homo(17, 2.70, -1);
+                for (double smax : { 1.0, 1.2 }) {
+                    auto ensg = [&](json c, bool g) {
+                        c["gfnff"]["frag_charge_model"] = "ensemble";
+                        c["gfnff"]["frag_charge_s_max"] = smax;
+                        c["gfnff"]["rev_sqe_virtual_pairs"] = true;
+                        c["gfnff"]["rev_sqe_group_pairs_only"] = g;
+                        return c;
+                    };
+                    json e_eeq = eeq_cfg;
+                    e_eeq["gfnff"]["frag_charge_model"] = "ensemble";
+                    e_eeq["gfnff"]["frag_charge_s_max"] = smax;
+                    const double ee = run(m, e_eeq).e;
+                    const double d_g = std::abs(run(m, ensg(sqe0, true)).e - ee);
+                    const double d_no = std::abs(run(m, ensg(sqe0, false)).e - ee) * KCAL;
+                    const double live = (smax < 1.1) ? 50.0 : 1.0;
+                    const bool ok = d_g < 1e-8 && d_no > live;
+                    pass = pass && ok;
+                    std::cout << (ok ? "  PASS  " : "  FAIL  ") << "X2/7f Cl2- r=2.70 ensemble s_max " << smax
+                              << ", sqe(kappa 0) + virtual pairs + group pairs vs eeq: |dE| = " << d_g
+                              << " Eh (tol 1e-8); without group pairs " << d_no << " kcal/mol (must be > " << live << ")\n";
+                }
+                json cg = ens(cfgH7(), true);
+                cg["gfnff"]["rev_sqe_group_pairs_only"] = true;
+                EnergyCalculator c("revgfnff", cg);
+                c.setMolecule(m.getMolInfo());
+                Matrix geom = m.getGeometry();
+                c.updateGeometry(geom);
+                c.CalculateEnergy(true);
+                const Matrix g = c.Gradient();
+                const double h = 1e-5;
+                double worst = 0.0;
+                for (int i = 0; i < geom.rows(); ++i)
+                    for (int k = 0; k < 3; ++k) {
+                        Matrix gp = geom, gm = geom;
+                        gp(i, k) += h;
+                        gm(i, k) -= h;
+                        c.updateGeometry(gp);
+                        const double ep = c.CalculateEnergy(true);
+                        c.updateGeometry(gm);
+                        const double em = c.CalculateEnergy(true);
+                        worst = std::max(worst, std::abs((ep - em) / (2.0 * h) - g(i, k)));
+                    }
+                const bool ok = worst < 1e-5;
+                pass = pass && ok;
+                std::cout << (ok ? "  PASS  " : "  FAIL  ") << "X2/7g FD gradient, recommended + virtual pairs + group pairs, Cl2- r=2.70"
+                          << ": max|g-gFD| = " << worst << " Eh/A (tol 1e-5)\n";
+            }
         }
     }
 

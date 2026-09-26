@@ -13356,6 +13356,11 @@ void GFNFF::setupRevSettings()
         m_rev_sqe_virtual = m_parameters.value("rev_sqe_virtual_pairs", false);
         if (rev.contains("sqe_virtual_pairs"))
             m_rev_sqe_virtual = rev["sqe_virtual_pairs"].get<bool>();
+        // Claude Generated (Sep 25, 2026; _log/SQE_INVARIANT_STATUS.md): Phase-2 pairs only inside
+        // one EEQ constraint group
+        m_rev_sqe_group_pairs = m_parameters.value("rev_sqe_group_pairs_only", false);
+        if (rev.contains("sqe_group_pairs_only"))
+            m_rev_sqe_group_pairs = rev["sqe_group_pairs_only"].get<bool>();
         m_rev_excess = m_parameters.value("rev_excess_electron", false);
         if (rev.contains("excess_electron"))
             m_rev_excess = rev["excess_electron"].get<bool>();
@@ -14187,6 +14192,25 @@ Vector GFNFF::revSolveSplitCharges(const CornerEEQ& ce, const Vector& topology_c
             scan_h(m_rev_base_eeq);
         }
         pairs.push_back(sp);
+    }
+    // Phase-2 group restriction (Claude Generated, Sep 25, 2026; _log/SQE_INVARIANT_STATUS.md).
+    // The pair list is the corner's BOND list, but the charge constraint is the corner's EEQ
+    // constraint grouping (pass-1 fragments, carried into pass 2 as the reference does - Known
+    // Issue #17 - or the frag_charge_model ensemble's groups). A bond that pass 2 perceives
+    // between two pass-1 fragments (the anion's radius grows with its pass-1 charge: the C-X bond
+    // of an [X-CH3-X]- SN2 transition state, X2- between the pass-1 split and the static bond
+    // cutoff) is then a pair across two groups, and p on it moves charge from one fixed-sum group
+    // into another: SQE at kappa = 0 lies BELOW the constrained EEQ (measured down to -203
+    // kcal/mol). Dropping those pairs is exactly P2's Phase-1 restriction applied to Phase 2;
+    // together with the virtual pairs below the reachable charge space is then the constrained
+    // EEQ one in every case. A dropped pair carries no hardness and no harris term either (the
+    // harris correction exists only where the pair's charge is free).
+    if (m_rev_sqe_group_pairs && topo.has_value() && static_cast<int>(topo->fraglist.size()) >= m_atomcount
+        && topo->nfrag > 1) {
+        const auto& fl = topo->fraglist;
+        pairs.erase(std::remove_if(pairs.begin(), pairs.end(),
+                        [&](const EEQSolver::SqePair& sp) { return fl[sp.i] != fl[sp.j]; }),
+            pairs.end());
     }
     // Phase-2 virtual pairs (Claude Generated, Sep 24, 2026; _log/X2_SCOPE_STATUS.md). The split
     // charges only move along listed pairs, so two bond-graph components that share ONE EEQ
