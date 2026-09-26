@@ -3779,3 +3779,60 @@ checks (I2_CLF_STATUS 9, 12.5), which were not repeated here since N reproduces 
   committed; the worktree kept those energies in its scratch only.
 - `/tmp` was full again (995 MB free of 94 GB) at the start of this merge.
 - Worktree and branch `feature/revgfnff-x2-i2-clf` left in place.
+
+---
+
+## I2-/ClF- class-L fragment data: packaged and committed (Sep 26, 2026)
+
+Closes the gap this file's own merge note flagged above ("No class-L fragment entries ... were
+committed; the worktree kept those energies in its scratch only"). Source: the worktree's surviving
+scratchpad (`ccsdt/frag/{i_radical,i_minus,cl_radical,cl_minus,f_radical,f_minus}/job.out`), which
+this session's scratchpad directory happened to still hold. All six jobs verified
+`****ORCA TERMINATED NORMALLY****` before use.
+
+**Cl/Cl-/F/F-: already covered, confirmed, not duplicated.** This campaign ran its own Cl, Cl-, F,
+F- single-atom jobs (same method as the tracked package-21 `ref/L/{cl_radical,cl_minus,f_radical,
+f_minus}_dlpno_ccsdt/`, plus `%scf StabPerform` for the two radicals; `f_radical` needed a retry
+without the stability keyword after the first attempt hit an unstable-UHF abort). Compared to the
+tracked directories' `energies.json`, all four agree to <=2e-12 Eh (<=1.3e-9 kcal/mol — the F
+radical retry itself reproduces the tracked value to 11 of 12 printed digits, as already noted in
+`I2_CLF_STATUS.md` section 4): Cl -459.676436409232 vs tracked -459.67643640923, Cl-
+-459.805097424395 vs -459.805097424396, F -99.627867270642 vs -99.627867270643, F- -99.749111538228
+vs -99.749111538228 (exact). Nothing new committed for these four; the existing `ref/L/*_dlpno_ccsdt/`
+directories remain the reference.
+
+**I/I-: genuinely new, now committed.** No tracked I-atom DLPNO-CCSD(T) reference existed before.
+Added, following the exact `cl_radical_dlpno_ccsdt`/`f_radical_dlpno_ccsdt` template — `energies.json`
+tracked in git plus a local `job.out.gz` (gzipped raw ORCA output) for provenance; checked that this
+matches the existing convention exactly: `git ls-files` shows only `energies.json` tracked for all
+four pre-existing `*_dlpno_ccsdt` class-L dirs too, `job.out.gz` is caught by
+`test_cases/revgfnff/ref/.gitignore`'s `*.out.gz` rule everywhere under `ref/`. No
+`job.inp`/`meta.json`/`points.xyz` — matching the class-L single-point convention, not the class-E
+curve convention:
+
+- `test_cases/revgfnff/ref/L/i_radical_dlpno_ccsdt/` — I atom, DLPNO-CCSD(T) aug-cc-pVTZ-PP
+  aug-cc-pVTZ-PP/C (28-electron SK-MCDHF-RSC ECP), UHF doublet, E = -294.864677780441 Eh,
+  <S**2> = 0.760823.
+- `test_cases/revgfnff/ref/L/i_minus_dlpno_ccsdt/` — I-, same basis/ECP, RHF singlet,
+  E = -294.980366679532 Eh.
+
+Both values match, to the last printed digit, the `fragment_energies_eh` already embedded in the
+committed `ref/E/i2m_I-I-_dlpno_ccsdt/energies.json` — so this is packaging the data the curve file
+already relies on, not new numbers.
+
+**Consistency check against the committed curve/status numbers** (recomputed independently from
+`ref/E/{i2m_I-I-,clfm_Cl-F-}_dlpno_ccsdt/energies.json`'s raw points + `fragment_energies_eh`, not
+re-typed from the status file):
+
+- I2-: `E(r) - [E(I)+E(I-)]` minimum -27.445 kcal/mol at r=3.2594 A (status file: -27.44 at
+  3.2594) and tail values -0.30 / 0.25 / 1.34 / 0.60 kcal/mol at r = 5.43 / 6.00 / 7.50 / 9.00 A —
+  exact match to `I2_CLF_STATUS.md` section 4's reported tail.
+- ClF-: minimum -27.828 kcal/mol at r=2.1523 A (status file section 6: -27.83 at 2.1523);
+  `asymptote_gap_kcal` (4.654079371264389, Cl-+F below Cl+F-) reproduced independently from the raw
+  fragment energies to 12 significant figures; tail values now small (-0.68 to -0.10 kcal/mol from
+  r=5-9 A), consistent with the section-12.4/merge-commit note that the upper-state tail points were
+  recomputed with a Cl- guess before this data was committed (the original +3.7..+4.6 kcal/mol
+  artefact from I2_CLF_STATUS.md section 4 is not present in the tracked file).
+
+No code changes, no rebuild. `git status` on `test_cases/revgfnff/ref/L/` shows only the two new
+directories.
