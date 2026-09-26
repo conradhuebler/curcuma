@@ -57,6 +57,7 @@ static constexpr Entry kPairEntries[] = {
     {  6,  8,   1.467046,   1.211688,   0.401442,   0.049790 },   // C-O (n = 3, fit rms 4.65)
     { 17, 17,   1.825132,   1.854651,   1.235720,   0.034200 },   // Cl-Cl (n = 1, fit rms 1.07)
     { 35, 35,   1.183487,   1.224448,   1.021135,   0.067712 },   // Br-Br (n = 1, fit rms 0.79) X2BR:pair br2_Br-Br class-A r2SCAN-3c, hand-inserted (_log/X2_SCOPE_STATUS.md)
+    { 53, 53,   1.637324,   1.237805,   0.796582,   0.102556 },   // I-I (n = 1, fit rms 0.62) X2I:pair i2_I-I class-A r2SCAN-3c, hand-inserted (_log/I2_CLF_STATUS.md)
     {  9, 17,   1.173822,   1.544609,   2.347998,   0.098277 },   // Cl-F (n = 1, fit rms 1.21)
     {  1, 17,   1.850313,   1.577804,   0.465050,   0.001089 },   // Cl-H (n = 1, fit rms 2.55)
     {  7, 17,   0.634339,   0.300000,   1.423038,  -0.036624 },   // Cl-N (n = 1, fit rms 1.22)
@@ -107,6 +108,7 @@ static constexpr OrderEntry kOrderEntries[] = {
     {  9, 17, 1,   1.173822,   1.544609,   2.347998,   0.098277 },   // Cl-F order 1 (n = 1, clf_F-Cl, fit rms 1.21)
     { 17, 17, 1,   1.825132,   1.854651,   1.235720,   0.034200 },   // Cl-Cl order 1 (n = 1, cl2_Cl-Cl, fit rms 1.07)
     { 35, 35, 1,   1.183487,   1.224448,   1.021135,   0.067712 },   // Br-Br order 1 (n = 1, br2_Br-Br, fit rms 0.79) X2BR:order1 hand-inserted (_log/X2_SCOPE_STATUS.md)
+    { 53, 53, 1,   1.637324,   1.237805,   0.796582,   0.102556 },   // I-I order 1 (n = 1, i2_I-I, fit rms 0.62) X2I:order1 hand-inserted (_log/I2_CLF_STATUS.md)
 };
 
 static constexpr std::size_t kOrderCount = sizeof(kOrderEntries) / sizeof(kOrderEntries[0]);
@@ -139,7 +141,9 @@ static constexpr HalfOrderEntry kHalfOrderEntries[] = {
     // bond cutoff weight 0.3), against the rest of the model with localised charges
     {  9,  9,   0.655464,   1.549085,   0.000000,   0.264120 },   // F-F  order 0.5 (F2-, D 45.2 kcal/mol, r_min 1.690 A)
     { 17, 17,   1.143785,   1.162928,   0.295217,   0.600037 },   // Cl-Cl order 0.5 (Cl2-, D 34.0 kcal/mol, r_min 2.568 A)
+    {  9, 17,   2.419571,   1.816478,   0.781053,   0.398527 },   // Cl-F order 0.5 (ClF-, DLPNO-CCSD(T), D 110.3 kcal/mol, r_min 1.918 A, fit bonded rms 3.51 LOO 7.99) X2CLF:half
     { 35, 35,   1.200601,   1.136506,   0.395906,   0.531758 },   // Br-Br order 0.5 (Br2-, DLPNO-CCSD(T), D 55.2 kcal/mol, r_min 2.694 A, fit bonded rms 0.99 LOO 2.62) X2BR:half
+    { 53, 53,   2.155195,   1.384566,   0.343513,   0.505417 },   // I-I order 0.5 (I2-, I2-, DLPNO-CCSD(T), D 66.7 kcal/mol, r_min 2.950 A, fit bonded rms 2.28 LOO 5.40) X2I:half
 };
 
 static constexpr std::size_t kHalfOrderCount = sizeof(kHalfOrderEntries) / sizeof(kHalfOrderEntries[0]);
