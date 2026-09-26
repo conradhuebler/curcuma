@@ -107,6 +107,10 @@ static constexpr OrderEntry kOrderEntries[] = {
     {  9, 17, 1,   1.173822,   1.544609,   2.347998,   0.098277 },   // Cl-F order 1 (n = 1, clf_F-Cl, fit rms 1.21)
     { 17, 17, 1,   1.825132,   1.854651,   1.235720,   0.034200 },   // Cl-Cl order 1 (n = 1, cl2_Cl-Cl, fit rms 1.07)
     { 35, 35, 1,   1.183487,   1.224448,   1.021135,   0.067712 },   // Br-Br order 1 (n = 1, br2_Br-Br, fit rms 0.79) X2BR:order1 hand-inserted (_log/X2_SCOPE_STATUS.md)
+    // S-S order 3 (s2_SDS, s 0.704767 ca 0.718655 beta 0.753023 dr0 0.129960, fit rms 6.70) was hand-inserted
+    // here by the PI_STAR campaign and REMOVED again (Sep 26, 2026, PI_STAR_STATUS.md section 12): with no
+    // S-S order-1 row, findOrder clamps EVERY S-S bond onto it, so default rev-gfnff moved on 19 GMTKN55
+    // structures (H2S2 +13, S8 +104 kcal/mol). The S2- pi-excess row no longer needs an order row.
 };
 
 static constexpr std::size_t kOrderCount = sizeof(kOrderEntries) / sizeof(kOrderEntries[0]);
@@ -153,6 +157,72 @@ inline bool hasHalfOrder(int za, int zb)
         if (kHalfOrderEntries[k].z1 == z1 && kHalfOrderEntries[k].z2 == z2)
             return true;
     return false;
+}
+
+// ================================================================================================
+// HAND-MAINTAINED SECTION (P3 pi* prototype, Claude Generated, Sep 25, 2026;
+// test_cases/revgfnff/_log/PI_STAR_STATUS.md) - NOT written by scripts/revgfnff_wellfit.py.
+//
+// PI-EXCESS rows: the well of a DIATOMIC radical anion whose extra electron sits in pi* (O2-),
+// perceived by GFNFF::revPiExcessElectrons (-gfnff.rev_pi_excess_electron). The bond's order
+// row (findOrder at its unchanged continuous order) is blended towards this row with weight
+// min(1, y). A pair without a row here is never perceived. Same (s, ca, beta, dr0) meaning as
+// the rows above; capped like an ordinary well.
+// ================================================================================================
+struct PiExcessEntry {
+    int z1, z2;
+    double s, ca, beta, dr0;
+};
+
+static constexpr PiExcessEntry kPiExcessEntries[] = {
+    // O-O: DLPNO-CCSD(T)/aug-cc-pVTZ O2- curve (ref/E/o2m_O-O-_dlpno_ccsdt, 12 naturally-bonded
+    // points r=1.01-1.96 A out of 20; the model's own topology drops the bond past 1.96 A;
+    // no react-mode/kept-topology tail extension attempted, see PI_STAR_STATUS.md), fragment-
+    // referenced against O (triplet) + O- (doublet). REFIT Sep 26, 2026 (PI_STAR_STATUS.md section
+    // 12): the first fit reconstructed the well with CURCUMA_BONDDUMP's r0_dyn, which lacks the
+    // stage-3a(i) pair-CN correction the kernel applies (runtime r0 ~ constant 1.81 Bohr, r0_dyn
+    // falls to 1.24 at 1.96 A) - that row gave 19.2 kcal/mol at runtime, not its reported 3.04.
+    // This row is fitted against the RUNTIME r0/fc/alpha (CURCUMA_WELLDUMP): rms 2.83 at runtime.
+    {  8,  8,   0.798346,   1.188780,   1.507767,   0.375625 },   // O-O (n = 12, o2m_O-O-, fit rms 2.83, runtime r0) PISTAR:pi-excess refit section 12
+    // S-S: DLPNO-CCSD(T)/aug-cc-pVTZ S2- curve (ref/E/s2m_S-S-_dlpno_ccsdt, 11 naturally-bonded
+    // points r=1.60-2.60 A out of 20; the model's own topology drops the bond past 2.60 A; no
+    // react-mode/kept-topology tail extension attempted, see PI_STAR_STATUS.md), fragment-
+    // referenced against S (triplet) + S- (doublet), fit rms 0.26 kcal/mol.
+    { 16, 16,   0.582195,   0.765328,   0.175854,   0.286630 },   // S-S (n = 11, s2m_S-S-, fit rms 0.26, runtime r0) PISTAR:pi-excess refit section 12
+};
+
+static constexpr std::size_t kPiExcessCount = sizeof(kPiExcessEntries) / sizeof(kPiExcessEntries[0]);
+
+/// true when the element pair has a pi-excess row, i.e. is eligible for the pi* perception
+inline bool hasPiExcess(int za, int zb)
+{
+    const int z1 = za < zb ? za : zb;
+    const int z2 = za < zb ? zb : za;
+    for (std::size_t k = 0; k < kPiExcessCount; ++k)
+        if (kPiExcessEntries[k].z1 == z1 && kPiExcessEntries[k].z2 == z2)
+            return true;
+    return false;
+}
+
+/// blend (s, ca, beta, dr0) towards the pair's pi-excess row with weight min(1, y); no-op for a
+/// pair without a row or y <= 0
+inline void applyPiExcess(int za, int zb, double y, double& s, double& ca, double& beta, double& dr0)
+{
+    if (!(y > 0.0))
+        return;
+    const int z1 = za < zb ? za : zb;
+    const int z2 = za < zb ? zb : za;
+    const double t = y < 1.0 ? y : 1.0;
+    for (std::size_t k = 0; k < kPiExcessCount; ++k) {
+        const PiExcessEntry& pe = kPiExcessEntries[k];
+        if (pe.z1 != z1 || pe.z2 != z2)
+            continue;
+        s += t * (pe.s - s);
+        ca += t * (pe.ca - ca);
+        beta += t * (pe.beta - beta);
+        dr0 += t * (pe.dr0 - dr0);
+        return;
+    }
 }
 
 /// rev-gfnff P3: the half-order blend weight t in [0, 1] of a pair at a continuous order

@@ -70,6 +70,15 @@ inline constexpr HarrisEntry kHarrisEntries[] = {
     { 17, 17, 115.8267243370, 120.0728512838, 0.7429824561 },   // Cl-Cl (Cl2-, DLPNO-CCSD(T))
     { 35, 35, 115.4623886836, 99.6617053206, 0.6835839599 },   // Br-Br (Br2-, DLPNO-CCSD(T), static bonded rms 1.69 LOO 2.14, react break 1.82) X2BR:harris
     { 9, 9, 212.2064031706, 238.6608379001, 1.3765664160 },     // F-F   (F2-,  DLPNO-CCSD(T))
+    // O-O / S-S: DLPNO-CCSD(T) O2- / S2- curves (PI_STAR_STATUS.md), kappa = 0 free-charge target
+    // with the FINAL pi-excess well row baked in, bonded points only (O 12, r = 1.01-1.96 A; S 11,
+    // r = 1.60-2.60 A). REFIT Sep 26, 2026 (section 12) after the well refit: the first O-O row
+    // (A 1931.7, B 1971.2, c 0.05 = search floor) was absorbing the r0 error of the first well fit
+    // (a convex, growing target that A - B exp(-c r) can only follow in its linear c -> 0 limit).
+    // With the corrected well the target is concave and c lands inside the range, but the rms
+    // valley is shallow (O: 2.76-2.89 kcal/mol for c = 0.02-1.0), so c is only weakly determined.
+    { 8, 8, 150.3350507111, 157.1886555765, 0.6260000000 },      // O-O   (n = 12, o2m_O-O-, fit rms 2.76) PISTAR:harris refit section 12
+    { 16, 16, 61.1565654160, 125.1316646006, 0.7980000000 },     // S-S   (n = 11, s2m_S-S-, fit rms 0.29) PISTAR:harris refit section 12
 };
 // ---- END hand-maintained block --------------------------------------------------------------
 inline constexpr std::size_t kHarrisCount = sizeof(kHarrisEntries) / sizeof(kHarrisEntries[0]);

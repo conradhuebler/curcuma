@@ -274,6 +274,14 @@ void FFWorkspace::calcBonds(FFAccumulator& acc, const std::vector<Bond>& list, s
             new_form = true;
         }
         energy = new_form ? well : well * w;
+        // Diagnostic (Claude Generated, Sep 26, 2026; _log/PI_STAR_STATUS.md section 12): the
+        // RUNTIME well inputs, in particular r0_ij AFTER the stage-3a(i) pair-CN correction, which
+        // CURCUMA_BONDDUMP's r0_dyn does not include. Zero cost unless CURCUMA_WELLDUMP is set.
+        static const bool s_welldump = std::getenv("CURCUMA_WELLDUMP") != nullptr;
+        if (s_welldump)
+            fmt::print("WELLDUMP {}-{} r={:.6f} r0={:.6f} fc={:.6f} alpha={:.6f} form={} well={:.10f} w={:.6f} E={:.10f}\n",
+                       bond.i + 1, bond.j + 1, rij, r0_ij, k_b, alpha_orig,
+                       new_form ? m_rev_well[idx].form : 0, well, w, energy);
         // rev-gfnff stage 3a(ii) (Claude Generated, Sep 2026): valence share.
         //     E = -k_b e^{-a dr^2} w c,     c = 1/2 (f_i + f_j),
         //     f_i = clip((Val_i - sum_{k != j} w_ik) / w_ij, 0, 1),
@@ -2461,7 +2469,7 @@ void FFWorkspace::prepareWellForms()
             const auto& st = m_rev_well_stamp[p];
             if (st[0] != b.fc || st[1] != b.exponent
                 || st[2] != static_cast<double>(b.z_i) || st[3] != static_cast<double>(b.z_j)
-                || st[4] != b.rev_order) {
+                || st[4] != b.rev_order || st[5] != b.rev_pi_excess) {
                 same = false;
                 break;
             }
@@ -2476,7 +2484,8 @@ void FFWorkspace::prepareWellForms()
         m_rev_well_stamp[p] = { b.fc, b.exponent, static_cast<double>(b.z_i),
                                 static_cast<double>(b.z_j),
                                 (m_rev.well_order_override >= 0.0) ? m_rev.well_order_override
-                                                                   : b.rev_order };
+                                                                   : b.rev_order,
+                                b.rev_pi_excess };
     }
     m_rev_well.assign(nb, RevWellPar{});
     // The table is in Angstrom units (that is how the class-A fit reports it and how the header
@@ -2501,6 +2510,23 @@ void FFWorkspace::prepareWellForms()
             if (m_rev.well_form == 4 && ord > 0.0)
                 have_v2 = RevWellTableV2::findOrder(b.z_i, b.z_j, ord,
                                                     v2_s, v2_ca, v2_beta, v2_dr0);
+            // rev-gfnff P3 pi* prototype (Claude Generated, Sep 25, 2026; _log/PI_STAR_STATUS.md):
+            // a perceived pi* excess (Bond::rev_pi_excess > 0, only set for an isolated diatomic
+            // radical anion with a pi-excess row) blends the order row towards the pair's
+            // pi-excess row. Skipped whenever rev_pi_excess == 0, i.e. for every other bond.
+            // A pair whose ORDER table has no row (S-S) takes the pi-excess row on its own: the
+            // perception only fires for pairs with a pi-excess row, and y = 1 replaces the order
+            // row completely anyway. (Sep 26, 2026, PI_STAR_STATUS.md section 12: the first
+            // version needed an S-S order-3 row in kOrderEntries just to open this branch, and
+            // that row leaked into DEFAULT rev-gfnff - every S-S bond, S8 +104 kcal/mol.)
+            if (m_rev.well_form == 4 && b.rev_pi_excess > 0.0 && !have_v2
+                && RevWellTableV2::hasPiExcess(b.z_i, b.z_j)) {
+                v2_s = v2_ca = v2_beta = v2_dr0 = 0.0;
+                RevWellTableV2::applyPiExcess(b.z_i, b.z_j, 1.0, v2_s, v2_ca, v2_beta, v2_dr0);
+                have_v2 = true;
+            } else if (m_rev.well_form == 4 && have_v2 && b.rev_pi_excess > 0.0)
+                RevWellTableV2::applyPiExcess(b.z_i, b.z_j, b.rev_pi_excess,
+                                              v2_s, v2_ca, v2_beta, v2_dr0);
             if (!have_v2) {
                 // form 3, or form 4 on a pair the ORDER table does not cover: the element-pair
                 // fit of the same (free-curvature) form.

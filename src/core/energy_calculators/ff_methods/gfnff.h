@@ -402,6 +402,7 @@ PARAM(rev_sqe_q0_mu_tau, Double, 1.0, "rev-gfnff stage 2, rev_sqe_q0_rule mu: te
 PARAM(rev_sqe_phase1, Bool, false, "rev-gfnff P2 (Sep 2026, opt-in, needs rev_charge_model sqe): solve the Phase-1 topology charges qa with the same split-charge model as the Phase-2 charges (pairs = the topology bonds at their TOPOLOGICAL bond order 1, same kappa_Z and q0 rule), so the charge-dependent hardness dgam(qa)/alpeeq(qa) of the Coulomb self-energy localises together with the charge instead of staying at the delocalised constrained-EEQ qa. qa stays a function of the topology alone. At kappa = 0 on a connected graph identical to the constrained Phase 1. See test_cases/revgfnff/_log/P2P3_STATUS.md.", "Reactive", {})
 PARAM(rev_sqe_virtual_pairs, Bool, false, "rev-gfnff stage 2 (Sep 24, 2026, opt-in, needs rev_charge_model sqe): the Phase-2 split-charge solve chains every bond-graph component that shares one EEQ constraint group with zero-hardness VIRTUAL pairs, the Phase-2 analogue of the P2 Phase-1 virtual pairs. Without it charge cannot move between two unbonded atoms of the same constraint group and stays at the integer q0 placement - which the frag_charge_model ensemble merged corner creates just past the bond cutoff (X2- label dependence, SQE(kappa 0) != EEQ by up to 108 kcal/mol). At kappa = 0 the reachable charge space is then the constrained EEQ one. See test_cases/revgfnff/_log/X2_SCOPE_STATUS.md.", "Reactive", {})
 PARAM(rev_excess_electron, Bool, false, "rev-gfnff P3 (Sep 2026, opt-in, needs rev_charge_model sqe): perceive excess electrons with no bonding slot left (an anionic fragment whose atoms are valence-saturated, e.g. Cl2-, F2-: x = max(0, -Q_f - free slots)), spread x over the fragment's bonds that have a calibrated half-order well row, lower their bond order by x/2 (the mg3 well table then reads the half-order row) and add x*rev_excess_kappa to their split-charge hardness (the resonance of the 2c-3e bond lives in the well, not in the Coulomb term). A per-topology constant; inert for every neutral fragment. See test_cases/revgfnff/_log/P2P3_STATUS.md.", "Reactive", {})
+PARAM(rev_pi_excess_electron, Bool, false, "rev-gfnff P3 pi* extension (Sep 25, 2026, opt-in PROTOTYPE, needs rev_excess_electron): perceive the pi* excess electron of a DIATOMIC radical anion (O2-, S2-), which the sigma-slot budget of rev_excess_electron cannot see. Fires only for an isolated two-atom bond-graph component with a pi component (continuous order > 1) and fragment charge exactly -1, on a pair with a calibrated pi-excess well row (rev_well_table_v2.h kPiExcessEntries); the bond's mg3 well is then replaced by that row and the pair's split-charge excess (flat/frac/harris) counts y = 1. No polyatomic pi system, no dianion, no aromatic. See test_cases/revgfnff/_log/PI_STAR_STATUS.md.", "Reactive", {})
 PARAM(rev_excess_kappa, Double, 100.0, "rev-gfnff P3: flat split-charge hardness (Eh) per excess electron on a perceived 2c-3e pair (x*rev_excess_kappa, no bond-order dependence). Large = the charge stays on its q0 atom, i.e. the Coulomb term carries no delocalisation energy for that pair.", "Reactive", {})
 PARAM(rev_excess_mode, String, "flat", "rev-gfnff P3 (Sep 2026, opt-in alternative, see test_cases/revgfnff/_log/P2P3_ALTERNATIVES_STATUS.md): how the Coulomb term is kept from double-counting a perceived 2c-3e pair. flat = the shipped x*rev_excess_kappa split-charge hardness (localises the charge on its q0 atom); frac = fractional-charge correction E_x = 1/2 x c K_ij(r) q_i q_j with K_ij the pair EEQ curvature and c = rev_excess_frac_c: removes the fraction c of the pair delocalisation energy while the charges stay symmetric, polarisable and independent of q0; harris = no extra hardness (charges free, as flat at rev_excess_kappa 0) plus a non-self-consistent energy x*g(r) per perceived pair, g fitted to DLPNO-CCSD(T) (rev_harris_table.h, test_cases/revgfnff/_log/P2P3_HARRIS_STATUS.md).", "Reactive", {})
 PARAM(rev_excess_frac_c, Double, 0.9, "rev-gfnff P3, rev_excess_mode frac: fraction c in [0, 0.99] of the pair EEQ curvature removed (1 - c of the EEQ delocalisation energy is kept; the axial polarisability scales as 1/(1 - c)).", "Reactive", {})
@@ -530,6 +531,10 @@ public:
         /// keyed on (min, max) atom index; only pairs with a nonzero x are stored. Empty unless
         /// rev_excess_electron is on. See GFNFF::revExcessElectrons().
         std::map<std::pair<int, int>, double> rev_excess;
+        /// rev-gfnff P3 pi* prototype (Claude Generated, Sep 25, 2026): perceived pi* excess
+        /// electrons y of a diatomic radical anion, same key; empty unless rev_pi_excess_electron.
+        /// See GFNFF::revPiExcessElectrons() and _log/PI_STAR_STATUS.md.
+        std::map<std::pair<int, int>, double> rev_pi_excess;
         /// rev-gfnff P2: the q0 the Phase-1 split-charge solve used (empty unless
         /// rev_sqe_phase1). The static Phase-2 q0 reuses it, so both phases localise a charge
         /// on the SAME atom (their mu probes use different matrices and could disagree).
@@ -2608,6 +2613,11 @@ private:
     void revLocaliseExcessQ0(CornerEEQ& ce, const TopologyInfo& topo) const;
     /// P3: per-bond excess electrons x_ij of a topology (see the PARAM rev_excess_electron).
     std::map<std::pair<int, int>, double> revExcessElectrons(const TopologyInfo& topo) const;
+    bool m_rev_pi_excess = false;               ///< P3 pi* prototype (_log/PI_STAR_STATUS.md)
+    /// P3 pi* prototype: per-bond pi* excess electrons y_ij of a diatomic radical anion
+    std::map<std::pair<int, int>, double> revPiExcessElectrons(const TopologyInfo& topo) const;
+    /// sigma x_ij + pi* y_ij of one pair (0 if not perceived)
+    double revExcessTotal(const TopologyInfo& topo, int i, int j) const;
     /// P2: re-solve topo.topology_charges with the split-charge model on the Phase-1 matrix and
     /// refresh alpeeq/dgam from them; also fills topo.rev_excess (P3). Runs at the end of every
     /// calculateTopologyInfoOnce() pass. No-op unless m_rev_sqe && (m_rev_sqe_phase1 || m_rev_excess).
