@@ -3585,3 +3585,84 @@ one small compute decision pending operator go-ahead), and O2-/S2- (evaluated, r
 caveats, no further compute needed) are all sitting in their own worktrees, none yet merged into
 `reactff2-llm`. Consolidation into a single branch state is the natural next step, pending the
 operator's direction.
+
+# Side-thread — SN2-TS fix and O2-/S2- merged into `reactff2-llm` (2026-09-26)
+
+Two sequential merges, each verified in full before the next. I2-/ClF- (worktree
+`agent-a3f1d83a70348ee86`) was not touched and is NOT merged.
+
+**Commits** (not pushed):
+- Pre-merge tip `aae36f7e` (binary T0, md5 c58f3095).
+- Step 1: `686ddcd2` merges `worktree-agent-a51e81dadcf7f4b52` (`b2588309`,
+  `rev_sqe_group_pairs_only`). Binary M1, md5 cc57be15.
+- Step 2: the O2-/S2- worktree state was committed there on a new branch
+  `feature/revgfnff-pistar-o2s2`, in three commits: `2520711c` (comparison scripts:
+  `-gfnff.cache_topology false` + `CURCUMA`/`CURCUMA_EXTRA_FLAGS` env), `76ff250e` (reference data +
+  `revgfnff_ref.py` S2 additions), `609ee8a1` (the mechanism, tables, refit script, PI_STAR_STATUS.md).
+  `build_pi/` and the ignored `*.out.gz` stayed out. Merged as `3233958a`. Binary M2, md5 46d57285.
+  The one edit made while committing: a note at the top of PI_STAR_STATUS.md section 11 saying that
+  the code/table comments' "section 12" means section 11 (11.1). The comments themselves were left
+  alone because the refit script tags rows with the same "section 12" wording.
+
+**Conflicts: none, in either merge.** Git merged all files automatically, so no conflict had to be
+resolved by hand. I still checked both merges, and neither needed a judgment call:
+(1) the changed lines of each merge (merge vs. its first parent) are identical, line for line, to the
+branch's own diff against its base `63a3e4de`. So the merge added no hunks and dropped none.
+(2) Step 1: the multi-gpu merge touched no line of `gfnff_method.cpp` beyond old line ~12000, so
+`revSolveSplitCharges`/`setupRevSettings` are exactly as the fix expects.
+(3) Step 2: `Bond` gains the field `rev_pi_excess`. The GPU code copies `Bond` field by field
+(`BondSoA::upload`) and has no rev well path, so a layout change cannot reach it. Every consumer of
+`rev_excess`/`rev_order` in `src/` is inside the files the branch already edits. GPU builds were not
+compiled (no SDK here).
+
+**Method** (scratch at `/home/conrad/src/curcuma_branches/merge_scratch_20260926/`, because `/tmp`,
+a 94 GB tmpfs, was full of other sessions' scratch). Each single point gets a fresh directory with
+`-gfnff.cache_topology false` and `-threads 1`. Energies count as bit-identical within 1e-9 Eh.
+Configs: gf = `-method gfnff`; rev = revgfnff default; sqe; sqevp (+VP); flat = sqe+phase1+excess;
+rec = flat+VP+harris+ensemble s_max 1.2. The suffixes g/pi add `rev_sqe_group_pairs_only` /
+`rev_pi_excess_electron`. The fit harness is the canonical stage-2 config (`revgfnff_fit.py
+--evaluate-only`, 39 files / 1379 frames, C0/D0/H0 JSONs from the sqeinv scratch). Frames are
+compared on energy, charges and gradient at <= 1e-10.
+
+## Step 1 (T0 -> M1)
+
+| check | result |
+|---|---|
+| GMTKN55 2462, flag off, 6 configs (gf rev sqe sqevp flat rec) | 0 / 2462 changed each |
+| MOR41 95 + **S30L-CI 90** (first S30L-CI check for this fix), same 6 configs | 0 / 185 changed each |
+| fit harness, 5 arms (C0, D0, H0, H0+ens1.2, H0+ens1.2+VP) | 1379 / 1379 identical each |
+| flag on, GMTKN55: sqevp -> sqevpg | 15 move, all cross-group (BH76 fch3fts +137.3, hoch3fts +119.4, G21EA/EA_25 +103.3, clch3clts +64.0, SIE4x4 h2o2+ +60.5, ... BHDIV10/ts3 +1.1, WCPT18/ts8h2o +0.06) |
+| flag on, GMTKN55: rec -> recg | the same 15 (PX13/h2o_2_ts +35.6, clch3clts +21.3, WCPT18/ts2 +17.1, fch3fts +16.8, ...) |
+| flag on, MOR41 + S30L-CI (sqevpg, recg) | 0 / 185 |
+| invariant: revgfnff eeq vs sqevpg (kappa 0) | 21 differ, max 0.072 kcal/mol (ALK8/li4_me4) = the known eeq-side Phase-2 skip, SQE_INVARIANT_STATUS section 6; without the flag 36 differ, max 137.3 |
+| harness, flag on | 15 frames move in C0/H0/rec+VP. Loss: rec+VP 5391.91 -> 5097.97, harris 5060.33 -> 5391.13, C0 11547.2 -> 11051.7. The first two equal package 33. |
+| `test_gfnff_sqe` | PASS, incl. X2/7f (2.2e-16 / 0 Eh; 103.0 / 4.66 kcal/mol without the flag) and X2/7g (FD 7.6e-12 Eh/A) |
+| `ctest` | T0 295/307 -> M1 295/307, same 12 failures |
+
+## Step 2 (M1 -> M2)
+
+| check | result |
+|---|---|
+| GMTKN55 2462, flag off, 8 configs (above + sqevpg, recg) | 0 / 2462 changed each |
+| **S-S leak re-check**: rev default (the arm the leaked S-S order row hit, S8 +104 when broken) | 0 / 2462, i.e. 0 of the 168 S-containing structures incl. DC13/s8, ICONF/S8_1/_2, S4O4_1/_2 |
+| MOR41 + **S30L-CI** (first S30L-CI check for this fix), 8 configs | 0 / 185 changed each |
+| flag on, GMTKN55 (flat, rec, recg) | exactly 2 move in each: EA_24 +72.45 / +72.42 / +72.42, EA_20 +19.02 / +18.38 / +18.38 kcal/mol, identical to PI_STAR_STATUS 11.7 |
+| flag on, MOR41 + S30L-CI | 0 / 185 |
+| fit harness, flag off, 8 arms (5 above + G/C0, G/H0, ens+VP+G/H0) | 1379 / 1379 identical each |
+| fit harness, flag on (D0, H0, ens+VP/H0, ens+VP+G/H0) | 1379 / 1379 identical to flag off |
+| `ctest` | M2 295/307, the same 12 failures as T0 |
+
+**Plain GFN-FF vs xtb** (unchanged through both merges, since T0 == M2 bit for bit; per structure, xtb from the
+cached reference energies): GMTKN55 n=2460 MAD 0.854, max 131.6 (WATER27/H3OpH2O62d); MOR41 n=95
+MAD 11.62 (the documented pprcht-vs-xtb split); S30L-CI n=90 per fragment MAD 0.979, max 15.9. The
+GMTKN55 figure is 0.005 below MULTIGPU_MERGE_STATUS's 0.859. The likely reason is that this runner has
+the topology cache off. I did not check this further.
+
+**ctest baseline (all three binaries):** 295/307 passed. The 12 failures: confscan_dtemplate, test_orca_interface,
+xtb_cpscf, cli_confscan_01..07, cli_simplemd_18_gfnff_rev_nve_vs_gfnff,
+cli_simplemd_20_gfnff_rev_h_budget.
+
+**Open for the operator:** no ctest exercises `rev_pi_excess_electron`; its coverage is the flag-on
+GMTKN55 and harness numbers above plus the worktree's FD checks. The PI_STAR caveats still apply
+(O + O- / S + S- recombination barrier, no reference beyond 2.16 / 3.15 A). The worktrees and their
+branches (`worktree-agent-a51e81dadcf7f4b52`, `feature/revgfnff-pistar-o2s2`) were left in place.
