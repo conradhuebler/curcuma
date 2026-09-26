@@ -664,6 +664,8 @@ GFNFF::GFNFF(const json& parameters)
         m_frag_s_max = std::max(1.0, m_parameters.value("frag_charge_s_max", 1.0));  // 1.0 = no window (placement rule only)
         m_frag_tau_eh = std::max(1e-6, m_parameters.value("frag_charge_tau", 1.0)) / 627.5094740631;
         m_frag_sigma = std::max(1e-6, m_parameters.value("frag_charge_sigma", 0.05));
+        m_frag_atomic_ea = m_parameters.value("frag_charge_atomic_ea", false);        // opt-in, I2_CLF_STATUS.md
+        m_frag_ea_sigma = std::max(1e-6, m_parameters.value("frag_charge_ea_sigma", 0.02));
         m_frag_max_edges = std::max(0, std::min(10, m_parameters.value("frag_charge_max_edges", 4)));
         m_frag_max_placements = std::max(1, m_parameters.value("frag_charge_max_placements", 6));
         if (m_frag_ensemble && m_topology_mode == "react") {

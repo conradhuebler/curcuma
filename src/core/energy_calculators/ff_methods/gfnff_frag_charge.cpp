@@ -77,6 +77,28 @@ inline void fragWindowL(double s, double s_max, double& L, double& dL)
     dL = 30.0 * t * t * (1.0 - t) * (1.0 - t) / w;
 }
 
+/// Experimental atomic electron affinities in eV (NIST / Andersen, Haugen, Hotop, J. Phys. Chem.
+/// Ref. Data 28 (1999) 1511; rounded), for -gfnff.frag_charge_atomic_ea (opt-in). 0 = anion not
+/// bound (He, Be, N, Ne, Mg, Ar, Zn, Kr, Cd, Xe, Hg, Rn); NaN = not tabulated here (transition
+/// metals, lanthanides, ...), which makes the rule fall back to the free-charge weighting.
+/// Claude Generated (Sep 2026), test_cases/revgfnff/_log/I2_CLF_STATUS.md.
+double atomicElectronAffinityEV(int z)
+{
+    switch (z) {
+    case 1: return 0.754195;  case 2: return 0.0;       case 3: return 0.618049;  case 4: return 0.0;
+    case 5: return 0.279723;  case 6: return 1.262119;  case 7: return 0.0;       case 8: return 1.461105;
+    case 9: return 3.401190;  case 10: return 0.0;      case 11: return 0.547926; case 12: return 0.0;
+    case 13: return 0.43283;  case 14: return 1.389521; case 15: return 0.746607; case 16: return 2.077103;
+    case 17: return 3.612724; case 18: return 0.0;      case 19: return 0.501459; case 30: return 0.0;
+    case 32: return 1.232712; case 33: return 0.8048;   case 34: return 2.020605; case 35: return 3.363588;
+    case 36: return 0.0;      case 37: return 0.485916; case 48: return 0.0;      case 50: return 1.112066;
+    case 51: return 1.047401; case 52: return 1.970875; case 53: return 3.059047; case 54: return 0.0;
+    case 55: return 0.471626; case 80: return 0.0;      case 82: return 0.356743; case 83: return 0.942363;
+    case 86: return 0.0;
+    default: return std::numeric_limits<double>::quiet_NaN();
+    }
+}
+
 /// scoped per-thread verbosity (the variants run silently)
 struct FragQuiet {
     int saved;
@@ -400,7 +422,7 @@ double GFNFF::fragEnsembleBlend(bool gradient, double e_master)
         // rank = bare_nuclei * (G + 1) + radicals: a placement that strips a group of ALL its
         // electrons (a bare proton next to CO in a pass-2-split CH2O2+) is never preferred to one
         // that does not, whatever the radical count; then the fewest odd-electron groups.
-        struct Cand { std::vector<double> qg; int radicals; double S; std::string cls; };
+        struct Cand { std::vector<double> qg; int radicals; double S; std::string cls; double ea; };
         std::vector<Cand> cands;
         int rmin = std::numeric_limits<int>::max();
         for (const auto& cmp : comps) {
@@ -408,6 +430,7 @@ double GFNFF::fragEnsembleBlend(bool gradient, double e_master)
             c.qg.assign(G, 0.0);
             c.radicals = 0;
             c.S = 0.0;
+            c.ea = std::numeric_limits<double>::quiet_NaN();   // atomic EA of a single-atom -1 carrier
             std::vector<std::string> parts;
             for (int g = 0; g < G; ++g) {
                 c.qg[g] = unit * cmp[g];
@@ -415,6 +438,8 @@ double GFNFF::fragEnsembleBlend(bool gradient, double e_master)
                 if (ne & 1L) ++c.radicals;
                 if (ne <= 0) c.radicals += G + 1;
                 c.S += c.qg[g] * qfree_g[g] / static_cast<double>(nq);
+                if (m_charge == -1 && cmp[g] == 1 && zlist[g].size() == 1)
+                    c.ea = atomicElectronAffinityEV(zlist[g][0]);
                 if (cmp[g] != 0) {
                     std::string zs = fmt::format("{:+d}:", static_cast<int>(c.qg[g]));
                     for (int z : zlist[g]) zs += fmt::format("{}.", z);
@@ -434,18 +459,26 @@ double GFNFF::fragEnsembleBlend(bool gradient, double e_master)
             kept.resize(m_frag_max_placements);
         }
         // class weights Omega = softmax(S_class / sigma), S_class = max over its members
+        // opt-in frag_charge_atomic_ea (I2_CLF_STATUS.md): when EVERY kept candidate puts the -1 on
+        // one single atom with a tabulated EA, rank by that EA instead (the asymptote gap of
+        // A- + B vs A + B- is exactly EA(B) - EA(A)); otherwise the free-charge rule below.
+        bool use_ea = m_frag_atomic_ea && !kept.empty();
+        for (const auto& c : kept)
+            if (!std::isfinite(c.ea)) use_ea = false;
+        const double sig = use_ea ? m_frag_ea_sigma : m_frag_sigma;
         std::map<std::string, double> cls_S;
         for (const auto& c : kept) {
+            const double sc = use_ea ? c.ea : c.S;
             auto it = cls_S.find(c.cls);
-            if (it == cls_S.end()) cls_S[c.cls] = c.S;
-            else it->second = std::max(it->second, c.S);
+            if (it == cls_S.end()) cls_S[c.cls] = sc;
+            else it->second = std::max(it->second, sc);
         }
         double smax = -std::numeric_limits<double>::infinity();
         for (const auto& kv : cls_S) smax = std::max(smax, kv.second);
         std::map<std::string, double> cls_W;
         std::map<std::string, int> cls_id;
         double zc = 0.0;
-        for (const auto& kv : cls_S) { cls_W[kv.first] = std::exp((kv.second - smax) / m_frag_sigma); zc += cls_W[kv.first]; }
+        for (const auto& kv : cls_S) { cls_W[kv.first] = std::exp((kv.second - smax) / sig); zc += cls_W[kv.first]; }
         for (auto& kv : cls_W) { kv.second /= zc; cls_id.emplace(kv.first, static_cast<int>(cls_id.size())); }
 
         std::string gkey = "a";
