@@ -3350,3 +3350,238 @@ completely unaffected. GPU code still unverified (no GPU/SDK here, as before).
 Cleanup done: old worktree/branch deleted. Known Issue numbering collided a second time (multi-
 gpu's own entries vs. our #34/#35) — renumbered to #36/#37, cross-references fixed in `CLAUDE.md`,
 `AIChangelog.md`, `TODO.md`.
+
+# Side-thread — I2-/ClF- campaign executed (Sonnet), evaluation pending (Opus) (2026-09-26)
+
+Continuation of the X2- deepening dispatch (worktree `agent-a3f1d83a70348ee86`, rate-limited
+mid-task on 2026-09-25, resumed by a Sonnet execution agent per the operator's explicit
+plan/execute/evaluate split). Not yet merged into `reactff2-llm`; not yet documented as a
+numbered package (pending the Opus evaluation below). Full detail:
+`I2_CLF_STATUS.md` sections 4-11 (in that worktree).
+
+**Campaign completed**: the ORCA jobs from the interrupted session had actually kept running as
+orphaned processes and completed; the Sonnet agent recovered them from scratchpad rather than
+re-running (no wasted compute). ClF- 22/22 curve points; I2- 19/20 (one tail-point ORCA segfault,
+not retried, confirmed inconsequential — that point's energy is near zero, below the fit's
+inclusion threshold anyway). Fitted the required rows (I-I order-1 + half-order, Cl-F half-order
++ harris, Cl-F order-1 already existed). Falsifiers clean: GMTKN55(2462)/MOR41+S30L-CI(185) zero
+unintended regression (the one MOR41 structure that moved, literal diatomic I2, is the intended
+new-row engagement); `ctest` 294/306, bit-identical to the documented baseline; gradients clean.
+
+**Two real, unresolved problems found and honestly reported, NOT fixed (out of scope for the
+execution agent, explicitly deferred to evaluation)**:
+1. **The harris/recommended combination that worked well for Cl2-/F2-/Br2- (bonded rms ~8-10
+   kcal/mol) badly degrades for the new pairs**: ClF- bonded rms goes from 2.99 (flat100) to
+   **86.5** (harris/recommended) — nearly 30x worse; I2- goes 2.22 -> 21.1. I-I harris's fitted
+   `c` parameter landed on the fit's own search-grid boundary — a possible sign the fit range
+   (tuned for Cl/F/Br length scales) does not fit I's larger covalent radius.
+2. **`frag_charge_atomic_ea`** (ClF-'s carrier-selection fix from the interrupted session,
+   corrects the long-range Cl-/F asymptote as designed) **is a net NEGATIVE for the water-probe
+   test** (MAE 10.91 vs 5.35 without it, wrong sign on the Cl/F preference at 2 of 3 distances) —
+   the true reference physics is a strongly asymmetric, growing preference for the F end, not a
+   discrete 50/50-vs-100/0 choice, which the atomic-EA fix's discrete tabulated-value approach
+   does not capture.
+
+Also documented: a genuine ClF- physics artifact (independent SCF at r>=3.7 A can converge to the
+wrong, higher Cl+F- asymptote despite passing UHF stability checks — a known risk, not a bug) and
+one non-reproducible numerical anomaly that self-corrected on repeat (correctly flagged as noise).
+
+**Next**: an Opus evaluation agent will review the full campaign, specifically scrutinize the two
+open problems above, and write the verdict/recommendation the execution agent was explicitly told
+not to write.
+
+# Side-thread — I2-/ClF- evaluated: I2- ready, ClF- ready with a stated caveat (2026-09-26)
+
+Opus evaluation of the Sonnet-executed I2-/ClF- campaign (worktree `agent-a3f1d83a70348ee86`),
+per the operator's plan/execute/evaluate split. Full detail: `I2_CLF_STATUS.md` section 12.
+
+**Verdict: I2- is ready as opt-in at Br2-'s bar. ClF- is ready with caveats, and only with
+`-gfnff.frag_charge_atomic_ea true` on.**
+
+**Root cause of the "harris badly degrades" finding (package's own prior side-thread), MOSTLY
+FIXED, not a design flaw**: the harris g(r) fit data had been generated in the SAME run as the
+flat100 calibration, BEFORE the half-order well row was fitted and built into the binary — so
+harris was fit against PLACEHOLDER rows (copied from another element pair), not the real ones.
+Br2- avoided this only because its campaign happened to run the steps in the right order. Fixed
+by regenerating the fit data from the FINAL binary and refitting: **I2- bonded rms 21.1 -> 2.12**
+kcal/mol (now matches the halogen-pair bar), **ClF- bonded rms 86.5 -> 8.40** (large improvement,
+not fully closed). Only the I-I and Cl-F harris rows changed (`rev_harris_table.h`).
+
+**New mandatory methodology rule for any future element-pair extension (already relayed to the
+concurrent O2-/S2- work)**: fit and build in the well rows FIRST, rebuild, THEN generate harris
+fit data from that final binary — and always check that the fit's own reported rms equals the
+measured RUNTIME rms as a cheap sanity check for exactly this class of ordering bug.
+
+**ClF-'s remaining 8.4 kcal/mol bonded residual, characterised, not fixed**: NOT the carrier-
+selection logic (verified: harris's free charges track the DLPNO Hirshfeld charges to ~0.07 e
+regardless of `frag_charge_model` settings). The actual cause: the half-order well row itself is
+anchored to `flat100`'s charge placement, which puts the electron on F (physically the WRONG
+atom, per electron affinity) — both charge states jump discontinuously at 2.15 A, a 12 kcal/mol
+step no smooth g(r) function can absorb. A cleaner fix (localise the electron by electron
+affinity in the WELL-FITTING reference too, not just in carrier selection) is sketched, not built.
+
+**A significant correction to the earlier `frag_charge_atomic_ea` finding**: the claim that
+ClF-'s DLPNO-CCSD(T) reference SCF converges to the wrong (higher-energy) asymptote "from r>=3.7
+A" was itself incomplete — re-examined, the actual onset is **r>=2.98 A** (Hirshfeld charges
+already show the wrong state at 2.65->2.98 A). This means BOTH water-probe test geometries at
+3.31 A are contaminated by this DLPNO reference artefact, and the earlier-reported "growing F
+preference" was largely THIS ARTEFACT, not genuine physics. Re-scored on the valid (uncontaminated)
+probe points only: recommended-without-EA 5.39, recommended-with-EA 7.86 — EA is still somewhat
+worse there, but the FUNDAMENTAL correctness case for EA remains strong: without it, every
+isolated/separated ClF- geometry sits 51.4 kcal/mol too high (both carrier rules are static and
+environment-blind; each fails at one end of the probe test, but only EA gets the isolated species
+right). Recommendation: EA on for ClF-, with the residual probe-test gap and the 8.4 kcal/mol
+bonded residual both stated as known, characterised limits — not swept under the rug.
+
+**A real reference-data fix identified, NOT started, needs authorization**: re-running the 9
+affected ClF- ORCA jobs with a Cl- (rather than the default) starting guess would very likely fix
+the wrong-asymptote artefact at the source, giving a clean reference for the water-probe test.
+Estimated cost: ~1-1.5 h of ORCA compute. Held pending operator go-ahead.
+
+**Verification**: the evaluation agent independently re-checked rather than trusting the Sonnet
+report — GMTKN55 sample (456 structures, 2 configs) 0 moved; MOR41/I2 -21.5 kcal/mol confirmed as
+the intended engagement; **the 1379-frame fit harness, which the Sonnet agent had never actually
+run against the FINAL (post-refit) binary, now confirmed 1379/1379 identical across 5
+configurations**; `ctest` 294/306, the same 12 known failures; FD gradients/probes/label-gap/
+up-down numbers all reproduced exactly.
+
+**For the main-repo docs, once this is merged (not yet done — still worktree-local)**: add I2- to
+the recommended X2- setting unchanged; add ClF- only with `frag_charge_atomic_ea true` and the
+8.4 kcal/mol bonded-rms limit stated explicitly; correct the record to say `harris` is NOT a bad
+default for new element pairs (the degradation was a fitting-order bug); correct the ClF-
+reference-artefact onset to 2.98 A (not 3.7 A); add the general "fit well rows before harris,
+check fit-rms==runtime-rms" methodology note for future extensions.
+
+# Side-thread — O2-/S2- campaign executed (Sonnet), evaluation pending (Opus) (2026-09-26)
+
+Continuation of the X2- deepening dispatch (worktree `agent-a997450b4245937f9`, rate-limited
+mid-task on 2026-09-25, resumed by a Sonnet execution agent). Applied the fitting-order lesson
+relayed from the parallel I2-/ClF- work mid-task (see prior side-thread) — explicitly verified
+correct this time (fit rms vs runtime rms match: O-O 6.1925/6.192462, S-S 0.2946/0.294599).
+Not yet merged into `reactff2-llm`; not yet documented as a numbered package (pending Opus
+evaluation). Full detail: `PI_STAR_STATUS.md` sections 7-10.
+
+**Campaign completed, honestly incomplete in two places**: O2- DLPNO-CCSD(T) 14/20 grid points
+converged (6 failed at r>=2.43 A with UHF spin contamination, <S^2>~1.75-1.79 vs ideal 0.75 — a
+genuine DLPNO/UHF reference-state limitation, not fixed, not this task's to fix). S2- 13/20 (2
+explicit non-convergences + 5 tail points not reached before time ran out — potentially
+completable with more compute, unlike the O2- gap). **A task-brief error caught and corrected**:
+the brief assumed S-S needs an order-1 row; the agent found S2 (like O2) comes out continuous
+order 3 in GFN-FF's own perception and built the correct row instead.
+
+**Well/harris rows fitted**: O-O well rms 3.04 kcal/mol (n=12 bonded), S-S well rms 0.26 (n=11,
+excellent). **O-O harris row is degenerate/saturated** (c=0.05 — the bonded-range data was too
+narrow to pin the curvature; kept as best-fit-on-available-data, flagged, not hidden). S-S harris
+well-determined (c=0.384).
+
+**Falsifiers**: GMTKN55 flag-off bit-identical (checked twice); flag-on moves exactly 2 structures
+(O2-/S2- in G21EA), nothing else; static curves match reference r_min exactly for both; water-probe
+label gap ~0.01 kcal/mol (matches the halogen precedent); gradients clean; `ctest` 294/306, the
+same 12 known failures. **Gaps, reported not hidden**: S30L-CI could not be run at all (its 30
+per-structure directories are gitignored/manually-supplied and genuinely absent from this
+worktree — must be re-checked once merged into the main tree, where that data exists). The fit
+harness used 1425 points, not the canonical 1379 — needs the evaluation step to confirm this is
+the right/consistent harness, not an accidental substitute.
+
+**A genuinely new, unexplained physics finding**: the up-vs-down topology-history scan shows O2-
+history-dependence of up to 3.27 kcal/mol **deep inside the bonded region (r=1.4-1.6 A)** — NOT
+at the fragment-perception threshold, unlike every halogen X2- species measured so far. S2- shows
+a smaller version (0.27). Not diagnosed further (correctly out of scope for the execution task) —
+a real open question for evaluation/follow-up.
+
+**A separate, valuable bug found and fixed along the way**: `scripts/{gmtkn55_compare.py,
+mor41_validation.py,s30lci_gfnff_compare.py}` never explicitly disabled GFN-FF's topology cache,
+risking a stale-cache false positive in ANY use of these scripts (not just this task) — fixed
+(`-gfnff.cache_topology false` + a `CURCUMA`/`CURCUMA_EXTRA_FLAGS` override), all this task's own
+falsifiers re-verified clean afterward. Whether this retroactively affects any EARLIER claim this
+session made with these scripts is not established — most prior campaigns already followed the
+independently-established "fresh scratch dir per structure" discipline (the same defence this bug
+duplicates), so the risk is judged low, but worth keeping in mind.
+
+**Operationally important, confirmed not just suspected**: a SHARED `/tmp` tmpfs filled to 100%
+**by other, independent Claude Code sessions on this machine** (not this session's own agents) mid-
+campaign, corrupting a few ORCA jobs — recovered by moving remaining work to `/var/tmp` (real
+disk). This is the first DIRECT, concrete confirmation this session has had that other concurrent
+sessions on this machine can tangibly interfere with active work here, beyond the earlier
+speculative concern raised (and partly self-resolved) around the multi-gpu merge's build chaos.
+
+**Next**: an Opus evaluation agent will review the campaign, focusing on the degenerate O-O harris
+fit, the new bonded-region history-dependence finding, whether the incomplete grids (especially
+S2-'s 5 unreached tail points) need finishing, and the harness-count discrepancy — and write the
+verdict the execution agent was explicitly told not to write.
+
+# Side-thread — O2-/S2- evaluated: ready as opt-in, after catching a real shipped-regression risk (2026-09-26)
+
+Opus evaluation of the Sonnet-executed O2-/S2- campaign (worktree `agent-a997450b4245937f9`).
+Full detail: `PI_STAR_STATUS.md` section 11.
+
+**Verdict: ship as opt-in at the Br2-/I2- bar, but only in the CORRECTED state below** (the
+Sonnet-reported numbers were wrong in two places, both caught and fixed here without new ORCA
+compute). Caveats: not suitable for O+O-/S+S- recombination MD; no reference data beyond 2.16 A
+(O2-)/3.15 A (S2-).
+
+| | bonded rms | react break | react form |
+|---|---:|---:|---:|
+| S2- | 0.28 | 1.24 | 15.0 |
+| O2- (corrected) | 2.65 | 2.51 | 39.6 (peak +80 - same in plain rev-gfnff, unbonded regime, not caused by this feature) |
+| Cl2- (for scale) | - | 1.79 | 9.6 |
+
+**Four real defects found in the Sonnet execution's own work, all fixed here, none needing new
+ORCA jobs**:
+1. **The well fit read r0 from a diagnostic dump that lacks the pair-CN correction the energy
+   kernel actually applies at runtime** — the reported O-O well rms of 3.04 was wrong; the
+   ACTUAL runtime rms was 19.2. Refitted using a new env-gated `CURCUMA_WELLDUMP` diagnostic
+   (matching the established `CURCUMA_*DUMP` convention); new rows now reproduce the runtime
+   bond term to 4e-7 Eh.
+2. **A serious one: the S-S order-3 row LEAKED INTO DEFAULT rev-gfnff, affecting every S-S bond
+   regardless of the opt-in flag** — the Sonnet agent's own falsifier claim ("0/2462 GMTKN55
+   structures changed") **was WRONG**: 19 structures had actually moved, S8 (elemental sulfur)
+   by +104 kcal/mol. This would have been a silent regression to ordinary sulfur chemistry if it
+   had shipped. Fixed: the shared row removed, S2- now uses its own dedicated, properly-gated
+   row; default confirmed back to 0/2462 changed, flag-on curves bit-identical to before this fix.
+   **This is exactly the kind of error the plan/execute/evaluate split (Sonnet executes, Opus
+   independently re-verifies rather than trusting the report) exists to catch.**
+3. S2-'s reference file was missing two already-converged points (2.85, 3.15 A) — added.
+4. The O2- 7.5 A reference point had converged to the WRONG electronic state (+62 kcal/mol above
+   O+O-, the same class of SCF-convergence-to-the-wrong-asymptote artefact found separately in
+   the ClF- work) — excluded from the fit.
+
+**The four assigned evaluation questions, resolved**:
+1. Degenerate O-O harris fit (c=0.05) — **FIXED**, caused by defect 1 above, not by insufficient
+   data range as first suspected. After the fix, c=0.626 (well-determined). Concrete practical
+   impact: the broken row produced a 76 kcal/mol energy STEP when a react-mode bond dropped; the
+   fixed row gives 4.5.
+2. The new deep-bonded-region up-vs-down history dependence — **characterised, NOT specific to
+   this feature**: plain (unmodified) rev-gfnff shows the same 3.24 kcal/mol at the identical
+   geometry, from bond parameters frozen when the topology is built at a stretched geometry. A
+   pre-existing, general rev-gfnff limitation, not a new bug this work introduced.
+3. Incomplete grids — **resolved as acceptable, no new compute recommended**. O2-'s 6 missing
+   points are the CORRECT dissociation state that happens to crash ORCA's own DLPNO module (a
+   code limitation, more compute would not fix it). S2-'s "5 tail points not reached due to time"
+   claim was itself wrong — those jobs kept running as orphaned processes and have since finished,
+   crashing with the identical issue (not a time problem). **Explicit recommendation: do not
+   request the 5 S2- jobs or any extra O2- jobs** — the existing 12+11 valid bonded points are
+   sufficient; a canonical (non-DLPNO) UCCSD(T) reference could reach the tail if ever wanted, but
+   that is a new method choice needing its own operator sign-off, not a mechanical rerun. No new
+   ORCA jobs were launched.
+4. Fit-harness frame-count discrepancy (1425 vs 1379) — **resolved**: the earlier run used the
+   wrong harness config by mistake; the correct canonical run gives 1379/1379 bit-identical in
+   all three comparisons.
+
+**Verified on the final, corrected binary**: GMTKN55 flag on/off moves only `EA_20`/`EA_24` (the
+two intended G21EA structures); MOR41 moves nothing; gradients match FD to <=1.6e-7 Eh/A; water-
+probe label gap <=0.011 kcal/mol; `ctest` 294/306, the same 12 known failures.
+
+**Not yet done, flagged explicitly by the evaluation agent**: S30L-CI zero-regression must be
+re-checked once this is merged into the main checkout (the data is genuinely absent from this
+worktree, same limitation as noted for the I2-/ClF- side-thread). The worktree currently mixes
+the Sonnet execution's changes with the evaluation agent's fixes (new script
+`scripts/revgfnff_pistar_refit.py`, the two table files, `ff_workspace_gfnff.cpp`, the S2-
+reference file) — ready for orchestrator review and consolidation, not yet committed anywhere.
+
+**Status of the whole "deepen the X2- strand" dispatch, all three threads now returned**: the
+SN2-TS invariant leak (package 33), I2-/ClF- (evaluated, I2- ready / ClF- ready-with-caveat,
+one small compute decision pending operator go-ahead), and O2-/S2- (evaluated, ready-with-
+caveats, no further compute needed) are all sitting in their own worktrees, none yet merged into
+`reactff2-llm`. Consolidation into a single branch state is the natural next step, pending the
+operator's direction.
