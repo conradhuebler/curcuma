@@ -33,6 +33,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -42,7 +43,8 @@ REPO = Path(__file__).resolve().parents[1]
 TESTSET = REPO / "test_cases" / "MOR41-testset"
 RUNDIR = TESTSET / "_run"
 REACTIONS = TESTSET / "reactions.dat"
-CURCUMA = REPO / "release" / "curcuma"
+CURCUMA = Path(os.environ["CURCUMA"]) if os.environ.get("CURCUMA") else REPO / "release" / "curcuma"
+CURCUMA_EXTRA_FLAGS = shlex.split(os.environ.get("CURCUMA_EXTRA_FLAGS", ""))
 
 
 def find_xtb():
@@ -99,8 +101,11 @@ def parse_xtb_energy(stdout):
 
 
 def run_curcuma(xyz_path, method):
+    # PI_STAR_STATUS.md (Sep 2026): -gfnff.cache_topology false -- see the matching comment in
+    # scripts/gmtkn55_compare.py::run_curcuma (a stale struc.topo.json trap, not specific to MOR41).
     cmd = [str(CURCUMA), "-sp", str(xyz_path), "-method", method,
-           "-charge", "0", "-verbosity", "0", "-no_bmt"]
+           "-charge", "0", "-verbosity", "0", "-no_bmt",
+           "-gfnff.cache_topology", "false"] + CURCUMA_EXTRA_FLAGS
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
     except subprocess.TimeoutExpired:

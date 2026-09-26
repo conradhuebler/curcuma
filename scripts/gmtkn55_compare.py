@@ -41,6 +41,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -49,7 +50,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 TESTSET = REPO / "test_cases" / "GMTKN55-testset"
 RUNDIR = TESTSET / "_run"
-CURCUMA = REPO / "release" / "curcuma"
+CURCUMA = Path(os.environ["CURCUMA"]) if os.environ.get("CURCUMA") else REPO / "release" / "curcuma"
+# PI_STAR_STATUS.md (Sep 2026): extra CLI flags appended to every curcuma invocation, e.g. for
+# testing a new PARAM flag on/off without a dedicated --extra-flags argparse option.
+CURCUMA_EXTRA_FLAGS = shlex.split(os.environ.get("CURCUMA_EXTRA_FLAGS", ""))
 
 AU2KCAL = 627.509474           # Hartree -> kcal/mol
 NON_SUBSET_DIRS = {"_utils", "_results", ".git"}
@@ -141,8 +145,15 @@ def parse_xtb_energy(stdout):
 
 
 def run_curcuma(xyz_path, method, charge, timeout, uhf=0):
+    # PI_STAR_STATUS.md (Sep 2026): -gfnff.cache_topology false -- a stale struc.topo.json
+    # left behind by a PREVIOUS run (different binary/charge/spin, same element list + bond
+    # graph, which is all the on-disk cache fingerprints) is silently reused otherwise, the
+    # same trap documented repeatedly elsewhere in this codebase (Known Issue #11/#21(c));
+    # found here via a genuine one-structure (G21EA/EA_9) false-positive "flag changed
+    # something" reading during this session.
     cmd = [str(CURCUMA), "-sp", str(xyz_path), "-method", method,
-           "-charge", str(charge), "-spin", str(uhf), "-verbosity", "0", "-no_bmt"]
+           "-charge", str(charge), "-spin", str(uhf), "-verbosity", "0", "-no_bmt",
+           "-gfnff.cache_topology", "false"] + CURCUMA_EXTRA_FLAGS
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:

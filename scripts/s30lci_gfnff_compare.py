@@ -20,6 +20,7 @@ import csv
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -28,7 +29,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 TESTSET = REPO / "test_cases" / "s30lci_test_set"
 RUNDIR = TESTSET / "_run"
-CURCUMA = REPO / "release" / "curcuma"
+CURCUMA = Path(os.environ["CURCUMA"]) if os.environ.get("CURCUMA") else REPO / "release" / "curcuma"
+CURCUMA_EXTRA_FLAGS = shlex.split(os.environ.get("CURCUMA_EXTRA_FLAGS", ""))
 
 
 def find_xtb():
@@ -113,8 +115,11 @@ def parse_xtb_energy(stdout):
 
 
 def run_curcuma(xyz_path, charge):
+    # PI_STAR_STATUS.md (Sep 2026): -gfnff.cache_topology false -- see the matching comment in
+    # scripts/gmtkn55_compare.py::run_curcuma (a stale struc.topo.json trap, not specific to S30L-CI).
     cmd = [str(CURCUMA), "-sp", str(xyz_path), "-method", "gfnff",
-           "-charge", str(charge), "-verbosity", "0", "-no_bmt"]
+           "-charge", str(charge), "-verbosity", "0", "-no_bmt",
+           "-gfnff.cache_topology", "false"] + CURCUMA_EXTRA_FLAGS
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     return parse_curcuma_energy(proc.stdout), proc.stdout + proc.stderr
 
