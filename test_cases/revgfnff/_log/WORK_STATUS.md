@@ -3716,3 +3716,66 @@ not compiled (no SDK in this environment, as always).
 **Not done, by design**: the I2-/ClF- worktree was not touched — a separate Sonnet re-run task
 (the 9-job Cl- starting-guess recompute) is still in progress there; that merge is the remaining,
 final piece of the "consolidate all three X2- deepening threads" plan.
+
+# Side-thread — I2-/ClF- merged into `reactff2-llm` (2026-09-26)
+
+Third and last of the X2- deepening merges. Source: worktree `agent-a3f1d83a70348ee86`
+(based on `63a3e4de`), uncommitted state after the campaign, the harris-refit evaluation and the
+ClF- upper-state recompute (I2_CLF_STATUS.md sections 1-13). Not pushed. No doc synthesis here.
+
+**Commits**
+- Pre-merge tip `ceb9a74e` (binary T, md5 46d57285; same md5 as the O2-/S2- merge binary M2,
+  the two commits since only touch this file).
+- Worktree state committed on a new branch `feature/revgfnff-x2-i2-clf` in three commits:
+  `9348e888` reference data (I2 class-A RKS/UKS + geometry, I2- and the corrected ClF- DLPNO
+  curves, `revgfnff_ref.py` i2 entries), `67fd1e4e` the opt-in `frag_charge_atomic_ea` mechanism
+  (`gfnff.h`, `gfnff_frag_charge.cpp`, `gfnff_method.cpp`), `9160ecdf` the table rows + I2_CLF_STATUS.md.
+  The harris-order fix and the reference correction are not separate commits: the worktree held
+  only their final state (refit harris rows, corrected ClF- data), which is what went in.
+  Left out: `build_i2clf/`, the `_sp` scratch symlink, the `GMTKN55-testset` symlink, the ignored
+  `*.out.gz`.
+- Merge `836d1566` (binary N, md5 c16195e8).
+
+**Conflicts (3, all adjacent insertions, resolved as the union, no judgment call on content)**
+- `scripts/revgfnff_ref.py`: CURVES keeps both `("i2", ..., "I-I")` and `("s2", ..., "S=S")`; the
+  three `rcov` tables get both `"S": 1.03` and `"I": 1.33`.
+- `rev_well_table_v2.h`: I-I order-1 row placed after Br-Br, before the O2-/S2- note that the S-S
+  order-3 row was removed. That note's warning (a lone order row clamps every bond of that pair)
+  does not apply here: I-I gets an order-1 row, i.e. the ordinary single bond.
+- `rev_harris_table.h`: I-I and Cl-F rows inside the X2 block, before the O-O/S-S block.
+- All lookups in both tables are linear scans, so row order carries no meaning. Checked: the merge
+  vs. its first parent adds/removes exactly the branch's lines, except the three merged rcov lines.
+  The auto-merged `gfnff.h`/`gfnff_method.cpp`/`gfnff_frag_charge.cpp` have no residual difference.
+
+**Verification** (scratch `/home/conrad/src/curcuma_branches/merge_scratch_i2clf/`, `/tmp` was 99 %
+full again; same runners as the previous merge: fresh dir per structure, `-gfnff.cache_topology
+false`, `-threads 1`, bit-identical = within 1e-9 Eh; baseline = the M2 result files, whose binary
+has T's md5; `gf` and `rev` re-run on T reproduce them 0/2647)
+
+| check | result |
+|---|---|
+| GMTKN55 2462, 11 flag-off configs (gf rev sqe sqevp sqevpg flat rec recg flatpi recpi recgpi) | 0 / 2462 changed in each |
+| MOR41 95 + **S30L-CI 90** (first S30L-CI check for this thread), same 11 | gf 0/185; every revgfnff config exactly 1/185: **MOR41/I2 -21.50 kcal/mol** (the I-I order-1 row, not flag-gated; worktree: -21.50). S30L-CI 0/90 in all 11 |
+| **S-S leak re-check** (rev default, the arm the leaked S-S row hit) | 0 / 2462, i.e. 0 of the 168 S-containing structures |
+| iodine outside MOR41/I2 | 0 of the 45 I-containing GMTKN55 structures move in any config |
+| `frag_charge_atomic_ea` on: gf, rev, rec, rec+G+pi | 0 / 2462 and 0 / 185 in each (worktree: 0 moved) |
+| fit harness 1379 frames, 12 arms (C0 D0 H0, E/V/VG:H0, G:C0, G:H0, D0pi H0pi, V/VG:H0pi) | 1379 / 1379 identical in each; rec+VP loss 5391.91 as before |
+| fit harness, EA on (C0, H0, V:H0, V:H0pi) | 1379 / 1379 identical to EA off |
+| I2-/ClF- curves vs DLPNO, 6 configs, worktree binary G vs merged N | 246 points, max difference 4e-13 kcal/mol; table identical to I2_CLF_STATUS 12.1/13.7: I2- rec+VP full 13.49 / bonded 2.12; ClF- rec+VP+EA full 10.30 / bonded 8.41 / tail 11.90 / E(far) 0.00 |
+| `ctest` (release) | T 295/307, N 295/307; the same 12 failures (confscan_dtemplate, test_orca_interface, xtb_cpscf, cli_confscan_01..07, cli_simplemd_18, cli_simplemd_20) |
+
+The fit harness does not contain an I-I or Cl-F system, so it cannot see the new rows; the
+flag-on coverage for them is the curve table above plus the worktree's FD / up-vs-down / probe
+checks (I2_CLF_STATUS 9, 12.5), which were not repeated here since N reproduces G's energies.
+
+**For the operator**
+- The I-I order-1 row changes default `-method revgfnff` for every I-I bond (MOR41/I2 -21.5
+  kcal/mol). Intended by the worktree, but it is the one default-path change of the three merges.
+- No ctest covers `frag_charge_atomic_ea` or the I-I/Cl-F rows.
+- ClF- caveats from I2_CLF_STATUS 12.6 stand: EA flag required, bonded rms 8.4 (structural),
+  flat100 unusable for ClF-. The I2- r = 12 A reference point is still missing.
+- The ClF- `meta.json` does not mention the section-13 MORead recompute; provenance is in the
+  log and the commit message only. No class-L fragment entries (I, I-, Cl, Cl-, F, F-) were
+  committed; the worktree kept those energies in its scratch only.
+- `/tmp` was full again (995 MB free of 94 GB) at the start of this merge.
+- Worktree and branch `feature/revgfnff-x2-i2-clf` left in place.
