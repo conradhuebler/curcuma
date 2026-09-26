@@ -69,7 +69,9 @@ struct HarrisEntry {
 inline constexpr HarrisEntry kHarrisEntries[] = {
     { 17, 17, 115.8267243370, 120.0728512838, 0.7429824561 },   // Cl-Cl (Cl2-, DLPNO-CCSD(T))
     { 35, 35, 115.4623886836, 99.6617053206, 0.6835839599 },   // Br-Br (Br2-, DLPNO-CCSD(T), static bonded rms 1.69 LOO 2.14, react break 1.82) X2BR:harris
+    { 53, 53, 89.3328189456, 52.6698342651, 0.4756892231 },   // I-I (I2-, DLPNO-CCSD(T), static bonded rms 2.12 LOO 2.61, react break rms 2.02; refit on the final half row, I2_CLF_STATUS 12) X2I:harris
     { 9, 9, 212.2064031706, 238.6608379001, 1.3765664160 },     // F-F   (F2-,  DLPNO-CCSD(T))
+    { 9, 17, -11.8546099202, -198.5314773496, 0.0500000000 },    // Cl-F (ClF-, DLPNO-CCSD(T), static bonded rms 8.40 LOO 9.52, react break 6.94; refit on the final half row, c at grid bound = linear limit, I2_CLF_STATUS 12) X2CLF:harris
     // O-O / S-S: DLPNO-CCSD(T) O2- / S2- curves (PI_STAR_STATUS.md), kappa = 0 free-charge target
     // with the FINAL pi-excess well row baked in, bonded points only (O 12, r = 1.01-1.96 A; S 11,
     // r = 1.60-2.60 A). REFIT Sep 26, 2026 (section 12) after the well refit: the first O-O row

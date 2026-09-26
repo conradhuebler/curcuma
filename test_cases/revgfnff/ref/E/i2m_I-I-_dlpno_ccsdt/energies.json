@@ -1,0 +1,601 @@
+{
+ "class": "E",
+ "system": "i2m_I-I-_dlpno_ccsdt",
+ "tag": "I-I(-) rigid stretch, DLPNO-CCSD(T) SIE-free reference (Sep 2026 I2- campaign, I2_CLF_STATUS.md)",
+ "method": "DLPNO-CCSD(T) aug-cc-pVTZ-PP aug-cc-pVTZ-PP/C RIJCOSX def2/J TightSCF",
+ "charge": -1,
+ "mult": 2,
+ "n_points": 20,
+ "n_ok": 19,
+ "s2_ideal": 0.75,
+ "s2_flagged_points": [],
+ "grid_note": "Cl2- DLPNO grid (package 21) scaled by r_eq(I2)/r_eq(Cl2) = 2.716134/2.0315 (r2SCAN-3c), tail 6/7.5/9/12 A",
+ "fragment_energies_eh": {
+  "atom": -294.864677780441,
+  "atom_s2": 0.760823,
+  "anion": -294.980366679532,
+  "note": "minimum of the grid: r=3.2594 A, E - asymptote = -27.44 kcal/mol"
+ },
+ "points": [
+  {
+   "point": 0,
+   "label": "r=2.0371",
+   "energy_eh": -589.534312847007,
+   "s2": 0.751128,
+   "s2_linearized": 0.7500249,
+   "t1_diagnostic": 0.011860488,
+   "hirshfeld_charge_spin": [
+    [
+     -0.49999,
+     0.5
+    ],
+    [
+     -0.499989,
+     0.5
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.499999,
+     0.499999
+    ],
+    [
+     -0.500001,
+     0.500001
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 1,
+   "label": "r=2.1729",
+   "energy_eh": -589.660873567671,
+   "s2": 0.753023,
+   "s2_linearized": 0.7500556,
+   "t1_diagnostic": 0.016181816,
+   "hirshfeld_charge_spin": [
+    [
+     -0.49999,
+     0.500001
+    ],
+    [
+     -0.499988,
+     0.499999
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.499999,
+     0.499999
+    ],
+    [
+     -0.500001,
+     0.500001
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 2,
+   "label": "r=2.3087",
+   "energy_eh": -589.74583469182,
+   "s2": 0.761081,
+   "s2_linearized": 0.7501167,
+   "t1_diagnostic": 0.007663569,
+   "hirshfeld_charge_spin": [
+    [
+     -0.499991,
+     0.5
+    ],
+    [
+     -0.499991,
+     0.5
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.5,
+     0.5
+    ],
+    [
+     -0.5,
+     0.5
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 3,
+   "label": "r=2.4445",
+   "energy_eh": -589.802133160261,
+   "s2": 0.764876,
+   "s2_linearized": 0.7501791,
+   "t1_diagnostic": 0.0075987,
+   "hirshfeld_charge_spin": [
+    [
+     -0.499995,
+     0.5
+    ],
+    [
+     -0.499995,
+     0.5
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.5,
+     0.5
+    ],
+    [
+     -0.5,
+     0.5
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 4,
+   "label": "r=2.5803",
+   "energy_eh": -589.839211991211,
+   "s2": 0.766048,
+   "s2_linearized": 0.750208,
+   "t1_diagnostic": 0.007976679,
+   "hirshfeld_charge_spin": [
+    [
+     -0.499999,
+     0.5
+    ],
+    [
+     -0.499999,
+     0.5
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.5,
+     0.5
+    ],
+    [
+     -0.5,
+     0.5
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 5,
+   "label": "r=2.7161",
+   "energy_eh": -589.862717263508,
+   "s2": 0.766735,
+   "s2_linearized": 0.7502352,
+   "t1_diagnostic": 0.008047489,
+   "hirshfeld_charge_spin": [
+    [
+     -0.500003,
+     0.5
+    ],
+    [
+     -0.500003,
+     0.5
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.5,
+     0.5
+    ],
+    [
+     -0.5,
+     0.5
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 6,
+   "label": "r=2.8520",
+   "energy_eh": -589.876972986523,
+   "s2": 0.767491,
+   "s2_linearized": 0.7502503,
+   "t1_diagnostic": 0.008130257,
+   "hirshfeld_charge_spin": [
+    [
+     -0.500006,
+     0.5
+    ],
+    [
+     -0.500005,
+     0.5
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.5,
+     0.5
+    ],
+    [
+     -0.5,
+     0.5
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 7,
+   "label": "r=2.9877",
+   "energy_eh": -589.884815213304,
+   "s2": 0.768499,
+   "s2_linearized": 0.7502667,
+   "t1_diagnostic": 0.008233521,
+   "hirshfeld_charge_spin": [
+    [
+     -0.500006,
+     0.5
+    ],
+    [
+     -0.500006,
+     0.5
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.499999,
+     0.5
+    ],
+    [
+     -0.500001,
+     0.5
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 8,
+   "label": "r=3.2594",
+   "energy_eh": -589.888780464475,
+   "s2": 0.771417,
+   "s2_linearized": 0.7502913,
+   "t1_diagnostic": 0.00849605,
+   "hirshfeld_charge_spin": [
+    [
+     -0.500008,
+     0.5
+    ],
+    [
+     -0.500008,
+     0.5
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.5,
+     0.5
+    ],
+    [
+     -0.5,
+     0.5
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 9,
+   "label": "r=3.5309",
+   "energy_eh": -589.885109679127,
+   "s2": 0.775301,
+   "s2_linearized": 0.7503502,
+   "t1_diagnostic": 0.00895457,
+   "hirshfeld_charge_spin": [
+    [
+     -0.500008,
+     0.5
+    ],
+    [
+     -0.500008,
+     0.5
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.5,
+     0.5
+    ],
+    [
+     -0.5,
+     0.5
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 10,
+   "label": "r=3.6476",
+   "energy_eh": -589.882578973437,
+   "s2": 0.777146,
+   "s2_linearized": 0.7503708,
+   "t1_diagnostic": 0.009150969,
+   "hirshfeld_charge_spin": [
+    [
+     -0.500007,
+     0.5
+    ],
+    [
+     -0.500007,
+     0.5
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.5,
+     0.5
+    ],
+    [
+     -0.5,
+     0.5
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 11,
+   "label": "r=3.8026",
+   "energy_eh": -589.878832430511,
+   "s2": 0.779653,
+   "s2_linearized": 0.7503992,
+   "t1_diagnostic": 0.009353116,
+   "hirshfeld_charge_spin": [
+    [
+     -0.500012,
+     0.5
+    ],
+    [
+     -0.500012,
+     0.5
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.5,
+     0.5
+    ],
+    [
+     -0.5,
+     0.5
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 12,
+   "label": "r=4.0741",
+   "energy_eh": -589.872277835903,
+   "s2": 0.783913,
+   "s2_linearized": 0.7504555,
+   "t1_diagnostic": 0.009667393,
+   "hirshfeld_charge_spin": [
+    [
+     -0.500002,
+     0.499999
+    ],
+    [
+     -0.500002,
+     0.499999
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.5,
+     0.5
+    ],
+    [
+     -0.5,
+     0.5
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 13,
+   "label": "r=4.3458",
+   "energy_eh": -589.866517362158,
+   "s2": 0.787623,
+   "s2_linearized": 0.7505065,
+   "t1_diagnostic": 0.009894886,
+   "hirshfeld_charge_spin": [
+    [
+     -0.499971,
+     0.499998
+    ],
+    [
+     -0.499971,
+     0.499998
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.500001,
+     0.5
+    ],
+    [
+     -0.499999,
+     0.5
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 14,
+   "label": "r=4.8890",
+   "energy_eh": -589.85804237711,
+   "s2": 0.792453,
+   "s2_linearized": 0.7505663,
+   "t1_diagnostic": 0.010099954,
+   "hirshfeld_charge_spin": [
+    [
+     -0.499981,
+     0.500005
+    ],
+    [
+     -0.499981,
+     0.500004
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.5,
+     0.5
+    ],
+    [
+     -0.5,
+     0.5
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 15,
+   "label": "r=5.4323",
+   "energy_eh": -589.845518892533,
+   "s2": 0.784565,
+   "s2_linearized": 0.7505646,
+   "t1_diagnostic": 0.009371829,
+   "hirshfeld_charge_spin": [
+    [
+     -0.500006,
+     0.499999
+    ],
+    [
+     -0.500006,
+     0.499999
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.5,
+     0.5
+    ],
+    [
+     -0.5,
+     0.5
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 16,
+   "label": "r=6.0000",
+   "energy_eh": -589.844649176429,
+   "s2": 0.783143,
+   "s2_linearized": 0.7505463,
+   "t1_diagnostic": 0.009283049,
+   "hirshfeld_charge_spin": [
+    [
+     -0.500002,
+     0.5
+    ],
+    [
+     -0.500003,
+     0.499998
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.499999,
+     0.500001
+    ],
+    [
+     -0.500001,
+     0.499999
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 17,
+   "label": "r=7.5000",
+   "energy_eh": -589.842912300794,
+   "s2": 0.781047,
+   "s2_linearized": 0.7505261,
+   "t1_diagnostic": 0.00913802,
+   "hirshfeld_charge_spin": [
+    [
+     -0.500002,
+     0.500003
+    ],
+    [
+     -0.500002,
+     0.500003
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.5,
+     0.5
+    ],
+    [
+     -0.5,
+     0.5
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 18,
+   "label": "r=9.0000",
+   "energy_eh": -589.844091362593,
+   "s2": 0.782927,
+   "s2_linearized": 0.7504958,
+   "t1_diagnostic": 0.009272151,
+   "hirshfeld_charge_spin": [
+    [
+     -0.500008,
+     0.499994
+    ],
+    [
+     -0.500007,
+     0.499995
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.5,
+     0.5
+    ],
+    [
+     -0.5,
+     0.5
+    ]
+   ],
+   "uhf_stability": []
+  },
+  {
+   "point": 19,
+   "label": "r=12.0000",
+   "energy_eh": null,
+   "s2": 0.780402,
+   "s2_linearized": null,
+   "t1_diagnostic": null,
+   "hirshfeld_charge_spin": [
+    [
+     -0.499996,
+     0.500007
+    ],
+    [
+     -0.500006,
+     0.499996
+    ]
+   ],
+   "mulliken_charge_spin": [
+    [
+     -0.499995,
+     0.500005
+    ],
+    [
+     -0.500005,
+     0.499995
+    ]
+   ],
+   "uhf_stability": []
+  }
+ ]
+}
