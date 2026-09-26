@@ -1,0 +1,25 @@
+{
+ "date": "2026-09-25T22:12:16",
+ "host": "fjodor",
+ "curcuma_head": "63a3e4de",
+ "orca": "/opt/orca/orca",
+ "script": "scripts/revgfnff_ref.py",
+ "argv": [
+  "run",
+  "--classes",
+  "A",
+  "--only",
+  "i2",
+  "--jobs",
+  "2",
+  "--nprocs",
+  "4",
+  "--uks-inside-out",
+  "--slowconv"
+ ],
+ "orca_version": "6.0.0",
+ "keywords": "r2SCAN-3c TightSCF EnGrad",
+ "nprocs": 4,
+ "uks": true,
+ "broken_sym": true
+}

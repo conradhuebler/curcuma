@@ -1,0 +1,9 @@
+{
+ "date": "2026-09-26T14:28:50",
+ "host": "fjodor",
+ "orca": "/opt/orca/orca",
+ "orca_version": "6.0.0",
+ "keywords": "DLPNO-CCSD(T) aug-cc-pVTZ aug-cc-pVTZ/C RIJCOSX def2/J TightSCF",
+ "input_extra": "%pal nprocs 8 (4 for the atoms), %maxcore 3000, %shark PGCFlag 0, OMP_NUM_THREADS=1, Hirshfeld print; aug-cc-pVTZ / aug-cc-pVTZ/C all-electron non-relativistic (as cl2m/f2m); UHF StabPerform + StabRestartUHFifUnstable",
+ "note": "Operator-authorized campaign, see test_cases/revgfnff/_log/I2_CLF_STATUS.md."
+}

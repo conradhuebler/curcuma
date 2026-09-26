@@ -1,0 +1,9 @@
+{
+ "date": "2026-09-26T11:21:48",
+ "host": "fjodor",
+ "orca": "/opt/orca/orca",
+ "orca_version": "6.0.0",
+ "keywords": "DLPNO-CCSD(T) aug-cc-pVTZ-PP aug-cc-pVTZ-PP/C RIJCOSX def2/J TightSCF",
+ "input_extra": "%pal nprocs 8 (4 for the atoms), %maxcore 3000, %shark PGCFlag 0, OMP_NUM_THREADS=1, Hirshfeld print; aug-cc-pVTZ-PP / aug-cc-pVTZ-PP/C, 28-electron SK-MCDHF-RSC ECP (scalar-relativistic); no spin-orbit",
+ "note": "Operator-authorized campaign, see test_cases/revgfnff/_log/I2_CLF_STATUS.md."
+}
