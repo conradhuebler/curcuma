@@ -1,0 +1,7 @@
+{
+ "date": "2026-09-26",
+ "host": "fjodor",
+ "orca": "/opt/orca/orca",
+ "keywords": "DLPNO-CCSD(T) aug-cc-pVTZ aug-cc-pVTZ/C RIJCOSX def2/J TightSCF",
+ "note": "PI_STAR_STATUS.md campaign fragment: O DLPNO-CCSD(T) single point (PI_STAR_STATUS.md fragment anchor)"
+}
