@@ -3666,3 +3666,53 @@ cli_simplemd_20_gfnff_rev_h_budget.
 GMTKN55 and harness numbers above plus the worktree's FD checks. The PI_STAR caveats still apply
 (O + O- / S + S- recombination barrier, no reference beyond 2.16 / 3.15 A). The worktrees and their
 branches (`worktree-agent-a51e81dadcf7f4b52`, `feature/revgfnff-pistar-o2s2`) were left in place.
+
+# Side-thread — SN2-TS invariant fix and O2-/S2- consolidated into reactff2-llm (2026-09-26)
+
+Both ready threads merged into the real `reactff2-llm` branch, sequentially, each fully
+re-verified before the next started. New tip `723cf7d2`. Not pushed. Full detail in the
+consolidation agent's own commit messages and this file's own append (git log for exact hashes).
+
+**Both merges clean, no manual conflict resolution needed** — git merged every file
+automatically in both cases; the agent confirmed the added/removed lines match each source
+branch's own diff exactly (no silent content loss). Merge 1 (`686ddcd2`) brings in the SN2-TS
+`rev_sqe_group_pairs_only` fix (commit `b2588309`). Merge 2 (`3233958a`) brings in the O2-/S2-
+work, committed first as 3 clean commits on a new branch `feature/revgfnff-pistar-o2s2`
+(`2520711c` script topology-cache fix, `76ff250e` reference data + `revgfnff_ref.py` S2
+additions, `609ee8a1` the mechanism itself).
+
+**Falsifiers, all clean, both S30L-CI numbers verified for the FIRST TIME (data only exists in
+the main checkout, absent from both worktrees)**: GMTKN55 (2462) flag-off 0 changed in every
+config checked; MOR41+S30L-CI (185) flag-off 0/185 for both fixes; 1379-frame fit harness
+identical in every arm checked (12 total); flag-on effects match exactly what each worktree
+already reported (SN2-TS: the expected 15 GMTKN55 structures move, max +137.3 kcal/mol; O2-/S2-:
+only `EA_24`/`EA_20` move, +72.42/+18.38); harness loss 5391.91 -> 5097.97 with the SN2-TS flag,
+as expected; `ctest` 295/307, the same 12 known pre-existing failures both before and after each
+merge. **The S-S-leaks-into-default bug (found and fixed during the O2-/S2- evaluation) stays
+fixed through the merge**: 0/2462 GMTKN55 structures change with the flag off, including all 168
+sulfur-containing structures and S8 specifically.
+
+**A GPU-layout risk checked, not testable here**: the new `Bond::rev_pi_excess` field cannot
+reach the GPU code path (which copies bond fields individually and has no rev-gfnff branch at
+all) — consistent with rev-gfnff being CPU-only throughout this whole investigation; GPU code was
+not compiled (no SDK in this environment, as always).
+
+**Needs attention, flagged by the consolidation agent**:
+- **`/tmp` (94 GB RAM disk) was completely full again, mostly from OTHER Claude Code sessions on
+  this machine** — broke one test batch mid-consolidation (recovered, moved scratch to real disk
+  at `merge_scratch_20260926/`). This is the THIRD time this specific problem has hit this
+  investigation (earlier: the multi-gpu merge's build corruption; the O2-/S2- ORCA campaign). The
+  still-running ClF- ORCA re-run task was warned directly, mid-task, in case it is also affected.
+- No `ctest` covers `rev_pi_excess_electron` yet — a permanent regression-test gap, not urgent
+  (opt-in, fully covered by the falsifier suite above) but worth a dedicated CLI test eventually,
+  matching the pattern already set for `frag_charge_model`/stale-CN (`cli_gfnff_05`/`06`).
+- A cosmetic doc-comment typo ("section 12" vs the actual "section 11" of `PI_STAR_STATUS.md`)
+  noted via an added note rather than editing the comment (deliberately minimal footprint).
+- A small, pre-existing, NOT merge-caused runner discrepancy noted: plain GFN-FF vs xtb on
+  GMTKN55 comes out 0.854 here vs 0.859 in the multi-gpu merge's own log — identical before and
+  after both merges, so not a regression, likely a topology-cache-setting difference between
+  runner invocations; not investigated further (correctly out of scope).
+
+**Not done, by design**: the I2-/ClF- worktree was not touched — a separate Sonnet re-run task
+(the 9-job Cl- starting-guess recompute) is still in progress there; that merge is the remaining,
+final piece of the "consolidate all three X2- deepening threads" plan.
