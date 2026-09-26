@@ -1,0 +1,204 @@
+{
+ "class": "E",
+ "system": "s2m_S-S-_dlpno_ccsdt",
+ "tag": "S-S(-) rigid stretch, DLPNO-CCSD(T) (PI_STAR_STATUS.md campaign, Sep 2026)",
+ "method": "DLPNO-CCSD(T) aug-cc-pVTZ aug-cc-pVTZ/C RIJCOSX def2/J TightSCF",
+ "charge": -1,
+ "mult": 2,
+ "n_points": 20,
+ "n_ok": 13,
+ "max_wall_s": 0.0,
+ "s2_ideal": 0.75,
+ "s2_flagged_points": [],
+ "fragment_energies_eh": {
+  "atom": -397.656195942719,
+  "atom_s2": 2.012868,
+  "atom_hf_type": "UHF",
+  "anion": -397.7281013291,
+  "anion_s2": 0.763432,
+  "note": "fragment names: S radical, S- anion"
+ },
+ "points": [
+  {
+   "point": 0,
+   "label": "r=1.6000",
+   "energy_eh": -795.382244011386,
+   "s2": 0.774693,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 1,
+   "label": "r=1.7000",
+   "energy_eh": -795.453621295424,
+   "s2": 0.776135,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 2,
+   "label": "r=1.8000",
+   "energy_eh": -795.493850286184,
+   "s2": 0.77799,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 3,
+   "label": "r=1.9000",
+   "energy_eh": -795.513884449672,
+   "s2": 0.780292,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 4,
+   "label": "r=2.0000",
+   "energy_eh": -795.520899653425,
+   "s2": 0.783046,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 5,
+   "label": "r=2.1000",
+   "energy_eh": -795.519727208933,
+   "s2": 0.786208,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 6,
+   "label": "r=2.2000",
+   "energy_eh": -795.513459275536,
+   "s2": 0.789689,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 7,
+   "label": "r=2.3000",
+   "energy_eh": -795.504266261066,
+   "s2": 0.793372,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 8,
+   "label": "r=2.4000",
+   "energy_eh": -795.493438535557,
+   "s2": 0.797124,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 9,
+   "label": "r=2.5000",
+   "energy_eh": -795.482093429708,
+   "s2": 0.800835,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 10,
+   "label": "r=2.6000",
+   "energy_eh": -795.470868345257,
+   "s2": 0.804378,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 11,
+   "label": "r=2.8500",
+   "energy_eh": -795.444801232869,
+   "s2": 0.81206,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 12,
+   "label": "r=3.1500",
+   "energy_eh": -795.420223851572,
+   "s2": 0.818522,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 13,
+   "label": "r=3.5000",
+   "energy_eh": null,
+   "s2": null,
+   "hf_type": "UHF",
+   "orca_rc": -1,
+   "wall_s": 0.0
+  },
+  {
+   "point": 14,
+   "label": "r=3.9000",
+   "energy_eh": null,
+   "s2": null,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 15,
+   "label": "r=4.3500",
+   "energy_eh": null,
+   "s2": null,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 16,
+   "label": "r=4.8500",
+   "energy_eh": null,
+   "s2": null,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 17,
+   "label": "r=5.4000",
+   "energy_eh": null,
+   "s2": null,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 18,
+   "label": "r=5.9500",
+   "energy_eh": null,
+   "s2": null,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 19,
+   "label": "r=6.5000",
+   "energy_eh": null,
+   "s2": null,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  }
+ ],
+ "note_eval": "points 11/12 (r=2.85/3.15) added Sep 26, 2026 by the Opus evaluation (PI_STAR_STATUS.md section 12): they had converged in /var/tmp/pistar_ccsdt2 but the file was assembled before they finished"
+}

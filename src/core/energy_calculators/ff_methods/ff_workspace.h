@@ -809,7 +809,8 @@ private:
     /// (fc, exponent, z_i, z_j, rev_order) - rev_order is in the stamp because the
     /// bond-order-resolved table (form 3 / 'mg3') keys on it, and a rebuild can change it while
     /// leaving everything else alone. Claude Generated (Sep 20, 2026).
-    std::vector<std::array<double, 5>> m_rev_well_stamp;
+    /// + rev_pi_excess (Sep 25, 2026, P3 pi* prototype): it selects the pi-excess row.
+    std::vector<std::array<double, 6>> m_rev_well_stamp;
     int m_rev_well_stamp_form = -1;
     /// rev-gfnff 3a(ii) (Claude Generated, Sep 14, 2026): the SMOOTH 1,3 proxy - the genuineness
     /// g_p of every pair of the corner's bond list, in m_bonds order. A compact polyhedron's

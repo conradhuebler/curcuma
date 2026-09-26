@@ -3953,6 +3953,8 @@ std::string GFNFF::computeTopologyFingerprint() const
             data += ",xm=harris";
         if (m_rev_excess && m_rev_excess_react_consistent)
             data += ",xrc=1";
+        if (m_rev_pi_excess)   // P3 pi* prototype (Sep 25, 2026): changes the Phase-1 charges under flat
+            data += ",xpi=1";
     }
     // Use std::hash for a fast, non-cryptographic fingerprint
     size_t hash = std::hash<std::string>{}(data);
@@ -9213,6 +9215,15 @@ std::vector<Bond> GFNFF::generateBondsNative(const TopologyInfo& topo_info) cons
                     if (it != topo_info.rev_excess.end())
                         b.rev_order -= 0.5 * it->second;
                 }
+                // rev-gfnff P3 pi* prototype (Sep 25, 2026; _log/PI_STAR_STATUS.md): the pi*
+                // excess of a diatomic radical anion does NOT touch rev_order (every other bond
+                // of the pair keeps its order interpolation); the well blends to the pair's
+                // pi-excess row instead (FFWorkspace::prepareWellForms).
+                if (m_rev_pi_excess && !topo_info.rev_pi_excess.empty()) {
+                    auto it = topo_info.rev_pi_excess.find({ std::min(i, j), std::max(i, j) });
+                    if (it != topo_info.rev_pi_excess.end())
+                        b.rev_pi_excess = it->second;
+                }
 
                 bonds.push_back(b);
             }
@@ -13398,6 +13409,16 @@ void GFNFF::setupRevSettings()
             m_rev_sqe_phase1 = false;
             m_rev_excess = false;
         }
+        // P3 pi* prototype (Claude Generated, Sep 25, 2026; _log/PI_STAR_STATUS.md). Hardcoded
+        // fallback false = the PARAM default (see the AGENT_STATE "PARAM default" trap).
+        m_rev_pi_excess = m_parameters.value("rev_pi_excess_electron", false);
+        if (rev.contains("pi_excess_electron"))
+            m_rev_pi_excess = rev["pi_excess_electron"].get<bool>();
+        if (m_rev_pi_excess && !m_rev_excess) {
+            if (rv.enabled)
+                CurcumaLogger::warn("rev-gfnff: rev_pi_excess_electron needs rev_excess_electron true (and rev_charge_model sqe) - ignored");
+            m_rev_pi_excess = false;
+        }
         // Claude Generated (Sep 24, 2026; _log/P2P3_HARRIS_STATUS.md): the harris g(r) table is
         // fitted at kappa_Z = 0; any kappa_Z > 0 localises the charges by itself and g then
         // over-corrects (measured +128 / +225 kcal/mol in a react-mode Cl2- / F2- scan).
@@ -14446,12 +14467,84 @@ std::map<std::pair<int, int>, double> GFNFF::revExcessElectrons(const TopologyIn
     return out;
 }
 
+// P3 pi* prototype (Claude Generated, Sep 25, 2026; test_cases/revgfnff/_log/PI_STAR_STATUS.md).
+//
+// The sigma-slot budget above cannot see the extra electron of O2- / S2-: the neutral O=O bond
+// already satisfies the nominal valence 2 with its sigma + pi pair, and the third pi electron goes
+// into pi*, of a pi system the budget counts as saturated. GFN-FF's own Hueckel sees it - the ipis
+// correction raises the O2- pi count from 2 to 3 - but then discards it again through the "wrong
+// pi occupation" fallback (HOMO > 0.40 -> redo with nelpi - 1), so the continuous order stays 3,
+// exactly as for neutral O2. This perception is the diatomic special case of "one more pi electron
+// than the neutral bonding count", decided on topology constants only:
+//
+//   a bond-graph component of exactly two atoms i-j (each with one neighbour, the other),
+//   whose bond has a pi component (continuousBondOrder > 1), whose Phase-1 charge sum is -1
+//   (|Q + 1| < 1e-3: one excess electron; a dianion is NOT handled), on a pair with a
+//   calibrated pi-excess well row (RevWellTableV2::hasPiExcess), not already in rev_excess
+//   -> y_ij = 1.
+//
+// Everything else - any pi system of more than two atoms, aromatic radical anions, O2 2-, O2+ -
+// is deliberately out of scope and gets y = 0.
+std::map<std::pair<int, int>, double> GFNFF::revPiExcessElectrons(const TopologyInfo& topo) const
+{
+    std::map<std::pair<int, int>, double> out;
+    const int N = m_atomcount;
+    if (!m_rev_pi_excess || N < 2 || static_cast<int>(topo.neighbor_lists.size()) != N
+        || topo.topology_charges.size() != N)
+        return out;
+    const auto& nb = topo.neighbor_lists;
+    for (int i = 0; i < N; ++i) {
+        if (nb[i].size() != 1)
+            continue;
+        const int j = nb[i][0];
+        if (j <= i || j >= N || nb[j].size() != 1 || nb[j][0] != i)
+            continue;                                           // not an isolated diatomic
+        if (!RevWellTableV2::hasPiExcess(m_atoms[i], m_atoms[j]))
+            continue;
+        const std::pair<int, int> key { i, j };
+        if (topo.rev_excess.count(key))
+            continue;                                           // sigma side owns the pair
+        const double order = continuousBondOrder(i, j, topo);
+        if (!(order > 1.0 + 1e-6))
+            continue;                                           // no pi component
+        const double Q = topo.topology_charges(i) + topo.topology_charges(j);
+        if (std::abs(Q + 1.0) >= 1e-3)
+            continue;                                           // not exactly one excess electron
+        out[key] = 1.0;
+    }
+    if (CurcumaLogger::get_verbosity() >= 2)
+        for (const auto& [pr, y] : out)
+            CurcumaLogger::info(fmt::format("rev-gfnff P3 pi*: excess pi* electrons y = {:.4f} on bond {}-{} (order {:.3f}, pi-excess well row)",
+                y, pr.first + 1, pr.second + 1, continuousBondOrder(pr.first, pr.second, topo)));
+    return out;
+}
+
+// sigma excess x_ij + pi* excess y_ij of one pair. The split-charge consumers below (flat, frac,
+// harris) treat both the same way; the two maps never share a key (revPiExcessElectrons skips a
+// pair the sigma side perceived, and no element pair has both a half-order and a pi-excess row).
+double GFNFF::revExcessTotal(const TopologyInfo& topo, int i, int j) const
+{
+    const std::pair<int, int> key { std::min(i, j), std::max(i, j) };
+    double v = 0.0;
+    if (!topo.rev_excess.empty()) {
+        auto it = topo.rev_excess.find(key);
+        if (it != topo.rev_excess.end())
+            v += it->second;
+    }
+    if (m_rev_pi_excess && !topo.rev_pi_excess.empty()) {
+        auto it = topo.rev_pi_excess.find(key);
+        if (it != topo.rev_pi_excess.end())
+            v += it->second;
+    }
+    return v;
+}
+
 double GFNFF::revExcessKappa(const TopologyInfo& topo, int i, int j) const
 {
-    if (!m_rev_excess || m_rev_excess_frac || m_rev_excess_harris || topo.rev_excess.empty())
+    if (!m_rev_excess || m_rev_excess_frac || m_rev_excess_harris
+        || (topo.rev_excess.empty() && topo.rev_pi_excess.empty()))
         return 0.0;
-    auto it = topo.rev_excess.find({ std::min(i, j), std::max(i, j) });
-    return (it == topo.rev_excess.end()) ? 0.0 : it->second * m_rev_excess_kappa;
+    return revExcessTotal(topo, i, j) * m_rev_excess_kappa;
 }
 
 // P3 alternative "harris" (Claude Generated, Sep 24, 2026; _log/P2P3_HARRIS_STATUS.md): the
@@ -14460,10 +14553,9 @@ double GFNFF::revExcessKappa(const TopologyInfo& topo, int i, int j) const
 // workspace adds the non-self-consistent energy x_ij g(r_ij) instead (rev_harris_table.h).
 double GFNFF::revExcessHarrisX(const TopologyInfo& topo, int i, int j) const
 {
-    if (!m_rev_excess || !m_rev_excess_harris || topo.rev_excess.empty())
+    if (!m_rev_excess || !m_rev_excess_harris || (topo.rev_excess.empty() && topo.rev_pi_excess.empty()))
         return 0.0;
-    auto it = topo.rev_excess.find({ std::min(i, j), std::max(i, j) });
-    return (it == topo.rev_excess.end()) ? 0.0 : it->second;
+    return revExcessTotal(topo, i, j);
 }
 
 // P3 alternative "frac" (Claude Generated, Sep 23, 2026; _log/P2P3_ALTERNATIVES_STATUS.md):
@@ -14471,10 +14563,10 @@ double GFNFF::revExcessHarrisX(const TopologyInfo& topo, int i, int j) const
 // topology constant; unlike kappa_x it does not localise the charge (see EEQSolver::SqePair).
 double GFNFF::revExcessFracC(const TopologyInfo& topo, int i, int j) const
 {
-    if (!m_rev_excess || !m_rev_excess_frac || topo.rev_excess.empty())
+    if (!m_rev_excess || !m_rev_excess_frac || (topo.rev_excess.empty() && topo.rev_pi_excess.empty()))
         return 0.0;
-    auto it = topo.rev_excess.find({ std::min(i, j), std::max(i, j) });
-    return (it == topo.rev_excess.end()) ? 0.0 : std::min(it->second, 1.0) * m_rev_excess_frac_c;
+    const double x = revExcessTotal(topo, i, j);
+    return (x == 0.0) ? 0.0 : std::min(x, 1.0) * m_rev_excess_frac_c;
 }
 
 // P2: the Phase-1 topology charges under the split-charge model.
@@ -14495,6 +14587,7 @@ double GFNFF::revExcessFracC(const TopologyInfo& topo, int i, int j) const
 void GFNFF::revApplyPhase1Sqe(TopologyInfo& topo) const
 {
     topo.rev_excess.clear();
+    topo.rev_pi_excess.clear();
     topo.rev_sqe_q0.resize(0);
     if (!m_rev_settings.enabled || !m_rev_sqe || !(m_rev_sqe_phase1 || m_rev_excess))
         return;
@@ -14502,6 +14595,8 @@ void GFNFF::revApplyPhase1Sqe(TopologyInfo& topo) const
         return;
     if (m_rev_excess)
         topo.rev_excess = revExcessElectrons(topo);
+    if (m_rev_pi_excess)   // after the sigma map: a pair already perceived there is skipped
+        topo.rev_pi_excess = revPiExcessElectrons(topo);
     if (!m_rev_sqe_phase1)
         return;
 

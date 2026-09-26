@@ -1,0 +1,203 @@
+{
+ "class": "E",
+ "system": "o2m_O-O-_dlpno_ccsdt",
+ "tag": "O-O(-) rigid stretch, DLPNO-CCSD(T) (PI_STAR_STATUS.md campaign, Sep 2026)",
+ "method": "DLPNO-CCSD(T) aug-cc-pVTZ aug-cc-pVTZ/C RIJCOSX def2/J TightSCF",
+ "charge": -1,
+ "mult": 2,
+ "n_points": 20,
+ "n_ok": 14,
+ "max_wall_s": 0.0,
+ "s2_ideal": 0.75,
+ "s2_flagged_points": [],
+ "fragment_energies_eh": {
+  "atom": -74.978834124133,
+  "atom_s2": 2.009199,
+  "atom_hf_type": "UHF",
+  "anion": -75.027465583379,
+  "anion_s2": 0.770385,
+  "note": "fragment names: O radical, O- anion"
+ },
+ "points": [
+  {
+   "point": 0,
+   "label": "r=1.0125",
+   "energy_eh": -149.972896773834,
+   "s2": 0.779861,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 1,
+   "label": "r=1.0800",
+   "energy_eh": -150.055621277888,
+   "s2": 0.772701,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 2,
+   "label": "r=1.1475",
+   "energy_eh": -150.105935367854,
+   "s2": 0.775392,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 3,
+   "label": "r=1.2150",
+   "energy_eh": -150.134465604775,
+   "s2": 0.780607,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 4,
+   "label": "r=1.2825",
+   "energy_eh": -150.148249862942,
+   "s2": 0.787187,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 5,
+   "label": "r=1.3500",
+   "energy_eh": -150.152354427876,
+   "s2": 0.794719,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 6,
+   "label": "r=1.4175",
+   "energy_eh": -150.149964901021,
+   "s2": 0.802927,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 7,
+   "label": "r=1.4850",
+   "energy_eh": -150.143388299016,
+   "s2": 0.811575,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 8,
+   "label": "r=1.5525",
+   "energy_eh": -150.134248713352,
+   "s2": 0.82045,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 9,
+   "label": "r=1.6200",
+   "energy_eh": -150.123636749802,
+   "s2": 0.829344,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 10,
+   "label": "r=1.7550",
+   "energy_eh": -150.100949448198,
+   "s2": 0.846423,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 11,
+   "label": "r=1.9575",
+   "energy_eh": -150.069151459473,
+   "s2": 0.868545,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 12,
+   "label": "r=2.1600",
+   "energy_eh": -150.044032327811,
+   "s2": 0.885043,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  },
+  {
+   "point": 13,
+   "label": "r=2.4300",
+   "energy_eh": null,
+   "s2": 1.754306,
+   "hf_type": "UHF",
+   "orca_rc": -1,
+   "wall_s": 0.0
+  },
+  {
+   "point": 14,
+   "label": "r=2.7000",
+   "energy_eh": null,
+   "s2": null,
+   "hf_type": "UHF",
+   "orca_rc": -1,
+   "wall_s": 0.0
+  },
+  {
+   "point": 15,
+   "label": "r=3.2000",
+   "energy_eh": null,
+   "s2": 1.785751,
+   "hf_type": "UHF",
+   "orca_rc": -1,
+   "wall_s": 0.0
+  },
+  {
+   "point": 16,
+   "label": "r=4.0000",
+   "energy_eh": null,
+   "s2": 1.779248,
+   "hf_type": "UHF",
+   "orca_rc": -1,
+   "wall_s": 0.0
+  },
+  {
+   "point": 17,
+   "label": "r=5.0000",
+   "energy_eh": null,
+   "s2": 1.779612,
+   "hf_type": "UHF",
+   "orca_rc": -1,
+   "wall_s": 0.0
+  },
+  {
+   "point": 18,
+   "label": "r=6.0000",
+   "energy_eh": null,
+   "s2": 1.779665,
+   "hf_type": "UHF",
+   "orca_rc": -1,
+   "wall_s": 0.0
+  },
+  {
+   "point": 19,
+   "label": "r=7.5000",
+   "energy_eh": -149.907590473117,
+   "s2": 0.75208,
+   "hf_type": "UHF",
+   "orca_rc": 0,
+   "wall_s": 0.0
+  }
+ ]
+}

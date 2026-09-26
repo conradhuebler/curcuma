@@ -1,0 +1,19 @@
+{
+ "class": "L",
+ "system": "s_minus_dlpno_ccsdt",
+ "tag": "S- DLPNO-CCSD(T) single point (PI_STAR_STATUS.md fragment anchor)",
+ "method": "DLPNO-CCSD(T) aug-cc-pVTZ aug-cc-pVTZ/C RIJCOSX def2/J TightSCF",
+ "charge": -1,
+ "mult": 2,
+ "n_points": 1,
+ "n_ok": 1,
+ "points": [
+  {
+   "point": 0,
+   "label": "S",
+   "energy_eh": -397.7281013291,
+   "s2": 0.763432,
+   "hf_type": "UHF"
+  }
+ ]
+}

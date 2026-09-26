@@ -122,6 +122,11 @@ struct Bond {
     // per stage-1b corner, so it carries no geometry derivative: the well parameters it selects
     // are constants inside one energy call, exactly like fc and exponent.
     double rev_order = 0.0;
+    // rev-gfnff P3 pi* prototype (Claude Generated, Sep 25, 2026; _log/PI_STAR_STATUS.md): the
+    // perceived pi* excess y of a diatomic radical anion (O2-). 0 = not perceived (every bond
+    // unless rev_pi_excess_electron fires). A topology constant; the mg3 well blends towards
+    // the pair's pi-excess row with weight min(1, y). rev_order is left untouched.
+    double rev_pi_excess = 0.0;
 };
 
 struct Angle {
