@@ -630,3 +630,94 @@ characterised (a real energy jump, not just a cusp); P2's Phase-1 copy and P3's 
 react-corner capture are NOT covered by that fix, not yet checked for the same defect class. The
 n=2-systems scope caveat is resolved to n=3 (Br2-, package 31), with I2-/ClF- campaigns and an
 O2-/S2- pi*-detection design in progress as of package 33.
+
+## Consolidated state after the "deepen the X2- strand" dispatch (2026-09-26)
+
+Three follow-up investigations, each run as its own isolated-worktree plan/execute/evaluate cycle
+(Opus designs and evaluates, Sonnet executes the measurement campaign — a pattern that caught two
+real defects before they could ship, see below), are now all merged into `reactff2-llm`
+(`test_cases/revgfnff/_log/WORK_STATUS.md`'s side-thread entries have the full commit-by-commit
+record). **The mechanism now covers five halogen/interhalogen pairs plus a structurally distinct
+extension for two chalcogen pairs — all still opt-in, `gfnff` and the `revgfnff` default path
+both bit-identical throughout.**
+
+**SN2-TS invariant leak (`-gfnff.rev_sqe_group_pairs_only`, package 33)**: the 3 anionic-SN2-TS
+cases `rev_sqe_virtual_pairs` (package 31) could not fix were never a separate defect — the SQE
+pair list wasn't filtered by constraint-group membership, letting charge leak across a supposedly
+fixed boundary whenever 3+ fragments are in play (not just X2-, not just anions: 15 GMTKN55
+structures move at the DEFAULT `s_max=1.0` with `virtual_pairs` alone, 9 of them neutral).
+`rev_sqe_group_pairs_only` (used together with `virtual_pairs`) closes the fidelity invariant
+EXACTLY (2e-14 e) on every tested case, including all 3 remaining SN2-TS ones. Recommended
+addition to the X2- setting; genuinely improves the field's original headline target,
+`BH76_anionic` (73.8 -> 64.3 in the windowed/`harris` configuration) — but is NOT uniformly
+beneficial (in `harris` WITHOUT the window, the same fix makes `BH76_anionic` worse, 62.4 -> 76.2,
+since the leak had been accidentally helping there).
+
+**I2- and ClF- (`-gfnff.frag_charge_atomic_ea` for ClF-)**: n=2 is now n=4 (Cl2-/F2-/Br2-/I2-) plus
+the first HETERONUCLEAR case, ClF-. I2- is a clean, direct extension of the halogen recipe
+(bonded rms 2.12 kcal/mol, matching Br2-'s quality) once a real methodology bug was caught: the
+`harris` g(r) fit had been generated BEFORE the half-order well row was finalised, giving a
+badly-wrong fit for the new pairs specifically (this had been silently absorbed by Br2- only
+because that campaign happened to run the steps in the right order) — **new mandatory rule for any
+future element-pair extension: fit and build the well row first, rebuild, THEN generate `harris`
+fit data from that final binary, and check fit-rms == runtime-rms as a cheap sanity check.**
+ClF- needed a genuinely new mechanism: `frag_charge_model`'s existing carrier tie-break
+(topology-constant EEQ chemical potential) picks the WRONG atom for this pair (electronegativity
+and true electron affinity are oppositely ordered for Cl vs F) — `frag_charge_atomic_ea` (opt-in,
+uses tabulated experimental electron affinities instead, falls back to the existing rule for
+anything not a simple single-atom tie) fixes this; without it every isolated ClF- geometry sits
+51.4 kcal/mol above the model's own correct asymptote. A second, independent problem was found and
+fixed in the DLPNO-CCSD(T) reference itself: the SCF converged to the wrong (higher-energy) Cl+F-
+electronic state from r>=2.98 A onward, contaminating both the tail of the curve and the water-
+probe test; recomputed with a Cl--seeded fragment-guess restart for the 10 affected points (all
+10 confirmed converged to the correct, lower asymptote, verified against the model's own fragment
+energies). **With the corrected reference, the earlier apparent trade-off (EA fixes the asymptote
+but hurts the water-probe test) mostly disappears**: probe MAE for the recommended ClF- setting
+goes from 10.91 (against the OLD, contaminated reference) to 6.15 (against the corrected one) —
+EA is now a clear improvement on both metrics, not a trade-off. ClF-'s bonded-region rms (8.4
+kcal/mol, after the harris-order fix, up from a badly broken 86.5) remains the field's worst-
+fitting half-well, traced to the half-order row itself being anchored to the OLD flat100
+reference's wrong-atom charge placement — a 12 kcal/mol discontinuous step no smooth `g(r)` can
+follow; a cleaner fix (localise by electron affinity in the well-fitting reference too, not just
+in carrier selection) is sketched, not built.
+
+**O2- and S2- (`-gfnff.rev_pi_excess_electron`)**: a structurally NEW perception channel, not an
+extension of the existing sigma-valence-budget mechanism — the existing mechanism cannot see these
+species at all (superoxide/persulfide's extra electron sits in a pi* orbital of an
+ALREADY-SATISFIED pi system, invisible to sigma-slot counting; confirmed, not assumed, by
+inspecting GFN-FF's own Hückel solver). A NEW topology-level rule (fires on a 2-atom component
+with a pi-containing bond order and exactly one excess electron, itself a purely topological
+signal with no geometry derivative, same in kind as the sigma-side rule) feeds the SAME
+well/harris machinery already built for the halogen pairs. **A genuinely dangerous defect was
+caught by the evaluation step, not the execution step**: the first fitted S-S row leaked into
+DEFAULT `-method revgfnff` behaviour for every S-S bond regardless of the opt-in flag (19 GMTKN55
+structures moved, S8 by +104 kcal/mol) — the execution agent's own falsifier had wrongly reported
+"0 changed"; caught by independent re-verification and fixed before any of this reached
+`reactff2-llm`. A separate well-fit bug (reading r0 from a diagnostic that lacks the pair-CN
+correction the energy kernel actually applies) had also silently corrupted the fits (reported rms
+3.04, actual runtime rms 19.2) and was the real cause of an apparently degenerate `harris` fit
+(c=0.05 before the fix, 0.626 after) — not insufficient reference-data range as first suspected.
+Final quality: S2- bonded rms 0.28 (excellent), O2- 2.65 (after the fixes, was 5.83). **Two
+caveats, stated plainly, not swept under the rug**: not suitable for O+O-/S+S- recombination MD
+(a genuine, unexplained deep-bonded-region up-vs-down history dependence exists for O2-, 3.27
+kcal/mol at r=1.4-1.6 A — though found to be a PRE-EXISTING plain-rev-gfnff limitation, not
+specific to this mechanism, since unmodified rev-gfnff shows the identical 3.24 kcal/mol at the
+same geometry); no reference data beyond 2.16 A (O2-)/3.15 A (S2-), so no dissociation-limit
+behaviour is validated for either.
+
+**Recommended settings, as of this consolidation** (all opt-in, `rev_charge_model` stays `eeq` by
+default):
+- Cl2-/F2-/Br2-/I2-: `-gfnff.rev_charge_model sqe -gfnff.rev_sqe_phase1 true
+  -gfnff.rev_excess_electron true -gfnff.rev_excess_mode harris -gfnff.frag_charge_model ensemble
+  -gfnff.frag_charge_s_max 1.2 -gfnff.rev_sqe_virtual_pairs true -gfnff.rev_sqe_group_pairs_only true`
+- ClF-: the above, plus `-gfnff.frag_charge_atomic_ea true`.
+- O2-/S2-: the above (minus the halogen-specific `frag_charge_atomic_ea`), plus
+  `-gfnff.rev_pi_excess_electron true` — static/single-point use only, not recombination MD.
+
+**Still open**: P2's Phase-1 q0 copy and P3's react-corner capture were never checked for the same
+mu-cusp defect class fixed elsewhere (package 30); ClF-'s 8.4 kcal/mol bonded residual; no
+permanent `ctest` coverage yet for `rev_sqe_group_pairs_only`, `frag_charge_atomic_ea`, or
+`rev_pi_excess_electron`; the single-atom fragment reference energies for I/I-/Cl-/F- from the
+I2-/ClF- campaign were never committed (worktree scratch only); a recurring operational issue this
+whole dispatch ran into repeatedly — a shared `/tmp` filled by OTHER, unrelated sessions on this
+machine, four separate times — is a standing infrastructure risk, not a code issue.
