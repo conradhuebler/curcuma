@@ -1,6 +1,6 @@
 /*
  * <GFN-FF Implementation for Curcuma>
- * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -1366,6 +1366,15 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         if (m_workspace) {
             m_workspace->setGeometry(m_geometry_bohr);
             m_workspace->setD3CN(m_last_cn);
+            // Stale-CN fix A (Claude Generated, Sep 2026, Known Issue #32): the Coulomb
+            // self-energy reads chi(CN) = chi_base + cnf*sqrt(CN) from the workspace's m_cn,
+            // which only the gradient branch below used to set (setCNDerivatives). An
+            // energy-only call on a reused calculator therefore evaluated the EN term with the
+            // CN of the last gradient geometry, or with the topology-build CN (chi_static) if
+            // there was none. Hand the current CN over on every call. Static-CN mode is
+            // unaffected: there m_last_cn is the captured CN (reuse_cn skips the recompute
+            // above), which is exactly what the gradient path would have handed over too.
+            m_workspace->setCN(m_last_cn);
         }
     }
 
@@ -1583,6 +1592,54 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
                 }
             }
         }
+    }
+
+    // Stale-CN fix B (Claude Generated, Sep 2026, Known Issue #32): refresh the per-pair D4
+    // C6(CN) at the current CN. The pair list's C6 was baked once in
+    // generateGFNFFParameterSet() (Gaussian CN weights of the topology-build geometry) and
+    // never updated, while the analytic gradient already carries dC6/dCN (m_dc6dcn_ptr) and the
+    // reference evaluates C6(CN) every call (gfnff_engrad.F90:323, d3_gradient(..., cn, dcn,
+    // ...)). On a reused calculator (MD, opt, FD, batch reuse) the energy was therefore a
+    // frozen-C6 energy whose derivative is not the force. Only the Gaussian weights and the C6
+    // half-contraction are rebuilt here (refreshC6WeightsForCN); the dc6dcn DERIVATIVE stays
+    // owned by updateCNValuesForGradient. Static-CN mode keeps its frozen C6 (reuse_cn).
+    // -gfnff.dispersion_c6_update false restores the old frozen-C6 behaviour.
+    if (!gpu_only && !reuse_cn && m_d4_generator && m_workspace && m_last_cn.size() == m_atomcount
+        && m_parameters.value("dispersion_c6_update", true)) {
+        bool weights_fresh = false;
+        auto t_c6 = std::chrono::high_resolution_clock::now();
+        auto* pool = threadPool();
+        m_workspace->forEachD4PairList([&](std::vector<GFNFFDispersion>& d4_pairs) {
+            if (!weights_fresh) {
+                if (pool) pool->setActiveThreadCount(m_threads);
+                std::vector<double> cn_std(m_last_cn.data(), m_last_cn.data() + m_atomcount);
+                m_d4_generator->refreshC6WeightsForCN(cn_std, pool, m_threads);
+                weights_fresh = true;
+            }
+            // getChargeWeightedC6 is const and reads only per-atom caches: pairs are independent.
+            const int np = static_cast<int>(d4_pairs.size());
+            auto c6_worker = [&](int t_id, int T) {
+                const int b = static_cast<int>(static_cast<long long>(np) * t_id / T);
+                const int e = static_cast<int>(static_cast<long long>(np) * (t_id + 1) / T);
+                for (int k = b; k < e; ++k) {
+                    auto& d = d4_pairs[k];
+                    d.C6 = m_d4_generator->getChargeWeightedC6(m_atoms[d.i], m_atoms[d.j], d.i, d.j);
+                }
+            };
+            const int T = (pool && m_threads > 1 && np > 4096) ? m_threads : 1;
+            if (T > 1) {
+                std::vector<std::future<void>> futures;
+                futures.reserve(T - 1);
+                for (int t = 1; t < T; ++t)
+                    futures.push_back(pool->enqueue(c6_worker, t, T));
+                c6_worker(0, T);
+                for (auto& f : futures) f.get();
+            } else {
+                c6_worker(0, 1);
+            }
+        });
+        if (do_timing && weights_fresh)
+            t_d4_gw += std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_c6).count();
     }
 
     // WP-P1 (May 2026): cache phase-timings into a member so MD diagnostics can read them
@@ -10578,6 +10635,14 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
         d4_input["d4_s9"] = 1.00;
         // Lever 3 Opt B: plumb the user-facing gfnff flag down to the generator.
         d4_input["d4_disp_half_contraction"] = m_parameters.value("disp_half_contraction", true);
+        // Claude Generated (Sep 2026, Known Issue #32): with the per-call C6 refresh
+        // (dispersion_c6_update, "stale-CN fix B" in prepareCNAndEEQ) the Gaussian weights feed
+        // the ENERGY, not only dC6/dCN. The generator's CN-change cache (d4_cn_cache_threshold,
+        // default 0.01) would then let the gradient's dC6/dCN be built at a lagging CN while
+        // the energy's C6 uses the current one. So GFN-FF disables that cache unless the user
+        // set it explicitly (-d4param.d4_cn_cache_threshold).
+        if (m_parameters.value("dispersion_c6_update", true) && !d4_input.contains("d4_cn_cache_threshold"))
+            d4_input["d4_cn_cache_threshold"] = 0.0;
 
         ConfigManager d4_config("d4param", d4_input);
         m_d4_generator = std::make_unique<D4ParameterGenerator>(d4_config);
@@ -11362,7 +11427,9 @@ Matrix GFNFF::NumGradFixedCharges(double dx)
     auto energy_at = [&]() {
         auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
         m_workspace->setGeometry(m_geometry_bohr);
-        m_workspace->setD3CN(Vector::Map(cn_vec.data(), cn_vec.size()).eval());
+        const Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
+        m_workspace->setD3CN(cn);
+        m_workspace->setCN(cn);  // stale-CN fix A (Sep 2026): the chi(CN) self-energy term too
         return m_workspace->calculate(false);
     };
     for (int i = 0; i < m_atomcount; ++i) {

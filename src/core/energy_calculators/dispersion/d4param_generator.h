@@ -1,6 +1,6 @@
 /*
  * DFT-D4 Parameter Generator for Curcuma
- * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -103,6 +103,15 @@ public:
     // @param skip_dc6dcn  If true, skip O(N²) dc6dcn matrix (GPU computes per-pair)
     void updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool = nullptr,
                                     int num_threads = 1, bool skip_dc6dcn = false);
+
+    /**
+     * @brief Refresh Gaussian CN-weights and the C6 half-contraction at new CN values, energy-only.
+     * Claude Generated (Sep 2026, Known Issue #32): weights + half-contraction only; dgw/dc6dcn
+     * (gradient-only) stay owned by updateCNValuesForGradient. Lets a reused calculator's
+     * energy-only call see the current CN in getChargeWeightedC6() without paying for gradient
+     * derivatives it doesn't need.
+     */
+    void refreshC6WeightsForCN(const std::vector<double>& cn, CxxThreadPool* pool = nullptr, int num_threads = 1);
     const Matrix& getDC6DCN() const { return m_dc6dcn; }
 
     // Claude Generated (March 2026): GPU dc6dcn Phase 2 — expose weight arrays

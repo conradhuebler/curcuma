@@ -270,6 +270,22 @@ endif()
 add_test(NAME test_gfnff_topology_reentrancy
          COMMAND test_gfnff_topology_reentrancy ${CMAKE_SOURCE_DIR}/test_cases)
 
+# Claude Generated (Sep 2026, Known Issue #32): energy-only calls on a reused GFN-FF
+# calculator must use their own CN (Coulomb chi(CN)) and D4 C6, not the last gradient
+# call's. Checks FD-vs-analytic via NumGrad (reused energy-only calls), energy-only vs
+# gradient call at one geometry, and reused vs fresh Coulomb / total / D4 dispersion
+# energies (the last two fail when only the CN fix, not the C6 refresh, is present).
+add_executable(test_gfnff_stale_cn test_gfnff_stale_cn.cpp)
+target_link_libraries(test_gfnff_stale_cn curcuma_core test_molecule_registry)
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_stale_cn REUSE_FROM curcuma_core)
+endif()
+add_test(NAME gfnff_stale_cn_energy_only
+         COMMAND test_gfnff_stale_cn
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(gfnff_stale_cn_energy_only
+    PROPERTIES TIMEOUT 300 LABELS "gfnff;stale_cn")
+
 # Claude Generated: PolymerBuild sequence parser tests (prime notation)
 add_executable(test_polymerbuild_sequence
         test_polymerbuild_sequence.cpp)

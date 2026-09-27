@@ -2005,6 +2005,15 @@ void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& 
     m_cn_cached = true;
 }
 
+// Claude Generated (Sep 2026, Known Issue #32): stale-CN fix B — see header. Weights +
+// half-contraction only; dgw / dc6dcn (gradient-only) stay owned by updateCNValuesForGradient.
+void D4ParameterGenerator::refreshC6WeightsForCN(const std::vector<double>& cn, CxxThreadPool* pool, int num_threads)
+{
+    m_cn_values = cn;
+    precomputeGaussianWeights(pool, num_threads);
+    precomputeC6HalfContraction(pool, num_threads);
+}
+
 // Claude Generated (Apr 2026): P1a — CN-change threshold check for Gaussian weight caching
 bool D4ParameterGenerator::canSkipGaussianWeightsUpdate(const std::vector<double>& new_cn) const
 {

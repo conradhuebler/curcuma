@@ -83,6 +83,23 @@ namespace TestMolecules {
             }
         },
         {
+            // Claude Generated (Sep 2026): dichlorine at 2.73 A, the GMTKN55 G21EA/EA_25
+            // (Cl2-) geometry. Used as the radical anion (charge -1) by
+            // test_gfnff_stale_cn; no reference energies.
+            "Cl2", {
+                .name = "Cl2",
+                .description = "Dichlorine at 2.73 A (GMTKN55 G21EA/EA_25 geometry)",
+                .category = "dimers",
+                .atoms = {
+                    {17, Eigen::Vector3d(0.000000, 0.000000, 0.000000)},
+                    {17, Eigen::Vector3d(2.730000, 0.000000, 0.000000)}
+                },
+                .reference_energies = {},
+                .tolerances = {},
+                .atom_count = 2
+            }
+        },
+        {
             "CH4", {
                 .name = "CH4",
                 .description = "Methane from CH4.xyz",

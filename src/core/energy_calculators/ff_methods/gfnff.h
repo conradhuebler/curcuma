@@ -1,6 +1,6 @@
 /*
  * <GFN-FF Implementation for Curcuma>
- * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -278,6 +278,7 @@ PARAM(static_all, Bool, false,
 PARAM(eeq_distance_cutoff_auto, Bool, false,
       "Auto-enable eeq_distance_cutoff=30 Bohr after Phase-1 when nfrag==1 and max|q|<0.5 e. Saves ~12 ms/step polymer. Falls back to 0.0 for ionic/multi-fragment systems.", "Performance", {})
 PARAM(dispersion_cutoff_bohr, Double, 0.0, "Cutoff (Bohr) for D4 dispersion pair-list. 0 = full O(N^2) (Fortran-parity). Recommended for large systems: 15.0. Energy drift < 1 muEh at 15 Bohr. When active, CN-derivative stencil is extended to cover the cutoff range.", "Performance", {})
+PARAM(dispersion_c6_update, Bool, true, "Recompute every stored D4 pair C6 from the current coordination numbers on every evaluation (stale-CN fix B, Known Issue #32). Before this fix C6 stayed at the setup geometry while the dispersion gradient already used dC6/dCN at the current CN, so a reused calculator (optimisation, MD, finite differences, batch reuse) evaluated a frozen-C6 energy that did not match a single point at the same geometry. Single points are unaffected. false restores the old frozen-C6 behaviour for comparisons.", "Algorithm", {})
 PARAM(disp_half_contraction, Bool, true,
       "Lever 3 Opt B: per-atom half-contraction fast path for the D4 dispersion C6 and dc6dcn build. About 7x faster inner contraction on large systems; reassociates the FP sum at ~1e-16 so energy matches to ~1e-10 Eh and gradient to ~1e-7. Set false for strictly bit-identical reproductions.", "Performance", {})
 PARAM(eeq_refactor_eps_bohr, Double, 0.05,
