@@ -1,6 +1,7 @@
 /*
  * <Optimizer Driver Implementation - Template Method Pattern>
- * Copyright (C) 2025 Claude AI - Generated Code
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Claude Generated (AI-written code, operator-owned)
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -397,8 +398,28 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
         fmt::print("{0: ^{1}} {2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}}\n", " ", 15, "[Eh]", "[kJ/mol]", "[A]", "[Eh/Bohr]", "[s]");
     }
 
+    // Last accepted structure: for the RMSD between consecutive steps, and what every abort
+    // returns. Claude Generated (Sep 2026): the abort paths below used to return a result with
+    // NO molecule, so a GFN-FF optimisation of a 6200-atom cluster that ran 2015 steps and then
+    // hit "Energy rise exceeded" left nothing behind. m_molecule cannot be used for this - the
+    // LBFGSpp path writes the step under evaluation into it before the energy-rise check - so the
+    // state is taken from previous_molecule / m_current_energy / m_current_gradient, which only
+    // change once a step has been accepted.
+    Molecule previous_molecule = m_molecule;
+    auto failed_with_last = [&](const std::string& why) {
+        OptimizationResult r = OptimizationResult::failed_result(why);
+        Molecule last = previous_molecule;
+        last.setEnergy(m_current_energy);
+        r.final_molecule = last;
+        r.final_energy = m_current_energy;
+        r.final_gradient = m_current_gradient;
+        r.final_gradient_norm = m_current_gradient.norm();
+        r.final_energy_change = (m_current_energy - m_initial_energy) * CURCUMA_EH_TO_KJMOL;
+        r.iterations_performed = std::max(0, m_current_iteration - 1);
+        return r;
+    };
+
     try {
-        Molecule previous_molecule = m_molecule; // For RMSD between consecutive steps
         auto step_start_time = std::chrono::high_resolution_clock::now(); // For per-step timing
 
         // Track last step metrics for convergence reporting
@@ -441,7 +462,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             } else if (!evaluateEnergyAndGradient(new_coords, new_energy, new_gradient)) {
                 CurcumaLogger::set_verbosity(saved_global_verbosity);
                 CurcumaLogger::error_fmt("Energy evaluation failed at iteration {}", m_current_iteration);
-                return OptimizationResult::failed_result("Energy evaluation failed during optimization");
+                return failed_with_last("Energy evaluation failed during optimization");
             }
 
             // Check for energy rise limit
@@ -450,7 +471,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
                 CurcumaLogger::set_verbosity(saved_global_verbosity);
                 CurcumaLogger::warn_fmt("Energy rise ({:.2f} kJ/mol) exceeds limit ({:.1f} kJ/mol)",
                     energy_change_kjmol, m_context.max_energy_rise);
-                return OptimizationResult::failed_result("Energy rise exceeded maximum allowed");
+                return failed_with_last("Energy rise exceeded maximum allowed");
             }
 
             // Update molecule geometry
@@ -579,7 +600,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
     } catch (const std::exception& e) {
         CurcumaLogger::set_verbosity(saved_global_verbosity);
         CurcumaLogger::error_fmt("Optimization failed with exception: {}", e.what());
-        return OptimizationResult::failed_result(e.what());
+        return failed_with_last(e.what());
     }
 }
 

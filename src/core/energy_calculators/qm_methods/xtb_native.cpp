@@ -27,6 +27,7 @@
 
 #include "STO_CGTO.hpp"
 #include "src/core/curcuma_logger.h"
+#include "src/core/molecule.h"  // Molecule::GetFragments for the fragment SCF guess (Sep 2026)
 #include "src/core/citation_registry.h"
 #include "src/core/config_manager.h"
 #include "src/core/charge_extrapolation.h"
@@ -273,6 +274,97 @@ bool XTB::seedEEQGuess(Vector& q_sh_out)
                                    m_basis.nsh_at[iat] > 0 ? m_basis.nsh_at[iat] : 1));
         q_sh_out(s) = q_at(iat) * w;
     }
+    return true;
+}
+
+/* ------------------------------------------------------------------------- *
+ *  Fragment initial guess (Claude Generated, Sep 2026; operator's proposal).
+ *
+ *  Large clusters of many small molecules (mixture2: 1000 water + 400 urea,
+ *  6200 atoms) have a tiny GFN2 HOMO-LUMO gap (~0.1 eV per xtb 6.7.1), and the
+ *  first Fock matrix built from EEQ or bare-H0 charges moves up to ~2.5 e
+ *  between distant molecules; the SCF then runs away (measured: energy
+ *  +2e5 Eh by iteration 3, on CPU and GPU, FP32 and FP64). Starting from the
+ *  converged state of every isolated molecule puts iteration 0 next to the
+ *  physical solution. Each fragment is converged in its actual geometry, so the
+ *  GFN2 atomic dipoles/quadrupoles are already in the lab frame - no rotation
+ *  or molecule-type matching needed. Fragments = Molecule::GetFragments(), the
+ *  same partition large_system_mode=fragments uses.
+ * ------------------------------------------------------------------------- */
+bool XTB::seedFragmentGuess(Vector& q_sh_out, Matrix& dp_out, Matrix& qp_out)
+{
+    const int nsh = m_basis.nsh;
+    const int nat = m_atomcount;
+    if (nat <= 0 || nsh <= 0)
+        return false;
+    // A net charge cannot be assigned to fragments unambiguously - same limitation as
+    // large_system_mode=fragments. The caller falls back to the EEQ guess.
+    if (std::abs(static_cast<double>(m_charge)) > 1.0e-12)
+        return false;
+
+    const auto t0 = std::chrono::high_resolution_clock::now();
+
+    Mol full;
+    full.m_number_atoms = nat;
+    full.m_charge = 0;
+    full.m_spin = 0.0;
+    full.m_atoms = m_atoms;
+    full.m_geometry = m_geometry;
+    const std::vector<std::vector<int>> fragments = Molecule(full).GetFragments();
+    if (fragments.size() <= 1)
+        return false;
+
+    q_sh_out = Vector::Zero(nsh);
+    dp_out = Matrix::Zero(3, nat);
+    qp_out = Matrix::Zero(6, nat);
+
+    // The fragment SCFs are an implementation detail of the guess: keep their output
+    // (one SCF table per fragment) out of the log, restore the level afterwards.
+    const int saved_verbosity = CurcumaLogger::get_verbosity();
+    CurcumaLogger::set_verbosity(0);
+    bool ok = true;
+    int max_iter = 0, not_converged = 0;
+    for (const auto& atoms : fragments) {
+        Mol sub;
+        sub.m_number_atoms = static_cast<int>(atoms.size());
+        sub.m_charge = 0;
+        sub.m_spin = 0.0;
+        sub.m_geometry = Matrix(atoms.size(), 3);
+        for (std::size_t k = 0; k < atoms.size(); ++k) {
+            sub.m_atoms.push_back(m_atoms[atoms[k]]);
+            sub.m_geometry.row(k) = m_geometry.row(atoms[k]);
+        }
+        XTB frag(m_method);
+        frag.setScfGuess("eeq");   // never recurse into the fragment guess
+        frag.setIntraThreads(1);
+        if (!frag.InitialiseMolecule(sub)) { ok = false; break; }
+        frag.Calculation(false);
+        if (!frag.m_wfn.q_sh.allFinite()) { ok = false; break; }
+        max_iter = std::max(max_iter, frag.m_scf_iterations);
+        if (!frag.m_scf_converged) ++not_converged;
+        for (std::size_t k = 0; k < atoms.size(); ++k) {
+            const int a = atoms[k];
+            const int n = m_basis.nsh_at[a];
+            if (frag.m_basis.nsh_at[k] != n) { ok = false; break; }
+            q_sh_out.segment(m_basis.ish_at[a], n) = frag.m_wfn.q_sh.segment(frag.m_basis.ish_at[k], n);
+            if (m_method == MethodType::GFN2) {
+                dp_out.col(a) = frag.m_wfn.dp_at.col(k);
+                qp_out.col(a) = frag.m_wfn.qp_at.col(k);
+            }
+        }
+        if (!ok) break;
+    }
+    CurcumaLogger::set_verbosity(saved_verbosity);
+    if (!ok)
+        return false;
+
+    const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::high_resolution_clock::now() - t0).count();
+    if (saved_verbosity >= 1)
+        CurcumaLogger::result(fmt::format(
+            "SCF initial guess: {} fragments converged separately ({:.0f} ms, <= {} iterations{})",
+            fragments.size(), ms, max_iter,
+            not_converged ? fmt::format(", {} not converged", not_converged) : std::string()));
     return true;
 }
 
@@ -680,9 +772,31 @@ double XTB::Calculation(bool gradient)
         }
         if (verb >= scf_min)
             CurcumaLogger::result("SCF initial guess: warm-start from previous step");
-    } else if (m_scf_guess == "eeq" && !m_force_h0_guess) {
+    } else if ((m_scf_guess == "eeq" || m_scf_guess == "fragments") && !m_force_h0_guess) {
+        bool seeded = false;
+        if (m_scf_guess == "fragments") {
+            Vector q_sh_guess;
+            Matrix dp_guess, qp_guess;
+            if (seedFragmentGuess(q_sh_guess, dp_guess, qp_guess)) {
+                q_sh_old   = q_sh_guess;
+                m_wfn.q_sh = q_sh_guess;
+                m_wfn.q_at.setZero(m_atomcount);
+                for (int s = 0; s < nsh; ++s)
+                    m_wfn.q_at(m_basis.sh2at[s]) += q_sh_guess(s);
+                if (m_method == MethodType::GFN2) {
+                    m_wfn.dp_at = dp_guess;
+                    m_wfn.qp_at = qp_guess;
+                }
+                seeded = true;
+            } else if (verb >= scf_min) {
+                CurcumaLogger::warn("Fragment initial guess unavailable (one fragment, charged "
+                                    "system or a failed fragment SCF); using the EEQ guess");
+            }
+        }
         Vector q_sh_guess;
-        if (seedEEQGuess(q_sh_guess)) {
+        if (seeded) {
+            // fragment guess set above
+        } else if (seedEEQGuess(q_sh_guess)) {
             q_sh_old   = q_sh_guess;
             m_wfn.q_sh = q_sh_guess;
             m_wfn.q_at.setZero(m_atomcount);

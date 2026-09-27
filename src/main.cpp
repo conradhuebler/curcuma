@@ -2075,10 +2075,15 @@ int executeOptimization(const json& controller, int argc, char** argv) {
                 // path below uses final_molecule for the same reason.
                 if (result.final_molecule.AtomCount() > 0) {
                     result.final_molecule.writeXYZFile(output_file);
-                    CurcumaLogger::warn_fmt("Last geometry written anyway to: {} (E = {:.8f} Eh, "
-                                            "|grad| = {:.6f}) - NOT a converged minimum",
-                                            output_file, result.final_energy,
-                                            result.final_gradient_norm);
+                    // Since Sep 2026 every abort returns the last accepted structure (or the
+                    // input, if the optimiser never started); energy/|grad| are NaN when unknown.
+                    auto num = [](double v, const char* f) {
+                        return std::isfinite(v) ? fmt::format(fmt::runtime(f), v) : std::string("n/a");
+                    };
+                    CurcumaLogger::warn_fmt("Last geometry written anyway to: {} (E = {} Eh, "
+                                            "|grad| = {}) - NOT a converged minimum",
+                                            output_file, num(result.final_energy, "{:.8f}"),
+                                            num(result.final_gradient_norm, "{:.6f}"));
                     std::vector<std::string> bak_files = BMTUtils::collectBakFiles(controller);
                     BMTUtils::processBakFiles(bmt_dir, bak_files);
                 } else {

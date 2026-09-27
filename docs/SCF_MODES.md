@@ -47,8 +47,31 @@ converges stiff systems like `complex` where Fock-DIIS diverges.
 
 | Guess  | Behaviour                                                                  |
 |--------|---------------------------------------------------------------------------|
-| `h0`   | Bare Hamiltonian (zero shell charges) at iter 0. **Default.**             |
-| `eeq`  | Single-shot dftd4 EEQ atomic charges (`curcuma::dispersion::D4ChargeModel`), partitioned across shells by reference occupations. Starts the SCF in the correct basin. |
+| `eeq`  | Single-shot dftd4 EEQ atomic charges (`curcuma::dispersion::D4ChargeModel`), partitioned across shells by reference occupations (q_sh = q_A n0_sh / n0_A). Starts the SCF in the correct basin. **Default** (`native_xtb_method.h`). |
+| `h0`   | Bare Hamiltonian (zero shell charges) at iter 0. |
+| `fragments` | (Sep 2026, opt-in) Converge every covalently bonded fragment on its own (`Molecule::GetFragments`, same partition as `large_system_mode fragments`) and start from their shell charges and GFN2 atomic dipoles/quadrupoles, each in its real geometry. Neutral systems only, else falls back to `eeq`. See "Large clusters" below: correct, but not faster where it was tried. |
+
+No guess builds a density matrix: the GFN Fock matrix depends only on the SCC vector (shell
+charges, GFN2 atomic multipoles), so iteration 0 builds H from the guess and diagonalises.
+
+### Large clusters of small molecules (measured Sep 2026)
+
+`mixture2.xyz` (1000 water + 400 urea, 6200 atoms, packed): the GFN2 vacuum SCF of the **as-packed**
+geometry runs away (energy +2e5 Eh by iteration 3) on CPU and GPU, FP32 and FP64, with the `eeq`
+and the `h0` guess. Cut spheres show why: already iteration 1 moves up to ~2.3 e between
+molecules (charge sloshing across a HOMO-LUMO gap of ~0.1 eV per xtb 6.7.1), and the SCF only
+recovers on small cuts:
+
+| sphere | default | `fragments` | xtb 6.7.1 | ALPB water |
+|---|---:|---:|---:|---:|
+| 757 atoms | 111 it | 103 it | 53 it | - |
+| 1846 atoms | 76 it | 127 it | 191 it | 17 it |
+| 2142 atoms, **GFN-FF-relaxed** geometry | 13 it | - | - | - |
+
+Level shift (0.2/0.5 Eh) and stronger damping (0.2) do not converge within 150 iterations; DIIS
+produces NaN (see TODO.md). The fix is the geometry: relax with GFN-FF first, then GFN2 converges
+normally in vacuum. Implicit solvent (`-xtb.solvent water -xtb.solvent_model alpb`) also
+removes the sloshing, but is a different model.
 
 ## Controlling parameters
 
@@ -58,9 +81,9 @@ defaults equal the historic native defaults, so unset = no change.
 | Flag             | Default | Meaning |
 |------------------|---------|---------|
 | `-scf_mode`      | `broyden` | Strategy (see above). |
-| `-scf_guess`     | `h0`    | Initial charge guess (see above). |
+| `-scf_guess`     | `eeq`   | Initial charge guess (see above). |
 | `-scf_damping`   | `0.4`   | Density mixing factor: `P = damp*P_new + (1-damp)*P_old`. Lower = stronger damping. |
-| `-scf_threshold` | `1e-6`  | Convergence threshold on max\|dq_shell\| (and dE). |
+| `-scf_threshold` | `1e-5`  | Convergence threshold on max\|dq_shell\| (and dE). |
 | `-diis_start`    | `5`     | Damped warmup iterations before DIIS (diis/level-shift). |
 | `-diis_subspace` | `6`     | DIIS history depth (Fock matrices kept). |
 | `-level_shift`   | `0.2`   | Virtual-orbital shift magnitude (Eh) for `level-shift` mode. |

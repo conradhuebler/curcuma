@@ -1117,6 +1117,15 @@ private:
     // falls back to the bare-H0 guess).
     bool seedEEQGuess(Vector& q_sh_out);                                 // xtb_native.cpp
 
+    // Fragment initial guess (Claude Generated, Sep 2026, operator's idea): split the system
+    // into covalently bonded fragments (Molecule::GetFragments, same partition as
+    // large_system_mode=fragments), converge each fragment's SCF on its own, and scatter the
+    // fragment SCC states (q_sh, GFN2 dp_at/qp_at) onto the global indices. Aimed at large
+    // many-molecule clusters, where the first full Fock from EEQ or bare-H0 charges moves
+    // electrons between distant molecules by several e and the SCF runs away. Returns false
+    // for a single fragment or on any failure (caller falls back to the EEQ guess).
+    bool seedFragmentGuess(Vector& q_sh_out, Matrix& dp_out, Matrix& qp_out);  // xtb_native.cpp
+
     // Multi-step SCC extrapolation helpers (Claude Generated). xtb_native.cpp.
     // packSccState  : flatten the current m_wfn SCC vector — GFN1 [q_sh],
     //                 GFN2 [q_sh; vec(dp_at); vec(qp_at)] (column-major).
@@ -1320,7 +1329,7 @@ private:
     int         m_diis_start    = 5;     // damped warmup iterations before DIIS
     int         m_diis_subspace = 6;     // DIIS history depth (Fock matrices kept)
     double      m_level_shift   = 0.2;   // virtual-orbital shift magnitude (Eh), LevelShift mode
-    std::string m_scf_guess     = "eeq"; // initial charge guess: "eeq" (default, dftd4 EEQ) | "h0" (bare)
+    std::string m_scf_guess     = "eeq"; // initial charge guess: "eeq" (default, dftd4 EEQ) | "h0" (bare) | "fragments" (converged fragments)
     // xtb and tblite disagree on the STO-6G 4s/4p expansion; curcuma follows
     // tblite (the better fit to the exact Slater function). Set true to
     // reproduce the xtb binary bit-for-bit on K, Ca and Ge-Kr. STO_CGTO.hpp.
