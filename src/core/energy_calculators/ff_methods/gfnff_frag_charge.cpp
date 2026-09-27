@@ -181,7 +181,13 @@ double GFNFF::fragPass1Threshold(int i, int j) const
         rco -= m_bond_qa[i] * fq(zi) + m_bond_qa[j] * fq(zj);
     }
     rco *= fat[zi] * fat[zj];
-    return fm(zi) * fm(zj) * rthr * rco;
+    double thr = fm(zi) * fm(zj) * rthr * rco;
+    // rev_excess_bond_extend (Sep 27, 2026): a 2c-3e candidate pair splits at the EXTENDED
+    // threshold, so its window starts there. Isolation is tested with the ordinary pass-1
+    // criterion against every other atom (the same "no other bond" condition as the rule).
+    if (m_rev_bond_extend > 1.0 && revX2PairExtendable(i, j))
+        return m_rev_bond_extend * getnbThresholdPass1(i, j);   // charge-independent, as the rule
+    return thr;
 }
 
 std::vector<GFNFF::FragEdge> GFNFF::fragWindowEdges(const std::vector<int>& fraglist, int nfrag) const

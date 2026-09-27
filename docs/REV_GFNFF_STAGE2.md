@@ -721,3 +721,42 @@ permanent `ctest` coverage yet for `rev_sqe_group_pairs_only`, `frag_charge_atom
 I2-/ClF- campaign were never committed (worktree scratch only); a recurring operational issue this
 whole dispatch ran into repeatedly — a shared `/tmp` filled by OTHER, unrelated sessions on this
 machine, four separate times — is a standing infrastructure risk, not a code issue.
+
+## X2- survey over all seven pairs, and the ClF- joint refit (2026-09-27)
+
+`test_cases/revgfnff/_log/X2_COMPRESSED_SURVEY_STATUS.md`, `scripts/revgfnff_x2_survey.py`. All seven
+pairs were measured against their DLPNO-CCSD(T) curves in the recommended setting above (with
+`rev_sqe_group_pairs_only`).
+
+- **Compressed wall: fixed for all seven.** Compressed rms <= 2.4 kcal/mol except ClF-. Plain
+  `gfnff` gives 79-207 there. F2-/O2-/S2- references reach only +24/+21/+1.3 kcal/mol up the wall.
+- **ClF- was the only bonded-region outlier.** With `group_pairs_only` its bonded rms is 9.20, not the
+  recorded 8.4. A joint refit of the Cl-F half + harris rows against the harris-mode rest, no longer
+  anchored to flat100, uses the kernel r0 (`scripts/revgfnff_x2_jointrefit.py`, constant g) and takes
+  it to **1.54** (compressed 1.66, full 10.63 -> 8.48, react break 4.24 -> 3.59). Fit rms = runtime rms.
+  Flat mode stays unusable for ClF-.
+- **Family-wide and larger, not fixed: the static bond-perception cutoff.** At ~1.03-1.1 r_min it
+  removes the bond, and with it the well and x·g, while the reference is bound to ~1.5-2 r_min.
+  - Every pair then errs by +24 to +50 kcal/mol just past the cutoff (S2- +49.6, I2- +40.4).
+  - Cl2-/F2-/Br2-'s global model minimum is a spurious window point about 2x too deep (Cl2- -50.3 at
+    2.84 A vs -28.4 at 2.64).
+  - React-mode breaking scans, where the bond persists, give rms 1.2-3.6 for all seven.
+  - Proposals are costed in the status file, section 5. Until one is decided, **static X2- single
+    points beyond ~1.05 r_min are not validated**; follow an X2- bond outward in react mode.
+
+### P-A: extended 2c-3e bond perception, `-gfnff.rev_excess_bond_extend` (2026-09-27, opt-in)
+
+Built on the operator's decision; `X2_COMPRESSED_SURVEY_STATUS.md` section 8.
+- **What it does.** A pair of otherwise unbonded atoms with a half-order (or pi-excess) row, at net
+  charge -1, with no third atom on the contact, keeps its bond out to f × the ordinary threshold.
+  The ensemble window and the SQE pair's bond order move with it.
+- **Result at f = 1.8.** Static full-grid rms against DLPNO-CCSD(T) goes from 7.8-16.9 to
+  **0.2-2.7 kcal/mol** for all seven pairs (Cl2- 2.01, F2- 2.29, Br2- 1.47, I2- 1.15, ClF- 1.16,
+  O2- 2.71, S2- 0.22). The spurious 2x-deep minima are gone. There are no discontinuities in the
+  covered range, and up-vs-down history dependence is exactly 0.
+- **Rows.** I-I, Cl-F and S-S rows were refit jointly on the extended range; the other four were
+  kept by a leave-one-out rule.
+- **Falsifiers.** Across GMTKN55/MOR41/S30L-CI the rule fires only on G21EA/EA_25 (Cl2-). BH76
+  (incl. the SN2 TS, after an ellipsoid block added for BH76/clch3clts), AHB21 and CHB6 are untouched.
+- **Not covered.** Halogen react-mode forming is unchanged.
+- **Recommended.** Add `-gfnff.rev_excess_bond_extend 1.8` to the settings above.

@@ -145,9 +145,21 @@ static constexpr HalfOrderEntry kHalfOrderEntries[] = {
     // bond cutoff weight 0.3), against the rest of the model with localised charges
     {  9,  9,   0.655464,   1.549085,   0.000000,   0.264120 },   // F-F  order 0.5 (F2-, D 45.2 kcal/mol, r_min 1.690 A)
     { 17, 17,   1.143785,   1.162928,   0.295217,   0.600037 },   // Cl-Cl order 0.5 (Cl2-, D 34.0 kcal/mol, r_min 2.568 A)
-    {  9, 17,   2.419571,   1.816478,   0.781053,   0.398527 },   // Cl-F order 0.5 (ClF-, DLPNO-CCSD(T), D 110.3 kcal/mol, r_min 1.918 A, fit bonded rms 3.51 LOO 7.99) X2CLF:half
+    // Cl-F: JOINT refit with the Cl-F harris row against the harris-mode rest, NOT against the flat100
+    // rest (Sep 27, 2026, X2_COMPRESSED_SURVEY_STATUS.md Part 2): flat100 localises ClF-'s electron
+    // on F and jumps at the pass-1 split inside the well, a 12 kcal/mol step no smooth g follows.
+    // Consequence: this row is correct for rev_excess_mode harris only; flat mode must not be used
+    // for ClF- (it was already unusable, I2_CLF 12.6). Previous row: 2.419571, 1.816478, 0.781053,
+    // 0.398527 (fitted on flat100 with CURCUMA_BONDDUMP r0_dyn, which lacks the pair-CN correction).
+    // Sep 27, 2026 (section 8.3): refit again, jointly with the harris row, on the EXTENDED bonded range
+    // (rev_excess_bond_extend 1.8, 18 points 1.24-4.20 A); the row above (0.671798, 1.193147, 0.767489,
+    // 0.466702) was fitted without the extension and gave 12.86 on this range. Adopted because its LOO
+    // rms (2.83) beats the old row's out-of-sample rms there.
+    {  9, 17,   1.403080,   1.387367,   0.610858,   0.441112 },   // Cl-F order 0.5 (ClF-, DLPNO-CCSD(T), joint refit on the extended range, bonded rms 1.27 LOO 2.83) X2CLF:half
     { 35, 35,   1.200601,   1.136506,   0.395906,   0.531758 },   // Br-Br order 0.5 (Br2-, DLPNO-CCSD(T), D 55.2 kcal/mol, r_min 2.694 A, fit bonded rms 0.99 LOO 2.62) X2BR:half
-    { 53, 53,   2.155195,   1.384566,   0.343513,   0.505417 },   // I-I order 0.5 (I2-, I2-, DLPNO-CCSD(T), D 66.7 kcal/mol, r_min 2.950 A, fit bonded rms 2.28 LOO 5.40) X2I:half
+    // Sep 27, 2026 (section 8.3): joint refit with the harris row on the EXTENDED bonded range (17 points
+    // 2.04-6.00 A); previous row 2.155195, 1.384566, 0.343513, 0.505417 (rms 3.54 on that range).
+    { 53, 53,   2.708738,   1.280517,   0.214582,   0.507642 },   // I-I order 0.5 (I2-, DLPNO-CCSD(T), joint refit on the extended range, bonded rms 1.16 LOO 1.88) X2I:half
 };
 
 static constexpr std::size_t kHalfOrderCount = sizeof(kHalfOrderEntries) / sizeof(kHalfOrderEntries[0]);
@@ -192,7 +204,10 @@ static constexpr PiExcessEntry kPiExcessEntries[] = {
     // points r=1.60-2.60 A out of 20; the model's own topology drops the bond past 2.60 A; no
     // react-mode/kept-topology tail extension attempted, see PI_STAR_STATUS.md), fragment-
     // referenced against S (triplet) + S- (doublet), fit rms 0.26 kcal/mol.
-    { 16, 16,   0.582195,   0.765328,   0.175854,   0.286630 },   // S-S (n = 11, s2m_S-S-, fit rms 0.26, runtime r0) PISTAR:pi-excess refit section 12
+    // S-S: joint refit with the harris row on the EXTENDED bonded range (Sep 27, 2026,
+    // X2_COMPRESSED_SURVEY_STATUS.md section 8.5; 13 points 1.60-3.15 A, g constant). Previous row
+    // 0.582195, 0.765328, 0.175854, 0.286630 (rms 1.08 on that range).
+    { 16, 16,   0.887826,   0.817006,   0.000000,   0.238104 },   // S-S (s2m_S-S-, joint refit on the extended range, bonded rms 0.22 LOO 0.47) PISTAR:pi-excess
 };
 
 static constexpr std::size_t kPiExcessCount = sizeof(kPiExcessEntries) / sizeof(kPiExcessEntries[0]);

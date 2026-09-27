@@ -1272,7 +1272,137 @@ std::vector<std::pair<int,int>> GFNFF::perceiveGeometricBonds() const
     }
     for (const auto& rb : row_bonds)
         bonds.insert(bonds.end(), rb.begin(), rb.end());
+    // rev_excess_bond_extend: 2c-3e candidate pairs past the ordinary cutoff. Off (factor 1) for
+    // plain GFN-FF and for every rev setting without rev_excess_electron.
+    if (m_rev_bond_extend > 1.0 && m_charge == -1) {
+        auto extra = revX2ExtendBonds(bonds, qshift, fm_atom);
+        if (!extra.empty()) {
+            bonds.insert(bonds.end(), extra.begin(), extra.end());
+            std::sort(bonds.begin(), bonds.end());   // keep the (i, j) ascending order
+        }
+    }
     return bonds;
+}
+
+// ---------------------------------------------------------------------------------------------
+// rev_excess_bond_extend (Claude Generated, Sep 27, 2026; _log/X2_COMPRESSED_SURVEY_STATUS.md
+// section 8). The 2c-3e binding of X2- lives in the half-order well and the harris x*g term, both
+// of which exist only while the X-X bond is perceived. The ordinary getnb criterion drops the bond
+// at ~1.05 r_min, while the DLPNO-CCSD(T) reference stays bound to ~2 r_min; what remains past the
+// cutoff is plain GFN-FF (no binding, EEQ delocalisation in the ensemble window), +24..+50 kcal/mol
+// off. The rule below keeps such a bond out to f times the ordinary threshold, and ONLY for a pair
+// that nothing else could claim:
+//   - both atoms have no bond at all in the ordinary list of the same pass (an isolated X and X-),
+//   - the element pair has a half-order row (hasHalfOrder) or, with rev_pi_excess_electron, a
+//     pi-excess row (hasPiExcess) - i.e. exactly the pairs the P3 perceptions can act on,
+//   - the system's net charge is negative (a neutral X + X is never joined: its x would be 0 and
+//     it would get the NEUTRAL order-1 well at twice its range),
+//   - each atom is the other's only candidate within the extended range (index-free, and a third
+//     free halogen switches the rule off rather than picking a partner by index).
+// Whether the pair then really is a 2c-3e bond is decided downstream by the unchanged perceptions
+// (revExcessElectrons / revPiExcessElectrons, on the component's Phase-1 charge).
+// ---------------------------------------------------------------------------------------------
+bool GFNFF::revX2PairElements(int i, int j) const
+{
+    if (m_rev_bond_extend <= 1.0 || m_charge != -1 || i == j || i < 0 || j < 0 || i >= m_atomcount || j >= m_atomcount)
+        return false;
+    const int zi = m_atoms[i], zj = m_atoms[j];
+    if (RevWellTableV2::hasHalfOrder(zi, zj))
+        return true;
+    return m_rev_pi_excess && RevWellTableV2::hasPiExcess(zi, zj);
+}
+
+// Section 8.6 (falsifier BH76/clch3clts, the [Cl...CH3...Cl]- SN2 transition state): both Cl have
+// no ordinary bond there, so "isolated" alone joined them ACROSS the carbon (+56.5 kcal/mol), and the
+// moved window added an F...F edge across the carbon of fch3fts (-13.2). A 2c-3e bond is a direct
+// A-B contact: no third atom k may lie inside its bond ellipsoid r_ik + r_kj < r_ij + 2 d_block
+// (d_block = 0.5 A). An atom on the axis between the two (the SN2 carbon: excess 0) blocks it; a
+// water hydrogen-bonded to one end (excess >= ~2.8 A at 2.2 A from X) does not. Isolation is tested
+// with the ordinary pass-1 (qa = 0) criterion, the same in both q-loop passes.
+bool GFNFF::revX2PairExtendable(int i, int j) const
+{
+    if (!revX2PairElements(i, j))
+        return false;
+    constexpr double kBlockBohr = 0.5 * 1.8897261246257702;
+    const double rij = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
+    for (int k = 0; k < m_atomcount; ++k) {
+        if (k == i || k == j)
+            continue;
+        const double rik = (m_geometry_bohr.row(i) - m_geometry_bohr.row(k)).norm();
+        const double rjk = (m_geometry_bohr.row(j) - m_geometry_bohr.row(k)).norm();
+        if (rik < getnbThresholdPass1(i, k) || rjk < getnbThresholdPass1(j, k))
+            return false;                                   // not isolated
+        if (rik + rjk < rij + 2.0 * kBlockBohr)
+            return false;                                   // a third atom sits on the contact
+    }
+    return true;
+}
+
+double GFNFF::getnbThresholdPass1(int i, int j) const
+{
+    using GFNFFParameters::metal_type;
+    using GFNFFParameters::normcn;
+    const int zi = m_atoms[i], zj = m_atoms[j];
+    const double ncn_i = (zi >= 1 && zi <= 86) ? static_cast<double>(normcn[zi - 1]) : 4.0;
+    const double ncn_j = (zj >= 1 && zj <= 86) ? static_cast<double>(normcn[zj - 1]) : 4.0;
+    auto fm = [&](int z) {
+        const int mt = (z >= 1 && z <= 86) ? metal_type[z - 1] : 0;
+        return mt == 2 ? 1.0 : (mt == 1 ? 1.025 : 1.0);
+    };
+    const double rco = GFNFFParameters::computeRabEstimate(zi, zj, ncn_i, ncn_j) * fat[zi] * fat[zj];
+    return fm(zi) * fm(zj) * 1.25 * rco;
+}
+
+std::vector<std::pair<int,int>> GFNFF::revX2ExtendBonds(const std::vector<std::pair<int,int>>& bonds,
+    const std::vector<double>& qshift, const std::vector<double>& fm_atom) const
+{
+    (void)qshift;
+    (void)fm_atom;
+    std::vector<std::pair<int,int>> out;
+    std::vector<int> deg(m_atomcount, 0);
+    for (const auto& b : bonds) {
+        ++deg[b.first];
+        ++deg[b.second];
+    }
+    std::vector<int> iso;
+    for (int i = 0; i < m_atomcount; ++i)
+        if (deg[i] == 0)
+            iso.push_back(i);
+    if (iso.size() < 2)
+        return out;
+    // A merged-corner variant of the frag_charge_model ensemble window carries the bond out to the
+    // end of the window, so the blend starts from the bonded energy at the extended threshold.
+    const bool variant_override = m_frag_override.active
+        && static_cast<int>(m_frag_override.fraglist.size()) == m_atomcount;
+    std::vector<int> cand(m_atomcount, -1), ncand(m_atomcount, 0);
+    for (size_t a = 0; a < iso.size(); ++a)
+        for (size_t b = a + 1; b < iso.size(); ++b) {
+            const int i = iso[a], j = iso[b];
+            if (!revX2PairExtendable(i, j))
+                continue;
+            // The extended threshold is CHARGE-INDEPENDENT (the pass-1, qa = 0 threshold in both
+            // q-loop passes). With the pass-2 charge shrink in it, an anion's radius grows in pass 2,
+            // so between the two thresholds pass 1 splits the pair into two carried fragments while
+            // pass 2 bonds it again - a bonded pair on two constraint groups, x = 0 and charges
+            // (-1, 0): measured -114 kcal/mol on F2- at 2.69 A (section 8.2).
+            double f = m_rev_bond_extend;
+            if (variant_override && m_frag_override.fraglist[i] == m_frag_override.fraglist[j])
+                f *= m_frag_s_max;
+            const double thr = f * getnbThresholdPass1(i, j);
+            const double r = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
+            if (r < thr) {
+                cand[i] = j; ++ncand[i];
+                cand[j] = i; ++ncand[j];
+            }
+        }
+    for (int i : iso)
+        if (ncand[i] == 1 && cand[i] > i && ncand[cand[i]] == 1 && cand[cand[i]] == i)
+            out.emplace_back(i, cand[i]);
+    if (!out.empty() && CurcumaLogger::get_verbosity() >= 2)
+        for (const auto& b : out)
+            CurcumaLogger::info(fmt::format("rev-gfnff rev_excess_bond_extend: 2c-3e candidate bond {}-{} at {:.4f} Bohr (factor {:.3f})",
+                b.first + 1, b.second + 1, (m_geometry_bohr.row(b.first) - m_geometry_bohr.row(b.second)).norm(), m_rev_bond_extend));
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -8938,6 +9068,25 @@ void GFNFF::buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<in
         }
     }
 
+    // rev_excess_bond_extend (Claude Generated, Sep 27, 2026; X2_COMPRESSED_SURVEY_STATUS.md
+    // section 8.4): a 2c-3e candidate bond exists past the ordinary threshold, which the icase 2/3
+    // lists above re-test with their own distance criterion - so they dropped it, nbdiff = nbf - nb
+    // became 1 and the hybridization changed (O2-: sp -> order 2 instead of 3, a +14 kcal/mol step
+    // exactly where the extended bond takes over from the ordinary one). Such a bond is a bond in
+    // every list. Only an isolated pair (one neighbour each, the other) of an eligible element pair.
+    if (m_rev_bond_extend > 1.0 && geometric_nb) {
+        for (int i = 0; i < m_atomcount; ++i) {
+            if (topo.nb_full[i].size() != 1)
+                continue;
+            const int j = topo.nb_full[i][0];
+            if (j < 0 || j >= m_atomcount || topo.nb_full[j].size() != 1 || topo.nb_full[j][0] != i
+                || !revX2PairExtendable(i, j))
+                continue;
+            for (auto* lst : { &topo.nb_hc, &topo.nb_nometal })
+                if ((*lst)[i].empty())
+                    (*lst)[i].push_back(j);
+        }
+    }
     setupProfile().add("topo:     nb_nometal list", std::chrono::duration<double, std::milli>(
                                                    std::chrono::high_resolution_clock::now() - t_nbm0).count());
     // --- itag: eta detection needs nbf and nbm (gfnff_ini2.f90:170-195) ---
@@ -13421,6 +13570,13 @@ void GFNFF::setupRevSettings()
                 CurcumaLogger::warn("rev-gfnff: rev_pi_excess_electron needs rev_excess_electron true (and rev_charge_model sqe) - ignored");
             m_rev_pi_excess = false;
         }
+        // rev_excess_bond_extend (Claude Generated, Sep 27, 2026; X2_COMPRESSED_SURVEY_STATUS.md
+        // section 8). Hardcoded fallback 1.0 = the PARAM default (off).
+        m_rev_bond_extend = std::max(1.0, m_parameters.value("rev_excess_bond_extend", 1.0));
+        if (rev.contains("excess_bond_extend"))
+            m_rev_bond_extend = std::max(1.0, rev["excess_bond_extend"].get<double>());
+        if (!(rv.enabled && m_rev_excess))
+            m_rev_bond_extend = 1.0;
         // Claude Generated (Sep 24, 2026; _log/P2P3_HARRIS_STATUS.md): the harris g(r) table is
         // fitted at kappa_Z = 0; any kappa_Z > 0 localises the charges by itself and g then
         // over-corrects (measured +128 / +225 kcal/mol in a react-mode Cl2- / F2- scan).
@@ -13999,7 +14155,8 @@ Matrix GFNFF::revSqeModelGradient(const Vector& q, const Vector& p, const EEQSol
         if (r < 1e-8)
             continue;
         double dbdr = 0.0;
-        const double b = RevGFNFF::bondOrder(r, rv.R2(sp.i, sp.j), rv.bo2_width, &dbdr);
+        const double b = RevGFNFF::bondOrder(r / sp.b_scale, rv.R2(sp.i, sp.j), rv.bo2_width, &dbdr);
+        dbdr /= sp.b_scale;
         if (b <= bmin)
             continue;
         double dkdb = 0.0;
@@ -14214,6 +14371,16 @@ Vector GFNFF::revSolveSplitCharges(const CornerEEQ& ce, const Vector& topology_c
                 scan_h(other);
             scan_h(m_rev_base_eeq);
         }
+        // rev_excess_bond_extend (Claude Generated, Sep 27, 2026; X2_COMPRESSED_SURVEY_STATUS.md
+        // section 8): the SQE pair of a perceived 2c-3e bond stays live as far as the bond itself
+        // can reach (f x the ordinary threshold, x s_max inside the ensemble window). Without it the
+        // b > bmin gate (b = 1e-3 at 1.37 R2, Cl-Cl ~3.8 A) pinned the charges at q0 while the bond
+        // and the topological qa were still those of the delocalised pair: -42 kcal/mol on Cl2- at
+        // 4.06 A. Only pairs that carry x (harris_x or kappa_x) and are eligible element pairs.
+        if (m_rev_bond_extend > 1.0 && (sp.harris_x > 0.0 || sp.kappa_x > 0.0) && revX2PairExtendable(sp.i, sp.j)) {
+            sp.b_scale = m_rev_bond_extend * m_frag_s_max;
+            sp.b = have_rcov ? RevGFNFF::bondOrder(r / sp.b_scale, rv.R2(sp.i, sp.j), rv.bo2_width, nullptr) : 1.0;
+        }
         pairs.push_back(sp);
     }
     // Phase-2 group restriction (Claude Generated, Sep 25, 2026; _log/SQE_INVARIANT_STATUS.md).
@@ -14348,6 +14515,7 @@ Vector GFNFF::revSolveSplitCharges(const CornerEEQ& ce, const Vector& topology_c
             d.kappa_x = pairs[k].kappa_x;
             d.frac_c = pairs[k].frac_c;
             d.harris_x = pairs[k].harris_x;
+            d.b_scale = pairs[k].b_scale;
             data.push_back(d);
         }
         m_workspace->setSqeBmin(m_rev_sqe_bmin);
