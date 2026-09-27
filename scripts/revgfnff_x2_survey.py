@@ -63,6 +63,8 @@ def configs(pair):
         "rev_default": ("revgfnff", []),
         "rec_noGP": ("revgfnff", P2P3 + HARRIS + ENS + VP + add),
         "rec": ("revgfnff", REC + add),
+        # P-A (section 8 of the status file): rec + the 2c-3e candidate bond extension
+        "recX": ("revgfnff", REC + add + ["-gfnff.rev_excess_bond_extend", os.environ.get("X2S_EXT", "1.8")]),
         "flat100": ("revgfnff", P2P3 + add),
         "flat100_raw": ("revgfnff", P2P3),               # the state the half rows were fitted on
         "harris_raw": ("revgfnff", P2P3 + HARRIS),        # harris, no window / carrier flags
@@ -266,5 +268,29 @@ def cmd_updown(argv):
               f"n>1 kcal {sum(v > 1 for _, v in dd)}/{len(dd)}")
 
 
+def cmd_steps(argv):
+    """fresh single points on a fine grid (default 0.01 A) over the reference range: the largest
+    adjacent-point energy step and its r, against the largest analytic |dE/dr| * h (a step well
+    above that is a discontinuity, not a steep wall)."""
+    binp, pairs, cfgs = argv[0], argv[1].split(","), argv[2].split(",")
+    h = float(os.environ.get("X2S_STEP", "0.01"))
+    jobs = {}
+    with ThreadPoolExecutor(int(os.environ.get("X2S_JOBS", "12"))) as ex:
+        for p in pairs:
+            pts = ref_points(p)
+            g = [float(x) for x in np.round(np.arange(pts[0][0], min(pts[-1][0], 9.0) + 1e-9, h), 4)]
+            for c in cfgs:
+                jobs[(p, c)] = (g, ex.submit(curve, binp, p, c, g))
+    for (p, c), (g, f) in jobs.items():
+        rows = f.result()
+        st = []
+        for a, b in zip(rows[:-1], rows[1:]):
+            # only the region past the wall (E < +20): inside the wall a 0.01 A step is legitimately large
+            if a["E"] < 20 and b["E"] < 20:
+                st.append((abs(b["E"] - a["E"]), a["r"], b["E"] - a["E"]))
+        w = max(st)
+        print(f"{p + '|' + c:18s} n {len(rows)}: largest step {w[2]:+8.3f} kcal/mol at {w[1]:.3f}->{w[1] + h:.3f} A")
+
+
 if __name__ == "__main__":
-    {"survey": cmd_survey, "decomp": cmd_decomp, "react": cmd_react, "updown": cmd_updown}[sys.argv[1]](sys.argv[2:])
+    {"survey": cmd_survey, "decomp": cmd_decomp, "react": cmd_react, "updown": cmd_updown, "steps": cmd_steps}[sys.argv[1]](sys.argv[2:])

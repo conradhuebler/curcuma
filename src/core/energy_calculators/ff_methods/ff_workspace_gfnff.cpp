@@ -2951,7 +2951,7 @@ void FFWorkspace::calcSqeHardness(bool gradient)
             const Eigen::Vector3d dvec = m_geometry.row(sp.i) - m_geometry.row(sp.j);
             const double rr = dvec.norm();
             double g = 0.0, dgdr = 0.0;
-            if (rr > 1e-8 && revOrder(sp.i, sp.j, rr, nullptr) > m_sqe_bmin
+            if (rr > 1e-8 && revOrder(sp.i, sp.j, rr / sp.b_scale, nullptr) > m_sqe_bmin
                 && RevHarrisTable::harrisG(m_atom_types[sp.i], m_atom_types[sp.j], rr, g, dgdr)) {
                 e_sqe += sp.harris_x * g;
                 if (gradient) {
@@ -2969,7 +2969,8 @@ void FFWorkspace::calcSqeHardness(bool gradient)
         if (r < 1e-8)
             continue;
         double dbdr = 0.0;
-        const double b_raw = revOrder(sp.i, sp.j, r, gradient ? &dbdr : nullptr);
+        const double b_raw = revOrder(sp.i, sp.j, r / sp.b_scale, gradient ? &dbdr : nullptr);
+        dbdr /= sp.b_scale;   // d b(r / s) / dr
         // Below the floor the pair is rigid: the solver has already forced p = 0 there, and
         // clamping keeps kappa (and its derivative) finite if a pair drifts out mid-step.
         const bool clamped = (b_raw <= bmin);

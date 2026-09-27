@@ -230,6 +230,8 @@ struct SqePairData {
     /// _log/P2P3_HARRIS_STATUS.md): topological excess-electron count x_ij of the pair (0 = inert).
     /// Adds E = x_ij g(r_ij) (RevHarrisTable::harrisG) - never enters the charge solve.
     double harris_x = 0.0;
+    /// rev_excess_bond_extend: the pair's b is revOrder(r / b_scale) (see EEQSolver::SqePair::b_scale)
+    double b_scale = 1.0;
 };
 
 struct RevSettings {

@@ -462,6 +462,7 @@ PARAM(rev_sqe_group_pairs_only, Bool, false, "rev-gfnff stage 2, Sep 25, 2026, o
 PARAM(rev_sqe_virtual_pairs, Bool, false, "rev-gfnff stage 2 (Sep 24, 2026, opt-in, needs rev_charge_model sqe): the Phase-2 split-charge solve chains every bond-graph component that shares one EEQ constraint group with zero-hardness VIRTUAL pairs, the Phase-2 analogue of the P2 Phase-1 virtual pairs. Without it charge cannot move between two unbonded atoms of the same constraint group and stays at the integer q0 placement - which the frag_charge_model ensemble merged corner creates just past the bond cutoff (X2- label dependence, SQE(kappa 0) != EEQ by up to 108 kcal/mol). At kappa = 0 the reachable charge space is then the constrained EEQ one. See test_cases/revgfnff/_log/X2_SCOPE_STATUS.md.", "Reactive", {})
 PARAM(rev_excess_electron, Bool, false, "rev-gfnff P3 (Sep 2026, opt-in, needs rev_charge_model sqe): perceive excess electrons with no bonding slot left (an anionic fragment whose atoms are valence-saturated, e.g. Cl2-, F2-: x = max(0, -Q_f - free slots)), spread x over the fragment's bonds that have a calibrated half-order well row, lower their bond order by x/2 (the mg3 well table then reads the half-order row) and add x*rev_excess_kappa to their split-charge hardness (the resonance of the 2c-3e bond lives in the well, not in the Coulomb term). A per-topology constant; inert for every neutral fragment. See test_cases/revgfnff/_log/P2P3_STATUS.md.", "Reactive", {})
 PARAM(rev_pi_excess_electron, Bool, false, "rev-gfnff P3 pi* extension (Sep 25, 2026, opt-in PROTOTYPE, needs rev_excess_electron): perceive the pi* excess electron of a DIATOMIC radical anion (O2-, S2-), which the sigma-slot budget of rev_excess_electron cannot see. Fires only for an isolated two-atom bond-graph component with a pi component (continuous order > 1) and fragment charge exactly -1, on a pair with a calibrated pi-excess well row (rev_well_table_v2.h kPiExcessEntries); the bond's mg3 well is then replaced by that row and the pair's split-charge excess (flat/frac/harris) counts y = 1. No polyatomic pi system, no dianion, no aromatic. See test_cases/revgfnff/_log/PI_STAR_STATUS.md.", "Reactive", {})
+PARAM(rev_excess_bond_extend, Double, 1.0, "rev-gfnff P3 (Sep 27, 2026, opt-in, needs rev_excess_electron; the pi* pairs also rev_pi_excess_electron): factor on the ordinary getnb bond threshold for a 2c-3e candidate pair, so the X-X bond - and with it the excess count x, the half-order / pi-excess well and the harris x*g term - survives past the ordinary cutoff (~1.05 r_min) out to where the reference binding has gone. A candidate is a pair of atoms that the ordinary perception leaves WITHOUT ANY bond, whose element pair has a half-order (or, with rev_pi_excess_electron, a pi-excess) well row, in a system of negative net charge, and that are each other's only such candidate. Nothing else is ever bonded by it. The frag_charge_model ensemble window moves with it ([f, f*frag_charge_s_max] times the ordinary threshold). 1.0 = off (bit-identical). See test_cases/revgfnff/_log/X2_COMPRESSED_SURVEY_STATUS.md section 8.", "Reactive", {})
 PARAM(rev_excess_kappa, Double, 100.0, "rev-gfnff P3: flat split-charge hardness (Eh) per excess electron on a perceived 2c-3e pair (x*rev_excess_kappa, no bond-order dependence). Large = the charge stays on its q0 atom, i.e. the Coulomb term carries no delocalisation energy for that pair.", "Reactive", {})
 PARAM(rev_excess_mode, String, "flat", "rev-gfnff P3 (Sep 2026, opt-in alternative, see test_cases/revgfnff/_log/P2P3_ALTERNATIVES_STATUS.md): how the Coulomb term is kept from double-counting a perceived 2c-3e pair. flat = the shipped x*rev_excess_kappa split-charge hardness (localises the charge on its q0 atom); frac = fractional-charge correction E_x = 1/2 x c K_ij(r) q_i q_j with K_ij the pair EEQ curvature and c = rev_excess_frac_c: removes the fraction c of the pair delocalisation energy while the charges stay symmetric, polarisable and independent of q0; harris = no extra hardness (charges free, as flat at rev_excess_kappa 0) plus a non-self-consistent energy x*g(r) per perceived pair, g fitted to DLPNO-CCSD(T) (rev_harris_table.h, test_cases/revgfnff/_log/P2P3_HARRIS_STATUS.md).", "Reactive", {})
 PARAM(rev_excess_frac_c, Double, 0.9, "rev-gfnff P3, rev_excess_mode frac: fraction c in [0, 0.99] of the pair EEQ curvature removed (1 - c of the EEQ delocalisation energy is kept; the axial polarisability scales as 1/(1 - c)).", "Reactive", {})
@@ -1186,6 +1187,19 @@ public:
     /// Geometric bond perception on the CURRENT geometry, uncached. The geometric half of
     /// getCachedBondList(), shared so the reuse check needs no second implementation.
     std::vector<std::pair<int,int>> perceiveGeometricBonds() const;
+    /// rev_excess_bond_extend (Claude Generated, Sep 27, 2026): true if (i, j) is an eligible
+    /// 2c-3e element pair in a negatively charged system (flags on, rows present). Distance-free.
+    bool revX2PairElements(int i, int j) const;
+    /// rev_excess_bond_extend: the extra bonds of the 2c-3e candidate rule on top of \p bonds
+    /// (the ordinary list of the same pass); \p qshift = the pass's charge shrink per atom.
+    std::vector<std::pair<int,int>> revX2ExtendBonds(const std::vector<std::pair<int,int>>& bonds,
+        const std::vector<double>& qshift, const std::vector<double>& fm_atom) const;
+    /// ordinary getnb threshold (Bohr) of pass 1 (qa = 0) - the isolation test of the rule above
+    double getnbThresholdPass1(int i, int j) const;
+    /// rev_excess_bond_extend: the full, distance-free eligibility of (i, j) - element pair, net
+    /// charge -1, both atoms without any ordinary pass-1 bond, no third atom inside the pair's
+    /// bond ellipsoid. One function for the perception AND the ensemble window.
+    bool revX2PairExtendable(int i, int j) const;
 
     /// Canonical i<j bond graph of a neighbour list, for the reuse comparison.
     static std::vector<std::pair<int, int>>
@@ -2823,6 +2837,7 @@ private:
     /// P3: per-bond excess electrons x_ij of a topology (see the PARAM rev_excess_electron).
     std::map<std::pair<int, int>, double> revExcessElectrons(const TopologyInfo& topo) const;
     bool m_rev_pi_excess = false;               ///< P3 pi* prototype (_log/PI_STAR_STATUS.md)
+    double m_rev_bond_extend = 1.0;             ///< rev_excess_bond_extend: 2c-3e candidate bond threshold factor (1 = off)
     /// P3 pi* prototype: per-bond pi* excess electrons y_ij of a diatomic radical anion
     std::map<std::pair<int, int>, double> revPiExcessElectrons(const TopologyInfo& topo) const;
     /// sigma x_ij + pi* y_ij of one pair (0 if not perceived)

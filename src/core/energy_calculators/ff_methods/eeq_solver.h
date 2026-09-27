@@ -171,6 +171,11 @@ public:
         /// CARRIED only (to the workspace, which adds E = x_ij g(r)); the SQE solve ignores it by
         /// design, so the charges of a harris pair are those of kappa_x = 0.
         double harris_x = 0.0;
+        /// rev_excess_bond_extend (Claude Generated, Sep 27, 2026): b is evaluated at r / b_scale,
+        /// so an extended 2c-3e pair stays live (b > bmin) out to the end of its ensemble window.
+        /// 1 = every ordinary pair (bit-identical). Only the solve's activity gate and kappa(b)
+        /// read b; at kappa_Z = 0 (the harris setting) that leaves the gate alone.
+        double b_scale = 1.0;
     };
 
     /**
