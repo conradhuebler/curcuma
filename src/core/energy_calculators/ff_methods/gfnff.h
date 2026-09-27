@@ -242,6 +242,12 @@ PARAM(skip_phase2, Bool, false, "Skip Phase 2 EEQ refinement and use Phase 1 top
 // take it on merge. The PARAM text below is still byte-identical to confsearch's.
 PARAM(nh_linear_fix, Bool, true, "Do not let the angle-only GEODEP rule (input angle > 160 deg -> sp) promote a 2-coordinate nitrogen that carries a hydrogen to sp hybridisation. Why: the reference rule (gfnff_ini.f90, gen%linthr) declares ANY near-linear input angle linear-by-design, so a thermally stretched =N-H (measured: a guanidine imine N-H at 179 deg in a hot MD snapshot) is re-perceived as sp, gets theta0=180, and the distortion becomes its own equilibrium -- the structure optimises INTO the artefact and appears ~160 kJ/mol too deep (xtb 6.7.1 reproduces this with -276 kJ/mol, so it is an inherited method defect, not a port bug). In a conformer search, where every snapshot optimisation derives its own topology, one such event founds a self-reinforcing family (measured: 75 percent of a WEKLQ pool within three temperature stages). The genuine sp cases of an N-H nitrogen (H-N=C isocyanide-like, R-N=N terminal, metal nitriles, azides) are all caught by the STRUCTURAL rules that run before the angle fallback and are unaffected by this guard. Set false for bit-faithful reference (xtb/pprcht) behaviour, e.g. for validation against the Fortran implementations.", "Advanced", {})
 PARAM(frag_charge_autodetect, Bool, false, "For a CHARGED molecule that falls into exactly TWO fragments, try both placements of the net charge and keep the one with the lower EEQ electrostatic energy. Off by default because that is NOT what the reference does: its auto-detection block (gfnff_ini.f90, nfrag==2 branch) is gated on sum(qfrag(2:nfrag)) > 999 while qfrag is pre-initialised to [charge, 0, ...], so the block is dead code in both pprcht and xtb and the effective rule is 'whole charge on fragment 0'. Enabling the trial changes which fragment carries the charge and can be very wrong: GMTKN55 AHB21/21 (formate ... HF) then puts the -1 on the two-atom HF fragment, giving its hydrogen a charge of -0.52 and shifting the Coulomb term by 237 kcal/mol. Enable only to reproduce curcuma's pre-Sep-2026 behaviour or to experiment with the placement rule.", "Advanced", {})
+PARAM(frag_charge_model, String, "ensemble", "How the net charge of a CHARGED molecule that GFN-FF perceives as several fragments is placed. reference = the pprcht/xtb rule: the whole charge on fragment 0, i.e. on the fragment that contains atom 1, one integer placement, identical to every release so far. ensemble = chemistry-aware and continuous: every integer placement of the charge over the fragments is a complete GFN-FF evaluation with parameters consistent with that placement, placements are chosen by electron-count parity - fewest odd-electron fragments - then weighted by their free Phase-1 EEQ charge, and chemically identical placements by their energy with temperature frag_charge_tau, and fragments that are close to their pass-1 bond threshold are blended continuously with a merged corner that treats them as one EEQ group - weight 1-lambda, lambda = smootherstep of r/r_thr between 1 and frag_charge_s_max - so the energy is continuous where the fragment count changes. Engaged only for charged systems with two or more fragments; CPU; not in react topology mode. See docs/FRAG_CHARGE_MODEL.md.", "Advanced", {})
+PARAM(frag_charge_s_max, Double, 1.0, "frag_charge_model ensemble: end of the contact window in units of the pass-1 bond threshold r_thr of each atom pair. Between s = r/r_thr = 1, where pass 1 splits the pair, and s_max two fragments are partly merged; beyond s_max they are fully separated and only integer placements remain. 1.0 switches the window off: only the placement rule acts, and the energy keeps the reference rule's step at the split.", "Advanced", {})
+PARAM(frag_charge_tau, Double, 1.0, "frag_charge_model ensemble: temperature in kcal/mol of the Boltzmann average over integer charge placements. Small = the lowest-energy placement wins; placements closer than a few tau are averaged, which keeps the energy and gradient smooth at degeneracies such as a symmetric X...X- pair.", "Advanced", {})
+PARAM(frag_charge_sigma, Double, 0.05, "frag_charge_model ensemble: width in elementary charges of the weighting between chemically DIFFERENT charge carriers that the electron-count parity rule leaves tied, by the free single-constraint Phase-1 EEQ charge each carrier holds. Chemically identical carriers, e.g. the two ends of a symmetric X...X- pair, are weighted by their energies with frag_charge_tau instead.", "Advanced", {})
+PARAM(frag_charge_max_edges, Int, 4, "frag_charge_model ensemble: maximum number of fragment-fragment contacts inside the window that are blended - 2^n corners are evaluated. Contacts beyond this count, the most separated first, are treated as fully separated and a warning is printed.", "Advanced", {})
+PARAM(frag_charge_max_placements, Int, 6, "frag_charge_model ensemble: maximum number of integer charge placements evaluated per corner. With more groups the candidates are pre-selected by the free single-constraint Phase-1 EEQ charge of each group.", "Advanced", {})
 PARAM(cn_cutoff_bohr, Double, 10.0, "CN neighbor list cutoff radius in Bohr (reference cnthr=100 Bohr^2=10 Bohr). 0 = use accuracy-based threshold instead.", "Advanced", {})
 PARAM(cn_accuracy, Double, 1.0, "CN accuracy for threshold calculation (cnthr = 100 - log10(acc)*50). Only used when cn_cutoff_bohr = 0. Set to 0 for full O(N^2) reference mode.", "Advanced", {})
 PARAM(solve, String, "auto",
@@ -685,6 +691,19 @@ public:
      * @brief Get currently configured thread count
      */
     int threadCount() const { return m_threads; }
+
+    /**
+     * @brief Fix the EEQ fragment grouping and the integer group charges of this instance
+     *
+     * Used by the frag_charge_model ensemble: each charge variant is a GFNFF instance whose
+     * Phase-1/Phase-2 EEQ constraints are given here instead of being perceived + placed by the
+     * reference rule. fraglist is 1-based per atom (group id), qfrag[g-1] the group charge.
+     * Must be called before InitialiseMolecule(). Claude Generated (Sep 2026).
+     */
+    void setFragmentOverride(const std::vector<int>& fraglist, int nfrag, const std::vector<double>& qfrag);
+
+    /// frag_charge_model ensemble: number of charge variants evaluated in the last call (0 = inactive)
+    int fragEnsembleVariantCount() const { return m_frag_last_nvariants; }
 
     /**
      * @brief Retrieve cached topology information, computing it once if needed
@@ -2565,6 +2584,50 @@ private:
     mutable int m_frag_carry_nfrag = 0;
     mutable std::vector<int> m_frag_carry_list;
     mutable std::vector<double> m_frag_carry_qfrag;
+
+    // ===== frag_charge_model ensemble (Claude Generated, Sep 24, 2026) =====
+    // See docs/FRAG_CHARGE_MODEL.md. A charge VARIANT is a complete GFNFF instance whose
+    // EEQ fragment groups and integer group charges are fixed by m_frag_override; the master
+    // blends the variants' energies/gradients: E = sum_c W_c sum_p omega_cp E_cp.
+    struct FragOverride {
+        bool active = false;
+        int nfrag = 0;
+        std::vector<int> fraglist;   // 1-based group id per atom
+        std::vector<double> qfrag;   // integer charge per group
+    };
+    FragOverride m_frag_override;
+    bool m_frag_is_variant = false;      ///< this instance is a variant (never nests)
+    mutable int m_frag_split_pass = 0;   ///< q-loop pass that split the fragments (1 or 2), set by calculateTopologyInfo
+    bool m_frag_ensemble = false;        ///< frag_charge_model == ensemble
+    double m_frag_s_max = 1.1;
+    double m_frag_tau_eh = 1.0 / 627.5094740631;
+    double m_frag_sigma = 0.05;          ///< e, width of the free-charge softmax over carrier classes
+    int m_frag_max_edges = 4;
+    int m_frag_max_placements = 6;
+    struct FragContact { int i, j; double thr, L, dL; };   // dL = dL/ds
+    struct FragEdge { int f, g; double lambda = 1.0; std::vector<FragContact> contacts; };
+    struct FragVariant {
+        std::string key;
+        std::unique_ptr<GFNFF> ff;
+        double energy = 0.0;
+        Matrix gradient;
+        Vector charges;
+        FFEnergyComponents comp;
+        bool ok = false;
+    };
+    std::vector<FragVariant> m_frag_variants;          // cache, keyed by FragVariant::key
+    unsigned m_frag_variants_topo_version = ~0u;
+    Vector m_frag_free_q;                               // free single-constraint Phase-1 charges (placement pre-selection)
+    bool m_frag_blend_valid = false;
+    FFEnergyComponents m_frag_blend_comp;
+    int m_frag_last_nvariants = 0;
+    bool m_frag_warned_edges = false;
+    double fragPass1Threshold(int i, int j) const;     ///< getnb bond threshold of the pass that split the fragments, Bohr
+    std::vector<FragEdge> fragWindowEdges(const std::vector<int>& fraglist, int nfrag) const;
+    GFNFF* fragVariant(const std::string& key, const std::vector<int>& group_of_atom, int ngroups,
+                       const std::vector<double>& qgroup);
+    double fragEnsembleBlend(bool gradient, double e_master);
+    double calculationSingle(bool gradient);            ///< the reference (single-variant) Calculation()
     CNDerivStore m_last_dcn; ///< CN derivatives (gradient only). Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
 
     // WP-FF-DistMatrix-Sharing (May 2026): shared packed-triangular distance arrays.

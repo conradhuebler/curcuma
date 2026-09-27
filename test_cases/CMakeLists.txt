@@ -143,6 +143,20 @@ add_test(NAME gfnff_react_fd_gradient
          COMMAND test_gfnff_react_fd
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
+# Claude Generated (Sep 27, 2026): frag_charge_model ensemble must not depend on the geometry
+# the topology was built at (Known Issue #31; check 5 of cli_gfnff_05_frag_charge_ensemble,
+# which needs a reused calculator instance the -sp CLI cannot express).
+add_executable(test_gfnff_frag_charge_history test_gfnff_frag_charge_history.cpp)
+target_link_libraries(test_gfnff_frag_charge_history curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_frag_charge_history REUSE_FROM curcuma_core)
+endif()
+add_test(NAME gfnff_frag_charge_history
+         COMMAND test_gfnff_frag_charge_history
+                 ${CMAKE_CURRENT_SOURCE_DIR}/cli/gfnff/05_frag_charge_ensemble/cl2m_ea25.xyz
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(gfnff_frag_charge_history PROPERTIES TIMEOUT 120 LABELS "gfnff;frag_charge")
+
 # Copy reference data to build tree so tests can find them
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/reference_data
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
