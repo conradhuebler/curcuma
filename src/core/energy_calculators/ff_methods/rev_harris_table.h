@@ -69,7 +69,9 @@ struct HarrisEntry {
 inline constexpr HarrisEntry kHarrisEntries[] = {
     { 17, 17, 115.8267243370, 120.0728512838, 0.7429824561 },   // Cl-Cl (Cl2-, DLPNO-CCSD(T))
     { 35, 35, 115.4623886836, 99.6617053206, 0.6835839599 },   // Br-Br (Br2-, DLPNO-CCSD(T), static bonded rms 1.69 LOO 2.14, react break 1.82) X2BR:harris
-    { 53, 53, 89.3328189456, 52.6698342651, 0.4756892231 },   // I-I (I2-, DLPNO-CCSD(T), static bonded rms 2.12 LOO 2.61, react break rms 2.02; refit on the final half row, I2_CLF_STATUS 12) X2I:harris
+    // I-I: joint refit with the half row on the extended range (Sep 27, 2026, section 8.3), g constant;
+    // previous row 89.3328189456, 52.6698342651, 0.4756892231 (I2_CLF_STATUS 12).
+    { 53, 53, 94.7575031398, 0.0, 0.1000000000 },                // I-I (I2-, DLPNO-CCSD(T), joint refit on the extended range, g constant) X2I:harris
     { 9, 9, 212.2064031706, 238.6608379001, 1.3765664160 },     // F-F   (F2-,  DLPNO-CCSD(T))
     // Cl-F: JOINT refit with the Cl-F half row (Sep 27, 2026, X2_COMPRESSED_SURVEY_STATUS.md Part 2,
     // scripts/revgfnff_x2_jointrefit.py): both rows fitted together on the recommended harris
@@ -77,7 +79,8 @@ inline constexpr HarrisEntry kHarrisEntries[] = {
     // CURCUMA_WELLDUMP, 11 static bonded points. g is a constant (B = 0): with B free the fit makes
     // g the compression wall (c on its bound, |B| 1e3-1e7) - measured, rejected. Static bonded rms
     // 9.20 -> 1.54 (LOO 6.46). Previous row: -11.8546099202, -198.5314773496, 0.05 (I2_CLF 12).
-    { 9, 17, 100.7065823477, 0.0, 0.5000000000 },               // Cl-F (ClF-, DLPNO-CCSD(T), joint refit, g constant) X2CLF:harris
+    // Sep 27, 2026 (section 8.3): refit again on the extended range; previous 100.7065823477, 0, 0.5.
+    { 9, 17, 133.4827130410, 0.0, 0.1000000000 },               // Cl-F (ClF-, DLPNO-CCSD(T), joint refit on the extended range, g constant) X2CLF:harris
     // O-O / S-S: DLPNO-CCSD(T) O2- / S2- curves (PI_STAR_STATUS.md), kappa = 0 free-charge target
     // with the FINAL pi-excess well row baked in, bonded points only (O 12, r = 1.01-1.96 A; S 11,
     // r = 1.60-2.60 A). REFIT Sep 26, 2026 (section 12) after the well refit: the first O-O row
@@ -86,7 +89,9 @@ inline constexpr HarrisEntry kHarrisEntries[] = {
     // With the corrected well the target is concave and c lands inside the range, but the rms
     // valley is shallow (O: 2.76-2.89 kcal/mol for c = 0.02-1.0), so c is only weakly determined.
     { 8, 8, 150.3350507111, 157.1886555765, 0.6260000000 },      // O-O   (n = 12, o2m_O-O-, fit rms 2.76) PISTAR:harris refit section 12
-    { 16, 16, 61.1565654160, 125.1316646006, 0.7980000000 },     // S-S   (n = 11, s2m_S-S-, fit rms 0.29) PISTAR:harris refit section 12
+    // S-S: joint refit on the extended range (Sep 27, 2026, section 8.5), g constant; previous
+    // 61.1565654160, 125.1316646006, 0.798.
+    { 16, 16, 88.3314951915, 0.0, 0.1000000000 },                // S-S   (s2m_S-S-, joint refit on the extended range, g constant) PISTAR:harris
 };
 // ---- END hand-maintained block --------------------------------------------------------------
 inline constexpr std::size_t kHarrisCount = sizeof(kHarrisEntries) / sizeof(kHarrisEntries[0]);

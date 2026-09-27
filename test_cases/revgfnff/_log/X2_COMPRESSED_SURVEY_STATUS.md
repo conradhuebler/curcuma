@@ -246,3 +246,146 @@ MOR41/S30L-CI structures were read (read-only) from the main checkout; this work
   the comments).
 - Scratch (not persistent): `/var/tmp/x2s/` (`survey_A.json`, `survey_B.json`, `jr_clf_*.json`,
   `falsify.py`, binaries A/B).
+
+## 8. P-A built: `-gfnff.rev_excess_bond_extend` (operator decision, Sep 27, 2026)
+
+The operator (via the coordinator) chose P-A. Binaries: B = end of Part 2 (md5 36010189); final
+**G** (md5 7207f9fa). Recommended value **1.8**. The PARAM default is 1.0 = off.
+
+### 8.1 Mechanism (as built; each rule below exists because a measurement forced it)
+
+- **Perception** (`perceiveGeometricBonds` -> `revX2ExtendBonds`). After the ordinary getnb pass, two
+  atoms are joined if `r < f * t1(i,j)`. Here t1 is the ordinary pass-1 (qa = 0) threshold, and the
+  pair must pass `revX2PairExtendable`:
+  - the element pair has a half-order row (or, with `rev_pi_excess_electron`, a pi-excess row);
+  - the net charge is exactly -1;
+  - both atoms have no bond under the ordinary pass-1 criterion;
+  - no third atom lies inside the bond ellipsoid `r_ik + r_kj < r_ij + 1.0 A`;
+  - each atom is the other's only candidate.
+
+  Whether the pair then gets x is decided by the unchanged P3 perceptions. Gated on `rev_enabled`
+  plus `rev_excess_electron`; plain `gfnff` and default `revgfnff` cannot reach it.
+- **Window** (`fragPass1Threshold`). An extendable pair's split threshold is `f * t1`, so the
+  ensemble window runs over `[f, f * s_max] * t1`. In the merged-corner variant the rule accepts
+  the pair up to `f * s_max * t1`, so that corner carries the bond, x and g, and the blend starts
+  from the bonded energy.
+- **SQE pair** (`SqePair::b_scale = f * s_max`). An extended pair with x > 0 evaluates its SQE bond
+  order at r / b_scale in the solve, the workspace kernel, the harris gate and the q0-blend gradient.
+- **Neighbour lists**. The extended bond is added to `nb_hc` / `nb_nometal` as well.
+
+Found on the way, each fixed before moving on:
+
+| # | defect of the first version | measured | fix |
+|---|---|---|---|
+| 1 | extended threshold carried the pass-2 charge shrink | argued: pass 1 splits, pass 2 bonds -> x = 0, q (-1, 0) | charge-independent `f * t1` in both passes (no numeric effect on the grid: #2 was the actual cause) |
+| 2 | the SQE pair's `b > rev_sqe_bmin` gate (1.37 R2, Cl-Cl ~3.8 A) switched the pair off while the bond persisted: charges pinned, qa-diagonal error back | Cl2- -42.0 at 4.06 A, F2- -114 at 2.69 A, ClF- -56 at 3.3 A | `b_scale` |
+| 3 | icase-2/3 lists re-test distances and drop the extended bond -> nbdiff 1 -> other hybridization | O2- +14.5 / S2- +20.1 kcal/mol steps (order 3 -> 2) | extended bond added to all three lists |
+| 4 | "isolated" is not enough: two free halides across a carbon | BH76/clch3clts **+56.5**, fch3fts **-13.2** (window only) | ellipsoid block + net charge exactly -1 |
+
+### 8.2 Refit (all 7 pairs, joint half/pi + harris, from the final binary of each round)
+
+`revgfnff_x2_jointrefit.py` on `recX`:
+- g form: B >= 0, c <= 1.5; `X2J_GCONST=1` gives a constant g.
+- Kernel replica of the Bond term: 1-5e-4 kcal/mol, the print precision of `CURCUMA_WELLDUMP`
+  (now a real check; the earlier self-substitution check was tautological).
+- **Adoption rule**: a refit replaces a row only if its LOO rms beats the old row's rms on the new
+  bonded set. The old rows never saw the extended points, so that rms is out-of-sample.
+
+| pair | bonded n | old rows | refit rms / LOO (g free, g const) | decision |
+|---|---:|---:|---|---|
+| F2- | 15 | 2.26 | 0.30 / 2.88, 1.64 / 2.66 | keep |
+| Cl2- | 17 | 2.12 | 1.66 / 4.90, 1.77 / 3.40 | keep |
+| Br2- | 18 | 1.53 | 0.84 / 2.09, 0.91 / 1.70 | keep |
+| I2- | 17 | 3.54 | 1.16 / 1.98, **1.16 / 1.88** | refit, g const |
+| ClF- | 18 | 12.86 | 1.27 / 3.21, **1.27 / 2.83** | refit, g const |
+| O2- | 13 | 2.71 | 1.74 / 7.75, 2.14 / 8.30 | keep |
+| S2- | 13 | 1.08 | 0.14 / 8.97, **0.22 / 0.47** | refit, g const |
+
+Fit rms = runtime rms after the rebuild: I2- 1.157 / 1.16, ClF- 1.274 / 1.27, S2- 0.221 / 0.22. The
+kept pairs reproduce their pre-refit runtime numbers exactly. O2-/S2- were decided on the binary
+that includes fix #3 (both moved there).
+
+### 8.3 Result (binary G, fresh, vs DLPNO-CCSD(T), kcal/mol)
+
+| pair | full rms rec -> **recX** | bonded+compr | compressed | worst point recX | model min recX / ref |
+|---|---|---:|---:|---|---|
+| Cl2- | 9.69 -> **2.01** | 2.12 | 2.30 | +3.8 @ 1.63 (compr) | -27.6 @ 2.64 / -28.4 @ 2.64 |
+| F2- | 9.73 -> **2.29** | 2.26 | 1.90 | +4.0 @ 2.50 | -25.7 @ 1.92 / -26.8 @ 1.92 |
+| Br2- | 9.51 -> **1.47** | 1.53 | 1.12 | +3.0 @ 4.18 | -27.2 @ 2.78 / -28.4 @ 2.78 |
+| I2- | 13.49 -> **1.15** | 1.16 | 0.78 | +2.5 @ 4.89 | -26.0 @ 3.26 / -27.4 @ 3.26 |
+| ClF- | 8.48 -> **1.16** | 1.27 | 1.63 | +3.4 @ 1.32 (compr) | -26.8 @ 2.22 / -27.8 @ 2.15 |
+| O2- | 7.75 -> **2.71** | 2.71 | 2.44 | -3.8 @ 1.35 | -95.5 @ 1.35 / -91.7 @ 1.35 |
+| S2- | 16.88 -> **0.22** | 0.22 | 0.23 | +0.4 @ 2.60 | -85.9 @ 2.00 / -85.7 @ 2.00 |
+
+- The section-5 estimate "static full rms towards ~2-4" is **better than estimated**: 0.2-2.7.
+- The worst point is <= 4 kcal/mol for every pair. The spurious 2x-deep minima of Cl2-/F2-/Br2-
+  are gone; every model minimum sits at the reference r_min.
+- `rec` (no extension) with the new rows: I2- bonded 2.12 -> 0.88, ClF- 1.54 -> 1.90, S2- 0.28 ->
+  0.24; full rms unchanged within 0.1.
+- The factor is not a knife edge. Full rms at f = 1.6 / 2.0 stays within 0.5 of f = 1.8 for every
+  pair (F2- worst: 2.22 / 2.73).
+- O2-/S2- references end at 2.16/3.15 A, still bound (-24/-23), so beyond that nothing is validated.
+
+**Continuity** (fresh 0.01 A scans over the whole reference range, `survey steps`, region E < +20):
+- `rec`: the largest steps are the cutoff jumps, Cl2- -46.4, F2- -72.0, Br2- -44.1, I2- -8.3,
+  ClF- -25.8, S2- +34.4.
+- `recX`: the largest step is 1.8-3.2 kcal/mol per 0.01 A for the halogens, always on the steep
+  inner wall; O2- 8.1 / S2- 5.5 at their innermost point. **No discontinuity left in the covered range.**
+
+**Up-vs-down** (0.05 A chains, default topology refresh): `rec` max 1.5-15.5 kcal/mol, `recX`
+**0.00 for all seven**.
+
+**React mode** (breaking / forming chains):
+- Breaking is unchanged (0.3-3.2).
+- Forming is fixed for O2- (38.1 -> **2.48**) and S2- (19.0 -> **0.32**), because the whole
+  reference range now lies inside the extended range.
+- **Halogen forming is unchanged** (Cl2- 8.0, F2- 12.3, Br2- 8.3, I2- 11.0, ClF- 6.2): react mode
+  forms bonds through its own hysteresis scan, which this static rule does not touch. Not attempted.
+
+**Water-probe label gap** (same geometry, the two X labels swapped, water H-bonded at 2.2 A):
+- 0.0000 for Cl2-, F2-, Br2-, O2-, S2- in `rec` and `recX`.
+- **I2-: 27.5 kcal/mol in `rec` on binary A as well - pre-existing.** It appears wherever the I-I
+  pair is unbonded and a water H sits 2.2 A from iodine (19 kcal/mol even at 7.7 A separation), and
+  vanishes at I...H 3.0 A. The ensemble's three-fragment window has an I...H contact defect. recX
+  removes it out to ~6 A, because the bond persists there, and leaves it beyond. Not investigated
+  further.
+
+**FD gradients** (h = 1e-4 A):
+- Bare diatomics at 1.1-2.3 r_min, where no known defect band is hit: <= 3.4e-6 Eh/A.
+- **New pre-existing plain-GFN-FF defect found**: net-charge -1 homonuclear diatomics have a band of
+  spurious analytic force in plain `-method gfnff` on binary A. F-F 3.00-3.20 A (-14.7 Eh/A at 3.00),
+  O-O 3.00-3.15, C-C 3.55-3.75, Cl-Cl 4.65-4.90; neutral pairs are clean; Br-Br none in range. The
+  energy is smooth and the term FDs are <= 0.015 Eh/A. It is independent of the ensemble model, the
+  repulsion rebuild, static CN and every rev switch. Not root-caused; plain GFN-FF is out of scope
+  here. It falls inside recX's F2- range (F2- 3.07 A: 0.36 Eh/A).
+- Water-probe points: on binary A with `rec` the same geometries already deviate by 1.9e-3 to 0.22
+  Eh/A (pre-existing). recX is the same order: lower for 5/7 pairs, higher for ClF-
+  (1.9e-3 -> 1.0e-2) and F2- (0.22 -> 0.29).
+
+### 8.4 Falsifiers
+
+| check | result |
+|---|---|
+| GMTKN55 2462 + MOR41 95 + S30L-CI 90, A vs G, plain `gfnff` | **0 / 2647 moved** |
+| same, default `revgfnff` | **0 / 2647 moved** |
+| same, rec + EA (no extension) | 0 / 2647 |
+| same, rec + EA + pi (no extension) | 1 / 2647: G21EA/EA_24 (S2-) -0.0012 kcal/mol (S-S row refit) |
+| **extension on vs off** (G, rec + EA + pi, f 1.8), all 2647, 128 anionic; the rule's verbosity-2 bond line counted | rule fires in **1** (G21EA/EA_25 = Cl2-, +0.08 kcal/mol); energy moves in 1. **BH76 (13 anionic incl. all SN2 TS) 0 / 0, AHB21 (42 anionic) 0 / 0, CHB6 0 / 0**, WATER27 0 / 0, IL16 0 / 0 |
+| first version (before fix #4) | fired on BH76/clch3clts (+56.5) and moved fch3fts (-13.2): the flagged SN2 risk was real, and blocked by the ellipsoid |
+| adversarial geometries (`/var/tmp/x2s/adversarial.py`) | 10 must-not cases fire 0 times: Cl-...Cl- at q -2, water on the X...X axis, F-...HF, Cl-...CH3Cl, Cl-...O2, SN2 path at 5 points. 9 must cases fire: Cl2- at 2.7 / 3.3 / 4.0 A, bare / water on axis / water beside |
+| `ctest -L gfnff` | 70 / 72, the same two baseline failures (`cli_simplemd_18/20`) |
+| full `ctest` | 288 / 307, identical failure set to binary B (12 baseline + 7 needing `../release/curcuma`) |
+
+### 8.5 Limits, stated plainly
+
+- It is topology perception: a third atom crossing the bond ellipsoid, or a second free candidate
+  appearing, switches the bond on or off discontinuously. The ordinary GFN-FF perception has the
+  same property; the ensemble window only smooths fragment splits.
+- Diatomic 2c-3e anions only; X-...X-Y (the X in a molecule) is never joined, by construction.
+  Net charge -1 only.
+- Halogen react-mode forming is unchanged.
+- The pre-existing plain-GFN-FF anion gradient band and the pre-existing I...H window label gap
+  (both above) are real, unfixed, and outside this change.
+- Recommended setting now: the stage-2 halogen setting + `-gfnff.rev_excess_bond_extend 1.8`
+  (+ `frag_charge_atomic_ea` for ClF-, + `rev_pi_excess_electron` for O2-/S2-). **All of it stays
+  opt-in.**

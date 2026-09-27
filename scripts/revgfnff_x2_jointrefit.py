@@ -55,16 +55,33 @@ def welldump(binp, pair, cfg, r):
     if not m:
         return None
     R, r0, fc, al = (float(x) for x in m[0])
-    return {"r0": r0, "alpha": al}
+    return {"r0": r0, "alpha": al, "fc": fc, "uncap": UNCAP[pair]}
+
+
+# half-order rows (sigma excess) are uncapped (ff_workspace_gfnff.cpp, P3 uncap = halfOrderWeight
+# = 1 at order 0.5); the pi-excess rows of O-O / S-S have no half-order row and keep the y = 2 cap.
+UNCAP = {"Cl2-": 1.0, "F2-": 1.0, "Br2-": 1.0, "I2-": 1.0, "ClF-": 1.0, "O2-": 0.0, "S2-": 0.0}
+
+
+def share_min_one(x, a):
+    u = x - 1.0
+    if u >= 0.0:
+        return 1.0
+    if u <= -a:
+        return x
+    return 1.0 - u * u * u / (a * a) - 2.0 * u * u / a
 
 
 def f_well(r, v, s, ca, beta, dr0):
-    """well per unit |fc| (Eh), kernel form 3 with the P3 uncap (half-order weight 1)."""
+    """well per unit |fc| (Eh): the kernel's form 3 (calcBonds), cap at y = 2 blended by uncap."""
     a = ca * math.sqrt(v["alpha"] / s)
     x = r * BOHR - v["r0"] - dr0 * BOHR
     phi = a * x + beta / BOHR ** 2 * x * x
     y = math.exp(-min(max(phi, -50.0), 200.0))
-    return -s * (2 * y - y * y)
+    yc = 2.0 * share_min_one(y / 2.0, 0.2)
+    capped = -s * (2 * yc - yc * yc)
+    u = v.get("uncap", 1.0)
+    return (1.0 - u) * capped + u * (-s * (2 * y - y * y))
 
 
 def g_of(r, A, B, c):
@@ -90,10 +107,12 @@ def main():
         return q["E"] - q["bond"] - q["H"] + q["bond"] * f_well(q["r"], q["v"], s, ca, beta, dr0) / q["fcur"] \
             + q["xeff"] * g_of(q["r"], A, B, c)
 
-    # sanity: the current rows must reproduce the runtime energy exactly
-    chk = max(abs(model(half + harris, q) - q["E"]) for q in pts)
+    # sanity: the well formula x |fc| must reproduce the kernel's Bond term wherever the window does
+    # not blend (x_eff = 1); a wrong cap / r0 / unit shows up here, not in a self-substitution.
+    chk = max((abs(q["bond"] - f_well(q["r"], q["v"], *half) * abs(q["v"]["fc"]) * K)
+               for q in pts if abs(q["xeff"] - 1.0) < 1e-6), default=float("nan"))
     print(f"{pair} {cfg}: {len(pts)} bonded points {pts[0]['r']:.3f}-{pts[-1]['r']:.3f} A, "
-          f"x_eff {min(q['xeff'] for q in pts):.3f}-{max(q['xeff'] for q in pts):.3f}, replica check {chk:.2e} kcal/mol")
+          f"x_eff {min(q['xeff'] for q in pts):.3f}-{max(q['xeff'] for q in pts):.3f}, kernel-replica check (Bond term) {chk:.2e} kcal/mol")
 
     def solve_lin(nl, P):
         """given (s, ca, beta, dr0, c): A, B by linear least squares."""

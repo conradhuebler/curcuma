@@ -743,3 +743,20 @@ pairs were measured against their DLPNO-CCSD(T) curves in the recommended settin
   - React-mode breaking scans, where the bond persists, give rms 1.2-3.6 for all seven.
   - Proposals are costed in the status file, section 5. Until one is decided, **static X2- single
     points beyond ~1.05 r_min are not validated**; follow an X2- bond outward in react mode.
+
+### P-A: extended 2c-3e bond perception, `-gfnff.rev_excess_bond_extend` (2026-09-27, opt-in)
+
+Built on the operator's decision; `X2_COMPRESSED_SURVEY_STATUS.md` section 8.
+- **What it does.** A pair of otherwise unbonded atoms with a half-order (or pi-excess) row, at net
+  charge -1, with no third atom on the contact, keeps its bond out to f × the ordinary threshold.
+  The ensemble window and the SQE pair's bond order move with it.
+- **Result at f = 1.8.** Static full-grid rms against DLPNO-CCSD(T) goes from 7.8-16.9 to
+  **0.2-2.7 kcal/mol** for all seven pairs (Cl2- 2.01, F2- 2.29, Br2- 1.47, I2- 1.15, ClF- 1.16,
+  O2- 2.71, S2- 0.22). The spurious 2x-deep minima are gone. There are no discontinuities in the
+  covered range, and up-vs-down history dependence is exactly 0.
+- **Rows.** I-I, Cl-F and S-S rows were refit jointly on the extended range; the other four were
+  kept by a leave-one-out rule.
+- **Falsifiers.** Across GMTKN55/MOR41/S30L-CI the rule fires only on G21EA/EA_25 (Cl2-). BH76
+  (incl. the SN2 TS, after an ellipsoid block added for BH76/clch3clts), AHB21 and CHB6 are untouched.
+- **Not covered.** Halogen react-mode forming is unchanged.
+- **Recommended.** Add `-gfnff.rev_excess_bond_extend 1.8` to the settings above.
