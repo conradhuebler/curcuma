@@ -45,7 +45,7 @@ Force field implementation system with multi-threading support for UFF, QMDFF, a
 
 **EEQSolver** (`eeq_solver.cpp/h`): two-phase EEQ (topological Phase 1, geometric Phase 2 with
 dxi/dgam/alpha corrections); Schur-Cholesky default (`dpotrf` under `ScopedBlasThreads`),
-PCG/LDLT/LU alternatives, cached factor + iterative refinement for MD; **projected PCG**
+PCG/LDLT/LU alternatives, opt-in cached factor + iterative refinement for MD (off by default since Sep 27, 2026); **projected PCG**
 (`solveWithProjectedPCG`, default for N >= 500, tol 1e-12, `eeq_ppcg_min_nfrag 0` = exact) replaces the O(N² nfrag) Schur
 route for many-fragment boxes (water/3000: 887 -> 59 ms per solve, energies identical to 12
 digits, gradients to 3e-10). Phase-2 takes
@@ -357,7 +357,8 @@ landed after the WP was written; (b) `eeq_matrix_rebuild_eps_bohr>0` makes
 0/1/3) — it stays disabled. Single points never hit the cache. **Caveat (Sep 27, 2026)**:
 "one step is enough at the default threshold" does not hold in MD on water8 (24 atoms) —
 refine 1 leaves the trajectory 7.8e-6 A/step off the exact solve, refine 3 matches it; energy
-conservation unaffected. Open, see TODO.md "Cholesky-Faktor-Cache mit einer Nachiteration".
+conservation unaffected. **Since Sep 27, 2026 the cache is off by default** (`eeq_refactor_eps_bohr 0`):
+below 500 atoms it saved no time (450-atom water cluster 16.05 ms cached vs 15.53 ms uncached per call).
 
 **Jun 2026 — large-system GFN-FF speedups** (see `docs/GFNFF_PERFORMANCE_LEVERS.md`):
 - **HB candidate generation (Lever 1)**: cell-list nhb2 (`hyd_on[]`) + nhb1

@@ -791,7 +791,7 @@
   Seiten den exakten Loeser. Details und Zahlen: [docs/GPU_TUNING.md](docs/GPU_TUNING.md) Abschnitt 3.
 
 ### GFN-FF/EEQ: Cholesky-Faktor-Cache mit einer Nachiteration ist in der MD nicht exakt (2026-09-27)
-- **Status**: ⏳ OFFEN, gemessen, nicht behoben — Default-Aenderung ist Betreiber-Entscheidung
+- **Status**: 🤖 umgesetzt 2026-09-27 (Betreiber: „dann machen wir das so") — `eeq_refactor_eps_bohr` Default 0, Cache aus; zugleich `nonbonded_skin_bohr` Default 2. Machine-tested, Betreiber-Pruefung offen.
 - **Befund** (water8_cluster, 24 Atome, 8 Fragmente, CSVR 300 K, dt 0,5 fs, 1 Thread, 500 fs):
   Referenz = cholesky ohne Cache (`eeq_refactor_eps_bohr 0`) = ppcg (identisch ueber 500 fs).
   Default (`eps 0.05`, `eeq_refine_iters 1`) weicht ab Schritt 1 ab (7,8e-6 A, dann +7,8e-6 A pro

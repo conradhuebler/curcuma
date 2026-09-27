@@ -10872,7 +10872,7 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
     const double effective_r_cut = cutoff_active ? eeq_cut
                                                  : coulombRCutBohr();
     // Claude Generated (Sep 2026): build radius = cutoff + optional Verlet skin
-    // (nonbonded_skin_bohr, default 0); the kernel still cuts at effective_r_cut.
+    // (nonbonded_skin_bohr, default 2 since Sep 27, 2026); the kernel still cuts at effective_r_cut.
     const double build_cut = cutoff_active ? eeq_cut + nonbondedSkinBohr() : 0.0;
     const double cutoff_sq = cutoff_active ? build_cut * build_cut : 0.0;
 
@@ -11157,7 +11157,7 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
 
     if (repulsionListIsDistanceFiltered()) {
         // Claude Generated (Sep 2026): build radius = kernel cutoff + optional Verlet skin
-        // (nonbonded_skin_bohr, default 0). Pairs between 20 and 20+skin are stored but the
+        // (nonbonded_skin_bohr, default 2 since Sep 27, 2026). Pairs between 20 and 20+skin are stored but the
         // kernel still skips them (r.r_cut stays NB_REP_RCUT); they are the reserve that lets
         // updateNonbondedRepulsionIfNeeded() rebuild only after skin/2 of atomic motion.
         SpatialCellList rep_cells;
@@ -11340,7 +11340,7 @@ double GFNFF::dispersionSkinBohr() const
 double GFNFF::nonbondedSkinBohr() const
 {
     // Claude Generated (Sep 2026): Verlet skin of the repulsion and explicit-Coulomb lists.
-    return std::max(0.0, m_parameters.value("nonbonded_skin_bohr", 0.0));
+    return std::max(0.0, m_parameters.value("nonbonded_skin_bohr", 2.0));  // default 2 since Sep 27, 2026
 }
 
 double GFNFF::coulombRCutBohr() const

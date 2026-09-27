@@ -849,7 +849,7 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     if (m_config.get<int>("verbosity", 0) >= 2)
         CurcumaLogger::info(fmt::format("EEQ solver config: solve_method={}, ppcg auto at nfrag>={} & N>={}, tol={:.0e}, max_iter={}",
             m_config.get<std::string>("solve_method", "cholesky"), m_ppcg_min_nfrag, m_ppcg_min_atoms, m_ppcg_tol, m_ppcg_max_iter));
-    m_refactor_eps         = m_config.get<double>("eeq_refactor_eps_bohr", 0.05);
+    m_refactor_eps         = m_config.get<double>("eeq_refactor_eps_bohr", 0.0);
     m_refactor_force_every = m_config.get<int>("eeq_refactor_force_every", 0);
     m_refine_iters         = m_config.get<int>("eeq_refine_iters", 1);
     m_matrix_rebuild_eps   = m_config.get<double>("eeq_matrix_rebuild_eps_bohr", 0.0);
