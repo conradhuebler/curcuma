@@ -58,6 +58,7 @@ CMakeLists.txt.user*
 
 # Build directories
 build/
+build_asan/
 debug/
 release/
 bin/
@@ -94,6 +95,8 @@ test_cases/**/*.trj.xyz
 test_cases/**/*.opt.xyz
 test_cases/**/*.param.json
 test_cases/**/curcuma_*.json
+curcuma_citations.bib
+gfnff_diag_charges.json
 test_cases/**/*.log
 test_cases/**/*.dat
 !test_cases/**/baseline.dat
