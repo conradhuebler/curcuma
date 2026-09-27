@@ -93,11 +93,11 @@
 - **Abhängigkeit**: Benötigt theoretische Implementierung oder externe Daten
 
 ### Unit System Migration (CODATA-2018)
-- **Status**: ⏳ IN PROGRESS
-- **Task**: Replace hardcoded constants mit `CurcumaUnit` namespace functions
-- **Betroffene Dateien**: Multiple legacy files mit hardcoded constants
-- **Verweis**: src/core/CLAUDE.md:113, CLAUDE.md:296
-- **Gewinn**: Centralized, documented, CODATA-2018 compliant constants
+- **Status**: 🤖 umgesetzt (Commit `191cebe3`, 2026-09-25), machine-tested — Betreiber-Pruefung offen
+- **Stand**: alle Bohr/Angstroem- und Hartree-Umrechnungen laufen ueber `src/core/units.h`;
+  `-DUSE_LEGACY_UNIT_CONSTANTS=ON` stellt die alten Einzelwerte bitgenau her. Inventar und
+  Messwerte: [docs/UNIT_CONSTANTS.md](docs/UNIT_CONSTANTS.md), CLAUDE.md Known Issue #33.
+- **Offen**: der Rest von 0,0036 kcal/mol gegen pprcht auf `polymer_2x` (nicht verfolgt).
 
 ### GFN-FF EEQ warm start across the q-loop passes — DONE, entry was stale (re-measured Sep 18, 2026)
 - The warm start is in place and works: polymer_2x with the topology cache deleted, 7320 atoms /
@@ -327,8 +327,8 @@
   genug, dass der Unterschied meist unter der Schwelle bleibt, aber nicht garantiert unter allen
   MOR41/GMTKN55-Strukturen).
 
-### GFN-FF/EEQ: CPU/GPU-Trajektorien-Divergenz — Ursache direkt gezeigt, kein Fix (2026-09)
-- **Status**: ⏳ OFFEN, Mechanismus bestaetigt, kein Loesungsweg umgesetzt
+### GFN-FF/EEQ: CPU/GPU-Trajektorien-Divergenz — Loeser als Ursache am 2026-09-27 widerlegt (s. KORREKTUR am Abschnittsende)
+- **Status**: ⏳ OFFEN — punktgenau nicht erreichbar (CPU/CPU divergiert ebenso), Ensemblevergleich Betreiber-Entscheidung
 - **Befund**: ein 10-ps-GFN-FF-MD-Vergleich CPU vs. GPU auf `polymer_2x` (7320 Atome, nfrag=1500)
   divergiert reproduzierbar (nahezu deckungsgleich bis ~400 fs, ab ~1200 fs vollstaendig
   entkoppelt). Ursache **direkt gezeigt, nicht nur vermutet**: bei `nfrag=1500` waehlt der
@@ -740,6 +740,41 @@
   vergleicht dagegen, `golden_energies.txt` ist entfernt. Dadurch laeuft erstmals auch der zweite
   Durchlauf mit `-threads 4` (wurde nach dem ersten Fehlschlag nie erreicht): 40/40. Negativkontrolle
   (eine Referenz um 1e-4 Eh verfaelscht) schlaegt an. `ctest -L gfnff` jetzt **78/78**.
+- **KORREKTUR (2026-09-27): die „direkt gezeigte" Ursache oben ist widerlegt, fuer beide Systeme.**
+  Dem Kontrollversuch vom 23.9. fehlte die Wiederholung mit DEMSELBEN Loeser. Nachgeholt:
+  - *polymer_2x, 2 ps, CSVR, je ein Lauf*: CPU gegen CPU (gleiche Threadzahl) trennt sich bei
+    1e-5 A nach 730 fs, 0,1 A nach 1220 fs; CPU gegen GPU WP7-A 700/1180 fs, CPU gegen GPU WP7-E
+    710/1180 fs, GPU-Karte gegen Karte 720/1200 fs. Der Loeser setzt die Zeitskala nicht, die
+    CPU ist mit mehreren Threads selbst nicht bitgenau. Mittelwerte 1–2 ps aller 6 Laeufe gleich
+    im Rauschen (<T> 300,2–300,5 K, <Epot> −914,92…−915,00 Eh bei sd 0,4 Eh).
+  - *water8 (24 Atome), 1 Thread*: bytegleich reproduzierbar; mit 4 Threads nicht (1e-5 A nach
+    2618 fs). cholesky gegen ppcg trennt sich ab dem ERSTEN Schritt (7,8e-6 A, linear wachsend) —
+    aber nicht wegen „zwei korrekter Loeser": cholesky mit Neufaktorisierung in jedem Schritt
+    (`-eeq_solver.eeq_refactor_eps_bohr 0`) und ppcg sind ueber 500 fs identisch. Ursache ist der
+    Cholesky-Faktor-Cache mit nur EINER Nachiteration (`eeq_refine_iters 1`, Default); mit 3
+    Nachiterationen 480 fs innerhalb der Druckaufloesung. Siehe eigener Eintrag unten.
+  - *Folge*: Punktgenauer CPU/GPU-Vergleich ueber ps ist nicht erreichbar, solange schon CPU/CPU
+    divergiert; Option (c) Ensemblevergleich ist der einzige, der fuer CPU gegen GPU traegt.
+    Entscheidung beim Betreiber. Ursache der CPU-Thread-Nichtdeterminismus: nicht gesucht.
+    Vault: `Labor/curcuma EEQ-Löser-Benchmark.md`, Eintrag 2026-09-27.
+- **GPU-Default = CPU-Semantik (Commit folgt, 2026-09-27)**: die GPU waehlt WP7-E jetzt unter
+  denselben Schwellen wie die CPU ppcg (`eeq_ppcg_min_nfrag`/`min_atoms`), `0` erzwingt auf beiden
+  Seiten den exakten Loeser. Details und Zahlen: [docs/GPU_TUNING.md](docs/GPU_TUNING.md) Abschnitt 3.
+
+### GFN-FF/EEQ: Cholesky-Faktor-Cache mit einer Nachiteration ist in der MD nicht exakt (2026-09-27)
+- **Status**: ⏳ OFFEN, gemessen, nicht behoben — Default-Aenderung ist Betreiber-Entscheidung
+- **Befund** (water8_cluster, 24 Atome, 8 Fragmente, CSVR 300 K, dt 0,5 fs, 1 Thread, 500 fs):
+  Referenz = cholesky ohne Cache (`eeq_refactor_eps_bohr 0`) = ppcg (identisch ueber 500 fs).
+  Default (`eps 0.05`, `eeq_refine_iters 1`) weicht ab Schritt 1 ab (7,8e-6 A, dann +7,8e-6 A pro
+  Schritt, 1e-3 A nach 258 fs); `eeq_refine_iters 3` bleibt 480 fs innerhalb 1e-5 A. Der Kommentar
+  zu A4 in `eeq_solver.cpp` und `ff_methods/CLAUDE.md` („bei der Default-Schwelle ist die
+  Nachiteration ein numerisches No-op") trifft hier nicht zu.
+- **Wirkung**: NVE-Energieerhaltung (2 ps, je ein Lauf) praktisch unveraendert — Drift 1,77e-4 statt
+  1,37e-4 Eh bei dt 0,5 fs, 2,9e-5 statt 2,5e-5 bei dt 0,25 fs. Betroffen: CPU-GFN-FF-MD/-Opt
+  unter `eeq_ppcg_min_atoms` (500) Atomen; darueber laeuft ppcg ohne Cache.
+- **Optionen**: (a) `eeq_refine_iters` Default 2–3 (O(N^2) je Schritt, bei <500 Atomen billig —
+  Kosten nicht gemessen); (b) `eeq_refactor_eps_bohr` Default 0 fuer kleine Systeme; (c) belassen.
+  Vor einer Aenderung: Kosten messen, mehr als ein System, Energieerhaltung mit n>1.
 
 ### SIGSEGV am Ursprung untersucht (Auftrag „fix den SIGSEGV am Ursprung") — nicht gefunden, Werkzeuge sind blind dafuer (2026-09-24)
 - **Status**: ⏳ OFFEN. Root Cause NICHT gefunden trotz gruendlicher Untersuchung mit ASan,

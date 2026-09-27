@@ -717,6 +717,14 @@ void GFNFF::forwardEEQSolverParams(json& eeq_params) {
         }
     }
 
+    // Claude Generated (Sep 2026): the projected-PCG switches too, so -gfnff.eeq_ppcg_* reaches
+    // the CPU solver. The GPU reads min_nfrag/min_atoms/max_iter from the eeq_solver scope
+    // first, then from gfnff; its tolerance is pcg_tolerance (absolute), not eeq_ppcg_tol.
+    for (const char* key : { "eeq_ppcg_min_nfrag", "eeq_ppcg_min_atoms", "eeq_ppcg_tol", "eeq_ppcg_max_iter" }) {
+        if (m_parameters.contains(key) && !eeq.contains(key))
+            eeq[key] = m_parameters[key];
+    }
+
     // WP-EEQ-Cache: forward Cholesky-cache params to eeq_solver
     if (m_parameters.contains("eeq_refactor_eps_bohr") && !eeq.contains("eeq_refactor_eps_bohr"))
         eeq["eeq_refactor_eps_bohr"] = m_parameters["eeq_refactor_eps_bohr"];

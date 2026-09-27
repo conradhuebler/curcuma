@@ -317,10 +317,23 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
     // prefer projected PCG. Note m_eeq_ppcg_tolerance is an ABSOLUTE tolerance on |r| (GPU
     // convention, like m_eeq_pcg_tolerance above) whereas the CPU's eeq_ppcg_tol is relative
     // (tol*(|b|+1)) — same PARAM value, different meaning; read as pcg_tolerance's GPU sibling.
-    m_eeq_ppcg_max_iter  = gfnff_cfg.value("eeq_ppcg_max_iter", 500);
+    // Claude Generated (Sep 2026): these PARAMs belong to eeq_solver (eeq_solver.h) and the CPU
+    // EEQSolver reads them from that scope. Read them from there first, so the same flag
+    // (-eeq_solver.eeq_ppcg_min_nfrag 0 = exact solve) steers CPU and GPU alike.
+    auto eeq_value = [&](const char* key, auto dflt) {
+        const json* scopes[2] = {
+            gfnff_cfg.contains("eeq_solver") ? &gfnff_cfg.at("eeq_solver") : nullptr,
+            config.contains("eeq_solver") ? &config.at("eeq_solver") : nullptr };
+        for (const json* scope : scopes) {
+            if (scope && scope->is_object() && scope->contains(key))
+                return scope->value(key, dflt);
+        }
+        return gfnff_cfg.value(key, dflt);
+    };
+    m_eeq_ppcg_max_iter  = eeq_value("eeq_ppcg_max_iter", 500);
     m_eeq_ppcg_tolerance = gfnff_cfg.value("pcg_tolerance", 1e-10);
-    m_eeq_ppcg_min_nfrag = gfnff_cfg.value("eeq_ppcg_min_nfrag", 1);
-    m_eeq_ppcg_min_atoms = gfnff_cfg.value("eeq_ppcg_min_atoms", 500);
+    m_eeq_ppcg_min_nfrag = eeq_value("eeq_ppcg_min_nfrag", 1);
+    m_eeq_ppcg_min_atoms = eeq_value("eeq_ppcg_min_atoms", 500);
 
     // Claude Generated (Sep 2026, multi-GPU): `gpu_device` (global CLI key, set per worker by
     // the batch capabilities) pins this method to one device. Everything below that allocates
@@ -1031,24 +1044,45 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                                        ? m_eeq_distance_cutoff * m_eeq_distance_cutoff
                                        : 0.0;
 
+        // nfrag > 1: which solver. Default (cholesky) -> WP7-E above the CPU's ppcg thresholds,
+        // WP7-A below them. "batched" -> WP7-B. "pcg" -> WP7-C (explicit only). "ppcg" -> WP7-E.
+        // Claude Generated (Sep 2026): resolved ONCE here for both the verbosity-2 path report
+        // and the dispatch below - they were two copies, and the report missed the new default.
+        //
+        // The default does what the CPU EEQSolver does with it: its SchurCholesky dispatch
+        // switches to projected PCG for a large many-fragment system (eeq_solver.cpp
+        // ppcg_auto: nfrag >= eeq_ppcg_min_nfrag && N >= eeq_ppcg_min_atoms). The GPU used to
+        // keep the exact dense WP7-A there: a different algorithm than the CPU and 17x slower
+        // on polymer_2x (1325 vs 79 ms per solve). The algorithm difference is NOT what makes
+        // CPU and GPU MD trajectories part: on polymer_2x (2 ps, CSVR) two CPU runs with
+        // identical settings separate by 1e-5 A at ~730 fs, CPU vs GPU WP7-A at ~700 fs, CPU vs
+        // GPU WP7-E at ~710 fs - chaotic growth of rounding differences either way.
+        // -eeq_solver.eeq_ppcg_min_nfrag 0 forces the exact solve, on both sides.
+        const bool ppcg_thresholds_met = m_eeq_ppcg_min_nfrag > 0
+            && m_eeq_nfrag >= m_eeq_ppcg_min_nfrag
+            && N >= m_eeq_ppcg_min_atoms;
+        EEQSolveMethod many_frag_method = m_eeq_strategy;
+        if (many_frag_method == EEQSolveMethod::SchurCholesky && ppcg_thresholds_met)
+            many_frag_method = EEQSolveMethod::ProjectedPCG;
+        if (many_frag_method == EEQSolveMethod::Auto) {
+            // WP7-E (Sep 2026, curcuma EEQ-Löser-Benchmark): WP7-C's per-fragment PCG loop
+            // (nfrag+1 solves) and its block-Jacobi setup both scale with fragment count/size
+            // in ways that make it intractable for many-fragment, large systems (e.g. a
+            // solvated polymer, nfrag~1500). Projected PCG (WP7-E) does one solve regardless
+            // of nfrag, so Auto prefers it over WP7-C under the CPU's own ppcg thresholds.
+            many_frag_method = (N >= m_eeq_pcg_threshold) ? EEQSolveMethod::PCG
+                                                          : EEQSolveMethod::SchurCholesky;
+            if (many_frag_method == EEQSolveMethod::PCG && ppcg_thresholds_met)
+                many_frag_method = EEQSolveMethod::ProjectedPCG;
+        }
+
         if (CurcumaLogger::get_verbosity() >= 2) {
             const char* path = "CPU-fallback";
             if (gpu_eeq_applicable) {
                 if (m_eeq_nfrag == 1) {
                     path = "WP5-A GPU-Schur (cholesky)";
                 } else {
-                    EEQSolveMethod resolved = m_eeq_strategy;
-                    if (resolved == EEQSolveMethod::Auto) {
-                        resolved = (N >= m_eeq_pcg_threshold)
-                                       ? EEQSolveMethod::PCG
-                                       : EEQSolveMethod::SchurCholesky;
-                        if (resolved == EEQSolveMethod::PCG
-                            && m_eeq_ppcg_min_nfrag > 0
-                            && m_eeq_nfrag >= m_eeq_ppcg_min_nfrag
-                            && N >= m_eeq_ppcg_min_atoms) {
-                            resolved = EEQSolveMethod::ProjectedPCG;
-                        }
-                    }
+                    const EEQSolveMethod resolved = many_frag_method;
                     if      (resolved == EEQSolveMethod::Batched)      path = "WP7-B GPU-Schur (batched)";
                     else if (resolved == EEQSolveMethod::ProjectedPCG) path = "WP7-E GPU-Schur (projected-pcg)";
                     else if (resolved == EEQSolveMethod::PCG)          path = "WP7-C GPU-Schur (pcg)";
@@ -1121,29 +1155,9 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                             force_refactor);
                     }
                 } else {
-                    // nfrag > 1: pick strategy. Default (cholesky) → WP7-A. "batched" → WP7-B.
-                    // "pcg" or auto-with-large-N → WP7-C (explicit only, see below). "ppcg"
-                    // (or auto-with-many-fragments) → WP7-E. All fall back to WP2 + CPU-Schur
-                    // on failure.
-                    EEQSolveMethod resolved = m_eeq_strategy;
-                    if (resolved == EEQSolveMethod::Auto) {
-                        resolved = (N >= m_eeq_pcg_threshold)
-                                       ? EEQSolveMethod::PCG
-                                       : EEQSolveMethod::SchurCholesky;
-                        // WP7-E (Sep 2026, curcuma EEQ-Löser-Benchmark): WP7-C's per-fragment
-                        // PCG loop (nfrag+1 solves) and its block-Jacobi setup both scale with
-                        // fragment count/size in ways that make it intractable for many-
-                        // fragment, large systems (e.g. a solvated polymer, nfrag~1500).
-                        // Projected PCG (WP7-E) does one solve regardless of nfrag, so Auto
-                        // prefers it over WP7-C whenever the CPU's own ppcg auto-selection
-                        // thresholds would — same PARAMs, so CPU and GPU agree.
-                        if (resolved == EEQSolveMethod::PCG
-                            && m_eeq_ppcg_min_nfrag > 0
-                            && m_eeq_nfrag >= m_eeq_ppcg_min_nfrag
-                            && N >= m_eeq_ppcg_min_atoms) {
-                            resolved = EEQSolveMethod::ProjectedPCG;
-                        }
-                    }
+                    // nfrag > 1: strategy resolved above (many_frag_method). All fall back to
+                    // WP2 + CPU-Schur on failure.
+                    const EEQSolveMethod resolved = many_frag_method;
 
                     if (resolved == EEQSolveMethod::ProjectedPCG && m_eeq_gpu->isFragmentTopoValid()) {
                         // WP7-E: single projected-PCG solve (no nfrag+1 loop, no block-Jacobi).

@@ -354,8 +354,10 @@ NOT loosened**: (a) there is no speed to gain — the whole cache mechanism is ~
 of MD wall time, comparable to noise, since the threaded LAPACK `dpotrf` path
 landed after the WP was written; (b) `eeq_matrix_rebuild_eps_bohr>0` makes
 `A_nn` itself stale, so refinement cannot rescue it (identical Etot at refine
-0/1/3) — it stays disabled. At the default threshold refinement is a numerical
-no-op, so single points are unaffected.
+0/1/3) — it stays disabled. Single points never hit the cache. **Caveat (Sep 27, 2026)**:
+"one step is enough at the default threshold" does not hold in MD on water8 (24 atoms) —
+refine 1 leaves the trajectory 7.8e-6 A/step off the exact solve, refine 3 matches it; energy
+conservation unaffected. Open, see TODO.md "Cholesky-Faktor-Cache mit einer Nachiteration".
 
 **Jun 2026 — large-system GFN-FF speedups** (see `docs/GFNFF_PERFORMANCE_LEVERS.md`):
 - **HB candidate generation (Lever 1)**: cell-list nhb2 (`hyd_on[]`) + nhb1
@@ -677,6 +679,10 @@ std::string method = "d4";  // Matches Fortran reference
   names (the untouched `gfnff_rocm.hip` uses them, and both plugins load `RTLD_GLOBAL`, so the
   two backends must not export identical symbols). Kernel TUs stay separate (not merged blind;
   no ROCm SDK here — the HIP side is a token-identical mechanical mirror, uncompiled).
+
+- **Sep 27, 2026 — EEQ default = CPU semantics**: nfrag>1 with `solve_method cholesky` resolves
+  once (`many_frag_method` in `gfnff_gpu_method_impl.h`) to WP7-E above `eeq_ppcg_min_nfrag`/
+  `min_atoms`, else WP7-A; `0` forces exact on CPU and GPU. Numbers: docs/GPU_TUNING.md section 3.
 
 ### ✅ Phase 1+2: GPU CN + GPU dc6dcn (March 2026)
 - GPU CN computation replaces CPU O(N²) erf() loop
