@@ -145,7 +145,13 @@ static constexpr HalfOrderEntry kHalfOrderEntries[] = {
     // bond cutoff weight 0.3), against the rest of the model with localised charges
     {  9,  9,   0.655464,   1.549085,   0.000000,   0.264120 },   // F-F  order 0.5 (F2-, D 45.2 kcal/mol, r_min 1.690 A)
     { 17, 17,   1.143785,   1.162928,   0.295217,   0.600037 },   // Cl-Cl order 0.5 (Cl2-, D 34.0 kcal/mol, r_min 2.568 A)
-    {  9, 17,   2.419571,   1.816478,   0.781053,   0.398527 },   // Cl-F order 0.5 (ClF-, DLPNO-CCSD(T), D 110.3 kcal/mol, r_min 1.918 A, fit bonded rms 3.51 LOO 7.99) X2CLF:half
+    // Cl-F: JOINT refit with the Cl-F harris row against the harris-mode rest, NOT against the flat100
+    // rest (Sep 27, 2026, X2_COMPRESSED_SURVEY_STATUS.md Part 2): flat100 localises ClF-'s electron
+    // on F and jumps at the pass-1 split inside the well, a 12 kcal/mol step no smooth g follows.
+    // Consequence: this row is correct for rev_excess_mode harris only; flat mode must not be used
+    // for ClF- (it was already unusable, I2_CLF 12.6). Previous row: 2.419571, 1.816478, 0.781053,
+    // 0.398527 (fitted on flat100 with CURCUMA_BONDDUMP r0_dyn, which lacks the pair-CN correction).
+    {  9, 17,   0.671798,   1.193147,   0.767489,   0.466702 },   // Cl-F order 0.5 (ClF-, DLPNO-CCSD(T), harris joint refit, bonded rms 1.54 LOO 6.46) X2CLF:half
     { 35, 35,   1.200601,   1.136506,   0.395906,   0.531758 },   // Br-Br order 0.5 (Br2-, DLPNO-CCSD(T), D 55.2 kcal/mol, r_min 2.694 A, fit bonded rms 0.99 LOO 2.62) X2BR:half
     { 53, 53,   2.155195,   1.384566,   0.343513,   0.505417 },   // I-I order 0.5 (I2-, I2-, DLPNO-CCSD(T), D 66.7 kcal/mol, r_min 2.950 A, fit bonded rms 2.28 LOO 5.40) X2I:half
 };

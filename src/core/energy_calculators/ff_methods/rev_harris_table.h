@@ -71,7 +71,13 @@ inline constexpr HarrisEntry kHarrisEntries[] = {
     { 35, 35, 115.4623886836, 99.6617053206, 0.6835839599 },   // Br-Br (Br2-, DLPNO-CCSD(T), static bonded rms 1.69 LOO 2.14, react break 1.82) X2BR:harris
     { 53, 53, 89.3328189456, 52.6698342651, 0.4756892231 },   // I-I (I2-, DLPNO-CCSD(T), static bonded rms 2.12 LOO 2.61, react break rms 2.02; refit on the final half row, I2_CLF_STATUS 12) X2I:harris
     { 9, 9, 212.2064031706, 238.6608379001, 1.3765664160 },     // F-F   (F2-,  DLPNO-CCSD(T))
-    { 9, 17, -11.8546099202, -198.5314773496, 0.0500000000 },    // Cl-F (ClF-, DLPNO-CCSD(T), static bonded rms 8.40 LOO 9.52, react break 6.94; refit on the final half row, c at grid bound = linear limit, I2_CLF_STATUS 12) X2CLF:harris
+    // Cl-F: JOINT refit with the Cl-F half row (Sep 27, 2026, X2_COMPRESSED_SURVEY_STATUS.md Part 2,
+    // scripts/revgfnff_x2_jointrefit.py): both rows fitted together on the recommended harris
+    // setting's own energy (+ frag_charge_atomic_ea + rev_sqe_group_pairs_only), kernel r0 from
+    // CURCUMA_WELLDUMP, 11 static bonded points. g is a constant (B = 0): with B free the fit makes
+    // g the compression wall (c on its bound, |B| 1e3-1e7) - measured, rejected. Static bonded rms
+    // 9.20 -> 1.54 (LOO 6.46). Previous row: -11.8546099202, -198.5314773496, 0.05 (I2_CLF 12).
+    { 9, 17, 100.7065823477, 0.0, 0.5000000000 },               // Cl-F (ClF-, DLPNO-CCSD(T), joint refit, g constant) X2CLF:harris
     // O-O / S-S: DLPNO-CCSD(T) O2- / S2- curves (PI_STAR_STATUS.md), kappa = 0 free-charge target
     // with the FINAL pi-excess well row baked in, bonded points only (O 12, r = 1.01-1.96 A; S 11,
     // r = 1.60-2.60 A). REFIT Sep 26, 2026 (section 12) after the well refit: the first O-O row
