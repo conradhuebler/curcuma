@@ -1,6 +1,6 @@
 /*
  * <Curcuma main file.>
- * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *               2024 Gerd Gehrisch <gg27fyla@student.freiberg.de>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -1913,11 +1913,14 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         if (!dump_gradient_path.empty()) {
             std::ofstream gf(dump_gradient_path);
             if (gf) {
+                // Sep 2026: 17 significant digits (round-trip exact for a double), so two dumps
+                // can be compared bit for bit (run-to-run / thread-count determinism checks).
+                // The energy stays fixed-point: scripts read it with "-?\d+\.\d+".
                 gf << "# GFN-FF/xTB analytic gradient dE/dx [Eh/Angstrom], one atom per row\n";
-                gf << "# energy " << fmt::format("{:.12f}", energy) << " Eh, gnorm "
-                   << fmt::format("{:.12e}", grad_norm) << " Eh/Angstrom\n";
+                gf << "# energy " << fmt::format("{:.15f}", energy) << " Eh, gnorm "
+                   << fmt::format("{:.16e}", grad_norm) << " Eh/Angstrom\n";
                 for (int i = 0; i < gradient.rows(); ++i)
-                    gf << fmt::format("{:.14e} {:.14e} {:.14e}\n",
+                    gf << fmt::format("{:.16e} {:.16e} {:.16e}\n",
                                       gradient(i, 0), gradient(i, 1), gradient(i, 2));
             } else {
                 CurcumaLogger::error("Could not open -dump_gradient file: " + dump_gradient_path);

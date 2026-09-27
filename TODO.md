@@ -755,8 +755,33 @@
     Nachiterationen 480 fs innerhalb der Druckaufloesung. Siehe eigener Eintrag unten.
   - *Folge*: Punktgenauer CPU/GPU-Vergleich ueber ps ist nicht erreichbar, solange schon CPU/CPU
     divergiert; Option (c) Ensemblevergleich ist der einzige, der fuer CPU gegen GPU traegt.
-    Entscheidung beim Betreiber. Ursache der CPU-Thread-Nichtdeterminismus: nicht gesucht.
-    Vault: `Labor/curcuma EEQ-Löser-Benchmark.md`, Eintrag 2026-09-27.
+    Entscheidung beim Betreiber. Vault: `Labor/curcuma EEQ-Löser-Benchmark.md`, Eintrag 2026-09-27.
+  - *Nachtrag, selber Tag*: der CPU-Thread-Nichtdeterminismus ist gefunden und behoben (D4-Paarliste
+    in Thread-Ankunftsreihenfolge, s. eigener Eintrag unten). CPU gegen CPU bei gleicher Threadzahl
+    ist damit bitgleich (polymer_2x 12 Threads 300 Schritte, water8 2/4/8/16 Threads).
+- **Bitgleichheit — was geht, was nicht (2026-09-27)**:
+  - *CPU, gleiche Threadzahl, Lauf gegen Lauf*: **erreicht**. `d4param_generator.cpp` fuegte die
+    parallel erzeugten D4-Paare (und im JSON-Pfad Paare + ATM-Tripel) per `omp critical` in
+    Thread-Ankunftsreihenfolge zusammen; jetzt pro Zeile/Index gesammelt und in fester Reihenfolge
+    verkettet. Belege: water8-Einzelpunkt 4 Threads 8/8 bitgleich (vorher 4 verschiedene aus 6;
+    mit `-gfnff.dispersion false` schon vorher 6/6), MD 4/8 Threads bitgleich, polymer_2x-MD
+    12 Threads 2/2 bitgleich. 1 Thread unveraendert. ctest 487/490 (drei bekannte).
+  - *CPU, verschiedene Threadzahlen*: nicht bitgleich (letztes Bit, 3–8e-17 im Gradienten), weil
+    `FFWorkspace` die Terme threadzahlabhaengig partitioniert; auch das BLAS im EEQ haengt von der
+    Threadzahl ab. Machbar waere eine feste Blockzahl statt Threadzahl-Partitionen — offen.
+  - *GPU, Lauf gegen Lauf*: **nicht bitgleich** (water8 MD: 6 verschiedene aus 6). Energien,
+    Komponenten und Ladungen sind gleich, nur der Gradient nicht: alle Kernel addieren per
+    `atomicAdd` (`add_grad`) in einen gemeinsamen Gradientenpuffer; die Reihenfolge variiert
+    auch mit `CUDA_LAUNCH_BLOCKING=1`, also schon innerhalb der Kernel. Weder Verlet-Skin noch
+    Blockgroesse 1024 aendern das. Abhilfe waere ein Umbau: Puffer pro Term + Summe in fester
+    Reihenfolge, Paarterme per Sammeln pro Atom oder Zwischenspeicher pro Paar, Energie-Teilsummen
+    pro Block — oder Festkomma-Atomics (Aufloesung ~1e-12). Leistung: kein Gewinn zu erwarten,
+    eher leicht langsamer auf FP64-schwachen Karten (A4500); die grossen Bloecke (EEQ ~79 ms,
+    Coulomb-Phase ~93 ms von 182 ms auf polymer_2x) sind nicht betroffen bzw. schon Sammel-Kernel.
+    Betreiber-Entscheidung.
+  - *CPU gegen GPU*: bitgleich praktisch nicht erreichbar (Operationsreihenfolge, FMA, `erf`/`exp`
+    verschieden); water8: Einzelpunkt 2,7e-15 Eh, Gradient 4e-15; MD-Mittel ueber 500 fs auf
+    13–14 Stellen gleich, sobald die CPU ohne Faktor-Cache rechnet.
 - **GPU-Default = CPU-Semantik (Commit folgt, 2026-09-27)**: die GPU waehlt WP7-E jetzt unter
   denselben Schwellen wie die CPU ppcg (`eeq_ppcg_min_nfrag`/`min_atoms`), `0` erzwingt auf beiden
   Seiten den exakten Loeser. Details und Zahlen: [docs/GPU_TUNING.md](docs/GPU_TUNING.md) Abschnitt 3.

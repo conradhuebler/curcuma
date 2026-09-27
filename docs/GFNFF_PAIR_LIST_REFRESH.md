@@ -154,6 +154,11 @@ correctness fix, not list maintenance.
   correct schedule. The skin is exact and bit-identical on MOR41/GMTKN55 (checked with
   `-nb_cell_list_min_atoms 0 -nonbonded_skin_bohr 4`, so the cell-list path is exercised), and
   saves ~4 % of an MD step on polymer_2x; it is an opt-in for large-system MD.
+- **On the GPU the trade-off is different** (Sep 27, 2026): the host rebuild is the same ~240 ms,
+  but the rest of the step is much shorter, so it dominates. polymer_2x, 30 steps, one A4500:
+  energy call 431 -> 182 ms with `-gfnff.nonbonded_skin_bohr 1` or `2`, Epot identical to the 6
+  printed decimals. A default change for the GPU path is the operator's decision; see
+  [GPU_TUNING.md](GPU_TUNING.md) section 3.
 
 ## Validation
 

@@ -226,10 +226,12 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
     }
 
     CurcumaLogger::result("  ═════════════════════════════════════════════════════════════════");
-    // Per-call init costs that are not part of param-gen but happen every setMolecule()
+    // Init cost of setMolecule(), measured once there. Sep 2026 (Claude Generated): it used to be
+    // printed and ADDED to "Total energy call" on every call - on polymer_2x a stale 498 ms per
+    // MD step that never happened (24 s run for 30 steps, not 30 x 680 ms). Labelled one-time now.
     if (r.t_gpu_upload > 0.0) {
         CurcumaLogger::result(fmt::format("  {:<32}  {:>14.1f} ms",
-            "GPU workspace upload", r.t_gpu_upload));
+            "GPU workspace upload (one-time)", r.t_gpu_upload));
     }
     if (r.t_topology > 0.0 || r.t_param_gen > 0.0) {
         CurcumaLogger::result(fmt::format("  {:<32}  topo={}  param={}",
@@ -237,9 +239,8 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
             (r.t_topology  > 0.0) ? fmt::format("{:>7.1f} ms", r.t_topology)  : "     --",
             (r.t_param_gen > 0.0) ? fmt::format("{:>7.1f} ms", r.t_param_gen) : "     --"));
     }
-    // Total from param-ready to result
-    double t_total = r.t_wall;
-    if (r.t_gpu_upload > 0.0) t_total += r.t_gpu_upload;
+    // Total from param-ready to result (this call only; the one-time upload is not part of it)
+    const double t_total = r.t_wall;
     CurcumaLogger::result(fmt::format("  {:<32}  wall={:>7.2f} ms",
         "Total energy call", t_total));
     CurcumaLogger::result("");
