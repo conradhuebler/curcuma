@@ -22,6 +22,7 @@
 
 #pragma once
 
+#include "src/core/units.h"
 #include "json.hpp"
 #include "src/core/config_manager.h"
 #include "src/core/parameter_macros.h"
@@ -352,7 +353,7 @@ PARAM(nonbonded_skin_bohr, Double, 0.0, "Verlet skin (Bohr) for the non-bonded r
 PARAM(dispersion_c6_update, Bool, true, "Recompute every stored D4 pair C6 from the current coordination numbers whenever the geometry changed (GFNFF::refreshDispersionC6). Before Sep 2026 C6 stayed at the setup geometry while the dispersion gradient already used dC6/dCN at the current CN, so MD and optimisation energies drifted away from a single point at the same geometry (triose: 0.18 kcal/mol after 200 fs at 800 K). Single points are unaffected. false restores the old frozen-C6 behaviour for comparisons.", "Algorithm", {})
 PARAM(eeq_mixed_precision, Bool, false, "WP-B GPU only: factor the EEQ Coulomb matrix in FP32 then refine the solution with the FP64 residual, dsposv-style, for full FP64 accuracy at a fraction of the FP64-factor cost on FP64-weak GPUs. Opt-in on CUDA and ROCm (default OFF; enable per card after measuring). Applies to the factor-dominated few-fragment solve paths; the many-fragment general path stays FP64.", "Performance", {})
 PARAM(eeq_mixed_precision_iters, Int, 2, "WP-B GPU only: number of FP64-residual / FP32-correction refinement steps for eeq_mixed_precision. Minimum 1. Two steps reach FP64 accuracy on the validation set.", "Performance", {})
-PARAM(coulomb_r_cut, Double, 100.0, "GFN-FF electrostatics: per-pair distance cutoff in Bohr. The reference (Fortran goed_gfnff) has NO cutoff; 100 Bohr was chosen as an 'effective no-cutoff' because no pair of the validation sets reaches it. That assumption breaks for a system wider than ~53 Angstrom: the cutoff is HARD (no switching), so a pair crossing it changes the energy discontinuously - measured on a 500-water cluster, moving one oxygen by 0.0005 Angstrom jumped the energy by 5 kJ/mol and made the analytic gradient wrong by 0.96 Eh/Angstrom at that atom. In MD such crossings inject energy. Raise it (or set a very large value) for systems above ~50 Angstrom; the price on polymer_2x (7320 atoms) is a single point 3.6 -> 5.4 s. Below ~53 Angstrom nothing changes, so every reference set is unaffected. See docs/MD_LARGE_SYSTEMS.md.", "Performance", {})
+PARAM(coulomb_r_cut, Double, 0.0, "GFN-FF electrostatics: per-pair distance cutoff in Bohr. 0 (default since Sep 25, 2026) = no cutoff, as the reference goed_gfnff and as the EEQ solve itself, which never truncates. A positive value is a HARD cutoff without switching: a pair crossing it changes the energy discontinuously - on a 500-water cluster, moving one oxygen by 0.0005 Angstrom jumped the energy by 5 kJ/mol and made the analytic gradient wrong by 0.96 Eh/Angstrom at that atom - and it truncates the long-range 1/r sum: the former default of 100 Bohr put polymer_2x, 7320 atoms and 88 Angstrom wide, 112.7 kcal/mol above the reference. Systems below about 53 Angstrom never reach 100 Bohr. Only set a value for speed, knowing both effects.", "Performance", {})
 PARAM(coulomb_implicit, Bool, true, "CPU: evaluate the N^2/2 Coulomb pairs on the fly from the per-atom EEQ charges and alpeeq instead of building and storing a pair list. The stored list costs 128 bytes per pair - 3.4 GB and ~0.5 s of pure write bandwidth at 7320 atoms, which threading does not remove (measured). Energies agree with the stored path to rounding; set false for the stored list (e.g. to compare). Not used with eeq_distance_cutoff > 0, where the list is already short.", "Performance", {})
 PARAM(gpu_coulomb_implicit, Bool, true, "GPU only: the device enumerates all Coulomb atom pairs itself (per-atom gather, gamma_ij from per-atom alpeeq) instead of reading an N^2/2 pair list built on the host. Saves the host list (24.5 M pairs / 2.7 GB and ~1.5 s at 7320 atoms). Not used with eeq_distance_cutoff > 0. Set false for the stored pair list.", "Performance", {})
 PARAM(gpu_disp_pairs_on_device, Bool, false, "WP-A GPU only: build the D4 dispersion pair list on the device via a two-pass enumeration plus per-pair C6 contraction, replacing the host O(N^2) GenerateDispersionPairsNative loop and the per-build H2D upload. Default OFF keeps the proven host build. Bit-identical to the host list up to the FP order of the device Gaussian weights. Measured Sep 2026 on polymer_2x (7320 atoms): pair build 630 -> 32 ms, SP wall 6.8 -> 5.6 s, energy identical; see docs/GPU_TUNING.md.", "Performance", {})
@@ -1455,6 +1456,8 @@ private:
     double dispersionSkinBohr() const;
     /// Claude Generated (Sep 2026): Verlet skin of the repulsion / explicit-Coulomb lists (nonbonded_skin_bohr)
     double nonbondedSkinBohr() const;
+    /// Claude Generated (Sep 2026): electrostatics pair cutoff in Bohr; coulomb_r_cut <= 0 (default) = none, as the reference
+    double coulombRCutBohr() const;
     /// Claude Generated (Sep 2026): true if the repulsion list is cell-list built (distance-filtered),
     /// false if the O(N^2) build stores every pair (N < nb_cell_list_min_atoms) and so cannot go stale
     bool repulsionListIsDistanceFiltered() const;
@@ -2297,7 +2300,7 @@ public:
     // Claude Generated (April 2026): PBC accessors for GPU path
     bool hasPBC() const { return m_has_pbc; }
     Eigen::Matrix3d getUnitCellBohr() const {
-        constexpr double ANG2BOHR = 1.0 / 0.529177210903;
+        constexpr double ANG2BOHR = CurcumaUnit::Length::ANGSTROM_TO_BOHR;
         return m_unit_cell * ANG2BOHR;
     }
 
@@ -2837,9 +2840,12 @@ private:
 
     // Conversion factors
     static constexpr double HARTREE_TO_KCAL = 627.5094740631;
-    static constexpr double BOHR_TO_ANGSTROM = 0.5291772105638411;
+    // Sep 2026: were 0.5291772105638411 (~CODATA 2014) while m_geometry_bohr is built with
+    // CurcumaUnit (CODATA 2018), so the numerical gradient's Bohr->Angstrom round trip was
+    // off by 6.4e-10 relative. One constant for geometry now - Claude Generated.
+    static constexpr double BOHR_TO_ANGSTROM = CurcumaUnit::Length::bohr_radius_or_legacy(0.5291772105638411);
     static constexpr double KCAL_TO_HARTREE = 1.0 / 627.5094740631;
-    static constexpr double ANGSTROM_TO_BOHR = 1.0 / 0.5291772105638411;
+    static constexpr double ANGSTROM_TO_BOHR = CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.0 / 0.5291772105638411);
 
     /**
      * @brief Element-specific radius scaling factors (fat array from gfnff_ini2.f90:76-97)

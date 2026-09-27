@@ -134,6 +134,15 @@ option(USE_VULKAN
 # USE_AVX2 or USE_MARCH_NATIVE alongside); CMake errors out if AVX2 cannot be enabled.
 option(USE_GFNFF_FAST_EXP
     "Enable SIMD-vectorized exp() in GFN-FF dcn hot loop (WP-D Stage B, requires AVX2)" OFF)
+# Sep 2026: every unit conversion uses CODATA 2018 (src/core/units.h). ON restores the
+# per-site constants curcuma used before (seven Bohr radii incl. the GFN-FF Fortran literal
+# 0.52917726, older Hartree factors) bit for bit - for reproducing earlier results and for
+# exact comparison with reference codes. See docs/UNIT_CONSTANTS.md.
+option(USE_LEGACY_UNIT_CONSTANTS
+    "Use the pre-Sep-2026 per-site unit constants instead of CODATA 2018 everywhere" OFF)
+if(USE_LEGACY_UNIT_CONSTANTS)
+    add_compile_definitions(CURCUMA_LEGACY_UNIT_CONSTANTS=1)
+endif()
 option(GFNFF_CN_DCN_FUSION
     "Enable fused CN+DCN single-pass (WP-D Stage D, no SIMD dependency)" OFF)
 if(GFNFF_CN_DCN_FUSION)

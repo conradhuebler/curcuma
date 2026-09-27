@@ -28,6 +28,7 @@
 #pragma once
 
 #include "src/core/global.h"
+#include <limits>
 #include "gfnff_parameters.h"
 #include "ff_terms.h"  // Bond, Angle, Dihedral, Inversion, vdW, EQ, CNDerivStore, GeoGradMatrix
 
@@ -417,7 +418,7 @@ private:
     /// data (charges + alpeeq) instead of reading a stored pair list. Set from the parameter set
     /// (GFN-FF only); see calcCoulomb().
     bool   m_coulomb_implicit = false;
-    double m_coulomb_implicit_rcut = 100.0;
+    double m_coulomb_implicit_rcut = std::numeric_limits<double>::infinity();  // no cutoff, as the reference (Sep 2026)
 
     // Term-enable flags
     bool m_dispersion_enabled = true;

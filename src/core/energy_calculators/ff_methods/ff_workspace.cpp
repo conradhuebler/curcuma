@@ -73,7 +73,7 @@ void FFWorkspace::setInteractionLists(GFNFFParameterSet&& params)
 
     // Method type and distance unit factor
     m_method_type = params.method_type;
-    m_au = (m_method_type != FFMethodType::GFN_FF) ? 1.889726125 : 1.0;
+    m_au = (m_method_type != FFMethodType::GFN_FF) ? CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.889726125) : 1.0;
 
     m_dispersion_enabled = params.dispersion_enabled;
     m_hbond_enabled = params.hbond_enabled;

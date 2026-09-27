@@ -6,6 +6,7 @@
  * December 25, 2025: Complete alphaiw (polarizability) data integration
  */
 
+#include "src/core/units.h"
 #include "d4param_generator.h"
 #include "d4_charge_scaling.h"  // shared exact dftd4 zeta (AP6b)
 #include "d4_ncoord.h"          // dftd4 EN-weighted covalent CN (GFN2 D4 path)
@@ -698,7 +699,7 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
         std::vector<std::vector<int>> adjacency(n_atoms);
 
         // Covalent radii in Angstrom (from GFN-FF method) for bond detection
-        const double ANGSTROM_TO_BOHR = 1.8897261246257702;
+        const double ANGSTROM_TO_BOHR = CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.8897261246257702);
         static const std::vector<double> rcov_angstrom = {
             0.32, 0.37, 1.30, 0.99, 0.84, 0.75, 0.71, 0.64, 0.60, 0.62, // H-Ne
             1.60, 1.40, 1.24, 1.14, 1.09, 1.04, 1.00, 1.01, // Na-Ar

@@ -3749,7 +3749,7 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     if (coulomb_implicit && m_parameters.value("eeq_distance_cutoff", 0.0) <= 0.0) {
         params.coulombs.clear();
         params.coulomb_implicit = true;
-        params.coulomb_implicit_rcut = m_parameters.value("coulomb_r_cut", 100.0);
+        params.coulomb_implicit_rcut = coulombRCutBohr();
     } else {
         params.coulombs = generateCoulombPairsNative();
     }
@@ -5281,7 +5281,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         CurcumaLogger::info(fmt::format("  full_product = {:.6f}", full_product));
         CurcumaLogger::info(fmt::format("  k_b (final)  = {:.6f} Eh", params.force_constant));
         CurcumaLogger::info(fmt::format("  r0           = {:.6f} Bohr ({:.4f} Å)", params.equilibrium_distance,
-                                         params.equilibrium_distance * 0.529177));
+                                         params.equilibrium_distance * CurcumaUnit::Length::bohr_radius_or_legacy(0.529177)));
         CurcumaLogger::info(fmt::format("  alpha        = {:.6f}", params.alpha));
         // Compare with Fortran reference for first C-C bond
         if (bond_count == 0 && z1 == 6 && z2 == 6) {
@@ -6102,13 +6102,11 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
     const double kn = -7.5;
     const double cnmax = 4.4;
     const double sqrtpi = 1.77245385091;
-    const double ANG2BOHR = 1.8897259886;
-    const double k_scaled = 4.0 / 3.0;
 
     // Pre-compute covalent radii in Bohr with 4/3 scaling
     std::vector<double> rcov_bohr(m_atomcount);
     for (int i = 0; i < m_atomcount; ++i) {
-        rcov_bohr[i] = k_scaled * CNCalculator::getCovalentRadius(m_atoms[i]) * ANG2BOHR;
+        rcov_bohr[i] = GFNFFParameters::gfnff_cn_rcov_bohr(m_atoms[i]);
     }
 
     // Step 1: Compute raw CN — parallelise over atoms (each atom independent).
@@ -6524,14 +6522,12 @@ GFNFF::CNAndDerivResult GFNFF::computeCNAndDerivativesFused(
     const double kn      = -7.5;
     const double cnmax   = 4.4;
     const double sqrtpi  = 1.77245385091;
-    const double ANG2BOHR = 1.8897259886;
-    const double k_scaled = 4.0 / 3.0;
     const double cutoff_sq = cn_cutoff_bohr * cn_cutoff_bohr;
 
     // Pre-compute covalent radii in Bohr with GFN-FF 4/3 scaling
     std::vector<double> rcov_bohr(N);
     for (int i = 0; i < N; ++i)
-        rcov_bohr[i] = k_scaled * CNCalculator::getCovalentRadius(m_atoms[i]) * ANG2BOHR;
+        rcov_bohr[i] = GFNFFParameters::gfnff_cn_rcov_bohr(m_atoms[i]);
 
     CNAndDerivResult result;
     result.cn_values.resize(N);
@@ -7908,8 +7904,9 @@ std::vector<double> GFNFF::computeMetallicCharacter() const
      * So the sum of norms needs one O(N*k) pass over the CN neighbour list.
      *
      * Radii note: Fortran param%rcov == covalentRadD3 with "* aatoau * 4/3" already
-     * applied in the array literal (gfnff_param.f90:405), which is exactly what
-     * CNCalculator applies (k_scaled * COVALENT_RADII * ANG2BOHR). Same radii.
+     * applied in the array literal (gfnff_param.f90:405). Every CN evaluation takes it
+     * from GFNFFParameters::gfnff_cn_rcov_bohr() since Sep 2026 - this site used to apply
+     * the CODATA-2018 constant while CNCalculator used the CODATA-1986 one (1.8897259886).
      */
     using GFNFFParameters::gfnff_en;
 
@@ -7929,10 +7926,9 @@ std::vector<double> GFNFF::computeMetallicCharacter() const
         m_atoms, m_geometry_bohr, mchar_cutoff_bohr, kn, cnmax);
 
     // Scaled covalent radii in Bohr (must match CNCalculator exactly)
-    const double k_scaled = 4.0 / 3.0;
     std::vector<double> rcov_bohr(m_atomcount, 0.0);
     for (int i = 0; i < m_atomcount; ++i) {
-        rcov_bohr[i] = k_scaled * CNCalculator::getCovalentRadius(m_atoms[i]) * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
+        rcov_bohr[i] = GFNFFParameters::gfnff_cn_rcov_bohr(m_atoms[i]);
     }
 
     for (int i = 0; i < m_atomcount; ++i) {
@@ -10865,7 +10861,7 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
     const double eeq_cut = m_parameters.value("eeq_distance_cutoff", 0.0);
     const bool cutoff_active = (eeq_cut > 0.0);
     const double effective_r_cut = cutoff_active ? eeq_cut
-                                                 : m_parameters.value("coulomb_r_cut", 100.0);
+                                                 : coulombRCutBohr();
     // Claude Generated (Sep 2026): build radius = cutoff + optional Verlet skin
     // (nonbonded_skin_bohr, default 0); the kernel still cuts at effective_r_cut.
     const double build_cut = cutoff_active ? eeq_cut + nonbondedSkinBohr() : 0.0;
@@ -11336,6 +11332,16 @@ double GFNFF::nonbondedSkinBohr() const
 {
     // Claude Generated (Sep 2026): Verlet skin of the repulsion and explicit-Coulomb lists.
     return std::max(0.0, m_parameters.value("nonbonded_skin_bohr", 0.0));
+}
+
+double GFNFF::coulombRCutBohr() const
+{
+    // Claude Generated (Sep 2026): one reader for coulomb_r_cut. The reference has no
+    // electrostatics cutoff, and neither does the EEQ solve that produces the charges; the
+    // former 100 Bohr default truncated the energy of any system wider than ~53 Angstrom
+    // (polymer_2x: +112.7 kcal/mol vs pprcht). <= 0 means no cutoff.
+    const double rc = m_parameters.value("coulomb_r_cut", 0.0);
+    return rc > 0.0 ? rc : std::numeric_limits<double>::infinity();
 }
 
 bool GFNFF::repulsionListIsDistanceFiltered() const

@@ -187,6 +187,8 @@ target; CUDA hardware was not available to re-check that backend directly).
 
 **Cross-platform determinism (`-DUSE_PORTABLE_MATH=ON`)**: Wine and native Windows can round `erf`/`acos`/`exp`/`log` differently in the last bit (different CRT-DLL reimplementations), which can flip a GFN-FF classification threshold into a different bond term. Vendored fdlibm-derived replacements close this; off by default, on for the Windows nightly build — see [docs/PORTABLE_ERF.md](docs/PORTABLE_ERF.md).
 
+**One unit system (`-DUSE_LEGACY_UNIT_CONSTANTS=ON` to revert)**: every Bohr/Ångström and Hartree conversion uses CODATA 2018 (`src/core/units.h`). Before Sep 2026 seven different Bohr radii were in use, which put a systematic 5e-7 Eh between CPU and GPU GFN-FF on a 7320-atom system; the legacy build restores the old per-site values bit for bit — see [docs/UNIT_CONSTANTS.md](docs/UNIT_CONSTANTS.md).
+
 **Known differences from Fortran reference** (see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)):
 - Sub-mEh agreement for most small/medium molecules
 - EEQ charge environment corrections (dxi) partially implemented

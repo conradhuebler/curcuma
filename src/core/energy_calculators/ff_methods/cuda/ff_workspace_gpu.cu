@@ -16,6 +16,7 @@
  */
 
 #include "ff_workspace_gpu.h"
+#include <limits>
 #include "gfnff_soa.h"
 #include "gfnff_kernels.cuh"
 
@@ -607,7 +608,7 @@ struct FFWorkspaceGPUImpl {
     CoulombSoA     coulomb;         ///< Coulomb pairs (gamma + cutoff only; charges dynamic)
     // Claude Generated (Sep 2026): implicit all-pairs Coulomb (no pair list).
     bool               coulomb_implicit = false;
-    double             coulomb_rcut = 100.0;
+    double             coulomb_rcut = std::numeric_limits<double>::infinity();  // no cutoff (Sep 2026)
     // (per-atom alpeeq: the existing self-energy buffer d_coul_alp, same values)
     BondSoA        bonds;           ///< Bond stretching
     AngleSoA       angles;          ///< Angle bending
@@ -2935,22 +2936,10 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
     // Reference: gfnff_cn.f90:66-126, cn_calculator.cpp:99-155
     constexpr double kn = -7.5;          // CN decay constant
     constexpr double cnmax = 4.4;       // Squashing limit
-    constexpr double threshold_factor = 2.5;  // Cutoff factor for rcov
-    constexpr double ANG2BOHR = 1.8897259886;
-
-    // Pre-compute threshold squared (largest possible distance)
-    // Use max covalent radius * threshold_factor as conservative cutoff
-    const auto& rcov_d3 = GFNFFParameters::covalent_rad_d3;  // in Bohr
-    double max_rcov = 0.0;
-    for (int i = 0; i < N; ++i) {
-        int z = atom_types[i];
-        if (z >= 1 && z <= static_cast<int>(rcov_d3.size())) {
-            max_rcov = std::max(max_rcov, rcov_d3[z - 1]);
-        }
-    }
-    // rcov_d3 is already scaled by 4/3, use conservative threshold
-    double threshold_sq = (threshold_factor * 2.0 * max_rcov * ANG2BOHR) * (threshold_factor * 2.0 * max_rcov * ANG2BOHR);
-    threshold_sq = 900.0;  // Use 30 Bohr cutoff (same as CNCalculator)
+    // Distance cutoff of the O(N^2) CN sum: 30 Bohr. Sep 2026: the dead rcov-based estimate
+    // that was computed and then overwritten here (with a CODATA-1986 Angstrom->Bohr factor
+    // applied to radii already in Bohr) is removed - Claude Generated.
+    const double threshold_sq = 900.0;
 
     // Ensure CN buffers are allocated
     if (impl.d_cn_raw.n < N) impl.d_cn_raw.alloc(N);
