@@ -328,7 +328,7 @@
   MOR41/GMTKN55-Strukturen).
 
 ### GFN-FF/EEQ: CPU/GPU-Trajektorien-Divergenz — Loeser als Ursache am 2026-09-27 widerlegt (s. KORREKTUR am Abschnittsende)
-- **Status**: ⏳ OFFEN — punktgenau nicht erreichbar (CPU/CPU divergiert ebenso), Ensemblevergleich Betreiber-Entscheidung
+- **Status**: Betreiber-Entscheidung 2026-09-27: CPU gegen GPU wird **vorerst per Ensemblevergleich** bewertet (punktgenau nicht erreichbar); GPU-Bitgleichheit als TODO (s. „Bitgleichheit" unten)
 - **Befund**: ein 10-ps-GFN-FF-MD-Vergleich CPU vs. GPU auf `polymer_2x` (7320 Atome, nfrag=1500)
   divergiert reproduzierbar (nahezu deckungsgleich bis ~400 fs, ab ~1200 fs vollstaendig
   entkoppelt). Ursache **direkt gezeigt, nicht nur vermutet**: bei `nfrag=1500` waehlt der
@@ -778,7 +778,11 @@
     pro Block — oder Festkomma-Atomics (Aufloesung ~1e-12). Leistung: kein Gewinn zu erwarten,
     eher leicht langsamer auf FP64-schwachen Karten (A4500); die grossen Bloecke (EEQ ~79 ms,
     Coulomb-Phase ~93 ms von 182 ms auf polymer_2x) sind nicht betroffen bzw. schon Sammel-Kernel.
-    Betreiber-Entscheidung.
+    **Betreiber 2026-09-27: als TODO aufgenommen, nicht jetzt.** Erster Schritt, wenn es angegangen
+    wird: einen Kernel (Repulsion) als Sammel-Variante hinter einem Schalter bauen und auf A4500 und
+    H200 messen; Diagnose-Werkzeug war eine Spur mit FNV-Hashes von Gradient/Ladungen/Geometrie pro
+    Aufruf (Vorlage im Diff `_artefacts/2026-09-27_curcuma_cf850070_feature-multi-gpu_determinism.patch`
+    nicht enthalten — sie war temporaer; Aufbau im Laborjournal 27.9. beschrieben).
   - *CPU gegen GPU*: bitgleich praktisch nicht erreichbar (Operationsreihenfolge, FMA, `erf`/`exp`
     verschieden); water8: Einzelpunkt 2,7e-15 Eh, Gradient 4e-15; MD-Mittel ueber 500 fs auf
     13–14 Stellen gleich, sobald die CPU ohne Faktor-Cache rechnet.
@@ -800,6 +804,48 @@
 - **Optionen**: (a) `eeq_refine_iters` Default 2–3 (O(N^2) je Schritt, bei <500 Atomen billig —
   Kosten nicht gemessen); (b) `eeq_refactor_eps_bohr` Default 0 fuer kleine Systeme; (c) belassen.
   Vor einer Aenderung: Kosten messen, mehr als ein System, Energieerhaltung mit n>1.
+- **Gemessen (2026-09-27, Auftrag „miss die Kosten und erklaere den Nutzen")** — 5 Systeme
+  (caffeine 24, water8 24, triose 66, complex 231, w150 = 150 Wasser/450 Atome aus polymer_2x),
+  MD CSVR 300 K, dt 0,5 fs. Ladungsfehler = |q - q_exakt| an derselben Geometrie (temporaere
+  Kontrolle im Loeser, danach entfernt), 1000 Schritte, 1 Thread:
+
+  | refine | Ladungsfehler median / max (e) | Trajektorie nach 500 fs vs. exakt |
+  |---|---|---|
+  | 0 | 1e-3 … 4e-3 / bis 1,7e-2 | bis 2,2 A |
+  | 1 (Default) | 1e-5 … 2,5e-4 / bis 8e-4 | 3e-5 … 0,25 A |
+  | 2 | ~5e-6 / bis 3e-5 | bis 0,05 A |
+  | 3 | ~1e-7 / bis 1e-6 | <= 2e-4 A (meist ~1e-6) |
+
+  Kosten pro Energieaufruf (Median, 300 Schritte): unter 231 Atomen alle Varianten innerhalb der
+  Aufloesung; complex 1 Thread 5,79 (refine 1) / 5,90 (refine 3) / 5,91 ms (exakt); **w150 1 Thread
+  16,05 / 16,90 / 15,53 ms, 8 Threads 12,37 / 13,33 / 11,63 ms — ohne Cache ist es am schnellsten.**
+  Der Faktor-Cache spart unterhalb der ppcg-Schwelle keine Zeit (eine 450er-Cholesky kostet weniger
+  als Nachiteration plus Cache-Verwaltung) und liefert nur den Ladungsfehler. NVE 1 ps (n = 1, s.
+  Seed-Befund unten): Drift fuer refine 1 / 3 / exakt gleich (water8 2,1e-4 / 1,7e-4 / 1,7e-4 Eh,
+  complex und w150 identisch in allen Varianten).
+  **Empfehlung**: `eeq_refactor_eps_bohr` Default 0 (Cache aus) statt mehr Nachiterationen — exakt
+  und nicht langsamer. Der Cache bleibt als Opt-in fuer den erzwungen exakten Loeser auf grossen
+  Systemen (`eeq_ppcg_min_nfrag 0`, N >> 500), wo die O(N^3)-Faktorisierung zaehlt — dort nicht
+  gemessen. Default-Aenderung: Betreiber-Entscheidung.
+
+### SimpleMD: `-seed` wirkt nicht auf die Anfangsgeschwindigkeiten (2026-09-27)
+- **Status**: ⏳ OFFEN, im Code belegt, nicht behoben (aendert jede MD-Startgeschwindigkeit)
+- **Befund**: `SimpleMD::InitVelocities()` (`simplemd.cpp:1141`) zieht aus einem eigenen
+  `static std::default_random_engine generator;` mit festem Standard-Seed, nicht aus dem per
+  `-seed` initialisierten `gen` (`simplemd.cpp:~620/715`). Folgen: (a) NVE-Laeufe mit verschiedenem
+  `-seed` sind identisch (gemessen: water8/complex/w150, Seeds 1–3, bitgleiche Drift); bei Thermostat-
+  Laeufen wirkt der Seed nur auf das Thermostat-Rauschen. (b) Mit Default `-seed -1` („Uhrzeit")
+  starten alle Laeufe mit denselben Geschwindigkeiten. (c) `static` + mehrere MDs pro Prozess
+  (ConfSearch): Laeufe teilen den Generatorzustand; parallel gestartet ist das ein Data Race.
+- **Fix-Vorschlag**: Generator als Member, mit `m_seed` initialisiert, in `InitVelocities()` und
+  den Thermostaten benutzen. Aendert alle MD-Startbedingungen → Golden-Werte der MD-Tests pruefen.
+
+### GFN-FF-NVE-Drift auf complex (231 Atome) unabhaengig vom EEQ-Loeser (Beobachtung, 2026-09-27)
+- **Status**: ⏳ OFFEN, nicht untersucht
+- **Befund**: NVE 1 ps, dt 0,5 fs, 300 K, 1 Thread: |Etot(1 ps) − Etot(0)| = 6,1e-3 Eh (max 1,0e-2),
+  identisch fuer refine 1 / 3 / exakt; w150 2,2e-3 Eh, water8 1,7e-4 Eh. n = 1 (Seed-Befund oben).
+  Kandidaten, ungeprueft: diskontinuierliche Listen (HB/XB-Zwangs-Neubau alle 10 Aufrufe,
+  `hb_update_force_every 10`), Gradientenrest der Repulsion (Known Issue „recorded gradient residual").
 
 ### SIGSEGV am Ursprung untersucht (Auftrag „fix den SIGSEGV am Ursprung") — nicht gefunden, Werkzeuge sind blind dafuer (2026-09-24)
 - **Status**: ⏳ OFFEN. Root Cause NICHT gefunden trotz gruendlicher Untersuchung mit ASan,
