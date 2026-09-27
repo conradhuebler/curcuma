@@ -173,7 +173,10 @@ correctly: E = -4.27427100 vs xtb's -4.27427080 Eh, C-H 1.08609 vs 1.08580 A.
   — see the note below).
 - **Open**: a first unit probe on `-method uff`, `eht` and `qmdff` gave gradient/FD ratios
   of 10.8, ~0 and 1.02 on H2O, i.e. none of them clearly honours the Eh/Angstrom contract.
-  Not investigated; the `gradient_unit_contract` ctest deliberately covers only the three
-  validated methods.
+  The `gradient_unit_contract` ctest deliberately covers only the three validated methods.
+  **Update Sep 27, 2026**: for UFF and QMDFF this is not a unit problem but wrong chain rules
+  (UFF angle: missing −sinθ, so the wrong sign; QMDFF angle: missing sinθ; QMDFF bond: missing
+  dx/dr = −r0/r²). A prepared fix brings both to the FD print floor (~4e-5 Eh/Å); deferred by
+  the operator, details in TODO.md "UFF- und QMDFF-Gradient falsch". EHT not investigated.
 
 Human production testing pending until the operator removes this note.

@@ -1221,6 +1221,14 @@ double XTB::Calculation(bool gradient)
             m_E_third_order = ethird; m_E_multipole = emp;
             const double e_scc = eb + ecoul + ethird + emp;
             const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
+            // A non-finite SCC state is a failure, never convergence (Sep 2026, see the CPU loop).
+            if (!std::isfinite(dq) || !std::isfinite(e_scc)) {
+                CurcumaLogger::warn_fmt("XTB::Calculation: SCF produced non-finite values at iteration {} "
+                                        "(E = {}, max|dq| = {}) - diverged", iter, e_scc, dq);
+                m_scf_converged = false; m_scf_iterations = iter + 1;
+                setHardError(fmt::format("native SCF diverged: non-finite energy/charges at iteration {}", iter));
+                return m_E_total;
+            }
             note_fp32_progress(dq);
             dq_prev = dq;
             if (verb >= scf_min) {
@@ -1505,7 +1513,20 @@ double XTB::Calculation(bool gradient)
         // iteration, so the SCF exited after 2 cycles with the moments unconverged and
         // the analytic gradient came out 0.0330 instead of 0.0211 Eh/Bohr (60 % off,
         // while the energy still matched xtb to 1e-8). Claude Generated.
-        const double dq = (packSCC() - x_in).cwiseAbs().maxCoeff();
+        const Vector x_out_check = packSCC();
+        const double dq = (x_out_check - x_in).cwiseAbs().maxCoeff();
+        // Claude Generated (Sep 2026): a non-finite SCC state is a failure, not convergence. With
+        // -scf_mode diis on a 1846-atom water/urea cluster the charges turned NaN at iteration 6;
+        // maxCoeff() over the NaN vector then came out 0, dE too, and the SCF "converged" to
+        // +540710 Eh, which was returned as a valid single point. Test the vectors themselves,
+        // not only dq.
+        if (!std::isfinite(dq) || !std::isfinite(e_scc) || !x_out_check.allFinite() || !x_in.allFinite()) {
+            CurcumaLogger::warn_fmt("XTB::Calculation: SCF produced non-finite values at iteration {} "
+                                    "(E = {}) - diverged", iter, e_scc);
+            m_scf_converged = false; m_scf_iterations = iter + 1;
+            setHardError(fmt::format("native SCF diverged: non-finite energy/charges at iteration {}", iter));
+            return m_E_total;
+        }
         note_fp32_progress(dq);
         dq_prev = dq;   // drives the LevelShift fade-out on the next iteration
         const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
@@ -1598,6 +1619,17 @@ double XTB::Calculation(bool gradient)
         else
             CurcumaLogger::warn_fmt("SCF NOT converged after {} iterations ({:.1f} ms)",
                                     m_scf_iterations, ms(t_scf_start, t_scf_end));
+    }
+
+    // Claude Generated (Sep 2026): an unconverged SCF is not a result. It used to be returned
+    // like one - level shift on a 1846-atom water/urea cluster ended after 150 iterations at
+    // +3080 Eh with exit code 0. xtb and tblite stop with an error here too. The explicit opt-out
+    // keeps the old behaviour for anyone who knowingly accepts a nearly converged energy.
+    if (!m_scf_converged && !m_scf_allow_unconverged) {
+        setHardError(fmt::format("native SCF did not converge within {} iterations (last max|dq| = {:.2e}); "
+                                 "-scf_allow_unconverged true accepts the unconverged energy",
+                                 m_scf_iterations, dq_prev));
+        return m_E_total;
     }
 
     // Claude Generated (Sep 2026): post-SCF host phase timings (printed with CURCUMA_GPU_PROFILE
@@ -1885,6 +1917,15 @@ double XTB::Calculation(bool gradient)
             const double e_retry = Calculation(gradient);
             m_in_scf_retry = false;
             m_force_h0_guess = false;
+            // Claude Generated (Sep 2026): if the bare-H0 retry lands on an impossible charge
+            // distribution too, the result is not usable - it used to be returned anyway.
+            if (!hasError() && m_wfn.q_at.size() == m_atomcount) {
+                const double q_retry = m_wfn.q_at.cwiseAbs().maxCoeff();
+                if (!(q_retry <= q_bound))   // also catches NaN
+                    setHardError(fmt::format("native SCF converged to an implausible charge distribution "
+                                             "(max |q| = {:.2f} e > {:.2f}) also from the bare-H0 guess",
+                                             q_retry, q_bound));
+            }
             return e_retry;
         }
     }

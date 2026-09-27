@@ -388,6 +388,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
     CurcumaLogger::set_verbosity(verbosity >= 2 ? verbosity : 0);
     m_context.write_trajectory = write_trajectory;
     m_context.verbosity = verbosity;
+    m_convergence_reason.clear();  // reported as the non-convergence reason below (Sep 2026)
 
     m_start_time = std::chrono::high_resolution_clock::now();
 
@@ -435,13 +436,23 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             Vector step = CalculateOptimizationStep(current_coords, m_current_gradient);
 
             if (step.norm() == 0) {
-                // Zero step may indicate convergence (solver decided no more progress)
-                // or an error. Check method-specific convergence before giving up.
-                if (CheckMethodSpecificConvergence()) {
+                // A zero step means the optimiser cannot make further progress (LBFGSpp line
+                // search below min_step, native optimiser error). Claude Generated (Sep 2026): it
+                // used to count as convergence whenever CheckMethodSpecificConvergence() agreed -
+                // which LBFGSpp set from the line-search failure itself and the native adapter
+                // always returns - so a 240-atom cluster "converged" at |g| = 1.9e-3 and the
+                // 6200-atom mixture2 at 0.228 against a threshold of 5e-4. Now the driver's own
+                // criteria decide; otherwise the run ends as NOT converged (the last structure is
+                // still returned and written).
+                const double gnorm_now = m_current_gradient.norm();
+                if (CheckMethodSpecificConvergence()
+                    && checkConvergence(energy_change_kjmol, rmsd_change, gnorm_now)) {
                     m_converged = true;
                     m_convergence_reason = "Optimizer reports convergence (zero step)";
                 } else {
-                    CurcumaLogger::warn("Optimization step is zero - line search or gradient failure");
+                    m_convergence_reason = fmt::format(
+                        "Optimizer could not make further progress (zero step), convergence criteria not met: {}",
+                        formatConvergenceReport(energy_change_kjmol, rmsd_change, gnorm_now));
                 }
                 break;
             }
@@ -561,7 +572,10 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             if (m_converged) {
                 CurcumaLogger::success_fmt("Optimization converged after {} iterations", m_current_iteration);
             } else {
-                CurcumaLogger::warn_fmt("Optimization did not converge within {} iterations", m_context.max_iterations);
+                if (!m_convergence_reason.empty())
+                    CurcumaLogger::warn_fmt("Optimization did not converge: {}", m_convergence_reason);
+                else
+                    CurcumaLogger::warn_fmt("Optimization did not converge within {} iterations", m_context.max_iterations);
             }
             CurcumaLogger::energy_abs(m_current_energy, "Final energy");
             CurcumaLogger::energy_rel(m_current_energy - m_initial_energy, "Energy change");
@@ -592,7 +606,9 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
         m_energy_trajectory.clear();
 
         if (!m_converged) {
-            result.error_message = fmt::format("Did not converge within {} iterations", m_context.max_iterations);
+            result.error_message = m_convergence_reason.empty()
+                ? fmt::format("Did not converge within {} iterations", m_context.max_iterations)
+                : m_convergence_reason;
         }
 
         return result;

@@ -1,6 +1,7 @@
 /*
  * <LBFGSpp Optimizer Strategy Implementation>
- * Copyright (C) 2025 Claude AI - Generated Code
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Claude Generated code (AI contribution; copyright remains with the project owner).
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -225,15 +226,13 @@ Vector LBFGSppOptimizer::CalculateOptimizationStep(const Vector& current_coordin
         }
         return Vector::Zero(current_coordinates.size());
     } catch (const std::runtime_error& e) {
-        // LBFGSpp throws runtime_error when the line search step shrinks below min_step.
-        // Treat as convergence: we cannot make further progress, output the current structure.
+        // LBFGSpp throws runtime_error when the line search step shrinks below min_step: no further
+        // progress is possible. Sep 2026 (Claude Generated): this no longer means "converged" - the
+        // zero step makes OptimizerDriver stop, and it reports convergence only if its own criteria
+        // (energy/RMSD/gradient thresholds) hold; otherwise the run ends as not converged.
         const double gnorm = gradient.norm();
-        if (gnorm < m_lbfgs_eps_abs * 100.0) {
-            CurcumaLogger::info_fmt("LBFGSpp: line search step < min_step with ||g||={:.2e} — converged",
-                                    gnorm);
-        } else {
-            CurcumaLogger::warn_fmt("LBFGSpp: line search failed (||g||={:.2e}), stopping: {}", gnorm, e.what());
-        }
+        CurcumaLogger::info_fmt("LBFGSpp: line search step < min_step (||g||={:.2e}), stopping: {}",
+                                gnorm, e.what());
         m_solver_converged = true;
         return Vector::Zero(current_coordinates.size());
     }

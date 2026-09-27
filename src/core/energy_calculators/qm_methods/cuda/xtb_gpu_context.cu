@@ -4976,6 +4976,14 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
                                     double* e_coulomb, double* e_third, double* e_multipole)
 {
     if (!ok() || m_impl->loop_nao <= 0 || !dq_out || !e_band) return false;
+    // Claude Generated (Sep 2026): every failure below names itself - the host used to report
+    // "GPU resident SCF step failed at iteration N" with no reason. Nested calls may set a more
+    // specific message first; fail() only fills an empty one.
+    m_impl->last_error.clear();
+    auto fail = [&](const char* what) {
+        if (m_impl->last_error.empty()) m_impl->last_error = what;
+        return false;
+    };
     cudaStream_t stream = m_impl->stream;
     const int nsh = m_impl->loop_nsh, nat = m_impl->loop_nat, nao = m_impl->loop_nao;
     const int b = 128;
@@ -4986,14 +4994,14 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
         nat, Impl::D4_MAX_REF, m_impl->dQat.ptr, m_impl->dD4Cn.ptr, m_impl->dD4Gi.ptr,
         m_impl->dD4Zeff.ptr, m_impl->dD4Nref.ptr, m_impl->dD4Refcn.ptr,
         m_impl->dD4Refcovcn.ptr, m_impl->dD4Refq.ptr, m_impl->dD4W.ptr, m_impl->dD4dWq.ptr);
-    if (cudaGetLastError() != cudaSuccess) return false;
+    if (cudaGetLastError() != cudaSuccess) return fail("D4 reference-weight kernel failed");
     m_impl->profMark("scf: D4 reference weights");
 
     // 2. Potential build (overwrites dQat with the input-derived q_at) + Fock +
     //    eigensolve; eps stays resident (no download).
     if (!buildDevicePotentialAndSolve(nao, fp32, /*n_eig=*/0, /*eps_out=*/nullptr,
                                       /*download_eps=*/false))
-        return false;
+        return fail("potential build / Fock / eigensolve failed");
 
     // 3. Occupation on the device (resident eps → resident occ).
     const double kT = m_impl->loop_Tele * 3.166808e-6;
@@ -5002,43 +5010,43 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
     k_occupations<<<1, blk, blk * sizeof(double), stream>>>(
         m_impl->dEps.ptr, m_impl->dOcc.ptr, nao, kT, m_impl->loop_nelec,
         m_impl->loop_nocc_pairs, use_fermi, m_impl->dOccMu.ptr, m_impl->dOccNcol.ptr);
-    if (cudaGetLastError() != cudaSuccess) return false;
+    if (cudaGetLastError() != cudaSuccess) return fail("occupation kernel failed");
     // Claude Generated (Sep 2026): build P from the occupied columns only (last column with
     // occ > 1e-12, reported by the kernel), exactly like the CPU density (xtb_scf.cpp,
     // leftCols(ncol)). The dropped columns weigh < 1e-12; the GEMM shrinks from nao^3 to
     // nao^2 * ncol (polymer: 26 % of the SCF time was this product over all nao columns).
     int ncol = nao;
     m_impl->dOccNcol.download(&ncol, 1, stream);
-    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return fail("stream synchronisation after occupations failed");
     if (ncol <= 0 || ncol > nao) ncol = nao;
     m_impl->profMark("scf: occupations");
 
     // 4. Density + Mulliken-AO over the occupied columns.
-    if (!residentDensityResident(nao, ncol, e_band)) return false;
+    if (!residentDensityResident(nao, ncol, e_band)) return fail("density / Mulliken populations failed");
     m_impl->profMark("scf: density P + populations");
 
     // 5. Output charges/moments from the resident density.
     // q_sh = n0_sh − Σ_{μ∈s} pop_ao; q_at = n0_at − Σ_{μ∈A} pop_ao.
     if (cudaMemcpyAsync(m_impl->dQsh.ptr, m_impl->dN0sh.ptr, sizeof(double) * nsh,
-                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess) return false;
+                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess) return fail("shell-charge copy failed");
     k_qsh_scatter<<<(nao + b - 1) / b, b, 0, stream>>>(nao, m_impl->dPop.ptr,
                                                        m_impl->dAo2sh.ptr, m_impl->dQsh.ptr);
     if (cudaMemcpyAsync(m_impl->dQat.ptr, m_impl->dN0at.ptr, sizeof(double) * nat,
-                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess) return false;
+                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess) return fail("atomic-charge copy failed");
     k_qat_scatter<<<(nao + b - 1) / b, b, 0, stream>>>(nao, m_impl->dPop.ptr,
                                                        m_impl->dAo2at.ptr, m_impl->dQat.ptr);
     // Atomic multipole moments dp_at/qp_at from the resident density (resident).
-    if (!multipoleMomentsResident(nao, nat)) return false;
+    if (!multipoleMomentsResident(nao, nat)) return fail("atomic multipole moments failed");
     m_impl->profMark("scf: charges + multipole moments");
 
     // 6. SCC energy components (resident charges/moments).
-    if (!sccEnergy(nat, nsh, e_coulomb, e_third, e_multipole)) return false;
+    if (!sccEnergy(nat, nsh, e_coulomb, e_third, e_multipole)) return fail("SCC energy failed");
     m_impl->profMark("scf: SCC energy");
 
     // 7. Convergence dq = max|q_sh_out − q_sh_in| (q_sh_in = current dPotQsh).
     k_maxabsdiff<<<1, blk, blk * sizeof(double), stream>>>(m_impl->dQsh.ptr, m_impl->dPotQsh.ptr,
                                                            nsh, m_impl->dDq.ptr);
-    if (cudaGetLastError() != cudaSuccess) return false;
+    if (cudaGetLastError() != cudaSuccess) return fail("convergence (max|dq|) kernel failed");
     m_impl->dDq.download(dq_out, 1, stream);
 
     // 8. Broyden: pack input [dPotQsh; dInDpAt; dInQpAt] + output [dQsh; dDpAt; dQpAt],
@@ -5054,13 +5062,14 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
         cudaMemcpyAsync(vout, m_impl->dQsh.ptr, sizeof(double) * nsh, cudaMemcpyDeviceToDevice, stream);
         cudaMemcpyAsync(vout + off_dp, m_impl->dDpAt.ptr, sizeof(double) * 3 * nat, cudaMemcpyDeviceToDevice, stream);
         cudaMemcpyAsync(vout + off_qp, m_impl->dQpAt.ptr, sizeof(double) * 6 * nat, cudaMemcpyDeviceToDevice, stream);
-        if (!runBroydenUpdate(vin, vout, m_impl->dBroyVnext.ptr)) return false;
+        if (!runBroydenUpdate(vin, vout, m_impl->dBroyVnext.ptr)) return fail("device Broyden update failed");
         cudaMemcpyAsync(m_impl->dPotQsh.ptr, m_impl->dBroyVnext.ptr, sizeof(double) * nsh, cudaMemcpyDeviceToDevice, stream);
         cudaMemcpyAsync(m_impl->dInDpAt.ptr, m_impl->dBroyVnext.ptr + off_dp, sizeof(double) * 3 * nat, cudaMemcpyDeviceToDevice, stream);
         cudaMemcpyAsync(m_impl->dInQpAt.ptr, m_impl->dBroyVnext.ptr + off_qp, sizeof(double) * 6 * nat, cudaMemcpyDeviceToDevice, stream);
     }
     m_impl->profMark("scf: dq + Broyden");
-    return cudaStreamSynchronize(stream) == cudaSuccess;
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return fail("stream synchronisation at end of step failed");
+    return true;
 }
 
 bool XtbGpuContext::residentLoopCharges(double* q_sh, double* q_at, double* dp_at,

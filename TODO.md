@@ -840,30 +840,51 @@
 - **Fix-Vorschlag**: Generator als Member, mit `m_seed` initialisiert, in `InitVelocities()` und
   den Thermostaten benutzen. Aendert alle MD-Startbedingungen → Golden-Werte der MD-Tests pruefen.
 
-### Optimierer: Liniensuch-Fehlschlag wird als Konvergenz gemeldet (2026-09-27)
-- **Status**: ⏳ OFFEN, im Code belegt, Aenderung ist Betreiber-Entscheidung (aendert viele "converged"-Meldungen)
-- **Befund**: `LBFGSppOptimizer::CalculateOptimizationStep` (`lbfgspp_optimizer.cpp:~219-228`) setzt
-  `m_solver_converged = true`, wenn die Liniensuche unter `min_step` faellt (logic_error mit
-  Step < 1e-8, und runtime_error); dazu kommt LBFGS++s eigenes Kriterium ||g|| < eps_rel·||x|| (von der
-  Lage im Raum abhaengig). `OptimizerDriver::Optimize` nimmt einen Nullschritt mit dieser Meldung als
-  Erfolg, **ohne** curcumas Kriterien zu pruefen. Gemessen: 240-Atom-Wassercluster "konvergiert" bei
-  |g| = 1,9e-3 (Schwelle 5e-4), mixture2 (6200 Atome) bei |g| = 0,228; ein Neustart vom Ergebnis
-  macht 0 Schritte. Vorschlag: Nullschritt ohne erfuellte Kriterien = "gestoppt, nicht konvergiert"
-  (Struktur wird seit 2026-09-27 trotzdem geschrieben).
-- **Nebenbefund**: der Legacy-Pfad `CurcumaOpt::LBFGSOptimise` liest `m_defaults.value("LBFGS_eps_abs")`
+### Optimierer: Liniensuch-Fehlschlag wurde als Konvergenz gemeldet — BEHOBEN (2026-09-27)
+- **Befund**: LBFGS++ setzte `m_solver_converged = true`, wenn die Liniensuche unter `min_step` fiel, und
+  `OptimizerDriver::Optimize` nahm den Nullschritt als Erfolg, ohne curcumas Kriterien zu pruefen
+  (240-Atom-Wassercluster "konvergiert" bei |g| = 1,9e-3, mixture2 bei 0,228; Schwelle 5e-4).
+- **Fix** (Betreiber-Entscheidung "fixen"): ein Nullschritt zaehlt nur noch als Konvergenz, wenn die
+  eigenen Kriterien des Treibers erfuellt sind; sonst "nicht konvergiert" mit dem Kriterienbericht
+  (`formatConvergenceReport`), Exit 1, letzte Struktur wird geschrieben.
+- **Aufgedeckt**: `cli_curcumaopt_03`–`06` (`-opt water -method uff`) bestanden nur dank der falschen
+  Konvergenz — der UFF-Winkelgradient ist falsch (naechster Eintrag). Die vier Tests pruefen CLI-Verhalten,
+  nicht UFF-Physik, und laufen jetzt mit `-method gfnff` (echte Konvergenz, z. B. Ethan 9 Schritte,
+  |g| = 8e-6).
+- **Nebenbefund, offen**: der Legacy-Pfad `CurcumaOpt::LBFGSOptimise` liest `m_defaults.value("LBFGS_eps_abs")`
   usw. mit Grossbuchstaben, die registrierten PARAMs heissen `lbfgs_eps_abs` — CLI-Werte kommen dort
   vermutlich nicht an (nicht gemessen).
 
-### Native xTB-SCF meldet Unsinn als Ergebnis (2026-09-27)
-- **Status**: ⏳ OFFEN, gemessen, nicht behoben
-- **Befund** (GFN2, 1846-Atom-Wasser/Harnstoff-Ausschnitt der Rohgeometrie): `-scf_mode diis` erzeugt NaN
-  (Iteration 6/7), danach dE = dq = 0 → "konvergiert"; der Ladungs-Guard (Known Issue #9) startet neu,
-  landet im selben NaN, Ergebnis +540710 Eh wird als Einzelpunkt ausgegeben (rc 0). Level-Shift und
-  `-scf_damping 0.2` enden nach 150 Iterationen unkonvergiert mit +3080 bzw. falscher Energie, ebenfalls
-  rc 0. Im GPU-residenten SCF bricht die Divergenz mit leerem `lastError()` ab ("failed at iteration N"
-  ohne Grund).
-- **Task**: nicht-endliche Energie/Ladungen = Fehlschlag (nicht Konvergenz); unkonvergierte SCF als Fehler
-  melden oder mindestens deutlich markieren; Abbruchgrund im GPU-Pfad benennen.
+### UFF- und QMDFF-Gradient falsch (gefunden 2026-09-27)
+- **Status**: ⏳ OFFEN — Ursache gefunden, Fix vorbereitet, Betreiber: "uff und qmdff erstmal nicht"
+- **UFF-Winkel** (`FFWorkspace::calcUFFAngles`, `ff_workspace_uff.cpp`): `UFF::AngleBending` liefert
+  dθ/dx, der Kern multipliziert mit dE/dcosθ = fc(C1 + 4 C2 cosθ) ohne den Faktor −sinθ → falsches
+  Vorzeichen, Optimierungen laufen in jedem Winkel bergauf. Gemessen (FD, Wasser): 5,1e-2 Eh/Å, mit
+  `dEdtheta = -sin(theta) * fc*(C1 + 4 C2 cos)` 3,3e-5 (= Druckgrenze; Koffein 4,7e-5).
+  Geschichte: efa0f095 (Maerz 2026) hat genau das repariert, aber im `ForceFieldThread`, den UFF seit
+  a42254c5 (8 Tage vorher) nicht mehr benutzte; der FFWorkspace-Kern behielt die alte Formel.
+- **QMDFF-Winkel** (`calcQMDFFAngles`): gleicher Fehler, nur der Faktor sinθ fehlt (Vorzeichen stimmt).
+- **QMDFF-Bindung** (`calcQMDFFBonds`): `diff` ist −dE/dx mit x = r0/r; der Faktor dx/dr = −r0/r²
+  fehlt (`dEdr = diff * ratio / distance`). QMDFF mit beiden Fixes: FD Wasser 1,7e-2 → 3,7e-5,
+  Koffein 7,5e-2 → 3,9e-5.
+- **Formelfrage, nicht angefasst**: e6bb55e7 (Jan 2026, ein GFN-FF-Commit) hat den QMDFF-Bindungs-
+  exponenten von 0,5 auf 0,75 geaendert (E = k[1 + x^a − 2 x^{0,75a}], Minimum dann nicht bei r0);
+  `QMDFF::LJStretchEnergy` hat weiterhin 0,5. Welche Form gilt, ist zu klaeren.
+- **Test**: `check_gradient_units.py` um uff/qmdff erweitern; die verschobenen Geometrien muessen dabei
+  die an der Referenzgeometrie erzeugte `.param.json` benutzen (QMDFF nimmt θ0 aus der Geometrie).
+  Der Pre-Fix-Build `build_asan` (24.09.) dient als Gegenprobe.
+
+### Native xTB-SCF meldete Unsinn als Ergebnis — BEHOBEN (2026-09-27)
+- **Befund**: DIIS erzeugte NaN, `maxCoeff()` ueber den NaN-Vektor ergab 0 → "konvergiert" bei
+  +540710 Eh (rc 0); Level-Shift endete unkonvergiert bei +3080 Eh (rc 0); GPU-residenter SCF brach ohne
+  Grund ab.
+- **Fix**: nicht-endlicher Zustand → Fehler "diverged at iteration N" (CPU- und GPU-Schleife);
+  unkonvergiert → Fehler, `-scf_allow_unconverged true` stellt das alte Verhalten her; Runaway-Retry mit
+  weiterhin unmoeglichen Ladungen → Fehler; jeder GPU-Fehlschlag in `residentScfStep` benennt seine Stufe.
+  Doku: docs/SCF_MODES.md "Failure handling".
+- **Offen**: SimpleMD bricht bei einem SCF-Fehler erst nach dem ersten Schritt ab ("Simulation got
+  unstable"), zeigt den Fehlschritt als Epot = 0,0 und endet mit rc 0 (vorbestehend). ROCm-Spiegel des
+  `residentScfStep` meldet weiter ohne Grund (kein SDK hier).
 
 ### Optimierer-Abbruch ohne Struktur — BEHOBEN (2026-09-27)
 - `OptimizerDriver::Optimize` gab bei "Energy rise exceeded", fehlgeschlagener Energieauswertung und
