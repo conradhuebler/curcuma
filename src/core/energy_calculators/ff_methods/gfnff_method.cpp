@@ -574,6 +574,33 @@ GFNFF::GFNFF(const json& parameters)
     m_cache_topology = m_parameters.value("cache_topology", true);
     m_print_timing = m_parameters.value("print_timing", true);
 
+    // frag_charge_model (Claude Generated, Sep 24, 2026; ported to master Sep 27, 2026 - Known
+    // Issue #31, docs/FRAG_CHARGE_MODEL.md): chemistry-aware, continuous fragment charge
+    // placement. Default "ensemble" at frag_charge_s_max 1.0 (placement rule only, no continuous
+    // window) fixes the index bug of the reference rule; "reference" reproduces the pprcht/xtb
+    // rule bit for bit. These fallbacks are the ACTUAL default whenever the caller's json does
+    // not carry the key (most CLI paths do not merge the full ParameterRegistry defaults into
+    // controller["gfnff"]), so they must stay in sync with the PARAM macro defaults in gfnff.h
+    // by hand - editing only the PARAM default has no runtime effect.
+    {
+        std::string fm = m_parameters.value("frag_charge_model", std::string("ensemble"));
+        std::transform(fm.begin(), fm.end(), fm.begin(), [](unsigned char c) { return std::tolower(c); });
+        if (fm != "reference" && fm != "ensemble") {
+            CurcumaLogger::warn(fmt::format("GFNFF: unknown frag_charge_model '{}', using 'reference'", fm));
+            fm = "reference";
+        }
+        m_frag_ensemble = (fm == "ensemble");
+        m_frag_s_max = std::max(1.0, m_parameters.value("frag_charge_s_max", 1.0));  // 1.0 = no window (placement rule only)
+        m_frag_tau_eh = std::max(1e-6, m_parameters.value("frag_charge_tau", 1.0)) / 627.5094740631;
+        m_frag_sigma = std::max(1e-6, m_parameters.value("frag_charge_sigma", 0.05));
+        m_frag_max_edges = std::max(0, std::min(10, m_parameters.value("frag_charge_max_edges", 4)));
+        m_frag_max_placements = std::max(1, m_parameters.value("frag_charge_max_placements", 6));
+        if (m_frag_ensemble && m_topology_mode == "react") {
+            CurcumaLogger::warn("GFNFF: frag_charge_model ensemble is not available in react topology mode - using the reference rule");
+            m_frag_ensemble = false;
+        }
+    }
+
     // Initialize EEQ solver (Dec 2025 - Phase 3)
     // CRITICAL FIX (Dec 25, 2025): Pass global CurcumaLogger verbosity to EEQSolver
     json eeq_params = m_parameters;
@@ -2136,6 +2163,19 @@ bool GFNFF::rebuildReactiveTopology()
 }
 
 double GFNFF::Calculation(bool gradient)
+{
+    // frag_charge_model ensemble (Claude Generated, Sep 24, 2026): the master runs its own
+    // reference evaluation first (it owns the topology perception and its refresh logic), then
+    // the charge variants are blended on top of it. Nothing below changes when the model is off.
+    m_frag_blend_valid = false;
+    m_frag_last_nvariants = 0;
+    const double e_master = calculationSingle(gradient);
+    if (m_frag_ensemble && !m_frag_is_variant && m_charge != 0 && m_initialized)
+        return fragEnsembleBlend(gradient, e_master);
+    return e_master;
+}
+
+double GFNFF::calculationSingle(bool gradient)
 {
     // Claude Generated (February 2026): Start total calculation timer for verbosity 1+
     auto calc_start = std::chrono::high_resolution_clock::now();
@@ -9044,6 +9084,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     m_frag_carry_list.clear();
     m_frag_carry_qfrag.clear();
     TopologyInfo topo = calculateTopologyInfoOnce();
+    m_frag_split_pass = (topo.nfrag > 1) ? 1 : 0;
 
     if (topo.topology_charges.size() != m_atomcount) return topo;
 
@@ -9102,6 +9143,11 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         m_frag_carry_qfrag = topo.qfrag;
     }
     TopologyInfo topo2 = calculateTopologyInfoOnce();
+    // frag_charge_model ensemble: which q-loop pass decided the fragmentation (1 = pass 1 and
+    // carried, 2 = pass 1 saw one fragment and the charge-shrunk pass 2 split it). The contact
+    // window is anchored at that pass's bond threshold, so lambda = 0 exactly where the perceived
+    // fragment count changes. Claude Generated (Sep 2026).
+    m_frag_split_pass = (topo.nfrag > 1) ? 1 : (topo2.nfrag > 1 ? 2 : 0);
     m_frag_carry_nfrag = 0;
     m_frag_carry_list.clear();
     m_frag_carry_qfrag.clear();
@@ -9212,7 +9258,14 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // 100 kcal/mol on that structure; the same mechanism drove the AHB21/BH76/G21EA/SIE4x4
     // family. See the rev-gfnff TODO for the physics side of this - the reference is not
     // right either, it is simply self-consistent.
-    if (m_frag_carry_nfrag > 1
+    if (m_frag_override.active
+        && static_cast<int>(m_frag_override.fraglist.size()) == m_atomcount) {
+        // frag_charge_model ensemble variant (Sep 2026): grouping and integer group charges are
+        // fixed by the master, in both q-loop passes.
+        topo_info.nfrag = m_frag_override.nfrag;
+        topo_info.fraglist = m_frag_override.fraglist;
+        topo_info.qfrag = m_frag_override.qfrag;
+    } else if (m_frag_carry_nfrag > 1
         && static_cast<int>(m_frag_carry_list.size()) == m_atomcount) {
         topo_info.nfrag = m_frag_carry_nfrag;
         topo_info.fraglist = m_frag_carry_list;
@@ -9472,7 +9525,13 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         // where it looked better was decided against xtb's .CHRG line-2 parsing quirk,
         // a different branch entirely), while it is demonstrably worse here.
         const bool frag_autodetect = m_parameters.value("frag_charge_autodetect", false);
-        if (topo_info.nfrag == 2 && m_charge != 0 && !frag_autodetect) {
+        if (m_frag_override.active) {
+            // frag_charge_model ensemble variant: the group charges are prescribed.
+            eeq_topology_input.qfrag = topo_info.qfrag;
+            topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
+                m_atoms, m_geometry_bohr, m_charge, topo_info.coordination_numbers,
+                eeq_topology_input, true, pool_setup, m_threads);
+        } else if (topo_info.nfrag == 2 && m_charge != 0 && !frag_autodetect) {
             // Reference behaviour: whole charge on fragment 0.
             topo_info.qfrag = {static_cast<double>(m_charge), 0.0};
             eeq_topology_input.qfrag = topo_info.qfrag;
@@ -10664,8 +10723,10 @@ ConfigManager GFNFF::extractDispersionConfig(const std::string& method) const
 }
 
 // Energy component getters (FFWorkspace is the only GFN-FF engine).
+// frag_charge_model ensemble (Sep 2026): when the variant blend is active the components are the
+// same weighted sum as the energy (sum of the components == total), not the master's own workspace.
 #define GFNFF_WS_ENERGY(NAME, FIELD) \
-    double GFNFF::NAME() const { return m_workspace ? m_workspace->energyComponents().FIELD : 0.0; }
+    double GFNFF::NAME() const { return m_frag_blend_valid ? m_frag_blend_comp.FIELD : (m_workspace ? m_workspace->energyComponents().FIELD : 0.0); }
 GFNFF_WS_ENERGY(BondEnergy, bond)
 GFNFF_WS_ENERGY(AngleEnergy, angle)
 GFNFF_WS_ENERGY(DihedralEnergy, dihedral)
@@ -10682,8 +10743,8 @@ GFNFF_WS_ENERGY(HalogenBondEnergy, xbond)
 GFNFF_WS_ENERGY(ATMEnergy, atm)
 #undef GFNFF_WS_ENERGY
 double GFNFF::RepulsionEnergy() const {
-    if (!m_workspace) return 0.0;
-    const auto& c = m_workspace->energyComponents();
+    if (!m_workspace && !m_frag_blend_valid) return 0.0;
+    const auto& c = m_frag_blend_valid ? m_frag_blend_comp : m_workspace->energyComponents();
     return c.bonded_rep + c.nonbonded_rep;
 }
 

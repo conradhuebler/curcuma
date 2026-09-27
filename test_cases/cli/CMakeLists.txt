@@ -73,6 +73,10 @@ set_tests_properties(cli_curcumaopt_07_opt_multixyz PROPERTIES TIMEOUT 300 LABEL
 
 add_cli_test(gfnff 01_complex_gfnff_singlepoint)
 add_cli_test(gfnff 02_caffeine_gfnff_energy_components)
+# Claude Generated (Sep 24, 2026; ported to master Sep 27, 2026): chemistry-aware, continuous
+# fragment-charge placement (-gfnff.frag_charge_model ensemble, Known Issue #31, docs/FRAG_CHARGE_MODEL.md).
+add_cli_test(gfnff 05_frag_charge_ensemble)
+set_tests_properties(cli_gfnff_05_frag_charge_ensemble PROPERTIES TIMEOUT 900 LABELS "gfnff;frag_charge")
 
 # =============================================================================
 # GPU GFN-FF Tests — only registered when USE_CUDA=ON
