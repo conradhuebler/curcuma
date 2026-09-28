@@ -298,7 +298,7 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
     // EEQ Coulomb-matrix distance cutoff (Bohr). Default 0 = no cutoff, matches Fortran
     // goed_gfnff (gfnff_engrad.F90:1274-1391) and the CPU EEQSolver default. Non-zero
     // values violate Hellmann-Feynman vs. the full Coulomb energy → MD energy drift.
-    m_eeq_distance_cutoff = gfnff_cfg.value("eeq_distance_cutoff", 0.0);
+    // Read below through eeq_value() (eeq_solver scope first).
 
     // WP7-B/C (May 2026): EEQ solver strategy for nfrag>1.
     //   "cholesky" / "schur_cholesky" → WP5-A/WP7-A (exact, default).
@@ -306,16 +306,6 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
     //   "pcg"                         → WP7-C iterative PCG (warm-started).
     //   "auto"                        → PCG for N>=pcg_large_threshold, else cholesky.
     //   "lu"                          → CPU-only; collapses to cholesky on GPU.
-    {
-        std::string strategy_str = gfnff_cfg.value("solve_method", std::string("cholesky"));
-        m_eeq_strategy = EEQSolver::parseSolveMethod(strategy_str);
-    }
-    m_eeq_batched_min_distance_bohr = gfnff_cfg.value("eeq_batched_min_distance", 15.0);
-    m_eeq_pcg_max_iter   = gfnff_cfg.value("max_pcg_iterations", 200);
-    m_eeq_pcg_tolerance  = gfnff_cfg.value("pcg_tolerance", 1e-10);
-    m_eeq_pcg_threshold  = gfnff_cfg.value("pcg_large_threshold", 500);
-    m_eeq_block_jacobi_max_frag_atoms = gfnff_cfg.value("gpu_block_jacobi_max_frag_atoms", 300);
-    m_eeq_block_jacobi_max_nfrag      = gfnff_cfg.value("gpu_block_jacobi_max_nfrag", 400);
     // WP7-E: reuses the CPU EEQSolver's ppcg PARAMs (eeq_solver.h) for both the iteration
     // cap and the Auto-strategy nfrag/atom thresholds, so CPU and GPU agree on when to
     // prefer projected PCG. Note m_eeq_ppcg_tolerance is an ABSOLUTE tolerance on |r| (GPU
@@ -334,8 +324,23 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
         }
         return gfnff_cfg.value(key, dflt);
     };
+    // Claude Generated (Sep 28, 2026, docs/MULTI_GPU_GAPS.md X-1): the solver keys below are
+    // eeq_solver PARAMs since the parameter parser registers multi-line PARAMs, so a flat flag
+    // (-pcg_tolerance 1e-12) is routed to the eeq_solver scope. Read that scope first, like the
+    // CPU solver, then gfnff; the GPU keeps its own fallback defaults.
+    {
+        std::string strategy_str = eeq_value("solve_method", std::string("cholesky"));
+        m_eeq_strategy = EEQSolver::parseSolveMethod(strategy_str);
+    }
+    m_eeq_distance_cutoff = eeq_value("eeq_distance_cutoff", 0.0);   // 0 = no cutoff (see above)
+    m_eeq_batched_min_distance_bohr = eeq_value("eeq_batched_min_distance", 15.0);
+    m_eeq_pcg_max_iter   = eeq_value("max_pcg_iterations", 200);
+    m_eeq_pcg_tolerance  = eeq_value("pcg_tolerance", 1e-10);
+    m_eeq_pcg_threshold  = eeq_value("pcg_large_threshold", 500);
+    m_eeq_block_jacobi_max_frag_atoms = eeq_value("gpu_block_jacobi_max_frag_atoms", 300);
+    m_eeq_block_jacobi_max_nfrag      = eeq_value("gpu_block_jacobi_max_nfrag", 400);
     m_eeq_ppcg_max_iter  = eeq_value("eeq_ppcg_max_iter", 500);
-    m_eeq_ppcg_tolerance = gfnff_cfg.value("pcg_tolerance", 1e-10);
+    m_eeq_ppcg_tolerance = eeq_value("pcg_tolerance", 1e-10);
     m_eeq_ppcg_min_nfrag = eeq_value("eeq_ppcg_min_nfrag", 1);
     m_eeq_ppcg_min_atoms = eeq_value("eeq_ppcg_min_atoms", 500);
 

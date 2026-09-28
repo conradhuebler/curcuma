@@ -275,7 +275,20 @@ Measured: 182 ms per energy call on polymer_2x on one A4500, EEQ ~79 ms, Coulomb
 
 ## 3. Cross-cutting
 
-- **X-1 GPU/EEQ tuning parameters missing from the registry** [M]: the build reports 26
+- **X-1 GPU/EEQ tuning parameters missing from the registry** *- FIXED Sep 28, 2026 (stage C): the parser
+  tokenizes PARAM macros (strings, comments, adjacent literals) instead of matching a regex; 0 malformed
+  warnings, 725 instead of 705 definitions. The 26 warnings were 20 dropped names plus fragments of PARAMs
+  that were registered anyway. Old and new parser on the same inputs: the 705 common entries are
+  identical (one, `eeq_refactor_force_every`, differs only by joined adjacent literals - the same runtime
+  string). Two newly registered defaults were set to the values the code actually used, because the PARAM
+  text had never been effective: `max_pcg_iterations` 200 -> 100 and `pcg_large_system_iterations`
+  5000 -> 100 (CPU fallbacks in `eeq_solver.cpp`; the accuracy profiles in `accuracy_profile.cpp` that set
+  other values are never called - dead code, noted). Routing: `-export_run` for 9 fixed commands differs
+  only by the new `gfnff/solvent` + `gfnff/solvent_model` default entries and by the flat EEQ flags moving
+  from the command module to `eeq_solver`; all energies identical. Behaviour change, intended: a flat
+  `-solve_method pcg -max_pcg_iterations 300` was ignored by the CPU solver before (log: `solve_method=
+  cholesky`) and is applied now (`solve_method=pcg`, 300 iterations); the GPU reads these keys from the
+  `eeq_solver` scope first as well.* [M] Original finding: the build reports 26
   "Malformed PARAM" warnings (18 in `ff_methods/eeq_solver.h`, 8 in `ff_methods/gfnff.h`) - multi-line
   PARAM macros that the extractor drops. Among the dropped names: `max_pcg_iterations`,
   `pcg_tolerance`, `pcg_large_threshold`, `gpu_block_jacobi_max_frag_atoms`,

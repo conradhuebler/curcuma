@@ -1049,11 +1049,16 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "implicit-solvation reaction field) the robust path is cholesky's augmented-LU "
           "fallback, which ldlt does not reproduce.",
           "Algorithm", {})
-    PARAM(max_pcg_iterations, Int, 200,
-          "Maximum PCG iterations for EEQ solve", "Algorithm", {})
+    // Claude Generated (Sep 2026): defaults of max_pcg_iterations and pcg_large_system_iterations set
+    // to the values the code actually used. Until Sep 28, 2026 the parameter parser dropped both
+    // PARAMs (multi-line), so the registry never supplied 200/5000 and the CPU solver ran on its
+    // fallbacks (eeq_solver.cpp, 100 each). Registering them with 200/5000 would have changed
+    // results silently. The GPU wrapper keeps its own fallback (200) for its WP7-C PCG.
+    PARAM(max_pcg_iterations, Int, 100,
+          "Maximum PCG iterations for the CPU EEQ solve (the GPU WP7-C PCG defaults to 200 when this is not given)", "Algorithm", {})
     PARAM(pcg_tolerance, Double, 1e-10,
           "PCG convergence tolerance", "Algorithm", {})
-    PARAM(pcg_large_system_iterations, Int, 5000,
+    PARAM(pcg_large_system_iterations, Int, 100,
           "Max PCG iterations for large systems (N>pcg_large_threshold). Overrides max_pcg_iterations.", "Algorithm", {})
     PARAM(pcg_large_system_scaling, Int, 10,
           "PCG iteration scaling factor for large systems: max_iter = min(scaling*N, pcg_large_system_iterations)", "Algorithm", {})
