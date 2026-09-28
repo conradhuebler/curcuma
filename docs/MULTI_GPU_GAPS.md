@@ -311,6 +311,26 @@ Measured: 182 ms per energy call on polymer_2x on one A4500, EEQ ~79 ms, Coulomb
   as 52 ms (:116) and ~240 ms (:159); comments in `qm_methods/gfnff_gpu_method_impl.h:34-39, 959-965`
   describe the old CPU-EEQ pipeline.
 
+## Measurements Sep 28, 2026 (stage D, after the fixes of stages A-C)
+
+4x RTX A4500 (20 GB, no NVLink), i9-10980XE (18 cores); an unrelated ollama process held 7-9 GB on
+every card during the runs (0 % load). Lab journal: vault `Labor/curcuma MD-Stabilität großer
+Systeme.md`, entry Sep 28. GFN-FF MD: `-dt 1 -thermostat csvr -T 300 -seed 7 -threads 16`.
+
+| what | result | note |
+|---|---|---|
+| GFN-FF MD step, polymer_2x (7320) | **GPU 0.38-0.39 s, CPU 16 threads 1.33 s** | difference of 5/35 and 5/95-step runs; Sep 21: 1.475 vs 1.25 |
+| of that: energy call (GPU) | 171 ms = EEQ 77 + Coulomb/finish 94 | verbosity-2 report, late step |
+| of that: SimpleMD `step_total` | 213 ms median (dump steps) | **~0.18 s/step not attributed**; no perf/nsys here |
+| EEQ, one fragment, polymer (1410) | GPU dense Cholesky 8.6 ms; CPU CN+EEQ 36 ms (projected PCG) / 52 ms (exact) | F-4 pays only for large single-fragment systems; none available here |
+| GFN-FF `-sp` batch, 8x polymer | **1 GPU 3.2 s, 4 GPUs 1.3 s, CPU 16 threads 0.98 s** | GFN-FF single points belong on the CPU |
+| GPU batch peak RSS, 8/16/32x polymer | **2.7 / 4.2 / 7.3 GB** (CPU 1.3 / 2.3 / 2.3) | F-16 leak confirmed: ~190 MB per structure, linear |
+| GFN2 polymer, split thresholds lowered to 1000 | 1/2/4 GPUs 8.95 / 11.7 / 12.8 s; 1 GPU: setup 1.94 s, SCF 4.0 s, post-SCF 2.34 s of which D4 1.86 s | proxy only; the split is a loss at this size (gate 4000 is right) |
+| GFN2 polymer_2x on 1/2/4 GPUs (D1, D2 = G2-9) | **not measured** | needs 13.5-17.9 GB on device 0, ~11.5 GB free |
+
+Measurement artefact found: `-md_diagnostics_timing` reports host prep times on the GPU path (`eeq_solve`
+769 ms, same as the CPU run), and with `-dump 1` the diagnostics writing itself slows the step to ~1.5 s.
+
 ## 4. What to tackle, in order
 
 Ordered by risk first, then by what limits scaling. No numbers here are promises; each item needs
