@@ -248,6 +248,10 @@ public:
     /// "" when not configured, else backend/device/solve summary or the reason it is not used.
     std::string distributedEigensolverStatus() const;
 
+    /// "" or why part of the multi-GPU eigensolve runs on this device anyway (no cuBLASMp for the
+    /// FP64 generalized path, -scf_gpu_partial_diag). Claude Generated (Sep 2026, G2-7).
+    std::string distributedEigensolverDegradation() const;
+
     /**
      * @brief Spread the screened-pattern density of the resident SCF over several GPUs.
      * @param devices helper devices (this context's own device is skipped); empty disables it

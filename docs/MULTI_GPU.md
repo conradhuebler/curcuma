@@ -25,7 +25,7 @@ Caveat: the polymer (1410 atoms) runs had ollama occupying 9-12 GB per GPU; the 
 
 - GFN-FF single point is >98 % CPU setup (topology + parameters); the GPU energy call is 137 ms. Gate G0e: passed -> multi-GPU cannot speed up a GFN-FF SP.
 - GPU gfn2/gfn1 wall minus reported TOTAL: ~0.7-1 s untimed (context/plugin init, uploads).
-- GFN-FF CPU vs GPU energy differs by 5.7e-7 Eh on polymer_2x (not investigated; GPU EEQ cutoff suspected).
+- GFN-FF CPU vs GPU energy differs by 5.7e-7 Eh on polymer_2x (not investigated; GPU EEQ cutoff suspected). **Superseded (Sep 25, 2026)**: the cause was different Bohr radii in the CPU and GPU CN radii; CPU == GPU to all 10 printed decimals since, CLAUDE.md Known Issue #33(a).
 
 ### GFN-FF MD, polymer_2x, 50 steps, dt 1 fs, -threads 36 (GPU run used the wrong gradient unit, see below)
 

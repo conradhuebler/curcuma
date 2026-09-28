@@ -31,12 +31,15 @@
  *                        dispersion, repulsion, Coulomb, HB, XB, ATM, BATM, sTors)
  *   - every energy term runs on the device (no host residual workspace since Jun 2026)
  *
- * Per-step calculation (orchestrated here, NOT delegated to GFNFF::Calculation):
- *   1. GPU: computeCN() — CN on GPU (k_cn_compute kernel)
- *   2. CPU: prepareCNAndEEQ(gradient, gpu_only, &gpu_cn) — EEQ only (CN from GPU)
- *   3. Distribute state (charges, CN, geometry) to the GPU workspace
- *   4. m_gfnff->updateHBXBIfNeeded() — dynamic HB/XB re-detection
- *   5. m_gpu_workspace->calculate() — all energy terms on GPU
+ * Per-step calculation (orchestrated here, NOT delegated to GFNFF::Calculation);
+ * updated Sep 28, 2026 - the list below used to describe the March 2026 CPU-EEQ pipeline:
+ *   1. host list maintenance (HB/XB, D4 pair skin, repulsion skin) + GPU computeCN()
+ *   2. GPU: Phase 1 = charge-independent kernels (prepareAndLaunchChargeIndependent),
+ *      D4 Gaussian weights / C6 refresh (energy mode before Phase 1, gradient mode after)
+ *   3. Phase-2 EEQ on the device (nfrag == 1: dense Schur-Cholesky WP5-A; nfrag > 1: WP7-E
+ *      projected PCG above the ppcg thresholds, else WP7-A); host EEQ only for skip_phase2,
+ *      frozen charges, or while the fragment topology is not on the device yet
+ *   4. GPU: Coulomb + post-processing + download (launchChargeDependentAndFinish)
  *
  * Usage:
  *   ./curcuma -sp mol.xyz -method gfnff -gpu cuda    # CUDA backend
@@ -52,6 +55,7 @@
 #include "../ff_methods/gfnff.h"
 #include "../ff_methods/eeq_solver.h"  // EEQSolveMethod enum
 #include "src/core/curcuma_logger.h"
+#include "src/core/gpu_fallback.h"
 #include "src/core/citation_registry.h"
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"
 #include "src/core/energy_calculators/ff_methods/cuda/gpu_utils.h"  // backend-neutral
@@ -970,13 +974,15 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     // WP5-D (May 2026): finalizeCNForCPU + prepareCNAndEEQ removed from normal path.
     // All CN consumers are now GPU-side; no CPU round-trip needed.
 
-    // Claude Generated (April 2026): EEQ charge selection
-    // Three paths, in priority order:
-    //   1. skip_phase2: bypass entirely, use CPU Phase 1 topology charges
-    //   2. GPU EEQ Cholesky (nfrag==1 only): O(N²) matrix build + O(N³/6) GPU Cholesky
-    //      For nfrag>1 the system is block-diagonal; dense Cholesky is O(N³) on the
-    //      full matrix — inefficient. TODO: batched-Cholesky per fragment block.
-    //   3. CPU Phase 2 EEQ: always valid fallback (already cached from InitialiseMolecule)
+    // Claude Generated (April 2026): EEQ charge selection, in priority order (updated Sep 28, 2026;
+    // the old list predated WP6/WP7 and the device Schur paths):
+    //   1. frozen charges (static mode) or skip_phase2: no Phase-2 solve
+    //   2. host EEQ: charges already current for this geometry, the ROCm many-fragment route,
+    //      or nfrag > 1 before the fragment topology is on the device
+    //   3. device EEQ: nfrag == 1 -> dense Schur-Cholesky (WP5-A; always dense, see
+    //      docs/MULTI_GPU_GAPS.md F-4); nfrag > 1 -> WP7-E projected PCG / WP7-A / WP7-B / WP7-C
+    //   4. a rejected or failed device solve keeps the last accepted charges (reported as a
+    //      GPU fallback, src/core/gpu_fallback.h)
     Vector charges(N);
     if (m_gpu_workspace->frozenCharges()) {
         // Static-Mode (WP-S1): GPU d_charges retain previous-step values, no upload needed.
@@ -1149,6 +1155,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                     } else {
                         if constexpr (Backend::has_device_schur) {
                             CurcumaLogger::warn("EEQ GPU: WP5-A failed, falling back to WP2 + CPU Schur");
+                            curcuma::reportGpuFallback("GFN-FF EEQ: device Schur failed, host Schur step");
                         } else if (CurcumaLogger::get_verbosity() >= 3) {
                             CurcumaLogger::info("EEQ ROCm: device GPU-Schur (nfrag=1) not ported; using WP2 GPU solve + CPU Schur");
                         }
@@ -1274,6 +1281,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                         } else {
                             if constexpr (Backend::has_device_schur) {
                                 CurcumaLogger::warn("EEQ GPU: WP7-A cholesky failed, falling back to WP2 + CPU Schur");
+                                curcuma::reportGpuFallback("GFN-FF EEQ: device Schur failed, host Schur step");
                             } else if (CurcumaLogger::get_verbosity() >= 3) {
                                 CurcumaLogger::info("EEQ ROCm: device GPU-Schur not ported; using WP2 GPU solve + CPU Schur");
                             }
@@ -1284,6 +1292,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                         // Triggers when fragment topo invalid OR Cholesky failed in WP7-A.
                         if constexpr (Backend::has_device_schur) {
                             CurcumaLogger::warn("EEQ GPU: all GPU Schur paths failed, falling back to WP2 + CPU Schur");
+                            curcuma::reportGpuFallback("GFN-FF EEQ: device Schur failed, host Schur step");
                         } else if (CurcumaLogger::get_verbosity() >= 3) {
                             CurcumaLogger::info("EEQ ROCm: GPU-Schur not ported; using WP2 GPU solve + CPU Schur complement");
                         }
@@ -1485,6 +1494,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                 if (gpu_charges_accepted) used_gpu_eeq = true;
             } else {
                 CurcumaLogger::warn("GPU EEQ Cholesky failed (not SPD), falling back to CPU solver");
+                curcuma::reportGpuFallback("GFN-FF EEQ: device Cholesky failed (not SPD)");
             }
         } else {
             // Fragment topo not yet uploaded (first MD step before topology build).
@@ -1500,6 +1510,10 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
             // topology charges", which is not what is used (measured on triose: the fallback
             // energy matches neither the Phase-1 nor the current Phase-2 single point).
             CurcumaLogger::warn("GPU EEQ: no valid solution - keeping the charges of the last accepted EEQ solve");
+            // Counted only when the device solve was applicable and got rejected; the first-step
+            // "fragment topology not yet uploaded" route is by design (F-19, Sep 2026).
+            if (gpu_eeq_applicable)
+                curcuma::reportGpuFallback("GFN-FF EEQ: no valid device solution, previous charges kept");
             m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/true);
             charges = m_gfnff->getLastCharges();
             m_gpu_workspace->setEEQCharges(charges);

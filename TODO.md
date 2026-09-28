@@ -972,6 +972,15 @@
 
 ---
 
+### Hessian: SCF-Schwelle erreicht die Worker nicht (gefunden 2026-09-28)
+- **Status**: ⏳ offen
+- **Befund**: `-scf_threshold 1e-9` und `-hessian.scf_threshold 1e-9` aendern die Frequenzen von caffeine (gfn2) um
+  exakt 0 - der Schluessel kommt nicht an; `executeHessian` (`src/main.cpp`) reicht nur `controller["hessian"]` weiter,
+  die Methoden-Unterbereiche (`xtb`, `gfnff`, ...) fehlen (gleiche Klasse wie ConfSearch vor `ChildConfig`).
+- **Folge**: bei der lockeren Standardschwelle haengt die FD-Hessian von der Worker-Aufteilung ab (1 vs 4 GPUs:
+  bis 0.3 cm-1) und CPU vs GPU weicht bis 4.5 cm-1 ab (vorbestehend, altes Binary identisch).
+- **Task**: Unterbereiche wie `MethodFactory::methodParameterScopes()` weiterreichen, dann CPU/GPU mit 1e-9 erneut vergleichen.
+
 ### ROCm: drei offene Fehler aus der Multi-GPU-Analyse — nur dokumentiert (2026-09-28)
 - **Status**: ⏳ offen. Betreiberentscheidung 28.09.: ohne ROCm-Hardware keine Codeaenderung, nur Doku.
 - **F-1**: GFN-FF auf ROCm rechnet standardmaessig **keinen Coulomb-Term** (seit `ab6e3f5e`, 17.09.):
@@ -1023,6 +1032,9 @@
 ### ConfSearch: GPU + Multi-Threading (Future)
 - **Status**: ⏳ PLANNED
 - **Problem**: Bei threads > 1 konkurrieren mehrere MD-Instanzen um die GPU. Aktuell wird GPU deaktiviert wenn threads > 1.
+- **Korrektur 2026-09-28**: gilt nur, solange der GPU-Geraetepool inaktiv ist (genau eine sichtbare GPU, keine
+  `-gpu_devices`/`-gpu_workers_per_device`). Mit aktivem Pool bleibt die GPU an: jeder MD-Worker least einen
+  Slot, ueberzaehlige warten (`src/capabilities/confsearch.cpp:161-170`). Offen ist also nur noch der Ein-GPU-Fall.
 - **Task**: 
   1. Implementiere GPU-Lock (Mutex) oder Queue, sodass nur 1 Thread gleichzeitig die GPU nutzt
   2. Alternative: Ein Thread bekommt GPU-CUDA, andere nutzen CPU-Fallback

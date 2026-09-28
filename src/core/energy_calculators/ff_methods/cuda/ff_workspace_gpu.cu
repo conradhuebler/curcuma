@@ -2392,6 +2392,8 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // are fully synchronized to the main stream before Phase-2 entries execute.
     // Phase-1-internal events (event_bonded, event_threebody) are NOT externally signaled
     // after graph replay → Phase-2 must NOT wait on them in that case.
+    // (Sep 28, 2026: with d_grad_snapshot always allocated, Phase-1 never runs as a graph, so
+    // p1_was_graph is always false today; kept for when graph capture is re-enabled.)
     const bool p1_was_graph = impl.m_graph_phase1_valid;
 
     // WP5-A fix: d_grad_snapshot is only allocated at verbosity >= 3 now.

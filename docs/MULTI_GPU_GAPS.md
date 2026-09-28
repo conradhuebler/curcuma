@@ -60,22 +60,40 @@ on the optimised geometry a constant ~30 s against 249 s single-GPU [D: lab jour
 
 **Device selection and batch coverage**
 
-- **G2-2 The split ignores `-gpu_devices` and `-gpu_device`.** Default and `all` mean every visible
+- **G2-2 The split ignores `-gpu_devices` and `-gpu_device`.** *FIXED Sep 28, 2026 (stage B): `all`/default
+  means the `-gpu_devices` list, a single calculation with a pool runs on the first listed device
+  (EnergyCalculator, key `gpu_device_auto`), an explicit `-gpu_device N` keeps the default split off.
+  Measured by sampling `nvidia-smi` during a polymer GFN2 run with `-gpu_devices 2,3` (split thresholds
+  lowered to 1000): old binary on devices 0,1,2,3, new on 2,3 only; energy identical (-2088.25340678).* [M]
+  Original finding: Default and `all` mean every visible
   device, device 0 included (`xtb_gpu_method.cpp:556-570`) [R]. A large single run on a shared node
   places ranks on busy GPUs; workaround: an explicit list or `CUDA_VISIBLE_DEVICES`.
 - **G2-3 An explicit `-gpu_eigensolver_devices`/`-gpu_density_devices` inside a batch worker
-  bypasses the lease guard** (`xtb_gpu_method.cpp:556-558, 607`) [R] and `all` then expands to every
+  bypasses the lease guard** *- FIXED Sep 28 (stage B): ignored in a leased worker with a warning and a
+  counted fallback (4-structure `-sp` batch with `-gpu_eigensolver_devices all`: summary "4 x ...
+  ignored in a batch worker"). A k-device lease is still not implemented.* [M] (`xtb_gpu_method.cpp:556-558, 607`) [R] and `all` then expands to every
   device - every worker builds NCCL communicators over all GPUs. GPU_TUNING.md:40 says "batch
   workers keep it off", true only for the default. There is no API to lease k devices for one worker.
-- **G2-16 Batch coverage is partial** [C]: `-opt` multi-XYZ at `-threads <= 1` runs sequentially
+- **G2-16 Batch coverage is partial** *- partly FIXED Sep 28 (stage B): the `-opt` multi-XYZ batch and the
+  threaded Hessian run at least one worker per GPU slot (4 caffeine, gfn2: opt 5.28 -> 2.40 s; Hessian
+  1 -> 4 devices, 4.72 -> 2.49 s). ConfScan's recomputation stays sequential. Found on the way (H-1,
+  fixed): with more than one Hessian worker the frequencies were computed but never printed, because
+  the workers' logger save/restore interleaved and left the level at 0 (CLAUDE.md Known Issue #3,
+  pre-existing, also on the CPU with `-threads 4`). Measured side effects, not fixed: the FD Hessian
+  depends on the worker split at the default SCF threshold (GPU 1 vs 4 devices: max 0.3 cm-1; CPU 1 vs 4
+  threads: 0.1 = print precision) and CPU vs GPU differ by up to 4.5 cm-1 (pre-existing, same with the
+  old binary); `-scf_threshold`/`-hessian.scf_threshold` do NOT reach the Hessian workers (H-2, open:
+  `executeHessian` forwards only `controller["hessian"]`).* [M] Original finding [C]: `-opt` multi-XYZ at `-threads <= 1` runs sequentially
   (`src/capabilities/optimizer_factory.cpp:407-417`); ConfScan's energy recomputation is sequential
   (`src/capabilities/confscan.cpp:545, 608`); the Hessian defaults to 1 thread, so 1 GPU
   (`src/capabilities/hessian.cpp:283`); only the `-sp` batch raises its worker count to the GPU slots
   (`src/main.cpp:1757-1760`). The pool balances by lease count, not free memory or foreign load
   (`src/core/gpu_device_pool.cpp:164-185`).
-- **G2-14 ConfSearch forwards only `gpu`**, not `gpu_device`, `gpu_sparse_integrals`,
+- **G2-14 ConfSearch forwards only `gpu`** *- FIXED Sep 28 (stage B): `ChildConfig()` forwards every global
+  GPU key present in the controller (code change; not exercised by a run)*, not `gpu_device`, `gpu_sparse_integrals`,
   `gpu_memory_check` or `gpu_eigensolver_*` (`src/capabilities/confsearch.cpp:1078-1097`) [C].
-- **G2-12 Vulkan counts devices it cannot use** (`vulkan/vk_context.cpp:209-237`); the pool can
+- **G2-12 Vulkan counts devices it cannot use** *(open - the Vulkan plugin is not built here, so a filter
+  could not even be compiled; documented only)* (`vulkan/vk_context.cpp:209-237`); the pool can
   lease them and that worker runs on the CPU [C].
 
 **Scaling of one molecule**
@@ -94,23 +112,33 @@ on the optimised geometry a constant ~30 s against 249 s single-GPU [D: lab jour
   that would fit only when split can be refused. `CudaBuffer` uses `int` sizes
   (`ff_methods/cuda/gfnff_soa.h:48`): dense n^2 buffers stop at nao ~46340 whatever the GPU count [C].
 - **G2-6 The distributed density exists only for CUDA + GFN2 resident loop + screened storage**
-  [C]. GFN1 gets none and prints no status; with dense storage the status wrongly says "nao below
+  [C]. *Status message FIXED Sep 28 (stage B): it now names the real cause (dense storage, nao below the
+  threshold, or "never reached: GFN1 has no such path"); the GFN1 path itself is still missing.* GFN1 gets none and prints no status; with dense storage the status wrongly says "nao below
   min" (`cuda/xtb_gpu_context.cu:3643-3644` vs `3212`).
 
 **Silent or misleading behaviour**
 
-- **G2-7** [C]: cusolverMg chosen instead of cuSOLVERMp is info-level only
+- **G2-7** *- FIXED Sep 28 (stage B): every such status is a warning and a counted fallback (see G2-15);
+  the partial-diag and no-cuBLASMp cases got their own status (`distributedEigensolverDegradation`).
+  Not triggered on this machine (cuSOLVERMp + cuBLASMp present), so exercised only by code reading.* [C]: cusolverMg chosen instead of cuSOLVERMp is info-level only
   (`xtb_gpu_method.cpp:441-442`); without cuBLASMp the FP64 generalized path quietly becomes a
   distributed `syevd` (`xtb_distributed_eigensolver.cpp:155-166`); a failed verification-buffer
   allocation is not a warning (`cuda/xtb_gpu_context.cu:403-425`); `-scf_gpu_partial_diag` disables
   the split without a message.
-- **G2-8** [C]: Mg FP32 is not excluded up front - only the per-solve check rejects it; with
+- **G2-8** *- FIXED Sep 28 (stage B): cusolverMg never takes an FP32 solve (`distReady`).* [C]: Mg FP32 is not excluded up front - only the per-solve check rejects it; with
   `-gpu_eigensolver_verify false` it is accepted unchecked (`cuda/xtb_gpu_context.cu:394, 646-666`),
   while GPU_TUNING.md:44/99 and MULTI_GPU.md:66 say "FP64 only".
-- **G2-11** [C]: batch workers run at verbosity 0 (`src/main.cpp:1766, 1783`), so a CPU fallback
+- **G2-11** *- FIXED Sep 28 (stage B) by the fallback summary (G2-15).* [C]: batch workers run at verbosity 0 (`src/main.cpp:1766, 1783`), so a CPU fallback
   of a worker is invisible; the printed "device N" is the lease, not proof the GPU ran.
 - **G2-15** [C]: `gpu_strict`, `gpu_multi_mode`, `gpu_profile`, `gpu_count` from the multi-GPU plan
-  are not implemented (no hits in `src/`).
+  are not implemented (no hits in `src/`). *`gpu_strict` IMPLEMENTED Sep 28 (stage B):
+  `src/core/gpu_fallback.{h,cpp}` counts every GPU degradation (worker CPU fallback, plugin missing or
+  declined, device init failure, eigensolver degradations, GFN-FF EEQ fallbacks, split flags ignored in
+  a worker); `main` prints a summary after the run at warning level whatever the verbosity; `-gpu_strict
+  true` ends the run at the first one with exit code 3. Measured with the EEQ test hook: triose MD at
+  `-verbosity 0` prints "4 x GFN-FF EEQ: no valid device solution", `-gpu_strict true` exits 3, a clean
+  run with `-gpu_strict true` exits 0 with no report. `gpu_strict` is a global key like the other gpu_*
+  keys (main.cpp `global_params`), not a registry PARAM. The other three names stay unimplemented.* [M]
 
 **Backend parity**
 
@@ -207,7 +235,9 @@ Measured: 182 ms per energy call on polymer_2x on one A4500, EEQ ~79 ms, Coulomb
 - **F-9 Per-step overhead**: a blocking displacement sync, three CN downloads nobody reads, WP5-C
   skip-check kernels whose flag has no reader (`ff_methods/cuda/ff_workspace_gpu.cu:3000-3016, 2719`) [C].
 - **F-10 CUDA graphs are permanently off** (graph capture failed on Blackwell;
-  `ff_methods/cuda/ff_workspace_gpu.cu:1036-1042`) [R]; the comment at `:2394` claims the opposite.
+  `ff_methods/cuda/ff_workspace_gpu.cu:1036-1042`) [R]. *Correction Sep 28, 2026: the comment near
+  `:2394` does not claim the opposite - it is conditional ("if Phase-1 ran as a graph"); it now says
+  that this never happens today.*
 - **F-15 Size wall at N >= 46341**: `int` products `N*N` overflow (`ff_methods/cuda/eeq_solver_gpu.cu:273, 357`,
   `ff_methods/cuda/ff_workspace_gpu.cu:1543, 1637`, `ff_methods/cuda/gpu_utils.cpp:62`); the memory
   estimate ignores the pair lists [C].
@@ -232,7 +262,8 @@ Measured: 182 ms per energy call on polymer_2x on one A4500, EEQ ~79 ms, Coulomb
 
 - **F-14** GPU results are not run-to-run reproducible (`atomicAdd` gradient, energy, CN, fragment
   sums, pair order) [C]; known, deferred by the operator [D: TODO.md:772-781, Sep 27].
-- **F-19** "All EEQ paths exhausted -> Phase-1 charges" warns only at verbosity >= 1
+- **F-19** *- FIXED Sep 28 (stage B): one ungated warning with the correct wording plus a counted fallback
+  (only when the device solve was applicable; the first-step topology route is by design).* "All EEQ paths exhausted -> Phase-1 charges" warns only at verbosity >= 1
   (`qm_methods/gfnff_gpu_method_impl.h:1474-1479`), so MD children at verbosity 0 never show it [C].
 
 **ROCm parity**
@@ -257,7 +288,9 @@ Measured: 182 ms per energy call on polymer_2x on one A4500, EEQ ~79 ms, Coulomb
   on Sep 21 (1.475 s/step with one A4500 vs 1.25 s on 16 CPU threads, MD_LARGE_SYSTEMS.md:117-121),
   before WP7-E and the skin default - the Sep 27 figure is the energy call only; the cost of G2-9
   and F-8 inside MD is unknown.
-- **X-3 Doc drift** [C]: MD_LARGE_SYSTEMS.md:117-131 ("GPU buys nothing") predates the Sep 27 changes;
+- **X-3 Doc drift** *- FIXED Sep 28 (stage B), each place corrected with a dated note; the repulsion
+  52 vs ~240 ms item turned out to be two different quantities (CPU rebuild vs GPU call saving), left
+  as an open measurement.* [C]: MD_LARGE_SYSTEMS.md:117-131 ("GPU buys nothing") predates the Sep 27 changes;
   MULTI_GPU.md:28 (CPU/GPU 5.7e-7 Eh) is superseded by CLAUDE.md #33; TODO.md:1011-1018 says ConfSearch
   switches the GPU off at `-threads > 1` - true only while the device pool is inactive (one
   visible GPU); with an active pool the GPU stays on (`src/capabilities/confsearch.cpp:161-170`) [R]; GPU_TUNING.md:36 ("off by default") contradicts :40 and

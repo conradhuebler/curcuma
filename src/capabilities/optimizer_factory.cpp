@@ -404,6 +404,13 @@ std::vector<OptimizationResult> OptimizationDispatcher::optimizeBatch(
     std::vector<OptimizationResult> results;
     results.resize(molecules.size());
 
+    // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md G2-16): with a GPU device pool the batch
+    // runs at least one worker per GPU slot, as the -sp batch does (main.cpp) - at the default
+    // -threads 1 it used to optimise every structure one after another on device 0.
+    const auto& gpu_pool = curcuma::GpuDevicePool::instance();
+    if (gpu_pool.active())
+        threads = std::max(threads, gpu_pool.capacity());
+
     if (threads <= 1 || molecules.size() <= 1) {
         // Sequential path: no thread pool, no progress bar, identical behaviour
         // to the original implementation.

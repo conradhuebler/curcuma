@@ -550,6 +550,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/method_factory.cpp
         src/core/energy_calculators/gpu_plugin.cpp
         src/core/gpu_device_pool.cpp
+        src/core/gpu_fallback.cpp
         src/core/energy_calculators/qm_methods/eht_method.cpp
         src/core/energy_calculators/qm_methods/native_xtb_method.cpp
         src/core/energy_calculators/qm_methods/nddo.cpp

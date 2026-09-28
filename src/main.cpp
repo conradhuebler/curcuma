@@ -18,6 +18,7 @@
  *
  */
 #include "src/core/gpu_device_pool.h"
+#include "src/core/gpu_fallback.h"
 #include "src/core/intra_parallel_context.h"
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 #include "src/core/energy_calculators/qm_methods/eht.h"
@@ -696,6 +697,7 @@ json CLI2Json(int argc, char** argv)
         "verbosity", "threads", "method", "gpu",  // energy_method and gpu apply to all capabilities
         "gpu_device",   // Claude Generated (Sep 2026, multi-GPU): device index for -gpu (see docs/MULTI_GPU.md)
         "gpu_devices", "gpu_workers_per_device",  // batch workers spread over these devices
+        "gpu_strict",   // Claude Generated (Sep 2026): any GPU fallback ends the run (exit 3), see src/core/gpu_fallback.h
         "gpu_memory_check",  // native gfn1/gfn2 GPU: refuse a basis that does not fit (default true)
         "gpu_sparse_integrals",  // native gfn1/gfn2 GPU: screened S/H0/multipole storage auto|on|off
         // Claude Generated (Sep 2026, multi-GPU step 3): multi-GPU eigensolve (docs/GPU_TUNING.md)
@@ -3014,6 +3016,20 @@ int main(int argc, char **argv) {
     // runs and for a single visible device without explicit pool flags.
     curcuma::GpuDevicePool::instance().configure(controller);
 
+    // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md G2-15): `-gpu_strict true` turns every
+    // GPU fallback (CPU fallback of a worker, slower eigensolver library, EEQ fallback, ...)
+    // into a hard stop. Without it the fallbacks are counted and summarised after the run.
+    {
+        bool strict = false;
+        if (controller.contains("gpu_strict")) {
+            const auto& v = controller["gpu_strict"];
+            strict = v.is_boolean() ? v.get<bool>()
+                   : v.is_number()  ? v.get<double>() != 0.0
+                   : (v.is_string() && (v.get<std::string>() == "true" || v.get<std::string>() == "1"));
+        }
+        curcuma::setGpuStrict(strict);
+    }
+
     // Handle run export - Claude Generated (October 2025)
     // Export current configuration AFTER all merging/importing
     // Now global parameter, always in controller["export_run"] if present
@@ -3099,6 +3115,7 @@ int main(int argc, char **argv) {
     auto it = CAPABILITY_REGISTRY.find(command);
     if (it != CAPABILITY_REGISTRY.end()) {
         int result = it->second.handler(controller, argc, argv);
+        curcuma::printGpuFallbackSummary();
         return result;
     }
 

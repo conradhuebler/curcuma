@@ -329,6 +329,7 @@ struct XtbGpuContext::Impl {
     bool                       dens_failed = false;
     int                        dens_min_nao = 4000;
     std::string                dens_error;
+    std::string                dens_skip_reason;   ///< G2-6: why the split did not run (last cause)
     int                        dens_steps = 0;
     long                       pattern_generation = 0;   // bumped when the screened pattern changes
 
@@ -372,6 +373,7 @@ struct XtbGpuContext::Impl {
     int              dist_solves = 0;
     long             l_generation = 0;   // bumped whenever dL (Cholesky factor of S) is rewritten
     std::string      dist_status;
+    std::string      dist_degrade;   ///< G2-7: part of the solve stays on this device (see accessor)
     std::unique_ptr<DistributedEigensolver> dist;
 
     /// 1 = solved on several GPUs, 0 = not used (input intact, run the single-GPU solver),
@@ -657,6 +659,12 @@ struct XtbGpuContext::Impl {
                 return false;
             }
         }
+        // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md G2-8): cusolverMg is FP64-only by
+        // design (its FP32 eigenpairs degraded after the first call, see the verification note
+        // above). It used to be excluded only by the per-solve check, i.e. not at all with
+        // -gpu_eigensolver_verify false. FP32 iterations stay on this device.
+        if (fp32 && std::string(dist->name()) == "cusolverMg")
+            return false;
         // FP32 correctness is a per-machine question (see dist_fp32_state): the first FP32 solve
         // is verified, and only a failed verification turns FP32 off for the rest of the run.
         // the wrapper reports dist_status; a backend that failed verification is not used again
@@ -2957,6 +2965,14 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
     // 4x A4500) the distributed reduction wins in FP64 (sygst 3.7 s vs two single-GPU trsm 21 s)
     // but not in FP32 (0.56 vs 0.57 s), and the cuBLASMp FP32 back-transform is slower than the
     // single-GPU trsm (1.74 vs 0.38 s).
+    // Claude Generated (Sep 2026, G2-7): name the two cases in which the multi-GPU solver is set up
+    // but this FP64 solve still runs (partly) on this device.
+    if (m_impl->dist_devices.size() > 1 && n >= m_impl->dist_min_nao && m_impl->dist_degrade.empty()) {
+        if (partial)
+            m_impl->dist_degrade = "-scf_gpu_partial_diag runs the eigensolve on one device (the split is off)";
+        else if (!fp32 && m_impl->distReady(n, false) && !m_impl->dist->supportsGeneralized())
+            m_impl->dist_degrade = "no cuBLASMp: FP64 reduction and back-transform stay on one device, only syevd is split";
+    }
     if (!partial && !fp32 && m_impl->distReady(n, false) && m_impl->dist->supportsGeneralized()) {
         // No single-GPU workspaces or FP32 copies while the FP64 solve is distributed.
         m_impl->dCf.free(); m_impl->dLf.free(); m_impl->dWorkf.free(); m_impl->lwork_f32 = 0;
@@ -3209,6 +3225,14 @@ bool XtbGpuContext::residentDensity(const double* occ, int ncol, int n,
 bool XtbGpuContext::densityPatternDistributed(int n, int ncol, bool for_weighted_density)
 {
     Impl& I = *m_impl;
+    // Claude Generated (Sep 2026, G2-6): remember WHY the split did not run, so the status names
+    // the real cause instead of always "nao below min".
+    if (!I.dens_devices.empty() && !I.dens_failed) {
+        if (!I.sparse || I.sp_nnz <= 0)
+            I.dens_skip_reason = "dense integral storage; the split needs screened storage (-gpu_sparse_integrals on)";
+        else if (n < I.dens_min_nao)
+            I.dens_skip_reason = "nao " + std::to_string(n) + " below gpu_density_min_nao = " + std::to_string(I.dens_min_nao);
+    }
     if (I.dens_failed || I.dens_devices.empty() || !I.sparse || I.sp_nnz <= 0 || ncol <= 0
         || n < I.dens_min_nao)
         return false;   // below ~3000 basis functions the transfers cost more than the split saves
@@ -3363,7 +3387,7 @@ bool XtbGpuContext::residentDensityResident(int n, int ncol, double* band_out)
     // Claude Generated (Sep 2026): pattern density split over several GPUs (see
     // densityPatternDistributed); falls through to the single-device kernels below when it is
     // not configured or fails.
-    const bool split_done = I.sparse && ncol > 0 && densityPatternDistributed(n, ncol);
+    const bool split_done = ncol > 0 && densityPatternDistributed(n, ncol);
     if (ncol > 0 && !split_done) {
         const dim3 block(16, 16);
         const dim3 grid((n + block.x - 1) / block.x, (ncol + block.y - 1) / block.y);
@@ -3641,12 +3665,19 @@ std::string XtbGpuContext::densityDevicesStatus() const
 {
     if (!m_impl || m_impl->dens_devices.empty()) return {};
     if (m_impl->dens_steps == 0 && !m_impl->dens_failed)
-        return "not used (nao below gpu_density_min_nao = " + std::to_string(m_impl->dens_min_nao) + ")";
+        return "not used (" + (m_impl->dens_skip_reason.empty()
+            ? std::string("never reached: only the GFN2 resident SCF loop splits the density, GFN1 has no such path")
+            : m_impl->dens_skip_reason) + ")";
     if (m_impl->dens_failed)
         return "failed (" + m_impl->dens_error + "); single-device density from here on";
     std::string list = std::to_string(m_impl->device);
     for (int d : m_impl->dens_devices) list += "," + std::to_string(d);
     return "pattern density on devices [" + list + "], " + std::to_string(m_impl->dens_steps) + " steps";
+}
+
+std::string XtbGpuContext::distributedEigensolverDegradation() const
+{
+    return m_impl ? m_impl->dist_degrade : std::string();
 }
 
 std::string XtbGpuContext::distributedEigensolverStatus() const
