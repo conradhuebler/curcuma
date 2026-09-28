@@ -253,6 +253,11 @@ public:
     /// Set D3 coordination numbers (for dynamic r0)
     void setD3CN(const Vector& cn) { m_d3_cn = cn; }
 
+    /// Set the CN of the current geometry only (energy-only calls). The Coulomb self-energy
+    /// uses it for chi = chi_base + cnf*sqrt(CN); without it an energy-only call after a
+    /// geometry change kept the CN of the last gradient call. Claude Generated (Sep 2026).
+    void setCN(const Vector& cn) { m_cn = cn; }
+
     /// Set CN, CNF, and CN derivatives (gradient only)
     /// Claude Generated (WP4, May 2026): dcn now CNDerivStore (pair-list) instead of std::vector<SpMatrix>
     void setCNDerivatives(const Vector& cn, const Vector& cnf,

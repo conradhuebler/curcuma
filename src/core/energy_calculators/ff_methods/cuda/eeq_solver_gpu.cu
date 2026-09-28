@@ -58,6 +58,7 @@ struct EEQSolverGPUImpl {
     cusolverDnHandle_t cusolver_handle = nullptr;
     cublasHandle_t     cublas_handle   = nullptr;  ///< WP7-C: PCG matvec/dot/axpy
     cudaStream_t stream = nullptr;
+    cudaEvent_t  ev_legacy_barrier = nullptr;  ///< F-12: orders impl.stream after the workspace stream
 
     // Device buffers
     CudaBuffer<double> d_alpha;      ///< [N] alpha_corrected
@@ -379,6 +380,7 @@ EEQSolverGPU::~EEQSolverGPU()
         if (m_impl->h_info) cudaFreeHost(m_impl->h_info);
         if (m_impl->cublas_handle) cublasDestroy(m_impl->cublas_handle);
         if (m_impl->cusolver_handle) cusolverDnDestroy(m_impl->cusolver_handle);
+        if (m_impl->ev_legacy_barrier) cudaEventDestroy(m_impl->ev_legacy_barrier);
         if (m_impl->stream) cudaStreamDestroy(m_impl->stream);
     }
 }
@@ -2071,6 +2073,17 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUProjectedPCG(
     if (impl.d_frag_inv_atoms.n < nfrag) return false;
 
     const int N = natoms;
+
+    // Claude Generated (Sep 2026, MULTI_GPU_GAPS F-12): d_rhs_atoms and the coordinates are
+    // written on the FFWorkspaceGPU main stream, which this solver does not own. The other
+    // device-RHS paths start with a blocking cudaMemcpy, which orders them implicitly through
+    // the legacy default stream; this path had no such operation since WP5-D removed the sync.
+    // An event recorded on the legacy stream waits for all prior work in every blocking stream
+    // (all curcuma streams are created with cudaStreamCreate), so impl.stream waits for it.
+    if (!impl.ev_legacy_barrier)
+        cudaEventCreateWithFlags(&impl.ev_legacy_barrier, cudaEventDisableTiming);
+    cudaEventRecord(impl.ev_legacy_barrier, cudaStreamLegacy);
+    cudaStreamWaitEvent(impl.stream, impl.ev_legacy_barrier, 0);
 
     const bool do_refactor = force_refactor
                           || !impl.m_pcg_M_inv_valid

@@ -1595,6 +1595,11 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             m_last_cnf = Vector();
         }
         m_last_dcn.clear();
+        // Claude Generated (Sep 2026): the Coulomb self-energy reads the workspace CN
+        // (chi = chi_base + cnf*sqrt(CN)), which only the gradient path above set. An
+        // energy-only call at a new geometry therefore used the CN of the last gradient call
+        // (triose, 0.08 A displacement: 4.6e-3 Eh, all in the Coulomb term).
+        if (!gpu_only && m_workspace) m_workspace->setCN(m_last_cn);
 
         if (do_eeq && !skip_eeq && !eeq_charges_current) {
             t0 = std::chrono::high_resolution_clock::now();

@@ -549,8 +549,13 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
 
         // Deliverable 3 (Jun 2026): route high-fragment EEQ to the exact CPU PCG.
         // Backend default: 0 on CUDA (device Schur handles it), 16 on ROCm.
-        m_eeq_cpu_fragment_threshold = cfg_get_int("eeq_rocm_cpu_fragment_threshold",
-                                                   Backend::default_eeq_cpu_fragment_threshold);
+        // Claude Generated (Sep 2026, MULTI_GPU_GAPS F-13): read only where the backend has
+        // no device Schur paths (ROCm). The key is documented as "ROCm only", and on CUDA the
+        // host EEQ it selects is the path that segfaults inside a CUDA process on polymer_2x
+        // (TECHNICAL_DEBT.md F-Q9), so the CUDA wrapper keeps its trait default (0).
+        if constexpr (!Backend::has_device_schur)
+            m_eeq_cpu_fragment_threshold = cfg_get_int("eeq_rocm_cpu_fragment_threshold",
+                                                       Backend::default_eeq_cpu_fragment_threshold);
 
         // Phase 2: Upload C6 reference table for GPU dc6dcn per-pair computation
         D4ParameterGenerator* d4 = m_gfnff->getD4Generator();
@@ -900,6 +905,15 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     // k_dispersion in gradient mode is deferred to Phase 2 (needs dc6dcn from
     // computeGaussianWeightsOnGPU, which runs AFTER Phase 1 on d_cn — current step).
     // G-P1: d_cn_final → d_cn D2D copy is enqueued inside prepareAndLaunchChargeIndependent().
+    //
+    // Claude Generated (Sep 2026): energy-only calls need the C6 of THIS geometry too (line
+    // searches, energy-only scans), as on the CPU (gfnff_method.cpp, dispersionC6Stale). In
+    // energy mode k_dispersion is launched inside Phase 1 on stream A, so the refresh has to be
+    // enqueued BEFORE it, from d_cn_final (current step, computeCN above); the event_upload
+    // fence in Phase 1 orders stream A after it.
+    if (!gradient && !m_gpu_workspace->frozenCN()) {
+        m_gpu_workspace->computeGaussianWeightsOnGPU(/*use_cn_final=*/true);
+    }
     m_gpu_workspace->prepareAndLaunchChargeIndependent(gradient);
 
     // Gaussian weights + dc6dcn: must run AFTER Phase 1 so d_cn holds the current step's
@@ -968,12 +982,12 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         // Static-Mode (WP-S1): GPU d_charges retain previous-step values, no upload needed.
         // CPU-side charges fetched for any consumer that still needs them.
         if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::info("EEQ GPU Phase 2: frozen charges (static_charges mode) — skipping solve+upload");
+            CurcumaLogger::info("EEQ GPU Phase 2: frozen charges (static_charges mode) - skipping solve+upload");
         }
         charges = m_gfnff->getLastCharges();
     } else if (m_skip_phase2) {
         if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::warn("GPU path: skip_phase2=true — bypassing GPU EEQ, using CPU Phase 1 topology charges");
+            CurcumaLogger::warn("GPU path: skip_phase2=true - bypassing GPU EEQ, using CPU Phase 1 topology charges");
         }
         m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/false);
         charges = m_gfnff->getLastCharges();
@@ -1323,12 +1337,17 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 
             if (eeq_ok) {
                 if (used_gpu_schur) {
-                    // WP5-A: charges already on GPU (d_rhs[0..N-1] in EEQ solver).
-                    // D2D copy into impl.d_charges — skips H2D upload in Phase-2.
-                    m_gpu_workspace->setEEQDeviceCharges(m_eeq_gpu->getDeviceChargesPtr());
                     // Download for storeChargesFromGPU() — EEQ stream already synced.
                     Backend::downloadDoubles(m_eeq_charges_gpu.data(),
                                              m_eeq_gpu->getDeviceChargesPtr(), N);
+                    // Test hook (Claude Generated, Sep 2026): CURCUMA_EEQ_GPU_FORCE_REJECT=1
+                    // rejects every GPU EEQ solution, so the fallback below can be exercised on
+                    // a well-conditioned molecule. Read once; zero cost when unset.
+                    static const bool force_reject = [] {
+                        const char* e = std::getenv("CURCUMA_EEQ_GPU_FORCE_REJECT");
+                        return e && *e && std::string(e) != "0";
+                    }();
+                    if (force_reject) gpu_charges_accepted = false;
                     // Validate — mirrors gfnff_method.cpp:864-880 CPU check.
                     // GPU Cholesky can return info=0 with NaN/huge charges on ill-conditioned systems.
                     for (int i = 0; i < N && gpu_charges_accepted; ++i)
@@ -1350,8 +1369,13 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                     }
                     if (gpu_charges_accepted) {
                         m_gfnff->storeChargesFromGPU(m_eeq_charges_gpu.data(), N);
+                        // WP5-A: D2D copy into impl.d_charges — skips the H2D upload in
+                        // Phase 2. Only AFTER validation (Claude Generated, Sep 2026): this copy
+                        // used to precede the check, so a rejected solution stayed on the device
+                        // and Coulomb ran on it while the log reported the Phase-1 fallback.
+                        m_gpu_workspace->setEEQDeviceCharges(m_eeq_gpu->getDeviceChargesPtr());
                     } else {
-                        CurcumaLogger::warn("EEQ GPU: invalid charges (NaN/Inf or |q|>50), using Phase 1 topology charges");
+                        CurcumaLogger::warn("EEQ GPU: invalid charges (NaN/Inf or |q|>50), solution rejected");
                     }
                 } else {
                     // CPU Schur complement: q = z1 - Z2 * λ
@@ -1468,15 +1492,17 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         }
 
         if (!used_gpu_eeq) {
-            // Phase 1 topology charges fallback: skip EEQ solver, use charges computed
-            // during InitialiseMolecule. Matches CPU path behaviour when EEQ Phase 2 fails.
-            // CN derivatives needed for gradient are still computed by prepareCNAndEEQ.
-            CurcumaLogger::warn("GPU EEQ: all paths exhausted — switching to Phase 1 topology charges");
+            // Fallback: skip the EEQ solve and keep the charges of the last ACCEPTED solve
+            // (getLastCharges() is not updated with skip_eeq). Same as the CPU path, which keeps
+            // the previous m_charges on an invalid solution (gfnff_method.cpp, "keeping previous
+            // m_charges"). CN derivatives needed for gradient are still computed by
+            // prepareCNAndEEQ. Claude Generated (Sep 2026): the message used to say "Phase 1
+            // topology charges", which is not what is used (measured on triose: the fallback
+            // energy matches neither the Phase-1 nor the current Phase-2 single point).
+            CurcumaLogger::warn("GPU EEQ: no valid solution - keeping the charges of the last accepted EEQ solve");
             m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/true);
             charges = m_gfnff->getLastCharges();
             m_gpu_workspace->setEEQCharges(charges);
-            if (CurcumaLogger::get_verbosity() >= 1)
-                CurcumaLogger::warn("GPU EEQ: using Phase 1 topology charges as fallback");
         }
     }
 

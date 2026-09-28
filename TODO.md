@@ -972,6 +972,20 @@
 
 ---
 
+### ROCm: drei offene Fehler aus der Multi-GPU-Analyse — nur dokumentiert (2026-09-28)
+- **Status**: ⏳ offen. Betreiberentscheidung 28.09.: ohne ROCm-Hardware keine Codeaenderung, nur Doku.
+- **F-1**: GFN-FF auf ROCm rechnet standardmaessig **keinen Coulomb-Term** (seit `ab6e3f5e`, 17.09.):
+  implizite Coulomb-Paare leeren die Host-Liste, der HIP-Workspace hat keinen impliziten Zweig
+  (`ff_methods/rocm/gfnff_rocm.hip:4948-4975, 6337`). Umgehung: `-gfnff.gpu_coulomb_implicit false`.
+  Nur Codelesung, nicht ausgefuehrt.
+- **G2-13**: `qm_methods/xtb_hip_method.cpp:109` setzt Mixed Precision bedingungslos und ueberschreibt
+  `-scf_mixed_precision false` (CUDA hat den Fix, `xtb_gpu_method.cpp:695-705`).
+- **F-17**: Energiereduktionen setzen wave32 voraus (`gfnff_rocm.hip:86-128`), falsch auf CDNA/MI (wave64);
+  alle Geraete-EEQ-Varianten sind auf ROCm Stubs.
+- **Verweis**: [docs/MULTI_GPU_GAPS.md](docs/MULTI_GPU_GAPS.md), CLAUDE.md Known Issue #35.
+
+---
+
 ## 🔵 CAPABILITIES & ANALYSIS (src/capabilities/)
 
 ### ConfScan Verbosity Enhancement

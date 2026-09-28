@@ -1255,6 +1255,9 @@ void FFWorkspaceGPU::invalidateGraph()
 void FFWorkspaceGPU::setEEQCharges(const Vector& q)
 {
     m_eeq_charges = q;
+    // Claude Generated (Sep 2026): host charges supersede any pending device copy, so the
+    // upload in launchChargeDependentAndFinish() must not be skipped.
+    m_device_charges_ready = false;
 }
 
 void FFWorkspaceGPU::setEEQDeviceCharges(const double* d_src)

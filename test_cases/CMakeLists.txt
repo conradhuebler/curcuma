@@ -382,7 +382,35 @@ if(USE_CUDA)
     if(USE_PCH)
         target_precompile_headers(test_gpu_numgrad REUSE_FROM curcuma_core)
     endif()
+
 endif()
+
+# Claude Generated (Sep 2026, MULTI_GPU_GAPS F-11): an energy-only call at a new geometry must
+# equal a gradient call there (CPU: stale Coulomb CN; GPU: stale D4 C6).
+add_executable(test_gfnff_energy_only_geometry test_gfnff_energy_only_geometry.cpp)
+target_link_libraries(test_gfnff_energy_only_geometry curcuma_core)
+# The GPU plugin is looked up next to the executable (gpu_plugin.cpp, /proc/self/exe).
+set_target_properties(test_gfnff_energy_only_geometry PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+if(USE_PCH)
+    target_precompile_headers(test_gfnff_energy_only_geometry REUSE_FROM curcuma_core)
+endif()
+foreach(EO_MOL triose caffeine)
+    add_test(NAME gfnff_energy_only_geometry_${EO_MOL}
+             COMMAND test_gfnff_energy_only_geometry
+                     ${CMAKE_SOURCE_DIR}/test_cases/molecules/larger/${EO_MOL}.xyz none
+             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(gfnff_energy_only_geometry_${EO_MOL}
+        PROPERTIES TIMEOUT 120 LABELS "gfnff")
+    if(USE_CUDA)
+        add_test(NAME gfnff_gpu_energy_only_geometry_${EO_MOL}
+                 COMMAND test_gfnff_energy_only_geometry
+                         ${CMAKE_SOURCE_DIR}/test_cases/molecules/larger/${EO_MOL}.xyz cuda
+                 WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+        set_tests_properties(gfnff_gpu_energy_only_geometry_${EO_MOL}
+            PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu")
+    endif()
+endforeach()
 
 
 # Claude Generated (AP5, Apr 2026): GFN1/GFN2 analytical vs numerical gradient test
