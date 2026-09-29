@@ -668,6 +668,31 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                                                fp32, verify);
         }
 
+        // Claude Generated (Sep 29, 2026): -scf_pseudo_diag - FP32 SCF steps rotate the previous
+        // eigenvectors instead of diagonalising (docs/GFN2_GPU_COST_PLAN.md stage 2).
+        {
+            // SCF keys arrive in the xtb scope (-xtb.scf_pseudo_diag / the flat flag routed there).
+            auto scfval = [&](const char* key) -> const json* {
+                if (config.contains("xtb") && config["xtb"].is_object() && config["xtb"].contains(key))
+                    return &config["xtb"][key];
+                return config.contains(key) ? &config[key] : nullptr;
+            };
+            auto scfnum = [&](const char* key, double def) {
+                const json* x = scfval(key);
+                if (!x) return def;
+                if (x->is_number()) return x->get<double>();
+                if (x->is_string()) { try { return std::stod(x->get<std::string>()); } catch (...) {} }
+                return def;
+            };
+            bool pseudo = false;
+            if (const json* x = scfval("scf_pseudo_diag"))
+                pseudo = x->is_boolean() ? x->get<bool>()
+                       : x->is_number()  ? x->get<double>() != 0.0
+                       : (x->is_string() && (x->get<std::string>() == "true" || x->get<std::string>() == "1"));
+            ctx->setPseudoDiagonalisation(pseudo, scfnum("scf_pseudo_diag_max_dq", 0.05),
+                                          static_cast<int>(scfnum("scf_pseudo_diag_max_steps", 8)));
+        }
+
         // Claude Generated (Sep 2026, multi-GPU): `-gpu_density_devices all|0,1,..|solver|none`
         // splits the screened-pattern density of the resident SCF over several GPUs (exact, see
         // XtbGpuContext::densityPatternDistributed). "solver" reuses the eigensolver's devices.

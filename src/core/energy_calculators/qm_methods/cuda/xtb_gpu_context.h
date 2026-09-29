@@ -260,6 +260,14 @@ public:
      * an approximation. Per SCF step only the column slices of C travel. Claude Generated (Sep 2026).
      */
     void setDensityDevices(const std::vector<int>& devices, int min_nao = 4000);
+    /// Stage 2 of docs/GFN2_GPU_COST_PLAN.md (Claude Generated, Sep 29, 2026): FP32 SCF steps
+    /// replace the full diagonalisation by one occupied-virtual rotation of the previous
+    /// eigenvectors (pseudo-diagonalisation, Stewart/Csaszar/Pulay 1982) once the previous step's
+    /// max|dq| is below max_dq, at most max_steps times in a row; a full solve follows otherwise,
+    /// and whenever the HOMO-LUMO gap estimate is small against kT or a rotation is large.
+    void setPseudoDiagonalisation(bool on, double max_dq, int max_steps);
+    /// Pseudo-diagonalisation steps taken / tried and rejected since the last beginResidentLoop.
+    void pseudoDiagonalisationCounts(int& taken, int& rejected) const;
 
     /// "" when not configured, else the devices used and the number of split steps.
     std::string densityDevicesStatus() const;
@@ -536,6 +544,9 @@ private:
     /// round-trip. The default true downloads eps_out as before.
     bool eigensolveResidentFock(double* eps_out, bool fp32, int n_eig = 0,
                                 bool download_eps = true);
+    /// The full solve behind eigensolveResidentFock (which may take a pseudo-diagonalisation
+    /// step instead, see setPseudoDiagonalisation).
+    bool eigensolveResidentFockFull(double* eps_out, bool fp32, int n_eig, bool download_eps);
     /// Stage 6: device potential build + Fock + eigensolve from the RESIDENT mixed
     /// SCC inputs (dPotQsh/dInDpAt/dInQpAt + dD4W/dD4dWq) — the body of
     /// residentSolvePotential without the host uploads. Shared by it and the fused

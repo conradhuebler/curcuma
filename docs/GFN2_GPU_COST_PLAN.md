@@ -1,7 +1,7 @@
 # GFN2 on several GPUs: where the time goes and what to change
 
-Status (Sep 29, 2026): stage 0 measured, stage 1a done, 1b tried and rejected, 1c deferred;
-stages 2-3 open (design below, awaiting the operator's go).
+Status (Sep 29, 2026): stage 0 measured, 1a done, 1b rejected, 1c deferred, stage 2 implemented as
+the opt-in `-scf_pseudo_diag` (single GPU), stage 3 open.
 All numbers: 4x RTX A4500 (20 GB, PCIe, no NVLink), polymer_2x (7320 atoms, nao 15444, 19252
 electrons, nocc 9626), commit `bfbdc569`, `CURCUMA_GPU_PROFILE=1`.
 
@@ -67,6 +67,27 @@ electrons, nocc 9626), commit `bfbdc569`, `CURCUMA_GPU_PROFILE=1`.
   7.4 TFLOP in 0.57 s, near the A4500's FP32 peak), so four GPUs could save at most ~0.4 s per
   iteration. Stage 2 below works in the AO basis and needs no reduction in its iterations, which
   leaves the reduction only in the few full-diagonalisation steps.
+
+## Stage 2 result (`-scf_pseudo_diag`, opt-in)
+
+Implemented on the calculation's own GPU (`XtbGpuContext::Impl::pseudoDiagStep`), in the AO basis
+as designed below, orbitals not yet split over the GPUs.
+
+- **A systematic FP32 bias, found and fixed.** The first version converged to the right energy but
+  needed 24 instead of 19 iterations on polymer, because every pseudo step's SCC energy was 1.9 mEh
+  off. A temporary FP64 check of C^T S C showed the occupied orbitals systematically too long
+  (sum over the occupied block of (diag - 1) = +1.9e-3, every step), and comparing the Gram
+  diagonal of the same FP32 vectors pinned it on the FP32 `syrk`: its diagonal, sums of ~3000
+  squares, came out ~1e-6 too small per column (-1.4e-3 over the block against +4.3e-4 when the
+  same numbers are summed in FP64). The diagonal is now recomputed with FP64 accumulation
+  (`k_pseudo_gram_diag`, O(n^2)); the bias drops to 1.3e-4 and the iteration count is back to 19.
+- **Measured.** polymer_2x, 4x A4500: **113 -> 89 s**, 12 iterations either way, 8 pseudo steps at
+  2.3 s instead of ~6.4 s per iteration (all on device 0), energy -11784.87804452 Eh unchanged.
+  polymer on one GPU (`-scf_threshold 1e-8`): SCF 11.8 -> 10.6 s, 19 iterations either way,
+  gradient 2.8e-9 Eh/A from the full-solve run. MOR41 on the GPU: 95/95 identical (ED30: 8 pseudo
+  steps at 0.9 ms against 5.4 ms for a full FP32 step).
+- **Scope.** Only FP32 steps, so nothing changes where mixed precision is off (the default on
+  full-rate-FP64 GPUs such as the H200). An FP64 variant would be the H200 counterpart.
 
 ## Stages 2-3: design after stage 0/1
 

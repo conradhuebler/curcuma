@@ -21,6 +21,7 @@
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -516,8 +517,29 @@ struct XtbGpuContext::Impl {
     /// and the multi-GPU solver's per-device buffers. Called once the SCF has converged: the
     /// post-SCF phase (dense P rebuild, D4, gradient W) otherwise stacks on top of them (polymer_2x:
     /// the device peak sat between SCF end and gradient start while ~3.5 GB per GPU were idle).
+    // Stage 2 pseudo-diagonalisation state (Claude Generated, Sep 29, 2026).
+    bool   pseudo_enabled = false;
+    double pseudo_max_dq = 0.05;
+    int    pseudo_max_steps = 8;
+    int    pseudo_consecutive = 0;   // pseudo steps since the last full solve
+    int    pseudo_taken = 0, pseudo_rejected = 0;
+    double last_dq = 1e300;          // max|dq| of the previous resident step
+    bool   in_resident_step = false; // pseudo steps only inside residentScfStep
+    bool   cprev_valid = false;      // dCprev32 holds the previous step's eigenvectors (AO basis)
+    CudaBuffer<float>  dCprev32, dPsT, dPsGov, dPsWork;
+    CudaBuffer<double> dPsG, dPsStats;
+    CudaBuffer<unsigned int> dPsMax;
+    void releasePseudoDiag()
+    {
+        dCprev32.free(); dPsT.free(); dPsGov.free(); dPsWork.free(); dPsG.free(); dPsStats.free(); dPsMax.free();
+        cprev_valid = false;
+        pseudo_consecutive = 0;
+    }
+    bool pseudoDiagStep(int n);
+
     void releaseEigenWorkspaces()
     {
+        releasePseudoDiag();
         dWork.free(); lwork = 0;
         dCf.free(); dLf.free(); dWorkf.free(); lwork_f32 = 0;
         dProbeA.free(); dProbeV.free(); dProbeY.free(); dProbeT.free(); dProbeU.free();
@@ -3329,8 +3351,243 @@ static inline void fillEpsSentinel(double* eps_out, int neig, int n)
 // back-transform → generalized eigenvectors in dC, eigenvalues → eps_out. The
 // device analogue of the CPU dsygst+dsyevd+dtrsm path, reusing the resident L (no
 // per-iteration L upload). Shared by residentSolve and residentSolveMultipole.
-bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig,
-                                           bool download_eps)
+// ---- Stage 2: pseudo-diagonalisation (docs/GFN2_GPU_COST_PLAN.md) ----------------------------
+// Claude Generated (Sep 29, 2026). Between two SCF steps the Fock matrix changes little, so the
+// previous eigenvectors C (AO basis, C^T S C = I) are already close. One first-order Jacobi
+// rotation between the occupied (o) and virtual (v) blocks removes the coupling
+//     G = C^T F C,   theta_ai = G_ai / (G_ii - G_aa),   C_o += C_v theta,   C_v -= C_o theta^T
+// (Stewart, Csaszar, Pulay, J. Comput. Chem. 3 (1982) 227), and a Cholesky re-orthonormalisation
+// in the S metric (C^T S C = (L^T C)^T (L^T C) = R^T R, C <- C R^-1) restores C^T S C = I. The
+// Cholesky order keeps the occupied span: column i only mixes with columns <= i. Only GEMMs, so it
+// replaces an eigensolve whose tridiagonalisation is memory-bound. The orbital energies are the
+// Rayleigh quotients G_pp of the rotated-from vectors (occupied block first, virtual block after -
+// the occupation kernel does not need them sorted).
+
+// g[p] = sum_mu C(mu,p) T(mu,p), accumulated in FP64; one block per column.
+__global__ void k_pseudo_coldot(const float* __restrict__ C, const float* __restrict__ T, int n,
+                                double* __restrict__ g)
+{
+    extern __shared__ double sred[];
+    const int p = blockIdx.x;
+    const size_t off = static_cast<size_t>(p) * n;
+    double acc = 0.0;
+    for (int mu = threadIdx.x; mu < n; mu += blockDim.x)
+        acc += static_cast<double>(C[off + mu]) * static_cast<double>(T[off + mu]);
+    sred[threadIdx.x] = acc;
+    __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sred[threadIdx.x] += sred[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) g[p] = sred[0];
+}
+
+// stats[0] = max_i g_i (occupied), stats[1] = min_a g_a (virtual). One block.
+__global__ void k_pseudo_gap(const double* __restrict__ g, int no, int n, double* __restrict__ stats)
+{
+    extern __shared__ double sred[];
+    double hi = -1e300, lo = 1e300;
+    for (int p = threadIdx.x; p < n; p += blockDim.x) {
+        if (p < no) hi = fmax(hi, g[p]); else lo = fmin(lo, g[p]);
+    }
+    double* smax = sred;
+    double* smin = sred + blockDim.x;
+    smax[threadIdx.x] = hi; smin[threadIdx.x] = lo;
+    __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            smax[threadIdx.x] = fmax(smax[threadIdx.x], smax[threadIdx.x + s]);
+            smin[threadIdx.x] = fmin(smin[threadIdx.x], smin[threadIdx.x + s]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) { stats[0] = smax[0]; stats[1] = smin[0]; }
+}
+
+// theta_ai = G_ai / (g_i - g_a) in place (G_ov is nv x no, column-major), and the largest
+// |theta| as the bit pattern of a non-negative float (monotone as unsigned int).
+__global__ void k_pseudo_theta(float* __restrict__ gov, const double* __restrict__ g, int no, int nv,
+                               unsigned int* __restrict__ maxbits)
+{
+    const size_t total = static_cast<size_t>(nv) * no;
+    unsigned int local = 0u;
+    for (size_t e = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x; e < total;
+         e += static_cast<size_t>(gridDim.x) * blockDim.x) {
+        const int a = static_cast<int>(e % nv), i = static_cast<int>(e / nv);
+        const float t = static_cast<float>(static_cast<double>(gov[e]) / (g[i] - g[no + a]));
+        gov[e] = t;
+        const unsigned int bits = __float_as_uint(fabsf(t));
+        local = bits > local ? bits : local;
+    }
+    atomicMax(maxbits, local);
+}
+
+// Diagonal of the S-metric Gram matrix, M_pp = sum_mu B(mu,p)^2, accumulated in FP64 and written
+// over the FP32 syrk diagonal. Measured on polymer: the FP32 syrk diagonal of these sums of ~3000
+// squares is systematically ~1e-6 too small per column (sum over the occupied block -1.8e-3), so
+// the Cholesky normalised every orbital slightly too long and the electron count drifted by
+// ~4e-3 (SCC energy 1.9 mEh off). The off-diagonal elements keep their FP32 values.
+__global__ void k_pseudo_gram_diag(const float* __restrict__ B, int n, float* __restrict__ M)
+{
+    extern __shared__ double sred[];
+    const int p = blockIdx.x;
+    const size_t off = static_cast<size_t>(p) * n;
+    double acc = 0.0;
+    for (int mu = threadIdx.x; mu < n; mu += blockDim.x) {
+        const double x = static_cast<double>(B[off + mu]);
+        acc += x * x;
+    }
+    sred[threadIdx.x] = acc;
+    __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sred[threadIdx.x] += sred[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) M[static_cast<size_t>(p) + off] = static_cast<float>(sred[0]);
+}
+
+bool XtbGpuContext::Impl::pseudoDiagStep(int n)
+{
+    const int no = loop_nocc_pairs, nv = n - no;
+    if (no <= 0 || nv <= 0) return false;
+    const size_t nn = static_cast<size_t>(n) * n;
+    try {
+        dCf.ensure(static_cast<int>(nn));
+        dLf.ensure(static_cast<int>(nn));
+        dPsT.ensure(static_cast<int>(nn));
+        dPsGov.ensure(static_cast<int>(static_cast<size_t>(nv) * no));
+        dPsG.ensure(n);
+        dPsStats.ensure(2);
+        dPsMax.ensure(1);
+    } catch (...) { return false; }
+    const int b = 256;
+    const int gnn = static_cast<int>((nn + b - 1) / b);
+    const float one = 1.0f, zero = 0.0f, mone = -1.0f;
+    float* C = dCprev32.ptr;
+    float* T = dPsT.ptr;
+    float* Cv = C + static_cast<size_t>(no) * n;
+
+    // 1. F in FP32, T = F C, g = diag(C^T F C), G_ov = C_v^T (F C_o).
+    k_d2f<<<gnn, b, 0, stream>>>(dC.ptr, dCf.ptr, nn);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    if (cublasSgemm(cublas, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n, &one, dCf.ptr, n, C, n, &zero, T, n)
+        != CUBLAS_STATUS_SUCCESS)
+        return false;
+    k_pseudo_coldot<<<n, b, b * sizeof(double), stream>>>(C, T, n, dPsG.ptr);
+    if (cublasSgemm(cublas, CUBLAS_OP_T, CUBLAS_OP_N, nv, no, n, &one, Cv, n, T, n, &zero, dPsGov.ptr, nv)
+        != CUBLAS_STATUS_SUCCESS)
+        return false;
+
+    // 2. Is a single rotation safe? Gap between the occupied and virtual Rayleigh quotients large
+    //    against kT (occupations stay 0/2 and the order of the blocks is right), rotations small.
+    k_pseudo_gap<<<1, b, 2 * b * sizeof(double), stream>>>(dPsG.ptr, no, n, dPsStats.ptr);
+    dPsMax.zero(1, stream);
+    k_pseudo_theta<<<1024, b, 0, stream>>>(dPsGov.ptr, dPsG.ptr, no, nv, dPsMax.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    double stats[2] = {0.0, 0.0};
+    unsigned int maxbits = 0u;
+    dPsStats.download(stats, 2, stream);
+    dPsMax.download(&maxbits, 1, stream);
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    float max_theta = 0.0f;
+    std::memcpy(&max_theta, &maxbits, sizeof(float));
+    const double kT = loop_Tele * 3.166808e-6;
+    const double gap = stats[1] - stats[0];
+    if (!(gap > std::max(30.0 * kT, 1.0e-3)) || !(max_theta < 0.1f)) return false;
+
+    // 3. Rotate: keep the old C_v in T, then C_v -= C_o theta^T, C_o += C_v(old) theta.
+    if (cudaMemcpyAsync(T, Cv, sizeof(float) * static_cast<size_t>(n) * nv, cudaMemcpyDeviceToDevice, stream)
+            != cudaSuccess
+        || cublasSgemm(cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, nv, no, &mone, C, n, dPsGov.ptr, nv, &one, Cv, n)
+            != CUBLAS_STATUS_SUCCESS
+        || cublasSgemm(cublas, CUBLAS_OP_N, CUBLAS_OP_N, n, no, nv, &one, T, n, dPsGov.ptr, nv, &one, C, n)
+            != CUBLAS_STATUS_SUCCESS)
+        return false;
+
+    // 4. S-orthonormalise: B = L^T C (into T), M = B^T B (upper, into dCf), M = R^T R, C <- C R^-1.
+    k_d2f<<<gnn, b, 0, stream>>>(dL.ptr, dLf.ptr, nn);
+    if (cudaGetLastError() != cudaSuccess
+        || cublasStrmm(cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT,
+                       n, n, &one, dLf.ptr, n, C, n, T, n) != CUBLAS_STATUS_SUCCESS
+        || cublasSsyrk(cublas, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_T, n, n, &one, T, n, &zero, dCf.ptr, n)
+            != CUBLAS_STATUS_SUCCESS)
+        return false;
+    k_pseudo_gram_diag<<<n, b, b * sizeof(double), stream>>>(T, n, dCf.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    int lw = 0;
+    if (cusolverDnSpotrf_bufferSize(cusolver, CUBLAS_FILL_MODE_UPPER, n, dCf.ptr, n, &lw) != CUSOLVER_STATUS_SUCCESS)
+        return false;
+    try { dPsWork.ensure(std::max(1, lw)); dInfo.ensure(1); } catch (...) { return false; }
+    if (cusolverDnSpotrf(cusolver, CUBLAS_FILL_MODE_UPPER, n, dCf.ptr, n, dPsWork.ptr, lw, dInfo.ptr)
+        != CUSOLVER_STATUS_SUCCESS)
+        return false;
+    int info = 0;
+    dInfo.download(&info, 1, stream);
+    if (cudaStreamSynchronize(stream) != cudaSuccess || info != 0) return false;
+    if (cublasStrsm(cublas, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT,
+                    n, n, &one, dCf.ptr, n, C, n) != CUBLAS_STATUS_SUCCESS)
+        return false;
+
+    // 5. Hand the result to the density: C in FP64, orbital energies = the Rayleigh quotients.
+    k_f2d<<<gnn, b, 0, stream>>>(C, dC.ptr, nn);
+    if (cudaGetLastError() != cudaSuccess
+        || cudaMemcpyAsync(dEps.ptr, dPsG.ptr, sizeof(double) * n, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+        return false;
+    return true;
+}
+
+void XtbGpuContext::setPseudoDiagonalisation(bool on, double max_dq, int max_steps)
+{
+    if (!m_impl) return;
+    m_impl->pseudo_enabled = on;
+    m_impl->pseudo_max_dq = max_dq;
+    m_impl->pseudo_max_steps = max_steps;
+    if (!on) m_impl->releasePseudoDiag();
+}
+
+void XtbGpuContext::pseudoDiagonalisationCounts(int& taken, int& rejected) const
+{
+    taken = m_impl ? m_impl->pseudo_taken : 0;
+    rejected = m_impl ? m_impl->pseudo_rejected : 0;
+}
+
+bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig, bool download_eps)
+{
+    Impl& I = *m_impl;
+    const int n = I.resident_n;
+    const bool partial = (n_eig > 0 && n_eig < n);
+    const bool closed_shell = std::fabs(I.loop_nelec - 2.0 * I.loop_nocc_pairs) < 1e-9;
+    if (I.pseudo_enabled && I.in_resident_step && fp32 && !partial && closed_shell && I.cprev_valid && I.loop_nao == n
+        && I.last_dq < I.pseudo_max_dq && I.pseudo_consecutive < I.pseudo_max_steps) {
+        if (I.pseudoDiagStep(n)) {
+            ++I.pseudo_consecutive;
+            ++I.pseudo_taken;
+            I.profMark("eig FP32: pseudo-diagonalisation");
+            if (download_eps && eps_out) I.dEps.download(eps_out, n, I.stream);
+            return cudaStreamSynchronize(I.stream) == cudaSuccess;
+        }
+        ++I.pseudo_rejected;
+        I.profMark("eig FP32: pseudo-diagonalisation rejected");
+        // dCprev32 may be half-rotated; the full solve below refreshes it.
+    }
+    const bool ok = eigensolveResidentFockFull(eps_out, fp32, n_eig, download_eps);
+    if (ok && I.pseudo_enabled && !partial) {
+        const size_t nn = static_cast<size_t>(n) * n;
+        bool stored = false;
+        try {
+            I.dCprev32.ensure(static_cast<int>(nn));
+            const int b = 256;
+            k_d2f<<<static_cast<int>((nn + b - 1) / b), b, 0, I.stream>>>(I.dC.ptr, I.dCprev32.ptr, nn);
+            stored = cudaGetLastError() == cudaSuccess;
+        } catch (...) { stored = false; }
+        I.cprev_valid = stored;
+        I.pseudo_consecutive = 0;
+    }
+    return ok;
+}
+
+bool XtbGpuContext::eigensolveResidentFockFull(double* eps_out, bool fp32, int n_eig,
+                                               bool download_eps)
 {
     const int n = m_impl->resident_n;
     cudaStream_t stream = m_impl->stream;
@@ -5459,6 +5716,10 @@ bool XtbGpuContext::beginResidentLoop(int nsh, int nat, int nao, double Tele, do
     if (!broydenBegin(nsh + 9 * nat, alpha, max_hist, w0)) return false;
     m_impl->loop_nsh = nsh; m_impl->loop_nat = nat; m_impl->loop_nao = nao;
     m_impl->loop_Tele = Tele; m_impl->loop_nelec = n_elec; m_impl->loop_nocc_pairs = nocc_pairs;
+    m_impl->last_dq = 1e300;             // a new SCF starts without usable previous eigenvectors
+    m_impl->cprev_valid = false;
+    m_impl->pseudo_consecutive = 0;
+    m_impl->pseudo_taken = m_impl->pseudo_rejected = 0;
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
 
@@ -5489,9 +5750,11 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
 
     // 2. Potential build (overwrites dQat with the input-derived q_at) + Fock +
     //    eigensolve; eps stays resident (no download).
-    if (!buildDevicePotentialAndSolve(nao, fp32, /*n_eig=*/0, /*eps_out=*/nullptr,
-                                      /*download_eps=*/false))
-        return fail("potential build / Fock / eigensolve failed");
+    m_impl->in_resident_step = true;
+    const bool solved = buildDevicePotentialAndSolve(nao, fp32, /*n_eig=*/0, /*eps_out=*/nullptr,
+                                                     /*download_eps=*/false);
+    m_impl->in_resident_step = false;
+    if (!solved) return fail("potential build / Fock / eigensolve failed");
 
     // 3. Occupation on the device (resident eps → resident occ).
     const double kT = m_impl->loop_Tele * 3.166808e-6;
@@ -5559,6 +5822,7 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
     }
     m_impl->profMark("scf: dq + Broyden");
     if (cudaStreamSynchronize(stream) != cudaSuccess) return fail("stream synchronisation at end of step failed");
+    m_impl->last_dq = *dq_out;   // gates the next step's pseudo-diagonalisation
     return true;
 }
 
