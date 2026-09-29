@@ -2626,6 +2626,31 @@ bool GFNFF::detectReactiveBondChanges()
         if (m_workspace->transitions().empty()) { // first transition of a set: remember the base topology
             m_rev_base_bonds = m_react_bonds;
             m_rev_base_eeq = captureCornerEEQ();
+            // Claude Generated (Sep 29, 2026; _log/MU_CUSP_STATUS.md section 10). The base corner is
+            // the one exception to "q0 is decided where the corner's weight is zero": it carries
+            // weight 1 at s = 0. captureCornerEEQ() re-derives its q0 (rounding of the converged
+            // charges, P3 flat re-localisation), i.e. takes a discrete decision at full weight, and
+            // the energy jumped at every transition start whenever a pair hardness was > 0
+            // (formate C-H at kappa 0.5: 39.9 kcal/mol). It must instead keep exactly the q0 the
+            // slot corner used - the same rule as the revert branch below, which keeps a corner's
+            // frozen q0 for the same reason. What is still lost is the soft mu rule's placement
+            // correction sum_p w_p (E_p - E_0): the corners carry one q0 each, no blend.
+            // Same source order as revSlotCorner(), but WITHOUT its last resort m_charge / N on
+            // every atom: that one ignores the fragment sums and is only reached when no slot
+            // solve has happened yet (a transition that starts at the very first call) - then
+            // there is no earlier energy to be continuous with and the capture rule stays.
+            if (m_rev_sqe && m_rev_sqe_base_q0_keep) {
+                const TopologyInfo& btopo = getCachedTopology();
+                Vector keep;
+                if (!m_rev_corner_eeq.empty() && m_rev_corner_eeq.back().q0.size() == m_atomcount)
+                    keep = m_rev_corner_eeq.back().q0;
+                else if (m_rev_sqe_phase1 && btopo.rev_sqe_q0.size() == m_atomcount)
+                    keep = btopo.rev_sqe_q0;
+                else if (m_eeq_topo_cache.has_value())
+                    keep = revSqeQ0Fragments(*m_eeq_topo_cache, btopo.topology_charges, btopo.hybridization, btopo.alpeeq);
+                if (keep.size() == m_atomcount && keep.allFinite())
+                    m_rev_base_eeq.q0 = keep;
+            }
         }
         std::pair<int, int> pair;
         RevTransition tr;
@@ -13510,6 +13535,11 @@ void GFNFF::setupRevSettings()
                 throw std::runtime_error("rev-gfnff: rev_sqe_q0_mu_tau must not be negative");
             m_rev_sqe_q0_mu_tau = tau_kcal / CurcumaUnit::Energy::HARTREE_TO_KCALMOL;
         }
+        // react: the base corner keeps the slot's q0 at a transition start (Claude Generated,
+        // Sep 29, 2026; _log/MU_CUSP_STATUS.md section 10). Fallback must match the PARAM default.
+        m_rev_sqe_base_q0_keep = m_parameters.value("rev_sqe_base_q0_keep", true);
+        if (rev.contains("sqe_base_q0_keep"))
+            m_rev_sqe_base_q0_keep = rev["sqe_base_q0_keep"].get<bool>();
         // ---- P2/P3 (Claude Generated, Sep 23, 2026; _log/P2P3_STATUS.md) --------------------
         m_rev_sqe_phase1 = m_parameters.value("rev_sqe_phase1", false);
         if (rev.contains("sqe_phase1"))

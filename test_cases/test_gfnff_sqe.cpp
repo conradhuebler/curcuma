@@ -1146,6 +1146,74 @@ int main(int argc, char* argv[])
         }
     }
 
+    // ---------------------------------------------------------------------------------------
+    // 7. React transition start keeps the base corner's q0 (Claude Generated, Sep 29, 2026) —
+    //    test_cases/revgfnff/_log/MU_CUSP_STATUS.md section 10. When the first transition of a
+    //    set starts, the old-topology base corner carries the full weight (s = 0); it used to
+    //    re-derive its q0 by rounding the converged charges, a discrete decision at full weight
+    //    and an energy jump at every transition start once a pair hardness is > 0. A reused
+    //    react calculator is walked through a transition start in 0.005 A steps; the largest
+    //    frame-to-frame second difference must stay below 1 kcal/mol. The same walk with
+    //    `rev_sqe_base_q0_keep false` (the old capture) must show the step (> 5 kcal/mol) - that
+    //    is the proof that the walk really crosses a transition start.
+    // ---------------------------------------------------------------------------------------
+    {
+        auto cfgR = [](const std::vector<std::pair<const char*, double>>& kap, bool keep) {
+            json g;
+            g["rev_enabled"] = true;
+            g["rev_charge_model"] = "sqe";
+            for (const auto& [k, v] : kap)
+                g[k] = v;
+            g["topology_mode"] = "react";
+            g["rev_sqe_base_q0_keep"] = keep;
+            return json { { "verbosity", 0 }, { "threads", 1 }, { "gfnff", g } };
+        };
+        auto formateCH = [](double d) {   // formate, C-H along +z at distance d (A)
+            const double a = 62.5 * M_PI / 180.0;
+            curcuma::Molecule m;
+            m.addPair({ 6, Position(0.0, 0.0, 0.0) });
+            m.addPair({ 1, Position(0.0, 0.0, d) });
+            m.addPair({ 8, Position(1.25 * std::sin(a), 0.0, -1.25 * std::cos(a)) });
+            m.addPair({ 8, Position(-1.25 * std::sin(a), 0.0, -1.25 * std::cos(a)) });
+            m.setCharge(-1);
+            return m;
+        };
+        // max |E(k+1) - 2 E(k) + E(k-1)| over a walk on ONE calculator (kcal/mol)
+        auto walk = [](const json& cfg, auto make, double x0, double x1) {
+            EnergyCalculator c("revgfnff", cfg);
+            curcuma::Molecule m0 = make(x0);
+            c.setMolecule(m0.getMolInfo());
+            std::vector<double> e;
+            const int n = static_cast<int>(std::round((x1 - x0) / 0.005));
+            for (int k = 0; k <= n; ++k) {
+                if (k > 0)
+                    c.updateGeometry(make(x0 + 0.005 * k).getGeometry());
+                e.push_back(c.CalculateEnergy(false) * 627.509474);
+            }
+            double worst = 0.0;
+            for (size_t k = 1; k + 1 < e.size(); ++k)
+                worst = std::max(worst, std::abs(e[k + 1] - 2.0 * e[k] + e[k - 1]));
+            return worst;
+        };
+        struct W { const char* name; std::vector<std::pair<const char*, double>> kap; bool cl2; double x0, x1; };
+        for (const W& w : { W { "Cl2- breaking, kappa_Cl 0.85", { { "rev_sqe_kappa_Cl", 0.85 } }, true, 1.90, 3.30 },
+                 W { "HCOO- C-H breaking, kappa 0.5 (H,C,O)", { { "rev_sqe_kappa_H", 0.5 }, { "rev_sqe_kappa_C", 0.5 }, { "rev_sqe_kappa_O", 0.5 } }, false, 1.00, 1.85 } }) {
+            double on = 0.0, off = 0.0;
+            if (w.cl2) {
+                on = walk(cfgR(w.kap, true), [](double r) { return cl2anion(r); }, w.x0, w.x1);
+                off = walk(cfgR(w.kap, false), [](double r) { return cl2anion(r); }, w.x0, w.x1);
+            } else {
+                on = walk(cfgR(w.kap, true), formateCH, w.x0, w.x1);
+                off = walk(cfgR(w.kap, false), formateCH, w.x0, w.x1);
+            }
+            const bool ok = (on < 1.0) && (off > 5.0);
+            pass = pass && ok;
+            std::cout << (ok ? "  PASS  " : "  FAIL  ") << "MU/7 react walk, " << w.name
+                      << ": max 2nd difference " << on << " kcal/mol (tol 1.0); old capture " << off
+                      << " kcal/mol (must be > 5, else the walk missed the transition start)\n";
+        }
+    }
+
     std::cout << (pass ? "PASS" : "FAIL") << "\n";
     return pass ? 0 : 1;
 }

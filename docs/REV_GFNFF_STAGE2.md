@@ -152,6 +152,10 @@ STATIC path; fixed in package 30 (see "Reference charges q0").
   `-gfnff.param_file`), `rev_sqe_bmin`, **`rev_sqe_q0_rule`** (uniform | mu, default mu, new),
   **`rev_sqe_q0_mu_tau`** (kcal/mol, default 1, package 30: temperature of the mu rule's placement
   blend; 0 = the old hard rule; `sqe_q0_mu_tau` in the `rev` section),
+  **`rev_sqe_base_q0_keep`** (bool, default true, Sep 29, 2026: at a react transition start the
+  old-topology base corner keeps the slot's q0 instead of re-deriving it at full weight; false =
+  the old capture; `sqe_base_q0_keep` in the `rev` section; a runtime react rule, so NOT in the
+  topology-cache fingerprint; `_log/MU_CUSP_STATUS.md` section 10),
   **`rev_sqe_kappa_form`** (inverse | power | vanishing, default inverse — unchanged, opt-in
   fork; see "What is implemented" for why `vanishing` exists and when to switch to it),
   **`rev_sqe_kappa_exponent`** (for `power`, default 3 — kept for the negative result, see below).
@@ -714,8 +718,20 @@ default):
 - O2-/S2-: the above (minus the halogen-specific `frag_charge_atomic_ea`), plus
   `-gfnff.rev_pi_excess_electron true` — static/single-point use only, not recombination MD.
 
-**Still open**: P2's Phase-1 q0 copy and P3's react-corner capture were never checked for the same
-mu-cusp defect class fixed elsewhere (package 30); ClF-'s 8.4 kcal/mol bonded residual; no
+**Checked (Sep 29, 2026, `_log/MU_CUSP_STATUS.md` section 10)**: the three other hard q0 decisions.
+In the recommended harris settings every pair hardness is 0, so q0 has no energy lever at all
+(`rec`/`recX` with the whole q0 rule switched to `uniform`: <= 1.4e-13 kcal/mol on all 7 pairs), and
+none of the three can produce a step there. Where q0 does matter (kappa > 0, P3 flat):
+(1) `revApplyPhase1Sqe` (P2) has no cusp or jump - its placement is a topology constant - but its
+tie-break between topologically equivalent atoms is the atom index: formate mirror asymmetry 0.91
+kcal/mol (kappa 0.5), and it is the cause of the P2+P3 flat water-probe label gap (Cl2- 9.40
+kcal/mol); not fixed. (2) `revLocaliseExcessQ0` acts only in flat mode and at s = 0 of new corners;
+no step of its own. (3) `captureCornerEEQ` re-derived the base corner's q0 at full weight at every
+react transition start: 39.9 kcal/mol (formate C-H, kappa 0.5), 9.25 (Cl2-, kappa_Cl 0.85) - FIXED
+(`rev_sqe_base_q0_keep`, default on); what remains is the soft mu blend correction, which no stored
+corner carries (5.3 kcal/mol in a flat-mode Cl2-...water case).
+**Still open**: the soft-blend remainder of (3) and P2's index tie-break of (1), both only where q0
+has a lever; ClF-'s 8.4 kcal/mol bonded residual; no
 permanent `ctest` coverage yet for `rev_sqe_group_pairs_only`, `frag_charge_atomic_ea`, or
 `rev_pi_excess_electron`; the single-atom fragment reference energies for I/I-/Cl-/F- from the
 I2-/ClF- campaign were never committed (worktree scratch only); a recurring operational issue this

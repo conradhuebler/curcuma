@@ -263,3 +263,116 @@ residual is the calculator's 5.1e-6 floor for both rules), 6d dE/ds change acros
 Scratchpad `mu/`: `common.py`, `fdcheck.py`, `scan.py`, `tausweep.py`, `nve.py`, `final/psscan.py`,
 `final/run_all.sh` (all final falsifiers), `guards/` (configs C0/U0/K5/KCl/UK5/H0, `cmp.py`),
 `strip_mine.py` (builds A' from any tree), `v1_src/` (the rejected charge blend).
+
+## 10. Follow-up audit: the three other hard q0 decisions (Sep 29, 2026)
+
+Opus agent, worktree `mu-cusp-audit`, branch `feature/revgfnff-mu-cusp-audit` (from `revgfnff`
+37bcb959). AI-generated, machine-tested only; human production testing pending. Binaries: **A** =
+unmodified tip (md5 7396ba1a), **B** = A + the fix below (md5 4b84b8aa), same cmake options as
+`build_rev`. Scripts and data: untracked `_audit/` in that worktree (`/tmp` was 98 % full).
+
+### 10.1 The lever question first: the recommended X2- setting
+
+harris sets kappa_x = 0 (`revExcessKappa`) and every kappa_Z defaults to 0, so all split-charge
+hardnesses vanish and q0 cannot change an energy. Measured, 7 pairs x reference grid, fresh:
+
+| setting | whole q0 rule `mu` -> `uniform` | `tau 1` -> `tau 0` |
+|---|---:|---:|
+| `rec`, `recX` (+ bond_extend 1.8) | <= 1.4e-13 kcal/mol | 0 |
+| `flat100` (P2+P3 flat) | 44 - 191 kcal/mol | 0 (P2 never reaches the soft rule) |
+
+So none of the three paths can produce a step in the recommended setting. Everything below is about
+settings where q0 has a lever: kappa > 0, or P3 `flat`.
+
+### 10.2 Per path
+
+**(1) `revApplyPhase1Sqe` (P2) - no cusp or jump; index tie-break; not fixed.** The Phase-1 mu is
+topological (topological distances, integer neighbour counts). Its placement is therefore a topology
+constant and cannot flip along a geometric coordinate. Fresh-topology scans, kappa 0.5 (H/C/N/O/F/Cl),
+max change of the FD slope between neighbouring intervals:
+
+| scan | `tau 0` (old rule, reproduces section 1) | soft `mu` | + P2 |
+|---|---:|---:|---:|
+| formate antisym. C-O stretch, 5e-4 A | 38.4 kcal/mol/A (6.1e-2 Eh/A) | 2.5 | 1.3 |
+| UPU23/5z P-O stretch, 5e-4 A | **52.80 kcal/mol energy jump** @ -0.0215 | 0.9 | 0.8 |
+
+The price of the hard rule here is a different defect. Topologically equivalent atoms (the two
+formate O) are an EXACT Phase-1 tie (qa -0.550326 on both), broken by the atom index: q0 = -1 sits
+on atom 3 at every geometry.
+- formate: max |E(s) - E(-s)| **0.91 kcal/mol** (+P2), <= 5e-13 in every other setting
+- formate: O labels swapped at s = 0.02 A: **0.61 kcal/mol**
+- UPU23/5z: 0.000 (its P2 placement is not a tie)
+- **Cl2- + water H-bonded to one end, labels swapped**: `flat100` **9.40 kcal/mol** at 2.40 A (0 once
+  pass 1 splits the pair); flat WITHOUT P2 0.000; `rec`/`recX` 0.000. This is the "neighbouring
+  molecule misread by 9-15 kcal/mol" cost of the Sep 23 P2+P3 flat setting. Its mechanism is P2's
+  tie-break: the topological mu cannot see a probe in another fragment.
+
+Why not fixed: a Boltzmann blend over tied Phase-1 placements changes qa, and qa sets alpeeq/dgam and
+every bond/angle/torsion fqq. Each placement would need its own full parameter set (a topology
+corner), and it would only serve settings that harris has replaced. The charge blend is excluded by
+section 2. Operator decision if flat/kappa > 0 with P2 is ever to be used again.
+
+**(2) `revLocaliseExcessQ0` (P3 pair localisation) - no step of its own.** Reached only in flat mode
+(kappa_x > 0; harris/frac skip it) inside `captureCornerEEQ`. For NEW corners the decision is taken
+at s = 0 (weight 0). Its only full-weight use was the base corner at a transition start, i.e. path
+(3); with P2 its qa priority reproduces P2's placement (flat100 react chains A == B bitwise).
+
+**(3) `captureCornerEEQ` - CONFIRMED, FIXED.** At the first transition of a set, the old-topology base
+corner (weight 1 at s = 0) re-derived its q0: `revSqeQ0Rounded` of the converged charges, plus
+`revLocaliseExcessQ0` in flat mode. The slot had used the fragment/P2/corner q0 a moment before.
+This is not only the suspected `w_1 |E_1 - E_0|`: at kappa > 0 the converged charges are not the
+integer placement, so the hardness penalty was lost at EVERY transition start, exact ties included.
+React-mode chains, 0.005 A, largest single-frame step (max second difference, kcal/mol):
+
+| chain | A | B | B `-gfnff.rev_sqe_base_q0_keep false` |
+|---|---:|---:|---:|
+| Cl2- breaking, kappa_Cl 0.85 (`REACT rebuild #1 ... dE_jump -38.7 kJ/mol`, s 0.00) | **9.25** @ 3.205 | 0.12 (completion @ 3.82) | 9.25 |
+| formate C-H breaking / forming, kappa 0.5, s = 0 | **39.87 / 35.41** @ 1.75 | 0.031 / 0.124 | = A |
+| same at s = 0.004 / 0.01 (mu near-tie), soft mu | 39.86 / 39.88 | **0.064 / 0.089** | = A |
+| same, `tau 0` | 39.9 | 0.031 | = A |
+| Cl2- + water, flat, no P2 (soft blend active) | 6.01 @ 3.20 | **5.33** @ 3.20 | = A |
+| controls: sqe kappa 0, `flat100`, `rec`, Cl2- flat bare | - | A == B bitwise | - |
+
+**Fix** (`gfnff_method.cpp`, transition start in `detectReactiveBondChanges`): the base corner takes the
+q0 the slot used. The source order is revSlotCorner's: frozen corner -> P2 Phase-1 placement ->
+fragment rule. This is the same rule the revert branch already applies ("keeping it costs 0.0"). When
+no slot solve has happened yet (a transition that starts at the very first call), the capture rule
+stays. `-gfnff.rev_sqe_base_q0_keep` (default true; false = old capture, reproduces A bitwise).
+**First version was wrong, caught by the harness**: it fell back to revSlotCorner's last resort
+m_charge/N on every atom, which ignores the fragment sums. `fch3f_umbrella` (transition at frame 0)
+moved by -158 kcal/mol at kappa 0. The fallback was removed.
+
+**Remainder of (3), not fixed**: the soft mu rule's correction sum_p w_p (E_p - E_0) lives outside the
+corners (the slot's global blend state), so it is dropped when a transition starts. Measured 5.34
+kcal/mol (weights 0.528 / 0.472, dE 11.3 kcal/mol, Cl2- + water, flat without P2). Here the mu pick
+is the HIGHER placement - the section 8 mu-vs-energy issue. It needs a q0 lever AND a mu near-tie AND
+a transition start. Complete fix sketched, not built: per-corner frozen-weight blend (a corner-energy
++ gradient hook in `FFWorkspace::calculate`, frozen weights so no dw/dx term, carried through revert).
+Worth doing only if kappa > 0 / flat come back.
+
+### 10.3 Validation (A vs B)
+
+| check | result |
+|---|---|
+| FD gradient in flight (x0 +- 1e-4 A appended to the same batch) | Cl2- 4.3e-8, formate 3.5e-8 Eh/A (A: 5.3e-8 / 2.2e-7); spurious in-flight force on formate 0.46 -> 0.08 Eh/A |
+| 1379-frame harness (E, q AND gradient per frame) | C0, U0, H0 (P2+P3 harris), H0pi, D0 (P2+P3 flat): **1379/1379 identical** (<= 4e-15); K5off == A_K5 bitwise |
+| same, kappa > 0 | K5: 39 in-flight frames of 7 class-E react systems move; class E rms 112.81 -> **110.82**; AHB21 stretch curve 35.2 -> 21.1 (TS residual +43.4 -> -3.9), nh4_nh3_pt 79.2 -> 65.1. KCl: 2 Cl2- frames, 119.04 -> 119.00. Barriers/guards unchanged, no gate changed state |
+| GMTKN55 2462 + MOR41 95 + S30L-CI 90, fresh | `gfnff`, `revgfnff` default, `recX`: **0 / 2647 moved** (1e-10 Eh) |
+| X2- survey, 7 pairs x {rec, recX, flat100, flat100_raw} x {static, react break, react form, up, down} | A == B <= 1.4e-13 kcal/mol; recX full rms 2.01/2.29/1.47/1.15/1.16/2.71/0.22 = section 8.3 of X2_COMPRESSED_SURVEY_STATUS |
+| NVE react (Cl2- kappa_Cl 0.85 3 ps; formate kappa 0.5 1500 K 2 ps, dt 0.0625) | A == B-off; B equal within the trace (formate rebuild #3 dE_jump -1.3e-5 -> ~0 Eh). In MD the react topology is rebuilt at t = 0, so later transitions start from corner q0s near the converged charges; the large steps above are scans/batches from a fragment-rule state |
+| `test_gfnff_sqe` new block 7 | react walk max 2nd diff Cl2- 0.053 (old capture 9.249), formate C-H 0.031 (old 39.87); asserts < 1 and old > 5 (proof the walk crosses a transition start) |
+| `ctest -L gfnff` | 70 / 72 A and B, same two baseline failures (`cli_simplemd_18/20`) |
+| full `ctest` | 288 / 307 A and B, **identical failure sets** (baseline + `cli_errors_*`/`parameter_io_tests` needing `../release/curcuma`, `cli_confscan_01..07`) |
+
+Tooling note: the merge-scratch `framecmp.py` (copied from `merge_scratch_20260926`) read the key
+`gradient`, while batch frames carry `gradient_eh_ang`. Its "grad <= 1e-10" column was therefore
+vacuous in that merge's harness comparisons. The copy here reads the right key. `cmp.py` (section 5)
+is energy-only and unaffected.
+
+### 10.4 Files
+
+- `src/core/energy_calculators/ff_methods/gfnff.h`: PARAM `rev_sqe_base_q0_keep`, member.
+- `src/core/energy_calculators/ff_methods/gfnff_method.cpp`: parse (fallback true = PARAM default),
+  base-corner q0 at the transition start.
+- `test_cases/test_gfnff_sqe.cpp`: block 7.
+- `docs/REV_GFNFF_STAGE2.md` (PARAM list, "Checked"/"Still open"), `AIChangelog.md`.
