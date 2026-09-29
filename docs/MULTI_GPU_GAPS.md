@@ -384,7 +384,8 @@ Measurement artefact found: `-md_diagnostics_timing` reports host prep times on 
 **GFN2 polymer_2x SP (nao 15444), 1/2/4 A4500:** wall 287 / 227 / 143 s, SCF iterations 15 / 14 / 12
 (part of the "speedup" is FP32 rounding luck). Per FP32 iteration only 1.78x on 4 GPUs. Not scaling at 4
 GPUs (~55 of 140 s): setup 20.8 s (`k_overlap_h0` 11.6 s and Cholesky of S 3.5 s on device 0), post-SCF
-5 s (D4 ATM 3.8 s on device 0), the FP64 back-transform `trsm` (10.6 / 20.8 / 10.9 s - does not scale),
+5 s (D4 ATM 3.8 s on device 0), the FP64 back-transform `trsm` (10.6 / 20.8 / 10.9 s - does not scale;
+**done Sep 29, 2026**: column split with a full L per device, 10.6 / 5.6 / 2.7 s),
 ~1.5 s/iteration device-0 share (potential 0.33, SCC energy 0.17, FP32 copy/back-transform 0.94 s).
 FP32 `syevd` inside cuSOLVERMp is the largest bucket (4.8 s/it at 4 GPUs, NCCL 22-30 % of busy time).
 G2-9 (buffer re-allocation between opt steps) measured <= 0.2 s per step - not worth it. Device-0 peak

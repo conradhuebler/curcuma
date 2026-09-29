@@ -22,6 +22,7 @@
 
 #include "xtb_distributed_eigensolver.h"
 
+#include <cublas_v2.h>
 #include <cuda_runtime.h>
 
 #ifdef CURCUMA_HAVE_CUSOLVERMG
@@ -37,6 +38,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 
@@ -118,6 +120,7 @@ public:
         onAllRanks(static_cast<int>(m_ranks.size()), [&](int r) {
             Rank& R = m_ranks[r];
             cudaSetDevice(m_devs[r]);
+            if (R.cublas) cublasDestroy(R.cublas);
             if (R.bgrid) cublasMpGridDestroy(R.bgrid);
             if (R.bhandle) cublasMpDestroy(R.bhandle);
             if (R.grid) cusolverMpDestroyGrid(R.grid);
@@ -159,6 +162,14 @@ public:
                 && cublasMpGridCreate(1, ndev, CUBLASMP_GRID_LAYOUT_COL_MAJOR, R.comm, &R.bgrid)
                        == CUBLASMP_STATUS_SUCCESS;
         });
+        // Claude Generated (Sep 29, 2026): plain cuBLAS on every rank for the column-split
+        // back-transform (see backTransformLocal). CURCUMA_GPU_EIG_MP_TRSM=1 keeps cublasMpTrsm.
+        m_have_local_trsm = !std::getenv("CURCUMA_GPU_EIG_MP_TRSM") && onAllRanks(ndev, [&](int r) {
+            Rank& R = m_ranks[r];
+            cudaSetDevice(m_devs[r]);
+            return cublasCreate(&R.cublas) == CUBLAS_STATUS_SUCCESS
+                && cublasSetStream(R.cublas, R.stream) == CUBLAS_STATUS_SUCCESS;
+        });
         return true;
     }
 
@@ -171,13 +182,31 @@ public:
     }
     int deviceCount() const override { return static_cast<int>(m_devs.size()); }
 
+    bool supportsBackTransform() const override { return m_have_local_trsm; }
+
     bool solve(int n, void* A, void* eig, bool fp32, int src_device) override
+    {
+        return solveImpl(n, A, nullptr, -1, eig, fp32, src_device);
+    }
+
+    bool solveBackTransformed(int n, void* A, const void* L, long l_generation, void* eig, bool fp32,
+                              int src_device) override
+    {
+        if (!m_have_local_trsm || !L) return false;
+        return solveImpl(n, A, L, l_generation, eig, fp32, src_device);
+    }
+
+    /// Plain solve; with L != nullptr also C = L^-T Q on every rank before the gather.
+    bool solveImpl(int n, void* A, const void* L, long l_generation, void* eig, bool fp32, int src_device)
     {
         const int ndev = static_cast<int>(m_devs.size());
         m_input_intact = true;
+        m_reduce_ms = m_back_ms = 0.0;
         if (!ensureMatrices(n, fp32)) return false;
         const size_t esize = fp32 ? sizeof(float) : sizeof(double);
         char jobz[] = "V";
+        if (L && !ensureFullFactor(n, L, l_generation, fp32, src_device)) return false;
+        std::vector<double> t_back(ndev, 0.0);
 
         // Scatter: each rank pulls its column blocks from the source device (peer copies).
         auto t0 = std::chrono::steady_clock::now();
@@ -207,10 +236,18 @@ public:
             if (cudaStreamSynchronize(R.stream) != cudaSuccess) return false;
             int info = -1;
             if (cudaMemcpy(&info, R.dInfo, sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
-            return st == CUSOLVER_STATUS_SUCCESS && info == 0;
+            if (st != CUSOLVER_STATUS_SUCCESS || info != 0) return false;
+            if (L) {
+                const auto tb = std::chrono::steady_clock::now();
+                if (!backTransformLocal(r, n, fp32) || cudaStreamSynchronize(R.stream) != cudaSuccess)
+                    return false;
+                t_back[r] = msSince(tb);
+            }
+            return true;
         });
         if (!ok) return false;
         m_solve_ms = msSince(t0);
+        m_back_ms = *std::max_element(t_back.begin(), t_back.end());
 
         // Gather eigenvectors back into A, eigenvalues from rank 0.
         t0 = std::chrono::steady_clock::now();
@@ -255,6 +292,10 @@ public:
             m_metric_valid = true;
             m_metric_gen = l_generation;
         }
+        // Full L on every rank for the column-split back-transform (falls back to cublasMpTrsm
+        // when a device has no room for it).
+        const bool local_trsm = m_have_local_trsm && ensureFullFactor(n, L, l_generation, fp32, src_device);
+        if (!local_trsm && !ensureTrsmWork(n, fp32)) return false;
         m_scatter_ms = msSince(t0);
 
         t0 = std::chrono::steady_clock::now();
@@ -281,14 +322,20 @@ public:
             t_eig[r] = msSince(tr);
             tr = std::chrono::steady_clock::now();
             // C = L^-T Q.
-            const double one64 = 1.0;
-            const float one32 = 1.0f;
-            const void* alpha = fp32 ? static_cast<const void*>(&one32) : static_cast<const void*>(&one64);
-            if (cublasMpTrsm(R.bhandle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T,
-                             CUBLAS_DIAG_NON_UNIT, n, n, alpha, R.dL, 1, 1, R.bdesc, R.dQ, 1, 1, R.bdesc, ct,
-                             R.trsmWork, R.trsm_dev, R.trsmHost.data(), R.trsmHost.size())
-                != CUBLASMP_STATUS_SUCCESS)
-                return false;
+            if (local_trsm) {
+                // Every column of C depends only on the same column of Q, so each rank solves
+                // its own columns against a full copy of L; no communication at all.
+                if (!backTransformLocal(r, n, fp32)) return false;
+            } else {
+                const double one64 = 1.0;
+                const float one32 = 1.0f;
+                const void* alpha = fp32 ? static_cast<const void*>(&one32) : static_cast<const void*>(&one64);
+                if (cublasMpTrsm(R.bhandle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T,
+                                 CUBLAS_DIAG_NON_UNIT, n, n, alpha, R.dL, 1, 1, R.bdesc, R.dQ, 1, 1, R.bdesc, ct,
+                                 R.trsmWork, R.trsm_dev, R.trsmHost.data(), R.trsmHost.size())
+                    != CUBLASMP_STATUS_SUCCESS)
+                    return false;
+            }
             if (cudaStreamSynchronize(R.stream) != cudaSuccess) return false;
             t_back[r] = msSince(tr);
             return true;
@@ -333,6 +380,14 @@ private:
         size_t trsm_dev = 0;
         std::vector<char> trsmHost;
         int* mInfo = nullptr;   // managed: readable on host and device whichever sygst expects
+        // Column-split back-transform (Claude Generated, Sep 29, 2026): plain cuBLAS handle and a
+        // full n x n copy of L. On the source device the caller's L is used in place (lfull points
+        // at it, lfull_mem stays empty), so the device holding the SCF state pays for no copy.
+        cublasHandle_t cublas = nullptr;
+        const void* lfull = nullptr;
+        void* lfull_mem = nullptr;
+        size_t lfull_bytes = 0;
+        long lfull_gen = -1;
     };
 
     template <class BufFn>
@@ -367,6 +422,95 @@ private:
         });
     }
 
+    /**
+     * @brief Put the full lower Cholesky factor L of S on every rank (Claude Generated, Sep 29, 2026).
+     *
+     * The back-transform C = L^-T Q is column-independent: column k of C needs column k of Q and
+     * all of L. cublasMpTrsm distributes L as well and pipelines the triangular solve over the
+     * ranks, which on PCIe (no NVLink) serialises: at n = 15444 on 4x A4500 it took 10.9 s,
+     * no faster than one GPU (10.6 s) - nsys showed three devices idle while the fourth ran.
+     * With a full copy of L per device every rank solves its own columns independently.
+     * Cost: one n x n peer copy per device and geometry (1.9 GB at n = 15444, FP64), none on the
+     * source device, whose L is used in place.
+     * @return false when L is unknown (nullptr and not cached) or a copy does not fit
+     */
+    bool ensureFullFactor(int n, const void* L, long l_generation, bool fp32, int src_device)
+    {
+        const size_t esize = fp32 ? sizeof(float) : sizeof(double);
+        const size_t bytes = esize * static_cast<size_t>(n) * n;
+        return onAllRanks(static_cast<int>(m_devs.size()), [&](int r) {
+            Rank& R = m_ranks[r];
+            cudaSetDevice(m_devs[r]);
+            if (m_devs[r] == src_device) {
+                if (!L) return false;
+                if (R.lfull_mem) { cudaFree(R.lfull_mem); R.lfull_mem = nullptr; R.lfull_bytes = 0; }
+                R.lfull = L;
+                R.lfull_gen = l_generation;
+                return true;
+            }
+            if (R.lfull_mem && R.lfull_bytes == bytes && R.lfull_gen == l_generation) {
+                R.lfull = R.lfull_mem;
+                return true;
+            }
+            if (!L) return false;
+            if (R.lfull_bytes != bytes) {
+                if (R.lfull_mem) cudaFree(R.lfull_mem);
+                R.lfull_mem = nullptr;
+                R.lfull_bytes = 0;
+                if (cudaMalloc(&R.lfull_mem, bytes) != cudaSuccess) {
+                    cudaGetLastError();
+                    R.lfull_mem = nullptr;
+                    return false;
+                }
+                R.lfull_bytes = bytes;
+            }
+            if (cudaMemcpyPeer(R.lfull_mem, m_devs[r], L, src_device, bytes) != cudaSuccess) return false;
+            R.lfull = R.lfull_mem;
+            R.lfull_gen = l_generation;
+            return true;
+        });
+    }
+
+    /// cuBLASMp trsm workspace, allocated on first use (collective query).
+    bool ensureTrsmWork(int n, bool fp32)
+    {
+        if (m_ranks.empty() || m_ranks[0].trsmWork) return true;
+        const cublasComputeType_t ct = fp32 ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_64F;
+        return onAllRanks(static_cast<int>(m_devs.size()), [&](int r) {
+            Rank& R = m_ranks[r];
+            cudaSetDevice(m_devs[r]);
+            size_t th = 0;
+            const double one64 = 1.0;
+            const float one32 = 1.0f;
+            const void* alpha = fp32 ? static_cast<const void*>(&one32) : static_cast<const void*>(&one64);
+            if (cublasMpTrsm_bufferSize(R.bhandle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T,
+                                        CUBLAS_DIAG_NON_UNIT, n, n, alpha, R.dL, 1, 1, R.bdesc, R.dQ, 1, 1,
+                                        R.bdesc, ct, &R.trsm_dev, &th)
+                != CUBLASMP_STATUS_SUCCESS)
+                return false;
+            R.trsmHost.assign(std::max<size_t>(1, th), 0);
+            return cudaMalloc(&R.trsmWork, std::max<size_t>(1, R.trsm_dev)) == cudaSuccess;
+        });
+    }
+
+    /// C_local = L^-T Q_local on rank r: its local columns are contiguous (n x local_cols, ld n).
+    bool backTransformLocal(int r, int n, bool fp32)
+    {
+        Rank& R = m_ranks[r];
+        const int ncol = static_cast<int>(m_local_cols[r]);
+        if (ncol == 0) return true;
+        if (fp32) {
+            const float one = 1.0f;
+            return cublasStrsm(R.cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T,
+                               CUBLAS_DIAG_NON_UNIT, n, ncol, &one, static_cast<const float*>(R.lfull), n,
+                               static_cast<float*>(R.dQ), n) == CUBLAS_STATUS_SUCCESS;
+        }
+        const double one = 1.0;
+        return cublasDtrsm(R.cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T,
+                           CUBLAS_DIAG_NON_UNIT, n, ncol, &one, static_cast<const double*>(R.lfull), n,
+                           static_cast<double*>(R.dQ), n) == CUBLAS_STATUS_SUCCESS;
+    }
+
     void releaseMatrices()
     {
         for (int r = 0; r < static_cast<int>(m_ranks.size()); ++r) {
@@ -375,6 +519,10 @@ private:
             for (void** p : { &R.dA, &R.dQ, &R.dD, &R.dWork, &R.dInfo, &R.dL, &R.gstWork, &R.trsmWork })
                 if (*p) { cudaFree(*p); *p = nullptr; }
             if (R.mInfo) { cudaFree(R.mInfo); R.mInfo = nullptr; }
+            if (R.lfull_mem) { cudaFree(R.lfull_mem); R.lfull_mem = nullptr; }
+            R.lfull = nullptr;
+            R.lfull_bytes = 0;
+            R.lfull_gen = -1;
             if (R.bdesc) { cublasMpMatrixDescriptorDestroy(R.bdesc); R.bdesc = nullptr; }
             R.gstHost.clear();
             R.trsmHost.clear();
@@ -425,15 +573,12 @@ private:
                                                R.descA, 1, 1, R.descA, dt, &R.gst_dev, &gh)
                     != CUSOLVER_STATUS_SUCCESS)
                     return false;
-                if (cublasMpTrsm_bufferSize(R.bhandle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T,
-                                            CUBLAS_DIAG_NON_UNIT, n, n, alpha, R.dL, 1, 1, R.bdesc, R.dQ, 1, 1,
-                                            R.bdesc, ct, &R.trsm_dev, &th)
-                    != CUBLASMP_STATUS_SUCCESS)
-                    return false;
+                // Claude Generated (Sep 29, 2026): the cuBLASMp trsm workspace is only needed when
+                // the column-split back-transform is not available (ensureTrsmWork allocates it on
+                // first use then).
+                (void)th; (void)alpha; (void)ct;
                 R.gstHost.assign(std::max<size_t>(1, gh), 0);
-                R.trsmHost.assign(std::max<size_t>(1, th), 0);
-                return cudaMalloc(&R.gstWork, std::max<size_t>(1, R.gst_dev)) == cudaSuccess
-                    && cudaMalloc(&R.trsmWork, std::max<size_t>(1, R.trsm_dev)) == cudaSuccess;
+                return cudaMalloc(&R.gstWork, std::max<size_t>(1, R.gst_dev)) == cudaSuccess;
             });
         }
         m_gen_alloc = ok;
@@ -447,6 +592,7 @@ private:
         const int ndev = static_cast<int>(m_devs.size());
         std::vector<long> local_cols;
         m_layout = columnLayout(n, m_block, ndev, local_cols);
+        m_local_cols = local_cols;
         const size_t esize = fp32 ? sizeof(float) : sizeof(double);
         const cudaDataType dt = fp32 ? CUDA_R_32F : CUDA_R_64F;
         char jobz[] = "V";
@@ -486,6 +632,8 @@ private:
     std::vector<int> m_devs;
     int m_block;
     bool m_have_blas = false;
+    bool m_have_local_trsm = false;
+    std::vector<long> m_local_cols;
     bool m_metric_valid = false;
     bool m_gen_alloc = false;
     long m_metric_gen = -1;

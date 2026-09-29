@@ -369,6 +369,7 @@ struct XtbGpuContext::Impl {
     int              dist_fp64_state = 0;   // same, for the FP64 solves (see verifyDistributed)
     bool             dist_verify = true;    // -gpu_eigensolver_verify
     CudaBuffer<float>  dProbeV, dProbeY, dProbeT, dProbeA;   // FP32 probe vectors + copy of A
+    CudaBuffer<float>  dProbeU;                               // scratch for the back-transformed check
     CudaBuffer<double> dProbeVd, dProbeYd, dProbeTd, dProbeAd, dProbeSd;
     int              dist_solves = 0;
     long             l_generation = 0;   // bumped whenever dL (Cholesky factor of S) is rewritten
@@ -378,8 +379,12 @@ struct XtbGpuContext::Impl {
 
     /// 1 = solved on several GPUs, 0 = not used (input intact, run the single-GPU solver),
     /// -1 = failed after the input was overwritten.
-    int distSolve(int n, void* A, void* eig, bool fp32)
+    /// With back_L != nullptr (FP32 only) the backend also back-transforms the eigenvectors,
+    /// C = L^-T Q, on the devices when it can; *back_done then tells whether it did.
+    int distSolve(int n, void* A, void* eig, bool fp32, const void* back_L = nullptr,
+                  bool* back_done = nullptr)
     {
+        if (back_done) *back_done = false;
         if (!distReady(n, fp32)) return 0;
         if (cudaStreamSynchronize(stream) != cudaSuccess) return 0;
         // First FP32 solve on this machine: keep a copy of the input so the returned eigenpairs
@@ -435,7 +440,13 @@ struct XtbGpuContext::Impl {
                 || cudaStreamSynchronize(stream) != cudaSuccess)
                 verify = false;
         }
-        bool solved = dist->solve(n, A, eig, fp32, device);
+        // Claude Generated (Sep 29, 2026): FP32 back-transform on the devices (column split)
+        // instead of one n x n strsm on this device. CURCUMA_GPU_EIG_LOCAL_BACKXF=1 keeps it here.
+        const bool back_on_devices = fp32 && back_L && dist->supportsBackTransform()
+                                     && !std::getenv("CURCUMA_GPU_EIG_LOCAL_BACKXF");
+        bool solved = back_on_devices
+            ? dist->solveBackTransformed(n, A, back_L, l_generation, eig, fp32, device)
+            : dist->solve(n, A, eig, fp32, device);
         // Claude Generated (Sep 2026): CURCUMA_GPU_EIG_CORRUPT=1 deliberately damages the returned
         // eigenvectors, to check that verifyDistributedFp32() actually notices. A detector that is
         // never tested against a known-bad input is not a detector.
@@ -451,12 +462,18 @@ struct XtbGpuContext::Impl {
             profAdd(fp32 ? "  multi-GPU FP32: scatter" : "  multi-GPU FP64: scatter", sc);
             profAdd(fp32 ? "  multi-GPU FP32: solve" : "  multi-GPU FP64: solve", so);
             profAdd(fp32 ? "  multi-GPU FP32: gather" : "  multi-GPU FP64: gather", ga);
+            if (back_on_devices) {
+                double re = 0.0, ba = 0.0;
+                dist->lastGeneralizedTimings(re, ba);
+                profAdd("  multi-GPU FP32: back-transform (in solve)", ba);
+            }
         }
         if (solved) {
             ++dist_solves;
             bool rejected = false;
             if (verify && verifyDistributedFp32(n, static_cast<const float*>(A),
-                                                static_cast<const float*>(eig))
+                                                static_cast<const float*>(eig),
+                                                back_on_devices ? static_cast<const float*>(back_L) : nullptr)
                 && dist_fp32_state < 0) {
                 // Wrong eigenpairs: put the input back and let the caller solve on this device.
                 rejected = (cudaMemcpyAsync(A, dProbeA.ptr, sizeof(float) * static_cast<size_t>(n) * n,
@@ -476,6 +493,7 @@ struct XtbGpuContext::Impl {
             // 222 s polymer_2x run (measured), while keeping them costs one n x n buffer.
             // releaseEigenWorkspaces() frees them when the SCF is over.
             if (rejected) return 0;            // input restored -> single-GPU path
+            if (back_done) *back_done = back_on_devices;
             // Only THIS call's precision decides: an earlier FP32 rejection must not fail a
             // perfectly good FP64 solve (it did, and aborted the SCF at the first FP64 iteration).
             if ((fp32 && dist_fp32_state < 0) || (!fp32 && dist_fp64_state < 0)) return -1;
@@ -495,7 +513,7 @@ struct XtbGpuContext::Impl {
     {
         dWork.free(); lwork = 0;
         dCf.free(); dLf.free(); dWorkf.free(); lwork_f32 = 0;
-        dProbeA.free(); dProbeV.free(); dProbeY.free(); dProbeT.free();
+        dProbeA.free(); dProbeV.free(); dProbeY.free(); dProbeT.free(); dProbeU.free();
         dProbeAd.free(); dProbeVd.free(); dProbeYd.free(); dProbeTd.free(); dProbeSd.free();
         if (dist) { dist->releaseBuffers(); cudaSetDevice(device); }
     }
@@ -511,7 +529,7 @@ struct XtbGpuContext::Impl {
      * it), but that is one library version on one machine, so it is measured rather than assumed.
      * @return true when the verdict was reached (dist_fp32_state set), false when it could not run
      */
-    bool verifyDistributedFp32(int n, const float* Q, const float* eps_dev)
+    bool verifyDistributedFp32(int n, const float* Q, const float* eps_dev, const float* L = nullptr)
     {
         if (dProbeA.n < n || dProbeV.n < n) return false;
         const float one = 1.0f, zero = 0.0f, minus = -1.0f;
@@ -519,14 +537,38 @@ struct XtbGpuContext::Impl {
         if (cublasSsymv(cublas, CUBLAS_FILL_MODE_LOWER, n, &one, dProbeA.ptr, n, dProbeV.ptr, 1,
                         &zero, dProbeY.ptr, 1) != CUBLAS_STATUS_SUCCESS)                 // y = A v
             return false;
-        if (cublasSgemv(cublas, CUBLAS_OP_T, n, n, &one, Q, n, dProbeV.ptr, 1, &zero,
-                        dProbeT.ptr, 1) != CUBLAS_STATUS_SUCCESS)                        // t = Q^T v
-            return false;
-        k_scale_by<<<(n + b - 1) / b, b, 0, stream>>>(dProbeT.ptr, eps_dev, n);          // t *= eps
-        if (cudaGetLastError() != cudaSuccess) return false;
-        if (cublasSgemv(cublas, CUBLAS_OP_N, n, n, &one, Q, n, dProbeT.ptr, 1, &minus,
-                        dProbeY.ptr, 1) != CUBLAS_STATUS_SUCCESS)                        // y := Q t - y
-            return false;
+        if (L) {
+            // Claude Generated (Sep 29, 2026): the solver returned C = L^-T Q, not Q. With
+            // Q = L^T C the same identity reads  A v = L^T C (eps .* (C^T (L v))), i.e. two extra
+            // triangular matrix-vector products; the residual and its reference are unchanged.
+            try { dProbeU.ensure(n); } catch (...) { return false; }
+            if (cudaMemcpyAsync(dProbeU.ptr, dProbeV.ptr, sizeof(float) * n, cudaMemcpyDeviceToDevice,
+                                stream) != cudaSuccess
+                || cublasStrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, L, n,
+                               dProbeU.ptr, 1) != CUBLAS_STATUS_SUCCESS                  // u = L v
+                || cublasSgemv(cublas, CUBLAS_OP_T, n, n, &one, Q, n, dProbeU.ptr, 1, &zero,
+                               dProbeT.ptr, 1) != CUBLAS_STATUS_SUCCESS)                 // t = C^T u
+                return false;
+            k_scale_by<<<(n + b - 1) / b, b, 0, stream>>>(dProbeT.ptr, eps_dev, n);      // t *= eps
+            if (cudaGetLastError() != cudaSuccess
+                || cublasSgemv(cublas, CUBLAS_OP_N, n, n, &one, Q, n, dProbeT.ptr, 1, &zero,
+                               dProbeU.ptr, 1) != CUBLAS_STATUS_SUCCESS                  // u = C t
+                || cublasStrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, L, n,
+                               dProbeU.ptr, 1) != CUBLAS_STATUS_SUCCESS                  // u = L^T u
+                || cublasSscal(cublas, n, &minus, dProbeY.ptr, 1) != CUBLAS_STATUS_SUCCESS
+                || cublasSaxpy(cublas, n, &one, dProbeU.ptr, 1, dProbeY.ptr, 1)
+                       != CUBLAS_STATUS_SUCCESS)                                         // y := u - y
+                return false;
+        } else {
+            if (cublasSgemv(cublas, CUBLAS_OP_T, n, n, &one, Q, n, dProbeV.ptr, 1, &zero,
+                            dProbeT.ptr, 1) != CUBLAS_STATUS_SUCCESS)                    // t = Q^T v
+                return false;
+            k_scale_by<<<(n + b - 1) / b, b, 0, stream>>>(dProbeT.ptr, eps_dev, n);      // t *= eps
+            if (cudaGetLastError() != cudaSuccess) return false;
+            if (cublasSgemv(cublas, CUBLAS_OP_N, n, n, &one, Q, n, dProbeT.ptr, 1, &minus,
+                            dProbeY.ptr, 1) != CUBLAS_STATUS_SUCCESS)                    // y := Q t - y
+                return false;
+        }
         float res = 0.0f, ref = 0.0f;
         if (cublasSnrm2(cublas, n, dProbeY.ptr, 1, &res) != CUBLAS_STATUS_SUCCESS
             || cublasSnrm2(cublas, n, dProbeT.ptr, 1, &ref) != CUBLAS_STATUS_SUCCESS
@@ -3014,7 +3056,9 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
                         m_impl->dLf.ptr, n, m_impl->dCf.ptr, n) != CUBLAS_STATUS_SUCCESS)
             return false;
         m_impl->profMark("eig FP32: copy + reduce");
-        const int dist_rc = partial ? 0 : m_impl->distSolve(n, m_impl->dCf.ptr, m_impl->dEpsf.ptr, true);
+        bool back_done = false;   // eigenvectors already back-transformed on the devices
+        const int dist_rc = partial ? 0 : m_impl->distSolve(n, m_impl->dCf.ptr, m_impl->dEpsf.ptr, true,
+                                                            m_impl->dLf.ptr, &back_done);
         if (dist_rc < 0) return false;
         int lwork = 0;
         if (dist_rc == 1) {
@@ -3053,9 +3097,10 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
             m_impl->profMark("eig FP32: syevd");
         }
         // Back-transform only the neig computed eigenvectors (columns 0..neig-1).
-        if (cublasStrsm(m_impl->cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
-                        CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, neig, &onef,
-                        m_impl->dLf.ptr, n, m_impl->dCf.ptr, n) != CUBLAS_STATUS_SUCCESS)
+        if (!back_done
+            && cublasStrsm(m_impl->cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
+                           CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, neig, &onef,
+                           m_impl->dLf.ptr, n, m_impl->dCf.ptr, n) != CUBLAS_STATUS_SUCCESS)
             return false;
         // Convert the neig columns (column-major: first neig·n contiguous) + neig eps.
         const size_t conv = static_cast<size_t>(neig) * static_cast<size_t>(n);

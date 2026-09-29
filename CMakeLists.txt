@@ -1135,7 +1135,7 @@ if(USE_CUDA)
         add_library(curcuma_cuda_mgpu SHARED
             src/core/energy_calculators/qm_methods/cuda/xtb_distributed_eigensolver.cpp)
         target_include_directories(curcuma_cuda_mgpu PRIVATE ${PROJECT_SOURCE_DIR})
-        target_link_libraries(curcuma_cuda_mgpu PRIVATE CUDA::cudart)
+        target_link_libraries(curcuma_cuda_mgpu PRIVATE CUDA::cudart CUDA::cublas)
         target_compile_definitions(curcuma_cuda_mgpu PRIVATE USE_CUDA)
         set_target_properties(curcuma_cuda_mgpu PROPERTIES
             POSITION_INDEPENDENT_CODE ON
