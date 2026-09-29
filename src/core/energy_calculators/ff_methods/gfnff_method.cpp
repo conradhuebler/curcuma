@@ -972,13 +972,17 @@ bool GFNFF::InitialiseMolecule()
             CurcumaLogger::result(fmt::format(
                 "GFN-FF react filters: valence cap {}, refractory {} scans, exchange {} scans, slack factor {:.2f}{}",
                 m_react_valence_cap ? "on" : "off", m_react_refractory_scans, m_react_exchange_scans, m_react_slack_form_factor,
-                m_rev_settings.enabled ? fmt::format("; rev form switch {} (order: bond order bo2 > {:.3f}); weights: form at w > {:.3f}, break at w < {:.3f}; transition coordinate bo3 {:.2f}x k {:.1f}, window {:.2f}..{:.2f}, revert {:.2f}; E_over shift {:.3f} k {:.1f} p(H,C,N,O) {:.3f} {:.3f} {:.3f} {:.3f} valence(N,O) {:.2f} {:.2f} preset {}; valence share {}; H never sp {}",
+                m_rev_settings.enabled ? fmt::format("; rev form switch {} (order: bond order bo2 > {:.3f}); weights: form at w > {:.3f}, break at w < {:.3f}; transition coordinate bo3 {:.2f}x k {:.1f}, window {:.2f}..{:.2f}, revert {:.2f}; E_over shift {:.3f} k {:.1f} p(H,C,N,O) {:.3f} {:.3f} {:.3f} {:.3f} valence(N,O) {:.2f} {:.2f} preset {}; valence share {}; H never sp {}; H-scope {} (H1 {} H2 {} R1 {})",
                     m_rev_form_order ? "order" : "weight", m_rev_bo2_form,
                     m_rev_bo_form, m_rev_bo_break, m_rev_settings.bo3_center, m_rev_settings.bo3_width, m_rev_tr_begin, m_rev_tr_end, m_rev_tr_revert,
                     m_rev_settings.over_shift, m_rev_settings.over_k, revOverP(1), revOverP(6), revOverP(7), revOverP(8), revValence(7), revValence(8),
                     m_parameters.value("rev_over_preset", std::string("stage1a")),
                     m_rev_settings.valence_share ? "on" : "off",
-                    m_rev_settings.h_not_sp ? "on" : "off") : ""));
+                    m_rev_settings.h_not_sp ? "on" : "off",
+                    m_rev_settings.h_scope ? "on" : "off",
+                    m_rev_settings.h_scope_h1 ? "on" : "off",
+                    m_rev_settings.h_scope_h2 ? "on" : "off",
+                    m_rev_settings.h_scope_r1 ? "on" : "off") : ""));
         }
     }
 
@@ -5389,6 +5393,21 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     int matrix_i = (hyb1 < 1 || hyb1 > 3) ? 3 : hyb1;
     int matrix_j = (hyb2 < 1 || hyb2 > 3) ? 3 : hyb2;
 
+    // rev-gfnff Q5 "H1" (Claude Generated, Sep 2026; FABLE_BOND_STATE_2.md sec 7.6): every
+    // atom with Z==1 gets bsmat column/row 3 (== 0, value-identical) for the BOND-STRENGTH
+    // lookup only, whatever its partner count - so a bridging H's bstrength comes from the
+    // same bsmat[hyb_X][0] a terminal H on that X already gets, instead of the bsmat[hyb_X][1]
+    // ("sp") column its raw hyb=1 would otherwise select. Deliberately scoped to matrix_i/j
+    // alone (used only in the bstrength lookup a few lines below): hyb1/hyb2 and hybi_raw/
+    // hybj_raw, which feed the earlier r0 "shift" correction and the later N-sp2/CO/bbtyp/
+    // is_bridge tests, are untouched here - see the note at determineHybridizationFortran's
+    // return for why a blanket hyb-array override was tried first and reverted (it also moves
+    // r0 via the X-sp shift, which the rkt06 falsifier requires to stay exactly bit-identical).
+    if (m_rev_settings.enabled && m_rev_settings.h_scope && m_rev_settings.h_scope_h1) {
+        if (z1 == 1) matrix_i = 3;
+        if (z2 == 1) matrix_j = 3;
+    }
+
     // bsmat lookup only: fold hyb 0 (H) onto 3 so the index stays inside the 4x4 table.
     // That fold is value-preserving - row/column 0 and 3 of bsmat are identical - which is
     // exactly why it hid the bug above for so long: the table lookup was right, only the
@@ -5465,7 +5484,13 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         // two full wells where one valence is available (the c_ij rule of rev_valence_share
         // halves them). The two rules are complementary; together H + H2 gives rms 2.71 kcal/mol
         // over the 11-point r2SCAN-3c path (15.79 before). rev-only: gfnff keeps the reference.
-        const bool h_sp = !(m_rev_settings.enabled && m_rev_settings.h_not_sp);
+        // rev-gfnff Q5 "H1" (Claude Generated, Sep 2026): H1 subsumes rev_h_not_sp for real
+        // hydrogen - once Z==1 always reads bsmat column 0 (the fold above), the is_bridge
+        // 0.30-scaling test below must not re-override that with a DIFFERENT hyb=1-keyed
+        // special case, regardless of rev_h_not_sp's own setting. rev_h_not_sp itself is left
+        // untouched (coexists) so it still governs plain h_not_sp use when h_scope_h1 is off.
+        const bool h_sp = !(m_rev_settings.enabled
+            && (m_rev_settings.h_not_sp || (m_rev_settings.h_scope && m_rev_settings.h_scope_h1)));
         if ((grp1 == 7 || (z1 == 1 && h_sp)) && hyb1_value == 1) {
             bbtyp = 3;  // linear halogen → no torsion
             is_bridge = true;
@@ -7852,11 +7877,22 @@ std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb,
         // the F-F bond then missed its pi treatment (r0 2.9297 vs 2.8355 Bohr, fc
         // -0.1291 vs -0.0884) — 19.2 kcal/mol in the bond term on a 4-atom molecule.
         int kk = 0;
+        // rev-gfnff Q5 "P1" (Claude Generated, Sep 2026; FABLE_BOND_STATE_2.md sec 7.6): a
+        // Z==1 atom never counts as an sp/sp2 picon neighbour. Stated by the design as a
+        // structural CONSEQUENCE of H1 ("a hydrogen with hyb forced to 0 can never satisfy
+        // hyb==1||2") - but Q5's H1 is implemented narrowly (only the bond-strength lookup,
+        // see the note at getGFNFFBondParameters), so it does NOT change hyb[j] here and this
+        // needs its own explicit skip, tied to the SAME sub-switch (no separate PARAM: there is
+        // no independent code path to gate). Off by default and whenever h_scope/h_scope_h1 is
+        // off, this is exactly the pre-existing PX13/hf_2_ts port-fidelity behaviour (a bridging
+        // H's hyb=1 counts towards kk), unchanged.
+        const bool p1_active = m_rev_settings.enabled && m_rev_settings.h_scope && m_rev_settings.h_scope_h1;
         for (int j : adjacency_list[i]) {
             if (zi == 8 && m_atoms[j] == 16 && hyb[j] == 5) {
                 piat = false;   // SO3 oxygen is not a pi (gfnff_ini.f90:321-324)
                 continue;       // Fortran `cycle`: this neighbour does not count for kk
             }
+            if (p1_active && m_atoms[j] == 1) continue;
             if (hyb[j] == 1 || hyb[j] == 2) ++kk;
         }
         const bool picon = (kk > 0) && nofs(zi);
@@ -8835,6 +8871,21 @@ std::vector<int> GFNFF::determineHybridizationFortran(const GFNFFTopology& topo,
     // that hydrogen then takes a tetrahedral theta0 instead of 180 deg and the jumps get larger
     // (N2 + 3 H2 at 0.25 fs: 4-11 events above 40 kJ/mol per run instead of 0). A consistent
     // treatment of the over-coordinated hydrogen (bond, angle, E_over together) is stage 3.
+    //
+    // rev-gfnff Q5 "H1" (Claude Generated, Sep 2026; FABLE_BOND_STATE_2.md sec 7.6): H1 is
+    // deliberately NOT implemented as a blanket override of this returned array (which was tried
+    // first and reverted - see H_SCOPE_IMPL_STATUS.md). A blanket hyb[H]=0 here also changes the
+    // bond-length "shift"/r0 correction in getGFNFFBondParameters (the X-sp/X-sp3 hybridization
+    // shift, which reads the SAME raw hyb array but is unrelated to bond STRENGTH): a genuinely
+    // bridging H currently has hyb=1, so its two H-H (or X-H) bonds pick up the "X-sp" +0.14
+    // shift from the OUTER atom's hyb=0 partner; zeroing hyb[H] here removes that shift too and
+    // changes r0 - measured on the rkt06 H+H2 path (points 5/12/13, where a real 2-coordinate
+    // bridging H exists) as a ~0.013 Eh energy change the falsifier table's own row d requires
+    // to be EXACTLY zero. H1 is applied narrowly instead, only at the two call sites that decide
+    // BOND STRENGTH (getGFNFFBondParameters' bsmat matrix fold and its is_bridge gate) and at
+    // detectPiSystems' picon counter (P1, which the design says follows from H1); this array and
+    // every other consumer of topo.hybridization[H] (the shift/r0 correction, torsion nrot
+    // rules) is untouched by Q5, exactly like the heavy-atom rules above.
     return hyb;
 }
 
@@ -9441,6 +9492,13 @@ std::vector<Angle> GFNFF::generateAnglesNative(const TopologyInfo& topo_info) co
         #pragma omp for schedule(dynamic, 10)
         for (int center = 0; center < m_atomcount; ++center) {
             if (center >= static_cast<int>(topo_info.adjacency_list.size())) continue;
+            // rev-gfnff Q5 "H2" (Claude Generated, Sep 2026; FABLE_BOND_STATE_2.md sec 7.6):
+            // no GFN-FF angle term is ever centred on a Z==1 atom. Needed together with H1 (a
+            // bridging H forced to hyb=0 would otherwise pick up a spurious tetrahedral
+            // theta0=109.5); the sp theta0=180 an unmodified bridging H gets today is itself an
+            // artefact this rule removes regardless of H1's own setting.
+            if (m_rev_settings.enabled && m_rev_settings.h_scope && m_rev_settings.h_scope_h2
+                && m_atoms[center] == 1) continue;
             const auto& neighbors = topo_info.adjacency_list[center];
             if (neighbors.size() <= 1 || neighbors.size() > 6) continue;
 
@@ -10911,7 +10969,29 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // Fortran perceives rings on the metal-free list (gfnff_ini.f90:692 getring36(...,nbm,...)).
     {
         SetupScope sc("topo:   rings");
-        topo_info.ring_sizes = findSmallestRings(topo_info.nb_nometal, topo_info);
+        // rev-gfnff Q5 "R1" (Claude Generated, Sep 2026; FABLE_BOND_STATE_2.md sec 7.6): ring
+        // enumeration excludes every Z==1 atom entirely. Built as an H-free copy of the
+        // metal-free adjacency list (both directions: a hydrogen's OWN list is emptied, and it
+        // is removed from every heavy atom's list), so no ring the enumerator finds can ever
+        // contain a hydrogen - a heavy-atom-only ring (e.g. cyclopropane) is untouched. This one
+        // filtered adjacency list is enough to also clear the 3-ring fxh correction on a
+        // bridging carbon's OWN C-H bonds, not just its siblings: fxh (gfnff_method.cpp, the
+        // "Check if this is an X-H bond" block) is keyed on topo.ring_sizes[heavy_idx], which is
+        // now 0 for that carbon whenever its only 3-ring ran through a bridging H.
+        if (m_rev_settings.enabled && m_rev_settings.h_scope && m_rev_settings.h_scope_r1) {
+            std::vector<std::vector<int>> nb_no_h = topo_info.nb_nometal;
+            for (int i = 0; i < m_atomcount; ++i) {
+                if (m_atoms[i] == 1) { nb_no_h[i].clear(); continue; }
+                std::vector<int> filtered;
+                filtered.reserve(nb_no_h[i].size());
+                for (int j : nb_no_h[i])
+                    if (m_atoms[j] != 1) filtered.push_back(j);
+                nb_no_h[i] = std::move(filtered);
+            }
+            topo_info.ring_sizes = findSmallestRings(nb_no_h, topo_info);
+        } else {
+            topo_info.ring_sizes = findSmallestRings(topo_info.nb_nometal, topo_info);
+        }
     }
 
     // Calculate simple neighbor counts for XTB compatibility in torsions
@@ -13365,6 +13445,14 @@ void GFNFF::setupRevSettings()
     // so -gfnff.rev_h_not_sp had no effect at all (in -sp and in -batch alike). Read it here with
     // the rest of the struct fields.
     rv.h_not_sp = m_parameters.value("rev_h_not_sp", true);
+    // Claude Generated (Sep 2026): Q5 "H-scope" (FABLE_BOND_STATE_2.md sec 7.6) - master switch
+    // plus three per-rule ablation arms, read unconditionally like every other rev_* flag; the
+    // rules themselves are additionally gated on m_rev_settings.enabled at each call site (same
+    // pattern as h_not_sp), so plain -method gfnff never reaches them regardless of this flag.
+    rv.h_scope = m_parameters.value("rev_h_scope", false);
+    rv.h_scope_h1 = m_parameters.value("rev_h_scope_h1", true);
+    rv.h_scope_h2 = m_parameters.value("rev_h_scope_h2", true);
+    rv.h_scope_r1 = m_parameters.value("rev_h_scope_r1", true);
     rv.bo_center = m_parameters.value("rev_bo_center", 2.0);
     rv.bo_width = m_parameters.value("rev_bo_width", -7.5);
     rv.w_join = m_parameters.value("rev_bo_form", 0.05);
@@ -13641,9 +13729,10 @@ void GFNFF::setupRevSettings()
     if (const char* d = std::getenv("CURCUMA_REVDUMP"); d && d[0] == '1') {
         CurcumaLogger::result(fmt::format(
             "rev dump (struct): enabled {} bond_weight {} term_weights {} blend_repulsion {} over_coord {} "
-            "valence_share {} share_onethree {} h_not_sp {} blend {}",
+            "valence_share {} share_onethree {} h_not_sp {} h_scope {} (h1 {} h2 {} r1 {}) blend {}",
             rv.enabled, rv.bond_weight, rv.term_weights, rv.blend_repulsion, rv.over_coord,
-            rv.valence_share, rv.share_onethree, rv.h_not_sp, rv.blend));
+            rv.valence_share, rv.share_onethree, rv.h_not_sp,
+            rv.h_scope, rv.h_scope_h1, rv.h_scope_h2, rv.h_scope_r1, rv.blend));
         CurcumaLogger::result(fmt::format(
             "rev dump (scalars): bo {:.4f}/{:.4f} bo2 {:.4f}/{:.4f} bo3 {:.4f}/{:.4f} bo4 {:.4f}/{:.4f} "
             "bo5 {:.4f}/{:.4f} over_k {:.4f} over_shift {:.4f} w_join {:.4f}",
