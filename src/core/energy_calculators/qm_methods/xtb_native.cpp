@@ -43,11 +43,40 @@
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <future>
 #include <stdexcept>
+#include <thread>
+#include <vector>
 
 namespace curcuma::xtb {
+
+namespace {
+/// Transpose a square n x n matrix in place, in 64 x 64 tiles over up to 8 host threads
+/// (Claude Generated, Sep 29, 2026). Pure element swaps, so the result is exact. Used to
+/// turn a column-major device download into curcuma's row-major Matrix without a temporary.
+void transposeSquareInPlace(double* a, int n)
+{
+    constexpr int T = 64;
+    const int nb = (n + T - 1) / T;
+    const unsigned nt = std::max(1u, std::min(8u, std::thread::hardware_concurrency()));
+    auto work = [&](unsigned t) {
+        for (int bi = static_cast<int>(t); bi < nb; bi += static_cast<int>(nt)) {
+            const int i0 = bi * T, i1 = std::min(n, i0 + T);
+            for (int bj = bi; bj < nb; ++bj) {
+                const int j0 = bj * T, j1 = std::min(n, j0 + T);
+                for (int i = i0; i < i1; ++i)
+                    for (int j = (bi == bj ? i + 1 : j0); j < j1; ++j)
+                        std::swap(a[static_cast<size_t>(i) * n + j], a[static_cast<size_t>(j) * n + i]);
+            }
+        }
+    };
+    std::vector<std::thread> pool;
+    for (unsigned t = 0; t < nt; ++t) pool.emplace_back(work, t);
+    for (auto& th : pool) th.join();
+}
+} // namespace
 
 /* ------------------------------------------------------------------------- *
  *  Lifecycle
@@ -544,13 +573,35 @@ double XTB::Calculation(bool gradient)
         t_dev_built = clock::now();
         if (gpu_computed) {
             const int nao = m_basis.nao, nsh = m_basis.nsh;
-            Eigen::MatrixXd Scm(nao, nao), H0cm(nao, nao), Lcm(nao, nao), Gcm(nsh, nsh);
-            if (m_gpu_scf->downloadOverlap(Scm) && m_gpu_scf->downloadH0(H0cm)
-                && m_gpu_scf->downloadCholesky(Lcm) && m_gpu_scf->downloadGamma(Gcm)) {
-                m_S     = Scm;   // col-major device → row-major Matrix (S symmetric)
-                m_H0    = H0cm;  // H0 symmetric
-                m_X     = Lcm;   // m_X is column-major Eigen::MatrixXd → direct
-                m_gamma = Gcm;
+            // Claude Generated (Sep 29, 2026): download straight into the members. S and H0 come
+            // column-major into the row-major m_S/m_H0 and are then transposed in place, which
+            // gives exactly the element-wise copy the old temporaries made (m_S(i,j) = S(i,j))
+            // without two 1.9 GB temporaries and four serial copies (polymer_2x: 2.4 s -> see
+            // docs/GFN2_GPU_COST_PLAN.md stage 1a). Backends without the raw download keep the
+            // old path.
+            const auto td0 = clock::now();
+            bool got = false;
+            m_S.resize(nao, nao);
+            m_H0.resize(nao, nao);
+            if (m_gpu_scf->downloadOverlapInto(m_S.data()) && m_gpu_scf->downloadH0Into(m_H0.data())) {
+                transposeSquareInPlace(m_S.data(), nao);
+                transposeSquareInPlace(m_H0.data(), nao);
+                got = m_gpu_scf->downloadCholesky(m_X) && m_gpu_scf->downloadGamma(m_gamma);
+            } else {
+                Eigen::MatrixXd Scm(nao, nao), H0cm(nao, nao), Lcm(nao, nao), Gcm(nsh, nsh);
+                if (m_gpu_scf->downloadOverlap(Scm) && m_gpu_scf->downloadH0(H0cm)
+                    && m_gpu_scf->downloadCholesky(Lcm) && m_gpu_scf->downloadGamma(Gcm)) {
+                    m_S     = Scm;   // col-major device → row-major Matrix
+                    m_H0    = H0cm;
+                    m_X     = Lcm;   // m_X is column-major Eigen::MatrixXd → direct
+                    m_gamma = Gcm;
+                    got = true;
+                }
+            }
+            if (got) {
+                if (verb >= 3)
+                    CurcumaLogger::info_fmt("    S/H0/L/gamma download into the host copies: {:.0f} ms",
+                                            ms(td0, clock::now()));
                 integrals_from_device = true;
                 if (verb >= 2)
                     CurcumaLogger::info("SCF: integrals built on GPU device "

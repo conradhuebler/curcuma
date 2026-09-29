@@ -1,6 +1,7 @@
 # GFN2 on several GPUs: where the time goes and what to change
 
-Status: plan plus stage-0 measurements (Sep 29, 2026). Nothing from stages 1-3 is implemented yet.
+Status (Sep 29, 2026): stage 0 measured, stage 1a done, stage 1b tried and rejected; 1c and stages
+2-3 open.
 All numbers: 4x RTX A4500 (20 GB, PCIe, no NVLink), polymer_2x (7320 atoms, nao 15444, 19252
 electrons, nocc 9626), commit `bfbdc569`, `CURCUMA_GPU_PROFILE=1`.
 
@@ -43,6 +44,25 @@ electrons, nocc 9626), commit `bfbdc569`, `CURCUMA_GPU_PROFILE=1`.
   `cuMemSetAccess`; on polymer the distributed Cholesky takes 1.72 s of which 0.44 s factorise,
   vs 41 ms on one GPU); host download + copy of S/H0/L/gamma 3.7 s; host multipole interaction
   matrices 1.5 s; pre-SCF EEQ guess on device 0 ~1.5 s.
+
+## Stage 1 results
+
+- **1a done.** S/H0 are downloaded column-major straight into `m_S`/`m_H0` and transposed in
+  place (exact element swaps), L and gamma straight into `m_X`/`m_gamma`, and the screened-storage
+  scatter runs on up to 8 host threads. polymer_2x: download + host copy **3.67 -> 1.07 s**
+  (downloads 1.3 s, host copies 2.36 s before). Checked element-wise against the old path on
+  caffeine (dense storage) and polymer (screened storage): all four matrices identical. A full
+  deferral (no download at all on the resident path) would save the remaining ~1 s and 5.7 GB of
+  host memory; not done, it touches every host consumer of these matrices.
+- **1b rejected (measured).** The density as an FP32 `syrk` per GPU plus a gather of the stored
+  pairs cut the density step from 0.85 to 0.29 s, but every FP32 iteration's SCC energy came out
+  **2.7 mEh too high** (-11857.3256 vs -11857.3287 Eh) - the FP32 resolution of an 11857 Eh
+  electronic energy (2e-7 relative). The SCF then cannot meet its energy criterion in FP32 and
+  switched to FP64 three times: 16 instead of 12 iterations, 178 instead of 113 s. The FP32
+  eigenvectors themselves do not cause this because their density is accumulated in FP64. Kept
+  out of the code; any faster density must accumulate in FP64 (e.g. a tiled FP64 kernel that
+  reuses C rows - the current kernel reads C once per stored pair and runs at ~93 GFLOP/s, i.e.
+  memory-bound).
 
 ## Stages 1-3 (planned)
 

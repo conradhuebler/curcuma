@@ -239,6 +239,14 @@ public:
         L_out.resize(m_n, m_n);
         return m_ctx->downloadCholesky(L_out.data());
     }
+    bool downloadOverlapInto(double* S_colmajor) override
+    {
+        return m_ctx && m_n > 0 && m_ctx->downloadOverlap(S_colmajor);
+    }
+    bool downloadH0Into(double* H0_colmajor) override
+    {
+        return m_ctx && m_n > 0 && m_ctx->downloadH0(H0_colmajor);
+    }
 
     bool beginMultipoleComputed() override
     {

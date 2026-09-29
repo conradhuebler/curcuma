@@ -404,6 +404,11 @@ struct GpuScfBackend {
     virtual bool downloadOverlap(Eigen::MatrixXd& S_out)   { (void)S_out;  return false; }
     virtual bool downloadH0(Eigen::MatrixXd& H0_out)       { (void)H0_out; return false; }
     virtual bool downloadCholesky(Eigen::MatrixXd& L_out)  { (void)L_out;  return false; }
+    /// Claude Generated (Sep 29, 2026): the same S / H0 written column-major straight into
+    /// caller storage of nao*nao doubles, so the host needs no temporary and no extra copy
+    /// (polymer_2x: 2.4 s of host copies). Default false: the caller uses the functions above.
+    virtual bool downloadOverlapInto(double* S_colmajor) { (void)S_colmajor; return false; }
+    virtual bool downloadH0Into(double* H0_colmajor)     { (void)H0_colmajor; return false; }
 
     /* ----- Device nuclear gradient (Stage 4) ---------------------------- *
      * The electronic + repulsion + Coulomb gradient (sections 1/2/3 of
