@@ -88,6 +88,10 @@ set_tests_properties(cli_gfnff_05_frag_charge_ensemble PROPERTIES TIMEOUT 900 LA
 # (test_cases/revgfnff/_log/STALE_CN_STATUS.md). Fails 4/4 checks on the pre-fix binary.
 add_cli_test(gfnff 06_stale_cn_energy_only)
 set_tests_properties(cli_gfnff_06_stale_cn_energy_only PROPERTIES TIMEOUT 300 LABELS "gfnff;stale_cn")
+# Claude Generated (Sep 29, 2026): the rev-gfnff pair-validity gate (-gfnff.rev_pair_validity,
+# FABLE_BOND_STATE_2.md sec 2.1-rev, test_cases/revgfnff/_log/PAIR_VALIDITY_IMPL_STATUS.md).
+add_cli_test(gfnff 07_pair_validity_gate)
+set_tests_properties(cli_gfnff_07_pair_validity_gate PROPERTIES TIMEOUT 300 LABELS "gfnff;react;rev;pair_validity")
 
 # =============================================================================
 # GPU GFN-FF Tests — only registered when USE_CUDA=ON
