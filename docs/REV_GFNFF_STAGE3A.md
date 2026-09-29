@@ -525,7 +525,27 @@ flags except the ones tabulated above.
   kcal/mol from the share-off arm, and `conserving` is only the smaller of the two errors;
 - the compressed-BF4- probe, where the share costs +33.4 kcal/mol under `mg` against +18.6 under
   `gauss`. That geometry is documented as a perception question, not a share question
-  (`FABLE_BOND_STATE.md`), and is not a regression gate.
+  (`FABLE_BOND_STATE.md`), and is not a regression gate. **Superseded (Sep 29, 2026)**: the
+  "+33.4/+18.6" figures were stale (`FABLE_BOND_STATE_2.md` section 0 re-measured the current
+  shipped default at +343.6 kcal/mol vs share-off, +895.7 vs the corner's own 4-bond evaluation) -
+  and the perception question itself is now RESOLVED, not merely documented: see below.
+
+### 2.4 The pair-validity gate (Sep 29, 2026) resolves the compressed-BF4- perception question
+
+`FABLE_BOND_STATE_2.md` section 2.1-rev's VALID(i,j,b) rule - a per-corner, geometry-free test of
+whether a perceived bonded pair is a genuine bond or a closed-shell repulsion (BF4-'s six spurious
+F...F contacts; a hot react-MD trajectory's geminal H...H "bond") - is implemented as
+`-gfnff.rev_pair_validity` (default off). An invalid pair's corner is regenerated from the reduced
+bond list (hybridisation/angles/torsions/pi-systems/EEQ all freshly derived), reusing the existing
+`m_forced_bonds` corner-forcing seam every react-mode corner already goes through - no new
+architecture needed. With the gate on, the compressed-BF4- probe reproduces its own 4-bond
+topology's energy **bit-for-bit** (`-1.25025415` Eh), and over the full reference set (GMTKN55
+2462 + MOR41 285 + S30L-CI 90 structures) exactly the 5 structures the offline sweep predicted
+move (`PX13/hf_2_ts` + 4 named `MB16-43` clusters), nothing else - bit-identical with the flag
+off. Full acceptance table, the react-mode MD smoothness measurement (max per-step |dEpot| 70.5 ->
+14.3 kJ/mol on the extracted geminal-H...H frame) and a bug found+fixed on a live react-mode
+corner: `test_cases/revgfnff/_log/PAIR_VALIDITY_IMPL_STATUS.md`. Implementation:
+`src/core/energy_calculators/ff_methods/gfnff_pair_validity.cpp`.
 
 **Implemented since Sep 20, 2026, OPT-IN (section 2.3)**: the second step of stage 3a(iii)
 (`rev_well_form mg2`, free curvature + r0 re-solve) and the **bond-order-resolved well table**
