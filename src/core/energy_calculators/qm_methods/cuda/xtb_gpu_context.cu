@@ -358,6 +358,8 @@ struct XtbGpuContext::Impl {
     std::string      dist_backend = "auto";
     int              dist_block = 128;
     int              dist_min_nao = 4000;
+    int              dist_potrf = 0;          // Cholesky factorisations done on the devices
+    std::string      dist_potrf_status;       // why one was not (empty: never refused)
     bool             dist_fp32 = true;
     bool             dist_failed = false;
     // Claude Generated (Sep 2026): -1 = this backend's FP32 solve was verified WRONG on this
@@ -715,6 +717,74 @@ struct XtbGpuContext::Impl {
         return true;
     }
 
+    /**
+     * @brief Cholesky of the overlap in dL (S in the lower triangle) on the eigensolver's devices
+     *        (Claude Generated, Sep 29, 2026).
+     *
+     * Same gates as the FP64 eigensolve (distReady), plus a check of the result: a copy of S is
+     * kept, and S v == L (L^T v) is tested with a random v (relative residual < 1e-10; a correct
+     * FP64 factorisation lands near 1e-15). On a failed check S is put back and the caller runs
+     * the single-GPU potrf. The copy is one n x n buffer during setup, far below the SCF peak.
+     * CURCUMA_GPU_DIST_POTRF=0 keeps the factorisation on this device.
+     * @return 1 = dL holds L, 0 = not done (dL still holds S), -1 = dL destroyed
+     */
+    int distCholesky(int n)
+    {
+        if (!distReady(n, false) || !dist->supportsCholesky()) return 0;
+        if (const char* e = std::getenv("CURCUMA_GPU_DIST_POTRF"); e && std::string(e) == "0") return 0;
+        const size_t nn = static_cast<size_t>(n) * n;
+        CudaBuffer<double> copy, v, y, t;
+        try { copy.alloc(static_cast<int>(nn)); v.alloc(n); y.alloc(n); t.alloc(n); }
+        catch (...) { return 0; }
+        const int b = 256;
+        k_probe_filld<<<(n + b - 1) / b, b, 0, stream>>>(v.ptr, n, 0x27D4EB2Fu);
+        if (cudaGetLastError() != cudaSuccess
+            || cudaMemcpyAsync(copy.ptr, dL.ptr, sizeof(double) * nn, cudaMemcpyDeviceToDevice, stream) != cudaSuccess
+            || cudaStreamSynchronize(stream) != cudaSuccess)
+            return 0;
+        const bool done = dist->cholesky(n, dL.ptr, device);
+        cudaSetDevice(device);
+        if (prof) {
+            double sc = 0.0, so = 0.0, ga = 0.0;
+            dist->lastTimings(sc, so, ga);
+            profAdd("  multi-GPU potrf: scatter", sc);
+            profAdd("  multi-GPU potrf: factorise", so);
+            profAdd("  multi-GPU potrf: gather", ga);
+        }
+        bool good = false;
+        if (done) {
+            const double one = 1.0, zero = 0.0, minus = -1.0;
+            double res = 0.0, ref = 0.0;
+            good = cublasDsymv(cublas, CUBLAS_FILL_MODE_LOWER, n, &one, copy.ptr, n, v.ptr, 1, &zero,
+                               y.ptr, 1) == CUBLAS_STATUS_SUCCESS                       // y = S v
+                && cudaMemcpyAsync(t.ptr, v.ptr, sizeof(double) * n, cudaMemcpyDeviceToDevice, stream) == cudaSuccess
+                && cublasDtrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, dL.ptr, n,
+                               t.ptr, 1) == CUBLAS_STATUS_SUCCESS                         // t = L^T v
+                && cublasDtrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, dL.ptr, n,
+                               t.ptr, 1) == CUBLAS_STATUS_SUCCESS                         // t = L t
+                && cublasDnrm2(cublas, n, y.ptr, 1, &ref) == CUBLAS_STATUS_SUCCESS
+                && cublasDaxpy(cublas, n, &minus, y.ptr, 1, t.ptr, 1) == CUBLAS_STATUS_SUCCESS
+                && cublasDnrm2(cublas, n, t.ptr, 1, &res) == CUBLAS_STATUS_SUCCESS
+                && cudaStreamSynchronize(stream) == cudaSuccess
+                && ref > 0.0 && res / ref < 1.0e-10;
+            if (std::getenv("CURCUMA_GPU_EIG_VERIFY_ALWAYS"))
+                std::fprintf(stderr, "[chol verify] relative residual %.3e\n", ref > 0.0 ? res / ref : -1.0);
+        }
+        if (good) {
+            ++dist_potrf;
+            return 1;
+        }
+        // Not factorised or failed the check: put S back for the single-GPU potrf.
+        if (cudaMemcpyAsync(dL.ptr, copy.ptr, sizeof(double) * nn, cudaMemcpyDeviceToDevice, stream) != cudaSuccess
+            || cudaStreamSynchronize(stream) != cudaSuccess)
+            return -1;
+        if (dist_potrf_status.empty())
+            dist_potrf_status = done ? "multi-GPU Cholesky of S failed its check; factorised on device "
+                                           + std::to_string(device)
+                                     : "multi-GPU Cholesky of S failed; factorised on device " + std::to_string(device);
+        return 0;
+    }
+
     /// Generalized variant (reduction + solve + back-transform on the devices). Same return codes
     /// as distSolve(); 0 also when the backend has no generalized path.
     int distSolveGeneralized(int n, void* A, const void* L, void* eig, bool fp32)
@@ -788,6 +858,13 @@ struct XtbGpuContext::Impl {
     double sp_fraction = 1.0;        // nnz / nao^2
     double sp_rmax = 0.0;            // largest element-pair cutoff (Bohr)
     CudaBuffer<int>    dSpRow, dSpCol, dSpColPtr, dSpPerm;
+    // Claude Generated (Sep 29, 2026): atom-pair screen for the dense S/H0 build in screened
+    // mode. Element kind per atom and the squared element-pair cutoff (the same table the pair
+    // pattern is built from, slightly widened), so k_overlap_h0 skips the atom pairs whose
+    // integrals the SCF never stores. screen_nk == 0: no screen (dense mode, or disabled).
+    CudaBuffer<int>    dAtKind;
+    CudaBuffer<double> dScreenCut2;
+    int                screen_nk = 0;
     CudaBuffer<double> dSpS, dSpH0, dSpDp, dSpQp, dSpTmp;
     // Density: the resident screened loop keeps P only on the pattern (dSpP) and rebuilds the
     // dense dP on demand (gradient, host download). p_dense_valid says which one is current.
@@ -929,7 +1006,8 @@ __global__ void k_overlap_h0(
     const double* __restrict__ sh_zeta, const double* __restrict__ shpoly,
     const double* __restrict__ se, const int* __restrict__ z,
     const int* __restrict__ valence, const double* __restrict__ xyz,
-    double* __restrict__ S, double* __restrict__ H0)
+    double* __restrict__ S, double* __restrict__ H0,
+    const int* __restrict__ at_kind, const double* __restrict__ cut2, int nk)
 {
     const int a = blockIdx.x * blockDim.x + threadIdx.x;
     const int b = blockIdx.y * blockDim.y + threadIdx.y;
@@ -939,6 +1017,13 @@ __global__ void k_overlap_h0(
     const int la = ang_sh[a], lb = ang_sh[b];
     const double xa = xyz[3 * iat + 0], ya = xyz[3 * iat + 1], za = xyz[3 * iat + 2];
     const double xb = xyz[3 * jat + 0], yb = xyz[3 * jat + 1], zb = xyz[3 * jat + 2];
+    // Claude Generated (Sep 29, 2026): screened storage keeps only the atom pairs inside the
+    // element-pair cutoff (every integral beyond it is below sparse_eps). The caller zeroed S and
+    // H0, so a pair outside the (slightly widened) cutoff is skipped instead of computed.
+    if (nk > 0 && iat != jat) {
+        const double sx = xa - xb, sy = ya - yb, sz = za - zb;
+        if (sx * sx + sy * sy + sz * sz > cut2[at_kind[iat] * nk + at_kind[jat]]) return;
+    }
     const double avg_eps = 0.5 * (se[a] + se[b]);
 
     double h_factor;
@@ -3733,7 +3818,10 @@ std::string XtbGpuContext::distributedEigensolverStatus() const
         return "not used (nao below gpu_eigensolver_min_nao = " + std::to_string(m_impl->dist_min_nao) + ")";
     return std::string(m_impl->dist->name()) + " on " + std::to_string(m_impl->dist->deviceCount())
         + " GPUs, " + std::to_string(m_impl->dist_solves) + " solves"
-        + (m_impl->dist_verify ? " (each verified)" : " (verification off)");
+        + (m_impl->dist_verify ? " (each verified)" : " (verification off)")
+        + (m_impl->dist_potrf > 0 ? ", " + std::to_string(m_impl->dist_potrf) + " Cholesky factorisation(s) of S (checked)"
+                                  : std::string())
+        + (m_impl->dist_potrf_status.empty() ? std::string() : "; " + m_impl->dist_potrf_status);
 }
 
 void XtbGpuContext::setMemoryCheck(bool on)
@@ -3871,6 +3959,7 @@ bool XtbGpuContext::buildScreenedPairs(const double* xyz_bohr, bool& use_sparse)
     Impl& I = *m_impl;
     const int nat = I.basis_nat, nao = I.basis_nao;
     I.sp_fraction = 1.0;
+    I.screen_nk = 0;
     if (I.sparse_mode == 0 || !I.h_ao_contiguous || nat <= 0) return true;
 
     // Element-pair cutoffs (atoms of one element share amin/cmax).
@@ -4000,6 +4089,25 @@ bool XtbGpuContext::buildScreenedPairs(const double* xyz_bohr, bool& use_sparse)
     I.sp_nnz = static_cast<int>(nnz);
     ++I.pattern_generation;
     use_sparse = true;
+    // Claude Generated (Sep 29, 2026): the same cutoff table for the dense S/H0 build. Widened by
+    // 1e-6 relative so a pair the host put into the pattern can never be skipped on the device
+    // because of a different rounding of the distance (FMA contraction); a borderline pair
+    // outside the pattern that is computed anyway only adds a value below sparse_eps to the
+    // dense S that is factorised. CURCUMA_GPU_FULL_DENSE_S=1 computes every pair (old path).
+    I.screen_nk = 0;
+    if (!std::getenv("CURCUMA_GPU_FULL_DENSE_S")) {
+        std::vector<double> cut2w(cut2.size());
+        for (size_t i = 0; i < cut2.size(); ++i) cut2w[i] = cut2[i] * (1.0 + 1.0e-6);
+        try {
+            I.dAtKind.upload(kind.data(), nat, I.stream);
+            I.dScreenCut2.upload(cut2w.data(), nk * nk, I.stream);
+            // upload() is asynchronous from pageable host memory; the vectors die on return.
+            if (cudaStreamSynchronize(I.stream) != cudaSuccess) return false;
+            I.screen_nk = nk;
+        } catch (const std::exception&) {
+            I.screen_nk = 0;   // unscreened dense build, same result
+        }
+    }
     return true;
 }
 
@@ -4115,13 +4223,19 @@ bool XtbGpuContext::computeIntegrals(const double* xyz_bohr)
     const double* H_dense_dst = use_sparse ? I.dC.ptr : I.dH0.ptr;
     const dim3 block(16, 16);
     const dim3 grid((nsh + block.x - 1) / block.x, (nsh + block.y - 1) / block.y);
+    const int screen_nk = use_sparse ? I.screen_nk : 0;
+    if (screen_nk > 0
+        && (cudaMemsetAsync(const_cast<double*>(S_dense_dst), 0, sizeof(double) * nn, stream) != cudaSuccess
+            || cudaMemsetAsync(const_cast<double*>(H_dense_dst), 0, sizeof(double) * nn, stream) != cudaSuccess))
+        return false;
     k_overlap_h0<<<grid, block, 0, stream>>>(
         nsh, nao, I.basis_is_gfn2,
         I.dSh2at.ptr, I.dAng.ptr, I.dIaoSh.ptr, I.dNaoSh.ptr,
         I.dShNprim.ptr, I.dShPrimOff.ptr, I.dPrimAlpha.ptr,
         I.dPrimCoeff.ptr, I.dShZeta.ptr, I.dShpoly.ptr,
         I.dSE.ptr, I.dZ.ptr, I.dValence.ptr, I.dXyz.ptr,
-        const_cast<double*>(S_dense_dst), const_cast<double*>(H_dense_dst));
+        const_cast<double*>(S_dense_dst), const_cast<double*>(H_dense_dst),
+        screen_nk > 0 ? I.dAtKind.ptr : nullptr, screen_nk > 0 ? I.dScreenCut2.ptr : nullptr, screen_nk);
     if (cudaGetLastError() != cudaSuccess) return false;
     if (use_sparse) {
         const int b1 = 256;
@@ -4170,17 +4284,24 @@ bool XtbGpuContext::computeIntegrals(const double* xyz_bohr)
                             cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
             return false;
     }
-    if (cusolverDnDpotrf(I.cusolver, CUBLAS_FILL_MODE_LOWER, nao,
-                         I.dL.ptr, nao, I.dPotrfWork.ptr,
-                         I.potrf_lwork, I.dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
-        return false;
+    const int dist_chol = I.distCholesky(nao);
+    if (dist_chol < 0) return false;
     int info = 1;
-    if (cudaMemcpyAsync(&info, I.dInfo.ptr, sizeof(int),
-                        cudaMemcpyDeviceToHost, stream) != cudaSuccess)
-        return false;
-    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    if (dist_chol == 1) {
+        info = 0;
+        I.profMark("integrals: Cholesky of S (multi-GPU)");
+    } else {
+        if (cusolverDnDpotrf(I.cusolver, CUBLAS_FILL_MODE_LOWER, nao,
+                             I.dL.ptr, nao, I.dPotrfWork.ptr,
+                             I.potrf_lwork, I.dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
+            return false;
+        if (cudaMemcpyAsync(&info, I.dInfo.ptr, sizeof(int),
+                            cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+            return false;
+        if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+        I.profMark("integrals: Cholesky of S");
+    }
     ++I.l_generation;
-    I.profMark("integrals: Cholesky of S");
     (void)nat;
     return info == 0;
 }

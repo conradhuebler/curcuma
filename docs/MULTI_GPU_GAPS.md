@@ -103,11 +103,17 @@ on the optimised geometry a constant ~30 s against 249 s single-GPU [D: lab jour
 - **G2-4 Integrals, Fock, potential, mixing, D4 and most of the gradient are not distributed** -
   the ceiling above. Distributing them (column-block ownership) is the planned next step; whether it
   pays depends on the per-phase profile on the target hardware, which does not exist (X-2).
+  **Part 1 (Sep 29, 2026)**: the dense S/H0 build skips atom pairs outside the screening cutoff
+  (`k_overlap_h0` 11.5 -> 1.3 s at polymer_2x, on every GPU count - a single-device fix made a split
+  unnecessary) and the Cholesky of S runs as cuSOLVERMp `potrf` on the eigensolver's devices
+  (3.5 -> 1.8 s on 4 GPUs); see MULTI_GPU.md "Setup of one large molecule".
 - **G2-9 Distributed buffers and the distributed L are freed after every SCF**
   (`cuda/xtb_gpu_context.cu:5079`, `xtb_distributed_eigensolver.cpp:370-391`) [C], so every MD/opt
   step re-allocates and re-scatters them. Cost unmeasured.
 - **G2-10 Dense host downloads every geometry** (S, H0, L, gamma; P and C unless the deferred path
   is active; `xtb_native.cpp:543-550, 1674-1679`) [C] - 1.9 GB per n^2 matrix at nao 15444.
+  Measured Sep 29, 2026 (`-verbosity 3` setup split): 3.7 s per geometry at polymer_2x, the same on
+  1/2/4 GPUs - now the largest part of the setup after the device build (5.0 s).
 - **G2-5 Device 0 keeps every dense n^2 matrix**; adding GPUs only moves the eigensolver workspace
   off it: 17.9 -> 13.5 GB on 4 GPUs, 12.3 GB with device 0 out of the solver [D: GPU_TUNING.md:72-76,
   Sep 17]. The memory estimate is single-device (`cuda/xtb_gpu_context.cu:3517-3552`), so a system

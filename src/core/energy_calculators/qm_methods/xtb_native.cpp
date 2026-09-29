@@ -513,6 +513,9 @@ double XTB::Calculation(bool gradient)
     // SCF-setup block below) and their result (gpu_computed) is reused there, so the
     // device build runs exactly once. Any failure / non-resident mode → full host build.
     Matrix S, H0;
+    // Claude Generated (Sep 29, 2026): device path only - split of the "overlap + H0" bucket into
+    // the device integral build and the download of S/H0/L/gamma into the host matrices.
+    auto t_dev_built = t_cn;
     bool gpu_computed = false;        // device integral build succeeded (reused below)
     bool integrals_from_device = false;
     // X-I1: device d kernels are backend-gated. CUDA supports them; ROCm/Vulkan
@@ -538,6 +541,7 @@ double XTB::Calculation(bool gradient)
             if (basis_ok) m_gpu_basis_dirty = false;
         }
         gpu_computed = basis_ok && m_gpu_scf->beginComputed(gbf.xyz_bohr);
+        t_dev_built = clock::now();
         if (gpu_computed) {
             const int nao = m_basis.nao, nsh = m_basis.nsh;
             Eigen::MatrixXd Scm(nao, nao), H0cm(nao, nao), Lcm(nao, nao), Gcm(nsh, nsh);
@@ -625,6 +629,10 @@ double XTB::Calculation(bool gradient)
         CurcumaLogger::info("Setup timing:");
         CurcumaLogger::info_fmt("  coordination numbers : {:8.2f} ms", ms(t0, t_cn));
         CurcumaLogger::info_fmt("  overlap + H0         : {:8.2f} ms", ms(t_cn, t_h0));
+        if (integrals_from_device) {
+            CurcumaLogger::info_fmt("    device build (S/H0/L/gamma) : {:8.2f} ms", ms(t_cn, t_dev_built));
+            CurcumaLogger::info_fmt("    host download + copy        : {:8.2f} ms", ms(t_dev_built, t_h0));
+        }
         CurcumaLogger::info_fmt("  orthonormalizer      : {:8.2f} ms", ms(t_h0, t_ortho));
         CurcumaLogger::info_fmt("  Coulomb gamma matrix : {:8.2f} ms", ms(t_ortho, t_gamma));
         if (m_method == MethodType::GFN2) {

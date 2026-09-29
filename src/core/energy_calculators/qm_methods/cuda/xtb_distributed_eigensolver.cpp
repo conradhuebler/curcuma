@@ -183,6 +183,51 @@ public:
     int deviceCount() const override { return static_cast<int>(m_devs.size()); }
 
     bool supportsBackTransform() const override { return m_have_local_trsm; }
+    bool supportsCholesky() const override { return true; }
+
+    bool cholesky(int n, double* A, int src_device) override
+    {
+        const int ndev = static_cast<int>(m_devs.size());
+        m_input_intact = true;
+        m_reduce_ms = m_back_ms = 0.0;
+        if (!ensureMatrices(n, false)) return false;
+        auto t0 = std::chrono::steady_clock::now();
+        if (!scatterColumns(n, sizeof(double), A, src_device, [](Rank& R) { return R.dA; })) return false;
+        m_scatter_ms = msSince(t0);
+        t0 = std::chrono::steady_clock::now();
+        bool ok = onAllRanks(ndev, [&](int r) {
+            Rank& R = m_ranks[r];
+            cudaSetDevice(m_devs[r]);
+            size_t wdev = 0, whost = 0;
+            if (cusolverMpPotrf_bufferSize(R.handle, CUBLAS_FILL_MODE_LOWER, n, R.dA, 1, 1, R.descA,
+                                           CUDA_R_64F, &wdev, &whost) != CUSOLVER_STATUS_SUCCESS)
+                return false;
+            // The syevd workspace is idle here; reuse it when it is large enough.
+            void* dwork = R.dWork;
+            void* own = nullptr;
+            if (wdev > R.work_dev) {
+                if (cudaMalloc(&own, wdev) != cudaSuccess) { cudaGetLastError(); return false; }
+                dwork = own;
+            }
+            std::vector<char> hwork(std::max<size_t>(1, whost));
+            const auto st = cusolverMpPotrf(R.handle, CUBLAS_FILL_MODE_LOWER, n, R.dA, 1, 1, R.descA, CUDA_R_64F,
+                                            dwork, std::max(wdev, R.work_dev), hwork.data(), hwork.size(),
+                                            static_cast<int*>(R.dInfo));
+            const bool synced = cudaStreamSynchronize(R.stream) == cudaSuccess;
+            if (own) cudaFree(own);
+            int info = -1;
+            if (!synced || cudaMemcpy(&info, R.dInfo, sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess)
+                return false;
+            return st == CUSOLVER_STATUS_SUCCESS && info == 0;
+        });
+        if (!ok) return false;
+        m_solve_ms = msSince(t0);
+        t0 = std::chrono::steady_clock::now();
+        m_input_intact = false;
+        ok = gatherColumns(n, sizeof(double), A, src_device, [](Rank& R) { return R.dA; });
+        m_gather_ms = msSince(t0);
+        return ok;
+    }
 
     bool solve(int n, void* A, void* eig, bool fp32, int src_device) override
     {

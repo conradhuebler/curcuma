@@ -99,6 +99,22 @@ public:
         return false;
     }
 
+    /// True when cholesky() is available (cuSOLVERMp backend).
+    virtual bool supportsCholesky() const { return false; }
+
+    /**
+     * @brief FP64 Cholesky factorisation S = L L^T on the devices (Claude Generated, Sep 29, 2026).
+     * @param A n x n column-major on src_device; lower triangle read, overwritten by L in the lower
+     *          triangle (upper triangle: whatever the backend leaves there, as cusolverDnDpotrf)
+     * @return false on failure; A is only written after a successful factorisation, but a failed
+     *         gather can leave it partly overwritten (inputIntact() false)
+     */
+    virtual bool cholesky(int n, double* A, int src_device)
+    {
+        (void)n; (void)A; (void)src_device;
+        return false;
+    }
+
     /// True when solveBackTransformed() is available (cuSOLVERMp backend with plain cuBLAS).
     virtual bool supportsBackTransform() const { return false; }
 
