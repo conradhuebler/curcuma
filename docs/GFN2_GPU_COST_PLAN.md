@@ -1,7 +1,7 @@
 # GFN2 on several GPUs: where the time goes and what to change
 
-Status (Sep 29, 2026): stage 0 measured, stage 1a done, stage 1b tried and rejected; 1c and stages
-2-3 open.
+Status (Sep 29, 2026): stage 0 measured, stage 1a done, 1b tried and rejected, 1c deferred;
+stages 2-3 open (design below, awaiting the operator's go).
 All numbers: 4x RTX A4500 (20 GB, PCIe, no NVLink), polymer_2x (7320 atoms, nao 15444, 19252
 electrons, nocc 9626), commit `bfbdc569`, `CURCUMA_GPU_PROFILE=1`.
 
@@ -63,6 +63,27 @@ electrons, nocc 9626), commit `bfbdc569`, `CURCUMA_GPU_PROFILE=1`.
   out of the code; any faster density must accumulate in FP64 (e.g. a tiled FP64 kernel that
   reuses C rows - the current kernel reads C once per stored pair and runs at ~93 GFLOP/s, i.e.
   memory-bound).
+- **1c deferred.** The FP32 reduction already runs at ~13 TFLOP/s on device 0 (two `strsm`,
+  7.4 TFLOP in 0.57 s, near the A4500's FP32 peak), so four GPUs could save at most ~0.4 s per
+  iteration. Stage 2 below works in the AO basis and needs no reduction in its iterations, which
+  leaves the reduction only in the few full-diagonalisation steps.
+
+## Stages 2-3: design after stage 0/1
+
+Pseudo-diagonalisation in the **AO basis** (C^T S C = I), orbitals split over the GPUs by
+virtual columns, FP32 like today's mixed-precision iterations, density still accumulated in FP64:
+
+1. Broadcast F (FP32, 0.95 GB) to all GPUs; S is geometry-constant and stored once per GPU.
+2. GPU k: T_k = F C_virt[:,J_k], G_ov[:,J_k] = C_occ^T T_k (C_occ replicated, 0.6 GB FP32).
+3. theta = G_ai / (G_ii - G_aa) (eigenvalue estimates: G_ii = diag C^T F C, also split).
+4. C_occ += C_virt theta (partial per GPU, allreduce), C_virt -= C_occ theta^T (local).
+5. Re-orthonormalise C_occ against S (C_occ^T S C_occ, Cholesky, trsm), split by columns.
+
+Estimate ~0.8 s per iteration on 4 A4500 against 4.7 s (eigensolve) + 0.57 s (reduction) today.
+Full diagonalisation stays on the first iteration, whenever the SCF stalls or the HOMO-LUMO gap
+is small against kT, and every k-th iteration as a safety net. Stage 3 is the same step in FP64
+once, after the last FP32 full solve, replacing the FP64 `sygst + syevd + trsm` (26.9 s; est.
+8-9 s, and no FP64 reduction needed).
 
 ## Stages 1-3 (planned)
 
