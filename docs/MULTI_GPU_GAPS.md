@@ -264,8 +264,13 @@ Measured: 182 ms per energy call on polymer_2x on one A4500, EEQ ~79 ms, Coulomb
 - **F-3 No path spreads one GFN-FF molecule over several GPUs** *- IMPLEMENTED Sep 29, 2026 (CUDA):
   Coulomb tiles + projected-PCG EEQ (column blocks + matvec) over the devices, peer copies, ctest
   `gfnff_gpu_split_equals_single`; polymer_2x MD step 1/2/4 GPUs 0.139/0.099/0.076 s. Numbers and options:
-  GPU_TUNING.md section 3. Remaining EEQ cost at 4 GPUs is ~70 PCG iterations x ~0.5 ms (0.19 ms gemv +
-  peer latency + three host syncs per iteration).* [M] Original: - no NCCL, peer access or
+  GPU_TUNING.md section 3. Remaining EEQ cost at 4 GPUs is ~70 PCG iterations x ~0.5 ms. The loop now
+  syncs once per iteration instead of three times (alpha/beta on the device; 4 GPUs 0.076 -> 0.073 s/step,
+  charges within 3e-11 e of the exact CPU solve). Tried and NOT kept (measured, polymer_2x): an exact block
+  inverse per small fragment (1500 waters) as preconditioner - iterations 75/68/68 -> 73/66/68; a linear
+  extrapolation of the start vector - 1-2 of ~68 iterations. The conditioning of the inter-fragment
+  Coulomb coupling sets the iteration count; a global preconditioner (deflation, multigrid) would be the
+  next lever. `CURCUMA_PPCG_ITERS=1` prints the iterations of every solve.* [M] Original: - no NCCL, peer access or
   multi-device logic in the GFN-FF GPU code [C]. A standalone `-md` uses one device
   (`src/capabilities/simplemd.cpp:852-858`); batch consumers (ConfSearch MD/opt, `-sp`/`-opt`
   batch, CurcumaOpt threads, Hessian) lease one device per worker [C]. A split would need at each
