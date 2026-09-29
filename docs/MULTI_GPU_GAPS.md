@@ -82,8 +82,10 @@ on the optimised geometry a constant ~30 s against 249 s single-GPU [D: lab jour
   pre-existing, also on the CPU with `-threads 4`). Measured side effects, not fixed: the FD Hessian
   depends on the worker split at the default SCF threshold (GPU 1 vs 4 devices: max 0.3 cm-1; CPU 1 vs 4
   threads: 0.1 = print precision) and CPU vs GPU differ by up to 4.5 cm-1 (pre-existing, same with the
-  old binary); `-scf_threshold`/`-hessian.scf_threshold` do NOT reach the Hessian workers (H-2, open:
-  `executeHessian` forwards only `controller["hessian"]`).* [M] Original finding [C]: `-opt` multi-XYZ at `-threads <= 1` runs sequentially
+  old binary); `-scf_threshold`/`-hessian.scf_threshold` did NOT reach the Hessian workers (H-2: `executeHessian`
+  forwarded only `controller["hessian"]`, and ConfigManager drops object values). FIXED Sep 29: scopes are
+  forwarded and re-attached; with `-scf_threshold 1e-9` CPU, 1 GPU and 4 GPUs give identical frequencies,
+  i.e. the 4.5 cm-1 CPU/GPU gap was loose-SCF noise.* [M] Original finding [C]: `-opt` multi-XYZ at `-threads <= 1` runs sequentially
   (`src/capabilities/optimizer_factory.cpp:407-417`); ConfScan's energy recomputation is sequential
   (`src/capabilities/confscan.cpp:545, 608`); the Hessian defaults to 1 thread, so 1 GPU
   (`src/capabilities/hessian.cpp:283`); only the `-sp` batch raises its worker count to the GPU slots
@@ -231,7 +233,14 @@ Measured: 182 ms per energy call on polymer_2x on one A4500, EEQ ~79 ms, Coulomb
 - **F-7 List maintenance is serial on the host** and re-uploads with blocking `cudaMemcpy`
   (`ff_methods/cuda/gfnff_soa.h:85-92`); the CPU `FFWorkspace` is kept alive and updated on each
   rebuild [C]. The device D4 build exists but is opt-in (630 -> 32 ms) [D: GPU_TUNING.md:158].
-- **F-8 The two-pass topology recomputation can fire during MD** [C]; its cost has never been measured.
+- **F-8 The two-pass topology recomputation can fire during MD** [C]. *Measured and FIXED Sep 29, 2026:
+  with `topology_mode auto` every forced HB/XB refresh (every 10 calls) re-ran the full topology (CPU EEQ
+  N=7320, Hueckel, BATM; ~1.65 s per firing, ~160 ms/step on polymer_2x) because an atom had moved > 0.5
+  Bohr, and every repulsion rebuild re-derived the bond list (26.8 M pair tests, ~75 % of ~265 ms). The
+  reference never recomputes the topology in MD (gfnff_hbset reads only the setup topology). Default is
+  now `topology_mode constant`, and the bond list is frozen with it. MD results unchanged: triose CPU 300
+  steps bit-identical auto vs constant (energy terms, charges, gradients), polymer_2x GPU 45 steps <= 4e-12
+  Eh (GPU run-to-run noise). polymer_2x MD step: GPU 0.377 -> 0.200 s, CPU (16 thr) 1.36 -> 1.08 s.* [M]
 - **F-9 Per-step overhead**: a blocking displacement sync, three CN downloads nobody reads, WP5-C
   skip-check kernels whose flag has no reader (`ff_methods/cuda/ff_workspace_gpu.cu:3000-3016, 2719`) [C].
 - **F-10 CUDA graphs are permanently off** (graph capture failed on Blackwell;
@@ -253,7 +262,17 @@ Measured: 182 ms per energy call on polymer_2x on one A4500, EEQ ~79 ms, Coulomb
   step: coordinate broadcast, allreduce of CN and dEdCN, a row-block distributed EEQ matrix with an
   allreduce per PCG dot product, a charge broadcast for Coulomb and a gradient reduction - with the
   host stages F-7/F-8 still serial.
-- **F-16 Batch workers leak** the host GFNFF object and the full parameter set on destruction
+- **F-16 Batch workers leak** *- FIXED Sep 29, 2026. Root cause was NOT CUDA: the nvcc-compiled .cu TUs
+  of the CUDA plugin lacked `-DEIGEN_MAX_ALIGN_BYTES=64` (hipcc got it in June), so Eigen's inline
+  allocation code existed in two ABIs inside the plugin; freeing the host GFNFF object aborted with
+  `free(): invalid pointer` (reproduced deterministically, gdb: `GFNFF::~GFNFF`). The March 2026 "heap
+  corruption" workaround leaked ~194 MB per structure (54 MB parameter set + ~140 MB GFNFF object,
+  LD_PRELOAD tracker). Now `CMAKE_CUDA_FLAGS` carries the same pin, the wrapper frees both and keeps only
+  bonds + bond_hb_data. Peak RSS 8/32/64 x polymer: 1.95/1.90/1.93 GB (was 2.7/7.3/13.3); 10/10 runs of 64
+  structures clean under `GLIBC_TUNABLES=glibc.malloc.check=3`; energies identical.
+  `CURCUMA_GFNFF_GPU_LEAK=1` restores the old leak. Whether F-Q9 (TECHNICAL_DEBT) had the same cause is
+  plausible (its ASan build had vectorization off, i.e. no ABI split) but not proven: F-Q9 no longer
+  reproduces with the Sep 27 binary (0/5).* [M] Original: the host GFNFF object and the full parameter set on destruction
   (`qm_methods/gfnff_gpu_method_impl.h:368-370, 500-505`); the comment says "~100 KB", but the set
   holds every pair list [C]. Size unmeasured.
 - No GFN-FF batch timing exists; all pool numbers are GFN2 [D: MULTI_GPU.md:226-237].
@@ -330,6 +349,32 @@ Systeme.md`, entry Sep 28. GFN-FF MD: `-dt 1 -thermostat csvr -T 300 -seed 7 -th
 
 Measurement artefact found: `-md_diagnostics_timing` reports host prep times on the GPU path (`eeq_solve`
 769 ms, same as the CPU run), and with `-dump 1` the diagnostics writing itself slows the step to ~1.5 s.
+
+## Profiling Sep 29, 2026 (nsys + perf, agents; all timed runs serialised on one lock)
+
+**GFN-FF MD step, polymer_2x, 1 A4500, 16 host threads** (before the F-8 fix: 0.38 s/step; after: 0.20 s):
+
+| part | ms/step | note |
+|---|---:|---|
+| `k_coulomb_implicit` | 85 | all pairs, each twice |
+| EEQ projected PCG (`symv`) | 53 | ~69 iterations x 0.76 ms, bandwidth-bound dense N x N |
+| `k_eeq_build_matrix` | 14 | dense N x N every step |
+| dispersion + dC6/dCN | 14 | |
+| CN pair-list regeneration | 6 | fires on 16/25 steps |
+| GPU idle (syncs, 208 `cudaStreamSynchronize`/step) | 5-6 | GPU busy 97 % of a normal step |
+| forced HB/XB refresh incl. full topology | 160 | F-8, fixed |
+| repulsion rebuild incl. bond list | 34 | bond list part fixed with F-8 |
+| outside the energy call | <= 2 | |
+
+**GFN2 polymer_2x SP (nao 15444), 1/2/4 A4500:** wall 287 / 227 / 143 s, SCF iterations 15 / 14 / 12
+(part of the "speedup" is FP32 rounding luck). Per FP32 iteration only 1.78x on 4 GPUs. Not scaling at 4
+GPUs (~55 of 140 s): setup 20.8 s (`k_overlap_h0` 11.6 s and Cholesky of S 3.5 s on device 0), post-SCF
+5 s (D4 ATM 3.8 s on device 0), the FP64 back-transform `trsm` (10.6 / 20.8 / 10.9 s - does not scale),
+~1.5 s/iteration device-0 share (potential 0.33, SCC energy 0.17, FP32 copy/back-transform 0.94 s).
+FP32 `syevd` inside cuSOLVERMp is the largest bucket (4.8 s/it at 4 GPUs, NCCL 22-30 % of busy time).
+G2-9 (buffer re-allocation between opt steps) measured <= 0.2 s per step - not worth it. Device-0 peak
+15.3 / 18.5 / 15.8 GB for 1 / 2 / 4 GPUs (2 GPUs needs more than 1). `-opt` on 4 GPUs ran 5 SCFs for 3
+printed steps (two extra at the start geometry, ~216 s) - under investigation.
 
 ## 4. What to tackle, in order
 

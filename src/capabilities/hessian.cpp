@@ -26,6 +26,7 @@
 
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
+#include "src/core/energy_calculators/method_factory.h"
 #include "src/core/intra_parallel_context.h"
 #include "src/core/gpu_device_pool.h"
 
@@ -219,6 +220,14 @@ void HessianThread::Threaded()
 Hessian::Hessian(const std::string& method, const json& controller, bool silent)
     : Hessian(method, ConfigManager("hessian", controller), silent)
 {
+    // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md H-2): ConfigManager keeps only scalar
+    // top-level keys, so method sub-scopes (xtb, gfnff, eeq_solver, ...) handed in by
+    // executeHessian were dropped before the displacement workers built their EnergyCalculators
+    // (-scf_threshold changed the frequencies by exactly 0). Re-attach them.
+    for (const std::string& scope : MethodFactory::methodParameterScopes()) {
+        if (controller.contains(scope) && controller[scope].is_object())
+            m_controller[scope] = controller[scope];
+    }
 }
 
 Hessian::Hessian(const json& controller, bool silent)

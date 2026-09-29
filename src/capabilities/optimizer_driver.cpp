@@ -214,6 +214,7 @@ bool OptimizerDriver::InitializeOptimization(const Molecule* molecule)
     }
 
     m_molecule = *molecule;
+    m_eval_cache_valid = false;   // new molecule / calculator setup below
 
     // Validate context
     if (!m_context.isValid()) {
@@ -279,6 +280,7 @@ bool OptimizerDriver::ReinitializeKeepCalculator(const Molecule& molecule)
     // move (evaluateEnergyAndGradient uses updateGeometry()). Keeps interactive
     // grab restarts cheap and crash-free even when the geometry is badly distorted.
     m_molecule = molecule;
+    m_eval_cache_valid = false;
 
     if (!m_context.isValid()) {
         CurcumaLogger::error_fmt("Invalid optimization context: {}", m_context.getValidationErrors());
@@ -625,6 +627,15 @@ bool OptimizerDriver::evaluateEnergyAndGradient(const Vector& coordinates, doubl
 {
     try {
         CoordinatesToMolecule(coordinates, m_molecule);
+        // Claude Generated (Sep 2026): same geometry as the last evaluation -> reuse it (see
+        // m_eval_cache_valid). Exact comparison on purpose: any change re-evaluates.
+        if (m_eval_cache_valid && !m_context.use_numerical_gradient
+            && m_eval_cache_coords.size() == coordinates.size()
+            && (m_eval_cache_coords.array() == coordinates.array()).all()) {
+            energy = m_eval_cache_energy;
+            gradient = m_eval_cache_gradient;
+            return true;
+        }
         // Claude Generated (Mar 2026): Use updateGeometry instead of setMolecule to avoid
         // full GFN-FF re-initialization (topology/charges/parameters) on every step.
         // setMolecule() triggers expensive InitialiseMolecule() which can return 0.0 energy.
@@ -697,9 +708,14 @@ bool OptimizerDriver::evaluateEnergyAndGradient(const Vector& coordinates, doubl
             }
         }
 
+        m_eval_cache_coords = coordinates;
+        m_eval_cache_energy = energy;
+        m_eval_cache_gradient = gradient;
+        m_eval_cache_valid = true;
         return true;
 
     } catch (const std::exception& e) {
+        m_eval_cache_valid = false;
         CurcumaLogger::error_fmt("Energy/gradient evaluation failed: {}", e.what());
         return false;
     }

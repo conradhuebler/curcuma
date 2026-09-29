@@ -577,7 +577,7 @@ GFNFF::GFNFF(const json& parameters)
         { "hbond", true },
         { "repulsion_scaling", 1.0 },
         { "solvent", "none" },  // Claude Generated (Mar 2026): ALPB solvation
-        { "topology_mode", "auto" },  // "auto" (two-tier caching) or "constant" (never recalculate)
+        { "topology_mode", "constant" },  // "constant" (frozen, reference behaviour; default since Sep 29, 2026), "auto" or "react"
         { "cache_topology", true },   // Claude Generated (Mar 2026): Cache Phase-1 topology in param.json (opt-out)
         { "print_timing", true }      // Claude Generated (Mar 2026): Print init timing at verbosity >= 1
     };
@@ -600,12 +600,12 @@ GFNFF::GFNFF(const json& parameters)
 
     // Extract topology mode: auto (adaptive caching), constant (frozen), react
     // (dynamic bond topology, Claude Generated Aug 2026). "default" aliases auto.
-    m_topology_mode = m_parameters.value("topology_mode", "auto");
+    m_topology_mode = m_parameters.value("topology_mode", "constant");
     if (m_topology_mode == "default")
-        m_topology_mode = "auto";
+        m_topology_mode = "constant";
     if (m_topology_mode != "auto" && m_topology_mode != "constant" && m_topology_mode != "react") {
-        CurcumaLogger::warn(fmt::format("GFNFF: unknown topology_mode '{}', falling back to 'auto'", m_topology_mode));
-        m_topology_mode = "auto";
+        CurcumaLogger::warn(fmt::format("GFNFF: unknown topology_mode '{}', falling back to 'constant'", m_topology_mode));
+        m_topology_mode = "constant";
     }
     m_react_form_factor = m_parameters.value("react_bond_form_factor", 1.6);
     m_react_break_factor = m_parameters.value("react_bond_break_factor", 2.6);
@@ -1086,6 +1086,12 @@ const GFNFF::TopologyInfo& GFNFF::getCachedTopology() const {
 }
 
 const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
+    // Claude Generated (Sep 2026): with a frozen topology (constant mode, after the first full
+    // topology) the bond list is frozen too, as in the reference, where every bonded/non-bonded
+    // classification during MD uses the setup topology. Recomputing it (26.8 M pair tests at 7320
+    // atoms) was ~75 % of each non-bonded repulsion rebuild (~200 ms per rebuild on polymer_2x).
+    if (m_cached_bond_list && m_static_topology_valid && m_topology_mode == "constant")
+        return *m_cached_bond_list;
     // Only recalculate if geometry has meaningfully changed
     if (!m_cached_bond_list || m_geometry_tracker.geometryChanged(m_geometry_bohr)) {
         if (m_cached_bond_list && CurcumaLogger::get_verbosity() >= 2) {

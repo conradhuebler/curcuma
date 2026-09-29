@@ -1287,7 +1287,15 @@ int executeHessian(const json& controller, int argc, char** argv) {
         return 1;
     }
     std::string method = controller.value("method", "gfnff");
-    Hessian hessian(method, controller.value("hessian", json::object()));
+    // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md H-2): the displacement workers build their
+    // EnergyCalculators from the hessian scope only, so -scf_threshold / -xtb.* / -gfnff.* never
+    // reached them. Forward the method sub-scopes as curcumaopt.cpp does for opt/sp.
+    json hessian_config = controller.value("hessian", json::object());
+    for (const std::string& scope : MethodFactory::methodParameterScopes()) {
+        if (controller.contains(scope) && controller[scope].is_object() && !hessian_config.contains(scope))
+            hessian_config[scope] = controller[scope];
+    }
+    Hessian hessian(method, hessian_config);
     initializeBMT(&hessian, argv[2], "hessian", controller);
     Molecule mol1 = Files::LoadFile(argv[2]);
     hessian.setMolecule(mol1);

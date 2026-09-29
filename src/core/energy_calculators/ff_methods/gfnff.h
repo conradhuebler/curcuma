@@ -371,7 +371,7 @@ PARAM(solvent_model, String, "alpb",
 // React topology mode (Claude Generated Aug 2026): event-driven reactive bond topology.
 // Bonds may form and break during MD; all bonded terms are rebuilt at change events.
 // See docs/GFNFF_REACT_TOPOLOGY.md. PARAMs stay single-line, see note above.
-PARAM(topology_mode, String, "auto", "Topology mode: auto = adaptive two-tier caching, constant = frozen after init, react = bond topology is re-detected with hysteresis during MD and all bonded terms are rebuilt at change events. default is accepted as an alias for auto.", "Basic", {})
+PARAM(topology_mode, String, "constant", "Topology mode: constant (default since Sep 29, 2026) = topology and bond list frozen after init, as in the Fortran reference (gfnff_hbset reads only the setup topology); auto = full topology recalculation whenever an atom moved more than 0.5 Bohr (measured: identical results, ~1.6 s per recalculation at 7320 atoms), react = bond topology is re-detected with hysteresis during MD and all bonded terms are rebuilt at change events. default is accepted as an alias for constant.", "Basic", {})
 PARAM(react_bond_form_factor, Double, 1.6, "React mode: a non-bonded pair becomes a bond when r < factor * covalent-radius sum * element fat scaling. Optimistic on purpose: the Gaussian bond well is weak at this distance and formation is expected mid-collision. Must stay below react_bond_break_factor and below typical hydrogen-bond contact distances.", "Reactive", {})
 PARAM(react_bond_break_factor, Double, 2.6, "React mode: an existing bond is removed when r > factor * covalent-radius sum * element fat scaling. Conservative on purpose: the bond is kept until its Gaussian well has largely decayed, so removal causes only a small energy jump. The wide gap to react_bond_form_factor is the hysteresis that prevents flicker.", "Reactive", {})
 PARAM(react_check_every, Int, 5, "React mode: run the O N^2 hysteresis bond scan every N energy calls. 0 = displacement-triggered only.", "Reactive", {})
@@ -2742,7 +2742,7 @@ private:
     bool rebuildReactiveTopology();
 
     // Topology caching mode: "auto" (two-tier caching) or "constant" (never recalculate)
-    std::string m_topology_mode = "auto";
+    std::string m_topology_mode = "constant";
 
     // Claude Generated (March 2026): Topology persistence in param.json
     bool m_cache_topology = true;   ///< Cache Phase-1 EEQ topology in param.json (opt-out)

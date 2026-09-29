@@ -137,11 +137,14 @@ private:
     bool initGPUWorkspace();
 
     std::unique_ptr<GFNFF>          m_gfnff;
-    // NOTE: GPU params intentionally leaked (raw ptr, never freed).
-    // The workspace's device allocations corrupt adjacent heap metadata, making
-    // the GFNFFParameterSet unfreeable.  Cost: ~100 KB one-time leak.
-    // TODO: Investigate CUDA driver heap corruption root cause.
-    GFNFFParameterSet*              m_gpu_params_leaked = nullptr;
+    // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md F-16): the part of the host parameter
+    // set the GPU path still reads after the workspace is built (bonds + bond_hb_data for the
+    // HB bond cross-reference). It used to be the FULL set, deliberately leaked as a guard against
+    // a March 2026 heap corruption whose cause (async uploads from destroyed temporaries) was fixed
+    // in the same commit; measured Sep 2026: 54 MB per molecule of 1410 atoms, plus ~140 MB for
+    // the leaked GFNFF object - 194 MB per structure in a GPU batch. Now freed normally;
+    // CURCUMA_GFNFF_GPU_LEAK=1 restores the old leak (safety valve for TECHNICAL_DEBT F-Q9).
+    std::unique_ptr<GFNFFParameterSet> m_gpu_params;
     std::unique_ptr<GpuWorkspace>   m_gpu_workspace;
 
     // Claude Generated (March 2026): GPU EEQ solver (cuSOLVER Cholesky)
@@ -279,6 +282,17 @@ private:
 // Constructor
 // ---------------------------------------------------------------------------
 
+/// Claude Generated (Sep 2026, F-16): CURCUMA_GFNFF_GPU_LEAK=1 restores the old deliberate leak
+/// of the host GFNFF object and parameter set (safety valve for the unresolved F-Q9 heap issue).
+inline bool gfnffGpuLeakRequested()
+{
+    static const bool leak = [] {
+        const char* e = std::getenv("CURCUMA_GFNFF_GPU_LEAK");
+        return e && *e && std::string(e) != "0";
+    }();
+    return leak;
+}
+
 template <class Backend>
 GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
                                                       const json& config)
@@ -374,9 +388,15 @@ GFNFFGpuMethodImpl<Backend>::~GFNFFGpuMethodImpl()
     bindDevice();
     m_gpu_workspace.reset();
 
-    // Leak GFNFF instance — its Eigen member destructors (m_last_cn, m_charges, etc.)
-    // crash on CUDA-corrupted heap metadata.  Cost: ~10 KB, process is ending anyway.
-    m_gfnff.release();
+    // Claude Generated (Sep 2026, F-16): freed normally now (it used to be leaked, ~140 MB per
+    // molecule of 1410 atoms, see m_gpu_params). CURCUMA_GFNFF_GPU_LEAK=1 keeps the old leak.
+    if (gfnffGpuLeakRequested()) {
+        (void)m_gpu_params.release();
+        (void)m_gfnff.release();
+    } else {
+        m_gpu_params.reset();
+        m_gfnff.reset();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -508,10 +528,20 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         // All energy terms (including HB, XB, ATM, BATM, sTors) run on GPU.
         m_gpu_workspace = std::make_unique<GpuWorkspace>(*pending, natoms, atom_types);
 
-        // WORKAROUND: Leak the parameter set — the workspace's device allocations corrupt
-        // adjacent heap metadata, making the GFNFFParameterSet unfreeable.
-        // Cost: ~100 KB one-time.  TODO: investigate CUDA root cause.
-        m_gpu_params_leaked = pending.release();
+        // Claude Generated (Sep 2026, F-16): keep only what the GPU path reads later (bonds and
+        // the bond-HB cross-reference, see calculateEnergy); the rest (D4 pairs, repulsion
+        // pairs, ...) is on the device now and is freed here. Old behaviour (leak the whole set)
+        // with CURCUMA_GFNFF_GPU_LEAK=1.
+        if (gfnffGpuLeakRequested()) {
+            (void)m_gpu_params.release();
+            m_gpu_params.reset(pending.release());
+        } else {
+            auto keep = std::make_unique<GFNFFParameterSet>();
+            keep->bonds = std::move(pending->bonds);
+            keep->bond_hb_data = std::move(pending->bond_hb_data);
+            pending.reset();
+            m_gpu_params = std::move(keep);
+        }
 
         // Pass verbosity to GPU workspace for conditional diagnostics
         m_gpu_workspace->setVerbosity(CurcumaLogger::get_verbosity());
@@ -724,8 +754,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     // when it rebuilt the bonded terms, the whole device workspace is stale (bond/angle/
     // torsion SoAs, repulsion partition, Coulomb params, EEQ fragment topology). Rebuild
     // it from the refreshed cached parameter set by re-running initGPUWorkspace().
-    // Note: each rebuild leaks one ~100 KB parameter set (pre-existing CUDA heap
-    // workaround in initGPUWorkspace) — bounded by the number of bond-change events.
+    // (Since Sep 2026 the previous parameter set is freed here; it used to be leaked, F-16.)
     m_gfnff->updateReactiveTopologyIfNeeded();
     if (m_gfnff->consumeReactRebuild()) {
         m_gpu_workspace.reset();
@@ -792,7 +821,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     // Claude Generated (Apr 2026): HB CN computed entirely on GPU via two-pass kernel.
     // Replaces CPU loop over bond_hb_data (O(n_hb_pairs) erf() evaluations).
     auto t_hb_cn_start = std::chrono::high_resolution_clock::now();
-    if (m_gpu_params_leaked && !m_gpu_params_leaked->bond_hb_data.empty()) {
+    if (m_gpu_params && !m_gpu_params->bond_hb_data.empty()) {
         m_gpu_workspace->computeBondHBCN();
     }
     auto t_hb_cn_end = std::chrono::high_resolution_clock::now();
@@ -809,9 +838,9 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         // Without this, the bond SoA's nr_hb/hb_H_atom and the HB alpha pair list become stale,
         // causing gradient errors at H-bond atoms during optimization/MD.
         // Reference: Fortran gfnff_ini2.f90:1008-1060 (bond_hb_AHB_set0/set1)
-        if (m_gpu_params_leaked) {
+        if (m_gpu_params) {
             auto hb_update = m_gfnff->rebuildBondHBData(
-                m_gfnff->getLastHBonds(), m_gpu_params_leaked->bonds);
+                m_gfnff->getLastHBonds(), m_gpu_params->bonds);
 
             // Update HB alpha (H,B) pair list on GPU
             m_gpu_workspace->updateHBAlphaPairs(hb_update.bond_hb_data, m_atom_types);
@@ -820,14 +849,14 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
             m_gpu_workspace->updateBondHBMetadata(hb_update.bond_nr_hb, hb_update.bond_hb_H_atom);
 
             // Update leaked params' bond_hb_data for HB CN computation (Step 2b)
-            m_gpu_params_leaked->bond_hb_data = std::move(hb_update.bond_hb_data);
+            m_gpu_params->bond_hb_data = std::move(hb_update.bond_hb_data);
 
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::info(fmt::format(
                     "  [DEBUG] HB re-detection: updated bond_hb_data ({} entries), "
                     "hb_alpha ({} pairs), bond nr_hb for {} bonds",
-                    static_cast<int>(m_gpu_params_leaked->bond_hb_data.size()),
-                    [&]() { int n = 0; for (const auto& e : m_gpu_params_leaked->bond_hb_data) n += static_cast<int>(e.B_atoms.size()); return n; }(),
+                    static_cast<int>(m_gpu_params->bond_hb_data.size()),
+                    [&]() { int n = 0; for (const auto& e : m_gpu_params->bond_hb_data) n += static_cast<int>(e.B_atoms.size()); return n; }(),
                     static_cast<int>(hb_update.bond_nr_hb.size())));
             }
         }

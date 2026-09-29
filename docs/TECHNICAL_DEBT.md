@@ -483,6 +483,14 @@ Correctness / crash / UB first, then maintainability. "v" = spot-verified by re-
 - Native xTB and GFN-FF GPU-kernel internals were deliberately **not** audited (out of scope); only CPU-path / `#ifdef`-leak / non-GPU debt there.
 - This is documentation only — no fixes applied. Each row's "suggested fix" is a one-line pointer, not a reviewed patch.
 - **2026-06-26 merge:** the separate architecture audit `TECHNICAL_DEBT_ENERGY_SYSTEM.md` was folded in here — its new findings became F-Q9, X-P1, X-P2, Q-59, D-46, and the section-5 build-flag note; everything else it raised was already covered above (Q-38 include path, D-26 copyGradientTo, D-24 interface bloat, D-18/D-19/D-20, D-2/D-3/D-15, F-W1, X-M5). That file was deleted after the merge.
+- **2026-09-29, F-Q9 likely cause found (AI, machine-tested):** the nvcc-compiled .cu TUs of the CUDA plugin were
+  built without `-DEIGEN_MAX_ALIGN_BYTES=64` (g++ and hipcc had it), so Eigen's inline allocation code existed in two
+  ABIs in the plugin. Freeing the host GFNFF object deterministically aborted with `free(): invalid pointer` in
+  `GFNFF::~GFNFF`; with the pin in `CMAKE_CUDA_FLAGS` it is freed cleanly (10/10 x 64 structures under
+  `glibc.malloc.check=3`), and the F-Q9 parameter-set leak is gone (see MULTI_GPU_GAPS F-16). This also explains why
+  the Sep 24 ASan build (vectorization off) never reproduced the crash. The Sep 24 reproducer itself no longer crashes
+  with the Sep 27 binary (0/5), so the link to that specific SIGSEGV is plausible, not proven. D-26/D-46 (reference /
+  copy workarounds for the same "CUDA heap" class) can be revisited.
 - **2026-09-24, F-Q9/D-26/D-46 investigated, root cause not pinned down (AI, machine-tested tooling, no fix applied):**
   requested as "fix the SIGSEGV at its source" for a specific, reproducible instance — GFN-FF MD on `polymer_2x`
   (nfrag=1502), GPU active, `-eeq_rocm_cpu_fragment_threshold` routing the CPU exact-PCG EEQ solve

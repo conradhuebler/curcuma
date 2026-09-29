@@ -972,14 +972,9 @@
 
 ---
 
-### Hessian: SCF-Schwelle erreicht die Worker nicht (gefunden 2026-09-28)
-- **Status**: ⏳ offen
-- **Befund**: `-scf_threshold 1e-9` und `-hessian.scf_threshold 1e-9` aendern die Frequenzen von caffeine (gfn2) um
-  exakt 0 - der Schluessel kommt nicht an; `executeHessian` (`src/main.cpp`) reicht nur `controller["hessian"]` weiter,
-  die Methoden-Unterbereiche (`xtb`, `gfnff`, ...) fehlen (gleiche Klasse wie ConfSearch vor `ChildConfig`).
-- **Folge**: bei der lockeren Standardschwelle haengt die FD-Hessian von der Worker-Aufteilung ab (1 vs 4 GPUs:
-  bis 0.3 cm-1) und CPU vs GPU weicht bis 4.5 cm-1 ab (vorbestehend, altes Binary identisch).
-- **Task**: Unterbereiche wie `MethodFactory::methodParameterScopes()` weiterreichen, dann CPU/GPU mit 1e-9 erneut vergleichen.
+### Hessian: SCF-Schwelle erreicht die Worker nicht — BEHOBEN (2026-09-29)
+- `executeHessian` reicht die Methoden-Unterbereiche weiter, der Hessian-Konstruktor haengt sie nach ConfigManager wieder an.
+  Mit `-scf_threshold 1e-9` liefern CPU, 1 GPU und 4 GPUs identische Frequenzen (caffeine, gfn2).
 
 ### ROCm: drei offene Fehler aus der Multi-GPU-Analyse — nur dokumentiert (2026-09-28)
 - **Status**: ⏳ offen. Betreiberentscheidung 28.09.: ohne ROCm-Hardware keine Codeaenderung, nur Doku.
