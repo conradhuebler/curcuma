@@ -11103,18 +11103,20 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
     const bool hh_use_bpair = m_parameters.value("hh_repulsion_bpair", true);
     const SparseTopoTable& hh_table = hh_use_bpair ? topo_info.bpair : topo_info.topo_distances;
 
-    auto make_nb_rep = [&](int ii, int jj) {
+    // Claude Generated (Sep 2026): returns the pair instead of appending it, so the candidate
+    // pairs can be evaluated in parallel (see below). Unchanged physics.
+    auto make_nb_rep = [&](int ii, int jj, GFNFFRepulsion& r) -> bool {
         int i = std::min(ii, jj);
         int j = std::max(ii, jj);
-        if (i == j) return;
-        if (bonded_set.count({i, j}) > 0) return;
+        if (i == j) return false;
+        if (bonded_set.count({i, j}) > 0) return false;
 
         int zi = m_atoms[i] - 1;
         int zj = m_atoms[j] - 1;
 
         bool valid = (zi >= 0 && zi < static_cast<int>(repan_angewChem2020.size()) &&
                       zj >= 0 && zj < static_cast<int>(repan_angewChem2020.size()));
-        if (!valid) return;
+        if (!valid) return false;
 
         double repz_i = (zi >= 0 && zi < static_cast<int>(repz.size())) ? repz[zi] : 1.0;
         double repz_j = (zj >= 0 && zj < static_cast<int>(repz.size())) ? repz[zj] : 1.0;
@@ -11150,22 +11152,26 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
             ff = 1.04;
         }
 
-        GFNFFRepulsion r;
+        r = GFNFFRepulsion{};
         r.i = i;
         r.j = j;
         r.alpha = std::sqrt(dum1 * dum2) * ff;
         r.repab = repz_i * repz_j * REPSCALN;
         r.r_cut = NB_REP_RCUT;
 
-        nonbonded_reps.push_back(r);
-
         if (m_rep_diag) {
             int topo_dist = topo_info.topo_distances.get(i, j);
             fmt::print(stderr, "nb_rep {:3d}-{:3d} alpha={:.10f} repab={:.10f} qa_i={:.10f} qa_j={:.10f} cn_i={:.0f} cn_j={:.0f} ff={:.4f} bpair={}\n",
                 i+1, j+1, r.alpha, r.repab, qa_i, qa_j, cn_i, cn_j, ff, topo_dist);
         }
+        return true;
     };
 
+    // Claude Generated (Sep 2026): collect the candidate pairs serially (cheap), evaluate them in
+    // parallel in contiguous static ranges and concatenate the ranges in order - the list is
+    // identical to the serial one, element for element. The per-pair work (bonded-set lookup,
+    // H...H topology lookup, sqrt) made this ~64 ms of every repulsion rebuild at 7320 atoms.
+    std::vector<std::pair<int, int>> cand;
     if (repulsionListIsDistanceFiltered()) {
         // Claude Generated (Sep 2026): build radius = kernel cutoff + optional Verlet skin
         // (nonbonded_skin_bohr, default 2 since Sep 27, 2026). Pairs between 20 and 20+skin are stored but the
@@ -11173,11 +11179,34 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
         // updateNonbondedRepulsionIfNeeded() rebuild only after skin/2 of atomic motion.
         SpatialCellList rep_cells;
         rep_cells.build(m_geometry_bohr, NB_REP_RCUT + nonbondedSkinBohr());
-        rep_cells.forEachPair([&](int i, int j, double /*r2*/) { make_nb_rep(i, j); });
+        rep_cells.forEachPair([&](int i, int j, double /*r2*/) { cand.emplace_back(i, j); });
     } else {
+        cand.reserve(static_cast<size_t>(m_atomcount) * (m_atomcount - 1) / 2);
         for (int i = 0; i < m_atomcount; ++i)
             for (int j = i + 1; j < m_atomcount; ++j)
-                make_nb_rep(i, j);
+                cand.emplace_back(i, j);
+    }
+    const int rep_threads = std::max(1, m_threads);
+    if (m_rep_diag || rep_threads == 1 || cand.size() < 20000) {
+        nonbonded_reps.reserve(cand.size());
+        GFNFFRepulsion r;
+        for (const auto& c : cand)
+            if (make_nb_rep(c.first, c.second, r)) nonbonded_reps.push_back(r);
+    } else {
+        std::vector<std::vector<GFNFFRepulsion>> part(rep_threads);
+        const size_t n = cand.size();
+        #pragma omp parallel for num_threads(rep_threads) schedule(static, 1)
+        for (int t = 0; t < rep_threads; ++t) {
+            const size_t a = n * t / rep_threads, b = n * (t + 1) / rep_threads;
+            part[t].reserve(b - a);
+            GFNFFRepulsion r;
+            for (size_t k = a; k < b; ++k)
+                if (make_nb_rep(cand[k].first, cand[k].second, r)) part[t].push_back(r);
+        }
+        size_t total = 0;
+        for (const auto& pp : part) total += pp.size();
+        nonbonded_reps.reserve(total);
+        for (auto& pp : part) nonbonded_reps.insert(nonbonded_reps.end(), pp.begin(), pp.end());
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
