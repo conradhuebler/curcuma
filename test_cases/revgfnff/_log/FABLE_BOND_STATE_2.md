@@ -508,8 +508,8 @@ quantity. Static structures with no 2-coordinate H and no H in a ring are bit-id
 construction (that is the regression net). The count of what the rules touch (MEASURED offline
 from the gate sweep's saved corners, 2647 structures): **80 structures have a hydrogen with two
 listed partners** (GMTKN55 78: all 13 BH76 RKT transition states, AHB21/3 and /8, AL2X6 al2h6/
-al2me4/al2me5, ALK8 x3, BHDIV10 ts5/ts7, BHPERI/TS5, PA26/c2h2p and h2p, 24 MB16-43 clusters, ...;
-MOR41 PR06/PR07), **38 of them with an H-bridged triangle** (R1 fires there). Everything else is
+al2me4/al2me5, ALK8 x3, BHDIV10 ts5/ts7, BHPERI/TS5, PA26 c2h2p/h2p/p2p/si2h6p, 28 MB16-43 clusters [corrected from "24" in §7.6], NBPRC/K_H, PArel x3,
+PX13 x11, RC21/2p3, W4-11/b2h6, WATER27 x2, WCPT18 x3; MOR41 PR06/PR07), **38 of them with an H-bridged triangle** (R1 fires there). Everything else is
 untouched.
 
 ### 7.4 Falsifier table with predictions
@@ -527,11 +527,11 @@ Angle total. kcal/mol unless stated. "gate" = `rev_pair_validity`.
 | e | rkt03 TS (pt12), relative to CH4 + H | Q5 + WP5 | barrier **-16.3** (ref +7.6); relative to CH3 + H2 +27.5 (ref +9.2) | C-H4 E -0.0935 -> -0.0707: **+14.4** -> barrier **-1.9** from CH4 + H, **+41.9** from CH3 + H2 | the -43.8 reaction energy (§7.2 b) is the larger defect and is not Q5's |
 | f | FHF- De (FHF- -> HF + F-) | Q5 + TODO #13 | **-120.6** (gfnff -74.9, known ~-45) | bond -0.28540 -> -0.21566: **+43.8** -> De **-76.9**; angle 0 (linear), H2 no static effect | the remaining ~32 over-binding is the H budget (§1 row e) |
 | g | H5O2+ | Q5 + budget | 0.42704 Eh; share cost +167.5 | bridging pairs -0.22663 -> -0.17125: **+34.8** (angle at H_b: fc 0.089 at 180 deg, ~0) | reference: an external De still needed |
-| h | CH5+ probe (net +1, H-H valid via `q+`) | Q5 | 0.66022 Eh | C-H_b /(1.3234 x 1.18): +61.0; H-H /1.18: +5.6; siblings /1.05: +16.0; minus the two H-centred angles (fc 0.178 at ~65 deg vs 180, <= the Angle total 0.0270 Eh = 17.0) -> **+66 .. +83** | no reference in the set (CH4 is not in PA26); PA(CH4) = 130 kcal/mol needs E(H+) in the model |
+| h | CH5+ probe (net +1, H-H valid via `q+`) | Q5 | 0.66022 Eh | C-H_b /(1.3234 x 1.18 x 1.05): **+66.2** (was wrongly +61.0 without the fxh, corrected in §7.6); H-H /1.18: +5.6; siblings /1.05: +16.0; minus the two H-centred angles (fc 0.178 at ~65 deg vs 180, <= the Angle total 0.0270 Eh = 17.0) -> **+70.9 .. +87.8** | no reference in the set (CH4 is not in PA26); PA(CH4) = 130 kcal/mol needs E(H+) in the model |
 | i | B2H6 dimerisation, W4-11 | TODO #13 first | **+1.375 Eh** vs 2 BH3 (OverCoord 1.330) | wells: B-H_b /(1.3234 x 1.18) +61.4, B-B /1.18 +3.7 -> **+65** on top of a term that is 1.33 Eh wrong | Q5 is not the lever here; measured so it is not credited or blamed |
 | j | H3+ (PA26/h2p) | Q5 (H2 only) | 1.49997 Eh; bstr 1.0, ringf 1.0 (0 rings found — MEASURED, the ring finder does not report the all-H triangle) | H1/R1 no-ops; H2 removes three H-centred angles (fc 0.089, 60 deg vs 180): energy **lower by the H3+ Angle total** (not extracted) | measure; the only all-H falsifier |
 | k | BH76 RKT01-21 transition states (13 structures with a 2-coordinate H) | Q5 | class-B rms per STAGE3A | every X...H...Y TS with a heavy X or Y: the X-H well /1.3234 in the TS corner (rkt03 pattern); all-H (rkt06) unchanged | the per-structure offline predictor of §7.5 gives each number before any build |
-| l | static regression, 2647 structures | — | — | **exactly the 80 + 0 structures of §7.3 move, none other** (bit-identity elsewhere by construction) | the offline count is the prediction |
+| l | static regression, 2647 structures | — | — | **exactly the 80 structures of §7.3 move, none other** (bit-identity elsewhere by construction); counted on the EVALUATED topology — see §7.6 (1) for the seven structures a union over q-loop passes adds and that must NOT move | the offline count is the prediction |
 | m | N2 + 3 H2 / 2 H2 / 4 H at 0.25 fs (STAGE1's stability cells) | Q5 (H2) | 0 events > 40 kJ/mol per run with sp; 4-11 with `hyb = 0` + tetrahedral theta0 (CITED) | **<= the sp arm (0-1)**: H2 removes the H-centred angle instead of re-aiming it | the one prediction that can only be measured in MD; it is H2's falsifier |
 
 What would falsify Q5-v1: (i) row m failing — then the bridging H needs a bend term after all
@@ -558,3 +558,74 @@ any structure outside the 80 of row l changing.
 4. **WP5 conditioning**: freeze (gate, Q5-v1, `conserving` + X_i) before the fit; the bridged
    X-H wells of FHF-/H5O2+/CH5+/B2H6 are then fitted through the hypervalence slack (TODO #13),
    which is where their residual after Q5 (rows f-i) belongs.
+
+### 7.6 Corrections after the offline verification (sweep v3, 2026-09-29, fourth pass)
+
+`BOND_VALIDITY_GATE_SWEEP_STATUS.md` v3 confirmed rows d and f exactly (rkt06 proven collinear at
+all 14 points, FHF- -120.62 -> -76.85 re-derived from the raw dump) and found three defects. Each is
+resolved below; the original text above is kept with markers.
+
+**(1) Count 86 vs 80 — a counting convention, and one prose error of mine.** The sweep script
+(`scripts/revgfnff_h_scope_sweep.py`) takes the union of EVERY `BOND` block in the log, and
+`CURCUMA_BONDDUMP` prints the list once per q-loop pass. Re-deriving the seven structures it has and
+I do not (MEASURED from the saved logs, partners of the named H per block | evaluated share corner):
+
+| structure | H | pass 1 (qa = 0) | pass 2 (charge-shrunk) | evaluated corner |
+|---|---|---|---|---|
+| BH76/RKT18 | 6 | [1, 2] | [2] | [2] |
+| DIPCS10/c2h6_2+ | 3 | [1, 4] | [1] | [1] |
+| G21IP/IP_64 | 2 | [1, 3] | [3] | [3] |
+| MB16-43/08 | 14 | [3, 6] | [3] | [3] |
+| PA26/sih4p | 2 | [1, 6] | [6] | [6] |
+| WCPT18/ts7h2o | 3 | [5, 8] | [5] | [5] |
+| WATER27/OHmH2O | 1 | [3] | [3] | [3]; a fourth, later re-perception block prints [3, 4] |
+
+Six are two-coordinate ONLY in pass 1; the parameter set (hybridisation, rings, `fxh`, angles) is
+built from the pass-2 topology, and in react mode from each corner's own list — that is where the
+rules act, so these seven are NOT touched. **The count stands at 80 on the evaluated topology**
+(79 with a two-coordinate H + `MB16-43/34`), and the tool must read the LAST q-loop block or the
+share corner, not the union. What WAS wrong in §7.3 is my bucket prose: MB16-43 has **28** members
+in my own list (`01 02 03 04 05 06 09 14 15 16 17 18 19 21 22 23 24 25 26 28 29 30 32 34 37 39 40
+41`; 22 with an H-bridged triangle), not "24" — a transcription from a truncated print; the
+sweep's 28 for that subset is a coincidence (it includes /08 and lacks /34). BH76 is 13 (RKT18 is
+pass-1 only). New prediction, added to row l: **the seven structures above are bit-identical under
+Q5-v1**; if any moves, the rules are being applied at pass 1 — the wrong place.
+
+**(2) The mu3-bridging hydride (`MB16-43/34`, H15 bonded to B, Al, Mg) — H1 applies, no
+qualifier.** MEASURED: the code's `grp == 1` branch (`gfnff_method.cpp:8682-8685`) gives it `hyb =
+3`; its three bonds carry `bstr 1.0000` (rows 0 and 3 of `bsmat` are identical, `gfnff_par.h:361`),
+`ringf 1.0000` (the ring finder walks `nb_nometal`, so the B-H-Al/Mg triangles are not rings),
+`fxh` 1.10 / 1.20 by element (unaffected); three angles are centred on it, fc 0.018 / 0.004 /
+0.002; share `c` 0.22 / 0.27 / 0.33 (its budget is 1 against three claims — the budget's job, not
+Q5's). So "hyb(H) = 0 always" is a bond no-op for any hydrogen with three or more partners, R1 has
+nothing to remove, and H2 removes three negligible terms — the rule set is uniform over every
+hydrogen and needs no coordination qualifier. Two implementation notes that this case exposes:
+the branch is keyed on **group 1, which also holds Li, Na, K** — H1 must test `Z == 1`, never the
+group, so the alkali "M+ tetra coord" logic stays as it is; and `MB16-43/34` is the one structure
+touched by H2 alone (its predicted shift is below 0.01 Eh: three angles with fc <= 0.018).
+
+**(3) CH5+ row h — my arithmetic was wrong, the sweep's is right.** `fxh` is keyed on the CARBON's
+ring membership (`gfnff_method.cpp:5605-5660`), so the 3-ring factor sits on every C-H of that
+carbon, bridging bonds included — my own §7.2 table lists `fxh 1.05` on C-H_b, and row h divided
+it out only on the siblings. Corrected: C-H_b / (1.3234 x 1.18 x 1.05) = -0.27043 x 0.3901 =
++0.1055 Eh = **+66.2** (was +61.0); H-H +5.6 and siblings +16.0 unchanged; bond-only **+87.8**;
+with the H2 bound, **+70.9 .. +87.8** kcal/mol (was +66 .. +83). The same correction applies to
+every X-H_b bond of a carbon in an H-bridged triangle in row k's predictor: the factor R1 removes
+is `ringf x fxh_3ring`, not `ringf` alone. FHF-, H5O2+, B2H6 (no carbon) and rkt03 (no ring) are
+unaffected.
+
+**Final rule set (Q5-v1, unchanged in substance; the implementation target)**, rev mode only, one
+opt-in PARAM with per-rule sub-switches:
+
+    H1  every atom with Z == 1 has hyb = 0, whatever its partner count (the grp == 1 branch stays
+        for Li/Na/K). X-H strength = bsmat[hyb_X][0]; the 0.30 bridging scale cannot fire for H
+        (subsumes rev_h_not_sp); H-H unchanged.
+    H2  no angle term is centred on an atom with Z == 1, whatever its partner count.
+    R1  ring enumeration excludes atoms with Z == 1 (no ringf, no 3-ring fxh from an H-bridged
+        triangle; the sibling C-H of such a carbon keep fxh 1.0 — and so do the bridging ones).
+    P1  an atom with Z == 1 never counts as an sp/sp2 neighbour for picon.
+    heavy atoms: no change; the rules act on each corner's own (pass-2 / corner) bond list, never
+        on the q-loop pass-1 list.
+
+Acceptance numbers after these corrections: rows d, f, g unchanged; row h +70.9 .. +87.8; row l =
+the 80 structures named in §7.3 as corrected here, plus bit-identity on the seven of table (1).
