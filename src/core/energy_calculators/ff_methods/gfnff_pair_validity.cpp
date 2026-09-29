@@ -295,6 +295,26 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
 
     const std::vector<std::pair<int, int>> saved_forced = m_forced_bonds;
     const bool saved_owns = m_react_owns_bonds;
+    // Claude Generated (Sep 2026): whether m_forced_bonds/m_react_owns_bonds were ALREADY under
+    // an explicit caller's control before this call. Found by testing on a live react-mode
+    // trajectory (test_cases/revgfnff/_log/PAIR_VALIDITY_IMPL_STATUS.md): prepareTransitionCorners()
+    // / rebuildReactiveTopology() set m_forced_bonds to a corner's own bond list BEFORE calling
+    // generateGFNFFParameterSet(), then immediately read m_cached_topology again afterward
+    // (captureCornerEEQ()) EXPECTING it to describe the corner that was just generated - if the
+    // gate restores m_forced_bonds and invalidates the cache in between, that read silently
+    // recomputes from the RESTORED (un-gated) bond list instead, so the corner's captured EEQ/
+    // hybridisation disagree with the bonds actually installed into it (measured: the geminal
+    // c2h6 H...H frame's blended energy came out IDENTICAL gate on/off, because the "new" corner's
+    // EEQ snapshot silently reverted to the 8-bond state even though its bond list was the gated
+    // 7-bond one). The static/default path is the opposite case: NOTHING re-manages
+    // m_forced_bonds afterward, so leaving it at the pruned list would freeze every later
+    // geometry (a subsequent -opt/-md step, or the next frame of a -batch run) to this one gated
+    // decision forever - there restoring is required for correctness.
+    // Resolution: restore+reset ONLY when the caller had NOT already taken explicit ownership of
+    // the bond source (the static/default virgin state); otherwise leave the gated state in
+    // place; the caller (prepareTransitionCorners()/rebuildReactiveTopology()) already re-sets
+    // m_forced_bonds itself before its own next need, exactly as it does between every corner.
+    const bool caller_owns_bonds = !saved_forced.empty() || saved_owns;
     auto forceAndReset = [&](std::vector<std::pair<int, int>> bonds, bool owns) {
         // Claude Generated (Sep 2026): the exact reset sequence prepareTransitionCorners() /
         // rebuildReactiveTopology() already use to force an explicit bond list through
@@ -321,7 +341,8 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
             "keeping the ungated corner", e.what()));
     }
 
-    forceAndReset(saved_forced, saved_owns);
+    if (!caller_owns_bonds || !ok)
+        forceAndReset(saved_forced, saved_owns);
 
     if (!ok)
         return generateGFNFFParameterSetImpl(); // fall back to the ORIGINAL (ungated) corner
