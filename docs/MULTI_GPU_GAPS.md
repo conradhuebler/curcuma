@@ -106,7 +106,9 @@ on the optimised geometry a constant ~30 s against 249 s single-GPU [D: lab jour
   **Part 1 (Sep 29, 2026)**: the dense S/H0 build skips atom pairs outside the screening cutoff
   (`k_overlap_h0` 11.5 -> 1.3 s at polymer_2x, on every GPU count - a single-device fix made a split
   unnecessary) and the Cholesky of S runs as cuSOLVERMp `potrf` on the eigensolver's devices
-  (3.5 -> 1.8 s on 4 GPUs); see MULTI_GPU.md "Setup of one large molecule".
+  (3.5 -> 1.8 s on 4 GPUs); see MULTI_GPU.md "Setup of one large molecule". D4 ATM and the
+  on-the-fly multipole potential/energy kernels (device 0) now run one warp per atom: 3.8 -> 1.6 s
+  and 5.9 -> 2.4 s per single point at polymer_2x - a split over devices is not needed for them.
 - **G2-9 Distributed buffers and the distributed L are freed after every SCF**
   (`cuda/xtb_gpu_context.cu:5079`, `xtb_distributed_eigensolver.cpp:370-391`) [C], so every MD/opt
   step re-allocates and re-scatters them. Cost unmeasured.

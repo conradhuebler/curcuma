@@ -145,6 +145,7 @@ Environment variables:
 | `CURCUMA_GPU_PROFILE=1` | Stream-synchronised per-phase device timings (integrals, potential, Fock, reduce/syevd/back-transform per precision, density, charges, Broyden) plus the post-SCF host phases. Adds synchronisation cost; for diagnosis only. |
 | `CURCUMA_GPU_MP_OTF=0\|1` | The old form of `-gpu_multipole_otf`. Still honoured and still wins over the flag, for reproducing older runs. |
 | `CURCUMA_GPU_FULL_DENSE_S=1` | Screened integral storage only: compute the dense S/H0 for every atom pair again instead of skipping the pairs outside the screening cutoff (Sep 29, 2026). For comparison only - the skipped integrals are below `sparse_eps` (1e-20). polymer_2x: `k_overlap_h0` 11.5 -> 1.3 s. |
+| `CURCUMA_GPU_THREAD_PER_ATOM=1` | Use the thread-per-atom originals of the D4 ATM, on-the-fly multipole potential and multipole energy kernels instead of the warp-per-atom versions (Sep 29, 2026). For comparison only; the originals launch only nat threads and were latency-bound (polymer_2x: D4 ATM 3.8 -> 1.6 s, multipole potential 0.33 -> 0.11 s per iteration). Results differ in the last bits (summation order). |
 | `CURCUMA_GPU_DIST_POTRF=0` | Keep the Cholesky factorisation of S on the calculation's device instead of the multi-GPU eigensolver's devices (cuSOLVERMp `potrf`, since Sep 29, 2026; same gates as the FP64 eigensolve, result checked with `S v = L (L^T v)`). |
 
 Automatic large-system behaviour (no option; triggered above ~5000 basis functions on the CUDA device-resident path):

@@ -261,6 +261,8 @@ struct XtbGpuContext::Impl {
     // asynchronous, so host clocks are meaningless without it) and accumulates the wall time
     // since the previous mark under a phase name. Disabled = no synchronisation, no cost.
     bool prof = std::getenv("CURCUMA_GPU_PROFILE") != nullptr;
+    // Claude Generated (Sep 29, 2026): the thread-per-atom originals of the warp-per-atom pair kernels.
+    bool thread_per_atom = std::getenv("CURCUMA_GPU_THREAD_PER_ATOM") != nullptr;
     std::vector<std::string> prof_names;
     std::vector<double>      prof_ms;
     std::vector<int>         prof_calls;
@@ -2619,6 +2621,189 @@ __global__ void k_energy_multipole_otf(int nat, const double* __restrict__ xyz, 
     if (tid == 0) atomicAdd(e_out, sdata[0]);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Claude Generated (Sep 29, 2026): warp-per-atom variants of the three O(N^2)/O(N^3) atom-pair
+// kernels. The thread-per-atom originals launch only nat threads (polymer_2x: 7320 threads, i.e.
+// ~5 warps per SM on an A4500), so the FP64 pair loops ran latency-bound: k_d4_atm_nl 2.97 s,
+// k_multipole_potential_otf 0.29 s per SCF iteration. Here a warp owns atom i, its 32 lanes stride
+// over the partner atoms and a fixed shuffle tree reduces the partial sums - deterministic, but in
+// a different summation order than the originals (last-bit differences). The multipole potential
+// additionally evaluates the pair interaction once: for v -> -v the damping (|v| only) and the
+// dipole-dipole and quadrupole tensors are unchanged and sd flips sign, all exactly in floating
+// point, so the (j,i) terms are taken from the (i,j) evaluation bit for bit.
+// CURCUMA_GPU_THREAD_PER_ATOM=1 selects the originals (for comparison).
+// ---------------------------------------------------------------------------------------------
+__device__ __forceinline__ double d_warp_sum(double v)
+{
+    for (int o = 16; o > 0; o >>= 1) v += __shfl_down_sync(0xffffffffu, v, o);
+    return v;
+}
+
+__global__ void k_multipole_potential_otf_w(
+    int nat, const double* __restrict__ xyz, const double* __restrict__ mrad, double dmp3, double dmp5,
+    const double* __restrict__ dkernel, const double* __restrict__ qkernel,
+    const double* __restrict__ q_at, const double* __restrict__ dp_at, const double* __restrict__ qp_at,
+    double* __restrict__ v_dp, double* __restrict__ v_qp, double* __restrict__ v_at)
+{
+    const int i = static_cast<int>((static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x) >> 5);
+    const int lane = threadIdx.x & 31;
+    if (i >= nat) return;   // uniform per warp
+    const double xi = xyz[3*i], yi = xyz[3*i+1], zi = xyz[3*i+2];
+    const double mi = mrad[i];
+    double vd[3] = {0.0, 0.0, 0.0};
+    double vq[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    double vat = 0.0;
+    for (int j = lane; j < nat; j += 32) {
+        if (j == i) continue;   // amat diagonal is zero
+        const double qj = q_at[j];
+        const double dpj0 = dp_at[0 + j * 3], dpj1 = dp_at[1 + j * 3], dpj2 = dp_at[2 + j * 3];
+        double sd[3], dd[9], sq[6];
+        d_mp_amat_pair(xyz[3*j] - xi, xyz[3*j+1] - yi, xyz[3*j+2] - zi,
+                       0.5 * (mi + mrad[j]), dmp3, dmp5, sd, dd, sq);
+        for (int k = 0; k < 3; ++k) {
+            vd[k] += sd[k] * qj + dd[k * 3 + 0] * dpj0 + dd[k * 3 + 1] * dpj1 + dd[k * 3 + 2] * dpj2;
+            vat += (-sd[k]) * dp_at[k + j * 3];          // sd(j,i) = -sd(i,j)
+        }
+        for (int k = 0; k < 6; ++k) {
+            vq[k] += sq[k] * qj;
+            vat += sq[k] * qp_at[k + j * 6];             // sq(j,i) = sq(i,j)
+        }
+    }
+    for (int k = 0; k < 3; ++k) vd[k] = d_warp_sum(vd[k]);
+    for (int k = 0; k < 6; ++k) vq[k] = d_warp_sum(vq[k]);
+    vat = d_warp_sum(vat);
+    if (lane != 0) return;
+    const double mpscale_q[6] = {1.0, 2.0, 1.0, 2.0, 2.0, 1.0};
+    for (int k = 0; k < 3; ++k) v_dp[k + i * 3] = vd[k] + 2.0 * dkernel[i] * dp_at[k + i * 3];
+    for (int k = 0; k < 6; ++k)
+        v_qp[k + i * 6] = vq[k] + 2.0 * qkernel[i] * qp_at[k + i * 6] * mpscale_q[k];
+    v_at[i] = vat;
+}
+
+// Energy twin: one warp per atom i, then the block's warp sums are added and one atomicAdd per
+// block goes to e_out (as in the original). blockDim must be a multiple of 32, shared = warps.
+__global__ void k_energy_multipole_otf_w(int nat, const double* __restrict__ xyz, const double* __restrict__ mrad,
+                                         double dmp3, double dmp5,
+                                         const double* __restrict__ dkernel, const double* __restrict__ qkernel,
+                                         const double* __restrict__ dp_at, const double* __restrict__ qp_at,
+                                         const double* __restrict__ q_at, double* e_out)
+{
+    extern __shared__ double sdata[];
+    const int i = static_cast<int>((static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x) >> 5);
+    const int lane = threadIdx.x & 31, wib = threadIdx.x >> 5;
+    double ei = 0.0;
+    if (i < nat) {
+        const double xi = xyz[3*i], yi = xyz[3*i+1], zi = xyz[3*i+2];
+        double dpi[3], qpi[6];
+        for (int k = 0; k < 3; ++k) dpi[k] = dp_at[k + static_cast<size_t>(i) * 3];
+        for (int k = 0; k < 6; ++k) qpi[k] = qp_at[k + static_cast<size_t>(i) * 6];
+        for (int j = lane; j < nat; j += 32) {
+            if (j == i) continue;
+            const double qj = q_at[j];
+            double sd[3], dd[9], sq[6];
+            d_mp_amat_pair(xyz[3*j] - xi, xyz[3*j+1] - yi, xyz[3*j+2] - zi,
+                           0.5 * (mrad[i] + mrad[j]), dmp3, dmp5, sd, dd, sq);
+            for (int k = 0; k < 3; ++k)
+                ei += dpi[k] * sd[k] * qj;
+            for (int a = 0; a < 3; ++a) {
+                const double dpia = dpi[a];
+                for (int b = 0; b < 3; ++b)
+                    ei += 0.5 * dpia * dd[a * 3 + b] * dp_at[b + static_cast<size_t>(j) * 3];
+            }
+            for (int k = 0; k < 6; ++k)
+                ei += qpi[k] * sq[k] * qj;
+        }
+        ei = d_warp_sum(ei);
+        if (lane == 0) {
+            const double mpscale_q[6] = {1.0, 2.0, 1.0, 2.0, 2.0, 1.0};
+            const double dk = dkernel[i], qk = qkernel[i];
+            for (int k = 0; k < 3; ++k) ei += dk * dpi[k] * dpi[k];
+            for (int k = 0; k < 6; ++k) ei += qk * qpi[k] * qpi[k] * mpscale_q[k];
+        }
+    }
+    if (lane == 0) sdata[wib] = ei;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        double s = 0.0;
+        for (int w = 0; w < static_cast<int>(blockDim.x >> 5); ++w) s += sdata[w];
+        atomicAdd(e_out, s);
+    }
+}
+
+// Warp-per-atom twin of k_d4_atm_nl (see the note at k_multipole_potential_otf_w): lanes stride
+// over the neighbour index ix, each keeps the inner y < x loop of the original.
+__global__ void k_d4_atm_nl_w(int nat, const double* __restrict__ xyz, const double* __restrict__ r4r2,
+                              const double* __restrict__ c6, const double* __restrict__ dc6dcn,
+                              const int* __restrict__ nbptr, const int* __restrict__ nb,
+                              double s9, double a1, double a2, double alp, double cut2,
+                              double* __restrict__ e_atom, double* __restrict__ grad,
+                              double* __restrict__ dEdcn)
+{
+    const int a = static_cast<int>((static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x) >> 5);
+    const int lane = threadIdx.x & 31;
+    if (a >= nat) return;   // uniform per warp
+    const double eps = 2.220446049250313e-16;
+    const double xa = xyz[3*a+0], ya = xyz[3*a+1], za = xyz[3*a+2];
+    const double r4r2a = r4r2[a];
+    const size_t nat_s = static_cast<size_t>(nat);
+    const bool alp16 = (alp == 16.0);
+    double eacc = 0.0, gx = 0.0, gy = 0.0, gz = 0.0, cnacc = 0.0;
+    for (int ix = nbptr[a] + lane; ix < nbptr[a + 1]; ix += 32) {
+        const int x = nb[ix];
+        const double vaxx = xyz[3*x+0]-xa, vaxy = xyz[3*x+1]-ya, vaxz = xyz[3*x+2]-za;
+        const double r2ax = vaxx*vaxx + vaxy*vaxy + vaxz*vaxz;
+        if (r2ax > cut2 || r2ax < eps) continue;
+        const double c6ax = c6[a*nat_s + x];
+        const double r0ax = a1*sqrt(3.0*r4r2a*r4r2[x]) + a2;
+        for (int iy = nbptr[a]; iy < ix; ++iy) {        // y < x (list ascending)
+            const int y = nb[iy];
+            const double vayx = xyz[3*y+0]-xa, vayy = xyz[3*y+1]-ya, vayz = xyz[3*y+2]-za;
+            const double r2ay = vayx*vayx + vayy*vayy + vayz*vayz;
+            if (r2ay > cut2 || r2ay < eps) continue;
+            const double dxyx = xyz[3*y+0]-xyz[3*x+0], dxyy = xyz[3*y+1]-xyz[3*x+1], dxyz_ = xyz[3*y+2]-xyz[3*x+2];
+            const double r2xy = dxyx*dxyx + dxyy*dxyy + dxyz_*dxyz_;
+            if (r2xy > cut2 || r2xy < eps) continue;
+
+            const double c6ay = c6[a*nat_s + y];
+            const double c6xy = c6[x*nat_s + y];
+            const double c9 = -s9 * sqrt(fabs(c6ax*c6ay*c6xy));
+            const double r0ay = a1*sqrt(3.0*r4r2a*r4r2[y]) + a2;
+            const double r0xy = a1*sqrt(3.0*r4r2[x]*r4r2[y]) + a2;
+            const double r0 = r0ax*r0ay*r0xy;
+            const double r2 = r2ax*r2ay*r2xy;
+            const double r1 = sqrt(r2);
+            const double r3 = r2*r1;
+            const double r5 = r3*r2;
+            const double q = r0/r1;
+            const double pw = alp16 ? (q*q*q*q*q) * cbrt(q) : pow(q, alp/3.0);
+            const double fdmp = 1.0/(1.0 + 6.0*pw);
+            const double ang = 0.375*(r2ax + r2xy - r2ay)*(r2ax - r2xy + r2ay)*(-r2ax + r2xy + r2ay)/r5 + 1.0/r3;
+            const double dE = ang*fdmp*c9;
+            eacc += -dE;
+
+            const double dfdmp = -2.0*alp*pw*fdmp*fdmp;
+            const double dang_ax = -0.375*(r2ax*r2ax*r2ax + r2ax*r2ax*(r2xy+r2ay)
+                          + r2ax*(3.0*r2xy*r2xy + 2.0*r2xy*r2ay + 3.0*r2ay*r2ay)
+                          - 5.0*(r2xy-r2ay)*(r2xy-r2ay)*(r2xy+r2ay))/r5;
+            const double gcax = c9*(-dang_ax*fdmp + ang*dfdmp)/r2ax;
+            gx += -gcax*vaxx; gy += -gcax*vaxy; gz += -gcax*vaxz;
+            const double dang_ay = -0.375*(r2ay*r2ay*r2ay + r2ay*r2ay*(r2xy+r2ax)
+                          + r2ay*(3.0*r2xy*r2xy + 2.0*r2xy*r2ax + 3.0*r2ax*r2ax)
+                          - 5.0*(r2xy-r2ax)*(r2xy-r2ax)*(r2xy+r2ax))/r5;
+            const double gcay = c9*(-dang_ay*fdmp + ang*dfdmp)/r2ay;
+            gx += -gcay*vayx; gy += -gcay*vayy; gz += -gcay*vayz;
+            cnacc += -dE*0.5*(dc6dcn[a*nat_s+x]/c6ax + dc6dcn[a*nat_s+y]/c6ay);
+        }
+    }
+    eacc = d_warp_sum(eacc);
+    gx = d_warp_sum(gx); gy = d_warp_sum(gy); gz = d_warp_sum(gz);
+    cnacc = d_warp_sum(cnacc);
+    if (lane != 0) return;
+    e_atom[a] = eacc;
+    grad[3*a+0] = gx; grad[3*a+1] = gy; grad[3*a+2] = gz;
+    dEdcn[a] = cnacc;
+}
+
 // v_at(A) += dE_D4/dq(A) (resident from k_d4_dedq). One thread per atom.
 __global__ void k_vat_add_d4(int nat, const double* __restrict__ d4_dedq, double* __restrict__ v_at)
 {
@@ -4872,10 +5057,18 @@ bool XtbGpuContext::dispersionATM(int nat, const double* c6, const double* dc6dc
     }
     I.dD4AtmC6.upload(c6, static_cast<int>(nn), stream);
     I.dD4AtmDc6.upload(dc6dcn, static_cast<int>(nn), stream);
-    const int b = 64;
-    k_d4_atm_nl<<<(nat + b - 1) / b, b, 0, stream>>>(
-        nat, I.dD4Xyz.ptr, I.dD4Sqrt.ptr, I.dD4AtmC6.ptr, I.dD4AtmDc6.ptr, I.dD4NbPtr.ptr, I.dD4Nb.ptr,
-        s9, a1, a2, alp, cut2, I.dD4Eat.ptr, I.dD4Grad.ptr, I.dD4Dcn.ptr);
+    if (I.thread_per_atom) {
+        const int b = 64;
+        k_d4_atm_nl<<<(nat + b - 1) / b, b, 0, stream>>>(
+            nat, I.dD4Xyz.ptr, I.dD4Sqrt.ptr, I.dD4AtmC6.ptr, I.dD4AtmDc6.ptr, I.dD4NbPtr.ptr, I.dD4Nb.ptr,
+            s9, a1, a2, alp, cut2, I.dD4Eat.ptr, I.dD4Grad.ptr, I.dD4Dcn.ptr);
+    } else {
+        const int b = 128;                                   // 4 atoms (warps) per block
+        const long long threads = 32LL * nat;
+        k_d4_atm_nl_w<<<static_cast<unsigned>((threads + b - 1) / b), b, 0, stream>>>(
+            nat, I.dD4Xyz.ptr, I.dD4Sqrt.ptr, I.dD4AtmC6.ptr, I.dD4AtmDc6.ptr, I.dD4NbPtr.ptr, I.dD4Nb.ptr,
+            s9, a1, a2, alp, cut2, I.dD4Eat.ptr, I.dD4Grad.ptr, I.dD4Dcn.ptr);
+    }
     if (cudaGetLastError() != cudaSuccess) return false;
     I.dD4Eat.download(e_atom_out, nat, stream);
     I.dD4Grad.download(grad_out, 3 * nat, stream);
@@ -4983,11 +5176,21 @@ bool XtbGpuContext::sccEnergy(int nat, int nsh, double* e_coulomb, double* e_thi
         if (cudaGetLastError() != cudaSuccess) return false;
     }
     if (m_impl->mp_otf && e_multipole) {
-        const int grid = (nat + block - 1) / block;
-        k_energy_multipole_otf<<<grid, block, block * sizeof(double), stream>>>(
-            nat, m_impl->dMpXyz.ptr, m_impl->dMpRad.ptr, m_impl->mp_dmp3, m_impl->mp_dmp5,
-            m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dDpAt.ptr, m_impl->dQpAt.ptr,
-            m_impl->dQat.ptr, m_impl->dESca.ptr + 1);
+        if (m_impl->thread_per_atom) {
+            const int grid = (nat + block - 1) / block;
+            k_energy_multipole_otf<<<grid, block, block * sizeof(double), stream>>>(
+                nat, m_impl->dMpXyz.ptr, m_impl->dMpRad.ptr, m_impl->mp_dmp3, m_impl->mp_dmp5,
+                m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dDpAt.ptr, m_impl->dQpAt.ptr,
+                m_impl->dQat.ptr, m_impl->dESca.ptr + 1);
+        } else {
+            const int wb = 128;                              // 4 atoms (warps) per block
+            const long long threads = 32LL * nat;
+            k_energy_multipole_otf_w<<<static_cast<unsigned>((threads + wb - 1) / wb), wb,
+                                       (wb / 32) * sizeof(double), stream>>>(
+                nat, m_impl->dMpXyz.ptr, m_impl->dMpRad.ptr, m_impl->mp_dmp3, m_impl->mp_dmp5,
+                m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dDpAt.ptr, m_impl->dQpAt.ptr,
+                m_impl->dQat.ptr, m_impl->dESca.ptr + 1);
+        }
         if (cudaGetLastError() != cudaSuccess) return false;
     } else if (!m_impl->dMpAmatSD.empty() && e_multipole) {
         const int grid = (nat + block - 1) / block;
@@ -5480,8 +5683,15 @@ bool XtbGpuContext::buildDevicePotentialAndSolve(int n, bool fp32, int n_eig,
         if (cudaGetLastError() != cudaSuccess) return false;
     }
     // Multipole potential v_dp/v_qp + v_at scalar shift, then v_at += D4.
-    if (m_impl->mp_otf) {
+    if (m_impl->mp_otf && m_impl->thread_per_atom) {
         k_multipole_potential_otf<<<(nat + b - 1) / b, b, 0, stream>>>(
+            nat, m_impl->dMpXyz.ptr, m_impl->dMpRad.ptr, m_impl->mp_dmp3, m_impl->mp_dmp5,
+            m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dQat.ptr,
+            m_impl->dInDpAt.ptr, m_impl->dInQpAt.ptr,
+            m_impl->dVdp.ptr, m_impl->dVqp.ptr, m_impl->dVat.ptr);
+    } else if (m_impl->mp_otf) {
+        const long long threads = 32LL * nat;
+        k_multipole_potential_otf_w<<<static_cast<unsigned>((threads + b - 1) / b), b, 0, stream>>>(
             nat, m_impl->dMpXyz.ptr, m_impl->dMpRad.ptr, m_impl->mp_dmp3, m_impl->mp_dmp5,
             m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dQat.ptr,
             m_impl->dInDpAt.ptr, m_impl->dInQpAt.ptr,
