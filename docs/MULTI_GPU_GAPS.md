@@ -398,7 +398,11 @@ GPUs (~55 of 140 s): setup 20.8 s (`k_overlap_h0` 11.6 s and Cholesky of S 3.5 s
 FP32 `syevd` inside cuSOLVERMp is the largest bucket (4.8 s/it at 4 GPUs, NCCL 22-30 % of busy time).
 G2-9 (buffer re-allocation between opt steps) measured <= 0.2 s per step - not worth it. Device-0 peak
 15.3 / 18.5 / 15.8 GB for 1 / 2 / 4 GPUs (2 GPUs needs more than 1). `-opt` on 4 GPUs ran 5 SCFs for 3
-printed steps (two extra at the start geometry, ~216 s) - under investigation.
+printed steps (two extra at the start geometry, ~216 s). **Resolved Sep 29, 2026**: one of the two is
+the driver's initial evaluation (needed); the other was LBFGSpp's `InitializeSingleSteps()` evaluating
+the same geometry again through its objective, which bypasses the driver's evaluation cache. The
+objective now reuses the driver's energy/gradient (`LBFGSppObjectiveFunction::prime`); polymer proxy
+(nao 3222, 4 GPUs, 3 steps): 5 -> 4 integral builds/SCFs, 37.1 -> 32.9 s.
 
 ## 4. What to tackle, in order
 

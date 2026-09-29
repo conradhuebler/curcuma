@@ -61,11 +61,17 @@ double LBFGSppObjectiveFunction::operator()(const Vector& x, Vector& grad)
             }
         }
 
-        // Update geometry only (avoid full GFN-FF reinit via setMolecule)
-        m_energy_calculator->updateGeometry(m_molecule->getGeometry());
-
         double energy;
-        if (m_use_numerical_gradient) {
+        const bool reuse = m_primed && m_primed_x.size() == x.size() && m_primed_gradient.size() == x.size()
+            && (m_primed_x.array() == x.array()).all();
+        m_primed = false;
+        if (reuse) {
+            // Claude Generated (Sep 29, 2026): the driver evaluated exactly this geometry (prime()).
+            energy = m_primed_energy;
+            grad = m_primed_gradient;
+        } else if (m_use_numerical_gradient) {
+            // Update geometry only (avoid full GFN-FF reinit via setMolecule)
+            m_energy_calculator->updateGeometry(m_molecule->getGeometry());
             // Use numerical gradient (for debugging)
             energy = m_energy_calculator->CalculateEnergy(false);
             if (std::isnan(energy) || std::isinf(energy)) {
@@ -75,6 +81,7 @@ double LBFGSppObjectiveFunction::operator()(const Vector& x, Vector& grad)
             Geometry gradient_geom = m_energy_calculator->NumGrad();
             grad = Vector::Map(gradient_geom.data(), gradient_geom.size());
         } else {
+            m_energy_calculator->updateGeometry(m_molecule->getGeometry());
             // Use analytical gradient
             energy = m_energy_calculator->CalculateEnergy(true);
             if (std::isnan(energy) || std::isinf(energy)) {
@@ -163,6 +170,10 @@ bool LBFGSppOptimizer::InitializeOptimizerInternal()
 
         // Initialize coordinate vector and LBFGSpp single-step workspace
         m_current_coordinates = MoleculeToCoordinates(m_molecule);
+        // The driver has just evaluated this geometry (InitializeOptimization /
+        // ReinitializeKeepCalculator); LBFGSpp's first call reuses it instead of recomputing.
+        if (m_current_gradient.size() == m_current_coordinates.size())
+            m_objective->prime(m_current_coordinates, m_current_energy, m_current_gradient);
         double fx = m_current_energy;
         int already_converged = m_solver->InitializeSingleSteps(*m_objective, m_current_coordinates, fx);
         if (already_converged) {

@@ -49,6 +49,7 @@ This directory contains the **core optimization algorithms** for molecular geome
 
 #### Integration Layer  
 - **optimizeWithLBFGSpp()**: Wrapper for external LBFGSpp library
+- **LBFGSpp start geometry evaluated once** (Sep 29, 2026, 🤖): `InitializeSingleSteps()` reuses the driver's initial energy/gradient via `LBFGSppObjectiveFunction::prime()` (one fewer SCF per optimisation)
 - **optimizeWithInternal()**: Wrapper for internal GPTLBFGS
 - **Legacy compatibility**: Bridge to existing CurcumaOpt interface
 
