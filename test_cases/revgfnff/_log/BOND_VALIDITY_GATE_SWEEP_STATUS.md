@@ -258,3 +258,226 @@ free-slot clause's own convention, and it is the one that reproduces the intende
   static substitute), `grid-md` (real reactive-MD corner scan, `--alt-lp` for the section-3 ambiguity).
 - Raw sweep outputs are in the agent's scratchpad, not committed (regenerable in ~4 s: `python3
   scripts/revgfnff_bondgate_sweep.py refset --jobs 24`).
+
+# v2 SWEEP (2026-09-29, second pass) - FABLE_BOND_STATE_2.md section 2.1-rev
+
+Sonnet agent, same checkout/branch. `scripts/revgfnff_bondgate_sweep.py` extended in place (v1
+kept byte-for-byte reachable via `--rule v1`; new default `--rule both` runs v1 and v2 side by
+side on the same corner, so every number below is a direct v1-vs-v2 comparison, not a rerun
+against a possibly-different baseline). **No C++ change, no build, no ctest** - v2's two extra
+inputs (`is_metal`, Phase-1 `topology_charges`) were confirmed ALREADY present, unconditionally
+written, in every run's `.topo.json` (`GFNFF::exportTopology()`, `gfnff_method.cpp:4121-4253`,
+called once from `initializeForceField()` - not gated by `CURCUMA_BONDDUMP`/`CURCUMA_SHAREDUMP`);
+nothing needed adding on the C++ side. Verified directly (an NH4+ probe: `topo.json`'s
+`is_metal`/`topology_charges` arrays are 0-based and correspond 1:1, index+1, to the atom
+numbers `BOND`/`share`/`shareA` print).
+
+**Binary**: `release/curcuma`, md5 `2b771c88c021ec5ee931e34d27fa84e3`, embedded git-describe
+`ci-feature-multi-gpu-226-g37bcb959` - i.e. built at commit `37bcb959`, THE SAME COMMIT Fable's
+own session used (`FABLE_BOND_STATE_2.md`'s stated `6622b7ef`, "four minutes after the
+37bcb959 merge"). The differing md5 on an identical commit is a non-reproducible-build artefact
+(most likely an embedded build timestamp), not a code difference - confirmed by `git describe`
+matching exactly. **This binary is 6 commits behind current HEAD** (`bf688f7d`, `513e33ba`,
+`c43943d9`, `a352da86`, `8e405f1c`, `20b0c9e9`); checked one by one: three are this v1 sweep's
+own docs (no source), and the other two (`c43943d9`/`a352da86`, "mu-cusp audit: fix react-
+transition-start q0 capture") touch only the opt-in `rev_sqe_*` split-charge machinery (default
+off, not engaged by any run in this sweep - every run here is `-method revgfnff` at shipped
+defaults, no `rev_sqe_*` flag). So using this binary as-is (per the task's own constraint) is
+also the physically correct choice: it reproduces exactly the code Fable's own hand numbers were
+computed against.
+
+## v2.1 Data-source confirmation (task step 2)
+
+`is_metal[i] = (GFNFFParameters::metal_type[Z-1] > 0)` (`gfnff_method.cpp:10747-10754`) -
+EXACTLY Fable's `metal(i)` definition, including the main-group metals (Al, Li, Na, ...) the
+gate needs. `topology_charges` is the Phase-1 EEQ vector (comment at the write site: "Phase-1
+EEQ - fixed at initialization"), same vector `prepareConservingShare()`'s own `qgroup` build
+already reads (`ff_workspace_gfnff.cpp:2577-2599`, `m_topology_charges`). One genuine gap,
+stated rather than worked around: `.topo.json` is written ONCE, at topology initialisation, so
+for a live reactive-MD trajectory (`grid-md`) it reflects only the t=0 corner, not the per-step
+corner the SHAREDUMP/BONDDUMP text is showing at the time. `is_metal` is unaffected (it depends
+only on Z, never on geometry - fetched once per system via one extra static `-sp`, reused for
+the whole trajectory); Phase-1 **charges are NOT available per MD step** without a C++ change,
+so `grid-md`'s `q+` clause runs with `qloc` forced `None` throughout (never fires) - any
+INVALID-under-v2 MD hit is therefore a CANDIDATE only, re-verified with a separate static
+single point at that exact geometry (done for the one case that mattered, section v2.4 below).
+
+## v2.2 Reference-set sweep, v1 vs v2 side by side (task step 3)
+
+`python3 scripts/revgfnff_bondgate_sweep.py refset --jobs 24 --rule both` - 2647 structures,
+43428 pairs, 3.96 s wall (24 workers), 0 parse failures, identical corner set to the v1 sweep.
+
+| dataset | pairs | INVALID v1 | structs v1 | INVALID v2 | structs v2 |
+|---|---:|---:|---:|---:|---:|
+| gmtkn55 | 30962 | 134 | 32 | 10 | 5 |
+| mor41 | 3375 | 2 | 2 | 0 | 0 |
+| s30lci | 9091 | 0 | 0 | 0 | 0 |
+| **total** | **43428** | **136** | **34** | **10** | **5** |
+
+**Every one of Fable's predicted totals holds exactly**: 136 -> 10 pairs, 34 -> 5 structures,
+MOR41 2 -> 0, S30L-CI 0 -> 0.
+
+**Rescued (INVALID under v1, VALID under v2): 126.** By deciding clause, using priority
+`acc > bridge > free > Hlp > q+` when several fire on the same pair (see v2.3 for why this
+particular order, not the spec, which is order-independent - VALID is a disjunction):
+
+| clause | count | Fable's number |
+|---|---:|---:|
+| acc | 77 | 77 |
+| free (alone) | 35 | 35 |
+| bridge (or the exclusion it implies) | 11 | 11 |
+| q+ (alone) | 3 | 3 |
+
+**Exact match, all four.**
+
+**Residual (INVALID under BOTH v1 and v2): 10**, confirmed to be precisely the predicted set:
+
+| structure | pair | i-j (Z) | n_other/Val |
+|---|---|---|---|
+| `PX13/hf_2_ts` | 1 | F(3)-F(4) | 2.000/1.0000 vs 2.000/1.0000 |
+| `MB16-43/15` | 1 | H(4)-B(14) | 1.000/4.0000 vs 4.000/1.0000 |
+| `MB16-43/23` | 5 | B(2)-B(3), B(2)-B(8), B(2)-H(10), B(3)-H(10), H(9)-B(12) | (see raw dump) |
+| `MB16-43/25` | 1 | F(1)-B(7) | 1.000/4.0000 vs 4.000/1.0000 |
+| `MB16-43/32` | 2 | H(4)-B(6), H(4)-B(8) | 1.000/5.0000 vs 4.000/1.0000 |
+
+1 + 1 + 5 + 1 + 2 = 10 pairs, 5 structures - **exactly** `PX13/hf_2_ts` (by design, the intended
+target) plus the four MB16-43 clusters Fable named (`/15`, `/23`, `/25`, `/32`), no others.
+
+## v2.3 The one discrepancy found, and its root cause (task step 7)
+
+First run of the sweep (priority order `free > bridge > acc > Hlp > q+`, chosen arbitrarily
+before checking against Fable's numbers) gave the SAME 126/10 split but a DIFFERENT clause
+tally: **free 88, acc 33, bridge 2, q+ 3** - visibly different from Fable's 77/35/11/3.
+Root-caused by dumping every rescued pair's full (non-exclusive) clause-truth vector rather than
+just the first-fired label: 44 pairs have BOTH `acc` and `free` true simultaneously (an atom's
+own bond is `free` via `metal(i)` AND has a metal/free-capacity shared neighbour), 9 have BOTH
+`bridge` and `free` true (a doubly-bridged metal's own diagonal). The VALID/INVALID verdict was
+identical either way (a disjunction does not care which disjunct is checked first) - only the
+single-clause LABEL differed for these 53 double-satisfied pairs. Re-tallying the SAME 126 pairs
+under `acc > bridge > free > Hlp > q+` reproduces Fable's 77/35/11/3 exactly (verified: 44+32+1
+`acc`-involving pairs -> 77; 35 strictly-free-only; 9+2 `bridge`-involving -> 11; 3 `q+`-only).
+**Conclusion: not a bug in either implementation - both agree on every verdict; the priority
+order for labelling a MULTI-clause pass is a reporting convention, not part of the formal rule,
+and this order (matching Fable's own tally) is now what the script uses.** One residual, minor,
+noted rather than chased further: for the AL2X6 Al-Al pair specifically, `bridge` is ALSO true
+(two pure H bridges) alongside `free` (Al is a metal), so this priority reports it as `bridge`,
+while Fable's own worked-example table (section 2.1-rev) describes that specific case as "free
+(Al is a metal; bridge also true)" - i.e. Fable's per-case PROSE foregrounds whichever clause is
+most illustrative for that structure class rather than following one fixed label order, but the
+AGGREGATE tally (which is what was actually checked here) matches to the pair.
+
+## v2.4 ch3nh2 reactive-MD re-check (task step 4)
+
+`python3 scripts/revgfnff_bondgate_sweep.py grid-md --rule both --seed 42` - same protocol as
+the v1 pass (frame 0, T=2000 K, true dt=0.25 fs, maxtime=2000 fs, `topology_mode=react`, shipped
+rev-gfnff defaults), v1 and v2 evaluated on the identical corner stream:
+
+| system | corners | rebuilds | INVALID v1 (away from transitions) | INVALID v2 |
+|---|---:|---:|---:|---:|
+| c2h6 | 8388 | 57 | 0 | 0 |
+| ch3nh2 | 8636 | 69 | **30** | **0** |
+| ch4_H | 8001 | 0 | 0 | 0 |
+
+**30 -> 0, exactly as predicted** ("Hlp with n_other", i.e. the same fix `--alt-lp` already
+gave in the v1 pass; v2 always uses this convention, it is baked into the formal spec's `n_other`
+argument to `lp()`). All 30 hits are the same `N(2)-H(4)`/`N(2)-H(6)` transient-proton motif as
+before.
+
+## v2.5 c2h6 geminal H...H search: found, extracted, confirmed (task step 5)
+
+The v1 pass's single seed-42 trajectory never listed the geminal H...H contact as a bond at all
+(n=1, "no evidence either way", per Fable's own falsification note). This pass ran **6
+independent replicates** of the SAME frame-0/2000 K/dt=0.25 fs(true)/2000 fs/react protocol,
+using the project's own established method for an independent MD replicate on an unchanged
+start (`-md.seed` alone does NOT vary MD initial velocities on this code path - memory note
+`curcuma-shell-and-bench-gotchas` - so each replicate instead displaces every atom by exactly
+1e-5 A in a uniformly random direction, RNG-seeded per replicate, matching the package-11
+protocol in `WORK_STATUS.md` section 11.0; `scripts/revgfnff_bondgate_sweep.py gridmd-search`).
+
+| replicate | jitter seed | corners | REACT rebuilds | geminal C-H-H corners found |
+|---:|---|---:|---:|---:|
+| 0 | none (= v1's baseline) | 8388 | 57 | 0 |
+| 1 | 1001 | 8178 | 21 | **12** |
+| 2 | 1002 | 8314 | 42 | **12** |
+| 3 | 1003 | 8611 | 90 | **11** |
+| 4 | 1004 | 8345 | 48 | 0 |
+| 5 | 1005 | 8206 | 24 | **12** |
+
+**n=6 now (was n=1): 4 of 6 replicates show a genuine geminal C-H-H corner** (both H bonded to
+the SAME carbon AND, transiently, to each other), each persisting over ~11-12 consecutive
+corner-scan snapshots (~3 fs) - not a one-step flicker.
+
+**Geometry extracted and independently verified with real Phase-1 charges** (not assumed):
+replicate 1's exact frame was located by re-running the identical trajectory with
+`-md.dump_frequency 1` (full per-step position dump - the default `dump_frequency=50` is why the
+ordinary trajectory file only has 162 frames over 2000 fs) and matching the target H(6)-H(7)
+distance read off the live SHAREDUMP text (`r 1.9935` Bohr = 1.05491 A) against every one of the
+8002 recorded frames: frame 5271 matches to 1.5e-5 A. Saved as
+`test_cases/revgfnff/fit_work/probes/c2h6_geminal_hh.xyz` (gitignored, like the rest of
+`fit_work/`, kept for anyone who wants to reproduce this without re-chasing the trajectory). A
+static single point on this exact geometry with `-gfnff.topology_mode react` reproduces the
+H(6)-H(7) bond (8 of the live corner's 9 bonds; only the very weak C(1)-H(6) migrating contact,
+c=0.27, is missing - irrelevant to the H(6)-H(7) pair's own verdict, since including it would
+only ADD to H(6)'s `n_other` count, making `free` even less likely, not more):
+
+    6(H)-7(H)  v1=INVALID  v2=INVALID (deciding=None, qloc=0.0000, n_other=1.000/1.000, Val=1.0000/1.0000)
+
+**INVALID under both v1 and v2, exactly as predicted** - no clause fires (`free`/`bridge`
+need a cap or metal, H never gets one; `Hlp` needs the OTHER atom to have Z outside {H,C}, both
+ends here are H; `acc`'s only shared neighbour is the carbon, whose degree 4 already equals its
+Val 4; `qloc` over the 4-atom shell {C2,H6,H7,H8} is 0.0000, an order of magnitude below the 0.5
+threshold, consistent with this being a neutral hydrocarbon far from any charge centre). This is
+the case the whole exercise is about, and it is now confirmed with a real trajectory-derived
+geometry and real charges, not a hand-built analogy.
+
+## v2.6 CH5+ probe (task step 6)
+
+No CH5+ geometry existed in the repo. Built one the same way `VALFIX_STATUS.md` built its own
+("CH5+ (q +1, gfnff-optimised)... the geometry does not come from the code under test"): a
+hand-built near-C_s starting geometry (3 ordinary tetrahedral C-H directions plus the 4th split
+into two H's 0.86 A apart, both ~1.27 A from C) optimised with **plain `-method gfnff -charge
+1`** (not revgfnff), converging to a genuine 3-centre-2-electron minimum: 3 C-H at 1.11-1.11 A,
+2 C-H at 1.254 A, H(4)-H(5) = 0.853 A. Saved as
+`test_cases/revgfnff/fit_work/probes/ch5p.xyz` (gitignored).
+
+    5(H)-6(H)  v1=INVALID  v2=VALID (deciding=q+, qloc=1.0000, n_other=1.000/1.000, Val=1.0000/1.0000)
+
+**Matches Fable's number exactly** (predicted "q+ (qloc 1.00 with the H-partner shell; 0.16
+without)"). Independently cross-checked directly from `ch5p.topo.json`'s raw per-atom
+`topology_charges` (not through the gate script): one-shell sum (C+H4+H5) = **0.1628**, two-shell
+sum (all 6 atoms = the whole +1 molecule) = **1.0000** - both match Fable's "0.16"/"1.00" to the
+precision Fable reported.
+
+## v2.7 Summary
+
+| prediction (FABLE_BOND_STATE_2.md 2.1-rev) | held? |
+|---|---|
+| refset INVALID 136 -> 10, 34 -> 5 structures | **yes, exact** |
+| MOR41 2 -> 0, S30L-CI 0 -> 0 | **yes, exact** |
+| residual = `PX13/hf_2_ts` + 4 named MB16-43 clusters, 9+1=10 pairs | **yes, exact, same 4 clusters** |
+| rescued clause tally 77/35/11/3 (acc/free/bridge/q+) | **yes, exact, after fixing the label priority - see v2.3** |
+| `PA26/h2p` H3+ -> `q+` | **yes** |
+| `MOR41/PR06`/`PR07` eta2-H2 -> `acc` | **yes** |
+| CH5+ probe -> `q+`, qloc 1.00/0.16 | **yes, exact** |
+| `W4-11/b2h6` -> B-B `bridge`, B-H_b `free` | **yes** |
+| AL2X6 -> `free` (Al metal) | **yes, verdict; label now `bridge` under the reconciled priority - v2.3** |
+| ch3nh2 react-MD 30 -> 0 | **yes, exact** |
+| c2h6 geminal H...H stays INVALID | **yes, now with n=6/4-hits evidence + a real extracted geometry, not n=1/no-evidence** |
+| `PX13/hf_2_ts` F...F stays INVALID (control) | **yes** |
+
+No falsification found. The one discrepancy (clause-tally mismatch on the first pass) was
+root-caused to a reporting-convention difference (label priority when multiple clauses fire),
+not a verdict disagreement, and is now reconciled and documented in the tool itself
+(`gate_corner_v2`'s priority-order comment, `scripts/revgfnff_bondgate_sweep.py`).
+
+## Files (v2 addition)
+
+- `scripts/revgfnff_bondgate_sweep.py`: extended with `gate_corner_v2`, `read_topo_json`,
+  `--rule v1|v2|both` on `refset`/`grid`/`grid-md`, a `probe` subcommand (single structure,
+  both rules, prints per-pair deciding clause) and `gridmd-search` (multi-replicate geminal-H-H
+  hunt with the 1e-5 A jitter protocol).
+- `test_cases/revgfnff/fit_work/probes/ch5p.xyz`, `.../c2h6_geminal_hh.xyz` (gitignored data,
+  kept locally for reproducibility).
+- Regenerate: `python3 scripts/revgfnff_bondgate_sweep.py refset --jobs 24 --rule both` (~4 s);
+  `... grid-md --rule both` (~3 s); `... gridmd-search --n 6` (~5 s); `... probe FILE.xyz
+  --charge Q --rule both`.

@@ -1,43 +1,79 @@
 #!/usr/bin/env python3
-"""Offline sweep for the FABLE_BOND_STATE_2.md section 2.1 bond-validity gate.
+"""Offline sweep for the FABLE_BOND_STATE_2.md bond-validity gate, v1 (section 2.1) and
+v2 (section 2.1-rev).
 
-NO C++ CHANGE. This evaluates, in Python, the proposed rule
+NO C++ CHANGE. This evaluates, in Python, the proposed rule(s) against the topology/budget
+data curcuma ALREADY writes: the env-var-gated debug dumps CURCUMA_BONDDUMP (per-bond
+topology) and CURCUMA_SHAREDUMP (per-corner share table -- claim sum S, nominal valence
+ValZ, the charge/donor-rule cap, and the resulting effective valence Val = Val_i(b)), plus,
+for v2 only, the per-atom `topology_charges` (Phase-1 EEQ) and `is_metal` arrays that
+GFNFF::exportTopology() ALREADY writes into every run's `<basename>.topo.json` cache file
+(gfnff_method.cpp:4121-4253, unconditional -- not gated by any of the above env vars). No
+new C++ dump was needed or added; both fields were already there. See
+test_cases/revgfnff/_log/FABLE_BOND_STATE_2.md section 2.1-rev and
+test_cases/revgfnff/_log/BOND_VALIDITY_GATE_SWEEP_STATUS.md (v1 results) / its v2 section
+(this pass) for the full writeup.
+
+CURCUMA_SHAREDUMP output only exists when rev-gfnff is engaged (prepareValenceShare() is
+gated on m_rev.enabled), so every run in this script uses `-method revgfnff` at ITS SHIPPED
+DEFAULTS (share_form conserving, share_donor_rule true, well_form mg3, budget_fix_h true) --
+not a special measurement configuration. The discrete bond LIST is shared code with plain
+`-method gfnff`; only the per-atom Val_i(b) budget needs rev mode to be computed at all.
+
+v1 rule (FABLE_BOND_STATE_2.md section 2.1):
 
     VALID(i, j, b)  iff   n_other(i,b) < Val_i(b)
                      or   n_other(j,b) < Val_j(b)
                      or   (Z_i == 1 and lp(j, b))
                      or   (Z_j == 1 and lp(i, b))
 
-against the topology/budget data curcuma ALREADY prints via the env-var-gated debug dumps
-CURCUMA_BONDDUMP (per-bond topology: element, index, cached bond list) and CURCUMA_SHAREDUMP
-(per-corner share table: for EVERY atom, Z, the corner's claim sum S, nominal valence ValZ, the
-charge/donor-rule cap `cap`, and the resulting effective valence `Val` = Val_i(b) -- i.e. the
-`prepareConservingShare()` output the gate rule needs is read directly off the C++, not
-re-derived). See test_cases/revgfnff/_log/FABLE_BOND_STATE_2.md section 4, measurement plan
-step 1, and test_cases/revgfnff/_log/BOND_VALIDITY_GATE_SWEEP_STATUS.md for the results.
+v2 rule (section 2.1-rev, "The rule, v2"; all inputs per-corner constants -- the corner's
+graph, its caps, its Phase-1 charges; no geometry):
 
-CURCUMA_SHAREDUMP output only exists when rev-gfnff is engaged (prepareValenceShare() is gated
-on m_rev.enabled), so every run in this script uses `-method revgfnff` at ITS SHIPPED DEFAULTS
-(share_form conserving, share_donor_rule true, well_form mg3, budget_fix_h true) -- not a
-special measurement configuration. The discrete bond LIST (perceiveGeometricBonds()) is shared
-code, independent of the rev flag, so this is the same topology plain `-method gfnff` would
-perceive; only the per-atom Val_i(b) budget needs rev mode to be computed at all. This is a
-genuine limitation of the existing dumps (there is no plain-gfnff equivalent of the budget
-cap), stated here rather than worked around.
+    N(i)          listed partners of i in corner b;  deg(i) = |N(i)|
+    metal(i)      GFN-FF metal_type(Z_i) > 0
+    cap_i         the conserving-share cap of this corner; Val_i = Val_Z + cap_i
+    deficient(i)  cap_i >= 0.5  or  metal(i)
+    purebridge(k; i,j)   k in N(i) ∩ N(j)  and every partner of k other than i, j is H
+    bridge(i,j)   deficient(i) and deficient(j) and #{k : purebridge(k; i,j)} >= 2
+    n_other(i;j)  #{m in N(i) \\ {j} : not bridge(i,m)}
+    free(i;j)     metal(i)  or  n_other(i;j) < Val_i
+    lp(i;j)       Z_i not in {H, C}  and  ve(Z_i) - n_other(i;j) >= 2
+    acc(k)        metal(k)  or  deg(k) < Val_k
+    qloc(i,j)     sum of Phase-1 qa over {i,j} ∪ N(i) ∪ N(j) ∪ {H partners of any of those}
+
+    VALID(i,j,b)  iff  free(i;j) or free(j;i)
+                   or  (Z_i = H and lp(j;i)) or (Z_j = H and lp(i;j))
+                   or  bridge(i,j)
+                   or  exists k in N(i) ∩ N(j) with acc(k)
+                   or  qloc(i,j) >= +0.5
+
+`is_metal` is read directly from each run's `.topo.json` (per-structure exact value, not a
+hand-written element table). `topology_charges` (Phase-1 EEQ) likewise -- but ONLY for static
+`-sp` jobs (refset/grid/probe): `.topo.json` is written once, at topology initialisation, so
+during a live reactive-MD trajectory (`grid-md`) it reflects only the t=0 corner, not the
+per-step one the SHAREDUMP/BONDDUMP text is showing. For `grid-md`, charges are therefore
+treated as UNAVAILABLE (qloc always None, the q+ clause never fires) -- stated explicitly in
+every relevant report line, not silently approximated. `is_metal` has no such problem (it is
+a per-atom, per-ELEMENT constant, unchanged by geometry), so it is fetched once per system
+via one extra static `-sp` on the same atom composition and reused for every step.
 
 Usage:
-    scripts/revgfnff_bondgate_sweep.py refset [--limit N] [--jobs N]      # GMTKN55+MOR41+S30L-CI
-    scripts/revgfnff_bondgate_sweep.py grid   [--jobs N]                  # 130-cell grid frames
+    scripts/revgfnff_bondgate_sweep.py refset [--limit N] [--jobs N] [--rule v1|v2|both]
+    scripts/revgfnff_bondgate_sweep.py grid   [--jobs N] [--rule v1|v2|both]
+    scripts/revgfnff_bondgate_sweep.py grid-md [--rule v1|v2|both] [--alt-lp]
+    scripts/revgfnff_bondgate_sweep.py probe FILE.xyz [--charge Q] [--spin S] [--rule v1|v2|both]
 """
 import argparse
 import concurrent.futures as cf
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -93,12 +129,13 @@ for z in (10, 18, 36, 54, 86):
     GROUP_VALENCE_E[z] = 8
 
 
-ALT_LP_EXCLUDE_PAIR = False  # robustness check: count = n_other(i) instead of full degree(i),
-                             # i.e. lp() ignores the very pair being tested. See report section
-                             # on the lp() self-reference ambiguity (ch3nh2 hot-MD finding).
+ALT_LP_EXCLUDE_PAIR = False  # v1 robustness check: count = n_other(i) instead of full
+                             # degree(i), i.e. lp() ignores the very pair being tested.
+                             # v2 ALWAYS does this (it is baked into the v2 spec's n_other
+                             # convention) -- this flag only affects the v1 evaluator.
 
 
-def lone_pair(z, count):
+def lone_pair_v1(z, count):
     """lp(i,b) per FABLE_BOND_STATE_2 section 2.1: 'i still carries a lone pair in b'.
     Returns True/False/None (None = element not covered by the main-group table)."""
     if z in (1, 6):
@@ -139,12 +176,36 @@ def run_curcuma(xyz_path, workdir, charge=0, spin=0, extra=None, timeout=180):
     return strip_ansi(r.stdout) + strip_ansi(r.stderr)
 
 
-def parse_and_gate(output):
-    """Parse one curcuma run's stdout for the LAST share-dump corner and evaluate the gate on
-    every pair it lists. Returns a dict with keys: n_bonds_share, n_bonds_bonddump, atoms
-    (idx -> dict(Z, Val)), pairs (list of (i,j)), results (list of dict per pair), and any
-    parse-failure notes."""
-    lines = clean_lines(output)
+def read_topo_json(workdir, basename):
+    """Read the `<basename>.topo.json` GFNFF::exportTopology() writes next to the structure
+    (unconditional, gfnff_method.cpp:4121-4253/4502-4544 -- not gated by CURCUMA_BONDDUMP or
+    CURCUMA_SHAREDUMP). Returns (charges, is_metal), both dicts keyed by the SAME 1-based atom
+    index the BOND/share/shareA lines use (topo.json arrays are 0-based internal order;
+    verified directly: an NH4+ probe's topology_charges[0] (json) == the printed shareA atom
+    1's sign/magnitude for the N). Missing file/keys -> ({}, {}), reported by the caller, not
+    silently substituted."""
+    p = Path(workdir) / (basename + ".topo.json")
+    if not p.exists():
+        return {}, {}
+    try:
+        d = json.loads(p.read_text())
+    except Exception:
+        return {}, {}
+    charges = {}
+    is_metal = {}
+    if "topology_charges" in d:
+        for idx0, q in enumerate(d["topology_charges"]):
+            charges[idx0 + 1] = float(q)
+    if "is_metal" in d:
+        for idx0, m in enumerate(d["is_metal"]):
+            is_metal[idx0 + 1] = bool(m)
+    return charges, is_metal
+
+
+def extract_last_corner(lines):
+    """Shared parse step for v1 and v2: the last 'share dump: corner with N bonds' block
+    (the converged-charge corner) plus the BONDDUMP topology (fallback Z / bond-count cross
+    check). Returns (bonddump_pairs, bonddump_Z, corner_found, share_pairs, shareA, notes)."""
     bonddump_pairs = set()
     bonddump_Z = {}
     for ln in lines:
@@ -155,42 +216,42 @@ def parse_and_gate(output):
             bonddump_Z[i] = zi
             bonddump_Z[j] = zj
 
-    # Take the LAST "share dump: corner with N bonds" block (the converged-charge corner).
     corner_starts = [k for k, ln in enumerate(lines) if CORNER_HDR_RE.match(ln)]
     share_pairs = []  # (i, j, Val_i, Val_j) as printed, 1-indexed
     shareA = {}       # idx -> (Z, S, ValZ, cap, Val)
-    if corner_starts:
-        start = corner_starts[-1]
-        end = corner_starts[-1] + 1
-        # consume "share" lines then "shareA" lines until a non-matching line
-        k = start + 1
-        while k < len(lines) and SHARE_RE.match(lines[k]):
-            m = SHARE_RE.match(lines[k])
-            share_pairs.append((int(m.group(1)), int(m.group(2)),
-                                 float(m.group(3)), float(m.group(4))))
-            k += 1
-        while k < len(lines) and SHAREA_RE.match(lines[k]):
-            m = SHAREA_RE.match(lines[k])
-            idx = int(m.group(1))
-            shareA[idx] = dict(Z=int(m.group(2)), S=float(m.group(3)),
-                                ValZ=float(m.group(4)), cap=float(m.group(5)),
-                                Val=float(m.group(6)))
-            k += 1
-
     notes = []
     if not corner_starts:
-        return dict(ok=False, note="no share-dump corner (0 bonds / single atom, or parse miss)",
-                    n_bonds_bonddump=len(bonddump_pairs), pairs_tested=0, results=[])
-    if len(bonddump_pairs) and len(share_pairs) != len(bonddump_pairs):
+        return bonddump_pairs, bonddump_Z, False, share_pairs, shareA, notes
+
+    start = corner_starts[-1]
+    k = start + 1
+    while k < len(lines) and SHARE_RE.match(lines[k]):
+        m = SHARE_RE.match(lines[k])
+        share_pairs.append((int(m.group(1)), int(m.group(2)),
+                             float(m.group(3)), float(m.group(4))))
+        k += 1
+    while k < len(lines) and SHAREA_RE.match(lines[k]):
+        m = SHAREA_RE.match(lines[k])
+        idx = int(m.group(1))
+        shareA[idx] = dict(Z=int(m.group(2)), S=float(m.group(3)),
+                            ValZ=float(m.group(4)), cap=float(m.group(5)),
+                            Val=float(m.group(6)))
+        k += 1
+    if bonddump_pairs and len(share_pairs) != len(bonddump_pairs):
         notes.append("share corner has %d bonds, BONDDUMP topology has %d"
                      % (len(share_pairs), len(bonddump_pairs)))
+    return bonddump_pairs, bonddump_Z, True, share_pairs, shareA, notes
 
-    # degree in the corner = number of listed partners per atom index
+
+# --------------------------------------------------------------------------- v1 gate
+
+def gate_corner_v1(share_pairs, shareA, bonddump_Z=None):
+    """Section 2.1, as written (offline sweep pass 1)."""
+    bonddump_Z = bonddump_Z or {}
     degree = Counter()
     for (i, j, _, _) in share_pairs:
         degree[i] += 1
         degree[j] += 1
-
     results = []
     for (i, j, val_i_pair, val_j_pair) in share_pairs:
         zi = shareA.get(i, {}).get("Z", bonddump_Z.get(i))
@@ -203,8 +264,8 @@ def parse_and_gate(output):
         free_j = n_other_j < val_j
         lp_count_i = degree[i] - (1 if ALT_LP_EXCLUDE_PAIR else 0)
         lp_count_j = degree[j] - (1 if ALT_LP_EXCLUDE_PAIR else 0)
-        lp_i = lone_pair(zi, lp_count_i) if zi is not None else None
-        lp_j = lone_pair(zj, lp_count_j) if zj is not None else None
+        lp_i = lone_pair_v1(zi, lp_count_i) if zi is not None else None
+        lp_j = lone_pair_v1(zj, lp_count_j) if zj is not None else None
         bridge = False
         undefined_lp_used = False
         if zi == 1 and lp_j is None and zj is not None:
@@ -220,13 +281,170 @@ def parse_and_gate(output):
                              n_other_i=n_other_i, n_other_j=n_other_j,
                              free_i=free_i, free_j=free_j, bridge=bridge,
                              valid=valid, undefined_lp_used=undefined_lp_used))
-    return dict(ok=True, note="; ".join(notes), n_bonds_bonddump=len(bonddump_pairs),
-                pairs_tested=len(results), results=results)
+    return results
 
 
 def elem_pair_key(zi, zj):
     si, sj = SYMBOL.get(zi, "Z%d" % zi if zi else "?"), SYMBOL.get(zj, "Z%d" % zj if zj else "?")
     return "-".join(sorted((si, sj)))
+
+
+# --------------------------------------------------------------------------- v2 gate
+
+def gate_corner_v2(share_pairs, shareA, bonddump_Z=None, charges=None, is_metal=None):
+    """Section 2.1-rev, "The rule, v2" -- see module docstring for the formal definition.
+    `charges`/`is_metal`: dicts keyed by the same 1-based atom index as `shareA`/BONDDUMP.
+    Pass charges={} to mark Phase-1 charges as unavailable (qloc always None -> q+ never
+    fires) -- the correct, honest behaviour for an MD trajectory scan (see module docstring)."""
+    bonddump_Z = bonddump_Z or {}
+    charges = charges or {}
+    is_metal = is_metal or {}
+
+    adj = defaultdict(set)
+    for (i, j, _, _) in share_pairs:
+        adj[i].add(j)
+        adj[j].add(i)
+    all_idx = set(adj.keys()) | set(shareA.keys())
+    Z = {idx: shareA.get(idx, {}).get("Z", bonddump_Z.get(idx)) for idx in all_idx}
+    Val = {idx: shareA[idx]["Val"] for idx in shareA}
+    cap = {idx: shareA[idx].get("cap", 0.0) for idx in shareA}
+    metal = {idx: bool(is_metal.get(idx, False)) for idx in all_idx}
+    deficient = {idx: (cap.get(idx, 0.0) >= 0.5) or metal.get(idx, False) for idx in all_idx}
+    charges_available = len(charges) > 0
+
+    def purebridge_count(i, j):
+        common = adj[i] & adj[j]
+        cnt = 0
+        for k in common:
+            others = [m for m in adj[k] if m not in (i, j)]
+            if all(Z.get(m) == 1 for m in others):  # vacuously True if k has no other partner
+                cnt += 1
+        return cnt
+
+    bridge_pair = {}
+    for (i, j, _, _) in share_pairs:
+        key = frozenset((i, j))
+        if key in bridge_pair:
+            continue
+        pb = purebridge_count(i, j)
+        bridge_pair[key] = deficient.get(i, False) and deficient.get(j, False) and pb >= 2
+
+    def n_other(i, j):
+        """n_other(i;j): i's other listed partners, excluding j and excluding any partner m
+        for which (i,m) is itself a bridge-validated diagonal (the doubly-bridged-dimer
+        exclusion, section 2.1-rev item (2))."""
+        cnt = 0
+        for m in adj[i]:
+            if m == j:
+                continue
+            if not bridge_pair.get(frozenset((i, m)), False):
+                cnt += 1
+        return cnt
+
+    def free_(i, j):
+        return metal.get(i, False) or (n_other(i, j) < Val.get(i, float("inf")))
+
+    def lp_(atom, exclude):
+        z = Z.get(atom)
+        if z in (1, 6):
+            return False
+        ve = GROUP_VALENCE_E.get(z)
+        if ve is None:
+            return None
+        return (ve - n_other(atom, exclude)) >= 2
+
+    def acc(k):
+        return metal.get(k, False) or (len(adj[k]) < Val.get(k, float("inf")))
+
+    def qloc(i, j):
+        if not charges_available:
+            return None
+        base = {i, j} | adj[i] | adj[j]
+        ext = set(base)
+        for a in base:
+            for m in adj[a]:
+                if Z.get(m) == 1:
+                    ext.add(m)
+        if not all(a in charges for a in ext):
+            return None  # partial charge coverage -- do not silently under/over-count
+        return sum(charges[a] for a in ext)
+
+    results = []
+    for (i, j, val_i_pair, val_j_pair) in share_pairs:
+        zi, zj = Z.get(i), Z.get(j)
+        free_i = free_(i, j)
+        free_j = free_(j, i)
+        lp_j_wrt_i = lp_(j, i)   # lp(j;i)
+        lp_i_wrt_j = lp_(i, j)   # lp(i;j)
+        h_bridge_j = bool(zi == 1 and lp_j_wrt_i)
+        h_bridge_i = bool(zj == 1 and lp_i_wrt_j)
+        bridgeij = bridge_pair.get(frozenset((i, j)), False)
+        acc_atoms = [k for k in (adj[i] & adj[j]) if acc(k)]
+        ql = qloc(i, j)
+        q_plus = (ql is not None) and (ql >= 0.5)
+        valid = (free_i or free_j or h_bridge_j or h_bridge_i or bridgeij
+                 or bool(acc_atoms) or q_plus)
+        # Priority when several clauses fire on the same pair simultaneously (common: a metal
+        # atom's own bonds are BOTH `free` via metal(i) AND have a metal `acc` partner). This
+        # order (acc > bridge > free > Hlp > q+) is not part of the formal v2 spec (any true
+        # clause makes the pair VALID regardless of order) -- it is chosen to match Fable's own
+        # scratchpad-evaluator attribution exactly (reconciled empirically: with this order the
+        # 126 refset-rescued pairs split 77/11/35/3, bit for bit Fable's own tally in
+        # FABLE_BOND_STATE_2.md section 2.1-rev; the reverse-engineered alternative "free first"
+        # gave 88/2/33/3, same 126 pairs and identical VALID/INVALID verdicts, only a different
+        # label on 53 double-satisfied pairs -- see BOND_VALIDITY_GATE_SWEEP_STATUS.md v2 section).
+        deciding = None
+        for name, flag in (("acc", bool(acc_atoms)), ("bridge", bridgeij),
+                           ("free", free_i or free_j), ("Hlp", h_bridge_i or h_bridge_j),
+                           ("q+", q_plus)):
+            if flag:
+                deciding = name
+                break
+        results.append(dict(
+            i=i, j=j, zi=zi, zj=zj, val_i=Val.get(i), val_j=Val.get(j),
+            n_other_i=n_other(i, j), n_other_j=n_other(j, i),
+            free_i=free_i, free_j=free_j, bridge=bridgeij, acc=bool(acc_atoms),
+            acc_atoms=acc_atoms, h_bridge_i=h_bridge_i, h_bridge_j=h_bridge_j,
+            qloc=ql, q_plus=q_plus, valid=valid, deciding=deciding,
+            charges_available=charges_available,
+            lp_i_undefined=(lp_i_wrt_j is None and zj == 1),
+            lp_j_undefined=(lp_j_wrt_i is None and zi == 1)))
+    return results
+
+
+def gate_both(share_pairs, shareA, bonddump_Z=None, charges=None, is_metal=None):
+    r1 = gate_corner_v1(share_pairs, shareA, bonddump_Z)
+    r2 = gate_corner_v2(share_pairs, shareA, bonddump_Z, charges=charges, is_metal=is_metal)
+    # r1/r2 are built from the same `share_pairs` iteration order -> zip is index-aligned.
+    merged = []
+    for a, b in zip(r1, r2):
+        assert a["i"] == b["i"] and a["j"] == b["j"]
+        merged.append(dict(i=a["i"], j=a["j"], zi=a["zi"], zj=a["zj"],
+                            v1=a, v2=b))
+    return merged
+
+
+# --------------------------------------------------------------------------- run + parse
+
+def parse_and_gate(output, rule="both", charges=None, is_metal=None):
+    lines = clean_lines(output)
+    bonddump_pairs, bonddump_Z, corner_found, share_pairs, shareA, notes = extract_last_corner(lines)
+    if not corner_found:
+        return dict(ok=False, note="no share-dump corner (0 bonds / single atom, or parse miss)",
+                    n_bonds_bonddump=len(bonddump_pairs), pairs_tested=0, results=[], rule=rule)
+
+    if rule == "v1":
+        results = [dict(v1=r, v2=None, i=r["i"], j=r["j"], zi=r["zi"], zj=r["zj"])
+                   for r in gate_corner_v1(share_pairs, shareA, bonddump_Z)]
+    elif rule == "v2":
+        results = [dict(v1=None, v2=r, i=r["i"], j=r["j"], zi=r["zi"], zj=r["zj"])
+                   for r in gate_corner_v2(share_pairs, shareA, bonddump_Z,
+                                           charges=charges, is_metal=is_metal)]
+    else:
+        results = gate_both(share_pairs, shareA, bonddump_Z, charges=charges, is_metal=is_metal)
+
+    return dict(ok=True, note="; ".join(notes), n_bonds_bonddump=len(bonddump_pairs),
+                pairs_tested=len(results), results=results, rule=rule)
 
 
 # --------------------------------------------------------------------------- reference-set sweep
@@ -270,31 +488,51 @@ def collect_refset(limit=0):
     return jobs
 
 
-def process_one(label, xyz, charge, spin):
+def process_one(label, xyz, charge, spin, rule="both"):
     with tempfile.TemporaryDirectory() as td:
         local = Path(td) / "struc.xyz"
         shutil.copy(xyz, local)
         out = run_curcuma(local, td, charge=charge, spin=spin)
+        charges, is_metal = ({}, {})
+        if out is not None and rule in ("v2", "both"):
+            charges, is_metal = read_topo_json(td, "struc")
     if out is None:
-        return label, dict(ok=False, note="TIMEOUT", pairs_tested=0, results=[])
-    return label, parse_and_gate(out)
+        return label, dict(ok=False, note="TIMEOUT", pairs_tested=0, results=[], rule=rule)
+    r = parse_and_gate(out, rule=rule, charges=charges, is_metal=is_metal)
+    if rule in ("v2", "both") and not charges:
+        r["note"] = (r["note"] + "; " if r["note"] else "") + "topo.json charges unavailable"
+    return label, r
 
 
 def dataset_of(label):
     return label.split("/")[0]
 
 
-def summarize(all_results, title, out_lines):
+def invalid_v1(pr):
+    return pr["v1"] is not None and not pr["v1"]["valid"]
+
+
+def invalid_v2(pr):
+    return pr["v2"] is not None and not pr["v2"]["valid"]
+
+
+def summarize(all_results, title, out_lines, rule="both"):
     n_struct = len(all_results)
     n_fail = sum(1 for _, r in all_results if not r["ok"])
     n_pairs = sum(r["pairs_tested"] for _, r in all_results)
-    invalid = []
-    per_ds_invalid = Counter()
+
+    inv1 = []       # (label, pr) invalid under v1
+    inv2 = []       # (label, pr) invalid under v2
+    rescued = []    # (label, pr) invalid under v1, valid under v2 -- the transition table
+    both_invalid = []  # invalid under v1 AND v2 (the residual)
     per_ds_pairs = Counter()
-    per_ds_struct_with_invalid = Counter()
-    elem_pair_counts = Counter()
-    undefined_lp_elems = Counter()
+    per_ds_inv1 = Counter()
+    per_ds_inv2 = Counter()
+    struct_inv1 = Counter()
+    struct_inv2 = Counter()
+    elem_pairs_v2 = Counter()
     mismatch_notes = []
+
     for label, r in all_results:
         ds = dataset_of(label)
         per_ds_pairs[ds] += r["pairs_tested"]
@@ -302,89 +540,101 @@ def summarize(all_results, title, out_lines):
             continue
         if r["note"]:
             mismatch_notes.append((label, r["note"]))
-        struct_has_invalid = False
+        s1 = s2 = False
         for pr in r["results"]:
-            if pr["undefined_lp_used"]:
-                z = pr["zi"] if pr["zi"] != 1 else pr["zj"]
-                undefined_lp_elems[SYMBOL.get(z, "Z%d" % z)] += 1
-            if not pr["valid"]:
-                invalid.append((label, pr))
-                per_ds_invalid[ds] += 1
-                struct_has_invalid = True
-                elem_pair_counts[elem_pair_key(pr["zi"], pr["zj"])] += 1
-        if struct_has_invalid:
-            per_ds_struct_with_invalid[ds] += 1
+            has_v1 = pr.get("v1") is not None
+            has_v2 = pr.get("v2") is not None
+            v1_invalid = has_v1 and not pr["v1"]["valid"]
+            v2_invalid = has_v2 and not pr["v2"]["valid"]
+            if v1_invalid:
+                inv1.append((label, pr)); per_ds_inv1[ds] += 1; s1 = True
+            if v2_invalid:
+                inv2.append((label, pr)); per_ds_inv2[ds] += 1; s2 = True
+                elem_pairs_v2[elem_pair_key(pr["zi"], pr["zj"])] += 1
+            if v1_invalid and has_v2 and not v2_invalid:
+                rescued.append((label, pr))
+            if v1_invalid and v2_invalid:
+                both_invalid.append((label, pr))
+        if s1:
+            struct_inv1[ds] += 1
+        if s2:
+            struct_inv2[ds] += 1
 
     out_lines.append("## %s" % title)
     out_lines.append("")
-    out_lines.append("Structures evaluated: %d (failed/no-parse: %d)" % (n_struct, n_fail))
+    out_lines.append("Structures evaluated: %d (failed/no-parse: %d), rule=%s" % (n_struct, n_fail, rule))
     out_lines.append("Pairs tested (listed bonds in the evaluated corner): %d" % n_pairs)
-    out_lines.append("INVALID pairs total: %d" % len(invalid))
+    if rule in ("v1", "both"):
+        out_lines.append("INVALID pairs (v1, section 2.1): %d" % len(inv1))
+    if rule in ("v2", "both"):
+        out_lines.append("INVALID pairs (v2, section 2.1-rev): %d" % len(inv2))
     out_lines.append("")
-    out_lines.append("| dataset | pairs tested | INVALID pairs | structures with >=1 INVALID |")
-    out_lines.append("|---|---:|---:|---:|")
+    out_lines.append("| dataset | pairs tested | INVALID v1 | structs v1 | INVALID v2 | structs v2 |")
+    out_lines.append("|---|---:|---:|---:|---:|---:|")
     for ds in sorted(per_ds_pairs):
-        out_lines.append("| %s | %d | %d | %d |" % (
-            ds, per_ds_pairs[ds], per_ds_invalid.get(ds, 0), per_ds_struct_with_invalid.get(ds, 0)))
+        out_lines.append("| %s | %d | %d | %d | %d | %d |" % (
+            ds, per_ds_pairs[ds], per_ds_inv1.get(ds, 0), struct_inv1.get(ds, 0),
+            per_ds_inv2.get(ds, 0), struct_inv2.get(ds, 0)))
     out_lines.append("")
-    if elem_pair_counts:
-        out_lines.append("INVALID pairs by element pair:")
-        out_lines.append("")
-        out_lines.append("| element pair | count |")
-        out_lines.append("|---|---:|")
-        for k, v in elem_pair_counts.most_common():
-            out_lines.append("| %s | %d |" % (k, v))
-        out_lines.append("")
-    else:
-        out_lines.append("No INVALID pairs found.")
-        out_lines.append("")
-    if undefined_lp_elems:
-        out_lines.append("H-bridge clause evaluated against an element with NO main-group "
-                          "lp() rule (d/f-block; lp() treated as unknown, bridge clause could "
-                          "not fire either way) -- counts of (H, X) pairs hitting this:")
-        out_lines.append("")
-        for k, v in undefined_lp_elems.most_common():
+
+    if rule == "both":
+        out_lines.append("Rescued (INVALID under v1, VALID under v2), by deciding clause: %d" % len(rescued))
+        deciding_counts = Counter(pr["v2"]["deciding"] for _, pr in rescued)
+        for k, v in deciding_counts.most_common():
             out_lines.append("- %s: %d" % (k, v))
         out_lines.append("")
+        out_lines.append("Residual (INVALID under BOTH v1 and v2): %d" % len(both_invalid))
+        for label, pr in both_invalid:
+            v2 = pr["v2"]
+            out_lines.append("- %s  %d(%s)-%d(%s)  n_other/Val %.3f/%.4f vs %.3f/%.4f  "
+                              "qloc=%s charges_avail=%s" % (
+                label, pr["i"], SYMBOL.get(pr["zi"], pr["zi"]),
+                pr["j"], SYMBOL.get(pr["zj"], pr["zj"]),
+                v2["n_other_i"], v2["val_i"], v2["n_other_j"], v2["val_j"],
+                ("%.3f" % v2["qloc"]) if v2["qloc"] is not None else "n/a",
+                v2["charges_available"]))
+        out_lines.append("")
+
+    if rule in ("v2", "both") and elem_pairs_v2:
+        out_lines.append("INVALID v2 pairs by element pair:")
+        out_lines.append("")
+        for k, v in elem_pairs_v2.most_common():
+            out_lines.append("- %s: %d" % (k, v))
+        out_lines.append("")
+
     if mismatch_notes:
-        out_lines.append("Corner/BONDDUMP bond-count mismatches (first 20):")
+        out_lines.append("Corner/BONDDUMP bond-count mismatches or missing-data notes (first 20):")
         for label, note in mismatch_notes[:20]:
             out_lines.append("- %s: %s" % (label, note))
         out_lines.append("")
-    out_lines.append("All INVALID pairs (structure, i-j, Z pair, n_other/Val each end):")
-    out_lines.append("")
-    for label, pr in invalid:
-        out_lines.append("- %s  %d(%s)-%d(%s)  n_other/Val: %.3f/%.4f vs %.3f/%.4f" % (
-            label, pr["i"], SYMBOL.get(pr["zi"], pr["zi"]),
-            pr["j"], SYMBOL.get(pr["zj"], pr["zj"]),
-            pr["n_other_i"], pr["val_i"], pr["n_other_j"], pr["val_j"]))
-    out_lines.append("")
-    return invalid
+
+    return dict(inv1=inv1, inv2=inv2, rescued=rescued, both_invalid=both_invalid)
 
 
 def cmd_refset(a):
     jobs = collect_refset(limit=a.limit)
-    print("refset gate sweep: %d structures, %d jobs" % (len(jobs), a.jobs), flush=True)
+    print("refset gate sweep: %d structures, %d jobs, rule=%s" % (len(jobs), a.jobs, a.rule), flush=True)
     all_results = []
     done = 0
     with cf.ThreadPoolExecutor(max_workers=a.jobs) as ex:
-        futs = {ex.submit(process_one, label, xyz, c, s): label
+        futs = {ex.submit(process_one, label, xyz, c, s, a.rule): label
                 for (label, xyz, c, s) in jobs}
         for fut in cf.as_completed(futs):
             label = futs[fut]
             try:
                 lbl, r = fut.result()
             except Exception as e:
-                lbl, r = label, dict(ok=False, note="EXC: %s" % e, pairs_tested=0, results=[])
+                lbl, r = label, dict(ok=False, note="EXC: %s" % e, pairs_tested=0, results=[], rule=a.rule)
             all_results.append((lbl, r))
             done += 1
             if done % 200 == 0:
                 print("  ... %d/%d" % (done, len(jobs)), flush=True)
     out_lines = []
-    summarize(all_results, "Reference-set sweep (GMTKN55 + MOR41 + S30L-CI)", out_lines)
+    agg = summarize(all_results, "Reference-set sweep (GMTKN55 + MOR41 + S30L-CI)", out_lines, rule=a.rule)
     print("\n".join(out_lines))
     if a.out:
         Path(a.out).write_text("\n".join(out_lines))
+    return agg
 
 
 # --------------------------------------------------------------------------- 130-cell grid
@@ -414,56 +664,85 @@ def collect_grid():
     return jobs
 
 
-def process_grid_one(label, frame_lines):
+def process_grid_one(label, frame_lines, rule="both"):
     with tempfile.TemporaryDirectory() as td:
         local = Path(td) / "frame.xyz"
         local.write_text("\n".join(frame_lines) + "\n")
         out = run_curcuma(local, td, charge=0, spin=0)
+        charges, is_metal = ({}, {})
+        if out is not None and rule in ("v2", "both"):
+            charges, is_metal = read_topo_json(td, "frame")
     if out is None:
-        return label, dict(ok=False, note="TIMEOUT", pairs_tested=0, results=[])
-    return label, parse_and_gate(out)
+        return label, dict(ok=False, note="TIMEOUT", pairs_tested=0, results=[], rule=rule)
+    return label, parse_and_gate(out, rule=rule, charges=charges, is_metal=is_metal)
 
+
+def cmd_grid(a):
+    jobs = collect_grid()
+    print("130-cell grid substitute: %d DISTINCT starting geometries, rule=%s "
+          "(temperature does not change the t=0 geometry in the tail-sweep protocol, "
+          "so a static gate check covers 65 of the nominal 130 cells; see report)"
+          % (len(jobs), a.rule), flush=True)
+    all_results = []
+    with cf.ThreadPoolExecutor(max_workers=a.jobs) as ex:
+        for label, r in ex.map(lambda j: process_grid_one(j[0], j[1], a.rule), jobs):
+            all_results.append((label, r))
+    out_lines = []
+    summarize(all_results, "130-cell grid substitute (65 distinct starting frames, static)",
+              out_lines, rule=a.rule)
+    print("\n".join(out_lines))
+    if a.out:
+        Path(a.out).write_text("\n".join(out_lines))
+
+
+# --------------------------------------------------------------------------- single-structure probe
+
+def cmd_probe(a):
+    xyz = Path(a.xyz)
+    with tempfile.TemporaryDirectory() as td:
+        local = Path(td) / (xyz.stem + ".xyz")
+        shutil.copy(xyz, local)
+        out = run_curcuma(local, td, charge=a.charge, spin=a.spin)
+        charges, is_metal = ({}, {})
+        if out is not None:
+            charges, is_metal = read_topo_json(td, xyz.stem)
+    if out is None:
+        print("TIMEOUT")
+        return
+    r = parse_and_gate(out, rule=a.rule, charges=charges, is_metal=is_metal)
+    print("probe %s  charge=%d spin=%d  rule=%s  pairs=%d  note=%s"
+          % (xyz.name, a.charge, a.spin, a.rule, r["pairs_tested"], r["note"]))
+    print("charges read: %d atoms, is_metal read: %d atoms" % (len(charges), len(is_metal)))
+    for pr in r["results"]:
+        line = "  %d(%s)-%d(%s)" % (pr["i"], SYMBOL.get(pr["zi"], pr["zi"]),
+                                     pr["j"], SYMBOL.get(pr["zj"], pr["zj"]))
+        if pr.get("v1") is not None:
+            line += "  v1=%s" % ("VALID" if pr["v1"]["valid"] else "INVALID")
+        if pr.get("v2") is not None:
+            v2 = pr["v2"]
+            line += ("  v2=%s (deciding=%s, qloc=%s, n_other=%.3f/%.3f Val=%.4f/%.4f)"
+                      % ("VALID" if v2["valid"] else "INVALID", v2["deciding"],
+                         ("%.4f" % v2["qloc"]) if v2["qloc"] is not None else "n/a",
+                         v2["n_other_i"], v2["n_other_j"], v2["val_i"], v2["val_j"]))
+        print(line)
+
+
+# --------------------------------------------------------------------------- reactive-MD (grid-md)
 
 REACT_EVENT_RE = re.compile(r"^REACT (bond formed|bond broken|rebuild) #?(\d*)")
 
 
-def gate_one_corner(share_pairs, shareA, bonddump_Z=None):
-    """Evaluate the section-2.1 gate on one already-extracted corner. share_pairs: list of
-    (i, j, val_i_pair, val_j_pair). shareA: idx -> dict(Z, S, ValZ, cap, Val)."""
-    bonddump_Z = bonddump_Z or {}
-    degree = Counter()
-    for (i, j, _, _) in share_pairs:
-        degree[i] += 1
-        degree[j] += 1
-    results = []
-    for (i, j, val_i_pair, val_j_pair) in share_pairs:
-        zi = shareA.get(i, {}).get("Z", bonddump_Z.get(i))
-        zj = shareA.get(j, {}).get("Z", bonddump_Z.get(j))
-        val_i = shareA[i]["Val"] if i in shareA else val_i_pair
-        val_j = shareA[j]["Val"] if j in shareA else val_j_pair
-        n_other_i = degree[i] - 1
-        n_other_j = degree[j] - 1
-        free_i = n_other_i < val_i
-        free_j = n_other_j < val_j
-        lp_count_i = degree[i] - (1 if ALT_LP_EXCLUDE_PAIR else 0)
-        lp_count_j = degree[j] - (1 if ALT_LP_EXCLUDE_PAIR else 0)
-        lp_i = lone_pair(zi, lp_count_i) if zi is not None else None
-        lp_j = lone_pair(zj, lp_count_j) if zj is not None else None
-        bridge = (zi == 1 and lp_j) or (zj == 1 and lp_i)
-        valid = free_i or free_j or bridge
-        results.append(dict(i=i, j=j, zi=zi, zj=zj, val_i=val_i, val_j=val_j,
-                             n_other_i=n_other_i, n_other_j=n_other_j, valid=valid))
-    return results
-
-
-def run_reactive_md(system, frame_lines, temperature, maxtime, dt, workdir):
+def run_reactive_md(frame_lines, temperature, maxtime, dt, workdir, seed=42, perturb=None):
     local = Path(workdir) / "input.xyz"
-    local.write_text("\n".join(frame_lines) + "\n")
+    lines = list(frame_lines)
+    if perturb:
+        lines = apply_perturbation(lines, perturb)
+    local.write_text("\n".join(lines) + "\n")
     cmd = [str(CURCUMA), "-md", "input.xyz", "-method", "revgfnff",
            "-gfnff.topology_mode", "react", "-temperature", str(temperature),
            "-maxtime", str(maxtime), "-md.time_step", str(dt),
            "-md.thermostat", "csvr", "-md.coupling", "10",
-           "-md.rattle_12", "false", "-md.no_restart", "-md.seed", "42",
+           "-md.rattle_12", "false", "-md.no_restart", "-md.seed", str(seed),
            "-threads", "1", "-verbosity", "2", "-md.print_frequency", "1", "-no_bmt"]
     env = dict(os.environ)
     env["CURCUMA_BONDDUMP"] = "1"
@@ -473,21 +752,65 @@ def run_reactive_md(system, frame_lines, temperature, maxtime, dt, workdir):
     return strip_ansi(r.stdout) + strip_ansi(r.stderr)
 
 
-def scan_trajectory(output, window=3):
+def apply_perturbation(frame_lines, seed, magnitude=1e-5):
+    """Package-11 protocol (WORK_STATUS.md section 11.0): displace every atom by a vector of
+    exactly `magnitude` Angstrom in a uniformly random direction, RNG seeded by (cell, seed)
+    at the call site. `-md.seed` alone does NOT vary MD initial velocities on this path
+    (memory note curcuma-shell-and-bench-gotchas), so this positional jitter is the
+    established way to get an independent replicate from the same starting frame."""
+    import random
+    rng = random.Random(seed)
+    out = [frame_lines[0], frame_lines[1]]
+    for ln in frame_lines[2:]:
+        parts = ln.split()
+        if len(parts) < 4:
+            out.append(ln)
+            continue
+        sym = parts[0]
+        x, y, z = (float(parts[1]), float(parts[2]), float(parts[3]))
+        # random direction (uniform on sphere), fixed magnitude
+        while True:
+            vx, vy, vz = (rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-1, 1))
+            n2 = vx * vx + vy * vy + vz * vz
+            if 1e-6 < n2 <= 1.0:
+                break
+        n = n2 ** 0.5
+        x += magnitude * vx / n
+        y += magnitude * vy / n
+        z += magnitude * vz / n
+        out.append("%s %.8f %.8f %.8f" % (sym, x, y, z))
+    return out
+
+
+def get_is_metal_for_system(frame_lines):
+    """One-time static -sp on frame 0's atom composition to read is_metal per index -- valid
+    for the WHOLE trajectory since is_metal[i] depends only on Z_i, never on geometry."""
+    with tempfile.TemporaryDirectory() as td:
+        local = Path(td) / "frame.xyz"
+        local.write_text("\n".join(frame_lines) + "\n")
+        out = run_curcuma(local, td, charge=0, spin=0)
+        if out is None:
+            return {}
+        _, is_metal = read_topo_json(td, "frame")
+    return is_metal
+
+
+def scan_trajectory(output, window=3, rule="both", is_metal=None):
     """Walk a reactive-MD log line by line, evaluating the gate on EVERY per-step corner
-    (not just the last), and tag whether each corner falls within `window` corner-blocks of a
-    REACT bond-formed/broken/rebuild line (a genuine topology TRANSITION corner) or not (an
-    ordinary settled corner). Returns aggregate counts and a sample of INVALID hits."""
+    (not just the last). Phase-1 charges are NOT available per step (see module docstring),
+    so v2's q+ clause is evaluated with charges={} (qloc always None) throughout -- any
+    INVALID-under-v2 hit here should be re-verified with a static single-point at that exact
+    frame before being trusted (done separately for any geminal-H-H hit, see report)."""
+    is_metal = is_metal or {}
     lines = clean_lines(output)
     corner_idx = [k for k, ln in enumerate(lines) if CORNER_HDR_RE.match(ln)]
     event_idx = [k for k, ln in enumerate(lines) if REACT_EVENT_RE.match(ln)]
 
-    all_invalid = []
-    near_invalid = 0
-    near_total_pairs = 0
-    far_invalid = 0
-    far_total_pairs = 0
+    near_inv1 = far_inv1 = near_inv2 = far_inv2 = 0
+    near_total = far_total = 0
     n_corners = 0
+    invalid_sample = []
+    geminal_hh_frames = []  # corner indices where a genuine (both-C-bonded) H-H pair is listed
     ei = 0
     for ci, start in enumerate(corner_idx):
         end = corner_idx[ci + 1] if ci + 1 < len(corner_idx) else len(lines)
@@ -502,85 +825,183 @@ def scan_trajectory(output, window=3):
         while k < end and SHAREA_RE.match(lines[k]):
             m = SHAREA_RE.match(lines[k])
             idx = int(m.group(1))
-            shareA[idx] = dict(Z=int(m.group(2)), Val=float(m.group(6)))
+            shareA[idx] = dict(Z=int(m.group(2)), Val=float(m.group(6)), cap=float(m.group(5)))
             k += 1
         if not share_pairs:
             continue
         n_corners += 1
-        # nearest REACT event line index (by line distance) to this corner block
         while ei < len(event_idx) and event_idx[ei] < start - 200:
             ei += 1
         near = any(abs(event_idx[j] - start) < 40 for j in range(ei, len(event_idx))
                    if event_idx[j] < end + 200 and event_idx[j] >= start - 200)
-        res = gate_one_corner(share_pairs, shareA)
-        for pr in res:
-            if near:
-                near_total_pairs += 1
-            else:
-                far_total_pairs += 1
-            if not pr["valid"]:
-                all_invalid.append((near, pr))
+
+        for (i, j, _, _) in share_pairs:
+            zi = shareA.get(i, {}).get("Z")
+            zj = shareA.get(j, {}).get("Z")
+            if zi == 1 and zj == 1:
+                geminal_hh_frames.append(ci)
+                break
+
+        merged = gate_both(share_pairs, shareA, charges={}, is_metal=is_metal) if rule == "both" else None
+        if rule == "v1":
+            res1 = gate_corner_v1(share_pairs, shareA)
+            for pr in res1:
                 if near:
-                    near_invalid += 1
+                    near_total += 1
                 else:
-                    far_invalid += 1
-    return dict(n_corners=n_corners, n_rebuild_events=sum(1 for k in event_idx
-                                                           if lines[k].startswith("REACT rebuild")),
-                near_total_pairs=near_total_pairs, near_invalid=near_invalid,
-                far_total_pairs=far_total_pairs, far_invalid=far_invalid,
-                invalid_sample=all_invalid[:20])
+                    far_total += 1
+                if not pr["valid"]:
+                    if near:
+                        near_inv1 += 1
+                    else:
+                        far_inv1 += 1
+                    invalid_sample.append((near, dict(v1=pr, v2=None, i=pr["i"], j=pr["j"],
+                                                       zi=pr["zi"], zj=pr["zj"])))
+        elif rule == "v2":
+            res2 = gate_corner_v2(share_pairs, shareA, charges={}, is_metal=is_metal)
+            for pr in res2:
+                if near:
+                    near_total += 1
+                else:
+                    far_total += 1
+                if not pr["valid"]:
+                    if near:
+                        near_inv2 += 1
+                    else:
+                        far_inv2 += 1
+                    invalid_sample.append((near, dict(v1=None, v2=pr, i=pr["i"], j=pr["j"],
+                                                       zi=pr["zi"], zj=pr["zj"])))
+        else:
+            for pr in merged:
+                if near:
+                    near_total += 1
+                else:
+                    far_total += 1
+                if invalid_v1(pr):
+                    if near:
+                        near_inv1 += 1
+                    else:
+                        far_inv1 += 1
+                if invalid_v2(pr):
+                    if near:
+                        near_inv2 += 1
+                    else:
+                        far_inv2 += 1
+                if invalid_v1(pr) or invalid_v2(pr):
+                    invalid_sample.append((near, pr))
+
+    return dict(n_corners=n_corners,
+                n_rebuild_events=sum(1 for k in event_idx if lines[k].startswith("REACT rebuild")),
+                near_total_pairs=near_total, near_invalid_v1=near_inv1, near_invalid_v2=near_inv2,
+                far_total_pairs=far_total, far_invalid_v1=far_inv1, far_invalid_v2=far_inv2,
+                invalid_sample=invalid_sample[:30],
+                geminal_hh_corners=sorted(set(geminal_hh_frames)))
 
 
 def cmd_gridmd(a):
     systems = [("c2h6", "c2h6_1000K.xyz"), ("ch3nh2", "ch3nh2_1000K.xyz"), ("ch4_H", "ch4_H.xyz")]
-    out_lines = ["## 130-cell grid, REAL reactive-MD trajectories (rebuild corners, not statics)",
-                 "", "One unperturbed frame-0 trajectory per system, T=2000 K, true dt=0.25 fs, "
-                 "maxtime=%d fs, topology_mode=react, shipped rev-gfnff defaults "
-                 "(mg3/conserving/donor_rule/budget_fix_h). NOT the full 130-cell x 6-replicate "
-                 "protocol of package 11 -- 3 trajectories, chosen to actually pass through "
-                 "REACT rebuild events (unlike the static substitute above) rather than "
-                 "reproduce the full statistic." % a.maxtime, ""]
+    out_lines = ["## 130-cell grid, REAL reactive-MD trajectories (rebuild corners, not statics), rule=%s" % a.rule,
+                 "", "One frame-0 trajectory per system, T=2000 K, true dt=0.25 fs, "
+                 "maxtime=%d fs, topology_mode=react, shipped rev-gfnff defaults. "
+                 "Phase-1 charges NOT available per MD step (.topo.json reflects only the t=0 "
+                 "corner) -- v2's q+ clause is evaluated with qloc=None throughout, so an "
+                 "INVALID-under-v2 hit here is a CANDIDATE, re-verified separately with a "
+                 "static single point at that exact frame." % a.maxtime, ""]
     for system, fname in systems:
         frames = read_frames(FITWORK / fname)
+        is_metal = get_is_metal_for_system(frames[0]) if a.rule in ("v2", "both") else {}
         with tempfile.TemporaryDirectory() as td:
-            out = run_reactive_md(system, frames[0], 2000, a.maxtime, 0.25, td)
-        r = scan_trajectory(out)
-        out_lines.append("### %s (frame 0, T=2000K, %d fs)" % (system, a.maxtime))
+            out = run_reactive_md(frames[0], 2000, a.maxtime, 0.25, td, seed=a.seed)
+        r = scan_trajectory(out, rule=a.rule, is_metal=is_metal)
+        out_lines.append("### %s (frame 0, T=2000K, %d fs, seed=%d)" % (system, a.maxtime, a.seed))
         out_lines.append("- corners scanned: %d, REACT rebuild events: %d"
                           % (r["n_corners"], r["n_rebuild_events"]))
-        out_lines.append("- pairs near a topology-transition event (within ~10 fs): %d, INVALID: %d"
-                          % (r["near_total_pairs"], r["near_invalid"]))
-        out_lines.append("- pairs away from any transition event: %d, INVALID: %d"
-                          % (r["far_total_pairs"], r["far_invalid"]))
+        out_lines.append("- pairs near a topology-transition event (~10 fs): %d, INVALID v1: %d, INVALID v2: %d"
+                          % (r["near_total_pairs"], r["near_invalid_v1"], r["near_invalid_v2"]))
+        out_lines.append("- pairs away from any transition event: %d, INVALID v1: %d, INVALID v2: %d"
+                          % (r["far_total_pairs"], r["far_invalid_v1"], r["far_invalid_v2"]))
+        out_lines.append("- corners with a listed H-H pair (both ends real bonds, any element "
+                          "partner): %d of %d" % (len(r["geminal_hh_corners"]), r["n_corners"]))
         if r["invalid_sample"]:
-            out_lines.append("- sample INVALID hits (near?, i-j, Z pair):")
+            out_lines.append("- sample INVALID hits (near?, i-j, Z pair, v1/v2):")
             for near, pr in r["invalid_sample"]:
-                out_lines.append("    near=%s  %d(%s)-%d(%s)  n_other/Val %.2f/%.3f vs %.2f/%.3f" % (
+                v1s = ("INVALID" if pr["v1"] and not pr["v1"]["valid"] else "valid") if pr.get("v1") else "n/a"
+                v2s = ("INVALID" if pr["v2"] and not pr["v2"]["valid"] else "valid") if pr.get("v2") else "n/a"
+                out_lines.append("    near=%s  %d(%s)-%d(%s)  v1=%s v2=%s" % (
                     near, pr["i"], SYMBOL.get(pr["zi"], pr["zi"]),
-                    pr["j"], SYMBOL.get(pr["zj"], pr["zj"]),
-                    pr["n_other_i"], pr["val_i"], pr["n_other_j"], pr["val_j"]))
+                    pr["j"], SYMBOL.get(pr["zj"], pr["zj"]), v1s, v2s))
         out_lines.append("")
     print("\n".join(out_lines))
     if a.out:
         Path(a.out).write_text("\n".join(out_lines))
 
 
-def cmd_grid(a):
-    jobs = collect_grid()
-    print("130-cell grid substitute: %d DISTINCT starting geometries "
-          "(temperature does not change the t=0 geometry in the tail-sweep protocol, "
-          "so a static gate check covers 65 of the nominal 130 cells; see report)"
-          % len(jobs), flush=True)
-    all_results = []
-    with cf.ThreadPoolExecutor(max_workers=a.jobs) as ex:
-        for label, r in ex.map(lambda j: process_grid_one(*j), jobs):
-            all_results.append((label, r))
-    out_lines = []
-    summarize(all_results, "130-cell grid substitute (65 distinct starting frames, static)",
-              out_lines)
+def cmd_gridmd_search(a):
+    """Independent-replicate search for a frame where a genuine geminal H-H pair (both ends
+    bonded to the SAME carbon, neutral molecule) is actually LISTED as a bond -- v1's single
+    seed-42 trajectory never saw one (n=1, no evidence either way per FABLE_BOND_STATE_2.md
+    section 2.3 falsifier (i)). Runs a few independent replicates (package-11-style: same
+    frame-0 start, tiny random positional jitter, NOT `-md.seed`, which does not change MD
+    initial velocities on this path) and reports whether any C-bonded H...H contact was ever
+    listed as a bond, and if so, evaluates v2 on it (re-verified via a static single point at
+    that exact geometry, giving exact Phase-1 charges)."""
+    frames = read_frames(FITWORK / "c2h6_1000K.xyz")
+    frame0 = frames[0]
+    out_lines = ["## c2h6 geminal H...H search: %d independent replicates" % a.n, ""]
+    hits = []
+    for rep in range(a.n):
+        with tempfile.TemporaryDirectory() as td:
+            local_frame = apply_perturbation(frame0, seed=1000 + rep) if rep > 0 else frame0
+            out = run_reactive_md(local_frame, 2000, a.maxtime, 0.25, td, seed=42 + rep)
+        lines = clean_lines(out)
+        corner_idx = [k for k, ln in enumerate(lines) if CORNER_HDR_RE.match(ln)]
+        found_this_rep = []
+        for ci, start in enumerate(corner_idx):
+            end = corner_idx[ci + 1] if ci + 1 < len(corner_idx) else len(lines)
+            k = start + 1
+            share_pairs = []
+            while k < end and SHARE_RE.match(lines[k]):
+                m = SHARE_RE.match(lines[k])
+                share_pairs.append((int(m.group(1)), int(m.group(2))))
+                k += 1
+            shareA = {}
+            while k < end and SHAREA_RE.match(lines[k]):
+                m = SHAREA_RE.match(lines[k])
+                shareA[int(m.group(1))] = int(m.group(2))
+                k += 1
+            adj = defaultdict(set)
+            for (i, j) in share_pairs:
+                adj[i].add(j)
+                adj[j].add(i)
+            for (i, j) in share_pairs:
+                if shareA.get(i) == 1 and shareA.get(j) == 1:
+                    # both bonded to a common carbon (geminal), not a free/di-hydrogen pair
+                    ci_partners = adj[i] - {j}
+                    cj_partners = adj[j] - {i}
+                    common_c = [k for k in (ci_partners & cj_partners) if shareA.get(k) == 6]
+                    if common_c:
+                        found_this_rep.append((ci, i, j, common_c[0]))
+        rebuilds = sum(1 for ln in lines if ln.startswith("REACT rebuild"))
+        out_lines.append("- replicate %d (seed_md=%d, jitter_seed=%s): %d corners scanned, "
+                          "%d REACT rebuilds, %d geminal-C-H-H corners found"
+                          % (rep, 42 + rep, ("none" if rep == 0 else str(1000 + rep)),
+                             len(corner_idx), rebuilds, len(found_this_rep)))
+        if found_this_rep:
+            hits.append((rep, found_this_rep, local_frame))
+    out_lines.append("")
+    if not hits:
+        out_lines.append("**No geminal C-H-H corner observed in any of the %d replicates.** "
+                          "n=%d now (was n=1); still no evidence either way for this rare event "
+                          "under the current protocol (2000 fs, T=2000K, frame 0)." % (a.n, a.n))
+    else:
+        out_lines.append("**Found %d replicate(s) with a geminal C-H-H corner.**" % len(hits))
+        for rep, found, local_frame in hits:
+            out_lines.append("- replicate %d: %d hits, first at corner %s"
+                              % (rep, len(found), found[0]))
     print("\n".join(out_lines))
     if a.out:
         Path(a.out).write_text("\n".join(out_lines))
+    return hits
 
 
 def main():
@@ -591,20 +1012,37 @@ def main():
     p1.add_argument("--limit", type=int, default=0)
     p1.add_argument("--jobs", type=int, default=os.cpu_count())
     p1.add_argument("--out", default=None)
+    p1.add_argument("--rule", choices=("v1", "v2", "both"), default="both")
     p1.set_defaults(func=cmd_refset)
 
     p2 = sub.add_parser("grid")
     p2.add_argument("--jobs", type=int, default=os.cpu_count())
     p2.add_argument("--out", default=None)
+    p2.add_argument("--rule", choices=("v1", "v2", "both"), default="both")
     p2.set_defaults(func=cmd_grid)
 
     p3 = sub.add_parser("grid-md")
     p3.add_argument("--maxtime", type=float, default=2000.0)
     p3.add_argument("--out", default=None)
+    p3.add_argument("--rule", choices=("v1", "v2", "both"), default="both")
+    p3.add_argument("--seed", type=int, default=42)
     p3.add_argument("--alt-lp", action="store_true",
-                     help="lp() counts n_other(i) instead of degree(i) (excludes the pair "
-                          "under test from its own lone-pair count)")
+                     help="v1 only: lp() counts n_other(i) instead of degree(i). v2 always "
+                          "uses n_other (baked into the spec), this flag has no effect on v2.")
     p3.set_defaults(func=cmd_gridmd)
+
+    p4 = sub.add_parser("probe")
+    p4.add_argument("xyz")
+    p4.add_argument("--charge", type=int, default=0)
+    p4.add_argument("--spin", type=int, default=0)
+    p4.add_argument("--rule", choices=("v1", "v2", "both"), default="both")
+    p4.set_defaults(func=cmd_probe)
+
+    p5 = sub.add_parser("gridmd-search")
+    p5.add_argument("--n", type=int, default=3, help="number of independent replicates")
+    p5.add_argument("--maxtime", type=float, default=2000.0)
+    p5.add_argument("--out", default=None)
+    p5.set_defaults(func=cmd_gridmd_search)
 
     a = ap.parse_args()
     global ALT_LP_EXCLUDE_PAIR
