@@ -689,8 +689,13 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                 pseudo = x->is_boolean() ? x->get<bool>()
                        : x->is_number()  ? x->get<double>() != 0.0
                        : (x->is_string() && (x->get<std::string>() == "true" || x->get<std::string>() == "1"));
+            bool pseudo64 = false;
+            if (const json* x = scfval("scf_pseudo_diag_fp64"))
+                pseudo64 = x->is_boolean() ? x->get<bool>()
+                         : x->is_number()  ? x->get<double>() != 0.0
+                         : (x->is_string() && (x->get<std::string>() == "true" || x->get<std::string>() == "1"));
             ctx->setPseudoDiagonalisation(pseudo, scfnum("scf_pseudo_diag_max_dq", 0.05),
-                                          static_cast<int>(scfnum("scf_pseudo_diag_max_steps", 8)));
+                                          static_cast<int>(scfnum("scf_pseudo_diag_max_steps", 8)), pseudo64);
         }
 
         // Claude Generated (Sep 2026, multi-GPU): `-gpu_density_devices all|0,1,..|solver|none`

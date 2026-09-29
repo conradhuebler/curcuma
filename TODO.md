@@ -118,6 +118,10 @@
 
 ### GPU-SCF GFN1/GFN2: der Eigenloeser ist 73 % des Laufs (2026-09)
 - **Status**: ⏳ OFFEN, Zerlegung gemessen, kein Punkt umgesetzt
+- **Update 2026-09-29 (Pseudo-Diagonalisierung, docs/GFN2_GPU_COST_PLAN.md)**: `-scf_pseudo_diag` ersetzt die meisten FP32-Eigenloesungen durch eine Besetzt-virtuell-Rotation plus S-Orthonormierung (polymer_2x, 4x A4500: 113 -> 89 s; MOR41 und GMTKN55 auf der GPU identisch). Offen:
+  - Default einschalten? (Betreiberentscheidung; die Messungen oben sprechen dafuer)
+  - `-scf_pseudo_diag_fp64` auf einer GPU mit vollem FP64 (H200) messen - auf der A4500 korrekt, aber langsamer (117 -> 167 s)
+  - cuBLAS-`trmm` L^T C laeuft nur mit 5.7 TFLOP/s (0.65 s von 2.3 s pro Pseudo-Schritt)
 - **Messung** (polymer_2x, 7320 Atome, nao 15444, GFN2, 1x RTX A4500, `-sp -gradient` 254 s,
   `CURCUMA_GPU_PROFILE=1`, Geraete festgenagelt):
 

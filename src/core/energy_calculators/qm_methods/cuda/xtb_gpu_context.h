@@ -265,7 +265,8 @@ public:
     /// eigenvectors (pseudo-diagonalisation, Stewart/Csaszar/Pulay 1982) once the previous step's
     /// max|dq| is below max_dq, at most max_steps times in a row; a full solve follows otherwise,
     /// and whenever the HOMO-LUMO gap estimate is small against kT or a rotation is large.
-    void setPseudoDiagonalisation(bool on, double max_dq, int max_steps);
+    /// fp64: also in FP64 steps (the whole SCF where mixed precision is off, the final steps otherwise).
+    void setPseudoDiagonalisation(bool on, double max_dq, int max_steps, bool fp64 = false);
     /// Pseudo-diagonalisation steps taken / tried and rejected since the last beginResidentLoop.
     void pseudoDiagonalisationCounts(int& taken, int& rejected) const;
 

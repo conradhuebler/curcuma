@@ -1,7 +1,8 @@
 # GFN2 on several GPUs: where the time goes and what to change
 
 Status (Sep 29, 2026): stage 0 measured, 1a done, 1b rejected, 1c deferred, stage 2 implemented as
-the opt-in `-scf_pseudo_diag` (single GPU), stage 3 open.
+the opt-in `-scf_pseudo_diag` (single GPU), stage 3 implemented as `-scf_pseudo_diag_fp64` - correct,
+but slower on the A4500.
 All numbers: 4x RTX A4500 (20 GB, PCIe, no NVLink), polymer_2x (7320 atoms, nao 15444, 19252
 electrons, nocc 9626), commit `bfbdc569`, `CURCUMA_GPU_PROFILE=1`.
 
@@ -88,6 +89,33 @@ as designed below, orbitals not yet split over the GPUs.
   steps at 0.9 ms against 5.4 ms for a full FP32 step).
 - **Scope.** Only FP32 steps, so nothing changes where mixed precision is off (the default on
   full-rate-FP64 GPUs such as the H200). An FP64 variant would be the H200 counterpart.
+
+- **GMTKN55 on the GPU**, pseudo on vs off: 2459 of 2460 structures identical to the printed 8
+  decimals, one (`W4-11/bn3pi`) 1e-8 Eh; the two non-converging `G21IP` cations fail in both.
+- **Where the 2.3 s of a polymer_2x pseudo step go**: F*C + G 0.62 s, rotation 0.24 s, and the
+  S-orthonormalisation 1.42 s, of which the cuBLAS `trmm` L^T C alone is 0.65 s (5.7 TFLOP/s).
+  Splitting the step over the PCIe-connected GPUs would move 1-4 GB per iteration and helper -
+  about what it saves; not done.
+
+## Stage 3 result (`-scf_pseudo_diag_fp64`, opt-in)
+
+The pseudo step is now one template (`pseudoRotateOrthonormalise<float|double>`) and also runs in
+FP64 steps when asked to.
+
+- **The energy-weighted density needed a fix.** The rotated vectors span the right occupied space
+  but do not diagonalise the occupied block of F, so the gradient's W = C diag(2 eps) C^T missed
+  the off-diagonal G_ij: polymer (`-scf_threshold 1e-8`) gradient **8.6e-4 Eh/A** off after FP64
+  pseudo steps started from FP32 vectors, 3.1e-7 in a pure-FP64 SCF. After a pseudo step the
+  gradient now rebuilds F from the converged potentials and forms W = C_o (2 G_oo) C_o^T,
+  G_oo = C_o^T F C_o (exact for the integer occupations the gap gate guarantees): **3.6e-9 and
+  2.2e-9**. Energies identical in all variants.
+- **Slower on this hardware, as estimated.** polymer_2x on 4x A4500 with the gradient: 117 s
+  without pseudo steps, **167 s** with FP32 + FP64 pseudo steps - the FP64 step on one card takes
+  25 s for F*C alone (FP64 at ~1/32 of FP32) against 27 s for the distributed full FP64 solve, and
+  the W correction adds 29 s. On polymer (one GPU) it does pay: SCF 11.6 -> 8.3 s; a pure-FP64 SCF
+  20.0 -> 16.3 s.
+- **Where it belongs**: GPUs with full-rate FP64 (H200 and alike), where mixed precision is off by
+  default and therefore no step takes the FP32 pseudo path at all. Not measurable here.
 
 ## Stages 2-3: design after stage 0/1
 

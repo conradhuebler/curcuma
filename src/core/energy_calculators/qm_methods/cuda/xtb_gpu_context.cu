@@ -529,13 +529,26 @@ struct XtbGpuContext::Impl {
     CudaBuffer<float>  dCprev32, dPsT, dPsGov, dPsWork;
     CudaBuffer<double> dPsG, dPsStats;
     CudaBuffer<unsigned int> dPsMax;
+    // FP64 pseudo steps (-scf_pseudo_diag_fp64): the same step in FP64 (stage 3 of the cost plan,
+    // and the whole SCF on GPUs whose FP64 is not throttled).
+    bool   pseudo_fp64 = false;
+    bool   cprev64_valid = false;
+    int    pseudo_consecutive64 = 0;
+    float  pseudo_last_max_theta = 0.0f;
+    bool   c_exact_eigenvectors = true;   // dC/dEps come from a full eigensolve (false after a pseudo step)
+    CudaBuffer<double> dCprev64, dPsT64, dPsGov64, dPsWork64;
     void releasePseudoDiag()
     {
         dCprev32.free(); dPsT.free(); dPsGov.free(); dPsWork.free(); dPsG.free(); dPsStats.free(); dPsMax.free();
-        cprev_valid = false;
-        pseudo_consecutive = 0;
+        dCprev64.free(); dPsT64.free(); dPsGov64.free(); dPsWork64.free();
+        cprev_valid = cprev64_valid = false;
+        pseudo_consecutive = pseudo_consecutive64 = 0;
     }
     bool pseudoDiagStep(int n);
+    int  pseudoDiagStep64(int n);
+    template <typename R>
+    int pseudoRotateOrthonormalise(int n, int no, const R* F, const R* L, R* C, R* Tb, R* Gov, R* M,
+                                   CudaBuffer<R>& work, double* g, const char* tag);
 
     void releaseEigenWorkspaces()
     {
@@ -3364,7 +3377,8 @@ static inline void fillEpsSentinel(double* eps_out, int neig, int n)
 // the occupation kernel does not need them sorted).
 
 // g[p] = sum_mu C(mu,p) T(mu,p), accumulated in FP64; one block per column.
-__global__ void k_pseudo_coldot(const float* __restrict__ C, const float* __restrict__ T, int n,
+template <typename R>
+__global__ void k_pseudo_coldot(const R* __restrict__ C, const R* __restrict__ T, int n,
                                 double* __restrict__ g)
 {
     extern __shared__ double sred[];
@@ -3406,7 +3420,8 @@ __global__ void k_pseudo_gap(const double* __restrict__ g, int no, int n, double
 
 // theta_ai = G_ai / (g_i - g_a) in place (G_ov is nv x no, column-major), and the largest
 // |theta| as the bit pattern of a non-negative float (monotone as unsigned int).
-__global__ void k_pseudo_theta(float* __restrict__ gov, const double* __restrict__ g, int no, int nv,
+template <typename R>
+__global__ void k_pseudo_theta(R* __restrict__ gov, const double* __restrict__ g, int no, int nv,
                                unsigned int* __restrict__ maxbits)
 {
     const size_t total = static_cast<size_t>(nv) * no;
@@ -3414,20 +3429,21 @@ __global__ void k_pseudo_theta(float* __restrict__ gov, const double* __restrict
     for (size_t e = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x; e < total;
          e += static_cast<size_t>(gridDim.x) * blockDim.x) {
         const int a = static_cast<int>(e % nv), i = static_cast<int>(e / nv);
-        const float t = static_cast<float>(static_cast<double>(gov[e]) / (g[i] - g[no + a]));
-        gov[e] = t;
-        const unsigned int bits = __float_as_uint(fabsf(t));
+        const double t = static_cast<double>(gov[e]) / (g[i] - g[no + a]);
+        gov[e] = static_cast<R>(t);
+        const unsigned int bits = __float_as_uint(fabsf(static_cast<float>(t)));
         local = bits > local ? bits : local;
     }
     atomicMax(maxbits, local);
 }
 
 // Diagonal of the S-metric Gram matrix, M_pp = sum_mu B(mu,p)^2, accumulated in FP64 and written
-// over the FP32 syrk diagonal. Measured on polymer: the FP32 syrk diagonal of these sums of ~3000
+// over the syrk diagonal. Measured on polymer: the FP32 syrk diagonal of these sums of ~3000
 // squares is systematically ~1e-6 too small per column (sum over the occupied block -1.8e-3), so
 // the Cholesky normalised every orbital slightly too long and the electron count drifted by
-// ~4e-3 (SCC energy 1.9 mEh off). The off-diagonal elements keep their FP32 values.
-__global__ void k_pseudo_gram_diag(const float* __restrict__ B, int n, float* __restrict__ M)
+// ~4e-3 (SCC energy 1.9 mEh off). The off-diagonal elements keep their syrk values.
+template <typename R>
+__global__ void k_pseudo_gram_diag(const R* __restrict__ B, int n, R* __restrict__ M)
 {
     extern __shared__ double sred[];
     const int p = blockIdx.x;
@@ -3443,7 +3459,119 @@ __global__ void k_pseudo_gram_diag(const float* __restrict__ B, int n, float* __
         if (threadIdx.x < s) sred[threadIdx.x] += sred[threadIdx.x + s];
         __syncthreads();
     }
-    if (threadIdx.x == 0) M[static_cast<size_t>(p) + off] = static_cast<float>(sred[0]);
+    if (threadIdx.x == 0) M[static_cast<size_t>(p) + off] = static_cast<R>(sred[0]);
+}
+
+// Precision overloads of the cuBLAS/cuSOLVER calls of the pseudo step.
+namespace pseudo_blas {
+inline cublasStatus_t gemm(cublasHandle_t h, cublasOperation_t a, cublasOperation_t b, int m, int n, int k,
+                           const float* al, const float* A, int lda, const float* B, int ldb,
+                           const float* be, float* C, int ldc)
+{ return cublasSgemm(h, a, b, m, n, k, al, A, lda, B, ldb, be, C, ldc); }
+inline cublasStatus_t gemm(cublasHandle_t h, cublasOperation_t a, cublasOperation_t b, int m, int n, int k,
+                           const double* al, const double* A, int lda, const double* B, int ldb,
+                           const double* be, double* C, int ldc)
+{ return cublasDgemm(h, a, b, m, n, k, al, A, lda, B, ldb, be, C, ldc); }
+inline cublasStatus_t trmm(cublasHandle_t h, int n, const float* al, const float* L, const float* C, float* B)
+{ return cublasStrmm(h, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, n, al, L, n, C, n, B, n); }
+inline cublasStatus_t trmm(cublasHandle_t h, int n, const double* al, const double* L, const double* C, double* B)
+{ return cublasDtrmm(h, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, n, al, L, n, C, n, B, n); }
+inline cublasStatus_t syrk(cublasHandle_t h, int n, const float* al, const float* B, const float* be, float* M)
+{ return cublasSsyrk(h, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_T, n, n, al, B, n, be, M, n); }
+inline cublasStatus_t syrk(cublasHandle_t h, int n, const double* al, const double* B, const double* be, double* M)
+{ return cublasDsyrk(h, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_T, n, n, al, B, n, be, M, n); }
+inline cublasStatus_t trsm(cublasHandle_t h, int n, const float* al, const float* R, float* C)
+{ return cublasStrsm(h, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, n, al, R, n, C, n); }
+inline cublasStatus_t trsm(cublasHandle_t h, int n, const double* al, const double* R, double* C)
+{ return cublasDtrsm(h, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, n, al, R, n, C, n); }
+inline cusolverStatus_t potrfSize(cusolverDnHandle_t h, int n, float* M, int* lw)
+{ return cusolverDnSpotrf_bufferSize(h, CUBLAS_FILL_MODE_UPPER, n, M, n, lw); }
+inline cusolverStatus_t potrfSize(cusolverDnHandle_t h, int n, double* M, int* lw)
+{ return cusolverDnDpotrf_bufferSize(h, CUBLAS_FILL_MODE_UPPER, n, M, n, lw); }
+inline cusolverStatus_t potrf(cusolverDnHandle_t h, int n, float* M, float* w, int lw, int* info)
+{ return cusolverDnSpotrf(h, CUBLAS_FILL_MODE_UPPER, n, M, n, w, lw, info); }
+inline cusolverStatus_t potrf(cusolverDnHandle_t h, int n, double* M, double* w, int lw, int* info)
+{ return cusolverDnDpotrf(h, CUBLAS_FILL_MODE_UPPER, n, M, n, w, lw, info); }
+} // namespace pseudo_blas
+
+/**
+ * One pseudo-diagonalisation step in precision R (float or double), Claude Generated (Sep 29, 2026).
+ * In:  F (n x n Fock, AO basis), L (lower Cholesky factor of S), C (previous eigenvectors, C^T S C = I,
+ *      occupied block first). Scratch: Tb (n x n), Gov (nv x no), M (n x n; may alias F - F is not read
+ *      after step 1), work (potrf).
+ * Out: C rotated and S-orthonormalised, g = Rayleigh quotients of the rotated-from vectors.
+ * Returns 1 on success, 0 when the step was rejected before C was touched (small gap or a large
+ * rotation), -1 on a failure after C was modified.
+ */
+template <typename R>
+int XtbGpuContext::Impl::pseudoRotateOrthonormalise(int n, int no, const R* F, const R* L, R* C, R* Tb,
+                                                    R* Gov, R* M, CudaBuffer<R>& work, double* g, const char* tag)
+{
+    XtbGpuContext::Impl& I = *this;
+    namespace pb = pseudo_blas;
+    const int nv = n - no;
+    const int b = 256;
+    const R one = 1, zero = 0, mone = -1;
+    cudaStream_t stream = I.stream;
+    R* Cv = C + static_cast<size_t>(no) * n;
+    auto mark = [&](const char* what) { I.profMark((std::string(tag) + what).c_str()); };
+
+    // 1. T = F C, g = diag(C^T F C), G_ov = C_v^T (F C_o).
+    if (pb::gemm(I.cublas, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n, &one, F, n, C, n, &zero, Tb, n) != CUBLAS_STATUS_SUCCESS)
+        return 0;
+    k_pseudo_coldot<R><<<n, b, b * sizeof(double), stream>>>(C, Tb, n, g);
+    if (pb::gemm(I.cublas, CUBLAS_OP_T, CUBLAS_OP_N, nv, no, n, &one, Cv, n, Tb, n, &zero, Gov, nv) != CUBLAS_STATUS_SUCCESS)
+        return 0;
+    mark("F*C, diag(G), G_ov");
+
+    // 2. Is one rotation safe? The occupied/virtual gap must be large against kT (occupations stay
+    //    0/2 and the two blocks keep their order) and every rotation angle small.
+    k_pseudo_gap<<<1, b, 2 * b * sizeof(double), stream>>>(g, no, n, I.dPsStats.ptr);
+    I.dPsMax.zero(1, stream);
+    k_pseudo_theta<R><<<1024, b, 0, stream>>>(Gov, g, no, nv, I.dPsMax.ptr);
+    if (cudaGetLastError() != cudaSuccess) return 0;
+    double stats[2] = {0.0, 0.0};
+    unsigned int maxbits = 0u;
+    I.dPsStats.download(stats, 2, stream);
+    I.dPsMax.download(&maxbits, 1, stream);
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return 0;
+    float max_theta = 0.0f;
+    std::memcpy(&max_theta, &maxbits, sizeof(float));
+    I.pseudo_last_max_theta = max_theta;
+    const double kT = I.loop_Tele * 3.166808e-6;
+    if (!(stats[1] - stats[0] > std::max(30.0 * kT, 1.0e-3)) || !(max_theta < 0.1f)) return 0;
+    mark("gap/theta check");
+
+    // 3. Rotate: keep the old C_v in Tb, then C_v -= C_o theta^T, C_o += C_v(old) theta.
+    if (cudaMemcpyAsync(Tb, Cv, sizeof(R) * static_cast<size_t>(n) * nv, cudaMemcpyDeviceToDevice, stream)
+            != cudaSuccess
+        || pb::gemm(I.cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, nv, no, &mone, C, n, Gov, nv, &one, Cv, n)
+            != CUBLAS_STATUS_SUCCESS
+        || pb::gemm(I.cublas, CUBLAS_OP_N, CUBLAS_OP_N, n, no, nv, &one, Tb, n, Gov, nv, &one, C, n)
+            != CUBLAS_STATUS_SUCCESS)
+        return -1;
+    mark("rotation");
+
+    // 4. S-orthonormalise: B = L^T C (into Tb), M = B^T B (upper, diagonal re-summed in FP64),
+    //    M = R^T R, C <- C R^-1. The Cholesky order keeps the occupied span (column i mixes only
+    //    with columns <= i).
+    if (pb::trmm(I.cublas, n, &one, L, C, Tb) != CUBLAS_STATUS_SUCCESS) return -1;
+    mark("orth trmm L^T C");
+    if (pb::syrk(I.cublas, n, &one, Tb, &zero, M) != CUBLAS_STATUS_SUCCESS) return -1;
+    k_pseudo_gram_diag<R><<<n, b, b * sizeof(double), stream>>>(Tb, n, M);
+    if (cudaGetLastError() != cudaSuccess) return -1;
+    mark("orth syrk + FP64 diagonal");
+    int lw = 0;
+    if (pb::potrfSize(I.cusolver, n, M, &lw) != CUSOLVER_STATUS_SUCCESS) return -1;
+    try { work.ensure(std::max(1, lw)); I.dInfo.ensure(1); } catch (...) { return -1; }
+    if (pb::potrf(I.cusolver, n, M, work.ptr, lw, I.dInfo.ptr) != CUSOLVER_STATUS_SUCCESS) return -1;
+    int info = 0;
+    I.dInfo.download(&info, 1, stream);
+    if (cudaStreamSynchronize(stream) != cudaSuccess || info != 0) return -1;
+    mark("orth potrf");
+    if (pb::trsm(I.cublas, n, &one, M, C) != CUBLAS_STATUS_SUCCESS) return -1;
+    mark("orth trsm C R^-1");
+    return 1;
 }
 
 bool XtbGpuContext::Impl::pseudoDiagStep(int n)
@@ -3462,86 +3590,70 @@ bool XtbGpuContext::Impl::pseudoDiagStep(int n)
     } catch (...) { return false; }
     const int b = 256;
     const int gnn = static_cast<int>((nn + b - 1) / b);
-    const float one = 1.0f, zero = 0.0f, mone = -1.0f;
-    float* C = dCprev32.ptr;
-    float* T = dPsT.ptr;
-    float* Cv = C + static_cast<size_t>(no) * n;
-
-    // 1. F in FP32, T = F C, g = diag(C^T F C), G_ov = C_v^T (F C_o).
-    k_d2f<<<gnn, b, 0, stream>>>(dC.ptr, dCf.ptr, nn);
+    k_d2f<<<gnn, b, 0, stream>>>(dC.ptr, dCf.ptr, nn);   // F -> FP32
+    k_d2f<<<gnn, b, 0, stream>>>(dL.ptr, dLf.ptr, nn);   // L -> FP32
     if (cudaGetLastError() != cudaSuccess) return false;
-    if (cublasSgemm(cublas, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n, &one, dCf.ptr, n, C, n, &zero, T, n)
-        != CUBLAS_STATUS_SUCCESS)
-        return false;
-    k_pseudo_coldot<<<n, b, b * sizeof(double), stream>>>(C, T, n, dPsG.ptr);
-    if (cublasSgemm(cublas, CUBLAS_OP_T, CUBLAS_OP_N, nv, no, n, &one, Cv, n, T, n, &zero, dPsGov.ptr, nv)
-        != CUBLAS_STATUS_SUCCESS)
-        return false;
-
-    // 2. Is a single rotation safe? Gap between the occupied and virtual Rayleigh quotients large
-    //    against kT (occupations stay 0/2 and the order of the blocks is right), rotations small.
-    k_pseudo_gap<<<1, b, 2 * b * sizeof(double), stream>>>(dPsG.ptr, no, n, dPsStats.ptr);
-    dPsMax.zero(1, stream);
-    k_pseudo_theta<<<1024, b, 0, stream>>>(dPsGov.ptr, dPsG.ptr, no, nv, dPsMax.ptr);
-    if (cudaGetLastError() != cudaSuccess) return false;
-    double stats[2] = {0.0, 0.0};
-    unsigned int maxbits = 0u;
-    dPsStats.download(stats, 2, stream);
-    dPsMax.download(&maxbits, 1, stream);
-    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
-    float max_theta = 0.0f;
-    std::memcpy(&max_theta, &maxbits, sizeof(float));
-    const double kT = loop_Tele * 3.166808e-6;
-    const double gap = stats[1] - stats[0];
-    if (!(gap > std::max(30.0 * kT, 1.0e-3)) || !(max_theta < 0.1f)) return false;
-
-    // 3. Rotate: keep the old C_v in T, then C_v -= C_o theta^T, C_o += C_v(old) theta.
-    if (cudaMemcpyAsync(T, Cv, sizeof(float) * static_cast<size_t>(n) * nv, cudaMemcpyDeviceToDevice, stream)
-            != cudaSuccess
-        || cublasSgemm(cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, nv, no, &mone, C, n, dPsGov.ptr, nv, &one, Cv, n)
-            != CUBLAS_STATUS_SUCCESS
-        || cublasSgemm(cublas, CUBLAS_OP_N, CUBLAS_OP_N, n, no, nv, &one, T, n, dPsGov.ptr, nv, &one, C, n)
-            != CUBLAS_STATUS_SUCCESS)
-        return false;
-
-    // 4. S-orthonormalise: B = L^T C (into T), M = B^T B (upper, into dCf), M = R^T R, C <- C R^-1.
-    k_d2f<<<gnn, b, 0, stream>>>(dL.ptr, dLf.ptr, nn);
-    if (cudaGetLastError() != cudaSuccess
-        || cublasStrmm(cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT,
-                       n, n, &one, dLf.ptr, n, C, n, T, n) != CUBLAS_STATUS_SUCCESS
-        || cublasSsyrk(cublas, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_T, n, n, &one, T, n, &zero, dCf.ptr, n)
-            != CUBLAS_STATUS_SUCCESS)
-        return false;
-    k_pseudo_gram_diag<<<n, b, b * sizeof(double), stream>>>(T, n, dCf.ptr);
-    if (cudaGetLastError() != cudaSuccess) return false;
-    int lw = 0;
-    if (cusolverDnSpotrf_bufferSize(cusolver, CUBLAS_FILL_MODE_UPPER, n, dCf.ptr, n, &lw) != CUSOLVER_STATUS_SUCCESS)
-        return false;
-    try { dPsWork.ensure(std::max(1, lw)); dInfo.ensure(1); } catch (...) { return false; }
-    if (cusolverDnSpotrf(cusolver, CUBLAS_FILL_MODE_UPPER, n, dCf.ptr, n, dPsWork.ptr, lw, dInfo.ptr)
-        != CUSOLVER_STATUS_SUCCESS)
-        return false;
-    int info = 0;
-    dInfo.download(&info, 1, stream);
-    if (cudaStreamSynchronize(stream) != cudaSuccess || info != 0) return false;
-    if (cublasStrsm(cublas, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT,
-                    n, n, &one, dCf.ptr, n, C, n) != CUBLAS_STATUS_SUCCESS)
-        return false;
-
-    // 5. Hand the result to the density: C in FP64, orbital energies = the Rayleigh quotients.
-    k_f2d<<<gnn, b, 0, stream>>>(C, dC.ptr, nn);
+    // M aliases the FP32 F (dCf): F is only read in step 1.
+    const int rc = pseudoRotateOrthonormalise<float>(n, no, dCf.ptr, dLf.ptr, dCprev32.ptr, dPsT.ptr,
+                                                     dPsGov.ptr, dCf.ptr, dPsWork, dPsG.ptr, "eig FP32 pseudo: ");
+    if (rc < 0) cprev_valid = false;
+    if (rc != 1) return false;
+    // Hand the result to the density: C in FP64, orbital energies = the Rayleigh quotients.
+    k_f2d<<<gnn, b, 0, stream>>>(dCprev32.ptr, dC.ptr, nn);
     if (cudaGetLastError() != cudaSuccess
         || cudaMemcpyAsync(dEps.ptr, dPsG.ptr, sizeof(double) * n, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
         return false;
+    c_exact_eigenvectors = false;
     return true;
 }
 
-void XtbGpuContext::setPseudoDiagonalisation(bool on, double max_dq, int max_steps)
+int XtbGpuContext::Impl::pseudoDiagStep64(int n)
+{
+    const int no = loop_nocc_pairs, nv = n - no;
+    if (no <= 0 || nv <= 0) return 0;
+    const size_t nn = static_cast<size_t>(n) * n;
+    // The FP32 scratch is idle in an FP64 step; release it before the FP64 buffers grow.
+    dCf.free(); dLf.free(); dPsT.free(); dPsGov.free(); dPsWork.free();
+    try {
+        dCprev64.ensure(static_cast<int>(nn));
+        dPsT64.ensure(static_cast<int>(nn));
+        dPsGov64.ensure(static_cast<int>(static_cast<size_t>(nv) * no));
+        dPsG.ensure(n);
+        dPsStats.ensure(2);
+        dPsMax.ensure(1);
+    } catch (...) { return 0; }
+    const int b = 256;
+    const int gnn = static_cast<int>((nn + b - 1) / b);
+    if (!cprev64_valid) {   // start from the FP32 eigenvectors of the previous step
+        k_f2d<<<gnn, b, 0, stream>>>(dCprev32.ptr, dCprev64.ptr, nn);
+        if (cudaGetLastError() != cudaSuccess) return 0;
+        cprev64_valid = true;
+    }
+    // M aliases F (dC): F is only read in step 1; C is copied back into dC afterwards.
+    const int rc = pseudoRotateOrthonormalise<double>(n, no, dC.ptr, dL.ptr, dCprev64.ptr, dPsT64.ptr,
+                                                      dPsGov64.ptr, dC.ptr, dPsWork64, dPsG.ptr, "eig FP64 pseudo: ");
+    // rc < 0: F (dC) may already hold the Gram matrix - no silent fallback to a full solve on it.
+    if (rc < 0) { cprev64_valid = false; return -1; }
+    if (rc != 1) return 0;
+    if (cudaMemcpyAsync(dC.ptr, dCprev64.ptr, sizeof(double) * nn, cudaMemcpyDeviceToDevice, stream) != cudaSuccess
+        || cudaMemcpyAsync(dEps.ptr, dPsG.ptr, sizeof(double) * n, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+        return -1;
+    // The FP32 copy follows, so a later FP32 step starts from these vectors.
+    if (!dCprev32.empty() && dCprev32.n >= static_cast<int>(nn)) {
+        k_d2f<<<gnn, b, 0, stream>>>(dCprev64.ptr, dCprev32.ptr, nn);
+        cprev_valid = cudaGetLastError() == cudaSuccess;
+    }
+    c_exact_eigenvectors = false;
+    return 1;
+}
+
+void XtbGpuContext::setPseudoDiagonalisation(bool on, double max_dq, int max_steps, bool fp64)
 {
     if (!m_impl) return;
     m_impl->pseudo_enabled = on;
     m_impl->pseudo_max_dq = max_dq;
     m_impl->pseudo_max_steps = max_steps;
+    m_impl->pseudo_fp64 = on && fp64;
     if (!on) m_impl->releasePseudoDiag();
 }
 
@@ -3557,31 +3669,57 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
     const int n = I.resident_n;
     const bool partial = (n_eig > 0 && n_eig < n);
     const bool closed_shell = std::fabs(I.loop_nelec - 2.0 * I.loop_nocc_pairs) < 1e-9;
-    if (I.pseudo_enabled && I.in_resident_step && fp32 && !partial && closed_shell && I.cprev_valid && I.loop_nao == n
-        && I.last_dq < I.pseudo_max_dq && I.pseudo_consecutive < I.pseudo_max_steps) {
+    const bool pseudo_ok = I.pseudo_enabled && I.in_resident_step && !partial && closed_shell
+        && I.loop_nao == n && I.last_dq < I.pseudo_max_dq;
+    auto finish_pseudo = [&](const char* what) {
+        ++I.pseudo_taken;
+        I.profMark(what);
+        if (download_eps && eps_out) I.dEps.download(eps_out, n, I.stream);
+        return cudaStreamSynchronize(I.stream) == cudaSuccess;
+    };
+    if (pseudo_ok && fp32 && I.cprev_valid && I.pseudo_consecutive < I.pseudo_max_steps) {
         if (I.pseudoDiagStep(n)) {
             ++I.pseudo_consecutive;
-            ++I.pseudo_taken;
-            I.profMark("eig FP32: pseudo-diagonalisation");
-            if (download_eps && eps_out) I.dEps.download(eps_out, n, I.stream);
-            return cudaStreamSynchronize(I.stream) == cudaSuccess;
+            I.cprev64_valid = false;   // the FP64 copy is now one step behind
+            return finish_pseudo("eig FP32 pseudo: hand-over to the density");
         }
         ++I.pseudo_rejected;
-        I.profMark("eig FP32: pseudo-diagonalisation rejected");
         // dCprev32 may be half-rotated; the full solve below refreshes it.
+    } else if (pseudo_ok && !fp32 && I.pseudo_fp64 && (I.cprev64_valid || I.cprev_valid)
+               && I.pseudo_consecutive64 < I.pseudo_max_steps) {
+        const int rc = I.pseudoDiagStep64(n);
+        if (rc < 0) {
+            I.last_error = "FP64 pseudo-diagonalisation step failed after the Fock matrix was consumed";
+            return false;
+        }
+        if (rc == 1) {
+            ++I.pseudo_consecutive64;
+            return finish_pseudo("eig FP64 pseudo: hand-over to the density");
+        }
+        ++I.pseudo_rejected;
     }
     const bool ok = eigensolveResidentFockFull(eps_out, fp32, n_eig, download_eps);
+    if (ok) I.c_exact_eigenvectors = true;
     if (ok && I.pseudo_enabled && !partial) {
         const size_t nn = static_cast<size_t>(n) * n;
+        const int b = 256;
         bool stored = false;
         try {
             I.dCprev32.ensure(static_cast<int>(nn));
-            const int b = 256;
             k_d2f<<<static_cast<int>((nn + b - 1) / b), b, 0, I.stream>>>(I.dC.ptr, I.dCprev32.ptr, nn);
             stored = cudaGetLastError() == cudaSuccess;
         } catch (...) { stored = false; }
         I.cprev_valid = stored;
         I.pseudo_consecutive = 0;
+        I.cprev64_valid = false;
+        if (I.pseudo_fp64 && !fp32) {   // an FP64 solve seeds the FP64 pseudo steps directly
+            try {
+                I.dCprev64.ensure(static_cast<int>(nn));
+                I.cprev64_valid = cudaMemcpyAsync(I.dCprev64.ptr, I.dC.ptr, sizeof(double) * nn,
+                                                  cudaMemcpyDeviceToDevice, I.stream) == cudaSuccess;
+            } catch (...) { I.cprev64_valid = false; }
+            I.pseudo_consecutive64 = 0;
+        }
     }
     return ok;
 }
@@ -5717,8 +5855,8 @@ bool XtbGpuContext::beginResidentLoop(int nsh, int nat, int nao, double Tele, do
     m_impl->loop_nsh = nsh; m_impl->loop_nat = nat; m_impl->loop_nao = nao;
     m_impl->loop_Tele = Tele; m_impl->loop_nelec = n_elec; m_impl->loop_nocc_pairs = nocc_pairs;
     m_impl->last_dq = 1e300;             // a new SCF starts without usable previous eigenvectors
-    m_impl->cprev_valid = false;
-    m_impl->pseudo_consecutive = 0;
+    m_impl->cprev_valid = m_impl->cprev64_valid = false;
+    m_impl->pseudo_consecutive = m_impl->pseudo_consecutive64 = 0;
     m_impl->pseudo_taken = m_impl->pseudo_rejected = 0;
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
@@ -6204,17 +6342,53 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     // for_weighted_density flag. dOcc already holds 2*eps (uploaded just above) and the
     // full-nao dCw computed here is kept as the fallback the single-device k_density_sp below
     // still needs when the split is not configured or the geometry is too small to split.
+    // Claude Generated (Sep 29, 2026): after a pseudo-diagonalisation step the columns of C span the
+    // right occupied space but do not diagonalise the occupied block of the Fock matrix, so
+    // C diag(2 eps) C^T misses the off-diagonal G_ij (polymer: 8.6e-4 Eh/A after FP64 pseudo steps
+    // started from FP32 vectors). The basis-invariant form W = C_o (2 G_oo) C_o^T with
+    // G_oo = C_o^T F C_o is exact for integer occupations (the pseudo step's gap gate). F is rebuilt
+    // from the potentials uploaded above, i.e. the converged ones.
+    const bool w_from_goo = nocc_orbs > 0 && !m_impl->c_exact_eigenvectors;
+    if (w_from_goo) {
+        const int no = nocc_orbs;
+        CudaBuffer<double> Cbak, Goo;
+        try {
+            Cbak.ensure(static_cast<int>(nn));
+            Goo.ensure(static_cast<int>(static_cast<size_t>(no) * no));
+            m_impl->dCw.ensure(static_cast<int>(static_cast<size_t>(nao) * no));
+        } catch (...) { return false; }
+        const double two = 2.0;
+        if (cudaMemcpyAsync(Cbak.ptr, m_impl->dC.ptr, sizeof(double) * nn, cudaMemcpyDeviceToDevice, stream)
+                != cudaSuccess
+            || !buildFockIntoC(nao, with_mp)
+            || cublasDgemm(m_impl->cublas, CUBLAS_OP_N, CUBLAS_OP_N, nao, no, nao, &one, m_impl->dC.ptr, nao,
+                           Cbak.ptr, nao, &zero, m_impl->dCw.ptr, nao) != CUBLAS_STATUS_SUCCESS          // T = F C_o
+            || cublasDgemm(m_impl->cublas, CUBLAS_OP_T, CUBLAS_OP_N, no, no, nao, &one, Cbak.ptr, nao,
+                           m_impl->dCw.ptr, nao, &zero, Goo.ptr, no) != CUBLAS_STATUS_SUCCESS            // G_oo
+            || cublasDgemm(m_impl->cublas, CUBLAS_OP_N, CUBLAS_OP_N, nao, no, no, &two, Cbak.ptr, nao,
+                           Goo.ptr, no, &zero, m_impl->dCw.ptr, nao) != CUBLAS_STATUS_SUCCESS            // C_o 2G_oo
+            || cudaMemcpyAsync(m_impl->dC.ptr, Cbak.ptr, sizeof(double) * nn, cudaMemcpyDeviceToDevice, stream)
+                != cudaSuccess)
+            return false;
+        if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+        m_impl->profMark("grad: W from G_oo (after a pseudo-diagonalisation step)");
+    }
     if (nocc_orbs > 0) {
-        std::vector<double> occ2(nocc_orbs);
-        for (int k = 0; k < nocc_orbs; ++k) occ2[k] = 2.0 * eps[k];
-        m_impl->dOcc.upload(occ2.data(), nocc_orbs, stream);
-        const dim3 block(16, 16);
-        const dim3 grid((nao + block.x - 1) / block.x, (nocc_orbs + block.y - 1) / block.y);
-        k_scale_cols<<<grid, block, 0, stream>>>(m_impl->dCw.ptr, m_impl->dC.ptr,
-                                                 m_impl->dOcc.ptr, nao, nocc_orbs);
-        if (cudaGetLastError() != cudaSuccess) return false;
+        if (!w_from_goo) {
+            std::vector<double> occ2(nocc_orbs);
+            for (int k = 0; k < nocc_orbs; ++k) occ2[k] = 2.0 * eps[k];
+            m_impl->dOcc.upload(occ2.data(), nocc_orbs, stream);
+            const dim3 block(16, 16);
+            const dim3 grid((nao + block.x - 1) / block.x, (nocc_orbs + block.y - 1) / block.y);
+            k_scale_cols<<<grid, block, 0, stream>>>(m_impl->dCw.ptr, m_impl->dC.ptr,
+                                                     m_impl->dOcc.ptr, nao, nocc_orbs);
+            if (cudaGetLastError() != cudaSuccess) return false;
+        }
         if (use_pattern_pw) {
-            const bool w_split = densityPatternDistributed(nao, nocc_orbs, /*for_weighted_density=*/true);
+            // The split rebuilds Cw from C and the occupations on each helper, which the G_oo form
+            // does not fit; that case stays on this device.
+            const bool w_split = !w_from_goo
+                && densityPatternDistributed(nao, nocc_orbs, /*for_weighted_density=*/true);
             if (!w_split) {
                 const int bs = 256;
                 k_density_sp<<<(m_impl->sp_nnz + bs - 1) / bs, bs, 0, stream>>>(
