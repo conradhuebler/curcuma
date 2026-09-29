@@ -403,6 +403,12 @@ the driver's initial evaluation (needed); the other was LBFGSpp's `InitializeSin
 the same geometry again through its objective, which bypasses the driver's evaluation cache. The
 objective now reuses the driver's energy/gradient (`LBFGSppObjectiveFunction::prime`); polymer proxy
 (nao 3222, 4 GPUs, 3 steps): 5 -> 4 integral builds/SCFs, 37.1 -> 32.9 s.
+Device-0 peak, **Sep 29, 2026**: the FP64 verification copy of F (1.9 GB) was the largest single
+buffer on device 0 during the distributed FP64 solve; y = F v is now taken before the solve and the
+copy (only needed to redo a rejected solve) lives on the helper device with the most free memory.
+With the dropped cuBLASMp trsm workspace: 1 / 2 / 4 GPUs 15.3 / 15.8 / 13.3 GB (was 15.3 / 18.5 /
+15.8). The remaining +0.5 GB at 2 GPUs is the cuSOLVERMp rank on device 0 (local columns of A, Q and
+L plus its syevd workspace at half the matrix each).
 
 ## 4. What to tackle, in order
 

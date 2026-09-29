@@ -361,6 +361,9 @@ struct XtbGpuContext::Impl {
     int              dist_block = 128;
     int              dist_min_nao = 4000;
     int              dist_potrf = 0;          // Cholesky factorisations done on the devices
+    void*            dist_backup = nullptr;   // FP64 verification copy of F on a helper device
+    int              dist_backup_dev = -1;
+    size_t           dist_backup_bytes = 0;
     std::string      dist_potrf_status;       // why one was not (empty: never refused)
     bool             dist_fp32 = true;
     bool             dist_failed = false;
@@ -519,6 +522,7 @@ struct XtbGpuContext::Impl {
         dCf.free(); dLf.free(); dWorkf.free(); lwork_f32 = 0;
         dProbeA.free(); dProbeV.free(); dProbeY.free(); dProbeT.free(); dProbeU.free();
         dProbeAd.free(); dProbeVd.free(); dProbeYd.free(); dProbeTd.free(); dProbeSd.free();
+        releaseRemoteBackup();
         if (dist) { dist->releaseBuffers(); cudaSetDevice(device); }
     }
 
@@ -622,14 +626,16 @@ struct XtbGpuContext::Impl {
      *              C^T S C = I.
      * dProbeAd holds the copy of A (plain) or F (generalized) taken before the solve.
      */
-    bool verifyDistributedFp64(int n, const double* C, const double* eps_dev, bool generalized)
+    bool verifyDistributedFp64(int n, const double* C, const double* eps_dev, bool generalized,
+                               bool y_ready = false)
     {
-        if (dProbeAd.n < n || dProbeVd.n < n) return false;
+        if ((!y_ready && dProbeAd.n < n) || dProbeVd.n < n || dProbeYd.n < n) return false;
         const double one = 1.0, zero = 0.0, minus = -1.0;
         const int b = 256;
-        // y = M v   (M = A or F, symmetric, lower triangle)
-        if (cublasDsymv(cublas, CUBLAS_FILL_MODE_LOWER, n, &one, dProbeAd.ptr, n, dProbeVd.ptr, 1,
-                        &zero, dProbeYd.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+        // y = M v   (M = A or F, symmetric, lower triangle); y_ready: computed before the solve
+        if (!y_ready
+            && cublasDsymv(cublas, CUBLAS_FILL_MODE_LOWER, n, &one, dProbeAd.ptr, n, dProbeVd.ptr, 1,
+                           &zero, dProbeYd.ptr, 1) != CUBLAS_STATUS_SUCCESS)
             return false;
         // u = v (plain) or u = S v = L (L^T v) (generalized), kept in dProbeTd
         if (cudaMemcpyAsync(dProbeTd.ptr, dProbeVd.ptr, sizeof(double) * n,
@@ -688,6 +694,50 @@ struct XtbGpuContext::Impl {
                 + " eigenvalues out of ascending order); the eigensolve stays on device "
                 + std::to_string(device);
         return true;
+    }
+
+    /// Buffer of `bytes` on the eigensolver device (other than this one) with the most free
+    /// memory, kept across calls; false when none has room. Claude Generated (Sep 29, 2026).
+    bool ensureRemoteBackup(size_t bytes)
+    {
+        if (std::getenv("CURCUMA_GPU_EIG_LOCAL_BACKUP")) return false;
+        if (dist_backup && dist_backup_bytes >= bytes) return true;
+        releaseRemoteBackup();
+        int best = -1;
+        size_t best_free = 0;
+        for (int d : dist_devices) {
+            if (d == device) continue;
+            size_t fr = 0, tot = 0;
+            cudaSetDevice(d);
+            if (cudaMemGetInfo(&fr, &tot) == cudaSuccess && fr > best_free) { best_free = fr; best = d; }
+        }
+        bool ok = false;
+        // keep 1 GB head room on the helper for its own solver buffers
+        if (best >= 0 && best_free > bytes + (size_t(1) << 30)) {
+            cudaSetDevice(best);
+            if (cudaMalloc(&dist_backup, bytes) == cudaSuccess) {
+                dist_backup_dev = best;
+                dist_backup_bytes = bytes;
+                ok = true;
+            } else {
+                cudaGetLastError();
+                dist_backup = nullptr;
+            }
+        }
+        cudaSetDevice(device);
+        return ok;
+    }
+
+    void releaseRemoteBackup()
+    {
+        if (dist_backup) {
+            cudaSetDevice(dist_backup_dev);
+            cudaFree(dist_backup);
+            cudaSetDevice(device);
+        }
+        dist_backup = nullptr;
+        dist_backup_dev = -1;
+        dist_backup_bytes = 0;
     }
 
     /// Create the multi-GPU solver on first use; false when it is not to be used for this call.
@@ -799,23 +849,46 @@ struct XtbGpuContext::Impl {
         // every call - which is how the cusolverMg reuse defect was found (first call exact, second
         // call wrong).
         bool verify64 = !fp32 && dist_verify && dist_fp64_state >= 0;
+        // Claude Generated (Sep 29, 2026): the verification needs y = F v and, only to redo a
+        // rejected solve, a copy of F. y is now taken before the solve (F is still intact), and
+        // the copy lives on one of the helper devices when it fits there: it was the largest
+        // single buffer on this device during the FP64 solve (1.9 GB at n = 15444; with 2 GPUs the
+        // device peaked 2.3 GB above the single-GPU run). On a helper-device failure the copy
+        // stays here as before.
+        bool backup_remote = false;
         if (verify64) {
             try {
-                dProbeAd.ensure(static_cast<int>(static_cast<size_t>(n) * n));
                 dProbeVd.ensure(n); dProbeYd.ensure(n); dProbeTd.ensure(n);
             } catch (...) {
-                dProbeAd.free(); dProbeVd.free(); dProbeYd.free(); dProbeTd.free();
-                dist_fp64_state = -1;
-                dist_status = std::string(dist->name()) + ": FP64 verification needs one more n x n "
-                    "buffer than fits on device " + std::to_string(device)
-                    + "; the eigensolve stays on that device";
-                return 0;
+                dProbeVd.free(); dProbeYd.free(); dProbeTd.free();
+                verify64 = false;
             }
+        }
+        if (verify64) {
+            const size_t bytes = sizeof(double) * static_cast<size_t>(n) * n;
+            backup_remote = ensureRemoteBackup(bytes)
+                && cudaMemcpyPeer(dist_backup, dist_backup_dev, A, device, bytes) == cudaSuccess;
+            cudaSetDevice(device);
+            if (!backup_remote) {
+                try {
+                    dProbeAd.ensure(static_cast<int>(static_cast<size_t>(n) * n));
+                } catch (...) {
+                    dProbeAd.free(); dProbeVd.free(); dProbeYd.free(); dProbeTd.free();
+                    dist_fp64_state = -1;
+                    dist_status = std::string(dist->name()) + ": FP64 verification needs one more n x n "
+                        "buffer than fits on device " + std::to_string(device)
+                        + "; the eigensolve stays on that device";
+                    return 0;
+                }
+            }
+            const double one = 1.0, zero = 0.0;
             const int b = 256;
             k_probe_filld<<<(n + b - 1) / b, b, 0, stream>>>(dProbeVd.ptr, n, 0x85EBCA6Bu);
             if (cudaGetLastError() != cudaSuccess
-                || cudaMemcpyAsync(dProbeAd.ptr, A, sizeof(double) * static_cast<size_t>(n) * n,
-                                   cudaMemcpyDeviceToDevice, stream) != cudaSuccess
+                || cublasDsymv(cublas, CUBLAS_FILL_MODE_LOWER, n, &one, static_cast<const double*>(A), n,
+                               dProbeVd.ptr, 1, &zero, dProbeYd.ptr, 1) != CUBLAS_STATUS_SUCCESS   // y = F v
+                || (!backup_remote
+                    && cudaMemcpyAsync(dProbeAd.ptr, A, bytes, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
                 || cudaStreamSynchronize(stream) != cudaSuccess)
                 verify64 = false;
         }
@@ -836,11 +909,14 @@ struct XtbGpuContext::Impl {
             ++dist_solves;
             bool rejected = false;
             if (verify64 && verifyDistributedFp64(n, static_cast<const double*>(A),
-                                                  static_cast<const double*>(eig), true)
+                                                  static_cast<const double*>(eig), true, true)
                 && dist_fp64_state < 0) {
-                rejected = (cudaMemcpyAsync(A, dProbeAd.ptr, sizeof(double) * static_cast<size_t>(n) * n,
-                                            cudaMemcpyDeviceToDevice, stream) == cudaSuccess
-                            && cudaStreamSynchronize(stream) == cudaSuccess);
+                const size_t bytes = sizeof(double) * static_cast<size_t>(n) * n;
+                rejected = backup_remote
+                    ? cudaMemcpyPeer(A, device, dist_backup, dist_backup_dev, bytes) == cudaSuccess
+                    : (cudaMemcpyAsync(A, dProbeAd.ptr, bytes, cudaMemcpyDeviceToDevice, stream) == cudaSuccess
+                       && cudaStreamSynchronize(stream) == cudaSuccess);
+                cudaSetDevice(device);
                 --dist_solves;
             }
             if (rejected) return 0;
@@ -3069,6 +3145,7 @@ XtbGpuContext::~XtbGpuContext()
     // The multi-GPU solver switches devices while it tears down; drop it first.
     m_impl->dist.reset();
     m_impl->releaseDensityHelpers();
+    m_impl->releaseRemoteBackup();
     // Free the handles and every CudaBuffer (destroyed with m_impl) on OUR device.
     bindDevice();
     if (m_impl->cusolver) cusolverDnDestroy(m_impl->cusolver);
