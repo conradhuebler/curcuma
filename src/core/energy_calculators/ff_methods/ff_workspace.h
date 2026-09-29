@@ -689,6 +689,27 @@ public:
     int getHBondCount() const { return static_cast<int>(m_hbonds.size()); }
     int getXBondCount() const { return static_cast<int>(m_xbonds.size()); }
 
+    /// rev-gfnff pair-validity gate (Claude Generated, Sep 2026; FABLE_BOND_STATE_2.md sec
+    /// 2.1-rev, cap_i / X_i): the FULL per-atom budget cap of the "conserving" valence share,
+    /// factored out of prepareConservingShare()'s per-atom loop (ff_workspace_gfnff.cpp) so the
+    /// pair-validity gate (GFNFF::findInvalidPairValidityPairs, gfnff_pair_validity.cpp) reads
+    /// the IDENTICAL cap formula instead of a second, drifting implementation - the gate runs
+    /// inside GFNFF, before any FFWorkspace instance exists for the corner under test, so it
+    /// cannot call prepareConservingShare() itself (that needs a populated m_bonds/m_atom_types/
+    /// m_topology_charges/m_rev_share_sum). This static function has no such dependency: it is a
+    /// pure function of its five scalar arguments plus GFNFFParameters::periodic_group (defined
+    /// in ff_workspace_gfnff.cpp, which already includes gfnff_par.h).
+    /// @param Z                atomic number
+    /// @param qgroup_i         topological (Phase-1 EEQ) charge of the atom plus its H partners
+    /// @param donor_i          true if the atom donates into a deficient/group-13 partner's
+    ///                         orbital in this corner (the donor rule, rev_share_donor_rule)
+    /// @param valz             the atom's nominal sigma valence Val_Z(i) (GFNFF::revValence)
+    /// @param fix_h            exclude hydrogen from hypervalent growth (rev_budget_fix_h)
+    /// @param delivered_growth [out] true for a d-block metal (FABLE_REVIEW_2 A.5 does not
+    ///                         budget metals; the caller reads is_metal instead of a finite cap)
+    static double shareCapForAtom(int Z, double qgroup_i, bool donor_i, double valz, bool fix_h,
+                                  bool& delivered_growth);
+
 private:
     int m_natoms = 0;
     int m_num_threads = 1;

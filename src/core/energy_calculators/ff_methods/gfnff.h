@@ -432,6 +432,7 @@ PARAM(rev_share_form, String, "conserving", "rev-gfnff stage 3a(ii): which valen
 PARAM(rev_share_min_width, Double, 0.1, "rev-gfnff stage 3a(ii), rev_share_form conserving only: half-width (in units of Val/S) of the C1 smooth min that replaces min(1, x). The min is EXACTLY 1 for x >= 1 - so a saturated equilibrium atom keeps a share factor of literally 1.0 and its term stays bit-identical - and EXACTLY x for x <= 1 - width, so valence conservation is exact where the share bites; only the corner between the two is rounded by a cubic. Smaller values follow min(1, x) more closely at the price of a stiffer force through the join.", "Reactive", {})
 PARAM(rev_share_donor_rule, Bool, true, "rev-gfnff stage 3a(ii), rev_share_form conserving only: grant the excess budget X_i >= 1 to an atom that DONATES into a dative bond. The charge rule cannot see one - a dative bond puts a whole valence into the acceptor's empty orbital while the donor's EEQ charge stays near +0.2 - so without this rule an amine borane's nitrogen gets Val ~ 3.2 against S ~ 4 and all four of its wells are scaled by ~0.8, measured as +73 to +110 kcal/mol on H3N-BH3, H3N-O and H3N-CH2 where the delivered share is inert. An atom qualifies if, in the corner being evaluated, it has a partner that is either a group-13 element (B, Al: an empty p orbital, which no bond count can reveal) or an atom carrying FEWER partners than its own nominal sigma valence, i.e. a free coordination site (the amine oxide's one-coordinate O, the ylide's three-coordinate C). The grant is a maximum against the charge rule, never a replacement, and it applies only where the charge rule decides - group 13 and the period >= 3 octet expansion already carry a larger cap. Both tests read the corner's own bond list, so the cap stays a per-corner constant with no chain rule. Costs nothing at equilibrium (the cap is only reachable once an atom claims MORE than its nominal valence) and nothing on a radical adduct (a one-coordinate H is not deficient). DEFAULT ON; false is the ablation arm.", "Reactive", {})
 PARAM(rev_budget_fix_h, Bool, true, "rev-gfnff stage 3a(ii): hydrogen keeps its nominal valence 1 in the share budget - never hypervalent. The alternative rule (false) gives every atom Val_i = Val_Z + softplus(settled count - Val_Z), so an H that sits between two partners (a just-formed H2 still bonded to its carbon) gets Val_H -> 2 as soon as the H-H tight bond order crosses the settled window, and BOTH its wells jump from half share to full share in one step - the measured origin of the hot react-MD blow-ups. A hydrogen has ONE valence; a bridging H is a 3c-2e bond whose two partial wells must SHARE it. With the flag on, Val_H = 1 exactly and its derivative channel is zero; every other element keeps the softplus budget. DEFAULT ON since Sep 18, 2026: on the 20-cell react-MD grid it removes both runaways (max per-step dEpot 2593.6 -> 59.3 kJ/mol, T_max 1.6e8 -> 8306 K, hard swaps 5 -> 0) and no falsifier moves (equilibria, hypervalent ions, BF4-, rkt06 all bit-identical). false reproduces the pre-Sep-18 behaviour.", "Reactive", {})
+PARAM(rev_pair_validity, Bool, false, "rev-gfnff pair-validity gate (FABLE_BOND_STATE_2.md sec 2.1-rev): a per-corner, geometry-free veto on a listed bonded pair (i,j) that is a closed-shell repulsion rather than a bond - true unless one end has a free valence slot (n_other < Val_Z + cap, the SAME per-atom budget cap the conserving valence share computes, FFWorkspace::shareCapForAtom), or is a metal, or is a proton bridging two lone-pair atoms (an X-H-Y 3c-4e bridge), or the pair is a doubly-bridged M...M diagonal alongside >= 2 pure H bridges, or the pair shares a metal/deficient neighbour (a sigma complex, e.g. Kubas eta2-H2), or the pair's local shell carries >= 0.5 e of Phase-1 topological charge (a cationic 3c-2e bond, H3+/CH5+). An invalid pair is removed from that corner's own topology and the corner is REGENERATED from the reduced bond list (hybridisation, angles, torsions, pi-systems, Phase-1 EEQ all freshly derived, exactly as if the pair had never been perceived) - not merely zeroed in the bond energy, since the reference test (a compressed BF4- probe) requires the reduced corner's hybridisation and EEQ to match a naturally 4-bonded topology bit-for-bit. Fixes the compressed-BF4- artefact (a fresh 10-bond perception, six spurious F...F contacts alongside the four genuine B-F bonds, scores hundreds of kcal/mol above the same force field's own 4-bond evaluation) and the geminal H...H well of a hot react-MD trajectory (an artefact bond between two already-saturated hydrogens of the same carbon, which re-parametrises the sibling C-H bonds). DEFAULT OFF: a rev-gfnff research mechanism, not a port-fidelity change, bit-identical when off (verified over GMTKN55+MOR41+S30L-CI, 2647 structures, 0 moved) and on every already-valid reference structure with it on. See docs/REV_GFNFF_STAGE3A.md and test_cases/revgfnff/_log/PAIR_VALIDITY_IMPL_STATUS.md.", "Reactive", {})
 PARAM(rev_max_transitions, Int, 4, "rev-gfnff stage 1b: transitions blended at the same time (2^k topology corners are evaluated per step); a further event snaps the transition closest to either end of its window.", "Reactive", {})
 PARAM(rev_bo_form, Double, 0.05, "rev-gfnff react scan: a non-bonded pair (never a 1,3 pair) joins the bond list once its term WEIGHT exceeds this value, i.e. where its terms are still ~0.", "Reactive", {})
 PARAM(rev_bo_break, Double, 0.02, "rev-gfnff react scan: a bond leaves the list once its term weight falls below this value.", "Reactive", {})
@@ -937,9 +938,17 @@ public:
      *
      * Claude Generated (March 2026): Primary parameter generation path.
      * Called after InitialiseMolecule() when topology is available.
+     *
+     * Claude Generated (Sep 2026): now a thin gate wrapper (gfnff_pair_validity.cpp) around
+     * generateGFNFFParameterSetImpl() - see that function's declaration below. Off by default
+     * (-gfnff.rev_pair_validity), in which case it is exactly the one call it always was.
      */
     GFNFFParameterSet generateGFNFFParameterSet();
 
+    /// Claude Generated (Sep 2026): the actual generator, renamed out of the way of the gate
+    /// wrapper above. Every existing call site keeps calling generateGFNFFParameterSet(); this
+    /// is what that now calls (once, or twice under the pair-validity gate).
+    GFNFFParameterSet generateGFNFFParameterSetImpl();
 
     /**
      * @brief Consume cached parameter set for external use.
@@ -1450,6 +1459,18 @@ private:
      * @brief Retrieve cached bond list, computing it once if needed
      */
     const std::vector<std::pair<int,int>>& getCachedBondList() const;
+
+    /**
+     * @brief rev-gfnff pair-validity gate (Claude Generated, Sep 2026; gfnff_pair_validity.cpp;
+     * FABLE_BOND_STATE_2.md sec 2.1-rev): every listed bonded pair of `topo` that VALID() rejects
+     * - a closed-shell repulsion between two saturated, lone-pair-free, non-metal centres, with
+     * no shared metal/deficient neighbour and no nearby antibonding excess charge. Reads only
+     * `topo` (neighbour lists, is_metal, Phase-1 topology_charges) plus GFNFF::revValence() and
+     * FFWorkspace::shareCapForAtom() - no geometry, no FFWorkspace instance. Canonical (i < j)
+     * pairs, in no particular order. Called by generateGFNFFParameterSet() only when
+     * -gfnff.rev_pair_validity is on.
+     */
+    std::vector<std::pair<int, int>> findInvalidPairValidityPairs(const TopologyInfo& topo) const;
 
     /**
      * @brief Calculate topological distances (bond counts) between all atom pairs using BFS
@@ -2740,6 +2761,7 @@ private:
     std::string m_rev_share_form = "conserving"; ///< stage 3a(ii): delivered | conserving share formula (Sep 18, 2026; DEFAULT conserving since Sep 19, 2026)
     bool m_rev_share_donor_rule = true; ///< stage 3a(ii) conserving: a dative donor gets X_i >= 1 (Claude Generated, Sep 19, 2026)
     bool m_rev_budget_fix_h = true;    ///< stage 3a(ii): hydrogen keeps Val = 1 in the share budget (never hypervalent); Claude Generated Sep 15, 2026, DEFAULT ON since Sep 18, 2026
+    bool m_rev_pair_validity = false;  ///< pair-validity gate (FABLE_BOND_STATE_2.md sec 2.1-rev); Claude Generated Sep 2026, DEFAULT OFF (gfnff_pair_validity.cpp)
     std::vector<Bond> m_rev_fading; ///< stage 1b: wells of broken bonds, kept in the bond list (weight w) until w < rev_bo_break
     std::map<std::pair<int, int>, long> m_rev_cooldown; ///< stage 1b: demoted pair -> first scan call at which it may start a transition again
     int m_rev_demote_cooldown = 0;                      ///< stage 1b: scans a demoted pair has to wait

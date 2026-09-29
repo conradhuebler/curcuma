@@ -4591,7 +4591,12 @@ bool GFNFF::initializeForceField()
 
 // Claude Generated (March 2026): Native parameter set generation — bypasses JSON entirely
 // Uses native generators for bonds/angles, converts JSON for remaining terms (incremental migration)
-GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
+// Claude Generated (Sep 2026): renamed from generateGFNFFParameterSet() when the pair-validity
+// gate wrapper was added (gfnff_pair_validity.cpp) - this Impl() is the actual generator, called
+// once by the public generateGFNFFParameterSet() when the gate is off or finds nothing to prune,
+// and up to twice (once to read the corner's own topology, once more on the pruned bond list)
+// when it does. Nothing in this function itself changed.
+GFNFFParameterSet GFNFF::generateGFNFFParameterSetImpl()
 {
     SetupScope total_scope("TOTAL parameter set generation");
     // Same OpenMP budget as calculateTopologyInfo (dispersion pair generation uses OpenMP).
@@ -13350,6 +13355,12 @@ void GFNFF::setupRevSettings()
     // (operator decision after FABLE_REVIEW_2 A.2: no falsifier moves, both react-MD runaways go).
     m_rev_budget_fix_h = m_parameters.value("rev_budget_fix_h", true);
     rv.budget_fix_h = m_rev_budget_fix_h;
+    // Claude Generated (Sep 2026): the pair-validity gate (gfnff_pair_validity.cpp) is read here
+    // like every other rev_* flag - setupRevSettings() runs unconditionally (both plain gfnff
+    // and revgfnff construct a GFNFF instance through it), and the gate itself does not require
+    // rev_enabled: it is a topology-perception veto, independent of the bond-order/share/well-form
+    // machinery. DEFAULT OFF, so plain gfnff and default revgfnff are unaffected either way.
+    m_rev_pair_validity = m_parameters.value("rev_pair_validity", false);
     // Claude Generated (Sep 13, 2026): rv.h_not_sp was declared and printed but NEVER assigned,
     // so -gfnff.rev_h_not_sp had no effect at all (in -sp and in -batch alike). Read it here with
     // the rest of the struct fields.
