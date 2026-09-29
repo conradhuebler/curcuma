@@ -2566,6 +2566,52 @@ void FFWorkspace::prepareWellForms()
     }
 }
 
+// Claude Generated (Sep 2026): see the doxygen comment on the declaration (ff_workspace.h) -
+// the per-atom budget cap X_i of the conserving share, as a pure function of its five scalar
+// arguments, so it can be evaluated outside a populated FFWorkspace (the rev-gfnff pair-validity
+// gate, GFNFF::findInvalidPairValidityPairs, calls it directly). Verbatim body of the loop this
+// replaced in prepareConservingShare() below - no behaviour change there.
+double FFWorkspace::shareCapForAtom(int Z, double qgroup_i, bool donor_i, double valz, bool fix_h,
+                                     bool& delivered_growth)
+{
+    delivered_growth = false;
+    double cap = 0.0;
+    if (Z == 1 || Z == 9) {
+        cap = 0.0;                   // H is never hypervalent; F is never hypervalent
+    } else {
+        const int grp = (Z >= 1 && Z <= 86) ? GFNFFParameters::periodic_group[Z - 1] : 0;
+        const int period = Z <= 2 ? 1 : Z <= 10 ? 2 : Z <= 18 ? 3 : Z <= 36 ? 4 : Z <= 54 ? 5 : 6;
+        if (grp < 0) {
+            // A d-block element: periodic_group is negative for it, and FABLE_REVIEW_2 A.5
+            // does not cover metals. Their coordination numbers routinely exceed any sigma
+            // valence, so the charge rule would scale EVERY metal-ligand well by Val_Z/CN.
+            // Deliberate, documented carve-out: a transition metal keeps the delivered
+            // growth (cap = the softplus itself), i.e. this mode does not touch it. NOT
+            // measured - no metal is in any rev-gfnff reference set.
+            delivered_growth = true;
+        } else if (grp == 3) {
+            // NB: GFNFFParameters::periodic_group uses MAIN-GROUP numbering 1-8, not IUPAC
+            // 1-18 - so "group 13" of FABLE_REVIEW_2 A.5 (B, Al, Ga, In, Tl) is 3 here and
+            // "groups 15-17" (N/P/As.., O/S/Se.., F/Cl/Br..) are 5-7. Measured the hard way:
+            // with the IUPAC numbers no rule ever fired and ClO4- fell to the charge rule
+            // (cap 0.65 instead of 5), costing +164 kcal/mol.
+            cap = 1.0;               // the empty orbital: BF4-, BH4-, AlCl4-, H3N-BH3
+        } else if (period >= 3 && grp >= 5 && grp <= 7) {
+            cap = 6.0 - valz;        // the octet expansion the valence table already grants P/S
+        } else {
+            cap = shareClip(qgroup_i);   // C, N, O and the rest: granted by charge
+            // ... and, on top of it, by the donor rule: a full valence goes into the
+            // acceptor's empty orbital whatever the donor's charge says. max(), never a
+            // replacement - a charged donor keeps whichever cap is larger.
+            if (donor_i)
+                cap = std::max(cap, 1.0);
+        }
+    }
+    if (fix_h && Z == 1)
+        cap = 0.0;
+    return cap;
+}
+
 void FFWorkspace::prepareConservingShare(bool fix_h)
 {
     const int N = m_natoms;
@@ -2643,42 +2689,13 @@ void FFWorkspace::prepareConservingShare(bool fix_h)
         const double S = m_rev_share_sum(i);
         const double valz = m_rev.valence[i];
         const int Z = have_types ? m_atom_types[i] : 0;
-        // --- the cap X_i ---------------------------------------------------------------
-        double cap = 0.0;
-        bool delivered_growth = false;   // transition metals, see below
-        if (Z == 1 || Z == 9) {
-            cap = 0.0;                   // H is never hypervalent; F is never hypervalent
-        } else {
-            const int grp = (Z >= 1 && Z <= 86) ? GFNFFParameters::periodic_group[Z - 1] : 0;
-            const int period = Z <= 2 ? 1 : Z <= 10 ? 2 : Z <= 18 ? 3 : Z <= 36 ? 4 : Z <= 54 ? 5 : 6;
-            if (grp < 0) {
-                // A d-block element: periodic_group is negative for it, and FABLE_REVIEW_2 A.5
-                // does not cover metals. Their coordination numbers routinely exceed any sigma
-                // valence, so the charge rule would scale EVERY metal-ligand well by Val_Z/CN.
-                // Deliberate, documented carve-out: a transition metal keeps the delivered
-                // growth (cap = the softplus itself), i.e. this mode does not touch it. NOT
-                // measured - no metal is in any rev-gfnff reference set.
-                delivered_growth = true;
-            } else if (grp == 3) {
-                // NB: GFNFFParameters::periodic_group uses MAIN-GROUP numbering 1-8, not IUPAC
-                // 1-18 - so "group 13" of FABLE_REVIEW_2 A.5 (B, Al, Ga, In, Tl) is 3 here and
-                // "groups 15-17" (N/P/As.., O/S/Se.., F/Cl/Br..) are 5-7. Measured the hard way:
-                // with the IUPAC numbers no rule ever fired and ClO4- fell to the charge rule
-                // (cap 0.65 instead of 5), costing +164 kcal/mol.
-                cap = 1.0;               // the empty orbital: BF4-, BH4-, AlCl4-, H3N-BH3
-            } else if (period >= 3 && grp >= 5 && grp <= 7) {
-                cap = 6.0 - valz;        // the octet expansion the valence table already grants P/S
-            } else {
-                cap = shareClip(qgroup[i]);   // C, N, O and the rest: granted by charge
-                // ... and, on top of it, by the donor rule: a full valence goes into the
-                // acceptor's empty orbital whatever the donor's charge says. max(), never a
-                // replacement - a charged donor keeps whichever cap is larger.
-                if (donor[i])
-                    cap = std::max(cap, 1.0);
-            }
-        }
-        if (fix_h && Z == 1)
-            cap = 0.0;
+        // --- the cap X_i -----------------------------------------------------------------
+        // Claude Generated (Sep 2026): extracted to the public static shareCapForAtom() so the
+        // pair-validity gate (GFNFF::findInvalidPairValidityPairs, gfnff_pair_validity.cpp) can
+        // read the identical formula without needing a populated FFWorkspace. Behaviour here is
+        // unchanged - same branches, same inputs (qgroup[i], donor[i] built above), same output.
+        bool delivered_growth = false;
+        const double cap = shareCapForAtom(Z, qgroup[i], donor[i] != 0, valz, fix_h, delivered_growth);
         m_rev_share_cap(i) = delivered_growth ? 99.0 : cap;
         // --- the budget ----------------------------------------------------------------
         const double exc_arg = S - valz;
