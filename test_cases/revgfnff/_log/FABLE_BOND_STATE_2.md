@@ -339,7 +339,9 @@ CITED, becomes the elimination channel's gap), and an MS-ARMD weight (`exp(-Delt
 would suppress the higher corner smoothly. Decide after prediction 2 is measured and after Q5,
 because Q5 changes those gaps.
 
-**Q5 (hyb / rings / fxh from settled bonds only in rev mode?)** Yes, and the gate makes it smaller:
+**Q5 (hyb / rings / fxh from settled bonds only in rev mode?)** *Made precise in §7 (2026-09-29,
+third pass): "settled" is defined there, and the answer is a hydrogen-scope rule set, not a
+settled-only gate.* Yes, and the gate makes it smaller:
 a geminal H-bridged "3-ring" is never enumerated, so the only transient re-parametrisation left is
 the one a genuine bridging H causes (ch4_H: a 2-coordinate H read as sp, the C-H-H read as a
 3-ring, `fxh` on the siblings). The minimal rev-mode rule: a hydrogen is never a ring member and
@@ -403,3 +405,156 @@ references, not a bond-existence item.
 
 Absolute rev-vs-gfnff differences in this table are the `mg3` depth offset and must not be read as
 errors (STAGE3A header). Scratch: `<scratchpad>/chk/{bf4c,bf4r,bf4pin,fhf,hf,fm,h5o2,rkt06}`.
+
+## 7. Q5 — perception rules under a transient bond: "settled" defined, the rule set, falsifiers (2026-09-29, third pass)
+
+Binary for every MEASURED number here: `release/curcuma` md5 `53b32b06`, built after the gate merge
+`56df4de8`; shipped defaults, `rev_pair_validity` at its default (off) unless stated; verbosity 3
+for the `BOND_FACTORS` / per-angle / `shareD` dumps. Same geometries as §6 plus the repo's
+`ref/P/rkt03`, `GMTKN55/W4-11/{b2h6,bh3}` and `PA26/h2p`.
+
+### 7.1 What the code does now, and why "settled-only" is not a gate
+
+Grounding (CODE, `docs/REV_GFNFF_STAGE1.md` stage 1b; `PAIR_VALIDITY_IMPL_STATUS.md` §5): every
+corner of the 2^k blend is a COMPLETE parameter set built by `generateGFNFFParameterSet()` from
+that corner's own bond list — hybridisation, rings, pi-systems, `fxh`/`ctype`, angles, torsions
+and the Phase-1 EEQ are all re-derived per corner. The blend `E = sum_b W_b E_b` therefore
+already interpolates the neighbours' re-parametrisation over the transition window, and a
+completed transition's corner IS the next base topology (rebuild `dE_jump = 0` by construction).
+The gate (`rev_pair_validity`) sits inside the same seam: an invalid pair is removed from the list
+before that call, so the corner is built as if the pair had never been perceived.
+
+**Definition.** For a pair p and the current blend with in-flight transitions t_1..t_k:
+
+    settled(p)  :=  p is in the base bond list (m_react_bonds)  and  p is the pair of no in-flight
+                    transition;  equivalently, p's term weight is 1 in every one of the 2^k corners.
+
+A forming pair (s_t in [0,1)) and a breaking pair are unsettled until their transition completes;
+a pair the gate invalidates never enters a corner, so it is never settled. The scan's own 1,3 test
+("transitions below s = 0.5 do not count", STAGE1) is a threshold approximation of this.
+
+**Decision: the perception rules are NOT restricted to settled bonds.** A corner's parameter set
+must be the parameter set of its topology at s = 1, otherwise the completion step is a
+discontinuity. Reading hyb/rings from the settled subgraph in the corner that carries the new bond
+would leave that corner's neighbours un-re-parametrised while s runs 0 -> 1, and then apply the
+whole change at the rebuild — the amplitude (§7.2: 1.3234 x 1.18 x 1.05 = 1.64 on a C-H well, +451
+kJ/mol in BREAK_TAIL) is deferred, not removed. A second blend for the "settling" would double the
+corners and needs a coordinate with no physical definition. What Q5 must change instead is WHICH
+rules a bridging hydrogen may trigger, so that the amplitude is zero by construction where it is
+an artefact, while heavy-atom re-parametrisation (a carbon going sp2 -> sp3 as a C-C bond forms,
+the Hückel order of a ring changing) stays what it is: real chemistry, carried by the blend.
+
+### 7.2 The rules a two-coordinate hydrogen triggers today, measured
+
+`rev_h_not_sp` (default on) removes only the reference's 0.30 bridging-bond scale
+(`gfnff_method.cpp:5468-5485`). The hydrogen keeps `hyb = 1` (`determineHybridizationFortran`,
+a 2-partner H), and that feeds four other rules:
+
+| rule | where | what it does to a NEIGHBOURING, real bond | measured |
+|---|---|---|---|
+| `bsmat[hyb_X][1]` on the H's X-H bonds | `:5420` | X-H bond strength 1.3234 instead of 1.000 (sp3 X); H-H is exempt by the special case at `:5410` (bstr 1.0) | B2H6 B-H_b, FHF- F-H, H5O2+ O-H_b, CH5+ C-H_b, rkt03-TS C-H4: all `bstr 1.3234` in rev, 0.3000 in gfnff; rkt06 H-H 1.0000 in both |
+| ring enumeration walks through H | `findSmallestRings` (`:7936`) | an X-H-Y or C-H-H triangle is a 3-ring: `ringf 1.18` on all three bonds, and the 3-ring `fxh 1.05` on EVERY C-H of that carbon (siblings) | CH5+: `ringf 1.18` on C-H_b (x2) and H-H, `fxh 1.05` on all five C-H; B2H6: `ringf 1.18` on B-H_b and B-B; BREAK_TAIL's 1.635x = 1.3234 x 1.18 x 1.05 (CITED); H3+ finds 0 rings |
+| angle centred on the H | `generateAnglesNative` (`:9425`, any centre with >= 2 partners) with the sp rule `theta0 = 180` (`:6510`) | a bent bridge is penalised towards linear; forcing `hyb = 0` instead made it tetrahedral (STAGE1's measured failure) | FHF- `angle_0-1-2` fc 0.053, H5O2+ 0.089, CH5+ `angle_0-4-5`/`0-5-4` 0.178 each at ~65 deg, B2H6 0.012 (x2), H3+ 0.089 (x3, at 60 deg), rkt06-TS 0.080 at 180 deg (energy 0) |
+| an sp H makes a lone-pair neighbour `picon` | `:7850` (PX13 port-fidelity item) | a pi-system through the bridge | `PX13/hf_2_ts` (the F...F pair is gate-invalid in rev mode anyway) |
+
+Under `mg3` the well energy at fixed geometry is exactly proportional to `fc` (`D = s|k_b|`,
+`a = sqrt(ca^2 alpha / s)` is scale-free, the cap `y <= 2` too), so removing a factor F from a
+bond's `fc` scales that bond's `E_pair` by 1/F. That is what makes the predictions below exact
+offline numbers for the bond term.
+
+Per-bond consequence (rev, `shareD`; E in Eh):
+
+| system | pair | bstr | ringf | fxh | D | c | E_pair | gfnff D (0.30 rule) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| FHF- | F-H (x2) | 1.3234 | 1 | 1 | 0.2854 | 0.500 | -0.1427 | 0.0394 |
+| H5O2+ | O-H_b (x2) | 1.3234 | 1 | 0.93 | 0.2340 | 0.484 | -0.1133 | 0.0361 |
+| CH5+ | C-H_b (x2) | 1.3234 | 1.18 | 1.05 | 0.2702 | 0.500 | -0.1352 | 0.0597 |
+| CH5+ | H-H | 1.0 | 1.18 | 1 | 0.2339 | 0.250 | -0.0586 | 0.0561 |
+| CH5+ | C-H (x3, siblings) | 1.0 | 1 | 1.05 | 0.1788 | 1.000 | -0.1788 | 0.1733 |
+| B2H6 | B-H_b (x4) | 1.3234 | 1.18 | 1.10 | 0.1701 | 0.400 | -0.0680 | 0.0385 |
+| B2H6 | B-B | 1.0 | 1.18 | 1 | 0.0609 | 0.640 | -0.0390 | 0.0608 |
+| rkt03 TS (pt12) | C-H4 | 1.3234 | 1 | 1 | 0.1870 | 0.500 | -0.0935 | 0.0391 |
+| rkt06 TS (pt12) | H-H (x2) | 1.0 | 1 | 1 | 0.1939 | 0.500 | -0.0970 | — |
+
+So rev-gfnff's bridged X-H wells are today 3.3x the reference's calibrated `0.30 x 1.3234 = 0.397`
+— an unintended half-state of `rev_h_not_sp` ("not a bridging atom" without "not sp"). Two
+findings outside Q5, recorded so nobody attributes them to it: (a) **B2H6 in rev mode is +1.375 Eh
+above 2 BH3** (gfnff +0.0533), of which `OverCoord = +1.330 Eh` — the stage-1a E_over on a
+5-partner boron against `Val_B = 3` (TODO #13, and the diagonal-edge over-count of §2.1-rev (2)
+again); (b) **rkt03 under the current default**: CH3 + H2 sits 43.8 kcal/mol BELOW CH4 + H
+(reference: 1.6 above; FABLE_REVIEW_2 A.4 had -26.8 under `gauss`), all in the bond term — the
+`mg3` H-H row is 121 kcal/mol deep (D 0.1935 Eh) against De 109, and the planar CH3's C-H carry the
+sp2 `bsmat 1.0792`. A WP5 depth item; the CH3 carbon is correctly sp2, not a perception artefact.
+
+### 7.3 The rule set (Q5-v1; rev mode only, one opt-in PARAM with per-rule sub-switches for attribution)
+
+    H1  hyb(H) = 0 always.  The 2-partner rule never makes a hydrogen sp. Consequences: X-H bond
+        strength = bsmat[hyb_X][0] (the same value a terminal H on that X gets); the 0.30 bridging
+        scale can no longer fire for H (subsumes rev_h_not_sp); H-H unchanged (already 1.0).
+    H2  no angle term is centred on a hydrogen.  The X-H-Y bend of a 3-centre bond gets no GFN-FF
+        angle; its geometry is set by the two wells, the share, the repulsion blend and E_over.
+        Needed with H1 (hyb 0 would give theta0 109.5, STAGE1's measured failure), and the sp
+        theta0 = 180 at a 60-85 deg bridge (CH5+, B2H6, H3+) is itself an artefact of the rule.
+    R1  a hydrogen is never a ring member.  Ring enumeration runs on the H-free subgraph in rev
+        mode; ringf and the 3-ring fxh never fire on an H-bridged triangle, and the sibling C-H of
+        such a carbon keep fxh 1.0.
+    P1  a hydrogen never counts as an sp/sp2 neighbour for picon (follows from H1).
+    heavy atoms: NO change.  hyb, rings, pi-systems, fxh/ctype/amide, angle theta0, torsion nrot
+        read the corner's full list as today; the blend carries the change.
+
+Scope statement: every rule reads only the element (Z = 1) and the corner's list — per-corner
+constants, no geometry, no derivative; a change is carried by the s-blend like every other corner
+quantity. Static structures with no 2-coordinate H and no H in a ring are bit-identical by
+construction (that is the regression net). The count of what the rules touch (MEASURED offline
+from the gate sweep's saved corners, 2647 structures): **80 structures have a hydrogen with two
+listed partners** (GMTKN55 78: all 13 BH76 RKT transition states, AHB21/3 and /8, AL2X6 al2h6/
+al2me4/al2me5, ALK8 x3, BHDIV10 ts5/ts7, BHPERI/TS5, PA26/c2h2p and h2p, 24 MB16-43 clusters, ...;
+MOR41 PR06/PR07), **38 of them with an H-bridged triangle** (R1 fires there). Everything else is
+untouched.
+
+### 7.4 Falsifier table with predictions
+
+E_pair scales by 1/F under `mg3` (§7.2), so the bond-term shifts are exact offline; the H2 shifts
+need the per-angle energy, which the dumps do not print — they are bounded by the structure's
+Angle total. kcal/mol unless stated. "gate" = `rev_pair_validity`.
+
+| # | falsifier | owner | current default | PREDICTED with Q5-v1 (gate on) | note |
+|---|---|---|---|---|---|
+| a | BREAK_TAIL c2h6/T2000_f16 hard break, +471.1 kJ (bond +451.0, all of it `fc` re-derivation: 1.3234 x 1.18 x 1.05 on C1-H4/H5, CITED) | gate (corner invalid: both H on C1) | +471.1 with gate off | **~0** with the gate; with Q5-v1 alone (gate off) also **~0**: the +451.41 column becomes 0, leaving the -0.46 shape term | either mechanism removes it; Q5-v1 is the one that also covers the valid corners below |
+| b | BREAK_TAIL ch4_H/T2000_f10 +310.4 (C1-H4 +111.5, C1-H6 +112.8, siblings +17 each, CITED) | gate (3-ring corner C1-H4-H6 invalid) | +310.4 | **~0** either way, as a | |
+| c | elimination-channel corner {C-H3 absent, C-H4, H3-H4} (valid: H3 free) — H4 bridges C and H3 | **Q5** | C-H4 well x1.3234 in that corner: amplitude 0.32 x D_CH ~ 0.054 Eh = 143 kJ/mol carried by s_CH3 s_HH | **0** | the residual the gate leaves; measurable on the c2h6 130-cell grid as the per-step tail with gate on vs gate + Q5 |
+| d | rkt06, 14 points | none | dev pt5/12/13 +0.62/-0.16/+0.18 (§1 row c) | **0.00 change at every point** | H-H bstr already 1.0; the H-centred angle sits at 180 deg (energy 0); collinear path |
+| e | rkt03 TS (pt12), relative to CH4 + H | Q5 + WP5 | barrier **-16.3** (ref +7.6); relative to CH3 + H2 +27.5 (ref +9.2) | C-H4 E -0.0935 -> -0.0707: **+14.4** -> barrier **-1.9** from CH4 + H, **+41.9** from CH3 + H2 | the -43.8 reaction energy (§7.2 b) is the larger defect and is not Q5's |
+| f | FHF- De (FHF- -> HF + F-) | Q5 + TODO #13 | **-120.6** (gfnff -74.9, known ~-45) | bond -0.28540 -> -0.21566: **+43.8** -> De **-76.9**; angle 0 (linear), H2 no static effect | the remaining ~32 over-binding is the H budget (§1 row e) |
+| g | H5O2+ | Q5 + budget | 0.42704 Eh; share cost +167.5 | bridging pairs -0.22663 -> -0.17125: **+34.8** (angle at H_b: fc 0.089 at 180 deg, ~0) | reference: an external De still needed |
+| h | CH5+ probe (net +1, H-H valid via `q+`) | Q5 | 0.66022 Eh | C-H_b /(1.3234 x 1.18): +61.0; H-H /1.18: +5.6; siblings /1.05: +16.0; minus the two H-centred angles (fc 0.178 at ~65 deg vs 180, <= the Angle total 0.0270 Eh = 17.0) -> **+66 .. +83** | no reference in the set (CH4 is not in PA26); PA(CH4) = 130 kcal/mol needs E(H+) in the model |
+| i | B2H6 dimerisation, W4-11 | TODO #13 first | **+1.375 Eh** vs 2 BH3 (OverCoord 1.330) | wells: B-H_b /(1.3234 x 1.18) +61.4, B-B /1.18 +3.7 -> **+65** on top of a term that is 1.33 Eh wrong | Q5 is not the lever here; measured so it is not credited or blamed |
+| j | H3+ (PA26/h2p) | Q5 (H2 only) | 1.49997 Eh; bstr 1.0, ringf 1.0 (0 rings found — MEASURED, the ring finder does not report the all-H triangle) | H1/R1 no-ops; H2 removes three H-centred angles (fc 0.089, 60 deg vs 180): energy **lower by the H3+ Angle total** (not extracted) | measure; the only all-H falsifier |
+| k | BH76 RKT01-21 transition states (13 structures with a 2-coordinate H) | Q5 | class-B rms per STAGE3A | every X...H...Y TS with a heavy X or Y: the X-H well /1.3234 in the TS corner (rkt03 pattern); all-H (rkt06) unchanged | the per-structure offline predictor of §7.5 gives each number before any build |
+| l | static regression, 2647 structures | — | — | **exactly the 80 + 0 structures of §7.3 move, none other** (bit-identity elsewhere by construction) | the offline count is the prediction |
+| m | N2 + 3 H2 / 2 H2 / 4 H at 0.25 fs (STAGE1's stability cells) | Q5 (H2) | 0 events > 40 kJ/mol per run with sp; 4-11 with `hyb = 0` + tetrahedral theta0 (CITED) | **<= the sp arm (0-1)**: H2 removes the H-centred angle instead of re-aiming it | the one prediction that can only be measured in MD; it is H2's falsifier |
+
+What would falsify Q5-v1: (i) row m failing — then the bridging H needs a bend term after all
+(candidate: a linear X-H-Y term with theta0 180 only for a hydrogen whose two partners are both
+lone-pair atoms, i.e. the 3c-4e case, and none otherwise); (ii) row k moving a class-B path
+AWAY from the reference by more than row e's +14.4 pattern predicts — which would mean the 1.3234
+was compensating a too-shallow X-H well at the TS and belongs in the WP5 depth fit instead; (iii)
+any structure outside the 80 of row l changing.
+
+### 7.5 Measurement plan (nothing implemented)
+
+1. **Offline predictor, no build**: from `BOND_FACTORS` + `shareD` at verbosity 3 (the gate
+   sweep's runner already saves the logs), for every structure with a 2-coordinate H compute
+   `dE_bond = sum_p E_p (1 - 1/F_p)`, F_p = the product of the factors H1/R1 remove on pair p, and
+   the H-centred angle count/fc. Deliverable: the row-k table for all 13 RKT TSs, AHB21/3, /8, the
+   AL2X6/ALK8/MB16-43 members, and the four probes here, before a line of C++ exists. The H2
+   energy needs one addition to the angle dump (per-angle energy) or is bounded by the Angle total.
+2. **Implementation as opt-in** (`-gfnff.rev_h_perception`, sub-switches for H1/H2/R1/P1);
+   acceptance in this order: bit-identity on every structure of row l's complement; rkt06 0.00 at
+   all 14 points; the row f/g/h/e numbers to the offline predictor's precision; FD gradient at
+   FHF- and rkt03 pt12 (no new derivative: the rules are per-corner constants).
+3. **MD**: row m on STAGE1's three cells (3 x 3 runs), then the c2h6 130-cell grid at true
+   0.25 fs with gate on vs gate + Q5 (row c), then the BREAK_TAIL replay with Q5 alone (row a/b).
+4. **WP5 conditioning**: freeze (gate, Q5-v1, `conserving` + X_i) before the fit; the bridged
+   X-H wells of FHF-/H5O2+/CH5+/B2H6 are then fitted through the hypervalence slack (TODO #13),
+   which is where their residual after Q5 (rows f-i) belongs.
