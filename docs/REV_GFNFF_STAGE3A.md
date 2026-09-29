@@ -559,6 +559,49 @@ contain (metals, hydrogen bonds, charged species, periodic systems); and the C-H
 average two systems each, which is a HYBRIDISATION difference (sp3 vs sp C-H, water vs methanol
 O-H) that a bond-ORDER dimension cannot separate.
 
+### 2.5 Q5, the hydrogen-perception rule set (Sep 29, 2026, opt-in)
+
+`FABLE_BOND_STATE_2.md` section 7/7.6 ("Q5"): a bridging hydrogen (an X-H-Y 3c-4e/3c-2e bond, a
+migrating H) is given `hyb=1` ("sp") by the topology perception, which lets it trigger four rules
+meant for a genuine sp centre and not for an exchange intermediate - `-gfnff.rev_h_scope`
+(default off) removes them, one PARAM per rule (`rev_h_scope_h1/h2/r1`, all default true, read
+only when the master is on):
+- **H1**: every atom with `Z==1` reads the terminal-H bond-strength column `bsmat[hyb_X][0]`
+  instead of the "sp" column, whatever its partner count (tests the element, never the periodic
+  group, so Li/Na/K are untouched). Implemented narrowly, at the bond-strength lookup and the
+  `is_bridge` 0.30-scaling gate only (`getGFNFFBondParameters`) - NOT as a blanket override of the
+  hybridisation array, which was tried first and reverted: it also changes the r0 "shift"
+  correction (an unrelated hybridisation-keyed term), moving the exactly-collinear rkt06 H+H2 path
+  by ~0.013 Eh where the falsifier requires 0.00. Subsumes the narrower, pre-existing
+  `-gfnff.rev_h_not_sp` for real hydrogen (kept, unchanged, as the mechanism reachable when
+  `rev_h_scope_h1` is off).
+- **H2**: no GFN-FF angle term is ever centred on a `Z==1` atom (`generateAnglesNative`). Needed
+  together with H1, which was tried alone once before and rejected for exactly this reason (a
+  spurious tetrahedral `theta0`; see the note at `determineHybridizationFortran`'s return).
+- **R1**: ring enumeration excludes every `Z==1` atom entirely, on an H-free copy of the metal-free
+  adjacency list fed to `findSmallestRings` - clears `ringf` AND the 3-ring `fxh` correction on
+  every bond of a bridged carbon at once (bridging and sibling C-H alike), since `fxh` is keyed on
+  the carbon's own ring membership.
+- **P1**: a `Z==1` atom never counts as an sp/sp2 "picon" neighbour (`detectPiSystems`); a
+  structural consequence of H1 that still needs its own explicit skip since H1 does not touch the
+  hybridisation array (no separate PARAM - there is no independent code path to gate).
+
+Bit-identical when off (GMTKN55 2462 + MOR41 285 + S30L-CI 90 structures, 0 moved); on, exactly
+the 80 structures with a genuinely 2+-coordinate hydrogen in the EVALUATED (pass-2, never pass-1)
+topology move (79 + `MB16-43/34`, a mu3-bridging hydride where the rule is a near-total no-op).
+FHF- De -120.6 -> -77.6 kcal/mol (predicted -76.9); the exactly-collinear rkt06 path is 0.00 at
+every point measured, both the symmetric TS and an asymmetric point (H-H bond strength is a pure
+`Z==1&&Z==1` check, independent of hybridisation). One of the seven pass-1-only structures the
+design's own offline verification named as required-bit-identical genuinely is NOT
+(`WATER27/OHmH2O`) - root-caused to the unrelated `-gfnff.frag_charge_model ensemble` default
+(Sep 24, 2026), which spawns independent sub-`GFNFF` topology evaluations that Q5 correctly and
+consistently applies to as well; with `-gfnff.frag_charge_model reference` that structure is
+bit-identical too. Full acceptance table, the CH5+/B2H6 probe numbers and the sweep methodology:
+`test_cases/revgfnff/_log/H_SCOPE_IMPL_STATUS.md`. Implementation: three call sites in
+`gfnff_method.cpp` (`determineHybridizationFortran`, `generateAnglesNative`,
+`calculateTopologyInfoOnce`'s ring-building block, `detectPiSystems`); PARAMs and `RevSettings`
+fields in `gfnff.h`/`ff_workspace.h`.
+
 ---
 
 ## 4. Files
@@ -574,4 +617,4 @@ O-H) that a bond-ORDER dimension cannot separate.
 | the class-A harness | `scripts/revgfnff_classa.py` (`--mode kept --extra "-gfnff.topology_mode react"`) |
 | diagnostics | `CURCUMA_SHAREDUMP=1` (per-pair `share`/`shareD` rows and, in `conserving`, a per-atom `shareA` row whose `cap` column shows the donor grant), `CURCUMA_BLENDDUMP=1` (per energy call a `blendD` row per stage-1b transition: pair, forming/tight, window `[w_a, w_b]`, r, coordinate c, corner weight s), `CURCUMA_REVDUMP=1` (the resolved settings, incl. `share_form` / `share_donor_rule` / `well_form`), `CURCUMA_BONDDUMP=1` (per perceived bond the dynamic r0/fc/alpha/fqq/CN **and its continuous bond order**), `-gfnff.rev_well_order_override` (forces that order so `dE/d(order)` is measurable; `mg3` only, off by default) |
 | measurements | `test_cases/revgfnff/_log/WORK_STATUS.md`, `HBUDGET_STATUS.md`, `RUNAWAY_STATUS.md`, `FABLE_REVIEW_2.md` |
-| regression tests | `cli_simplemd_20_gfnff_rev_h_budget`, `cli_gfnff_03_rev_adduct_falsifier`, `cli_gfnff_04_rev_well_form` |
+| regression tests | `cli_simplemd_20_gfnff_rev_h_budget`, `cli_gfnff_03_rev_adduct_falsifier`, `cli_gfnff_04_rev_well_form`, `cli_gfnff_07_pair_validity_gate`, `cli_gfnff_08_h_scope` |
