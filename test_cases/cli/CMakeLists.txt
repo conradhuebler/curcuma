@@ -92,6 +92,10 @@ set_tests_properties(cli_gfnff_06_stale_cn_energy_only PROPERTIES TIMEOUT 300 LA
 # FABLE_BOND_STATE_2.md sec 2.1-rev, test_cases/revgfnff/_log/PAIR_VALIDITY_IMPL_STATUS.md).
 add_cli_test(gfnff 07_pair_validity_gate)
 set_tests_properties(cli_gfnff_07_pair_validity_gate PROPERTIES TIMEOUT 300 LABELS "gfnff;react;rev;pair_validity")
+# Claude Generated (Sep 29, 2026): rev-gfnff Q5, the hydrogen-perception rule set H1/H2/R1/P1
+# (-gfnff.rev_h_scope, FABLE_BOND_STATE_2.md sec 7/7.6, test_cases/revgfnff/_log/H_SCOPE_IMPL_STATUS.md).
+add_cli_test(gfnff 08_h_scope)
+set_tests_properties(cli_gfnff_08_h_scope PROPERTIES TIMEOUT 300 LABELS "gfnff;react;rev;h_scope")
 
 # =============================================================================
 # GPU GFN-FF Tests — only registered when USE_CUDA=ON

@@ -348,7 +348,53 @@ struct RevSettings {
     /// rev-gfnff stage 3a(ii) (Sep 2026): "an H is never sp" - an sp hydrogen is not treated as
     /// a bridging atom, so its bond keeps the full strength instead of the reference's 0.30
     /// scaling. See the comment at the rule in gfnff_method.cpp.
+    /// SUPERSEDED by h_scope/h_scope_h1 below (FABLE_BOND_STATE_2.md sec 7.6, "Q5"): this flag
+    /// stays as its own, narrower, independent mechanism (see the note at h_scope) rather than
+    /// being removed or aliased, since it is the only handle left when h_scope_h1 is off.
     bool h_not_sp = true;
+    /// rev-gfnff Q5 (Claude Generated, Sep 2026; FABLE_BOND_STATE_2.md sec 7.6, "H-scope"):
+    /// master switch for the hydrogen-perception rule set. A hydrogen bridging two partners
+    /// (an X-H-Y 3c-4e/3c-2e bond, a geminal migrating H) is today given hyb = 1 ("sp") by
+    /// determineHybridizationFortran, which lets it trigger four rules meant for a genuine sp
+    /// centre: the bsmat[1][*] bond-strength column (1.3234x instead of the terminal-H
+    /// bsmat[hyb_X][0]), 3-ring membership through the H-H/X-H edges of a bridge triangle
+    /// (ringf 1.18 plus, for a bridging carbon, the sibling AND bridging C-H fxh 1.05), an
+    /// angle centred on the bridging H with theta0 = 180 deg (a bent bridge is then penalised
+    /// towards linear), and counting as an sp/sp2 "picon" neighbour for pi-conjugation. All
+    /// four are geometry-free per-corner constants (element + partner count + ring/pi
+    /// membership of the CORNER's own bond list), so a change is carried by the existing
+    /// s-blend exactly like every other corner quantity - no new derivative. Measured
+    /// (test_cases/revgfnff/_log/H_SCOPE_IMPL_STATUS.md): FHF- De -120.6 -> -76.9 kcal/mol
+    /// (known ~-45; plain gfnff -74.9), CH5+ probe +70.9..+87.8 kcal/mol, rkt06 (14-point
+    /// collinear H+H2 path) exactly 0.00 change at every point (H-H bond strength is a pure
+    /// Z==1&&Z==1 check, independent of hybridization, and the bridging angle is exactly 180
+    /// deg by symmetry there). DEFAULT OFF: bit-identical over GMTKN55+MOR41+S30L-CI (2647
+    /// structures) when off; touches exactly the 80 structures with a genuinely 2+-coordinate
+    /// hydrogen (FABLE_BOND_STATE_2.md sec 7.6/7.3) when on, none other. Sub-switches
+    /// h_scope_h1/h2/r1 below are ablation arms, read only when this is true; a hydrogen never
+    /// counting as a picon neighbour (the design's "P1") is a structural CONSEQUENCE of h1 (a
+    /// hydrogen with hyb forced to 0 can never satisfy the hyb==1||2 picon test) and has no
+    /// separate switch - there is no independent code path to gate.
+    bool h_scope = false;
+    /// rev-gfnff Q5 "H1": every atom with Z == 1 gets hyb = 0, whatever its partner count (the
+    /// grp == 1 branch in determineHybridizationFortran stays reachable for Li/Na/K - this
+    /// tests the ELEMENT, not the periodic group). Subsumes h_not_sp for real hydrogen (once
+    /// hyb(H) is forced to 0 it can never equal 1, so the is_bridge/0.30-scaling block that
+    /// h_not_sp guards becomes structurally unreachable for Z==1, independent of h_not_sp's own
+    /// value). DEFAULT true (only read when h_scope is true).
+    bool h_scope_h1 = true;
+    /// rev-gfnff Q5 "H2": no GFN-FF angle term is ever centred on a Z==1 atom. Required
+    /// together with h1 - h1 alone (hyb(H) = 0) gives a spurious tetrahedral theta0 = 109.5 deg
+    /// at the bridging H, which was tried and rejected once already (see the note at
+    /// determineHybridizationFortran's return). DEFAULT true (only read when h_scope is true).
+    bool h_scope_h2 = true;
+    /// rev-gfnff Q5 "R1": ring enumeration excludes every Z==1 atom entirely - no ringf and no
+    /// 3-ring fxh correction reaches ANY bond of a hydrogen-bridged ring, including the
+    /// bridging bonds themselves (FABLE_BOND_STATE_2.md sec 7.6 found this must apply to the
+    /// bridging C-H too, not just its siblings: fxh is keyed on the CARBON's ring membership,
+    /// so excluding H from ring perception clears it for every C-H of that carbon at once).
+    /// DEFAULT true (only read when h_scope is true).
+    bool h_scope_r1 = true;
     bool blend = true;            ///< stage 1b: dual-topology blending of the bonded terms over a transition
     double bo_center = 2.0;       ///< term WEIGHT switch: R = f_b (rcov_i + rcov_j) fat_i fat_j (wide: the well decays by itself)
     double bo_width = -7.5;       ///< k of the weight switch (negative: w -> 1 inside R)
