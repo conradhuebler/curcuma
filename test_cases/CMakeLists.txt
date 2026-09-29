@@ -534,6 +534,19 @@ if(Python3_Interpreter_FOUND)
     set_tests_properties(gradient_unit_contract
         PROPERTIES TIMEOUT 300 LABELS "gradient;frequencies;native_xtb;gfnff")
 
+    # Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md F-3): the GFN-FF multi-GPU split of one
+    # molecule (Coulomb tiles + projected-PCG EEQ) must reproduce the single-device run.
+    # Skipped (77) with fewer than two CUDA devices.
+    if(USE_CUDA)
+        add_test(NAME gfnff_gpu_split_equals_single
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/check_gfnff_gpu_split.py
+                         $<TARGET_FILE:curcuma>
+                         ${CMAKE_SOURCE_DIR}/test_cases/molecules/larger/polymer_2x.xyz)
+        set_tests_properties(gfnff_gpu_split_equals_single
+            PROPERTIES TIMEOUT 600 LABELS "gfnff_gpu;gpu" SKIP_RETURN_CODE 77)
+    endif()
+
     # Claude Generated (Sep 2026): adaptive (step-rejecting) integrator.
     #   1. adaptive_step is OFF by default and an explicit false is identical to it.
     #   2. The failure mode it exists for reproduces on ONE water: 1750 K, dt = 1 fs, NVE

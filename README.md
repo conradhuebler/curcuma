@@ -48,6 +48,7 @@ system dependencies (one backend per build dir: `release_cuda/`, `release_rocm/`
 - **Multi-GPU** (Sep 2026, AI-generated, machine-tested): `-gpu_device N` pins a run to one
   device; batch runs (`-sp`/`-opt` on a multi-XYZ file, ConfSearch, Hessian) spread their
   workers over all visible GPUs (`-gpu_devices 0,2`, `-gpu_workers_per_device 2`).
+  GFN-FF spreads ONE large molecule over the visible GPUs (Coulomb + EEQ; `-gfnff.gpu_split_devices`).
   Every GPU fallback is summarised after the run; `-gpu_strict true` stops at the first one
   (exit code 3), see [docs/GPU_TUNING.md](docs/GPU_TUNING.md).
   `curcuma -methods` lists the devices. One large GFN1/GFN2 molecule can spread its

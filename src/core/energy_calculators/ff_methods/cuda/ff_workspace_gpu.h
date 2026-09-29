@@ -92,6 +92,21 @@ public:
 
     /// Set dynamic EEQ charges (geometry-dependent, size N)
     void setEEQCharges(const Vector& q);
+    /// Build the k_coulomb_tiles tile-pair list for the current atom count (Claude Generated, Sep 2026).
+    void ensureCoulombTiles();
+
+    /**
+     * @brief Split the implicit Coulomb term of ONE molecule over several GPUs (Claude Generated,
+     * Sep 2026, docs/MULTI_GPU_GAPS.md F-3). The tile-pair list of k_coulomb_tiles is divided into
+     * equal ranges; each helper evaluates its range on its own copy of coordinates/charges and
+     * the partial gradient/energy is added on this device. Off for periodic systems.
+     * @param helper_devices other devices (not this one); empty = off
+     * @param min_atoms      use it only from this many atoms on
+     */
+    void setCoulombSplitDevices(const std::vector<int>& helper_devices, int min_atoms);
+    std::string coulombSplitStatus() const;
+    bool prepareCoulombSplit();
+    void launchCoulombSplit();
 
     /// WP5-A: D2D path — charges already on GPU after GPU Schur complement.
     /// Enqueues a D2D copy on the main workspace stream; no H2D upload happens

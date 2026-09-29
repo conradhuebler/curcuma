@@ -27,6 +27,7 @@
 
 #include <memory>
 #include <vector>
+#include <string>
 
 struct EEQSolverGPUImpl;
 
@@ -63,6 +64,22 @@ public:
      * @param refine_iters  Max FP64 residual / FP32 correction steps (default 2, min 1).
      */
     void setMixedPrecision(bool enabled, int refine_iters = 2);
+
+    /**
+     * @brief Split the projected-PCG EEQ solve (WP7-E) of ONE molecule over several GPUs.
+     *
+     * Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md F-3). Every participating device builds a
+     * column block of the (symmetric) EEQ matrix and computes its block of each PCG matrix-vector
+     * product; this device keeps the PCG recurrences. Per iteration only N doubles travel to each
+     * helper and N/k back (peer copies). The matrix elements are bit-identical to the single-device
+     * build; the products differ in summation order only.
+     *
+     * @param helper_devices  other devices (not this one); empty = off
+     * @param min_atoms       use the split only from this many atoms on
+     */
+    void setSplitDevices(const std::vector<int>& helper_devices, int min_atoms);
+    /// "" when off, else a one-line status (devices, columns, solves) or why it is not used.
+    std::string splitStatus() const;
 
     /**
      * @brief Build N×N Coulomb matrix on GPU + Cholesky solve via cuSOLVER.

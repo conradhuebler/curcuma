@@ -650,6 +650,45 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_coul_chi_base; ///< [N]
     CudaBuffer<double> d_coul_gam;      ///< [N]
     CudaBuffer<double> d_coul_alp;      ///< [N]
+    // Claude Generated (Sep 2026, F-3): multi-GPU Coulomb split
+    struct CoulSplitPart {
+        int dev = -1, t0 = 0, t1 = 0;
+        cudaStream_t stream = nullptr;
+        cudaEvent_t  done   = nullptr;
+        CudaBuffer<double> x, y, z, q, alp, grad, E;
+        CudaBuffer<int> tiles;
+    };
+    int own_device = -1;
+    bool pbc_active = false;
+    std::vector<int> coul_split_devs;
+    int coul_split_min_atoms = 0;
+    std::vector<std::unique_ptr<CoulSplitPart>> coul_parts;
+    int coul_split_natoms = -1;
+    int coul_own_tiles = 0;
+    CudaBuffer<double> d_coul_part_grad;   ///< [nparts * 3N] partial gradients from the helpers
+    CudaBuffer<double> d_coul_part_E;      ///< [nparts]
+    cudaEvent_t ev_coul = nullptr;
+    bool coul_split_failed = false;
+    std::string coul_split_status;
+    long coul_split_calls = 0;
+    void releaseCoulSplit() {
+        for (auto& pp : coul_parts) {
+            if (!pp) continue;
+            cudaSetDevice(pp->dev);
+            pp->x.free(); pp->y.free(); pp->z.free(); pp->q.free(); pp->alp.free();
+            pp->grad.free(); pp->E.free(); pp->tiles.free();
+            if (pp->done)   cudaEventDestroy(pp->done);
+            if (pp->stream) cudaStreamDestroy(pp->stream);
+        }
+        coul_parts.clear();
+        if (own_device >= 0) cudaSetDevice(own_device);
+        d_coul_part_grad.free(); d_coul_part_E.free();
+        coul_split_natoms = -1;
+    }
+    // Claude Generated (Sep 2026): tile-pair list for k_coulomb_tiles (bi <= bj, GFNFF_COUL_TILE atoms)
+    CudaBuffer<int>    d_coul_tiles;    ///< [2*coul_ntiles]
+    int                coul_ntiles = 0;
+    int                coul_tiles_natoms = -1;
     bool               coul_self_on_gpu = false;
     bool               use_mixed_precision = false;  ///< TODO: Restore to true after GPU gradient debugging complete
 
@@ -831,6 +870,7 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
               "pinned alloc m_h_energies");
 
     m_impl = std::make_unique<FFWorkspaceGPUImpl>();
+    cudaGetDevice(&m_impl->own_device);   // Claude Generated (Sep 2026): home device of the Coulomb split
     m_impl->N = natoms;
 
     // Create dedicated CUDA streams for multi-stream concurrency
@@ -1166,6 +1206,9 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
         if (m_impl->stream_pairwise) cudaStreamSynchronize(m_impl->stream_pairwise);
         if (m_impl->stream_bonded)   cudaStreamSynchronize(m_impl->stream_bonded);
         if (m_impl->stream_threebody)cudaStreamSynchronize(m_impl->stream_threebody);
+        // Claude Generated (Sep 2026): helper devices of the Coulomb split first (switches device).
+        m_impl->releaseCoulSplit();
+        if (m_impl->ev_coul) cudaEventDestroy(m_impl->ev_coul);
 
         if (m_impl->event_pairwise)    cudaEventDestroy(m_impl->event_pairwise);
         if (m_impl->event_bonded)      cudaEventDestroy(m_impl->event_bonded);
@@ -1251,6 +1294,156 @@ void FFWorkspaceGPU::invalidateGraph()
 // ============================================================================
 // Per-step state setters
 // ============================================================================
+
+// Claude Generated (Sep 2026, F-3): multi-GPU Coulomb split, see ff_workspace_gpu.h.
+void FFWorkspaceGPU::setCoulombSplitDevices(const std::vector<int>& helper_devices, int min_atoms)
+{
+    auto& impl = *m_impl;
+    if (impl.own_device < 0) cudaGetDevice(&impl.own_device);
+    impl.releaseCoulSplit();
+    impl.coul_split_devs.clear();
+    for (int d : helper_devices)
+        if (d != impl.own_device) impl.coul_split_devs.push_back(d);
+    impl.coul_split_min_atoms = min_atoms;
+    impl.coul_split_failed = false;
+    impl.coul_split_status.clear();
+}
+
+std::string FFWorkspaceGPU::coulombSplitStatus() const
+{
+    const auto& I = *m_impl;
+    if (I.coul_split_devs.empty()) return {};
+    if (!I.coul_split_status.empty()) return I.coul_split_status;
+    if (I.coul_parts.empty())
+        return "configured, not used (needs implicit Coulomb, no PBC and N >= "
+               + std::to_string(I.coul_split_min_atoms) + ")";
+    std::string list = std::to_string(I.own_device);
+    for (int d : I.coul_split_devs) list += "," + std::to_string(d);
+    return "Coulomb tiles on devices [" + list + "], " + std::to_string(I.coul_split_calls) + " calls";
+}
+
+bool FFWorkspaceGPU::prepareCoulombSplit()
+{
+    auto& impl = *m_impl;
+    if (impl.coul_split_devs.empty() || impl.coul_split_failed || impl.pbc_active
+        || m_natoms < impl.coul_split_min_atoms) {
+        if (!impl.coul_parts.empty()) impl.releaseCoulSplit();
+        return false;
+    }
+    if (impl.coul_split_natoms == m_natoms && !impl.coul_parts.empty()) return true;
+    impl.releaseCoulSplit();
+    const int N = m_natoms;
+    const int nparts = static_cast<int>(impl.coul_split_devs.size()) + 1;
+    std::vector<int> bounds(nparts + 1, 0);
+    for (int k = 0; k <= nparts; ++k)
+        bounds[k] = static_cast<int>((static_cast<long long>(impl.coul_ntiles) * k) / nparts);
+    std::vector<int> tiles(2 * static_cast<size_t>(impl.coul_ntiles));
+    impl.d_coul_tiles.download(tiles.data(), 2 * impl.coul_ntiles);
+    try {
+        for (int h = 0; h < nparts - 1; ++h) {
+            auto part = std::make_unique<FFWorkspaceGPUImpl::CoulSplitPart>();
+            part->dev = impl.coul_split_devs[h];
+            part->t0 = bounds[h + 1];
+            part->t1 = bounds[h + 2];
+            if (cudaSetDevice(part->dev) != cudaSuccess)
+                throw std::runtime_error("cudaSetDevice(" + std::to_string(part->dev) + ") failed");
+            int can = 0;
+            cudaDeviceCanAccessPeer(&can, part->dev, impl.own_device);
+            if (can) cudaDeviceEnablePeerAccess(impl.own_device, 0);
+            cudaGetLastError();
+            if (cudaStreamCreate(&part->stream) != cudaSuccess
+                || cudaEventCreateWithFlags(&part->done, cudaEventDisableTiming) != cudaSuccess)
+                throw std::runtime_error("stream/event setup failed on device " + std::to_string(part->dev));
+            part->x.alloc(N); part->y.alloc(N); part->z.alloc(N); part->q.alloc(N); part->alp.alloc(N);
+            part->grad.alloc(3 * N); part->E.alloc(1);
+            const int nt = part->t1 - part->t0;
+            part->tiles.alloc(2 * nt);
+            part->tiles.upload(tiles.data() + 2 * static_cast<size_t>(part->t0), 2 * nt);
+            impl.coul_parts.push_back(std::move(part));
+        }
+        cudaSetDevice(impl.own_device);
+        for (int d : impl.coul_split_devs) {
+            int can = 0;
+            cudaDeviceCanAccessPeer(&can, impl.own_device, d);
+            if (can) cudaDeviceEnablePeerAccess(d, 0);
+        }
+        cudaGetLastError();
+        impl.d_coul_part_grad.alloc(3 * N * (nparts - 1));
+        impl.d_coul_part_E.alloc(nparts - 1);
+        if (!impl.ev_coul) cudaEventCreateWithFlags(&impl.ev_coul, cudaEventDisableTiming);
+        impl.coul_own_tiles = bounds[1];
+        impl.coul_split_natoms = N;
+    } catch (const std::exception& e) {
+        impl.releaseCoulSplit();
+        cudaSetDevice(impl.own_device);
+        impl.coul_split_failed = true;
+        impl.coul_split_status = std::string("unavailable: ") + e.what();
+        return false;
+    }
+    return true;
+}
+
+void FFWorkspaceGPU::launchCoulombSplit()
+{
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+    const size_t b1 = sizeof(double) * static_cast<size_t>(N);
+    double* E_slot = &impl.d_energies.ptr[impl.E_COUL];
+    cudaEventRecord(impl.ev_coul, impl.stream_pairwise);   // coords + charges are final here
+    int h = 0;
+    for (auto& pp : impl.coul_parts) {
+        auto& P = *pp;
+        cudaSetDevice(P.dev);
+        cudaStreamWaitEvent(P.stream, impl.ev_coul, 0);
+        cudaMemcpyPeerAsync(P.x.ptr, P.dev, impl.coords.d_x.ptr, impl.own_device, b1, P.stream);
+        cudaMemcpyPeerAsync(P.y.ptr, P.dev, impl.coords.d_y.ptr, impl.own_device, b1, P.stream);
+        cudaMemcpyPeerAsync(P.z.ptr, P.dev, impl.coords.d_z.ptr, impl.own_device, b1, P.stream);
+        cudaMemcpyPeerAsync(P.q.ptr, P.dev, impl.d_charges.ptr, impl.own_device, b1, P.stream);
+        cudaMemcpyPeerAsync(P.alp.ptr, P.dev, impl.d_coul_alp.ptr, impl.own_device, b1, P.stream);
+        cudaMemsetAsync(P.grad.ptr, 0, 3 * b1, P.stream);
+        cudaMemsetAsync(P.E.ptr, 0, sizeof(double), P.stream);
+        k_coulomb_tiles<<<P.t1 - P.t0, GFNFF_COUL_TILE, 0, P.stream>>>(
+            N, P.tiles.ptr, P.alp.ptr, impl.coulomb_rcut, P.x.ptr, P.y.ptr, P.z.ptr, P.q.ptr,
+            P.grad.ptr, P.E.ptr);
+        cudaMemcpyPeerAsync(impl.d_coul_part_grad.ptr + static_cast<size_t>(h) * 3 * N, impl.own_device,
+                            P.grad.ptr, P.dev, 3 * b1, P.stream);
+        cudaMemcpyPeerAsync(impl.d_coul_part_E.ptr + h, impl.own_device, P.E.ptr, P.dev,
+                            sizeof(double), P.stream);
+        cudaEventRecord(P.done, P.stream);
+        ++h;
+    }
+    cudaSetDevice(impl.own_device);
+    if (impl.coul_own_tiles > 0)
+        k_coulomb_tiles<<<impl.coul_own_tiles, GFNFF_COUL_TILE, 0, impl.stream_pairwise>>>(
+            N, impl.d_coul_tiles.ptr, impl.d_coul_alp.ptr, impl.coulomb_rcut,
+            impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+            impl.d_charges.ptr, impl.d_grad.ptr, E_slot);
+    for (auto& pp : impl.coul_parts)
+        cudaStreamWaitEvent(impl.stream_pairwise, pp->done, 0);
+    const int n3 = 3 * N;
+    k_add_coulomb_parts<<<(n3 + 255) / 256, 256, 0, impl.stream_pairwise>>>(
+        n3, static_cast<int>(impl.coul_parts.size()), impl.d_coul_part_grad.ptr,
+        impl.d_coul_part_E.ptr, impl.d_grad.ptr, E_slot);
+    ++impl.coul_split_calls;
+}
+
+// Claude Generated (Sep 2026): build the (bi <= bj) tile-pair list of k_coulomb_tiles once per
+// atom count. Row-major over the upper triangle; a contiguous sub-range is a balanced share
+// for another device.
+void FFWorkspaceGPU::ensureCoulombTiles()
+{
+    auto& impl = *m_impl;
+    if (impl.coul_tiles_natoms == m_natoms && impl.coul_ntiles > 0) return;
+    const int nb = (m_natoms + GFNFF_COUL_TILE - 1) / GFNFF_COUL_TILE;
+    std::vector<int> tiles;
+    tiles.reserve(static_cast<size_t>(nb) * (nb + 1));
+    for (int bi = 0; bi < nb; ++bi)
+        for (int bj = bi; bj < nb; ++bj) { tiles.push_back(bi); tiles.push_back(bj); }
+    impl.coul_ntiles = static_cast<int>(tiles.size() / 2);
+    impl.d_coul_tiles.alloc(static_cast<int>(tiles.size()));
+    impl.d_coul_tiles.upload(tiles.data(), static_cast<int>(tiles.size()));
+    impl.coul_tiles_natoms = m_natoms;
+}
 
 void FFWorkspaceGPU::setEEQCharges(const Vector& q)
 {
@@ -1482,6 +1675,7 @@ void FFWorkspaceGPU::setUnitCell(const double* cell_bohr_9, const double* cell_b
     cudaMemcpyToSymbol(d_lattice_inv, cell_bohr_inv_9, 9 * sizeof(double));
     int flag = has_pbc ? 1 : 0;
     cudaMemcpyToSymbol(d_has_pbc, &flag, sizeof(int));
+    m_impl->pbc_active = has_pbc;   // the Coulomb split runs without PBC only (helpers have no cell)
 }
 
 // ============================================================================
@@ -2473,12 +2667,31 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
 
     // k_coulomb (needs EEQ charges)
     if (m_coulomb_enabled && impl.coulomb_implicit) {
-        LaunchConfig cfg = getLaunchConfig(m_natoms, m_block_size);
-        k_coulomb_implicit<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
-            m_natoms, impl.d_coul_alp.ptr, impl.coulomb_rcut,
-            impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
-            impl.d_charges.ptr, impl.d_grad.ptr, &impl.d_energies.ptr[impl.E_COUL]);
-        checkCuda(cudaGetLastError(), "k_coulomb_implicit launch");
+        // Claude Generated (Sep 2026): each pair once (k_coulomb_tiles); the row-wise kernel
+        // evaluated every pair twice. CURCUMA_GFNFF_COULOMB_ROWWISE=1 selects the old kernel.
+        static const bool rowwise = [] {
+            const char* e = std::getenv("CURCUMA_GFNFF_COULOMB_ROWWISE");
+            return e && *e && std::string(e) != "0";
+        }();
+        if (rowwise) {
+            LaunchConfig cfg = getLaunchConfig(m_natoms, m_block_size);
+            k_coulomb_implicit<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
+                m_natoms, impl.d_coul_alp.ptr, impl.coulomb_rcut,
+                impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+                impl.d_charges.ptr, impl.d_grad.ptr, &impl.d_energies.ptr[impl.E_COUL]);
+            checkCuda(cudaGetLastError(), "k_coulomb_implicit launch");
+        } else {
+            ensureCoulombTiles();
+            if (prepareCoulombSplit()) {
+                launchCoulombSplit();
+            } else {
+                k_coulomb_tiles<<<impl.coul_ntiles, GFNFF_COUL_TILE, 0, impl.stream_pairwise>>>(
+                    m_natoms, impl.d_coul_tiles.ptr, impl.d_coul_alp.ptr, impl.coulomb_rcut,
+                    impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+                    impl.d_charges.ptr, impl.d_grad.ptr, &impl.d_energies.ptr[impl.E_COUL]);
+            }
+            checkCuda(cudaGetLastError(), "k_coulomb_tiles launch");
+        }
     } else if (m_coulomb_enabled && impl.coulomb.n > 0) {
         LaunchConfig cfg = getLaunchConfig(impl.coulomb.n, m_block_size);
         k_coulomb<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(

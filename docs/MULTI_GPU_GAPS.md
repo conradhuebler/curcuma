@@ -223,13 +223,19 @@ Measured: 182 ms per energy call on polymer_2x on one A4500, EEQ ~79 ms, Coulomb
 
 **Scaling of the single-GPU step (prerequisite for any multi-GPU gain)**
 
-- **F-4 A single fragment always takes the dense O(N^3) GPU Cholesky every step**
+- **F-4 A single fragment always takes the dense O(N^3) GPU Cholesky every step** *- FIXED Sep 29, 2026:
+  one fragment takes projected PCG from eeq_ppcg_min_atoms on, as on the CPU (WP5-A stays the fallback;
+  the per-fragment dense block is no longer allocated for nfrag = 1). polymer (1410, one fragment): EEQ
+  8.6 -> 7.6-8.1 ms, energies identical; larger single fragments gain more (O(N^2 it) vs O(N^3)), not
+  measured - no such test system here.* [M]
   (`qm_methods/gfnff_gpu_method_impl.h:1119`) [R]; the CPU switches to projected PCG from 500 atoms
   (`ff_methods/eeq_solver.cpp:1583-1586`). Contradicts GPU_TUNING.md:161 ("select the solver alike").
 - **F-5 EEQ is O(N^2) per step**: the dense N x N matrix is rebuilt each step, every PCG iteration is a
   dense `dsymv` plus three blocking host syncs (`ff_methods/cuda/eeq_solver_gpu.cu:1994-2034, 2084`)
   [C]. The only open alternative is a matrix-free/FMM matvec.
-- **F-6 Coulomb evaluates all N^2 pairs, each twice** (`ff_methods/cuda/gfnff_kernels.cu:401-421`) [C].
+- **F-6 Coulomb evaluates all N^2 pairs, each twice** *- FIXED Sep 29, 2026: `k_coulomb_tiles`, each pair
+  once, j tile in shared memory: polymer_2x 93.7 -> 31.6 ms, polymer 17.4 -> 2.7 ms; gradient equal to 9e-16,
+  energy to 3e-13 Eh.* [M] Original: (`ff_methods/cuda/gfnff_kernels.cu:401-421`) [C].
 - **F-7 List maintenance is serial on the host** and re-uploads with blocking `cudaMemcpy`
   (`ff_methods/cuda/gfnff_soa.h:85-92`); the CPU `FFWorkspace` is kept alive and updated on each
   rebuild [C]. The device D4 build exists but is opt-in (630 -> 32 ms) [D: GPU_TUNING.md:158].
@@ -255,7 +261,11 @@ Measured: 182 ms per energy call on polymer_2x on one A4500, EEQ ~79 ms, Coulomb
 
 **Multi-GPU**
 
-- **F-3 No path spreads one GFN-FF molecule over several GPUs** - no NCCL, peer access or
+- **F-3 No path spreads one GFN-FF molecule over several GPUs** *- IMPLEMENTED Sep 29, 2026 (CUDA):
+  Coulomb tiles + projected-PCG EEQ (column blocks + matvec) over the devices, peer copies, ctest
+  `gfnff_gpu_split_equals_single`; polymer_2x MD step 1/2/4 GPUs 0.139/0.099/0.076 s. Numbers and options:
+  GPU_TUNING.md section 3. Remaining EEQ cost at 4 GPUs is ~70 PCG iterations x ~0.5 ms (0.19 ms gemv +
+  peer latency + three host syncs per iteration).* [M] Original: - no NCCL, peer access or
   multi-device logic in the GFN-FF GPU code [C]. A standalone `-md` uses one device
   (`src/capabilities/simplemd.cpp:852-858`); batch consumers (ConfSearch MD/opt, `-sp`/`-opt`
   batch, CurcumaOpt threads, Hessian) lease one device per worker [C]. A split would need at each

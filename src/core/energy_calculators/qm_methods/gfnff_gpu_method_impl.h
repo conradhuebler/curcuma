@@ -56,6 +56,7 @@
 #include "../ff_methods/eeq_solver.h"  // EEQSolveMethod enum
 #include "src/core/curcuma_logger.h"
 #include "src/core/gpu_fallback.h"
+#include "src/core/gpu_device_pool.h"
 #include "src/core/citation_registry.h"
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"
 #include "src/core/energy_calculators/ff_methods/cuda/gpu_utils.h"  // backend-neutral
@@ -64,6 +65,7 @@
 #include "src/core/energy_calculators/ff_methods/ff_terms.h"
 
 #include <chrono>
+#include <sstream>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -256,6 +258,8 @@ private:
     // per-backend default (0 for CUDA, 16 for ROCm).
     int    m_eeq_cpu_fragment_threshold = Backend::default_eeq_cpu_fragment_threshold;
 
+    bool m_split_configured = false;  ///< Claude Generated (Sep 2026): multi-GPU split set up
+    bool m_split_reported = false;
     int  m_calc_count = 0;  ///< counts calculateEnergy() calls; first 5 always print timing
 
     // Claude Generated (Sep 2026): setForcePhaseTiming(true) (from -md_diagnostics_timing)
@@ -622,6 +626,50 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         // Lazy refactorization is RMSD-based: force_refactor flag passed per solve() call.
         m_eeq_gpu = std::make_unique<GpuEEQSolver>(natoms);
 
+        // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md F-3): split ONE molecule over several
+        // GPUs - the Coulomb tiles and the projected-PCG EEQ (matrix column blocks + matvec).
+        // gpu_split_devices: auto (default) = the -gpu_devices pool, else every visible device,
+        // unless this is a leased batch worker or the run is pinned with an explicit -gpu_device;
+        // a comma list; none/off. Used from gpu_split_min_atoms on.
+        if constexpr (Backend::has_multi_gpu_split) {
+            std::string spec = "auto";
+            for (const json* scope : { &gfnff_cfg, &m_parameters })
+                if (scope->contains("gpu_split_devices") && (*scope)["gpu_split_devices"].is_string()) {
+                    spec = (*scope)["gpu_split_devices"].get<std::string>();
+                    break;
+                }
+            const int min_atoms = cfg_get_int("gpu_split_min_atoms", 1000);
+            const int leased = curcuma::leasedGpuDevice();
+            const bool auto_dev = m_parameters.value("gpu_device_auto", false);
+            const bool pinned = leased < 0 && m_parameters.contains("gpu_device") && !auto_dev;
+            std::vector<int> devs;
+            if (spec == "auto" || spec == "all") {
+                if (leased < 0 && (!pinned || spec == "all")) {
+                    const auto& pool = curcuma::GpuDevicePool::instance();
+                    if (pool.active()) devs = pool.devices();
+                    else for (int d = 0; d < Backend::deviceCount(); ++d) devs.push_back(d);
+                }
+            } else if (spec != "none" && spec != "off" && !spec.empty()) {
+                std::stringstream ss(spec);
+                for (std::string tok; std::getline(ss, tok, ',');) {
+                    try { devs.push_back(std::stoi(tok)); } catch (...) {
+                        CurcumaLogger::warn("gpu_split_devices: cannot parse '" + tok + "'");
+                    }
+                }
+                if (leased >= 0 && !devs.empty()) {
+                    CurcumaLogger::warn("-gpu_split_devices ignored in a batch worker (leased device "
+                                        + std::to_string(leased) + ")");
+                    curcuma::reportGpuFallback("-gpu_split_devices ignored in a batch worker");
+                    devs.clear();
+                }
+            }
+            if (devs.size() > 1) {
+                m_gpu_workspace->setCoulombSplitDevices(devs, min_atoms);
+                m_eeq_gpu->setSplitDevices(devs, std::max(min_atoms, cfg_get_int("gpu_split_eeq_min_atoms", 4000)));
+                m_split_configured = true;
+            }
+        }
+
         // WP-B (Jun 2026): FP32-factor + FP64 iterative-refinement EEQ solve. Opt-in on
         // both backends (default off until per-card tuned, mirroring the xTB
         // scf_mixed_precision X-AP3 default-off-on-CUDA policy). Reads
@@ -650,8 +698,10 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
             m_eeq_rhs_constraints  = topo_params.rhs_constraints;
             m_eeq_nfrag            = topo_params.nfrag;
 
-            // WP6: upload fragment topology for batched Cholesky (nfrag > 1)
-            if (m_eeq_nfrag > 1) {
+            // WP6: upload fragment topology for batched Cholesky (nfrag > 1), and since Sep 2026
+            // also for one fragment on the device-Schur backend, which then takes the projected
+            // PCG from eeq_ppcg_min_atoms on like the CPU (F-4; see singleFragmentPPCG()).
+            if (m_eeq_nfrag > 1 || (m_eeq_nfrag == 1 && Backend::has_device_schur)) {
                 m_eeq_gpu->uploadFragmentTopology(m_eeq_nfrag, m_eeq_fraglist, natoms);
                 // WP7-B: cache min inter-fragment distance for batched-solver warning.
                 const GeoGradMatrix& geom = m_gfnff->getGeometryBohr();
@@ -991,8 +1041,8 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         m_eeq_rhs_constraints = topo_params.rhs_constraints;
         m_eeq_nfrag           = topo_params.nfrag;
 
-        // WP6: upload fragment topology for batched Cholesky (nfrag > 1)
-        if (m_eeq_nfrag > 1) {
+        // WP6: upload fragment topology for batched Cholesky (nfrag > 1); one fragment too (F-4)
+        if (m_eeq_nfrag > 1 || (m_eeq_nfrag == 1 && Backend::has_device_schur)) {
             m_eeq_gpu->uploadFragmentTopology(m_eeq_nfrag, m_eeq_fraglist, N);
             // WP7-B: refresh min inter-fragment distance after topology rebuild.
             const GeoGradMatrix& geom = m_gfnff->getGeometryBohr();
@@ -1130,11 +1180,21 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                 many_frag_method = EEQSolveMethod::ProjectedPCG;
         }
 
+        // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md F-4): one fragment used to take the
+        // dense O(N^3) Cholesky (WP5-A) at any size, while the CPU switches to projected PCG from
+        // eeq_ppcg_min_atoms (500) on. Same rule on the GPU now (default solve_method, projected
+        // PCG not disabled with eeq_ppcg_min_nfrag 0); it is also what lets the multi-GPU split
+        // (gpu_split_devices) reach single-fragment molecules. WP5-A stays the fallback.
+        const bool single_frag_ppcg = Backend::has_device_schur && m_eeq_nfrag == 1
+            && m_eeq_strategy == EEQSolveMethod::SchurCholesky && ppcg_thresholds_met
+            && m_eeq_gpu->isFragmentTopoValid();
+
         if (CurcumaLogger::get_verbosity() >= 2) {
             const char* path = "CPU-fallback";
             if (gpu_eeq_applicable) {
                 if (m_eeq_nfrag == 1) {
-                    path = "WP5-A GPU-Schur (cholesky)";
+                    path = single_frag_ppcg ? "WP7-E GPU-Schur (projected-pcg, one fragment)"
+                                            : "WP5-A GPU-Schur (cholesky)";
                 } else {
                     const EEQSolveMethod resolved = many_frag_method;
                     if      (resolved == EEQSolveMethod::Batched)      path = "WP7-B GPU-Schur (batched)";
@@ -1171,6 +1231,26 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 
             if (use_device_rhs) {
                 if (m_eeq_nfrag == 1) {
+                  if (single_frag_ppcg) {
+                    // F-4 (Sep 2026): one fragment, projected PCG as on the CPU; WP5-A on failure.
+                    eeq_ok = m_eeq_gpu->solveWithDeviceRHSAndGPUProjectedPCG(
+                        N, 1,
+                        m_gpu_workspace->getDeviceXPtr(),
+                        m_gpu_workspace->getDeviceYPtr(),
+                        m_gpu_workspace->getDeviceZPtr(),
+                        m_gpu_workspace->getDeviceAlphaPtr(),
+                        m_gpu_workspace->getDeviceGamPtr(),
+                        m_gpu_workspace->getDeviceRHSPtr(),
+                        m_eeq_fraglist,
+                        m_eeq_rhs_constraints,
+                        m_eeq_ppcg_max_iter,
+                        m_eeq_ppcg_tolerance,
+                        eeq_cutoff_sq,
+                        force_refactor);
+                    if (eeq_ok) used_gpu_schur = true;
+                    else CurcumaLogger::warn("EEQ GPU: projected PCG (one fragment) stalled, using WP5-A");
+                  }
+                  if (!eeq_ok) {
                     // WP5-A: single-fragment GPU Schur (fast path).
                     eeq_ok = m_eeq_gpu->solveWithDeviceRHSAndGPUSchur(
                         N, 1,
@@ -1209,6 +1289,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                             eeq_cutoff_sq,
                             force_refactor);
                     }
+                  }
                 } else {
                     // nfrag > 1: strategy resolved above (many_frag_method). All fall back to
                     // WP2 + CPU-Schur on failure.
@@ -1559,6 +1640,23 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     // === Finish: Coulomb + postprocess + download ===
     // Note: setEEQCharges / setEEQDeviceCharges already called above per path.
     m_last_energy = m_gpu_workspace->launchChargeDependentAndFinish(gradient);
+
+    // Claude Generated (Sep 2026): say once which parts of the multi-GPU split ran (or why not).
+    if constexpr (Backend::has_multi_gpu_split) {
+        if (m_split_configured && !m_split_reported && m_calc_count >= 1) {
+            m_split_reported = true;
+            const std::string c = m_gpu_workspace->coulombSplitStatus();
+            const std::string e = m_eeq_gpu ? m_eeq_gpu->splitStatus() : std::string();
+            for (const std::string& st : { c, e }) {
+                if (st.rfind("unavailable", 0) == 0) {
+                    CurcumaLogger::warn("GFN-FF multi-GPU: " + st);
+                    curcuma::reportGpuFallback("GFN-FF multi-GPU split unavailable", st);
+                } else if (!st.empty() && CurcumaLogger::get_verbosity() >= 2) {
+                    CurcumaLogger::info("GFN-FF multi-GPU: " + st);
+                }
+            }
+        }
+    }
 
     // Claude Generated (June 2026): OPT-IN device-resident HB charges (default OFF).
     // The reference (Fortran) and CPU both freeze the H-bond charges at topology build,

@@ -152,8 +152,21 @@ Reference numbers, polymer_2x GFN2 (7320 atoms, nao 15444), one A4500: 375 s, 16
 
 ## 3. GFN-FF on the GPU (CUDA)
 
+**One molecule on several GPUs (Sep 29, 2026).** The implicit Coulomb term (tiles of atom pairs) and
+the projected-PCG EEQ (column blocks of the EEQ matrix + every PCG matrix-vector product) are spread
+over the devices; everything else stays on the calculation's device. Results equal the single-device
+run up to summation order (ctest `gfnff_gpu_split_equals_single`: charges 3e-15 e, energies 3e-14 Eh).
+MD step polymer_2x (7320 atoms, 16 host threads, A4500): **1 / 2 / 4 GPUs 0.139 / 0.099 / 0.076 s**
+(the same step was 0.377 s before the Sep 29 work: frozen topology 0.38 -> 0.20 s, each-pair-once
+Coulomb kernel 0.20 -> 0.14 s, split 0.14 -> 0.076 s). Energy call 120 -> 60 ms on 4 GPUs (EEQ 77 -> 35,
+Coulomb 32 -> 14 ms). polymer (1410 atoms, one fragment): 16.0 -> 12.0 ms per step, Coulomb only.
+
 | Option | Default | Effect / when to change |
 |---|---|---|
+| `-gfnff.gpu_split_devices auto\|0,1\|none` | auto | Devices for the split. `auto` = the `-gpu_devices` pool, else every visible device; off in a leased batch worker and when the run is pinned with an explicit `-gpu_device`. `none` = one device. |
+| `-gfnff.gpu_split_min_atoms N` | 1000 | Coulomb split from N atoms on (measured gain at 1410 atoms, see above; below 1000 not measured). |
+| `-gfnff.gpu_split_eeq_min_atoms N` | 4000 | EEQ split from N atoms on: at 1410 atoms the per-iteration peer latency eats the gain (EEQ 8.1 vs 8.2 ms), at 7320 atoms 77 -> 35 ms. Only the projected-PCG path is split. |
+| `CURCUMA_GFNFF_COULOMB_ROWWISE=1` | unset | Diagnostic: the old row-wise Coulomb kernel (every pair twice). The tiled kernel is 3x (7320 atoms, 93.7 -> 31.6 ms) to 6x (1410 atoms, 17.4 -> 2.7 ms) faster; gradients equal to 9e-16. |
 | `-gfnff.coulomb_implicit true\|false` | true | **CPU**: evaluate the N^2/2 Coulomb pairs on the fly from the per-atom EEQ charges and alpeeq instead of building and storing the pair list. The stored list is 128 bytes per pair - 3.4 GB and ~0.5 s of pure write bandwidth at 7320 atoms, and threading that loop changes nothing (measured). polymer_2x single point, 36 threads: wall 4.49 -> 3.93 s, host RSS 6.66 -> 3.72 GB, pair setup 496 -> 0.1 ms, and the Coulomb evaluation itself 1733 -> 1096 ms (summed over threads) because it no longer streams the list. MD (polymer, 100 steps) is unchanged at 7.7 s, small molecules unchanged. Energies identical, gradients within 4e-16. Set false for the stored list. Not used with `eeq_distance_cutoff > 0`. |
 | `-gfnff.gpu_coulomb_implicit true\|false` | true | The device enumerates all Coulomb pairs itself instead of a host-built N^2/2 list. polymer_2x: -1.5 s setup, -6 GB host memory, energy identical. Ignored with `eeq_distance_cutoff > 0`. Set false only to compare against the pair-list path. |
 | `-gfnff.gpu_disp_pairs_on_device true\|false` | false | Builds the D4 dispersion pair list on the device. polymer_2x: dispersion pairs 630 -> 32 ms, wall 6.8 -> 5.6 s, energy identical, gradient 5e-16; device peak higher (list lives on the device). Kept off by default until tested on more systems - a good first switch for large systems. |

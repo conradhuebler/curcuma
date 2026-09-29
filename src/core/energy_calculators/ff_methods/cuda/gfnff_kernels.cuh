@@ -128,6 +128,38 @@ __global__ GFNFF_KERNEL_BOUNDS void k_coulomb_implicit(
     double*                    energy
 );
 
+/// grad[0..3N) += sum_k parts[k*3N + ...], energy += sum_k part_E[k] (multi-GPU Coulomb reduce).
+/// Claude Generated (Sep 2026).
+__global__ void k_add_coulomb_parts(int n3, int nparts, const double* __restrict__ parts,
+                                    const double* __restrict__ part_E,
+                                    double* grad, double* energy);
+
+/// Tile size of k_coulomb_tiles (atoms per tile, power of two).
+constexpr int GFNFF_COUL_TILE = 128;
+
+/**
+ * @brief Implicit all-pairs Coulomb (erf-damped), each pair i<j evaluated ONCE.
+ *
+ * Claude Generated (Sep 2026). Same physics as k_coulomb_implicit, which evaluates every pair
+ * twice (once per atom). One block handles one tile pair (bi, bj), bi <= bj, of
+ * GFNFF_COUL_TILE atoms each; tiles[2*t], tiles[2*t+1] list them. The j tile is staged in shared
+ * memory, j-gradients are accumulated in shared memory and added once per atom per tile. A
+ * contiguous range of the tile list can run on another device (multi-GPU split), writing into
+ * that device's own gradient/energy buffers.
+ */
+__global__ void k_coulomb_tiles(
+    int natoms,
+    const int* __restrict__    tiles,    ///< [2*ntiles] (bi, bj), bi <= bj
+    const double* __restrict__ alp,
+    double                     r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ charges,
+    double*                    grad,
+    double*                    energy
+);
+
 // ============================================================================
 // Bonded kernels: 1 thread = 1 interaction
 // ============================================================================

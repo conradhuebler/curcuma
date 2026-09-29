@@ -428,6 +428,113 @@ __global__ void k_coulomb_implicit(
 }
 
 // ============================================================================
+// Kernel 3b: tiled implicit Coulomb, each pair once (Claude Generated, Sep 2026)
+//
+// E = sum_{i<j} q_i q_j erf(gamma_ij r_ij) / r_ij,   gamma_ij = 1/sqrt(alp_i + alp_j)
+// dE/dr = q_i q_j (2 gamma/sqrt(pi) exp(-gamma^2 r^2) / r - erf(gamma r) / r^2)
+// Identical to k_coulomb_implicit, but every pair is evaluated once: that kernel pays the
+// erf + exp of each pair twice (once from each atom's row), which dominated the GFN-FF MD step
+// on large systems (polymer_2x, 7320 atoms: 85 ms of ~180 ms per energy call, nsys Sep 29).
+// Thread t of tile (bi, bj) owns atom i = bi*T + t; it walks the j tile in a rotated order
+// (jj = (t + k) mod T) so that concurrent shared-memory atomics on the j gradients rarely collide.
+// ============================================================================
+
+__global__ void k_coulomb_tiles(
+    int natoms,
+    const int* __restrict__    tiles,
+    const double* __restrict__ alp,
+    double                     r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ charges,
+    double*                    grad,
+    double*                    energy)
+{
+    constexpr int T = GFNFF_COUL_TILE;
+    __shared__ double sx[T], sy[T], sz[T], sq[T], sa[T];
+    __shared__ double sgx[T], sgy[T], sgz[T];
+
+    const int bi = tiles[2 * blockIdx.x];
+    const int bj = tiles[2 * blockIdx.x + 1];
+    const int t  = threadIdx.x;
+    const int i  = bi * T + t;
+    const int jl = bj * T + t;
+
+    if (jl < natoms) {
+        sx[t] = cx[jl]; sy[t] = cy[jl]; sz[t] = cz[jl];
+        sq[t] = charges[jl]; sa[t] = alp[jl];
+    } else {
+        sx[t] = sy[t] = sz[t] = 0.0; sq[t] = nan(""); sa[t] = 1.0;
+    }
+    sgx[t] = 0.0; sgy[t] = 0.0; sgz[t] = 0.0;
+    __syncthreads();
+
+    double local_E = 0.0;
+    double gx = 0.0, gy = 0.0, gz = 0.0;
+    const bool active = (i < natoms);
+    const double xi = active ? cx[i] : 0.0;
+    const double yi = active ? cy[i] : 0.0;
+    const double zi = active ? cz[i] : 0.0;
+    const double qi = active ? charges[i] : nan("");
+    const double ai = active ? alp[i] : 1.0;
+    const bool diag = (bi == bj);
+    static const double two_inv_sqrt_pi = 1.1283791670955126;
+
+    if (active && !isnan(qi)) {
+        for (int k = 0; k < T; ++k) {
+            const int jj = (t + k) & (T - 1);
+            const int j  = bj * T + jj;
+            if (j >= natoms || (diag && j <= i)) continue;
+            const double qj = sq[jj];
+            if (isnan(qj)) continue;
+            double dx = xi - sx[jj];
+            double dy = yi - sy[jj];
+            double dz = zi - sz[jj];
+            applyMIC(dx, dy, dz);
+            const double r2  = dx * dx + dy * dy + dz * dz;
+            const double rij = sqrt(r2);
+            if (rij > r_cut || rij < 1e-10) continue;
+            const double gamma_ij = 1.0 / sqrt(ai + sa[jj]);
+            const double gamma_r  = gamma_ij * rij;
+            const double erf_v    = erf(gamma_r);
+            const double qq       = qi * qj;
+            local_E += qq * erf_v / rij;
+            const double derf = gamma_ij * exp(-gamma_r * gamma_r) * two_inv_sqrt_pi;
+            const double fac  = qq * (derf / rij - erf_v / r2) / rij;
+            const double fx = fac * dx, fy = fac * dy, fz = fac * dz;
+            gx += fx; gy += fy; gz += fz;
+            atomicAdd(&sgx[jj], -fx);
+            atomicAdd(&sgy[jj], -fy);
+            atomicAdd(&sgz[jj], -fz);
+        }
+        add_grad(grad, i, gx, gy, gz);
+    }
+    __syncthreads();
+    if (jl < natoms && (sgx[t] != 0.0 || sgy[t] != 0.0 || sgz[t] != 0.0))
+        add_grad(grad, jl, sgx[t], sgy[t], sgz[t]);
+
+    blockReduceAddEnergy(local_E, energy);
+}
+
+__global__ void k_add_coulomb_parts(int n3, int nparts, const double* __restrict__ parts,
+                                    const double* __restrict__ part_E,
+                                    double* grad, double* energy)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k < n3) {
+        double s = 0.0;
+        for (int p = 0; p < nparts; ++p) s += parts[static_cast<size_t>(p) * n3 + k];
+        atomicAdd(&grad[k], s);   // other streams add to d_grad concurrently
+    }
+    if (k == 0) {
+        double e = 0.0;
+        for (int p = 0; p < nparts; ++p) e += part_E[p];
+        atomicAdd(energy, e);
+    }
+}
+
+// ============================================================================
 // Kernel 4: Bond Stretching
 // r0 = (r0_base_i + cnfak_i*cn[i] + r0_base_j + cnfak_j*cn[j] + rabshift) * ff
 // E = fc * exp(-alpha * (r - r0)^2)
