@@ -481,3 +481,214 @@ not a verdict disagreement, and is now reconciled and documented in the tool its
 - Regenerate: `python3 scripts/revgfnff_bondgate_sweep.py refset --jobs 24 --rule both` (~4 s);
   `... grid-md --rule both` (~3 s); `... gridmd-search --n 6` (~5 s); `... probe FILE.xyz
   --charge Q --rule both`.
+
+## v3 — offline verification of FABLE_BOND_STATE_2.md section 7 (Q5 falsifier table), 2026-09-29
+
+Sonnet agent, same checkout/branch. Binary `release/curcuma` md5 `53b32b06` (matches the value
+Fable's §7 header cites). **NO C++ change, no PARAM, no build, no ctest** — pure offline
+measurement, per the dispatch. Every Fable-run artefact used below (`<scratchpad>/q5/*`,
+`<scratchpad>/chk/{hf,fm}`) was **read**, then **independently re-run** from the same input files
+against the same binary to confirm reproducibility before being used in any calculation — none of
+the numbers below are taken from Fable's document on trust alone.
+
+### v3.1 Regression count (§7.3, §7.4 row l) — MISMATCH
+
+New script `scripts/revgfnff_h_scope_sweep.py` (committed) imports `collect_refset`/`run_curcuma`/
+`BOND_RE` from `revgfnff_bondgate_sweep.py` unmodified and asks a purely structural question per
+structure: does any Z==1 atom have exactly 2 bonded partners in the perceived topology, and/or is
+any Z==1 atom part of a 3-ring (triangle)? Full sweep, 2647 structures, 24 workers, 3.4 s wall, 124
+structures with no BOND line at all (single atoms / unbound noble-gas or radical-cation dimers —
+not failures, just zero-bond systems; none of them is a candidate for a 2-coordinate H).
+
+| | Fable §7.3 predicted | MEASURED (this sweep) |
+|---|---:|---:|
+| structures with a 2-coordinate H | **80** (78 GMTKN55 + 2 MOR41) | **86** (84 GMTKN55 + 2 MOR41) |
+| … of those, with an H-bridged triangle | **38** | **40** |
+
+MOR41 matches exactly (PR06, PR07, both with a triangle — confirmed). The mismatch is entirely
+inside GMTKN55, concentrated in two of Fable's own named subsets:
+
+- **BH76 RKT01–21**: Fable says "all 13"; measured **14** — `RKT01,03,04,05,06,07,08,11,14,17,
+  18,19,20,21` (RKT02/09/10/12/13/15/16/22 do not qualify; RKT22 is outside the 01–21 range Fable
+  named, consistent). One extra transition state has a 2-coordinate H that the "13" count missed.
+- **MB16-43**: Fable says "24"; measured **28** — `01,02,03,04,05,06,08,09,14,15,16,17,18,19,21,
+  22,23,24,25,26,28,29,30,32,37,39,40,41` (28 items). Four extra clusters.
+- Every other named bucket matches exactly: AHB21 (3,8), AL2X6 (al2h6/al2me4/al2me5), ALK8 (x3),
+  BHDIV10 (ts5/ts7), BHPERI/TS5, PA26 (c2h2p, h2p — present, plus 3 more PA26 hits Fable's "..."
+  doesn't name: p2p, si2h6p, sih4p).
+- Fable's "..." covers the rest of GMTKN55 (his arithmetic: 78 − 50 named = 28 unlisted); measured
+  unlisted total is 29 (DIPCS10/c2h6_2+, G21IP/IP_64, NBPRC/K_H, PArel×3, PX13×11, RC21/2p3,
+  W4-11/b2h6, WATER27×3, WCPT18×4, plus PA26's 3 extra) — one more than his implied 28, consistent
+  with the BH76/MB16-43 overcounts absorbing most of the +6 and one unlisted item making up the
+  rest (84 measured − 50 named-and-matching − 28-corrected-to-32 named-but-mismatched ≠ a clean
+  split, the arithmetic doesn't fully reconcile term-by-term and isn't worth forcing — the totals
+  are what matter and they disagree by 6).
+
+**Verdict: does NOT reproduce "exactly 80, none other."** Measured is 86 (+6, all GMTKN55, all
+excess — no structure is missing from Fable's list, only extra ones are present). Not rounded into
+agreement.
+
+**A further, distinct scope gap found by the same sweep**: `MB16-43/34` has an H atom (index 15,
+Z=1) with **three** bonded partners (B, Al, Mg — a μ3-bridging hydride in a synthetic metal
+cluster), forming three triangles ([3,6,15],[3,14,15],[6,14,15]) with none of its own three bonds
+"exactly 2". It is invisible to the "2-coordinate H" count entirely, yet the source code
+(`gfnff_method.cpp:8682-8685`, `grp==1`) has a SEPARATE branch for it: `nb20i==2 -> hyb=1`
+(bridging, what H1/§7.3 addresses) vs. `nb20i>2 -> hyb=3` ("M+ tetra coord", untouched by anything
+in §7.3's stated scope). Fable's own H1 text ("hyb(H) = 0 **always**") reads as if it should also
+zero this branch, but the falsifier count and the "80" arithmetic only ever describe the
+2-partner case. **This structure sits outside Fable's own stated regression net** (86 or even 87,
+not 80) and is flagged, not fixed — it is exactly the kind of case row (iii)'s falsifier
+("any structure outside the 80 changing") is designed to catch, and by the letter of H1 it would.
+
+### v3.2 Item 5 — the complement (§7.3's "everything else is untouched")
+
+From the same sweep: **2561** of 2647 structures have neither a 2-coordinate H nor an H-bridged
+triangle (2647 − 86 = 2561; adding the MB16-43/34 edge case above brings the touched count to 87
+and the untouched complement to 2560). Confirmed structurally, not by energy: every structure in
+the untouched set has zero atoms meeting either trigger condition, so none of H1/H2/R1/P1 (which
+all key exclusively off "is this atom H" and "how many bonded partners / ring memberships does it
+have") can fire on it — bit-identity there is a direct consequence of the rules' own stated scope
+(§7.3: "every rule reads only the element (Z=1) and the corner's list"), not something that needs
+a build to check. The qualitative claim holds; the exact count it's paired with in §7.3/row l (86
+vs. claimed 80) does not.
+
+### v3.3 FHF- (§7.4 row f) — reproduced, both current and predicted numbers
+
+Fable's own `<scratchpad>/chk/{hf,fm}` and `q5/fhf_{gfnff,revgfnff}` geometries and run logs were
+read, then independently re-run fresh (`-sp ... -method {revgfnff,gfnff} -charge {0,-1} -threads 1
+-no_bmt`) against the same binary:
+
+| species | independently reproduced | Fable §6/§7 |
+|---|---:|---:|
+| HF (0.917 Å) | -0.25081231 Eh | -0.25081231 |
+| F- | -0.88314547 Eh | -0.88314547 |
+| FHF- (1.14 Å), revgfnff default | -1.32617610 Eh | -1.32617610 |
+| FHF- (1.14 Å), plain gfnff | -1.15893076 Eh | -1.15893076 |
+
+**Current default De** = E(HF)+E(F-)−E(FHF-) = **-120.62 kcal/mol** (De defined as the
+HF+F- → FHF- association energy, the sign convention row f uses) — matches the claimed **-120.6**
+exactly.
+
+**Predicted-with-Q5-v1 De**, computed independently from the raw `-verbosity 3` `shareD`/
+`BOND_FACTORS` dump of the FHF- revgfnff run (not copied from Fable's table): each F-H bond prints
+`shareD ... D 0.28540190 w 0.999996 c 0.500002 E -0.14270154` and `BOND_FACTORS ... bstr=1.3234
+... fc=-0.191537163319`; the two bonds sum to the reported `Bond -0.2854030738 Eh`, and `Angle`
+is exactly `+0.0000000000` (the ion is linear, confirmed from the geometry — H2's angle-removal is
+provably a no-op here regardless of any rule detail).
+
+The proportionality claim itself ("E_pair ∝ fc under mg3") was checked **in source**, not assumed:
+`ff_workspace_gfnff.cpp:2536` computes `D = v2_s * kb` with `kb = std::abs(b.fc)` and `v2_s` a pure
+element/order-table lookup with no hyb/bstr dependence, so dividing `fc` by the bstr factor that
+H1 removes divides `D` — and hence the well `E_pair`, at fixed `c`/`w`/geometry — by exactly the
+same factor. This is general (any bond, any bstr change), not FHF--specific.
+
+Removing the H1 factor (bstr 1.3234) from both F-H bonds: new bond term = -0.28540307/1.3234 =
+-0.21565896 Eh, shift = **+43.77 kcal/mol** (Fable: "+43.8" — match). New total E(FHF-) =
+-1.32617610 + 0.06974411 = **-1.25643199 Eh**. New De = **-76.85 kcal/mol** (Fable: "-76.9" —
+match to within rounding).
+
+**Verdict: row f fully reproduced**, current and predicted, from first principles and the actual
+binary/log output, independent of trusting Fable's arithmetic.
+
+### v3.4 rkt06, 14 points (§7.4 row d) — reproduced, and shown to be structurally guaranteed
+
+Two of the 14 points have saved Fable run artefacts (`q5/rkt06_p05`, `q5/rkt06_p12`, both
+`-method revgfnff -charge 0 -spin 1`); both were read and are internally consistent with the
+claim: `BOND_FACTORS` shows `bstr=1.0000` on both H-H bonds at both points, and `Angle
++0.0000000000 Eh` exactly, despite a nonzero `angle_..._fc_final` (0.0796) — the geometry is
+linear so the term vanishes regardless of the force constant.
+
+Rather than stop at 2 of 14 points, the full 14-point path (`test_cases/revgfnff/ref/P/rkt06/
+points.xyz`) was checked geometrically: **all 14 points have max|x|=max|y|=0.000000** (every atom
+exactly on the z-axis) — the path is exactly collinear at every single point, not just near the
+TS. Combined with the H-H bond-strength special case being a **pure Z==1&&Z==1 check independent
+of hybridization** (`gfnff_method.cpp:5411-5412`, `if (z1==1 && z2==1) bstrength = bstren[1]`, i.e.
+1.00, unconditionally — H1 cannot change what this branch returns since it never reaches the
+hyb-keyed `bsmat` lookup at all), this makes Fable's "0.00 change at every point" a **structurally
+guaranteed** result, not merely an empirical one at the 2 sampled points: no ring is geometrically
+possible in a 3-atom collinear chain (R1 moot), no lone-pair heavy atom exists to be a picon
+neighbour (P1 moot), H1 is a no-op on H-H bonds everywhere, and H2 removes a term that is already
+identically 0 by symmetry at every point on this path.
+
+**Verdict: row d confirmed, with a stronger-than-requested basis** (a structural proof covering
+all 14 points, not just the 2 with saved logs).
+
+### v3.5 CH5+ probe (§7.4 row h) — current number reproduced; predicted range has an internal inconsistency
+
+`q5/ch5p_revgfnff/run.log` (`-method revgfnff -charge 1 -spin 0`, geometry `C 0 0 0 / H×3 (CH3
+unit) / H×2 (eta2-H2 bridge at 1.2 A)`) gives `Final Energy: 0.66022068 Eh` — matches Fable's
+"0.66022" exactly (re-run independently, same result).
+
+The `shareD`/`BOND_FACTORS` dump gives, per bond (bonds 1-2/1-3/1-4 = C-H siblings, 1-5/1-6 =
+C-H_b bridging, 5-6 = H-H):
+
+| bond | D | c | bstr | ringf | fxh | E |
+|---|---:|---:|---:|---:|---:|---:|
+| C-H sibling ×3 | 0.178834 | 1.000000 | 1.0000 | 1.0000 | 1.0500 | -0.178834 |
+| C-H_b ×2 | 0.270209 | 0.500405 | 1.3234 | 1.1800 | **1.0500** | -0.135214 |
+| H-H | 0.233858 | 0.250405 | 1.0000 | 1.1800 | 1.0000 | -0.058559 |
+
+Reproducing Fable's row-h arithmetic literally (C-H_b divided only by bstr×ringf = 1.3234×1.18;
+H-H by ringf only; siblings by fxh only) gives component shifts of **+61.03 / +5.60 / +16.03**
+kcal/mol (Fable: "+61.0 / +5.6 / +16.0" — matches), bond-only total **+82.66** kcal/mol, and
+combined with the Angle-total bound (0.0270 Eh = 16.97 kcal/mol, the maximum the two H-centred
+angles could contribute since the log has no per-angle energy split) gives a range of
+**[65.7, 82.7]** kcal/mol — matching the stated **"+66..+83"**.
+
+**But this arithmetic is inconsistent with Fable's own §7.2 table and with the source code.** The
+`BOND_FACTORS` dump (table above, read directly from the log, not transcribed from §7.2) shows
+`fxh=1.0500` on the C-H_b bonds too, not just the siblings. `fxh`'s trigger, read from source
+(`gfnff_method.cpp:5605-5660`), is keyed on `topo.ring_sizes[carbon_index]==3` — the CARBON's own
+ring membership — and applies identically to every C-H bond of that carbon, bridging or sibling,
+with no distinction between them. R1 ("hydrogen is never a ring member") removes this specific
+triangle from ring perception entirely, since 2 of its 3 members are H — so it must also clear
+`fxh` back to 1.0 on the C-H_b bonds, exactly as it does for the siblings, not just on the
+siblings as row h's arithmetic implies. Redoing the calculation with fxh also removed from
+C-H_b (dividing by 1.3234×1.18×1.05 instead of 1.3234×1.18) gives bond-only shift **+87.83**
+kcal/mol and range **[70.9, 87.8]** kcal/mol — about **5 kcal/mol higher** than the stated
+"+66..+83" at both ends.
+
+**Verdict: the current number (0.66022 Eh) is reproduced exactly. The predicted range is
+internally inconsistent — row h's own table lists fxh=1.05 on C-H_b, but row h's arithmetic
+doesn't divide it out there. The mechanistically consistent range, using the same rule
+literally as coded, is [70.9, 87.8] kcal/mol, not [66, 83].** This is not a rounding
+difference; flagged as a real defect in the falsifier table, to be corrected before it is used
+as an acceptance criterion for an actual implementation.
+
+### v3.6 What is / isn't checkable offline (honesty note)
+
+- **Fully checkable offline, done here**: the regression count (v3.1, structural — mismatch
+  found), the complement (v3.2, structural — qualitative claim holds, count doesn't), FHF- (v3.3,
+  exact — matches), rkt06 (v3.4, exact + generalized to all 14 points — matches), CH5+'s bond-term
+  arithmetic (v3.5 — current number matches, predicted range does not, for a found reason).
+- **Bounded, not exact, offline**: the two H-centred angle contributions in H5O2+/CH5+/H3+ (rows
+  g/h/j) — the log's `Angle` line is a structure-wide sum; Fable's own methodology note already
+  says this needs "one addition to the angle dump" to extract per-angle energies. Not attempted
+  here (would need a source change, out of scope for this task). The [66,83]/[70.9,87.8] ranges
+  above use the SAME bound Fable used (the full Angle total as the ceiling on what H2 could
+  remove), so the upper ends of both ranges are the more reliable numbers; the lower ends assume
+  H2 removes 100% of the Angle term, which is almost certainly an over-estimate (8 of CH5+'s 10
+  angles are C-centred and untouched by H2) — the TRUE shift is probably close to the upper end of
+  whichever range is correct.
+- **B2H6 (row i) and rkt03 (row e)**: read and cross-referenced opportunistically while gathering
+  the above (both q5/ artefacts reproduce Fable's stated current-default numbers exactly — B2H6
+  revgfnff 0.69045229 Eh, rkt03ts revgfnff -0.67768359 Eh — not independently re-derived further,
+  since neither was in the task's required list and row i explicitly says Q5 is not the lever
+  there).
+- **Genuinely needs the real implementation to check**: row m (MD stability, 3×3 cells — this is a
+  dynamical claim about event rates, not a static energy, and cannot be evaluated without the
+  actual rule set running in the react-mode integrator); row k's per-structure predictor
+  (§7.5 step 1, "run for all 13 RKT TSs" — not attempted here, would need the same
+  BOND_FACTORS/shareD extraction as v3.3/v3.5 repeated 13 times plus the same fxh-consistency
+  question resolved first, since it affects every X-H_b bond the same way CH5+'s does); FD
+  gradient checks (§7.5 step 2, needs actual code).
+
+### Files (v3 addition)
+
+- `scripts/revgfnff_h_scope_sweep.py` (new): imports `revgfnff_bondgate_sweep` unmodified;
+  `python3 scripts/revgfnff_h_scope_sweep.py [out.json]` runs the full 2647-structure structural
+  sweep (~3.5 s, 24 workers) and prints the regression-count table of v3.1.
+- No other file changed. All numeric cross-checks in v3.3-v3.5 were done ad hoc against
+  `<scratchpad>/q5/*` and `<scratchpad>/chk/{hf,fm}` (Fable's own run artefacts, outside the
+  repo, gitignored) plus fresh re-runs of the same inputs; nothing from the scratchpad is part of
+  this commit.
