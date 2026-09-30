@@ -103,6 +103,7 @@ public:
     // @param skip_dc6dcn  If true, skip O(N²) dc6dcn matrix (GPU computes per-pair)
     void updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool = nullptr,
                                     int num_threads = 1, bool skip_dc6dcn = false);
+
     const Matrix& getDC6DCN() const { return m_dc6dcn; }
 
     /**

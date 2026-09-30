@@ -4479,6 +4479,10 @@ struct FFWorkspaceHipImpl {
     RepulsionSoA   bonded_rep;      ///< Bonded repulsion pairs
     RepulsionSoA   nonbonded_rep;   ///< Non-bonded repulsion pairs
     CoulombSoA     coulomb;         ///< Coulomb pairs (gamma + cutoff only; charges dynamic)
+    // Claude Generated (Sep 2026): implicit all-pairs Coulomb (no pair list), the HIP counterpart of
+    // the CUDA path. k_coulomb_dense enumerates every pair from the per-atom alpeeq (d_coul_alp).
+    bool           coulomb_implicit = false;
+    double         coulomb_rcut = 100.0;
     BondSoA        bonds;           ///< Bond stretching
     AngleSoA       angles;          ///< Angle bending
     DihedralSoA    dihedrals;       ///< Standard + extra torsions (combined)
@@ -4848,6 +4852,10 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
     m_impl->bonded_rep.upload(params.bonded_repulsions, stream);
     m_impl->nonbonded_rep.upload(params.nonbonded_repulsions, stream);
     m_impl->coulomb.upload(params.coulombs, natoms, stream);
+    if (params.coulomb_implicit && params.coul_self_alp.size() == natoms) {
+        m_impl->coulomb_implicit = true;
+        m_impl->coulomb_rcut = params.coulomb_implicit_rcut;
+    }
     m_impl->bonds.upload(params.bonds, atom_types, stream);
     m_impl->angles.upload(params.angles, atom_types, stream);
     m_impl->dihedrals.upload(params.dihedrals, params.extra_dihedrals, atom_types, stream);
@@ -4945,7 +4953,15 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
 
     // --- Extract per-atom Coulomb self-energy params (for CPU postProcess TERM 2+3) ---
     // Mirrors FFWorkspace::setInteractionLists() lines 90-118
-    if (!params.coulombs.empty()) {
+    if (params.coulomb_implicit && params.coul_self_alp.size() == natoms) {
+        // No pair list to scan: the per-atom self-energy inputs come straight from the
+        // parameter set (GFNFF::generateCoulombSelfEnergyNative).
+        m_coul_chi_base   = params.coul_self_chi_base;
+        m_coul_gam        = params.coul_self_gam;
+        m_coul_alp        = params.coul_self_alp;
+        m_coul_chi_static = params.coul_self_chi_static;
+        setCoulombSelfEnergyParams(m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_chi_static);
+    } else if (!params.coulombs.empty()) {
         m_coul_chi_base  = Vector::Zero(natoms);
         m_coul_gam       = Vector::Zero(natoms);
         m_coul_alp       = Vector::Zero(natoms);
@@ -6334,7 +6350,17 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
     }
 
     // k_coulomb (needs EEQ charges)
-    if (m_coulomb_enabled && impl.coulomb.n > 0) {
+    if (m_coulomb_enabled && impl.coulomb_implicit) {
+        const int coul_block = 128;
+        const int grid = (m_natoms + coul_block - 1) / coul_block;
+        k_coulomb_dense<<<grid, coul_block, 0, impl.stream_pairwise>>>(
+            m_natoms, impl.d_coul_alp.ptr,
+            impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+            impl.d_charges.ptr, impl.coulomb_rcut,
+            impl.d_grad.ptr,
+            &impl.d_energies.ptr[impl.E_COUL]);
+        checkCuda(hipGetLastError(), "k_coulomb_dense (implicit) launch");
+    } else if (m_coulomb_enabled && impl.coulomb.n > 0) {
         // ROCm: the pair k_coulomb's ~6M FP64 atomicAdd dominated the MD step. Preferred path is
         // the dense, coalesced, shared-mem-tiled N-body kernel (k_coulomb_dense) which also fixes
         // the gather's random-memory bottleneck; it needs the per-atom charge-corrected EEQ alpha

@@ -80,8 +80,9 @@ add_cli_test(gfnff 03_rev_adduct_falsifier)
 set_tests_properties(cli_gfnff_03_rev_adduct_falsifier PROPERTIES TIMEOUT 600 LABELS "gfnff;react;rev")
 add_cli_test(gfnff 04_rev_well_form)
 set_tests_properties(cli_gfnff_04_rev_well_form PROPERTIES TIMEOUT 300 LABELS "gfnff;react;rev")
-# Claude Generated (Sep 24, 2026): chemistry-aware, continuous fragment-charge placement
-# (-gfnff.frag_charge_model ensemble, test_cases/revgfnff/_log/FRAG_CHARGE_STATUS.md).
+# Claude Generated (Sep 24, 2026; ported to master Sep 27, 2026): chemistry-aware, continuous
+# fragment-charge placement (-gfnff.frag_charge_model ensemble, Known Issue #34/#31,
+# docs/FRAG_CHARGE_MODEL.md, test_cases/revgfnff/_log/FRAG_CHARGE_STATUS.md).
 add_cli_test(gfnff 05_frag_charge_ensemble)
 set_tests_properties(cli_gfnff_05_frag_charge_ensemble PROPERTIES TIMEOUT 900 LABELS "gfnff;frag_charge")
 # Claude Generated (Sep 24, 2026): energy-only calls on a reused calculator must use their own CN

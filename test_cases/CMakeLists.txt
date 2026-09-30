@@ -193,6 +193,20 @@ add_test(NAME gfnff_sqe
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(gfnff_sqe PROPERTIES TIMEOUT 300 LABELS "gfnff;rev;sqe")
 
+# Claude Generated (Sep 27, 2026): frag_charge_model ensemble must not depend on the geometry
+# the topology was built at (Known Issue #34/#31; check 5 of cli_gfnff_05_frag_charge_ensemble,
+# which needs a reused calculator instance the -sp CLI cannot express).
+add_executable(test_gfnff_frag_charge_history test_gfnff_frag_charge_history.cpp)
+target_link_libraries(test_gfnff_frag_charge_history curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_frag_charge_history REUSE_FROM curcuma_core)
+endif()
+add_test(NAME gfnff_frag_charge_history
+         COMMAND test_gfnff_frag_charge_history
+                 ${CMAKE_CURRENT_SOURCE_DIR}/cli/gfnff/05_frag_charge_ensemble/cl2m_ea25.xyz
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(gfnff_frag_charge_history PROPERTIES TIMEOUT 120 LABELS "gfnff;frag_charge")
+
 # Copy reference data to build tree so tests can find them
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/reference_data
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
@@ -305,6 +319,22 @@ endif()
 
 add_test(NAME test_gfnff_topology_reentrancy
          COMMAND test_gfnff_topology_reentrancy ${CMAKE_SOURCE_DIR}/test_cases)
+
+# Claude Generated (Sep 2026, Known Issue #32): energy-only calls on a reused GFN-FF
+# calculator must use their own CN (Coulomb chi(CN)) and D4 C6, not the last gradient
+# call's. Checks FD-vs-analytic via NumGrad (reused energy-only calls), energy-only vs
+# gradient call at one geometry, and reused vs fresh Coulomb / total / D4 dispersion
+# energies (the last two fail when only the CN fix, not the C6 refresh, is present).
+add_executable(test_gfnff_stale_cn test_gfnff_stale_cn.cpp)
+target_link_libraries(test_gfnff_stale_cn curcuma_core test_molecule_registry)
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_stale_cn REUSE_FROM curcuma_core)
+endif()
+add_test(NAME gfnff_stale_cn_energy_only
+         COMMAND test_gfnff_stale_cn
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(gfnff_stale_cn_energy_only
+    PROPERTIES TIMEOUT 300 LABELS "gfnff;stale_cn")
 
 # Claude Generated: PolymerBuild sequence parser tests (prime notation)
 add_executable(test_polymerbuild_sequence

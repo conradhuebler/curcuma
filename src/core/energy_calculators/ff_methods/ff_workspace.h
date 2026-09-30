@@ -40,6 +40,7 @@
 #include <functional>
 #include <Eigen/Sparse>
 
+#include <functional>
 #include <future>
 #include <memory>
 #include <vector>
@@ -599,6 +600,7 @@ public:
         return n;
     }
 
+
     /// Set CN, CNF, and CN derivatives (gradient only)
     /// Claude Generated (WP4, May 2026): dcn now CNDerivStore (pair-list) instead of std::vector<SpMatrix>
     void setCNDerivatives(const Vector& cn, const Vector& cnf,
@@ -732,6 +734,7 @@ public:
     // Access master interaction list sizes (for diagnostics)
     int bondCount() const { return static_cast<int>(m_bonds.size()); }
     int dispersionPairCount() const { return static_cast<int>(m_dispersions.size() + m_d4_dispersions.size()); }
+
     int getHBondCount() const { return static_cast<int>(m_hbonds.size()); }
     int getXBondCount() const { return static_cast<int>(m_xbonds.size()); }
 

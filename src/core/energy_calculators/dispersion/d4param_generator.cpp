@@ -2018,8 +2018,8 @@ void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& 
     m_cn_cached = true;
 }
 
-// Claude Generated (Sep 2026): stale-CN package — see header. Weights + half-contraction
-// only; dgw / dc6dcn (gradient-only) stay owned by updateCNValuesForGradient.
+// Claude Generated (Sep 2026): stale-CN package (Known Issue #35 fix B) — see header. Weights +
+// half-contraction only; dgw / dc6dcn (gradient-only) stay owned by updateCNValuesForGradient.
 void D4ParameterGenerator::refreshC6WeightsForCN(const std::vector<double>& cn, CxxThreadPool* pool, int num_threads)
 {
     m_cn_values = cn;

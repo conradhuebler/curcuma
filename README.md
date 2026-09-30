@@ -93,6 +93,8 @@ one: native GFN2-xTB, semi-empirical QM, roughly two orders of magnitude slower 
 real electronic structure (charges, orbitals, bond breaking). Use `gfnff` to explore and
 `gfn2` to decide.
 
+> **Charged multi-fragment systems (GFN-FF, Sep 2026):** the net charge now goes to the chemically right fragment instead of the one that happens to contain atom 1 (`-gfnff.frag_charge_model ensemble`, the new default; `reference` restores the old rule). Energies of charged species that GFN-FF sees as several fragments can therefore differ from earlier releases and from xtb (GMTKN55 WATER27 reaction MAD 58.6 -> 21.4 kcal/mol). See [docs/FRAG_CHARGE_MODEL.md](docs/FRAG_CHARGE_MODEL.md).
+
 Native GFN methods (no external dependency required, canonical backends since AP3 2026-04-25):
 - **gfn1** : Native GFN1-xTB — 14/16 validation molecules at 1e-8 vs tblite; includes the GFN1-only halogen-bond correction (B–X···A, added Sep 2026)
 - **gfn2** : Native GFN2-xTB — 15/16 validation molecules at 1e-8 vs tblite (only `complex` open at 7.3e-8)

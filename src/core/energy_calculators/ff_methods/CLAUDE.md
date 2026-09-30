@@ -291,6 +291,10 @@ ctest -R test_gfnff_gradients --verbose
     hit on a charged nfrag==2 complex left qfrag=[0,…,0] (F2 trial is skipped on a cache hit),
     Phase-2 EEQ forced charge 0 → wrong Coulomb (~Q²γ) on cached re-runs. Now restores qfrag;
     write guard checks qfrag SUM (not qfrag[0], so [0,m_charge] placements cache too).
+  - **Sep 2026 (frag_charge_model, 🤖 machine-tested)**: default `ensemble` chooses the charge
+    carrier by chemistry instead of "fragment of atom 1" (`gfnff_frag_charge.cpp`; variants via
+    `setFragmentOverride()`, blended in `Calculation()` -> `fragEnsembleBlend()`); `reference`
+    = old rule, bit-identical. Known Issue #31, [docs/FRAG_CHARGE_MODEL.md](../../../../docs/FRAG_CHARGE_MODEL.md).
 
 **Dispersion Corrections**:
 - [ ] **Metal-specific C6 parameters** - Transition metals may need special handling

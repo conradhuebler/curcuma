@@ -645,14 +645,15 @@ GFNFF::GFNFF(const json& parameters)
     m_print_timing = m_parameters.value("print_timing", true);
 
     // frag_charge_model (Claude Generated, Sep 24, 2026; default flipped Sep 24, 2026 - see
-    // test_cases/revgfnff/_log/FRAG_CHARGE_STATUS.md section 17): chemistry-aware, continuous
-    // fragment charge placement. Default "ensemble" at frag_charge_s_max 1.0 (placement rule
-    // only, no continuous window) fixes the index bug of section 3a; "reference" reproduces the
-    // pprcht/xtb rule bit for bit. These fallbacks are the ACTUAL default whenever the caller's
-    // json does not carry the key (most CLI paths do not merge full ParameterRegistry defaults
-    // into controller["gfnff"] - see the identical caveat on cache_topology/print_timing above
-    // and the getDefaultJson() comments elsewhere in this file), so they must stay in sync with
-    // the PARAM macro defaults in gfnff.h by hand.
+    // test_cases/revgfnff/_log/FRAG_CHARGE_STATUS.md section 17, docs/FRAG_CHARGE_MODEL.md,
+    // Known Issue #34/#31): chemistry-aware, continuous fragment charge placement. Default
+    // "ensemble" at frag_charge_s_max 1.0 (placement rule only, no continuous window) fixes
+    // the index bug of section 3a; "reference" reproduces the pprcht/xtb rule bit for bit.
+    // These fallbacks are the ACTUAL default whenever the caller's json does not carry the key
+    // (most CLI paths do not merge full ParameterRegistry defaults into controller["gfnff"] -
+    // see the identical caveat on cache_topology/print_timing above and the getDefaultJson()
+    // comments elsewhere in this file), so they must stay in sync with the PARAM macro defaults
+    // in gfnff.h by hand - editing only the PARAM default has no runtime effect.
     {
         std::string fm = m_parameters.value("frag_charge_model", std::string("ensemble"));
         std::transform(fm.begin(), fm.end(), fm.begin(), [](unsigned char c) { return std::tolower(c); });
@@ -1630,14 +1631,14 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         if (m_workspace) {
             m_workspace->setGeometry(m_geometry_bohr);
             m_workspace->setD3CN(m_last_cn);
-            // Stale-CN fix (Claude Generated, Sep 2026): the Coulomb self-energy reads
-            // chi(CN) = chi_base + cnf*sqrt(CN) from the workspace's m_cn, which only the
-            // gradient branch below used to set (setCNDerivatives). An energy-only call on a
-            // reused calculator therefore evaluated the EN term with the CN of the last
-            // gradient geometry, or with the topology-build CN (chi_static) if there was none.
-            // Hand the current CN over on every call. Static-CN mode is unaffected: there
-            // m_last_cn is the captured CN (reuse_cn skips the recompute above), which is
-            // exactly what the gradient path would have handed over too.
+            // Stale-CN fix A (Claude Generated, Sep 2026, Known Issue #35): the Coulomb
+            // self-energy reads chi(CN) = chi_base + cnf*sqrt(CN) from the workspace's m_cn,
+            // which only the gradient branch below used to set (setCNDerivatives). An
+            // energy-only call on a reused calculator therefore evaluated the EN term with the
+            // CN of the last gradient geometry, or with the topology-build CN (chi_static) if
+            // there was none. Hand the current CN over on every call. Static-CN mode is
+            // unaffected: there m_last_cn is the captured CN (reuse_cn skips the recompute
+            // above), which is exactly what the gradient path would have handed over too.
             m_workspace->setCN(m_last_cn);
         }
     }
@@ -1871,7 +1872,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         }
     }
 
-    // Stale-CN fix B (Claude Generated, Sep 2026): refresh the per-pair D4 C6(CN) at the
+    // Stale-CN fix B (Claude Generated, Sep 2026, Known Issue #35): refresh the per-pair D4 C6(CN) at the
     // current CN. The pair list's C6 was baked once in generateGFNFFParameterSet() (Gaussian CN
     // weights of the topology-build geometry) and never updated, while the analytic gradient
     // already carries dC6/dCN (m_dc6dcn_ptr) and the reference evaluates C6(CN) every call
@@ -1879,12 +1880,13 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     // FD, batch reuse) the energy was therefore a frozen-C6 energy whose derivative is not the
     // force. Static-CN mode keeps its frozen C6 (reuse_cn). The dc6dcn DERIVATIVE and its P1a
     // CN-change threshold (updateCNValuesForGradient) are untouched.
+    // -gfnff.dispersion_c6_update false restores the old frozen-C6 behaviour.
     // Merge note (Sep 25, 2026): feature/multi-gpu fixed the same frozen-C6 bug independently
-    // (GFNFF::refreshDispersionC6, f51f5200). Both recompute d.C6 = getChargeWeightedC6() from
-    // the Gaussian weights at the current CN; this block additionally covers every stored
-    // rev-gfnff corner list (forEachD4PairList), so it was kept and the other one removed. The
-    // multi-gpu `dispersion_c6_update` PARAM (default true) now gates this block on the CPU and
-    // the device-side C6 refresh on the GPU.
+    // (GFNFF::refreshDispersionC6, f51f5200, its own Known Issue #31/#32). Both recompute
+    // d.C6 = getChargeWeightedC6() from the Gaussian weights at the current CN; this block
+    // additionally covers every stored rev-gfnff corner list (forEachD4PairList), so it was
+    // kept and the other one removed. The multi-gpu `dispersion_c6_update` PARAM (default true)
+    // now gates this block on the CPU and the device-side C6 refresh on the GPU.
     if (!gpu_only && !reuse_cn && m_d4_generator && m_workspace && m_last_cn.size() == m_atomcount
         && m_parameters.value("dispersion_c6_update", true)) {
         bool weights_fresh = false;
@@ -12380,7 +12382,7 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
         d4_input["d4_s9"] = 1.00;
         // Lever 3 Opt B: plumb the user-facing gfnff flag down to the generator.
         d4_input["d4_disp_half_contraction"] = m_parameters.value("disp_half_contraction", true);
-        // Claude Generated (Sep 2026): with the per-step C6 refresh (dispersion_c6_update) the
+        // Claude Generated (Sep 2026, Known Issue #35): with the per-step C6 refresh (dispersion_c6_update) the
         // Gaussian weights feed the ENERGY, not only dC6/dCN. The generator's CN-change cache
         // (d4_cn_cache_threshold, default 0.01) then lets C6 lag the geometry and jump when it
         // finally refreshes: measured on triose, an optimisation then stops 5.7e-6 Eh away from
@@ -13226,7 +13228,7 @@ Matrix GFNFF::NumGradFixedCharges(double dx)
         m_workspace->setGeometry(m_geometry_bohr);
         const Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
         m_workspace->setD3CN(cn);
-        m_workspace->setCN(cn);  // stale-CN fix (Sep 2026): the chi(CN) self-energy term too
+        m_workspace->setCN(cn);  // stale-CN fix A (Sep 2026): the chi(CN) self-energy term too
         return m_workspace->calculate(false);
     };
     for (int i = 0; i < m_atomcount; ++i) {
