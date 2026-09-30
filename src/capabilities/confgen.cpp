@@ -30,12 +30,14 @@
 #include "src/core/elements.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <fmt/core.h>
 #include <fstream>
 #include <functional>
 #include <iomanip>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <random>
 #include <set>
@@ -1367,9 +1369,11 @@ bool ConfGen::hasClash(const Molecule& mol, double factor) const
 }
 
 // Claude Generated (Jul 2026, roadmap item P0): restrained build -- see the header for the why.
-bool ConfGen::restrainedBuild(const Proposal& p, Molecule& driven, const Molecule* start) const
+bool ConfGen::restrainedBuild(const Proposal& p, Molecule& driven, const Molecule* start,
+    EnergyCalculator* calc) const
 {
-    if (!m_calculator)
+    EnergyCalculator* use_calc = calc ? calc : m_calculator.get();
+    if (!use_calc)
         return false;
 
     // One restraint per torsion whose state differs from the template's.
@@ -1408,7 +1412,11 @@ bool ConfGen::restrainedBuild(const Proposal& p, Molecule& driven, const Molecul
 
     json opt_config;
     opt_config["method"] = m_method;
-    opt_config["threads"] = m_threads;
+    // Claude Generated (Sep 2026): a caller-supplied calculator is a per-worker instance of the
+    // parallel build loop -- it provides its OWN thread by running alongside others, so it must stay
+    // single-threaded internally. Without `calc` this is the original single shared m_calculator,
+    // which keeps the old m_threads-wide intra-optimisation parallelism.
+    opt_config["threads"] = calc ? 1 : m_threads;
     opt_config["charge"] = m_charge;
     opt_config["spin"] = m_spin;
     opt_config["verbosity"] = 0;
@@ -1433,7 +1441,7 @@ bool ConfGen::restrainedBuild(const Proposal& p, Molecule& driven, const Molecul
     // one) the same restraints act as a clash repair instead; see the parameter documentation.
     Molecule mol = start ? *start : m_frames[p.template_frame].molecule;
     auto result = Optimization::OptimizationDispatcher::optimizeStructure(
-        &mol, Optimization::OptimizerType::LBFGSPP, m_calculator.get(), opt_config);
+        &mol, Optimization::OptimizerType::LBFGSPP, use_calc, opt_config);
     if (result.final_molecule.AtomCount() == 0)
         return false; // hard failure; a non-converged but finite geometry is still usable below
 
@@ -2751,9 +2759,11 @@ double ConfGen::contactTargetDistance(int pair_index) const
     return d[d.size() / 2];
 }
 
-bool ConfGen::restrainedBuildNCI(const Proposal& p, Molecule& driven, const Molecule* start) const
+bool ConfGen::restrainedBuildNCI(const Proposal& p, Molecule& driven, const Molecule* start,
+    EnergyCalculator* calc) const
 {
-    if (!m_calculator || p.nci_targets.empty())
+    EnergyCalculator* use_calc = calc ? calc : m_calculator.get();
+    if (!use_calc || p.nci_targets.empty())
         return false;
     // Claude Generated (Sep 2026): einmal je Lauf -- die Stufenreihenfolge unten unterscheidet
     // Kontaktbedingungen (Schweratom-Schweratom) von Brueckenbedingungen (H...Akzeptor) am ersten
@@ -2802,7 +2812,9 @@ bool ConfGen::restrainedBuildNCI(const Proposal& p, Molecule& driven, const Mole
 
     json opt_config;
     opt_config["method"] = m_method;
-    opt_config["threads"] = m_threads;
+    // Claude Generated (Sep 2026): see restrainedBuild() -- a caller-supplied per-worker calculator
+    // stays single-threaded, the shared one keeps the old m_threads-wide intra-op parallelism.
+    opt_config["threads"] = calc ? 1 : m_threads;
     opt_config["charge"] = m_charge;
     opt_config["spin"] = m_spin;
     opt_config["verbosity"] = 0;
@@ -2882,7 +2894,7 @@ bool ConfGen::restrainedBuildNCI(const Proposal& p, Molecule& driven, const Mole
             stage["distance_restraints"]
                 = withPolarHydrogenRestraints(Optimization::GeometryRestraints::toJson(active));
             auto step = Optimization::OptimizationDispatcher::optimizeStructure(
-                &mol, Optimization::OptimizerType::LBFGSPP, m_calculator.get(), stage);
+                &mol, Optimization::OptimizerType::LBFGSPP, use_calc, stage);
             if (step.final_molecule.AtomCount() == 0)
                 return false;
             mol = step.final_molecule;
@@ -2909,7 +2921,7 @@ bool ConfGen::restrainedBuildNCI(const Proposal& p, Molecule& driven, const Mole
             stage["distance_restraints"]
                 = withPolarHydrogenRestraints(Optimization::GeometryRestraints::toJson(active));
             auto step = Optimization::OptimizationDispatcher::optimizeStructure(
-                &mol, Optimization::OptimizerType::LBFGSPP, m_calculator.get(), stage);
+                &mol, Optimization::OptimizerType::LBFGSPP, use_calc, stage);
             if (step.final_molecule.AtomCount() == 0)
                 return false;
             mol = step.final_molecule;
@@ -2922,7 +2934,7 @@ bool ConfGen::restrainedBuildNCI(const Proposal& p, Molecule& driven, const Mole
         mol = steerRelax(mol, opt_config["distance_restraints"],
             1000 + 7919 * (p.template_frame + 1) + 31 * static_cast<int>(p.nci_targets.size()));
     auto result = Optimization::OptimizationDispatcher::optimizeStructure(
-        &mol, Optimization::OptimizerType::LBFGSPP, m_calculator.get(), opt_config);
+        &mol, Optimization::OptimizerType::LBFGSPP, use_calc, opt_config);
     if (result.final_molecule.AtomCount() == 0)
         return false;
 
@@ -3351,6 +3363,10 @@ void ConfGen::optimiseProposals(std::vector<Proposal>& proposals) const
     for (int i = 0; i < static_cast<int>(proposals.size()); ++i)
         if (proposals[i].geometry.AtomCount() > 0)
             todo.push_back(i);
+    /* Claude Generated (Sep 2026): the moment the build phase is done and optimisation is about to
+     * start -- distinct from the build summary above, which counts every ATTEMPT (build failures
+     * included); this is the count that actually reaches the optimiser next. */
+    CurcumaLogger::result_fmt("ConfGen: {} built proposal(s) to optimise", static_cast<int>(todo.size()));
     const int workers = std::max(1, std::min<int>(m_threads, static_cast<int>(todo.size())));
     if (workers > 1) {
         json worker_config = opt_config;
@@ -3362,6 +3378,14 @@ void ConfGen::optimiseProposals(std::vector<Proposal>& proposals) const
          * appeared, which is what made this parallelisation look like it was not running at all.
          * Save and restore around the batch, exactly as ConfSearch::PerformOptimisation does. */
         const int verbosity_before = CurcumaLogger::get_verbosity();
+        /* Claude Generated (Sep 2026): live i/N feedback while the batch runs, same mechanism as the
+         * build phase above / ConfSearch's OptThread completion hook -- otherwise this phase is silent
+         * from "N proposal(s) to optimise" until the summary line, however long it takes. */
+        std::atomic<int> done_optimised{ 0 };
+        std::mutex opt_progress_mtx;
+        const bool live_bar = (m_verbosity == 1) && CurcumaLogger::progress_enabled();
+        const std::string opt_bar_label = "ConfGen optimise";
+        const int n_to_optimise = static_cast<int>(todo.size());
         std::vector<std::thread> pool;
         for (int w = 0; w < workers; ++w) {
             pool.emplace_back([&, w]() {
@@ -3378,19 +3402,42 @@ void ConfGen::optimiseProposals(std::vector<Proposal>& proposals) const
                     auto r = Optimization::OptimizationDispatcher::optimizeStructure(
                         &mol, Optimization::OptimizerType::LBFGSPP, &local, worker_config);
                     if (!r.success) {
-                        if (!keep_unconverged(r, q.geometry))
+                        if (!keep_unconverged(r, q.geometry)) {
+                            const int d = ++done_optimised;
+                            std::lock_guard<std::mutex> lock(opt_progress_mtx);
+                            if (live_bar)
+                                CurcumaLogger::progress_bar(d, n_to_optimise, opt_bar_label);
                             continue;
+                        }
                         q.unconverged = true;
                     }
                     q.optimised = true;
                     q.geometry = r.final_molecule;
                     q.energy = r.final_energy;
+                    const int d = ++done_optimised;
+                    std::lock_guard<std::mutex> lock(opt_progress_mtx);
+                    if (live_bar) {
+                        CurcumaLogger::progress_bar(d, n_to_optimise, opt_bar_label);
+                    } else if (m_verbosity >= 2) {
+                        // Raw fmt::print, not CurcumaLogger: this runs on a worker where the shared
+                        // static logger level is 0 for the duration of the batch (see above).
+                        const double elapsed = std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - t_start)
+                                                   .count();
+                        fmt::print("  ConfGen optimise: {}/{} done | proposal {} | E = {:.6f} Eh{} | "
+                                   "elapsed {:.1f} s\n",
+                            d, n_to_optimise, todo[idx] + 1, r.final_energy,
+                            r.success ? "" : ", not converged", elapsed);
+                        std::fflush(stdout);
+                    }
                 }
             });
         }
         for (auto& t : pool)
             t.join();
         CurcumaLogger::set_verbosity(verbosity_before);
+        if (live_bar)
+            CurcumaLogger::progress_done();
         CurcumaLogger::result_fmt("ConfGen: {} proposal(s) optimised on {} worker(s) in {:.1f} s "
                                   "(one calculator each, reused across its share)",
             static_cast<int>(todo.size()), workers,
@@ -4138,22 +4185,43 @@ void ConfGen::start()
         // Build the geometries: start from the template and set every torsion whose state differs.
         const std::vector<std::pair<int, int>> reference_bonds
             = topologyFingerprint(m_frames.front().molecule, m_topology_factor);
-        int clashes = 0, restrained = 0, restrained_ok = 0, nci_built = 0, nci_failed = 0, nci_unreached = 0;
-        for (Proposal& p : proposals) {
+        std::atomic<int> clashes_a{ 0 }, restrained_a{ 0 }, restrained_ok_a{ 0 },
+            nci_built_a{ 0 }, nci_failed_a{ 0 }, nci_unreached_a{ 0 };
+        /* Claude Generated (Sep 2026): the H/heavy-atom cache restrainedBuildNCI lazily fills is a
+         * `mutable` member -- filled here, once, before any worker can race on it (see its own
+         * lazy-init comment and the field's declaration in confgen.h). */
+        if (m_atom_is_hydrogen.empty() && !m_frames.empty()) {
+            const Molecule& ref = m_frames.front().molecule;
+            m_atom_is_hydrogen.resize(ref.AtomCount());
+            for (int i = 0; i < ref.AtomCount(); ++i)
+                m_atom_is_hydrogen[i] = (ref.Atom(i).first == 1);
+        }
+        /* Claude Generated (Sep 2026): building a proposal (this loop) is a SEPARATE bottleneck from
+         * optimising it (optimiseProposals(), fixed Aug 2026) -- every branch below that reaches
+         * restrainedBuild()/restrainedBuildNCI() runs a full restrained optimisation on the ONE
+         * shared m_calculator, serialising proposal after proposal regardless of -threads. Measured
+         * on a live 114-atom/gfn2 ConfSearch run: this phase alone held the process at a single OS
+         * thread for the whole time between two progress files, ~85 % of a comparable gfnff ConfGen
+         * call's total wall time. Same fix as optimiseProposals(): one calculator per worker, reused
+         * across its own share -- nothing is re-derived per proposal, there are simply W independent
+         * chains instead of one. Every code path below is UNCHANGED, only wrapped in a lambda so it
+         * can run from either a single thread (byte-identical to the old loop, calc == nullptr ->
+         * restrainedBuild()/restrainedBuildNCI() fall back to m_calculator) or a worker pool. */
+        auto build_one = [&](Proposal& p, EnergyCalculator* calc) {
             // An NCI move has no rigid-build variant: there is no single coordinate to set. It goes
             // straight to the restrained build, which is the whole point -- the concerted relaxation
             // around a re-tied hydrogen bond is what a torsion move cannot express.
             if (p.nci_move()) {
                 Molecule driven;
                 const bool is_route = p.route_start.AtomCount() > 0;
-                if (!restrainedBuildNCI(p, driven, is_route ? &p.route_start : nullptr)) {
-                    nci_unreached++;
-                    continue;
+                if (!restrainedBuildNCI(p, driven, is_route ? &p.route_start : nullptr, calc)) {
+                    nci_unreached_a.fetch_add(1, std::memory_order_relaxed);
+                    return;
                 }
                 if (hasClash(driven, m_clash_factor)
                     || topologyFingerprint(driven, m_topology_factor) != reference_bonds) {
-                    nci_failed++;
-                    continue;
+                    nci_failed_a.fetch_add(1, std::memory_order_relaxed);
+                    return;
                 }
                 if (is_route)
                     driven.setName(fmt::format("route_from_{}_d{}", p.template_frame + 1, p.distance));
@@ -4163,8 +4231,8 @@ void ConfGen::start()
                             && p.nci_targets[0].second == 1 && p.nci_targets[1].second == 1 ? "clamp" : "d2")));
                 p.geometry = driven;
                 p.restrained_build = true;
-                nci_built++;
-                continue;
+                nci_built_a.fetch_add(1, std::memory_order_relaxed);
+                return;
             }
             // Claude Generated (Aug 2026): a collective-mode displacement arrives with its geometry
             // already set -- there is no torsion target to drive towards. It still has to pass the
@@ -4174,9 +4242,9 @@ void ConfGen::start()
                     || hasClash(p.geometry, m_clash_factor)
                     || topologyFingerprint(p.geometry, m_topology_factor) != reference_bonds) {
                     p.geometry = Molecule();
-                    clashes++;
+                    clashes_a.fetch_add(1, std::memory_order_relaxed);
                 }
-                continue;
+                return;
             }
             Geometry geom = m_frames[p.template_frame].molecule.getGeometry();
             for (std::size_t t = 0; t < m_torsions.size(); ++t)
@@ -4219,10 +4287,10 @@ void ConfGen::start()
                 // clash-free TEMPLATE and drives the torsions to their targets with a harmonic
                 // restraint, so the rest of the molecule relaxes out of the way while they turn.
                 if (!m_restrained_build) {
-                    clashes++;
-                    continue; // leave p.geometry empty -> counted as "not built"
+                    clashes_a.fetch_add(1, std::memory_order_relaxed);
+                    return; // leave p.geometry empty -> counted as "not built"
                 }
-                restrained++;
+                restrained_a.fetch_add(1, std::memory_order_relaxed);
                 // Claude Generated (Aug 2026): TWO ways to use the restraints, and which one works
                 // depends on how far the proposal is from its template.
                 //
@@ -4239,19 +4307,19 @@ void ConfGen::start()
                 // So repair first, drive second -- the old order was drive-only, which is why the
                 // de-novo assemblies could not be built at all.
                 Molecule driven;
-                bool ok = restrainedBuild(p, driven, &mol)
+                bool ok = restrainedBuild(p, driven, &mol, calc)
                     && !hasClash(driven, m_clash_factor)
                     && topologyFingerprint(driven, m_topology_factor) == reference_bonds;
                 std::string how = "repaired";
                 if (!ok) {
-                    ok = restrainedBuild(p, driven)
+                    ok = restrainedBuild(p, driven, nullptr, calc)
                         && !hasClash(driven, m_clash_factor)
                         && topologyFingerprint(driven, m_topology_factor) == reference_bonds;
                     how = "driven";
                 }
                 if (!ok) {
-                    clashes++;
-                    continue;
+                    clashes_a.fetch_add(1, std::memory_order_relaxed);
+                    return;
                 }
                 /* Claude Generated (Aug 2026): name the isomerisation for what it is -- its Hamming
                  * distance is 0 (the state vector is the template's), so the generic name would
@@ -4264,11 +4332,83 @@ void ConfGen::start()
                     driven.setName(fmt::format("proposal_from_{}_d{}_{}", p.template_frame + 1, p.distance, how));
                 p.geometry = driven;
                 p.restrained_build = true;
-                restrained_ok++;
-                continue;
+                restrained_ok_a.fetch_add(1, std::memory_order_relaxed);
+                return;
             }
             p.geometry = mol;
+        };
+
+        const int build_workers = std::max(1, std::min<int>(m_threads, static_cast<int>(proposals.size())));
+        /* Claude Generated (Sep 2026): the user-visible reason for this whole rework -- a long build
+         * phase (gfn2, many restrained proposals) used to show NOTHING between "N proposal(s) to
+         * build" and the summary line, for however many minutes it took; a live run looked stalled
+         * even when it was not. Same mechanism ConfSearch's OptThread batch uses: a live i/N bar at
+         * verbosity 1 (mutex-guarded -- workers finish proposals concurrently), a per-proposal line
+         * at verbosity >= 2. */
+        std::atomic<int> done_proposals{ 0 };
+        std::mutex build_progress_mtx;
+        const auto build_start = std::chrono::steady_clock::now();
+        const bool live_bar = (m_verbosity == 1) && CurcumaLogger::progress_enabled();
+        const std::string build_bar_label = "ConfGen build";
+        const int n_to_build = static_cast<int>(proposals.size());
+        auto report_one_built = [&](int idx) {
+            const int d = ++done_proposals;
+            std::lock_guard<std::mutex> lock(build_progress_mtx);
+            if (live_bar) {
+                CurcumaLogger::progress_bar(d, n_to_build, build_bar_label);
+            } else if (m_verbosity >= 2) {
+                // Claude Generated (Sep 2026): raw fmt::print, not CurcumaLogger -- this can run on a
+                // worker where the shared static logger level was dropped to 0 for the batch (see
+                // below), exactly as OptThread's completion hook does in ConfSearch.
+                const double elapsed = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - build_start)
+                                           .count();
+                fmt::print("  ConfGen build: {}/{} done | proposal {} | elapsed {:.1f} s\n",
+                    d, n_to_build, idx + 1, elapsed);
+                std::fflush(stdout);
+            }
+        };
+        if (build_workers > 1) {
+            json build_calc_cfg;
+            build_calc_cfg["method"] = m_method;
+            build_calc_cfg["threads"] = 1; // the worker pool supplies the parallelism, not the calculator
+            build_calc_cfg["charge"] = m_charge;
+            build_calc_cfg["spin"] = m_spin;
+            const auto t_start = std::chrono::steady_clock::now();
+            // Claude Generated (Aug 2026 pattern, reused Sep 2026): child optimisations run at
+            // verbosity 0 -- the shared logger level is a static, save/restore around the batch.
+            const int verbosity_before = CurcumaLogger::get_verbosity();
+            std::vector<std::thread> pool;
+            for (int w = 0; w < build_workers; ++w) {
+                pool.emplace_back([&, w]() {
+                    EnergyCalculator local(m_method, build_calc_cfg);
+                    if (!m_frames.empty())
+                        local.setMolecule(m_frames.front().molecule.getMolInfo());
+                    for (std::size_t idx = w; idx < proposals.size(); idx += build_workers) {
+                        build_one(proposals[idx], &local);
+                        report_one_built(static_cast<int>(idx));
+                    }
+                });
+            }
+            for (auto& t : pool)
+                t.join();
+            CurcumaLogger::set_verbosity(verbosity_before);
+            if (live_bar)
+                CurcumaLogger::progress_done();
+            CurcumaLogger::result_fmt("ConfGen: {} proposal(s) built on {} worker(s) in {:.1f} s "
+                                      "(one calculator each, reused across its share)",
+                static_cast<int>(proposals.size()), build_workers,
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count());
+        } else {
+            for (std::size_t idx = 0; idx < proposals.size(); ++idx) {
+                build_one(proposals[idx], nullptr);
+                report_one_built(static_cast<int>(idx));
+            }
+            if (live_bar)
+                CurcumaLogger::progress_done();
         }
+        int clashes = clashes_a.load(), restrained = restrained_a.load(), restrained_ok = restrained_ok_a.load(),
+            nci_built = nci_built_a.load(), nci_failed = nci_failed_a.load(), nci_unreached = nci_unreached_a.load();
         if (restrained > 0)
             CurcumaLogger::result_fmt("ConfGen: rigid build failed for {} proposal(s) -- restrained build "
                                       "recovered {} of them (k = {} Eh/rad^2)",

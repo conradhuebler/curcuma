@@ -374,8 +374,11 @@ private:
      *               Passing the RIGIDLY BUILT geometry instead turns the same machinery into a clash
      *               repair -- the fold is already correct, the restraints only hold it while the
      *               optimiser relieves the overlaps.
+     * @param calc   optional calculator to use instead of the shared m_calculator (Sep 2026: lets the
+     *               parallel build loop give each worker its own instance -- see its call site).
      */
-    bool restrainedBuild(const Proposal& p, Molecule& driven, const Molecule* start = nullptr) const;
+    bool restrainedBuild(const Proposal& p, Molecule& driven, const Molecule* start = nullptr,
+        EnergyCalculator* calc = nullptr) const;
 
     /**
      * @brief Enumerate NCI moves: break a hydrogen bond the template has, form one it does not.
@@ -484,8 +487,11 @@ private:
      * to nci_break_distance -- i.e. outside the detection criterion. The rest of the molecule relaxes
      * around that, which is precisely the concerted motion a torsion move cannot express. Restraints
      * are released afterwards; optimiseProposals() reports a freely optimised energy as always.
+     * @param calc   optional calculator to use instead of the shared m_calculator (Sep 2026: lets the
+     *               parallel build loop give each worker its own instance -- see its call site).
      */
-    bool restrainedBuildNCI(const Proposal& p, Molecule& driven, const Molecule* start = nullptr) const;
+    bool restrainedBuildNCI(const Proposal& p, Molecule& driven, const Molecule* start = nullptr,
+        EnergyCalculator* calc = nullptr) const;
     /** Claude Generated (Sep 2026): the torsion route to a hydrogen bond -- for an absent D-H...A pair,
  *  the combination of observed rotamer states of the torsions on the bond path D->A that brings H and A
  *  closest by RIGID rotation, then the restrained build from that geometry. Unifies the two move sets:

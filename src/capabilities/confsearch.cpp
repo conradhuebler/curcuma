@@ -4387,7 +4387,14 @@ int ConfSearch::PerformConfGen(const std::string& f, const std::string& method)
         CurcumaLogger::info_fmt("ConfSearch: {} user setting(s) forwarded to ConfGen (cfg now {} keys)",
             static_cast<int>(m_controller["confgen"].size()), before);
     }
-    cfg.merge_patch(ChildConfig(method, (m_threads > 1) ? 1 : m_threads));
+    /* Claude Generated (Sep 2026): unlike the opt-phase ChildConfig() calls above (which throttle to
+     * 1 because ConfSearch's OWN outer CxxThreadPool already parallelises over many structures),
+     * PerformConfGen() is a single direct call in the sequential cycle flow -- there is no outer
+     * pool here for the throttle to defer to. ConfGen's build and optimise phases (confgen.cpp,
+     * Sep 2026) parallelise INTERNALLY over their own proposals, exactly the way the outer pool does
+     * for the opt phases; throttling to 1 silently disabled that (a live gfn2/WEKLQ run sat pinned to
+     * one core for the whole build phase with -threads 10). Full m_threads reaches ConfGen instead. */
+    cfg.merge_patch(ChildConfig(method, m_threads));
     cfg["generate"] = true;
     cfg["couplings"] = false;
     cfg["max_proposals"] = m_confgen_max_proposals;
@@ -4457,7 +4464,13 @@ int ConfSearch::PerformConfGen(const std::string& f, const std::string& method)
     cfg["nci_generate"] = m_confgen_nci_moves;
     cfg["consensus_build"] = m_confgen_consensus;
     cfg["new_rmsd"] = m_rmsd;   // "new" means the same thing here as everywhere else in the search
-    cfg["verbosity"] = (m_verbosity >= 2) ? m_verbosity : 0;
+    /* Claude Generated (Sep 2026): was `>= 2` -- silent at ConfSearch's normal verbosity 1, which is
+     * why RECOMBINE looked stalled during its (previously single-threaded, now parallel) build phase:
+     * ConfGen's own live progress bar and per-phase detail never reached anyone running a normal
+     * ConfSearch job. `>= 1` lets that through at ConfSearch's own verbosity 1 while verbosity 0 stays
+     * fully silent, matching the general convention (Level 1 = minimal results). The one line the
+     * comment below already documents as "swallowed in every normal run" is exactly what this fixes. */
+    cfg["verbosity"] = (m_verbosity >= 1) ? m_verbosity : 0;
     // Claude Generated (Jul 2026): the standalone -confgen path sets this (main.cpp), and GFN-FF keys
     // its topology/parameter cache on it. Without it the key is empty, so a cache written for ANOTHER
     // basename can be picked up -- which is how this phase first crashed inside the GFN-FF parameter
@@ -4482,10 +4495,10 @@ int ConfSearch::PerformConfGen(const std::string& f, const std::string& method)
         gen.start();
     }
 
-    /* Claude Generated (Aug 2026): count what the step actually produced, at ConfSearch's OWN
-     * verbosity. ConfGen reports "N proposed, M built, K optimised successfully" itself -- but this
-     * call sets the child to verbosity 0 unless the run is at >= 2 (see cfg["verbosity"] above), so
-     * that line is swallowed in every normal run. The return value alone cannot tell the two cases
+    /* Claude Generated (Aug 2026, gate loosened Sep 2026): count what the step actually produced, at
+     * ConfSearch's OWN verbosity. ConfGen reports "N proposed, M built, K optimised successfully"
+     * itself, now visible at ConfSearch verbosity >= 1 too (see cfg["verbosity"] above) -- but silent
+     * runs (verbosity 0) still need this. The return value alone cannot tell the two cases
      * apart either: it counts NEW conformers, and it is 0 both when the ensemble is saturated (a
      * legitimate outcome) and when not a single proposal survived its optimisation (a defect).
      * Measured: a 23-hour production run built 89 proposals across three cycles and optimised NONE
