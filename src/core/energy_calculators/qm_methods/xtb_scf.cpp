@@ -210,10 +210,18 @@ void XTB::reduceToStandardForm(Eigen::MatrixXd& A, int n, int threads, bool& ok)
         m_X.triangularView<Eigen::Lower>().transpose().template solveInPlace<Eigen::OnTheRight>(A);
         return;
     }
+#ifdef CURCUMA_XTB_HAVE_LAPACK_SYEVD
     const char uplo = 'L';
     int itype = 1, info = 0;
     dsygst_(&itype, &uplo, &n, A.data(), &n, m_X.data(), &n, &info);
     ok = (info == 0);
+#else
+    // Every call site is itself gated on CURCUMA_XTB_HAVE_LAPACK_SYEVD (see solveEigen()),
+    // so this branch is unreachable without BLAS/MKL linked; kept buildable without a LAPACK
+    // symbol declaration (which is only declared above under the same guard).
+    (void)n;
+    ok = false;
+#endif
 }
 
 /* ------------------------------------------------------------------ *
