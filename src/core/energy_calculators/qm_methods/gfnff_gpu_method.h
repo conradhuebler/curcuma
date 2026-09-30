@@ -42,6 +42,8 @@ struct GFNFFCudaBackend {
     /// CUDA implements the device Schur EEQ solves (WP5-A / WP7-A / WP7-B / WP7-C),
     /// so a failure there is a real numerical failure and is warned about.
     static constexpr bool has_device_schur = true;
+    /// Multi-GPU split of one molecule (Coulomb tiles + EEQ PCG). Claude Generated (Sep 2026).
+    static constexpr bool has_multi_gpu_split = true;
 
     /// 0 = never route the EEQ to the CPU PCG; the device Schur paths handle nfrag>1.
     static constexpr int default_eeq_cpu_fragment_threshold = 0;

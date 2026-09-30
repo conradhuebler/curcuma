@@ -48,12 +48,21 @@ system dependencies (one backend per build dir: `release_cuda/`, `release_rocm/`
 - **Multi-GPU** (Sep 2026, AI-generated, machine-tested): `-gpu_device N` pins a run to one
   device; batch runs (`-sp`/`-opt` on a multi-XYZ file, ConfSearch, Hessian) spread their
   workers over all visible GPUs (`-gpu_devices 0,2`, `-gpu_workers_per_device 2`).
+  GFN-FF spreads ONE large molecule over the visible GPUs (Coulomb + EEQ; `-gfnff.gpu_split_devices`).
+  Every GPU fallback is summarised after the run; `-gpu_strict true` stops at the first one
+  (exit code 3), see [docs/GPU_TUNING.md](docs/GPU_TUNING.md).
   `curcuma -methods` lists the devices. One large GFN1/GFN2 molecule can spread its
   eigensolve and its density over several GPUs; with more than one device visible this is the
   default from 4000 basis functions up (`-gpu_eigensolver_devices none` / `-gpu_density_devices
   none` to disable; needs cuSOLVERMp, cuBLASMp and NCCL at build time, see
   [docs/GPU_TUNING.md](docs/GPU_TUNING.md)).
   See [docs/MULTI_GPU.md](docs/MULTI_GPU.md).
+- **Performance tuning** (Sep 2026, AI-generated, machine-tested): every performance knob
+  is a CLI flag - thread counts, the eigensolve reduction route, the mixed-precision
+  guards, the GPU multipole storage. `python scripts/tuning_sweep.py mol.xyz --method gfn2
+  [--gpu cuda]` measures them on the machine it runs on, verifies that no setting changes
+  the energy, and prints the fastest command line. Options and measured numbers:
+  [docs/GPU_TUNING.md](docs/GPU_TUNING.md).
 
 ## Validation Status Labels
 
@@ -98,6 +107,8 @@ Native GFN methods (no external dependency required, canonical backends since AP
 > **4th-period elements (GFN1):** what is left of that 0.011 kcal/mol is a genuine xtb-vs-tblite disagreement, not a curcuma error — the two references carry different STO-6G 4s/4p tables (Z = 19–36; GFN2 uses STO-4G there and is unaffected). curcuma follows tblite, whose expansion fits the exact Slater function 3–5× better. `-xtb.sto6g_legacy_4sp true` switches to xtb's tables and reproduces the binary bit-for-bit. Details in [docs/GMTKN55_VALIDATION.md](docs/GMTKN55_VALIDATION.md).
 
 > **Gradients (Sep 2026):** analytic gradients are now validated set-wide against xtb 6.7.1 on all 2462 GMTKN55 geometries (median deviation 3e-7 / 4e-7 / 4e-8 Eh/Bohr for gfn1 / gfn2 / gfnff), with the outliers arbitrated by finite differences of each code's own energy. That sweep found and fixed two unit bugs — GFN-FF MD forces were a factor 1.89 too small, and vibrational frequencies were too high for every method — see [docs/GRADIENT_VALIDATION.md](docs/GRADIENT_VALIDATION.md). Frequencies now match xtb to ≤0.13 % on H2O for all three methods.
+
+> **GFN-FF MD/optimisation correctness (Sep 2026):** several non-bonded pair lists were built once at setup and never revisited during a run — a non-bonded repulsion pair starting more than 20 Bohr apart could diffuse to near-zero distance with **zero** repulsive force (root-caused from a real crash on an H200), and D4 dispersion's C6 values were frozen at the setup geometry for every GFN-FF MD/optimisation run, not only large ones, while the gradient used the current CN — energy and gradient belonged to different functions after the first geometry change. Both fixed with a periodic geometry-triggered refresh; MOR41 (95/95) and GMTKN55 gfnff (2462/2462) bit-identical before/after. See [docs/GFNFF_PAIR_LIST_REFRESH.md](docs/GFNFF_PAIR_LIST_REFRESH.md).
 
 > **Speed:** on a 231-atom complex (single core, energy+gradient) native `gfn1` runs in ~1.02 s and `gfn2` in ~1.08 s, versus xtb 6.7.1 at 1.37 s / 0.98 s — i.e. gfn1 is faster than xtb and gfn2 within ~11%. See [docs/SQM_PERFORMANCE.md](docs/SQM_PERFORMANCE.md) for the single-core record and [docs/SQM_THREADING.md](docs/SQM_THREADING.md) for `-threads N` scaling.
 
@@ -178,6 +189,8 @@ target; CUDA hardware was not available to re-check that backend directly).
 **Reactive MD (experimental)**: `-gfnff.topology_mode react` lets bonds form and break during MD (hysteresis re-detection + bonded-term rebuild, NVT-only) — see [docs/GFNFF_REACT_TOPOLOGY.md](docs/GFNFF_REACT_TOPOLOGY.md).
 
 **Cross-platform determinism (`-DUSE_PORTABLE_MATH=ON`)**: Wine and native Windows can round `erf`/`acos`/`exp`/`log` differently in the last bit (different CRT-DLL reimplementations), which can flip a GFN-FF classification threshold into a different bond term. Vendored fdlibm-derived replacements close this; off by default, on for the Windows nightly build — see [docs/PORTABLE_ERF.md](docs/PORTABLE_ERF.md).
+
+**One unit system (`-DUSE_LEGACY_UNIT_CONSTANTS=ON` to revert)**: every Bohr/Ångström and Hartree conversion uses CODATA 2018 (`src/core/units.h`). Before Sep 2026 seven different Bohr radii were in use, which put a systematic 5e-7 Eh between CPU and GPU GFN-FF on a 7320-atom system; the legacy build restores the old per-site values bit for bit — see [docs/UNIT_CONSTANTS.md](docs/UNIT_CONSTANTS.md).
 
 **Known differences from Fortran reference** (see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)):
 - Sub-mEh agreement for most small/medium molecules
@@ -746,6 +759,20 @@ The thermostat target temperature can follow a multi-stage **ramp** and individu
 curcuma -md input.xyz -method gfnff -temperature 300 -temp_ramp true -temp_schedule "600:steps:5000;300:reach:10"
 ```
 See [docs/TEMPERATURE_RAMP.md](docs/TEMPERATURE_RAMP.md) for the schedule grammar (`steps`/`reach`), the `temp_regions` JSON array, live temperature control, and per-thermostat support.
+
+On a large solvated system the default 1 fs step can be too long for a momentarily compressed X-H
+bond, and a single such step heats the whole trajectory. Instead of lowering `-dt` or raising the
+hydrogen mass for the whole run, the integrator can redo just that step with a subdivided one:
+```sh
+curcuma -md input.xyz -method gfnff -dt 1.0 -adaptive_step true
+```
+It is off by default and adds no constraint and no mass modification. Two things are watched: the
+total energy of the step, and - because that one loses its contrast as the system grows, while a
+violating step stays on a handful of atoms - the kinetic energy of the **hottest atom relative to
+the per-atom mean**. On a 7320-atom solvated polymer over 300 fs the second channel is what works:
++67.59 Eh and 2175 K become **+0.53 Eh and 246 K**, and 92 of the 104 rejected steps were ones the
+energy criterion accepted. See [docs/MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md) for the
+mechanism (one water molecule collapsing), the calibration tables and what it does not do.
 
 With
 ```sh

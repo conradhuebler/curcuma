@@ -24,7 +24,7 @@
 //       -L/opt/cuda/lib64 -L$MP/lib -L$BMP/lib -lcusolverMp -lcublasmp -lnccl -lcudart -lpthread \
 //       -o bench_syevd_mp
 // Run:
-//   LD_LIBRARY_PATH=$MP/lib:$BMP/lib ./bench_syevd_mp <n> <fp64|fp32> <devices e.g. 0,1,2,3> [block=1024]
+//   LD_LIBRARY_PATH=$MP/lib:$BMP/lib ./bench_syevd_mp <n> <fp64|fp32> <devices e.g. 0,1,2,3> [block=1024] [nprow=1]
 
 #include <cuda.h>
 #include <cusolverMp.h>
@@ -64,9 +64,10 @@ std::vector<T> makeSymmetric(int n)
 }
 
 template <typename T>
-int run(int n, const std::vector<int>& devs, int nb, cudaDataType dtype)
+int run(int n, const std::vector<int>& devs, int nb, cudaDataType dtype, int nprow)
 {
     const int ndev = static_cast<int>(devs.size());
+    const int npcol = ndev / nprow;   // nprow x npcol process grid, column-major rank mapping
     const auto host = makeSymmetric<T>(n);
     std::vector<ncclComm_t> comms(ndev);
     if (ncclCommInitAll(comms.data(), ndev, devs.data()) != ncclSuccess) {
@@ -85,10 +86,11 @@ int run(int n, const std::vector<int>& devs, int nb, cudaDataType dtype)
         cusolverMpHandle_t h = nullptr;
         if (cusolverMpCreate(&h, devs[r], stream) != CUSOLVER_STATUS_SUCCESS) return;
         cusolverMpGrid_t grid = nullptr;
-        if (cusolverMpCreateDeviceGrid(h, &grid, comms[r], 1, ndev, CUSOLVERMP_GRID_MAPPING_COL_MAJOR)
+        if (cusolverMpCreateDeviceGrid(h, &grid, comms[r], nprow, npcol, CUSOLVERMP_GRID_MAPPING_COL_MAJOR)
             != CUSOLVER_STATUS_SUCCESS) return;
-        const int64_t lrows = cusolverMpNUMROC(n, nb, 0, 0, 1);
-        const int64_t lcols = cusolverMpNUMROC(n, nb, static_cast<uint32_t>(r), 0, static_cast<uint32_t>(ndev));
+        const int myrow = r % nprow, mycol = r / nprow;
+        const int64_t lrows = cusolverMpNUMROC(n, nb, static_cast<uint32_t>(myrow), 0, static_cast<uint32_t>(nprow));
+        const int64_t lcols = cusolverMpNUMROC(n, nb, static_cast<uint32_t>(mycol), 0, static_cast<uint32_t>(npcol));
         cusolverMpMatrixDescriptor_t descA = nullptr, descQ = nullptr;
         cusolverMpCreateMatrixDesc(&descA, grid, dtype, n, n, nb, nb, 0, 0, lrows);
         cusolverMpCreateMatrixDesc(&descQ, grid, dtype, n, n, nb, nb, 0, 0, lrows);
@@ -140,8 +142,8 @@ int run(int n, const std::vector<int>& devs, int nb, cudaDataType dtype)
     for (int i = 0; i < n; ++i) { tr += host[i + static_cast<size_t>(i) * n]; se += eig[i]; }
     std::ostringstream mem;
     for (int r = 0; r < ndev; ++r) mem << (r ? "," : "") << static_cast<int>(used_gb[r] * 1024);
-    std::printf("MP   ndev=%d n=%d %s nb=%d solve=%.2f s scatter=%.2f s ok=%d  used_MiB=[%s]  trace=%.6f sum_eig=%.6f\n",
-                ndev, n, sizeof(T) == 8 ? "fp64" : "fp32", nb,
+    std::printf("MP   grid=%dx%d ndev=%d n=%d %s nb=%d solve=%.2f s scatter=%.2f s ok=%d  used_MiB=[%s]  trace=%.6f sum_eig=%.6f\n",
+                nprow, npcol, ndev, n, sizeof(T) == 8 ? "fp64" : "fp32", nb,
                 *std::max_element(t_solve.begin(), t_solve.end()), *std::max_element(t_scatter.begin(), t_scatter.end()),
                 static_cast<int>(std::count(ok.begin(), ok.end(), 1) == ndev), mem.str().c_str(), tr, se);
     return 0;
@@ -152,7 +154,7 @@ int run(int n, const std::vector<int>& devs, int nb, cudaDataType dtype)
 int main(int argc, char** argv)
 {
     if (argc < 4) {
-        std::fprintf(stderr, "usage: %s <n> <fp64|fp32> <dev,dev,...> [block]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <n> <fp64|fp32> <dev,dev,...> [block] [nprow]\n", argv[0]);
         return 1;
     }
     const int n = std::atoi(argv[1]);
@@ -161,5 +163,10 @@ int main(int argc, char** argv)
     std::stringstream ss(argv[3]);
     for (std::string tok; std::getline(ss, tok, ',');) devs.push_back(std::atoi(tok.c_str()));
     const int nb = argc > 4 ? std::atoi(argv[4]) : 1024;
-    return prec == "fp32" ? run<float>(n, devs, nb, CUDA_R_32F) : run<double>(n, devs, nb, CUDA_R_64F);
+    const int nprow = argc > 5 ? std::atoi(argv[5]) : 1;   // process-grid rows (1 = the 1 x ndev layout curcuma uses)
+    if (nprow < 1 || static_cast<int>(devs.size()) % nprow != 0) {
+        std::fprintf(stderr, "nprow must divide the device count\n");
+        return 1;
+    }
+    return prec == "fp32" ? run<float>(n, devs, nb, CUDA_R_32F, nprow) : run<double>(n, devs, nb, CUDA_R_64F, nprow);
 }

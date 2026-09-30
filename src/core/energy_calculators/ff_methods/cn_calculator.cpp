@@ -1,11 +1,13 @@
 /*
  * Coordination Number Calculator Implementation
- * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * Claude Generated - Consolidated from D3ParameterGenerator
  */
 
+#include "src/core/units.h"
 #include "cn_calculator.h"
+#include "gfnff_par.h"  // gfnff_cn_rcov_bohr: the one CN radius source (Sep 2026)
 #include "src/core/curcuma_logger.h"
 #include "src/core/math_compat.h"
 
@@ -57,7 +59,7 @@ std::vector<double> CNCalculator::calculateD3CN(
     // vs tblite that vanishes once the 25-Bohr cutoff matches tblite's CN.
     // Geometry is in Angstrom.
     const double cn_cutoff_ang = (cn_cutoff_bohr > 0.0)
-        ? cn_cutoff_bohr * 0.529177210903  // CODATA-2018 bohr radius (Angstrom)
+        ? cn_cutoff_bohr * CurcumaUnit::Length::BOHR_TO_ANGSTROM
         : 0.0;
 
     std::vector<double> cn_values(atoms.size(), 0.0);
@@ -129,23 +131,14 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
     // WP-D (May 2026): optional out_cn_raw lets callers reuse the raw N²-erf
     // result for dcn computation instead of recomputing it.
 
-    const double ANG2BOHR = 1.8897259886;  // 1 Angstrom = 1.8897259886 Bohr
-
     const int natoms = static_cast<int>(atoms.size());
     std::vector<double> cn_values(natoms, 0.0);
     if (out_cn_raw) out_cn_raw->assign(natoms, 0.0);
 
-    // GFN-FF CN scaling factor (Reference: gfnff_param.f90:381-404)
-    const double k_scaled = 4.0 / 3.0;
-
     // Pre-compute scaled covalent radii in Bohr (avoids repeated lookup in inner loop)
     std::vector<double> rcov_bohr(natoms, 0.0);
-    for (int i = 0; i < natoms; ++i) {
-        int elem = atoms[i] - 1;
-        if (elem >= 0 && elem < static_cast<int>(COVALENT_RADII.size())) {
-            rcov_bohr[i] = k_scaled * COVALENT_RADII[elem] * ANG2BOHR;
-        }
-    }
+    for (int i = 0; i < natoms; ++i)
+        rcov_bohr[i] = GFNFFParameters::gfnff_cn_rcov_bohr(atoms[i]);
 
     // Claude Generated (Mar 2026, Phase 4): Parallelized outer loop — each atom independent
     #pragma omp parallel for schedule(dynamic, 32)
@@ -216,7 +209,7 @@ void CNCalculator::addD3CNGradient(
     // dispersion cutoff) so the CN derivative is consistent with the (cut) CN
     // used in the energy.
     const double cn_cutoff_ang = (cn_cutoff_bohr > 0.0)
-        ? cn_cutoff_bohr * 0.529177210903  // CODATA-2018 bohr radius (Angstrom)
+        ? cn_cutoff_bohr * CurcumaUnit::Length::BOHR_TO_ANGSTROM
         : 0.0;
 
     const int natoms = static_cast<int>(atoms.size());
@@ -282,18 +275,12 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
      *    No cutoff, full O(N²) calculation. For verification only.
      */
 
-    const double ANG2BOHR = 1.8897259886;
     const int natoms = static_cast<int>(atoms.size());
-    const double k_scaled = 4.0 / 3.0;
 
     // Pre-compute scaled covalent radii in Bohr
     std::vector<double> rcov_bohr(natoms, 0.0);
-    for (int i = 0; i < natoms; ++i) {
-        int elem = atoms[i] - 1;
-        if (elem >= 0 && elem < static_cast<int>(COVALENT_RADII.size())) {
-            rcov_bohr[i] = k_scaled * COVALENT_RADII[elem] * ANG2BOHR;
-        }
-    }
+    for (int i = 0; i < natoms; ++i)
+        rcov_bohr[i] = GFNFFParameters::gfnff_cn_rcov_bohr(atoms[i]);
 
     // Mode selection
     if (cn_cutoff_bohr > 0.0) {
@@ -373,15 +360,10 @@ CNCalculator::CNResult CNCalculator::calculateGFNFFCNWithNeighbors(
     double cnmax)
 {
     const int natoms = static_cast<int>(atoms.size());
-    const double ANG2BOHR = 1.8897259886;
-    const double k_scaled = 4.0 / 3.0;
 
     std::vector<double> rcov_bohr(natoms, 0.0);
-    for (int i = 0; i < natoms; ++i) {
-        int elem = atoms[i] - 1;
-        if (elem >= 0 && elem < static_cast<int>(COVALENT_RADII.size()))
-            rcov_bohr[i] = k_scaled * COVALENT_RADII[elem] * ANG2BOHR;
-    }
+    for (int i = 0; i < natoms; ++i)
+        rcov_bohr[i] = GFNFFParameters::gfnff_cn_rcov_bohr(atoms[i]);
 
     CNResult result;
     result.cn_values.resize(natoms, 0.0);

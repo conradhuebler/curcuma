@@ -3,6 +3,8 @@
 > 🤖 AI-generated, not human-tested. Numbers below are measurements, not guarantees.
 >
 > All user-facing options and environment variables with defaults and when to change them: [GPU_TUNING.md](GPU_TUNING.md).
+>
+> What does not work yet, for GFN2/GFN1 and GFN-FF, with evidence and an order of attack: [MULTI_GPU_GAPS.md](MULTI_GPU_GAPS.md) (inventory, Sep 28, 2026).
 
 Plan: `~/.claude/plans/neuer-branch-wir-wollen-happy-marshmallow.md` (phases 0-6).
 Two cases: (A) batch of structures distributed over GPUs, (B) one large system on several GPUs.
@@ -25,7 +27,7 @@ Caveat: the polymer (1410 atoms) runs had ollama occupying 9-12 GB per GPU; the 
 
 - GFN-FF single point is >98 % CPU setup (topology + parameters); the GPU energy call is 137 ms. Gate G0e: passed -> multi-GPU cannot speed up a GFN-FF SP.
 - GPU gfn2/gfn1 wall minus reported TOTAL: ~0.7-1 s untimed (context/plugin init, uploads).
-- GFN-FF CPU vs GPU energy differs by 5.7e-7 Eh on polymer_2x (not investigated; GPU EEQ cutoff suspected).
+- GFN-FF CPU vs GPU energy differs by 5.7e-7 Eh on polymer_2x (not investigated; GPU EEQ cutoff suspected). **Superseded (Sep 25, 2026)**: the cause was different Bohr radii in the CPU and GPU CN radii; CPU == GPU to all 10 printed decimals since, CLAUDE.md Known Issue #33(a).
 
 ### GFN-FF MD, polymer_2x, 50 steps, dt 1 fs, -threads 36 (GPU run used the wrong gradient unit, see below)
 
@@ -34,7 +36,18 @@ Caveat: the polymer (1410 atoms) runs had ollama occupying 9-12 GB per GPU; the 
 | CPU | 355 s | ~6.9 s | 9.7 GB RSS |
 | 1x A4500 | 83 s | ~1.4 s | 10.9 GB RSS, 2.2 GB GPU |
 
-- CPU MD heats up (T 298 -> 20476 K at 40 fs) while the GPU run stays near 300 K. polymer_2x is **not pre-optimized** (operator note), so large initial forces make divergent trajectories plausible; not treated as a bug. Use an optimized structure for MD timings.
+- CPU MD heats up (T 298 -> 20476 K at 40 fs) while the GPU run stays near 300 K. **That
+  CPU-vs-GPU asymmetry was the Eh/Bohr vs Eh/Angstrom gradient unit bug (Known Issue #28) and
+  is gone since it was fixed** (operator, Sep 2026) - with the fixed binary both paths behave
+  the same. What remains is a blow-up that is NOT a CPU/GPU difference; see
+  [MD_LARGE_SYSTEMS.md](MD_LARGE_SYSTEMS.md). **The explanation first given here - "polymer_2x is not pre-optimized, so large initial forces make
+  divergent trajectories plausible" - was measured and is WRONG** (Sep 18, 2026): the cause is
+  the 1 fs time step, not the structure. GFN-FF-optimising polymer_2x (-901.94 -> -917.34 Eh,
+  gradient norm 2.35 -> 0.175) does not fix it - at dt = 1 fs the optimised structure heats to
+  <T> = 18527 K where the raw one reaches 2936 K. The time step does fix it: NVE over 100 fs
+  drifts +11.58 Eh at dt = 1.0 and -0.25 Eh at dt = 0.25, i.e. a factor 46 for a 4x smaller step
+  where dt^2 integration error would give 16 - dt = 1 fs is past the stability limit for GFN-FF's
+  X-H stretches here. See [MD_LARGE_SYSTEMS.md](MD_LARGE_SYSTEMS.md) for the verified settings.
 - ~1.4 s/step on GPU for 7320 atoms is far above the 23 ms/step measured at 1410 atoms -> per-step cost does not come from the force kernels alone (suspects: CN pair-list rebuild each step, dense EEQ potrf, syncs; see plan Phase 6).
 
 ### Dense eigensolver, n = 15444 (GFN2 nao of polymer_2x), random symmetric matrix
@@ -236,11 +249,19 @@ Energies unchanged at the printed precision (complex -329.52714784, polymer -208
 
 - `DistributedEigensolver` (`qm_methods/cuda/xtb_distributed_eigensolver.{h,cpp}`) in its own library `libcurcuma_cuda_mgpu.so`, loaded on first use by `libcurcuma_cuda.so` (`xtb_distributed_eigensolver_loader.cpp`), so a host without cuSOLVERMp/NCCL keeps single-GPU runs.
 - Backends: `mp` = cuSOLVERMp + cuBLASMp over NCCL (one host thread per GPU, communicators from `ncclCommInitAll`); `mg` = cusolverMg, FP64 only.
-- Hook: `XtbGpuContext::eigensolveResidentFock`. FP64: scatter F (and L once per geometry), `sygst` + `syevd` + `trsm` on the GPUs, gather C. FP32: `syevd` only. Falls back to the single-GPU cuSOLVER path on any failure, with a warning.
+- Hook: `XtbGpuContext::eigensolveResidentFock`. FP64: scatter F (and L once per geometry), `sygst` + `syevd` + back-transform on the GPUs, gather C. FP32: `syevd` + back-transform. Falls back to the single-GPU cuSOLVER path on any failure, with a warning.
+- Back-transform (Sep 29, 2026): column split - every GPU holds a full copy of L and runs `trsm` on its own eigenvector columns (`MpEigensolver::ensureFullFactor`/`backTransformLocal`); replaces `cublasMpTrsm`, which did not scale over PCIe. polymer_2x FP64 back-transform 10.9 -> 2.7 s on 4 GPUs, 20.8 -> 5.6 s on 2; wall 143 -> 134 s (4 GPUs), 227 -> 210 s (2 GPUs); energy -11784.87804452 Eh unchanged. The FP32 verification checks the back-transformed vectors through `A v = L^T C (eps .* (C^T L v))`.
 - Pitfalls found: cuBLASMp grid destruction is collective (a sequential teardown deadlocks at exit); stdout redirected to a file is block-buffered, so a long run looks hung (use `stdbuf -oL`).
 - Also fixed on the way: the gradient allocated W before releasing the eigensolver workspaces (raised the device peak); workspaces are now released when the SCF ends.
 - Validation: complex (gfn1, gfn2) at `-scf_threshold 1e-9` vs single GPU, energy and gradient <= 1.2e-9 for mp (4 GPUs, 2 GPUs not including device 0) and mg (FP64); polymer_2x energy identical at the printed 8 decimals; 200/200 `ctest -L gpu`.
 - Numbers and options: [GPU_TUNING.md](GPU_TUNING.md#multi-gpu-eigensolve-one-large-molecule-on-several-gpus).
+
+## Setup of one large molecule (Sep 29, 2026)
+
+- **Screened dense S/H0 build**: with screened integral storage the dense S (factorised into L) and H0 (Fock seed) were still computed for all nsh^2 shell pairs, 94 % of them outside the screening cutoff at polymer_2x. `k_overlap_h0` now receives the element-pair cutoff table the pattern is built from (widened by 1e-6 so no pattern pair is ever skipped) and leaves the other pairs at zero. Those entries were below `sparse_eps` (1e-20). polymer_2x: 11.5 -> 1.3 s on one device (all GPU counts, also 1 GPU); polymer (nao 3222, 41 % of pairs kept): 409 -> 215 ms, gradient identical to 3e-16 Eh/A, SCF iteration energies identical to 10 decimals. Dense storage (small molecules) is unchanged.
+- **Cholesky of S on the eigensolver's devices**: cuSOLVERMp `potrf` when the FP64 eigensolve is distributed; S is kept for one check `S v = L (L^T v)` (relative residual 9.9e-16 on polymer_2x, threshold 1e-10) and put back for the single-GPU `potrf` on failure. polymer_2x factorisation 3.5 s -> 1.8 s (4 GPUs) / 2.6 s (2 GPUs); the solver set-up (NCCL communicators) now happens here instead of in the first SCF solve. Setup + SCF 114.7 -> 112.8 s on 4 GPUs.
+- Not distributed: the remaining 1.3 s of `k_overlap_h0` (device 0), and the download of S/H0/L/gamma into the host matrices (3.7 s per geometry at polymer_2x, measured with the new `-verbosity 3` setup split; G2-10).
+- **D4 ATM and the on-the-fly multipole kernels, one warp per atom**: these atom-pair kernels ran one thread per atom (7320 threads, ~5 warps per SM on an A4500) and were latency-bound. With one warp per atom and a shuffle reduction: D4 ATM 3.8 -> 1.6 s per single point, multipole potential 3.9 -> 1.3 s and SCC energy 2.0 -> 1.0 s summed over 12 iterations (polymer_2x, 4 GPUs, wall 122 -> 117 s). A multi-GPU split of these kernels was not needed: the gain comes on device 0 alone, i.e. also with one GPU. The multipole potential evaluates each pair interaction once (the (j,i) terms follow exactly from the (i,j) evaluation). polymer proxy with `-gpu_multipole_otf on`: energy 4.5e-13 Eh, gradient 8e-15 Eh/A from the previous build.
 
 ## Step 3b: distributed pattern density (implemented, Sep 17, 2026)
 
@@ -258,3 +279,89 @@ functions (`gpu_eigensolver_min_nao`, `gpu_density_min_nao`). `-gpu_eigensolver_
 peak 13.9 GB, energy identical to the single-GPU run - the same numbers as with the options set
 explicitly. Below the gate the status line says so ("not used (nao below ...)"), and
 `ctest -L gpu` (200 tests, all small molecules) is unaffected: 200/200.
+
+## What to measure on the H200 node (Sep 18, 2026)
+
+Ordered by what curcuma cannot answer here. Everything below runs from the repository; nothing
+needs a code change. Bring back the `.json` files and the profile output.
+
+**0. Check the build first - without this the rest measures the wrong thing.**
+```bash
+bash scripts/find_mgpu_libs.sh        # what this node has (try `module load nvhpc` first)
+cmake .. -DCMAKE_CUDA_ARCHITECTURES=90 -DCUSOLVERMP_ROOT=... -DCUBLASMP_ROOT=... -DNCCL_ROOT=... \
+      -DCURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER=ON        # fails the configure if they are missing
+cmake .. ... 2>&1 | grep "=== curcuma multi-GPU eigensolver"   # or check the summary by hand
+curcuma -methods            # "multi-GPU eigensolver: mp (cuSOLVERMp)", plus the H200s
+```
+The Sep 17 H200 run fell back to cusolverMg because cuSOLVERMp/NCCL were missing, and Mg is 15x
+slower than the single-GPU path on our own measurement - a build without them looks like
+"multi-GPU does not help" when nothing multi-GPU ran.
+
+**1. The sweep, for the record.** `python scripts/tuning_sweep.py
+test_cases/molecules/larger/polymer_2x.xyz --method gfn2 --gpu cuda --repeats 2 --json h200.json`
+(~2 h). It checks every energy against the baseline, so a divergence shows up as SUSPECT rather
+than as a number to be believed.
+
+**2. Is mixed precision really the wrong default there?** The current default is FP64-only on
+full-rate-FP64 cards, decided from one operator log (5.29 s FP32 vs 3.36 s FP64 per iteration,
+and an FP32 phase converging 1.1 kcal/mol off). Measure `-scf_mixed_precision true|false` x
+`-scf_fp32_threshold 1e-5|1e-6` and watch the ITERATION COUNT as much as the wall time: if
+`true` now converges in the same number of iterations as `false`, the false-fixed-point guard
+has removed the reason for the default and it should be reconsidered.
+
+**3. The per-phase profile - the one measurement that is still missing everywhere.**
+`CURCUMA_GPU_PROFILE=1 curcuma -sp polymer_2x.xyz -method gfn2 -gpu cuda -verbosity 3`. It says
+how much of the run is eigensolve, density, Fock, integrals. That decides whether distributing
+the integrals and the Fock build (column-block ownership) is worth writing at all: if the
+eigensolve plus density is already 80 % of the run on that hardware, the answer is no.
+
+**4. Does the split scale past 2 GPUs on NVLink?** `-gpu_eigensolver_devices 0 | 0,1 | 0,1,2,3`
+(and the same for `-gpu_density_devices`). On PCIe we measured 1.53x and 1.34x at 4 devices with
+7320 atoms. NVLink should do better per device - or the far faster single card may leave nothing
+to win, which is equally worth knowing.
+
+**5. What the 141 GB card allows that ours does not.** `-gpu_multipole_otf off` and
+`-gpu_sparse_integrals off` both fail or time out on a 20 GB A4500. If they run there, compare
+them against the defaults: storing the multipole matrices may well beat rebuilding them when
+memory is free, and that would justify making the `auto` threshold device-memory-aware instead
+of a fixed ~2700 atoms.
+
+**6. How large can a system get now?** polymer_2x needs about 14 GB on one device. With 141 GB
+the interesting question is where the next wall is (nao^2 buffers, the int32 indexing noted in
+the size-guard work), so: one run on the largest structure you have.
+
+**7. Batch throughput**, if the node has 4 or 8 cards: `-sp` on a multi-XYZ file with
+`-gpu_devices 0,1,2,3 -gpu_workers_per_device 1|2`. Independent of everything above and the
+easiest real-world win.
+
+## Operator runs on other hardware (Sep 17/18, 2026)
+
+- **2x H200 NVL, build without cuSOLVERMp/NCCL**: the eigensolve fell back to cusolverMg, which
+  curcuma then only used for FP64 - one distributed solve out of 21, so the run looked
+  single-GPU. polymer_2x gfn2: 15 iterations / 52 s before the distributed density, 21 / 66 s
+  with it; the extra iterations are the FP32 noise-floor effect that the stagnation guard now
+  addresses (`scf_fp32_threshold` == `scf_threshold` == 1e-5), not a defect of the density path.
+  What that machine needs is a build WITH cuSOLVERMp + cuBLASMp + NCCL.
+- **2x RTX PRO 5000 Blackwell, Mg-only build, current code**: the per-solve verification rejected
+  Mg's FP32 eigenpairs (relative residual 3.5e-3) and kept FP64 distributed. Both runs below
+  converged in 12 iterations to -11784.87804452 Eh, the same energy as our 4x A4500 runs:
+
+  | polymer_2x gfn2, same machine | one GPU | `-gpu_density_devices all` |
+  |---|---:|---:|
+  | FP32 iteration | 4.62 s | **4.00 s** |
+  | FP64 iteration | 32.5 s | **25.3 s** |
+  | total | 100 s | **91 s** |
+
+  This is the first multi-GPU measurement on hardware other than the A4500 box, and it is worth
+  reading carefully: the 9 % came WITHOUT a distributed FP32 eigensolve (Mg was rejected), i.e.
+  from the distributed density plus the one distributed FP64 solve. On 2 GPUs the FP32 eigensolve
+  is worth little anyway (A4500: 12.2 -> 11.7 s per iteration on two devices), so the way to more
+  on that machine is more devices or a build with cuSOLVERMp, not the current backend.
+- **Full knob sweep on the A4500 box** (Sep 18, 2026): all 15 knobs on polymer_2x, 45 runs, one
+  energy for all of them; the numbers and what they mean are in
+  [GPU_TUNING.md](GPU_TUNING.md#a-full-sweep-measured). The same sweep is the thing to run on the
+  H200 node: `python scripts/tuning_sweep.py test_cases/molecules/larger/polymer_2x.xyz --method
+  gfn2 --gpu cuda --repeats 2 --json h200.json`.
+- Nothing here is a curcuma measurement on NVLink hardware: the per-phase profile
+  (`CURCUMA_GPU_PROFILE=1`) has not been taken on either machine, so how much of those runs is
+  distributable at all is still unknown.

@@ -27,6 +27,7 @@
 #include "xtb_gpu_method.h"
 
 #include "src/core/gpu_device_pool.h"
+#include "src/core/gpu_fallback.h"
 
 #include <algorithm>
 #include <cstring>
@@ -205,6 +206,8 @@ public:
         const std::string why = m_ctx->lastError();
         CurcumaLogger::warn(fmt::format("GPU {} on device {} failed{}; this calculation runs on the CPU",
                                         stage, m_ctx->deviceId(), why.empty() ? std::string() : " - " + why));
+        curcuma::reportGpuFallback(fmt::format("native xTB: GPU {} failed, calculation on the CPU", stage),
+                                   fmt::format("device {}{}", m_ctx->deviceId(), why.empty() ? std::string() : ", " + why));
     }
 
     bool downloadGamma(Eigen::MatrixXd& gamma_out) override
@@ -235,6 +238,14 @@ public:
         if (!m_ctx || m_n <= 0) return false;
         L_out.resize(m_n, m_n);
         return m_ctx->downloadCholesky(L_out.data());
+    }
+    bool downloadOverlapInto(double* S_colmajor) override
+    {
+        return m_ctx && m_n > 0 && m_ctx->downloadOverlap(S_colmajor);
+    }
+    bool downloadH0Into(double* H0_colmajor) override
+    {
+        return m_ctx && m_n > 0 && m_ctx->downloadH0(H0_colmajor);
     }
 
     bool beginMultipoleComputed() override
@@ -436,10 +447,28 @@ public:
         const std::string dist = m_ctx ? m_ctx->distributedEigensolverStatus() : std::string();
         if (dist.empty() || dist == m_dist_reported) return;
         m_dist_reported = dist;
-        if (dist.rfind("unavailable", 0) == 0 || dist.find("failed") != std::string::npos)
+        // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md G2-7): every status that means "not
+        // (fully) distributed" or "slower library" is a warning and a counted GPU fallback, not an
+        // info line at verbosity 2 - batch workers and default runs never showed them.
+        const bool degraded = dist.rfind("unavailable", 0) == 0 || dist.find("failed") != std::string::npos
+            || dist.find("needs one more") != std::string::npos || dist.find("stays on") != std::string::npos
+            || dist.find("only FP64") != std::string::npos;
+        if (degraded) {
             CurcumaLogger::warn("GPU multi-GPU eigensolver " + dist);
-        else if (CurcumaLogger::get_verbosity() >= 2)
+            curcuma::reportGpuFallback("multi-GPU eigensolver not (fully) used", dist);
+        } else if (dist.rfind("cusolverMg", 0) == 0) {
+            CurcumaLogger::warn("GPU multi-GPU eigensolver: " + dist
+                + " - cusolverMg is the fallback library (FP64 only, slower than cuSOLVERMp)");
+            curcuma::reportGpuFallback("multi-GPU eigensolver on cusolverMg instead of cuSOLVERMp", dist);
+        } else if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info("GPU multi-GPU eigensolver: " + dist);
+        }
+        const std::string degr = m_ctx ? m_ctx->distributedEigensolverDegradation() : std::string();
+        if (!degr.empty() && degr != m_degr_reported) {
+            m_degr_reported = degr;
+            CurcumaLogger::warn("GPU multi-GPU eigensolver: " + degr);
+            curcuma::reportGpuFallback("multi-GPU eigensolver partly on one device", degr);
+        }
     }
 
     // ---- Full device GFN2 potential build (Stage 5, Part B3/B4) -----------
@@ -455,6 +484,7 @@ public:
     }
 
     bool supportsOnTheFlyMultipole() const override { return true; }
+    std::string lastError() const override { return m_ctx ? m_ctx->lastError() : std::string(); }
     bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr, const double* mrad,
                                 double dmp3, double dmp5, const double* dkernel,
                                 const double* qkernel, const double* gamma3) override
@@ -493,6 +523,7 @@ private:
     bool           m_fallback_warned = false;
     bool           m_storage_reported = false;
     std::string    m_dist_reported;
+    std::string    m_degr_reported;
     std::string    m_dens_reported;
 };
 
@@ -552,9 +583,47 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
         // Both multi-GPU paths only engage from gpu_eigensolver_min_nao / gpu_density_min_nao
         // (4000) basis functions up; below that they cost more than they save.
         // See docs/GPU_TUNING.md for the measured numbers.
-        const bool several_devices = XtbGpuContext::deviceCount() > 1
-            && curcuma::leasedGpuDevice() < 0;
-        if (config.contains("gpu_eigensolver_devices") || several_devices) {
+        //
+        // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md G2-2/G2-3): which devices "all" means
+        // and when the split is allowed at all.
+        //  - "all"/"auto"/default = the device pool (-gpu_devices) when one is configured, else
+        //    every visible device. It used to be every visible device regardless of -gpu_devices,
+        //    so a single large run on a shared node put ranks on GPUs the user had excluded.
+        //  - An explicit -gpu_device N (not the pool's automatic choice, gpu_device_auto) keeps the
+        //    default split off: the user asked for one card.
+        //  - A batch worker holding a lease never splits, not even on an explicit flag: every
+        //    worker would otherwise build NCCL communicators over all GPUs. The flag is ignored
+        //    with a warning and counted as a GPU fallback.
+        const int leased = curcuma::leasedGpuDevice();
+        const auto& pool = curcuma::GpuDevicePool::instance();
+        const std::vector<int> pool_devices = pool.active() ? pool.devices() : std::vector<int>{};
+        const bool auto_device = config.contains("gpu_device_auto") && config["gpu_device_auto"].is_boolean()
+            && config["gpu_device_auto"].get<bool>();
+        const bool user_pinned = leased < 0 && config.contains("gpu_device") && !auto_device;
+        const int usable = pool_devices.empty() ? XtbGpuContext::deviceCount()
+                                                : static_cast<int>(pool_devices.size());
+        const bool several_devices = usable > 1 && leased < 0 && !user_pinned;
+        auto push_all = [&](std::vector<int>& devs) {
+            if (pool_devices.empty()) devs.push_back(-1);   // the context expands -1 to every visible device
+            else devs.insert(devs.end(), pool_devices.begin(), pool_devices.end());
+        };
+        auto split_requested = [&](const char* key) {
+            if (!config.contains(key)) return false;
+            const auto& v = config[key];
+            if (v.is_array()) return !v.empty();
+            if (!v.is_string()) return false;
+            const std::string x = v.get<std::string>();
+            return !x.empty() && x != "none" && x != "off";
+        };
+        for (const char* key : { "gpu_eigensolver_devices", "gpu_density_devices" }) {
+            if (leased >= 0 && split_requested(key)) {
+                CurcumaLogger::warn(fmt::format("-{} ignored: this calculation is a batch worker on "
+                                                "leased device {}; batch workers do not split one molecule", key, leased));
+                curcuma::reportGpuFallback(std::string("-") + key + " ignored in a batch worker",
+                                           "device " + std::to_string(leased));
+            }
+        }
+        if (leased < 0 && (config.contains("gpu_eigensolver_devices") || several_devices)) {
             std::vector<int> devs;
             std::string spec = "all";
             if (config.contains("gpu_eigensolver_devices")) {
@@ -566,7 +635,7 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                 }
             }
             if (spec == "all" || spec == "auto") {
-                devs.push_back(-1);   // the context expands this to every visible device
+                push_all(devs);
             } else if (!spec.empty() && spec != "none" && spec != "off") {
                 std::stringstream ss(spec);
                 for (std::string tok; std::getline(ss, tok, ',');) {
@@ -599,11 +668,41 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                                                fp32, verify);
         }
 
+        // Claude Generated (Sep 29, 2026): -scf_pseudo_diag - FP32 SCF steps rotate the previous
+        // eigenvectors instead of diagonalising (docs/GFN2_GPU_COST_PLAN.md stage 2).
+        {
+            // SCF keys arrive in the xtb scope (-xtb.scf_pseudo_diag / the flat flag routed there).
+            auto scfval = [&](const char* key) -> const json* {
+                if (config.contains("xtb") && config["xtb"].is_object() && config["xtb"].contains(key))
+                    return &config["xtb"][key];
+                return config.contains(key) ? &config[key] : nullptr;
+            };
+            auto scfnum = [&](const char* key, double def) {
+                const json* x = scfval(key);
+                if (!x) return def;
+                if (x->is_number()) return x->get<double>();
+                if (x->is_string()) { try { return std::stod(x->get<std::string>()); } catch (...) {} }
+                return def;
+            };
+            bool pseudo = false;
+            if (const json* x = scfval("scf_pseudo_diag"))
+                pseudo = x->is_boolean() ? x->get<bool>()
+                       : x->is_number()  ? x->get<double>() != 0.0
+                       : (x->is_string() && (x->get<std::string>() == "true" || x->get<std::string>() == "1"));
+            bool pseudo64 = false;
+            if (const json* x = scfval("scf_pseudo_diag_fp64"))
+                pseudo64 = x->is_boolean() ? x->get<bool>()
+                         : x->is_number()  ? x->get<double>() != 0.0
+                         : (x->is_string() && (x->get<std::string>() == "true" || x->get<std::string>() == "1"));
+            ctx->setPseudoDiagonalisation(pseudo, scfnum("scf_pseudo_diag_max_dq", 0.05),
+                                          static_cast<int>(scfnum("scf_pseudo_diag_max_steps", 8)), pseudo64);
+        }
+
         // Claude Generated (Sep 2026, multi-GPU): `-gpu_density_devices all|0,1,..|solver|none`
         // splits the screened-pattern density of the resident SCF over several GPUs (exact, see
         // XtbGpuContext::densityPatternDistributed). "solver" reuses the eigensolver's devices.
         // Defaults to all visible devices under the same condition as the eigensolve above.
-        if (config.contains("gpu_density_devices") || several_devices) {
+        if (leased < 0 && (config.contains("gpu_density_devices") || several_devices)) {
             std::vector<int> devs;
             std::string spec = "all";
             if (config.contains("gpu_density_devices")) {
@@ -615,12 +714,12 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                 }
             }
             if (spec == "all" || spec == "auto") {
-                devs.push_back(-1);
+                push_all(devs);
             } else if (spec == "solver" && config.contains("gpu_eigensolver_devices")
                        && config["gpu_eigensolver_devices"].is_string()) {
                 const std::string es = config["gpu_eigensolver_devices"].get<std::string>();
                 if (es == "all" || es == "auto") {
-                    devs.push_back(-1);
+                    push_all(devs);
                 } else {
                     std::stringstream ss(es);
                     for (std::string tok; std::getline(ss, tok, ',');) {
@@ -684,20 +783,35 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
         // path: far-from-convergence iterations solve in FP32, reverting to
         // FP64 near convergence (max|dq| < threshold) so the converged energy
         // stays FP64 (gpu_gfn{1,2}_validation @1e-8 holds). Claude Generated.
-        xtb->setMixedPrecision(true);
+        // Claude Generated (Sep 2026, measured on H200): mixed precision is a CONSUMER-GPU trick.
+        // Where FP64 runs at half the FP32 rate it does not pay - polymer_2x on an H200 NVL took
+        // 5.29 s per FP32 iteration and 3.36 s per FP64 one - and it is worse than that: at
+        // nao = 15444 the FP32 phase converged to a fixed point 1.1 kcal/mol off (dq 7.1e-6 while
+        // the truth was 9.4e-3), so the SCF had to discover that through its FP64 check and spent
+        // 42 iterations instead of 15. On such a device the default is therefore FP64 throughout;
+        // -scf_mixed_precision true overrides it.
+        // The user's own -scf_mixed_precision (applied by applyXtbScfConfig before this
+        // point) wins over the device-class default. Claude Generated (Sep 2026): this used
+        // to be an unconditional assignment, so the flag the message below advertises had
+        // no effect on a full-rate-FP64 device.
+        auto cfg_has = [&](const char* key) {
+            return config.contains(key)
+                || (config.contains("xtb") && config["xtb"].is_object() && config["xtb"].contains(key));
+        };
+        const bool fast_fp64 = ctx->deviceHasFastFp64();
+        const bool mp_explicit = cfg_has("scf_mixed_precision") || cfg_has("mixed_precision");
+        if (!mp_explicit) xtb->setMixedPrecision(!fast_fp64);
+        if (fast_fp64 && !mp_explicit && CurcumaLogger::get_verbosity() >= 2)   // info() is level >= 2
+            CurcumaLogger::info(fmt::format(
+                "{}: {} has full-rate FP64 - mixed precision OFF by default "
+                "(-scf_mixed_precision true to force it)", getMethodName(), ctx->deviceName()));
         // Claude Generated (Sep 2026, operator decision): on the GPU switch to FP64 only once
         // max|dq| < 1e-5 (CPU default stays 1e-3). Measured on polymer (1410 atoms, RTX A4500):
         // FP64 eigensolves 4 -> 1, SCF 6.7 -> 4.5 s, energy identical to 1e-12 Eh, gradient vs
         // CPU 2.6e-6 -> 7.0e-6 Eh/A (within the loose default scf_threshold). An explicit
         // -scf_fp32_threshold (or its alias fp32_threshold) wins. See docs/MULTI_GPU.md.
-        {
-            auto has = [&](const char* key) {
-                return config.contains(key)
-                    || (config.contains("xtb") && config["xtb"].is_object() && config["xtb"].contains(key));
-            };
-            if (!has("scf_fp32_threshold") && !has("fp32_threshold"))
-                xtb->setFp32Threshold(1.0e-5);
-        }
+        if (!cfg_has("scf_fp32_threshold") && !cfg_has("fp32_threshold"))
+            xtb->setFp32Threshold(1.0e-5);
         if (CurcumaLogger::get_verbosity() >= 2)
             CurcumaLogger::info(fmt::format(
                 "{}: GPU device-resident SCF backend active (Broyden; "

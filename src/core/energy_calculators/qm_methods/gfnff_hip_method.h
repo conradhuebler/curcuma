@@ -44,6 +44,8 @@ struct GFNFFRocmBackend {
     /// Schur complement.  That is the expected path here, not a numerical failure, so
     /// the wrapper reports it at verbosity 3 instead of warning.
     static constexpr bool has_device_schur = false;
+    /// No multi-GPU split on ROCm (CUDA only, Sep 2026).
+    static constexpr bool has_multi_gpu_split = false;
 
     /// Deliverable 3 (Jun 2026): from 16 fragments on, the EEQ goes to the exact CPU
     /// PCG — the device path would do a dense N x N Cholesky (O(N^3)) for nfrag>1.

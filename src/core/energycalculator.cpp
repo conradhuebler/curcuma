@@ -181,8 +181,20 @@ bool EnergyCalculator::createMethod(const std::string& method_name, const json& 
 
         // Claude Generated (Sep 2026, multi-GPU case A): a batch worker holding a GPU lease
         // pins its method to the leased device (see src/core/gpu_device_pool.h).
-        if (curcuma::leasedGpuDevice() >= 0)
+        if (curcuma::leasedGpuDevice() >= 0) {
             method_config["gpu_device"] = curcuma::leasedGpuDevice();
+        } else if (!method_config.contains("gpu_device")
+                   && curcuma::GpuDevicePool::instance().active()) {
+            // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md G2-2): a single calculation
+            // with -gpu_devices runs on the first listed device, not on device 0 - otherwise
+            // "-gpu_devices 2,3" still put the calculation (and all its dense matrices) on 0.
+            // gpu_device_auto tells the backends this was not an explicit -gpu_device.
+            const auto devs = curcuma::GpuDevicePool::instance().devices();
+            if (!devs.empty()) {
+                method_config["gpu_device"] = devs.front();
+                method_config["gpu_device_auto"] = true;
+            }
+        }
         method_config["multiplicity"] = m_mult;
         
         // Add geometry file for parameter caching

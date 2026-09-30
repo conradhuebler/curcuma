@@ -6,6 +6,7 @@
  * December 25, 2025: Complete alphaiw (polarizability) data integration
  */
 
+#include "src/core/units.h"
 #include "d4param_generator.h"
 #include "d4_charge_scaling.h"  // shared exact dftd4 zeta (AP6b)
 #include "d4_ncoord.h"          // dftd4 EN-weighted covalent CN (GFN2 D4 path)
@@ -429,15 +430,14 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     // ARCHITECTURE:
     //   - collapse(2): Parallelize BOTH i and j loops for better load balancing
     //   - Dynamic scheduling: Handles triangular iteration (j > i) efficiently
-    //   - Thread-local storage: Each thread builds its own pair list
-    //   - Critical section: Minimal synchronization for merging
+    //   - Per-row storage: row i's pairs go to row_pairs[i], merged in i order afterwards,
+    //     so the list order is the serial one for any thread count (Sep 2026)
     //
     // THREAD SAFETY:
     //   - m_atoms, m_cn_values, m_eeq_charges, m_topology_charges: Read-only ✅
     //   - getChargeWeightedC6(), getSqrtZr4r2(): Pure functions with cached data ✅
     //   - GFNFFParameters::zetaChargeScale(): Static data ✅
-    //   - local_pairs: Thread-local ✅
-    //   - pairs_vec: Protected by critical section ✅
+    //   - row_pairs[i]: written by exactly one iteration ✅
 
     json dispersion_pairs = json::array();
 
@@ -447,18 +447,18 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     // (12 string-keyed inserts each) plus an OpenMP spawn — on every geometry.
     // GFN-FF keeps it on; its ForceFieldThread consumes d4_dispersion_pairs.
     if (m_build_pair_lists) {
-    std::vector<json> pairs_vec;
-
-    #pragma omp parallel
+    // Sep 2026 (Claude Generated): per-row buckets merged in i order, as in
+    // GenerateDispersionPairsNative - the omp-critical merge below the loop used to append in
+    // thread-arrival order, making the pair order run-to-run nondeterministic.
+    std::vector<std::vector<json>> row_pairs(m_atoms.size());
     {
-        std::vector<json> local_pairs;
-
         // NOTE: Cannot use collapse(2) with triangular loops (j = i + 1)
         // Parallelize outer loop only, still provides good speedup
         // Claude Generated 2026 - MSVC's OpenMP (2.0 semantics) requires a signed
         // loop index; GCC/Clang accept size_t fine, so this was never caught before.
-        #pragma omp for schedule(dynamic, 10)
+        #pragma omp parallel for schedule(dynamic, 10)
         for (int i = 0; i < static_cast<int>(m_atoms.size()); ++i) {
+            std::vector<json>& local_pairs = row_pairs[i];
             for (int j = i + 1; j < static_cast<int>(m_atoms.size()); ++j) {
             int atom_i = m_atoms[i];
             int atom_j = m_atoms[j];
@@ -576,18 +576,14 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
             }
         }  // end j loop
     }  // end i loop
+    }  // end omp parallel for
 
-        // Merge thread-local results into global container
-        #pragma omp critical
-        {
-            pairs_vec.insert(pairs_vec.end(), local_pairs.begin(), local_pairs.end());
+    // Convert the rows, in i order, to the JSON array and count pairs
+    for (auto& row : row_pairs) {
+        for (auto& p : row) {
+            dispersion_pairs.push_back(std::move(p));
+            num_pairs++;
         }
-    }  // end omp parallel
-
-    // Convert vector to JSON array and count pairs
-    for (const auto& p : pairs_vec) {
-        dispersion_pairs.push_back(p);
-        num_pairs++;
     }
     }  // end if (m_build_pair_lists)
 
@@ -698,7 +694,7 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
         std::vector<std::vector<int>> adjacency(n_atoms);
 
         // Covalent radii in Angstrom (from GFN-FF method) for bond detection
-        const double ANGSTROM_TO_BOHR = 1.8897261246257702;
+        const double ANGSTROM_TO_BOHR = CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.8897261246257702);
         static const std::vector<double> rcov_angstrom = {
             0.32, 0.37, 1.30, 0.99, 0.84, 0.75, 0.71, 0.64, 0.60, 0.62, // H-Ne
             1.60, 1.40, 1.24, 1.14, 1.09, 1.04, 1.00, 1.01, // Na-Ar
@@ -766,13 +762,14 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
         // Same proven pattern as C6 pair loop above: thread-local vectors + critical merge
         // Thread safety: m_atoms, m_gaussian_weights, m_c6_reference_cache are read-only
         //                getChargeWeightedC6() and calculateTripleScale() are pure functions
-        #pragma omp parallel
+        // Sep 2026 (Claude Generated): one slot per triple, merged in index order - the former
+        // omp-critical merge appended in thread-arrival order, so the triple order (and the
+        // summation order downstream) changed from run to run with more than one thread.
+        std::vector<json> triple_slots(triplet_vec.size());
         {
-            std::vector<json> local_triples;
-
             // Claude Generated 2026 - MSVC's OpenMP (2.0 semantics) requires a signed
             // loop index; GCC/Clang accept size_t fine, so this was never caught before.
-            #pragma omp for schedule(dynamic, 10)
+            #pragma omp parallel for schedule(dynamic, 10)
             for (int idx = 0; idx < static_cast<int>(triplet_vec.size()); ++idx) {
                 int i = std::get<0>(triplet_vec[idx]);
                 int j = std::get<1>(triplet_vec[idx]);
@@ -801,16 +798,11 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
                 triple["atm_method"] = "d4";
                 triple["triple_scale"] = calculateTripleScale(i, j, k);
 
-                local_triples.push_back(std::move(triple));
-            }
-
-            #pragma omp critical
-            {
-                for (auto& t : local_triples) {
-                    atm_triples.push_back(std::move(t));
-                }
+                triple_slots[idx] = std::move(triple);
             }
         }
+        for (auto& t : triple_slots)
+            atm_triples.push_back(std::move(t));
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::param("Generated D4 ATM triples (bonded)", static_cast<int>(atm_triples.size()));
@@ -2088,18 +2080,24 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     // (Curcuma-vs-XTB diff: +0.92969 Eh @ cutoff=60.0  →  +0.92993 Eh @ cutoff=38.73).
     // Fortran's dispthr appears to apply only to D3, not D4 — D4's effective cutoff is larger.
     // 60 Bohr stays as the empirical Curcuma D4 default.
-    constexpr double disp_cutoff_bohr = 60.0;
+    constexpr double disp_cutoff_bohr = PAIR_BUILD_CUTOFF_BOHR;  // 60.0 (header constant, Sep 2026)
     constexpr double disp_cutoff_sq = disp_cutoff_bohr * disp_cutoff_bohr;
 
-    #pragma omp parallel
+    // Claude Generated (Sep 2026): pairs are collected per row i and concatenated in i order,
+    // so the list comes out in the serial (i, j) order for every thread count and every run.
+    // Before, thread-local lists were appended in thread-ARRIVAL order under omp critical: the
+    // pair order - and with it the workspace partitioning and the summation order - changed
+    // from run to run, and a 4-thread water8 single point differed in the last bit between
+    // runs (6 repeats, 4 distinct gradients; with -gfnff.dispersion false all 6 identical).
+    const int n_at = static_cast<int>(m_atoms.size());
+    std::vector<std::vector<GFNFFDispersion>> row_pairs(n_at);
     {
-        std::vector<GFNFFDispersion> local_pairs;
-
         // Claude Generated 2026 - MSVC's OpenMP (2.0 semantics) requires a signed
         // loop index; GCC/Clang accept size_t fine, so this was never caught before.
-        #pragma omp for schedule(dynamic, 10)
-        for (int i = 0; i < static_cast<int>(m_atoms.size()); ++i) {
-            for (int j = i + 1; j < static_cast<int>(m_atoms.size()); ++j) {
+        #pragma omp parallel for schedule(dynamic, 10)
+        for (int i = 0; i < n_at; ++i) {
+            std::vector<GFNFFDispersion>& local_pairs = row_pairs[i];
+            for (int j = i + 1; j < n_at; ++j) {
                 double r2 = (geometry_bohr.row(i) - geometry_bohr.row(j)).squaredNorm();
                 if (r2 > disp_cutoff_sq) continue;
 
@@ -2137,17 +2135,21 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
                 // with 60 instead of 50 the worst GMTKN55 gfn2 deviation moves 0.01667 ->
                 // 0.01666 kcal/mol. The whole deviation is the THREE-body cutoff instead
                 // (-xtb.d4_atm_cutoff). Measured Sep 2026; Claude Generated.
-                d.r_cut = 50.0;
+                d.r_cut = PAIR_EVAL_CUTOFF_BOHR;  // 50.0 (header constant, Sep 2026)
                 d.zetac6 = zetac6;
                 // P1c (Apr 2026): Legacy D3 fields removed from GFNFFDispersion
 
                 local_pairs.push_back(d);
             }
         }
-
-        #pragma omp critical
-        {
-            all_pairs.insert(all_pairs.end(), local_pairs.begin(), local_pairs.end());
+    }
+    {
+        size_t n_pairs = 0;
+        for (const auto& row : row_pairs) n_pairs += row.size();
+        all_pairs.reserve(n_pairs);
+        for (auto& row : row_pairs) {
+            all_pairs.insert(all_pairs.end(), row.begin(), row.end());
+            std::vector<GFNFFDispersion>().swap(row);  // release as we go (large systems)
         }
     }
 
