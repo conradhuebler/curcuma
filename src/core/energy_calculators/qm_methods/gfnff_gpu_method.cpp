@@ -28,6 +28,19 @@ void GFNFFCudaBackend::downloadDoubles(double* host, const double* device, int n
     cudaMemcpy(host, device, n * sizeof(double), cudaMemcpyDeviceToHost);
 }
 
+int GFNFFCudaBackend::deviceCount()
+{
+    int n = 0;
+    return cudaGetDeviceCount(&n) == cudaSuccess ? n : 0;
+}
+
+bool GFNFFCudaBackend::setDevice(int device)
+{
+    int cur = -1;
+    if (cudaGetDevice(&cur) == cudaSuccess && cur == device) return true;
+    return cudaSetDevice(device) == cudaSuccess;
+}
+
 // ---------------------------------------------------------------------------
 // Explicit instantiation of the shared wrapper for the CUDA backend
 // ---------------------------------------------------------------------------

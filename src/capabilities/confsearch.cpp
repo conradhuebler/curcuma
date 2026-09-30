@@ -17,6 +17,7 @@
  *
  */
 
+#include "src/core/gpu_device_pool.h"
 #include "src/global_config.h"
 
 #include "src/capabilities/confscan.h"
@@ -154,7 +155,14 @@ void ConfSearch::start()
 
     // GPU + Multi-Threading Safety: Deactivate GPU when threads > 1 to prevent
     // GPU contention. Multiple MD instances cannot share the GPU simultaneously.
-    if (m_threads > 1 && md.contains("gpu") && !md["gpu"].is_null() && md["gpu"] != "none") {
+    // Claude Generated (Sep 2026, multi-GPU): with an active GPU device pool every MD worker
+    // leases its own device slot (MDThread::execute), and surplus workers wait for a slot, so
+    // the parallel runs no longer contend for one device - keep the GPU on.
+    if (curcuma::GpuDevicePool::instance().active()) {
+        if (m_threads > curcuma::GpuDevicePool::instance().capacity())
+            CurcumaLogger::info(fmt::format("ConfSearch: {} threads share {} GPU slot(s); surplus MD runs wait for a free device",
+                                            m_threads, curcuma::GpuDevicePool::instance().capacity()));
+    } else if (m_threads > 1 && md.contains("gpu") && !md["gpu"].is_null() && md["gpu"] != "none") {
         CurcumaLogger::warn("GPU cannot be used with multiple threads simultaneously. Disabling GPU for this run.");
         md["gpu"] = "none";
         m_gpu = "none";

@@ -72,6 +72,7 @@ inline bool cpuTriEig(int n, const double* diag, const double* off, double* eval
 } // namespace
 
 struct XtbVulkanContext::Impl {
+    explicit Impl(int device) : vkc(device) {}
     curcuma::vk::VkContext vkc;
 
     VkDevice      dev   = VK_NULL_HANDLE;
@@ -1781,12 +1782,13 @@ struct XtbVulkanContext::Impl {
     }
 };
 
-XtbVulkanContext::XtbVulkanContext() : m_impl(std::make_unique<Impl>()) {}
+XtbVulkanContext::XtbVulkanContext(int device) : m_impl(std::make_unique<Impl>(device)) {}
 XtbVulkanContext::~XtbVulkanContext() = default;
 
 bool XtbVulkanContext::ok() const { return m_impl && m_impl->vkc.ok(); }
 std::string XtbVulkanContext::deviceName() const { return m_impl ? m_impl->vkc.deviceName() : std::string(); }
 int XtbVulkanContext::deviceId() const { return m_impl ? m_impl->vkc.deviceId() : -1; }
+bool XtbVulkanContext::bindDevice() const { return ok(); }
 bool XtbVulkanContext::deviceAvailable() { return curcuma::vk::VkContext::deviceAvailable(); }
 
 bool XtbVulkanContext::solveSymmetric(const double* A, int n, double* eps, double* V)

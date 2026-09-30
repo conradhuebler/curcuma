@@ -37,6 +37,7 @@
 
 #include "src/core/energycalculator.h"
 #include "src/core/intra_parallel_context.h"
+#include "src/core/gpu_device_pool.h"
 #include "src/core/molecule.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
@@ -773,6 +774,8 @@ public:
         // One MD run among many under a molecule-level pool: keep intra-molecule
         // fan-out suppressed so methods that honor the flag stay serial.
         curcuma::SuppressIntraParallel intra_guard;
+        // Multi-GPU batch (Sep 2026): borrow a device slot for this task; no-op without a GPU pool.
+        curcuma::GpuDeviceLease gpu_lease;
 
         const auto t0 = std::chrono::steady_clock::now();
         m_mddriver = new SimpleMD(m_controller, false);

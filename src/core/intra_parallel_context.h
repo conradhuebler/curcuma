@@ -36,13 +36,33 @@ inline bool& intraParallelSuppressed()
     return flag;
 }
 
+/// Intra-molecule thread budget while suppressed (Claude Generated, Sep 2026, multi-GPU).
+/// 1 = strictly serial (the CPU batch case: the molecule-level pool already owns every core).
+/// A GPU batch worker (GpuDeviceLease) raises it to cores / GPU slots: its heavy work runs on
+/// the device, so the few host-side stages (integral setup, per-iteration potential) would
+/// otherwise idle cores and stall the GPU.
+inline int& intraThreadBudget()
+{
+    static thread_local int budget = 1;
+    return budget;
+}
+
 /// RAII guard: raise the suppression flag for the enclosing scope and restore the
 /// previous value on exit (nesting-safe). Construct it at the top of a
 /// molecule-level batch worker's task so any method it invokes stays serial.
 struct SuppressIntraParallel {
     bool prev;
-    SuppressIntraParallel()  : prev(intraParallelSuppressed()) { intraParallelSuppressed() = true; }
-    ~SuppressIntraParallel() { intraParallelSuppressed() = prev; }
+    int prev_budget;
+    SuppressIntraParallel() : prev(intraParallelSuppressed()), prev_budget(intraThreadBudget())
+    {
+        intraParallelSuppressed() = true;
+        intraThreadBudget() = 1;
+    }
+    ~SuppressIntraParallel()
+    {
+        intraParallelSuppressed() = prev;
+        intraThreadBudget() = prev_budget;
+    }
 };
 
 } // namespace curcuma

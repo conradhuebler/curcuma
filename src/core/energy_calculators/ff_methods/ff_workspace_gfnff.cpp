@@ -864,10 +864,57 @@ void FFWorkspace::calcCoulomb(int p)
 {
     auto& acc = m_accumulators[p];
     auto [begin, end] = m_partitions[p].coulombs;
-    if (begin == end) return;
+    const auto [atom_begin, atom_end] = m_partitions[p].coulomb_atoms;
+    if (begin == end && atom_begin == atom_end) return;
 
     Matrix grad_before;
     if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
+
+    // Claude Generated (Sep 2026): implicit pairs. Everything a pair needs is per-atom - the EEQ
+    // charge and alpeeq (gamma_ij = 1/sqrt(alp_i+alp_j)) - so the N^2/2 list does not have to
+    // exist. Storing it costs 128 bytes per pair: 3.4 GB and ~0.5 s of pure write bandwidth at
+    // 7320 atoms, which no amount of threading removes (measured). Same formula and the same
+    // i<j pair set as the stored path below; the CUDA k_coulomb_implicit kernel is the device
+    // twin of this loop.
+    if (atom_begin < atom_end) {
+        const double sqrt_pi = 1.772453850905516;
+        const bool have_q = (m_eeq_charges.size() == m_natoms);
+        const bool have_alp = (m_coul_alp.size() == m_natoms);
+        if (have_q && have_alp) {
+            for (int i = atom_begin; i < atom_end; ++i) {
+                const double qi = m_eeq_charges(i);
+                const double alp_i = m_coul_alp(i);
+                if (std::isnan(qi) || alp_i <= 0.0) continue;
+                const Eigen::Vector3d ri = m_geometry.row(i);
+                for (int j = i + 1; j < m_natoms; ++j) {
+                    const double qj = m_eeq_charges(j);
+                    const double alp_j = m_coul_alp(j);
+                    if (std::isnan(qj) || alp_j <= 0.0) continue;
+                    const Eigen::Vector3d rij_vec = ri - m_geometry.row(j).transpose();
+                    const double rij = rij_vec.norm();
+                    if (rij > m_coulomb_implicit_rcut || rij < 1e-10) continue;
+
+                    const double gamma_ij = 1.0 / std::sqrt(alp_i + alp_j);
+                    const double gamma_r = gamma_ij * rij;
+                    const double erf_term = curcuma_erf(gamma_r);
+                    acc.energy.coulomb += qi * qj * erf_term / rij;
+
+                    if (m_do_gradient) {
+                        const double exp_term = std::exp(-gamma_r * gamma_r);
+                        const double derf_dr = gamma_ij * exp_term * (2.0 / sqrt_pi);
+                        const double dEdr_pair = qi * qj * (derf_dr / rij - erf_term / (rij * rij));
+                        const Eigen::Vector3d grad = dEdr_pair * rij_vec / rij;
+                        acc.gradient.row(i) += grad.transpose();
+                        acc.gradient.row(j) -= grad.transpose();
+                    }
+                }
+            }
+        }
+        if (acc.has_components && m_do_gradient)
+            acc.grad_coulomb += (acc.gradient - grad_before);
+        if (begin == end) return;
+        if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
+    }
 
     for (int idx = begin; idx < end; ++idx) {
         const auto& coul = m_coulombs[idx];

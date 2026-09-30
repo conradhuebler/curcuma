@@ -245,3 +245,6 @@ external/plumed2/
 external/ulysses-main/
 external/ulysses.zip
 src/version.h
+
+# Multi-GPU benchmark scratch runs (outputs, binaries)
+scripts/gpu_bench/run/

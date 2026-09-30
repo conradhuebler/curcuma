@@ -541,6 +541,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/ulyssesinterface.cpp
         src/core/energy_calculators/method_factory.cpp
         src/core/energy_calculators/gpu_plugin.cpp
+        src/core/gpu_device_pool.cpp
         src/core/energy_calculators/qm_methods/eht_method.cpp
         src/core/energy_calculators/qm_methods/native_xtb_method.cpp
         src/core/energy_calculators/qm_methods/nddo.cpp
@@ -1020,11 +1021,31 @@ endif()
 # Requires: CUDA toolkit, compute capability >= 6.0 (Pascal / GTX 10xx)
 # Build: cmake -DUSE_CUDA=ON && make -j4
 if(USE_CUDA)
-    enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
+    # Claude Generated (Sep 2026, multi-GPU): toolkit-aware default architecture list.
+    #   Turing 7.5, Ampere 8.0 (A100) / 8.6 (RTX 30xx, RTX A4500), Ada 8.9,
+    #   Hopper 9.0 (H100/H200, needs CUDA >= 11.8), Blackwell 10.0 (B200) / 12.0 (RTX 50xx,
+    #   both need CUDA >= 12.8). CUDA 13 dropped Pascal 6.x and Volta 7.0.
+    # Without a native entry a device falls back to PTX JIT (slow first start) or refuses the
+    # kernels, i.e. a silent CPU fallback - the likely cause of "no GPU speedup" on H200.
+    # Override for fast local builds, e.g. -DCMAKE_CUDA_ARCHITECTURES=86.
+    if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+        set(_curcuma_cuda_archs "75;80;86;89;90;100;120")
+    elseif(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+        set(_curcuma_cuda_archs "60;70;75;80;86;89;90;100;120")
+    elseif(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 11.8)
+        set(_curcuma_cuda_archs "60;70;75;80;86;89;90")
+    else()
+        set(_curcuma_cuda_archs "60;70;75;80;86")
+    endif()
+    # Must be decided BEFORE enable_language(CUDA): that call otherwise seeds the cache with
+    # the compiler's own default and a later set(... CACHE) is ignored.
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+        set(CMAKE_CUDA_ARCHITECTURES "${_curcuma_cuda_archs}" CACHE STRING "CUDA architectures")
+    endif()
+    enable_language(CUDA)
     set(CMAKE_CUDA_STANDARD 17)
-    # Target: Pascal(6.0), Volta(7.0), Turing(7.5), Ampere(8.0/8.6), Ada(8.9)
-    set(CMAKE_CUDA_ARCHITECTURES "60;70;75;80;86;89;120" CACHE STRING "CUDA architectures")
+    message(STATUS "CUDA ${CUDAToolkit_VERSION}: building device code for architectures ${CMAKE_CUDA_ARCHITECTURES}")
 
     # CUDA source files - compiled as part of curcuma_core
     set(CUDA_SOURCES
@@ -1059,6 +1080,61 @@ if(USE_CUDA)
         src/core/energy_calculators/qm_methods/cuda/gpu_plugin_entry_cuda.cpp)
     target_include_directories(curcuma_cuda PRIVATE ${PROJECT_SOURCE_DIR})
     target_link_libraries(curcuma_cuda PRIVATE CUDA::cudart CUDA::cusolver CUDA::cublas)
+    target_sources(curcuma_cuda PRIVATE
+        src/core/energy_calculators/qm_methods/cuda/xtb_distributed_eigensolver_loader.cpp)
+
+    # Claude Generated (Sep 2026, multi-GPU step 3): optional multi-GPU eigensolvers for the
+    # resident GFN1/GFN2 SCF (-gpu_eigensolver_devices). Both are optional; the plugin builds
+    # and runs single-GPU without them.
+    #   cuSOLVERMp + NCCL (default backend): not part of the CUDA toolkit. Point
+    #     CUSOLVERMP_ROOT / CUBLASMP_ROOT at the pip wheels nvidia-cusolvermp-cu13 /
+    #     nvidia-cublasmp-cu13 (.../site-packages/nvidia/cu13, .../nvidia/cublasmp/cu13) or at
+    #     an NVIDIA HPC SDK math_libs directory; NCCL from the system or NCCL_ROOT.
+    #   cusolverMg (fallback): ships with the CUDA toolkit, deprecated since CUDA 13.
+    option(CURCUMA_MULTI_GPU_EIGENSOLVER "Link cuSOLVERMp/NCCL and cusolverMg when found" ON)
+    if(CURCUMA_MULTI_GPU_EIGENSOLVER)
+        # Separate library, dlopen'ed by libcurcuma_cuda.so on first use: a run host without
+        # cuSOLVERMp/NCCL keeps the single-GPU plugin working.
+        add_library(curcuma_cuda_mgpu SHARED
+            src/core/energy_calculators/qm_methods/cuda/xtb_distributed_eigensolver.cpp)
+        target_include_directories(curcuma_cuda_mgpu PRIVATE ${PROJECT_SOURCE_DIR})
+        target_link_libraries(curcuma_cuda_mgpu PRIVATE CUDA::cudart)
+        target_compile_definitions(curcuma_cuda_mgpu PRIVATE USE_CUDA)
+        set_target_properties(curcuma_cuda_mgpu PROPERTIES
+            POSITION_INDEPENDENT_CODE ON
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+        add_dependencies(curcuma curcuma_cuda_mgpu)
+        find_library(CURCUMA_CUSOLVERMG_LIB NAMES cusolverMg HINTS ${CUDAToolkit_LIBRARY_DIR})
+        if(CURCUMA_CUSOLVERMG_LIB)
+            target_link_libraries(curcuma_cuda_mgpu PRIVATE ${CURCUMA_CUSOLVERMG_LIB})
+            target_compile_definitions(curcuma_cuda_mgpu PRIVATE CURCUMA_HAVE_CUSOLVERMG)
+            message(STATUS "Multi-GPU eigensolver: cusolverMg ${CURCUMA_CUSOLVERMG_LIB}")
+        endif()
+        find_path(CURCUMA_CUSOLVERMP_INCLUDE cusolverMp.h
+            HINTS $ENV{CUSOLVERMP_ROOT} ${CUSOLVERMP_ROOT} PATH_SUFFIXES include)
+        find_library(CURCUMA_CUSOLVERMP_LIB NAMES cusolverMp libcusolverMp.so.0
+            HINTS $ENV{CUSOLVERMP_ROOT} ${CUSOLVERMP_ROOT} PATH_SUFFIXES lib lib64)
+        find_library(CURCUMA_CUBLASMP_LIB NAMES cublasmp libcublasmp.so.0
+            HINTS $ENV{CUBLASMP_ROOT} ${CUBLASMP_ROOT} PATH_SUFFIXES lib lib64)
+        find_path(CURCUMA_CUBLASMP_INCLUDE cublasmp.h
+            HINTS $ENV{CUBLASMP_ROOT} ${CUBLASMP_ROOT} PATH_SUFFIXES include)
+        find_path(CURCUMA_NCCL_INCLUDE nccl.h HINTS $ENV{NCCL_ROOT} ${NCCL_ROOT} PATH_SUFFIXES include)
+        find_library(CURCUMA_NCCL_LIB NAMES nccl HINTS $ENV{NCCL_ROOT} ${NCCL_ROOT} PATH_SUFFIXES lib lib64)
+        if(CURCUMA_CUSOLVERMP_INCLUDE AND CURCUMA_CUSOLVERMP_LIB AND CURCUMA_CUBLASMP_LIB
+           AND CURCUMA_CUBLASMP_INCLUDE AND CURCUMA_NCCL_INCLUDE AND CURCUMA_NCCL_LIB)
+            target_include_directories(curcuma_cuda_mgpu PRIVATE ${CURCUMA_CUSOLVERMP_INCLUDE} ${CURCUMA_CUBLASMP_INCLUDE} ${CURCUMA_NCCL_INCLUDE})
+            target_link_libraries(curcuma_cuda_mgpu PRIVATE ${CURCUMA_CUSOLVERMP_LIB} ${CURCUMA_CUBLASMP_LIB} ${CURCUMA_NCCL_LIB})
+            target_compile_definitions(curcuma_cuda_mgpu PRIVATE CURCUMA_HAVE_CUSOLVERMP)
+            get_filename_component(_mp_dir ${CURCUMA_CUSOLVERMP_LIB} DIRECTORY)
+            get_filename_component(_bmp_dir ${CURCUMA_CUBLASMP_LIB} DIRECTORY)
+            # The wheels are not on the loader path; bake their directories into the library.
+            set_property(TARGET curcuma_cuda_mgpu APPEND PROPERTY BUILD_RPATH "${_mp_dir};${_bmp_dir}")
+            set_property(TARGET curcuma_cuda_mgpu APPEND PROPERTY INSTALL_RPATH "${_mp_dir};${_bmp_dir}")
+            message(STATUS "Multi-GPU eigensolver: cuSOLVERMp ${CURCUMA_CUSOLVERMP_LIB}, NCCL ${CURCUMA_NCCL_LIB}")
+        else()
+            message(STATUS "Multi-GPU eigensolver: cuSOLVERMp/cuBLASMp/NCCL not found (set CUSOLVERMP_ROOT, CUBLASMP_ROOT, NCCL_ROOT)")
+        endif()
+    endif()
     # Match curcuma_core's compile definitions EXACTLY so every shared class (XTB, ...) has
     # an identical ABI on both sides of the dlopen boundary. Generator expression captures
     # the final set (incl. USE_GFNFF/USE_MKL/USE_D4/... set elsewhere in this file).

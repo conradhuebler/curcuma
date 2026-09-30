@@ -79,6 +79,8 @@ void FFWorkspace::setInteractionLists(GFNFFParameterSet&& params)
     m_hbond_enabled = params.hbond_enabled;
     m_repulsion_enabled = params.repulsion_enabled;
     m_coulomb_enabled = params.coulomb_enabled;
+    m_coulomb_implicit = params.coulomb_implicit;
+    m_coulomb_implicit_rcut = params.coulomb_implicit_rcut;
 
     // Build bonded pairs cache for fast repulsion lookup
     m_bonded_pairs.clear();
@@ -157,6 +159,25 @@ void FFWorkspace::partition()
         pr.bonded_reps = linearRange(m_bonded_reps.size(), t, T);
         pr.nonbonded_reps = linearRange(m_nonbonded_reps.size(), t, T);
         pr.coulombs = linearRange(m_coulombs.size(), t, T);
+        // Implicit Coulomb: split the OUTER atom index so that every thread gets roughly the
+        // same number of (i<j) pairs - atom i carries natoms-1-i of them, so equal atom counts
+        // would leave thread 0 with most of the work. Claude Generated (Sep 2026).
+        if (m_coulomb_implicit && m_natoms > 1) {
+            const double total = 0.5 * static_cast<double>(m_natoms) * (m_natoms - 1);
+            auto atom_at = [&](int k) {                 // first atom whose prefix >= k/T of total
+                if (k <= 0) return 0;
+                if (k >= T) return m_natoms;
+                const double want = total * k / T;
+                // pairs(i) = i*natoms - i*(i+1)/2 solved for i
+                const double n = m_natoms;
+                const double disc = (n - 0.5) * (n - 0.5) - 2.0 * want;
+                const int i = static_cast<int>(std::ceil((n - 0.5) - std::sqrt(std::max(0.0, disc))));
+                return std::min(m_natoms, std::max(0, i));
+            };
+            pr.coulomb_atoms = { atom_at(t), atom_at(t + 1) };
+        } else {
+            pr.coulomb_atoms = { 0, 0 };
+        }
         pr.hbonds = linearRange(m_hbonds.size(), t, T);
         pr.xbonds = linearRange(m_xbonds.size(), t, T);
         pr.atm_triples = linearRange(m_atm_triples.size(), t, T);

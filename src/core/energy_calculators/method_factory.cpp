@@ -607,5 +607,19 @@ void MethodFactory::printAvailableMethods() {
     for (const auto& b : gpu_plugin::knownBackends())
         if (gpu_plugin::available(b)) plugins += (plugins.empty() ? "" : ", ") + b;
     fmt::print("\nGPU plugins next to the executable: {}\n", plugins.empty() ? "none" : plugins);
+    // Claude Generated (Sep 2026, multi-GPU): the devices each plugin can see, with the
+    // indices `-gpu_device` / `-gpu_devices` refer to (after CUDA_VISIBLE_DEVICES etc.).
+    for (const auto& b : gpu_plugin::knownBackends()) {
+        if (!gpu_plugin::available(b)) continue;
+        const int n = gpu_plugin::deviceCount(b);
+        fmt::print("  {}: {} device(s)\n", b, n);
+        for (int i = 0; i < n; ++i) {
+            const json info = gpu_plugin::deviceInfo(b, i);
+            if (info.empty()) continue;
+            const double gb = info.value("memory_total_bytes", std::uint64_t(0)) / 1073741824.0;
+            fmt::print("    [{}] {}  {:.1f} GB  {}\n", i, info.value("name", std::string("?")), gb,
+                       info.contains("compute_capability") ? "cc " + info["compute_capability"].get<std::string>() : "");
+        }
+    }
     fmt::print("===================================\n");
 }

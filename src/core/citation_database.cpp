@@ -29,19 +29,19 @@ const std::unordered_map<std::string, CitationData>& database()
 
         // === QM Methods ===
         { "xtb", {
-            "Extended Tight-Binding (Bannwarth et al. 2020)",
-            "Bannwarth, C. et al., WIREs Comput. Mol. Sci. 2020, 10, e01493 (DOI: 10.1002/wcms.1493)",
-            "bannwarth2020xtb",
-            "@article{bannwarth2020xtb,\n"
-            "  author = {Bannwarth, Christoph and Ehlert, Sebastian and Caldeweyher, Eike\n"
+            "Extended Tight-Binding (Bannwarth et al. 2021)",
+            "Bannwarth, C. et al., WIREs Comput. Mol. Sci. 2021, 11, e1493 (DOI: 10.1002/wcms.1493)",
+            "bannwarth2021xtb",
+            "@article{bannwarth2021xtb,\n"
+            "  author = {Bannwarth, Christoph and Caldeweyher, Eike and Ehlert, Sebastian\n"
+            "            and Hansen, Andreas and Pracht, Philipp and Seibert, Jakob\n"
             "            and Spicher, Sebastian and Grimme, Stefan},\n"
-            "  title = {Extended Tight-Binding Quantum Chemistry Methods},\n"
+            "  title = {Extended {tight-binding} quantum chemistry methods},\n"
             "  journal = {WIREs Comput. Mol. Sci.},\n"
-            "  year = {2020},\n"
-            "  volume = {10},\n"
-            "  pages = {e01493},\n"
-            "  doi = {10.1002/wcms.1493},\n"
-            "  url = {https://github.com/grimme-lab/xtb}\n"
+            "  year = {2021},\n"
+            "  volume = {11},\n"
+            "  pages = {e1493},\n"
+            "  doi = {10.1002/wcms.1493}\n"
             "}"
         }},
 
@@ -51,8 +51,10 @@ const std::unordered_map<std::string, CitationData>& database()
             "grimme2017gfn1",
             "@article{grimme2017gfn1,\n"
             "  author = {Grimme, Stefan and Bannwarth, Christoph and Shushkov, Pavlo},\n"
-            "  title = {A Robust and Efficient Tight Binding Quantum Chemical Method\n"
-            "           for Chemistry, Noncovalent Interactions, and Reactivity},\n"
+            "  title = {A Robust and Accurate Tight-Binding Quantum Chemical Method for\n"
+            "           Structures, Vibrational Frequencies, and Noncovalent Interactions of\n"
+            "           Large Molecular Systems Parametrized for All spd-Block Elements\n"
+            "           ($Z = 1$--$86$)},\n"
             "  journal = {J. Chem. Theory Comput.},\n"
             "  year = {2017},\n"
             "  volume = {13},\n"
@@ -67,9 +69,9 @@ const std::unordered_map<std::string, CitationData>& database()
             "bannwarth2019gfn2",
             "@article{bannwarth2019gfn2,\n"
             "  author = {Bannwarth, Christoph and Ehlert, Sebastian and Grimme, Stefan},\n"
-            "  title = {GFN2-xTB -- An Accurate and Broadly Parametrized Self-Consistent\n"
-            "           Extended Tight-Binding Quantum Chemical Method with Multipole\n"
-            "           Electrostatics and Dispersion},\n"
+            "  title = {GFN2-xTB---An Accurate and Broadly Parametrized Self-Consistent\n"
+            "           Tight-Binding Quantum Chemical Method with Multipole\n"
+            "           Electrostatics and Density-Dependent Dispersion Contributions},\n"
             "  journal = {J. Chem. Theory Comput.},\n"
             "  year = {2019},\n"
             "  volume = {15},\n"
@@ -85,8 +87,8 @@ const std::unordered_map<std::string, CitationData>& database()
             "@article{pracht2019gfn0,\n"
             "  author = {Pracht, Philipp and Caldeweyher, Eike and Ehlert, Sebastian\n"
             "            and Grimme, Stefan},\n"
-            "  title = {Gradient extended tight-binding: A general framework for\n"
-            "           the calculation of potential energy surfaces and forces},\n"
+            "  title = {A Robust Non-Self-Consistent Tight-Binding Quantum Chemistry\n"
+            "           Method for large Molecules},\n"
             "  journal = {ChemRxiv},\n"
             "  year = {2019},\n"
             "  doi = {10.26434/chemrxiv.8326202.v1},\n"
@@ -124,7 +126,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "eht", {
             "Extended Huckel Theory (Hoffmann 1963)",
-            "Hoffmann, R. J. Chem. Phys. 1963, 39, 1397–1412 (DOI: 10.1063/1.1734457)",
+            "Hoffmann, R. J. Chem. Phys. 1963, 39, 1397–1412 (DOI: 10.1063/1.1734456)",
             "hoffmann1963eht",
             "@article{hoffmann1963eht,\n"
             "  author = {Hoffmann, Roald},\n"
@@ -133,7 +135,7 @@ const std::unordered_map<std::string, CitationData>& database()
             "  year = {1963},\n"
             "  volume = {39},\n"
             "  pages = {1397--1412},\n"
-            "  doi = {10.1063/1.1734457}\n"
+            "  doi = {10.1063/1.1734456}\n"
             "}"
         }},
 
@@ -329,6 +331,7 @@ const std::unordered_map<std::string, CitationData>& database()
             "}\n"
             "@article{caldeweyher2019d4,\n"
             "  author = {Caldeweyher, Eike and Ehlert, Sebastian and Hansen, Andreas\n"
+            "            and Neugebauer, Hagen and Spicher, Sebastian and Bannwarth, Christoph\n"
             "            and Grimme, Stefan},\n"
             "  title = {A generally applicable atomic-charge dependent London dispersion correction},\n"
             "  journal = {J. Chem. Phys.},\n"
@@ -369,7 +372,7 @@ const std::unordered_map<std::string, CitationData>& database()
             "rezac2012h4",
             "@article{rezac2012h4,\n"
             "  author = {Řezáč, Jan and Hobza, Pavel},\n"
-            "  title = {Advanced Corrections of Hydrogen Bonding and Dispersion for Semiempirical Quantum Chemical Methods},\n"
+            "  title = {Advanced Corrections of Hydrogen Bonding and Dispersion for Semiempirical Quantum Mechanical Methods},\n"
             "  journal = {J. Chem. Theory Comput.},\n"
             "  year = {2012},\n"
             "  volume = {8},\n"
@@ -381,7 +384,7 @@ const std::unordered_map<std::string, CitationData>& database()
         // === GFN-FF sub-references ===
         { "eeq", {
             "Electronegativity Equalization Method (Mortier, Ghosh, Shankar 1986)",
-            "Mortier, W. J.; Ghosh, S. K.; Shankar, S. J. Am. Chem. Soc. 1986, 108, 5708–5711 (DOI: 10.1021/ja00279a008)",
+            "Mortier, W. J.; Ghosh, S. K.; Shankar, S. J. Am. Chem. Soc. 1986, 108, 4315–4320 (DOI: 10.1021/ja00275a013)",
             "mortier1986eeq",
             "@article{mortier1986eeq,\n"
             "  author = {Mortier, Wilfried J. and Ghosh, Swapan K. and Shankar, Sambasivarao},\n"
@@ -389,8 +392,8 @@ const std::unordered_map<std::string, CitationData>& database()
             "  journal = {J. Am. Chem. Soc.},\n"
             "  year = {1986},\n"
             "  volume = {108},\n"
-            "  pages = {5708--5711},\n"
-            "  doi = {10.1021/ja00279a008}\n"
+            "  pages = {4315--4320},\n"
+            "  doi = {10.1021/ja00275a013}\n"
             "}"
         }},
 
@@ -422,33 +425,43 @@ const std::unordered_map<std::string, CitationData>& database()
         }},
 
         { "ghosh_islam", {
-            "Chemical Hardness Parameters (Ghosh & Islam 2009)",
-            "Ghosh, D. C.; Islam, N. Int. J. Quantum Chem. 2009, 109, 1435–1454 (DOI: 10.1002/qua.22202)",
-            "ghosh2009hardness",
-            "@article{ghosh2009hardness,\n"
-            "  author = {Ghosh, Dulal C. and Islam, Najmul},\n"
-            "  title = {Whether electronegativity and hardness are two different concepts or the offspring of one fundamental concept},\n"
+            "Chemical Hardness Parameters (Ghosh & Islam 2011)",
+            "Ghosh, D. C.; Islam, N. Int. J. Quantum Chem. 2011, 111, 40–51 (DOI: 10.1002/qua.22415)",
+            "ghosh2011hardness",
+            "@article{ghosh2011hardness,\n"
+            "  author = {Ghosh, Dulal C. and Islam, Nazmul},\n"
+            "  title = {Whether electronegativity and hardness are manifest two different descriptors of the one and the same fundamental property of atoms---A quest},\n"
             "  journal = {Int. J. Quantum Chem.},\n"
-            "  year = {2009},\n"
-            "  volume = {109},\n"
-            "  pages = {1435--1454},\n"
-            "  doi = {10.1002/qua.22202}\n"
+            "  year = {2011},\n"
+            "  volume = {111},\n"
+            "  pages = {40--51},\n"
+            "  doi = {10.1002/qua.22415}\n"
             "}"
         }},
 
         { "atm", {
             "Three-Body Dispersion (Axilrod-Teller-Muto)",
-            "Axilrod, B. M. J. Chem. Phys. 1951, 19, 719-724 (DOI: 10.1063/1.1748205)\n"
+            "Axilrod, B. M.; Teller, E. J. Chem. Phys. 1943, 11, 299-300 (DOI: 10.1063/1.1723844)\n"
+            "Axilrod, B. M. J. Chem. Phys. 1951, 19, 719-724 (DOI: 10.1063/1.1748339)\n"
             "Muto, Y. Proc. Phys. Math. Soc. Jpn. 1943, 17, 629",
             "axilrod1951atm",
+            "@article{axilrod1943atm,\n"
+            "  author = {Axilrod, B. M. and Teller, E.},\n"
+            "  title = {Interaction of the van der Waals Type Between Three Atoms},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {1943},\n"
+            "  volume = {11},\n"
+            "  pages = {299--300},\n"
+            "  doi = {10.1063/1.1723844}\n"
+            "}\n"
             "@article{axilrod1951atm,\n"
             "  author = {Axilrod, B. M.},\n"
-            "  title = {Triple-dipole dispersion interaction},\n"
+            "  title = {Triple-dipole interaction. {I}. Theory},\n"
             "  journal = {J. Chem. Phys.},\n"
             "  year = {1951},\n"
             "  volume = {19},\n"
             "  pages = {719--724},\n"
-            "  doi = {10.1063/1.1748205}\n"
+            "  doi = {10.1063/1.1748339}\n"
             "}\n"
             "@article{muto1943atm,\n"
             "  author = {Muto, Yosihiko},\n"
@@ -461,17 +474,17 @@ const std::unordered_map<std::string, CitationData>& database()
         }},
 
         { "bj", {
-            "Becke-Johnson Damping Function (Becke & Johnson 2006)",
-            "Becke, A. D.; Johnson, E. R. J. Chem. Phys. 2006, 124, 24109 (DOI: 10.1063/1.2213970)",
-            "becke2006bj",
-            "@article{becke2006bj,\n"
+            "Becke-Johnson Damping Function (Becke & Johnson 2007)",
+            "Becke, A. D.; Johnson, E. R. J. Chem. Phys. 2007, 127, 154108 (DOI: 10.1063/1.2795701)",
+            "becke2007bj",
+            "@article{becke2007bj,\n"
             "  author = {Becke, A. D. and Johnson, E. R.},\n"
             "  title = {Exchange-hole dipole moment and the dispersion interaction revisited},\n"
             "  journal = {J. Chem. Phys.},\n"
-            "  year = {2006},\n"
-            "  volume = {124},\n"
-            "  pages = {24109},\n"
-            "  doi = {10.1063/1.2213970}\n"
+            "  year = {2007},\n"
+            "  volume = {127},\n"
+            "  pages = {154108},\n"
+            "  doi = {10.1063/1.2795701}\n"
             "}"
         }},
 
@@ -492,7 +505,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "alpb", {
             "Analytical Linearized Poisson-Boltzmann Solvation (Ehlert, Stahn, Spicher, Grimme 2021)",
-            "Ehlert, S.; Stahn, M.; Spicher, S.; Grimme, S. J. Chem. Theory Comput. 2021, 17, 4250–4259 (DOI: 10.1021/acs.jctc.1c00371)",
+            "Ehlert, S.; Stahn, M.; Spicher, S.; Grimme, S. J. Chem. Theory Comput. 2021, 17, 4250–4261 (DOI: 10.1021/acs.jctc.1c00471)",
             "ehlert2021alpb",
             "@article{ehlert2021alpb,\n"
             "  author = {Ehlert, Sebastian and Stahn, Marcel and Spicher, Sebastian\n"
@@ -501,8 +514,8 @@ const std::unordered_map<std::string, CitationData>& database()
             "  journal = {J. Chem. Theory Comput.},\n"
             "  year = {2021},\n"
             "  volume = {17},\n"
-            "  pages = {4250--4259},\n"
-            "  doi = {10.1021/acs.jctc.1c00371}\n"
+            "  pages = {4250--4261},\n"
+            "  doi = {10.1021/acs.jctc.1c00471}\n"
             "}"
         }},
 
@@ -522,45 +535,47 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "still_gb", {
             "Generalized Born Model (Still et al. 1990)",
-            "Still, W. C. et al., J. Am. Chem. Soc. 1990, 112, 6127–6129 (DOI: 10.1021/ja00178a034)",
+            "Still, W. C. et al., J. Am. Chem. Soc. 1990, 112, 6127–6129 (DOI: 10.1021/ja00172a038)",
             "still1990gb",
             "@article{still1990gb,\n"
-            "  author = {Still, W. Clark and Tempczyk, Anna and Hawley, Ross C.\n"
+            "  author = {Still, W. Clark and Tempczyk, Anna and Hawley, Ronald C.\n"
             "            and Hendrickson, Thomas},\n"
-            "  title = {Semianalytical processing of diastereomeric mixtures},\n"
+            "  title = {Semianalytical treatment of solvation for molecular mechanics and dynamics},\n"
             "  journal = {J. Am. Chem. Soc.},\n"
             "  year = {1990},\n"
             "  volume = {112},\n"
             "  pages = {6127--6129},\n"
-            "  doi = {10.1021/ja00178a034}\n"
+            "  doi = {10.1021/ja00172a038}\n"
             "}"
         }},
 
         { "p16", {
             "P16 Kernel (Lange & Herbert 2012)",
-            "Lange, A. W.; Herbert, J. M. J. Chem. Theory Comput. 2012, 8, 1999–2010 (DOI: 10.1021/ct300183n)",
+            "Lange, A. W.; Herbert, J. M. J. Chem. Theory Comput. 2012, 8, 1999–2011 (DOI: 10.1021/ct300111m)",
             "lange2012p16",
             "@article{lange2012p16,\n"
             "  author = {Lange, Adrian W. and Herbert, John M.},\n"
-            "  title = {A smooth, nonsingular, and faithful discretization scheme for polarizable continuum models: The {C-PCM} reaction field},\n"
+            "  title = {Improving Generalized Born Models by Exploiting Connections to Polarizable Continuum Models. {I}. An Improved Effective {C}oulomb Operator},\n"
             "  journal = {J. Chem. Theory Comput.},\n"
             "  year = {2012},\n"
             "  volume = {8},\n"
-            "  pages = {1999--2010},\n"
-            "  doi = {10.1021/ct300183n}\n"
+            "  pages = {1999--2011},\n"
+            "  doi = {10.1021/ct300111m}\n"
             "}"
         }},
 
         { "cpcm_x", {
             "CPCM-X / ddCOSMO Implicit Solvation (Stahn, Ehlert, Grimme 2023)",
-            "Stahn, M.; Ehlert, S.; Grimme, S. J. Phys. Chem. A 2023 (DOI: 10.1021/acs.jpca.3c04382)",
+            "Stahn, M.; Ehlert, S.; Grimme, S. J. Phys. Chem. A 2023, 127, 7036–7043 (DOI: 10.1021/acs.jpca.3c04382)",
             "stahn2023cpcmx",
             "@article{stahn2023cpcmx,\n"
             "  author = {Stahn, Marcel and Ehlert, Sebastian and Grimme, Stefan},\n"
-            "  title = {Accurate and Efficient Molecular Polarizable Continuum Model\n"
-            "           Solvation for Semiempirical Quantum Mechanical Methods},\n"
+            "  title = {Extended Conductor-like Polarizable Continuum Solvation Model\n"
+            "           ({CPCM-X}) for Semiempirical Methods},\n"
             "  journal = {J. Phys. Chem. A},\n"
             "  year = {2023},\n"
+            "  volume = {127},\n"
+            "  pages = {7036--7043},\n"
             "  doi = {10.1021/acs.jpca.3c04382}\n"
             "}"
         }},
@@ -587,7 +602,7 @@ const std::unordered_map<std::string, CitationData>& database()
             "spicher2020gfnff",
             "@article{spicher2020gfnff,\n"
             "  author = {Spicher, Sebastian and Grimme, Stefan},\n"
-            "  title = {{GFN-FF}: A General Force Field for Accurate Quantum-Chemical Calculations},\n"
+            "  title = {Robust Atomistic Modeling of Materials, Organometallic, and Biochemical Systems},\n"
             "  journal = {Angew. Chem. Int. Ed.},\n"
             "  year = {2020},\n"
             "  volume = {59},\n"
@@ -630,7 +645,7 @@ const std::unordered_map<std::string, CitationData>& database()
             "grimme2014qmdff",
             "@article{grimme2014qmdff,\n"
             "  author = {Grimme, Stefan},\n"
-            "  title = {A General Quantum Mechanically Derived Force Field (QMDFF) for Molecules and Condensed Phase Assemblies},\n"
+            "  title = {A General Quantum Mechanically Derived Force Field (QMDFF) for Molecules and Condensed Phase Simulations},\n"
             "  journal = {J. Chem. Theory Comput.},\n"
             "  year = {2014},\n"
             "  volume = {10},\n"
@@ -679,17 +694,17 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "ancopt", {
             "Approximate Normal Coordinate Optimizer (Bannwarth et al. 2021)",
-            "Bannwarth, C. et al., WIREs Comput. Mol. Sci. 2021, 11, e01493 (DOI: 10.1002/wcms.1493)",
+            "Bannwarth, C. et al., WIREs Comput. Mol. Sci. 2021, 11, e1493 (DOI: 10.1002/wcms.1493)",
             "bannwarth2021xtb",
             "@article{bannwarth2021xtb,\n"
             "  author = {Bannwarth, Christoph and Caldeweyher, Eike and Ehlert, Sebastian\n"
-            "            and Hansen, Andreas and Pracht, Philipp and Seibert, Jan\n"
+            "            and Hansen, Andreas and Pracht, Philipp and Seibert, Jakob\n"
             "            and Spicher, Sebastian and Grimme, Stefan},\n"
-            "  title = {Extended Tight-Binding Quantum Chemistry Methods},\n"
+            "  title = {Extended {tight-binding} quantum chemistry methods},\n"
             "  journal = {WIREs Comput. Mol. Sci.},\n"
             "  year = {2021},\n"
             "  volume = {11},\n"
-            "  pages = {e01493},\n"
+            "  pages = {e1493},\n"
             "  doi = {10.1002/wcms.1493}\n"
             "}"
         }},
@@ -742,23 +757,23 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "gdiis", {
             "Geometry Direct Inversion in the Iterative Subspace (Csaszar & Pulay 1984)",
-            "Csaszar, P.; Pulay, P. J. Comput. Chem. 1984, 5, 241–249 (DOI: 10.1002/jcc.540050306)",
+            "Csaszar, P.; Pulay, P. J. Mol. Struct. 1984, 114, 31–34 (DOI: 10.1016/S0022-2860(84)87198-7)",
             "csaszar1984gdiis",
             "@article{csaszar1984gdiis,\n"
-            "  author = {Csaszar, Peter and Pulay, Peter},\n"
+            "  author = {Cs{\\'a}sz{\\'a}r, P{\\'a}l and Pulay, P{\\'e}ter},\n"
             "  title = {Geometry optimization by direct inversion in the iterative subspace},\n"
-            "  journal = {J. Comput. Chem.},\n"
+            "  journal = {J. Mol. Struct.},\n"
             "  year = {1984},\n"
-            "  volume = {5},\n"
-            "  pages = {241--249},\n"
-            "  doi = {10.1002/jcc.540050306}\n"
+            "  volume = {114},\n"
+            "  pages = {31--34},\n"
+            "  doi = {10.1016/S0022-2860(84)87198-7}\n"
             "}"
         }},
 
         { "rfo", {
             "Rational Function Optimization (Simons et al. 1983)",
             "Simons, J. et al., J. Phys. Chem. 1983, 87, 2745-2753 (DOI: 10.1021/j100238a013)\n"
-            "Banerjee, A. et al., J. Phys. Chem. 1985, 89, 52-57 (DOI: 10.1021/j100247a013)",
+            "Banerjee, A. et al., J. Phys. Chem. 1985, 89, 52-57 (DOI: 10.1021/j100247a015)",
             "simons1983rfo",
             "@article{simons1983rfo,\n"
             "  author = {Simons, Jack and Jorgensen, Poul and Taylor, Hugh and Ozment, Judy},\n"
@@ -777,18 +792,20 @@ const std::unordered_map<std::string, CitationData>& database()
             "  year = {1985},\n"
             "  volume = {89},\n"
             "  pages = {52--57},\n"
-            "  doi = {10.1021/j100247a013}\n"
+            "  doi = {10.1021/j100247a015}\n"
             "}"
         }},
 
         // === Molecular alignment ===
         { "molalign", {
-            "Molecular Alignment for Conformer Search (Karaborni et al. 2023)",
-            "Karaborni, Hübler et al., J. Chem. Inf. Model. 2023, 63, 1157–1165 (DOI: 10.1021/acs.jcim.2c01187)",
-            "karaborni2023molalign",
-            "@article{karaborni2023molalign,\n"
-            "  author = {Karaborni, S. and Hübler, C. and others},\n"
-            "  title = {Molecular Alignment for Conformer Search},\n"
+            "Near-Congruence Molecular Alignment (Vasquez-Perez et al. 2023)",
+            "Vásquez-Pérez, J. M. et al., J. Chem. Inf. Model. 2023, 63, 1157–1165 (DOI: 10.1021/acs.jcim.2c01187)",
+            "vasquezperez2023molalign",
+            "@article{vasquezperez2023molalign,\n"
+            "  author = {V{\\'a}squez-P{\\'e}rez, Jos{\\'e} Manuel and Z{\\'a}rate-Hern{\\'a}ndez, Luis {\\'A}ngel\n"
+            "            and G{\\'o}mez-Castro, Carlos Zepactonal and Nolasco-Hern{\\'a}ndez, Uriel Alejandro},\n"
+            "  title = {A Practical Algorithm to Solve the Near-Congruence Problem for\n"
+            "           Rigid Molecules and Clusters},\n"
             "  journal = {J. Chem. Inf. Model.},\n"
             "  year = {2023},\n"
             "  volume = {63},\n"
@@ -835,8 +852,8 @@ const std::unordered_map<std::string, CitationData>& database()
             "Townsend, J. et al., Nat. Commun. 2020, 11, 3230 (DOI: 10.1038/s41467-020-17035-5)",
             "townsend2020ripser",
             "@article{townsend2020ripser,\n"
-            "  author = {Townsend, James and Micucci, Colin P. and Hymel, James H.\n"
-            "            and Rinderspacher, Alison and Sundholm, Dage},\n"
+            "  author = {Townsend, Jacob and Micucci, Cassie Putman and Hymel, John H.\n"
+            "            and Maroulas, Vasileios and Vogiatzis, Konstantinos D.},\n"
             "  title = {Representation of molecular structures with persistent homology for machine learning applications in chemistry},\n"
             "  journal = {Nat. Commun.},\n"
             "  year = {2020},\n"
@@ -848,18 +865,18 @@ const std::unordered_map<std::string, CitationData>& database()
 
         // === ORCA interface ===
         { "orca", {
-            "Quantum Chemistry Package (Neese 2024)",
-            "Neese, F. WIREs Comput. Mol. Sci. 2024, 14, e1692 (DOI: 10.1002/wcms.1692)\n"
-            "Neese, F. et al., J. Chem. Phys. 2020, 152, 224108 (DOI: 10.1063/5.0005356)",
-            "neese2024orca",
-            "@article{neese2024orca,\n"
+            "Quantum Chemistry Package (Neese 2022)",
+            "Neese, F. WIREs Comput. Mol. Sci. 2022, 12, e1606 (DOI: 10.1002/wcms.1606)\n"
+            "Neese, F. et al., J. Chem. Phys. 2020, 152, 224108 (DOI: 10.1063/5.0004608)",
+            "neese2022orca",
+            "@article{neese2022orca,\n"
             "  author = {Neese, Frank},\n"
             "  title = {Software update: the {ORCA} program system, version 5.0},\n"
             "  journal = {WIREs Comput. Mol. Sci.},\n"
-            "  year = {2024},\n"
-            "  volume = {14},\n"
-            "  pages = {e1692},\n"
-            "  doi = {10.1002/wcms.1692},\n"
+            "  year = {2022},\n"
+            "  volume = {12},\n"
+            "  pages = {e1606},\n"
+            "  doi = {10.1002/wcms.1606},\n"
             "  url = {https://github.com/orca/orca}\n"
             "}\n"
             "@article{neese2020orca,\n"
@@ -870,7 +887,7 @@ const std::unordered_map<std::string, CitationData>& database()
             "  year = {2020},\n"
             "  volume = {152},\n"
             "  pages = {224108},\n"
-            "  doi = {10.1063/5.0005356}\n"
+            "  doi = {10.1063/5.0004608}\n"
             "}"
         }},
 

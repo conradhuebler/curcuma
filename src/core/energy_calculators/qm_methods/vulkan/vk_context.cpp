@@ -16,6 +16,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -105,7 +106,7 @@ int scoreDevice(VkPhysicalDevice phys, uint32_t& family_out)
 
 /// Pick the best usable physical device on `inst`. Returns true + handle/index/family.
 bool pickPhysicalDevice(VkInstance inst, VkPhysicalDevice& phys_out, int& index_out,
-                        uint32_t& family_out)
+                        uint32_t& family_out, int preferred_index = -1)
 {
     uint32_t n = 0;
     if (vkEnumeratePhysicalDevices(inst, &n, nullptr) != VK_SUCCESS || n == 0)
@@ -113,6 +114,18 @@ bool pickPhysicalDevice(VkInstance inst, VkPhysicalDevice& phys_out, int& index_
     std::vector<VkPhysicalDevice> devs(n);
     if (vkEnumeratePhysicalDevices(inst, &n, devs.data()) != VK_SUCCESS)
         return false;
+
+    // Claude Generated (Sep 2026, multi-GPU): an explicit index is honoured or fails -
+    // silently picking another device would put two workers on the same card.
+    if (preferred_index >= 0) {
+        if (preferred_index >= static_cast<int>(n)) return false;
+        uint32_t fam = 0;
+        if (scoreDevice(devs[preferred_index], fam) < 0) return false;
+        phys_out   = devs[preferred_index];
+        index_out  = preferred_index;
+        family_out = fam;
+        return true;
+    }
 
     int best_score = -1;
     for (uint32_t i = 0; i < n; ++i) {
@@ -130,14 +143,14 @@ bool pickPhysicalDevice(VkInstance inst, VkPhysicalDevice& phys_out, int& index_
 
 } // namespace
 
-VkContext::VkContext()
+VkContext::VkContext(int preferred_index)
     : m_impl(std::make_unique<Impl>())
 {
     m_impl->instance = createInstance();
     if (m_impl->instance == VK_NULL_HANDLE) return;
 
     if (!pickPhysicalDevice(m_impl->instance, m_impl->phys, m_impl->deviceIndex,
-                            m_impl->queueFamily))
+                            m_impl->queueFamily, preferred_index))
         return;
 
     VkPhysicalDeviceProperties prop{};
@@ -192,6 +205,36 @@ bool VkContext::ok() const { return m_impl && m_impl->ok; }
 bool VkContext::hasFloat64() const { return m_impl && m_impl->fp64; }
 std::string VkContext::deviceName() const { return m_impl ? m_impl->name : std::string(); }
 int VkContext::deviceId() const { return m_impl ? m_impl->deviceIndex : -1; }
+
+std::vector<VkContext::DeviceSummary> VkContext::enumerateDevices()
+{
+    std::vector<DeviceSummary> out;
+    VkInstance inst = createInstance();
+    if (inst == VK_NULL_HANDLE) return out;
+    uint32_t n = 0;
+    if (vkEnumeratePhysicalDevices(inst, &n, nullptr) == VK_SUCCESS && n > 0) {
+        std::vector<VkPhysicalDevice> devs(n);
+        vkEnumeratePhysicalDevices(inst, &n, devs.data());
+        for (uint32_t i = 0; i < n; ++i) {
+            DeviceSummary d;
+            d.index = static_cast<int>(i);
+            VkPhysicalDeviceProperties prop{};
+            vkGetPhysicalDeviceProperties(devs[i], &prop);
+            d.name = prop.deviceName;
+            d.discrete = prop.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+            VkPhysicalDeviceMemoryProperties mem{};
+            vkGetPhysicalDeviceMemoryProperties(devs[i], &mem);
+            for (uint32_t h = 0; h < mem.memoryHeapCount; ++h)
+                if (mem.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+                    d.memory_bytes = std::max<uint64_t>(d.memory_bytes, mem.memoryHeaps[h].size);
+            uint32_t fam = 0;
+            d.usable = scoreDevice(devs[i], fam) >= 0;
+            out.push_back(d);
+        }
+    }
+    vkDestroyInstance(inst, nullptr);
+    return out;
+}
 
 bool VkContext::deviceAvailable()
 {

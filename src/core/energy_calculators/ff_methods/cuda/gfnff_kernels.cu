@@ -378,6 +378,55 @@ __global__ void k_coulomb(
     blockReduceAddEnergy(local_E, energy);
 }
 
+// Implicit all-pairs Coulomb, see gfnff_kernels.cuh. Pair arithmetic identical to k_coulomb.
+__global__ void k_coulomb_implicit(
+    int natoms,
+    const double* __restrict__ alp,
+    double                     r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ charges,
+    double*                    grad,
+    double*                    energy)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    double local_E = 0.0;
+
+    if (i < natoms) {
+        const double qi = charges[i];
+        if (!isnan(qi)) {
+            static const double inv_sqrt_pi = 0.5641895835477563;
+            double gx = 0.0, gy = 0.0, gz = 0.0, e_half = 0.0;
+            for (int j = 0; j < natoms; ++j) {
+                if (j == i) continue;
+                double dx  = cx[i] - cx[j];
+                double dy  = cy[i] - cy[j];
+                double dz  = cz[i] - cz[j];
+                applyMIC(dx, dy, dz);
+                double r2  = dx*dx + dy*dy + dz*dz;
+                double rij = sqrt(r2);
+                if (rij > r_cut || rij < 1e-10) continue;
+                double qj = charges[j];
+                if (isnan(qj)) continue;
+                double gamma_ij = 1.0 / sqrt(alp[i] + alp[j]);
+                double gamma_r = gamma_ij * rij;
+                double erf_v   = erf(gamma_r);
+                e_half += 0.5 * (qi * qj * erf_v / rij);
+                double exp_v  = exp(-gamma_r * gamma_r);
+                double derf   = gamma_ij * exp_v * (2.0 * inv_sqrt_pi);
+                double dEdr   = qi * qj * (derf / rij - erf_v / (rij * rij));
+                double fac    = dEdr / rij;
+                gx += fac*dx; gy += fac*dy; gz += fac*dz;
+            }
+            local_E = e_half;
+            add_grad(grad, i, gx, gy, gz);   // atomic: other kernels may touch atom i concurrently
+        }
+    }
+
+    blockReduceAddEnergy(local_E, energy);
+}
+
 // ============================================================================
 // Kernel 4: Bond Stretching
 // r0 = (r0_base_i + cnfak_i*cn[i] + r0_base_j + cnfak_j*cn[j] + rabshift) * ff

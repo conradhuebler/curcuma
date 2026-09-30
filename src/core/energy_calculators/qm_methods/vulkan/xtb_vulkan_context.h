@@ -58,7 +58,8 @@ struct XtbVulkanBasisData {
 
 class XtbVulkanContext {
 public:
-    XtbVulkanContext();
+    /// @param device Vulkan physical-device index; -1 = best device. Claude Generated (Sep 2026).
+    explicit XtbVulkanContext(int device = -1);
     ~XtbVulkanContext();
 
     XtbVulkanContext(const XtbVulkanContext&) = delete;
@@ -72,6 +73,10 @@ public:
 
     /// Index of the selected physical device, or -1.
     int deviceId() const;
+
+    /// Vulkan handles are explicit per device (no per-thread current device) -> always true
+    /// when ok(). Exists so XtbGpuAdapter treats all backends alike. Claude Generated.
+    bool bindDevice() const;
 
     /// True if a suitable compute+FP64 Vulkan device is visible (static probe).
     static bool deviceAvailable();

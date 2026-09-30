@@ -68,7 +68,8 @@ namespace gpu {
  * precision policy) and logs its stage banner. Everything else — all 20 forwarding
  * methods and gpuActive() — lives here once.
  *
- * @tparam Context device context class; needs ok() / deviceId() / deviceName().
+ * @tparam Context device context class; needs Context(int device), ok() / deviceId() /
+ *                deviceName() / bindDevice().
  *
  * Claude Generated (Sep 2026).
  */
@@ -86,7 +87,10 @@ public:
         : m_method(method)
     {
         // Device handshake (non-throwing; ok() is false when no usable device).
-        m_gpu = std::make_unique<Context>();
+        // Claude Generated (Sep 2026, multi-GPU): `gpu_device` (global CLI key, set per
+        // worker by the batch capabilities) selects the device; -1 = the backend default.
+        m_device = gpuDeviceFromConfig(config);
+        m_gpu = std::make_unique<Context>(m_device);
 
         // Full validated CPU pipeline (config, large-system modes, errors, properties).
         m_cpu = std::make_unique<NativeXtbMethod>(method, config);
@@ -98,18 +102,26 @@ public:
                 CurcumaLogger::success(fmt::format(
                     "{}: {} context ready on device {} ({})",
                     m_cpu->getMethodName(), ctx_label, m_gpu->deviceId(), m_gpu->deviceName()));
+        } else if (m_device >= 0) {
+            CurcumaLogger::warn(fmt::format(
+                "{}: {} {} is not usable (index out of range or init failed); running CPU path",
+                m_cpu->getMethodName(), device_label, m_device));
         } else {
             CurcumaLogger::warn(fmt::format(
                 "{}: no usable {}; running CPU path", m_cpu->getMethodName(), device_label));
         }
     }
 
-    ~XtbGpuAdapter() override = default;
+    // Bind before the members (context, resident backend, CPU solver holding the hooks)
+    // are destroyed, so device memory is freed on the device that owns it.
+    ~XtbGpuAdapter() override { bindDevice(); }
 
     // ---- ComputationalMethod interface: forward to the CPU pipeline -------
-    bool setMolecule(const Mol& mol) override { return m_cpu->setMolecule(mol); }
-    bool updateGeometry(const Matrix& g) override { return m_cpu->updateGeometry(g); }
-    double calculateEnergy(bool gradient = false) override { return m_cpu->calculateEnergy(gradient); }
+    // The three calls that reach the device re-bind first: the object may be driven from a
+    // different host thread than the one that built it (the CUDA current device is per thread).
+    bool setMolecule(const Mol& mol) override { bindDevice(); return m_cpu->setMolecule(mol); }
+    bool updateGeometry(const Matrix& g) override { bindDevice(); return m_cpu->updateGeometry(g); }
+    double calculateEnergy(bool gradient = false) override { bindDevice(); return m_cpu->calculateEnergy(gradient); }
 
     Matrix getGradient() const override { return m_cpu->getGradient(); }
     Vector getCharges() const override { return m_cpu->getCharges(); }
@@ -139,12 +151,36 @@ public:
     /// True when the device context is live (else this object runs the CPU path).
     bool gpuActive() const { return m_gpu && m_gpu->ok(); }
 
+    /// Device index this object was asked to use (-1 = backend default). Claude Generated.
+    int gpuDevice() const { return m_device; }
+
+    /**
+     * @brief Read the `gpu_device` key (int, or a numeric string) from a method config.
+     * @return the index, or -1 when absent/invalid (= backend default device).
+     * Claude Generated (Sep 2026, multi-GPU).
+     */
+    static int gpuDeviceFromConfig(const json& config)
+    {
+        if (!config.contains("gpu_device")) return -1;
+        const auto& v = config["gpu_device"];
+        try {
+            // CLI2Json stores numeric flags as double ("-gpu_device 3" -> 3.0).
+            if (v.is_number()) return static_cast<int>(v.get<double>());
+            if (v.is_string() && !v.get<std::string>().empty()) return std::stoi(v.get<std::string>());
+        } catch (...) {
+        }
+        return -1;
+    }
+
 protected:
+    void bindDevice() const { if (m_gpu && m_gpu->ok()) m_gpu->bindDevice(); }
+
     /// The owned XTB the derived constructor hangs its device hooks on (may be null).
     curcuma::xtb::XTB* cpuSolver() { return m_cpu->solver(); }
     Context* context() { return m_gpu.get(); }
 
     curcuma::xtb::MethodType m_method;
+    int                      m_device = -1;   ///< requested device index (-1 = default)
     // m_gpu/m_scf_backend before m_cpu: the owned XTB holds the eigensolver hook + the
     // resident-SCF backend pointer, so it must be destroyed (in m_cpu) FIRST — members
     // are destroyed in reverse declaration order.
