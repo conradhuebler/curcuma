@@ -1,6 +1,6 @@
 /*
  * <AncOpt Optimizer Implementation>
- * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * Port of AncOpt from XTB by Stefan Grimme
  * Original: external/xtb/src/optimizer.f90
@@ -21,6 +21,7 @@
 #endif
 #endif
 
+#include "src/core/units.h"
 #include "ancopt_optimizer.h"
 #include "optimisation/rf_solver.h"
 #include "src/core/citation_registry.h"
@@ -671,7 +672,7 @@ Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates
     // which is NOT in the reference. For systems with many internal coordinates the
     // sqrt(nvar) scaling of the true step norm was shrunk to a tiny per-step radius,
     // producing "slurring" optimization with many small steps.
-    double maxdispl_ang = m_maxdispl * 0.529177; // Bohr → Å
+    double maxdispl_ang = m_maxdispl * CurcumaUnit::Length::bohr_radius_or_legacy(0.529177); // Bohr → Å
     for (int i = 0; i < m_displ.size(); ++i) {
         if (std::abs(m_displ(i)) > maxdispl_ang) {
             m_displ(i) = std::copysign(maxdispl_ang, m_displ(i));
@@ -681,7 +682,7 @@ Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates
     // XTB: exit micro-loop (= regenerate ANC) if step norm > 2.0 Bohr after iter 2.
     // This prevents the Hessian from being updated with a garbage step.
     // Reference: XTB optimizer.f90 relax() Zeile 733-736
-    if (m_micro_current > 2 && m_displ.norm() > 2.0 * 0.529177) {
+    if (m_micro_current > 2 && m_displ.norm() > 2.0 * CurcumaUnit::Length::bohr_radius_or_legacy(0.529177)) {
         CurcumaLogger::warn_fmt("Large step detected ({:.3f} A), forcing ANC regeneration",
                                 m_displ.norm());
         m_needs_anc_regeneration = true;
@@ -851,7 +852,7 @@ Matrix ANCOptimizer::generateModelHessian(const Molecule& mol) {
     // Conversion: 1 Bohr = 0.529177 Å
     // Geometry stored in Å, parameters in Bohr.
     // Hessian units: Eh/Å² (consistent with gradient in Eh/Å).
-    const double A2B = 1.0 / 0.529177; // Å → Bohr
+    const double A2B = CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.0 / 0.529177); // Å → Bohr
     const double A2B2 = A2B * A2B;     // for converting Eh/Bohr² → Eh/Å²
 
     // Lindh 1995 reference distances r0 [Bohr] (Table 1), indexed by period:

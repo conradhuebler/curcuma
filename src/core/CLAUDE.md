@@ -58,7 +58,7 @@ return m_method->calculateEnergy(gradient);
 ### Force Field System
 - **ForceField**: Main engine with universal JSON parameter caching (96% speedup) + **CurcumaLogger verbosity**
 - **ForceFieldGenerator**: Parameter generation with **progress tracking and timing**
-- **ForceFieldThread**: Multi-threaded calculations for large systems
+- **FFWorkspace**: the single threaded energy/gradient engine (UFF/QMDFF/GFN-FF)
 - **Universal Verbosity**: Energy decomposition, timing analysis, silent mode support
 - **Performance Critical**: Parameter caching essential for iterative calculations
 
@@ -87,7 +87,7 @@ core/
 │   └── ff_methods/                 # ALL force field methods (moved from src/core/)
 │       ├── forcefield.cpp          # Main FF engine + verbosity
 │       ├── forcefieldgenerator.cpp # Parameter generation + progress tracking
-│       ├── forcefieldthread.cpp    # Multi-threading support
+│       ├── ff_workspace*.cpp       # Partitioned energy/gradient engine
 │       ├── qmdff.cpp               # QMDFF implementation
 │       ├── eigen_uff.cpp           # UFF implementation
 │       └── *_par.h                 # Parameter databases (UFF, QMDFF)

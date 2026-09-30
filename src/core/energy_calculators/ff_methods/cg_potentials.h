@@ -19,7 +19,7 @@
 
 #pragma once
 
-#include "forcefieldthread.h"
+#include "ff_terms.h"  // vdW struct
 #include <Eigen/Dense>
 
 using Vector3d = Eigen::Vector3d;

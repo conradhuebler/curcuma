@@ -1,6 +1,6 @@
 /*
  * DFT-D4 Parameter Generator for Curcuma
- * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -103,6 +103,15 @@ public:
     // @param skip_dc6dcn  If true, skip O(N²) dc6dcn matrix (GPU computes per-pair)
     void updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool = nullptr,
                                     int num_threads = 1, bool skip_dc6dcn = false);
+
+    /**
+     * @brief Refresh Gaussian CN-weights and the C6 half-contraction at new CN values, energy-only.
+     * Claude Generated (Sep 2026, Known Issue #32): weights + half-contraction only; dgw/dc6dcn
+     * (gradient-only) stay owned by updateCNValuesForGradient. Lets a reused calculator's
+     * energy-only call see the current CN in getChargeWeightedC6() without paying for gradient
+     * derivatives it doesn't need.
+     */
+    void refreshC6WeightsForCN(const std::vector<double>& cn, CxxThreadPool* pool = nullptr, int num_threads = 1);
     const Matrix& getDC6DCN() const { return m_dc6dcn; }
 
     // Claude Generated (March 2026): GPU dc6dcn Phase 2 — expose weight arrays
@@ -147,6 +156,15 @@ public:
     // struct below — and external callers — can size against MAX_REF).
     static constexpr int MAX_ELEM = 118;
     static constexpr int MAX_REF = 7;
+
+    // Claude Generated (Sep 2026): the two radii of the GFN-FF D4 pair list, named so the
+    // caller can derive the list's skin. GenerateDispersionPairsNative() keeps every pair
+    // closer than PAIR_BUILD_CUTOFF_BOHR and stamps r_cut = PAIR_EVAL_CUTOFF_BOHR on it; the
+    // kernel skips pairs beyond r_cut. The 10 Bohr difference is a Verlet skin: a pair absent
+    // from the list needs >= 10 Bohr of relative motion before it can contribute
+    // (see GFNFF::updateDispersionPairsIfNeeded()). Values unchanged from the former literals.
+    static constexpr double PAIR_BUILD_CUTOFF_BOHR = 60.0;
+    static constexpr double PAIR_EVAL_CUTOFF_BOHR  = 50.0;
 
     // Claude Generated (AP2 perf, 2026-06): split weightedC6Gfn2 into a per-atom
     // weight build + a per-pair contraction so the O(N) atom weights are computed

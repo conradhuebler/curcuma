@@ -30,11 +30,11 @@
  * 
  * This wrapper adapts the existing ForceField implementation (UFF, QMDFF, etc.)
  * to the unified ComputationalMethod interface. It maintains the high-performance
- * threading capabilities of the original ForceField using CxxThreadPool.
+ * threading capabilities of the original ForceField (FFWorkspace on CxxThreadPool).
  * 
  * Key Features:
  * - Maintains existing CxxThreadPool threading system for optimal performance
- * - Supports all ForceField methods: UFF, UFF-D3, QMDFF, gfnff
+ * - Supports the ForceField methods UFF, UFF-D3 and QMDFF (GFN-FF has its own engine)
  * - Preserves universal parameter caching system (96% speedup)
  * - Thread-safe parameter caching control for concurrent calculations
  * - Analytical gradients always available
@@ -45,7 +45,7 @@ class ForceFieldMethod : public ComputationalMethod {
 public:
     /**
      * @brief Constructor with method name and configuration
-     * @param method_name ForceField method ("uff", "uff-d3", "qmdff", "gfnff")
+     * @param method_name ForceField method ("uff", "uff-d3", "qmdff")
      * @param config JSON configuration (ForceField-specific parameters)
      */
     ForceFieldMethod(const std::string& method_name, const json& config = json{});
@@ -225,43 +225,13 @@ public:
     double getDispersionEnergy() const;
 
     /**
-     * @brief Get Coulomb energy component
-     * @return Electrostatic energy
-     */
-    double getCoulombEnergy() const;
-
-    /**
-     * @brief Get hydrogen bond energy component
-     * @return Hydrogen bond energy
-     */
-    double getHBondEnergy() const;
-
-    /**
-     * @brief Get halogen bond energy component
-     * @return Halogen bond energy
-     */
-    double getXBondEnergy() const;
-
-    /**
-     * @brief Get atm (three-body dispersion) energy component
-     * @return ATM energy
-     */
-    double getATMEnergy() const;
-
-    /**
-     * @brief Get batm (bonded ATM) energy component
-     * @return BATM energy
-     */
-    double getBatmEnergy() const;
-
-    /**
      * @brief Get complete energy decomposition as JSON
      * @return JSON object with all energy components in Hartree
      *
-     * Returns all 10 energy terms for ForceField methods:
+     * Returns the 10-key layout shared with GFN-FF:
      * - Bond, Angle, Torsion, Inversion (bonded terms)
-     * - Dispersion, Coulomb (non-bonded terms)
-     * - HBond, XBond, ATM, BATM (special terms)
+     * - Dispersion (uff-d3)
+     * - Coulomb, HBond, XBond, ATM, BATM are always 0.0 for UFF/QMDFF
      */
     json getEnergyDecomposition() const override;
 

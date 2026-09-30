@@ -44,7 +44,15 @@ std::string createBMTDir(const std::string& basename, const std::string& keyword
 
 #ifdef C17
 #ifndef _WIN32
-    std::filesystem::create_directories(bmt_dir);
+    // The timestamp resolves to one second, so two runs on the same input started within
+    // the same second would share a directory. That is not merely untidy: RestartFiles()
+    // scans the output directory, so the second run would adopt the first one's
+    // curcuma_restart.json and continue from a state that is not its own. Suffix the name
+    // until create_directories() reports that it actually created the directory.
+    std::string candidate = bmt_dir;
+    for (int i = 2; i < 1000 && !std::filesystem::create_directories(candidate); ++i)
+        candidate = bmt_dir + "_" + std::to_string(i);
+    bmt_dir = candidate;
 #endif
 #endif
 

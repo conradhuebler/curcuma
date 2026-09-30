@@ -25,13 +25,15 @@ run_test() {
     # Fresh start: drop any restart state so run 1 is deterministic.
     rm -f curcuma_restart.json conformers.confscan_progress.json
 
-    # NOTE: single-threaded. The threaded reorder path can intermittently stall (a
-    # pre-existing concurrency issue, see AIChangelog / docs); the restart double-run
-    # exposes it. threads=1 is deterministic and yields the same goldens.
+    # NOTE: runs multi-threaded on purpose. The restart double-run was one of the two
+    # scenarios that exposed the intermittent reorder stall (lost wakeup in
+    # CxxThreadPool, fixed 2026-08-03 - see AIChangelog), so it doubles as the regression
+    # guard. Measured 5x at threads=4: both run fingerprints identical every run, and
+    # identical to the threads=1 results.
     set +e
     $CURCUMA -confscan conformers.xyz \
         -rmsd.method subspace \
-        -confscan.threads 1 \
+        -confscan.threads 4 \
         -no_bmt \
         > stdout.run1.log 2> stderr.run1.log
     local rc1=$?
@@ -46,7 +48,7 @@ run_test() {
     set +e
     $CURCUMA -confscan conformers.xyz \
         -rmsd.method subspace \
-        -confscan.threads 1 \
+        -confscan.threads 4 \
         -no_bmt \
         > stdout.run2.log 2> stderr.run2.log
     local rc2=$?

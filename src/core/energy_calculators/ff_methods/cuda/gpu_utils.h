@@ -15,11 +15,15 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
+ * Claude Generated (Sep 2026): SHARED by the CUDA and the ROCm backend - the interface
+ * has no runtime-API types at all, so there is only ONE declaration of GPUUtils; the
+ * implementation is cuda/gpu_utils.cpp (nvcc) resp. the GPUUtils block at the end of
+ * rocm/gfnff_rocm.hip (hipcc). rocm/gpu_utils_hip.h is a one-line include shim.
  */
 
 #pragma once
 
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
 
 #include <cstddef>
 #include <string>
@@ -30,7 +34,7 @@ namespace GPUUtils {
  * @brief Get available GPU memory information.
  * @param free  Output: free memory in bytes
  * @param total Output: total memory in bytes
- * @return true if successful, false if CUDA error
+ * @return true if successful, false on a GPU runtime error
  *
  * Claude Generated (March 2026): GPU memory management for Phase 2.
  */
@@ -54,7 +58,7 @@ size_t estimateGFNFFGPUMemory(int natoms);
  * @brief Check if molecule fits in GPU memory.
  * @param natoms Number of atoms
  * @param threshold Fraction of free memory to use (default 0.8)
- * @return true if sufficient memory, false if insufficient or CUDA error
+ * @return true if sufficient memory, false if insufficient or on a GPU error
  *
  * Claude Generated (March 2026): Pre-allocation check to avoid OOM.
  */
@@ -77,4 +81,4 @@ void logGPUMemoryStatus(int verbosity = 2);
 
 } // namespace GPUUtils
 
-#endif // USE_CUDA
+#endif // USE_CUDA || USE_ROCM

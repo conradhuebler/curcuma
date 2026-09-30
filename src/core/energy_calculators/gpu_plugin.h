@@ -30,6 +30,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "computational_method.h"   // ComputationalMethod, json (global namespace)
 
@@ -50,5 +51,37 @@ std::unique_ptr<ComputationalMethod> createNativeXtb(const std::string& backend,
  * Returns nullptr on failure (caller falls back to CPU). Claude Generated.
  */
 std::unique_ptr<ComputationalMethod> createGfnff(const std::string& backend, const json& config);
+
+/// True if the plugin library libcurcuma_<backend>.so can be loaded (cached; a failed probe
+/// is not retried and, unlike the create* calls, is silent). Used for `-gpu auto` and
+/// for the "was this backend built?" checks — the core no longer needs USE_CUDA/USE_ROCM/
+/// USE_VULKAN for dispatch (Claude Generated, Sep 2026).
+bool available(const std::string& backend);
+
+/// First loadable backend in the order cuda, rocm, vulkan; "none" if no plugin is present.
+std::string firstAvailable();
+
+/// The backend names the loader knows, in priority order.
+const std::vector<std::string>& knownBackends();
+
+/**
+ * @brief Number of devices the backend's runtime can see (after CUDA_VISIBLE_DEVICES etc.).
+ * Returns 0 when the plugin is not loadable. A plugin built before the multi-GPU ABI
+ * (no `curcuma_<backend>_device_count` symbol) reports 1. Claude Generated (Sep 2026).
+ */
+int deviceCount(const std::string& backend);
+
+/**
+ * @brief Static properties of one device: {"index","name","memory_total_bytes",
+ * "compute_capability", ...}. Empty object when unavailable. Creates no device context.
+ * Claude Generated (Sep 2026).
+ */
+json deviceInfo(const std::string& backend, int index);
+
+/**
+ * @brief Distributed-eigensolver backends this plugin was built with ("mp", "mg", "mp,mg").
+ * Empty when the plugin does not export the symbol. Claude Generated (Sep 2026).
+ */
+std::string mgpuBackends(const std::string& backend);
 
 } // namespace gpu_plugin

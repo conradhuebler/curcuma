@@ -27,10 +27,10 @@
 #include "ff_workspace.h"
 #include "gfnff_par.h"
 #include "forcefieldfunctions.h"
-#include "forcefieldderivaties.h"
 #include "gfnff_geometry.h"
 #include "src/core/units.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/math_compat.h"
 
 #include <fmt/core.h>
 #include <fmt/format.h>
@@ -75,7 +75,7 @@ void FFWorkspace::computeHBCoordinationNumbers(int p)
 
             double rcovij = rcov_scal * rcov_43 * (rcov_base[ati - 1] + rcov_base[atj - 1]);
             double arg = -kn * (r - rcovij) / rcovij;
-            double tmp = 0.5 * (1.0 + std::erf(arg));
+            double tmp = 0.5 * (1.0 + curcuma_erf(arg));
             hb_cn_map[H] += tmp;
 
             double dCN_dr = inv_sqrt_pi * (-kn / rcovij) * std::exp(-arg * arg) / r;
@@ -94,6 +94,17 @@ void FFWorkspace::computeHBCoordinationNumbers(int p)
             bond.hb_cn_H = (it != hb_cn_map.end()) ? it->second : 0.0;
         }
     }
+
+    // CSR index by H atom. The per-H entry order equals the order the former linear
+    // scan visited them, so the gradient accumulation order (and result) is unchanged.
+    const int nat = static_cast<int>(m_atom_types.size());
+    m_hb_grad_offsets.assign(nat + 1, 0);
+    for (const auto& e : m_hb_grad_entries) ++m_hb_grad_offsets[e.H_atom + 1];
+    for (int a = 0; a < nat; ++a) m_hb_grad_offsets[a + 1] += m_hb_grad_offsets[a];
+    m_hb_grad_list.resize(m_hb_grad_entries.size());
+    std::vector<int> fill(m_hb_grad_offsets.begin(), m_hb_grad_offsets.end() - 1);
+    for (int k = 0; k < static_cast<int>(m_hb_grad_entries.size()); ++k)
+        m_hb_grad_list[fill[m_hb_grad_entries[k].H_atom]++] = k;
 }
 
 // ============================================================================
@@ -157,10 +168,12 @@ void FFWorkspace::calcBonds(int p)
                 constexpr double t1 = 0.1;
                 double zz = t1 * alpha_orig * dr * dr * energy;
                 int H = (m_atom_types[bond.i] == 1) ? bond.i : bond.j;
-                for (const auto& hbg : m_hb_grad_entries) {
-                    if (hbg.H_atom != H) continue;
-                    acc.gradient.row(H) += zz * hbg.dCN_dH.transpose();
-                    acc.gradient.row(hbg.B_atom) += zz * hbg.dCN_dB.transpose();
+                if (H + 1 < static_cast<int>(m_hb_grad_offsets.size())) {
+                    for (int k = m_hb_grad_offsets[H]; k < m_hb_grad_offsets[H + 1]; ++k) {
+                        const auto& hbg = m_hb_grad_entries[m_hb_grad_list[k]];
+                        acc.gradient.row(H) += zz * hbg.dCN_dH.transpose();
+                        acc.gradient.row(hbg.B_atom) += zz * hbg.dCN_dB.transpose();
+                    }
                 }
             }
 
@@ -851,10 +864,57 @@ void FFWorkspace::calcCoulomb(int p)
 {
     auto& acc = m_accumulators[p];
     auto [begin, end] = m_partitions[p].coulombs;
-    if (begin == end) return;
+    const auto [atom_begin, atom_end] = m_partitions[p].coulomb_atoms;
+    if (begin == end && atom_begin == atom_end) return;
 
     Matrix grad_before;
     if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
+
+    // Claude Generated (Sep 2026): implicit pairs. Everything a pair needs is per-atom - the EEQ
+    // charge and alpeeq (gamma_ij = 1/sqrt(alp_i+alp_j)) - so the N^2/2 list does not have to
+    // exist. Storing it costs 128 bytes per pair: 3.4 GB and ~0.5 s of pure write bandwidth at
+    // 7320 atoms, which no amount of threading removes (measured). Same formula and the same
+    // i<j pair set as the stored path below; the CUDA k_coulomb_implicit kernel is the device
+    // twin of this loop.
+    if (atom_begin < atom_end) {
+        const double sqrt_pi = 1.772453850905516;
+        const bool have_q = (m_eeq_charges.size() == m_natoms);
+        const bool have_alp = (m_coul_alp.size() == m_natoms);
+        if (have_q && have_alp) {
+            for (int i = atom_begin; i < atom_end; ++i) {
+                const double qi = m_eeq_charges(i);
+                const double alp_i = m_coul_alp(i);
+                if (std::isnan(qi) || alp_i <= 0.0) continue;
+                const Eigen::Vector3d ri = m_geometry.row(i);
+                for (int j = i + 1; j < m_natoms; ++j) {
+                    const double qj = m_eeq_charges(j);
+                    const double alp_j = m_coul_alp(j);
+                    if (std::isnan(qj) || alp_j <= 0.0) continue;
+                    const Eigen::Vector3d rij_vec = ri - m_geometry.row(j).transpose();
+                    const double rij = rij_vec.norm();
+                    if (rij > m_coulomb_implicit_rcut || rij < 1e-10) continue;
+
+                    const double gamma_ij = 1.0 / std::sqrt(alp_i + alp_j);
+                    const double gamma_r = gamma_ij * rij;
+                    const double erf_term = curcuma_erf(gamma_r);
+                    acc.energy.coulomb += qi * qj * erf_term / rij;
+
+                    if (m_do_gradient) {
+                        const double exp_term = std::exp(-gamma_r * gamma_r);
+                        const double derf_dr = gamma_ij * exp_term * (2.0 / sqrt_pi);
+                        const double dEdr_pair = qi * qj * (derf_dr / rij - erf_term / (rij * rij));
+                        const Eigen::Vector3d grad = dEdr_pair * rij_vec / rij;
+                        acc.gradient.row(i) += grad.transpose();
+                        acc.gradient.row(j) -= grad.transpose();
+                    }
+                }
+            }
+        }
+        if (acc.has_components && m_do_gradient)
+            acc.grad_coulomb += (acc.gradient - grad_before);
+        if (begin == end) return;
+        if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
+    }
 
     for (int idx = begin; idx < end; ++idx) {
         const auto& coul = m_coulombs[idx];
@@ -877,7 +937,7 @@ void FFWorkspace::calcCoulomb(int p)
         }
 
         double gamma_r = coul.gamma_ij * rij;
-        double erf_term = std::erf(gamma_r);
+        double erf_term = curcuma_erf(gamma_r);
         double energy_pair = qi * qj * erf_term / rij;
         acc.energy.coulomb += energy_pair;
 
@@ -898,37 +958,11 @@ void FFWorkspace::calcCoulomb(int p)
 }
 
 // ============================================================================
-// HB/XB Damping Helper Functions (file-local)
+// HB/XB Damping Helper Functions: ws_damping_short_range/ws_damping_long_range/
+// ws_damping_out_of_line/ws_charge_scaling moved (Sep 2026) to gfnff_par.h under
+// GFNFFParameters, so gfnff_method.cpp's detection-time strength pre-check can share them
+// exactly. Brought into scope here via the `using namespace GFNFFParameters;` below.
 // ============================================================================
-
-namespace {
-
-inline double ws_damping_out_of_line(double r_AH, double r_HB, double r_AB, double radab, double bacut)
-{
-    double ratio = (r_AH + r_HB) / r_AB;
-    double exponent = (bacut / radab) * (ratio - 1.0);
-    if (exponent > 15.0) return 0.0;
-    return 2.0 / (1.0 + std::exp(exponent));
-}
-
-inline double ws_damping_short_range(double r, double r_vdw, double scut, double alp)
-{
-    double ratio = scut * r_vdw / (r * r);
-    return 1.0 / (1.0 + std::pow(ratio, alp));
-}
-
-inline double ws_damping_long_range(double r, double longcut, double alp)
-{
-    return 1.0 / (1.0 + std::pow(r * r / longcut, alp));
-}
-
-inline double ws_charge_scaling(double q, double st, double sf)
-{
-    double exp_term = std::exp(st * q);
-    return exp_term / (exp_term + sf);
-}
-
-} // anonymous namespace
 
 // ============================================================================
 // Hydrogen Bonds (three-body A-H...B)
@@ -1148,7 +1182,8 @@ void FFWorkspace::calcHydrogenBonds(int p)
         }
         acc.energy.hbond += E_HB;
 
-        if (std::getenv("CURCUMA_HB_DUMP") && std::abs(E_HB) > 1e-13) {
+        static const bool hb_dump = (std::getenv("CURCUMA_HB_DUMP") != nullptr);  // once, not per triple
+        if (hb_dump && std::abs(E_HB) > 1e-13) {
             fmt::print("HBTRIP A={:3d} H={:3d} B={:3d} case={} E={:.12f}\n",
                        hb.i+1, hb.j+1, hb.k+1, hb.case_type, E_HB);
         }

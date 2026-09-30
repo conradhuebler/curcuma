@@ -1,0 +1,11 @@
+{
+  "_generator": "xtb 6.7.1 (edcfbbe): xtb FI_pyr.xyz --gfn 1 --sp --acc 0.0001",
+  "_note": "GFN1 halogen-bond (B-X...A) regression. NOT a tblite dump -- the tblite dumper needs a USE_TBLITE build; xtb 6.7.1 and tblite share this term verbatim (external/xtb/src/xtb/halogen.f90 == external/tblite/src/tblite/classical/halogen.f90). Structure: GMTKN55 HAL59/FI_pyr (F-I...pyridine). Without the halogen-bond correction curcuma is 1.9017e-2 Eh (11.93 kcal/mol) below this value -- the term itself is +0.01901671 Eh.",
+  "method": "gfn1",
+  "molecule": {
+    "comment": "F-I...N halogen bond (GMTKN55 HAL59/FI_pyr)",
+    "name": "FI_pyr",
+    "natoms": 13
+  },
+  "total_energy": -25.501918897701
+}

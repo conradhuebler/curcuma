@@ -9,15 +9,13 @@
  * Selected by the factory when `-gpu rocm` (or `-gpu auto` on a ROCm-only build) is
  * given and the build has USE_ROCM.
  *
- * Design (minimal-disruption sibling of NativeXtbMethod, identical to the CUDA wrapper):
- *   - OWNS a NativeXtbMethod (the validated CPU pipeline: config, large-system modes,
- *     error handling, property accessors).
- *   - OWNS an XtbHipContext (hipBLAS/rocSOLVER handles + stream).
- *
- * Stage 0 (current): every call forwards to the CPU NativeXtbMethod; the HIP context
- * is only initialized to prove the build/link and device handshake. Later stages
- * install the device-resident SCF backend (the hipified XtbHipContext implements the
- * same GpuScfBackend contract as the CUDA path) and the GPU eigensolver hook.
+ * Design: OWNS a NativeXtbMethod (the validated CPU pipeline: config, large-system
+ * modes, error handling, property accessors) + an XtbHipContext (hipBLAS/rocSOLVER
+ * handles + stream). Every ComputationalMethod call forwards to the CPU pipeline; the
+ * GPU is reached through the hooks the constructor installs on the owned XTB. That
+ * shared wrapper logic lives ONCE in XtbGpuAdapter (xtb_gpu_adapter.h, Claude Generated
+ * Sep 2026); only the ROCm-specific eigensolver hook, the resident backend and the
+ * mixed-precision policy are in the .cpp.
  *
  * Usage:
  *   ./curcuma -sp mol.xyz -method gfn2 -gpu rocm   # explicit ROCm
@@ -29,70 +27,23 @@
 
 #ifdef USE_ROCM
 
-#include "native_xtb_method.h"   // NativeXtbMethod + curcuma::xtb::MethodType
-
-#include <memory>
-#include <string>
-
-namespace curcuma {
-namespace xtb {
-struct GpuScfBackend;
-namespace gpu {
-class XtbHipContext;
-}
-}
-}
+#include "xtb_gpu_adapter.h"        // XtbGpuAdapter (shared wrapper logic)
+#include "rocm/xtb_hip_context.h"   // XtbHipContext (pimpl — no HIP headers)
 
 /**
  * @brief GPU-accelerated native GFN1/GFN2 (method "gfn1"/"gfn2" with -gpu rocm).
+ *
+ * A thin instantiation: the whole ComputationalMethod surface (forwarding, device
+ * handshake + logging, CPU fallback, gpuActive()) comes from the shared adapter; the
+ * constructor adds the rocSOLVER eigensolver hook and the device-resident SCF backend.
  * Claude Generated.
  */
-class XtbHipComputationalMethod : public ComputationalMethod {
+class XtbHipComputationalMethod
+    : public curcuma::xtb::gpu::XtbGpuAdapter<curcuma::xtb::gpu::XtbHipContext> {
 public:
     explicit XtbHipComputationalMethod(curcuma::xtb::MethodType method,
                                        const json& config = json{});
     ~XtbHipComputationalMethod() override;
-
-    // ---- ComputationalMethod interface (Stage 0: forward to CPU) ----------
-    bool setMolecule(const Mol& mol) override;
-    bool updateGeometry(const Matrix& geometry) override;
-    double calculateEnergy(bool gradient = false) override;
-
-    Matrix getGradient() const override;
-    Vector getCharges() const override;
-    Vector getBondOrders() const override;
-    Position getDipole() const override;
-    bool hasGradient() const override;
-
-    std::string getMethodName() const override;
-    bool isThreadSafe() const override;
-    void setThreadCount(int threads) override;
-
-    void setParameters(const json& params) override;
-    json getParameters() const override;
-
-    bool hasError() const override;
-    void clearError() override;
-    std::string getErrorMessage() const override;
-
-    Vector getOrbitalEnergies() const override;
-    int getNumElectrons() const override;
-    json getEnergyDecomposition() const override;
-    bool saveToFile(const std::string& filename) const override;
-
-    void setWarmStart(bool on) override;
-    void setIterativeMode(bool on) override;
-
-    /// True when the HIP context is live (else this object runs the CPU path).
-    bool gpuActive() const;
-
-private:
-    curcuma::xtb::MethodType                          m_method;
-    // m_gpu/m_scf_backend before m_cpu: the owned XTB holds the eigensolver hook +
-    // resident-SCF backend pointer, so it must be destroyed (in m_cpu) first.
-    std::unique_ptr<curcuma::xtb::gpu::XtbHipContext> m_gpu;          ///< device handles
-    std::unique_ptr<curcuma::xtb::GpuScfBackend>      m_scf_backend;  ///< Stage-2 resident SCF (GFN1)
-    std::unique_ptr<NativeXtbMethod>                  m_cpu;          ///< validated CPU pipeline
 };
 
 #endif // USE_ROCM

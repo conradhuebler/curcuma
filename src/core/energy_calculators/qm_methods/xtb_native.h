@@ -29,8 +29,8 @@
 
 #include "src/core/global.h"
 #include "src/core/solvation/implicit_solvation.h"
-#include "qm_driver.h"
-#include "STOIntegrals.hpp"
+#include "interface/abstract_interface.h"
+#include "json.hpp"
 
 #include <Eigen/Dense>
 #include <array>
@@ -404,6 +404,11 @@ struct GpuScfBackend {
     virtual bool downloadOverlap(Eigen::MatrixXd& S_out)   { (void)S_out;  return false; }
     virtual bool downloadH0(Eigen::MatrixXd& H0_out)       { (void)H0_out; return false; }
     virtual bool downloadCholesky(Eigen::MatrixXd& L_out)  { (void)L_out;  return false; }
+    /// Claude Generated (Sep 29, 2026): the same S / H0 written column-major straight into
+    /// caller storage of nao*nao doubles, so the host needs no temporary and no extra copy
+    /// (polymer_2x: 2.4 s of host copies). Default false: the caller uses the functions above.
+    virtual bool downloadOverlapInto(double* S_colmajor) { (void)S_colmajor; return false; }
+    virtual bool downloadH0Into(double* H0_colmajor)     { (void)H0_colmajor; return false; }
 
     /* ----- Device nuclear gradient (Stage 4) ---------------------------- *
      * The electronic + repulsion + Coulomb gradient (sections 1/2/3 of
@@ -508,6 +513,10 @@ struct GpuScfBackend {
     { (void)q_sh0; (void)dp_at0; (void)qp_at0; (void)q_at0; (void)n0_sh; (void)n0_at;
       (void)Tele; (void)n_elec; (void)nocc_pairs; (void)alpha; (void)max_hist; (void)w0;
       return false; }
+    /// Per-phase device timings (CURCUMA_GPU_PROFILE), "" when unsupported/disabled.
+    /// Claude Generated (Sep 2026).
+    virtual std::string profileReport() const { return {}; }
+
     virtual bool residentScfStep(bool fp32, double& dq, double& e_band, double& e_coulomb,
                                  double& e_third, double& e_multipole)
     { (void)fp32; (void)dq; (void)e_band; (void)e_coulomb; (void)e_third; (void)e_multipole;
@@ -579,6 +588,18 @@ struct GpuScfBackend {
                                 const double* qkernel, const double* gamma3)
     { (void)nat; (void)nsh; (void)amat_sd; (void)amat_dd; (void)amat_sq;
       (void)dkernel; (void)qkernel; (void)gamma3; return false; }
+    /// Device potential without the stored multipole interaction matrices (the backend
+    /// rebuilds them from geometry + damping radii). Claude Generated (Sep 2026).
+    /// Why the last begin*/step call returned false, when the backend can say. Empty
+    /// otherwise. Claude Generated (Sep 2026).
+    virtual std::string lastError() const { return {}; }
+    virtual bool supportsOnTheFlyMultipole() const { return false; }
+    virtual bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr,
+                                        const double* mrad, double dmp3, double dmp5,
+                                        const double* dkernel, const double* qkernel,
+                                        const double* gamma3)
+    { (void)nat; (void)nsh; (void)xyz_bohr; (void)mrad; (void)dmp3; (void)dmp5;
+      (void)dkernel; (void)qkernel; (void)gamma3; return false; }
     /// q_sh (nsh), dp_at (3×nat), qp_at (6×nat) are the mixed SCC input; W/dWq
     /// (each nat·7) the host-built D4 reference weights at those charges. Builds
     /// the potential + Fock on the device and writes the eigenvalues to eps.
@@ -627,12 +648,12 @@ inline int solventModelCode(const std::string& s)
     return -1;
 }
 
-class XTB : public QMDriver {
+class XTB : public QMInterface {
 public:
     explicit XTB(MethodType method);
     ~XTB() override;
 
-    // QMDriver API
+    // QMInterface API
     using QMInterface::InitialiseMolecule;   // unhide base-class overloads (Mol& / Mol*)
     bool   InitialiseMolecule() override;
     double Calculation(bool gradient = false) override;
@@ -670,6 +691,9 @@ public:
                                 std::vector<int>& nref) const;            // xtb_native.cpp
     Vector  getOrbitalEnergies() const { return m_wfn.eps; }
     Matrix  getMOCoefficients() const { return m_wfn.C; }
+    Matrix  MolecularOrbitals() const { return m_mo; }
+    Vector  Energies() const { return m_energies; }
+    int     NumElectrons() const { return m_num_electrons; }
     Matrix  getDensity() const { return m_wfn.P; }
     // Converged per-iteration SCC energy components (Eh), cached from the last
     // SCF iteration. Reference for the device SCC-energy reductions (Stage 6,
@@ -782,6 +806,14 @@ public:
     void setDiisSubspace(int n)           { if (n >= 2) m_diis_subspace = n; }
     void setLevelShift(double b)          { m_level_shift = b; }
     void setScfGuess(const std::string& g){ m_scf_guess = g; }
+    void setScfAllowUnconverged(bool b){ m_scf_allow_unconverged = b; }
+    // Opt-in: build the 4s/4p shells from xtb's older STO-6G tables instead of
+    // tblite's (K, Ca, Ge-Kr only). See STO_CGTO.hpp pAlpha6_legacy_4s.
+    void setSto6gLegacy4sp(bool b)        { m_sto6g_legacy_4sp = b; }
+    // D4 three-body (ATM) real-space cutoff in Bohr. tblite uses 25.0 (the default,
+    // since tblite is curcuma's reference for GFN1/GFN2), xtb passes 40.0. Set 40.0
+    // to reproduce the xtb binary on molecules extending past ~25 Bohr.
+    void setD4AtmCutoff(double c)         { m_d4_atm_cutoff = c; }
     ScfMode scfMode() const               { return m_scf_mode; }
 
     // Electronic temperature in Kelvin (0 → integer occupation, no Fermi smearing).
@@ -850,6 +882,14 @@ public:
     void setMixedPrecision(bool b)      { m_scf_mixed_precision = b; }
     void setFp32Threshold(double t)     { if (t > 0.0) m_scf_fp32_threshold = t; }
     void setGpuPartialDiag(bool b)      { m_gpu_partial_diag = b; }
+    // Performance knobs, all with their measured defaults (see the PARAM help in
+    // native_xtb_method.h). Claude Generated (Sep 2026).
+    void setEigensolverMaxThreads(int n)    { m_eig_max_threads = std::max(0, n); }
+    void setScfReduce(const std::string& r) { m_scf_reduce = r; }
+    void setScfReduceThreads(int n)         { m_scf_reduce_threads = std::max(1, n); }
+    void setFp32StallPatience(int n)        { m_fp32_stall_patience = std::max(0, n); }
+    void setFp32FalseFixpointFactor(double f) { m_fp32_false_fixpoint = f; }
+    void setGpuMultipoleOtf(const std::string& m) { m_gpu_mp_otf = m; }
 
     // Warm-start: reuse converged charges from the previous geometry step.
     // Activated by MD/opt capabilities; also settable via -warm_start false.
@@ -971,6 +1011,13 @@ private:
     // (already filled by GpuScfBackend::downloadMultipoleInts); only the CN-damping
     // radii + atom-pair interaction matrices are computed. Claude Generated (Stage 3m).
     void setupMultipole(bool integrals_on_device = false);   // xtb_multipole.cpp (GFN2)
+    /// Build the host dense dipole/quadrupole AO integrals if their build was deferred
+    /// because a large system runs the fully device-resident GPU SCF (Claude Generated,
+    /// Sep 2026). Every host path that reads m_dp_int/m_qp_int calls this first.
+    void ensureHostMultipoleIntegrals();
+    /// Download the converged density P and MO coefficients C from the device if a large
+    /// GPU single point skipped that (Claude Generated, Sep 2026).
+    void ensureHostWavefunction();
     Vector computeCoordinationNumbers() const;           // xtb_native.cpp
     void buildReferenceOccupations();                    // xtb_native.cpp
 
@@ -1009,6 +1056,14 @@ private:
     // fractional occupations m_wfn.focc (xtb fermismear, scc_core.f90). Claude Generated.
     double electronicFreeEnergy() const;                                 // xtb_scf.cpp
 
+    // Alpha/beta electron counts (tblite get_alpha_beta_occupation). Equal to
+    // nocc/2 each in the closed-shell case, in which none of the open-shell code runs.
+    double m_nalpha = 0.0;
+    double m_nbeta = 0.0;
+    // Electronic entropy accumulated by the two-channel occupation; consumed by
+    // electronicFreeEnergy(). Only meaningful while openShell() is true.
+    mutable double m_ts_uhf = 0.0;
+
     // Assemble full Fock matrix: F = H0 + isotropic potential + multipole.
     // Isotropic: F_μν = H0_μν - 0.5·S_μν·(v_ao(μ) + v_ao(ν))
     // GFN2:      adds dp_int·vdp + qp_int·vqp via tblite add_vmp_to_h1.
@@ -1032,6 +1087,24 @@ private:
     //     m_electronic_temp, or integer closed-shell at T=0). Mirrors solveEigen.
     //   updatePopulationsFromPopAo: shell/atom Mulliken charges from precomputed
     //     AO populations pop_ao(μ)=Σ_ν P_μν·S_μν (GFN1: no multipole moments).
+    /**
+     * @brief Fermi occupations of ONE spin channel, max 1.0 per orbital.
+     *
+     * Verbatim port of tblite's get_fermi_filling / get_aufbau_filling /
+     * get_fermi_filling_ (src/tblite/wavefunction/fermi.f90): aufbau to obtain the
+     * channel's HOMO index, then a Newton iteration on the Fermi level that targets
+     * exactly that integer electron count. `entropy` returns this channel's
+     * sum(f ln f + (1-f) ln(1-f)) * kT, i.e. tblite's get_electronic_entropy.
+     * Claude Generated (Sep 2026, open-shell support).
+     */
+    static void fermiFillingChannel(const Vector& eps, double nel, double kT,
+                                    Eigen::VectorXd& occ_ch, double& entropy);
+
+    /// Number of unpaired electrons (tblite nuhf). m_spin carries multiplicity - 1.
+    double nUhf() const { return (m_spin > 0.0) ? m_spin : 0.0; }
+    /// True when the SCF must run the two-channel (open-shell) occupation.
+    bool openShell() const { return nUhf() > 0.0; }
+
     void occupationsFromEps(const Vector& eps,
                             Eigen::VectorXd& occ, int& ncol) const;      // xtb_scf.cpp
     void updatePopulationsFromPopAo(const Eigen::VectorXd& pop_ao);      // xtb_scf.cpp
@@ -1049,6 +1122,15 @@ private:
     // correct Coulomb shift. Returns false if EEQ is unavailable (caller then
     // falls back to the bare-H0 guess).
     bool seedEEQGuess(Vector& q_sh_out);                                 // xtb_native.cpp
+
+    // Fragment initial guess (Claude Generated, Sep 2026, operator's idea): split the system
+    // into covalently bonded fragments (Molecule::GetFragments, same partition as
+    // large_system_mode=fragments), converge each fragment's SCF on its own, and scatter the
+    // fragment SCC states (q_sh, GFN2 dp_at/qp_at) onto the global indices. Aimed at large
+    // many-molecule clusters, where the first full Fock from EEQ or bare-H0 charges moves
+    // electrons between distant molecules by several e and the SCF runs away. Returns false
+    // for a single fragment or on any failure (caller falls back to the EEQ guess).
+    bool seedFragmentGuess(Vector& q_sh_out, Matrix& dp_out, Matrix& qp_out);  // xtb_native.cpp
 
     // Multi-step SCC extrapolation helpers (Claude Generated). xtb_native.cpp.
     // packSccState  : flatten the current m_wfn SCC vector — GFN1 [q_sh],
@@ -1069,7 +1151,10 @@ private:
 
     // Repulsion + (GFN1) halogen-bond energies.
     double calcRepulsionEnergy() const;                                  // xtb_native.cpp
-    double calcHalogenBondEnergy() const;                                // xtb_native.cpp
+    double calcHalogenBondEnergy() const;                                // xtb_h0.cpp
+    // Analytic gradient of the GFN1 halogen-bond correction; adds into `gradient`
+    // (nat×3, Eh/Bohr). No-op for GFN2. Claude Generated.
+    void   addHalogenBondGradient(Matrix& gradient) const;               // xtb_h0.cpp
 
     // GFN2 D4 dispersion (optional — requires USE_D4 at compile time).
     // need_gradient gates the (expensive) GFN1 D3 finite-difference geometry
@@ -1106,13 +1191,27 @@ private:
     void parallelStripes(int n_threads,
                          const std::function<void(int, int)>& worker) const; // xtb_native.cpp
 
-    /* ----- legacy QMDriver hooks (still routed through MakeOverlap/H) */
-    Matrix MakeOverlap(std::vector<STO::Orbital>& basisset) override;
-    Matrix MakeH(const Matrix& S,
-                 const std::vector<STO::Orbital>& basisset) override;
+    /// A <- L^-1 A L^-T with the cached Cholesky factor; picks dsygst or two triangular solves
+    /// by thread count (see xtb_scf.cpp for the measurements). Claude Generated (Sep 2026).
+    void reduceToStandardForm(Eigen::MatrixXd& A, int n, int threads, bool& ok) const;
+    /// BLAS/LAPACK threads in force right now (what MklThreadScope set).
+    static int blasThreadsNow();
 
 private:
     MethodType m_method;
+
+    // Converged MO coefficients / orbital energies / occupied-orbital count,
+    // mirrored from m_wfn after every Calculation() for the wrapper accessors
+    // MolecularOrbitals()/Energies()/NumElectrons() (formerly inherited from
+    // the QMDriver base, which this class no longer derives from).
+    Matrix m_mo;
+    Vector m_energies;
+    int    m_num_electrons = 0;
+
+    // LAPACK dsyevd/ssyevd scratch, reused across SCF iterations (xtb_scf.cpp).
+    std::vector<double> m_lapack_work;
+    std::vector<float>  m_lapack_work_f;
+    std::vector<int>    m_lapack_iwork;
 
     BasisMap     m_basis;
     H0Data       m_h0;
@@ -1147,6 +1246,8 @@ private:
     std::vector<double> m_mp_dkernel;
     std::vector<double> m_mp_qkernel;
     bool m_mp_initialized = false;
+    bool m_mp_ints_deferred = false;   // host m_dp_int/m_qp_int not built yet (GPU large system)
+    bool m_wfn_on_device = false;      // converged P/C not downloaded yet (GPU large system)
 
     // B0 (Jul 2026): setupMultipole() sub-phase timings (ms), for the verbosity-3
     // setup report. The single "multipole setup" bucket could not be attributed.
@@ -1217,6 +1318,12 @@ private:
     // solveEigen() and printed at verbosity >= 3. Reset in Calculation().
     // Claude Generated 2026-06 (SCF profiling).
     mutable double m_t_xfx = 0.0;   // X·F·X transform (two GEMMs)
+    // Claude Generated (Sep 2026): the reduce timer above covers a row-major -> column-major
+    // copy of F plus the LAPACK call; they are timed separately here because the copy turned out
+    // to be a large share. m_blas_threads records what the BLAS actually had during the solve.
+    mutable double m_t_xfx_copy = 0.0;
+    mutable int    m_blas_threads = 0;
+    mutable int    m_eig_calls_native = 0, m_eig_calls_fp32 = 0, m_eig_calls_lapack = 0;
     mutable double m_t_diag = 0.0;  // dsyevd standard eigensolve
     mutable double m_t_back = 0.0;  // back-transform C = X·C~ (one GEMM)
     mutable double m_t_dens = 0.0;  // density P = C·occ·Cᵀ
@@ -1228,7 +1335,29 @@ private:
     int         m_diis_start    = 5;     // damped warmup iterations before DIIS
     int         m_diis_subspace = 6;     // DIIS history depth (Fock matrices kept)
     double      m_level_shift   = 0.2;   // virtual-orbital shift magnitude (Eh), LevelShift mode
-    std::string m_scf_guess     = "eeq"; // initial charge guess: "eeq" (default, dftd4 EEQ) | "h0" (bare)
+    std::string m_scf_guess     = "eeq"; // initial charge guess: "eeq" (default, dftd4 EEQ) | "h0" (bare) | "fragments" (converged fragments)
+    bool        m_scf_allow_unconverged = false; // Sep 2026: unconverged SCF = hard error unless set
+    // xtb and tblite disagree on the STO-6G 4s/4p expansion; curcuma follows
+    // tblite (the better fit to the exact Slater function). Set true to
+    // reproduce the xtb binary bit-for-bit on K, Ca and Ge-Kr. STO_CGTO.hpp.
+    bool        m_sto6g_legacy_4sp = false;
+    // D4 ATM cutoff (Bohr). 25.0 = tblite (default), 40.0 = xtb. Carries the ENTIRE
+    // GFN2 energy deviation against xtb on molecules extending past ~25 Bohr, and
+    // ~45 % of the gfn2 runtime on a 231-atom system. Claude Generated (Sep 2026).
+    double      m_d4_atm_cutoff = 25.0;
+    // Runaway-solution recovery (Claude Generated, Sep 2026). The GFN third-order term
+    // scales as q^3 and is unbounded below, so an SCF started far from the ground state
+    // can converge to a spurious stationary point with absurd charges. Observed on
+    // GMTKN55 W4-11/so3 with gfn1: the single-shot EEQ guess put iteration 0 at
+    // -32.7 Eh (SO2, the closest analogue, starts at -11.7), and the SCF settled at
+    // -108.066 Eh against xtb's -17.649, with a third-order term of -134.6 Eh. Starting
+    // from the bare-H0 guess instead reproduces xtb to 1e-8. The reference's own default
+    // guess is "sad" (q = charge/nat, i.e. zero for a neutral molecule; tblite
+    // app/cli.f90:585), which is what H0 amounts to here. Rather than change curcuma's
+    // faster EEQ default for everyone, the converged charges are checked and the whole
+    // calculation is redone from H0 when they are physically impossible.
+    bool m_force_h0_guess = false;   ///< set by the retry; suppresses the EEQ guess
+    bool m_in_scf_retry   = false;   ///< guards against recursing more than once
     std::string m_eigensolver   = "mkl"; // eigensolve backend: "mkl" (dsyevd) | "native"/"dnc"
     // FP32 early-iteration eigensolve (MKL path), ON by default since Jul 2026.
     // The eigensolve is ~58% of native-GFN runtime after the shell-pair-blocked
@@ -1239,6 +1368,14 @@ private:
     bool        m_scf_mixed_precision = true;
     double      m_scf_fp32_threshold  = 1.0e-3;  // switch FP32→FP64 once max|dq| < this
     bool        m_gpu_partial_diag    = false;   // opt-in GPU partial diagonalisation (AP1; net-neutral, see PARAM)
+    // Tunables that were environment variables / hard-coded heuristics until Sep 2026.
+    // Defaults reproduce the previous behaviour exactly. Claude Generated.
+    int         m_eig_max_threads     = 0;       // 0 = follow -threads (CURCUMA_EIG_MAX_THREADS overrides)
+    std::string m_scf_reduce          = "auto";  // auto | sygst | trsm
+    int         m_scf_reduce_threads  = 8;       // 'auto' takes trsm from this thread count up
+    int         m_fp32_stall_patience = 3;       // FP32 iterations without progress before FP64 (0 = off)
+    double      m_fp32_false_fixpoint = 10.0;    // FP64/FP32 residual ratio that unmasks a false fixed point (0 = off)
+    std::string m_gpu_mp_otf          = "auto";  // GFN2 GPU multipole matrices: auto | on | off
     // Optional GPU eigensolver; default unset → CPU path unchanged. Claude Generated.
     ExternalEigensolver m_external_eigensolver;
     bool        m_eig_fp32 = false;              // per-iteration flag set by the SCF loop
@@ -1381,6 +1518,9 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
 
     lookup("scf_mode",     [&](const json& v){ if (v.is_string()) xtb.setScfMode(v.get<std::string>()); });
     lookup("scf_guess",    [&](const json& v){ if (v.is_string()) xtb.setScfGuess(v.get<std::string>()); });
+    lookup("scf_allow_unconverged", [&](const json& v){ if (v.is_boolean()) xtb.setScfAllowUnconverged(v.get<bool>()); else if (v.is_number()) xtb.setScfAllowUnconverged(v.get<double>() != 0.0); });
+    lookup("sto6g_legacy_4sp", [&](const json& v){ if (v.is_boolean()) xtb.setSto6gLegacy4sp(v.get<bool>()); });
+    lookup("d4_atm_cutoff", [&](const json& v){ if (v.is_number()) xtb.setD4AtmCutoff(v.get<double>()); });
     lookup("eigensolver",  [&](const json& v){ if (v.is_string()) xtb.setEigensolver(v.get<std::string>()); });
     lookup("scf_damping",  [&](const json& v){ if (v.is_number()) xtb.setScfDamping(v.get<double>()); });
     lookup("scf_threshold",[&](const json& v){ if (v.is_number()) xtb.setScfThreshold(v.get<double>()); });
@@ -1392,6 +1532,14 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_mixed_precision", [&](const json& v){ if (v.is_boolean()) xtb.setMixedPrecision(v.get<bool>()); });
     lookup("scf_fp32_threshold",  [&](const json& v){ if (v.is_number()) xtb.setFp32Threshold(v.get<double>()); });
     lookup("scf_gpu_partial_diag",[&](const json& v){ if (v.is_boolean()) xtb.setGpuPartialDiag(v.get<bool>()); });
+    // Performance knobs (Claude Generated, Sep 2026). Defaults are the measured ones;
+    // these exist so a machine can be tuned without a rebuild (scripts/tuning_sweep.py).
+    lookup("eigensolver_max_threads", [&](const json& v){ if (v.is_number()) xtb.setEigensolverMaxThreads(static_cast<int>(v.get<double>())); });
+    lookup("scf_reduce",              [&](const json& v){ if (v.is_string()) xtb.setScfReduce(v.get<std::string>()); });
+    lookup("scf_reduce_threads",      [&](const json& v){ if (v.is_number()) xtb.setScfReduceThreads(static_cast<int>(v.get<double>())); });
+    lookup("scf_fp32_stall_patience", [&](const json& v){ if (v.is_number()) xtb.setFp32StallPatience(static_cast<int>(v.get<double>())); });
+    lookup("scf_fp32_false_fixpoint_factor", [&](const json& v){ if (v.is_number()) xtb.setFp32FalseFixpointFactor(v.get<double>()); });
+    lookup("gpu_multipole_otf",       [&](const json& v){ if (v.is_string()) xtb.setGpuMultipoleOtf(v.get<std::string>()); });
     lookup("scf_extrapolation",      [&](const json& v){ if (v.is_string())          xtb.setScfExtrapolation(v.get<std::string>()); });
     lookup("scf_extrapolation_order",[&](const json& v){ if (v.is_number_integer())  xtb.setScfExtrapolationOrder(v.get<int>()); });
     lookup("scf_extrapolation_apply",[&](const json& v){ if (v.is_string())          xtb.setScfExtrapolationApply(v.get<std::string>()); });

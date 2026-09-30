@@ -16,31 +16,28 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  * Claude Generated (March 2026): Extracted GFN-FF specific parameter structs
- * from forcefieldthread.h for clean separation of concerns.
+ * from the old forcefieldthread.h for clean separation of concerns.
  *
  * This header defines all GFN-FF specific interaction parameter structures
  * and the aggregate GFNFFParameterSet used for native in-memory parameter
  * transfer between GFNFF (generator) and ForceField (calculator).
  *
  * Generic structs (Bond, Angle, Dihedral, Inversion, vdW, EQ) remain in
- * forcefieldthread.h as they are shared by UFF/QMDFF/GFN-FF.
+ * ff_terms.h as they are shared by UFF/QMDFF/GFN-FF.
  */
 
 #pragma once
 
 #include <Eigen/Dense>
+#include <limits>
 #include <string>
 #include <vector>
 
 #include "json.hpp"
 using json = nlohmann::json;
 
-// Forward-declare generic structs from forcefieldthread.h
-struct Bond;
-struct Angle;
-struct Dihedral;
-struct Inversion;
-struct vdW;
+// Generic term structs (Bond, Angle, Dihedral, Inversion, vdW, EQ, CNDerivStore)
+#include "ff_terms.h"
 
 /**
  * @brief Force field method type for unified parameter set
@@ -48,7 +45,7 @@ struct vdW;
  * Claude Generated (March 2026): Distinguishes UFF, QMDFF, and GFN-FF within
  * the shared ForceFieldParameterSet / FFWorkspace architecture.
  */
-enum class FFMethodType { UFF = 1, QMDFF = 2, GFN_FF = 3 };
+enum class FFMethodType { UFF = 1, QMDFF = 2, GFN_FF = 3, CG = 4 };
 
 /**
  * @brief Bond-HB mapping entry for dncoord_erf calculation
@@ -245,7 +242,7 @@ struct GFNFFBatmTriple {
  *   json j = params.toJSON();
  */
 struct GFNFFParameterSet {
-    // Bonded terms (use generic structs from forcefieldthread.h)
+    // Bonded terms (use generic structs from ff_terms.h)
     std::vector<Bond> bonds;
     std::vector<Angle> angles;
     std::vector<Dihedral> dihedrals;
@@ -258,6 +255,18 @@ struct GFNFFParameterSet {
     std::vector<GFNFFRepulsion> bonded_repulsions;
     std::vector<GFNFFRepulsion> nonbonded_repulsions;
     std::vector<GFNFFCoulomb> coulombs;
+
+    // Per-atom Coulomb self-energy inputs (Claude Generated Sep 2026), independent
+    // of the pair list above — see GFNFF::generateCoulombSelfEnergyNative(). Sized
+    // m_atomcount when populated; a single isolated atom still needs a nonzero EEQ
+    // self-energy even though `coulombs` is structurally empty for N=1.
+    Eigen::VectorXd coul_self_chi_base, coul_self_gam, coul_self_alp,
+        coul_self_cnf, coul_self_chi_static;
+
+    // Claude Generated (Sep 2026): the GPU enumerates all Coulomb pairs itself (no `coulombs`
+    // list); cutoff for that implicit loop (100 Bohr = the no-cutoff reference value).
+    bool   coulomb_implicit = false;
+    double coulomb_implicit_rcut = std::numeric_limits<double>::infinity();  // no cutoff, as the reference (Sep 2026)
 
     // Three-body terms
     std::vector<GFNFFHydrogenBond> hbonds;

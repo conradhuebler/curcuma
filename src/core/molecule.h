@@ -85,7 +85,27 @@ class Molecule
       void ImportJson(const json& molecule);
 
       void Initialise(const int* attyp, const double* coord, const int natoms, const double charge, const int spin);
-      void ApplyReorderRule(const std::vector<int>& rule);
+
+      /**
+       * @brief Permute the atoms of this molecule according to `rule`.
+       *
+       * `rule` must be a complete permutation of [0, AtomCount()): rule[p] is the index
+       * of the atom that moves to position p. Any other input (empty, wrong length,
+       * out-of-range or duplicate indices) leaves the molecule untouched and returns
+       * false - a partial rule would silently shrink the molecule to rule.size() atoms.
+       *
+       * @return true if the molecule was reordered, false if the rule was rejected.
+       */
+      bool ApplyReorderRule(const std::vector<int>& rule);
+
+      /**
+       * @brief Copy of this molecule with all protons removed, heavy atoms in original order.
+       *
+       * Only elements and coordinates are carried over (no name, energy, charges, bonds).
+       * Claude Generated (Aug 2026) - shared by RMSDDriver::ProtonDepleted() and ConfScan's
+       * heavy-atom comparison path, which need identical heavy-atom indexing.
+       */
+      Molecule ProtonDepletedCopy() const;
 
       void print_geom(bool moreinfo = true) const;
       void printFragmente();

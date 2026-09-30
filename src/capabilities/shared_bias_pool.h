@@ -14,6 +14,7 @@
 
 #include <shared_mutex>
 #include <atomic>
+#include <tuple>
 #include <vector>
 
 #include "src/capabilities/simplemd.h"  // BiasStructure
@@ -55,8 +56,9 @@ public:
      *  well-tempered OUTPUT weight; pass 0 when well-tempering is off, so the force
      *  and deposition are never affected). One unique_lock per batch -- called at most
      *  once per MD step, so it does not defeat the read-heavy snapshot() design.
-     *  updates: (structure index, well-tempered weight increment) pairs. */
-    void registerVisits(const std::vector<std::pair<int, double>>& updates);
+     *  updates: (structure index, counter increment [1.0 legacy / expr strided], well-tempered
+     *  weight increment) tuples. */
+    void registerVisits(const std::vector<std::tuple<int, double, double>>& updates);
 
     /** Prune structures whose counter is below threshold.
      *  Called between temperature cycles (no concurrent access).
@@ -68,6 +70,14 @@ public:
      *  optimised minima so the raw snapshots are replaced by their converged
      *  geometries and the pool stays clean for the next MD cycle. */
     void pruneNonPersistent();
+
+    /** Claude Generated (Jul 2026): bound the pool to at most max_size structures by dropping the
+     *  lowest-counter non-persistent snapshots (rarely-visited regions). Persistent optimised minima
+     *  are always kept, even if their count alone exceeds max_size. Re-indexes afterwards. Called
+     *  between temperature cycles (no concurrent MD access); max_size <= 0 is a no-op. This is the
+     *  enforcement of rmsd_mtd_max_gaussians and, with the per-step Gaussian screen, keeps the bias
+     *  evaluation cost bounded as the search accumulates structures. Returns the number removed. */
+    int capToSize(int max_size);
 
     /** Claude Generated (Jun 2026): set the symmetry/atom-permutation set (full-atom reorder
      *  rules discovered by ConfScan). Set between temperature cycles; read every MD step.
@@ -89,6 +99,14 @@ public:
     /** Remove all structures. Used when starting fresh
      *  or when resetting between temperature cycles. */
     void clear();
+
+    /** Claude Generated (Jun 2026): full-state restore for ConfSearch restart.
+     *  Replaces the pool contents with the given structures (metadata AND geometry),
+     *  preserving each BiasStructure::index and counter exactly. Used when resuming a
+     *  ConfSearch run from a checkpoint. Unlike deserializeMetadata()/deserializeGeometry()
+     *  (which split the two and leave geometry as a placeholder), this restores ready-to-use
+     *  bias structures in one call. */
+    void restoreStructures(const std::vector<BiasStructure>& structures);
 
     /** Serialize metadata (counter, energy, factor, index, temperature)
      *  to JSON. Matches existing restart format for backward compatibility. */

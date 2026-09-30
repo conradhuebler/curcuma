@@ -102,12 +102,16 @@ constexpr double pAlpha5[5][15] = {
     {1.975724573e-1, 8.806345634e-2, 7.732370620e-2, 5.002110360e-2, 3.726907315e-2, 1.273309895e-1, 8.809647701e-2, 4.786503860e-2, 3.367775277e-2, 9.424112917e-2, 5.836797641e-2, 4.833708379e-2, 7.506099109e-2, 5.537913898e-2, 6.254074479e-2},
     {7.445271746e-2, 4.249068522e-2, 3.800708627e-2, 2.789361681e-2, 2.241490836e-2, 5.606243164e-2, 4.234835707e-2, 2.730479990e-2, 2.091949042e-2, 4.569058269e-2, 3.206682246e-2, 2.751899341e-2, 3.892475795e-2, 3.072866652e-2, 3.411243214e-2}
 };
+// NOTE (Claude Generated, Sep 2026): the 4f/5f/5g columns (ityp 12-14) of this
+// table were previously copied from pCoeff3 by mistake — 12 wrong values. They
+// were inert (GFN1/GFN2 use no f/g shells, and no element requests STO-5G), but
+// wrong; corrected verbatim against tblite basis/slater.f90 pCoeff5.
 constexpr double pCoeff5[5][15] = {
-    {2.214055312e-2, -1.596349096e-2, -3.920358850e-3, 1.513948997e-3, 1.375523371e-2, 2.079051117e-2, -2.329023747e-3, -1.143929558e-2, -3.113958289e-2, 2.020869128e-2, -3.673711876e-3, -3.231527611e-3, 1.999839052e-2, 1.909729355e-1, 1.780980905e-1},
-    {1.135411520e-1, -5.685884883e-2, -4.168430506e-2, -7.316801518e-2, -3.097344179e-1, 1.235472099e-1, -1.357395221e-2, -6.322651538e-2, -1.374007017e-1, 1.321157923e-1, 1.167122499e-1, -2.434931372e-2, 1.395427440e-1, 6.146060459e-1, 6.063757846e-1},
-    {3.318161484e-1, 3.698265599e-1, -1.637440990e-1, -3.143703799e-1, -3.199192259e-1, 3.667738886e-1, 2.632185383e-1, 4.398907721e-1, 5.573881018e-1, 3.911240346e-1, 4.216476416e-1, 3.440817054e-1, 4.091508237e-1, 3.059611271e-1, 3.828552923e-1},
-    {4.825700713e-1, 5.480512593e-1, 7.419373723e-1, 9.032615169e-1, 1.084547038e+0, 4.834930290e-1, 5.880427024e-1, 5.245859166e-1, 4.855428100e-1, 4.779609701e-1, 4.547673415e-1, 5.693674376e-1, 4.779609701e-1, 1.254001522e-1, 2.171122608e-1},
-    {1.935721966e-1, 1.472634893e-1, 3.724364929e-1, 3.294210848e-1, 3.345288361e-1, 1.653444074e-1, 2.242794445e-1, 1.017072253e-1, 6.605423564e-2, 1.463662294e-1, 1.037803318e-1, 1.511340183e-1, 1.463662294e-1, 5.077063693e-2, 6.974153145e-2}
+    {2.214055312e-2, -1.596349096e-2, -3.920358850e-3, 1.513948997e-3, 1.375523371e-2, 2.079051117e-2, -2.329023747e-3, -1.143929558e-2, -3.113958289e-2, 2.020869128e-2, -3.673711876e-3, -3.231527611e-3, 1.999839052e-2, -7.301193568e-4, 1.998085812e-2},
+    {1.135411520e-1, -5.685884883e-2, -4.168430506e-2, -7.316801518e-2, -3.097344179e-1, 1.235472099e-1, -1.357395221e-2, -6.322651538e-2, -1.374007017e-1, 1.321157923e-1, 1.167122499e-1, -2.434931372e-2, 1.395427440e-1, 8.414991343e-2, 1.460384050e-1},
+    {3.318161484e-1, 3.698265599e-1, -1.637440990e-1, -3.143703799e-1, -3.199192259e-1, 3.667738886e-1, 2.632185383e-1, 4.398907721e-1, 5.573881018e-1, 3.911240346e-1, 4.216476416e-1, 3.440817054e-1, 4.091508237e-1, 3.923683153e-1, 4.230565459e-1},
+    {4.825700713e-1, 5.480512593e-1, 7.419373723e-1, 9.032615169e-1, 1.084547038e+0, 4.834930290e-1, 5.880427024e-1, 5.245859166e-1, 4.855428100e-1, 4.779609701e-1, 4.547673415e-1, 5.693674376e-1, 4.708252119e-1, 5.040033146e-1, 4.635699665e-1},
+    {1.935721966e-1, 1.472634893e-1, 3.724364929e-1, 3.294210848e-1, 3.345288361e-1, 1.653444074e-1, 2.242794445e-1, 1.017072253e-1, 6.605423564e-2, 1.463662294e-1, 1.037803318e-1, 1.511340183e-1, 1.328082566e-1, 1.328979300e-1, 1.226411691e-1}
 };
 
 // --- STO-6G for the 6s and 6p shells (principal quantum number n=6), needed for
@@ -128,6 +132,36 @@ constexpr double pCoeff6p[6] = {
     2.782723680e-3, -1.282887780e-1, -2.266255943e-1,
     4.682259383e-1, 6.752048848e-1, 1.091534212e-1};
 
+// --- Legacy STO-6G 4s/4p tables (xtb's variant) -----------------------------
+// The STO-6G tables above are tblite's. xtb (src/slater.f90:286-298, 324-336)
+// still carries an OLDER 4s/4p set; each file keeps the other variant present
+// but commented out, so the two references genuinely disagree here — and only
+// here (every other n/l entry, and every other STO-NG order, is identical).
+//
+// tblite's values are the better expansion, measured against the exact Slater
+// function (L2 error of the normalized radial fit at zeta=1):
+//     4s  tblite 7.7e-5  xtb 4.1e-4       4p  tblite 1.2e-4  xtb 3.4e-4
+// for scale, the shared 3s/3p/5p entries sit at 2.0e-4 / 2.8e-4 / 6.3e-5.
+// The legacy set also gives 4s and 4p bit-identical exponents (and carries only
+// 7 significant digits against 10 everywhere else), which no genuine Stewart
+// optimisation produces — it is a stale transcription.
+//
+// curcuma therefore keeps tblite's values as the default. These arrays exist so
+// a run can be made bit-comparable to the xtb binary (-xtb.sto6g_legacy_4sp
+// true); they affect K, Ca and Ge-Kr only. Claude Generated.
+constexpr double pAlpha6_legacy_4s[6] = {
+    1.365346e+00, 4.393213e-01, 1.877069e-01,
+    9.360270e-02, 5.052263e-02, 2.809354e-02};
+constexpr double pCoeff6_legacy_4s[6] = {
+    3.775056e-03, -5.585965e-02, -3.192946e-01,
+    -2.764780e-02, 9.049199e-01, 3.406258e-01};
+constexpr double pAlpha6_legacy_4p[6] = {
+    1.365346e+00, 4.393213e-01, 1.877069e-01,
+    9.360270e-02, 5.052263e-02, 2.809354e-02};
+constexpr double pCoeff6_legacy_4p[6] = {
+    -7.052075e-03, -5.259505e-02, -3.773450e-02,
+    3.874773e-01, 5.791672e-01, 1.221817e-01};
+
 /**
  * @brief Convert an STO basis function to a contracted GTO (STO-NG expansion)
  *
@@ -139,9 +173,11 @@ constexpr double pCoeff6p[6] = {
  * @param l Angular momentum (0=s, 1=p, 2=d)
  * @param zeta Slater exponent
  * @param ng Number of Gaussians (3, 4, 5, or 6)
+ * @param legacy_4sp Use xtb's older STO-6G 4s/4p tables instead of tblite's
+ *                   (see pAlpha6_legacy_4s above). Default false = tblite.
  * @return CGTO Shell with normalized coefficients
  */
-inline Shell slater_to_gauss(int n, int l, double zeta, int ng)
+inline Shell slater_to_gauss(int n, int l, double zeta, int ng, bool legacy_4sp = false)
 {
     Shell s;
     s.ang = l;
@@ -200,6 +236,17 @@ inline Shell slater_to_gauss(int n, int l, double zeta, int ng)
     for (int i = 0; i < ng; ++i) {
         s.alpha[i] = alpha_table[i][ityp] * zeta2;
         s.coeff[i] = coeff_table[i][ityp];
+    }
+
+    // Opt-in: reproduce the xtb binary's older STO-6G 4s/4p contraction
+    // (ityp 3 = 4s, 7 = 4p). Only STO-6G differs between the two references.
+    if (legacy_4sp && ng == 6 && (ityp == 3 || ityp == 7)) {
+        const double* a_leg = (ityp == 3) ? pAlpha6_legacy_4s : pAlpha6_legacy_4p;
+        const double* c_leg = (ityp == 3) ? pCoeff6_legacy_4s : pCoeff6_legacy_4p;
+        for (int i = 0; i < 6; ++i) {
+            s.alpha[i] = a_leg[i] * zeta2;
+            s.coeff[i] = c_leg[i];
+        }
     }
 
     // Apply normalization (TBLite basis/slater.f90 line 504-505, norm=.true.)

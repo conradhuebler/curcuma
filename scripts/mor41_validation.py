@@ -43,7 +43,25 @@ TESTSET = REPO / "test_cases" / "MOR41-testset"
 RUNDIR = TESTSET / "_run"
 REACTIONS = TESTSET / "reactions.dat"
 CURCUMA = REPO / "release" / "curcuma"
-XTB = Path.home() / "Downloads" / "xtb-6.6.1" / "bin" / "xtb"
+
+
+def find_xtb():
+    env = os.environ.get("XTB_BIN")
+    if env and Path(env).exists():
+        return Path(env)
+    which = shutil.which("xtb")
+    if which:
+        return Path(which)
+    for cand in ("/opt/xtb/bin/xtb",
+                 Path.home() / "Downloads" / "xtb-dist" / "bin" / "xtb",
+                 Path.home() / "Downloads" / "xtb-6.6.1" / "bin" / "xtb"):
+        p = Path(cand)
+        if p.exists():
+            return p
+    return None
+
+
+XTB = find_xtb()
 
 AU2KCAL = 627.509474           # Hartree -> kcal/mol
 
@@ -327,6 +345,9 @@ def main():
     ap.add_argument("--recompute", action="store_true",
                     help="ignore cache and recompute energies")
     args = ap.parse_args()
+
+    if XTB is None or not XTB.exists():
+        raise SystemExit("xtb binary not found - set XTB_BIN or install xtb on PATH")
 
     methods = list(METHODS) if args.method == "all" else [args.method]
     reactions = parse_reactions()

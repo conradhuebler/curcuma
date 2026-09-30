@@ -132,6 +132,31 @@ if(USE_PCH)
         target_precompile_headers(test_gfnff_grad_traj REUSE_FROM curcuma_core)
 endif()
 
+# Claude Generated (Aug 2026): analytic vs finite-difference gradient across a
+# react-topology rebuild event (topology_mode=react bond formation).
+add_executable(test_gfnff_react_fd test_gfnff_react_fd.cpp)
+target_link_libraries(test_gfnff_react_fd curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_react_fd REUSE_FROM curcuma_core)
+endif()
+add_test(NAME gfnff_react_fd_gradient
+         COMMAND test_gfnff_react_fd
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+# Claude Generated (Sep 27, 2026): frag_charge_model ensemble must not depend on the geometry
+# the topology was built at (Known Issue #31; check 5 of cli_gfnff_05_frag_charge_ensemble,
+# which needs a reused calculator instance the -sp CLI cannot express).
+add_executable(test_gfnff_frag_charge_history test_gfnff_frag_charge_history.cpp)
+target_link_libraries(test_gfnff_frag_charge_history curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_frag_charge_history REUSE_FROM curcuma_core)
+endif()
+add_test(NAME gfnff_frag_charge_history
+         COMMAND test_gfnff_frag_charge_history
+                 ${CMAKE_CURRENT_SOURCE_DIR}/cli/gfnff/05_frag_charge_ensemble/cl2m_ea25.xyz
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(gfnff_frag_charge_history PROPERTIES TIMEOUT 120 LABELS "gfnff;frag_charge")
+
 # Copy reference data to build tree so tests can find them
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/reference_data
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
@@ -207,6 +232,14 @@ set_tests_properties(test_eeq_extrapolation PROPERTIES TIMEOUT 180 LABELS "eeq_e
 add_test(NAME test_fast_exp
          COMMAND test_fast_exp)
 
+# Claude Generated (Sep 2026): vendored fdlibm erf/acos/exp/log (CURCUMA_PORTABLE_MATH
+# layer, docs/PORTABLE_ERF.md) pinned against the host libm + special values. Header-only
+# functions, so no library link is needed. Run via: ctest -R test_portable_math
+add_executable(test_portable_math test_portable_math.cpp)
+target_include_directories(test_portable_math PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME test_portable_math COMMAND test_portable_math)
+set_tests_properties(test_portable_math PROPERTIES LABELS "portable_math;unit")
+
 # Claude Generated (Session 5): Two-Phase EEQ System Tests
 # Tests Phase 1 topology charges and Phase 2 environment corrections
 add_executable(test_eeq_two_phase
@@ -236,6 +269,22 @@ endif()
 
 add_test(NAME test_gfnff_topology_reentrancy
          COMMAND test_gfnff_topology_reentrancy ${CMAKE_SOURCE_DIR}/test_cases)
+
+# Claude Generated (Sep 2026, Known Issue #32): energy-only calls on a reused GFN-FF
+# calculator must use their own CN (Coulomb chi(CN)) and D4 C6, not the last gradient
+# call's. Checks FD-vs-analytic via NumGrad (reused energy-only calls), energy-only vs
+# gradient call at one geometry, and reused vs fresh Coulomb / total / D4 dispersion
+# energies (the last two fail when only the CN fix, not the C6 refresh, is present).
+add_executable(test_gfnff_stale_cn test_gfnff_stale_cn.cpp)
+target_link_libraries(test_gfnff_stale_cn curcuma_core test_molecule_registry)
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_stale_cn REUSE_FROM curcuma_core)
+endif()
+add_test(NAME gfnff_stale_cn_energy_only
+         COMMAND test_gfnff_stale_cn
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(gfnff_stale_cn_energy_only
+    PROPERTIES TIMEOUT 300 LABELS "gfnff;stale_cn")
 
 # Claude Generated: PolymerBuild sequence parser tests (prime notation)
 add_executable(test_polymerbuild_sequence
@@ -326,7 +375,11 @@ set_tests_properties(xtb_solvation_numgrad
 # Only built and registered when USE_CUDA=ON
 if(USE_CUDA)
     add_executable(test_gfnff_gpu test_gfnff_gpu.cpp)
-    target_link_libraries(test_gfnff_gpu curcuma_core CUDA::cudart)
+    # Sep 2026: USE_CUDA no longer propagates from curcuma_core (the backend is a
+    # plugin); the test links the plugin directly for the GFNFFGPUComputationalMethod
+    # typeinfo it dynamic_casts to.
+    target_link_libraries(test_gfnff_gpu curcuma_core curcuma_cuda CUDA::cudart)
+    target_compile_definitions(test_gfnff_gpu PRIVATE USE_CUDA)
 
     if(USE_PCH)
         target_precompile_headers(test_gfnff_gpu REUSE_FROM curcuma_core)
@@ -355,10 +408,39 @@ if(USE_CUDA)
     # Claude Generated (March 2026): GPU analytical vs numerical gradient test
     add_executable(test_gpu_numgrad test_gpu_numgrad.cpp)
     target_link_libraries(test_gpu_numgrad curcuma_core CUDA::cudart)
+    target_compile_definitions(test_gpu_numgrad PRIVATE USE_CUDA)
     if(USE_PCH)
         target_precompile_headers(test_gpu_numgrad REUSE_FROM curcuma_core)
     endif()
+
 endif()
+
+# Claude Generated (Sep 2026, MULTI_GPU_GAPS F-11): an energy-only call at a new geometry must
+# equal a gradient call there (CPU: stale Coulomb CN; GPU: stale D4 C6).
+add_executable(test_gfnff_energy_only_geometry test_gfnff_energy_only_geometry.cpp)
+target_link_libraries(test_gfnff_energy_only_geometry curcuma_core)
+# The GPU plugin is looked up next to the executable (gpu_plugin.cpp, /proc/self/exe).
+set_target_properties(test_gfnff_energy_only_geometry PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+if(USE_PCH)
+    target_precompile_headers(test_gfnff_energy_only_geometry REUSE_FROM curcuma_core)
+endif()
+foreach(EO_MOL triose caffeine)
+    add_test(NAME gfnff_energy_only_geometry_${EO_MOL}
+             COMMAND test_gfnff_energy_only_geometry
+                     ${CMAKE_SOURCE_DIR}/test_cases/molecules/larger/${EO_MOL}.xyz none
+             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(gfnff_energy_only_geometry_${EO_MOL}
+        PROPERTIES TIMEOUT 120 LABELS "gfnff")
+    if(USE_CUDA)
+        add_test(NAME gfnff_gpu_energy_only_geometry_${EO_MOL}
+                 COMMAND test_gfnff_energy_only_geometry
+                         ${CMAKE_SOURCE_DIR}/test_cases/molecules/larger/${EO_MOL}.xyz cuda
+                 WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+        set_tests_properties(gfnff_gpu_energy_only_geometry_${EO_MOL}
+            PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu")
+    endif()
+endforeach()
 
 
 # Claude Generated (AP5, Apr 2026): GFN1/GFN2 analytical vs numerical gradient test
@@ -473,3 +555,65 @@ endif()
 
 add_test(NAME test_path_cv COMMAND test_path_cv)
 set_tests_properties(test_path_cv PROPERTIES TIMEOUT 60 LABELS "pathcv;unit")
+
+# Claude Generated (Sep 2026): interface-level gradient + frequency contract.
+# Guards two things nothing else covered:
+#   1. EnergyCalculator::Gradient() must be Eh/Angstrom for EVERY method — SimpleMD
+#      integrates it against Angstrom coordinates and the FD Hessian differences it
+#      against Angstrom displacements. GFN-FF returned Eh/Bohr here until Sep 2026;
+#      gfnff_numgrad_builtin could not see it because it compares GFN-FF's INTERNAL
+#      gradient against an internal FD, both in Bohr.
+#   2. Vibrational frequencies vs committed xtb 6.7.1 values (no xtb needed at run
+#      time). Catches the Eh/Ang^2-vs-Eh/Bohr^2 Hessian bug and the empirical
+#      "+47.349 cm-1" offset that used to mask it.
+# Verified to FAIL on a pre-fix binary (gfnff gradient ratio 0.5287 = au; frequencies
+# 92 % / 92 % / 40 % high for gfn1 / gfn2 / gfnff).
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME gradient_unit_contract
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/check_gradient_units.py
+                     $<TARGET_FILE:curcuma>)
+    set_tests_properties(gradient_unit_contract
+        PROPERTIES TIMEOUT 300 LABELS "gradient;frequencies;native_xtb;gfnff")
+
+    # Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md F-3): the GFN-FF multi-GPU split of one
+    # molecule (Coulomb tiles + projected-PCG EEQ) must reproduce the single-device run.
+    # Skipped (77) with fewer than two CUDA devices.
+    if(USE_CUDA)
+        add_test(NAME gfnff_gpu_split_equals_single
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/check_gfnff_gpu_split.py
+                         $<TARGET_FILE:curcuma>
+                         ${CMAKE_SOURCE_DIR}/test_cases/molecules/larger/polymer_2x.xyz)
+        set_tests_properties(gfnff_gpu_split_equals_single
+            PROPERTIES TIMEOUT 600 LABELS "gfnff_gpu;gpu" SKIP_RETURN_CODE 77)
+    endif()
+
+    # Claude Generated (Sep 2026): adaptive (step-rejecting) integrator.
+    #   1. adaptive_step is OFF by default and an explicit false is identical to it.
+    #   2. The failure mode it exists for reproduces on ONE water: 1750 K, dt = 1 fs, NVE
+    #      runs away by +8.78 Eh because the GFN-FF O-H bond stiffens under compression.
+    #   3. With the feature the same run conserves energy (-0.003 Eh), with no constraint
+    #      and no mass modification.
+    # See docs/MD_LARGE_SYSTEMS.md.
+    add_test(NAME md_adaptive_step
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/check_adaptive_step.py
+                     $<TARGET_FILE:curcuma>)
+    set_tests_properties(md_adaptive_step
+        PROPERTIES TIMEOUT 300 LABELS "md;integrator;gfnff")
+
+    # Claude Generated (Sep 2026): the MD clock. SimpleMD integrates in Angstrom/amu/Hartree,
+    # whose time unit is 1.9516 fs, so a step given in femtoseconds has to be converted before
+    # it multiplies a velocity. Until Sep 2026 it was not, and every MD ran 1.9516x too fast
+    # while energies, forces, temperature and energy conservation all stayed correct - which is
+    # why nothing noticed. This test ties the reported time to a vibrational period taken from
+    # the (independently validated) Hessian path. See docs/MD_LARGE_SYSTEMS.md.
+    add_test(NAME md_time_axis
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/check_md_time_axis.py
+                     $<TARGET_FILE:curcuma>)
+    set_tests_properties(md_time_axis
+        PROPERTIES TIMEOUT 300 LABELS "md;integrator;gfnff;units")
+endif()

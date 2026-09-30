@@ -9,6 +9,13 @@
  * Interface is CUDA-agnostic (Pimpl pattern) — can be forward-declared
  * from non-CUDA translation units.
  *
+ * Claude Generated (Sep 2026): SHARED by the CUDA and the ROCm backend - the Pimpl
+ * keeps cuSOLVER/rocSOLVER out of this file, so the two copies differed only in the
+ * class name.  The ROCm build gets this exact declaration under its hipified names via
+ * rocm/eeq_solver_hip.h (EEQSolverGPU -> EEQSolverHip, rocSOLVER dpotrf/dpotrs); the
+ * names stay distinct because libcurcuma_cuda.so and libcurcuma_rocm.so are dlopen'd
+ * with RTLD_GLOBAL and must not export colliding symbols.
+ *
  * Minimum compute capability: 6.0 (Pascal) — native double atomicAdd.
  *
  * Reference: Spicher/Grimme J. Chem. Theory Comput. 2020 (GFN-FF EEQ)
@@ -16,10 +23,11 @@
 
 #pragma once
 
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
 
 #include <memory>
 #include <vector>
+#include <string>
 
 struct EEQSolverGPUImpl;
 
@@ -56,6 +64,22 @@ public:
      * @param refine_iters  Max FP64 residual / FP32 correction steps (default 2, min 1).
      */
     void setMixedPrecision(bool enabled, int refine_iters = 2);
+
+    /**
+     * @brief Split the projected-PCG EEQ solve (WP7-E) of ONE molecule over several GPUs.
+     *
+     * Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md F-3). Every participating device builds a
+     * column block of the (symmetric) EEQ matrix and computes its block of each PCG matrix-vector
+     * product; this device keeps the PCG recurrences. Per iteration only N doubles travel to each
+     * helper and N/k back (peer copies). The matrix elements are bit-identical to the single-device
+     * build; the products differ in summation order only.
+     *
+     * @param helper_devices  other devices (not this one); empty = off
+     * @param min_atoms       use the split only from this many atoms on
+     */
+    void setSplitDevices(const std::vector<int>& helper_devices, int min_atoms);
+    /// "" when off, else a one-line status (devices, columns, solves) or why it is not used.
+    std::string splitStatus() const;
 
     /**
      * @brief Build N×N Coulomb matrix on GPU + Cholesky solve via cuSOLVER.
@@ -265,8 +289,52 @@ public:
      * @param max_iter        Per-PCG-call iteration cap (e.g. 200).
      * @param tol             Convergence tolerance on |r| (e.g. 1e-10).
      * @param force_refactor  If true: rebuild A and re-extract Jacobi precond.
+     * @param block_jacobi_max_frag_atoms  Skip the block-Jacobi build for any fragment larger
+     *        than this many atoms (falls back to diagonal Jacobi for that step). See
+     *        eeq_solver.h PARAM gpu_block_jacobi_max_frag_atoms.
+     * @param block_jacobi_max_nfrag       Skip the block-Jacobi build entirely above this many
+     *        fragments — its serial per-fragment cudaStreamSynchronize pair is the dominant
+     *        cost at nfrag~1500+ regardless of fragment size. See PARAM
+     *        gpu_block_jacobi_max_nfrag.
      */
     bool solveWithDeviceRHSAndGPUPCG(
+        int natoms, int nfrag,
+        const double* cx, const double* cy, const double* cz,
+        const double* d_alpha_corrected,
+        const double* d_gam_corrected,
+        const double* d_rhs_atoms,
+        const std::vector<int>& fraglist,
+        const std::vector<double>& rhs_constraints,
+        int    max_iter,
+        double tol,
+        double cutoff_sq    = 0.0,
+        bool   force_refactor = true,
+        int    block_jacobi_max_frag_atoms = 300,
+        int    block_jacobi_max_nfrag = 400
+    );
+
+    /**
+     * @brief WP7-E: GPU projected PCG solver for nfrag>=1 (Sep 2026).
+     *
+     * Single-solve port of the CPU EEQSolver::solveWithProjectedPCG: instead of
+     * (nfrag+1) independent PCG solves + a Schur reduction (WP7-C above), one PCG
+     * runs directly in the constraint tangent space (Σ_{i∈frag} v_i = 0) and
+     * returns the final charges in place at d_rhs[0..N-1] (getDeviceChargesPtr()).
+     * Uses only the diagonal Jacobi preconditioner (no block-Jacobi cost) — this
+     * is the path to use for many-fragment, large systems where WP7-C's
+     * per-fragment solve loop and/or block-Jacobi setup are intractable (see
+     * eeq_solver.h PARAM gpu_block_jacobi_max_nfrag doc / "curcuma EEQ-Löser-
+     * Benchmark" project).
+     *
+     * Returns false on PCG stall (max_iter reached without |r|<=tol) — caller
+     * must fall back to solveWithDeviceRHSAndGPUSchurGeneral (WP7-A).
+     *
+     * @param max_iter        Per-solve iteration cap (e.g. 500).
+     * @param tol             Convergence tolerance on |r| (absolute, e.g. 1e-10).
+     * @param force_refactor  If true: rebuild A and re-extract the Jacobi precond
+     *                        (+ its per-fragment sum, sM).
+     */
+    bool solveWithDeviceRHSAndGPUProjectedPCG(
         int natoms, int nfrag,
         const double* cx, const double* cy, const double* cz,
         const double* d_alpha_corrected,
@@ -317,6 +385,9 @@ private:
     int m_last_N = 0;  ///< cached N for workspace reuse
 
     // ── WP-B (Jun 2026): mixed-precision FP32-factor + FP64-refine helpers ──────
+    // CUDA only: defined in eeq_solver_gpu.cu.  The ROCm TU implements the same two
+    // steps as file-static functions (mixedFactorHip / mixedSolveRefineHip in
+    // rocm/eeq_solver_hip.hiph), so for USE_ROCM these are declared but never used.
     /// FP32 Cholesky of the FP64 matrix currently in d_A (left intact). Stores the
     /// FP32 factor in d_A_f32. Returns the cuSOLVER info (0 = SPD success). Does NOT
     /// modify d_A, so the caller can fall back to the FP64 dpotrf/LU path on failure.
@@ -327,4 +398,4 @@ private:
     void mixedSolveRefine(int N, int nrhs);
 };
 
-#endif // USE_CUDA
+#endif // USE_CUDA || USE_ROCM

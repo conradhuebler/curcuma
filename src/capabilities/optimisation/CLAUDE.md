@@ -49,6 +49,7 @@ This directory contains the **core optimization algorithms** for molecular geome
 
 #### Integration Layer  
 - **optimizeWithLBFGSpp()**: Wrapper for external LBFGSpp library
+- **LBFGSpp start geometry evaluated once** (Sep 29, 2026, 🤖): `InitializeSingleSteps()` reuses the driver's initial energy/gradient via `LBFGSppObjectiveFunction::prime()` (one fewer SCF per optimisation)
 - **optimizeWithInternal()**: Wrapper for internal GPTLBFGS
 - **Legacy compatibility**: Bridge to existing CurcumaOpt interface
 
@@ -144,6 +145,7 @@ Optimized structure saved to: input.opt.xyz
 | SR1 update | 🤖 AI-generated, ⚙️ compiles | indirectly via DIIS | standalone correctness vs. reference |
 
 **Known gaps vs. reference implementations:**
+- **L-BFGS stalls permanently** once the backtracking search is exhausted (takes the ~1e-9 step, no history reset): caffeine/GFN-FF frozen from step 33 at |g| 1.6e-3, lbfgspp converges in 38 (Sep 28, 2026, TODO.md). The driver's stall detection now ends such runs; the optimizer itself is not fixed.
 - No independent numerical gradient check for any native method
 - Step size control not validated against reference optimizer (XTB, Gaussian)
 - DIIS extrapolation: no guarantee of convergence on difficult PES

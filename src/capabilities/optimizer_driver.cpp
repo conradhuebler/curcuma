@@ -1,6 +1,7 @@
 /*
  * <Optimizer Driver Implementation - Template Method Pattern>
- * Copyright (C) 2025 Claude AI - Generated Code
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Claude Generated (AI-written code, operator-owned)
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -150,6 +151,10 @@ OptimizationContext OptimizationContext::fromJson(const json& config, EnergyCalc
     }
     if (config.contains("max_energy_rise"))
         context.max_energy_rise = config["max_energy_rise"].get<double>();
+    if (config.contains("stall_steps") && config["stall_steps"].is_number())
+        context.stall_steps = static_cast<int>(config["stall_steps"].get<double>());
+    if (config.contains("stall_rmsd") && config["stall_rmsd"].is_number())
+        context.stall_rmsd = config["stall_rmsd"].get<double>();
 
     // Claude Generated (Feb 21, 2026): Numerical gradient option for debugging
     if (config.contains("numgrad"))
@@ -213,6 +218,7 @@ bool OptimizerDriver::InitializeOptimization(const Molecule* molecule)
     }
 
     m_molecule = *molecule;
+    m_eval_cache_valid = false;   // new molecule / calculator setup below
 
     // Validate context
     if (!m_context.isValid()) {
@@ -278,6 +284,7 @@ bool OptimizerDriver::ReinitializeKeepCalculator(const Molecule& molecule)
     // move (evaluateEnergyAndGradient uses updateGeometry()). Keeps interactive
     // grab restarts cheap and crash-free even when the geometry is badly distorted.
     m_molecule = molecule;
+    m_eval_cache_valid = false;
 
     if (!m_context.isValid()) {
         CurcumaLogger::error_fmt("Invalid optimization context: {}", m_context.getValidationErrors());
@@ -387,6 +394,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
     CurcumaLogger::set_verbosity(verbosity >= 2 ? verbosity : 0);
     m_context.write_trajectory = write_trajectory;
     m_context.verbosity = verbosity;
+    m_convergence_reason.clear();  // reported as the non-convergence reason below (Sep 2026)
 
     m_start_time = std::chrono::high_resolution_clock::now();
 
@@ -397,14 +405,35 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
         fmt::print("{0: ^{1}} {2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}}\n", " ", 15, "[Eh]", "[kJ/mol]", "[A]", "[Eh/Bohr]", "[s]");
     }
 
+    // Last accepted structure: for the RMSD between consecutive steps, and what every abort
+    // returns. Claude Generated (Sep 2026): the abort paths below used to return a result with
+    // NO molecule, so a GFN-FF optimisation of a 6200-atom cluster that ran 2015 steps and then
+    // hit "Energy rise exceeded" left nothing behind. m_molecule cannot be used for this - the
+    // LBFGSpp path writes the step under evaluation into it before the energy-rise check - so the
+    // state is taken from previous_molecule / m_current_energy / m_current_gradient, which only
+    // change once a step has been accepted.
+    Molecule previous_molecule = m_molecule;
+    auto failed_with_last = [&](const std::string& why) {
+        OptimizationResult r = OptimizationResult::failed_result(why);
+        Molecule last = previous_molecule;
+        last.setEnergy(m_current_energy);
+        r.final_molecule = last;
+        r.final_energy = m_current_energy;
+        r.final_gradient = m_current_gradient;
+        r.final_gradient_norm = m_current_gradient.norm();
+        r.final_energy_change = (m_current_energy - m_initial_energy) * CURCUMA_EH_TO_KJMOL;
+        r.iterations_performed = std::max(0, m_current_iteration - 1);
+        return r;
+    };
+
     try {
-        Molecule previous_molecule = m_molecule; // For RMSD between consecutive steps
         auto step_start_time = std::chrono::high_resolution_clock::now(); // For per-step timing
 
         // Track last step metrics for convergence reporting
         double energy_change_kjmol = 0.0;
         double rmsd_change = 0.0;
         double gradient_norm = 0.0;
+        int stalled_steps = 0;  // consecutive steps below stall_rmsd (stall detection)
 
         // Main optimization loop (Template Method Pattern)
         for (m_current_iteration = 1; m_current_iteration <= m_context.max_iterations; ++m_current_iteration) {
@@ -414,13 +443,23 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             Vector step = CalculateOptimizationStep(current_coords, m_current_gradient);
 
             if (step.norm() == 0) {
-                // Zero step may indicate convergence (solver decided no more progress)
-                // or an error. Check method-specific convergence before giving up.
-                if (CheckMethodSpecificConvergence()) {
+                // A zero step means the optimiser cannot make further progress (LBFGSpp line
+                // search below min_step, native optimiser error). Claude Generated (Sep 2026): it
+                // used to count as convergence whenever CheckMethodSpecificConvergence() agreed -
+                // which LBFGSpp set from the line-search failure itself and the native adapter
+                // always returns - so a 240-atom cluster "converged" at |g| = 1.9e-3 and the
+                // 6200-atom mixture2 at 0.228 against a threshold of 5e-4. Now the driver's own
+                // criteria decide; otherwise the run ends as NOT converged (the last structure is
+                // still returned and written).
+                const double gnorm_now = m_current_gradient.norm();
+                if (CheckMethodSpecificConvergence()
+                    && checkConvergence(energy_change_kjmol, rmsd_change, gnorm_now)) {
                     m_converged = true;
                     m_convergence_reason = "Optimizer reports convergence (zero step)";
                 } else {
-                    CurcumaLogger::warn("Optimization step is zero - line search or gradient failure");
+                    m_convergence_reason = fmt::format(
+                        "Optimizer could not make further progress (zero step), convergence criteria not met: {}",
+                        formatConvergenceReport(energy_change_kjmol, rmsd_change, gnorm_now));
                 }
                 break;
             }
@@ -441,7 +480,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             } else if (!evaluateEnergyAndGradient(new_coords, new_energy, new_gradient)) {
                 CurcumaLogger::set_verbosity(saved_global_verbosity);
                 CurcumaLogger::error_fmt("Energy evaluation failed at iteration {}", m_current_iteration);
-                return OptimizationResult::failed_result("Energy evaluation failed during optimization");
+                return failed_with_last("Energy evaluation failed during optimization");
             }
 
             // Check for energy rise limit
@@ -450,7 +489,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
                 CurcumaLogger::set_verbosity(saved_global_verbosity);
                 CurcumaLogger::warn_fmt("Energy rise ({:.2f} kJ/mol) exceeds limit ({:.1f} kJ/mol)",
                     energy_change_kjmol, m_context.max_energy_rise);
-                return OptimizationResult::failed_result("Energy rise exceeded maximum allowed");
+                return failed_with_last("Energy rise exceeded maximum allowed");
             }
 
             // Update molecule geometry
@@ -501,6 +540,24 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
                 break;
             }
 
+            // Stall detection. Claude Generated (Sep 2026): the native L-BFGS backtracking
+            // search halves the step up to 30 times and then takes the ~1e-9 step anyway without
+            // flagging an error, and its history is not reset, so the same failing direction
+            // repeats. A GFN-FF optimisation of mixture2 (6200 atoms) sat like that from step
+            // 4744 to the 5000-step limit, 48 s per step, geometry and energy frozen, |grad| 0.105.
+            // A step that does not move the geometry is not progress, whatever the optimiser says.
+            if (m_context.stall_steps > 0) {
+                stalled_steps = (rmsd_change < m_context.stall_rmsd) ? stalled_steps + 1 : 0;
+                if (stalled_steps >= m_context.stall_steps) {
+                    m_convergence_reason = fmt::format(
+                        "No progress: the geometry moved less than {:.1e} A in each of the last {} steps, "
+                        "convergence criteria not met: {}",
+                        m_context.stall_rmsd, stalled_steps,
+                        formatConvergenceReport(energy_change_kjmol, rmsd_change, gradient_norm));
+                    break;
+                }
+            }
+
             // Single step mode (for debugging/testing)
             if (m_context.single_step_mode) {
                 CurcumaLogger::info("Single step mode - stopping after one iteration");
@@ -540,7 +597,10 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             if (m_converged) {
                 CurcumaLogger::success_fmt("Optimization converged after {} iterations", m_current_iteration);
             } else {
-                CurcumaLogger::warn_fmt("Optimization did not converge within {} iterations", m_context.max_iterations);
+                if (!m_convergence_reason.empty())
+                    CurcumaLogger::warn_fmt("Optimization did not converge: {}", m_convergence_reason);
+                else
+                    CurcumaLogger::warn_fmt("Optimization did not converge within {} iterations", m_context.max_iterations);
             }
             CurcumaLogger::energy_abs(m_current_energy, "Final energy");
             CurcumaLogger::energy_rel(m_current_energy - m_initial_energy, "Energy change");
@@ -571,7 +631,9 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
         m_energy_trajectory.clear();
 
         if (!m_converged) {
-            result.error_message = fmt::format("Did not converge within {} iterations", m_context.max_iterations);
+            result.error_message = m_convergence_reason.empty()
+                ? fmt::format("Did not converge within {} iterations", m_context.max_iterations)
+                : m_convergence_reason;
         }
 
         return result;
@@ -579,7 +641,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
     } catch (const std::exception& e) {
         CurcumaLogger::set_verbosity(saved_global_verbosity);
         CurcumaLogger::error_fmt("Optimization failed with exception: {}", e.what());
-        return OptimizationResult::failed_result(e.what());
+        return failed_with_last(e.what());
     }
 }
 
@@ -588,6 +650,15 @@ bool OptimizerDriver::evaluateEnergyAndGradient(const Vector& coordinates, doubl
 {
     try {
         CoordinatesToMolecule(coordinates, m_molecule);
+        // Claude Generated (Sep 2026): same geometry as the last evaluation -> reuse it (see
+        // m_eval_cache_valid). Exact comparison on purpose: any change re-evaluates.
+        if (m_eval_cache_valid && !m_context.use_numerical_gradient
+            && m_eval_cache_coords.size() == coordinates.size()
+            && (m_eval_cache_coords.array() == coordinates.array()).all()) {
+            energy = m_eval_cache_energy;
+            gradient = m_eval_cache_gradient;
+            return true;
+        }
         // Claude Generated (Mar 2026): Use updateGeometry instead of setMolecule to avoid
         // full GFN-FF re-initialization (topology/charges/parameters) on every step.
         // setMolecule() triggers expensive InitialiseMolecule() which can return 0.0 energy.
@@ -660,9 +731,14 @@ bool OptimizerDriver::evaluateEnergyAndGradient(const Vector& coordinates, doubl
             }
         }
 
+        m_eval_cache_coords = coordinates;
+        m_eval_cache_energy = energy;
+        m_eval_cache_gradient = gradient;
+        m_eval_cache_valid = true;
         return true;
 
     } catch (const std::exception& e) {
+        m_eval_cache_valid = false;
         CurcumaLogger::error_fmt("Energy/gradient evaluation failed: {}", e.what());
         return false;
     }

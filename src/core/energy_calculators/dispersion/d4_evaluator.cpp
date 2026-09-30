@@ -379,21 +379,60 @@ double D4Evaluator::computeATM(const std::vector<int>& atoms,
     // 2026-06, ATM threading). Const reads (c6/dc6dcn/r4r2/geometry) → thread-safe;
     // writes go to the passed-in E / grad / dcn. Loops iat >= jat >= kat, degenerate
     // triples self-skip via r2 < eps. Mirrors dftd4 atm.f90 exactly.
+    // Claude Generated (Sep 2026): neighbour lists for the O(N^3) triple loop. Only triples whose
+    // three distances are all inside the cutoff contribute, so j and k can be taken from the
+    // neighbours of i instead of from all atoms below it - the dense loop spends its time on
+    // distance tests that fail (1410 atoms: 467 M triples visited, a few million kept). The lists
+    // are sorted ascending and scanned in the same order as the dense loop, so the triple set and
+    // the accumulation order - and therefore the result - are unchanged. This is what the CUDA
+    // kernel k_d4_atm_nl already does.
+    std::vector<std::vector<int>> nb(nat);
+    {
+        for (int iat = 0; iat < nat; ++iat) {
+            const Eigen::Vector3d ri = geometry_bohr.row(iat);
+            auto& list = nb[iat];
+            for (int jat = 0; jat < iat; ++jat) {
+                const double r2 = (geometry_bohr.row(jat).transpose() - ri).squaredNorm();
+                if (r2 <= cutoff2 && r2 >= eps) list.push_back(jat);
+            }
+        }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        size_t tot = 0;
+        for (const auto& l : nb) tot += l.size();
+        CurcumaLogger::info_fmt("D4 ATM: cutoff {:.1f} Bohr, {:.1f} neighbours per atom on average "
+                                "({} of {} ordered pairs)", cutoff_bohr,
+                                2.0 * static_cast<double>(tot) / nat, tot,
+                                static_cast<size_t>(nat) * (nat - 1) / 2);
+    }
+
+    // Claude Generated (Sep 2026): r0_ij = a1*sqrt(3*r4r2_i*r4r2_j) + a2 factorises into per-atom
+    // values, so the three square roots the inner loop used to take per triple become two
+    // multiplications: sqrt(3*r4r2_i*r4r2_j) = sqrt(3)*sqrt(r4r2_i)*sqrt(r4r2_j).
+    std::vector<double> r4r2_sqrt(nat);
+    for (int i = 0; i < nat; ++i) r4r2_sqrt[i] = std::sqrt(r4r2[i]);
+    const double sqrt3 = std::sqrt(3.0);
+
     auto processIat = [&](int iat, double& E, Matrix& grad, Vector& dcn) {
         const Eigen::Vector3d ri = geometry_bohr.row(iat);
-        for (int jat = 0; jat <= iat; ++jat) {
+        const auto& nbi = nb[iat];
+        const double si = sqrt3 * r4r2_sqrt[iat];
+        for (size_t jj = 0; jj < nbi.size(); ++jj) {
+            const int jat = nbi[jj];
             const double c6ij = c6(jat, iat);
-            const double r0ij = a1 * std::sqrt(3.0 * r4r2[jat] * r4r2[iat]) + a2;
+            const double r0ij = a1 * si * r4r2_sqrt[jat] + a2;
             const Eigen::Vector3d rj = geometry_bohr.row(jat);
             const Eigen::Vector3d vij = rj - ri;
             const double r2ij = vij.squaredNorm();
             if (r2ij > cutoff2 || r2ij < eps) continue;
-            for (int kat = 0; kat <= jat; ++kat) {
+            for (size_t kk = 0; kk <= jj; ++kk) {
+                const int kat = nbi[kk];
                 const double c6ik = c6(kat, iat);
                 const double c6jk = c6(kat, jat);
                 const double c9 = -s9 * std::sqrt(std::abs(c6ij * c6ik * c6jk));
-                const double r0ik = a1 * std::sqrt(3.0 * r4r2[kat] * r4r2[iat]) + a2;
-                const double r0jk = a1 * std::sqrt(3.0 * r4r2[kat] * r4r2[jat]) + a2;
+                const double r0ik = a1 * si * r4r2_sqrt[kat] + a2;
+                const double r0jk = a1 * sqrt3 * r4r2_sqrt[jat] * r4r2_sqrt[kat] + a2;
                 const double r0 = r0ij * r0ik * r0jk;
                 const double triple = atm_triple_scale(iat, jat, kat);
 
@@ -457,6 +496,8 @@ double D4Evaluator::computeATM(const std::vector<int>& atoms,
     // reassociation). The serial path (nthr=1) writes the outputs directly so it stays
     // byte-for-byte unchanged. m_threads is pre-gated by the caller (effectiveIntraThreads).
     const int nthr = (m_threads > 1 && nat >= 4 * m_threads) ? m_threads : 1;
+    if (CurcumaLogger::get_verbosity() >= 3)
+        CurcumaLogger::info_fmt("D4 ATM: {} atoms on {} threads (m_threads = {})", nat, nthr, m_threads);
     if (nthr <= 1) {
         for (int iat = 0; iat < nat; ++iat)
             processIat(iat, E_atm, gradient_out, dEdCN_out);

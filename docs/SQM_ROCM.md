@@ -91,7 +91,7 @@ as CUDA, correct at every step:
 | File | Role |
 |------|------|
 | `qm_methods/rocm/xtb_hip_context.{h,cpp}` | HIP context: device handshake + `solveGeneralized` (rocSOLVER `dsygvd`). Host-callable — device memory via `hipMalloc`/`hipMemcpy`, no device kernels yet, so it compiles as plain C++ |
-| `qm_methods/xtb_hip_method.{h,cpp}` | `ComputationalMethod` wrapper; owns the context + the CPU `NativeXtbMethod`; installs the `ExternalEigensolver` hook |
+| `qm_methods/xtb_hip_method.{h,cpp}` | `ComputationalMethod` wrapper (Sep 2026: a thin instantiation of `XtbGpuAdapter<XtbHipContext>` + `XtbGpuResidentBackend<…>` from `qm_methods/xtb_gpu_adapter.h`, shared with Vulkan); installs the `ExternalEigensolver` hook |
 | `ff_methods/rocm/` | (later stage) hipified GFN-FF kernels + workspace |
 
 Dispatch: `method_factory.cpp` `resolveNativeXtbGpuMode()` returns `"rocm"` when
@@ -102,8 +102,9 @@ rocSOLVER provides the **generalized** symmetric-definite solver directly, so th
 reduction/back-transform is unnecessary and the same hook serves GFN1 and GFN2.
 
 The HIP context (`xtb_hip_context.hip`) is compiled by **`hipcc` into a plain relocatable
-object** (CMake `add_custom_command`) and linked into `curcuma_core` with `g++` as an
-`EXTERNAL_OBJECT`. This builds the device kernels while keeping the HIP-only
+object** (CMake `add_custom_command`) and linked with `g++` as an `EXTERNAL_OBJECT` into
+the runtime-loaded plugin `libcurcuma_rocm.so` (Sep 2026; before that into `curcuma_core`
+— see [GPU_PLUGIN_STARTUP.md](GPU_PLUGIN_STARTUP.md)). This builds the device kernels while keeping the HIP-only
 `--offload-arch`/`--hip-link` flags off the GNU link (which would otherwise flip the link
 to `ld.lld` and drop GNU OpenMP / `libgomp`). No `enable_language(HIP)` is used.
 

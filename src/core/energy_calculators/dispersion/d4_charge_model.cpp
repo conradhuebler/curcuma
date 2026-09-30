@@ -5,10 +5,12 @@
  * Claude Generated 2026 — AP ∂q/∂x (Phase 2).
  */
 
+#include "src/core/units.h"
 #include "d4_charge_model.h"
 
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"  // covalent radii + CN form
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"      // chi_eeq, gam_eeq, alpha_eeq, cnf_eeq
+#include "src/core/math_compat.h"
 
 #include <cmath>
 
@@ -17,7 +19,7 @@ namespace curcuma::dispersion {
 namespace {
     constexpr double TSQRT2PI       = 0.797884560802866;   // sqrt(2/π)
     constexpr double TWO_OVER_SQRTPI = 1.1283791670955126; // 2/sqrt(π)
-    constexpr double ANG2BOHR        = 1.8897259886;
+    constexpr double ANG2BOHR        = CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.8897259886);
     constexpr double K_SCALED        = 4.0 / 3.0;          // GFN-FF CN radius scaling
     constexpr double KN              = -7.5;               // GFN-FF erf-CN steepness
     constexpr double CNMAX           = 4.4;                // CN log-compression cap
@@ -69,7 +71,7 @@ Vector D4ChargeModel::computeCharges(const std::vector<int>& atoms,
     // log-compression chain factor used in the gradient.
     m_cn.assign(N, 0.0);
     m_cn_raw.assign(N, 0.0);
-    const double log1p_ecnmax = std::log(1.0 + std::exp(CNMAX));
+    const double log1p_ecnmax = curcuma_log(1.0 + curcuma_exp(CNMAX));
     for (int i = 0; i < N; ++i) {
         if (m_rcov_bohr[i] == 0.0) continue;
         double cn_raw = 0.0;
@@ -78,10 +80,10 @@ Vector D4ChargeModel::computeCharges(const std::vector<int>& atoms,
             const double r = (m_geom.row(i) - m_geom.row(j)).norm();
             const double rcov_ij = m_rcov_bohr[i] + m_rcov_bohr[j];
             const double dr = (r - rcov_ij) / rcov_ij;
-            cn_raw += 0.5 * (1.0 + std::erf(KN * dr));
+            cn_raw += 0.5 * (1.0 + curcuma_erf(KN * dr));
         }
         m_cn_raw[i] = cn_raw;
-        m_cn[i] = log1p_ecnmax - std::log(1.0 + std::exp(CNMAX - cn_raw));
+        m_cn[i] = log1p_ecnmax - curcuma_log(1.0 + curcuma_exp(CNMAX - cn_raw));
     }
 
     // Build augmented EEQ matrix M = [[A, 1], [1^T, 0]] and RHS c = [b; Q].
@@ -93,7 +95,7 @@ Vector D4ChargeModel::computeCharges(const std::vector<int>& atoms,
         for (int j = 0; j < i; ++j) {
             const double r = (m_geom.row(i) - m_geom.row(j)).norm();
             const double gammij = 1.0 / std::sqrt(m_alp[i] + m_alp[j]);
-            const double aij = std::erf(gammij * r) / r;
+            const double aij = curcuma_erf(gammij * r) / r;
             M(i, j) = aij;
             M(j, i) = aij;
         }
@@ -145,7 +147,7 @@ void D4ChargeModel::addChargeResponseGradient(const Vector& dEdq, Matrix& grad_o
             const double gammij = 1.0 / std::sqrt(m_alp[a] + m_alp[b]);
             const double gr = gammij * r;
             const double Aprime = gammij * TWO_OVER_SQRTPI * std::exp(-gr * gr) / r
-                                  - std::erf(gr) / (r * r);
+                                  - curcuma_erf(gr) / (r * r);
             const double c_ab = zq(a) * m_q(b) + zq(b) * m_q(a);
 
             // --- b-term (CN): (u_a + u_b) · d(cn_raw)/dr · û ---

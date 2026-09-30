@@ -13,7 +13,7 @@
  *
  * AP4: repulsion + H0/Pulay (s/p only) + Coulomb + CN chain-rule.
  * AP5: GFN2 direct multipole gradient (SD/DD/SQ) + mrad/CN chain-rule.
- * AP5 (TODO): integral Pulay term (multipole integral derivatives × v_dp/v_qp).
+ * AP5b: integral Pulay term (multipole integral derivatives × v_dp/v_qp), section 5.
  *
  * Claude Generated. GPL-3.0.
  */
@@ -180,6 +180,11 @@ void XTB::calculateGradient()
     }
 
     // ==========================================================================
+    //  1b.  GFN1 halogen-bond gradient (classical B–X···A term, no density)
+    // ==========================================================================
+    addHalogenBondGradient(m_gradient);
+
+    // ==========================================================================
     //  2a.  On-site CN contribution: dEdcn[iat] += (-kcn[ish]) · P(μ,μ)
     //       (diagonal H0 elements: H0_μμ = se[ish]; dH0/dCN = -kcn[ish])
     // ==========================================================================
@@ -216,6 +221,13 @@ void XTB::calculateGradient()
     // which span thread boundaries — so threads write into private grad/dEdcn
     // partials that are summed afterwards. Bit-identical to the serial sum up to
     // floating-point reassociation (validated against the serial reference).
+    // Shells are geometry-independent: convert once instead of once per shell
+    // pair in the inner loop (as_cgto_shell copies two std::vectors). Same hoist
+    // as B1 in getHamiltonianH0(); identical values. Claude Generated, Sep 2026.
+    std::vector<CGTO::Shell> shells(nsh);
+    for (int ish = 0; ish < nsh; ++ish)
+        shells[ish] = as_cgto_shell(m_basis.cgto[ish]);
+
     const int grad_threads = effectiveIntraThreads(nat);
     std::vector<Matrix> grad_parts(grad_threads, Matrix::Zero(nat, 3));
     std::vector<Vector> dEdcn_parts(grad_threads, Vector::Zero(nat));
@@ -248,7 +260,7 @@ void XTB::calculateGradient()
                 const int ia_nao   = m_basis.nao_sh[ish_a];
                 const double pi_a  = 1.0 + m_h0.shpoly[ish_a] * rr;
                 const double zeta_a = m_basis.cgto[ish_a].slater_exp;
-                const CGTO::Shell sh_a = as_cgto_shell(m_basis.cgto[ish_a]);
+                const CGTO::Shell& sh_a = shells[ish_a];
 
                 for (int ib = 0; ib < nsh_jat; ++ib) {
                     const int ish_b    = m_basis.ish_at[jat] + ib;
@@ -256,7 +268,7 @@ void XTB::calculateGradient()
                     const int jb_nao   = m_basis.nao_sh[ish_b];
                     const double pi_b  = 1.0 + m_h0.shpoly[ish_b] * rr;
                     const double zeta_b = m_basis.cgto[ish_b].slater_exp;
-                    const CGTO::Shell sh_b = as_cgto_shell(m_basis.cgto[ish_b]);
+                    const CGTO::Shell& sh_b = shells[ish_b];
 
                     // X-I1: d-touching shell pair uses the spherical-transform
                     // gradient blocks (computed once per shell pair); pure s/p
@@ -868,6 +880,10 @@ bool XTB::calculateGradientGpu()
         xyz[3*i+2] = m_geometry(i, 2) * AA_TO_AU;
     }
 
+    // 1b. GFN1 halogen-bond gradient (classical, host-side — the device kernels
+    // cover sections 1/2/3 only).
+    addHalogenBondGradient(m_gradient);
+
     // 3b. Dispersion gradient (host-cached) + its CN chain-rule contribution.
     if (m_disp_gradient_valid
         && m_disp_gradient.rows() == nat && m_disp_gradient.cols() == 3) {
@@ -881,7 +897,19 @@ bool XTB::calculateGradientGpu()
     if (m_method == MethodType::GFN2 && m_mp_initialized && !m_mp_grad_off) {
         using namespace gfn2_params;
         Vector dEdr_mp = Vector::Zero(nat);
-        for (int iat = 0; iat < nat; ++iat) {
+        // Point 3 (Claude Generated, Sep 2026): thread the O(nat^2) pair loop, same
+        // idiom as host section 2b (xtb_gradient.cpp:225-234) - parallelStripes over
+        // the outer index iat, one private (grad, dEdr) accumulator per stripe (a
+        // thread's jat range crosses other threads' iat stripes, so the accumulator
+        // must be private, not a shared array), reduced below. Reorders the ~2.7e7
+        // pair additions -> not bit-identical, ~1e-14 relative (measured).
+        const int mp_threads = effectiveIntraThreads(nat);
+        std::vector<Matrix> mp_grad_parts(mp_threads, Matrix::Zero(nat, 3));
+        std::vector<Vector> mp_dEdr_parts(mp_threads, Vector::Zero(nat));
+        parallelStripes(mp_threads, [&](int tid, int nth) {
+        Matrix& g_loc    = mp_grad_parts[tid];
+        Vector& dEdr_loc = mp_dEdr_parts[tid];
+        for (int iat = tid; iat < nat; iat += nth) {
             for (int jat = 0; jat < iat; ++jat) {
                 const double vx = xyz[3*jat+0] - xyz[3*iat+0];
                 const double vy = xyz[3*jat+1] - xyz[3*iat+1];
@@ -904,7 +932,7 @@ bool XTB::calculateGradientGpu()
                 double gy = -ddmp3*vy*diff_sd + fdmp3*g3*(m_wfn.q_at(iat)*m_wfn.dp_at(1,jat) - m_wfn.q_at(jat)*m_wfn.dp_at(1,iat));
                 double gz = -ddmp3*vz*diff_sd + fdmp3*g3*(m_wfn.q_at(iat)*m_wfn.dp_at(2,jat) - m_wfn.q_at(jat)*m_wfn.dp_at(2,iat));
                 const double fddr_sd = 3.0*diff_sd*mp_dmp3*fdmp3*g3*(fdmp3/rr_dmp)*std::pow(rr_dmp*g1, mp_dmp3);
-                dEdr_mp(iat) += fddr_sd; dEdr_mp(jat) += fddr_sd;
+                dEdr_loc(iat) += fddr_sd; dEdr_loc(jat) += fddr_sd;
 
                 const double dpidpj = m_wfn.dp_at(0,iat)*m_wfn.dp_at(0,jat)+m_wfn.dp_at(1,iat)*m_wfn.dp_at(1,jat)+m_wfn.dp_at(2,iat)*m_wfn.dp_at(2,jat);
                 const double dpiv = vx*m_wfn.dp_at(0,iat)+vy*m_wfn.dp_at(1,iat)+vz*m_wfn.dp_at(2,iat);
@@ -914,7 +942,7 @@ bool XTB::calculateGradientGpu()
                 gy += -2.0*fdmp5*g5*dpidpj*vy + 3.0*fdmp5*g5*(dpiv*m_wfn.dp_at(1,jat)+dpjv*m_wfn.dp_at(1,iat)) - edd*ddmp5*g7*vy;
                 gz += -2.0*fdmp5*g5*dpidpj*vz + 3.0*fdmp5*g5*(dpiv*m_wfn.dp_at(2,jat)+dpjv*m_wfn.dp_at(2,iat)) - edd*ddmp5*g7*vz;
                 const double fddr_dd = 3.0*edd*mp_dmp5*fdmp5*g5*(fdmp5/rr_dmp)*std::pow(rr_dmp*g1, mp_dmp5);
-                dEdr_mp(iat) += fddr_dd; dEdr_mp(jat) += fddr_dd;
+                dEdr_loc(iat) += fddr_dd; dEdr_loc(jat) += fddr_dd;
 
                 const double qi = m_wfn.q_at(iat), qj = m_wfn.q_at(jat);
                 const double eq =
@@ -934,12 +962,19 @@ bool XTB::calculateGradientGpu()
                 gy += -eq*ddmp5*g7*vy - 2.0*fdmp5*g5*(qi*tjvy+qj*tivy);
                 gz += -eq*ddmp5*g7*vz - 2.0*fdmp5*g5*(qi*tjvz+qj*tivz);
                 const double fddr_sq = eq*3.0*mp_dmp5*fdmp5*g5*(fdmp5/rr_dmp)*std::pow(rr_dmp*g1, mp_dmp5);
-                dEdr_mp(iat) += fddr_sq; dEdr_mp(jat) += fddr_sq;
+                dEdr_loc(iat) += fddr_sq; dEdr_loc(jat) += fddr_sq;
 
-                m_gradient(iat,0) += gx; m_gradient(jat,0) -= gx;
-                m_gradient(iat,1) += gy; m_gradient(jat,1) -= gy;
-                m_gradient(iat,2) += gz; m_gradient(jat,2) -= gz;
+                g_loc(iat,0) += gx; g_loc(jat,0) -= gx;
+                g_loc(iat,1) += gy; g_loc(jat,1) -= gy;
+                g_loc(iat,2) += gz; g_loc(jat,2) -= gz;
             }
+        }
+        });  // parallelStripes over iat
+        // Reduce the per-thread partials (Point 3). dEdr_mp must be complete before
+        // the mrad/CN chain-rule conversion below.
+        for (int t = 0; t < mp_threads; ++t) {
+            m_gradient += mp_grad_parts[t];
+            dEdr_mp    += mp_dEdr_parts[t];
         }
         for (int i = 0; i < nat; ++i) {
             const int zi = m_atoms[i];
@@ -952,9 +987,16 @@ bool XTB::calculateGradientGpu()
     }
 
     // 4. CN chain-rule gradient (host; identical to section 4 in calculateGradient).
+    // Point 3 (Claude Generated, Sep 2026): threaded like section 5 above. dEdcn is
+    // fully reduced by this point (read-only here), so only m_gradient needs private
+    // per-thread accumulators.
     std::vector<double> rcov(nat);
     for (int i = 0; i < nat; ++i) rcov[i] = covalent_rad_d3_au(m_atoms[i]);
-    for (int i = 0; i < nat; ++i) {
+    const int cn_threads = effectiveIntraThreads(nat);
+    std::vector<Matrix> cn_grad_parts(cn_threads, Matrix::Zero(nat, 3));
+    parallelStripes(cn_threads, [&](int tid, int nth) {
+    Matrix& g_loc = cn_grad_parts[tid];
+    for (int i = tid; i < nat; i += nth) {
         for (int j = 0; j < i; ++j) {
             const double dx = xyz[3*i+0] - xyz[3*j+0];
             const double dy = xyz[3*i+1] - xyz[3*j+1];
@@ -977,11 +1019,14 @@ bool XTB::calculateGradientGpu()
                 dcndr = dc1dr * c2 + c1 * dc2dr;
             }
             const double factor = (dEdcn(i) + dEdcn(j)) * dcndr / r;
-            m_gradient(i, 0) += factor * dx;  m_gradient(j, 0) -= factor * dx;
-            m_gradient(i, 1) += factor * dy;  m_gradient(j, 1) -= factor * dy;
-            m_gradient(i, 2) += factor * dz;  m_gradient(j, 2) -= factor * dz;
+            g_loc(i, 0) += factor * dx;  g_loc(j, 0) -= factor * dx;
+            g_loc(i, 1) += factor * dy;  g_loc(j, 1) -= factor * dy;
+            g_loc(i, 2) += factor * dz;  g_loc(j, 2) -= factor * dz;
         }
     }
+    });  // parallelStripes over i
+    for (int t = 0; t < cn_threads; ++t)
+        m_gradient += cn_grad_parts[t];
     return true;
 }
 

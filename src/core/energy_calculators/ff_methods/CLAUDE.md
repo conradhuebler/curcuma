@@ -4,93 +4,69 @@
 
 Force field implementation system with multi-threading support for UFF, QMDFF, and native GFN-FF.
 
-## Architecture
+## Architecture (Sep 2026 — one engine)
 
 ### Core Separation of Concerns
 
-**ForceFieldThread** (`forcefieldthread.cpp/h`):
-- **Responsibility**: Energy and gradient calculations for all force field terms
-- **Threading**: Multi-threaded via CxxThreadPool
-- **Methods**: Calculate{Method}{Term}Contribution() pattern (e.g., CalculateGFNFFBondContribution)
+**FFWorkspace** (`ff_workspace.h/.cpp`, `ff_workspace_gfnff.cpp`, `ff_workspace_uff.cpp`):
+- **Responsibility**: the ONLY energy/gradient engine. Partitions every interaction list over
+  `CxxThreadPool` workers, accumulates per-partition energies/gradients, reduces, then applies
+  the CN chain rule and the Coulomb self-energy in `postProcess()`.
+- **Kernels**: `calcBonds/calcAngles/calcDihedrals/calcExtraTorsions/calcInversions/calcSTorsions`,
+  `calcDispersion/calcD4Dispersion`, `calcBondedRepulsion/calcNonbondedRepulsion`, `calcCoulomb`,
+  `calcHydrogenBonds/calcHalogenBonds`, `calcATM(Gradient)`, `calcBATM` (GFN-FF, physics from
+  Fortran `gfnff_engrad.F90`) and the UFF/QMDFF kernels in `ff_workspace_uff.cpp`.
+- **Input**: a `GFNFFParameterSet` (native structs from `gfnff_parameters.h` / `ff_terms.h`),
+  moved in via `setInteractionLists()`; per-step data via `setGeometry/setEEQCharges/setD3CN/
+  setCNDerivatives/setDC6DCNPtr`.
 
-**ForceField** (`forcefield.cpp/h`):
-- **Responsibility**: Thread pool management, geometry updates, energy accumulation
-- **Role**: Dispatcher that coordinates ForceFieldThread instances
+**ff_terms.h**: the shared term structs (`Bond`, `Angle`, `Dihedral`, `Inversion`, `vdW`, `EQ`,
+`CNDerivStore`, `GeoGradMatrix`) used by the workspace, ForceField, GFNFF and the GPU SoA headers.
 
-**ForceFieldGenerator** (`forcefieldgenerator.cpp/h`):
-- **Responsibility**: UFF parameter generation from atom types
-- **Used by**: UFF method only
+**ForceField** (`forcefield.cpp/h`, UFF / UFF-D3 / QMDFF / CG):
+- Parameter generation via `ForceFieldGenerator`, JSON parameter caching, D3 pairs for `uff-d3`,
+  then hands the lists to its own `FFWorkspace`. No thread engine of its own any more.
+  `-method cg` (coarse-grained LJ beads, `-load_ff_json FILE` with `cg_default` etc.) builds one
+  type-3 `vdW` per bead pair; `FFWorkspace::calcCGPairs` (ff_workspace_cg.cpp) evaluates
+  `CGPotentials::calculateCGPairEnergy` with an analytic sphere gradient (FD for ellipsoids).
 
-**EEQSolver** (`eeq_solver.cpp/h` - Claude Generated December 2025, Enhanced January 4, 2026):
-- **Responsibility**: Standalone electronegativity equalization charge solver (extracted from GFN-FF)
-- **Architecture** (January 4, 2026): Hybrid two-phase + iterative refinement
-  - Phase 1: Initial solve with base parameters (gam only, no dgam) + **CNF term in RHS**
-  - Phase 2: Iterative refinement with dgam corrections applied in matrix, **NO CNF term in RHS**
-  - Key fix: CNF term ONLY in Phase 1 (gfnff_ini.f90:563-570), removed from Phase 2 (gfnff_ini.f90:696-707)
-- **Helper Functions** (new): `buildCorrectedEEQMatrix()`, `solveEEQ(use_cnf_term=bool)`
-- **Phase 1 Improvements** (December 28, 2025): Pi-system detection (sp/sp2 hybridization from CN), neighbor electronegativity averaging (Pauling scale), environment-dependent dxi corrections (Boron, C=O, C=N, halogens, metals)
-- **Accuracy**: CH₄ charges improved 75% (5.0× error → 1.3× error), fixes 4/6 GFN-FF energy terms
-- **Used By**: GFN-FF for Coulomb charges, D4ParameterGenerator for charge-dependent C6
-- **Parameters**: Element-specific (chi_eeq, gam_eeq, alpha_eeq, cnf_eeq) from gfnff_par.h + ConfigManager integration
-- **Coulomb Energy Fix (Jan 28, 2026)**: Corrected dgam ff-values and enabled charge-corrected gameeq/alpeeq - Coulomb energy now matches Fortran reference exactly (< 1 nEh error)
-- **Status**: ✅ EEQ charges correct, ✅ Coulomb energy exact match
+**GFNFF** (`gfnff_method.cpp/h`, `gfnff_torsions.cpp`, `gfnff_inversions.cpp`):
+- Topology (bonds, hybridisation, rings, fragments), Phase-1 EEQ, FT-HMO pi-bond orders,
+  native parameter generation (`generateGFNFFParameterSet()`), per-step CN + Phase-2 EEQ
+  (`prepareCNAndEEQ()`), RMSD-gated H-/X-bond re-detection, ALPB solvation, then
+  `m_workspace->calculate()`. Owns the `CxxThreadPool` (`threadPool()`), shared with the
+  EEQ solver and the workspace. The legacy thread engine it kept in sync (never evaluated for
+  GFN-FF since Mar 2026) was removed in Sep 2026.
+- `NumGrad()` (full FD incl. EEQ) and `NumGradFixedCharges()` (FD with frozen charges) run on
+  the workspace; `getBondParameters()/getTorsionParameters()/...` export JSON views of the
+  cached native parameter set for the validation tests.
+- **No periodic boundary conditions on the CPU path**: the unit cell used to reach only the
+  removed engine; the workspace is non-periodic. The GPU path carries its own PBC handling.
 
-**GFNFF Class** (`gfnff_method.cpp/h` + `../qm_methods/gfnff.cpp/h`):
-- **Responsibility**: GFN-FF parameter generation (topology-aware) + ConfigManager integration
-- **EEQSolver Integration** (Dec 2025): Delegates charge calculation to standalone EEQSolver instead of embedded implementation
-- **Methods**: generateTopologyAwareBonds(), generateGFNFFDispersionPairs(), etc.
-- **Output**: JSON parameter sets passed to ForceField
+**EEQSolver** (`eeq_solver.cpp/h`): two-phase EEQ (topological Phase 1, geometric Phase 2 with
+dxi/dgam/alpha corrections); Schur-Cholesky default (`dpotrf` under `ScopedBlasThreads`),
+PCG/LDLT/LU alternatives, opt-in cached factor + iterative refinement for MD (off by default since Sep 27, 2026); **projected PCG**
+(`solveWithProjectedPCG`, default for N >= 500, tol 1e-12, `eeq_ppcg_min_nfrag 0` = exact) replaces the O(N² nfrag) Schur
+route for many-fragment boxes (water/3000: 887 -> 59 ms per solve, energies identical to 12
+digits, gradients to 3e-10). Phase-2 takes
+`Eigen::Ref` views of the augmented matrix (no N x N copies). The `TopologyInput` it needs is
+cached in `GFNFF` per topology version.
 
-### GFN-FF Implementation Pattern
+### Adding a New GFN-FF Term - Checklist (workspace engine)
 
-**Two-Phase Architecture:**
-
-1. **Parameter Generation** (in GFNFF class):
-   ```cpp
-   // gfnff.cpp with ConfigManager migration
-   ConfigManager config("gfnff", parameters);
-   json params = config.exportConfig();
-   params["bonds"] = generateTopologyAwareBonds(...);
-   params["angles"] = generateTopologyAwareAngles(...);
-   params["gfnff_dispersions"] = generateGFNFFDispersionPairs();
-   // etc.
-   m_forcefield->setParameter(params);
-   ```
-
-2. **Term Calculation** (in ForceFieldThread with parameter flags):
-   ```cpp
-   // forcefieldthread.cpp - Phase 2 parameter flag checks
-   if (m_dispersion_enabled) {
-       CalculateGFNFFDispersionContribution();  // Only if enabled
-   }
-   if (m_hbond_enabled) {
-       CalculateGFNFFHydrogenBondContribution(); // Only if enabled
-   }
-   ```
-
-### Adding New GFN-FF Terms - Checklist
-
-To add a new GFN-FF energy term (e.g., "CrossTerm"), you MUST modify:
-
-1. **Parameter Structures** (`forcefieldthread.h`):
-   - Add new struct (e.g., `GFNFFCrossTerm { int i,j; double param1; }`)
-   - Add member vector (e.g., `std::vector<GFNFFCrossTerm> m_gfnff_crossterms;`)
-
-2. **Parameter Generation** (`gfnff.cpp`):
-   - Add generation method (e.g., `generateGFNFFCrossTerms()`)
-   - Call in `generateGFNFFParameters()` and add to JSON
-
-3. **Term Calculation** (`forcefieldthread.cpp`):
-   - Add calculation method (e.g., `CalculateGFNFFCrossTermContribution()`)
-   - Call in `ForceFieldThread::execute()` under `if (m_method == 3)` block
-
-4. **Energy Accumulation** (`forcefield.cpp`):
-   - Add energy component member variable if needed
-   - Collect from threads in `ForceField::Calculate()`
-
-5. **Parameter Setter** (`forcefield.h/.cpp`):
-   - Add setter method (e.g., `setGFNFFCrossTerms(const json&)`)
-   - Call in `setParameter()` dispatcher
+1. **Struct**: add the per-interaction struct to `gfnff_parameters.h` (or `ff_terms.h` if shared
+   with UFF/QMDFF) and a `std::vector<...>` member to `GFNFFParameterSet`.
+2. **Generation**: add `generateXxxNative()` to `GFNFF`, call it from `generateGFNFFParameterSet()`.
+3. **Workspace lists**: store the vector in `FFWorkspace::setInteractionLists()`, add its range to
+   the partition struct in `partition()`, and a `FFEnergyComponents` / `FFTermTimings` field.
+4. **Kernel**: implement `FFWorkspace::calcXxx(int partition)` in `ff_workspace_gfnff.cpp`
+   (energy into `acc.energy.xxx`, gradient into `acc.gradient`, CN chain-rule into `acc.dEdcn`),
+   call it from `executeGFNFF()`; add the reduction in `reduce()`.
+5. **Report**: extend `GFNFFEnergyReport` / the verbosity-2 table in `GFNFF::Calculation()`.
+6. **GPU**: mirror the kernel in `cuda/gfnff_kernels.cu` (+ `rocm/gfnff_rocm.hip`) and the SoA
+   upload in `cuda/gfnff_soa.h` (shared by CUDA and HIP since Sep 2026; the `rocm/*_hip.h`
+   files are include shims), or gate the term CPU-only.
+7. **Test**: add the term to `test_gfnff_validation.cpp` against the Fortran reference.
 
 ## GFN-FF Gradient Implementation Status (February 2026)
 
@@ -113,13 +89,13 @@ To add a new GFN-FF energy term (e.g., "CrossTerm"), you MUST modify:
 | Halogen Bonds | CalculateGFNFFHalogenBondContribution() | ✅ ACTIVE | ✅ Implemented (Mar 2026) | rbxgfnff_eg |
 | Triple Bond Torsions | CalculateGFNFFSTorsionContribution() | ✅ ACTIVE (Mar 2026) | ✅ Implemented | sTors_eg:3454 |
 | BATM | CalculateGFNFFBatmContribution() | ✅ ACTIVE | ✅ Implemented (Mar 2026) — GradientBATM() | batmgfnff_eg |
-| ATM (D3/D4) | CalculateATMContribution() | ✅ ACTIVE | ✅ Complete | d3_gradient |
+| ATM (D3/D4) | CalculateATMContribution() | OFF by default for GFN-FF since Sep 2026 (`dispersion_atm`) | ✅ Complete | none - the reference has no three-body dispersion; see REV_GFNFF_TODO #13 |
 
 ### Implementation Details
 
 #### ✅ Complete Gradient Implementations
 
-**Bond Gradients** (forcefieldthread.cpp:834-842):
+**Bond Gradients** (`FFWorkspace::calcBonds`, ff_workspace_gfnff.cpp):
 ```cpp
 // dE/dr = -2*α*dr*E (chain rule)
 double dEdr = -2.0 * alpha * dr * energy;
@@ -128,17 +104,17 @@ m_gradient.row(bond.j) += dEdr * factor * derivate.row(1);
 ```
 - **Note**: Missing CN gradient contribution (dr0/dCN * dCN/dx) - second-order effect
 
-**Angle Gradients** (forcefieldthread.cpp:993-1034):
+**Angle Gradients** (`FFWorkspace::calcAngles`):
 - Complete implementation with distance-dependent damping
 - Full damping gradient terms: ∂E/∂x = (∂E/∂θ * damp) * (∂θ/∂x) + (∂E/∂damp) * (∂damp/∂x)
 - Matches Fortran egbend exactly
 
-**Torsion Gradients** (forcefieldthread.cpp:1038-1360):
+**Torsion Gradients** (`FFWorkspace::calcDihedrals`):
 - Complete with all three damping terms (damp_ik, damp_jk, damp_jl)
 - Cross-center damping formula matches Fortran
 - NCI torsion support (atcutt_nci = 0.305 vs standard atcutt = 0.505)
 
-**Extra Torsion Gradients** (forcefieldthread.cpp:1366-1520):
+**Extra Torsion Gradients** (`FFWorkspace::calcExtraTorsions`):
 - Same implementation as primary torsions
 - Without +π phase shift (gauche torsions)
 
@@ -166,7 +142,7 @@ m_gradient.row(bond.j) += dEdr * factor * derivate.row(1);
 
 ### Gradient Terms Status (Feb 2026)
 
-**✅ ALL BONDED GRADIENT TERMS NOW ENABLED** in `forcefieldthread.cpp:execute()`:
+**✅ ALL BONDED GRADIENT TERMS NOW ENABLED** in `FFWorkspace::executeGFNFF()` (ff_workspace.cpp):
 
 ```cpp
 // Lines 116-120: All bonded terms ACTIVE (Feb 2026)
@@ -228,7 +204,7 @@ ctest -R test_gfnff_gradients --verbose
 - Coulomb (dynamic EEQ charges) — < 0.1 mEh (< 1 nEh for small molecules)
 - Hydrogen bonds / Halogen bonds — all cases 1-3 + gradients
 - BATM — topology charges distributed after thread creation (fixed Mar 6)
-- ATM (separated to own GradientATM()) — energy ≈ 0, gradient correct
+- ATM (separated to own GradientATM()) — not part of the reference; off by default since Sep 2026 (`-gfnff.dispersion_atm true` restores it)
 
 ### ✅ EEQ Solver Status
 - **EEQSolver**: Standalone in `eeq_solver.{h,cpp}`, two-phase architecture
@@ -315,6 +291,10 @@ ctest -R test_gfnff_gradients --verbose
     hit on a charged nfrag==2 complex left qfrag=[0,…,0] (F2 trial is skipped on a cache hit),
     Phase-2 EEQ forced charge 0 → wrong Coulomb (~Q²γ) on cached re-runs. Now restores qfrag;
     write guard checks qfrag SUM (not qfrag[0], so [0,m_charge] placements cache too).
+  - **Sep 2026 (frag_charge_model, 🤖 machine-tested)**: default `ensemble` chooses the charge
+    carrier by chemistry instead of "fragment of atom 1" (`gfnff_frag_charge.cpp`; variants via
+    `setFragmentOverride()`, blended in `Calculation()` -> `fragEnsembleBlend()`); `reference`
+    = old rule, bit-identical. Known Issue #31, [docs/FRAG_CHARGE_MODEL.md](../../../../docs/FRAG_CHARGE_MODEL.md).
 
 **Dispersion Corrections**:
 - [ ] **Metal-specific C6 parameters** - Transition metals may need special handling
@@ -337,6 +317,13 @@ ctest -R test_gfnff_gradients --verbose
 8. NCI torsion `is_nci` flag population in parameter generation
 
 ## Performance
+
+**Sep 2026 — cleanup (docs/CLEANUP_2026_09.md)**: removing the dead legacy engine and its
+per-step feed (parameter sync, CN-derivative rebuild, charge distribution, H-/X-bond JSON) plus
+exact hot-path fixes (H-bond gradient CSR index, EEQ `Ref` views, cached EEQ topology input,
+parameter set moved instead of copied twice) gave, energies identical to the last digit:
+polymer/1410 SP 774 -> 489 ms (t8), water box/3000 SP 7.1 -> 4.1 s, polymer MD 1.3x. The MD
+step is now dominated by the Phase-2 EEQ solve (45-70 ms of ~90 ms at N=1410).
 
 **Multi-threading Benchmarks** (water.xyz, 4 cores):
 - 1 thread: 0.320s
@@ -371,8 +358,11 @@ NOT loosened**: (a) there is no speed to gain — the whole cache mechanism is ~
 of MD wall time, comparable to noise, since the threaded LAPACK `dpotrf` path
 landed after the WP was written; (b) `eeq_matrix_rebuild_eps_bohr>0` makes
 `A_nn` itself stale, so refinement cannot rescue it (identical Etot at refine
-0/1/3) — it stays disabled. At the default threshold refinement is a numerical
-no-op, so single points are unaffected.
+0/1/3) — it stays disabled. Single points never hit the cache. **Caveat (Sep 27, 2026)**:
+"one step is enough at the default threshold" does not hold in MD on water8 (24 atoms) —
+refine 1 leaves the trajectory 7.8e-6 A/step off the exact solve, refine 3 matches it; energy
+conservation unaffected. **Since Sep 27, 2026 the cache is off by default** (`eeq_refactor_eps_bohr 0`):
+below 500 atoms it saved no time (450-atom water cluster 16.05 ms cached vs 15.53 ms uncached per call).
 
 **Jun 2026 — large-system GFN-FF speedups** (see `docs/GFNFF_PERFORMANCE_LEVERS.md`):
 - **HB candidate generation (Lever 1)**: cell-list nhb2 (`hyd_on[]`) + nhb1
@@ -631,7 +621,7 @@ std::string method = "d4";  // Matches Fortran reference
    - Multi-threaded parallelization across atom pairs
    - Method routing: "uff-d3" → method_type==1 with D3 flag
 
-3. **Energy Calculation** (`forcefieldthread.cpp:execute()`):
+3. **Energy Calculation** (`FFWorkspace::executeGFNFF()`):
    - UFF bonded terms: bonds, angles, dihedrals, inversions, vdW
    - Native D3 dispersion: `CalculateD3DispersionContribution()`
    - Total energy: E_total = E_UFF_bonded + E_D3_dispersion
@@ -659,7 +649,7 @@ std::string method = "d4";  // Matches Fortran reference
 
 - ✅ Validated D3 dispersion (10/11 molecules <1% error)
 - ✅ Geometry-dependent CN calculation with Gaussian weighting
-- ✅ Multi-threaded parallelization via ForceFieldThread
+- ✅ Multi-threaded parallelization via FFWorkspace partitions
 - ✅ Consistent D3 implementation with GFN-FF
 - ✅ PBE0/BJ damping parameters (a1=0.4145, a2=4.8593, s8=1.2177)
 
@@ -667,7 +657,7 @@ std::string method = "d4";  // Matches Fortran reference
 
 - `forcefieldgenerator.h/cpp`: New `GenerateUFFD3Parameters()` method
 - `forcefield.cpp`: D3 distribution in `AutoRanges()` for method "uff-d3"
-- `forcefieldthread.h/cpp`: New `CalculateD3DispersionContribution()` method
+- `ff_workspace_gfnff.cpp`: `calcDispersion()` evaluates the D3 pair list (uff-d3) with the GFN-FF dispersion kernel
 - `gfnff_method.cpp`: Replaced `generateGFNFFDispersionPairs()` with native D3 (eliminates ~200 lines duplicate code)
 
 ### Integration with GFN-FF
@@ -683,6 +673,21 @@ std::string method = "d4";  // Matches Fortran reference
 - Maintainability: Single D3 implementation to validate and update
 
 ## GPU Pipeline (cuda/)
+
+- **Sep 2026 — one host wrapper, shared headers**: the CUDA and HIP `ComputationalMethod`
+  wrappers are one class template `GFNFFGpuMethodImpl<Backend>` (`qm_methods/gfnff_gpu_method_impl.h`,
+  traits = workspace/EEQ types, backend name, `has_device_schur`, CPU-fragment threshold,
+  `downloadDoubles`); `gfnff_gpu_method.*` / `gfnff_hip_method.*` are ~40-line instantiations.
+  `gpu_utils.h`, `gfnff_soa.h`, `ff_workspace_gpu.h`, `eeq_solver_gpu.h` exist once under `cuda/`
+  on top of `ff_methods/gpu_rt.h` (`gpuMalloc`/`gpuMemcpy`/`gpuStream_t` → cuda*/hip* by
+  `__HIP_PLATFORM_AMD__`); the `rocm/*_hip.h` files are shims that `#define` the Hip class
+  names (the untouched `gfnff_rocm.hip` uses them, and both plugins load `RTLD_GLOBAL`, so the
+  two backends must not export identical symbols). Kernel TUs stay separate (not merged blind;
+  no ROCm SDK here — the HIP side is a token-identical mechanical mirror, uncompiled).
+
+- **Sep 27, 2026 — EEQ default = CPU semantics**: nfrag>1 with `solve_method cholesky` resolves
+  once (`many_frag_method` in `gfnff_gpu_method_impl.h`) to WP7-E above `eeq_ppcg_min_nfrag`/
+  `min_atoms`, else WP7-A; `0` forces exact on CPU and GPU. Numbers: docs/GPU_TUNING.md section 3.
 
 ### ✅ Phase 1+2: GPU CN + GPU dc6dcn (March 2026)
 - GPU CN computation replaces CPU O(N²) erf() loop
@@ -718,11 +723,16 @@ std::string method = "d4";  // Matches Fortran reference
 - **MD speedup**: ~15x for topology phase when topology is constant (typical MD)
 - **Implementation**: `getCachedTopology()` in `gfnff_method.cpp`, `needsFullTopologyUpdate()` checks displacement
 
+### 🤖 React Topology Mode (Aug 2026, machine-tested)
+- **`topology_mode=react`**: dynamic bond topology (bonds form AND break in MD) via hysteresis scan + full bonded-term rebuild — [docs/GFNFF_REACT_TOPOLOGY.md](../../../../docs/GFNFF_REACT_TOPOLOGY.md)
+- NVT-only (dE_jump at rebuild events, logged); rebuild == fresh-init bit-identical (ctest `gfnff_react_fd_gradient`, `cli_simplemd_13/14`)
+- **Recorded pre-existing gradient residual**: analytic vs FD up to 1e-1 Eh/A for H-H (bond dynamic-r0 CN chain 2.4e-2 + partial repulsion gradient) — react-independent, tracked in `test_gfnff_react_fd`
+
 ### ✅ Tuning knobs — GPU CN pair list + HB list (Task #10/#11, Jun 2026)
 - 8 `gfnff` PARAMs trade perf/accuracy; defaults bit-identical to Fortran-parity. See [docs/GPU_GFNNF_DISCREPANCIES.md](../../../../docs/GPU_GFNNF_DISCREPANCIES.md#performanceaccuracy-tuning-knobs-task-10--11-june-2026)
 - Task #10: `gpu_cn_pair_regen` (default ON) rebuilds the stale-prone CN-deriv pair list on topology change; `gpu_cn_pair_cutoff_factor` widens it (`ff_workspace_gpu.cu`)
 - Task #11: `hb_accuracy`/`hb_thr{1,2}_bohr2` set hbthr1/hbthr2; `hb_update_rmsd_bohr`/`hb_update_force_every` control rebuild timing (`gfnff_method.cpp`)
-- **Caveat**: registry PARAMs MUST be single-line — `param_parser` drops multi-line PARAMs whose help text contains `)`
+- **Resolved Sep 28, 2026**: multi-line PARAMs (help with `)` or adjacent literals) are now parsed; the single-line rule is obsolete (docs/PARAMETER_SYSTEM.md)
 
 ### ✅ EEQ WP7-D — block-Jacobi PCG (GPU) + contact-aware dispatch (CPU, Jun 2026)
 - GPU-PCG now uses the per-fragment **block-Jacobi** preconditioner (port of CPU `buildBlockJacobi`) instead of diagonal Jacobi → far fewer iters for many fragments, exact (`k_eeq_block_jacobi_apply`/`buildBlockJacobiFactors` in `cuda/eeq_solver_gpu.cu`; verified == GPU SchurCholesky ≤1e-8)
@@ -780,6 +790,6 @@ std::string method = "d4";  // Matches Fortran reference
 
 ## References
 
-- ForceFieldThread implements formulas from Fortran `gfnff_engrad.F90`
+- FFWorkspace (`ff_workspace_gfnff.cpp`) implements the formulas from Fortran `gfnff_engrad.F90`
 - GFNFF parameter generation follows Spicher/Grimme J. Chem. Theory Comput. 2020
 - D3 dispersion: Grimme et al., J. Chem. Phys. 132, 154104 (2010)

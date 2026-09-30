@@ -135,6 +135,18 @@ public:
 
     void setMatchingAtoms(const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms);
 
+    /*! \brief Claude Generated (Sep 2026): check an alignment method name (e.g. from
+     *  -rmsd.method/-confscan.method) against the same lookup LoadAlignmentMethodParameters()
+     *  uses internally, so callers can catch a typo (e.g. "intertia") before it silently
+     *  falls back to 'subspace' deep inside a per-thread RMSDDriver, where the warning is
+     *  easy to miss and the caller's own config summary would otherwise keep echoing the
+     *  invalid raw string as if it were what actually ran. */
+    static bool IsValidAlignmentMethodName(const std::string& name);
+    //! Comma-separated list of recognised alignment method names, for warning/help text.
+    static std::string ValidAlignmentMethodNames();
+    //! Name of the method LoadAlignmentMethodParameters() falls back to on an unrecognised name.
+    static std::string DefaultAlignmentMethodName();
+
     double Rules2RMSD(const std::vector<int> rules, int fragment = -1);
     StructComp Rule2RMSD(const std::vector<int> rules, int fragment = 1);
 
@@ -250,6 +262,13 @@ public:
     double SimpleRMSD();
 
     double BestFitRMSD();
+
+    /** Claude Generated (Jul 2026): best-fit RMSD assuming reference AND target geometries are
+     *  ALREADY geometric-centered (same convention as CenterMolecule). Skips the two re-centering
+     *  passes of BestFitRMSD -- used by the RMSD-MTD screen fast path, where the walker is centered
+     *  once per step and hills are pre-centered/cached. Leaves the (centered) reference untouched and
+     *  stores the rotated target so Gradient() stays valid. Ignores per-atom weights. */
+    double BestFitRMSDCentered();
 
     double CustomRotation();
 
@@ -404,7 +423,14 @@ private:
 
     // --- General & Threading ---
     PARAM(threads, Int, 1, "Number of threads for parallel execution.", "Performance", {})
-    PARAM(protons, Bool, true, "Include protons in the calculation (opposite of 'heavy').", "General", {"heavy"})
+    /* Claude Generated (Aug 2026): 'heavy' used to be a plain alias of 'protons', which
+       inverted its meaning - a bare CLI flag becomes true, so '-heavy' asked for
+       protons=true, i.e. the exact opposite of heavy-only, and only '-heavy false'
+       (or -rmsd.protons false) did what the help text promised. It is now its own
+       parameter with the documented polarity; the two are combined as
+       m_protons = protons && !heavy (see rmsd.cpp), so the defaults are unchanged. */
+    PARAM(protons, Bool, true, "Include protons in the calculation (opposite of 'heavy').", "General", {})
+    PARAM(heavy, Bool, false, "Use only heavy atoms, i.e. exclude protons (opposite of 'protons').", "General", {})
     PARAM(force_reorder, Bool, false, "Force reordering even if atom counts match.", "General", {"reorder"})
     PARAM(no_reorder, Bool, false, "Disable all reordering logic.", "General", {"noreorder"})
 

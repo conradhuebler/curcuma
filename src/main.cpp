@@ -1,6 +1,6 @@
 /*
  * <Curcuma main file.>
- * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *               2024 Gerd Gehrisch <gg27fyla@student.freiberg.de>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -17,6 +17,10 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  */
+#include "src/core/gpu_device_pool.h"
+#include "src/core/gpu_fallback.h"
+#include "src/core/intra_parallel_context.h"
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 #include "src/core/energy_calculators/qm_methods/eht.h"
 #include "src/core/energy_calculators/qm_methods/orcainterface.h"
 #include "src/core/fileiterator.h"
@@ -64,6 +68,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -691,13 +696,33 @@ json CLI2Json(int argc, char** argv)
     // (setCharge reads controller["charge"], not the command-module namespace).
     std::set<std::string> global_params = {
         "verbosity", "threads", "method", "gpu",  // energy_method and gpu apply to all capabilities
+        "gpu_device",   // Claude Generated (Sep 2026, multi-GPU): device index for -gpu (see docs/MULTI_GPU.md)
+        "gpu_devices", "gpu_workers_per_device",  // batch workers spread over these devices
+        "gpu_strict",   // Claude Generated (Sep 2026): any GPU fallback ends the run (exit 3), see src/core/gpu_fallback.h
+        "gpu_memory_check",  // native gfn1/gfn2 GPU: refuse a basis that does not fit (default true)
+        "gpu_sparse_integrals",  // native gfn1/gfn2 GPU: screened S/H0/multipole storage auto|on|off
+        // Claude Generated (Sep 2026, multi-GPU step 3): multi-GPU eigensolve (docs/GPU_TUNING.md)
+        "gpu_eigensolver_devices", "gpu_eigensolver_backend", "gpu_eigensolver_block",
+        "gpu_eigensolver_min_nao", "gpu_eigensolver_fp32", "gpu_eigensolver_verify",
+        "gpu_density_devices", "gpu_density_min_nao",  // split the pattern density (docs/GPU_TUNING.md)
         "charge", "spin",  // molecular charge/spin (top-level, not module-scoped)
-        "export_run", "export-run", // Export current run configuration
-        "import_config", "import-config", // Import custom configuration
+        "export_run", // Export current run configuration
+        "import_config", // Import custom configuration
         "bak",   // Files to copy back from BMT output directory to CWD
         "no_bmt", // Disable BMT output directory (legacy: write to CWD)
         "noprogress" // Disable live progress bars globally (e.g. when redirecting to a file)
     };
+
+    // Claude Generated (Jul 2026): modules that are sub-scopes of a calculation rather than
+    // commands in their own right. Auto-routing a flat flag into one of these is the intended,
+    // everyday behaviour ("-sp mol.xyz -cn_cutoff_bohr 5.5" -> controller["gfnff"]), so it is
+    // only reported at info level. Moving a flag into another CAPABILITY module means the user
+    // almost certainly aimed it at the active command and it silently went elsewhere -> warn.
+    // This is the safety net for the class of bug where ConfSearch (unregistered) lost
+    // -opt_method to polymerbuild and -thermostat to simplemd without any diagnostic.
+    std::set<std::string> scope_modules(MethodFactory::methodParameterScopes().begin(),
+                                        MethodFactory::methodParameterScopes().end());
+    scope_modules.insert({"ripser", "rmsd", "ancopt", "modern_optimizer", "native_lbfgs"});
 
     // Claude Generated (October 2025): CLI keyword to module name mapping
     // Maps command-line keywords (e.g., -md) to actual module names (e.g., simplemd)
@@ -741,6 +766,9 @@ json CLI2Json(int argc, char** argv)
 
         if (sub == "-") {
             current.erase(0, 1);
+            // Claude Generated (Jun 2026): canonicalize hyphens to underscores in CLI
+            // parameter names so "-opt-method" matches the JSON key "opt_method".
+            std::replace(current.begin(), current.end(), '-', '_');
 
             // Handle special verbosity shortcuts - Claude Generated
             if (current == "silent" || current == "quiet") {
@@ -938,6 +966,17 @@ json CLI2Json(int argc, char** argv)
                 continue;
             }
 
+            // Claude Generated (Jul 2026): announce the move. Silent rerouting hid the fact that
+            // -opt_method / -thermostat / -restart never reached ConfSearch for months.
+            {
+                const std::string msg = "CLI flag -" + pname + " is not a parameter of the active"
+                    " command's module \"" + module_name + "\"; it is owned by \"" + owners[0]
+                    + "\" and was routed to -" + owners[0] + "." + pname + ".";
+                if (scope_modules.count(owners[0]) > 0)
+                    CurcumaLogger::info(msg);
+                else
+                    CurcumaLogger::warn(msg + " Use the dotted form if that is not what you meant.");
+            }
             reroute_targets[owners[0]][pname] = it.value();
             reroute_remove.push_back(pname);
         }
@@ -995,7 +1034,21 @@ json CLI2Json(int argc, char** argv)
         } else if (is_nested_object && param_name != keyword) {
             // Handle nested structure for OTHER modules (not this command's keyword)
             // param_name = "rmsd", param_value = {"method": "subspace"}
-            module_params[param_name] = param_value;
+            //
+            // Claude Generated (Jul 2026): map CLI keywords to module names here too. Because
+            // setNestedJsonValue() already split "md.rmsd_mtd" into key["md"]["rmsd_mtd"], this
+            // branch (not the flat-dotted one above) is what handles "-md.x" issued from another
+            // command -- and it used to store it verbatim under controller["md"], which no module
+            // reads. So "curcuma -confsearch mol.xyz -md.rmsd_mtd false" was silently ignored.
+            std::string target_module = param_name;
+            if (keyword_to_module.count(param_name) > 0)
+                target_module = keyword_to_module[param_name];
+            if (module_params.contains(target_module) && module_params[target_module].is_object()) {
+                for (auto& [k, v] : param_value.items())
+                    module_params[target_module][k] = v; // merge, do not clobber a sibling block
+            } else {
+                module_params[target_module] = param_value;
+            }
             keys_to_remove.push_back(param_name);
         }
         // NOTE: We KEEP nested structures where param_name == keyword!
@@ -1236,7 +1289,15 @@ int executeHessian(const json& controller, int argc, char** argv) {
         return 1;
     }
     std::string method = controller.value("method", "gfnff");
-    Hessian hessian(method, controller.value("hessian", json::object()));
+    // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md H-2): the displacement workers build their
+    // EnergyCalculators from the hessian scope only, so -scf_threshold / -xtb.* / -gfnff.* never
+    // reached them. Forward the method sub-scopes as curcumaopt.cpp does for opt/sp.
+    json hessian_config = controller.value("hessian", json::object());
+    for (const std::string& scope : MethodFactory::methodParameterScopes()) {
+        if (controller.contains(scope) && controller[scope].is_object() && !hessian_config.contains(scope))
+            hessian_config[scope] = controller[scope];
+    }
+    Hessian hessian(method, hessian_config);
     initializeBMT(&hessian, argv[2], "hessian", controller);
     Molecule mol1 = Files::LoadFile(argv[2]);
     hessian.setMolecule(mol1);
@@ -1652,6 +1713,120 @@ int executeRMSD(const json& controller, int argc, char** argv) {
     return 0;
 }
 
+// Claude Generated (Sep 2026, multi-GPU case A): one single point of a multi-structure batch.
+// Each worker owns its EnergyCalculator (stateful GFN-FF/xTB backends stay thread-local),
+// suppresses intra-molecule threading (coarse parallelism owns the cores) and leases a GPU
+// device slot, so N workers on N GPUs run N molecules at once.
+class SinglePointBatchThread : public CxxThread {
+public:
+    SinglePointBatchThread(size_t index, const Molecule& molecule, const std::string& method, const json& controller)
+        : m_index(index)
+        , m_molecule(molecule)
+        , m_method(method)
+        , m_controller(controller)
+    {
+    }
+
+    int execute() override
+    {
+        curcuma::SuppressIntraParallel intra_guard;
+        curcuma::GpuDeviceLease gpu_lease;
+        m_device = gpu_lease.device();
+        const auto t0 = std::chrono::steady_clock::now();
+        EnergyCalculator energy_calc(m_method, m_controller);
+        energy_calc.setMolecule(m_molecule.getMolInfo());
+        m_energy = energy_calc.CalculateEnergy(false);
+        m_error = energy_calc.Error();
+        if (m_error)
+            m_message = energy_calc.ErrorMessage();
+        m_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        return 0;
+    }
+
+    size_t m_index;
+    Molecule m_molecule;
+    std::string m_method;
+    json m_controller;
+    double m_energy = 0.0;
+    double m_seconds = 0.0;
+    int m_device = -1;
+    bool m_error = false;
+    std::string m_message;
+};
+
+/**
+ * @brief Single points for every frame of a multi-structure file (batch mode of -sp).
+ *
+ * Workers = -threads (at least the number of GPU slots when a device pool is active, so
+ * `-sp many.xyz -gpu cuda` on a 4-GPU node uses all four without an extra flag). Energies are
+ * printed in input order and written as a multi-XYZ file with the energy in the comment line.
+ * Claude Generated (Sep 2026).
+ */
+int executeSinglePointBatch(const std::vector<Molecule>& frames, const std::string& method,
+                            const json& energy_controller, const json& controller, const std::string& filename)
+{
+    int threads = controller.value("threads", 1);
+    const auto& gpu_pool = curcuma::GpuDevicePool::instance();
+    if (gpu_pool.active())
+        threads = std::max(threads, gpu_pool.capacity());
+    threads = std::max(1, std::min<int>(threads, static_cast<int>(frames.size())));
+
+    CurcumaLogger::info(fmt::format("Single point batch: {} structures, {} worker(s){}", frames.size(), threads,
+        gpu_pool.active() ? fmt::format(", {} GPU slot(s)", gpu_pool.capacity()) : std::string()));
+
+    json worker_controller = energy_controller;
+    worker_controller["verbosity"] = 0;
+
+    CxxThreadPool pool;
+    pool.setProgressBar(controller.value("noprogress", false) ? CxxThreadPool::ProgressBarType::None
+                                                              : CxxThreadPool::ProgressBarType::Continously);
+    pool.setActiveThreadCount(threads);
+    std::vector<SinglePointBatchThread*> workers;
+    for (size_t i = 0; i < frames.size(); ++i) {
+        // The pool owns and deletes the workers (auto-delete default); results are read below
+        // while the pool is still alive.
+        auto* th = new SinglePointBatchThread(i, frames[i], method, worker_controller);
+        workers.push_back(th);
+        pool.addThread(th);
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const int saved_verbosity = CurcumaLogger::get_verbosity();
+    CurcumaLogger::set_verbosity(0);   // the logger level is global; workers would interleave
+    pool.StartAndWait();
+    CurcumaLogger::set_verbosity(saved_verbosity);
+    const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+    std::string basename = BMTUtils::stripExtension(filename);
+    std::string bmt_dir;
+    if (!controller.value("no_bmt", false)) {
+        bmt_dir = BMTUtils::createBMTDir(basename, "sp");
+        BMTUtils::writeMetadata(bmt_dir, basename, "sp", filename);
+    }
+    const std::string out_file = BMTUtils::outputPath(bmt_dir, basename + ".sp.xyz");
+    { std::ofstream clear_file(out_file); }
+
+    int failed = 0;
+    double sum_task = 0.0;
+    for (auto* th : workers) {
+        sum_task += th->m_seconds;
+        if (th->m_error) {
+            ++failed;
+            CurcumaLogger::error(fmt::format("Structure {}: {}", th->m_index + 1, th->m_message));
+        } else {
+            fmt::print("Structure {:5d}  Single Point Energy = {:.8f} Eh  ({:.2f} s{})\n", th->m_index + 1, th->m_energy,
+                th->m_seconds, th->m_device >= 0 ? fmt::format(", device {}", th->m_device) : std::string());
+            Molecule out = th->m_molecule;
+            out.setEnergy(th->m_energy);
+            out.appendXYZFile(out_file);
+        }
+    }
+    fmt::print("\nBatch: {} structures in {:.2f} s wall ({:.2f} s summed task time), {} failed\n",
+               frames.size(), wall, sum_task, failed);
+    fmt::print("Energies written to: {}\n", out_file);
+    return failed > 0 ? 1 : 0;
+}
+
 int executeSinglePoint(const json& controller, int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "Please use curcuma for energy calculation as follows:\ncurcuma -sp input.xyz" << std::endl;
@@ -1696,6 +1871,26 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         || (controller.contains("opt") && read_bool(controller["opt"], "gradient"))
         || !dump_gradient_path.empty();
 
+    // Claude Generated (Sep 2026, multi-GPU case A): a multi-structure input is evaluated as a
+    // batch - one energy per frame, spread over -threads workers and, with -gpu, over the
+    // GPU device pool. A single structure takes the unchanged path below.
+    {
+        std::vector<Molecule> frames;
+        FileIterator file(argv[2]);
+        while (!file.AtEnd()) {
+            Molecule mol = file.Next();
+            if (mol.AtomCount() == 0)
+                continue;
+            if (controller.contains("charge"))
+                mol.setCharge(controller["charge"].get<int>());
+            if (controller.contains("spin"))
+                mol.setSpin(controller["spin"].get<int>());
+            frames.push_back(mol);
+        }
+        if (frames.size() > 1)
+            return executeSinglePointBatch(frames, method, energy_controller, controller, argv[2]);
+    }
+
     Molecule molecule(argv[2]);
     // Claude Generated (Jul 2026): Apply charge/spin from CLI controller to the molecule
     // before the energy calculation. Mirrors the -opt path (see below). Without this,
@@ -1724,17 +1919,20 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
     if (want_gradient) {
         Geometry gradient = energy_calc.Gradient();
         double grad_norm = Eigen::Map<Eigen::VectorXd>(gradient.data(), gradient.size()).norm();
-        CurcumaLogger::param("Gradient norm", fmt::format("{:.6e} Eh/Bohr", grad_norm));
+        CurcumaLogger::param("Gradient norm", fmt::format("{:.6e} Eh/Ang", grad_norm));
 
         // Claude Generated (Jul 2026): full-vector dump for backend comparison.
         if (!dump_gradient_path.empty()) {
             std::ofstream gf(dump_gradient_path);
             if (gf) {
-                gf << "# GFN-FF/xTB analytic gradient dE/dx [Eh/Bohr], one atom per row\n";
-                gf << "# energy " << fmt::format("{:.12f}", energy) << " Eh, gnorm "
-                   << fmt::format("{:.12e}", grad_norm) << " Eh/Bohr\n";
+                // Sep 2026: 17 significant digits (round-trip exact for a double), so two dumps
+                // can be compared bit for bit (run-to-run / thread-count determinism checks).
+                // The energy stays fixed-point: scripts read it with "-?\d+\.\d+".
+                gf << "# GFN-FF/xTB analytic gradient dE/dx [Eh/Angstrom], one atom per row\n";
+                gf << "# energy " << fmt::format("{:.15f}", energy) << " Eh, gnorm "
+                   << fmt::format("{:.16e}", grad_norm) << " Eh/Angstrom\n";
                 for (int i = 0; i < gradient.rows(); ++i)
-                    gf << fmt::format("{:.14e} {:.14e} {:.14e}\n",
+                    gf << fmt::format("{:.16e} {:.16e} {:.16e}\n",
                                       gradient(i, 0), gradient(i, 1), gradient(i, 2));
             } else {
                 CurcumaLogger::error("Could not open -dump_gradient file: " + dump_gradient_path);
@@ -1750,7 +1948,10 @@ int executeOptimization(const json& controller, int argc, char** argv) {
     if (argc < 3) {
         fmt::print("\nUsage: curcuma -opt input.xyz [parameters]\n\n");
         fmt::print("Basic:\n");
-        fmt::print("  -method <name>       Energy method: uff, gfnff, gfn2, ... (default: gfnff)\n");
+        fmt::print("  -method <name>       Energy method (default: gfnff)\n");
+        fmt::print("                         gfnff     - fast: native GFN-FF, the general-purpose default\n");
+        fmt::print("                         gfn2      - accurate: native GFN2-xTB, ~100x slower than gfnff\n");
+        fmt::print("                         gfn1, eht, pm3, uff, qmdff, ... (see docs/)\n");
         fmt::print("  -optimizer <name>    Optimization algorithm (default: auto)\n");
         fmt::print("                         auto      - automatic selection based on system size\n");
         fmt::print("                         lbfgspp   - external LBFGSpp library (robust, recommended)\n");
@@ -1872,7 +2073,34 @@ int executeOptimization(const json& controller, int argc, char** argv) {
                 BMTUtils::processBakFiles(bmt_dir, bak_files);
                 return 0;
             } else {
-                CurcumaLogger::warn_fmt("{} optimizer failed: {}", optimizer_method, result.error_message);
+                // Claude Generated (Sep 2026): write the geometry even when the optimiser did
+                // not converge. It is the best structure found and often hours of compute - a
+                // GFN2 optimisation of polymer_2x (7320 atoms) ran 1.8 h, hit max_iterations
+                // and left NOTHING behind. The multi-structure path below already writes
+                // non-converged results; this makes the single-structure path agree.
+                CurcumaLogger::warn_fmt("{} optimizer did not converge: {}", optimizer_method,
+                                        result.error_message);
+                // result.final_molecule, NOT molecules[0]: the optimiser does not update the
+                // input molecule in place, so writing molecules[0] would silently hand back the
+                // INPUT geometry dressed as a result (caught by measurement: the "optimised"
+                // water500 had exactly the input's single-point energy). The multi-structure
+                // path below uses final_molecule for the same reason.
+                if (result.final_molecule.AtomCount() > 0) {
+                    result.final_molecule.writeXYZFile(output_file);
+                    // Since Sep 2026 every abort returns the last accepted structure (or the
+                    // input, if the optimiser never started); energy/|grad| are NaN when unknown.
+                    auto num = [](double v, const char* f) {
+                        return std::isfinite(v) ? fmt::format(fmt::runtime(f), v) : std::string("n/a");
+                    };
+                    CurcumaLogger::warn_fmt("Last geometry written anyway to: {} (E = {} Eh, "
+                                            "|grad| = {}) - NOT a converged minimum",
+                                            output_file, num(result.final_energy, "{:.8f}"),
+                                            num(result.final_gradient_norm, "{:.6f}"));
+                    std::vector<std::string> bak_files = BMTUtils::collectBakFiles(controller);
+                    BMTUtils::processBakFiles(bmt_dir, bak_files);
+                } else {
+                    CurcumaLogger::error("No geometry available from the failed optimisation");
+                }
             }
         } else {
             // Multi-structure path: optimise each frame and collect final geometries.
@@ -2780,39 +3008,7 @@ int main(int argc, char **argv) {
 
     // Phase 2: List available computational methods - Claude Generated 2025
     if (command == "methods") {
-        auto methods = MethodFactory::getAvailableMethods();
-        std::cout << "Available computational methods in this build:\n\n";
-
-        std::cout << "Quantum Methods:\n";
-        for (const auto& method : methods) {
-            if (method.find("gfn") != std::string::npos ||
-                method.find("eht") != std::string::npos ||
-                method.find("pm") != std::string::npos ||
-                method.find("am") != std::string::npos ||
-                method.find("mndo") != std::string::npos ||
-                method.find("-3c") != std::string::npos ||
-                method == "orca") {
-                std::cout << "  - " << method << "\n";
-            }
-        }
-
-        std::cout << "\nForce Fields:\n";
-        for (const auto& method : methods) {
-            if (method.find("uff") != std::string::npos ||
-                method.find("ff") != std::string::npos ||
-                method.find("qmdff") != std::string::npos) {
-                std::cout << "  - " << method << "\n";
-            }
-        }
-
-        std::cout << "\nDispersion Corrections:\n";
-        for (const auto& method : methods) {
-            if (method.find("d3") != std::string::npos ||
-                method.find("d4") != std::string::npos) {
-                std::cout << "  - " << method << "\n";
-            }
-        }
-
+        MethodFactory::printAvailableMethods();   // table-driven listing (family, providers)
         return 0;
     }
 
@@ -2887,6 +3083,25 @@ int main(int argc, char **argv) {
         mergeJsonRecursive(controller, imported_config);
 
         std::cout << "Loaded configuration from: " << config_file << std::endl;
+    }
+
+    // Claude Generated (Sep 2026, multi-GPU case A): one process-wide pool of GPU device slots
+    // for molecule-level batch workers (-gpu_devices, -gpu_workers_per_device). No-op for CPU
+    // runs and for a single visible device without explicit pool flags.
+    curcuma::GpuDevicePool::instance().configure(controller);
+
+    // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md G2-15): `-gpu_strict true` turns every
+    // GPU fallback (CPU fallback of a worker, slower eigensolver library, EEQ fallback, ...)
+    // into a hard stop. Without it the fallbacks are counted and summarised after the run.
+    {
+        bool strict = false;
+        if (controller.contains("gpu_strict")) {
+            const auto& v = controller["gpu_strict"];
+            strict = v.is_boolean() ? v.get<bool>()
+                   : v.is_number()  ? v.get<double>() != 0.0
+                   : (v.is_string() && (v.get<std::string>() == "true" || v.get<std::string>() == "1"));
+        }
+        curcuma::setGpuStrict(strict);
     }
 
     // Handle run export - Claude Generated (October 2025)
@@ -2974,6 +3189,7 @@ int main(int argc, char **argv) {
     auto it = CAPABILITY_REGISTRY.find(command);
     if (it != CAPABILITY_REGISTRY.end()) {
         int result = it->second.handler(controller, argc, argv);
+        curcuma::printGpuFallbackSummary();
         return result;
     }
 

@@ -73,6 +73,10 @@ set_tests_properties(cli_curcumaopt_07_opt_multixyz PROPERTIES TIMEOUT 300 LABEL
 
 add_cli_test(gfnff 01_complex_gfnff_singlepoint)
 add_cli_test(gfnff 02_caffeine_gfnff_energy_components)
+# Claude Generated (Sep 24, 2026; ported to master Sep 27, 2026): chemistry-aware, continuous
+# fragment-charge placement (-gfnff.frag_charge_model ensemble, Known Issue #31, docs/FRAG_CHARGE_MODEL.md).
+add_cli_test(gfnff 05_frag_charge_ensemble)
+set_tests_properties(cli_gfnff_05_frag_charge_ensemble PROPERTIES TIMEOUT 900 LABELS "gfnff;frag_charge")
 
 # =============================================================================
 # GPU GFN-FF Tests — only registered when USE_CUDA=ON
@@ -157,6 +161,7 @@ add_cli_test(simplemd 04_rattle_all)
 add_cli_test(simplemd 05_spheric_wall)
 add_cli_test(simplemd 06_alias_temperature)
 add_cli_test(simplemd 07_restart_simulation)
+add_cli_test(simplemd 08_cg_spheres)
 add_cli_test(simplemd 08_gfnff_acetic_acid_dimer_md)
 add_cli_test(simplemd 09_xtbgfnff_acetic_acid_dimer_md)
 add_cli_test(simplemd 10_gfnff_polymer_md)
@@ -164,7 +169,22 @@ set_tests_properties(cli_simplemd_10_gfnff_polymer_md PROPERTIES TIMEOUT 3600 LA
 add_cli_test(simplemd 11_diagnostics_dump)
 set_tests_properties(cli_simplemd_11_diagnostics_dump PROPERTIES TIMEOUT 180 LABELS "simplemd;gfnff;diagnostics")
 add_cli_test(simplemd 12_eeq_cutoff_auto)
+add_cli_test(simplemd 13_gfnff_react_noevent)
+add_cli_test(simplemd 14_gfnff_react_h_recombination)
+set_tests_properties(cli_simplemd_13_gfnff_react_noevent PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;react")
+set_tests_properties(cli_simplemd_14_gfnff_react_h_recombination PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;react")
 set_tests_properties(cli_simplemd_12_eeq_cutoff_auto PROPERTIES TIMEOUT 180 LABELS "simplemd;gfnff;eeq_cutoff")
+# Claude Generated (Jul 2026): RMSD-MTD strided-scheme regression tests (docs/RMSD_MTD_TEXTBOOK.md 6)
+add_cli_test(simplemd 13_rmsd_mtd_legacy_ab)
+set_tests_properties(cli_simplemd_13_rmsd_mtd_legacy_ab PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;rmsd_mtd")
+add_cli_test(simplemd 14_rmsd_mtd_coverage)
+set_tests_properties(cli_simplemd_14_rmsd_mtd_coverage PROPERTIES TIMEOUT 200 LABELS "simplemd;gfnff;rmsd_mtd")
+
+# =============================================================================
+# ConfSearch Tests (Claude Generated, Jul 2026)
+# =============================================================================
+add_cli_test(confsearch 01_gfnff_smoke)
+set_tests_properties(cli_confsearch_01_gfnff_smoke PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;rmsd_mtd")
 
 # =============================================================================
 # NEB-MD Tests (2 scenarios)
@@ -196,6 +216,7 @@ set_tests_properties(cli_analysis_01_parallel_equivalence PROPERTIES TIMEOUT 120
 
 add_cli_test(routing 01_flat_param_routing)
 add_cli_test(routing 02_roundtrip_replay)
+add_cli_test(routing 03_confsearch_param_routing)   # ConfSearch registry migration guard
 
 # =============================================================================
 # Error Handling Tests (6 scenarios) - Phase 1-2 Implementation
@@ -240,6 +261,15 @@ set_tests_properties(cli_sqm_06_gfn2_extended_singlepoint PROPERTIES DISABLED TR
 set_tests_properties(cli_sqm_07_gfn1_extended_singlepoint PROPERTIES DISABLED TRUE)
 # AP3: gfn2 -opt still broken (gradient = zero), disable until AP4 restores gradient.
 set_tests_properties(cli_sqm_10_gfn2_optimization_smoke PROPERTIES DISABLED TRUE)
+
+# Claude Generated (Sep 2026): test 11 asserts `-method ipea1` routes to and matches
+# TBLite (ipea1 has no other provider, MethodFactory throws without USE_TBLITE) -
+# disable it when this build wasn't configured with TBLite, same DISABLED pattern
+# as the tests above, instead of a permanent hard failure.
+if(NOT USE_TBLITE)
+    set_tests_properties(cli_sqm_11_gfn2_provider_check PROPERTIES DISABLED TRUE)
+    message(STATUS "cli_sqm_11_gfn2_provider_check: disabled - USE_TBLITE is OFF (ipea1 has no other provider)")
+endif()
 
 # Allow the optimization test more wall-clock — caffeine -opt can run > 30 s
 # (kept for reference; test is currently DISABLED)

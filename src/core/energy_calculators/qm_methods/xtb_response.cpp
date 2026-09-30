@@ -361,6 +361,9 @@ void XTB::computeMullikenChargeResponse(const Vector& dEdq, Matrix& grad_out) co
     }
 
     // ---- 6. Pulay/H0 + explicit-overlap gradient (off-site shell pairs) ----
+    std::vector<CGTO::Shell> shells(nsh);   // hoisted, geometry-independent
+    for (int ish = 0; ish < nsh; ++ish)
+        shells[ish] = as_cgto_shell(m_basis.cgto[ish]);
     for (int iat = 0; iat < nat; ++iat) {
         for (int jat = iat + 1; jat < nat; ++jat) {
             const double dx_ij = xyz[3*iat+0] - xyz[3*jat+0];
@@ -381,7 +384,7 @@ void XTB::computeMullikenChargeResponse(const Vector& dEdq, Matrix& grad_out) co
                 const int ia_nao   = m_basis.nao_sh[ish_a];
                 const double pi_a  = 1.0 + m_h0.shpoly[ish_a] * rr;
                 const double zeta_a = m_basis.cgto[ish_a].slater_exp;
-                const CGTO::Shell sh_a = as_cgto_shell(m_basis.cgto[ish_a]);
+                const CGTO::Shell& sh_a = shells[ish_a];
 
                 for (int ib = 0; ib < m_basis.nsh_at[jat]; ++ib) {
                     const int ish_b    = m_basis.ish_at[jat] + ib;
@@ -389,7 +392,7 @@ void XTB::computeMullikenChargeResponse(const Vector& dEdq, Matrix& grad_out) co
                     const int jb_nao   = m_basis.nao_sh[ish_b];
                     const double pi_b  = 1.0 + m_h0.shpoly[ish_b] * rr;
                     const double zeta_b = m_basis.cgto[ish_b].slater_exp;
-                    const CGTO::Shell sh_b = as_cgto_shell(m_basis.cgto[ish_b]);
+                    const CGTO::Shell& sh_b = shells[ish_b];
 
                     double hs;
                     if (m_method == MethodType::GFN1) {

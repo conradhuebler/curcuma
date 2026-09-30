@@ -14,6 +14,14 @@
  * from non-CUDA translation units.  All CUDA types are hidden in the Pimpl
  * (FFWorkspaceGPUImpl, defined in ff_workspace_gpu.cu).
  *
+ * Claude Generated (Sep 2026): SHARED by the CUDA and the ROCm backend - the Pimpl
+ * keeps every runtime type out of this file, so the two copies differed only in the
+ * class name.  The ROCm build gets this exact declaration under its hipified names via
+ * rocm/ff_workspace_hip.h (FFWorkspaceGPU -> FFWorkspaceHip); the names stay distinct
+ * because libcurcuma_cuda.so and libcurcuma_rocm.so are dlopen'd with RTLD_GLOBAL and
+ * must not export colliding symbols.  Device implementations: ff_workspace_gpu.cu (nvcc)
+ * resp. rocm/gfnff_rocm.hip (hipcc).
+ *
  * Minimum compute capability: 6.0 (Pascal) — native double atomicAdd.
  *
  * Reference: Spicher/Grimme J. Chem. Theory Comput. 2020 (GFN-FF)
@@ -21,7 +29,7 @@
 
 #pragma once
 
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
 
 #include "src/core/global.h"
 #include "../ff_workspace.h"           // FFEnergyComponents, Matrix, Vector, SpMatrix
@@ -84,6 +92,21 @@ public:
 
     /// Set dynamic EEQ charges (geometry-dependent, size N)
     void setEEQCharges(const Vector& q);
+    /// Build the k_coulomb_tiles tile-pair list for the current atom count (Claude Generated, Sep 2026).
+    void ensureCoulombTiles();
+
+    /**
+     * @brief Split the implicit Coulomb term of ONE molecule over several GPUs (Claude Generated,
+     * Sep 2026, docs/MULTI_GPU_GAPS.md F-3). The tile-pair list of k_coulomb_tiles is divided into
+     * equal ranges; each helper evaluates its range on its own copy of coordinates/charges and
+     * the partial gradient/energy is added on this device. Off for periodic systems.
+     * @param helper_devices other devices (not this one); empty = off
+     * @param min_atoms      use it only from this many atoms on
+     */
+    void setCoulombSplitDevices(const std::vector<int>& helper_devices, int min_atoms);
+    std::string coulombSplitStatus() const;
+    bool prepareCoulombSplit();
+    void launchCoulombSplit();
 
     /// WP5-A: D2D path — charges already on GPU after GPU Schur complement.
     /// Enqueues a D2D copy on the main workspace stream; no H2D upload happens
@@ -242,6 +265,40 @@ public:
     void updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,
                       const std::vector<int>& atom_types);
 
+    /**
+     * @brief Re-upload the bonded/non-bonded repulsion SoA after a periodic rebuild.
+     *
+     * Claude Generated (Sep 2026): counterpart to updateHBonds()/updateXBonds() for the
+     * repulsion pair lists (see GFNFF::updateNonbondedRepulsionIfNeeded()). RepulsionSoA::n
+     * is set from the passed vector's size on every call, so this is resize-aware in both
+     * directions (growing or shrinking pair count) without any extra bookkeeping — the
+     * underlying CudaBuffer reallocates only when the new count exceeds its current
+     * capacity, and the SoA's own `n` (used for every kernel launch bound) always reflects
+     * the just-uploaded count.
+     */
+    void updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
+                          const std::vector<GFNFFRepulsion>& nonbonded_reps);
+
+    /**
+     * @brief Re-upload the D4 dispersion SoA after a skin-triggered rebuild.
+     *
+     * Claude Generated (Sep 2026): counterpart to updateRepulsion() for the D4 pair list (see
+     * GFNFF::updateDispersionPairsIfNeeded()). Besides the pair SoA itself, three pieces of state
+     * are sized by the pair count and must follow it: the per-pair dc6dcn device buffers written
+     * by k_dc6dcn_per_pair, and the host index mirror + staging vectors used by
+     * updateDispersionDC6DCN(). The caller must invalidateGraph() afterwards (disp.n changed).
+     */
+    void updateDispersion(const std::vector<GFNFFDispersion>& pairs);
+
+    /**
+     * @brief Re-upload the explicit Coulomb pair SoA (eeq_distance_cutoff > 0 only).
+     *
+     * Claude Generated (Sep 2026): see GFNFF::updateCoulombPairsIfNeeded(). The per-atom
+     * self-energy parameters are topology-only and are not touched. The caller must
+     * invalidateGraph() afterwards (coulomb.n changed).
+     */
+    void updateCoulombPairs(const std::vector<GFNFFCoulomb>& pairs);
+
     /// Get last uploaded HBond list (for CPU vs GPU comparison debugging)
     const std::vector<GFNFFHydrogenBond>& getLastHBonds() const { return m_last_hbonds; }
 
@@ -339,6 +396,9 @@ public:
     // =========================================================================
 
     void setDispersionEnabled(bool v);
+    /// Claude Generated (Sep 2026): let k_dc6dcn_per_pair also rewrite the per-pair C6 from the
+    /// current-step Gaussian weights (GFN-FF `dispersion_c6_update`, see GFNFF::refreshDispersionC6()).
+    void setDispersionC6Update(bool v) { m_disp_c6_update = v; }
     void setHBondEnabled(bool v);
     void setRepulsionEnabled(bool v);
     void setCoulombEnabled(bool v);
@@ -605,6 +665,7 @@ private:
 
     // Term enable flags
     bool m_dispersion_enabled = true;
+    bool m_disp_c6_update = true;   ///< Claude Generated (Sep 2026): per-step C6 refresh in k_dc6dcn_per_pair
     bool m_hbond_enabled      = true;
     bool m_repulsion_enabled  = true;
     bool m_coulomb_enabled    = true;
@@ -646,4 +707,4 @@ private:
     FFTermTimings m_kernel_timings;
 };
 
-#endif // USE_CUDA
+#endif // USE_CUDA || USE_ROCM
