@@ -32,6 +32,7 @@
 
 #pragma once
 
+#include "src/core/units.h"
 #include <Eigen/Dense>
 #include <vector>
 #include <utility>
@@ -175,7 +176,7 @@ private:
 
     // Physical constants
     static constexpr double boltz_ev = 8.617333262e-5; // Boltzmann constant in eV/K
-    static constexpr double hartree_to_ev = 27.2113957; // Hartree to eV conversion
+    static constexpr double hartree_to_ev = CurcumaUnit::Energy::hartree_to_ev_or_legacy(27.2113957); // Hartree to eV; CODATA 2018 unless USE_LEGACY_UNIT_CONSTANTS
 
     // ========================================
     // Helper Methods

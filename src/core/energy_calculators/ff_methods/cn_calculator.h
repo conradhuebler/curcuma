@@ -139,17 +139,11 @@ public:
     /// with r, R in Bohr and rcov = 4/3 * covalent_radii(Z) converted to Bohr, and the atom's
     /// CN is the log-compressed sum of c_ij over its neighbours.
 
-    /// rcov of one atom in Bohr, exactly as the CN build computes it. An element outside the
-    /// table keeps the 0.0 sentinel the CN build uses to exclude the atom.
-    static double gfnffCNRadiusBohr(int atomic_number)
-    {
-        constexpr double k_scaled = 4.0 / 3.0;      // gfnff_param.f90 covalentRadD3 scaling
-        constexpr double ANG2BOHR = 1.8897259886;   // as in calculateGFNFFCN()
-        const int idx = atomic_number - 1;
-        if (idx < 0 || idx >= static_cast<int>(COVALENT_RADII.size()))
-            return 0.0;
-        return k_scaled * COVALENT_RADII[idx] * ANG2BOHR;
-    }
+    /// rcov of one atom in Bohr, exactly as the CN build computes it: use
+    /// GFNFFParameters::gfnff_cn_rcov_bohr() (gfnff_par.h) - the one CN radius source since
+    /// Sep 2026. An earlier local copy here (gfnffCNRadiusBohr(), CODATA-1986-derived
+    /// Angstrom->Bohr constant) put a systematic ~1-2.5e-10 Eh/bond offset against it and
+    /// was removed.
 
     /// this pair's own contribution to the raw CN of either atom (symmetric in i, j)
     static double pairCNContribution(double r_bohr, double rcov_sum_bohr, double kn = -7.5)

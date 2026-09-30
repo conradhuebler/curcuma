@@ -114,6 +114,12 @@ single-thread time.
 
 ### And one GPU does not beat it
 
+> **Dated, partly superseded (note of Sep 28, 2026).** Measured Sep 21, 2026, i.e. before the GPU
+> took projected PCG for many-fragment EEQ (Sep 27, "EEQ + finish" ~1500 -> ~180 ms) and before the
+> 2 Bohr skin became the default (energy call 431 -> 182 ms). The full MD step has not been
+> re-measured since; until it is, do not quote "the GPU buys nothing" as the current state
+> ([MULTI_GPU_GAPS.md](MULTI_GPU_GAPS.md) X-2).
+
 | configuration | setup | s/step | against 16 CPU threads |
 |---|---:|---:|---:|
 | 16 threads, CPU only | 6.5 s | **1.25** | 1.00x |

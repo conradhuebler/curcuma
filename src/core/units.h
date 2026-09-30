@@ -1,6 +1,6 @@
 /*
  * <Centralized Unit System and Physical Constants for Curcuma>
- * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  * Claude Generated: Educational unit system designed under Conrad's instruction
  *
  * This program is free software: you can redistribute it and/or modify
@@ -13,6 +13,9 @@
  */
 
 #pragma once
+
+#include <cmath>
+#include <string>
 
 namespace CurcumaUnit {
 
@@ -81,6 +84,27 @@ namespace Energy {
     constexpr double HARTREE_TO_WAVENUMBER = 219474.6313632; // cm^-1
     constexpr double EV_TO_HARTREE = 1.0 / HARTREE_TO_EV;
 
+    // Same build switch as Length::bohr_radius_or_legacy (Claude Generated, Sep 2026): CODATA 2018
+    // by default, the old per-site factor in a USE_LEGACY_UNIT_CONSTANTS build.
+    /// Hartree -> kcal/mol: CODATA 2018, or `legacy` in a USE_LEGACY_UNIT_CONSTANTS build.
+    inline constexpr double hartree_to_kcalmol_or_legacy([[maybe_unused]] double legacy)
+    {
+#ifdef CURCUMA_LEGACY_UNIT_CONSTANTS
+        return legacy;
+#else
+        return HARTREE_TO_KCALMOL;
+#endif
+    }
+    /// Hartree -> eV: CODATA 2018, or `legacy` in a USE_LEGACY_UNIT_CONSTANTS build.
+    inline constexpr double hartree_to_ev_or_legacy([[maybe_unused]] double legacy)
+    {
+#ifdef CURCUMA_LEGACY_UNIT_CONSTANTS
+        return legacy;
+#else
+        return HARTREE_TO_EV;
+#endif
+    }
+
     // Forward conversions (from Hartree)
     inline constexpr double hartree_to_kjmol(double eh) { return eh * HARTREE_TO_KJMOL; }
     inline constexpr double hartree_to_kcalmol(double eh) { return eh * HARTREE_TO_KCALMOL; }
@@ -102,6 +126,36 @@ namespace Length {
     // Base conversion factor (CODATA-2018)
     constexpr double BOHR_TO_ANGSTROM = 0.529177210903;
     constexpr double ANGSTROM_TO_BOHR = 1.0 / BOHR_TO_ANGSTROM;
+
+    // ----- One unit system, with the old per-site values behind a build switch -----
+    // Claude Generated (Sep 2026): curcuma carried seven different Bohr radii (CODATA 2018,
+    // 2014, 2010, 1986, the GFN-FF Fortran literal 0.52917726, two truncations) spread over
+    // its code paths; CPU and GPU GFN-FF differed by 5e-7 Eh on 7320 atoms because of it.
+    // Every conversion site now calls one of these with the value it used to hard-code:
+    //   default build                    -> CODATA 2018 (the constants above)
+    //   -DUSE_LEGACY_UNIT_CONSTANTS=ON   -> exactly the old per-site value (bit for bit),
+    //                                       for reproducing earlier results and for exact
+    //                                       comparison with reference codes that carry
+    //                                       their own constant (pprcht/xtb GFN-FF: 0.52917726).
+    // Inventory of the old values: docs/UNIT_CONSTANTS.md.
+    /// Bohr radius in Angstrom: CODATA 2018, or `legacy` in a USE_LEGACY_UNIT_CONSTANTS build.
+    inline constexpr double bohr_radius_or_legacy([[maybe_unused]] double legacy)
+    {
+#ifdef CURCUMA_LEGACY_UNIT_CONSTANTS
+        return legacy;
+#else
+        return BOHR_TO_ANGSTROM;
+#endif
+    }
+    /// Angstrom -> Bohr factor: 1/CODATA 2018, or `legacy` in a USE_LEGACY_UNIT_CONSTANTS build.
+    inline constexpr double angstrom_to_bohr_or_legacy([[maybe_unused]] double legacy)
+    {
+#ifdef CURCUMA_LEGACY_UNIT_CONSTANTS
+        return legacy;
+#else
+        return ANGSTROM_TO_BOHR;
+#endif
+    }
     constexpr double BOHR_TO_METER = 5.29177210903e-11;
     constexpr double ANGSTROM_TO_METER = 1.0e-10;
 

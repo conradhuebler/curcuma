@@ -21,6 +21,7 @@
 
 #include "method_factory.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/gpu_fallback.h"
 
 // Method implementations
 #include "ff_methods/forcefield_method.h"
@@ -186,6 +187,7 @@ static std::string resolveGpuMode(const json& config, const char* label) {
     if (std::find(known.begin(), known.end(), gpu_mode) == known.end()) {
         CurcumaLogger::warn(std::string(label) + ": unknown -gpu value '" + gpu_mode
             + "' (use cuda|rocm|vulkan|auto|none). Using CPU.");
+        curcuma::reportGpuFallback(std::string(label) + ": unknown -gpu value, calculation on the CPU", gpu_mode);
         return "none";
     }
     if (!gpu_plugin::available(gpu_mode)) {
@@ -194,6 +196,8 @@ static std::string resolveGpuMode(const json& config, const char* label) {
         CurcumaLogger::warn(std::string(label) + ": GPU acceleration requested (-gpu " + gpu_mode
             + ") but the plugin libcurcuma_" + gpu_mode + ".so is not present. Falling back to CPU.");
         CurcumaLogger::warn("To build it: cmake -DUSE_" + upper + "=ON (the plugin is placed next to the curcuma executable)");
+        curcuma::reportGpuFallback(std::string(label) + ": GPU plugin not present, calculation on the CPU",
+                                   "libcurcuma_" + gpu_mode + ".so");
         return "none";
     }
     return gpu_mode;
@@ -209,6 +213,7 @@ static std::unique_ptr<ComputationalMethod> createNativeXtbAny(curcuma::xtb::Met
         if (auto m = gpu_plugin::createNativeXtb(gpu, static_cast<int>(mt), config))
             return m;
         CurcumaLogger::warn(std::string(label) + ": the " + gpu + " plugin did not provide a backend; using CPU");
+        curcuma::reportGpuFallback(std::string(label) + ": GPU plugin declined, calculation on the CPU", gpu);
     }
     CurcumaLogger::info(std::string(label) + ": using native xTB implementation");
     return std::make_unique<NativeXtbMethod>(mt, config);
@@ -406,7 +411,10 @@ std::unique_ptr<ComputationalMethod> createNativeGfnff(const std::string& method
         CurcumaLogger::info("GFN-FF: using GPU acceleration (" + gpu + ")");
         if (auto m = gpu_plugin::createGfnff(gpu, gfnff_config))
             return m;   // the plugin logs why when it declines (e.g. Vulkan: shaders not ported)
-        CurcumaLogger::info("GFN-FF: the " + gpu + " plugin did not provide a backend; using CPU");
+        // Claude Generated (Sep 2026, G2-11): a warning and a counted fallback, not info - an
+        // invalid -gpu_device or a failed device init ended up here silently at verbosity 1.
+        CurcumaLogger::warn("GFN-FF: the " + gpu + " plugin did not provide a backend; using CPU");
+        curcuma::reportGpuFallback("GFN-FF: GPU plugin declined, calculation on the CPU", gpu);
     }
     CurcumaLogger::info("GFN-FF: using CPU implementation");
     return std::make_unique<GFNFFComputationalMethod>("gfnff", gfnff_config);

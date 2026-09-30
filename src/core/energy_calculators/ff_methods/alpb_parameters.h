@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "src/core/units.h"
 #include <array>
 #include <cmath>
 #include <string>
@@ -18,7 +19,7 @@ namespace ALPBParameters {
 constexpr int MAX_ELEM = 94;
 
 // Unit conversions (Fortran gbsa.f90)
-constexpr double autoaa = 0.52917726;
+constexpr double autoaa = CurcumaUnit::Length::bohr_radius_or_legacy(0.52917726);  // reference literal unless CODATA 2018 (Sep 2026)
 constexpr double aatoau = 1.0 / autoaa;
 constexpr double autokcal = 627.50947428;
 constexpr double kcaltoau = 1.0 / autokcal;

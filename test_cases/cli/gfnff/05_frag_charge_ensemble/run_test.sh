@@ -81,10 +81,15 @@ def water(end_z, direction, dXH=2.3):
     return [("H", 0.0, 0.0, zH), ("O", 0.0, 0.0, zO), ("H", 0.97 * math.sin(th), 0.0, zO - direction * 0.97 * math.cos(th))]
 
 ea25 = rd("cl2m_ea25.xyz"); h3o = rd("h3op_h2o2.xyz")
-# 1. identity of the (now explicit) reference rule
+# 1. identity of the (now explicit) reference rule. Re-pinned Sep 30, 2026 after merging
+#    master's CODATA-2018 unit-constants unification (Known Issue #35: gfnff shift
+#    <= 1.5e-4 kcal/mol ~= 2.4e-7 Eh) - both values moved by ~2-4e-9 Eh, well inside that
+#    documented bound. H3OpH2O2's pin is from before the Sep-25 ATM default flip (master's
+#    dispersion_atm default false already applies here; after the old ATM-on behaviour the
+#    value would be 0.466545743025).
 e1 = batch([ea25], -1, REF)[0]["energy_eh"]; e2 = batch([h3o], 1, REF)[0]["energy_eh"]
-check("identity EA_25 (reference)", abs(e1 - (-0.980160564980)) < 1e-10, f"{e1:.12f} vs -0.980160564980")
-check("identity H3OpH2O2 (reference)", abs(e2 - 0.466545743025) < 1e-10, f"{e2:.12f} vs 0.466545743025")
+check("identity EA_25 (reference)", abs(e1 - (-0.980160561416)) < 1e-10, f"{e1:.12f} vs -0.980160561416")
+check("identity H3OpH2O2 (reference)", abs(e2 - 0.466545742354) < 1e-10, f"{e2:.12f} vs 0.466545742354")
 
 # 2. label symmetry at the split
 r = 2.6409

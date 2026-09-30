@@ -28,6 +28,7 @@
 #pragma once
 
 #include "src/core/global.h"
+#include <limits>
 #include "gfnff_parameters.h"
 #include "ff_terms.h"  // Bond, Angle, Dihedral, Inversion, vdW, EQ, CNDerivStore, GeoGradMatrix
 #include "gfnff_param_tables.h"  // Claude Generated (Sep 2026): runtime gen scalars
@@ -784,7 +785,7 @@ private:
     void swapState(TopologyState& st);             ///< O(1) exchange of the slot with a stored corner
     double calculateSingle(bool gradient);         ///< one topology (the pre-stage-1b calculate())
     Vector m_eeq_charges, m_topology_charges, m_d3_cn;
-    /// rev-gfnff stage 3a(i): GFN-FF CN radii in Bohr (CNCalculator::gfnffCNRadiusBohr), set once
+    /// rev-gfnff stage 3a(i): GFN-FF CN radii in Bohr (GFNFFParameters::gfnff_cn_rcov_bohr), set once
     std::vector<double> m_rev_cn_rcov;
     Vector m_cn, m_cnf;
     CNDerivStore m_dcn;  // Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
@@ -797,7 +798,7 @@ private:
     /// data (charges + alpeeq) instead of reading a stored pair list. Set from the parameter set
     /// (GFN-FF only); see calcCoulomb().
     bool   m_coulomb_implicit = false;
-    double m_coulomb_implicit_rcut = 100.0;
+    double m_coulomb_implicit_rcut = std::numeric_limits<double>::infinity();  // no cutoff, as the reference (Sep 2026)
 
     // Term-enable flags
     bool m_dispersion_enabled = true;

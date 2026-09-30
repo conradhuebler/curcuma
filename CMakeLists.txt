@@ -134,6 +134,15 @@ option(USE_VULKAN
 # USE_AVX2 or USE_MARCH_NATIVE alongside); CMake errors out if AVX2 cannot be enabled.
 option(USE_GFNFF_FAST_EXP
     "Enable SIMD-vectorized exp() in GFN-FF dcn hot loop (WP-D Stage B, requires AVX2)" OFF)
+# Sep 2026: every unit conversion uses CODATA 2018 (src/core/units.h). ON restores the
+# per-site constants curcuma used before (seven Bohr radii incl. the GFN-FF Fortran literal
+# 0.52917726, older Hartree factors) bit for bit - for reproducing earlier results and for
+# exact comparison with reference codes. See docs/UNIT_CONSTANTS.md.
+option(USE_LEGACY_UNIT_CONSTANTS
+    "Use the pre-Sep-2026 per-site unit constants instead of CODATA 2018 everywhere" OFF)
+if(USE_LEGACY_UNIT_CONSTANTS)
+    add_compile_definitions(CURCUMA_LEGACY_UNIT_CONSTANTS=1)
+endif()
 option(GFNFF_CN_DCN_FUSION
     "Enable fused CN+DCN single-pass (WP-D Stage D, no SIMD dependency)" OFF)
 if(GFNFF_CN_DCN_FUSION)
@@ -397,7 +406,15 @@ elseif(USE_AVX2)
 endif()
 if(NOT CURCUMA_EIGEN_ALIGN EQUAL 0)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DEIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN}")
-    message(STATUS "Eigen: EIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN} (pinned for g++/GPU-TU ABI parity)")
+    # Claude Generated (Sep 2026): the same pin for nvcc. The hipcc TUs got it in Jun 2026, the
+    # CUDA .cu TUs never did: ff_workspace_gpu.cu / gfnff_kernels.cu / xtb_gpu_context.cu include
+    # Eigen, so the CUDA plugin carried Eigen's inline allocation code in two ABIs (16 from nvcc,
+    # 64 from g++) and the linker kept one. An Eigen vector allocated with one and freed with the
+    # other aborts with "free(): invalid pointer" - which is what the March 2026 "CUDA heap
+    # corruption" workaround (deliberately leaking the host GFNFF object and parameter set, ~194 MB
+    # per structure in a GPU batch) was hiding (docs/MULTI_GPU_GAPS.md F-16).
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -DEIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN}")
+    message(STATUS "Eigen: EIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN} (pinned for g++/nvcc/hipcc ABI parity)")
 endif()
 
 # WP-D Stage B (May 2026): USE_GFNFF_FAST_EXP requires AVX2. Either USE_AVX2 or
@@ -547,6 +564,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/method_factory.cpp
         src/core/energy_calculators/gpu_plugin.cpp
         src/core/gpu_device_pool.cpp
+        src/core/gpu_fallback.cpp
         src/core/energy_calculators/qm_methods/eht_method.cpp
         src/core/energy_calculators/qm_methods/native_xtb_method.cpp
         src/core/energy_calculators/qm_methods/nddo.cpp
@@ -1126,7 +1144,7 @@ if(USE_CUDA)
         add_library(curcuma_cuda_mgpu SHARED
             src/core/energy_calculators/qm_methods/cuda/xtb_distributed_eigensolver.cpp)
         target_include_directories(curcuma_cuda_mgpu PRIVATE ${PROJECT_SOURCE_DIR})
-        target_link_libraries(curcuma_cuda_mgpu PRIVATE CUDA::cudart)
+        target_link_libraries(curcuma_cuda_mgpu PRIVATE CUDA::cudart CUDA::cublas)
         target_compile_definitions(curcuma_cuda_mgpu PRIVATE USE_CUDA)
         set_target_properties(curcuma_cuda_mgpu PROPERTIES
             POSITION_INDEPENDENT_CODE ON

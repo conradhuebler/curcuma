@@ -34,6 +34,10 @@
 # Both pins moved by +1.2195e-8 Eh, nothing else: gauss -4.673521653477 -> -4.673521641282,
 # gfnff -4.672737068614 -> -4.672737056419; with -gfnff.dispersion_atm true the merged binary
 # reproduces the old pins exactly. Thresholds unchanged.
+# RE-PINNED Sep 30, 2026 (master merge, CODATA-2018 unit-constants unification, Known Issue #35):
+# gauss -4.673521641282 -> -4.673521644951 (+3.67e-9 Eh), gfnff -4.672737056419 -> -4.672737061444
+# (+5.03e-9 Eh) - both well inside the documented gfnff shift bound (<= 1.5e-4 kcal/mol). Nothing
+# else changed; thresholds unchanged.
 
 set -e
 
@@ -43,8 +47,8 @@ source "$SCRIPT_DIR/../test_utils.sh"
 TEST_NAME="gfnff - 04: rev-gfnff bond-well form identity and liveness"
 TEST_DIR="$SCRIPT_DIR"
 
-REV_GAUSS_EH=-4.673521641282   # the DELIVERED Gaussian; the default is mg3 since Sep 22, 2026
-GFNFF_EH=-4.672737056419
+REV_GAUSS_EH=-4.673521644951   # the DELIVERED Gaussian; the default is mg3 since Sep 22, 2026
+GFNFF_EH=-4.672737061444
 IDENTITY_TOL=1e-11
 LIVENESS_MIN=1e-6
 

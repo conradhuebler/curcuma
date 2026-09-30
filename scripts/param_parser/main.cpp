@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -83,48 +84,113 @@ std::string trim(const std::string& str)
     return str.substr(strBegin, strRange);
 }
 
-/// Is the PARAM( ... ) of @p text closed?
-///
-/// Claude Generated 2026 - The accumulator used to give up as soon as the text so
-/// far held "PARAM" and any ')'. Help texts contain those long before the PARAM's
-/// own closing paren -- "'chloroform'). 'none' (default)" is enough -- so a PARAM
-/// written across several lines with adjacent string literals was warned about and
-/// then thrown away. gfnff's `solvent` and `solvent_model` were lost that way and
-/// never reached the registry, which is why the source carries a note asking for
-/// PARAMs to stay on one line.
-///
-/// Parentheses inside string literals do not count, and a backslash escapes the
-/// next character.
-bool param_parens_closed(const std::string& text)
-{
-    bool in_string = false;
-    bool escaped = false;
-    bool saw_open = false;
-    int depth = 0;
+// Claude Generated (Sep 2026): tokenizer for PARAM(...) macros, see main() step 2.
+struct ParsedMacro {
+    std::vector<std::string> args;   ///< top-level arguments, raw text
+};
 
-    for (char c : text) {
-        if (escaped) {
-            escaped = false;
-            continue;
+/// Find every PARAM( ... ) in a block of C++ text, skipping strings, char literals and comments.
+static void extract_param_macros(const std::string& t, std::vector<ParsedMacro>& out, std::vector<size_t>& starts)
+{
+    enum State { Code, Str, Chr, LineComment, BlockComment };
+    State st = Code;
+    const size_t n = t.size();
+    for (size_t i = 0; i < n; ++i) {
+        const char c = t[i];
+        if (st == LineComment) { if (c == '\n') st = Code; continue; }
+        if (st == BlockComment) { if (c == '*' && i + 1 < n && t[i + 1] == '/') { st = Code; ++i; } continue; }
+        if (st == Str) { if (c == '\\') ++i; else if (c == '"') st = Code; continue; }
+        if (st == Chr) { if (c == '\\') ++i; else if (c == '\'') st = Code; continue; }
+        if (c == '/' && i + 1 < n && t[i + 1] == '/') { st = LineComment; ++i; continue; }
+        if (c == '/' && i + 1 < n && t[i + 1] == '*') { st = BlockComment; ++i; continue; }
+        if (c == '"') { st = Str; continue; }
+        if (c == '\'') { st = Chr; continue; }
+        // identifier PARAM at a word boundary, followed by optional whitespace and '('
+        if (c != 'P' || t.compare(i, 5, "PARAM") != 0) continue;
+        if (i > 0 && (std::isalnum(static_cast<unsigned char>(t[i - 1])) || t[i - 1] == '_')) continue;
+        size_t k = i + 5;
+        if (k < n && (std::isalnum(static_cast<unsigned char>(t[k])) || t[k] == '_')) continue;
+        while (k < n && std::isspace(static_cast<unsigned char>(t[k]))) ++k;
+        if (k >= n || t[k] != '(') continue;
+        // Collect the arguments up to the matching ')'.
+        ParsedMacro m;
+        std::string cur;
+        int depth = 0;           // nesting of (), {}, [] inside the macro
+        State s2 = Code;
+        size_t e = k + 1;
+        bool closed = false;
+        for (; e < n; ++e) {
+            const char d = t[e];
+            if (s2 == LineComment) { if (d == '\n') s2 = Code; continue; }
+            if (s2 == BlockComment) { if (d == '*' && e + 1 < n && t[e + 1] == '/') { s2 = Code; ++e; } continue; }
+            if (s2 == Str || s2 == Chr) {
+                cur += d;
+                if (d == '\\' && e + 1 < n) { cur += t[++e]; continue; }
+                if ((s2 == Str && d == '"') || (s2 == Chr && d == '\'')) s2 = Code;
+                continue;
+            }
+            if (d == '/' && e + 1 < n && t[e + 1] == '/') { s2 = LineComment; ++e; continue; }
+            if (d == '/' && e + 1 < n && t[e + 1] == '*') { s2 = BlockComment; ++e; continue; }
+            if (d == '"') { s2 = Str; cur += d; continue; }
+            if (d == '\'') { s2 = Chr; cur += d; continue; }
+            if (d == '(' || d == '{' || d == '[') ++depth;
+            if (d == ')' && depth == 0) { m.args.push_back(cur); closed = true; break; }
+            if (d == ')' || d == '}' || d == ']') --depth;
+            if (d == ',' && depth == 0) { m.args.push_back(cur); cur.clear(); continue; }
+            cur += d;
         }
-        if (c == '\\') {
-            escaped = true;
-            continue;
-        }
-        if (c == '"') {
-            in_string = !in_string;
-            continue;
-        }
-        if (in_string)
-            continue;
-        if (c == '(') {
-            ++depth;
-            saw_open = true;
-        } else if (c == ')') {
-            --depth;
-        }
+        starts.push_back(i);
+        if (!closed) m.args.clear();   // unterminated: reported as malformed
+        out.push_back(m);
+        i = closed ? e : n;
     }
-    return saw_open && depth <= 0;
+}
+
+/// Join the string literal(s) of one argument ("a" "b" -> a b, escapes kept verbatim).
+/// Returns false when the argument contains anything but string literals and whitespace.
+static bool join_string_literals(const std::string& a, std::string& out)
+{
+    out.clear();
+    bool any = false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        const char c = a[i];
+        if (std::isspace(static_cast<unsigned char>(c))) continue;
+        if (c != '"') return false;
+        any = true;
+        for (++i; i < a.size() && a[i] != '"'; ++i) {
+            if (a[i] == '\\' && i + 1 < a.size()) out += a[i++];
+            out += a[i];
+        }
+        if (i >= a.size()) return false;
+    }
+    return any;
+}
+
+/// Turn the six macro arguments into a Parameter, with the same field conventions as the old
+/// regex parser (trimmed name/type/default/category; help = literal content; aliases = raw text
+/// between the braces, untrimmed).
+static bool macro_to_parameter(const ParsedMacro& m, const std::string& module, Parameter& p)
+{
+    if (m.args.size() != 6 && m.args.size() != 7) return false;
+    std::string help, cat;
+    if (!join_string_literals(m.args[3], help) || !join_string_literals(m.args[4], cat)) return false;
+    const std::string& al = m.args[5];
+    const size_t ob = al.find('{'), cb = al.rfind('}');
+    if (ob == std::string::npos || cb == std::string::npos || cb < ob) return false;
+    p.module = module;
+    p.name = trim(m.args[0]);
+    p.type = trim(m.args[1]);
+    p.defaultValue = trim(m.args[2]);
+    p.helpText = trim(help);
+    p.category = trim(cat);
+    p.aliases = al.substr(ob + 1, cb - ob - 1);
+    p.annotation.clear();
+    if (m.args.size() == 7) {
+        std::string ann;
+        if (join_string_literals(m.args[6], ann))
+            p.annotation = ann;
+    }
+    return !p.name.empty() && !p.type.empty();
 }
 
 // Function to generate the C++ header file content - Claude Generated (fixed)
@@ -250,17 +316,21 @@ int main(int argc, char* argv[])
     }
 
     // 2. Parse all input files
+    //
+    // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md X-1): the PARAM macros are found by a
+    // small tokenizer instead of a line-accumulating regex. The regex failed on multi-line PARAMs
+    // whose help text is several adjacent string literals ("a" "b") or contains ')' - and a
+    // failed match left the rest of that PARAM in the buffer, so the following PARAMs of the block
+    // were dropped too (26 names in eeq_solver.h and gfnff.h, silently absent from -help,
+    // flat-flag routing and -export_run). The tokenizer tracks strings, character literals and
+    // comments, takes the macro up to its matching ')', splits the six top-level arguments and
+    // joins adjacent string literals. A PARAM inside a comment is not a definition.
     std::vector<Parameter> all_params;
     std::vector<Module> all_modules;
     std::regex begin_regex(R"(BEGIN_PARAMETER_DEFINITION\s*\(\s*(\w+)\s*\))");
     std::regex end_regex(R"(END_PARAMETER_DEFINITION)");
-    // Fixed regex: \"s* → \"\s* (typo fix), added multiline support
-    // Claude Generated 2026 - the trailing group is the optional annotation string.
-    std::regex param_regex(R"(PARAM\s*\(\s*(\w+)\s*,\s*(\w+)\s*,\s*(.*?)\s*,\s*\"(.*?)\"\s*,\s*\"(.*?)\"\s*,\s*\{(.*?)\}(?:\s*,\s*\"([^\"]*)\")?\s*\))", std::regex::ECMAScript);
     std::regex module_info_regex(R"(MODULE_INFO\s*\(\s*\"(.*?)\"\s*,\s*\"(.*?)\"\s*,\s*\{(.*?)\}\s*\))", std::regex::ECMAScript);
-
-    bool in_param_block = false;
-    std::string current_module;
+    int malformed = 0;
 
     for (const auto& filepath : input_files) {
         // Claude Generated (October 2025): Skip parameter_macros.h - it contains macro definitions only, not parameter declarations
@@ -274,91 +344,61 @@ int main(int argc, char* argv[])
             continue;
         }
 
-        // Read entire file content for multi-line PARAM support - Claude Generated
-        std::string file_content((std::istreambuf_iterator<char>(file)),
-            std::istreambuf_iterator<char>());
-        file.close();
-
+        // Collect the text of every BEGIN_PARAMETER_DEFINITION ... END_PARAMETER_DEFINITION block,
+        // with the line number of each block line for the diagnostics.
         std::string line;
-        std::istringstream stream(file_content);
         int line_number = 0;
-        std::string accumulated_line;
-
-        while (std::getline(stream, line)) {
-            line_number++;
+        bool in_block = false;
+        std::string module, block;
+        std::vector<int> block_line_of_char;
+        auto flush_block = [&]() {
+            std::vector<ParsedMacro> macros;
+            std::vector<size_t> starts;
+            extract_param_macros(block, macros, starts);
+            for (size_t k = 0; k < macros.size(); ++k) {
+                const int at = starts[k] < block_line_of_char.size() ? block_line_of_char[starts[k]] : line_number;
+                Parameter prm;
+                if (!macro_to_parameter(macros[k], module, prm)) {
+                    std::cerr << "Warning: Malformed PARAM in " << filepath << " around line " << at << "\n";
+                    ++malformed;
+                    continue;
+                }
+                all_params.push_back(prm);
+            }
+            block.clear();
+            block_line_of_char.clear();
+        };
+        while (std::getline(file, line)) {
+            ++line_number;
             std::smatch match;
-
-            // Check for BEGIN block
-            if (std::regex_search(line, match, begin_regex)) {
-                in_param_block = true;
-                current_module = match[1];
-                accumulated_line.clear();
+            if (!in_block && std::regex_search(line, match, begin_regex)) {
+                in_block = true;
+                module = match[1];
                 continue;
             }
-
-            // Check for END block
-            if (std::regex_search(line, match, end_regex)) {
-                in_param_block = false;
-                current_module = "";
-                accumulated_line.clear();
+            if (in_block && std::regex_search(line, match, end_regex)) {
+                flush_block();
+                in_block = false;
+                module.clear();
                 continue;
             }
-
-            if (in_param_block) {
+            if (in_block) {
                 // Claude Generated 2026 - module metadata, one line, before the params.
                 if (std::regex_search(line, match, module_info_regex) && match.size() == 4) {
-                    all_modules.push_back({ current_module, trim(match[1]), trim(match[2]),
+                    all_modules.push_back({ module, trim(match[1]), trim(match[2]),
                         std::string(match[3]) });
                     continue;
                 }
-
-                // A comment line is not a declaration. gfnff.h keeps a removed
-                // parameter as "// PARAM(eeq_distance_cutoff, ...) - REMOVED" for
-                // the record, and without this it is reported as malformed on
-                // every single build.
-                const std::string stripped = line.substr(line.find_first_not_of(" \t") == std::string::npos
-                        ? 0
-                        : line.find_first_not_of(" \t"));
-                if (stripped.rfind("//", 0) == 0)
-                    continue;
-
-                // Ignore anything before a PARAM starts: comments between the
-                // definitions would otherwise end up glued to the next one.
-                if (accumulated_line.empty() && line.find("PARAM(") == std::string::npos)
-                    continue;
-
-                // Accumulate lines for multi-line PARAM definitions
-                accumulated_line += " " + line;
-
-                // Wait until the PARAM's own parenthesis is closed. Judging by the
-                // mere presence of ')' cuts multi-line definitions in half (see
-                // param_parens_closed).
-                if (!param_parens_closed(accumulated_line))
-                    continue;
-
-                // Try to match complete PARAM definition
-                if (std::regex_search(accumulated_line, match, param_regex) && match.size() == 8) {
-                    all_params.push_back({
-                        current_module,
-                        trim(match[1]), // name
-                        trim(match[2]), // type
-                        trim(match[3]), // defaultValue
-                        trim(match[4]), // helpText
-                        trim(match[5]), // category
-                        std::string(match[6]), // aliases - DON'T trim! We need quotes for parsing
-                        std::string(match[7])  // annotation, empty when absent
-                    });
-                    accumulated_line.clear();
-                } else {
-                    // Closed, but still no match: a genuine syntax error rather
-                    // than a definition that had not finished arriving.
-                    std::cerr << "Warning: Malformed PARAM in " << filepath
-                              << " around line " << line_number << "\n";
-                    accumulated_line.clear();
-                }
+                block += line;
+                block += '\n';
+                block_line_of_char.resize(block.size(), line_number);
             }
         }
+        if (in_block)
+            flush_block();
     }
+    if (malformed > 0)
+        std::cerr << "Warning: " << malformed << " malformed PARAM definition(s) were skipped\n";
 
     // 3. Generate the header file content
     std::string header_content = generate_header_content(all_params, all_modules);

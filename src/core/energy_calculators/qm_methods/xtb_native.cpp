@@ -27,6 +27,7 @@
 
 #include "STO_CGTO.hpp"
 #include "src/core/curcuma_logger.h"
+#include "src/core/molecule.h"  // Molecule::GetFragments for the fragment SCF guess (Sep 2026)
 #include "src/core/citation_registry.h"
 #include "src/core/config_manager.h"
 #include "src/core/charge_extrapolation.h"
@@ -42,11 +43,40 @@
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <future>
 #include <stdexcept>
+#include <thread>
+#include <vector>
 
 namespace curcuma::xtb {
+
+namespace {
+/// Transpose a square n x n matrix in place, in 64 x 64 tiles over up to 8 host threads
+/// (Claude Generated, Sep 29, 2026). Pure element swaps, so the result is exact. Used to
+/// turn a column-major device download into curcuma's row-major Matrix without a temporary.
+void transposeSquareInPlace(double* a, int n)
+{
+    constexpr int T = 64;
+    const int nb = (n + T - 1) / T;
+    const unsigned nt = std::max(1u, std::min(8u, std::thread::hardware_concurrency()));
+    auto work = [&](unsigned t) {
+        for (int bi = static_cast<int>(t); bi < nb; bi += static_cast<int>(nt)) {
+            const int i0 = bi * T, i1 = std::min(n, i0 + T);
+            for (int bj = bi; bj < nb; ++bj) {
+                const int j0 = bj * T, j1 = std::min(n, j0 + T);
+                for (int i = i0; i < i1; ++i)
+                    for (int j = (bi == bj ? i + 1 : j0); j < j1; ++j)
+                        std::swap(a[static_cast<size_t>(i) * n + j], a[static_cast<size_t>(j) * n + i]);
+            }
+        }
+    };
+    std::vector<std::thread> pool;
+    for (unsigned t = 0; t < nt; ++t) pool.emplace_back(work, t);
+    for (auto& th : pool) th.join();
+}
+} // namespace
 
 /* ------------------------------------------------------------------------- *
  *  Lifecycle
@@ -277,6 +307,97 @@ bool XTB::seedEEQGuess(Vector& q_sh_out)
 }
 
 /* ------------------------------------------------------------------------- *
+ *  Fragment initial guess (Claude Generated, Sep 2026; operator's proposal).
+ *
+ *  Large clusters of many small molecules (mixture2: 1000 water + 400 urea,
+ *  6200 atoms) have a tiny GFN2 HOMO-LUMO gap (~0.1 eV per xtb 6.7.1), and the
+ *  first Fock matrix built from EEQ or bare-H0 charges moves up to ~2.5 e
+ *  between distant molecules; the SCF then runs away (measured: energy
+ *  +2e5 Eh by iteration 3, on CPU and GPU, FP32 and FP64). Starting from the
+ *  converged state of every isolated molecule puts iteration 0 next to the
+ *  physical solution. Each fragment is converged in its actual geometry, so the
+ *  GFN2 atomic dipoles/quadrupoles are already in the lab frame - no rotation
+ *  or molecule-type matching needed. Fragments = Molecule::GetFragments(), the
+ *  same partition large_system_mode=fragments uses.
+ * ------------------------------------------------------------------------- */
+bool XTB::seedFragmentGuess(Vector& q_sh_out, Matrix& dp_out, Matrix& qp_out)
+{
+    const int nsh = m_basis.nsh;
+    const int nat = m_atomcount;
+    if (nat <= 0 || nsh <= 0)
+        return false;
+    // A net charge cannot be assigned to fragments unambiguously - same limitation as
+    // large_system_mode=fragments. The caller falls back to the EEQ guess.
+    if (std::abs(static_cast<double>(m_charge)) > 1.0e-12)
+        return false;
+
+    const auto t0 = std::chrono::high_resolution_clock::now();
+
+    Mol full;
+    full.m_number_atoms = nat;
+    full.m_charge = 0;
+    full.m_spin = 0.0;
+    full.m_atoms = m_atoms;
+    full.m_geometry = m_geometry;
+    const std::vector<std::vector<int>> fragments = Molecule(full).GetFragments();
+    if (fragments.size() <= 1)
+        return false;
+
+    q_sh_out = Vector::Zero(nsh);
+    dp_out = Matrix::Zero(3, nat);
+    qp_out = Matrix::Zero(6, nat);
+
+    // The fragment SCFs are an implementation detail of the guess: keep their output
+    // (one SCF table per fragment) out of the log, restore the level afterwards.
+    const int saved_verbosity = CurcumaLogger::get_verbosity();
+    CurcumaLogger::set_verbosity(0);
+    bool ok = true;
+    int max_iter = 0, not_converged = 0;
+    for (const auto& atoms : fragments) {
+        Mol sub;
+        sub.m_number_atoms = static_cast<int>(atoms.size());
+        sub.m_charge = 0;
+        sub.m_spin = 0.0;
+        sub.m_geometry = Matrix(atoms.size(), 3);
+        for (std::size_t k = 0; k < atoms.size(); ++k) {
+            sub.m_atoms.push_back(m_atoms[atoms[k]]);
+            sub.m_geometry.row(k) = m_geometry.row(atoms[k]);
+        }
+        XTB frag(m_method);
+        frag.setScfGuess("eeq");   // never recurse into the fragment guess
+        frag.setIntraThreads(1);
+        if (!frag.InitialiseMolecule(sub)) { ok = false; break; }
+        frag.Calculation(false);
+        if (!frag.m_wfn.q_sh.allFinite()) { ok = false; break; }
+        max_iter = std::max(max_iter, frag.m_scf_iterations);
+        if (!frag.m_scf_converged) ++not_converged;
+        for (std::size_t k = 0; k < atoms.size(); ++k) {
+            const int a = atoms[k];
+            const int n = m_basis.nsh_at[a];
+            if (frag.m_basis.nsh_at[k] != n) { ok = false; break; }
+            q_sh_out.segment(m_basis.ish_at[a], n) = frag.m_wfn.q_sh.segment(frag.m_basis.ish_at[k], n);
+            if (m_method == MethodType::GFN2) {
+                dp_out.col(a) = frag.m_wfn.dp_at.col(k);
+                qp_out.col(a) = frag.m_wfn.qp_at.col(k);
+            }
+        }
+        if (!ok) break;
+    }
+    CurcumaLogger::set_verbosity(saved_verbosity);
+    if (!ok)
+        return false;
+
+    const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::high_resolution_clock::now() - t0).count();
+    if (saved_verbosity >= 1)
+        CurcumaLogger::result(fmt::format(
+            "SCF initial guess: {} fragments converged separately ({:.0f} ms, <= {} iterations{})",
+            fragments.size(), ms, max_iter,
+            not_converged ? fmt::format(", {} not converged", not_converged) : std::string()));
+    return true;
+}
+
+/* ------------------------------------------------------------------------- *
  *  Multi-step SCC extrapolation helpers (Claude Generated).
  *
  *  packSccState / unpackSccState (de)serialise the SCC mixing vector — the
@@ -421,6 +542,9 @@ double XTB::Calculation(bool gradient)
     // SCF-setup block below) and their result (gpu_computed) is reused there, so the
     // device build runs exactly once. Any failure / non-resident mode → full host build.
     Matrix S, H0;
+    // Claude Generated (Sep 29, 2026): device path only - split of the "overlap + H0" bucket into
+    // the device integral build and the download of S/H0/L/gamma into the host matrices.
+    auto t_dev_built = t_cn;
     bool gpu_computed = false;        // device integral build succeeded (reused below)
     bool integrals_from_device = false;
     // X-I1: device d kernels are backend-gated. CUDA supports them; ROCm/Vulkan
@@ -446,15 +570,38 @@ double XTB::Calculation(bool gradient)
             if (basis_ok) m_gpu_basis_dirty = false;
         }
         gpu_computed = basis_ok && m_gpu_scf->beginComputed(gbf.xyz_bohr);
+        t_dev_built = clock::now();
         if (gpu_computed) {
             const int nao = m_basis.nao, nsh = m_basis.nsh;
-            Eigen::MatrixXd Scm(nao, nao), H0cm(nao, nao), Lcm(nao, nao), Gcm(nsh, nsh);
-            if (m_gpu_scf->downloadOverlap(Scm) && m_gpu_scf->downloadH0(H0cm)
-                && m_gpu_scf->downloadCholesky(Lcm) && m_gpu_scf->downloadGamma(Gcm)) {
-                m_S     = Scm;   // col-major device → row-major Matrix (S symmetric)
-                m_H0    = H0cm;  // H0 symmetric
-                m_X     = Lcm;   // m_X is column-major Eigen::MatrixXd → direct
-                m_gamma = Gcm;
+            // Claude Generated (Sep 29, 2026): download straight into the members. S and H0 come
+            // column-major into the row-major m_S/m_H0 and are then transposed in place, which
+            // gives exactly the element-wise copy the old temporaries made (m_S(i,j) = S(i,j))
+            // without two 1.9 GB temporaries and four serial copies (polymer_2x: 2.4 s -> see
+            // docs/GFN2_GPU_COST_PLAN.md stage 1a). Backends without the raw download keep the
+            // old path.
+            const auto td0 = clock::now();
+            bool got = false;
+            m_S.resize(nao, nao);
+            m_H0.resize(nao, nao);
+            if (m_gpu_scf->downloadOverlapInto(m_S.data()) && m_gpu_scf->downloadH0Into(m_H0.data())) {
+                transposeSquareInPlace(m_S.data(), nao);
+                transposeSquareInPlace(m_H0.data(), nao);
+                got = m_gpu_scf->downloadCholesky(m_X) && m_gpu_scf->downloadGamma(m_gamma);
+            } else {
+                Eigen::MatrixXd Scm(nao, nao), H0cm(nao, nao), Lcm(nao, nao), Gcm(nsh, nsh);
+                if (m_gpu_scf->downloadOverlap(Scm) && m_gpu_scf->downloadH0(H0cm)
+                    && m_gpu_scf->downloadCholesky(Lcm) && m_gpu_scf->downloadGamma(Gcm)) {
+                    m_S     = Scm;   // col-major device → row-major Matrix
+                    m_H0    = H0cm;
+                    m_X     = Lcm;   // m_X is column-major Eigen::MatrixXd → direct
+                    m_gamma = Gcm;
+                    got = true;
+                }
+            }
+            if (got) {
+                if (verb >= 3)
+                    CurcumaLogger::info_fmt("    S/H0/L/gamma download into the host copies: {:.0f} ms",
+                                            ms(td0, clock::now()));
                 integrals_from_device = true;
                 if (verb >= 2)
                     CurcumaLogger::info("SCF: integrals built on GPU device "
@@ -533,6 +680,10 @@ double XTB::Calculation(bool gradient)
         CurcumaLogger::info("Setup timing:");
         CurcumaLogger::info_fmt("  coordination numbers : {:8.2f} ms", ms(t0, t_cn));
         CurcumaLogger::info_fmt("  overlap + H0         : {:8.2f} ms", ms(t_cn, t_h0));
+        if (integrals_from_device) {
+            CurcumaLogger::info_fmt("    device build (S/H0/L/gamma) : {:8.2f} ms", ms(t_cn, t_dev_built));
+            CurcumaLogger::info_fmt("    host download + copy        : {:8.2f} ms", ms(t_dev_built, t_h0));
+        }
         CurcumaLogger::info_fmt("  orthonormalizer      : {:8.2f} ms", ms(t_h0, t_ortho));
         CurcumaLogger::info_fmt("  Coulomb gamma matrix : {:8.2f} ms", ms(t_ortho, t_gamma));
         if (m_method == MethodType::GFN2) {
@@ -680,9 +831,31 @@ double XTB::Calculation(bool gradient)
         }
         if (verb >= scf_min)
             CurcumaLogger::result("SCF initial guess: warm-start from previous step");
-    } else if (m_scf_guess == "eeq" && !m_force_h0_guess) {
+    } else if ((m_scf_guess == "eeq" || m_scf_guess == "fragments") && !m_force_h0_guess) {
+        bool seeded = false;
+        if (m_scf_guess == "fragments") {
+            Vector q_sh_guess;
+            Matrix dp_guess, qp_guess;
+            if (seedFragmentGuess(q_sh_guess, dp_guess, qp_guess)) {
+                q_sh_old   = q_sh_guess;
+                m_wfn.q_sh = q_sh_guess;
+                m_wfn.q_at.setZero(m_atomcount);
+                for (int s = 0; s < nsh; ++s)
+                    m_wfn.q_at(m_basis.sh2at[s]) += q_sh_guess(s);
+                if (m_method == MethodType::GFN2) {
+                    m_wfn.dp_at = dp_guess;
+                    m_wfn.qp_at = qp_guess;
+                }
+                seeded = true;
+            } else if (verb >= scf_min) {
+                CurcumaLogger::warn("Fragment initial guess unavailable (one fragment, charged "
+                                    "system or a failed fragment SCF); using the EEQ guess");
+            }
+        }
         Vector q_sh_guess;
-        if (seedEEQGuess(q_sh_guess)) {
+        if (seeded) {
+            // fragment guess set above
+        } else if (seedEEQGuess(q_sh_guess)) {
             q_sh_old   = q_sh_guess;
             m_wfn.q_sh = q_sh_guess;
             m_wfn.q_at.setZero(m_atomcount);
@@ -1107,6 +1280,14 @@ double XTB::Calculation(bool gradient)
             m_E_third_order = ethird; m_E_multipole = emp;
             const double e_scc = eb + ecoul + ethird + emp;
             const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
+            // A non-finite SCC state is a failure, never convergence (Sep 2026, see the CPU loop).
+            if (!std::isfinite(dq) || !std::isfinite(e_scc)) {
+                CurcumaLogger::warn_fmt("XTB::Calculation: SCF produced non-finite values at iteration {} "
+                                        "(E = {}, max|dq| = {}) - diverged", iter, e_scc, dq);
+                m_scf_converged = false; m_scf_iterations = iter + 1;
+                setHardError(fmt::format("native SCF diverged: non-finite energy/charges at iteration {}", iter));
+                return m_E_total;
+            }
             note_fp32_progress(dq);
             dq_prev = dq;
             if (verb >= scf_min) {
@@ -1391,7 +1572,20 @@ double XTB::Calculation(bool gradient)
         // iteration, so the SCF exited after 2 cycles with the moments unconverged and
         // the analytic gradient came out 0.0330 instead of 0.0211 Eh/Bohr (60 % off,
         // while the energy still matched xtb to 1e-8). Claude Generated.
-        const double dq = (packSCC() - x_in).cwiseAbs().maxCoeff();
+        const Vector x_out_check = packSCC();
+        const double dq = (x_out_check - x_in).cwiseAbs().maxCoeff();
+        // Claude Generated (Sep 2026): a non-finite SCC state is a failure, not convergence. With
+        // -scf_mode diis on a 1846-atom water/urea cluster the charges turned NaN at iteration 6;
+        // maxCoeff() over the NaN vector then came out 0, dE too, and the SCF "converged" to
+        // +540710 Eh, which was returned as a valid single point. Test the vectors themselves,
+        // not only dq.
+        if (!std::isfinite(dq) || !std::isfinite(e_scc) || !x_out_check.allFinite() || !x_in.allFinite()) {
+            CurcumaLogger::warn_fmt("XTB::Calculation: SCF produced non-finite values at iteration {} "
+                                    "(E = {}) - diverged", iter, e_scc);
+            m_scf_converged = false; m_scf_iterations = iter + 1;
+            setHardError(fmt::format("native SCF diverged: non-finite energy/charges at iteration {}", iter));
+            return m_E_total;
+        }
         note_fp32_progress(dq);
         dq_prev = dq;   // drives the LevelShift fade-out on the next iteration
         const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
@@ -1484,6 +1678,17 @@ double XTB::Calculation(bool gradient)
         else
             CurcumaLogger::warn_fmt("SCF NOT converged after {} iterations ({:.1f} ms)",
                                     m_scf_iterations, ms(t_scf_start, t_scf_end));
+    }
+
+    // Claude Generated (Sep 2026): an unconverged SCF is not a result. It used to be returned
+    // like one - level shift on a 1846-atom water/urea cluster ended after 150 iterations at
+    // +3080 Eh with exit code 0. xtb and tblite stop with an error here too. The explicit opt-out
+    // keeps the old behaviour for anyone who knowingly accepts a nearly converged energy.
+    if (!m_scf_converged && !m_scf_allow_unconverged) {
+        setHardError(fmt::format("native SCF did not converge within {} iterations (last max|dq| = {:.2e}); "
+                                 "-scf_allow_unconverged true accepts the unconverged energy",
+                                 m_scf_iterations, dq_prev));
+        return m_E_total;
     }
 
     // Claude Generated (Sep 2026): post-SCF host phase timings (printed with CURCUMA_GPU_PROFILE
@@ -1771,6 +1976,15 @@ double XTB::Calculation(bool gradient)
             const double e_retry = Calculation(gradient);
             m_in_scf_retry = false;
             m_force_h0_guess = false;
+            // Claude Generated (Sep 2026): if the bare-H0 retry lands on an impossible charge
+            // distribution too, the result is not usable - it used to be returned anyway.
+            if (!hasError() && m_wfn.q_at.size() == m_atomcount) {
+                const double q_retry = m_wfn.q_at.cwiseAbs().maxCoeff();
+                if (!(q_retry <= q_bound))   // also catches NaN
+                    setHardError(fmt::format("native SCF converged to an implausible charge distribution "
+                                             "(max |q| = {:.2f} e > {:.2f}) also from the bare-H0 guess",
+                                             q_retry, q_bound));
+            }
             return e_retry;
         }
     }

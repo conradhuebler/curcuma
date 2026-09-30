@@ -93,11 +93,11 @@
 - **Abhängigkeit**: Benötigt theoretische Implementierung oder externe Daten
 
 ### Unit System Migration (CODATA-2018)
-- **Status**: ⏳ IN PROGRESS
-- **Task**: Replace hardcoded constants mit `CurcumaUnit` namespace functions
-- **Betroffene Dateien**: Multiple legacy files mit hardcoded constants
-- **Verweis**: src/core/CLAUDE.md:113, CLAUDE.md:296
-- **Gewinn**: Centralized, documented, CODATA-2018 compliant constants
+- **Status**: 🤖 umgesetzt (Commit `191cebe3`, 2026-09-25), machine-tested — Betreiber-Pruefung offen
+- **Stand**: alle Bohr/Angstroem- und Hartree-Umrechnungen laufen ueber `src/core/units.h`;
+  `-DUSE_LEGACY_UNIT_CONSTANTS=ON` stellt die alten Einzelwerte bitgenau her. Inventar und
+  Messwerte: [docs/UNIT_CONSTANTS.md](docs/UNIT_CONSTANTS.md), CLAUDE.md Known Issue #33.
+- **Offen**: der Rest von 0,0036 kcal/mol gegen pprcht auf `polymer_2x` (nicht verfolgt).
 
 ### GFN-FF EEQ warm start across the q-loop passes — DONE, entry was stale (re-measured Sep 18, 2026)
 - The warm start is in place and works: polymer_2x with the topology cache deleted, 7320 atoms /
@@ -118,6 +118,11 @@
 
 ### GPU-SCF GFN1/GFN2: der Eigenloeser ist 73 % des Laufs (2026-09)
 - **Status**: ⏳ OFFEN, Zerlegung gemessen, kein Punkt umgesetzt
+- **Update 2026-09-29 (Pseudo-Diagonalisierung, docs/GFN2_GPU_COST_PLAN.md)**: `-scf_pseudo_diag` ersetzt die meisten FP32-Eigenloesungen durch eine Besetzt-virtuell-Rotation plus S-Orthonormierung (polymer_2x, 4x A4500: 113 -> 89 s; MOR41 und GMTKN55 auf der GPU identisch). Offen:
+  - Default einschalten? (Betreiberentscheidung; die Messungen oben sprechen dafuer)
+  - `-scf_pseudo_diag_fp64` auf einer GPU mit vollem FP64 (H200) messen - auf der A4500 korrekt, aber langsamer (117 -> 167 s)
+  - cuBLAS-`trmm` L^T C laeuft nur mit 5.7 TFLOP/s (0.65 s von 2.3 s pro Pseudo-Schritt)
+- **TODO 2026-09-30 (CPU-Pfad fuer `-scf_pseudo_diag`, Betreiber: "als todo vermerken")**: Messung (OpenBLAS, n = 3222, 8 Threads): Pseudo-Schritt in FP64 ca. 0.42 s gegen 0.9 s (volle FP32-Iteration) bzw. 1.6 s (volle FP64-Iteration); polymer CPU 19.2 s, davon 12.4 s Eigenloesung -> geschaetzt 20-25 % Gewinn (nicht implementiert, Schaetzung aus Einzelbenchmarks). Umsetzung: dieselbe Mathematik wie `pseudoRotateOrthonormalise` (xtb_gpu_context.cu) mit BLAS in `XTB::solveEigen`, komplett FP64 (FP32-Dreieckskernel in OpenBLAS ca. 12x langsamer), W fuer den Gradienten aus G_oo, Absicherung wie auf der GPU, opt-in, Regression MOR41/GMTKN55. Kein Gewinn erwartet unter ca. 1500 Basisfunktionen. Rohdaten: docs/GFN2_GPU_COST_PLAN.md.
 - **Messung** (polymer_2x, 7320 Atome, nao 15444, GFN2, 1x RTX A4500, `-sp -gradient` 254 s,
   `CURCUMA_GPU_PROFILE=1`, Geraete festgenagelt):
 
@@ -273,8 +278,8 @@
   GFN-FF etwas bringt — nicht die Kraftfeld-Kernel.
 
 ### `make` in release/ scheitert: fuenf CUDA-Unittests ohne `USE_CUDA` (2026-09)
-- **Status**: ⏳ OFFEN, vorbestehend (nicht von der Gradienten-Instrumentierung verursacht)
-- **Symptom**: `cd release && make -j8` endet mit **Exit 2**. Die Hauptziele bauen
+- **Status**: ✅ BEHOBEN (2026-09-30) — alle 14 `test_xtb_cuda_*` linken jetzt `curcuma_cuda curcuma_core CUDA::cudart` und setzen `USE_CUDA` pro Ziel (Reihenfolge wichtig: das Plugin braucht Host-Symbole aus dem statischen Kern). `make` in `release/` endet mit Exit 0; die 121 `sqm_cuda_*`-Tests, die nie gelaufen waren, bestehen. Der Fehler war auch auf master vorhanden.
+- **Symptom** (vor der Behebung): `cd release && make -j8` endete mit **Exit 2**. Die Hauptziele bauen
   (`curcuma_cuda` 7 %, `curcuma_core` 62 %, `curcuma` 63 %); es scheitern nur
   `test_xtb_cuda_{cn,eeq,gamma,gradient,h0,multipole,overlap,qat}` mit
   „`gpu` in Namensbereich `curcuma::xtb` bezeichnet keinen Typ".
@@ -327,8 +332,8 @@
   genug, dass der Unterschied meist unter der Schwelle bleibt, aber nicht garantiert unter allen
   MOR41/GMTKN55-Strukturen).
 
-### GFN-FF/EEQ: CPU/GPU-Trajektorien-Divergenz — Ursache direkt gezeigt, kein Fix (2026-09)
-- **Status**: ⏳ OFFEN, Mechanismus bestaetigt, kein Loesungsweg umgesetzt
+### GFN-FF/EEQ: CPU/GPU-Trajektorien-Divergenz — Loeser als Ursache am 2026-09-27 widerlegt (s. KORREKTUR am Abschnittsende)
+- **Status**: Betreiber-Entscheidung 2026-09-27: CPU gegen GPU wird **vorerst per Ensemblevergleich** bewertet (punktgenau nicht erreichbar); GPU-Bitgleichheit als TODO (s. „Bitgleichheit" unten)
 - **Befund**: ein 10-ps-GFN-FF-MD-Vergleich CPU vs. GPU auf `polymer_2x` (7320 Atome, nfrag=1500)
   divergiert reproduzierbar (nahezu deckungsgleich bis ~400 fs, ab ~1200 fs vollstaendig
   entkoppelt). Ursache **direkt gezeigt, nicht nur vermutet**: bei `nfrag=1500` waehlt der
@@ -740,6 +745,203 @@
   vergleicht dagegen, `golden_energies.txt` ist entfernt. Dadurch laeuft erstmals auch der zweite
   Durchlauf mit `-threads 4` (wurde nach dem ersten Fehlschlag nie erreicht): 40/40. Negativkontrolle
   (eine Referenz um 1e-4 Eh verfaelscht) schlaegt an. `ctest -L gfnff` jetzt **78/78**.
+- **KORREKTUR (2026-09-27): die „direkt gezeigte" Ursache oben ist widerlegt, fuer beide Systeme.**
+  Dem Kontrollversuch vom 23.9. fehlte die Wiederholung mit DEMSELBEN Loeser. Nachgeholt:
+  - *polymer_2x, 2 ps, CSVR, je ein Lauf*: CPU gegen CPU (gleiche Threadzahl) trennt sich bei
+    1e-5 A nach 730 fs, 0,1 A nach 1220 fs; CPU gegen GPU WP7-A 700/1180 fs, CPU gegen GPU WP7-E
+    710/1180 fs, GPU-Karte gegen Karte 720/1200 fs. Der Loeser setzt die Zeitskala nicht, die
+    CPU ist mit mehreren Threads selbst nicht bitgenau. Mittelwerte 1–2 ps aller 6 Laeufe gleich
+    im Rauschen (<T> 300,2–300,5 K, <Epot> −914,92…−915,00 Eh bei sd 0,4 Eh).
+  - *water8 (24 Atome), 1 Thread*: bytegleich reproduzierbar; mit 4 Threads nicht (1e-5 A nach
+    2618 fs). cholesky gegen ppcg trennt sich ab dem ERSTEN Schritt (7,8e-6 A, linear wachsend) —
+    aber nicht wegen „zwei korrekter Loeser": cholesky mit Neufaktorisierung in jedem Schritt
+    (`-eeq_solver.eeq_refactor_eps_bohr 0`) und ppcg sind ueber 500 fs identisch. Ursache ist der
+    Cholesky-Faktor-Cache mit nur EINER Nachiteration (`eeq_refine_iters 1`, Default); mit 3
+    Nachiterationen 480 fs innerhalb der Druckaufloesung. Siehe eigener Eintrag unten.
+  - *Folge*: Punktgenauer CPU/GPU-Vergleich ueber ps ist nicht erreichbar, solange schon CPU/CPU
+    divergiert; Option (c) Ensemblevergleich ist der einzige, der fuer CPU gegen GPU traegt.
+    Entscheidung beim Betreiber. Vault: `Labor/curcuma EEQ-Löser-Benchmark.md`, Eintrag 2026-09-27.
+  - *Nachtrag, selber Tag*: der CPU-Thread-Nichtdeterminismus ist gefunden und behoben (D4-Paarliste
+    in Thread-Ankunftsreihenfolge, s. eigener Eintrag unten). CPU gegen CPU bei gleicher Threadzahl
+    ist damit bitgleich (polymer_2x 12 Threads 300 Schritte, water8 2/4/8/16 Threads).
+- **Bitgleichheit — was geht, was nicht (2026-09-27)**:
+  - *CPU, gleiche Threadzahl, Lauf gegen Lauf*: **erreicht**. `d4param_generator.cpp` fuegte die
+    parallel erzeugten D4-Paare (und im JSON-Pfad Paare + ATM-Tripel) per `omp critical` in
+    Thread-Ankunftsreihenfolge zusammen; jetzt pro Zeile/Index gesammelt und in fester Reihenfolge
+    verkettet. Belege: water8-Einzelpunkt 4 Threads 8/8 bitgleich (vorher 4 verschiedene aus 6;
+    mit `-gfnff.dispersion false` schon vorher 6/6), MD 4/8 Threads bitgleich, polymer_2x-MD
+    12 Threads 2/2 bitgleich. 1 Thread unveraendert. ctest 487/490 (drei bekannte).
+  - *CPU, verschiedene Threadzahlen*: nicht bitgleich (letztes Bit, 3–8e-17 im Gradienten), weil
+    `FFWorkspace` die Terme threadzahlabhaengig partitioniert; auch das BLAS im EEQ haengt von der
+    Threadzahl ab. Machbar waere eine feste Blockzahl statt Threadzahl-Partitionen — offen.
+  - *GPU, Lauf gegen Lauf*: **nicht bitgleich** (water8 MD: 6 verschiedene aus 6). Energien,
+    Komponenten und Ladungen sind gleich, nur der Gradient nicht: alle Kernel addieren per
+    `atomicAdd` (`add_grad`) in einen gemeinsamen Gradientenpuffer; die Reihenfolge variiert
+    auch mit `CUDA_LAUNCH_BLOCKING=1`, also schon innerhalb der Kernel. Weder Verlet-Skin noch
+    Blockgroesse 1024 aendern das. Abhilfe waere ein Umbau: Puffer pro Term + Summe in fester
+    Reihenfolge, Paarterme per Sammeln pro Atom oder Zwischenspeicher pro Paar, Energie-Teilsummen
+    pro Block — oder Festkomma-Atomics (Aufloesung ~1e-12). Leistung: kein Gewinn zu erwarten,
+    eher leicht langsamer auf FP64-schwachen Karten (A4500); die grossen Bloecke (EEQ ~79 ms,
+    Coulomb-Phase ~93 ms von 182 ms auf polymer_2x) sind nicht betroffen bzw. schon Sammel-Kernel.
+    **Betreiber 2026-09-27: als TODO aufgenommen, nicht jetzt.** Erster Schritt, wenn es angegangen
+    wird: einen Kernel (Repulsion) als Sammel-Variante hinter einem Schalter bauen und auf A4500 und
+    H200 messen; Diagnose-Werkzeug war eine Spur mit FNV-Hashes von Gradient/Ladungen/Geometrie pro
+    Aufruf (Vorlage im Diff `_artefacts/2026-09-27_curcuma_cf850070_feature-multi-gpu_determinism.patch`
+    nicht enthalten — sie war temporaer; Aufbau im Laborjournal 27.9. beschrieben).
+  - *CPU gegen GPU*: bitgleich praktisch nicht erreichbar (Operationsreihenfolge, FMA, `erf`/`exp`
+    verschieden); water8: Einzelpunkt 2,7e-15 Eh, Gradient 4e-15; MD-Mittel ueber 500 fs auf
+    13–14 Stellen gleich, sobald die CPU ohne Faktor-Cache rechnet.
+- **GPU-Default = CPU-Semantik (Commit folgt, 2026-09-27)**: die GPU waehlt WP7-E jetzt unter
+  denselben Schwellen wie die CPU ppcg (`eeq_ppcg_min_nfrag`/`min_atoms`), `0` erzwingt auf beiden
+  Seiten den exakten Loeser. Details und Zahlen: [docs/GPU_TUNING.md](docs/GPU_TUNING.md) Abschnitt 3.
+
+### GFN-FF/EEQ: Cholesky-Faktor-Cache mit einer Nachiteration ist in der MD nicht exakt (2026-09-27)
+- **Status**: 🤖 umgesetzt 2026-09-27 (Betreiber: „dann machen wir das so") — `eeq_refactor_eps_bohr` Default 0, Cache aus; zugleich `nonbonded_skin_bohr` Default 2. Machine-tested, Betreiber-Pruefung offen.
+- **Befund** (water8_cluster, 24 Atome, 8 Fragmente, CSVR 300 K, dt 0,5 fs, 1 Thread, 500 fs):
+  Referenz = cholesky ohne Cache (`eeq_refactor_eps_bohr 0`) = ppcg (identisch ueber 500 fs).
+  Default (`eps 0.05`, `eeq_refine_iters 1`) weicht ab Schritt 1 ab (7,8e-6 A, dann +7,8e-6 A pro
+  Schritt, 1e-3 A nach 258 fs); `eeq_refine_iters 3` bleibt 480 fs innerhalb 1e-5 A. Der Kommentar
+  zu A4 in `eeq_solver.cpp` und `ff_methods/CLAUDE.md` („bei der Default-Schwelle ist die
+  Nachiteration ein numerisches No-op") trifft hier nicht zu.
+- **Wirkung**: NVE-Energieerhaltung (2 ps, je ein Lauf) praktisch unveraendert — Drift 1,77e-4 statt
+  1,37e-4 Eh bei dt 0,5 fs, 2,9e-5 statt 2,5e-5 bei dt 0,25 fs. Betroffen: CPU-GFN-FF-MD/-Opt
+  unter `eeq_ppcg_min_atoms` (500) Atomen; darueber laeuft ppcg ohne Cache.
+- **Optionen**: (a) `eeq_refine_iters` Default 2–3 (O(N^2) je Schritt, bei <500 Atomen billig —
+  Kosten nicht gemessen); (b) `eeq_refactor_eps_bohr` Default 0 fuer kleine Systeme; (c) belassen.
+  Vor einer Aenderung: Kosten messen, mehr als ein System, Energieerhaltung mit n>1.
+- **Gemessen (2026-09-27, Auftrag „miss die Kosten und erklaere den Nutzen")** — 5 Systeme
+  (caffeine 24, water8 24, triose 66, complex 231, w150 = 150 Wasser/450 Atome aus polymer_2x),
+  MD CSVR 300 K, dt 0,5 fs. Ladungsfehler = |q - q_exakt| an derselben Geometrie (temporaere
+  Kontrolle im Loeser, danach entfernt), 1000 Schritte, 1 Thread:
+
+  | refine | Ladungsfehler median / max (e) | Trajektorie nach 500 fs vs. exakt |
+  |---|---|---|
+  | 0 | 1e-3 … 4e-3 / bis 1,7e-2 | bis 2,2 A |
+  | 1 (Default) | 1e-5 … 2,5e-4 / bis 8e-4 | 3e-5 … 0,25 A |
+  | 2 | ~5e-6 / bis 3e-5 | bis 0,05 A |
+  | 3 | ~1e-7 / bis 1e-6 | <= 2e-4 A (meist ~1e-6) |
+
+  Kosten pro Energieaufruf (Median, 300 Schritte): unter 231 Atomen alle Varianten innerhalb der
+  Aufloesung; complex 1 Thread 5,79 (refine 1) / 5,90 (refine 3) / 5,91 ms (exakt); **w150 1 Thread
+  16,05 / 16,90 / 15,53 ms, 8 Threads 12,37 / 13,33 / 11,63 ms — ohne Cache ist es am schnellsten.**
+  Der Faktor-Cache spart unterhalb der ppcg-Schwelle keine Zeit (eine 450er-Cholesky kostet weniger
+  als Nachiteration plus Cache-Verwaltung) und liefert nur den Ladungsfehler. NVE 1 ps (n = 1, s.
+  Seed-Befund unten): Drift fuer refine 1 / 3 / exakt gleich (water8 2,1e-4 / 1,7e-4 / 1,7e-4 Eh,
+  complex und w150 identisch in allen Varianten).
+  **Empfehlung**: `eeq_refactor_eps_bohr` Default 0 (Cache aus) statt mehr Nachiterationen — exakt
+  und nicht langsamer. Der Cache bleibt als Opt-in fuer den erzwungen exakten Loeser auf grossen
+  Systemen (`eeq_ppcg_min_nfrag 0`, N >> 500), wo die O(N^3)-Faktorisierung zaehlt — dort nicht
+  gemessen. Default-Aenderung: Betreiber-Entscheidung.
+
+### SimpleMD: `-seed` wirkt nicht auf die Anfangsgeschwindigkeiten (2026-09-27)
+- **Status**: ⏳ OFFEN, im Code belegt, nicht behoben (aendert jede MD-Startgeschwindigkeit)
+- **Befund**: `SimpleMD::InitVelocities()` (`simplemd.cpp:1141`) zieht aus einem eigenen
+  `static std::default_random_engine generator;` mit festem Standard-Seed, nicht aus dem per
+  `-seed` initialisierten `gen` (`simplemd.cpp:~620/715`). Folgen: (a) NVE-Laeufe mit verschiedenem
+  `-seed` sind identisch (gemessen: water8/complex/w150, Seeds 1–3, bitgleiche Drift); bei Thermostat-
+  Laeufen wirkt der Seed nur auf das Thermostat-Rauschen. (b) Mit Default `-seed -1` („Uhrzeit")
+  starten alle Laeufe mit denselben Geschwindigkeiten. (c) `static` + mehrere MDs pro Prozess
+  (ConfSearch): Laeufe teilen den Generatorzustand; parallel gestartet ist das ein Data Race.
+- **Fix-Vorschlag**: Generator als Member, mit `m_seed` initialisiert, in `InitVelocities()` und
+  den Thermostaten benutzen. Aendert alle MD-Startbedingungen → Golden-Werte der MD-Tests pruefen.
+
+### Optimierer: Liniensuch-Fehlschlag wurde als Konvergenz gemeldet — BEHOBEN (2026-09-27)
+- **Befund**: LBFGS++ setzte `m_solver_converged = true`, wenn die Liniensuche unter `min_step` fiel, und
+  `OptimizerDriver::Optimize` nahm den Nullschritt als Erfolg, ohne curcumas Kriterien zu pruefen
+  (240-Atom-Wassercluster "konvergiert" bei |g| = 1,9e-3, mixture2 bei 0,228; Schwelle 5e-4).
+- **Fix** (Betreiber-Entscheidung "fixen"): ein Nullschritt zaehlt nur noch als Konvergenz, wenn die
+  eigenen Kriterien des Treibers erfuellt sind; sonst "nicht konvergiert" mit dem Kriterienbericht
+  (`formatConvergenceReport`), Exit 1, letzte Struktur wird geschrieben.
+- **Aufgedeckt**: `cli_curcumaopt_03`–`06` (`-opt water -method uff`) bestanden nur dank der falschen
+  Konvergenz — der UFF-Winkelgradient ist falsch (naechster Eintrag). Die vier Tests pruefen CLI-Verhalten,
+  nicht UFF-Physik, und laufen jetzt mit `-method gfnff` (echte Konvergenz, z. B. Ethan 9 Schritte,
+  |g| = 8e-6).
+- **Nebenbefund, offen**: der Legacy-Pfad `CurcumaOpt::LBFGSOptimise` liest `m_defaults.value("LBFGS_eps_abs")`
+  usw. mit Grossbuchstaben, die registrierten PARAMs heissen `lbfgs_eps_abs` — CLI-Werte kommen dort
+  vermutlich nicht an (nicht gemessen).
+
+### Optimierer: Stillstandserkennung — UMGESETZT (2026-09-28, Betreiber: "ja, gute Idee")
+- `-opt.stall_steps N` (Standard 20, 0 = aus) / `-opt.stall_rmsd` (Standard 1e-6 Å): bewegt sich die
+  Geometrie N Schritte in Folge weniger als stall_rmsd, endet der Lauf "No progress", Exit 1, letzte
+  Struktur geschrieben. Anlass: mixture2 (GFN-FF, eigener L-BFGS) stand von Schritt 4744 bis zum
+  Limit 5000 still, 48 s/Schritt, ~3,4 h verloren. ctest 487/490 (dieselben 3 bekannten).
+
+### Eigener L-BFGS bleibt dauerhaft stehen (gefunden 2026-09-28)
+- **Status**: ⏳ OFFEN, gemessen, Ursache nur per Codelesung
+- **Befund**: Koffein, GFN-FF, `-opt.optimizer lbfgs`, Standard: ab Schritt 33 keine Bewegung mehr
+  (367 von 400 Schritten, |grad| 1,6e-3, Ziel 5e-4); `auto`/`lbfgspp` konvergieren in 38 Schritten.
+- **Vermuteter Mechanismus** (`optimisation/lbfgs.cpp:439-451`): die Backtracking-Suche halbiert bis
+  zu 30-mal und nimmt dann den ~1e-9-Schritt ohne Fehlermeldung; `sy <= 1e-10` → keine
+  Historie-Aktualisierung, kein Reset → dieselbe Richtung wiederholt sich. Nicht per Log bestätigt:
+  `-verbosity 2` erreicht die Schritt-Ausgabe des L-BFGS nicht (Verbosity kommt dort nicht an).
+- **Vorschlag**: bei erschöpfter Liniensuche Historie verwerfen und mit steilstem Abstieg neu
+  starten; die Verbosity-Weitergabe reparieren.
+
+### mixture2 (GFN-FF): Energie an einer N-H···O=C-Brücke nicht glatt (gefunden 2026-09-28)
+- **Status**: ⏳ OFFEN, nicht eingegrenzt
+- **Befund**: an der Struktur nach 4744 Schritten (E = -917.10049 Eh) finden weder eigener L-BFGS noch
+  LBFGS++ einen Abstieg (Nullschritt bei |grad| 0,11 Eh/Bohr). CPU- und GPU-Gradient identisch
+  (6,6e-13); 99,9 % von |g|² sitzen auf drei Atomen: O 5514/C 5512 (Harnstoff-C=O) und H 5045 (N-H
+  eines zweiten Harnstoffs, H···O 2,09 Å). Finite Differenzen dort konvergieren nicht mit h
+  (5514 y: h=1e-3 → 0,064, h=1e-4 → 0,386, analytisch 0,197; bei z Vorzeichenwechsel).
+- **Offen**: ob der Knick aus der H-Brücken-Liste (`hb_update_force_every 1`), der Topologieerkennung
+  oder einem Term kommt. Einschränkung: jeder FD-Punkt lief als eigener Prozess und erkannte
+  Topologie und HB-Liste neu; der `.topo.json`-Cache hält die Bindungen nicht fest.
+
+### Multi-GPU-Lückenanalyse (2026-09-28)
+- Bestandsaufnahme GFN2/GFN1 + GFN-FF mit Belegen und Reihenfolge: [docs/MULTI_GPU_GAPS.md](docs/MULTI_GPU_GAPS.md).
+  Darin zwei bisher undokumentierte Korrektheitsfehler (ROCm ohne Coulomb-Term seit `ab6e3f5e`;
+  verworfene GPU-EEQ-Ladungen werden trotzdem benutzt) — nicht behoben, nur festgehalten.
+
+### UFF- und QMDFF-Gradient falsch (gefunden 2026-09-27)
+- **Status**: ⏳ OFFEN — Ursache gefunden, Fix vorbereitet, Betreiber: "uff und qmdff erstmal nicht"
+- **UFF-Winkel** (`FFWorkspace::calcUFFAngles`, `ff_workspace_uff.cpp`): `UFF::AngleBending` liefert
+  dθ/dx, der Kern multipliziert mit dE/dcosθ = fc(C1 + 4 C2 cosθ) ohne den Faktor −sinθ → falsches
+  Vorzeichen, Optimierungen laufen in jedem Winkel bergauf. Gemessen (FD, Wasser): 5,1e-2 Eh/Å, mit
+  `dEdtheta = -sin(theta) * fc*(C1 + 4 C2 cos)` 3,3e-5 (= Druckgrenze; Koffein 4,7e-5).
+  Geschichte: efa0f095 (Maerz 2026) hat genau das repariert, aber im `ForceFieldThread`, den UFF seit
+  a42254c5 (8 Tage vorher) nicht mehr benutzte; der FFWorkspace-Kern behielt die alte Formel.
+- **QMDFF-Winkel** (`calcQMDFFAngles`): gleicher Fehler, nur der Faktor sinθ fehlt (Vorzeichen stimmt).
+- **QMDFF-Bindung** (`calcQMDFFBonds`): `diff` ist −dE/dx mit x = r0/r; der Faktor dx/dr = −r0/r²
+  fehlt (`dEdr = diff * ratio / distance`). QMDFF mit beiden Fixes: FD Wasser 1,7e-2 → 3,7e-5,
+  Koffein 7,5e-2 → 3,9e-5.
+- **Formelfrage, nicht angefasst**: e6bb55e7 (Jan 2026, ein GFN-FF-Commit) hat den QMDFF-Bindungs-
+  exponenten von 0,5 auf 0,75 geaendert (E = k[1 + x^a − 2 x^{0,75a}], Minimum dann nicht bei r0);
+  `QMDFF::LJStretchEnergy` hat weiterhin 0,5. Welche Form gilt, ist zu klaeren.
+- **Test**: `check_gradient_units.py` um uff/qmdff erweitern; die verschobenen Geometrien muessen dabei
+  die an der Referenzgeometrie erzeugte `.param.json` benutzen (QMDFF nimmt θ0 aus der Geometrie).
+  Der Pre-Fix-Build `build_asan` (24.09.) dient als Gegenprobe.
+
+### Native xTB-SCF meldete Unsinn als Ergebnis — BEHOBEN (2026-09-27)
+- **Befund**: DIIS erzeugte NaN, `maxCoeff()` ueber den NaN-Vektor ergab 0 → "konvergiert" bei
+  +540710 Eh (rc 0); Level-Shift endete unkonvergiert bei +3080 Eh (rc 0); GPU-residenter SCF brach ohne
+  Grund ab.
+- **Fix**: nicht-endlicher Zustand → Fehler "diverged at iteration N" (CPU- und GPU-Schleife);
+  unkonvergiert → Fehler, `-scf_allow_unconverged true` stellt das alte Verhalten her; Runaway-Retry mit
+  weiterhin unmoeglichen Ladungen → Fehler; jeder GPU-Fehlschlag in `residentScfStep` benennt seine Stufe.
+  Doku: docs/SCF_MODES.md "Failure handling".
+- **Offen**: SimpleMD bricht bei einem SCF-Fehler erst nach dem ersten Schritt ab ("Simulation got
+  unstable"), zeigt den Fehlschritt als Epot = 0,0 und endet mit rc 0 (vorbestehend). ROCm-Spiegel des
+  `residentScfStep` meldet weiter ohne Grund (kein SDK hier).
+
+### Optimierer-Abbruch ohne Struktur — BEHOBEN (2026-09-27)
+- `OptimizerDriver::Optimize` gab bei "Energy rise exceeded", fehlgeschlagener Energieauswertung und
+  Ausnahmen ein Ergebnis **ohne Molekuel** zurueck; `main.cpp` meldete "No geometry available" — eine
+  GFN-FF-Optimierung von mixture2 verlor so 2015 Schritte. Jetzt gibt jeder Abbruch die letzte
+  akzeptierte Struktur (Energie, Gradient) zurueck, Dispatcher-Fehlschlaege die Eingabe (Energie NaN,
+  als "n/a" gemeldet). Getestet: Abbruch im 1. Schritt, geschriebene Struktur SP = gemeldete Energie.
+
+### SCF-Startwert `fragments` (Opt-in, 2026-09-27, Betreiber-Idee)
+- `-scf_guess fragments`: jedes kovalente Fragment einzeln konvergieren, Schalenladungen + GFN2-Multipole
+  als Startwert. Korrekt (gleiche Energien), aber auf mixture2-Ausschnitten nicht schneller (103/127 statt
+  111/76 Iterationen) — die Divergenz der Rohgeometrie ist keine Startwert-Frage. Doku: docs/SCF_MODES.md.
+
+### GFN-FF-NVE-Drift auf complex (231 Atome) unabhaengig vom EEQ-Loeser (Beobachtung, 2026-09-27)
+- **Status**: ⏳ OFFEN, nicht untersucht
+- **Befund**: NVE 1 ps, dt 0,5 fs, 300 K, 1 Thread: |Etot(1 ps) − Etot(0)| = 6,1e-3 Eh (max 1,0e-2),
+  identisch fuer refine 1 / 3 / exakt; w150 2,2e-3 Eh, water8 1,7e-4 Eh. n = 1 (Seed-Befund oben).
+  Kandidaten, ungeprueft: diskontinuierliche Listen (HB/XB-Zwangs-Neubau alle 10 Aufrufe,
+  `hb_update_force_every 10`), Gradientenrest der Repulsion (Known Issue „recorded gradient residual").
 
 ### SIGSEGV am Ursprung untersucht (Auftrag „fix den SIGSEGV am Ursprung") — nicht gefunden, Werkzeuge sind blind dafuer (2026-09-24)
 - **Status**: ⏳ OFFEN. Root Cause NICHT gefunden trotz gruendlicher Untersuchung mit ASan,
@@ -808,6 +1010,24 @@
 
 ---
 
+### Hessian: SCF-Schwelle erreicht die Worker nicht — BEHOBEN (2026-09-29)
+- `executeHessian` reicht die Methoden-Unterbereiche weiter, der Hessian-Konstruktor haengt sie nach ConfigManager wieder an.
+  Mit `-scf_threshold 1e-9` liefern CPU, 1 GPU und 4 GPUs identische Frequenzen (caffeine, gfn2).
+
+### ROCm: drei offene Fehler aus der Multi-GPU-Analyse — nur dokumentiert (2026-09-28)
+- **Status**: ⏳ offen. Betreiberentscheidung 28.09.: ohne ROCm-Hardware keine Codeaenderung, nur Doku.
+- **F-1**: GFN-FF auf ROCm rechnet standardmaessig **keinen Coulomb-Term** (seit `ab6e3f5e`, 17.09.):
+  implizite Coulomb-Paare leeren die Host-Liste, der HIP-Workspace hat keinen impliziten Zweig
+  (`ff_methods/rocm/gfnff_rocm.hip:4948-4975, 6337`). Umgehung: `-gfnff.gpu_coulomb_implicit false`.
+  Nur Codelesung, nicht ausgefuehrt.
+- **G2-13**: `qm_methods/xtb_hip_method.cpp:109` setzt Mixed Precision bedingungslos und ueberschreibt
+  `-scf_mixed_precision false` (CUDA hat den Fix, `xtb_gpu_method.cpp:695-705`).
+- **F-17**: Energiereduktionen setzen wave32 voraus (`gfnff_rocm.hip:86-128`), falsch auf CDNA/MI (wave64);
+  alle Geraete-EEQ-Varianten sind auf ROCm Stubs.
+- **Verweis**: [docs/MULTI_GPU_GAPS.md](docs/MULTI_GPU_GAPS.md), CLAUDE.md Known Issue #35.
+
+---
+
 ## 🔵 CAPABILITIES & ANALYSIS (src/capabilities/)
 
 ### ConfScan Verbosity Enhancement
@@ -845,6 +1065,9 @@
 ### ConfSearch: GPU + Multi-Threading (Future)
 - **Status**: ⏳ PLANNED
 - **Problem**: Bei threads > 1 konkurrieren mehrere MD-Instanzen um die GPU. Aktuell wird GPU deaktiviert wenn threads > 1.
+- **Korrektur 2026-09-28**: gilt nur, solange der GPU-Geraetepool inaktiv ist (genau eine sichtbare GPU, keine
+  `-gpu_devices`/`-gpu_workers_per_device`). Mit aktivem Pool bleibt die GPU an: jeder MD-Worker least einen
+  Slot, ueberzaehlige warten (`src/capabilities/confsearch.cpp:161-170`). Offen ist also nur noch der Ein-GPU-Fall.
 - **Task**: 
   1. Implementiere GPU-Lock (Mutex) oder Queue, sodass nur 1 Thread gleichzeitig die GPU nutzt
   2. Alternative: Ein Thread bekommt GPU-CUDA, andere nutzen CPU-Fallback

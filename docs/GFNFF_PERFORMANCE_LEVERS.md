@@ -241,7 +241,7 @@ helps CPU SP, CPU MD, and unblocks the GPU MD path simultaneously.
 
 ```bash
 # Per-phase timing (line-stamped):
-OMP_NUM_THREADS=4 stdbuf -oL -eL ./release/curcuma -sp mixture2.xyz -method gfnff \
+OMP_NUM_THREADS=4 stdbuf -oL -eL ./release/curcuma -sp test_cases/molecules/larger/mixture2.xyz -method gfnff \
   -threads 4 -v 2 -no_bmt 2>&1 | sed -ur 's/\x1b\[[0-9;]*m//g' | python3 stamp.py
 
 # Thread scaling:
@@ -249,7 +249,7 @@ for T in 1 4 8; do time OMP_NUM_THREADS=$T ./release/curcuma -sp \
   test_cases/eeq_mixture_fractions/mixed_3007.xyz -method gfnff -threads $T -v 1 -no_bmt; done
 
 # GPU (correct but not an SP win on GTX 1660):
-./release/curcuma -sp mixture2.xyz -method gfnff -gpu cuda -threads 4 -v 1 -no_bmt
+./release/curcuma -sp test_cases/molecules/larger/mixture2.xyz -method gfnff -gpu cuda -threads 4 -v 1 -no_bmt
 ```
 
 > AI-generated performance audit, June 2026. Measurements reproducible on the machine

@@ -20,6 +20,7 @@
 
 #include "ff_workspace.h"
 #include "cn_calculator.h"
+#include "gfnff_par.h"  // GFNFFParameters::gfnff_cn_rcov_bohr: the one CN radius source (Sep 2026)
 #include "src/core/curcuma_logger.h"
 #include "src/core/units.h"
 
@@ -74,7 +75,7 @@ void FFWorkspace::setInteractionLists(GFNFFParameterSet&& params)
 
     // Method type and distance unit factor
     m_method_type = params.method_type;
-    m_au = (m_method_type != FFMethodType::GFN_FF) ? 1.889726125 : 1.0;
+    m_au = (m_method_type != FFMethodType::GFN_FF) ? CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.889726125) : 1.0;
 
     m_dispersion_enabled = params.dispersion_enabled;
     m_hbond_enabled = params.hbond_enabled;
@@ -141,9 +142,14 @@ void FFWorkspace::setAtomTypes(const std::vector<int>& atoms)
     m_natoms = static_cast<int>(atoms.size());
     // rev-gfnff stage 3a(i) (Claude Generated, Sep 2026): the CN radii the pair correction in
     // calcBonds() needs. Built here (not lazily in a kernel) so that no worker thread writes it.
+    // Claude Generated (Sep 2026): uses GFNFFParameters::gfnff_cn_rcov_bohr(), the one CN radius
+    // source - this used to call CNCalculator::gfnffCNRadiusBohr(), a separate implementation
+    // still on the old CODATA-1986-derived Angstrom->Bohr constant (see gfnff_par.h), which put
+    // a systematic ~1-2.5e-10 Eh/bond offset between this corner-blending path and every other
+    // CN evaluation in GFN-FF.
     m_rev_cn_rcov.resize(atoms.size());
     for (size_t i = 0; i < atoms.size(); ++i)
-        m_rev_cn_rcov[i] = CNCalculator::gfnffCNRadiusBohr(atoms[i]);
+        m_rev_cn_rcov[i] = GFNFFParameters::gfnff_cn_rcov_bohr(atoms[i]);
 }
 
 void FFWorkspace::partition()

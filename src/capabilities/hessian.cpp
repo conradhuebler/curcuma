@@ -26,6 +26,7 @@
 
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
+#include "src/core/energy_calculators/method_factory.h"
 #include "src/core/intra_parallel_context.h"
 #include "src/core/gpu_device_pool.h"
 
@@ -219,6 +220,14 @@ void HessianThread::Threaded()
 Hessian::Hessian(const std::string& method, const json& controller, bool silent)
     : Hessian(method, ConfigManager("hessian", controller), silent)
 {
+    // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md H-2): ConfigManager keeps only scalar
+    // top-level keys, so method sub-scopes (xtb, gfnff, eeq_solver, ...) handed in by
+    // executeHessian were dropped before the displacement workers built their EnergyCalculators
+    // (-scf_threshold changed the frequencies by exactly 0). Re-attach them.
+    for (const std::string& scope : MethodFactory::methodParameterScopes()) {
+        if (controller.contains(scope) && controller[scope].is_object())
+            m_controller[scope] = controller[scope];
+    }
 }
 
 Hessian::Hessian(const json& controller, bool silent)
@@ -356,6 +365,12 @@ void Hessian::start()
         LoadMolecule(m_read_xyz);
         LoadHessian(m_read_file);
     }
+    // Claude Generated (Sep 2026): the displacement workers build their own EnergyCalculators,
+    // whose save/restore of the process-wide logger level interleaves when several run at once
+    // (CLAUDE.md Known Issue #3) and can leave it at 0 - the frequencies were then computed but
+    // never printed with -threads > 1. Re-assert the level at the pool boundary, as the MD/opt
+    // pool helpers do.
+    CurcumaLogger::set_verbosity(m_verbosity);
 
     m_frequencies = ConvertHessian(m_hessian);
 
@@ -586,8 +601,15 @@ void Hessian::CalculateHessianThreaded()
     if (m_method.compare("gfnff") == 0) {
         m_threads = 1;
         CurcumaLogger::warn("GFN-FF enforces single thread approach for numerical stability");
+    } else if (curcuma::GpuDevicePool::instance().active()) {
+        // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md G2-16): one displacement worker per
+        // GPU slot at least (each worker leases its device, HessianThread::execute); the default
+        // -threads 1 used to leave every GPU but device 0 idle.
+        m_threads = std::min(std::max(m_threads, curcuma::GpuDevicePool::instance().capacity()),
+                             static_cast<int>(m_molecule.AtomCount()));
     }
     std::vector<std::vector<int>> threads(m_threads);
+    pool->setActiveThreadCount(m_threads);   // m_threads may have changed above (atom count, GFN-FF, GPU slots)
 
     for (int i = 0; i < m_molecule.AtomCount(); ++i) {
         atoms.push_back(i);

@@ -1,6 +1,6 @@
 /*
  * <Curcuma main file.>
- * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *               2024 Gerd Gehrisch <gg27fyla@student.freiberg.de>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -18,6 +18,7 @@
  *
  */
 #include "src/core/gpu_device_pool.h"
+#include "src/core/gpu_fallback.h"
 #include "src/core/intra_parallel_context.h"
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 #include "src/core/energy_calculators/qm_methods/eht.h"
@@ -696,6 +697,7 @@ json CLI2Json(int argc, char** argv)
         "verbosity", "threads", "method", "gpu",  // energy_method and gpu apply to all capabilities
         "gpu_device",   // Claude Generated (Sep 2026, multi-GPU): device index for -gpu (see docs/MULTI_GPU.md)
         "gpu_devices", "gpu_workers_per_device",  // batch workers spread over these devices
+        "gpu_strict",   // Claude Generated (Sep 2026): any GPU fallback ends the run (exit 3), see src/core/gpu_fallback.h
         "gpu_memory_check",  // native gfn1/gfn2 GPU: refuse a basis that does not fit (default true)
         "gpu_sparse_integrals",  // native gfn1/gfn2 GPU: screened S/H0/multipole storage auto|on|off
         // Claude Generated (Sep 2026, multi-GPU step 3): multi-GPU eigensolve (docs/GPU_TUNING.md)
@@ -1285,7 +1287,15 @@ int executeHessian(const json& controller, int argc, char** argv) {
         return 1;
     }
     std::string method = controller.value("method", "gfnff");
-    Hessian hessian(method, controller.value("hessian", json::object()));
+    // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md H-2): the displacement workers build their
+    // EnergyCalculators from the hessian scope only, so -scf_threshold / -xtb.* / -gfnff.* never
+    // reached them. Forward the method sub-scopes as curcumaopt.cpp does for opt/sp.
+    json hessian_config = controller.value("hessian", json::object());
+    for (const std::string& scope : MethodFactory::methodParameterScopes()) {
+        if (controller.contains(scope) && controller[scope].is_object() && !hessian_config.contains(scope))
+            hessian_config[scope] = controller[scope];
+    }
+    Hessian hessian(method, hessian_config);
     initializeBMT(&hessian, argv[2], "hessian", controller);
     Molecule mol1 = Files::LoadFile(argv[2]);
     hessian.setMolecule(mol1);
@@ -2038,11 +2048,14 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         if (!dump_gradient_path.empty()) {
             std::ofstream gf(dump_gradient_path);
             if (gf) {
+                // Sep 2026: 17 significant digits (round-trip exact for a double), so two dumps
+                // can be compared bit for bit (run-to-run / thread-count determinism checks).
+                // The energy stays fixed-point: scripts read it with "-?\d+\.\d+".
                 gf << "# GFN-FF/xTB analytic gradient dE/dx [Eh/Angstrom], one atom per row\n";
-                gf << "# energy " << fmt::format("{:.12f}", energy) << " Eh, gnorm "
-                   << fmt::format("{:.12e}", grad_norm) << " Eh/Angstrom\n";
+                gf << "# energy " << fmt::format("{:.15f}", energy) << " Eh, gnorm "
+                   << fmt::format("{:.16e}", grad_norm) << " Eh/Angstrom\n";
                 for (int i = 0; i < gradient.rows(); ++i)
-                    gf << fmt::format("{:.14e} {:.14e} {:.14e}\n",
+                    gf << fmt::format("{:.16e} {:.16e} {:.16e}\n",
                                       gradient(i, 0), gradient(i, 1), gradient(i, 2));
             } else {
                 CurcumaLogger::error("Could not open -dump_gradient file: " + dump_gradient_path);
@@ -2197,10 +2210,15 @@ int executeOptimization(const json& controller, int argc, char** argv) {
                 // path below uses final_molecule for the same reason.
                 if (result.final_molecule.AtomCount() > 0) {
                     result.final_molecule.writeXYZFile(output_file);
-                    CurcumaLogger::warn_fmt("Last geometry written anyway to: {} (E = {:.8f} Eh, "
-                                            "|grad| = {:.6f}) - NOT a converged minimum",
-                                            output_file, result.final_energy,
-                                            result.final_gradient_norm);
+                    // Since Sep 2026 every abort returns the last accepted structure (or the
+                    // input, if the optimiser never started); energy/|grad| are NaN when unknown.
+                    auto num = [](double v, const char* f) {
+                        return std::isfinite(v) ? fmt::format(fmt::runtime(f), v) : std::string("n/a");
+                    };
+                    CurcumaLogger::warn_fmt("Last geometry written anyway to: {} (E = {} Eh, "
+                                            "|grad| = {}) - NOT a converged minimum",
+                                            output_file, num(result.final_energy, "{:.8f}"),
+                                            num(result.final_gradient_norm, "{:.6f}"));
                     std::vector<std::string> bak_files = BMTUtils::collectBakFiles(controller);
                     BMTUtils::processBakFiles(bmt_dir, bak_files);
                 } else {
@@ -3131,6 +3149,20 @@ int main(int argc, char **argv) {
     // runs and for a single visible device without explicit pool flags.
     curcuma::GpuDevicePool::instance().configure(controller);
 
+    // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md G2-15): `-gpu_strict true` turns every
+    // GPU fallback (CPU fallback of a worker, slower eigensolver library, EEQ fallback, ...)
+    // into a hard stop. Without it the fallbacks are counted and summarised after the run.
+    {
+        bool strict = false;
+        if (controller.contains("gpu_strict")) {
+            const auto& v = controller["gpu_strict"];
+            strict = v.is_boolean() ? v.get<bool>()
+                   : v.is_number()  ? v.get<double>() != 0.0
+                   : (v.is_string() && (v.get<std::string>() == "true" || v.get<std::string>() == "1"));
+        }
+        curcuma::setGpuStrict(strict);
+    }
+
     // Handle run export - Claude Generated (October 2025)
     // Export current configuration AFTER all merging/importing
     // Now global parameter, always in controller["export_run"] if present
@@ -3216,6 +3248,7 @@ int main(int argc, char **argv) {
     auto it = CAPABILITY_REGISTRY.find(command);
     if (it != CAPABILITY_REGISTRY.end()) {
         int result = it->second.handler(controller, argc, argv);
+        curcuma::printGpuFallbackSummary();
         return result;
     }
 

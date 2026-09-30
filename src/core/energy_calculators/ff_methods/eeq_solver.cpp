@@ -849,7 +849,7 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     if (m_config.get<int>("verbosity", 0) >= 2)
         CurcumaLogger::info(fmt::format("EEQ solver config: solve_method={}, ppcg auto at nfrag>={} & N>={}, tol={:.0e}, max_iter={}",
             m_config.get<std::string>("solve_method", "cholesky"), m_ppcg_min_nfrag, m_ppcg_min_atoms, m_ppcg_tol, m_ppcg_max_iter));
-    m_refactor_eps         = m_config.get<double>("eeq_refactor_eps_bohr", 0.05);
+    m_refactor_eps         = m_config.get<double>("eeq_refactor_eps_bohr", 0.0);
     m_refactor_force_every = m_config.get<int>("eeq_refactor_force_every", 0);
     m_refine_iters         = m_config.get<int>("eeq_refine_iters", 1);
     m_matrix_rebuild_eps   = m_config.get<double>("eeq_matrix_rebuild_eps_bohr", 0.0);
@@ -3157,7 +3157,7 @@ Matrix EEQSolver::computeTopologicalDistancesSparse(
     const float RABD_CUTOFF_F = 13.0f;   // Fortran gfnff_ini.f90:88, real(sp)
     const float TDIST_THR_F   = 12.0f;   // Fortran gfnff_param.f90:776, real(sp)
     const double RFGOED1 = 1.175;         // gfnff_param.f90:817
-    const double BOHR_TO_ANGSTROM = 0.52917726;
+    const double BOHR_TO_ANGSTROM = GFNFFParameters::gfnff_autoaa;  // reference-table constant (0.52917726 in a legacy-unit build), Sep 2026
 
     // Pre-compute float32 bond weights (sum of covalent radii per bond)
     // Build adjacency list with edge weights for Dijkstra

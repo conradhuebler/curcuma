@@ -1134,7 +1134,7 @@ private:
     bool m_skip_phase2;               ///< Skip Phase 2 and use Phase 1 topology charges directly (Claude Generated Apr 2026)
     EEQSolveMethod m_solve_method;    ///< Linear solve algorithm selection
     double m_eeq_distance_cutoff_override = -1.0;  ///< WP-S3: post-init cutoff override (-1 = use config)
-    double m_refactor_eps = 0.05;       ///< WP-EEQ-Cache: max displacement (Bohr) before re-factorizing
+    double m_refactor_eps = 0.0;        ///< WP-EEQ-Cache: max displacement (Bohr) before re-factorizing; 0 = cache off (default since Sep 27, 2026)
     int    m_refactor_force_every = 0;  ///< WP-EEQ-Cache: force refactorization every N steps (0 = disabled)
     int    m_refine_iters = 1;          ///< A4: iterative-refinement steps on a cached-factor solve (0 = off)
     // Projected PCG (many-fragment path, Sep 2026): see solveWithProjectedPCG()
@@ -1338,11 +1338,16 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "implicit-solvation reaction field) the robust path is cholesky's augmented-LU "
           "fallback, which ldlt does not reproduce.",
           "Algorithm", {})
-    PARAM(max_pcg_iterations, Int, 200,
-          "Maximum PCG iterations for EEQ solve", "Algorithm", {})
+    // Claude Generated (Sep 2026): defaults of max_pcg_iterations and pcg_large_system_iterations set
+    // to the values the code actually used. Until Sep 28, 2026 the parameter parser dropped both
+    // PARAMs (multi-line), so the registry never supplied 200/5000 and the CPU solver ran on its
+    // fallbacks (eeq_solver.cpp, 100 each). Registering them with 200/5000 would have changed
+    // results silently. The GPU wrapper keeps its own fallback (200) for its WP7-C PCG.
+    PARAM(max_pcg_iterations, Int, 100,
+          "Maximum PCG iterations for the CPU EEQ solve (the GPU WP7-C PCG defaults to 200 when this is not given)", "Algorithm", {})
     PARAM(pcg_tolerance, Double, 1e-10,
           "PCG convergence tolerance", "Algorithm", {})
-    PARAM(pcg_large_system_iterations, Int, 5000,
+    PARAM(pcg_large_system_iterations, Int, 100,
           "Max PCG iterations for large systems (N>pcg_large_threshold). Overrides max_pcg_iterations.", "Algorithm", {})
     PARAM(pcg_large_system_scaling, Int, 10,
           "PCG iteration scaling factor for large systems: max_iter = min(scaling*N, pcg_large_system_iterations)", "Algorithm", {})
@@ -1403,15 +1408,11 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "Advanced", {})
     PARAM(dump_charges, Bool, false,
           "Save Phase 1 and Phase 2 charges to charges_dump_N<size>.json for analysis", "Advanced", {})
-    PARAM(eeq_refactor_eps_bohr, Double, 0.05,
-          "WP-EEQ-Cache: Cholesky refactorization threshold (max atom displacement, Bohr). "
-          "Skips O(N^3) factorization when geometry change is below this. "
-          "Set to 0.0 (or negative) to disable the cache entirely — every call refactors, "
-          "bit-identical to pre-WP behavior.", "Algorithm", {})
+    PARAM(eeq_refactor_eps_bohr, Double, 0.0, "WP-EEQ-Cache: reuse the Cholesky factor of the EEQ matrix while no atom moved more than this many Bohr since the last factorisation, correcting the solve with eeq_refine_iters refinement steps. 0 (default since Sep 27, 2026) = factorise on every call, exact. Measured Sep 2026: below the projected-PCG threshold (eeq_ppcg_min_atoms, 500) the cache saves no time - 450-atom water cluster 16.05 ms per energy call cached vs 15.53 ms uncached - while one refinement step leaves a charge error of 1e-5 to 8e-4 e. Only consider it for the forced exact solve on large systems (eeq_ppcg_min_nfrag 0), not measured there.", "Algorithm", {})
     PARAM(eeq_refactor_force_every, Int, 0,
           "WP-EEQ-Cache: Force Cholesky refactorization every N steps regardless of geometry. "
           "0 = never force (only geometry-triggered). Recommended: 100 for long MD runs.", "Algorithm", {})
-    PARAM(eeq_refine_iters, Int, 1, "A4: iterative-refinement steps applied when the EEQ solve reuses a cached Cholesky factor. Each step costs O(N^2) and removes the stale-factor error, so charges stay exact for the current geometry and the gradient stays consistent. 0 disables refinement.", "Algorithm", {})
+    PARAM(eeq_refine_iters, Int, 1, "A4: iterative-refinement steps applied when the EEQ solve reuses a cached Cholesky factor - only with eeq_refactor_eps_bohr > 0. Each step costs O(N^2) and shrinks the stale-factor error geometrically; measured in MD at eps 0.05 Bohr: 1 step leaves 1e-5 to 8e-4 e, 3 steps about 1e-7 e. 0 disables refinement.", "Algorithm", {})
     PARAM(eeq_ppcg_min_nfrag, Int, 1, "Projected-PCG EEQ solve is selected automatically when the system has at least this many fragments AND at least eeq_ppcg_min_atoms atoms: ONE iterative solve on the constraint tangent space instead of the dense factorisation (+ nfrag extra solves). 0 disables the automatic choice (solve_method ppcg still forces it, eeq_ppcg_min_atoms keeps small systems exact). Converged to eeq_ppcg_tol; polymer/1410: 44 -> 16 ms per solve, dE 1e-12 Eh.", "Algorithm", {})
     PARAM(eeq_ppcg_min_atoms, Int, 500, "Minimum atom count for the automatic projected-PCG choice (small systems stay on the exact Schur-Cholesky solve).", "Algorithm", {})
     PARAM(eeq_ppcg_tol, Double, 1e-12, "Projected-PCG relative residual tolerance |P r| <= tol (|b|+1); 1e-12 gives energy/gradient deviations ~1e-12 from the direct solve (1e-10 saves ~15% of the iterations).", "Algorithm", {})

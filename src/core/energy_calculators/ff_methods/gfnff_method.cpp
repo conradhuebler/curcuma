@@ -237,10 +237,12 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
     }
 
     CurcumaLogger::result("  ═════════════════════════════════════════════════════════════════");
-    // Per-call init costs that are not part of param-gen but happen every setMolecule()
+    // Init cost of setMolecule(), measured once there. Sep 2026 (Claude Generated): it used to be
+    // printed and ADDED to "Total energy call" on every call - on polymer_2x a stale 498 ms per
+    // MD step that never happened (24 s run for 30 steps, not 30 x 680 ms). Labelled one-time now.
     if (r.t_gpu_upload > 0.0) {
         CurcumaLogger::result(fmt::format("  {:<32}  {:>14.1f} ms",
-            "GPU workspace upload", r.t_gpu_upload));
+            "GPU workspace upload (one-time)", r.t_gpu_upload));
     }
     if (r.t_topology > 0.0 || r.t_param_gen > 0.0) {
         CurcumaLogger::result(fmt::format("  {:<32}  topo={}  param={}",
@@ -248,9 +250,8 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
             (r.t_topology  > 0.0) ? fmt::format("{:>7.1f} ms", r.t_topology)  : "     --",
             (r.t_param_gen > 0.0) ? fmt::format("{:>7.1f} ms", r.t_param_gen) : "     --"));
     }
-    // Total from param-ready to result
-    double t_total = r.t_wall;
-    if (r.t_gpu_upload > 0.0) t_total += r.t_gpu_upload;
+    // Total from param-ready to result (this call only; the one-time upload is not part of it)
+    const double t_total = r.t_wall;
     CurcumaLogger::result(fmt::format("  {:<32}  wall={:>7.2f} ms",
         "Total energy call", t_total));
     CurcumaLogger::result("");
@@ -589,7 +590,7 @@ GFNFF::GFNFF(const json& parameters)
         { "hbond", true },
         { "repulsion_scaling", 1.0 },
         { "solvent", "none" },  // Claude Generated (Mar 2026): ALPB solvation
-        { "topology_mode", "auto" },  // "auto" (two-tier caching) or "constant" (never recalculate)
+        { "topology_mode", "constant" },  // "constant" (frozen, reference behaviour; default since Sep 29, 2026), "auto" or "react"
         { "cache_topology", true },   // Claude Generated (Mar 2026): Cache Phase-1 topology in param.json (opt-out)
         { "print_timing", true }      // Claude Generated (Mar 2026): Print init timing at verbosity >= 1
     };
@@ -618,12 +619,12 @@ GFNFF::GFNFF(const json& parameters)
 
     // Extract topology mode: auto (adaptive caching), constant (frozen), react
     // (dynamic bond topology, Claude Generated Aug 2026). "default" aliases auto.
-    m_topology_mode = m_parameters.value("topology_mode", "auto");
+    m_topology_mode = m_parameters.value("topology_mode", "constant");
     if (m_topology_mode == "default")
-        m_topology_mode = "auto";
+        m_topology_mode = "constant";
     if (m_topology_mode != "auto" && m_topology_mode != "constant" && m_topology_mode != "react") {
-        CurcumaLogger::warn(fmt::format("GFNFF: unknown topology_mode '{}', falling back to 'auto'", m_topology_mode));
-        m_topology_mode = "auto";
+        CurcumaLogger::warn(fmt::format("GFNFF: unknown topology_mode '{}', falling back to 'constant'", m_topology_mode));
+        m_topology_mode = "constant";
     }
     m_react_form_factor = m_parameters.value("react_bond_form_factor", 1.6);
     m_react_break_factor = m_parameters.value("react_bond_break_factor", 2.6);
@@ -768,6 +769,14 @@ void GFNFF::forwardEEQSolverParams(json& eeq_params) {
         if (!eeq.contains("eeq_distance_cutoff")) {
             eeq["eeq_distance_cutoff"] = m_parameters["eeq_distance_cutoff"];
         }
+    }
+
+    // Claude Generated (Sep 2026): the projected-PCG switches too, so -gfnff.eeq_ppcg_* reaches
+    // the CPU solver. The GPU reads min_nfrag/min_atoms/max_iter from the eeq_solver scope
+    // first, then from gfnff; its tolerance is pcg_tolerance (absolute), not eeq_ppcg_tol.
+    for (const char* key : { "eeq_ppcg_min_nfrag", "eeq_ppcg_min_atoms", "eeq_ppcg_tol", "eeq_ppcg_max_iter" }) {
+        if (m_parameters.contains(key) && !eeq.contains(key))
+            eeq[key] = m_parameters[key];
     }
 
     // WP-EEQ-Cache: forward Cholesky-cache params to eeq_solver
@@ -1106,7 +1115,16 @@ bool GFNFF::UpdateMolecule()
 const GFNFF::TopologyInfo& GFNFF::getCachedTopology() const {
     // Constant topology mode: always return cached topology after first calculation
     // Useful for MD/optimization where bond connectivity never changes
-    if (m_topology_mode == "constant" && m_cached_topology) {
+    // Claude Generated (Sep 30, 2026): must also check m_static_topology_valid, matching the
+    // sibling getCachedBondList()'s condition below - an explicit invalidation (the rev-gfnff
+    // pair-validity gate's forceAndReset(), gfnff_pair_validity.cpp) sets this flag false to force
+    // a one-off recompute on a bond list it forced, without moving the geometry; this shortcut
+    // used to ignore that signal entirely once m_cached_topology existed, so under the
+    // topology_mode=constant default (Sep 29, 2026) the gate's regenerated corner was silently
+    // replaced by the stale ungated topology for every consumer that goes through this cache
+    // (e.g. FFWorkspace::calcOverCoordination's repulsion-list blend flags) - found via
+    // cli_gfnff_07_pair_validity_gate regressing after the topology_mode default flip.
+    if (m_topology_mode == "constant" && m_cached_topology && m_static_topology_valid) {
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("GFNFF: Using constant topology (mode=constant)");
         }
@@ -1160,6 +1178,12 @@ const GFNFF::TopologyInfo& GFNFF::getCachedTopology() const {
 }
 
 const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
+    // Claude Generated (Sep 2026): with a frozen topology (constant mode, after the first full
+    // topology) the bond list is frozen too, as in the reference, where every bonded/non-bonded
+    // classification during MD uses the setup topology. Recomputing it (26.8 M pair tests at 7320
+    // atoms) was ~75 % of each non-bonded repulsion rebuild (~200 ms per rebuild on polymer_2x).
+    if (m_cached_bond_list && m_static_topology_valid && m_topology_mode == "constant")
+        return *m_cached_bond_list;
     // Only recalculate if geometry has meaningfully changed
     if (!m_cached_bond_list || m_geometry_tracker.geometryChanged(m_geometry_bohr)) {
         if (m_cached_bond_list && CurcumaLogger::get_verbosity() >= 2) {
@@ -1833,6 +1857,11 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             m_last_cnf = Vector();
         }
         m_last_dcn.clear();
+        // Claude Generated (Sep 2026): the Coulomb self-energy reads the workspace CN
+        // (chi = chi_base + cnf*sqrt(CN)), which only the gradient path above set. An
+        // energy-only call at a new geometry therefore used the CN of the last gradient call
+        // (triose, 0.08 A displacement: 4.6e-3 Eh, all in the Coulomb term).
+        if (!gpu_only && m_workspace) m_workspace->setCN(m_last_cn);
 
         if (do_eeq && !skip_eeq && !eeq_charges_current) {
             t0 = std::chrono::high_resolution_clock::now();
@@ -4682,7 +4711,7 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSetImpl()
     if (coulomb_implicit && m_parameters.value("eeq_distance_cutoff", 0.0) <= 0.0) {
         params.coulombs.clear();
         params.coulomb_implicit = true;
-        params.coulomb_implicit_rcut = m_parameters.value("coulomb_r_cut", 100.0);
+        params.coulomb_implicit_rcut = coulombRCutBohr();
     } else {
         params.coulombs = generateCoulombPairsNative();
     }
@@ -6247,7 +6276,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         CurcumaLogger::info(fmt::format("  full_product = {:.6f}", full_product));
         CurcumaLogger::info(fmt::format("  k_b (final)  = {:.6f} Eh", params.force_constant));
         CurcumaLogger::info(fmt::format("  r0           = {:.6f} Bohr ({:.4f} Å)", params.equilibrium_distance,
-                                         params.equilibrium_distance * 0.529177));
+                                         params.equilibrium_distance * CurcumaUnit::Length::bohr_radius_or_legacy(0.529177)));
         CurcumaLogger::info(fmt::format("  alpha        = {:.6f}", params.alpha));
         // Compare with Fortran reference for first C-C bond
         if (bond_count == 0 && z1 == 6 && z2 == 6) {
@@ -7070,13 +7099,11 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
     const double kn = -7.5;
     const double cnmax = 4.4;
     const double sqrtpi = 1.77245385091;
-    const double ANG2BOHR = 1.8897259886;
-    const double k_scaled = 4.0 / 3.0;
 
     // Pre-compute covalent radii in Bohr with 4/3 scaling
     std::vector<double> rcov_bohr(m_atomcount);
     for (int i = 0; i < m_atomcount; ++i) {
-        rcov_bohr[i] = k_scaled * CNCalculator::getCovalentRadius(m_atoms[i]) * ANG2BOHR;
+        rcov_bohr[i] = GFNFFParameters::gfnff_cn_rcov_bohr(m_atoms[i]);
     }
 
     // Step 1: Compute raw CN — parallelise over atoms (each atom independent).
@@ -7492,14 +7519,12 @@ GFNFF::CNAndDerivResult GFNFF::computeCNAndDerivativesFused(
     const double kn      = -7.5;
     const double cnmax   = 4.4;
     const double sqrtpi  = 1.77245385091;
-    const double ANG2BOHR = 1.8897259886;
-    const double k_scaled = 4.0 / 3.0;
     const double cutoff_sq = cn_cutoff_bohr * cn_cutoff_bohr;
 
     // Pre-compute covalent radii in Bohr with GFN-FF 4/3 scaling
     std::vector<double> rcov_bohr(N);
     for (int i = 0; i < N; ++i)
-        rcov_bohr[i] = k_scaled * CNCalculator::getCovalentRadius(m_atoms[i]) * ANG2BOHR;
+        rcov_bohr[i] = GFNFFParameters::gfnff_cn_rcov_bohr(m_atoms[i]);
 
     CNAndDerivResult result;
     result.cn_values.resize(N);
@@ -8907,8 +8932,9 @@ std::vector<double> GFNFF::computeMetallicCharacter() const
      * So the sum of norms needs one O(N*k) pass over the CN neighbour list.
      *
      * Radii note: Fortran param%rcov == covalentRadD3 with "* aatoau * 4/3" already
-     * applied in the array literal (gfnff_param.f90:405), which is exactly what
-     * CNCalculator applies (k_scaled * COVALENT_RADII * ANG2BOHR). Same radii.
+     * applied in the array literal (gfnff_param.f90:405). Every CN evaluation takes it
+     * from GFNFFParameters::gfnff_cn_rcov_bohr() since Sep 2026 - this site used to apply
+     * the CODATA-2018 constant while CNCalculator used the CODATA-1986 one (1.8897259886).
      */
     using GFNFFParameters::gfnff_en;
 
@@ -8928,10 +8954,9 @@ std::vector<double> GFNFF::computeMetallicCharacter() const
         m_atoms, m_geometry_bohr, mchar_cutoff_bohr, kn, cnmax);
 
     // Scaled covalent radii in Bohr (must match CNCalculator exactly)
-    const double k_scaled = 4.0 / 3.0;
     std::vector<double> rcov_bohr(m_atomcount, 0.0);
     for (int i = 0; i < m_atomcount; ++i) {
-        rcov_bohr[i] = k_scaled * CNCalculator::getCovalentRadius(m_atoms[i]) * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
+        rcov_bohr[i] = GFNFFParameters::gfnff_cn_rcov_bohr(m_atoms[i]);
     }
 
     for (int i = 0; i < m_atomcount; ++i) {
@@ -11968,9 +11993,9 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
     const double eeq_cut = m_parameters.value("eeq_distance_cutoff", 0.0);
     const bool cutoff_active = (eeq_cut > 0.0);
     const double effective_r_cut = cutoff_active ? eeq_cut
-                                                 : m_parameters.value("coulomb_r_cut", 100.0);
+                                                 : coulombRCutBohr();
     // Claude Generated (Sep 2026): build radius = cutoff + optional Verlet skin
-    // (nonbonded_skin_bohr, default 0); the kernel still cuts at effective_r_cut.
+    // (nonbonded_skin_bohr, default 2 since Sep 27, 2026); the kernel still cuts at effective_r_cut.
     const double build_cut = cutoff_active ? eeq_cut + nonbondedSkinBohr() : 0.0;
     const double cutoff_sq = cutoff_active ? build_cut * build_cut : 0.0;
 
@@ -12261,18 +12286,22 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
     // path bit-identical.
     constexpr double NB_REP_RCUT = 20.0;
 
-    auto make_nb_rep = [&](int ii, int jj) {
+    // Claude Generated (Sep 2026): returns the pair instead of appending it, so the candidate
+    // pairs can be evaluated in parallel (see below). Unchanged physics. hh_use_bpair/hh_table
+    // are already in scope, hoisted above (shared with the bonded_reps loop and the rev-blend
+    // nonbonded_set lambda so all three use the same H...H classification).
+    auto make_nb_rep = [&](int ii, int jj, GFNFFRepulsion& r) -> bool {
         int i = std::min(ii, jj);
         int j = std::max(ii, jj);
-        if (i == j) return;
-        if (bonded_set.count({i, j}) > 0) return;
+        if (i == j) return false;
+        if (bonded_set.count({i, j}) > 0) return false;
 
         int zi = m_atoms[i] - 1;
         int zj = m_atoms[j] - 1;
 
         bool valid = (zi >= 0 && zi < static_cast<int>(repan_angewChem2020.size()) &&
                       zj >= 0 && zj < static_cast<int>(repan_angewChem2020.size()));
-        if (!valid) return;
+        if (!valid) return false;
 
         double repz_i = (zi >= 0 && zi < static_cast<int>(repz.size())) ? repz[zi] : 1.0;
         double repz_j = (zj >= 0 && zj < static_cast<int>(repz.size())) ? repz[zj] : 1.0;
@@ -12309,7 +12338,7 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
             ff = 1.04;
         }
 
-        GFNFFRepulsion r;
+        r = GFNFFRepulsion{};
         r.i = i;
         r.j = j;
         r.alpha = std::sqrt(dum1 * dum2) * ff;
@@ -12324,27 +12353,54 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
             r.bo_mult = 1.0;
         }
 
-        nonbonded_reps.push_back(r);
-
         if (m_rep_diag) {
             int topo_dist = topo_info.topo_distances.get(i, j);
             fmt::print(stderr, "nb_rep {:3d}-{:3d} alpha={:.10f} repab={:.10f} qa_i={:.10f} qa_j={:.10f} cn_i={:.0f} cn_j={:.0f} ff={:.4f} bpair={}\n",
                 i+1, j+1, r.alpha, r.repab, qa_i, qa_j, cn_i, cn_j, ff, topo_dist);
         }
+        return true;
     };
 
+    // Claude Generated (Sep 2026): collect the candidate pairs serially (cheap), evaluate them in
+    // parallel in contiguous static ranges and concatenate the ranges in order - the list is
+    // identical to the serial one, element for element. The per-pair work (bonded-set lookup,
+    // H...H topology lookup, sqrt) made this ~64 ms of every repulsion rebuild at 7320 atoms.
+    std::vector<std::pair<int, int>> cand;
     if (repulsionListIsDistanceFiltered()) {
         // Claude Generated (Sep 2026): build radius = kernel cutoff + optional Verlet skin
-        // (nonbonded_skin_bohr, default 0). Pairs between 20 and 20+skin are stored but the
+        // (nonbonded_skin_bohr, default 2 since Sep 27, 2026). Pairs between 20 and 20+skin are stored but the
         // kernel still skips them (r.r_cut stays NB_REP_RCUT); they are the reserve that lets
         // updateNonbondedRepulsionIfNeeded() rebuild only after skin/2 of atomic motion.
         SpatialCellList rep_cells;
         rep_cells.build(m_geometry_bohr, NB_REP_RCUT + nonbondedSkinBohr());
-        rep_cells.forEachPair([&](int i, int j, double /*r2*/) { make_nb_rep(i, j); });
+        rep_cells.forEachPair([&](int i, int j, double /*r2*/) { cand.emplace_back(i, j); });
     } else {
+        cand.reserve(static_cast<size_t>(m_atomcount) * (m_atomcount - 1) / 2);
         for (int i = 0; i < m_atomcount; ++i)
             for (int j = i + 1; j < m_atomcount; ++j)
-                make_nb_rep(i, j);
+                cand.emplace_back(i, j);
+    }
+    const int rep_threads = std::max(1, m_threads);
+    if (m_rep_diag || rep_threads == 1 || cand.size() < 20000) {
+        nonbonded_reps.reserve(cand.size());
+        GFNFFRepulsion r;
+        for (const auto& c : cand)
+            if (make_nb_rep(c.first, c.second, r)) nonbonded_reps.push_back(r);
+    } else {
+        std::vector<std::vector<GFNFFRepulsion>> part(rep_threads);
+        const size_t n = cand.size();
+        #pragma omp parallel for num_threads(rep_threads) schedule(static, 1)
+        for (int t = 0; t < rep_threads; ++t) {
+            const size_t a = n * t / rep_threads, b = n * (t + 1) / rep_threads;
+            part[t].reserve(b - a);
+            GFNFFRepulsion r;
+            for (size_t k = a; k < b; ++k)
+                if (make_nb_rep(cand[k].first, cand[k].second, r)) part[t].push_back(r);
+        }
+        size_t total = 0;
+        for (const auto& pp : part) total += pp.size();
+        nonbonded_reps.reserve(total);
+        for (auto& pp : part) nonbonded_reps.insert(nonbonded_reps.end(), pp.begin(), pp.end());
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -12521,7 +12577,17 @@ double GFNFF::dispersionSkinBohr() const
 double GFNFF::nonbondedSkinBohr() const
 {
     // Claude Generated (Sep 2026): Verlet skin of the repulsion and explicit-Coulomb lists.
-    return std::max(0.0, m_parameters.value("nonbonded_skin_bohr", 0.0));
+    return std::max(0.0, m_parameters.value("nonbonded_skin_bohr", 2.0));  // default 2 since Sep 27, 2026
+}
+
+double GFNFF::coulombRCutBohr() const
+{
+    // Claude Generated (Sep 2026): one reader for coulomb_r_cut. The reference has no
+    // electrostatics cutoff, and neither does the EEQ solve that produces the charges; the
+    // former 100 Bohr default truncated the energy of any system wider than ~53 Angstrom
+    // (polymer_2x: +112.7 kcal/mol vs pprcht). <= 0 means no cutoff.
+    const double rc = m_parameters.value("coulomb_r_cut", 0.0);
+    return rc > 0.0 ? rc : std::numeric_limits<double>::infinity();
 }
 
 bool GFNFF::repulsionListIsDistanceFiltered() const

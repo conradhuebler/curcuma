@@ -45,7 +45,7 @@ Force field implementation system with multi-threading support for UFF, QMDFF, a
 
 **EEQSolver** (`eeq_solver.cpp/h`): two-phase EEQ (topological Phase 1, geometric Phase 2 with
 dxi/dgam/alpha corrections); Schur-Cholesky default (`dpotrf` under `ScopedBlasThreads`),
-PCG/LDLT/LU alternatives, cached factor + iterative refinement for MD; **projected PCG**
+PCG/LDLT/LU alternatives, opt-in cached factor + iterative refinement for MD (off by default since Sep 27, 2026); **projected PCG**
 (`solveWithProjectedPCG`, default for N >= 500, tol 1e-12, `eeq_ppcg_min_nfrag 0` = exact) replaces the O(N² nfrag) Schur
 route for many-fragment boxes (water/3000: 887 -> 59 ms per solve, energies identical to 12
 digits, gradients to 3e-10). Phase-2 takes
@@ -358,8 +358,11 @@ NOT loosened**: (a) there is no speed to gain — the whole cache mechanism is ~
 of MD wall time, comparable to noise, since the threaded LAPACK `dpotrf` path
 landed after the WP was written; (b) `eeq_matrix_rebuild_eps_bohr>0` makes
 `A_nn` itself stale, so refinement cannot rescue it (identical Etot at refine
-0/1/3) — it stays disabled. At the default threshold refinement is a numerical
-no-op, so single points are unaffected.
+0/1/3) — it stays disabled. Single points never hit the cache. **Caveat (Sep 27, 2026)**:
+"one step is enough at the default threshold" does not hold in MD on water8 (24 atoms) —
+refine 1 leaves the trajectory 7.8e-6 A/step off the exact solve, refine 3 matches it; energy
+conservation unaffected. **Since Sep 27, 2026 the cache is off by default** (`eeq_refactor_eps_bohr 0`):
+below 500 atoms it saved no time (450-atom water cluster 16.05 ms cached vs 15.53 ms uncached per call).
 
 **Jun 2026 — large-system GFN-FF speedups** (see `docs/GFNFF_PERFORMANCE_LEVERS.md`):
 - **HB candidate generation (Lever 1)**: cell-list nhb2 (`hyd_on[]`) + nhb1
@@ -682,6 +685,10 @@ std::string method = "d4";  // Matches Fortran reference
   two backends must not export identical symbols). Kernel TUs stay separate (not merged blind;
   no ROCm SDK here — the HIP side is a token-identical mechanical mirror, uncompiled).
 
+- **Sep 27, 2026 — EEQ default = CPU semantics**: nfrag>1 with `solve_method cholesky` resolves
+  once (`many_frag_method` in `gfnff_gpu_method_impl.h`) to WP7-E above `eeq_ppcg_min_nfrag`/
+  `min_atoms`, else WP7-A; `0` forces exact on CPU and GPU. Numbers: docs/GPU_TUNING.md section 3.
+
 ### ✅ Phase 1+2: GPU CN + GPU dc6dcn (March 2026)
 - GPU CN computation replaces CPU O(N²) erf() loop
 - GPU dc6dcn per-pair kernel replaces CPU O(N²) matrix + extraction
@@ -728,7 +735,7 @@ std::string method = "d4";  // Matches Fortran reference
 - 8 `gfnff` PARAMs trade perf/accuracy; defaults bit-identical to Fortran-parity. See [docs/GPU_GFNNF_DISCREPANCIES.md](../../../../docs/GPU_GFNNF_DISCREPANCIES.md#performanceaccuracy-tuning-knobs-task-10--11-june-2026)
 - Task #10: `gpu_cn_pair_regen` (default ON) rebuilds the stale-prone CN-deriv pair list on topology change; `gpu_cn_pair_cutoff_factor` widens it (`ff_workspace_gpu.cu`)
 - Task #11: `hb_accuracy`/`hb_thr{1,2}_bohr2` set hbthr1/hbthr2; `hb_update_rmsd_bohr`/`hb_update_force_every` control rebuild timing (`gfnff_method.cpp`)
-- **Caveat**: registry PARAMs MUST be single-line — `param_parser` drops multi-line PARAMs whose help text contains `)`
+- **Resolved Sep 28, 2026**: multi-line PARAMs (help with `)` or adjacent literals) are now parsed; the single-line rule is obsolete (docs/PARAMETER_SYSTEM.md)
 
 ### ✅ EEQ WP7-D — block-Jacobi PCG (GPU) + contact-aware dispatch (CPU, Jun 2026)
 - GPU-PCG now uses the per-fragment **block-Jacobi** preconditioner (port of CPU `buildBlockJacobi`) instead of diagonal Jacobi → far fewer iters for many fragments, exact (`k_eeq_block_jacobi_apply`/`buildBlockJacobiFactors` in `cuda/eeq_solver_gpu.cu`; verified == GPU SchurCholesky ≤1e-8)

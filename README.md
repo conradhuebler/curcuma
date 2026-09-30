@@ -48,6 +48,9 @@ system dependencies (one backend per build dir: `release_cuda/`, `release_rocm/`
 - **Multi-GPU** (Sep 2026, AI-generated, machine-tested): `-gpu_device N` pins a run to one
   device; batch runs (`-sp`/`-opt` on a multi-XYZ file, ConfSearch, Hessian) spread their
   workers over all visible GPUs (`-gpu_devices 0,2`, `-gpu_workers_per_device 2`).
+  GFN-FF spreads ONE large molecule over the visible GPUs (Coulomb + EEQ; `-gfnff.gpu_split_devices`).
+  Every GPU fallback is summarised after the run; `-gpu_strict true` stops at the first one
+  (exit code 3), see [docs/GPU_TUNING.md](docs/GPU_TUNING.md).
   `curcuma -methods` lists the devices. One large GFN1/GFN2 molecule can spread its
   eigensolve and its density over several GPUs; with more than one device visible this is the
   default from 4000 basis functions up (`-gpu_eigensolver_devices none` / `-gpu_density_devices
@@ -196,6 +199,8 @@ side, so it neither heats nor lets anything out; it is a container, not a period
 see [docs/WP-PERIODIC-NONBONDED.md](docs/WP-PERIODIC-NONBONDED.md)).
 
 **Cross-platform determinism (`-DUSE_PORTABLE_MATH=ON`)**: Wine and native Windows can round `erf`/`acos`/`exp`/`log` differently in the last bit (different CRT-DLL reimplementations), which can flip a GFN-FF classification threshold into a different bond term. Vendored fdlibm-derived replacements close this; off by default, on for the Windows nightly build — see [docs/PORTABLE_ERF.md](docs/PORTABLE_ERF.md).
+
+**One unit system (`-DUSE_LEGACY_UNIT_CONSTANTS=ON` to revert)**: every Bohr/Ångström and Hartree conversion uses CODATA 2018 (`src/core/units.h`). Before Sep 2026 seven different Bohr radii were in use, which put a systematic 5e-7 Eh between CPU and GPU GFN-FF on a 7320-atom system; the legacy build restores the old per-site values bit for bit — see [docs/UNIT_CONSTANTS.md](docs/UNIT_CONSTANTS.md).
 
 **Known differences from Fortran reference** (see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)):
 - Sub-mEh agreement for most small/medium molecules

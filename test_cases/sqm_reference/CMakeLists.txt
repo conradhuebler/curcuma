@@ -532,15 +532,18 @@ endif()
 # === Stage 3 GPU integral component tests (Claude Generated, GPU port) ======
 # Each compares a device integral kernel to its CPU reference elementwise @1e-9.
 # Built only with USE_CUDA; the exes runtime-skip (exit 0) without a device,
-# so they never false-fail off-GPU. Linked against curcuma_core (CPU reference
-# + the compiled device kernels).
+# so they never false-fail off-GPU. Linked against curcuma_core (CPU reference)
+# and the curcuma_cuda plugin (listed FIRST: the plugin needs host symbols from the static core; the device kernels and XtbGpuContext live there since
+# Jul 2026; USE_CUDA no longer propagates from curcuma_core, so it is set per target -
+# without it xtb_gpu_context.h is empty and the tests failed to compile).
 if(USE_CUDA)
     set(_SQM_CUDA_MOL ${CMAKE_CURRENT_SOURCE_DIR}/molecules)
     set(_SQM_CUDA_COMP_MOLS H2O CH4 NH3 C6H6 HCN triose)
 
     # 3a: coordination numbers + CN-shifted self-energies.
     add_executable(test_xtb_cuda_cn test_xtb_cuda_cn.cpp)
-    target_link_libraries(test_xtb_cuda_cn PRIVATE curcuma_core)
+    target_link_libraries(test_xtb_cuda_cn PRIVATE curcuma_cuda curcuma_core CUDA::cudart)
+    target_compile_definitions(test_xtb_cuda_cn PRIVATE USE_CUDA)
     target_include_directories(test_xtb_cuda_cn PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/external
@@ -559,7 +562,8 @@ if(USE_CUDA)
 
     # 3b: overlap S + bare Hamiltonian H0 + device Cholesky L.
     add_executable(test_xtb_cuda_h0 test_xtb_cuda_h0.cpp)
-    target_link_libraries(test_xtb_cuda_h0 PRIVATE curcuma_core)
+    target_link_libraries(test_xtb_cuda_h0 PRIVATE curcuma_cuda curcuma_core CUDA::cudart)
+    target_compile_definitions(test_xtb_cuda_h0 PRIVATE USE_CUDA)
     target_include_directories(test_xtb_cuda_h0 PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/external
@@ -578,7 +582,8 @@ if(USE_CUDA)
 
     # 3c: Coulomb gamma matrix.
     add_executable(test_xtb_cuda_gamma test_xtb_cuda_gamma.cpp)
-    target_link_libraries(test_xtb_cuda_gamma PRIVATE curcuma_core)
+    target_link_libraries(test_xtb_cuda_gamma PRIVATE curcuma_cuda curcuma_core CUDA::cudart)
+    target_compile_definitions(test_xtb_cuda_gamma PRIVATE USE_CUDA)
     target_include_directories(test_xtb_cuda_gamma PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/external
@@ -597,7 +602,8 @@ if(USE_CUDA)
 
     # 3d: GFN2 multipole integrals (dipole + traceless quadrupole). GFN2 only.
     add_executable(test_xtb_cuda_multipole test_xtb_cuda_multipole.cpp)
-    target_link_libraries(test_xtb_cuda_multipole PRIVATE curcuma_core)
+    target_link_libraries(test_xtb_cuda_multipole PRIVATE curcuma_cuda curcuma_core CUDA::cudart)
+    target_compile_definitions(test_xtb_cuda_multipole PRIVATE USE_CUDA)
     target_include_directories(test_xtb_cuda_multipole PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/external
@@ -614,7 +620,8 @@ if(USE_CUDA)
 
     # 4 (primitive): overlap derivative dS/dR — crux of the nuclear gradient.
     add_executable(test_xtb_cuda_overlap_grad test_xtb_cuda_overlap_grad.cpp)
-    target_link_libraries(test_xtb_cuda_overlap_grad PRIVATE curcuma_core)
+    target_link_libraries(test_xtb_cuda_overlap_grad PRIVATE curcuma_cuda curcuma_core CUDA::cudart)
+    target_compile_definitions(test_xtb_cuda_overlap_grad PRIVATE USE_CUDA)
     target_include_directories(test_xtb_cuda_overlap_grad PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/external
@@ -633,7 +640,8 @@ if(USE_CUDA)
 
     # 4a: full GFN1 nuclear gradient (device sections 1/2/3 + host 3b/4) vs CPU.
     add_executable(test_xtb_cuda_gradient test_xtb_cuda_gradient.cpp)
-    target_link_libraries(test_xtb_cuda_gradient PRIVATE curcuma_core)
+    target_link_libraries(test_xtb_cuda_gradient PRIVATE curcuma_cuda curcuma_core CUDA::cudart)
+    target_compile_definitions(test_xtb_cuda_gradient PRIVATE USE_CUDA)
     target_include_directories(test_xtb_cuda_gradient PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/external
@@ -653,7 +661,8 @@ if(USE_CUDA)
     # 5 (Part A): single-shot D4 EEQ charges + dq/dx charge-response on the device
     # vs D4ChargeModel CPU. Charges FP64 LU (~1e-10); response has reductions → 1e-9.
     add_executable(test_xtb_cuda_eeq test_xtb_cuda_eeq.cpp)
-    target_link_libraries(test_xtb_cuda_eeq PRIVATE curcuma_core)
+    target_link_libraries(test_xtb_cuda_eeq PRIVATE curcuma_cuda curcuma_core CUDA::cudart)
+    target_compile_definitions(test_xtb_cuda_eeq PRIVATE USE_CUDA)
     target_include_directories(test_xtb_cuda_eeq PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/external
@@ -673,7 +682,8 @@ if(USE_CUDA)
     # 5 (Part B1): device atomic Mulliken charges from the resident density vs the
     # host updatePopulations (GFN2 only — the resident ao2at map + in-SCF D4 q_at).
     add_executable(test_xtb_cuda_qat test_xtb_cuda_qat.cpp)
-    target_link_libraries(test_xtb_cuda_qat PRIVATE curcuma_core)
+    target_link_libraries(test_xtb_cuda_qat PRIVATE curcuma_cuda curcuma_core CUDA::cudart)
+    target_compile_definitions(test_xtb_cuda_qat PRIVATE USE_CUDA)
     target_include_directories(test_xtb_cuda_qat PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/external
@@ -691,7 +701,8 @@ if(USE_CUDA)
     # 5 (Part B2): in-SCF GFN2 D4 atom-potential dE_D4/dq on the device vs the host
     # D4Evaluator at a frozen charge set (GFN2 only).
     add_executable(test_xtb_cuda_d4pot test_xtb_cuda_d4pot.cpp)
-    target_link_libraries(test_xtb_cuda_d4pot PRIVATE curcuma_core)
+    target_link_libraries(test_xtb_cuda_d4pot PRIVATE curcuma_cuda curcuma_core CUDA::cudart)
+    target_compile_definitions(test_xtb_cuda_d4pot PRIVATE USE_CUDA)
     target_include_directories(test_xtb_cuda_d4pot PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/external
@@ -713,7 +724,8 @@ if(USE_CUDA)
     # 6 (S6.1): device occupations (Fermi / integer fill) vs host occupationsFromEps
     # at a converged eps spectrum. Method-independent kernel — gfn1 + gfn2.
     add_executable(test_xtb_cuda_occ test_xtb_cuda_occ.cpp)
-    target_link_libraries(test_xtb_cuda_occ PRIVATE curcuma_core)
+    target_link_libraries(test_xtb_cuda_occ PRIVATE curcuma_cuda curcuma_core CUDA::cudart)
+    target_compile_definitions(test_xtb_cuda_occ PRIVATE USE_CUDA)
     target_include_directories(test_xtb_cuda_occ PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/external
@@ -732,7 +744,8 @@ if(USE_CUDA)
 
     # 6 (S6.2): device resident shell Mulliken charges vs host getShellCharges (gfn2).
     add_executable(test_xtb_cuda_qsh test_xtb_cuda_qsh.cpp)
-    target_link_libraries(test_xtb_cuda_qsh PRIVATE curcuma_core)
+    target_link_libraries(test_xtb_cuda_qsh PRIVATE curcuma_cuda curcuma_core CUDA::cudart)
+    target_compile_definitions(test_xtb_cuda_qsh PRIVATE USE_CUDA)
     target_include_directories(test_xtb_cuda_qsh PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/external
@@ -750,7 +763,8 @@ if(USE_CUDA)
     # 6 (S6.2b): device D4 reference weights W/dWq rebuilt from q vs host buildRefWFlat
     # at a frozen charge set (gfn2).
     add_executable(test_xtb_cuda_d4refw test_xtb_cuda_d4refw.cpp)
-    target_link_libraries(test_xtb_cuda_d4refw PRIVATE curcuma_core)
+    target_link_libraries(test_xtb_cuda_d4refw PRIVATE curcuma_cuda curcuma_core CUDA::cudart)
+    target_compile_definitions(test_xtb_cuda_d4refw PRIVATE USE_CUDA)
     target_include_directories(test_xtb_cuda_d4refw PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/external
@@ -768,7 +782,8 @@ if(USE_CUDA)
     # 6 (S6.3): device SCC energy (coulomb / third-order / multipole) vs the host
     # evaluateComponentsAtFixedDensity at the identical resident state (gfn2).
     add_executable(test_xtb_cuda_scc_energy test_xtb_cuda_scc_energy.cpp)
-    target_link_libraries(test_xtb_cuda_scc_energy PRIVATE curcuma_core)
+    target_link_libraries(test_xtb_cuda_scc_energy PRIVATE curcuma_cuda curcuma_core CUDA::cudart)
+    target_compile_definitions(test_xtb_cuda_scc_energy PRIVATE USE_CUDA)
     target_include_directories(test_xtb_cuda_scc_energy PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/external
@@ -786,7 +801,8 @@ if(USE_CUDA)
     # 6 (S6.4): device modified-Broyden mixer vs host BroydenMixer over a synthetic
     # contractive sequence (standalone numeric, no molecule).
     add_executable(test_xtb_cuda_broyden test_xtb_cuda_broyden.cpp)
-    target_link_libraries(test_xtb_cuda_broyden PRIVATE curcuma_core)
+    target_link_libraries(test_xtb_cuda_broyden PRIVATE curcuma_cuda curcuma_core CUDA::cudart)
+    target_compile_definitions(test_xtb_cuda_broyden PRIVATE USE_CUDA)
     target_include_directories(test_xtb_cuda_broyden PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/external

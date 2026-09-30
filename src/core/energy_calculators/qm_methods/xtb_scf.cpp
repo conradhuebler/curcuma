@@ -29,6 +29,8 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 // When MKL/BLAS is linked (EIGEN_USE_BLAS is set by CMake via USE_BLAS/USE_MKL,
@@ -278,6 +280,21 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
 {
     const int nao = m_basis.nao;
     m_wfn.W_valid = false;            // only the purification path supplies W directly
+
+    // Claude Generated (Sep 29, 2026): CURCUMA_DUMP_FS=<file> writes this call's F and S
+    // (int nao, double nel, then F and S column-major) and overwrites it on every call, so
+    // after the run it holds the last SCF iteration. Input for offline eigensolver-precision
+    // experiments (docs/GFN2_GPU_COST_PLAN.md stage 0.2). Zero cost when unset.
+    if (const char* dump = std::getenv("CURCUMA_DUMP_FS")) {
+        if (std::FILE* f = std::fopen(dump, "wb")) {
+            const double nel = m_wfn.nocc;
+            std::fwrite(&nao, sizeof(int), 1, f);
+            std::fwrite(&nel, sizeof(double), 1, f);
+            std::fwrite(F.data(), sizeof(double), static_cast<size_t>(nao) * nao, f);
+            std::fwrite(S.data(), sizeof(double), static_cast<size_t>(nao) * nao, f);
+            std::fclose(f);
+        }
+    }
 
 #ifdef CURCUMA_XTB_HAVE_LAPACK_SYEVD
     // Opt-in density-matrix purification (eigensolver="purify"): build the 0 K idempotent

@@ -404,6 +404,11 @@ struct GpuScfBackend {
     virtual bool downloadOverlap(Eigen::MatrixXd& S_out)   { (void)S_out;  return false; }
     virtual bool downloadH0(Eigen::MatrixXd& H0_out)       { (void)H0_out; return false; }
     virtual bool downloadCholesky(Eigen::MatrixXd& L_out)  { (void)L_out;  return false; }
+    /// Claude Generated (Sep 29, 2026): the same S / H0 written column-major straight into
+    /// caller storage of nao*nao doubles, so the host needs no temporary and no extra copy
+    /// (polymer_2x: 2.4 s of host copies). Default false: the caller uses the functions above.
+    virtual bool downloadOverlapInto(double* S_colmajor) { (void)S_colmajor; return false; }
+    virtual bool downloadH0Into(double* H0_colmajor)     { (void)H0_colmajor; return false; }
 
     /* ----- Device nuclear gradient (Stage 4) ---------------------------- *
      * The electronic + repulsion + Coulomb gradient (sections 1/2/3 of
@@ -801,6 +806,7 @@ public:
     void setDiisSubspace(int n)           { if (n >= 2) m_diis_subspace = n; }
     void setLevelShift(double b)          { m_level_shift = b; }
     void setScfGuess(const std::string& g){ m_scf_guess = g; }
+    void setScfAllowUnconverged(bool b){ m_scf_allow_unconverged = b; }
     // Opt-in: build the 4s/4p shells from xtb's older STO-6G tables instead of
     // tblite's (K, Ca, Ge-Kr only). See STO_CGTO.hpp pAlpha6_legacy_4s.
     void setSto6gLegacy4sp(bool b)        { m_sto6g_legacy_4sp = b; }
@@ -1117,6 +1123,15 @@ private:
     // falls back to the bare-H0 guess).
     bool seedEEQGuess(Vector& q_sh_out);                                 // xtb_native.cpp
 
+    // Fragment initial guess (Claude Generated, Sep 2026, operator's idea): split the system
+    // into covalently bonded fragments (Molecule::GetFragments, same partition as
+    // large_system_mode=fragments), converge each fragment's SCF on its own, and scatter the
+    // fragment SCC states (q_sh, GFN2 dp_at/qp_at) onto the global indices. Aimed at large
+    // many-molecule clusters, where the first full Fock from EEQ or bare-H0 charges moves
+    // electrons between distant molecules by several e and the SCF runs away. Returns false
+    // for a single fragment or on any failure (caller falls back to the EEQ guess).
+    bool seedFragmentGuess(Vector& q_sh_out, Matrix& dp_out, Matrix& qp_out);  // xtb_native.cpp
+
     // Multi-step SCC extrapolation helpers (Claude Generated). xtb_native.cpp.
     // packSccState  : flatten the current m_wfn SCC vector — GFN1 [q_sh],
     //                 GFN2 [q_sh; vec(dp_at); vec(qp_at)] (column-major).
@@ -1320,7 +1335,8 @@ private:
     int         m_diis_start    = 5;     // damped warmup iterations before DIIS
     int         m_diis_subspace = 6;     // DIIS history depth (Fock matrices kept)
     double      m_level_shift   = 0.2;   // virtual-orbital shift magnitude (Eh), LevelShift mode
-    std::string m_scf_guess     = "eeq"; // initial charge guess: "eeq" (default, dftd4 EEQ) | "h0" (bare)
+    std::string m_scf_guess     = "eeq"; // initial charge guess: "eeq" (default, dftd4 EEQ) | "h0" (bare) | "fragments" (converged fragments)
+    bool        m_scf_allow_unconverged = false; // Sep 2026: unconverged SCF = hard error unless set
     // xtb and tblite disagree on the STO-6G 4s/4p expansion; curcuma follows
     // tblite (the better fit to the exact Slater function). Set true to
     // reproduce the xtb binary bit-for-bit on K, Ca and Ge-Kr. STO_CGTO.hpp.
@@ -1502,6 +1518,7 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
 
     lookup("scf_mode",     [&](const json& v){ if (v.is_string()) xtb.setScfMode(v.get<std::string>()); });
     lookup("scf_guess",    [&](const json& v){ if (v.is_string()) xtb.setScfGuess(v.get<std::string>()); });
+    lookup("scf_allow_unconverged", [&](const json& v){ if (v.is_boolean()) xtb.setScfAllowUnconverged(v.get<bool>()); else if (v.is_number()) xtb.setScfAllowUnconverged(v.get<double>() != 0.0); });
     lookup("sto6g_legacy_4sp", [&](const json& v){ if (v.is_boolean()) xtb.setSto6gLegacy4sp(v.get<bool>()); });
     lookup("d4_atm_cutoff", [&](const json& v){ if (v.is_number()) xtb.setD4AtmCutoff(v.get<double>()); });
     lookup("eigensolver",  [&](const json& v){ if (v.is_string()) xtb.setEigensolver(v.get<std::string>()); });

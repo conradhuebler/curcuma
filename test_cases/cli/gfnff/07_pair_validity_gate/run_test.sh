@@ -16,10 +16,19 @@
 #                            the code when the flag is not requested).
 #   2. BF4- compressed     - the headline number: with the gate off, a fresh 10-bond perception
 #                            (six spurious F...F contacts alongside the four B-F bonds) reads
-#                            +0.17707951 Eh; with the gate on, all six F...F pairs are invalid,
+#                            +0.17707968 Eh; with the gate on, all six F...F pairs are invalid,
 #                            the corner is regenerated on the 4 B-F bonds alone, and the energy
 #                            is EXACTLY -1.25025415 Eh - the same force field's own 4-bond
 #                            evaluation (bit-for-bit, not merely close).
+#   RE-PINNED Sep 30, 2026 (master merge, CODATA-2018 unit-constants unification, Known Issue
+#   #35): the "off" pin moved +0.17707951 -> +0.17707968 Eh (well inside the documented gfnff
+#   shift bound); the "gate ON" pin (-1.25025415) is unchanged, matched to 7e-8 Eh (the test's
+#   own 1e-7 tolerance). Also found and fixed in this merge: GFNFF::getCachedTopology()'s
+#   topology_mode=constant shortcut (the new default since Sep 29, 2026) ignored an explicit
+#   m_static_topology_valid=false invalidation - which is exactly how this gate forces a
+#   one-off corner regeneration - so under the new default the gate's repulsion-pair-derived
+#   terms (e.g. FFWorkspace::calcOverCoordination) silently kept reading the stale, ungated
+#   10-bond topology. Now also checks the flag, matching the sibling getCachedBondList().
 #   3. BF4- realistic      - at B-F 1.3998 A only 4 bonds are perceived in the first place (every
 #                            pair already valid): gate on/off must be bit-identical (the "all
 #                            pairs valid" falsifier, FABLE_BOND_STATE_2.md sec 4 step 2) AND
@@ -89,8 +98,8 @@ e_bf4c_off = batch([compressed], -1, GATE_OFF)[0]["energy_eh"]
 e_bf4c_none = batch([compressed], -1, [])[0]["energy_eh"]
 check("off bit-identity (BF4- compressed, explicit false vs absent)", abs(e_bf4c_off - e_bf4c_none) < 1e-12,
       f"{e_bf4c_off:.12f} vs {e_bf4c_none:.12f}")
-check("off matches the pre-gate 10-bond fresh perception (+0.17707951 Eh)",
-      abs(e_bf4c_off - 0.17707951) < 1e-7, f"{e_bf4c_off:.8f}")
+check("off matches the pre-gate 10-bond fresh perception (+0.17707968 Eh)",
+      abs(e_bf4c_off - 0.17707968) < 1e-7, f"{e_bf4c_off:.8f}")
 
 # 2. BF4- compressed, gate ON: the headline acceptance number (FABLE_BOND_STATE_2.md sec 2.3.1),
 #    -1.25025415 Eh EXACTLY, matching the topology's own 4-bond evaluation bit-for-bit.
