@@ -122,6 +122,7 @@
   - Default einschalten? (Betreiberentscheidung; die Messungen oben sprechen dafuer)
   - `-scf_pseudo_diag_fp64` auf einer GPU mit vollem FP64 (H200) messen - auf der A4500 korrekt, aber langsamer (117 -> 167 s)
   - cuBLAS-`trmm` L^T C laeuft nur mit 5.7 TFLOP/s (0.65 s von 2.3 s pro Pseudo-Schritt)
+- **TODO 2026-09-30 (CPU-Pfad fuer `-scf_pseudo_diag`, Betreiber: "als todo vermerken")**: Messung (OpenBLAS, n = 3222, 8 Threads): Pseudo-Schritt in FP64 ca. 0.42 s gegen 0.9 s (volle FP32-Iteration) bzw. 1.6 s (volle FP64-Iteration); polymer CPU 19.2 s, davon 12.4 s Eigenloesung -> geschaetzt 20-25 % Gewinn (nicht implementiert, Schaetzung aus Einzelbenchmarks). Umsetzung: dieselbe Mathematik wie `pseudoRotateOrthonormalise` (xtb_gpu_context.cu) mit BLAS in `XTB::solveEigen`, komplett FP64 (FP32-Dreieckskernel in OpenBLAS ca. 12x langsamer), W fuer den Gradienten aus G_oo, Absicherung wie auf der GPU, opt-in, Regression MOR41/GMTKN55. Kein Gewinn erwartet unter ca. 1500 Basisfunktionen. Rohdaten: docs/GFN2_GPU_COST_PLAN.md.
 - **Messung** (polymer_2x, 7320 Atome, nao 15444, GFN2, 1x RTX A4500, `-sp -gradient` 254 s,
   `CURCUMA_GPU_PROFILE=1`, Geraete festgenagelt):
 

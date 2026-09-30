@@ -151,3 +151,12 @@ once, after the last FP32 full solve, replacing the FP64 `sygst + syevd + trsm` 
 Estimates are back-of-envelope; each stage gets its own before/after measurement. FP64 is ~1/32
 of FP32 on the A4500 and near 1:1 on an H200, so stage 3's balance differs there (not measurable
 here).
+
+## CPU (measured Sep 30, 2026, not implemented)
+
+OpenBLAS, polymer n = 3222, 8 threads, isolated kernels on random matrices: dgemm 0.097 s, sgemm
+0.050 s, G_ov dgemm 0.026, dsyrk 0.057, dtrmm 0.052, dtrsm 0.082, dpotrf 0.059, dsyevd 1.35,
+ssyevd 0.60 (16 threads: 0.076 / 0.042 / 0.019 / 0.041 / 0.051 / 0.069 / 0.054 / 1.04 / 0.46). A full
+FP64 iteration (dsygst 0.19 + dsyevd + back-transform) is ~1.6 s, a FP32 one ~0.9 s, an all-FP64
+pseudo step ~0.42 s. The real CPU polymer run: 19.2 s, of which 12.4 s eigensolve; replacing ~8 of 12
+iterations would save an estimated 20-25 %. Estimate only - see TODO.md.
