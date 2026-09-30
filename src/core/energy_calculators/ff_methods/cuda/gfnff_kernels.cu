@@ -378,6 +378,162 @@ __global__ void k_coulomb(
     blockReduceAddEnergy(local_E, energy);
 }
 
+// Implicit all-pairs Coulomb, see gfnff_kernels.cuh. Pair arithmetic identical to k_coulomb.
+__global__ void k_coulomb_implicit(
+    int natoms,
+    const double* __restrict__ alp,
+    double                     r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ charges,
+    double*                    grad,
+    double*                    energy)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    double local_E = 0.0;
+
+    if (i < natoms) {
+        const double qi = charges[i];
+        if (!isnan(qi)) {
+            static const double inv_sqrt_pi = 0.5641895835477563;
+            double gx = 0.0, gy = 0.0, gz = 0.0, e_half = 0.0;
+            for (int j = 0; j < natoms; ++j) {
+                if (j == i) continue;
+                double dx  = cx[i] - cx[j];
+                double dy  = cy[i] - cy[j];
+                double dz  = cz[i] - cz[j];
+                applyMIC(dx, dy, dz);
+                double r2  = dx*dx + dy*dy + dz*dz;
+                double rij = sqrt(r2);
+                if (rij > r_cut || rij < 1e-10) continue;
+                double qj = charges[j];
+                if (isnan(qj)) continue;
+                double gamma_ij = 1.0 / sqrt(alp[i] + alp[j]);
+                double gamma_r = gamma_ij * rij;
+                double erf_v   = erf(gamma_r);
+                e_half += 0.5 * (qi * qj * erf_v / rij);
+                double exp_v  = exp(-gamma_r * gamma_r);
+                double derf   = gamma_ij * exp_v * (2.0 * inv_sqrt_pi);
+                double dEdr   = qi * qj * (derf / rij - erf_v / (rij * rij));
+                double fac    = dEdr / rij;
+                gx += fac*dx; gy += fac*dy; gz += fac*dz;
+            }
+            local_E = e_half;
+            add_grad(grad, i, gx, gy, gz);   // atomic: other kernels may touch atom i concurrently
+        }
+    }
+
+    blockReduceAddEnergy(local_E, energy);
+}
+
+// ============================================================================
+// Kernel 3b: tiled implicit Coulomb, each pair once (Claude Generated, Sep 2026)
+//
+// E = sum_{i<j} q_i q_j erf(gamma_ij r_ij) / r_ij,   gamma_ij = 1/sqrt(alp_i + alp_j)
+// dE/dr = q_i q_j (2 gamma/sqrt(pi) exp(-gamma^2 r^2) / r - erf(gamma r) / r^2)
+// Identical to k_coulomb_implicit, but every pair is evaluated once: that kernel pays the
+// erf + exp of each pair twice (once from each atom's row), which dominated the GFN-FF MD step
+// on large systems (polymer_2x, 7320 atoms: 85 ms of ~180 ms per energy call, nsys Sep 29).
+// Thread t of tile (bi, bj) owns atom i = bi*T + t; it walks the j tile in a rotated order
+// (jj = (t + k) mod T) so that concurrent shared-memory atomics on the j gradients rarely collide.
+// ============================================================================
+
+__global__ void k_coulomb_tiles(
+    int natoms,
+    const int* __restrict__    tiles,
+    const double* __restrict__ alp,
+    double                     r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ charges,
+    double*                    grad,
+    double*                    energy)
+{
+    constexpr int T = GFNFF_COUL_TILE;
+    __shared__ double sx[T], sy[T], sz[T], sq[T], sa[T];
+    __shared__ double sgx[T], sgy[T], sgz[T];
+
+    const int bi = tiles[2 * blockIdx.x];
+    const int bj = tiles[2 * blockIdx.x + 1];
+    const int t  = threadIdx.x;
+    const int i  = bi * T + t;
+    const int jl = bj * T + t;
+
+    if (jl < natoms) {
+        sx[t] = cx[jl]; sy[t] = cy[jl]; sz[t] = cz[jl];
+        sq[t] = charges[jl]; sa[t] = alp[jl];
+    } else {
+        sx[t] = sy[t] = sz[t] = 0.0; sq[t] = nan(""); sa[t] = 1.0;
+    }
+    sgx[t] = 0.0; sgy[t] = 0.0; sgz[t] = 0.0;
+    __syncthreads();
+
+    double local_E = 0.0;
+    double gx = 0.0, gy = 0.0, gz = 0.0;
+    const bool active = (i < natoms);
+    const double xi = active ? cx[i] : 0.0;
+    const double yi = active ? cy[i] : 0.0;
+    const double zi = active ? cz[i] : 0.0;
+    const double qi = active ? charges[i] : nan("");
+    const double ai = active ? alp[i] : 1.0;
+    const bool diag = (bi == bj);
+    static const double two_inv_sqrt_pi = 1.1283791670955126;
+
+    if (active && !isnan(qi)) {
+        for (int k = 0; k < T; ++k) {
+            const int jj = (t + k) & (T - 1);
+            const int j  = bj * T + jj;
+            if (j >= natoms || (diag && j <= i)) continue;
+            const double qj = sq[jj];
+            if (isnan(qj)) continue;
+            double dx = xi - sx[jj];
+            double dy = yi - sy[jj];
+            double dz = zi - sz[jj];
+            applyMIC(dx, dy, dz);
+            const double r2  = dx * dx + dy * dy + dz * dz;
+            const double rij = sqrt(r2);
+            if (rij > r_cut || rij < 1e-10) continue;
+            const double gamma_ij = 1.0 / sqrt(ai + sa[jj]);
+            const double gamma_r  = gamma_ij * rij;
+            const double erf_v    = erf(gamma_r);
+            const double qq       = qi * qj;
+            local_E += qq * erf_v / rij;
+            const double derf = gamma_ij * exp(-gamma_r * gamma_r) * two_inv_sqrt_pi;
+            const double fac  = qq * (derf / rij - erf_v / r2) / rij;
+            const double fx = fac * dx, fy = fac * dy, fz = fac * dz;
+            gx += fx; gy += fy; gz += fz;
+            atomicAdd(&sgx[jj], -fx);
+            atomicAdd(&sgy[jj], -fy);
+            atomicAdd(&sgz[jj], -fz);
+        }
+        add_grad(grad, i, gx, gy, gz);
+    }
+    __syncthreads();
+    if (jl < natoms && (sgx[t] != 0.0 || sgy[t] != 0.0 || sgz[t] != 0.0))
+        add_grad(grad, jl, sgx[t], sgy[t], sgz[t]);
+
+    blockReduceAddEnergy(local_E, energy);
+}
+
+__global__ void k_add_coulomb_parts(int n3, int nparts, const double* __restrict__ parts,
+                                    const double* __restrict__ part_E,
+                                    double* grad, double* energy)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k < n3) {
+        double s = 0.0;
+        for (int p = 0; p < nparts; ++p) s += parts[static_cast<size_t>(p) * n3 + k];
+        atomicAdd(&grad[k], s);   // other streams add to d_grad concurrently
+    }
+    if (k == 0) {
+        double e = 0.0;
+        for (int p = 0; p < nparts; ++p) e += part_E[p];
+        atomicAdd(energy, e);
+    }
+}
+
 // ============================================================================
 // Kernel 4: Bond Stretching
 // r0 = (r0_base_i + cnfak_i*cn[i] + r0_base_j + cnfak_j*cn[j] + rabshift) * ff
@@ -2802,7 +2958,8 @@ __global__ void k_dc6dcn_per_pair(
     const double* __restrict__ dgw,
     const double* __restrict__ c6_flat,
     double*       __restrict__ dc6dcn_ij,
-    double*       __restrict__ dc6dcn_ji)
+    double*       __restrict__ dc6dcn_ji,
+    double*       __restrict__ c6_out)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_pairs) return;
@@ -2827,6 +2984,7 @@ __global__ void k_dc6dcn_per_pair(
 
     double dc6_ij = 0.0;
     double dc6_ji = 0.0;
+    double c6     = 0.0;   // Claude Generated (Sep 2026): C6 itself, same double sum
 
     for (int ri = 0; ri < nri; ++ri) {
         double dgw_i_ri = dgw[gw_i_base + ri];
@@ -2841,11 +2999,15 @@ __global__ void k_dc6dcn_per_pair(
 
             // dc6dcn(j,i) = dC6(i,j)/dCN(j) = Σ gw(i,ri) * dgw(j,rj) * C6ref
             dc6_ji += gw_i_ri * dgw[gw_j_base + rj] * c6ref;
+
+            // C6(i,j) = Σ gw(i,ri) * gw(j,rj) * C6ref (Caldeweyher 2019 CN-weighted C6)
+            c6 += gw_i_ri * gw[gw_j_base + rj] * c6ref;
         }
     }
 
     dc6dcn_ij[tid] = dc6_ij;
     dc6dcn_ji[tid] = dc6_ji;
+    if (c6_out) c6_out[tid] = c6;
 }
 
 // ============================================================================
@@ -3420,6 +3582,62 @@ __global__ void k_eeq_block_jacobi_apply(
             acc += Ainv[lj * Nf + li] * s_rf[lj];
         d_z[frag_atom_map[atom_start + li]] = acc;   // scatter local → global
     }
+}
+
+// ── WP7-E: GPU projected PCG kernels (Sep 2026) ──────────────────────────────
+__global__ void k_frag_sum(int N,
+                            const double* __restrict__ v,
+                            const int*    __restrict__ atom_frag,
+                            double*       __restrict__ frag_sum)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    atomicAdd(&frag_sum[atom_frag[i]], v[i]);
+}
+
+__global__ void k_frag_scatter_add(int N,
+                                    double*       __restrict__ v,
+                                    const int*    __restrict__ atom_frag,
+                                    const double* __restrict__ frag_delta)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    v[i] += frag_delta[atom_frag[i]];
+}
+
+__global__ void k_frag_project_delta(int nfrag,
+                                      const double* __restrict__ frag_sum,
+                                      const double* __restrict__ inv_frag_atoms,
+                                      double*       __restrict__ frag_delta)
+{
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= nfrag) return;
+    frag_delta[f] = -frag_sum[f] * inv_frag_atoms[f];
+}
+
+__global__ void k_frag_feasibility_delta(int nfrag,
+                                          const double* __restrict__ frag_sum,
+                                          const double* __restrict__ rhs_constraints,
+                                          const double* __restrict__ inv_frag_atoms,
+                                          double*       __restrict__ frag_delta)
+{
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= nfrag) return;
+    frag_delta[f] = (rhs_constraints[f] - frag_sum[f]) * inv_frag_atoms[f];
+}
+
+__global__ void k_frag_precond_correct(int N,
+                                        const double* __restrict__ Minv,
+                                        const int*    __restrict__ atom_frag,
+                                        const double* __restrict__ frag_sum,
+                                        const double* __restrict__ frag_sM,
+                                        double*       __restrict__ z)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    int f = atom_frag[i];
+    double sM = frag_sM[f];
+    if (sM > 0.0) z[i] -= Minv[i] * frag_sum[f] / sM;
 }
 
 // ============================================================================

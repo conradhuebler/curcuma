@@ -17,7 +17,18 @@
 #include <cuda_runtime.h>
 #include <cusolverDn.h>
 
+#include <algorithm>
+#include <chrono>
+#include <climits>
 #include <cmath>
+#include <cstring>
+#include <cstdio>
+#include <cstdlib>
+#include <map>
+#include <mutex>
+#include <set>
+#include <thread>
+#include <vector>
 
 // CudaBuffer<T> (RAII cudaMalloc/cudaFree) — the project's established device
 // allocation helper; routing every allocation through it is the mitigation for
@@ -28,10 +39,17 @@
 // the host element-parameter tables that seed __constant__ memory.
 #include "xtb_gpu_integrals_device.cuh"
 #include "../parameters/xtb_params_extra.hpp"
+#include "xtb_distributed_eigensolver.h"
 
 namespace curcuma {
 namespace xtb {
 namespace gpu {
+
+// Claude Generated (Sep 2026): used by Impl::distSolve below, defined with the other kernels.
+__global__ void k_probe_fill(float* v, int n, unsigned seed);
+__global__ void k_scale_by(float* x, const float* s, int n);
+__global__ void k_probe_filld(double* v, int n, unsigned seed);
+__global__ void k_scale_byd(double* x, const double* s, int n);
 
 struct XtbGpuContext::Impl {
     cudaStream_t       stream   = nullptr;
@@ -154,6 +172,11 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dD4C6Flat;              // reference C6 block (MAX_ELEM²·MAX_REF²)
     CudaBuffer<double> dD4W, dD4dWq;           // per-iter weights (nat·MAX_REF)
     CudaBuffer<double> dD4Dedq;                // output dE_D4/dq (nat)
+    // Claude Generated (Sep 2026): post-SCF 2-body gradient + ATM on the device.
+    CudaBuffer<double> dD4dWc, dD4Eat, dD4Grad, dD4Dcn;   // nat*7 / nat / 3 nat / nat
+    CudaBuffer<double> dD4AtmC6, dD4AtmDc6;               // nat^2 each (q=0 reference)
+    CudaBuffer<int>    dD4NbPtr, dD4Nb;                   // ATM neighbour list
+    std::vector<double> h_d4_xyz;                         // host copy of the D4 geometry
 
     // Stage 6 (S6.2b): q-independent per-atom reference data so the device rebuilds
     // W/dWq from the resident SCF charges (k_d4_build_refw), removing the host
@@ -176,6 +199,11 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dMpAmatSD;   // charge-dipole, 3·nat² (col-major blocks [k])
     CudaBuffer<double> dMpAmatDD;   // dipole-dipole, 9·nat² (block [a*3+b])
     CudaBuffer<double> dMpAmatSQ;   // charge-quadrupole, 6·nat²
+    // Claude Generated (Sep 2026): on-the-fly interaction (no stored nat² matrices).
+    bool               mp_otf = false;
+    double             mp_dmp3 = 3.0, mp_dmp5 = 4.0;
+    CudaBuffer<double> dMpXyz;      // geometry (Bohr), 3·nat
+    CudaBuffer<double> dMpRad;      // CN-dependent damping radii, nat
     CudaBuffer<double> dMpDkernel;  // on-site dipole XC kernel, nat
     CudaBuffer<double> dMpQkernel;  // on-site quadrupole XC kernel, nat
     CudaBuffer<double> dGamma3;     // per-shell third-order hardness Γ_s, nsh
@@ -224,6 +252,782 @@ struct XtbGpuContext::Impl {
     int    loop_nsh = 0, loop_nat = 0, loop_nao = 0, loop_nocc_pairs = 0;
     double loop_Tele = 0.0, loop_nelec = 0.0;
     CudaBuffer<double> dDq;         // max|q_sh_out − q_sh_in| (1 double)
+
+    // Claude Generated (Sep 2026): pre-allocation memory check (beginBasis).
+    bool        memory_check = true;
+    std::string last_error;
+
+    // Claude Generated (Sep 2026): phase profiler for the device path, enabled by the
+    // environment variable CURCUMA_GPU_PROFILE. Each mark synchronises the stream (kernels are
+    // asynchronous, so host clocks are meaningless without it) and accumulates the wall time
+    // since the previous mark under a phase name. Disabled = no synchronisation, no cost.
+    bool prof = std::getenv("CURCUMA_GPU_PROFILE") != nullptr;
+    // Claude Generated (Sep 29, 2026): the thread-per-atom originals of the warp-per-atom pair kernels.
+    bool thread_per_atom = std::getenv("CURCUMA_GPU_THREAD_PER_ATOM") != nullptr;
+    std::vector<std::string> prof_names;
+    std::vector<double>      prof_ms;
+    std::vector<int>         prof_calls;
+    std::vector<double>      prof_mem_mib;   // largest device memory in use at a mark of that phase
+    std::chrono::steady_clock::time_point prof_t;
+    void profStart()
+    {
+        if (!prof) return;
+        cudaStreamSynchronize(stream);
+        prof_t = std::chrono::steady_clock::now();
+    }
+    void profMark(const char* name)
+    {
+        if (!prof) return;
+        cudaStreamSynchronize(stream);
+        const auto t = std::chrono::steady_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(t - prof_t).count();
+        prof_t = t;
+        profAdd(name, ms);
+    }
+    /// Add a timing without moving the mark (sub-phases measured elsewhere, e.g. inside the
+    /// multi-GPU eigensolver). Also records the device memory in use on this context's device.
+    void profAdd(const char* name, double ms)
+    {
+        if (!prof) return;
+        size_t free_b = 0, total_b = 0;
+        double used = 0.0;
+        if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess)
+            used = static_cast<double>(total_b - free_b) / (1024.0 * 1024.0);
+        for (size_t i = 0; i < prof_names.size(); ++i) {
+            if (prof_names[i] == name) {
+                prof_ms[i] += ms; ++prof_calls[i];
+                prof_mem_mib[i] = std::max(prof_mem_mib[i], used);
+                return;
+            }
+        }
+        prof_names.emplace_back(name);
+        prof_ms.push_back(ms);
+        prof_calls.push_back(1);
+        prof_mem_mib.push_back(used);
+    }
+
+    // Claude Generated (Sep 2026): screened (sparse) AO-pair storage for S, H0, dp_int, qp_int.
+    // See the "Screened (sparse) AO-pair storage" kernel block for the layout.
+    // Claude Generated (Sep 2026, multi-GPU): the pattern density P(r,c) = sum_k Cw(r,k) C(c,k)
+    // is a sum over the occupied columns, so it splits over GPUs without any approximation: every
+    // device evaluates the SAME pattern over its own slice of k and the partial results are added.
+    // Only a column slice of C (n x kn) travels per step, not the whole matrix.
+    struct DensityHelper {
+        int          device = -1;
+        cudaStream_t stream = nullptr;
+        cudaEvent_t  done   = nullptr;
+        double*      dC     = nullptr;   // n x kn slice of the eigenvectors
+        double*      dCw    = nullptr;   // the same slice scaled by the occupations
+        double*      dOcc   = nullptr;   // kn occupations
+        double*      dPsp   = nullptr;   // partial density on the pattern (nnz)
+        int*         dRow   = nullptr;   // pattern (geometry-constant)
+        int*         dCol   = nullptr;
+        int          cap_cols = 0;
+        int          cap_nnz  = 0;
+        long         pattern_gen = -1;
+        double*      stage  = nullptr;   // nnz staging buffer on the PRIMARY device
+    };
+    std::vector<int>           dens_devices;    // helper devices (never the context's own)
+    std::vector<DensityHelper> dens_helpers;
+    bool                       dens_failed = false;
+    int                        dens_min_nao = 4000;
+    std::string                dens_error;
+    std::string                dens_skip_reason;   ///< G2-6: why the split did not run (last cause)
+    int                        dens_steps = 0;
+    long                       pattern_generation = 0;   // bumped when the screened pattern changes
+
+    void releaseDensityHelpers()
+    {
+        for (DensityHelper& h : dens_helpers) {
+            cudaSetDevice(h.device);
+            for (void** p : { reinterpret_cast<void**>(&h.dC), reinterpret_cast<void**>(&h.dCw),
+                              reinterpret_cast<void**>(&h.dOcc), reinterpret_cast<void**>(&h.dPsp),
+                              reinterpret_cast<void**>(&h.dRow), reinterpret_cast<void**>(&h.dCol) })
+                if (*p) { cudaFree(*p); *p = nullptr; }
+            if (h.done) { cudaEventDestroy(h.done); h.done = nullptr; }
+            if (h.stream) { cudaStreamDestroy(h.stream); h.stream = nullptr; }
+            cudaSetDevice(device);
+            if (h.stage) { cudaFree(h.stage); h.stage = nullptr; }
+            h.cap_cols = h.cap_nnz = 0;
+            h.pattern_gen = -1;
+        }
+        dens_helpers.clear();
+        cudaSetDevice(device);
+    }
+
+    // Claude Generated (Sep 2026, multi-GPU step 3): optional multi-GPU eigensolve, created on
+    // first use. dist_failed latches after a failure so the SCF does not retry every iteration.
+    std::vector<int> dist_devices;
+    std::string      dist_backend = "auto";
+    int              dist_block = 128;
+    int              dist_min_nao = 4000;
+    int              dist_potrf = 0;          // Cholesky factorisations done on the devices
+    void*            dist_backup = nullptr;   // FP64 verification copy of F on a helper device
+    int              dist_backup_dev = -1;
+    size_t           dist_backup_bytes = 0;
+    std::string      dist_potrf_status;       // why one was not (empty: never refused)
+    bool             dist_fp32 = true;
+    bool             dist_failed = false;
+    // Claude Generated (Sep 2026): -1 = this backend's FP32 solve was verified WRONG on this
+    // machine, 1 = verified correct, 0 = not tested yet. cusolverMg FP32 failed here (4x A4500,
+    // CUDA 13.3, n = 15444: the SCF diverged from the first iteration while the eigenvalue sum
+    // still matched, so a trace check does not catch it) - but that is one library version on one
+    // machine, so it is measured per run instead of hard-coded.
+    int              dist_fp32_state = 0;
+    int              dist_fp64_state = 0;   // same, for the FP64 solves (see verifyDistributed)
+    bool             dist_verify = true;    // -gpu_eigensolver_verify
+    CudaBuffer<float>  dProbeV, dProbeY, dProbeT, dProbeA;   // FP32 probe vectors + copy of A
+    CudaBuffer<float>  dProbeU;                               // scratch for the back-transformed check
+    CudaBuffer<double> dProbeVd, dProbeYd, dProbeTd, dProbeAd, dProbeSd;
+    int              dist_solves = 0;
+    long             l_generation = 0;   // bumped whenever dL (Cholesky factor of S) is rewritten
+    std::string      dist_status;
+    std::string      dist_degrade;   ///< G2-7: part of the solve stays on this device (see accessor)
+    std::unique_ptr<DistributedEigensolver> dist;
+
+    /// 1 = solved on several GPUs, 0 = not used (input intact, run the single-GPU solver),
+    /// -1 = failed after the input was overwritten.
+    /// With back_L != nullptr (FP32 only) the backend also back-transforms the eigenvectors,
+    /// C = L^-T Q, on the devices when it can; *back_done then tells whether it did.
+    int distSolve(int n, void* A, void* eig, bool fp32, const void* back_L = nullptr,
+                  bool* back_done = nullptr)
+    {
+        if (back_done) *back_done = false;
+        if (!distReady(n, fp32)) return 0;
+        if (cudaStreamSynchronize(stream) != cudaSuccess) return 0;
+        // First FP32 solve on this machine: keep a copy of the input so the returned eigenpairs
+        // can be checked against it, and so this call can be redone on this device if they are
+        // wrong. One n x n FP32 copy, once per run; if it does not fit, FP32 is not distributed
+        // (an unverified FP32 backend could return silently wrong eigenvectors).
+        // CURCUMA_GPU_EIG_VERIFY_ALWAYS=1 verifies EVERY distributed FP32 solve, not just the
+        // first. Diagnostic: cusolverMg passed the first check here and still made the SCF
+        // diverge, i.e. a later call went wrong. Claude Generated (Sep 2026).
+        // EVERY distributed solve is verified, not just the first: cusolverMg passed the first
+        // check here and degraded later (solve 1 residual 1.4e-6, solve 2 8.7e-2), which a one-shot
+        // gate cannot catch - the run then converged to an energy 1.65 kcal/mol off. The check is
+        // three matrix-vector products plus one n x n copy, i.e. well under a percent of a solve.
+        bool verify = fp32 && dist_verify && dist_fp32_state >= 0;
+        bool verify64 = !fp32 && dist_verify && dist_fp64_state >= 0;
+        if (verify64) {
+            try {
+                dProbeAd.ensure(static_cast<int>(static_cast<size_t>(n) * n));
+                dProbeVd.ensure(n); dProbeYd.ensure(n); dProbeTd.ensure(n);
+            } catch (...) {
+                dProbeAd.free(); dProbeVd.free(); dProbeYd.free(); dProbeTd.free();
+                dist_fp64_state = -1;
+                dist_status = std::string(dist->name()) + ": FP64 verification needs one more n x n "
+                    "buffer than fits on device " + std::to_string(device)
+                    + "; the eigensolve stays on that device";
+                return 0;
+            }
+            const int b = 256;
+            k_probe_filld<<<(n + b - 1) / b, b, 0, stream>>>(dProbeVd.ptr, n, 0x85EBCA6Bu);
+            if (cudaGetLastError() != cudaSuccess
+                || cudaMemcpyAsync(dProbeAd.ptr, A, sizeof(double) * static_cast<size_t>(n) * n,
+                                   cudaMemcpyDeviceToDevice, stream) != cudaSuccess
+                || cudaStreamSynchronize(stream) != cudaSuccess)
+                verify64 = false;
+        }
+        if (verify) {
+            try {
+                dProbeA.ensure(static_cast<int>(static_cast<size_t>(n) * n));
+                dProbeV.ensure(n); dProbeY.ensure(n); dProbeT.ensure(n);
+            } catch (...) {
+                dProbeA.free(); dProbeV.free(); dProbeY.free(); dProbeT.free();
+                dist_fp32_state = -1;
+                dist_status = std::string(dist->name()) + ": FP32 verification needs one more "
+                    "n x n buffer than fits on device " + std::to_string(device)
+                    + "; only FP64 is distributed";
+                return 0;
+            }
+            const int b = 256;
+            k_probe_fill<<<(n + b - 1) / b, b, 0, stream>>>(dProbeV.ptr, n, 0x9E3779B9u);
+            if (cudaGetLastError() != cudaSuccess
+                || cudaMemcpyAsync(dProbeA.ptr, A, sizeof(float) * static_cast<size_t>(n) * n,
+                                   cudaMemcpyDeviceToDevice, stream) != cudaSuccess
+                || cudaStreamSynchronize(stream) != cudaSuccess)
+                verify = false;
+        }
+        // Claude Generated (Sep 29, 2026): FP32 back-transform on the devices (column split)
+        // instead of one n x n strsm on this device. CURCUMA_GPU_EIG_LOCAL_BACKXF=1 keeps it here.
+        const bool back_on_devices = fp32 && back_L && dist->supportsBackTransform()
+                                     && !std::getenv("CURCUMA_GPU_EIG_LOCAL_BACKXF");
+        bool solved = back_on_devices
+            ? dist->solveBackTransformed(n, A, back_L, l_generation, eig, fp32, device)
+            : dist->solve(n, A, eig, fp32, device);
+        // Claude Generated (Sep 2026): CURCUMA_GPU_EIG_CORRUPT=1 deliberately damages the returned
+        // eigenvectors, to check that verifyDistributedFp32() actually notices. A detector that is
+        // never tested against a known-bad input is not a detector.
+        if (solved && verify && std::getenv("CURCUMA_GPU_EIG_CORRUPT")) {
+            const size_t ncorrupt = static_cast<size_t>(n) * std::max(1, n / 20);
+            cudaMemsetAsync(A, 0, sizeof(float) * ncorrupt, stream);
+            cudaStreamSynchronize(stream);
+        }
+        cudaSetDevice(device);
+        if (prof) {
+            double sc = 0.0, so = 0.0, ga = 0.0;
+            dist->lastTimings(sc, so, ga);
+            profAdd(fp32 ? "  multi-GPU FP32: scatter" : "  multi-GPU FP64: scatter", sc);
+            profAdd(fp32 ? "  multi-GPU FP32: solve" : "  multi-GPU FP64: solve", so);
+            profAdd(fp32 ? "  multi-GPU FP32: gather" : "  multi-GPU FP64: gather", ga);
+            if (back_on_devices) {
+                double re = 0.0, ba = 0.0;
+                dist->lastGeneralizedTimings(re, ba);
+                profAdd("  multi-GPU FP32: back-transform (in solve)", ba);
+            }
+        }
+        if (solved) {
+            ++dist_solves;
+            bool rejected = false;
+            if (verify && verifyDistributedFp32(n, static_cast<const float*>(A),
+                                                static_cast<const float*>(eig),
+                                                back_on_devices ? static_cast<const float*>(back_L) : nullptr)
+                && dist_fp32_state < 0) {
+                // Wrong eigenpairs: put the input back and let the caller solve on this device.
+                rejected = (cudaMemcpyAsync(A, dProbeA.ptr, sizeof(float) * static_cast<size_t>(n) * n,
+                                            cudaMemcpyDeviceToDevice, stream) == cudaSuccess
+                            && cudaStreamSynchronize(stream) == cudaSuccess);
+                --dist_solves;
+            }
+            if (verify64 && verifyDistributedFp64(n, static_cast<const double*>(A),
+                                                  static_cast<const double*>(eig), false)
+                && dist_fp64_state < 0) {
+                rejected = (cudaMemcpyAsync(A, dProbeAd.ptr, sizeof(double) * static_cast<size_t>(n) * n,
+                                            cudaMemcpyDeviceToDevice, stream) == cudaSuccess
+                            && cudaStreamSynchronize(stream) == cudaSuccess);
+                --dist_solves;
+            }
+            // The probe buffers stay allocated: re-allocating ~1 GB per solve cost 38 s of the
+            // 222 s polymer_2x run (measured), while keeping them costs one n x n buffer.
+            // releaseEigenWorkspaces() frees them when the SCF is over.
+            if (rejected) return 0;            // input restored -> single-GPU path
+            if (back_done) *back_done = back_on_devices;
+            // Only THIS call's precision decides: an earlier FP32 rejection must not fail a
+            // perfectly good FP64 solve (it did, and aborted the SCF at the first FP64 iteration).
+            if ((fp32 && dist_fp32_state < 0) || (!fp32 && dist_fp64_state < 0)) return -1;
+            return 1;
+        }
+        dist_failed = true;
+        dist_status = std::string(dist->name()) + " failed (n = " + std::to_string(n)
+            + (fp32 ? ", FP32" : ", FP64") + "); single-GPU solver from here on";
+        return dist->inputIntact() ? 0 : -1;
+    }
+
+    /// Claude Generated (Sep 2026): drop every eigensolver workspace and FP32 copy on this device
+    /// and the multi-GPU solver's per-device buffers. Called once the SCF has converged: the
+    /// post-SCF phase (dense P rebuild, D4, gradient W) otherwise stacks on top of them (polymer_2x:
+    /// the device peak sat between SCF end and gradient start while ~3.5 GB per GPU were idle).
+    // Stage 2 pseudo-diagonalisation state (Claude Generated, Sep 29, 2026).
+    bool   pseudo_enabled = false;
+    double pseudo_max_dq = 0.05;
+    int    pseudo_max_steps = 8;
+    int    pseudo_consecutive = 0;   // pseudo steps since the last full solve
+    int    pseudo_taken = 0, pseudo_rejected = 0;
+    double last_dq = 1e300;          // max|dq| of the previous resident step
+    bool   in_resident_step = false; // pseudo steps only inside residentScfStep
+    bool   cprev_valid = false;      // dCprev32 holds the previous step's eigenvectors (AO basis)
+    CudaBuffer<float>  dCprev32, dPsT, dPsGov, dPsWork;
+    CudaBuffer<double> dPsG, dPsStats;
+    CudaBuffer<unsigned int> dPsMax;
+    // FP64 pseudo steps (-scf_pseudo_diag_fp64): the same step in FP64 (stage 3 of the cost plan,
+    // and the whole SCF on GPUs whose FP64 is not throttled).
+    bool   pseudo_fp64 = false;
+    bool   cprev64_valid = false;
+    int    pseudo_consecutive64 = 0;
+    float  pseudo_last_max_theta = 0.0f;
+    bool   c_exact_eigenvectors = true;   // dC/dEps come from a full eigensolve (false after a pseudo step)
+    CudaBuffer<double> dCprev64, dPsT64, dPsGov64, dPsWork64;
+    void releasePseudoDiag()
+    {
+        dCprev32.free(); dPsT.free(); dPsGov.free(); dPsWork.free(); dPsG.free(); dPsStats.free(); dPsMax.free();
+        dCprev64.free(); dPsT64.free(); dPsGov64.free(); dPsWork64.free();
+        cprev_valid = cprev64_valid = false;
+        pseudo_consecutive = pseudo_consecutive64 = 0;
+    }
+    bool pseudoDiagStep(int n);
+    int  pseudoDiagStep64(int n);
+    template <typename R>
+    int pseudoRotateOrthonormalise(int n, int no, const R* F, const R* L, R* C, R* Tb, R* Gov, R* M,
+                                   CudaBuffer<R>& work, double* g, const char* tag);
+
+    void releaseEigenWorkspaces()
+    {
+        releasePseudoDiag();
+        dWork.free(); lwork = 0;
+        dCf.free(); dLf.free(); dWorkf.free(); lwork_f32 = 0;
+        dProbeA.free(); dProbeV.free(); dProbeY.free(); dProbeT.free(); dProbeU.free();
+        dProbeAd.free(); dProbeVd.free(); dProbeYd.free(); dProbeTd.free(); dProbeSd.free();
+        releaseRemoteBackup();
+        if (dist) { dist->releaseBuffers(); cudaSetDevice(device); }
+    }
+
+    /**
+     * @brief Check that a distributed FP32 solve returned eigenpairs of the matrix it was given.
+     *
+     * A random vector v is pushed through the matrix twice: y = A v from a copy of the input
+     * (symv, lower triangle) and y2 = Q (eps .* (Q^T v)) from what the solver returned. They must
+     * agree. Three matrix-vector products plus one n x n copy, done ONCE per run: cusolverMg's
+     * FP32 eigenvectors were wrong here (4x A4500, CUDA 13.3, n = 15444 - the SCF diverged from
+     * the first iteration while the eigenvalue SUM still matched, so a trace check does not catch
+     * it), but that is one library version on one machine, so it is measured rather than assumed.
+     * @return true when the verdict was reached (dist_fp32_state set), false when it could not run
+     */
+    bool verifyDistributedFp32(int n, const float* Q, const float* eps_dev, const float* L = nullptr)
+    {
+        if (dProbeA.n < n || dProbeV.n < n) return false;
+        const float one = 1.0f, zero = 0.0f, minus = -1.0f;
+        const int b = 256;
+        if (cublasSsymv(cublas, CUBLAS_FILL_MODE_LOWER, n, &one, dProbeA.ptr, n, dProbeV.ptr, 1,
+                        &zero, dProbeY.ptr, 1) != CUBLAS_STATUS_SUCCESS)                 // y = A v
+            return false;
+        if (L) {
+            // Claude Generated (Sep 29, 2026): the solver returned C = L^-T Q, not Q. With
+            // Q = L^T C the same identity reads  A v = L^T C (eps .* (C^T (L v))), i.e. two extra
+            // triangular matrix-vector products; the residual and its reference are unchanged.
+            try { dProbeU.ensure(n); } catch (...) { return false; }
+            if (cudaMemcpyAsync(dProbeU.ptr, dProbeV.ptr, sizeof(float) * n, cudaMemcpyDeviceToDevice,
+                                stream) != cudaSuccess
+                || cublasStrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, L, n,
+                               dProbeU.ptr, 1) != CUBLAS_STATUS_SUCCESS                  // u = L v
+                || cublasSgemv(cublas, CUBLAS_OP_T, n, n, &one, Q, n, dProbeU.ptr, 1, &zero,
+                               dProbeT.ptr, 1) != CUBLAS_STATUS_SUCCESS)                 // t = C^T u
+                return false;
+            k_scale_by<<<(n + b - 1) / b, b, 0, stream>>>(dProbeT.ptr, eps_dev, n);      // t *= eps
+            if (cudaGetLastError() != cudaSuccess
+                || cublasSgemv(cublas, CUBLAS_OP_N, n, n, &one, Q, n, dProbeT.ptr, 1, &zero,
+                               dProbeU.ptr, 1) != CUBLAS_STATUS_SUCCESS                  // u = C t
+                || cublasStrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, L, n,
+                               dProbeU.ptr, 1) != CUBLAS_STATUS_SUCCESS                  // u = L^T u
+                || cublasSscal(cublas, n, &minus, dProbeY.ptr, 1) != CUBLAS_STATUS_SUCCESS
+                || cublasSaxpy(cublas, n, &one, dProbeU.ptr, 1, dProbeY.ptr, 1)
+                       != CUBLAS_STATUS_SUCCESS)                                         // y := u - y
+                return false;
+        } else {
+            if (cublasSgemv(cublas, CUBLAS_OP_T, n, n, &one, Q, n, dProbeV.ptr, 1, &zero,
+                            dProbeT.ptr, 1) != CUBLAS_STATUS_SUCCESS)                    // t = Q^T v
+                return false;
+            k_scale_by<<<(n + b - 1) / b, b, 0, stream>>>(dProbeT.ptr, eps_dev, n);      // t *= eps
+            if (cudaGetLastError() != cudaSuccess) return false;
+            if (cublasSgemv(cublas, CUBLAS_OP_N, n, n, &one, Q, n, dProbeT.ptr, 1, &minus,
+                            dProbeY.ptr, 1) != CUBLAS_STATUS_SUCCESS)                    // y := Q t - y
+                return false;
+        }
+        float res = 0.0f, ref = 0.0f;
+        if (cublasSnrm2(cublas, n, dProbeY.ptr, 1, &res) != CUBLAS_STATUS_SUCCESS
+            || cublasSnrm2(cublas, n, dProbeT.ptr, 1, &ref) != CUBLAS_STATUS_SUCCESS
+            || cudaStreamSynchronize(stream) != cudaSuccess)
+            return false;
+        const double rel = (ref > 0.0f) ? static_cast<double>(res) / static_cast<double>(ref) : 1.0;
+        // A = Q L Q^T alone is NOT enough: it is invariant under a consistent permutation of the
+        // eigenpairs, while the SCF fills the LEADING columns and therefore needs the eigenvalues
+        // ascending. Measured here (polymer, nao 3222, cusolverMg FP32): the residual check passed
+        // at 1e-6 while the SCF diverged, which is exactly what a permuted spectrum looks like.
+        std::vector<float> eps_host(n);
+        if (cudaMemcpy(eps_host.data(), eps_dev, sizeof(float) * n, cudaMemcpyDeviceToHost) != cudaSuccess)
+            return false;
+        // Only count inversions that MATTER: in FP32 two nearly degenerate orbitals can come back
+        // swapped by ~1e-7 Eh, which changes nothing for the occupation, while a genuinely permuted
+        // spectrum shows up as large steps in the wrong direction. Measured: cuSOLVERMp at
+        // nao = 15444 returns exactly one such harmless swap, and rejecting it cost 36 s.
+        const double span = std::fabs(static_cast<double>(eps_host[n - 1]) - static_cast<double>(eps_host[0]));
+        const double ord_tol = std::max(1.0e-6, 1.0e-6 * span);
+        int inversions = 0;
+        for (int i = 1; i < n; ++i)
+            if (static_cast<double>(eps_host[i - 1]) - static_cast<double>(eps_host[i]) > ord_tol)
+                ++inversions;
+        // FP32 over n ~ 1e4 accumulations lands well below 1e-3 when the solve is correct; the
+        // observed failure was O(1), so the threshold does not need to be tight.
+        if (std::getenv("CURCUMA_GPU_EIG_VERIFY_ALWAYS"))
+            std::fprintf(stderr, "[eig verify] solve %d: relative residual %.3e, %d inversions\n",
+                         dist_solves, rel, inversions);
+        dist_fp32_state = (rel < 1.0e-3 && inversions == 0) ? 1 : -1;
+        if (dist_fp32_state < 0)
+            dist_status = std::string(dist->name()) + ": its FP32 eigenpairs failed verification "
+                "here (relative residual " + std::to_string(rel) + ", " + std::to_string(inversions)
+                + " eigenvalues out of ascending order); FP32 iterations stay on device "
+                + std::to_string(device) + " and only FP64 is distributed";
+        else
+            dist_status = std::string(dist->name()) + ": FP32 eigenpairs verified (relative "
+                "residual " + std::to_string(rel) + ", spectrum ascending)";
+        return true;
+    }
+
+    /**
+     * @brief FP64 twin of verifyDistributedFp32, for both the plain and the generalized solve.
+     *
+     * plain:       A v  ==  C (eps .* (C^T v))
+     * generalized: F v  ==  S C (eps .* (C^T (S v)))  with S = L L^T applied by two trmv calls,
+     *              which is the identity F = S C diag(eps) C^T S for  F C = S C diag(eps),
+     *              C^T S C = I.
+     * dProbeAd holds the copy of A (plain) or F (generalized) taken before the solve.
+     */
+    bool verifyDistributedFp64(int n, const double* C, const double* eps_dev, bool generalized,
+                               bool y_ready = false)
+    {
+        if ((!y_ready && dProbeAd.n < n) || dProbeVd.n < n || dProbeYd.n < n) return false;
+        const double one = 1.0, zero = 0.0, minus = -1.0;
+        const int b = 256;
+        // y = M v   (M = A or F, symmetric, lower triangle); y_ready: computed before the solve
+        if (!y_ready
+            && cublasDsymv(cublas, CUBLAS_FILL_MODE_LOWER, n, &one, dProbeAd.ptr, n, dProbeVd.ptr, 1,
+                           &zero, dProbeYd.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+            return false;
+        // u = v (plain) or u = S v = L (L^T v) (generalized), kept in dProbeTd
+        if (cudaMemcpyAsync(dProbeTd.ptr, dProbeVd.ptr, sizeof(double) * n,
+                            cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+            return false;
+        if (generalized) {
+            if (cublasDtrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n,
+                            dL.ptr, n, dProbeTd.ptr, 1) != CUBLAS_STATUS_SUCCESS
+                || cublasDtrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n,
+                               dL.ptr, n, dProbeTd.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+                return false;
+        }
+        // t = C^T u ; t *= eps ; w = C t   (w reuses dProbeTd)
+        // Scratch for C^T u; kept across calls with the other probe buffers.
+        try { dProbeSd.ensure(n); } catch (...) { return false; }
+        CudaBuffer<double>& tmp = dProbeSd;
+        if (cublasDgemv(cublas, CUBLAS_OP_T, n, n, &one, C, n, dProbeTd.ptr, 1, &zero,
+                        tmp.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+            return false;
+        k_scale_byd<<<(n + b - 1) / b, b, 0, stream>>>(tmp.ptr, eps_dev, n);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        if (cublasDgemv(cublas, CUBLAS_OP_N, n, n, &one, C, n, tmp.ptr, 1, &zero,
+                        dProbeTd.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+            return false;
+        if (generalized) {   // y2 = S w
+            if (cublasDtrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n,
+                            dL.ptr, n, dProbeTd.ptr, 1) != CUBLAS_STATUS_SUCCESS
+                || cublasDtrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n,
+                               dL.ptr, n, dProbeTd.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+                return false;
+        }
+        double res = 0.0, ref = 0.0;
+        if (cublasDaxpy(cublas, n, &minus, dProbeYd.ptr, 1, dProbeTd.ptr, 1) != CUBLAS_STATUS_SUCCESS
+            || cublasDnrm2(cublas, n, dProbeTd.ptr, 1, &res) != CUBLAS_STATUS_SUCCESS
+            || cublasDnrm2(cublas, n, dProbeYd.ptr, 1, &ref) != CUBLAS_STATUS_SUCCESS
+            || cudaStreamSynchronize(stream) != cudaSuccess)
+            return false;
+        std::vector<double> eps_host(n);
+        if (cudaMemcpy(eps_host.data(), eps_dev, sizeof(double) * n, cudaMemcpyDeviceToHost) != cudaSuccess)
+            return false;
+        // FP64 rounding is ~1e-16, so anything above a tiny tolerance is a real permutation.
+        const double span = std::fabs(eps_host[n - 1] - eps_host[0]);
+        const double ord_tol = std::max(1.0e-12, 1.0e-12 * span);
+        int inversions = 0;
+        for (int i = 1; i < n; ++i)
+            if (eps_host[i - 1] - eps_host[i] > ord_tol) ++inversions;
+        const double rel = (ref > 0.0) ? res / ref : 1.0;
+        if (std::getenv("CURCUMA_GPU_EIG_VERIFY_ALWAYS"))
+            std::fprintf(stderr, "[eig verify] FP64 solve %d: relative residual %.3e, %d inversions\n",
+                         dist_solves, rel, inversions);
+        // FP64 has ~1e-16 per operation, so a correct solve lands far below 1e-8 even at n = 15444.
+        dist_fp64_state = (rel < 1.0e-8 && inversions == 0) ? 1 : -1;
+        if (dist_fp64_state < 0)
+            dist_status = std::string(dist->name()) + ": its FP64 eigenpairs failed verification "
+                "here (relative residual " + std::to_string(rel) + ", " + std::to_string(inversions)
+                + " eigenvalues out of ascending order); the eigensolve stays on device "
+                + std::to_string(device);
+        return true;
+    }
+
+    /// Buffer of `bytes` on the eigensolver device (other than this one) with the most free
+    /// memory, kept across calls; false when none has room. Claude Generated (Sep 29, 2026).
+    bool ensureRemoteBackup(size_t bytes)
+    {
+        if (std::getenv("CURCUMA_GPU_EIG_LOCAL_BACKUP")) return false;
+        if (dist_backup && dist_backup_bytes >= bytes) return true;
+        releaseRemoteBackup();
+        int best = -1;
+        size_t best_free = 0;
+        for (int d : dist_devices) {
+            if (d == device) continue;
+            size_t fr = 0, tot = 0;
+            cudaSetDevice(d);
+            if (cudaMemGetInfo(&fr, &tot) == cudaSuccess && fr > best_free) { best_free = fr; best = d; }
+        }
+        bool ok = false;
+        // keep 1 GB head room on the helper for its own solver buffers
+        if (best >= 0 && best_free > bytes + (size_t(1) << 30)) {
+            cudaSetDevice(best);
+            if (cudaMalloc(&dist_backup, bytes) == cudaSuccess) {
+                dist_backup_dev = best;
+                dist_backup_bytes = bytes;
+                ok = true;
+            } else {
+                cudaGetLastError();
+                dist_backup = nullptr;
+            }
+        }
+        cudaSetDevice(device);
+        return ok;
+    }
+
+    void releaseRemoteBackup()
+    {
+        if (dist_backup) {
+            cudaSetDevice(dist_backup_dev);
+            cudaFree(dist_backup);
+            cudaSetDevice(device);
+        }
+        dist_backup = nullptr;
+        dist_backup_dev = -1;
+        dist_backup_bytes = 0;
+    }
+
+    /// Create the multi-GPU solver on first use; false when it is not to be used for this call.
+    bool distReady(int n, bool fp32)
+    {
+        if (dist_devices.size() < 2 || dist_failed || n < dist_min_nao || (fp32 && !dist_fp32))
+            return false;
+        if (!dist) {
+            std::string why;
+            dist = DistributedEigensolver::create(dist_backend, dist_devices, dist_block, why);
+            cudaSetDevice(device);
+            if (!dist) {
+                dist_failed = true;
+                dist_status = "unavailable: " + why;
+                return false;
+            }
+        }
+        // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md G2-8): cusolverMg is FP64-only by
+        // design (its FP32 eigenpairs degraded after the first call, see the verification note
+        // above). It used to be excluded only by the per-solve check, i.e. not at all with
+        // -gpu_eigensolver_verify false. FP32 iterations stay on this device.
+        if (fp32 && std::string(dist->name()) == "cusolverMg")
+            return false;
+        // FP32 correctness is a per-machine question (see dist_fp32_state): the first FP32 solve
+        // is verified, and only a failed verification turns FP32 off for the rest of the run.
+        // the wrapper reports dist_status; a backend that failed verification is not used again
+        if (fp32 && dist_fp32_state < 0) return false;
+        if (!fp32 && dist_fp64_state < 0) return false;
+        return true;
+    }
+
+    /**
+     * @brief Cholesky of the overlap in dL (S in the lower triangle) on the eigensolver's devices
+     *        (Claude Generated, Sep 29, 2026).
+     *
+     * Same gates as the FP64 eigensolve (distReady), plus a check of the result: a copy of S is
+     * kept, and S v == L (L^T v) is tested with a random v (relative residual < 1e-10; a correct
+     * FP64 factorisation lands near 1e-15). On a failed check S is put back and the caller runs
+     * the single-GPU potrf. The copy is one n x n buffer during setup, far below the SCF peak.
+     * CURCUMA_GPU_DIST_POTRF=0 keeps the factorisation on this device.
+     * @return 1 = dL holds L, 0 = not done (dL still holds S), -1 = dL destroyed
+     */
+    int distCholesky(int n)
+    {
+        if (!distReady(n, false) || !dist->supportsCholesky()) return 0;
+        if (const char* e = std::getenv("CURCUMA_GPU_DIST_POTRF"); e && std::string(e) == "0") return 0;
+        const size_t nn = static_cast<size_t>(n) * n;
+        CudaBuffer<double> copy, v, y, t;
+        try { copy.alloc(static_cast<int>(nn)); v.alloc(n); y.alloc(n); t.alloc(n); }
+        catch (...) { return 0; }
+        const int b = 256;
+        k_probe_filld<<<(n + b - 1) / b, b, 0, stream>>>(v.ptr, n, 0x27D4EB2Fu);
+        if (cudaGetLastError() != cudaSuccess
+            || cudaMemcpyAsync(copy.ptr, dL.ptr, sizeof(double) * nn, cudaMemcpyDeviceToDevice, stream) != cudaSuccess
+            || cudaStreamSynchronize(stream) != cudaSuccess)
+            return 0;
+        const bool done = dist->cholesky(n, dL.ptr, device);
+        cudaSetDevice(device);
+        if (prof) {
+            double sc = 0.0, so = 0.0, ga = 0.0;
+            dist->lastTimings(sc, so, ga);
+            profAdd("  multi-GPU potrf: scatter", sc);
+            profAdd("  multi-GPU potrf: factorise", so);
+            profAdd("  multi-GPU potrf: gather", ga);
+        }
+        bool good = false;
+        if (done) {
+            const double one = 1.0, zero = 0.0, minus = -1.0;
+            double res = 0.0, ref = 0.0;
+            good = cublasDsymv(cublas, CUBLAS_FILL_MODE_LOWER, n, &one, copy.ptr, n, v.ptr, 1, &zero,
+                               y.ptr, 1) == CUBLAS_STATUS_SUCCESS                       // y = S v
+                && cudaMemcpyAsync(t.ptr, v.ptr, sizeof(double) * n, cudaMemcpyDeviceToDevice, stream) == cudaSuccess
+                && cublasDtrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, dL.ptr, n,
+                               t.ptr, 1) == CUBLAS_STATUS_SUCCESS                         // t = L^T v
+                && cublasDtrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, dL.ptr, n,
+                               t.ptr, 1) == CUBLAS_STATUS_SUCCESS                         // t = L t
+                && cublasDnrm2(cublas, n, y.ptr, 1, &ref) == CUBLAS_STATUS_SUCCESS
+                && cublasDaxpy(cublas, n, &minus, y.ptr, 1, t.ptr, 1) == CUBLAS_STATUS_SUCCESS
+                && cublasDnrm2(cublas, n, t.ptr, 1, &res) == CUBLAS_STATUS_SUCCESS
+                && cudaStreamSynchronize(stream) == cudaSuccess
+                && ref > 0.0 && res / ref < 1.0e-10;
+            if (std::getenv("CURCUMA_GPU_EIG_VERIFY_ALWAYS"))
+                std::fprintf(stderr, "[chol verify] relative residual %.3e\n", ref > 0.0 ? res / ref : -1.0);
+        }
+        if (good) {
+            ++dist_potrf;
+            return 1;
+        }
+        // Not factorised or failed the check: put S back for the single-GPU potrf.
+        if (cudaMemcpyAsync(dL.ptr, copy.ptr, sizeof(double) * nn, cudaMemcpyDeviceToDevice, stream) != cudaSuccess
+            || cudaStreamSynchronize(stream) != cudaSuccess)
+            return -1;
+        if (dist_potrf_status.empty())
+            dist_potrf_status = done ? "multi-GPU Cholesky of S failed its check; factorised on device "
+                                           + std::to_string(device)
+                                     : "multi-GPU Cholesky of S failed; factorised on device " + std::to_string(device);
+        return 0;
+    }
+
+    /// Generalized variant (reduction + solve + back-transform on the devices). Same return codes
+    /// as distSolve(); 0 also when the backend has no generalized path.
+    int distSolveGeneralized(int n, void* A, const void* L, void* eig, bool fp32)
+    {
+        if (!distReady(n, fp32) || !dist->supportsGeneralized()) return 0;
+        if (cudaStreamSynchronize(stream) != cudaSuccess) return 0;
+        // Same verification as the plain path, on the generalized residual F c = eps S c with
+        // S = L L^T. A backend that passes once is trusted for the rest of the run; one that fails
+        // is dropped and the solve returns to this device. CURCUMA_GPU_EIG_VERIFY_ALWAYS=1 checks
+        // every call - which is how the cusolverMg reuse defect was found (first call exact, second
+        // call wrong).
+        bool verify64 = !fp32 && dist_verify && dist_fp64_state >= 0;
+        // Claude Generated (Sep 29, 2026): the verification needs y = F v and, only to redo a
+        // rejected solve, a copy of F. y is now taken before the solve (F is still intact), and
+        // the copy lives on one of the helper devices when it fits there: it was the largest
+        // single buffer on this device during the FP64 solve (1.9 GB at n = 15444; with 2 GPUs the
+        // device peaked 2.3 GB above the single-GPU run). On a helper-device failure the copy
+        // stays here as before.
+        bool backup_remote = false;
+        if (verify64) {
+            try {
+                dProbeVd.ensure(n); dProbeYd.ensure(n); dProbeTd.ensure(n);
+            } catch (...) {
+                dProbeVd.free(); dProbeYd.free(); dProbeTd.free();
+                verify64 = false;
+            }
+        }
+        if (verify64) {
+            const size_t bytes = sizeof(double) * static_cast<size_t>(n) * n;
+            backup_remote = ensureRemoteBackup(bytes)
+                && cudaMemcpyPeer(dist_backup, dist_backup_dev, A, device, bytes) == cudaSuccess;
+            cudaSetDevice(device);
+            if (!backup_remote) {
+                try {
+                    dProbeAd.ensure(static_cast<int>(static_cast<size_t>(n) * n));
+                } catch (...) {
+                    dProbeAd.free(); dProbeVd.free(); dProbeYd.free(); dProbeTd.free();
+                    dist_fp64_state = -1;
+                    dist_status = std::string(dist->name()) + ": FP64 verification needs one more n x n "
+                        "buffer than fits on device " + std::to_string(device)
+                        + "; the eigensolve stays on that device";
+                    return 0;
+                }
+            }
+            const double one = 1.0, zero = 0.0;
+            const int b = 256;
+            k_probe_filld<<<(n + b - 1) / b, b, 0, stream>>>(dProbeVd.ptr, n, 0x85EBCA6Bu);
+            if (cudaGetLastError() != cudaSuccess
+                || cublasDsymv(cublas, CUBLAS_FILL_MODE_LOWER, n, &one, static_cast<const double*>(A), n,
+                               dProbeVd.ptr, 1, &zero, dProbeYd.ptr, 1) != CUBLAS_STATUS_SUCCESS   // y = F v
+                || (!backup_remote
+                    && cudaMemcpyAsync(dProbeAd.ptr, A, bytes, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+                || cudaStreamSynchronize(stream) != cudaSuccess)
+                verify64 = false;
+        }
+        const bool solved = dist->solveGeneralized(n, A, L, l_generation, eig, fp32, device);
+        cudaSetDevice(device);
+        if (prof) {
+            double sc = 0.0, so = 0.0, ga = 0.0, re = 0.0, ba = 0.0;
+            dist->lastTimings(sc, so, ga);
+            dist->lastGeneralizedTimings(re, ba);
+            const std::string p = fp32 ? "  multi-GPU FP32: " : "  multi-GPU FP64: ";
+            profAdd((p + "scatter F (+L)").c_str(), sc);
+            profAdd((p + "sygst").c_str(), re);
+            profAdd((p + "syevd").c_str(), so - re - ba);
+            profAdd((p + "trsm back-transform").c_str(), ba);
+            profAdd((p + "gather C").c_str(), ga);
+        }
+        if (solved) {
+            ++dist_solves;
+            bool rejected = false;
+            if (verify64 && verifyDistributedFp64(n, static_cast<const double*>(A),
+                                                  static_cast<const double*>(eig), true, true)
+                && dist_fp64_state < 0) {
+                const size_t bytes = sizeof(double) * static_cast<size_t>(n) * n;
+                rejected = backup_remote
+                    ? cudaMemcpyPeer(A, device, dist_backup, dist_backup_dev, bytes) == cudaSuccess
+                    : (cudaMemcpyAsync(A, dProbeAd.ptr, bytes, cudaMemcpyDeviceToDevice, stream) == cudaSuccess
+                       && cudaStreamSynchronize(stream) == cudaSuccess);
+                cudaSetDevice(device);
+                --dist_solves;
+            }
+            if (rejected) return 0;
+            if (dist_fp64_state < 0) return -1;
+            return 1;
+        }
+        dist_failed = true;
+        dist_status = std::string(dist->name()) + " generalized solve failed (n = " + std::to_string(n)
+            + (fp32 ? ", FP32" : ", FP64") + "); single-GPU solver from here on";
+        return dist->inputIntact() ? 0 : -1;
+    }
+
+    int    sparse_mode = 1;          // 0 = always dense, 1 = auto, 2 = always sparse
+    bool   sparse = false;           // storage used for the current geometry
+    double sparse_eps = 1.0e-20;     // integrals below this are dropped
+    int    sp_nnz = 0;
+    double sp_fraction = 1.0;        // nnz / nao^2
+    double sp_rmax = 0.0;            // largest element-pair cutoff (Bohr)
+    CudaBuffer<int>    dSpRow, dSpCol, dSpColPtr, dSpPerm;
+    // Claude Generated (Sep 29, 2026): atom-pair screen for the dense S/H0 build in screened
+    // mode. Element kind per atom and the squared element-pair cutoff (the same table the pair
+    // pattern is built from, slightly widened), so k_overlap_h0 skips the atom pairs whose
+    // integrals the SCF never stores. screen_nk == 0: no screen (dense mode, or disabled).
+    CudaBuffer<int>    dAtKind;
+    CudaBuffer<double> dScreenCut2;
+    int                screen_nk = 0;
+    CudaBuffer<double> dSpS, dSpH0, dSpDp, dSpQp, dSpTmp;
+    // Density: the resident screened loop keeps P only on the pattern (dSpP) and rebuilds the
+    // dense dP on demand (gradient, host download). p_dense_valid says which one is current.
+    CudaBuffer<double> dSpP;
+    bool               p_dense_valid = true;
+    int                last_ncol = 0;
+    // Point 2 (Claude Generated, Sep 2026): the device gradient's H0-Pulay and CN-onsite
+    // kernels read P and W ONLY at stored screened pairs (verified exhaustively - see
+    // computeGradient) and at the AO diagonal (always in-pattern by construction, see
+    // buildScreenedPairs). dSpW is the pattern-only twin of dSpP for the energy-weighted
+    // density W (built by the *_spP gradient kernels below via k_density_sp, weight 2*eps
+    // instead of occ); dSpDiagIdx[mu] is the pair-storage index e of the (mu,mu) entry,
+    // computed once in buildScreenedPairs (same loop that builds dSpRow/dSpCol, no extra
+    // scan). Neither is needed when the geometry is small enough to stay dense.
+    CudaBuffer<double> dSpW;
+    CudaBuffer<int>    dSpDiagIdx;
+    std::vector<int>   h_sp_row, h_sp_col;       // host copy (dense downloads)
+    // Per-atom screening data captured in beginBasis (geometry independent).
+    std::vector<int>    h_z, h_at_ao0, h_at_nao;
+    std::vector<double> h_at_amin, h_at_cmax;
+    bool                h_ao_contiguous = false;
+
+    /// Free every nao²- and nat²-sized buffer. Called when a basis cannot be set up, so a
+    /// refused or half-allocated basis does not keep gigabytes of device memory pinned for the
+    /// rest of the process (the CPU fallback then runs with a clean device).
+    void releaseLarge()
+    {
+        for (CudaBuffer<double>* b : { &dH0, &dS, &dL, &dC, &dP, &dCw, &dWork, &dDpInt, &dQpInt,
+                                       &dSdR, &dPotrfWork, &dW, &dGamma, &dMpAmatSD, &dMpAmatDD,
+                                       &dMpAmatSQ, &dSolvB, &dEeqM, &dEeqWork })
+            b->free();
+        for (CudaBuffer<float>* b : { &dCf, &dLf, &dWorkf })
+            b->free();
+        for (CudaBuffer<double>* b : { &dSpS, &dSpH0, &dSpDp, &dSpQp, &dSpTmp, &dSpP, &dSpW })
+            b->free();
+        releaseDensityHelpers();
+        mp_otf = false;
+        p_dense_valid = true;
+        for (CudaBuffer<int>* b : { &dSpRow, &dSpCol, &dSpColPtr, &dSpPerm, &dSpDiagIdx })
+            b->free();
+        h_sp_row.clear(); h_sp_row.shrink_to_fit();
+        h_sp_col.clear(); h_sp_col.shrink_to_fit();
+        sparse = false;
+        sp_nnz = 0;
+        lwork = 0;
+        lwork_f32 = 0;
+        potrf_lwork = 0;
+        resident_n = 0;
+        basis_nao = 0;
+    }
 };
 
 // ---- Stage 3 element parameter tables in __constant__ memory --------------
@@ -235,10 +1039,18 @@ __constant__ double c_covrad_d3[86];   // covalent_rad_d3_au(z), index z-1
 __constant__ double c_pauling[86];     // pauling_en[z-1]
 __constant__ double c_atomic_rad[86];  // atomic_rad_au(z), index z-1
 
+// Claude Generated (Sep 2026, multi-GPU): __constant__ memory belongs to ONE device, so the
+// tables must be uploaded once PER DEVICE, not once per process. The old `static bool`
+// left every device but the first with uninitialised tables (wrong CN/EEQ, no error)
+// and was a data race when several workers built contexts at the same time.
 void ensureStage3Constants()
 {
-    static bool loaded = false;
-    if (loaded) return;
+    static std::mutex mtx;
+    static std::set<int> loaded_devices;
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess) return;
+    std::lock_guard<std::mutex> lock(mtx);
+    if (loaded_devices.count(dev)) return;
     double covrad[86], pauling[86], arad[86];
     for (int z = 1; z <= 86; ++z) {
         covrad[z - 1]  = curcuma::xtb::covalent_rad_d3_au(z);
@@ -248,7 +1060,7 @@ void ensureStage3Constants()
     cudaMemcpyToSymbol(c_covrad_d3, covrad, sizeof(covrad));
     cudaMemcpyToSymbol(c_pauling, pauling, sizeof(pauling));
     cudaMemcpyToSymbol(c_atomic_rad, arad, sizeof(arad));
-    loaded = true;
+    loaded_devices.insert(dev);
 }
 } // namespace
 
@@ -307,7 +1119,8 @@ __global__ void k_overlap_h0(
     const double* __restrict__ sh_zeta, const double* __restrict__ shpoly,
     const double* __restrict__ se, const int* __restrict__ z,
     const int* __restrict__ valence, const double* __restrict__ xyz,
-    double* __restrict__ S, double* __restrict__ H0)
+    double* __restrict__ S, double* __restrict__ H0,
+    const int* __restrict__ at_kind, const double* __restrict__ cut2, int nk)
 {
     const int a = blockIdx.x * blockDim.x + threadIdx.x;
     const int b = blockIdx.y * blockDim.y + threadIdx.y;
@@ -317,6 +1130,13 @@ __global__ void k_overlap_h0(
     const int la = ang_sh[a], lb = ang_sh[b];
     const double xa = xyz[3 * iat + 0], ya = xyz[3 * iat + 1], za = xyz[3 * iat + 2];
     const double xb = xyz[3 * jat + 0], yb = xyz[3 * jat + 1], zb = xyz[3 * jat + 2];
+    // Claude Generated (Sep 29, 2026): screened storage keeps only the atom pairs inside the
+    // element-pair cutoff (every integral beyond it is below sparse_eps). The caller zeroed S and
+    // H0, so a pair outside the (slightly widened) cutoff is skipped instead of computed.
+    if (nk > 0 && iat != jat) {
+        const double sx = xa - xb, sy = ya - yb, sz = za - zb;
+        if (sx * sx + sy * sy + sz * sz > cut2[at_kind[iat] * nk + at_kind[jat]]) return;
+    }
     const double avg_eps = 0.5 * (se[a] + se[b]);
 
     double h_factor;
@@ -576,24 +1396,43 @@ __global__ void k_grad_cn_onsite(int nao, const double* __restrict__ P,
     atomicAdd(&dEdcn[ao2at[mu]], (-kcn[ao2sh[mu]]) * Pmm);
 }
 
+// Point 2 (Claude Generated, Sep 2026): pattern-only twin - P(mu,mu) read straight out of the
+// compact dSpP array via the diagonal index dSpDiagIdx[mu] (built once in buildScreenedPairs;
+// the AO diagonal is always in the screened pattern - an atom is always its own neighbour).
+__global__ void k_grad_cn_onsite_spP(int nao, const double* __restrict__ Psp,
+                                     const int* __restrict__ diag_idx,
+                                     const double* __restrict__ kcn, const int* __restrict__ ao2sh,
+                                     const int* __restrict__ ao2at, double* __restrict__ dEdcn)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mu >= nao) return;
+    const double Pmm = Psp[diag_idx[mu]];
+    atomicAdd(&dEdcn[ao2at[mu]], (-kcn[ao2sh[mu]]) * Pmm);
+}
+
 // Section 2b: H0/Pulay off-site gradient. One thread per AO pair (μ,ν) with iat<jat.
 // Mirrors xtb_gradient.cpp:228-438 (GFN1/GFN2 isotropic part; the GFN2 multipole
 // integral Pulay block is Stage 4b and handled separately).
-__global__ void k_grad_h0_pulay(
-    int nao, int is_gfn2,
+// Pair body of the H0/Pulay gradient, shared by the dense kernel (every (mu,nu)), the
+// screened-pair kernel (stored pairs only; S and H0 come from the sparse arrays, P/W from
+// the dense buffers at the pattern position) and the pattern-only screened-pair kernel
+// (S/H0/P/W all come from the sparse arrays - Point 2, Sep 2026).
+// Claude Generated (Sep 2026): factored out of k_grad_h0_pulay unchanged. Pmn/Wmn are now
+// passed in by the caller (was a dense P[mn]/W[mn] lookup here) so the same body serves a
+// dense buffer, a dense buffer read at a pattern index, or a pattern-only array - the caller
+// decides where Pmn/Wmn come from, this function no longer knows or cares.
+__device__ __forceinline__ void d_grad_h0_pulay_pair(
+    int mu, int nu, double Smn, double H0mn, double Pmn, double Wmn,
+    int is_gfn2,
     const int* __restrict__ ao2sh, const int* __restrict__ ao2at, const int* __restrict__ ang,
     const int* __restrict__ iao_sh, const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
     const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
     const double* __restrict__ sh_zeta, const double* __restrict__ shpoly, const double* __restrict__ kcn,
     const int* __restrict__ valence, const int* __restrict__ z, const double* __restrict__ se,
-    const double* __restrict__ xyz, const double* __restrict__ P, const double* __restrict__ S,
-    const double* __restrict__ H0, const double* __restrict__ W, const double* __restrict__ v_ao,
+    const double* __restrict__ xyz, const double* __restrict__ v_ao,
     const double* __restrict__ v_dp, const double* __restrict__ v_qp,
     double* __restrict__ grad, double* __restrict__ dEdcn)
 {
-    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
-    const int nu = blockIdx.y * blockDim.y + threadIdx.y;
-    if (mu >= nao || nu >= nao) return;
     const int iat = ao2at[mu], jat = ao2at[nu];
     if (iat >= jat) return;  // unique atom pairs, off-site only
 
@@ -639,8 +1478,6 @@ __global__ void k_grad_h0_pulay(
     const double h_av = 0.5 * (se[isha] + se[ishb]) * h_factor;
     const double dlog_pi_dr_r = (shpoly[isha] / pi_a + shpoly[ishb] / pi_b) * rr / (2.0 * r2);
 
-    const size_t mn = static_cast<size_t>(mu) + static_cast<size_t>(nu) * nao;
-    const double Pmn = P[mn], Smn = S[mn], H0mn = H0[mn], Wmn = W[mn];
     double dS[3];
     if (dpair) {
         d_overlap_grad_elem(la, sa, lb, sb,
@@ -718,7 +1555,102 @@ __global__ void k_grad_h0_pulay(
     atomicAdd(&dEdcn[jat], (-kcn[ishb]) * cn_c);
 }
 
+__global__ void k_grad_h0_pulay(
+    int nao, int is_gfn2,
+    const int* __restrict__ ao2sh, const int* __restrict__ ao2at, const int* __restrict__ ang,
+    const int* __restrict__ iao_sh, const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
+    const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
+    const double* __restrict__ sh_zeta, const double* __restrict__ shpoly, const double* __restrict__ kcn,
+    const int* __restrict__ valence, const int* __restrict__ z, const double* __restrict__ se,
+    const double* __restrict__ xyz, const double* __restrict__ P, const double* __restrict__ S,
+    const double* __restrict__ H0, const double* __restrict__ W, const double* __restrict__ v_ao,
+    const double* __restrict__ v_dp, const double* __restrict__ v_qp,
+    double* __restrict__ grad, double* __restrict__ dEdcn)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    const int nu = blockIdx.y * blockDim.y + threadIdx.y;
+    if (mu >= nao || nu >= nao) return;
+    if (ao2at[mu] >= ao2at[nu]) return;  // unique atom pairs, off-site only
+    const size_t mn = static_cast<size_t>(mu) + static_cast<size_t>(nu) * nao;
+    d_grad_h0_pulay_pair(mu, nu, S[mn], H0[mn], P[mn], W[mn], is_gfn2, ao2sh, ao2at, ang, iao_sh,
+                         sh_nprim, sh_prim_off, prim_alpha, prim_coeff, sh_zeta, shpoly, kcn,
+                         valence, z, se, xyz, v_ao, v_dp, v_qp, grad, dEdcn);
+}
+
+// Screened-pair twin: one thread per stored pair e = (row, col). P and W are dense (a full
+// nao x nao buffer) but only ever read at the pattern position (mu,nu) - kept as the
+// reference/fallback for callers that upload P/C explicitly (pc_resident=false in
+// computeGradient) rather than reuse the resident screened-pattern density.
+__global__ void k_grad_h0_pulay_sp(
+    int nnz, const int* __restrict__ row, const int* __restrict__ col,
+    const double* __restrict__ Ssp, const double* __restrict__ H0sp,
+    int nao, int is_gfn2,
+    const int* __restrict__ ao2sh, const int* __restrict__ ao2at, const int* __restrict__ ang,
+    const int* __restrict__ iao_sh, const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
+    const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
+    const double* __restrict__ sh_zeta, const double* __restrict__ shpoly, const double* __restrict__ kcn,
+    const int* __restrict__ valence, const int* __restrict__ z, const double* __restrict__ se,
+    const double* __restrict__ xyz, const double* __restrict__ P, const double* __restrict__ W,
+    const double* __restrict__ v_ao, const double* __restrict__ v_dp, const double* __restrict__ v_qp,
+    double* __restrict__ grad, double* __restrict__ dEdcn)
+{
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= nnz) return;
+    const int mu = row[e], nu = col[e];
+    if (ao2at[mu] >= ao2at[nu]) return;
+    const size_t mn = static_cast<size_t>(mu) + static_cast<size_t>(nu) * nao;
+    d_grad_h0_pulay_pair(mu, nu, Ssp[e], H0sp[e], P[mn], W[mn], is_gfn2, ao2sh, ao2at, ang, iao_sh,
+                         sh_nprim, sh_prim_off, prim_alpha, prim_coeff, sh_zeta, shpoly, kcn,
+                         valence, z, se, xyz, v_ao, v_dp, v_qp, grad, dEdcn);
+}
+
+// Point 2 (Claude Generated, Sep 2026): pattern-only twin of k_grad_h0_pulay_sp - P and W
+// come from the compact nnz-sized dSpP/dSpW arrays (same pair index e that already indexes
+// Ssp/H0sp), no dense nao x nao buffer at all. Used on the device-resident path
+// (pc_resident=true) where dSpP is already the converged density from the SCF loop's last
+// iteration and dSpW is built once per gradient call (see computeGradient).
+__global__ void k_grad_h0_pulay_spP(
+    int nnz, const int* __restrict__ row, const int* __restrict__ col,
+    const double* __restrict__ Ssp, const double* __restrict__ H0sp,
+    const double* __restrict__ Psp, const double* __restrict__ Wsp,
+    int is_gfn2,
+    const int* __restrict__ ao2sh, const int* __restrict__ ao2at, const int* __restrict__ ang,
+    const int* __restrict__ iao_sh, const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
+    const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
+    const double* __restrict__ sh_zeta, const double* __restrict__ shpoly, const double* __restrict__ kcn,
+    const int* __restrict__ valence, const int* __restrict__ z, const double* __restrict__ se,
+    const double* __restrict__ xyz,
+    const double* __restrict__ v_ao, const double* __restrict__ v_dp, const double* __restrict__ v_qp,
+    double* __restrict__ grad, double* __restrict__ dEdcn)
+{
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= nnz) return;
+    const int mu = row[e], nu = col[e];
+    if (ao2at[mu] >= ao2at[nu]) return;
+    d_grad_h0_pulay_pair(mu, nu, Ssp[e], H0sp[e], Psp[e], Wsp[e], is_gfn2, ao2sh, ao2at, ang, iao_sh,
+                         sh_nprim, sh_prim_off, prim_alpha, prim_coeff, sh_zeta, shpoly, kcn,
+                         valence, z, se, xyz, v_ao, v_dp, v_qp, grad, dEdcn);
+}
+
 // Section 3: isotropic Coulomb gradient. One thread per shell is, inner js<is.
+//
+// Point 5a (Claude Generated, Sep 2026): the only call site (computeGradient, below) always
+// passes gexp=2.0 (xtb_coulomb.hpp:98, Klopman-Ohno kernel, both GFN1/GFN2 - the energy-side
+// gamma-matrix kernel a few hundred lines up already hardcodes the same 2.0 for the same
+// reason). The general path costs 4 FP64 pow() per shell pair; on this card (Ampere-class)
+// FP64 transcendentals run at a fraction of the FP64 add/mul rate, so this loop was
+// essentially the whole measured 234 ms Coulomb-gradient phase on polymer_2x (7320 atoms).
+//
+// For gexp==2 exactly, let X = r^2 + gam_bar^-2, so gamma = X^(-1/2). The code's "dgamma_dr"
+// is actually d(gamma)/dr * (1/r) (that 1/r is what lets grad += force*dx work directly on
+// the raw coordinate difference, no separate normalisation below) - algebraically
+// dgamma/dr * (1/r) = -r^(gexp-2)*gamma^(gexp+1), and r^(gexp-2) = r^0 = 1 identically for
+// gexp=2, leaving -gamma^3 with no r-dependence left to evaluate at all. Verified against the
+// general formula symbolically (both reduce to the same closed form) and numerically at
+// several (r, gam_bar) points before wiring in. NOT bit-identical to the general path -
+// gamma*gamma*gamma rounds one ULP differently than pow(gamma,3.0) at some inputs - see the
+// noise-floor/validation numbers in the report; treat this the same way the shell-pair-blocked
+// integral kernels' FMA-contraction note is treated (docs/SQM_PERFORMANCE.md).
 __global__ void k_grad_coulomb(int nsh, int is_gfn2, const int* __restrict__ sh2at,
                                const double* __restrict__ g, const double* __restrict__ q_sh,
                                const double* __restrict__ xyz, double gexp, double* __restrict__ grad)
@@ -726,6 +1658,7 @@ __global__ void k_grad_coulomb(int nsh, int is_gfn2, const int* __restrict__ sh2
     const int is = blockIdx.x * blockDim.x + threadIdx.x;
     if (is >= nsh) return;
     const int iat = sh2at[is];
+    const bool fast_gexp2 = (gexp == 2.0);
     for (int js = 0; js < is; ++js) {
         const int jat = sh2at[js];
         if (iat == jat) continue;
@@ -734,10 +1667,16 @@ __global__ void k_grad_coulomb(int nsh, int is_gfn2, const int* __restrict__ sh2
         const double dz = xyz[3*iat+2] - xyz[3*jat+2];
         const double r2 = dx*dx + dy*dy + dz*dz;
         if (r2 < 1.0e-12) continue;
-        const double r1 = sqrt(r2);
         const double gam_bar = d_coulomb_average(g[is], g[js], is_gfn2 != 0);
-        const double gamma = pow(pow(r1, gexp) + pow(gam_bar, -gexp), -1.0 / gexp);
-        const double dgamma_dr = -pow(r1, gexp - 2.0) * pow(gamma, gexp + 1.0);
+        double dgamma_dr;
+        if (fast_gexp2) {
+            const double gamma = 1.0 / sqrt(r2 + 1.0 / (gam_bar * gam_bar));
+            dgamma_dr = -(gamma * gamma * gamma);
+        } else {
+            const double r1 = sqrt(r2);
+            const double gamma = pow(pow(r1, gexp) + pow(gam_bar, -gexp), -1.0 / gexp);
+            dgamma_dr = -pow(r1, gexp - 2.0) * pow(gamma, gexp + 1.0);
+        }
         const double force = q_sh[is] * q_sh[js] * dgamma_dr;
         atomicAdd(&grad[3*iat+0], force*dx); atomicAdd(&grad[3*jat+0], -force*dx);
         atomicAdd(&grad[3*iat+1], force*dy); atomicAdd(&grad[3*jat+1], -force*dy);
@@ -766,6 +1705,39 @@ __global__ void k_d2f(const double* __restrict__ in, float* __restrict__ out, si
     const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < n) out[i] = static_cast<float>(in[i]);
 }
+// Claude Generated (Sep 2026): deterministic pseudo-random probe vector and elementwise scale,
+// used by verifyDistributedFp32() to check that a distributed eigensolve really returned
+// eigenpairs of the matrix it was given.
+__global__ void k_probe_fill(float* __restrict__ v, int n, unsigned seed)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    unsigned h = seed ^ (static_cast<unsigned>(i) * 2654435761u);
+    h ^= h >> 13; h *= 1274126177u; h ^= h >> 16;
+    v[i] = (static_cast<float>(h & 0xFFFFFu) / 524288.0f) - 1.0f;   // in [-1, 1)
+}
+
+__global__ void k_scale_by(float* __restrict__ x, const float* __restrict__ s, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] *= s[i];
+}
+
+__global__ void k_probe_filld(double* __restrict__ v, int n, unsigned seed)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    unsigned h = seed ^ (static_cast<unsigned>(i) * 2654435761u);
+    h ^= h >> 13; h *= 1274126177u; h ^= h >> 16;
+    v[i] = (static_cast<double>(h & 0xFFFFFu) / 524288.0) - 1.0;
+}
+
+__global__ void k_scale_byd(double* __restrict__ x, const double* __restrict__ s, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] *= s[i];
+}
+
 __global__ void k_f2d(const float* __restrict__ in, double* __restrict__ out, size_t n)
 {
     const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -855,6 +1827,401 @@ __global__ void k_multipole_moments(double* dp_at, double* qp_at,
             atomicAdd(&qp_at[k + iat * 6], -acc);
         }
     }
+}
+
+// ====================================================================== *
+//  Screened (sparse) AO-pair storage for S, H0 and the GFN2 multipole integrals.
+//  Claude Generated (Sep 2026, large systems).
+//
+//  The Gaussian integrals decay as exp(-a_i a_j/(a_i+a_j) R^2) with the distance R of
+//  the two atoms, so beyond a basis-derived cutoff every element of S, H0, dp_int and
+//  qp_int is below 1e-20 and contributes nothing representable to the SCF. Storing only
+//  the AO pairs of atom pairs within that cutoff turns eleven nao^2 matrices into eleven
+//  nnz-length arrays (polymer_2x: 16 % of the pairs within 40 Bohr).
+//
+//  Layout: entry e is the AO pair (row[e], col[e]), ordered column-major (col ascending,
+//  then row ascending) - the same order as the dense buffers - and colptr[mu] is the first
+//  entry of column mu. perm[e] is the entry of the transposed pair (col[e], row[e]); the
+//  atom-distance screen is symmetric, so it always exists. Every kernel below performs the
+//  same arithmetic, in the same order, as its dense counterpart, so with nothing screened
+//  away (forced mode on a small molecule) the results are identical to the dense path.
+// ====================================================================== *
+
+// values[e] = dense[row[e] + col[e]*n]
+__global__ void k_sp_gather(const double* __restrict__ dense, const int* __restrict__ row,
+                            const int* __restrict__ col, int n, int nnz, double* __restrict__ values)
+{
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= nnz) return;
+    values[e] = dense[static_cast<size_t>(row[e]) + static_cast<size_t>(col[e]) * n];
+}
+
+// dense[row[e] + col[e]*n] = values[e]   (dense must be zeroed before)
+__global__ void k_sp_scatter(const double* __restrict__ values, const int* __restrict__ row,
+                             const int* __restrict__ col, int n, int nnz, double* __restrict__ dense)
+{
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= nnz) return;
+    dense[static_cast<size_t>(row[e]) + static_cast<size_t>(col[e]) * n] = values[e];
+}
+
+// Sparse twin of k_multipole_ints: one thread per stored pair, S taken from the screened
+// overlap values of the same entry. dp/qp are 3*nnz / 6*nnz, component k at k*nnz + e.
+__global__ void k_multipole_ints_sp(
+    int nnz, const int* __restrict__ row, const int* __restrict__ col,
+    const int* __restrict__ ao2sh, const int* __restrict__ ao2at,
+    const int* __restrict__ iao_sh, const int* __restrict__ ang_sh,
+    const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
+    const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
+    const double* __restrict__ xyz, const double* __restrict__ Ssp,
+    double* __restrict__ dp_sp, double* __restrict__ qp_sp)
+{
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= nnz) return;
+    const size_t ne = static_cast<size_t>(nnz);
+    const size_t ee = static_cast<size_t>(e);
+    const int mu = row[e], nu = col[e];
+
+    const int isha = ao2sh[mu], iat = ao2at[mu];
+    const int ishb = ao2sh[nu], jat = ao2at[nu];
+    const int la = ang_sh[isha], lb = ang_sh[ishb];
+    const int sa = mu - iao_sh[isha], sb = nu - iao_sh[ishb];
+    const bool dpair = (la >= 2 || lb >= 2);
+
+    for (int k = 0; k < 3; ++k) dp_sp[static_cast<size_t>(k) * ne + ee] = 0.0;
+    for (int k = 0; k < 6; ++k) qp_sp[static_cast<size_t>(k) * ne + ee] = 0.0;
+
+    const double* aA = prim_alpha + sh_prim_off[isha];
+    const double* cA = prim_coeff + sh_prim_off[isha];
+    const int npa = sh_nprim[isha];
+    const double* aB = prim_alpha + sh_prim_off[ishb];
+    const double* cB = prim_coeff + sh_prim_off[ishb];
+    const int npb = sh_nprim[ishb];
+
+    double Sx, D[3], Q[6];
+    if (!dpair) {
+        const int ta = d_ao_to_type(la, sa);
+        const int tb = d_ao_to_type(lb, sb);
+        if (ta < 0 || tb < 0) return;
+        d_cgto_multipole(aA, cA, npa, aB, cB, npb,
+                         xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
+                         xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], ta, tb, Sx, D, Q);
+    } else {
+        d_multipole_elem(la, sa, lb, sb, aA, cA, npa, aB, cB, npb,
+                         xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
+                         xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], Sx, D, Q);
+    }
+
+    const double Rx = xyz[3*jat+0], Ry = xyz[3*jat+1], Rz = xyz[3*jat+2];
+    const double Smn = Ssp[e];
+    const double dx = D[0], dy = D[1], dz = D[2];
+    dp_sp[0*ne + ee] = dx - Rx * Smn;
+    dp_sp[1*ne + ee] = dy - Ry * Smn;
+    dp_sp[2*ne + ee] = dz - Rz * Smn;
+
+    const double qxx = Q[0] - 2*Rx*dx + Rx*Rx*Smn;
+    const double qxy = Q[1] - Rx*dy - Ry*dx + Rx*Ry*Smn;
+    const double qyy = Q[2] - 2*Ry*dy + Ry*Ry*Smn;
+    const double qxz = Q[3] - Rx*dz - Rz*dx + Rx*Rz*Smn;
+    const double qyz = Q[4] - Ry*dz - Rz*dy + Ry*Rz*Smn;
+    const double qzz = Q[5] - 2*Rz*dz + Rz*Rz*Smn;
+    const double tr = 0.5 * (qxx + qyy + qzz);
+    qp_sp[0*ne + ee] = 1.5 * qxx - tr;
+    qp_sp[1*ne + ee] = 1.5 * qxy;
+    qp_sp[2*ne + ee] = 1.5 * qyy - tr;
+    qp_sp[3*ne + ee] = 1.5 * qxz;
+    qp_sp[4*ne + ee] = 1.5 * qyz;
+    qp_sp[5*ne + ee] = 1.5 * qzz - tr;
+}
+
+// Sparse twin of k_build_fock_iso (+ optional k_add_fock_multipole): F must be zeroed first.
+// F(mu,nu) = H0 - 1/2 S (v_mu + v_nu) - 1/2 [dp/qp(mu,nu).v(jat) + dp/qp(nu,mu).v(iat)].
+__global__ void k_build_fock_sp(double* __restrict__ F, int n, int nnz,
+                                const int* __restrict__ row, const int* __restrict__ col,
+                                const int* __restrict__ perm,
+                                const double* __restrict__ H0sp, const double* __restrict__ Ssp,
+                                const double* __restrict__ vao,
+                                const double* __restrict__ dp_sp, const double* __restrict__ qp_sp,
+                                const double* __restrict__ v_dp, const double* __restrict__ v_qp,
+                                const int* __restrict__ ao2at)
+{
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= nnz) return;
+    const int mu = row[e], nu = col[e];
+    const size_t mn = static_cast<size_t>(mu) + static_cast<size_t>(nu) * n;
+    double f = H0sp[e] - 0.5 * Ssp[e] * (vao[mu] + vao[nu]);
+    if (dp_sp) {
+        const size_t ne = static_cast<size_t>(nnz);
+        const size_t em = static_cast<size_t>(e), et = static_cast<size_t>(perm[e]);
+        const int iat = ao2at[mu], jat = ao2at[nu];
+        double dd = 0.0;
+        for (int k = 0; k < 3; ++k) {
+            const size_t off = static_cast<size_t>(k) * ne;
+            dd += dp_sp[off + em] * v_dp[k + jat * 3] + dp_sp[off + et] * v_dp[k + iat * 3];
+        }
+        double qq = 0.0;
+        for (int k = 0; k < 6; ++k) {
+            const size_t off = static_cast<size_t>(k) * ne;
+            qq += qp_sp[off + em] * v_qp[k + jat * 6] + qp_sp[off + et] * v_qp[k + iat * 6];
+        }
+        f -= 0.5 * (dd + qq);
+    }
+    F[mn] = f;
+}
+
+// Sparse twin of k_pop_ao: pop(mu) = sum_nu P(mu,nu) S(mu,nu), nu ascending. Column mu of
+// the pattern lists exactly the nu with S(nu,mu) stored; S(mu,nu) is at perm[e].
+__global__ void k_pop_ao_sp(double* __restrict__ pop, const double* __restrict__ P,
+                            const double* __restrict__ Ssp, const int* __restrict__ row,
+                            const int* __restrict__ colptr, const int* __restrict__ perm, int n)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mu >= n) return;
+    double s = 0.0;
+    for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) {
+        const size_t idx = static_cast<size_t>(mu) + static_cast<size_t>(row[e]) * n;
+        s += P[idx] * Ssp[perm[e]];
+    }
+    pop[mu] = s;
+}
+
+// Sparse twin of k_multipole_moments (column mu, rows ascending).
+__global__ void k_multipole_moments_sp(double* dp_at, double* qp_at, const double* __restrict__ P,
+                                       const double* __restrict__ dp_sp, const double* __restrict__ qp_sp,
+                                       const int* __restrict__ row, const int* __restrict__ colptr,
+                                       const int* __restrict__ ao2at, int n, int nnz)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mu >= n) return;
+    const size_t ne  = static_cast<size_t>(nnz);
+    const size_t col = static_cast<size_t>(mu) * n;
+    const int iat = ao2at[mu];
+    for (int k = 0; k < 3; ++k) {
+        const double* dk = dp_sp + static_cast<size_t>(k) * ne;
+        double acc = 0.0;
+        for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) acc += P[col + row[e]] * dk[e];
+        atomicAdd(&dp_at[k + iat * 3], -acc);
+    }
+    for (int k = 0; k < 6; ++k) {
+        const double* qk = qp_sp + static_cast<size_t>(k) * ne;
+        double acc = 0.0;
+        for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) acc += P[col + row[e]] * qk[e];
+        atomicAdd(&qp_at[k + iat * 6], -acc);
+    }
+}
+
+// Density on the screened pattern only (Claude Generated, Sep 2026). Populations, multipole
+// moments and the band energy read P exclusively at stored pairs, so the SCF loop never needs
+// the dense nao x nao product: P(row,col) = sum_k Cw(row,k) C(col,k) with Cw = C diag(occ),
+// the same sum the dense GEMM P = Cw C^T performs for that element. polymer_2x: 6 % of the
+// elements (the dense GEMM was 26 % of the SCF time) and no dense P buffer during the loop.
+__global__ void k_density_sp(int nnz, const int* __restrict__ row, const int* __restrict__ col,
+                             const double* __restrict__ Cw, const double* __restrict__ C,
+                             int n, int ncol, double* __restrict__ Psp)
+{
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= nnz) return;
+    const size_t r = static_cast<size_t>(row[e]), c = static_cast<size_t>(col[e]);
+    double acc = 0.0;
+    for (int k = 0; k < ncol; ++k) {
+        const size_t off = static_cast<size_t>(k) * n;
+        acc += Cw[r + off] * C[c + off];
+    }
+    Psp[e] = acc;
+}
+
+// pop(mu) = sum_nu P(mu,nu) S(mu,nu) from pattern-only P (both at the transposed entry).
+__global__ void k_pop_ao_spP(double* __restrict__ pop, const double* __restrict__ Psp,
+                             const double* __restrict__ Ssp, const int* __restrict__ colptr,
+                             const int* __restrict__ perm, int n)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mu >= n) return;
+    double s = 0.0;
+    for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) {
+        const int t = perm[e];
+        s += Psp[t] * Ssp[t];
+    }
+    pop[mu] = s;
+}
+
+// Multipole moments from pattern-only P: column mu, P(row,mu) = Psp[e].
+__global__ void k_multipole_moments_spP(double* dp_at, double* qp_at, const double* __restrict__ Psp,
+                                        const double* __restrict__ dp_sp, const double* __restrict__ qp_sp,
+                                        const int* __restrict__ colptr, const int* __restrict__ ao2at,
+                                        int n, int nnz)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mu >= n) return;
+    const size_t ne = static_cast<size_t>(nnz);
+    const int iat = ao2at[mu];
+    for (int k = 0; k < 3; ++k) {
+        const double* dk = dp_sp + static_cast<size_t>(k) * ne;
+        double acc = 0.0;
+        for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) acc += Psp[e] * dk[e];
+        atomicAdd(&dp_at[k + iat * 3], -acc);
+    }
+    for (int k = 0; k < 6; ++k) {
+        const double* qk = qp_sp + static_cast<size_t>(k) * ne;
+        double acc = 0.0;
+        for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) acc += Psp[e] * qk[e];
+        atomicAdd(&qp_at[k + iat * 6], -acc);
+    }
+}
+
+// Post-SCF: the whole 2-body D4 (energy + nuclear gradient + dE/dCN + dE/dq) in one per-atom
+// GATHER — a superset of k_d4_dedq. No atomics: the pair force is antisymmetric (atom j's own
+// thread accumulates the mirror term) and the energy is per-atom (host halves Σ e_atom). Port of
+// D4Evaluator::computeEnergyAndGradient's per-reference 2-body path: the direct radial gradient is
+// dE_dr = -C6·ddisp_dr2·(R_i-R_j) with ddisp_dr2 = s6·(-6r⁴t6²) + s8·r4r2·(-8r⁶t8²) (the C6·ζc6
+// rescale cancels in the per-reference path), dEdcn_i = -dc6dcn_i·disp_sum, dEdq_i = -dc6dq_i·disp_sum.
+// Claude Generated. CUDA port of the ROCm kernel (Sep 2026), unchanged.
+__global__ void k_d4_grad(int nat, int max_elem, int max_ref,
+                          const int* __restrict__ Z, const int* __restrict__ nref,
+                          const double* __restrict__ sqrtZr4r2, const double* __restrict__ xyz,
+                          const double* __restrict__ c6_flat,
+                          const double* __restrict__ W, const double* __restrict__ dWq,
+                          const double* __restrict__ dWc,
+                          double s6, double s8, double a1, double a2, double cut2,
+                          double* __restrict__ e_atom, double* __restrict__ grad,
+                          double* __restrict__ dEdcn, double* __restrict__ dEdq)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const int ei = Z[i] - 1;
+    const int nri = nref[i];
+    if (ei < 0 || ei >= max_elem || nri <= 0) {
+        e_atom[i] = 0.0; grad[3*i+0] = grad[3*i+1] = grad[3*i+2] = 0.0; dEdcn[i] = 0.0; dEdq[i] = 0.0;
+        return;
+    }
+    const double xi = xyz[3 * i + 0], yi = xyz[3 * i + 1], zi = xyz[3 * i + 2];
+    const double sq_i = sqrtZr4r2[i];
+    const double* Wi   = W   + static_cast<size_t>(i) * max_ref;
+    const double* dWqi = dWq + static_cast<size_t>(i) * max_ref;
+    const double* dWci = dWc + static_cast<size_t>(i) * max_ref;
+
+    double eacc = 0.0, gx = 0.0, gy = 0.0, gz = 0.0, cnacc = 0.0, qacc = 0.0;
+    for (int j = 0; j < nat; ++j) {
+        if (j == i) continue;
+        const double dx = xi - xyz[3 * j + 0];
+        const double dy = yi - xyz[3 * j + 1];
+        const double dz = zi - xyz[3 * j + 2];
+        const double r2 = dx * dx + dy * dy + dz * dz;
+        if (r2 > cut2 || r2 < 1.0e-20) continue;
+        const int ej = Z[j] - 1;
+        const int nrj = nref[j];
+        if (ej < 0 || ej >= max_elem || nrj <= 0) continue;
+
+        const double r4r2ij = 3.0 * sq_i * sqrtZr4r2[j];
+        const double r0 = a1 * sqrt(r4r2ij) + a2;
+        const double r0_2 = r0 * r0;
+        const double r0_6 = r0_2 * r0_2 * r0_2;
+        const double r0_8 = r0_6 * r0_2;
+        const double r6 = r2 * r2 * r2;
+        const double r8 = r6 * r2;
+        const double t6 = 1.0 / (r6 + r0_6);
+        const double t8 = 1.0 / (r8 + r0_8);
+        const double disp_sum = s6 * t6 + s8 * r4r2ij * t8;
+        const double d6 = -6.0 * r2 * r2 * t6 * t6;            // -6·r⁴·t6²
+        const double d8 = -8.0 * r2 * r2 * r2 * t8 * t8;       // -8·r⁶·t8²
+        const double ddisp_dr2 = s6 * d6 + s8 * r4r2ij * d8;
+
+        const double* Wj = W + static_cast<size_t>(j) * max_ref;
+        const size_t base = (static_cast<size_t>(ei) * max_elem + ej)
+                          * static_cast<size_t>(max_ref) * max_ref;
+        double C6 = 0.0, dc6dcni = 0.0, dc6dqi = 0.0;
+        for (int a = 0; a < nri; ++a) {
+            const size_t basea = base + static_cast<size_t>(a) * max_ref;
+            double sW = 0.0;
+            for (int b = 0; b < nrj; ++b) sW += Wj[b] * c6_flat[basea + b];
+            C6      += Wi[a]   * sW;
+            dc6dcni += dWci[a] * sW;
+            dc6dqi  += dWqi[a] * sW;
+        }
+        eacc  += -C6 * disp_sum;                 // per-atom energy (host: E = ½·Σ e_atom)
+        const double f = -C6 * ddisp_dr2;        // dE_dr = f·(R_i-R_j)
+        gx += f * dx; gy += f * dy; gz += f * dz;
+        cnacc += -dc6dcni * disp_sum;            // CN chain (host distributes via ∂CN/∂R)
+        qacc  += -dc6dqi  * disp_sum;            // q-response first half (host folds ∂q/∂R)
+    }
+    e_atom[i] = eacc;
+    grad[3 * i + 0] = gx; grad[3 * i + 1] = gy; grad[3 * i + 2] = gz;
+    dEdcn[i] = cnacc;
+    dEdq[i]  = qacc;
+}
+
+// D4 ATM 3-body (energy + nuclear gradient + dE/dCN), CUDA port of the ROCm k_d4_atm (Claude
+// Generated, Sep 2026) with one change: the pair loops run over a host-built neighbour list of
+// atoms within the ATM cutoff (nb[nbptr[a]..nbptr[a+1]), ascending) instead of all atoms. Every
+// skipped pair failed the r2 > cut2 test in the ROCm kernel and contributed nothing, and the
+// remaining pairs are visited in the same (ascending) order, so the sums are the same. At 7320
+// atoms this turns ~2e11 distance tests into ~5e8.
+__global__ void k_d4_atm_nl(int nat, const double* __restrict__ xyz, const double* __restrict__ r4r2,
+                            const double* __restrict__ c6, const double* __restrict__ dc6dcn,
+                            const int* __restrict__ nbptr, const int* __restrict__ nb,
+                            double s9, double a1, double a2, double alp, double cut2,
+                            double* __restrict__ e_atom, double* __restrict__ grad,
+                            double* __restrict__ dEdcn)
+{
+    const int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= nat) return;
+    const double eps = 2.220446049250313e-16;
+    const double xa = xyz[3*a+0], ya = xyz[3*a+1], za = xyz[3*a+2];
+    const double r4r2a = r4r2[a];
+    const size_t nat_s = static_cast<size_t>(nat);
+    const bool alp16 = (alp == 16.0);
+    double eacc = 0.0, gx = 0.0, gy = 0.0, gz = 0.0, cnacc = 0.0;
+    for (int ix = nbptr[a]; ix < nbptr[a + 1]; ++ix) {
+        const int x = nb[ix];
+        const double vaxx = xyz[3*x+0]-xa, vaxy = xyz[3*x+1]-ya, vaxz = xyz[3*x+2]-za;
+        const double r2ax = vaxx*vaxx + vaxy*vaxy + vaxz*vaxz;
+        if (r2ax > cut2 || r2ax < eps) continue;
+        const double c6ax = c6[a*nat_s + x];
+        const double r0ax = a1*sqrt(3.0*r4r2a*r4r2[x]) + a2;
+        for (int iy = nbptr[a]; iy < ix; ++iy) {        // y < x (list ascending)
+            const int y = nb[iy];
+            const double vayx = xyz[3*y+0]-xa, vayy = xyz[3*y+1]-ya, vayz = xyz[3*y+2]-za;
+            const double r2ay = vayx*vayx + vayy*vayy + vayz*vayz;
+            if (r2ay > cut2 || r2ay < eps) continue;
+            const double dxyx = xyz[3*y+0]-xyz[3*x+0], dxyy = xyz[3*y+1]-xyz[3*x+1], dxyz_ = xyz[3*y+2]-xyz[3*x+2];
+            const double r2xy = dxyx*dxyx + dxyy*dxyy + dxyz_*dxyz_;
+            if (r2xy > cut2 || r2xy < eps) continue;
+
+            const double c6ay = c6[a*nat_s + y];
+            const double c6xy = c6[x*nat_s + y];
+            const double c9 = -s9 * sqrt(fabs(c6ax*c6ay*c6xy));
+            const double r0ay = a1*sqrt(3.0*r4r2a*r4r2[y]) + a2;
+            const double r0xy = a1*sqrt(3.0*r4r2[x]*r4r2[y]) + a2;
+            const double r0 = r0ax*r0ay*r0xy;
+            const double r2 = r2ax*r2ay*r2xy;
+            const double r1 = sqrt(r2);
+            const double r3 = r2*r1;
+            const double r5 = r3*r2;
+            // alp = 16 (GFN2): (r0/r1)^(16/3) = q^5 * cbrt(q), far cheaper than pow on the device.
+            const double q = r0/r1;
+            const double pw = alp16 ? (q*q*q*q*q) * cbrt(q) : pow(q, alp/3.0);
+            const double fdmp = 1.0/(1.0 + 6.0*pw);
+            const double ang = 0.375*(r2ax + r2xy - r2ay)*(r2ax - r2xy + r2ay)*(-r2ax + r2xy + r2ay)/r5 + 1.0/r3;
+            const double dE = ang*fdmp*c9;
+            eacc += -dE;
+
+            const double dfdmp = -2.0*alp*pw*fdmp*fdmp;
+            const double dang_ax = -0.375*(r2ax*r2ax*r2ax + r2ax*r2ax*(r2xy+r2ay)
+                          + r2ax*(3.0*r2xy*r2xy + 2.0*r2xy*r2ay + 3.0*r2ay*r2ay)
+                          - 5.0*(r2xy-r2ay)*(r2xy-r2ay)*(r2xy+r2ay))/r5;
+            const double gcax = c9*(-dang_ax*fdmp + ang*dfdmp)/r2ax;
+            gx += -gcax*vaxx; gy += -gcax*vaxy; gz += -gcax*vaxz;
+            const double dang_ay = -0.375*(r2ay*r2ay*r2ay + r2ay*r2ay*(r2xy+r2ax)
+                          + r2ay*(3.0*r2xy*r2xy + 2.0*r2xy*r2ax + 3.0*r2ax*r2ax)
+                          - 5.0*(r2xy-r2ax)*(r2xy-r2ax)*(r2xy+r2ax))/r5;
+            const double gcay = c9*(-dang_ay*fdmp + ang*dfdmp)/r2ay;
+            gx += -gcay*vayx; gy += -gcay*vayy; gz += -gcay*vayz;
+            cnacc += -dE*0.5*(dc6dcn[a*nat_s+x]/c6ax + dc6dcn[a*nat_s+y]/c6ay);
+        }
+    }
+    e_atom[a] = eacc;
+    grad[3*a+0] = gx; grad[3*a+1] = gy; grad[3*a+2] = gz;
+    dEdcn[a] = cnacc;
 }
 
 // ====================================================================== *
@@ -1251,6 +2618,303 @@ __global__ void k_multipole_potential(
     v_at[i] = vat;
 }
 
+// Claude Generated (Sep 2026, large systems): on-the-fly twins of k_multipole_potential and
+// k_energy_multipole. The GFN2 multipole interaction matrices are 18 nat^2 doubles (7.7 GB at
+// 7320 atoms) but each element is a closed-form function of one atom pair (xtb_multipole.cpp
+// step 5), so the kernels rebuild the elements they need instead of reading stored matrices.
+// amat(row t, col s) uses v = x_s - x_t, r = |v|, rr = (mrad_t + mrad_s)/2 / r:
+//   sd[k]    = v_k g3 fdmp3
+//   dd[a][b] = delta_ab g3 fdmp5 - v_a v_b 3 g5 fdmp5
+//   sq       = (vx^2, 2 vx vy, vy^2, 2 vx vz, 2 vy vz, vz^2) g5 fdmp5
+__device__ __forceinline__ void d_mp_amat_pair(double vx, double vy, double vz, double rad_sum_half,
+                                         double dmp3, double dmp5,
+                                         double sd[3], double dd[9], double sq[6])
+{
+    const double r1 = sqrt(vx*vx + vy*vy + vz*vz);
+    const double g1 = 1.0 / r1;
+    const double g3 = g1 * g1 * g1;
+    const double g5 = g3 * g1 * g1;
+    const double rr = rad_sum_half * g1;
+    const double fdmp3 = 1.0 / (1.0 + 6.0 * pow(rr, dmp3));
+    const double fdmp5 = 1.0 / (1.0 + 6.0 * pow(rr, dmp5));
+    sd[0] = vx * g3 * fdmp3; sd[1] = vy * g3 * fdmp3; sd[2] = vz * g3 * fdmp3;
+    const double dd_iso = g3 * fdmp5, dd_anis = 3.0 * g5 * fdmp5;
+    const double v[3] = {vx, vy, vz};
+    for (int a = 0; a < 3; ++a)
+        for (int b = 0; b < 3; ++b)
+            dd[a * 3 + b] = ((a == b) ? dd_iso : 0.0) - v[a] * v[b] * dd_anis;
+    sq[0] = vx * vx * g5 * fdmp5;
+    sq[1] = 2.0 * vx * vy * g5 * fdmp5;
+    sq[2] = vy * vy * g5 * fdmp5;
+    sq[3] = 2.0 * vx * vz * g5 * fdmp5;
+    sq[4] = 2.0 * vy * vz * g5 * fdmp5;
+    sq[5] = vz * vz * g5 * fdmp5;
+}
+
+__global__ void k_multipole_potential_otf(
+    int nat, const double* __restrict__ xyz, const double* __restrict__ mrad, double dmp3, double dmp5,
+    const double* __restrict__ dkernel, const double* __restrict__ qkernel,
+    const double* __restrict__ q_at, const double* __restrict__ dp_at, const double* __restrict__ qp_at,
+    double* __restrict__ v_dp, double* __restrict__ v_qp, double* __restrict__ v_at)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const double mpscale_q[6] = {1.0, 2.0, 1.0, 2.0, 2.0, 1.0};
+    double vd[3] = {0.0, 0.0, 0.0};
+    double vq[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    double vat = 0.0;
+    for (int j = 0; j < nat; ++j) {
+        if (j == i) continue;   // amat diagonal is zero
+        const double qj = q_at[j];
+        const double dpj0 = dp_at[0 + j * 3], dpj1 = dp_at[1 + j * 3], dpj2 = dp_at[2 + j * 3];
+        const double half = 0.5 * (mrad[i] + mrad[j]);
+        double sd_ij[3], dd_ij[9], sq_ij[6], sd_ji[3], dd_ji[9], sq_ji[6];
+        // (row i, col j): v = x_j - x_i ; (row j, col i): v = x_i - x_j
+        d_mp_amat_pair(xyz[3*j] - xyz[3*i], xyz[3*j+1] - xyz[3*i+1], xyz[3*j+2] - xyz[3*i+2],
+                       half, dmp3, dmp5, sd_ij, dd_ij, sq_ij);
+        d_mp_amat_pair(xyz[3*i] - xyz[3*j], xyz[3*i+1] - xyz[3*j+1], xyz[3*i+2] - xyz[3*j+2],
+                       half, dmp3, dmp5, sd_ji, dd_ji, sq_ji);
+        for (int k = 0; k < 3; ++k) {
+            vd[k] += sd_ij[k] * qj
+                   + dd_ij[k * 3 + 0] * dpj0
+                   + dd_ij[k * 3 + 1] * dpj1
+                   + dd_ij[k * 3 + 2] * dpj2;
+            vat += sd_ji[k] * dp_at[k + j * 3];
+        }
+        for (int k = 0; k < 6; ++k) {
+            vq[k] += sq_ij[k] * qj;
+            vat += sq_ji[k] * qp_at[k + j * 6];
+        }
+    }
+    for (int k = 0; k < 3; ++k) v_dp[k + i * 3] = vd[k] + 2.0 * dkernel[i] * dp_at[k + i * 3];
+    for (int k = 0; k < 6; ++k)
+        v_qp[k + i * 6] = vq[k] + 2.0 * qkernel[i] * qp_at[k + i * 6] * mpscale_q[k];
+    v_at[i] = vat;
+}
+
+__global__ void k_energy_multipole_otf(int nat, const double* __restrict__ xyz, const double* __restrict__ mrad,
+                                       double dmp3, double dmp5,
+                                       const double* __restrict__ dkernel, const double* __restrict__ qkernel,
+                                       const double* __restrict__ dp_at, const double* __restrict__ qp_at,
+                                       const double* __restrict__ q_at, double* e_out)
+{
+    extern __shared__ double sdata[];
+    const int tid = threadIdx.x;
+    const double mpscale_q[6] = {1.0, 2.0, 1.0, 2.0, 2.0, 1.0};
+    const int i = blockIdx.x * blockDim.x + tid;
+    double ei = 0.0;
+    if (i < nat) {
+        double dpi[3], qpi[6];
+        for (int k = 0; k < 3; ++k) dpi[k] = dp_at[k + static_cast<size_t>(i) * 3];
+        for (int k = 0; k < 6; ++k) qpi[k] = qp_at[k + static_cast<size_t>(i) * 6];
+        for (int j = 0; j < nat; ++j) {
+            if (j == i) continue;
+            const double qj = q_at[j];
+            double sd[3], dd[9], sq[6];
+            d_mp_amat_pair(xyz[3*j] - xyz[3*i], xyz[3*j+1] - xyz[3*i+1], xyz[3*j+2] - xyz[3*i+2],
+                           0.5 * (mrad[i] + mrad[j]), dmp3, dmp5, sd, dd, sq);
+            for (int k = 0; k < 3; ++k)
+                ei += dpi[k] * sd[k] * qj;
+            for (int a = 0; a < 3; ++a) {
+                const double dpia = dpi[a];
+                for (int b = 0; b < 3; ++b)
+                    ei += 0.5 * dpia * dd[a * 3 + b] * dp_at[b + static_cast<size_t>(j) * 3];
+            }
+            for (int k = 0; k < 6; ++k)
+                ei += qpi[k] * sq[k] * qj;
+        }
+        const double dk = dkernel[i], qk = qkernel[i];
+        for (int k = 0; k < 3; ++k) ei += dk * dpi[k] * dpi[k];
+        for (int k = 0; k < 6; ++k) ei += qk * qpi[k] * qpi[k] * mpscale_q[k];
+    }
+    sdata[tid] = ei; __syncthreads();
+    for (int st = blockDim.x >> 1; st > 0; st >>= 1) { if (tid < st) sdata[tid] += sdata[tid + st]; __syncthreads(); }
+    if (tid == 0) atomicAdd(e_out, sdata[0]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Claude Generated (Sep 29, 2026): warp-per-atom variants of the three O(N^2)/O(N^3) atom-pair
+// kernels. The thread-per-atom originals launch only nat threads (polymer_2x: 7320 threads, i.e.
+// ~5 warps per SM on an A4500), so the FP64 pair loops ran latency-bound: k_d4_atm_nl 2.97 s,
+// k_multipole_potential_otf 0.29 s per SCF iteration. Here a warp owns atom i, its 32 lanes stride
+// over the partner atoms and a fixed shuffle tree reduces the partial sums - deterministic, but in
+// a different summation order than the originals (last-bit differences). The multipole potential
+// additionally evaluates the pair interaction once: for v -> -v the damping (|v| only) and the
+// dipole-dipole and quadrupole tensors are unchanged and sd flips sign, all exactly in floating
+// point, so the (j,i) terms are taken from the (i,j) evaluation bit for bit.
+// CURCUMA_GPU_THREAD_PER_ATOM=1 selects the originals (for comparison).
+// ---------------------------------------------------------------------------------------------
+__device__ __forceinline__ double d_warp_sum(double v)
+{
+    for (int o = 16; o > 0; o >>= 1) v += __shfl_down_sync(0xffffffffu, v, o);
+    return v;
+}
+
+__global__ void k_multipole_potential_otf_w(
+    int nat, const double* __restrict__ xyz, const double* __restrict__ mrad, double dmp3, double dmp5,
+    const double* __restrict__ dkernel, const double* __restrict__ qkernel,
+    const double* __restrict__ q_at, const double* __restrict__ dp_at, const double* __restrict__ qp_at,
+    double* __restrict__ v_dp, double* __restrict__ v_qp, double* __restrict__ v_at)
+{
+    const int i = static_cast<int>((static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x) >> 5);
+    const int lane = threadIdx.x & 31;
+    if (i >= nat) return;   // uniform per warp
+    const double xi = xyz[3*i], yi = xyz[3*i+1], zi = xyz[3*i+2];
+    const double mi = mrad[i];
+    double vd[3] = {0.0, 0.0, 0.0};
+    double vq[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    double vat = 0.0;
+    for (int j = lane; j < nat; j += 32) {
+        if (j == i) continue;   // amat diagonal is zero
+        const double qj = q_at[j];
+        const double dpj0 = dp_at[0 + j * 3], dpj1 = dp_at[1 + j * 3], dpj2 = dp_at[2 + j * 3];
+        double sd[3], dd[9], sq[6];
+        d_mp_amat_pair(xyz[3*j] - xi, xyz[3*j+1] - yi, xyz[3*j+2] - zi,
+                       0.5 * (mi + mrad[j]), dmp3, dmp5, sd, dd, sq);
+        for (int k = 0; k < 3; ++k) {
+            vd[k] += sd[k] * qj + dd[k * 3 + 0] * dpj0 + dd[k * 3 + 1] * dpj1 + dd[k * 3 + 2] * dpj2;
+            vat += (-sd[k]) * dp_at[k + j * 3];          // sd(j,i) = -sd(i,j)
+        }
+        for (int k = 0; k < 6; ++k) {
+            vq[k] += sq[k] * qj;
+            vat += sq[k] * qp_at[k + j * 6];             // sq(j,i) = sq(i,j)
+        }
+    }
+    for (int k = 0; k < 3; ++k) vd[k] = d_warp_sum(vd[k]);
+    for (int k = 0; k < 6; ++k) vq[k] = d_warp_sum(vq[k]);
+    vat = d_warp_sum(vat);
+    if (lane != 0) return;
+    const double mpscale_q[6] = {1.0, 2.0, 1.0, 2.0, 2.0, 1.0};
+    for (int k = 0; k < 3; ++k) v_dp[k + i * 3] = vd[k] + 2.0 * dkernel[i] * dp_at[k + i * 3];
+    for (int k = 0; k < 6; ++k)
+        v_qp[k + i * 6] = vq[k] + 2.0 * qkernel[i] * qp_at[k + i * 6] * mpscale_q[k];
+    v_at[i] = vat;
+}
+
+// Energy twin: one warp per atom i, then the block's warp sums are added and one atomicAdd per
+// block goes to e_out (as in the original). blockDim must be a multiple of 32, shared = warps.
+__global__ void k_energy_multipole_otf_w(int nat, const double* __restrict__ xyz, const double* __restrict__ mrad,
+                                         double dmp3, double dmp5,
+                                         const double* __restrict__ dkernel, const double* __restrict__ qkernel,
+                                         const double* __restrict__ dp_at, const double* __restrict__ qp_at,
+                                         const double* __restrict__ q_at, double* e_out)
+{
+    extern __shared__ double sdata[];
+    const int i = static_cast<int>((static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x) >> 5);
+    const int lane = threadIdx.x & 31, wib = threadIdx.x >> 5;
+    double ei = 0.0;
+    if (i < nat) {
+        const double xi = xyz[3*i], yi = xyz[3*i+1], zi = xyz[3*i+2];
+        double dpi[3], qpi[6];
+        for (int k = 0; k < 3; ++k) dpi[k] = dp_at[k + static_cast<size_t>(i) * 3];
+        for (int k = 0; k < 6; ++k) qpi[k] = qp_at[k + static_cast<size_t>(i) * 6];
+        for (int j = lane; j < nat; j += 32) {
+            if (j == i) continue;
+            const double qj = q_at[j];
+            double sd[3], dd[9], sq[6];
+            d_mp_amat_pair(xyz[3*j] - xi, xyz[3*j+1] - yi, xyz[3*j+2] - zi,
+                           0.5 * (mrad[i] + mrad[j]), dmp3, dmp5, sd, dd, sq);
+            for (int k = 0; k < 3; ++k)
+                ei += dpi[k] * sd[k] * qj;
+            for (int a = 0; a < 3; ++a) {
+                const double dpia = dpi[a];
+                for (int b = 0; b < 3; ++b)
+                    ei += 0.5 * dpia * dd[a * 3 + b] * dp_at[b + static_cast<size_t>(j) * 3];
+            }
+            for (int k = 0; k < 6; ++k)
+                ei += qpi[k] * sq[k] * qj;
+        }
+        ei = d_warp_sum(ei);
+        if (lane == 0) {
+            const double mpscale_q[6] = {1.0, 2.0, 1.0, 2.0, 2.0, 1.0};
+            const double dk = dkernel[i], qk = qkernel[i];
+            for (int k = 0; k < 3; ++k) ei += dk * dpi[k] * dpi[k];
+            for (int k = 0; k < 6; ++k) ei += qk * qpi[k] * qpi[k] * mpscale_q[k];
+        }
+    }
+    if (lane == 0) sdata[wib] = ei;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        double s = 0.0;
+        for (int w = 0; w < static_cast<int>(blockDim.x >> 5); ++w) s += sdata[w];
+        atomicAdd(e_out, s);
+    }
+}
+
+// Warp-per-atom twin of k_d4_atm_nl (see the note at k_multipole_potential_otf_w): lanes stride
+// over the neighbour index ix, each keeps the inner y < x loop of the original.
+__global__ void k_d4_atm_nl_w(int nat, const double* __restrict__ xyz, const double* __restrict__ r4r2,
+                              const double* __restrict__ c6, const double* __restrict__ dc6dcn,
+                              const int* __restrict__ nbptr, const int* __restrict__ nb,
+                              double s9, double a1, double a2, double alp, double cut2,
+                              double* __restrict__ e_atom, double* __restrict__ grad,
+                              double* __restrict__ dEdcn)
+{
+    const int a = static_cast<int>((static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x) >> 5);
+    const int lane = threadIdx.x & 31;
+    if (a >= nat) return;   // uniform per warp
+    const double eps = 2.220446049250313e-16;
+    const double xa = xyz[3*a+0], ya = xyz[3*a+1], za = xyz[3*a+2];
+    const double r4r2a = r4r2[a];
+    const size_t nat_s = static_cast<size_t>(nat);
+    const bool alp16 = (alp == 16.0);
+    double eacc = 0.0, gx = 0.0, gy = 0.0, gz = 0.0, cnacc = 0.0;
+    for (int ix = nbptr[a] + lane; ix < nbptr[a + 1]; ix += 32) {
+        const int x = nb[ix];
+        const double vaxx = xyz[3*x+0]-xa, vaxy = xyz[3*x+1]-ya, vaxz = xyz[3*x+2]-za;
+        const double r2ax = vaxx*vaxx + vaxy*vaxy + vaxz*vaxz;
+        if (r2ax > cut2 || r2ax < eps) continue;
+        const double c6ax = c6[a*nat_s + x];
+        const double r0ax = a1*sqrt(3.0*r4r2a*r4r2[x]) + a2;
+        for (int iy = nbptr[a]; iy < ix; ++iy) {        // y < x (list ascending)
+            const int y = nb[iy];
+            const double vayx = xyz[3*y+0]-xa, vayy = xyz[3*y+1]-ya, vayz = xyz[3*y+2]-za;
+            const double r2ay = vayx*vayx + vayy*vayy + vayz*vayz;
+            if (r2ay > cut2 || r2ay < eps) continue;
+            const double dxyx = xyz[3*y+0]-xyz[3*x+0], dxyy = xyz[3*y+1]-xyz[3*x+1], dxyz_ = xyz[3*y+2]-xyz[3*x+2];
+            const double r2xy = dxyx*dxyx + dxyy*dxyy + dxyz_*dxyz_;
+            if (r2xy > cut2 || r2xy < eps) continue;
+
+            const double c6ay = c6[a*nat_s + y];
+            const double c6xy = c6[x*nat_s + y];
+            const double c9 = -s9 * sqrt(fabs(c6ax*c6ay*c6xy));
+            const double r0ay = a1*sqrt(3.0*r4r2a*r4r2[y]) + a2;
+            const double r0xy = a1*sqrt(3.0*r4r2[x]*r4r2[y]) + a2;
+            const double r0 = r0ax*r0ay*r0xy;
+            const double r2 = r2ax*r2ay*r2xy;
+            const double r1 = sqrt(r2);
+            const double r3 = r2*r1;
+            const double r5 = r3*r2;
+            const double q = r0/r1;
+            const double pw = alp16 ? (q*q*q*q*q) * cbrt(q) : pow(q, alp/3.0);
+            const double fdmp = 1.0/(1.0 + 6.0*pw);
+            const double ang = 0.375*(r2ax + r2xy - r2ay)*(r2ax - r2xy + r2ay)*(-r2ax + r2xy + r2ay)/r5 + 1.0/r3;
+            const double dE = ang*fdmp*c9;
+            eacc += -dE;
+
+            const double dfdmp = -2.0*alp*pw*fdmp*fdmp;
+            const double dang_ax = -0.375*(r2ax*r2ax*r2ax + r2ax*r2ax*(r2xy+r2ay)
+                          + r2ax*(3.0*r2xy*r2xy + 2.0*r2xy*r2ay + 3.0*r2ay*r2ay)
+                          - 5.0*(r2xy-r2ay)*(r2xy-r2ay)*(r2xy+r2ay))/r5;
+            const double gcax = c9*(-dang_ax*fdmp + ang*dfdmp)/r2ax;
+            gx += -gcax*vaxx; gy += -gcax*vaxy; gz += -gcax*vaxz;
+            const double dang_ay = -0.375*(r2ay*r2ay*r2ay + r2ay*r2ay*(r2xy+r2ax)
+                          + r2ay*(3.0*r2xy*r2xy + 2.0*r2xy*r2ax + 3.0*r2ax*r2ax)
+                          - 5.0*(r2xy-r2ax)*(r2xy-r2ax)*(r2xy+r2ax))/r5;
+            const double gcay = c9*(-dang_ay*fdmp + ang*dfdmp)/r2ay;
+            gx += -gcay*vayx; gy += -gcay*vayy; gz += -gcay*vayz;
+            cnacc += -dE*0.5*(dc6dcn[a*nat_s+x]/c6ax + dc6dcn[a*nat_s+y]/c6ay);
+        }
+    }
+    eacc = d_warp_sum(eacc);
+    gx = d_warp_sum(gx); gy = d_warp_sum(gy); gz = d_warp_sum(gz);
+    cnacc = d_warp_sum(cnacc);
+    if (lane != 0) return;
+    e_atom[a] = eacc;
+    grad[3*a+0] = gx; grad[3*a+1] = gy; grad[3*a+2] = gz;
+    dEdcn[a] = cnacc;
+}
+
 // v_at(A) += dE_D4/dq(A) (resident from k_d4_dedq). One thread per atom.
 __global__ void k_vat_add_d4(int nat, const double* __restrict__ d4_dedq, double* __restrict__ v_at)
 {
@@ -1473,13 +3137,21 @@ __global__ void k_maxabsdiff(const double* __restrict__ a, const double* __restr
     if (tid == 0) *out = sdata[0];
 }
 
-XtbGpuContext::XtbGpuContext()
+XtbGpuContext::XtbGpuContext(int device)
     : m_impl(std::make_unique<Impl>())
 {
     int count = 0;
     if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0)
         return; // no device — caller falls back to CPU
 
+    // Claude Generated (Sep 2026, multi-GPU): device < 0 keeps the historical behaviour
+    // (whatever device is current on this thread, normally 0). An explicit index binds the
+    // calling thread to that device BEFORE the stream and the cuBLAS/cuSOLVER handles are
+    // created, because CUDA ties all of them to the device that is current at creation.
+    if (device >= count)
+        return; // invalid index — caller falls back to CPU (the adapter warns)
+    if (device >= 0 && cudaSetDevice(device) != cudaSuccess)
+        return;
     if (cudaGetDevice(&m_impl->device) != cudaSuccess)
         return;
 
@@ -1505,12 +3177,30 @@ XtbGpuContext::~XtbGpuContext()
 {
     if (!m_impl)
         return;
+    // The multi-GPU solver switches devices while it tears down; drop it first.
+    m_impl->dist.reset();
+    m_impl->releaseDensityHelpers();
+    m_impl->releaseRemoteBackup();
+    // Free the handles and every CudaBuffer (destroyed with m_impl) on OUR device.
+    bindDevice();
     if (m_impl->cusolver) cusolverDnDestroy(m_impl->cusolver);
     if (m_impl->cublas)   cublasDestroy(m_impl->cublas);
     if (m_impl->stream)   cudaStreamDestroy(m_impl->stream);
 }
 
 bool XtbGpuContext::ok() const { return m_impl && m_impl->ok; }
+
+bool XtbGpuContext::deviceHasFastFp64() const
+{
+    if (!m_impl || m_impl->device < 0) return false;
+    cudaDeviceProp prop{};
+    if (cudaGetDeviceProperties(&prop, m_impl->device) != cudaSuccess) return false;
+    // FP64:FP32 is 1:2 on the datacenter parts and 1:32 / 1:64 elsewhere. By compute capability:
+    // 6.0 P100, 7.0 V100, 8.0 A100, 9.x H100/H200/GH200, 10.x B200 - all 1:2. Consumer/workstation
+    // (7.5, 8.6, 8.9, 12.x incl. the RTX PRO Blackwell parts) are not.
+    const int cc = prop.major * 10 + prop.minor;
+    return cc == 60 || cc == 70 || cc == 80 || prop.major == 9 || prop.major == 10;
+}
 
 std::string XtbGpuContext::deviceName() const
 {
@@ -1519,10 +3209,24 @@ std::string XtbGpuContext::deviceName() const
 
 int XtbGpuContext::deviceId() const { return m_impl ? m_impl->device : -1; }
 
+bool XtbGpuContext::bindDevice() const
+{
+    if (!m_impl || m_impl->device < 0) return false;
+    int cur = -1;
+    if (cudaGetDevice(&cur) == cudaSuccess && cur == m_impl->device) return true;
+    return cudaSetDevice(m_impl->device) == cudaSuccess;
+}
+
 bool XtbGpuContext::deviceAvailable()
 {
     int count = 0;
     return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
+}
+
+int XtbGpuContext::deviceCount()
+{
+    int count = 0;
+    return cudaGetDeviceCount(&count) == cudaSuccess ? count : 0;
 }
 
 bool XtbGpuContext::solveGeneralizedEigenF64(const double* F, const double* L, int n,
@@ -1615,9 +3319,11 @@ bool XtbGpuContext::residentBegin(const double* H0, const double* S,
     const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
     try {
         // Geometry-constant matrices, uploaded exactly once for this geometry.
+        m_impl->sparse = false;   // host-uploaded integrals are always dense
         m_impl->dH0.upload(H0, static_cast<int>(nn), m_impl->stream);
         m_impl->dS.upload(S, static_cast<int>(nn), m_impl->stream);
         m_impl->dL.upload(L, static_cast<int>(nn), m_impl->stream);
+        ++m_impl->l_generation;
         // Resident work buffers, reused across iterations.
         m_impl->dC.alloc(static_cast<int>(nn));
         m_impl->dP.alloc(static_cast<int>(nn));
@@ -1658,8 +3364,368 @@ static inline void fillEpsSentinel(double* eps_out, int neig, int n)
 // back-transform → generalized eigenvectors in dC, eigenvalues → eps_out. The
 // device analogue of the CPU dsygst+dsyevd+dtrsm path, reusing the resident L (no
 // per-iteration L upload). Shared by residentSolve and residentSolveMultipole.
-bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig,
-                                           bool download_eps)
+// ---- Stage 2: pseudo-diagonalisation (docs/GFN2_GPU_COST_PLAN.md) ----------------------------
+// Claude Generated (Sep 29, 2026). Between two SCF steps the Fock matrix changes little, so the
+// previous eigenvectors C (AO basis, C^T S C = I) are already close. One first-order Jacobi
+// rotation between the occupied (o) and virtual (v) blocks removes the coupling
+//     G = C^T F C,   theta_ai = G_ai / (G_ii - G_aa),   C_o += C_v theta,   C_v -= C_o theta^T
+// (Stewart, Csaszar, Pulay, J. Comput. Chem. 3 (1982) 227), and a Cholesky re-orthonormalisation
+// in the S metric (C^T S C = (L^T C)^T (L^T C) = R^T R, C <- C R^-1) restores C^T S C = I. The
+// Cholesky order keeps the occupied span: column i only mixes with columns <= i. Only GEMMs, so it
+// replaces an eigensolve whose tridiagonalisation is memory-bound. The orbital energies are the
+// Rayleigh quotients G_pp of the rotated-from vectors (occupied block first, virtual block after -
+// the occupation kernel does not need them sorted).
+
+// g[p] = sum_mu C(mu,p) T(mu,p), accumulated in FP64; one block per column.
+template <typename R>
+__global__ void k_pseudo_coldot(const R* __restrict__ C, const R* __restrict__ T, int n,
+                                double* __restrict__ g)
+{
+    extern __shared__ double sred[];
+    const int p = blockIdx.x;
+    const size_t off = static_cast<size_t>(p) * n;
+    double acc = 0.0;
+    for (int mu = threadIdx.x; mu < n; mu += blockDim.x)
+        acc += static_cast<double>(C[off + mu]) * static_cast<double>(T[off + mu]);
+    sred[threadIdx.x] = acc;
+    __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sred[threadIdx.x] += sred[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) g[p] = sred[0];
+}
+
+// stats[0] = max_i g_i (occupied), stats[1] = min_a g_a (virtual). One block.
+__global__ void k_pseudo_gap(const double* __restrict__ g, int no, int n, double* __restrict__ stats)
+{
+    extern __shared__ double sred[];
+    double hi = -1e300, lo = 1e300;
+    for (int p = threadIdx.x; p < n; p += blockDim.x) {
+        if (p < no) hi = fmax(hi, g[p]); else lo = fmin(lo, g[p]);
+    }
+    double* smax = sred;
+    double* smin = sred + blockDim.x;
+    smax[threadIdx.x] = hi; smin[threadIdx.x] = lo;
+    __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            smax[threadIdx.x] = fmax(smax[threadIdx.x], smax[threadIdx.x + s]);
+            smin[threadIdx.x] = fmin(smin[threadIdx.x], smin[threadIdx.x + s]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) { stats[0] = smax[0]; stats[1] = smin[0]; }
+}
+
+// theta_ai = G_ai / (g_i - g_a) in place (G_ov is nv x no, column-major), and the largest
+// |theta| as the bit pattern of a non-negative float (monotone as unsigned int).
+template <typename R>
+__global__ void k_pseudo_theta(R* __restrict__ gov, const double* __restrict__ g, int no, int nv,
+                               unsigned int* __restrict__ maxbits)
+{
+    const size_t total = static_cast<size_t>(nv) * no;
+    unsigned int local = 0u;
+    for (size_t e = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x; e < total;
+         e += static_cast<size_t>(gridDim.x) * blockDim.x) {
+        const int a = static_cast<int>(e % nv), i = static_cast<int>(e / nv);
+        const double t = static_cast<double>(gov[e]) / (g[i] - g[no + a]);
+        gov[e] = static_cast<R>(t);
+        const unsigned int bits = __float_as_uint(fabsf(static_cast<float>(t)));
+        local = bits > local ? bits : local;
+    }
+    atomicMax(maxbits, local);
+}
+
+// Diagonal of the S-metric Gram matrix, M_pp = sum_mu B(mu,p)^2, accumulated in FP64 and written
+// over the syrk diagonal. Measured on polymer: the FP32 syrk diagonal of these sums of ~3000
+// squares is systematically ~1e-6 too small per column (sum over the occupied block -1.8e-3), so
+// the Cholesky normalised every orbital slightly too long and the electron count drifted by
+// ~4e-3 (SCC energy 1.9 mEh off). The off-diagonal elements keep their syrk values.
+template <typename R>
+__global__ void k_pseudo_gram_diag(const R* __restrict__ B, int n, R* __restrict__ M)
+{
+    extern __shared__ double sred[];
+    const int p = blockIdx.x;
+    const size_t off = static_cast<size_t>(p) * n;
+    double acc = 0.0;
+    for (int mu = threadIdx.x; mu < n; mu += blockDim.x) {
+        const double x = static_cast<double>(B[off + mu]);
+        acc += x * x;
+    }
+    sred[threadIdx.x] = acc;
+    __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sred[threadIdx.x] += sred[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) M[static_cast<size_t>(p) + off] = static_cast<R>(sred[0]);
+}
+
+// Precision overloads of the cuBLAS/cuSOLVER calls of the pseudo step.
+namespace pseudo_blas {
+inline cublasStatus_t gemm(cublasHandle_t h, cublasOperation_t a, cublasOperation_t b, int m, int n, int k,
+                           const float* al, const float* A, int lda, const float* B, int ldb,
+                           const float* be, float* C, int ldc)
+{ return cublasSgemm(h, a, b, m, n, k, al, A, lda, B, ldb, be, C, ldc); }
+inline cublasStatus_t gemm(cublasHandle_t h, cublasOperation_t a, cublasOperation_t b, int m, int n, int k,
+                           const double* al, const double* A, int lda, const double* B, int ldb,
+                           const double* be, double* C, int ldc)
+{ return cublasDgemm(h, a, b, m, n, k, al, A, lda, B, ldb, be, C, ldc); }
+inline cublasStatus_t trmm(cublasHandle_t h, int n, const float* al, const float* L, const float* C, float* B)
+{ return cublasStrmm(h, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, n, al, L, n, C, n, B, n); }
+inline cublasStatus_t trmm(cublasHandle_t h, int n, const double* al, const double* L, const double* C, double* B)
+{ return cublasDtrmm(h, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, n, al, L, n, C, n, B, n); }
+inline cublasStatus_t syrk(cublasHandle_t h, int n, const float* al, const float* B, const float* be, float* M)
+{ return cublasSsyrk(h, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_T, n, n, al, B, n, be, M, n); }
+inline cublasStatus_t syrk(cublasHandle_t h, int n, const double* al, const double* B, const double* be, double* M)
+{ return cublasDsyrk(h, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_T, n, n, al, B, n, be, M, n); }
+inline cublasStatus_t trsm(cublasHandle_t h, int n, const float* al, const float* R, float* C)
+{ return cublasStrsm(h, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, n, al, R, n, C, n); }
+inline cublasStatus_t trsm(cublasHandle_t h, int n, const double* al, const double* R, double* C)
+{ return cublasDtrsm(h, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, n, al, R, n, C, n); }
+inline cusolverStatus_t potrfSize(cusolverDnHandle_t h, int n, float* M, int* lw)
+{ return cusolverDnSpotrf_bufferSize(h, CUBLAS_FILL_MODE_UPPER, n, M, n, lw); }
+inline cusolverStatus_t potrfSize(cusolverDnHandle_t h, int n, double* M, int* lw)
+{ return cusolverDnDpotrf_bufferSize(h, CUBLAS_FILL_MODE_UPPER, n, M, n, lw); }
+inline cusolverStatus_t potrf(cusolverDnHandle_t h, int n, float* M, float* w, int lw, int* info)
+{ return cusolverDnSpotrf(h, CUBLAS_FILL_MODE_UPPER, n, M, n, w, lw, info); }
+inline cusolverStatus_t potrf(cusolverDnHandle_t h, int n, double* M, double* w, int lw, int* info)
+{ return cusolverDnDpotrf(h, CUBLAS_FILL_MODE_UPPER, n, M, n, w, lw, info); }
+} // namespace pseudo_blas
+
+/**
+ * One pseudo-diagonalisation step in precision R (float or double), Claude Generated (Sep 29, 2026).
+ * In:  F (n x n Fock, AO basis), L (lower Cholesky factor of S), C (previous eigenvectors, C^T S C = I,
+ *      occupied block first). Scratch: Tb (n x n), Gov (nv x no), M (n x n; may alias F - F is not read
+ *      after step 1), work (potrf).
+ * Out: C rotated and S-orthonormalised, g = Rayleigh quotients of the rotated-from vectors.
+ * Returns 1 on success, 0 when the step was rejected before C was touched (small gap or a large
+ * rotation), -1 on a failure after C was modified.
+ */
+template <typename R>
+int XtbGpuContext::Impl::pseudoRotateOrthonormalise(int n, int no, const R* F, const R* L, R* C, R* Tb,
+                                                    R* Gov, R* M, CudaBuffer<R>& work, double* g, const char* tag)
+{
+    XtbGpuContext::Impl& I = *this;
+    namespace pb = pseudo_blas;
+    const int nv = n - no;
+    const int b = 256;
+    const R one = 1, zero = 0, mone = -1;
+    cudaStream_t stream = I.stream;
+    R* Cv = C + static_cast<size_t>(no) * n;
+    auto mark = [&](const char* what) { I.profMark((std::string(tag) + what).c_str()); };
+
+    // 1. T = F C, g = diag(C^T F C), G_ov = C_v^T (F C_o).
+    if (pb::gemm(I.cublas, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n, &one, F, n, C, n, &zero, Tb, n) != CUBLAS_STATUS_SUCCESS)
+        return 0;
+    k_pseudo_coldot<R><<<n, b, b * sizeof(double), stream>>>(C, Tb, n, g);
+    if (pb::gemm(I.cublas, CUBLAS_OP_T, CUBLAS_OP_N, nv, no, n, &one, Cv, n, Tb, n, &zero, Gov, nv) != CUBLAS_STATUS_SUCCESS)
+        return 0;
+    mark("F*C, diag(G), G_ov");
+
+    // 2. Is one rotation safe? The occupied/virtual gap must be large against kT (occupations stay
+    //    0/2 and the two blocks keep their order) and every rotation angle small.
+    k_pseudo_gap<<<1, b, 2 * b * sizeof(double), stream>>>(g, no, n, I.dPsStats.ptr);
+    I.dPsMax.zero(1, stream);
+    k_pseudo_theta<R><<<1024, b, 0, stream>>>(Gov, g, no, nv, I.dPsMax.ptr);
+    if (cudaGetLastError() != cudaSuccess) return 0;
+    double stats[2] = {0.0, 0.0};
+    unsigned int maxbits = 0u;
+    I.dPsStats.download(stats, 2, stream);
+    I.dPsMax.download(&maxbits, 1, stream);
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return 0;
+    float max_theta = 0.0f;
+    std::memcpy(&max_theta, &maxbits, sizeof(float));
+    I.pseudo_last_max_theta = max_theta;
+    const double kT = I.loop_Tele * 3.166808e-6;
+    if (!(stats[1] - stats[0] > std::max(30.0 * kT, 1.0e-3)) || !(max_theta < 0.1f)) return 0;
+    mark("gap/theta check");
+
+    // 3. Rotate: keep the old C_v in Tb, then C_v -= C_o theta^T, C_o += C_v(old) theta.
+    if (cudaMemcpyAsync(Tb, Cv, sizeof(R) * static_cast<size_t>(n) * nv, cudaMemcpyDeviceToDevice, stream)
+            != cudaSuccess
+        || pb::gemm(I.cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, nv, no, &mone, C, n, Gov, nv, &one, Cv, n)
+            != CUBLAS_STATUS_SUCCESS
+        || pb::gemm(I.cublas, CUBLAS_OP_N, CUBLAS_OP_N, n, no, nv, &one, Tb, n, Gov, nv, &one, C, n)
+            != CUBLAS_STATUS_SUCCESS)
+        return -1;
+    mark("rotation");
+
+    // 4. S-orthonormalise: B = L^T C (into Tb), M = B^T B (upper, diagonal re-summed in FP64),
+    //    M = R^T R, C <- C R^-1. The Cholesky order keeps the occupied span (column i mixes only
+    //    with columns <= i).
+    if (pb::trmm(I.cublas, n, &one, L, C, Tb) != CUBLAS_STATUS_SUCCESS) return -1;
+    mark("orth trmm L^T C");
+    if (pb::syrk(I.cublas, n, &one, Tb, &zero, M) != CUBLAS_STATUS_SUCCESS) return -1;
+    k_pseudo_gram_diag<R><<<n, b, b * sizeof(double), stream>>>(Tb, n, M);
+    if (cudaGetLastError() != cudaSuccess) return -1;
+    mark("orth syrk + FP64 diagonal");
+    int lw = 0;
+    if (pb::potrfSize(I.cusolver, n, M, &lw) != CUSOLVER_STATUS_SUCCESS) return -1;
+    try { work.ensure(std::max(1, lw)); I.dInfo.ensure(1); } catch (...) { return -1; }
+    if (pb::potrf(I.cusolver, n, M, work.ptr, lw, I.dInfo.ptr) != CUSOLVER_STATUS_SUCCESS) return -1;
+    int info = 0;
+    I.dInfo.download(&info, 1, stream);
+    if (cudaStreamSynchronize(stream) != cudaSuccess || info != 0) return -1;
+    mark("orth potrf");
+    if (pb::trsm(I.cublas, n, &one, M, C) != CUBLAS_STATUS_SUCCESS) return -1;
+    mark("orth trsm C R^-1");
+    return 1;
+}
+
+bool XtbGpuContext::Impl::pseudoDiagStep(int n)
+{
+    const int no = loop_nocc_pairs, nv = n - no;
+    if (no <= 0 || nv <= 0) return false;
+    const size_t nn = static_cast<size_t>(n) * n;
+    try {
+        dCf.ensure(static_cast<int>(nn));
+        dLf.ensure(static_cast<int>(nn));
+        dPsT.ensure(static_cast<int>(nn));
+        dPsGov.ensure(static_cast<int>(static_cast<size_t>(nv) * no));
+        dPsG.ensure(n);
+        dPsStats.ensure(2);
+        dPsMax.ensure(1);
+    } catch (...) { return false; }
+    const int b = 256;
+    const int gnn = static_cast<int>((nn + b - 1) / b);
+    k_d2f<<<gnn, b, 0, stream>>>(dC.ptr, dCf.ptr, nn);   // F -> FP32
+    k_d2f<<<gnn, b, 0, stream>>>(dL.ptr, dLf.ptr, nn);   // L -> FP32
+    if (cudaGetLastError() != cudaSuccess) return false;
+    // M aliases the FP32 F (dCf): F is only read in step 1.
+    const int rc = pseudoRotateOrthonormalise<float>(n, no, dCf.ptr, dLf.ptr, dCprev32.ptr, dPsT.ptr,
+                                                     dPsGov.ptr, dCf.ptr, dPsWork, dPsG.ptr, "eig FP32 pseudo: ");
+    if (rc < 0) cprev_valid = false;
+    if (rc != 1) return false;
+    // Hand the result to the density: C in FP64, orbital energies = the Rayleigh quotients.
+    k_f2d<<<gnn, b, 0, stream>>>(dCprev32.ptr, dC.ptr, nn);
+    if (cudaGetLastError() != cudaSuccess
+        || cudaMemcpyAsync(dEps.ptr, dPsG.ptr, sizeof(double) * n, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+        return false;
+    c_exact_eigenvectors = false;
+    return true;
+}
+
+int XtbGpuContext::Impl::pseudoDiagStep64(int n)
+{
+    const int no = loop_nocc_pairs, nv = n - no;
+    if (no <= 0 || nv <= 0) return 0;
+    const size_t nn = static_cast<size_t>(n) * n;
+    // The FP32 scratch is idle in an FP64 step; release it before the FP64 buffers grow.
+    dCf.free(); dLf.free(); dPsT.free(); dPsGov.free(); dPsWork.free();
+    try {
+        dCprev64.ensure(static_cast<int>(nn));
+        dPsT64.ensure(static_cast<int>(nn));
+        dPsGov64.ensure(static_cast<int>(static_cast<size_t>(nv) * no));
+        dPsG.ensure(n);
+        dPsStats.ensure(2);
+        dPsMax.ensure(1);
+    } catch (...) { return 0; }
+    const int b = 256;
+    const int gnn = static_cast<int>((nn + b - 1) / b);
+    if (!cprev64_valid) {   // start from the FP32 eigenvectors of the previous step
+        k_f2d<<<gnn, b, 0, stream>>>(dCprev32.ptr, dCprev64.ptr, nn);
+        if (cudaGetLastError() != cudaSuccess) return 0;
+        cprev64_valid = true;
+    }
+    // M aliases F (dC): F is only read in step 1; C is copied back into dC afterwards.
+    const int rc = pseudoRotateOrthonormalise<double>(n, no, dC.ptr, dL.ptr, dCprev64.ptr, dPsT64.ptr,
+                                                      dPsGov64.ptr, dC.ptr, dPsWork64, dPsG.ptr, "eig FP64 pseudo: ");
+    // rc < 0: F (dC) may already hold the Gram matrix - no silent fallback to a full solve on it.
+    if (rc < 0) { cprev64_valid = false; return -1; }
+    if (rc != 1) return 0;
+    if (cudaMemcpyAsync(dC.ptr, dCprev64.ptr, sizeof(double) * nn, cudaMemcpyDeviceToDevice, stream) != cudaSuccess
+        || cudaMemcpyAsync(dEps.ptr, dPsG.ptr, sizeof(double) * n, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+        return -1;
+    // The FP32 copy follows, so a later FP32 step starts from these vectors.
+    if (!dCprev32.empty() && dCprev32.n >= static_cast<int>(nn)) {
+        k_d2f<<<gnn, b, 0, stream>>>(dCprev64.ptr, dCprev32.ptr, nn);
+        cprev_valid = cudaGetLastError() == cudaSuccess;
+    }
+    c_exact_eigenvectors = false;
+    return 1;
+}
+
+void XtbGpuContext::setPseudoDiagonalisation(bool on, double max_dq, int max_steps, bool fp64)
+{
+    if (!m_impl) return;
+    m_impl->pseudo_enabled = on;
+    m_impl->pseudo_max_dq = max_dq;
+    m_impl->pseudo_max_steps = max_steps;
+    m_impl->pseudo_fp64 = on && fp64;
+    if (!on) m_impl->releasePseudoDiag();
+}
+
+void XtbGpuContext::pseudoDiagonalisationCounts(int& taken, int& rejected) const
+{
+    taken = m_impl ? m_impl->pseudo_taken : 0;
+    rejected = m_impl ? m_impl->pseudo_rejected : 0;
+}
+
+bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig, bool download_eps)
+{
+    Impl& I = *m_impl;
+    const int n = I.resident_n;
+    const bool partial = (n_eig > 0 && n_eig < n);
+    const bool closed_shell = std::fabs(I.loop_nelec - 2.0 * I.loop_nocc_pairs) < 1e-9;
+    const bool pseudo_ok = I.pseudo_enabled && I.in_resident_step && !partial && closed_shell
+        && I.loop_nao == n && I.last_dq < I.pseudo_max_dq;
+    auto finish_pseudo = [&](const char* what) {
+        ++I.pseudo_taken;
+        I.profMark(what);
+        if (download_eps && eps_out) I.dEps.download(eps_out, n, I.stream);
+        return cudaStreamSynchronize(I.stream) == cudaSuccess;
+    };
+    if (pseudo_ok && fp32 && I.cprev_valid && I.pseudo_consecutive < I.pseudo_max_steps) {
+        if (I.pseudoDiagStep(n)) {
+            ++I.pseudo_consecutive;
+            I.cprev64_valid = false;   // the FP64 copy is now one step behind
+            return finish_pseudo("eig FP32 pseudo: hand-over to the density");
+        }
+        ++I.pseudo_rejected;
+        // dCprev32 may be half-rotated; the full solve below refreshes it.
+    } else if (pseudo_ok && !fp32 && I.pseudo_fp64 && (I.cprev64_valid || I.cprev_valid)
+               && I.pseudo_consecutive64 < I.pseudo_max_steps) {
+        const int rc = I.pseudoDiagStep64(n);
+        if (rc < 0) {
+            I.last_error = "FP64 pseudo-diagonalisation step failed after the Fock matrix was consumed";
+            return false;
+        }
+        if (rc == 1) {
+            ++I.pseudo_consecutive64;
+            return finish_pseudo("eig FP64 pseudo: hand-over to the density");
+        }
+        ++I.pseudo_rejected;
+    }
+    const bool ok = eigensolveResidentFockFull(eps_out, fp32, n_eig, download_eps);
+    if (ok) I.c_exact_eigenvectors = true;
+    if (ok && I.pseudo_enabled && !partial) {
+        const size_t nn = static_cast<size_t>(n) * n;
+        const int b = 256;
+        bool stored = false;
+        try {
+            I.dCprev32.ensure(static_cast<int>(nn));
+            k_d2f<<<static_cast<int>((nn + b - 1) / b), b, 0, I.stream>>>(I.dC.ptr, I.dCprev32.ptr, nn);
+            stored = cudaGetLastError() == cudaSuccess;
+        } catch (...) { stored = false; }
+        I.cprev_valid = stored;
+        I.pseudo_consecutive = 0;
+        I.cprev64_valid = false;
+        if (I.pseudo_fp64 && !fp32) {   // an FP64 solve seeds the FP64 pseudo steps directly
+            try {
+                I.dCprev64.ensure(static_cast<int>(nn));
+                I.cprev64_valid = cudaMemcpyAsync(I.dCprev64.ptr, I.dC.ptr, sizeof(double) * nn,
+                                                  cudaMemcpyDeviceToDevice, I.stream) == cudaSuccess;
+            } catch (...) { I.cprev64_valid = false; }
+            I.pseudo_consecutive64 = 0;
+        }
+    }
+    return ok;
+}
+
+bool XtbGpuContext::eigensolveResidentFockFull(double* eps_out, bool fp32, int n_eig,
+                                               bool download_eps)
 {
     const int n = m_impl->resident_n;
     cudaStream_t stream = m_impl->stream;
@@ -1676,11 +3742,43 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
     const bool partial = (n_eig > 0 && n_eig < n);
     const int neig = partial ? n_eig : n;
 
+    // Claude Generated (Sep 2026, multi-GPU step 3): FP64 iterations run the whole generalized
+    // solve on several GPUs (sygst + syevd + trsm; L is distributed once per geometry). This device
+    // only sends F and receives C, and allocates no cuSOLVER workspace. FP32 iterations distribute
+    // only the eigensolve (distSolve in the FP32 branch below): measured on polymer_2x (n = 15444,
+    // 4x A4500) the distributed reduction wins in FP64 (sygst 3.7 s vs two single-GPU trsm 21 s)
+    // but not in FP32 (0.56 vs 0.57 s), and the cuBLASMp FP32 back-transform is slower than the
+    // single-GPU trsm (1.74 vs 0.38 s).
+    // Claude Generated (Sep 2026, G2-7): name the two cases in which the multi-GPU solver is set up
+    // but this FP64 solve still runs (partly) on this device.
+    if (m_impl->dist_devices.size() > 1 && n >= m_impl->dist_min_nao && m_impl->dist_degrade.empty()) {
+        if (partial)
+            m_impl->dist_degrade = "-scf_gpu_partial_diag runs the eigensolve on one device (the split is off)";
+        else if (!fp32 && m_impl->distReady(n, false) && !m_impl->dist->supportsGeneralized())
+            m_impl->dist_degrade = "no cuBLASMp: FP64 reduction and back-transform stay on one device, only syevd is split";
+    }
+    if (!partial && !fp32 && m_impl->distReady(n, false) && m_impl->dist->supportsGeneralized()) {
+        // No single-GPU workspaces or FP32 copies while the FP64 solve is distributed.
+        m_impl->dCf.free(); m_impl->dLf.free(); m_impl->dWorkf.free(); m_impl->lwork_f32 = 0;
+        if (!m_impl->dWork.empty()) { m_impl->dWork.free(); m_impl->lwork = 0; }
+        const int rc = m_impl->distSolveGeneralized(n, m_impl->dC.ptr, m_impl->dL.ptr, m_impl->dEps.ptr, false);
+        if (rc < 0) return false;
+        if (rc == 1) {
+            m_impl->profMark("eig FP64: multi-GPU sygst+syevd+trsm");
+            if (download_eps && eps_out) m_impl->dEps.download(eps_out, n, stream);
+            return cudaStreamSynchronize(stream) == cudaSuccess;
+        }
+        // rc == 0: F is intact, continue with the single-GPU path below.
+    }
+
     if (fp32) {
         // Mixed precision: reduce + diagonalise + back-transform in FP32, then
         // convert the eigenvectors/values back to FP64 so the resident density
         // (FP64) is unchanged. ~5–10× faster than FP64 on consumer GPUs.
         try {
+            // Claude Generated (Sep 2026): the FP64 syevd workspace (~3.6 nao^2 doubles) is idle
+            // while the SCF runs in FP32; release it so both precisions never coexist.
+            if (!m_impl->dWork.empty()) { m_impl->dWork.free(); m_impl->lwork = 0; }
             if (m_impl->dCf.n   < static_cast<int>(nn)) m_impl->dCf.alloc(static_cast<int>(nn));
             if (m_impl->dLf.n   < static_cast<int>(nn)) m_impl->dLf.alloc(static_cast<int>(nn));
             if (m_impl->dEpsf.n < n)                    m_impl->dEpsf.alloc(n);
@@ -1699,8 +3797,15 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
                         CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, n, &onef,
                         m_impl->dLf.ptr, n, m_impl->dCf.ptr, n) != CUBLAS_STATUS_SUCCESS)
             return false;
+        m_impl->profMark("eig FP32: copy + reduce");
+        bool back_done = false;   // eigenvectors already back-transformed on the devices
+        const int dist_rc = partial ? 0 : m_impl->distSolve(n, m_impl->dCf.ptr, m_impl->dEpsf.ptr, true,
+                                                            m_impl->dLf.ptr, &back_done);
+        if (dist_rc < 0) return false;
         int lwork = 0;
-        if (partial) {
+        if (dist_rc == 1) {
+            m_impl->profMark("eig FP32: syevd (multi-GPU)");
+        } else if (partial) {
             const float vl = 0.0f, vu = 0.0f; int h_meig = 0;
             if (cusolverDnSsyevdx_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR,
                                              CUSOLVER_EIG_RANGE_I, CUBLAS_FILL_MODE_LOWER, n,
@@ -1717,6 +3822,7 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
                                   m_impl->dEpsf.ptr, m_impl->dWorkf.ptr, m_impl->lwork_f32,
                                   m_impl->dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
                 return false;
+            m_impl->profMark("eig FP32: syevd");
         } else {
             if (cusolverDnSsyevd_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR,
                                             CUBLAS_FILL_MODE_LOWER, n, m_impl->dCf.ptr, n,
@@ -1730,21 +3836,25 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
                                  n, m_impl->dCf.ptr, n, m_impl->dEpsf.ptr, m_impl->dWorkf.ptr,
                                  m_impl->lwork_f32, m_impl->dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
                 return false;
+            m_impl->profMark("eig FP32: syevd");
         }
         // Back-transform only the neig computed eigenvectors (columns 0..neig-1).
-        if (cublasStrsm(m_impl->cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
-                        CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, neig, &onef,
-                        m_impl->dLf.ptr, n, m_impl->dCf.ptr, n) != CUBLAS_STATUS_SUCCESS)
+        if (!back_done
+            && cublasStrsm(m_impl->cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
+                           CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, neig, &onef,
+                           m_impl->dLf.ptr, n, m_impl->dCf.ptr, n) != CUBLAS_STATUS_SUCCESS)
             return false;
         // Convert the neig columns (column-major: first neig·n contiguous) + neig eps.
         const size_t conv = static_cast<size_t>(neig) * static_cast<size_t>(n);
         k_f2d<<<static_cast<int>((conv + b - 1) / b), b, 0, stream>>>(m_impl->dCf.ptr, m_impl->dC.ptr, conv);
         k_f2d<<<(neig + b - 1) / b, b, 0, stream>>>(m_impl->dEpsf.ptr, m_impl->dEps.ptr, neig);
         if (cudaGetLastError() != cudaSuccess) return false;
+        m_impl->profMark("eig FP32: back-transform + to FP64");
 
-        int info = 1;
-        if (cudaMemcpyAsync(&info, m_impl->dInfo.ptr, sizeof(int),
-                            cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+        int info = 0;
+        if (dist_rc != 1
+            && cudaMemcpyAsync(&info, m_impl->dInfo.ptr, sizeof(int),
+                               cudaMemcpyDeviceToHost, stream) != cudaSuccess)
             return false;
         if (download_eps && eps_out) m_impl->dEps.download(eps_out, neig, stream);
         if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
@@ -1761,7 +3871,12 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
                     CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, n, &one,
                     m_impl->dL.ptr, n, m_impl->dC.ptr, n) != CUBLAS_STATUS_SUCCESS)
         return false;
-    if (partial) {
+    m_impl->profMark("eig FP64: reduce");
+    const int dist_rc = partial ? 0 : m_impl->distSolve(n, m_impl->dC.ptr, m_impl->dEps.ptr, false);
+    if (dist_rc < 0) return false;
+    if (dist_rc == 1) {
+        m_impl->profMark("eig FP64: syevd (multi-GPU)");
+    } else if (partial) {
         const double vl = 0.0, vu = 0.0; int h_meig = 0; int lwork_dx = 0;
         if (cusolverDnDsyevdx_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR,
                                          CUSOLVER_EIG_RANGE_I, CUBLAS_FILL_MODE_LOWER, n,
@@ -1778,21 +3893,36 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
                               m_impl->dEps.ptr, m_impl->dWork.ptr, m_impl->lwork,
                               m_impl->dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
             return false;
+        m_impl->profMark("eig FP64: syevd");
     } else {
+        // Claude Generated (Sep 2026): FP64 workspace on demand; drop the FP32 copies first.
+        if (m_impl->lwork <= 0 || m_impl->dWork.empty()) {
+            m_impl->dCf.free(); m_impl->dLf.free(); m_impl->dWorkf.free(); m_impl->lwork_f32 = 0;
+            int lwork = 0;
+            if (cusolverDnDsyevd_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR,
+                                            CUBLAS_FILL_MODE_LOWER, n, m_impl->dC.ptr, n,
+                                            m_impl->dEps.ptr, &lwork) != CUSOLVER_STATUS_SUCCESS)
+                return false;
+            try { m_impl->dWork.alloc(lwork > 0 ? lwork : 1); } catch (...) { return false; }
+            m_impl->lwork = lwork;
+        }
         if (cusolverDnDsyevd(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
                              n, m_impl->dC.ptr, n, m_impl->dEps.ptr, m_impl->dWork.ptr,
                              m_impl->lwork, m_impl->dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
             return false;
+        m_impl->profMark("eig FP64: syevd");
     }
     // Back-transform only the neig computed eigenvectors (columns 0..neig-1).
     if (cublasDtrsm(m_impl->cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
                     CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, neig, &one,
                     m_impl->dL.ptr, n, m_impl->dC.ptr, n) != CUBLAS_STATUS_SUCCESS)
         return false;
+    m_impl->profMark("eig FP64: back-transform");
 
-    int info = 1;
-    if (cudaMemcpyAsync(&info, m_impl->dInfo.ptr, sizeof(int),
-                        cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+    int info = 0;
+    if (dist_rc != 1
+        && cudaMemcpyAsync(&info, m_impl->dInfo.ptr, sizeof(int),
+                           cudaMemcpyDeviceToHost, stream) != cudaSuccess)
         return false;
     if (download_eps && eps_out) m_impl->dEps.download(eps_out, neig, stream);
     if (cudaStreamSynchronize(stream) != cudaSuccess)
@@ -1812,11 +3942,7 @@ bool XtbGpuContext::residentSolve(const double* v_ao, int n, double* eps_out, bo
     m_impl->dVao.upload(v_ao, n, stream);
 
     // F = H0 − ½·S·(v_ao⊕v_ao), built straight into the eigenvector buffer dC.
-    const dim3 block(16, 16);
-    const dim3 grid((n + block.x - 1) / block.x, (n + block.y - 1) / block.y);
-    k_build_fock_iso<<<grid, block, 0, stream>>>(m_impl->dC.ptr, m_impl->dH0.ptr,
-                                                 m_impl->dS.ptr, m_impl->dVao.ptr, n);
-    if (cudaGetLastError() != cudaSuccess)
+    if (!buildFockIntoC(n, /*multipole=*/false))
         return false;
 
     return eigensolveResidentFock(eps_out, fp32, n_eig);
@@ -1830,9 +3956,13 @@ bool XtbGpuContext::residentDensity(const double* occ, int ncol, int n,
     cudaStream_t stream = m_impl->stream;
     const double one = 1.0, zero = 0.0;
 
+    try { m_impl->dP.ensure(static_cast<int>(static_cast<size_t>(n) * n)); } catch (...) { return false; }
+    m_impl->p_dense_valid = true;
     if (ncol > 0) {
         m_impl->dOcc.upload(occ, ncol, stream);
-        // Cw(:,k) = occ[k]·C(:,k)  for k < ncol.
+        // Cw(:,k) = occ[k]·C(:,k)  for k < ncol  (n x ncol; Claude Generated Sep 2026: sized to
+        // the occupied columns instead of n x n).
+        try { m_impl->dCw.ensure(n * ncol); } catch (...) { return false; }
         const dim3 block(16, 16);
         const dim3 grid((n + block.x - 1) / block.x, (ncol + block.y - 1) / block.y);
         k_scale_cols<<<grid, block, 0, stream>>>(m_impl->dCw.ptr, m_impl->dC.ptr,
@@ -1851,17 +3981,8 @@ bool XtbGpuContext::residentDensity(const double* occ, int ncol, int n,
             return false;
     }
 
-    // pop_ao(μ) = Σ_ν P(μ,ν)·S(μ,ν).
-    const int b1 = 128;
-    k_pop_ao<<<(n + b1 - 1) / b1, b1, 0, stream>>>(m_impl->dPop.ptr, m_impl->dP.ptr,
-                                                   m_impl->dS.ptr, n);
-    if (cudaGetLastError() != cudaSuccess)
-        return false;
-
-    // Band energy = Σ_μν P_μν·H0_μν (host-pointer dot is blocking; sync to be safe).
-    const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
-    if (cublasDdot(m_impl->cublas, static_cast<int>(nn), m_impl->dP.ptr, 1,
-                   m_impl->dH0.ptr, 1, band_out) != CUBLAS_STATUS_SUCCESS)
+    // pop_ao(μ) = Σ_ν P(μ,ν)·S(μ,ν); band energy = Σ_μν P_μν·H0_μν.
+    if (!populationsAndBand(n, band_out))
         return false;
 
     m_impl->dPop.download(pop_ao_out, n, stream);
@@ -1871,32 +3992,250 @@ bool XtbGpuContext::residentDensity(const double* occ, int ncol, int n,
 // Stage 6: density + Mulliken-AO from the RESIDENT occupations (dOcc, set by
 // k_occupations) — no occ upload, no pop_ao download (dPop stays resident for the
 // device q_sh/q_at reductions). band_out = Σ P⊙H0 (host scalar). Claude Generated.
+// Claude Generated (Sep 2026, multi-GPU): pattern density over several GPUs.
+//
+// P(r,c) = sum_k Cw(r,k) C(c,k) is a plain sum over the occupied columns, so each device can
+// evaluate the full pattern over its own contiguous slice of k and the partials are added on the
+// primary device. Per SCF step only the column slices of C (n x kn each) and the partial pattern
+// arrays travel; the pattern indices are geometry-constant and uploaded once.
+//
+// Returns false when the split is not set up or fails, and leaves the target buffer untouched
+// in that case, so the caller falls back to the single-device kernel.
+//
+// Point 6 (Claude Generated, Sep 2026): for_weighted_density retargets the same column-split
+// SDDMM at the gradient's W = C_occ*diag(2eps)*C_occ^T instead of the SCF loop's P. Both are
+// the identical sum-over-occupied-columns pattern (k_density_sp doesn't know or care what the
+// weight vector means), so nothing below needs duplicating - only which CudaBuffer the result
+// lands in changes. The caller (computeGradient) uploads its own weight vector (2*eps) into
+// the SAME dOcc buffer the SCF loop uses before calling this, so dOcc itself needs no
+// generalisation either.
+bool XtbGpuContext::densityPatternDistributed(int n, int ncol, bool for_weighted_density)
+{
+    Impl& I = *m_impl;
+    // Claude Generated (Sep 2026, G2-6): remember WHY the split did not run, so the status names
+    // the real cause instead of always "nao below min".
+    if (!I.dens_devices.empty() && !I.dens_failed) {
+        if (!I.sparse || I.sp_nnz <= 0)
+            I.dens_skip_reason = "dense integral storage; the split needs screened storage (-gpu_sparse_integrals on)";
+        else if (n < I.dens_min_nao)
+            I.dens_skip_reason = "nao " + std::to_string(n) + " below gpu_density_min_nao = " + std::to_string(I.dens_min_nao);
+    }
+    if (I.dens_failed || I.dens_devices.empty() || !I.sparse || I.sp_nnz <= 0 || ncol <= 0
+        || n < I.dens_min_nao)
+        return false;   // below ~3000 basis functions the transfers cost more than the split saves
+
+    const int nhelp = static_cast<int>(I.dens_devices.size());
+    const int nworker = nhelp + 1;               // the helpers plus this device
+    if (ncol < 16 * nworker) return false;       // too few columns to be worth splitting
+    CudaBuffer<double>& target = for_weighted_density ? I.dSpW : I.dSpP;
+    // The pattern density buffer is normally allocated by the single-device branch, which this
+    // function replaces.
+    try { target.ensure(I.sp_nnz); I.dCw.ensure(n * ncol); } catch (...) { return false; }
+
+    // Create the helpers (streams, events, pattern buffers) on first use.
+    if (I.dens_helpers.empty()) {
+        for (int d : I.dens_devices) {
+            Impl::DensityHelper h;
+            h.device = d;
+            cudaSetDevice(d);
+            int can = 0;
+            if (cudaDeviceCanAccessPeer(&can, d, I.device) == cudaSuccess && can)
+                cudaDeviceEnablePeerAccess(I.device, 0);
+            cudaGetLastError();   // "already enabled" is expected and must not linger
+            if (cudaStreamCreate(&h.stream) != cudaSuccess
+                || cudaEventCreateWithFlags(&h.done, cudaEventDisableTiming) != cudaSuccess) {
+                cudaSetDevice(I.device);
+                I.dens_failed = true;
+                I.dens_error = "stream/event creation failed";
+                I.releaseDensityHelpers();
+                return false;
+            }
+            I.dens_helpers.push_back(h);
+        }
+        cudaSetDevice(I.device);
+        for (int d : I.dens_devices) {
+            int can = 0;
+            if (cudaDeviceCanAccessPeer(&can, I.device, d) == cudaSuccess && can)
+                cudaDeviceEnablePeerAccess(d, 0);
+            cudaGetLastError();
+        }
+    }
+
+    // Column split: contiguous slices, the primary device takes the first one.
+    const int per = (ncol + nworker - 1) / nworker;
+    const int own_cols = std::min(per, ncol);
+
+    auto fail = [&](const char* where, cudaError_t err = cudaGetLastError()) {
+        cudaSetDevice(I.device);
+        I.dens_failed = true;
+        I.dens_error = std::string(where) + ": " + cudaGetErrorString(err);
+        I.releaseDensityHelpers();
+        return false;
+    };
+
+    // Launch the helpers first so they overlap with this device's own slice.
+    for (int i = 0; i < nhelp; ++i) {
+        Impl::DensityHelper& h = I.dens_helpers[i];
+        const int k0 = std::min(ncol, (i + 1) * per);
+        const int kn = std::min(per, ncol - k0);
+        if (kn <= 0) continue;
+        cudaSetDevice(h.device);
+        // Buffers: column slice (grown to the largest slice seen) and the pattern.
+        if (h.cap_cols < kn) {
+            if (h.dC) cudaFree(h.dC);
+            if (h.dCw) cudaFree(h.dCw);
+            if (h.dOcc) cudaFree(h.dOcc);
+            const size_t bytes = sizeof(double) * static_cast<size_t>(n) * kn;
+            if (cudaMalloc(reinterpret_cast<void**>(&h.dC), bytes) != cudaSuccess
+                || cudaMalloc(reinterpret_cast<void**>(&h.dCw), bytes) != cudaSuccess
+                || cudaMalloc(reinterpret_cast<void**>(&h.dOcc), sizeof(double) * kn) != cudaSuccess)
+                return fail("alloc column slice");
+            h.cap_cols = kn;
+        }
+        if (h.cap_nnz < I.sp_nnz) {
+            if (h.dPsp) cudaFree(h.dPsp);
+            if (h.dRow) cudaFree(h.dRow);
+            if (h.dCol) cudaFree(h.dCol);
+            if (cudaMalloc(reinterpret_cast<void**>(&h.dPsp), sizeof(double) * I.sp_nnz) != cudaSuccess
+                || cudaMalloc(reinterpret_cast<void**>(&h.dRow), sizeof(int) * I.sp_nnz) != cudaSuccess
+                || cudaMalloc(reinterpret_cast<void**>(&h.dCol), sizeof(int) * I.sp_nnz) != cudaSuccess)
+                return fail("alloc pattern");
+            h.cap_nnz = I.sp_nnz;
+            h.pattern_gen = -1;
+            cudaSetDevice(I.device);
+            if (h.stage) cudaFree(h.stage);
+            if (cudaMalloc(reinterpret_cast<void**>(&h.stage), sizeof(double) * I.sp_nnz) != cudaSuccess)
+                return fail("alloc staging");
+            cudaSetDevice(h.device);
+        }
+        if (h.pattern_gen != I.pattern_generation) {
+            if (cudaMemcpyPeerAsync(h.dRow, h.device, I.dSpRow.ptr, I.device,
+                                    sizeof(int) * I.sp_nnz, h.stream) != cudaSuccess
+                || cudaMemcpyPeerAsync(h.dCol, h.device, I.dSpCol.ptr, I.device,
+                                       sizeof(int) * I.sp_nnz, h.stream) != cudaSuccess)
+                return fail("copy pattern");
+            h.pattern_gen = I.pattern_generation;
+        }
+        // Column slice of C and the matching occupations.
+        if (cudaMemcpyPeerAsync(h.dC, h.device, I.dC.ptr + static_cast<size_t>(k0) * n, I.device,
+                                sizeof(double) * static_cast<size_t>(n) * kn, h.stream) != cudaSuccess
+            || cudaMemcpyPeerAsync(h.dOcc, h.device, I.dOcc.ptr + k0, I.device,
+                                   sizeof(double) * kn, h.stream) != cudaSuccess)
+            return fail("copy column slice");
+        const dim3 block(16, 16);
+        const dim3 grid((n + block.x - 1) / block.x, (kn + block.y - 1) / block.y);
+        k_scale_cols<<<grid, block, 0, h.stream>>>(h.dCw, h.dC, h.dOcc, n, kn);
+        const int bs = 256;
+        k_density_sp<<<(I.sp_nnz + bs - 1) / bs, bs, 0, h.stream>>>(
+            I.sp_nnz, h.dRow, h.dCol, h.dCw, h.dC, n, kn, h.dPsp);
+        if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess) return fail("helper kernels", e);
+        if (cudaMemcpyPeerAsync(h.stage, I.device, h.dPsp, h.device,
+                                sizeof(double) * I.sp_nnz, h.stream) != cudaSuccess
+            || cudaEventRecord(h.done, h.stream) != cudaSuccess)
+            return fail("copy partial back");
+    }
+
+    // This device's own slice, into the target pattern buffer (dSpP or dSpW).
+    cudaSetDevice(I.device);
+    {
+        const dim3 block(16, 16);
+        const dim3 grid((n + block.x - 1) / block.x, (own_cols + block.y - 1) / block.y);
+        k_scale_cols<<<grid, block, 0, I.stream>>>(I.dCw.ptr, I.dC.ptr, I.dOcc.ptr, n, own_cols);
+        const int bs = 256;
+        k_density_sp<<<(I.sp_nnz + bs - 1) / bs, bs, 0, I.stream>>>(
+            I.sp_nnz, I.dSpRow.ptr, I.dSpCol.ptr, I.dCw.ptr, I.dC.ptr, n, own_cols, target.ptr);
+        if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess) return fail("own slice", e);
+    }
+
+    // Add the partials once each helper has written its staging buffer.
+    const double one = 1.0;
+    for (int i = 0; i < nhelp; ++i) {
+        Impl::DensityHelper& h = I.dens_helpers[i];
+        const int k0 = std::min(ncol, (i + 1) * per);
+        if (std::min(per, ncol - k0) <= 0) continue;
+        if (cudaStreamWaitEvent(I.stream, h.done, 0) != cudaSuccess) return fail("wait event");
+        if (cublasDaxpy(I.cublas, I.sp_nnz, &one, h.stage, 1, target.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+            return fail("reduce partials");
+    }
+    ++I.dens_steps;
+    return true;
+}
+
 bool XtbGpuContext::residentDensityResident(int n, int ncol, double* band_out)
 {
     if (!ok() || n <= 0 || n != m_impl->resident_n || !band_out) return false;
-    cudaStream_t stream = m_impl->stream;
+    Impl& I = *m_impl;
+    cudaStream_t stream = I.stream;
     const double one = 1.0, zero = 0.0;
+    I.last_ncol = ncol;
     if (ncol > 0) {
+        try { I.dCw.ensure(n * ncol); } catch (...) { return false; }   // n x ncol
+    }
+    // Claude Generated (Sep 2026): pattern density split over several GPUs (see
+    // densityPatternDistributed); falls through to the single-device kernels below when it is
+    // not configured or fails.
+    const bool split_done = ncol > 0 && densityPatternDistributed(n, ncol);
+    if (ncol > 0 && !split_done) {
         const dim3 block(16, 16);
         const dim3 grid((n + block.x - 1) / block.x, (ncol + block.y - 1) / block.y);
-        k_scale_cols<<<grid, block, 0, stream>>>(m_impl->dCw.ptr, m_impl->dC.ptr,
-                                                 m_impl->dOcc.ptr, n, ncol);
+        k_scale_cols<<<grid, block, 0, stream>>>(I.dCw.ptr, I.dC.ptr, I.dOcc.ptr, n, ncol);
         if (cudaGetLastError() != cudaSuccess) return false;
-        if (cublasDgemm(m_impl->cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, n, ncol,
-                        &one, m_impl->dCw.ptr, n, m_impl->dC.ptr, n,
-                        &zero, m_impl->dP.ptr, n) != CUBLAS_STATUS_SUCCESS)
+    }
+    if (split_done) {
+        I.p_dense_valid = false;
+    } else if (I.sparse) {
+        // Claude Generated (Sep 2026): pattern-only density (see k_density_sp). A row-major
+        // variant (contiguous rows, occ applied in the kernel) was measured 8x slower on polymer
+        // (4.69 vs 0.60 s over 12 SCF steps) and dropped.
+        try { I.dSpP.ensure(I.sp_nnz); } catch (...) { return false; }
+        if (ncol > 0) {
+            const int bs = 256;
+            k_density_sp<<<(I.sp_nnz + bs - 1) / bs, bs, 0, stream>>>(
+                I.sp_nnz, I.dSpRow.ptr, I.dSpCol.ptr, I.dCw.ptr, I.dC.ptr, n, ncol, I.dSpP.ptr);
+            if (cudaGetLastError() != cudaSuccess) return false;
+        } else {
+            I.dSpP.zero(I.sp_nnz, stream);
+        }
+        I.p_dense_valid = false;
+    } else if (ncol > 0) {
+        if (cublasDgemm(I.cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, n, ncol,
+                        &one, I.dCw.ptr, n, I.dC.ptr, n,
+                        &zero, I.dP.ptr, n) != CUBLAS_STATUS_SUCCESS)
             return false;
-    } else if (cudaMemsetAsync(m_impl->dP.ptr, 0, sizeof(double) * static_cast<size_t>(n) * n,
-                               stream) != cudaSuccess) {
+        I.p_dense_valid = true;
+    } else {
+        if (cudaMemsetAsync(I.dP.ptr, 0, sizeof(double) * static_cast<size_t>(n) * n, stream) != cudaSuccess)
+            return false;
+        I.p_dense_valid = true;
+    }
+    return populationsAndBand(n, band_out);
+}
+
+// Claude Generated (Sep 2026): rebuild the dense density from the resident eigenvectors and
+// occupations of the last step when the loop only kept it on the screened pattern.
+bool XtbGpuContext::ensureDenseDensity(int n)
+{
+    Impl& I = *m_impl;
+    if (!I.sparse || I.p_dense_valid) return true;
+    cudaStream_t stream = I.stream;
+    const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
+    try { I.dP.ensure(static_cast<int>(nn)); } catch (...) { return false; }
+    const int ncol = I.last_ncol;
+    if (ncol > 0) {
+        try { I.dCw.ensure(n * ncol); } catch (...) { return false; }
+        const dim3 block(16, 16);
+        const dim3 grid((n + block.x - 1) / block.x, (ncol + block.y - 1) / block.y);
+        k_scale_cols<<<grid, block, 0, stream>>>(I.dCw.ptr, I.dC.ptr, I.dOcc.ptr, n, ncol);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        const double one = 1.0, zero = 0.0;
+        if (cublasDgemm(I.cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, n, ncol,
+                        &one, I.dCw.ptr, n, I.dC.ptr, n, &zero, I.dP.ptr, n) != CUBLAS_STATUS_SUCCESS)
+            return false;
+    } else if (cudaMemsetAsync(I.dP.ptr, 0, sizeof(double) * nn, stream) != cudaSuccess) {
         return false;
     }
-    const int b1 = 128;
-    k_pop_ao<<<(n + b1 - 1) / b1, b1, 0, stream>>>(m_impl->dPop.ptr, m_impl->dP.ptr,
-                                                   m_impl->dS.ptr, n);
-    if (cudaGetLastError() != cudaSuccess) return false;
-    const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
-    return cublasDdot(m_impl->cublas, static_cast<int>(nn), m_impl->dP.ptr, 1,
-                      m_impl->dH0.ptr, 1, band_out) == CUBLAS_STATUS_SUCCESS;
+    I.p_dense_valid = true;
+    return true;
 }
 
 bool XtbGpuContext::residentFinalize(double* P_colmajor, double* C_colmajor, int n)
@@ -1905,6 +4244,8 @@ bool XtbGpuContext::residentFinalize(double* P_colmajor, double* C_colmajor, int
         return false;
     cudaStream_t stream = m_impl->stream;
     const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
+    m_impl->releaseEigenWorkspaces();   // SCF finished; see releaseEigenWorkspaces
+    if (!ensureDenseDensity(n)) return false;
     m_impl->dP.download(P_colmajor, static_cast<int>(nn), stream);
     m_impl->dC.download(C_colmajor, static_cast<int>(nn), stream);
     return cudaStreamSynchronize(stream) == cudaSuccess;
@@ -1954,16 +4295,7 @@ bool XtbGpuContext::residentSolveMultipole(const double* v_ao, const double* v_d
     m_impl->dVqp.upload(v_qp, 6 * nat, stream);
 
     // F = H0 − ½·S·(v_ao⊕v_ao) into dC, then add the GFN2 multipole contribution.
-    const dim3 block(16, 16);
-    const dim3 grid((n + block.x - 1) / block.x, (n + block.y - 1) / block.y);
-    k_build_fock_iso<<<grid, block, 0, stream>>>(m_impl->dC.ptr, m_impl->dH0.ptr,
-                                                 m_impl->dS.ptr, m_impl->dVao.ptr, n);
-    if (cudaGetLastError() != cudaSuccess)
-        return false;
-    k_add_fock_multipole<<<grid, block, 0, stream>>>(m_impl->dC.ptr, m_impl->dDpInt.ptr,
-                                                     m_impl->dQpInt.ptr, m_impl->dVdp.ptr,
-                                                     m_impl->dVqp.ptr, m_impl->dAo2at.ptr, n);
-    if (cudaGetLastError() != cudaSuccess)
+    if (!buildFockIntoC(n, /*multipole=*/true))
         return false;
 
     return eigensolveResidentFock(eps_out, fp32, n_eig);
@@ -1976,17 +4308,7 @@ bool XtbGpuContext::residentMultipoleMoments(double* dp_at3, double* qp_at6, int
         return false;
     cudaStream_t stream = m_impl->stream;
 
-    // Accumulator-scatter kernel needs zeroed targets.
-    if (cudaMemsetAsync(m_impl->dDpAt.ptr, 0, sizeof(double) * 3 * nat, stream) != cudaSuccess)
-        return false;
-    if (cudaMemsetAsync(m_impl->dQpAt.ptr, 0, sizeof(double) * 6 * nat, stream) != cudaSuccess)
-        return false;
-
-    const int b1 = 128;
-    k_multipole_moments<<<(n + b1 - 1) / b1, b1, 0, stream>>>(
-        m_impl->dDpAt.ptr, m_impl->dQpAt.ptr, m_impl->dP.ptr,
-        m_impl->dDpInt.ptr, m_impl->dQpInt.ptr, m_impl->dAo2at.ptr, n);
-    if (cudaGetLastError() != cudaSuccess)
+    if (!multipoleMomentsResident(n, nat))
         return false;
 
     m_impl->dDpAt.download(dp_at3, 3 * nat, stream);
@@ -1998,6 +4320,177 @@ bool XtbGpuContext::residentMultipoleMoments(double* dp_at3, double* qp_at6, int
  *  Device-side integral build (Stage 3).
  * ====================================================================== */
 
+size_t XtbGpuContext::estimateResidentBytes(int nat, int nsh, int nao, bool is_gfn2) const
+{
+    return estimateStorageBytes(nat, nsh, nao, is_gfn2, 0.0);
+}
+
+size_t XtbGpuContext::estimateStorageBytes(int nat, int nsh, int nao, bool is_gfn2, double nnz) const
+{
+    if (!ok() || nao <= 0) return 0;
+    const double nn = static_cast<double>(nao) * nao;
+    // cuSOLVER workspace sizes for this n (queries only; the array arguments are not read).
+    int lw_syevd = 0, lw_ssyevd = 0, lw_potrf = 0;
+    cusolverDnDsyevd_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
+                                nao, nullptr, nao, nullptr, &lw_syevd);
+    cusolverDnSsyevd_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
+                                nao, nullptr, nao, nullptr, &lw_ssyevd);
+    cusolverDnDpotrf_bufferSize(m_impl->cusolver, CUBLAS_FILL_MODE_LOWER, nao, nullptr, nao, &lw_potrf);
+
+    double doubles = 0.0;
+    // Claude Generated (Sep 2026): peak of the resident SCF (the gradient frees the eigensolver
+    // workspaces before it allocates W, so it stays below this).
+    if (nnz > 0.0) {
+        doubles += nn;                                    // L (dense Cholesky factor)
+        doubles += 3.0 * nnz + 1.5 * nnz;                 // S, H0, scratch + row/col/perm indices
+    } else {
+        doubles += 3.0 * nn;                              // S, H0, L
+    }
+    doubles += 3.0 * nn;                                  // C (holds F), P, Cw (<= n x n)
+    // Only one precision's eigensolver workspace exists at a time.
+    const double fp64_work = static_cast<double>(lw_syevd);
+    const double fp32_work = nn + 0.5 * lw_ssyevd;        // F + L copies (2 x nn/2) + ssyevd work
+    doubles += std::max(fp64_work, fp32_work) + lw_potrf;
+    doubles += static_cast<double>(nsh) * nsh;            // Coulomb gamma
+    doubles += 2.0 * (static_cast<double>(nat) + 1.0) * (nat + 1.0);  // D4-EEQ LU + getrf work
+    if (is_gfn2) {
+        doubles += 9.0 * (nnz > 0.0 ? nnz : nn);          // dipole (3) + quadrupole (6) integrals
+        const double amat = 18.0 * static_cast<double>(nat) * nat;
+        if (amat * sizeof(double) <= 1.0e9) doubles += amat;  // else rebuilt on the fly
+    }
+    doubles += 64.0 * (nao + nsh + nat) + 32.0 * 1024 * 1024;  // vectors + slack
+    return static_cast<size_t>(doubles * sizeof(double));
+}
+
+std::string XtbGpuContext::profileReport() const
+{
+    if (!m_impl || !m_impl->prof || m_impl->prof_names.empty()) return {};
+    std::string out = "GPU phase profile (CURCUMA_GPU_PROFILE, stream-synchronised; indented rows are\n"
+                      "sub-phases already counted in the row above; mem = device memory in use):\n";
+    double total = 0.0;
+    for (size_t i = 0; i < m_impl->prof_ms.size(); ++i)
+        if (m_impl->prof_names[i].rfind("  ", 0) != 0) total += m_impl->prof_ms[i];
+    char line[200];
+    for (size_t i = 0; i < m_impl->prof_names.size(); ++i) {
+        std::snprintf(line, sizeof(line), "  %-44s %11.1f ms %6.1f %%  %5d calls  mem %7.0f MiB\n",
+                      m_impl->prof_names[i].c_str(), m_impl->prof_ms[i],
+                      total > 0 ? 100.0 * m_impl->prof_ms[i] / total : 0.0, m_impl->prof_calls[i],
+                      m_impl->prof_mem_mib[i]);
+        out += line;
+    }
+    std::snprintf(line, sizeof(line), "  %-44s %11.1f ms\n", "sum", total);
+    out += line;
+    return out;
+}
+
+void XtbGpuContext::setSparseIntegrals(int mode)
+{
+    if (m_impl) m_impl->sparse_mode = std::max(0, std::min(2, mode));
+}
+bool XtbGpuContext::sparseIntegrals() const { return m_impl && m_impl->sparse; }
+double XtbGpuContext::sparseFraction() const { return m_impl ? m_impl->sp_fraction : 1.0; }
+double XtbGpuContext::sparseCutoffBohr() const { return m_impl ? m_impl->sp_rmax : 0.0; }
+
+void XtbGpuContext::setDistributedEigensolver(const std::vector<int>& devices,
+                                              const std::string& backend, int block, int min_nao,
+                                              bool fp32, bool verify)
+{
+    if (!m_impl) return;
+    m_impl->dist.reset();
+    bindDevice();
+    m_impl->dist_devices.clear();
+    int count = 0;
+    cudaGetDeviceCount(&count);
+    for (int d : devices) {
+        if (d < 0) {   // "all"
+            m_impl->dist_devices.clear();
+            for (int i = 0; i < count; ++i) m_impl->dist_devices.push_back(i);
+            break;
+        }
+        if (d < count && std::find(m_impl->dist_devices.begin(), m_impl->dist_devices.end(), d)
+                             == m_impl->dist_devices.end())
+            m_impl->dist_devices.push_back(d);
+    }
+    m_impl->dist_backend = backend.empty() ? std::string("auto") : backend;
+    m_impl->dist_block = block > 0 ? block : 128;
+    m_impl->dist_min_nao = std::max(0, min_nao);
+    m_impl->dist_fp32 = fp32;
+    m_impl->dist_verify = verify;
+    m_impl->dist_fp32_state = 0;
+    m_impl->dist_fp64_state = 0;
+    m_impl->dist_failed = false;
+    m_impl->dist_solves = 0;
+    m_impl->dist_status.clear();
+}
+
+void XtbGpuContext::setDensityDevices(const std::vector<int>& devices, int min_nao)
+{
+    if (!m_impl) return;
+    bindDevice();
+    m_impl->releaseDensityHelpers();
+    m_impl->dens_devices.clear();
+    m_impl->dens_failed = false;
+    m_impl->dens_steps = 0;
+    m_impl->dens_min_nao = std::max(0, min_nao);
+    int count = 0;
+    cudaGetDeviceCount(&count);
+    for (int d : devices) {
+        if (d < 0) {   // "all"
+            m_impl->dens_devices.clear();
+            for (int i = 0; i < count; ++i)
+                if (i != m_impl->device) m_impl->dens_devices.push_back(i);
+            return;
+        }
+        if (d >= 0 && d < count && d != m_impl->device
+            && std::find(m_impl->dens_devices.begin(), m_impl->dens_devices.end(), d)
+                   == m_impl->dens_devices.end())
+            m_impl->dens_devices.push_back(d);
+    }
+}
+
+std::string XtbGpuContext::densityDevicesStatus() const
+{
+    if (!m_impl || m_impl->dens_devices.empty()) return {};
+    if (m_impl->dens_steps == 0 && !m_impl->dens_failed)
+        return "not used (" + (m_impl->dens_skip_reason.empty()
+            ? std::string("never reached: only the GFN2 resident SCF loop splits the density, GFN1 has no such path")
+            : m_impl->dens_skip_reason) + ")";
+    if (m_impl->dens_failed)
+        return "failed (" + m_impl->dens_error + "); single-device density from here on";
+    std::string list = std::to_string(m_impl->device);
+    for (int d : m_impl->dens_devices) list += "," + std::to_string(d);
+    return "pattern density on devices [" + list + "], " + std::to_string(m_impl->dens_steps) + " steps";
+}
+
+std::string XtbGpuContext::distributedEigensolverDegradation() const
+{
+    return m_impl ? m_impl->dist_degrade : std::string();
+}
+
+std::string XtbGpuContext::distributedEigensolverStatus() const
+{
+    if (!m_impl || m_impl->dist_devices.size() < 2) return {};
+    if (!m_impl->dist_status.empty()) return m_impl->dist_status;
+    if (!m_impl->dist)
+        return "not used (nao below gpu_eigensolver_min_nao = " + std::to_string(m_impl->dist_min_nao) + ")";
+    return std::string(m_impl->dist->name()) + " on " + std::to_string(m_impl->dist->deviceCount())
+        + " GPUs, " + std::to_string(m_impl->dist_solves) + " solves"
+        + (m_impl->dist_verify ? " (each verified)" : " (verification off)")
+        + (m_impl->dist_potrf > 0 ? ", " + std::to_string(m_impl->dist_potrf) + " Cholesky factorisation(s) of S (checked)"
+                                  : std::string())
+        + (m_impl->dist_potrf_status.empty() ? std::string() : "; " + m_impl->dist_potrf_status);
+}
+
+void XtbGpuContext::setMemoryCheck(bool on)
+{
+    if (m_impl) m_impl->memory_check = on;
+}
+
+std::string XtbGpuContext::lastError() const
+{
+    return m_impl ? m_impl->last_error : std::string();
+}
+
 bool XtbGpuContext::beginBasis(const XtbGpuBasisData& b)
 {
     if (!ok() || b.nat <= 0 || b.nsh <= 0 || b.nao <= 0 || b.nprim_total <= 0
@@ -2005,6 +4498,13 @@ bool XtbGpuContext::beginBasis(const XtbGpuBasisData& b)
         || !b.sh_nprim || !b.sh_prim_off || !b.prim_alpha || !b.prim_coeff
         || !b.sh_zeta || !b.selfenergy || !b.kcn || !b.shpoly)
         return false;
+    m_impl->last_error.clear();
+
+    // A new basis size invalidates every large buffer (and the memory check, which now runs
+    // in computeIntegrals once the geometry - hence the screened pair count - is known).
+    if (b.nao != m_impl->basis_nao)
+        m_impl->releaseLarge();
+
     ensureStage3Constants();
     try {
         // Molecule-constant uploads (synchronous memcpy inside CudaBuffer::upload).
@@ -2037,37 +4537,235 @@ bool XtbGpuContext::beginBasis(const XtbGpuBasisData& b)
         m_impl->dSE.ensure(b.nsh);
         m_impl->dXyz.ensure(3 * b.nat);
         m_impl->dGamma.ensure(b.nsh * b.nsh);
-        const size_t nn = static_cast<size_t>(b.nao) * static_cast<size_t>(b.nao);
-        m_impl->dS.ensure(static_cast<int>(nn));
-        m_impl->dH0.ensure(static_cast<int>(nn));
-        m_impl->dL.ensure(static_cast<int>(nn));
         // AO→atom / AO→shell maps (used by the multipole integrals and the
         // overlap-derivative kernel; cheap, uploaded for both methods).
         if (b.ao2at) m_impl->dAo2at.upload(b.ao2at, b.nao, m_impl->stream);
         if (b.ao2sh) m_impl->dAo2sh.upload(b.ao2sh, b.nao, m_impl->stream);
-        // GFN2: the resident multipole integral buffers (computed by
-        // computeIntegrals; no upload). dp_int 3·nn, qp_int 6·nn col-major.
-        if (b.is_gfn2) {
-            m_impl->dDpInt.ensure(static_cast<int>(3 * nn));
-            m_impl->dQpInt.ensure(static_cast<int>(6 * nn));
-        }
-        // Device Cholesky workspace (size is geometry-constant for fixed nao).
-        int lwork = 0;
-        if (cusolverDnDpotrf_bufferSize(m_impl->cusolver, CUBLAS_FILL_MODE_LOWER,
-                                        b.nao, m_impl->dL.ptr, b.nao, &lwork)
-            != CUSOLVER_STATUS_SUCCESS)
-            return false;
-        m_impl->potrf_lwork = lwork;
-        m_impl->dPotrfWork.ensure(lwork > 0 ? lwork : 1);
         if (m_impl->dInfo.n < 1) m_impl->dInfo.alloc(1);
-    } catch (...) {
+        // The nao²-sized integral storage (dense S/H0/L/dp/qp or the screened pair arrays)
+        // is allocated by computeIntegrals, which knows the geometry.
+    } catch (const std::exception& e) {
+        m_impl->last_error = std::string("device allocation failed: ") + e.what();
+        m_impl->releaseLarge();
         return false;
     }
+    // Claude Generated (Sep 2026): per-atom screening data for the sparse integral storage.
+    // amin = smallest primitive exponent on the atom, cmax = largest |contraction coefficient|;
+    // together they bound every integral between two atoms (see screenRadius). The AOs of an
+    // atom must form one contiguous, ascending block (the pair layout relies on it).
+    m_impl->h_z.assign(b.z, b.z + b.nat);
+    m_impl->h_at_amin.assign(b.nat, 1.0e300);
+    m_impl->h_at_cmax.assign(b.nat, 0.0);
+    for (int ish = 0; ish < b.nsh; ++ish) {
+        const int at = b.sh2at[ish];
+        for (int p = 0; p < b.sh_nprim[ish]; ++p) {
+            const int ip = b.sh_prim_off[ish] + p;
+            m_impl->h_at_amin[at] = std::min(m_impl->h_at_amin[at], b.prim_alpha[ip]);
+            m_impl->h_at_cmax[at] = std::max(m_impl->h_at_cmax[at], std::fabs(b.prim_coeff[ip]));
+        }
+    }
+    m_impl->h_at_ao0.assign(b.nat, -1);
+    m_impl->h_at_nao.assign(b.nat, 0);
+    m_impl->h_ao_contiguous = (b.ao2at != nullptr);
+    if (b.ao2at) {
+        for (int mu = 0; mu < b.nao; ++mu) {
+            const int at = b.ao2at[mu];
+            if (mu > 0 && at < b.ao2at[mu - 1]) { m_impl->h_ao_contiguous = false; break; }
+            if (m_impl->h_at_ao0[at] < 0) m_impl->h_at_ao0[at] = mu;
+            ++m_impl->h_at_nao[at];
+        }
+    }
+
     m_impl->basis_nat     = b.nat;
     m_impl->basis_nsh     = b.nsh;
     m_impl->basis_nao     = b.nao;
     m_impl->basis_is_gfn2 = b.is_gfn2;
     return cudaStreamSynchronize(m_impl->stream) == cudaSuccess;
+}
+
+namespace {
+
+// Radius (Bohr) beyond which every overlap-type integral between two atoms with smallest
+// primitive exponents a1/a2 and largest contraction coefficients c1/c2 is below eps.
+// A primitive product decays as c1 c2 (pi/g)^1.5 exp(-a1 a2/g R^2), g = a1 + a2; the angular
+// and multipole factors add at most a polynomial in R, bounded here by (1 + R)^6, and the
+// origin shift of the multipole integrals multiplies by up to (1 + |r|max)^2. The bound is
+// deliberately loose: a larger radius costs memory, never accuracy. Claude Generated.
+double screenRadius(double a1, double c1, double a2, double c2, double rabs, double eps)
+{
+    const double g = a1 + a2;
+    const double mu = a1 * a2 / g;
+    const double logc = std::log(c1 * c2 * std::pow(M_PI / g, 1.5) + 1.0e-300)
+        + 2.0 * std::log1p(rabs);
+    const double target = std::log(eps);
+    auto significant = [&](double R) { return logc + 6.0 * std::log1p(R) - mu * R * R > target; };
+    double lo = 0.0, hi = 8.0;
+    while (significant(hi) && hi < 1.0e6) hi *= 2.0;
+    for (int it = 0; it < 80; ++it) {
+        const double mid = 0.5 * (lo + hi);
+        (significant(mid) ? lo : hi) = mid;
+    }
+    return hi;
+}
+
+} // namespace
+
+bool XtbGpuContext::buildScreenedPairs(const double* xyz_bohr, bool& use_sparse)
+{
+    use_sparse = false;
+    Impl& I = *m_impl;
+    const int nat = I.basis_nat, nao = I.basis_nao;
+    I.sp_fraction = 1.0;
+    I.screen_nk = 0;
+    if (I.sparse_mode == 0 || !I.h_ao_contiguous || nat <= 0) return true;
+
+    // Element-pair cutoffs (atoms of one element share amin/cmax).
+    double rabs = 0.0;
+    for (int a = 0; a < 3 * nat; ++a) rabs = std::max(rabs, std::fabs(xyz_bohr[a]));
+    std::map<int, int> kind_of_z;
+    std::vector<int> kind(nat);
+    std::vector<double> k_amin, k_cmax;
+    for (int a = 0; a < nat; ++a) {
+        auto it = kind_of_z.find(I.h_z[a]);
+        if (it == kind_of_z.end()) {
+            it = kind_of_z.emplace(I.h_z[a], static_cast<int>(k_amin.size())).first;
+            k_amin.push_back(I.h_at_amin[a]);
+            k_cmax.push_back(I.h_at_cmax[a]);
+        }
+        kind[a] = it->second;
+    }
+    const int nk = static_cast<int>(k_amin.size());
+    std::vector<double> cut2(static_cast<size_t>(nk) * nk);
+    I.sp_rmax = 0.0;
+    for (int i = 0; i < nk; ++i)
+        for (int j = 0; j < nk; ++j) {
+            const double r = screenRadius(k_amin[i], k_cmax[i], k_amin[j], k_cmax[j], rabs, I.sparse_eps);
+            cut2[static_cast<size_t>(i) * nk + j] = r * r;
+            I.sp_rmax = std::max(I.sp_rmax, r);
+        }
+
+    // Neighbour atoms per atom (symmetric by construction), ascending.
+    const unsigned hw = std::max(1u, std::min(std::thread::hardware_concurrency(), 32u));
+    std::vector<std::vector<int>> nb(nat);
+    {
+        std::vector<std::thread> pool;
+        for (unsigned t = 0; t < hw; ++t)
+            pool.emplace_back([&, t]() {
+                for (int b = static_cast<int>(t); b < nat; b += static_cast<int>(hw)) {
+                    const double xb = xyz_bohr[3*b], yb = xyz_bohr[3*b+1], zb = xyz_bohr[3*b+2];
+                    for (int a = 0; a < nat; ++a) {
+                        const double dx = xyz_bohr[3*a] - xb, dy = xyz_bohr[3*a+1] - yb, dz = xyz_bohr[3*a+2] - zb;
+                        if (dx*dx + dy*dy + dz*dz < cut2[static_cast<size_t>(kind[a]) * nk + kind[b]])
+                            nb[b].push_back(a);
+                    }
+                }
+            });
+        for (auto& th : pool) th.join();
+    }
+
+    // Column sizes -> nnz.
+    std::vector<long long> col_atom_nnz(nat, 0);
+    long long nnz = 0;
+    for (int b = 0; b < nat; ++b) {
+        for (int a : nb[b]) col_atom_nnz[b] += I.h_at_nao[a];
+        nnz += col_atom_nnz[b] * I.h_at_nao[b];
+    }
+    I.sp_fraction = static_cast<double>(nnz) / (static_cast<double>(nao) * nao);
+    const bool want = (I.sparse_mode == 2) || (I.sparse_mode == 1 && I.sp_fraction < 0.5);
+    // The device buffers are int-indexed; the quadrupole block is 6 * nnz.
+    if (!want || nnz <= 0 || nnz > INT_MAX / 6) return true;
+
+    // colptr per AO (column-major), then row/col/perm.
+    std::vector<int> colptr(nao + 1, 0);
+    {
+        // AOs are contiguous and ascending by atom, so the columns of atom b follow those of b-1.
+        long long acc = 0;
+        for (int b = 0; b < nat; ++b)
+            for (int k = 0; k < I.h_at_nao[b]; ++k) {
+                colptr[I.h_at_ao0[b] + k] = static_cast<int>(acc);
+                acc += col_atom_nnz[b];
+            }
+        colptr[nao] = static_cast<int>(acc);
+    }
+    // AO offset of each neighbour atom block inside a column of atom b.
+    std::vector<std::vector<int>> nb_off(nat);
+    for (int b = 0; b < nat; ++b) {
+        nb_off[b].resize(nb[b].size());
+        int off = 0;
+        for (size_t i = 0; i < nb[b].size(); ++i) { nb_off[b][i] = off; off += I.h_at_nao[nb[b][i]]; }
+    }
+    I.h_sp_row.assign(static_cast<size_t>(nnz), 0);
+    I.h_sp_col.assign(static_cast<size_t>(nnz), 0);
+    std::vector<int> perm(static_cast<size_t>(nnz), 0);
+    // Point 2 (Claude Generated, Sep 2026): diag_idx[mu] = the pair-storage index e of the
+    // (mu,mu) entry, so the gradient's CN-onsite kernel can read P(mu,mu) straight out of the
+    // pattern-only dSpP instead of needing a dense nao x nao buffer. The diagonal AO block is
+    // always in the pattern (an atom is its own neighbour, cut2[same-kind] > 0), and the loop
+    // below already visits it - when the neighbour atom a equals the column atom b, r==k is
+    // exactly mu==nu. Captured in the SAME pass, no extra scan.
+    std::vector<int> diag_idx(nao, -1);
+    {
+        std::vector<std::thread> pool;
+        for (unsigned t = 0; t < hw; ++t)
+            pool.emplace_back([&, t]() {
+                for (int b = static_cast<int>(t); b < nat; b += static_cast<int>(hw)) {
+                    for (int k = 0; k < I.h_at_nao[b]; ++k) {
+                        const int nu = I.h_at_ao0[b] + k;      // column AO (atom b)
+                        long long e = colptr[nu];
+                        for (size_t ia = 0; ia < nb[b].size(); ++ia) {
+                            const int a = nb[b][ia];
+                            // position of atom b inside the neighbour list of atom a
+                            const auto& la = nb[a];
+                            const size_t pos = static_cast<size_t>(std::lower_bound(la.begin(), la.end(), b) - la.begin());
+                            const int boff = nb_off[a][pos];
+                            for (int r = 0; r < I.h_at_nao[a]; ++r, ++e) {
+                                const int mu = I.h_at_ao0[a] + r;   // row AO (atom a)
+                                I.h_sp_row[e] = mu;
+                                I.h_sp_col[e] = nu;
+                                // transpose (nu, mu): column mu (atom a), row nu (atom b)
+                                perm[e] = colptr[mu] + boff + k;
+                                if (a == b && r == k) diag_idx[nu] = static_cast<int>(e);
+                            }
+                        }
+                    }
+                }
+            });
+        for (auto& th : pool) th.join();
+    }
+
+    try {
+        I.dSpRow.upload(I.h_sp_row.data(), static_cast<int>(nnz), I.stream);
+        I.dSpCol.upload(I.h_sp_col.data(), static_cast<int>(nnz), I.stream);
+        I.dSpPerm.upload(perm.data(), static_cast<int>(nnz), I.stream);
+        I.dSpColPtr.upload(colptr.data(), nao + 1, I.stream);
+        I.dSpDiagIdx.upload(diag_idx.data(), nao, I.stream);
+    } catch (const std::exception& ex) {
+        I.last_error = std::string("screened pair upload failed: ") + ex.what();
+        return false;
+    }
+    I.sp_nnz = static_cast<int>(nnz);
+    ++I.pattern_generation;
+    use_sparse = true;
+    // Claude Generated (Sep 29, 2026): the same cutoff table for the dense S/H0 build. Widened by
+    // 1e-6 relative so a pair the host put into the pattern can never be skipped on the device
+    // because of a different rounding of the distance (FMA contraction); a borderline pair
+    // outside the pattern that is computed anyway only adds a value below sparse_eps to the
+    // dense S that is factorised. CURCUMA_GPU_FULL_DENSE_S=1 computes every pair (old path).
+    I.screen_nk = 0;
+    if (!std::getenv("CURCUMA_GPU_FULL_DENSE_S")) {
+        std::vector<double> cut2w(cut2.size());
+        for (size_t i = 0; i < cut2.size(); ++i) cut2w[i] = cut2[i] * (1.0 + 1.0e-6);
+        try {
+            I.dAtKind.upload(kind.data(), nat, I.stream);
+            I.dScreenCut2.upload(cut2w.data(), nk * nk, I.stream);
+            // upload() is asynchronous from pageable host memory; the vectors die on return.
+            if (cudaStreamSynchronize(I.stream) != cudaSuccess) return false;
+            I.screen_nk = nk;
+        } catch (const std::exception&) {
+            I.screen_nk = 0;   // unscreened dense build, same result
+        }
+    }
+    return true;
 }
 
 bool XtbGpuContext::computeCnSelfEnergy(const double* xyz_bohr)
@@ -2100,61 +4798,255 @@ bool XtbGpuContext::computeIntegrals(const double* xyz_bohr)
     const int nsh = m_impl->basis_nsh;
     const int nao = m_impl->basis_nao;
     cudaStream_t stream = m_impl->stream;
+    Impl& I = *m_impl;
+    const size_t nn = static_cast<size_t>(nao) * static_cast<size_t>(nao);
+
+    // Claude Generated (Sep 2026): choose the storage for this geometry (dense nao^2 or the
+    // screened pair list), check that it fits, then allocate. The check runs once per basis
+    // and whenever the storage kind changes; later geometries of the same molecule reuse the
+    // buffers they already hold (the free-memory figure no longer contains them).
+    const bool was_sparse = I.sparse;
+    const bool had_storage = !I.dL.empty();
+    bool use_sparse = false;
+    if (!buildScreenedPairs(xyz_bohr, use_sparse)) return false;
+    if (I.memory_check && (!had_storage || use_sparse != was_sparse)) {
+        const double nnz = use_sparse ? static_cast<double>(I.sp_nnz) : 0.0;
+        if (had_storage) { I.releaseLarge(); I.basis_nao = nao; }
+        const size_t need = estimateStorageBytes(nat, nsh, nao, I.basis_is_gfn2 != 0, nnz);
+        size_t free_b = 0, total_b = 0;
+        if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess && need > free_b) {
+            char msg[400];
+            std::snprintf(msg, sizeof(msg),
+                          "needs about %.1f GB of device memory for nao=%d, nat=%d (%s storage, "
+                          "%.1f %% of AO pairs), but only %.1f of %.1f GB are free on device %d",
+                          need / 1073741824.0, nao, nat, use_sparse ? "screened" : "dense",
+                          100.0 * I.sp_fraction, free_b / 1073741824.0, total_b / 1073741824.0, I.device);
+            I.last_error = msg;
+            I.releaseLarge();
+            I.basis_nao = nao;
+            return false;
+        }
+        if (had_storage) {
+            // releaseLarge dropped the pair arrays built above; rebuild them.
+            if (!buildScreenedPairs(xyz_bohr, use_sparse)) return false;
+        }
+    }
+    try {
+        I.dL.ensure(static_cast<int>(nn));
+        if (use_sparse) {
+            // Dense S is built straight into dL (then factorised in place) and dense H0 into
+            // dC, which the SCF reuses for the Fock matrix: no extra nao^2 buffer.
+            for (CudaBuffer<double>* buf : { &I.dS, &I.dH0, &I.dDpInt, &I.dQpInt }) buf->free();
+            I.dC.ensure(static_cast<int>(nn));
+            I.dSpS.ensure(I.sp_nnz);
+            I.dSpH0.ensure(I.sp_nnz);
+            I.dSpTmp.ensure(I.sp_nnz);
+            if (I.basis_is_gfn2) {
+                I.dSpDp.ensure(3 * I.sp_nnz);
+                I.dSpQp.ensure(6 * I.sp_nnz);
+            }
+        } else {
+            for (CudaBuffer<double>* buf : { &I.dSpS, &I.dSpH0, &I.dSpTmp, &I.dSpDp, &I.dSpQp }) buf->free();
+            for (CudaBuffer<int>* buf : { &I.dSpRow, &I.dSpCol, &I.dSpColPtr, &I.dSpPerm }) buf->free();
+            I.h_sp_row.clear(); I.h_sp_col.clear();
+            I.dS.ensure(static_cast<int>(nn));
+            I.dH0.ensure(static_cast<int>(nn));
+            if (I.basis_is_gfn2) {
+                I.dDpInt.ensure(static_cast<int>(3 * nn));
+                I.dQpInt.ensure(static_cast<int>(6 * nn));
+            }
+        }
+        int lwork = 0;
+        if (cusolverDnDpotrf_bufferSize(I.cusolver, CUBLAS_FILL_MODE_LOWER, nao, I.dL.ptr, nao, &lwork)
+            != CUSOLVER_STATUS_SUCCESS)
+            return false;
+        I.potrf_lwork = lwork;
+        I.dPotrfWork.ensure(lwork > 0 ? lwork : 1);
+    } catch (const std::exception& ex) {
+        I.last_error = std::string("device allocation failed: ") + ex.what();
+        I.releaseLarge();
+        I.basis_nao = nao;
+        return false;
+    }
+    I.sparse = use_sparse;
 
     // CN + self-energies (uploads xyz, runs k_cn + k_self_energy, syncs).
+    I.profStart();
     if (!computeCnSelfEnergy(xyz_bohr)) return false;
+    I.profMark("integrals: CN + self-energies");
 
-    // Overlap S + bare Hamiltonian H0 (one thread per shell-pair).
+    // Overlap S + bare Hamiltonian H0 (one thread per shell-pair), dense.
+    const double* S_dense_dst = use_sparse ? I.dL.ptr : I.dS.ptr;
+    const double* H_dense_dst = use_sparse ? I.dC.ptr : I.dH0.ptr;
     const dim3 block(16, 16);
     const dim3 grid((nsh + block.x - 1) / block.x, (nsh + block.y - 1) / block.y);
+    const int screen_nk = use_sparse ? I.screen_nk : 0;
+    if (screen_nk > 0
+        && (cudaMemsetAsync(const_cast<double*>(S_dense_dst), 0, sizeof(double) * nn, stream) != cudaSuccess
+            || cudaMemsetAsync(const_cast<double*>(H_dense_dst), 0, sizeof(double) * nn, stream) != cudaSuccess))
+        return false;
     k_overlap_h0<<<grid, block, 0, stream>>>(
-        nsh, nao, m_impl->basis_is_gfn2,
-        m_impl->dSh2at.ptr, m_impl->dAng.ptr, m_impl->dIaoSh.ptr, m_impl->dNaoSh.ptr,
-        m_impl->dShNprim.ptr, m_impl->dShPrimOff.ptr, m_impl->dPrimAlpha.ptr,
-        m_impl->dPrimCoeff.ptr, m_impl->dShZeta.ptr, m_impl->dShpoly.ptr,
-        m_impl->dSE.ptr, m_impl->dZ.ptr, m_impl->dValence.ptr, m_impl->dXyz.ptr,
-        m_impl->dS.ptr, m_impl->dH0.ptr);
+        nsh, nao, I.basis_is_gfn2,
+        I.dSh2at.ptr, I.dAng.ptr, I.dIaoSh.ptr, I.dNaoSh.ptr,
+        I.dShNprim.ptr, I.dShPrimOff.ptr, I.dPrimAlpha.ptr,
+        I.dPrimCoeff.ptr, I.dShZeta.ptr, I.dShpoly.ptr,
+        I.dSE.ptr, I.dZ.ptr, I.dValence.ptr, I.dXyz.ptr,
+        const_cast<double*>(S_dense_dst), const_cast<double*>(H_dense_dst),
+        screen_nk > 0 ? I.dAtKind.ptr : nullptr, screen_nk > 0 ? I.dScreenCut2.ptr : nullptr, screen_nk);
     if (cudaGetLastError() != cudaSuccess) return false;
+    if (use_sparse) {
+        const int b1 = 256;
+        const int g1 = (I.sp_nnz + b1 - 1) / b1;
+        k_sp_gather<<<g1, b1, 0, stream>>>(I.dL.ptr, I.dSpRow.ptr, I.dSpCol.ptr, nao, I.sp_nnz, I.dSpS.ptr);
+        k_sp_gather<<<g1, b1, 0, stream>>>(I.dC.ptr, I.dSpRow.ptr, I.dSpCol.ptr, nao, I.sp_nnz, I.dSpH0.ptr);
+        if (cudaGetLastError() != cudaSuccess) return false;
+    }
+    I.profMark("integrals: overlap + H0");
 
     // Coulomb γ matrix (independent of S; one thread per shell-pair).
-    if (!m_impl->dHardness.empty()) {
+    if (!I.dHardness.empty()) {
         const dim3 gblock(16, 16);
         const dim3 ggrid((nsh + gblock.x - 1) / gblock.x, (nsh + gblock.y - 1) / gblock.y);
-        k_gamma<<<ggrid, gblock, 0, stream>>>(nsh, m_impl->basis_is_gfn2, m_impl->dSh2at.ptr,
-                                              m_impl->dHardness.ptr, m_impl->dXyz.ptr,
-                                              m_impl->dGamma.ptr);
+        k_gamma<<<ggrid, gblock, 0, stream>>>(nsh, I.basis_is_gfn2, I.dSh2at.ptr,
+                                              I.dHardness.ptr, I.dXyz.ptr, I.dGamma.ptr);
         if (cudaGetLastError() != cudaSuccess) return false;
     }
 
-    // GFN2 multipole integrals (dp_int/qp_int), one thread per AO pair. Needs the
-    // resident overlap S for the origin shift, so it runs after k_overlap_h0.
-    if (m_impl->basis_is_gfn2 && !m_impl->dDpInt.empty()) {
-        const dim3 mblock(16, 16);
-        const dim3 mgrid((nao + mblock.x - 1) / mblock.x, (nao + mblock.y - 1) / mblock.y);
-        k_multipole_ints<<<mgrid, mblock, 0, stream>>>(
-            nao, m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr, m_impl->dIaoSh.ptr, m_impl->dAng.ptr,
-            m_impl->dShNprim.ptr, m_impl->dShPrimOff.ptr, m_impl->dPrimAlpha.ptr,
-            m_impl->dPrimCoeff.ptr, m_impl->dXyz.ptr, m_impl->dS.ptr,
-            m_impl->dDpInt.ptr, m_impl->dQpInt.ptr);
-        if (cudaGetLastError() != cudaSuccess) return false;
+    // GFN2 multipole integrals (dp_int/qp_int); need S for the origin shift.
+    if (I.basis_is_gfn2) {
+        if (use_sparse) {
+            const int b1 = 256;
+            k_multipole_ints_sp<<<(I.sp_nnz + b1 - 1) / b1, b1, 0, stream>>>(
+                I.sp_nnz, I.dSpRow.ptr, I.dSpCol.ptr, I.dAo2sh.ptr, I.dAo2at.ptr, I.dIaoSh.ptr, I.dAng.ptr,
+                I.dShNprim.ptr, I.dShPrimOff.ptr, I.dPrimAlpha.ptr, I.dPrimCoeff.ptr, I.dXyz.ptr,
+                I.dSpS.ptr, I.dSpDp.ptr, I.dSpQp.ptr);
+            if (cudaGetLastError() != cudaSuccess) return false;
+        } else if (!I.dDpInt.empty()) {
+            const dim3 mblock(16, 16);
+            const dim3 mgrid((nao + mblock.x - 1) / mblock.x, (nao + mblock.y - 1) / mblock.y);
+            k_multipole_ints<<<mgrid, mblock, 0, stream>>>(
+                nao, I.dAo2sh.ptr, I.dAo2at.ptr, I.dIaoSh.ptr, I.dAng.ptr,
+                I.dShNprim.ptr, I.dShPrimOff.ptr, I.dPrimAlpha.ptr,
+                I.dPrimCoeff.ptr, I.dXyz.ptr, I.dS.ptr,
+                I.dDpInt.ptr, I.dQpInt.ptr);
+            if (cudaGetLastError() != cudaSuccess) return false;
+        }
     }
+    I.profMark("integrals: gamma + multipole");
 
-    // L = chol(S): copy S → L, factor the lower triangle in place (matches the
-    // CPU Eigen matrixL() convention; the trsm path reads fill=LOWER only).
-    const size_t nn = static_cast<size_t>(nao) * static_cast<size_t>(nao);
-    if (cudaMemcpyAsync(m_impl->dL.ptr, m_impl->dS.ptr, sizeof(double) * nn,
-                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
-        return false;
-    if (cusolverDnDpotrf(m_impl->cusolver, CUBLAS_FILL_MODE_LOWER, nao,
-                         m_impl->dL.ptr, nao, m_impl->dPotrfWork.ptr,
-                         m_impl->potrf_lwork, m_impl->dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
-        return false;
+    // L = chol(S): factor the lower triangle in place (matches the CPU Eigen matrixL()
+    // convention; the trsm path reads fill=LOWER only). Dense storage copies S -> L first.
+    if (!use_sparse) {
+        if (cudaMemcpyAsync(I.dL.ptr, I.dS.ptr, sizeof(double) * nn,
+                            cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+            return false;
+    }
+    const int dist_chol = I.distCholesky(nao);
+    if (dist_chol < 0) return false;
     int info = 1;
-    if (cudaMemcpyAsync(&info, m_impl->dInfo.ptr, sizeof(int),
-                        cudaMemcpyDeviceToHost, stream) != cudaSuccess)
-        return false;
-    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    if (dist_chol == 1) {
+        info = 0;
+        I.profMark("integrals: Cholesky of S (multi-GPU)");
+    } else {
+        if (cusolverDnDpotrf(I.cusolver, CUBLAS_FILL_MODE_LOWER, nao,
+                             I.dL.ptr, nao, I.dPotrfWork.ptr,
+                             I.potrf_lwork, I.dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
+            return false;
+        if (cudaMemcpyAsync(&info, I.dInfo.ptr, sizeof(int),
+                            cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+            return false;
+        if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+        I.profMark("integrals: Cholesky of S");
+    }
+    ++I.l_generation;
+    (void)nat;
     return info == 0;
+}
+
+// ---- Storage-independent SCF building blocks (Claude Generated, Sep 2026) ----------------
+// Each dispatches to the dense nao^2 kernel or its screened-pair twin; the arithmetic per
+// matrix element is the same in both.
+
+bool XtbGpuContext::buildFockIntoC(int n, bool multipole)
+{
+    Impl& I = *m_impl;
+    cudaStream_t stream = I.stream;
+    if (I.sparse) {
+        const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
+        if (cudaMemsetAsync(I.dC.ptr, 0, sizeof(double) * nn, stream) != cudaSuccess) return false;
+        const bool mp = multipole && !I.dSpDp.empty();
+        const int bs = 256;
+        k_build_fock_sp<<<(I.sp_nnz + bs - 1) / bs, bs, 0, stream>>>(
+            I.dC.ptr, n, I.sp_nnz, I.dSpRow.ptr, I.dSpCol.ptr, I.dSpPerm.ptr,
+            I.dSpH0.ptr, I.dSpS.ptr, I.dVao.ptr,
+            mp ? I.dSpDp.ptr : nullptr, mp ? I.dSpQp.ptr : nullptr,
+            mp ? I.dVdp.ptr : nullptr, mp ? I.dVqp.ptr : nullptr, I.dAo2at.ptr);
+        return cudaGetLastError() == cudaSuccess;
+    }
+    const dim3 block(16, 16);
+    const dim3 grid((n + block.x - 1) / block.x, (n + block.y - 1) / block.y);
+    k_build_fock_iso<<<grid, block, 0, stream>>>(I.dC.ptr, I.dH0.ptr, I.dS.ptr, I.dVao.ptr, n);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    if (multipole) {
+        k_add_fock_multipole<<<grid, block, 0, stream>>>(I.dC.ptr, I.dDpInt.ptr, I.dQpInt.ptr,
+                                                         I.dVdp.ptr, I.dVqp.ptr, I.dAo2at.ptr, n);
+        if (cudaGetLastError() != cudaSuccess) return false;
+    }
+    return true;
+}
+
+bool XtbGpuContext::populationsAndBand(int n, double* band_out)
+{
+    Impl& I = *m_impl;
+    cudaStream_t stream = I.stream;
+    const int b1 = 128;
+    if (I.sparse && !I.p_dense_valid) {
+        k_pop_ao_spP<<<(n + b1 - 1) / b1, b1, 0, stream>>>(I.dPop.ptr, I.dSpP.ptr, I.dSpS.ptr,
+                                                           I.dSpColPtr.ptr, I.dSpPerm.ptr, n);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        return cublasDdot(I.cublas, I.sp_nnz, I.dSpP.ptr, 1, I.dSpH0.ptr, 1, band_out)
+            == CUBLAS_STATUS_SUCCESS;
+    }
+    if (I.sparse) {
+        k_pop_ao_sp<<<(n + b1 - 1) / b1, b1, 0, stream>>>(I.dPop.ptr, I.dP.ptr, I.dSpS.ptr,
+                                                          I.dSpRow.ptr, I.dSpColPtr.ptr, I.dSpPerm.ptr, n);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        // Band energy over the stored pairs: gather P, then dot with H0.
+        const int bs = 256;
+        k_sp_gather<<<(I.sp_nnz + bs - 1) / bs, bs, 0, stream>>>(I.dP.ptr, I.dSpRow.ptr, I.dSpCol.ptr,
+                                                                 n, I.sp_nnz, I.dSpTmp.ptr);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        return cublasDdot(I.cublas, I.sp_nnz, I.dSpTmp.ptr, 1, I.dSpH0.ptr, 1, band_out)
+            == CUBLAS_STATUS_SUCCESS;
+    }
+    k_pop_ao<<<(n + b1 - 1) / b1, b1, 0, stream>>>(I.dPop.ptr, I.dP.ptr, I.dS.ptr, n);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
+    return cublasDdot(I.cublas, static_cast<int>(nn), I.dP.ptr, 1, I.dH0.ptr, 1, band_out)
+        == CUBLAS_STATUS_SUCCESS;
+}
+
+bool XtbGpuContext::multipoleMomentsResident(int n, int nat)
+{
+    Impl& I = *m_impl;
+    cudaStream_t stream = I.stream;
+    // Accumulator-scatter kernels need zeroed targets.
+    if (cudaMemsetAsync(I.dDpAt.ptr, 0, sizeof(double) * 3 * nat, stream) != cudaSuccess) return false;
+    if (cudaMemsetAsync(I.dQpAt.ptr, 0, sizeof(double) * 6 * nat, stream) != cudaSuccess) return false;
+    const int b1 = 128;
+    if (I.sparse && !I.p_dense_valid) {
+        k_multipole_moments_spP<<<(n + b1 - 1) / b1, b1, 0, stream>>>(
+            I.dDpAt.ptr, I.dQpAt.ptr, I.dSpP.ptr, I.dSpDp.ptr, I.dSpQp.ptr,
+            I.dSpColPtr.ptr, I.dAo2at.ptr, n, I.sp_nnz);
+    } else if (I.sparse) {
+        k_multipole_moments_sp<<<(n + b1 - 1) / b1, b1, 0, stream>>>(
+            I.dDpAt.ptr, I.dQpAt.ptr, I.dP.ptr, I.dSpDp.ptr, I.dSpQp.ptr,
+            I.dSpRow.ptr, I.dSpColPtr.ptr, I.dAo2at.ptr, n, I.sp_nnz);
+    } else {
+        k_multipole_moments<<<(n + b1 - 1) / b1, b1, 0, stream>>>(
+            I.dDpAt.ptr, I.dQpAt.ptr, I.dP.ptr, I.dDpInt.ptr, I.dQpInt.ptr, I.dAo2at.ptr, n);
+    }
+    return cudaGetLastError() == cudaSuccess;
 }
 
 bool XtbGpuContext::residentBeginComputed()
@@ -2166,22 +5058,21 @@ bool XtbGpuContext::residentBeginComputed()
         // dH0/dS/dL already hold the device-computed integrals (computeIntegrals).
         // Allocate the resident SCF work buffers, like residentBegin but without
         // uploading any matrix. ensure() reuses the allocation across MD/opt steps.
+        // Claude Generated (Sep 2026): Cw (n x ncol) and the FP64/FP32 eigensolver workspaces
+        // are allocated on first use by the density build and eigensolveResidentFock, which
+        // keep only one precision's workspace at a time.
         m_impl->dC.ensure(static_cast<int>(nn));
-        m_impl->dP.ensure(static_cast<int>(nn));
-        m_impl->dCw.ensure(static_cast<int>(nn));
+        // Screened storage keeps P on the pattern during the loop; dense P only on demand.
+        if (!m_impl->sparse) m_impl->dP.ensure(static_cast<int>(nn));
+        else m_impl->dP.free();
         m_impl->dEps.ensure(n);
         m_impl->dVao.ensure(n);
         m_impl->dOcc.ensure(n);
         m_impl->dPop.ensure(n);
-        int lwork = 0;
-        if (cusolverDnDsyevd_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR,
-                                        CUBLAS_FILL_MODE_LOWER, n, m_impl->dC.ptr, n,
-                                        m_impl->dEps.ptr, &lwork) != CUSOLVER_STATUS_SUCCESS)
-            return false;
-        m_impl->lwork = lwork;
-        m_impl->dWork.ensure(lwork > 0 ? lwork : 1);
         if (m_impl->dInfo.n < 1) m_impl->dInfo.alloc(1);
-    } catch (...) {
+    } catch (const std::exception& e) {
+        m_impl->last_error = std::string("device allocation failed: ") + e.what();
+        m_impl->releaseLarge();
         return false;
     }
     m_impl->resident_n = n;
@@ -2202,9 +5093,45 @@ bool XtbGpuContext::downloadSelfEnergy(double* se_out)
     return cudaStreamSynchronize(m_impl->stream) == cudaSuccess;
 }
 
+// Screened storage: scatter the stored pairs into a zeroed host dense matrix (the host keeps
+// dense S/H0 for properties and the CPU fallback). Claude Generated (Sep 2026).
+static bool scatterToHost(CudaBuffer<double>& values, const std::vector<int>& row,
+                          const std::vector<int>& col, int n, int ncomp, int nnz,
+                          double* out, cudaStream_t stream)
+{
+    const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
+    std::vector<double> v(static_cast<size_t>(ncomp) * nnz);
+    values.download(v.data(), ncomp * nnz, stream);
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    // Claude Generated (Sep 29, 2026): zero fill and scatter split over host threads. Every
+    // stored pair has its own target element, so the ranges never collide and the result is
+    // identical to the serial loop (polymer_2x: 313 ms per matrix serial).
+    const unsigned nt = std::max(1u, std::min(8u, std::thread::hardware_concurrency()));
+    auto parallel = [nt](size_t count, const auto& body) {
+        std::vector<std::thread> pool;
+        for (unsigned t = 0; t < nt; ++t)
+            pool.emplace_back([&, t]() { body(count * t / nt, count * (t + 1) / nt); });
+        for (auto& th : pool) th.join();
+    };
+    parallel(static_cast<size_t>(ncomp) * nn,
+             [&](size_t a, size_t b) { std::fill(out + a, out + b, 0.0); });
+    for (int k = 0; k < ncomp; ++k) {
+        const double* src = v.data() + static_cast<size_t>(k) * nnz;
+        double* dst = out + static_cast<size_t>(k) * nn;
+        parallel(static_cast<size_t>(nnz), [&](size_t a, size_t b) {
+            for (size_t e = a; e < b; ++e)
+                dst[static_cast<size_t>(row[e]) + static_cast<size_t>(col[e]) * n] = src[e];
+        });
+    }
+    return true;
+}
+
 bool XtbGpuContext::downloadOverlap(double* S_out)
 {
     if (!ok() || m_impl->basis_nao <= 0 || !S_out) return false;
+    if (m_impl->sparse)
+        return scatterToHost(m_impl->dSpS, m_impl->h_sp_row, m_impl->h_sp_col, m_impl->basis_nao, 1,
+                             m_impl->sp_nnz, S_out, m_impl->stream);
     const size_t nn = static_cast<size_t>(m_impl->basis_nao) * m_impl->basis_nao;
     m_impl->dS.download(S_out, static_cast<int>(nn), m_impl->stream);
     return cudaStreamSynchronize(m_impl->stream) == cudaSuccess;
@@ -2213,6 +5140,9 @@ bool XtbGpuContext::downloadOverlap(double* S_out)
 bool XtbGpuContext::downloadH0(double* H0_out)
 {
     if (!ok() || m_impl->basis_nao <= 0 || !H0_out) return false;
+    if (m_impl->sparse)
+        return scatterToHost(m_impl->dSpH0, m_impl->h_sp_row, m_impl->h_sp_col, m_impl->basis_nao, 1,
+                             m_impl->sp_nnz, H0_out, m_impl->stream);
     const size_t nn = static_cast<size_t>(m_impl->basis_nao) * m_impl->basis_nao;
     m_impl->dH0.download(H0_out, static_cast<int>(nn), m_impl->stream);
     return cudaStreamSynchronize(m_impl->stream) == cudaSuccess;
@@ -2236,8 +5166,16 @@ bool XtbGpuContext::downloadGamma(double* gamma_out)
 
 bool XtbGpuContext::downloadMultipoleInts(double* dp_int3, double* qp_int6)
 {
-    if (!ok() || m_impl->basis_nao <= 0 || m_impl->dDpInt.empty() || !dp_int3 || !qp_int6)
+    if (!ok() || m_impl->basis_nao <= 0 || !dp_int3 || !qp_int6)
         return false;
+    if (m_impl->sparse) {
+        if (m_impl->dSpDp.empty()) return false;
+        return scatterToHost(m_impl->dSpDp, m_impl->h_sp_row, m_impl->h_sp_col, m_impl->basis_nao, 3,
+                             m_impl->sp_nnz, dp_int3, m_impl->stream)
+            && scatterToHost(m_impl->dSpQp, m_impl->h_sp_row, m_impl->h_sp_col, m_impl->basis_nao, 6,
+                             m_impl->sp_nnz, qp_int6, m_impl->stream);
+    }
+    if (m_impl->dDpInt.empty()) return false;
     const size_t nn = static_cast<size_t>(m_impl->basis_nao) * m_impl->basis_nao;
     m_impl->dDpInt.download(dp_int3, static_cast<int>(3 * nn), m_impl->stream);
     m_impl->dQpInt.download(qp_int6, static_cast<int>(6 * nn), m_impl->stream);
@@ -2478,6 +5416,7 @@ bool XtbGpuContext::beginDispersion(int nat, const int* Z, const double* sqrtZr4
     m_impl->dD4Nref.upload(nref, nat, stream);
     m_impl->dD4Sqrt.upload(sqrtZr4r2, nat, stream);
     m_impl->dD4Xyz.upload(xyz_bohr, 3 * nat, stream);
+    m_impl->h_d4_xyz.assign(xyz_bohr, xyz_bohr + 3 * nat);
     // The reference C6 block is element data (geometry- AND molecule-independent):
     // upload it only once per process. ensure() keeps the allocation across steps.
     if (!m_impl->d4_c6_uploaded) {
@@ -2509,6 +5448,121 @@ bool XtbGpuContext::dispersionDedq(int nat, const double* W, const double* dWq, 
     if (cudaGetLastError() != cudaSuccess) return false;
     m_impl->dD4Dedq.download(dEdq_out, nat, stream);
     return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+// Claude Generated (Sep 2026): post-SCF D4 on the device (CUDA twins of the ROCm path). For a
+// 7k-atom GFN2 run the host ATM term alone was ~90 % of the 40 s post-SCF phase.
+bool XtbGpuContext::dispersionGradient(int nat, const double* W, const double* dWq, const double* dWc,
+                                       double* e_atom_out, double* grad_out,
+                                       double* dEdcn_out, double* dEdq_out)
+{
+    if (!ok() || nat <= 0 || nat != m_impl->d4_nat || !W || !dWq || !dWc || !e_atom_out
+        || !grad_out || !dEdcn_out || !dEdq_out || m_impl->dD4C6Flat.empty())
+        return false;
+    Impl& I = *m_impl;
+    cudaStream_t stream = I.stream;
+    const int wlen = nat * Impl::D4_MAX_REF;
+    try {
+        I.dD4dWc.ensure(wlen);
+        I.dD4Eat.ensure(nat);
+        I.dD4Grad.ensure(3 * nat);
+        I.dD4Dcn.ensure(nat);
+    } catch (...) {
+        return false;
+    }
+    I.dD4W.upload(W, wlen, stream);
+    I.dD4dWq.upload(dWq, wlen, stream);
+    I.dD4dWc.upload(dWc, wlen, stream);
+    const double cut2 = I.d4_cut * I.d4_cut;
+    const int b = 128;
+    k_d4_grad<<<(nat + b - 1) / b, b, 0, stream>>>(
+        nat, 118, Impl::D4_MAX_REF, I.dD4Z.ptr, I.dD4Nref.ptr, I.dD4Sqrt.ptr, I.dD4Xyz.ptr,
+        I.dD4C6Flat.ptr, I.dD4W.ptr, I.dD4dWq.ptr, I.dD4dWc.ptr,
+        I.d4_s6, I.d4_s8, I.d4_a1, I.d4_a2, cut2,
+        I.dD4Eat.ptr, I.dD4Grad.ptr, I.dD4Dcn.ptr, I.dD4Dedq.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    I.dD4Eat.download(e_atom_out, nat, stream);
+    I.dD4Grad.download(grad_out, 3 * nat, stream);
+    I.dD4Dcn.download(dEdcn_out, nat, stream);
+    I.dD4Dedq.download(dEdq_out, nat, stream);
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+bool XtbGpuContext::dispersionATM(int nat, const double* c6, const double* dc6dcn,
+                                  double s9, double a1, double a2, double alp, double cutoff,
+                                  double* e_atom_out, double* grad_out, double* dEdcn_out)
+{
+    Impl& I = *m_impl;
+    if (!ok() || nat <= 0 || nat != I.d4_nat || !c6 || !dc6dcn || !e_atom_out || !grad_out
+        || !dEdcn_out || static_cast<int>(I.h_d4_xyz.size()) != 3 * nat)
+        return false;
+    cudaStream_t stream = I.stream;
+    const double cut2 = cutoff * cutoff;
+
+    // Neighbour list (host, threaded): atoms within the cutoff, ascending, self excluded.
+    std::vector<std::vector<int>> nbl(nat);
+    {
+        const double* xyz = I.h_d4_xyz.data();
+        const unsigned hw = std::max(1u, std::min(std::thread::hardware_concurrency(), 32u));
+        std::vector<std::thread> pool;
+        for (unsigned t = 0; t < hw; ++t)
+            pool.emplace_back([&, t]() {
+                for (int a = static_cast<int>(t); a < nat; a += static_cast<int>(hw))
+                    for (int x = 0; x < nat; ++x) {
+                        if (x == a) continue;
+                        const double dx = xyz[3*x] - xyz[3*a], dy = xyz[3*x+1] - xyz[3*a+1], dz = xyz[3*x+2] - xyz[3*a+2];
+                        if (dx*dx + dy*dy + dz*dz <= cut2) nbl[a].push_back(x);
+                    }
+            });
+        for (auto& th : pool) th.join();
+    }
+    std::vector<int> nbptr(nat + 1, 0), nb;
+    size_t total = 0;
+    for (int a = 0; a < nat; ++a) total += nbl[a].size();
+    if (total > static_cast<size_t>(INT_MAX)) return false;
+    nb.reserve(total);
+    for (int a = 0; a < nat; ++a) {
+        nbptr[a] = static_cast<int>(nb.size());
+        nb.insert(nb.end(), nbl[a].begin(), nbl[a].end());
+    }
+    nbptr[nat] = static_cast<int>(nb.size());
+
+    const size_t nn = static_cast<size_t>(nat) * nat;
+    if (nn > static_cast<size_t>(INT_MAX)) return false;
+    try {
+        I.dD4AtmC6.ensure(static_cast<int>(nn));
+        I.dD4AtmDc6.ensure(static_cast<int>(nn));
+        I.dD4Eat.ensure(nat);
+        I.dD4Grad.ensure(3 * nat);
+        I.dD4Dcn.ensure(nat);
+        I.dD4NbPtr.upload(nbptr.data(), nat + 1, stream);
+        I.dD4Nb.upload(nb.empty() ? nbptr.data() : nb.data(), std::max<int>(1, static_cast<int>(nb.size())), stream);
+    } catch (...) {
+        return false;
+    }
+    I.dD4AtmC6.upload(c6, static_cast<int>(nn), stream);
+    I.dD4AtmDc6.upload(dc6dcn, static_cast<int>(nn), stream);
+    if (I.thread_per_atom) {
+        const int b = 64;
+        k_d4_atm_nl<<<(nat + b - 1) / b, b, 0, stream>>>(
+            nat, I.dD4Xyz.ptr, I.dD4Sqrt.ptr, I.dD4AtmC6.ptr, I.dD4AtmDc6.ptr, I.dD4NbPtr.ptr, I.dD4Nb.ptr,
+            s9, a1, a2, alp, cut2, I.dD4Eat.ptr, I.dD4Grad.ptr, I.dD4Dcn.ptr);
+    } else {
+        const int b = 128;                                   // 4 atoms (warps) per block
+        const long long threads = 32LL * nat;
+        k_d4_atm_nl_w<<<static_cast<unsigned>((threads + b - 1) / b), b, 0, stream>>>(
+            nat, I.dD4Xyz.ptr, I.dD4Sqrt.ptr, I.dD4AtmC6.ptr, I.dD4AtmDc6.ptr, I.dD4NbPtr.ptr, I.dD4Nb.ptr,
+            s9, a1, a2, alp, cut2, I.dD4Eat.ptr, I.dD4Grad.ptr, I.dD4Dcn.ptr);
+    }
+    if (cudaGetLastError() != cudaSuccess) return false;
+    I.dD4Eat.download(e_atom_out, nat, stream);
+    I.dD4Grad.download(grad_out, 3 * nat, stream);
+    I.dD4Dcn.download(dEdcn_out, nat, stream);
+    const bool okk = cudaStreamSynchronize(stream) == cudaSuccess;
+    // The nat^2 reference matrices are only needed for this call.
+    I.dD4AtmC6.free();
+    I.dD4AtmDc6.free();
+    return okk;
 }
 
 /* ====================================================================== *
@@ -2606,7 +5660,24 @@ bool XtbGpuContext::sccEnergy(int nat, int nsh, double* e_coulomb, double* e_thi
             nsh, m_impl->dQsh.ptr, m_impl->dGamma3.ptr, m_impl->dESca.ptr + 0);
         if (cudaGetLastError() != cudaSuccess) return false;
     }
-    if (!m_impl->dMpAmatSD.empty() && e_multipole) {
+    if (m_impl->mp_otf && e_multipole) {
+        if (m_impl->thread_per_atom) {
+            const int grid = (nat + block - 1) / block;
+            k_energy_multipole_otf<<<grid, block, block * sizeof(double), stream>>>(
+                nat, m_impl->dMpXyz.ptr, m_impl->dMpRad.ptr, m_impl->mp_dmp3, m_impl->mp_dmp5,
+                m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dDpAt.ptr, m_impl->dQpAt.ptr,
+                m_impl->dQat.ptr, m_impl->dESca.ptr + 1);
+        } else {
+            const int wb = 128;                              // 4 atoms (warps) per block
+            const long long threads = 32LL * nat;
+            k_energy_multipole_otf_w<<<static_cast<unsigned>((threads + wb - 1) / wb), wb,
+                                       (wb / 32) * sizeof(double), stream>>>(
+                nat, m_impl->dMpXyz.ptr, m_impl->dMpRad.ptr, m_impl->mp_dmp3, m_impl->mp_dmp5,
+                m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dDpAt.ptr, m_impl->dQpAt.ptr,
+                m_impl->dQat.ptr, m_impl->dESca.ptr + 1);
+        }
+        if (cudaGetLastError() != cudaSuccess) return false;
+    } else if (!m_impl->dMpAmatSD.empty() && e_multipole) {
         const int grid = (nat + block - 1) / block;
         k_energy_multipole<<<grid, block, block * sizeof(double), stream>>>(
             nat, m_impl->dMpAmatSD.ptr, m_impl->dMpAmatDD.ptr, m_impl->dMpAmatSQ.ptr,
@@ -2767,6 +5838,7 @@ bool XtbGpuContext::beginResidentLoop(int nsh, int nat, int nao, double Tele, do
         m_impl->dQat.ensure(nat); m_impl->dQsh.ensure(nsh);
         m_impl->dN0sh.ensure(nsh); m_impl->dN0at.ensure(nat);
         m_impl->dDq.ensure(1);
+        m_impl->dOccMu.ensure(1); m_impl->dOccNcol.ensure(1);   // occupied-column count (density)
     } catch (...) {
         return false;
     }
@@ -2782,6 +5854,10 @@ bool XtbGpuContext::beginResidentLoop(int nsh, int nat, int nao, double Tele, do
     if (!broydenBegin(nsh + 9 * nat, alpha, max_hist, w0)) return false;
     m_impl->loop_nsh = nsh; m_impl->loop_nat = nat; m_impl->loop_nao = nao;
     m_impl->loop_Tele = Tele; m_impl->loop_nelec = n_elec; m_impl->loop_nocc_pairs = nocc_pairs;
+    m_impl->last_dq = 1e300;             // a new SCF starts without usable previous eigenvectors
+    m_impl->cprev_valid = m_impl->cprev64_valid = false;
+    m_impl->pseudo_consecutive = m_impl->pseudo_consecutive64 = 0;
+    m_impl->pseudo_taken = m_impl->pseudo_rejected = 0;
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
 
@@ -2789,22 +5865,34 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
                                     double* e_coulomb, double* e_third, double* e_multipole)
 {
     if (!ok() || m_impl->loop_nao <= 0 || !dq_out || !e_band) return false;
+    // Claude Generated (Sep 2026): every failure below names itself - the host used to report
+    // "GPU resident SCF step failed at iteration N" with no reason. Nested calls may set a more
+    // specific message first; fail() only fills an empty one.
+    m_impl->last_error.clear();
+    auto fail = [&](const char* what) {
+        if (m_impl->last_error.empty()) m_impl->last_error = what;
+        return false;
+    };
     cudaStream_t stream = m_impl->stream;
     const int nsh = m_impl->loop_nsh, nat = m_impl->loop_nat, nao = m_impl->loop_nao;
     const int b = 128;
+    m_impl->profStart();
 
     // 1. D4 reference weights from the current (previous-output) resident q_at.
     k_d4_build_refw<<<(nat + b - 1) / b, b, 0, stream>>>(
         nat, Impl::D4_MAX_REF, m_impl->dQat.ptr, m_impl->dD4Cn.ptr, m_impl->dD4Gi.ptr,
         m_impl->dD4Zeff.ptr, m_impl->dD4Nref.ptr, m_impl->dD4Refcn.ptr,
         m_impl->dD4Refcovcn.ptr, m_impl->dD4Refq.ptr, m_impl->dD4W.ptr, m_impl->dD4dWq.ptr);
-    if (cudaGetLastError() != cudaSuccess) return false;
+    if (cudaGetLastError() != cudaSuccess) return fail("D4 reference-weight kernel failed");
+    m_impl->profMark("scf: D4 reference weights");
 
     // 2. Potential build (overwrites dQat with the input-derived q_at) + Fock +
     //    eigensolve; eps stays resident (no download).
-    if (!buildDevicePotentialAndSolve(nao, fp32, /*n_eig=*/0, /*eps_out=*/nullptr,
-                                      /*download_eps=*/false))
-        return false;
+    m_impl->in_resident_step = true;
+    const bool solved = buildDevicePotentialAndSolve(nao, fp32, /*n_eig=*/0, /*eps_out=*/nullptr,
+                                                     /*download_eps=*/false);
+    m_impl->in_resident_step = false;
+    if (!solved) return fail("potential build / Fock / eigensolve failed");
 
     // 3. Occupation on the device (resident eps → resident occ).
     const double kT = m_impl->loop_Tele * 3.166808e-6;
@@ -2812,38 +5900,44 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
     const int blk = 256;
     k_occupations<<<1, blk, blk * sizeof(double), stream>>>(
         m_impl->dEps.ptr, m_impl->dOcc.ptr, nao, kT, m_impl->loop_nelec,
-        m_impl->loop_nocc_pairs, use_fermi, nullptr, nullptr);
-    if (cudaGetLastError() != cudaSuccess) return false;
+        m_impl->loop_nocc_pairs, use_fermi, m_impl->dOccMu.ptr, m_impl->dOccNcol.ptr);
+    if (cudaGetLastError() != cudaSuccess) return fail("occupation kernel failed");
+    // Claude Generated (Sep 2026): build P from the occupied columns only (last column with
+    // occ > 1e-12, reported by the kernel), exactly like the CPU density (xtb_scf.cpp,
+    // leftCols(ncol)). The dropped columns weigh < 1e-12; the GEMM shrinks from nao^3 to
+    // nao^2 * ncol (polymer: 26 % of the SCF time was this product over all nao columns).
+    int ncol = nao;
+    m_impl->dOccNcol.download(&ncol, 1, stream);
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return fail("stream synchronisation after occupations failed");
+    if (ncol <= 0 || ncol > nao) ncol = nao;
+    m_impl->profMark("scf: occupations");
 
-    // 4. Density + Mulliken-AO (full columns; occ is 0 past the Fermi window).
-    if (!residentDensityResident(nao, nao, e_band)) return false;
+    // 4. Density + Mulliken-AO over the occupied columns.
+    if (!residentDensityResident(nao, ncol, e_band)) return fail("density / Mulliken populations failed");
+    m_impl->profMark("scf: density P + populations");
 
     // 5. Output charges/moments from the resident density.
     // q_sh = n0_sh − Σ_{μ∈s} pop_ao; q_at = n0_at − Σ_{μ∈A} pop_ao.
     if (cudaMemcpyAsync(m_impl->dQsh.ptr, m_impl->dN0sh.ptr, sizeof(double) * nsh,
-                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess) return false;
+                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess) return fail("shell-charge copy failed");
     k_qsh_scatter<<<(nao + b - 1) / b, b, 0, stream>>>(nao, m_impl->dPop.ptr,
                                                        m_impl->dAo2sh.ptr, m_impl->dQsh.ptr);
     if (cudaMemcpyAsync(m_impl->dQat.ptr, m_impl->dN0at.ptr, sizeof(double) * nat,
-                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess) return false;
+                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess) return fail("atomic-charge copy failed");
     k_qat_scatter<<<(nao + b - 1) / b, b, 0, stream>>>(nao, m_impl->dPop.ptr,
                                                        m_impl->dAo2at.ptr, m_impl->dQat.ptr);
-    // Atomic multipole moments dp_at/qp_at from the resident density (resident;
-    // the scatter kernel needs zeroed targets).
-    if (cudaMemsetAsync(m_impl->dDpAt.ptr, 0, sizeof(double) * 3 * nat, stream) != cudaSuccess) return false;
-    if (cudaMemsetAsync(m_impl->dQpAt.ptr, 0, sizeof(double) * 6 * nat, stream) != cudaSuccess) return false;
-    k_multipole_moments<<<(nao + b - 1) / b, b, 0, stream>>>(
-        m_impl->dDpAt.ptr, m_impl->dQpAt.ptr, m_impl->dP.ptr,
-        m_impl->dDpInt.ptr, m_impl->dQpInt.ptr, m_impl->dAo2at.ptr, nao);
-    if (cudaGetLastError() != cudaSuccess) return false;
+    // Atomic multipole moments dp_at/qp_at from the resident density (resident).
+    if (!multipoleMomentsResident(nao, nat)) return fail("atomic multipole moments failed");
+    m_impl->profMark("scf: charges + multipole moments");
 
     // 6. SCC energy components (resident charges/moments).
-    if (!sccEnergy(nat, nsh, e_coulomb, e_third, e_multipole)) return false;
+    if (!sccEnergy(nat, nsh, e_coulomb, e_third, e_multipole)) return fail("SCC energy failed");
+    m_impl->profMark("scf: SCC energy");
 
     // 7. Convergence dq = max|q_sh_out − q_sh_in| (q_sh_in = current dPotQsh).
     k_maxabsdiff<<<1, blk, blk * sizeof(double), stream>>>(m_impl->dQsh.ptr, m_impl->dPotQsh.ptr,
                                                            nsh, m_impl->dDq.ptr);
-    if (cudaGetLastError() != cudaSuccess) return false;
+    if (cudaGetLastError() != cudaSuccess) return fail("convergence (max|dq|) kernel failed");
     m_impl->dDq.download(dq_out, 1, stream);
 
     // 8. Broyden: pack input [dPotQsh; dInDpAt; dInQpAt] + output [dQsh; dDpAt; dQpAt],
@@ -2859,18 +5953,22 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
         cudaMemcpyAsync(vout, m_impl->dQsh.ptr, sizeof(double) * nsh, cudaMemcpyDeviceToDevice, stream);
         cudaMemcpyAsync(vout + off_dp, m_impl->dDpAt.ptr, sizeof(double) * 3 * nat, cudaMemcpyDeviceToDevice, stream);
         cudaMemcpyAsync(vout + off_qp, m_impl->dQpAt.ptr, sizeof(double) * 6 * nat, cudaMemcpyDeviceToDevice, stream);
-        if (!runBroydenUpdate(vin, vout, m_impl->dBroyVnext.ptr)) return false;
+        if (!runBroydenUpdate(vin, vout, m_impl->dBroyVnext.ptr)) return fail("device Broyden update failed");
         cudaMemcpyAsync(m_impl->dPotQsh.ptr, m_impl->dBroyVnext.ptr, sizeof(double) * nsh, cudaMemcpyDeviceToDevice, stream);
         cudaMemcpyAsync(m_impl->dInDpAt.ptr, m_impl->dBroyVnext.ptr + off_dp, sizeof(double) * 3 * nat, cudaMemcpyDeviceToDevice, stream);
         cudaMemcpyAsync(m_impl->dInQpAt.ptr, m_impl->dBroyVnext.ptr + off_qp, sizeof(double) * 6 * nat, cudaMemcpyDeviceToDevice, stream);
     }
-    return cudaStreamSynchronize(stream) == cudaSuccess;
+    m_impl->profMark("scf: dq + Broyden");
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return fail("stream synchronisation at end of step failed");
+    m_impl->last_dq = *dq_out;   // gates the next step's pseudo-diagonalisation
+    return true;
 }
 
 bool XtbGpuContext::residentLoopCharges(double* q_sh, double* q_at, double* dp_at,
                                         double* qp_at, double* eps)
 {
     if (!ok() || m_impl->loop_nao <= 0) return false;
+    m_impl->releaseEigenWorkspaces();   // the resident loop is over (called once after it)
     cudaStream_t stream = m_impl->stream;
     const int nsh = m_impl->loop_nsh, nat = m_impl->loop_nat, nao = m_impl->loop_nao;
     if (q_sh)  m_impl->dQsh.download(q_sh, nsh, stream);
@@ -2900,6 +5998,27 @@ bool XtbGpuContext::beginPotential(int nat, int nsh,
         return false;
     cudaStream_t stream = m_impl->stream;
     const size_t nn = static_cast<size_t>(nat) * static_cast<size_t>(nat);
+    // Claude Generated (Sep 2026): the STORED multipole path holds 18 nat^2 doubles on the
+    // device - 7.7 GB at 7320 atoms - on top of everything the SCF already has resident.
+    // Without this check the allocation (or a later one starved by it) failed deep inside the
+    // SCF and the user saw only "GPU resident SCF step failed at iteration 0". Measured on
+    // polymer_2x with `-gpu_multipole_otf off` on a 20 GB A4500.
+    {
+        const size_t need = 18 * nn * sizeof(double);
+        size_t free_b = 0, total_b = 0;
+        if (m_impl->memory_check && cudaMemGetInfo(&free_b, &total_b) == cudaSuccess
+            && need + (64ull << 20) > free_b) {
+            char msg[420];
+            std::snprintf(msg, sizeof(msg),
+                          "the stored GFN2 multipole interaction matrices need %.1f GB on device %d "
+                          "for nat=%d, but only %.1f of %.1f GB are free - rebuild them per "
+                          "iteration instead (-gpu_multipole_otf auto, the default above ~2700 atoms)",
+                          need / 1073741824.0, m_impl->device, nat,
+                          free_b / 1073741824.0, total_b / 1073741824.0);
+            m_impl->last_error = msg;
+            return false;
+        }
+    }
     try {
         m_impl->dMpAmatSD.ensure(static_cast<int>(3 * nn));
         m_impl->dMpAmatDD.ensure(static_cast<int>(9 * nn));
@@ -2914,8 +6033,13 @@ bool XtbGpuContext::beginPotential(int nat, int nsh,
         m_impl->dVat.ensure(nat);
         m_impl->dQat.ensure(nat);
     } catch (...) {
+        m_impl->last_error = "device allocation for the stored GFN2 multipole interaction "
+                             "matrices failed (try -gpu_multipole_otf auto)";
         return false;
     }
+    m_impl->mp_otf = false;
+    m_impl->dMpXyz.free();
+    m_impl->dMpRad.free();
     m_impl->dMpAmatSD.upload(amat_sd, static_cast<int>(3 * nn), stream);
     m_impl->dMpAmatDD.upload(amat_dd, static_cast<int>(9 * nn), stream);
     m_impl->dMpAmatSQ.upload(amat_sq, static_cast<int>(6 * nn), stream);
@@ -2925,6 +6049,48 @@ bool XtbGpuContext::beginPotential(int nat, int nsh,
     m_impl->pot_nsh = nsh;
     // WP4b: solvation is opt-in per geometry via beginSolvation() (called after this);
     // reset here so a solvent-free geometry never re-uses a stale Born matrix.
+    m_impl->solv_active = false;
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+// Claude Generated (Sep 2026): device potential without stored interaction matrices. Uploads
+// the geometry and the CN-dependent damping radii (nat + 3 nat doubles instead of 18 nat^2);
+// k_multipole_potential_otf / k_energy_multipole_otf rebuild the matrix elements per iteration.
+bool XtbGpuContext::beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr,
+                                           const double* mrad, double dmp3, double dmp5,
+                                           const double* dkernel, const double* qkernel,
+                                           const double* gamma3)
+{
+    if (!ok() || nat <= 0 || nsh <= 0 || !xyz_bohr || !mrad || !dkernel || !qkernel || !gamma3)
+        return false;
+    cudaStream_t stream = m_impl->stream;
+    try {
+        m_impl->dMpAmatSD.free();
+        m_impl->dMpAmatDD.free();
+        m_impl->dMpAmatSQ.free();
+        m_impl->dMpXyz.ensure(3 * nat);
+        m_impl->dMpRad.ensure(nat);
+        m_impl->dMpDkernel.ensure(nat);
+        m_impl->dMpQkernel.ensure(nat);
+        m_impl->dGamma3.ensure(nsh);
+        m_impl->dPotQsh.ensure(nsh);
+        m_impl->dInDpAt.ensure(3 * nat);
+        m_impl->dInQpAt.ensure(6 * nat);
+        m_impl->dVsh.ensure(nsh);
+        m_impl->dVat.ensure(nat);
+        m_impl->dQat.ensure(nat);
+    } catch (...) {
+        return false;
+    }
+    m_impl->dMpXyz.upload(xyz_bohr, 3 * nat, stream);
+    m_impl->dMpRad.upload(mrad, nat, stream);
+    m_impl->dMpDkernel.upload(dkernel, nat, stream);
+    m_impl->dMpQkernel.upload(qkernel, nat, stream);
+    m_impl->dGamma3.upload(gamma3, nsh, stream);
+    m_impl->mp_dmp3 = dmp3;
+    m_impl->mp_dmp5 = dmp5;
+    m_impl->mp_otf = true;
+    m_impl->pot_nsh = nsh;
     m_impl->solv_active = false;
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
@@ -3009,11 +6175,26 @@ bool XtbGpuContext::buildDevicePotentialAndSolve(int n, bool fp32, int n_eig,
         if (cudaGetLastError() != cudaSuccess) return false;
     }
     // Multipole potential v_dp/v_qp + v_at scalar shift, then v_at += D4.
-    k_multipole_potential<<<(nat + b - 1) / b, b, 0, stream>>>(
-        nat, m_impl->dMpAmatSD.ptr, m_impl->dMpAmatDD.ptr, m_impl->dMpAmatSQ.ptr,
-        m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dQat.ptr,
-        m_impl->dInDpAt.ptr, m_impl->dInQpAt.ptr,
-        m_impl->dVdp.ptr, m_impl->dVqp.ptr, m_impl->dVat.ptr);
+    if (m_impl->mp_otf && m_impl->thread_per_atom) {
+        k_multipole_potential_otf<<<(nat + b - 1) / b, b, 0, stream>>>(
+            nat, m_impl->dMpXyz.ptr, m_impl->dMpRad.ptr, m_impl->mp_dmp3, m_impl->mp_dmp5,
+            m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dQat.ptr,
+            m_impl->dInDpAt.ptr, m_impl->dInQpAt.ptr,
+            m_impl->dVdp.ptr, m_impl->dVqp.ptr, m_impl->dVat.ptr);
+    } else if (m_impl->mp_otf) {
+        const long long threads = 32LL * nat;
+        k_multipole_potential_otf_w<<<static_cast<unsigned>((threads + b - 1) / b), b, 0, stream>>>(
+            nat, m_impl->dMpXyz.ptr, m_impl->dMpRad.ptr, m_impl->mp_dmp3, m_impl->mp_dmp5,
+            m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dQat.ptr,
+            m_impl->dInDpAt.ptr, m_impl->dInQpAt.ptr,
+            m_impl->dVdp.ptr, m_impl->dVqp.ptr, m_impl->dVat.ptr);
+    } else {
+        k_multipole_potential<<<(nat + b - 1) / b, b, 0, stream>>>(
+            nat, m_impl->dMpAmatSD.ptr, m_impl->dMpAmatDD.ptr, m_impl->dMpAmatSQ.ptr,
+            m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dQat.ptr,
+            m_impl->dInDpAt.ptr, m_impl->dInQpAt.ptr,
+            m_impl->dVdp.ptr, m_impl->dVqp.ptr, m_impl->dVat.ptr);
+    }
     if (cudaGetLastError() != cudaSuccess) return false;
     k_vat_add_d4<<<(nat + b - 1) / b, b, 0, stream>>>(nat, m_impl->dD4Dedq.ptr, m_impl->dVat.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
@@ -3032,16 +6213,10 @@ bool XtbGpuContext::buildDevicePotentialAndSolve(int n, bool fp32, int n_eig,
                                                     m_impl->dVao.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
 
+    m_impl->profMark("scf: potential (D4 dE/dq, gamma, multipole)");
     // F = H0 − ½·S·(v_ao⊕v_ao) + GFN2 multipole; then eigensolve (shared path).
-    const dim3 block(16, 16);
-    const dim3 grid((n + block.x - 1) / block.x, (n + block.y - 1) / block.y);
-    k_build_fock_iso<<<grid, block, 0, stream>>>(m_impl->dC.ptr, m_impl->dH0.ptr,
-                                                 m_impl->dS.ptr, m_impl->dVao.ptr, n);
-    if (cudaGetLastError() != cudaSuccess) return false;
-    k_add_fock_multipole<<<grid, block, 0, stream>>>(m_impl->dC.ptr, m_impl->dDpInt.ptr,
-                                                     m_impl->dQpInt.ptr, m_impl->dVdp.ptr,
-                                                     m_impl->dVqp.ptr, m_impl->dAo2at.ptr, n);
-    if (cudaGetLastError() != cudaSuccess) return false;
+    if (!buildFockIntoC(n, /*multipole=*/true)) return false;
+    m_impl->profMark("scf: Fock build");
 
     return eigensolveResidentFock(eps_out, fp32, n_eig, download_eps);
 }
@@ -3089,10 +6264,38 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     const size_t nn = static_cast<size_t>(nao) * static_cast<size_t>(nao);
     const double one = 1.0, zero = 0.0;
 
+    // Points 1+2 (Claude Generated, Sep 2026): on the device-resident sparse path
+    // (pc_resident=true, screened pattern in use) P and W are only ever read at stored
+    // pattern positions by the kernels below (k_grad_h0_pulay_spP, k_grad_cn_onsite_spP -
+    // verified exhaustively, see the *_spP kernels above) - so neither needs the dense
+    // nao x nao buffer at all. use_pattern_pw selects that fast path; pc_resident=false
+    // (explicit P/C upload) and the small/dense-geometry case keep the original dense
+    // buffers unchanged as the reference/fallback.
+    const bool use_pattern_pw = pc_resident && m_impl->sparse;
+
+    // Claude Generated (Sep 2026): phase marks for the device gradient, same
+    // profMark/CURCUMA_GPU_PROFILE mechanism as the integral build and the resident
+    // SCF loop (env-gated; no cost when unset — see profMark()).
+    m_impl->profStart();
+
     try {
-        if (m_impl->dW.n < static_cast<int>(nn)) m_impl->dW.alloc(static_cast<int>(nn));
-        if (m_impl->dCw.n < static_cast<int>(nn)) m_impl->dCw.alloc(static_cast<int>(nn));
-        if (m_impl->dP.n  < static_cast<int>(nn)) m_impl->dP.alloc(static_cast<int>(nn));
+        // Claude Generated (Sep 2026): the eigensolver workspaces are not needed by the gradient;
+        // release them BEFORE allocating W so the gradient phase does not add to the SCF peak
+        // (the allocation used to come first).
+        m_impl->releaseEigenWorkspaces();
+        // Point 2: dW/dP (dense, nao x nao) are only needed by the dense-buffer paths.
+        if (!use_pattern_pw) {
+            if (m_impl->dW.n < static_cast<int>(nn)) m_impl->dW.alloc(static_cast<int>(nn));
+            if (m_impl->dP.n  < static_cast<int>(nn)) m_impl->dP.alloc(static_cast<int>(nn));
+        } else {
+            m_impl->dSpW.ensure(m_impl->sp_nnz);
+        }
+        // dCw only ever holds nao x nocc_orbs (k_scale_cols/k_density_sp write no more than
+        // that) - was allocated at the full nao x nao here although residentDensityResident
+        // already sizes it correctly; fixed while touching this block (memory only, no
+        // measured time effect - flagged by the operator, not a separate optimisation).
+        const size_t cw_n = nocc_orbs > 0 ? static_cast<size_t>(nao) * nocc_orbs : 0;
+        if (cw_n > 0 && m_impl->dCw.n < static_cast<int>(cw_n)) m_impl->dCw.alloc(static_cast<int>(cw_n));
         if (m_impl->dC.n  < static_cast<int>(nn)) m_impl->dC.alloc(static_cast<int>(nn));
         if (m_impl->dVao.n < nao) m_impl->dVao.alloc(nao);
         if (m_impl->dOcc.n < nao) m_impl->dOcc.alloc(nao);
@@ -3100,13 +6303,22 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
         m_impl->dGrad.ensure(3 * nat);
         m_impl->dEdcn.ensure(nat);
     } catch (...) { return false; }
+    m_impl->profMark("grad: workspace alloc");
 
     // Upload the converged SCF state (P/C symmetric-or-column-major from host).
     // AP8: skip the nao²-sized P/C uploads when they are already resident.
     if (!pc_resident) {
         m_impl->dP.upload(P, static_cast<int>(nn), stream);
         m_impl->dC.upload(C, static_cast<int>(nn), stream);
+        m_impl->p_dense_valid = true;
+    } else if (!use_pattern_pw) {
+        if (!ensureDenseDensity(nao)) return false;   // dense geometry: rebuild if stale
     }
+    // use_pattern_pw: nothing to do - dSpP already holds the converged pattern density
+    // from the SCF loop's last iteration (built by the SAME k_density_sp call the loop
+    // already ran for the population/band energy, from the SAME dCw/dC this call reuses
+    // via pc_resident). Point 1+2 together: no dense P, no download, no DGEMM rebuild.
+    m_impl->profMark("grad: dense density rebuild (ensureDenseDensity)");
     m_impl->dVao.upload(v_ao, nao, stream);
     m_impl->dQsh.upload(q_sh, nsh, stream);
     // GFN2 multipole potentials (converged) for the multipole-integral Pulay term.
@@ -3119,25 +6331,82 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
         m_impl->dVdp.upload(v_dp, 3 * nat, stream);
         m_impl->dVqp.upload(v_qp, 6 * nat, stream);
     }
+    m_impl->profMark("grad: upload v_ao/q_sh/v_dp/v_qp");
 
     // Energy-weighted density W = C_occ · diag(2·ε_occ) · C_occᵀ.
+    // Point 2 (Claude Generated, Sep 2026): on the pattern path, build W ONLY at the stored
+    // screened pairs with the same SDDMM kernel (k_density_sp) the SCF loop already uses for
+    // P, weight swapped for 2*eps - no nao x nao DGEMM. polymer_2x: 12.75 s -> measured below.
+    // Point 6 (Claude Generated, Sep 2026): W is this same SDDMM, so it can go through
+    // densityPatternDistributed exactly like the SCF loop's P does - see its
+    // for_weighted_density flag. dOcc already holds 2*eps (uploaded just above) and the
+    // full-nao dCw computed here is kept as the fallback the single-device k_density_sp below
+    // still needs when the split is not configured or the geometry is too small to split.
+    // Claude Generated (Sep 29, 2026): after a pseudo-diagonalisation step the columns of C span the
+    // right occupied space but do not diagonalise the occupied block of the Fock matrix, so
+    // C diag(2 eps) C^T misses the off-diagonal G_ij (polymer: 8.6e-4 Eh/A after FP64 pseudo steps
+    // started from FP32 vectors). The basis-invariant form W = C_o (2 G_oo) C_o^T with
+    // G_oo = C_o^T F C_o is exact for integer occupations (the pseudo step's gap gate). F is rebuilt
+    // from the potentials uploaded above, i.e. the converged ones.
+    const bool w_from_goo = nocc_orbs > 0 && !m_impl->c_exact_eigenvectors;
+    if (w_from_goo) {
+        const int no = nocc_orbs;
+        CudaBuffer<double> Cbak, Goo;
+        try {
+            Cbak.ensure(static_cast<int>(nn));
+            Goo.ensure(static_cast<int>(static_cast<size_t>(no) * no));
+            m_impl->dCw.ensure(static_cast<int>(static_cast<size_t>(nao) * no));
+        } catch (...) { return false; }
+        const double two = 2.0;
+        if (cudaMemcpyAsync(Cbak.ptr, m_impl->dC.ptr, sizeof(double) * nn, cudaMemcpyDeviceToDevice, stream)
+                != cudaSuccess
+            || !buildFockIntoC(nao, with_mp)
+            || cublasDgemm(m_impl->cublas, CUBLAS_OP_N, CUBLAS_OP_N, nao, no, nao, &one, m_impl->dC.ptr, nao,
+                           Cbak.ptr, nao, &zero, m_impl->dCw.ptr, nao) != CUBLAS_STATUS_SUCCESS          // T = F C_o
+            || cublasDgemm(m_impl->cublas, CUBLAS_OP_T, CUBLAS_OP_N, no, no, nao, &one, Cbak.ptr, nao,
+                           m_impl->dCw.ptr, nao, &zero, Goo.ptr, no) != CUBLAS_STATUS_SUCCESS            // G_oo
+            || cublasDgemm(m_impl->cublas, CUBLAS_OP_N, CUBLAS_OP_N, nao, no, no, &two, Cbak.ptr, nao,
+                           Goo.ptr, no, &zero, m_impl->dCw.ptr, nao) != CUBLAS_STATUS_SUCCESS            // C_o 2G_oo
+            || cudaMemcpyAsync(m_impl->dC.ptr, Cbak.ptr, sizeof(double) * nn, cudaMemcpyDeviceToDevice, stream)
+                != cudaSuccess)
+            return false;
+        if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+        m_impl->profMark("grad: W from G_oo (after a pseudo-diagonalisation step)");
+    }
     if (nocc_orbs > 0) {
-        std::vector<double> occ2(nocc_orbs);
-        for (int k = 0; k < nocc_orbs; ++k) occ2[k] = 2.0 * eps[k];
-        m_impl->dOcc.upload(occ2.data(), nocc_orbs, stream);
-        const dim3 block(16, 16);
-        const dim3 grid((nao + block.x - 1) / block.x, (nocc_orbs + block.y - 1) / block.y);
-        k_scale_cols<<<grid, block, 0, stream>>>(m_impl->dCw.ptr, m_impl->dC.ptr,
-                                                 m_impl->dOcc.ptr, nao, nocc_orbs);
-        if (cudaGetLastError() != cudaSuccess) return false;
-        if (cublasDgemm(m_impl->cublas, CUBLAS_OP_N, CUBLAS_OP_T, nao, nao, nocc_orbs,
+        if (!w_from_goo) {
+            std::vector<double> occ2(nocc_orbs);
+            for (int k = 0; k < nocc_orbs; ++k) occ2[k] = 2.0 * eps[k];
+            m_impl->dOcc.upload(occ2.data(), nocc_orbs, stream);
+            const dim3 block(16, 16);
+            const dim3 grid((nao + block.x - 1) / block.x, (nocc_orbs + block.y - 1) / block.y);
+            k_scale_cols<<<grid, block, 0, stream>>>(m_impl->dCw.ptr, m_impl->dC.ptr,
+                                                     m_impl->dOcc.ptr, nao, nocc_orbs);
+            if (cudaGetLastError() != cudaSuccess) return false;
+        }
+        if (use_pattern_pw) {
+            // The split rebuilds Cw from C and the occupations on each helper, which the G_oo form
+            // does not fit; that case stays on this device.
+            const bool w_split = !w_from_goo
+                && densityPatternDistributed(nao, nocc_orbs, /*for_weighted_density=*/true);
+            if (!w_split) {
+                const int bs = 256;
+                k_density_sp<<<(m_impl->sp_nnz + bs - 1) / bs, bs, 0, stream>>>(
+                    m_impl->sp_nnz, m_impl->dSpRow.ptr, m_impl->dSpCol.ptr,
+                    m_impl->dCw.ptr, m_impl->dC.ptr, nao, nocc_orbs, m_impl->dSpW.ptr);
+                if (cudaGetLastError() != cudaSuccess) return false;
+            }
+        } else if (cublasDgemm(m_impl->cublas, CUBLAS_OP_N, CUBLAS_OP_T, nao, nao, nocc_orbs,
                         &one, m_impl->dCw.ptr, nao, m_impl->dC.ptr, nao,
                         &zero, m_impl->dW.ptr, nao) != CUBLAS_STATUS_SUCCESS)
             return false;
+    } else if (use_pattern_pw) {
+        m_impl->dSpW.zero(m_impl->sp_nnz, stream);
     } else {
         if (cudaMemsetAsync(m_impl->dW.ptr, 0, sizeof(double) * nn, stream) != cudaSuccess)
             return false;
     }
+    m_impl->profMark("grad: W = C_occ*diag(2eps)*C_occ^T (DGEMM)");
 
     if (cudaMemsetAsync(m_impl->dGrad.ptr, 0, sizeof(double) * 3 * nat, stream) != cudaSuccess)
         return false;
@@ -3154,31 +6423,71 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
         m_impl->dRepAlpha.ptr, m_impl->dRepZeff.ptr, kexp, rexp, kexp_light, m_impl->dGrad.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
 
-    k_grad_cn_onsite<<<(nao + b1 - 1) / b1, b1, 0, stream>>>(
-        nao, m_impl->dP.ptr, m_impl->dKcn.ptr, m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr,
-        m_impl->dEdcn.ptr);
+    // Point 2 (Claude Generated, Sep 2026): CN-onsite reads only P(mu,mu); on the pattern
+    // path it comes from dSpP via the diagonal index instead of the dense buffer.
+    if (use_pattern_pw) {
+        k_grad_cn_onsite_spP<<<(nao + b1 - 1) / b1, b1, 0, stream>>>(
+            nao, m_impl->dSpP.ptr, m_impl->dSpDiagIdx.ptr, m_impl->dKcn.ptr,
+            m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr, m_impl->dEdcn.ptr);
+    } else {
+        k_grad_cn_onsite<<<(nao + b1 - 1) / b1, b1, 0, stream>>>(
+            nao, m_impl->dP.ptr, m_impl->dKcn.ptr, m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr,
+            m_impl->dEdcn.ptr);
+    }
     if (cudaGetLastError() != cudaSuccess) return false;
+    m_impl->profMark("grad: repulsion + CN onsite");
 
     const dim3 block(16, 16);
     const dim3 grid((nao + block.x - 1) / block.x, (nao + block.y - 1) / block.y);
-    k_grad_h0_pulay<<<grid, block, 0, stream>>>(
-        nao, m_impl->basis_is_gfn2, m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr, m_impl->dAng.ptr,
-        m_impl->dIaoSh.ptr, m_impl->dShNprim.ptr, m_impl->dShPrimOff.ptr, m_impl->dPrimAlpha.ptr,
-        m_impl->dPrimCoeff.ptr, m_impl->dShZeta.ptr, m_impl->dShpoly.ptr, m_impl->dKcn.ptr,
-        m_impl->dValence.ptr, m_impl->dZ.ptr, m_impl->dSE.ptr, m_impl->dXyz.ptr, m_impl->dP.ptr,
-        m_impl->dS.ptr, m_impl->dH0.ptr, m_impl->dW.ptr, m_impl->dVao.ptr,
-        with_mp ? m_impl->dVdp.ptr : nullptr, with_mp ? m_impl->dVqp.ptr : nullptr,
-        m_impl->dGrad.ptr, m_impl->dEdcn.ptr);
+    if (use_pattern_pw) {
+        const int bs = 256;
+        k_grad_h0_pulay_spP<<<(m_impl->sp_nnz + bs - 1) / bs, bs, 0, stream>>>(
+            m_impl->sp_nnz, m_impl->dSpRow.ptr, m_impl->dSpCol.ptr, m_impl->dSpS.ptr, m_impl->dSpH0.ptr,
+            m_impl->dSpP.ptr, m_impl->dSpW.ptr,
+            m_impl->basis_is_gfn2, m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr, m_impl->dAng.ptr,
+            m_impl->dIaoSh.ptr, m_impl->dShNprim.ptr, m_impl->dShPrimOff.ptr, m_impl->dPrimAlpha.ptr,
+            m_impl->dPrimCoeff.ptr, m_impl->dShZeta.ptr, m_impl->dShpoly.ptr, m_impl->dKcn.ptr,
+            m_impl->dValence.ptr, m_impl->dZ.ptr, m_impl->dSE.ptr, m_impl->dXyz.ptr,
+            m_impl->dVao.ptr,
+            with_mp ? m_impl->dVdp.ptr : nullptr, with_mp ? m_impl->dVqp.ptr : nullptr,
+            m_impl->dGrad.ptr, m_impl->dEdcn.ptr);
+    } else if (m_impl->sparse) {
+        const int bs = 256;
+        k_grad_h0_pulay_sp<<<(m_impl->sp_nnz + bs - 1) / bs, bs, 0, stream>>>(
+            m_impl->sp_nnz, m_impl->dSpRow.ptr, m_impl->dSpCol.ptr, m_impl->dSpS.ptr, m_impl->dSpH0.ptr,
+            nao, m_impl->basis_is_gfn2, m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr, m_impl->dAng.ptr,
+            m_impl->dIaoSh.ptr, m_impl->dShNprim.ptr, m_impl->dShPrimOff.ptr, m_impl->dPrimAlpha.ptr,
+            m_impl->dPrimCoeff.ptr, m_impl->dShZeta.ptr, m_impl->dShpoly.ptr, m_impl->dKcn.ptr,
+            m_impl->dValence.ptr, m_impl->dZ.ptr, m_impl->dSE.ptr, m_impl->dXyz.ptr, m_impl->dP.ptr,
+            m_impl->dW.ptr, m_impl->dVao.ptr,
+            with_mp ? m_impl->dVdp.ptr : nullptr, with_mp ? m_impl->dVqp.ptr : nullptr,
+            m_impl->dGrad.ptr, m_impl->dEdcn.ptr);
+    } else {
+        k_grad_h0_pulay<<<grid, block, 0, stream>>>(
+            nao, m_impl->basis_is_gfn2, m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr, m_impl->dAng.ptr,
+            m_impl->dIaoSh.ptr, m_impl->dShNprim.ptr, m_impl->dShPrimOff.ptr, m_impl->dPrimAlpha.ptr,
+            m_impl->dPrimCoeff.ptr, m_impl->dShZeta.ptr, m_impl->dShpoly.ptr, m_impl->dKcn.ptr,
+            m_impl->dValence.ptr, m_impl->dZ.ptr, m_impl->dSE.ptr, m_impl->dXyz.ptr, m_impl->dP.ptr,
+            m_impl->dS.ptr, m_impl->dH0.ptr, m_impl->dW.ptr, m_impl->dVao.ptr,
+            with_mp ? m_impl->dVdp.ptr : nullptr, with_mp ? m_impl->dVqp.ptr : nullptr,
+            m_impl->dGrad.ptr, m_impl->dEdcn.ptr);
+    }
     if (cudaGetLastError() != cudaSuccess) return false;
+    m_impl->profMark(use_pattern_pw ? "grad: H0 Pulay (screened pair kernel, pattern-only P/W)"
+                      : m_impl->sparse ? "grad: H0 Pulay (screened pair kernel)"
+                                       : "grad: H0 Pulay (dense)");
 
     k_grad_coulomb<<<(nsh + b1 - 1) / b1, b1, 0, stream>>>(
         nsh, m_impl->basis_is_gfn2, m_impl->dSh2at.ptr, m_impl->dHardness.ptr,
         m_impl->dQsh.ptr, m_impl->dXyz.ptr, 2.0, m_impl->dGrad.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
+    m_impl->profMark("grad: Coulomb");
 
     m_impl->dGrad.download(grad_out, 3 * nat, stream);
     m_impl->dEdcn.download(dEdcn_out, nat, stream);
-    return cudaStreamSynchronize(stream) == cudaSuccess;
+    const bool ok_sync = cudaStreamSynchronize(stream) == cudaSuccess;
+    m_impl->profMark("grad: download + sync");
+    return ok_sync;
 }
 
 // Stage 6 (S6.1): device occupation. Component-test entry — uploads a frozen eps
@@ -3217,7 +6526,8 @@ bool XtbGpuContext::occupations(const double* eps, int n, double Tele, double n_
 
 bool XtbGpuContext::residentBeginMultipoleComputed()
 {
-    if (!ok() || m_impl->basis_nat <= 0 || m_impl->dDpInt.empty()) return false;
+    const bool have_mp = m_impl && (m_impl->sparse ? !m_impl->dSpDp.empty() : !m_impl->dDpInt.empty());
+    if (!ok() || m_impl->basis_nat <= 0 || !have_mp) return false;
     const int nat = m_impl->basis_nat;
     try {
         // dp_int/qp_int are already resident (computeIntegrals); dAo2at uploaded in

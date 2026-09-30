@@ -29,6 +29,7 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -261,6 +262,11 @@ struct GFNFFParameterSet {
     // self-energy even though `coulombs` is structurally empty for N=1.
     Eigen::VectorXd coul_self_chi_base, coul_self_gam, coul_self_alp,
         coul_self_cnf, coul_self_chi_static;
+
+    // Claude Generated (Sep 2026): the GPU enumerates all Coulomb pairs itself (no `coulombs`
+    // list); cutoff for that implicit loop (100 Bohr = the no-cutoff reference value).
+    bool   coulomb_implicit = false;
+    double coulomb_implicit_rcut = std::numeric_limits<double>::infinity();  // no cutoff, as the reference (Sep 2026)
 
     // Three-body terms
     std::vector<GFNFFHydrogenBond> hbonds;

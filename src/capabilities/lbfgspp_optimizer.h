@@ -1,6 +1,6 @@
 /*
  * <LBFGSpp Optimizer Strategy - External Library Implementation>
- * Copyright (C) 2025 Claude AI - Generated Code
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -58,6 +58,23 @@ public:
      * outlive the optimizer; nullptr / empty is a no-op. */
     void bindRestraints(const GeometryRestraints* restraints) { m_restraints = restraints; }
 
+    /**
+     * @brief Hand over an energy/gradient the driver already computed at x (Claude Generated,
+     *        Sep 29, 2026). The next call with exactly these coordinates returns them instead of
+     *        running the calculator again; one shot. LBFGSpp's InitializeSingleSteps() evaluates
+     *        the start geometry itself, right after the driver's own initial evaluation - for a
+     *        GFN2 run on polymer_2x that duplicate was a full SCF (~40 s on 4 GPUs).
+     * @param gradient the raw calculator gradient (constraints and the grab bias are applied
+     *        in operator() as for a fresh evaluation)
+     */
+    void prime(const Vector& x, double energy, const Vector& gradient)
+    {
+        m_primed_x = x;
+        m_primed_energy = energy;
+        m_primed_gradient = gradient;
+        m_primed = true;
+    }
+
 private:
     EnergyCalculator* m_energy_calculator;
     Molecule* m_molecule;
@@ -69,6 +86,9 @@ private:
 
     double m_last_energy = 0.0;
     Vector m_last_parameters;
+    bool m_primed = false;          // prime(): one reusable evaluation pending
+    Vector m_primed_x, m_primed_gradient;
+    double m_primed_energy = 0.0;
     bool m_error = false;
     int m_atom_count = 0;
 };

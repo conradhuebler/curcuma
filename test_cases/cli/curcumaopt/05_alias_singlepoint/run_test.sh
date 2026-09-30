@@ -10,7 +10,9 @@ TEST_DIR="$SCRIPT_DIR"
 
 run_test() {
     cd "$TEST_DIR"
-    $CURCUMA -opt input.xyz -method uff > stdout.log 2> stderr.log
+    # gfnff, not uff (Sep 27, 2026): these tests check CLI behaviour; the UFF angle gradient is
+    # wrong (TODO.md) and uff only 'converged' through a line-search abort counted as success.
+    $CURCUMA -opt input.xyz -method gfnff > stdout.log 2> stderr.log
     assert_exit_code $? 0 "Optimization should succeed"
 
     # BMT-aware: resolve output file from CWD or BMT directory

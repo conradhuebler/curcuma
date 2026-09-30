@@ -103,7 +103,9 @@ Affects only systems with N>200 (the truncation gating). Small molecules unchang
 
 ## Latest: ATM Gradient Separation + Precision Limits Documented (Mar 12, 2026) ✅
 
-**ATM three-body gradient** separated from `GradientDispersion()` into its own `GradientATM()` component. Matches Fortran structure where ATM is outside `g_disp` (gfnff_gdisp0.f90:308-400). Zero functional impact (ATM energy ≈ 5e-8 Eh).
+**ATM three-body gradient** separated from `GradientDispersion()` into its own `GradientATM()` component. Zero functional impact (ATM energy ≈ 5e-8 Eh).
+
+> **Correction (Sep 25, 2026)**: this entry said the separation "matches Fortran structure where ATM is outside `g_disp` (gfnff_gdisp0.f90:308-400)". Those lines are the pairwise `d3_gradient`; the GFN-FF reference has **no** non-bonded three-body dispersion at all. curcuma's bonded-triple ATM term was its own addition and is now **off by default** (`-gfnff.dispersion_atm true` restores it) — see [REV_GFNFF_TODO.md](REV_GFNFF_TODO.md) #13.
 
 **Dispersion GradComp** failures on large molecules (triose 2.1e-4, complex 4.1e-4, polymer 4.9e-4) confirmed as **parametric precision limits**, not code bugs. Error scales ~√N (random CN/C6 parameter accumulation across O(N²) pairs), not ~N (which would indicate a missing systematic term). All GradComp tests pass for small molecules. Scientifically irrelevant for MD/optimization.
 

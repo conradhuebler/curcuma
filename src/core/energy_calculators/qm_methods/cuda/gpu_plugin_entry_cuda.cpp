@@ -26,7 +26,66 @@
 
 #include "json.hpp"
 
+#include <cuda_runtime.h>
+
+#include <cstring>
+#include "xtb_distributed_eigensolver.h"   // availableBackends() for the -methods query
+
+namespace {
+// Copy a JSON dump into the caller's buffer. Returns the length needed (excluding the NUL),
+// so a caller with a too-small buffer can retry. Claude Generated (Sep 2026, multi-GPU).
+int writeJson(const json& j, char* buf, int len)
+{
+    const std::string s = j.dump();
+    if (buf && len > 0) {
+        const size_t n = std::min(s.size(), static_cast<size_t>(len - 1));
+        std::memcpy(buf, s.data(), n);
+        buf[n] = '\0';
+    }
+    return static_cast<int>(s.size());
+}
+} // namespace
+
 extern "C" {
+
+// ---- Multi-GPU device discovery (Claude Generated, Sep 2026) ----------------------------
+// Optional symbols: the core treats a plugin without them as "1 device, no details".
+// Indices are the CUDA runtime's, i.e. AFTER CUDA_VISIBLE_DEVICES (which SLURM sets per job).
+
+int curcuma_cuda_device_count()
+{
+    int n = 0;
+    return cudaGetDeviceCount(&n) == cudaSuccess ? n : 0;
+}
+
+// Claude Generated (Sep 2026): which distributed-eigensolver backends libcurcuma_cuda_mgpu.so
+// was built with - "mp" (cuSOLVERMp + NCCL), "mg" (the deprecated cusolverMg fallback, measured
+// 15x slower than one GPU on polymer_2x), "mp,mg", or "none (<why>)" when the library is
+// missing. Queried by `curcuma -methods`, so a cluster build can be checked without running a
+// calculation. Loading the library here is the same dlopen the SCF would do.
+const char* curcuma_cuda_mgpu_backends()
+{
+    static const std::string s = curcuma::xtb::gpu::DistributedEigensolver::availableBackends();
+    return s.c_str();
+}
+
+// JSON: {"index","name","memory_total_bytes","compute_capability","pci_bus_id","pci_device_id"}.
+// Reads device properties only - no context is created, so this is cheap and has no side effect
+// on the device memory of the calling process.
+int curcuma_cuda_device_info(int index, char* buf, int len)
+{
+    cudaDeviceProp prop{};
+    if (cudaGetDeviceProperties(&prop, index) != cudaSuccess)
+        return -1;
+    json j;
+    j["index"] = index;
+    j["name"] = std::string(prop.name);
+    j["memory_total_bytes"] = static_cast<std::uint64_t>(prop.totalGlobalMem);
+    j["compute_capability"] = std::to_string(prop.major) + "." + std::to_string(prop.minor);
+    j["pci_bus_id"] = prop.pciBusID;
+    j["pci_device_id"] = prop.pciDeviceID;
+    return writeJson(j, buf, len);
+}
 
 // method_type: curcuma::xtb::MethodType (GFN1=1, GFN2=2). Returns a new heap object the
 // caller (core) owns, or nullptr on failure so the core falls back to the CPU method.

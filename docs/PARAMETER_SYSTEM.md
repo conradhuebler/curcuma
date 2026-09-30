@@ -344,7 +344,13 @@ PARAM(temperature, Double, 300.0, "Simulation temperature in K", "Basic", {"temp
 
 ### Multi-line PARAM Definitions
 
-Parser supports spreading parameters across multiple lines:
+Parser supports spreading parameters across multiple lines. Since Sep 28, 2026 this holds without
+exceptions: the parser (`scripts/param_parser/main.cpp`) tokenizes the macro instead of matching a
+regex, so help texts may contain `)` or `,` and may be written as adjacent string literals
+(`"part one " "part two"`), and a `PARAM(...)` inside a comment is ignored. Before that, such
+PARAMs were silently dropped together with the PARAMs following them in the same block - 20 names
+in `eeq_solver.h`/`gfnff.h` were missing from `-help`, flat-flag routing and `-export_run`.
+`make GenerateParams` prints `Warning: Malformed PARAM` for a definition it cannot read.
 
 ```cpp
 PARAM(topological_save_persistence_image,

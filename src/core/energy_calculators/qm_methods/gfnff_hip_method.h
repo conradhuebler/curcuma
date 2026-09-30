@@ -44,6 +44,8 @@ struct GFNFFRocmBackend {
     /// Schur complement.  That is the expected path here, not a numerical failure, so
     /// the wrapper reports it at verbosity 3 instead of warning.
     static constexpr bool has_device_schur = false;
+    /// No multi-GPU split on ROCm (CUDA only, Sep 2026).
+    static constexpr bool has_multi_gpu_split = false;
 
     /// Deliverable 3 (Jun 2026): from 16 fragments on, the EEQ goes to the exact CPU
     /// PCG — the device path would do a dense N x N Cholesky (O(N^3)) for nfrag>1.
@@ -52,6 +54,11 @@ struct GFNFFRocmBackend {
     /// Blocking device->host copy of n doubles (GPU-Schur charge download).
     /// Defined in gfnff_hip_method.cpp so <hip/hip_runtime.h> stays out of this header.
     static void downloadDoubles(double* host, const double* device, int n);
+
+    /// Multi-GPU (Claude Generated, Sep 2026): number of visible devices, and make `device`
+    /// current on the calling thread (the runtime's current device is per host thread).
+    static int  deviceCount();
+    static bool setDevice(int device);
 };
 
 // The wrapper is instantiated in exactly one translation unit (gfnff_hip_method.cpp),
