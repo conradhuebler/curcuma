@@ -33,15 +33,15 @@ const std::unordered_map<std::string, CitationData>& database()
             "Bannwarth, C. et al., WIREs Comput. Mol. Sci. 2021, 11, e1493 (DOI: 10.1002/wcms.1493)",
             "bannwarth2021xtb",
             "@article{bannwarth2021xtb,\n"
-            "  author = {Bannwarth, Christoph and Ehlert, Sebastian and Caldeweyher, Eike\n"
+            "  author = {Bannwarth, Christoph and Caldeweyher, Eike and Ehlert, Sebastian\n"
+            "            and Hansen, Andreas and Pracht, Philipp and Seibert, Jakob\n"
             "            and Spicher, Sebastian and Grimme, Stefan},\n"
-            "  title = {Extended Tight-Binding Quantum Chemistry Methods},\n"
+            "  title = {Extended {tight-binding} quantum chemistry methods},\n"
             "  journal = {WIREs Comput. Mol. Sci.},\n"
             "  year = {2021},\n"
             "  volume = {11},\n"
             "  pages = {e1493},\n"
-            "  doi = {10.1002/wcms.1493},\n"
-            "  url = {https://github.com/grimme-lab/xtb}\n"
+            "  doi = {10.1002/wcms.1493}\n"
             "}"
         }},
 
@@ -69,9 +69,9 @@ const std::unordered_map<std::string, CitationData>& database()
             "bannwarth2019gfn2",
             "@article{bannwarth2019gfn2,\n"
             "  author = {Bannwarth, Christoph and Ehlert, Sebastian and Grimme, Stefan},\n"
-            "  title = {GFN2-xTB -- An Accurate and Broadly Parametrized Self-Consistent\n"
-            "           Extended Tight-Binding Quantum Chemical Method with Multipole\n"
-            "           Electrostatics and Dispersion},\n"
+            "  title = {GFN2-xTB---An Accurate and Broadly Parametrized Self-Consistent\n"
+            "           Tight-Binding Quantum Chemical Method with Multipole\n"
+            "           Electrostatics and Density-Dependent Dispersion Contributions},\n"
             "  journal = {J. Chem. Theory Comput.},\n"
             "  year = {2019},\n"
             "  volume = {15},\n"
@@ -331,6 +331,7 @@ const std::unordered_map<std::string, CitationData>& database()
             "}\n"
             "@article{caldeweyher2019d4,\n"
             "  author = {Caldeweyher, Eike and Ehlert, Sebastian and Hansen, Andreas\n"
+            "            and Neugebauer, Hagen and Spicher, Sebastian and Bannwarth, Christoph\n"
             "            and Grimme, Stefan},\n"
             "  title = {A generally applicable atomic-charge dependent London dispersion correction},\n"
             "  journal = {J. Chem. Phys.},\n"
@@ -371,7 +372,7 @@ const std::unordered_map<std::string, CitationData>& database()
             "rezac2012h4",
             "@article{rezac2012h4,\n"
             "  author = {Řezáč, Jan and Hobza, Pavel},\n"
-            "  title = {Advanced Corrections of Hydrogen Bonding and Dispersion for Semiempirical Quantum Chemical Methods},\n"
+            "  title = {Advanced Corrections of Hydrogen Bonding and Dispersion for Semiempirical Quantum Mechanical Methods},\n"
             "  journal = {J. Chem. Theory Comput.},\n"
             "  year = {2012},\n"
             "  volume = {8},\n"
@@ -644,7 +645,7 @@ const std::unordered_map<std::string, CitationData>& database()
             "grimme2014qmdff",
             "@article{grimme2014qmdff,\n"
             "  author = {Grimme, Stefan},\n"
-            "  title = {A General Quantum Mechanically Derived Force Field (QMDFF) for Molecules and Condensed Phase Assemblies},\n"
+            "  title = {A General Quantum Mechanically Derived Force Field (QMDFF) for Molecules and Condensed Phase Simulations},\n"
             "  journal = {J. Chem. Theory Comput.},\n"
             "  year = {2014},\n"
             "  volume = {10},\n"
@@ -697,9 +698,9 @@ const std::unordered_map<std::string, CitationData>& database()
             "bannwarth2021xtb",
             "@article{bannwarth2021xtb,\n"
             "  author = {Bannwarth, Christoph and Caldeweyher, Eike and Ehlert, Sebastian\n"
-            "            and Hansen, Andreas and Pracht, Philipp and Seibert, Jan\n"
+            "            and Hansen, Andreas and Pracht, Philipp and Seibert, Jakob\n"
             "            and Spicher, Sebastian and Grimme, Stefan},\n"
-            "  title = {Extended Tight-Binding Quantum Chemistry Methods},\n"
+            "  title = {Extended {tight-binding} quantum chemistry methods},\n"
             "  journal = {WIREs Comput. Mol. Sci.},\n"
             "  year = {2021},\n"
             "  volume = {11},\n"
@@ -851,8 +852,8 @@ const std::unordered_map<std::string, CitationData>& database()
             "Townsend, J. et al., Nat. Commun. 2020, 11, 3230 (DOI: 10.1038/s41467-020-17035-5)",
             "townsend2020ripser",
             "@article{townsend2020ripser,\n"
-            "  author = {Townsend, James and Micucci, Colin P. and Hymel, James H.\n"
-            "            and Rinderspacher, Alison and Sundholm, Dage},\n"
+            "  author = {Townsend, Jacob and Micucci, Cassie Putman and Hymel, John H.\n"
+            "            and Maroulas, Vasileios and Vogiatzis, Konstantinos D.},\n"
             "  title = {Representation of molecular structures with persistent homology for machine learning applications in chemistry},\n"
             "  journal = {Nat. Commun.},\n"
             "  year = {2020},\n"
