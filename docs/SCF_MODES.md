@@ -47,8 +47,32 @@ converges stiff systems like `complex` where Fock-DIIS diverges.
 
 | Guess  | Behaviour                                                                  |
 |--------|---------------------------------------------------------------------------|
-| `h0`   | Bare Hamiltonian (zero shell charges) at iter 0. **Default.**             |
-| `eeq`  | Single-shot dftd4 EEQ atomic charges (`curcuma::dispersion::D4ChargeModel`), partitioned across shells by reference occupations. Starts the SCF in the correct basin. |
+| `eeq`  | Single-shot dftd4 EEQ atomic charges (`curcuma::dispersion::D4ChargeModel`), partitioned across shells by reference occupations (q_sh = q_A n0_sh / n0_A). Starts the SCF in the correct basin. **Default** (`native_xtb_method.h`). |
+| `h0`   | Bare Hamiltonian (zero shell charges) at iter 0. |
+| `fragments` | (Sep 2026, opt-in) Converge every covalently bonded fragment on its own (`Molecule::GetFragments`, same partition as `large_system_mode fragments`) and start from their shell charges and GFN2 atomic dipoles/quadrupoles, each in its real geometry. Neutral systems only, else falls back to `eeq`. See "Large clusters" below: correct, but not faster where it was tried. |
+
+No guess builds a density matrix: the GFN Fock matrix depends only on the SCC vector (shell
+charges, GFN2 atomic multipoles), so iteration 0 builds H from the guess and diagonalises.
+
+### Large clusters of small molecules (measured Sep 2026)
+
+`mixture2.xyz` (1000 water + 400 urea, 6200 atoms, packed): the GFN2 vacuum SCF of the **as-packed**
+geometry runs away (energy +2e5 Eh by iteration 3) on CPU and GPU, FP32 and FP64, with the `eeq`
+and the `h0` guess. Cut spheres show why: already iteration 1 moves up to ~2.3 e between
+molecules (charge sloshing across a HOMO-LUMO gap of ~0.1 eV per xtb 6.7.1), and the SCF only
+recovers on small cuts:
+
+| sphere | default | `fragments` | xtb 6.7.1 | ALPB water |
+|---|---:|---:|---:|---:|
+| 757 atoms | 111 it | 103 it | 53 it | - |
+| 1846 atoms | 76 it | 127 it | 191 it | 17 it |
+| 2142 atoms, **GFN-FF-relaxed** geometry | 13 it | - | - | - |
+
+Level shift (0.2/0.5 Eh) and stronger damping (0.2) do not converge within 150 iterations; DIIS
+produces NaN. Both used to be returned as valid energies (+3080 / +540710 Eh, exit code 0); since
+Sep 27, 2026 they end with an error (see "Failure handling" below). The fix is the geometry: relax
+with GFN-FF first, then GFN2 converges normally in vacuum. Implicit solvent (`-xtb.solvent water -xtb.solvent_model alpb`) also
+removes the sloshing, but is a different model.
 
 ## Controlling parameters
 
@@ -58,12 +82,39 @@ defaults equal the historic native defaults, so unset = no change.
 | Flag             | Default | Meaning |
 |------------------|---------|---------|
 | `-scf_mode`      | `broyden` | Strategy (see above). |
-| `-scf_guess`     | `h0`    | Initial charge guess (see above). |
+| `-scf_guess`     | `eeq`   | Initial charge guess (see above). |
 | `-scf_damping`   | `0.4`   | Density mixing factor: `P = damp*P_new + (1-damp)*P_old`. Lower = stronger damping. |
-| `-scf_threshold` | `1e-6`  | Convergence threshold on max\|dq_shell\| (and dE). |
+| `-scf_threshold` | `1e-5`  | Convergence threshold on max\|dq_shell\| (and dE). |
 | `-diis_start`    | `5`     | Damped warmup iterations before DIIS (diis/level-shift). |
 | `-diis_subspace` | `6`     | DIIS history depth (Fock matrices kept). |
 | `-level_shift`   | `0.2`   | Virtual-orbital shift magnitude (Eh) for `level-shift` mode. |
+| `-scf_allow_unconverged` | `false` | Accept an SCF that hit the iteration limit (150, fixed) instead of failing. |
+
+## Failure handling (Sep 27, 2026)
+
+An SCF result is only returned when it is one. Three cases now end the calculation with an error
+(`-sp` exits with 1; `-opt` exits with 1 and still writes its last accepted structure):
+
+- **Non-finite state** — energy, `max|dq|` or the SCC vector itself contains NaN/Inf. Before, a
+  NaN vector made `maxCoeff()` report 0, so the SCF "converged" (DIIS on a 1846-atom water/urea
+  cluster: +540710 Eh; now "diverged at iteration 6"). The same test sits in the GPU-resident loop,
+  where no NaN case has been reproduced yet.
+- **Not converged within the iteration limit** (fixed at 150; the log counts 151 iterations) — as
+  in xtb and tblite. `-scf_allow_unconverged true` restores the old behaviour (warning + last
+  energy) for anyone who knowingly accepts it.
+- **Implausible charges after the bare-H0 retry** — the runaway guard of CLAUDE.md Known Issue #9
+  used to return the retry's result even when it was just as impossible.
+
+The GPU-resident loop now names the failing stage (eigensolve, density, Broyden, ...) instead of
+reporting "failed at iteration N" without a reason. Not tested: the ROCm mirror (no SDK here) still
+reports without a reason.
+
+Consequence for existing data: GMTKN55 `G21IP/b+`, `be+`, `c+` (gfn2) never converged (CLAUDE.md
+Known Issue #9) and now fail instead of printing a meaningless number (checked: `c+` exits 1, with
+`-scf_allow_unconverged true` it prints -0.78818677 Eh as before). An MD stops at SimpleMD's existing
+per-step check ("Simulation got unstable, exiting!"); measured on C+ with a He 25 A away: one step,
+then the abort — but the MD still exits with 0 and prints the failed step as Epot = 0.0. That MD
+behaviour predates this change and is not fixed here.
 
 ## The `complex` (231 atoms) — converged
 

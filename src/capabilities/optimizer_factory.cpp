@@ -1,6 +1,7 @@
 /*
  * <Optimizer Factory Implementation>
- * Copyright (C) 2025 Claude AI - Generated Code
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Claude Generated (AI-written code, operator-owned)
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,6 +19,7 @@
  */
 
 #include "optimizer_factory.h"
+#include <limits>
 #include "ancopt_optimizer.h"
 #include "lbfgspp_optimizer.h"
 #include "native_optimizer_adapters.h"
@@ -237,19 +239,30 @@ OptimizationResult OptimizationDispatcher::optimizeStructure(
     const json& config)
 {
 
+    // Claude Generated (Sep 2026): a failure before or around the optimisation still returns a
+    // structure - the input, which is the last one there is - so the caller always has a geometry
+    // to write. Its energy is unknown here and marked NaN rather than 0.
+    auto failed_with_input = [&](const std::string& why) {
+        OptimizationResult r = OptimizationResult::failed_result(why);
+        if (molecule) r.final_molecule = *molecule;
+        r.final_energy = std::numeric_limits<double>::quiet_NaN();
+        r.final_gradient_norm = std::numeric_limits<double>::quiet_NaN();
+        return r;
+    };
+
     try {
         // Validate inputs
         if (!molecule) {
             return OptimizationResult::failed_result("Null molecule provided");
         }
         if (!energy_calculator) {
-            return OptimizationResult::failed_result("Null energy calculator provided");
+            return failed_with_input("Null energy calculator provided");
         }
 
         // Create optimizer
         auto optimizer = OptimizerFactory::createOptimizer(optimizer_type, energy_calculator);
         if (!optimizer) {
-            return OptimizationResult::failed_result("Failed to create optimizer");
+            return failed_with_input("Failed to create optimizer");
         }
 
         // Configure optimizer
@@ -277,7 +290,7 @@ OptimizationResult OptimizationDispatcher::optimizeStructure(
 
         // Initialize optimization
         if (!optimizer->InitializeOptimization(*molecule)) {
-            return OptimizationResult::failed_result("Optimizer initialization failed");
+            return failed_with_input("Optimizer initialization failed");
         }
 
         // Extract settings from config
@@ -295,8 +308,7 @@ OptimizationResult OptimizationDispatcher::optimizeStructure(
         return result;
 
     } catch (const std::exception& e) {
-        return OptimizationResult::failed_result(
-            fmt::format("Optimization failed: {}", e.what()));
+        return failed_with_input(fmt::format("Optimization failed: {}", e.what()));
     }
 }
 
@@ -391,6 +403,13 @@ std::vector<OptimizationResult> OptimizationDispatcher::optimizeBatch(
 
     std::vector<OptimizationResult> results;
     results.resize(molecules.size());
+
+    // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md G2-16): with a GPU device pool the batch
+    // runs at least one worker per GPU slot, as the -sp batch does (main.cpp) - at the default
+    // -threads 1 it used to optimise every structure one after another on device 0.
+    const auto& gpu_pool = curcuma::GpuDevicePool::instance();
+    if (gpu_pool.active())
+        threads = std::max(threads, gpu_pool.capacity());
 
     if (threads <= 1 || molecules.size() <= 1) {
         // Sequential path: no thread pool, no progress bar, identical behaviour

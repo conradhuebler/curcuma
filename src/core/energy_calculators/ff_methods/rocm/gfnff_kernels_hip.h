@@ -502,8 +502,10 @@ __global__ GFNFF_KERNEL_BOUNDS void k_dc6dcn_per_pair(
     const double* __restrict__ dgw,            ///< [N * MAX_REF] weight derivatives
     const double* __restrict__ c6_flat,        ///< [MAX_ELEM² * MAX_REF²] C6 reference table
     double*       __restrict__ dc6dcn_ij,      ///< [n] output: dC6(i,j)/dCN(i)
-    double*       __restrict__ dc6dcn_ji       ///< [n] output: dC6(i,j)/dCN(j)
+    double*       __restrict__ dc6dcn_ji,      ///< [n] output: dC6(i,j)/dCN(j)
+    double*       __restrict__ c6_out          ///< [n] output: C6(i,j) at the current CN, or nullptr
     // refn read from d_refn_const (constant memory, uploaded via upload_refn_const)
+    // Claude Generated (Sep 2026): mirror of the CUDA per-step C6 refresh (unverified: no ROCm SDK here).
 );
 
 // ============================================================================

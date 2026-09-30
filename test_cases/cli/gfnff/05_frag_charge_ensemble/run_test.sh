@@ -93,9 +93,12 @@ ea25 = rd("cl2m_ea25.xyz"); h3o = rd("h3op_h2o2.xyz")
 # 1. identity of the (now explicit) reference rule. Values pinned from master's own binary
 #    (Sep 27, 2026); EA_25 equals reactff2-llm's pin, H3OpH2O2 equals reactff2-llm's pre-Sep-25
 #    value (master keeps the bonded-triple ATM term that reactff2-llm switched off).
-H3O_PIN = 0.466545744259   # master = reactff2-llm before its Sep-25 ATM default flip (after it: 0.466545743025)
+#    Re-pinned Sep 30, 2026 after merging origin/master's CODATA-2018 unit-constants
+#    unification (Known Issue #35: gfnff shift <= 1.5e-4 kcal/mol ~= 2.4e-7 Eh) - both values
+#    moved by ~2-4e-9 Eh, well inside that documented bound.
+H3O_PIN = 0.466545742354   # master = reactff2-llm before its Sep-25 ATM default flip (after it: 0.466545743025)
 e1 = sp(ea25, -1, REF)[0]; e2 = sp(h3o, 1, REF)[0]
-check("identity EA_25 (reference)", abs(e1 - (-0.980160564980)) < 1e-10, f"{e1:.12f} vs -0.980160564980")
+check("identity EA_25 (reference)", abs(e1 - (-0.980160561416)) < 1e-10, f"{e1:.12f} vs -0.980160561416")
 check("identity H3OpH2O2 (reference)", abs(e2 - H3O_PIN) < 1e-10, f"{e2:.12f} vs {H3O_PIN:.12f}")
 # 2. label symmetry at the split
 r = 2.6409

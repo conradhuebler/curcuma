@@ -12,6 +12,7 @@
  * whole pipeline MKL-free.
  */
 
+#include "src/core/units.h"
 #include "xtb_fragment_scf.h"
 
 #include "src/core/curcuma_logger.h"
@@ -275,7 +276,7 @@ double FragmentScfDriver::runFragments(bool gradient)
 double FragmentScfDriver::runDivideConquer(bool gradient)
 {
     const int nat = m_mol.m_number_atoms;
-    const double au_per_bohr = 0.52917721092;          // Angstrom per Bohr
+    const double au_per_bohr = CurcumaUnit::Length::bohr_radius_or_legacy(0.52917721092);          // Angstrom per Bohr
     const double cell_A   = m_cell_bohr   * au_per_bohr;   // geometry is in Angstrom
     const double buffer_A = m_buffer_bohr * au_per_bohr;
     const Geometry& X = m_mol.m_geometry;

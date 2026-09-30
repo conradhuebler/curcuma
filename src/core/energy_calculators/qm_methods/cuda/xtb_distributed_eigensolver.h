@@ -99,6 +99,41 @@ public:
         return false;
     }
 
+    /// True when cholesky() is available (cuSOLVERMp backend).
+    virtual bool supportsCholesky() const { return false; }
+
+    /**
+     * @brief FP64 Cholesky factorisation S = L L^T on the devices (Claude Generated, Sep 29, 2026).
+     * @param A n x n column-major on src_device; lower triangle read, overwritten by L in the lower
+     *          triangle (upper triangle: whatever the backend leaves there, as cusolverDnDpotrf)
+     * @return false on failure; A is only written after a successful factorisation, but a failed
+     *         gather can leave it partly overwritten (inputIntact() false)
+     */
+    virtual bool cholesky(int n, double* A, int src_device)
+    {
+        (void)n; (void)A; (void)src_device;
+        return false;
+    }
+
+    /// True when solveBackTransformed() is available (cuSOLVERMp backend with plain cuBLAS).
+    virtual bool supportsBackTransform() const { return false; }
+
+    /**
+     * @brief solve() followed by the back-transform C = L^-T Q on the devices (Claude Generated,
+     *        Sep 29, 2026). A is the already reduced matrix L^-1 F L^-T; on return it holds the
+     *        generalized eigenvectors C instead of Q. Each device solves its own eigenvector
+     *        columns against a full copy of L (column-independent, no communication).
+     * @param L            lower Cholesky factor of S on src_device, same precision as A
+     * @param l_generation changes whenever the caller's L changes (the device copies are kept)
+     * @return false on failure; inputIntact() tells whether A is still the reduced matrix
+     */
+    virtual bool solveBackTransformed(int n, void* A, const void* L, long l_generation, void* eig,
+                                      bool fp32, int src_device)
+    {
+        (void)n; (void)A; (void)L; (void)l_generation; (void)eig; (void)fp32; (void)src_device;
+        return false;
+    }
+
     /// True when the distributed factor for (n, fp32, l_generation) is already in place.
     virtual bool hasMetric(int n, bool fp32, long l_generation) const
     {
@@ -108,7 +143,8 @@ public:
 
     /// Wall-clock split of the last solve() in ms: column scatter, collective solve, gather.
     /// For solveGeneralized() the solve part contains reduction + syevd + back-transform, and
-    /// reduce_ms / back_ms give those two separately (0 for solve()).
+    /// reduce_ms / back_ms give those two separately (0 for solve(); solveBackTransformed()
+    /// sets back_ms only).
     void lastTimings(double& scatter_ms, double& solve_ms, double& gather_ms) const
     {
         scatter_ms = m_scatter_ms; solve_ms = m_solve_ms; gather_ms = m_gather_ms;

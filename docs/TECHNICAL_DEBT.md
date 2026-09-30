@@ -124,7 +124,7 @@ S/P/Cl/Si), B0 guard removed; see [docs/SQM_DSHELL_WP.md](SQM_DSHELL_WP.md). Rem
 | F-G2 | `gfnff_method.cpp` repulsion grad | medium | `ff_methods/CLAUDE.md` table marks bonded repulsion gradient "⚠️ Partial" but `Calculation()` returns a gradient including repulsion with no runtime guard. `-opt` users get a knowingly-incomplete gradient silently. Finish or one-time-warn. |
 | F-E9 | `gfnff_method.cpp:4761,4776,5025` | low | `static bool/int` debug counters shared across instances/threads. Race under molecule-level CxxThreadPool parallelism. Remove / promote to members. |
 | F-Q5 | `gfnff_method.cpp:9136–9141` | medium | `std::ofstream("gfnff_diag_charges.json")` to CWD at verbosity 3 — BMT/outputPath violation (CLAUDE.md mandate). Route through `BMTUtils::outputPath()`. |
-| F-Q9 | `GFNFFGPUComputationalMethod` / `GFNFFHipComputationalMethod` `m_gpu_params_leaked` | medium | Intentional one-time leak (~100 KB) of `GFNFFParameterSet*` — freeing it corrupts adjacent CUDA heap metadata (`FFWorkspaceGPU` allocations). Root cause (CUDA driver heap corruption) uninvestigated. Same class of workaround as D-26 `copyGradientTo`. Fix the heap issue at source, then free properly. (Merged from the energy-system architecture audit.) |
+| F-Q9 | `GFNFFGPUComputationalMethod` / `GFNFFHipComputationalMethod` `m_gpu_params_leaked` | medium | Intentional one-time leak (~100 KB) of `GFNFFParameterSet*` — freeing it corrupts adjacent CUDA heap metadata (`FFWorkspaceGPU` allocations). Same class of workaround as D-26 `copyGradientTo`. **2026-09-24: investigated with ASan/compute-sanitizer/gdb for a concrete crash instance in the same bug class — see the dated note below; root cause narrowed but not found, tools confirmed blind to it, no fix applied.** Fix the heap issue at source, then free properly. (Merged from the energy-system architecture audit.) |
 
 ---
 
@@ -483,3 +483,60 @@ Correctness / crash / UB first, then maintainability. "v" = spot-verified by re-
 - Native xTB and GFN-FF GPU-kernel internals were deliberately **not** audited (out of scope); only CPU-path / `#ifdef`-leak / non-GPU debt there.
 - This is documentation only — no fixes applied. Each row's "suggested fix" is a one-line pointer, not a reviewed patch.
 - **2026-06-26 merge:** the separate architecture audit `TECHNICAL_DEBT_ENERGY_SYSTEM.md` was folded in here — its new findings became F-Q9, X-P1, X-P2, Q-59, D-46, and the section-5 build-flag note; everything else it raised was already covered above (Q-38 include path, D-26 copyGradientTo, D-24 interface bloat, D-18/D-19/D-20, D-2/D-3/D-15, F-W1, X-M5). That file was deleted after the merge.
+- **2026-09-29, F-Q9 likely cause found (AI, machine-tested):** the nvcc-compiled .cu TUs of the CUDA plugin were
+  built without `-DEIGEN_MAX_ALIGN_BYTES=64` (g++ and hipcc had it), so Eigen's inline allocation code existed in two
+  ABIs in the plugin. Freeing the host GFNFF object deterministically aborted with `free(): invalid pointer` in
+  `GFNFF::~GFNFF`; with the pin in `CMAKE_CUDA_FLAGS` it is freed cleanly (10/10 x 64 structures under
+  `glibc.malloc.check=3`), and the F-Q9 parameter-set leak is gone (see MULTI_GPU_GAPS F-16). This also explains why
+  the Sep 24 ASan build (vectorization off) never reproduced the crash. The Sep 24 reproducer itself no longer crashes
+  with the Sep 27 binary (0/5), so the link to that specific SIGSEGV is plausible, not proven. D-26/D-46 (reference /
+  copy workarounds for the same "CUDA heap" class) can be revisited.
+- **2026-09-24, F-Q9/D-26/D-46 investigated, root cause not pinned down (AI, machine-tested tooling, no fix applied):**
+  requested as "fix the SIGSEGV at its source" for a specific, reproducible instance — GFN-FF MD on `polymer_2x`
+  (nfrag=1502), GPU active, `-eeq_rocm_cpu_fragment_threshold` routing the CPU exact-PCG EEQ solve
+  (`EEQSolver::calculateFinalCharges`) into the same process as an active CUDA context. Crash rate ~80-100% per run
+  in this specific configuration (10/10 across compute-sanitizer + `-threads 1` batches), i.e. not the rare/flaky
+  case F-Q9 originally described, but the same class.
+  - **Built a from-scratch ASan instrumented tree** (`build_asan/`, `-DCMAKE_BUILD_TYPE=Debug
+    -DCMAKE_CXX_FLAGS="-fsanitize=address ..."`, matching `release/`'s CUDA/GFN-FF/BLAS options) — none existed
+    before. **Found and ruled out a genuine but unrelated toolchain false positive along the way**: Eigen's
+    AVX-512/AVX2 `pstore` intrinsics SEGV deterministically under this GCC 16.1.1 + ASan combination on *any*
+    vectorized `Eigen::Vector` assignment (reproduces even on a 24-atom system, plain `-sp -gpu cuda`, no MD, no
+    threshold flag) — confirmed absent on the plain `release/` binary, confirmed gone at `-O0` and with
+    `-DEIGEN_DONT_VECTORIZE`. Not investigated further (out of scope, no curcuma code involved); worth knowing
+    before trusting any ASan report from this codebase without a control run against the non-ASan binary.
+  - **With vectorization disabled (ASan usable), the real bug does not reproduce under ASan or under
+    `compute-sanitizer --tool memcheck`** — 5/5 and 4/5-crashing-but-0-errors-reported respectively, run against
+    the exact scenario that crashes the plain binary 4/5 of the time in the same batch. This is a *meaningful
+    negative result*, not an inconclusive one: both tools are specifically built to catch host-side heap misuse
+    (ASan) and CUDA host/device misuse (compute-sanitizer) and catch neither, despite the underlying crash
+    occurring at a similar rate in the same run. `dmesg`/kernel Xid: no NVIDIA driver-level fault logged for any
+    crash (inconclusive either way — Xid covers GPU kernel/reset faults, not necessarily userspace CUDA-library
+    heap interactions).
+  - **Ruled out, with a positive control each time:** a CPU-side threading race in the O(N²) EEQ-matrix-fill
+    (`std::thread`-parallel above 64 atoms) — crashes identically at `-threads 1`; the GPU-device-side PCG/Schur
+    kernels — crash is 100% CPU-side (`info threads` at the fault: exactly one thread); CLI argument parsing of
+    the long `-eeq_rocm_cpu_fragment_threshold` flag name — crashes identically when the same value is set via
+    `-import_config` JSON instead; a size-mismatch in the reused `m_phase2_A` `(N+nfrag)²` buffer — confirmed via
+    breakpoint that `ensurePhase2Buffers` is entered with the correct, cache-hit `natoms`/`nfrag` every time.
+    **Above all: a pure-CPU run of the identical MD (`-threads 8`, no `-gpu`) never crashes (0/3)** — the bug
+    requires an active CUDA context, full stop.
+  - **Positive finding, not just eliminations**: `gdb` on the `this` pointer of the very first
+    `EEQSolver::ensurePhase2Buffers` call after the crash-triggering CUDA sync (`FFWorkspaceGPU::finalizeCNForCPU`'s
+    `cudaStreamSynchronize`) shows genuine corruption — not a debugger display artifact, since a follow-up
+    `print m_phase2_buf_natoms` through the same pointer fails with "Cannot access memory". The corrupted pointer
+    value decodes to plausible ASCII fragments; this was NOT reproducible as a fixed pattern (differs run to run)
+    and following the specific string lead (a long CLI flag name) via the `-import_config` control above did not
+    hold up — treat the ASCII appearance as coincidental byte content of *some* nearby heap/rodata string, not as
+    a solved clue.
+  - **Where this leaves F-Q9/D-26/D-46**: the "root cause uninvestigated" status is no longer accurate — it has
+    now been investigated with the standard tools (ASan, compute-sanitizer, gdb) to the point where those tools
+    are confirmed not to see it, and the trigger is narrowed to "CPU touches a large heap-resident matrix shortly
+    after a `cudaStreamSynchronize` call, in the same process as an active CUDA context" (matches the existing
+    `gfnff.h:1128` "CUDA corrupts heap metadata" characterization directly). That is now the most specific
+    description available without NVIDIA-internal driver tooling this environment does not have. **No fix
+    applied** — the workaround pattern already in place elsewhere (pre-allocated buffers, memcpy instead of Eigen
+    assignment, avoiding fresh heap growth near a CUDA sync) is the only known mitigation, and extending it to
+    `EEQSolver`'s Phase-2 path is the next concrete, scoped step, not a root fix. See
+    [[curcuma MD-Stabilität großer Systeme]] (vault) for the full session log and every ruled-out hypothesis with
+    its exact command.

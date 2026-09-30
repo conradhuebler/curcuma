@@ -1,6 +1,6 @@
 /*
  * GFN-FF Parameters - angewChem2020 Parameter Set
- * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "src/core/units.h"
 #include <cmath>
 #include <initializer_list>
 #include <utility>
@@ -285,7 +286,12 @@ static const std::vector<double> rcov_bohr = r0_gfnff;
 // Stored as raw_Å × aatoau (Bohr, WITHOUT 4/3 scaling)
 // The 4/3 factor is applied at runtime in torsion/angle/HB damping functions.
 // Claude Generated (Mar 7, 2026): Exact Fortran raw values × aatoau for traceability
-static constexpr double gfnff_aatoau = 1.0 / 0.52917726; // Fortran gfnff_param.f90:380
+// Bohr radius for converting the GFN-FF REFERENCE TABLES. The reference itself uses
+// 0.52917726 (Fortran gfnff_param.f90:380, not a CODATA value); the default build uses
+// CODATA 2018 here like everywhere else, -DUSE_LEGACY_UNIT_CONSTANTS=ON restores 0.52917726
+// (tables bit-identical to the reference) - see docs/UNIT_CONSTANTS.md. Claude Generated (Sep 2026).
+static constexpr double gfnff_autoaa = CurcumaUnit::Length::bohr_radius_or_legacy(0.52917726);
+static constexpr double gfnff_aatoau = 1.0 / gfnff_autoaa;
 
 static const std::vector<double> covalent_rad_d3 = {
     0.32 * gfnff_aatoau, 0.46 * gfnff_aatoau,                                         // H, He
@@ -318,6 +324,27 @@ static const std::vector<double> covalent_rad_d3 = {
     2.01 * gfnff_aatoau, 1.81 * gfnff_aatoau,                                         // Fr, Ra
     1.67 * gfnff_aatoau, 1.58 * gfnff_aatoau                                          // Ac, Th
 };
+
+/**
+ * @brief GFN-FF coordination-number radius in Bohr for element Z
+ *
+ * covalentRadD3 x aatoau x 4/3, the reference's param%rcov (gfnff_param.f90:381-402);
+ * aatoau = 1/gfnff_autoaa, i.e. CODATA 2018 by default and the reference's 1/0.52917726
+ * in a USE_LEGACY_UNIT_CONSTANTS build. The ONE source for every CN evaluation:
+ * CNCalculator, the GFNFF dCN loops, mchar and - through covalent_rad_d3 - the GPU
+ * kernels. Claude Generated (Sep 2026): replaces local conversions that used two other
+ * Angstrom->Bohr constants - 1.8897259886 = 1/0.529177249 (CODATA 1986) in the CPU CN
+ * code and 1/0.529177210903 (CODATA 2018) in the mchar radii - while the GPU took the
+ * table's 1/0.52917726. The CPU CN radii were 2.1e-8 relative off the GPU's, which put a
+ * systematic 1-2.5e-10 Eh per bond between CPU and GPU (5e-7 Eh on 7320 atoms).
+ *
+ * @return radius in Bohr, 0.0 outside Z = 1..86
+ */
+inline double gfnff_cn_rcov_bohr(int Z)
+{
+    if (Z < 1 || Z > 86) return 0.0;
+    return covalent_rad_d3[Z - 1] * (4.0 / 3.0);
+}
 
 // Standard covalent radii - Angström
 // Used for bond detection threshold (× 1.3)
@@ -730,6 +757,39 @@ static constexpr double VBOND_SCALE = 0.9;
 static constexpr double XHACI_GLOBABH = 0.268;  // A-H...B general scaling
 static constexpr double XHACI_COH = 0.350;      // A-H...O=C scaling
 static constexpr double XHACI_GLOB = 1.50;      // Baseline acidity
+
+// --- HB/XB damping primitives ---
+// Moved here (Sep 2026) from ff_workspace_gfnff.cpp's file-local anonymous namespace so that
+// GFNFF::estimateHBStrengthCase1/Case2or4/estimateXBStrength (gfnff_method.cpp, the
+// detection-time early-pruning of negligible HB/XB candidates — see gfnff.h PARAM
+// hb_min_pair_energy_eh/xb_min_pair_energy_eh) can call the EXACT SAME formula the energy
+// kernel (FFWorkspace::calcHydrogenBonds/calcHalogenBonds) uses, with no risk of the two
+// silently diverging. Names/bodies unchanged; ff_workspace_gfnff.cpp's `using namespace
+// GFNFFParameters` already brings these into scope there, so its call sites needed no change.
+inline double ws_damping_out_of_line(double r_AH, double r_HB, double r_AB, double radab, double bacut)
+{
+    double ratio = (r_AH + r_HB) / r_AB;
+    double exponent = (bacut / radab) * (ratio - 1.0);
+    if (exponent > 15.0) return 0.0;
+    return 2.0 / (1.0 + std::exp(exponent));
+}
+
+inline double ws_damping_short_range(double r, double r_vdw, double scut, double alp)
+{
+    double ratio = scut * r_vdw / (r * r);
+    return 1.0 / (1.0 + std::pow(ratio, alp));
+}
+
+inline double ws_damping_long_range(double r, double longcut, double alp)
+{
+    return 1.0 / (1.0 + std::pow(r * r / longcut, alp));
+}
+
+inline double ws_charge_scaling(double q, double st, double sf)
+{
+    double exp_term = std::exp(st * q);
+    return exp_term / (exp_term + sf);
+}
 
 // --- HB / XB element tables (xhbas, xhaci, xbaci) ---
 //

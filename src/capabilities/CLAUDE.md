@@ -55,6 +55,7 @@ capabilities/
     - **EIGEN_USE_LAPACKE**: per-file in rf_solver.cpp (safe, no `I` variable conflict)
   - Not tested: QM gradients, transition states, linear molecules, XL tier (>2000 atoms)
 - **OptimizerDriver** (`optimizer_driver.cpp/h`): 🤖 AI-generated base class (Template Method)
+  - A zero step counts as converged only if the driver's own criteria hold; `-opt.stall_steps`/`-opt.stall_rmsd` (20 / 1e-6 Å) end a frozen run as "No progress" (Sep 2026). Every abort writes the last accepted structure.
 - **OptimizerFactory** / **OptimizationDispatcher**: 🤖 AI-generated
 - **Native L-BFGS / DIIS / RFO** (`optimisation/lbfgs.cpp`): 🤖 AI-generated — see `optimisation/CLAUDE.md`
 - **Constrained optimization**: Fix atomic positions by setting gradient = 0

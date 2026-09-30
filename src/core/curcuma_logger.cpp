@@ -17,6 +17,7 @@
  *
  */
 
+#include "src/core/units.h"
 #include "curcuma_logger.h"
 #include "citation_registry.h"
 #include <algorithm>
@@ -56,7 +57,7 @@ std::mutex g_citation_mutex;
 inline double hartree_to_kjmol(double eh) { return eh * 2625.4996394798; }
 inline double hartree_to_ev(double eh) { return eh * 27.211386245988; }
 inline double hartree_to_wavenumber(double eh) { return eh * 219474.6313632; }
-inline double bohr_to_angstrom(double bohr) { return bohr * 0.529177210903; }
+inline double bohr_to_angstrom(double bohr) { return bohr * CurcumaUnit::Length::BOHR_TO_ANGSTROM; }
 
 // ============================================================================
 // Public Interface Implementation

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This file is part of Curcuma - Native Solvation Module
  *
@@ -9,6 +9,7 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
+#include "src/core/units.h"
 #include "gbsa.h"
 
 #include <cmath>
@@ -20,7 +21,7 @@ namespace Solvation {
 
 // Physical constants
 namespace {
-    const double ANGSTROM_TO_BOHR = 1.8897259886;     // Conversion factor
+    const double ANGSTROM_TO_BOHR = CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.8897259886);
     const double KCAL_TO_HARTREE = 0.00159360144;      // kcal/mol to Hartree
     const double SQRT_PI = 1.7724538509055159;         // √π
 }

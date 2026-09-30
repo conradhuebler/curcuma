@@ -134,6 +134,15 @@ option(USE_VULKAN
 # USE_AVX2 or USE_MARCH_NATIVE alongside); CMake errors out if AVX2 cannot be enabled.
 option(USE_GFNFF_FAST_EXP
     "Enable SIMD-vectorized exp() in GFN-FF dcn hot loop (WP-D Stage B, requires AVX2)" OFF)
+# Sep 2026: every unit conversion uses CODATA 2018 (src/core/units.h). ON restores the
+# per-site constants curcuma used before (seven Bohr radii incl. the GFN-FF Fortran literal
+# 0.52917726, older Hartree factors) bit for bit - for reproducing earlier results and for
+# exact comparison with reference codes. See docs/UNIT_CONSTANTS.md.
+option(USE_LEGACY_UNIT_CONSTANTS
+    "Use the pre-Sep-2026 per-site unit constants instead of CODATA 2018 everywhere" OFF)
+if(USE_LEGACY_UNIT_CONSTANTS)
+    add_compile_definitions(CURCUMA_LEGACY_UNIT_CONSTANTS=1)
+endif()
 option(GFNFF_CN_DCN_FUSION
     "Enable fused CN+DCN single-pass (WP-D Stage D, no SIMD dependency)" OFF)
 if(GFNFF_CN_DCN_FUSION)
@@ -397,7 +406,15 @@ elseif(USE_AVX2)
 endif()
 if(NOT CURCUMA_EIGEN_ALIGN EQUAL 0)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DEIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN}")
-    message(STATUS "Eigen: EIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN} (pinned for g++/GPU-TU ABI parity)")
+    # Claude Generated (Sep 2026): the same pin for nvcc. The hipcc TUs got it in Jun 2026, the
+    # CUDA .cu TUs never did: ff_workspace_gpu.cu / gfnff_kernels.cu / xtb_gpu_context.cu include
+    # Eigen, so the CUDA plugin carried Eigen's inline allocation code in two ABIs (16 from nvcc,
+    # 64 from g++) and the linker kept one. An Eigen vector allocated with one and freed with the
+    # other aborts with "free(): invalid pointer" - which is what the March 2026 "CUDA heap
+    # corruption" workaround (deliberately leaking the host GFNFF object and parameter set, ~194 MB
+    # per structure in a GPU batch) was hiding (docs/MULTI_GPU_GAPS.md F-16).
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -DEIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN}")
+    message(STATUS "Eigen: EIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN} (pinned for g++/nvcc/hipcc ABI parity)")
 endif()
 
 # WP-D Stage B (May 2026): USE_GFNFF_FAST_EXP requires AVX2. Either USE_AVX2 or
@@ -542,6 +559,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/method_factory.cpp
         src/core/energy_calculators/gpu_plugin.cpp
         src/core/gpu_device_pool.cpp
+        src/core/gpu_fallback.cpp
         src/core/energy_calculators/qm_methods/eht_method.cpp
         src/core/energy_calculators/qm_methods/native_xtb_method.cpp
         src/core/energy_calculators/qm_methods/nddo.cpp
@@ -1042,6 +1060,20 @@ if(USE_CUDA)
     # the compiler's own default and a later set(... CACHE) is ignored.
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
         set(CMAKE_CUDA_ARCHITECTURES "${_curcuma_cuda_archs}" CACHE STRING "CUDA architectures")
+    else()
+        # Claude Generated (Sep 2026): a CACHE STRING is only ever written once - if this
+        # build directory already has ANY value (from a prior -DCMAKE_CUDA_ARCHITECTURES=...,
+        # an inherited env var, or a cluster module/toolchain file), the branch above never
+        # runs again on any later `cmake`/`make` in the same directory, and the toolkit-aware
+        # default (which already includes 90 for H100/H200) is silently skipped forever - the
+        # likely cause of "no GPU speedup on H200" when the cached value predates that card.
+        # This is not a curcuma bug, just CMake CACHE semantics; make it visible instead of
+        # silent. Fix: wipe this build dir (or `cmake --fresh`) to let the default apply, or
+        # pass an explicit -DCMAKE_CUDA_ARCHITECTURES=<your target, e.g. 90 for H200>.
+        message(STATUS "CMAKE_CUDA_ARCHITECTURES already cached as '${CMAKE_CUDA_ARCHITECTURES}' "
+                       "(NOT curcuma's toolkit-aware default '${_curcuma_cuda_archs}') - "
+                       "if this build targets a different GPU, wipe this build directory "
+                       "or pass -DCMAKE_CUDA_ARCHITECTURES explicitly.")
     endif()
     enable_language(CUDA)
     set(CMAKE_CUDA_STANDARD 17)
@@ -1092,13 +1124,19 @@ if(USE_CUDA)
     #     an NVIDIA HPC SDK math_libs directory; NCCL from the system or NCCL_ROOT.
     #   cusolverMg (fallback): ships with the CUDA toolkit, deprecated since CUDA 13.
     option(CURCUMA_MULTI_GPU_EIGENSOLVER "Link cuSOLVERMp/NCCL and cusolverMg when found" ON)
+    # Claude Generated (Sep 2026): turn "not found" from a STATUS line into a configure error.
+    # Use it on any machine where the distributed eigensolve is the point of the build.
+    # Default OFF: the libraries stay OPTIONAL and a machine without them builds and runs
+    # (single GPU, batch over GPUs, distributed density - only the split eigensolve is lost).
+    option(CURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER
+           "Fail the configure when cuSOLVERMp/cuBLASMp/NCCL are not found (default OFF: optional)" OFF)
     if(CURCUMA_MULTI_GPU_EIGENSOLVER)
         # Separate library, dlopen'ed by libcurcuma_cuda.so on first use: a run host without
         # cuSOLVERMp/NCCL keeps the single-GPU plugin working.
         add_library(curcuma_cuda_mgpu SHARED
             src/core/energy_calculators/qm_methods/cuda/xtb_distributed_eigensolver.cpp)
         target_include_directories(curcuma_cuda_mgpu PRIVATE ${PROJECT_SOURCE_DIR})
-        target_link_libraries(curcuma_cuda_mgpu PRIVATE CUDA::cudart)
+        target_link_libraries(curcuma_cuda_mgpu PRIVATE CUDA::cudart CUDA::cublas)
         target_compile_definitions(curcuma_cuda_mgpu PRIVATE USE_CUDA)
         set_target_properties(curcuma_cuda_mgpu PROPERTIES
             POSITION_INDEPENDENT_CODE ON
@@ -1131,9 +1169,62 @@ if(USE_CUDA)
             set_property(TARGET curcuma_cuda_mgpu APPEND PROPERTY BUILD_RPATH "${_mp_dir};${_bmp_dir}")
             set_property(TARGET curcuma_cuda_mgpu APPEND PROPERTY INSTALL_RPATH "${_mp_dir};${_bmp_dir}")
             message(STATUS "Multi-GPU eigensolver: cuSOLVERMp ${CURCUMA_CUSOLVERMP_LIB}, NCCL ${CURCUMA_NCCL_LIB}")
+            set(CURCUMA_MGPU_BACKEND "cuSOLVERMp + NCCL")
         else()
-            message(STATUS "Multi-GPU eigensolver: cuSOLVERMp/cuBLASMp/NCCL not found (set CUSOLVERMP_ROOT, CUBLASMP_ROOT, NCCL_ROOT)")
+            # Claude Generated (Sep 2026): say WHICH piece is missing, and offer to fail here.
+            # A single STATUS line in a long configure log is how a cluster build ends up
+            # silently Mg-only - and cusolverMg measured 15x slower than one GPU on
+            # polymer_2x (docs/GPU_TUNING.md), i.e. that build looks like "multi-GPU does
+            # not help" while nothing multi-GPU ever ran.
+            set(_mgpu_missing "")
+            foreach(_v CURCUMA_CUSOLVERMP_INCLUDE CURCUMA_CUSOLVERMP_LIB
+                       CURCUMA_CUBLASMP_INCLUDE CURCUMA_CUBLASMP_LIB
+                       CURCUMA_NCCL_INCLUDE CURCUMA_NCCL_LIB)
+                if(NOT ${_v})
+                    string(APPEND _mgpu_missing "\n     missing: ${_v}")
+                endif()
+            endforeach()
+            set(CURCUMA_MGPU_BACKEND "cusolverMg only (FALLBACK)")
+            if(CURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER)
+                message(FATAL_ERROR
+                    "CURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER=ON, but the distributed eigensolver "
+                    "cannot be built:${_mgpu_missing}\n"
+                    "   Set CUSOLVERMP_ROOT, CUBLASMP_ROOT and NCCL_ROOT (pip wheels "
+                    "nvidia-cusolvermp-cuXX / nvidia-cublasmp-cuXX / nvidia-nccl-cuXX, or an "
+                    "NVIDIA HPC SDK math_libs/comm_libs directory), or configure with "
+                    "-DCURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER=OFF to accept the cusolverMg "
+                    "fallback (measured 15x SLOWER than a single GPU on polymer_2x).")
+            endif()
+            message(STATUS "Multi-GPU eigensolver: cuSOLVERMp/cuBLASMp/NCCL not found - OPTIONAL, the build continues.${_mgpu_missing}")
+            message(STATUS "   Unaffected without them: every single-GPU run, the batch spread over "
+                           "several GPUs (-gpu_devices), and the distributed density "
+                           "(-gpu_density_devices). Only ONE molecule's eigensolve cannot be split.")
+            if(CURCUMA_CUSOLVERMG_LIB)
+                message(STATUS "   This build falls back to cusolverMg for that one case; it works "
+                               "and stays exact, but measured 15x slower than a single GPU on "
+                               "polymer_2x, so prefer -gpu_eigensolver_devices none there.")
+            endif()
+            message(STATUS "   To enable: pip install nvidia-cusolvermp-cu13 nvidia-cublasmp-cu13 "
+                           "nvidia-nccl-cu13, then -DCUSOLVERMP_ROOT=<site-packages>/nvidia/cu13 "
+                           "-DCUBLASMP_ROOT=<site-packages>/nvidia/cublasmp/cu13 -DNCCL_ROOT=<prefix>; "
+                           "or point them at an NVIDIA HPC SDK math_libs/comm_libs directory.")
+            message(STATUS "   To make this a configure error instead: "
+                           "-DCURCUMA_REQUIRE_MULTI_GPU_EIGENSOLVER=ON")
         endif()
+        # One summary block, after the individual lines, so the outcome is visible at the end
+        # of a long configure and can be grepped: `cmake .. | grep "multi-GPU eigensolver"`.
+        if(CURCUMA_MGPU_BACKEND STREQUAL "cuSOLVERMp + NCCL")
+            if(CURCUMA_CUSOLVERMG_LIB)
+                set(_mgpu_summary "cuSOLVERMp + NCCL (cusolverMg also linked as fallback)")
+            else()
+                set(_mgpu_summary "cuSOLVERMp + NCCL")
+            endif()
+        elseif(CURCUMA_CUSOLVERMG_LIB)
+            set(_mgpu_summary "cusolverMg only - optional cuSOLVERMp missing, see above")
+        else()
+            set(_mgpu_summary "none - one molecule stays on one GPU (everything else works)")
+        endif()
+        message(STATUS "=== curcuma multi-GPU eigensolver: ${_mgpu_summary} ===")
     endif()
     # Match curcuma_core's compile definitions EXACTLY so every shared class (XTB, ...) has
     # an identical ABI on both sides of the dlopen boundary. Generator expression captures

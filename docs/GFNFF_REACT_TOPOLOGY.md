@@ -159,7 +159,7 @@ The asymmetry is deliberate:
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `topology_mode` | `auto` | `auto` (alias `default`), `constant`, `react` |
+| `topology_mode` | `constant` (since Sep 29, 2026; was `auto`) | `constant` (alias `default`), `auto`, `react` |
 | `react_bond_form_factor` | 1.6 | formation radius factor (optimistic) |
 | `react_bond_break_factor` | 2.6 | retention radius factor (conservative) |
 | `react_check_every` | 5 | scan every N energy calls (0 = displacement only) |

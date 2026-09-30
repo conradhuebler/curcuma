@@ -429,11 +429,13 @@ verdict depends entirely on the BLAS build.
 The eigensolve used to be capped at 8 threads regardless of `-threads`, because
 the FP32 reduction dominated and regressed past that. With the FP64 reduction the
 optimum moved, and it is machine-dependent, so the cap is gone and `-threads`
-decides (`CURCUMA_EIG_MAX_THREADS` still caps it independently if wanted).
+decides (`-eigensolver_max_threads N` caps it independently if wanted;
+`CURCUMA_EIG_MAX_THREADS` is the older spelling and still wins over the flag).
 polymer, gfn2, this 36-core box: `-threads 8` 28.8 s, **`-threads 16` 24.9 s**,
 `-threads 24` 27.0 s, `-threads 36` 30.2 s; complex/231 is unaffected (1.11 s,
 the size gate keeps it serial). The D&C eigensolve is memory-bandwidth-bound, so
-more threads than memory channels still lose - that is now a user choice.
+more threads than memory channels still lose - that is now a user choice, and
+`scripts/tuning_sweep.py` measures it per machine (docs/GPU_TUNING.md section 5).
 
 ## The three memory-bound O(nat^2)/O(nao^2) SCF loops (2026-09)
 
@@ -448,14 +450,17 @@ bound (the multipole ones touch 18 matrices, i.e. ~286 MB per call at nat = 1410
 | potential build (`addMultipolePotential`) | 172 ms/it | **55 ms/it** |
 | `energyMultipole` (inside "energy/mix") | 158 ms/it | **18 ms/it** |
 | populations (GFN2 multipole moments) | 214 ms/it | **77 ms/it** |
-| reduce (`dsygst` -> two `dtrsm` above 8 threads) | 231 ms/it | **169 ms/it** |
+| reduce (`dsygst` -> two `dtrsm` above 8 threads, `-scf_reduce`) | 231 ms/it | **169 ms/it** |
 | **wall** | 24.9 s | **21.0 s** |
 
 The potential build is threaded over the target atom with disjoint writes, so it
 stays bit-identical. The energy and the populations use per-thread partial sums
 added in a fixed thread order, which reassociates the outer sum: over polymer the
 energy stays identical to 12 decimals and the gradient moves by 1.5e-14, and the
-converged FP64 result was in fact unchanged (diff 0.0). Switching the reduction
+converged FP64 result was in fact unchanged (diff 0.0). The reduction route is
+`-scf_reduce auto|sygst|trsm` with the switch point at `-scf_reduce_threads`
+(default 8), so a machine with a different BLAS can be measured rather than
+guessed. Switching the reduction
 to triangular solves is a rounding-level change (3.9e-14 on the gradient).
 
 ## What is left on the CPU (polymer, gfn2, -threads 16, 21.0 s)
@@ -552,6 +557,209 @@ After the 2026-07 integral work the setup is 91 ms and the gradient 175 ms, so
 **the SCF is now 70% of the gfn2 runtime** (762 of 1083 ms) and the iteration
 count is the dominant remaining lever — not the integrals. A looser convergence
 (`-scf_threshold 5e-5` → 16 it, energy-identical) closes most of what is left.
+
+## The GPU gradient and the MD step at 7320 atoms (2026-09)
+
+> AI-generated, machine-measured. Every number below is measured on this machine unless
+> labelled otherwise. Human production testing pending.
+>
+> **Supersedes the first revision of this section**, which put the gradient at "~96 s" from
+> the difference MD-step minus single-point. That difference is not the gradient: 45 s of it
+> is an extra FP64 eigensolve in the MD step (see "Why an MD step is not a single point").
+
+All on `polymer_2x_gfnff_opt.xyz` (7320 atoms, GFN2 nao 15444, screened pairs 6.1 %),
+1x RTX A4500, CUDA 13.3, `-gpu cuda -threads 8`, one device
+(`-gpu_eigensolver_devices none -gpu_density_devices none`).
+
+### The three totals
+
+| run | wall | SCF |
+|---|---:|---:|
+| `-sp` (energy only) | 249 s | 220.8 s, 12 iterations |
+| `-sp -gradient` | 287.1 s | 220.5 s, 12 iterations |
+| `-md` step, steady state | 332.4 s | ~268 s, 10 iterations |
+
+**A gradient costs 38 s in a single point.** The MD step is another 45 s on top, and that is
+*not* gradient work — the gradient phases are identical in both (below).
+
+### Where the 38 s go (`CURCUMA_GPU_PROFILE=1`, marks added to `computeGradient`)
+
+| phase | time | share of device gradient |
+|---|---:|---:|
+| `W = C_occ*diag(2 eps)*C_occ^T` (DGEMM) | **12748 ms** | **94 %** |
+| H0 Pulay (screened pair kernel) | 452 ms | 3.3 % |
+| Coulomb | 234 ms | 1.7 % |
+| repulsion + CN onsite | 114 ms | 0.8 % |
+| dense density rebuild (`ensureDenseDensity`) | 0.0 ms | already dense |
+| workspace alloc / uploads / download+sync | 6.4 ms | — |
+| **device gradient total** | **13555 ms** | |
+
+The printed `gradient :` line is 18.7 s, so ~5.2 s is the host part (the two `nat^2` loops).
+**The earlier estimate of "~20 s" for the two DGEMMs was of the right order but the wrong
+shape**: `ensureDenseDensity` costs nothing here (P is already dense from the resident
+finalize), and the entire cost is the single `W` DGEMM. That one call is 94 % of the device
+gradient, and its result is read only at the 6.1 % of AO pairs the screened kernel visits.
+
+**The gradient is not distributed.** With 4 GPUs the SCF drops 1.94x while every gradient
+mark is unchanged (12726 / 452 / 234 / 114 ms). The gradient plus the host round-trips below
+is a fixed ~43 s, so it grows from 15 % to 23 % of wall time as GPUs are added.
+
+### Requesting a gradient costs 19.4 s of host round-trips, per geometry
+
+`xtb_native.cpp:1519-1523` only keeps the wavefunction on the device when NO gradient is
+requested, although the device gradient passes empty P/C with `pc_resident=true`
+(`xtb_gradient.cpp:862-868`) and the host fallback re-fetches on demand (`:1678-1681`).
+Measured with the same structure, `Post-SCF host phases:` (`xtb_native.cpp:1610-1615`):
+
+| phase | no gradient | with gradient |
+|---|---:|---:|
+| finalize: download P and C | 0.0 ms | **15332 ms** |
+| host potential rebuild | 0.0 ms | 1864 ms |
+| Coulomb/third-order/multipole energies | 0.0 ms | 1672 ms |
+| band energy Tr(P H0) | 0.0 ms | 284 ms |
+| entropy/repulsion/halogen bond | 796 ms | 797 ms |
+| dispersion (D4, incl. gradient prep) | 4052 ms | 4052 ms |
+
+**This is paid in every MD step, not once** — confirmed by the per-step profile of a 4-step
+MD. Over 1000 steps that is 5.3 hours for data nothing reads.
+
+### Why an MD step is not a single point: extrapolation saves the cheap iterations
+
+`-scf_extrapolation aspc` works — iterations per MD step go 15, 12, 10, 10. But the
+eigensolve time does not follow, because mixed precision is ON on a consumer card and the
+two precisions differ by 6.5x:
+
+| MD step | SCF iters | FP32 | **FP64** | FP32 time | **FP64 time** | eigensolve total |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 15 | 14 | **1** | 105.6 s | **49.3 s** | 154.9 s |
+| 2 | 12 | 10 | **2** | 75.5 s | **98.4 s** | 173.9 s |
+| 3 | 10 | 8 | **2** | 60.3 s | **98.4 s** | 158.7 s |
+| 4 | 10 | 8 | **2** | 60.5 s | **98.2 s** | 158.7 s |
+
+Per call: FP32 `syevd` 7.54 s, FP64 `syevd` 49.2 s. A third fewer iterations and **not one
+second saved** — the iterations extrapolation removes are the cheap FP32 ones, while the
+count of expensive FP64 ones goes UP. The log says why: `SCF: FP32 phase stalled at
+max|dq| = 9.50e-06`. FP32 cannot resolve below ~1e-5 on this system, and a better starting
+guess reaches that floor sooner, so more of the run happens in FP64.
+
+A cold single point needs **one** FP64 eigensolve, an extrapolated MD step **two**. 49 s —
+that is the whole 45 s difference.
+
+**This is a consumer-GPU artefact and does not transfer to a datacenter card.** There mixed
+precision is OFF by default (full-rate FP64, see "GPU: mixed precision ... " in
+AIChangelog.md), so the effect cannot occur. Do not extrapolate these MD-vs-single-point
+numbers to an H200.
+
+### An MD step, fully accounted
+
+332.4 s = SCF ~268 s (81 %) + host round-trips 19.1 s (6 %) + device gradient 13.6 s (4 %)
++ host gradient ~5.2 s + D4/entropy/repulsion ~4.9 s + integrals and remainder.
+
+### Instrumentation added for this (both env-gated, zero cost when unset)
+
+- `XtbGpuContext::computeGradient` now carries 8 `profMark` calls, the same mechanism as the
+  integral build and the resident SCF. Before this the gradient was the only phase
+  `profileReport()` could not resolve at all.
+- The GFN-FF GPU path filled none of the `-md_diagnostics_timing` fields, because
+  `setRecordKernelTimings(verbosity >= 2)` at the top of every `calculateEnergy()` silently
+  overwrote the `setForcePhaseTiming(true)` that `-md_diagnostics_timing` had set once. Any
+  GFN-FF GPU MD below verbosity 2 lost its kernel timings every step. Fixed by OR-ing the two.
+
+### Implemented (2026-09): the gradient is now 7 s instead of 38 s
+
+Three changes, each measured separately, all on the same structure and one device:
+
+| | before | after |
+|---|---:|---:|
+| `-sp -gradient` wall | 287.1 s | **256 s** |
+| `gradient :` block | 18747 ms | **6499 ms** |
+| `grad: W = C_occ*diag(2 eps)*C_occ^T` | 12748 ms | **3309 ms** |
+| `finalize: download P and C` | 15332 ms | **0.0 ms** |
+| device memory during the gradient | 12337 MiB | **8143 MiB** |
+
+1. **The host P/C download is skipped when the device gradient will run.** The gate at
+   `xtb_native.cpp:1525-1531` now mirrors the caller's own gate exactly. Note there are TWO
+   `m_pot` rebuild sites: `:1555` (kept for the debug `m_F`, now skipped) and `:1656`, which is
+   unconditional under `if (gradient)` and is the one the gradient reads — so the gradient's
+   potential is unaffected.
+2. **P and W are read straight off the screened pattern; no dense `nao^2` matrix is built.**
+   `dSpP` is already the SCF's converged pattern density and needed no new computation at all;
+   `dSpW` is built once per gradient by the existing `k_density_sp` SDDMM with the weight set to
+   `2*eps`. The precondition was verified exhaustively: the only readers of `dP`/`dW` in the
+   gradient are `k_grad_cn_onsite` (diagonal only, always in-pattern by construction,
+   `buildScreenedPairs:3735-3746`) and `d_grad_h0_pulay_pair` via `k_grad_h0_pulay_sp` (stored
+   pairs only). The dense path is kept untouched as the reference for small systems.
+   **Measured 3309 ms against the 3273 ms of `scf: density P + populations`** — the SDDMM's own
+   cost for the same shape, i.e. the pattern build costs what the identical existing operation
+   costs, not the naive "16x fewer flops".
+3. **The two `nat^2` host loops are threaded** (`xtb_gradient.cpp:894-1024`, `parallelStripes`,
+   same idiom as host section 2b at `:231-234`). Not bit-identical by construction; measured
+   `-threads 1` vs `-threads 16` on 7320 atoms: **2.06e-14**.
+
+**Validation**: energy bit-identical (`-11799.19965134 Eh`); gradient vs a separate reference
+build **1.36e-14** at the DEFAULT `-scf_threshold`; `ctest` gpu 200/200, gpu_gradient 24/24,
+sqm 335/335.
+
+**A measurement trap worth recording.** The first comparison put the deviation at 1.1e-05 and
+appeared to scale with `scf_threshold`, which looked like a stale input. It was neither: the two
+runs had used **different eigensolver configurations**. This box has 4 GPUs and the multi-GPU
+eigensolve auto-activates above 4000 basis functions, and the distributed solve is less
+run-to-run reproducible than the single-GPU one — **the unmodified binary differs from itself by
+2.8e-05 between the two configurations**. Always pin `-gpu_eigensolver_devices` and
+`-gpu_density_devices` before diffing gradients on a multi-GPU box, and compare a run against
+itself first to establish the noise floor.
+
+### Implemented (2026-09, second round): the Coulomb kernel and a distributed W
+
+| phase | before | after |
+|---|---:|---:|
+| `grad: Coulomb` | 233.8 ms | **27.4 ms** (1 GPU) |
+| `grad: W = C_occ*diag(2 eps)*C_occ^T` | 3308.7 ms | **855.2 ms** (4 GPUs) |
+| `gradient :` block | 6499 ms | 6286 ms (1 GPU) / **3754 ms** (4 GPUs) |
+| `scf: density P + populations` | 39758 ms / 12 calls | **11558 ms** / 13 calls (4 GPUs) |
+
+**4. `k_grad_coulomb` specialised for `gexp == 2`.** The only call site passes 2.0, and the
+kernel then evaluated four FP64 `pow` per shell pair on a card whose FP64 transcendental path
+runs at 1/64 rate. Replaced by `r2`, a reciprocal, `rsqrt` and `gamma*gamma*gamma`; the general
+path is kept for any other exponent. **233.8 -> 27.4 ms, a factor 8.5**, energy bit-identical.
+
+**5. W is built through `densityPatternDistributed`.** Since W became the same SDDMM as the
+density (previous round), the existing distributed density path takes it with one extra
+argument: the weight vector holds `2*eps` and the output goes to `dSpW` instead of `dSpP`. The
+P path is unchanged. **3308.7 -> 855.2 ms on 4 GPUs (3.9x)**, and `-gpu_density_devices` now
+accelerates the SCF density as well.
+
+**Correctness**: at `-scf_threshold 1e-9`, 1 GPU vs 4 GPUs agree to **2.13e-10 Eh/Angstrom**
+with identical energies. `ctest` gpu 200/200, gpu_gradient 24/24, sqm 335/335.
+
+**Why the wall-clock of the 4-GPU run is WORSE (307 s vs 254 s), and why that is not a
+regression.** The two runs differ by one FP64 eigensolve — 11 FP32 + **1** FP64 against
+11 FP32 + **2** FP64 — and on this card that one iteration costs 49.3 + 21.4 + 10.5 = **81.2 s**,
+which swamps the ~30 s the distributed density and W actually save. It is the same FP32
+noise-floor lottery documented above under "Why an MD step is not a single point": the FP32
+phase stalls at ~9.5e-6 and a bit-level change decides whether one more FP64 round is needed.
+**The phase timings are meaningful, the run totals on this card are not.** On a full-rate-FP64
+device mixed precision is off by default and the effect cannot occur.
+
+**Measured and deliberately NOT changed**: `k_grad_repulsion` has no distance cutoff — but
+neither does the repulsion ENERGY (`XTB::calcRepulsionEnergy`, `xtb_h0.cpp:369-400`, a plain
+O(N^2) pair loop with only a degenerate-pair guard). Screening only the gradient would make the
+two inconsistent, which is worse than slow. Same class as the CN chain rule, opposite direction.
+
+**Known inefficiency in the path point 5 now uses**: `densityPatternDistributed` re-copies the
+helper devices' `C` column slices with `cudaMemcpyPeerAsync` on **every** call; only the pattern
+indices are cached (keyed on `pattern_generation`). Between the SCF's last P call and the
+gradient's W call only the weight vector changes, yet the full column slice is shipped again.
+Not fixed here: it touches state shared with the SCF's own P path.
+
+### GFN-FF for comparison: the EEQ solve dominates, more so on the GPU
+
+Same structure, GFN-FF MD, per step: CPU 16 threads **1095 ms** of which `eeq_solve`
+**758.7 ms (69 %)**; 1x A4500 **1474 ms** of which `eeq_solve` **1345 ms (93 %)**. The EEQ
+solve runs on the device (GPU-Schur path) and is the reason the card is slower than 16 cores
+here: everything else is accelerated, so the solve dominates even harder. Not setup — the
+charges depend on the geometry and are re-solved every step. Whether 758.7 / 1345 ms is near
+optimal is **unknown**; see TODO.md.
 
 ## Verification
 
