@@ -165,7 +165,7 @@ complex: 3.5e-4 Eh/A GPU-vs-CPU gradient difference at both thresholds (known: t
 Findings on polymer_2x (7320 atoms, 1502 fragments):
 - **OpenMP was pinned to one thread**: `CxxThreadPool` calls `omp_set_num_threads(1)` process-wide, so every `omp parallel for` in the topology (distance matrix, CN, Dijkstra) ran serially even with `-threads 36`. Topology and parameter generation now open the GFN-FF thread budget with `ScopedBlasThreads` (inside a batch worker the batch's intra budget). All affected loops write row/atom-local results; energy identical to 12 digits.
 - **nb_hc / nb_nometal** neighbour lists (2 x ~1 s per pass) parallelised over rows: 2.2 s -> 0.29 s. GFN-FF CN 0.33 -> 0.02 s.
-- **Implicit Coulomb pairs on the GPU** (`-gpu_coulomb_implicit`, default true): the device gathers over all atom pairs (`k_coulomb_implicit`, gamma_ij = 1/sqrt(alp_i + alp_j) from per-atom alpeeq) instead of reading the host-built N^2/2 list (24.5 M pairs, 2.7 GB, kept twice on the host). Not used with `eeq_distance_cutoff > 0`.
+- **Implicit Coulomb pairs on the GPU** (`-gpu_coulomb_implicit`, default true): the device gathers over all atom pairs (`k_coulomb_implicit` on CUDA, the existing `k_coulomb_dense` on ROCm, gamma_ij = 1/sqrt(alp_i + alp_j) from per-atom alpeeq) instead of reading the host-built N^2/2 list (24.5 M pairs, 2.7 GB, kept twice on the host). Not used with `eeq_distance_cutoff > 0`.
 
 | polymer_2x GFN-FF single point | before | now |
 |---|---|---|
