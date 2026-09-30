@@ -278,8 +278,8 @@
   GFN-FF etwas bringt — nicht die Kraftfeld-Kernel.
 
 ### `make` in release/ scheitert: fuenf CUDA-Unittests ohne `USE_CUDA` (2026-09)
-- **Status**: ⏳ OFFEN, vorbestehend (nicht von der Gradienten-Instrumentierung verursacht)
-- **Symptom**: `cd release && make -j8` endet mit **Exit 2**. Die Hauptziele bauen
+- **Status**: ✅ BEHOBEN (2026-09-30) — alle 14 `test_xtb_cuda_*` linken jetzt `curcuma_cuda curcuma_core CUDA::cudart` und setzen `USE_CUDA` pro Ziel (Reihenfolge wichtig: das Plugin braucht Host-Symbole aus dem statischen Kern). `make` in `release/` endet mit Exit 0; die 121 `sqm_cuda_*`-Tests, die nie gelaufen waren, bestehen. Der Fehler war auch auf master vorhanden.
+- **Symptom** (vor der Behebung): `cd release && make -j8` endete mit **Exit 2**. Die Hauptziele bauen
   (`curcuma_cuda` 7 %, `curcuma_core` 62 %, `curcuma` 63 %); es scheitern nur
   `test_xtb_cuda_{cn,eeq,gamma,gradient,h0,multipole,overlap,qat}` mit
   „`gpu` in Namensbereich `curcuma::xtb` bezeichnet keinen Typ".
