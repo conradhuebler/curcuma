@@ -37,6 +37,7 @@
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 
+#include <functional>
 #include <future>
 #include <memory>
 #include <vector>
@@ -253,9 +254,11 @@ public:
     /// Set D3 coordination numbers (for dynamic r0)
     void setD3CN(const Vector& cn) { m_d3_cn = cn; }
 
-    /// Set the CN of the current geometry only (energy-only calls). The Coulomb self-energy
-    /// uses it for chi = chi_base + cnf*sqrt(CN); without it an energy-only call after a
-    /// geometry change kept the CN of the last gradient call. Claude Generated (Sep 2026).
+    /// Set the CN read by the Coulomb self-energy's chi(CN) = chi_base + cnf*sqrt(CN) term.
+    /// Claude Generated (Sep 2026, Known Issue #32): must be refreshed on EVERY evaluation,
+    /// energy-only calls included - before, only setCNDerivatives() (gradient calls) wrote
+    /// m_cn, so an energy-only call on a reused calculator evaluated the EN term with the CN
+    /// of the last gradient geometry.
     void setCN(const Vector& cn) { m_cn = cn; }
 
     /// Set CN, CNF, and CN derivatives (gradient only)
@@ -400,6 +403,19 @@ public:
     // Access master interaction list sizes (for diagnostics)
     int bondCount() const { return static_cast<int>(m_bonds.size()); }
     int dispersionPairCount() const { return static_cast<int>(m_dispersions.size() + m_d4_dispersions.size()); }
+
+    /// Visit the installed D4 pair list so GFNFF can refresh the per-pair C6(CN) every call
+    /// (Claude Generated, Sep 2026, Known Issue #32). Only C6 may be changed; the list itself
+    /// stays fixed. Returns the number of lists visited (1 if a D4 pair list exists, else 0).
+    int forEachD4PairList(const std::function<void(std::vector<GFNFFDispersion>&)>& f)
+    {
+        int n = 0;
+        if (!m_d4_dispersions.empty()) {
+            f(m_d4_dispersions);
+            ++n;
+        }
+        return n;
+    }
     int getHBondCount() const { return static_cast<int>(m_hbonds.size()); }
     int getXBondCount() const { return static_cast<int>(m_xbonds.size()); }
 

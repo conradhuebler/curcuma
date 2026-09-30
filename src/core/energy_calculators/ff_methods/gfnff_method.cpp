@@ -625,6 +625,33 @@ GFNFF::GFNFF(const json& parameters)
     m_cache_topology = m_parameters.value("cache_topology", true);
     m_print_timing = m_parameters.value("print_timing", true);
 
+    // frag_charge_model (Claude Generated, Sep 24, 2026; ported to master Sep 27, 2026 - Known
+    // Issue #31, docs/FRAG_CHARGE_MODEL.md): chemistry-aware, continuous fragment charge
+    // placement. Default "ensemble" at frag_charge_s_max 1.0 (placement rule only, no continuous
+    // window) fixes the index bug of the reference rule; "reference" reproduces the pprcht/xtb
+    // rule bit for bit. These fallbacks are the ACTUAL default whenever the caller's json does
+    // not carry the key (most CLI paths do not merge the full ParameterRegistry defaults into
+    // controller["gfnff"]), so they must stay in sync with the PARAM macro defaults in gfnff.h
+    // by hand - editing only the PARAM default has no runtime effect.
+    {
+        std::string fm = m_parameters.value("frag_charge_model", std::string("ensemble"));
+        std::transform(fm.begin(), fm.end(), fm.begin(), [](unsigned char c) { return std::tolower(c); });
+        if (fm != "reference" && fm != "ensemble") {
+            CurcumaLogger::warn(fmt::format("GFNFF: unknown frag_charge_model '{}', using 'reference'", fm));
+            fm = "reference";
+        }
+        m_frag_ensemble = (fm == "ensemble");
+        m_frag_s_max = std::max(1.0, m_parameters.value("frag_charge_s_max", 1.0));  // 1.0 = no window (placement rule only)
+        m_frag_tau_eh = std::max(1e-6, m_parameters.value("frag_charge_tau", 1.0)) / 627.5094740631;
+        m_frag_sigma = std::max(1e-6, m_parameters.value("frag_charge_sigma", 0.05));
+        m_frag_max_edges = std::max(0, std::min(10, m_parameters.value("frag_charge_max_edges", 4)));
+        m_frag_max_placements = std::max(1, m_parameters.value("frag_charge_max_placements", 6));
+        if (m_frag_ensemble && m_topology_mode == "react") {
+            CurcumaLogger::warn("GFNFF: frag_charge_model ensemble is not available in react topology mode - using the reference rule");
+            m_frag_ensemble = false;
+        }
+    }
+
     // Initialize EEQ solver (Dec 2025 - Phase 3)
     // CRITICAL FIX (Dec 25, 2025): Pass global CurcumaLogger verbosity to EEQSolver
     json eeq_params = m_parameters;
@@ -1415,6 +1442,15 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         if (m_workspace) {
             m_workspace->setGeometry(m_geometry_bohr);
             m_workspace->setD3CN(m_last_cn);
+            // Stale-CN fix A (Claude Generated, Sep 2026, Known Issue #32): the Coulomb
+            // self-energy reads chi(CN) = chi_base + cnf*sqrt(CN) from the workspace's m_cn,
+            // which only the gradient branch below used to set (setCNDerivatives). An
+            // energy-only call on a reused calculator therefore evaluated the EN term with the
+            // CN of the last gradient geometry, or with the topology-build CN (chi_static) if
+            // there was none. Hand the current CN over on every call. Static-CN mode is
+            // unaffected: there m_last_cn is the captured CN (reuse_cn skips the recompute
+            // above), which is exactly what the gradient path would have handed over too.
+            m_workspace->setCN(m_last_cn);
         }
     }
 
@@ -1653,6 +1689,54 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             m_d4_generator->updateCNValuesForGradient(cn_std, pool, m_threads, /*skip_dc6dcn=*/false);
             refreshDispersionC6();
         }
+    }
+
+    // Stale-CN fix B (Claude Generated, Sep 2026, Known Issue #32): refresh the per-pair D4
+    // C6(CN) at the current CN. The pair list's C6 was baked once in
+    // generateGFNFFParameterSet() (Gaussian CN weights of the topology-build geometry) and
+    // never updated, while the analytic gradient already carries dC6/dCN (m_dc6dcn_ptr) and the
+    // reference evaluates C6(CN) every call (gfnff_engrad.F90:323, d3_gradient(..., cn, dcn,
+    // ...)). On a reused calculator (MD, opt, FD, batch reuse) the energy was therefore a
+    // frozen-C6 energy whose derivative is not the force. Only the Gaussian weights and the C6
+    // half-contraction are rebuilt here (refreshC6WeightsForCN); the dc6dcn DERIVATIVE stays
+    // owned by updateCNValuesForGradient. Static-CN mode keeps its frozen C6 (reuse_cn).
+    // -gfnff.dispersion_c6_update false restores the old frozen-C6 behaviour.
+    if (!gpu_only && !reuse_cn && m_d4_generator && m_workspace && m_last_cn.size() == m_atomcount
+        && m_parameters.value("dispersion_c6_update", true)) {
+        bool weights_fresh = false;
+        auto t_c6 = std::chrono::high_resolution_clock::now();
+        auto* pool = threadPool();
+        m_workspace->forEachD4PairList([&](std::vector<GFNFFDispersion>& d4_pairs) {
+            if (!weights_fresh) {
+                if (pool) pool->setActiveThreadCount(m_threads);
+                std::vector<double> cn_std(m_last_cn.data(), m_last_cn.data() + m_atomcount);
+                m_d4_generator->refreshC6WeightsForCN(cn_std, pool, m_threads);
+                weights_fresh = true;
+            }
+            // getChargeWeightedC6 is const and reads only per-atom caches: pairs are independent.
+            const int np = static_cast<int>(d4_pairs.size());
+            auto c6_worker = [&](int t_id, int T) {
+                const int b = static_cast<int>(static_cast<long long>(np) * t_id / T);
+                const int e = static_cast<int>(static_cast<long long>(np) * (t_id + 1) / T);
+                for (int k = b; k < e; ++k) {
+                    auto& d = d4_pairs[k];
+                    d.C6 = m_d4_generator->getChargeWeightedC6(m_atoms[d.i], m_atoms[d.j], d.i, d.j);
+                }
+            };
+            const int T = (pool && m_threads > 1 && np > 4096) ? m_threads : 1;
+            if (T > 1) {
+                std::vector<std::future<void>> futures;
+                futures.reserve(T - 1);
+                for (int t = 1; t < T; ++t)
+                    futures.push_back(pool->enqueue(c6_worker, t, T));
+                c6_worker(0, T);
+                for (auto& f : futures) f.get();
+            } else {
+                c6_worker(0, 1);
+            }
+        });
+        if (do_timing && weights_fresh)
+            t_d4_gw += std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_c6).count();
     }
 
     // WP-P1 (May 2026): cache phase-timings into a member so MD diagnostics can read them
@@ -2497,6 +2581,19 @@ bool GFNFF::rebuildReactiveTopology()
 }
 
 double GFNFF::Calculation(bool gradient)
+{
+    // frag_charge_model ensemble (Claude Generated, Sep 24, 2026): the master runs its own
+    // reference evaluation first (it owns the topology perception and its refresh logic), then
+    // the charge variants are blended on top of it. Nothing below changes when the model is off.
+    m_frag_blend_valid = false;
+    m_frag_last_nvariants = 0;
+    const double e_master = calculationSingle(gradient);
+    if (m_frag_ensemble && !m_frag_is_variant && m_charge != 0 && m_initialized)
+        return fragEnsembleBlend(gradient, e_master);
+    return e_master;
+}
+
+double GFNFF::calculationSingle(bool gradient)
 {
     // Claude Generated (February 2026): Start total calculation timer for verbosity 1+
     auto calc_start = std::chrono::high_resolution_clock::now();
@@ -9694,6 +9791,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     m_frag_carry_list.clear();
     m_frag_carry_qfrag.clear();
     TopologyInfo topo = calculateTopologyInfoOnce();
+    m_frag_split_pass = (topo.nfrag > 1) ? 1 : 0;
 
     if (topo.topology_charges.size() != m_atomcount) return topo;
 
@@ -9752,6 +9850,11 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         m_frag_carry_qfrag = topo.qfrag;
     }
     TopologyInfo topo2 = calculateTopologyInfoOnce();
+    // frag_charge_model ensemble: which q-loop pass decided the fragmentation (1 = pass 1 and
+    // carried, 2 = pass 1 saw one fragment and the charge-shrunk pass 2 split it). The contact
+    // window is anchored at that pass's bond threshold, so lambda = 0 exactly where the perceived
+    // fragment count changes. Claude Generated (Sep 2026).
+    m_frag_split_pass = (topo.nfrag > 1) ? 1 : (topo2.nfrag > 1 ? 2 : 0);
     m_frag_carry_nfrag = 0;
     m_frag_carry_list.clear();
     m_frag_carry_qfrag.clear();
@@ -9869,7 +9972,14 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // 100 kcal/mol on that structure; the same mechanism drove the AHB21/BH76/G21EA/SIE4x4
     // family. See the rev-gfnff TODO for the physics side of this - the reference is not
     // right either, it is simply self-consistent.
-    if (m_frag_carry_nfrag > 1
+    if (m_frag_override.active
+        && static_cast<int>(m_frag_override.fraglist.size()) == m_atomcount) {
+        // frag_charge_model ensemble variant (Sep 2026): grouping and integer group charges are
+        // fixed by the master, in both q-loop passes.
+        topo_info.nfrag = m_frag_override.nfrag;
+        topo_info.fraglist = m_frag_override.fraglist;
+        topo_info.qfrag = m_frag_override.qfrag;
+    } else if (m_frag_carry_nfrag > 1
         && static_cast<int>(m_frag_carry_list.size()) == m_atomcount) {
         topo_info.nfrag = m_frag_carry_nfrag;
         topo_info.fraglist = m_frag_carry_list;
@@ -10142,7 +10252,13 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         // where it looked better was decided against xtb's .CHRG line-2 parsing quirk,
         // a different branch entirely), while it is demonstrably worse here.
         const bool frag_autodetect = m_parameters.value("frag_charge_autodetect", false);
-        if (topo_info.nfrag == 2 && m_charge != 0 && !frag_autodetect) {
+        if (m_frag_override.active) {
+            // frag_charge_model ensemble variant: the group charges are prescribed.
+            eeq_topology_input.qfrag = topo_info.qfrag;
+            topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
+                m_atoms, m_geometry_bohr, m_charge, topo_info.coordination_numbers,
+                eeq_topology_input, true, pool_setup, m_threads);
+        } else if (topo_info.nfrag == 2 && m_charge != 0 && !frag_autodetect) {
             // Reference behaviour: whole charge on fragment 0.
             topo_info.qfrag = {static_cast<double>(m_charge), 0.0};
             eeq_topology_input.qfrag = topo_info.qfrag;
@@ -11244,13 +11360,15 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
         d4_input["d4_s9"] = 1.00;
         // Lever 3 Opt B: plumb the user-facing gfnff flag down to the generator.
         d4_input["d4_disp_half_contraction"] = m_parameters.value("disp_half_contraction", true);
-        // Claude Generated (Sep 2026): with the per-step C6 refresh (dispersion_c6_update) the
-        // Gaussian weights feed the ENERGY, not only dC6/dCN. The generator's CN-change cache
-        // (d4_cn_cache_threshold, default 0.01) then lets C6 lag the geometry and jump when it
-        // finally refreshes: measured on triose, an optimisation then stops 5.7e-6 Eh away from
-        // the single point at its own minimum (within the printed 1e-6 with the cache off), and the CPU trajectory
-        // departs from the GPU one at the first step (the GPU path never used the cache). So
-        // GFN-FF disables it unless the user set it explicitly (-d4param.d4_cn_cache_threshold).
+        // Claude Generated (Sep 2026, Known Issue #32): with the per-step C6 refresh
+        // (dispersion_c6_update, "stale-CN fix B" in prepareCNAndEEQ) the Gaussian weights feed
+        // the ENERGY, not only dC6/dCN. The generator's CN-change cache (d4_cn_cache_threshold,
+        // default 0.01) then lets C6 lag the geometry and jump when it finally refreshes:
+        // measured on triose, an optimisation then stops 5.7e-6 Eh away from the single point
+        // at its own minimum (within the printed 1e-6 with the cache off), and the CPU
+        // trajectory departs from the GPU one at the first step (the GPU path never used the
+        // cache). So GFN-FF disables it unless the user set it explicitly
+        // (-d4param.d4_cn_cache_threshold).
         if (m_parameters.value("dispersion_c6_update", true) && !d4_input.contains("d4_cn_cache_threshold"))
             d4_input["d4_cn_cache_threshold"] = 0.0;
 
@@ -11456,8 +11574,10 @@ ConfigManager GFNFF::extractDispersionConfig(const std::string& method) const
 }
 
 // Energy component getters (FFWorkspace is the only GFN-FF engine).
+// frag_charge_model ensemble (Sep 2026): when the variant blend is active the components are the
+// same weighted sum as the energy (sum of the components == total), not the master's own workspace.
 #define GFNFF_WS_ENERGY(NAME, FIELD) \
-    double GFNFF::NAME() const { return m_workspace ? m_workspace->energyComponents().FIELD : 0.0; }
+    double GFNFF::NAME() const { return m_frag_blend_valid ? m_frag_blend_comp.FIELD : (m_workspace ? m_workspace->energyComponents().FIELD : 0.0); }
 GFNFF_WS_ENERGY(BondEnergy, bond)
 GFNFF_WS_ENERGY(AngleEnergy, angle)
 GFNFF_WS_ENERGY(DihedralEnergy, dihedral)
@@ -11474,8 +11594,8 @@ GFNFF_WS_ENERGY(HalogenBondEnergy, xbond)
 GFNFF_WS_ENERGY(ATMEnergy, atm)
 #undef GFNFF_WS_ENERGY
 double GFNFF::RepulsionEnergy() const {
-    if (!m_workspace) return 0.0;
-    const auto& c = m_workspace->energyComponents();
+    if (!m_workspace && !m_frag_blend_valid) return 0.0;
+    const auto& c = m_frag_blend_valid ? m_frag_blend_comp : m_workspace->energyComponents();
     return c.bonded_rep + c.nonbonded_rep;
 }
 
@@ -12093,7 +12213,9 @@ Matrix GFNFF::NumGradFixedCharges(double dx)
     auto energy_at = [&]() {
         auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
         m_workspace->setGeometry(m_geometry_bohr);
-        m_workspace->setD3CN(Vector::Map(cn_vec.data(), cn_vec.size()).eval());
+        const Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
+        m_workspace->setD3CN(cn);
+        m_workspace->setCN(cn);  // stale-CN fix A (Sep 2026): the chi(CN) self-energy term too
         return m_workspace->calculate(false);
     };
     for (int i = 0; i < m_atomcount; ++i) {
