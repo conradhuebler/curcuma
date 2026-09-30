@@ -145,6 +145,7 @@ Optimized structure saved to: input.opt.xyz
 | SR1 update | 🤖 AI-generated, ⚙️ compiles | indirectly via DIIS | standalone correctness vs. reference |
 
 **Known gaps vs. reference implementations:**
+- **L-BFGS stalls permanently** once the backtracking search is exhausted (takes the ~1e-9 step, no history reset): caffeine/GFN-FF frozen from step 33 at |g| 1.6e-3, lbfgspp converges in 38 (Sep 28, 2026, TODO.md). The driver's stall detection now ends such runs; the optimizer itself is not fixed.
 - No independent numerical gradient check for any native method
 - Step size control not validated against reference optimizer (XTB, Gaussian)
 - DIIS extrapolation: no guarantee of convergence on difficult PES

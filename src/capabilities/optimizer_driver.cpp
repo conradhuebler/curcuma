@@ -151,6 +151,10 @@ OptimizationContext OptimizationContext::fromJson(const json& config, EnergyCalc
     }
     if (config.contains("max_energy_rise"))
         context.max_energy_rise = config["max_energy_rise"].get<double>();
+    if (config.contains("stall_steps") && config["stall_steps"].is_number())
+        context.stall_steps = static_cast<int>(config["stall_steps"].get<double>());
+    if (config.contains("stall_rmsd") && config["stall_rmsd"].is_number())
+        context.stall_rmsd = config["stall_rmsd"].get<double>();
 
     // Claude Generated (Feb 21, 2026): Numerical gradient option for debugging
     if (config.contains("numgrad"))
@@ -429,6 +433,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
         double energy_change_kjmol = 0.0;
         double rmsd_change = 0.0;
         double gradient_norm = 0.0;
+        int stalled_steps = 0;  // consecutive steps below stall_rmsd (stall detection)
 
         // Main optimization loop (Template Method Pattern)
         for (m_current_iteration = 1; m_current_iteration <= m_context.max_iterations; ++m_current_iteration) {
@@ -533,6 +538,24 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
                 m_converged = true;
                 m_convergence_reason = "All convergence criteria satisfied";
                 break;
+            }
+
+            // Stall detection. Claude Generated (Sep 2026): the native L-BFGS backtracking
+            // search halves the step up to 30 times and then takes the ~1e-9 step anyway without
+            // flagging an error, and its history is not reset, so the same failing direction
+            // repeats. A GFN-FF optimisation of mixture2 (6200 atoms) sat like that from step
+            // 4744 to the 5000-step limit, 48 s per step, geometry and energy frozen, |grad| 0.105.
+            // A step that does not move the geometry is not progress, whatever the optimiser says.
+            if (m_context.stall_steps > 0) {
+                stalled_steps = (rmsd_change < m_context.stall_rmsd) ? stalled_steps + 1 : 0;
+                if (stalled_steps >= m_context.stall_steps) {
+                    m_convergence_reason = fmt::format(
+                        "No progress: the geometry moved less than {:.1e} A in each of the last {} steps, "
+                        "convergence criteria not met: {}",
+                        m_context.stall_rmsd, stalled_steps,
+                        formatConvergenceReport(energy_change_kjmol, rmsd_change, gradient_norm));
+                    break;
+                }
             }
 
             // Single step mode (for debugging/testing)

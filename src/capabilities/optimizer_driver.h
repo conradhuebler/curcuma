@@ -1,6 +1,7 @@
 /*
  * <Optimizer Driver Base Class - Template Method Pattern>
- * Copyright (C) 2025 Claude AI - Generated Code
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Claude Generated code (AI contribution; copyright remains with the project owner).
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -52,6 +53,8 @@ public:
     int threads = 1;
     bool single_step_mode = false;
     double max_energy_rise = 100.0; // kJ/mol - maximum allowed energy increase
+    int stall_steps = 20;           // consecutive non-moving steps before "no progress"; 0 = off
+    double stall_rmsd = 1e-6;       // Å - per-step RMSD that counts as "not moving"
 
     // Output control
     bool write_trajectory = true;

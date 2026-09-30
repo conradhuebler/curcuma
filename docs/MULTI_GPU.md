@@ -3,6 +3,8 @@
 > 🤖 AI-generated, not human-tested. Numbers below are measurements, not guarantees.
 >
 > All user-facing options and environment variables with defaults and when to change them: [GPU_TUNING.md](GPU_TUNING.md).
+>
+> What does not work yet, for GFN2/GFN1 and GFN-FF, with evidence and an order of attack: [MULTI_GPU_GAPS.md](MULTI_GPU_GAPS.md) (inventory, Sep 28, 2026).
 
 Plan: `~/.claude/plans/neuer-branch-wir-wollen-happy-marshmallow.md` (phases 0-6).
 Two cases: (A) batch of structures distributed over GPUs, (B) one large system on several GPUs.

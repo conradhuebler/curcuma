@@ -859,6 +859,39 @@
   usw. mit Grossbuchstaben, die registrierten PARAMs heissen `lbfgs_eps_abs` — CLI-Werte kommen dort
   vermutlich nicht an (nicht gemessen).
 
+### Optimierer: Stillstandserkennung — UMGESETZT (2026-09-28, Betreiber: "ja, gute Idee")
+- `-opt.stall_steps N` (Standard 20, 0 = aus) / `-opt.stall_rmsd` (Standard 1e-6 Å): bewegt sich die
+  Geometrie N Schritte in Folge weniger als stall_rmsd, endet der Lauf "No progress", Exit 1, letzte
+  Struktur geschrieben. Anlass: mixture2 (GFN-FF, eigener L-BFGS) stand von Schritt 4744 bis zum
+  Limit 5000 still, 48 s/Schritt, ~3,4 h verloren. ctest 487/490 (dieselben 3 bekannten).
+
+### Eigener L-BFGS bleibt dauerhaft stehen (gefunden 2026-09-28)
+- **Status**: ⏳ OFFEN, gemessen, Ursache nur per Codelesung
+- **Befund**: Koffein, GFN-FF, `-opt.optimizer lbfgs`, Standard: ab Schritt 33 keine Bewegung mehr
+  (367 von 400 Schritten, |grad| 1,6e-3, Ziel 5e-4); `auto`/`lbfgspp` konvergieren in 38 Schritten.
+- **Vermuteter Mechanismus** (`optimisation/lbfgs.cpp:439-451`): die Backtracking-Suche halbiert bis
+  zu 30-mal und nimmt dann den ~1e-9-Schritt ohne Fehlermeldung; `sy <= 1e-10` → keine
+  Historie-Aktualisierung, kein Reset → dieselbe Richtung wiederholt sich. Nicht per Log bestätigt:
+  `-verbosity 2` erreicht die Schritt-Ausgabe des L-BFGS nicht (Verbosity kommt dort nicht an).
+- **Vorschlag**: bei erschöpfter Liniensuche Historie verwerfen und mit steilstem Abstieg neu
+  starten; die Verbosity-Weitergabe reparieren.
+
+### mixture2 (GFN-FF): Energie an einer N-H···O=C-Brücke nicht glatt (gefunden 2026-09-28)
+- **Status**: ⏳ OFFEN, nicht eingegrenzt
+- **Befund**: an der Struktur nach 4744 Schritten (E = -917.10049 Eh) finden weder eigener L-BFGS noch
+  LBFGS++ einen Abstieg (Nullschritt bei |grad| 0,11 Eh/Bohr). CPU- und GPU-Gradient identisch
+  (6,6e-13); 99,9 % von |g|² sitzen auf drei Atomen: O 5514/C 5512 (Harnstoff-C=O) und H 5045 (N-H
+  eines zweiten Harnstoffs, H···O 2,09 Å). Finite Differenzen dort konvergieren nicht mit h
+  (5514 y: h=1e-3 → 0,064, h=1e-4 → 0,386, analytisch 0,197; bei z Vorzeichenwechsel).
+- **Offen**: ob der Knick aus der H-Brücken-Liste (`hb_update_force_every 1`), der Topologieerkennung
+  oder einem Term kommt. Einschränkung: jeder FD-Punkt lief als eigener Prozess und erkannte
+  Topologie und HB-Liste neu; der `.topo.json`-Cache hält die Bindungen nicht fest.
+
+### Multi-GPU-Lückenanalyse (2026-09-28)
+- Bestandsaufnahme GFN2/GFN1 + GFN-FF mit Belegen und Reihenfolge: [docs/MULTI_GPU_GAPS.md](docs/MULTI_GPU_GAPS.md).
+  Darin zwei bisher undokumentierte Korrektheitsfehler (ROCm ohne Coulomb-Term seit `ab6e3f5e`;
+  verworfene GPU-EEQ-Ladungen werden trotzdem benutzt) — nicht behoben, nur festgehalten.
+
 ### UFF- und QMDFF-Gradient falsch (gefunden 2026-09-27)
 - **Status**: ⏳ OFFEN — Ursache gefunden, Fix vorbereitet, Betreiber: "uff und qmdff erstmal nicht"
 - **UFF-Winkel** (`FFWorkspace::calcUFFAngles`, `ff_workspace_uff.cpp`): `UFF::AngleBending` liefert
