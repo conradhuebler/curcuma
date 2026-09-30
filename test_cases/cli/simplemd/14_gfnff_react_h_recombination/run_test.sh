@@ -33,9 +33,12 @@ run_test() {
     # shared engine was a data race), so seed 42 no longer produces the trajectory this test was
     # calibrated on and recombines nothing. react itself is unaffected: measured on the merged
     # build, seeds 7/123/999 give 6/8/2 events, seed 42 gives 0; master's binary gives 3 at seed 42.
+    # -md.time_step 0.975 / -maxtime 9758 = the 0.5 / 5000 fs this test was calibrated on, times 1.9516: since ef462fcf the MD
+    # clock is real (before, every step and -maxtime were stretched by 1.9516). Measured, 7 seeds:
+    # 13 events before, 2 at 5000 fs now, 13 at 9758 fs. Seed 13 (5 events at 9758 fs), not 123 (0).
     timeout 280 $CURCUMA -md input.xyz -method gfnff -gfnff.topology_mode react \
-        -temperature 6000 -maxtime 5000 -md.time_step 0.5 -threads 1 \
-        -md.seed 123 -md.no_restart -md.rattle_12 false \
+        -temperature 6000 -maxtime 9758 -md.time_step 0.975 -threads 1 \
+        -md.seed 13 -md.no_restart -md.rattle_12 false \
         -md.wall_type spheric -md.wall_radius 2.5 \
         -no_bmt > stdout.log 2> stderr.log
     return $?

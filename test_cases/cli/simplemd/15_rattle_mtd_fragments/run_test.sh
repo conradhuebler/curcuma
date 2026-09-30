@@ -27,8 +27,9 @@ run_test() {
     cd "$TEST_DIR"
     cleanup_bmt_dirs
     rm -f stdout.log stderr.log
+    # -maxtime 5855 = the former 3000 times 1.9516 (MD clock fix ef462fcf): 60 hills at 3000, 133 at 5855.
     timeout 200 "$CURCUMA" -md input.xyz -method gfnff -rmsd_mtd \
-        -maxtime 3000 -temperature 500 -rattle 2 -md.seed 42 -threads 1 \
+        -maxtime 5855 -temperature 500 -rattle 2 -md.seed 42 -threads 1 \
         > stdout.log 2> stderr.log
     RUN_EXIT=$?
     TRJ_FILE=$(find_output_file "input.trj.xyz")
