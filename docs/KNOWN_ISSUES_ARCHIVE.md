@@ -126,7 +126,7 @@ the global `CurcumaLogger` verbosity is now RAII-scoped via `CurcumaMethod` (cto
 
 ## #4 ConfSearch Phase A-C
 
-efficiency/robustness features (RATTLE threshold, topo/Epot abort, seed funnel, opt→bias feedback, permutation-aware + adaptive MTD bias) — roadmap, open TODOs and experimental caveats in [docs/CONFSEARCH_ROADMAP.md](CONFSEARCH_ROADMAP.md). Cross-run bias heating (shared-pool hills `W=k·counter` grow unbounded → `<T>` climbs run-by-run → NaN) is bounded by **defaults ON for ConfSearch**: `rmsd_mtd_freeze_inherited`+`temp_abort` (measured best: 0 blow-ups, best conformer yield; `rmsd_mtd_max_height` is opt-in for tighter T). The bare `-startT 500` run no longer blows up (roadmap TODO #4; intra-run wide-hill blow-up still open).
+efficiency/robustness features (RATTLE threshold, topo/Epot abort, seed funnel, opt→bias feedback, permutation-aware + adaptive MTD bias) — roadmap, open TODOs and experimental caveats in [docs/CONFSEARCH_ROADMAP.md](CONFSEARCH_ROADMAP.md). Cross-run bias heating (shared-pool hills `W=k·counter` grow unbounded → `<T>` climbs run-by-run → NaN) is bounded by **defaults ON for ConfSearch** [Correction 2026-10-01: `temp_abort` and `rmsd_mtd_freeze_inherited` are `false` by default in `confsearch.h:308,315` ("off by default under the strided scheme"); the comment at `confsearch.cpp:181` repeats the old claim and is stale]: `rmsd_mtd_freeze_inherited`+`temp_abort` (measured best: 0 blow-ups, best conformer yield; `rmsd_mtd_max_height` is opt-in for tighter T). The bare `-startT 500` run no longer blows up (roadmap TODO #4; intra-run wide-hill blow-up still open).
 
 ## #5 Native GFN transition metals FIXED (MOR41, Jul 16, 2026, AI/machine-tested)
 

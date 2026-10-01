@@ -1,332 +1,52 @@
-# CLAUDE.md - Test Cases Directory
+# CLAUDE.md - test_cases/
 
-## Overview
+All tests run by `ctest`: C++ unit/integration tests, CLI end-to-end scripts and reference-value gates.
+List them with `ctest --test-dir release -N`; select with `-R <regex>` or `-L <label>`.
+Longer guide (Feb 2026, not re-checked): [TESTING.md](TESTING.md).
 
-Das `test_cases/` Verzeichnis enthält alle Tests für Curcuma, organisiert in mehrere Testkategorien:
-- **Unit Tests** (C++) - Direktes Testen von Core-Funktionalität
-- **CLI Tests** (Bash) - End-to-End Tests der Command-Line Interface
-- **Integration Tests** (C++) - Capability-spezifische Integrationstests
+## Where tests are registered
 
-## Structure
+- Root `CMakeLists.txt` (`add_subdirectory(test_cases)` onward): `molecule_comprehensive`, `AAAbGal_*`, `confscan_*`, `energy_methods`, `parameter_io`, `confstat_*`
+- `test_cases/CMakeLists.txt`: the `test_*.cpp` executables (`gfnff_*`, `xtb_gradient_*`, `d4_dedq`, `gradient_unit_contract`, `md_*`, ...), `gfnff_val_*` (one per `reference_data/*.ref.json`)
+- `test_cases/cli/CMakeLists.txt`: CLI tests, `add_cli_test(CATEGORY NAME)` registers `cli_<category>_<name>`; GPU categories only when the backend is built
+- `test_cases/sqm_reference/CMakeLists.txt`: `sqm_val_*` (1e-8 Eh energy gates for gfn1/gfn2), `sqm_solv_*`, `sqm_gbsa_*`, `gfnff_solv_*`, `d4_diag_*`
 
-```
-test_cases/
-├── cli/                          # ✅ CLI End-to-End Tests (Bash)
-│   ├── curcumaopt/              # Optimization CLI tests (6 tests)
-│   ├── rmsd/                    # RMSD CLI tests (6 tests)
-│   ├── confscan/                # ConfScan CLI tests (7 tests)
-│   ├── simplemd/                # SimpleMD CLI tests (7 tests)
-│   ├── gfnff/                   # GFN-FF CLI tests (1 test)
-│   ├── test_utils.sh            # Shared test utilities
-│   ├── CMakeLists.txt           # CTest integration
-│   ├── README.md                # CLI test documentation
-│   ├── KNOWN_BUGS.md            # Documented bugs affecting tests
-│   └── GOLDEN_REFERENCES.md     # Scientific reference values
-├── AAAbGal.cpp                  # RMSD integration test (5 methods)
-├── reorder/                     # RMSD reordering test
-├── rmsd/                        # RMSD unit test
-├── confscan.cpp                 # ConfScan integration test (10 scenarios)
-├── test_energy_methods.cpp      # Energy method validation suite
-├── test_molecule.cpp            # Molecule data structure tests
-└── CMakeLists.txt               # Main test configuration
-```
+## CLI tests (`cli/<category>/<NN_name>/run_test.sh`)
 
-## CLI Tests (NEW - October 2025)
+- `add_cli_test` copies the test directory into the build tree at configure time and runs it there, so the source tree stays clean
+- Start from `cli/template_test.sh`: source `test_utils.sh` via `SCRIPT_DIR`, then `run_test()` and `validate_results()`
+- Validate the science (values with tolerance, structure counts, drift), not only the exit code; output files via `find_output_file` (BMT-aware)
+- Reference values and their origin: `cli/GOLDEN_REFERENCES.md`; documented bugs: `cli/KNOWN_BUGS.md`
 
-### Build Directory Isolation (CLAUDE Generated October 28, 2025)
+## Unit and integration tests
 
-**Architecture**: Tests execute from BUILD TREE to keep SOURCE TREE clean
-- **Source tree**: `test_cases/cli/category/test_name/` - only input files + scripts tracked
-- **Build tree**: `build/test_cases/cli/category/test_name/` - all outputs generated here
-- **CMake Pattern**: `file(COPY)` + copy-and-run macro (same as C++ unit tests)
-- **Benefit**: Clean `git status`, professional separation of concerns
+- Test molecules come from the registry (rule below); `test_energy_methods.cpp` uses `AAA-bGal/A.xyz` (117 atoms) instead
+- New unit test `test_<name>.cpp`: `add_executable`, `target_link_libraries(... curcuma_core test_molecule_registry)`, `add_test` with `TIMEOUT` and `LABELS` in `test_cases/CMakeLists.txt`
+- Document the tolerance and where each reference value comes from (program, version, settings)
 
-**How It Works**:
-```cmake
-# CMakeLists.txt macro copies entire test directory to build tree
-add_cli_test(rmsd 01_default_rmsd)
-  → Copies test_cases/cli/rmsd/01_default_rmsd/ to build/test_cases/cli/rmsd/01_default_rmsd/
-  → Copies test_utils.sh to build/test_cases/cli/rmsd/ and build/test_cases/cli/
-  → Runs test from build directory (clean source tree!)
-```
+## Molecule Registry - MANDATORY Rule
 
-### Design Philosophy
-
-**End-to-End Testing**: Tests verwenden curcuma genau wie ein User es verwenden würde - über die Command Line.
-
-**Scientific Validation**: Tests validieren nicht nur Exit-Codes, sondern wissenschaftliche Korrektheit:
-- **RMSD**: Numerische Werte mit Toleranz
-- **Optimierung**: Energie-Konvergenz
-- **ConfScan**: Anzahl akzeptierter Konformere
-- **SimpleMD**: Trajektorien-Länge und Energie-Drift
-
-### Test Organization Pattern
-
-Jeder Test folgt dieser Struktur:
-```
-cli/capability/XX_test_name/
-├── run_test.sh        # Haupttest-Skript
-├── input.xyz          # Input-Molekül
-├── expected_*         # Erwartete Ausgaben (optional)
-├── stdout.log         # Curcuma stdout (generiert)
-└── stderr.log         # Curcuma stderr (generiert)
-```
-
-### Test Script Pattern
-
-```bash
-#!/bin/bash
-# Test: Descriptive Name
-# Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
-# Claude Generated - Based on testing_plan_*.md
-
-set -e
-source "../../test_utils.sh"
-
-run_test() {
-    $CURCUMA -capability input.xyz > stdout.log 2> stderr.log
-    assert_exit_code $? 0 "Capability should succeed"
-}
-
-validate_results() {
-    # Scientific validation
-    local value=$(extract_value_from_output stdout.log)
-    assert_scientific_value "2.87214" "$value" "0.0001" "Scientific metric"
-}
-
-main() {
-    test_header "Test Name"
-    cleanup_before
-    run_test && validate_results
-    print_test_summary
-    [ $TESTS_FAILED -eq 0 ] && exit 0 || exit 1
-}
-
-main "$@"
-```
-
-### test_utils.sh - Shared Utilities
-
-Zentrale Bibliothek mit wiederverwendbaren Funktionen:
-
-**Test Management**:
-- `test_header()` - Formatierte Test-Überschrift
-- `print_test_summary()` - Zusammenfassung am Ende
-- `cleanup_test_artifacts()` - Clean up generierte Dateien
-
-**Assertions (Exit Codes)**:
-- `assert_exit_code()` - Vergleiche Exit-Code
-- `assert_curcuma_success()` - Pragmatische Erfolgs-Prüfung (Datei-Existenz)
-
-**Assertions (Datei-Inhalte)**:
-- `assert_file_exists()` - Datei existiert
-- `assert_string_in_file()` - String in Datei vorhanden
-- `assert_file_not_empty()` - Datei nicht leer
-
-**Scientific Validation**:
-- `assert_scientific_value()` - Numerischer Vergleich mit Toleranz
-- `compare_float()` - Floating-Point Arithmetik (awk-basiert)
-- `extract_energy_from_xyz()` - Energie aus XYZ-Kommentar
-- `extract_rmsd_from_output()` - RMSD aus Curcuma-Output
-- `count_xyz_structures()` - Strukturen in Multi-XYZ Datei
-
-**Golden References**:
-- `store_golden_reference()` - Referenz speichern
-- `load_golden_reference()` - Referenz laden
-
-### CTest Integration
-
-```cmake
-# test_cases/cli/CMakeLists.txt
-add_test(
-    NAME cli_capability_XX_test_name
-    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/capability/XX_test_name/run_test.sh
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/capability/XX_test_name
-)
-set_tests_properties(cli_capability_XX_test_name PROPERTIES TIMEOUT 30)
-```
-
-**Ausführung**:
-```bash
-# Alle CLI Tests
-ctest -R "cli_" --output-on-failure
-
-# Spezifische Kategorie
-ctest -R "cli_rmsd_" --output-on-failure
-
-# Einzelner Test
-ctest -R "cli_rmsd_01" --verbose
-```
-
-### Current Status (Stand 2026-01-15)
-
-**Tests**: 28 implementiert, **20/28 bestanden (71%)**
-- RMSD: 6/6 ✅ (100%)
-- ConfScan: 7/7 ✅ (100%)
-- Curcumaopt: 6/6 ✅ (100%)
-- GFN-FF: 1/1 ✅ (100%)
-- SimpleMD: 0/7 (no crashes, output file issue)
-
-**Golden References**: RMSD 2.87214 Å (AAA-bGal, 90 atoms) - see GOLDEN_REFERENCES.md
-
-## Molecule Registry — MANDATORY Rule
-
-**NEVER hardcode molecule geometry in test files.**
-
-All test molecules live in `core/test_molecule_registry.cpp` and are accessible via:
+**NEVER hardcode molecule geometry in test files.** All test molecules live in `core/test_molecule_registry.cpp`:
 ```cpp
 #include "core/test_molecule_registry.h"
-curcuma::Molecule mol = TestMolecules::TestMoleculeRegistry::createMolecule("CH4", false);
-//                                                                                  ^^^^
-//                                           false = keep Angstrom (Molecule expects Angstrom)
+curcuma::Molecule mol = TestMolecules::TestMoleculeRegistry::createMolecule("CH4", false); // false = keep Angstrom
 ```
+- Available: `H2`, `HCl`, `OH`, `Cl2`, `HCN`, `H2O`, `H2O_dimer`, `NH3`, `O3`, `CH4`, `CH3OH`, `CH3OCH3`, `C6H6`, `monosaccharide`, `triose`
+- To add one: edit `core/test_molecule_registry.cpp` (atoms in Angstrom) and link `test_molecule_registry` to the test target
+- Why: hardcoded geometry gives geometry-dependent pass/fail, duplicates data and is hard to audit
 
-Available molecules: `H2`, `HCl`, `OH`, `HCN`, `H2O`, `H2O_dimer`, `O3`, `CH4`, `CH3OH`, `CH3OCH3`, `C6H6`, `monosaccharide`, `triose`
+## Traps
 
-**To add a new molecule**: edit `core/test_molecule_registry.cpp` — atoms in Angstrom, then link `test_molecule_registry` in CMakeLists.txt.
-
-**Why**: hardcoded geometry in test files produces inconsistent results (geometry-dependent pass/fail), duplicates data, and is hard to audit.
-
-## Unit Tests (C++)
-
-### test_molecule.cpp
-**Status**: ✅ Vollständiger Test-Suite (15 Kategorien)
-**Zweck**: Vorbereitung für Molecule Refactoring (SOA/AOS Design)
-
-Tests decken ab:
-- XYZ Parser (10 duplicate functions zu vereinheitlichen)
-- Fragment System (O(1) lookups geplant)
-- Cache System (granulare Flags geplant)
-- Geometry Access (zero-copy geplant)
-- Type Safety (ElementType enum geplant)
-
-### test_energy_methods.cpp
-**Status**: ✅ Production-Ready
-**Zweck**: Validierung aller Energy Methods gegen Referenz-Energien
-
-Test-Molekül: `A.xyz` (117 Atome)
-
-**Getestete Methoden**:
-- QM: gfn2, gfn1, ipea1, pm6, pm3, eht
-- Force Fields: uff, gfnff
-- Providers: TBLite, Ulysses, XTB
-
-**Referenz-Energien** (Beispiele):
-```cpp
-m_reference_energies["gfn2"] = -165.75590286;  // TBLite GFN2-xTB
-m_reference_energies["uff"] = 1.25494377;      // UFF
-m_reference_energies["eht"] = -190.28490972;   // Extended Hückel
-```
-
-**Toleranzen**:
-- QM Methods: 1e-6 Eh (hochpräzise)
-- Force Fields: 1e-5 Eh (Force Field Toleranz)
-
-## Integration Tests
-
-### AAAbGal.cpp - RMSD Multi-Method Test
-**Zweck**: RMSD mit verschiedenen Alignment-Methoden testen
-
-**Migriert (2025-10-19)**: `RMSDJson` → `ParameterRegistry::getInstance().getDefaultJson("rmsd")`
-
-**Getestete Methoden**:
-1. `AAAbGal_dtemplate()` - Dimer template
-2. `AAAbGal_free()` - Free reordering
-3. `AAAbGal_template()` - Template with nomunkres
-4. `AAAbGal_subspace()` - Subspace search
-5. `AAAbGal_incr()` - Incremental
-
-**Referenz-RMSD**: 0.457061 (mit Reordering)
-
-### confscan.cpp - ConfScan Multi-Scenario Test
-**Zweck**: ConfScan mit verschiedenen Methoden testen
-
-**Migriert (2025-10-19)**: `ConfScanJson` → `ParameterRegistry::getInstance().getDefaultJson("confscan")`
-
-**Getestete Szenarien** (10):
-1. `free()` - Free alignment
-2. `subspace()` - Subspace search
-3. `template_method()` - Template-based
-4. `dtemplate()` - Dimer template
-5. `molalign()` - External molalign
-6. `sLX1()`, `sLX2()`, `sLX2Reset()` - sLX logic
-7. `sLX20()`, `sLX20Reset()` - Extended sLX
-
-## Development Guidelines
-
-### Adding New CLI Tests
-
-1. **Erstelle Test-Verzeichnis**:
-   ```bash
-   mkdir -p test_cases/cli/capability/XX_test_name
-   cd test_cases/cli/capability/XX_test_name
-   ```
-
-2. **Kopiere Template**:
-   ```bash
-   cp ../../rmsd/01_default_rmsd/run_test.sh .
-   ```
-
-3. **Passe an**:
-   - Test-Name und Beschreibung
-   - Curcuma Command
-   - Validierungs-Logik
-
-4. **Registriere in CMakeLists.txt**:
-   ```cmake
-   add_test(NAME cli_capability_XX ...)
-   ```
-
-5. **Dokumentiere Referenzwerte** in GOLDEN_REFERENCES.md
-
-### Adding New Unit Tests
-
-1. **Erstelle `test_newfeature.cpp`**
-2. **Folge test_energy_methods.cpp Pattern**:
-   - Test class mit Setup
-   - Reference values
-   - Tolerance definition
-   - Result reporting
-3. **Registriere in CMakeLists.txt**:
-   ```cmake
-   add_executable(test_newfeature test_newfeature.cpp)
-   target_link_libraries(test_newfeature curcuma_core ...)
-   add_test(NAME test_newfeature COMMAND test_newfeature)
-   ```
-
-## Testing Best Practices
-
-### CLI Tests
-✅ **DO**:
-- Teste reale User-Workflows
-- Validiere wissenschaftliche Korrektheit
-- Nutze Golden References mit Toleranzen
-- Dokumentiere erwartete Fehler-Szenarien
-- Cleanup generierte Dateien
-
-❌ **DON'T**:
-- Verlasse dich nur auf Exit-Codes
-- Teste interne Implementation-Details
-- Hardcode absolute Pfade
-- Ignoriere wissenschaftliche Validierung
-
-### Unit Tests
-✅ **DO**:
-- Teste einzelne Funktionen isoliert
-- Nutze klare Referenz-Werte
-- Dokumentiere Toleranzen wissenschaftlich
-- Teste Edge-Cases
-
-❌ **DON'T**:
-- Teste mehrere Features in einem Test
-- Verwende undokumentierte Magic Numbers
-- Überspringe Error-Cases
-
-## Known Issues
-
-- ✅ **FIXED (Oct 26, 2025)**: JSON null-Fehler bei SimpleMD/curcumaopt - parameter routing now works
-- SimpleMD output file generation: 0/7 tests generate trajectory (separate issue, no crashes)
-- Invalid method tests: Expected error scenarios not yet implemented
+- `createMolecule(name)` defaults to `scale_coordinates = true` and returns **Bohr**; pass `false` for Angstrom
+- CLI scripts take `$CURCUMA`, else the first of `release/`, `debug/`, `build/`, `release_rocm/`, ... in the project root, whatever build tree ctest runs in
+- `cli/errors/*` hardcode `release/curcuma`; `sqm_val_*` use the build's own binary (`$<TARGET_FILE:curcuma>`)
+- Configure-time copies and globs: an edited `run_test.sh` or a new `reference_data/*.ref.json` is picked up only after CMake re-runs
+- `add_cli_test` injects `PROJECT_ROOT` after the line `#!/bin/bash`; a script with another shebang does not get it
+- `WILL_FAIL` marks `sqm_val*` molecules not yet at 1e-8 (`_GFN1_XFAIL`/`_GFN2_XFAIL`: `complex`, plus `He2` for gfn1); they pass while the gap persists
+- `d4_diag_*` and `confscan_molalign` are registered only when their inputs (`release_tblite/dumps/`, `molalign` binary) exist
+- `*/03_invalid_*` CLI tests check graceful fallback; `curcumaopt/03_invalid_method` runs a valid gfnff optimisation. Error paths are covered by `cli/errors/`
+- `AAAbGal incr` exists in `AAAbGal.cpp` but its ctest entry is commented out
+- `energy_methods` reference comments still name TBLite / external GFN-FF although `gfn1`, `gfn2`, `gfnff` now resolve to native code; not checked whether the test passes
 
 ## Instructions Block
 
@@ -347,4 +67,5 @@ m_reference_energies["eht"] = -190.28490972;   // Extended Hückel
 
 ---
 
-*Diese Dokumentation beschreibt die Test-Infrastruktur und Best Practices für Curcuma*
+Previous version (status counts, per-test descriptions, completed issues, removed 2026-10-01):
+[docs/archive/TEST_CASES_NOTES_2026-10.md](../docs/archive/TEST_CASES_NOTES_2026-10.md)
