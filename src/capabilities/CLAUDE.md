@@ -50,7 +50,7 @@ Hessian, docking. Energies and gradients always come from `EnergyCalculator`. Do
 
 - `CurcumaOpt` features without a driver counterpart: `opt_h` (first priority in the former note), Hessian after opt, `mo_scheme`, `./stop` file, GFN2 dipole,
   `fusion` (needs a `Molecule::Check()` gate, which `OptimizerDriver` does not have)
-- Parallel `-opt` batch has no live progress bar: `CxxThreadPool` updates it only in legacy mode (`docs/OPT_MULTIXYZ_PARALLELISM_WP.md` (not committed to git yet))
+- Parallel `-opt` batch has no live progress bar: `CxxThreadPool` updates it only in legacy mode (work-package note OPT_MULTIXYZ_PARALLELISM_WP in docs/, not committed to git yet)
 - ConfScan `Reorder`: a thread disabled for one candidate can stay disabled for the next (exclude-list `continue`, re-enable only inside
   `if (reorder && keep_molecule)`), and a skipped thread keeps its old `m_keep_molecule`; a fix changes accepted counts, needs its own review
 - ConfScan `force_reorder` baseline kept one structure more than the tiered pipeline (44-structure ensemble), not root-caused ([CONFSCAN_REORDER_TIMING_WP](../../docs/CONFSCAN_REORDER_TIMING_WP.md))

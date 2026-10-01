@@ -53,9 +53,6 @@ Every new method or capability added by AI must include in its CLAUDE.md:
   - ❌ DON'T: Multi-paragraph explanations, code examples, historical details
   - ✅ DO: Brief statements with links to detailed docs if needed
   - ✅ DO: "✅ **Feature name** - Brief description" for completed items
-- Remove completed/resolved items after 2-3 updates (move to git history)
-- Tasks corresponding to code must be placed in the correct CLAUDE.md file
-- Each CLAUDE.md has a variable part (short-term info, bugs) and preserved part (permanent knowledge)
 - **Instructions blocks** contain operator-defined future tasks and visions for code development
 - Only include information important for ALL subdirectories in main CLAUDE.md
 - Preserve new knowledge from conversations but keep it brief
@@ -64,7 +61,6 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - **Keep git commits concise and focused**
 - **Rule of thumb**: If a CLAUDE.md section exceeds 20 lines, consider if it's better placed elsewhere
 - Newly added features need a precise and short documentation under docs/, a link to the documentation from claude.md and a note in the readme
-- **Bug and campaign reports do not go into this file.** Dated fix reports with measurements go to [docs/KNOWN_ISSUES_ARCHIVE.md](docs/KNOWN_ISSUES_ARCHIVE.md) and `AIChangelog.md`; this file keeps only the open items and the traps below
 
 ## Development Guidelines
 
@@ -272,7 +268,7 @@ curcuma/
 └── CMakeLists.txt           # Build configuration
 ```
 
-## Completed Developments (2026)
+## Past Developments
 
 Moved to [docs/CAPABILITY_NOTES_2026.md](docs/CAPABILITY_NOTES_2026.md) (GFN-FF/GFN1/GFN2 cleanup Sep 2026, `-interaction`, GFN-FF ring torsions, GPU HB freeze) and `AIChangelog.md`.
 
@@ -307,7 +303,9 @@ ctest -R "cli_rmsd_01" --verbose
 
 ## Project Management
 
-- **Knowledge store (Obsidian vault)**: `~/Nextcloud/Obsidan/Wissen/`, German, operator-owned. Project notes (`Projekte/curcuma *.md`), lab journal for computational campaigns (`Labor/curcuma *.md`, append-only, mandatory fields incl. commit + dirty state + diff), reusable method knowledge (`Wissen/curcuma.md`, `Wissen/Governance-Regeln für KI-Coding-Agenten an wissenschaftlichem Code.md`, `Wissen/Agentisches Arbeiten.md`). **Read `00 Regeln.md` there before writing anything into it.** Code, changelog and bug history stay in this repository; method knowledge, campaign records and project status go to the vault. Cross-project agent rules: `~/.claude/CLAUDE.md`.
+- **Knowledge store (Obsidian vault)**: `~/Nextcloud/Obsidan/Wissen/`, German, operator-owned. Read its `00 Regeln.md` before writing anything into it.
+  - `Projekte/curcuma *.md`: project status; `Labor/curcuma *.md`: lab journal for computational campaigns (append-only, mandatory fields incl. commit, dirty state, diff); `Offene Fragen/`: scientific questions without an owner; `Wissen/curcuma.md` and related notes: reusable method knowledge.
+  - Code, changelog and bug history stay in this repository; method knowledge, campaign records and project status go to the vault. Cross-project agent rules: `~/.claude/CLAUDE.md`.
 - **Prioritized TODO list**: [TODO.md](TODO.md). **Module docs**: each `src/` subdirectory has a CLAUDE.md.
 - **Status and validation**: [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md), [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md), [docs/GMTKN55_VALIDATION.md](docs/GMTKN55_VALIDATION.md), [docs/MOR41_VALIDATION.md](docs/MOR41_VALIDATION.md), [docs/S30L_GFNNF_VALIDATION.md](docs/S30L_GFNNF_VALIDATION.md), [docs/GRADIENT_VALIDATION.md](docs/GRADIENT_VALIDATION.md); technical debt: [docs/TECHNICAL_DEBT.md](docs/TECHNICAL_DEBT.md).
 - **rev-gfnff backlog**: places where GFN-FF could be better than the reference, each checked against an external reference (r2SCAN-3c, GFN2, DLPNO, experiment): [docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md). Port fidelity stays the default.
@@ -322,13 +320,25 @@ ctest -R "cli_rmsd_01" --verbose
 - **TESTED**: Works (by operator feedback)
 - **APPROVED**: Move to changelog, remove from CLAUDE.md
 
-### Documentation Update Rules
-- **Replace debugging details with architecture decisions** when issues are resolved
-- **Remove unnecessary pointer addresses and crash investigation specifics**
-- **Focus on architectural clarity** rather than technical debugging information
-- **Document the "why" behind design decisions** for future reference
-- **Eliminate redundant information** that doesn't add architectural value
-- **Prioritize clean, maintainable documentation** over verbose troubleshooting history
+## Where Things Go
+
+One home per kind of information; copies drift apart. `scripts/check_docs.py` enforces the mechanical parts: run it
+before committing, or enable the hook with `git config core.hooksPath scripts/git-hooks`.
+
+| Kind | Home |
+|---|---|
+| Rules, invariants, traps, layout of a directory | the `CLAUDE.md` of that directory (root 500 lines, others 120, no line over 600 characters) |
+| Open code tasks and defects | `TODO.md`, open items only, at most 3 lines each |
+| Bug report, measurement, campaign | one dated document in `docs/` plus one index line in `AIChangelog.md` |
+| Method status and validation | `docs/<METHOD>_STATUS.md` or `docs/*_VALIDATION.md` |
+| Scientific questions without an owner, project status | the vault (`Offene Fragen/`, `Projekte/`); `TODO.md` links to the note by name, no copy |
+| History | git log and the `AIChangelog.md` index |
+
+- No dated status sections, "Completed" lists or fix narratives in a CLAUDE.md. No new markdown file in the repository root (README, CLAUDE, TODO, AIChangelog only) and no completion or summary reports; the changelog line is the record.
+- A statement about the code ("X exists", "default is Y") is checked against the code when it is written; a path in backticks must exist. What was not checked says so.
+- Closing a task is one change: remove its TODO entry, add the changelog line, close or strike the linked vault note.
+- Dead code: code without a caller is deleted in the same change that removes its last caller (git is the archive); no `.backup`/`.orig` files. Code that stays off on purpose carries the comment `INACTIVE (date): reason, switch` and a TODO entry. Known candidates: `TODO.md`, section "Löschkandidaten".
+- Open questions: code-bound ones in `TODO.md`, section "Entscheidungen und Fragen"; scientific ones in the vault. Each side holds links, not copies.
 
 ## Git Best Practices
 - **Only commit source files**: Use `git add <file>` for specific files, never `git add -A` without review

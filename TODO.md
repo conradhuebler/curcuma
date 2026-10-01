@@ -67,7 +67,7 @@ Stand.
 - `cli_simplemd_08/09` (Essigsäuredimer, CSVR, dt 1 fs) gegen das gemergte Binary mit der MD-Uhr-Korrektur (`ef462fcf`) erneut laufen lassen (Known Issue #32).
 - `test_cg_potentials` wird gebaut, hat aber keinen ctest-Eintrag; der CG-Beispielaufruf mit VTF-Eingabe endet mit "Failed to initialize ForceField
   engine" (`docs/archive/CG.md`, geprüft 2026-10-01).
-- `molecule_comprehensive` verweist auf das Target `test_molecule`, dessen Quelle `src/core/test_molecule.cpp` nicht im Baum liegt.
+- `molecule_comprehensive` verweist auf das Target `test_molecule`, dessen Quelle the source file test_molecule.cpp under src/core nicht im Baum liegt.
 - Wissenschaftliche Validierung der CLI-Tests ausbauen (RMSD-Toleranzen, Energiekonvergenz); Muster für absichtlich fehlschlagende
   Tests (`03_invalid_method` in `curcumaopt`, `rmsd`, `confscan`); Performance-Benchmarks für Regressionserkennung.
 - ConfScan: Accept/Reject-Meldungen bei Standard-Verbosity nicht sichtbar (Eintrag von 2025, nicht erneut geprüft).
@@ -90,7 +90,32 @@ Stand.
 - **Build-System** (Stand November 2025, nicht geprüft): bedingte Kompilierung, fünf Build-Varianten, nur der Standardbuild war damals fehlerfrei.
   Seit 2026-09-30 baut `make` in `release/` wieder mit Exit 0; die übrigen Varianten vor einer Wiederaufnahme neu messen.
 
-## 6. Aus der alten Liste entfernt (überholt oder erledigt)
+## 6. Entscheidungen und Fragen
+
+Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projektstatus stehen im Vault und sind nur verlinkt.
+
+- `-scf_pseudo_diag` als Standard einschalten? (Messungen sprechen dafür, Abschnitt 2.)
+- `shouldUpdateHBXB()` korrigieren und damit von der Fortran-Referenz abweichen, oder als Referenzeigenschaft belassen?
+- UFF-/QMDFF-Gradient reparieren (Stand: "erstmal nicht")? `-seed` für die MD-Startgeschwindigkeiten reparieren (ändert jede MD)?
+- GPU-Bitgleichheit angehen (Sammel-Kernel statt `atomicAdd`) oder bei Ensemblevergleichen bleiben?
+- Vault, fachliche Fragen: `Offene Fragen/` ("Valenzanteil im reaktiven GFN-FF", "Veraltete C6-Dispersion und Paarlisten in inaktiven Topologie-Ecken",
+  "Lücke zwischen GFN2-xTB und Doppelhybrid-Methoden schließen", "RRHO-Näherung durch MD ... ersetzen").
+- Vault, Projektstatus: `Projekte/curcuma rev-gfnff`, `curcuma GPU-Backends`, `curcuma MD-Stabilität großer Systeme`, `curcuma ConfSearch Weiterentwicklung`,
+  `curcuma GFN-FF Transitionsmetalle (MOR41)`, `curcuma Reaktives GFN-FF (react-Topologie)`, `curcuma Konformerenfilter (reorder_paper)`.
+
+## 7. Löschkandidaten
+
+Belege aus der Prüfung der CLAUDE.md-Dateien vom 2026-10-01. Vor dem Löschen die Aufrufer erneut suchen. Umsetzung auf dem Branch `fix/remove-dead-code`.
+
+- `src/capabilities/curcumaopt.cpp`: in keiner Quellliste, mit `11d0e891` entfernt. `curcumaopt.h` hält noch den PARAM-Block des Moduls `opt` und bleibt, bis die Parameter umgezogen sind.
+- `src/capabilities/optimisation/modern_optimizer_simple.*`: wird weder kompiliert noch eingebunden.
+- `MolAlignLib()` und `Prepare*Template()` in `rmsd.cpp`: ohne Aufrufer. `CostMatrixCalculator` und `MunkresAssignmentSolver` (`src/capabilities/rmsd/`): kompiliert, nirgends aufgerufen.
+- `launchGpuKernel()` im D4-Evaluator: nie aufgerufen.
+- `src/helpers/`: `cli_test.cpp` und `gfnff_test.cpp` binden nicht vorhandene Header ein; vier weitere Helfer ohne CMake-Target.
+- Untracked: `src/capabilities/analysis.cpp.backup`, `src/tools/trajectory_writer.cpp.backup`.
+- `test_cg_potentials` wird gebaut, aber nie von ctest ausgeführt (löschen oder registrieren).
+
+## 8. Aus der alten Liste entfernt (überholt oder erledigt)
 
 | Eintrag | Grund |
 |---|---|

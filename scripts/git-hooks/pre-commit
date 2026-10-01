@@ -1,0 +1,4 @@
+#!/bin/sh
+# Claude Generated (Oct 2026): documentation and repository hygiene check, see CLAUDE.md "Where Things Go".
+# Enable with:  git config core.hooksPath scripts/git-hooks
+exec python3 "$(git rev-parse --show-toplevel)/scripts/check_docs.py"
