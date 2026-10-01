@@ -18,7 +18,7 @@ echo ""
 echo ""
 echo "Test 2: Testing with larger molecule (A.xyz, 117 atoms)"
 echo "--------------------------------------------------------"  
-./curcuma -opt /home/user/curcuma/test_cases/AAA-bGal/A.xyz \
+./curcuma -opt /home/user/curcuma/test_cases/AAA-bGlc/A.xyz \
     -method uff -MaxIter 10 -verbosity 2
 
 echo ""

@@ -25,7 +25,7 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/AAA-bGal/A.xyz"
+    "test_cases/AAA-bGlc/A.xyz"
    ],
    "analysis": {
     "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
@@ -43,9 +43,9 @@
     ]
    },
    "aliases": [
-    "aaa-bgal.a"
+    "aaa-bglc.a"
    ],
-   "description": "comment line: input_76, a conformer from a curcuma run; host C36H48N6 plus guest C7H14O6; the guest is methyl beta-D-glucopyranoside by configuration analysis (see analysis), although the directory is named AAA-bGal"
+   "description": "formerly test_cases/AAA-bGal/A.xyz; comment line: input_76, a conformer from a curcuma run; host C36H48N6 plus guest C7H14O6; the guest is methyl beta-D-glucopyranoside by configuration analysis (see analysis),, the directory was named AAA-bGal until 2026-10-01"
   },
   {
    "id": "aaa-bglc.conf96",
@@ -70,7 +70,7 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/AAA-bGal/B.xyz"
+    "test_cases/AAA-bGlc/B.xyz"
    ],
    "analysis": {
     "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
@@ -88,9 +88,9 @@
     ]
    },
    "aliases": [
-    "aaa-bgal.b"
+    "aaa-bglc.b"
    ],
-   "description": "comment line: input_96, a conformer from a curcuma run; host C36H48N6 plus guest C7H14O6; the guest is methyl beta-D-glucopyranoside by configuration analysis (see analysis), although the directory is named AAA-bGal"
+   "description": "formerly test_cases/AAA-bGal/B.xyz; comment line: input_96, a conformer from a curcuma run; host C36H48N6 plus guest C7H14O6; the guest is methyl beta-D-glucopyranoside by configuration analysis (see analysis),, the directory was named AAA-bGal until 2026-10-01"
   },
   {
    "id": "aaa-host-frames353",

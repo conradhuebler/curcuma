@@ -5,9 +5,9 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/input_aa.xyz
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/input_ab.xyz
       DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/AAA-bGal/A.xyz
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/AAA-bGlc/A.xyz
         DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/AAA-bGal/B.xyz
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/AAA-bGlc/B.xyz
             DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 
 # Claude Generated: Test Molecule Registry - Central hardcoded molecule database
@@ -62,7 +62,7 @@ target_link_libraries(confstat_tests
 )
 
 # Claude Generated: Energy calculation test suite
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/AAA-bGal/A.xyz
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/AAA-bGlc/A.xyz
         DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 
 add_executable(test_energy_methods

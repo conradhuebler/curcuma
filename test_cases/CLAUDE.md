@@ -20,7 +20,7 @@ Longer guide (Feb 2026, not re-checked): [TESTING.md](TESTING.md).
 
 ## Unit and integration tests
 
-- Test molecules come from the registry (rule below); `test_energy_methods.cpp` uses `AAA-bGal/A.xyz` (117 atoms) instead
+- Test molecules come from the registry (rule below); `test_energy_methods.cpp` uses `AAA-bGlc/A.xyz` (117 atoms; host plus methyl beta-D-glucopyranoside, directory renamed from AAA-bGal on 2026-10-01) instead
 - New unit test `test_<name>.cpp`: `add_executable`, `target_link_libraries(... curcuma_core test_molecule_registry)`, `add_test` with `TIMEOUT` and `LABELS` in `test_cases/CMakeLists.txt`
 - Document the tolerance and where each reference value comes from (program, version, settings)
 

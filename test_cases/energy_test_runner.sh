@@ -14,7 +14,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Test configuration
-TEST_MOLECULE="AAA-bGal/A.xyz"
+TEST_MOLECULE="AAA-bGlc/A.xyz"
 CURCUMA_BINARY="../curcuma"
 TEST_OUTPUT_DIR="energy_test_results"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
