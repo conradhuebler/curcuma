@@ -3,9 +3,9 @@
  "note": "Generated for legacy entries by scripts/structlib_import_legacy.py; maintained with scripts/structlib.py. Rules: test_cases/structures/README.md",
  "structures": [
   {
-   "id": "aaa-bgal.conf76",
+   "id": "aaa-bglc.conf76",
    "class": "clusters",
-   "file": "clusters/aaa-bgal.conf76.xyz",
+   "file": "clusters/aaa-bglc.conf76.xyz",
    "format": "xyz",
    "formula": "C43H62N6O6",
    "natoms": 117,
@@ -27,15 +27,30 @@
    "legacy_paths": [
     "test_cases/AAA-bGal/A.xyz"
    ],
+   "analysis": {
+    "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
+    "guest_formula": "C7H14O6",
+    "frames": 1,
+    "guest_configuration": [
+     {
+      "series": "D",
+      "sugar": "gluco",
+      "anomer": "beta",
+      "axial_equatorial_C1_to_C5": "eeeee",
+      "faces_C1_to_C5": "UdUdU",
+      "frames": 1
+     }
+    ]
+   },
    "aliases": [
     "aaa-bgal.a"
    ],
-   "description": "comment line: input_76, a conformer from a curcuma run; host C36H48N6 plus guest C7H14O6, named bGal in the directory name (the operator is unsure whether bGal or bGlc; the formula does not decide)"
+   "description": "comment line: input_76, a conformer from a curcuma run; host C36H48N6 plus guest C7H14O6; the guest is methyl beta-D-glucopyranoside by configuration analysis (see analysis), although the directory is named AAA-bGal"
   },
   {
-   "id": "aaa-bgal.conf96",
+   "id": "aaa-bglc.conf96",
    "class": "clusters",
-   "file": "clusters/aaa-bgal.conf96.xyz",
+   "file": "clusters/aaa-bglc.conf96.xyz",
    "format": "xyz",
    "formula": "C43H62N6O6",
    "natoms": 117,
@@ -57,10 +72,25 @@
    "legacy_paths": [
     "test_cases/AAA-bGal/B.xyz"
    ],
+   "analysis": {
+    "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
+    "guest_formula": "C7H14O6",
+    "frames": 1,
+    "guest_configuration": [
+     {
+      "series": "D",
+      "sugar": "gluco",
+      "anomer": "beta",
+      "axial_equatorial_C1_to_C5": "eeeee",
+      "faces_C1_to_C5": "UdUdU",
+      "frames": 1
+     }
+    ]
+   },
    "aliases": [
     "aaa-bgal.b"
    ],
-   "description": "comment line: input_96, a conformer from a curcuma run; host C36H48N6 plus guest C7H14O6, named bGal in the directory name (the operator is unsure whether bGal or bGlc; the formula does not decide)"
+   "description": "comment line: input_96, a conformer from a curcuma run; host C36H48N6 plus guest C7H14O6; the guest is methyl beta-D-glucopyranoside by configuration analysis (see analysis), although the directory is named AAA-bGal"
   },
   {
    "id": "aaa-host-frames353",
@@ -478,9 +508,9 @@
    "description": "comment line: anti conformation for torsion testing"
   },
   {
-   "id": "c33h45n9-c7h14o6-frames44",
+   "id": "c33h45n9-agal-frames44",
    "class": "ensembles",
-   "file": "ensembles/c33h45n9-c7h14o6-frames44.xyz",
+   "file": "ensembles/c33h45n9-agal-frames44.xyz",
    "format": "xyz",
    "formula": "C40H59N9O6",
    "natoms": 114,
@@ -515,7 +545,22 @@
     "input",
     "unnamed.c40h59n9o6.a1c30b"
    ],
-   "description": "44 frames of a complex of host C33H45N9 and guest C7H14O6 (a methyl hexopyranoside by formula; gluco or galacto is not recorded), curcuma conformer output"
+   "analysis": {
+    "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
+    "guest_formula": "C7H14O6",
+    "frames": 44,
+    "guest_configuration": [
+     {
+      "series": "D",
+      "sugar": "galacto",
+      "anomer": "alpha",
+      "axial_equatorial_C1_to_C5": "aeeae",
+      "faces_C1_to_C5": "ddUUU",
+      "frames": 44
+     }
+    ]
+   },
+   "description": "44 frames of a complex of host C33H45N9 and guest C7H14O6; the guest is methyl alpha-D-galactopyranoside in all 44 frames (see analysis); curcuma conformer output"
   },
   {
    "id": "caffeine",
@@ -1327,10 +1372,25 @@
    "legacy_paths": [
     "test_cases/optimisation/acyclic/JL22-bGal.xyz"
    ],
+   "analysis": {
+    "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
+    "guest_formula": "C7H14O6",
+    "frames": 1,
+    "guest_configuration": [
+     {
+      "series": "D",
+      "sugar": "galacto",
+      "anomer": "beta",
+      "axial_equatorial_C1_to_C5": "eeeae",
+      "faces_C1_to_C5": "UdUUU",
+      "frames": 1
+     }
+    ]
+   },
    "aliases": [
     "jl22-bgal"
    ],
-   "description": "comment line: input_6, a conformer from a curcuma run; host C58H78N10 plus guest C7H14O6"
+   "description": "comment line: input_6, a conformer from a curcuma run; host C58H78N10 plus guest C7H14O6; the guest is methyl beta-D-galactopyranoside by configuration analysis (see analysis)"
   },
   {
    "id": "jl22-bgal.xtb-gfn2-opt",
@@ -1358,6 +1418,21 @@
    "legacy_paths": [
     "test_cases/optimisation/acyclic/GFN-2.xyz"
    ],
+   "analysis": {
+    "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
+    "guest_formula": "C7H14O6",
+    "frames": 1,
+    "guest_configuration": [
+     {
+      "series": "D",
+      "sugar": "galacto",
+      "anomer": "beta",
+      "axial_equatorial_C1_to_C5": "eeeae",
+      "faces_C1_to_C5": "UdUUU",
+      "frames": 1
+     }
+    ]
+   },
    "aliases": [
     "gfn-2"
    ],
@@ -1389,6 +1464,21 @@
    "legacy_paths": [
     "test_cases/optimisation/acyclic/GFN-FF.xyz"
    ],
+   "analysis": {
+    "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
+    "guest_formula": "C7H14O6",
+    "frames": 1,
+    "guest_configuration": [
+     {
+      "series": "D",
+      "sugar": "galacto",
+      "anomer": "beta",
+      "axial_equatorial_C1_to_C5": "eeeae",
+      "faces_C1_to_C5": "UdUUU",
+      "frames": 1
+     }
+    ]
+   },
    "aliases": [
     "gfn-ff"
    ],
@@ -1421,9 +1511,9 @@
    "description": "comment line: LiH equilibrium bond length 1.595 A"
   },
   {
-   "id": "macrocycle-bglc",
+   "id": "macrocycle-bgal",
    "class": "clusters",
-   "file": "clusters/macrocycle-bglc.xyz",
+   "file": "clusters/macrocycle-bgal.xyz",
    "format": "xyz",
    "formula": "C83H122N12O14",
    "natoms": 231,
@@ -1447,6 +1537,21 @@
     "test_cases/molecules/larger/complex.xyz",
     "test_cases/sqm_reference/molecules/complex.xyz"
    ],
+   "analysis": {
+    "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
+    "guest_formula": "C7H14O6",
+    "frames": 1,
+    "guest_configuration": [
+     {
+      "series": "D",
+      "sugar": "galacto",
+      "anomer": "beta",
+      "axial_equatorial_C1_to_C5": "eeeae",
+      "faces_C1_to_C5": "UdUUU",
+      "frames": 1
+     }
+    ]
+   },
    "reference_calculations": [
     {
      "kind": "gfnff-terms",
@@ -1458,12 +1563,12 @@
    "aliases": [
     "complex"
    ],
-   "description": "host C76H108N12O8 plus guest C7H14O6; the guest is bGlc according to the operator (2026-10-01), the formula alone does not separate gluco- from galacto-"
+   "description": "host C76H108N12O8 plus guest C7H14O6; the guest is methyl beta-D-galactopyranoside by configuration analysis (see analysis); the operator remembered bGlc (2026-10-01), which the coordinates do not support"
   },
   {
-   "id": "macrocycle-bglc.conf2",
+   "id": "macrocycle-bgal.conf2",
    "class": "clusters",
-   "file": "clusters/macrocycle-bglc.conf2.xyz",
+   "file": "clusters/macrocycle-bgal.conf2.xyz",
    "format": "xyz",
    "formula": "C83H122N12O14",
    "natoms": 231,
@@ -1481,15 +1586,30 @@
    "legacy_paths": [
     "test_cases/optimisation/makrocyclic/input.xyz"
    ],
+   "analysis": {
+    "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
+    "guest_formula": "C7H14O6",
+    "frames": 1,
+    "guest_configuration": [
+     {
+      "series": "D",
+      "sugar": "galacto",
+      "anomer": "beta",
+      "axial_equatorial_C1_to_C5": "eeeae",
+      "faces_C1_to_C5": "UdUUU",
+      "frames": 1
+     }
+    ]
+   },
    "aliases": [
     "makrocyclic.input"
    ],
    "description": "comment line: input_2, a conformer from a curcuma run"
   },
   {
-   "id": "macrocycle-bglc.uff-analytic-grad",
+   "id": "macrocycle-bgal.uff-analytic-grad",
    "class": "clusters",
-   "file": "clusters/macrocycle-bglc.uff-analytic-grad.xyz",
+   "file": "clusters/macrocycle-bgal.uff-analytic-grad.xyz",
    "format": "xyz",
    "formula": "C83H122N12O14",
    "natoms": 231,
@@ -1513,15 +1633,30 @@
    "legacy_paths": [
     "test_cases/optimisation/makrocyclic/AnGrad.xyz"
    ],
+   "analysis": {
+    "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
+    "guest_formula": "C7H14O6",
+    "frames": 1,
+    "guest_configuration": [
+     {
+      "series": "D",
+      "sugar": "galacto",
+      "anomer": "beta",
+      "axial_equatorial_C1_to_C5": "eeeae",
+      "faces_C1_to_C5": "UdUUU",
+      "frames": 1
+     }
+    ]
+   },
    "aliases": [
     "angrad"
    ],
    "description": "optimised with analytical gradients, see optimisation/makrocyclic/README.md"
   },
   {
-   "id": "macrocycle-bglc.uff-numeric-grad",
+   "id": "macrocycle-bgal.uff-numeric-grad",
    "class": "clusters",
-   "file": "clusters/macrocycle-bglc.uff-numeric-grad.xyz",
+   "file": "clusters/macrocycle-bgal.uff-numeric-grad.xyz",
    "format": "xyz",
    "formula": "C83H122N12O14",
    "natoms": 231,
@@ -1545,6 +1680,21 @@
    "legacy_paths": [
     "test_cases/optimisation/makrocyclic/NumGrad.xyz"
    ],
+   "analysis": {
+    "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
+    "guest_formula": "C7H14O6",
+    "frames": 1,
+    "guest_configuration": [
+     {
+      "series": "D",
+      "sugar": "galacto",
+      "anomer": "beta",
+      "axial_equatorial_C1_to_C5": "eeeae",
+      "faces_C1_to_C5": "UdUUU",
+      "frames": 1
+     }
+    ]
+   },
    "aliases": [
     "numgrad"
    ],

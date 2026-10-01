@@ -25,7 +25,7 @@ import re
 import subprocess
 import sys
 
-ROOT = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
+ROOT = subprocess.check_output(["git", "-C", os.path.dirname(os.path.abspath(__file__)), "rev-parse", "--show-toplevel"], text=True).strip()
 os.chdir(ROOT)
 
 ROOT_MD_WHITELIST = {"README.md", "CLAUDE.md", "TODO.md", "AIChangelog.md"}

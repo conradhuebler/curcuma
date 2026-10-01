@@ -19,6 +19,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import structlib as sl  # noqa: E402
+import pyranoside_stereo as ps  # noqa: E402
 
 ROOT = sl.ROOT
 DRY = "--dry-run" in sys.argv
@@ -180,19 +181,19 @@ RENAME = {
     "polymer_2x_gfnff_opt": ("peo201x2-water1500.gfnff-min", "same system as peo201x2-water1500; comment: GFN-FF minimum"),
     "unnamed.c402h806o202.9ae88f": ("peo201-chain", "one chain C402H806O202 (= H-(OCH2CH2)201-OH, PEO-like); legacy name polymer; chain identity inferred from the composition"),
     "mixture2": ("urea400-water1000", "400 CH4N2O and 1000 H2O (fragment analysis)"),
-    "complex": ("macrocycle-bglc", "host C76H108N12O8 plus guest C7H14O6; the guest is bGlc according to the operator (2026-10-01), the formula alone does not separate gluco- from galacto-"),
-    "angrad": ("macrocycle-bglc.uff-analytic-grad", "optimised with analytical gradients, see optimisation/makrocyclic/README.md"),
-    "numgrad": ("macrocycle-bglc.uff-numeric-grad", "optimised with numerical gradients, see optimisation/makrocyclic/README.md"),
-    "makrocyclic.input": ("macrocycle-bglc.conf2", "comment line: input_2, a conformer from a curcuma run"),
-    "aaa-bgal.a": ("aaa-bgal.conf76", "comment line: input_76, a conformer from a curcuma run; host C36H48N6 plus guest C7H14O6, named bGal in the directory name (the operator is unsure whether bGal or bGlc; the formula does not decide)"),
-    "aaa-bgal.b": ("aaa-bgal.conf96", "comment line: input_96, a conformer from a curcuma run; host C36H48N6 plus guest C7H14O6, named bGal in the directory name (the operator is unsure whether bGal or bGlc; the formula does not decide)"),
-    "jl22-bgal": ("jl22-bgal.conf6", "comment line: input_6, a conformer from a curcuma run; host C58H78N10 plus guest C7H14O6"),
+    "complex": ("macrocycle-bgal", "host C76H108N12O8 plus guest C7H14O6; the guest is methyl beta-D-galactopyranoside by configuration analysis (see analysis); the operator remembered bGlc (2026-10-01), which the coordinates do not support"),
+    "angrad": ("macrocycle-bgal.uff-analytic-grad", "optimised with analytical gradients, see optimisation/makrocyclic/README.md"),
+    "numgrad": ("macrocycle-bgal.uff-numeric-grad", "optimised with numerical gradients, see optimisation/makrocyclic/README.md"),
+    "makrocyclic.input": ("macrocycle-bgal.conf2", "comment line: input_2, a conformer from a curcuma run"),
+    "aaa-bgal.a": ("aaa-bglc.conf76", "comment line: input_76, a conformer from a curcuma run; host C36H48N6 plus guest C7H14O6; the guest is methyl beta-D-glucopyranoside by configuration analysis (see analysis), although the directory is named AAA-bGal"),
+    "aaa-bgal.b": ("aaa-bglc.conf96", "comment line: input_96, a conformer from a curcuma run; host C36H48N6 plus guest C7H14O6; the guest is methyl beta-D-glucopyranoside by configuration analysis (see analysis), although the directory is named AAA-bGal"),
+    "jl22-bgal": ("jl22-bgal.conf6", "comment line: input_6, a conformer from a curcuma run; host C58H78N10 plus guest C7H14O6; the guest is methyl beta-D-galactopyranoside by configuration analysis (see analysis)"),
     "gfn-2": ("jl22-bgal.xtb-gfn2-opt", "file name GFN-2.xyz and xtb 6.6.0 optimisation comment; method taken from the file name"),
     "gfn-ff": ("jl22-bgal.xtb-gfnff-opt", "file name GFN-FF.xyz and xtb 6.6.0 optimisation comment; method taken from the file name"),
     "conf": ("aaa-host-frames353", "353 frames of C36H48N6, the formula of the host fragment of aaa-bgal; identity inferred from the formula (the operator is not sure that the host is AAA)"),
     "unnamed.c36h48n6.614365": ("aaa-host.rmsd-b", "C36H48N6 as used by the cli/rmsd tests (second of the two variants)"),
     "unnamed.c36h48n6.f841c5": ("aaa-host.rmsd-a", "C36H48N6 as used by the cli/rmsd tests (first of the two variants)"),
-    "unnamed.c40h59n9o6.a1c30b": ("c33h45n9-c7h14o6-frames44", "44 frames of a complex of host C33H45N9 and guest C7H14O6 (a methyl hexopyranoside by formula; gluco or galacto is not recorded), curcuma conformer output"),
+    "unnamed.c40h59n9o6.a1c30b": ("c33h45n9-agal-frames44", "44 frames of a complex of host C33H45N9 and guest C7H14O6; the guest is methyl alpha-D-galactopyranoside in all 44 frames (see analysis); curcuma conformer output"),
     "helicen": ("helicene-frames17", "17 frames of C26H16 (formula of hexahelicene); what the frames are is not recorded"),
     "triose": ("trisaccharide-c18h32o16", "formula C18H32O16 equals three hexose units minus two H2O; legacy name triose"),
     "triose.input": ("trisaccharide-c18h32o16.opt-start", "input of the optimisation test (directory optimisation/triose); the geometry level is not recorded"),
@@ -327,6 +328,17 @@ def main():
                 old = e["provenance"]
                 e["provenance"] = {**README_EVIDENCE[p], **({"comment": old["comment"]} if "comment" in old else {}),
                                    **({"energy_eh": old["energy_eh"]} if "energy_eh" in old else {})}
+        if ext == ".xyz" and n >= 30:
+            frames_res = ps.analyse_file(full)
+            guests = [r for fr in frames_res for r in fr if "series" in r]
+            if guests:
+                cnt = collections.Counter((r["series"], r["sugar"], r["anomer"], r["axial_eq"], r["faces"]) for r in guests)
+                e["analysis"] = {
+                    "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built "
+                              "reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
+                    "guest_formula": "C7H14O6", "frames": len(frames_res),
+                    "guest_configuration": [{"series": k[0], "sugar": k[1], "anomer": k[2], "axial_equatorial_C1_to_C5": k[3],
+                                             "faces_C1_to_C5": k[4], "frames": v} for k, v in cnt.most_common()]}
         refs = []
         for p in paths:
             info = out_file_info(p)

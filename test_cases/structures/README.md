@@ -86,7 +86,7 @@ python3 scripts/structlib.py check
 `id`, `class`, `file`, `format`, `formula` (Hill), `natoms`, `frames`, `charge`, `spin`, `role`, `size_bytes`,
 `sha256`, `provenance{kind, program, version, method, basis, solvent, convergence, energy_eh, gnorm, reference,
 license, description, evidence, level_note, comment}`, `reference_calculations[]`, `derived_from`, `supersedes`,
-`description`, `aliases`, `variant_of`, `needs_name`, `legacy`, `legacy_paths[]`. Top level: `sets[]` (fetched benchmark sets), `not_imported`.
+`description`, `analysis` (derived properties, e.g. the sugar configuration of a guest, with the method that produced it), `aliases`, `variant_of`, `needs_name`, `legacy`, `legacy_paths[]`. Top level: `sets[]` (fetched benchmark sets), `not_imported`.
 
 ## Commands
 

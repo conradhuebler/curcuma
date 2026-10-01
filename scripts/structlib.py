@@ -20,7 +20,7 @@ import re
 import subprocess
 import sys
 
-ROOT = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
+ROOT = subprocess.check_output(["git", "-C", os.path.dirname(os.path.abspath(__file__)), "rev-parse", "--show-toplevel"], text=True).strip()
 LIB = os.path.join(ROOT, "test_cases", "structures")
 MANIFEST = os.path.join(LIB, "manifest.json")
 
