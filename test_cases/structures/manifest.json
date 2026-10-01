@@ -1,0 +1,2368 @@
+{
+ "version": 1,
+ "note": "Generated for legacy entries by scripts/structlib_import_legacy.py; maintained with scripts/structlib.py. Rules: test_cases/structures/README.md",
+ "structures": [
+  {
+   "id": "aaa-bgal.conf76",
+   "class": "clusters",
+   "file": "clusters/aaa-bgal.conf76.xyz",
+   "format": "xyz",
+   "formula": "C43H62N6O6",
+   "natoms": 117,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "unspecified",
+   "size_bytes": 4489,
+   "sha256": "f6bb780483aedf8c6469efced52745672a79481ac216cc426352746ef2d7dd3f",
+   "provenance": {
+    "kind": "program_output",
+    "comment": "input_76 ** Energy = -165.755903 Eh ** Charge = 0 ** Spin = 0 ** Curcuma 0.1 (0.0.76-11-g0d7ba0c)",
+    "program": "curcuma",
+    "version": "0.0.76-11-g0d7ba0c",
+    "energy_eh": -165.755903,
+    "level_note": "curcuma output comment; the method used is not recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/AAA-bGal/A.xyz"
+   ],
+   "aliases": [
+    "aaa-bgal.a"
+   ],
+   "description": "comment line: input_76, a conformer from a curcuma run; host C36H48N6 plus guest C7H14O6, named bGal in the directory name (the operator is unsure whether bGal or bGlc; the formula does not decide)"
+  },
+  {
+   "id": "aaa-bgal.conf96",
+   "class": "clusters",
+   "file": "clusters/aaa-bgal.conf96.xyz",
+   "format": "xyz",
+   "formula": "C43H62N6O6",
+   "natoms": 117,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "unspecified",
+   "size_bytes": 4490,
+   "sha256": "0c575a56f823c11cc9241c15eb25bc4016860b053e5a168387bd37cf2de806dd",
+   "provenance": {
+    "kind": "program_output",
+    "comment": "input_96 ** Energy = -165.755280 Eh ** Charge = 0 ** Spin = 0 ** Curcuma 0.1 (0.0.76-11-g0d7ba0c)",
+    "program": "curcuma",
+    "version": "0.0.76-11-g0d7ba0c",
+    "energy_eh": -165.75528,
+    "level_note": "curcuma output comment; the method used is not recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/AAA-bGal/B.xyz"
+   ],
+   "aliases": [
+    "aaa-bgal.b"
+   ],
+   "description": "comment line: input_96, a conformer from a curcuma run; host C36H48N6 plus guest C7H14O6, named bGal in the directory name (the operator is unsure whether bGal or bGlc; the formula does not decide)"
+  },
+  {
+   "id": "aaa-host-frames353",
+   "class": "ensembles",
+   "file": "ensembles/aaa-host-frames353.xyz",
+   "format": "xyz",
+   "formula": "C36H48N6",
+   "natoms": 90,
+   "frames": 353,
+   "charge": null,
+   "spin": null,
+   "role": "ensemble",
+   "size_bytes": 2074227,
+   "sha256": "84b28fc1fa7319fe6b7e96ef5734693e1ee4395f9513289e50e2aca9b1faf638",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "-119.19406195",
+    "level_note": "a bare number, no unit or program recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/confs/conf.xyz"
+   ],
+   "aliases": [
+    "conf"
+   ],
+   "description": "353 frames of C36H48N6, the formula of the host fragment of aaa-bgal; identity inferred from the formula (the operator is not sure that the host is AAA)"
+  },
+  {
+   "id": "aaa-host.rmsd-a",
+   "class": "large",
+   "file": "large/aaa-host.rmsd-a.xyz",
+   "format": "xyz",
+   "formula": "C36H48N6",
+   "natoms": 90,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 5875,
+   "sha256": "f841c57ad62aa7e250617fbb2cc5550912ee8b8fae5b1ac4a356a701998aa364",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "-119.19406195",
+    "level_note": "a bare number, no unit or program recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/rmsd/01_default_rmsd/ref.xyz",
+    "test_cases/cli/rmsd/02_no_reorder/ref.xyz",
+    "test_cases/cli/rmsd/02_no_reorder/target.xyz",
+    "test_cases/cli/rmsd/03_invalid_method/ref.xyz",
+    "test_cases/cli/rmsd/04_template_elements/ref.xyz",
+    "test_cases/cli/rmsd/05_fragment_rmsd/ref.xyz",
+    "test_cases/cli/rmsd/06_alias_reorder/ref.xyz",
+    "test_cases/input_aa.xyz",
+    "test_cases/reorder/input_aa.xyz",
+    "test_cases/rmsd/input_aa.xyz"
+   ],
+   "aliases": [
+    "input_aa",
+    "ref",
+    "target",
+    "unnamed.c36h48n6.f841c5"
+   ],
+   "description": "C36H48N6 as used by the cli/rmsd tests (first of the two variants)"
+  },
+  {
+   "id": "aaa-host.rmsd-b",
+   "class": "large",
+   "file": "large/aaa-host.rmsd-b.xyz",
+   "format": "xyz",
+   "formula": "C36H48N6",
+   "natoms": 90,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 5876,
+   "sha256": "614365d2001861e054cad6bb6d4498ec7eb9f999d4dc73371fe95d5d48208832",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "-119.19401242",
+    "level_note": "a bare number, no unit or program recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/rmsd/01_default_rmsd/target.xyz",
+    "test_cases/cli/rmsd/03_invalid_method/target.xyz",
+    "test_cases/cli/rmsd/04_template_elements/target.xyz",
+    "test_cases/cli/rmsd/05_fragment_rmsd/target.xyz",
+    "test_cases/cli/rmsd/06_alias_reorder/target.xyz",
+    "test_cases/input_ab.xyz",
+    "test_cases/reorder/input_ab.xyz",
+    "test_cases/rmsd/input_ab.xyz"
+   ],
+   "aliases": [
+    "input_ab",
+    "target",
+    "unnamed.c36h48n6.614365"
+   ],
+   "description": "C36H48N6 as used by the cli/rmsd tests (second of the two variants)"
+  },
+  {
+   "id": "acetic-acid-dimer",
+   "class": "clusters",
+   "file": "clusters/acetic-acid-dimer.xyz",
+   "format": "xyz",
+   "formula": "C4H8O4",
+   "natoms": 16,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "unspecified",
+   "size_bytes": 684,
+   "sha256": "dc57614d63d6dc3fa05f41b7b88b434150372aca9e47cf4c68adf6afe9028f24",
+   "provenance": {
+    "kind": "program_output",
+    "comment": "2067.068657 ** Energy = -28.897215 Eh ** Charge = 0 ** Spin = 0 ** Curcuma 0.1 (0.0.69-3-g570a2ae)",
+    "program": "curcuma",
+    "version": "0.0.69-3-g570a2ae",
+    "energy_eh": -28.897215,
+    "level_note": "curcuma output comment; the method used is not recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/sqm/06_gfn2_extended_singlepoint/acetic_acid_dimer.xyz",
+    "test_cases/cli/sqm/07_gfn1_extended_singlepoint/acetic_acid_dimer.xyz",
+    "test_cases/molecules/larger/acetic_acid_dimer.xyz",
+    "test_cases/sqm_reference/molecules/acetic_acid_dimer.xyz"
+   ],
+   "reference_calculations": [
+    {
+     "kind": "gfnff-terms",
+     "generator": "gfnff-analyzer-parser",
+     "date": "2026-03-19 11:33:28",
+     "file": "test_cases/reference_data/acetic_acid_dimer.ref.json"
+    }
+   ],
+   "aliases": [
+    "acetic_acid_dimer"
+   ]
+  },
+  {
+   "id": "acetic-acid-dimer.cyclic-hb",
+   "class": "clusters",
+   "file": "clusters/acetic-acid-dimer.cyclic-hb.xyz",
+   "format": "xyz",
+   "formula": "C4H8O4",
+   "natoms": 16,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 747,
+   "sha256": "42eaf79d27f9d0cf6c85870b101a53adaed0e68c5a5314e2785e702b807e36d8",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "Acetic acid dimer (cyclic hydrogen-bonded, from Curcuma reference data)"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/simplemd/08_gfnff_acetic_acid_dimer_md/input.xyz",
+    "test_cases/cli/simplemd/09_xtbgfnff_acetic_acid_dimer_md/input.xyz"
+   ],
+   "aliases": [
+    "unnamed.c4h8o4.42eaf7"
+   ],
+   "description": "comment line: cyclic hydrogen-bonded acetic acid dimer"
+  },
+  {
+   "id": "ammonia.alt1",
+   "class": "small",
+   "file": "small/ammonia.alt1.xyz",
+   "format": "xyz",
+   "formula": "H3N",
+   "natoms": 4,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 143,
+   "sha256": "7c9e2b565b4da8863abe0e5245fd0622331695e82a13396711efbf62f08cf0b0",
+   "provenance": {
+    "kind": "unknown"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/simplemd/13_gfnff_react_noevent/input.xyz"
+   ],
+   "aliases": [
+    "unnamed.h3n.7c9e2b"
+   ],
+   "needs_name": true
+  },
+  {
+   "id": "ammonia.ideal-c3v",
+   "class": "small",
+   "file": "small/ammonia.ideal-c3v.xyz",
+   "format": "xyz",
+   "formula": "H3N",
+   "natoms": 4,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 176,
+   "sha256": "42e75a1adadc8ec74e3669aa20fb242d63d7024db6a1ef303b10df7a56c62f8e",
+   "provenance": {
+    "kind": "constructed",
+    "comment": "Ammonia C3v, r(NH)=1.012 Å, ang(HNH)=106.7°",
+    "description": "Ammonia C3v, r(NH)=1.012 Å, ang(HNH)=106.7°",
+    "level_note": "idealised geometry parameters stated in the comment; no calculation level"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/gpu_gradient/01_vulkan_gfn1_gradient/NH3.xyz",
+    "test_cases/sqm_reference/molecules/NH3.xyz"
+   ],
+   "aliases": [
+    "nh3"
+   ],
+   "description": "comment line: ammonia C3v, r(NH)=1.012 A, ang(HNH)=106.7 deg"
+  },
+  {
+   "id": "benzene",
+   "class": "small",
+   "file": "small/benzene.xyz",
+   "format": "xyz",
+   "formula": "C6H6",
+   "natoms": 12,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 604,
+   "sha256": "f23049a57678ebf56df0c12db1ae62dd0ca8b897d36565b99db5b68cddb0b400",
+   "provenance": {
+    "kind": "unknown"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/sqm/01_pm3_singlepoint/C6H6.xyz",
+    "test_cases/cli/sqm/02_am1_singlepoint/C6H6.xyz",
+    "test_cases/cli/sqm/03_mndo_singlepoint/C6H6.xyz",
+    "test_cases/cli/sqm/04_gfn1_singlepoint/C6H6.xyz",
+    "test_cases/cli/sqm/05_gfn2_singlepoint/C6H6.xyz",
+    "test_cases/cli/sqm/08_ngfn1_baseline_singlepoint/C6H6.xyz",
+    "test_cases/cli/sqm/09_ngfn2_baseline_singlepoint/C6H6.xyz",
+    "test_cases/molecules/larger/C6H6.xyz"
+   ],
+   "reference_calculations": [
+    {
+     "kind": "xtb-output",
+     "program": "xtb",
+     "version": "6.6.1",
+     "flags": "--gfnff",
+     "evidence": "test_cases/molecules/larger/C6H6.out",
+     "note": "single-point reference at this geometry (no --opt in the call)"
+    },
+    {
+     "kind": "gfnff-terms",
+     "generator": "gfnff-analyzer-parser",
+     "date": "2026-02-18 23:26:35",
+     "file": "test_cases/reference_data/C6H6.ref.json"
+    },
+    {
+     "kind": "xtb-sqm",
+     "program": "xtb",
+     "version": "6.6.1",
+     "method": "gfn1",
+     "file": "test_cases/reference_data/sqm/C6H6.gfn1.json",
+     "charge": 0,
+     "spin_unpaired": 0
+    },
+    {
+     "kind": "xtb-sqm",
+     "program": "xtb",
+     "version": "6.6.1",
+     "method": "gfn2",
+     "file": "test_cases/reference_data/sqm/C6H6.gfn2.json",
+     "charge": 0,
+     "spin_unpaired": 0
+    }
+   ],
+   "aliases": [
+    "c6h6"
+   ]
+  },
+  {
+   "id": "benzene.ideal-d6h",
+   "class": "small",
+   "file": "small/benzene.ideal-d6h.xyz",
+   "format": "xyz",
+   "formula": "C6H6",
+   "natoms": 12,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 431,
+   "sha256": "053346b540a133ed6972ddfda45c676b3f3b3f50215d1a0c87633b7db1449b35",
+   "provenance": {
+    "kind": "constructed",
+    "comment": "Benzene D6h, r(CC)=1.397 Å, r(CH)=1.087 Å",
+    "description": "Benzene D6h, r(CC)=1.397 Å, r(CH)=1.087 Å",
+    "level_note": "idealised geometry parameters stated in the comment; no calculation level"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/sqm_reference/molecules/C6H6.xyz"
+   ],
+   "aliases": [
+    "c6h6.sqmref"
+   ],
+   "description": "comment line: benzene D6h, r(CC)=1.397 A"
+  },
+  {
+   "id": "benzene.validation",
+   "class": "small",
+   "file": "small/benzene.validation.xyz",
+   "format": "xyz",
+   "formula": "C6H6",
+   "natoms": 12,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 511,
+   "sha256": "adc4c82ae630f527d80f24e7bf5e1cebb7969ae9aef863d372bbac9d4f178808",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "Benzene - C6H6 - Aromatic ring for combined testing"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/validation/benzene.xyz"
+   ],
+   "aliases": [
+    "benzene"
+   ],
+   "description": "from the validation/ directory"
+  },
+  {
+   "id": "benzoic-acid",
+   "class": "medium",
+   "file": "medium/benzoic-acid.xyz",
+   "format": "xyz",
+   "formula": "C7H6O2",
+   "natoms": 15,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 1242,
+   "sha256": "8401eb9cbd155c29dea3c0b567ebb671fc54f8ec21b888ca7b77e671b17a6ac7",
+   "provenance": {
+    "kind": "optimized",
+    "comment": "energy: -26.162163870557 gnorm: 0.000687190214 xtb: 6.6.0 (8843059)",
+    "program": "xtb",
+    "version": "6.6.0",
+    "energy_eh": -26.162163870557,
+    "gnorm": 0.000687190214,
+    "level_note": "xtbopt.xyz comment (energy, gnorm, xtb version); Hamiltonian and convergence level not recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/sqm/06_gfn2_extended_singlepoint/C6H5COOH.xyz",
+    "test_cases/cli/sqm/07_gfn1_extended_singlepoint/C6H5COOH.xyz",
+    "test_cases/molecules/larger/C6H5COOH.xyz"
+   ],
+   "reference_calculations": [
+    {
+     "kind": "xtb-output",
+     "program": "xtb",
+     "version": "6.6.1",
+     "flags": "--gfnff",
+     "evidence": "test_cases/molecules/larger/C6H5COOH.out",
+     "note": "single-point reference at this geometry (no --opt in the call)"
+    }
+   ],
+   "aliases": [
+    "c6h5cooh"
+   ]
+  },
+  {
+   "id": "butane.anti",
+   "class": "medium",
+   "file": "medium/butane.anti.xyz",
+   "format": "xyz",
+   "formula": "C4H10",
+   "natoms": 14,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 590,
+   "sha256": "327f4a7b52462cae9373a425031db60b100fcb74ed89740404982b2402e586b9",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "Butane - C4H10 - Anti conformation for torsion testing"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/confsearch/01_gfnff_smoke/input.xyz",
+    "test_cases/cli/simplemd/13_rmsd_mtd_legacy_ab/input.xyz",
+    "test_cases/cli/simplemd/14_rmsd_mtd_coverage/input.xyz",
+    "test_cases/validation/butane.xyz"
+   ],
+   "aliases": [
+    "butane",
+    "input",
+    "unnamed.c4h10.327f4a"
+   ],
+   "description": "comment line: anti conformation for torsion testing"
+  },
+  {
+   "id": "c33h45n9-c7h14o6-frames44",
+   "class": "ensembles",
+   "file": "ensembles/c33h45n9-c7h14o6-frames44.xyz",
+   "format": "xyz",
+   "formula": "C40H59N9O6",
+   "natoms": 114,
+   "frames": 44,
+   "charge": 0,
+   "spin": 0,
+   "role": "ensemble",
+   "size_bytes": 192023,
+   "sha256": "a1c30bf06c5372a4726d62dd743a7ab8a445f3da17cfbba0a3aaa0c47085e9ad",
+   "provenance": {
+    "kind": "program_output",
+    "comment": "#1 ** Energy = -2472.319903 Eh ** Charge = 0 ** Spin = 0 ** Curcuma 0.1 (0.0.158)",
+    "program": "curcuma",
+    "version": "0.0.158",
+    "energy_eh": -2472.319903,
+    "level_note": "curcuma output comment; the method used is not recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/confscan/01_default_scan/conformers.xyz",
+    "test_cases/cli/confscan/02_get_rmsd/conformers.xyz",
+    "test_cases/cli/confscan/03_invalid_rmsd_method/conformers.xyz",
+    "test_cases/cli/confscan/04_slx_logic/conformers.xyz",
+    "test_cases/cli/confscan/05_hybrid_rmsd_elements/conformers.xyz",
+    "test_cases/cli/confscan/06_heavy_only/conformers.xyz",
+    "test_cases/cli/confscan/07_restart_scan/conformers.xyz",
+    "test_cases/confscan/input.xyz",
+    "test_cases/input.xyz"
+   ],
+   "aliases": [
+    "conformers",
+    "input",
+    "unnamed.c40h59n9o6.a1c30b"
+   ],
+   "description": "44 frames of a complex of host C33H45N9 and guest C7H14O6 (a methyl hexopyranoside by formula; gluco or galacto is not recorded), curcuma conformer output"
+  },
+  {
+   "id": "caffeine",
+   "class": "medium",
+   "file": "medium/caffeine.xyz",
+   "format": "xyz",
+   "formula": "C8H10N4O2",
+   "natoms": 24,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 964,
+   "sha256": "5c06caae98a2dcbc37e0237ec571fc8509f56a55596aedd9968349699909c8d1",
+   "provenance": {
+    "kind": "unknown"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/gfnff/02_caffeine_gfnff_energy_components/caffeine.xyz",
+    "test_cases/cli/gfnff_gpu/01_gfnff_gpu_singlepoint/caffeine.xyz",
+    "test_cases/cli/gfnff_gpu/02_rocm_singlepoint/caffeine.xyz",
+    "test_cases/cli/simplemd/11_diagnostics_dump/input.xyz",
+    "test_cases/cli/simplemd/12_eeq_cutoff_auto/caffeine.xyz",
+    "test_cases/cli/sqm/01_pm3_singlepoint/caffeine.xyz",
+    "test_cases/cli/sqm/02_am1_singlepoint/caffeine.xyz",
+    "test_cases/cli/sqm/03_mndo_singlepoint/caffeine.xyz",
+    "test_cases/cli/sqm/04_gfn1_singlepoint/caffeine.xyz",
+    "test_cases/cli/sqm/05_gfn2_singlepoint/caffeine.xyz",
+    "test_cases/cli/sqm/08_ngfn1_baseline_singlepoint/caffeine.xyz",
+    "test_cases/cli/sqm/09_ngfn2_baseline_singlepoint/caffeine.xyz",
+    "test_cases/cli/sqm/10_gfn2_optimization_smoke/caffeine.xyz",
+    "test_cases/molecules/larger/caffeine.xyz",
+    "test_cases/sqm_reference/molecules/caffeine.xyz"
+   ],
+   "aliases": [
+    "input"
+   ],
+   "reference_calculations": [
+    {
+     "kind": "gfnff-terms",
+     "generator": "gfnff-analyzer-parser",
+     "date": "2026-02-18 23:26:35",
+     "file": "test_cases/reference_data/caffeine.ref.json"
+    },
+    {
+     "kind": "xtb-sqm",
+     "program": "xtb",
+     "version": "6.6.1",
+     "method": "gfn1",
+     "file": "test_cases/reference_data/sqm/caffeine.gfn1.json",
+     "charge": 0,
+     "spin_unpaired": 0
+    },
+    {
+     "kind": "xtb-sqm",
+     "program": "xtb",
+     "version": "6.6.1",
+     "method": "gfn2",
+     "file": "test_cases/reference_data/sqm/caffeine.gfn2.json",
+     "charge": 0,
+     "spin_unpaired": 0
+    }
+   ]
+  },
+  {
+   "id": "caffeine.opt",
+   "class": "medium",
+   "file": "medium/caffeine.opt.xyz",
+   "format": "xyz",
+   "formula": "C8H10N4O2",
+   "natoms": 24,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "unspecified",
+   "size_bytes": 989,
+   "sha256": "1587790e08ded647790693cb6bbfc143ef242248b9f23f0c1640966fa977c0a0",
+   "provenance": {
+    "kind": "program_output",
+    "comment": "** Energy = -42.153837 Eh ** Charge = 0 ** Spin = 0 ** Curcuma 0.1 (0.0.233-75-g1234bfa)",
+    "program": "curcuma",
+    "version": "0.0.233-75-g1234bfa",
+    "energy_eh": -42.153837,
+    "level_note": "curcuma output comment; the method used is not recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/sqm_reference/molecules/caffeine.opt.xyz"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "cg-spheres2",
+   "class": "cg",
+   "file": "cg/cg-spheres2.xyz",
+   "format": "xyz",
+   "formula": "#2262",
+   "natoms": 2,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 79,
+   "sha256": "fc737eb40af0a888fbc388f037a7fc80a495d1c8164bf28640ee08d9721ff0c0",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "CG system with 2 spheres"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/simplemd/08_cg_spheres/input.xyz"
+   ],
+   "aliases": [
+    "unnamed.cg.fc737e"
+   ],
+   "description": "comment line: CG system with 2 spheres (element 226 beads)"
+  },
+  {
+   "id": "cg-vtf.analysis-parallel",
+   "class": "cg",
+   "file": "cg/cg-vtf.analysis-parallel.vtf",
+   "format": "vtf",
+   "formula": null,
+   "natoms": 0,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 819192,
+   "sha256": "406d22c19494e097621fee0a116495611f494ed3081d8acbd6d418b4f5798bd7",
+   "provenance": {
+    "kind": "unknown"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/analysis/01_parallel_equivalence/input.vtf"
+   ],
+   "aliases": [
+    "unnamed.x.406d22"
+   ],
+   "description": "VTF input of cli/analysis/01_parallel_equivalence"
+  },
+  {
+   "id": "cg-vtf.single-point",
+   "class": "cg",
+   "file": "cg/cg-vtf.single-point.vtf",
+   "format": "vtf",
+   "formula": null,
+   "natoms": 0,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 166,
+   "sha256": "b9d192442012cdafa4d41e80c6605b691cc2d53bb2cf26eb3b0af01b7e7d0af5",
+   "provenance": {
+    "kind": "unknown"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/cg/01_single_point/input.vtf"
+   ],
+   "aliases": [
+    "unnamed.x.b9d192"
+   ],
+   "description": "VTF input of cli/cg/01_single_point"
+  },
+  {
+   "id": "cl2-anion",
+   "class": "clusters",
+   "file": "clusters/cl2-anion.xyz",
+   "format": "xyz",
+   "formula": "Cl2",
+   "natoms": 2,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 159,
+   "sha256": "ff8835dec2407ef913a51661312cc285fcca0b191437a0cc67fbb5d416572b1b",
+   "provenance": {
+    "kind": "unknown"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/gfnff/05_frag_charge_ensemble/cl2m_ea25.xyz"
+   ],
+   "aliases": [
+    "cl2m_ea25"
+   ],
+   "description": "GMTKN55 G21EA/EA_25, the dichlorine radical anion (docs/KNOWN_ISSUES_ARCHIVE.md #17); charge -1 per that entry, not in the file"
+  },
+  {
+   "id": "dihydrogen.r0.47",
+   "class": "small",
+   "file": "small/dihydrogen.r0.47.xyz",
+   "format": "xyz",
+   "formula": "H2",
+   "natoms": 2,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 73,
+   "sha256": "84968d3b58fc56bdbf256605285317b3b66b04a325380f2c2b99d2166e5066f5",
+   "provenance": {
+    "kind": "unknown"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/sqm/06_gfn2_extended_singlepoint/HH.xyz",
+    "test_cases/cli/sqm/07_gfn1_extended_singlepoint/HH.xyz",
+    "test_cases/molecules/dimers/HH.xyz"
+   ],
+   "reference_calculations": [
+    {
+     "kind": "xtb-output",
+     "program": "xtb",
+     "version": "6.6.1",
+     "flags": "--gfnff --wrtopo nb,bpair,alist,blist,tlist,vtors,vbond,vangl",
+     "evidence": "test_cases/molecules/dimers/HH.out",
+     "note": "single-point reference at this geometry (no --opt in the call)"
+    },
+    {
+     "kind": "gfnff-terms",
+     "generator": "gfnff-analyzer-parser",
+     "date": "2026-02-07 20:48:53",
+     "file": "test_cases/reference_data/HH.ref.json"
+    },
+    {
+     "kind": "xtb-sqm",
+     "program": "xtb",
+     "version": "6.6.1",
+     "method": "gfn1",
+     "file": "test_cases/reference_data/sqm/H2.gfn1.json",
+     "charge": 0,
+     "spin_unpaired": 0
+    },
+    {
+     "kind": "xtb-sqm",
+     "program": "xtb",
+     "version": "6.6.1",
+     "method": "gfn2",
+     "file": "test_cases/reference_data/sqm/H2.gfn2.json",
+     "charge": 0,
+     "spin_unpaired": 0
+    }
+   ],
+   "aliases": [
+    "hh"
+   ],
+   "description": "bond length 0.47 A measured from the coordinates"
+  },
+  {
+   "id": "dihydrogen.r0.741",
+   "class": "small",
+   "file": "small/dihydrogen.r0.741.xyz",
+   "format": "xyz",
+   "formula": "H2",
+   "natoms": 2,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 96,
+   "sha256": "f9c74511ec6fd745ac709667c8d3fdd91312d9d76d07daa7a482c9b1a7279b36",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "H2 equilibrium bond length 0.741 Å"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/sqm_reference/molecules/H2.xyz"
+   ],
+   "aliases": [
+    "h2"
+   ],
+   "description": "comment line: H2 equilibrium bond length 0.741 A"
+  },
+  {
+   "id": "dimethyl-ether",
+   "class": "small",
+   "file": "small/dimethyl-ether.xyz",
+   "format": "xyz",
+   "formula": "C2H6O",
+   "natoms": 9,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 363,
+   "sha256": "c3e02ef5cfc549c2eba72cc0ba720b4e070b814b4c5b8adb257e84bbafbe7845",
+   "provenance": {
+    "kind": "unknown"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/sqm/01_pm3_singlepoint/CH3OCH3.xyz",
+    "test_cases/cli/sqm/02_am1_singlepoint/CH3OCH3.xyz",
+    "test_cases/cli/sqm/03_mndo_singlepoint/CH3OCH3.xyz",
+    "test_cases/cli/sqm/04_gfn1_singlepoint/CH3OCH3.xyz",
+    "test_cases/cli/sqm/05_gfn2_singlepoint/CH3OCH3.xyz",
+    "test_cases/cli/sqm/08_ngfn1_baseline_singlepoint/CH3OCH3.xyz",
+    "test_cases/cli/sqm/09_ngfn2_baseline_singlepoint/CH3OCH3.xyz",
+    "test_cases/molecules/larger/CH3OCH3.xyz"
+   ],
+   "reference_calculations": [
+    {
+     "kind": "gfnff-terms",
+     "generator": "gfnff-analyzer-parser",
+     "date": "2026-02-18 23:26:35",
+     "file": "test_cases/reference_data/CH3OCH3.ref.json"
+    },
+    {
+     "kind": "xtb-sqm",
+     "program": "xtb",
+     "version": "6.6.1",
+     "method": "gfn1",
+     "file": "test_cases/reference_data/sqm/CH3OCH3.gfn1.json",
+     "charge": 0,
+     "spin_unpaired": 0
+    },
+    {
+     "kind": "xtb-sqm",
+     "program": "xtb",
+     "version": "6.6.1",
+     "method": "gfn2",
+     "file": "test_cases/reference_data/sqm/CH3OCH3.gfn2.json",
+     "charge": 0,
+     "spin_unpaired": 0
+    }
+   ],
+   "aliases": [
+    "ch3och3"
+   ]
+  },
+  {
+   "id": "ethane",
+   "class": "small",
+   "file": "small/ethane.xyz",
+   "format": "xyz",
+   "formula": "C2H6",
+   "natoms": 8,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 360,
+   "sha256": "caf8f7bbe9545f7da35f4adae1a40aec7a8d4ed6e26113e00ec3e3f438fdedb1",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "Ethane molecule for CLI tests"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/curcumaopt/04_lbfgs_params/input.xyz"
+   ],
+   "aliases": [
+    "unnamed.c2h6.caf8f7"
+   ]
+  },
+  {
+   "id": "ethene",
+   "class": "small",
+   "file": "small/ethene.xyz",
+   "format": "xyz",
+   "formula": "C2H4",
+   "natoms": 6,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 287,
+   "sha256": "9b7262614e0f55a6ec5a7e44c794f07055b38b0cb0649a11e69307655b419c50",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "Ethene - C2H4 - Planar sp2 carbons for inversion testing"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/validation/ethene.xyz"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "fi-pyridine",
+   "class": "medium",
+   "file": "medium/fi-pyridine.xyz",
+   "format": "xyz",
+   "formula": "C5H5FIN",
+   "natoms": 13,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 1018,
+   "sha256": "62c6283d9e8eb21d8a5e9d0c0dda411495df225c7e798d4d70db6c7cbac0d11c",
+   "provenance": {
+    "kind": "unknown"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/sqm_reference/molecules/FI_pyr.xyz"
+   ],
+   "aliases": [
+    "fi_pyr"
+   ],
+   "description": "formula C5H5FIN; GMTKN55 HAL59 FI_pyr (a halogen-bond complex, see docs/KNOWN_ISSUES_ARCHIVE.md #26); identity from the name and the formula"
+  },
+  {
+   "id": "h-atoms4",
+   "class": "clusters",
+   "file": "clusters/h-atoms4.xyz",
+   "format": "xyz",
+   "formula": "H4",
+   "natoms": 4,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 143,
+   "sha256": "66abcc00e6ea1492ea0d195d006803f63f21e0c2828ee886dca3ba5b4c71dae5",
+   "provenance": {
+    "kind": "unknown"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/simplemd/14_gfnff_react_h_recombination/input.xyz"
+   ],
+   "aliases": [
+    "unnamed.h4.66abcc"
+   ],
+   "description": "four H atoms (cli/simplemd react recombination test)"
+  },
+  {
+   "id": "helicene-frames17",
+   "class": "ensembles",
+   "file": "ensembles/helicene-frames17.xyz",
+   "format": "xyz",
+   "formula": "C26H16",
+   "natoms": 42,
+   "frames": 17,
+   "charge": 0,
+   "spin": 0,
+   "role": "ensemble",
+   "size_bytes": 28514,
+   "sha256": "742b993dda0224fe230f50de9f54c07de9f263d381e031c401c4b4ab7a84aecd",
+   "provenance": {
+    "kind": "program_output",
+    "comment": "0 0.000000 ** Energy =   0.000000 Eh ** Charge = 0 ** Spin = 0 ** Curcuma 0.1 (0.0.224-160-g1ba8712)",
+    "program": "curcuma",
+    "version": "0.0.224-160-g1ba8712",
+    "energy_eh": 0.0,
+    "level_note": "curcuma output comment; the method used is not recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/curcumaopt/07_opt_multixyz/helicen.xyz"
+   ],
+   "aliases": [
+    "helicen"
+   ],
+   "description": "17 frames of C26H16 (formula of hexahelicene); what the frames are is not recorded"
+  },
+  {
+   "id": "helium-dimer.r3.0",
+   "class": "small",
+   "file": "small/helium-dimer.r3.0.xyz",
+   "format": "xyz",
+   "formula": "He2",
+   "natoms": 2,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 100,
+   "sha256": "ed3975212c8d58f05e2faea053ce726087494a304375f0f72f140102c641029f",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "He2 non-bonded test 3.0 Å separation"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/sqm_reference/molecules/He2.xyz"
+   ],
+   "aliases": [
+    "he2"
+   ],
+   "description": "comment line: He2 non-bonded test, 3.0 A separation"
+  },
+  {
+   "id": "hydrogen-chloride",
+   "class": "small",
+   "file": "small/hydrogen-chloride.xyz",
+   "format": "xyz",
+   "formula": "ClH",
+   "natoms": 2,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 86,
+   "sha256": "e5fb098051991e0a524a097a4761470e25f7d6c0470f0cd47a20504ef370b1ed",
+   "provenance": {
+    "kind": "unknown"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/sqm/06_gfn2_extended_singlepoint/HCl.xyz",
+    "test_cases/cli/sqm/07_gfn1_extended_singlepoint/HCl.xyz",
+    "test_cases/molecules/dimers/HCl.xyz"
+   ],
+   "reference_calculations": [
+    {
+     "kind": "xtb-output",
+     "program": "xtb",
+     "version": "6.6.1",
+     "flags": "--gfnff",
+     "evidence": "test_cases/molecules/dimers/HCl.out",
+     "note": "single-point reference at this geometry (no --opt in the call)"
+    },
+    {
+     "kind": "xtb-sqm",
+     "program": "xtb",
+     "version": "6.6.1",
+     "method": "gfn1",
+     "file": "test_cases/reference_data/sqm/HCl.gfn1.json",
+     "charge": 0,
+     "spin_unpaired": 0
+    },
+    {
+     "kind": "xtb-sqm",
+     "program": "xtb",
+     "version": "6.6.1",
+     "method": "gfn2",
+     "file": "test_cases/reference_data/sqm/HCl.gfn2.json",
+     "charge": 0,
+     "spin_unpaired": 0
+    }
+   ],
+   "aliases": [
+    "hcl"
+   ]
+  },
+  {
+   "id": "hydrogen-chloride.alt1",
+   "class": "small",
+   "file": "small/hydrogen-chloride.alt1.xyz",
+   "format": "xyz",
+   "formula": "ClH",
+   "natoms": 2,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 67,
+   "sha256": "1bec32ea96628c1b83480d2e4c137b83f2a8d805afdfb998c9fa1b458d7f0d7d",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "HCl molecule"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/molecules/larger/HCl.xyz"
+   ],
+   "reference_calculations": [
+    {
+     "kind": "gfnff-terms",
+     "generator": "gfnff-analyzer-parser",
+     "date": "2026-02-18 23:26:36",
+     "file": "test_cases/reference_data/HCl.ref.json"
+    }
+   ],
+   "aliases": [
+    "hcl.mol-larger"
+   ],
+   "needs_name": true
+  },
+  {
+   "id": "hydrogen-chloride.d-shell-validation",
+   "class": "small",
+   "file": "small/hydrogen-chloride.d-shell-validation.xyz",
+   "format": "xyz",
+   "formula": "ClH",
+   "natoms": 2,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 102,
+   "sha256": "271ec189e4044ea6315f328b34816c4358b51002b98622337461a315854e0f0f",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "HCl d-shell validation (X-I1)"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/sqm_reference/molecules/HCl.xyz"
+   ],
+   "aliases": [
+    "hcl.sqmref"
+   ],
+   "description": "comment line: HCl d-shell validation (X-I1)"
+  },
+  {
+   "id": "hydrogen-cyanide",
+   "class": "small",
+   "file": "small/hydrogen-cyanide.xyz",
+   "format": "xyz",
+   "formula": "CHN",
+   "natoms": 3,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 304,
+   "sha256": "c81a22fedf2eb22254e37246c44d0e722d7ec23c2eea9afb75e2b4be044b6f03",
+   "provenance": {
+    "kind": "optimized",
+    "comment": "energy: -5.504066162388 gnorm: 0.000359872239 xtb: 6.6.1 (8d0f1dd)",
+    "program": "xtb",
+    "version": "6.6.1",
+    "energy_eh": -5.504066162388,
+    "gnorm": 0.000359872239,
+    "level_note": "xtbopt.xyz comment (energy, gnorm, xtb version); Hamiltonian and convergence level not recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/sqm/01_pm3_singlepoint/HCN.xyz",
+    "test_cases/cli/sqm/02_am1_singlepoint/HCN.xyz",
+    "test_cases/cli/sqm/03_mndo_singlepoint/HCN.xyz",
+    "test_cases/cli/sqm/04_gfn1_singlepoint/HCN.xyz",
+    "test_cases/cli/sqm/05_gfn2_singlepoint/HCN.xyz",
+    "test_cases/cli/sqm/08_ngfn1_baseline_singlepoint/HCN.xyz",
+    "test_cases/cli/sqm/09_ngfn2_baseline_singlepoint/HCN.xyz",
+    "test_cases/molecules/trimers/HCN.xyz",
+    "test_cases/sqm_reference/molecules/HCN.xyz"
+   ],
+   "reference_calculations": [
+    {
+     "kind": "xtb-output",
+     "program": "xtb",
+     "version": "6.6.1",
+     "flags": "--gfnff",
+     "evidence": "test_cases/molecules/trimers/HCN.out",
+     "note": "single-point reference at this geometry (no --opt in the call)"
+    },
+    {
+     "kind": "gfnff-terms",
+     "generator": "gfnff-analyzer-parser",
+     "date": "2026-03-12 22:12:01",
+     "file": "test_cases/reference_data/HCN.ref.json"
+    },
+    {
+     "kind": "xtb-sqm",
+     "program": "xtb",
+     "version": "6.6.1",
+     "method": "gfn1",
+     "file": "test_cases/reference_data/sqm/HCN.gfn1.json",
+     "charge": 0,
+     "spin_unpaired": 0
+    },
+    {
+     "kind": "xtb-sqm",
+     "program": "xtb",
+     "version": "6.6.1",
+     "method": "gfn2",
+     "file": "test_cases/reference_data/sqm/HCN.gfn2.json",
+     "charge": 0,
+     "spin_unpaired": 0
+    }
+   ],
+   "aliases": [
+    "hcn"
+   ]
+  },
+  {
+   "id": "hydrogen-cyanide.gpu-qresponse",
+   "class": "small",
+   "file": "small/hydrogen-cyanide.gpu-qresponse.xyz",
+   "format": "xyz",
+   "formula": "CHN",
+   "natoms": 3,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 314,
+   "sha256": "92dea5027dbac76d6c0b5369c23029ce4fc64b45bbbf8487b3eb3b6e994a8b27",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "HCN linear, polar — D4 EEQ q-response stresses the device dense (N+1) solve"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/gpu_gradient/02_vulkan_gfn2_qresponse/HCN.xyz"
+   ],
+   "aliases": [
+    "hcn.cli-gpu_gradient"
+   ],
+   "description": "same coordinates as hydrogen-cyanide; only the comment line differs (cli/gpu_gradient test)"
+  },
+  {
+   "id": "hydrogen-sulfide.d-shell-validation",
+   "class": "small",
+   "file": "small/hydrogen-sulfide.d-shell-validation.xyz",
+   "format": "xyz",
+   "formula": "H2S",
+   "natoms": 3,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 137,
+   "sha256": "258cc6cba3ec33e47fcb2979feee79dfafad5e1d16ede48a8c52093a1aedcbff",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "H2S d-shell validation (X-I1)"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/sqm_reference/molecules/H2S.xyz"
+   ],
+   "aliases": [
+    "h2s"
+   ],
+   "description": "comment line: H2S d-shell validation (X-I1)"
+  },
+  {
+   "id": "hydronium-water2",
+   "class": "clusters",
+   "file": "clusters/hydronium-water2.xyz",
+   "format": "xyz",
+   "formula": "H7O3",
+   "natoms": 10,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 784,
+   "sha256": "f9867ee46a4c84f0deb9b817b9fb8761d46430782ac16277538ebc2bd2a6d06e",
+   "provenance": {
+    "kind": "unknown"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/gfnff/05_frag_charge_ensemble/h3op_h2o2.xyz"
+   ],
+   "aliases": [
+    "h3op_h2o2"
+   ],
+   "description": "GMTKN55 WATER27 H3O+(H2O)2 (docs/KNOWN_ISSUES_ARCHIVE.md #31); charge +1 per that entry, not in the file"
+  },
+  {
+   "id": "hydroxyl",
+   "class": "small",
+   "file": "small/hydroxyl.xyz",
+   "format": "xyz",
+   "formula": "HO",
+   "natoms": 2,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 85,
+   "sha256": "90a9071ff1d2a4cf1f0c726364038f57f5dfff06d218ab00b7b55f7f7c134df5",
+   "provenance": {
+    "kind": "unknown"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/sqm/06_gfn2_extended_singlepoint/OH.xyz",
+    "test_cases/cli/sqm/07_gfn1_extended_singlepoint/OH.xyz",
+    "test_cases/molecules/dimers/OH.xyz"
+   ],
+   "reference_calculations": [
+    {
+     "kind": "xtb-output",
+     "program": "xtb",
+     "version": "6.6.1",
+     "flags": "--gfnff",
+     "evidence": "test_cases/molecules/dimers/OH.out",
+     "note": "single-point reference at this geometry (no --opt in the call)"
+    }
+   ],
+   "aliases": [
+    "oh"
+   ]
+  },
+  {
+   "id": "jl22-bgal.conf6",
+   "class": "clusters",
+   "file": "clusters/jl22-bgal.conf6.xyz",
+   "format": "xyz",
+   "formula": "C65H92N10O6",
+   "natoms": 173,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 7940,
+   "sha256": "f67fc2dba91078de473546d47b8a8e45aba227f42b78c5385eb0eadca9237016",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "input_6 ** Energy = -3529.65147926 Eh **"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/optimisation/acyclic/JL22-bGal.xyz"
+   ],
+   "aliases": [
+    "jl22-bgal"
+   ],
+   "description": "comment line: input_6, a conformer from a curcuma run; host C58H78N10 plus guest C7H14O6"
+  },
+  {
+   "id": "jl22-bgal.xtb-gfn2-opt",
+   "class": "clusters",
+   "file": "clusters/jl22-bgal.xtb-gfn2-opt.xyz",
+   "format": "xyz",
+   "formula": "C65H92N10O6",
+   "natoms": 173,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 13568,
+   "sha256": "28ddc92b6938085fb6b53c7d1c622ff1f5c70ce5cf46dcfe7419746a82c8ef34",
+   "provenance": {
+    "kind": "optimized",
+    "comment": "energy: -239.889203563409 gnorm: 0.000420361072 xtb: 6.6.0 (8843059)",
+    "program": "xtb",
+    "version": "6.6.0",
+    "energy_eh": -239.889203563409,
+    "gnorm": 0.000420361072,
+    "level_note": "xtbopt.xyz comment (energy, gnorm, xtb version); Hamiltonian and convergence level not recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/optimisation/acyclic/GFN-2.xyz"
+   ],
+   "aliases": [
+    "gfn-2"
+   ],
+   "description": "file name GFN-2.xyz and xtb 6.6.0 optimisation comment; method taken from the file name"
+  },
+  {
+   "id": "jl22-bgal.xtb-gfnff-opt",
+   "class": "clusters",
+   "file": "clusters/jl22-bgal.xtb-gfnff-opt.xyz",
+   "format": "xyz",
+   "formula": "C65H92N10O6",
+   "natoms": 173,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 13567,
+   "sha256": "0bb4cfb9d4cb41591c756f5f53e368843cde92baa5ea69346a2aab16871f937e",
+   "provenance": {
+    "kind": "optimized",
+    "comment": "energy: -30.209367328783 gnorm: 0.000782495766 xtb: 6.6.0 (8843059)",
+    "program": "xtb",
+    "version": "6.6.0",
+    "energy_eh": -30.209367328783,
+    "gnorm": 0.000782495766,
+    "level_note": "xtbopt.xyz comment (energy, gnorm, xtb version); Hamiltonian and convergence level not recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/optimisation/acyclic/GFN-FF.xyz"
+   ],
+   "aliases": [
+    "gfn-ff"
+   ],
+   "description": "file name GFN-FF.xyz and xtb 6.6.0 optimisation comment; method taken from the file name"
+  },
+  {
+   "id": "lithium-hydride.r1.595",
+   "class": "small",
+   "file": "small/lithium-hydride.r1.595.xyz",
+   "format": "xyz",
+   "formula": "HLi",
+   "natoms": 2,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 99,
+   "sha256": "bcdc1a5efdd077a576c184c8dfe4e20702674aa52154760ab5cba8157973fa6a",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "LiH equilibrium bond length 1.595 Å"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/sqm_reference/molecules/LiH.xyz"
+   ],
+   "aliases": [
+    "lih"
+   ],
+   "description": "comment line: LiH equilibrium bond length 1.595 A"
+  },
+  {
+   "id": "macrocycle-bglc",
+   "class": "clusters",
+   "file": "clusters/macrocycle-bglc.xyz",
+   "format": "xyz",
+   "formula": "C83H122N12O14",
+   "natoms": 231,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "unspecified",
+   "size_bytes": 8897,
+   "sha256": "0ed534dbae40b40373f9416c58a5728c6cce4f387766507294821a663918fd4e",
+   "provenance": {
+    "kind": "program_output",
+    "comment": "** Energy =  37.005701 Eh ** Charge = 0 ** Spin = 0 ** Curcuma 0.1 (0.0.66-3-gaad38d4)",
+    "program": "curcuma",
+    "version": "0.0.66-3-gaad38d4",
+    "energy_eh": 37.005701,
+    "level_note": "curcuma output comment; the method used is not recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/gfnff/01_complex_gfnff_singlepoint/complex.xyz",
+    "test_cases/molecules/larger/complex.xyz",
+    "test_cases/sqm_reference/molecules/complex.xyz"
+   ],
+   "reference_calculations": [
+    {
+     "kind": "gfnff-terms",
+     "generator": "gfnff-analyzer-parser",
+     "date": "2026-02-18 23:26:36",
+     "file": "test_cases/reference_data/complex.ref.json"
+    }
+   ],
+   "aliases": [
+    "complex"
+   ],
+   "description": "host C76H108N12O8 plus guest C7H14O6; the guest is bGlc according to the operator (2026-10-01), the formula alone does not separate gluco- from galacto-"
+  },
+  {
+   "id": "macrocycle-bglc.conf2",
+   "class": "clusters",
+   "file": "clusters/macrocycle-bglc.conf2.xyz",
+   "format": "xyz",
+   "formula": "C83H122N12O14",
+   "natoms": 231,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 10637,
+   "sha256": "d65380bb0a54832a1f1f789d3c8ffb3a7279f3186c7ea6665f419d933e69f888",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "input_2 ** Energy = -4944.36361546 Eh **"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/optimisation/makrocyclic/input.xyz"
+   ],
+   "aliases": [
+    "makrocyclic.input"
+   ],
+   "description": "comment line: input_2, a conformer from a curcuma run"
+  },
+  {
+   "id": "macrocycle-bglc.uff-analytic-grad",
+   "class": "clusters",
+   "file": "clusters/macrocycle-bglc.uff-analytic-grad.xyz",
+   "format": "xyz",
+   "formula": "C83H122N12O14",
+   "natoms": 231,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "unspecified",
+   "size_bytes": 8885,
+   "sha256": "c928eb8caa0008cb235fa94691e5c3c40f9720048d081259cde27e0b3a859eef",
+   "provenance": {
+    "kind": "optimized",
+    "program": "curcuma",
+    "method": "uff",
+    "version": "commit 4e19c68f8c252babdcd7c87e95287c8f34177e9a (LBFGSpp commit 7e3848617795ddd0e25f4b772e679adfee583229)",
+    "evidence": "test_cases/optimisation/makrocyclic/README.md",
+    "level_note": "optimised with analytical gradients; UFF is inferred from the README text (universal force field), convergence not recorded",
+    "comment": "** Energy =   3.015478 Eh ** Charge = 0 ** Spin = 0 ** Curcuma 0.1 (0.0.108)",
+    "energy_eh": 3.015478
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/optimisation/makrocyclic/AnGrad.xyz"
+   ],
+   "aliases": [
+    "angrad"
+   ],
+   "description": "optimised with analytical gradients, see optimisation/makrocyclic/README.md"
+  },
+  {
+   "id": "macrocycle-bglc.uff-numeric-grad",
+   "class": "clusters",
+   "file": "clusters/macrocycle-bglc.uff-numeric-grad.xyz",
+   "format": "xyz",
+   "formula": "C83H122N12O14",
+   "natoms": 231,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "unspecified",
+   "size_bytes": 8888,
+   "sha256": "1bcb28d9ad91ca8e8b08f27ad3c980da3d5d8e541fd749e311e3ff4cc78646be",
+   "provenance": {
+    "kind": "optimized",
+    "program": "curcuma",
+    "method": "uff",
+    "version": "commit 4e19c68f8c252babdcd7c87e95287c8f34177e9a (LBFGSpp commit 7e3848617795ddd0e25f4b772e679adfee583229)",
+    "evidence": "test_cases/optimisation/makrocyclic/README.md",
+    "level_note": "optimised with numerical gradients; UFF is inferred from the README text (universal force field), convergence not recorded",
+    "comment": "** Energy =   3.027176 Eh ** Charge = 0 ** Spin = 0 ** Curcuma 0.1 (0.0.108)",
+    "energy_eh": 3.027176
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/optimisation/makrocyclic/NumGrad.xyz"
+   ],
+   "aliases": [
+    "numgrad"
+   ],
+   "description": "optimised with numerical gradients, see optimisation/makrocyclic/README.md"
+  },
+  {
+   "id": "methane",
+   "class": "small",
+   "file": "small/methane.xyz",
+   "format": "xyz",
+   "formula": "CH4",
+   "natoms": 5,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 314,
+   "sha256": "7cb4b2532352b75fb151d08485aa5d6fe024987e432fce9b170387bcfbf4c6ea",
+   "provenance": {
+    "kind": "unknown"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/sqm/01_pm3_singlepoint/CH4.xyz",
+    "test_cases/cli/sqm/02_am1_singlepoint/CH4.xyz",
+    "test_cases/cli/sqm/03_mndo_singlepoint/CH4.xyz",
+    "test_cases/cli/sqm/04_gfn1_singlepoint/CH4.xyz",
+    "test_cases/cli/sqm/05_gfn2_singlepoint/CH4.xyz",
+    "test_cases/cli/sqm/08_ngfn1_baseline_singlepoint/CH4.xyz",
+    "test_cases/cli/sqm/09_ngfn2_baseline_singlepoint/CH4.xyz",
+    "test_cases/cli/sqm/10_gfn2_optimization_smoke/CH4.xyz",
+    "test_cases/molecules/larger/CH4.xyz"
+   ],
+   "reference_calculations": [
+    {
+     "kind": "xtb-output",
+     "program": "xtb",
+     "version": "6.6.1",
+     "flags": "--gfnff --wrtopo nb,bpair,alist,blist,tlist,vtors,vbond,vangl",
+     "evidence": "test_cases/molecules/larger/CH4.out",
+     "note": "single-point reference at this geometry (no --opt in the call)"
+    },
+    {
+     "kind": "gfnff-terms",
+     "generator": "gfnff-analyzer-parser",
+     "date": "2026-02-18 23:26:35",
+     "file": "test_cases/reference_data/CH4.ref.json"
+    },
+    {
+     "kind": "gfnff-terms",
+     "generator": "gfnff-analyzer-parser",
+     "date": "2026-03-12 22:12:01",
+     "file": "test_cases/reference_data/methane.ref.json"
+    },
+    {
+     "kind": "xtb-sqm",
+     "program": "xtb",
+     "version": "6.6.1",
+     "method": "gfn1",
+     "file": "test_cases/reference_data/sqm/CH4.gfn1.json",
+     "charge": 0,
+     "spin_unpaired": 0
+    },
+    {
+     "kind": "xtb-sqm",
+     "program": "xtb",
+     "version": "6.6.1",
+     "method": "gfn2",
+     "file": "test_cases/reference_data/sqm/CH4.gfn2.json",
+     "charge": 0,
+     "spin_unpaired": 0
+    }
+   ],
+   "aliases": [
+    "ch4"
+   ]
+  },
+  {
+   "id": "methane.ideal-td",
+   "class": "small",
+   "file": "small/methane.ideal-td.xyz",
+   "format": "xyz",
+   "formula": "CH4",
+   "natoms": 5,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 189,
+   "sha256": "0d6bd5b8eac75105441508a0216bd1d43e379908e56a4eba260868e3d5e255b1",
+   "provenance": {
+    "kind": "constructed",
+    "comment": "Methane Td, r(CH)=1.091 Å",
+    "description": "Methane Td, r(CH)=1.091 Å",
+    "level_note": "idealised geometry parameters stated in the comment; no calculation level"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/sqm_reference/molecules/CH4.xyz"
+   ],
+   "aliases": [
+    "ch4.sqmref"
+   ],
+   "description": "comment line: methane Td, r(CH)=1.091 A"
+  },
+  {
+   "id": "methanol",
+   "class": "small",
+   "file": "small/methanol.xyz",
+   "format": "xyz",
+   "formula": "CH4O",
+   "natoms": 6,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 538,
+   "sha256": "7e0527f96fa926080418db63a4070d27a8f465188b222142f8656106addaedc1",
+   "provenance": {
+    "kind": "optimized",
+    "comment": "energy: -8.226117409900 gnorm: 0.000622942382 xtb: 6.6.0 (8843059)",
+    "program": "xtb",
+    "version": "6.6.0",
+    "energy_eh": -8.2261174099,
+    "gnorm": 0.000622942382,
+    "level_note": "xtbopt.xyz comment (energy, gnorm, xtb version); Hamiltonian and convergence level not recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/sqm/01_pm3_singlepoint/CH3OH.xyz",
+    "test_cases/cli/sqm/02_am1_singlepoint/CH3OH.xyz",
+    "test_cases/cli/sqm/03_mndo_singlepoint/CH3OH.xyz",
+    "test_cases/cli/sqm/04_gfn1_singlepoint/CH3OH.xyz",
+    "test_cases/cli/sqm/05_gfn2_singlepoint/CH3OH.xyz",
+    "test_cases/cli/sqm/08_ngfn1_baseline_singlepoint/CH3OH.xyz",
+    "test_cases/cli/sqm/09_ngfn2_baseline_singlepoint/CH3OH.xyz",
+    "test_cases/molecules/larger/CH3OH.xyz"
+   ],
+   "reference_calculations": [
+    {
+     "kind": "xtb-output",
+     "program": "xtb",
+     "version": "6.6.1",
+     "flags": "--gfnff --wrtopo nb,bpair,alist,blist,tlist,vtors,vbond,vangl",
+     "evidence": "test_cases/molecules/larger/CH3OH.out",
+     "note": "single-point reference at this geometry (no --opt in the call)"
+    },
+    {
+     "kind": "gfnff-terms",
+     "generator": "gfnff-analyzer-parser",
+     "date": "2026-02-18 23:26:35",
+     "file": "test_cases/reference_data/CH3OH.ref.json"
+    },
+    {
+     "kind": "xtb-sqm",
+     "program": "xtb",
+     "version": "6.6.1",
+     "method": "gfn1",
+     "file": "test_cases/reference_data/sqm/CH3OH.gfn1.json",
+     "charge": 0,
+     "spin_unpaired": 0
+    },
+    {
+     "kind": "xtb-sqm",
+     "program": "xtb",
+     "version": "6.6.1",
+     "method": "gfn2",
+     "file": "test_cases/reference_data/sqm/CH3OH.gfn2.json",
+     "charge": 0,
+     "spin_unpaired": 0
+    }
+   ],
+   "aliases": [
+    "ch3oh"
+   ]
+  },
+  {
+   "id": "methanol.alt1",
+   "class": "small",
+   "file": "small/methanol.alt1.xyz",
+   "format": "xyz",
+   "formula": "CH4O",
+   "natoms": 6,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 280,
+   "sha256": "f00834479bb0ff4542ab72637925351deebf4ebcf02b08cdd39b8137a035ff28",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "Methanol molecule for CLI tests"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/curcumaopt/06_opth_only/input.xyz"
+   ],
+   "aliases": [
+    "unnamed.ch4o.f00834"
+   ],
+   "needs_name": true
+  },
+  {
+   "id": "na2cl2-isolated-ions",
+   "class": "clusters",
+   "file": "clusters/na2cl2-isolated-ions.xyz",
+   "format": "xyz",
+   "formula": "Cl2Na2",
+   "natoms": 4,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 184,
+   "sha256": "fd6de3e090918fe00c623b70556aeef3b647df57c6bbe1a78330959ac3d37e58",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "4 isolated Na+/Cl- ions, pairwise distance > 5 Å — WP-S3 negative test"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/simplemd/12_eeq_cutoff_auto/NaCl.xyz",
+    "test_cases/molecules/ionic/NaCl_cluster.xyz"
+   ],
+   "aliases": [
+    "NaCl",
+    "NaCl_cluster",
+    "nacl"
+   ],
+   "description": "comment line: 4 isolated Na+/Cl- ions"
+  },
+  {
+   "id": "ozone",
+   "class": "small",
+   "file": "small/ozone.xyz",
+   "format": "xyz",
+   "formula": "O3",
+   "natoms": 3,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 305,
+   "sha256": "8d44abdb155bd5c31ea8c045d625c0089f3d2085efe921524416590ba56315fc",
+   "provenance": {
+    "kind": "optimized",
+    "comment": "energy: -11.927956259976 gnorm: 0.000666997138 xtb: 6.6.1 (8d0f1dd)",
+    "program": "xtb",
+    "version": "6.6.1",
+    "energy_eh": -11.927956259976,
+    "gnorm": 0.000666997138,
+    "level_note": "xtbopt.xyz comment (energy, gnorm, xtb version); Hamiltonian and convergence level not recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/molecules/trimers/O3.xyz"
+   ],
+   "reference_calculations": [
+    {
+     "kind": "xtb-output",
+     "program": "xtb",
+     "version": "6.6.1",
+     "flags": "--gfnff",
+     "evidence": "test_cases/molecules/trimers/O3.out",
+     "note": "single-point reference at this geometry (no --opt in the call)"
+    }
+   ],
+   "aliases": [
+    "o3"
+   ]
+  },
+  {
+   "id": "peo201-chain",
+   "class": "bulk",
+   "file": "bulk/peo201-chain.xyz",
+   "format": "xyz",
+   "formula": "C402H806O202",
+   "natoms": 1410,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "unspecified",
+   "size_bytes": 59450,
+   "sha256": "9ae88f3d40a0b5cb03221db4f57e4059b9a59845b2916c3f85f5c7ebc576e073",
+   "provenance": {
+    "kind": "program_output",
+    "comment": "** Energy =  28.415956 Eh ** Charge = 0 ** Spin = 0 ** Curcuma 0.1 (0.0.142)",
+    "program": "curcuma",
+    "version": "0.0.142",
+    "energy_eh": 28.415956,
+    "level_note": "curcuma output comment; the method used is not recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/simplemd/10_gfnff_polymer_md/input.xyz",
+    "test_cases/molecules/larger/polymer.xyz"
+   ],
+   "aliases": [
+    "input",
+    "polymer",
+    "unnamed.c402h806o202.9ae88f"
+   ],
+   "reference_calculations": [
+    {
+     "kind": "gfnff-terms",
+     "generator": "gfnff-analyzer-parser",
+     "date": "2026-02-18 23:26:46",
+     "file": "test_cases/reference_data/polymer.ref.json"
+    }
+   ],
+   "description": "one chain C402H806O202 (= H-(OCH2CH2)201-OH, PEO-like); legacy name polymer; chain identity inferred from the composition"
+  },
+  {
+   "id": "peo201x2-water1500",
+   "class": "bulk",
+   "file": "bulk/peo201x2-water1500.xyz",
+   "format": "xyz",
+   "formula": "C804H4612O1904",
+   "natoms": 7320,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 234128,
+   "sha256": "2ee9edb45fac41d08ec55047388d87ec5907d5077f547456331647b92f28cfeb",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "polymer.xyz"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/molecules/larger/polymer_2x.xyz"
+   ],
+   "aliases": [
+    "polymer_2x"
+   ],
+   "description": "two chains of composition C402H806O202 (= H-(OCH2CH2)201-OH, PEO-like) and 1500 H2O; from fragment analysis, chain identity inferred from the composition"
+  },
+  {
+   "id": "peo201x2-water1500.gfn2-relaxed",
+   "class": "bulk",
+   "file": "bulk/peo201x2-water1500.gfn2-relaxed.xyz",
+   "format": "xyz",
+   "formula": "C804H4612O1904",
+   "natoms": 7320,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 285550,
+   "sha256": "9816c0254cf15135faf1d1653927145574698f0b79d237701b047775f0fb1c36",
+   "provenance": {
+    "kind": "optimized",
+    "comment": "polymer_2x GFN2 relaxed (400 LBFGS steps from the GFN-FF minimum, NOT converged), E = -11811.591679 Eh, |grad| = 0.204 - MD benchmark reference, see docs/MD_LARGE_SYSTEMS.md",
+    "method": "gfn2",
+    "level_note": "method named in the comment line; program and convergence not recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/molecules/larger/polymer_2x_gfn2_opt.xyz"
+   ],
+   "aliases": [
+    "polymer_2x_gfn2_opt"
+   ],
+   "description": "same system as peo201x2-water1500; comment: GFN2 relaxed (400 LBFGS steps from the GFN-FF minimum)"
+  },
+  {
+   "id": "peo201x2-water1500.gfnff-min",
+   "class": "bulk",
+   "file": "bulk/peo201x2-water1500.gfnff-min.xyz",
+   "format": "xyz",
+   "formula": "C804H4612O1904",
+   "natoms": 7320,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 285483,
+   "sha256": "889ee11848a489754b6394d13e88c80563be18d87679ba03a640c63ed312f10d",
+   "provenance": {
+    "kind": "optimized",
+    "comment": "polymer_2x GFN-FF minimum, E = -917.336755 Eh, max|g| = 0.045 Eh/A - MD benchmark reference, see docs/MD_LARGE_SYSTEMS.md",
+    "method": "gfnff",
+    "level_note": "method named in the comment line; program and convergence not recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/molecules/larger/polymer_2x_gfnff_opt.xyz"
+   ],
+   "aliases": [
+    "polymer_2x_gfnff_opt"
+   ],
+   "description": "same system as peo201x2-water1500; comment: GFN-FF minimum"
+  },
+  {
+   "id": "phosphine.d-shell-validation",
+   "class": "small",
+   "file": "small/phosphine.d-shell-validation.xyz",
+   "format": "xyz",
+   "formula": "H3P",
+   "natoms": 4,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 172,
+   "sha256": "29da894e7fbde1d8177b6e5369c875defbd5ab94be26483cf738864fe8c144b2",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "PH3 d-shell validation (X-I1)"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/sqm_reference/molecules/PH3.xyz"
+   ],
+   "aliases": [
+    "ph3"
+   ],
+   "description": "comment line: PH3 d-shell validation (X-I1)"
+  },
+  {
+   "id": "polymerbuild-fragment-2xx",
+   "class": "small",
+   "file": "small/polymerbuild-fragment-2xx.xyz",
+   "format": "xyz",
+   "formula": "C2H3xXx2",
+   "natoms": 7,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "invalid-input",
+   "size_bytes": 220,
+   "sha256": "84e60e67def51daa5c55ab35610338adc8eeb999153ae81922d2d3e24791a604",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "Test fragment with 2 Xx connection points on C0"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/polymerbuild/fragment_2xx.xyz"
+   ],
+   "aliases": [
+    "fragment_2xx"
+   ],
+   "description": "comment line: test fragment with 2 Xx connection atoms; deliberately invalid element Xx"
+  },
+  {
+   "id": "silane.d-shell-validation",
+   "class": "small",
+   "file": "small/silane.d-shell-validation.xyz",
+   "format": "xyz",
+   "formula": "H4Si",
+   "natoms": 5,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 208,
+   "sha256": "bd2fd7a5da61268308a75c085b1a1b16c7c8beed78d65f23b6619b081cdeef11",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "SiH4 d-shell validation (X-I1)"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/sqm_reference/molecules/SiH4.xyz"
+   ],
+   "aliases": [
+    "sih4"
+   ],
+   "description": "comment line: SiH4 d-shell validation (X-I1)"
+  },
+  {
+   "id": "trisaccharide-c18h32o16",
+   "class": "large",
+   "file": "large/trisaccharide-c18h32o16.xyz",
+   "format": "xyz",
+   "formula": "C18H32O16",
+   "natoms": 66,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 5219,
+   "sha256": "fbe4e96ebcc3c3036b91d8b74501046900a5368586745249841ddeb1d33664b8",
+   "provenance": {
+    "kind": "optimized",
+    "comment": "energy: -9.914550457345 gnorm: 0.000259047525 xtb: 6.6.0 (8843059)",
+    "program": "xtb",
+    "version": "6.6.0",
+    "energy_eh": -9.914550457345,
+    "gnorm": 0.000259047525,
+    "level_note": "xtbopt.xyz comment (energy, gnorm, xtb version); Hamiltonian and convergence level not recorded"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/molecules/larger/triose.xyz",
+    "test_cases/sqm_reference/molecules/triose.xyz"
+   ],
+   "reference_calculations": [
+    {
+     "kind": "gfnff-terms",
+     "generator": "gfnff-analyzer-parser",
+     "date": "2026-02-18 23:26:49",
+     "file": "test_cases/reference_data/triose.ref.json"
+    }
+   ],
+   "aliases": [
+    "triose"
+   ],
+   "description": "formula C18H32O16 equals three hexose units minus two H2O; legacy name triose"
+  },
+  {
+   "id": "trisaccharide-c18h32o16.opt-start",
+   "class": "large",
+   "file": "large/trisaccharide-c18h32o16.opt-start.xyz",
+   "format": "xyz",
+   "formula": "C18H32O16",
+   "natoms": 66,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 3245,
+   "sha256": "685cfbed58b26b44336e3a7db06c3b42ba21b28e41cc12e7b741d71667d44805",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "5287993"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/optimisation/triose/input.xyz"
+   ],
+   "aliases": [
+    "triose.input"
+   ],
+   "description": "input of the optimisation test (directory optimisation/triose); the geometry level is not recorded"
+  },
+  {
+   "id": "urea400-water1000",
+   "class": "bulk",
+   "file": "bulk/urea400-water1000.xyz",
+   "format": "xyz",
+   "formula": "C400H3600N800O1400",
+   "natoms": 6200,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 303817,
+   "sha256": "69d6e126d4a35e613d229d1d065719fe9f08ad208120cea01fdd8645e3469897",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "mixture.pdb"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/molecules/larger/mixture2.xyz"
+   ],
+   "aliases": [
+    "mixture2"
+   ],
+   "description": "400 CH4N2O and 1000 H2O (fragment analysis)"
+  },
+  {
+   "id": "water",
+   "class": "small",
+   "file": "small/water.xyz",
+   "format": "xyz",
+   "formula": "H2O",
+   "natoms": 3,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 109,
+   "sha256": "9b0caece770d8c1e4fe87b4eff772ab12440fc26bf8032ce706a734a945c777e",
+   "provenance": {
+    "kind": "unknown"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/sqm/01_pm3_singlepoint/water.xyz",
+    "test_cases/cli/sqm/02_am1_singlepoint/water.xyz",
+    "test_cases/cli/sqm/03_mndo_singlepoint/water.xyz",
+    "test_cases/cli/sqm/04_gfn1_singlepoint/water.xyz",
+    "test_cases/cli/sqm/05_gfn2_singlepoint/water.xyz",
+    "test_cases/cli/sqm/08_ngfn1_baseline_singlepoint/water.xyz",
+    "test_cases/cli/sqm/09_ngfn2_baseline_singlepoint/water.xyz",
+    "test_cases/cli/sqm/10_gfn2_optimization_smoke/water.xyz",
+    "test_cases/cli/sqm/11_gfn2_provider_check/water.xyz",
+    "test_cases/molecules/trimers/water.xyz"
+   ],
+   "reference_calculations": [
+    {
+     "kind": "xtb-output",
+     "program": "xtb",
+     "version": "6.6.1",
+     "flags": "--gfnff --wrtopo nb,bpair,alist,blist,tlist,vtors,vbond,vangl",
+     "evidence": "test_cases/molecules/trimers/water.out",
+     "note": "single-point reference at this geometry (no --opt in the call)"
+    }
+   ],
+   "aliases": []
+  },
+  {
+   "id": "water.alt1",
+   "class": "small",
+   "file": "small/water.alt1.xyz",
+   "format": "xyz",
+   "formula": "H2O",
+   "natoms": 3,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 93,
+   "sha256": "acb52de0c8bc827d27e995b928a40a762cad27b1e7e388528393f20a65102c02",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "H2O molecule"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/molecules/larger/H2O.xyz"
+   ],
+   "reference_calculations": [
+    {
+     "kind": "gfnff-terms",
+     "generator": "gfnff-analyzer-parser",
+     "date": "2026-02-18 23:26:36",
+     "file": "test_cases/reference_data/H2O.ref.json"
+    },
+    {
+     "kind": "xtb-sqm",
+     "program": "xtb",
+     "version": "6.6.1",
+     "method": "gfn1",
+     "file": "test_cases/reference_data/sqm/H2O.gfn1.json",
+     "charge": 0,
+     "spin_unpaired": 0
+    },
+    {
+     "kind": "xtb-sqm",
+     "program": "xtb",
+     "version": "6.6.1",
+     "method": "gfn2",
+     "file": "test_cases/reference_data/sqm/H2O.gfn2.json",
+     "charge": 0,
+     "spin_unpaired": 0
+    }
+   ],
+   "aliases": [
+    "h2o.mol-larger"
+   ],
+   "needs_name": true
+  },
+  {
+   "id": "water.fast-cli",
+   "class": "small",
+   "file": "small/water.fast-cli.xyz",
+   "format": "xyz",
+   "formula": "H2O",
+   "natoms": 3,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 159,
+   "sha256": "c08b18b222038f3d587c51302ffe556299dd811eda6c668822e0000c554f43fe",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "Water molecule for fast CLI tests"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/curcumaopt/01_default_uff_opt/input.xyz",
+    "test_cases/cli/curcumaopt/02_gfn2_single_point/input.xyz",
+    "test_cases/cli/curcumaopt/03_invalid_method/input.xyz",
+    "test_cases/cli/curcumaopt/05_alias_singlepoint/input.xyz",
+    "test_cases/cli/routing/01_flat_param_routing/water.xyz",
+    "test_cases/cli/routing/02_roundtrip_replay/water.xyz",
+    "test_cases/cli/routing/03_confsearch_param_routing/water.xyz",
+    "test_cases/cli/simplemd/01_nve_short_run/input.xyz",
+    "test_cases/cli/simplemd/02_nvt_berendsen/input.xyz",
+    "test_cases/cli/simplemd/03_invalid_thermostat/input.xyz",
+    "test_cases/cli/simplemd/04_rattle_all/input.xyz",
+    "test_cases/cli/simplemd/05_spheric_wall/input.xyz",
+    "test_cases/cli/simplemd/06_alias_temperature/input.xyz",
+    "test_cases/cli/simplemd/07_restart_simulation/input.xyz"
+   ],
+   "aliases": [
+    "input",
+    "unnamed.h2o.c08b18",
+    "water"
+   ],
+   "description": "comment line: water molecule for fast CLI tests"
+  },
+  {
+   "id": "water.ideal-c2v",
+   "class": "small",
+   "file": "small/water.ideal-c2v.xyz",
+   "format": "xyz",
+   "formula": "H2O",
+   "natoms": 3,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 136,
+   "sha256": "51aeacffce7fde7b9be9c21c2ae3fefa416fd4a90241b7cf00c28058b384cb86",
+   "provenance": {
+    "kind": "constructed",
+    "comment": "Water C2v, r(OH)=0.9572 Å, ang(HOH)=104.52°",
+    "description": "Water C2v, r(OH)=0.9572 Å, ang(HOH)=104.52°",
+    "level_note": "idealised geometry parameters stated in the comment; no calculation level"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/cli/gpu_multipole/01_vulkan_gfn2_multipole/H2O.xyz",
+    "test_cases/sqm_reference/molecules/H2O.xyz"
+   ],
+   "aliases": [
+    "h2o"
+   ],
+   "description": "comment line: water C2v, r(OH)=0.9572 A"
+  },
+  {
+   "id": "water8-cluster",
+   "class": "clusters",
+   "file": "clusters/water8-cluster.xyz",
+   "format": "xyz",
+   "formula": "H16O8",
+   "natoms": 24,
+   "frames": 1,
+   "charge": null,
+   "spin": null,
+   "role": "unspecified",
+   "size_bytes": 699,
+   "sha256": "c660775abaf5108535905a2d0920442340fe26431042f12b2d55b75b4dd27b96",
+   "provenance": {
+    "kind": "unknown",
+    "comment": "8 well-separated waters (8 A grid) - C1c validation cluster"
+   },
+   "legacy": true,
+   "legacy_paths": [
+    "test_cases/molecules/larger/water8_cluster.xyz"
+   ],
+   "aliases": [
+    "water8_cluster"
+   ]
+  }
+ ],
+ "sets": [
+  {
+   "id": "gmtkn55",
+   "kind": "database",
+   "fetch": "python scripts/fetch_testset.py fetch gmtkn55",
+   "directory": "test_cases/GMTKN55-testset",
+   "tracked": false,
+   "doc": "docs/GMTKN55_VALIDATION.md",
+   "note": "Grimme-group benchmark set; ignored by git, retrieved on demand"
+  },
+  {
+   "id": "mor41",
+   "kind": "database",
+   "fetch": "python scripts/fetch_testset.py fetch mor41",
+   "directory": "test_cases/MOR41-testset",
+   "tracked": false,
+   "doc": "docs/MOR41_VALIDATION.md",
+   "note": "organometallic reaction set; retrieved on demand"
+  },
+  {
+   "id": "s30l",
+   "kind": "database",
+   "fetch": "manual (paywalled Supporting Information), see docs/TESTSET_RETRIEVAL.md",
+   "directory": "test_cases/s30l_test_set",
+   "tracked": false,
+   "doc": "docs/S30L_GFNNF_VALIDATION.md"
+  },
+  {
+   "id": "s30lci",
+   "kind": "database",
+   "fetch": "supplied manually",
+   "directory": "test_cases/s30lci_test_set",
+   "tracked": "README and reference file only",
+   "doc": "test_cases/s30lci_test_set/README",
+   "note": "counterion variant of S30L"
+  }
+ ],
+ "not_imported": {
+  "program_output": [
+   "test_cases/cli/curcumaopt/01_default_uff_opt/input.opt.trj.t0.xyz",
+   "test_cases/cli/curcumaopt/01_default_uff_opt/optimized.xyz",
+   "test_cases/cli/rmsd/01_default_rmsd/target.reordered.xyz",
+   "test_cases/cli/rmsd/02_no_reorder/ref.centered.xyz",
+   "test_cases/cli/rmsd/02_no_reorder/target.centered.xyz",
+   "test_cases/cli/rmsd/02_no_reorder/target.reordered.xyz",
+   "test_cases/cli/rmsd/03_invalid_method/ref.centered.xyz",
+   "test_cases/cli/rmsd/03_invalid_method/target.centered.xyz",
+   "test_cases/cli/rmsd/03_invalid_method/target.reordered.xyz",
+   "test_cases/cli/rmsd/04_template_elements/ref.centered.xyz",
+   "test_cases/cli/rmsd/04_template_elements/target.centered.xyz",
+   "test_cases/cli/rmsd/04_template_elements/target.reordered.xyz",
+   "test_cases/cli/rmsd/05_fragment_rmsd/ref.centered.xyz",
+   "test_cases/cli/rmsd/05_fragment_rmsd/target.centered.xyz",
+   "test_cases/cli/rmsd/05_fragment_rmsd/target.reordered.xyz",
+   "test_cases/cli/rmsd/06_alias_reorder/ref.centered.xyz",
+   "test_cases/cli/rmsd/06_alias_reorder/target.centered.xyz",
+   "test_cases/cli/rmsd/06_alias_reorder/target.reordered.xyz",
+   "test_cases/molecules/larger/.opt.trj.t0.xyz",
+   "test_cases/optimisation/makrocyclic/input.opt.xyz",
+   "test_cases/optimisation/makrocyclic/input.trj.xyz",
+   "test_cases/reorder/reorder_ab.xyz",
+   "test_cases/rmsd/aligned_ab.xyz"
+  ],
+  "unparsable": [
+   "test_cases/cli/errors/02_invalid_xyz_format/invalid.xyz: line 1: atom count expected"
+  ]
+ }
+}

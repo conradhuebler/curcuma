@@ -1,4 +1,6 @@
 #!/bin/sh
-# Claude Generated (Oct 2026): documentation and repository hygiene check, see CLAUDE.md "Where Things Go".
+# Claude Generated (Oct 2026): documentation and structure-library checks, see CLAUDE.md "Where Things Go".
 # Enable with:  git config core.hooksPath scripts/git-hooks
-exec python3 "$(git rev-parse --show-toplevel)/scripts/check_docs.py"
+root="$(git rev-parse --show-toplevel)"
+python3 "$root/scripts/check_docs.py" || exit 1
+python3 "$root/scripts/structlib.py" check || exit 1

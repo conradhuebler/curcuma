@@ -331,6 +331,7 @@ before committing, or enable the hook with `git config core.hooksPath scripts/gi
 | Open code tasks and defects | `TODO.md`, open items only, at most 3 lines each |
 | Bug report, measurement, campaign | one dated document in `docs/` plus one index line in `AIChangelog.md` |
 | Method status and validation | `docs/<METHOD>_STATUS.md` or `docs/*_VALIDATION.md` |
+| Test structures (geometry, charge, spin, provenance) | `test_cases/structures/` (manifest, naming and provenance rules in its README); no structure file anywhere else |
 | Scientific questions without an owner, project status | the vault (`Offene Fragen/`, `Projekte/`); `TODO.md` links to the note by name, no copy |
 | History | git log and the `AIChangelog.md` index |
 
@@ -406,7 +407,7 @@ before committing, or enable the hook with `git config core.hooksPath scripts/gi
 ### Breaking Changes (Test-Driven)
 - **Molecule data structure refactoring**: Hybrid SOA/AOS design for better performance
   - **PHASE 1**: ✅ Comprehensive test suite with refactoring-specific validation
-    - ctest `molecule_comprehensive` (target `test_molecule`; no source file by that name found in `src/core` on 2026-10-01): 15 test categories
+    - ctest `molecule_comprehensive` (target `test_molecule`, source `test_cases/test_molecule.cpp`): 15 test categories
     - `src/core/REFACTORING_ROADMAP.md`: Detailed phase-by-phase plan
     - Tests include current behavior AND validation for planned improvements
     - Specific tests for: XYZ parser unification, cache granularity, fragment O(1) lookup, type safety

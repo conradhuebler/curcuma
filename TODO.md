@@ -68,7 +68,10 @@ Stand.
 - `test_cg_potentials` ist seit 2026-10-01 als ctest `cg_potentials` registriert (besteht); der CG-Beispielaufruf mit VTF-Eingabe endet mit "Failed to initialize ForceField
   engine" (`docs/archive/CG.md`, geprüft 2026-10-01).
 - **Drei ctests scheitern reproduzierbar** (am 2026-10-01 auf `master` und auf `fix/remove-dead-code` gleich, `confscan_dtemplate` 3 von 3 Läufen auf `master`): `xtb_cpscf` (Gate (C), Antwort Mulliken gegen EEQ: H2 8.2e-5 gegen 1e-6, H2O und HCN je über 1.5e-4), `test_orca_interface` ("O2 triplet mult=3" in `methodToOrcaKeyword`), `confscan_dtemplate` (Ursache nicht untersucht). Die Einordnung "flaky" für `confscan_dtemplate` in älteren Notizen trifft nicht zu.
-- `molecule_comprehensive` verweist auf das Target `test_molecule`, dessen Quelle the source file test_molecule.cpp under src/core nicht im Baum liegt.
+- **Strukturbibliothek** (`test_cases/structures/`, Phasen 0 und 1 erledigt): 67 Strukturen mit Herkunft im Manifest, 65 % davon `unknown` (Altbestand, nur abgeleitet).
+  Offen: Phase 2 (Tests kategorieweise auf die Bibliothek umstellen, `sqm` zuerst, Eingaben byte-identisch, case.json je Test), Phase 3 (`TestMoleculeRegistry`
+  liest die Bibliothek statt hartkodierter Atome), Phase 4 (getrackte `.out`-Dateien als Beleg ablegen, 115 untracked Laufausgaben in `test_cases/` entfernen,
+  Berichte in `test_cases/cli/` ins Archiv). Das Optimierungslevel der `unknown`-Strukturen kann nur von Ihnen nachgetragen werden (`python3 scripts/structlib.py report --list-unknown`).
 - Wissenschaftliche Validierung der CLI-Tests ausbauen (RMSD-Toleranzen, Energiekonvergenz); Muster für absichtlich fehlschlagende
   Tests (`03_invalid_method` in `curcumaopt`, `rmsd`, `confscan`); Performance-Benchmarks für Regressionserkennung.
 - ConfScan: Accept/Reject-Meldungen bei Standard-Verbosity nicht sichtbar (Eintrag von 2025, nicht erneut geprüft).

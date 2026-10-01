@@ -35,6 +35,12 @@ curcuma::Molecule mol = TestMolecules::TestMoleculeRegistry::createMolecule("CH4
 - To add one: edit `core/test_molecule_registry.cpp` (atoms in Angstrom) and link `test_molecule_registry` to the test target
 - Why: hardcoded geometry gives geometry-dependent pass/fail, duplicates data and is hard to audit
 
+## Structure library
+
+- `test_cases/structures/` holds every test structure with provenance (program, method, level, or the literature source); rules and naming in its `README.md`, validation with `python3 scripts/structlib.py check`
+- New structures only through `structlib.py add`; a changed geometry is a new id; no program output in the library
+- Migration state: the library exists, the tests still read their own local copies (`legacy_paths` in the manifest map them); migrated tests will copy from the library
+
 ## Traps
 
 - `createMolecule(name)` defaults to `scale_coordinates = true` and returns **Bohr**; pass `false` for Angstrom
