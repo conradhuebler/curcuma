@@ -4,837 +4,214 @@
 
 # Curcuma
 
-A simple Open Source molecular modelling tool.
+An open source toolkit for molecular modelling: energies, gradients, geometry optimisation, molecular
+dynamics, conformer search and structure analysis with native implementations of GFN-FF, GFN1-xTB,
+GFN2-xTB, PM3/AM1/MNDO and UFF. The native methods need no external program.
 
-> **Sep 2026:** the native GFN-FF / GFN1 / GFN2 stack was cleaned up (single `FFWorkspace`
-> engine, table-driven method registry, ~20k lines of dead code removed) and sped up with
-> numerically identical results; `curcuma -methods` lists every method with its providers.
-> Details: [docs/CLEANUP_2026_09.md](docs/CLEANUP_2026_09.md).
+## What to know before you install
 
-## Download and requirements
-Dependencies are fetched automatically via CMake FetchContent (no manual submodule init required).
-- [LBFGSpp](https://github.com/conradhuebler/LBFGSpp) a fork of [yixuan/LBFGSpp](https://github.com/yixuan/LBFGSpp/) provides LBFGS optimiser, the fork allows performing single step optimisation without resetting any calculated optimsation history
-- [XTB](https://github.com/grimme-lab/xtb) the official xtb program — optional external backend for `xtb-gfn1`, `xtb-gfn2`, `xtb-gfnff` (USE_XTB build flag). Not required for the native GFN1/GFN2/GFN-FF implementations.
-- [tblite](https://github.com/tblite/tblite) optional external backend for `tblite-gfn1`, `tblite-gfn2`, `xtb-gfn1`, `xtb-gfn2` (USE_TBLITE build flag). The canonical `gfn1`/`gfn2` methods use the native curcuma implementation instead.
-- [simple-d3](https://github.com/dftd3/simple-dftd3) Dispersion Correction D3
-- [cpp-d4](https://github.com/conradhuebler/cpp-d4) Fork of the cpp-d4 repository for Dispersion Correction D4
-- [CxxThreadPool](https://github.com/conradhuebler/CxxThreadPool) - C++ Thread Pool for parallel calculation
-- [eigen](https://gitlab.com/libeigen/eigen) provides eigen C++ library for linear algebra. Eigen is not downloaded automatically, but will be fetched and updated if the build scripts in the **scripts** subdirectory are used.
-- [fmt](https://github.com/fmtlib/fmt) formatted console output
-- [plumped](https://github.com/plumed/plumed2) Support for Metadynamics, must be compiled manually and enabled manually (Option USE_Plumed)
-- [ulysses](https://gitlab.com/siriius/ulysses) Support for several semiemprical models via ulysses
-
-Additionally, [nlohmann/json](https://github.com/nlohmann/json) is obtained via cmake.
-
-A C++/Eigen implementation of the Munkres Algorithmus (Hungarian Method) based on [the workshop here](https://brc2.com/the-algorithm-workshop/) is included.
-
-### GPU acceleration (optional)
-
-The GPU backends for `gfn1`/`gfn2`/`gfnff` are **off by default** and each needs extra
-system dependencies (one backend per build dir: `release_cuda/`, `release_rocm/`,
-`release_vulkan/`). The default `release/` build needs none of these.
-
-- **CUDA** (`-gpu cuda`, `-DUSE_CUDA=ON`): NVIDIA CUDA toolkit — `nvcc`,
-  cuSOLVER, cuBLAS, cudart (Arch: `cuda`). See [docs/SQM_GPU.md](docs/SQM_GPU.md).
-- **ROCm / HIP** (`-gpu rocm`, `-DUSE_ROCM=ON -DCMAKE_PREFIX_PATH=/opt/rocm`):
-  `hip-runtime-amd`, `rocm-llvm`, `rocm-device-libs`, `rocminfo`; **`rocblas` + `rocsolver`**
-  for the GPU eigensolver (xTB) / EEQ solve (GFN-FF). Set `-DROCM_GPU_ARCH` to your GPU's `gfx`
-  (e.g. `gfx1150`; `rocminfo | grep gfx`). `USE_ROCM` enables gfn1/gfn2, `USE_ROCM`
-  enables gfnff. See [docs/SQM_ROCM.md](docs/SQM_ROCM.md).
-- **Vulkan** (`-gpu vulkan`, `-DUSE_VULKAN=ON`): `vulkan-icd-loader` +
-  `vulkan-headers` + an FP64-capable driver (AMD `vulkan-radeon`/RADV — **no ROCm needed**,
-  NVIDIA `nvidia-utils`, Intel `vulkan-intel`); `shaderc`/`glslang` only to regenerate the
-  (committed) SPIR-V. Needs a device with `shaderFloat64`. See [docs/SQM_VULKAN.md](docs/SQM_VULKAN.md).
-- **Multi-GPU** (Sep 2026, AI-generated, machine-tested): `-gpu_device N` pins a run to one
-  device; batch runs (`-sp`/`-opt` on a multi-XYZ file, ConfSearch, Hessian) spread their
-  workers over all visible GPUs (`-gpu_devices 0,2`, `-gpu_workers_per_device 2`).
-  GFN-FF spreads ONE large molecule over the visible GPUs (Coulomb + EEQ; `-gfnff.gpu_split_devices`).
-  Every GPU fallback is summarised after the run; `-gpu_strict true` stops at the first one
-  (exit code 3), see [docs/GPU_TUNING.md](docs/GPU_TUNING.md).
-  `curcuma -methods` lists the devices. One large GFN1/GFN2 molecule can spread its
-  eigensolve and its density over several GPUs; with more than one device visible this is the
-  default from 4000 basis functions up (`-gpu_eigensolver_devices none` / `-gpu_density_devices
-  none` to disable; needs cuSOLVERMp, cuBLASMp and NCCL at build time, see
-  [docs/GPU_TUNING.md](docs/GPU_TUNING.md)).
-  See [docs/MULTI_GPU.md](docs/MULTI_GPU.md).
-- **Performance tuning** (Sep 2026, AI-generated, machine-tested): every performance knob
-  is a CLI flag - thread counts, the eigensolve reduction route, the mixed-precision
-  guards, the GPU multipole storage. `python scripts/tuning_sweep.py mol.xyz --method gfn2
-  [--gpu cuda]` measures them on the machine it runs on, verifies that no setting changes
-  the energy, and prints the fastest command line. Options and measured numbers:
-  [docs/GPU_TUNING.md](docs/GPU_TUNING.md).
-
-## Validation Status Labels
-
-Curcuma contains a mix of production-tested and AI-generated code. The following labels appear throughout this README and the internal `CLAUDE.md` documentation to indicate the confidence level of each feature:
+**Validation status.** A large part of curcuma, including every native quantum-chemical and force-field
+method, was written with AI assistance and checked by automated tests and by comparison with reference
+programs. It has **not been tested by a human on production problems**. Passing tests does not imply
+physical correctness for every input; cross-check results against an established reference before using
+them in research. The labels used in this README and in the developer documentation:
 
 | Label | Meaning | Who sets it |
 |-------|---------|-------------|
-| 🤖 AI-generated | Code written by AI, not yet reviewed by a human | AI |
+| 🤖 AI-generated | Code written by AI, not reviewed by a human | AI |
 | ⚙️ Machine-tested | Passes automated tests (CI, ctest) | AI |
-| 👁️ Human-reviewed | Human has read and understood the code | Human only |
-| ✅ TESTED | Human has run it on real problems and verified correct behaviour | **Human only** |
-| ✅ APPROVED | Human confirms correctness, ready for production use | **Human only** |
+| 👁️ Human-reviewed | A human has read and understood the code | Human only |
+| ✅ TESTED | A human has run it on real problems and it behaves correctly | **Human only** |
+| ✅ APPROVED | Human confirms correctness, ready for production | **Human only** |
 
-**Important**: passing automated tests does not imply physical correctness for all inputs. AI-generated scientific code can produce plausible but wrong results in untested regimes. Features marked only 🤖/⚙️ should be cross-checked against an established reference before use in research.
+**Methods** (`-method NAME`; `curcuma -methods` lists what your build provides). Native methods are 🤖 ⚙️:
 
-### UFF, xTB, GFN-FF and Dispersion Correction
-Curcuma has an interface to tblite, xtb as well simple-d3 and cpp-d4, enabling semiempirical calculations or combinations of UFF with D3, D4 and H4 (no parameters are adjusted yet). To use one of the methods, please add **-method methodname** to your arguments:
+| Method | Kind | Use | What it was compared with |
+|---|---|---|---|
+| `gfnff` | GFN-FF force field, native | **default of every capability**; fast (milliseconds per gradient) | pprcht/gfnff (the port source), every structure of MOR41 and GMTKN55: max 0.07 kcal/mol; S30L-CI: max 0.58, caused by one deliberate difference in the triple-bond torsion (0.05 with `-gfnff.storsion_reference_loop_bug true`). Against xtb it differs where xtb and the port source differ. |
+| `gfn2` | GFN2-xTB, native | the accurate choice, about 100x slower than `gfnff` | tblite and xtb 6.7.1: 11 of 12 reference molecules within 1e-8 Eh, GMTKN55 within 0.017 kcal/mol |
+| `gfn1` | GFN1-xTB, native | as `gfn2` | tblite: 14 of 16 reference molecules within 1e-8 Eh; GMTKN55 max 0.011 kcal/mol |
+| `pm3`, `am1`, `mndo`, `pm6` | NDDO, native | semi-empirical | PM3/AM1/MNDO: 21 of 21 tests against Ulysses |
+| `eht`, `uff`, `qmdff` | Hückel, force fields | | machine-tested only |
+| `xtb-*`, `tblite-*`, `ugfn2`, `ipea1` | external backends | need `USE_XTB`, `USE_TBLITE`, `USE_ULYSSES` | production-quality interfaces |
 
-Classical force field:
-- uff : Universal Force Field (no longer any capability's default since Sep 2026)
+Use `gfnff` to explore and `gfn2` to decide. Details per method and per data set:
+[docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md), [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md),
+[docs/GMTKN55_VALIDATION.md](docs/GMTKN55_VALIDATION.md), [docs/MOR41_VALIDATION.md](docs/MOR41_VALIDATION.md).
+The figures above are from September 2026 and are not updated automatically; the scripts in `scripts/`
+re-measure them.
 
-Native force field (no external dependency required, **the default for every capability**):
-- **gfnff** : Native C++ GFN-FF — full energy and gradient, validated against Fortran reference (see status below)
-- **gfnff** + `-gpu cuda` : CUDA-accelerated variant; topology cached, charges on CPU, all kernels on GPU
-- **xtb-gfnff** : GFN-FF via the xtb Fortran library (USE_GFNFF build flag)
+**Limits you should know.**
+- GFN-FF is a force field. On the 41 MOR41 reactions it is 60 to 70 kcal/mol away from DLPNO-CCSD(T) in mean absolute deviation (GFN2: about 12). Port fidelity to the reference is high; the reference itself is not accurate for reaction energies of metal complexes.
+- GFN-FF has no periodic boundary conditions.
+- Open-shell systems work for `gfn1`/`gfn2` (`-spin N`, N = number of unpaired electrons).
+- GPU backends (`-gpu cuda|rocm|vulkan`) are optional and off by default. CUDA has been run on an NVIDIA H200, RTX 5090, RTX 5080, RTX A4500 and GTX 1660; ROCm on a Radeon 890M (gfx1150) only, so the ROCm plugin build is unverified on other setups; Vulkan is opt-in and brings no speed-up. A GPU run that falls back to the CPU says so after the run (`-gpu_strict true` stops instead).
+- Results of the native methods can differ in the last digits from tblite/xtb in documented places (`-xtb.sto6g_legacy_4sp`, `-xtb.d4_atm_cutoff 40.0` reproduce xtb's choices).
+- Molecular dynamics times recorded with versions before the fix of 2026-09 (`ef462fcf`) run 1.9516 times too long; multiply them by that factor.
+- GFN-FF writes its perceived topology to `<basename>.topo.json` next to the input and reads it again. Delete the file after changing the geometry file in a way that alters bonding.
 
-**Which method should I use?** `gfnff` is the **fast** one and the default for every
-capability (single point, optimisation, MD, Hessian, conformer search): a native GFN-FF
-force field, no external dependency, milliseconds per gradient. `gfn2` is the **accurate**
-one: native GFN2-xTB, semi-empirical QM, roughly two orders of magnitude slower but with
-real electronic structure (charges, orbitals, bond breaking). Use `gfnff` to explore and
-`gfn2` to decide.
+**Capabilities** (each prints its options with `curcuma -<capability>` without arguments): single point
+`-sp`, optimisation `-opt`, Hessian and frequencies `-hessian`, molecular dynamics `-md` (thermostats,
+RATTLE, temperature ramps, PLUMED metadynamics), conformer search `-confsearch` and filtering `-confscan`,
+RMSD with atom reordering `-rmsd`, docking `-dock`, interaction energies `-interaction`, implicit solvation
+(ALPB/GBSA for native GFN1/GFN2, ALPB for GFN-FF), trajectory and structure analysis `-analysis`.
 
-> **Charged multi-fragment systems (GFN-FF, Sep 2026):** the net charge now goes to the chemically right fragment instead of the one that happens to contain atom 1 (`-gfnff.frag_charge_model ensemble`, the new default; `reference` restores the old rule). Energies of charged species that GFN-FF sees as several fragments can therefore differ from earlier releases and from xtb (GMTKN55 WATER27 reaction MAD 58.6 -> 21.4 kcal/mol). See [docs/FRAG_CHARGE_MODEL.md](docs/FRAG_CHARGE_MODEL.md).
-
-Native GFN methods (no external dependency required, canonical backends since AP3 2026-04-25):
-- **gfn1** : Native GFN1-xTB — 14/16 validation molecules at 1e-8 vs tblite; includes the GFN1-only halogen-bond correction (B–X···A, added Sep 2026)
-- **gfn2** : Native GFN2-xTB — 15/16 validation molecules at 1e-8 vs tblite (only `complex` open at 7.3e-8)
-
-> Native GFN1/GFN2 are validated against tblite to a 1e-8 Eh target — see [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md). For explicit tblite or xtb backends use `tblite-gfn1`/`tblite-gfn2` or `xtb-gfn1`/`xtb-gfn2`.
-
-> **Halogen bonds (GFN1, Sep 2026):** GFN1 carries a classical B–X···A correction (X = Cl/Br/I/At, acceptor = N/O/P/S) that GFN2 does not. It was previously unimplemented; with it, all 2462 GMTKN55 structures reproduce xtb 6.7.1 to MAD 0.00007 / max 0.011 kcal/mol (was 0.041 / 11.93, and every deviation above 0.1 kcal was a halogen-bonded `HAL59` structure). See [docs/GMTKN55_VALIDATION.md](docs/GMTKN55_VALIDATION.md).
-
-> **4th-period elements (GFN1):** what is left of that 0.011 kcal/mol is a genuine xtb-vs-tblite disagreement, not a curcuma error — the two references carry different STO-6G 4s/4p tables (Z = 19–36; GFN2 uses STO-4G there and is unaffected). curcuma follows tblite, whose expansion fits the exact Slater function 3–5× better. `-xtb.sto6g_legacy_4sp true` switches to xtb's tables and reproduces the binary bit-for-bit. Details in [docs/GMTKN55_VALIDATION.md](docs/GMTKN55_VALIDATION.md).
-
-> **Gradients (Sep 2026):** analytic gradients are now validated set-wide against xtb 6.7.1 on all 2462 GMTKN55 geometries (median deviation 3e-7 / 4e-7 / 4e-8 Eh/Bohr for gfn1 / gfn2 / gfnff), with the outliers arbitrated by finite differences of each code's own energy. That sweep found and fixed two unit bugs — GFN-FF MD forces were a factor 1.89 too small, and vibrational frequencies were too high for every method — see [docs/GRADIENT_VALIDATION.md](docs/GRADIENT_VALIDATION.md). Frequencies now match xtb to ≤0.13 % on H2O for all three methods.
-
-> **GFN-FF MD/optimisation correctness (Sep 2026):** several non-bonded pair lists were built once at setup and never revisited during a run — a non-bonded repulsion pair starting more than 20 Bohr apart could diffuse to near-zero distance with **zero** repulsive force (root-caused from a real crash on an H200), and D4 dispersion's C6 values were frozen at the setup geometry for every GFN-FF MD/optimisation run, not only large ones, while the gradient used the current CN — energy and gradient belonged to different functions after the first geometry change. Both fixed with a periodic geometry-triggered refresh; MOR41 (95/95) and GMTKN55 gfnff (2462/2462) bit-identical before/after. See [docs/GFNFF_PAIR_LIST_REFRESH.md](docs/GFNFF_PAIR_LIST_REFRESH.md).
-
-> **Speed:** on a 231-atom complex (single core, energy+gradient) native `gfn1` runs in ~1.02 s and `gfn2` in ~1.08 s, versus xtb 6.7.1 at 1.37 s / 0.98 s — i.e. gfn1 is faster than xtb and gfn2 within ~11%. See [docs/SQM_PERFORMANCE.md](docs/SQM_PERFORMANCE.md) for the single-core record and [docs/SQM_THREADING.md](docs/SQM_THREADING.md) for `-threads N` scaling.
-
-> **d-shell elements (X-I1, June 2026):** native GFN1/GFN2 now handle d-shell basis functions (S, P, Cl, Si and other main-group d elements), matching tblite to ≤1e-8 Eh; analytic gradients FD-validated. CPU only — on `-gpu` a d-shell system falls back to the CPU integral/SCF path. Transition metals: after the Jul 2026 fixes (shell-vs-angular parameter indexing + 6s/6p STO-6G expansion), **native GFN1 and GFN2 reproduce tblite for transition metals** — GFN2 3d exact (1e-8), GFN1 72/95 MOR41 structures exact; both leave a small **~1e-3 Eh** residual for 4d/5d (heavy-element band/multipole/D4, still open). **GFN-FF transition metals are not yet validated.** See [docs/SQM_DSHELL_WP.md](docs/SQM_DSHELL_WP.md) and [docs/MOR41_VALIDATION.md](docs/MOR41_VALIDATION.md).
-
-> Native GFN1/GFN2 can use multiple cores **within one calculation** of a single large molecule: pass `-threads N` to a `-sp`/`-opt`/MD run (default is serial and bit-identical). Integral setup, gradient and Fock build scale ~3–5×; see [docs/SQM_THREADING.md](docs/SQM_THREADING.md).
-
-> **Benchmark test sets on demand:** `python scripts/fetch_testset.py fetch mor41` downloads the Grimme-group MOR41/GMTKN55/S30L benchmark sets into the layout the validation scripts expect (S30L's Supporting Information is paywalled and must be placed by hand; instructions are printed). `scripts/testset_perf.py` then times CPU/threading/GPU performance on whatever set is fetched. See [docs/TESTSET_RETRIEVAL.md](docs/TESTSET_RETRIEVAL.md).
-
-> Opt-in **MKL-free / GPU-portable eigensolve kernels** are available for the native GFN SCF (MKL stays the default): `-eigensolver native` (own Householder + Cuppen divide-and-conquer), `-eigensolver purify` (0 K density-matrix purification, GEMM-only, no diagonalization), `-eigensolver lobpcg` (seeded block LOBPCG, experimental), and `CURCUMA_EIG_TRED2=blocked` (BLAS-3 blocked tridiagonalization). See [docs/SQM_EIGENSOLVE_GPU.md](docs/SQM_EIGENSOLVE_GPU.md).
-
-> Opt-in **CUDA GPU path** for the native GFN1/GFN2 solver: `-method gfn1|gfn2 -gpu cuda` (build `release_cuda/` with `-DUSE_CUDA=ON`). Staged cuSOLVER/cuBLAS port (the CPU path is unchanged and `#ifdef`-free); both **GFN1** and **GFN2** run a device-resident SCF under the default Broyden mixing, and **Stage 3 builds the integrals (CN/S/H0/L/γ/multipole) on the device and Stage 4 the nuclear gradient — so `-opt`/`-md` are fully device-resident** (only xyz up, gradient+energy down per step; every device kernel matches the CPU elementwise to ~1e-15). 🤖 AI-generated / ⚙️ machine-tested only. See [docs/SQM_GPU.md](docs/SQM_GPU.md).
-
-> **AMD/ROCm** (`-gpu rocm`, build `release_rocm/` with `-DUSE_ROCM=ON`) and **Vulkan compute** (`-gpu vulkan`, hand-written SPIR-V, `-DUSE_VULKAN=ON`) backends for the same `gfn1`/`gfn2`/`gfnff` methods. `-gpu auto` picks the first compiled backend (cuda > rocm > vulkan), else CPU. 🤖 **Vulkan: GFN1 = Stage 2** (device-resident SCF — Fock/eigensolve/density/populations/band on the GPU via a device-built Löwdin S⁻¹ᐟ²; only `v_ao`/`occ` up and `eps`/`pop`/`band` down per iteration), **GFN2 = Stage 1** (per-iteration eigensolve on GPU). gfn1/gfn2 single-point + opt match the CPU bit-for-bit on the validation set (AMD 890M/RADV); integrals/gradient still CPU. **ROCm: GFN1 = Stage 4 (fully device-resident)** — the integral build (CN/S/H0/L/γ), the SCF (Fock/density/eigensolve via HIP kernels + rocBLAS + rocSOLVER) and the nuclear gradient (repulsion/Pulay/Coulomb HIP kernels) all run on the GPU; only the dispersion gradient + CN chain-rule on the host. **GFN2** uses the device integrals + rocSOLVER eigensolver (gradient on host). gfn1/gfn2 single-point + opt match the CPU bit-for-bit, incl. the full `-opt` trajectory (AMD 890M, needs `rocsolver`+`rocblas`). **ROCm GFN-FF** (`-DUSE_ROCM=ON`, June 2026): the full energy + nuclear-gradient kernel stack runs on the GPU (single-TU hipify of the CUDA gfnff kernels; EEQ via rocSOLVER `dpotrf`/`dgetrf` + host CPU-Schur); single-point energy and gradient match CPU ≤1e-7 on water/CH4/caffeine/231-atom complex. **Two opt-in CUDA-only GFN-FF GPU flags (default OFF, ROCm mirrors pending):** `-gfnff.eeq_mixed_precision` (FP32-factor + FP64-refine EEQ solve) and `-gfnff.gpu_disp_pairs_on_device` (on-device D4 pair build) — bit-identical to the host but not a measured speedup (residency milestones). See [docs/SQM_ROCM.md](docs/SQM_ROCM.md) / [docs/SQM_VULKAN.md](docs/SQM_VULKAN.md) / [docs/GFNFF_PERFORMANCE_LEVERS.md](docs/GFNFF_PERFORMANCE_LEVERS.md).
-
-> Opt-in **approximate large-system modes** scale the native GFN SCF beyond ~1000 atoms by exploiting locality (default is the exact dense path): `-large_system_mode fragments` (disconnected-fragment SCF, energy+gradient, `-eigensolver` propagates per fragment), `-large_system_mode dc` (divide-and-conquer, energy-only, `-eigensolver` propagates per sub-block, `-large_system_buffer_bohr` accuracy knob), `-large_system_mode sparse` (non-orthogonal density purification, 0 K gapped, `-eigensolver` ignored, `-large_system_sparse_threshold` knob). Each converges to the dense energy as its knob tightens; combining `-large_system_mode=fragments|dc` with `-eigensolver=purify` requires `-electronic_temperature 0` (hard error otherwise). See [docs/SQM_LARGE_SYSTEMS.md](docs/SQM_LARGE_SYSTEMS.md).
-
-> Opt-in **multi-step SCC extrapolation** for the native GFN SCF cuts SCF iterations across geometry steps in `-opt`/`-md` by predicting the next charge state from several past converged steps (generalises the 1-step warm-start; default `none` is unchanged). `-scf_extrapolation aspc` (Kolafa ASPC, best for fixed-timestep MD) or `-scf_extrapolation gauss` (least-squares, better for irregular opt steps), with `-scf_extrapolation_order`. The safe default `guess` coupling still converges the SCF fully; `-scf_extrapolation_apply xlbomd` is an experimental extended-Lagrangian Born-Oppenheimer mode (time-reversible auxiliary density + converged corrector, for low MD energy drift). On a smooth caffeine trajectory, `aspc`/`gauss` roughly halve SCF iterations (gfn2 215→90, gfn1 170→79) with bit-identical converged energy. 🤖 AI-generated / ⚙️ machine-tested only. See [docs/SQM_SCF_EXTRAPOLATION.md](docs/SQM_SCF_EXTRAPOLATION.md).
-
-xtb methods:
-- xtb-gfnff : GFN-FF via the xtb library
-- xtb-gfn1
-- xtb-gfn2
-
-Using only **d3** or **d4** should be possible.
-
-Native GFN2 includes an analytic D4 dispersion charge-response gradient
-(∂E_D4/∂q · ∂q/∂x). The zeta charges default to a single-shot dftd4 EEQ model
-(`-d4_charge_source eeq`, analytic ∂q/∂x); `-d4_charge_source mulliken` feeds the
-GFN2 SCF charges (energy + ∂E/∂q; the CPSCF gradient response is still pending —
-see [docs/D4_Q_RESPONSE.md](docs/D4_Q_RESPONSE.md)). Current alignment vs tblite:
-11/12 at 1e-8 — only `complex` (231 atoms, 6.95e-5 Eh residual) remains open.
-Status tracked in [docs/GFN2_NATIVE_ROADMAP.md](docs/GFN2_NATIVE_ROADMAP.md) and
-[docs/GFN2_D4_STATUS.md](docs/GFN2_D4_STATUS.md); `ctest -L d4_diag`.
-
-The native GFN SCF defaults to `broyden` mixing — a modified-Broyden quasi-Newton
-scheme on the SCC charge vector, the same mixer tblite/xtb use — which converges
-large polar systems that the old Fock-DIIS diverged on (e.g. the 231-atom
-`complex` now converges from the bare guess with plain `-method gfn2`). Other
-modes remain selectable: `-scf_mode diis|plain|level-shift` and `-scf_guess
-h0|eeq` (plus `-scf_damping`, `-diis_start`, `-level_shift`). See
-[docs/SCF_MODES.md](docs/SCF_MODES.md).
-
-Please cite xtb, tblite etc if external methods are used within curcuma! The most recent information can be found at the respective github pages, some are listed below.
-
-UFF
-- J. Am. Chem. Soc. (1992) 114(25) p. 10024-10035,
-- with the H4 hydrogen bond correction (J. Chem. Theory Comput. 8, 141-151 (2012)) included (same parameters as applied in case of PM6-D3 for now).
-
-GFN-FF (native C++ implementation):
-- S. Spicher and S. Grimme, Angew. Chem. Int. Ed. 2020, 59, 15665. DOI: 10.1002/anie.202004239
-
-### Native GFN-FF Status (April 2026)
-
-The native `gfnff` implementation is **AI-implemented and machine-tested** — human production testing is pending.
-
-**What works (validated by automated tests):**
-- All energy terms: bonds, angles, torsions, inversions, repulsion, dispersion (D4), Coulomb (EEQ), hydrogen bonds, halogen bonds, triple-bond torsions, BATM, ATM
-- Analytical gradients for all terms; GPU (CUDA) analytical gradients correct
-- 20 validation molecules (H₂ to a 1280-atom polymer) — energy vs. Fortran reference within tolerances
-- CUDA acceleration: topology caching, async CPU/GPU overlap, shared-memory reduction
-- Geometry optimization and MD using gradients
-- **GFN-FF ALPB solvation**: self-consistent Born reaction field coupled into EEQ (`A_eeq += B`); validated against xtb 6.7.1 (`--gfnff --alpb`) to ≤1e-8 Eh (7 molecules × 4 solvents, `ctest -L gfnff_solvation`; June 2026). Gradient FD-validated at frozen solvated charges (same approximation as the Fortran reference). `-gfnff.solvent_model gbsa` maps to ALPB (GFN-FF has no separate GBSA model; warns at runtime). See [docs/SQM_SOLVATION_WP.md](docs/SQM_SOLVATION_WP.md).
-
-**Not validated / not implemented:**
-- **Periodic boundary conditions**: Not implemented
-- **Organometallics / transition metals**: No test molecule with metal center; parameter quality unknown
-
-**Large-system precision (re-verified Sep 2026, superseding an older note)**: the two caveats
-previously listed here — "dispersion gradients show √N accumulation error on large systems"
-and "GPU energy for polymer (1280 atoms): 8.9 µEh vs. 1 µEh tolerance" — no longer reproduce.
-`test_gfnff_validation` on the current 1410-atom `polymer.xyz` (`ctest -R gfnff_val_polymer`):
-dispersion GradComp max_err 9.9e-9 Eh/Bohr (tol 1e-4, was ~4.9e-4 in Mar 2026 — likely fixed
-incidentally by later D3/D4 precision work, e.g. CLAUDE.md Known Issues #5). CPU-vs-GPU
-single-point energy on the same molecule, ROCm (gfx1150): 0.33 µEh (well under the 1 µEh
-target; CUDA hardware was not available to re-check that backend directly).
-
-**Reactive MD (experimental)**: `-gfnff.topology_mode react` lets bonds form and break during MD (hysteresis re-detection + bonded-term rebuild, NVT-only) — see [docs/GFNFF_REACT_TOPOLOGY.md](docs/GFNFF_REACT_TOPOLOGY.md).
-
-**Cross-platform determinism (`-DUSE_PORTABLE_MATH=ON`)**: Wine and native Windows can round `erf`/`acos`/`exp`/`log` differently in the last bit (different CRT-DLL reimplementations), which can flip a GFN-FF classification threshold into a different bond term. Vendored fdlibm-derived replacements close this; off by default, on for the Windows nightly build — see [docs/PORTABLE_ERF.md](docs/PORTABLE_ERF.md).
-
-**One unit system (`-DUSE_LEGACY_UNIT_CONSTANTS=ON` to revert)**: every Bohr/Ångström and Hartree conversion uses CODATA 2018 (`src/core/units.h`). Before Sep 2026 seven different Bohr radii were in use, which put a systematic 5e-7 Eh between CPU and GPU GFN-FF on a 7320-atom system; the legacy build restores the old per-site values bit for bit — see [docs/UNIT_CONSTANTS.md](docs/UNIT_CONSTANTS.md).
-
-**Known differences from Fortran reference** (see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)):
-- Sub-mEh agreement for most small/medium molecules
-- EEQ charge environment corrections (dxi) partially implemented
-- Metal-specific EEQ corrections (fqq) not implemented
-
-Do not use for production on untested system classes without cross-checking against `xtb-gfnff`.
-
-D3:
-- J. Chem. Phys. 132, 154104 (2010); https://doi.org/10.1063/1.3382344
-
-D4:
-- E. Caldeweyher, C. Bannwarth and S. Grimme, J. Chem. Phys., 2017, 147, 034112. DOI: 10.1063/1.4993215
-- E. Caldeweyher, S. Ehlert, A. Hansen, H. Neugebauer, S. Spicher, C. Bannwarth and S. Grimme, J. Chem. Phys., 2019, 150, 154122. DOI: 10.1063/1.5090222
-
-Dispersion correction parameters are yet complicated to change, this will be improved sooner than later.
-
-## Compiling
-To compile Curcuma you will need [CMake](https://cmake.org/download/) 3.15 or newer and a C++17-capable compiler, both gcc and icc (quite recent version) work. One possible option is MinGW. For Windows, it is further necessary to add the bin-folder in the MinGW installation to the path (Edit the system environment variables > Environment Variables > under "System Variables" select "Path" > Edit > New > paste path, for example "C:\MinGW\bin").
-
-To obtain the most recent version
-```sh
-git clone --recursive https://github.com/conradhuebler/curcuma
-```
-For Windows: you need to make sure to navigate to a folder outside the Windows System before clone to avoid conflicts of usage rights.
-
-Compile it as follows on Unix Platform:
-```sh
-cd curcuma 
-mkdir build
-cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make
-```
-For Windows: you need to tell the CMD which compiler to use to avoid errors if using the wrong compiler. Using MinGW as example, the "cmake ..." command would become
-```sh
-cmake .. -DCMAKE_BUILD_TYPE=Release -G "MinGW Makefiles"
-```
-
-### Windows with OpenMP support (w64devkit)
-
-Standard MinGW does not ship with OpenMP. To enable OpenMP on Windows, use [w64devkit](https://github.com/skeeto/w64devkit), which provides a GCC toolchain with OpenMP support out of the box.
-
-1. Install [MinGW](https://sourceforge.net/projects/mingw/) and [CMake](https://cmake.org/download/), and add their `bin` directories to the System environment variables (`PATH`).
-2. Download and extract [w64devkit](https://github.com/skeeto/w64devkit/releases).
-3. Open the w64devkit terminal from the extracted folder (run `w64devkit.exe`).
-4. Inside that terminal, build Curcuma:
+## Download and requirements
 
 ```sh
 git clone --recursive https://github.com/conradhuebler/curcuma
+```
+
+You need [CMake](https://cmake.org/download/) 3.18 or newer and a C++17 compiler (gcc, clang, icc, MinGW).
+Dependencies are fetched by CMake (FetchContent); nothing needs to be initialised by hand.
+
+- [LBFGSpp](https://github.com/conradhuebler/LBFGSpp), a fork of [yixuan/LBFGSpp](https://github.com/yixuan/LBFGSpp/) (the fork allows single-step optimisation without resetting the history)
+- [simple-d3](https://github.com/dftd3/simple-dftd3) (D3) and [cpp-d4](https://github.com/conradhuebler/cpp-d4) (D4, fork)
+- [CxxThreadPool](https://github.com/conradhuebler/CxxThreadPool), [fmt](https://github.com/fmtlib/fmt), [nlohmann/json](https://github.com/nlohmann/json)
+- [Eigen](https://gitlab.com/libeigen/eigen) is not downloaded automatically; the build scripts in `scripts/` fetch and update it
+- Optional: [xtb](https://github.com/grimme-lab/xtb) (`USE_XTB`), [tblite](https://github.com/tblite/tblite) (`USE_TBLITE`), [Ulysses](https://gitlab.com/siriius/ulysses) (`USE_ULYSSES`), [PLUMED](https://github.com/plumed/plumed2) (`USE_Plumed`, must be built manually). The native `gfn1`, `gfn2` and `gfnff` do not need xtb or tblite.
+
+A C++/Eigen implementation of the Munkres algorithm (Hungarian method) based on [this workshop](https://brc2.com/the-algorithm-workshop/) is included.
+
+### Build (Linux, macOS)
+
+```sh
 cd curcuma
 mkdir build
 cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j4
+```
+
+### Build (Windows)
+
+Clone outside the Windows system folders. Add the `bin` directory of your MinGW installation to `PATH`
+and select the generator explicitly:
+
+```sh
 cmake .. -DCMAKE_BUILD_TYPE=Release -G "MinGW Makefiles"
-mingw32-make
 ```
 
-The w64devkit environment provides the correct `libgomp` runtime, so `-DUSE_OpenMP=ON` will be picked up automatically by CMake.
+Standard MinGW has no OpenMP. [w64devkit](https://github.com/skeeto/w64devkit) provides a GCC with
+OpenMP: install [CMake](https://cmake.org/download/), extract w64devkit, start `w64devkit.exe`, and
+inside that terminal run `git clone --recursive ...`, `mkdir build`, `cd build`,
+`cmake .. -DCMAKE_BUILD_TYPE=Release -G "MinGW Makefiles"`, `mingw32-make`. CMake then picks up
+`-DUSE_OpenMP=ON` with the right `libgomp`. The Windows nightly build uses `-DUSE_PORTABLE_MATH=ON`,
+see [docs/PORTABLE_ERF.md](docs/PORTABLE_ERF.md); native Windows runs have not been compared with Linux
+results on a Windows machine.
 
-## Modern Parameter System (October 2025)
+### GPU acceleration (optional)
 
-Curcuma features an **automated parameter registry system** for all molecular modeling capabilities:
+One backend per build directory (`release_cuda/`, `release_rocm/`, `release_vulkan/`); the default build
+needs none of these. The backends are loaded at run time as plugins (`libcurcuma_{cuda,rocm,vulkan}.so`),
+so a CPU-only run does not touch them.
 
-- **Auto-generated help** directly from source code annotations
-- **Type-safe** parameter definitions with compile-time validation
-- **JSON export/import** for reproducible computational workflows
-- **Alias support** for multiple parameter names
-- **Build-time validation** detects duplicate or conflicting parameters
+- **CUDA** (`-DUSE_CUDA=ON`, run with `-gpu cuda`): NVIDIA CUDA toolkit (`nvcc`, cuSOLVER, cuBLAS, cudart). [docs/SQM_GPU.md](docs/SQM_GPU.md)
+- **ROCm / HIP** (`-DUSE_ROCM=ON -DCMAKE_PREFIX_PATH=/opt/rocm -DROCM_GPU_ARCH=gfxNNNN`): `hip-runtime-amd`, `rocm-llvm`, `rocm-device-libs`, `rocminfo`, `rocblas`, `rocsolver`. [docs/SQM_ROCM.md](docs/SQM_ROCM.md)
+- **Vulkan** (`-DUSE_VULKAN=ON`): `vulkan-icd-loader`, `vulkan-headers` and a driver with `shaderFloat64`; no ROCm needed on AMD. [docs/SQM_VULKAN.md](docs/SQM_VULKAN.md)
+- **Several GPUs**: `-gpu_device N` pins a run; batch runs spread over the visible devices (`-gpu_devices`, `-gpu_workers_per_device`); one large molecule can be split over several GPUs. [docs/MULTI_GPU.md](docs/MULTI_GPU.md), [docs/GPU_TUNING.md](docs/GPU_TUNING.md)
+- **Tuning**: every performance knob is a CLI flag; `python scripts/tuning_sweep.py mol.xyz --method gfn2 [--gpu cuda]` measures them on your machine and checks that no setting changes the energy.
 
-### For Users
-
-**Export default configuration:**
-```sh
-./curcuma -export-config analysis > my_analysis.json
-```
-
-**Modify and run with custom config:**
-```sh
-# Edit my_analysis.json with your preferred settings
-./curcuma -analysis input.xyz -import-config my_analysis.json
-```
-
-**List available modules:**
-```sh
-./curcuma -list-modules
-```
-
-**Capture and replay a full run (2026):** any registered parameter is reachable by its flat CLI name, and `-export_run` / `-import_config` form a round-trip. See [docs/CLI_ROUND_TRIP.md](docs/CLI_ROUND_TRIP.md).
-```sh
-./curcuma -sp water.xyz -method gfnff -cn_cutoff_bohr 5.5 -export_run run.json
-./curcuma -import_config run.json                       # replay
-./curcuma -import_config run.json -cn_cutoff_bohr 7.0   # replay with override
-```
-
-### For Developers
-
-All new capabilities must use the Parameter Registry System. See:
-- **Technical Documentation**: [docs/PARAMETER_SYSTEM.md](docs/PARAMETER_SYSTEM.md)
-- **Migration Guide**: [docs/PARAMETER_MIGRATION_GUIDE.md](docs/PARAMETER_MIGRATION_GUIDE.md)
-- **Reference Implementation**: `src/capabilities/analysis.h`
-
-**Quick Start for New Capabilities:**
-```cpp
-// In your capability header:
-#include "src/core/parameter_macros.h"
-
-class MyCapability : public CurcumaMethod {
-private:
-    BEGIN_PARAMETER_DEFINITION(my_capability)
-
-    PARAM(max_iterations, Int, 100,
-          "Maximum number of iterations",
-          "Algorithm",
-          {"max_iter"})
-
-    PARAM(output_file, String, "",
-          "Optional output file path",
-          "Output",
-          {"out"})
-
-    END_PARAMETER_DEFINITION
-};
-```
-
-Build system automatically extracts parameters and generates unified registry with validation and help.
-
-# Usage
-
-## General
-curcuma catches the Ctrl-C signals from the console if used on Linux platform. It will then create an empty file called "stop". Some methods, like **confscan**, regularly check for that file and finalise the current task. If Ctrl-C is signaled and a "stop" file already exists, curcuma will stop immediately.
-
-## RMSD Calculator 
-```sh
-curcuma -rmsd file1.xyz file2.xyz
-```
-Computes RMSD. If the two structures are ordered differently, curcuma will automatically reorder the atom list. To force reordering use
-```sh
-curcuma -rmsd file1.xyz file2.xyz -reorder
-```
-
-Two basic approaches are currently implemented, one incremental (testing many, but not all possible orders, parallelised) method without any requirements and another Kuhn-Munkres like approach. 
-The Kuhn-Munkres like approach needs a prior alignment (only cude) of the structures, which may be obtained using a smaller substructure (template). One way is to use a molecule in a supramolecular structure . Use
-```sh
--method template -fragment 1
-```
-to use the second structure, eg the one bound non-covalently by the first structure, as template. With this approach a much faster reordering is obtained. Omitting -fragment, curcuma tries using the smallest fragment.
-
-Alternatively, generate templates using the incremental approach. For this, all atoms of one element (nitrogen is the default) are used. After the templates are generated, the structures oriented according the templates are reordered using the Kuhn-Munkres like approach. Use
-```sh
--method hybrid -element 8
-```
-for taking oxygen as template.
- 
-Add
-```sh
--heavy
-```
-to perform calculation only on non-proton atoms.
-
-A new, and all previous published (and not yet published) methods was propsed Feb 2023 by Vásquez-Pérez and coworkers. It outperforms all methods so far (and sometimes the methods implemented in curcuma). 
-It can be obtained at [Github](https://github.com/qcuaeh/molalignlib) and included in curcuma for RMSD calculation conformational filtering.
-```sh
--reorder -method molalign -molalignbin /anypath/molalign
-```
-
-If the method was used, please cite the authors!
-[J. Chem. Inf. Model. 2023, 63, 4, 1157–1165](https://pubs.acs.org/doi/abs/10.1021/acs.jcim.2c01187)
-The method can be applied during confscan, however, problems with the random numbers occur during the test runs for larger problems, making the less ideal than the natively in curcuma implemented methods.
-```sh
--rmsdmethod molalign -molalignbin /anypath/molalign
-```
-
-```json
-{ "reorder", false },
-{ "check", false },
-{ "heavy", false },
-{ "fragment", -1 },
-{ "fragment_reference", -1 },
-{ "fragment_target", -1 },
-{ "init", -1 },
-{ "pt", 0 },
-{ "silent", false },
-{ "storage", 1.0 },
-{ "method", "incr" },
-{ "noreorder", false },
-{ "threads", 1 },
-{ "Element", 7 },
-{ "DynamicCenter", false },
-{ "order", "" },
-{ "check", false },
-{ "topo", 0 },
-{ "write", 0 },
-{ "moi", false },
-{ "update-rotation", false },
-{ "damping", 0.8 },
-{ "split", false },
-{ "nomunkres", false },
-{ "dmix", -1 },
-{ "molalignbin", "molalign" }
-```
-
-
-## Docking tool
-Some docking can be performed (WIP).
-
-Use
-```sh
-curcuma -dock -host A.xyz -guest B.xyz
-```
-to perform docking of B as guest and A as host molecule, use
-```sh
-curcuma -dock -complex AB.xyz
-```
-to perform docking on a complex or use
-```sh
-curcuma -dock -complex AB.xyz -guest C.xyz
-```
-to replace substrat structures in complex AB with C.
-
-
-Use
-```sh
-curcuma -dock -host A.xyz -guest B.xyz -Step_X X  -Step_Y Y -Step_Z Z
-```
-with X, Y and Z being the steps of rotation. With X = 10, 10 rotations with 360/X ° will be performed.
-
-Use
-```sh
-curcuma -dock -host A.xyz -guest B.xyz -Pos_X X  -Pos_X Y -Pos_X Z
-```
-with {X, Y, Z} being the initial anchor position for the substrat.
-
-After docking a PseudoFF optimisation of the docking position will be performed, where the Lennard-Jones-Potential between both structures is calculated. XTB is then used to preoptimise the unique docking structures and the results are filtered using ConfScan and the template based reordering approach.
-
-```json
-{ "Pos_X", 0.0 },
-{ "Pos_Y", 0.0 },
-{ "Pos_Z", 0.0 },
-{ "AutoPos", true },
-{ "Filter", true },
-{ "PostOpt", true },
-{ "Step_X", 10 },
-{ "Step_Y", 10 },
-{ "Step_z", 10 },
-{ "Host", "none" },
-{ "Guest", "none" },
-{ "Complex", "none" },
-{ "scaling", 1.5 },
-{ "NoOpt", false },
-{ "CentroidMaxDistance", 1e5 },
-{ "CentroidTolDis", 1e-1 },
-{ "RotationTolDis", 1e-1 },
-{ "Threads", 1 },
-{ "DockingThreads", 1 },
-{ "Charge", 0 },
-{ "Cycles", 1 },
-{ "RMSDMethod", "incr" },
-{ "RMSDThreads", 1 },
-{ "RMSDElement", 7 }
-```
-
-
-
-## Conformation Filter
-Curcuma has some conformation filter based on energy, rmsd, rotation constants and rank limitation. As some structures may be identic, yet can not be aligned due to atom ordering, depending on the difference of the energy and rotational constants and the rmsd, automatic reordering in rmsd calculation will be performed.
-
-Use
-```sh
-curcuma -confscan conformation.xyz
-```
-to simple filter the conformation. The results will be stored in an additional xyz file.
-
-Use
-```sh
-curcuma -confscan conformation.xyz -MaxHTopoDiff 0
-```
-to ensure, that even the rmsd is smaller than the threshold, the second molecule is only rejected if there is no difference in the hydrogen bond pattern. Set to ***-MaxHTopoDiff 2*** if two two changes are allowed. A detailed description will follow some time.
-```sh
-curcuma -confscan conformation.xyz -reorder
-```
-to force reordering for every rmsd calculation.
-
-Add
-```sh
--heavy
-```
-to perform rmsd calculation and reordering only on non-proton atoms. Reordering is much faster then!
-
-Adding
-```sh
--RMSDmethod template
-```
-the template based reordering is used, **hybrid** is also working.
-
-With
-```sh
--Useorders X
-```
-up to X reorder results will be reused from the last reorder calculation. Template based approaches result in only one reorder rule, however X is set to 0 in automatically, but can be changed with that argument.
-
-By adding the argument
-```sh
--accepted accepted.xyz
-```
-a file with already accepted structures can be passed to curcuma. Molecules in that file (accepted.xyz) will be rejected if they appear in the conformation.xyz, thus several files with conformation can be joined.
-
-Confscan will write a restart file, finalise and quit, if a file called "stop" is found in the working directory. Such file will be generated if Ctrl-C is hit or if it is created using for example the **touch stop** command.
-Within a restart file, the last energy difference and the atom indicies from reordering are stored. A restart file will automatically be read upon the start of curcuma. The content of the restart file will be used to speed up the 2nd step of the conformation filtering procedure.
-
-Confscan supports the molalign tool. However, as too often reordering with molalign is not working, it can efficiently be used if the RMSD is only slightly above the threshold. 
-```sh
--domolalign 1.1
-```
-Sets the threshold to 1.1*RMSDthreshold. If the molecule was accepted as to different, but the RMSD is blow 1.1*RMSDthreshold molalign will check too.
-
-Confscan write a statistic file, where for each rejected molecule the reference alongside the energy difference and the RMSD is printed out. Furthermore, the reordered indices are given, if available. Molalign does not return the reordered indices, hence they are empty or marked **0,0** if the reordered was finally performed using molalign in a standard run.
-
-```json
-{ "noname", true },
-{ "restart", true },
-{ "heavy", false },
-{ "rmsd", -1 },
-{ "rank", -1 },
-{ "writeXYZ", false },
-{ "forceReorder", false },
-{ "check", false },
-{ "energy", 1.0 },
-{ "maxenergy", -1.0 },
-{ "preventreorder", false },
-{ "scaleLoose", 1.5 },
-{ "scaleTight", 0.1 },
-{ "scaleLooseEnergy", 1.2 },
-{ "scaleTightEnergy", 0.1 },
-{ "scaleLooseRotational", 1.2 },
-{ "scaleTightRotational", 0.1 },
-{ "scaleLooseRipser", 1.2 },
-{ "scaleTightRipser", 0.1 },
-{ "skip", 0 },
-{ "allxyz", false },
-{ "update", false },
-{ "MaxParam", -1 },
-{ "UseOrders", -1 },
-{ "RMSDMethod", "hybrid" },
-{ "MaxHTopoDiff", -1 },
-{ "threads", 1 },
-{ "RMSDElement", 7 },
-{ "accepted", "" },
-{ "method", "" },
-{ "lastdE", -1 },
-{ "fewerFile", false },
-{ "dothird", true },
-{ "skipfirst", false },
-{ "ignoreRotation", false },
-{ "ignoreBarCode", false },
-{ "skipless", false },
-{ "looseThresh", 7 },
-{ "tightThresh", 3 },
-{ "update-rotation", false },
-{ "damping", 0.8 },
-{ "split", false },
-{ "writefiles", false },
-{ "nomunkres", false },
-{ "molalignbin", "molalign" },
-{ "ripser_xmax", 4 },
-{ "ripser_xmin", 0 },
-{ "ripser_ymax", 4 },
-{ "ripser_ymin", 0 },
-{ "ripser_bins", 10 },
-{ "ripser_scaling", 0.1 },
-{ "ripser_stdx", 10 },
-{ "ripser_stdy", 10 },
-{ "ripser_ratio", 1 },
-{ "ripser_dimension", 2 },
-{ "domolalign", -1 }
-```
-
-```cpp
-/* rotational = 1
- * ripser     = 2
- * energy     = 4 */
-int looseThresh = 1 * (diff_rot < m_diff_rot_threshold_loose) + 2 * (diff < m_diff_ripser_threshold_loose) + 4 * (std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_diff_energy_threshold_loose);
-if ((looseThresh & m_looseThresh) == m_looseThresh) 
-{
-
-}
-```
-## Find unique structures in trajectories
-xyz and trj are handled equally.
-```sh
-curcuma -rmsdtraj XXX.trj -writeUnique -rmsd 1.5
-```
-
-
-```json
-{ "writeUnique", false },
-{ "writeAligned", false },
-{ "rmsd", 1.5 },
-{ "fragment", -1 },
-{ "reference", "none" },
-{ "second", "none" },
-{ "heavy", false },
-{ "pcafile", false },
-{ "allxyz", false },
-{ "RefFirst", false },
-{ "noreorder", true },
-{ "opt", false },
-{ "filter", false },
-{ "writeRMSD", true },
-{ "offset", 0 }
-```
-
-## Geometry optimisation (batch mode possible)
-Geometry optimisation can be performed with curcuma using 
-```sh
-curcuma -opt XXX.xyz
-```
-A file called XXX.opt.xyz with the optimised structures will be written. The individual steps are stored in XXX.trj.xyz. The number of threads can be controlled with
-```sh
--threads X
-```
-
-```json
-{ "writeXYZ", true },
-{ "printOutput", true },
-{ "dE", 0.1 },
-{ "dRMSD", 0.01 },
-{ "method", "uff" },
-{ "MaxIter", 5000 },
-{ "LBFGS_eps", 1e-5 },
-{ "StoreIntermediate", 2000 },
-{ "SingleStep", 20 },
-{ "ConvCount", 11 },
-{ "GradNorm", 0.001 },
-{ "Threads", 1 },
-{ "Charge", 0 },
-{ "Spin", 0 },
-{ "SinglePoint", false },
-{ "optH", false },
-{ "serial", false }
-```
-
-
-```cpp
-/*
- * Energy = 1
- * RMSD = 2
- * LBFGS Conv = 4
- * Gradient Norm = 8
- * */
-converged = 1 * (abs(fun.m_energy - final_energy) * 2625.5 < dE)
-    + 2 * (driver->RMSD() < dRMSD)
-    + 4 * (solver.isConverged())
-    + 8 * (solver.final_grad_norm() < GradNorm);
-perform_optimisation = (converged != ConvCount) && (fun.isError() == 0);
-}
-
-## Reorder and Align trajectories
-To reorder trajectory files with dissordered atomic indicies, for example after merging several minimum energy path files from NEB calculation, use
-```sh
-curcuma -rmsdtraj XXX.xyz -writeAligned
-```
-Reordering will be done with respect to the previouse structure in the trajectory. If the first structure should be used, add ***-reffirst*** as additional argument. The new trajectory is called XXX_aligned.xyz.
-
-Using ***-rmsdtraj*** argument, a file **XXX_rmsd.dat** will be written, where the rmsd is stored.
-
-## Distance and angle calculation
+## Using curcuma
 
 ```sh
-curcuma -distance XXX.trj atom1 atom2
+curcuma -sp water.xyz                       # single point, default method gfnff
+curcuma -sp water.xyz -method gfn2          # accurate native GFN2-xTB
+curcuma -opt water.xyz -method gfn2         # geometry optimisation
+curcuma -hessian water.xyz -method gfn2     # frequencies
+curcuma -md water.xyz -method gfnff         # molecular dynamics
+curcuma -rmsd a.xyz b.xyz                   # RMSD (reorders atoms if needed)
+curcuma -confsearch mol.xyz -md_method gfnff -opt_method gfn2
 ```
 
+### Getting help
+
+| Command | Output |
+|---|---|
+| `curcuma -help` | all capabilities by category |
+| `curcuma -help <category>` | detailed help of one category (e.g. `optimization`, `dynamics`) |
+| `curcuma -methods` | methods available in this build, GPU devices |
+| `curcuma -list-modules` | modules with their parameter counts |
+| `curcuma -help-module <module>` | every parameter of a module with type, default and description (e.g. `gfnff`) |
+| `curcuma -export-config <module>` | the module's defaults as JSON |
+
+The help text and the exported defaults come from the parameter definitions in the source, so they
+describe the installed binary. The per-tool notes for RMSD, docking, ConfScan, trajectories,
+optimisation, MD and ConfSearch (examples, options, convergence rules) are in
+[docs/USAGE_TOOLS.md](docs/USAGE_TOOLS.md); its parameter lists date from 2025.
+
+### Parameters, JSON, reproducible runs
+
+Any parameter can be given as a flat flag (`-cn_cutoff_bohr 5.5`) or scoped (`-gfnff.cn_cutoff_bohr 5.5`).
+`-export-config <module>` prints a module's defaults as JSON to the standard output (the program banner
+precedes the JSON in the build checked on 2026-10-01, so remove the lines before the first `{` when saving it).
+
+A complete run, with the resolved parameters, can be captured and replayed
+([docs/CLI_ROUND_TRIP.md](docs/CLI_ROUND_TRIP.md)):
+
 ```sh
-curcuma -angle XXX.trj atom1 atom2 atom3
+curcuma -sp water.xyz -method gfnff -cn_cutoff_bohr 5.5 -export_run run.json
+curcuma -import_config run.json                       # replay
+curcuma -import_config run.json -cn_cutoff_bohr 7.0   # replay with override
 ```
 
-The index starts with 1. Using grep and sed via ***|grep '::' |sed 's/:://g'*** omitts unused output.
+### Output directories (BMT)
 
-## Compare two RDG vs sign(λ<sub>2</sub>)ρ plots 
-Using 
-```sh
-curcuma -nci file1.dat file2.dat
-```
-one can ''remove'' RDG vs sign(λ<sub>2</sub>)ρ points which occur in both plots (file1.dat and file2.dat). The similarity of two points is set to true, if the distance is below a threshold distance, which is defined by the averaged distance of two adjacent points.
-
-## Molecular Dynamics and Metadynamics
-Curcuma has now a Molecular Dynamics modul, which can be used with:
-```sh
-curcuma -md input.xyz
-```
-
-### Possible options
-```json
-{ "writeXYZ", true },
-{ "printOutput", true },
-{ "MaxTime", 5000 },
-{ "T", 298.15 },
-{ "dt", 1 }, // single step in fs
-{ "rm_COM", 100 }, // remove translation and rotation every x fs
-{ "charge", 0 },
-{ "Spin", 0 },
-{ "rmrottrans", 0 },
-{ "nocenter", false },
-{ "dump", 50 },
-{ "print", 1000 },
-{ "unique", false },
-{ "rmsd", 1.5 },
-{ "opt", false },
-{ "hmass", 1 },
-{ "velo", 1 },
-{ "rescue", false },
-{ "coupling", 10 },
-{ "MaxTopoDiff", 15 },
-{ "impuls", 0 },
-{ "method", "uff" },
-{ "impuls_scaling", 0.75 },
-{ "writeinit", false },
-{ "initfile", "none" },
-{ "norestart", false },
-{ "writerestart", 1000 },
-{ "rattle", false },
-{ "rattle_tolerance", 1e-6 },
-{ "rattle_maxiter", 10 },
-{ "thermostat", "csvr" },
-{ "respa", 1 },
-{ "dipole", false },
-{ "seed", 1 },
-{ "cleanenergy", false },
-{ "wall", "none" }, // can be spheric or rect
-{ "wall_type", "logfermi" }, // can be logfermi or harmonic
-{ "wall_spheric_radius", 0 },
-{ "wall_xl", 0 },
-{ "wall_yl", 0 },
-{ "wall_zl", 0 },
-{ "wall_x_min", 0 },
-{ "wall_x_max", 0 },
-{ "wall_y_min", 0 },
-{ "wall_y_max", 0 },
-{ "wall_z_min", 0 },
-{ "wall_z_max", 0 },
-{ "wall_temp", 298.15 },
-{ "wall_beta", 6 },
-{ "mtd", false },
-{ "plumed", "plumed.dat" }
-```
-
-For example, using 
-```sh
-curcuma -md input.xyz -method gfnff
-``` 
-the GFN-FF approach will be used.
-
-```sh
-curcuma -md input.xyz -method gfnff -T 500  -berendson 200 -dt 1 -hmass 1 -thermostat_steps 400 -velo 4 -maxtime 2e4 -dt 0.5 -impuls 500 -impuls_scaling 0.75
-``` 
-will perform some kind of conformational search using GFN-FF. Results are stored in **input.unique.xyz**! Repeating it will result in other conformations and the previous results stored in **input.unique.xyz** will be overwritten. Bonds may break from time to time ...
-
-Rattle can be used to constrain (currently) all bonds, allowing larger time steps for integration. Up to 8 fs might be possible.
-```sh
-curcuma -md input.xyz -rattle -dt 4
-``` 
-
-The MD implementation integrates well into curcuma, hence calculation can be stopped with Ctrl-C (or a "stop" file) and will be resumed (velocities and geometries are stored) if a restart file is found.
-
-The thermostat target temperature can follow a multi-stage **ramp** and individual atom subsets can be thermostatted as separate **regions**:
-```sh
-curcuma -md input.xyz -method gfnff -temperature 300 -temp_ramp true -temp_schedule "600:steps:5000;300:reach:10"
-```
-See [docs/TEMPERATURE_RAMP.md](docs/TEMPERATURE_RAMP.md) for the schedule grammar (`steps`/`reach`), the `temp_regions` JSON array, live temperature control, and per-thermostat support.
-
-On a large solvated system the default 1 fs step can be too long for a momentarily compressed X-H
-bond, and a single such step heats the whole trajectory. Instead of lowering `-dt` or raising the
-hydrogen mass for the whole run, the integrator can redo just that step with a subdivided one:
-```sh
-curcuma -md input.xyz -method gfnff -dt 1.0 -adaptive_step true
-```
-It is off by default and adds no constraint and no mass modification. Two things are watched: the
-total energy of the step, and - because that one loses its contrast as the system grows, while a
-violating step stays on a handful of atoms - the kinetic energy of the **hottest atom relative to
-the per-atom mean**. On a 7320-atom solvated polymer over 300 fs the second channel is what works:
-+67.59 Eh and 2175 K become **+0.53 Eh and 246 K**, and 92 of the 104 rejected steps were ones the
-energy criterion accepted. See [docs/MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md) for the
-mechanism (one water molecule collapsing), the calibration tables and what it does not do.
-
-With
-```sh
-curcuma -md input.xyz -mtd
-``` 
-a metadynamics simulation can be performed using plumed. It is a ***plumed.dat*** expected, or can be set with
-```sh
-curcuma -md input.xyz -mtd -plumed plumed.dat
-```
-
-See [docs/PLUMED_HELP.md](docs/PLUMED_HELP.md) for the full PLUMED integration guide (unit conversions, output files, available CVs, thermal equilibration gate, internal RMSD-MTD).
-
-## Conformational Search (dual-method)
-
-The MD-driven conformational search (`-confsearch`) can explore with a cheap method and refine/rank the discovered conformers with a more accurate one:
-
-```sh
-curcuma -confsearch input.xyz -md_method gfnff -opt_method gfn2
-```
-
-`-md_method` runs the MD exploration and the pre-optimization; `-opt_method` runs the per-cycle accurate re-optimization and the final ranking. Both fall back to `-method` when unset, so `curcuma -confsearch input.xyz -method gfnff` keeps the single-method behaviour. See [docs/CONFSEARCH_DUAL_METHOD.md](docs/CONFSEARCH_DUAL_METHOD.md).
-
-The search is **restartable** with `-restart`: a self-contained checkpoint (bias pool, cumulative conformers, seeds, energies, schedule position) is written after every MD phase and every temperature cycle, into the BMT dir and copied back to the start directory. Re-running the same command with `-restart` resumes from it (kill the process to interrupt; the checkpoint persists). See [docs/CONFSEARCH_RESTART.md](docs/CONFSEARCH_RESTART.md).
-
-## Output Directory System (BMT)
-
-By default, all curcuma commands create a **Basename.Method.Timestamp** directory for their output files. For example:
-
-```sh
-curcuma -md water.xyz -method gfnff
-# Output goes to: water.md.20260609_143052/
-```
-
-The BMT directory contains all trajectory files, restart data, and a `metadata.json` file with calculation details (basename, method, timestamp, input file). This keeps the working directory clean and makes it easy to compare runs.
-
-To copy specific files back to the working directory after the calculation finishes, use the `-bak` flag:
+Every command writes into a directory named `Basename.Method.Timestamp`, for example
+`water.opt.20261001_091303/`, with the output files and a `metadata.json`. `-bak FILE` copies a file back
+to the working directory, `-no_bmt` writes into the working directory.
 
 ```sh
 curcuma -opt water.xyz -method gfnff -bak water.opt.xyz
-# water.opt.xyz is copied from the BMT directory to the working directory
 ```
 
-Multiple files can be specified: `-bak water.opt.xyz -bak water.trj.xyz`.
+### Stopping a run
 
-To disable BMT and write output to the working directory (legacy behavior):
+On Linux, Ctrl-C makes curcuma create an empty file `stop`. ConfScan and MD check for it,
+write a restart file and finish. A second Ctrl-C while `stop` exists ends the program at once.
+
+### More
+
+[docs/](docs/) holds one document per feature: the SCF modes ([docs/SCF_MODES.md](docs/SCF_MODES.md)),
+solvation ([docs/SOLVATION.md](docs/SOLVATION.md)), temperature ramps
+([docs/TEMPERATURE_RAMP.md](docs/TEMPERATURE_RAMP.md)), large-system MD
+([docs/MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md)), PLUMED ([docs/PLUMED_HELP.md](docs/PLUMED_HELP.md)),
+reactive GFN-FF MD ([docs/GFNFF_REACT_TOPOLOGY.md](docs/GFNFF_REACT_TOPOLOGY.md), experimental), benchmark
+sets ([docs/TESTSET_RETRIEVAL.md](docs/TESTSET_RETRIEVAL.md)). Method status paragraphs that used to stand in
+this README are in [docs/README_METHOD_NOTES_2026.md](docs/README_METHOD_NOTES_2026.md).
+
+## For developers
+
+New capabilities define their parameters with the Parameter Registry (`BEGIN_PARAMETER_DEFINITION` /
+`PARAM` in the capability header); the build extracts them into the help, the JSON export and the
+validation. See [docs/PARAMETER_SYSTEM.md](docs/PARAMETER_SYSTEM.md),
+[docs/archive/PARAMETER_MIGRATION_GUIDE.md](docs/archive/PARAMETER_MIGRATION_GUIDE.md) and the reference
+implementation `src/capabilities/analysis.h`. Each source directory has a `CLAUDE.md` with its design notes;
+the root [CLAUDE.md](CLAUDE.md) holds the project rules, the open items and the validation traps, and
+[docs/KNOWN_ISSUES_ARCHIVE.md](docs/KNOWN_ISSUES_ARCHIVE.md) the bug and validation history.
 
 ```sh
-curcuma -md input.xyz -method uff -no_bmt
+cd build && ctest --output-on-failure    # test suite
 ```
 
-# Funding
-The development of curcuma is funded by:
+## Please cite
 
--   2026 Stiftung Innovation in der Hochschullehre
+Software: [conradhuebler/curcuma, Zenodo](https://doi.org/10.5281/zenodo.4302722).
+For the conformer filter (`-confscan`): C. Hübler, *A conformational filter protocol for structures with topological symmetry*, ChemRxiv preprint (2026), [doi:10.26434/chemrxiv.15009180/v1](https://chemrxiv.org/doi/full/10.26434/chemrxiv.15009180/v1).
+Please also cite the methods and programs you use; the most recent information is on their project pages.
+
+- UFF: A. K. Rappe et al., J. Am. Chem. Soc. 114 (1992) 10024-10035. With the H4 hydrogen-bond correction (J. Chem. Theory Comput. 8, 141-151 (2012)), same parameters as for PM6-D3 for now.
+- GFN-FF: S. Spicher and S. Grimme, Angew. Chem. Int. Ed. 59 (2020) 15665. DOI: 10.1002/anie.202004239
+- GFN1-xTB: S. Grimme, C. Bannwarth and P. Shushkov, J. Chem. Theory Comput. 13 (2017) 1989.
+- GFN2-xTB: C. Bannwarth, S. Ehlert and S. Grimme, J. Chem. Theory Comput. 15 (2019) 1652.
+- D3: J. Chem. Phys. 132, 154104 (2010), https://doi.org/10.1063/1.3382344
+- D4: E. Caldeweyher et al., J. Chem. Phys. 147 (2017) 034112, DOI: 10.1063/1.4993215; J. Chem. Phys. 150 (2019) 154122, DOI: 10.1063/1.5090222
+- Atom reordering with molalign (optional, `-reorder -method molalign -molalignbin PATH`): [J. Chem. Inf. Model. 2023, 63, 4, 1157-1165](https://pubs.acs.org/doi/abs/10.1021/acs.jcim.2c01187)
+
+Curcuma prints the references for the methods used in a run and writes them to `curcuma_citations.bib`.
+
+## Funding
+
+The development of curcuma is funded by 2026 Stiftung Innovation in der Hochschullehre.
 
 ![STIL Logo](https://github.com/conradhuebler/curcuma/raw/master/STIL_Funding.jpg)
-
-
-# Citation
-Please cite the software package if you obtain results:
-[conradhuebler/curcuma: Curcuma Zenodo Citation](https://doi.org/10.5281/zenodo.4302722)
-
-Have a lot of fun!

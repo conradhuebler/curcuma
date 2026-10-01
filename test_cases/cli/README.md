@@ -188,7 +188,7 @@ All CLI tests must pass for CI to succeed.
 ## References
 
 - **Test Plans:** `testing_plan_*.md` files in project root
-- **Overview:** `testing_plan_overview.md`
+- **Overview:** `docs/archive/testing_plan_overview.md`
 - **Parameter System:** `docs/PARAMETER_SYSTEM.md`
 
 ## Future Work

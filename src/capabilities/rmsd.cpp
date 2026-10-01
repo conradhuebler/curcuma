@@ -1034,6 +1034,9 @@ std::pair<Molecule, LimitedStorage> RMSDDriver::InitialisePair()
 
 void RMSDDriver::ReorderMolecule()
 {
+    // Claude Generated (Oct 2026): every atom permutation (also inside ConfScan) cites the filter protocol paper
+    CitationRegistry::cite("confscan");
+
     auto R = GetOperateVectors(m_reference, m_target);
     Eigen::Matrix3d rotation = R.first;
 

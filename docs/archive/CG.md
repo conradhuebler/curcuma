@@ -1,3 +1,18 @@
+> **Stand der Pruefung gegen den Code (2026-10-01).** Dieses Dokument ist der Implementierungsplan von
+> Oktober 2025; die Statusangaben darin sind veraltet.
+> - **Phase 1-4 vorhanden**: `CG_ELEMENT = 226` (`src/tools/formats.h`), `Molecule::isCGSystem/hasMixedSystem/getCGAtoms/getAtomicAtoms`,
+>   `WriteVTF`/`WriteVTFTrajectory` (`src/tools/formats.h`), `ForceField::generateCGParameters` (`forcefield.cpp`),
+>   `cg_potentials.cpp`. `test_cg_potentials` wird gebaut (`test_cases/CMakeLists.txt`), ein ctest-Eintrag dafuer wurde nicht gefunden.
+> - **Phase 5 ("NEXT") ist umgesetzt**: `SimpleMD` erkennt reine CG-Systeme, setzt den 10fachen Zeitschritt
+>   (`m_cg_timestep_factor`, `simplemd.cpp`), wendet PBC an (`applyPeriodicBoundaryConditions`); ctest `cli_simplemd_08_cg_spheres` besteht.
+> - **Die Energieauswertung laeuft seit Sep 2026 auf der Workspace-Engine** (`ff_workspace_cg.cpp`, `docs/CLEANUP_2026_09.md`), nicht mehr auf
+>   dem hier beschriebenen ForceField-Pfad. Parameter kommen ueber `-load_ff_json FILE` (`cg_default`, `cg_per_atom`, `pair_interactions`, `bonds`).
+> - **Beispielaufrufe im Abschnitt "Usage Examples" funktionieren nicht mehr**: `-config` ist nicht mehr der Schalter, und
+>   `-sp test_cases/cg/simple_beads.vtf -method cg -load_ff_json test_cases/cg/cg_params.json` endet mit "Failed to initialize ForceField engine".
+>   Funktionierend (geprueft): `curcuma -sp input.xyz -method cg -load_ff_json cg_params.json` mit Element-226-XYZ aus `test_cases/cli/simplemd/08_cg_spheres/`
+>   (Energie 0.40328774 Eh). Ursache des VTF-Fehlers nicht untersucht.
+> - **Phase 6 (Ellipsoide)** wurde nicht geprueft; laut `docs/CLEANUP_2026_09.md` hat der Ellipsoid-Gradient nur Finite Differenzen.
+
 Curcuma Coarse Graining Implementation Plan
 
   🎯 Überblick

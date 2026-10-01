@@ -1,5 +1,12 @@
 # Curcuma Universal Logging System
 
+> Checked against `src/core/curcuma_logger.{h,cpp}` on 2026-10-01: the function table below was corrected
+> (`result()` and `debug()` were missing, `energy_abs()` prints from Level 1, `citation()` is not gated by the
+> level). Not checked: the per-module content lists, and the synchronisation of external library verbosity.
+> Level 4 and above are not implemented. The logger's static default is Level 1; `CurcumaLogger::initialize()`
+> takes a default argument of 2. The verbosity is a shared static, see Known Issue #3 in
+> [KNOWN_ISSUES_ARCHIVE.md](KNOWN_ISSUES_ARCHIVE.md).
+
 ## Overview
 
 All computational modules in Curcuma follow a standardized verbosity system using `CurcumaLogger`. This ensures consistent output behavior across the entire codebase and supports different use cases from automated scripting to educational exploration.
@@ -22,7 +29,7 @@ All computational modules in Curcuma follow a standardized verbosity system usin
   - Method selection and basic settings
   - Convergence status
   - Critical warnings and information
-- **Logger Functions**: `error()`, `warn()`, `success()`
+- **Logger Functions**: `error()`, `warn()`, `success()`, `result()`, `energy_abs()`
 - **Use Cases**: Normal interactive use, standard calculations
 
 ### **Level 2: Scientific Analysis (Educational)**
@@ -34,7 +41,7 @@ All computational modules in Curcuma follow a standardized verbosity system usin
   - Intermediate scientific results (HOMO/LUMO, energy components)
   - Method comparisons and analysis
   - Performance timing for optimization
-- **Logger Functions**: `error()`, `warn()`, `success()`, `info()`, `param()`, `citation()`
+- **Logger Functions**: all of Level 1, plus `info()`, `param()`
 - **Use Cases**: Learning, research, method development
 
 ### **Level 3: Full Debug**
@@ -65,10 +72,12 @@ All computational modules in Curcuma follow a standardized verbosity system usin
 | `error()` | Always | Red | Critical errors (always visible) |
 | `warn()` | ≥1 | Orange | Important warnings |
 | `success()` | ≥1 | Green | Successful completion messages |
+| `result()` | ≥1 | White | Neutral reporting of scientific results |
 | `info()` | ≥2 | Default | Educational/scientific information |
 | `param()` | ≥2 | Blue | Structured parameter output |
-| `energy_abs()` | ≥2 | Default | Energy values with appropriate units |
-| `citation()` | ≥2 | Green | Scientific references and citations |
+| `energy_abs()` | ≥1 | Default | Energy values with appropriate units |
+| `citation()` | any | Green | Registers a reference (`CitationRegistry`); all collected references are printed at program end regardless of verbosity, and written to `curcuma_citations.bib` |
+| `debug(level, msg)` | compile-time threshold | | Debug output; shown for `level <= 2` (`CURCUMA_DEBUG_LEVEL` in `global_config.h`) |
 
 ## Implementation Guidelines
 

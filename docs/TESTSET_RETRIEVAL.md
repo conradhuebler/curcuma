@@ -56,7 +56,7 @@ Output: `test_cases/GMTKN55-testset/_run/gmtkn55_{results,summary}_<method>.csv|
 in `_run/energies.json` so `--subset`/`--limit` reruns and a resumed full sweep
 never recompute.
 
-**Open-shell limitation (verified Sep 2026, see CLAUDE.md Known Issues #9)**:
+**Open-shell limitation (verified Sep 2026, see KNOWN_ISSUES_ARCHIVE.md Known Issues #9)**:
 native `-sp` has no working path to request UHF occupation for gfn1/gfn2 -
 `-spin N` sets inert `Molecule` metadata that no `energy_calculators/` code
 reads. `gmtkn55_compare.py` therefore skips every structure with a nonzero
@@ -67,7 +67,7 @@ gfnff is unaffected (no explicit open-shell term) and runs everything.
 **Results (full sweep, Sep 2026)**: gfn2 MAD 0.000 / gfn1 MAD 0.047 / gfnff
 MAD 19.98 kcal/mol vs xtb. The GFN-FF number is dominated by a found bug -
 native GFN-FF returns exactly 0.0 Eh for any single free atom (missing EEQ
-self-energy, see CLAUDE.md Known Issues #8); excluding those 107 structures
+self-energy, see KNOWN_ISSUES_ARCHIVE.md Known Issues #8); excluding those 107 structures
 GFN-FF MAD drops to 3.54 kcal/mol. Full analysis, per-subset breakdown and
 outlier categories: [docs/GMTKN55_VALIDATION.md](GMTKN55_VALIDATION.md).
 

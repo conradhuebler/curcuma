@@ -392,7 +392,7 @@ load-bearing part.
 
 **Original issue**: Dispersion GradComp fails on large molecules (triose 2.1e-4, complex 4.1e-4, polymer 4.9e-4 vs tol 1e-4), attributed to √N accumulation of small per-pair C6/CN parameter differences.
 
-**Re-verified Sep 2026** (`test_gfnff_validation` on the current committed references, `ctest -R gfnff_val_{polymer,complex,triose}`): dispersion GradComp max_err is now **7.5e-9 (triose), 8.9e-9 (complex), 9.9e-9 (polymer)** — five orders of magnitude under the old values and the 1e-4 tolerance, and every other component (Bond/Angle/Torsion/Repulsion/Coulomb/HBond) passes with similar margin. The √N precision limit described above no longer reproduces; likely fixed incidentally by later D3/D4 precision work (e.g. the C6/CN reference-table and CN-cutoff fixes in CLAUDE.md Known Issues #5) without this doc being updated at the time.
+**Re-verified Sep 2026** (`test_gfnff_validation` on the current committed references, `ctest -R gfnff_val_{polymer,complex,triose}`): dispersion GradComp max_err is now **7.5e-9 (triose), 8.9e-9 (complex), 9.9e-9 (polymer)** — five orders of magnitude under the old values and the 1e-4 tolerance, and every other component (Bond/Angle/Torsion/Repulsion/Coulomb/HBond) passes with similar margin. The √N precision limit described above no longer reproduces; likely fixed incidentally by later D3/D4 precision work (e.g. the C6/CN reference-table and CN-cutoff fixes in KNOWN_ISSUES_ARCHIVE.md Known Issues #5) without this doc being updated at the time.
 - **Status**: RESOLVED - no longer a caveat for large-system dispersion gradients.
 
 ### Coulomb Precision Limit on Complex (Mar 12, 2026) - ACCEPTED

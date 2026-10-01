@@ -504,7 +504,7 @@ EOF
 ### Curcuma-spezifische Dokumentation
 
 - **Parameter-Details**: `PARAMETER_MIGRATION_GUIDE.md`
-- **CG-Systeme**: `CG.md`
+- **CG-Systeme**: `docs/archive/CG.md` (Plan von 2025, Stand dort vermerkt)
 - **Entwicklung**: `CLAUDE.md`
 
 ---
