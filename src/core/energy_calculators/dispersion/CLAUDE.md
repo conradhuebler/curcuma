@@ -26,7 +26,7 @@ energy/gradient kernel (`curcuma::dispersion::D4Evaluator`). Native D3 lives in
 | Native GFN1 | `D3ParameterGenerator::createForGFN1()` (D3, not D4) | 1.0 | 2.4 | 0.63 | 5.00 | none |
 
 - GFN2 couples D4 self-consistently: `XTB::addDispersionPotential` adds `dE_D4/dq` each SCF iteration; the reference build runs once per geometry (`m_d4_prepared`, reset in `XTB::Calculation`)
-- GFN2 GPU D4 runs in the backend contexts (`xtb_gpu_context.cu`, `xtb_hip_context.hip`, Vulkan), not through `D4Evaluator::launchGpuKernel()`, which is an empty, uncalled hook
+- GFN2 GPU D4 runs in the backend contexts (`xtb_gpu_context.cu`, `xtb_hip_context.hip`, Vulkan), not through `D4Evaluator` (its empty `launchGpuKernel()` hook was removed on 2026-10-01)
 - `-d4_charge_source` (GFN2, `xtb` scope): `mulliken` default (variational response), `eeq` (single-shot EEQ), `cpscf` (explicit Z-vector); see [docs/D4_Q_RESPONSE.md](../../../../docs/D4_Q_RESPONSE.md)
 - GFN-FF uses `zetac6` from topology charges as a fixed per-pair prefactor (no `dq/dx` term)
 

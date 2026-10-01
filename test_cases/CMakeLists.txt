@@ -104,6 +104,7 @@ add_executable(test_cg_potentials
         test_cg_potentials.cpp)
 
 target_link_libraries(test_cg_potentials curcuma_core)
+add_test(NAME cg_potentials COMMAND test_cg_potentials)
 
 if(USE_PCH)
         target_precompile_headers(test_cg_potentials REUSE_FROM curcuma_core)

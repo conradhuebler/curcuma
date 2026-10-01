@@ -11,8 +11,7 @@ Python re-implementations of GFN-FF terms. None of them is registered in `ctest`
 | `parallel_scf.cpp` | `parallel_scf` | always; times `ParallelEigenSolver` on a 4000x4000 matrix |
 | `ulysses_helper.cpp` | `ulysses_helper` | `USE_ULYSSES` (no `HELPERS` gate) |
 | `xtb_helper.cpp`, `tblite_helper.cpp`, `gfnff_helper.cpp`, `dftd3_helper.cpp`, `dftd4_helper.cpp` | same name | `HELPERS` plus `USE_XTB` / `USE_TBLITE` / `USE_GFNFF` / `USE_D3` / `USE_D4` |
-| `cli_test.cpp` | `cli_helper` | never: target commented out, includes the header cli_parser.h, which no longer exists in src/tools |
-| `gfnff_test.cpp` | none | never: includes the header gfnff.h, which no longer exists in qm_methods |
+| (removed 2026-10-01) | | cli_test.cpp and gfnff_test.cpp included headers that no longer exist and had no target |
 | `imagewrite.cpp`, `storage_bench.cpp`, `polymer_topo.cpp`, `gfnff_term_validator.cpp` | none | never; standalone `main()` programs (Eigen image writer, parameter-lookup storage benchmark, matrix topology analysis, GFN-FF term check) |
 | `gfnff_reference_validator.py`, `gfnff_term_validator.py`, `validate_ch3oh.py` | - | Python scripts re-implementing GFN-FF formulas from the Fortran reference |
 

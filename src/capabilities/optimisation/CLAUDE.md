@@ -7,7 +7,7 @@ belong to `OptimizerDriver` ([../CLAUDE.md](../CLAUDE.md)). Educational-first: k
 
 - `lbfgs.*`: class `LBFGS` (all three methods), driven by `NativeLBFGS/DIIS/RFOAdapter` in `../native_optimizer_adapters.*`
 - `rf_solver.*`: `RFSolver::calculateRFStep()` (Lanczos if nvar+1 >= 50, else dense), `lanczosLowestEigenpair()`; used by `RFOStep()` and ANCOpt
-- `modern_optimizer_simple.*`: not compiled, included nowhere; its `modern_optimizer` PARAM block still enters the registry
+- `modern_optimizer_simple.*` was removed on 2026-10-01 (not compiled, included nowhere); its `modern_optimizer` PARAM module (11 parameters) left the registry with it. `main.cpp` still lists `modern_optimizer` among the scope modules, which has no effect
 
 ## Algorithms (`lbfgs.cpp`)
 

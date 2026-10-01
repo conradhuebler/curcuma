@@ -497,8 +497,6 @@ set(curcuma_core_SRC
         src/capabilities/persistentdiagram.cpp
         src/capabilities/analysenciplot.cpp
         src/capabilities/curcumamethod.cpp
-        # Native LBFGS optimizer - Claude Generated (disabled, superseded by native_optimizer_adapters)
-        # src/capabilities/native_lbfgs_optimizer.cpp
         src/capabilities/confscan.cpp
         src/capabilities/confsearch.cpp
         src/capabilities/shared_bias_pool.cpp
@@ -1544,10 +1542,6 @@ endif()
 add_executable(curcuma_helper
         src/helpers/main.cpp)
         
-# cli_helper disabled - requires cli_parser.h (native-gfnff WIP)
-# add_executable(cli_helper
-#         src/helpers/cli_test.cpp)
-
 add_executable(parallel_scf
         src/helpers/parallel_scf.cpp)
 target_link_libraries(parallel_scf curcuma_core)

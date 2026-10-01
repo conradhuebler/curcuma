@@ -227,7 +227,7 @@ curcuma/
 │   ├── capabilities/          # High-level molecular modeling tasks
 │   │   ├── confscan.cpp      # Conformational scanning
 │   │   ├── confsearch.cpp    # Conformational searching  
-│   │   ├── curcumaopt.cpp    # Geometry optimization
+│   │   ├── optimizer_driver.cpp # Geometry optimization (OptimizerDriver)
 │   │   ├── simplemd.cpp      # Molecular dynamics
 │   │   └── rmsd.cpp          # Structure analysis
 │   ├── core/                 # Core computational engines

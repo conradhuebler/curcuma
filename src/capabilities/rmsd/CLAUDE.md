@@ -41,7 +41,7 @@ rmsdtraj, SimpleMD, NEB docking and `OptimizerDriver`. Status: 🤖 AI-generated
 ## Open items
 
 - Duplicate code: `CostMatrixCalculator`/`MunkresAssignmentSolver` were extracted from `MakeCostMatrix`/`SolveCostMatrix` but nothing calls them; wire in or remove (operator decision)
-- Uncalled leftovers in `RMSDDriver`: `MolAlignLib()`, `PrepareHeavyTemplate()`, both `PrepareAtomTemplate()`, `PrepareDistanceTemplate()`; the strategies hold copies
+- `RMSDDriver::MolAlignLib()` and the `Prepare*Template()` functions were removed on 2026-10-01 (no callers; the strategies hold the live copies)
 - `-rmsd.method` help (`../rmsd.h`) lists `hungarian`, which is not in `method_map` (falls back to `subspace`), and omits the aliases `hybrid`, `hybrid0`, `free`
 
 ## Instructions Block

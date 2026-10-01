@@ -12,8 +12,7 @@ Hessian, docking. Energies and gradients always come from `EnergyCalculator`. Do
 - `rmsd.*` (`RMSDDriver`, strategies in [rmsd/](rmsd/CLAUDE.md)), `confscan.*`, `confsearch.*`, `shared_bias_pool.*`, `simplemd.*`, `analysis*`, `handlers/`, `trajectory*`
 - Others: `hessian`, `docking`, `nebdocking`, `qmdfffit`, `persistentdiagram`, `tda_engine`, `pairmapper`, `casino`, `polymerbuild`, `confstat`, `rmsdtraj`
 - `optimiser/`: LevMar headers (docking, NEB, qmdfffit), `OptimiseDipoleScaling.h` (main.cpp); `c_code/`: C Hungarian solver used by `rmsd`
-- Dead: `curcumaopt.cpp` (legacy `CurcumaOpt`), `native_lbfgs_optimizer.cpp`, `optimisation/modern_optimizer_simple.cpp` are not compiled;
-  `munkress_2.h`, `optimiser/{LBFGSppInterface,LevMarNEBPseudoFF,Proton,XTBDocking}.h` are included nowhere (grep)
+- Removed 2026-10-01 as dead (no callers): the legacy `CurcumaOpt` implementation, `native_lbfgs_optimizer.*`, `optimisation/modern_optimizer_simple.*`, munkress_2.h and four unused `optimiser/*.h` headers; `curcumaopt.h` stays because its PARAM block defines the `opt` module
 
 ## Checklists
 

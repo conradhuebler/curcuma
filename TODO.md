@@ -65,7 +65,7 @@ Stand.
 ## 3. Tests und Validierung
 
 - `cli_simplemd_08/09` (Essigsäuredimer, CSVR, dt 1 fs) gegen das gemergte Binary mit der MD-Uhr-Korrektur (`ef462fcf`) erneut laufen lassen (Known Issue #32).
-- `test_cg_potentials` wird gebaut, hat aber keinen ctest-Eintrag; der CG-Beispielaufruf mit VTF-Eingabe endet mit "Failed to initialize ForceField
+- `test_cg_potentials` ist seit 2026-10-01 als ctest `cg_potentials` registriert (besteht); der CG-Beispielaufruf mit VTF-Eingabe endet mit "Failed to initialize ForceField
   engine" (`docs/archive/CG.md`, geprüft 2026-10-01).
 - `molecule_comprehensive` verweist auf das Target `test_molecule`, dessen Quelle the source file test_molecule.cpp under src/core nicht im Baum liegt.
 - Wissenschaftliche Validierung der CLI-Tests ausbauen (RMSD-Toleranzen, Energiekonvergenz); Muster für absichtlich fehlschlagende
@@ -105,15 +105,15 @@ Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projek
 
 ## 7. Löschkandidaten
 
-Belege aus der Prüfung der CLAUDE.md-Dateien vom 2026-10-01. Vor dem Löschen die Aufrufer erneut suchen. Umsetzung auf dem Branch `fix/remove-dead-code`.
+Am 2026-10-01 auf dem Branch `fix/remove-dead-code` entfernt: curcumaopt.cpp, `native_lbfgs_optimizer.*`, `optimisation/modern_optimizer_simple.*`, munkress_2.h,
+vier ungenutzte `optimiser/*.h`, core/accuracy_profile.cpp (inkludierte einen nicht vorhandenen Header), `RMSDDriver::MolAlignLib()` und `Prepare*Template()`,
+`D4Evaluator::launchGpuKernel()`, helpers/cli_test.cpp und gfnff_test.cpp, zwei untracked `.backup`-Dateien. Volle Testsuite danach: dieselben drei bekannten Ausfälle wie vorher.
 
-- `src/capabilities/curcumaopt.cpp`: in keiner Quellliste, mit `11d0e891` entfernt. `curcumaopt.h` hält noch den PARAM-Block des Moduls `opt` und bleibt, bis die Parameter umgezogen sind.
-- `src/capabilities/optimisation/modern_optimizer_simple.*`: wird weder kompiliert noch eingebunden.
-- `MolAlignLib()` und `Prepare*Template()` in `rmsd.cpp`: ohne Aufrufer. `CostMatrixCalculator` und `MunkresAssignmentSolver` (`src/capabilities/rmsd/`): kompiliert, nirgends aufgerufen.
-- `launchGpuKernel()` im D4-Evaluator: nie aufgerufen.
-- `src/helpers/`: `cli_test.cpp` und `gfnff_test.cpp` binden nicht vorhandene Header ein; vier weitere Helfer ohne CMake-Target.
-- Untracked: `src/capabilities/analysis.cpp.backup`, `src/tools/trajectory_writer.cpp.backup`.
-- `test_cg_potentials` wird gebaut, aber nie von ctest ausgeführt (löschen oder registrieren).
+Offen, Aufrufer vor dem Löschen erneut suchen:
+- `src/capabilities/curcumaopt.h`: hält den PARAM-Block des Moduls `opt` (28 Parameter); die Klasse `CurcumaOpt` ist ohne Implementierung. Die Parameter müssen erst in ein anderes Header umziehen.
+- `src/capabilities/rmsd/rmsd_costmatrix.*`, `rmsd_assignment.*` (`CostMatrixCalculator`, `MunkresAssignmentSolver`): kompiliert und von `rmsd_strategies.h` eingebunden, die Klassen selbst werden nirgends aufgerufen. Entscheidung nötig, ob die Strategien sie künftig nutzen sollen.
+- `main.cpp` führt `modern_optimizer` noch in der Liste der Scope-Module; das Modul existiert nicht mehr.
+- `src/helpers/`: `imagewrite.cpp`, `storage_bench.cpp`, `polymer_topo.cpp`, `gfnff_term_validator.cpp` ohne CMake-Target (eigenständige `main()`-Programme).
 
 ## 8. Aus der alten Liste entfernt (überholt oder erledigt)
 
