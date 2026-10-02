@@ -43,6 +43,7 @@ Walk the same energy ranking, but require geometric spacing:
 | `-seed_min_rmsd` | `0.0` | Spacing in Angstrom. `0` derives it from `rmsd` |
 | `-seed_diversity_factor` | `2.0` | Multiplier on `-rmsd` when `seed_min_rmsd = 0` |
 | `-seed_energy_window` | `50.0` | kJ/mol window vs the global minimum that defines the candidates |
+| `-seed_vary` | `false` | Not seed selection but the MD random seed: `true` gives every child MD its own seed, a deterministic function of `-seed`, cycle, repetition, chain round, phase and walker (otherwise equal `-seed` + equal start structure = bit-identical start velocities). Off keeps runs byte-identical; effect on search quality unmeasured (A/B open) |
 
 **Note:** with the default `seed_rank 1` only one seed is kept, so the diversity rule has nothing to
 choose and the run is bit-identical to before. Diversity only matters with `-seed_rank N > 1` or

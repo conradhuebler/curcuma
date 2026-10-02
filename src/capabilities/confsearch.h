@@ -1,6 +1,6 @@
 /*
  * <Conformational Search based on Molecular Dynamics>
- * Copyright (C) 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2022 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -627,6 +627,11 @@ private:
     std::vector<Molecule> m_refine_seed_mols; ///< seeds of the current repetition's refinement MD (geometry + energy)
     std::vector<Molecule> m_refined_seeds; ///< memory of already-refined seeds, cleared per temperature stage
     bool m_md_snapshot_append = false; ///< second MD step of a repetition appends to the snapshot file
+    // Claude Generated (Oct 2026): per-run MD seed variation (see PARAM seed_vary). The indices are
+    // set by the stage loop in start() and read by PerformMolecularDynamics().
+    bool m_seed_vary = false;
+    int m_seed_vary_cycle = 0, m_seed_vary_rep = 0, m_seed_vary_chain = 0;
+    long long m_seed_vary_clock = -1; ///< clock value frozen at the first use when seed == -1
     int m_explore_md_rattle = -1; ///< Claude Generated (Aug 2026): explicit exploration RATTLE mode, -1 = inherit
     int m_rmsd_mtd_cap_eff = 0; ///< Claude Generated (Aug 2026): the bias cap actually in force (resolved from -1 = adaptive)
     std::string m_topo_lock_md, m_topo_lock_opt; ///< reference .topo.json per PES (empty = unlocked)
@@ -759,6 +764,7 @@ private:
     PARAM(thermostat, String, "csvr", "Thermostat: berendsen, andersen, nosehover, csvr or none.", "MD", {})
     PARAM(coupling, Double, 10.0, "Thermostat coupling time in femtoseconds.", "MD", {})
     PARAM(seed, Int, -1, "Random seed for the MD runs. -1 uses the clock.", "MD", {})
+    PARAM(seed_vary, Bool, false, "Give every child MD its own random seed, derived deterministically from seed, the temperature cycle, the repetition, the densification chain round, the MD phase (exploration or refinement) and the walker index (position of the seed structure in the run list). Without it every child MD receives the same seed and SimpleMD mixes in only the start geometry, so a later repetition or cycle that restarts from the same structure at the same temperature draws bit-identical start velocities. Default off, so that runs stay reproducible and byte-identical to earlier versions; whether varying the seed improves the search is unmeasured (A/B test open). With seed -1 (clock) the clock is read once per search and then varied the same way, so the runs of one search still differ.", "MD", {})
     PARAM(remove_com_motion, Double, 100.0, "Remove translation and rotation every N femtoseconds.", "MD", {"rm_COM"})
     PARAM(remove_com_mode, Int, 1, "Removal mode: 0 none, 1 translation, 2 rotation, 3 both.", "MD", {"rmrottrans"})
     PARAM(no_center, Bool, false, "Disable centering of the molecule at the origin.", "MD", {"nocenter"})

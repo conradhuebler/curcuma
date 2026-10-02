@@ -227,6 +227,45 @@ bool ConfSearch::Initialise()
 
 // Claude Generated (Sep 2026): unweighted heavy-atom radius of gyration of a geometry, elements taken
 // from ref (all pool structures share the atom order of the input). Used for the Rg-flooding hand-over.
+/**
+ * @brief Claude Generated (Oct 2026): deterministic per-run MD seed for PARAM seed_vary.
+ *
+ * Mixes the user seed with (cycle, repetition, chain round, MD phase, walker) through the
+ * SplitMix64 finaliser (Steele/Lea/Flood 2014), one round per component, so neighbouring indices
+ * give uncorrelated seeds. The result lies in [1, 2^31-1]: SimpleMD treats -1 (clock) and 0
+ * (natoms*T) as special values, so both are excluded. Same inputs -> same seed, i.e. a rerun
+ * with the same -seed stays reproducible.
+ */
+static int VariedMDSeed(long long base, int cycle, int repetition, int chain, int phase, int walker)
+{
+    auto mix = [](std::uint64_t z) {
+        z += 0x9e3779b97f4a7c15ULL;
+        z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+        return z ^ (z >> 31);
+    };
+    std::uint64_t h = mix(static_cast<std::uint64_t>(base));
+    for (int v : { cycle, repetition, chain, phase, walker })
+        h = mix(h ^ static_cast<std::uint64_t>(static_cast<std::uint32_t>(v)));
+    const int seed = static_cast<int>(h & 0x7fffffffULL);
+    return seed == 0 ? 1 : seed;
+}
+
+/* Claude Generated (Oct 2026): hash of a start geometry, quantised to 1e-6 Angstrom like
+ * SimpleMD::seedRandomEngine(). Diagnostic only (seed_vary log line): equal seed AND equal hash
+ * means bit-identical start velocities. */
+static std::size_t StartGeometryHash(const Molecule& mol)
+{
+    const Geometry g = mol.getGeometry();
+    std::size_t h = 1469598103934665603ULL;
+    for (int i = 0; i < g.rows(); ++i)
+        for (int k = 0; k < 3; ++k) {
+            const long long q = std::llround(g(i, k) * 1e6);
+            h ^= static_cast<std::size_t>(q) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        }
+    return h;
+}
+
 static double HeavyAtomRg(const Molecule& ref, const Geometry& g)
 {
     Eigen::Vector3d c = Eigen::Vector3d::Zero();
@@ -799,6 +838,10 @@ void ConfSearch::start()
             : fmt::format("cycle{:02d}_T{}K", temperature_cycle, static_cast<int>(m_currentT));
         if (chain_now)
             m_cycle_tag += fmt::format("_c{}", chain_round);
+        // Claude Generated (Oct 2026): indices for the per-run MD seed (PARAM seed_vary).
+        m_seed_vary_cycle = temperature_cycle;
+        m_seed_vary_rep = stage_rep;
+        m_seed_vary_chain = chain_round;
         // Stem of the exploration files: MD snapshots (<stem>.xyz), their optimisation
         // (<stem>.opt.xyz) and the dedup result (<stem>.opt.accepted.xyz).
         const std::string explore = cycleStage("s1_explore", m_md_method);
@@ -2433,7 +2476,30 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
         total_runs, m_threads);
     for (int repeat = 0; repeat < 1; ++repeat) {
         for (size_t i = 0; i < molecules.size(); ++i) {
-            MDThread* thread = new MDThread(md_param);
+            MDThread* thread = nullptr;
+            if (m_seed_vary) {
+                // Claude Generated (Oct 2026): PARAM seed_vary -- own deterministic seed per run.
+                // Phase 1 = refinement MD (it appends to the exploration snapshots), 0 = exploration.
+                long long base = md_param.value("seed", -1);
+                if (base == -1) {
+                    if (m_seed_vary_clock == -1)
+                        m_seed_vary_clock = std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count();
+                    base = m_seed_vary_clock;
+                }
+                nlohmann::json run_param = md_param;
+                run_param["seed"] = VariedMDSeed(base, m_seed_vary_cycle, m_seed_vary_rep, m_seed_vary_chain,
+                    m_md_snapshot_append ? 1 : 0, static_cast<int>(i));
+                CurcumaLogger::result_fmt("ConfSearch: seed_vary -- cycle {} rep {} chain {} {} walker {}: MD seed {} (start geometry hash {:016x})",
+                    m_seed_vary_cycle, m_seed_vary_rep + 1, m_seed_vary_chain,
+                    m_md_snapshot_append ? "refine" : "explore", i, run_param["seed"].get<int>(),
+                    StartGeometryHash(*molecules[i]));
+                thread = new MDThread(run_param);
+            } else {
+                thread = new MDThread(md_param);
+                CurcumaLogger::info_fmt("ConfSearch: MD run {} seed {} (start geometry hash {:016x})",
+                    i, md_param.value("seed", -1), StartGeometryHash(*molecules[i]));
+            }
             thread->setThreadId(index++);
             thread->setBasename(outputPath(Basename() + ".r" + std::to_string(repeat)));
             thread->setMolecule(molecules[i]);
@@ -5408,6 +5474,7 @@ void ConfSearch::LoadControlJson()
     m_rmsd_mtd_screen = m_config.get<bool>("rmsd_mtd_screen");
     m_rg_flood_wall_quantile = m_config.get<double>("rg_flood_wall_quantile");
     m_rg_flood_pool_seed = m_config.get<bool>("rg_flood_pool_seed");
+    m_seed_vary = m_config.get<bool>("seed_vary"); // Claude Generated (Oct 2026)
     m_rg_flood_seed_bin = m_config.get<double>("rg_flood_seed_bin");
     m_rmsd_mtd_heavy_only = m_config.get<bool>("rmsd_mtd_heavy_only");
     m_rmsd_mtd_cutoff_tol = m_config.get<double>("rmsd_mtd_cutoff_tol");
