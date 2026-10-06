@@ -751,14 +751,9 @@ A classical CI-NEB (`-nebmd.optimize true -nebmd.idpp false`) can relax the band
 the minimum energy path first, and an externally converged path can be supplied with
 `-nebmd.path_file` (e.g. ORCA's `neb_MEP_trj.xyz`).
 
-**Caveat:** potential-energy barriers are validated on a clean case (ethane rotation,
-GFN2 2.88 vs ~2.9 kcal/mol experimental), but the **free-energy estimators
-(`-nebmd.pmf`, `-nebmd.umbrella`) are not yet usable** — on helicene they miss the
-reference barrier by +45 % and −60 % respectively. Always verify a NEB saddle point
-with a frequency calculation (exactly one imaginary mode).
-
-See [docs/NEB_MD.md](docs/NEB_MD.md) for the force model, the validation record, and
-`(k, dt)` guidance.
+`-nebmd.pipeline true` runs a finite-temperature string followed by constrained mean-force
+sampling on a path CV and reports G(s), a basin barrier and an absolute TST rate. AI-generated,
+machine-tested, validated on ethane rotation (GFN-FF) only - see [docs/NEB_MD.md](docs/NEB_MD.md).
 
 For example, using
 ```sh

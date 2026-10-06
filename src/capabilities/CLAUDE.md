@@ -68,7 +68,7 @@ capabilities/
   - ✅ VTF trajectory output for CG systems
   - ✅ Orientational dynamics infrastructure (prepared for Phase 6 ellipsoids)
 - **NEB Docking**: Nudged elastic band for transition state searches
-- ⚠️ **NEB-MD (`nebmd.{h,cpp}`)** (Jul 2026, AI/machine-tested): MD-driven band — N `SimpleMD` replicas coupled by springs, plus a classical CI-NEB (`-nebmd.optimize`, FIRE) and path CVs (`path_cv.{h,cpp}`). **Barriers on a clean case work** (ethane rotation, GFN2 2.88 vs ~2.9 exp); **free energies do NOT yet** (helicene: 58.4 / 13-19 vs ~38 reference). Two traps: the band can converge to a non-saddle (verify with a frequency calculation), and the sampling drifts off the path. See [docs/NEB_MD.md](../../docs/NEB_MD.md)
+- ⚠️ **NEB-MD (`nebmd.{h,cpp}`)** (Oct 2026, AI/machine-tested): CI-NEB, string stage (`string_path.{h,cpp}`), constrained mean force on path CVs (`path_cv.{h,cpp}`), basin barrier + TST rate (`fe_profile.h`), reference histogram (`z_filter.h`, `wham.h`). Validated on **ethane only** (GFN-FF, 300 K); band/spring PMF removed, helicene numbers invalid. See [docs/NEB_MD.md](../../docs/NEB_MD.md)
 - **Trajectory Analysis**: Analysis tools for MD trajectories
 
 ### Advanced Analysis
