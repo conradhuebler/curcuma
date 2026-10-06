@@ -556,6 +556,43 @@ endif()
 add_test(NAME test_path_cv COMMAND test_path_cv)
 set_tests_properties(test_path_cv PROPERTIES TIMEOUT 60 LABELS "pathcv;unit")
 
+# Claude Generated 2026: WHAM solver vs a known double-well profile (header-only, no core link)
+add_executable(test_wham test_wham.cpp)
+target_include_directories(test_wham PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME test_wham COMMAND test_wham)
+set_tests_properties(test_wham PROPERTIES TIMEOUT 120 LABELS "pathcv;unit")
+
+# Claude Generated 2026: SHAKE/RATTLE scalar constraint, NVE energy conservation (distance CV)
+add_executable(test_scalar_constraint test_scalar_constraint.cpp)
+target_link_libraries(test_scalar_constraint curcuma_cap curcuma_core)
+target_compile_definitions(test_scalar_constraint PRIVATE CURCUMA_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_test(NAME test_scalar_constraint COMMAND test_scalar_constraint)
+set_tests_properties(test_scalar_constraint PROPERTIES TIMEOUT 300 LABELS "pathcv;unit")
+
+# Claude Generated 2026: pure string/path helpers (Kabsch, reparametrisation, double-well FTS)
+add_executable(test_string_path test_string_path.cpp)
+target_link_libraries(test_string_path curcuma_core)
+add_test(NAME test_string_path COMMAND test_string_path)
+set_tests_properties(test_string_path PROPERTIES TIMEOUT 60 LABELS "pathcv;unit")
+
+# Claude Generated 2026: automatic z threshold (population separation) for -nebmd.cv_histogram
+add_executable(test_z_filter test_z_filter.cpp)
+target_include_directories(test_z_filter PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME test_z_filter COMMAND test_z_filter)
+set_tests_properties(test_z_filter PROPERTIES TIMEOUT 60 LABELS "pathcv;unit")
+
+# Claude Generated 2026: grid-free (natural cubic spline) barrier of the mean-force profile
+add_executable(test_fe_profile test_fe_profile.cpp)
+target_include_directories(test_fe_profile PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME test_fe_profile COMMAND test_fe_profile)
+set_tests_properties(test_fe_profile PROPERTIES TIMEOUT 60 LABELS "pathcv;unit")
+
+# Claude Generated 2026: absolute TST rate / Eyring free energy across s* (fe_profile.h tstRate)
+add_executable(test_tst_rate test_tst_rate.cpp)
+target_include_directories(test_tst_rate PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME test_tst_rate COMMAND test_tst_rate)
+set_tests_properties(test_tst_rate PROPERTIES TIMEOUT 60 LABELS "pathcv;unit")
+
 # Claude Generated (Sep 2026): interface-level gradient + frequency contract.
 # Guards two things nothing else covered:
 #   1. EnergyCalculator::Gradient() must be Eh/Angstrom for EVERY method — SimpleMD

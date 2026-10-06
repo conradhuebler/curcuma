@@ -22,7 +22,14 @@
  */
 
 #include "src/capabilities/nebmd.h"
+#include "src/core/units.h"
+#include "src/capabilities/wham.h"
+#include "src/capabilities/string_path.h"
+#include "src/capabilities/z_filter.h"
+#include "src/capabilities/fe_profile.h"
 
+#include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <limits>
 #include <set>
@@ -96,6 +103,71 @@ void NebMD::LoadControlJson()
     m_pmf = m_config.get<bool>("pmf");
     m_fixman = m_config.get<bool>("fixman");
     m_pmf_equilibration = m_config.get<int>("pmf_equilibration");
+
+    // Decoupled scheme (Claude Generated 2026). "independent" is a thin, explicit layer
+    // over the umbrella machinery: restrain s only, drop the neighbour springs, and switch
+    // on the conditional mean-force estimator. It is named separately because it is a
+    // different method, not a different parameter setting.
+    m_scheme = m_config.get<std::string>("scheme");
+    m_independent = (m_scheme == "independent");
+    m_fe_bins = std::max(m_config.get<int>("fe_bins"), 4);
+    m_div_probes = std::max(m_config.get<int>("div_probes"), 0);
+    m_div_epsilon = m_config.get<double>("div_epsilon");
+    m_ramp_steps = m_config.get<int>("ramp_steps");
+    if (m_ramp_steps <= 0)
+        m_ramp_steps = m_pmf_equilibration;
+    m_bias_fmax = m_config.get<double>("bias_fmax");
+    m_cv_trace = m_config.get<bool>("cv_trace");
+    m_window_threads = std::max(m_config.get<int>("window_threads"), 1);
+    m_max_temperature = m_config.get<double>("max_temperature");
+    m_constrain = m_config.get<bool>("constrain");
+    m_constrain_tol = m_config.get<double>("constrain_tolerance");
+    m_adaptive_k = m_config.get<bool>("adaptive_k");
+    m_adaptive_k_max = m_config.get<double>("adaptive_k_max");
+    m_band_verbosity = CurcumaLogger::get_verbosity();
+    // Finite-temperature string (Claude Generated 2026): restraint to the mean path only.
+    m_string = (m_scheme == "string");
+    m_string_k = m_config.get<double>("string_k");
+    m_string_update = std::max(m_config.get<int>("string_update"), 1);
+    m_string_alpha = m_config.get<double>("string_alpha");
+    m_string_smooth = m_config.get<double>("string_smooth");
+    m_string_tol = m_config.get<double>("string_tol");
+    m_string_patience = std::max(m_config.get<int>("string_patience"), 1);
+    m_string_max_time = m_config.get<double>("string_max_time");
+    m_string_max_step = m_config.get<double>("string_max_step");          // Claude Generated 2026
+    m_string_abort_on_dead = m_config.get<bool>("string_abort_on_dead"); // Claude Generated 2026
+    m_string_prepare = m_config.get<bool>("string_prepare");             // Claude Generated 2026
+    m_string_ftol = m_config.get<double>("string_ftol");
+    m_string_blocks = std::max(m_config.get<int>("string_blocks"), 2);
+    m_string_gain = m_config.get<double>("string_gain");
+    m_string_gain_z = m_config.get<double>("string_gain_z");
+    m_string_write_updates = m_config.get<bool>("string_write_updates");
+    m_cv_histogram = m_config.get<std::string>("cv_histogram", "");
+    m_cv_hist_zmax = m_config.get<double>("cv_hist_zmax");
+    m_cv_frames = std::max(m_config.get<int>("cv_frames"), 0);   // Claude Generated 2026
+    m_cv_extend = std::max(m_config.get<int>("cv_extend"), 0);   // Claude Generated 2026
+    // Claude Generated 2026: extension as a fraction of the CV path length; when > 0 it takes
+    // precedence over cv_extend (frames), the frame count is derived in buildCvPath.
+    m_cv_extend_length = std::max(m_config.get<double>("cv_extend_length"), 0.0);
+    if (m_cv_extend_length > 0.0 && m_cv_extend > 0)
+        CurcumaLogger::warn(fmt::format("NEB-MD: both cv_extend ({}) and cv_extend_length ({}) are set - "
+                                        "cv_extend_length takes precedence, cv_extend is ignored.",
+                                        m_cv_extend, m_cv_extend_length));
+    if (m_string) {
+        if (m_umbrella || m_constrain)
+            CurcumaLogger::warn("NEB-MD: scheme 'string' ignores umbrella/constrain (no path CV in stage 1).");
+        m_umbrella = false;
+        m_constrain = false;
+        m_umbrella_keep_springs = false;
+        if (m_reparametrize > 0)
+            CurcumaLogger::warn("NEB-MD: -nebmd.reparametrize is ignored in scheme 'string' (only the "
+                                "mean path is reparametrised, never the images).");
+        m_reparametrize = 0;
+    }
+    if (m_independent) {
+        m_umbrella = true;              // uses the frozen-path CV and its static restraint
+        m_umbrella_keep_springs = false; // no neighbour coupling - that is the whole point
+    }
     m_mtd_transverse = m_config.get<bool>("mtd_transverse");
     m_idpp = m_config.get<bool>("idpp");
     m_idpp_iterations = m_config.get<int>("idpp_iterations");
@@ -148,6 +220,12 @@ void NebMD::setEndpoints(const Molecule& start, const Molecule& end)
 
 bool NebMD::Initialise()
 {
+    if (m_pmf) {
+        CurcumaLogger::error("NEB-MD: -nebmd.pmf was removed (the spring-band mean force has no "
+                             "well-defined coordinate). Use -nebmd.umbrella, optionally with "
+                             "-nebmd.constrain.");
+        return false;
+    }
     if (!m_endpoints_set) {
         CurcumaLogger::error("NEB-MD: endpoints not set - call setEndpoints() first.");
         return false;
@@ -175,14 +253,40 @@ bool NebMD::Initialise()
     m_images.assign(m_nimages, nullptr);
     m_image_done.assign(m_nimages, false);
     m_image_geoms.assign(m_nimages, Geometry());
-    m_pmf_force_sum.assign(m_nimages, 0.0);
-    m_pmf_spring_sum.assign(m_nimages, 0.0);
-    m_pmf_fixman_sum.assign(m_nimages, 0.0);
-    m_pmf_epot_sum.assign(m_nimages, 0.0);
-    m_pmf_epot_sq_sum.assign(m_nimages, 0.0);
-    m_pmf_arc_sum.assign(m_nimages, 0.0);
-    m_pmf_samples = 0;
+    resetPmfAccumulators(static_cast<int>(m_start.AtomCount()));
     return true;
+}
+
+void NebMD::resetPmfAccumulators(int nat)
+{
+    // Claude Generated 2026: single place where every PMF running sum is (re)initialised.
+    // Previously duplicated in two call sites, which is how a new accumulator gets
+    // forgotten in one of them.
+    m_fe_count.assign(m_fe_bins, 0);
+    m_fe_force.assign(m_fe_bins, 0.0);
+    m_fe_div.assign(m_fe_bins, 0.0);
+    m_fe_ssum.assign(m_fe_bins, 0.0);
+    m_fe_wsum.assign(m_fe_bins, 0.0);
+    m_win_s_sum.assign(m_nimages, 0.0);
+    m_win_s2_sum.assign(m_nimages, 0.0);
+    m_win_count.assign(m_nimages, 0);
+    m_win_z_sum.assign(m_nimages, 0.0);
+    m_win_w.assign(m_nimages, 0.0);
+    m_win_wf.assign(m_nimages, 0.0);
+    m_win_wd.assign(m_nimages, 0.0);
+    m_prev_s.assign(m_nimages, -1.0);
+    m_img_max_jump.assign(m_nimages, 0.0);
+    m_img_max_jump_step.assign(m_nimages, -1);
+    m_img_capped.assign(m_nimages, 0);
+    m_window_died.assign(m_nimages, -1);
+    m_window_died_T.assign(m_nimages, 0.0);
+    m_calib_dg_sum.assign(m_nimages, 0.0);
+    m_calib_n.assign(m_nimages, 0);
+    m_fe_rejected_bin.assign(m_fe_bins, 0);
+    m_win_rejected.assign(m_nimages, 0);
+    m_probe_rng.clear();
+    for (int i = 0; i < m_nimages; ++i)
+        m_probe_rng.emplace_back(static_cast<std::mt19937::result_type>(20260802u + 7919u * (i + 1)));
 }
 
 Geometry NebMD::interpolate(const Geometry& a, const Geometry& b, double t) const
@@ -485,12 +589,7 @@ bool NebMD::buildInitialPath()
         m_image_geoms = frames;
         m_images.assign(m_nimages, nullptr);
         m_image_done.assign(m_nimages, false);
-        m_pmf_force_sum.assign(m_nimages, 0.0);
-        m_pmf_spring_sum.assign(m_nimages, 0.0);
-        m_pmf_epot_sum.assign(m_nimages, 0.0);
-        m_pmf_epot_sq_sum.assign(m_nimages, 0.0);
-        m_pmf_arc_sum.assign(m_nimages, 0.0);
-        m_pmf_fixman_sum.assign(m_nimages, 0.0);
+        resetPmfAccumulators(static_cast<int>(frames.front().rows()));
         m_start_geom = frames.front();
         m_end_geom = frames.back();
         std::vector<int> atoms = m_start.Atoms();
@@ -577,6 +676,195 @@ bool NebMD::buildInitialPath()
     return true;
 }
 
+void NebMD::checkExtensionEnergies(const std::vector<Geometry>& base,
+                                   const std::vector<Geometry>& extended) const
+{
+    // Claude Generated 2026: an extrapolated frame is only meaningful as the continuation of a
+    // basin if the energy rises beyond the endpoint. A LOWER energy means the path ends on a
+    // slope (the endpoint is not a minimum along the continued direction) - warn, do not abort.
+    const int m = m_cv_extend;
+    const int N = static_cast<int>(base.size());
+    if (m <= 0 || N < 2 || static_cast<int>(extended.size()) != N + 2 * m)
+        return;
+    const double kcal = 627.5094740631;
+    auto sp = [this](const Geometry& g) -> double {
+        EnergyCalculator ec(m_method, m_controller, Basename());
+        Molecule mol = m_start;
+        mol.setGeometry(g);
+        ec.setMolecule(mol.getMolInfo());
+        ec.updateGeometry(g);
+        return ec.CalculateEnergy(false);
+    };
+    double e0 = 0.0, eN = 0.0;
+    std::vector<double> eL(m), eR(m); // eL[j-1] = E(F_-j), eR[j-1] = E(F_N-1+j)
+    {
+        CoutSuppress cs;
+        e0 = sp(base.front());
+        eN = sp(base.back());
+        for (int j = 1; j <= m; ++j) {
+            eL[j - 1] = sp(extended[m - j]);
+            eR[j - 1] = sp(extended[m + N - 1 + j]);
+        }
+    }
+    CurcumaLogger::set_verbosity(m_band_verbosity);
+    std::string l = "NEB-MD cv_extend: E(extension) - E(endpoint) [kcal/mol], start side:";
+    std::string r = "NEB-MD cv_extend: E(extension) - E(endpoint) [kcal/mol], end side  :";
+    bool lower = false;
+    for (int j = 0; j < m; ++j) {
+        l += fmt::format(" {:.3f}", (eL[j] - e0) * kcal);
+        r += fmt::format(" {:.3f}", (eR[j] - eN) * kcal);
+        if (eL[j] < e0 || eR[j] < eN)
+            lower = true;
+    }
+    CurcumaLogger::result(l);
+    CurcumaLogger::result(r);
+    if (lower)
+        CurcumaLogger::warn("NEB-MD cv_extend: an extrapolated CV frame lies LOWER in energy than the path "
+                            "endpoint it continues. The endpoint is then no basin along the continued "
+                            "direction; the extension is physically doubtful (check the endpoints are "
+                            "minima, or use a smaller cv_extend).");
+}
+
+bool NebMD::buildCvPath(bool place_windows)
+{
+    // Claude Generated 2026: CV frames and window placement (see the block comment in nebmd.h).
+    m_cv_path.clear();
+    m_cv_orig_s.clear();
+    m_cv_lo = 0;
+    m_cv_hi = -1;
+    if (m_cv_frames <= 0 && m_cv_extend <= 0 && m_cv_extend_length <= 0.0)
+        return true; // default: CV on the image frames, nothing changes
+    if (place_windows && !m_independent) {
+        if (m_string)
+            CurcumaLogger::info("NEB-MD: cv_frames/cv_extend do not act on the string stage; they apply to "
+                                "the path CV of scheme 'independent' (pipeline stage 2).");
+        else
+            CurcumaLogger::warn("NEB-MD: cv_frames/cv_extend are only used by scheme 'independent' and by "
+                                "cv_histogram - ignored here.");
+        return true;
+    }
+    if (m_image_geoms.size() < 2) {
+        CurcumaLogger::error("NEB-MD: cv_frames/cv_extend need a path with at least two frames.");
+        return false;
+    }
+    const int nat = static_cast<int>(m_image_geoms.front().rows());
+    const std::vector<Geometry>& P = m_image_geoms;
+    const int Np = static_cast<int>(P.size());
+
+    std::vector<Geometry> base = curcuma::string_path::alignConsecutive(P, {});
+    if (m_cv_frames > 0) {
+        // Part B: re-sample at equal arclength onto cv_frames frames (before the extension).
+        int nf = m_cv_frames;
+        if (nf < 3) {
+            CurcumaLogger::warn(fmt::format("NEB-MD: cv_frames = {} is too few for a path CV; using 3.", nf));
+            nf = 3;
+        }
+        base = curcuma::string_path::resamplePath(base, nf, {});
+    }
+    if (m_cv_extend_length > 0.0) {
+        // Claude Generated 2026: extension given as a LENGTH (fraction of the arclength L of the
+        // (re-sampled) CV path). m = ceil(f L / d) + 1 with d = L/(F-1); m_cv_extend then holds
+        // the effective frame count for everything downstream (extension, windows, headers).
+        const int F = static_cast<int>(base.size());
+        double L = 0.0; // plain (already consecutively aligned) RMSD arclength, as PathCV sees it
+        for (int k = 1; k < F; ++k)
+            L += curcuma::string_path::weightedRmsd(base[k], base[k - 1], {}, false);
+        m_cv_extend = curcuma::string_path::extensionFrames(m_cv_extend_length, F);
+        const double d = F > 1 ? L / static_cast<double>(F - 1) : 0.0;
+        CurcumaLogger::result_fmt("NEB-MD cv_extend: {:.4g} of the path length = {} frames "
+                                  "(path L = {:.4f} A RMSD arclength, {} CV frames, spacing d = {:.4f} A; "
+                                  "windows reach {:.4f} A = {:.4f} L beyond each end)",
+                                  m_cv_extend_length, m_cv_extend, L, F, d,
+                                  (m_cv_extend - 1) * d, L > 0.0 ? (m_cv_extend - 1) * d / L : 0.0);
+    }
+    std::vector<Geometry> cv = base;
+    if (m_cv_extend > 0) {
+        cv = curcuma::string_path::extendPath(base, m_cv_extend, {});
+        checkExtensionEnergies(base, cv);
+    }
+    m_cv_path = cv;
+    const int M = static_cast<int>(cv.size());
+    m_cv_lo = (m_cv_extend > 0) ? 1 : 0;
+    m_cv_hi = M - 1 - m_cv_lo;
+
+    const PathCV pcv(m_cv_path, m_start);
+    std::vector<double> sc(M, 0.0);
+    for (int k = 0; k < M; ++k)
+        sc[k] = pcv.s(cv[k]);
+    m_cv_orig_s = { pcv.s(P[0]), pcv.s(P[std::min(1, Np - 1)]), pcv.s(P[std::max(Np - 2, 0)]), pcv.s(P[Np - 1]) };
+    bool monotone = true;
+    for (int k = m_cv_lo + 1; k <= m_cv_hi; ++k)
+        if ((sc[k] - sc[k - 1]) * (sc[m_cv_hi] - sc[m_cv_lo]) <= 0.0)
+            monotone = false;
+    CurcumaLogger::result_fmt("NEB-MD: path CV on {} frames (path {} frames, cv_frames {}, cv_extend {}), "
+                              "lambda = {:.3f}; s(CV frame 0) = {:.4f}, window range s = [{:.4f}, {:.4f}], "
+                              "s(CV frame {}) = {:.4f}",
+                              M, Np, m_cv_frames, m_cv_extend, pcv.lambda(), sc.front(), sc[m_cv_lo],
+                              sc[m_cv_hi], M - 1, sc.back());
+    CurcumaLogger::result_fmt("NEB-MD: original path frames on this CV: s(first) = {:.4f}, s(second) = {:.4f}, "
+                              "s(second-to-last) = {:.4f}, s(last) = {:.4f}",
+                              m_cv_orig_s[0], m_cv_orig_s[1], m_cv_orig_s[2], m_cv_orig_s[3]);
+    if (!monotone)
+        CurcumaLogger::warn("NEB-MD: s is not monotonic over the window range of the CV frames - the path "
+                            "folds back on itself in RMSD space; window placement is unreliable.");
+    if (!place_windows)
+        return true;
+
+    std::vector<Geometry> win;
+    if (m_cv_frames > 0) {
+        // Part B: nwin = nimages windows, setpoints equidistant in s over [s(C_lo), s(C_hi)];
+        // start geometry = point of the CV polyline at that s (bracketing frames k, k+1 and
+        // t = (s* - s_k)/(s_k+1 - s_k)). setupUmbrella re-evaluates s0 on that geometry.
+        const int nwin = std::max(m_nimages, 2);
+        const double a = sc[m_cv_lo], b = sc[m_cv_hi];
+        for (int i = 0; i < nwin; ++i) {
+            if (i == 0) {
+                win.push_back(cv[m_cv_lo]);
+                continue;
+            }
+            if (i == nwin - 1) {
+                win.push_back(cv[m_cv_hi]);
+                continue;
+            }
+            const double target = a + (b - a) * static_cast<double>(i) / static_cast<double>(nwin - 1);
+            int k = -1;
+            for (int j = m_cv_lo; j < m_cv_hi; ++j)
+                if ((sc[j] - target) * (sc[j + 1] - target) <= 0.0) {
+                    k = j;
+                    break;
+                }
+            if (k < 0) { // non-monotonic s: nearest CV frame
+                k = m_cv_lo;
+                for (int j = m_cv_lo; j <= m_cv_hi; ++j)
+                    if (std::abs(sc[j] - target) < std::abs(sc[k] - target))
+                        k = j;
+                win.push_back(cv[k]);
+                continue;
+            }
+            const double den = sc[k + 1] - sc[k];
+            const double t = std::abs(den) > 1e-15 ? (target - sc[k]) / den : 0.0;
+            win.push_back((1.0 - t) * cv[k] + t * cv[k + 1]);
+        }
+    } else {
+        win.assign(cv.begin() + m_cv_lo, cv.begin() + m_cv_hi + 1);
+    }
+    m_nimages = static_cast<int>(win.size());
+    m_image_geoms = win;
+    m_images.assign(m_nimages, nullptr);
+    m_image_done.assign(m_nimages, false);
+    resetPmfAccumulators(nat);
+    m_start_geom = win.front();
+    m_end_geom = win.back();
+    if (m_cv_extend > 0 && m_fixed_endpoints) {
+        m_fixed_endpoints = false;
+        CurcumaLogger::result("NEB-MD: cv_extend > 0 - every window is integrated (fixed_endpoints off); the "
+                              "former path endpoints are ordinary windows now.");
+    }
+    CurcumaLogger::result_fmt("NEB-MD: {} windows on the CV, s from {:.4f} to {:.4f}", m_nimages,
+                              sc[m_cv_lo], sc[m_cv_hi]);
+    return true;
+}
+
 bool NebMD::prepareImages()
 {
     int nat = static_cast<int>(m_start_geom.rows());
@@ -595,6 +883,18 @@ bool NebMD::prepareImages()
     sd["write_restart_frequency"] = -1; // disable per-image restart files (step() gates on `> -1` then `% freq`; 0 would SIGFPE)
     sd["opt"] = false;
     sd["rmsd_mtd"] = false;
+    if (m_constrain) {
+        // The scalar constraint lives inside SimpleMD::Rattle(), so that integrator has to
+        // be selected. Bond constraints are switched off explicitly: they would change the
+        // degrees of freedom and thereby the very ensemble whose free energy is measured.
+        sd["rattle"] = 1;
+        sd["rattle_12"] = false;
+        sd["rattle_13"] = false;
+    }
+    // Claude Generated 2026: the string stage owns its run length (string_max_time); the
+    // band loop ends earlier on convergence.
+    if (m_string)
+        sd["max_time"] = m_string_max_time;
     sd["mtd"] = false;
     sd["wall_type"] = "none";
     sd["unique"] = false;
@@ -614,7 +914,18 @@ bool NebMD::prepareImages()
         }
 
         json img_ctrl = m_controller;
-        img_ctrl["simplemd"] = sd;
+        // Each image needs its OWN random stream. Claude Generated 2026: handing every
+        // image the same seed would give all windows identical thermostat noise, so the
+        // replicas would be correlated by construction - the opposite of what an
+        // independent-window scheme requires. Deriving the seed from the image index keeps
+        // the run reproducible and makes the serial and the parallel result identical.
+        {
+            json sd_i = sd;
+            const int base = sd.contains("seed") && sd["seed"].is_number_integer()
+                ? sd["seed"].get<int>() : 0;
+            sd_i["seed"] = (base > 0 ? base : 20260802) + 7919 * (i + 1);
+            img_ctrl["simplemd"] = sd_i;
+        }
         // Distinct seed per image so velocities are independent.
         int base_seed = sd.value("seed", -1);
         img_ctrl["simplemd"]["seed"] = (base_seed <= 0) ? (1000 + i * 101) : (base_seed + i);
@@ -761,15 +1072,24 @@ bool NebMD::stepBand()
     std::vector<Geometry> Fspring = computeSpringForces(R, tau);
     int nat = static_cast<int>(R[0].rows());
 
-    // 1) Compute + inject the external (spring / nudging) force for each interior image.
-    for (int i = 1; i < m_nimages - 1; ++i) {
+    // 1) Compute + inject the external (spring / nudging) force for every live image.
+    //
+    // Claude Generated 2026: the loop used to run over interior images only, so with
+    // fixed_endpoints=false the endpoint images were created but never driven or advanced
+    // - opt-in behaviour that silently did nothing. They are now included.
+    //
+    // This is NOT a change of the default: with fixed_endpoints=true the endpoints are
+    // nullptr and the guard below skips them, so the default path is bit-identical. The
+    // opt-in is the existing -nebmd.fixed_endpoints flag. It matters for short paths,
+    // where a usable profile needs the endpoints sampled as well.
+    for (int i = 0; i < m_nimages; ++i) {
         if (m_image_done[i])
             continue;
         SimpleMD* img = m_images[i];
         if (!img)
             continue;
 
-        Geometry g = img->gradient(); // true gradient dE/dR at the current position (Eh/Å)
+        Geometry g = img->trueGradient(); // true gradient dE/dR at the current position (Eh/Å)
         Geometry Fext = Geometry::Zero(nat, 3);
         // applyExternalForces() adds its argument to m_eigen_gradient (dE/dR); the integrator
         // then applies force = -gradient. So to apply a desired FORCE F_desired we must pass
@@ -794,7 +1114,12 @@ bool NebMD::stepBand()
         //                                    in the plain NEB-MD mode.
         // Keeping the springs biases the sampling (the bias is not removed by WHAM), so
         // it trades statistical rigour for staying on the path - report both.
-        if (m_umbrella) {
+        // Claude Generated 2026: scheme 'string' - no springs, no nudging; only the restraint
+        // to the frame M_i of the (between updates frozen) mean path.
+        if (m_string) {
+            Fext.setZero();
+            applyStringRestraint(i, img, Fext);
+        } else if (m_umbrella) {
             if (!m_umbrella_keep_springs)
                 Fext.setZero();
             applyUmbrellaBias(i, img, Fext);
@@ -809,50 +1134,167 @@ bool NebMD::stepBand()
             img->setMTDProjection(tau[i]);
     }
 
-    // 2) Advance every interior image by one MD step (independent thermostats/velocities).
+    // 2) Advance every live image by one MD step (independent thermostats/velocities).
+    // Clamped endpoints are null (see the note above) and are skipped.
     bool any_running = false;
-    for (int i = 1; i < m_nimages - 1; ++i) {
-        if (m_image_done[i])
-            continue;
-        SimpleMD* img = m_images[i];
-        if (!img)
-            continue;
-        const bool ok = img->step(); // false at max_time / instability / stop-file
-        if (!ok)
-            m_image_done[i] = true;
-        else
-            any_running = true;
+    // Claude Generated 2026: in the decoupled scheme the windows share nothing, so the MD
+    // steps may run concurrently. Only step() is parallelised - it contains the energy and
+    // gradient evaluation and therefore essentially all of the cost. Everything that
+    // touches shared state (bias, accumulators, RNG, trace) stays on the serial path.
+    std::vector<int> live;
+    live.reserve(m_nimages);
+    for (int i = 0; i < m_nimages; ++i)
+        if (!m_image_done[i] && m_images[i])
+            live.push_back(i);
+
+    // Claude Generated 2026: scheme 'string' as well - between two updates every image is
+    // coupled only to its frozen frame M_i (restraint applied above, serially).
+    if ((m_independent || m_string) && m_window_threads > 1 && live.size() > 1) {
+        std::vector<char> ok(live.size(), 1);
+#pragma omp parallel for num_threads(m_window_threads) schedule(dynamic)
+        for (int k = 0; k < static_cast<int>(live.size()); ++k)
+            ok[k] = m_images[live[k]]->step() ? 1 : 0;
+        for (size_t k = 0; k < live.size(); ++k) {
+            if (!ok[k])
+                m_image_done[live[k]] = true;
+            else
+                any_running = true;
+        }
+        killRunawayWindows(live);
+    } else {
+        for (int i : live) {
+            const bool ok = m_images[i]->step(); // false at max_time / instability / stop-file
+            if (!ok)
+                m_image_done[i] = true;
+            else
+                any_running = true;
+        }
+        killRunawayWindows(live);
     }
 
+    // Claude Generated 2026: string stage - a dead image is frozen (never integrated, its
+    // mean-path frame never updated again), so every later update would measure a small
+    // Delta_max on a partly unrelaxed path and report a convergence that does not hold.
+    // With string_abort_on_dead the stage stops here; start() writes no string path and
+    // failed() turns into a non-zero exit code (pipeline: stage 2 is not started).
+    if (m_string && m_string_abort_on_dead) {
+        std::string dead;
+        for (int i : live)
+            if (m_window_died[i] == m_step)
+                dead += fmt::format("{}image {} (T = {:.4g} K)", dead.empty() ? "" : ", ", i, m_window_died_T[i]);
+        if (!dead.empty()) {
+            m_string_aborted = true;
+            CurcumaLogger::set_verbosity(m_band_verbosity);
+            CurcumaLogger::error(fmt::format(
+                "NEB-MD string: ABORTED - dead image(s) at MD step {} after {} mean-path update(s): {}. "
+                "A dead image is frozen and its part of the path would stay unrelaxed, so the string "
+                "stage is stopped (string_abort_on_dead = true) and no string path is written. "
+                "Hints: reduce string_alpha and/or string_max_step (now {:.3f} A) so the restraint "
+                "centres move in smaller steps; check the endpoints and the start path (path_file) "
+                "for clashes or a wrong atom order; lower string_k (now {:.4f}); see "
+                "<base>.neb.string_history.csv for the update that preceded the failure.",
+                m_step, m_string_updates, dead, m_string_max_step, m_string_k));
+            return false;
+        }
+    }
+
+    // (The constraint is no longer applied here - it lives inside SimpleMD::Rattle().)
+
     ++m_step;
+    if (m_window_threads > 1)
+        CurcumaLogger::set_verbosity(m_band_verbosity);
 
     // Claude Generated 2026: string reparametrisation - redistribute the images to equal
     // arclength so they stay well-defined umbrella windows (required for a meaningful PMF).
     if (m_reparametrize > 0 && m_step % m_reparametrize == 0)
         reparametrizeString();
 
-    // Claude Generated 2026: accumulate the mean force AFTER equilibration. The gradients
-    // read above belong to the pre-step geometry, which is exactly the configuration the
-    // averages should be taken over, so we accumulate with the tangents of this step.
-    // Claude Generated 2026: the arclength mean-force estimator is only meaningful with
-    // the neighbour springs. In umbrella mode no spring force is applied (the restraint
-    // acts on the path CV instead), so subtracting Fspring in accumulatePMF() would
-    // remove a bias that was never added - producing garbage (observed: 2.8e5 kcal/mol
-    // over a 500 A "arclength"). WHAM on the CV histograms is the estimator there.
-    if (m_pmf && !m_umbrella && m_step > m_pmf_equilibration)
-        accumulatePMF(R, tau, Fspring);
+    // Claude Generated 2026: scheme 'string' - accumulate the aligned image averages every
+    // step and update the mean path every string_update steps; stop on convergence.
+    if (m_string) {
+        for (int i : live)
+            if (m_images[i] && !m_image_done[i])
+                accumulateStringMean(i);
+        if (m_step % m_string_update == 0 && updateStringPath()) {
+            if (m_step % m_dump == 0) {
+                writePathSnapshot(m_step);
+                writeEnergyTable(m_step);
+            }
+            return false; // converged
+        }
+    }
 
     // Umbrella histograms (after equilibration): record s(R) of every window.
+    // Endpoints are included when they are integrated (fixed_endpoints=false).
+    // Calibration phase: measure the local slope, then set the per-window stiffness once.
+    if (m_adaptive_k && m_independent && m_path_cv) {
+        if (m_step > m_pmf_equilibration / 2 && m_step < m_pmf_equilibration)
+            accumulateCalibration(live);
+        else if (m_step == m_pmf_equilibration)
+            calibrateStiffness();
+    }
+
     if (m_umbrella && m_path_cv && m_step > m_pmf_equilibration) {
-        for (int i = 1; i < m_nimages - 1; ++i) {
-            if (!m_images[i] || m_image_done[i])
-                continue;
+        std::vector<int> acc;
+        acc.reserve(m_nimages);
+        for (int i = 0; i < m_nimages; ++i)
+            if (m_images[i] && !m_image_done[i])
+                acc.push_back(i);
+
+        // Claude Generated 2026: the accumulation is the expensive half of the window
+        // block - it evaluates the path CV with its gradient plus the finite-difference
+        // probes for div b, which on a small molecule costs more than the force field
+        // itself. It is therefore parallelised as well, with one buffer per image that is
+        // merged afterwards; the histogram entries are already per image and race-free.
+        std::vector<FeLocal> loc;
+        if (m_independent) {
+            loc.resize(acc.size());
+            for (auto& L : loc) {
+                L.count.assign(m_fe_bins, 0);
+                L.force.assign(m_fe_bins, 0.0);
+                L.div.assign(m_fe_bins, 0.0);
+                L.ssum.assign(m_fe_bins, 0.0);
+                L.wsum.assign(m_fe_bins, 0.0);
+                L.rejected_bin.assign(m_fe_bins, 0);
+            }
+        }
+
+#pragma omp parallel for num_threads(m_window_threads) schedule(dynamic) \
+    if (m_independent && m_window_threads > 1 && acc.size() > 1)
+        for (int k = 0; k < static_cast<int>(acc.size()); ++k) {
+            const int i = acc[k];
             const double s = m_path_cv->s(m_images[i]->positions());
             m_umbrella_ssum[i] += s;
             ++m_umbrella_n[i];
             const int b = static_cast<int>(s * m_umbrella_bins);
             if (b >= 0 && b < m_umbrella_bins)
                 ++m_hist[i][b];
+            if (m_independent)
+                accumulateMeanForce(i, m_images[i], loc[k], m_probe_rng[i]);
+        }
+
+        // Serial merge.
+        for (size_t k = 0; k < loc.size(); ++k) {
+            const int i = acc[k];
+            for (int b = 0; b < m_fe_bins; ++b) {
+                m_fe_count[b] += loc[k].count[b];
+                m_fe_force[b] += loc[k].force[b];
+                m_fe_div[b] += loc[k].div[b];
+                m_fe_ssum[b] += loc[k].ssum[b];
+                m_fe_wsum[b] += loc[k].wsum[b];
+            }
+            m_win_count[i] += loc[k].win_n;
+            m_win_s_sum[i] += loc[k].win_s;
+            m_win_s2_sum[i] += loc[k].win_s2;
+            m_win_z_sum[i] += loc[k].win_z;
+            m_win_w[i] += loc[k].win_w;
+            m_win_wf[i] += loc[k].win_wf;
+            m_win_wd[i] += loc[k].win_wd;
+            m_fe_rejected += loc[k].rejected;
+            m_win_rejected[i] += loc[k].rejected;
+            for (int b = 0; b < m_fe_bins && b < static_cast<int>(loc[k].rejected_bin.size()); ++b)
+                m_fe_rejected_bin[b] += loc[k].rejected_bin[b];
+            m_fe_nonfinite += loc[k].nonfinite;
         }
     }
 
@@ -1128,10 +1570,33 @@ void NebMD::setupUmbrella()
     // for the path collective variable and place one umbrella window per image.
     CitationRegistry::cite("pathcv");
     CitationRegistry::cite("wham");
-    m_path_cv = std::make_unique<PathCV>(m_image_geoms, m_start);
+    // Claude Generated 2026: the CV is built on cvFrames() - the image frames by default, the
+    // re-sampled / extended frames when cv_frames / cv_extend are set (buildCvPath).
+    const std::vector<Geometry>& cvp = cvFrames();
+    m_path_cv = std::make_unique<PathCV>(cvp, m_start);
     m_umbrella_s0.assign(m_nimages, 0.0);
+    // Claude Generated 2026: the window centres must be the s values the reference frames
+    // ACTUALLY have, not i/(N-1).
+    //
+    // s = sum_i (i-1) w_i / sum_i w_i / (N-1) equals i/(N-1) at frame i only in the limit
+    // lambda -> infinity, where each frame's Gaussian excludes all others. At finite
+    // lambda the neighbouring frames still carry weight and s is compressed towards the
+    // middle: measured for a 3-frame ethane path with lambda*d^2 = 1, the first frame has
+    // s = 0.148 and the last s = 0.855. Windows placed at 0 and 1 then target values that
+    // no structure on the path can reach, so the restraint pushes permanently against an
+    // unreachable setpoint and the image is driven off the path. Evaluating s at the
+    // frames removes the problem exactly and costs one CV evaluation per image.
     for (int i = 0; i < m_nimages; ++i)
-        m_umbrella_s0[i] = static_cast<double>(i) / (m_nimages - 1);
+        m_umbrella_s0[i] = m_path_cv->s(m_image_geoms[i]);
+    {
+        const double span = m_umbrella_s0.back() - m_umbrella_s0.front();
+        if (span < 0.5)
+            CurcumaLogger::warn(fmt::format(
+                "Path CV: the reference frames only span s = {:.3f} .. {:.3f}. With so few frames "
+                "(or so small a lambda) the coordinate resolves the path poorly; consider more "
+                "frames for the CV than windows for the sampling.",
+                m_umbrella_s0.front(), m_umbrella_s0.back()));
+    }
     // Claude Generated 2026: auto-select the force constant so that neighbouring windows
     // actually OVERLAP - without overlap WHAM has nothing to stitch and returns garbage.
     // The thermal width of a harmonic window is sigma = sqrt(kT/k); requiring
@@ -1139,18 +1604,298 @@ void NebMD::setupUmbrella()
     // (Measured failure of the previous fixed default k=200: sigma/ds = 0.02, nine gaps
     // in the histogram, WHAM barrier 351 kcal/mol - meaningless.)
     if (m_umbrella_k <= 0.0) {
-        const double kT = 3.166811e-6 * 300.0;
+        const double kT = thermalEnergy();
         const double ds = 1.0 / std::max(m_nimages - 1, 1);
         m_umbrella_k = kT / (0.5 * ds * 0.5 * ds);
         CurcumaLogger::info(fmt::format(
             "NEB-MD: umbrella k auto-set to {:.4f} (sigma_s ~ {:.3f}, window spacing {:.3f})",
             m_umbrella_k, std::sqrt(kT / m_umbrella_k), ds));
     }
+    m_umbrella_kvec.assign(m_nimages, m_umbrella_k);
+    // Hand the constraint to the integrator, where it belongs (Claude Generated 2026):
+    // SimpleMD applies it inside Rattle(), i.e. before the kinetic energy is formed and
+    // before the thermostat runs. Applying it from outside after step() left the injected
+    // energy beyond the thermostat's reach and heated every constrained window to death.
+    if (m_constrain) {
+        for (int i = 0; i < m_nimages; ++i) {
+            if (!m_images[i])
+                continue;
+            PathCV* cv = m_path_cv.get();
+            m_images[i]->setScalarConstraint(
+                [cv](const Geometry& R, Geometry& grad) {
+                    double sv = 0.0, zv = 0.0;
+                    cv->evaluate(R, &sv, &zv, &grad, nullptr);
+                    return sv;
+                },
+                m_umbrella_s0[i], m_constrain_tol);
+        }
+        CurcumaLogger::result_fmt("NEB-MD: s held by a holonomic constraint (SHAKE/RATTLE inside "
+                                  "the integrator), tolerance {:.1e}", m_constrain_tol);
+    }
     m_hist.assign(m_nimages, std::vector<int>(m_umbrella_bins, 0));
     m_umbrella_ssum.assign(m_nimages, 0.0);
     m_umbrella_n.assign(m_nimages, 0);
     CurcumaLogger::result_fmt("NEB-MD: umbrella sampling on the path CV (lambda = {:.3f}, k = {:.1f}, "
                               "{} windows)", m_path_cv->lambda(), m_umbrella_k, m_nimages);
+
+    // Claude Generated 2026: conditioning of the path coordinate.
+    //
+    // The path CV can only tell two images apart if they are further apart than the
+    // molecule wanders on its own. The reference spacing is known here; the thermal
+    // amplitude is measured during the run and the ratio is reported at the end.
+    {
+        // Spacing and Z floor refer to the CV frames (identical to the image frames by default).
+        const int nat = static_cast<int>(cvp[0].rows());
+        const int ncv = static_cast<int>(cvp.size());
+        double dsum = 0.0;
+        for (int i = 1; i < ncv; ++i) {
+            double d2 = 0.0;
+            for (int a = 0; a < nat; ++a)
+                d2 += (cvp[i].row(a) - cvp[i - 1].row(a)).squaredNorm();
+            dsum += std::sqrt(d2 / nat);
+        }
+        m_path_spacing = dsum / std::max(ncv - 1, 1);
+        CurcumaLogger::result_fmt("NEB-MD: reference path spacing {:.4f} A per image "
+                                  "(total {:.3f} A, lambda*d^2 = {:.2f})",
+                                  m_path_spacing, dsum, m_path_cv->lambda() * m_path_spacing * m_path_spacing);
+
+        // Floor for |grad s|^2/m below which a sample is unusable. Evaluated at the
+        // MIDPOINTS between reference frames: s has a plateau at each frame, so the
+        // gradient is largest in between - that is the scale to normalise against.
+        std::vector<double> Zmid;
+        for (int i = 1; i < ncv; ++i) {
+            const Geometry mid = 0.5 * (cvp[i] + cvp[i - 1]);
+            double Z = 0.0;
+            pathBiasField(mid, &Z);
+            if (Z > 0.0)
+                Zmid.push_back(Z);
+        }
+        if (!Zmid.empty()) {
+            std::sort(Zmid.begin(), Zmid.end());
+            m_fe_Zfloor = 1e-3 * Zmid[Zmid.size() / 2];
+        }
+    }
+}
+
+
+void NebMD::accumulateCalibration(const std::vector<int>& live)
+{
+    // Claude Generated 2026: read off the local slope of the profile during equilibration.
+    // Legitimate because a restraint depending only on s leaves conditional averages
+    // untouched, so <b.grad E> is the unbiased mean force whatever the current stiffness.
+    if (!m_path_cv)
+        return;
+    for (int i : live) {
+        if (!m_images[i] || m_image_done[i])
+            continue;
+        const Geometry R = m_images[i]->positions();
+        const int nat = static_cast<int>(R.rows());
+        double sv = 0.0, zv = 0.0;
+        Geometry ds;
+        m_path_cv->evaluate(R, &sv, &zv, &ds, nullptr);
+        double Z = 0.0;
+        for (int a = 0; a < nat; ++a)
+            Z += ds.row(a).squaredNorm() / std::max(m_masses[a], 1e-12);
+        if (Z < m_fe_Zfloor)
+            continue;
+        const Geometry g = m_images[i]->trueGradient();
+        double bdotg = 0.0;
+        for (int a = 0; a < nat; ++a)
+            bdotg += ds.row(a).dot(g.row(a)) / (std::max(m_masses[a], 1e-12) * Z);
+        if (!std::isfinite(bdotg))
+            continue;
+        m_calib_dg_sum[i] += bdotg;
+        ++m_calib_n[i];
+    }
+}
+
+void NebMD::calibrateStiffness()
+{
+    // k_i > |dG/ds|_i / (ds/2): stiff where the profile is steep, soft where it is flat.
+    // A single global value cannot satisfy both ends at once, which is why the basin
+    // windows held and the flank windows slid in every run of this work.
+    double s0min = 1e30, s0max = -1e30;
+    for (int i = 0; i < m_nimages; ++i) {
+        s0min = std::min(s0min, m_umbrella_s0[i]);
+        s0max = std::max(s0max, m_umbrella_s0[i]);
+    }
+    const double dsw = (s0max - s0min) / std::max(m_nimages - 1, 1);
+    const double kmax = m_adaptive_k_max * m_umbrella_k;
+    bool capped = false;
+    CurcumaLogger::result("NEB-MD: calibrated per-window stiffness (from the measured local slope)");
+    for (int i = 0; i < m_nimages; ++i) {
+        if (m_calib_n[i] < 10)
+            continue;
+        const double dg = std::abs(m_calib_dg_sum[i] / static_cast<double>(m_calib_n[i]));
+        double k_i = dg / std::max(0.5 * dsw, 1e-12);
+        k_i = std::max(k_i, m_umbrella_k); // never softer than requested
+        if (k_i > kmax) { k_i = kmax; capped = true; }
+        m_umbrella_kvec[i] = k_i;
+        CurcumaLogger::result(fmt::format("    window {:>2}: |dG/ds| = {:.4f} Eh -> k = {:.3f}",
+                                          i, dg, k_i));
+    }
+    // Put every window back on its reference frame before production starts.
+    //
+    // Claude Generated 2026: without this the calibration arrives too late. During the
+    // equilibration phase a window on a steep flank slides away, and once it has crossed a
+    // maximum it cannot be recovered by a restraint sized from the LOCAL slope - measured
+    // on helicene, the restoring force was already three times the local dG/ds while the
+    // window kept sitting 1.45 spacings away, because returning would have meant climbing
+    // back over the barrier. Resetting the geometry costs nothing statistically: the
+    // equilibration samples are discarded anyway, and the reference frame is by definition
+    // the place the window is meant to sample. Velocities are kept and only rescaled if the
+    // discontinuous coordinate change has thrown the temperature off.
+    int reset = 0;
+    for (int i = 0; i < m_nimages; ++i) {
+        if (!m_images[i] || m_image_done[i])
+            continue;
+        const double T_before = m_images[i]->currentTemperature();
+        m_images[i]->setPositions(m_image_geoms[i]);
+        const double T_target = m_images[i]->targetTemperature();
+        if (T_before > 1e-6 && T_target > 1e-6 && T_before > 2.0 * T_target)
+            m_images[i]->rescaleVelocities(std::sqrt(T_target / T_before));
+        m_prev_s[i] = -1.0; // the jump detector must not see the reset as a CV jump
+        ++reset;
+    }
+    if (reset > 0)
+        CurcumaLogger::result_fmt("NEB-MD: {} windows reset onto their reference frames before "
+                                  "production (calibration finished)", reset);
+
+    if (capped)
+        CurcumaLogger::warn("The calibrated stiffness hit its upper bound. The profile is steeper "
+                            "than the restraint may be made without endangering the window; the "
+                            "affected windows will not hold and the barrier is a lower bound.");
+}
+
+
+bool NebMD::constrainWindow(int i)
+{
+    // Claude Generated 2026: hold s(R) = s0 exactly (SHAKE), then remove the velocity
+    // component along the constraint (RATTLE).
+    //
+    //   SHAKE:   R_a <- R_a - (g/Z) grad_a s / m_a   iterated until |g| = |s - s0| < tol
+    //   RATTLE:  v_a <- v_a - (nu)  grad_a s / m_a ,  nu = (sum_a v_a.grad_a s) / Z
+    //
+    // with Z = sum_a |grad_a s|^2 / m_a. Both steps move along the same direction as the
+    // constraint force, which is what makes them the discrete form of a Lagrange
+    // multiplier rather than an arbitrary correction.
+    //
+    // This is applied after the integrator has taken its step, not inside its half-kicks,
+    // so time reversibility is only approximate - the same caveat that the injected spring
+    // force carries (see the note at the top of nebmd.h). It is nevertheless a genuine
+    // constraint: s is exact at every point where anything is measured.
+    SimpleMD* img = m_images[i];
+    if (!img || !m_path_cv)
+        return false;
+    Geometry R = img->positions();
+    const Geometry R_before = R;
+    const int nat = static_cast<int>(R.rows());
+    const double s_target = m_umbrella_s0[i];
+
+    double sv = 0.0, zv = 0.0;
+    Geometry ds;
+    int it = 0;
+    for (; it < 100; ++it) {
+        m_path_cv->evaluate(R, &sv, &zv, &ds, nullptr);
+        const double g = sv - s_target;
+        if (std::abs(g) < m_constrain_tol)
+            break;
+        double Z = 0.0;
+        for (int a = 0; a < nat; ++a)
+            Z += ds.row(a).squaredNorm() / std::max(m_masses[a], 1e-12);
+        if (Z < 1e-30)
+            return false;
+        const double mu = g / Z;
+        for (int a = 0; a < nat; ++a)
+            R.row(a) -= (mu / std::max(m_masses[a], 1e-12)) * ds.row(a);
+    }
+    if (it >= 100) {
+        ++m_shake_fail;
+        return false;
+    }
+
+    // The position correction must be carried into the velocities: dv = dr/dt, exactly as
+    // SimpleMD::Rattle() does for its bond constraints (the m_dT_inverse factors there).
+    //
+    // Claude Generated 2026 - CORRECTED. The first version moved the positions and then
+    // projected the velocities independently. That is not a constraint but two unrelated
+    // corrections, and it pumps energy into the system at every step: measured, three of
+    // four windows heated past 3000 K and were destroyed. Deriving the velocity change
+    // from the position change is what makes the pair a discrete Lagrange multiplier.
+    const Geometry dR = R - R_before;
+    Geometry v = img->velocities();
+    const double dt = std::max(img->timeStep(), 1e-12) * CurcumaUnit::Constants::FS_TO_MD_TIME; // velocities are in integrator units
+    v += dR / dt;
+    img->setPositions(R);
+
+    // Second RATTLE stage: remove the remaining velocity component along the constraint,
+    // so that ds/dt = 0 and the coordinate stays put over the following step.
+    m_path_cv->evaluate(R, &sv, &zv, &ds, nullptr);
+    double Z = 0.0, vdot = 0.0;
+    for (int a = 0; a < nat; ++a) {
+        const double m = std::max(m_masses[a], 1e-12);
+        Z += ds.row(a).squaredNorm() / m;
+        vdot += v.row(a).dot(ds.row(a));
+    }
+    if (Z > 1e-30) {
+        const double nu = vdot / Z;
+        for (int a = 0; a < nat; ++a)
+            v.row(a) -= (nu / std::max(m_masses[a], 1e-12)) * ds.row(a);
+    }
+    img->setVelocities(v);
+    return true;
+}
+
+void NebMD::killRunawayWindows(const std::vector<int>& live)
+{
+    // Claude Generated 2026: a window that has blown up must leave the averages.
+    //
+    // The characteristic failure in this work was not a crash but a transient: the
+    // temperature jumped by many orders of magnitude for a short while, the thermostat
+    // pulled it back, and the run continued with a damaged molecule. Nothing in the mean
+    // values showed it - only the final potential energy did. Such a window is not noisy,
+    // it is gone, and everything it contributes afterwards is meaningless.
+    double limit = m_max_temperature;
+    if (limit <= 0.0) {
+        double T0 = 300.0;
+        for (int i : live)
+            if (m_images[i]) { T0 = std::max(m_images[i]->targetTemperature(), 1.0); break; }
+        limit = 10.0 * T0;
+    }
+    for (int i : live) {
+        if (!m_images[i] || m_image_done[i])
+            continue;
+        const double T = m_images[i]->currentTemperature();
+        if (!std::isfinite(T) || T > limit) {
+            m_image_done[i] = true;
+            m_window_died[i] = m_step;
+            if (i < static_cast<int>(m_window_died_T.size()))
+                m_window_died_T[i] = T;
+            CurcumaLogger::warn(fmt::format(
+                "NEB-MD: window {} declared dead at step {} (T = {:.3g} K > {:.0f} K). It is "
+                "removed from the integration and from all averages.", i, m_step, T, limit));
+        }
+    }
+}
+
+double NebMD::biasRampFactor() const
+{
+    // Claude Generated 2026: adiabatic switch-on of the restraints.
+    //
+    // Every image starts exactly ON the reference path and exactly AT its setpoint
+    // (s0_i = s(gamma_i)), so at t = 0 no restraint force is needed at all. Switching the
+    // full stiffness on immediately delivers a shock that can push the image off the path
+    // - and once z has grown, all distances d_i grow together, the weights flatten, s
+    // becomes ill-defined and grad s small and noisy. The restraint then pushes in a
+    // meaningless direction with a magnitude that keeps growing with the deviation, which
+    // is how helicene images were torn apart at k = 5.
+    //
+    // The ramp uses a raised cosine, so it starts and ends with zero slope: no kick at
+    // switch-on and no discontinuity when production sampling begins.
+    if (m_ramp_steps <= 0 || m_step >= m_ramp_steps)
+        return 1.0;
+    const double t = static_cast<double>(m_step) / static_cast<double>(m_ramp_steps);
+    return 0.5 * (1.0 - std::cos(3.14159265358979323846 * t));
 }
 
 void NebMD::applyUmbrellaBias(int i, SimpleMD* img, Geometry& Fext) const
@@ -1162,8 +1907,55 @@ void NebMD::applyUmbrellaBias(int i, SimpleMD* img, Geometry& Fext) const
     double s = 0.0, z = 0.0;
     Geometry ds, dz;
     m_path_cv->evaluate(img->positions(), &s, &z, &ds, m_kz > 0.0 ? &dz : nullptr);
+    // Jump diagnostic (Claude Generated 2026): a best-fit RMSD can switch alignment
+    // branch, which leaves s continuous but its gradient discontinuous. The restraint
+    // then delivers an impulsive force - the suspected origin of the isolated
+    // temperature excursions (one dump interval at 1e7 K, then recovery).
+    const double gnorm = ds.norm();
+    if (m_prev_s[i] >= 0.0) {
+        const double jump = std::abs(s - m_prev_s[i]);
+        if (jump > m_img_max_jump[i]) {
+            m_img_max_jump[i] = jump;
+            m_img_max_jump_step[i] = m_step;
+        }
+    }
+    m_prev_s[i] = s;
+    if (m_cv_trace) {
+        if (!m_cv_trace_file.is_open()) {
+            m_cv_trace_file.open(outputPath(Basename() + ".neb.cvtrace.csv"));
+            m_cv_trace_file << "step,image,s,ds_step,grad_s_norm,z,T\n";
+        }
+        m_cv_trace_file << m_step << "," << i << "," << fmt::format("{:.8f}", s) << ","
+                        << fmt::format("{:.8f}", m_prev_s[i] < 0 ? 0.0 : std::abs(s - m_prev_s[i]))
+                        << "," << fmt::format("{:.6f}", gnorm) << "," << fmt::format("{:.6f}", z)
+                        << "," << fmt::format("{:.2f}", img->currentTemperature()) << "\n";
+    }
+
+    if (m_constrain)
+        return; // s is held exactly; an additional restraint would be double bookkeeping
+    const double ramp = biasRampFactor();
     const double dev = s - m_umbrella_s0[i];
-    Fext += (m_umbrella_k * dev) * ds;
+    const double k_i = windowK(i);
+    Geometry bias = (ramp * k_i * dev) * ds;
+    // Claude Generated 2026: cap the restraint force. Where the path CV saturates, |grad s|
+    // can spike and the restraint then destroys the molecule instead of holding it. The
+    // cap keeps the run alive; the counter makes sure the event is not silently ignored,
+    // because frequent capping means the coordinate is badly conditioned.
+    // The cap must scale the WHOLE vector by one factor, not each atom separately.
+    // Per-atom clipping changes the DIRECTION of the force, so it is no longer parallel
+    // to grad s - it then stops restraining s and instead deforms the molecule along a
+    // direction with no physical meaning. Measured: with per-atom clipping and a stiff
+    // restraint, helicene dissociated (Epot -3.2 .. -9.2 Eh instead of -9.2), while the
+    // same run with a soft restraint stayed intact.
+    const double kMaxBias = m_bias_fmax; // Eh/Angstrom, largest per-atom component
+    double fmax = 0.0;
+    for (int a = 0; a < bias.rows(); ++a)
+        fmax = std::max(fmax, bias.row(a).norm());
+    if (fmax > kMaxBias) {
+        bias *= kMaxBias / fmax; // uniform scaling: direction preserved
+        ++m_img_capped[i];
+    }
+    Fext += bias;
 
     // Tube restraint on the PERPENDICULAR coordinate: V_z = k_z/2 * z^2, applied only
     // beyond a tolerance so the image can fluctuate freely inside the tube.
@@ -1176,7 +1968,7 @@ void NebMD::applyUmbrellaBias(int i, SimpleMD* img, Geometry& Fext) const
     if (m_kz > 0.0) {
         const double excess = z - m_z_tolerance;
         if (excess > 0.0)
-            Fext += (m_kz * excess) * dz;
+            Fext += (ramp * m_kz * excess) * dz;
     }
 }
 
@@ -1191,44 +1983,19 @@ void NebMD::writeWHAM() const
     // iterated until the offsets f_i stop changing; G(s) = -kT ln P(s).
     if (!m_path_cv)
         return;
-    const double kT = 3.166811e-6 * 300.0;  // Eh at 300 K (thermostat target)
+    const double kT = thermalEnergy(); // Eh at the thermostat setpoint
     const double kcal = 627.5094740631;
     const int B = m_umbrella_bins;
 
-    std::vector<double> f(m_nimages, 0.0), P(B, 0.0);
-    std::vector<double> Ntot(m_nimages, 0.0);
-    for (int i = 0; i < m_nimages; ++i)
+    std::vector<double> Ntot(m_nimages, 0.0), kvec(m_nimages, 0.0);
+    for (int i = 0; i < m_nimages; ++i) {
         Ntot[i] = static_cast<double>(m_umbrella_n[i]);
-
-    auto bias = [&](int i, int b) {
-        const double s = (b + 0.5) / B;
-        const double d = s - m_umbrella_s0[i];
-        return 0.5 * m_umbrella_k * d * d;
-    };
-
-    for (int iter = 0; iter < 2000; ++iter) {
-        // P(s) from the current offsets
-        for (int b = 0; b < B; ++b) {
-            double num = 0.0, den = 0.0;
-            for (int i = 0; i < m_nimages; ++i) {
-                num += m_hist[i][b];
-                den += Ntot[i] * std::exp(-(bias(i, b) - f[i]) / kT);
-            }
-            P[b] = (den > 1e-300) ? num / den : 0.0;
-        }
-        // new offsets
-        double maxdev = 0.0;
-        for (int i = 0; i < m_nimages; ++i) {
-            double sum = 0.0;
-            for (int b = 0; b < B; ++b)
-                sum += P[b] * std::exp(-bias(i, b) / kT);
-            const double fnew = (sum > 1e-300) ? -kT * std::log(sum) : f[i];
-            maxdev = std::max(maxdev, std::abs(fnew - f[i]));
-            f[i] = fnew;
-        }
-        if (maxdev < 1e-10)
-            break;
+        // Per-window stiffness: calibrateStiffness() sets m_umbrella_kvec[i], and that is
+        // the k the dynamics used (applyUmbrellaBias). The global m_umbrella_k here
+        // unbiased the histograms with the wrong potential whenever calibration was active.
+        kvec[i] = windowK(i);
     }
+    const std::vector<double> P = curcuma::whamSolve(m_hist, Ntot, m_umbrella_s0, kvec, kT);
 
     // G(s) = -kT ln P(s), shifted to zero at its minimum
     std::vector<double> G(B, std::numeric_limits<double>::quiet_NaN());
@@ -1343,16 +2110,13 @@ double NebMD::reparametrizeString()
     // small per-step displacements of an MD the difference is negligible, and linear
     // interpolation cannot introduce the overshoot that a spline can - which would create
     // exactly the atom-atom clashes we fight elsewhere.)
-    const int nat = static_cast<int>(m_start_geom.rows());
     std::vector<Geometry> R = currentPath();
 
-    // Cumulative arclength of the current polyline.
-    std::vector<double> s(m_nimages, 0.0);
-    for (int i = 1; i < m_nimages; ++i)
-        s[i] = s[i - 1] + (R[i] - R[i - 1]).norm();
-    const double total = s[m_nimages - 1];
-    if (total < 1e-9)
-        return 0.0;
+    // Claude Generated 2026: the polyline/arclength kernel now lives in
+    // curcuma::string_path::reparametrizeEqualArclength (unweighted = the former inline code,
+    // bit-identical, checked in test_string_path (d)); here only the application to the live
+    // images remains.
+    const std::vector<Geometry> targets = curcuma::string_path::reparametrizeEqualArclength(R, {});
 
     double disp2 = 0.0;
     int moved = 0;
@@ -1360,16 +2124,7 @@ double NebMD::reparametrizeString()
         if (!m_images[i])
             continue; // clamped image: never moved
 
-        // Target arclength for a uniform distribution.
-        const double s_target = total * static_cast<double>(i) / static_cast<double>(m_nimages - 1);
-
-        // Locate the segment containing s_target and interpolate linearly within it.
-        int seg = 0;
-        while (seg < m_nimages - 2 && s[seg + 1] < s_target)
-            ++seg;
-        const double ds = s[seg + 1] - s[seg];
-        const double t = (ds > 1e-12) ? (s_target - s[seg]) / ds : 0.0;
-        const Geometry target = (1.0 - t) * R[seg] + t * R[seg + 1];
+        const Geometry& target = targets[i];
 
         const double d = (target - R[i]).norm();
         if (d < 1e-10)
@@ -1394,307 +2149,1272 @@ double NebMD::reparametrizeString()
     return (moved > 0) ? std::sqrt(disp2 / moved) : 0.0;
 }
 
-void NebMD::accumulatePMF(const std::vector<Geometry>& R,
-                          const std::vector<Geometry>& tau,
-                          const std::vector<Geometry>& Fspring)
+/* ===================== Scheme 'string' (Claude Generated 2026) =====================
+ * Finite-temperature string, stage 1 of the string -> path-CV chain. See nebmd.h for the
+ * method; the pure geometry (Kabsch, averaging frames, reparametrisation) lives in
+ * curcuma::string_path. */
+
+namespace {
+/*! Weighted squared norm sum_a w_a |d_a|^2 (uniform when w is empty). Claude Generated 2026. */
+double stringWeightedSq(const Geometry& d, const std::vector<double>& w)
 {
-    // Claude Generated 2026: accumulate <F.tau> per image plus the arclength coordinate.
-    // Called once per band step AFTER the equilibration phase.
-    const int nat = static_cast<int>(R[0].rows());
+    if (w.empty())
+        return d.squaredNorm();
+    double s = 0.0;
+    for (int a = 0; a < d.rows(); ++a)
+        s += w[static_cast<size_t>(a)] * d.row(a).squaredNorm();
+    return s;
+}
+} // namespace
 
-    // Arclength: cumulative distance along the current band.
-    std::vector<double> s(m_nimages, 0.0);
-    for (int i = 1; i < m_nimages; ++i)
-        s[i] = s[i - 1] + (R[i] - R[i - 1]).norm();
-
-    for (int i = 0; i < m_nimages; ++i) {
-        m_pmf_arc_sum[i] += s[i];
-        if (!m_images[i])
-            continue; // clamped endpoint: no dynamics, no mean force
-
-        // -F_true . tau  =  +g . tau  (g is the gradient dE/dR)
-        const Geometry g = m_images[i]->gradient();
-        double gdot = 0.0;
-        for (int a = 0; a < nat; ++a)
-            gdot += g.row(a).dot(tau[i].row(a));
-        m_pmf_force_sum[i] += gdot;
-
-        // Spring contribution. Claude Generated 2026 - CORRECTED.
-        //
-        // The previous code treated the spring as an umbrella bias and SUBTRACTED its
-        // mean force from <grad E . tau>. That is wrong, and measurably so: an umbrella
-        // bias is an external potential with a FIXED centre, whereas the NEB spring
-        // couples to the neighbouring images, which fluctuate themselves. In a
-        // stationary band each image satisfies
-        //
-        //     <F_true . tau> + <F_spring . tau> ~ 0
-        //
-        // because the spring is exactly what balances the true force and keeps the image
-        // at its position. Subtracting one from the other therefore cancels the signal
-        // rather than removing a bias - which is why the barrier COLLAPSED as sampling
-        // improved (58.4 kcal/mol at 400 fs -> 4.69 at 100 ps).
-        //
-        // The correct reading is the opposite one: in the constrained/stationary
-        // ensemble the mean spring force IS the negative mean thermodynamic force
-        // (den Otter & Briels, JCP 109, 4139 (1998)), so
-        //
-        //     dG/ds = <grad E . tau>            (unconstrained part)
-        //
-        // is already the estimator, and the spring term must NOT enter it. We keep
-        // accumulating it for diagnostics: |<F_spring.tau>| ~ |<grad E.tau>| is the
-        // signature of a well-equilibrated band, and the residual of the two is a
-        // direct measure of how far from stationarity the run is.
-        double sdot = 0.0;
-        for (int a = 0; a < nat; ++a)
-            sdot += Fspring[i].row(a).dot(tau[i].row(a));
-        m_pmf_spring_sum[i] += -sdot;
-
-        // Metric (Fixman) term. Claude Generated 2026.
-        //
-        // s is a curvilinear coordinate, so the volume element of the constrained
-        // ensemble is not constant and the free-energy derivative carries an extra
-        // contribution
-        //
-        //     dG/ds |_metric = -kT/2 * d ln Z / ds ,   Z = sum_a |tau_a|^2 / m_a
-        //
-        // (Z is the mass metric of the CV; for a unit tangent it reduces to the
-        // mass-weighted norm of the tangent). Reference: Fixman, PNAS 71, 3050 (1974);
-        // den Otter & Briels, J. Chem. Phys. 109, 4139 (1998) for the constrained-MD
-        // form used here.
-        //
-        // d ln Z / ds is taken as a central difference over the neighbouring images,
-        // which is the only s-resolution the band provides. Endpoints and images whose
-        // neighbours coincide are skipped (the term is then undefined, not zero).
-        if (m_fixman && i > 0 && i < m_nimages - 1) {
-            auto metric = [&](const Geometry& t) {
-                double Z = 0.0;
-                for (int a = 0; a < nat; ++a)
-                    Z += t.row(a).squaredNorm() / std::max(m_masses[a], 1e-12);
-                return Z;
-            };
-            const double Zp = metric(tau[i + 1]);
-            const double Zm = metric(tau[i - 1]);
-            const double ds = (R[i + 1] - R[i - 1]).norm();
-            if (Zp > 1e-30 && Zm > 1e-30 && ds > 1e-12) {
-                const double kT = 3.166811e-6 * 300.0; // Eh at the thermostat setpoint
-                const double dlnZ = (std::log(Zp) - std::log(Zm)) / ds;
-                m_pmf_fixman_sum[i] += -0.5 * kT * dlnZ;
-            }
-        }
-
-        const double e = m_images[i]->potentialEnergy();
-        m_pmf_epot_sum[i] += e;
-        m_pmf_epot_sq_sum[i] += e * e;
+void NebMD::prepareStringStartPath()
+{
+    // Claude Generated 2026: consecutive Kabsch alignment + equal-arclength reparametrisation of
+    // the start path in the restraint metric, BEFORE the images are built, so every image starts
+    // exactly on its prepared frame (energy/gradient consistent, no setPositions). Without it
+    // update 1 measures and applies the reparametrisation of an unequally spaced / unaligned start
+    // path (helicene ORCA MEP: 0.28 A, absorbed in 0.05 A trust-radius steps over 5 updates).
+    namespace sp = curcuma::string_path;
+    m_string_prep_shift = 0.0;
+    if (m_image_geoms.size() < 3)
+        return;
+    const std::vector<double> w = m_mass_weighted_spring ? m_masses : std::vector<double>();
+    std::vector<Geometry> P = sp::reparametrizeEqualArclength(sp::alignConsecutive(m_image_geoms, w), w);
+    const double shift = sp::maxFrameDisplacement(P, m_image_geoms, w, true);
+    m_string_prep_shift = shift;
+    if (shift > 1e-6) {
+        m_image_geoms = P;
+        CurcumaLogger::result_fmt("NEB-MD string: start path prepared (aligned + equal arclength), "
+                                  "largest best-fit shift {:.3e} A", shift);
+    } else {
+        CurcumaLogger::result_fmt("NEB-MD string: start path already aligned and equidistant "
+                                  "(largest shift {:.2e} A <= 1e-6 A), left unchanged", shift);
     }
-    ++m_pmf_samples;
 }
 
-void NebMD::writeFreeEnergyProfile() const
+void NebMD::setupString()
 {
-    CitationRegistry::cite("denotter");
-    if (m_fixman)
-        CitationRegistry::cite("fixman");
-    if (m_pmf_samples <= 0) {
-        CurcumaLogger::warn("NEB-MD: no PMF samples collected (run longer than pmf_equilibration) "
-                            "- skipping the free-energy profile.");
-        return;
-    }
+    // Claude Generated 2026: freeze the starting mean path, choose k, open the history file.
+    const int nat = static_cast<int>(m_image_geoms[0].rows());
+    m_string_w = m_mass_weighted_spring ? m_masses : std::vector<double>();
+    m_string_path = m_image_geoms; // the images start exactly on their frames (zero restraint)
+    m_string_sum.assign(m_nimages, Geometry::Zero(nat, 3));
+    m_string_n.assign(m_nimages, 0);
+    m_string_capped.assign(m_nimages, 0);
+    m_string_updates = 0;
+    m_string_converged_count = 0;
+    m_string_converged = false;
+    m_string_last_delta = -1.0;
+    m_string_aborted = false;
+    m_string_last_scale = 1.0;
+    m_string_block_sum.assign(m_nimages, std::vector<Geometry>(m_string_blocks, Geometry::Zero(nat, 3)));
+    m_string_block_n.assign(m_nimages, std::vector<long>(m_string_blocks, 0));
 
-    const double inv_n = 1.0 / static_cast<double>(m_pmf_samples);
+    // Spacing d in the restraint metric (sqrt(amu)*A when mass-weighted) and the largest
+    // parallel force along the starting path, from the step-0 energies.
+    double dsum = 0.0;
+    for (int i = 1; i < m_nimages; ++i)
+        dsum += std::sqrt(stringWeightedSq(m_string_path[i] - m_string_path[i - 1], m_string_w));
+    const double d = dsum / std::max(m_nimages - 1, 1);
+    const std::vector<double> E = currentEnergies();
+    double fpar = 0.0;
+    for (int i = 1; i < m_nimages - 1; ++i)
+        fpar = std::max(fpar, std::abs(E[i + 1] - E[i - 1]) / std::max(2.0 * d, 1e-12));
+    if (m_string_k <= 0.0) {
+        m_string_k = 4.0 * fpar / std::max(d, 1e-12);
+        if (!(m_string_k > 0.0) || !std::isfinite(m_string_k)) {
+            m_string_k = 0.05;
+            CurcumaLogger::warn("NEB-MD string: automatic k undefined (flat start path); using 0.05.");
+        } else {
+            CurcumaLogger::result_fmt("NEB-MD string: k auto-set to {:.5f} from the start energies "
+                                      "(F_par,max = {:.5f}, spacing d = {:.4f})", m_string_k, fpar, d);
+        }
+    }
+    // Stability: restraint angular frequency sqrt(k) per MD time unit (1.9516 fs). The bound
+    // k <= 0.2 at dt = 0.5 fs scales with 1/dt^2.
+    double dt = 0.5;
+    for (int i = 0; i < m_nimages; ++i)
+        if (m_images[i]) {
+            dt = m_images[i]->timeStep();
+            break;
+        }
+    const double kmax = 0.2 * (0.5 / std::max(dt, 1e-6)) * (0.5 / std::max(dt, 1e-6));
+    if (m_string_k > kmax)
+        CurcumaLogger::warn(fmt::format("NEB-MD string: k = {:.4f} exceeds the stability guide {:.4f} for "
+                                        "dt = {:.3f} fs (restraint period {:.1f} fs).",
+                                        m_string_k, kmax, dt, 2.0 * M_PI * 1.9516 / std::sqrt(m_string_k)));
+    CurcumaLogger::result_fmt("NEB-MD string: {} images, k = {:.4f} {} , update every {} steps, alpha = {:.2f}, "
+                              "smooth = {:.2f}, tol = {:.3f} A x {}, max_time = {:.0f} fs",
+                              m_nimages, m_string_k, m_mass_weighted_spring ? "Eh/(amu A^2)" : "Eh/A^2",
+                              m_string_update, m_string_alpha, m_string_smooth, m_string_tol,
+                              m_string_patience, m_string_max_time);
+    CurcumaLogger::result_fmt("NEB-MD string: trust radius string_max_step = {:.3f} A{}, abort on dead image = {}",
+                              m_string_max_step, m_string_max_step > 0.0 ? "" : " (off)",
+                              m_string_abort_on_dead ? "yes" : "no");
+    CurcumaLogger::result_fmt("NEB-MD string: holding estimate k*d/2 = {:.5f} vs F_par,max = {:.5f} "
+                              "(start path, same metric)", 0.5 * m_string_k * d, fpar);
+    if (m_string_ftol > 0.0)
+        CurcumaLogger::result_fmt("NEB-MD string: force criterion ftol = {:.2e} Eh/A ({} blocks per update), "
+                                  "gain = {:.1f} (z >= {:.1f}), start-path preparation {}",
+                                  m_string_ftol, m_string_blocks, m_string_gain, m_string_gain_z,
+                                  m_string_prepare ? fmt::format("shift {:.3e} A", m_string_prep_shift) : std::string("off"));
+    else
+        CurcumaLogger::warn("NEB-MD string: string_ftol = 0 - former criterion delta_max < string_tol "
+                            "(false-positive prone, reproduction only)");
+
+    std::ofstream h(outputPath(Basename() + ".neb.string_history.csv"));
+    if (h)
+        h << "update,step,delta_max,delta_rms,arclength,perp_max,below_tol,scale,n_dead,"
+             "delta_perp_max,f_rms_max,f_se_max,f_sig_max,z_max,gain_max,prep_shift\n";
+}
+
+void NebMD::applyStringRestraint(int i, SimpleMD* img, Geometry& Fext) const
+{
+    // Claude Generated 2026: dV/dR_a = k w_a (R_a - M_aligned_a), M_i superimposed onto the
+    // current R with the w-weighted Kabsch of the same sum (envelope theorem, see
+    // test_string_path (b)). applyExternalForces() adds to the GRADIENT, so dV/dR is added
+    // as is (Eh/A).
+    if (!img || i < 0 || i >= static_cast<int>(m_string_path.size()))
+        return;
+    const Geometry& R = img->positions();
+    const Geometry Ma = curcuma::string_path::applyAlignment(
+        m_string_path[i], curcuma::string_path::kabsch(m_string_path[i], R, m_string_w));
+    Geometry g(R.rows(), 3);
+    double fmax = 0.0;
+    for (int a = 0; a < R.rows(); ++a) {
+        const double ka = m_string_k * (m_string_w.empty() ? 1.0 : m_string_w[static_cast<size_t>(a)]);
+        g.row(a) = ka * (R.row(a) - Ma.row(a));
+        fmax = std::max(fmax, g.row(a).norm());
+    }
+    // Same cap as the umbrella restraint (bias_fmax): uniform scaling keeps the direction.
+    if (fmax > m_bias_fmax) {
+        g *= m_bias_fmax / fmax;
+        ++m_string_capped[i];
+    }
+    Fext += g;
+}
+
+void NebMD::accumulateStringMean(int i)
+{
+    // Claude Generated 2026: superimpose R_i onto M_i (same weights) and add it to the sum,
+    // so the average lives in the frame of M_i and the path keeps one common frame.
+    if (!m_images[i])
+        return;
+    const Geometry& R = m_images[i]->positions();
+    const Geometry Ra = curcuma::string_path::applyAlignment(
+        R, curcuma::string_path::kabsch(R, m_string_path[i], m_string_w));
+    m_string_sum[i] += Ra;
+    ++m_string_n[i];
+    // Claude Generated 2026: block sums for the standard error of the mean force. Block index =
+    // step within the update * blocks / string_update (stage-1 steps are counted from 1).
+    if (i < static_cast<int>(m_string_block_sum.size()) && m_string_blocks > 0) {
+        const long in_update = static_cast<long>((m_step - 1) % m_string_update);
+        const int b = std::min(static_cast<int>(in_update * m_string_blocks / m_string_update), m_string_blocks - 1);
+        m_string_block_sum[i][b] += Ra;
+        ++m_string_block_n[i][b];
+    }
+}
+
+bool NebMD::updateStringPath()
+{
+    // Claude Generated 2026: mean -> tau/perp -> block statistics (F, SE, z) -> gain -> mixing ->
+    // smoothing -> reparametrisation -> delta/delta_perp -> trust radius, all in the pure
+    // curcuma::string_path::updateMeanPath (unit-tested, test_string_path (i)); here only the
+    // bookkeeping, the convergence criterion and the output. With string_gain <= 1 the new path
+    // is bit-identical to the former inline update.
+    namespace sp = curcuma::string_path;
+    const int N = m_nimages;
+    std::vector<Geometry> means(N);
+    std::vector<std::vector<Geometry>> blocks(N);
+    for (int i = 0; i < N; ++i) {
+        if (m_string_n[i] <= 0)
+            continue; // no samples (dead or clamped image): frame not updated
+        means[i] = m_string_sum[i] / static_cast<double>(m_string_n[i]);
+        if (i < static_cast<int>(m_string_block_sum.size()))
+            for (int b = 0; b < m_string_blocks; ++b)
+                if (m_string_block_n[i][b] > 0)
+                    blocks[i].push_back(m_string_block_sum[i][b] / static_cast<double>(m_string_block_n[i][b]));
+    }
+    const sp::MeanPathUpdate U = sp::updateMeanPath(m_string_path, means, blocks, m_string_k, m_string_w,
+                                                    m_string_alpha, m_string_gain, m_string_gain_z, m_string_ftol,
+                                                    m_string_max_step, m_string_smooth, m_fixed_endpoints);
+    const double delta_max = U.delta_max, scale = U.scale;
+    m_string_last_scale = scale;
+    int n_dead = 0;
+    for (int i = 0; i < N; ++i)
+        if (i < static_cast<int>(m_window_died.size()) && m_window_died[i] >= 0)
+            ++n_dead;
+
+    m_string_path = U.path;
+    for (int i = 0; i < N; ++i) {
+        m_string_sum[i].setZero();
+        m_string_n[i] = 0;
+        if (i < static_cast<int>(m_string_block_sum.size()))
+            for (int b = 0; b < m_string_blocks; ++b) {
+                m_string_block_sum[i][b].setZero();
+                m_string_block_n[i][b] = 0;
+            }
+    }
+    ++m_string_updates;
+    if (m_string_write_updates) { // Claude Generated 2026: diagnostic history of M
+        const std::vector<Geometry> frames = sp::alignConsecutive(m_string_path, {});
+        const std::string upath = outputPath(Basename() + ".neb.string_updates.xyz");
+        for (size_t i = 0; i < frames.size(); ++i) {
+            Molecule mol = m_start;
+            mol.setGeometry(frames[i]);
+            mol.appendXYZFile(upath, fmt::format("string update={} image={}", m_string_updates, i));
+        }
+    }
+    m_string_last_delta = delta_max;
+    m_string_last_fsig = U.f_sig_max;
+    m_string_last_se = U.f_se_max;
+    m_string_last_z = U.z_max;
+    // Claude Generated 2026: a scaled update (the path has not reached the proposed mean) or an
+    // update with a frozen dead image (its frame is never updated) is no evidence of convergence.
+    // Force criterion (string_ftol > 0): resolved (SE < ftol) and small (F_sig < ftol) perpendicular
+    // mean force; delta_perp_max < string_tol is only a guard. string_ftol = 0: former criterion.
+    const bool se_ok = std::isfinite(U.f_se_max) && U.f_se_max < m_string_ftol;
+    bool below;
+    if (m_string_ftol > 0.0)
+        below = U.f_sig_max < m_string_ftol && se_ok && scale >= 1.0 && n_dead == 0
+            && U.delta_perp_max < m_string_tol;
+    else
+        below = delta_max < m_string_tol && scale >= 1.0 && n_dead == 0;
+    if (below)
+        ++m_string_converged_count;
+    else
+        m_string_converged_count = 0;
+    m_string_converged = (m_string_updates >= kStringMinUpdates && m_string_converged_count >= m_string_patience);
+
+    auto fmtF = [](double v) { return std::isfinite(v) ? fmt::format("{:.6e}", v) : std::string("nan"); };
+    std::ofstream h(outputPath(Basename() + ".neb.string_history.csv"), std::ios::app);
+    if (h)
+        h << m_string_updates << "," << m_step << "," << fmt::format("{:.6f}", delta_max) << ","
+          << fmt::format("{:.6f}", U.delta_rms) << "," << fmt::format("{:.6f}", U.arclength) << ","
+          << fmt::format("{:.6f}", U.perp_max) << "," << m_string_converged_count << ","
+          << fmt::format("{:.6f}", scale) << "," << n_dead << ","
+          << fmt::format("{:.6f}", U.delta_perp_max) << "," << fmtF(U.f_rms_max) << "," << fmtF(U.f_se_max) << ","
+          << fmtF(U.f_sig_max) << "," << fmt::format("{:.3f}", U.z_max) << "," << fmt::format("{:.3f}", U.gain_max)
+          << "," << fmt::format("{:.6f}", m_string_prep_shift) << "\n";
+    CurcumaLogger::set_verbosity(m_band_verbosity);
+    const std::string se_txt = std::isfinite(U.f_se_max) ? fmt::format("{:.2e}", U.f_se_max) : std::string("n/a");
+    std::string noise;
+    if (m_string_ftol > 0.0 && !se_ok)
+        noise = std::isfinite(U.f_se_max)
+            ? fmt::format(" [noise-limited: SE {:.2e} >= ftol {:.2e}; string_update x {:.1f} needed]", U.f_se_max,
+                          m_string_ftol, (U.f_se_max / m_string_ftol) * (U.f_se_max / m_string_ftol))
+            : std::string(" [noise-limited: SE n/a (< 2 blocks)]");
+    CurcumaLogger::result_fmt("NEB-MD string update {:3d} (step {}): delta_max = {:.4f} A, delta_perp = {:.4f} A, "
+                              "arclength = {:.4f} A, perp_max = {:.4f} A, F_sig = {:.2e} Eh/A, SE = {}, z = {:.1f}, "
+                              "gain = {:.1f}, scale = {:.3f}, live images = {}/{}{}{}",
+                              m_string_updates, m_step, delta_max, U.delta_perp_max, U.arclength, U.perp_max,
+                              U.f_sig_max, se_txt, U.z_max, U.gain_max, scale, N - n_dead, N, noise,
+                              m_string_converged ? "  -> converged" : "");
+    return m_string_converged;
+}
+
+void NebMD::writeStringPath(const std::string& filename) const
+{
+    // Claude Generated 2026: consecutive UNWEIGHTED Kabsch alignment, so the plain frame
+    // differences used by the stage-2 consumers (PathCV lambda, path spacing, Z floor) equal
+    // the unweighted best-fit RMSD the path CV itself uses. Atom order = start structure.
+    const std::vector<Geometry> frames = curcuma::string_path::alignConsecutive(m_string_path, {});
+    const std::string path = outputPath(filename);
+    std::remove(path.c_str());
+    EnergyCalculator ec(m_method, m_controller, Basename());
+    Molecule probe = m_start;
+    ec.setMolecule(probe.getMolInfo());
+    for (size_t i = 0; i < frames.size(); ++i) {
+        const double E = bandEnergy(ec, frames[i], nullptr);
+        Molecule mol = m_start;
+        mol.setGeometry(frames[i]);
+        mol.appendXYZFile(path, fmt::format("string update={} image={} E={:.8f}", m_string_updates, i, E));
+    }
+    CurcumaLogger::set_verbosity(m_band_verbosity);
+}
+
+void NebMD::histogramTrajectory(const std::string& traj) const
+{
+    // Claude Generated 2026: G_ref(s) = -kT ln P(s) of a free trajectory on the path CV. The
+    // CV is the same object stage 2 builds (PathCV on m_image_geoms, lambda from the path),
+    // so G_ref and the stage-2 mean-force G(s) refer to one coordinate.
+    CitationRegistry::cite("pathcv");
+    std::unique_ptr<PathCV> local;
+    const PathCV* cv = m_path_cv.get();
+    const std::vector<Geometry>& cvp = cvFrames(); // Claude Generated 2026: same CV as stage 2
+    if (!cv) {
+        local = std::make_unique<PathCV>(cvp, m_start);
+        cv = local.get();
+    }
+    const int nat = static_cast<int>(m_start.AtomCount());
+    const double T = m_md_config.contains("temperature") && m_md_config["temperature"].is_number()
+        ? m_md_config["temperature"].get<double>() : 300.0;
+    const double kT = 3.166811563e-6 * T;
     const double kcal = 627.5094740631;
 
-    // Mean arclength, mean force (spring bias removed) and mean potential energy.
-    std::vector<double> s(m_nimages, 0.0), dGds(m_nimages, 0.0);
-    std::vector<double> emean(m_nimages, 0.0), esd(m_nimages, 0.0);
-    for (int i = 0; i < m_nimages; ++i) {
-        s[i] = m_pmf_arc_sum[i] * inv_n;
-        if (m_images[i]) {
-            // dG/ds = <grad E . tau> + metric (Fixman) term.
-            //
-            // The spring term is deliberately NOT subtracted here - see the note in
-            // accumulatePMF(). Subtracting it cancelled the signal (the spring balances
-            // the true force in a stationary band) and drove the barrier to zero as the
-            // statistics improved.
-            dGds[i] = (m_pmf_force_sum[i] + m_pmf_fixman_sum[i]) * inv_n;
-            emean[i] = m_pmf_epot_sum[i] * inv_n;
-            const double var = m_pmf_epot_sq_sum[i] * inv_n - emean[i] * emean[i];
-            esd[i] = (var > 0.0) ? std::sqrt(var) : 0.0;
-        } else {
-            emean[i] = (i == 0) ? m_endpoint_energy_start : m_endpoint_energy_end;
+    // reference frames: interior range and the on-path z baseline z_path(s). z is offset
+    // below zero ON the path, and the offset depends on the position (an end frame has one
+    // neighbour, an interior frame two), so the filter works on the excess z - z_path(s) with
+    // z_path linearly interpolated between the frames (sorted by s, clamped at the ends).
+    // Interior range = window range of the CV frames [C_lo, C_hi] (= first/last frame by default).
+    const int cv_lo = m_cv_path.empty() ? 0 : m_cv_lo;
+    const int cv_hi = m_cv_path.empty() ? static_cast<int>(cvp.size()) - 1 : m_cv_hi;
+    const double s_first = cv->s(cvp[cv_lo]), s_last = cv->s(cvp[cv_hi]);
+    const double s_lo = std::min(s_first, s_last), s_hi = std::max(s_first, s_last);
+    std::vector<std::pair<double, double>> zpath;
+    for (const auto& g : cvp) {
+        double s = 0.0, z = 0.0;
+        cv->evaluate(g, &s, &z, nullptr, nullptr);
+        zpath.emplace_back(s, z);
+    }
+    std::sort(zpath.begin(), zpath.end());
+    auto zBase = [&zpath](double s) {
+        if (s <= zpath.front().first)
+            return zpath.front().second;
+        if (s >= zpath.back().first)
+            return zpath.back().second;
+        size_t k = 1;
+        while (k < zpath.size() - 1 && zpath[k].first < s)
+            ++k;
+        const double ds = zpath[k].first - zpath[k - 1].first;
+        const double t = ds > 1e-15 ? (s - zpath[k - 1].first) / ds : 0.0;
+        return (1.0 - t) * zpath[k - 1].second + t * zpath[k].second;
+    };
+
+    std::vector<double> sv, zv;
+    std::vector<long> frame_index; // Claude Generated 2026: file position of each usable frame (TST pass)
+    long wrong_nat = 0, iframe = -1;
+    FileIterator it(traj);
+    while (!it.AtEnd()) {
+        Molecule m = it.Next();
+        ++iframe;
+        if (static_cast<int>(m.AtomCount()) != nat) {
+            ++wrong_nat;
+            continue;
+        }
+        double s = 0.0, z = 0.0;
+        cv->evaluate(m.getGeometry(), &s, &z, nullptr, nullptr);
+        if (!std::isfinite(s) || !std::isfinite(z)) {
+            ++wrong_nat;
+            continue;
+        }
+        sv.push_back(s);
+        zv.push_back(z);
+        frame_index.push_back(iframe);
+    }
+    const long nframes = static_cast<long>(sv.size());
+    if (nframes == 0) {
+        CurcumaLogger::error("NEB-MD cv_histogram: no usable frame in '" + traj + "'.");
+        return;
+    }
+    // filter quantity: absolute z (user threshold) or the excess z - z_path(s) (automatic).
+    // Claude Generated 2026: the automatic threshold separates the on-path population from a
+    // distant one (frames in another basin, e.g. permuted labels) at the density valley of
+    // log10(excess); unimodal -> only outliers > 10 x median excess (see z_filter.h).
+    const bool auto_z = (m_cv_hist_zmax <= 0.0);
+    std::vector<double> zf(nframes);
+    double zmean = 0.0;
+    for (long k = 0; k < nframes; ++k) {
+        zf[k] = auto_z ? zv[k] - zBase(sv[k]) : zv[k];
+        zmean += zf[k];
+    }
+    zmean /= static_cast<double>(nframes);
+    curcuma::z_filter::ZThreshold zsel;
+    if (auto_z)
+        zsel = curcuma::z_filter::chooseThreshold(zf);
+    else
+        zsel.rule = "user cv_hist_zmax";
+    const double zmax = auto_z ? zsel.threshold : m_cv_hist_zmax;
+    long n_interior = 0, rej_interior = 0;
+    for (long k = 0; k < nframes; ++k) {
+        if (sv[k] < s_lo || sv[k] > s_hi)
+            continue;
+        ++n_interior;
+        if (zf[k] > zmax)
+            ++rej_interior;
+    }
+
+    const int B = m_fe_bins;
+    const int nblocks = 5;
+    std::vector<long> count(B, 0);
+    std::vector<std::vector<long>> bcount(nblocks, std::vector<long>(B, 0));
+    std::vector<long> btotal(nblocks, 0);
+    long rejected = 0, used = 0;
+    for (long k = 0; k < nframes; ++k) {
+        if (zf[k] > zmax) {
+            ++rejected;
+            continue;
+        }
+        int b = static_cast<int>(std::floor(sv[k] * B));
+        b = std::min(std::max(b, 0), B - 1);
+        const int blk = static_cast<int>(std::min<long>(nblocks - 1, k * nblocks / nframes));
+        ++count[b];
+        ++bcount[blk][b];
+        ++btotal[blk];
+        ++used;
+    }
+
+    auto gOf = [&](long c, long tot) {
+        return (c > 0 && tot > 0) ? -kT * std::log(static_cast<double>(c) / static_cast<double>(tot)) * kcal
+                                  : std::numeric_limits<double>::quiet_NaN();
+    };
+    std::vector<double> G(B), Gse(B, std::numeric_limits<double>::quiet_NaN());
+    double gmin = std::numeric_limits<double>::infinity();
+    for (int b = 0; b < B; ++b) {
+        G[b] = gOf(count[b], used);
+        if (std::isfinite(G[b]))
+            gmin = std::min(gmin, G[b]);
+    }
+    for (int b = 0; b < B; ++b) {
+        if (std::isfinite(G[b]))
+            G[b] -= gmin;
+        // block SE: only where every block populated the bin (otherwise undefined)
+        double m = 0.0, m2 = 0.0;
+        bool all = true;
+        for (int j = 0; j < nblocks; ++j) {
+            const double g = gOf(bcount[j][b], btotal[j]);
+            if (!std::isfinite(g)) {
+                all = false;
+                break;
+            }
+            m += g;
+            m2 += g * g;
+        }
+        if (all) {
+            m /= nblocks;
+            Gse[b] = std::sqrt(std::max(m2 / nblocks - m * m, 0.0) / (nblocks - 1));
         }
     }
-    // Clamped endpoints carry NO mean force (they are not integrated), so G is only
-    // defined on the sampled interior. Extrapolating into them fabricates a barrier at
-    // the endpoint - the profile is therefore reported over the sampled range only.
-    const int i_lo = m_images[0] ? 0 : 1;
-    const int i_hi = m_images[m_nimages - 1] ? m_nimages - 1 : m_nimages - 2;
-    if (i_hi <= i_lo) {
-        CurcumaLogger::warn("NEB-MD: fewer than two sampled images - no free-energy profile.");
+
+    // barrier / reaction dG over populated bins inside the interior range (AP4 convention)
+    int b0 = -1, b1 = -1;
+    double gmax_in = -std::numeric_limits<double>::infinity();
+    for (int b = 0; b < B; ++b) {
+        const double sc = (b + 0.5) / B;
+        if (!std::isfinite(G[b]) || sc < s_lo || sc > s_hi)
+            continue;
+        if (b0 < 0) b0 = b;
+        b1 = b;
+        gmax_in = std::max(gmax_in, G[b]);
+    }
+
+    // Claude Generated 2026: basin-referenced barrier of G_ref, same function as the stage-2
+    // profile (fe_profile.h basinBarrier) on the bin midpoints of the populated (count > 0, i.e.
+    // after the z filter) bins inside the interior range; coverage from finite-difference slopes.
+    std::vector<double> xb, gb;
+    for (int b = 0; b < B; ++b) {
+        const double sc = (b + 0.5) / B;
+        if (count[b] <= 0 || !std::isfinite(G[b]) || sc < s_lo || sc > s_hi)
+            continue;
+        xb.push_back(sc);
+        gb.push_back(G[b]);
+    }
+    curcuma::fe_profile::BasinBarrier basR;
+    curcuma::fe_profile::BasinCoverage covR;
+    if (xb.size() >= 3) {
+        basR = curcuma::fe_profile::basinBarrier(xb, gb, kT * kcal);
+        covR = curcuma::fe_profile::basinCoverage(xb, curcuma::fe_profile::finiteDifferenceSlope(xb, gb));
+    } else {
+        basR.warning = "fewer than 3 populated interior bins";
+    }
+    const bool covR_bad = xb.size() >= 3 && (!covR.left || !covR.right);
+
+    // Claude Generated 2026: absolute TST rate of the free trajectory (fe_profile.h tstRate).
+    // <Z^{1/2}> at s* from the frames themselves (free MD: weight 1, plain mean of Z^{1/2}), only
+    // frames that pass the z filter, in the bins within s* +- 1.5 bin widths; if those hold fewer
+    // than 50 frames, from the nearest populated bins on each side (zHalfNear fallback). Z needs
+    // ds/dR, so the trajectory is read a second time and only the frames in the needed bins are
+    // evaluated with the gradient. p(s*) from G_ref on the same bin midpoints as the basin barrier.
+    curcuma::fe_profile::TstRate tstR;
+    curcuma::fe_profile::ZHalfEstimate zhR;
+    std::string tstR_note;
+    if (!basR.valid) {
+        tstR_note = "not computed - no basin barrier (" + basR.warning + ")";
+    } else {
+        const double hw = 1.5 / B;
+        const long zmin_samples = 50;
+        std::vector<char> need(B, 0);
+        long nwin = 0;
+        for (int b = 0; b < B; ++b)
+            if (count[b] > 0 && std::abs((b + 0.5) / B - basR.s_star) <= hw) {
+                need[b] = 1;
+                nwin += count[b];
+            }
+        if (nwin < zmin_samples) { // the same bins zHalfNear's fallback will use (count = z-filtered frames)
+            std::vector<double> sc(B);
+            for (int b = 0; b < B; ++b)
+                sc[b] = (b + 0.5) / B;
+            for (size_t b : curcuma::fe_profile::zHalfFallbackBins(sc, count, basR.s_star, zmin_samples))
+                need[b] = 1;
+        }
+        std::vector<double> zsum(B, 0.0);
+        std::vector<long> zcnt(B, 0);
+        // usable frame k (first pass) -> its bin, if it is needed and passes the z filter
+        std::vector<int> frame_bin(nframes, -1);
+        for (long k = 0; k < nframes; ++k) {
+            const int b = std::min(std::max(static_cast<int>(std::floor(sv[k] * B)), 0), B - 1);
+            if (need[b] && !(zf[k] > zmax))
+                frame_bin[k] = b;
+        }
+        FileIterator it2(traj);
+        long iframe2 = -1, k = 0;
+        while (!it2.AtEnd() && k < nframes) {
+            Molecule m = it2.Next();
+            ++iframe2;
+            if (iframe2 != frame_index[k])
+                continue;
+            const int b = frame_bin[k++];
+            if (b < 0)
+                continue;
+            double s = 0.0, z = 0.0;
+            Geometry ds;
+            cv->evaluate(m.getGeometry(), &s, &z, &ds, nullptr);
+            double Z = 0.0;
+            for (int a = 0; a < nat; ++a)
+                Z += ds.row(a).squaredNorm() / std::max(m_masses[a], 1e-12);
+            if (std::isfinite(Z) && Z > 0.0) {
+                zsum[b] += std::sqrt(Z);
+                ++zcnt[b];
+            }
+        }
+        std::vector<double> zs, zv;
+        std::vector<long> zn;
+        for (int b = 0; b < B; ++b)
+            if (zcnt[b] > 0) {
+                zs.push_back((b + 0.5) / B);
+                zn.push_back(zcnt[b]);
+                zv.push_back(zsum[b] / zcnt[b]);
+            }
+        zhR = curcuma::fe_profile::zHalfNear(zs, zn, zv, basR.s_star, hw, zmin_samples);
+        if (!zhR.valid)
+            tstR_note = "not computed - " + zhR.warning;
+        else {
+            std::vector<double> gb_eh(gb.size());
+            for (size_t j = 0; j < gb.size(); ++j)
+                gb_eh[j] = gb[j] / kcal;
+            tstR = curcuma::fe_profile::tstRate(xb, gb_eh, kT, basR.s_star, zhR.value);
+            if (!tstR.valid)
+                tstR_note = "not computed - " + tstR.warning;
+        }
+    }
+
+    const std::string out = outputPath(Basename() + ".neb.ref.csv");
+    std::ofstream f(out);
+    if (f) {
+        f << "# Reference G_ref(s) = -kT ln P(s) of a free trajectory on the path CV (Claude Generated 2026)\n";
+        f << "# trajectory " << traj << ", frames " << nframes << " (skipped wrong atom count / non-finite "
+          << wrong_nat << "), T = " << T << " K, lambda = " << cv->lambda() << "\n";
+        f << fmt::format("# z filter: {} <= {:.6g} A^2 ({}), mean of the filtered quantity {:.6g}, rejected {} = {:.4f}\n",
+                         auto_z ? "z - z_path(s)" : "z", zmax, zsel.rule,
+                         zmean, rejected, static_cast<double>(rejected) / static_cast<double>(nframes));
+        f << fmt::format("# z filter interior: {} of {} interior frames rejected = {:.4f}\n", rej_interior, n_interior,
+                         n_interior > 0 ? static_cast<double>(rej_interior) / static_cast<double>(n_interior) : 0.0);
+        if (auto_z)
+            f << fmt::format("# z filter detail: median excess {:.6g}, on-path mode {:.6g}, far peak {:.6g}, "
+                             "peak score {:.3g}, bimodal {}\n",
+                             zsel.median, zsel.mode, zsel.far_peak, zsel.score, zsel.bimodal ? 1 : 0);
+        f << fmt::format("# interior s range [{:.6f}, {:.6f}] = s(first frame), s(last frame); block SE from {} contiguous blocks\n",
+                         s_lo, s_hi, nblocks);
+        if (basR.valid) {
+            f << fmt::format("# G_ref barrier (basin, fwd/rev): {:.4f} / {:.4f} kcal/mol at s* = {:.4f} (G_X = -kT ln "
+                             "int_X exp(-G/kT) ds over the populated interior bin midpoints, X = s <= s* / s >= s*; "
+                             "ds in units of the CV coordinate s)\n", basR.barrier_fwd, basR.barrier_rev, basR.s_star);
+            f << fmt::format("# G_ref reaction dG (basin): {:.4f} kcal/mol\n", basR.reaction);
+        } else {
+            f << "# G_ref barrier (basin, fwd/rev): not defined - " << basR.warning << "\n";
+        }
+        // Claude Generated 2026: absolute TST rate of the free trajectory
+        if (tstR.valid) {
+            f << fmt::format("# G_ref TST rate (fwd/rev): {:.6e} / {:.6e} 1/ps at s* = {:.4f} (k = 1/2 <|sdot|>(s*) p_X(s*), "
+                             "p_X = exp(-G_ref(s*)/kT) / int_X exp(-G_ref/kT) ds over the populated interior bin midpoints; "
+                             "independent of the scale of s)\n", tstR.k_fwd, tstR.k_rev, tstR.s_star);
+            f << fmt::format("# G_ref TST dG (Eyring, fwd/rev): {:.4f} / {:.4f} kcal/mol (kT ln((kB T/h)/k), kB T/h = {:.6f} 1/ps)\n",
+                             tstR.dG_fwd * kcal, tstR.dG_rev * kcal, tstR.eyring_prefactor);
+            f << fmt::format("# G_ref TST detail: <|sdot|>(s*) {:.6e} s/ps = sqrt(2kT/pi) <Z^1/2>, <Z^1/2> {:.6e} amu^-1/2 A^-1 "
+                             "(mean over z-filtered frames) from {} frames in {} bin(s){}; p(s*) fwd/rev {:.6e} / {:.6e} 1/s\n",
+                             tstR.sdot_abs, zhR.value, zhR.samples, zhR.bins,
+                             zhR.fallback ? " (FALLBACK: " + zhR.warning + ")" : "", tstR.p_fwd, tstR.p_rev);
+        } else {
+            f << "# G_ref TST rate: " << tstR_note << "\n";
+        }
+        if (covR_bad)
+            f << fmt::format("# basin not covered: left {} right {} (dG/ds first {:.4e}, last {:.4e}, max|dG/ds| "
+                             "{:.4e} kcal/mol)\n", covR.left ? "ok" : "NOT", covR.right ? "ok" : "NOT",
+                             covR.slope_left, covR.slope_right, covR.max_abs);
+        if (!m_cv_path.empty() && m_cv_extend_length > 0.0) // Claude Generated 2026 (only in length mode)
+            f << fmt::format("# cv_extend_length {:.6g} of the path length = {} frames per end\n",
+                             m_cv_extend_length, m_cv_extend);
+        if (!m_cv_path.empty() && m_cv_orig_s.size() == 4)
+            f << fmt::format("# cv path: {} frames (cv_frames {}, cv_extend {}), lambda {:.6g}; original path frames "
+                             "on this CV: s(first) {:.6f}, s(second) {:.6f}, s(second-to-last) {:.6f}, s(last) {:.6f}\n",
+                             m_cv_path.size(), m_cv_frames, m_cv_extend, cv->lambda(),
+                             m_cv_orig_s[0], m_cv_orig_s[1], m_cv_orig_s[2], m_cv_orig_s[3]);
+        f << "s,count,P,G_kcal,G_se_kcal,interior\n";
+        for (int b = 0; b < B; ++b) {
+            const double sc = (b + 0.5) / B;
+            f << fmt::format("{:.4f}", sc) << "," << count[b] << ","
+              << fmt::format("{:.6e}", used > 0 ? static_cast<double>(count[b]) / used : 0.0) << ","
+              << (std::isfinite(G[b]) ? fmt::format("{:.4f}", G[b]) : "nan") << ","
+              << (std::isfinite(Gse[b]) ? fmt::format("{:.4f}", Gse[b]) : "nan") << ","
+              << ((sc >= s_lo && sc <= s_hi) ? 1 : 0) << "\n";
+        }
+    }
+
+    CurcumaLogger::set_verbosity(m_band_verbosity);
+    CurcumaLogger::result("");
+    CurcumaLogger::result("=== Reference histogram of the path CV (no MD) ===");
+    CurcumaLogger::result_fmt("  trajectory         : {} ({} frames used of {}, {} skipped)", traj, used, nframes, wrong_nat);
+    CurcumaLogger::result_fmt("  z filter           : {} <= {:.4g} A^2 ({}), rejected {} = {:.2f} %",
+                              auto_z ? "z - z_path(s)" : "z", zmax, zsel.rule, rejected,
+                              100.0 * rejected / std::max<long>(nframes, 1));
+    CurcumaLogger::result_fmt("  z filter interior  : {} of {} interior frames rejected = {:.2f} %", rej_interior,
+                              n_interior, 100.0 * rej_interior / std::max<long>(n_interior, 1));
+    if (auto_z)
+        CurcumaLogger::result_fmt("  z filter detail    : median excess {:.4g}, on-path mode {:.4g}, far peak {:.4g}, "
+                                  "score {:.3g}", zsel.median, zsel.mode, zsel.far_peak, zsel.score);
+    CurcumaLogger::result_fmt("  interior range     : s = [{:.4f}, {:.4f}]", s_lo, s_hi);
+    if (b0 >= 0)
+        CurcumaLogger::result_fmt("  G_ref barrier      : {:.2f} kcal/mol, reaction dG {:.2f} (first/last populated interior bin "
+                                  "s = {:.3f} / {:.3f})",
+                                  gmax_in - G[b0], G[b1] - G[b0], (b0 + 0.5) / B, (b1 + 0.5) / B);
+    if (basR.valid) {
+        CurcumaLogger::result_fmt("  G_ref barrier (basin, fwd/rev): {:.2f} / {:.2f} kcal/mol at s* = {:.4f}",
+                                  basR.barrier_fwd, basR.barrier_rev, basR.s_star);
+        CurcumaLogger::result_fmt("  G_ref reaction dG (basin): {:.2f} kcal/mol", basR.reaction);
+    } else {
+        CurcumaLogger::warn("NEB-MD cv_histogram: G_ref barrier (basin, fwd/rev) not defined - " + basR.warning);
+    }
+    if (tstR.valid) { // Claude Generated 2026
+        CurcumaLogger::result_fmt("  G_ref TST rate (fwd/rev): {:.4e} / {:.4e} 1/ps at s* = {:.4f}",
+                                  tstR.k_fwd, tstR.k_rev, tstR.s_star);
+        CurcumaLogger::result_fmt("  G_ref TST dG (Eyring, fwd/rev): {:.2f} / {:.2f} kcal/mol", tstR.dG_fwd * kcal,
+                                  tstR.dG_rev * kcal);
+        CurcumaLogger::result_fmt("  G_ref TST detail   : <|sdot|>(s*) {:.4e} s/ps, p(s*) fwd/rev {:.4e} / {:.4e} 1/s, "
+                                  "<Z^1/2> {:.4e} from {} frames in {} bin(s){}",
+                                  tstR.sdot_abs, tstR.p_fwd, tstR.p_rev, zhR.value, zhR.samples, zhR.bins,
+                                  zhR.fallback ? " (fallback)" : "");
+        if (zhR.fallback)
+            CurcumaLogger::warn("NEB-MD cv_histogram TST rate: " + zhR.warning);
+    } else {
+        CurcumaLogger::result("  G_ref TST rate     : " + tstR_note);
+    }
+    if (covR_bad)
+        CurcumaLogger::warn(fmt::format("basin not covered ({}{}{}): the slope of G_ref at the outermost populated "
+                                        "interior bin is still > 0.5 max|dG/ds| (left {:.3f}, right {:.3f}, max {:.3f} "
+                                        "kcal/mol per unit s).", covR.left ? "" : "left",
+                                        (!covR.left && !covR.right) ? ", " : "", covR.right ? "" : "right",
+                                        covR.slope_left, covR.slope_right, covR.max_abs));
+    CurcumaLogger::result_fmt("  written            : {}", out);
+}
+
+
+double NebMD::windowK(int i) const
+{
+    // Claude Generated 2026: restraint stiffness actually applied to window i.
+    return (i >= 0 && i < static_cast<int>(m_umbrella_kvec.size())) ? m_umbrella_kvec[i] : m_umbrella_k;
+}
+
+double NebMD::thermalEnergy() const
+{
+    // kT in Hartree at the thermostat setpoint. Claude Generated 2026.
+    // Taken from the images rather than hard-coded, so a run at a different temperature
+    // does not silently keep using 300 K in the metric term.
+    double T = 300.0;
+    for (int i = 0; i < m_nimages; ++i)
+        if (m_images[i]) {
+            const double t = m_images[i]->targetTemperature();
+            if (t > 1e-6)
+                T = t;
+            break;
+        }
+    return 3.166811563e-6 * T;
+}
+
+Geometry NebMD::pathBiasField(const Geometry& R, double* Z_out) const
+{
+    // Claude Generated 2026: the mass-weighted field
+    //
+    //     b_a = grad_a s / (m_a Z) ,      Z = sum_a |grad_a s|^2 / m_a
+    //
+    // which satisfies b.grad s = 1 by construction (the only requirement the master
+    // equation makes) and whose Z is the inverse effective mass of the coordinate.
+    Geometry b = Geometry::Zero(R.rows(), 3);
+    if (!m_path_cv)
+        return b;
+    double s = 0.0, z = 0.0;
+    Geometry ds;
+    m_path_cv->evaluate(R, &s, &z, &ds, nullptr);
+    const int nat = static_cast<int>(R.rows());
+    double Z = 0.0;
+    for (int a = 0; a < nat; ++a)
+        Z += ds.row(a).squaredNorm() / std::max(m_masses[a], 1e-12);
+    if (Z_out)
+        *Z_out = Z;
+    if (Z < 1e-30)
+        return b;
+    for (int a = 0; a < nat; ++a)
+        b.row(a) = ds.row(a) / (std::max(m_masses[a], 1e-12) * Z);
+    return b;
+}
+
+void NebMD::accumulateMeanForce(int i, SimpleMD* img, FeLocal& out, std::mt19937& rng) const
+{
+    // Claude Generated 2026: conditional mean force for the decoupled scheme.
+    //
+    //     dG/ds = <b.grad E>_s - kT <div b>_s
+    //
+    // Samples from every window go into the SAME global bins: a restraint that depends
+    // only on s is constant on the surface s = const and therefore does not change the
+    // conditional distribution there. No unbiasing, no window matching, no overlap
+    // requirement - the windows only have to make sure every s is visited at all.
+    if (!m_path_cv || !img)
+        return;
+    const Geometry R = img->positions();
+    const int nat = static_cast<int>(R.rows());
+
+    double s = 0.0, z = 0.0;
+    Geometry ds;
+    m_path_cv->evaluate(R, &s, &z, &ds, nullptr);
+    double Z = 0.0;
+    for (int a = 0; a < nat; ++a)
+        Z += ds.row(a).squaredNorm() / std::max(m_masses[a], 1e-12);
+
+    // The field b scales as 1/|grad s|, so it diverges wherever the coordinate stops
+    // responding to the geometry. That is not a numerical artefact but the honest
+    // statement that dG/ds is undefined there - and it would swamp the average. Such
+    // samples are therefore discarded and counted; a large discarded fraction means the
+    // coordinate is unusable for this system, which is a diagnosis, not a defect.
+    if (Z < m_fe_Zfloor) {
+        ++out.rejected;
+        // Claude Generated 2026: the bin is known from s even for a rejected sample, so the
+        // rejection fraction can be reported per support point (rejected_frac in fe.csv).
+        if (std::isfinite(s) && !out.rejected_bin.empty()) {
+            int rb = static_cast<int>(std::floor(s * m_fe_bins));
+            rb = std::min(std::max(rb, 0), m_fe_bins - 1);
+            ++out.rejected_bin[rb];
+        }
         return;
     }
 
-    // Integrate dG/ds over the arclength (trapezoid), sampled images only.
-    std::vector<double> G(m_nimages, 0.0);
-    for (int i = i_lo + 1; i <= i_hi; ++i)
-        G[i] = G[i - 1] + 0.5 * (dGds[i] + dGds[i - 1]) * (s[i] - s[i - 1]);
+    // <b.grad E>: the true gradient, projected with the mass-weighted field.
+    const Geometry g = img->trueGradient(); // dE/dR in Eh/Angstrom
+    double bdotg = 0.0;
+    for (int a = 0; a < nat; ++a)
+        bdotg += ds.row(a).dot(g.row(a)) / (std::max(m_masses[a], 1e-12) * Z);
 
-    std::ofstream f(outputPath(Basename() + ".neb.pmf.csv"));
-    if (f) {
-        f << "# NEB-MD free-energy profile (finite-temperature string, mean-force integration)\n";
-        f << "# samples=" << m_pmf_samples << " equilibration_steps=" << m_pmf_equilibration << "\n";
-        f << "# dG/ds has the spring (umbrella) contribution removed; a metric/Fixman term is neglected.\n";
-        f << "image,s_Angstrom,dGds_Eh_per_A,G_kcal,Epot_mean_Eh,Epot_sd_kcal\n";
+    // <div b>: needs second derivatives of s. They are obtained from finite differences
+    // of the ANALYTIC gradient along random directions (Hutchinson):
+    //
+    //     div b = tr(db/dR) = E_v [ v . (db/dR) v ] ,  v ~ N(0,1)
+    //
+    // so one probe costs two extra evaluations of ds/dR and NO energy evaluation. The
+    // single-probe variance is large, but it averages out over the trajectory - which is
+    // exactly what the estimator does anyway.
+    double divb = 0.0;
+    if (m_div_probes > 0) {
+        std::normal_distribution<double> gauss(0.0, 1.0);
+        const double eps = m_div_epsilon;
+        for (int p = 0; p < m_div_probes; ++p) {
+            Geometry v(nat, 3);
+            for (int a = 0; a < nat; ++a)
+                for (int c = 0; c < 3; ++c)
+                    v(a, c) = gauss(rng);
+            const Geometry bp = pathBiasField(R + eps * v);
+            const Geometry bm = pathBiasField(R - eps * v);
+            double acc = 0.0;
+            for (int a = 0; a < nat; ++a)
+                acc += v.row(a).dot(bp.row(a) - bm.row(a));
+            divb += acc / (2.0 * eps);
+        }
+        divb /= static_cast<double>(m_div_probes);
+    }
+
+    // A window whose MD has gone unstable produces non-finite values. Without this guard
+    // they propagate silently into the running sums and every reported number becomes NaN
+    // - which is worse than a crash, because the run still finishes and prints a profile.
+    // Measured: 4 of 8 helicene windows died this way and poisoned both estimators.
+    if (!std::isfinite(s) || !std::isfinite(bdotg) || !std::isfinite(divb)) {
+        ++out.nonfinite;
+        return;
+    }
+
+    int bin = static_cast<int>(std::floor(s * m_fe_bins));
+    bin = std::min(std::max(bin, 0), m_fe_bins - 1);
+    // Ensemble weight. In the CONSTRAINED ensemble the sampled distribution differs from
+    // the marginal one by Z^(-1/2), so every conditional average has to be reweighted:
+    //     dG/ds = <Z^-1/2 (b.grad E - kT div b)> / <Z^-1/2>
+    // For the restrained (unconstrained) scheme the weight is one and the expression
+    // reduces to the plain average - both routes therefore share one code path.
+    const double w = m_constrain ? 1.0 / std::sqrt(Z) : 1.0;
+    out.count[bin] += 1;
+    out.wsum[bin] += w;
+    out.force[bin] += w * bdotg;
+    out.div[bin] += w * divb;
+    out.ssum[bin] += s;
+
+    {
+        out.win_n += 1;
+        out.win_s += s;
+        out.win_s2 += s * s;
+        // Thermal amplitude for the conditioning check. Claude Generated 2026.
+        //
+        // Measured through z, NOT through the Cartesian variance: the images translate and
+        // rotate freely, so a variance of the raw coordinates is dominated by rigid-body
+        // motion (measured 17 A for ethane, which is obviously not a vibration). z is a
+        // best-fit RMSD distance from the path and therefore invariant under both, so
+        // sqrt(<z>) is the transverse amplitude in the same metric as the path spacing.
+        out.win_z += z;
+        out.win_w += w;
+        out.win_wf += w * bdotg;
+        out.win_wd += w * divb;
+    }
+}
+
+void NebMD::writeMeanForceProfile() const
+{
+    CurcumaLogger::set_verbosity(m_band_verbosity); // see m_band_verbosity in nebmd.h
+    // Claude Generated 2026: two independent estimators of the same profile.
+    //
+    //   (I)  binned conditional mean force   dG/ds = <b.grad E> - kT <div b>
+    //   (II) mean restraint force per window dG/ds(<s>) = -k (<s> - s0)
+    //
+    // (II) carries the metric contribution implicitly, because the sampled distribution
+    // of s IS the marginal density; (I) computes it explicitly through div b. Agreement
+    // of the two is therefore the first internal check of the metric term available in
+    // this code - previously it could only be judged by its order of magnitude.
+    CitationRegistry::cite("denotter");
+    const double kT = thermalEnergy();
+    const double kcal = 627.5094740631;
+
+    long total = 0;
+    for (int b = 0; b < m_fe_bins; ++b)
+        total += m_fe_count[b];
+    if (total <= 0) {
+        CurcumaLogger::warn("NEB-MD: no mean-force samples collected - run longer than "
+                            "pmf_equilibration.");
+        return;
+    }
+
+    // ---------- estimator (I): conditional mean force ----------
+    std::vector<double> sI, dgI;
+    std::vector<long> nI, rejI; // samples and Z-floor rejections per support point (Claude Generated 2026)
+    if (m_constrain) {
+        // Constrained scheme: one support point per window, at the constrained value of s.
+        // Binning would be meaningless here - s never moves, so a window fills exactly one
+        // bin. This is the blue-moon form: <Z^-1/2 (b.grad E - kT div b)> / <Z^-1/2>.
+        std::vector<std::pair<std::pair<double, double>, int>> pts;
         for (int i = 0; i < m_nimages; ++i) {
-            f << i << "," << fmt::format("{:.6f}", s[i]) << ","
-              << fmt::format("{:.8f}", dGds[i]) << ","
-              << fmt::format("{:.4f}", G[i] * kcal) << ","
-              << fmt::format("{:.6f}", emean[i]) << ","
-              << fmt::format("{:.4f}", esd[i] * kcal) << "\n";
+            if (m_win_count[i] < 10 || m_win_w[i] < 1e-300)
+                continue;
+            pts.push_back({ { m_umbrella_s0[i], (m_win_wf[i] - kT * m_win_wd[i]) / m_win_w[i] }, i });
+        }
+        std::sort(pts.begin(), pts.end());
+        for (const auto& p : pts) {
+            sI.push_back(p.first.first);
+            dgI.push_back(p.first.second);
+            nI.push_back(m_win_count[p.second]);
+            rejI.push_back(p.second < static_cast<int>(m_win_rejected.size()) ? m_win_rejected[p.second] : 0);
+        }
+        if (pts.size() < 3)
+            CurcumaLogger::warn("Fewer than three constrained windows contributed; a profile "
+                                "integrated over so few support points carries a large "
+                                "discretisation error and the barrier should not be quoted.");
+    } else {
+        for (int b = 0; b < m_fe_bins; ++b) {
+            if (m_fe_count[b] < 10) // an almost empty bin is noise, not information
+                continue;
+            const double n = static_cast<double>(m_fe_count[b]);
+            const double wn = (m_fe_wsum[b] > 1e-300) ? m_fe_wsum[b] : n;
+            sI.push_back(m_fe_ssum[b] / n);
+            dgI.push_back(m_fe_force[b] / wn - kT * m_fe_div[b] / wn);
+            nI.push_back(m_fe_count[b]);
+            rejI.push_back(b < static_cast<int>(m_fe_rejected_bin.size()) ? m_fe_rejected_bin[b] : 0);
         }
     }
-
-    // Barrier + width analysis. A single highest-energy image is a point estimate; the
-    // barrier has a WIDTH, which is what controls the TST prefactor and tunnelling.
-    int imax = i_lo;
-    for (int i = i_lo; i <= i_hi; ++i)
-        if (G[i] > G[imax])
-            imax = i;
-    const double dG_barrier = (G[imax] - G[i_lo]) * kcal;
-    const double dE_barrier = (emean[imax] - emean[i_lo]) * kcal;
-
-    // Width at half the barrier height (in arclength), from the discrete profile.
-    double width = 0.0;
-    if (dG_barrier > 0.0) {
-        const double half = G[i_lo] + 0.5 * (G[imax] - G[i_lo]);
-        double s_left = s[i_lo], s_right = s[i_hi];
-        for (int i = imax; i > i_lo; --i) {
-            if (G[i - 1] <= half) {
-                const double t = (half - G[i - 1]) / std::max(G[i] - G[i - 1], 1e-30);
-                s_left = s[i - 1] + t * (s[i] - s[i - 1]);
-                break;
-            }
+    auto integrate = [](const std::vector<double>& x, const std::vector<double>& y) {
+        std::vector<double> G(x.size(), 0.0);
+        for (size_t k = 1; k < x.size(); ++k)
+            G[k] = G[k - 1] + 0.5 * (y[k] + y[k - 1]) * (x[k] - x[k - 1]);
+        return G;
+    };
+    // Claude Generated 2026: barrier and reaction dG only from support points inside the
+    // interior range [s(frame 0), s(frame N-1)] of the reference path. Outside it the path CV
+    // saturates (no frame beyond the ends), so G there is not a free energy along the path.
+    // With every support point inside (constrained scheme: s0_i = s(frame i)) the result is
+    // the former max(G) - G.front() / G.back() - G.front() exactly.
+    double s_lo = 0.0, s_hi = 1.0;
+    if (!m_umbrella_s0.empty()) {
+        s_lo = std::min(m_umbrella_s0.front(), m_umbrella_s0.back());
+        s_hi = std::max(m_umbrella_s0.front(), m_umbrella_s0.back());
+    }
+    auto interiorRange = [&](const std::vector<double>& x, size_t& k0, size_t& k1) {
+        bool found = false;
+        for (size_t k = 0; k < x.size(); ++k) {
+            if (x[k] < s_lo - 1e-12 || x[k] > s_hi + 1e-12)
+                continue;
+            if (!found) k0 = k;
+            k1 = k;
+            found = true;
         }
-        for (int i = imax; i < i_hi; ++i) {
-            if (G[i + 1] <= half) {
-                const double t = (half - G[i + 1]) / std::max(G[i] - G[i + 1], 1e-30);
-                s_right = s[i + 1] + t * (s[i] - s[i + 1]);
-                break;
-            }
-        }
-        width = s_right - s_left;
+        return found;
+    };
+    auto barrier = [&](const std::vector<double>& x, const std::vector<double>& G) {
+        size_t k0 = 0, k1 = 0;
+        if (G.empty() || !interiorRange(x, k0, k1))
+            return 0.0;
+        double gmax = G[k0];
+        for (size_t k = k0; k <= k1; ++k)
+            if (x[k] >= s_lo - 1e-12 && x[k] <= s_hi + 1e-12)
+                gmax = std::max(gmax, G[k]);
+        return gmax - G[k0];
+    };
+    auto reaction = [&](const std::vector<double>& x, const std::vector<double>& G) {
+        size_t k0 = 0, k1 = 0;
+        if (G.empty() || !interiorRange(x, k0, k1))
+            return 0.0;
+        return G[k1] - G[k0];
+    };
+    const std::vector<double> GI = integrate(sI, dgI);
+
+    // ---------- estimator (II): mean restraint force per window ----------
+    // In a harmonic window the mean force of the restraint equals -dG/ds at <s>; the
+    // window width additionally gives the curvature, G'' = kT/sigma^2 - k.
+    std::vector<double> sII, dgII, curv;
+    std::vector<int> winIdx;
+    for (int i = 0; i < m_nimages && !m_constrain; ++i) {
+        if (i >= static_cast<int>(m_win_count.size()) || m_win_count[i] < 10)
+            continue;
+        const double n = static_cast<double>(m_win_count[i]);
+        const double sbar = m_win_s_sum[i] / n;
+        const double var = std::max(m_win_s2_sum[i] / n - sbar * sbar, 1e-16);
+        sII.push_back(sbar);
+        dgII.push_back(-windowK(i) * (sbar - m_umbrella_s0[i]));
+        curv.push_back(kT / var - windowK(i));
+        winIdx.push_back(i);
+    }
+    // Windows may end up out of order if one slid past its neighbour; sort by <s>.
+    std::vector<size_t> order(sII.size());
+    for (size_t k = 0; k < order.size(); ++k)
+        order[k] = k;
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return sII[a] < sII[b]; });
+    std::vector<double> sII_s, dgII_s;
+    for (size_t k : order) {
+        sII_s.push_back(sII[k]);
+        dgII_s.push_back(dgII[k]);
+    }
+    const std::vector<double> GII = integrate(sII_s, dgII_s);
+
+    // ---------- report ----------
+    const double bI = barrier(sI, GI) * kcal, bII = barrier(sII_s, GII) * kcal;
+    const double rI = reaction(sI, GI) * kcal;
+    const double rII = reaction(sII_s, GII) * kcal;
+    size_t ki0 = 0, ki1 = 0;
+    const int n_inside = interiorRange(sI, ki0, ki1) ? static_cast<int>(ki1 - ki0 + 1) : 0;
+
+    // Claude Generated 2026: grid-free barrier of estimator (I). The maximum over the discrete
+    // support points underestimates the barrier whenever the true maximum falls between two
+    // of them (coarse grids: 8 windows gave 1.94 vs 2.14 kcal/mol). A natural cubic spline of
+    // dG/ds through the INTERIOR support points is integrated exactly and evaluated on a fine
+    // grid (fe_profile.h). Same definition as the node barrier: max G - G(first interior
+    // support point); reaction dG = G(last) - G(first). The G_kcal column stays trapezoidal.
+    curcuma::fe_profile::SplineProfile splI;
+    if (n_inside > 0) {
+        const std::vector<double> s_in(sI.begin() + ki0, sI.begin() + ki1 + 1);
+        const std::vector<double> d_in(dgI.begin() + ki0, dgI.begin() + ki1 + 1);
+        splI = curcuma::fe_profile::integrateSpline(s_in, d_in);
+        if (!splI.warning.empty())
+            CurcumaLogger::warn("NEB-MD mean-force profile (I): " + splI.warning);
+    }
+    const double bI_spl = splI.barrier_forward * kcal, rI_spl = splI.reaction * kcal;
+
+    // Claude Generated 2026: barrier referenced to the basin free energies (fe_profile.h,
+    // basinBarrier) on the spline-integrated G(s): G_A = -kT ln int_{s<=s*} exp(-G/kT) ds,
+    // G_B likewise for s >= s*; plus the coverage test on the outermost support points.
+    curcuma::fe_profile::BasinBarrier basI;
+    curcuma::fe_profile::BasinCoverage covI;
+    if (n_inside >= 3) {
+        basI = curcuma::fe_profile::basinBarrier(splI.s, splI.G, kT);
+        const std::vector<double> s_in(sI.begin() + ki0, sI.begin() + ki1 + 1);
+        const std::vector<double> d_in(dgI.begin() + ki0, dgI.begin() + ki1 + 1);
+        covI = curcuma::fe_profile::basinCoverage(s_in, d_in);
+    } else {
+        basI.warning = "fewer than 3 interior support points";
     }
 
-    // ---- Profile evaluation -------------------------------------------------------
-    // Forward/reverse barrier, reaction free energy, TS position, width and curvature.
-    const double G_last = G[i_hi] * kcal;
-    const double G_max = G[imax] * kcal;
-    const double dG_reverse = G_max - G_last;
-    const double dG_reaction = G_last - G[i_lo] * kcal;
-
-    // Curvature at the top from a parabola through the three points around imax. The
-    // magnitude of the (negative) curvature sets the imaginary frequency and therefore
-    // both the TST prefactor and the tunnelling correction: a narrow, sharply curved
-    // barrier tunnels much more than a broad flat one.
-    double curvature = 0.0;
-    if (imax > 0 && imax < m_nimages - 1) {
-        const double h1 = s[imax] - s[imax - 1];
-        const double h2 = s[imax + 1] - s[imax];
-        if (h1 > 1e-9 && h2 > 1e-9) {
-            const double gl = G[imax - 1] * kcal, gm = G_max, gr = G[imax + 1] * kcal;
-            curvature = 2.0 * (h1 * gr - (h1 + h2) * gm + h2 * gl) / (h1 * h2 * (h1 + h2));
+    // Claude Generated 2026: absolute TST rate across s* (fe_profile.h tstRate) - independent of
+    // the scale of s, unlike the basin barrier. Only in the constrained ensemble, where the Z^{-1/2}
+    // weight makes <Z^{1/2}>_s = count / wsum per bin; in the restrained ensemble the per-bin
+    // samples are not drawn from the conditional ensemble at fixed s in the same sense, so no rate.
+    curcuma::fe_profile::TstRate tstI;
+    curcuma::fe_profile::ZHalfEstimate zhI;
+    std::string tst_note;
+    if (!m_constrain) {
+        tst_note = "not computed - only in the constrained ensemble (-nebmd.constrain true), where <Z^1/2>(s*) = "
+                   "count / sum Z^-1/2 per bin";
+    } else if (!basI.valid) {
+        tst_note = "not computed - no interior maximum s* (" + basI.warning + ")";
+    } else {
+        std::vector<double> zs, zv;
+        std::vector<long> zn;
+        for (int b = 0; b < m_fe_bins; ++b) {
+            if (m_fe_count[b] < 10 || !(m_fe_wsum[b] > 1e-300))
+                continue;
+            const double n = static_cast<double>(m_fe_count[b]);
+            zs.push_back(m_fe_ssum[b] / n);
+            zn.push_back(m_fe_count[b]);
+            zv.push_back(n / m_fe_wsum[b]);
+        }
+        zhI = curcuma::fe_profile::zHalfNear(zs, zn, zv, basI.s_star, 1.5 / m_fe_bins, 50);
+        if (!zhI.valid)
+            tst_note = "not computed - " + zhI.warning;
+        else {
+            tstI = curcuma::fe_profile::tstRate(splI.s, splI.G, kT, basI.s_star, zhI.value);
+            if (!tstI.valid)
+                tst_note = "not computed - " + tstI.warning;
         }
     }
 
     CurcumaLogger::result("");
-    CurcumaLogger::result("=== NEB-MD free-energy profile ===");
-    if (m_nudged) {
-        // This is the single most important caveat of the whole analysis.
-        CurcumaLogger::warn("PMF with nudged=true is NOT thermodynamically valid: projecting out the "
-                            "parallel true force makes the force field non-conservative, so there is no "
-                            "underlying potential and no proper NVT ensemble (the images heat up). Use "
-                            "-nebmd.nudged false for free-energy estimates; keep nudged=true only for "
-                            "path/saddle searching.");
+    CurcumaLogger::result("=== Free energy from the decoupled scheme (independent windows) ===");
+    CurcumaLogger::result_fmt("  samples (pooled)   : {} in {} of {} bins",
+                              total, sI.size(), m_fe_bins);
+    CurcumaLogger::result_fmt("  interior range     : s = [{:.4f}, {:.4f}] (s of the first / last path frame); "
+                              "barrier and reaction dG use only support points inside ({} of {} for (I))",
+                              s_lo, s_hi, n_inside, sI.size());
+    CurcumaLogger::result_fmt("  (I)  mean force    : barrier (spline) {:.2f} kcal/mol at s = {:.4f}, reaction dG {:.2f}",
+                              bI_spl, splI.s_max, rI_spl);
+    CurcumaLogger::result_fmt("  (I)  mean force    : barrier (nodes) {:.2f} kcal/mol, reaction dG {:.2f} "
+                              "(maximum over the support points)", bI, rI);
+    if (basI.valid) {
+        CurcumaLogger::result_fmt("  (I)  barrier (basin, fwd/rev): {:.2f} / {:.2f} kcal/mol at s* = {:.4f} "
+                                  "(G(s*) - G_A / G(s*) - G_B, G_X = -kT ln int_X exp(-G/kT) ds)",
+                                  basI.barrier_fwd * kcal, basI.barrier_rev * kcal, basI.s_star);
+        CurcumaLogger::result_fmt("  (I)  reaction dG (basin): {:.2f} kcal/mol (G_B - G_A; scale depends on the CV "
+                                  "parametrisation, compare only on the same CV)", basI.reaction * kcal);
+    } else {
+        CurcumaLogger::warn("NEB-MD mean-force profile (I): barrier (basin, fwd/rev) not defined - " + basI.warning);
     }
-    CurcumaLogger::result_fmt("  samples/image      : {} (after {} equilibration steps)",
-                              m_pmf_samples, m_pmf_equilibration);
-    CurcumaLogger::result_fmt("  sampled images     : {}..{} (clamped endpoints carry no mean force)",
-                              i_lo, i_hi);
-    CurcumaLogger::result_fmt("  path length        : {:.2f} A", s[m_nimages - 1]);
-    CurcumaLogger::result_fmt("  barrier forward    : {:.2f} kcal/mol (image {}, s = {:.2f} A)",
-                              dG_barrier, imax, s[imax]);
-    CurcumaLogger::result_fmt("  barrier reverse    : {:.2f} kcal/mol", dG_reverse);
-    CurcumaLogger::result_fmt("  reaction dG        : {:.2f} kcal/mol", dG_reaction);
-    CurcumaLogger::result_fmt("  <Epot> barrier     : {:.2f} kcal/mol  (potential-energy estimate)",
-                              dE_barrier);
-    CurcumaLogger::result_fmt("  entropic/thermal   : {:.2f} kcal/mol  (dG - <Epot> difference)",
-                              dG_barrier - dE_barrier);
-    CurcumaLogger::result_fmt("  barrier width FWHM : {:.2f} A", width);
-    CurcumaLogger::result_fmt("  curvature at top   : {:.2f} kcal/mol/A^2 (negative = real maximum; "
-                              "large |value| = narrow barrier, more tunnelling)", curvature);
-    CurcumaLogger::result_fmt("  Epot fluctuation   : +/-{:.2f} kcal/mol at the top", esd[imax] * kcal);
-    {
-        // Stationarity diagnostic: in an equilibrated band <F_spring.tau> should cancel
-        // <grad E.tau> image by image. A large residual means the run is not stationary
-        // and dG/ds cannot be trusted, whatever its value.
-        double worst = 0.0;
-        for (int i = i_lo; i <= i_hi; ++i) {
-            if (!m_images[i])
-                continue;
-            const double f = m_pmf_force_sum[i] * inv_n;
-            const double sp = m_pmf_spring_sum[i] * inv_n;
-            const double scale = std::max(std::abs(f), 1e-12);
-            worst = std::max(worst, std::abs(f + sp) / scale);
-        }
-        CurcumaLogger::result_fmt("  stationarity       : worst |<F.tau>+<Fspring.tau>|/|<F.tau>| = {:.2f} "
-                                  "(0 = spring exactly balances the true force)", worst);
+    if (n_inside >= 3 && (!covI.left || !covI.right))
+        CurcumaLogger::warn(fmt::format(
+            "basin not covered ({}{}{}): dG/ds at the outermost support point is still > 0.5 max|dG/ds| "
+            "(left {:.3e}, right {:.3e}, max {:.3e} Eh), so the windows do not reach the basin bottom and "
+            "the basin barrier is not referenced to the basin. Extend the CV (cv_extend, or a larger value) and "
+            "check that the path ends in minima.",
+            covI.left ? "" : "left", (!covI.left && !covI.right) ? ", " : "", covI.right ? "" : "right",
+            covI.slope_left, covI.slope_right, covI.max_abs));
+    // Claude Generated 2026: TST rate (absolute, independent of the scale of s)
+    if (tstI.valid) {
+        CurcumaLogger::result_fmt("  (I)  TST rate (fwd/rev): {:.4e} / {:.4e} 1/ps at s* = {:.4f}",
+                                  tstI.k_fwd, tstI.k_rev, tstI.s_star);
+        CurcumaLogger::result_fmt("  (I)  TST dG (Eyring, fwd/rev): {:.2f} / {:.2f} kcal/mol (kT ln((kB T/h)/k), "
+                                  "kB T/h = {:.4f} 1/ps)", tstI.dG_fwd * kcal, tstI.dG_rev * kcal,
+                                  tstI.eyring_prefactor);
+        CurcumaLogger::result_fmt("  (I)  TST detail    : <|sdot|>(s*) {:.4e} s/ps, p(s*) fwd/rev {:.4e} / {:.4e} 1/s, "
+                                  "<Z^1/2> {:.4e} from {} samples in {} bin(s){}",
+                                  tstI.sdot_abs, tstI.p_fwd, tstI.p_rev, zhI.value, zhI.samples, zhI.bins,
+                                  zhI.fallback ? " (fallback)" : "");
+        if (zhI.fallback)
+            CurcumaLogger::warn("NEB-MD TST rate: " + zhI.warning);
+    } else {
+        CurcumaLogger::result("  (I)  TST rate      : " + tst_note);
     }
-    if (m_fixman) {
-        // Report the metric term separately so its (expected small) size can be judged
-        // against the total rather than being hidden inside it.
-        double fmin = 0.0, fmax_c = 0.0, ftot = 0.0;
-        bool first = true;
-        for (int i = i_lo; i <= i_hi; ++i) {
-            if (!m_images[i])
-                continue;
-            const double v = m_pmf_fixman_sum[i] * inv_n;
-            ftot += std::abs(v);
-            if (first) { fmin = fmax_c = v; first = false; }
-            fmin = std::min(fmin, v);
-            fmax_c = std::max(fmax_c, v);
+    if (m_constrain)
+        CurcumaLogger::result("  (II) restraint     : not defined - there is no restraint to read a "
+                              "force from when s is held by a constraint");
+    else
+        CurcumaLogger::result_fmt("  (II) restraint     : barrier {:.2f} kcal/mol, reaction dG {:.2f}",
+                                  bII, rII);
+    const double spread = m_constrain ? 0.0 : std::abs(bI - bII);
+    CurcumaLogger::result_fmt("  agreement          : {:.2f} kcal/mol between two independent "
+                              "estimators of the same profile (node barriers of (I) and (II))", spread);
+    if (spread > 0.1 * std::max(std::abs(bI), 1.0))
+        CurcumaLogger::warn("The two estimators disagree by more than 10 %. They differ only in how "
+                            "the metric contribution enters (explicitly via div b, implicitly via "
+                            "the sampled density), so the discrepancy points at that term, at the "
+                            "div-b probe settings, or at insufficient sampling in some bins.");
+
+    // Metric contribution on its own - it is now a measured quantity, not an estimate.
+    double dmin = 0.0, dmax = 0.0;
+    bool first = true;
+    for (int b = 0; b < m_fe_bins; ++b) {
+        if (m_fe_count[b] < 10)
+            continue;
+        const double wn = (m_fe_wsum[b] > 1e-300) ? m_fe_wsum[b] : static_cast<double>(m_fe_count[b]);
+        const double v = -kT * m_fe_div[b] / wn;
+        if (first) { dmin = dmax = v; first = false; }
+        dmin = std::min(dmin, v);
+        dmax = std::max(dmax, v);
+    }
+    CurcumaLogger::result_fmt("  metric -kT<div b>  : {:.3e} .. {:.3e} Eh per unit s "
+                              "({} probe(s), eps = {:.1e} A)", dmin, dmax, m_div_probes, m_div_epsilon);
+
+    std::ofstream f(outputPath(Basename() + ".neb.fe.csv"));
+    if (f) {
+        f << "# Free energy from the decoupled scheme (Claude Generated 2026)\n";
+        f << "# estimator I: binned conditional mean force  dG/ds = <b.grad E> - kT <div b>\n";
+        f << "# a restraint depending only on s does not bias conditional averages, so all\n";
+        f << "# windows are pooled into the same bins; no unbiasing and no overlap needed\n";
+        // Claude Generated 2026: interior range + per-point sample count and Z-floor
+        // rejection fraction rejected/(samples+rejected) (bin of a rejected sample from its s).
+        f << fmt::format("# interior s range [{:.6f}, {:.6f}] = s(first frame), s(last frame); barrier and "
+                         "reaction dG use only support points inside\n", s_lo, s_hi);
+        f << fmt::format("# estimator I barrier (spline): {:.4f} kcal/mol at s = {:.6f}, reaction dG {:.4f} kcal/mol "
+                         "(natural cubic spline of dG/ds through the interior support points, integrated exactly; "
+                         "barrier = max G - G(first interior support point){})\n",
+                         bI_spl, splI.s_max, rI_spl, splI.spline ? "" : "; FALLBACK trapezoid: " + splI.warning);
+        f << fmt::format("# estimator I barrier (nodes): {:.4f} kcal/mol, reaction dG {:.4f} kcal/mol "
+                         "(trapezoid, maximum over the support points; G_kcal column below)\n", bI, rI);
+        // Claude Generated 2026: basin-referenced barrier (fe_profile.h basinBarrier) + CV info.
+        if (basI.valid) {
+            f << fmt::format("# estimator I barrier (basin, fwd/rev): {:.4f} / {:.4f} kcal/mol at s* = {:.6f} "
+                             "(G_X = -kT ln int_X exp(-G/kT) ds over the spline, X = s <= s* / s >= s*; ds in units "
+                             "of the CV coordinate s, so the absolute value depends on the CV parametrisation)\n",
+                             basI.barrier_fwd * kcal, basI.barrier_rev * kcal, basI.s_star);
+            f << fmt::format("# estimator I reaction dG (basin): {:.4f} kcal/mol\n", basI.reaction * kcal);
+        } else {
+            f << "# estimator I barrier (basin, fwd/rev): not defined - " << basI.warning << "\n";
         }
-        CurcumaLogger::result_fmt("  metric (Fixman)    : dG/ds contribution {:.3e} .. {:.3e} Eh/A "
-                                  "(mean |.| {:.3e}); expected O(kT) - a correctness term, not a cure",
-                                  fmin, fmax_c, ftot / std::max(i_hi - i_lo + 1, 1));
+        // Claude Generated 2026: absolute TST rate + Eyring free energy (fe_profile.h tstRate)
+        if (tstI.valid) {
+            f << fmt::format("# TST rate (fwd/rev): {:.6e} / {:.6e} 1/ps at s* = {:.6f} (k = 1/2 <|sdot|>(s*) p_X(s*), "
+                             "p_X = exp(-G(s*)/kT) / int_X exp(-G/kT) ds over the spline; independent of the scale of s)\n",
+                             tstI.k_fwd, tstI.k_rev, tstI.s_star);
+            f << fmt::format("# TST dG (Eyring, fwd/rev): {:.4f} / {:.4f} kcal/mol (kT ln((kB T/h)/k), kB T/h = {:.6f} 1/ps)\n",
+                             tstI.dG_fwd * kcal, tstI.dG_rev * kcal, tstI.eyring_prefactor);
+            f << fmt::format("# TST detail: <|sdot|>(s*) {:.6e} s/ps = sqrt(2kT/pi) <Z^1/2>, <Z^1/2> {:.6e} amu^-1/2 A^-1 "
+                             "(count / sum Z^-1/2) from {} samples in {} bin(s){}; p(s*) fwd/rev {:.6e} / {:.6e} 1/s\n",
+                             tstI.sdot_abs, zhI.value, zhI.samples, zhI.bins,
+                             zhI.fallback ? " (FALLBACK: " + zhI.warning + ")" : "", tstI.p_fwd, tstI.p_rev);
+        } else {
+            f << "# TST rate: " << tst_note << "\n";
+        }
+        if (n_inside >= 3 && (!covI.left || !covI.right))
+            f << fmt::format("# basin not covered: left {} right {} (dG/ds first {:.4e}, last {:.4e}, max|dG/ds| "
+                             "{:.4e} Eh)\n", covI.left ? "ok" : "NOT", covI.right ? "ok" : "NOT",
+                             covI.slope_left, covI.slope_right, covI.max_abs);
+        if (!m_cv_path.empty() && m_cv_extend_length > 0.0) // Claude Generated 2026 (only in length mode)
+            f << fmt::format("# cv_extend_length {:.6g} of the path length = {} frames per end\n",
+                             m_cv_extend_length, m_cv_extend);
+        if (!m_cv_path.empty() && m_cv_orig_s.size() == 4)
+            f << fmt::format("# cv path: {} frames (cv_frames {}, cv_extend {}), lambda {:.6g}; original path frames "
+                             "on this CV: s(first) {:.6f}, s(second) {:.6f}, s(second-to-last) {:.6f}, s(last) {:.6f}\n",
+                             m_cv_path.size(), m_cv_frames, m_cv_extend, m_path_cv ? m_path_cv->lambda() : 0.0,
+                             m_cv_orig_s[0], m_cv_orig_s[1], m_cv_orig_s[2], m_cv_orig_s[3]);
+        f << "estimator,s,dGds_Eh,G_kcal,samples,rejected_frac\n";
+        auto frac = [](long n, long r) { return (n + r) > 0 ? static_cast<double>(r) / static_cast<double>(n + r) : 0.0; };
+        for (size_t k = 0; k < sI.size(); ++k)
+            f << "I," << fmt::format("{:.6f}", sI[k]) << "," << fmt::format("{:.8f}", dgI[k]) << ","
+              << fmt::format("{:.4f}", GI[k] * kcal) << "," << nI[k] << ","
+              << fmt::format("{:.6f}", frac(nI[k], rejI[k])) << "\n";
+        for (size_t k = 0; k < sII_s.size(); ++k) {
+            const int i = winIdx[order[k]];
+            const long r = i < static_cast<int>(m_win_rejected.size()) ? m_win_rejected[i] : 0;
+            f << "II," << fmt::format("{:.6f}", sII_s[k]) << "," << fmt::format("{:.8f}", dgII_s[k])
+              << "," << fmt::format("{:.4f}", GII[k] * kcal) << "," << m_win_count[i] << ","
+              << fmt::format("{:.6f}", frac(m_win_count[i], r)) << "\n";
+        }
     }
 
-    // Compact ASCII profile (plain characters only - no UTF, per project rules).
-    {
-        double gmin = G[i_lo] * kcal, gmax = G[i_lo] * kcal;
-        for (int i = i_lo; i <= i_hi; ++i) {
-            gmin = std::min(gmin, G[i] * kcal);
-            gmax = std::max(gmax, G[i] * kcal);
-        }
-        const double span = std::max(gmax - gmin, 1e-9);
-        const int wbar = 40;
-        CurcumaLogger::result("  profile (G in kcal/mol vs image):");
-        for (int i = i_lo; i <= i_hi; ++i) {
-            const double gi = G[i] * kcal;
-            const int n = static_cast<int>(std::lround((gi - gmin) / span * wbar));
-            std::string bar(std::max(n, 0), '#');
-            CurcumaLogger::result(fmt::format("    {:>2} |{:<{}}| {:8.2f}{}", i, bar, wbar, gi,
-                                              (i == imax ? "  <- TS" : "")));
+    // Conditioning: can the coordinate resolve the images at all?
+    if (m_fe_nonfinite > 0)
+        CurcumaLogger::warn(fmt::format(
+            "{} samples were dropped because the window's MD produced non-finite values. Those "
+            "windows are dead - the profile below rests on the survivors only and must not be "
+            "quoted without checking which windows contributed.", m_fe_nonfinite));
+    if (m_fe_rejected > 0 || m_bias_capped > 0) {
+        const double rej = 100.0 * m_fe_rejected / std::max<long>(total + m_fe_rejected, 1);
+        CurcumaLogger::result_fmt("  discarded samples  : {:.1f} % (|grad s| collapsed); "
+                                  "restraint force capped {} times", rej, m_bias_capped);
+    }
+    double amp = 0.0;
+    int ampn = 0;
+    for (size_t k = 0; k < winIdx.size(); ++k) {
+        const int i = winIdx[k];
+        const double n = static_cast<double>(m_win_count[i]);
+        if (n < 1.0)
+            continue;
+        amp += std::sqrt(std::max(m_win_z_sum[i] / n, 0.0)); // z is an RMSD^2
+        ++ampn;
+    }
+    if (ampn > 0 && m_path_spacing > 0.0) {
+        amp /= ampn;
+        const double ratio = m_path_spacing / std::max(amp, 1e-12);
+        CurcumaLogger::result_fmt("  conditioning       : path spacing {:.4f} A vs thermal "
+                                  "amplitude {:.4f} A -> ratio {:.2f}", m_path_spacing, amp, ratio);
+        if (ratio < 2.0)
+            CurcumaLogger::warn("The reference images lie closer together than the molecule moves on "
+                                "its own. The path coordinate then cannot resolve them, s saturates "
+                                "at 0 or 1, and no estimator can repair that. Use FEWER, more widely "
+                                "spaced images - the mean-force route needs no window overlap, so "
+                                "wide spacing costs nothing here (unlike WHAM, which demands the "
+                                "opposite and is therefore not applicable to such a short path).");
+    }
+
+    // Window diagnostics: where the windows actually sat, and how wide they were.
+    CurcumaLogger::result("  windows (target -> sampled, width, curvature):");
+    for (size_t k = 0; k < winIdx.size(); ++k) {
+        const int i = winIdx[k];
+        const double n = static_cast<double>(m_win_count[i]);
+        const double sbar = m_win_s_sum[i] / n;
+        const double sd = std::sqrt(std::max(m_win_s2_sum[i] / n - sbar * sbar, 0.0));
+        CurcumaLogger::result(fmt::format(
+            "    {:>3}  s0 = {:.4f} -> <s> = {:.4f}   sigma = {:.4f}   G'' = {:>10.2f} kcal/mol",
+            i, m_umbrella_s0[i], sbar, sd, curv[k] * kcal));
+    }
+    for (int i = 0; i < m_nimages; ++i) {
+        m_bias_capped += m_img_capped[i];
+        if (m_img_max_jump[i] > m_max_s_jump) {
+            m_max_s_jump = m_img_max_jump[i];
+            m_max_jump_step = static_cast<int>(m_img_max_jump_step[i]);
+            m_max_jump_image = i;
         }
     }
-    CurcumaLogger::warn("EXPERIMENTAL - do not quote these numbers as barriers. G(s) is only as good "
-                        "as the path it is computed on, and the trapezoid integration over few images "
-                        "carries a visible error (helicene test: dG(reaction) = -22 kcal/mol where "
-                        "symmetry demands 0). See docs/NEB_MD.md for the validation status.");
-    if (m_reparametrize <= 0) {
-        CurcumaLogger::warn("PMF without string reparametrisation: the images drift along the path, "
-                            "so the mean force is integrated over a moving grid. Set "
-                            "-nebmd.reparametrize 5 (or similar) for a meaningful profile.");
+    if (m_max_jump_step >= 0)
+        CurcumaLogger::result_fmt("  largest jump of s  : {:.4f} in one step (image {}, step {}) "
+                                  "- a large value indicates a discontinuous CV gradient",
+                                  m_max_s_jump, m_max_jump_image, m_max_jump_step);
+    // Holding criterion (Claude Generated 2026). Without it the other diagnostics are
+    // degenerate: every one of them - estimator agreement, discard rate, conditioning -
+    // improves monotonically as the restraint is weakened, and is perfect in the limit
+    // k -> 0, where the windows have simply abandoned the barrier and the profile is flat.
+    // A window that is not where it was put measures the basin it slid into, not the
+    // barrier. Measured on helicene: at k = 0.5 all six windows had collapsed onto the two
+    // path ends while every other indicator looked best of the whole screening.
+    if (!winIdx.empty()) {
+        double s0min = 1e30, s0max = -1e30;
+        for (int i = 0; i < m_nimages; ++i) {
+            s0min = std::min(s0min, m_umbrella_s0[i]);
+            s0max = std::max(s0max, m_umbrella_s0[i]);
+        }
+        const double dsw = (s0max - s0min) / std::max(m_nimages - 1, 1);
+        double worst_dev = 0.0;
+        int worst_win = -1;
+        for (size_t k = 0; k < winIdx.size(); ++k) {
+            const int i = winIdx[k];
+            const double sbar = m_win_s_sum[i] / static_cast<double>(m_win_count[i]);
+            const double dev = std::abs(sbar - m_umbrella_s0[i]) / std::max(dsw, 1e-12);
+            if (dev > worst_dev) { worst_dev = dev; worst_win = i; }
+        }
+        CurcumaLogger::result_fmt("  holding            : worst |<s>-s0| = {:.2f} window spacings "
+                                  "(window {}); < 0.5 means the windows stay where they were put",
+                                  worst_dev, worst_win);
+        if (worst_dev > 0.5) {
+            CurcumaLogger::warn(fmt::format(
+                "The windows have left their setpoints by up to {:.1f} spacings. The restraint is "
+                "too weak against the slope of the profile, so the barrier region is only crossed, "
+                "not sampled, and the reported barrier is a lower bound at best. Holding requires "
+                "roughly k > (dG/ds)/(ds/2); note that FEWER windows enlarge ds and therefore lower "
+                "the stiffness needed - which also suits the path CV, whose reference frames must "
+                "be spaced well above the thermal amplitude.", worst_dev));
+        }
     }
+
+    CurcumaLogger::warn("Decoupled scheme: AI-implemented and machine-tested only. Validate on a "
+                        "system with a known barrier before quoting numbers.");
 }
+
+
+
 
 void NebMD::writeBandFile(const std::string& filename, int step, const std::string& tag) const
 {
@@ -1749,16 +3469,27 @@ void NebMD::start()
 {
     if (!Initialise())
         return;
-    // Register band outputs for copy-back to CWD (BMT mode).
-    addBakFile(Basename() + ".neb.path.xyz");
-    addBakFile(Basename() + ".neb.energy.csv");
-    addBakFile(Basename() + ".neb.final.xyz");
-    if (m_pmf)
-        addBakFile(Basename() + ".neb.pmf.csv");
-    if (m_write_initial_path)
-        addBakFile(Basename() + ".neb.init.xyz");
+    // Register band outputs for copy-back to CWD (BMT mode). Not in the analysis-only
+    // cv_histogram mode, which writes none of them (Claude Generated 2026).
+    if (m_cv_histogram.empty()) {
+        addBakFile(Basename() + ".neb.path.xyz");
+        addBakFile(Basename() + ".neb.energy.csv");
+        addBakFile(Basename() + ".neb.final.xyz");
+        if (m_write_initial_path)
+            addBakFile(Basename() + ".neb.init.xyz");
+    }
     if (!buildInitialPath())
         return;
+    // Claude Generated 2026: analysis-only mode. The reference path is used exactly as read /
+    // interpolated - IDPP, overlap repair and band optimisation would change it, and a
+    // histogram of s is only comparable to stage 2 on the identical path.
+    if (!m_cv_histogram.empty()) {
+        if (!buildCvPath(false)) // same CV construction as stage 2 (Claude Generated 2026)
+            return;
+        histogramTrajectory(m_cv_histogram);
+        addBakFile(Basename() + ".neb.ref.csv");
+        return;
+    }
     CitationRegistry::cite("neb"); // improved tangent (Henkelman & Jonsson 2000)
     if (m_idpp)
         buildIDPPPath();       // repulsion-aware, neighbour-coupled path refinement
@@ -1767,8 +3498,21 @@ void NebMD::start()
     checkPathTopology();       // warn if the connectivity still differs from image 0
     if (m_optimize)
         optimizeBand();        // relax the band onto the MEP (classical CI-NEB) before the MD
+    if (!buildCvPath(true))    // cv_frames / cv_extend: CV frames + windows (Claude Generated 2026)
+        return;
+    if (m_string && m_string_prepare)
+        prepareStringStartPath(); // align + reparametrise BEFORE the images are built (Claude Generated 2026)
     if (!prepareImages())
         return;
+    if (m_string) {
+        setupString();     // freeze the starting mean path M, choose k (Claude Generated 2026)
+        addBakFile(Basename() + ".neb.string.xyz");
+        addBakFile(Basename() + ".neb.string_history.csv");
+        if (m_string_write_updates) {
+            std::remove(outputPath(Basename() + ".neb.string_updates.xyz").c_str());
+            addBakFile(Basename() + ".neb.string_updates.xyz");
+        }
+    }
     if (m_umbrella)
         setupUmbrella();   // freeze the path, build the CV, place the windows
     if (m_write_initial_path)
@@ -1799,10 +3543,72 @@ void NebMD::start()
     }
 
     writeFinalPath();
-    if (m_pmf)
-        writeFreeEnergyProfile();
+    if (m_string && m_string_aborted) {
+        // Claude Generated 2026: no string path from an aborted stage - remove a stale one (e.g.
+        // from an earlier -no_bmt run in the same directory) so no consumer can pick it up.
+        const std::string spath = outputPath(Basename() + ".neb.string.xyz");
+        std::remove(spath.c_str());
+        CurcumaLogger::error(fmt::format("NEB-MD string: stage aborted at step {} (dead image, string_abort_on_dead); "
+                                         "no string path written. History: {}",
+                                         m_step, outputPath(Basename() + ".neb.string_history.csv")));
+        return;
+    }
+    if (m_string) {
+        // Claude Generated 2026: stage-1 result = the mean path, consecutively aligned.
+        writeStringPath(Basename() + ".neb.string.xyz");
+        // Claude Generated 2026: with string_abort_on_dead = false the stage runs on with frozen
+        // images; say loudly which frames of the written path were never relaxed.
+        std::string frozen;
+        int ndead = 0;
+        for (int i = 0; i < m_nimages && i < static_cast<int>(m_window_died.size()); ++i)
+            if (m_window_died[i] >= 0) {
+                frozen += fmt::format("{}{} (dead at step {})", frozen.empty() ? "" : ", ", i, m_window_died[i]);
+                ++ndead;
+            }
+        if (ndead > 0)
+            CurcumaLogger::error(fmt::format("NEB-MD string: string stage finished with {} dead images: path frames {} "
+                                             "are NOT relaxed (frozen since their death; the convergence "
+                                             "criterion was never met with dead images).", ndead, frozen));
+        long capped = 0;
+        for (long c : m_string_capped)
+            capped += c;
+        // Claude Generated 2026: the end message names the criterion and its numbers.
+        const bool se_ok = std::isfinite(m_string_last_se) && m_string_last_se < m_string_ftol;
+        const std::string se_txt = std::isfinite(m_string_last_se) ? fmt::format("{:.2e}", m_string_last_se) : std::string("n/a");
+        if (m_string_converged && m_string_ftol > 0.0)
+            CurcumaLogger::result_fmt("NEB-MD string: converged (force criterion) after {} updates (step {}): "
+                                      "F_sig_max = {:.2e} < ftol {:.2e} Eh/A, SE_max = {}, last delta_max = {:.4f} A",
+                                      m_string_updates, m_step, m_string_last_fsig, m_string_ftol, se_txt,
+                                      m_string_last_delta);
+        else if (m_string_converged)
+            CurcumaLogger::result_fmt("NEB-MD string: converged (former criterion delta_max < string_tol, "
+                                      "string_ftol = 0) after {} updates (step {}), last delta_max = {:.4f} A",
+                                      m_string_updates, m_step, m_string_last_delta);
+        else if (m_string_ftol > 0.0 && !se_ok) {
+            CurcumaLogger::warn(fmt::format("NEB-MD string: string stage ended at string_max_time: force criterion "
+                                            "noise-limited (SE_max {} >= ftol {:.2e} Eh/A) after {} updates (step {}); "
+                                            "resolving it needs string_update x {} or a longer average. Not an error; "
+                                            "the written path is the last mean path.",
+                                            se_txt, m_string_ftol, m_string_updates, m_step,
+                                            std::isfinite(m_string_last_se) ? fmt::format("{:.1f}", (m_string_last_se / m_string_ftol) * (m_string_last_se / m_string_ftol)) : std::string("n/a")));
+            if (m_string_last_z > 3.0 && m_string_last_fsig > m_string_ftol)
+                CurcumaLogger::warn(fmt::format("NEB-MD string: path not relaxed - the perpendicular mean force is "
+                                                "significant (z_max = {:.1f}, F_sig_max = {:.2e} > ftol {:.2e} Eh/A).",
+                                                m_string_last_z, m_string_last_fsig, m_string_ftol));
+        } else
+            CurcumaLogger::warn(fmt::format("NEB-MD string: NOT converged after {} updates (step {}): F_sig_max = {:.2e} "
+                                            "Eh/A (ftol {:.2e}), SE_max = {}, z_max = {:.1f}, last delta_max = {:.4f} A "
+                                            "(tol {:.4f} A). The written path is the last mean path.",
+                                            m_string_updates, m_step, m_string_last_fsig, m_string_ftol, se_txt,
+                                            m_string_last_z, m_string_last_delta, m_string_tol));
+        CurcumaLogger::result_fmt("NEB-MD string: restraint force capped {} times", capped);
+        CurcumaLogger::result_fmt("NEB-MD string: mean path written to {} ({} frames)",
+                                  outputPath(Basename() + ".neb.string.xyz"), m_nimages);
+    }
     if (m_umbrella)
         writeWHAM();
+    if (m_independent)
+        writeMeanForceProfile();
 
     // Final summary: per-image energy.
     {

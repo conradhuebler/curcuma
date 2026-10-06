@@ -2280,6 +2280,91 @@ int executeSimpleMD(const json& controller, int argc, char** argv) {
     return 0;
 }
 
+/*! \brief Two-stage NEB-MD chain: finite-temperature string -> path-CV conditional mean force.
+ *
+ *  Claude Generated 2026 (AI-generated, machine-tested). Stage 1 runs scheme 'string' for
+ *  string_max_time and writes <base>.neb.string.xyz (consecutively Kabsch-aligned, atom order
+ *  of start.xyz). Stage 2 reads it as path_file and runs scheme 'independent' with umbrella and
+ *  (unless the user set -nebmd.constrain) the holonomic constraint on s, in the SAME BMT
+ *  directory under the basename <base>.stage2. The stage-2 path is used as written: optimize,
+ *  idpp and repair_overlaps would otherwise modify the frames read from path_file.
+ *  \param ctrl        resolved controller (simplemd merge already done by executeNebMD)
+ *  \param controller  original controller (BMT / -bak handling)
+ *  \return 0 on success, 1 when stage 1 aborted (dead image) or produced no path. */
+static int executeNebMDPipeline(const json& ctrl, const json& controller, const Molecule& start,
+                                const Molecule& end, const std::string& startfile)
+{
+    ConfigManager cfg("nebmd", ctrl);
+
+    json ctrl1 = ctrl;
+    if (!ctrl1.contains("nebmd") || !ctrl1["nebmd"].is_object())
+        ctrl1["nebmd"] = json::object();
+    if (!ctrl1.contains("simplemd") || !ctrl1["simplemd"].is_object())
+        ctrl1["simplemd"] = json::object();
+    ctrl1["nebmd"]["scheme"] = "string";
+    ctrl1["nebmd"]["umbrella"] = false;  // stage-2 settings must not leak into stage 1
+    ctrl1["nebmd"]["constrain"] = false;
+    ctrl1["nebmd"]["pipeline"] = false;
+    ctrl1["simplemd"]["max_time"] = cfg.get<double>("string_max_time");
+
+    CurcumaLogger::result("NEB-MD pipeline: stage 1 - finite-temperature string");
+    auto* neb1 = new NebMD(ctrl1, false);
+    initializeBMT(neb1, startfile, "nebmd", controller);
+    neb1->setEndpoints(start, end);
+    neb1->Initialise();
+    neb1->start();
+    // Claude Generated 2026: stage 1 aborted (dead image, string_abort_on_dead) -> its path is
+    // not relaxed; never continue with it.
+    if (neb1->failed()) {
+        CurcumaLogger::error("NEB-MD pipeline: stage 1 (string) aborted - stage 2 skipped.");
+        neb1->processBakFiles();
+        delete neb1;
+        return 1;
+    }
+    const std::string path = neb1->outputPath(neb1->Basename() + ".neb.string.xyz");
+    if (!std::ifstream(path).good()) {
+        CurcumaLogger::error("NEB-MD pipeline: stage 1 wrote no string path (" + path + ") - stage 2 skipped.");
+        neb1->processBakFiles();
+        delete neb1;
+        return 1;
+    }
+
+    json ctrl2 = ctrl;
+    if (!ctrl2.contains("nebmd") || !ctrl2["nebmd"].is_object())
+        ctrl2["nebmd"] = json::object();
+    const bool user_constrain = ctrl2["nebmd"].contains("constrain");
+    ctrl2["nebmd"]["path_file"] = path;
+    ctrl2["nebmd"]["scheme"] = "independent";
+    ctrl2["nebmd"]["umbrella"] = true;
+    if (!user_constrain)
+        ctrl2["nebmd"]["constrain"] = true;
+    ctrl2["nebmd"]["optimize"] = false;        // the path is the stage-1 result, use as written
+    ctrl2["nebmd"]["idpp"] = false;
+    ctrl2["nebmd"]["repair_overlaps"] = false;
+    ctrl2["nebmd"]["pipeline"] = false;
+
+    CurcumaLogger::result("NEB-MD pipeline: stage 2 - conditional mean force on the path CV of " + path);
+    auto* neb2 = new NebMD(ctrl2, false);
+    neb2->setFile(startfile);
+    neb2->setOutputDir(neb1->OutputDir());
+    neb2->overrideBasename(neb1->Basename() + ".stage2");
+    neb2->setEndpoints(start, end);
+    neb2->Initialise();
+    neb2->start();
+    // neb2 has no BMT directory of its own (it only borrows the output dir), so its copy-back
+    // is done through neb1: register every stage-2 output that exists.
+    for (const char* suffix : { ".neb.path.xyz", ".neb.energy.csv", ".neb.final.xyz", ".neb.init.xyz",
+             ".neb.fe.csv", ".neb.wham.csv" }) {
+        const std::string name = neb2->Basename() + suffix;
+        if (std::ifstream(neb1->outputPath(name)).good())
+            neb1->addBakFile(name);
+    }
+    neb1->processBakFiles();
+    delete neb2;
+    delete neb1;
+    return 0;
+}
+
 // Claude Generated 2026: NEB-like molecular dynamics handler.
 int executeNebMD(const json& controller, int argc, char** argv) {
     if (argc < 4) {
@@ -2332,14 +2417,21 @@ int executeNebMD(const json& controller, int argc, char** argv) {
         }
     }
 
+    // Claude Generated 2026: two-stage chain string -> path-CV mean force (-nebmd.pipeline).
+    // Lives here because the BMT directory is created here; stage 2 writes into the stage-1
+    // directory under the basename <base>.stage2.
+    if (ConfigManager("nebmd", ctrl).get<bool>("pipeline"))
+        return executeNebMDPipeline(ctrl, controller, start, end, argv[2]);
+
     auto* neb = new NebMD(ctrl, false);
     initializeBMT(neb, argv[2], "nebmd", controller);
     neb->setEndpoints(start, end);
     neb->Initialise();
     neb->start();
     neb->processBakFiles();
+    const int rc = neb->failed() ? 1 : 0; // Claude Generated 2026: aborted string stage -> exit != 0
     delete neb;
-    return 0;
+    return rc;
 }
 
 int executeCasino(const json& controller, int argc, char** argv) {
