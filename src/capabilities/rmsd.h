@@ -286,6 +286,16 @@ public:
 
     Geometry Gradient() const;
 
+    /*! \brief RMSD * d(RMSD)/dR, i.e. the gradient with its 1/RMSD factor cancelled.
+     *
+     *  Gradient() is (ref - tar)/(RMSD*N) and therefore singular where the target
+     *  coincides with the reference. Every consumer that multiplies the gradient by the
+     *  RMSD again - as the path collective variable does, because the chain rule of a
+     *  Gaussian in d^2 produces a factor 2*lambda*d - can use this form instead and never
+     *  divide at all. Analytically identical, regular everywhere.
+     *  Claude Generated 2026. */
+    Geometry GradientTimesRMSD() const;
+
     // Claude Generated - Public helper methods for Strategy Pattern access
     Geometry CenterMolecule(const Molecule& mol, int fragment) const;
     Geometry CenterMolecule(const Geometry& geom) const;

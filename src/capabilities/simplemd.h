@@ -244,7 +244,12 @@ public:
     // Getters for stepwise GUI feedback
     const Geometry& positions() const { return m_eigen_geometry; }
     const Geometry& velocities() const { return m_eigen_velocities; }
+    /** Gradient as last used by the integrator. After step() it INCLUDES the external force
+     *  applied in that step - use trueGradient() for dE/dR (Claude Generated 2026). */
     const Geometry& gradient() const { return m_eigen_gradient; }
+    /** Pure dE/dR (potential + walls) at the current position, without external forces.
+     *  Falls back to gradient() before the first step. */
+    const Geometry& trueGradient() const { return m_gradient_true_valid ? m_gradient_true : m_eigen_gradient; }
     double potentialEnergy() const { return m_Epot; }
     double kineticEnergy() const { return m_Ekin; }
     double currentTemperature() const { return m_T; }
@@ -302,6 +307,46 @@ public:
     /** Claude Generated (2026): scale all velocities by `factor` (used after a
      *  reparametrisation step to restore the target temperature). */
     void rescaleVelocities(double factor) { m_eigen_velocities *= factor; }
+
+    /** Claude Generated (2026): overwrite the velocities. Needed to project out the
+     *  component along a constraint gradient (RATTLE step for a collective variable). */
+    void setVelocities(const Geometry& v) { m_eigen_velocities = v; }
+
+    /** Claude Generated (2026): integration time step, needed to make a position
+     *  correction from an external constraint consistent with the velocities
+     *  (dv = dr/dt, exactly as Rattle() does for the bond constraints). */
+    double timeStep() const { return m_dT; }
+
+    /*! \brief Hold a general scalar function of the geometry by a holonomic constraint.
+     *
+     *  Claude Generated 2026. The callback returns sigma(R) and fills its cartesian
+     *  gradient; the constraint sigma(R) = target is then enforced inside Rattle(), in the
+     *  same place and with the same velocity bookkeeping as the bond constraints. That
+     *  placement is what makes it work: applying the correction after step() has finished
+     *  puts it behind the thermostat, so the energy it introduces is never removed again -
+     *  measured, three of four windows heated steadily to 3000 K and were destroyed.
+     *  Passing an empty function disables the constraint.
+     *
+     *  Degrees of freedom (Claude Generated 2026): one holonomic constraint removes one DOF,
+     *  so m_dof is lowered by 1 while a constraint is set (and restored when it is cleared).
+     *  Without this the thermostat targets Ekin for 3N instead of 3N-1 DOF and the measured
+     *  T = 2 Ekin/(kB m_dof) of a constrained run sits above the setpoint. InitConstrainedBonds()
+     *  applies the same correction if the constraint was set before Initialise(). */
+    using ScalarConstraint = std::function<double(const Geometry& R, Geometry& grad)>;
+    void setScalarConstraint(ScalarConstraint fn, double target, double tol = 1e-8)
+    {
+        const bool had = static_cast<bool>(m_scalar_constraint);
+        m_scalar_constraint = std::move(fn);
+        m_scalar_target = target;
+        m_scalar_tol = tol;
+        const bool has = static_cast<bool>(m_scalar_constraint);
+        if (has && !had && m_dof > 1)
+            m_dof -= 1;
+        else if (!has && had && m_dof > 0)
+            m_dof += 1;
+    }
+    /** Claude Generated 2026: number of degrees of freedom used for T and the thermostat. */
+    int degreesOfFreedom() const { return m_dof; }
 
 private:
     std::function<void(void)> ThermostatFunction;
@@ -451,6 +496,9 @@ private:
     int m_hmass = 1;
     double m_single_step = 1;
     double m_dT = 0.5, m_currentStep = 0, m_maxtime = 1000;
+    ScalarConstraint m_scalar_constraint;    // optional CV constraint (Claude Generated 2026)
+    double m_scalar_target = 0.0, m_scalar_tol = 1e-8;
+    int m_scalar_iters = 0;
     int m_spin = 0, m_charge = 0, m_print = 100;
     double m_T0 = 298.15, m_aver_Temp = 0, m_aver_rattle_Temp = 0, m_rmsd = 1.5;
     // Claude Generated (Jun 2026): initial velocity sampling temperature. Set to
@@ -511,6 +559,8 @@ private:
     Vector m_eigen_masses, m_eigen_inv_masses;
 
     // Stepwise-API state (Claude Generated 2026)
+    Geometry m_gradient_true;            // dE/dR without external force, see trueGradient()
+    bool m_gradient_true_valid = false;
     Geometry m_external_forces;          // additive per-atom force contribution, cleared after use
     bool m_external_forces_pending = false;
     bool m_run_prepared = false;         // true after prepareRun(), false after finalizeRun()
@@ -654,6 +704,24 @@ private:
 
     int m_mtd_dT = -1;
     int m_seed = -1;
+    /* Per-instance random generator. Claude Generated 2026.
+     *
+     * Previously three separate `static std::mt19937` objects were shared by ALL SimpleMD
+     * instances. That had three consequences: concurrent stepping of several instances was
+     * a data race (undefined behaviour, not merely non-reproducible); constructing a new
+     * instance re-seeded the stream that existing ones were drawing from; and the seed
+     * parameter reached only one of the three sites, so the thermostats were never
+     * reproducible. For replica methods such as NEB-MD, whose whole premise is that the
+     * images are independent, the shared stream broke that premise at the lowest level. */
+    std::mt19937 m_rng;
+    /* CSVR state, per instance. Claude Generated 2026: these were function-local statics -
+     * the chi-squared distribution and its cached degree-of-freedom count were shared by
+     * every SimpleMD in the process and mutated on each call, and the normal distribution
+     * carried its Box-Muller spare value from one instance to the next. Shared mutation is
+     * a data race under concurrency and couples replicas that are meant to be independent. */
+    std::normal_distribution<double> m_csvr_norm{ 0.0, 1.0 };
+    std::chi_squared_distribution<float> m_csvr_chi{ 1.0f };
+    int m_csvr_last_dof = -1;
     int m_time_step = 0;
     int m_dof = 0;
     int m_mtd_time = 0, m_loop_time = 0;

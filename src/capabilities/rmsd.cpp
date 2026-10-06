@@ -1772,3 +1772,26 @@ Geometry RMSDDriver::Gradient() const
     }
     return (m_reference.getGeometry() - m_target.getGeometry()) / (RMSD() * m_target.getGeometry().rows());
 }
+
+Geometry RMSDDriver::GradientTimesRMSD() const
+{
+    // Claude Generated 2026: RMSD * d(RMSD)/dR without ever forming 1/RMSD.
+    //
+    // The division in Gradient() is exact but numerically hostile: at RMSD -> 0 it
+    // produces an arbitrarily large vector that the caller then multiplies by RMSD again.
+    // Measured consequence in the path collective variable: a window whose setpoint IS a
+    // reference frame sat next to the singularity and |grad s| reached 67.7 against 0.05
+    // for the other windows, which drove the restraint force to values that destroyed the
+    // molecule. Cancelling the factor analytically removes the failure mode entirely.
+    if (!m_rmsd_weights.empty()
+        && static_cast<int>(m_rmsd_weights.size()) == m_reference.getGeometry().rows()) {
+        Geometry g = m_reference.getGeometry() - m_target.getGeometry();
+        double wsum = 0.0;
+        for (double w : m_rmsd_weights)
+            wsum += w;
+        for (int i = 0; i < g.rows(); ++i)
+            g.row(i) *= m_rmsd_weights[i];
+        return g / (wsum > 0 ? wsum : 1.0);
+    }
+    return (m_reference.getGeometry() - m_target.getGeometry()) / m_target.getGeometry().rows();
+}

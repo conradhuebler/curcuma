@@ -616,8 +616,7 @@ bool SimpleMD::Initialise()
     m_eigen_masses = Eigen::VectorXd::Zero(3*m_natoms);
     m_eigen_inv_masses = Eigen::VectorXd::Zero(3*m_natoms);
 
-    static std::random_device rd{};
-    static std::mt19937 gen{ rd() };
+
     if (m_seed == -1) {
         const auto start = std::chrono::high_resolution_clock::now();
         m_seed = std::chrono::duration_cast<std::chrono::seconds>(start.time_since_epoch()).count();
@@ -625,7 +624,7 @@ bool SimpleMD::Initialise()
         m_seed = m_natoms * m_T0;
     if (m_verbosity >= 1)
         std::cout << "Random seed is " << m_seed << std::endl;
-    gen.seed(m_seed);
+    m_rng.seed(static_cast<std::mt19937::result_type>(m_seed));
 
     if (m_initfile != "none") {
         json md;
@@ -712,7 +711,7 @@ bool SimpleMD::Initialise()
         m_seed = m_T0 * m_natoms;
     if (m_verbosity >= 1)
         std::cout << "Random seed is " << m_seed << std::endl;
-    gen.seed(m_seed);
+    m_rng.seed(m_seed);
 
 
     m_start_fragments = m_molecule.GetFragments();
@@ -1099,6 +1098,12 @@ void SimpleMD::InitConstrainedBonds()
         m_dof -= dof_com_removed;
         if (m_dof < 1) m_dof = 1;
     }
+
+    // Step 3 (Claude Generated 2026): a scalar (CV) constraint set BEFORE Initialise()
+    // removes one more DOF. setScalarConstraint() handles the usual case (set after
+    // prepareRun); this covers the reset of m_dof = 3N in Initialise().
+    if (m_scalar_constraint && m_dof > 1)
+        m_dof -= 1;
 
     // Report
     if (m_rattle) {
@@ -2369,11 +2374,10 @@ void SimpleMD::ApplyThermostatRegion(const std::vector<int>& atoms, double T0, i
             return;
         const double Ekin_target = 0.5 * kb_Eh * T0 * dof;
         const double c = std::exp(-(m_dT / 2.0 * m_respa) / m_coupling);
-        static std::mt19937 gen{ std::random_device{}() };
         std::normal_distribution<double> dnorm{ 0.0, 1.0 };
         std::chi_squared_distribution<double> dchi{ static_cast<double>(dof) };
-        const double R = dnorm(gen);
-        const double SNf = dchi(gen);
+        const double R = dnorm(m_rng);
+        const double SNf = dchi(m_rng);
         const double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (dof * Ekin)
             + 2 * R * std::sqrt(c * (1 - c) * Ekin_target / (dof * Ekin));
         const double alpha = std::sqrt(std::max(0.0, alpha2));
@@ -3189,6 +3193,12 @@ void SimpleMD::Verlet()
     WallPotential();
     // Claude Generated 2026: re-apply the external force so the second velocity half-kick
     // sees it too (time-symmetric for a constant external force; see step()).
+    // Claude Generated 2026: remember the PURE gradient at the new position (potential +
+    // walls, no external force) for trueGradient(). gradient() alone is contaminated by
+    // the external force applied in this very step, which NEB-MD's mean-force estimators
+    // and its nudged-force projection must not see.
+    m_gradient_true = m_eigen_gradient;
+    m_gradient_true_valid = true;
     if (m_external_forces_pending)
         m_eigen_gradient += m_external_forces;
     ekin = 0.0;
@@ -3404,6 +3414,76 @@ void SimpleMD::Rattle()
     m_rattle_iters_step1 = static_cast<int>(iter);
     m_rattle_constrained_atoms = static_cast<int>(constrained_atoms.size());
 
+    // Optional constraint on a general scalar function of the geometry (Claude Generated
+    // 2026). Classical SHAKE: the constraint force acts along grad(sigma) evaluated at the
+    // START of the step, R(t) (= m_eigen_geometry, not yet overwritten), so the position
+    // correction is dr = -mu * M^-1 * grad(sigma)(R(t)); only the multiplier mu is iterated
+    // (Newton on sigma(R) = target, slope grad(sigma)(R_k) . M^-1 grad(sigma)(R(t))).
+    // The same force is carried into the half-step velocity as dv = dr/dt - this term is
+    // REQUIRED: it is the component of the constraint impulse that the later RATTLE
+    // projection (along grad(sigma) at R(t+dt)) does not remove.
+    // Oct 2026 fix: the direction used to be re-evaluated at each SHAKE iterate R_k (a mass-
+    // weighted projection onto the constraint surface). That is not the symplectic RATTLE
+    // map and gave an NVE drift ~dt^2 that grew with the curvature of the constraint
+    // (ethane/GFN-FF, 2000 steps, dt 0.5 fs, 3 starts: C-H distance -4e-4..-6e-4 Eh,
+    // C-C +9e-5..+3e-4 Eh; fixed direction: |drift| <= 2.6e-5 Eh, free run ~1e-5..7e-5).
+    // It must happen HERE - before the kinetic energy is formed and before the thermostat
+    // runs - otherwise the constraint silently heats the system.
+    if (m_scalar_constraint) {
+        Geometry R(m_natoms, 3);
+        for (int a = 0; a < m_natoms; ++a)
+            for (int c3 = 0; c3 < 3; ++c3)
+                R(a, c3) = coord[3 * a + c3];
+        Geometry grad(m_natoms, 3);
+        Geometry grad_old(m_natoms, 3);
+        m_scalar_constraint(m_eigen_geometry, grad_old); // constraint-force direction at R(t)
+        const double inv_dT = 1.0 / dt; // dt = m_dT in the integrator time unit (FS_TO_MD_TIME), NOT fs
+        int sit = 0;
+        for (; sit < 100; ++sit) {
+            const double sigma = m_scalar_constraint(R, grad);
+            const double g = sigma - m_scalar_target;
+            if (std::abs(g) < m_scalar_tol)
+                break;
+            double Z = 0.0;
+            for (int a = 0; a < m_natoms; ++a)
+                Z += grad.row(a).dot(grad_old.row(a)) * m_eigen_inv_masses.data()[3 * a];
+            if (std::abs(Z) < 1e-30)
+                break;
+            const double mu = g / Z;
+            for (int a = 0; a < m_natoms; ++a) {
+                const double im = m_eigen_inv_masses.data()[3 * a];
+                for (int c3 = 0; c3 < 3; ++c3) {
+                    const double dr = -mu * im * grad_old(a, c3);
+                    R(a, c3) += dr;
+                    m_eigen_velocities.data()[3 * a + c3] += dr * inv_dT;
+                }
+            }
+        }
+        m_scalar_iters = sit;
+        // Remove the half-step velocity component along grad(sigma)(R(t+dt)). Not part of
+        // textbook RATTLE: with only the scalar constraint active it is redundant (the
+        // projection after the second half-kick removes the same direction again; removing
+        // it was measured to leave the drift unchanged to 6 digits, Oct 2026). Kept: removal
+        // is not proven bit-identical, and with bond RATTLE also active it feeds into the
+        // bond velocity stage (that combination is untested).
+        m_scalar_constraint(R, grad);
+        double Z = 0.0, vdot = 0.0;
+        for (int a = 0; a < m_natoms; ++a) {
+            Z += grad.row(a).squaredNorm() * m_eigen_inv_masses.data()[3 * a];
+            for (int c3 = 0; c3 < 3; ++c3)
+                vdot += m_eigen_velocities.data()[3 * a + c3] * grad(a, c3);
+        }
+        if (Z > 1e-30) {
+            const double nu = vdot / Z;
+            for (int a = 0; a < m_natoms; ++a)
+                for (int c3 = 0; c3 < 3; ++c3)
+                    m_eigen_velocities.data()[3 * a + c3] -= nu * m_eigen_inv_masses.data()[3 * a] * grad(a, c3);
+        }
+        for (int a = 0; a < m_natoms; ++a)
+            for (int c3 = 0; c3 < 3; ++c3)
+                coord[3 * a + c3] = R(a, c3);
+    }
+
     double ekin = 0;
 
     for (int i = 0; i < m_natoms; ++i) {
@@ -3450,6 +3530,12 @@ void SimpleMD::Rattle()
     WallPotential();
     // Claude Generated 2026: re-apply the external force so the second velocity half-kick
     // sees it too (time-symmetric for a constant external force; see step()).
+    // Claude Generated 2026: remember the PURE gradient at the new position (potential +
+    // walls, no external force) for trueGradient(). gradient() alone is contaminated by
+    // the external force applied in this very step, which NEB-MD's mean-force estimators
+    // and its nudged-force projection must not see.
+    m_gradient_true = m_eigen_gradient;
+    m_gradient_true_valid = true;
     if (m_external_forces_pending)
         m_eigen_gradient += m_external_forces;
 
@@ -3546,6 +3632,30 @@ void SimpleMD::Rattle()
         CurcumaLogger::info("RATTLE 2nd step: max iterations reached (" + std::to_string(static_cast<int>(iter)) + ")");
         m_rattle_max_err_count++;
     }
+    // Second stage for the scalar constraint (Claude Generated 2026). The velocity
+    // projection MUST be repeated here, after the second half-kick: the kick reintroduces
+    // a component along grad(sigma), and leaving it there means the constraint does work
+    // on the system. That is the difference between SHAKE and RATTLE, and omitting it was
+    // measured to heat three of four constrained windows to death over 50000 steps while a
+    // 4000-step test still looked perfectly healthy.
+    if (m_scalar_constraint) {
+        Geometry grad(m_natoms, 3);
+        m_scalar_constraint(m_eigen_geometry, grad);
+        double Z = 0.0, vdot = 0.0;
+        for (int a = 0; a < m_natoms; ++a) {
+            Z += grad.row(a).squaredNorm() * m_eigen_inv_masses.data()[3 * a];
+            for (int c3 = 0; c3 < 3; ++c3)
+                vdot += m_eigen_velocities.data()[3 * a + c3] * grad(a, c3);
+        }
+        if (Z > 1e-30) {
+            const double nu = vdot / Z;
+            for (int a = 0; a < m_natoms; ++a)
+                for (int c3 = 0; c3 < 3; ++c3)
+                    m_eigen_velocities.data()[3 * a + c3]
+                        -= nu * m_eigen_inv_masses.data()[3 * a] * grad(a, c3);
+        }
+    }
+
     m_rattle_iters_step2 = static_cast<int>(iter);
 
     // Accumulate worst errors for periodic summary
@@ -4754,20 +4864,15 @@ void SimpleMD::CSVR()
 {
     double Ekin_target = 0.5 * kb_Eh * (m_T0)*m_dof;
     double c = exp(-(m_dT / 2.0 * m_respa) / m_coupling);
-    static std::default_random_engine rd{};
-    static std::mt19937 gen{ rd() };
-    static std::normal_distribution<> d{ 0, 1 };
     // Lazy-reinit when m_dof changes (e.g. after RATTLE constraint setup or
-    // first call with a different molecule). A stale static distribution with
-    // the wrong DOF produces wrong fluctuation widths in the CSVR rescaling.
-    static int csvr_last_dof = -1;
-    static std::chi_squared_distribution<float> dchi{ 1.0f };
-    if (m_dof != csvr_last_dof) {
-        dchi = std::chi_squared_distribution<float>(static_cast<float>(m_dof));
-        csvr_last_dof = m_dof;
+    // first call with a different molecule). A stale distribution with the wrong DOF
+    // produces wrong fluctuation widths in the CSVR rescaling.
+    if (m_dof != m_csvr_last_dof) {
+        m_csvr_chi = std::chi_squared_distribution<float>(static_cast<float>(m_dof));
+        m_csvr_last_dof = m_dof;
     }
-    double R = d(gen);
-    double SNf = dchi(gen);
+    double R = m_csvr_norm(m_rng);
+    double SNf = m_csvr_chi(m_rng);
     double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (m_dof * m_Ekin) + 2 * R * sqrt(c * (1 - c) * Ekin_target / (m_dof * m_Ekin));
     m_Ekin_exchange += m_Ekin * (alpha2 - 1);
     double alpha = sqrt(alpha2);
