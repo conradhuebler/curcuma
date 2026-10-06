@@ -57,28 +57,38 @@ double PathCV::computeLambdaFromPath(const std::vector<Geometry>& path)
 
 double PathCV::rmsdTo(int i, const Geometry& R, Geometry* grad) const
 {
-    // A fresh driver per call keeps this const and thread-safe; the RMSD of a few
-    // dozen atoms is cheap compared with the energy evaluation it accompanies.
-    // Start from the registry defaults - handing ConfigManager a partial rmsd block
-    // makes it throw on the first parameter that is missing.
-    json rmsd_mod = ParameterRegistry::getInstance().getDefaultJson("rmsd");
-    rmsd_mod["method"] = "inertia";
-    rmsd_mod["no_reorder"] = true;
-    rmsd_mod["threads"] = 1;
-    json cfg = json::object();
-    cfg["rmsd"] = rmsd_mod;
-    RMSDDriver driver(cfg, true);
-
-    Molecule ref = m_template;
-    ref.setGeometry(m_path[i]);
-    Molecule tar = m_template;
-    tar.setGeometry(R);
-    driver.setReference(ref);
-    driver.setTarget(tar);
-
-    const double d = driver.BestFitRMSD();
+    // Claude Generated 2026: minimal RMSD of R onto frame i (Kabsch, exact) and its gradient
+    // in the LABORATORY frame of R.
+    //
+    // Replaces the RMSDDriver call. That driver aligns the target onto the reference and
+    // returns the gradient in the aligned (reference) frame, so the gradient was only right
+    // for geometries already oriented like the reference. Measured: relative error of ds/dR
+    // 4 % unrotated, 49 % after a 30 degree rotation, 99 % after 90 degrees (a
+    // finite-difference check on a non-collinear molecule, see test_path_cv). Since NEB-MD
+    // lets the images rotate freely (no COM/rotation removal), that error grew with time.
+    //
+    //   d^2 = 1/N sum_a |Rot (p_a - <p>) - (q_a - <q>)|^2 ,  Rot = V D U^T from SVD(P^T Q)
+    //   d * dd/dp_a = Rot^T (Rot (p_a - <p>) - (q_a - <q>)) / N     (envelope theorem)
+    //
+    // The returned gradient keeps the sign convention of the old GradientTimesRMSD():
+    // it is MINUS d*dd/dR, and the caller folds that sign into its chain rule.
+    const Geometry& Q = m_path[i];
+    const int N = static_cast<int>(R.rows());
+    const Eigen::RowVector3d cp = R.colwise().mean();
+    const Eigen::RowVector3d cq = Q.colwise().mean();
+    const Eigen::MatrixXd P = R.rowwise() - cp;
+    const Eigen::MatrixXd Qc = Q.rowwise() - cq;
+    const Eigen::Matrix3d H = P.transpose() * Qc;
+    Eigen::JacobiSVD<Eigen::Matrix3d> svd(H, Eigen::ComputeFullU | Eigen::ComputeFullV);
+    Eigen::Matrix3d D = Eigen::Matrix3d::Identity();
+    if ((svd.matrixV() * svd.matrixU().transpose()).determinant() < 0)
+        D(2, 2) = -1.0;
+    const Eigen::Matrix3d Rot = svd.matrixV() * D * svd.matrixU().transpose();
+    // rows: aligned_a = Rot * p_a  ->  P * Rot^T
+    const Eigen::MatrixXd res = P * Rot.transpose() - Qc;
+    const double d = std::sqrt(res.squaredNorm() / std::max(N, 1));
     if (grad)
-        *grad = driver.Gradient();
+        *grad = -(res * Rot) / static_cast<double>(std::max(N, 1)); // rows: Rot^T res_a
     return d;
 }
 
@@ -127,7 +137,7 @@ void PathCV::evaluate(const Geometry& R, double* s_out, double* z_out, Geometry*
         for (int i = 0; i < N; ++i) {
             if (gd[i].rows() != nat || gd[i].cols() != 3)
                 continue;
-            *dz_dR += (-(w[i] / wsum) * 2.0 * d[i]) * gd[i];
+            *dz_dR += (-(w[i] / wsum) * 2.0) * gd[i];
         }
     }
 
@@ -144,8 +154,12 @@ void PathCV::evaluate(const Geometry& R, double* s_out, double* z_out, Geometry*
     // caught.
     *ds_dR = Geometry::Zero(nat, 3);
     for (int i = 0; i < N; ++i) {
+        // The factor d_i that the chain rule produces is already contained in gd[i]
+        // (= d_i * dd_i/dR, see rmsdTo), so it must NOT appear here a second time.
+        // Keeping the two together is what removes the 1/RMSD singularity: a structure
+        // sitting exactly on a reference frame is now an ordinary point.
         const double pref = (static_cast<double>(i) / (N - 1) - s) * (w[i] / wsum)
-            * (2.0 * m_lambda * d[i]);
+            * (2.0 * m_lambda);
         if (gd[i].rows() == nat && gd[i].cols() == 3)
             *ds_dR += pref * gd[i];
     }

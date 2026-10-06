@@ -137,6 +137,67 @@ int main()
     // (d) the CV must be a pure function of R - evaluating twice gives the same value.
     check(std::abs(cv.s(R) - s0) < 1e-12, "s is deterministic (pure function of R)");
 
+    // (e) gradient in a ROTATED frame (Claude Generated 2026). The 2-atom collinear case above
+    // cannot see a missing back-rotation of the best-fit gradient: the target is aligned
+    // onto the reference before the RMSD is taken, so dRMSD/dR is only valid in the
+    // laboratory frame if it is rotated back. Use a non-collinear 5-atom molecule, a
+    // bent path and a target rotated by 40 degrees; compare analytic and FD gradients.
+    {
+        Molecule t5;
+        Position q;
+        const double X[5][3] = { { 0, 0, 0 }, { 1.4, 0.1, 0.0 }, { -0.5, 1.3, 0.2 }, { -0.4, -0.6, 1.2 }, { 0.3, 0.4, -1.3 } };
+        for (const auto& x : X) {
+            q << x[0], x[1], x[2];
+            t5.addPair({ 6, q });
+        }
+        std::vector<Geometry> p5;
+        for (int i = 0; i < 6; ++i) {
+            Geometry g(5, 3);
+            for (int a = 0; a < 5; ++a)
+                for (int c = 0; c < 3; ++c)
+                    g(a, c) = X[a][c];
+            const double f = i / 5.0;
+            g(1, 0) += 0.8 * f;
+            g(2, 1) -= 0.6 * f;
+            g(3, 2) += 0.5 * f * f;
+            g(4, 0) += 0.4 * std::sin(3.0 * f);
+            p5.push_back(g);
+        }
+        PathCV cv5(p5, t5);
+        const double th = 40.0 * M_PI / 180.0;
+        Eigen::Matrix3d Rz;
+        Rz << std::cos(th), -std::sin(th), 0, std::sin(th), std::cos(th), 0, 0, 0, 1;
+        Geometry R5 = 0.5 * (p5[2] + p5[3]);
+        R5(1, 1) += 0.07;
+        R5(4, 2) -= 0.05;
+        R5 = (R5 * Rz.transpose()).eval();
+        R5.rowwise() += Eigen::RowVector3d(0.3, -0.2, 0.1);
+        double sv = 0, zv = 0;
+        Geometry ds, dz;
+        cv5.evaluate(R5, &sv, &zv, &ds, &dz);
+        double err_s = 0, err_z = 0, nrm_s = 0, nrm_z = 0;
+        const double h = 1e-5;
+        for (int a = 0; a < 5; ++a)
+            for (int c = 0; c < 3; ++c) {
+                Geometry Rp = R5, Rm = R5;
+                Rp(a, c) += h;
+                Rm(a, c) -= h;
+                double sp = 0, zp = 0, sm = 0, zm = 0;
+                cv5.evaluate(Rp, &sp, &zp, nullptr, nullptr);
+                cv5.evaluate(Rm, &sm, &zm, nullptr, nullptr);
+                const double fs = (sp - sm) / (2 * h), fz = (zp - zm) / (2 * h);
+                err_s += (fs - ds(a, c)) * (fs - ds(a, c));
+                err_z += (fz - dz(a, c)) * (fz - dz(a, c));
+                nrm_s += fs * fs;
+                nrm_z += fz * fz;
+            }
+        const double rel_s = std::sqrt(err_s / std::max(nrm_s, 1e-30));
+        const double rel_z = std::sqrt(err_z / std::max(nrm_z, 1e-30));
+        std::cout << "   rotated-frame FD: rel err ds = " << rel_s << ", dz = " << rel_z << std::endl;
+        check(rel_s < 1e-5, "ds/dR correct for a rotated (non-collinear) geometry");
+        check(rel_z < 1e-5, "dz/dR correct for a rotated (non-collinear) geometry");
+    }
+
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : "SOME TESTS FAILED") << std::endl;
     return failures == 0 ? 0 : 1;
 }
