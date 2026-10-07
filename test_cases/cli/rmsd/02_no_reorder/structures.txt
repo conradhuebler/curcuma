@@ -1,0 +1,3 @@
+# Structures from test_cases/structures (id, optionally 'as <file name>'); see structures/README.md
+aaa-host.rmsd-a as ref.xyz
+aaa-host.rmsd-a as target.xyz

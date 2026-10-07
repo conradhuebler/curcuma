@@ -1,0 +1,2 @@
+# Structures from test_cases/structures (id, optionally 'as <file name>'); see structures/README.md
+methanol.alt1 as input.xyz

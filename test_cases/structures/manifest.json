@@ -139,13 +139,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/rmsd/01_default_rmsd/ref.xyz",
-    "test_cases/cli/rmsd/02_no_reorder/ref.xyz",
-    "test_cases/cli/rmsd/02_no_reorder/target.xyz",
-    "test_cases/cli/rmsd/03_invalid_method/ref.xyz",
-    "test_cases/cli/rmsd/04_template_elements/ref.xyz",
-    "test_cases/cli/rmsd/05_fragment_rmsd/ref.xyz",
-    "test_cases/cli/rmsd/06_alias_reorder/ref.xyz",
     "test_cases/input_aa.xyz",
     "test_cases/reorder/input_aa.xyz",
     "test_cases/rmsd/input_aa.xyz"
@@ -178,11 +171,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/rmsd/01_default_rmsd/target.xyz",
-    "test_cases/cli/rmsd/03_invalid_method/target.xyz",
-    "test_cases/cli/rmsd/04_template_elements/target.xyz",
-    "test_cases/cli/rmsd/05_fragment_rmsd/target.xyz",
-    "test_cases/cli/rmsd/06_alias_reorder/target.xyz",
     "test_cases/input_ab.xyz",
     "test_cases/reorder/input_ab.xyz",
     "test_cases/rmsd/input_ab.xyz"
@@ -250,10 +238,6 @@
     "comment": "Acetic acid dimer (cyclic hydrogen-bonded, from Curcuma reference data)"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/cli/simplemd/08_gfnff_acetic_acid_dimer_md/input.xyz",
-    "test_cases/cli/simplemd/09_xtbgfnff_acetic_acid_dimer_md/input.xyz"
-   ],
    "aliases": [
     "unnamed.c4h8o4.42eaf7"
    ],
@@ -276,9 +260,6 @@
     "kind": "unknown"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/cli/simplemd/13_gfnff_react_noevent/input.xyz"
-   ],
    "aliases": [
     "unnamed.h3n.7c9e2b"
    ],
@@ -305,7 +286,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/gpu_gradient/01_vulkan_gfn1_gradient/NH3.xyz",
     "test_cases/sqm_reference/molecules/NH3.xyz"
    ],
    "aliases": [
@@ -484,9 +464,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/confsearch/01_gfnff_smoke/input.xyz",
-    "test_cases/cli/simplemd/13_rmsd_mtd_legacy_ab/input.xyz",
-    "test_cases/cli/simplemd/14_rmsd_mtd_coverage/input.xyz",
     "test_cases/validation/butane.xyz"
    ],
    "aliases": [
@@ -519,13 +496,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/confscan/01_default_scan/conformers.xyz",
-    "test_cases/cli/confscan/02_get_rmsd/conformers.xyz",
-    "test_cases/cli/confscan/03_invalid_rmsd_method/conformers.xyz",
-    "test_cases/cli/confscan/04_slx_logic/conformers.xyz",
-    "test_cases/cli/confscan/05_hybrid_rmsd_elements/conformers.xyz",
-    "test_cases/cli/confscan/06_heavy_only/conformers.xyz",
-    "test_cases/cli/confscan/07_restart_scan/conformers.xyz",
     "test_cases/confscan/input.xyz",
     "test_cases/input.xyz"
    ],
@@ -569,11 +539,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/gfnff/02_caffeine_gfnff_energy_components/caffeine.xyz",
-    "test_cases/cli/gfnff_gpu/01_gfnff_gpu_singlepoint/caffeine.xyz",
-    "test_cases/cli/gfnff_gpu/02_rocm_singlepoint/caffeine.xyz",
-    "test_cases/cli/simplemd/11_diagnostics_dump/input.xyz",
-    "test_cases/cli/simplemd/12_eeq_cutoff_auto/caffeine.xyz",
     "test_cases/molecules/larger/caffeine.xyz",
     "test_cases/sqm_reference/molecules/caffeine.xyz"
    ],
@@ -652,9 +617,6 @@
     "comment": "CG system with 2 spheres"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/cli/simplemd/08_cg_spheres/input.xyz"
-   ],
    "aliases": [
     "unnamed.cg.fc737e"
    ],
@@ -677,9 +639,6 @@
     "kind": "unknown"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/cli/analysis/01_parallel_equivalence/input.vtf"
-   ],
    "aliases": [
     "unnamed.x.406d22"
    ],
@@ -702,9 +661,6 @@
     "kind": "unknown"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/cli/cg/01_single_point/input.vtf"
-   ],
    "aliases": [
     "unnamed.x.b9d192"
    ],
@@ -727,9 +683,6 @@
     "kind": "unknown"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/cli/gfnff/05_frag_charge_ensemble/cl2m_ea25.xyz"
-   ],
    "aliases": [
     "cl2m_ea25"
    ],
@@ -888,9 +841,6 @@
     "comment": "Ethane molecule for CLI tests"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/cli/curcumaopt/04_lbfgs_params/input.xyz"
-   ],
    "aliases": [
     "unnamed.c2h6.caf8f7"
    ]
@@ -960,9 +910,6 @@
     "kind": "unknown"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/cli/simplemd/14_gfnff_react_h_recombination/input.xyz"
-   ],
    "aliases": [
     "unnamed.h4.66abcc"
    ],
@@ -990,9 +937,6 @@
     "level_note": "curcuma output comment; the method used is not recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/cli/curcumaopt/07_opt_multixyz/helicen.xyz"
-   ],
    "aliases": [
     "helicen"
    ],
@@ -1219,9 +1163,6 @@
     "comment": "HCN linear, polar — D4 EEQ q-response stresses the device dense (N+1) solve"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/cli/gpu_gradient/02_vulkan_gfn2_qresponse/HCN.xyz"
-   ],
    "aliases": [
     "hcn.cli-gpu_gradient"
    ],
@@ -1270,9 +1211,6 @@
     "kind": "unknown"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/cli/gfnff/05_frag_charge_ensemble/h3op_h2o2.xyz"
-   ],
    "aliases": [
     "h3op_h2o2"
    ],
@@ -1494,7 +1432,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/gfnff/01_complex_gfnff_singlepoint/complex.xyz",
     "test_cases/molecules/larger/complex.xyz",
     "test_cases/sqm_reference/molecules/complex.xyz"
    ],
@@ -1835,9 +1772,6 @@
     "comment": "Methanol molecule for CLI tests"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/cli/curcumaopt/06_opth_only/input.xyz"
-   ],
    "aliases": [
     "unnamed.ch4o.f00834"
    ],
@@ -1862,7 +1796,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/simplemd/12_eeq_cutoff_auto/NaCl.xyz",
     "test_cases/molecules/ionic/NaCl_cluster.xyz"
    ],
    "aliases": [
@@ -1935,7 +1868,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/simplemd/10_gfnff_polymer_md/input.xyz",
     "test_cases/molecules/larger/polymer.xyz"
    ],
    "aliases": [
@@ -2307,22 +2239,6 @@
     "comment": "Water molecule for fast CLI tests"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/cli/curcumaopt/01_default_uff_opt/input.xyz",
-    "test_cases/cli/curcumaopt/02_gfn2_single_point/input.xyz",
-    "test_cases/cli/curcumaopt/03_invalid_method/input.xyz",
-    "test_cases/cli/curcumaopt/05_alias_singlepoint/input.xyz",
-    "test_cases/cli/routing/01_flat_param_routing/water.xyz",
-    "test_cases/cli/routing/02_roundtrip_replay/water.xyz",
-    "test_cases/cli/routing/03_confsearch_param_routing/water.xyz",
-    "test_cases/cli/simplemd/01_nve_short_run/input.xyz",
-    "test_cases/cli/simplemd/02_nvt_berendsen/input.xyz",
-    "test_cases/cli/simplemd/03_invalid_thermostat/input.xyz",
-    "test_cases/cli/simplemd/04_rattle_all/input.xyz",
-    "test_cases/cli/simplemd/05_spheric_wall/input.xyz",
-    "test_cases/cli/simplemd/06_alias_temperature/input.xyz",
-    "test_cases/cli/simplemd/07_restart_simulation/input.xyz"
-   ],
    "aliases": [
     "input",
     "unnamed.h2o.c08b18",
@@ -2351,7 +2267,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/gpu_multipole/01_vulkan_gfn2_multipole/H2O.xyz",
     "test_cases/sqm_reference/molecules/H2O.xyz"
    ],
    "aliases": [
