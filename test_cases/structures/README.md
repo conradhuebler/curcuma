@@ -26,7 +26,11 @@ hook). Large benchmark sets are not stored here, they are fetched (see `sets` in
   from the library at first use (`CURCUMA_STRUCTURE_LIBRARY_DIR`). Nine of the fifteen geometries are identical to the former hard-coded ones, Cl2 now uses the real
   GMTKN55 geometry `cl2-anion` (2.727 A instead of the rounded 2.73 A), NH3 uses `ammonia.ideal-c3v` (internal coordinates differ by 0.5 mA, other
   orientation), and the registry entries without a library counterpart (`H2O_dimer`, `monosaccharide`) became library structures.
-- **Not done**: five tracked program outputs outside `cli/` remain (phase 4).
+- **Phase 4 (tidy-up)**: done for tracked files. 42 committed program outputs, generated files and unused copies are removed (centered/reordered RMSD results, optimiser
+  trajectories, `gfnff_adjacency`/`gfnff_topo`, `.xtboptok`, a ctest cost file, five unused copies of `test_utils.sh`; 42 files in total). The xtb outputs that document the gfnff
+  reference data moved to `test_cases/reference_data/xtb_outputs/`; `structlib.py check` verifies that every evidence path in the manifest exists. Three report files
+  of `cli/` and the Jan 2026 result log moved to `docs/archive/`.
+- **Not done**: untracked run outputs in `test_cases/` (not touched, they may be local work).
   The full test suite gives the same result as before the migration (327 pass, 3 known failures, 7 disabled). 23 tracked files that look like program
   output and one file that cannot be parsed (the invalid-format input of `cli/errors/02_invalid_xyz_format`) are listed
   under `not_imported` in the manifest and are not part of the library.

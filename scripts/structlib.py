@@ -215,6 +215,10 @@ def check(args):
                     errors.append(f"{where} {fld} must be an integer for new structures")
             if e.get("role") not in ROLES:
                 errors.append(f"{where} role {e.get('role')!r} not in {ROLES}")
+        evid = [p.get("evidence")] + [r.get("evidence") for r in e.get("reference_calculations", [])]
+        for ev in evid:
+            if ev and not os.path.exists(os.path.join(ROOT, ev)):
+                errors.append(f"{where} evidence file does not exist: {ev}")
         if e.get("needs_name"):
             warnings.append(f"{where} generic legacy name, give it a meaningful id")
         for lp in e.get("legacy_paths", []):
