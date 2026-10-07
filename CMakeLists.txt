@@ -1574,13 +1574,13 @@ target_sources(Continuous
 )
 add_test(NAME molecule_comprehensive COMMAND test_molecule)
 
-add_test(NAME AAAbGal_dtemplate COMMAND AAAbGal dtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME AAAbGal_free COMMAND AAAbGal free WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME AAAbGal_template COMMAND AAAbGal template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME AAAbGal_subspace COMMAND AAAbGal subspace WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-#add_test(NAME AAAbGal_incremental COMMAND AAAbGal incr WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGlc_dtemplate COMMAND AAAbGlc dtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGlc_free COMMAND AAAbGlc free WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGlc_template COMMAND AAAbGlc template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGlc_subspace COMMAND AAAbGlc subspace WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+#add_test(NAME AAAbGlc_incremental COMMAND AAAbGlc incr WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 
-#set_tests_properties(AAAbGal_incremental PROPERTIES TIMEOUT 300)
+#set_tests_properties(AAAbGlc_incremental PROPERTIES TIMEOUT 300)
 
 add_test(NAME confscan_subspace COMMAND confscan_test subspace WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME confscan_free COMMAND confscan_test free WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)

@@ -37,7 +37,7 @@ struct RegistryInitializer {
     RegistryInitializer() { initialize_generated_registry(); }
 } registry_initializer;
 
-int AAAbGal_dtemplate() // template
+int AAAbGlc_dtemplate() // template
 {
     int threads = MaxThreads();
 
@@ -63,7 +63,7 @@ int AAAbGal_dtemplate() // template
     }
 }
 
-int AAAbGal_free() // hybrid
+int AAAbGlc_free() // hybrid
 {
     int threads = MaxThreads();
 
@@ -88,7 +88,7 @@ int AAAbGal_free() // hybrid
     }
 }
 
-int AAAbGal_template() // template
+int AAAbGlc_template() // template
 {
     int threads = MaxThreads();
 
@@ -114,7 +114,7 @@ int AAAbGal_template() // template
     }
 }
 
-int AAAbGal_subspace() // subspace
+int AAAbGlc_subspace() // subspace
 {
     int threads = MaxThreads();
 
@@ -141,7 +141,7 @@ int AAAbGal_subspace() // subspace
     }
 }
 
-int AAAbGal_incr() // incremental
+int AAAbGlc_incr() // incremental
 {
     int threads = MaxThreads();
 
@@ -172,13 +172,13 @@ int main(int argc, char** argv)
     if(argc == 1)
         return EXIT_FAILURE;
     if(std::string(argv[1]).compare("template") == 0)
-        return AAAbGal_template();
+        return AAAbGlc_template();
     else if (std::string(argv[1]).compare("subspace") == 0)
-        return AAAbGal_subspace();
+        return AAAbGlc_subspace();
     else if(std::string(argv[1]).compare("incr") == 0)
-        return AAAbGal_incr();
+        return AAAbGlc_incr();
     else if (std::string(argv[1]).compare("free") == 0)
-        return AAAbGal_free();
+        return AAAbGlc_free();
     else if (std::string(argv[1]).compare("dtemplate") == 0)
-        return AAAbGal_dtemplate();
+        return AAAbGlc_dtemplate();
 }

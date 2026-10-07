@@ -6,7 +6,7 @@ Longer guide (Feb 2026, not re-checked): [TESTING.md](TESTING.md).
 
 ## Where tests are registered
 
-- Root `CMakeLists.txt` (`add_subdirectory(test_cases)` onward): `molecule_comprehensive`, `AAAbGal_*`, `confscan_*`, `energy_methods`, `parameter_io`, `confstat_*`
+- Root `CMakeLists.txt` (`add_subdirectory(test_cases)` onward): `molecule_comprehensive`, `AAAbGlc_*`, `confscan_*`, `energy_methods`, `parameter_io`, `confstat_*`
 - `test_cases/CMakeLists.txt`: the `test_*.cpp` executables (`gfnff_*`, `xtb_gradient_*`, `d4_dedq`, `gradient_unit_contract`, `md_*`, ...), `gfnff_val_*` (one per `reference_data/*.ref.json`)
 - `test_cases/cli/CMakeLists.txt`: CLI tests, `add_cli_test(CATEGORY NAME)` registers `cli_<category>_<name>`; GPU categories only when the backend is built
 - `test_cases/sqm_reference/CMakeLists.txt`: `sqm_val_*` (1e-8 Eh energy gates for gfn1/gfn2), `sqm_solv_*`, `sqm_gbsa_*`, `gfnff_solv_*`, `d4_diag_*`
@@ -51,7 +51,7 @@ curcuma::Molecule mol = TestMolecules::TestMoleculeRegistry::createMolecule("CH4
 - `WILL_FAIL` marks `sqm_val*` molecules not yet at 1e-8 (`_GFN1_XFAIL`/`_GFN2_XFAIL`: `complex`, plus `He2` for gfn1); they pass while the gap persists
 - `d4_diag_*` and `confscan_molalign` are registered only when their inputs (`release_tblite/dumps/`, `molalign` binary) exist
 - `*/03_invalid_*` CLI tests check graceful fallback; `curcumaopt/03_invalid_method` runs a valid gfnff optimisation. Error paths are covered by `cli/errors/`
-- `AAAbGal incr` exists in `AAAbGal.cpp` but its ctest entry is commented out
+- `AAAbGlc incr` exists in `AAAbGlc.cpp` but its ctest entry is commented out
 - `energy_methods` reference comments still name TBLite / external GFN-FF although `gfn1`, `gfn2`, `gfnff` now resolve to native code; not checked whether the test passes
 
 ## Instructions Block

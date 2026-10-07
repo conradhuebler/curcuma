@@ -233,7 +233,7 @@ test_cases/
 ├── test_energy_methods.cpp                  ← General method validation
 ├── test_molecule.cpp                        ← Molecule data structure tests
 │
-├── AAAbGal.cpp                              ← RMSD integration test
+├── AAAbGlc.cpp                              ← RMSD integration test
 ├── confscan.cpp                             ← ConfScan integration test
 ├── rmsd/                                    ← RMSD unit tests
 │

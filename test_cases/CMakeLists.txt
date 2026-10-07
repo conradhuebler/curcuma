@@ -28,17 +28,17 @@ target_link_libraries(rmsd_test curcuma_core)
 add_executable(reorder_test
         reorder/main.cpp)
 
-    add_executable(AAAbGal
-            AAAbGal.cpp)
+    add_executable(AAAbGlc
+            AAAbGlc.cpp)
 # Claude Generated: Test executable for Molecule class
 add_executable(test_molecule
         test_molecule.cpp)
 
-target_link_libraries(AAAbGal curcuma_core)
+target_link_libraries(AAAbGlc curcuma_core)
 target_link_libraries(reorder_test curcuma_core)
 target_link_libraries(test_molecule curcuma_core)
 if(USE_PCH)
-        target_precompile_headers(AAAbGal REUSE_FROM curcuma_core)
+        target_precompile_headers(AAAbGlc REUSE_FROM curcuma_core)
         target_precompile_headers(reorder_test REUSE_FROM curcuma_core)
         target_precompile_headers(test_molecule REUSE_FROM curcuma_core)
 endif()
