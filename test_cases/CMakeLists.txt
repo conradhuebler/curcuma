@@ -31,6 +31,9 @@ curcuma_stage_structures(${CMAKE_CURRENT_BINARY_DIR}/sqm_reference/molecules
 add_library(test_molecule_registry core/test_molecule_registry.cpp)
 
 target_link_libraries(test_molecule_registry curcuma_core)
+# the registry reads its geometries from the structure library (test_cases/structures)
+target_compile_definitions(test_molecule_registry PRIVATE
+    CURCUMA_STRUCTURE_LIBRARY_DIR="${CMAKE_SOURCE_DIR}/test_cases/structures")
 
 if(USE_PCH)
     target_precompile_headers(test_molecule_registry REUSE_FROM curcuma_core)

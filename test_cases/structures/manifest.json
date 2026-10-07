@@ -1655,6 +1655,41 @@
    "needs_name": true
   },
   {
+   "id": "methyl-a-d-galactopyranoside",
+   "class": "medium",
+   "file": "medium/methyl-a-d-galactopyranoside.xyz",
+   "format": "xyz",
+   "formula": "C7H14O6",
+   "natoms": 27,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "unspecified",
+   "size_bytes": 903,
+   "sha256": "11ba175201f0f517bb77d649069ae8c6bbad24cf54bdfff23fde6ee37278b7af",
+   "provenance": {
+    "kind": "unknown"
+   },
+   "legacy": true,
+   "notes": "taken over from the hard-coded TestMoleculeRegistry entry monosaccharide (description: from larger/monosaccharide.xyz, a file that is not in the repository); level and origin not recorded",
+   "analysis": {
+    "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation)",
+    "guest_formula": "C7H14O6",
+    "frames": 1,
+    "guest_configuration": [
+     {
+      "series": "D",
+      "sugar": "galacto",
+      "anomer": "alpha",
+      "axial_equatorial_C1_to_C5": "aeeae",
+      "faces_C1_to_C5": "ddUUU",
+      "frames": 1
+     }
+    ]
+   },
+   "description": "methyl alpha-D-galactopyranoside by configuration analysis (see analysis); formula C7H14O6; origin not recorded"
+  },
+  {
    "id": "na2cl2-isolated-ions",
    "class": "clusters",
    "file": "clusters/na2cl2-isolated-ions.xyz",
@@ -2005,6 +2040,25 @@
     }
    ],
    "aliases": []
+  },
+  {
+   "id": "water-dimer.roo2.8",
+   "class": "clusters",
+   "file": "clusters/water-dimer.roo2.8.xyz",
+   "format": "xyz",
+   "formula": "H4O2",
+   "natoms": 6,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 247,
+   "sha256": "1e73be4715ba5920c32902983282661181798defa2ff9c88d7638efdc46ab5c7",
+   "provenance": {
+    "kind": "constructed",
+    "description": "two water molecules with parallel C2 axes collinear along z, O...O 2.8 A, the hydrogens of each molecule point away from the other molecule; hand-built, taken over from the former TestMoleculeRegistry entry H2O_dimer (a hydrogen-bond gradient test)"
+   },
+   "notes": "no relaxation; not a hydrogen-bonded minimum"
   },
   {
    "id": "water.alt1",

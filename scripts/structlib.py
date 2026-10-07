@@ -335,8 +335,8 @@ def add(args):
         sys.exit(f"id must match {ID_RE.pattern}")
     if args.cls not in CLASSES:
         sys.exit(f"class must be one of {CLASSES}")
-    if args.kind == "unknown":
-        sys.exit("kind unknown is not allowed for new structures")
+    if args.kind == "unknown" and not args.legacy:
+        sys.exit("kind unknown is not allowed for new structures (--legacy is for data taken over from older code)")
     m = load_manifest()
     if any(e["id"] == args.id for e in m["structures"]):
         sys.exit(f"id {args.id} exists; a changed geometry needs a new id (use --supersedes)")
@@ -363,6 +363,8 @@ def add(args):
     entry = {"id": args.id, "class": args.cls, "file": f"{args.cls}/{args.id}.xyz", "format": "xyz",
              "formula": hill_formula(sym), "natoms": n, "frames": 1, "charge": args.charge, "spin": args.spin,
              "role": args.role, "size_bytes": os.path.getsize(dest), "sha256": sha256(dest), "provenance": prov}
+    if args.legacy:
+        entry["legacy"] = True
     if args.derived_from:
         entry["derived_from"] = args.derived_from
     if args.supersedes:
@@ -483,7 +485,8 @@ def main():
     a.add_argument("file"); a.add_argument("--id", required=True); a.add_argument("--class", dest="cls", required=True)
     a.add_argument("--charge", type=int, required=True); a.add_argument("--spin", type=int, required=True, help="number of unpaired electrons")
     a.add_argument("--role", default="unspecified", choices=ROLES)
-    a.add_argument("--kind", required=True, choices=[k for k in KINDS if k != "unknown"])
+    a.add_argument("--kind", required=True, choices=KINDS)
+    a.add_argument("--legacy", action="store_true", help="data taken over from older code; allows kind unknown")
     for k in ("program", "version", "method", "basis", "solvent", "convergence", "reference", "license", "description", "evidence", "derived-from", "supersedes", "variant-of", "notes"):
         a.add_argument("--" + k)
     a.add_argument("--energy", type=float, help="energy in Eh at the recorded level")

@@ -22,7 +22,11 @@ hook). Large benchmark sets are not stored here, they are fetched (see `sets` in
   the library. The `geometry_file` field of 35 reference JSON files, the paths in `TestMoleculeRegistry`, five Python helpers and
   three benchmark scripts point to the library; scripts can use `structlib.py path <id>` and `structlib.py stage`. All 64 remaining
   legacy copies were removed (`structlib.py retire`).
-- **Not done**: the `TestMoleculeRegistry` still carries hard-coded atoms; five tracked program outputs outside `cli/` remain.
+- **Phase 3 (registry)**: done. `TestMoleculeRegistry` holds no coordinates any more; each entry names a library structure (`library_id`) and the atoms are read
+  from the library at first use (`CURCUMA_STRUCTURE_LIBRARY_DIR`). Nine of the fifteen geometries are identical to the former hard-coded ones, Cl2 now uses the real
+  GMTKN55 geometry `cl2-anion` (2.727 A instead of the rounded 2.73 A), NH3 uses `ammonia.ideal-c3v` (internal coordinates differ by 0.5 mA, other
+  orientation), and the registry entries without a library counterpart (`H2O_dimer`, `monosaccharide`) became library structures.
+- **Not done**: five tracked program outputs outside `cli/` remain (phase 4).
   The full test suite gives the same result as before the migration (327 pass, 3 known failures, 7 disabled). 23 tracked files that look like program
   output and one file that cannot be parsed (the invalid-format input of `cli/errors/02_invalid_xyz_format`) are listed
   under `not_imported` in the manifest and are not part of the library.

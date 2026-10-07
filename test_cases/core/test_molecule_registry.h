@@ -12,7 +12,8 @@ namespace TestMolecules {
         std::string name;
         std::string description;
         std::string category;
-        std::vector<std::pair<int, Eigen::Vector3d>> atoms;  // element, position
+        std::string library_id;                               // structure of test_cases/structures that holds the geometry
+        std::vector<std::pair<int, Eigen::Vector3d>> atoms;  // element, position in Angstrom; read from the library at first use
         std::map<std::string, double> reference_energies;     // method -> energy
         std::map<std::string, double> tolerances;             // method -> tolerance
         int atom_count;
@@ -33,7 +34,7 @@ namespace TestMolecules {
         static std::vector<std::string> getAllMoleculeNames();
         static curcuma::Molecule createMolecule(const std::string& name, bool scale_coordinates = true);
 
-        // Get XYZ file path for external programs (e.g., xtb, dftd3)
+        // Absolute path of the library file of a molecule, for external programs (e.g., xtb, dftd3)
         static std::string getXyzPath(const std::string& name);
 
         // Helper methods for common categories
@@ -48,9 +49,8 @@ namespace TestMolecules {
         static bool hasReferenceEnergy(const std::string& mol_name, const std::string& method);
 
     private:
-        static const std::map<std::string, MoleculeData> s_molecule_registry;
-        static const std::map<std::string, std::string> s_xyz_paths;
-        static void initializeRegistry();
+        static std::map<std::string, MoleculeData> s_molecule_registry;
+        static void ensureLoaded();   // fills MoleculeData::atoms from the structure library (once)
     };
 
 } // namespace TestMolecules

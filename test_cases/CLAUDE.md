@@ -26,13 +26,13 @@ Longer guide (Feb 2026, not re-checked): [TESTING.md](TESTING.md).
 
 ## Molecule Registry - MANDATORY Rule
 
-**NEVER hardcode molecule geometry in test files.** All test molecules live in `core/test_molecule_registry.cpp`:
+**NEVER hardcode molecule geometry in test files.** All test molecules are named in `core/test_molecule_registry.cpp`; their geometry is read from the structure library (`library_id`):
 ```cpp
 #include "core/test_molecule_registry.h"
 curcuma::Molecule mol = TestMolecules::TestMoleculeRegistry::createMolecule("CH4", false); // false = keep Angstrom
 ```
-- Available: `H2`, `HCl`, `OH`, `Cl2`, `HCN`, `H2O`, `H2O_dimer`, `NH3`, `O3`, `CH4`, `CH3OH`, `CH3OCH3`, `C6H6`, `monosaccharide`, `triose`
-- To add one: edit `core/test_molecule_registry.cpp` (atoms in Angstrom) and link `test_molecule_registry` to the test target
+- Available: `H2`, `HCl`, `OH`, `Cl2`, `HCN`, `H2O`, `H2O_dimer`, `NH3`, `O3`, `CH4`, `CH3OH`, `CH3OCH3`, `C6H6`, `monosaccharide`, `triose`; reference energies in the registry belong to the geometry of the library structure
+- To add one: add the structure to the library (`python3 scripts/structlib.py add`), then a registry entry with its `library_id`, `atom_count` and reference values; link `test_molecule_registry` to the test target
 - Why: hardcoded geometry gives geometry-dependent pass/fail, duplicates data and is hard to audit
 
 ## Structure library
