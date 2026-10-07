@@ -168,7 +168,7 @@ def main():
     if len(sys.argv) < 3:
         print("Usage: python3 reproduce_gfnff_energy.py <xyz_file> <json_file>")
         print("\nExample:")
-        print("  python3 reproduce_gfnff_energy.py molecules/dimers/HH.xyz molecules/dimers/HH.json")
+        print("  python3 reproduce_gfnff_energy.py structures/small/dihydrogen.r0.47.xyz molecules/dimers/HH.json")
         sys.exit(1)
 
     xyz_file = Path(sys.argv[1])

@@ -7,6 +7,9 @@ Claude Generated (Oct 2026). Rules: test_cases/structures/README.md.
   structlib.py report           counts per class and provenance, share of unknown provenance
   structlib.py usage [ID ...]   which tests use which structure (derived from legacy paths and CMake/script text)
   structlib.py migrate TESTDIR  replace the local structure copies of a test directory by structures.txt (byte-identical)
+  structlib.py retire [PATH ...] remove byte-identical legacy copies (all that remain without PATH)
+  structlib.py path ID ...      absolute path of the library file(s)
+  structlib.py stage DEST N=ID  copy structures into DEST under the names N (for scripts)
   structlib.py add FILE ...     register a new structure (see --help); rewrites the comment line with id/charge/spin/level/source
 
 Standard library only.
@@ -18,6 +21,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -246,7 +250,10 @@ def check(args):
     for dp, dn, fn in os.walk(LIB):
         for f in fn:
             rel = os.path.normpath(os.path.relpath(os.path.join(dp, f), LIB))
-            if rel in ("manifest.json", "README.md") or rel in listed:
+            if rel in ("manifest.json", "README.md", "structures.cmake") or rel in listed:
+                continue
+            if re.search(r"\.(topo|param)\.json$", rel):
+                warnings.append(f"cache file next to a library structure (delete it before re-measuring): {rel}")
                 continue
             errors.append(f"file not in manifest: {rel}")
     for msg in errors:
@@ -416,12 +423,61 @@ def migrate(args):
     return 0
 
 
+def retire(args):
+    """git rm legacy copies of library structures (byte-identical only) and drop them from legacy_paths."""
+    m = load_manifest()
+    by_path = {lp: e for e in m["structures"] for lp in e.get("legacy_paths", [])}
+    paths = args.paths or sorted(by_path)
+    for p in paths:
+        e = by_path.get(p)
+        if e is None:
+            sys.exit(f"{p} is not a legacy path of any structure")
+        if sha256(os.path.join(ROOT, p)) != e["sha256"]:
+            sys.exit(f"{p} differs from the library file of {e['id']}; not retiring")
+    for p in paths:
+        e = by_path[p]
+        subprocess.check_call(["git", "rm", "-q", p], cwd=ROOT)
+        e["legacy_paths"].remove(p)
+        if not e["legacy_paths"]:
+            del e["legacy_paths"]
+    save_manifest(m)
+    print(f"retired {len(paths)} legacy file(s)")
+    return 0
+
+
+def library_path(sid):
+    """Absolute path of the library file of a structure id (for scripts)."""
+    for e in load_manifest()["structures"]:
+        if e["id"] == sid:
+            return os.path.join(LIB, e["file"])
+    raise KeyError(f"structure {sid} is not in the library")
+
+
+def path_cmd(args):
+    for sid in args.ids:
+        print(library_path(sid))
+    return 0
+
+
+def stage_cmd(args):
+    """Copy library structures into DEST under the given names (like curcuma_stage_structures in CMake)."""
+    os.makedirs(args.dest, exist_ok=True)
+    for item in args.items:
+        name, _, sid = item.partition("=")
+        src = library_path(sid)
+        shutil.copyfile(src, os.path.join(args.dest, name + os.path.splitext(src)[1]))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check").set_defaults(fn=check)
     r = sub.add_parser("report"); r.add_argument("--list-unknown", action="store_true"); r.set_defaults(fn=report)
     u = sub.add_parser("usage"); u.add_argument("ids", nargs="*"); u.set_defaults(fn=usage)
+    rt = sub.add_parser("retire"); rt.add_argument("paths", nargs="*"); rt.set_defaults(fn=retire)
+    pa = sub.add_parser("path"); pa.add_argument("ids", nargs="+"); pa.set_defaults(fn=path_cmd)
+    st = sub.add_parser("stage"); st.add_argument("dest"); st.add_argument("items", nargs="+", help="NAME=ID"); st.set_defaults(fn=stage_cmd)
     mg = sub.add_parser("migrate"); mg.add_argument("testdir"); mg.add_argument("--dry-run", action="store_true"); mg.set_defaults(fn=migrate)
     a = sub.add_parser("add"); a.set_defaults(fn=add)
     a.add_argument("file"); a.add_argument("--id", required=True); a.add_argument("--class", dest="cls", required=True)

@@ -8,22 +8,22 @@ using curcuma::Molecule;
 
 namespace TestMolecules {
 
-    // XYZ file paths for external programs (xtb, dftd3, etc.)
+    // XYZ file paths (relative to test_cases/) for external programs (xtb, dftd3, etc.): files of the structure library
+    // test_cases/structures, see its README. Names without an entry have no xyz file (their atoms are in the registry below).
     const std::map<std::string, std::string> TestMoleculeRegistry::s_xyz_paths = {
-        {"H2", "molecules/dimers/HH.xyz"},
-        {"HCl", "molecules/dimers/HCl.xyz"},
-        {"OH", "molecules/dimers/OH.xyz"},
-        {"HCN", "molecules/trimers/HCN.xyz"},
-        {"H2O", "molecules/trimers/water.xyz"},
-        {"O3", "molecules/trimers/O3.xyz"},
-        {"CH4", "molecules/larger/CH4.xyz"},
-        {"CH3OH", "molecules/larger/CH3OH.xyz"},
-        {"CH3OCH3", "molecules/larger/CH3OCH3.xyz"},
-        {"C6H6", "molecules/larger/C6H6.xyz"},
-        {"benzene", "molecules/larger/C6H6.xyz"},
-        {"monosaccharide", "molecules/larger/monosaccharide.xyz"},
-        {"triose", "molecules/larger/triose.xyz"},
-        {"polymer", "molecules/larger/polymer.xyz"}
+        {"H2", "structures/small/dihydrogen.r0.47.xyz"},
+        {"HCl", "structures/small/hydrogen-chloride.xyz"},
+        {"OH", "structures/small/hydroxyl.xyz"},
+        {"HCN", "structures/small/hydrogen-cyanide.xyz"},
+        {"H2O", "structures/small/water.xyz"},
+        {"O3", "structures/small/ozone.xyz"},
+        {"CH4", "structures/small/methane.xyz"},
+        {"CH3OH", "structures/small/methanol.xyz"},
+        {"CH3OCH3", "structures/small/dimethyl-ether.xyz"},
+        {"C6H6", "structures/small/benzene.xyz"},
+        {"benzene", "structures/small/benzene.xyz"},
+        {"triose", "structures/large/trisaccharide-c18h32o16.xyz"},
+        {"polymer", "structures/bulk/peo201-chain.xyz"}
     };
 
     // Initialize the molecule registry with critical test molecules
@@ -417,7 +417,7 @@ namespace TestMolecules {
             for (const auto& pair : s_xyz_paths) {
                 if (name == pair.second) return pair.second;
             }
-            throw std::invalid_argument("XYZ path for molecule '" + name + "' not found. Available: H2, HCl, OH, CH4, CH3OH, CH3OCH3, C6H6, HCN, H2O, O3, monosaccharide, triose, polymer");
+            throw std::invalid_argument("XYZ path for molecule '" + name + "' not found. Available: H2, HCl, OH, CH4, CH3OH, CH3OCH3, C6H6, HCN, H2O, O3, triose, polymer");
         }
         return it->second;
     }

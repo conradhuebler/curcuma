@@ -113,8 +113,8 @@ target_compile_features(test_xtb_scf_extrapolation PRIVATE cxx_std_17)
 add_test(
     NAME scf_extrapolation_caffeine
     COMMAND test_xtb_scf_extrapolation
-        ${CMAKE_CURRENT_SOURCE_DIR}/molecules/caffeine.xyz
-        ${CMAKE_CURRENT_SOURCE_DIR}/molecules/caffeine.opt.xyz
+        ${CMAKE_CURRENT_BINARY_DIR}/molecules/caffeine.xyz
+        ${CMAKE_CURRENT_BINARY_DIR}/molecules/caffeine.opt.xyz
 )
 set_tests_properties(scf_extrapolation_caffeine PROPERTIES TIMEOUT 120 LABELS "scf_extrapolation")
 
@@ -146,7 +146,7 @@ foreach(_mt ${_D4_DIAG_MOLS_TOL})
             NAME d4_diag_${_mol}
             COMMAND diag_curcuma_d4_potential --quiet --tol ${_tol}
                 ${D4_DIAG_DUMP_DIR}/${_mol}_gfn2.json
-                ${CMAKE_CURRENT_SOURCE_DIR}/molecules/${_mol}.xyz
+                ${CMAKE_CURRENT_BINARY_DIR}/molecules/${_mol}.xyz
         )
         set_tests_properties(d4_diag_${_mol} PROPERTIES TIMEOUT 60 LABELS "d4_diag")
     else()
@@ -185,7 +185,7 @@ foreach(_mt ${_ECOMP_MOLS_TOL})
             NAME ecomp_${_mol}
             COMMAND diag_curcuma_energy_components --quiet --tol ${_tol}
                 ${D4_DIAG_DUMP_DIR}/${_mol}_gfn2.json
-                ${CMAKE_CURRENT_SOURCE_DIR}/molecules/${_mol}.xyz
+                ${CMAKE_CURRENT_BINARY_DIR}/molecules/${_mol}.xyz
         )
         set_tests_properties(ecomp_${_mol} PROPERTIES TIMEOUT 60 LABELS "gfn2_align")
     else()
@@ -230,7 +230,7 @@ foreach(_mt ${_ECOMP_MOLS_TOL_GFN1})
             NAME ecomp_${_mol}_gfn1
             COMMAND diag_curcuma_energy_components --quiet --tol ${_tol}
                 ${D4_DIAG_DUMP_DIR}/${_mol}_gfn1.json
-                ${CMAKE_CURRENT_SOURCE_DIR}/molecules/${_mol}.xyz
+                ${CMAKE_CURRENT_BINARY_DIR}/molecules/${_mol}.xyz
         )
         set_tests_properties(ecomp_${_mol}_gfn1 PROPERTIES TIMEOUT 60 LABELS "gfn1_align")
     else()
@@ -260,7 +260,7 @@ find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     set(_SQM_VAL_PY   ${CMAKE_CURRENT_SOURCE_DIR}/validate_sqm.py)
     set(_SQM_VAL_REF  ${CMAKE_CURRENT_SOURCE_DIR}/reference_data)
-    set(_SQM_VAL_MOL  ${CMAKE_CURRENT_SOURCE_DIR}/molecules)
+    set(_SQM_VAL_MOL  ${CMAKE_CURRENT_BINARY_DIR}/molecules)
     set(_SQM_VAL_TOL  1e-8)
     set(_SQM_MOLS H2 He2 LiH H2O CH4 NH3 C6H6 HCN acetic_acid_dimer caffeine triose complex
         # X-I1 d-shell main-group set (S/P/Cl/Si), all <= 1e-8 vs tblite.
@@ -537,7 +537,7 @@ endif()
 # Jul 2026; USE_CUDA no longer propagates from curcuma_core, so it is set per target -
 # without it xtb_gpu_context.h is empty and the tests failed to compile).
 if(USE_CUDA)
-    set(_SQM_CUDA_MOL ${CMAKE_CURRENT_SOURCE_DIR}/molecules)
+    set(_SQM_CUDA_MOL ${CMAKE_CURRENT_BINARY_DIR}/molecules)
     set(_SQM_CUDA_COMP_MOLS H2O CH4 NH3 C6H6 HCN triose)
 
     # 3a: coordination numbers + CN-shifted self-energies.
@@ -867,7 +867,7 @@ if(USE_TBLITE)
         C6H6
     )
 
-    set(_SQM_MOL_DIR   ${CMAKE_CURRENT_SOURCE_DIR}/molecules)
+    set(_SQM_MOL_DIR   ${CMAKE_CURRENT_BINARY_DIR}/molecules)
     set(_SQM_DUMP_DIR  ${CMAKE_CURRENT_BINARY_DIR}/dumps)
     file(MAKE_DIRECTORY ${_SQM_DUMP_DIR})
 

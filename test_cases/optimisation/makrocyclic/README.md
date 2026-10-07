@@ -1,4 +1,7 @@
 # Overview
+
+> The structures of this experiment moved to the structure library `test_cases/structures` (2026-10-01): `AnGrad.xyz` is `macrocycle-bgal.uff-analytic-grad`, `NumGrad.xyz` is `macrocycle-bgal.uff-numeric-grad`, `input.xyz` is `macrocycle-bgal.conf2`.
+
 The structure files AnGrad.xyz and NumGrad.xyz were obtained using the git commit 4e19c68f8c252babdcd7c87e95287c8f34177e9a of curcuma and commit 7e3848617795ddd0e25f4b772e679adfee583229 of the LBFGSpp submodule.
 The best result (lowest energy) was obtained using analytical gradients, although curcuma ended with
 ```sh

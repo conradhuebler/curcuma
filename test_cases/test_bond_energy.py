@@ -20,17 +20,17 @@ HARTREE_TO_EV = 27.211386
 # Test data
 test_cases = {
     "HH": {
-        "xyz_file": "molecules/dimers/HH.xyz",
+        "xyz_file": "structures/small/dihydrogen.r0.47.xyz",
         "json_file": "molecules/dimers/HH.json",
         "bond_energy_reference": -0.164952024621,  # From HH.out
     },
     "OH": {
-        "xyz_file": "molecules/dimers/OH.xyz",
+        "xyz_file": "structures/small/hydroxyl.xyz",
         "json_file": "molecules/dimers/OH.json",
         "bond_energy_reference": -0.170910705515,  # From OH.out
     },
     "HCl": {
-        "xyz_file": "molecules/dimers/HCl.xyz",
+        "xyz_file": "structures/small/hydrogen-chloride.xyz",
         "json_file": "molecules/dimers/HCl.json",
         "bond_energy_reference": -0.084310498873,  # From HCl.out
     },

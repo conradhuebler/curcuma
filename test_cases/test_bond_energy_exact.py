@@ -136,19 +136,19 @@ P = [
 # Test data
 test_cases = {
     "HH": {
-        "xyz_file": "molecules/dimers/HH.xyz",
+        "xyz_file": "structures/small/dihydrogen.r0.47.xyz",
         "json_file": "molecules/dimers/HH.json",
         "bond_energy_reference": -0.164952024621,
         "atoms": [1, 1],  # H, H
     },
     "OH": {
-        "xyz_file": "molecules/dimers/OH.xyz",
+        "xyz_file": "structures/small/hydroxyl.xyz",
         "json_file": "molecules/dimers/OH.json",
         "bond_energy_reference": -0.170910705515,
         "atoms": [8, 1],  # O, H
     },
     "HCl": {
-        "xyz_file": "molecules/dimers/HCl.xyz",
+        "xyz_file": "structures/small/hydrogen-chloride.xyz",
         "json_file": "molecules/dimers/HCl.json",
         "bond_energy_reference": -0.084310498873,
         "atoms": [17, 1],  # Cl, H

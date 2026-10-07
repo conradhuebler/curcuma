@@ -269,7 +269,7 @@ private:
 
 int main(int argc, char* argv[]) {
     try {
-        std::string molecule_file = "A.xyz";  // Copied by CMake from AAA-bGlc/A.xyz
+        std::string molecule_file = "A.xyz";  // Copied by CMake from structures/clusters/aaa-bglc.conf76.xyz
         
         // Allow command line specification of test molecule
         if (argc > 1) {

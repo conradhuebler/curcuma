@@ -68,10 +68,10 @@ Stand.
 - `test_cg_potentials` ist seit 2026-10-01 als ctest `cg_potentials` registriert (besteht); der CG-Beispielaufruf mit VTF-Eingabe endet mit "Failed to initialize ForceField
   engine" (`docs/archive/CG.md`, geprüft 2026-10-01).
 - **Drei ctests scheitern reproduzierbar** (am 2026-10-01 auf `master` und auf `fix/remove-dead-code` gleich, `confscan_dtemplate` 3 von 3 Läufen auf `master`): `xtb_cpscf` (Gate (C), Antwort Mulliken gegen EEQ: H2 8.2e-5 gegen 1e-6, H2O und HCN je über 1.5e-4), `test_orca_interface` ("O2 triplet mult=3" in `methodToOrcaKeyword`), `confscan_dtemplate` (Ursache nicht untersucht). Die Einordnung "flaky" für `confscan_dtemplate` in älteren Notizen trifft nicht zu.
-- **Strukturbibliothek** (`test_cases/structures/`, Phasen 0 und 1 erledigt): 67 Strukturen mit Herkunft im Manifest, 65 % davon `unknown` (Altbestand, nur abgeleitet).
-  Offen: Phase 2 (Tests kategorieweise auf die Bibliothek umstellen, `sqm` zuerst, Eingaben byte-identisch, case.json je Test), Phase 3 (`TestMoleculeRegistry`
-  liest die Bibliothek statt hartkodierter Atome), Phase 4 (getrackte `.out`-Dateien als Beleg ablegen, 115 untracked Laufausgaben in `test_cases/` entfernen,
-  Berichte in `test_cases/cli/` ins Archiv). Das Optimierungslevel der `unknown`-Strukturen kann nur von Ihnen nachgetragen werden (`python3 scripts/structlib.py report --list-unknown`).
+- **Strukturbibliothek** (`test_cases/structures/`, Phasen 0 bis 2 erledigt): 67 Strukturen, alle Tests und Skripte lesen sie; 65 % der Herkunftsangaben sind `unknown`
+  (Altbestand, nur abgeleitet). Offen: Phase 3 (`TestMoleculeRegistry` ohne hartkodierte Atome, aus der Bibliothek lesen), Phase 4 (getrackte `.out`-Dateien als Beleg,
+  115 untracked Laufausgaben in `test_cases/` entfernen, Berichte in `test_cases/cli/` ins Archiv), case.json je Test. Das Optimierungslevel der `unknown`-Strukturen
+  kann nur der Betreiber nachtragen (`python3 scripts/structlib.py report --list-unknown`).
 - Wissenschaftliche Validierung der CLI-Tests ausbauen (RMSD-Toleranzen, Energiekonvergenz); Muster für absichtlich fehlschlagende
   Tests (`03_invalid_method` in `curcumaopt`, `rmsd`, `confscan`); Performance-Benchmarks für Regressionserkennung.
 - ConfScan: Accept/Reject-Meldungen bei Standard-Verbosity nicht sichtbar (Eintrag von 2025, nicht erneut geprüft).
@@ -103,7 +103,7 @@ Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projek
 - UFF-/QMDFF-Gradient reparieren (Stand: "erstmal nicht")? `-seed` für die MD-Startgeschwindigkeiten reparieren (ändert jede MD)?
 - GPU-Bitgleichheit angehen (Sammel-Kernel statt `atomicAdd`) oder bei Ensemblevergleichen bleiben?
 - Vault, fachliche Fragen: `Offene Fragen/` ("Valenzanteil im reaktiven GFN-FF", "Veraltete C6-Dispersion und Paarlisten in inaktiven Topologie-Ecken",
-  "Lücke zwischen GFN2-xTB und Doppelhybrid-Methoden schließen", "RRHO-Näherung durch MD ... ersetzen").
+  "Lücke zwischen GFN2-xTB und Doppelhybrid-Methoden schließen", "RRHO-Näherung durch MD ... ersetzen", "Ladungsplatzierung bei geladenen Mehrfragment-Systemen in GFN-FF - was ist physikalisch besser", Known Issue #31).
 - Vault, Projektstatus: `Projekte/curcuma rev-gfnff`, `curcuma GPU-Backends`, `curcuma MD-Stabilität großer Systeme`, `curcuma ConfSearch Weiterentwicklung`,
   `curcuma GFN-FF Transitionsmetalle (MOR41)`, `curcuma Reaktives GFN-FF (react-Topologie)`, `curcuma Konformerenfilter (reorder_paper)`.
 

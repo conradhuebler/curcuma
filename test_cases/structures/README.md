@@ -8,14 +8,22 @@ hook). Large benchmark sets are not stored here, they are fetched (see `sets` in
 
 - **Done**: the library, the manifest, the checker, and the import of the structures that were scattered over `test_cases/`
   (67 distinct structures from 187 files; the other 120 were byte-identical copies). Every entry lists its `legacy_paths`.
-- **Phase 2 (tests read the library)**: in progress, per CLI category. A migrated test directory has a `structures.txt` and no
+- **Phase 2 (tests read the library)**: done for the CLI tests and for every other consumer in `test_cases/`, `scripts/` and the
+  registry. CLI category notes follow. A migrated test directory has a `structures.txt` and no
   local copy of the structure; `python3 scripts/structlib.py usage` lists which tests use which structure. All CLI test directories
   are migrated (51 directories, 122 local copies replaced); in 49 of them the inputs in the build tree were compared byte for
   byte before and after in three build configurations, `cli/cg/01_single_point` and `cli/gfnff_gpu/01_gfnff_gpu_singlepoint`
   are not registered in any of them and are only covered by the hash check of `structlib.py migrate`. Left in `cli/`: 18
   tracked program outputs (`*.centered.xyz`, `*.reordered.xyz`, `optimized.xyz`, an optimiser trajectory) and the deliberately
   invalid `errors/02_invalid_xyz_format/invalid.xyz`.
-- **Not done**: the C++ tests, `sqm_reference/` and the `TestMoleculeRegistry` do not use the library yet (64 legacy paths remain). 23 tracked files that look like program
+- **Other consumers**: `test_cases/CMakeLists.txt` and `sqm_reference/CMakeLists.txt` stage the library at configure time into the
+  build tree under the former file names (`curcuma_stage_structures` in `structures.cmake`, for example
+  `build/test_cases/molecules/larger/caffeine.xyz`); the tests read the staged copies, so caches such as `*.topo.json` do not end up in
+  the library. The `geometry_file` field of 35 reference JSON files, the paths in `TestMoleculeRegistry`, five Python helpers and
+  three benchmark scripts point to the library; scripts can use `structlib.py path <id>` and `structlib.py stage`. All 64 remaining
+  legacy copies were removed (`structlib.py retire`).
+- **Not done**: the `TestMoleculeRegistry` still carries hard-coded atoms; five tracked program outputs outside `cli/` remain.
+  The full test suite gives the same result as before the migration (327 pass, 3 known failures, 7 disabled). 23 tracked files that look like program
   output and one file that cannot be parsed (the invalid-format input of `cli/errors/02_invalid_xyz_format`) are listed
   under `not_imported` in the manifest and are not part of the library.
 - **Provenance of the legacy entries** was only derived from what the repository records (comment lines, xtb `.out`

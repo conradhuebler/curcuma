@@ -95,9 +95,9 @@ def run_test(mol_name, mol_path):
 
 def main():
     test_molecules = [
-        ("HH", "test_cases/molecules/dimers/HH.xyz"),
-        ("OH", "test_cases/molecules/dimers/OH.xyz"),
-        ("HCl", "test_cases/molecules/dimers/HCl.xyz"),
+        ("HH", "test_cases/structures/small/dihydrogen.r0.47.xyz"),
+        ("OH", "test_cases/structures/small/hydroxyl.xyz"),
+        ("HCl", "test_cases/structures/small/hydrogen-chloride.xyz"),
     ]
 
     print("\n" + "="*60)

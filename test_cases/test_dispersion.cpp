@@ -232,7 +232,7 @@ void DispersionTester::setupReferences() {
 
     // D3-2: Benzene - PBE0/BJ - Aromatic π-π
     m_references.push_back({
-        "test_cases/validation/benzene.xyz", "Benzene", 12,
+        "test_cases/structures/small/benzene.validation.xyz", "Benzene", 12,
         "D3", "pbe0", "bj", false,
         -1.0, -1.0, -1.0,
         -9.3472846510120E-03,  // simple-dftd3 v1.0.0: ./s-dftd3 benzene.xyz --bj pbe0
@@ -243,7 +243,7 @@ void DispersionTester::setupReferences() {
 
     // D3-3: Ethene - PBE0/BJ
     m_references.push_back({
-        "test_cases/validation/ethene.xyz", "Ethene", 6,
+        "test_cases/structures/small/ethene.xyz", "Ethene", 6,
         "D3", "pbe0", "bj", false,
         -1.0, -1.0, -1.0,
         -1.9007508505774E-03,  // simple-dftd3 v1.0.0: ./s-dftd3 ethene.xyz --bj pbe0
@@ -254,7 +254,7 @@ void DispersionTester::setupReferences() {
 
     // D3-4: Butane - PBE0/BJ - Alkane van der Waals
     m_references.push_back({
-        "test_cases/validation/butane.xyz", "Butane", 14,
+        "test_cases/structures/medium/butane.anti.xyz", "Butane", 14,
         "D3", "pbe0", "bj", false,
         -1.0, -1.0, -1.0,
         -7.5565453629339E-03,  // simple-dftd3 v1.0.0: ./s-dftd3 butane.xyz --bj pbe0
@@ -298,7 +298,7 @@ void DispersionTester::setupReferences() {
 
     // D3-8: Benzene - B3LYP/BJ
     m_references.push_back({
-        "test_cases/validation/benzene.xyz", "Benzene", 12,
+        "test_cases/structures/small/benzene.validation.xyz", "Benzene", 12,
         "D3", "b3lyp", "bj", false,
         -1.0, -1.0, -1.0,
         -1.8881359124881E-02,  // simple-dftd3 v1.0.0: ./s-dftd3 benzene.xyz --bj b3lyp
@@ -309,7 +309,7 @@ void DispersionTester::setupReferences() {
 
     // D3-9: Ethene - B3LYP/BJ
     m_references.push_back({
-        "test_cases/validation/ethene.xyz", "Ethene", 6,
+        "test_cases/structures/small/ethene.xyz", "Ethene", 6,
         "D3", "b3lyp", "bj", false,
         -1.0, -1.0, -1.0,
         -3.9402086193874E-03,  // simple-dftd3 v1.0.0: ./s-dftd3 ethene.xyz --bj b3lyp
@@ -320,7 +320,7 @@ void DispersionTester::setupReferences() {
 
     // D3-10: Butane - B3LYP/BJ
     m_references.push_back({
-        "test_cases/validation/butane.xyz", "Butane", 14,
+        "test_cases/structures/medium/butane.anti.xyz", "Butane", 14,
         "D3", "b3lyp", "bj", false,
         -1.0, -1.0, -1.0,
         -1.4885055766375E-02,  // simple-dftd3 v1.0.0: ./s-dftd3 butane.xyz --bj b3lyp
@@ -342,7 +342,7 @@ void DispersionTester::setupReferences() {
 
     // D3-12: Benzene - PBE0/BJ/ATM - Three-body correction
     m_references.push_back({
-        "test_cases/validation/benzene.xyz", "Benzene", 12,
+        "test_cases/structures/small/benzene.validation.xyz", "Benzene", 12,
         "D3", "pbe0", "bj", true,  // ATM enabled
         -1.0, -1.0, -1.0,
         -9.3378499887848E-03,  // simple-dftd3 v1.0.0: ./s-dftd3 benzene.xyz --bj pbe0 --atm
@@ -353,7 +353,7 @@ void DispersionTester::setupReferences() {
 
     // D3-13: Ethene - PBE0/BJ/ATM
     m_references.push_back({
-        "test_cases/validation/ethene.xyz", "Ethene", 6,
+        "test_cases/structures/small/ethene.xyz", "Ethene", 6,
         "D3", "pbe0", "bj", true,
         -1.0, -1.0, -1.0,
         -1.9005301184261E-03,  // simple-dftd3 v1.0.0: ./s-dftd3 ethene.xyz --bj pbe0 --atm
@@ -364,7 +364,7 @@ void DispersionTester::setupReferences() {
 
     // D3-14: Butane - PBE0/BJ/ATM
     m_references.push_back({
-        "test_cases/validation/butane.xyz", "Butane", 14,
+        "test_cases/structures/medium/butane.anti.xyz", "Butane", 14,
         "D3", "pbe0", "bj", true,
         -1.0, -1.0, -1.0,
         -7.5388052717929E-03,  // simple-dftd3 v1.0.0: ./s-dftd3 butane.xyz --bj pbe0 --atm
@@ -397,7 +397,7 @@ void DispersionTester::setupReferences() {
 
     // D3-17: Benzene - Zero damping (no ATM)
     m_references.push_back({
-        "test_cases/validation/benzene.xyz", "Benzene", 12,
+        "test_cases/structures/small/benzene.validation.xyz", "Benzene", 12,
         "D3", "pbe0", "zero", false,
         -1.0, -1.0, -1.0,
         -3.1191452507417E-03,  // simple-dftd3 v1.0.0: ./s-dftd3 benzene.xyz --zero pbe0
@@ -408,7 +408,7 @@ void DispersionTester::setupReferences() {
 
     // D3-18: Butane - Zero damping
     m_references.push_back({
-        "test_cases/validation/butane.xyz", "Butane", 14,
+        "test_cases/structures/medium/butane.anti.xyz", "Butane", 14,
         "D3", "pbe0", "zero", false,
         -1.0, -1.0, -1.0,
         -4.1662204806842E-03,  // simple-dftd3 v1.0.0: ./s-dftd3 butane.xyz --zero pbe0
@@ -434,7 +434,7 @@ void DispersionTester::setupReferences() {
 
     // D4-2: Benzene - PBE0 - Aromatic
     m_references.push_back({
-        "test_cases/validation/benzene.xyz", "Benzene", 12,
+        "test_cases/structures/small/benzene.validation.xyz", "Benzene", 12,
         "D4", "pbe0", "", true,
         -1.0, -1.0, -1.0,
         TODO_REFERENCE,
@@ -445,7 +445,7 @@ void DispersionTester::setupReferences() {
 
     // D4-3: Ethene - PBE0
     m_references.push_back({
-        "test_cases/validation/ethene.xyz", "Ethene", 6,
+        "test_cases/structures/small/ethene.xyz", "Ethene", 6,
         "D4", "pbe0", "", true,
         -1.0, -1.0, -1.0,
         TODO_REFERENCE,
@@ -456,7 +456,7 @@ void DispersionTester::setupReferences() {
 
     // D4-4: Butane - PBE0
     m_references.push_back({
-        "test_cases/validation/butane.xyz", "Butane", 14,
+        "test_cases/structures/medium/butane.anti.xyz", "Butane", 14,
         "D4", "pbe0", "", true,
         -1.0, -1.0, -1.0,
         TODO_REFERENCE,
@@ -500,7 +500,7 @@ void DispersionTester::setupReferences() {
 
     // D4-8: Benzene - B3LYP
     m_references.push_back({
-        "test_cases/validation/benzene.xyz", "Benzene", 12,
+        "test_cases/structures/small/benzene.validation.xyz", "Benzene", 12,
         "D4", "b3lyp", "", true,
         -1.0, -1.0, -1.0,
         TODO_REFERENCE,
@@ -511,7 +511,7 @@ void DispersionTester::setupReferences() {
 
     // D4-9: Ethene - B3LYP
     m_references.push_back({
-        "test_cases/validation/ethene.xyz", "Ethene", 6,
+        "test_cases/structures/small/ethene.xyz", "Ethene", 6,
         "D4", "b3lyp", "", true,
         -1.0, -1.0, -1.0,
         TODO_REFERENCE,
@@ -522,7 +522,7 @@ void DispersionTester::setupReferences() {
 
     // D4-10: Butane - B3LYP
     m_references.push_back({
-        "test_cases/validation/butane.xyz", "Butane", 14,
+        "test_cases/structures/medium/butane.anti.xyz", "Butane", 14,
         "D4", "b3lyp", "", true,
         -1.0, -1.0, -1.0,
         TODO_REFERENCE,
@@ -544,7 +544,7 @@ void DispersionTester::setupReferences() {
 
     // D4-12: Benzene - PBE0 (three-body disabled)
     m_references.push_back({
-        "test_cases/validation/benzene.xyz", "Benzene_noATM", 12,
+        "test_cases/structures/small/benzene.validation.xyz", "Benzene_noATM", 12,
         "D4", "pbe0", "", false,
         -1.0, -1.0, -1.0,
         TODO_REFERENCE,
@@ -555,7 +555,7 @@ void DispersionTester::setupReferences() {
 
     // D4-13: Ethene - PBE0 (three-body disabled)
     m_references.push_back({
-        "test_cases/validation/ethene.xyz", "Ethene_noATM", 6,
+        "test_cases/structures/small/ethene.xyz", "Ethene_noATM", 6,
         "D4", "pbe0", "", false,
         -1.0, -1.0, -1.0,
         TODO_REFERENCE,
@@ -566,7 +566,7 @@ void DispersionTester::setupReferences() {
 
     // D4-14: Butane - PBE0 (three-body disabled)
     m_references.push_back({
-        "test_cases/validation/butane.xyz", "Butane_noATM", 14,
+        "test_cases/structures/medium/butane.anti.xyz", "Butane_noATM", 14,
         "D4", "pbe0", "", false,
         -1.0, -1.0, -1.0,
         TODO_REFERENCE,
@@ -599,7 +599,7 @@ void DispersionTester::setupReferences() {
 
     // D4-17: Benzene - Custom s8 parameter
     m_references.push_back({
-        "test_cases/validation/benzene.xyz", "Benzene_custom", 12,
+        "test_cases/structures/small/benzene.validation.xyz", "Benzene_custom", 12,
         "D4", "pbe0", "", true,
         -1.0, 1.5, -1.0,  // Custom s8 = 1.5
         TODO_REFERENCE,
@@ -610,7 +610,7 @@ void DispersionTester::setupReferences() {
 
     // D4-18: Butane - Custom s6 parameter
     m_references.push_back({
-        "test_cases/validation/butane.xyz", "Butane_custom", 14,
+        "test_cases/structures/medium/butane.anti.xyz", "Butane_custom", 14,
         "D4", "pbe0", "", true,
         0.8, -1.0, -1.0,  // Custom s6 = 0.8
         TODO_REFERENCE,

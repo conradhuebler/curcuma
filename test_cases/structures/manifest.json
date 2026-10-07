@@ -24,9 +24,6 @@
     "level_note": "curcuma output comment; the method used is not recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/AAA-bGlc/A.xyz"
-   ],
    "analysis": {
     "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
     "guest_formula": "C7H14O6",
@@ -69,9 +66,6 @@
     "level_note": "curcuma output comment; the method used is not recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/AAA-bGlc/B.xyz"
-   ],
    "analysis": {
     "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
     "guest_formula": "C7H14O6",
@@ -111,9 +105,6 @@
     "level_note": "a bare number, no unit or program recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/confs/conf.xyz"
-   ],
    "aliases": [
     "conf"
    ],
@@ -138,11 +129,6 @@
     "level_note": "a bare number, no unit or program recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/input_aa.xyz",
-    "test_cases/reorder/input_aa.xyz",
-    "test_cases/rmsd/input_aa.xyz"
-   ],
    "aliases": [
     "input_aa",
     "ref",
@@ -170,11 +156,6 @@
     "level_note": "a bare number, no unit or program recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/input_ab.xyz",
-    "test_cases/reorder/input_ab.xyz",
-    "test_cases/rmsd/input_ab.xyz"
-   ],
    "aliases": [
     "input_ab",
     "target",
@@ -204,10 +185,6 @@
     "level_note": "curcuma output comment; the method used is not recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/larger/acetic_acid_dimer.xyz",
-    "test_cases/sqm_reference/molecules/acetic_acid_dimer.xyz"
-   ],
    "reference_calculations": [
     {
      "kind": "gfnff-terms",
@@ -285,9 +262,6 @@
     "level_note": "idealised geometry parameters stated in the comment; no calculation level"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/sqm_reference/molecules/NH3.xyz"
-   ],
    "aliases": [
     "nh3"
    ],
@@ -310,9 +284,6 @@
     "kind": "unknown"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/larger/C6H6.xyz"
-   ],
    "reference_calculations": [
     {
      "kind": "xtb-output",
@@ -371,9 +342,6 @@
     "level_note": "idealised geometry parameters stated in the comment; no calculation level"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/sqm_reference/molecules/C6H6.xyz"
-   ],
    "aliases": [
     "c6h6.sqmref"
    ],
@@ -397,9 +365,6 @@
     "comment": "Benzene - C6H6 - Aromatic ring for combined testing"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/validation/benzene.xyz"
-   ],
    "aliases": [
     "benzene"
    ],
@@ -428,9 +393,6 @@
     "level_note": "xtbopt.xyz comment (energy, gnorm, xtb version); Hamiltonian and convergence level not recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/larger/C6H5COOH.xyz"
-   ],
    "reference_calculations": [
     {
      "kind": "xtb-output",
@@ -463,9 +425,6 @@
     "comment": "Butane - C4H10 - Anti conformation for torsion testing"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/validation/butane.xyz"
-   ],
    "aliases": [
     "butane",
     "input",
@@ -495,10 +454,6 @@
     "level_note": "curcuma output comment; the method used is not recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/confscan/input.xyz",
-    "test_cases/input.xyz"
-   ],
    "aliases": [
     "conformers",
     "input",
@@ -538,10 +493,6 @@
     "kind": "unknown"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/larger/caffeine.xyz",
-    "test_cases/sqm_reference/molecules/caffeine.xyz"
-   ],
    "aliases": [
     "input"
    ],
@@ -594,9 +545,6 @@
     "level_note": "curcuma output comment; the method used is not recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/sqm_reference/molecules/caffeine.opt.xyz"
-   ],
    "aliases": []
   },
   {
@@ -705,9 +653,6 @@
     "kind": "unknown"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/dimers/HH.xyz"
-   ],
    "reference_calculations": [
     {
      "kind": "xtb-output",
@@ -765,9 +710,6 @@
     "comment": "H2 equilibrium bond length 0.741 Å"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/sqm_reference/molecules/H2.xyz"
-   ],
    "aliases": [
     "h2"
    ],
@@ -790,9 +732,6 @@
     "kind": "unknown"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/larger/CH3OCH3.xyz"
-   ],
    "reference_calculations": [
     {
      "kind": "gfnff-terms",
@@ -863,9 +802,6 @@
     "comment": "Ethene - C2H4 - Planar sp2 carbons for inversion testing"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/validation/ethene.xyz"
-   ],
    "aliases": []
   },
   {
@@ -885,9 +821,6 @@
     "kind": "unknown"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/sqm_reference/molecules/FI_pyr.xyz"
-   ],
    "aliases": [
     "fi_pyr"
    ],
@@ -960,9 +893,6 @@
     "comment": "He2 non-bonded test 3.0 Å separation"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/sqm_reference/molecules/He2.xyz"
-   ],
    "aliases": [
     "he2"
    ],
@@ -985,9 +915,6 @@
     "kind": "unknown"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/dimers/HCl.xyz"
-   ],
    "reference_calculations": [
     {
      "kind": "xtb-output",
@@ -1038,9 +965,6 @@
     "comment": "HCl molecule"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/larger/HCl.xyz"
-   ],
    "reference_calculations": [
     {
      "kind": "gfnff-terms",
@@ -1072,9 +996,6 @@
     "comment": "HCl d-shell validation (X-I1)"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/sqm_reference/molecules/HCl.xyz"
-   ],
    "aliases": [
     "hcl.sqmref"
    ],
@@ -1103,10 +1024,6 @@
     "level_note": "xtbopt.xyz comment (energy, gnorm, xtb version); Hamiltonian and convergence level not recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/trimers/HCN.xyz",
-    "test_cases/sqm_reference/molecules/HCN.xyz"
-   ],
    "reference_calculations": [
     {
      "kind": "xtb-output",
@@ -1186,9 +1103,6 @@
     "comment": "H2S d-shell validation (X-I1)"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/sqm_reference/molecules/H2S.xyz"
-   ],
    "aliases": [
     "h2s"
    ],
@@ -1233,9 +1147,6 @@
     "kind": "unknown"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/dimers/OH.xyz"
-   ],
    "reference_calculations": [
     {
      "kind": "xtb-output",
@@ -1268,9 +1179,6 @@
     "comment": "input_6 ** Energy = -3529.65147926 Eh **"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/optimisation/acyclic/JL22-bGal.xyz"
-   ],
    "analysis": {
     "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
     "guest_formula": "C7H14O6",
@@ -1314,9 +1222,6 @@
     "level_note": "xtbopt.xyz comment (energy, gnorm, xtb version); Hamiltonian and convergence level not recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/optimisation/acyclic/GFN-2.xyz"
-   ],
    "analysis": {
     "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
     "guest_formula": "C7H14O6",
@@ -1360,9 +1265,6 @@
     "level_note": "xtbopt.xyz comment (energy, gnorm, xtb version); Hamiltonian and convergence level not recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/optimisation/acyclic/GFN-FF.xyz"
-   ],
    "analysis": {
     "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
     "guest_formula": "C7H14O6",
@@ -1401,9 +1303,6 @@
     "comment": "LiH equilibrium bond length 1.595 Å"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/sqm_reference/molecules/LiH.xyz"
-   ],
    "aliases": [
     "lih"
    ],
@@ -1431,10 +1330,6 @@
     "level_note": "curcuma output comment; the method used is not recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/larger/complex.xyz",
-    "test_cases/sqm_reference/molecules/complex.xyz"
-   ],
    "analysis": {
     "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
     "guest_formula": "C7H14O6",
@@ -1481,9 +1376,6 @@
     "comment": "input_2 ** Energy = -4944.36361546 Eh **"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/optimisation/makrocyclic/input.xyz"
-   ],
    "analysis": {
     "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
     "guest_formula": "C7H14O6",
@@ -1528,9 +1420,6 @@
     "energy_eh": 3.015478
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/optimisation/makrocyclic/AnGrad.xyz"
-   ],
    "analysis": {
     "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
     "guest_formula": "C7H14O6",
@@ -1575,9 +1464,6 @@
     "energy_eh": 3.027176
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/optimisation/makrocyclic/NumGrad.xyz"
-   ],
    "analysis": {
     "method": "scripts/pyranoside_stereo.py (ring faces relative to CH2OH, Haworth orientation); validated on Open Babel built reference glycosides and cross-checked with Open Babel's canonical isomeric SMILES of the extracted guest",
     "guest_formula": "C7H14O6",
@@ -1615,9 +1501,6 @@
     "kind": "unknown"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/larger/CH4.xyz"
-   ],
    "reference_calculations": [
     {
      "kind": "xtb-output",
@@ -1682,9 +1565,6 @@
     "level_note": "idealised geometry parameters stated in the comment; no calculation level"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/sqm_reference/molecules/CH4.xyz"
-   ],
    "aliases": [
     "ch4.sqmref"
    ],
@@ -1713,9 +1593,6 @@
     "level_note": "xtbopt.xyz comment (energy, gnorm, xtb version); Hamiltonian and convergence level not recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/larger/CH3OH.xyz"
-   ],
    "reference_calculations": [
     {
      "kind": "xtb-output",
@@ -1795,9 +1672,6 @@
     "comment": "4 isolated Na+/Cl- ions, pairwise distance > 5 Å — WP-S3 negative test"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/ionic/NaCl_cluster.xyz"
-   ],
    "aliases": [
     "NaCl",
     "NaCl_cluster",
@@ -1828,9 +1702,6 @@
     "level_note": "xtbopt.xyz comment (energy, gnorm, xtb version); Hamiltonian and convergence level not recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/trimers/O3.xyz"
-   ],
    "reference_calculations": [
     {
      "kind": "xtb-output",
@@ -1867,9 +1738,6 @@
     "level_note": "curcuma output comment; the method used is not recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/larger/polymer.xyz"
-   ],
    "aliases": [
     "input",
     "polymer",
@@ -1903,9 +1771,6 @@
     "comment": "polymer.xyz"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/larger/polymer_2x.xyz"
-   ],
    "aliases": [
     "polymer_2x"
    ],
@@ -1931,9 +1796,6 @@
     "level_note": "method named in the comment line; program and convergence not recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/larger/polymer_2x_gfn2_opt.xyz"
-   ],
    "aliases": [
     "polymer_2x_gfn2_opt"
    ],
@@ -1959,9 +1821,6 @@
     "level_note": "method named in the comment line; program and convergence not recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/larger/polymer_2x_gfnff_opt.xyz"
-   ],
    "aliases": [
     "polymer_2x_gfnff_opt"
    ],
@@ -1985,9 +1844,6 @@
     "comment": "PH3 d-shell validation (X-I1)"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/sqm_reference/molecules/PH3.xyz"
-   ],
    "aliases": [
     "ph3"
    ],
@@ -2011,9 +1867,6 @@
     "comment": "Test fragment with 2 Xx connection points on C0"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/polymerbuild/fragment_2xx.xyz"
-   ],
    "aliases": [
     "fragment_2xx"
    ],
@@ -2037,9 +1890,6 @@
     "comment": "SiH4 d-shell validation (X-I1)"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/sqm_reference/molecules/SiH4.xyz"
-   ],
    "aliases": [
     "sih4"
    ],
@@ -2068,10 +1918,6 @@
     "level_note": "xtbopt.xyz comment (energy, gnorm, xtb version); Hamiltonian and convergence level not recorded"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/larger/triose.xyz",
-    "test_cases/sqm_reference/molecules/triose.xyz"
-   ],
    "reference_calculations": [
     {
      "kind": "gfnff-terms",
@@ -2103,9 +1949,6 @@
     "comment": "5287993"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/optimisation/triose/input.xyz"
-   ],
    "aliases": [
     "triose.input"
    ],
@@ -2129,9 +1972,6 @@
     "comment": "mixture.pdb"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/larger/mixture2.xyz"
-   ],
    "aliases": [
     "mixture2"
    ],
@@ -2154,9 +1994,6 @@
     "kind": "unknown"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/trimers/water.xyz"
-   ],
    "reference_calculations": [
     {
      "kind": "xtb-output",
@@ -2187,9 +2024,6 @@
     "comment": "H2O molecule"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/larger/H2O.xyz"
-   ],
    "reference_calculations": [
     {
      "kind": "gfnff-terms",
@@ -2266,9 +2100,6 @@
     "level_note": "idealised geometry parameters stated in the comment; no calculation level"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/sqm_reference/molecules/H2O.xyz"
-   ],
    "aliases": [
     "h2o"
    ],
@@ -2292,9 +2123,6 @@
     "comment": "8 well-separated waters (8 A grid) - C1c validation cluster"
    },
    "legacy": true,
-   "legacy_paths": [
-    "test_cases/molecules/larger/water8_cluster.xyz"
-   ],
    "aliases": [
     "water8_cluster"
    ]

@@ -1,6 +1,6 @@
 {
   "molecule": "HCl",
-  "geometry_file": "test_cases/molecules/dimers/HCl.xyz",
+  "geometry_file": "test_cases/structures/small/hydrogen-chloride.xyz",
   "charge": 0,
   "spin_unpaired": 0,
   "method": "gfn1",

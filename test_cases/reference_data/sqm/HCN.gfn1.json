@@ -1,6 +1,6 @@
 {
   "molecule": "HCN",
-  "geometry_file": "test_cases/molecules/trimers/HCN.xyz",
+  "geometry_file": "test_cases/structures/small/hydrogen-cyanide.xyz",
   "charge": 0,
   "spin_unpaired": 0,
   "method": "gfn1",

@@ -27,7 +27,7 @@ conda install -c conda-forge xtb
 
 **Basic D3 with PBE0/BJ damping:**
 ```bash
-xtb test_cases/validation/benzene.xyz --gfn 2 --d3 --func pbe0
+xtb test_cases/structures/small/benzene.validation.xyz --gfn 2 --d3 --func pbe0
 ```
 
 Expected output includes:
@@ -39,28 +39,28 @@ dispersion energy: -0.012345678 Eh
 
 **With three-body ATM term:**
 ```bash
-xtb test_cases/validation/benzene.xyz --gfn 2 --d3 --func pbe0 --atm
+xtb test_cases/structures/small/benzene.validation.xyz --gfn 2 --d3 --func pbe0 --atm
 ```
 
 **Different functional (B3LYP):**
 ```bash
-xtb test_cases/validation/benzene.xyz --gfn 2 --d3 --func b3lyp
+xtb test_cases/structures/small/benzene.validation.xyz --gfn 2 --d3 --func b3lyp
 ```
 
 **Other damping functions:**
 ```bash
 # Zero damping
-xtb test_cases/validation/benzene.xyz --gfn 2 --d3 --func pbe0 --zero
+xtb test_cases/structures/small/benzene.validation.xyz --gfn 2 --d3 --func pbe0 --zero
 
 # Bjm damping (modified Becke-Johnson)
-xtb test_cases/validation/benzene.xyz --gfn 2 --d3 --func pbe0 --bjm
+xtb test_cases/structures/small/benzene.validation.xyz --gfn 2 --d3 --func pbe0 --bjm
 ```
 
 #### D4 Calculations
 
 **Basic D4 with PBE0:**
 ```bash
-xtb test_cases/validation/benzene.xyz --gfn 2 --d4 --func pbe0
+xtb test_cases/structures/small/benzene.validation.xyz --gfn 2 --d4 --func pbe0
 ```
 
 D4 automatically includes three-body corrections. Expected output:
@@ -70,7 +70,7 @@ dispersion energy: -0.013456789 Eh
 
 **Different functional:**
 ```bash
-xtb test_cases/validation/benzene.xyz --gfn 2 --d4 --func b3lyp
+xtb test_cases/structures/small/benzene.validation.xyz --gfn 2 --d4 --func b3lyp
 ```
 
 ### Method 2: Using ORCA 5.0.3
@@ -177,7 +177,7 @@ In `test_dispersion.cpp`, find the reference you want to update. For example:
 ```cpp
 // D3-2: Benzene - PBE0/BJ - Aromatic π-π
 m_references.push_back({
-    "test_cases/validation/benzene.xyz", "Benzene", 12,
+    "test_cases/structures/small/benzene.validation.xyz", "Benzene", 12,
     "D3", "pbe0", "bj", false,
     -1.0, -1.0, -1.0,
     TODO_REFERENCE,  // TODO: Fill from XTB
@@ -189,7 +189,7 @@ m_references.push_back({
 ### Calculate the Energy
 
 ```bash
-xtb test_cases/validation/benzene.xyz --gfn 2 --d3 --func pbe0
+xtb test_cases/structures/small/benzene.validation.xyz --gfn 2 --d3 --func pbe0
 # Output: dispersion energy: -0.012345678 Eh
 ```
 
@@ -210,7 +210,7 @@ Replace `TODO_REFERENCE` with the actual value:
 ```cpp
 // D3-2: Benzene - PBE0/BJ - Aromatic π-π
 m_references.push_back({
-    "test_cases/validation/benzene.xyz", "Benzene", 12,
+    "test_cases/structures/small/benzene.validation.xyz", "Benzene", 12,
     "D3", "pbe0", "bj", false,
     -1.0, -1.0, -1.0,
     -0.012345678,    // XTB 6.6.1: xtb benzene.xyz --gfn 2 --d3 --func pbe0
@@ -307,7 +307,7 @@ Here's a template for organizing your calculated values:
 
 ```
 Molecule: benzene
-File: test_cases/validation/benzene.xyz
+File: test_cases/structures/small/benzene.validation.xyz
 Atoms: 12
 Date: 2025-12-15
 XTB Version: 6.6.1

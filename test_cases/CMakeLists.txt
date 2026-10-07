@@ -1,14 +1,30 @@
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/input_aa.xyz
-     DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+# Structures come from the library test_cases/structures (rules in its README), staged byte for byte into the build tree.
+include(${CMAKE_CURRENT_SOURCE_DIR}/structures/structures.cmake)
+curcuma_stage_structures(${CMAKE_CURRENT_BINARY_DIR}
+    input_aa=aaa-host.rmsd-a input_ab=aaa-host.rmsd-b
+    A=aaa-bglc.conf76 B=aaa-bglc.conf96)
 
-
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/input_ab.xyz
-      DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
-
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/AAA-bGlc/A.xyz
-        DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/AAA-bGlc/B.xyz
-            DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+# The former molecules/ directories, filled from the library under their old file names
+curcuma_stage_structures(${CMAKE_CURRENT_BINARY_DIR}/molecules/dimers
+    HH=dihydrogen.r0.47 HCl=hydrogen-chloride OH=hydroxyl)
+curcuma_stage_structures(${CMAKE_CURRENT_BINARY_DIR}/molecules/trimers
+    HCN=hydrogen-cyanide O3=ozone water=water)
+curcuma_stage_structures(${CMAKE_CURRENT_BINARY_DIR}/molecules/ionic NaCl_cluster=na2cl2-isolated-ions)
+curcuma_stage_structures(${CMAKE_CURRENT_BINARY_DIR}/molecules/larger
+    acetic_acid_dimer=acetic-acid-dimer C6H6=benzene C6H5COOH=benzoic-acid caffeine=caffeine
+    CH3OCH3=dimethyl-ether CH3OH=methanol CH4=methane complex=macrocycle-bgal H2O=water.alt1
+    HCl=hydrogen-chloride.alt1 mixture2=urea400-water1000 polymer=peo201-chain
+    polymer_2x=peo201x2-water1500 polymer_2x_gfn2_opt=peo201x2-water1500.gfn2-relaxed
+    polymer_2x_gfnff_opt=peo201x2-water1500.gfnff-min triose=trisaccharide-c18h32o16
+    water8_cluster=water8-cluster)
+curcuma_stage_structures(${CMAKE_CURRENT_BINARY_DIR}/molecules/staged cl2m_ea25=cl2-anion)
+# sqm_reference/molecules, same file names as before
+curcuma_stage_structures(${CMAKE_CURRENT_BINARY_DIR}/sqm_reference/molecules
+    acetic_acid_dimer=acetic-acid-dimer C6H6=benzene.ideal-d6h caffeine=caffeine caffeine.opt=caffeine.opt
+    CH4=methane.ideal-td complex=macrocycle-bgal FI_pyr=fi-pyridine H2=dihydrogen.r0.741 H2O=water.ideal-c2v
+    H2S=hydrogen-sulfide.d-shell-validation HCl=hydrogen-chloride.d-shell-validation HCN=hydrogen-cyanide
+    He2=helium-dimer.r3.0 LiH=lithium-hydride.r1.595 NH3=ammonia.ideal-c3v PH3=phosphine.d-shell-validation
+    SiH4=silane.d-shell-validation triose=trisaccharide-c18h32o16)
 
 # Claude Generated: Test Molecule Registry - Central hardcoded molecule database
 # Provides zero-dependency molecule access for all test cases
@@ -43,8 +59,7 @@ if(USE_PCH)
         target_precompile_headers(test_molecule REUSE_FROM curcuma_core)
 endif()
 
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/confscan/input.xyz
-        DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+curcuma_stage_structures(${CMAKE_CURRENT_BINARY_DIR} input=c33h45n9-agal-frames44)
 
 add_executable(confscan_test
         confscan.cpp)
@@ -62,9 +77,6 @@ target_link_libraries(confstat_tests
 )
 
 # Claude Generated: Energy calculation test suite
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/AAA-bGlc/A.xyz
-        DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
-
 add_executable(test_energy_methods
         test_energy_methods.cpp)
 
@@ -154,7 +166,7 @@ if(USE_PCH)
 endif()
 add_test(NAME gfnff_frag_charge_history
          COMMAND test_gfnff_frag_charge_history
-                 ${CMAKE_CURRENT_SOURCE_DIR}/cli/gfnff/05_frag_charge_ensemble/cl2m_ea25.xyz
+                 ${CMAKE_CURRENT_BINARY_DIR}/molecules/staged/cl2m_ea25.xyz
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(gfnff_frag_charge_history PROPERTIES TIMEOUT 120 LABELS "gfnff;frag_charge")
 
@@ -227,7 +239,7 @@ if(USE_PCH)
 endif()
 add_test(NAME test_eeq_extrapolation
          COMMAND test_eeq_extrapolation
-                 ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/complex.xyz 12)
+                 ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/complex.xyz 12)
 set_tests_properties(test_eeq_extrapolation PROPERTIES TIMEOUT 180 LABELS "eeq_extrapolation")
 
 add_test(NAME test_fast_exp
@@ -269,7 +281,7 @@ if(USE_PCH)
 endif()
 
 add_test(NAME test_gfnff_topology_reentrancy
-         COMMAND test_gfnff_topology_reentrancy ${CMAKE_SOURCE_DIR}/test_cases)
+         COMMAND test_gfnff_topology_reentrancy ${CMAKE_CURRENT_BINARY_DIR})
 
 # Claude Generated (Sep 2026, Known Issue #32): energy-only calls on a reused GFN-FF
 # calculator must use their own CN (Coulomb chi(CN)) and D4 C6, not the last gradient
@@ -301,8 +313,7 @@ add_test(NAME test_polymerbuild_sequence
          COMMAND test_polymerbuild_sequence)
 
 # Claude Generated: PolymerBuild structural tests (Xx selection, geometry comparison)
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/polymerbuild/fragment_2xx.xyz
-     DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/polymerbuild)
+curcuma_stage_structures(${CMAKE_CURRENT_BINARY_DIR}/polymerbuild fragment_2xx=polymerbuild-fragment-2xx)
 
 add_executable(test_polymerbuild_structure
         test_polymerbuild_structure.cpp)
@@ -429,14 +440,14 @@ endif()
 foreach(EO_MOL triose caffeine)
     add_test(NAME gfnff_energy_only_geometry_${EO_MOL}
              COMMAND test_gfnff_energy_only_geometry
-                     ${CMAKE_SOURCE_DIR}/test_cases/molecules/larger/${EO_MOL}.xyz none
+                     ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/${EO_MOL}.xyz none
              WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
     set_tests_properties(gfnff_energy_only_geometry_${EO_MOL}
         PROPERTIES TIMEOUT 120 LABELS "gfnff")
     if(USE_CUDA)
         add_test(NAME gfnff_gpu_energy_only_geometry_${EO_MOL}
                  COMMAND test_gfnff_energy_only_geometry
-                         ${CMAKE_SOURCE_DIR}/test_cases/molecules/larger/${EO_MOL}.xyz cuda
+                         ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/${EO_MOL}.xyz cuda
                  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
         set_tests_properties(gfnff_gpu_energy_only_geometry_${EO_MOL}
             PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu")
@@ -451,7 +462,7 @@ if(USE_PCH)
     target_precompile_headers(test_xtb_gradient REUSE_FROM curcuma_core)
 endif()
 
-set(_GRAD_MOL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/sqm_reference/molecules)
+set(_GRAD_MOL_DIR ${CMAKE_CURRENT_BINARY_DIR}/sqm_reference/molecules)
 foreach(_mol H2O CH4 NH3)
     add_test(NAME xtb_gradient_${_mol}
              COMMAND test_xtb_gradient ${_GRAD_MOL_DIR}/${_mol}.xyz
@@ -532,7 +543,7 @@ set_tests_properties(xtb_cpscf PROPERTIES TIMEOUT 120 LABELS "cpscf;native_xtb")
 # the -eigensolver propagation through fragments/dc. See docs/SQM_LARGE_SYSTEMS.md.
 add_test(NAME large_system_modes
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/large_system_modes.sh
-                 $<TARGET_FILE:curcuma> ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger
+                 $<TARGET_FILE:curcuma> ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(large_system_modes PROPERTIES TIMEOUT 180 LABELS "large_system;native_xtb")
 
@@ -573,7 +584,7 @@ if(Python3_Interpreter_FOUND)
                  COMMAND ${Python3_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/check_gfnff_gpu_split.py
                          $<TARGET_FILE:curcuma>
-                         ${CMAKE_SOURCE_DIR}/test_cases/molecules/larger/polymer_2x.xyz)
+                         ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/polymer_2x.xyz)
         set_tests_properties(gfnff_gpu_split_equals_single
             PROPERTIES TIMEOUT 600 LABELS "gfnff_gpu;gpu" SKIP_RETURN_CODE 77)
     endif()

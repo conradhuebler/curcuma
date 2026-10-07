@@ -1,7 +1,7 @@
 {
   "molecule": {
     "name": "polymer",
-    "geometry_file": "test_cases/molecules/larger/polymer.xyz",
+    "geometry_file": "test_cases/structures/bulk/peo201-chain.xyz",
     "atoms": [
       {
         "element": "O",

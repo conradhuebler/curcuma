@@ -118,9 +118,9 @@ def main():
     print("===================================\n")
 
     test_cases = [
-        {"name": "HH", "file": "test_cases/molecules/dimers/HH.xyz", "reference": "test_cases/golden_references/gfnff_hh.json"},
-        {"name": "CH4", "file": "test_cases/molecules/larger/CH4.xyz", "reference": "test_cases/golden_references/gfnff_ch4.json"},
-        {"name": "H2O", "file": "test_cases/molecules/trimers/water.xyz", "reference": "test_cases/golden_references/gfnff_h2o.json"}
+        {"name": "HH", "file": "test_cases/structures/small/dihydrogen.r0.47.xyz", "reference": "test_cases/golden_references/gfnff_hh.json"},
+        {"name": "CH4", "file": "test_cases/structures/small/methane.xyz", "reference": "test_cases/golden_references/gfnff_ch4.json"},
+        {"name": "H2O", "file": "test_cases/structures/small/water.xyz", "reference": "test_cases/golden_references/gfnff_h2o.json"}
     ]
 
     all_systems_passed = True

@@ -30,8 +30,8 @@ ctest -R "rmsd" --output-on-failure
 ./test_gfnff_unified
 
 # External tools need XYZ files
-xtb test_cases/molecules/larger/CH4.xyz --gfnff
-./build/external/simple-dftd3/release/app/s-dftd3 input.xyz
+xtb test_cases/structures/small/methane.xyz --gfnff
+./build/external/simple-dftd3/release/app/s-dftd3 structures/ensembles/c33h45n9-agal-frames44.xyz
 ```
 
 ---
@@ -88,7 +88,7 @@ curcuma::Molecule mol = TestMoleculeRegistry::createMolecule("CH4");
 
 // Get XYZ path for external verification
 std::string xyz_path = TestMoleculeRegistry::getXyzPath("CH4");
-// Returns: "molecules/larger/CH4.xyz"
+// Returns: "structures/small/methane.xyz"
 ```
 
 ### Check Available Molecules
@@ -530,7 +530,7 @@ ctest -R "cli_rmsd_01" --verbose
 source ../../test_utils.sh
 
 run_test() {
-    $CURCUMA -capability input.xyz > stdout.log 2> stderr.log
+    $CURCUMA -capability structures/ensembles/c33h45n9-agal-frames44.xyz > stdout.log 2> stderr.log
     assert_exit_code $? 0
 }
 

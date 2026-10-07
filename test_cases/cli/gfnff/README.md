@@ -87,6 +87,6 @@ Each test follows the standard CLI test pattern:
 
 ## Related Files
 
-- `test_cases/molecules/larger/complex.xyz` - Source molecule
+- `test_cases/structures/clusters/macrocycle-bgal.xyz` - Source molecule
 - `gfnff_goal.md` - Implementation targets and requirements
 - `test_cases/cli/test_utils.sh` - Shared test utilities

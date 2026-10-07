@@ -15,10 +15,10 @@ ctest -R "gfnff" --output-on-failure
 ### Run External Verification (XYZ Files)
 ```bash
 # Get XYZ path programmatically
-test_cases/molecules/larger/CH4.xyz
+test_cases/structures/small/methane.xyz
 
 # Run external program
-xtb test_cases/molecules/larger/CH4.xyz --gfnff
+xtb test_cases/structures/small/methane.xyz --gfnff
 ```
 
 ---
@@ -87,7 +87,7 @@ double energy = gfnff.calculateEnergy(mol);
 ```cpp
 // Get XYZ path programmatically (relative to build/test_cases/)
 std::string xyz_path = TestMoleculeRegistry::getXyzPath("CH4");
-// Returns: "molecules/larger/CH4.xyz"
+// Returns: "structures/small/methane.xyz"
 
 // Run external program
 std::string cmd = "xtb " + xyz_path + " --gfnff";
@@ -362,7 +362,7 @@ A: Unit tests without file dependencies are more portable and run in any build d
 A: No, all molecules must have both hardcoded coordinates (for unit tests) and an XYZ file (for external verification). This ensures consistency between test and reference.
 
 **Q: What if my molecule name differs from XYZ filename?**
-A: Add both to the `s_xyz_paths` map (see test_molecule_registry.cpp). Example: `{"C6H6", "molecules/larger/C6H6.xyz"}, {"benzene", "molecules/larger/C6H6.xyz"}`
+A: Add both to the `s_xyz_paths` map (see test_molecule_registry.cpp). Example: `{"C6H6", "structures/small/benzene.xyz"}, {"benzene", "structures/small/benzene.xyz"}`
 
 **Q: How do I update reference energies?**
 A: Run XTB/D3 externally using the XYZ file, then update the `reference_energies` map in test_molecule_registry.cpp.

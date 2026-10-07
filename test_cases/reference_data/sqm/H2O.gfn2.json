@@ -1,6 +1,6 @@
 {
   "molecule": "H2O",
-  "geometry_file": "test_cases/molecules/larger/H2O.xyz",
+  "geometry_file": "test_cases/structures/small/water.alt1.xyz",
   "charge": 0,
   "spin_unpaired": 0,
   "method": "gfn2",
