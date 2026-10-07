@@ -258,6 +258,9 @@ def tag_for(path):
 
 
 def main():
+    for dp, dn, fn in os.walk(os.path.join(ROOT, "test_cases")):
+        if "structures.txt" in fn and "release" not in dp:
+            sys.exit("tests have been migrated to the library (structures.txt exists); the legacy import cannot be repeated")
     files, skipped = tracked_structures()
     groups = collections.defaultdict(list)
     for p in files:

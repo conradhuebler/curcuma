@@ -21,6 +21,34 @@ macro(add_cli_test CATEGORY TEST_NAME)
     file(COPY ${TEST_FILES}
          DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${CATEGORY}/${TEST_NAME})
 
+    # Structures from the library test_cases/structures: structures.txt in the test directory lists one structure per
+    # line, "<id>" (file name <id>.xyz) or "<id> as <file name>". Bytes are copied unchanged (see structures/README.md).
+    set(_struct_list "${CMAKE_CURRENT_SOURCE_DIR}/${CATEGORY}/${TEST_NAME}/structures.txt")
+    if(EXISTS "${_struct_list}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_struct_list}")
+        file(STRINGS "${_struct_list}" _struct_lines)
+        foreach(_line IN LISTS _struct_lines)
+            string(STRIP "${_line}" _line)
+            if(_line STREQUAL "" OR _line MATCHES "^#")
+                continue()
+            endif()
+            if(_line MATCHES "^([^ ]+) +as +([^ ]+)$")
+                set(_sid "${CMAKE_MATCH_1}")
+                set(_sname "${CMAKE_MATCH_2}")
+            else()
+                set(_sid "${_line}")
+                set(_sname "${_line}.xyz")
+            endif()
+            file(GLOB _smatch "${CMAKE_SOURCE_DIR}/test_cases/structures/*/${_sid}.xyz"
+                              "${CMAKE_SOURCE_DIR}/test_cases/structures/*/${_sid}.vtf")
+            list(LENGTH _smatch _smatch_n)
+            if(NOT _smatch_n EQUAL 1)
+                message(FATAL_ERROR "structure '${_sid}' listed in ${_struct_list} is not in test_cases/structures exactly once")
+            endif()
+            configure_file("${_smatch}" "${CMAKE_CURRENT_BINARY_DIR}/${CATEGORY}/${TEST_NAME}/${_sname}" COPYONLY)
+        endforeach()
+    endif()
+
     # Copy shared test utilities to category and cli directories
     file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/test_utils.sh
          DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${CATEGORY}/)

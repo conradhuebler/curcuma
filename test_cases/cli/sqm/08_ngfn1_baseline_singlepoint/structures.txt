@@ -1,0 +1,8 @@
+# Structures from test_cases/structures (id, optionally 'as <file name>'); see structures/README.md
+benzene as C6H6.xyz
+caffeine
+dimethyl-ether as CH3OCH3.xyz
+hydrogen-cyanide as HCN.xyz
+methane as CH4.xyz
+methanol as CH3OH.xyz
+water

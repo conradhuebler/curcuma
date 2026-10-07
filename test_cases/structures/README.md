@@ -8,8 +8,10 @@ hook). Large benchmark sets are not stored here, they are fetched (see `sets` in
 
 - **Done**: the library, the manifest, the checker, and the import of the structures that were scattered over `test_cases/`
   (67 distinct structures from 187 files; the other 120 were byte-identical copies). Every entry lists its `legacy_paths`.
-- **Not done**: the tests still read their own local copies. Nothing in `cli/` or the C++ tests uses the library yet.
-  Until a test is migrated, its local copy stays the file that actually runs. 23 tracked files that look like program
+- **Phase 2 (tests read the library)**: in progress, per CLI category. A migrated test directory has a `structures.txt` and no
+  local copy of the structure; `python3 scripts/structlib.py usage` lists which tests use which structure. Migrated so far:
+  `cli/sqm`. Tests that are not migrated still run on their own local copies.
+- **Not done**: the C++ tests and the `TestMoleculeRegistry` do not use the library yet. 23 tracked files that look like program
   output and one file that cannot be parsed (the invalid-format input of `cli/errors/02_invalid_xyz_format`) are listed
   under `not_imported` in the manifest and are not part of the library.
 - **Provenance of the legacy entries** was only derived from what the repository records (comment lines, xtb `.out`
@@ -71,6 +73,15 @@ hook). Large benchmark sets are not stored here, they are fetched (see `sets` in
       `needs_name` until someone names it.
 10. **Roles**: `equilibrium`, `non-equilibrium`, `transition-state`, `ensemble`, `stress` (deliberately difficult), `invalid-input`
     (deliberately malformed, for error-path tests), `unspecified` (legacy only).
+
+## Using a structure in a CLI test
+
+Put a `structures.txt` into the test directory, one line per structure: `<id>` (file name `<id>.xyz`) or
+`<id> as <file name>` when the script expects another name. `add_cli_test` copies the library file byte for byte into
+the build directory of the test at configure time. Do not keep a local copy of a library structure next to it.
+`python3 scripts/structlib.py migrate <test dir>` converts an existing test directory (it refuses when a local file
+differs from the library file) and `check` verifies the lists. The legacy import
+(`scripts/structlib_import_legacy.py`) cannot be repeated once tests are migrated.
 
 ## Adding a structure
 

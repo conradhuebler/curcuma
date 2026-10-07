@@ -39,7 +39,7 @@ curcuma::Molecule mol = TestMolecules::TestMoleculeRegistry::createMolecule("CH4
 
 - `test_cases/structures/` holds every test structure with provenance (program, method, level, or the literature source); rules and naming in its `README.md`, validation with `python3 scripts/structlib.py check`
 - New structures only through `structlib.py add`; a changed geometry is a new id; no program output in the library
-- Migration state: the library exists, the tests still read their own local copies (`legacy_paths` in the manifest map them); migrated tests will copy from the library
+- Migration state: CLI test directories with a `structures.txt` copy their structures from the library (`add_cli_test`); the others still read local copies (`legacy_paths` in the manifest map them); migrated so far: see the README of the library
 
 ## Traps
 

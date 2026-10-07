@@ -217,8 +217,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/sqm/06_gfn2_extended_singlepoint/acetic_acid_dimer.xyz",
-    "test_cases/cli/sqm/07_gfn1_extended_singlepoint/acetic_acid_dimer.xyz",
     "test_cases/molecules/larger/acetic_acid_dimer.xyz",
     "test_cases/sqm_reference/molecules/acetic_acid_dimer.xyz"
    ],
@@ -333,13 +331,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/sqm/01_pm3_singlepoint/C6H6.xyz",
-    "test_cases/cli/sqm/02_am1_singlepoint/C6H6.xyz",
-    "test_cases/cli/sqm/03_mndo_singlepoint/C6H6.xyz",
-    "test_cases/cli/sqm/04_gfn1_singlepoint/C6H6.xyz",
-    "test_cases/cli/sqm/05_gfn2_singlepoint/C6H6.xyz",
-    "test_cases/cli/sqm/08_ngfn1_baseline_singlepoint/C6H6.xyz",
-    "test_cases/cli/sqm/09_ngfn2_baseline_singlepoint/C6H6.xyz",
     "test_cases/molecules/larger/C6H6.xyz"
    ],
    "reference_calculations": [
@@ -458,8 +449,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/sqm/06_gfn2_extended_singlepoint/C6H5COOH.xyz",
-    "test_cases/cli/sqm/07_gfn1_extended_singlepoint/C6H5COOH.xyz",
     "test_cases/molecules/larger/C6H5COOH.xyz"
    ],
    "reference_calculations": [
@@ -585,14 +574,6 @@
     "test_cases/cli/gfnff_gpu/02_rocm_singlepoint/caffeine.xyz",
     "test_cases/cli/simplemd/11_diagnostics_dump/input.xyz",
     "test_cases/cli/simplemd/12_eeq_cutoff_auto/caffeine.xyz",
-    "test_cases/cli/sqm/01_pm3_singlepoint/caffeine.xyz",
-    "test_cases/cli/sqm/02_am1_singlepoint/caffeine.xyz",
-    "test_cases/cli/sqm/03_mndo_singlepoint/caffeine.xyz",
-    "test_cases/cli/sqm/04_gfn1_singlepoint/caffeine.xyz",
-    "test_cases/cli/sqm/05_gfn2_singlepoint/caffeine.xyz",
-    "test_cases/cli/sqm/08_ngfn1_baseline_singlepoint/caffeine.xyz",
-    "test_cases/cli/sqm/09_ngfn2_baseline_singlepoint/caffeine.xyz",
-    "test_cases/cli/sqm/10_gfn2_optimization_smoke/caffeine.xyz",
     "test_cases/molecules/larger/caffeine.xyz",
     "test_cases/sqm_reference/molecules/caffeine.xyz"
    ],
@@ -772,8 +753,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/sqm/06_gfn2_extended_singlepoint/HH.xyz",
-    "test_cases/cli/sqm/07_gfn1_extended_singlepoint/HH.xyz",
     "test_cases/molecules/dimers/HH.xyz"
    ],
    "reference_calculations": [
@@ -859,13 +838,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/sqm/01_pm3_singlepoint/CH3OCH3.xyz",
-    "test_cases/cli/sqm/02_am1_singlepoint/CH3OCH3.xyz",
-    "test_cases/cli/sqm/03_mndo_singlepoint/CH3OCH3.xyz",
-    "test_cases/cli/sqm/04_gfn1_singlepoint/CH3OCH3.xyz",
-    "test_cases/cli/sqm/05_gfn2_singlepoint/CH3OCH3.xyz",
-    "test_cases/cli/sqm/08_ngfn1_baseline_singlepoint/CH3OCH3.xyz",
-    "test_cases/cli/sqm/09_ngfn2_baseline_singlepoint/CH3OCH3.xyz",
     "test_cases/molecules/larger/CH3OCH3.xyz"
    ],
    "reference_calculations": [
@@ -1070,8 +1042,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/sqm/06_gfn2_extended_singlepoint/HCl.xyz",
-    "test_cases/cli/sqm/07_gfn1_extended_singlepoint/HCl.xyz",
     "test_cases/molecules/dimers/HCl.xyz"
    ],
    "reference_calculations": [
@@ -1190,13 +1160,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/sqm/01_pm3_singlepoint/HCN.xyz",
-    "test_cases/cli/sqm/02_am1_singlepoint/HCN.xyz",
-    "test_cases/cli/sqm/03_mndo_singlepoint/HCN.xyz",
-    "test_cases/cli/sqm/04_gfn1_singlepoint/HCN.xyz",
-    "test_cases/cli/sqm/05_gfn2_singlepoint/HCN.xyz",
-    "test_cases/cli/sqm/08_ngfn1_baseline_singlepoint/HCN.xyz",
-    "test_cases/cli/sqm/09_ngfn2_baseline_singlepoint/HCN.xyz",
     "test_cases/molecules/trimers/HCN.xyz",
     "test_cases/sqm_reference/molecules/HCN.xyz"
    ],
@@ -1333,8 +1296,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/sqm/06_gfn2_extended_singlepoint/OH.xyz",
-    "test_cases/cli/sqm/07_gfn1_extended_singlepoint/OH.xyz",
     "test_cases/molecules/dimers/OH.xyz"
    ],
    "reference_calculations": [
@@ -1718,14 +1679,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/sqm/01_pm3_singlepoint/CH4.xyz",
-    "test_cases/cli/sqm/02_am1_singlepoint/CH4.xyz",
-    "test_cases/cli/sqm/03_mndo_singlepoint/CH4.xyz",
-    "test_cases/cli/sqm/04_gfn1_singlepoint/CH4.xyz",
-    "test_cases/cli/sqm/05_gfn2_singlepoint/CH4.xyz",
-    "test_cases/cli/sqm/08_ngfn1_baseline_singlepoint/CH4.xyz",
-    "test_cases/cli/sqm/09_ngfn2_baseline_singlepoint/CH4.xyz",
-    "test_cases/cli/sqm/10_gfn2_optimization_smoke/CH4.xyz",
     "test_cases/molecules/larger/CH4.xyz"
    ],
    "reference_calculations": [
@@ -1824,13 +1777,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/sqm/01_pm3_singlepoint/CH3OH.xyz",
-    "test_cases/cli/sqm/02_am1_singlepoint/CH3OH.xyz",
-    "test_cases/cli/sqm/03_mndo_singlepoint/CH3OH.xyz",
-    "test_cases/cli/sqm/04_gfn1_singlepoint/CH3OH.xyz",
-    "test_cases/cli/sqm/05_gfn2_singlepoint/CH3OH.xyz",
-    "test_cases/cli/sqm/08_ngfn1_baseline_singlepoint/CH3OH.xyz",
-    "test_cases/cli/sqm/09_ngfn2_baseline_singlepoint/CH3OH.xyz",
     "test_cases/molecules/larger/CH3OH.xyz"
    ],
    "reference_calculations": [
@@ -2277,15 +2223,6 @@
    },
    "legacy": true,
    "legacy_paths": [
-    "test_cases/cli/sqm/01_pm3_singlepoint/water.xyz",
-    "test_cases/cli/sqm/02_am1_singlepoint/water.xyz",
-    "test_cases/cli/sqm/03_mndo_singlepoint/water.xyz",
-    "test_cases/cli/sqm/04_gfn1_singlepoint/water.xyz",
-    "test_cases/cli/sqm/05_gfn2_singlepoint/water.xyz",
-    "test_cases/cli/sqm/08_ngfn1_baseline_singlepoint/water.xyz",
-    "test_cases/cli/sqm/09_ngfn2_baseline_singlepoint/water.xyz",
-    "test_cases/cli/sqm/10_gfn2_optimization_smoke/water.xyz",
-    "test_cases/cli/sqm/11_gfn2_provider_check/water.xyz",
     "test_cases/molecules/trimers/water.xyz"
    ],
    "reference_calculations": [

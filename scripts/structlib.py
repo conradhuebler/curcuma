@@ -6,6 +6,7 @@ Claude Generated (Oct 2026). Rules: test_cases/structures/README.md.
   structlib.py check            validate manifest and files (exit 1 on errors; used by the pre-commit hook)
   structlib.py report           counts per class and provenance, share of unknown provenance
   structlib.py usage [ID ...]   which tests use which structure (derived from legacy paths and CMake/script text)
+  structlib.py migrate TESTDIR  replace the local structure copies of a test directory by structures.txt (byte-identical)
   structlib.py add FILE ...     register a new structure (see --help); rewrites the comment line with id/charge/spin/level/source
 
 Standard library only.
@@ -218,6 +219,29 @@ def check(args):
                 errors.append(f"{where} legacy path no longer exists: {lp} (remove it from legacy_paths)")
             elif sha256(lpath) != h:
                 errors.append(f"{where} legacy path {lp} differs from the library file (migration must be byte-identical)")
+    # structures.txt lists in the tests
+    ids = {e["id"] for e in entries}
+    for dp, dn, fn in os.walk(os.path.join(ROOT, "test_cases")):
+        if "structures.txt" in fn and "GMTKN55-testset" not in dp and os.sep + "release" not in dp:
+            lst = os.path.join(dp, "structures.txt")
+            rel = os.path.relpath(lst, ROOT)
+            names = set()
+            for n, line in enumerate(open(lst, encoding="utf-8"), 1):
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                mm = re.match(r"^(\S+)(?:\s+as\s+(\S+))?$", s)
+                if not mm:
+                    errors.append(f"{rel}:{n}: expected '<id>' or '<id> as <file name>'")
+                    continue
+                sid, name = mm.group(1), mm.group(2) or (mm.group(1) + ".xyz")
+                if sid not in ids:
+                    errors.append(f"{rel}:{n}: structure {sid} is not in the manifest")
+                if name in names:
+                    errors.append(f"{rel}:{n}: file name {name} listed twice")
+                names.add(name)
+                if os.path.exists(os.path.join(dp, name)):
+                    errors.append(f"{rel}:{n}: {name} also exists as a local file in the test directory")
     # stray files
     for dp, dn, fn in os.walk(LIB):
         for f in fn:
@@ -274,11 +298,19 @@ def usage(args):
                 except OSError:
                     pass
     corpus.append(("CMakeLists.txt", open(os.path.join(ROOT, "CMakeLists.txt"), encoding="utf-8", errors="replace").read()))
+    lists = collections.defaultdict(list)
+    for dp, dn, fn in os.walk(os.path.join(ROOT, "test_cases")):
+        if "structures.txt" in fn and "GMTKN55-testset" not in dp and os.sep + "release" not in dp:
+            who = test_id(os.path.relpath(dp, ROOT).replace(os.sep, "/") + "/") or os.path.relpath(dp, ROOT)
+            for line in open(os.path.join(dp, "structures.txt"), encoding="utf-8"):
+                s = line.split("#")[0].strip()
+                if s:
+                    lists[s.split()[0]].append(who)
     want = set(args.ids)
     for e in m["structures"]:
         if want and e["id"] not in want:
             continue
-        users = set()
+        users = set(lists.get(e["id"], []))
         for lp in e.get("legacy_paths", []):
             t = test_id(lp)
             if t:
@@ -338,12 +370,59 @@ def add(args):
     return check(argparse.Namespace())
 
 
+def migrate(args):
+    """Replace the local copies of library structures in a test directory by a structures.txt list."""
+    tdir = os.path.relpath(os.path.abspath(args.testdir), ROOT).replace(os.sep, "/")
+    m = load_manifest()
+    by_path = {}
+    for e in m["structures"]:
+        for lp in e.get("legacy_paths", []):
+            by_path[lp] = e
+    tracked = subprocess.check_output(["git", "ls-files", tdir], text=True, cwd=ROOT).split("\n")
+    moved, lines = [], []
+    for p in sorted(x for x in tracked if x):
+        e = by_path.get(p)
+        if e is None:
+            continue
+        name = os.path.basename(p)
+        lines.append(f"{e['id']}" + ("" if name == e["id"] + os.path.splitext(name)[1] else f" as {name}"))
+        moved.append((p, e))
+    if not moved:
+        print("nothing to migrate in", tdir)
+        return 0
+    for p, e in moved:
+        if sha256(os.path.join(ROOT, p)) != e["sha256"]:
+            sys.exit(f"{p} differs from the library file of {e['id']}; migration must be byte-identical")
+    lst = os.path.join(ROOT, tdir, "structures.txt")
+    existing = []
+    if os.path.exists(lst):
+        existing = [l.rstrip("\n") for l in open(lst, encoding="utf-8") if l.strip() and not l.startswith("#")]
+    out = sorted(set(existing + lines))
+    print(f"{tdir}: {len(moved)} file(s) -> structures.txt ({len(out)} lines)")
+    if args.dry_run:
+        for l in out:
+            print("  ", l)
+        return 0
+    with open(lst, "w", encoding="utf-8") as f:
+        f.write("# Structures from test_cases/structures (id, optionally 'as <file name>'); see structures/README.md\n")
+        f.write("\n".join(out) + "\n")
+    for p, e in moved:
+        subprocess.check_call(["git", "rm", "-q", p], cwd=ROOT)
+        e["legacy_paths"].remove(p)
+        if not e["legacy_paths"]:
+            del e["legacy_paths"]
+    subprocess.check_call(["git", "add", os.path.join(tdir, "structures.txt")], cwd=ROOT)
+    save_manifest(m)
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check").set_defaults(fn=check)
     r = sub.add_parser("report"); r.add_argument("--list-unknown", action="store_true"); r.set_defaults(fn=report)
     u = sub.add_parser("usage"); u.add_argument("ids", nargs="*"); u.set_defaults(fn=usage)
+    mg = sub.add_parser("migrate"); mg.add_argument("testdir"); mg.add_argument("--dry-run", action="store_true"); mg.set_defaults(fn=migrate)
     a = sub.add_parser("add"); a.set_defaults(fn=add)
     a.add_argument("file"); a.add_argument("--id", required=True); a.add_argument("--class", dest="cls", required=True)
     a.add_argument("--charge", type=int, required=True); a.add_argument("--spin", type=int, required=True, help="number of unpaired electrons")
