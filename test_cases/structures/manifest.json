@@ -763,6 +763,27 @@
    ]
   },
   {
+   "id": "dinitrogen",
+   "class": "small",
+   "file": "small/dinitrogen.xyz",
+   "format": "xyz",
+   "formula": "N2",
+   "natoms": 2,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "equilibrium",
+   "size_bytes": 162,
+   "sha256": "b19352ea0dc3fcf46276c642862b0eaf61313aa0f9871c390ae9f67750abb93b",
+   "provenance": {
+    "kind": "program_output",
+    "program": "curcuma",
+    "version": "0.0.209-2-g7e38f75",
+    "description": "N2, N-N 1.0983 A (experiment 1.0977 A); former test_cases/molecules/dimers/NN.xyz; method of the Curcuma run not recorded",
+    "energy_eh": -5.763935
+   }
+  },
+  {
    "id": "ethane",
    "class": "small",
    "file": "small/ethane.xyz",
@@ -1690,6 +1711,25 @@
    "description": "methyl alpha-D-galactopyranoside by configuration analysis (see analysis); formula C7H14O6; origin not recorded"
   },
   {
+   "id": "methyl-a-d-glucopyranoside",
+   "class": "medium",
+   "file": "medium/methyl-a-d-glucopyranoside.xyz",
+   "format": "xyz",
+   "formula": "C7H14O6",
+   "natoms": 27,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "unspecified",
+   "size_bytes": 1208,
+   "sha256": "b1c6723a6a50f3929195913e9af73e83d7c32f6d351382ac5b4176d89c931e77",
+   "provenance": {
+    "kind": "unknown",
+    "description": "methyl alpha-D-glucopyranoside by configuration analysis (scripts/pyranoside_stereo.py: D, gluco, alpha); former test_cases/c6h12o6/aGlu.xyz, comment line holds only the energy -725.737126388319 (level not recorded); sibling of methyl-a-d-galactopyranoside"
+   },
+   "legacy": true
+  },
+  {
    "id": "na2cl2-isolated-ions",
    "class": "clusters",
    "file": "clusters/na2cl2-isolated-ions.xyz",
@@ -1965,6 +2005,28 @@
     "triose"
    ],
    "description": "formula C18H32O16 equals three hexose units minus two H2O; legacy name triose"
+  },
+  {
+   "id": "trisaccharide-c18h32o16.alt1",
+   "class": "large",
+   "file": "large/trisaccharide-c18h32o16.alt1.xyz",
+   "format": "xyz",
+   "formula": "C18H32O16",
+   "natoms": 66,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "unspecified",
+   "size_bytes": 2581,
+   "sha256": "2da9df43f0a566c8077ad6364ea6f7dc5a90065ce50eca5278ac75ae860e8687",
+   "provenance": {
+    "kind": "program_output",
+    "program": "curcuma",
+    "version": "0.0.209-2-g7e38f75",
+    "description": "C18H32O16, max coordinate difference 0.5 A to trisaccharide-c18h32o16; former test_cases/sqm_reference/molecules/triose.opt.xyz; method of the Curcuma run not recorded",
+    "energy_eh": -119.936773
+   },
+   "variant_of": "trisaccharide-c18h32o16"
   },
   {
    "id": "trisaccharide-c18h32o16.opt-start",
