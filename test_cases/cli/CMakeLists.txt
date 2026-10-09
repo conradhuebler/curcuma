@@ -86,7 +86,8 @@ endmacro()
 
 add_cli_test(curcumaopt 01_default_uff_opt)
 add_cli_test(curcumaopt 02_gfn2_single_point)
-# AP3 (2026-04-25): gfn2 now routes to native xTB; TBLite golden ref no longer valid until AP5.
+# cli_curcumaopt_02 stays disabled: despite its name the script runs '-method uff' and duplicates 01_default_uff_opt; it needs a decision what it
+# should test (checked 2026-10-09: one of its three assertions fails).
 set_tests_properties(cli_curcumaopt_02_gfn2_single_point PROPERTIES DISABLED TRUE)
 add_cli_test(curcumaopt 03_invalid_method)
 add_cli_test(curcumaopt 04_lbfgs_params)
@@ -273,12 +274,9 @@ add_cli_test(sqm 09_ngfn2_baseline_singlepoint)    # native ngfn2 broken-state s
 add_cli_test(sqm 10_gfn2_optimization_smoke)       # gfn2 -opt anchor (gradient = zero pre-AP-4)
 add_cli_test(sqm 11_gfn2_provider_check)           # routing anchor — updated for AP 3 (native backend)
 
-# AP3 (2026-04-25): gfn2/gfn1 route to native xTB. TBLite golden refs invalid until AP5.
-set_tests_properties(cli_sqm_04_gfn1_singlepoint PROPERTIES DISABLED TRUE)
-set_tests_properties(cli_sqm_05_gfn2_singlepoint PROPERTIES DISABLED TRUE)
-set_tests_properties(cli_sqm_06_gfn2_extended_singlepoint PROPERTIES DISABLED TRUE)
-set_tests_properties(cli_sqm_07_gfn1_extended_singlepoint PROPERTIES DISABLED TRUE)
-# AP3: gfn2 -opt still broken (gradient = zero), disable until AP4 restores gradient.
+# cli_sqm_04..07 are enabled since 2026-10-09: the native gfn1/gfn2 match the TBLite references (4e-9 Eh, OH radical 8e-4 Eh).
+# cli_sqm_10 stays disabled: it expects the log markers 'Geometry Optimisation converged' / 'gfn2 Final Energy', which -opt does not print
+# at the verbosity used (checked 2026-10-09); the gradient exists since AP4. The test needs a convergence check on input.opt.xyz instead.
 set_tests_properties(cli_sqm_10_gfn2_optimization_smoke PROPERTIES DISABLED TRUE)
 
 # Claude Generated (Sep 2026): test 11 asserts `-method ipea1` routes to and matches

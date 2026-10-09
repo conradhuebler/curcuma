@@ -10,9 +10,9 @@ TEST_NAME="sqm - 05: GFN2-xTB Single Point Energies"
 TEST_DIR="$SCRIPT_DIR"
 METHOD="gfn2"
 
-# Initial tolerance: 1 mEh (loose — documents current state vs TBLite reference)
-# TARGET: 1e-5 Eh once native implementation matches TBLite
-ENERGY_TOLERANCE="0.001"
+# Tolerance 1e-5 Eh: the native implementation matches the TBLite references to about 5e-9 Eh (measured 2026-10-09);
+# the sqm_val_* gates check 1e-8 against the same references.
+ENERGY_TOLERANCE="0.00001"
 
 # Reference values from ~/src/curcuma/release (TBLite gfn2)
 REF_WATER="-5.07036982186124"

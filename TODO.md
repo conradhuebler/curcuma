@@ -67,13 +67,18 @@ Stand.
 - `cli_simplemd_08/09` (Essigsäuredimer, CSVR, dt 1 fs) gegen das gemergte Binary mit der MD-Uhr-Korrektur (`ef462fcf`) erneut laufen lassen (Known Issue #32).
 - `test_cg_potentials` ist seit 2026-10-01 als ctest `cg_potentials` registriert (besteht); der CG-Beispielaufruf mit VTF-Eingabe endet mit "Failed to initialize ForceField
   engine" (`docs/archive/CG.md`, geprüft 2026-10-01).
-- **Drei ctests scheitern reproduzierbar** (am 2026-10-01 auf `master` und auf `fix/remove-dead-code` gleich, `confscan_dtemplate` 3 von 3 Läufen auf `master`): `xtb_cpscf` (Gate (C), Antwort Mulliken gegen EEQ: H2 8.2e-5 gegen 1e-6, H2O und HCN je über 1.5e-4), `test_orca_interface` ("O2 triplet mult=3" in `methodToOrcaKeyword`), `confscan_dtemplate` (Ursache nicht untersucht). Die Einordnung "flaky" für `confscan_dtemplate` in älteren Notizen trifft nicht zu.
+- **Drei ctests scheitern reproduzierbar** (am 2026-10-01 auf `master` und auf `fix/remove-dead-code` gleich, `confscan_dtemplate` 3 von 3 Läufen auf `master`): `xtb_cpscf` (Gate (C), Antwort Mulliken gegen EEQ: H2 8.2e-5 gegen 1e-6, H2O und HCN je über 1.5e-4), `test_orca_interface` ("O2 triplet mult=3" in `methodToOrcaKeyword`), `confscan_dtemplate` (Zähler tatsächlich 14/5/1/237, erwartet 17/2/1/305; die tatsächlichen Werte sind die erwarteten von `confscan_free` und `confscan_subspace`; ob Golden Values veraltet sind oder `dtemplate` wie die anderen Methoden rechnet, ist offen; der Test hängt von der Thread-Zahl ab). Die Einordnung "flaky" für `confscan_dtemplate` in älteren Notizen trifft nicht zu.
 - **Strukturbibliothek** (`test_cases/structures/`, Phasen 0 bis 4 erledigt): 69 Strukturen, alle Tests und Skripte lesen sie; 65 % der Herkunftsangaben sind `unknown`
   (Altbestand, nur abgeleitet). Offen: Phase 4 (getrackte `.out`-Dateien als Beleg,
   115 untracked Laufausgaben in `test_cases/` entfernen, Berichte in `test_cases/cli/` ins Archiv), case.json je Test. Das Optimierungslevel der `unknown`-Strukturen
   kann nur der Betreiber nachtragen (`python3 scripts/structlib.py report --list-unknown`).
 - Wissenschaftliche Validierung der CLI-Tests ausbauen (RMSD-Toleranzen, Energiekonvergenz); Muster für absichtlich fehlschlagende
   Tests (`03_invalid_method` in `curcumaopt`, `rmsd`, `confscan`); Performance-Benchmarks für Regressionserkennung.
+- **Testfall-Audit (2026-10-09)**: Drei CLI-Tests bleiben deaktiviert: `cli_curcumaopt_02` (ruft trotz Namens `-method uff` auf, doppelt `01`), `cli_sqm_10`
+  (erwartet Log-Marker, die `-opt` nicht schreibt; Konvergenz an `input.opt.xyz` prüfen), `cli_sqm_11` (braucht TBLite). `cli_sqm_04` bis `07` sind wieder aktiv (Toleranz 1e-5,
+  `OH` als Radikal ohne `-spin` mit 2e-3, Abweichung 8,2e-4 Eh zur geschlossenschaligen TBLite-Referenz). `simplemd` (16 von 17 Tests) und `curcumaopt` (7 von 7) prüfen nur Exit-Code,
+  Dateien oder Zeichenketten, keine Zahlen (Energieerhaltung, Temperatur, Drift). Nicht registrierte Quellen: `test_d3only_method.cpp`, `test_d3_weight_caching.cpp`,
+  `test_dispersion.cpp`, `test_torsion_count.cpp`, `simple_ulysses_test.cpp`, zwei `cuda/bench_*.cpp`, drei D4-Datendateien in `reference_data/`, zehn Skripte in `test_cases/`.
 - ConfScan: Accept/Reject-Meldungen bei Standard-Verbosity nicht sichtbar (Eintrag von 2025, nicht erneut geprüft).
 
 ## 4. Betreiber-Prüfung offen (🤖/⚙️, nur Sie vergeben ✅)

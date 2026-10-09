@@ -16,6 +16,7 @@ below. If it needs measurements or a derivation, write them into the matching `d
 
 ## Jul - Sep 2026 (and some late June), 108 entries, full text in AIChangelog_2026-late.md
 
+- Test audit (Oct 9, 2026): cli_sqm_04..07 re-enabled at 1e-5 Eh (native gfn1/gfn2 vs TBLite, OH radical 2e-3); ConfScan counter tests print actual vs expected; 3 CLI tests stay disabled with documented reasons
 - Dead code removed (Oct 1, 2026): legacy CurcumaOpt, native_lbfgs_optimizer, modern_optimizer_simple (module `modern_optimizer` left the registry), accuracy_profile, munkress_2.h, 4 unused optimiser headers, RMSDDriver::MolAlignLib/Prepare*Template, D4Evaluator::launchGpuKernel, 2 helpers, 2 .backup files; ctest `cg_potentials` registered
 - GFN-FF D4: the C6 summation order depended on the verbosity level — FIXED (Sep 30, 2026, ported from revgfnff, Known Issue #38)
 - make in release/ builds again: 14 CUDA component tests fixed (Sep 30, 2026)
