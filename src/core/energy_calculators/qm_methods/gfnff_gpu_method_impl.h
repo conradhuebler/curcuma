@@ -229,9 +229,62 @@ private:
     // SchurCholesky → WP5-A (nfrag=1) / WP7-A (nfrag>1) — exact, full N×N Cholesky.
     // Batched      → WP7-B (nfrag>1)                   — per-fragment Cholesky, drops cross-fragment Coulomb.
     // PCG          → WP7-C (nfrag>1)                   — iterative O(k·N²), warm-started.
-    // LU / Auto    → CPU concepts; Auto resolves to PCG above pcg_large_threshold else SchurCholesky.
+    // LU           → dense LU of the augmented system (CUDA only, Oct 2026).
+    // LDLT         → Bunch-Kaufman LDL^T of A_nn + Schur (CUDA only, Oct 2026).
+    // Auto         → EEQSolver::resolveMethod (ppcg above the size thresholds, else cholesky).
     EEQSolveMethod m_eeq_strategy = EEQSolveMethod::Auto;
-    double m_eeq_batched_min_distance_bohr = 15.0;  ///< warn if min inter-frag distance < this
+    /// Claude Generated (Oct 2026): energy criterion of the batched solver on the GPU path. Rebuilds
+    /// the residual r = A q_b - x of the full EEQ system on the host (one O(N^2) pass, once per
+    /// topology) from the device alpha/gam/rhs and the accepted batched charges, then
+    /// EEQSolver::estimateBatchedError(); warns above eeq_batched_max_error_eh.
+    void estimateBatchedErrorOnHost(int N, double cutoff_sq)
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        std::vector<double> alpha(N), gam(N), rhs(N);
+        Backend::downloadDoubles(alpha.data(), m_gpu_workspace->getDeviceAlphaPtr(), N);
+        Backend::downloadDoubles(gam.data(), m_gpu_workspace->getDeviceGamPtr(), N);
+        Backend::downloadDoubles(rhs.data(), m_gpu_workspace->getDeviceRHSPtr(), N);
+        const GeoGradMatrix& g = m_gfnff->getGeometryBohr();
+        const std::vector<double>& q = m_eeq_charges_gpu;
+        constexpr double tsqrt2pi = 0.797884560802866;   // as in k_eeq_build_matrix
+        auto elem = [&](int i, int j) -> double {
+            if (i == j) return gam[i] + tsqrt2pi / std::sqrt(alpha[i]);
+            const double dx = g(i, 0) - g(j, 0), dy = g(i, 1) - g(j, 1), dz = g(i, 2) - g(j, 2);
+            const double r2 = dx * dx + dy * dy + dz * dz;
+            if (cutoff_sq > 0.0 && r2 > cutoff_sq) return 0.0;
+            const double r = std::sqrt(r2);
+            return std::erf(r / std::sqrt(alpha[i] + alpha[j])) / r;
+        };
+        Vector res(N);
+        for (int i = 0; i < N; ++i) res(i) = elem(i, i) * q[i] - rhs[i];
+        for (int i = 1; i < N; ++i)
+            for (int j = 0; j < i; ++j) {
+                const double a = elem(i, j);
+                res(i) += a * q[j];
+                res(j) += a * q[i];
+            }
+        std::vector<std::vector<int>> frag_atoms(m_eeq_nfrag);
+        for (int i = 0; i < N && i < static_cast<int>(m_eeq_fraglist.size()); ++i) {
+            const int f = m_eeq_fraglist[i] - 1;
+            if (f >= 0 && f < m_eeq_nfrag) frag_atoms[f].push_back(i);
+        }
+        const double dE = EEQSolver::estimateBatchedError(res, frag_atoms, elem);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (dE > m_eeq_batched_max_error)
+            CurcumaLogger::warn(fmt::format(
+                "EEQ batched (final charges, GPU): estimated energy error from the dropped inter-fragment coupling "
+                "{:.2e} Eh > eeq_batched_max_error_eh {:.1e} Eh; cholesky or ppcg give the exact charges",
+                dE, m_eeq_batched_max_error));
+        else if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info(fmt::format("EEQ batched (final charges, GPU): estimated energy error {:.2e} Eh ({:.1f} ms)", dE, ms));
+        if (CurcumaLogger::get_verbosity() >= 3)
+            CurcumaLogger::info(fmt::format("EEQ batched error estimate (GPU path, host) took {:.1f} ms", ms));
+    }
+
+    // Oct 2026: energy criterion for the explicit batched solver (replaces eeq_batched_min_distance).
+    double m_eeq_batched_max_error = 1e-6;   ///< eeq_batched_max_error_eh; 0 = no estimate
+    bool   m_eeq_batched_check_pending = true; ///< estimate after the next batched solve (set per topology)
+
 
     // WP7-C (May 2026): GPU PCG parameters (mirror CPU EEQSolver defaults).
     int    m_eeq_pcg_max_iter   = 200;     ///< per-PCG-call iteration cap
@@ -351,7 +404,7 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
         m_eeq_strategy = EEQSolver::parseSolveMethod(strategy_str);
     }
     m_eeq_distance_cutoff = eeq_value("eeq_distance_cutoff", 0.0);   // 0 = no cutoff (see above)
-    m_eeq_batched_min_distance_bohr = eeq_value("eeq_batched_min_distance", 15.0);
+    m_eeq_batched_max_error = eeq_value("eeq_batched_max_error_eh", 1e-6);
     m_eeq_pcg_max_iter   = eeq_value("max_pcg_iterations", 200);
     m_eeq_pcg_tolerance  = eeq_value("pcg_tolerance", 1e-10);
     m_eeq_pcg_threshold  = eeq_value("pcg_large_threshold", 500);
@@ -704,11 +757,7 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
             if (m_eeq_nfrag > 1 || (m_eeq_nfrag == 1 && Backend::has_device_schur)) {
                 m_eeq_gpu->uploadFragmentTopology(m_eeq_nfrag, m_eeq_fraglist, natoms);
                 // WP7-B: cache min inter-fragment distance for batched-solver warning.
-                const GeoGradMatrix& geom = m_gfnff->getGeometryBohr();
-                if (geom.rows() == natoms && geom.cols() >= 3) {
-                    m_eeq_gpu->updateMinFragmentDistance(
-                        geom.col(0).data(), geom.col(1).data(), geom.col(2).data(), natoms);
-                }
+                m_eeq_batched_check_pending = true;  // batched error estimate once per topology
             }
         }
 
@@ -1045,11 +1094,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         if (m_eeq_nfrag > 1 || (m_eeq_nfrag == 1 && Backend::has_device_schur)) {
             m_eeq_gpu->uploadFragmentTopology(m_eeq_nfrag, m_eeq_fraglist, N);
             // WP7-B: refresh min inter-fragment distance after topology rebuild.
-            const GeoGradMatrix& geom = m_gfnff->getGeometryBohr();
-            if (geom.rows() == N && geom.cols() >= 3) {
-                m_eeq_gpu->updateMinFragmentDistance(
-                    geom.col(0).data(), geom.col(1).data(), geom.col(2).data(), N);
-            }
+            m_eeq_batched_check_pending = true;  // batched error estimate once per topology
         }
     }
 
@@ -1181,7 +1226,11 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         if (CurcumaLogger::get_verbosity() >= 1) {
             const char* path = "CPU-fallback";
             if (gpu_eeq_applicable) {
-                if (m_eeq_nfrag == 1) {
+                if (resolved_method == EEQSolveMethod::LU) {
+                    path = "augmented LU (getrf)";
+                } else if (resolved_method == EEQSolveMethod::LDLT) {
+                    path = "LDL^T (sytrf) + Schur";
+                } else if (m_eeq_nfrag == 1) {
                     path = single_frag_ppcg ? "WP7-E projected PCG, one fragment"
                          : single_frag_pcg  ? "WP7-C PCG, one fragment"
                          : resolved_method == EEQSolveMethod::Batched ? "WP5-A Cholesky (batched is exact for one fragment)"
@@ -1224,7 +1273,52 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
             bool used_gpu_schur = false;
 
             if (use_device_rhs) {
-                if (m_eeq_nfrag == 1) {
+                // Claude Generated (Oct 2026): solve_method lu -> dense LU of the augmented
+                // (N+nfrag) system on the device, any nfrag (same semantics as the CPU lu).
+                // Only the CUDA backend has it (EEQSolver::gpuSupports rejects lu elsewhere);
+                // the discarded branch is not instantiated for the ROCm solver type.
+                if constexpr (Backend::has_device_schur) {
+                    if (resolved_method == EEQSolveMethod::LU && m_eeq_gpu->isFragmentTopoValid()) {
+                        eeq_ok = m_eeq_gpu->solveWithDeviceRHSAndGPUAugmentedLU(
+                            N, m_eeq_nfrag,
+                            m_gpu_workspace->getDeviceXPtr(),
+                            m_gpu_workspace->getDeviceYPtr(),
+                            m_gpu_workspace->getDeviceZPtr(),
+                            m_gpu_workspace->getDeviceAlphaPtr(),
+                            m_gpu_workspace->getDeviceGamPtr(),
+                            m_gpu_workspace->getDeviceRHSPtr(),
+                            m_eeq_rhs_constraints,
+                            eeq_cutoff_sq);
+                        if (eeq_ok) {
+                            used_gpu_schur = true;
+                        } else {
+                            CurcumaLogger::warn("EEQ GPU: augmented LU failed, using the dense Cholesky path for this step");
+                            curcuma::reportGpuFallback("GFN-FF EEQ: lu failed, dense Cholesky step");
+                        }
+                    }
+                    // Oct 2026: solve_method ldlt -> Bunch-Kaufman LDL^T of A_nn + Schur (CUDA only).
+                    if (resolved_method == EEQSolveMethod::LDLT && m_eeq_gpu->isFragmentTopoValid()) {
+                        eeq_ok = m_eeq_gpu->solveWithDeviceRHSAndGPUSchurLDLT(
+                            N, m_eeq_nfrag,
+                            m_gpu_workspace->getDeviceXPtr(),
+                            m_gpu_workspace->getDeviceYPtr(),
+                            m_gpu_workspace->getDeviceZPtr(),
+                            m_gpu_workspace->getDeviceAlphaPtr(),
+                            m_gpu_workspace->getDeviceGamPtr(),
+                            m_gpu_workspace->getDeviceRHSPtr(),
+                            m_eeq_rhs_constraints,
+                            eeq_cutoff_sq);
+                        if (eeq_ok) {
+                            used_gpu_schur = true;
+                        } else {
+                            CurcumaLogger::warn("EEQ GPU: LDL^T failed, using the dense Cholesky path for this step");
+                            curcuma::reportGpuFallback("GFN-FF EEQ: ldlt failed, dense Cholesky step");
+                        }
+                    }
+                }
+                if (eeq_ok) {
+                    // lu solved above
+                } else if (m_eeq_nfrag == 1) {
                   if (single_frag_ppcg) {
                     // F-4 (Sep 2026): one fragment, projected PCG as on the CPU; WP5-A on failure.
                     eeq_ok = m_eeq_gpu->solveWithDeviceRHSAndGPUProjectedPCG(
@@ -1370,16 +1464,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                     if (!eeq_ok && resolved == EEQSolveMethod::Batched
                             && m_eeq_gpu->isFragmentTopoValid()) {
                         // WP7-B: per-fragment Cholesky (drops cross-fragment Coulomb).
-                        // Approximate — only safe for well-separated fragments.
-                        double min_d_sq = m_eeq_gpu->getMinFragmentDistanceSq();
-                        double thr      = m_eeq_batched_min_distance_bohr;
-                        if (thr > 0.0 && min_d_sq >= 0.0 && min_d_sq < thr * thr) {
-                            CurcumaLogger::warn(fmt::format(
-                                "WP7-B batched EEQ: min inter-fragment distance {:.2f} Bohr "
-                                "below threshold {:.2f} — cross-fragment Coulomb is "
-                                "non-negligible, energies will differ from cholesky.",
-                                std::sqrt(min_d_sq), thr));
-                        }
+                        // Approximate; the error is estimated after the solve (energy criterion).
                         eeq_ok = m_eeq_gpu->solveWithDeviceRHSAndGPUSchurBatched(
                             N, m_eeq_nfrag,
                             m_gpu_workspace->getDeviceXPtr(),
@@ -1522,6 +1607,12 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                         // used to precede the check, so a rejected solution stayed on the device
                         // and Coulomb ran on it while the log reported the Phase-1 fallback.
                         m_gpu_workspace->setEEQDeviceCharges(m_eeq_gpu->getDeviceChargesPtr());
+                        if (resolved_method == EEQSolveMethod::Batched && m_eeq_nfrag > 1
+                            && m_eeq_batched_check_pending && m_eeq_batched_max_error > 0.0
+                            && CurcumaLogger::get_verbosity() >= 1) {   // diagnostic only, see the CPU path
+                            m_eeq_batched_check_pending = false;
+                            estimateBatchedErrorOnHost(N, eeq_cutoff_sq);
+                        }
                     } else {
                         CurcumaLogger::warn("EEQ GPU: invalid charges (NaN/Inf or |q|>50), solution rejected");
                     }

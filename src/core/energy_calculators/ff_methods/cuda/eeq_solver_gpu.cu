@@ -22,6 +22,7 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -164,6 +165,12 @@ struct EEQSolverGPUImpl {
     //   d_frag_atom_map[k]     = global atom index for sorted position k
     CudaBuffer<double> d_A_blocks;           ///< [sum N_f²] per-fragment Coulomb blocks
     CudaBuffer<double> d_rhs_blocks;         ///< [sum N_f*2] per-fragment RHS
+    // Claude Generated (Oct 2026): pristine copy of d_rhs_blocks as uploaded (col0 = 0,
+    // col1 = 1). dpotrs overwrites BOTH columns of d_rhs_blocks with the solution, so the
+    // all-ones constraint column must be restored before every solve; it used to be set only
+    // at topology upload, and from the second call on the solver used Z2 of the previous
+    // step as right-hand side (wrong lambda, MD blow-up on polymer_2x at step 2).
+    CudaBuffer<double> d_rhs_blocks_init;    ///< [sum N_f*2] col0 = 0, col1 = 1 per fragment
     CudaBuffer<int>    d_frag_sizes;         ///< [nfrag]
     CudaBuffer<int>    d_frag_offsets_A;     ///< [nfrag]
     CudaBuffer<int>    d_frag_offsets_rhs;   ///< [nfrag]
@@ -250,6 +257,20 @@ struct EEQSolverGPUImpl {
     CudaBuffer<double>  d_rhs_constraints_dev;
     CudaBuffer<double>  d_ppcg_q_persistent;
     bool                m_ppcg_warm_valid = false;
+    // Claude Generated (Oct 2026): dense LU of the augmented (N+nfrag) system
+    // (solve_method lu, solveWithDeviceRHSAndGPUAugmentedLU).
+    CudaBuffer<double>  d_aug_A;       ///< [M*M] augmented matrix, then its LU factor (column-major)
+    CudaBuffer<double>  d_aug_rhs;     ///< [M] [b_atoms; Q_frag], then the solution [q; lambda]
+    CudaBuffer<int>     d_aug_piv;     ///< [M] getrf pivots
+    CudaBuffer<double>  d_aug_ws;      ///< getrf workspace
+    int                 m_aug_ws_size = 0;
+    // Claude Generated (Oct 2026): Bunch-Kaufman LDL^T of A_nn (solve_method ldlt): cusolverDnDsytrf
+    // takes 32-bit pivots, cusolverDnXsytrs 64-bit ones.
+    CudaBuffer<int>           d_ldlt_piv;     ///< [N] sytrf pivots (LAPACK convention)
+    CudaBuffer<long long>     d_ldlt_piv64;   ///< [N] the same as int64 for Xsytrs
+    CudaBuffer<double>        d_ldlt_ws;      ///< sytrf workspace (doubles)
+    CudaBuffer<unsigned char> d_ldlt_xs;      ///< Xsytrs device workspace (bytes)
+    std::vector<unsigned char> h_ldlt_xs;     ///< Xsytrs host workspace (bytes)
     int                 m_ppcg_total_iters   = 0;
     int                 m_ppcg_total_calls   = 0;
     int                 m_ppcg_nonconv_calls = 0;
@@ -1314,6 +1335,70 @@ static void solveSchurSystemInPlace(double* S, double* rhs, double* lambda, int 
     }
 }
 
+// Claude Generated (Oct 2026): the Schur tail shared by WP7-A (Cholesky/LU) and the device ldlt.
+// d_rhs holds [z1 | Z2] (N x (nfrag+1), column-major) on entry and the charges in d_rhs[0..N-1]
+// on return; synchronizes the EEQ stream. Moved verbatim out of solveWithDeviceRHSAndGPUSchurGeneral.
+static void finishGeneralSchur(EEQSolverGPUImpl& impl, int N, int nfrag,
+                               const std::vector<double>& rhs_constraints)
+{
+    // GPU reduction: Cz1[f] = Σ_{i∈frag_f} z1[i], S[f,g] = Σ_{i∈frag_f} Z2[i,g].
+    cudaMemsetAsync(impl.d_Cz1_general.ptr, 0, nfrag * sizeof(double), impl.stream);
+    cudaMemsetAsync(impl.d_S_general.ptr,   0, (size_t)nfrag * nfrag * sizeof(double), impl.stream);
+    {
+        int rb = 256;
+        int rg = (N + rb - 1) / rb;
+        k_eeq_reduce_fragment_sums<<<rg, rb, 0, impl.stream>>>(
+            N, nfrag,
+            impl.d_rhs.ptr,
+            impl.d_atom_frag.ptr,
+            impl.d_Cz1_general.ptr,
+            impl.d_S_general.ptr);
+    }
+
+    // D2H the small reduction outputs.
+    checkCudaEEQ(cudaMemcpyAsync(impl.h_Cz1_general.data(), impl.d_Cz1_general.ptr,
+                                  nfrag * sizeof(double),
+                                  cudaMemcpyDeviceToHost, impl.stream),
+                 "D2H Cz1 (general)");
+    checkCudaEEQ(cudaMemcpyAsync(impl.h_S_general.data(), impl.d_S_general.ptr,
+                                  (size_t)nfrag * nfrag * sizeof(double),
+                                  cudaMemcpyDeviceToHost, impl.stream),
+                 "D2H S (general)");
+    checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after reduce (general)");
+
+    // CPU Schur solve: S·λ = Cz1 - Q_frag (Gauss-elim with partial pivoting).
+    std::vector<double> schur_rhs(nfrag, 0.0);
+    for (int f = 0; f < nfrag; ++f) {
+        double q_target = (f < (int)rhs_constraints.size()) ? rhs_constraints[f] : 0.0;
+        schur_rhs[f] = impl.h_Cz1_general[f] - q_target;
+    }
+    solveSchurSystemInPlace(impl.h_S_general.data(),
+                             schur_rhs.data(),
+                             impl.h_lambda_general.data(),
+                             nfrag);
+
+    // H2D the tiny λ vector.
+    checkCudaEEQ(cudaMemcpyAsync(impl.d_lambda_general.ptr,
+                                  impl.h_lambda_general.data(),
+                                  nfrag * sizeof(double),
+                                  cudaMemcpyHostToDevice, impl.stream),
+                 "H2D lambda (general)");
+
+    // Apply: q[i] = z1[i] − Σ_g Z2[i,g]·λ[g]; write in-place into d_rhs[0..N-1].
+    {
+        int b = 256;
+        int g = (N + b - 1) / b;
+        k_eeq_schur_general<<<g, b, 0, impl.stream>>>(
+            N, nfrag,
+            impl.d_rhs.ptr,
+            impl.d_lambda_general.ptr,
+            impl.d_rhs.ptr);
+    }
+
+    // Sync so caller can D2D-copy from getDeviceChargesPtr() immediately.
+    checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after schur_general");
+}
+
 bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurGeneral(
     int natoms, int nfrag,
     const double* cx, const double* cy, const double* cz,
@@ -1498,62 +1583,7 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurGeneral(
             "cusolverDnDpotrs (general)");
     }
 
-    // GPU reduction: Cz1[f] = Σ_{i∈frag_f} z1[i], S[f,g] = Σ_{i∈frag_f} Z2[i,g].
-    cudaMemsetAsync(impl.d_Cz1_general.ptr, 0, nfrag * sizeof(double), impl.stream);
-    cudaMemsetAsync(impl.d_S_general.ptr,   0, (size_t)nfrag * nfrag * sizeof(double), impl.stream);
-    {
-        int rb = 256;
-        int rg = (N + rb - 1) / rb;
-        k_eeq_reduce_fragment_sums<<<rg, rb, 0, impl.stream>>>(
-            N, nfrag,
-            impl.d_rhs.ptr,
-            impl.d_atom_frag.ptr,
-            impl.d_Cz1_general.ptr,
-            impl.d_S_general.ptr);
-    }
-
-    // D2H the small reduction outputs.
-    checkCudaEEQ(cudaMemcpyAsync(impl.h_Cz1_general.data(), impl.d_Cz1_general.ptr,
-                                  nfrag * sizeof(double),
-                                  cudaMemcpyDeviceToHost, impl.stream),
-                 "D2H Cz1 (general)");
-    checkCudaEEQ(cudaMemcpyAsync(impl.h_S_general.data(), impl.d_S_general.ptr,
-                                  (size_t)nfrag * nfrag * sizeof(double),
-                                  cudaMemcpyDeviceToHost, impl.stream),
-                 "D2H S (general)");
-    checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after reduce (general)");
-
-    // CPU Schur solve: S·λ = Cz1 - Q_frag (Gauss-elim with partial pivoting).
-    std::vector<double> schur_rhs(nfrag, 0.0);
-    for (int f = 0; f < nfrag; ++f) {
-        double q_target = (f < (int)rhs_constraints.size()) ? rhs_constraints[f] : 0.0;
-        schur_rhs[f] = impl.h_Cz1_general[f] - q_target;
-    }
-    solveSchurSystemInPlace(impl.h_S_general.data(),
-                             schur_rhs.data(),
-                             impl.h_lambda_general.data(),
-                             nfrag);
-
-    // H2D the tiny λ vector.
-    checkCudaEEQ(cudaMemcpyAsync(impl.d_lambda_general.ptr,
-                                  impl.h_lambda_general.data(),
-                                  nfrag * sizeof(double),
-                                  cudaMemcpyHostToDevice, impl.stream),
-                 "H2D lambda (general)");
-
-    // Apply: q[i] = z1[i] − Σ_g Z2[i,g]·λ[g]; write in-place into d_rhs[0..N-1].
-    {
-        int b = 256;
-        int g = (N + b - 1) / b;
-        k_eeq_schur_general<<<g, b, 0, impl.stream>>>(
-            N, nfrag,
-            impl.d_rhs.ptr,
-            impl.d_lambda_general.ptr,
-            impl.d_rhs.ptr);
-    }
-
-    // Sync so caller can D2D-copy from getDeviceChargesPtr() immediately.
-    checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after schur_general");
+    finishGeneralSchur(impl, N, nfrag, rhs_constraints);
     return true;
 }
 
@@ -1844,6 +1874,15 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUPCG(
                           || !impl.m_pcg_M_inv_valid
                           || (N != m_last_N);
 
+    // Claude Generated (Oct 2026): per-call breakdown for the verbosity-2 diagnostic below
+    // (setup = matrix + preconditioner, solves = the nfrag+1 PCG runs). Host wall clock; the
+    // setup is synchronous through buildBlockJacobiFactors or the first PCG's D2H.
+    using pcg_clock = std::chrono::steady_clock;
+    const auto pcg_t0 = pcg_clock::now();
+    const int pcg_iters0 = impl.m_pcg_total_iters;
+    double pcg_setup_ms = 0.0;
+    int pcg_iter_z1 = 0, pcg_iter_max = 0;
+
     if (do_refactor) {
         // (Re)build A on GPU — same kernel WP7-A uses for the Cholesky path.
         {
@@ -1879,6 +1918,8 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUPCG(
                 "gpu_block_jacobi_max_frag_atoms={})",
                 nfrag, impl.m_max_frag_N, block_jacobi_max_nfrag, block_jacobi_max_frag_atoms));
         }
+        checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after pcg setup");
+        pcg_setup_ms = std::chrono::duration<double, std::milli>(pcg_clock::now() - pcg_t0).count();
         // Note: do NOT touch m_last_N here — it is owned by the cuSOLVER paths
         // (WP5-A / WP7-A) and tracks their workspace allocation. PCG bypasses
         // cuSOLVER entirely, so writing m_last_N here would falsely tell the
@@ -1907,6 +1948,7 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUPCG(
     }
     bool ok = runSinglePCG(impl, N, d_rhs_atoms, impl.d_rhs.ptr, max_iter, tol);
     if (!ok) return false;
+    pcg_iter_z1 = impl.m_pcg_total_iters - pcg_iters0;
 
     // --- PCG #2..nfrag+1: A · Z2[:,f] = e_f for each fragment. ---
     for (int f = 0; f < nfrag; ++f) {
@@ -1920,8 +1962,19 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUPCG(
         } else {
             cudaMemsetAsync(d_x_col, 0, N * sizeof(double), impl.stream);
         }
+        const int it_before = impl.m_pcg_total_iters;
         ok = runSinglePCG(impl, N, d_b_col, d_x_col, max_iter, tol);
         if (!ok) return false;
+        pcg_iter_max = std::max(pcg_iter_max, impl.m_pcg_total_iters - it_before);
+    }
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        const double total_ms = std::chrono::duration<double, std::milli>(pcg_clock::now() - pcg_t0).count();
+        const int iters = impl.m_pcg_total_iters - pcg_iters0;
+        CurcumaLogger::info(fmt::format(
+            "EEQ GPU PCG (WP7-C): {} solves, {} iterations (z1 {}, max per Z2 column {}, mean {:.1f}), "
+            "setup {:.1f} ms, solves {:.1f} ms, preconditioner {}",
+            nrhs, iters, pcg_iter_z1, pcg_iter_max, double(iters) / nrhs, pcg_setup_ms,
+            total_ms - pcg_setup_ms, impl.m_pcg_block_jacobi_valid ? "block-Jacobi" : "diagonal"));
     }
 
     // --- Persist warm-start BEFORE the Schur apply overwrites d_rhs[0..N-1]. ---
@@ -2542,6 +2595,12 @@ void EEQSolverGPU::uploadFragmentTopology(int nfrag,
         checkCudaEEQ(cudaMemcpy(impl.d_rhs_blocks.ptr, h_rhs_init.data(),
                                  total_rhs * sizeof(double), cudaMemcpyHostToDevice),
                      "H2D rhs_blocks init");
+        if (total_rhs > 0 && nfrag > 1) {
+            impl.d_rhs_blocks_init.alloc(total_rhs);
+            checkCudaEEQ(cudaMemcpy(impl.d_rhs_blocks_init.ptr, h_rhs_init.data(),
+                                     total_rhs * sizeof(double), cudaMemcpyHostToDevice),
+                         "H2D rhs_blocks_init");
+        }
     }
 
     // --- 6. Query cuSOLVER workspace size for the largest fragment ---
@@ -2710,7 +2769,13 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurBatched(
             impl.d_frag_atom_map.ptr, impl.d_A_blocks.ptr, nfrag, cutoff_sq);
     }
 
-    // --- 2. Gather per-step RHS (col0) from global d_rhs_atoms ---
+    // --- 2. Restore col1 = 1 (dpotrs of the previous call overwrote it with Z2), then
+    //        gather the per-step RHS (col0) from global d_rhs_atoms ---
+    if (impl.d_rhs_blocks_init.n < total_rhs) return false;
+    checkCudaEEQ(cudaMemcpyAsync(impl.d_rhs_blocks.ptr, impl.d_rhs_blocks_init.ptr,
+                                  (size_t)total_rhs * sizeof(double),
+                                  cudaMemcpyDeviceToDevice, impl.stream),
+                 "frag D2D rhs_blocks reset");
     {
         int block = 256;
         int grid  = (N + block - 1) / block;
@@ -2805,5 +2870,246 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurBatched(
                  "frag H2D charges");
     checkCudaEEQ(cudaStreamSynchronize(impl.stream), "frag sync after H2D charges");
 
+    return true;
+}
+
+// ============================================================================
+// solve_method lu on the device: dense LU of the augmented EEQ system
+// Claude Generated (Oct 2026)
+// ============================================================================
+
+/**
+ * @brief Augmented EEQ matrix [A C^T; C 0] (M = N + nfrag rows), column-major, one thread per element.
+ *
+ * Atom block: same element formula and operand order as k_eeq_build_cols / k_eeq_build_matrix
+ * (i = max(row,col), j = min(row,col)), so A_nn is bit-identical to the Cholesky paths' matrix.
+ * Constraint block: C(f, a) = 1 when atom a belongs to fragment f (atom_frag, 0-indexed), as in
+ * the CPU EEQSolver augmented matrix; the nfrag x nfrag corner is zero.
+ */
+__global__ __launch_bounds__(256, 4)
+void k_eeq_build_augmented(int N, int M,
+                           const double* __restrict__ cx, const double* __restrict__ cy,
+                           const double* __restrict__ cz, const double* __restrict__ alpha,
+                           const double* __restrict__ gam, const int* __restrict__ atom_frag,
+                           double* __restrict__ Aug, double cutoff_sq)
+{
+    const long long tid = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const long long tot = static_cast<long long>(M) * M;
+    if (tid >= tot) return;
+    const int row = static_cast<int>(tid % M);
+    const int col = static_cast<int>(tid / M);
+    double v;
+    if (row < N && col < N) {
+        if (row == col) {
+            v = gam[row] + TSQRT2PI_GPU / sqrt(alpha[row]);
+        } else {
+            const int i = row > col ? row : col;
+            const int j = row > col ? col : row;
+            const double dx = cx[i] - cx[j];
+            const double dy = cy[i] - cy[j];
+            const double dz = cz[i] - cz[j];
+            const double r_sq = dx * dx + dy * dy + dz * dz;
+            if (cutoff_sq > 0.0 && r_sq > cutoff_sq) {
+                v = 0.0;
+            } else {
+                const double r = sqrt(r_sq);
+                const double gamma_ij = 1.0 / sqrt(alpha[i] + alpha[j]);
+                v = erf(gamma_ij * r) / r;
+            }
+        }
+    } else if (row >= N && col >= N) {
+        v = 0.0;
+    } else {
+        const int atom = row < N ? row : col;
+        const int frag = row < N ? col - N : row - N;
+        v = (atom_frag[atom] == frag) ? 1.0 : 0.0;
+    }
+    Aug[tid] = v;
+}
+
+bool EEQSolverGPU::solveWithDeviceRHSAndGPUAugmentedLU(
+    int natoms, int nfrag,
+    const double* cx, const double* cy, const double* cz,
+    const double* d_alpha,
+    const double* d_gam,
+    const double* d_rhs_atoms,
+    const std::vector<double>& rhs_constraints,
+    double cutoff_sq)
+{
+    auto& impl = *m_impl;
+    if (nfrag < 1 || !impl.m_frag_topo_valid || impl.m_nfrag_batched != nfrag
+        || impl.d_atom_frag.n < natoms) {
+        CurcumaLogger::warn("EEQ GPU lu: fragment topology not on the device");
+        return false;
+    }
+    const int N = natoms;
+    const long long M_ll = static_cast<long long>(N) + nfrag;
+    if (M_ll * M_ll > static_cast<long long>(std::numeric_limits<int>::max())) {
+        CurcumaLogger::warn(fmt::format("EEQ GPU lu: augmented system too large ({} rows)", M_ll));
+        return false;
+    }
+    const int M = static_cast<int>(M_ll);
+
+    impl.d_aug_A.ensure(M * M);
+    impl.d_aug_rhs.ensure(M);
+    impl.d_aug_piv.ensure(M);
+
+    // 1. Augmented matrix on the device.
+    {
+        const long long tot = static_cast<long long>(M) * M;
+        const int block = 256;
+        const int grid = static_cast<int>((tot + block - 1) / block);
+        k_eeq_build_augmented<<<grid, block, 0, impl.stream>>>(
+            N, M, cx, cy, cz, d_alpha, d_gam, impl.d_atom_frag.ptr, impl.d_aug_A.ptr, cutoff_sq);
+        checkCudaEEQ(cudaGetLastError(), "k_eeq_build_augmented launch");
+    }
+
+    // 2. RHS [b_atoms; Q_frag].
+    std::vector<double> h_q(nfrag, 0.0);
+    for (int f = 0; f < nfrag && f < static_cast<int>(rhs_constraints.size()); ++f)
+        h_q[f] = rhs_constraints[f];
+    checkCudaEEQ(cudaMemcpyAsync(impl.d_aug_rhs.ptr, d_rhs_atoms, N * sizeof(double),
+                                  cudaMemcpyDeviceToDevice, impl.stream), "D2D lu rhs atoms");
+    checkCudaEEQ(cudaMemcpyAsync(impl.d_aug_rhs.ptr + N, h_q.data(), nfrag * sizeof(double),
+                                  cudaMemcpyHostToDevice, impl.stream), "H2D lu rhs constraints");
+
+    // 3. getrf (partial pivoting) + getrs, one RHS column.
+    int lwork = 0;
+    checkCusolverEEQ(cusolverDnDgetrf_bufferSize(impl.cusolver_handle, M, M, impl.d_aug_A.ptr, M, &lwork),
+                     "getrf_bufferSize (augmented lu)");
+    if (impl.m_aug_ws_size < lwork || impl.d_aug_ws.n < lwork) {
+        impl.d_aug_ws.alloc(lwork);
+        impl.m_aug_ws_size = lwork;
+    }
+    checkCusolverEEQ(cusolverDnDgetrf(impl.cusolver_handle, M, M, impl.d_aug_A.ptr, M,
+                                      impl.d_aug_ws.ptr, impl.d_aug_piv.ptr, impl.d_info.ptr),
+                     "cusolverDnDgetrf (augmented lu)");
+    checkCudaEEQ(cudaMemcpyAsync(impl.h_info, impl.d_info.ptr, sizeof(int),
+                                  cudaMemcpyDeviceToHost, impl.stream), "D2H info (augmented lu)");
+    checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after getrf (augmented lu)");
+    if (*impl.h_info != 0) {
+        CurcumaLogger::warn(fmt::format("EEQ GPU lu: getrf failed (info={})", *impl.h_info));
+        return false;
+    }
+    checkCusolverEEQ(cusolverDnDgetrs(impl.cusolver_handle, CUBLAS_OP_N, M, 1,
+                                      impl.d_aug_A.ptr, M, impl.d_aug_piv.ptr,
+                                      impl.d_aug_rhs.ptr, M, impl.d_info.ptr),
+                     "cusolverDnDgetrs (augmented lu)");
+
+    // 4. Charges = first N entries of the solution -> d_rhs[0..N-1] (getDeviceChargesPtr()).
+    if (impl.d_rhs.n < N) impl.d_rhs.alloc(N);
+    checkCudaEEQ(cudaMemcpyAsync(impl.d_rhs.ptr, impl.d_aug_rhs.ptr, N * sizeof(double),
+                                  cudaMemcpyDeviceToDevice, impl.stream), "D2D lu charges");
+    checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after augmented lu");
+    return true;
+}
+
+// ============================================================================
+// solve_method ldlt on the device: Bunch-Kaufman LDL^T of A_nn + Schur complement
+// Claude Generated (Oct 2026)
+// ============================================================================
+
+__global__ void k_int_to_int64(int n, const int* __restrict__ in, long long* __restrict__ out)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = static_cast<long long>(in[i]);
+}
+
+bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurLDLT(
+    int natoms, int nfrag,
+    const double* cx, const double* cy, const double* cz,
+    const double* d_alpha,
+    const double* d_gam,
+    const double* d_rhs_atoms,
+    const std::vector<double>& rhs_constraints,
+    double cutoff_sq)
+{
+    auto& impl = *m_impl;
+    if (nfrag < 1 || !impl.m_frag_topo_valid || impl.m_nfrag_batched != nfrag
+        || impl.d_atom_frag.n < natoms || impl.d_rhs_constraint_cols.n < natoms * nfrag) {
+        CurcumaLogger::warn("EEQ GPU ldlt: fragment topology not on the device");
+        return false;
+    }
+    const int N = natoms;
+    const int nrhs = nfrag + 1;
+    if (static_cast<long long>(N) * N > static_cast<long long>(std::numeric_limits<int>::max())) return false;
+
+    // d_A is shared with the Cholesky/LU paths: their cached factor is gone after this call.
+    impl.m_has_cached_factor  = false;
+    impl.m_using_lu           = false;
+    impl.m_cached_factor_mixed = false;
+    impl.d_A.ensure(N * N);
+    impl.d_ldlt_piv.ensure(N);
+    impl.d_ldlt_piv64.ensure(N);
+    impl.d_rhs.ensure(N * nrhs);
+
+    // 1. A_nn (same kernel and values as WP5-A/WP7-A; both triangles written, sytrf reads the lower).
+    {
+        const int n_lower = N * (N + 1) / 2;
+        const int block = 256;
+        k_eeq_build_matrix<<<(n_lower + block - 1) / block, block, 0, impl.stream>>>(
+            N, cx, cy, cz, d_alpha, d_gam, impl.d_A.ptr, cutoff_sq);
+    }
+
+    // 2. LDL^T (Bunch-Kaufman), lower triangle.
+    int lwork = 0;
+    checkCusolverEEQ(cusolverDnDsytrf_bufferSize(impl.cusolver_handle, N, impl.d_A.ptr, N, &lwork),
+                     "sytrf_bufferSize");
+    impl.d_ldlt_ws.ensure(std::max(1, lwork));
+    checkCusolverEEQ(cusolverDnDsytrf(impl.cusolver_handle, CUBLAS_FILL_MODE_LOWER, N, impl.d_A.ptr, N,
+                                      impl.d_ldlt_piv.ptr, impl.d_ldlt_ws.ptr, std::max(1, lwork),
+                                      impl.d_info.ptr),
+                     "cusolverDnDsytrf");
+    checkCudaEEQ(cudaMemcpyAsync(impl.h_info, impl.d_info.ptr, sizeof(int),
+                                  cudaMemcpyDeviceToHost, impl.stream), "D2H info (sytrf)");
+    checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after sytrf");
+    if (*impl.h_info != 0) {
+        CurcumaLogger::warn(fmt::format("EEQ GPU ldlt: sytrf failed (info={})", *impl.h_info));
+        return false;
+    }
+    k_int_to_int64<<<(N + 255) / 256, 256, 0, impl.stream>>>(N, impl.d_ldlt_piv.ptr, impl.d_ldlt_piv64.ptr);
+
+    // 3. RHS [b_atoms | C^T], as in WP7-A.
+    checkCudaEEQ(cudaMemcpyAsync(impl.d_rhs.ptr, d_rhs_atoms, N * sizeof(double),
+                                  cudaMemcpyDeviceToDevice, impl.stream), "D2D rhs_atoms col0 (ldlt)");
+    checkCudaEEQ(cudaMemcpyAsync(impl.d_rhs.ptr + N, impl.d_rhs_constraint_cols.ptr,
+                                  (size_t)N * nfrag * sizeof(double),
+                                  cudaMemcpyDeviceToDevice, impl.stream), "D2D constraint cols (ldlt)");
+
+    // 4. Solve A_nn [z1 | Z2] = [b | C^T], in blocks of at most 1024 right-hand sides:
+    //    cusolverDnXsytrs of cuSOLVER 12.2 (CUDA 13) returns wrong columns, with info = 0, for
+    //    nrhs > 1024 (standalone check, SPD and indefinite, n = 500..7320: residual 2.5e2 at
+    //    nrhs = 1025, 1e-15 at 1024 and for any chunked call).
+    constexpr int kSytrsMaxRhs = 1024;
+    size_t ws_dev = 0, ws_host = 0;
+    const int64_t n64 = N;
+    checkCusolverEEQ(cusolverDnXsytrs_bufferSize(impl.cusolver_handle, CUBLAS_FILL_MODE_LOWER, n64,
+                                                 static_cast<int64_t>(std::min(nrhs, kSytrsMaxRhs)),
+                                                 CUDA_R_64F, impl.d_A.ptr, n64,
+                                                 reinterpret_cast<const int64_t*>(impl.d_ldlt_piv64.ptr),
+                                                 CUDA_R_64F, impl.d_rhs.ptr, n64, &ws_dev, &ws_host),
+                     "Xsytrs_bufferSize");
+    impl.d_ldlt_xs.ensure(static_cast<int>(std::max<size_t>(1, ws_dev)));
+    if (impl.h_ldlt_xs.size() < std::max<size_t>(1, ws_host)) impl.h_ldlt_xs.resize(std::max<size_t>(1, ws_host));
+    for (int c0 = 0; c0 < nrhs; c0 += kSytrsMaxRhs) {
+        const int64_t nc = std::min(kSytrsMaxRhs, nrhs - c0);
+        checkCusolverEEQ(cusolverDnXsytrs(impl.cusolver_handle, CUBLAS_FILL_MODE_LOWER, n64, nc,
+                                          CUDA_R_64F, impl.d_A.ptr, n64,
+                                          reinterpret_cast<const int64_t*>(impl.d_ldlt_piv64.ptr),
+                                          CUDA_R_64F, impl.d_rhs.ptr + static_cast<size_t>(c0) * N, n64,
+                                          impl.d_ldlt_xs.ptr, ws_dev, impl.h_ldlt_xs.data(), ws_host,
+                                          impl.d_info.ptr),
+                         "cusolverDnXsytrs");
+    }
+    checkCudaEEQ(cudaMemcpyAsync(impl.h_info, impl.d_info.ptr, sizeof(int),
+                                  cudaMemcpyDeviceToHost, impl.stream), "D2H info (sytrs)");
+    checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after sytrs");
+    if (*impl.h_info != 0) {
+        CurcumaLogger::warn(fmt::format("EEQ GPU ldlt: sytrs failed (info={})", *impl.h_info));
+        return false;
+    }
+
+    // 5. Schur complement over the fragment constraints -> charges in d_rhs[0..N-1].
+    finishGeneralSchur(impl, N, nfrag, rhs_constraints);
     return true;
 }

@@ -16,6 +16,7 @@ below. If it needs measurements or a derivation, write them into the matching `d
 
 ## Jul - Sep 2026 (and some late June), 108 entries, full text in AIChangelog_2026-late.md
 
+- EEQ solver (Oct 10, 2026): batched fixed on CUDA (stale RHS column), energy criterion eeq_batched_max_error_eh replaces the distance threshold, lu and ldlt on CUDA, GPU tests share ctest RESOURCE_LOCK gpu — docs/EEQ_SOLVER_CONTROL.md
 - EEQ solver control (Oct 9, 2026): one resolveMethod for CPU and GPU, auto = ppcg from 500 atoms, explicit names never overridden, unknown name = error, verbosity-1 path line — docs/EEQ_SOLVER_CONTROL.md
 - EEQ solver benchmark script scripts/eeq_solver_benchmark.py (Oct 9, 2026): SP vs xtb and per-step MD timings per solver, CPU/CUDA, reads the structure library — docs/EEQ_SOLVER_BENCHMARK.md
 - Test audit (Oct 9, 2026): cli_sqm_04..07 re-enabled at 1e-5 Eh (native gfn1/gfn2 vs TBLite, OH radical 2e-3); ConfScan counter tests print actual vs expected; 3 CLI tests stay disabled with documented reasons

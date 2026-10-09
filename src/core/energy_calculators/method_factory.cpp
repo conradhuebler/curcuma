@@ -408,10 +408,10 @@ void fixEEQSolverChoice(json& cfg, const std::string& gpu)
         CurcumaLogger::error(e.what());
         throw MethodCreationException(e.what());
     }
-    if (gpu != "none" && !EEQSolver::gpuSupports(m)) {
+    if (gpu != "none" && !EEQSolver::gpuSupports(m, gpu)) {
         const std::string msg = fmt::format(
-            "EEQ solver '{}' has no device implementation for -gpu {} yet; on the GPU use: auto, cholesky, ppcg, pcg, batched "
-            "(or run on the CPU without -gpu)", EEQSolver::methodName(m), gpu);
+            "EEQ solver '{}' has no device implementation for -gpu {} yet; on the GPU use: {} "
+            "(or run on the CPU without -gpu)", EEQSolver::methodName(m), gpu, EEQSolver::gpuMethodNames(gpu));
         CurcumaLogger::error(msg);
         throw MethodCreationException(msg);
     }

@@ -379,6 +379,48 @@ public:
         double cutoff_sq = 0.0,
         bool force_refactor = true);
 
+    /**
+     * @brief Dense LU of the augmented EEQ system on the device (-eeq_solver.solve_method lu).
+     *
+     * Claude Generated (Oct 2026). Same semantics as the CPU `lu` (EEQSolver::dispatchSolve,
+     * Eigen PartialPivLU of the full (N+nfrag) x (N+nfrag) matrix [A C^T; C 0]): the augmented
+     * matrix is built on the device (column-major, M = N + nfrag), factorized with
+     * cusolverDnDgetrf (partial pivoting) and solved for the one right-hand side
+     * [b_atoms; Q_frag] with cusolverDnDgetrs. No Schur complement, no lazy factor reuse:
+     * refactorized on every call, like the CPU. Works for nfrag >= 1.
+     *
+     * Needs uploadFragmentTopology() (d_atom_frag) and keeps an M x M device matrix
+     * (623 MB at N = 7320, nfrag = 1502) for the lifetime of the solver.
+     * On success: charges in d_rhs[0..N-1] (getDeviceChargesPtr()). Returns false on an
+     * invalid topology, a too large system (M*M > INT_MAX) or an exactly singular U.
+     */
+    /**
+     * @brief Bunch-Kaufman LDL^T of A_nn on the device (-eeq_solver.solve_method ldlt). Claude Generated (Oct 2026).
+     *
+     * Same semantics as the CPU ldlt (solveSchurLDLT: LAPACK dsytrf on A_nn, then the nfrag x nfrag
+     * Schur complement): cusolverDnDsytrf (lower) + cusolverDnXsytrs on [b_atoms | C^T], then the
+     * WP7-A reduction and Schur solve. Overwrites d_A (the cached Cholesky/LU factor of WP5-A/WP7-A
+     * is invalidated). Memory as WP7-A: N x N matrix + N x (nfrag+1) right-hand sides.
+     * On success: charges in d_rhs[0..N-1]. Returns false on an invalid topology or info != 0.
+     */
+    bool solveWithDeviceRHSAndGPUSchurLDLT(
+        int natoms, int nfrag,
+        const double* cx, const double* cy, const double* cz,
+        const double* d_alpha,
+        const double* d_gam,
+        const double* d_rhs_atoms,
+        const std::vector<double>& rhs_constraints,
+        double cutoff_sq = 0.0);
+
+    bool solveWithDeviceRHSAndGPUAugmentedLU(
+        int natoms, int nfrag,
+        const double* cx, const double* cy, const double* cz,
+        const double* d_alpha,
+        const double* d_gam,
+        const double* d_rhs_atoms,
+        const std::vector<double>& rhs_constraints,
+        double cutoff_sq = 0.0);
+
 private:
     std::unique_ptr<EEQSolverGPUImpl> m_impl;
     int m_max_natoms;

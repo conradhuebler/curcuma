@@ -11,8 +11,11 @@
 #                  to 1e-7 Eh; -gfnff.solve is an equivalent alias, -eeq_solver.solve_method wins over it
 #   4. TYPO      - an unknown name ends with an error naming the valid solvers (it used to mean auto); for -md
 #                  a failed setup also gives a non-zero exit code (it used to be 0)
-#   5. GPU       - only if a CUDA plugin and a device are present: lu has no device implementation and is an
-#                  error with -gpu cuda, not a silent substitute
+#   5. GPU       - only if a CUDA plugin and a device are present: lu (augmented LU) and ldlt (sytrf + Schur)
+#                  run on the device (Oct 2026) and their charges agree with the CPU solver of the same name to
+#                  1e-9 e in every MD step (chain, 1410 atoms)
+#   6. BATCHED   - the energy criterion: batched on a water dimer (O...O 2.8 A) warns with an estimated error
+#                  within a factor 3 of the measured E(batched) - E(cholesky)
 # The verbosity-1 line "EEQ solver (final charges): <name>[ (auto)] [CPU|GPU ...]" is what is read.
 
 set -e
@@ -27,7 +30,7 @@ main() {
     cd "$SCRIPT_DIR"
     set +e
     CURCUMA="$CURCUMA" python3 - <<'PYEOF'
-import os, re, shutil, subprocess, sys, tempfile
+import json, os, re, shutil, subprocess, sys, tempfile
 B = os.environ["CURCUMA"]
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 fails = 0
@@ -83,13 +86,22 @@ check("-eeq_solver.solve_method wins over -gfnff.solve", rc == 0 and line.starts
 rc, line, _, out = sp(CAF, [S, "choleski"])
 check("typo is an error", rc != 0 and "unknown EEQ solver 'choleski'" in out and "valid:" in out, f"rc={rc}")
 
-def md_rc(extra):
+def md_rc(extra, xyz=CAF, charges=False):
+    """Short MD in a fresh directory; returns (rc, output[, per-step charges from the diagnostics file])."""
     d = tempfile.mkdtemp()
     try:
-        shutil.copy(CAF, os.path.join(d, "m.xyz"))
-        p = subprocess.run([B, "-md", "m.xyz", "-method", "gfnff", "-no_bmt", "-max_time", "2", "-threads", "2"] + extra,
+        shutil.copy(xyz, os.path.join(d, "m.xyz"))
+        diag = ["-md_diagnostics", "true", "-dump_frequency", "1"] if charges else []
+        p = subprocess.run([B, "-md", "m.xyz", "-method", "gfnff", "-no_bmt", "-max_time", "2", "-threads", "2"] + diag + extra,
                            cwd=d, capture_output=True, text=True, timeout=600)
-        return p.returncode, ANSI.sub("", p.stdout + p.stderr)
+        out = ANSI.sub("", p.stdout + p.stderr)
+        if not charges:
+            return p.returncode, out
+        q = []
+        fn = os.path.join(d, "m.diag.jsonl")
+        if os.path.exists(fn):
+            q = [json.loads(l)["charges"] for l in open(fn) if l.strip()]
+        return p.returncode, out, q
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -102,12 +114,26 @@ plugin = os.path.join(os.path.dirname(os.path.abspath(B)), "libcurcuma_cuda.so")
 have_gpu = os.path.exists(plugin) and shutil.which("nvidia-smi") is not None \
     and subprocess.run(["nvidia-smi", "-L"], capture_output=True).returncode == 0
 if have_gpu:
-    rc, _, _, out = sp(CAF, ["-gpu", "cuda", S, "lu"])
-    check("GPU: lu is an error, not a substitute", rc != 0 and "no device implementation" in out, f"rc={rc}")
-    rc, out = md_rc(["-gpu", "cuda", S, "lu"])
-    check("GPU MD: lu exits non-zero", rc != 0 and "no device implementation" in out, f"rc={rc}")
+    for name, path in (("lu", "augmented LU"), ("ldlt", "LDL^T (sytrf)")):
+        rc_g, out_g, q_g = md_rc(["-gpu", "cuda", "-gpu_strict", "true", "-verbosity", "1", S, name], CH, True)
+        rc_c, out_c, q_c = md_rc([S, name], CH, True)
+        check(f"GPU MD: {name} runs on the device", rc_g == 0 and f"{name} [GPU CUDA, {path}" in out_g, f"rc={rc_g}")
+        n = min(len(q_g), len(q_c))
+        dq = max((abs(a - b) for i in range(n) for a, b in zip(q_g[i], q_c[i])), default=1.0)
+        check(f"GPU {name} charges = CPU {name} charges", rc_c == 0 and n >= 2 and dq < 1e-9,
+              f"steps={n}, max |dq| = {dq:.2e} e")
 else:
     print("SKIP  GPU check (no CUDA plugin or device)")
+# batched energy criterion (CPU): estimate printed with the warning, compared with the measured error
+WD = "wdimer.xyz"
+rc, _, e_c, _ = sp(WD, [S, "cholesky"])
+rc2, _, e_b, out = sp(WD, [S, "batched"])
+m = re.search(r"EEQ batched \(final charges\): estimated energy error from the dropped inter-fragment coupling ([0-9.eE+-]+) Eh", out)
+est = float(m.group(1)) if m else None
+ok = rc == 0 and rc2 == 0 and est is not None and e_c is not None and e_b is not None and e_b > e_c \
+    and est / 3 < (e_b - e_c) < est * 3
+check("batched: energy-criterion warning matches the measured error", ok,
+      f"estimate {est} Eh, measured {(e_b - e_c) if (e_b is not None and e_c is not None) else None} Eh")
 sys.exit(1 if fails else 0)
 PYEOF
     local rc=$?

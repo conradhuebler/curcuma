@@ -405,7 +405,7 @@ if(USE_CUDA)
              COMMAND test_gfnff_gpu
              WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
     set_tests_properties(gfnff_gpu_builtin_molecules
-        PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;validation")
+        PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;validation")
 
     # Per-molecule tests using the same reference data as CPU GFN-FF validation
     foreach(REF_FILE ${GFNFF_REF_FILES})
@@ -417,7 +417,7 @@ if(USE_CUDA)
                  COMMAND test_gfnff_gpu ${BUILD_REF_FILE}
                  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
         set_tests_properties(${GPU_TEST_NAME}
-            PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;validation")
+            PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;validation")
     endforeach()
 
     # Claude Generated (March 2026): GPU analytical vs numerical gradient test
@@ -453,7 +453,7 @@ foreach(EO_MOL triose caffeine)
                          ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/${EO_MOL}.xyz cuda
                  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
         set_tests_properties(gfnff_gpu_energy_only_geometry_${EO_MOL}
-            PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu")
+            PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu")
     endif()
 endforeach()
 
@@ -589,7 +589,7 @@ if(Python3_Interpreter_FOUND)
                          $<TARGET_FILE:curcuma>
                          ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/polymer_2x.xyz)
         set_tests_properties(gfnff_gpu_split_equals_single
-            PROPERTIES TIMEOUT 600 LABELS "gfnff_gpu;gpu" SKIP_RETURN_CODE 77)
+            PROPERTIES TIMEOUT 600 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu" SKIP_RETURN_CODE 77)
     endif()
 
     # Claude Generated (Sep 2026): adaptive (step-rejecting) integrator.

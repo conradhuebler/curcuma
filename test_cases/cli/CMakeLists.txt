@@ -109,7 +109,7 @@ set_tests_properties(cli_gfnff_05_frag_charge_ensemble PROPERTIES TIMEOUT 900 LA
 
 # Claude Generated (Oct 2026): EEQ solver control (auto thresholds, explicit names, alias, typo, GPU gap).
 add_cli_test(gfnff 06_eeq_solver_control)
-set_tests_properties(cli_gfnff_06_eeq_solver_control PROPERTIES TIMEOUT 900 LABELS "gfnff;eeq")
+set_tests_properties(cli_gfnff_06_eeq_solver_control PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff;eeq")
 
 # =============================================================================
 # GPU GFN-FF Tests — only registered when USE_CUDA=ON
@@ -118,14 +118,14 @@ set_tests_properties(cli_gfnff_06_eeq_solver_control PROPERTIES TIMEOUT 900 LABE
 if(USE_CUDA)
     add_cli_test(gfnff_gpu 01_gfnff_gpu_singlepoint)
     set_tests_properties(cli_gfnff_gpu_01_gfnff_gpu_singlepoint
-        PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;cli")
+        PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;cli")
 endif()
 
 # ROCm GFN-FF — only when USE_ROCM=ON. Self-skips at runtime if no HIP device.
 if(USE_ROCM)
     add_cli_test(gfnff_gpu 02_rocm_singlepoint)
     set_tests_properties(cli_gfnff_gpu_02_rocm_singlepoint
-        PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;rocm;cli")
+        PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm;cli")
 endif()
 
 # =============================================================================
@@ -135,15 +135,15 @@ endif()
 if(USE_VULKAN)
     add_cli_test(gpu_gradient 01_vulkan_gfn1_gradient)
     set_tests_properties(cli_gpu_gradient_01_vulkan_gfn1_gradient
-        PROPERTIES TIMEOUT 120 LABELS "gpu_gradient;gpu;vulkan;cli")
+        PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gpu_gradient;gpu;vulkan;cli")
     # X-AP4: GFN2 D4 EEQ charge-response gradient on the device (q-response).
     add_cli_test(gpu_gradient 02_vulkan_gfn2_qresponse)
     set_tests_properties(cli_gpu_gradient_02_vulkan_gfn2_qresponse
-        PROPERTIES TIMEOUT 120 LABELS "gpu_gradient;gpu;vulkan;cli")
+        PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gpu_gradient;gpu;vulkan;cli")
     # V-AP2: GFN2 AO multipole integrals on the device.
     add_cli_test(gpu_multipole 01_vulkan_gfn2_multipole)
     set_tests_properties(cli_gpu_multipole_01_vulkan_gfn2_multipole
-        PROPERTIES TIMEOUT 120 LABELS "gpu_multipole;gpu;vulkan;cli")
+        PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gpu_multipole;gpu;vulkan;cli")
 endif()
 
 # =============================================================================

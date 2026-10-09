@@ -34,6 +34,8 @@
 
 #include <Eigen/Dense>
 #include <deque>
+#include <functional>
+#include <string>
 #include <vector>
 #include <memory>
 #include <optional>
@@ -383,9 +385,38 @@ public:
     /// Comma separated list of the canonical names (for messages).
     static std::string validMethodNames();
 
-    /// True when the GPU back-end has a device implementation of the method (auto resolves to a supported one).
-    /// Oct 2026: lu and ldlt have none yet - requesting them with -gpu is an error, not a silent substitute.
-    static bool gpuSupports(EEQSolveMethod m);
+    /// True when the GPU back-end (`cuda`, `rocm`, `vulkan`) has a device implementation of the method
+    /// (auto resolves to a supported one). Oct 2026: lu (dense augmented LU, cuSOLVER getrf) and ldlt
+    /// (cusolverDnDsytrf + Xsytrs on A_nn, Schur) run on CUDA only - requesting an unsupported one with
+    /// -gpu is an error, not a silent substitute.
+    static bool gpuSupports(EEQSolveMethod m, const std::string& backend = "cuda");
+
+    /// Comma separated names a back-end can run (for the error message). Claude Generated (Oct 2026).
+    static std::string gpuMethodNames(const std::string& backend);
+
+    /**
+     * @brief Energy error of the batched solve, estimated to second order. Claude Generated (Oct 2026).
+     *
+     * The batched solver minimises the EEQ functional E(q) = 1/2 q^T A q - x^T q with the
+     * inter-fragment blocks of A set to zero. Its charges q_b leave the residual r = A q_b - x of
+     * the full system; with the per-fragment charge constraints the exact energy excess is
+     * E(q_b) - E(q*) = 1/2 r^T (P A P)^+ r. Replacing A by its fragment-diagonal part gives
+     *   dE ~ 1/2 sum_f r_f^T d_f,   [A_ff 1; 1^T 0] [d_f; mu] = [r_f; 0],
+     * i.e. one block-Jacobi step with the same blocks the batched solve factorised. Exact when
+     * the coupling is weak; it only uses the residual (one O(N^2) matrix-vector product) and
+     * the fragment blocks.
+     *
+     * @param residual        r = A q_b - x over all atoms (A_nn and the atom right-hand side)
+     * @param fragment_atoms  atom indices of each fragment
+     * @param A_elem          element (i, j) of A_nn for atoms of the same fragment
+     * @return estimated E(q_b) - E(q*) in Eh (>= 0)
+     */
+    static double estimateBatchedError(const Vector& residual,
+                                       const std::vector<std::vector<int>>& fragment_atoms,
+                                       const std::function<double(int, int)>& A_elem);
+
+    /// Last batched-error estimate of this solver (Eh), -1 when none was made. Claude Generated (Oct 2026).
+    double lastBatchedErrorEstimate() const { return m_last_batched_error; }
 
     /**
      * @brief Resolve the requested method to the one that runs. Claude Generated (Oct 2026).
@@ -831,6 +862,10 @@ private:
 
         /// Apply z = M^-1 r blockwise. Atoms not in any fragment fall back to identity (z = r).
         Vector apply(const Vector& r) const;
+
+        /// Apply Z = M^-1 R to all columns of R at once (one multi-RHS triangular solve per fragment).
+        /// Not bit-identical to apply() per column (blocked kernel). Claude Generated (Oct 2026).
+        Matrix applyColumns(const Matrix& R) const;
     };
 
     /// Build BlockJacobiPC from A_nn and the fragment constraint matrix C (nfrag × natoms).
@@ -934,13 +969,11 @@ private:
     // uniform/placeholder charges; read via lastSolveFailed(), reset via clearSolveStatus().
     mutable bool m_last_solve_failed = false;
 
-    // WP7-D (Jun 2026): contact-aware dispatch. Minimum inter-fragment atom distance
-    // (Bohr) at the current geometry, computed in calculateFinalCharges from the packed
-    // distances + topology->fraglist and read by dispatchSolve. -1 = not computed
-    // (single fragment, or no topology) → treated as "in contact" so the safe exact
-    // path is chosen. The approximate batched solver drops cross-fragment Coulomb, so it
-    // is auto-selected only when fragments are well-separated (>= eeq_batched_min_distance).
-    mutable double m_contact_min_dist = -1.0;
+    // Oct 2026: energy criterion for the explicit batched solver (replaces the old minimum
+    // inter-fragment distance, eeq_batched_min_distance, and its per-step O(N^2) contact scan).
+    double m_batched_max_error = 1e-6;                 ///< eeq_batched_max_error_eh (0 = no check)
+    mutable std::vector<std::string> m_batched_checked; ///< "<phase>:<natoms>:<nfrag>" already estimated
+    mutable double m_last_batched_error = -1.0;         ///< last estimate (Eh), -1 = none
 
     // Convergence statistics — accumulate across calls, print summary instead of per-call spam
     // Claude Generated (April 2026)
@@ -1072,13 +1105,14 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "ppcg = projected PCG, one iterative solve for any nfrag (GPU: WP7-E); "
           "pcg = per-fragment PCG with block-Jacobi, nfrag+1 solves (GPU: WP7-C); "
           "batched = per-fragment solves that IGNORE cross-fragment Coulomb, inexact unless the "
-          "fragments are well separated, see eeq_batched_min_distance (GPU: WP7-B). "
+          "fragments are well separated, see eeq_batched_max_error_eh (GPU: WP7-B). "
           "Aliases: schur_cholesky = cholesky, projected_pcg = ppcg. An unknown name is an error. "
           "The verbosity-1 line 'EEQ solver:' names the method and the device that run. "
           "ldlt = Bunch-Kaufman LDL^T on A_nn + Schur; equals cholesky for SPD A_nn (all "
           "gas-phase systems). NOT an automatic fallback: for an indefinite A_nn (e.g. the "
           "implicit-solvation reaction field) the robust path is cholesky's augmented-LU "
-          "fallback, which ldlt does not reproduce.",
+          "fallback, which ldlt does not reproduce. lu = dense LU of the augmented (N+nfrag) system "
+          "(GPU: CUDA only, cuSOLVER getrf). ldlt on the GPU: CUDA only, cuSOLVER sytrf + Schur.",
           "Algorithm", {})
     // Claude Generated (Sep 2026): defaults of max_pcg_iterations and pcg_large_system_iterations set
     // to the values the code actually used. Until Sep 28, 2026 the parameter parser dropped both
@@ -1135,18 +1169,13 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "Algorithm", {})
     PARAM(eeq_distance_cutoff, Double, 0.0,
           "Distance cutoff in Bohr for Coulomb matrix sparsification (0 = no cutoff, matches Fortran goed_gfnff). Non-zero values violate Hellmann-Feynman vs. the full Coulomb energy and degrade MD energy conservation.", "Advanced", {})
-    PARAM(eeq_batched_min_distance, Double, 15.0,
-          "Minimum atom-atom distance between different fragments (Bohr) below which "
-          "fragments are considered in contact. Used both to warn for an explicit batched "
-          "solve and (with eeq_contact_prefer_exact) to auto-route in-contact systems to "
-          "the exact solver. 0 = disable the check. Default 15 Bohr ~ 8 Angstrom.",
-          "Advanced", {})
-    PARAM(eeq_contact_prefer_exact, Bool, true,
-          "Auto/PCG dispatch: when a highly fragmented system has fragments in contact "
-          "(min inter-fragment distance below eeq_batched_min_distance, or unknown), prefer "
-          "the exact solver (SchurCholesky/PCG+block-Jacobi, cross-fragment Coulomb retained) "
-          "over the approximate batched per-fragment solve. Set false to keep the old "
-          "density-only batched auto-selection.",
+    // Oct 2026: replaces eeq_batched_min_distance (a fixed distance, 15 Bohr) and the dead
+    // eeq_contact_prefer_exact (auto no longer selects batched at all).
+    PARAM(eeq_batched_max_error_eh, Double, 1e-6,
+          "Explicit batched solver: warn when the estimated energy error from the dropped "
+          "inter-fragment Coulomb coupling exceeds this many Eh. The estimate (second order, "
+          "one block-Jacobi step on the residual of the full EEQ system) is made once per "
+          "topology and charge phase, on CPU and GPU. 0 = no estimate.",
           "Advanced", {})
     PARAM(dump_charges, Bool, false,
           "Save Phase 1 and Phase 2 charges to charges_dump_N<size>.json for analysis", "Advanced", {})
