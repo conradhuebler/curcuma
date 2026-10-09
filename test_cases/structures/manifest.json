@@ -1829,6 +1829,25 @@
    "description": "one chain C402H806O202 (= H-(OCH2CH2)201-OH, PEO-like); legacy name polymer; chain identity inferred from the composition"
   },
   {
+   "id": "peo201-water500",
+   "class": "bulk",
+   "file": "bulk/peo201-water500.xyz",
+   "format": "xyz",
+   "formula": "C402H1806O702",
+   "natoms": 2910,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "unspecified",
+   "size_bytes": 92478,
+   "sha256": "c2f01e27e31b6ee355c3756ad953e407f0c9d22d66ab071997d22a667ec95071",
+   "provenance": {
+    "kind": "unknown",
+    "description": "one PEO chain of 201 units (C402H806O202) in 500 water molecules, the single-chain counterpart of peo201x2-water1500 (two chains, 1500 waters); former test_cases/molecules/polymer.xyz; chain geometry differs from peo201-chain; origin and level not recorded"
+   },
+   "legacy": true
+  },
+  {
    "id": "peo201x2-water1500",
    "class": "bulk",
    "file": "bulk/peo201x2-water1500.xyz",
