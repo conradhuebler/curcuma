@@ -58,6 +58,13 @@ RMSD with atom reordering `-rmsd`, docking `-dock`, interaction energies `-inter
 
 ## Download and requirements
 
+Prebuilt binaries are on the [Releases page](https://github.com/conradhuebler/curcuma/releases): a Linux x86_64 AppImage
+(`curcuma-<version>-x86_64-Linux.AppImage`) and a Windows x86_64 archive (`curcuma-<version>-x86_64-Windows.zip`). Every release
+is marked as a pre-release and is built by the CI from one commit; the releases named `Curcuma CI (feature/...)` are builds
+of development branches.
+
+To build from source:
+
 ```sh
 git clone --recursive https://github.com/conradhuebler/curcuma
 ```
