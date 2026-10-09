@@ -2007,25 +2007,53 @@
    "description": "formula C18H32O16 equals three hexose units minus two H2O; legacy name triose"
   },
   {
-   "id": "trisaccharide-c18h32o16.alt1",
+   "id": "trisaccharide-c18h32o16.gfn2-opt",
    "class": "large",
-   "file": "large/trisaccharide-c18h32o16.alt1.xyz",
+   "file": "large/trisaccharide-c18h32o16.gfn2-opt.xyz",
    "format": "xyz",
    "formula": "C18H32O16",
    "natoms": 66,
    "frames": 1,
    "charge": 0,
    "spin": 0,
-   "role": "unspecified",
-   "size_bytes": 2581,
-   "sha256": "2da9df43f0a566c8077ad6364ea6f7dc5a90065ce50eca5278ac75ae860e8687",
+   "role": "equilibrium",
+   "size_bytes": 2586,
+   "sha256": "cf527b1eeafe52910a51c4a5fbf8823f35a15ba6a1898c43f81b66281b865c85",
    "provenance": {
-    "kind": "program_output",
+    "kind": "optimized",
     "program": "curcuma",
-    "version": "0.0.209-2-g7e38f75",
-    "description": "C18H32O16, max coordinate difference 0.5 A to trisaccharide-c18h32o16; former test_cases/sqm_reference/molecules/triose.opt.xyz; method of the Curcuma run not recorded",
-    "energy_eh": -119.936773
+    "version": "0.0.284-12-gd3ed9952",
+    "method": "gfn2",
+    "convergence": "LBFGSpp, -convergence_preset tight; final ||grad|| 8.97e-6 as printed at -verbosity 2, 327 iterations",
+    "description": "C18H32O16 minimised from trisaccharide-c18h32o16 with: curcuma -opt start.xyz -method gfn2 -convergence_preset tight -max_iterations 3000; RMSD 0.30 A to the start, 0.08 A to the former trisaccharide-c18h32o16.alt1 (which it replaces)",
+    "energy_eh": -119.9368252
    },
+   "derived_from": "trisaccharide-c18h32o16",
+   "variant_of": "trisaccharide-c18h32o16"
+  },
+  {
+   "id": "trisaccharide-c18h32o16.gfnff-opt",
+   "class": "large",
+   "file": "large/trisaccharide-c18h32o16.gfnff-opt.xyz",
+   "format": "xyz",
+   "formula": "C18H32O16",
+   "natoms": 66,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "equilibrium",
+   "size_bytes": 2587,
+   "sha256": "fdc9d1166245a60e7313b3ab06c1b5a8185dbadd94702d01f48867bdbd6b33ce",
+   "provenance": {
+    "kind": "optimized",
+    "program": "curcuma",
+    "version": "0.0.284-12-gd3ed9952",
+    "method": "gfnff",
+    "convergence": "LBFGSpp, -convergence_preset tight; final ||grad|| 8.73e-6 as printed at -verbosity 2, 407 iterations",
+    "description": "C18H32O16 minimised from trisaccharide-c18h32o16 with: curcuma -opt start.xyz -method gfnff -convergence_preset tight -max_iterations 3000; RMSD 1.02 A to the start (an xtb 6.6.0 geometry)",
+    "energy_eh": -9.91771881
+   },
+   "derived_from": "trisaccharide-c18h32o16",
    "variant_of": "trisaccharide-c18h32o16"
   },
   {
