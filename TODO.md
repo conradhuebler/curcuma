@@ -77,8 +77,7 @@ Stand.
 - **Testfall-Audit (2026-10-09)**: Drei CLI-Tests bleiben deaktiviert: `cli_curcumaopt_02` (ruft trotz Namens `-method uff` auf, doppelt `01`), `cli_sqm_10`
   (erwartet Log-Marker, die `-opt` nicht schreibt; Konvergenz an `input.opt.xyz` prüfen), `cli_sqm_11` (braucht TBLite). `cli_sqm_04` bis `07` sind wieder aktiv (Toleranz 1e-5,
   `OH` als Radikal ohne `-spin` mit 2e-3, Abweichung 8,2e-4 Eh zur geschlossenschaligen TBLite-Referenz). `simplemd` (16 von 17 Tests) und `curcumaopt` (7 von 7) prüfen nur Exit-Code,
-  Dateien oder Zeichenketten, keine Zahlen (Energieerhaltung, Temperatur, Drift). Nicht registrierte Quellen: `test_d3only_method.cpp`, `test_d3_weight_caching.cpp`,
-  `test_dispersion.cpp`, `test_torsion_count.cpp`, `simple_ulysses_test.cpp`, zwei `cuda/bench_*.cpp`, drei D4-Datendateien in `reference_data/`, zehn Skripte in `test_cases/`.
+  Dateien oder Zeichenketten, keine Zahlen (Energieerhaltung, Temperatur, Drift). Nicht registriert und nicht gelöscht: zwei `cuda/bench_*.cpp` (Benchmarks, nach `scripts/` verschieben), drei D4-Datendateien in `reference_data/` (vermutlich Kopien der Dateien in `src/`, vor dem Löschen mit `diff` prüfen).
 - **Trisaccharid als optimierte Struktur** (2026-10-09): `trisaccharide-c18h32o16` (xtb 6.6.0, Methode unvermerkt) soll durch `.gfn2-opt` ersetzt werden (und `.gfnff-opt` für GFN-FF). Blockiert: TBLite-Referenzen `sqm_reference/reference_data/triose_gfn{1,2}.ref.json` und die GFN-FF-Terme `reference_data/triose.ref.json` gelten für die alte Geometrie und müssen dort neu erzeugt werden (`USE_TBLITE` im `release/`-Build aus); danach `triose=` in `test_cases/CMakeLists.txt` (Zeilen 18, 27) umstellen. GFN-FF-Minimum liegt 1,0 Å (RMSD) von der xtb-Geometrie, Ursache offen.
 - ConfScan: Accept/Reject-Meldungen bei Standard-Verbosity nicht sichtbar (Eintrag von 2025, nicht erneut geprüft).
 

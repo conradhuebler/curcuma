@@ -392,7 +392,6 @@ double energy = calc.calculateEnergy();
 
 **Test Files:**
 - `test_gfnff_d3.cpp` - D3 integration
-- `test_dispersion.cpp` - General dispersion testing
 
 **Usage:**
 ```cpp
