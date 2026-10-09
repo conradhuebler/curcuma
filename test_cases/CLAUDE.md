@@ -4,6 +4,10 @@ All tests run by `ctest`: C++ unit/integration tests, CLI end-to-end scripts and
 List them with `ctest --test-dir release -N`; select with `-R <regex>` or `-L <label>`.
 Longer guide (Feb 2026, not re-checked): [TESTING.md](TESTING.md).
 
+## Layout
+
+- `unit/` C++ test sources and the molecule registry; `scripts/` ctest scripts (`check_*.py`, `large_system_modes.sh`, `test_parameter_io.sh`); `cli/` end-to-end tests; `sqm_reference/` reference gates; `structures/` structure library; `reference_data/` reference JSON and xtb outputs
+
 ## Where tests are registered
 
 - Root `CMakeLists.txt` (`add_subdirectory(test_cases)` onward): `molecule_comprehensive`, `AAAbGlc_*`, `confscan_*`, `energy_methods`, `parameter_io`, `confstat_*`
@@ -20,7 +24,7 @@ Longer guide (Feb 2026, not re-checked): [TESTING.md](TESTING.md).
 
 ## Unit and integration tests
 
-- Test molecules come from the registry (rule below); `test_energy_methods.cpp` uses `AAA-bGlc/A.xyz` (117 atoms; host plus methyl beta-D-glucopyranoside, directory renamed from AAA-bGal on 2026-10-01) instead
+- Test molecules come from the registry (rule below); `test_energy_methods.cpp` uses `A.xyz`, staged by CMake from the library structure `aaa-bglc.conf76` (117 atoms; host plus methyl beta-D-glucopyranoside) instead
 - New unit test `test_<name>.cpp`: `add_executable`, `target_link_libraries(... curcuma_core test_molecule_registry)`, `add_test` with `TIMEOUT` and `LABELS` in `test_cases/CMakeLists.txt`
 - Document the tolerance and where each reference value comes from (program, version, settings)
 

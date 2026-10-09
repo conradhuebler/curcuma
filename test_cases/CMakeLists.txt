@@ -545,7 +545,7 @@ set_tests_properties(xtb_cpscf PROPERTIES TIMEOUT 120 LABELS "cpscf;native_xtb")
 # each mode vs its exact/known dense limit + the default path unchanged, plus
 # the -eigensolver propagation through fragments/dc. See docs/SQM_LARGE_SYSTEMS.md.
 add_test(NAME large_system_modes
-         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/large_system_modes.sh
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/large_system_modes.sh
                  $<TARGET_FILE:curcuma> ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(large_system_modes PROPERTIES TIMEOUT 180 LABELS "large_system;native_xtb")
@@ -574,7 +574,7 @@ find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     add_test(NAME gradient_unit_contract
              COMMAND ${Python3_EXECUTABLE}
-                     ${CMAKE_CURRENT_SOURCE_DIR}/check_gradient_units.py
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_gradient_units.py
                      $<TARGET_FILE:curcuma>)
     set_tests_properties(gradient_unit_contract
         PROPERTIES TIMEOUT 300 LABELS "gradient;frequencies;native_xtb;gfnff")
@@ -585,7 +585,7 @@ if(Python3_Interpreter_FOUND)
     if(USE_CUDA)
         add_test(NAME gfnff_gpu_split_equals_single
                  COMMAND ${Python3_EXECUTABLE}
-                         ${CMAKE_CURRENT_SOURCE_DIR}/check_gfnff_gpu_split.py
+                         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_gfnff_gpu_split.py
                          $<TARGET_FILE:curcuma>
                          ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/polymer_2x.xyz)
         set_tests_properties(gfnff_gpu_split_equals_single
@@ -601,7 +601,7 @@ if(Python3_Interpreter_FOUND)
     # See docs/MD_LARGE_SYSTEMS.md.
     add_test(NAME md_adaptive_step
              COMMAND ${Python3_EXECUTABLE}
-                     ${CMAKE_CURRENT_SOURCE_DIR}/check_adaptive_step.py
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_adaptive_step.py
                      $<TARGET_FILE:curcuma>)
     set_tests_properties(md_adaptive_step
         PROPERTIES TIMEOUT 300 LABELS "md;integrator;gfnff")
@@ -614,7 +614,7 @@ if(Python3_Interpreter_FOUND)
     # the (independently validated) Hessian path. See docs/MD_LARGE_SYSTEMS.md.
     add_test(NAME md_time_axis
              COMMAND ${Python3_EXECUTABLE}
-                     ${CMAKE_CURRENT_SOURCE_DIR}/check_md_time_axis.py
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_md_time_axis.py
                      $<TARGET_FILE:curcuma>)
     set_tests_properties(md_time_axis
         PROPERTIES TIMEOUT 300 LABELS "md;integrator;gfnff;units")

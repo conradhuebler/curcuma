@@ -222,12 +222,13 @@ set_tests_properties(cli_confsearch_01_gfnff_smoke PROPERTIES TIMEOUT 400 LABELS
 # add_cli_test(cg 01_single_point)
 
 # =============================================================================
-# Analysis Tests (1 scenario)
+# Analysis Tests (2 scenarios)
 # =============================================================================
 
 add_cli_test(analysis 01_parallel_equivalence)
 # 100 Frames × Scattering braucht länger als Standard-30s
 set_tests_properties(cli_analysis_01_parallel_equivalence PROPERTIES TIMEOUT 120)
+add_cli_test(analysis 02_scattering_options)
 
 # =============================================================================
 # CLI Routing Tests — Claude Generated 2026

@@ -5,7 +5,7 @@
 set -e  # Exit on error
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CURCUMA="$TEST_DIR/../release/curcuma"
+CURCUMA="$TEST_DIR/../../release/curcuma"
 TEMP_DIR="$TEST_DIR/temp_param_test"
 
 # Colors

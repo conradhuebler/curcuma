@@ -1,0 +1,2 @@
+# Structures from test_cases/structures (id, optionally 'as <file name>'); see structures/README.md
+aaa-host.rmsd-a as input_aa.xyz

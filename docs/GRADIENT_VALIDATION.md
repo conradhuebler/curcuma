@@ -10,7 +10,7 @@ Runners:
 * `scripts/gradient_compare.py` — set-wide `max |g_curcuma − g_xtb|` per structure.
 * `scripts/gradient_arbitrate.py` — for one structure, decides **which** code is right by
   finite-differencing each program's *own* total energy.
-* `test_cases/check_gradient_units.py` — the permanent `gradient_unit_contract` ctest.
+* `test_cases/scripts/check_gradient_units.py` — the permanent `gradient_unit_contract` ctest.
 
 ```bash
 python scripts/gradient_compare.py --set gmtkn55 --method all

@@ -1609,7 +1609,7 @@ add_test(NAME energy_methods COMMAND test_energy_methods WORKING_DIRECTORY ${PRO
 # Claude Generated: Parameter I/O system comprehensive tests (October 2025)
 add_test(
     NAME parameter_io_tests
-    COMMAND bash ${CMAKE_SOURCE_DIR}/test_cases/test_parameter_io.sh
+    COMMAND bash ${CMAKE_SOURCE_DIR}/test_cases/scripts/test_parameter_io.sh
     WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
 )
 
