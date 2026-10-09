@@ -49,7 +49,7 @@ xtb test_cases/structures/small/methane.xyz --gfnff
 
 ## Universal Molecule Registry
 
-**Location**: `test_cases/core/test_molecule_registry.h`
+**Location**: `test_cases/unit/test_molecule_registry.h`
 
 ### Available Molecules
 
@@ -80,7 +80,7 @@ xtb test_cases/structures/small/methane.xyz --gfnff
 ### Using TestMoleculeRegistry
 
 ```cpp
-#include "test_cases/core/test_molecule_registry.h"
+#include "test_cases/unit/test_molecule_registry.h"
 using namespace TestMolecules;
 
 // Create molecule - path-independent! (Unit Tests)
@@ -262,7 +262,7 @@ test_cases/
 #include <iostream>
 #include <cmath>
 
-#include "test_cases/core/test_molecule_registry.h"
+#include "test_cases/unit/test_molecule_registry.h"
 #include "src/core/molecule.h"
 #include "src/core/energycalculator.h"
 #include "src/core/config_manager.h"

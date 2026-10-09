@@ -39,7 +39,7 @@
 
 #include <Eigen/Dense>
 
-#include "core/test_molecule_registry.h"
+#include "test_molecule_registry.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/energy_calculators/ff_methods/gfnff.h"
 #include "src/core/molecule.h"

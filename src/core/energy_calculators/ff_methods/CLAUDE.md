@@ -24,7 +24,7 @@ D3/D4 fix records, GPU phase log, TODO checkboxes) is kept in
 4. `FFWorkspace::calcXxx(int partition)` in `ff_workspace_gfnff.cpp` (energy into `acc.energy`, gradient into `acc.gradient`, CN chain rule into `acc.dEdcn`), call it from `executeGFNFF()`, add the reduction in `reduce()`.
 5. Extend `GFNFFEnergyReport` and the verbosity-2 table in `GFNFF::Calculation()`.
 6. Mirror the kernel in `cuda/gfnff_kernels.cu` (and `rocm/gfnff_rocm.hip`, SoA upload in `cuda/gfnff_soa.h`), or gate the term CPU-only.
-7. Add the term to `test_cases/test_gfnff_validation.cpp` against the Fortran reference.
+7. Add the term to `test_cases/unit/test_gfnff_validation.cpp` against the Fortran reference.
 
 ## Invariants and traps
 

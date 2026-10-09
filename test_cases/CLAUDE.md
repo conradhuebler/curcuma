@@ -26,9 +26,9 @@ Longer guide (Feb 2026, not re-checked): [TESTING.md](TESTING.md).
 
 ## Molecule Registry - MANDATORY Rule
 
-**NEVER hardcode molecule geometry in test files.** All test molecules are named in `core/test_molecule_registry.cpp`; their geometry is read from the structure library (`library_id`):
+**NEVER hardcode molecule geometry in test files.** All test molecules are named in `unit/test_molecule_registry.cpp`; their geometry is read from the structure library (`library_id`):
 ```cpp
-#include "core/test_molecule_registry.h"
+#include "test_molecule_registry.h"
 curcuma::Molecule mol = TestMolecules::TestMoleculeRegistry::createMolecule("CH4", false); // false = keep Angstrom
 ```
 - Available: `H2`, `HCl`, `OH`, `Cl2`, `HCN`, `H2O`, `H2O_dimer`, `NH3`, `O3`, `CH4`, `CH3OH`, `CH3OCH3`, `C6H6`, `monosaccharide`, `triose`; reference energies in the registry belong to the geometry of the library structure
@@ -51,7 +51,7 @@ curcuma::Molecule mol = TestMolecules::TestMoleculeRegistry::createMolecule("CH4
 - `WILL_FAIL` marks `sqm_val*` molecules not yet at 1e-8 (`_GFN1_XFAIL`/`_GFN2_XFAIL`: `complex`, plus `He2` for gfn1); they pass while the gap persists
 - `d4_diag_*` and `confscan_molalign` are registered only when their inputs (`release_tblite/dumps/`, `molalign` binary) exist
 - `*/03_invalid_*` CLI tests check graceful fallback; `curcumaopt/03_invalid_method` runs a valid gfnff optimisation. Error paths are covered by `cli/errors/`
-- `AAAbGlc incr` exists in `AAAbGlc.cpp` but its ctest entry is commented out
+- `AAAbGlc incr` exists in `unit/aaabglc_test.cpp` but its ctest entry is commented out
 - `energy_methods` reference comments still name TBLite / external GFN-FF although `gfn1`, `gfn2`, `gfnff` now resolve to native code; not checked whether the test passes
 
 ## Instructions Block

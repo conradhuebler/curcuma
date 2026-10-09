@@ -21,7 +21,7 @@
 #include "src/core/molecule.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/global.h"
-#include "core/test_molecule_registry.h"
+#include "test_molecule_registry.h"
 #include "json.hpp"
 
 #include <Eigen/Dense>

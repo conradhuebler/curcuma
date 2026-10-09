@@ -18,7 +18,7 @@
 
 #include "src/core/energy_calculators/qm_methods/xtb_native.h"
 #include "src/core/curcuma_logger.h"
-#include "core/test_molecule_registry.h"
+#include "test_molecule_registry.h"
 
 #include <Eigen/Dense>
 

@@ -16,7 +16,7 @@
 #     the HYDRONIUM is fragment 0 - i.e. the carrier no longer depends on the atom numbering.
 #   - HISTORY (topology built at another geometry) needs a reused calculator instance, which the
 #     master CLI cannot express; it lives in the C++ test gfnff_frag_charge_history
-#     (test_cases/test_gfnff_frag_charge_history.cpp).
+#     (test_cases/unit/test_gfnff_frag_charge_history.cpp).
 #
 # Default is frag_charge_model=ensemble at frag_charge_s_max=1.0 (placement rule only, continuous
 # window OFF). REF (-gfnff.frag_charge_model reference) and ENS (ensemble, s_max pinned EXPLICITLY

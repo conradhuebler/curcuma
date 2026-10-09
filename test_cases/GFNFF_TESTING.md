@@ -70,7 +70,7 @@ xtb test_cases/structures/small/methane.xyz --gfnff
 ### C++ Unit Tests (No Paths Required)
 
 ```cpp
-#include "test_cases/core/test_molecule_registry.h"
+#include "test_cases/unit/test_molecule_registry.h"
 using namespace TestMolecules;
 
 // Create molecule - path-independent!

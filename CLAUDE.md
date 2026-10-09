@@ -407,7 +407,7 @@ before committing, or enable the hook with `git config core.hooksPath scripts/gi
 ### Breaking Changes (Test-Driven)
 - **Molecule data structure refactoring**: Hybrid SOA/AOS design for better performance
   - **PHASE 1**: ✅ Comprehensive test suite with refactoring-specific validation
-    - ctest `molecule_comprehensive` (target `test_molecule`, source `test_cases/test_molecule.cpp`): 15 test categories
+    - ctest `molecule_comprehensive` (target `test_molecule`, source `test_cases/unit/test_molecule.cpp`): 15 test categories
     - `src/core/REFACTORING_ROADMAP.md`: Detailed phase-by-phase plan
     - Tests include current behavior AND validation for planned improvements
     - Specific tests for: XYZ parser unification, cache granularity, fragment O(1) lookup, type safety

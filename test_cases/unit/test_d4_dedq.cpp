@@ -25,7 +25,7 @@
 #include "src/core/energy_calculators/dispersion/d4param_generator.h"
 #include "src/core/global.h"
 
-#include "core/test_molecule_registry.h"
+#include "test_molecule_registry.h"
 
 #include <cmath>
 #include <iomanip>
