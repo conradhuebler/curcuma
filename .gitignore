@@ -255,3 +255,7 @@ tuning_sweep_run/
 # caches written next to structure library files
 test_cases/structures/**/*.topo.json
 test_cases/structures/**/*.param.json
+
+# structure library files are tracked whatever their name (for example *.opt.xyz, *build-*)
+!test_cases/structures/**/*.xyz
+!test_cases/structures/**/*.vtf

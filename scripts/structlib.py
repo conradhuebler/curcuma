@@ -260,6 +260,12 @@ def check(args):
                 warnings.append(f"cache file next to a library structure (delete it before re-measuring): {rel}")
                 continue
             errors.append(f"file not in manifest: {rel}")
+    # a library file that .gitignore swallows is never committed and is missing on a fresh clone (CI)
+    paths = [os.path.relpath(os.path.join(LIB, e["file"]), ROOT).replace(os.sep, "/") for e in entries if e.get("file")]
+    ign = subprocess.run(["git", "check-ignore", "--no-index", "--stdin"], input="\n".join(paths), text=True,
+                         capture_output=True, cwd=ROOT).stdout.split("\n")
+    for p_ in sorted(x for x in ign if x):
+        errors.append(f"{p_} is ignored by .gitignore and would not be committed")
     for msg in errors:
         print("ERROR  ", msg)
     for msg in warnings:
