@@ -30,8 +30,8 @@ ctest -R "rmsd" --output-on-failure
 ./test_gfnff_unified
 
 # External tools need XYZ files
-xtb test_cases/molecules/larger/CH4.xyz --gfnff
-./build/external/simple-dftd3/release/app/s-dftd3 input.xyz
+xtb test_cases/structures/small/methane.xyz --gfnff
+./build/external/simple-dftd3/release/app/s-dftd3 structures/ensembles/c33h45n9-agal-frames44.xyz
 ```
 
 ---
@@ -49,7 +49,7 @@ xtb test_cases/molecules/larger/CH4.xyz --gfnff
 
 ## Universal Molecule Registry
 
-**Location**: `test_cases/core/test_molecule_registry.h`
+**Location**: `test_cases/unit/test_molecule_registry.h`
 
 ### Available Molecules
 
@@ -80,7 +80,7 @@ xtb test_cases/molecules/larger/CH4.xyz --gfnff
 ### Using TestMoleculeRegistry
 
 ```cpp
-#include "test_cases/core/test_molecule_registry.h"
+#include "test_cases/unit/test_molecule_registry.h"
 using namespace TestMolecules;
 
 // Create molecule - path-independent! (Unit Tests)
@@ -88,7 +88,7 @@ curcuma::Molecule mol = TestMoleculeRegistry::createMolecule("CH4");
 
 // Get XYZ path for external verification
 std::string xyz_path = TestMoleculeRegistry::getXyzPath("CH4");
-// Returns: "molecules/larger/CH4.xyz"
+// Returns: "structures/small/methane.xyz"
 ```
 
 ### Check Available Molecules
@@ -233,7 +233,7 @@ test_cases/
 ├── test_energy_methods.cpp                  ← General method validation
 ├── test_molecule.cpp                        ← Molecule data structure tests
 │
-├── AAAbGal.cpp                              ← RMSD integration test
+├── AAAbGlc.cpp                              ← RMSD integration test
 ├── confscan.cpp                             ← ConfScan integration test
 ├── rmsd/                                    ← RMSD unit tests
 │
@@ -262,7 +262,7 @@ test_cases/
 #include <iostream>
 #include <cmath>
 
-#include "test_cases/core/test_molecule_registry.h"
+#include "test_cases/unit/test_molecule_registry.h"
 #include "src/core/molecule.h"
 #include "src/core/energycalculator.h"
 #include "src/core/config_manager.h"
@@ -392,7 +392,6 @@ double energy = calc.calculateEnergy();
 
 **Test Files:**
 - `test_gfnff_d3.cpp` - D3 integration
-- `test_dispersion.cpp` - General dispersion testing
 
 **Usage:**
 ```cpp
@@ -530,7 +529,7 @@ ctest -R "cli_rmsd_01" --verbose
 source ../../test_utils.sh
 
 run_test() {
-    $CURCUMA -capability input.xyz > stdout.log 2> stderr.log
+    $CURCUMA -capability structures/ensembles/c33h45n9-agal-frames44.xyz > stdout.log 2> stderr.log
     assert_exit_code $? 0
 }
 

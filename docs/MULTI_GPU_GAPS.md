@@ -78,7 +78,7 @@ on the optimised geometry a constant ~30 s against 249 s single-GPU [D: lab jour
   threaded Hessian run at least one worker per GPU slot (4 caffeine, gfn2: opt 5.28 -> 2.40 s; Hessian
   1 -> 4 devices, 4.72 -> 2.49 s). ConfScan's recomputation stays sequential. Found on the way (H-1,
   fixed): with more than one Hessian worker the frequencies were computed but never printed, because
-  the workers' logger save/restore interleaved and left the level at 0 (CLAUDE.md Known Issue #3,
+  the workers' logger save/restore interleaved and left the level at 0 (KNOWN_ISSUES_ARCHIVE.md Known Issue #3,
   pre-existing, also on the CPU with `-threads 4`). Measured side effects, not fixed: the FD Hessian
   depends on the worker split at the default SCF threshold (GPU 1 vs 4 devices: max 0.3 cm-1; CPU 1 vs 4
   threads: 0.1 = print precision) and CPU vs GPU differ by up to 4.5 cm-1 (pre-existing, same with the
@@ -182,13 +182,13 @@ Measured: 182 ms per energy call on polymer_2x on one A4500, EEQ ~79 ms, Coulomb
 
 - **F-1 ROCm computes no Coulomb term by default - since `ab6e3f5e` (Sep 17, 2026).** *Open,
   documentation only (operator decision Sep 28: no ROCm code changes without ROCm hardware); workaround
-  in TODO.md and CLAUDE.md Known Issue #35.* The shared
+  in TODO.md and KNOWN_ISSUES_ARCHIVE.md Known Issue #35.* The shared
   wrapper sets implicit Coulomb pairs by default (`qm_methods/gfnff_gpu_method_impl.h:403-406`), which
   clears the host Coulomb list (`ff_methods/gfnff_method.cpp:3757-3761`). The HIP workspace has no
   implicit branch: it takes the self-energy parameters only from a non-empty pair list
   (`ff_methods/rocm/gfnff_rocm.hip:4948-4975`) and launches Coulomb only if `coulomb.n > 0`
   (`:6337`) [R]. Not run (no ROCm SDK here). Workaround `-gfnff.gpu_coulomb_implicit false`; the
-  per-atom self-energy fix of CLAUDE.md Known Issue #8 is not mirrored on ROCm either [C].
+  per-atom self-energy fix of KNOWN_ISSUES_ARCHIVE.md Known Issue #8 is not mirrored on ROCm either [C].
 - **F-2 A rejected GPU EEQ solution is still used.** *FIXED Sep 28, 2026 (stage A): the D2D copy now
   follows the validation, `setEEQCharges` clears the pending-device flag, and the log names what is used.
   Measured with the new test hook `CURCUMA_EEQ_GPU_FORCE_REJECT=1` (triose NVE MD, frame at 5 fs): before,

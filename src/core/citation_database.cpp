@@ -814,6 +814,22 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        // === Conformer filtering (ConfScan) ===
+        // Claude Generated (Oct 2026): cited by ConfScan::start()
+        { "confscan", {
+            "ConfScan conformational filter for structures with topological symmetry (Huebler 2026)",
+            "Hübler, C. A conformational filter protocol for structures with topological symmetry. ChemRxiv 2026 (preprint, DOI: 10.26434/chemrxiv.15009180/v1)",
+            "huebler2026confscan",
+            "@misc{huebler2026confscan,\n"
+            "  author = {H{\\\"u}bler, Conrad},\n"
+            "  title = {A conformational filter protocol for structures with topological symmetry},\n"
+            "  year = {2026},\n"
+            "  howpublished = {ChemRxiv preprint},\n"
+            "  doi = {10.26434/chemrxiv.15009180/v1},\n"
+            "  url = {https://chemrxiv.org/doi/full/10.26434/chemrxiv.15009180/v1}\n"
+            "}"
+        }},
+
         // === Molecular dynamics ===
         { "csvr", {
             "Canonical Sampling through Velocity Rescaling (Bussi et al. 2007)",

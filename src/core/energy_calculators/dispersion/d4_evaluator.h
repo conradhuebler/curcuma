@@ -77,10 +77,6 @@ struct D4Params {
  * Thread safety: the evaluator itself is stateless; concurrent calls are
  * safe as long as the backing D4ParameterGenerator's read-only data is
  * stable for the geometry under evaluation.
- *
- * CUDA hook: launchGpuKernel() is a documented extension point — empty in
- * this AP. GFN-FF's existing GPU pipeline does not go through this class;
- * future GFN2-CUDA work can plug in a damping-aware kernel here.
  */
 class D4Evaluator {
 public:
@@ -171,12 +167,6 @@ public:
 
     // ---------- CUDA hook (not used in this AP) ----------
     //
-    // Place-holder for a future GFN2-CUDA path. GFN-FF's existing kernel
-    // (gfnff_kernels.cu::k_dispersion) does NOT route through here — it
-    // consumes the precomputed pair data directly. Adding a GFN2 GPU path
-    // later will likely add a new kernel variant selected by m_params.damping.
-    virtual void launchGpuKernel(/* TODO: device buffers */) const {}
-
     const D4Params& params() const { return m_params; }
 
     // Invalidate the geometry-keyed pair-list cache (WP2, Claude Generated). Called by

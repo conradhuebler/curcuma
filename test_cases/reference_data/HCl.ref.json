@@ -1,7 +1,7 @@
 {
   "molecule": {
     "name": "HCl",
-    "geometry_file": "test_cases/molecules/larger/HCl.xyz",
+    "geometry_file": "test_cases/structures/small/hydrogen-chloride.alt1.xyz",
     "atoms": [
       {
         "element": "H",

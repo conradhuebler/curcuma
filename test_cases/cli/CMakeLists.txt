@@ -21,6 +21,34 @@ macro(add_cli_test CATEGORY TEST_NAME)
     file(COPY ${TEST_FILES}
          DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${CATEGORY}/${TEST_NAME})
 
+    # Structures from the library test_cases/structures: structures.txt in the test directory lists one structure per
+    # line, "<id>" (file name <id>.xyz) or "<id> as <file name>". Bytes are copied unchanged (see structures/README.md).
+    set(_struct_list "${CMAKE_CURRENT_SOURCE_DIR}/${CATEGORY}/${TEST_NAME}/structures.txt")
+    if(EXISTS "${_struct_list}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_struct_list}")
+        file(STRINGS "${_struct_list}" _struct_lines)
+        foreach(_line IN LISTS _struct_lines)
+            string(STRIP "${_line}" _line)
+            if(_line STREQUAL "" OR _line MATCHES "^#")
+                continue()
+            endif()
+            if(_line MATCHES "^([^ ]+) +as +([^ ]+)$")
+                set(_sid "${CMAKE_MATCH_1}")
+                set(_sname "${CMAKE_MATCH_2}")
+            else()
+                set(_sid "${_line}")
+                set(_sname "${_line}.xyz")
+            endif()
+            file(GLOB _smatch "${CMAKE_SOURCE_DIR}/test_cases/structures/*/${_sid}.xyz"
+                              "${CMAKE_SOURCE_DIR}/test_cases/structures/*/${_sid}.vtf")
+            list(LENGTH _smatch _smatch_n)
+            if(NOT _smatch_n EQUAL 1)
+                message(FATAL_ERROR "structure '${_sid}' listed in ${_struct_list} is not in test_cases/structures exactly once")
+            endif()
+            configure_file("${_smatch}" "${CMAKE_CURRENT_BINARY_DIR}/${CATEGORY}/${TEST_NAME}/${_sname}" COPYONLY)
+        endforeach()
+    endif()
+
     # Copy shared test utilities to category and cli directories
     file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/test_utils.sh
          DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${CATEGORY}/)
@@ -58,7 +86,8 @@ endmacro()
 
 add_cli_test(curcumaopt 01_default_uff_opt)
 add_cli_test(curcumaopt 02_gfn2_single_point)
-# AP3 (2026-04-25): gfn2 now routes to native xTB; TBLite golden ref no longer valid until AP5.
+# cli_curcumaopt_02 stays disabled: despite its name the script runs '-method uff' and duplicates 01_default_uff_opt; it needs a decision what it
+# should test (checked 2026-10-09: one of its three assertions fails).
 set_tests_properties(cli_curcumaopt_02_gfn2_single_point PROPERTIES DISABLED TRUE)
 add_cli_test(curcumaopt 03_invalid_method)
 add_cli_test(curcumaopt 04_lbfgs_params)
@@ -193,12 +222,13 @@ set_tests_properties(cli_confsearch_01_gfnff_smoke PROPERTIES TIMEOUT 400 LABELS
 # add_cli_test(cg 01_single_point)
 
 # =============================================================================
-# Analysis Tests (1 scenario)
+# Analysis Tests (2 scenarios)
 # =============================================================================
 
 add_cli_test(analysis 01_parallel_equivalence)
 # 100 Frames × Scattering braucht länger als Standard-30s
 set_tests_properties(cli_analysis_01_parallel_equivalence PROPERTIES TIMEOUT 120)
+add_cli_test(analysis 02_scattering_options)
 
 # =============================================================================
 # CLI Routing Tests — Claude Generated 2026
@@ -245,12 +275,9 @@ add_cli_test(sqm 09_ngfn2_baseline_singlepoint)    # native ngfn2 broken-state s
 add_cli_test(sqm 10_gfn2_optimization_smoke)       # gfn2 -opt anchor (gradient = zero pre-AP-4)
 add_cli_test(sqm 11_gfn2_provider_check)           # routing anchor — updated for AP 3 (native backend)
 
-# AP3 (2026-04-25): gfn2/gfn1 route to native xTB. TBLite golden refs invalid until AP5.
-set_tests_properties(cli_sqm_04_gfn1_singlepoint PROPERTIES DISABLED TRUE)
-set_tests_properties(cli_sqm_05_gfn2_singlepoint PROPERTIES DISABLED TRUE)
-set_tests_properties(cli_sqm_06_gfn2_extended_singlepoint PROPERTIES DISABLED TRUE)
-set_tests_properties(cli_sqm_07_gfn1_extended_singlepoint PROPERTIES DISABLED TRUE)
-# AP3: gfn2 -opt still broken (gradient = zero), disable until AP4 restores gradient.
+# cli_sqm_04..07 are enabled since 2026-10-09: the native gfn1/gfn2 match the TBLite references (4e-9 Eh, OH radical 8e-4 Eh).
+# cli_sqm_10 stays disabled: it expects the log markers 'Geometry Optimisation converged' / 'gfn2 Final Energy', which -opt does not print
+# at the verbosity used (checked 2026-10-09); the gradient exists since AP4. The test needs a convergence check on input.opt.xyz instead.
 set_tests_properties(cli_sqm_10_gfn2_optimization_smoke PROPERTIES DISABLED TRUE)
 
 # Claude Generated (Sep 2026): test 11 asserts `-method ipea1` routes to and matches

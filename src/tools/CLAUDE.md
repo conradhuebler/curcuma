@@ -1,97 +1,41 @@
-# CLAUDE.md - Tools Directory
+# CLAUDE.md - src/tools/
 
-## Overview
+Utilities used across curcuma. Mostly header-only `inline` functions; `bmt_utils.cpp` and
+`trajectory_writer.cpp` are compiled. Element data and unit constants are NOT here (`src/core/elements.h`,
+`periodic_table.h`, `units.h`).
 
-The tools directory contains utility functions and header-only libraries that provide essential services across the entire Curcuma codebase. These are fundamental building blocks used by all other modules.
+## Files
 
-## Structure
+| File | Content |
+|------|---------|
+| `formats.h` (`Files::`) | Readers XYZ/TRJ, SDF, MOL2, VTF, Turbomole `coord`; VTF writers; `LoadFile()` / `LoadMol()` dispatch |
+| `geometry.h` (`GeometryTools::`) | `Distance`, `Centroid`, rotation matrices, translate/rotate geometry |
+| `general.h` (`Tools::`) | String parsing/conversion, `mean`/`median`/`stdev`/`Histogram`, `CreateList()` range parser; global `RunTimer` |
+| `info.h` (`General::`) | `StartUp()` banner (version, git hash) |
+| `pbc_utils.h` (`PBCUtils::`) | Lattice vectors from a,b,c,alpha,beta,gamma and back, minimum image, PBC distance, cell check |
+| `spatial_cell_list.h` | Cell list for O(N) neighbour queries, no PBC; build cost does not pay off below roughly 800 atoms |
+| `string_similarity.h` (`StringUtils::`) | Levenshtein distance for "Did you mean" method suggestions |
+| `trajectory_writer.{h,cpp}`, `trajectory_helpers.h` | TrajectoryWriter and its JSON schema helpers |
+| `bmt_utils.{h,cpp}` (`BMTUtils::`) | BMT output directories |
 
-```
-tools/
-├── formats.h         # File format handling (XYZ, MOL2, SDF, PDB)
-├── geometry.h        # Geometric calculations and transformations
-├── general.h         # General utility functions and constants
-├── info.h            # Information and metadata handling
-├── trajectory_writer.h/cpp  # ✅ TrajectoryWriter - Unified trajectory output system
-└── bmt_utils.h/cpp   # 🤖 BMT output directory utilities (Basename.Method.Timestamp)
-```
+## ✅ TrajectoryWriter
 
-## Key Components
+- Formats `HumanTable`, `CSV`, `JSON`, `DAT`, `VTF`; single or multi-frame, plus statistics summaries (`TrajectoryStatistics`)
+- `trajectory_helpers.h` converts geometry-command results (bond, angle, torsion) into its JSON schema
 
-### File Format Support (`formats.h`)
-- **XYZ files**: Standard coordinate format reading/writing
-- **MOL2 files**: Tripos molecular structure format
-- **SDF files**: Structure-data file format
-- **PDB files**: Protein Data Bank format
-- **JSON files**: Parameter and configuration storage
-- Automatic format detection and validation
-- Error handling for malformed files
+## 🤖 BMT output directories (AI-generated, machine-tested; human production testing pending)
 
-### Geometric Operations (`geometry.h`)
-- **Distance calculations**: Bond lengths, inter-atomic distances
-- **Angle calculations**: Bond angles, dihedral angles
-- **Coordinate transformations**: Rotation, translation, alignment
-- **Molecular alignment**: RMSD-based structure superposition
-- **Center of mass**: Molecular center calculations
-- **Moments of inertia**: Principal axis determination
+- Default: every command writes into `Basename.Keyword.YYYYMMDD_HHMMSS/`; `-no_bmt` writes to CWD instead
+- `createBMTDir`, `writeMetadata` (`metadata.json`), `outputPath`, `processBakFiles`, `collectBakFiles`, `stripExtension`
+- `-bak f1 f2` copies listed files back to CWD; `bak` and `no_bmt` are global flags (`main.cpp`)
+- Output files must go through `BMTUtils::outputPath()` or, in `CurcumaMethod` subclasses, `CurcumaMethod::outputPath()` (root CLAUDE.md, mandatory)
 
-### General Utilities (`general.h`)
-- **Constants**: Physical constants, conversion factors
-- **String operations**: Parsing, formatting utilities
-- **Mathematical functions**: Vector operations, matrix utilities
-- **Memory management**: Smart pointer utilities
-- **Error handling**: Exception classes and error codes
+## Traps
 
-### Information Handling (`info.h`)
-- **Atomic data**: Element properties, atomic masses, radii
-- **Periodic table**: Element lookup and properties
-- **Units and conversions**: Energy, length, angle conversions
-- **Metadata**: File headers, calculation information
-
-### ✅ TrajectoryWriter (`trajectory_writer.h/cpp`)
-- **Unified output system** for Human, CSV, JSON, DAT, VTF formats
-- **JSON schema converters** for geometry command integration
-- **TrajectoryStatistics integration** for statistical analysis
-- **Multiple format support**: single and multi-frame trajectory output
-- **Custom configuration**: JSON-based format and precision settings
-- **Educational focus**: Clean separation of data formatting logic
-
-### 🤖 BMT Output Directory System (`bmt_utils.h/cpp`)
-- **Default behavior**: All commands create a `Basename.Keyword.YYYYMMDD_HHMMSS` directory for output files
-- **`createBMTDir(basename, keyword)`**: Creates the timestamped directory, logs the path
-- **`writeMetadata(bmt_dir, basename, method, input_file)`**: Writes `metadata.json` with calculation info (JSON format)
-- **`processBakFiles(bmt_dir, bak_files)`**: Copies listed files from BMT dir back to CWD; warns if BMT is empty
-- **`outputPath(bmt_dir, filename)`**: Returns `bmt_dir/filename` or just `filename` when BMT is disabled
-- **`stripExtension(filename)`**: Removes file extension (multi-dot safe, uses `std::filesystem::path::stem`)
-- **`collectBakFiles(controller)`**: Extracts `-bak` filenames from JSON controller (string or array form)
-- **`-bak` flag**: Specify files to copy back to CWD after calculation (e.g. `-bak result.xyz traj.xyz`)
-- **`-no_bmt` / `-bmt false`**: Disables BMT directory, output goes to CWD (legacy behavior)
-- **Requires C++17 + non-Windows**: Uses `std::filesystem::create_directories`; falls back to no-op otherwise
-- **Status**: AI-generated, machine-tested — human production testing pending
-
-### General Utilities (`general.h`)
-- **Constants**: Physical constants, conversion factors
-- **String operations**: Parsing, formatting utilities
-- **Mathematical functions**: Vector operations, matrix utilities
-- **Memory management**: Smart pointer utilities
-- **Error handling**: Exception classes and error codes
-
-## Design Principles
-
-### Header-Only Implementation
-- All tools are header-only for easy inclusion and compilation
-- Template-based design for type flexibility
-- Inline functions for performance optimization
-
-### Cross-Platform Compatibility
-- Platform-independent implementations
-- Consistent behavior across different systems
-- Standard library dependencies only
-
-### Performance Optimization
-- Efficient algorithms for geometric calculations
-- Memory-efficient data structures
-- Vectorized operations where possible
+- `LoadFile()` picks the reader by substring (`.xyz`, `.mol2`, ..., `coord`), first match wins; only `LoadFile()` reads `.json`
+- `createBMTDir()` creates the directory only in a `C17` non-Windows build; a second run in the same second gets suffix `_2`, `_3`, ...
+- `-bmt false` is not read anywhere; only `-no_bmt` disables BMT
+- `Tools::CreateList("a:b,c")` silently drops malformed tokens and returns nothing for a descending range (`1:-1`); callers resolve such forms first (see `analysis.cpp`)
 
 ## Instructions Block
 
@@ -99,29 +43,6 @@ tools/
 
 *Tool development priorities and utility function requirements to be defined by operator/programmer*
 
-## Variable Section
-
-### Current Development
-- Enhanced file format support for newer molecular formats
-- Improved geometric calculation performance
-- Better error handling and validation
-
-### Recent Improvements
-- Streamlined file I/O operations
-- Enhanced coordinate transformation functions
-- Better integration with molecular data structures
-
-### Frame Selection Support (2026) - Claude Generated
-- Analysis module now supports flexible frame selection via `frames` parameter
-- Format: `"1:5,8,10:12"` (colon for ranges, comma for separators)
-- Special values: `"last"` = last frame only, `"1:-1"` = all frames, `"N:N"` = single frame N
-- **Note**: CLI parsing issue prevents `-1` alone; use `"last"` or `"20:20"` syntax instead
-- Stride parameter processes every N-th frame from selection
-- Uses existing `Tools::CreateList()` parser from general.h
-- 1-based user input automatically converted to 0-based internal indexing
-- Scattering analysis automatically filtered with frame selection
-- Bounds checking ensures selected frames are valid (0 to total_frames-1)
-
 ---
 
-*This documentation covers all utility functions and tools used throughout Curcuma*
+Previous version (removed sections and status notes, 2026-10-01): [docs/archive/TOOLS_NOTES_2026-10.md](../../docs/archive/TOOLS_NOTES_2026-10.md)

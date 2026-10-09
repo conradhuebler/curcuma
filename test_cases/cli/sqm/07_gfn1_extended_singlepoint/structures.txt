@@ -1,0 +1,6 @@
+# Structures from test_cases/structures (id, optionally 'as <file name>'); see structures/README.md
+acetic-acid-dimer as acetic_acid_dimer.xyz
+benzoic-acid as C6H5COOH.xyz
+dihydrogen.r0.47 as HH.xyz
+hydrogen-chloride as HCl.xyz
+hydroxyl as OH.xyz
