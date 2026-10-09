@@ -29,8 +29,8 @@
 
 // Complete s-dftd3 reference data (MAX_REF=7 - fixes 1.48x energy error)
 // Data split across:
-// - test_cases/reference_data/d3_reference_cn.cpp (721 CN values)
-// - test_cases/reference_data/d3_reference_c6.cpp (262,444 C6 values)
+// - d3_reference_cn.cpp (721 CN values)
+// - d3_reference_c6.cpp (262,444 C6 values)
 // Include declarations for automatic linking
 #include "d3_reference_data.h"
 
