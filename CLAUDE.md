@@ -120,9 +120,9 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 
 #### Copyright and File Headers
 - **Copyright ownership**: All copyright remains with Conrad Hübler as the project owner and AI instructor
-- **Year updates**: Always update copyright year to current year when modifying files
+- **Years**: a new file gets the current year; an existing header keeps its range, no mass edits of the years
 - **Claude contributions**: Mark Claude-generated code sections but copyright stays with Conrad
-- **Format**: `Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>`
+- **Format**: `Copyright (C) <first year> - <last year> Conrad Hübler <Conrad.Huebler@gmx.net>`
 - **AI acknowledgment**: Add Claude contribution notes in code comments, not copyright headers
 
 #### Code Structure Guidelines
@@ -393,32 +393,6 @@ before committing, or enable the hook with `git config core.hooksPath scripts/gi
 - **Global Parameters**: `verbosity`, `threads`, `method`, `gpu` are additionally duplicated at top-level
 - **Flat-flag auto-routing (2026)**: Any registered PARAM is reachable by its flat name (`-cn_cutoff_bohr 5.5` routes to `controller["gfnff"]["cn_cutoff_bohr"]` because the registry records ownership). Same-name in the active command's module wins; truly ambiguous names (multiple owners, none matching) warn and stay in the command module. Dotted form `-<module>.<param>` always works for disambiguation. Unregistered/legacy flags stay in the command module (unchanged).
 - **JSON round-trip (2026)**: `-export_run file.json` writes the resolved controller plus `_command`, `_input`, and full registry defaults for every touched module. `-import_config file.json` performs a recursive deep merge (CLI wins at every depth). Invoking `curcuma -import_config run.json` reads `_command`/`_input` from the JSON, so the file alone is enough to replay a run. See [docs/CLI_ROUND_TRIP.md](docs/CLI_ROUND_TRIP.md).
-
-## Planned Development
-
-### TRAJECTORY ANALYSIS CONSOLIDATION
-**Status**: ✅ Phases 1-3 complete (Jan 2026) — see [docs/ANALYSIS_CONSOLIDATION_PLAN.md](docs/ANALYSIS_CONSOLIDATION_PLAN.md)
-- ✅ TrajectoryWriter, analysis.cpp migration, TrajectoryStatistics extended
-- ⏳ Phase 4: Migrate `trajectoryanalysis.cpp` + `rmsdtraj.cpp` (optional)
-- ⏳ Phase 5-6: Cleanup geometry commands, ProgressTracker (optional)
-
----
-
-### Breaking Changes (Test-Driven)
-- **Molecule data structure refactoring**: Hybrid SOA/AOS design for better performance
-  - **PHASE 1**: ✅ Comprehensive test suite with refactoring-specific validation
-    - ctest `molecule_comprehensive` (target `test_molecule`, source `test_cases/unit/test_molecule.cpp`): 15 test categories
-    - `src/core/REFACTORING_ROADMAP.md`: Detailed phase-by-phase plan
-    - Tests include current behavior AND validation for planned improvements
-    - Specific tests for: XYZ parser unification, cache granularity, fragment O(1) lookup, type safety
-  - **PHASE 2**: XYZ Comment Parser unification (eliminate 10 duplicate functions)
-    - **CRITICAL**: Production comment formats must not break (ORCA, XTB, simple energy)
-    - See `src/core/XYZ_COMMENT_FORMATS.md` for required format compatibility
-  - **PHASE 3**: Granular cache system (replace single m_dirty flag)
-  - **PHASE 4**: Fragment system O(1) lookups (replace std::map)
-  - **PHASE 5**: Type-safe ElementType enum (replace int elements)
-  - **PHASE 6**: Unified atom structure with zero-copy geometry access
-  - **CRITICAL**: All existing functionality must remain API-compatible
 
 ## Validation Method and Traps
 

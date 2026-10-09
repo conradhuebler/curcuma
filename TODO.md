@@ -93,7 +93,8 @@ Stand.
 - **CG Phase 6**: winkelabhängige Ellipsoid-Energie (`calculateEffectiveDistance`, `calculateCGPairEnergy`, Rotationszüge in Casino). Phase 1 bis 5 sind umgesetzt.
 - SimpleMD: Physik des Wandpotentials prüfen; RMSD-Strategy-Pattern Phase 3; erweiterte ConfSearch-Algorithmen; bessere Trajektorienanalyse;
   ConfSearch mit GPU und mehreren Threads (nur noch relevant, solange der GPU-Geräte-Pool inaktiv ist, Korrektur 2026-09-28).
-- **Molecule-Refactoring** (Phasen 2 bis 6): XYZ-Kommentar-Parser vereinheitlichen, granulare Caches, O(1)-Fragmentzugriff, `ElementType`-Enum,
+- **Trajektorienanalyse zusammenführen** (optional): Phasen 1 bis 3 sind laut `docs/ANALYSIS_CONSOLIDATION_PLAN.md` fertig; offen sind das Umstellen von `trajectoryanalysis.cpp` und `rmsdtraj.cpp` auf die gemeinsame Ausgabe/Statistik und das Aufräumen der Geometriebefehle. Stand des Plans: Dezember 2025, nicht geprüft.
+- **Molecule-Refactoring** (Phasen 3 bis 6; die zehn `setXYZComment_N`-Funktionen der Phase 2 gibt es im Code nicht mehr, `src/core/xyz_comment_parser.*` existiert; Stand der übrigen Phasen nicht geprüft): granulare Caches, O(1)-Fragmentzugriff, `ElementType`-Enum,
   SOA/AOS. Plan: `src/core/REFACTORING_ROADMAP.md`, Formate: `src/core/XYZ_COMMENT_FORMATS.md`.
 - **Native QM** (Stand November 2025, nicht geprüft): GFN2-Parametererweiterung, PM3-Elementumfang (F u. a.), Validierungsmoleküle, Doku
   "Wann GFN2, GFN1 oder PM3". Der Elementumfang von PM3 im Code ist nicht verifiziert.
