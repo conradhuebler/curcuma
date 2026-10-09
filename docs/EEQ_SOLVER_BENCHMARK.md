@@ -16,7 +16,7 @@ Output: `results.json` (raw, with commit, threads, ids, sha256) and Markdown tab
 
 ```sh
 scripts/eeq_solver_benchmark.py peo201x2-water1500 caffeine --curcuma release/curcuma --xtb /opt/bin/xtb \
-    --solvers default,cholesky_dense,ppcg,lu,pcg --devices cpu,cuda --md-fs 50 --threads 1 --out bench_out
+    --solvers default,cholesky,ppcg,lu,pcg --devices cpu,cuda --md-fs 50 --threads 1 --out bench_out
 ```
 
 - Structures: library id or alias from `test_cases/structures` (`polymer_2x` = `peo201x2-water1500`), or a path to an `.xyz`. Charge and spin
@@ -27,17 +27,16 @@ scripts/eeq_solver_benchmark.py peo201x2-water1500 caffeine --curcuma release/cu
 
 | variant | flags | note |
 |---|---|---|
-| `default` | none | |
-| `cholesky` | `-eeq_solver.solve_method cholesky` | for N >= 500 atoms and nfrag >= 1 the automatic projected PCG takes over (`eeq_ppcg_min_nfrag`, `eeq_ppcg_min_atoms`), so it is NOT dense |
-| `cholesky_dense` | `cholesky` + `-eeq_solver.eeq_ppcg_min_nfrag 0` | the dense factorisation |
-| `ppcg`, `auto`, `ldlt`, `lu`, `pcg`, `batched` | `-eeq_solver.solve_method <name>` | `batched` drops cross-fragment Coulomb: inexact |
+| `default` | none | = `auto` |
+| `auto`, `cholesky`, `ppcg`, `pcg`, `lu`, `ldlt`, `batched` | `-eeq_solver.solve_method <name>` | `batched` drops cross-fragment Coulomb: inexact; `lu`/`ldlt` are errors with `--devices cuda` |
 
-`-gfnff.solve X` is not used: the CPU maps it onto `eeq_solver.solve_method`, the GPU path reads only the `eeq_solver` scope and ignores it.
+Solver control and naming: [EEQ_SOLVER_CONTROL.md](EEQ_SOLVER_CONTROL.md). The measurement below was taken BEFORE that change, when `cholesky`
+and `default` were switched to projected PCG at 500 atoms; its `cholesky_dense` row is today's `cholesky`.
 
 ## Result so far (Oct 9, 2026, commit `4da2b26d`, RTX 5080, 1 thread, n = 1 run per configuration)
 
 polymer_2x (7320 atoms), single point: xtb 28.7 s; curcuma default 6.7 s, dense Cholesky 21 s, ldlt/lu 29 s, pcg 240 s; energies equal
-to 1.3e-6 Eh of xtb. MD per step (CPU / CUDA, ms): default 2441 / 65, cholesky_dense 5745 / 593, ldlt 7718 / 602, lu 7828 / 596,
+to 1.3e-6 Eh of xtb. MD per step (CPU / CUDA, ms): default 2441 / 65, cholesky_dense (= today's cholesky) 5745 / 593, ldlt 7718 / 602, lu 7828 / 596,
 pcg 61 786 / 36 309 (2 steps). Raw data and open points: lab journal `Labor/curcuma EEQ-Solver Benchmark.md` in the vault.
 
 Not tested: other molecules, repeats (no spread), multi-GPU, thread scaling. Known open point: `batched` on CUDA reports "WP7-B batched

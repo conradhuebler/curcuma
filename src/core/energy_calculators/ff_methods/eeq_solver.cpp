@@ -41,6 +41,8 @@
 #include "src/core/elements.h"
 #include "src/core/math_compat.h"
 
+#include <mutex>
+#include <stdexcept>
 #include <Eigen/Dense>
 #include <atomic>
 #include <cmath>
@@ -818,6 +820,7 @@ static inline int detectElementSpecificHybridization(int Z, double cn,
 
 // Claude Generated - March 2026
 EEQSolveMethod EEQSolver::parseSolveMethod(const std::string& method_str) {
+    if (method_str == "auto") return EEQSolveMethod::Auto;
     if (method_str == "lu") return EEQSolveMethod::LU;
     if (method_str == "ldlt") return EEQSolveMethod::LDLT;
     if (method_str == "pcg") return EEQSolveMethod::PCG;
@@ -826,7 +829,49 @@ EEQSolveMethod EEQSolver::parseSolveMethod(const std::string& method_str) {
     // "cholesky" (canonical) and "schur_cholesky" (legacy) both map to SchurCholesky
     if (method_str == "cholesky" || method_str == "schur_cholesky")
         return EEQSolveMethod::SchurCholesky;
-    return EEQSolveMethod::Auto;  // default including "auto"
+    // Oct 2026: no silent fallback - a typo must not change what a measurement runs.
+    throw std::invalid_argument(fmt::format("unknown EEQ solver '{}' (-eeq_solver.solve_method); valid: {}",
+                                            method_str, validMethodNames()));
+}
+
+void EEQSolver::reportSolverLine(const std::string& line) {
+    static std::mutex mtx;
+    static std::string last;
+    std::lock_guard<std::mutex> lock(mtx);
+    if (line == last)
+        return;
+    last = line;
+    CurcumaLogger::result(line);
+}
+
+const char* EEQSolver::methodName(EEQSolveMethod m) {
+    switch (m) {
+    case EEQSolveMethod::Auto: return "auto";
+    case EEQSolveMethod::SchurCholesky: return "cholesky";
+    case EEQSolveMethod::ProjectedPCG: return "ppcg";
+    case EEQSolveMethod::PCG: return "pcg";
+    case EEQSolveMethod::LU: return "lu";
+    case EEQSolveMethod::LDLT: return "ldlt";
+    case EEQSolveMethod::Batched: return "batched";
+    }
+    return "?";
+}
+
+std::string EEQSolver::validMethodNames() {
+    return "auto, cholesky, ppcg, pcg, lu, ldlt, batched (aliases: schur_cholesky, projected_pcg)";
+}
+
+bool EEQSolver::gpuSupports(EEQSolveMethod m) {
+    return m == EEQSolveMethod::Auto || m == EEQSolveMethod::SchurCholesky || m == EEQSolveMethod::ProjectedPCG
+        || m == EEQSolveMethod::PCG || m == EEQSolveMethod::Batched;
+}
+
+EEQSolveMethod EEQSolver::resolveMethod(EEQSolveMethod requested, int natoms, int nfrag,
+                                        int min_atoms, int min_nfrag) {
+    if (requested != EEQSolveMethod::Auto)
+        return requested;                               // explicit choice: never overridden
+    const bool ppcg = min_nfrag > 0 && nfrag >= min_nfrag && natoms >= min_atoms;
+    return ppcg ? EEQSolveMethod::ProjectedPCG : EEQSolveMethod::SchurCholesky;
 }
 
 EEQSolver::EEQSolver(const ConfigManager& config)
@@ -839,7 +884,7 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     m_calculate_cn = m_config.get<bool>("calculate_cn", true);
     m_allow_unconverged = m_config.get<bool>("allow_unconverged_charges", false);
     m_skip_phase2 = m_config.get<bool>("skip_phase2", false);
-    m_solve_method = parseSolveMethod(m_config.get<std::string>("solve_method", "cholesky"));
+    m_solve_method = parseSolveMethod(m_config.get<std::string>("solve_method", "auto"));
     // Read the Int PARAMs through double: CLI values arrive as JSON numbers (0.0), which a
     // strict get<int>() rejects in favour of the default.
     m_ppcg_min_nfrag = static_cast<int>(m_config.get<double>("eeq_ppcg_min_nfrag", 1.0));
@@ -848,7 +893,7 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     m_ppcg_max_iter  = static_cast<int>(m_config.get<double>("eeq_ppcg_max_iter", 500.0));
     if (m_config.get<int>("verbosity", 0) >= 2)
         CurcumaLogger::info(fmt::format("EEQ solver config: solve_method={}, ppcg auto at nfrag>={} & N>={}, tol={:.0e}, max_iter={}",
-            m_config.get<std::string>("solve_method", "cholesky"), m_ppcg_min_nfrag, m_ppcg_min_atoms, m_ppcg_tol, m_ppcg_max_iter));
+            m_config.get<std::string>("solve_method", "auto"), m_ppcg_min_nfrag, m_ppcg_min_atoms, m_ppcg_tol, m_ppcg_max_iter));
     m_refactor_eps         = m_config.get<double>("eeq_refactor_eps_bohr", 0.0);
     m_refactor_force_every = m_config.get<int>("eeq_refactor_force_every", 0);
     m_refine_iters         = m_config.get<int>("eeq_refine_iters", 1);
@@ -865,7 +910,7 @@ EEQSolver::EEQSolver(const ConfigManager& config)
         CurcumaLogger::param("verbosity", std::to_string(m_verbosity));
         CurcumaLogger::param("calculate_cn", m_calculate_cn ? "true" : "false");
         CurcumaLogger::param("allow_unconverged_charges", m_allow_unconverged ? "true" : "false");
-        CurcumaLogger::param("solve_method", m_config.get<std::string>("solve_method", "cholesky"));
+        CurcumaLogger::param("solve_method", m_config.get<std::string>("solve_method", "auto"));
     }
 }
 
@@ -1369,74 +1414,18 @@ Vector EEQSolver::dispatchSolve(
     int nfrag,
     int total_charge,
     CxxThreadPool* pool,
-    int num_threads)
+    int num_threads,
+    const char* phase)
 {
-    EEQSolveMethod method_to_use = m_solve_method;
-    if (m_solve_method == EEQSolveMethod::Auto) {
-        method_to_use = m_selected_method;  // Use cached or default (SchurCholesky)
-    }
-    // Stage 4 (May 2026): CPU batched path — per-fragment independent Cholesky.
-    // Ignores inter-fragment Coulomb coupling, valid when fragments are well-separated
-    // (typical for solvent mixtures, condensed phases of small molecules). For the
-    // mixture.xyz case (N=6200, nfrag=1400) this collapses solve cost from O(N³) LU
-    // (3.6s) to O(Σ atoms_f³) ≈ 90k flops total.
-    //
-    // For Auto mode + nfrag ≥ many-fragment-threshold, also auto-select Batched
-    // when the global SchurCholesky / LU paths historically fail (m_phase2_historically_implausible).
-    if (m_solve_method == EEQSolveMethod::Auto &&
-        m_phase2_historically_implausible &&
-        m_phase2_implausible_natoms == natoms &&
-        nfrag >= 8) {
-        method_to_use = EEQSolveMethod::Batched;
-        if (m_verbosity >= 1) {
-            CurcumaLogger::info(fmt::format(
-                "EEQ: history shows implausible global solve for N={}, nfrag={}; switching to batched per-fragment Cholesky",
-                natoms, nfrag));
-        }
-    }
-
-    // Auto-select Batched up-front for highly-fragmented systems (e.g. solvent mixtures,
-    // van-der-Waals complexes), where the global EEQ matrix is poorly conditioned and
-    // inter-fragment Coulomb is small compared to intra-fragment hardness. Threshold:
-    // nfrag/N > 20% AND nfrag >= 16 (avoids tripping on small molecules with few atoms).
-    //
-    // WP7-D (Jun 2026, Claude Generated): contact-aware. The batched solver DROPS
-    // cross-fragment Coulomb, so it is only correct for well-separated fragments. When
-    // fragments are in contact (m_contact_min_dist < eeq_batched_min_distance, or unknown),
-    // prefer the exact path instead: for explicit -solve_method pcg force PCG (block-Jacobi,
-    // built below for nfrag>=2); for Auto fall through to the exact auto-selector (which
-    // picks SchurCholesky/PCG, both retaining cross-fragment Coulomb).
-    if ((m_solve_method == EEQSolveMethod::Auto || m_solve_method == EEQSolveMethod::PCG) &&
-        method_to_use != EEQSolveMethod::Batched &&
-        nfrag >= 16 && nfrag * 5 > natoms) {
-        const bool   prefer_exact = m_config.get<bool>("eeq_contact_prefer_exact", true);
-        const double contact_thr  = m_config.get<double>("eeq_batched_min_distance", 15.0);
-        const bool   in_contact   = (m_contact_min_dist < 0.0)  // unknown → be safe
-                                 || (contact_thr > 0.0 && m_contact_min_dist < contact_thr);
-        const std::string dist_str = (m_contact_min_dist < 0.0)
-                                         ? std::string("unknown")
-                                         : fmt::format("{:.2f}", m_contact_min_dist);
-        if (prefer_exact && in_contact) {
-            // Keep the exact solver. Explicit PCG → PCG+block-Jacobi; Auto → leave
-            // method_to_use for the exact auto-selector below.
-            if (m_solve_method == EEQSolveMethod::PCG)
-                method_to_use = EEQSolveMethod::PCG;
-            if (m_verbosity >= 1) {
-                CurcumaLogger::info(fmt::format(
-                    "EEQ: fragmented system (nfrag={}, N={}) with fragments in contact "
-                    "(min inter-fragment distance {} Bohr < {}); using exact solver "
-                    "(cross-fragment Coulomb retained) instead of approximate batched",
-                    nfrag, natoms, dist_str, contact_thr));
-            }
-        } else {
-            method_to_use = EEQSolveMethod::Batched;
-            if (m_verbosity >= 1) {
-                CurcumaLogger::info(fmt::format(
-                    "EEQ: highly fragmented system (nfrag={}, N={}, density={}%, "
-                    "min inter-fragment distance {} Bohr); using batched per-fragment solve",
-                    nfrag, natoms, (100 * nfrag) / natoms, dist_str));
-            }
-        }
+    // Oct 2026: ONE resolution rule shared with the GPU path (resolveMethod). An explicit method
+    // runs as requested; auto picks projected PCG / Cholesky by the size thresholds and never
+    // selects the inexact batched solver.
+    EEQSolveMethod method_to_use = resolveMethod(m_solve_method, natoms, nfrag, m_ppcg_min_atoms, m_ppcg_min_nfrag);
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        const std::string line = fmt::format("EEQ solver ({}): {}{} [CPU], N={}, nfrag={}",
+            (phase && *phase) ? phase : "charges", methodName(method_to_use),
+            m_solve_method == EEQSolveMethod::Auto ? " (auto)" : "", natoms, nfrag);
+        reportSolverLine(line);
     }
 
     if (method_to_use == EEQSolveMethod::Batched) {
@@ -1532,9 +1521,7 @@ Vector EEQSolver::dispatchSolve(
     }
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        const char* method_name = (method_to_use == EEQSolveMethod::PCG) ? "PCG"
-            : (method_to_use == EEQSolveMethod::SchurCholesky) ? "SchurCholesky"
-            : (method_to_use == EEQSolveMethod::LDLT) ? "LDL^T" : "LU";
+        const char* method_name = methodName(method_to_use);
         const char* mode_str = (m_solve_method == EEQSolveMethod::Auto) ? " (auto)" : "";
         CurcumaLogger::info(fmt::format("[EEQ] dispatchSolve: Using {} solver{} (N={})", method_name, mode_str, natoms));
     }
@@ -1568,7 +1555,7 @@ Vector EEQSolver::dispatchSolve(
     // the guard, explicit-LU routes through that branch's `goto lu_solve`.
     if (method_to_use == EEQSolveMethod::SchurCholesky || method_to_use == EEQSolveMethod::PCG
         || method_to_use == EEQSolveMethod::LU || method_to_use == EEQSolveMethod::ProjectedPCG
-        || m_solve_method == EEQSolveMethod::Auto) {
+        ) {
         // Views into the augmented matrix (B3, Sep 2026): the former N x N copy of A_nn and
         // the dense nfrag x N rebuild of C cost O(N^2) per solve for nothing — C is exactly
         // the constraint block of A.
@@ -1577,12 +1564,9 @@ Vector EEQSolver::dispatchSolve(
         const MatrixCRef C = A.block(natoms, 0, nfrag, natoms);
         Vector rhs_constraints = x.tail(nfrag);
 
-        // Many-fragment path (Sep 2026): one projected-CG solve instead of nfrag+1 direct
-        // solves. Forced by solve_method=ppcg, automatic for large many-fragment systems.
-        const bool ppcg_forced = (method_to_use == EEQSolveMethod::ProjectedPCG);
-        const bool ppcg_auto = (method_to_use == EEQSolveMethod::SchurCholesky || m_solve_method == EEQSolveMethod::Auto)
-            && m_ppcg_min_nfrag > 0 && nfrag >= m_ppcg_min_nfrag && natoms >= m_ppcg_min_atoms;
-        if (ppcg_forced || ppcg_auto) {
+        // Projected PCG: one projected-CG solve instead of nfrag+1 direct solves. Runs when
+        // requested (ppcg) or when auto resolved to it (size thresholds, see resolveMethod).
+        if (method_to_use == EEQSolveMethod::ProjectedPCG) {
             Vector q_ppcg = solveWithProjectedPCG(A_nn, rhs_atoms, C, rhs_constraints, natoms, nfrag);
             if (q_ppcg.size() == natoms) {
                 charges = q_ppcg;
@@ -1590,109 +1574,6 @@ Vector EEQSolver::dispatchSolve(
             }
             if (m_verbosity >= 1)
                 CurcumaLogger::warn("EEQ: projected PCG did not converge, using the exact Schur-Cholesky solve for this step");
-        }
-
-        // Auto-benchmark on first call
-        // Claude Generated (March 2026): Skip benchmark for large N — PCG always wins above ~500 atoms.
-        // SchurCholesky for N>500 allocates O(N²) memory and O(N³) compute — prohibitively slow.
-        // For multi-fragment systems (nfrag>1), PCG needs nfrag+1 solves; benchmarking doubles that cost.
-        //
-        // May 2026 (Stage 1): nfrag-aware preference. SchurCholesky factorizes A_nn once
-        // (N³/6) and amortizes the cost over nfrag back-substitutions via BLAS-3 multi-RHS
-        // (Z2 = llt.solve(C^T)). PCG runs (nfrag+1) independent matvec loops at O(N²·k_pcg)
-        // each. Cholesky wins as soon as k_pcg·(nfrag+1) > N/6 + nfrag.
-        const int PCG_DIRECT_THRESHOLD = m_config.get<int>("pcg_large_threshold", 500);
-        const int nfrag_threshold = m_config.get<int>("eeq_pcg_nfrag_threshold", 4);
-        const int pcg_expected_iters = m_config.get<int>("eeq_pcg_expected_iters", 30);
-        const bool prefer_chol_for_nfrag =
-            (nfrag >= nfrag_threshold) ||
-            (pcg_expected_iters * (nfrag + 1) > natoms / 6 + nfrag);
-
-        if (m_solve_method == EEQSolveMethod::Auto && !m_auto_benchmark_done && natoms > PCG_DIRECT_THRESHOLD && !prefer_chol_for_nfrag) {
-            m_selected_method = EEQSolveMethod::PCG;
-            m_auto_benchmark_done = true;
-            if (m_verbosity >= 1) {
-                CurcumaLogger::info(fmt::format("EEQ: Large system (N={}, nfrag={}), using PCG directly (threshold={})",
-                                                natoms, nfrag, PCG_DIRECT_THRESHOLD));
-            }
-            // Fall through to PCG path below
-        } else if (m_solve_method == EEQSolveMethod::Auto && !m_auto_benchmark_done && prefer_chol_for_nfrag) {
-            m_selected_method = EEQSolveMethod::SchurCholesky;
-            m_auto_benchmark_done = true;
-            if (m_verbosity >= 1) {
-                CurcumaLogger::info(fmt::format(
-                    "EEQ: nfrag={} (threshold={}), N={}, k_pcg_est={}: SchurCholesky cheaper than {}+1 PCG solves, selecting it.",
-                    nfrag, nfrag_threshold, natoms, pcg_expected_iters, nfrag));
-            }
-            method_to_use = EEQSolveMethod::SchurCholesky;
-        }
-
-        if (m_solve_method == EEQSolveMethod::Auto && !m_auto_benchmark_done) {
-            auto t1 = std::chrono::high_resolution_clock::now();
-            Vector charges_schur = solveWithSchurCholesky(A_nn, rhs_atoms, C, rhs_constraints, natoms, nfrag);
-            auto t2 = std::chrono::high_resolution_clock::now();
-
-            int pcg_max = m_config.get<int>("max_pcg_iterations", 100);
-            double pcg_tol = m_config.get<double>("pcg_tolerance", 1e-10);
-            Vector x0_zero = Vector::Zero(natoms);
-
-            // Stage 2 (May 2026): even the benchmark PCG run uses the block-Jacobi PC
-            // when nfrag>=2, so the timed comparison reflects post-Stage-2 PCG cost.
-            BlockJacobiPC bench_pc;
-            const BlockJacobiPC* bench_pc_ptr = nullptr;
-            if (nfrag >= 2) {
-                bench_pc = buildBlockJacobi(A_nn, C);
-                if (bench_pc.valid) bench_pc_ptr = &bench_pc;
-            }
-
-            Vector z1 = solveWithPCG(A_nn, rhs_atoms, x0_zero, pcg_max, pcg_tol, bench_pc_ptr);
-            Matrix Z2(natoms, nfrag);
-            for (int f = 0; f < nfrag; ++f) {
-                Vector c_col = C.row(f).transpose();
-                Z2.col(f) = solveWithPCG(A_nn, c_col, x0_zero, pcg_max, pcg_tol, bench_pc_ptr);
-            }
-            Matrix S = C * Z2;
-            Vector schur_rhs = C * z1 - rhs_constraints;
-            Vector lambda;
-            if (nfrag == 1 && std::abs(S(0, 0)) < 1e-12) {
-                // Degenerate Schur complement during benchmark — PCG failed, prefer SchurCholesky.
-                // Do NOT return charges_schur blindly: it may itself be empty/NaN if Cholesky failed.
-                // Fall through: select SchurCholesky for future calls and return its result if valid.
-                m_selected_method = EEQSolveMethod::SchurCholesky;
-                m_auto_benchmark_done = true;
-                if (charges_schur.size() == natoms) {
-                    bool schur_nan = false;
-                    for (int i = 0; i < natoms && !schur_nan; ++i)
-                        schur_nan = std::isnan(charges_schur[i]) || std::isinf(charges_schur[i]);
-                    if (!schur_nan) return charges_schur;
-                }
-                // Both solvers failed during benchmark — signal failure to caller
-                return Vector();
-            } else if (nfrag == 1) {
-                lambda = Vector::Constant(1, schur_rhs(0) / S(0, 0));
-            } else {
-                lambda = S.partialPivLu().solve(schur_rhs);
-            }
-            Vector charges_pcg = z1 - Z2 * lambda;
-            auto t3 = std::chrono::high_resolution_clock::now();
-
-            double schur_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
-            double pcg_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
-
-            m_selected_method = (pcg_ms < schur_ms) ? EEQSolveMethod::PCG : EEQSolveMethod::SchurCholesky;
-            m_auto_benchmark_done = true;
-
-            if (CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::info(fmt::format("[EEQ] Auto-benchmark: SchurCholesky={:.1f}ms, PCG={:.1f}ms -> {}",
-                           schur_ms, pcg_ms,
-                           m_selected_method == EEQSolveMethod::PCG ? "PCG" : "SchurCholesky"));
-            }
-
-            m_pcg_last_z1 = z1;
-            m_pcg_last_Z2 = Z2;  // Cache all nfrag warm starts (May 2026)
-            m_pcg_cache_valid = true;
-
-            return charges_pcg;
         }
 
         if (method_to_use == EEQSolveMethod::PCG) {
@@ -1719,14 +1600,10 @@ Vector EEQSolver::dispatchSolve(
                 }
             }
 
-            // Claude Generated (April 2026): Gershgorin condition estimate for A_nn.
-            // Cheap O(N²) pre-check: if the matrix is weakly diagonally dominant or has
-            // a very large estimated condition number, PCG will converge slowly. Skip
-            // directly to LU instead of burning 5000 PCG iterations first.
-            // Gershgorin: λ ∈ [A_ii - Σ_j≠i |A_ij|, A_ii + Σ_j≠i |A_ij|] for each row.
-            // For the EEQ matrix, A_ij = erf(γ·r)/r > 0, so |A_ij| = A_ij.
+            // Gershgorin bounds of A_nn (diagnostic only, verbosity 2; O(N^2), so not computed otherwise).
+            // lambda in [A_ii - sum_j!=i |A_ij|, A_ii + sum_j!=i |A_ij|]; for the EEQ matrix A_ij > 0.
             bool pcg_viable = true;
-            {
+            if (m_verbosity >= 2) {
                 double min_gersh = std::numeric_limits<double>::max();
                 double max_gersh = 0.0;
                 for (int i = 0; i < natoms; ++i) {
@@ -1741,39 +1618,12 @@ Vector EEQSolver::dispatchSolve(
                 double kappa_est = (min_gersh > 0.0) ? max_gersh / min_gersh
                                                      : std::numeric_limits<double>::infinity();
 
-                if (m_verbosity >= 2) {
-                    CurcumaLogger::info(fmt::format(
-                        "EEQ PCG: Gershgorin bounds [{:.4e}, {:.4e}], κ_est={:.1e}",
-                        min_gersh, max_gersh, kappa_est));
-                }
+                CurcumaLogger::info(fmt::format(
+                    "EEQ PCG: Gershgorin bounds [{:.4e}, {:.4e}], κ_est={:.1e}",
+                    min_gersh, max_gersh, kappa_est));
 
-                // If the matrix is clearly not SPD or has extreme condition number,
-                // skip PCG entirely — it will burn 5000+ iterations and then fail anyway.
-                //
-                // Claude Generated (June 2026): the bypass is honored ONLY in Auto mode.
-                // The Gershgorin lower bound diag - Σ|A_ij| is intrinsically negative for
-                // SPD EEQ matrices (the off-diagonal erf(γ·r)/r terms sum past the diagonal
-                // hardness on most atoms), so this pre-check fires on essentially every real
-                // system. Left unscoped it silently overrode an explicit
-                // `-eeq_solver.solve_method pcg` — the PCG loop (and with it the warm-start
-                // and the multi-step EEQ extrapolation) then never ran. PCG converges for any
-                // SPD matrix; the NaN→LU fallback below already guards genuine failures, so an
-                // explicit PCG request runs PCG and only Auto keeps the heuristic bypass.
-                if (m_solve_method == EEQSolveMethod::Auto
-                    && (min_gersh <= 0.0 || kappa_est > 1e12)) {
-                    if (m_verbosity >= 2) {
-                        // Demoted to verbosity 2 (May 2026): Gershgorin lower bound is
-                        // overly pessimistic for EEQ matrices, so the warning fires on
-                        // many normal multi-fragment systems. Real fallback chain is now:
-                        // PCG → SchurCholesky → LU, so SPD matrices skip PCG cheaply.
-                        CurcumaLogger::warn(fmt::format(
-                            "EEQ PCG: Gershgorin sees ill-conditioning (κ_est={:.1e}, min_gersh={:.2e}); "
-                            "trying SchurCholesky next, LU as last resort", kappa_est, min_gersh));
-                    }
-                    m_pcg_cache_valid = false;
-                    m_pcg_x_history.clear();   // gap -> drop multi-step warm-start history
-                    pcg_viable = false;
-                }
+                // Oct 2026: the former Auto-only bypass of PCG for an ill-conditioned estimate is gone
+                // with the Auto benchmark; PCG runs when requested, the NaN -> LU fallback guards failures.
             }
 
             if (pcg_viable) {
@@ -1980,11 +1830,6 @@ Vector EEQSolver::dispatchSolve(
         }
         m_pcg_cache_valid = false;
         m_pcg_x_history.clear();   // LU discontinuity -> drop multi-step warm-start history
-        // After LU, switch to PCG for future calls (with warm-start from LU result).
-        // This avoids getting stuck in LU permanently: PCG may converge on the next
-        // step since the geometry change is small and LU provides a good initial guess.
-        if (m_solve_method == EEQSolveMethod::Auto)
-            m_selected_method = EEQSolveMethod::PCG;
     }
     end_dispatch: ;
 
@@ -3065,7 +2910,7 @@ std::vector<Vector> EEQSolver::calculateTopologyChargesMultiRHS(
     Vector topology_charges;
     {
         curcuma::ScopedBlasThreads _blas_threads(num_threads > 0 ? num_threads : 1);
-        topology_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads);
+        topology_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads, "topology charges");
     }
 
     // Claude Generated (March 2026): Print Phase 1 charge summary
@@ -3559,7 +3404,7 @@ Vector EEQSolver::calculateFinalCharges(
         const char* solver_name = (m_solve_method == EEQSolveMethod::PCG) ? "PCG"
             : (m_solve_method == EEQSolveMethod::ProjectedPCG) ? "projected PCG"
             : (m_solve_method == EEQSolveMethod::SchurCholesky) ? "Cholesky"
-            : (m_solve_method == EEQSolveMethod::Auto) ? "auto (benchmark)" : "LU";
+            : (m_solve_method == EEQSolveMethod::Auto) ? "auto" : "LU";
         if (use_iterative)
             fmt::print(stderr, "[EEQ] Phase 2: iterative refinement ({}, max {} iters, thr={:.0e})\n",
                        solver_name, max_iterations, convergence_threshold);
@@ -3893,7 +3738,7 @@ Vector EEQSolver::calculateFinalCharges(
         // src/core/blas_threads.h.
         curcuma::ScopedBlasThreads _blas_threads(num_threads > 0 ? num_threads : 1);
         const auto t_p2_solve = std::chrono::high_resolution_clock::now();
-        Vector new_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads);
+        Vector new_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads, "final charges");
         if (m_verbosity >= 2) {
             const auto t_p2_end = std::chrono::high_resolution_clock::now();
             const double ms_prep  = std::chrono::duration<double, std::milli>(t_p2_solve - t_p2_start).count();
@@ -3992,7 +3837,6 @@ Vector EEQSolver::calculateFinalCharges(
                 dump["solver_method"] = (m_solve_method == EEQSolveMethod::PCG) ? "PCG"
                     : (m_solve_method == EEQSolveMethod::SchurCholesky) ? "SchurCholesky"
                     : (m_solve_method == EEQSolveMethod::Auto) ? "Auto"
-                    : (m_selected_method == EEQSolveMethod::LU) ? "LU (auto)"
                     : "LU";
                 for (int i = 0; i < natoms; ++i) {
                     json atom;

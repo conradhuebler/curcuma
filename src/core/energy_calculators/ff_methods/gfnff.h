@@ -302,7 +302,7 @@ PARAM(frag_charge_max_placements, Int, 6, "frag_charge_model ensemble: maximum n
 PARAM(cn_cutoff_bohr, Double, 10.0, "CN neighbor list cutoff radius in Bohr (reference cnthr=100 Bohr^2=10 Bohr). 0 = use accuracy-based threshold instead.", "Advanced", {})
 PARAM(cn_accuracy, Double, 1.0, "CN accuracy for threshold calculation (cnthr = 100 - log10(acc)*50). Only used when cn_cutoff_bohr = 0. Set to 0 for full O(N^2) reference mode.", "Advanced", {})
 PARAM(solve, String, "auto",
-      "EEQ solver method: lu, schur_cholesky, pcg, auto. Passed to eeq_solver.", "Algorithm", {})
+      "EEQ solver: auto | cholesky | ppcg | pcg | lu | ldlt | batched, CPU and GPU (-gpu cuda). Alias of -eeq_solver.solve_method, which wins if both are set to a non-auto value. See eeq_solver.solve_method.", "Algorithm", {})
 PARAM(eeq_max_iterations, Int, -1,
       "Max EEQ PCG iterations. -1 = use adaptive default (200 small, 5000 large). Passed to eeq_solver.", "Algorithm", {})
 PARAM(eeq_tolerance, Double, -1.0,

@@ -230,7 +230,7 @@ private:
     // Batched      → WP7-B (nfrag>1)                   — per-fragment Cholesky, drops cross-fragment Coulomb.
     // PCG          → WP7-C (nfrag>1)                   — iterative O(k·N²), warm-started.
     // LU / Auto    → CPU concepts; Auto resolves to PCG above pcg_large_threshold else SchurCholesky.
-    EEQSolveMethod m_eeq_strategy = EEQSolveMethod::SchurCholesky;
+    EEQSolveMethod m_eeq_strategy = EEQSolveMethod::Auto;
     double m_eeq_batched_min_distance_bohr = 15.0;  ///< warn if min inter-frag distance < this
 
     // WP7-C (May 2026): GPU PCG parameters (mirror CPU EEQSolver defaults).
@@ -347,7 +347,7 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
     // (-pcg_tolerance 1e-12) is routed to the eeq_solver scope. Read that scope first, like the
     // CPU solver, then gfnff; the GPU keeps its own fallback defaults.
     {
-        std::string strategy_str = eeq_value("solve_method", std::string("cholesky"));
+        std::string strategy_str = eeq_value("solve_method", gfnff_cfg.value("solve", std::string("auto")));
         m_eeq_strategy = EEQSolver::parseSolveMethod(strategy_str);
     }
     m_eeq_distance_cutoff = eeq_value("eeq_distance_cutoff", 0.0);   // 0 = no cutoff (see above)
@@ -1162,49 +1162,43 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         // identical settings separate by 1e-5 A at ~730 fs, CPU vs GPU WP7-A at ~700 fs, CPU vs
         // GPU WP7-E at ~710 fs - chaotic growth of rounding differences either way.
         // -eeq_solver.eeq_ppcg_min_nfrag 0 forces the exact solve, on both sides.
-        const bool ppcg_thresholds_met = m_eeq_ppcg_min_nfrag > 0
-            && m_eeq_nfrag >= m_eeq_ppcg_min_nfrag
-            && N >= m_eeq_ppcg_min_atoms;
-        EEQSolveMethod many_frag_method = m_eeq_strategy;
-        if (many_frag_method == EEQSolveMethod::SchurCholesky && ppcg_thresholds_met)
-            many_frag_method = EEQSolveMethod::ProjectedPCG;
-        if (many_frag_method == EEQSolveMethod::Auto) {
-            // WP7-E (Sep 2026, curcuma EEQ-Löser-Benchmark): WP7-C's per-fragment PCG loop
-            // (nfrag+1 solves) and its block-Jacobi setup both scale with fragment count/size
-            // in ways that make it intractable for many-fragment, large systems (e.g. a
-            // solvated polymer, nfrag~1500). Projected PCG (WP7-E) does one solve regardless
-            // of nfrag, so Auto prefers it over WP7-C under the CPU's own ppcg thresholds.
-            many_frag_method = (N >= m_eeq_pcg_threshold) ? EEQSolveMethod::PCG
-                                                          : EEQSolveMethod::SchurCholesky;
-            if (many_frag_method == EEQSolveMethod::PCG && ppcg_thresholds_met)
-                many_frag_method = EEQSolveMethod::ProjectedPCG;
-        }
+        // Oct 2026: the SAME rule as the CPU (EEQSolver::resolveMethod): an explicit method runs as
+        // requested, auto picks projected PCG / Cholesky by eeq_ppcg_min_atoms / eeq_ppcg_min_nfrag.
+        // The GPU used to carry its own copy of this logic, including an Auto branch of its own.
+        const EEQSolveMethod resolved_method = EEQSolver::resolveMethod(
+            m_eeq_strategy, N, m_eeq_nfrag, m_eeq_ppcg_min_atoms, m_eeq_ppcg_min_nfrag);
+        const EEQSolveMethod many_frag_method = resolved_method;
 
-        // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md F-4): one fragment used to take the
-        // dense O(N^3) Cholesky (WP5-A) at any size, while the CPU switches to projected PCG from
-        // eeq_ppcg_min_atoms (500) on. Same rule on the GPU now (default solve_method, projected
-        // PCG not disabled with eeq_ppcg_min_nfrag 0); it is also what lets the multi-GPU split
-        // (gpu_split_devices) reach single-fragment molecules. WP5-A stays the fallback.
+        // One fragment: projected PCG (WP7-E) when it is the resolved method; WP5-A stays the fallback.
+        // It is also what lets the multi-GPU split (gpu_split_devices) reach single-fragment molecules.
         const bool single_frag_ppcg = Backend::has_device_schur && m_eeq_nfrag == 1
-            && m_eeq_strategy == EEQSolveMethod::SchurCholesky && ppcg_thresholds_met
+            && resolved_method == EEQSolveMethod::ProjectedPCG
+            && m_eeq_gpu->isFragmentTopoValid();
+        const bool single_frag_pcg = Backend::has_device_schur && m_eeq_nfrag == 1
+            && resolved_method == EEQSolveMethod::PCG
             && m_eeq_gpu->isFragmentTopoValid();
 
-        if (CurcumaLogger::get_verbosity() >= 2) {
+        if (CurcumaLogger::get_verbosity() >= 1) {
             const char* path = "CPU-fallback";
             if (gpu_eeq_applicable) {
                 if (m_eeq_nfrag == 1) {
-                    path = single_frag_ppcg ? "WP7-E GPU-Schur (projected-pcg, one fragment)"
-                                            : "WP5-A GPU-Schur (cholesky)";
+                    path = single_frag_ppcg ? "WP7-E projected PCG, one fragment"
+                         : single_frag_pcg  ? "WP7-C PCG, one fragment"
+                         : resolved_method == EEQSolveMethod::Batched ? "WP5-A Cholesky (batched is exact for one fragment)"
+                                            : "WP5-A Cholesky";
                 } else {
-                    const EEQSolveMethod resolved = many_frag_method;
-                    if      (resolved == EEQSolveMethod::Batched)      path = "WP7-B GPU-Schur (batched)";
-                    else if (resolved == EEQSolveMethod::ProjectedPCG) path = "WP7-E GPU-Schur (projected-pcg)";
-                    else if (resolved == EEQSolveMethod::PCG)          path = "WP7-C GPU-Schur (pcg)";
-                    else                                                path = "WP7-A GPU-Schur (cholesky)";
+                    if      (resolved_method == EEQSolveMethod::Batched)      path = "WP7-B batched";
+                    else if (resolved_method == EEQSolveMethod::ProjectedPCG) path = "WP7-E projected PCG";
+                    else if (resolved_method == EEQSolveMethod::PCG)          path = "WP7-C PCG";
+                    else                                                       path = "WP7-A Cholesky";
                 }
             }
-            CurcumaLogger::info(fmt::format("EEQ GPU Phase 2: N={}, nfrag={}, path={}",
-                N, m_eeq_nfrag, path));
+            // Once per run (and again if the path changes), not every MD/opt step.
+            const std::string line = fmt::format("EEQ solver (final charges): {}{} [GPU {}, {}], N={}, nfrag={}",
+                EEQSolver::methodName(resolved_method),
+                m_eeq_strategy == EEQSolveMethod::Auto ? " (auto)" : "",
+                Backend::name, path, N, m_eeq_nfrag);
+            EEQSolver::reportSolverLine(line);
         }
 
         if (gpu_eeq_applicable) {
@@ -1248,7 +1242,34 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                         eeq_cutoff_sq,
                         force_refactor);
                     if (eeq_ok) used_gpu_schur = true;
-                    else CurcumaLogger::warn("EEQ GPU: projected PCG (one fragment) stalled, using WP5-A");
+                    else {
+                        CurcumaLogger::warn("EEQ GPU: projected PCG (one fragment) stalled, using WP5-A");
+                        curcuma::reportGpuFallback("GFN-FF EEQ: projected PCG stalled, dense Cholesky step");
+                    }
+                  }
+                  if (!eeq_ok && single_frag_pcg) {
+                    // Explicit pcg on one fragment: WP7-C with nfrag = 1 (diagonal Jacobi).
+                    eeq_ok = m_eeq_gpu->solveWithDeviceRHSAndGPUPCG(
+                        N, 1,
+                        m_gpu_workspace->getDeviceXPtr(),
+                        m_gpu_workspace->getDeviceYPtr(),
+                        m_gpu_workspace->getDeviceZPtr(),
+                        m_gpu_workspace->getDeviceAlphaPtr(),
+                        m_gpu_workspace->getDeviceGamPtr(),
+                        m_gpu_workspace->getDeviceRHSPtr(),
+                        m_eeq_fraglist,
+                        m_eeq_rhs_constraints,
+                        m_eeq_pcg_max_iter,
+                        m_eeq_pcg_tolerance,
+                        eeq_cutoff_sq,
+                        force_refactor,
+                        m_eeq_block_jacobi_max_frag_atoms,
+                        m_eeq_block_jacobi_max_nfrag);
+                    if (eeq_ok) used_gpu_schur = true;
+                    else {
+                        CurcumaLogger::warn("EEQ GPU: PCG (one fragment) stalled, using WP5-A");
+                        curcuma::reportGpuFallback("GFN-FF EEQ: PCG stalled, dense Cholesky step");
+                    }
                   }
                   if (!eeq_ok) {
                     // WP5-A: single-fragment GPU Schur (fast path).
@@ -1315,6 +1336,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                             used_gpu_schur = true;
                         } else {
                             CurcumaLogger::warn("EEQ GPU: WP7-E projected PCG stalled, falling through to WP7-A");
+                            curcuma::reportGpuFallback("GFN-FF EEQ: projected PCG stalled, dense Cholesky step");
                         }
                         // On stall: silently fall through to WP7-A cholesky below.
                     }
@@ -1341,6 +1363,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                             used_gpu_schur = true;
                         } else {
                             CurcumaLogger::warn("EEQ GPU: WP7-C PCG stalled, falling through to WP7-A");
+                            curcuma::reportGpuFallback("GFN-FF EEQ: PCG stalled, dense Cholesky step");
                         }
                         // On stall: silently fall through to WP7-A cholesky below.
                     }
@@ -1372,6 +1395,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                             used_gpu_schur = true;
                         } else {
                             CurcumaLogger::warn("EEQ GPU: WP7-B batched failed, falling through to WP7-A");
+                            curcuma::reportGpuFallback("GFN-FF EEQ: batched failed, dense Cholesky step");
                         }
                     }
                     // WP7-A: full N×N Cholesky + GPU Schur complement for nfrag > 1.

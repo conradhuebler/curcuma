@@ -107,6 +107,10 @@ add_cli_test(gfnff 02_caffeine_gfnff_energy_components)
 add_cli_test(gfnff 05_frag_charge_ensemble)
 set_tests_properties(cli_gfnff_05_frag_charge_ensemble PROPERTIES TIMEOUT 900 LABELS "gfnff;frag_charge")
 
+# Claude Generated (Oct 2026): EEQ solver control (auto thresholds, explicit names, alias, typo, GPU gap).
+add_cli_test(gfnff 06_eeq_solver_control)
+set_tests_properties(cli_gfnff_06_eeq_solver_control PROPERTIES TIMEOUT 900 LABELS "gfnff;eeq")
+
 # =============================================================================
 # GPU GFN-FF Tests — only registered when USE_CUDA=ON
 # =============================================================================

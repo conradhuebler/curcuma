@@ -80,7 +80,7 @@ enum class EEQSolveMethod {
     Batched,        ///< Per-fragment Cholesky (GPU only); CPU falls back to SchurCholesky
     PCG,            ///< Preconditioned Conjugate Gradient with warm start
     ProjectedPCG,   ///< Constraint-projected PCG on A_nn: ONE iterative solve for any number of fragments
-    Auto            ///< Auto-select via first-call benchmark (SchurCholesky vs PCG)
+    Auto            ///< Threshold rule: ProjectedPCG for N >= eeq_ppcg_min_atoms and nfrag >= eeq_ppcg_min_nfrag, else SchurCholesky. Resolved by EEQSolver::resolveMethod (CPU and GPU share it).
 };
 
 /**
@@ -366,8 +366,38 @@ public:
     /**
      * @brief Parse solve method string to enum (public so GPU dispatch can reuse).
      * Claude Generated - March 2026; moved to public for WP7-B (May 2026).
+     *
+     * Canonical names: auto, cholesky, ldlt, lu, pcg, ppcg, batched. Aliases: schur_cholesky
+     * (= cholesky), projected_pcg (= ppcg). Oct 2026: an unknown name throws
+     * std::invalid_argument listing the valid names (it used to fall back to auto silently).
      */
     static EEQSolveMethod parseSolveMethod(const std::string& method_str);
+
+    /// Canonical CLI name of a method ("cholesky", "ppcg", ...).
+    static const char* methodName(EEQSolveMethod m);
+
+    /// Print an "EEQ solver: ..." line at verbosity 1, once per distinct line process-wide
+    /// (several calculator instances, e.g. batch workers, must not repeat it). Thread-safe.
+    static void reportSolverLine(const std::string& line);
+
+    /// Comma separated list of the canonical names (for messages).
+    static std::string validMethodNames();
+
+    /// True when the GPU back-end has a device implementation of the method (auto resolves to a supported one).
+    /// Oct 2026: lu and ldlt have none yet - requesting them with -gpu is an error, not a silent substitute.
+    static bool gpuSupports(EEQSolveMethod m);
+
+    /**
+     * @brief Resolve the requested method to the one that runs. Claude Generated (Oct 2026).
+     *
+     * ONE rule for CPU and GPU. Every explicit method is returned unchanged (the user's choice
+     * is never overridden by a size threshold). Auto becomes ProjectedPCG when
+     * natoms >= min_atoms and min_nfrag > 0 and nfrag >= min_nfrag (eeq_ppcg_min_atoms /
+     * eeq_ppcg_min_nfrag, default 500 / 1), otherwise SchurCholesky. Auto never picks an
+     * inexact method (batched).
+     */
+    static EEQSolveMethod resolveMethod(EEQSolveMethod requested, int natoms, int nfrag,
+                                        int min_atoms, int min_nfrag);
 
     /// WP-S3 (May 2026): post-init override for `eeq_distance_cutoff` (Bohr).
     /// Set by GFNFF after Phase-1 when the auto-detection heuristic triggers
@@ -690,7 +720,8 @@ private:
         int nfrag,
         int total_charge,
         CxxThreadPool* pool = nullptr,   // Claude Generated (WP2, May 2026): pool for Stage-4 batched parallelisation
-        int num_threads = 1               // Default 1 keeps existing callers (Phase 1, solveEEQ) serial
+        int num_threads = 1,              // Default 1 keeps existing callers (Phase 1, solveEEQ) serial
+        const char* phase = ""            // label for the verbosity-1 "EEQ solver:" line
     );
 
     /**
@@ -895,10 +926,6 @@ public:
 
 private:
 
-    // Auto-solver benchmark state
-    // Claude Generated - March 2026 (Auto-solver selection)
-    mutable EEQSolveMethod m_selected_method = EEQSolveMethod::SchurCholesky;  ///< Method chosen by auto-benchmark
-    mutable bool m_auto_benchmark_done = false;  ///< Whether auto-benchmark has run
 
     // WP7-B (May 2026): warn-once flag for CPU "batched" → cholesky fallback
     mutable bool m_batched_cpu_warned = false;
@@ -1036,14 +1063,18 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "Auto-calculate coordination numbers if not provided", "Algorithm", {})
     PARAM(use_iterative_refinement, Bool, false,
           "Use iterative refinement for EEQ Phase 2", "Algorithm", {})
-    PARAM(solve_method, String, "cholesky",
-          "EEQ linear solve algorithm: cholesky | ldlt | batched | pcg | auto | lu (legacy). "
-          "GPU paths: cholesky → WP5-A/WP7-A (exact, full N×N Cholesky); "
-          "batched → WP7-B (per-fragment Cholesky, ignores cross-fragment Coulomb — "
-          "use only for well-separated fragments, see eeq_batched_min_distance; "
-          "auto/pcg no longer auto-select it for in-contact fragments, see "
-          "eeq_contact_prefer_exact). "
-          "Legacy alias 'schur_cholesky' maps to 'cholesky'. "
+    PARAM(solve_method, String, "auto",
+          "EEQ linear solve algorithm, same names on CPU and GPU (-gpu cuda selects the device path): "
+          "auto | cholesky | ppcg | pcg | lu | ldlt | batched. An explicit name is never overridden by a "
+          "size threshold. auto (default) = ppcg when N >= eeq_ppcg_min_atoms (500) and nfrag >= "
+          "eeq_ppcg_min_nfrag (1), else cholesky; it never picks an inexact method. "
+          "cholesky = dense Cholesky on A_nn + Schur complement (GPU: WP5-A/WP7-A); "
+          "ppcg = projected PCG, one iterative solve for any nfrag (GPU: WP7-E); "
+          "pcg = per-fragment PCG with block-Jacobi, nfrag+1 solves (GPU: WP7-C); "
+          "batched = per-fragment solves that IGNORE cross-fragment Coulomb, inexact unless the "
+          "fragments are well separated, see eeq_batched_min_distance (GPU: WP7-B). "
+          "Aliases: schur_cholesky = cholesky, projected_pcg = ppcg. An unknown name is an error. "
+          "The verbosity-1 line 'EEQ solver:' names the method and the device that run. "
           "ldlt = Bunch-Kaufman LDL^T on A_nn + Schur; equals cholesky for SPD A_nn (all "
           "gas-phase systems). NOT an automatic fallback: for an indefinite A_nn (e.g. the "
           "implicit-solvation reaction field) the robust path is cholesky's augmented-LU "

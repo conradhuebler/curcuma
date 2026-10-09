@@ -18,14 +18,12 @@ For every structure, solver variant and device (cpu/cuda) it runs, each in a FRE
          step 0 is dropped as warm-up) and the final Epot from the MD table.
 
 Solver variants (flag spelling matters, see below):
-  default        no solver flag
-  cholesky       -eeq_solver.solve_method cholesky      (NOT dense for N>=500 and nfrag>=1: the
-                                                         automatic projected-PCG takes over)
-  cholesky_dense cholesky + -eeq_solver.eeq_ppcg_min_nfrag 0   (really the dense factorisation)
-  ppcg, auto, ldlt, lu, pcg, batched   -eeq_solver.solve_method <name>
+  default        no solver flag (= auto: ppcg for N >= 500 atoms, else cholesky)
+  auto, cholesky, ppcg, pcg, lu, ldlt, batched   -eeq_solver.solve_method <name>; an explicit name
+                 is never overridden by the size threshold (cholesky is dense at any size).
+                 lu and ldlt have no GPU implementation yet: with --devices cuda they are recorded as rc != 0.
   `batched` DROPS cross-fragment Coulomb: energies are not comparable, it is flagged in the table.
-`-gfnff.solve X` is deliberately not used: the CPU maps it onto eeq_solver.solve_method, the GPU
-path reads only the eeq_solver scope and ignores it.
+(-gfnff.solve X is an equivalent alias since Oct 2026; the benchmark uses the eeq_solver spelling.)
 
 Usage:
   scripts/eeq_solver_benchmark.py peo201x2-water1500 [caffeine ...] --curcuma build/curcuma \\
@@ -52,7 +50,6 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 VARIANTS = {
     "default": [],
     "cholesky": ["-eeq_solver.solve_method", "cholesky"],
-    "cholesky_dense": ["-eeq_solver.solve_method", "cholesky", "-eeq_solver.eeq_ppcg_min_nfrag", "0"],
     "ppcg": ["-eeq_solver.solve_method", "ppcg"],
     "auto": ["-eeq_solver.solve_method", "auto"],
     "ldlt": ["-eeq_solver.solve_method", "ldlt"],
@@ -148,7 +145,7 @@ def main():
                     help="library id or alias (test_cases/structures) or path to an .xyz file")
     ap.add_argument("--curcuma", required=True, type=Path)
     ap.add_argument("--xtb", type=Path, help="xtb binary: adds a reference SP per structure")
-    ap.add_argument("--solvers", default="default,cholesky_dense,ppcg,auto,ldlt,lu,pcg")
+    ap.add_argument("--solvers", default="default,cholesky,ppcg,pcg,lu,ldlt")
     ap.add_argument("--devices", default="cpu,cuda")
     ap.add_argument("--method", default="gfnff")
     ap.add_argument("--threads", type=int, default=1)
