@@ -1435,8 +1435,7 @@
     "program": "curcuma",
     "method": "uff",
     "version": "commit 4e19c68f8c252babdcd7c87e95287c8f34177e9a (LBFGSpp commit 7e3848617795ddd0e25f4b772e679adfee583229)",
-    "evidence": "test_cases/optimisation/makrocyclic/README.md",
-    "level_note": "optimised with analytical gradients; UFF is inferred from the README text (universal force field), convergence not recorded",
+    "level_note": "optimised with analytical gradients; UFF is named in the former README of this experiment (macrocycle-bgal, 2025, curcuma 0.0.108), convergence not recorded; the run ended with the LBFGS message 'the moving direction increases the objective function value'; E = 3.015478 Eh after 365 steps (older LBFGSpp, commit 7e384861); a later LBFGSpp reached 3.028958 Eh after 138 steps",
     "comment": "** Energy =   3.015478 Eh ** Charge = 0 ** Spin = 0 ** Curcuma 0.1 (0.0.108)",
     "energy_eh": 3.015478
    },
@@ -1459,7 +1458,7 @@
    "aliases": [
     "angrad"
    ],
-   "description": "optimised with analytical gradients, see optimisation/makrocyclic/README.md"
+   "description": "UFF optimisation with analytical gradients of the macrocycle-bgal complex (comparison of LBFGS implementations, 2025)"
   },
   {
    "id": "macrocycle-bgal.uff-numeric-grad",
@@ -1479,8 +1478,7 @@
     "program": "curcuma",
     "method": "uff",
     "version": "commit 4e19c68f8c252babdcd7c87e95287c8f34177e9a (LBFGSpp commit 7e3848617795ddd0e25f4b772e679adfee583229)",
-    "evidence": "test_cases/optimisation/makrocyclic/README.md",
-    "level_note": "optimised with numerical gradients; UFF is inferred from the README text (universal force field), convergence not recorded",
+    "level_note": "optimised with numerical gradients; UFF is named in the former README of this experiment (macrocycle-bgal, 2025, curcuma 0.0.108), convergence not recorded; no LBFGS error was signalled; E = 3.027176 Eh after 185 steps (older LBFGSpp, commit 7e384861); a later LBFGSpp reached 3.027298 Eh after 147 steps",
     "comment": "** Energy =   3.027176 Eh ** Charge = 0 ** Spin = 0 ** Curcuma 0.1 (0.0.108)",
     "energy_eh": 3.027176
    },
@@ -1503,7 +1501,7 @@
    "aliases": [
     "numgrad"
    ],
-   "description": "optimised with numerical gradients, see optimisation/makrocyclic/README.md"
+   "description": "UFF optimisation with numerical gradients of the macrocycle-bgal complex (comparison of LBFGS implementations, 2025)"
   },
   {
    "id": "methane",
