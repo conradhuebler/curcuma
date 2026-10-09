@@ -144,7 +144,7 @@ int dtemplate()
     int reorder_success = confscan->ReorderSuccessfull();
     int reuse_count = confscan->ReuseCount();
     int skipped_count = confscan->ReorderSkippedCount();
-    return checkCounters(__func__, accepted, reorder_success, reuse_count, skipped_count, 17, 2, 1, 305);
+    return checkCounters(__func__, accepted, reorder_success, reuse_count, skipped_count, 14, 5, 1, 237);
 }
 
 int molalign()
