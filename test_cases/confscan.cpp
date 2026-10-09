@@ -36,6 +36,19 @@ static struct RegistryInitializer {
     RegistryInitializer() { initialize_generated_registry(); }
 } registry_initializer;
 
+// Claude Generated (Oct 2026): the expected counters are golden values; on a mismatch print actual and expected,
+// otherwise the failure carries no information.
+static int checkCounters(const char* name, int accepted, int reorder, int reuse, int skipped,
+    int e_accepted, int e_reorder, int e_reuse, int e_skipped)
+{
+    if (accepted == e_accepted && reorder == e_reorder && reuse == e_reuse && skipped == e_skipped)
+        return EXIT_SUCCESS;
+    std::cerr << name << ": counters differ from the golden values (actual / expected): accepted " << accepted << " / " << e_accepted
+              << ", reorder successful " << reorder << " / " << e_reorder << ", reuse " << reuse << " / " << e_reuse
+              << ", reorder skipped " << skipped << " / " << e_skipped << std::endl;
+    return EXIT_FAILURE;
+}
+
 int free()
 {
     int threads = MaxThreads();
@@ -57,9 +70,7 @@ int free()
     int reorder_success = confscan->ReorderSuccessfull();
     int reuse_count = confscan->ReuseCount();
     int skipped_count = confscan->ReorderSkippedCount();
-    if (accepted == 14 && reorder_success == 5 && reuse_count == 1 && skipped_count == 237)
-        return EXIT_SUCCESS;
-    return EXIT_FAILURE;
+    return checkCounters(__func__, accepted, reorder_success, reuse_count, skipped_count, 14, 5, 1, 237);
 }
 
 int subspace()
@@ -84,9 +95,7 @@ int subspace()
     int skipped_count = confscan->ReorderSkippedCount();
     std::cout << accepted << " " << reorder_success << " " << reuse_count << " " << skipped_count << " " << std::endl;
 
-    if (accepted == 14 && reorder_success == 5 && reuse_count == 1 && skipped_count == 237)
-        return EXIT_SUCCESS;
-    return EXIT_FAILURE;
+    return checkCounters(__func__, accepted, reorder_success, reuse_count, skipped_count, 14, 5, 1, 237);
 }
 
 int template_method()
@@ -112,9 +121,7 @@ int template_method()
 
     std::cout << accepted << " " << reorder_success << " " << reuse_count << " " << skipped_count << " " << std::endl;
 
-    if (accepted == 15 && reorder_success == 4 && reuse_count == 1 && skipped_count == 246)
-        return EXIT_SUCCESS;
-    return EXIT_FAILURE;
+    return checkCounters(__func__, accepted, reorder_success, reuse_count, skipped_count, 15, 4, 1, 246);
 }
 
 int dtemplate()
@@ -137,9 +144,7 @@ int dtemplate()
     int reorder_success = confscan->ReorderSuccessfull();
     int reuse_count = confscan->ReuseCount();
     int skipped_count = confscan->ReorderSkippedCount();
-    if (accepted == 17 && reorder_success == 2 && reuse_count == 1 && skipped_count == 305)
-        return EXIT_SUCCESS;
-    return EXIT_FAILURE;
+    return checkCounters(__func__, accepted, reorder_success, reuse_count, skipped_count, 17, 2, 1, 305);
 }
 
 int molalign()
@@ -162,9 +167,7 @@ int molalign()
     int reorder_success = confscan->ReorderSuccessfull();
     int reuse_count = confscan->ReuseCount();
     int skipped_count = confscan->ReorderSkippedCount();
-    if (accepted == 20 && reorder_success == 0 && reuse_count == 0 && skipped_count == 349)
-        return EXIT_SUCCESS;
-    return EXIT_FAILURE;
+    return checkCounters(__func__, accepted, reorder_success, reuse_count, skipped_count, 20, 0, 0, 349);
 }
 
 int sLX1()
@@ -189,9 +192,7 @@ int sLX1()
     int reuse_count = confscan->ReuseCount();
     int skipped_count = confscan->ReorderSkippedCount();
     std::cout << accepted << " " << reorder_success << " " << reuse_count << " " << skipped_count << " " << std::endl;
-    if (accepted == 16 && reorder_success == 3 && reuse_count == 1 && skipped_count == 138)
-        return EXIT_SUCCESS;
-    return EXIT_FAILURE;
+    return checkCounters(__func__, accepted, reorder_success, reuse_count, skipped_count, 16, 3, 1, 138);
 }
 
 int sLX2()
@@ -216,9 +217,7 @@ int sLX2()
     int reuse_count = confscan->ReuseCount();
     int skipped_count = confscan->ReorderSkippedCount();
     std::cout << accepted << " " << reorder_success << " " << reuse_count << " " << skipped_count << " " << std::endl;
-    if (accepted == 14 && reorder_success == 5 && reuse_count == 1 && skipped_count == 101)
-        return EXIT_SUCCESS;
-    return EXIT_FAILURE;
+    return checkCounters(__func__, accepted, reorder_success, reuse_count, skipped_count, 14, 5, 1, 101);
 }
 
 int sLX2Reset()
@@ -243,9 +242,7 @@ int sLX2Reset()
     int reuse_count = confscan->ReuseCount();
     int skipped_count = confscan->ReorderSkippedCount();
     std::cout << accepted << " " << reorder_success << " " << reuse_count << " " << skipped_count << " " << std::endl;
-    if (accepted == 16 && reorder_success == 5 && reuse_count == 10 && skipped_count == 101)
-        return EXIT_SUCCESS;
-    return EXIT_FAILURE;
+    return checkCounters(__func__, accepted, reorder_success, reuse_count, skipped_count, 16, 5, 10, 101);
 }
 
 int sLX20()
@@ -268,9 +265,7 @@ int sLX20()
     int reorder_success = confscan->ReorderSuccessfull();
     int reuse_count = confscan->ReuseCount();
     int skipped_count = confscan->ReorderSkippedCount();
-    if (accepted == 14 && reorder_success == 5 && reuse_count == 1 && skipped_count == 101)
-        return EXIT_SUCCESS;
-    return EXIT_FAILURE;
+    return checkCounters(__func__, accepted, reorder_success, reuse_count, skipped_count, 14, 5, 1, 101);
 }
 
 int sLX20Reset()
@@ -294,9 +289,7 @@ int sLX20Reset()
     int reorder_success = confscan->ReorderSuccessfull();
     int reuse_count = confscan->ReuseCount();
     int skipped_count = confscan->ReorderSkippedCount();
-    if (accepted == 16 && reorder_success == 5 && reuse_count == 10 && skipped_count == 101)
-        return EXIT_SUCCESS;
-    return EXIT_FAILURE;
+    return checkCounters(__func__, accepted, reorder_success, reuse_count, skipped_count, 16, 5, 10, 101);
 }
 
 int main(int argc, char** argv)
