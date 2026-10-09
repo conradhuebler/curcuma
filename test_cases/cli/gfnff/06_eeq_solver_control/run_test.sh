@@ -9,7 +9,8 @@
 #   3. EXPLICIT  - -eeq_solver.solve_method cholesky|ppcg|pcg|lu|ldlt runs exactly that solver, at a size where
 #                  auto would pick another one (no size threshold overrides a named solver); energies agree
 #                  to 1e-7 Eh; -gfnff.solve is an equivalent alias, -eeq_solver.solve_method wins over it
-#   4. TYPO      - an unknown name ends with an error naming the valid solvers (it used to mean auto)
+#   4. TYPO      - an unknown name ends with an error naming the valid solvers (it used to mean auto); for -md
+#                  a failed setup also gives a non-zero exit code (it used to be 0)
 #   5. GPU       - only if a CUDA plugin and a device are present: lu has no device implementation and is an
 #                  error with -gpu cuda, not a silent substitute
 # The verbosity-1 line "EEQ solver (final charges): <name>[ (auto)] [CPU|GPU ...]" is what is read.
@@ -82,12 +83,29 @@ check("-eeq_solver.solve_method wins over -gfnff.solve", rc == 0 and line.starts
 rc, line, _, out = sp(CAF, [S, "choleski"])
 check("typo is an error", rc != 0 and "unknown EEQ solver 'choleski'" in out and "valid:" in out, f"rc={rc}")
 
+def md_rc(extra):
+    d = tempfile.mkdtemp()
+    try:
+        shutil.copy(CAF, os.path.join(d, "m.xyz"))
+        p = subprocess.run([B, "-md", "m.xyz", "-method", "gfnff", "-no_bmt", "-max_time", "2", "-threads", "2"] + extra,
+                           cwd=d, capture_output=True, text=True, timeout=600)
+        return p.returncode, ANSI.sub("", p.stdout + p.stderr)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+rc, out = md_rc([S, "choleski"])
+check("MD: a failed setup exits non-zero", rc != 0 and "MD setup failed" in out, f"rc={rc}")
+rc, out = md_rc([S, "ppcg"])
+check("MD: a valid solver exits 0", rc == 0, f"rc={rc}")
+
 plugin = os.path.join(os.path.dirname(os.path.abspath(B)), "libcurcuma_cuda.so")
 have_gpu = os.path.exists(plugin) and shutil.which("nvidia-smi") is not None \
     and subprocess.run(["nvidia-smi", "-L"], capture_output=True).returncode == 0
 if have_gpu:
     rc, _, _, out = sp(CAF, ["-gpu", "cuda", S, "lu"])
     check("GPU: lu is an error, not a substitute", rc != 0 and "no device implementation" in out, f"rc={rc}")
+    rc, out = md_rc(["-gpu", "cuda", S, "lu"])
+    check("GPU MD: lu exits non-zero", rc != 0 and "no device implementation" in out, f"rc={rc}")
 else:
     print("SKIP  GPU check (no CUDA plugin or device)")
 sys.exit(1 if fails else 0)
