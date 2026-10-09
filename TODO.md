@@ -79,6 +79,7 @@ Stand.
   `OH` als Radikal ohne `-spin` mit 2e-3, Abweichung 8,2e-4 Eh zur geschlossenschaligen TBLite-Referenz). `simplemd` (16 von 17 Tests) und `curcumaopt` (7 von 7) prüfen nur Exit-Code,
   Dateien oder Zeichenketten, keine Zahlen (Energieerhaltung, Temperatur, Drift). Nicht registrierte Quellen: `test_d3only_method.cpp`, `test_d3_weight_caching.cpp`,
   `test_dispersion.cpp`, `test_torsion_count.cpp`, `simple_ulysses_test.cpp`, zwei `cuda/bench_*.cpp`, drei D4-Datendateien in `reference_data/`, zehn Skripte in `test_cases/`.
+- **Trisaccharid als optimierte Struktur** (2026-10-09): `trisaccharide-c18h32o16` (xtb 6.6.0, Methode unvermerkt) soll durch `.gfn2-opt` ersetzt werden (und `.gfnff-opt` für GFN-FF). Blockiert: TBLite-Referenzen `sqm_reference/reference_data/triose_gfn{1,2}.ref.json` und die GFN-FF-Terme `reference_data/triose.ref.json` gelten für die alte Geometrie und müssen dort neu erzeugt werden (`USE_TBLITE` im `release/`-Build aus); danach `triose=` in `test_cases/CMakeLists.txt` (Zeilen 18, 27) umstellen. GFN-FF-Minimum liegt 1,0 Å (RMSD) von der xtb-Geometrie, Ursache offen.
 - ConfScan: Accept/Reject-Meldungen bei Standard-Verbosity nicht sichtbar (Eintrag von 2025, nicht erneut geprüft).
 
 ## 4. Betreiber-Prüfung offen (🤖/⚙️, nur Sie vergeben ✅)
