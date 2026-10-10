@@ -17,7 +17,11 @@
 #                     (default 1.0 Bohr)
 #   6. TYPO         - an unknown preconditioner name is an error
 #   7. GPU          - only with a CUDA plugin and a device: localinv runs in WP7-E (lines "precond=localinv gpu"),
-#                     fewer iterations than diag, charges within 1e-8 e of the GPU diag run in every MD step
+#                     G built on the device ("build=device"), fewer iterations than diag, charges within 1e-8 e of
+#                     the GPU diag run in every MD step; the host build (CURCUMA_LOCALINV_HOST_BUILD=1) gives the
+#                     same charges; an unusable G (CURCUMA_LOCALINV_TEST_INDEFINITE=1: -G; =3: true-residual check
+#                     forced to fail) is caught, the solve redone with Jacobi (charges of diag), and -gpu_strict
+#                     true then exits with code 3
 
 set -e
 
@@ -126,7 +130,31 @@ if have_gpu:
     dq = max((abs(a - b) for i in range(n) for a, b in zip(qd[i], ql[i])), default=1.0)
     check("GPU MD: localinv runs in WP7-E with fewer iterations", rcd == 0 and rcl == 0 and len(itl) >= 2
           and max(itl) < min(itd[-len(itl):]), f"diag {itd} localinv {itl}")
+    check("GPU MD: the local inverse is built on the device", len(iters(ppl, "build=device")) == len(itl)
+          and "LOCALINV GPU device build ok=1" in outl, f"device-built solves {len(iters(ppl, 'build=device'))} of {len(itl)}")
     check("GPU MD: charges agree with GPU diag", n >= 2 and dq < 1e-8, f"steps {n}, max |dq| = {dq:.2e} e")
+
+    def dq_to_diag(q):
+        m = min(len(qd), len(q))
+        return m, max((abs(a - b) for i in range(m) for a, b in zip(qd[i], q[i])), default=1.0)
+    # Host build (comparison switch): same charges, solves tagged build=host.
+    rch, outh, pph, _, qh = run("md", W, G + LI, {"CURCUMA_LOCALINV_HOST_BUILD": "1"}, fs=3)
+    m, dqh = dq_to_diag(qh)
+    check("GPU MD: CURCUMA_LOCALINV_HOST_BUILD=1 builds on the host, same charges", rch == 0
+          and iters(pph, "build=host") and not iters(pph, "build=device") and m >= 2 and dqh < 1e-8,
+          f"rc={rch}, max |dq| = {dqh:.2e} e")
+    # Unusable preconditioner on the device: G -> -G (test hook). Every solve breaks down (rz <= 0)
+    # and is redone with Jacobi: same charges as diag; each re-solve is a counted GPU fallback, so
+    # -gpu_strict true stops with exit code 3.
+    for mode, tag, what in (("1", "solve repeated with diagonal Jacobi", "negative definite G"),
+                            ("3", "true residual above 2 tol", "true-residual check forced to fail")):
+        rci, outi, _, _, qi = run("md", W, ["-gpu", "cuda"] + LI, {"CURCUMA_LOCALINV_TEST_INDEFINITE": mode}, fs=3)
+        m, dqi = dq_to_diag(qi)
+        check(f"GPU MD: {what}: Jacobi re-solve, charges of diag", rci == 0 and tag in outi
+              and "localinv re-solve with Jacobi" in outi and m >= 2 and dqi < 1e-8,
+              f"rc={rci}, steps {m}, max |dq| = {dqi:.2e} e")
+        rcs, outs, _, _, _ = run("md", W, G + LI, {"CURCUMA_LOCALINV_TEST_INDEFINITE": mode}, fs=3)
+        check(f"GPU MD: {what} with -gpu_strict true: exit code 3", rcs == 3 and "-gpu_strict" in outs, f"rc={rcs}")
     rcr, outr, ppr, _, qr = run("md", W, G + LI, {"CURCUMA_LOCALINV_TEST_REJECT": "1"}, fs=3)
     check("GPU MD: rejected build runs diag, no GPU fallback", rcr == 0 and "preconditioner rejected" in outr
           and not iters(ppr, "precond=localinv gpu") and len(qr) == len(qd)

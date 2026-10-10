@@ -303,19 +303,25 @@ private:
     int    m_eeq_ppcg_min_nfrag  = 1;      ///< Auto strategy: prefer ProjectedPCG over PCG when nfrag>=this
     int    m_eeq_ppcg_min_atoms  = 500;    ///< ... and N>=this
     // Claude Generated (Oct 2026): local-inverse preconditioner of WP7-E (eeq_ppcg_precond localinv),
-    // built on the host by EEQSolver::buildLocalInverse and uploaded as CSR (CUDA only).
+    // CUDA only. Built on the device (EEQSolverGPU::requestLocalInverseDeviceBuild, default) or, with
+    // CURCUMA_LOCALINV_HOST_BUILD=1 or the multi-GPU split, on the host by EEQSolver::buildLocalInverse
+    // and uploaded as CSR.
     bool   m_eeq_localinv = false;
     double m_eeq_localinv_radius = 8.0;
     double m_eeq_localinv_ext = 10.0;
     double m_eeq_localinv_rebuild = 1.0;
     int    m_eeq_localinv_threads = 1;
-    std::shared_ptr<LocalInversePreconditioner> m_eeq_li;   ///< last host build (ok or rejected)
+    std::shared_ptr<LocalInversePreconditioner> m_eeq_li;   ///< last build (host: G, H, S; device: geometry only)
     long   m_eeq_li_builds = 0, m_eeq_li_failures = 0;
     double m_eeq_li_build_ms = 0.0;
-    static constexpr int kLocalInvMaxNfrag = 4096;   ///< dense S^-1 on the device: nfrag^2 doubles (128 MB here)
+    long   m_eeq_li_seen_dev_builds = 0, m_eeq_li_seen_dev_failures = 0, m_eeq_li_seen_runtime = 0;
+    static constexpr int kLocalInvMaxNfrag = 4096;   ///< host build: dense S^-1 on the device, nfrag^2 doubles (128 MB here)
     /// Builds (or keeps) the local inverse for the current geometry and uploads it; on any failure the
     /// device solver runs with the diagonal Jacobi. Same rebuild rule as the CPU solver.
     void prepareLocalInverseGPU(int N, double cutoff_sq);
+    /// After a WP7-E solve: books device builds/rejections and reports every Jacobi re-solve as a
+    /// GPU fallback (curcuma::reportGpuFallback, -gpu_strict). Claude Generated (Oct 2026).
+    void finishLocalInverseGPU();
 
     // Deliverable 3 (Jun 2026): fragment count at/above which the device EEQ solve is
     // replaced by the exact CPU PCG/block-Jacobi solver. The device path does a dense
@@ -1361,6 +1367,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                         m_eeq_ppcg_tolerance,
                         eeq_cutoff_sq,
                         force_refactor);
+                    finishLocalInverseGPU();
                     if (eeq_ok) used_gpu_schur = true;
                     else {
                         CurcumaLogger::warn("EEQ GPU: projected PCG (one fragment) stalled, using WP5-A");
@@ -1453,6 +1460,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                             m_eeq_ppcg_tolerance,
                             eeq_cutoff_sq,
                             force_refactor);
+                        finishLocalInverseGPU();
                         if (eeq_ok) {
                             used_gpu_schur = true;
                         } else {
@@ -1979,7 +1987,11 @@ void GFNFFGpuMethodImpl<Backend>::prepareLocalInverseGPU(int N, double cutoff_sq
     } else {
         if (!m_eeq_localinv) return;
         const int nfrag = m_eeq_nfrag;
-        if (nfrag > kLocalInvMaxNfrag) {
+        // Oct 2026: default is the device build; the host build stays for the multi-GPU split and as
+        // comparison (CURCUMA_LOCALINV_HOST_BUILD=1).
+        static const bool host_build_env = [] { const char* e = std::getenv("CURCUMA_LOCALINV_HOST_BUILD"); return e && *e && *e != '0'; }();
+        const bool device_build = !host_build_env && m_eeq_gpu->localInverseDeviceBuildPossible(N);
+        if (!device_build && nfrag > kLocalInvMaxNfrag) {
             if (!m_eeq_li) {
                 CurcumaLogger::warn(fmt::format("EEQ GPU ppcg localinv: nfrag = {} > {} (dense S^-1 on the device), "
                                                 "using diagonal Jacobi", nfrag, kLocalInvMaxNfrag));
@@ -2008,6 +2020,20 @@ void GFNFFGpuMethodImpl<Backend>::prepareLocalInverseGPU(int N, double cutoff_sq
             rebuild = !(max_dr <= m_eeq_localinv_rebuild);
         }
         if (!rebuild) return;
+
+        if (device_build) {
+            // The device builds G inside the next WP7-E solve, from the matrix assembled there; this
+            // record keeps the geometry for the rebuild rule, finishLocalInverseGPU books the result.
+            auto rec = std::make_shared<LocalInversePreconditioner>();
+            rec->natoms = N;
+            rec->nfrag = nfrag;
+            rec->frag = frag;
+            rec->geometry = X;
+            rec->ok = true;
+            m_eeq_li = rec;
+            m_eeq_gpu->requestLocalInverseDeviceBuild(m_eeq_localinv_radius, m_eeq_localinv_ext);
+            return;
+        }
 
         std::vector<double> alpha(N), gam(N);
         Backend::downloadDoubles(alpha.data(), m_gpu_workspace->getDeviceAlphaPtr(), N);
@@ -2070,6 +2096,32 @@ void GFNFFGpuMethodImpl<Backend>::prepareLocalInverseGPU(int N, double cutoff_sq
             fprintf(stderr, "LOCALINV GPU build ok=%d build_ms=%.1f blocks_ms=%.1f check_ms=%.1f sinv_ms=%.1f upload_ms=%.1f nnz_row=%.1f\n",
                     m_eeq_li->ok ? 1 : 0, m_eeq_li->build_ms, m_eeq_li->blocks_ms, m_eeq_li->check_ms, m_eeq_li->sinv_ms, upload_ms,
                     m_eeq_li->nnz_per_row);
+    }
+}
+
+template <class Backend>
+void GFNFFGpuMethodImpl<Backend>::finishLocalInverseGPU()
+{
+    if constexpr (Backend::has_device_schur) {
+        if (!m_eeq_localinv) return;
+        const auto st = m_eeq_gpu->localInverseDeviceStats();
+        if (st.builds > m_eeq_li_seen_dev_builds) {
+            m_eeq_li_builds += st.builds - m_eeq_li_seen_dev_builds;
+            m_eeq_li_build_ms += st.last_build_ms;
+        }
+        if (st.build_failures > m_eeq_li_seen_dev_failures) {
+            // A rejected build runs Jacobi until the next rebuild (as on the host): exact charges, so
+            // it is a warning, not a GPU fallback.
+            m_eeq_li_failures += st.build_failures - m_eeq_li_seen_dev_failures;
+            if (m_eeq_li) { m_eeq_li->ok = false; m_eeq_li->why = st.last_why; }
+            CurcumaLogger::warn(fmt::format("EEQ GPU ppcg localinv: preconditioner rejected ({}), using diagonal Jacobi "
+                                            "until the next rebuild (failures so far: {})", st.last_why, m_eeq_li_failures));
+        }
+        for (long k = m_eeq_li_seen_runtime; k < st.runtime_fallbacks; ++k)
+            curcuma::reportGpuFallback("GFN-FF EEQ: localinv re-solve with Jacobi", st.last_why);
+        m_eeq_li_seen_dev_builds = st.builds;
+        m_eeq_li_seen_dev_failures = st.build_failures;
+        m_eeq_li_seen_runtime = st.runtime_fallbacks;
     }
 }
 

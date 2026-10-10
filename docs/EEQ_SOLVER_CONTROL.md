@@ -99,8 +99,56 @@ z = G r - G C^T S^-1 C G r with S = C G C^T, so the iterates stay on the fragmen
 - **Rebuild**: `eeq_localinv_rebuild_bohr` (default 1.0; 0 = every solve) rebuilds when any atom moved further since the last build. A stale
   G changes only the iteration count, never the converged charges (same `eeq_ppcg_tol`).
 - **Reproducibility**: the build is independent of the thread count (one thread per atom row, fixed summation order); MD charges at a fixed
-  thread count are bit-identical between runs. GPU: CSR kernels + dense S^-1 on the device (nfrag <= 4096), built on the host; not bit-reproducible, like the GPU path as a whole.
+  thread count are bit-identical between runs. The GPU path as a whole is not bit-reproducible (two diag runs: charges within 9e-12 e).
 - **CUDA only** on the device side; ROCm keeps `diag`.
+
+### GPU: build on the device (Oct 10, 2026)
+
+`buildLocalInverseOnDevice` (`cuda/eeq_solver_gpu.cu`), requested by `prepareLocalInverseGPU` (`gfnff_gpu_method_impl.h`) when the rebuild rule fires,
+runs inside the WP7-E solve after the EEQ matrix is assembled: `k_li_count` (block size and kept entries per atom, distance scan with a float
+prefilter and the exact double test), `k_li_blocks` (one 128-thread block per atom, launched in buckets of block size <= 32/64/128/larger so the
+shared memory fits the bucket: neighbours in ascending order, B = A[E,E] gathered from the device matrix `d_A`, i.e. the values of
+`k_eeq_build_matrix`, Cholesky + one column of B^-1 in shared memory, global scratch if a block does not fit), `k_li_symmetrize` (G = (Gl + Gl^T)/2).
+No floating-point atomics. The host build stays: `CURCUMA_LOCALINV_HOST_BUILD=1` (comparison) and the multi-GPU split (no full matrix on one device).
+
+- **No S on the device.** The device applies z = P G r (P = orthogonal fragment projection), not G - H S^-1 H^T: dense S = C G C^T costs
+  4.2 ms (potrf) + 9.4 ms (potri) at nfrag 1502 on the RTX 5080 (FP64 1/64), a sparse factor needs the host. P G P is symmetric and positive
+  definite on null(C) whenever G is; it removes the nfrag <= 4096 limit. Cost in iterations (MD, median per step): polymer_2x 15 vs 15 (host build),
+  peo201-water500 13 vs 13, peo201-chain 12 vs 12, urea400-water1000 11 vs 8.
+- **Definiteness** without the host's sparse Cholesky of G: (1) every local pivot must be > 0, else the build is rejected (Jacobi until the next
+  rebuild, a warning, no GPU fallback); (2) rz <= 0, pAp <= 0 or a stall stop the CG; (3) after convergence one more matvec checks the TRUE residual,
+  |P(b - A q)| <= 2 tol (observed ratio to tol: at most 0.999 in all runs below). (2) and (3) redo the solve with Jacobi from the same start
+  and are counted GPU fallbacks (`-gpu_strict true`: exit code 3). Test hooks: `CURCUMA_LOCALINV_TEST_INDEFINITE=1` (G -> -G), `=2` (every 10th
+  diagonal negated), `=3` (true-residual check forced to fail); `CURCUMA_LOCALINV_TEST_REJECT=1` rejects every build (test 07).
+- **Timing hooks**: `CURCUMA_PPCG_ITERS=1` prints `LOCALINV GPU device build ok= build_ms= ...` and the true-residual ratio;
+  `CURCUMA_PPCG_GPU_TIMING=1` synchronises after each phase of the WP7-E call and prints matrix / build / CG / residual times.
+
+MD 50 fs, dt 1 fs, 300 K, `-gpu cuda -gpu_strict true -threads 4`, per-step means over steps 1-49, RTX 5080; polymer_2x n = 3 runs (alternating
+configurations), the others n = 2; [range of the run means]. "host" = `CURCUMA_LOCALINV_HOST_BUILD=1` (the build before this change).
+Foreign load during the series: another session's CPU job at ~500 % for the first run, later none above 100 %; load average 5.6-15.5.
+
+| polymer_2x | iterations | build ms | EEQ ms/step | step ms |
+|---|---:|---:|---:|---:|
+| diag | 68 | - | 32.4 [32.2-32.7] | 76.4 [74.7-79.5] |
+| localinv rebuild 1.0, host build (7 builds) | 15 | 54.5 [51.4-60.5] | 23.8 [23.3-24.7] | 67.2 [65.8-69.7] |
+| localinv rebuild 1.0, device build (7 builds) | 16 | 2.3 [2.2-2.4] | 16.5 [16.4-16.6] | 60.9 [59.0-64.4] |
+| localinv rebuild 0, host build | 15 | 59.3 [50.5-76.5] | 76.8 [67.8-94.5] | 122.8 [110.8-146.7] |
+| localinv rebuild 0, device build | 15 | 2.1 [2.1-2.2] | 18.1 [17.9-18.3] | 63.4 [60.3-69.0] |
+
+Phase split of one device-build solve (polymer_2x, `CURCUMA_PPCG_GPU_TIMING`, n = 8 steps, median): matrix 6.6 ms, build 2.0, CG 5.2 (15
+iterations, 0.34 ms each; diag 0.33), true residual 0.3; the rest of the EEQ time (~3.8 ms, also in diag) is outside the solver call.
+Epot after 50 fs -902.161126 Eh in all 15 runs; per-step charges vs diag: device rebuild 0 3.5e-11 e, rebuild 1.0 3.6e-11, host 3.4e-11.
+
+| other systems, EEQ ms/step (iterations) | diag | host build, rebuild 0 | device, rebuild 0 | device, rebuild 1.0 |
+|---|---:|---:|---:|---:|
+| peo201-water500 (2910 atoms) | 7.0 (58) | 23.9 (13) | 4.7 (13), build 1.0 ms | 3.9 (14) |
+| urea400-water1000 | 22.9 (37) | 279 (8) | 20.0 (11), build 3.2 ms | 17.5 (12) |
+| peo201-chain (nfrag 1) | 3.7 (56) | 15.6 (12) | 2.4 (12), build 0.9 ms | 1.6 (13) |
+
+- **Rebuild threshold**: rebuild 1.0 stays faster than 0 on the device on all four systems (a build costs 1-3 ms, one more iteration 0.1-0.35 ms), so
+  the default 1.0 is kept for the GPU as well.
+- urea400-water1000: charges vs diag up to 1.1e-10 e per step for the device AND the host build (1.10e-10); two diag runs agree to 6e-14. This is the
+  spread of two solves converged to the absolute GPU tolerance 1e-10 on |r|, not an error of the build.
 
 Measurements (Oct 10, 2026; MD 50 fs, dt 1 fs, 300 K; per-step means over steps 1-49, n = 3 runs unless noted, spread = range of the run means;
 RTX 5080, 32 cores). Epot after 50 fs -902.161126 Eh in every run; per-step charges within 3.5e-11 e (CPU) / 3.4e-11 e (GPU) of `diag`.
@@ -140,8 +188,9 @@ The matrix itself differs by ~1e-13 between thread counts (threaded assembly), s
 
 - ROCm and Vulkan: same code path, not built or run here. `lu` and `ldlt` are errors there.
 - Multi-GPU split and the batch-worker device pool were not run after this change.
-- localinv: the GPU-side breakdown fallback (rz <= 0 in the device CG) was never triggered (only the host rejection, via the test hook); not run
-  with ALPB solvation, `eeq_distance_cutoff > 0`, transition metals, MD longer than 50 fs, optimisations, or nfrag > 4096 on the GPU (falls back to diag).
+- localinv: the GPU fallbacks were triggered only through the test hooks (no natural rejection or breakdown in any run); not run with ALPB
+  solvation, `eeq_distance_cutoff > 0`, transition metals, MD longer than 50 fs, optimisations, nfrag > 4096, or `eeq_localinv_ext_bohr` large
+  enough for the global-scratch path of `k_li_blocks` (blocks above about 150 atoms at 99 KB shared memory per block, estimated; polymer_2x has at most 86).
 
 ## Test note (Oct 10, 2026)
 

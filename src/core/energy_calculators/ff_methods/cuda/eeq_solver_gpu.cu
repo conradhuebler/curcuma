@@ -264,6 +264,17 @@ struct EEQSolverGPUImpl {
     bool                m_li_valid = false;
     int                 m_li_N = 0, m_li_nfrag = 0;
     long                m_li_runtime_fallbacks = 0;
+    // Claude Generated (Oct 2026): device build of the local inverse (buildLocalInverseOnDevice).
+    // m_li_device = true: G was built here and is applied as z = P G r (no H, no S^-1, see there).
+    bool                m_li_device = false;
+    bool                m_li_build_pending = false;   ///< requestLocalInverseDeviceBuild() was called
+    double              m_li_radius = 8.0, m_li_ext = 10.0;
+    CudaBuffer<int>     d_li_nblk, d_li_nkeep, d_li_fail, d_li_atoms;
+    CudaBuffer<float4>  d_li_xf;                      ///< float copy of the coordinates (prefilter)
+    CudaBuffer<unsigned int> d_li_maxabs;
+    CudaBuffer<double>  d_li_Gl_val, d_li_scratch;
+    int                 m_li_max_smem = -1;           ///< opt-in shared memory per block (bytes), queried once
+    EEQSolverGPU::LocalInverseDeviceStats m_li_stats;
     // Claude Generated (Oct 2026): dense LU of the augmented (N+nfrag) system
     // (solve_method lu, solveWithDeviceRHSAndGPUAugmentedLU).
     CudaBuffer<double>  d_aug_A;       ///< [M*M] augmented matrix, then its LU factor (column-major)
@@ -2114,6 +2125,14 @@ static inline void ppcgPrecondition(EEQSolverGPUImpl& impl, int N, int nfrag,
                                      const double* d_r, double* d_z)
 {
     int blk = 256, grd = (N + blk - 1) / blk;
+    if (impl.m_li_valid && impl.m_li_N == N && impl.m_li_nfrag == nfrag && impl.m_li_device) {
+        // Device build (Oct 2026): z = P G r, P = I - C^T (C C^T)^-1 C (subtract the fragment mean).
+        // Symmetric and positive definite on null(C) whenever G is; C z = 0 afterwards.
+        k_li_csr_spmv<<<grd, blk, 0, impl.stream>>>(N, impl.d_li_G_rowptr.ptr, impl.d_li_G_col.ptr,
+                                                    impl.d_li_G_val.ptr, d_r, d_z, 0);
+        ppcgProjectResidual(impl, N, nfrag, d_z);
+        return;
+    }
     if (impl.m_li_valid && impl.m_li_N == N && impl.m_li_nfrag == nfrag) {
         // z = G r ; t = C z ; mu = S^-1 t ; z -= H mu  (C z = 0 afterwards)
         k_li_csr_spmv<<<grd, blk, 0, impl.stream>>>(N, impl.d_li_G_rowptr.ptr, impl.d_li_G_col.ptr,
@@ -2424,9 +2443,429 @@ static bool runProjectedPCG(EEQSolverGPUImpl& impl, int N, int nfrag,
     static const bool print_iters = [] { const char* e = std::getenv("CURCUMA_PPCG_ITERS"); return e && *e && *e != '0'; }();
     if (print_iters)
         fprintf(stderr, "PPCG N=%d nfrag=%d iters=%d converged=%d |r|^2=%.3e%s\n",
-                N, nfrag, iters, converged ? 1 : 0, h_rnorm_sq, li_on ? " precond=localinv gpu" : "");
+                N, nfrag, iters, converged ? 1 : 0, h_rnorm_sq,
+                li_on ? (impl.m_li_device ? " precond=localinv gpu build=device" : " precond=localinv gpu build=host") : "");
     if (!converged) impl.m_ppcg_nonconv_calls += 1;
     return converged;
+}
+
+// ============================================================================
+// Device build of the local-inverse preconditioner (Claude Generated, Oct 2026)
+// ----------------------------------------------------------------------------
+// Same construction as the host EEQSolver::buildLocalInverse (maths: eeq_solver.h,
+// LocalInversePreconditioner): for every atom i the dense block B = A[E_i, E_i] over the atoms
+// within R_ext (ascending atom index, i included) is Cholesky-factorised, the column of i of B^-1
+// is solved, and its entries for atoms within R are row i of Gl; G = (Gl + Gl^T) / 2.
+// Differences to the host build:
+//   * B is gathered from the device matrix d_A (k_eeq_build_matrix), so G is the local inverse of
+//     exactly the matrix the CG multiplies with;
+//   * neighbours by a brute-force distance scan (one thread block per atom, N^2 distances, ~0.1 ms
+//     at N = 7320) instead of a cell list;
+//   * no global definiteness check (the host's sparse Cholesky of G, 17 of 47 ms): every local
+//     pivot must be > 0 (a cheap necessary condition), the rest is checked by the CG itself
+//     (rz > 0, pAp > 0) and by a true residual after convergence (solveWithDeviceRHSAndGPUProjectedPCG);
+//   * applied as z = P G r (orthogonal fragment projection) instead of G - H S^-1 H^T: no
+//     S = C G C^T, whose dense factorisation costs 4.2 ms (potrf) + 9.4 ms (potri) for nfrag = 1502
+//     on an RTX 5080. On the CPU this variant needs 0-2 more iterations (SP: polymer_2x 17 vs 16,
+//     peo201-water500 15 vs 14, urea400-water1000 11 vs 9, peo201-chain 14 vs 14).
+// Reproducible: every atom row is computed by one thread block in a fixed order, no atomics on
+// floating-point values.
+// ============================================================================
+
+/// Squared distance with explicit round-to-nearest operations (no FMA contraction), so that
+/// li_r2(i, j) == li_r2(j, i) bitwise and the kept pattern of G is exactly symmetric.
+__device__ __forceinline__ double li_r2(const double* __restrict__ cx, const double* __restrict__ cy,
+                                        const double* __restrict__ cz, int i, int j)
+{
+    const double dx = cx[i] - cx[j], dy = cy[i] - cy[j], dz = cz[i] - cz[j];
+    return __dadd_rn(__dadd_rn(__dmul_rn(dx, dx), __dmul_rn(dy, dy)), __dmul_rn(dz, dz));
+}
+
+/// Start of column c in a packed column-major lower triangle of order n.
+__device__ __forceinline__ int li_col(int c, int n) { return c * n - (c * (c - 1)) / 2; }
+
+/// Single-precision copy of the coordinates, shifted by atom 0 (keeps the magnitudes at the size of
+/// the system), for a cheap distance PRE-filter; w = 0. maxabs[0] receives max |shifted coordinate|
+/// as float bits (non-negative floats order like ints).
+__global__ void k_li_pack_f(int N, const double* __restrict__ cx, const double* __restrict__ cy,
+                            const double* __restrict__ cz, float4* __restrict__ xf, unsigned int* maxabs)
+{
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= N) return;
+    const float x = static_cast<float>(cx[j] - cx[0]);
+    const float y = static_cast<float>(cy[j] - cy[0]);
+    const float z = static_cast<float>(cz[j] - cz[0]);
+    xf[j] = make_float4(x, y, z, 0.0f);
+    const float m = fmaxf(fabsf(x), fmaxf(fabsf(y), fabsf(z)));
+    atomicMax(maxabs, __float_as_uint(m));
+}
+
+/// Squared-distance bound for the single-precision prefilter: every pair with exact r^2 <= E2 has
+/// float r^2 <= this. Error per coordinate difference <= 2 eps_f (|x_i| + |x_j|) + rounding of the
+/// shift, taken generously as 8 eps_f maxabs; the decision itself is always made with li_r2.
+__device__ __forceinline__ float li_prefilter_bound(double E2, const unsigned int* maxabs)
+{
+    const double delta = 8.0 * 1.2e-7 * static_cast<double>(__uint_as_float(*maxabs)) + 1e-6;
+    const double r = sqrt(E2) + 2.0 * sqrt(3.0) * delta;
+    return static_cast<float>(r * r * (1.0 + 1e-5));
+}
+
+/// Per atom: block size n_i (atoms within R_ext, i included) and kept entries k_i (within R).
+__global__ void k_li_count(int N, const double* __restrict__ cx, const double* __restrict__ cy,
+                           const double* __restrict__ cz, const float4* __restrict__ xf,
+                           const unsigned int* __restrict__ maxabs, double E2, double R2,
+                           int* __restrict__ nblk, int* __restrict__ nkeep)
+{
+    __shared__ int s_n, s_k;
+    const float E2f = li_prefilter_bound(E2, maxabs);
+    for (int i = blockIdx.x; i < N; i += gridDim.x) {
+        if (threadIdx.x == 0) { s_n = 0; s_k = 0; }
+        __syncthreads();
+        const float4 pi = xf[i];
+        int n = 0, k = 0;
+        for (int j = threadIdx.x; j < N; j += blockDim.x) {
+            const float4 pj = xf[j];
+            const float fx = pi.x - pj.x, fy = pi.y - pj.y, fz = pi.z - pj.z;
+            if (fx * fx + fy * fy + fz * fz > E2f) continue;   // certainly outside R_ext
+            const double r2 = li_r2(cx, cy, cz, i, j);
+            if (r2 <= E2) { ++n; if (r2 <= R2) ++k; }
+        }
+        atomicAdd(&s_n, n);   // integer sums: order-independent
+        atomicAdd(&s_k, k);
+        __syncthreads();
+        if (threadIdx.x == 0) { nblk[i] = s_n; nkeep[i] = s_k; }
+        __syncthreads();
+    }
+}
+
+/// Row i of Gl for the atoms atoms[0..count) (one thread block per atom, grid-stride). The atoms
+/// are launched in buckets of similar block size n_i, so that the dynamic shared memory (packed
+/// lower triangle + solved column + atom list) is sized for the bucket and not for the largest
+/// block of the system; a bucket whose largest block does not fit uses a per-block slice of global
+/// scratch instead (use_global). fail: 1 = a pivot <= 0 (block not positive definite), 2 =
+/// neighbour or kept count differs from k_li_count.
+__global__ void k_li_blocks(int N, const int* __restrict__ atoms, int count,
+                            const double* __restrict__ cx, const double* __restrict__ cy,
+                            const double* __restrict__ cz, const float4* __restrict__ xf,
+                            const unsigned int* __restrict__ maxabs, double E2, double R2,
+                            const double* __restrict__ A, int lda,
+                            const int* __restrict__ nblk, const int* __restrict__ rowptr, int n_max,
+                            int* __restrict__ Gcol, double* __restrict__ Glval, int* fail,
+                            int use_global, double* gscratch, long long gstride)
+{
+    extern __shared__ double li_smem[];
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, nwarps = blockDim.x >> 5;
+    const int bd = blockDim.x;
+    const long long npk = static_cast<long long>(n_max) * (n_max + 1) / 2;
+    double* L;
+    int* idx;
+    if (use_global) {
+        L = gscratch + static_cast<long long>(blockIdx.x) * gstride;
+        idx = reinterpret_cast<int*>(li_smem);
+    } else {
+        L = li_smem;
+        idx = reinterpret_cast<int*>(li_smem + npk + n_max);
+    }
+    double* x = L + npk;
+    unsigned char* keep = reinterpret_cast<unsigned char*>(idx + n_max);
+    int* wlist = reinterpret_cast<int*>(keep + ((n_max + 15) / 16) * 16);   // nwarps * n_max: (j << 1) | kept
+
+    __shared__ int s_k, s_fail;
+    __shared__ int s_wcnt[32];
+    const float E2f = li_prefilter_bound(E2, maxabs);
+
+    for (int b = blockIdx.x; b < count; b += gridDim.x) {
+        const int i = atoms[b];
+        if (tid == 0) { s_k = -1; s_fail = 0; }
+        const float4 pi = xf[i];
+        // (a) neighbours within R_ext in ascending atom order: warp w scans the w-th contiguous
+        //     segment of atom indices (ballots keep the order inside a warp), then the per-warp
+        //     lists are concatenated in warp order.
+        const int seg0 = static_cast<int>(static_cast<long long>(N) * warp / nwarps);
+        const int seg1 = static_cast<int>(static_cast<long long>(N) * (warp + 1) / nwarps);
+        int* wl = wlist + warp * n_max;
+        int cnt = 0;
+        for (int j0 = seg0; j0 < seg1; j0 += 32) {
+            const int j = j0 + lane;
+            bool in = false, kept = false;
+            if (j < seg1) {
+                const float4 pj = xf[j];
+                const float fx = pi.x - pj.x, fy = pi.y - pj.y, fz = pi.z - pj.z;
+                if (fx * fx + fy * fy + fz * fz <= E2f) {
+                    const double r2 = li_r2(cx, cy, cz, i, j);
+                    in = (r2 <= E2);
+                    kept = (r2 <= R2);
+                }
+            }
+            const unsigned m = __ballot_sync(0xffffffffu, in);
+            if (in) {
+                const int p = cnt + __popc(m & ((1u << lane) - 1u));
+                if (p < n_max) wl[p] = (j << 1) | (kept ? 1 : 0);
+            }
+            cnt += __popc(m);
+        }
+        if (lane == 0) s_wcnt[warp] = cnt;
+        __syncthreads();
+        int off = 0, n = 0;
+        for (int w = 0; w < nwarps; ++w) { if (w < warp) off += s_wcnt[w]; n += s_wcnt[w]; }
+        if (n <= n_max) {
+            for (int p = lane; p < cnt; p += 32) {
+                const int v = wl[p], j = v >> 1;
+                idx[off + p] = j;
+                keep[off + p] = static_cast<unsigned char>(v & 1);
+                if (j == i) s_k = off + p;
+            }
+        }
+        __syncthreads();
+        const int k = s_k;
+        if (n > n_max || n != nblk[i] || k < 0) {
+            if (tid == 0) atomicExch(fail, 2);
+            return;
+        }
+        // (b) packed lower triangle of B = A[idx, idx] from the device matrix (column-major, lda)
+        for (int c = warp; c < n; c += nwarps) {
+            const double* Acol = A + static_cast<long long>(idx[c]) * lda;
+            double* Lc = L + li_col(c, n);
+            for (int r = c + lane; r < n; r += 32) Lc[r - c] = Acol[idx[r]];
+        }
+        __syncthreads();
+        // (c) right-looking Cholesky B = L L^T (same operation order per element as the host
+        //     localCholeskyLower). Pivot <= 0: the block is not positive definite.
+        for (int kk = 0; kk < n; ++kk) {
+            double* Lk = L + li_col(kk, n);
+            if (tid == 0) {
+                const double p = Lk[0];
+                if (!(p > 0.0)) s_fail = 1; else Lk[0] = sqrt(p);
+            }
+            __syncthreads();
+            if (s_fail) break;
+            const double inv = 1.0 / Lk[0];
+            for (int r = kk + 1 + tid; r < n; r += bd) Lk[r - kk] *= inv;
+            __syncthreads();
+            for (int c = kk + 1 + warp; c < n; c += nwarps) {
+                const double l = Lk[c - kk];
+                double* Lc = L + li_col(c, n);
+                for (int r = c + lane; r < n; r += 32) Lc[r - c] -= l * Lk[r - kk];
+            }
+            __syncthreads();
+        }
+        if (s_fail) {
+            if (tid == 0) atomicExch(fail, 1);
+            return;
+        }
+        // (d) L y = e_k (y_m = 0 for m < k)
+        for (int m = tid; m < n; m += bd) x[m] = (m == k) ? 1.0 : 0.0;
+        __syncthreads();
+        for (int c = k; c < n; ++c) {
+            const double* Lc = L + li_col(c, n);
+            if (tid == 0) x[c] /= Lc[0];
+            __syncthreads();
+            const double xc = x[c];
+            for (int r = c + 1 + tid; r < n; r += bd) x[r] -= Lc[r - c] * xc;
+            __syncthreads();
+        }
+        // (e) L^T x = y, column-oriented: x_c final, then x_r -= L(c, r) x_c for r < c
+        for (int c = n - 1; c >= 0; --c) {
+            if (tid == 0) x[c] /= L[li_col(c, n)];
+            __syncthreads();
+            const double xc = x[c];
+            for (int r = tid; r < c; r += bd) x[r] -= L[li_col(r, n) + (c - r)] * xc;
+            __syncthreads();
+        }
+        // (f) kept entries of row i, ascending columns
+        if (tid == 0) {
+            int p = rowptr[i];
+            const int pend = rowptr[i + 1];
+            for (int m = 0; m < n; ++m) {
+                if (!keep[m]) continue;
+                if (p < pend) { Gcol[p] = idx[m]; Glval[p] = x[m]; }
+                ++p;
+            }
+            if (p != pend) atomicExch(fail, 2);
+        }
+        __syncthreads();
+    }
+}
+
+/// G_ij = (Gl_ij + Gl_ji) / 2 on the (symmetric) pattern; Gl_ji by binary search in row j.
+__global__ void k_li_symmetrize(int N, const int* __restrict__ rowptr, const int* __restrict__ col,
+                                const double* __restrict__ Glval, double* __restrict__ Gval, int* fail)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    for (int e = rowptr[i]; e < rowptr[i + 1]; ++e) {
+        const int j = col[e];
+        int lo = rowptr[j], hi = rowptr[j + 1] - 1, pos = -1;
+        while (lo <= hi) {
+            const int mid = (lo + hi) >> 1;
+            const int c = col[mid];
+            if (c == i) { pos = mid; break; }
+            if (c < i) lo = mid + 1; else hi = mid - 1;
+        }
+        if (pos < 0) { atomicExch(fail, 3); return; }
+        Gval[e] = 0.5 * Glval[e] + 0.5 * Glval[pos];
+    }
+}
+
+/// Test hook CURCUMA_LOCALINV_TEST_INDEFINITE: 1 = G -> -G (negative definite), 2 = G_ii -> -G_ii
+/// for every 10th atom (indefinite), 3 = G unchanged but the true-residual check fails every time.
+/// Only for exercising the fallbacks; 0 / unset = off.
+static int liTestMode()
+{
+    static const int mode = [] { const char* e = std::getenv("CURCUMA_LOCALINV_TEST_INDEFINITE"); return e ? std::atoi(e) : 0; }();
+    return mode;
+}
+
+/// Kernel of the test hook (modes 1 and 2).
+__global__ void k_li_test_perturb(int N, const int* __restrict__ rowptr, const int* __restrict__ col,
+                                  double* __restrict__ Gval, int mode)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    for (int e = rowptr[i]; e < rowptr[i + 1]; ++e)
+        if (mode == 1 || (mode == 2 && col[e] == i && i % 10 == 0)) Gval[e] = -Gval[e];
+}
+
+/// Builds G on the device from impl.d_A (must hold the current EEQ matrix, full, column-major).
+/// On success the preconditioner is active in device mode (m_li_device). Returns false with a
+/// reason; the caller then runs Jacobi. Claude Generated (Oct 2026).
+static bool buildLocalInverseOnDevice(EEQSolverGPUImpl& impl, int N, int nfrag, const double* cx,
+                                      const double* cy, const double* cz, std::string& why)
+{
+    cudaStream_t s = impl.stream;
+    // The matrix assembly queued before is not part of the build time: wait for it first (the
+    // count download below synchronises anyway, so this costs nothing extra).
+    checkCudaEEQ(cudaStreamSynchronize(s), "sync before li build");
+    const auto t0 = std::chrono::steady_clock::now();
+    impl.m_li_valid = false;
+    const double R2 = impl.m_li_radius * impl.m_li_radius;
+    const double E2 = impl.m_li_ext * impl.m_li_ext;
+    if (impl.d_li_nblk.n < N) impl.d_li_nblk.alloc(N);
+    if (impl.d_li_nkeep.n < N) impl.d_li_nkeep.alloc(N);
+    if (impl.d_li_fail.n < 1) impl.d_li_fail.alloc(1);
+    if (impl.d_li_G_rowptr.n < N + 1) impl.d_li_G_rowptr.alloc(N + 1);
+    if (impl.d_li_xf.n < N) impl.d_li_xf.alloc(N);
+    if (impl.d_li_maxabs.n < 1) impl.d_li_maxabs.alloc(1);
+    cudaMemsetAsync(impl.d_li_maxabs.ptr, 0, sizeof(unsigned int), s);
+    k_li_pack_f<<<(N + 255) / 256, 256, 0, s>>>(N, cx, cy, cz, impl.d_li_xf.ptr, impl.d_li_maxabs.ptr);
+    constexpr int kThreads = 128;
+    k_li_count<<<N, kThreads, 0, s>>>(N, cx, cy, cz, impl.d_li_xf.ptr, impl.d_li_maxabs.ptr, E2, R2,
+                                      impl.d_li_nblk.ptr, impl.d_li_nkeep.ptr);
+    std::vector<int> nblk(N), nkeep(N);
+    checkCudaEEQ(cudaMemcpyAsync(nblk.data(), impl.d_li_nblk.ptr, N * sizeof(int), cudaMemcpyDeviceToHost, s), "D2H li nblk");
+    checkCudaEEQ(cudaMemcpyAsync(nkeep.data(), impl.d_li_nkeep.ptr, N * sizeof(int), cudaMemcpyDeviceToHost, s), "D2H li nkeep");
+    checkCudaEEQ(cudaStreamSynchronize(s), "sync li count");
+    const double count_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+
+    std::vector<int> rowptr(N + 1, 0);
+    int n_max = 0;
+    double sum_block = 0.0;
+    for (int i = 0; i < N; ++i) {
+        rowptr[i + 1] = rowptr[i] + nkeep[i];
+        n_max = std::max(n_max, nblk[i]);
+        sum_block += nblk[i];
+    }
+    const int nnz = rowptr[N];
+    if (impl.d_li_G_col.n < nnz) impl.d_li_G_col.alloc(nnz);
+    if (impl.d_li_G_val.n < nnz) impl.d_li_G_val.alloc(nnz);
+    if (impl.d_li_Gl_val.n < nnz) impl.d_li_Gl_val.alloc(nnz);
+    checkCudaEEQ(cudaMemcpyAsync(impl.d_li_G_rowptr.ptr, rowptr.data(), (N + 1) * sizeof(int),
+                                 cudaMemcpyHostToDevice, s), "H2D li rowptr");
+    cudaMemsetAsync(impl.d_li_fail.ptr, 0, sizeof(int), s);
+
+    // Shared memory: packed lower triangle + solved column (doubles), atom list (int), kept flags.
+    if (impl.m_li_max_smem < 0) {
+        int dev = 0, v = 0;
+        cudaGetDevice(&dev);
+        cudaDeviceGetAttribute(&v, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+        impl.m_li_max_smem = v;
+    }
+    // Buckets of block size (<= 32, <= 64, <= 128, larger), each launch with the shared memory of its
+    // largest block: most blocks are small (mean 31 atoms on polymer_2x, largest 86), and memory for
+    // the largest block everywhere would leave few blocks resident per multiprocessor.
+    const int bucket_limit[4] = { 32, 64, 128, std::max(n_max, 129) };
+    std::vector<int> order;
+    order.reserve(N);
+    int bucket_begin[5] = { 0, 0, 0, 0, 0 };
+    int bucket_nmax[4] = { 0, 0, 0, 0 };
+    for (int bkt = 0; bkt < 4; ++bkt) {
+        bucket_begin[bkt] = static_cast<int>(order.size());
+        const int lo = bkt == 0 ? 0 : bucket_limit[bkt - 1];
+        for (int i = 0; i < N; ++i)
+            if (nblk[i] > lo && nblk[i] <= bucket_limit[bkt]) { order.push_back(i); bucket_nmax[bkt] = std::max(bucket_nmax[bkt], nblk[i]); }
+    }
+    bucket_begin[4] = static_cast<int>(order.size());
+    if (impl.d_li_atoms.n < N) impl.d_li_atoms.alloc(N);
+    checkCudaEEQ(cudaMemcpyAsync(impl.d_li_atoms.ptr, order.data(), order.size() * sizeof(int),
+                                 cudaMemcpyHostToDevice, s), "H2D li atom order");
+    const int nwarps = kThreads / 32;
+    bool any_global = false;
+    for (int bkt = 0; bkt < 4; ++bkt) {
+        const int count = bucket_begin[bkt + 1] - bucket_begin[bkt];
+        if (count == 0) continue;
+        const int nb = bucket_nmax[bkt];
+        const long long npk = static_cast<long long>(nb) * (nb + 1) / 2;
+        const size_t small_bytes = static_cast<size_t>(nb) * (sizeof(int) + 1) + 16
+                                 + static_cast<size_t>(nwarps) * nb * sizeof(int) + 16;
+        const size_t full_bytes = static_cast<size_t>(npk + nb) * sizeof(double) + small_bytes;
+        const size_t static_reserve = 1024;   // s_k, s_fail, s_wcnt and alignment
+        const bool use_global = full_bytes + static_reserve > static_cast<size_t>(impl.m_li_max_smem);
+        const size_t smem = use_global ? small_bytes : full_bytes;
+        int grid = count;
+        long long gstride = 0;
+        if (use_global) {
+            any_global = true;
+            gstride = ((npk + nb + 31) / 32) * 32;
+            const long long budget = 256LL * 1024 * 1024 / sizeof(double);   // 256 MB of scratch at most
+            grid = static_cast<int>(std::max(1LL, std::min<long long>(count, budget / gstride)));
+            if (impl.d_li_scratch.n < grid * gstride) impl.d_li_scratch.alloc(static_cast<int>(grid * gstride));
+        }
+        if (smem > 48 * 1024)
+            checkCudaEEQ(cudaFuncSetAttribute(k_li_blocks, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                              static_cast<int>(smem)), "li smem attribute");
+        k_li_blocks<<<grid, kThreads, smem, s>>>(N, impl.d_li_atoms.ptr + bucket_begin[bkt], count, cx, cy, cz,
+                                                 impl.d_li_xf.ptr, impl.d_li_maxabs.ptr, E2, R2,
+                                                 impl.d_A.ptr, N, impl.d_li_nblk.ptr,
+                                                 impl.d_li_G_rowptr.ptr, nb, impl.d_li_G_col.ptr,
+                                                 impl.d_li_Gl_val.ptr, impl.d_li_fail.ptr, use_global ? 1 : 0,
+                                                 use_global ? impl.d_li_scratch.ptr : nullptr, gstride);
+    }
+    checkCudaEEQ(cudaGetLastError(), "launch k_li_blocks");
+    {
+        const int blk = 256, grd = (N + blk - 1) / blk;
+        k_li_symmetrize<<<grd, blk, 0, s>>>(N, impl.d_li_G_rowptr.ptr, impl.d_li_G_col.ptr,
+                                            impl.d_li_Gl_val.ptr, impl.d_li_G_val.ptr, impl.d_li_fail.ptr);
+        const int test_mode = liTestMode();
+        if (test_mode == 1 || test_mode == 2)
+            k_li_test_perturb<<<grd, blk, 0, s>>>(N, impl.d_li_G_rowptr.ptr, impl.d_li_G_col.ptr,
+                                                  impl.d_li_G_val.ptr, test_mode);
+    }
+    int h_fail = 0;
+    checkCudaEEQ(cudaMemcpyAsync(&h_fail, impl.d_li_fail.ptr, sizeof(int), cudaMemcpyDeviceToHost, s), "D2H li fail");
+    checkCudaEEQ(cudaStreamSynchronize(s), "sync li build");
+    const double build_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    impl.m_li_stats.last_build_ms = build_ms;
+    impl.m_li_stats.total_build_ms += build_ms;
+
+    // Test hook shared with the host build: CURCUMA_LOCALINV_TEST_REJECT=1 rejects every build.
+    static const bool test_reject = [] { const char* e = std::getenv("CURCUMA_LOCALINV_TEST_REJECT"); return e && *e && *e != '0'; }();
+    if (h_fail == 1) why = "a dense block A[E,E] is not positive definite (local Cholesky pivot <= 0)";
+    else if (h_fail == 2) why = "neighbour list of the device build inconsistent";
+    else if (h_fail == 3) why = "pattern of the device-built G is not symmetric";
+    else if (test_reject) why = "rejected by CURCUMA_LOCALINV_TEST_REJECT";
+    const bool ok = (h_fail == 0) && !test_reject;
+
+    static const bool print_iters = [] { const char* e = std::getenv("CURCUMA_PPCG_ITERS"); return e && *e && *e != '0'; }();
+    if (print_iters)
+        fprintf(stderr, "LOCALINV GPU device build ok=%d build_ms=%.2f count_ms=%.2f nnz_row=%.1f block_mean=%.1f block_max=%d mem=%s\n",
+                ok ? 1 : 0, build_ms, count_ms, static_cast<double>(nnz) / N, sum_block / N, n_max,
+                any_global ? "global" : "shared");
+    if (!ok) return false;
+    impl.m_li_N = N;
+    impl.m_li_nfrag = nfrag;
+    impl.m_li_device = true;
+    impl.m_li_valid = true;
+    return true;
 }
 
 bool EEQSolverGPU::solveWithDeviceRHSAndGPUProjectedPCG(
@@ -2465,6 +2904,15 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUProjectedPCG(
     const bool do_refactor = force_refactor
                           || !impl.m_pcg_M_inv_valid
                           || (N != m_last_N);
+
+    // Claude Generated (Oct 2026): CURCUMA_PPCG_GPU_TIMING=1 synchronises after each phase and prints
+    // matrix / local-inverse build / CG / true-residual wall times (measurement hook, adds syncs).
+    static const bool phase_timing = [] { const char* e = std::getenv("CURCUMA_PPCG_GPU_TIMING"); return e && *e && *e != '0'; }();
+    auto phase_clock = [&]() {
+        if (phase_timing) cudaStreamSynchronize(impl.stream);
+        return std::chrono::steady_clock::now();
+    };
+    const auto tp0 = phase_clock();
 
     // Claude Generated (Sep 2026, F-3): multi-GPU split when configured and N is large enough.
     // A split that fails to set up (status set) falls back to the single-device path for good.
@@ -2506,6 +2954,27 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUProjectedPCG(
         // the inter-fragment Coulomb coupling limits convergence, not the intra-fragment one.
     }
 
+    const auto tp1 = phase_clock();
+    // Oct 2026: local inverse built on the device from the matrix just assembled (requested by
+    // the wrapper via requestLocalInverseDeviceBuild when its rebuild criterion fired).
+    if (impl.m_li_build_pending) {
+        impl.m_li_build_pending = false;
+        std::string why;
+        bool built = false;
+        if (use_split) {
+            why = "multi-GPU split active (no full matrix on one device)";
+            impl.m_li_valid = false;
+        } else {
+            built = buildLocalInverseOnDevice(impl, N, nfrag, cx, cy, cz, why);
+        }
+        if (built) {
+            impl.m_li_stats.builds += 1;
+        } else {
+            impl.m_li_stats.build_failures += 1;
+            impl.m_li_stats.last_why = why;
+        }
+    }
+
     if (impl.d_rhs.n < N) impl.d_rhs.alloc(N);
 
     // Warm-start q ← persistent cache (D2D), else zero. (A linear extrapolation from the last two
@@ -2537,12 +3006,53 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUProjectedPCG(
         checkCudaEEQ(cudaMemcpyAsync(impl.d_li_q0.ptr, impl.d_rhs.ptr, N * sizeof(double),
                                       cudaMemcpyDeviceToDevice, impl.stream), "D2D localinv q0");
     }
+    const auto tp2 = phase_clock();
     bool ok = runProjectedPCG(impl, N, nfrag, d_rhs_atoms, impl.d_rhs.ptr, max_iter, tol);
+    const auto tp3 = phase_clock();
+    bool residual_failed = false;
+    if (ok && li_on && impl.m_li_device) {
+        // Acceptance of a device-built G (Claude Generated, Oct 2026): the device build has no
+        // global definiteness check, and an indefinite M can let the RECURSIVE residual of the CG
+        // drift away from the true one. One extra matvec: |P(b - A q)| must be <= 2 tol (the
+        // recursion gap from rounding is far below tol for a positive definite M).
+        constexpr double kTrueResidualFactor = 2.0;
+        eeqMatvec(impl, N, impl.d_rhs.ptr, impl.d_pcg_Ap.ptr);
+        {
+            const int blk = 256, grd = (N + blk - 1) / blk;
+            k_pcg_init_residual<<<grd, blk, 0, impl.stream>>>(N, d_rhs_atoms, impl.d_pcg_Ap.ptr, impl.d_pcg_r.ptr);
+        }
+        ppcgProjectResidual(impl, N, nfrag, impl.d_pcg_r.ptr);
+        double h_true_sq = 0.0;
+        checkCublasEEQ(cublasSetPointerMode(impl.cublas_handle, CUBLAS_POINTER_MODE_HOST), "ptr host (li true res)");
+        checkCublasEEQ(cublasDdot(impl.cublas_handle, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_r.ptr, 1, &h_true_sq),
+                       "Ddot true residual (li)");
+        const double ratio = (tol > 0.0) ? std::sqrt(h_true_sq) / tol : 0.0;
+        static const bool print_iters = [] { const char* e = std::getenv("CURCUMA_PPCG_ITERS"); return e && *e && *e != '0'; }();
+        if (print_iters) fprintf(stderr, "LOCALINV GPU true residual |P(b-Aq)|/tol=%.3f\n", ratio);
+        if (liTestMode() == 3) h_true_sq = std::numeric_limits<double>::infinity();   // test hook
+        if (!(h_true_sq <= kTrueResidualFactor * kTrueResidualFactor * tol * tol)) {
+            ok = false;
+            residual_failed = true;
+            impl.m_li_stats.residual_fallbacks += 1;
+        } else {
+            impl.m_li_stats.last_true_residual_ratio = ratio;
+        }
+    }
+    if (phase_timing) {
+        const auto tp4 = phase_clock();
+        auto ms = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) {
+            return std::chrono::duration<double, std::milli>(b - a).count(); };
+        fprintf(stderr, "PPCG GPU timing matrix_ms=%.3f li_build_ms=%.3f cg_ms=%.3f true_res_ms=%.3f\n",
+                ms(tp0, tp1), ms(tp1, tp2), ms(tp2, tp3), ms(tp3, tp4));
+    }
     if (!ok && li_on) {
         impl.m_li_valid = false;   // never continue with this M; the host rebuilds or stays on Jacobi
         impl.m_li_runtime_fallbacks += 1;
-        CurcumaLogger::warn(fmt::format("EEQ GPU ppcg localinv: breakdown or stall, solve repeated with diagonal "
-                                        "Jacobi (fallbacks so far: {})", impl.m_li_runtime_fallbacks));
+        impl.m_li_stats.runtime_fallbacks += 1;
+        impl.m_li_stats.last_why = residual_failed ? "true residual above 2 tol" : "breakdown (rz <= 0 / pAp <= 0) or stall";
+        CurcumaLogger::warn(fmt::format("EEQ GPU ppcg localinv: {}, solve repeated with diagonal "
+                                        "Jacobi (fallbacks so far: {})", impl.m_li_stats.last_why,
+                                        impl.m_li_runtime_fallbacks));
         checkCudaEEQ(cudaMemcpyAsync(impl.d_rhs.ptr, impl.d_li_q0.ptr, N * sizeof(double),
                                       cudaMemcpyDeviceToDevice, impl.stream), "D2D localinv q0 restore");
         ok = runProjectedPCG(impl, N, nfrag, d_rhs_atoms, impl.d_rhs.ptr, max_iter, tol);
@@ -2592,6 +3102,7 @@ bool EEQSolverGPU::setLocalInversePreconditioner(int N, int nfrag,
     if (!ok) return false;
     impl.m_li_N = N;
     impl.m_li_nfrag = nfrag;
+    impl.m_li_device = false;
     impl.m_li_valid = true;
     return true;
 }
@@ -2599,6 +3110,19 @@ bool EEQSolverGPU::setLocalInversePreconditioner(int N, int nfrag,
 void EEQSolverGPU::clearLocalInversePreconditioner() { m_impl->m_li_valid = false; }
 bool EEQSolverGPU::localInversePreconditionerActive() const { return m_impl->m_li_valid; }
 long EEQSolverGPU::localInverseRuntimeFallbacks() const { return m_impl->m_li_runtime_fallbacks; }
+
+void EEQSolverGPU::requestLocalInverseDeviceBuild(double radius_bohr, double ext_bohr)
+{
+    auto& impl = *m_impl;
+    impl.m_li_radius = radius_bohr;
+    impl.m_li_ext = std::max(ext_bohr, radius_bohr);
+    impl.m_li_build_pending = true;
+    impl.m_li_valid = false;   // the previous G must not be used with the new geometry's request pending
+}
+
+bool EEQSolverGPU::localInverseDeviceBuildPossible(int N) const { return !splitWanted(*m_impl, N); }
+
+EEQSolverGPU::LocalInverseDeviceStats EEQSolverGPU::localInverseDeviceStats() const { return m_impl->m_li_stats; }
 
 // ============================================================================
 // WP6: uploadFragmentTopology — one-time setup for batched Cholesky (nfrag > 1)

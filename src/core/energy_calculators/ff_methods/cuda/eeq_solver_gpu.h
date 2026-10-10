@@ -368,6 +368,36 @@ public:
     long localInverseRuntimeFallbacks() const;
 
     /**
+     * @brief Build the local inverse G on the device (Claude Generated, Oct 2026).
+     *
+     * Marks a build for the next solveWithDeviceRHSAndGPUProjectedPCG call: there, after the EEQ
+     * matrix A is on the device, G is built from it (one thread block per atom: neighbours within
+     * ext_bohr in ascending atom order, dense block A[E,E] gathered from the device matrix,
+     * Cholesky + one column of the inverse in shared memory, entries within radius_bohr kept,
+     * G = (Gl + Gl^T)/2). The device applies z = P G r (P = orthogonal projection onto the
+     * fragment constraints) instead of the host's constraint form G - H S^-1 H^T, so no S and no
+     * nfrag limit. Definiteness: every local Cholesky pivot must be > 0 (else the build is
+     * rejected), rz <= 0 / pAp <= 0 / stall stop the CG, and the converged charges must pass a
+     * true residual |P(b - A q)| <= 2 tol; each failure redoes the solve with Jacobi.
+     * Not available with the multi-GPU split (no full matrix on one device).
+     */
+    void requestLocalInverseDeviceBuild(double radius_bohr, double ext_bohr);
+    /// true when a device build can run for N atoms (single device, full matrix present).
+    bool localInverseDeviceBuildPossible(int N) const;
+    /// Counters of the local inverse on this device (builds of both kinds, failures, fallbacks).
+    struct LocalInverseDeviceStats {
+        long   builds = 0;              ///< successful device builds
+        long   build_failures = 0;      ///< rejected device builds (pivot <= 0, pattern error, test hook)
+        long   runtime_fallbacks = 0;   ///< solves redone with Jacobi (host or device build)
+        long   residual_fallbacks = 0;  ///< part of runtime_fallbacks: true-residual check failed
+        double last_build_ms = 0.0;     ///< wall time of the last device build (host clock, synchronised)
+        double total_build_ms = 0.0;
+        double last_true_residual_ratio = 0.0;  ///< |P(b - A q)| / tol of the last accepted device-build solve
+        std::string last_why;           ///< reason of the last rejection or fallback
+    };
+    LocalInverseDeviceStats localInverseDeviceStats() const;
+
+    /**
      * @brief Batched per-fragment EEQ: independent N_f×N_f Cholesky + host Schur per fragment.
      *
      * Claude Generated (May 2026): Replaces single N×N Cholesky for nfrag > 1 systems.
