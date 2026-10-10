@@ -330,6 +330,7 @@ __device__ constexpr double TSQRT2PI_GPU = 0.797884560802866;
  * Diagonal:   A(i,i) = gam[i] + sqrt(2/pi) / sqrt(alpha[i])
  * Off-diag:   gamma_ij = 1/sqrt(alpha[i] + alpha[j])
  *             A(i,j) = erf(gamma_ij * r_ij) / r_ij
+ *             (= 1 / r_ij exactly when r_ij^2 >= 36 (alpha_i + alpha_j), no erf call there)
  *
  * Column-major layout: A[col*N + row].
  * Symmetric matrix → writes both lower and upper triangle for cuSOLVER potrs.
@@ -376,8 +377,16 @@ void k_eeq_build_matrix(
             A[i * N + j] = 0.0;
         } else {
             double r = sqrt(r_sq);
-            double gamma_ij = 1.0 / sqrt(alpha[i] + alpha[j]);
-            double val = erf(gamma_ij * r) / r;
+            const double asum = alpha[i] + alpha[j];
+            double val;
+            if (r_sq >= GFNFF_COUL_FARFIELD_X2 * asum) {
+                // Far field (Claude Generated, Oct 2026): erf(gamma_ij r) == 1.0 exactly for
+                // gamma_ij r >= 6 (GFNFF_COUL_FARFIELD_X2), so 1/r is bit-identical to erf()/r.
+                val = 1.0 / r;
+            } else {
+                double gamma_ij = 1.0 / sqrt(asum);
+                val = erf(gamma_ij * r) / r;
+            }
 
             // Column-major: element (row, col) at col*N + row
             // Write both triangles (cuSOLVER potrs reads full matrix)
@@ -391,6 +400,8 @@ void k_eeq_build_matrix(
  * @brief Column block [c0, c0+ncols) of the EEQ matrix, column-major (N rows), for the
  * multi-GPU split. Claude Generated (Sep 2026). Same element formula and operand order as
  * k_eeq_build_matrix (i = max(row,col), j = min(row,col)), so the values are bit-identical.
+ * It still calls erf() in the far field (multi-GPU only, not run on a one-GPU machine); the
+ * result equals k_eeq_build_matrix's 1/r there because erf saturates to 1.0 (GFNFF_COUL_FARFIELD_X2).
  */
 __global__ __launch_bounds__(256, 4)
 void k_eeq_build_cols(int N, int c0, int ncols,
@@ -3545,8 +3556,14 @@ void k_eeq_build_augmented(int N, int M,
                 v = 0.0;
             } else {
                 const double r = sqrt(r_sq);
-                const double gamma_ij = 1.0 / sqrt(alpha[i] + alpha[j]);
-                v = erf(gamma_ij * r) / r;
+                const double asum = alpha[i] + alpha[j];
+                // Far field (Claude Generated, Oct 2026): bit-identical, see k_eeq_build_matrix
+                if (r_sq >= GFNFF_COUL_FARFIELD_X2 * asum) {
+                    v = 1.0 / r;
+                } else {
+                    const double gamma_ij = 1.0 / sqrt(asum);
+                    v = erf(gamma_ij * r) / r;
+                }
             }
         }
     } else if (row >= N && col >= N) {

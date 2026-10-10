@@ -360,15 +360,25 @@ __global__ void k_coulomb(
             double qi = charges[i];
             double qj = charges[j];
             if (!isnan(qi) && !isnan(qj)) {
-                double gamma_r = gamma_ij[tid] * rij;
-                double erf_v   = erf(gamma_r);
-                local_E = qi * qj * erf_v / rij;
+                const double g = gamma_ij[tid];
+                double fac;
+                if (g * g * r2 >= GFNFF_COUL_FARFIELD_X2) {
+                    // Far field (Claude Generated, Oct 2026): erf == 1, exp term < 2.3e-16, see
+                    // GFNFF_COUL_FARFIELD_X2. E = qq/r, fac = dEdr/r = -qq/r^3. sqrt and division
+                    // (no rsqrt): this path carries a per-pair cutoff, tested on rij above.
+                    local_E = qi * qj / rij;
+                    fac     = -(qi * qj) / (r2 * rij);
+                } else {
+                    double gamma_r = g * rij;
+                    double erf_v   = erf(gamma_r);
+                    local_E = qi * qj * erf_v / rij;
 
-                static const double inv_sqrt_pi = 0.5641895835477563;
-                double exp_v  = exp(-gamma_r * gamma_r);
-                double derf   = gamma_ij[tid] * exp_v * (2.0 * inv_sqrt_pi);
-                double dEdr   = qi * qj * (derf / rij - erf_v / (rij * rij));
-                double fac    = dEdr / rij;
+                    static const double inv_sqrt_pi = 0.5641895835477563;
+                    double exp_v  = exp(-gamma_r * gamma_r);
+                    double derf   = g * exp_v * (2.0 * inv_sqrt_pi);
+                    double dEdr   = qi * qj * (derf / rij - erf_v / (rij * rij));
+                    fac           = dEdr / rij;
+                }
                 add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
                 add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
             }
@@ -397,6 +407,7 @@ __global__ void k_coulomb_implicit(
         const double qi = charges[i];
         if (!isnan(qi)) {
             static const double inv_sqrt_pi = 0.5641895835477563;
+            const bool no_cut = isinf(r_cut);   // default: no Coulomb cutoff (coulomb_r_cut)
             double gx = 0.0, gy = 0.0, gz = 0.0, e_half = 0.0;
             for (int j = 0; j < natoms; ++j) {
                 if (j == i) continue;
@@ -405,18 +416,38 @@ __global__ void k_coulomb_implicit(
                 double dz  = cz[i] - cz[j];
                 applyMIC(dx, dy, dz);
                 double r2  = dx*dx + dy*dy + dz*dz;
+                const double asum = alp[i] + alp[j];
+                if (no_cut && r2 >= GFNFF_COUL_FARFIELD_X2 * asum) {
+                    // Far field, no cutoff (Claude Generated, Oct 2026): same arithmetic as
+                    // k_coulomb_tiles (erf == 1, exp term < 2.3e-16, rsqrt).
+                    const double qj = charges[j];
+                    if (isnan(qj)) continue;
+                    const double ri = rsqrt(r2);
+                    const double e  = qi * qj * ri;
+                    e_half += 0.5 * e;
+                    const double f = -e * ri * ri;
+                    gx += f*dx; gy += f*dy; gz += f*dz;
+                    continue;
+                }
                 double rij = sqrt(r2);
                 if (rij > r_cut || rij < 1e-10) continue;
                 double qj = charges[j];
                 if (isnan(qj)) continue;
-                double gamma_ij = 1.0 / sqrt(alp[i] + alp[j]);
-                double gamma_r = gamma_ij * rij;
-                double erf_v   = erf(gamma_r);
-                e_half += 0.5 * (qi * qj * erf_v / rij);
-                double exp_v  = exp(-gamma_r * gamma_r);
-                double derf   = gamma_ij * exp_v * (2.0 * inv_sqrt_pi);
-                double dEdr   = qi * qj * (derf / rij - erf_v / (rij * rij));
-                double fac    = dEdr / rij;
+                double fac;
+                if (r2 >= GFNFF_COUL_FARFIELD_X2 * asum) {
+                    // Far field inside a finite cutoff: sqrt and division (Claude Generated, Oct 2026).
+                    e_half += 0.5 * (qi * qj / rij);
+                    fac     = -(qi * qj) / (r2 * rij);
+                } else {
+                    double gamma_ij = 1.0 / sqrt(asum);
+                    double gamma_r = gamma_ij * rij;
+                    double erf_v   = erf(gamma_r);
+                    e_half += 0.5 * (qi * qj * erf_v / rij);
+                    double exp_v  = exp(-gamma_r * gamma_r);
+                    double derf   = gamma_ij * exp_v * (2.0 * inv_sqrt_pi);
+                    double dEdr   = qi * qj * (derf / rij - erf_v / (rij * rij));
+                    fac           = dEdr / rij;
+                }
                 gx += fac*dx; gy += fac*dy; gz += fac*dz;
             }
             local_E = e_half;
@@ -437,6 +468,8 @@ __global__ void k_coulomb_implicit(
 // on large systems (polymer_2x, 7320 atoms: 85 ms of ~180 ms per energy call, nsys Sep 29).
 // Thread t of tile (bi, bj) owns atom i = bi*T + t; it walks the j tile in a rotated order
 // (jj = (t + k) mod T) so that concurrent shared-memory atomics on the j gradients rarely collide.
+// Far field (Oct 2026): pairs with r^2 >= 36 (alp_i + alp_j) skip erf/exp (GFNFF_COUL_FARFIELD_X2);
+// polymer_2x: 11.2 -> 2.4 ms per call on an RTX 5080 (CUPTI, n = 22 calls), energy unchanged at 1e-13 Eh.
 // ============================================================================
 
 __global__ void k_coulomb_tiles(
@@ -479,6 +512,7 @@ __global__ void k_coulomb_tiles(
     const double qi = active ? charges[i] : nan("");
     const double ai = active ? alp[i] : 1.0;
     const bool diag = (bi == bj);
+    const bool no_cut = isinf(r_cut);   // default: no Coulomb cutoff (coulomb_r_cut)
     static const double two_inv_sqrt_pi = 1.1283791670955126;
 
     if (active && !isnan(qi)) {
@@ -493,15 +527,39 @@ __global__ void k_coulomb_tiles(
             double dz = zi - sz[jj];
             applyMIC(dx, dy, dz);
             const double r2  = dx * dx + dy * dy + dz * dz;
+            const double asum = ai + sa[jj];
+            const double qq   = qi * qj;
+            double fac;
+            if (no_cut && r2 >= GFNFF_COUL_FARFIELD_X2 * asum) {
+                // Far field, no cutoff (Claude Generated, Oct 2026): erf(gamma r) == 1 and the exp
+                // term is < 2.3e-16 (GFNFF_COUL_FARFIELD_X2). rsqrt (1 ulp) replaces sqrt and two
+                // divisions. r2 >= 36 asum > 0, so the r < 1e-10 guard below cannot apply here.
+                const double ri = rsqrt(r2);
+                const double e  = qq * ri;
+                local_E += e;
+                fac = -e * ri * ri;
+                const double fx = fac * dx, fy = fac * dy, fz = fac * dz;
+                gx += fx; gy += fy; gz += fz;
+                atomicAdd(&sgx[jj], -fx);
+                atomicAdd(&sgy[jj], -fy);
+                atomicAdd(&sgz[jj], -fz);
+                continue;
+            }
             const double rij = sqrt(r2);
             if (rij > r_cut || rij < 1e-10) continue;
-            const double gamma_ij = 1.0 / sqrt(ai + sa[jj]);
-            const double gamma_r  = gamma_ij * rij;
-            const double erf_v    = erf(gamma_r);
-            const double qq       = qi * qj;
-            local_E += qq * erf_v / rij;
-            const double derf = gamma_ij * exp(-gamma_r * gamma_r) * two_inv_sqrt_pi;
-            const double fac  = qq * (derf / rij - erf_v / r2) / rij;
+            if (r2 >= GFNFF_COUL_FARFIELD_X2 * asum) {
+                // Far field inside a finite cutoff: same shortcut with sqrt and division,
+                // taken after applyMIC and the unchanged cutoff test.
+                local_E += qq / rij;
+                fac = -qq / (r2 * rij);
+            } else {
+                const double gamma_ij = 1.0 / sqrt(asum);
+                const double gamma_r  = gamma_ij * rij;
+                const double erf_v    = erf(gamma_r);
+                local_E += qq * erf_v / rij;
+                const double derf = gamma_ij * exp(-gamma_r * gamma_r) * two_inv_sqrt_pi;
+                fac = qq * (derf / rij - erf_v / r2) / rij;
+            }
             const double fx = fac * dx, fy = fac * dy, fz = fac * dz;
             gx += fx; gy += fy; gz += fz;
             atomicAdd(&sgx[jj], -fx);
@@ -3798,8 +3856,11 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_build_fragment_matrices(
             Af[li * Nf + lj] = 0.0;
         } else {
             double r          = sqrt(r_sq);
-            double gamma_ij   = 1.0 / sqrt(alpha[gi] + alpha[gj]);
-            double val        = erf(gamma_ij * r) / r;
+            const double asum = alpha[gi] + alpha[gj];
+            // Far field (Claude Generated, Oct 2026): erf == 1.0 exactly, value bit-identical
+            double val        = (r_sq >= GFNFF_COUL_FARFIELD_X2 * asum)
+                                    ? 1.0 / r
+                                    : erf((1.0 / sqrt(asum)) * r) / r;
             Af[lj * Nf + li] = val;  // lower triangle (col=lj, row=li)
             Af[li * Nf + lj] = val;  // upper triangle (col=li, row=lj)
         }

@@ -16,6 +16,7 @@ below. If it needs measurements or a derivation, write them into the matching `d
 
 ## Jul - Sep 2026 (and some late June), 108 entries, full text in AIChangelog_2026-late.md
 
+- GFN-FF CUDA Coulomb/EEQ far field (Oct 10, 2026): pairs with r^2 >= 36(a_i+a_j) skip erf/exp (erf == 1 exactly); EEQ matrix bit-identical, polymer_2x MD step 50.2 -> 37.6 ms (n=3) — docs/GPU_TUNING.md
 - EEQ localinv built on the GPU (Oct 10, 2026): per-atom Cholesky blocks from the device matrix, z = P G r (no S), true-residual check; polymer_2x build 54 -> 2.3 ms, EEQ 23.8 -> 16.5 ms/step (rebuild 1.0) — docs/EEQ_SOLVER_CONTROL.md
 - CPU ppcg: symmetric threaded matvec (upper block triangle, fixed 64-tiles, per-block-row slices, no atomics, bitwise identical for all -threads); polymer_2x SP Phase-2 solve at 16 threads 855 -> 350 ms (n=3), MD 16 threads eeq_solve diag 972 -> 452-567 ms, localinv 423 -> 270-305 ms (n=2); docs/EEQ_SOLVER_CONTROL.md
 - GFN-FF frag_charge_model ensemble OOM fixed (Oct 10, 2026): placements by bounded DP instead of all C(q+G-1,q) distributions (bit-identical), variant memory budget frag_charge_variant_memory_mb — docs/FRAG_CHARGE_MODEL.md

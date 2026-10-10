@@ -168,6 +168,26 @@ MD step polymer_2x (7320 atoms, 16 host threads, A4500): **1 / 2 / 4 GPUs 0.139 
 Coulomb kernel 0.20 -> 0.14 s, split 0.14 -> 0.076 s). Energy call 120 -> 60 ms on 4 GPUs (EEQ 77 -> 35,
 Coulomb 32 -> 14 ms). polymer (1410 atoms, one fragment): 16.0 -> 12.0 ms per step, Coulomb only.
 
+**Coulomb far field without erf (Oct 10, 2026, no switch).** For gamma_ij r >= 6, tested as
+r^2 >= 36 (alp_i + alp_j), erf(gamma_ij r) is exactly 1.0 in FP64 (CUDA erf saturates from x = 5.9007,
+checked on 2e9 sample points) and the Gaussian of the force is below 2.3e-16 relative. The kernels then
+evaluate q_i q_j / r (energy) and 1/r (EEQ matrix) instead of erf and exp. This is not a cutoff.
+Affected: `k_coulomb_tiles`, `k_coulomb_implicit` (rsqrt when there is no `coulomb_r_cut`, otherwise sqrt
+and division after the unchanged cutoff test), `k_coulomb` (sqrt and division), and the matrix builds
+`k_eeq_build_matrix`, `k_eeq_build_augmented`, `k_eeq_build_fragment_matrices` (1.0/r). Not changed:
+`k_eeq_build_cols` (multi-GPU split, keeps erf; same values since erf is 1.0 there) and the ROCm kernels.
+- EEQ matrix: bit-identical, 0 differing elements in 25 builds over 12 systems (4 to 7320 atoms, incl. MOR41
+  PR16/PR24/PR25 and an 8-water cluster where 252 of 276 pairs take the shortcut).
+- Single points (11 systems, every Coulomb kernel variant, with and without `coulomb_r_cut 60`
+  and `eeq_distance_cutoff 40`): old/new |dE| <= 4.6e-13 Eh, |dg| <= 1.1e-15 Eh/Bohr; the old binary run
+  twice differs by the same amount (atomics order).
+- polymer_2x (7320 atoms, RTX 5080, 50 fs MD, n = 3 alternating): `gpu.coulomb` 15.4 -> 6.6 ms,
+  `eeq_solve` 16.1 -> 12.3 ms, step 50.2 -> 37.6 ms; Epot after 50 fs unchanged (-902.161126 Eh), PCG
+  iterations unchanged (16). Kernel times (CUPTI): `k_coulomb_tiles` 11.2 -> 2.4 ms (3.7 ms with sqrt and
+  division instead of rsqrt), `k_eeq_build_matrix` 6.6 -> 2.8 ms. 99.9 % of the pairs are far-field there.
+- Not checked: periodic cells (a `unitcell` comment did not change the -sp energy, so the PBC path was
+  not exercised), multi-GPU, other GPUs than the RTX 5080 (FP64 at 1/64; on an FP64-strong card the gain is smaller).
+
 | Option | Default | Effect / when to change |
 |---|---|---|
 | `-gfnff.gpu_split_devices auto\|0,1\|none` | auto | Devices for the split. `auto` = the `-gpu_devices` pool, else every visible device; off in a leased batch worker and when the run is pinned with an explicit `-gpu_device`. `none` = one device. |
