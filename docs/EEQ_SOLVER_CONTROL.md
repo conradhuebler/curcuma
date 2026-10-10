@@ -125,17 +125,16 @@ RTX 5080, 32 cores). Epot after 50 fs -902.161126 Eh in every run; per-step char
   R 8: 16 / 14 / 14-15 / 9; R 10: 13 / 12 / 12 / 8; R 12: 12 / 10 / 11 / 7. R_ext above R + 2 Bohr lowers no count but costs the cube of the block.
 - The Python reconstruction that motivated this (vault note "curcuma Schwarz-Attention") predicted 81 -> 18 on polymer_2x; the C++ measures 68 -> 15.
 
-## Threaded matvec of the CPU ppcg (Oct 10, 2026)
+## Threaded symmetric matvec of the CPU ppcg (Oct 10, 2026)
 
-The dense products `A_nn * p` (once per iteration) and `A_nn * q` (residual start) run over fixed blocks of `kPpcgMatvecBlockRows` = 64 rows
-(`solveWithProjectedPCG`, `eeq_solver.cpp`), distributed over `-threads` like `buildLocalInverse` (`m_ppcg_pool`, `m_ppcg_threads`). Every output row is
-computed by one thread, the blocks do not depend on the thread count, there is no reduction: the product is bitwise identical for every `-threads` and
-equal to the former unblocked `A_nn * x` (checked once with a temporary debug hook on polymer_2x, 4 and 32 threads, block sizes 64 and 256; the hook is removed).
-`CURCUMA_PPCG_MATVEC_BLOCK=<rows>` overrides the block size (measurement only). The product is memory-bandwidth bound (428 MB per product on polymer_2x):
-`-sp`, Phase-2 solve 902 -> 715 (4 threads), 710 (16), 754 ms (32 threads = SMT, slower than 16); 1 thread 904 -> 901 ms (n = 3 each).
-Machine ceiling (OpenMP read of the same 428 MB, 1/2/16 threads): 21 / 43 / 60 GB/s; the matvec reaches 35 GB/s on one thread and 45 GB/s threaded, so
-2x over serial is not reachable here. Open: exploiting the symmetry of `A_nn` (half the bytes). The matrix itself differs by ~1e-13 between thread counts
-(threaded assembly, also before this change), so charges are not bitwise equal across `-threads`; energy and iteration counts are (test 07).
+The dense products `A_nn * p` (once per iteration) and `A_nn * q` (residual start) in `solveWithProjectedPCG` (`eeq_solver.cpp`) read only the blocks (I,J), J >= I,
+of fixed `kPpcgMatvecBlockRows` = 64 tiles (half the bytes; both triangles of `A_nn` are stored and identical, the assembly evaluates one erf per pair i > j).
+Each tile gives `y_I += A_IJ x_J` and `y_J += A_IJ^T x_I`. Block row I is handled by one thread (atomic work counter, `m_ppcg_pool`/`m_ppcg_threads`, std::thread fallback);
+the transposed parts go to a private slice per block row (nblocks x N doubles), `y_J = own_J + sum_{I<J} slice_I[J]` is summed with I ascending. No atomics, no
+thread-dependent order: the hash of every product (213 per SP, both phases) is identical at 1, 4, 32 threads (checked once with a temporary hook, removed); it differs
+from the former row-wise product by rounding only (charges 1e-14 e, same iteration counts, SP -898.61727307 Eh). `CURCUMA_PPCG_MATVEC_BLOCK=<rows>` overrides the block size.
+polymer_2x `-sp`, Phase-2 solve (median of 3): 1 thread 1138 -> 937 ms, 4: 868 -> 467, 16: 855 -> 350, 32: 827 -> 357. Machine-tested only; MD numbers in `AIChangelog.md`.
+The matrix itself differs by ~1e-13 between thread counts (threaded assembly), so charges are not bitwise equal across `-threads`; energy and iteration counts are (test 07).
 
 ## Not tested / open
 

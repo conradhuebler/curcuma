@@ -2232,42 +2232,75 @@ Vector EEQSolver::solveWithProjectedPCG(
         if (m_localinv->ok) li = m_localinv.get();
     }
 
-    // Claude Generated (Oct 2026): threaded dense matvec y = A_nn * x. A_nn is split into FIXED row blocks
-    // (kPpcgMatvecBlockRows, independent of the thread count); every block is computed by exactly one
-    // thread with Eigen's gemv, thread t takes blocks t, t+T, t+2T, ... There is no reduction over threads,
-    // so the result is bitwise identical for every thread count (also T = 1, same blocks). The product is
-    // memory-bandwidth bound (A_nn is streamed once, 8*N^2 bytes), hence the parallelism.
+    // Claude Generated (Oct 2026): symmetric threaded dense matvec y = A_nn * x. A_nn is symmetric (both
+    // triangles are stored, see the matrix assembly), so only the blocks (I,J), J >= I, of FIXED
+    // kPpcgMatvecBlockRows x kPpcgMatvecBlockRows tiles are read (half the memory traffic of the full
+    // product) and each tile gives two contributions:  y_I += A_IJ x_J  and  y_J += A_IJ^T x_I.
+    // Reproducibility without atomics: block row I is processed by exactly one thread (dynamic work
+    // counter, the tiles per row differ) and writes (a) own_I = sum_{J>=I} A_IJ x_J, J ascending, and
+    // (b) the transposed contributions A_IJ^T x_I into its own private slice tpart_I of length N. After a
+    // barrier, y_J = own_J + sum_{I<J} tpart_I[J] is summed with I ascending. Both the tile shapes and
+    // every summation order are independent of the thread count (also T = 1 runs the same code), so the
+    // result is bitwise identical for all -threads; it differs from a plain row-wise product by rounding.
     // CURCUMA_PPCG_MATVEC_BLOCK=<rows> overrides the block size (measurement hook, changes rounding by ulp).
     static const int matvec_block = [] {
         const char* e = std::getenv("CURCUMA_PPCG_MATVEC_BLOCK");
         const int v = e ? std::atoi(e) : 0;
         return v > 0 ? v : kPpcgMatvecBlockRows;
     }();
-    auto matvec = [&](const Vector& x, Vector& y) {
-        const int nblocks = (natoms + matvec_block - 1) / matvec_block;
-        auto do_block = [&](int b) {
-            const int i0 = b * matvec_block;
-            const int n = std::min(matvec_block, natoms - i0);
-            y.segment(i0, n).noalias() = A_nn.middleRows(i0, n) * x;
-        };
-        const int T = std::max(1, std::min(m_ppcg_threads, nblocks));
-        if (T <= 1) {
-            for (int b = 0; b < nblocks; ++b) do_block(b);
-            return;
-        }
-        auto worker = [&](int t) { for (int b = t; b < nblocks; b += T) do_block(b); };
+    const int mv_nblocks = (natoms + matvec_block - 1) / matvec_block;
+    Matrix mv_tpart;                 // column I: transposed contributions of block row I (rows >= I*block used)
+    Vector mv_own;                   // own_I per block row
+    if (natoms > 0) {
+        mv_tpart.resize(natoms, mv_nblocks);
+        mv_own.resize(natoms);
+    }
+    // Runs fn(t) for t = 0..T-1 on the pool (or std::thread fallback) and waits; T = 1 runs it inline.
+    auto run_team = [&](int T, const std::function<void(int)>& fn) {
+        if (T <= 1) { fn(0); return; }
         if (m_ppcg_pool) {
             std::vector<std::future<void>> futures;
             futures.reserve(T - 1);
-            for (int t = 1; t < T; ++t) futures.push_back(m_ppcg_pool->enqueue([&worker](int tt, int) { worker(tt); }, t, T));
-            worker(0);
+            for (int t = 1; t < T; ++t) futures.push_back(m_ppcg_pool->enqueue([&fn](int tt, int) { fn(tt); }, t, T));
+            fn(0);
             for (auto& f : futures) f.get();
         } else {
             std::vector<std::thread> threads;
-            for (int t = 1; t < T; ++t) threads.emplace_back(worker, t);
-            worker(0);
+            for (int t = 1; t < T; ++t) threads.emplace_back(fn, t);
+            fn(0);
             for (auto& th : threads) th.join();
         }
+    };
+    auto matvec = [&](const Vector& x, Vector& y) {
+        const int nb = mv_nblocks;
+        const int T = std::max(1, std::min(m_ppcg_threads, nb));
+        std::atomic<int> next_row(0);
+        run_team(T, [&](int) {
+            for (int I = next_row.fetch_add(1); I < nb; I = next_row.fetch_add(1)) {
+                const int i0 = I * matvec_block;
+                const int ni = std::min(matvec_block, natoms - i0);
+                auto xi = x.segment(i0, ni);
+                auto own = mv_own.segment(i0, ni);
+                own.noalias() = A_nn.block(i0, i0, ni, ni) * xi;
+                for (int J = I + 1; J < nb; ++J) {
+                    const int j0 = J * matvec_block;
+                    const int nj = std::min(matvec_block, natoms - j0);
+                    const auto blk = A_nn.block(i0, j0, ni, nj);
+                    own.noalias() += blk * x.segment(j0, nj);
+                    mv_tpart.col(I).segment(j0, nj).noalias() = blk.transpose() * xi;
+                }
+            }
+        });
+        std::atomic<int> next_col(0);
+        run_team(T, [&](int) {
+            for (int J = next_col.fetch_add(1); J < nb; J = next_col.fetch_add(1)) {
+                const int j0 = J * matvec_block;
+                const int nj = std::min(matvec_block, natoms - j0);
+                auto yj = y.segment(j0, nj);
+                yj = mv_own.segment(j0, nj);
+                for (int I = 0; I < J; ++I) yj += mv_tpart.col(I).segment(j0, nj);
+            }
+        });
     };
 
     std::vector<double> s(nfrag);

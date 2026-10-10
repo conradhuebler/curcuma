@@ -59,7 +59,7 @@ Stand.
   Offen: Standardwechsel auf `localinv` (Betreiber, erst Metalle/ALPB/Optimierung/lange MD messen), Aufbau der lokalen Inversen auf der GPU, Matvec mit Symmetrie, danach die
   Coulomb-Kraft (15 ms) als GPU-Engpass. [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md); Zahlen im Vault-Laborjournal "curcuma EEQ-Solver Benchmark".
 - **EEQ-Löser: algorithmische Verbesserungen nach dem Ensemble-Fix** (exakt, ohne Physikänderung; Betreiber 2026-10-10), Reihenfolge: (1) lokale Inverse auf der GPU aufbauen und jeden Schritt neu bauen
-  (GPU-Löser 23 -> ~12 ms), (2) Matvec und Matrixaufbau mit Symmetrie (CPU-Löser -20 bis -30 %), (3) Ladungsextrapolation mit `localinv` messen, (4) Coulomb-Kraft auf der GPU (15 ms) profilieren, (5) matrixfreier Matvec nur für Systeme > 20000 Atome.
+  (GPU-Löser 23 -> ~12 ms), (2) Matvec und Matrixaufbau mit Symmetrie (CPU-Löser -20 bis -30 %), (3) erledigt, negativ: Ladungsextrapolation spart 68 -> 66 Iterationen (localinv: 0), (4) Coulomb-Kraft auf der GPU (15 ms) profilieren, (5) matrixfreier Matvec nur für Systeme > 20000 Atome.
   Abnahme je Punkt: SP -898.61727307 Eh, Epot nach 50 fs -902.161126 Eh (CPU und CUDA), Ladungen <= 1e-10 e von heute, ctest seriell grün, Speicherdeckel auf allen Läufen. Ausgeschlossen: Toleranzen/Abschneidegrenzen (Genauigkeitsprofil unten).
 - **Genauigkeitsprofile `-accuracy loose|normal|high` (geplant, nicht begonnen, Betreiber 2026-10-10: jetzt nicht umsetzen)**: der Parameter `accuracy` (`gfnff.h:285`, `eeq_solver.h:1182`) wird nur
   durchgereicht, nichts liest ihn. Plan: eine zentrale Auflösung wie bei der Solver-Wahl, `normal` = heutiges Referenzverhalten bitgleich, Einzelschalter überschreiben; zuerst ein Scan der Schalter

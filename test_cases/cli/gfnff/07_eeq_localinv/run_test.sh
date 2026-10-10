@@ -10,7 +10,8 @@
 #   3. FALLBACK     - CURCUMA_LOCALINV_TEST_REJECT=1 rejects every build: warning, every solve on diag, energy
 #                     bit-identical to the diag run (never a wrong preconditioner)
 #   4. REPRODUCIBLE - two MD runs (2 fs) with localinv at 4 threads give bit-identical charges in every step
-#      MATVEC       - threaded dense matvec of the ppcg (fixed row blocks, no reduction over threads): same SP
+#      MATVEC       - symmetric threaded dense matvec of the ppcg (upper block triangle, fixed tiles, slices summed in
+#                     fixed order, no atomics): same SP
 #                     energy and same iteration counts at -threads 1 and 4, for diag and localinv
 #   5. REBUILD      - eeq_localinv_rebuild_bohr 100 builds once in a 3 fs MD, 0 builds every Phase-2 solve
 #                     (default 1.0 Bohr)
@@ -92,7 +93,7 @@ check("localinv MD reproducible at a fixed thread count", rca == 0 and rcb == 0 
 
 for pname, pextra in (("diag", []), ("localinv", LI)):
     # The matrix itself differs by ~1e-13 between thread counts (threaded assembly), so only energy and
-    # iteration counts are compared here; the bitwise independence of the matvec was checked separately.
+    # iteration counts are compared here; the bitwise independence of the symmetric matvec was checked separately.
     s1 = run("sp", W, pextra, threads=1)
     s4 = run("sp", W, pextra, threads=4)
     check(f"threaded matvec, SP {pname}: energy and ppcg iterations identical at 1 and 4 threads",
