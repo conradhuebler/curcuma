@@ -944,7 +944,7 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     m_ppcg_max_iter  = static_cast<int>(m_config.get<double>("eeq_ppcg_max_iter", 500.0));
     m_batched_max_error = m_config.get<double>("eeq_batched_max_error_eh", 1e-6);
     {   // Claude Generated (Oct 2026): local-inverse preconditioner of the projected PCG
-        const std::string pc = m_config.get<std::string>("eeq_ppcg_precond", "diag");
+        const std::string pc = m_config.get<std::string>("eeq_ppcg_precond", "localinv");
         if (pc == "localinv") m_ppcg_localinv = true;
         else if (pc != "diag")
             throw std::invalid_argument(fmt::format("eeq_ppcg_precond '{}' unknown (valid: diag, localinv)", pc));

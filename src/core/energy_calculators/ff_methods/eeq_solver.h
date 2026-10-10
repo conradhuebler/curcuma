@@ -1004,8 +1004,8 @@ private:
     int    m_ppcg_max_iter = 500;       ///< iteration cap; non-convergence falls back to Schur-Cholesky
     Vector m_ppcg_last_q;               ///< warm start (previous step's charges)
     // Local-inverse preconditioner of the projected PCG (Claude Generated, Oct 2026), see
-    // LocalInversePreconditioner. Off by default (eeq_ppcg_precond = diag).
-    bool   m_ppcg_localinv = false;     ///< eeq_ppcg_precond == localinv
+    // LocalInversePreconditioner. On by default (eeq_ppcg_precond = localinv), diag restores Jacobi.
+    bool   m_ppcg_localinv = false;     ///< set from eeq_ppcg_precond in the constructor (default localinv)
     double m_localinv_radius = 8.0;     ///< eeq_localinv_radius_bohr (kept entries per row)
     double m_localinv_ext = 10.0;       ///< eeq_localinv_ext_bohr (block that is inverted)
     double m_localinv_rebuild = 1.0;    ///< eeq_localinv_rebuild_bohr (0 = rebuild every solve)
@@ -1284,12 +1284,13 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
     PARAM(eeq_ppcg_min_atoms, Int, 500, "Minimum atom count for the automatic projected-PCG choice (small systems stay on the exact Schur-Cholesky solve).", "Algorithm", {})
     PARAM(eeq_ppcg_tol, Double, 1e-12, "Projected-PCG relative residual tolerance |P r| <= tol (|b|+1); 1e-12 gives energy/gradient deviations ~1e-12 from the direct solve (1e-10 saves ~15% of the iterations).", "Algorithm", {})
     PARAM(eeq_ppcg_max_iter, Int, 500, "Projected-PCG iteration cap; on non-convergence the exact Schur-Cholesky solve is used for that step.", "Algorithm", {})
-    // Claude Generated (Oct 2026): local-inverse preconditioner of the projected PCG, opt-in.
-    PARAM(eeq_ppcg_precond, String, "diag",
-          "Preconditioner of the projected PCG (ppcg): diag (default, diagonal Jacobi) | localinv "
-          "(sparse local inverse of the EEQ matrix: per atom the dense block of all atoms within "
+    // Claude Generated (Oct 2026): local-inverse preconditioner of the projected PCG; default since Oct 10, 2026.
+    PARAM(eeq_ppcg_precond, String, "localinv",
+          "Preconditioner of the projected PCG (ppcg): localinv (default since Oct 10, 2026) | diag (diagonal Jacobi, "
+          "the former default). localinv is a "
+          "sparse local inverse of the EEQ matrix: per atom the dense block of all atoms within "
           "eeq_localinv_ext_bohr is inverted and the entries within eeq_localinv_radius_bohr are kept; "
-          "used through a constraint preconditioner so the fragment charges stay exact). Only the "
+          "used through a constraint preconditioner so the fragment charges stay exact. Only the "
           "Phase-2 (final) charges use it; it needs fewer iterations but costs a build. If the "
           "symmetrised inverse is not positive definite the solve uses diag (warning, counted). "
           "See docs/EEQ_SOLVER_CONTROL.md.",

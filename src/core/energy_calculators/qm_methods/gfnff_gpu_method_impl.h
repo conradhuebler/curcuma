@@ -435,7 +435,7 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
     m_eeq_ppcg_min_nfrag = eeq_value("eeq_ppcg_min_nfrag", 1);
     m_eeq_ppcg_min_atoms = eeq_value("eeq_ppcg_min_atoms", 500);
     {   // Oct 2026: local-inverse preconditioner (same PARAMs and validation as the CPU EEQSolver)
-        const std::string pc = eeq_value("eeq_ppcg_precond", std::string("diag"));
+        const std::string pc = eeq_value("eeq_ppcg_precond", std::string("localinv"));
         if (pc == "localinv") m_eeq_localinv = true;
         else if (pc != "diag")
             throw std::invalid_argument(fmt::format("eeq_ppcg_precond '{}' unknown (valid: diag, localinv)", pc));

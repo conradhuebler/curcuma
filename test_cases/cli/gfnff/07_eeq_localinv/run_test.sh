@@ -72,10 +72,11 @@ def iters(lines, tag):
     return [int(re.search(r"iters=(\d+)", l).group(1)) for l in lines if tag in l]
 
 LI = ["-eeq_solver.eeq_ppcg_precond", "localinv"]
+DIAG = ["-eeq_solver.eeq_ppcg_precond", "diag"]
 W, CH = "water500.xyz", "chain.xyz"
 
 for name, xyz in (("501 fragments", W), ("one fragment", CH)):
-    rc0, _, pp0, e0, _ = run("sp", xyz, [])
+    rc0, _, pp0, e0, _ = run("sp", xyz, DIAG)
     rc1, _, pp1, e1, _ = run("sp", xyz, LI)
     it0 = max(iters(pp0, "iters="), default=0)              # Phase 2 is the larger count with diag
     it1 = iters(pp1, "precond=localinv")
@@ -84,8 +85,16 @@ for name, xyz in (("501 fragments", W), ("one fragment", CH)):
     check(f"SP {name}: same energy, at most half the iterations", ok,
           f"E diag {e0} localinv {e1}, Phase-2 iterations diag {it0} localinv {it1}")
 
+# Default since Oct 10, 2026: localinv is used without any flag; "diag" restores the diagonal Jacobi.
+rcd0, _, ppdef, edef, _ = run("sp", W, [])
+rcd1, _, ppdg, edg, _ = run("sp", W, DIAG)
+check("default preconditioner is localinv; diag selectable, same energy",
+      rcd0 == 0 and rcd1 == 0 and iters(ppdef, "precond=localinv") and not iters(ppdg, "precond=localinv")
+      and edef is not None and edg is not None and abs(edef - edg) < 1e-8,
+      f"E default {edef} diag {edg}")
+
 rc2, out2, pp2, e2, _ = run("sp", W, LI, {"CURCUMA_LOCALINV_TEST_REJECT": "1"})
-rc0, _, _, e0, _ = run("sp", W, [])
+rc0, _, _, e0, _ = run("sp", W, DIAG)
 check("rejected build falls back to diag, energy bit-identical", rc2 == 0 and e2 == e0 and e0 is not None
       and "preconditioner rejected" in out2 and not iters(pp2, "precond=localinv"),
       f"E {e2} vs {e0}")
@@ -95,7 +104,7 @@ rcb, _, _, _, qb = run("md", W, LI)
 check("localinv MD reproducible at a fixed thread count", rca == 0 and rcb == 0 and len(qa) >= 2 and qa == qb,
       f"steps {len(qa)}/{len(qb)}")
 
-for pname, pextra in (("diag", []), ("localinv", LI)):
+for pname, pextra in (("diag", DIAG), ("localinv", LI)):
     # The matrix itself differs by ~1e-13 between thread counts (threaded assembly), so only energy and
     # iteration counts are compared here; the bitwise independence of the symmetric matvec was checked separately.
     s1 = run("sp", W, pextra, threads=1)
@@ -122,7 +131,7 @@ have_gpu = os.path.exists(plugin) and shutil.which("nvidia-smi") is not None \
     and subprocess.run(["nvidia-smi", "-L"], capture_output=True).returncode == 0
 if have_gpu:
     G = ["-gpu", "cuda", "-gpu_strict", "true"]
-    rcd, _, ppd, _, qd = run("md", W, G, fs=3)
+    rcd, _, ppd, _, qd = run("md", W, G + DIAG, fs=3)
     rcl, outl, ppl, _, ql = run("md", W, G + LI, fs=3)
     itd = [i for i in iters(ppd, "iters=")]
     itl = iters(ppl, "precond=localinv gpu")

@@ -83,11 +83,11 @@ Cost on polymer_2x: 82 ms on the CPU, 336 ms on the GPU path (host loop), once (
 - **ldlt on the CPU** uses `dsytrs2` (level 3) instead of `dsytrs`: 7.3 -> 5.5 s per step, charges move by 2e-13 e.
   **lu on the CPU** is at the cost of the LU itself (Eigen and MKL `dgetrf` both 5.9 s for the 8822-row matrix).
 
-## Local-inverse preconditioner of ppcg (`eeq_ppcg_precond localinv`, opt-in)
+## Local-inverse preconditioner of ppcg (`eeq_ppcg_precond localinv`, default since Oct 10, 2026)
 
 Claude Generated (Oct 10, 2026) — 🤖 AI-generated, ⚙️ machine-tested (`cli_gfnff_07_eeq_localinv`, measurements below); human production testing pending.
 
-`-eeq_solver.eeq_ppcg_precond localinv` (default `diag`) replaces the diagonal Jacobi of the projected PCG, CPU and `-gpu cuda` (WP7-E).
+`-eeq_solver.eeq_ppcg_precond localinv` (the default since Oct 10, 2026; `diag` restores the diagonal Jacobi) replaces the diagonal Jacobi of the projected PCG, CPU and `-gpu cuda` (WP7-E).
 Per atom the dense block of A over all atoms within `eeq_localinv_ext_bohr` (default 10) is factorised, the column of the atom is solved and
 its entries within `eeq_localinv_radius_bohr` (default 8) are kept; G = (Gl + Gl^T)/2. It enters as a constraint preconditioner,
 z = G r - G C^T S^-1 C G r with S = C G C^T, so the iterates stay on the fragment-charge constraints; derivation and references in
