@@ -299,6 +299,8 @@ PARAM(frag_charge_tau, Double, 1.0, "frag_charge_model ensemble: temperature in 
 PARAM(frag_charge_sigma, Double, 0.05, "frag_charge_model ensemble: width in elementary charges of the weighting between chemically DIFFERENT charge carriers that the electron-count parity rule leaves tied, by the free single-constraint Phase-1 EEQ charge each carrier holds. Chemically identical carriers, e.g. the two ends of a symmetric X...X- pair, are weighted by their energies with frag_charge_tau instead.", "Advanced", {})
 PARAM(frag_charge_max_edges, Int, 4, "frag_charge_model ensemble: maximum number of fragment-fragment contacts inside the window that are blended - 2^n corners are evaluated. Contacts beyond this count, the most separated first, are treated as fully separated and a warning is printed.", "Advanced", {})
 PARAM(frag_charge_max_placements, Int, 6, "frag_charge_model ensemble: maximum number of integer charge placements evaluated per corner. With more groups the candidates are pre-selected by the free single-constraint Phase-1 EEQ charge of each group.", "Advanced", {})
+PARAM(frag_charge_variant_memory_mb, Int, 8192, "frag_charge_model ensemble: memory budget in MB for the charge variants held at the same time. Each variant is a complete GFN-FF instance; its size is estimated as 72 bytes * N^2 (measured 64-74 bytes * N^2 at N = 2822 and 6200 atoms). When placements x corners would exceed the budget, fewer placements per corner are evaluated (the ones with the lowest free-charge score are dropped), corners with the smallest weight are dropped if needed, variants not used in the current step are released, and a warning is printed once. At least one variant is always kept. The default leaves every system below about 4400 atoms unchanged at frag_charge_s_max 1.0.", "Advanced", {})
+PARAM(frag_charge_enumerate, Bool, false, "frag_charge_model ensemble, validation only: select the charge placements by enumerating ALL C(|charge|+G-1, |charge|) distributions over the G fragment groups, as before Oct 2026, instead of the bounded dynamic-programming selection that gives the same placements in the same order. Refused, with a warning, above 2 million distributions (memory).", "Advanced", {})
 PARAM(cn_cutoff_bohr, Double, 10.0, "CN neighbor list cutoff radius in Bohr (reference cnthr=100 Bohr^2=10 Bohr). 0 = use accuracy-based threshold instead.", "Advanced", {})
 PARAM(cn_accuracy, Double, 1.0, "CN accuracy for threshold calculation (cnthr = 100 - log10(acc)*50). Only used when cn_cutoff_bohr = 0. Set to 0 for full O(N^2) reference mode.", "Advanced", {})
 PARAM(solve, String, "auto",
@@ -765,6 +767,36 @@ public:
 
     /// frag_charge_model ensemble: number of charge variants evaluated in the last call (0 = inactive)
     int fragEnsembleVariantCount() const { return m_frag_last_nvariants; }
+
+    /**
+     * @brief Charge placements of the frag_charge_model ensemble for one corner (bounded selection)
+     *
+     * A placement distributes nq = |charge| units (sign `unit`, +1 or -1) over G groups. Rank per
+     * placement = sum over groups of [odd electron count] + (G+1)*[no electron left], with
+     * nelec[g] the electrons of the NEUTRAL group; score S = sum_g (unit*c_g) * qfree_g[g] / nq
+     * (summed in group order, as the full enumeration did). Returns the minimum-rank placements:
+     * all of them in the old enumeration order (lexicographically descending) if there are at
+     * most max_placements, else the max_placements best by S (ties: enumeration order).
+     * Dynamic programming over (group, units used) with pruning by safe dominance:
+     * O(G * nq^2 * max_placements) time, O(G * nq) memory; bit-identical to
+     * fragEnumeratePlacements() (equivalence test: test_frag_charge_selection).
+     * exact_tiebreak is set false only if a pathological cluster of near-equal scores (within
+     * rounding) had to be truncated, where the tie order may then differ from the enumeration.
+     * Claude Generated (Oct 2026).
+     */
+    static std::vector<std::vector<int>> fragSelectPlacements(int nq, double unit, const std::vector<long>& nelec,
+        const std::vector<double>& qfree_g, int max_placements, bool* exact_tiebreak = nullptr);
+
+    /**
+     * @brief Reference for fragSelectPlacements(): the pre-Oct-2026 full enumeration
+     *
+     * Enumerates all C(nq+G-1, nq) compositions (memory grows like G^nq), keeps the minimum
+     * rank, stable-sorts by S if more than max_placements remain and truncates. Validation and
+     * tests only (-gfnff.frag_charge_enumerate). Claude Generated (Oct 2026), code moved from
+     * fragEnsembleBlend().
+     */
+    static std::vector<std::vector<int>> fragEnumeratePlacements(int nq, double unit, const std::vector<long>& nelec,
+        const std::vector<double>& qfree_g, int max_placements);
 
     /**
      * @brief Retrieve cached topology information, computing it once if needed
@@ -2866,6 +2898,10 @@ private:
     double m_frag_sigma = 0.05;          ///< e, width of the free-charge softmax over carrier classes
     int m_frag_max_edges = 4;
     int m_frag_max_placements = 6;
+    int m_frag_variant_memory_mb = 8192; ///< budget for the held variants (Claude Generated, Oct 2026)
+    bool m_frag_enumerate = false;       ///< validation: full enumeration of the placements (pre-Oct-2026 path)
+    bool m_frag_warned_memory = false;
+    bool m_frag_warned_select = false;
     struct FragContact { int i, j; double thr, L, dL; };   // dL = dL/ds
     struct FragEdge { int f, g; double lambda = 1.0; std::vector<FragContact> contacts; };
     struct FragVariant {

@@ -106,6 +106,10 @@ add_cli_test(gfnff 02_caffeine_gfnff_energy_components)
 # fragment-charge placement (-gfnff.frag_charge_model ensemble, Known Issue #31, docs/FRAG_CHARGE_MODEL.md).
 add_cli_test(gfnff 05_frag_charge_ensemble)
 set_tests_properties(cli_gfnff_05_frag_charge_ensemble PROPERTIES TIMEOUT 900 LABELS "gfnff;frag_charge")
+# Claude Generated (Oct 2026): the ensemble with hundreds of fragments - bounded memory (no full enumeration of the
+# charge distributions), index-free carrier, equality with the former enumeration, variant memory budget.
+add_cli_test(gfnff 08_frag_charge_many_fragments)
+set_tests_properties(cli_gfnff_08_frag_charge_many_fragments PROPERTIES TIMEOUT 600 LABELS "gfnff;frag_charge")
 
 # Claude Generated (Oct 2026): EEQ solver control (auto thresholds, explicit names, alias, typo, GPU gap).
 add_cli_test(gfnff 06_eeq_solver_control)

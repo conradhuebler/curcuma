@@ -16,6 +16,7 @@ below. If it needs measurements or a derivation, write them into the matching `d
 
 ## Jul - Sep 2026 (and some late June), 108 entries, full text in AIChangelog_2026-late.md
 
+- GFN-FF frag_charge_model ensemble OOM fixed (Oct 10, 2026): placements by bounded DP instead of all C(q+G-1,q) distributions (bit-identical), variant memory budget frag_charge_variant_memory_mb — docs/FRAG_CHARGE_MODEL.md
 - EEQ ppcg CPU matvec threaded (Oct 10, 2026): fixed 64-row blocks of A_nn, bitwise independent of -threads; polymer_2x Phase-2 solve 900 -> 710 ms (4-16 threads), 1 thread unchanged; bandwidth-bound, not 2x — docs/EEQ_SOLVER_CONTROL.md
 - EEQ ppcg local-inverse preconditioner, opt-in -eeq_solver.eeq_ppcg_precond localinv (Oct 10, 2026): polymer_2x 68 -> 15 iterations, CPU EEQ 1004 -> 411 ms, CUDA 32 -> 21 ms per MD step — docs/EEQ_SOLVER_CONTROL.md
 - EEQ solver (Oct 10, 2026): batched fixed on CUDA (stale RHS column), energy criterion eeq_batched_max_error_eh replaces the distance threshold, lu and ldlt on CUDA, GPU tests share ctest RESOURCE_LOCK gpu — docs/EEQ_SOLVER_CONTROL.md

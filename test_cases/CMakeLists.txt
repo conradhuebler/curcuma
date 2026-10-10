@@ -173,6 +173,17 @@ add_test(NAME gfnff_frag_charge_history
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(gfnff_frag_charge_history PROPERTIES TIMEOUT 120 LABELS "gfnff;frag_charge")
 
+# Claude Generated (Oct 2026): the bounded placement selection of frag_charge_model ensemble
+# (GFNFF::fragSelectPlacements) returns the same placements in the same order as the former full
+# enumeration (20000 random cases), and scales to hundreds of fragment groups (docs/FRAG_CHARGE_MODEL.md).
+add_executable(test_frag_charge_selection unit/test_frag_charge_selection.cpp)
+target_link_libraries(test_frag_charge_selection curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_frag_charge_selection REUSE_FROM curcuma_core)
+endif()
+add_test(NAME gfnff_frag_charge_selection COMMAND test_frag_charge_selection 20000)
+set_tests_properties(gfnff_frag_charge_selection PROPERTIES TIMEOUT 300 LABELS "gfnff;frag_charge")
+
 # Copy reference data to build tree so tests can find them
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/reference_data
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR})

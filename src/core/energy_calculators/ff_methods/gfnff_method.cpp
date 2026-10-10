@@ -646,6 +646,8 @@ GFNFF::GFNFF(const json& parameters)
         m_frag_sigma = std::max(1e-6, m_parameters.value("frag_charge_sigma", 0.05));
         m_frag_max_edges = std::max(0, std::min(10, m_parameters.value("frag_charge_max_edges", 4)));
         m_frag_max_placements = std::max(1, m_parameters.value("frag_charge_max_placements", 6));
+        m_frag_variant_memory_mb = std::max(0, m_parameters.value("frag_charge_variant_memory_mb", 8192));
+        m_frag_enumerate = m_parameters.value("frag_charge_enumerate", false);
         if (m_frag_ensemble && m_topology_mode == "react") {
             CurcumaLogger::warn("GFNFF: frag_charge_model ensemble is not available in react topology mode - using the reference rule");
             m_frag_ensemble = false;

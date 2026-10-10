@@ -13,9 +13,6 @@ Stand.
 
 - **GFN-FF-Energie hängt von der Atomnummerierung ab** (911 von 2557 Strukturen, bis 237 kcal/mol bei geladenen Mehrfragment-Systemen;
   in pprcht und curcuma). Referenzeigenschaft, kein Portierungsfehler. [docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md) #12, Known Issue #34.
-- **`frag_charge_model ensemble` (Standard) sprengt den Speicher bei geladenen Systemen mit vielen Fragmenten** (2822 Atome, 497 Fragmente,
-  `-charge 4`: > 12 GB in Sekunden, 155 GB bis zum OOM-Kill am 2026-10-10; mit `-gfnff.frag_charge_model reference` 0 s, neutral ok; auch vor den
-  Solver-Änderungen reproduziert). Ursache in `gfnff_frag_charge.cpp` offen. Known Issue #31, [docs/FRAG_CHARGE_MODEL.md](docs/FRAG_CHARGE_MODEL.md).
 - **ROCm-GFN-FF ohne Coulomb-Term** als Voreinstellung seit `ab6e3f5e` (F-1, Umgehung `-gfnff.gpu_coulomb_implicit false`); GFN1/GFN2 auf ROCm
   ignorieren `-scf_mixed_precision false` (G2-13); Energiesummen nehmen wave32 an (F-17). Keine ROCm-Hardware, nur dokumentiert:
   [docs/MULTI_GPU_GAPS.md](docs/MULTI_GPU_GAPS.md).
@@ -58,8 +55,15 @@ Stand.
   Zahlen und Begründungen: Archiv, Abschnitt "GPU-SCF GFN1/GFN2"; [docs/GFN2_GPU_COST_PLAN.md](docs/GFN2_GPU_COST_PLAN.md).
 - **GPU-Gradient GFN1/GFN2**: Punkte 1 bis 6 umgesetzt; offen: der H0-Paar-Kernel (454 ms) ist einzelkartig, und `densityPatternDistributed`
   kopiert die C-Spaltenscheiben bei jedem Aufruf neu. [docs/SQM_PERFORMANCE.md](docs/SQM_PERFORMANCE.md).
-- **GFN-FF-MD, EEQ-Löser = 69 % des Schritts** (polymer_2x, 758,7 von 1095 ms, 16 CPU-Threads). Ob das nahe am Erreichbaren liegt, ist unbelegt.
-  Billiger erster Schritt: `-verbosity 2` und die Iterationszahl der projizierten PCG lesen.
+- **GFN-FF-MD, EEQ-Löser** (polymer_2x, 32 Threads): lokale Inverse (`localinv`, opt-in) und mehrthreadiges Matvec sind da, Schritt CPU 1247 -> 627 ms, GPU 74 -> 65 ms.
+  Offen: Standardwechsel auf `localinv` (Betreiber, erst Metalle/ALPB/Optimierung/lange MD messen), Aufbau der lokalen Inversen auf der GPU, Matvec mit Symmetrie, danach die
+  Coulomb-Kraft (15 ms) als GPU-Engpass. [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md); Zahlen im Vault-Laborjournal "curcuma EEQ-Solver Benchmark".
+- **EEQ-Löser: algorithmische Verbesserungen nach dem Ensemble-Fix** (exakt, ohne Physikänderung; Betreiber 2026-10-10), Reihenfolge: (1) lokale Inverse auf der GPU aufbauen und jeden Schritt neu bauen
+  (GPU-Löser 23 -> ~12 ms), (2) Matvec und Matrixaufbau mit Symmetrie (CPU-Löser -20 bis -30 %), (3) Ladungsextrapolation mit `localinv` messen, (4) Coulomb-Kraft auf der GPU (15 ms) profilieren, (5) matrixfreier Matvec nur für Systeme > 20000 Atome.
+  Abnahme je Punkt: SP -898.61727307 Eh, Epot nach 50 fs -902.161126 Eh (CPU und CUDA), Ladungen <= 1e-10 e von heute, ctest seriell grün, Speicherdeckel auf allen Läufen. Ausgeschlossen: Toleranzen/Abschneidegrenzen (Genauigkeitsprofil unten).
+- **Genauigkeitsprofile `-accuracy loose|normal|high` (geplant, nicht begonnen, Betreiber 2026-10-10: jetzt nicht umsetzen)**: der Parameter `accuracy` (`gfnff.h:285`, `eeq_solver.h:1182`) wird nur
+  durchgereicht, nichts liest ihn. Plan: eine zentrale Auflösung wie bei der Solver-Wahl, `normal` = heutiges Referenzverhalten bitgleich, Einzelschalter überschreiben; zuerst ein Scan der Schalter
+  (`eeq_ppcg_tol`, `cn_`/`hb_accuracy`, `eeq_distance_cutoff`, `coulomb_r_cut`, `dispersion_cutoff_bohr`) mit Fehler in E, F, NVE-Drift und Zeit, dann Fehlerbudget je Stufe; Abschneidegrenzen nur mit glatter Auslaufzone und konsistenter EEQ-Matrix. Offen: Stufennamen, Budget, `gfnff` oder `revgfnff`.
 - **GFN-FF Static-Mode-Initiative** (Mai 2026): die PARAMs `static_charges`/`static_cn` (WP-S1) sind im Code (`gfnff.h:323`), und der
   Changelog nennt WP-S1 bis S3 als umgesetzt. WP-S4 (Validierungssuite, 32-Konfigurationen-Matrix) nicht geprüft.
   [docs/GFNFF_STATIC_WP4_VALIDATION_SUITE.md](docs/GFNFF_STATIC_WP4_VALIDATION_SUITE.md).

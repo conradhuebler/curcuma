@@ -62,10 +62,13 @@
 #include "src/core/curcuma_logger.h"
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <map>
 #include <numeric>
+#include <set>
 
 #include <fmt/format.h>
 
@@ -108,6 +111,43 @@ void compositions(int units, int m, std::vector<int>& cur, std::vector<std::vect
         compositions(units - k, m - 1, cur, out);
         cur.pop_back();
     }
+}
+
+/// rank contribution of one group carrying c units: [odd electron count] + (G+1)*[no electron left].
+/// Same expressions as the pre-Oct-2026 enumeration (qg = unit * c as double, ne as long).
+inline int fragRankTerm(long nelec, double unit, int c, int G)
+{
+    const double qg = unit * c;
+    const long ne = nelec - static_cast<long>(qg);
+    int r = 0;
+    if (ne & 1L) ++r;
+    if (ne <= 0) r += G + 1;
+    return r;
+}
+
+/// score contribution (free-charge pre-selection) of one group carrying c units, same float
+/// expression as the enumeration: (unit*c) * qfree / nq, added to S in group order.
+inline double fragScoreTerm(double unit, int c, double qfree, int nq)
+{
+    const double qg = unit * c;
+    return qg * qfree / static_cast<double>(nq);
+}
+
+/// sparse placement prefix: (group, units) for the groups with c > 0, groups ascending
+using FragNZ = std::vector<std::pair<int, int>>;
+
+/// dense(a) > dense(b) lexicographically, i.e. a comes first in the old enumeration order
+/// (compositions() runs k = units .. 0 at the first slot, recursively)
+bool fragLexGreater(const FragNZ& a, const FragNZ& b)
+{
+    size_t i = 0;
+    for (; i < a.size() && i < b.size(); ++i) {
+        if (a[i].first != b[i].first)
+            return a[i].first < b[i].first;   // a is non-zero at an earlier group where b is zero
+        if (a[i].second != b[i].second)
+            return a[i].second > b[i].second;
+    }
+    return i < a.size() && i >= b.size();
 }
 
 void addScaled(FFEnergyComponents& a, const FFEnergyComponents& b, double w)
@@ -234,6 +274,168 @@ GFNFF* GFNFF::fragVariant(const std::string& key, const std::vector<int>& group_
     return m_frag_variants.back().ff.get();
 }
 
+std::vector<std::vector<int>> GFNFF::fragEnumeratePlacements(int nq, double unit, const std::vector<long>& nelec,
+    const std::vector<double>& qfree_g, int max_placements)
+{
+    // The pre-Oct-2026 code of fragEnsembleBlend(), unchanged in its arithmetic: all
+    // compositions, minimum rank, stable sort by S (only if more than max_placements), truncate.
+    const int G = static_cast<int>(nelec.size());
+    std::vector<std::vector<int>> comps;
+    std::vector<int> cur;
+    compositions(nq, G, cur, comps);
+    struct Cand { size_t idx; int radicals; double S; };
+    std::vector<Cand> cands;
+    int rmin = std::numeric_limits<int>::max();
+    for (size_t n = 0; n < comps.size(); ++n) {
+        Cand c{ n, 0, 0.0 };
+        for (int g = 0; g < G; ++g) {
+            c.radicals += fragRankTerm(nelec[g], unit, comps[n][g], G);
+            c.S += fragScoreTerm(unit, comps[n][g], qfree_g[g], nq);
+        }
+        rmin = std::min(rmin, c.radicals);
+        cands.push_back(c);
+    }
+    std::vector<Cand> kept;
+    for (const auto& c : cands)
+        if (c.radicals == rmin) kept.push_back(c);
+    if (static_cast<int>(kept.size()) > max_placements) {
+        std::stable_sort(kept.begin(), kept.end(), [](const Cand& x, const Cand& y) { return x.S > y.S; });
+        kept.resize(max_placements);
+    }
+    std::vector<std::vector<int>> out;
+    for (const auto& c : kept) out.push_back(comps[c.idx]);
+    return out;
+}
+
+std::vector<std::vector<int>> GFNFF::fragSelectPlacements(int nq, double unit, const std::vector<long>& nelec,
+    const std::vector<double>& qfree_g, int max_placements, bool* exact_tiebreak)
+{
+    // Claude Generated (Oct 2026). Replaces the full enumeration, which held C(nq+G-1, nq)
+    // vectors of length G (497 groups, nq = 3: 2e7 vectors, ~41 GB) before any filter acted.
+    //
+    // Both the rank and the score S are sums of per-group terms, so the placements are paths
+    // through the states (g, u) = (groups decided, units used). Rank: exact minimum by DP
+    // (suffix minima suf[g][r], prefix minima pre[u]). Only states on a minimum-rank path are
+    // kept; every prefix there has the same rank, so prefixes in one state differ only in S and
+    // in their enumeration order (lexicographic, decided inside the prefix).
+    // Selection: prefix B in a state can be dropped if at least K = max_placements other
+    // prefixes A beat it for EVERY common suffix. A beats B for every suffix if
+    //   (S_A >= S_B and A before B in enumeration order)   - float addition is monotone, a tie
+    //                                                          is then broken by the order, or
+    //   (S_A - S_B > delta)                                  - the gap survives all remaining
+    //                                                          roundings (delta bound below).
+    // Then the true top K are never dropped, and a final sort with the old comparator over the
+    // survivors gives exactly the old list. If there are at most K placements nothing is
+    // dropped and the list is returned in enumeration order (the old code did not sort then).
+    if (exact_tiebreak) *exact_tiebreak = true;
+    const int G = static_cast<int>(nelec.size());
+    const int K = std::max(1, max_placements);
+    if (G == 0 || nq < 0)
+        return {};
+    const int Q = nq + 1;
+    constexpr int INF = std::numeric_limits<int>::max() / 4;
+
+    // suffix minima: suf[g*Q + r] = minimum rank of r units over groups g .. G-1
+    std::vector<int> suf(static_cast<size_t>(G + 1) * Q, INF);
+    suf[static_cast<size_t>(G) * Q + 0] = 0;
+    for (int g = G - 1; g >= 0; --g)
+        for (int r = 0; r <= nq; ++r) {
+            int best = INF;
+            for (int c = 0; c <= r; ++c) {
+                const int tail = suf[static_cast<size_t>(g + 1) * Q + (r - c)];
+                if (tail < INF) best = std::min(best, fragRankTerm(nelec[g], unit, c, G) + tail);
+            }
+            suf[static_cast<size_t>(g) * Q + r] = best;
+        }
+    const int rmin = suf[nq];
+
+    // delta: every partial sum and term is bounded by M = sum |qfree_g| (c <= nq); each of the
+    // <= G remaining additions shifts a difference by at most 2 u M (u = DBL_EPSILON/2). Doubled.
+    double M = 0.0;
+    for (double q : qfree_g) M += std::abs(q);
+    const double delta = 4.0 * (G + 1) * DBL_EPSILON * M * 1.01;
+    const size_t cap = static_cast<size_t>(64) * K + 64;   // per state; only near-tie clusters reach it
+
+    struct Entry { double S; FragNZ nz; };
+    auto beats = [](const Entry& a, const Entry& b) {   // the old comparator: S descending, then enumeration order
+        if (a.S > b.S) return true;
+        if (b.S > a.S) return false;
+        return fragLexGreater(a.nz, b.nz);
+    };
+    std::vector<int> pre(Q, INF), npre(Q);
+    pre[0] = 0;
+    std::vector<unsigned long long> cnt(Q, 0), ncnt(Q);
+    cnt[0] = 1;
+    constexpr unsigned long long CNT_SAT = 1ull << 62;
+    std::vector<std::vector<Entry>> cur(Q), nxt(Q);
+    cur[0].push_back({ 0.0, {} });
+    for (int g = 0; g < G; ++g) {
+        const size_t sg = static_cast<size_t>(g) * Q, sg1 = static_cast<size_t>(g + 1) * Q;
+        std::fill(npre.begin(), npre.end(), INF);
+        for (int u = 0; u <= nq; ++u) {
+            if (pre[u] >= INF || pre[u] + suf[sg + (nq - u)] != rmin) continue;   // not on a minimum path
+            for (int c = 0; u + c <= nq; ++c)
+                npre[u + c] = std::min(npre[u + c], pre[u] + fragRankTerm(nelec[g], unit, c, G));
+        }
+        for (int t = 0; t <= nq; ++t) { nxt[t].clear(); ncnt[t] = 0; }
+        for (int u = 0; u <= nq; ++u) {
+            if (pre[u] >= INF || pre[u] + suf[sg + (nq - u)] != rmin) continue;
+            for (int c = 0; u + c <= nq; ++c) {
+                const int t = u + c;
+                if (npre[t] >= INF || npre[t] + suf[sg1 + (nq - t)] != rmin) continue;
+                if (pre[u] + fragRankTerm(nelec[g], unit, c, G) != npre[t]) continue;
+                ncnt[t] = std::min(CNT_SAT, ncnt[t] + cnt[u]);
+                const double term = fragScoreTerm(unit, c, qfree_g[g], nq);
+                for (const Entry& e : cur[u]) {
+                    Entry x{ e.S + term, e.nz };
+                    if (c > 0) x.nz.emplace_back(g, c);
+                    nxt[t].push_back(std::move(x));
+                }
+            }
+        }
+        // prune every state: drop an entry that at least K others beat for every suffix
+        for (int t = 0; t <= nq; ++t) {
+            std::vector<Entry>& L = nxt[t];
+            if (L.size() <= static_cast<size_t>(K)) continue;
+            std::vector<char> keep(L.size(), 1);
+            for (size_t b = 0; b < L.size(); ++b) {
+                int dom = 0;
+                for (size_t a = 0; a < L.size() && dom < K; ++a)
+                    if (a != b && ((L[a].S >= L[b].S && fragLexGreater(L[a].nz, L[b].nz)) || (L[a].S - L[b].S > delta)))
+                        ++dom;
+                keep[b] = dom < K;
+            }
+            std::vector<Entry> kept;
+            for (size_t b = 0; b < L.size(); ++b)
+                if (keep[b]) kept.push_back(std::move(L[b]));
+            if (kept.size() > cap) {   // near-tie cluster wider than the cap: keep the best by the old comparator
+                std::sort(kept.begin(), kept.end(), beats);
+                kept.resize(cap);
+                if (exact_tiebreak) *exact_tiebreak = false;
+            }
+            L = std::move(kept);
+        }
+        std::swap(cur, nxt);
+        pre = npre;
+        cnt = ncnt;
+    }
+    std::vector<Entry>& fin = cur[nq];
+    if (cnt[nq] <= static_cast<unsigned long long>(K))
+        std::sort(fin.begin(), fin.end(), [](const Entry& a, const Entry& b) { return fragLexGreater(a.nz, b.nz); });
+    else {
+        std::sort(fin.begin(), fin.end(), beats);
+        if (fin.size() > static_cast<size_t>(K)) fin.resize(K);
+    }
+    std::vector<std::vector<int>> out;
+    out.reserve(fin.size());
+    for (const Entry& e : fin) {
+        std::vector<int> v(G, 0);
+        for (const auto& p : e.nz) v[p.first] = p.second;
+        out.push_back(std::move(v));
+    }
+    return out;
+}
+
 double GFNFF::fragEnsembleBlend(bool gradient, double e_master)
 {
     const TopologyInfo& topo = getCachedTopology();
@@ -354,12 +556,57 @@ double GFNFF::fragEnsembleBlend(bool gradient, double e_master)
             master_idx = static_cast<int>(m_frag_variants.size()) - 1;
         }
     }
+    // ---- active corners and the variant memory budget (Claude Generated, Oct 2026) ------------
+    // Each variant is a complete GFNFF instance: measured 64-74 bytes * N^2 (VmRSS per variant,
+    // N = 2822: ~0.5 GB, N = 6200: ~2.6 GB), estimated as 72 bytes * N^2. The budget
+    // frag_charge_variant_memory_mb gives the number of variants held at once (>= 1); placements
+    // per corner and, if needed, the lightest corners are cut to fit (warning once).
+    std::vector<unsigned> act_mask;
+    std::vector<double> act_W;
     for (unsigned mask = 0; mask < (1u << k); ++mask) {
         double W = 1.0;
         for (int e = 0; e < k; ++e)
             W *= ((mask >> e) & 1u) ? (1.0 - edges[e].lambda) : edges[e].lambda;
         if (W <= 0.0)
             continue;   // exact: a corner with W = 0 has dW/dx = 0 too (smootherstep is C2 at both ends)
+        act_mask.push_back(mask);
+        act_W.push_back(W);
+    }
+    const double variant_bytes = std::max(1.0, 72.0 * static_cast<double>(m_atomcount) * static_cast<double>(m_atomcount));
+    const double budget_bytes = static_cast<double>(m_frag_variant_memory_mb) * 1024.0 * 1024.0;
+    const int max_held = static_cast<int>(std::min(1.0e6, std::max(1.0, std::floor(budget_bytes / variant_bytes))));
+    std::vector<char> act_use(act_mask.size(), 1);
+    bool mem_limited = false;
+    if (static_cast<int>(act_mask.size()) > max_held) {
+        // keep the max_held heaviest corners (ties: lower mask); the rest is renormalised away (Wok)
+        std::vector<size_t> order(act_mask.size());
+        std::iota(order.begin(), order.end(), 0);
+        std::stable_sort(order.begin(), order.end(), [&](size_t x, size_t y) { return act_W[x] > act_W[y]; });
+        std::fill(act_use.begin(), act_use.end(), 0);
+        for (int i = 0; i < max_held; ++i) act_use[order[i]] = 1;
+        mem_limited = true;
+    }
+    const int n_corners = std::min(static_cast<int>(act_mask.size()), max_held);
+    const int max_place = std::max(1, std::min(m_frag_max_placements, n_corners > 0 ? max_held / n_corners : max_held));
+
+    // ---- plan: the placements every corner needs, before any variant is built ----------------
+    struct Cand { std::vector<double> qg; int radicals; double S; std::string cls; };
+    struct CornerPlan {
+        unsigned mask = 0;
+        double W = 0.0;
+        int G = 0;
+        bool master = false;                 // the one-group corner of a one-fragment master
+        std::vector<int> group_of_atom;
+        std::vector<Cand> kept;
+        std::map<std::string, double> cls_W;
+        std::map<std::string, int> cls_id;
+        std::vector<std::string> keys;       // per kept candidate, "" = negligible class (skipped)
+    };
+    std::vector<CornerPlan> plans;
+    for (size_t ci = 0; ci < act_mask.size(); ++ci) {
+        if (!act_use[ci])
+            continue;
+        const unsigned mask = act_mask[ci];
         // groups = connected components of the merged edges over the base fragments
         std::vector<int> parent(F);
         std::iota(parent.begin(), parent.end(), 0);
@@ -390,16 +637,37 @@ double GFNFF::fragEnsembleBlend(bool gradient, double e_master)
         }
         for (auto& z : zlist) std::sort(z.begin(), z.end());
 
-        // all compositions of the net charge over the groups, then the parity filter
+        // placements: minimum rank, then at most frag_charge_max_placements by the free-charge
+        // score S. rank = bare_nuclei * (G + 1) + radicals: a placement that strips a group of ALL
+        // its electrons (a bare proton next to CO in a pass-2-split CH2O2+) is never preferred to
+        // one that does not, whatever the radical count; then the fewest odd-electron groups.
+        // fragSelectPlacements() gives the list of the former full enumeration (same members,
+        // same order) without enumerating all C(nq+G-1, nq) compositions (Oct 2026).
         std::vector<std::vector<int>> comps;
-        std::vector<int> cur;
-        compositions(nq, G, cur, comps);
-        // rank = bare_nuclei * (G + 1) + radicals: a placement that strips a group of ALL its
-        // electrons (a bare proton next to CO in a pass-2-split CH2O2+) is never preferred to one
-        // that does not, whatever the radical count; then the fewest odd-electron groups.
-        struct Cand { std::vector<double> qg; int radicals; double S; std::string cls; };
-        std::vector<Cand> cands;
-        int rmin = std::numeric_limits<int>::max();
+        bool exact_tiebreak = true;
+        bool enumerate = m_frag_enumerate;
+        if (enumerate) {
+            double ncomp = 1.0;
+            for (int t = 1; t <= nq; ++t) ncomp = ncomp * (G - 1 + t) / t;
+            if (ncomp > 2.0e6) {
+                if (!m_frag_warned_select) {
+                    CurcumaLogger::warn(fmt::format("GFNFF frag_charge_enumerate: {:.3g} charge distributions over {} groups exceed the "
+                                                    "enumeration limit (2e6) - using the bounded selection", ncomp, G));
+                    m_frag_warned_select = true;
+                }
+                enumerate = false;
+            }
+        }
+        if (enumerate)
+            comps = fragEnumeratePlacements(nq, unit, nelec, qfree_g, m_frag_max_placements);
+        else
+            comps = fragSelectPlacements(nq, unit, nelec, qfree_g, m_frag_max_placements, &exact_tiebreak);
+        if (!exact_tiebreak && !m_frag_warned_select) {
+            CurcumaLogger::warn("GFNFF frag_charge_model ensemble: many placements with free-charge scores equal within rounding; "
+                                "their tie order may differ from the full enumeration");
+            m_frag_warned_select = true;
+        }
+        std::vector<Cand> kept;
         for (const auto& cmp : comps) {
             Cand c;
             c.qg.assign(G, 0.0);
@@ -408,10 +676,8 @@ double GFNFF::fragEnsembleBlend(bool gradient, double e_master)
             std::vector<std::string> parts;
             for (int g = 0; g < G; ++g) {
                 c.qg[g] = unit * cmp[g];
-                const long ne = nelec[g] - static_cast<long>(c.qg[g]);
-                if (ne & 1L) ++c.radicals;
-                if (ne <= 0) c.radicals += G + 1;
-                c.S += c.qg[g] * qfree_g[g] / static_cast<double>(nq);
+                c.radicals += fragRankTerm(nelec[g], unit, cmp[g], G);
+                c.S += fragScoreTerm(unit, cmp[g], qfree_g[g], nq);
                 if (cmp[g] != 0) {
                     std::string zs = fmt::format("{:+d}:", static_cast<int>(c.qg[g]));
                     for (int z : zlist[g]) zs += fmt::format("{}.", z);
@@ -420,15 +686,14 @@ double GFNFF::fragEnsembleBlend(bool gradient, double e_master)
             }
             std::sort(parts.begin(), parts.end());
             for (const auto& ps : parts) c.cls += ps + "/";
-            rmin = std::min(rmin, c.radicals);
-            cands.push_back(std::move(c));
+            kept.push_back(std::move(c));
         }
-        std::vector<Cand> kept;
-        for (auto& c : cands)
-            if (c.radicals == rmin) kept.push_back(std::move(c));
-        if (static_cast<int>(kept.size()) > m_frag_max_placements) {
+        // memory budget: fewer placements per corner, the lowest score S dropped first - exactly
+        // what frag_charge_max_placements = max_place would select
+        if (static_cast<int>(kept.size()) > max_place) {
             std::stable_sort(kept.begin(), kept.end(), [](const Cand& x, const Cand& y) { return x.S > y.S; });
-            kept.resize(m_frag_max_placements);
+            kept.resize(max_place);
+            mem_limited = true;
         }
         // class weights Omega = softmax(S_class / sigma), S_class = max over its members
         std::map<std::string, double> cls_S;
@@ -445,30 +710,88 @@ double GFNFF::fragEnsembleBlend(bool gradient, double e_master)
         for (const auto& kv : cls_S) { cls_W[kv.first] = std::exp((kv.second - smax) / m_frag_sigma); zc += cls_W[kv.first]; }
         for (auto& kv : cls_W) { kv.second /= zc; cls_id.emplace(kv.first, static_cast<int>(cls_id.size())); }
 
+        CornerPlan plan;
+        plan.mask = mask;
+        plan.W = act_W[ci];
+        plan.G = G;
+        if (G == 1 && master_idx >= 0) {
+            plan.master = true;
+            kept.clear();
+        }
         std::string gkey = "a";
         for (int i = 0; i < m_atomcount; ++i)
             gkey += fmt::format(",{}", group_of_atom[i]);
-        std::vector<Place> uses;
-        if (G == 1 && master_idx >= 0) {
-            uses.push_back({ master_idx, 0, 1.0 });
-            kept.clear();
-        }
         for (const auto& c : kept) {
-            if (cls_W[c.cls] < 1e-14)
-                continue;   // negligible class: not worth a GFN-FF evaluation (weight is a topology constant)
-            std::string key = gkey + "|q";
-            for (int g = 0; g < G; ++g)
-                key += fmt::format(",{}", static_cast<int>(c.qg[g]));
-            GFNFF* ff = fragVariant(key, group_of_atom, G, c.qg);
+            std::string key;
+            if (cls_W[c.cls] >= 1e-14) {   // negligible class: not worth a GFN-FF evaluation (weight is a topology constant)
+                key = gkey + "|q";
+                for (int g = 0; g < G; ++g)
+                    key += fmt::format(",{}", static_cast<int>(c.qg[g]));
+            }
+            plan.keys.push_back(std::move(key));
+        }
+        plan.group_of_atom = std::move(group_of_atom);
+        plan.kept = std::move(kept);
+        plan.cls_W = std::move(cls_W);
+        plan.cls_id = std::move(cls_id);
+        plans.push_back(std::move(plan));
+    }
+    if (mem_limited && !m_frag_warned_memory) {
+        CurcumaLogger::warn(fmt::format("GFNFF frag_charge_model ensemble: the charge variants of {} atoms (~{:.0f} MB each) exceed "
+                                        "frag_charge_variant_memory_mb = {}; evaluating {} corner(s) with at most {} placement(s) each "
+                                        "instead of {} corner(s) x {}",
+            m_atomcount, variant_bytes / (1024.0 * 1024.0), m_frag_variant_memory_mb, n_corners, max_place, act_mask.size(),
+            m_frag_max_placements));
+        m_frag_warned_memory = true;
+    }
+
+    // ---- release variants this step does not need, if keeping them would exceed the budget -----
+    {
+        std::set<std::string> needed_keys;
+        for (const auto& pl : plans)
+            for (const auto& key : pl.keys)
+                if (!key.empty()) needed_keys.insert(key);
+        int held = 0, held_unneeded = 0;
+        std::set<std::string> present;
+        for (const auto& v : m_frag_variants)
+            if (v.ff) {
+                ++held;
+                present.insert(v.key);
+                if (!needed_keys.count(v.key)) ++held_unneeded;
+            }
+        int to_build = 0;
+        for (const auto& key : needed_keys)
+            if (!present.count(key)) ++to_build;
+        if (held_unneeded > 0 && held + to_build > max_held) {
+            m_frag_variants.erase(std::remove_if(m_frag_variants.begin(), m_frag_variants.end(),
+                                      [&](const FragVariant& v) { return v.ff && !needed_keys.count(v.key); }),
+                m_frag_variants.end());
+            master_idx = -1;
+            for (int v = 0; v < static_cast<int>(m_frag_variants.size()); ++v)
+                if (m_frag_variants[v].key == "master") master_idx = v;
+        }
+    }
+
+    // ---- build the variants and the corner list --------------------------------------------
+    for (const auto& pl : plans) {
+        std::vector<Place> uses;
+        if (pl.master)
+            uses.push_back({ master_idx, 0, 1.0 });
+        for (size_t n = 0; n < pl.kept.size(); ++n) {
+            const Cand& c = pl.kept[n];
+            const std::string& key = pl.keys[n];
+            if (key.empty())
+                continue;
+            GFNFF* ff = fragVariant(key, pl.group_of_atom, pl.G, c.qg);
             if (!ff)
                 continue;
             for (int v = 0; v < static_cast<int>(m_frag_variants.size()); ++v)
-                if (m_frag_variants[v].key == key) { uses.push_back({ v, cls_id[c.cls], cls_W[c.cls] }); break; }
+                if (m_frag_variants[v].key == key) { uses.push_back({ v, pl.cls_id.at(c.cls), pl.cls_W.at(c.cls) }); break; }
         }
         if (uses.empty())
             continue;
-        Wc.push_back(W);
-        corner_mask.push_back(mask);
+        Wc.push_back(pl.W);
+        corner_mask.push_back(pl.mask);
         corner_uses.push_back(std::move(uses));
     }
     if (Wc.empty()) {
