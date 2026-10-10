@@ -197,3 +197,11 @@ The matrix itself differs by ~1e-13 between thread counts (threaded assembly), s
 All tests that use the GPU carry `RESOURCE_LOCK "gpu"`, so `ctest -j8` runs them one after another. Without it `gfnff_gpu_vs_cpu_*` failed with
 "Insufficient GPU memory" when several GPU tests overlapped on one 16 GB card: 4 of 7 `-j8 -L gfnff` runs on the state before the Oct 9 solver changes
 (worktree at `a2b7c5f0`, built with the same flags) and 3 of 7 after them; with the lock 0 of 7 (87 tests each). Serial runs were green throughout.
+
+## Validation of `localinv` (Oct 10, 2026)
+
+`scripts/localinv_validation.py` (sub-commands run, grad, opt, md, analyze; memory capped through systemd-run) compares ppcg+`localinv` with ppcg+`diag` and the exact dense
+solver. Machine-measured: 703 single points (588 GMTKN55 structures incl. all 327 charged ones, 95 MOR41 complexes incl. 72 with a metal or Se, 10 ALPB systems), |dE| <= 1e-10 Eh
+against `cholesky`; 13 gradients, |dg| <= 9e-13 Eh/Angstrom; NVE 2 ps on polymer_2x (GPU) and peo201-water500 (CPU), drift and spread of Etot equal to `diag`; no Jacobi
+fallback with the default radii. With truncated radii (4/6 Bohr) 6 of 588 builds were rejected (small ions) and caught by the Jacobi fallback. Not measured: open shell, `eeq_distance_cutoff` > 0,
+MD beyond 2 ps, ROCm. A -opt of peo201-chain ends in different basins from run to run (thread count, rounding at 1e-13); at both end geometries cholesky, diag and localinv give the same energy.
