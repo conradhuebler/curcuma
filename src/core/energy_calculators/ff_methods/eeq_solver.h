@@ -1005,6 +1005,7 @@ private:
     Vector m_ppcg_last_q;               ///< warm start (previous step's charges)
     // Local-inverse preconditioner of the projected PCG (Claude Generated, Oct 2026), see
     // LocalInversePreconditioner. On by default (eeq_ppcg_precond = localinv), diag restores Jacobi.
+    bool   m_farfield_shortcut = true;  ///< from farfield_shortcut (default true), see eeq_solver.cpp
     bool   m_ppcg_localinv = false;     ///< set from eeq_ppcg_precond in the constructor (default localinv)
     double m_localinv_radius = 8.0;     ///< eeq_localinv_radius_bohr (kept entries per row)
     double m_localinv_ext = 10.0;       ///< eeq_localinv_ext_bohr (block that is inverted)
@@ -1281,6 +1282,8 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "0 = never force (only geometry-triggered). Recommended: 100 for long MD runs.", "Algorithm", {})
     PARAM(eeq_refine_iters, Int, 1, "A4: iterative-refinement steps applied when the EEQ solve reuses a cached Cholesky factor - only with eeq_refactor_eps_bohr > 0. Each step costs O(N^2) and shrinks the stale-factor error geometrically; measured in MD at eps 0.05 Bohr: 1 step leaves 1e-5 to 8e-4 e, 3 steps about 1e-7 e. 0 disables refinement.", "Algorithm", {})
     PARAM(eeq_ppcg_min_nfrag, Int, 1, "Projected-PCG EEQ solve is selected automatically when the system has at least this many fragments AND at least eeq_ppcg_min_atoms atoms: ONE iterative solve on the constraint tangent space instead of the dense factorisation (+ nfrag extra solves). 0 disables the automatic choice (solve_method ppcg still forces it, eeq_ppcg_min_atoms keeps small systems exact). Converged to eeq_ppcg_tol; polymer/1410: 44 -> 16 ms per solve, dE 1e-12 Eh.", "Algorithm", {})
+    // Claude Generated (Oct 2026): exact far-field shortcut of erf(gamma r)/r, see gfnff.h farfield_shortcut.
+    PARAM(farfield_shortcut, Bool, true, "Exact far-field shortcut of the EEQ matrix elements: for gamma_ij*r >= 6.5 erf(gamma_ij*r) is exactly 1.0 in FP64, so A_ij = 1/r without erf. Bit-identical to the full evaluation in the cases checked; false evaluates erf for every pair. Forwarded from gfnff.farfield_shortcut.", "Performance", {})
     PARAM(eeq_ppcg_min_atoms, Int, 500, "Minimum atom count for the automatic projected-PCG choice (small systems stay on the exact Schur-Cholesky solve).", "Algorithm", {})
     PARAM(eeq_ppcg_tol, Double, 1e-12, "Projected-PCG relative residual tolerance |P r| <= tol (|b|+1); 1e-12 gives energy/gradient deviations ~1e-12 from the direct solve (1e-10 saves ~15% of the iterations).", "Algorithm", {})
     PARAM(eeq_ppcg_max_iter, Int, 500, "Projected-PCG iteration cap; on non-convergence the exact Schur-Cholesky solve is used for that step.", "Algorithm", {})

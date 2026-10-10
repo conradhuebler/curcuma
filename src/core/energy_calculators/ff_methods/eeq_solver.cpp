@@ -80,6 +80,12 @@ using namespace GFNFFParameters;  // Access to chi_eeq, gam_eeq, alpha_eeq, cnf_
 // negligible vs the O(N³) factorization).
 namespace {
 
+// Claude Generated (Oct 2026): exact far field of A_ij = erf(gamma_ij r)/r: for gamma_ij^2 r^2 >= 42.25
+// (gamma_ij r >= 6.5, gamma_ij = 1/sqrt(alpha_i+alpha_j)) erf is exactly 1.0 in FP64 (std::erf and
+// portable_erf from x >= 5.9216), so A_ij = 1/r. Test r^2 >= X2*(alpha_i+alpha_j) needs no sqrt/erf.
+// Same constant as COULOMB_FARFIELD_X2 in ff_workspace_gfnff.cpp. Switch: farfield_shortcut.
+constexpr double EEQ_FARFIELD_X2 = 6.5 * 6.5;
+
 /// Rows per block of the threaded ppcg matvec (fixed, independent of the thread count => bitwise reproducible).
 constexpr int kPpcgMatvecBlockRows = 64;
 #ifdef USE_BLAS
@@ -955,6 +961,7 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     if (m_config.get<int>("verbosity", 0) >= 2)
         CurcumaLogger::info(fmt::format("EEQ solver config: solve_method={}, ppcg auto at nfrag>={} & N>={}, tol={:.0e}, max_iter={}",
             m_config.get<std::string>("solve_method", "auto"), m_ppcg_min_nfrag, m_ppcg_min_atoms, m_ppcg_tol, m_ppcg_max_iter));
+    m_farfield_shortcut    = m_config.get<bool>("farfield_shortcut", true);
     m_refactor_eps         = m_config.get<double>("eeq_refactor_eps_bohr", 0.0);
     m_refactor_force_every = m_config.get<int>("eeq_refactor_force_every", 0);
     m_refine_iters         = m_config.get<int>("eeq_refine_iters", 1);
@@ -1433,9 +1440,16 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
                 A(j, i) = 0.0;
             } else {
                 // J_ij = erf(gamma_ij * r) / r
-                double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
-                double erf_gamma = curcuma_erf(gamma_ij * r);
-                double coulomb = erf_gamma / r;
+                // Claude Generated (Oct 2026): exact far field, erf(gamma r) == 1.0 (EEQ_FARFIELD_X2)
+                const double a_sum = alpha_corrected(i) + alpha_corrected(j);
+                double coulomb;
+                if (m_farfield_shortcut && r * r >= EEQ_FARFIELD_X2 * a_sum) {
+                    coulomb = 1.0 / r;
+                } else {
+                    double gamma_ij = 1.0 / std::sqrt(a_sum);
+                    double erf_gamma = curcuma_erf(gamma_ij * r);
+                    coulomb = erf_gamma / r;
+                }
 
                 A(i, j) = coulomb;
                 A(j, i) = coulomb;
@@ -4001,6 +4015,7 @@ Vector EEQSolver::calculateFinalCharges(
         double eeq_dist_cutoff = getEEQDistanceCutoffEffective();
         const double EEQ_CUTOFF_SQ = (natoms > 200 && eeq_dist_cutoff > 0.0)
             ? eeq_dist_cutoff * eeq_dist_cutoff : 0.0;
+        const bool farfield = m_farfield_shortcut;
 
         int coulomb_progress_10pct = std::max(1, natoms / 10);
         bool show_coulomb_progress = (m_verbosity >= 3 && natoms >= 200 && iteration == 0);
@@ -4029,8 +4044,14 @@ Vector EEQSolver::calculateFinalCharges(
                             A(i, j) = A(j, i) = 0.0;
                             continue;
                         }
-                        double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
-                        double coulomb = curcuma_erf(gamma_ij * r) / r;
+                        const double a_sum = alpha_corrected(i) + alpha_corrected(j);
+                        double coulomb;
+                        if (farfield && r * r >= EEQ_FARFIELD_X2 * a_sum) {
+                            coulomb = 1.0 / r;  // exact: erf(gamma r) == 1.0 (EEQ_FARFIELD_X2)
+                        } else {
+                            double gamma_ij = 1.0 / std::sqrt(a_sum);
+                            coulomb = curcuma_erf(gamma_ij * r) / r;
+                        }
                         A(i, j) = coulomb;
                         A(j, i) = coulomb;
                     }
@@ -4062,8 +4083,14 @@ Vector EEQSolver::calculateFinalCharges(
                         A(i, j) = A(j, i) = 0.0;
                         continue;
                     }
-                    double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
-                    double coulomb = curcuma_erf(gamma_ij * r) / r;
+                    const double a_sum = alpha_corrected(i) + alpha_corrected(j);
+                    double coulomb;
+                    if (farfield && r * r >= EEQ_FARFIELD_X2 * a_sum) {
+                        coulomb = 1.0 / r;  // exact: erf(gamma r) == 1.0 (EEQ_FARFIELD_X2)
+                    } else {
+                        double gamma_ij = 1.0 / std::sqrt(a_sum);
+                        coulomb = curcuma_erf(gamma_ij * r) / r;
+                    }
                     A(i, j) = coulomb;
                     A(j, i) = coulomb;
                 }

@@ -305,6 +305,8 @@ public:
 
     void setStoreGradientComponents(bool v) { m_store_components = v; }
     void setPool(CxxThreadPool* pool) { m_pool = pool; }
+    /// Claude Generated (Oct 2026): exact far-field shortcut of the Coulomb pair loop (see calcCoulomb).
+    void setFarfieldShortcut(bool v) { m_farfield_shortcut = v; }
     int numThreads() const { return m_num_threads; }
 
     // Term enable flags (match ForceField flags)
@@ -440,6 +442,8 @@ private:
     /// (GFN-FF only); see calcCoulomb().
     bool   m_coulomb_implicit = false;
     double m_coulomb_implicit_rcut = std::numeric_limits<double>::infinity();  // no cutoff, as the reference (Sep 2026)
+    /// Claude Generated (Oct 2026): skip erf/exp for gamma_ij*r >= 6.5 (erf = 1 exactly in FP64), see calcCoulomb.
+    bool   m_farfield_shortcut = true;
 
     // Term-enable flags
     bool m_dispersion_enabled = true;

@@ -117,6 +117,9 @@ set_tests_properties(cli_gfnff_06_eeq_solver_control PROPERTIES TIMEOUT 900 RESO
 # Claude Generated (Oct 2026): local-inverse preconditioner of the projected PCG (eeq_ppcg_precond localinv).
 add_cli_test(gfnff 07_eeq_localinv)
 set_tests_properties(cli_gfnff_07_eeq_localinv PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff;eeq")
+# Claude Generated (Oct 2026): exact far-field shortcut of the CPU Coulomb term and EEQ matrix (-gfnff.farfield_shortcut), bit-identity.
+add_cli_test(gfnff 09_farfield_shortcut)
+set_tests_properties(cli_gfnff_09_farfield_shortcut PROPERTIES TIMEOUT 900 LABELS "gfnff;eeq")
 
 # =============================================================================
 # GPU GFN-FF Tests — only registered when USE_CUDA=ON

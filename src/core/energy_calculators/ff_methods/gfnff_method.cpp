@@ -762,6 +762,11 @@ void GFNFF::forwardEEQSolverParams(json& eeq_params) {
         eeq["eeq_refactor_force_every"] = m_parameters["eeq_refactor_force_every"];
     if (m_parameters.contains("eeq_refine_iters") && !eeq.contains("eeq_refine_iters"))
         eeq["eeq_refine_iters"] = m_parameters["eeq_refine_iters"];
+
+    // Claude Generated (Oct 2026): exact far-field shortcut of the matrix elements erf(gamma r)/r,
+    // one switch for the energy loop (FFWorkspace) and the EEQ matrix.
+    if (m_parameters.contains("farfield_shortcut") && !eeq.contains("farfield_shortcut"))
+        eeq["farfield_shortcut"] = m_parameters["farfield_shortcut"];
 }
 
 double GFNFF::getEEQDistanceCutoff() const {
@@ -3772,6 +3777,7 @@ bool GFNFF::initializeForceField()
         int num_threads = m_threads;  // WP1
         m_workspace = std::make_unique<FFWorkspace>(num_threads);
         m_workspace->setAtomTypes(m_atoms);
+        m_workspace->setFarfieldShortcut(m_parameters.value("farfield_shortcut", true));  // Oct 2026; fallback = PARAM default
 
         // Keep a copy for external consumers (full pair lists only when a GPU wrapper asked
         // for them, bonded terms otherwise), then MOVE the set into the workspace. The former

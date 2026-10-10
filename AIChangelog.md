@@ -16,6 +16,7 @@ below. If it needs measurements or a derivation, write them into the matching `d
 
 ## Jul - Sep 2026 (and some late June), 108 entries, full text in AIChangelog_2026-late.md
 
+- GFN-FF CPU Coulomb/EEQ far field (Oct 10, 2026): `-gfnff.farfield_shortcut` (default true) skips erf/exp for gamma*r >= 6.5 in `calcCoulomb` and the EEQ matrix; bit-identical on 53 structures, polymer_2x MD step 525 -> 467 ms (16 thr), 1745 -> 871 ms (1 thr), n=3 — docs/GFNFF_STATUS.md
 - GFN-FF CUDA Coulomb/EEQ far field (Oct 10, 2026): pairs with r^2 >= 36(a_i+a_j) skip erf/exp (erf == 1 exactly); EEQ matrix bit-identical, polymer_2x MD step 50.2 -> 37.6 ms (n=3) — docs/GPU_TUNING.md
 - EEQ localinv built on the GPU (Oct 10, 2026): per-atom Cholesky blocks from the device matrix, z = P G r (no S), true-residual check; polymer_2x build 54 -> 2.3 ms, EEQ 23.8 -> 16.5 ms/step (rebuild 1.0) — docs/EEQ_SOLVER_CONTROL.md
 - CPU ppcg: symmetric threaded matvec (upper block triangle, fixed 64-tiles, per-block-row slices, no atomics, bitwise identical for all -threads); polymer_2x SP Phase-2 solve at 16 threads 855 -> 350 ms (n=3), MD 16 threads eeq_solve diag 972 -> 452-567 ms, localinv 423 -> 270-305 ms (n=2); docs/EEQ_SOLVER_CONTROL.md
