@@ -79,6 +79,9 @@ using namespace GFNFFParameters;  // Access to chi_eeq, gam_eeq, alpha_eeq, cnf_
 // column-major Eigen::MatrixXd (`ColMatrix`) and converts at the boundaries (O(N²),
 // negligible vs the O(N³) factorization).
 namespace {
+
+/// Rows per block of the threaded ppcg matvec (fixed, independent of the thread count => bitwise reproducible).
+constexpr int kPpcgMatvecBlockRows = 64;
 #ifdef USE_BLAS
 extern "C" {
     void dpotrf_(const char* uplo, const int* n, double* a, const int* lda, int* info);
@@ -2229,6 +2232,44 @@ Vector EEQSolver::solveWithProjectedPCG(
         if (m_localinv->ok) li = m_localinv.get();
     }
 
+    // Claude Generated (Oct 2026): threaded dense matvec y = A_nn * x. A_nn is split into FIXED row blocks
+    // (kPpcgMatvecBlockRows, independent of the thread count); every block is computed by exactly one
+    // thread with Eigen's gemv, thread t takes blocks t, t+T, t+2T, ... There is no reduction over threads,
+    // so the result is bitwise identical for every thread count (also T = 1, same blocks). The product is
+    // memory-bandwidth bound (A_nn is streamed once, 8*N^2 bytes), hence the parallelism.
+    // CURCUMA_PPCG_MATVEC_BLOCK=<rows> overrides the block size (measurement hook, changes rounding by ulp).
+    static const int matvec_block = [] {
+        const char* e = std::getenv("CURCUMA_PPCG_MATVEC_BLOCK");
+        const int v = e ? std::atoi(e) : 0;
+        return v > 0 ? v : kPpcgMatvecBlockRows;
+    }();
+    auto matvec = [&](const Vector& x, Vector& y) {
+        const int nblocks = (natoms + matvec_block - 1) / matvec_block;
+        auto do_block = [&](int b) {
+            const int i0 = b * matvec_block;
+            const int n = std::min(matvec_block, natoms - i0);
+            y.segment(i0, n).noalias() = A_nn.middleRows(i0, n) * x;
+        };
+        const int T = std::max(1, std::min(m_ppcg_threads, nblocks));
+        if (T <= 1) {
+            for (int b = 0; b < nblocks; ++b) do_block(b);
+            return;
+        }
+        auto worker = [&](int t) { for (int b = t; b < nblocks; b += T) do_block(b); };
+        if (m_ppcg_pool) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t) futures.push_back(m_ppcg_pool->enqueue([&worker](int tt, int) { worker(tt); }, t, T));
+            worker(0);
+            for (auto& f : futures) f.get();
+        } else {
+            std::vector<std::thread> threads;
+            for (int t = 1; t < T; ++t) threads.emplace_back(worker, t);
+            worker(0);
+            for (auto& th : threads) th.join();
+        }
+    };
+
     std::vector<double> s(nfrag);
     // P v = v - C^T (C C^T)^{-1} C v : subtract the per-fragment mean.
     auto project = [&](Vector& v) {
@@ -2260,7 +2301,8 @@ Vector EEQSolver::solveWithProjectedPCG(
         std::fill(s.begin(), s.end(), 0.0);
         for (int i = 0; i < natoms; ++i) s[frag[i]] += q(i);
         for (int i = 0; i < natoms; ++i) q(i) += (rhs_constraints(frag[i]) - s[frag[i]]) / nfrag_atoms[frag[i]];
-        r = rhs_atoms - A_nn * q;
+        matvec(q, Ap);
+        r = rhs_atoms - Ap;
         project(r);
         precondition(pc, r, z);
         p = z;
@@ -2270,7 +2312,7 @@ Vector EEQSolver::solveWithProjectedPCG(
         converged = (r_norm <= tol_abs);
         if (pc && !converged && !(rz > 0.0)) return false;
         while (!converged && iters < m_ppcg_max_iter) {
-            Ap.noalias() = A_nn * p;                 // dense matvec: the only O(N^2) step per iteration
+            matvec(p, Ap);                           // dense matvec: the only O(N^2) step per iteration
             const double pAp = p.dot(Ap);
             if (!(pAp > 0.0)) {                      // lost positive definiteness on the tangent space
                 if (pc) return false;

@@ -125,6 +125,18 @@ RTX 5080, 32 cores). Epot after 50 fs -902.161126 Eh in every run; per-step char
   R 8: 16 / 14 / 14-15 / 9; R 10: 13 / 12 / 12 / 8; R 12: 12 / 10 / 11 / 7. R_ext above R + 2 Bohr lowers no count but costs the cube of the block.
 - The Python reconstruction that motivated this (vault note "curcuma Schwarz-Attention") predicted 81 -> 18 on polymer_2x; the C++ measures 68 -> 15.
 
+## Threaded matvec of the CPU ppcg (Oct 10, 2026)
+
+The dense products `A_nn * p` (once per iteration) and `A_nn * q` (residual start) run over fixed blocks of `kPpcgMatvecBlockRows` = 64 rows
+(`solveWithProjectedPCG`, `eeq_solver.cpp`), distributed over `-threads` like `buildLocalInverse` (`m_ppcg_pool`, `m_ppcg_threads`). Every output row is
+computed by one thread, the blocks do not depend on the thread count, there is no reduction: the product is bitwise identical for every `-threads` and
+equal to the former unblocked `A_nn * x` (checked once with a temporary debug hook on polymer_2x, 4 and 32 threads, block sizes 64 and 256; the hook is removed).
+`CURCUMA_PPCG_MATVEC_BLOCK=<rows>` overrides the block size (measurement only). The product is memory-bandwidth bound (428 MB per product on polymer_2x):
+`-sp`, Phase-2 solve 902 -> 715 (4 threads), 710 (16), 754 ms (32 threads = SMT, slower than 16); 1 thread 904 -> 901 ms (n = 3 each).
+Machine ceiling (OpenMP read of the same 428 MB, 1/2/16 threads): 21 / 43 / 60 GB/s; the matvec reaches 35 GB/s on one thread and 45 GB/s threaded, so
+2x over serial is not reachable here. Open: exploiting the symmetry of `A_nn` (half the bytes). The matrix itself differs by ~1e-13 between thread counts
+(threaded assembly, also before this change), so charges are not bitwise equal across `-threads`; energy and iteration counts are (test 07).
+
 ## Not tested / open
 
 - ROCm and Vulkan: same code path, not built or run here. `lu` and `ldlt` are errors there.
