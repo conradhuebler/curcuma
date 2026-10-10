@@ -302,6 +302,20 @@ private:
     double m_eeq_ppcg_tolerance  = 1e-10;  ///< GPU tol is absolute on |r| (unlike CPU's relative eeq_ppcg_tol)
     int    m_eeq_ppcg_min_nfrag  = 1;      ///< Auto strategy: prefer ProjectedPCG over PCG when nfrag>=this
     int    m_eeq_ppcg_min_atoms  = 500;    ///< ... and N>=this
+    // Claude Generated (Oct 2026): local-inverse preconditioner of WP7-E (eeq_ppcg_precond localinv),
+    // built on the host by EEQSolver::buildLocalInverse and uploaded as CSR (CUDA only).
+    bool   m_eeq_localinv = false;
+    double m_eeq_localinv_radius = 8.0;
+    double m_eeq_localinv_ext = 10.0;
+    double m_eeq_localinv_rebuild = 1.0;
+    int    m_eeq_localinv_threads = 1;
+    std::shared_ptr<LocalInversePreconditioner> m_eeq_li;   ///< last host build (ok or rejected)
+    long   m_eeq_li_builds = 0, m_eeq_li_failures = 0;
+    double m_eeq_li_build_ms = 0.0;
+    static constexpr int kLocalInvMaxNfrag = 4096;   ///< dense S^-1 on the device: nfrag^2 doubles (128 MB here)
+    /// Builds (or keeps) the local inverse for the current geometry and uploads it; on any failure the
+    /// device solver runs with the diagonal Jacobi. Same rebuild rule as the CPU solver.
+    void prepareLocalInverseGPU(int N, double cutoff_sq);
 
     // Deliverable 3 (Jun 2026): fragment count at/above which the device EEQ solve is
     // replaced by the exact CPU PCG/block-Jacobi solver. The device path does a dense
@@ -414,6 +428,17 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
     m_eeq_ppcg_tolerance = eeq_value("pcg_tolerance", 1e-10);
     m_eeq_ppcg_min_nfrag = eeq_value("eeq_ppcg_min_nfrag", 1);
     m_eeq_ppcg_min_atoms = eeq_value("eeq_ppcg_min_atoms", 500);
+    {   // Oct 2026: local-inverse preconditioner (same PARAMs and validation as the CPU EEQSolver)
+        const std::string pc = eeq_value("eeq_ppcg_precond", std::string("diag"));
+        if (pc == "localinv") m_eeq_localinv = true;
+        else if (pc != "diag")
+            throw std::invalid_argument(fmt::format("eeq_ppcg_precond '{}' unknown (valid: diag, localinv)", pc));
+        m_eeq_localinv_radius  = eeq_value("eeq_localinv_radius_bohr", 8.0);
+        m_eeq_localinv_ext     = std::max(eeq_value("eeq_localinv_ext_bohr", 10.0), m_eeq_localinv_radius);
+        m_eeq_localinv_rebuild = eeq_value("eeq_localinv_rebuild_bohr", 1.0);
+        if (config.contains("threads") && config["threads"].is_number())
+            m_eeq_localinv_threads = std::max(1, static_cast<int>(config["threads"].get<double>()));
+    }
 
     // Claude Generated (Sep 2026, multi-GPU): `gpu_device` (global CLI key, set per worker by
     // the batch capabilities) pins this method to one device. Everything below that allocates
@@ -1321,6 +1346,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                 } else if (m_eeq_nfrag == 1) {
                   if (single_frag_ppcg) {
                     // F-4 (Sep 2026): one fragment, projected PCG as on the CPU; WP5-A on failure.
+                    prepareLocalInverseGPU(N, eeq_cutoff_sq);
                     eeq_ok = m_eeq_gpu->solveWithDeviceRHSAndGPUProjectedPCG(
                         N, 1,
                         m_gpu_workspace->getDeviceXPtr(),
@@ -1412,6 +1438,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 
                     if (resolved == EEQSolveMethod::ProjectedPCG && m_eeq_gpu->isFragmentTopoValid()) {
                         // WP7-E: single projected-PCG solve (no nfrag+1 loop, no block-Jacobi).
+                        prepareLocalInverseGPU(N, eeq_cutoff_sq);
                         eeq_ok = m_eeq_gpu->solveWithDeviceRHSAndGPUProjectedPCG(
                             N, m_eeq_nfrag,
                             m_gpu_workspace->getDeviceXPtr(),
@@ -1938,6 +1965,113 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 // ---------------------------------------------------------------------------
 // Remaining ComputationalMethod interface — all delegate to m_gfnff
 // ---------------------------------------------------------------------------
+
+// Claude Generated (Oct 2026): host build + upload of the local-inverse preconditioner (see
+// LocalInversePreconditioner in eeq_solver.h). The block entries are recomputed from the device
+// alpha/gam with the formula of k_eeq_build_matrix; a preconditioner only has to be close to A^-1,
+// so rounding differences against the device matrix do not matter (the CG still converges to the
+// same tolerance on the true device matrix).
+template <class Backend>
+void GFNFFGpuMethodImpl<Backend>::prepareLocalInverseGPU(int N, double cutoff_sq)
+{
+    if constexpr (!Backend::has_device_schur) {
+        (void)N; (void)cutoff_sq;   // CUDA only: the ROCm solver has no upload entry point
+    } else {
+        if (!m_eeq_localinv) return;
+        const int nfrag = m_eeq_nfrag;
+        if (nfrag > kLocalInvMaxNfrag) {
+            if (!m_eeq_li) {
+                CurcumaLogger::warn(fmt::format("EEQ GPU ppcg localinv: nfrag = {} > {} (dense S^-1 on the device), "
+                                                "using diagonal Jacobi", nfrag, kLocalInvMaxNfrag));
+                m_eeq_li = std::make_shared<LocalInversePreconditioner>();
+                m_eeq_li->natoms = N;
+                m_eeq_li->nfrag = nfrag;
+            }
+            return;
+        }
+        const GeoGradMatrix& g = m_gfnff->getGeometryBohr();
+        Matrix X(N, 3);
+        for (int i = 0; i < N; ++i)
+            for (int d = 0; d < 3; ++d) X(i, d) = g(i, d);
+        std::vector<int> frag(N, 0);
+        for (int i = 0; i < N && i < static_cast<int>(m_eeq_fraglist.size()); ++i) frag[i] = m_eeq_fraglist[i] - 1;
+
+        // A device-side breakdown dropped the uploaded M: treat it like a rejected build.
+        if (m_eeq_li && m_eeq_li->ok && !m_eeq_gpu->localInversePreconditionerActive()) {
+            m_eeq_li->ok = false;
+            m_eeq_li->why = "indefinite in the GPU CG";
+        }
+        bool rebuild = !m_eeq_li || m_eeq_li->natoms != N || m_eeq_li->nfrag != nfrag || m_eeq_li->frag != frag
+                    || m_eeq_localinv_rebuild <= 0.0;
+        if (!rebuild) {
+            const double max_dr = (X - m_eeq_li->geometry).rowwise().norm().maxCoeff();
+            rebuild = !(max_dr <= m_eeq_localinv_rebuild);
+        }
+        if (!rebuild) return;
+
+        std::vector<double> alpha(N), gam(N);
+        Backend::downloadDoubles(alpha.data(), m_gpu_workspace->getDeviceAlphaPtr(), N);
+        Backend::downloadDoubles(gam.data(), m_gpu_workspace->getDeviceGamPtr(), N);
+        constexpr double tsqrt2pi = 0.797884560802866;   // as in k_eeq_build_matrix
+        auto fill = [&](const std::vector<int>& idx, double* out) {
+            const int n = static_cast<int>(idx.size());
+            for (int c = 0; c < n; ++c) {
+                const int j = idx[c];
+                for (int rr = c; rr < n; ++rr) {
+                    const int i = idx[rr];
+                    double v;
+                    if (i == j) v = gam[i] + tsqrt2pi / std::sqrt(alpha[i]);
+                    else {
+                        const double dx = X(i, 0) - X(j, 0), dy = X(i, 1) - X(j, 1), dz = X(i, 2) - X(j, 2);
+                        const double r2 = dx * dx + dy * dy + dz * dz;
+                        if (cutoff_sq > 0.0 && r2 > cutoff_sq) v = 0.0;
+                        else { const double r = std::sqrt(r2); v = std::erf(r / std::sqrt(alpha[i] + alpha[j])) / r; }
+                    }
+                    out[static_cast<size_t>(c) * n + rr] = v;
+                }
+            }
+        };
+        m_eeq_li = EEQSolver::buildLocalInverse(X, frag, nfrag, fill, m_eeq_localinv_radius, m_eeq_localinv_ext,
+                                                nullptr, m_eeq_localinv_threads, /*want_dense_S_inverse=*/true);
+        m_eeq_li_build_ms += m_eeq_li->build_ms;
+        bool uploaded = false;
+        double upload_ms = 0.0;
+        if (m_eeq_li->ok) {
+            const auto tu = std::chrono::steady_clock::now();
+            auto& G = m_eeq_li->G;
+            auto& H = m_eeq_li->H;
+            G.makeCompressed();
+            H.makeCompressed();
+            auto csr = [](const Eigen::SparseMatrix<double, Eigen::RowMajor>& M, std::vector<int>& rp,
+                          std::vector<int>& col, std::vector<double>& val) {
+                rp.assign(M.outerIndexPtr(), M.outerIndexPtr() + M.rows() + 1);
+                col.assign(M.innerIndexPtr(), M.innerIndexPtr() + M.nonZeros());
+                val.assign(M.valuePtr(), M.valuePtr() + M.nonZeros());
+            };
+            std::vector<int> grp, gcol, hrp, hcol;
+            std::vector<double> gval, hval;
+            csr(G, grp, gcol, gval);
+            csr(H, hrp, hcol, hval);
+            std::vector<double> sinv(m_eeq_li->S_inv.data(), m_eeq_li->S_inv.data() + m_eeq_li->S_inv.size());
+            uploaded = m_eeq_gpu->setLocalInversePreconditioner(N, nfrag, grp, gcol, gval, hrp, hcol, hval, sinv);
+            upload_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tu).count();
+            if (!uploaded) { m_eeq_li->ok = false; m_eeq_li->why = "device upload failed"; }
+        }
+        if (m_eeq_li->ok) {
+            ++m_eeq_li_builds;
+        } else {
+            m_eeq_gpu->clearLocalInversePreconditioner();
+            ++m_eeq_li_failures;
+            CurcumaLogger::warn(fmt::format("EEQ GPU ppcg localinv: preconditioner rejected ({}), using diagonal Jacobi "
+                                            "until the next rebuild (failures so far: {})", m_eeq_li->why, m_eeq_li_failures));
+        }
+        static const bool print_iters = [] { const char* e = std::getenv("CURCUMA_PPCG_ITERS"); return e && *e && *e != '0'; }();
+        if (print_iters)
+            fprintf(stderr, "LOCALINV GPU build ok=%d build_ms=%.1f blocks_ms=%.1f check_ms=%.1f sinv_ms=%.1f upload_ms=%.1f nnz_row=%.1f\n",
+                    m_eeq_li->ok ? 1 : 0, m_eeq_li->build_ms, m_eeq_li->blocks_ms, m_eeq_li->check_ms, m_eeq_li->sinv_ms, upload_ms,
+                    m_eeq_li->nnz_per_row);
+    }
+}
 
 template <class Backend>
 bool GFNFFGpuMethodImpl<Backend>::updateGeometry(const Matrix& geometry)

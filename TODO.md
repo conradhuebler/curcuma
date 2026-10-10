@@ -13,6 +13,9 @@ Stand.
 
 - **GFN-FF-Energie hängt von der Atomnummerierung ab** (911 von 2557 Strukturen, bis 237 kcal/mol bei geladenen Mehrfragment-Systemen;
   in pprcht und curcuma). Referenzeigenschaft, kein Portierungsfehler. [docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md) #12, Known Issue #34.
+- **`frag_charge_model ensemble` (Standard) sprengt den Speicher bei geladenen Systemen mit vielen Fragmenten** (2822 Atome, 497 Fragmente,
+  `-charge 4`: > 12 GB in Sekunden, 155 GB bis zum OOM-Kill am 2026-10-10; mit `-gfnff.frag_charge_model reference` 0 s, neutral ok; auch vor den
+  Solver-Änderungen reproduziert). Ursache in `gfnff_frag_charge.cpp` offen. Known Issue #31, [docs/FRAG_CHARGE_MODEL.md](docs/FRAG_CHARGE_MODEL.md).
 - **ROCm-GFN-FF ohne Coulomb-Term** als Voreinstellung seit `ab6e3f5e` (F-1, Umgehung `-gfnff.gpu_coulomb_implicit false`); GFN1/GFN2 auf ROCm
   ignorieren `-scf_mixed_precision false` (G2-13); Energiesummen nehmen wave32 an (F-17). Keine ROCm-Hardware, nur dokumentiert:
   [docs/MULTI_GPU_GAPS.md](docs/MULTI_GPU_GAPS.md).

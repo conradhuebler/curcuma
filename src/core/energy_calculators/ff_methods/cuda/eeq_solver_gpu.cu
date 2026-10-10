@@ -257,6 +257,13 @@ struct EEQSolverGPUImpl {
     CudaBuffer<double>  d_rhs_constraints_dev;
     CudaBuffer<double>  d_ppcg_q_persistent;
     bool                m_ppcg_warm_valid = false;
+    // Claude Generated (Oct 2026): local-inverse preconditioner of WP7-E (eeq_ppcg_precond
+    // localinv), uploaded from the host: CSR of G and H = G C^T, dense S^-1 (nfrag x nfrag).
+    CudaBuffer<int>     d_li_G_rowptr, d_li_G_col, d_li_H_rowptr, d_li_H_col;
+    CudaBuffer<double>  d_li_G_val, d_li_H_val, d_li_S_inv, d_li_t, d_li_mu, d_li_q0;
+    bool                m_li_valid = false;
+    int                 m_li_N = 0, m_li_nfrag = 0;
+    long                m_li_runtime_fallbacks = 0;
     // Claude Generated (Oct 2026): dense LU of the augmented (N+nfrag) system
     // (solve_method lu, solveWithDeviceRHSAndGPUAugmentedLU).
     CudaBuffer<double>  d_aug_A;       ///< [M*M] augmented matrix, then its LU factor (column-major)
@@ -2075,10 +2082,50 @@ static inline void ppcgProjectResidual(EEQSolverGPUImpl& impl, int N, int nfrag,
 
 // z ← M_inv·r, then an M-weighted per-fragment correction so that C·z = 0
 // (mirrors the CPU `precondition` lambda).
+// Claude Generated (Oct 2026): kernels of the local-inverse preconditioner (z = G r - H S^-1 C G r).
+// One thread per row, fixed summation order inside a row.
+__global__ void k_li_csr_spmv(int nrows, const int* __restrict__ rp, const int* __restrict__ col,
+                              const double* __restrict__ val, const double* __restrict__ x,
+                              double* __restrict__ y, int subtract)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nrows) return;
+    double s = 0.0;
+    for (int e = rp[i]; e < rp[i + 1]; ++e) s += val[e] * x[col[e]];
+    if (subtract) y[i] -= s; else y[i] = s;
+}
+// mu = S^-1 t, S^-1 dense column-major (symmetric), one thread per row.
+__global__ void k_li_dense_gemv(int n, const double* __restrict__ Sinv, const double* __restrict__ t,
+                                double* __restrict__ mu)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    double s = 0.0;
+    for (int j = 0; j < n; ++j) s += Sinv[static_cast<size_t>(j) * n + i] * t[j];
+    mu[i] = s;
+}
+// Breakdown flag for the local inverse: rz <= 0 means the preconditioner is not positive definite.
+__global__ void k_li_check_rz(const double* __restrict__ rz, double* flag)
+{
+    if (blockIdx.x == 0 && threadIdx.x == 0 && !(*rz > 0.0)) *flag = 1.0;
+}
+
 static inline void ppcgPrecondition(EEQSolverGPUImpl& impl, int N, int nfrag,
                                      const double* d_r, double* d_z)
 {
     int blk = 256, grd = (N + blk - 1) / blk;
+    if (impl.m_li_valid && impl.m_li_N == N && impl.m_li_nfrag == nfrag) {
+        // z = G r ; t = C z ; mu = S^-1 t ; z -= H mu  (C z = 0 afterwards)
+        k_li_csr_spmv<<<grd, blk, 0, impl.stream>>>(N, impl.d_li_G_rowptr.ptr, impl.d_li_G_col.ptr,
+                                                    impl.d_li_G_val.ptr, d_r, d_z, 0);
+        cudaMemsetAsync(impl.d_li_t.ptr, 0, (size_t)nfrag * sizeof(double), impl.stream);
+        k_frag_sum<<<grd, blk, 0, impl.stream>>>(N, d_z, impl.d_atom_frag.ptr, impl.d_li_t.ptr);
+        const int grd_f = (nfrag + blk - 1) / blk;
+        k_li_dense_gemv<<<grd_f, blk, 0, impl.stream>>>(nfrag, impl.d_li_S_inv.ptr, impl.d_li_t.ptr, impl.d_li_mu.ptr);
+        k_li_csr_spmv<<<grd, blk, 0, impl.stream>>>(N, impl.d_li_H_rowptr.ptr, impl.d_li_H_col.ptr,
+                                                    impl.d_li_H_val.ptr, impl.d_li_mu.ptr, d_z, 1);
+        return;
+    }
     k_pcg_apply_precond<<<grd, blk, 0, impl.stream>>>(N, impl.d_pcg_M_inv.ptr, d_r, d_z);
     cudaMemsetAsync(impl.d_frag_sum_scratch.ptr, 0, (size_t)nfrag * sizeof(double), impl.stream);
     k_frag_sum<<<grd, blk, 0, impl.stream>>>(
@@ -2318,6 +2365,10 @@ static bool runProjectedPCG(EEQSolverGPUImpl& impl, int N, int nfrag,
 
     bool converged = (h_rnorm_sq <= tol * tol);
     int  iters     = 0;
+    // Oct 2026: with the local inverse, rz <= 0 means it is not positive definite: stop (the
+    // caller redoes the solve with Jacobi).
+    const bool li_on = impl.m_li_valid && impl.m_li_N == N && impl.m_li_nfrag == nfrag;
+    if (li_on && !converged && !(h_rz > 0.0)) return false;
 
     // Claude Generated (Sep 2026): one host sync per iteration instead of three. alpha and beta
     // are formed on the device from device scalars (the divisions are the same IEEE operations the
@@ -2361,6 +2412,7 @@ static bool runProjectedPCG(EEQSolverGPUImpl& impl, int N, int nfrag,
         checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_DEVICE), "ptr dev (ppcg)");
         checkCublasEEQ(cublasDdot(blas, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_z.ptr, 1, d_scal + (1 - cur)),
                        "Ddot rz_new (ppcg)");
+        if (li_on) k_li_check_rz<<<1, 1, 0, s>>>(d_scal + (1 - cur), d_scal + 4);
         k_ppcg_update_p<<<grd_n, blk_n, 0, s>>>(N, d_scal + (1 - cur), d_scal + cur,
                                                 impl.d_pcg_z.ptr, impl.d_pcg_p.ptr, d_scal + 4);
         cur = 1 - cur;
@@ -2371,8 +2423,8 @@ static bool runProjectedPCG(EEQSolverGPUImpl& impl, int N, int nfrag,
     // Claude Generated (Sep 2026): CURCUMA_PPCG_ITERS=1 prints the iteration count of every solve.
     static const bool print_iters = [] { const char* e = std::getenv("CURCUMA_PPCG_ITERS"); return e && *e && *e != '0'; }();
     if (print_iters)
-        fprintf(stderr, "PPCG N=%d nfrag=%d iters=%d converged=%d |r|^2=%.3e\n",
-                N, nfrag, iters, converged ? 1 : 0, h_rnorm_sq);
+        fprintf(stderr, "PPCG N=%d nfrag=%d iters=%d converged=%d |r|^2=%.3e%s\n",
+                N, nfrag, iters, converged ? 1 : 0, h_rnorm_sq, li_on ? " precond=localinv gpu" : "");
     if (!converged) impl.m_ppcg_nonconv_calls += 1;
     return converged;
 }
@@ -2477,7 +2529,24 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUProjectedPCG(
                      "H2D rhs_constraints (ppcg)");
     }
 
+    // Oct 2026: with the local-inverse preconditioner keep the start vector, so a breakdown
+    // (rz <= 0, pAp <= 0) or a stall can be redone with the diagonal Jacobi from the same start.
+    const bool li_on = impl.m_li_valid && impl.m_li_N == N && impl.m_li_nfrag == nfrag;
+    if (li_on) {
+        if (impl.d_li_q0.n < N) impl.d_li_q0.alloc(N);
+        checkCudaEEQ(cudaMemcpyAsync(impl.d_li_q0.ptr, impl.d_rhs.ptr, N * sizeof(double),
+                                      cudaMemcpyDeviceToDevice, impl.stream), "D2D localinv q0");
+    }
     bool ok = runProjectedPCG(impl, N, nfrag, d_rhs_atoms, impl.d_rhs.ptr, max_iter, tol);
+    if (!ok && li_on) {
+        impl.m_li_valid = false;   // never continue with this M; the host rebuilds or stays on Jacobi
+        impl.m_li_runtime_fallbacks += 1;
+        CurcumaLogger::warn(fmt::format("EEQ GPU ppcg localinv: breakdown or stall, solve repeated with diagonal "
+                                        "Jacobi (fallbacks so far: {})", impl.m_li_runtime_fallbacks));
+        checkCudaEEQ(cudaMemcpyAsync(impl.d_rhs.ptr, impl.d_li_q0.ptr, N * sizeof(double),
+                                      cudaMemcpyDeviceToDevice, impl.stream), "D2D localinv q0 restore");
+        ok = runProjectedPCG(impl, N, nfrag, d_rhs_atoms, impl.d_rhs.ptr, max_iter, tol);
+    }
     if (!ok) return false;
 
     // Persist warm-start (charges are already at d_rhs[0..N-1] — the shared
@@ -2491,6 +2560,45 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUProjectedPCG(
     checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after ppcg");
     return true;
 }
+
+// ============================================================================
+// Local-inverse preconditioner upload (Claude Generated, Oct 2026)
+// ============================================================================
+
+bool EEQSolverGPU::setLocalInversePreconditioner(int N, int nfrag,
+    const std::vector<int>& G_rowptr, const std::vector<int>& G_col, const std::vector<double>& G_val,
+    const std::vector<int>& H_rowptr, const std::vector<int>& H_col, const std::vector<double>& H_val,
+    const std::vector<double>& S_inv)
+{
+    auto& impl = *m_impl;
+    impl.m_li_valid = false;
+    if (static_cast<int>(G_rowptr.size()) != N + 1 || static_cast<int>(H_rowptr.size()) != N + 1
+        || static_cast<long long>(S_inv.size()) != static_cast<long long>(nfrag) * nfrag)
+        return false;
+    auto up_i = [&](CudaBuffer<int>& b, const std::vector<int>& v) {
+        if (b.n < static_cast<int>(v.size())) b.alloc(static_cast<int>(v.size()));
+        return cudaMemcpyAsync(b.ptr, v.data(), v.size() * sizeof(int), cudaMemcpyHostToDevice, impl.stream) == cudaSuccess;
+    };
+    auto up_d = [&](CudaBuffer<double>& b, const std::vector<double>& v) {
+        if (b.n < static_cast<int>(v.size())) b.alloc(static_cast<int>(v.size()));
+        return cudaMemcpyAsync(b.ptr, v.data(), v.size() * sizeof(double), cudaMemcpyHostToDevice, impl.stream) == cudaSuccess;
+    };
+    bool ok = up_i(impl.d_li_G_rowptr, G_rowptr) && up_i(impl.d_li_G_col, G_col) && up_d(impl.d_li_G_val, G_val)
+           && up_i(impl.d_li_H_rowptr, H_rowptr) && up_i(impl.d_li_H_col, H_col) && up_d(impl.d_li_H_val, H_val)
+           && up_d(impl.d_li_S_inv, S_inv);
+    if (impl.d_li_t.n < nfrag) impl.d_li_t.alloc(nfrag);
+    if (impl.d_li_mu.n < nfrag) impl.d_li_mu.alloc(nfrag);
+    ok = ok && cudaStreamSynchronize(impl.stream) == cudaSuccess;
+    if (!ok) return false;
+    impl.m_li_N = N;
+    impl.m_li_nfrag = nfrag;
+    impl.m_li_valid = true;
+    return true;
+}
+
+void EEQSolverGPU::clearLocalInversePreconditioner() { m_impl->m_li_valid = false; }
+bool EEQSolverGPU::localInversePreconditionerActive() const { return m_impl->m_li_valid; }
+long EEQSolverGPU::localInverseRuntimeFallbacks() const { return m_impl->m_li_runtime_fallbacks; }
 
 // ============================================================================
 // WP6: uploadFragmentTopology — one-time setup for batched Cholesky (nfrag > 1)

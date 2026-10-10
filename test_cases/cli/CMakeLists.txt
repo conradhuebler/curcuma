@@ -110,6 +110,9 @@ set_tests_properties(cli_gfnff_05_frag_charge_ensemble PROPERTIES TIMEOUT 900 LA
 # Claude Generated (Oct 2026): EEQ solver control (auto thresholds, explicit names, alias, typo, GPU gap).
 add_cli_test(gfnff 06_eeq_solver_control)
 set_tests_properties(cli_gfnff_06_eeq_solver_control PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff;eeq")
+# Claude Generated (Oct 2026): local-inverse preconditioner of the projected PCG (eeq_ppcg_precond localinv).
+add_cli_test(gfnff 07_eeq_localinv)
+set_tests_properties(cli_gfnff_07_eeq_localinv PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff;eeq")
 
 # =============================================================================
 # GPU GFN-FF Tests — only registered when USE_CUDA=ON

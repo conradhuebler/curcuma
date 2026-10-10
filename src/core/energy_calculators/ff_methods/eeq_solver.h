@@ -86,6 +86,63 @@ enum class EEQSolveMethod {
 };
 
 /**
+ * @brief Local-inverse preconditioner for the projected PCG of the EEQ system (opt-in,
+ *        `-eeq_solver.eeq_ppcg_precond localinv`). Claude Generated (Oct 2026).
+ *
+ * **Problem.** The fragment-constrained EEQ system is the KKT system
+ *     A q + C^T lambda = b,   C q = d,
+ * A = A_nn (N x N, SPD: hardness diagonal + erf(r_ij/sqrt(a_i+a_j))/r_ij), C the 0/1 fragment
+ * membership (nfrag x N). The projected CG (EEQSolver::solveWithProjectedPCG) iterates on the
+ * tangent space null(C): residuals are projected with P = I - C^T (C C^T)^-1 C.
+ *
+ * **Constraint preconditioner** (Gould, Hribar, Nocedal, SIAM J. Sci. Comput. 23 (2001) 1376;
+ * Keller, Gould, Wathen, SIAM J. Matrix Anal. Appl. 21 (2000) 1300). For any SPD G ~ A^-1 the
+ * preconditioned residual is the solution z of
+ *     [G^-1 C^T; C 0] [z; mu] = [r; 0]   =>   z = P_G r,
+ *     P_G = G - G C^T S^-1 C G,   S = C G C^T  (nfrag x nfrag, SPD).
+ * Properties used by the CG: (i) C P_G = 0, so z and every search direction stay in null(C) and
+ * q keeps satisfying C q = d; (ii) P_G is symmetric, P_G C^T = 0, and for r in null(C), r != 0,
+ *     r^T P_G r = |G^1/2 r|^2 - |G^1/2 C^T S^-1 C G r|^2 > 0
+ * (Cauchy-Schwarz in the G inner product; equality only for r in range(C^T), which is orthogonal
+ * to null(C)) - P_G is positive definite on the tangent space exactly when G is SPD. (iii) For
+ * G = A^-1, P_G = (P A P)^+ on null(C): the ideal preconditioner. The Jacobi path is the special
+ * case G = diag(A)^-1, where S is diagonal (fragments are disjoint).
+ *
+ * **G = local inverse** (a sparse approximate inverse built from local dense inverses; cf.
+ * Benzi, J. Comput. Phys. 182 (2002) 418, section 5). A is long-ranged, A^-1 is short-ranged
+ * (screening by the hardness diagonal). For each atom i: E_i = atoms within R_ext of i, invert
+ * the dense block A[E_i,E_i] (here: Cholesky + one solve for the column of i), keep the entries
+ * of row i with r_ij <= R. G_ij = (Gl_ij + Gl_ji)/2. Symmetrising does not guarantee
+ * definiteness, so G is checked with a sparse Cholesky; S is factorised the same way. Any
+ * failure (or rz <= 0 / pAp <= 0 during the CG) means Jacobi is used instead - never a wrong M.
+ *
+ * Cost: build O(N n_ext^3 / 3) with n_ext ~ atoms within R_ext (independent per atom, parallel,
+ * the result does not depend on the thread count); per CG iteration two sparse products and
+ * one nfrag-size sparse triangular solve pair, against one dense N^2 matvec.
+ */
+struct LocalInversePreconditioner {
+    bool ok = false;           ///< false: build failed (G or S not SPD) - use Jacobi
+    std::string why;           ///< reason of a failed build
+    int natoms = 0;
+    int nfrag = 0;
+    std::vector<int> frag;     ///< fragment index of every atom (from C)
+    Matrix geometry;           ///< geometry (Bohr) of the build, for the rebuild criterion
+    Eigen::SparseMatrix<double, Eigen::RowMajor> G;  ///< symmetric local inverse, N x N
+    Eigen::SparseMatrix<double, Eigen::RowMajor> H;  ///< G C^T, N x nfrag
+    Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> S_llt;  ///< factor of S = C G C^T
+    Matrix S_inv;              ///< dense S^-1 (nfrag x nfrag) when the GPU applies it (else empty)
+    double nnz_per_row = 0.0;  ///< mean stored entries per row of G
+    double mean_block = 0.0;   ///< mean dense block size n_ext
+    double build_ms = 0.0;
+    double blocks_ms = 0.0;    ///< part of build_ms: neighbour lists + dense block inverses
+    double check_ms = 0.0;     ///< part of build_ms: sparse Cholesky of G (definiteness check)
+    double sinv_ms = 0.0;      ///< part of build_ms: dense S^-1 (GPU path only)
+
+    /// z = P_G r = G r - H S^-1 C G r. Deterministic (fixed summation order).
+    void apply(const Vector& r, Vector& z, Vector& t) const;
+};
+
+/**
  * @brief EEQ (Electronegativity Equalization) charge solver
  *
  * Standalone utility for calculating atomic partial charges using the EEQ method.
@@ -801,6 +858,31 @@ private:
         int natoms,
         int nfrag);
 
+public:
+    /**
+     * @brief Build the local-inverse preconditioner (see LocalInversePreconditioner).
+     * @param geometry_bohr N x 3 coordinates in Bohr (neighbourhoods)
+     * @param frag          fragment index per atom, 0..nfrag-1
+     * @param fill_block    fills the dense block A[idx, idx] (lower triangle suffices) into
+     *                      the column-major n x n buffer `out`; called concurrently from
+     *                      several threads, must be read-only on shared data
+     * @param radius_bohr   R: entries kept per row; ext_bohr: R_ext, block that is inverted
+     * @return always non-null; ->ok tells whether it may be used
+     * Claude Generated (Oct 2026). Result is bit-identical for any thread count.
+     */
+    static std::shared_ptr<LocalInversePreconditioner> buildLocalInverse(
+        const Matrix& geometry_bohr, const std::vector<int>& frag, int nfrag,
+        const std::function<void(const std::vector<int>& idx, double* out)>& fill_block,
+        double radius_bohr, double ext_bohr, CxxThreadPool* pool, int num_threads,
+        bool want_dense_S_inverse = false);
+
+    /// Statistics of the local-inverse preconditioner (test and benchmark hooks).
+    long localInverseBuilds() const { return m_localinv_builds; }
+    long localInverseBuildFailures() const { return m_localinv_build_failures; }
+    long localInverseRuntimeFallbacks() const { return m_localinv_runtime_fallbacks; }
+
+private:
+
     Vector solveWithSchurCholesky(
         const MatrixCRef& A_nn,
         const Vector& rhs_atoms,
@@ -921,6 +1003,20 @@ private:
     double m_ppcg_tol = 1e-12;          ///< relative residual tolerance (|P r| <= tol * (|b|+1))
     int    m_ppcg_max_iter = 500;       ///< iteration cap; non-convergence falls back to Schur-Cholesky
     Vector m_ppcg_last_q;               ///< warm start (previous step's charges)
+    // Local-inverse preconditioner of the projected PCG (Claude Generated, Oct 2026), see
+    // LocalInversePreconditioner. Off by default (eeq_ppcg_precond = diag).
+    bool   m_ppcg_localinv = false;     ///< eeq_ppcg_precond == localinv
+    double m_localinv_radius = 8.0;     ///< eeq_localinv_radius_bohr (kept entries per row)
+    double m_localinv_ext = 10.0;       ///< eeq_localinv_ext_bohr (block that is inverted)
+    double m_localinv_rebuild = 1.0;    ///< eeq_localinv_rebuild_bohr (0 = rebuild every solve)
+    std::shared_ptr<LocalInversePreconditioner> m_localinv;  ///< last build (also a failed one)
+    const Matrix* m_ppcg_geometry = nullptr;  ///< Phase-2 geometry (Bohr) during dispatchSolve; null in Phase 1
+    CxxThreadPool* m_ppcg_pool = nullptr;     ///< pool for the parallel build (dispatchSolve)
+    int    m_ppcg_threads = 1;
+    long   m_localinv_builds = 0;            ///< successful builds
+    long   m_localinv_build_failures = 0;    ///< builds rejected (G or S not positive definite)
+    long   m_localinv_runtime_fallbacks = 0; ///< solves restarted with Jacobi (rz <= 0 or pAp <= 0)
+    double m_localinv_build_ms_total = 0.0;  ///< wall time of all build attempts
     double m_matrix_rebuild_eps = 0.0;  ///< WP-EEQ-Matrix-Cache: max displacement before A_nn off-diag rebuild (0 = disabled)
 
     // ===== Cached Data for Energy Calculation =====
@@ -1188,6 +1284,30 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
     PARAM(eeq_ppcg_min_atoms, Int, 500, "Minimum atom count for the automatic projected-PCG choice (small systems stay on the exact Schur-Cholesky solve).", "Algorithm", {})
     PARAM(eeq_ppcg_tol, Double, 1e-12, "Projected-PCG relative residual tolerance |P r| <= tol (|b|+1); 1e-12 gives energy/gradient deviations ~1e-12 from the direct solve (1e-10 saves ~15% of the iterations).", "Algorithm", {})
     PARAM(eeq_ppcg_max_iter, Int, 500, "Projected-PCG iteration cap; on non-convergence the exact Schur-Cholesky solve is used for that step.", "Algorithm", {})
+    // Claude Generated (Oct 2026): local-inverse preconditioner of the projected PCG, opt-in.
+    PARAM(eeq_ppcg_precond, String, "diag",
+          "Preconditioner of the projected PCG (ppcg): diag (default, diagonal Jacobi) | localinv "
+          "(sparse local inverse of the EEQ matrix: per atom the dense block of all atoms within "
+          "eeq_localinv_ext_bohr is inverted and the entries within eeq_localinv_radius_bohr are kept; "
+          "used through a constraint preconditioner so the fragment charges stay exact). Only the "
+          "Phase-2 (final) charges use it; it needs fewer iterations but costs a build. If the "
+          "symmetrised inverse is not positive definite the solve uses diag (warning, counted). "
+          "See docs/EEQ_SOLVER_CONTROL.md.",
+          "Algorithm", {"ppcg_precond"})
+    PARAM(eeq_localinv_radius_bohr, Double, 8.0,
+          "localinv: entries of the local inverse kept per row, pairs within this distance (Bohr).",
+          "Algorithm", {})
+    PARAM(eeq_localinv_ext_bohr, Double, 10.0,
+          "localinv: radius (Bohr) of the dense block that is inverted per atom; >= eeq_localinv_radius_bohr. "
+          "Build cost grows with the cube of the atoms inside it.",
+          "Algorithm", {})
+    PARAM(eeq_localinv_rebuild_bohr, Double, 1.0,
+          "localinv: rebuild the preconditioner when any atom moved more than this (Bohr) since the "
+          "last build; 0 = rebuild at every solve. A stale preconditioner never changes the charges "
+          "(the CG still converges to eeq_ppcg_tol), only the iteration count. Measured on a 7320-atom "
+          "MD (1 fs steps): 1.0 rebuilds every ~7 steps for +1 iteration (15 -> 16); the GPU needs it, "
+          "a per-step rebuild there costs more than it saves.",
+          "Algorithm", {})
     PARAM(eeq_matrix_rebuild_eps_bohr, Double, 0.0,
           "WP-EEQ-Matrix-Cache: max atom displacement (Bohr) before A_nn Coulomb off-diagonal is "
           "rebuilt from scratch. When below this AND CN drift < 0.05, the cached off-diagonal is "

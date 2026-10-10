@@ -40,6 +40,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/elements.h"
 #include "src/core/math_compat.h"
+#include "src/tools/spatial_cell_list.h"
 
 #include <mutex>
 #include <stdexcept>
@@ -939,6 +940,15 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     m_ppcg_tol       = m_config.get<double>("eeq_ppcg_tol", 1e-12);
     m_ppcg_max_iter  = static_cast<int>(m_config.get<double>("eeq_ppcg_max_iter", 500.0));
     m_batched_max_error = m_config.get<double>("eeq_batched_max_error_eh", 1e-6);
+    {   // Claude Generated (Oct 2026): local-inverse preconditioner of the projected PCG
+        const std::string pc = m_config.get<std::string>("eeq_ppcg_precond", "diag");
+        if (pc == "localinv") m_ppcg_localinv = true;
+        else if (pc != "diag")
+            throw std::invalid_argument(fmt::format("eeq_ppcg_precond '{}' unknown (valid: diag, localinv)", pc));
+        m_localinv_radius  = m_config.get<double>("eeq_localinv_radius_bohr", 8.0);
+        m_localinv_ext     = std::max(m_config.get<double>("eeq_localinv_ext_bohr", 10.0), m_localinv_radius);
+        m_localinv_rebuild = m_config.get<double>("eeq_localinv_rebuild_bohr", 1.0);
+    }
     if (m_config.get<int>("verbosity", 0) >= 2)
         CurcumaLogger::info(fmt::format("EEQ solver config: solve_method={}, ppcg auto at nfrag>={} & N>={}, tol={:.0e}, max_iter={}",
             m_config.get<std::string>("solve_method", "auto"), m_ppcg_min_nfrag, m_ppcg_min_atoms, m_ppcg_tol, m_ppcg_max_iter));
@@ -1933,6 +1943,229 @@ Vector EEQSolver::dispatchSolve(
 // Cholesky is O(N³/6) vs O(N³/3) for LU — roughly 2× faster.
 
 // ---------------------------------------------------------------------------
+// Local-inverse preconditioner (Claude Generated, Oct 2026). Maths: header,
+// struct LocalInversePreconditioner.
+// ---------------------------------------------------------------------------
+
+/// In-place lower Cholesky A = L L^T of a column-major n x n buffer (only the lower triangle is
+/// read and written). Plain loops on purpose: no BLAS/LAPACK call (they would be threaded inside
+/// the parallel build) and a fixed operation order, so the result is reproducible. Returns false
+/// for a non-positive pivot. Claude Generated (Oct 2026).
+static bool localCholeskyLower(double* a, int n)
+{
+    for (int k = 0; k < n; ++k) {
+        double* ck = a + static_cast<size_t>(k) * n;
+        if (!(ck[k] > 0.0)) return false;
+        const double d = std::sqrt(ck[k]);
+        ck[k] = d;
+        const double inv = 1.0 / d;
+        for (int i = k + 1; i < n; ++i) ck[i] *= inv;
+        for (int j = k + 1; j < n; ++j) {          // rank-1 update of column j, rows j..n-1
+            double* cj = a + static_cast<size_t>(j) * n;
+            const double l = ck[j];
+            for (int i = j; i < n; ++i) cj[i] -= l * ck[i];
+        }
+    }
+    return true;
+}
+
+void LocalInversePreconditioner::apply(const Vector& r, Vector& z, Vector& t) const
+{
+    // z = G r ; mu = S^-1 C z ; z -= G C^T mu   (=> C z = 0, see header)
+    z.noalias() = G * r;
+    t.setZero(nfrag);
+    for (int i = 0; i < natoms; ++i) t(frag[i]) += z(i);
+    const Vector mu = S_llt.solve(t);
+    z.noalias() -= H * mu;
+}
+
+std::shared_ptr<LocalInversePreconditioner> EEQSolver::buildLocalInverse(
+    const Matrix& geometry_bohr, const std::vector<int>& frag, int nfrag,
+    const std::function<void(const std::vector<int>& idx, double* out)>& fill_block,
+    double radius_bohr, double ext_bohr, CxxThreadPool* pool, int num_threads,
+    bool want_dense_S_inverse)
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    auto pc = std::make_shared<LocalInversePreconditioner>();
+    const int N = static_cast<int>(geometry_bohr.rows());
+    pc->natoms = N;
+    pc->nfrag = nfrag;
+    pc->frag = frag;
+    pc->geometry = geometry_bohr;
+    auto finish = [&](bool ok, const char* why) {
+        pc->ok = ok;
+        if (why) pc->why = why;
+        pc->build_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        return pc;
+    };
+    if (N == 0 || nfrag < 1 || static_cast<int>(frag.size()) != N)
+        return finish(false, "empty system");
+
+    SpatialCellList cells;
+    cells.build(geometry_bohr, ext_bohr);
+    const double R2 = radius_bohr * radius_bohr;
+    const double E2 = ext_bohr * ext_bohr;
+
+    // Row i of the unsymmetrised local inverse Gl: columns (ascending) and values.
+    std::vector<std::vector<int>> row_col(N);
+    std::vector<std::vector<double>> row_val(N);
+    std::vector<int> block_size(N, 0);
+    std::atomic<int> next{ 0 };
+    std::atomic<bool> failed{ false };
+    constexpr int chunk = 16;
+    // Each atom is computed by exactly one thread from read-only inputs, so the result does not
+    // depend on which thread takes which chunk (dynamic scheduling only balances the load).
+    auto worker = [&]() {
+        std::vector<std::pair<int, double>> nb;   // (atom, r^2)
+        std::vector<int> idx;
+        std::vector<double> B, x;
+        for (;;) {
+            const int start = next.fetch_add(chunk);
+            if (start >= N || failed.load(std::memory_order_relaxed)) return;
+            const int stop = std::min(N, start + chunk);
+            for (int i = start; i < stop; ++i) {
+                nb.clear();
+                nb.emplace_back(i, 0.0);
+                cells.forEachNeighbor(i, E2, [&](int j, double r2) { nb.emplace_back(j, r2); });
+                std::sort(nb.begin(), nb.end());
+                const int n = static_cast<int>(nb.size());
+                idx.resize(n);
+                int k = 0;
+                for (int m = 0; m < n; ++m) {
+                    idx[m] = nb[m].first;
+                    if (idx[m] == i) k = m;
+                }
+                B.resize(static_cast<size_t>(n) * n);
+                fill_block(idx, B.data());
+                if (!localCholeskyLower(B.data(), n)) { failed = true; return; }
+                // Column k of B^-1: L y = e_k (y_m = 0 for m < k), then L^T x = y.
+                x.assign(n, 0.0);
+                x[k] = 1.0;
+                for (int c = k; c < n; ++c) {
+                    const double* lc = B.data() + static_cast<size_t>(c) * n;
+                    x[c] /= lc[c];
+                    for (int rr = c + 1; rr < n; ++rr) x[rr] -= lc[rr] * x[c];
+                }
+                for (int c = n - 1; c >= 0; --c) {
+                    const double* lc = B.data() + static_cast<size_t>(c) * n;
+                    double sum = x[c];
+                    for (int rr = c + 1; rr < n; ++rr) sum -= lc[rr] * x[rr];
+                    x[c] = sum / lc[c];
+                }
+                auto& cols = row_col[i];
+                auto& vals = row_val[i];
+                cols.clear();
+                vals.clear();
+                for (int m = 0; m < n; ++m)
+                    if (nb[m].second <= R2) { cols.push_back(idx[m]); vals.push_back(x[m]); }
+                block_size[i] = n;
+            }
+        }
+    };
+    const int T = std::max(1, std::min(num_threads, N / chunk + 1));
+    if (T > 1 && pool) {
+        std::vector<std::future<void>> futures;
+        futures.reserve(T - 1);
+        for (int t = 1; t < T; ++t) futures.push_back(pool->enqueue([&worker](int, int) { worker(); }, t, T));
+        worker();
+        for (auto& f : futures) f.get();
+    } else if (T > 1) {
+        std::vector<std::thread> threads;
+        for (int t = 1; t < T; ++t) threads.emplace_back(worker);
+        worker();
+        for (auto& th : threads) th.join();
+    } else {
+        worker();
+    }
+    pc->blocks_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (failed) return finish(false, "a dense block A[E,E] is not positive definite");
+
+    // G = (Gl + Gl^T) / 2. The two halves of an entry are added in a fixed order.
+    size_t total = 0;
+    double sum_block = 0.0;
+    for (int i = 0; i < N; ++i) { total += row_col[i].size(); sum_block += block_size[i]; }
+    std::vector<Eigen::Triplet<double>> trip;
+    trip.reserve(2 * total);
+    for (int i = 0; i < N; ++i)
+        for (size_t e = 0; e < row_col[i].size(); ++e) {
+            trip.emplace_back(i, row_col[i][e], 0.5 * row_val[i][e]);
+            trip.emplace_back(row_col[i][e], i, 0.5 * row_val[i][e]);
+        }
+    pc->G.resize(N, N);
+    pc->G.setFromTriplets(trip.begin(), trip.end());
+    pc->nnz_per_row = static_cast<double>(pc->G.nonZeros()) / N;
+    pc->mean_block = sum_block / N;
+
+    // Test hook: CURCUMA_LOCALINV_TEST_REJECT=1 treats every build as indefinite, so the Jacobi
+    // fallback path can be exercised (cli_gfnff_07_eeq_localinv); no effect when unset.
+    static const bool test_reject = [] { const char* e = std::getenv("CURCUMA_LOCALINV_TEST_REJECT"); return e && *e && *e != '0'; }();
+    if (test_reject) return finish(false, "rejected by CURCUMA_LOCALINV_TEST_REJECT");
+    // Definiteness of G: a sparse Cholesky (AMD ordering) must succeed.
+    {
+        const auto tc = std::chrono::steady_clock::now();
+        Eigen::SparseMatrix<double> Gc = pc->G;
+        Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> llt(Gc);
+        pc->check_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tc).count();
+        if (llt.info() != Eigen::Success) return finish(false, "symmetrised local inverse G is not positive definite");
+    }
+
+    // H = G C^T (N x nfrag): H_if = sum_{j in f} G_ij, summed in column order of row i.
+    std::vector<double> acc(nfrag, 0.0);
+    std::vector<char> seen(nfrag, 0);
+    std::vector<int> touched;
+    std::vector<Eigen::Triplet<double>> htrip;
+    htrip.reserve(pc->G.nonZeros());
+    for (int i = 0; i < N; ++i) {
+        touched.clear();
+        for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(pc->G, i); it; ++it) {
+            const int f = frag[it.col()];
+            if (!seen[f]) { seen[f] = 1; touched.push_back(f); }
+            acc[f] += it.value();
+        }
+        std::sort(touched.begin(), touched.end());
+        for (int f : touched) { htrip.emplace_back(i, f, acc[f]); acc[f] = 0.0; seen[f] = 0; }
+    }
+    pc->H.resize(N, nfrag);
+    pc->H.setFromTriplets(htrip.begin(), htrip.end());
+
+    // S = C H (nfrag x nfrag), entries summed in atom order; factorised once per build.
+    std::vector<Eigen::Triplet<double>> strip;
+    strip.reserve(pc->H.nonZeros());
+    for (int i = 0; i < N; ++i)
+        for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(pc->H, i); it; ++it)
+            strip.emplace_back(frag[i], static_cast<int>(it.col()), it.value());
+    Eigen::SparseMatrix<double> S(nfrag, nfrag);
+    S.setFromTriplets(strip.begin(), strip.end());
+    pc->S_llt.compute(S);
+    if (pc->S_llt.info() != Eigen::Success) return finish(false, "S = C G C^T is not positive definite");
+    if (want_dense_S_inverse) {
+        const auto ts = std::chrono::steady_clock::now();
+        // Columns of S^-1 are independent solves with the same factor: split them over the threads
+        // (each column is computed by one thread in a fixed order, so the result does not depend on T).
+        pc->S_inv.resize(nfrag, nfrag);
+        const int Ts = std::max(1, std::min(num_threads, nfrag / 64 + 1));
+        auto cols = [&](int t) {
+            const int c0 = static_cast<int>(static_cast<long long>(nfrag) * t / Ts);
+            const int c1 = static_cast<int>(static_cast<long long>(nfrag) * (t + 1) / Ts);
+            if (c1 <= c0) return;
+            Matrix E = Matrix::Zero(nfrag, c1 - c0);
+            for (int c = c0; c < c1; ++c) E(c, c - c0) = 1.0;
+            pc->S_inv.middleCols(c0, c1 - c0) = pc->S_llt.solve(E);
+        };
+        if (Ts > 1) {
+            std::vector<std::thread> th;
+            for (int t = 1; t < Ts; ++t) th.emplace_back(cols, t);
+            cols(0);
+            for (auto& x : th) x.join();
+        } else {
+            cols(0);
+        }
+        pc->sinv_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ts).count();
+    }
+    return finish(true, nullptr);
+}
+
+// ---------------------------------------------------------------------------
 // Projected preconditioned CG (many-fragment EEQ). See the header for the maths.
 // ---------------------------------------------------------------------------
 Vector EEQSolver::solveWithProjectedPCG(
@@ -1957,6 +2190,45 @@ Vector EEQSolver::solveWithProjectedPCG(
     std::vector<double> sM(nfrag, 0.0);
     for (int i = 0; i < natoms; ++i) sM[frag[i]] += Minv(i);
 
+    // Oct 2026: local-inverse preconditioner (opt-in, Phase 2 only). Built, or reused while no
+    // atom moved more than eeq_localinv_rebuild_bohr; a failed build is kept (ok = false) so the
+    // next attempt waits for the same rebuild criterion instead of retrying every step.
+    double build_ms_this_call = 0.0;
+    const LocalInversePreconditioner* li = nullptr;
+    if (m_ppcg_localinv && m_ppcg_geometry && m_ppcg_geometry->rows() == natoms) {
+        const Matrix& X = *m_ppcg_geometry;
+        bool rebuild = !m_localinv || m_localinv->natoms != natoms || m_localinv->nfrag != nfrag
+            || m_localinv->frag != frag || m_localinv_rebuild <= 0.0;
+        if (!rebuild) {
+            const double max_dr = (X - m_localinv->geometry).rowwise().norm().maxCoeff();
+            rebuild = !(max_dr <= m_localinv_rebuild);
+        }
+        if (rebuild) {
+            const double* a = A_nn.data();
+            const Eigen::Index lda = A_nn.outerStride();
+            auto fill = [a, lda](const std::vector<int>& idx, double* out) {
+                const int n = static_cast<int>(idx.size());
+                for (int c = 0; c < n; ++c) {
+                    const double* col = a + static_cast<size_t>(idx[c]) * lda;
+                    for (int rr = c; rr < n; ++rr) out[static_cast<size_t>(c) * n + rr] = col[idx[rr]];
+                }
+            };
+            m_localinv = buildLocalInverse(X, frag, nfrag, fill, m_localinv_radius, m_localinv_ext,
+                                           m_ppcg_pool, m_ppcg_threads);
+            build_ms_this_call = m_localinv->build_ms;
+            m_localinv_build_ms_total += m_localinv->build_ms;
+            if (m_localinv->ok) {
+                ++m_localinv_builds;
+            } else {
+                ++m_localinv_build_failures;
+                CurcumaLogger::warn(fmt::format("EEQ ppcg localinv: preconditioner rejected ({}), using diagonal Jacobi "
+                                                "until the next rebuild (failures so far: {})",
+                                                m_localinv->why, m_localinv_build_failures));
+            }
+        }
+        if (m_localinv->ok) li = m_localinv.get();
+    }
+
     std::vector<double> s(nfrag);
     // P v = v - C^T (C C^T)^{-1} C v : subtract the per-fragment mean.
     auto project = [&](Vector& v) {
@@ -1964,48 +2236,88 @@ Vector EEQSolver::solveWithProjectedPCG(
         for (int i = 0; i < natoms; ++i) s[frag[i]] += v(i);
         for (int i = 0; i < natoms; ++i) v(i) -= s[frag[i]] / nfrag_atoms[frag[i]];
     };
-    // z = M^{-1} r - M^{-1} C^T mu with mu = (C M^{-1} C^T)^{-1} C M^{-1} r, so that C z = 0.
-    auto precondition = [&](const Vector& r, Vector& z) {
+    // Jacobi: z = M^{-1} r - M^{-1} C^T mu with mu = (C M^{-1} C^T)^{-1} C M^{-1} r, so that C z = 0.
+    // localinv: the same constraint preconditioner with M^{-1} = G (see LocalInversePreconditioner).
+    Vector t_frag(nfrag);
+    auto precondition = [&](const LocalInversePreconditioner* pc, const Vector& r, Vector& z) {
+        if (pc) { pc->apply(r, z, t_frag); return; }
         z = Minv.cwiseProduct(r);
         std::fill(s.begin(), s.end(), 0.0);
         for (int i = 0; i < natoms; ++i) s[frag[i]] += z(i);
         for (int i = 0; i < natoms; ++i) z(i) -= Minv(i) * s[frag[i]] / sM[frag[i]];
     };
 
-    // Feasible start: previous charges (warm start) or zero, shifted per fragment onto qfrag.
-    Vector q = (m_ppcg_last_q.size() == natoms) ? m_ppcg_last_q : Vector::Zero(natoms);
-    std::fill(s.begin(), s.end(), 0.0);
-    for (int i = 0; i < natoms; ++i) s[frag[i]] += q(i);
-    for (int i = 0; i < natoms; ++i) q(i) += (rhs_constraints(frag[i]) - s[frag[i]]) / nfrag_atoms[frag[i]];
-
     const double tol_abs = m_ppcg_tol * (rhs_atoms.norm() + 1.0);
-    Vector r = rhs_atoms - A_nn * q;
-    project(r);
-    Vector z(natoms), p(natoms), Ap(natoms);
-    precondition(r, z);
-    p = z;
-    double rz = r.dot(z);
-    double r_norm = r.norm();
+    Vector q(natoms), r(natoms), z(natoms), p(natoms), Ap(natoms);
+    double r_norm = 0.0;
     int iters = 0;
-    bool converged = (r_norm <= tol_abs);
-    while (!converged && iters < m_ppcg_max_iter) {
-        Ap.noalias() = A_nn * p;                 // dense matvec: the only O(N^2) step per iteration
-        const double pAp = p.dot(Ap);
-        if (!(pAp > 0.0)) break;                 // lost positive definiteness on the tangent space
-        const double alpha = rz / pAp;
-        q += alpha * p;
-        r -= alpha * Ap;
-        project(r);                              // keeps the residual in the tangent space
-        ++iters;
+    bool converged = false;
+    // One CG run; returns false only when the local inverse showed indefiniteness (rz <= 0 or
+    // pAp <= 0), in which case the caller restarts the whole solve with Jacobi.
+    auto run_cg = [&](const LocalInversePreconditioner* pc) -> bool {
+        // Feasible start: previous charges (warm start) or zero, shifted per fragment onto qfrag.
+        q = (m_ppcg_last_q.size() == natoms) ? m_ppcg_last_q : Vector::Zero(natoms);
+        std::fill(s.begin(), s.end(), 0.0);
+        for (int i = 0; i < natoms; ++i) s[frag[i]] += q(i);
+        for (int i = 0; i < natoms; ++i) q(i) += (rhs_constraints(frag[i]) - s[frag[i]]) / nfrag_atoms[frag[i]];
+        r = rhs_atoms - A_nn * q;
+        project(r);
+        precondition(pc, r, z);
+        p = z;
+        double rz = r.dot(z);
         r_norm = r.norm();
-        if (r_norm <= tol_abs) { converged = true; break; }
-        precondition(r, z);
-        const double rz_new = r.dot(z);
-        p = z + (rz_new / rz) * p;
-        rz = rz_new;
+        iters = 0;
+        converged = (r_norm <= tol_abs);
+        if (pc && !converged && !(rz > 0.0)) return false;
+        while (!converged && iters < m_ppcg_max_iter) {
+            Ap.noalias() = A_nn * p;                 // dense matvec: the only O(N^2) step per iteration
+            const double pAp = p.dot(Ap);
+            if (!(pAp > 0.0)) {                      // lost positive definiteness on the tangent space
+                if (pc) return false;
+                break;
+            }
+            const double alpha = rz / pAp;
+            q += alpha * p;
+            r -= alpha * Ap;
+            project(r);                              // keeps the residual in the tangent space
+            ++iters;
+            r_norm = r.norm();
+            if (r_norm <= tol_abs) { converged = true; break; }
+            precondition(pc, r, z);
+            const double rz_new = r.dot(z);
+            if (pc && !(rz_new > 0.0)) return false;
+            p = z + (rz_new / rz) * p;
+            rz = rz_new;
+        }
+        return true;
+    };
+    int iters_discarded = 0;
+    if (!run_cg(li)) {
+        // Never continue with an M that is not positive definite: drop it, redo with Jacobi.
+        iters_discarded = iters;
+        ++m_localinv_runtime_fallbacks;
+        CurcumaLogger::warn(fmt::format("EEQ ppcg localinv: indefinite preconditioner detected in the CG after {} "
+                                        "iterations, solve repeated with diagonal Jacobi (fallbacks so far: {})",
+                                        iters, m_localinv_runtime_fallbacks));
+        m_localinv->ok = false;
+        m_localinv->why = "indefinite in the CG";
+        li = nullptr;
+        run_cg(nullptr);
     }
     m_pcg_total_calls++;
-    m_pcg_total_iters += iters;
+    m_pcg_total_iters += iters + iters_discarded;
+    // Claude Generated (Oct 2026): CURCUMA_PPCG_ITERS=1 prints the iteration count of every solve, also in MD
+    // (the verbosity of the solver is fixed at construction); same variable and format as the GPU solver.
+    static const bool print_iters = [] { const char* e = std::getenv("CURCUMA_PPCG_ITERS"); return e && *e && *e != '0'; }();
+    if (print_iters) {
+        if (m_ppcg_localinv)
+            fprintf(stderr, "PPCG N=%d nfrag=%d iters=%d converged=%d |r|=%.3e precond=%s build_ms=%.1f blocks_ms=%.1f check_ms=%.1f discarded=%d nnz_row=%.1f block=%.0f\n",
+                    natoms, nfrag, iters, converged ? 1 : 0, r_norm, li ? "localinv" : "diag", build_ms_this_call,
+                    build_ms_this_call > 0 ? m_localinv->blocks_ms : 0.0, build_ms_this_call > 0 ? m_localinv->check_ms : 0.0,
+                    iters_discarded, li ? li->nnz_per_row : 0.0, li ? li->mean_block : 0.0);
+        else
+            fprintf(stderr, "PPCG N=%d nfrag=%d iters=%d converged=%d |r|=%.3e\n", natoms, nfrag, iters, converged ? 1 : 0, r_norm);
+    }
     if (!converged) {
         m_pcg_nonconv_calls++;
         if (r_norm > m_pcg_worst_residual) m_pcg_worst_residual = r_norm;
@@ -3228,6 +3540,12 @@ void EEQSolver::printConvergenceSummary() {
             "EEQ PCG: {}/{} converged ({} iters total)",
             m_pcg_total_calls, m_pcg_total_calls, m_pcg_total_iters));
     }
+    if (m_ppcg_localinv && m_verbosity >= 2)
+        CurcumaLogger::info(fmt::format(
+            "EEQ ppcg localinv: {} builds ({:.1f} ms in total), {} rejected builds, {} CG fallbacks to Jacobi{}",
+            m_localinv_builds, m_localinv_build_ms_total, m_localinv_build_failures, m_localinv_runtime_fallbacks,
+            m_localinv ? fmt::format(", last: {:.1f} entries/row, block {:.0f} atoms", m_localinv->nnz_per_row,
+                                     m_localinv->mean_block) : std::string()));
     resetConvergenceStats();
 }
 
@@ -3832,7 +4150,14 @@ Vector EEQSolver::calculateFinalCharges(
         // src/core/blas_threads.h.
         curcuma::ScopedBlasThreads _blas_threads(num_threads > 0 ? num_threads : 1);
         const auto t_p2_solve = std::chrono::high_resolution_clock::now();
+        // Oct 2026: the local-inverse preconditioner of the projected PCG needs the geometry
+        // (neighbourhoods) and may build in parallel; only this Phase-2 solve provides them.
+        m_ppcg_geometry = &geometry_bohr;
+        m_ppcg_pool = pool;
+        m_ppcg_threads = num_threads > 0 ? num_threads : 1;
         Vector new_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads, "final charges");
+        m_ppcg_geometry = nullptr;
+        m_ppcg_pool = nullptr;
         if (m_verbosity >= 2) {
             const auto t_p2_end = std::chrono::high_resolution_clock::now();
             const double ms_prep  = std::chrono::duration<double, std::milli>(t_p2_solve - t_p2_start).count();

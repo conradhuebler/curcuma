@@ -349,6 +349,25 @@ public:
     );
 
     /**
+     * @brief Local-inverse preconditioner for the WP7-E projected PCG (eeq_ppcg_precond localinv).
+     *
+     * Claude Generated (Oct 2026). Built on the host (EEQSolver::buildLocalInverse, maths in
+     * eeq_solver.h, LocalInversePreconditioner) and uploaded here as CSR: G (N x N), H = G C^T
+     * (N x nfrag) and the dense S^-1 = (C G C^T)^-1 (nfrag x nfrag). While set, the projected
+     * PCG applies z = G r - H S^-1 C G r instead of the diagonal Jacobi. CUDA only (the ROCm
+     * build has no definition; the wrapper calls it only for Backend::has_device_schur).
+     * @return false if the upload failed (preconditioner stays off)
+     */
+    bool setLocalInversePreconditioner(int N, int nfrag,
+        const std::vector<int>& G_rowptr, const std::vector<int>& G_col, const std::vector<double>& G_val,
+        const std::vector<int>& H_rowptr, const std::vector<int>& H_col, const std::vector<double>& H_val,
+        const std::vector<double>& S_inv);
+    void clearLocalInversePreconditioner();
+    bool localInversePreconditionerActive() const;
+    /// Solves in which the local inverse showed rz <= 0 / pAp <= 0 or stalled and Jacobi redid the solve.
+    long localInverseRuntimeFallbacks() const;
+
+    /**
      * @brief Batched per-fragment EEQ: independent N_f×N_f Cholesky + host Schur per fragment.
      *
      * Claude Generated (May 2026): Replaces single N×N Cholesky for nfrag > 1 systems.

@@ -83,10 +83,54 @@ Cost on polymer_2x: 82 ms on the CPU, 336 ms on the GPU path (host loop), once (
 - **ldlt on the CPU** uses `dsytrs2` (level 3) instead of `dsytrs`: 7.3 -> 5.5 s per step, charges move by 2e-13 e.
   **lu on the CPU** is at the cost of the LU itself (Eigen and MKL `dgetrf` both 5.9 s for the 8822-row matrix).
 
+## Local-inverse preconditioner of ppcg (`eeq_ppcg_precond localinv`, opt-in)
+
+Claude Generated (Oct 10, 2026) — 🤖 AI-generated, ⚙️ machine-tested (`cli_gfnff_07_eeq_localinv`, measurements below); human production testing pending.
+
+`-eeq_solver.eeq_ppcg_precond localinv` (default `diag`) replaces the diagonal Jacobi of the projected PCG, CPU and `-gpu cuda` (WP7-E).
+Per atom the dense block of A over all atoms within `eeq_localinv_ext_bohr` (default 10) is factorised, the column of the atom is solved and
+its entries within `eeq_localinv_radius_bohr` (default 8) are kept; G = (Gl + Gl^T)/2. It enters as a constraint preconditioner,
+z = G r - G C^T S^-1 C G r with S = C G C^T, so the iterates stay on the fragment-charge constraints; derivation and references in
+`eeq_solver.h` (`LocalInversePreconditioner`). Only the Phase-2 (final) charges use it; Phase 1 has no geometry and stays on `diag`.
+
+- **Definiteness**: G is accepted only if a sparse Cholesky of G and of S succeeds; otherwise, or when the CG shows rz <= 0 / pAp <= 0
+  (GPU: also a stall), the solve runs on `diag` with a counted warning. No rejection occurred on the systems below (0 of all builds).
+  `CURCUMA_LOCALINV_TEST_REJECT=1` forces a rejection (test hook).
+- **Rebuild**: `eeq_localinv_rebuild_bohr` (default 1.0; 0 = every solve) rebuilds when any atom moved further since the last build. A stale
+  G changes only the iteration count, never the converged charges (same `eeq_ppcg_tol`).
+- **Reproducibility**: the build is independent of the thread count (one thread per atom row, fixed summation order); MD charges at a fixed
+  thread count are bit-identical between runs. GPU: CSR kernels + dense S^-1 on the device (nfrag <= 4096), built on the host; not bit-reproducible, like the GPU path as a whole.
+- **CUDA only** on the device side; ROCm keeps `diag`.
+
+Measurements (Oct 10, 2026; MD 50 fs, dt 1 fs, 300 K; per-step means over steps 1-49, n = 3 runs unless noted, spread = range of the run means;
+RTX 5080, 32 cores). Epot after 50 fs -902.161126 Eh in every run; per-step charges within 3.5e-11 e (CPU) / 3.4e-11 e (GPU) of `diag`.
+
+| polymer_2x (7320 atoms, 1502 fragments) | iterations/step | EEQ ms/step | step ms |
+|---|---:|---:|---:|
+| CPU 1 thread, diag | 68 | 1208 [1208-1208] | 2339 [2338-2340] |
+| CPU 1 thread, localinv rebuild 0 | 15 | 599 [598-599] | 1726 [1723-1730] |
+| CPU 32 threads, diag | 68 | 1004 [999-1008] | 1252 [1244-1259] |
+| CPU 32 threads, localinv rebuild 0 | 15 | 411 [407-417] | 657 [651-665] |
+| CUDA, diag | 68 | 32.2 [32.2-32.2] | 73.6 [73.5-73.7] |
+| CUDA, localinv rebuild 0 | 15 | 51.0 [50.9-51.1] | 92.4 [92.2-92.7] |
+| CUDA, localinv rebuild 0.5 (13 builds) | 16 | 25.4 [25.3-25.6] | 66.9 [66.7-67.2] |
+| CUDA, localinv rebuild 1.0 (7 builds) | 16 | 21.3 [21.2-21.3] | 62.7 [62.5-62.9] |
+
+- Build on polymer_2x (R 8 / R_ext 10): 48 ms at 1 thread, 22 ms at 32 threads, of which the serial definiteness check (sparse Cholesky of G)
+  is 17 ms; GPU path 31 ms (adds the dense S^-1, 1502^2). Peak RSS +6 MB over `diag` (3277 MB, SP, 32 threads); R 12/16: +20 MB, R 16/20: +54 MB.
+- Other systems, 16 threads, EEQ ms/step diag -> localinv (rebuild 0): peo201-water500 104 -> 54; NaCl in water (peo201-water500 with 40 waters
+  replaced by 20 Na + 20 Cl, neutral) 96 -> 51; the same with 24 Na / 20 Cl, `-charge 4 -gfnff.frag_charge_model reference`, n = 1: 95 -> 49;
+  urea400-water1000 440 -> 362 (build 166 ms, check-dominated); peo201-chain (nfrag 1) 13.4 -> 13.0.
+- Radius scan (SP, 1 thread, Phase-2 iterations; diag 72 / 62 / 63 / 37 for polymer_2x / chain / water500 / urea): R 6: 21-22 / 19 / 19 / 11;
+  R 8: 16 / 14 / 14-15 / 9; R 10: 13 / 12 / 12 / 8; R 12: 12 / 10 / 11 / 7. R_ext above R + 2 Bohr lowers no count but costs the cube of the block.
+- The Python reconstruction that motivated this (vault note "curcuma Schwarz-Attention") predicted 81 -> 18 on polymer_2x; the C++ measures 68 -> 15.
+
 ## Not tested / open
 
 - ROCm and Vulkan: same code path, not built or run here. `lu` and `ldlt` are errors there.
 - Multi-GPU split and the batch-worker device pool were not run after this change.
+- localinv: the GPU-side breakdown fallback (rz <= 0 in the device CG) was never triggered (only the host rejection, via the test hook); not run
+  with ALPB solvation, `eeq_distance_cutoff > 0`, transition metals, MD longer than 50 fs, optimisations, or nfrag > 4096 on the GPU (falls back to diag).
 
 ## Test note (Oct 10, 2026)
 
