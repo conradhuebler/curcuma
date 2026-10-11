@@ -88,6 +88,8 @@ Stand.
 - **Speicher für Systeme > 1000 Atome** (Molecule-Datenstruktur, Distanzmatrix-Cache): geplant, nicht begonnen.
 - **SCF-Vorkonditionierer `-scf_precond frag`** (Okt 2026, [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)), nicht umgesetzt: Ionen und geladene
   Fragmente (nur Skalarschritt), offene Schalen, GFN1; GPU siehe unten.
+- **`-scf_precond` `auto`-Modus** (2026-10-12): Aufbau von M lohnt sich nur bei wiederholter SCF (Census: Einzelpunkt eines Moleküls 1,25x bis 22x langsamer; Break-even etwa 2 SCFs unter 10 Atomen, 8 bei 10-30, 62 bei 30-100). Regel (wiederholte SCF in MD/Opt/Hessian, Fragmente <= 30 Atome) und
+  Volkszählung der Schalter-Standardfrage: [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), Abschnitt Census.
 - **`-scf_precond frag`, ungemessen**: Systeme > 600 Atome (CPU) bzw. > 1499 (GPU); M-Erneuerung in langer MD (> 500 fs, `-scf_precond_rebuild_rms`);
   Hessian mit der eingebauten Funktion (jedes Objekt ausgelenkter Geometrien baut sein eigenes M; gemessen nur der Prototyp bis 197 Atome); Fragmente über
   `-scf_precond_max_fragment_atoms` (Standard 100; Gewinn nur bis ~30 Atomen gemessen); Elemente außer H, C, N, O; Solvatation.

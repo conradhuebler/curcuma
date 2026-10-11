@@ -149,6 +149,24 @@ On the unrelaxed ureawater197 `frag` does not help (24 -> 33 iterations, guard).
   coarse matrix depends on the states at the Fermi level and changes with them. Code removed Oct 11, 2026; lab journal
   in the vault, 'curcuma GFN2-SCF-Vorkonditionierung', steps 7 to 10.
 
+## Census: frag against none on GMTKN55 and MOR41 (Oct 12, 2026)
+
+Same binary, `-threads 1`, n=1 per structure, 2555 structures (open shells with `-spin`), 14 processes in parallel; single point
+of ONE molecule each (a molecule is one fragment, its block is the Jacobian of the whole system). 624 structures ignore the switch
+with a warning (odd electrons or open shell 233, charge 1 186, charge -1 128, charge 2 10, no fragment qualifies 67); 3 do not
+converge in either mode (G21IP b+, be+, c+, single-atom cations). Energies: |E_frag - E_none| median 0, maximum 1.0e-8 Eh, none above 1e-6.
+
+| atoms | n | SCF iterations median none / frag | wall sum none / frag (s) | build median (ms) | break-even (SCFs, median build / median saved per SCF) |
+|---|---:|---|---|---:|---:|
+| < 10 | 783 | 10 / 4 | 20.2 / 25.3 (1.25x) | 14 | ~2 |
+| 10-30 | 958 | 11 / 4 | 28.0 / 74.7 (2.7x) | 37 | ~8 |
+| 30-100 | 252 | 13 / 4 | 12.5 / 280.8 (22.5x) | 409 | ~62 |
+
+The iteration count drops by more than 2 in 1888 of 2552 structures and rises by more than 2 in 3. A single point of one molecule is
+slower with frag in almost all cases (faster in 138 of 1928 structures with a block); the build of one block of ~60 atoms takes 7 s
+(C60ISO, PR08). MOR41: 18 -> 6 iterations, wall 5.6 -> 105.8 s. frag therefore pays off only for repeated SCFs (MD, optimisation,
+Hessian, ConfSearch) of the same molecule, not for single points; it is not the default. Data: vault `_artefacts/2026-10-12_curcuma_scf-census2_*`.
+
 ## Not measured or not implemented
 
 - Not measured: other elements than H, C, N, O; solvation (fragments are computed in gas phase); systems
