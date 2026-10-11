@@ -5,7 +5,7 @@ Claude Generated (Oct 2026) — 🤖 AI-generated, ⚙️ machine-tested (`cli_g
 ## Rule
 
 `-eeq_solver.solve_method NAME` (alias `-gfnff.solve NAME`; the `eeq_solver` spelling wins when both are set to a non-auto name) chooses the
-linear solve of the EEQ charge system. **The same names run on the CPU and, with `-gpu cuda`, on the GPU.** An explicit name is never
+linear solve of the EEQ charge system. **The same names run on the CPU and, with `-gpu cuda`, on the GPU; `-gpu rocm` accepts only `auto` and `cholesky`, `-gpu vulkan` accepts all names (GFN-FF runs on the CPU there).** An explicit name is never
 overridden by a size threshold.
 
 | name | algorithm | CPU | GPU (CUDA) |
@@ -15,8 +15,16 @@ overridden by a size threshold.
 | `ppcg` | projected PCG, one iterative solve for any nfrag | yes | WP7-E |
 | `pcg` | per-fragment PCG with block-Jacobi, nfrag+1 solves; stops at a relative residual of 1e-6 (about 4e-7 Eh on a 1410-atom chain); cost grows with nfrag, see below | yes | WP7-C |
 | `batched` | per-fragment solves, **drops cross-fragment Coulomb**: inexact; warns when the estimated error exceeds `eeq_batched_max_error_eh` (below) | yes | WP7-B (one fragment: same as `cholesky`) |
-| `lu` | dense LU of the augmented (N+nfrag) system | yes | augmented LU, cuSOLVER getrf/getrs (Oct 2026; ROCm/Vulkan: error) |
-| `ldlt` | dense Bunch-Kaufman LDL^T of A_nn + Schur (`dsytrf` + `dsytrs2`) | yes | cuSOLVER `sytrf` + `Xsytrs` (in blocks of 1024 right-hand sides) + Schur (Oct 2026; ROCm/Vulkan: error) |
+| `lu` | dense LU of the augmented (N+nfrag) system | yes | augmented LU, cuSOLVER getrf/getrs (Oct 2026; ROCm: error; Vulkan: CPU solver) |
+| `ldlt` | dense Bunch-Kaufman LDL^T of A_nn + Schur (`dsytrf` + `dsytrs2`) | yes | cuSOLVER `sytrf` + `Xsytrs` (in blocks of 1024 right-hand sides) + Schur (Oct 2026; ROCm: error; Vulkan: CPU solver) |
+
+ROCm has no device `ppcg`/`pcg`/`batched` (`has_device_schur=false`): `ppcg`, `pcg`, `batched`, `lu`, `ldlt` with `-gpu rocm` are an error naming the valid names (`auto, cholesky`); `auto` and `cholesky` run the dense device Cholesky of the WP2 path plus the host Schur step (verbosity 1: `cholesky ... [GPU ROCm, WP2 dense Cholesky + CPU Schur]`; from 16 fragments the EEQ goes to the CPU solver). Checked by `eeq_gpu_supports` (names only, no device).
+
+| | CPU | CUDA | ROCm / Vulkan |
+|---|---|---|---|
+| `ppcg` stop | relative: `eeq_ppcg_tol` 1e-12, `|P r| <= tol (|b|+1)` | absolute on `|r|`: `pcg_tolerance` 1e-10 | no `ppcg` |
+| far-field shortcut (`farfield_shortcut`) | gamma_ij*r >= 6.5 (`COULOMB_FARFIELD_X2` = 42.25) | gamma_ij*r >= 6.0 (`GFNFF_COUL_FARFIELD_X2` = 36) | none |
+| `localinv` preconditioner | yes | yes | no (ROCm; Vulkan runs the CPU) |
 
 Aliases `schur_cholesky` = `cholesky`, `projected_pcg` = `ppcg`. **An unknown name is an error** that lists the valid ones (it used to mean `auto`).
 The thresholds are arguments: `-eeq_solver.eeq_ppcg_min_atoms`, `-eeq_solver.eeq_ppcg_min_nfrag` (0 = auto never picks `ppcg`).
@@ -100,7 +108,7 @@ z = G r - G C^T S^-1 C G r with S = C G C^T, so the iterates stay on the fragmen
   G changes only the iteration count, never the converged charges (same `eeq_ppcg_tol`).
 - **Reproducibility**: the build is independent of the thread count (one thread per atom row, fixed summation order); MD charges at a fixed
   thread count are bit-identical between runs. The GPU path as a whole is not bit-reproducible (two diag runs: charges within 9e-12 e).
-- **CUDA only** on the device side; ROCm keeps `diag`.
+- **CUDA only** on the device side; ROCm has no device `ppcg` at all (so no preconditioner there).
 
 ### GPU: build on the device (Oct 10, 2026)
 
@@ -186,7 +194,7 @@ The matrix itself differs by ~1e-13 between thread counts (threaded assembly), s
 
 ## Not tested / open
 
-- ROCm and Vulkan: same code path, not built or run here. `lu` and `ldlt` are errors there.
+- ROCm: not built or run here; the rejection of `ppcg`/`pcg`/`batched`/`lu`/`ldlt` is tested by name only (`eeq_gpu_supports`). Vulkan runs GFN-FF on the CPU, so the CPU solvers apply.
 - Multi-GPU split and the batch-worker device pool were not run after this change.
 - localinv: the GPU fallbacks were triggered only through the test hooks (no natural rejection or breakdown in any run); not run with ALPB
   solvation, `eeq_distance_cutoff > 0`, transition metals, MD longer than 50 fs, optimisations, nfrag > 4096, or `eeq_localinv_ext_bohr` large

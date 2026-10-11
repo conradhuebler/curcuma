@@ -196,7 +196,6 @@ struct EEQSolverGPUImpl {
     int    m_frag_ws_size       = 0;
     bool   m_frag_topo_valid    = false;
     bool   m_frag_refactored    = false;  ///< cached Cholesky factors valid (lazy solve)
-    double m_min_frag_distance_sq = -1.0; ///< WP7-B: cached squared min inter-fragment distance (Bohr²); -1 = not computed
 
     // ── WP7-C: GPU PCG (May 2026) ────────────────────────────────────────────
     // Persistent warm-start buffers (survive across solve calls; invalidated on
@@ -3189,7 +3188,6 @@ void EEQSolverGPU::uploadFragmentTopology(int nfrag,
 
     impl.m_frag_topo_valid       = false;
     impl.m_frag_refactored       = false;
-    impl.m_min_frag_distance_sq  = -1.0;  // WP7-B: invalidate on topology change
     impl.m_pcg_warm_valid        = false; // WP7-C: warm-start invalid after topology change
     impl.m_pcg_M_inv_valid       = false; // WP7-C: re-extract M_inv on next solve
     impl.m_pcg_block_jacobi_valid = false; // WP7-D: rebuild block-Jacobi after topology change
@@ -3361,55 +3359,6 @@ void EEQSolverGPU::uploadFragmentTopology(int nfrag,
 bool EEQSolverGPU::isFragmentTopoValid() const
 {
     return m_impl->m_frag_topo_valid;
-}
-
-// ============================================================================
-// WP7-B: minimum inter-fragment distance — cached per topology.
-// Drives the close-contact warning before the batched solver runs.
-// ============================================================================
-
-void EEQSolverGPU::updateMinFragmentDistance(const double* host_x,
-                                              const double* host_y,
-                                              const double* host_z,
-                                              int natoms)
-{
-    auto& impl = *m_impl;
-    impl.m_min_frag_distance_sq = -1.0;
-    if (!impl.m_frag_topo_valid) return;
-    if (impl.m_nfrag_batched < 2)  return;
-    if (!host_x || !host_y || !host_z) return;
-    if (natoms <= 0) return;
-
-    // Iterate over fragment-sorted atoms. For each pair (k,l) with k<l from
-    // different fragments, compute squared distance and track the minimum.
-    // O(N²) but only runs once per topology change (not per MD step).
-    const int nfrag = impl.m_nfrag_batched;
-    const std::vector<int>& off = impl.h_frag_atom_offsets;  // [nfrag+1]
-    const std::vector<int>& map = impl.h_frag_atom_map;      // [N] global indices
-
-    double min_sq = std::numeric_limits<double>::infinity();
-    for (int f = 0; f < nfrag - 1; ++f) {
-        for (int g = f + 1; g < nfrag; ++g) {
-            for (int k = off[f]; k < off[f + 1]; ++k) {
-                int gi = map[k];
-                double xi = host_x[gi], yi = host_y[gi], zi = host_z[gi];
-                for (int l = off[g]; l < off[g + 1]; ++l) {
-                    int gj = map[l];
-                    double dx = host_x[gj] - xi;
-                    double dy = host_y[gj] - yi;
-                    double dz = host_z[gj] - zi;
-                    double d2 = dx*dx + dy*dy + dz*dz;
-                    if (d2 < min_sq) min_sq = d2;
-                }
-            }
-        }
-    }
-    impl.m_min_frag_distance_sq = min_sq;
-}
-
-double EEQSolverGPU::getMinFragmentDistanceSq() const
-{
-    return m_impl->m_min_frag_distance_sq;
 }
 
 // ============================================================================

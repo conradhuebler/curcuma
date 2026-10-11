@@ -66,6 +66,7 @@
 #include "src/core/energy_calculators/ff_methods/forcefield.h"
 #include "src/core/energy_calculators/ff_methods/ff_terms.h"
 
+#include <atomic>
 #include <chrono>
 #include <sstream>
 #include <cmath>
@@ -299,7 +300,6 @@ private:
     // WP7-C (May 2026): GPU PCG parameters (mirror CPU EEQSolver defaults).
     int    m_eeq_pcg_max_iter   = 200;     ///< per-PCG-call iteration cap
     double m_eeq_pcg_tolerance  = 1e-10;   ///< convergence tolerance on |r|
-    int    m_eeq_pcg_threshold  = 500;     ///< Auto strategy: PCG for N>=this (else cholesky)
     // Sep 2026 (curcuma EEQ-Löser-Benchmark): block-Jacobi preconditioner size gates — see
     // eeq_solver.h PARAM gpu_block_jacobi_max_frag_atoms / gpu_block_jacobi_max_nfrag.
     int    m_eeq_block_jacobi_max_frag_atoms = 300;
@@ -406,8 +406,8 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
     //   "cholesky" / "schur_cholesky" → WP5-A/WP7-A (exact, default).
     //   "batched"                     → WP7-B per-fragment Cholesky (drops cross-fragment Coulomb).
     //   "pcg"                         → WP7-C iterative PCG (warm-started).
-    //   "auto"                        → PCG for N>=pcg_large_threshold, else cholesky.
-    //   "lu"                          → CPU-only; collapses to cholesky on GPU.
+    //   "auto"                        → EEQSolver::resolveMethod (ppcg by eeq_ppcg_min_atoms/min_nfrag, else cholesky).
+    //   "lu" / "ldlt"                 → device LU / LDL^T (CUDA only; other backends reject them, EEQSolver::gpuSupports).
     // WP7-E: reuses the CPU EEQSolver's ppcg PARAMs (eeq_solver.h) for both the iteration
     // cap and the Auto-strategy nfrag/atom thresholds, so CPU and GPU agree on when to
     // prefer projected PCG. Note m_eeq_ppcg_tolerance is an ABSOLUTE tolerance on |r| (GPU
@@ -438,7 +438,6 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
     m_eeq_batched_max_error = eeq_value("eeq_batched_max_error_eh", 1e-6);
     m_eeq_pcg_max_iter   = eeq_value("max_pcg_iterations", 200);
     m_eeq_pcg_tolerance  = eeq_value("pcg_tolerance", 1e-10);
-    m_eeq_pcg_threshold  = eeq_value("pcg_large_threshold", 500);
     m_eeq_block_jacobi_max_frag_atoms = eeq_value("gpu_block_jacobi_max_frag_atoms", 300);
     m_eeq_block_jacobi_max_nfrag      = eeq_value("gpu_block_jacobi_max_nfrag", 400);
     m_eeq_ppcg_max_iter  = eeq_value("eeq_ppcg_max_iter", 500);
@@ -554,6 +553,20 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     m_gpu_upload_time_ms = std::chrono::duration<double, std::milli>(t_init_end - t_after_topo).count();
 
     m_initialized = true;
+
+    // Claude Generated (Oct 2026): the GPU wrapper never calls GFNFF::Calculation(), so the
+    // frag_charge_model ensemble (CPU default) does not act here: the reference rule puts the whole
+    // net charge on the fragment holding atom 1. Say so, once per run, when it would have mattered.
+    if (m_eeq_nfrag > 1 && mol.m_charge != 0 && m_gfnff->fragEnsembleRequested()) {
+        static std::atomic<bool> warned{ false };
+        if (!warned.exchange(true)) {
+            CurcumaLogger::warn(fmt::format(
+                "GFN-FF {}: net charge {} on {} fragments - the GPU path uses the reference charge placement "
+                "(whole charge on the fragment holding atom 1), the CPU default frag_charge_model ensemble is not "
+                "applied; energies can differ from the CPU. Set -gfnff.frag_charge_model reference to silence "
+                "this warning and make the CPU use the same rule.", Backend::name, mol.m_charge, m_eeq_nfrag));
+        }
+    }
 
     CitationRegistry::cite("gfnff");
     CitationRegistry::cite("d4", "gfnff");
@@ -1263,13 +1276,12 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         // Deliverable 3 (Jun 2026), ROCm only (threshold 0 on CUDA): high fragment count
         // (solvent box). The device EEQ does a dense N x N Cholesky for nfrag>1 - O(N^3),
         // intractable here - and the device PCG/batched/general-Schur variants are not
-        // ported on ROCm (they return false). Route to the exact CPU PCG + block-Jacobi +
-        // warm-start solver (O(N^2 k)), which keeps the charges identical to the CPU path.
-        // prepareCNAndEEQ runs the CPU EEQ with its configured exact solver
-        // (eeq_contact_prefer_exact default true).
+        // ported on ROCm (they return false). Route to the CPU EEQ (prepareCNAndEEQ), which solves
+        // with the configured solver (auto: projected PCG for many fragments, O(N^2 k)) and keeps
+        // the charges identical to the CPU path.
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info(fmt::format(
-                "EEQ GPU Phase 2: nfrag={} >= {} — routing to exact CPU PCG (device dense Cholesky avoided)",
+                "EEQ GPU Phase 2: nfrag={} >= {} - routing to exact CPU PCG (device dense Cholesky avoided)",
                 m_eeq_nfrag, m_eeq_cpu_fragment_threshold));
         }
         // The normal device path leaves CN GPU-resident (WP5-D), so m_gpu_cn_final is stale
@@ -1345,7 +1357,11 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         if (CurcumaLogger::get_verbosity() >= 1) {
             const char* path = "CPU-fallback";
             if (gpu_eeq_applicable) {
-                if (resolved_method == EEQSolveMethod::LU) {
+                if constexpr (!Backend::has_device_schur) {
+                    // ROCm: no device ppcg/pcg/batched/Schur (EEQSolver::gpuSupports allows auto and cholesky
+                    // only); every solve is the dense device Cholesky of WP2 plus the host Schur step.
+                    path = "WP2 dense Cholesky + CPU Schur";
+                } else if (resolved_method == EEQSolveMethod::LU) {
                     path = "augmented LU (getrf)";
                 } else if (resolved_method == EEQSolveMethod::LDLT) {
                     path = "LDL^T (sytrf) + Schur";
@@ -1362,8 +1378,10 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                 }
             }
             // Once per run (and again if the path changes), not every MD/opt step.
+            // On ROCm "auto" may resolve to projected PCG by size, but only the dense Cholesky runs there.
+            const EEQSolveMethod shown_method = Backend::has_device_schur ? resolved_method : EEQSolveMethod::SchurCholesky;
             const std::string line = fmt::format("EEQ solver (final charges): {}{} [GPU {}, {}], N={}, nfrag={}",
-                EEQSolver::methodName(resolved_method),
+                EEQSolver::methodName(shown_method),
                 m_eeq_strategy == EEQSolveMethod::Auto ? " (auto)" : "",
                 Backend::name, path, N, m_eeq_nfrag);
             EEQSolver::reportSolverLine(line);

@@ -16,6 +16,7 @@ Stand.
 - **ROCm-GFN-FF ohne Coulomb-Term** als Voreinstellung seit `ab6e3f5e` (F-1, Umgehung `-gfnff.gpu_coulomb_implicit false`); GFN1/GFN2 auf ROCm
   ignorieren `-scf_mixed_precision false` (G2-13); Energiesummen nehmen wave32 an (F-17). Keine ROCm-Hardware, nur dokumentiert:
   [docs/MULTI_GPU_GAPS.md](docs/MULTI_GPU_GAPS.md).
+- **Exitcode bei fehlgeschlagenem Setup**: `-md` gibt seit `a2b7c5f0` 1 zurück; prüfen, ob dasselbe für `-opt` und `-sp` gilt (nicht geprüft).
 - **UFF- und QMDFF-Gradient falsch** (Eintrag vom 2026-09-27: UFF-Winkel ohne den Faktor -sin(theta); Fix vorbereitet, Betreiber: "erstmal nicht").
   Nicht erneut geprüft; Details im Archiv unter "UFF- und QMDFF-Gradient falsch".
 - **`-seed` wirkt nicht auf die Anfangsgeschwindigkeiten der MD.** Geprüft 2026-10-01: `SimpleMD::InitVelocities()` (`simplemd.cpp:1141`)
@@ -28,7 +29,7 @@ Stand.
 - **Optimierer**: (a) der eigene L-BFGS bleibt bei Koffein/GFN-FF ab Schritt 33 stehen (die Stillstandserkennung `-opt.stall_steps` beendet
   den Lauf inzwischen, Ursache nur per Codelesung); (b) `mixture2`: kein Abstieg an einer N-H···O=C-Brücke, nicht eingegrenzt;
   (c) der `auto`-Optimierer kann bei hochsymmetrischen Systemen mit nur totalsymmetrischer Mode abbrechen (Td-CH4, gfn1; `-opt.optimizer lbfgs` geht).
-- **GFN-FF-NVE-Drift auf `complex`** (231 Atome): 6,1e-3 Eh über 1 ps bei dt 0,5 fs, unabhängig vom EEQ-Löser. Nicht untersucht.
+- **GFN-FF-NVE-Drift auf `complex`** (231 Atome): 6,1e-3 Eh über 1 ps bei dt 0,5 fs, unabhängig vom EEQ-Löser. Nicht untersucht. Auch `-gpu cuda` polymer_2x NVE 400 fs: Etot -0,0548 Eh in allen Läufen, schon vor den Optimierungen vom 2026-10-11 (n=2 je Binary).
 - **SIGSEGV am Ursprung nicht gefunden** (2026-09-24; ASan, compute-sanitizer, gdb ohne Treffer). Eintrag im Archiv.
 - **`DC13/c20bowl`**: Coulomb -6,29 kcal/mol gegen die Referenz, Ladungen ~6x zu groß, nicht eingegrenzt (Known Issue #14).
 - **Reproduzierbarkeit**: GPU läuft nicht bitgleich (`atomicAdd`-Reihenfolge); CPU nicht bitgleich über verschiedene Threadzahlen
@@ -60,6 +61,10 @@ Stand.
   localinv mit offener Schale, `eeq_distance_cutoff` > 0 und MD über 2 ps messen. [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md); Zahlen im Vault-Laborjournal "curcuma EEQ-Solver Benchmark".
 - **GPU-GFN-FF-MD, Schrittzerlegung polymer_2x** (CUPTI, 2026-10-11): Mittel 38,4 -> 21,7 ms (Wanduhr 1000-250 fs, n=3). Erledigt: K1 CN-Verlet-Liste, K6 Restart-Zustand nur bei `-rescue`, K3/K2 Löser/Dispersion parallel zu dc6dcn; Host-Neubauten exakt beschleunigt (D4 mit Thread-Budget und zweiphasig, HB/Repulsion parallel über Zellenlisten, `-gfnff.gpu_staged_list_upload`): 15,6 -> 4,3 ms je Schritt im Mittel ([docs/GFNFF-PERFORMANCE-ROADMAP.md](docs/GFNFF-PERFORMANCE-ROADMAP.md)).
   Offen: CG-Iterationen unter Last (K5), Host-Neubau überlappt nicht mit Gerätearbeit (HB 12,8 ms alle 10, Repulsion 11 ms alle ~8, D4 125 ms alle ~83 Schritte), K1-K3 und gestaffeltes Hochladen auf ROCm. Journal: Labor/curcuma EEQ-Solver Benchmark.
+- **ROCm-GFN-FF, Rückstand** (Hardware nötig, groß): nur `auto`/`cholesky` zulässig (kein Geräte-ppcg, kein localinv); fehlen: K1-Fehlerbehebung (CN-Liste jeden Schritt),
+  Fernfeld, K2/K3, gestaffelter Upload. [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md).
+- **GPU-Fernfeld und Toleranz angleichen**: Fernfeld in den Mehr-GPU-Kernel `k_eeq_build_cols` (`eeq_solver_gpu.cu`, klein); CUDA-Schwelle 6,0 auf 6,5 wie CPU (nicht bitgleich, mit Messung);
+  GPU-ppcg auf relatives `eeq_ppcg_tol` statt absolutem `pcg_tolerance` (ändert Ergebnisse).
 - **CPU-MD-Schritt polymer_2x: 294 -> 212 ms (16 Threads)** (2026-10-11): erledigt, bitgleich ([docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md)): Abstandspuffer, Plausibilitätstest, CN zeilenparallel;
   EEQ-Matrix gekachelt mit nicht-temporalen Stores (Aufbau 37,5 -> 19,6 ms, Matrix-Hash alt = neu). Offen: Coulomb vektorisiert (~6), `d4_gw` (E) (~10-15); 1 Thread: `cn` +4,8 ms ungeklärt.
   Journal: Labor/curcuma EEQ-Solver Benchmark, Abschnitt "CPU-MD-Schritt polymer_2x zerlegt".

@@ -184,6 +184,15 @@ endif()
 add_test(NAME gfnff_frag_charge_selection COMMAND test_frag_charge_selection 20000)
 set_tests_properties(gfnff_frag_charge_selection PROPERTIES TIMEOUT 300 LABELS "gfnff;frag_charge")
 
+# Claude Generated (Oct 2026): -gpu backend vs EEQ solver names (rocm: auto/cholesky only; vulkan: all) - name logic, no device.
+add_executable(test_eeq_gpu_supports unit/test_eeq_gpu_supports.cpp)
+target_link_libraries(test_eeq_gpu_supports curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_eeq_gpu_supports REUSE_FROM curcuma_core)
+endif()
+add_test(NAME eeq_gpu_supports COMMAND test_eeq_gpu_supports)
+set_tests_properties(eeq_gpu_supports PROPERTIES TIMEOUT 60 LABELS "gfnff;eeq")
+
 # Copy reference data to build tree so tests can find them
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/reference_data
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR})

@@ -445,7 +445,8 @@ public:
     /// True when the GPU back-end (`cuda`, `rocm`, `vulkan`) has a device implementation of the method
     /// (auto resolves to a supported one). Oct 2026: lu (dense augmented LU, cuSOLVER getrf) and ldlt
     /// (cusolverDnDsytrf + Xsytrs on A_nn, Schur) run on CUDA only - requesting an unsupported one with
-    /// -gpu is an error, not a silent substitute.
+    /// -gpu is an error, not a silent substitute. ROCm: only auto and cholesky (no device ppcg/pcg/batched).
+    /// Vulkan: GFN-FF runs on the CPU, so every name is accepted.
     static bool gpuSupports(EEQSolveMethod m, const std::string& backend = "cuda");
 
     /// Comma separated names a back-end can run (for the error message). Claude Generated (Oct 2026).
@@ -1263,15 +1264,6 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "fragment is split. This is the dominant cost for that regime — "
           "gpu_block_jacobi_max_frag_atoms alone does not fix it. Diagonal Jacobi is always "
           "correct, just converges in more PCG iterations.", "Algorithm", {})
-    PARAM(eeq_pcg_nfrag_threshold, Int, 4,
-          "Auto solver: prefer SchurCholesky when nfrag >= this threshold. "
-          "Cholesky factorizes A_nn once and amortizes the cost over nfrag back-substitutions "
-          "via BLAS-3, which beats nfrag independent PCG solves once nfrag is moderate.",
-          "Algorithm", {})
-    PARAM(eeq_pcg_expected_iters, Int, 30,
-          "Auto solver: expected average PCG iteration count. Used in the cost model "
-          "k_pcg*(nfrag+1) > N/6 to decide between PCG and SchurCholesky.",
-          "Algorithm", {})
     PARAM(eeq_distance_cutoff, Double, 0.0,
           "Distance cutoff in Bohr for Coulomb matrix sparsification (0 = no cutoff, matches Fortran goed_gfnff). Non-zero values violate Hellmann-Feynman vs. the full Coulomb energy and degrade MD energy conservation.", "Advanced", {})
     // Oct 2026: replaces eeq_batched_min_distance (a fixed distance, 15 Bohr) and the dead

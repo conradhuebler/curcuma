@@ -255,26 +255,6 @@ public:
     bool isFragmentTopoValid() const;
 
     /**
-     * @brief WP7-B: cache the minimum atom-atom distance between different fragments.
-     *
-     * Claude Generated (May 2026): O(N²) scan over the fragment-sorted atom map
-     * (uploadFragmentTopology() must have been called first). Computes the minimum
-     * |r_i - r_j|² over all pairs (i,j) with different fragment IDs and caches the
-     * squared result. Used by the dispatch in gfnff_gpu_method.cpp to decide whether
-     * to warn before running the batched (cross-fragment-Coulomb-dropping) solver.
-     *
-     * Coordinates are CPU-side Bohr; this scan happens once per topology build, not
-     * per MD step. If never called, getMinFragmentDistanceSq() returns -1.
-     */
-    void updateMinFragmentDistance(const double* host_x,
-                                   const double* host_y,
-                                   const double* host_z,
-                                   int natoms);
-
-    /// WP7-B: cached squared min inter-fragment distance (Bohr²). -1 if not yet computed.
-    double getMinFragmentDistanceSq() const;
-
-    /**
      * @brief WP7-C: GPU PCG solver for nfrag>=1 (May 2026).
      *
      * Iterative O(k·N²) replacement for the WP7-A Cholesky path. Reuses WP7-A's

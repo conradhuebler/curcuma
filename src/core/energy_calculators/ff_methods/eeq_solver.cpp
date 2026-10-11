@@ -931,6 +931,12 @@ double EEQSolver::estimateBatchedError(const Vector& residual,
 }
 
 bool EEQSolver::gpuSupports(EEQSolveMethod m, const std::string& backend) {
+    // Vulkan: GFN-FF runs on the CPU there (gpu_plugin_entry_vulkan.cpp), so the CPU solves every name.
+    if (backend == "vulkan")
+        return true;
+    // ROCm: no device ppcg/pcg/batched path (has_device_schur=false); only the dense Cholesky route exists.
+    if (backend == "rocm")
+        return m == EEQSolveMethod::Auto || m == EEQSolveMethod::SchurCholesky;
     if (m == EEQSolveMethod::LU || m == EEQSolveMethod::LDLT)
         return backend == "cuda";   // Oct 2026: augmented LU (getrf) and LDL^T (sytrf) exist only in the CUDA plugin
     return m == EEQSolveMethod::Auto || m == EEQSolveMethod::SchurCholesky || m == EEQSolveMethod::ProjectedPCG
@@ -1740,7 +1746,7 @@ Vector EEQSolver::dispatchSolve(
                                                      : std::numeric_limits<double>::infinity();
 
                 CurcumaLogger::info(fmt::format(
-                    "EEQ PCG: Gershgorin bounds [{:.4e}, {:.4e}], κ_est={:.1e}",
+                    "EEQ PCG: Gershgorin bounds [{:.4e}, {:.4e}], kappa_est={:.1e}",
                     min_gersh, max_gersh, kappa_est));
 
                 // Oct 2026: the former Auto-only bypass of PCG for an ill-conditioned estimate is gone

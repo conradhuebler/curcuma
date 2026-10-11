@@ -109,7 +109,8 @@ clusters and bulk systems (up to 2910 atoms, charge -3..+3); `cli_gfnff_08_frag_
   `m_parameters.value(key, FALLBACK)`, and the CLI does not merge full registry defaults into
   `controller["gfnff"]`. Changing the PARAM default in `gfnff.h` alone has no runtime effect.
 - **GPU**: the GPU wrapper does not call `GFNFF::Calculation()`, so `-gpu` runs keep the reference
-  rule (code inspection; not runtime-tested).
+  rule (code inspection; not runtime-tested). Since Oct 11, 2026 a charged multi-fragment system with `-gpu` and
+  `frag_charge_model` not `reference` prints one warning per run (`GFNFFGpuMethodImpl::setMolecule`).
 - Cost: each variant is a full GFN-FF evaluation; tiny for the parity-decided cases, 2^k corners
   times placements with the window on.
 - A reused calculator (optimisation, MD) on master still has the stale CN / D4-C6 defect of
