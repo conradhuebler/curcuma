@@ -355,7 +355,7 @@ comparison against them; it is a comparison against curcuma's own CPU path.
 > [GFNFF_PERFORMANCE_LEVERS.md](GFNFF_PERFORMANCE_LEVERS.md). The many-fragment
 > EEQ dispatch is known not to be tuned yet (operator confirmed); the exact
 > solver is preferred by default for fragments in contact
-> (`eeq_contact_prefer_exact`), which for 1400 fragments means a dense
+> (`eeq_contact_prefer_exact`; parameter removed since 2026-10, see EEQ_SOLVER_CONTROL.md), which for 1400 fragments means a dense
 > (natoms+nfrag)² factorisation. Not investigated further here.
 
 ## What did NOT help / not pursued

@@ -755,7 +755,7 @@ std::string method = "d4";  // Matches Fortran reference
 
 ### ✅ EEQ WP7-D — block-Jacobi PCG (GPU) + contact-aware dispatch (CPU, Jun 2026)
 - GPU-PCG now uses the per-fragment **block-Jacobi** preconditioner (port of CPU `buildBlockJacobi`) instead of diagonal Jacobi → far fewer iters for many fragments, exact (`k_eeq_block_jacobi_apply`/`buildBlockJacobiFactors` in `cuda/eeq_solver_gpu.cu`; verified == GPU SchurCholesky ≤1e-8)
-- CPU auto-select no longer routes in-contact fragments to the approximate Batched solver (drops cross-fragment Coulomb); `m_contact_min_dist` + PARAM `eeq_contact_prefer_exact` (default true) prefer the exact solver. See [docs/GPU_WP7_EEQ_LARGE_SYSTEMS.md](../GPU_WP7_EEQ_LARGE_SYSTEMS.md#wp7-d-block-jacobi-präkonditionierer--kontaktbewusste-auswahl-jun-2026)
+- CPU auto-select no longer routes in-contact fragments to the approximate Batched solver (drops cross-fragment Coulomb); `m_contact_min_dist` + PARAM `eeq_contact_prefer_exact` (default true) prefer the exact solver. See [docs/GPU_WP7_EEQ_LARGE_SYSTEMS.md](../GPU_WP7_EEQ_LARGE_SYSTEMS.md#wp7-d-block-jacobi-präkonditionierer--kontaktbewusste-auswahl-jun-2026) [Note: parameters eeq_batched_min_distance / eeq_contact_prefer_exact / eeq_pcg_nfrag_threshold removed since 2026-10, see EEQ_SOLVER_CONTROL.md]
 - Open: FMM matvec (O(N log N)) + ROCm block-Jacobi mirror
 
 ### ✅ WP-B — EEQ FP32-factor + FP64-refine mixed precision (CUDA, Jun 2026)

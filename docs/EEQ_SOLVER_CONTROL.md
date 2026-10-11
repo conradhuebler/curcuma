@@ -192,6 +192,10 @@ from the former row-wise product by rounding only (charges 1e-14 e, same iterati
 polymer_2x `-sp`, Phase-2 solve (median of 3): 1 thread 1138 -> 937 ms, 4: 868 -> 467, 16: 855 -> 350, 32: 827 -> 357. Machine-tested only; MD numbers in `AIChangelog.md`.
 The matrix itself differs by ~1e-13 between thread counts (threaded assembly), so charges are not bitwise equal across `-threads`; energy and iteration counts are (test 07).
 
+## Related
+
+GPU MD step breakdown and the CN-list / overlap / staged-upload switches: [GFNFF-PERFORMANCE-ROADMAP.md](GFNFF-PERFORMANCE-ROADMAP.md), [GPU_TUNING.md](GPU_TUNING.md).
+
 ## Not tested / open
 
 - ROCm: not built or run here; the rejection of `ppcg`/`pcg`/`batched`/`lu`/`ldlt` is tested by name only (`eeq_gpu_supports`). Vulkan runs GFN-FF on the CPU, so the CPU solvers apply.
