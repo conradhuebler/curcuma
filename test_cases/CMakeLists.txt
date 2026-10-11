@@ -638,4 +638,15 @@ if(Python3_Interpreter_FOUND)
                      $<TARGET_FILE:curcuma>)
     set_tests_properties(md_time_axis
         PROPERTIES TIMEOUT 300 LABELS "md;integrator;gfnff;units")
+
+    # Claude Generated (Oct 2026): CPU curcuma single points (gfnff, gfn2) against the stored
+    # xtb 6.7.1 energies of the structure library. No xtb run; see scripts/check_xtb_library_energies.py.
+    add_test(NAME xtb_library_energies
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_xtb_library_energies.py
+                     --curcuma $<TARGET_FILE:curcuma>
+                     --reference ${CMAKE_CURRENT_SOURCE_DIR}/reference_data/xtb_library_energies.json
+                     --structures ${CMAKE_CURRENT_SOURCE_DIR}/structures)
+    set_tests_properties(xtb_library_energies
+        PROPERTIES TIMEOUT 900 LABELS "gfnff;sqm;xtb_reference")
 endif()

@@ -4,6 +4,13 @@
 **Implementation**: AI-generated, machine-tested — **human production testing pending**
 **Location**: `src/core/energy_calculators/ff_methods/`
 
+## xtb library regression gate (Oct 11, 2026) 🤖⚙️
+
+- ctest `xtb_library_energies` (label `gfnff;sqm`, CPU, 4 threads): gfnff and gfn2 single points vs the stored xtb 6.7.1 energies in `test_cases/reference_data/xtb_library_energies.json`; no xtb run at test time.
+- GFN-FF: 1e-5 Eh vs xtb; known deviations (|d| > 1e-5, 8 structures, e.g. macrocycle-bgal, jl22-bgal) only must reproduce the stored difference to 1e-5 Eh. Charged structures use the `frag_charge_model reference` baseline.
+- GFN2: 1e-4 Eh vs xtb for natoms <= 500 (measured max 5.2e-5); peo201-chain (1410 atoms, D4 ATM split) only with `--include-large`.
+- Limit: for known-deviation structures the check compares differences derived from the same JSON, so an error in the stored `gfnff_xtb` alone is not detected (negative probe: `gfnff_curcuma` +1e-3 fails, `gfnff_xtb` +1e-3 passes).
+
 ## React topology mode (Aug 2026) 🤖⚙️
 
 Dynamic bond topology for MD: `-gfnff.topology_mode react` re-detects bonds with a
