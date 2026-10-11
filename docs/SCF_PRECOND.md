@@ -151,8 +151,9 @@ On the unrelaxed ureawater197 `frag` does not help (24 -> 33 iterations, guard).
 ## Not measured or not implemented
 
 - Not measured: other elements than H, C, N, O; solvation (fragments are computed in gas phase); systems
-  above 599 atoms; Hessian above 48 atoms (each displaced-geometry object builds its own M); MD longer than
+  above 599 atoms; Hessian with the built-in M (each displaced-geometry object builds its own M; only the prototype with a file matrix was measured, up to 197 atoms); MD longer than
   500 fs; RMS drift above 1 A; GPU other than one RTX 5080 (section GPU); multi-GPU nodes.
+- Fragments with more than 100 atoms keep the scalar seed (one warning; a fragment Jacobian costs 2*dim evaluations of its SCC map, nothing above ~30 atoms was measured).
 - Not implemented: GFN1; ROCm, Vulkan and the host-driven CUDA loop; multi-GPU SCF split; open shells; charged systems and ionic fragments (NaCl needs
   overlapping neighbourhoods of about R = 5 A for its soft dipole mode); overlapping Schwarz blocks.
 - The guard default is a rule from the prototype test set (24 scalar SCFs); on the unrelaxed 599-atom

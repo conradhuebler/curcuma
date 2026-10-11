@@ -39,6 +39,7 @@
 #include <random>
 #include <set>
 #include <stdexcept>
+#include <mutex>
 #include <thread>
 
 namespace curcuma::xtb {
@@ -363,7 +364,7 @@ bool XTB::selectScfPreconditioner(bool broyden_mode, bool cpu_loop, bool device_
     }
     if (m_scf_precond_frag->blockCount() == 0) {
         // Every fragment is a single atom, an ion, odd-electron or failed: M would be alpha*I.
-        warn_once("no fragment qualifies for a block (single atoms, ions, odd-electron or charged fragments)");
+        warn_once("no fragment qualifies for a block (single atoms, ions, odd-electron, charged or too large fragments)");
         return true;
     }
     std::shared_ptr<const SchwarzPreconditioner> P = m_scf_precond_frag;
@@ -382,6 +383,34 @@ bool XTB::selectScfPreconditioner(bool broyden_mode, bool cpu_loop, bool device_
 /* ------------------------------------------------------------------------- *
  *  XTB::buildFragmentPreconditioner
  * ------------------------------------------------------------------------- */
+namespace {
+/// Claude Generated (Oct 2026): fragments with more atoms than this keep the scalar seed. The Jacobian of a
+/// fragment costs 2*dim evaluations of its SCC map (dim = nsh + 9*nat); measured fragments had up to ~30 atoms,
+/// a single large molecule (polymer, protein) would otherwise cost hours (and, on the device, exceed the block limit).
+constexpr std::size_t kMaxFragmentAtoms = 100;
+
+/// Claude Generated (Oct 2026): silences the logger while fragment SCFs run. CurcumaLogger keeps ONE process-wide
+/// verbosity, so concurrent builds (Hessian or batch workers that each build an M) must not save and restore it
+/// independently, else the verbosity can stay at 0: the first scope saves, the last one restores.
+struct QuietLogScope {
+    static std::mutex& mtx() { static std::mutex m; return m; }
+    static int& depth() { static int d = 0; return d; }
+    static int& saved() { static int v = 0; return v; }
+    QuietLogScope()
+    {
+        std::lock_guard<std::mutex> lk(mtx());
+        if (depth()++ == 0) { saved() = CurcumaLogger::get_verbosity(); CurcumaLogger::set_verbosity(0); }
+    }
+    ~QuietLogScope()
+    {
+        std::lock_guard<std::mutex> lk(mtx());
+        if (--depth() == 0) CurcumaLogger::set_verbosity(saved());
+    }
+    QuietLogScope(const QuietLogScope&) = delete;
+    QuietLogScope& operator=(const QuietLogScope&) = delete;
+};
+} // namespace
+
 /**
  * @brief Build M = sum_f R_f^T (-J_f^-1) R_f + alpha on the rest (Claude Generated, Oct 2026).
  *
@@ -417,7 +446,7 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
     }
     const bool have_eeq = (q_eeq.size() == nat && q_eeq.allFinite());
 
-    enum class Skip { None, SingleAtom, OddElectrons, Charged };
+    enum class Skip { None, SingleAtom, OddElectrons, Charged, TooLarge };
     std::vector<Skip> skip(frags.size(), Skip::None);
     std::vector<int> jobs;
     for (size_t f = 0; f < frags.size(); ++f) {
@@ -425,6 +454,7 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
         double nel = 0.0, q = 0.0;
         for (int i : a) { nel += m_wfn.n0_at(i); if (have_eeq) q += q_eeq(i); }
         if (a.size() == 1) skip[f] = Skip::SingleAtom;
+        else if (a.size() > kMaxFragmentAtoms) skip[f] = Skip::TooLarge;
         else if ((std::llround(nel) % 2) != 0) skip[f] = Skip::OddElectrons;
         else if (!have_eeq || std::fabs(q) > 0.5) skip[f] = Skip::Charged;
         else jobs.push_back(static_cast<int>(f));
@@ -489,9 +519,8 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
         }
     };
 
-    const int saved_verbosity = CurcumaLogger::get_verbosity();
-    CurcumaLogger::set_verbosity(0);   // fragment SCF tables are an implementation detail
     {
+        QuietLogScope quiet;   // fragment SCF tables are an implementation detail
         const int nthr = curcuma::intraParallelSuppressed()
                              ? 1 : std::max(1, std::min<int>(m_intra_threads, static_cast<int>(jobs.size())));
         std::atomic<size_t> next{ 0 };
@@ -507,7 +536,7 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
             for (auto& th : pool) th.join();
         }
     }
-    CurcumaLogger::set_verbosity(saved_verbosity);
+    const int saved_verbosity = CurcumaLogger::get_verbosity();   // restored by the scope above
 
     // Assemble the Schwarz blocks (non-overlapping, D_f = 1).
     auto P = std::make_shared<SchwarzPreconditioner>(dim, alpha);
@@ -536,12 +565,19 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
         }
         ++n_block;
     }
-    int n_skip[4] = { 0, 0, 0, 0 };
+    int n_skip[5] = { 0, 0, 0, 0, 0 };
     for (size_t f = 0; f < frags.size(); ++f)
         if (skip[f] != Skip::None) {
             ++n_skip[static_cast<int>(skip[f])];
             n_scalar_atoms += static_cast<int>(frags[f].size());
         }
+    if (n_skip[4] > 0) {
+        static std::atomic<bool> warned_large{ false };
+        if (!warned_large.exchange(true))
+            CurcumaLogger::warn(fmt::format("scf_precond frag: {} fragment(s) with more than {} atoms keep the scalar seed "
+                                            "(a fragment Jacobian costs 2*dim SCC-map evaluations; untested above ~30 atoms)",
+                                            n_skip[4], kMaxFragmentAtoms));
+    }
     if (n_failed > 0)
         CurcumaLogger::warn(fmt::format("scf_precond frag: {} of {} fragment Jacobians failed (first: {}); "
                                         "their atoms keep the scalar seed", n_failed, jobs.size(), first_fail));
@@ -554,8 +590,8 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
         CurcumaLogger::info(fmt::format("SCF precond: frag, {} fragments, dim {}, built in {:.1f} ms",
                                         frags.size(), dim, t_ms));
         CurcumaLogger::info(fmt::format("SCF precond: {} blocks, scalar seed on {} atoms (single atoms {}, "
-                                        "odd electrons {}, charged {}, failed {}), memory {:.3f} MB",
-                                        n_block, n_scalar_atoms, n_skip[1], n_skip[2], n_skip[3], n_failed,
+                                        "odd electrons {}, charged {}, too large {}, failed {}), memory {:.3f} MB",
+                                        n_block, n_scalar_atoms, n_skip[1], n_skip[2], n_skip[3], n_skip[4], n_failed,
                                         8.0 * static_cast<double>(P->storedDoubles()) / 1048576.0));
     }
     return true;

@@ -941,7 +941,6 @@ public:
     void setScfPrecond(const std::string& s)      { m_scf_precond = s; }
     void setScfPrecondGuard(const std::string& s) { m_scf_precond_guard = s; }
     void setScfPrecondRebuildRms(double r)        { m_scf_precond_rebuild_rms = (r > 0.0) ? r : 0.0; }
-    const std::string& scfPrecond() const         { return m_scf_precond; }
 
     // Warm-start: reuse converged charges from the previous geometry step.
     // Activated by MD/opt capabilities; also settable via -warm_start false.

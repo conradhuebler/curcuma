@@ -97,6 +97,19 @@ main() {
     fi
     assert_numeric_match "$EF0" "$EF1" "$ENERGY_TOLERANCE" "MD frag: first MD energy equals the run without the switch"
 
+    # (e) CLI guard and spin/parity (Oct 2026): "-spin 1" as ONE argument is an error, not a silently
+    #     ignored key; a radical without -spin gets a parity warning; with -spin 1 the energy equals
+    #     xtb 6.7.1 (Cl2-, doublet: -9.321669164 Eh, identical with and without --uhf 1 in xtb).
+    local REF_CL2="-9.32166916"
+    $CURCUMA -sp cl2.xyz -method gfn2 -threads 1 -verbosity 1 -no_bmt -charge -1 "-spin 1" > spin_token.log 2>&1
+    assert_exit_code $? 1 "flag token with whitespace (\"-spin 1\" as one argument) is refused"
+    assert_string_in_file "contains whitespace" spin_token.log "flag token: error message printed"
+    run cl2_nospin.log cl2.xyz -charge -1
+    assert_string_in_file "inconsistent parity" cl2_nospin.log "radical without -spin: parity warning printed"
+    run cl2_spin.log cl2.xyz -charge -1 -spin 1
+    assert_string_not_in_file "inconsistent parity" cl2_spin.log "radical with -spin 1: no parity warning"
+    assert_numeric_match "$REF_CL2" "$(energy_of cl2_spin.log)" "$ENERGY_TOLERANCE" "Cl2- with -spin 1 equals xtb 6.7.1"
+
     print_test_summary
     [ $TESTS_FAILED -eq 0 ] && exit 0 || exit 1
 }

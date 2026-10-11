@@ -394,3 +394,4 @@ below. If it needs measurements or a derivation, write them into the matching `d
 - Citation database checked against Crossref (Sep 2026)
 - Citations, second pass (Sep 2026)
 - CLI guard (Oct 11, 2026): a flag token containing whitespace (`"-spin 1"` as one argv entry) is now an error instead of a silently ignored key; warning for an electron count whose parity contradicts `-spin` (numbers unchanged); open-shell CLI follow-ups in TODO.md
+- Pre-merge fixes for -scf_precond (Oct 11, 2026): fragments above 100 atoms keep the scalar seed (a single large molecule would cost hours), logger silencing during the fragment build is race-free (RAII scope), `RESOURCE_LOCK "gpu"` on cli_sqm_13 and sqm_cuda_broyden, dead getter removed, CLI whitespace guard also for CR, cli_sqm_12 part (e) (flag token, parity warning, Cl2- vs xtb), stale `test_orca_interface` expectation fixed ([docs/SCF_PRECOND.md](docs/SCF_PRECOND.md))

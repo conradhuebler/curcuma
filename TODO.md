@@ -84,11 +84,10 @@ Stand.
   [docs/GFNFF_STATIC_WP4_VALIDATION_SUITE.md](docs/GFNFF_STATIC_WP4_VALIDATION_SUITE.md).
 - **Speicher für Systeme > 1000 Atome** (Molecule-Datenstruktur, Distanzmatrix-Cache): geplant, nicht begonnen.
 - **SCF-Vorkonditionierer `-scf_precond frag`** (Okt 2026, [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)), nicht umgesetzt: Ionen und geladene
-  Fragmente (nur Skalarschritt), offene Schalen, GFN1, GPU-/ROCm-Pfad (Schalter wird mit Warnung ignoriert).
-- **`-scf_precond frag`, ungemessen**: Systeme > 600 Atome; M-Erneuerung in langer MD (> 500 fs, `-scf_precond_rebuild_rms`);
-  Hessian mit > 200 Atomen (jedes Objekt der ausgelenkten Geometrien baut sein eigenes M); Elemente außer H, C, N, O; Solvatation.
-- **`-scf_precond frag`, überlappende Blöcke**: nicht weiterverfolgt; Fragmenteinbettung mit eingefrorener Umgebung gab auf dem unrelaxierten
-  197-Atom-Cluster 33 -> 32 Iterationen, grobe Ladungstransfer-Ebene nicht besser als frag (n=1, entfernt; docs/SCF_PRECOND.md).
+  Fragmente (nur Skalarschritt), offene Schalen, GFN1; GPU siehe unten.
+- **`-scf_precond frag`, ungemessen**: Systeme > 600 Atome (CPU) bzw. > 1499 (GPU); M-Erneuerung in langer MD (> 500 fs, `-scf_precond_rebuild_rms`);
+  Hessian mit der eingebauten Funktion (jedes Objekt ausgelenkter Geometrien baut sein eigenes M; gemessen nur der Prototyp bis 197 Atome); Fragmente über
+  100 Atome (Skalarschritt, Warnung); Elemente außer H, C, N, O; Solvatation.
 - **`-scf_precond frag` auf der GPU, offen** (2026-10-11): umgesetzt nur für die vollresidente CUDA-Schleife ([docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), Abschnitt GPU). Mit Warnung ignoriert: ROCm, Vulkan, hostgetriebene CUDA-Schleife
   (Mischer auf dem Host, der CPU-Hook wäre dort direkt nutzbar), Mehr-GPU-SCF-Aufteilung (Eigenlöser/Dichte; ungetestet, nur ein Gerät hier).
   Ohne Wächter divergiert der unrelaxierte 599-Atom-Cluster mit Mischpräzision (151 Iterationen, harter Fehler, n=3).

@@ -767,7 +767,7 @@ json CLI2Json(int argc, char** argv)
             // argv entry, e.g. from a shell variable that was not word-split) used to become the
             // boolean key "spin 1" and was silently ignored - the run then reported a closed-shell
             // energy for a radical. No parameter name contains whitespace, so refuse it.
-            if (current.find_first_of(" \t\n") != std::string::npos) {
+            if (current.find_first_of(" \t\r\n") != std::string::npos) {
                 CurcumaLogger::error("Command-line argument '" + current
                     + "' contains whitespace: flag and value must be separate arguments "
                       "(check shell quoting / variable expansion).");
