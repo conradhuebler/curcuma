@@ -55,11 +55,15 @@ atoms left on the scalar seed and the memory of M.
 
 ## When it is ignored (one warning, scalar seed)
 
-GFN1; GPU-resident SCF; `-large_system_mode` other than `none`; `-scf_mode` other than `broyden`; total
+GFN1; GPU SCF paths other than the fully device-resident CUDA loop (host-driven device loops: ROCm, Vulkan,
+CUDA without the resident loop); a multi-GPU SCF split (eigensolver or density over several devices at this basis
+size); `-large_system_mode` other than `none`; `-scf_mode` other than `broyden`; total
 charge != 0; open shell or odd electron count; no fragment qualifies for a block. Per fragment, single
 atoms, fragments with an odd number of valence electrons and fragments with |sum of EEQ charges| > 0.5 e
 (ions) keep the scalar seed. Fragments with elements other than H, C, N, O are used, with one warning
-per run, because they are unmeasured. An unusable `CURCUMA_SCF_PRECOND_FILE` is a hard error.
+per run, because they are unmeasured. An unusable `CURCUMA_SCF_PRECOND_FILE` is a hard error; on a GPU path the
+file is ignored with a warning. An ignored switch on a GPU run is not a counted GPU fallback, so `-gpu_strict true`
+does not stop on it (nothing moves to the CPU).
 
 ## Measurements (all n=1 per entry)
 
@@ -94,6 +98,43 @@ library structure `urea400-water1000`; `_relax` = GFN2 relaxed, `_ffrelax` = rel
   6-7 -> 3-4; M from the start geometry over 500 MD steps without clear ageing (RMS displacement up to
   0.69 A); valid up to 0.10 A random displacement.
 
+## GPU (CUDA resident loop)
+
+Status: AI-generated, machine-tested only (Oct 11, 2026), human production testing pending.
+On `-gpu cuda` the fully device-resident GFN2 loop mixes on the device (`XtbGpuContext::runBroydenUpdate`). With
+`-scf_precond frag` the host builds M exactly as above (same fragment code), flattens the blocks
+(`SchwarzPreconditioner::flatten`), remaps the indices to the device packing of the SCC vector (moments atom-major)
+and uploads them once per build (`broydenSetPreconditioner`, reused by tag in later SCFs of the object, e.g. MD).
+The device replaces alpha*F by M*F in the linear step and the seed and alpha*dF by M*dF in u (kernels `k_pc_diag`,
+`k_pc_blocks`: one CUDA block per fragment block, block vector in shared memory, one warp per row; blocks up to 6144
+entries). The guard keeps the CPU rule (`ScfPrecondGuard::firesNorm` as a host callback) on ||F||_2 of each update
+(one `cublasDnrm2` scalar), keeps x_best/F_best as device copies and drops M like `dropStepHook`; no extra map
+evaluation. Without the switch the device Broyden runs its unchanged kernels.
+
+Measurements, RTX 5080, `-sp -method gfn2 -gpu cuda -threads 8 -verbosity 3`, default mixed precision, n=3 per cell
+(iterations identical in all three runs; times median; energies identical to 8 decimals within each row and between
+none and frag):
+
+| System | none: iter / SCF ms / total s | frag: iter / SCF ms / total s | frag, guard off | build of M |
+|---|---|---|---|---|
+| ureawater599_ffrelax | 13 / 426 / 1.09 | 9 / 330 / 1.04 | 9 / 331 / 1.04 | 53-56 ms |
+| ureawater1499_ffrelax | 13 / 1940 / 3.96 | 9 / 1504 / 3.72 | 9 / 1504 / 3.69 | 162-164 ms |
+| ureawater599, unrelaxed | 60 / 4487 / 5.11 | 47 / 3480 / 4.18 (guard fired at 4) | not converged in 151 (hard error) | 52-56 ms |
+
+- Upload of M: 0.7-3.9 ms (2.9 MB for 599 atoms). A repeat of the table on a busier machine (load 4-6) gave the same
+  iterations and energies, SCF times up to 20 % higher.
+- Default path unchanged: iteration tables (energy to 10 decimals, max|dq|) of the relaxed structures identical to
+  the binary before the change in all runs (n=3 before, n=6 after); the unrelaxed 599 table varies from run to run
+  already before the change (GPU not run-to-run reproducible), with 60 iterations and the same final energy every time.
+- With mixed precision off (`-scf_mixed_precision false`, n=1): ureawater599_ffrelax 12 -> 8 and ureawater1499_ffrelax
+  12 -> 8, i.e. the CPU counts (12 -> 8, 12 -> 7); unrelaxed 599 with guard 61 (CPU 62). The remaining iteration on the
+  default GPU path comes from the FP32 phase.
+- NVE MD 5 fs on ureawater599_ffrelax (`-max_time 5 -time_step 1 -temperature 300 -thermostat none -seed 42`, n=3):
+  iterations per SCF none 13, 11, 11, 10-11, 10-11, 11; frag 9, 7, 7, 7, 7, 7 (M built once); first energy identical
+  (-1037.75117514 Eh), later energies differ by up to 7e-7 Eh; total 4.45-4.65 s vs 3.98-4.08 s.
+- Component test `sqm_cuda_broyden`: device Broyden with M vs host `BroydenMixer` with the step hook, with guard
+  variants reset/keep/best, agree to 3e-15.
+
 ## Tested and rejected (Oct 2026, all n=1)
 
 On the unrelaxed ureawater197 `frag` does not help (24 -> 33 iterations, guard). Two extensions were measured and dropped:
@@ -111,8 +152,8 @@ On the unrelaxed ureawater197 `frag` does not help (24 -> 33 iterations, guard).
 
 - Not measured: other elements than H, C, N, O; solvation (fragments are computed in gas phase); systems
   above 599 atoms; Hessian above 48 atoms (each displaced-geometry object builds its own M); MD longer than
-  500 fs; RMS drift above 1 A; GPU.
-- Not implemented: GFN1; GPU/ROCm paths; open shells; charged systems and ionic fragments (NaCl needs
+  500 fs; RMS drift above 1 A; GPU other than one RTX 5080 (section GPU); multi-GPU nodes.
+- Not implemented: GFN1; ROCm, Vulkan and the host-driven CUDA loop; multi-GPU SCF split; open shells; charged systems and ionic fragments (NaCl needs
   overlapping neighbourhoods of about R = 5 A for its soft dipole mode); overlapping Schwarz blocks.
 - The guard default is a rule from the prototype test set (24 scalar SCFs); on the unrelaxed 599-atom
   cluster it costs 4 iterations against `none` at 8 threads.

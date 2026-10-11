@@ -422,6 +422,31 @@ public:
         return m_ctx->residentScfStep(fp32, &dq, &e_band, &e_coulomb, &e_third, &e_multipole);
     }
 
+    // ---- Broyden seed preconditioner in the resident loop (Claude Generated, Oct 2026) ----
+    bool supportsResidentPreconditioner() const override { return true; }
+    unsigned long long residentPreconditionerTag() const override
+    {
+        return m_ctx ? m_ctx->broydenPreconditionerTag() : 0;
+    }
+    bool multiGpuScfSplit(int nao) const override { return m_ctx && m_ctx->multiGpuScfSplit(nao); }
+    bool residentSetPreconditioner(const curcuma::xtb::GpuPrecondFlat* data, unsigned long long tag,
+                                   curcuma::xtb::GpuBroydenGuardFn guard, bool keep, bool best) override
+    {
+        if (!m_ctx) return false;
+        if (!data) return m_ctx->broydenSetPreconditioner(nullptr, tag, std::move(guard), keep, best);
+        XtbGpuContext::BroydenPrecond pc;
+        pc.N = data->N;
+        pc.nblocks = data->nblocks();
+        pc.max_dim = data->max_dim;
+        pc.idx_off = data->idx_off.data();
+        pc.idx = data->idx.data();
+        pc.b_off = data->b_off.data();
+        pc.B = data->B.data();
+        pc.fallback = data->fallback.data();
+        if (static_cast<int>(data->fallback.size()) != data->N) return false;
+        return m_ctx->broydenSetPreconditioner(&pc, tag, std::move(guard), keep, best);
+    }
+
     bool residentLoopCharges(Vector& q_sh, Vector& q_at, Eigen::MatrixXd& dp_at,
                              Eigen::MatrixXd& qp_at, Vector& eps) override
     {

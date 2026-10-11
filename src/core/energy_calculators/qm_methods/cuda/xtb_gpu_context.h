@@ -19,6 +19,7 @@
 
 #ifdef USE_CUDA
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -487,6 +488,45 @@ public:
     bool broydenBegin(int N, double alpha, int max_hist, double w0);
     bool broydenUpdate(int N, const double* vin, const double* vout, double* vnext);
 
+    /* ----- Broyden seed preconditioner (Claude Generated, Oct 2026) ------ *
+     * -scf_precond frag on the device (docs/SCF_PRECOND.md). M = sum_b R_b^T B_b R_b + C is
+     * block-diagonal on the packed SCC vector: block b covers the indices
+     * idx[idx_off[b] .. idx_off[b+1]) with the row-major matrix B + b_off[b]; C = fallback
+     * (alpha outside every block, 0 inside). With M set, runBroydenUpdate uses M*F instead of
+     * alpha*F in the linear step and the seed, and u = M*dF + dx/|dF| (BroydenMixer step hook).
+     * M*v: one CUDA block per Schwarz block, v gathered into shared memory, one warp per row.
+     * broydenBegin clears the active state, the guard and the fired index; the uploaded blocks
+     * stay resident under their tag, so a later SCF with the same M passes pc = nullptr.
+     *
+     * Guard: while M is active every update computes ||F||_2 (cublasDnrm2, one scalar to the
+     * host) and calls guard(n, ||F||, &store_best) with the update index n since broydenBegin.
+     * store_best: x_n and F_n are copied into device buffers. A true return drops M like
+     * BroydenMixer::dropStepHook(keep) - keep: u_k += alpha*dF_k - M*dF_k, otherwise the history
+     * is reset - and with best the update continues from x_best with F_best. No evaluation of the
+     * SCC map. An empty guard means no guard. */
+    struct BroydenPrecond {
+        int N = 0, nblocks = 0, max_dim = 0;
+        const int* idx_off = nullptr;   ///< nblocks + 1
+        const int* idx = nullptr;
+        const int* b_off = nullptr;     ///< nblocks + 1
+        const double* B = nullptr;
+        const double* fallback = nullptr;  ///< N
+    };
+    using BroydenGuard = std::function<bool(int n, double fnorm, bool* store_best)>;
+    /// Activate M for the current SCF (after broydenBegin). pc = nullptr reuses the resident upload,
+    /// which must carry @p tag. False (M stays off, last error set) on a size mismatch, a block
+    /// larger than the shared-memory limit, or a failed upload.
+    bool broydenSetPreconditioner(const BroydenPrecond* pc, unsigned long long tag,
+                                  BroydenGuard guard, bool keep, bool best);
+    /// Tag of the resident M upload (0 = none).
+    unsigned long long broydenPreconditionerTag() const;
+    /// True while M is applied (set and not dropped by the guard).
+    bool broydenPreconditionerActive() const;
+    /// Update index at which the guard dropped M in this SCF, -1 = not fired.
+    int broydenGuardFiredAt() const;
+    /// True if a multi-GPU eigensolver or density split would engage for @p nao basis functions.
+    bool multiGpuScfSplit(int nao) const;
+
     /* ----- Stage 6 (S6.5): fully device-resident GFN2 SCF loop ----------- *
      * beginResidentLoop uploads the initial SCC guess (q_sh/dp_at/qp_at), the
      * EEQ-guess q_at, and the reference shell/atom occupations once, and sets up
@@ -531,6 +571,10 @@ private:
     /// Device-pointer Broyden update core (S6.4); shared by broydenUpdate (test
     /// upload/download) and the fused resident loop. Queues all work on the stream.
     bool runBroydenUpdate(const double* dvin, const double* dvout, double* dvnext);
+    /// dst = M*src on the device (dst must not alias src). Claude Generated (Oct 2026).
+    bool applyBroydenPreconditioner(const double* src, double* dst);
+    /// Guard hit: drop M, rewrite (keep) or reset the history. Claude Generated (Oct 2026).
+    bool dropBroydenPreconditioner(bool keep);
 
     /// Reduce the resident Fock in dC to standard form with the cached L, solve
     /// it and back-transform → generalized eigenvectors in dC, ascending

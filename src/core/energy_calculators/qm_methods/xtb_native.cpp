@@ -44,6 +44,7 @@
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <stdexcept>
@@ -1259,21 +1260,109 @@ double XTB::Calculation(bool gradient)
     // Set after every (re)construction of m_broyden, CPU loop only. The guard (ScfPrecondGuard,
     // -scf_precond_guard / CURCUMA_SCF_PRECOND_GUARD) falls back to the scalar step when the
     // residual does not drop. scf_precond none and no file: nothing is set, the path is unchanged.
+    //
+    // GPU (Claude Generated, Oct 2026): the fully device-resident CUDA loop mixes on the device,
+    // so there M is uploaded once per build (flat blocks) and applied by the device Broyden; the
+    // guard runs there on ||F||_2 with the host-side rule (ScfPrecondGuard::firesNorm) as a
+    // callback. Every other GPU path (host-driven device loops: ROCm, Vulkan, CUDA without the
+    // resident loop) and a multi-GPU SCF split ignore the switch with one warning. Not counted
+    // as a GPU fallback (nothing moves to the CPU), so -gpu_strict does not stop on it.
     ScfPrecondGuard precond_guard;
+    struct DeviceGuardState { ScfPrecondGuard g; int fired_at = -1; double fnorm = 0.0; };
+    std::shared_ptr<DeviceGuardState> device_guard;   // set only when M runs on the device
     {
         const bool cpu_loop = !use_gpu_resident && !use_resident_loop && !use_device_potential;
+        bool device_loop = false;
+        std::string no_device_reason;
+        if (use_resident_loop) {
+            if (!m_gpu_scf->supportsResidentPreconditioner())
+                no_device_reason = "this GPU backend has no device preconditioner";
+            else if (m_gpu_scf->multiGpuScfSplit(m_basis.nao))
+                no_device_reason = "a multi-GPU SCF split (eigensolver or density over several devices) is active";
+            else
+                device_loop = true;
+        } else if (!cpu_loop) {
+            no_device_reason = "host-driven GPU SCF path (ROCm, Vulkan, or CUDA without the fully "
+                               "device-resident loop); implemented for the CPU loop and the resident CUDA loop";
+        }
         std::function<Vector(const Vector&)> pc_hook;
         std::string pc_err;
-        if (!selectScfPreconditioner(mode == ScfMode::Broyden, cpu_loop, packed_len, pc_hook,
-                                     precond_guard, pc_err)) {
+        if (!selectScfPreconditioner(mode == ScfMode::Broyden, cpu_loop, device_loop, no_device_reason,
+                                     packed_len, pc_hook, precond_guard, pc_err)) {
             m_scf_converged = false; m_scf_iterations = 0;
             setHardError("SCF preconditioner file unusable: " + pc_err);
             return m_E_total;
         }
-        if (pc_hook)
+        if (pc_hook && device_loop) {
+            pc_hook = nullptr;   // the device applies M itself
+            const auto t_up0 = clock::now();
+            std::string why;
+            if (m_scf_precond_dev_src != m_scf_precond_frag) {   // new M: new process-unique tag
+                static std::atomic<unsigned long long> next_tag{ 0 };
+                m_scf_precond_dev_src = m_scf_precond_frag;
+                m_scf_precond_dev_tag = ++next_tag;
+            }
+            GpuPrecondFlat flat;
+            const bool resident = (m_gpu_scf->residentPreconditionerTag() == m_scf_precond_dev_tag);
+            if (!resident) {
+                flat.N = m_scf_precond_frag->dim();
+                if (!m_scf_precond_frag->flatten(flat.idx_off, flat.idx, flat.b_off, flat.B,
+                                                 flat.fallback, flat.max_dim)) {
+                    why = "M has weighted blocks or more than 2^31 entries";
+                } else {
+                    // M is built on the host packing (packSCC: dp at nsh + k*nat + atom, qp at
+                    // nsh + 3*nat + k*nat + atom); the device packs the moments atom-major
+                    // (Eigen 3 x nat / 6 x nat storage: nsh + 3*atom + k, nsh + 3*nat + 6*atom + k).
+                    auto to_device = [nsh, nat](int j) {
+                        if (j < nsh) return j;
+                        if (j < nsh + 3 * nat) { const int r = j - nsh; return nsh + 3 * (r % nat) + r / nat; }
+                        const int r = j - nsh - 3 * nat;
+                        return nsh + 3 * nat + 6 * (r % nat) + r / nat;
+                    };
+                    for (int& j : flat.idx) j = to_device(j);
+                    std::vector<double> fb(flat.fallback.size());
+                    for (int j = 0; j < static_cast<int>(fb.size()); ++j) fb[to_device(j)] = flat.fallback[j];
+                    flat.fallback.swap(fb);
+                }
+            }
+            auto st = std::make_shared<DeviceGuardState>();
+            st->g = precond_guard;
+            GpuBroydenGuardFn guard_fn;
+            if (precond_guard.rule != ScfPrecondGuard::Rule::Off)
+                guard_fn = [st](int n, double f, bool* store_best) {
+                    bool new_best = false;
+                    const bool hit = st->g.firesNorm(n, f, &new_best);
+                    if (store_best) *store_best = new_best;
+                    if (hit) { st->fired_at = n; st->fnorm = f; }
+                    return hit;
+                };
+            if (why.empty()
+                && m_gpu_scf->residentSetPreconditioner(resident ? nullptr : &flat, m_scf_precond_dev_tag,
+                                                        guard_fn, precond_guard.keep, precond_guard.best)) {
+                device_guard = st;
+                const char* guard_name = precond_guard.rule == ScfPrecondGuard::Rule::Off
+                                             ? "off" : precond_guard.name.c_str();
+                if (!resident && verb >= 2)
+                    CurcumaLogger::info_fmt("SCF precond: device M uploaded to the resident GPU loop ({} blocks, "
+                                            "largest {}, {:.3f} MB, {:.1f} ms), guard '{}'",
+                                            m_scf_precond_frag->blockCount(), flat.max_dim,
+                                            8.0 * static_cast<double>(flat.B.size() + flat.fallback.size()) / 1048576.0,
+                                            ms(t_up0, clock::now()), guard_name);
+                else if (resident && verb >= 3)
+                    CurcumaLogger::info_fmt("SCF precond: device M reused (resident), guard '{}'", guard_name);
+            } else {
+                if (why.empty()) why = m_gpu_scf->lastError();
+                if (!m_scf_precond_warned)
+                    CurcumaLogger::warn("scf_precond 'frag' ignored: the device preconditioner could not be set up"
+                                        + (why.empty() ? std::string() : " (" + why + ")")
+                                        + "; scalar Broyden seed (scf_damping) is used");
+                m_scf_precond_warned = true;
+            }
+        } else if (pc_hook) {
             broyden.setStepHook(std::move(pc_hook));
-        else if (broyden.hasStepHook())   // only with -keep_diis: a hook left from an earlier SCF
+        } else if (broyden.hasStepHook()) {   // only with -keep_diis: a hook left from an earlier SCF
             broyden.dropStepHook(true);
+        }
     }
 
     double resident_band = 0.0;   // Tr(P H0) of the last device-resident step
@@ -1336,6 +1425,18 @@ double XTB::Calculation(bool gradient)
                 m_scf_converged = true;
                 e_total_old = e_scc;
                 break;
+            }
+            // Claude Generated (Oct 2026): the device guard decided inside this step's Broyden
+            // update; report it like the CPU loop (which never checks a converged iteration).
+            if (device_guard && device_guard->fired_at == iter) {
+                const ScfPrecondGuard& g = device_guard->g;
+                CurcumaLogger::warn_fmt("SCF preconditioner guard '{}' fired at iteration {} "
+                                        "(||F||_2 = {:.3e}, ||F_0||_2 = {:.3e}): scalar Broyden step "
+                                        "for the rest of this SCF ({} history, from {} x; device)",
+                                        g.name, iter, device_guard->fnorm, g.f0,
+                                        g.keep ? "kept" : "reset", g.best ? "best" : "current");
+                if (std::getenv("CURCUMA_SCF_TRACE"))
+                    fmt::print(stderr, "SCFTRACE_GUARD iter {} rule {} device\n", iter, g.name);
             }
             e_total_old = e_scc;
             continue;

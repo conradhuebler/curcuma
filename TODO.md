@@ -70,6 +70,9 @@ Stand.
   Hessian mit > 200 Atomen (jedes Objekt der ausgelenkten Geometrien baut sein eigenes M); Elemente außer H, C, N, O; Solvatation.
 - **`-scf_precond frag`, überlappende Blöcke**: nicht weiterverfolgt; Fragmenteinbettung mit eingefrorener Umgebung gab auf dem unrelaxierten
   197-Atom-Cluster 33 -> 32 Iterationen, grobe Ladungstransfer-Ebene nicht besser als frag (n=1, entfernt; docs/SCF_PRECOND.md).
+- **`-scf_precond frag` auf der GPU, offen** (2026-10-11): umgesetzt nur für die vollresidente CUDA-Schleife ([docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), Abschnitt GPU). Mit Warnung ignoriert: ROCm, Vulkan, hostgetriebene CUDA-Schleife
+  (Mischer auf dem Host, der CPU-Hook wäre dort direkt nutzbar), Mehr-GPU-SCF-Aufteilung (Eigenlöser/Dichte; ungetestet, nur ein Gerät hier).
+  Ohne Wächter divergiert der unrelaxierte 599-Atom-Cluster mit Mischpräzision (151 Iterationen, harter Fehler, n=3).
 
 ## 3. Tests und Validierung
 

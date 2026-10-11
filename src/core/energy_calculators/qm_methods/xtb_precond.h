@@ -103,6 +103,12 @@ struct ScfPrecondGuard {
     /// @brief Record f_n = ||F_n|| of iteration n (input x, residual F); true if the rule says:
     ///        drop M for the rest of this SCF.
     bool fires(int n, const Vector& x, const Vector& F);
+
+    /// @brief The rule of fires() on the norm alone (Claude Generated, Oct 2026): records
+    ///        f_n = @p f, sets @p new_best (if non-null) when x_n/F_n of this iteration are the
+    ///        new best pair that "best" has to keep, and returns true if M is to be dropped. The
+    ///        caller stores x_n/F_n itself (the device Broyden keeps them as device copies).
+    bool firesNorm(int n, double f, bool* new_best);
 };
 
 /**
@@ -138,6 +144,17 @@ public:
     std::size_t blockCount() const { return m_blocks.size(); }
     /// Number of doubles stored in the blocks and weights (memory = 8 bytes each).
     std::size_t storedDoubles() const;
+
+    /**
+     * @brief Flat copy of M for a device upload (Claude Generated, Oct 2026).
+     *
+     * Block b covers idx[idx_off[b] .. idx_off[b+1]) and its row-major matrix starts at
+     * B[b_off[b]]; fallback is C (alpha on uncovered indices, 0 on covered ones); max_dim is the
+     * largest block. Returns false (outputs undefined) if a block carries weights D_i, which the
+     * device kernel does not apply, or if an offset does not fit an int.
+     */
+    bool flatten(std::vector<int>& idx_off, std::vector<int>& idx, std::vector<int>& b_off,
+                 std::vector<double>& B, std::vector<double>& fallback, int& max_dim) const;
 
 private:
     int m_dim;

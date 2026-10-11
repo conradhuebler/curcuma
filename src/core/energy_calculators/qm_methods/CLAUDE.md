@@ -36,6 +36,7 @@ Methods are created by `MethodFactory` (`../method_factory.cpp`, table-driven, s
 - Silent mode (verbosity 0) must produce no output except errors; verbosity levels and logger functions: [docs/LOGGING_SYSTEM.md](../../../../docs/LOGGING_SYSTEM.md). No numerical path may depend on the print level.
 - GPU backends are runtime plugins; fallbacks to the CPU are counted and reported (`gpu_fallback.h`).
 - The Broyden seed hook (`BroydenMixer::setStepHook`, `-scf_precond frag`, `xtb_precond.h`) may change only the path, never the fixed point; with `-scf_precond none` nothing is set; the guard (`-scf_precond_guard`) only removes the hook (and with `best` restarts the scalar step from the best earlier input) (AI-generated, machine-tested; [docs/SCF_PRECOND.md](../../../../docs/SCF_PRECOND.md)).
+- The device copy of M (resident CUDA loop, `XtbGpuContext::broydenSetPreconditioner`) uses the device packing of the SCC vector (moments atom-major, the host `packSCC` is component-major); `xtb_native.cpp` remaps the indices before the upload. Without M the device Broyden runs its unchanged kernels (AI-generated, machine-tested).
 
 ## ORCA interface (🤖 AI-generated, pending human production test)
 

@@ -35,6 +35,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <set>
 #include <stdexcept>
@@ -99,8 +100,17 @@ ScfPrecondGuard ScfPrecondGuard::fromEnv()
 
 bool ScfPrecondGuard::fires(int n, const Vector& x, const Vector& F)
 {
-    const double f = F.norm();
-    if (best && (n == 0 || f < fmin)) { x_best = x; F_best = F; }
+    bool new_best = false;
+    const bool hit = firesNorm(n, F.norm(), &new_best);
+    if (new_best) { x_best = x; F_best = F; }
+    return hit;
+}
+
+bool ScfPrecondGuard::firesNorm(int n, double f, bool* new_best)
+{
+    // Order as before the split (Oct 2026): the best pair is decided against fmin of the earlier
+    // iterations, then fmin is updated.
+    if (new_best) *new_best = best && (n == 0 || f < fmin);
     if (n == 0) { f0 = f; fmin = f; return false; }
     bool hit = false;
     if (rule == Rule::Growth)
@@ -163,6 +173,41 @@ std::size_t SchwarzPreconditioner::storedDoubles() const
         n += static_cast<std::size_t>(b.B.size()) + static_cast<std::size_t>(b.weight.size())
              + b.index.size() / 2;   // int indices, counted as half a double
     return n;
+}
+
+GpuPrecondFlat::GpuPrecondFlat() = default;
+GpuPrecondFlat::~GpuPrecondFlat() = default;
+
+bool SchwarzPreconditioner::flatten(std::vector<int>& idx_off, std::vector<int>& idx,
+                                    std::vector<int>& b_off, std::vector<double>& B,
+                                    std::vector<double>& fallback, int& max_dim) const
+{
+    idx_off.assign(1, 0);
+    b_off.assign(1, 0);
+    idx.clear();
+    B.clear();
+    max_dim = 0;
+    std::size_t nB = 0, nI = 0;
+    for (const Block& b : m_blocks) {
+        if (b.weight.size() != 0) return false;   // D_i != 1: not supported by the device kernel
+        nB += static_cast<std::size_t>(b.B.size());
+        nI += b.index.size();
+    }
+    if (nB > static_cast<std::size_t>(std::numeric_limits<int>::max())
+        || nI > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+        return false;
+    idx.reserve(nI);
+    B.reserve(nB);
+    for (const Block& b : m_blocks) {
+        const int n = static_cast<int>(b.index.size());
+        max_dim = std::max(max_dim, n);
+        idx.insert(idx.end(), b.index.begin(), b.index.end());
+        B.insert(B.end(), b.B.data(), b.B.data() + b.B.size());   // PrecondMatrix is row-major
+        idx_off.push_back(static_cast<int>(idx.size()));
+        b_off.push_back(static_cast<int>(B.size()));
+    }
+    fallback.assign(m_fallback.data(), m_fallback.data() + m_fallback.size());
+    return true;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -236,11 +281,17 @@ std::vector<std::vector<int>> detectCovalentFragments(const std::vector<int>& at
  * behaviour) > scf_precond (none | frag). With scf_precond none and no file the
  * function returns immediately and touches nothing, so the default SCF path is unchanged.
  * Conditions under which 'frag' is ignored (one warning per XTB object): not GFN2,
- * not the Broyden mode, not the CPU loop, total charge != 0, open shell or odd electron count.
+ * not the Broyden mode, neither the CPU loop nor a device loop that applies M itself
+ * (@p device_loop, the fully device-resident CUDA loop; @p no_device_reason names why a GPU
+ * path cannot), total charge != 0, open shell or odd electron count. With @p device_loop the
+ * returned hook only signals "M is ready" (m_scf_precond_frag); the caller uploads M to the
+ * device instead of installing the hook (Claude Generated, Oct 2026). The file matrix stays
+ * CPU-only.
  *
  * @return false only for a hard error (unusable CURCUMA_SCF_PRECOND_FILE), with @p err set.
  */
-bool XTB::selectScfPreconditioner(bool broyden_mode, bool cpu_loop, int dim,
+bool XTB::selectScfPreconditioner(bool broyden_mode, bool cpu_loop, bool device_loop,
+                                  const std::string& no_device_reason, int dim,
                                   std::function<Vector(const Vector&)>& hook,
                                   ScfPrecondGuard& guard, std::string& err)
 {
@@ -250,8 +301,8 @@ bool XTB::selectScfPreconditioner(bool broyden_mode, bool cpu_loop, int dim,
         if (!broyden_mode) {
             CurcumaLogger::warn("CURCUMA_SCF_PRECOND_FILE ignored: needs the Broyden SCF mode");
         } else if (!cpu_loop) {
-            CurcumaLogger::warn("CURCUMA_SCF_PRECOND_FILE ignored: the GPU-resident SCF path is active "
-                                "(the preconditioner is implemented for the CPU SCF loop only)");
+            CurcumaLogger::warn("CURCUMA_SCF_PRECOND_FILE ignored: a GPU SCF path is active "
+                                "(the dense file matrix is implemented for the CPU SCF loop only)");
         } else {
             if (!loadScfPrecondMatrix(pc_file, dim, err)) {
                 CurcumaLogger::error("CURCUMA_SCF_PRECOND_FILE: " + err);
@@ -279,7 +330,7 @@ bool XTB::selectScfPreconditioner(bool broyden_mode, bool cpu_loop, int dim,
     }
     if (m_method != MethodType::GFN2) { warn_once("implemented for GFN2 only"); return true; }
     if (!broyden_mode) { warn_once("needs -scf_mode broyden"); return true; }
-    if (!cpu_loop) { warn_once("the GPU-resident SCF path is active (CPU SCF loop only)"); return true; }
+    if (!cpu_loop && !device_loop) { warn_once(no_device_reason); return true; }
     if (m_charge != 0) { warn_once(fmt::format("total charge {} (neutral systems only)", m_charge)); return true; }
     const long long nel = std::llround(m_wfn.nocc);
     if (openShell() || (nel % 2) != 0) {

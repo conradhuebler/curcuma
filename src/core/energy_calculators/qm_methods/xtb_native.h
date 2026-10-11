@@ -354,6 +354,33 @@ struct Wavefunction {
  *  Any method returning false makes the caller fall back to the CPU path for the
  *  whole calculation, so an unavailable / failing device never corrupts results.
  * ------------------------------------------------------------------------- */
+/**
+ * @brief Flat copy of the -scf_precond frag block matrix M for a device upload
+ *        (Claude Generated, Oct 2026; SchwarzPreconditioner::flatten, xtb_precond.h).
+ *
+ * M v = fallback .* v + sum_b R_b^T B_b R_b v on the packed SCC vector [q_sh | dp | qp] of
+ * length N in the DEVICE packing (moments atom-major: dp at nsh + 3*atom + k, qp at
+ * nsh + 3*nat + 6*atom + k; the host packSCC is component-major). Block b covers idx[idx_off[b] .. idx_off[b+1]) with its row-major matrix at
+ * B[b_off[b]]; fallback holds alpha (scf_damping) on indices outside every block, 0 inside.
+ */
+struct GpuPrecondFlat {
+    int N = 0;
+    int max_dim = 0;               ///< largest block
+    std::vector<int> idx_off;      ///< nblocks + 1
+    std::vector<int> idx;
+    std::vector<int> b_off;        ///< nblocks + 1
+    std::vector<double> B;
+    std::vector<double> fallback;  ///< N
+    int nblocks() const { return idx_off.empty() ? 0 : static_cast<int>(idx_off.size()) - 1; }
+    GpuPrecondFlat();    // out of line (xtb_precond.cpp) so that -Winline stays quiet
+    ~GpuPrecondFlat();
+};
+
+/// Guard callback of the device Broyden (Claude Generated, Oct 2026): called once per update
+/// while M is active with the update index n (0-based in this SCF) and ||F_n||_2; sets
+/// *store_best when x_n/F_n are to be kept as the "best" pair; returns true to drop M.
+using GpuBroydenGuardFn = std::function<bool(int n, double fnorm, bool* store_best)>;
+
 struct GpuScfBackend {
     virtual ~GpuScfBackend() = default;
     virtual bool begin(const Matrix& H0, const Matrix& S,
@@ -517,6 +544,25 @@ struct GpuScfBackend {
     /// Per-phase device timings (CURCUMA_GPU_PROFILE), "" when unsupported/disabled.
     /// Claude Generated (Sep 2026).
     virtual std::string profileReport() const { return {}; }
+
+    /* ----- Broyden seed preconditioner in the resident loop (Oct 2026) ---- *
+     * -scf_precond frag on the device (Claude Generated, docs/SCF_PRECOND.md): the device
+     * Broyden of the fully resident loop replaces alpha*F by M*F (linear step and seed) and
+     * alpha*dF by M*dF (update vectors u), like BroydenMixer::setStepHook on the host. Call
+     * residentSetPreconditioner after beginResidentLoop (which clears it); data == nullptr
+     * reactivates the upload already resident under @p tag. The guard runs on ||F||_2 of each
+     * update (one scalar to the host); on a hit M is dropped as in BroydenMixer::dropStepHook
+     * (keep: history rewritten to the scalar form, otherwise reset), and with @p best the next
+     * step starts from the stored device copies x_best + alpha*F_best. Default: unsupported. */
+    virtual bool supportsResidentPreconditioner() const { return false; }
+    /// Tag of the M upload resident on the device (0 = none).
+    virtual unsigned long long residentPreconditionerTag() const { return 0; }
+    /// True if a multi-GPU split (eigensolver or density over several devices) would engage
+    /// for a basis of @p nao functions; the device preconditioner is then not used.
+    virtual bool multiGpuScfSplit(int nao) const { (void)nao; return false; }
+    virtual bool residentSetPreconditioner(const GpuPrecondFlat* data, unsigned long long tag,
+                                           GpuBroydenGuardFn guard, bool keep, bool best)
+    { (void)data; (void)tag; (void)guard; (void)keep; (void)best; return false; }
 
     virtual bool residentScfStep(bool fp32, double& dq, double& e_band, double& e_coulomb,
                                  double& e_third, double& e_multipole)
@@ -1063,7 +1109,8 @@ private:
     // Broyden seed preconditioner (Claude Generated, Oct 2026; xtb_precond.cpp): picks the step
     // hook (file > -scf_precond frag > none) and the guard for one SCF; builds or reuses the
     // fragment M. Returns false only for an unusable CURCUMA_SCF_PRECOND_FILE.
-    bool selectScfPreconditioner(bool broyden_mode, bool cpu_loop, int dim,
+    bool selectScfPreconditioner(bool broyden_mode, bool cpu_loop, bool device_loop,
+                                 const std::string& no_device_reason, int dim,
                                  std::function<Vector(const Vector&)>& hook,
                                  ScfPrecondGuard& guard, std::string& err);
     bool buildFragmentPreconditioner(std::string& err);
@@ -1525,6 +1572,11 @@ private:
     bool         m_scf_precond_warned = false;      // "ignored" warning given once per object
     std::string  m_scf_precond_guard_checked;       // guard spec already parsed (warn once per spec)
     std::shared_ptr<const SchwarzPreconditioner> m_scf_precond_frag;
+    // Device copy (Claude Generated, Oct 2026): M of m_scf_precond_dev_src is uploaded to the
+    // resident CUDA loop under m_scf_precond_dev_tag (process-unique, 0 = none) and re-uploaded
+    // only when the device holds another tag.
+    std::shared_ptr<const SchwarzPreconditioner> m_scf_precond_dev_src;
+    unsigned long long m_scf_precond_dev_tag = 0;
     Matrix           m_scf_precond_geom;            // geometry (Angstrom) M was built at
     std::vector<int> m_scf_precond_atoms;           // atomic numbers M was built for
     // Fragment objects only: compute the SCC Jacobian after convergence into m_scf_jac_result.
