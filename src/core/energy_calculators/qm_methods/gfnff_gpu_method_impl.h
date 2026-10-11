@@ -15,6 +15,7 @@
  *       static constexpr const char* name           = "CUDA";           // log prose
  *       static constexpr const char* workspace_name = "FFWorkspaceGPU"; // error text
  *       static constexpr bool has_device_schur      = true;   // false on ROCm
+ *       static constexpr bool has_cn_pair_skin      = true;   // false on ROCm (K1, Oct 2026)
  *       static constexpr int  default_eeq_cpu_fragment_threshold = 0;   // 16 on ROCm
  *       static void downloadDoubles(double* host, const double* device, int n);
  *   };
@@ -208,6 +209,10 @@ private:
     int                 m_cn_pair_regen_every = 0;    ///< force regen every N grad steps (0=off)
     double              m_cn_pair_cutoff_factor = 2.5;///< cutoff = factor*(rcov_i+rcov_j)
     long                m_cn_pair_grad_steps = 0;     ///< gradient-step counter for regen_every
+    // K1 (Oct 2026, Claude Generated): Verlet skin of the CN pair list (gpu_cn_pair_skin_bohr).
+    // < 0: legacy (rebuild whenever the 0.5 Bohr topology check fires, i.e. every MD step).
+    double              m_cn_pair_skin = 1.0;         ///< skin in Bohr, list cutoff + 2*skin
+    double              m_cn_pair_max_disp = 0.0;     ///< allowed displacement since the last build (Bohr)
 
     // GPU CN result (always used — GPU CN is the default path)
     Vector              m_gpu_cn_final;        ///< Cached GPU CN result
@@ -670,6 +675,38 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         m_cn_pair_regen_every   = cfg_get_int("gpu_cn_pair_regen_every", 0);
         m_cn_pair_cutoff_factor = cfg_get_dbl("gpu_cn_pair_cutoff_factor", 2.5);
         m_gpu_workspace->setCNPairCutoffFactor(m_cn_pair_cutoff_factor);
+        // K1 (Oct 2026, Claude Generated): CN pair list as a Verlet list with skin s.
+        // The list holds every pair with r < f*rs + 2s (rs = rcov_i + rcov_j, 4/3-scaled D3 radii,
+        // f = gpu_cn_pair_cutoff_factor). A pair NOT in the list had r_build >= f*rs + 2s; after every
+        // atom moved by at most D since the build, r >= f*rs + 2s - 2D. The list is rebuilt once
+        // D > D_allow = s + rs_min/2 * (f - 1 - x_tail/|kn|), rs_min = smallest rs among the elements
+        // present. Then every missing pair has r >= rs*(1 + x_tail/|kn|), so its erf-CN term is at most
+        // 0.5*erfc(x_tail) and its dCN/dr at most |kn|/(rs*sqrt(pi))*exp(-x_tail^2). With kn = -7.5 and
+        // x_tail = 8: 5.6e-30 per pair (CN) and 4.2e-28 / Bohr per pair (derivative, H-H, rs = 1.61 Bohr).
+        // f = 2.5, H-H: rs_min = 1.61 Bohr, D_allow = s + 0.35 Bohr. Legacy (s < 0): rebuild on the
+        // topology check only, list cutoff f*rs exactly as before.
+        m_cn_pair_skin = cfg_get_dbl("gpu_cn_pair_skin_bohr", 1.0);
+        if constexpr (Backend::has_cn_pair_skin) {
+            if (m_cn_pair_skin >= 0.0) {
+                constexpr double kn_abs = 7.5;   // |kn| of the GFN-FF erf CN (computeCN, k_cn_compute_pairs)
+                constexpr double x_tail = 8.0;   // erf argument the missing pairs are guaranteed to exceed
+                double rcov_min = 1e30;
+                for (int z : m_atom_types) {
+                    if (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_rad_d3.size()))
+                        rcov_min = std::min(rcov_min, GFNFFParameters::covalent_rad_d3[z - 1] * (4.0 / 3.0));
+                }
+                const double rs_min = 2.0 * rcov_min;
+                // For f < 1 + x_tail/|kn| (2.07) even a fresh list misses larger terms; then the margin is
+                // 0 and a stale list misses nothing that a fresh list keeps (r >= f*rs for every rs).
+                const double c_tail = m_cn_pair_cutoff_factor - 1.0 - x_tail / kn_abs;
+                const double margin = c_tail > 0.0 ? 0.5 * rs_min * c_tail : 0.0;
+                m_cn_pair_max_disp = std::max(0.0, m_cn_pair_skin + margin);
+                m_gpu_workspace->setCNPairSkin(m_cn_pair_skin);
+                if (CurcumaLogger::get_verbosity() >= 3)
+                    CurcumaLogger::info(fmt::format("  GPU CN pair list: skin {:.3f} Bohr, rebuild above {:.3f} Bohr displacement",
+                                                    m_cn_pair_skin, m_cn_pair_max_disp));
+            }
+        }
         // Claude Generated (Sep 2026): per-step D4 C6 refresh on the device, same switch as the
         // CPU path (GFNFF::refreshDispersionC6()).
         m_gpu_workspace->setDispersionC6Update(cfg_get_bool("dispersion_c6_update", true));
@@ -900,10 +937,16 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         m_eeq_has_ref_geom = false;
     }
 
+    // K1 (Oct 2026, Claude Generated): true when the CN pair list is a Verlet list with its own
+    // reference geometry (see initGPUWorkspace() for the threshold derivation).
+    bool cn_pair_skin_mode = false;
+    if constexpr (Backend::has_cn_pair_skin)
+        cn_pair_skin_mode = (m_cn_pair_skin >= 0.0);
+
     {
         bool needs_topo_update = m_gpu_workspace->checkDisplacement(0.5);
         m_gfnff->setExternalTopologyDecision(needs_topo_update);
-        if (needs_topo_update) {
+        if (needs_topo_update && !cn_pair_skin_mode) {
             // Reference geometry updated after topology recalculation (triggered inside prepareCNAndEEQ)
             // — updateReferenceGeometry() called below after prepareCNAndEEQ.
             // Task #10 (Jun 2026): the CN-derivative pair list is built from the current
@@ -911,6 +954,17 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
             // so drop the latch to force a rebuild in the gradient block below.
             if (m_cn_pair_regen)
                 m_cn_pairs_generated = false;
+        }
+    }
+
+    // K1 (Oct 2026, Claude Generated): rebuild an existing CN pair list BEFORE computeCN when an
+    // atom moved more than m_cn_pair_max_disp since its build, so this step's CN and chain rule
+    // both see a list that misses no pair with a contribution above 0.5*erfc(8). The first list
+    // is still built after computeCN (below), exactly as before, so a single point is unchanged.
+    if constexpr (Backend::has_cn_pair_skin) {
+        if (cn_pair_skin_mode && m_cn_pair_regen && m_cn_pairs_generated
+            && m_gpu_workspace->cnPairListStale(m_cn_pair_max_disp)) {
+            m_gpu_workspace->generateCNPairListOnGPU();
         }
     }
 

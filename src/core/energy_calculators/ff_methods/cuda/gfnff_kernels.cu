@@ -3085,6 +3085,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(
     const double* __restrict__ cz,
     const int*    __restrict__ atom_types,
     double        cutoff_factor,
+    double        extra_bohr,
     int*          d_count)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -3119,7 +3120,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(
     double rcov_j = d_rcov_d3[zj - 1] * CN_RCOV_SCALE;
     double rcov_sum = rcov_i + rcov_j;
 
-    if (rij < cutoff_factor * rcov_sum && rij > 1e-10) {
+    if (rij < cutoff_factor * rcov_sum + extra_bohr && rij > 1e-10) {
         atomicAdd(d_count, 1);
     }
 }
@@ -3132,6 +3133,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
     const double* __restrict__ cz,
     const int*    __restrict__ atom_types,
     double        cutoff_factor,
+    double        extra_bohr,
     int*          d_counter,
     int*          idx_i,
     int*          idx_j,
@@ -3166,7 +3168,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
     double rcov_j = d_rcov_d3[zj - 1] * CN_RCOV_SCALE;
     double rcov_sum_val = rcov_i + rcov_j;
 
-    if (rij < cutoff_factor * rcov_sum_val && rij > 1e-10) {
+    if (rij < cutoff_factor * rcov_sum_val + extra_bohr && rij > 1e-10) {
         int idx = atomicAdd(d_counter, 1);
         idx_i[idx] = i;
         idx_j[idx] = j;

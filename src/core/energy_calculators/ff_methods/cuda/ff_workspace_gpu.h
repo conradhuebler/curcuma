@@ -426,6 +426,18 @@ public:
     void setCNPairCutoffFactor(double f) { m_cn_pair_cutoff_factor = f; }
     double getCNPairCutoffFactor() const { return m_cn_pair_cutoff_factor; }
 
+    /// K1 (Oct 2026, Claude Generated): Verlet skin of the CN pair list in Bohr. The list
+    /// holds pairs with r < factor*(rcov_i+rcov_j) + 2*skin; 0 reproduces the legacy list.
+    void setCNPairSkin(double skin_bohr) { m_cn_pair_skin_bohr = skin_bohr > 0.0 ? skin_bohr : 0.0; }
+    double getCNPairSkin() const { return m_cn_pair_skin_bohr; }
+
+    /// K1 (Oct 2026, Claude Generated): true when an atom moved more than max_disp_bohr since
+    /// the last generateCNPairListOnGPU() (own reference geometry, set by every build).
+    bool cnPairListStale(double max_disp_bohr);
+
+    /// Number of CN pair-list builds since construction (diagnostics).
+    long cnPairListBuilds() const { return m_cn_pair_builds; }
+
     // =========================================================================
     // GPU Topology Displacement Check (Claude Generated March 2026)
     // =========================================================================
@@ -676,6 +688,8 @@ private:
 
     // Task #10 (Jun 2026): CN-derivative pair-list cutoff factor (× rcov sum)
     double m_cn_pair_cutoff_factor = 2.5;
+    double m_cn_pair_skin_bohr = 0.0;   ///< K1 (Oct 2026): pair-list skin, 0 = legacy
+    long   m_cn_pair_builds = 0;        ///< K1 (Oct 2026): build counter
 
     // Pre-allocated pinned staging buffers for async DMA transfers.
     // Claude Generated (March 2026): Pinned memory enables true async H2D/D2H via

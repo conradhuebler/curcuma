@@ -84,7 +84,7 @@ public:
 
 protected:
     void checkHelp();
-    void TriggerWriteRestart();
+    nlohmann::json TriggerWriteRestart();   ///< writes curcuma_restart.json, returns the plain state (K6, Oct 2026)
 
     StringList RestartFiles() const;
 

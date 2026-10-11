@@ -695,6 +695,8 @@ struct FFWorkspaceGPUImpl {
     // GPU topology displacement check buffers (Claude Generated March 2026)
     RefCoordSoA ref_coords;  ///< Reference geometry SoA (rx[N], ry[N], rz[N]) — Phase 10, March 2026
     CudaBuffer<int>    d_disp_flag;       ///< [1] exceeded flag for displacement check
+    RefCoordSoA        cn_ref_coords;     ///< K1 (Oct 2026): geometry of the last CN pair-list build
+    CudaBuffer<int>    d_cn_disp_flag;    ///< K1 (Oct 2026): [1] flag for cnPairListStale()
 
     // GPU CN computation buffers (Phase 1: GPU migration)
     // Claude Generated (March 2026): CN computed entirely on GPU
@@ -1744,6 +1746,7 @@ void FFWorkspaceGPU::generateCNPairListOnGPU()
         impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
         impl.d_atom_types.ptr,
         m_cn_pair_cutoff_factor,  // cutoff_factor (Task #10: tunable)
+        2.0 * m_cn_pair_skin_bohr, // K1 (Oct 2026): Verlet skin, 0 = legacy list
         impl.d_cn_pair_counter.ptr);
     checkCuda(cudaStreamSynchronize(impl.stream), "k_generate_cn_pairs_count sync");
 
@@ -1774,6 +1777,7 @@ void FFWorkspaceGPU::generateCNPairListOnGPU()
         impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
         impl.d_atom_types.ptr,
         m_cn_pair_cutoff_factor,  // cutoff_factor (Task #10: tunable)
+        2.0 * m_cn_pair_skin_bohr, // K1 (Oct 2026): Verlet skin, 0 = legacy list
         impl.d_cn_pair_counter.ptr,
         impl.d_cn_idx_i.ptr,
         impl.d_cn_idx_j.ptr,
@@ -1781,9 +1785,52 @@ void FFWorkspaceGPU::generateCNPairListOnGPU()
     checkCuda(cudaStreamSynchronize(impl.stream), "k_generate_cn_pairs_write sync");
 
     m_cn_pairs_on_gpu = true;
+    ++m_cn_pair_builds;
+
+    // K1 (Oct 2026, Claude Generated): remember the geometry this list was built from, so
+    // cnPairListStale() can measure the largest atom displacement since this build.
+    if (impl.cn_ref_coords.empty()) impl.cn_ref_coords.alloc(N);
+    checkCuda(cudaMemcpyAsync(impl.cn_ref_coords.d_rx.ptr, impl.coords.d_x.ptr, N * sizeof(double),
+                              cudaMemcpyDeviceToDevice, impl.stream), "CN pair ref: D2D x");
+    checkCuda(cudaMemcpyAsync(impl.cn_ref_coords.d_ry.ptr, impl.coords.d_y.ptr, N * sizeof(double),
+                              cudaMemcpyDeviceToDevice, impl.stream), "CN pair ref: D2D y");
+    checkCuda(cudaMemcpyAsync(impl.cn_ref_coords.d_rz.ptr, impl.coords.d_z.ptr, N * sizeof(double),
+                              cudaMemcpyDeviceToDevice, impl.stream), "CN pair ref: D2D z");
 
     if (CurcumaLogger::get_verbosity() >= 3)
-        CurcumaLogger::info(fmt::format("  GPU CN pair list: {} pairs generated on GPU", h_count));
+        CurcumaLogger::info(fmt::format("  GPU CN pair list: {} pairs generated on GPU (build {})",
+                                        h_count, m_cn_pair_builds));
+}
+
+// ============================================================================
+// K1 (Oct 2026, Claude Generated): staleness test of the CN pair list.
+// True when some atom moved more than max_disp_bohr since the last
+// generateCNPairListOnGPU() (or when no list reference exists yet). Uses the same
+// flag kernel as checkDisplacement(), but against the pair-list reference geometry,
+// which is independent of the topology reference used by checkDisplacement().
+// ============================================================================
+bool FFWorkspaceGPU::cnPairListStale(double max_disp_bohr)
+{
+    if (!m_impl) return true;
+    auto& impl = *m_impl;
+    if (impl.cn_ref_coords.empty() || impl.coords.empty()) return true;
+    if (!impl.d_cn_disp_flag.ptr) impl.d_cn_disp_flag.alloc(1);
+
+    int zero = 0;
+    checkCuda(cudaMemcpyAsync(impl.d_cn_disp_flag.ptr, &zero, sizeof(int),
+                              cudaMemcpyHostToDevice, impl.stream), "cnPairListStale: zero flag");
+    LaunchConfig cfg = getLaunchConfig(m_natoms, m_block_size);
+    k_check_displacement<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        m_natoms,
+        impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+        impl.cn_ref_coords.d_rx.ptr, impl.cn_ref_coords.d_ry.ptr, impl.cn_ref_coords.d_rz.ptr,
+        max_disp_bohr * max_disp_bohr,
+        impl.d_cn_disp_flag.ptr);
+    int result = 0;
+    checkCuda(cudaMemcpyAsync(&result, impl.d_cn_disp_flag.ptr, sizeof(int),
+                              cudaMemcpyDeviceToHost, impl.stream), "cnPairListStale: download flag");
+    checkCuda(cudaStreamSynchronize(impl.stream), "cnPairListStale: sync");
+    return result != 0;
 }
 
 // ============================================================================

@@ -44,6 +44,8 @@ struct GFNFFCudaBackend {
     static constexpr bool has_device_schur = true;
     /// Multi-GPU split of one molecule (Coulomb tiles + EEQ PCG). Claude Generated (Sep 2026).
     static constexpr bool has_multi_gpu_split = true;
+    /// K1 (Oct 2026): CN pair list as a Verlet list with skin (cnPairListStale(), setCNPairSkin()).
+    static constexpr bool has_cn_pair_skin = true;
 
     /// 0 = never route the EEQ to the CPU PCG; the device Schur paths handle nfrag>1.
     static constexpr int default_eeq_cpu_fragment_threshold = 0;
