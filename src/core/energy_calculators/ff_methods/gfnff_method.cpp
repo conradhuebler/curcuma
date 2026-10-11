@@ -1370,7 +1370,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     }
 
     // Static-Mode (WP-S1, May 2026): reuse cached CN/dcn/D4 outputs after first capture.
-    // m_last_cn, m_last_dcn, m_last_cnf, m_d4_generator's dc6dcn matrix retain previous values.
+    // m_last_cn, m_last_dcn, m_last_cnf, m_d4_generator's per-pair dc6dcn retain previous values.
     const bool reuse_cn = m_static_cn && m_static_state_captured;
     const bool freeze_eeq = m_static_charges && m_static_state_captured;
 
@@ -1578,8 +1578,8 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
 
         // D4 Gaussian weights + derivatives needed for dc6dcn.
         // gpu_only: GPU computes gw + dgw + dc6dcn entirely on device (Phase 6).
-        // CPU path: compute gw + dgw + dc6dcn matrix on CPU.
-        // Static-Mode (WP-S1): skip recompute when CN frozen — d4_generator's cached dc6dcn matrix stays valid.
+        // CPU path: compute gw + dgw + per-pair dc6dcn on CPU.
+        // Static-Mode (WP-S1): skip recompute when CN frozen — d4_generator's cached per-pair dc6dcn stays valid.
         if (m_d4_generator && !gpu_only && !reuse_cn) {
             t0 = std::chrono::high_resolution_clock::now();
             std::vector<double> cn_std(m_last_cn.data(), m_last_cn.data() + m_last_cn.size());

@@ -674,6 +674,9 @@ void FFWorkspace::calcDispersion(int p)
     Matrix grad_before;
     if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
 
+    // Pair-list position hint for the dc6dcn lookup: the D4 list is walked in its own
+    // (sorted) order, so after the first binary search each lookup is a direct hit.
+    std::size_t dc6_hint = static_cast<std::size_t>(begin);
     for (int idx = begin; idx < end; ++idx) {
         const auto& disp = m_dispersions[idx];
 
@@ -706,12 +709,13 @@ void FFWorkspace::calcDispersion(int p)
             acc.gradient.row(disp.i) += grad.transpose();
             acc.gradient.row(disp.j) -= grad.transpose();
 
-            // dc6dcn chain-rule
-            if (m_dc6dcn_ptr && m_dc6dcn_ptr->size() > 0 &&
-                disp.i < m_dc6dcn_ptr->rows() && disp.j < m_dc6dcn_ptr->cols()) {
+            // dc6dcn chain-rule (Oct 2026: per-pair lookup; a pair outside the D4 list had a
+            // zero matrix cell, and subtracting 0 left dEdcn unchanged, so it is skipped)
+            double dc6_di, dc6_dj;
+            if (m_dc6dcn_ptr && m_dc6dcn_ptr->lookup(disp.i, disp.j, dc6_hint, dc6_di, dc6_dj)) {
                 double disp_value = disp_sum * disp.zetac6;
-                acc.dEdcn(disp.i) -= (*m_dc6dcn_ptr)(disp.i, disp.j) * disp_value;
-                acc.dEdcn(disp.j) -= (*m_dc6dcn_ptr)(disp.j, disp.i) * disp_value;
+                acc.dEdcn(disp.i) -= dc6_di * disp_value;
+                acc.dEdcn(disp.j) -= dc6_dj * disp_value;
             }
         }
     }
@@ -734,6 +738,8 @@ void FFWorkspace::calcD4Dispersion(int p)
     Matrix grad_before;
     if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
 
+    // Pair-list position hint for the dc6dcn lookup (see calcDispersion).
+    std::size_t dc6_hint = static_cast<std::size_t>(begin);
     for (int idx = begin; idx < end; ++idx) {
         const auto& disp = m_d4_dispersions[idx];
 
@@ -766,11 +772,12 @@ void FFWorkspace::calcD4Dispersion(int p)
             acc.gradient.row(disp.i) += grad.transpose();
             acc.gradient.row(disp.j) -= grad.transpose();
 
-            if (m_dc6dcn_ptr && m_dc6dcn_ptr->size() > 0 &&
-                disp.i < m_dc6dcn_ptr->rows() && disp.j < m_dc6dcn_ptr->cols()) {
+            // dc6dcn chain-rule, per-pair lookup (see calcDispersion)
+            double dc6_di, dc6_dj;
+            if (m_dc6dcn_ptr && m_dc6dcn_ptr->lookup(disp.i, disp.j, dc6_hint, dc6_di, dc6_dj)) {
                 double disp_value = disp_sum * disp.zetac6;
-                acc.dEdcn(disp.i) -= (*m_dc6dcn_ptr)(disp.i, disp.j) * disp_value;
-                acc.dEdcn(disp.j) -= (*m_dc6dcn_ptr)(disp.j, disp.i) * disp_value;
+                acc.dEdcn(disp.i) -= dc6_di * disp_value;
+                acc.dEdcn(disp.j) -= dc6_dj * disp_value;
             }
         }
     }

@@ -266,8 +266,9 @@ public:
     void setCNDerivatives(const Vector& cn, const Vector& cnf,
                           const CNDerivStore& dcn);
 
-    /// Set dc6dcn pointer for D4 dispersion CN gradient
-    void setDC6DCNPtr(const Matrix* ptr) { m_dc6dcn_ptr = ptr; }
+    /// Set the per-pair dC6/dCN source for the D4 dispersion CN gradient (Claude Generated,
+    /// Oct 2026: per-pair arrays of the D4 generator instead of a dense N x N matrix)
+    void setDC6DCNPtr(const D4DC6DCNPairs* ptr) { m_dc6dcn_ptr = ptr; }
 
     /// Set baseline energy (e0 from parameter set)
     void setE0(double e0) { m_e0 = e0; }
@@ -432,7 +433,7 @@ private:
     Vector m_eeq_charges, m_topology_charges, m_d3_cn;
     Vector m_cn, m_cnf;
     CNDerivStore m_dcn;  // Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
-    const Matrix* m_dc6dcn_ptr = nullptr;
+    const D4DC6DCNPairs* m_dc6dcn_ptr = nullptr;
     double m_e0 = 0.0;
 
     // Coulomb self-energy parameters (O(N), extracted at init)

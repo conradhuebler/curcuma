@@ -1255,7 +1255,6 @@ public:
         std::vector<std::vector<int>> neighbors;  ///< symmetric neighbor list (reusable by D4/EEQ)
     };
     const Vector& getLastCNF() const { return m_last_cnf; }
-    const Matrix* getDC6DCNPtr() const { return m_d4_generator ? &m_d4_generator->getDC6DCN() : nullptr; }
     FFWorkspace* getWorkspace() const { return m_workspace.get(); }
     /// GPU wrappers: keep the FULL parameter set for consumeCachedParameterSet() (default: bonded terms only).
     void setKeepFullParameterSet(bool keep) { m_keep_full_parameter_set = keep; }

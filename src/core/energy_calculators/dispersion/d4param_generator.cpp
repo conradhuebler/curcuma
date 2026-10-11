@@ -1841,47 +1841,45 @@ void D4ParameterGenerator::computeGaussianWeightDerivatives(CxxThreadPool* pool,
     }
 }
 
-// Claude Generated (Feb 15, 2026): Compute dc6dcn matrix from weight derivatives and C6 references
+// Claude Generated (Feb 15, 2026): Compute dc6dcn from weight derivatives and C6 references
 // Reference: Fortran gfnff_gdisp0.f90:262-305 (get_atomic_c6_d4 dc6dcn part)
 //
 // dc6dcn(i,j) = dC6(i,j)/dCN(i) = sum_{ri,rj} dgwdcn(ri,i) * gw(rj,j) * c6ref(ri,rj,Zi,Zj)
 // dc6dcn(j,i) = dC6(i,j)/dCN(j) = sum_{ri,rj} gw(ri,i) * dgwdcn(rj,j) * c6ref(ri,rj,Zi,Zj)
+//
+// Claude Generated (Oct 2026): stored per pair of the pair list (m_dc6dcn.dc6_di/dc6_dj[p])
+// instead of in a dense N x N matrix that was zeroed every call (429 MB at 7320 atoms) and
+// filled only at the pair-list cells. Each value is computed by the same kernel with the same
+// summation order as before, so every value a reader sees is bit-identical.
 void D4ParameterGenerator::computeDC6DCN(CxxThreadPool* pool, int num_threads)
 {
     // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²×M²)
-    int natoms = static_cast<int>(m_atoms.size());
-    // Claude Generated (Oct 2026): zero the N x N matrix in parallel column blocks instead of
-    // one serial setZero (429 MB at 7320 atoms, 22-24 ms, did not scale). Same result: all-zero
-    // bit pattern = 0.0, written before any cell is filled. Resizes (serial) only when the
-    // size changed.
-    if (m_dc6dcn.rows() != natoms || m_dc6dcn.cols() != natoms)
-        m_dc6dcn.resize(natoms, natoms);
-    {
-        double* zdata = m_dc6dcn.data();
-        const long long zn = static_cast<long long>(natoms) * natoms;
-        auto zero_worker = [&](int t_id, int T) {
-            const long long b = zn * t_id / T;
-            const long long e = zn * (t_id + 1) / T;
-            if (e > b) std::memset(zdata + b, 0, static_cast<size_t>(e - b) * sizeof(double));
-        };
-        if (pool && num_threads > 1 && zn > (1 << 20)) {
-            const int T = num_threads;
-            std::vector<std::future<void>> futures;
-            futures.reserve(T - 1);
-            for (int t = 1; t < T; ++t)
-                futures.push_back(pool->enqueue(zero_worker, t, T));
-            zero_worker(0, T);
-            for (auto& f : futures) f.get();
-        } else {
-            zero_worker(0, 1);
-        }
+    if (!m_dc6dcn_pairs_valid) {
+        // No pair list on the host (GPU builds it on device and computes dc6dcn there). The
+        // former full-N^2 fallback had no host reader in that mode; computing nothing keeps
+        // the 429 MB matrix out of every path. Readers find no pair and add nothing.
+        m_dc6dcn.dc6_di.clear();
+        m_dc6dcn.dc6_dj.clear();
+        m_dc6dcn_computed = false;
+        if (CurcumaLogger::get_verbosity() >= 3)
+            CurcumaLogger::warn("D4 computeDC6DCN called without a host pair list; dC6/dCN not computed");
+        return;
     }
 
-    // Per-pair dc6/dCN kernel. For i<j writes (i,j)=dC6(i,j)/dCN(i) and
-    // (j,i)=dC6(i,j)/dCN(j); for i==j (full-N² fallback only) writes the diagonal
-    // sum. Each unordered pair is the sole writer of its two cells, so any
-    // partition over pairs/rows is race-free without buffering.
-    auto pair_kernel = [&](int i, int j) {
+    const int P = static_cast<int>(m_dc6dcn.pairs.size());
+    m_dc6dcn.dc6_di.resize(P);
+    m_dc6dcn.dc6_dj.resize(P);
+    double* out_di = m_dc6dcn.dc6_di.data();
+    double* out_dj = m_dc6dcn.dc6_dj.data();
+
+    // Per-pair dc6/dCN kernel for pair p = (i, j), i < j. Writes the former matrix cells
+    // (i,j) -> out_di[p] and (j,i) -> out_dj[p]; 0.0 where the matrix kept its zero (element
+    // out of range, no weights). Each pair is its own sole writer: any partition is race-free.
+    auto pair_kernel = [&](int p) {
+        const int i = m_dc6dcn.pairs[p].first;
+        const int j = m_dc6dcn.pairs[p].second;
+        out_di[p] = 0.0;
+        out_dj[p] = 0.0;
         int Zi = m_atoms[i];
         int elem_i = Zi - 1;
         if (elem_i < 0 || elem_i >= MAX_ELEM) return;
@@ -1928,83 +1926,39 @@ void D4ParameterGenerator::computeDC6DCN(CxxThreadPool* pool, int num_threads)
             }
         }
 
-        if (i == j) {
-            m_dc6dcn(i, i) = dc6_di + dc6_dj;
-        } else {
-            m_dc6dcn(i, j) = dc6_di;  // dC6(i,j)/dCN(i)
-            m_dc6dcn(j, i) = dc6_dj;  // dC6(i,j)/dCN(j) — unique writer
-        }
+        out_di[p] = dc6_di;  // dC6(i,j)/dCN(i)
+        out_dj[p] = dc6_dj;  // dC6(i,j)/dCN(j)
     };
 
-    // Lever 3 Opt A: iterate only the in-cutoff pair list — exactly the dc6dcn
-    // entries the gradient consumer reads. Beyond-cutoff cells and the diagonal
-    // stay 0 (never read). Bit-identical for every consumed entry. Falls back to
-    // the full-N² double loop when the list is unavailable (GPU skip / first call).
-    if (m_dc6dcn_pairs_valid) {
-        const int P = static_cast<int>(m_dc6dcn_pairs.size());
-        // Claude Generated (Oct 2026): contiguous pair blocks instead of stride T (neighbouring
-        // pairs share rows/cache lines of the C6 half-contraction and of m_dc6dcn). Each cell
-        // has one writer, so the partition does not change any value.
-        auto pl_worker = [&](int t_id, int T) {
-            const int pb = static_cast<int>(static_cast<long long>(P) * t_id / T);
-            const int pe = static_cast<int>(static_cast<long long>(P) * (t_id + 1) / T);
-            for (int p = pb; p < pe; ++p)
-                pair_kernel(m_dc6dcn_pairs[p].first, m_dc6dcn_pairs[p].second);
-        };
-        if (num_threads > 1 && P > 64) {
-            int T = std::min(num_threads, P);
-            if (pool) {
-                std::vector<std::future<void>> futures;
-                futures.reserve(T - 1);
-                for (int t = 1; t < T; ++t)
-                    futures.push_back(pool->enqueue(pl_worker, t, T));
-                pl_worker(0, T);
-                for (auto& f : futures) f.get();
-            } else {
-                std::vector<std::thread> threads(T - 1);
-                for (int t = 1; t < T; ++t)
-                    threads[t - 1] = std::thread(pl_worker, t, T);
-                pl_worker(0, T);
-                for (auto& th : threads) th.join();
-            }
-        } else {
-            pl_worker(0, 1);
-        }
-        m_dc6dcn_computed = true;
-        return;
-    }
-
-    // Fallback: original full-N² row-partitioned loop. Each thread owns row i and
-    // iterates j >= i, so it is the sole writer of cells (i,j) and (j,i).
-    auto dc6_worker = [&](int t_id, int T) {
-        for (int i = t_id; i < natoms; i += T) {
-            int elem_i = m_atoms[i] - 1;
-            if (elem_i < 0 || elem_i >= MAX_ELEM) continue;
-            if (m_gaussian_weights[i].empty() || m_gaussian_weight_derivatives[i].empty()) continue;
-            for (int j = i; j < natoms; ++j) pair_kernel(i, j);
-        }
+    // Lever 3 Opt A: only the in-cutoff pair list - exactly the entries the gradient reads.
+    // Claude Generated (Oct 2026): contiguous pair blocks (neighbouring pairs share rows and
+    // cache lines of the C6 half-contraction). Each value has one writer, so the partition
+    // does not change any value.
+    auto pl_worker = [&](int t_id, int T) {
+        const int pb = static_cast<int>(static_cast<long long>(P) * t_id / T);
+        const int pe = static_cast<int>(static_cast<long long>(P) * (t_id + 1) / T);
+        for (int p = pb; p < pe; ++p)
+            pair_kernel(p);
     };
-
-    if (num_threads > 1 && natoms > 64) {
-        int T = std::min(num_threads, natoms);
+    if (num_threads > 1 && P > 64) {
+        int T = std::min(num_threads, P);
         if (pool) {
             std::vector<std::future<void>> futures;
             futures.reserve(T - 1);
             for (int t = 1; t < T; ++t)
-                futures.push_back(pool->enqueue(dc6_worker, t, T));
-            dc6_worker(0, T);
+                futures.push_back(pool->enqueue(pl_worker, t, T));
+            pl_worker(0, T);
             for (auto& f : futures) f.get();
         } else {
             std::vector<std::thread> threads(T - 1);
             for (int t = 1; t < T; ++t)
-                threads[t - 1] = std::thread(dc6_worker, t, T);
-            dc6_worker(0, T);
+                threads[t - 1] = std::thread(pl_worker, t, T);
+            pl_worker(0, T);
             for (auto& th : threads) th.join();
         }
     } else {
-        dc6_worker(0, 1);
+        pl_worker(0, 1);
     }
-
     m_dc6dcn_computed = true;
 }
 
@@ -2031,7 +1985,7 @@ bool D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& 
     // GPU will compute dc6dcn per dispersion pair directly.
     if (!skip_dc6dcn) {
         // Lever 3 Opt B: rebuild the half-contraction (CN changed → weights changed)
-        // before computeDC6DCN. Reuses m_dc6dcn_pairs from the last pair-list build.
+        // before computeDC6DCN. Reuses m_dc6dcn.pairs from the last pair-list build.
         precomputeC6HalfContraction(pool, num_threads);
         computeDC6DCN(pool, num_threads);
     }
@@ -2210,9 +2164,10 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     // Lever 3 Opt A (Jun 2026): capture the in-cutoff pair list. computeDC6DCN only
     // needs entries the gradient consumer reads — exactly the dispersion pairs (i<j,
     // within the 60 Bohr cutoff) collected above. updateCNValuesForGradient reuses it.
-    m_dc6dcn_pairs.clear();
-    m_dc6dcn_pairs.reserve(all_pairs.size());
-    for (const auto& d : all_pairs) m_dc6dcn_pairs.emplace_back(d.i, d.j);
+    // all_pairs is in (i, j) order, i < j - the sorted order D4DC6DCNPairs::lookup() relies on.
+    m_dc6dcn.pairs.clear();
+    m_dc6dcn.pairs.reserve(all_pairs.size());
+    for (const auto& d : all_pairs) m_dc6dcn.pairs.emplace_back(d.i, d.j);
     m_dc6dcn_pairs_valid = true;
 
     // dc6dcn for the gradient (derivatives + half-contraction already built above).
