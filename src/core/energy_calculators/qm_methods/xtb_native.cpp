@@ -2618,6 +2618,17 @@ void XTB::buildReferenceOccupations()
             CurcumaLogger::param("n_alpha", m_nalpha);
             CurcumaLogger::param("n_beta", m_nbeta);
         }
+        // Claude Generated (Oct 2026): an electron count whose parity contradicts -spin
+        // (odd electrons without -spin, or -spin 2 on a doublet) gives fractional alpha/beta
+        // occupations - tblite's behaviour, but xtb 6.7.1 defaults an odd count to a doublet.
+        // CH3 without -spin: -3.56397536 Eh vs xtb -3.56265832. Warn, do not change numbers.
+        const long nel = std::lround(m_wfn.nocc);
+        if (std::abs(m_wfn.nocc - nel) < 1e-6 && ((nel - std::lround(nuhf)) % 2) != 0
+            && CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::warn(fmt::format("native xTB: {} electrons with {} unpaired (-spin) "
+                "have inconsistent parity; occupations are fractional. For a radical pass "
+                "-spin <multiplicity-1>.", nel, std::lround(nuhf)));
+        }
     }
     m_wfn.q_at.setZero(m_basis.nat);
     m_wfn.q_sh.setZero(m_basis.nsh);

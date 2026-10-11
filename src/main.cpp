@@ -763,6 +763,16 @@ json CLI2Json(int argc, char** argv)
         std::string sub = current.substr(0, 1);
 
         if (sub == "-") {
+            // Claude Generated (Oct 2026): a flag token that contains whitespace ("-spin 1" as ONE
+            // argv entry, e.g. from a shell variable that was not word-split) used to become the
+            // boolean key "spin 1" and was silently ignored - the run then reported a closed-shell
+            // energy for a radical. No parameter name contains whitespace, so refuse it.
+            if (current.find_first_of(" \t\n") != std::string::npos) {
+                CurcumaLogger::error("Command-line argument '" + current
+                    + "' contains whitespace: flag and value must be separate arguments "
+                      "(check shell quoting / variable expansion).");
+                exit(1);
+            }
             current.erase(0, 1);
             // Claude Generated (Jun 2026): canonicalize hyphens to underscores in CLI
             // parameter names so "-opt-method" matches the JSON key "opt_method".

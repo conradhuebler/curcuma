@@ -368,3 +368,4 @@ below. If it needs measurements or a derivation, write them into the matching `d
 - ROCm GFN-FF: Coulomb term was missing (Sep 2026)
 - Citation database checked against Crossref (Sep 2026)
 - Citations, second pass (Sep 2026)
+- CLI guard (Oct 11, 2026): a flag token containing whitespace (`"-spin 1"` as one argv entry) is now an error instead of a silently ignored key; warning for an electron count whose parity contradicts `-spin` (numbers unchanged); open-shell CLI follow-ups in TODO.md
