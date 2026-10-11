@@ -110,20 +110,61 @@ main() {
     assert_string_not_in_file "inconsistent parity" cl2_spin.log "radical with -spin 1: no parity warning"
     assert_numeric_match "$REF_CL2" "$(energy_of cl2_spin.log)" "$ENERGY_TOLERANCE" "Cl2- with -spin 1 equals xtb 6.7.1"
 
-    # (f) Int parameters given on the CLI arrive as double (diis_start 1 -> 1.0); the xtb lookups used to drop
-    #     them silently (is_number_integer). With -scf_mode diis the damped warmup length changes the iteration count.
+    # (f) Int parameters given on the CLI arrive as double (diis_start 30 -> 30.0); the xtb lookups used to drop
+    #     them silently (is_number_integer). With -scf_mode diis the damped warmup length changes the iteration count
+    #     (urea3-water8: default 5 -> 13 iterations, diis_start 30 -> 21; diis_start 1 happens to give 13 as well).
     run diis_default.log ureawater.xyz -scf_mode diis
-    run diis_start1.log ureawater.xyz -scf_mode diis -xtb.diis_start 1
-    local ND0=$(iters_of diis_default.log); local ND1=$(iters_of diis_start1.log)
+    run diis_start30.log ureawater.xyz -scf_mode diis -xtb.diis_start 30
+    local ND0=$(iters_of diis_default.log); local ND1=$(iters_of diis_start30.log)
     TESTS_RUN=$((TESTS_RUN + 1))
     if [ -n "$ND0" ] && [ -n "$ND1" ] && [ "$ND0" != "$ND1" ]; then
-        echo -e "${GREEN}PASS${NC}: -xtb.diis_start 1 reaches the SCF (iterations $ND1 vs default $ND0)"
+        echo -e "${GREEN}PASS${NC}: -xtb.diis_start 30 reaches the SCF (iterations $ND1 vs default $ND0)"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
-        echo -e "${RED}FAIL${NC}: -xtb.diis_start 1 had no effect (iterations '$ND1', default '$ND0')"
+        echo -e "${RED}FAIL${NC}: -xtb.diis_start 30 had no effect (iterations '$ND1', default '$ND0')"
         TESTS_FAILED=$((TESTS_FAILED + 1))
     fi
-    assert_numeric_match "$(energy_of diis_default.log)" "$(energy_of diis_start1.log)" "$ENERGY_TOLERANCE" "diis_start does not change the energy"
+    # A longer SCF path ends at another point inside the convergence threshold (2e-6 Eh measured), hence 1e-5 here.
+    assert_numeric_match "$(energy_of diis_default.log)" "$(energy_of diis_start30.log)" "0.00001" "diis_start moves the energy by less than the SCF threshold scale (1e-5 Eh)"
+
+    # (g) scf_extrapolation_order and (h) scf_xlbomd_correctors on the CLI (double -> int, as in (f)): total SCF
+    #     iterations of a 15 fs MD (CURCUMA_SCF_TRACE counts them, -threads 1 is deterministic). Before the
+    #     fix every order gave the same total; the correctors are a MINIMUM cycle count, so 12 exceeds the
+    #     natural ~7 cycles while 1 does not. Measured (urea3-water8, aspc): default 118, order 0 122, order 6 120,
+    #     correctors 1: 126, correctors 12: 178. Relations only, no absolute numbers.
+    md_total() {   # md_total <name> [args...]: sets MD_TOTAL = number of SCF iterations
+        local NAME=$1; shift
+        CURCUMA_SCF_TRACE=1 $CURCUMA -md ureawater.xyz -method gfn2 -max_time 15 -time_step 1 -temperature 300 \
+            -thermostat none -seed 42 -threads 1 -verbosity 1 -no_bmt -scf_extrapolation aspc "$@" > "$NAME.log" 2>&1
+        assert_exit_code $? 0 "curcuma -md ureawater.xyz -scf_extrapolation aspc $*"
+        MD_TOTAL=$(grep -c '^SCFTRACE iter' "$NAME.log")
+    }
+    md_total xo_default
+    local T_DEF=$MD_TOTAL
+    md_total xo_0 -xtb.scf_extrapolation_order 0
+    local T_O0=$MD_TOTAL
+    md_total xo_6 -xtb.scf_extrapolation_order 6
+    local T_O6=$MD_TOTAL
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ "$T_O0" -gt 0 ] && [ "$T_O0" != "$T_DEF" ] && [ "$T_O6" != "$T_DEF" ] && [ "$T_O0" != "$T_O6" ]; then
+        echo -e "${GREEN}PASS${NC}: -xtb.scf_extrapolation_order reaches the SCF (iterations default $T_DEF, order 0 $T_O0, order 6 $T_O6)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo -e "${RED}FAIL${NC}: -xtb.scf_extrapolation_order had no effect (default $T_DEF, order 0 $T_O0, order 6 $T_O6)"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+    md_total xl_c1 -scf_extrapolation_apply xlbomd -xtb.scf_xlbomd_correctors 1
+    local T_C1=$MD_TOTAL
+    md_total xl_c12 -scf_extrapolation_apply xlbomd -xtb.scf_xlbomd_correctors 12
+    local T_C12=$MD_TOTAL
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ "$T_C1" -gt 0 ] && [ "$T_C12" -ge $((T_C1 + 20)) ]; then
+        echo -e "${GREEN}PASS${NC}: -xtb.scf_xlbomd_correctors reaches the SCF (iterations correctors 1: $T_C1, 12: $T_C12)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo -e "${RED}FAIL${NC}: -xtb.scf_xlbomd_correctors had no effect (correctors 1: $T_C1, 12: $T_C12)"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
 
     print_test_summary
     [ $TESTS_FAILED -eq 0 ] && exit 0 || exit 1
