@@ -671,12 +671,12 @@
    "charge": 0,
    "spin": 0,
    "gfnff_xtb": -203.517591334828,
-   "gfn2_xtb": null,
+   "gfn2_xtb": -2088.25500965908,
    "gfnff_curcuma": -203.51759212,
-   "gfn2_curcuma": null,
+   "gfn2_curcuma": -2088.25340678,
    "gfnff_curcuma_fragref": null,
    "status": "ok",
-   "note": "gfn2 not run (natoms>500)"
+   "note": "gfn2: xtb 1 thread ulimit -s unlimited 78 s 2.2 GB peak; curcuma 1 thread 55 s 2.1 GB; dE +1.603e-3 Eh with default, +2.57e-5 Eh with -xtb.d4_atm_cutoff 40.0 (D4 ATM cutoff split)"
   },
   "peo201-water500": {
    "natoms": 2910,
@@ -815,11 +815,11 @@
    "spin": 0,
    "gfnff_xtb": null,
    "gfn2_xtb": null,
-   "gfnff_curcuma": null,
+   "gfnff_curcuma": -857.07822827,
    "gfn2_curcuma": null,
    "gfnff_curcuma_fragref": null,
-   "status": "skipped",
-   "note": "charge/spin not in manifest: inferred charge=0 (neutral unless overridden) and spin=0 from electron parity; errors: {\"all\": \"natoms>3000 (both methods skipped)\"}; gfn2 not run (natoms>500)"
+   "status": "xtb_oom",
+   "note": "charge/spin not in manifest: inferred charge=0 (neutral unless overridden) and spin=0 from electron parity; gfn2 not run (natoms>500) gfnff xtb: oom-kill at 48G cgroup limit after 994 s (1 thread); curcuma 5 s"
   },
   "water": {
    "natoms": 3,
