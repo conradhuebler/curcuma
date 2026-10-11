@@ -382,6 +382,22 @@ public:
      * Not available with the multi-GPU split (no full matrix on one device).
      */
     void requestLocalInverseDeviceBuild(double radius_bohr, double ext_bohr);
+    /**
+     * K3 (Oct 2026, Claude Generated): cudaEvent_t (as void*) recorded on the workspace main stream
+     * after the solve inputs (coordinates, rhs_atoms) are written. When set, the WP7-E projected PCG
+     * waits on this event instead of the legacy-stream barrier, which also waited for dc6dcn and every
+     * Phase-1 worker stream. The caller sets it right before a solve and clears it (nullptr) after;
+     * the other solve paths keep their implicit legacy-stream ordering.
+     */
+    void setInputReadyEvent(void* cuda_event);
+    /**
+     * K2/K3 (Oct 2026, Claude Generated): give the solver stream the greatest device priority, so the
+     * latency-bound CG kernels (symv, dots, one host round trip per iteration) are scheduled ahead of
+     * pending blocks of dc6dcn / dispersion running on default-priority streams; those fill the gaps.
+     * Recreates the stream and rebinds the cuSOLVER/cuBLAS handles; call between solves.
+     * @return false if the runtime refused (stream unchanged).
+     */
+    bool setStreamPriorityHigh(bool high);
     /// true when a device build can run for N atoms (single device, full matrix present).
     bool localInverseDeviceBuildPossible(int N) const;
     /// Counters of the local inverse on this device (builds of both kinds, failures, fallbacks).

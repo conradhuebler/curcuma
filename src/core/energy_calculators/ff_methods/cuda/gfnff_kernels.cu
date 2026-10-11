@@ -177,10 +177,12 @@ __global__ void k_dispersion(
     double*                    grad,
     double*                    energy)
 {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
     double local_E = 0.0;
 
-    if (tid < n) {
+    // K2 (Oct 2026): grid-stride loop. With the full grid (gridDim*blockDim >= n) every thread
+    // handles at most one pair, exactly as before; a capped grid (background launch) loops.
+    const int stride = gridDim.x * blockDim.x;
+    for (int tid = blockIdx.x * blockDim.x + threadIdx.x; tid < n; tid += stride) {
         int i = idx_i[tid], j = idx_j[tid];
         double dx = cx[i] - cx[j];
         double dy = cy[i] - cy[j];
@@ -200,7 +202,7 @@ __global__ void k_dispersion(
             double t8   = 1.0 / (r8 + r0_8);
 
             double disp_sum = t6 + 2.0 * r4r2ij[tid] * t8;
-            local_E = -C6[tid] * disp_sum * zetac6[tid];
+            local_E += -C6[tid] * disp_sum * zetac6[tid];   // 0.0 + x == x: unchanged for one pair
 
             // Gradient: dE/dr via chain rule
             double d6   = -6.0 * r4 * t6 * t6;

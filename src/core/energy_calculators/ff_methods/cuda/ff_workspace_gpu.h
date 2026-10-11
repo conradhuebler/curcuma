@@ -570,6 +570,29 @@ public:
     /// Claude Generated (March 2026): Required before cross-stream reads (e.g. EEQSolverGPU).
     void synchronizeMainStream();
 
+    /**
+     * K3 (Oct 2026, Claude Generated): record an event on the main stream once the inputs of the
+     * device EEQ solve are written (coordinates from setGeometry(), rhs_atoms from k_build_eeq_rhs
+     * in Phase 1). Call after prepareAndLaunchChargeIndependent() and BEFORE the D4 Gaussian weights
+     * / dc6dcn are enqueued, so a solver stream that waits on eeqInputsReadyEvent() runs in parallel
+     * to dc6dcn and the Phase-1 worker streams instead of behind them (the solver's legacy-stream
+     * barrier waits for every blocking stream).
+     */
+    void recordEEQInputsReady();
+    /// cudaEvent_t of recordEEQInputsReady() as void* (keeps CUDA types out of host headers).
+    void* eeqInputsReadyEvent() const;
+
+    /**
+     * K2 (Oct 2026, Claude Generated): launch the gradient-mode k_dispersion on the pairwise stream
+     * right after dc6dcn instead of in Phase 2. k_dispersion reads only geometry, the dispersion SoA
+     * (C6 refreshed by k_dc6dcn_per_pair, zetac6 from the Phase-1 topology charges baked in at
+     * pair-list build) and dc6dcn; it never reads the Phase-2 EEQ charges. It accumulates into
+     * d_grad, d_dEdcn and the E_DISP slot with atomicAdd, as before. Call after
+     * computeGaussianWeightsOnGPU(false). Returns false (and Phase 2 launches it as before) in the
+     * single-stream debug mode or when dispersion is off.
+     */
+    bool launchDispersionGradientEarly();
+
     // =========================================================================
     // WP2: GPU-side EEQ topology parameters (Claude Generated May 2026)
     // =========================================================================
@@ -649,6 +672,8 @@ private:
     Vector  m_eeq_charges;
     Vector  m_topology_charges;
     bool    m_device_charges_ready = false;  ///< WP5-A: set by setEEQDeviceCharges(), skips H2D upload
+    int     m_sm_count             = 0;      ///< K2 (Oct 2026): SMs of the device, grid of the early dispersion
+    bool    m_disp_grad_launched   = false;  ///< K2 (Oct 2026): k_dispersion already enqueued this step
 
     // WP5-C (May 2026): GPU-side D4 dc6dcn skip-check state
     bool    m_dc6dcn_skip_pending = false;   ///< skip flag from previous step (read in current step)

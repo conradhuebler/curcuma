@@ -61,6 +61,8 @@ struct EEQSolverGPUImpl {
     cublasHandle_t     cublas_handle   = nullptr;  ///< WP7-C: PCG matvec/dot/axpy
     cudaStream_t stream = nullptr;
     cudaEvent_t  ev_legacy_barrier = nullptr;  ///< F-12: orders impl.stream after the workspace stream
+    cudaEvent_t  ev_input_ready    = nullptr;  ///< K3 (Oct 2026): workspace event, not owned; replaces the barrier
+    bool         stream_high_priority = false; ///< K2/K3 (Oct 2026): stream created with the greatest priority
 
     // Claude Generated (Sep 2026, F-3): multi-GPU split of the WP7-E projected PCG. Each helper
     // device owns a column block [c0, c1) of the symmetric EEQ matrix; this device owns [0, c1_own).
@@ -2907,10 +2909,17 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUProjectedPCG(
     // the legacy default stream; this path had no such operation since WP5-D removed the sync.
     // An event recorded on the legacy stream waits for all prior work in every blocking stream
     // (all curcuma streams are created with cudaStreamCreate), so impl.stream waits for it.
-    if (!impl.ev_legacy_barrier)
-        cudaEventCreateWithFlags(&impl.ev_legacy_barrier, cudaEventDisableTiming);
-    cudaEventRecord(impl.ev_legacy_barrier, cudaStreamLegacy);
-    cudaStreamWaitEvent(impl.stream, impl.ev_legacy_barrier, 0);
+    // K3 (Oct 2026, Claude Generated): with an input-ready event from the workspace, wait only for
+    // the main-stream point after k_build_eeq_rhs; dc6dcn and the Phase-1 worker streams run in
+    // parallel to the matrix build. Without it, the legacy barrier as before.
+    if (impl.ev_input_ready) {
+        cudaStreamWaitEvent(impl.stream, impl.ev_input_ready, 0);
+    } else {
+        if (!impl.ev_legacy_barrier)
+            cudaEventCreateWithFlags(&impl.ev_legacy_barrier, cudaEventDisableTiming);
+        cudaEventRecord(impl.ev_legacy_barrier, cudaStreamLegacy);
+        cudaStreamWaitEvent(impl.stream, impl.ev_legacy_barrier, 0);
+    }
 
     const bool do_refactor = force_refactor
                           || !impl.m_pcg_M_inv_valid
@@ -3129,6 +3138,37 @@ void EEQSolverGPU::requestLocalInverseDeviceBuild(double radius_bohr, double ext
     impl.m_li_ext = std::max(ext_bohr, radius_bohr);
     impl.m_li_build_pending = true;
     impl.m_li_valid = false;   // the previous G must not be used with the new geometry's request pending
+}
+
+// K3 (Oct 2026, Claude Generated): see header.
+void EEQSolverGPU::setInputReadyEvent(void* cuda_event)
+{
+    m_impl->ev_input_ready = static_cast<cudaEvent_t>(cuda_event);
+}
+
+// K2/K3 (Oct 2026, Claude Generated): see header. Recreates the solver stream with the requested
+// priority and rebinds the cuSOLVER/cuBLAS handles; numerics are unchanged (same kernels, order).
+bool EEQSolverGPU::setStreamPriorityHigh(bool high)
+{
+    auto& impl = *m_impl;
+    if (impl.stream_high_priority == high) return true;
+    int least = 0, greatest = 0;
+    if (cudaDeviceGetStreamPriorityRange(&least, &greatest) != cudaSuccess) return false;
+    cudaStream_t s = nullptr;
+    if (cudaStreamCreateWithPriority(&s, cudaStreamDefault, high ? greatest : least) != cudaSuccess)
+        return false;
+    cudaStreamSynchronize(impl.stream);
+    if (cusolverDnSetStream(impl.cusolver_handle, s) != CUSOLVER_STATUS_SUCCESS
+        || cublasSetStream(impl.cublas_handle, s) != CUBLAS_STATUS_SUCCESS) {
+        cusolverDnSetStream(impl.cusolver_handle, impl.stream);
+        cublasSetStream(impl.cublas_handle, impl.stream);
+        cudaStreamDestroy(s);
+        return false;
+    }
+    cudaStreamDestroy(impl.stream);
+    impl.stream = s;
+    impl.stream_high_priority = high;
+    return true;
 }
 
 bool EEQSolverGPU::localInverseDeviceBuildPossible(int N) const { return !splitWanted(*m_impl, N); }

@@ -16,6 +16,7 @@
  *       static constexpr const char* workspace_name = "FFWorkspaceGPU"; // error text
  *       static constexpr bool has_device_schur      = true;   // false on ROCm
  *       static constexpr bool has_cn_pair_skin      = true;   // false on ROCm (K1, Oct 2026)
+ *       static constexpr bool has_stream_overlap    = true;   // false on ROCm (K2/K3, Oct 2026)
  *       static constexpr int  default_eeq_cpu_fragment_threshold = 0;   // 16 on ROCm
  *       static void downloadDoubles(double* host, const double* device, int n);
  *   };
@@ -213,6 +214,10 @@ private:
     // < 0: legacy (rebuild whenever the 0.5 Bohr topology check fires, i.e. every MD step).
     double              m_cn_pair_skin = 1.0;         ///< skin in Bohr, list cutoff + 2*skin
     double              m_cn_pair_max_disp = 0.0;     ///< allowed displacement since the last build (Bohr)
+    // K2/K3 (Oct 2026, Claude Generated): stream overlap switches (gpu_eeq_overlap, gpu_dispersion_overlap).
+    bool                m_eeq_overlap = true;         ///< K3: device ppcg waits on the EEQ-input event, not on dc6dcn
+    bool                m_disp_overlap = true;        ///< K2: gradient k_dispersion right after dc6dcn
+    bool                m_eeq_priority_set = false;   ///< K2/K3: EEQ stream priority raised once
 
     // GPU CN result (always used — GPU CN is the default path)
     Vector              m_gpu_cn_final;        ///< Cached GPU CN result
@@ -707,6 +712,9 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
                                                     m_cn_pair_skin, m_cn_pair_max_disp));
             }
         }
+        // K2/K3 (Oct 2026, Claude Generated): stream overlap; fallbacks are the PARAM defaults.
+        m_eeq_overlap  = cfg_get_bool("gpu_eeq_overlap", true);
+        m_disp_overlap = cfg_get_bool("gpu_dispersion_overlap", true);
         // Claude Generated (Sep 2026): per-step D4 C6 refresh on the device, same switch as the
         // CPU path (GFNFF::refreshDispersionC6()).
         m_gpu_workspace->setDispersionC6Update(cfg_get_bool("dispersion_c6_update", true));
@@ -746,6 +754,7 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         // EEQ staging buffers pre-allocated above (before device init). Create solver here.
         // Lazy refactorization is RMSD-based: force_refactor flag passed per solve() call.
         m_eeq_gpu = std::make_unique<GpuEEQSolver>(natoms);
+        m_eeq_priority_set = false;   // K2/K3: new solver stream has default priority
 
         // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md F-3): split ONE molecule over several
         // GPUs - the Coulomb tiles and the projected-PCG EEQ (matrix column blocks + matvec).
@@ -1124,8 +1133,9 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 
     // === OVERLAP: Launch charge-independent GPU kernels ===
     // These run asynchronously while CPU computes EEQ parameters below.
-    // k_dispersion in gradient mode is deferred to Phase 2 (needs dc6dcn from
-    // computeGaussianWeightsOnGPU, which runs AFTER Phase 1 on d_cn — current step).
+    // k_dispersion in gradient mode is not in Phase 1 (needs dc6dcn from
+    // computeGaussianWeightsOnGPU, which runs AFTER Phase 1 on d_cn — current step); it starts
+    // right after dc6dcn (K2) or in Phase 2 (gpu_dispersion_overlap false).
     // G-P1: d_cn_final → d_cn D2D copy is enqueued inside prepareAndLaunchChargeIndependent().
     //
     // Claude Generated (Sep 2026): energy-only calls need the C6 of THIS geometry too (line
@@ -1138,12 +1148,30 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     }
     m_gpu_workspace->prepareAndLaunchChargeIndependent(gradient);
 
+    // K3 (Oct 2026, Claude Generated): mark the main-stream point where coords + rhs_atoms are
+    // written, BEFORE dc6dcn is enqueued; the device ppcg waits on it instead of on everything.
+    bool eeq_input_event = false;
+    (void)eeq_input_event;   // unused on backends without stream overlap
+    if constexpr (Backend::has_stream_overlap) {
+        if (m_eeq_overlap) {
+            m_gpu_workspace->recordEEQInputsReady();
+            eeq_input_event = true;
+        }
+    }
+
     // Gaussian weights + dc6dcn: must run AFTER Phase 1 so d_cn holds the current step's
     // values (Phase 1 D2D-copies d_cn_final → d_cn on main stream before sA fences).
-    // Using d_cn guarantees consistency with the dispersion kernel launched in Phase 2.
+    // Using d_cn guarantees consistency with the gradient-mode dispersion kernel.
     // Static-Mode (WP-S1): skip when frozen_cn — gw/dgw/dc6dcn buffers retain previous values.
     if (gradient && !m_gpu_workspace->frozenCN()) {
         m_gpu_workspace->computeGaussianWeightsOnGPU(/*use_cn_final=*/false);
+    }
+    // K2 (Oct 2026, Claude Generated): k_dispersion reads no EEQ charge (zetac6 holds the Phase-1
+    // topology charges), so it runs on the pairwise stream right after dc6dcn, parallel to the EEQ
+    // solve, instead of in Phase 2 after it. Off: Phase 2 launches it as before.
+    if constexpr (Backend::has_stream_overlap) {
+        if (gradient && m_disp_overlap)
+            m_gpu_workspace->launchDispersionGradientEarly();
     }
     auto t_launch_end = std::chrono::high_resolution_clock::now();
 
@@ -1335,6 +1363,16 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
             EEQSolver::reportSolverLine(line);
         }
 
+        // K3 (Oct 2026): one-shot input event for this step's device solve (cleared below).
+        if constexpr (Backend::has_stream_overlap) {
+            m_eeq_gpu->setInputReadyEvent(eeq_input_event ? m_gpu_workspace->eeqInputsReadyEvent() : nullptr);
+            // The CG is the critical path; dc6dcn/dispersion on default-priority streams fill its gaps.
+            if (!m_eeq_priority_set && (m_eeq_overlap || m_disp_overlap)) {
+                m_eeq_priority_set = true;
+                if (!m_eeq_gpu->setStreamPriorityHigh(true) && CurcumaLogger::get_verbosity() >= 2)
+                    CurcumaLogger::info("EEQ GPU: high stream priority not available, default priority kept");
+            }
+        }
         if (gpu_eeq_applicable) {
             // RMSD-based EEQ lazy refactorization:
             // Compute per-atom RMSD (Bohr) from geometry at last full Cholesky build.
@@ -1818,6 +1856,10 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         } else {
             // Fragment topo not yet uploaded (first MD step before topology build).
             // CPU fallback below will populate m_eeq_fraglist for next step.
+        }
+        // K3 (Oct 2026): the input event belongs to this step only.
+        if constexpr (Backend::has_stream_overlap) {
+            m_eeq_gpu->setInputReadyEvent(nullptr);
         }
 
         if (!used_gpu_eeq) {

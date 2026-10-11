@@ -815,6 +815,10 @@ struct FFWorkspaceGPUImpl {
     /// records them — that one-way dependency is safe under cudaStreamCaptureModeThreadLocal.
     cudaEvent_t     event_p2_pairwise             = nullptr;
     cudaEvent_t     event_p2_upload               = nullptr;
+    // K2/K3 (Oct 2026, Claude Generated): stream overlap of dc6dcn, EEQ solve and dispersion.
+    cudaEvent_t     event_eeq_inputs              = nullptr; ///< main: coords + rhs_atoms written (K3)
+    cudaEvent_t     event_disp_ready              = nullptr; ///< main: dc6dcn/C6 written (K2)
+    cudaEvent_t     event_disp_done               = nullptr; ///< pairwise: early k_dispersion done (K2)
 };
 
 // ============================================================================
@@ -887,6 +891,15 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     checkCuda(cudaEventCreateWithFlags(&m_impl->event_upload, cudaEventDisableTiming), "cudaEventCreate upload");
     checkCuda(cudaEventCreateWithFlags(&m_impl->event_p2_pairwise, cudaEventDisableTiming), "cudaEventCreate p2_pairwise");
     checkCuda(cudaEventCreateWithFlags(&m_impl->event_p2_upload, cudaEventDisableTiming), "cudaEventCreate p2_upload");
+    checkCuda(cudaEventCreateWithFlags(&m_impl->event_eeq_inputs, cudaEventDisableTiming), "cudaEventCreate eeq_inputs");
+    checkCuda(cudaEventCreateWithFlags(&m_impl->event_disp_ready, cudaEventDisableTiming), "cudaEventCreate disp_ready");
+    checkCuda(cudaEventCreateWithFlags(&m_impl->event_disp_done, cudaEventDisableTiming), "cudaEventCreate disp_done");
+    {   // K2 (Oct 2026): grid of the early dispersion launch
+        int dev = 0;
+        if (cudaGetDevice(&dev) != cudaSuccess
+            || cudaDeviceGetAttribute(&m_sm_count, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess)
+            m_sm_count = 0;   // 0 = full grid
+    }
     // Claude Generated (May 2026): timing-enabled events for stream-level kernel timing
     checkCuda(cudaEventCreate(&m_impl->timing_sA_start), "cudaEventCreate timing_sA_start");
     checkCuda(cudaEventCreate(&m_impl->timing_sA_end),   "cudaEventCreate timing_sA_end");
@@ -1218,6 +1231,9 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
         if (m_impl->event_upload)      cudaEventDestroy(m_impl->event_upload);
         if (m_impl->event_p2_pairwise) cudaEventDestroy(m_impl->event_p2_pairwise);
         if (m_impl->event_p2_upload)   cudaEventDestroy(m_impl->event_p2_upload);
+        if (m_impl->event_eeq_inputs)  cudaEventDestroy(m_impl->event_eeq_inputs);
+        if (m_impl->event_disp_ready)  cudaEventDestroy(m_impl->event_disp_ready);
+        if (m_impl->event_disp_done)   cudaEventDestroy(m_impl->event_disp_done);
 
         if (m_impl->stream)          cudaStreamDestroy(m_impl->stream);
         if (m_impl->stream_pairwise) cudaStreamDestroy(m_impl->stream_pairwise);
@@ -2121,6 +2137,65 @@ void FFWorkspaceGPU::computeGaussianWeightsOnGPU(bool use_cn_final)
 }
 
 // ============================================================================
+// K2/K3 (Oct 2026, Claude Generated): overlap of dc6dcn, EEQ solve and dispersion
+// ============================================================================
+
+void FFWorkspaceGPU::recordEEQInputsReady()
+{
+    // Everything the device EEQ reads that changes per step is written on the main stream
+    // before this point: coordinates (setGeometry) and rhs_atoms (k_build_eeq_rhs, Phase 1).
+    // alpha/gam/chi/cnf are synchronous uploads at topology changes.
+    cudaEventRecord(m_impl->event_eeq_inputs, m_impl->stream);
+}
+
+void* FFWorkspaceGPU::eeqInputsReadyEvent() const
+{
+    return m_impl ? static_cast<void*>(m_impl->event_eeq_inputs) : nullptr;
+}
+
+bool FFWorkspaceGPU::launchDispersionGradientEarly()
+{
+    auto& impl = *m_impl;
+    m_disp_grad_launched = false;
+    // Single-stream debug mode keeps the per-kernel snapshot order (dispersion in Phase 2).
+    if (!m_dispersion_enabled || impl.d_grad_after_bonds.ptr)
+        return false;
+
+    // Inputs of k_dispersion: coords (main, setGeometry), disp SoA idx/r4r2ij/r0_sq/zetac6/r_cut
+    // (pair-list build, host-synchronous), C6 + dc6dcn_ij/ji (k_dc6dcn_per_pair on main, just
+    // enqueued). d_grad/d_dEdcn/d_energies were zeroed on main in Phase 1. No EEQ charge is read.
+    cudaEventRecord(impl.event_disp_ready, impl.stream);
+    cudaStreamWaitEvent(impl.stream_pairwise, impl.event_disp_ready, 0);
+    // One block per SM (grid-stride loop in k_dispersion): the CG kernels of the EEQ solve on the
+    // high-priority solver stream then find free SM slots instead of queueing behind dispersion
+    // blocks. Measured on polymer_2x (RTX 5080, 84 SMs, CUPTI step median, n=1 each): full grid
+    // 18.4 ms, 1 block/SM 15.9, 0.75/SM 16.9, 1.5/SM 16.1. Fewer blocks also mean fewer
+    // blockReduceAddEnergy atomics on the one E_DISP slot.
+    LaunchConfig cfg = getLaunchConfig(impl.disp.n, m_block_size);
+    if (m_sm_count > 0) cfg.gridSize = std::min(cfg.gridSize, m_sm_count);
+    k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
+        impl.disp.n,
+        impl.disp.idx_i.ptr,  impl.disp.idx_j.ptr,
+        impl.disp.C6.ptr,     impl.disp.r4r2ij.ptr,
+        impl.disp.r0_sq.ptr,  impl.disp.zetac6.ptr,
+        impl.disp.r_cut.ptr,
+        impl.disp.dc6dcn_ij.ptr,
+        impl.disp.dc6dcn_ji.ptr,
+        impl.coords.d_x.ptr,
+        impl.coords.d_y.ptr,
+        impl.coords.d_z.ptr,
+        impl.d_dEdcn.ptr,
+        impl.d_grad.ptr,
+        &impl.d_energies.ptr[impl.E_DISP]);
+    checkCuda(cudaGetLastError(), "k_dispersion (early) launch");
+    // Phase 2 makes the main stream wait on this before anything else (outside any graph capture),
+    // so the dEdcn snapshot, k_coulomb_postprocess, k_cn_chainrule and the downloads follow it.
+    cudaEventRecord(impl.event_disp_done, impl.stream_pairwise);
+    m_disp_grad_launched = true;
+    return true;
+}
+
+// ============================================================================
 // Phase 3: Split calculation for CPU/GPU overlap
 // Claude Generated (March 2026)
 //
@@ -2620,6 +2695,15 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // Claude Generated (May 2026): Phase 2 timing start
     if (m_record_kernel_timings) cudaEventRecord(impl.timing_p2_start, stream);
 
+    // K2 (Oct 2026): k_dispersion was enqueued on stream_pairwise after dc6dcn. Order the main
+    // stream after it here, before any Phase-2 capture begins, so every Phase-2 consumer of
+    // d_grad/d_dEdcn/E_DISP (snapshot, postprocess, CN chain rule, downloads) follows it.
+    const bool disp_launched_early = m_disp_grad_launched && gradient;
+    if (m_disp_grad_launched) {
+        cudaStreamWaitEvent(stream, impl.event_disp_done, 0);
+        m_disp_grad_launched = false;
+    }
+
     // =========================================================================
     // WP4 (May 2026): Phase-2 CUDA-Graph capture / replay
     //   Two graph slots — one for gradient=true, one for energy-only — kept in step
@@ -2693,7 +2777,8 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // computeGaussianWeightsOnGPU() was called after Phase 1 (using d_cn, current step)
     // and runs on the main stream. The event_upload fence above ensures stream_pairwise
     // sees the completed dc6dcn values before k_dispersion launches.
-    if (m_dispersion_enabled && gradient) {
+    // K2 (Oct 2026): skipped when launchDispersionGradientEarly() already enqueued it.
+    if (m_dispersion_enabled && gradient && !disp_launched_early) {
         LaunchConfig cfg = getLaunchConfig(impl.disp.n, m_block_size);
         k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
             impl.disp.n,

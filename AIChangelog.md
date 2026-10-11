@@ -16,6 +16,7 @@ below. If it needs measurements or a derivation, write them into the matching `d
 
 ## Jul - Sep 2026 (and some late June), 108 entries, full text in AIChangelog_2026-late.md
 
+- GPU GFN-FF MD: dispersion and EEQ solve overlap dc6dcn (K2/K3, Oct 11, 2026): `-gfnff.gpu_eeq_overlap`, `-gfnff.gpu_dispersion_overlap` (true), polymer_2x GPU step 34.1 -> 30.9 ms (n=3) — docs/GFNFF-PERFORMANCE-ROADMAP.md
 - GPU GFN-FF MD: CN pair list as Verlet list, restart state only with -rescue (Oct 11, 2026): `-gfnff.gpu_cn_pair_skin_bohr` (1.0, <0 legacy), polymer_2x GPU step 38.4 -> 34.0 ms (dump 1: 51.6 -> 41.9), n=3 — docs/GFNFF-PERFORMANCE-ROADMAP.md
 - GFN-FF D4 dC6/dCN per pair instead of the N x N matrix (Oct 11, 2026): `D4DC6DCNPairs`, no 429 MB zeroing; bit-identical (54 SP + 2 MD), polymer_2x MD d4_gw 61 -> 34 ms (16 thr, n=3), GPU unaffected — docs/GFNFF-PERFORMANCE-ROADMAP.md
 - GFN-FF CPU d4_gw bit-identical (Oct 11, 2026): second C6 refresh skipped when the gradient path just rebuilt weights+C6 at the same CN, block instead of stride partition, parallel zeroing of m_dc6dcn; polymer_2x MD d4_gw 103 -> 58 ms (16 thr, n=3) — docs/GFNFF-PERFORMANCE-ROADMAP.md

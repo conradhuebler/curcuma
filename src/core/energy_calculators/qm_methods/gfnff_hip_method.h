@@ -48,6 +48,9 @@ struct GFNFFRocmBackend {
     static constexpr bool has_multi_gpu_split = false;
     /// K1 (Oct 2026): CN pair-list skin not ported; ROCm keeps the legacy rebuild on the topology check.
     static constexpr bool has_cn_pair_skin = false;
+    /// K2/K3 (Oct 2026): dispersion and the device EEQ solve overlap dc6dcn on own streams
+    /// (recordEEQInputsReady(), launchDispersionGradientEarly(), EEQ setInputReadyEvent()).
+    static constexpr bool has_stream_overlap = false;
 
     /// Deliverable 3 (Jun 2026): from 16 fragments on, the EEQ goes to the exact CPU
     /// PCG — the device path would do a dense N x N Cholesky (O(N^3)) for nfrag>1.
