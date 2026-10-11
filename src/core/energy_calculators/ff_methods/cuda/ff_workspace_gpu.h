@@ -60,7 +60,7 @@ struct FFWorkspaceGPUImpl;
  *   gpu_ws.setGeometry(geom);           // Bohr row-major N×3
  *   gpu_ws.setEEQCharges(q);            // N EEQ charges
  *   gpu_ws.setD3CN(cn);                 // N D3 coordination numbers
- *   gpu_ws.updateDispersionDC6DCN(dc6dcn); // N×N dc6/dcn matrix
+ *   gpu_ws.computeDC6DCNOnGPU(gw, dgw);  // per-pair dc6/dcn on the device
  *   double E = gpu_ws.calculate(true);
  *   Matrix G = gpu_ws.gradient();       // N×3 Hartree/Bohr
  */
@@ -192,20 +192,6 @@ public:
     // =========================================================================
 
     /**
-     * @brief Set CN pair list for GPU CN chain-rule gradient kernel.
-     *
-     * All atom pairs (i,j) within CN cutoff, with pre-computed scaled
-     * covalent radius sums. Uploaded to GPU once; geometry checked at runtime.
-     *
-     * @param idx_i      Atom i indices (size n_pairs)
-     * @param idx_j      Atom j indices (size n_pairs)
-     * @param rcov_sum   Scaled covalent radius sum per pair: 4/3*(rcov_i+rcov_j) in Bohr
-     */
-    void setCNPairList(const std::vector<int>& idx_i,
-                       const std::vector<int>& idx_j,
-                       const std::vector<double>& rcov_sum);
-
-    /**
      * @brief Set per-atom dlogdcn (logistic squashing factor for CN chain-rule).
      * dlogdcn[i] = exp(cnmax) / (exp(cnmax) + exp(cn_raw[i]))
      * Must be called every step after CN computation.
@@ -217,7 +203,7 @@ public:
      * @brief Generate CN pair list entirely on GPU (Apr 2026).
      *
      * Two-pass kernel: count valid pairs, allocate buffers, write (i,j,rcov_sum).
-     * Replaces CPU generateCNPairList() O(N^2) loop.
+     * Replaced the former host O(N^2) pair loop (removed Oct 2026).
      * Coordinates and atom types must already be on GPU.
      */
     void generateCNPairListOnGPU();
@@ -286,8 +272,8 @@ public:
      * Claude Generated (Sep 2026): counterpart to updateRepulsion() for the D4 pair list (see
      * GFNFF::updateDispersionPairsIfNeeded()). Besides the pair SoA itself, three pieces of state
      * are sized by the pair count and must follow it: the per-pair dc6dcn device buffers written
-     * by k_dc6dcn_per_pair, and the host index mirror + staging vectors used by
-     * updateDispersionDC6DCN(). The caller must invalidateGraph() afterwards (disp.n changed).
+     * by k_dc6dcn_per_pair (no host mirror since Oct 2026). The caller must invalidateGraph()
+     * afterwards (disp.n changed).
      */
     void updateDispersion(const std::vector<GFNFFDispersion>& pairs);
 
@@ -325,17 +311,6 @@ public:
                                      const Vector& alp,
                                      const Vector& chi_static);
 
-    /**
-     * @brief Upload per-pair dc6/dcn values for dispersion dEdcn on GPU.
-     *
-     * Extracts dc6dcn(i,j) and dc6dcn(j,i) for each dispersion pair from
-     * the full N×N matrix and uploads to GPU SoA arrays.
-     * Must be called every gradient step (dc6dcn is CN-dependent).
-     *
-     * @param dc6dcn  N×N matrix: dc6dcn(i,j) = dC6(i,j)/dCN(i)
-     */
-    void updateDispersionDC6DCN(const Matrix& dc6dcn);
-
     // =========================================================================
     // Phase 2: GPU dc6dcn per-pair computation (Claude Generated March 2026)
     // =========================================================================
@@ -350,7 +325,7 @@ public:
 
     /**
      * @brief Upload Gaussian weights + derivatives and compute dc6dcn per pair on GPU.
-     * Replaces: CPU computeDC6DCN() O(N²) + updateDispersionDC6DCN() extraction.
+     * Replaces the CPU computeDC6DCN() O(N²) matrix and its per-pair host extraction.
      * @param gw   Nested [N][nref] Gaussian weights (will be flattened to [N×MAX_REF])
      * @param dgw  Nested [N][nref] weight derivatives
      */
@@ -671,10 +646,6 @@ private:
 
     // GPU CN chain-rule state (replaces sparse dcn matrices)
     Vector m_dlogdcn;                       ///< [N] logistic squashing factor
-    std::vector<int>    m_cn_pair_i;        ///< CN pair atom i indices
-    std::vector<int>    m_cn_pair_j;        ///< CN pair atom j indices
-    std::vector<double> m_cn_pair_rcov;     ///< CN pair scaled cov. radius sum
-    int                 m_cn_n_pairs = 0;   ///< Number of CN pairs
     bool                m_cn_pairs_on_gpu = false; ///< Whether CN pairs uploaded to GPU
     double              m_kn = -7.5;        ///< CN exponential decay constant
 
@@ -701,11 +672,11 @@ private:
     bool m_staged_list_upload = false;
     int  m_host_threads = 1;
 
-    // Host-side dispersion pair indices (for per-step dc6dcn extraction)
+    // ROCm only (rocm/gfnff_rocm.hip; the CUDA source does not touch them since Oct 2026):
+    // host D4 pair indices for the ROCm gather-CSR rebuild, and the ROCm dc6dcn staging
+    // vectors, still filled there. Kept because the HIP source cannot be compiled here.
     std::vector<int> m_disp_idx_i_host;
     std::vector<int> m_disp_idx_j_host;
-
-    // Per-step dc6dcn staging buffer (pre-allocated, reused)
     std::vector<double> m_h_dc6dcn_ij;
     std::vector<double> m_h_dc6dcn_ji;
 

@@ -16,6 +16,7 @@ below. If it needs measurements or a derivation, write them into the matching `d
 
 ## Jul - Sep 2026 (and some late June), 108 entries, full text in AIChangelog_2026-late.md
 
+- CUDA GFN-FF: dead host D4 dc6dcn/CN pair paths removed (Oct 11, 2026): `updateDispersionDC6DCN`, `setCNPairList`, host `generateCNPairList`, CUDA host mirrors; device arrays bitwise unchanged, GPU MD peak RSS -216 MiB (polymer_2x)
 - GFN-FF CPU EEQ Phase-2 matrix built in 64x64 tiles with non-temporal stores (Oct 11, 2026): build 37.5 -> 19.6 ms, MD step 231 -> 212 ms (polymer_2x, 16 thr, n=3), matrix bitwise ([docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md))
 - EEQ solver names per GPU backend (Oct 11, 2026): ROCm only auto|cholesky (rest: error), Vulkan all; true ROCm path label; dead GPU code and 2 PARAMs removed; GPU warning for charged multi-fragment + ensemble - docs/EEQ_SOLVER_CONTROL.md
 - GFN-FF CPU MD polymer_2x 294 -> 228 ms/step (16 threads), bitwise: no dead sqrab/setZero, folded zero-distance test, one-pass plausibility test, row-parallel CN (Oct 11, 2026, [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md))

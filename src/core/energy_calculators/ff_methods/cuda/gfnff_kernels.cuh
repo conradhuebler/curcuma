@@ -644,7 +644,7 @@ void upload_refn_const(const int* data, int n);
 // ============================================================================
 // GPU CN pair list generation (Apr 2026)
 // Two-pass kernels: count valid pairs, then write (i, j, rcov_sum).
-// Replaces CPU generateCNPairList() O(N^2) loop.
+// Replaces the former host O(N^2) CN pair loop.
 // ============================================================================
 
 __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(

@@ -838,7 +838,7 @@ struct FFWorkspaceGPUImpl {
 // the whole list serially into fresh
 // std::vectors and copy each column with a blocking pageable cudaMemcpy: for the 9.4 M-pair
 // D4 list of polymer_2x that was 118 ms per rebuild (27 ms allocation, 39 ms conversion,
-// 30 ms copy, 22 ms host mirrors). Here the list is converted in chunks into a 2 x 32 MB
+// 30 ms copy, 22 ms host mirrors, the latter removed Oct 2026). Here the list is converted in chunks into a 2 x 32 MB
 // pinned buffer by several host threads, and each chunk is copied asynchronously while the
 // next one is converted. The device receives exactly the same bytes; the function returns
 // after the last copy has finished, like the blocking copies it replaces.
@@ -1051,19 +1051,6 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     // Upload covalent radii for HB/XB vdW radii lookup (Å units)
     upload_covalent_radii(GFNFFParameters::covalent_radii.data(),
                           static_cast<int>(GFNFFParameters::covalent_radii.size()));
-
-    // Store dispersion pair indices on host for per-step dc6dcn extraction
-    {
-        const int nd = static_cast<int>(params.dispersions.size());
-        m_disp_idx_i_host.resize(nd);
-        m_disp_idx_j_host.resize(nd);
-        m_h_dc6dcn_ij.resize(nd, 0.0);
-        m_h_dc6dcn_ji.resize(nd, 0.0);
-        for (int k = 0; k < nd; ++k) {
-            m_disp_idx_i_host[k] = params.dispersions[k].i;
-            m_disp_idx_j_host[k] = params.dispersions[k].j;
-        }
-    }
 
     // Store topology charges for BATM kernel; uploaded once below (static per topology)
     m_topology_charges = params.topology_charges;
@@ -1799,15 +1786,11 @@ void FFWorkspaceGPU::updateDispersion(const std::vector<GFNFFDispersion>& pairs)
     // the vector (also for 0 pairs) and grows each buffer only when needed.
     auto& impl = *m_impl;
     if (m_staged_list_upload) {
-        // Oct 2026: staged upload (see stagedListUpload()); fills the device columns and the
-        // host mirrors below in the same pass, with the values of the serial path.
+        // Oct 2026: staged upload (see stagedListUpload()); fills the device columns with the
+        // values of the serial path.
         DispersionSoA& d = impl.disp;
         d.n = static_cast<int>(pairs.size());
         const int nd = d.n;
-        m_disp_idx_i_host.resize(nd);
-        m_disp_idx_j_host.resize(nd);
-        m_h_dc6dcn_ij.resize(nd);
-        m_h_dc6dcn_ji.resize(nd);
         if (nd == 0) return;
         d.idx_i.ensure(nd);
         d.idx_j.ensure(nd);
@@ -1824,12 +1807,8 @@ void FFWorkspaceGPU::updateDispersion(const std::vector<GFNFFDispersion>& pairs)
                                      { d.r0_sq.ptr, sizeof(double) }, { d.zetac6.ptr, sizeof(double) },
                                      { d.r_cut.ptr, sizeof(double) }, { d.idx_i.ptr, sizeof(int) },
                                      { d.idx_j.ptr, sizeof(int) } };
-        int* mi = m_disp_idx_i_host.data();
-        int* mj = m_disp_idx_j_host.data();
-        double* zij = m_h_dc6dcn_ij.data();
-        double* zji = m_h_dc6dcn_ji.data();
         stagedListUpload(impl, pairs.size(), cols, 7, m_host_threads,
-            [&pairs, mi, mj, zij, zji](size_t a, size_t e, size_t k0, char* const* h) {
+            [&pairs](size_t a, size_t e, size_t k0, char* const* h) {
                 double* c6   = reinterpret_cast<double*>(h[0]);
                 double* r4r2 = reinterpret_cast<double*>(h[1]);
                 double* r0sq = reinterpret_cast<double*>(h[2]);
@@ -1847,10 +1826,6 @@ void FFWorkspaceGPU::updateDispersion(const std::vector<GFNFFDispersion>& pairs)
                     rcut[q] = p.r_cut;
                     ii[q]   = p.i;
                     jj[q]   = p.j;
-                    mi[k]   = p.i;
-                    mj[k]   = p.j;
-                    zij[k]  = 0.0;
-                    zji[k]  = 0.0;
                 }
             });
         return;
@@ -1862,16 +1837,6 @@ void FFWorkspaceGPU::updateDispersion(const std::vector<GFNFFDispersion>& pairs)
     if (impl.dc6dcn_gpu_ready && nd > 0) {
         impl.disp.dc6dcn_ij.ensure(nd);
         impl.disp.dc6dcn_ji.ensure(nd);
-    }
-
-    // Host mirrors for the host-dc6dcn fallback (updateDispersionDC6DCN()).
-    m_disp_idx_i_host.resize(nd);
-    m_disp_idx_j_host.resize(nd);
-    m_h_dc6dcn_ij.assign(nd, 0.0);
-    m_h_dc6dcn_ji.assign(nd, 0.0);
-    for (int k = 0; k < nd; ++k) {
-        m_disp_idx_i_host[k] = pairs[k].i;
-        m_disp_idx_j_host[k] = pairs[k].j;
     }
 }
 
@@ -1902,33 +1867,6 @@ void FFWorkspaceGPU::setUnitCell(const double* cell_bohr_9, const double* cell_b
 // GPU-only CN chain-rule setters (Claude Generated March 2026)
 // ============================================================================
 
-void FFWorkspaceGPU::setCNPairList(const std::vector<int>& idx_i,
-                                    const std::vector<int>& idx_j,
-                                    const std::vector<double>& rcov_sum)
-{
-    const int np = static_cast<int>(idx_i.size());
-    if (np == 0 || idx_j.size() != idx_i.size() || rcov_sum.size() != idx_i.size()) return;
-
-    m_cn_pair_i    = idx_i;
-    m_cn_pair_j    = idx_j;
-    m_cn_pair_rcov = rcov_sum;
-    m_cn_n_pairs   = np;
-
-    // Upload to GPU
-    auto& impl = *m_impl;
-    impl.d_cn_idx_i.alloc(np);
-    impl.d_cn_idx_j.alloc(np);
-    impl.d_cn_rcov_sum.alloc(np);
-    impl.d_cn_idx_i.upload(idx_i.data(), np);
-    impl.d_cn_idx_j.upload(idx_j.data(), np);
-    impl.d_cn_rcov_sum.upload(rcov_sum.data(), np);
-    impl.n_cn_pairs = np;
-    m_cn_pairs_on_gpu = true;
-
-    if (CurcumaLogger::get_verbosity() >= 3)
-        CurcumaLogger::info(fmt::format("  GPU CN chain-rule: {} pairs uploaded", np));
-}
-
 void FFWorkspaceGPU::setDlogDCN(const Vector& dlogdcn)
 {
     m_dlogdcn = dlogdcn;
@@ -1942,7 +1880,7 @@ void FFWorkspaceGPU::setDlogDCN(const Vector& dlogdcn)
 
 // ============================================================================
 // GPU CN pair list generation (Apr 2026)
-// Replaces CPU generateCNPairList() O(N^2) loop with two-pass GPU kernels.
+// Two-pass GPU kernels (replaced the former host O(N^2) loop, removed Oct 2026).
 // ============================================================================
 void FFWorkspaceGPU::generateCNPairListOnGPU()
 {
@@ -2123,8 +2061,6 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
 
     if (h_count == 0) {
         impl.disp_built_on_gpu = true;
-        m_disp_idx_i_host.clear();
-        m_disp_idx_j_host.clear();
         return;
     }
 
@@ -2144,44 +2080,11 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
         impl.disp.zetac6.ptr, impl.disp.r_cut.ptr);
     checkCuda(cudaStreamSynchronize(impl.stream), "k_disp_pairs_build sync");
 
-    // Keep the host idx mirror + dc6dcn staging consistent (CPU dc6dcn fallback /
-    // displacement consumers). One download per build (topology-change frequency).
-    m_disp_idx_i_host.resize(h_count);
-    m_disp_idx_j_host.resize(h_count);
-    impl.disp.idx_i.download(m_disp_idx_i_host.data(), h_count);
-    impl.disp.idx_j.download(m_disp_idx_j_host.data(), h_count);
-    checkCuda(cudaStreamSynchronize(impl.stream), "download disp idx mirror");
-    m_h_dc6dcn_ij.assign(h_count, 0.0);
-    m_h_dc6dcn_ji.assign(h_count, 0.0);
-
     impl.disp_built_on_gpu = true;
 
     if (CurcumaLogger::get_verbosity() >= 2)
         CurcumaLogger::info(fmt::format(
             "  GPU D4 dispersion pair list: {} pairs built on GPU (was host O(N^2) + upload)", h_count));
-}
-
-void FFWorkspaceGPU::updateDispersionDC6DCN(const Matrix& dc6dcn)
-{
-    // Claude Generated (March 2026): Extract per-pair dc6dcn values and upload to GPU.
-    // Eliminates the CPU round-trip (download dEdcn, add dispersion, re-upload).
-    const int nd = static_cast<int>(m_disp_idx_i_host.size());
-    if (nd == 0 || dc6dcn.size() == 0) return;
-
-    for (int k = 0; k < nd; ++k) {
-        int i = m_disp_idx_i_host[k];
-        int j = m_disp_idx_j_host[k];
-        if (i < dc6dcn.rows() && j < dc6dcn.cols()) {
-            m_h_dc6dcn_ij[k] = dc6dcn(i, j);
-            m_h_dc6dcn_ji[k] = dc6dcn(j, i);
-        } else {
-            m_h_dc6dcn_ij[k] = 0.0;
-            m_h_dc6dcn_ji[k] = 0.0;
-        }
-    }
-
-    m_impl->disp.dc6dcn_ij.upload(m_h_dc6dcn_ij.data(), nd);
-    m_impl->disp.dc6dcn_ji.upload(m_h_dc6dcn_ji.data(), nd);
 }
 
 // ============================================================================

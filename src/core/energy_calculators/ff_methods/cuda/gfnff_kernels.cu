@@ -3076,7 +3076,7 @@ __global__ void k_dc6dcn_per_pair(
 
 // ============================================================================
 // GPU CN pair list generation (Apr 2026)
-// Two-pass kernels replacing CPU generateCNPairList() O(N^2) loop.
+// Two-pass kernels replacing the former host O(N^2) CN pair loop.
 // ============================================================================
 
 /// Pass 1: count valid pairs. 1 thread = 1 upper-triangle pair (i<j).

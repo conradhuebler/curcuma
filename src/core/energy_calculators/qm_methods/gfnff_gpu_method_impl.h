@@ -199,11 +199,8 @@ private:
         double total = 0.0;           ///< calculateEnergy() wall time (excl. topology/paramgen)
     } m_last_gpu_prep_timing;
 
-    // CN chain-rule pair list (generated once at init, used every gradient step)
-    // Claude Generated (March 2026): Full GPU gradient consistency
-    std::vector<int>    m_cn_pair_i;        ///< atom i indices
-    std::vector<int>    m_cn_pair_j;        ///< atom j indices
-    std::vector<double> m_cn_pair_rcov;     ///< scaled cov. radius sum (Bohr)
+    // CN chain-rule pair list: built on the device (generateCNPairListOnGPU()); this flag
+    // records whether the current list is valid.
     bool                m_cn_pairs_generated = false;
 
     // Task #10 (Jun 2026): CN-derivative pair-list regen controls (from PARAMs)
@@ -352,12 +349,6 @@ private:
     // GFN-FF MD run at the normal (< 2) MD verbosity never recorded GPU kernel timings even
     // though it had asked to. Mirrors GFNFF::m_force_phase_timing's do_timing OR-pattern.
     bool m_force_phase_timing = false;
-
-    /**
-     * @brief Generate CN pair list from geometry and covalent radii.
-     * Called once after initGPUWorkspace(). Pairs with rcov_sum < 2*max contribution.
-     */
-    void generateCNPairList(const Matrix& geom_bohr);
 
     /// Claude Generated (Sep 2026): WP-A on-device D4 pair-list build from the host generator's
     /// current CN + Gaussian weights (factored out of initGPUWorkspace() so the skin-triggered
@@ -2422,11 +2413,6 @@ json GFNFFGpuMethodImpl<Backend>::getStreamTimings() const
     return out;
 }
 
-// ---------------------------------------------------------------------------
-// Generate CN pair list for GPU CN chain-rule kernel
-// Claude Generated (March 2026): Replaces sparse dcn matrices
-// ---------------------------------------------------------------------------
-
 template <class Backend>
 void GFNFFGpuMethodImpl<Backend>::buildDispersionPairsOnDevice()
 {
@@ -2448,52 +2434,6 @@ void GFNFFGpuMethodImpl<Backend>::buildDispersionPairsOnDevice()
     // GFN-FF D4: a1=0.58, a2=4.80, 60 Bohr cutoff (matches the host generator).
     m_gpu_workspace->generateDispersionPairListOnGPU(gw_flat, sqrtzr4r2, topo_q, 0.58, 4.80,
                                                      D4ParameterGenerator::PAIR_BUILD_CUTOFF_BOHR);
-}
-
-template <class Backend>
-void GFNFFGpuMethodImpl<Backend>::generateCNPairList(const Matrix& geom_bohr)
-{
-    const int N = static_cast<int>(geom_bohr.rows());
-    const auto& rcov_d3 = GFNFFParameters::covalent_rad_d3;
-    constexpr double rcov_scale = 4.0 / 3.0;
-
-    // Cutoff: where exp(-kn^2 * dr^2) < 1e-12 (kn=-7.5) → |dr| > 1.2 → r > 2.2 * rcov_sum
-    // Task #10 (Jun 2026): tunable; mirrors the GPU pair-list factor for CPU-fallback parity.
-    const double cutoff_factor = m_cn_pair_cutoff_factor;
-
-    m_cn_pair_i.clear();
-    m_cn_pair_j.clear();
-    m_cn_pair_rcov.clear();
-
-    for (int i = 0; i < N; ++i) {
-        int zi = m_atom_types[i];
-        if (zi < 1 || zi > static_cast<int>(rcov_d3.size())) continue;
-        double rcov_i = rcov_d3[zi - 1] * rcov_scale;
-
-        for (int j = i + 1; j < N; ++j) {
-            int zj = m_atom_types[j];
-            if (zj < 1 || zj > static_cast<int>(rcov_d3.size())) continue;
-            double rcov_j = rcov_d3[zj - 1] * rcov_scale;
-            double rcov_sum = rcov_i + rcov_j;
-
-            double dx = geom_bohr(i, 0) - geom_bohr(j, 0);
-            double dy = geom_bohr(i, 1) - geom_bohr(j, 1);
-            double dz = geom_bohr(i, 2) - geom_bohr(j, 2);
-            double r2 = dx*dx + dy*dy + dz*dz;
-            double rij = std::sqrt(r2);
-
-            if (rij < cutoff_factor * rcov_sum && rij > 1e-10) {
-                m_cn_pair_i.push_back(i);
-                m_cn_pair_j.push_back(j);
-                m_cn_pair_rcov.push_back(rcov_sum);
-            }
-        }
-    }
-
-    m_cn_pairs_generated = true;
-
-    if (CurcumaLogger::get_verbosity() >= 3)
-        CurcumaLogger::info(fmt::format("  CN pair list: {} pairs (N={})", m_cn_pair_i.size(), N));
 }
 
 #endif // USE_CUDA || USE_ROCM
