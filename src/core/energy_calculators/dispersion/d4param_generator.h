@@ -75,10 +75,14 @@ public:
      *
      * @param atoms Atomic numbers
      * @param geometry_bohr Coordinates in Bohr
+     * @param pool, num_threads  workers for the per-atom/per-pair helpers (Gaussian weights,
+     *        their derivatives, half-contraction, dC6/dCN); results do not depend on them
+     *        (Claude Generated, Oct 2026). The two O(N^2) loops use the caller's OpenMP setting.
      * @return Vector of GFNFFDispersion structs
      */
     std::vector<GFNFFDispersion> GenerateDispersionPairsNative(
-        const std::vector<int>& atoms, const Matrix& geometry_bohr);
+        const std::vector<int>& atoms, const Matrix& geometry_bohr,
+        CxxThreadPool* pool = nullptr, int num_threads = 1);
 
     // Individual parameter accessors
     double getC6(int atom_i, int atom_j, int ref_i = 0, int ref_j = 0) const;

@@ -36,6 +36,7 @@
 #include "../gfnff_parameters.h"       // GFNFFParameterSet
 #include "../gfnff.h"                  // GFNFF::EEQGPUParams (WP2)
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -289,6 +290,15 @@ public:
      * updateDispersionDC6DCN(). The caller must invalidateGraph() afterwards (disp.n changed).
      */
     void updateDispersion(const std::vector<GFNFFDispersion>& pairs);
+
+    /// Claude Generated (Oct 2026): staged upload of rebuilt pair lists (updateDispersion(),
+    /// updateRepulsion()): chunked conversion by `threads` host threads into a pinned double
+    /// buffer, asynchronous copies. Same device content as the serial upload (enabled = false).
+    void setStagedListUpload(bool enabled, int threads)
+    {
+        m_staged_list_upload = enabled;
+        m_host_threads = std::max(1, threads);
+    }
 
     /**
      * @brief Re-upload the explicit Coulomb pair SoA (eeq_distance_cutoff > 0 only).
@@ -686,6 +696,10 @@ private:
     // Last uploaded HB/XB bond lists (for CPU vs GPU comparison debugging)
     std::vector<GFNFFHydrogenBond> m_last_hbonds;
     std::vector<GFNFFHalogenBond> m_last_xbonds;
+
+    // Staged pair-list upload (setStagedListUpload(), Oct 2026)
+    bool m_staged_list_upload = false;
+    int  m_host_threads = 1;
 
     // Host-side dispersion pair indices (for per-step dc6dcn extraction)
     std::vector<int> m_disp_idx_i_host;

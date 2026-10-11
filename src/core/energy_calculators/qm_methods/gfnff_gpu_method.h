@@ -49,6 +49,8 @@ struct GFNFFCudaBackend {
     /// K2/K3 (Oct 2026): dispersion and the device EEQ solve overlap dc6dcn on own streams
     /// (recordEEQInputsReady(), launchDispersionGradientEarly(), EEQ setInputReadyEvent()).
     static constexpr bool has_stream_overlap = true;
+    /// Oct 2026: staged pinned upload of rebuilt pair lists (setStagedListUpload()).
+    static constexpr bool has_staged_list_upload = true;
 
     /// 0 = never route the EEQ to the CPU PCG; the device Schur paths handle nfrag>1.
     static constexpr int default_eeq_cpu_fragment_threshold = 0;

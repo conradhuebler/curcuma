@@ -33,7 +33,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <algorithm>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 // Matrix, Vector, SpMatrix are defined in global.h (via ff_workspace_gpu.h -> ff_workspace.h)
@@ -819,7 +821,134 @@ struct FFWorkspaceGPUImpl {
     cudaEvent_t     event_eeq_inputs              = nullptr; ///< main: coords + rhs_atoms written (K3)
     cudaEvent_t     event_disp_ready              = nullptr; ///< main: dc6dcn/C6 written (K2)
     cudaEvent_t     event_disp_done               = nullptr; ///< pairwise: early k_dispersion done (K2)
+
+    // Claude Generated (Oct 2026): pinned double buffer of the staged pair-list upload
+    // (stagedListUpload(), used by updateDispersion() / updateRepulsion() during MD).
+    void*           list_stage[2]                 = {nullptr, nullptr};
+    size_t          list_stage_bytes              = 0;
+    cudaEvent_t     list_stage_ev[2]              = {nullptr, nullptr};
 };
+
+// ============================================================================
+// Staged upload of a rebuilt pair list (Claude Generated, Oct 2026)
+// ============================================================================
+//
+// During MD the D4 and repulsion pair lists are rebuilt on the host and copied to the
+// device (HB/XB keep the SoA upload; 50k entries). The SoA upload functions above convert
+// the whole list serially into fresh
+// std::vectors and copy each column with a blocking pageable cudaMemcpy: for the 9.4 M-pair
+// D4 list of polymer_2x that was 118 ms per rebuild (27 ms allocation, 39 ms conversion,
+// 30 ms copy, 22 ms host mirrors). Here the list is converted in chunks into a 2 x 32 MB
+// pinned buffer by several host threads, and each chunk is copied asynchronously while the
+// next one is converted. The device receives exactly the same bytes; the function returns
+// after the last copy has finished, like the blocking copies it replaces.
+
+namespace {
+
+/// One device column of a SoA list: destination and element size.
+struct StageColumn {
+    void*  dst;
+    size_t elem;
+};
+
+/// Run fn(a, b) on contiguous sub-ranges of [k0, k1) with up to T host threads.
+template <class F>
+void hostParallelRanges(size_t k0, size_t k1, int T, F&& fn)
+{
+    const size_t n = k1 - k0;
+    if (T <= 1 || n < 32768) {
+        fn(k0, k1);
+        return;
+    }
+    std::vector<std::thread> workers;
+    workers.reserve(T - 1);
+    for (int t = 1; t < T; ++t)
+        workers.emplace_back([&fn, k0, n, t, T]() { fn(k0 + n * t / T, k0 + n * (t + 1) / T); });
+    fn(k0, k0 + n / T);
+    for (auto& w : workers) w.join();
+}
+
+/// Copy nrec records into the device columns. fill(a, b, k0, host) writes records [a, b) into
+/// the host columns host[c], record k at index k - k0. Returns when all copies are done.
+template <class Fill>
+void stagedListUpload(FFWorkspaceGPUImpl& impl, size_t nrec, const StageColumn* cols, int ncols,
+                      int threads, Fill&& fill)
+{
+    if (nrec == 0 || ncols <= 0) return;
+    constexpr size_t kStageBytes = size_t(32) << 20;
+    constexpr size_t kAlign = 256;
+    if (!impl.list_stage[0]) {
+        for (int b = 0; b < 2; ++b) {
+            checkCuda(cudaMallocHost(&impl.list_stage[b], kStageBytes), "cudaMallocHost list stage");
+            checkCuda(cudaEventCreateWithFlags(&impl.list_stage_ev[b], cudaEventDisableTiming),
+                      "cudaEventCreate list stage");
+        }
+        impl.list_stage_bytes = kStageBytes;
+    }
+    size_t rec_bytes = 0;
+    for (int c = 0; c < ncols; ++c) rec_bytes += cols[c].elem;
+    const size_t chunk = std::max<size_t>(1, (impl.list_stage_bytes - kAlign * ncols) / rec_bytes);
+
+    std::vector<char*> host(ncols);
+    bool used[2] = {false, false};
+    size_t step = 0;
+    for (size_t k0 = 0; k0 < nrec; k0 += chunk, ++step) {
+        const int b = static_cast<int>(step & 1);
+        const size_t k1 = std::min(nrec, k0 + chunk);
+        if (used[b])  // the copy that last read this half must be finished before it is refilled
+            checkCuda(cudaEventSynchronize(impl.list_stage_ev[b]), "list stage event sync");
+        char* base = static_cast<char*>(impl.list_stage[b]);
+        size_t off = 0;
+        for (int c = 0; c < ncols; ++c) {
+            host[c] = base + off;
+            off += (chunk * cols[c].elem + kAlign - 1) / kAlign * kAlign;
+        }
+        char* const* hc = host.data();
+        hostParallelRanges(k0, k1, threads, [&](size_t a, size_t e) { fill(a, e, k0, hc); });
+        for (int c = 0; c < ncols; ++c)
+            checkCuda(cudaMemcpyAsync(static_cast<char*>(cols[c].dst) + k0 * cols[c].elem, host[c],
+                                      (k1 - k0) * cols[c].elem, cudaMemcpyHostToDevice, impl.stream),
+                      "list stage H2D");
+        checkCuda(cudaEventRecord(impl.list_stage_ev[b], impl.stream), "list stage event record");
+        used[b] = true;
+    }
+    checkCuda(cudaStreamSynchronize(impl.stream), "list stage stream sync");
+}
+
+/// Repulsion list (bonded or non-bonded) through the staged upload; same device content as
+/// RepulsionSoA::upload().
+void stagedRepulsionUpload(FFWorkspaceGPUImpl& impl, RepulsionSoA& soa,
+                           const std::vector<GFNFFRepulsion>& v, int threads)
+{
+    soa.n = static_cast<int>(v.size());
+    if (soa.n == 0) return;
+    soa.idx_i.ensure(soa.n);
+    soa.idx_j.ensure(soa.n);
+    soa.alpha.ensure(soa.n);
+    soa.repab.ensure(soa.n);
+    soa.r_cut.ensure(soa.n);
+    const StageColumn cols[] = { { soa.alpha.ptr, sizeof(double) }, { soa.repab.ptr, sizeof(double) },
+                                 { soa.r_cut.ptr, sizeof(double) }, { soa.idx_i.ptr, sizeof(int) },
+                                 { soa.idx_j.ptr, sizeof(int) } };
+    stagedListUpload(impl, v.size(), cols, 5, threads,
+        [&v](size_t a, size_t e, size_t k0, char* const* h) {
+            double* alpha = reinterpret_cast<double*>(h[0]);
+            double* repab = reinterpret_cast<double*>(h[1]);
+            double* rcut  = reinterpret_cast<double*>(h[2]);
+            int*    ii    = reinterpret_cast<int*>(h[3]);
+            int*    jj    = reinterpret_cast<int*>(h[4]);
+            for (size_t k = a; k < e; ++k) {
+                const size_t q = k - k0;
+                alpha[q] = v[k].alpha;
+                repab[q] = v[k].repab;
+                rcut[q]  = v[k].r_cut;
+                ii[q]    = v[k].i;
+                jj[q]    = v[k].j;
+            }
+        });
+}
+
+}  // namespace
 
 // ============================================================================
 // FFWorkspaceGPU Constructor
@@ -1234,6 +1363,10 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
         if (m_impl->event_eeq_inputs)  cudaEventDestroy(m_impl->event_eeq_inputs);
         if (m_impl->event_disp_ready)  cudaEventDestroy(m_impl->event_disp_ready);
         if (m_impl->event_disp_done)   cudaEventDestroy(m_impl->event_disp_done);
+        for (int b = 0; b < 2; ++b) {   // Oct 2026: staged list upload buffers
+            if (m_impl->list_stage_ev[b]) cudaEventDestroy(m_impl->list_stage_ev[b]);
+            if (m_impl->list_stage[b])    cudaFreeHost(m_impl->list_stage[b]);
+        }
 
         if (m_impl->stream)          cudaStreamDestroy(m_impl->stream);
         if (m_impl->stream_pairwise) cudaStreamDestroy(m_impl->stream_pairwise);
@@ -1625,16 +1758,23 @@ void FFWorkspaceGPU::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
     // Claude Generated (March 2026): Needed because updateHBXBIfNeeded() may find
     // additional HBonds on re-detection that weren't in the initial parameter set.
     m_impl->hbonds.upload(hbonds, atom_types, m_impl->stream);
-    // Store for CPU vs GPU comparison debugging
-    m_last_hbonds = hbonds;
+    // Store for CPU vs GPU comparison debugging. Oct 2026: only where that comparison runs
+    // (verbosity >= 3 in the GPU wrapper); the deep copy was ~1 ms per MD re-detection.
+    if (CurcumaLogger::get_verbosity() >= 3)
+        m_last_hbonds = hbonds;
+    else
+        m_last_hbonds.clear();
 }
 
 void FFWorkspaceGPU::updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,
                                     const std::vector<int>& atom_types)
 {
     m_impl->xbonds.upload(xbonds, atom_types, m_impl->stream);
-    // Store for CPU vs GPU comparison debugging
-    m_last_xbonds = xbonds;
+    // Store for CPU vs GPU comparison debugging (verbosity >= 3 only, see updateHBonds())
+    if (CurcumaLogger::get_verbosity() >= 3)
+        m_last_xbonds = xbonds;
+    else
+        m_last_xbonds.clear();
 }
 
 void FFWorkspaceGPU::updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
@@ -1644,6 +1784,11 @@ void FFWorkspaceGPU::updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_r
     // by every kernel launch) from the passed vector on every call and grows the backing
     // CudaBuffer only if the new count exceeds current capacity — safe for both a growing
     // and a shrinking pair count, no separate resize path needed.
+    if (m_staged_list_upload) {   // Oct 2026: same device content, see stagedListUpload()
+        stagedRepulsionUpload(*m_impl, m_impl->bonded_rep, bonded_reps, m_host_threads);
+        stagedRepulsionUpload(*m_impl, m_impl->nonbonded_rep, nonbonded_reps, m_host_threads);
+        return;
+    }
     m_impl->bonded_rep.upload(bonded_reps, m_impl->stream);
     m_impl->nonbonded_rep.upload(nonbonded_reps, m_impl->stream);
 }
@@ -1653,6 +1798,63 @@ void FFWorkspaceGPU::updateDispersion(const std::vector<GFNFFDispersion>& pairs)
     // Claude Generated (Sep 2026): see the declaration. DispersionSoA::upload() sets disp.n from
     // the vector (also for 0 pairs) and grows each buffer only when needed.
     auto& impl = *m_impl;
+    if (m_staged_list_upload) {
+        // Oct 2026: staged upload (see stagedListUpload()); fills the device columns and the
+        // host mirrors below in the same pass, with the values of the serial path.
+        DispersionSoA& d = impl.disp;
+        d.n = static_cast<int>(pairs.size());
+        const int nd = d.n;
+        m_disp_idx_i_host.resize(nd);
+        m_disp_idx_j_host.resize(nd);
+        m_h_dc6dcn_ij.resize(nd);
+        m_h_dc6dcn_ji.resize(nd);
+        if (nd == 0) return;
+        d.idx_i.ensure(nd);
+        d.idx_j.ensure(nd);
+        d.C6.ensure(nd);
+        d.r4r2ij.ensure(nd);
+        d.r0_sq.ensure(nd);
+        d.zetac6.ensure(nd);
+        d.r_cut.ensure(nd);
+        if (impl.dc6dcn_gpu_ready) {
+            d.dc6dcn_ij.ensure(nd);
+            d.dc6dcn_ji.ensure(nd);
+        }
+        const StageColumn cols[] = { { d.C6.ptr, sizeof(double) }, { d.r4r2ij.ptr, sizeof(double) },
+                                     { d.r0_sq.ptr, sizeof(double) }, { d.zetac6.ptr, sizeof(double) },
+                                     { d.r_cut.ptr, sizeof(double) }, { d.idx_i.ptr, sizeof(int) },
+                                     { d.idx_j.ptr, sizeof(int) } };
+        int* mi = m_disp_idx_i_host.data();
+        int* mj = m_disp_idx_j_host.data();
+        double* zij = m_h_dc6dcn_ij.data();
+        double* zji = m_h_dc6dcn_ji.data();
+        stagedListUpload(impl, pairs.size(), cols, 7, m_host_threads,
+            [&pairs, mi, mj, zij, zji](size_t a, size_t e, size_t k0, char* const* h) {
+                double* c6   = reinterpret_cast<double*>(h[0]);
+                double* r4r2 = reinterpret_cast<double*>(h[1]);
+                double* r0sq = reinterpret_cast<double*>(h[2]);
+                double* zeta = reinterpret_cast<double*>(h[3]);
+                double* rcut = reinterpret_cast<double*>(h[4]);
+                int*    ii   = reinterpret_cast<int*>(h[5]);
+                int*    jj   = reinterpret_cast<int*>(h[6]);
+                for (size_t k = a; k < e; ++k) {
+                    const size_t q = k - k0;
+                    const GFNFFDispersion& p = pairs[k];
+                    c6[q]   = p.C6;
+                    r4r2[q] = p.r4r2ij;
+                    r0sq[q] = p.r0_squared;
+                    zeta[q] = p.zetac6;
+                    rcut[q] = p.r_cut;
+                    ii[q]   = p.i;
+                    jj[q]   = p.j;
+                    mi[k]   = p.i;
+                    mj[k]   = p.j;
+                    zij[k]  = 0.0;
+                    zji[k]  = 0.0;
+                }
+            });
+        return;
+    }
     impl.disp.upload(pairs, impl.stream);
     const int nd = impl.disp.n;
 
@@ -3589,3 +3791,4 @@ void FFWorkspaceGPU::updateReferenceGeometry()
                                cudaMemcpyDeviceToDevice, impl.stream),
               "updateReferenceGeometry: D2D copy z");
 }
+

@@ -321,6 +321,7 @@ private:
     double m_eeq_localinv_ext = 10.0;
     double m_eeq_localinv_rebuild = 1.0;
     int    m_eeq_localinv_threads = 1;
+    int    m_host_threads = 1;   ///< -threads: host threads of the staged list upload (Oct 2026)
     std::shared_ptr<LocalInversePreconditioner> m_eeq_li;   ///< last build (host: G, H, S; device: geometry only)
     long   m_eeq_li_builds = 0, m_eeq_li_failures = 0;
     double m_eeq_li_build_ms = 0.0;
@@ -454,6 +455,7 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
         m_eeq_localinv_rebuild = eeq_value("eeq_localinv_rebuild_bohr", 1.0);
         if (config.contains("threads") && config["threads"].is_number())
             m_eeq_localinv_threads = std::max(1, static_cast<int>(config["threads"].get<double>()));
+        m_host_threads = m_eeq_localinv_threads;
     }
 
     // Claude Generated (Sep 2026, multi-GPU): `gpu_device` (global CLI key, set per worker by
@@ -715,6 +717,10 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         // K2/K3 (Oct 2026, Claude Generated): stream overlap; fallbacks are the PARAM defaults.
         m_eeq_overlap  = cfg_get_bool("gpu_eeq_overlap", true);
         m_disp_overlap = cfg_get_bool("gpu_dispersion_overlap", true);
+        // Oct 2026 (Claude Generated): rebuilt D4/repulsion lists reach the device through the
+        // staged pinned upload (same bytes, parallel conversion); fallback is the PARAM default.
+        if constexpr (Backend::has_staged_list_upload)
+            m_gpu_workspace->setStagedListUpload(cfg_get_bool("gpu_staged_list_upload", true), m_host_threads);
         // Claude Generated (Sep 2026): per-step D4 C6 refresh on the device, same switch as the
         // CPU path (GFNFF::refreshDispersionC6()).
         m_gpu_workspace->setDispersionC6Update(cfg_get_bool("dispersion_c6_update", true));
