@@ -40,6 +40,7 @@ so the fixed point and the energy do not change; only the number of SCF iteratio
 | `-scf_precond` | `none` | `none` or `frag`; other values: warning, `none` |
 | `-scf_precond_guard` | `g2:4:best` | `g2:<n0>[:<ratio>][:keep][:best]`, `g1:<tau>[:keep][:best]` or `off`; only with `frag` |
 | `-scf_precond_rebuild_rms` | `0` | rebuild M when the RMS displacement from its build geometry exceeds this (Angstrom); 0 = never |
+| `-scf_precond_max_fragment_atoms` | `100` | molecules above this keep the scalar seed (one warning); 0 = no limit. A block costs 2*dim SCC-map evaluations (see below) |
 
 Developer environment variables (not for production runs):
 
@@ -153,7 +154,12 @@ On the unrelaxed ureawater197 `frag` does not help (24 -> 33 iterations, guard).
 - Not measured: other elements than H, C, N, O; solvation (fragments are computed in gas phase); systems
   above 599 atoms; Hessian with the built-in M (each displaced-geometry object builds its own M; only the prototype with a file matrix was measured, up to 197 atoms); MD longer than
   500 fs; RMS drift above 1 A; GPU other than one RTX 5080 (section GPU); multi-GPU nodes.
-- Fragments with more than 100 atoms keep the scalar seed (one warning; a fragment Jacobian costs 2*dim evaluations of its SCC map, nothing above ~30 atoms was measured).
+- Fragment size (`-scf_precond_max_fragment_atoms`, default 100, 0 = no limit): a fragment Jacobian costs 2*dim evaluations of its SCC map
+  (dim = nsh + 9*atoms). Measured on one thread, PEO chains as ONE molecule (`CURCUMA_SCF_JAC`, same algorithm, n=1): 58 atoms 1.4 s,
+  212 atoms 120 s (about N^3.4; 100 atoms about 10 s and 300 atoms several minutes are extrapolated, not measured). A large molecule pays
+  off only in a long MD or Hessian run. Measured once (n=1, `-threads 8`, PEO 212 atoms as ONE fragment, `-scf_precond_max_fragment_atoms 300`):
+  M built in 129.5 s (one fragment is built serially), SCF 12 -> 4 iterations (164 -> 55 ms), i.e. break-even after about 1200 SCFs. The
+  block of a single-fragment system is the exact Jacobian of the whole system. The iteration gain for ordinary fragments was measured up to ~30 atoms.
 - Not implemented: GFN1; ROCm, Vulkan and the host-driven CUDA loop; multi-GPU SCF split; open shells; charged systems and ionic fragments (NaCl needs
   overlapping neighbourhoods of about R = 5 A for its soft dipole mode); overlapping Schwarz blocks.
 - The guard default is a rule from the prototype test set (24 scalar SCFs); on the unrelaxed 599-atom

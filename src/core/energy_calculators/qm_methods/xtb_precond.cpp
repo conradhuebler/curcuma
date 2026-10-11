@@ -384,10 +384,6 @@ bool XTB::selectScfPreconditioner(bool broyden_mode, bool cpu_loop, bool device_
  *  XTB::buildFragmentPreconditioner
  * ------------------------------------------------------------------------- */
 namespace {
-/// Claude Generated (Oct 2026): fragments with more atoms than this keep the scalar seed. The Jacobian of a
-/// fragment costs 2*dim evaluations of its SCC map (dim = nsh + 9*nat); measured fragments had up to ~30 atoms,
-/// a single large molecule (polymer, protein) would otherwise cost hours (and, on the device, exceed the block limit).
-constexpr std::size_t kMaxFragmentAtoms = 100;
 
 /// Claude Generated (Oct 2026): silences the logger while fragment SCFs run. CurcumaLogger keeps ONE process-wide
 /// verbosity, so concurrent builds (Hessian or batch workers that each build an M) must not save and restore it
@@ -454,7 +450,7 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
         double nel = 0.0, q = 0.0;
         for (int i : a) { nel += m_wfn.n0_at(i); if (have_eeq) q += q_eeq(i); }
         if (a.size() == 1) skip[f] = Skip::SingleAtom;
-        else if (a.size() > kMaxFragmentAtoms) skip[f] = Skip::TooLarge;
+        else if (m_scf_precond_max_frag_atoms > 0 && a.size() > static_cast<size_t>(m_scf_precond_max_frag_atoms)) skip[f] = Skip::TooLarge;
         else if ((std::llround(nel) % 2) != 0) skip[f] = Skip::OddElectrons;
         else if (!have_eeq || std::fabs(q) > 0.5) skip[f] = Skip::Charged;
         else jobs.push_back(static_cast<int>(f));
@@ -575,8 +571,8 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
         static std::atomic<bool> warned_large{ false };
         if (!warned_large.exchange(true))
             CurcumaLogger::warn(fmt::format("scf_precond frag: {} fragment(s) with more than {} atoms keep the scalar seed "
-                                            "(a fragment Jacobian costs 2*dim SCC-map evaluations; untested above ~30 atoms)",
-                                            n_skip[4], kMaxFragmentAtoms));
+                                            "(a fragment Jacobian costs 2*dim SCC-map evaluations, ~2 min for 212 atoms on one thread; raise scf_precond_max_fragment_atoms, 0 = no limit)",
+                                            n_skip[4], m_scf_precond_max_frag_atoms));
     }
     if (n_failed > 0)
         CurcumaLogger::warn(fmt::format("scf_precond frag: {} of {} fragment Jacobians failed (first: {}); "
