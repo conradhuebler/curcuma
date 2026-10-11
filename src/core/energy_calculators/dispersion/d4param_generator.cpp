@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <chrono>
 #include <fstream>  // Claude Generated (Mar 5, 2026): For diagnostic JSON output
 #include <limits>
@@ -1849,7 +1850,32 @@ void D4ParameterGenerator::computeDC6DCN(CxxThreadPool* pool, int num_threads)
 {
     // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²×M²)
     int natoms = static_cast<int>(m_atoms.size());
-    m_dc6dcn = Matrix::Zero(natoms, natoms);
+    // Claude Generated (Oct 2026): zero the N x N matrix in parallel column blocks instead of
+    // one serial setZero (429 MB at 7320 atoms, 22-24 ms, did not scale). Same result: all-zero
+    // bit pattern = 0.0, written before any cell is filled. Resizes (serial) only when the
+    // size changed.
+    if (m_dc6dcn.rows() != natoms || m_dc6dcn.cols() != natoms)
+        m_dc6dcn.resize(natoms, natoms);
+    {
+        double* zdata = m_dc6dcn.data();
+        const long long zn = static_cast<long long>(natoms) * natoms;
+        auto zero_worker = [&](int t_id, int T) {
+            const long long b = zn * t_id / T;
+            const long long e = zn * (t_id + 1) / T;
+            if (e > b) std::memset(zdata + b, 0, static_cast<size_t>(e - b) * sizeof(double));
+        };
+        if (pool && num_threads > 1 && zn > (1 << 20)) {
+            const int T = num_threads;
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t)
+                futures.push_back(pool->enqueue(zero_worker, t, T));
+            zero_worker(0, T);
+            for (auto& f : futures) f.get();
+        } else {
+            zero_worker(0, 1);
+        }
+    }
 
     // Per-pair dc6/dCN kernel. For i<j writes (i,j)=dC6(i,j)/dCN(i) and
     // (j,i)=dC6(i,j)/dCN(j); for i==j (full-N² fallback only) writes the diagonal
@@ -1916,8 +1942,13 @@ void D4ParameterGenerator::computeDC6DCN(CxxThreadPool* pool, int num_threads)
     // the full-N² double loop when the list is unavailable (GPU skip / first call).
     if (m_dc6dcn_pairs_valid) {
         const int P = static_cast<int>(m_dc6dcn_pairs.size());
+        // Claude Generated (Oct 2026): contiguous pair blocks instead of stride T (neighbouring
+        // pairs share rows/cache lines of the C6 half-contraction and of m_dc6dcn). Each cell
+        // has one writer, so the partition does not change any value.
         auto pl_worker = [&](int t_id, int T) {
-            for (int p = t_id; p < P; p += T)
+            const int pb = static_cast<int>(static_cast<long long>(P) * t_id / T);
+            const int pe = static_cast<int>(static_cast<long long>(P) * (t_id + 1) / T);
+            for (int p = pb; p < pe; ++p)
                 pair_kernel(m_dc6dcn_pairs[p].first, m_dc6dcn_pairs[p].second);
         };
         if (num_threads > 1 && P > 64) {
@@ -1981,13 +2012,13 @@ void D4ParameterGenerator::computeDC6DCN(CxxThreadPool* pool, int num_threads)
 // Called from GFNFF::Calculation() when gradient is requested
 // Reference: Fortran gfnff_gdisp0.f90:382-395 - dc6dcn used for dispersion gradient
 // Claude Generated (Apr 2026): P1a — Skip recomputation when CN change < threshold (MD optimization)
-void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool, int num_threads, bool skip_dc6dcn)
+bool D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool, int num_threads, bool skip_dc6dcn)
 {
     m_cn_values = cn;
 
     // P1a: Skip recomputation if CN change is below threshold
     if (canSkipGaussianWeightsUpdate(cn)) {
-        return;  // gw, dgw, dc6dcn all unchanged — valid for this step
+        return false;  // gw, dgw, dc6dcn all unchanged — valid for this step
     }
 
     // Recompute gaussian weights with new CN values
@@ -2008,6 +2039,7 @@ void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& 
     // Store CN for next step's threshold check
     m_prev_cn_values = cn;
     m_cn_cached = true;
+    return true;
 }
 
 // Claude Generated (Sep 2026, Known Issue #32): stale-CN fix B — see header. Weights +

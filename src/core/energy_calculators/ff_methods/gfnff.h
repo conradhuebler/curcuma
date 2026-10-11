@@ -1089,8 +1089,10 @@ public:
      * `d4_cn_cache_threshold` skip: when no CN changed by more than the threshold, the weights
      * (and therefore C6 and dC6/dCN) are left at the previous step, consistently for both.
      * Controlled by the `dispersion_c6_update` PARAM (default on).
+     * @return true if the C6 of the installed D4 pair list were rewritten from the generator's
+     *         current weights (stale geometry, non-empty list); false if nothing was done.
      */
-    void refreshDispersionC6();
+    bool refreshDispersionC6();
 
     /// Claude Generated (Sep 2026): true if the stored D4 C6 were computed at a different
     /// geometry than the current one (and the C6 refresh is enabled). See refreshDispersionC6().

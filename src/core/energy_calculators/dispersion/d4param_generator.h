@@ -101,7 +101,9 @@ public:
     // Claude Generated (Feb 15, 2026): dc6dcn computation for dispersion CN gradient
     // Reference: Fortran gfnff_gdisp0.f90:174-210, 262-305
     // @param skip_dc6dcn  If true, skip O(N²) dc6dcn matrix (GPU computes per-pair)
-    void updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool = nullptr,
+    // @return true if the Gaussian weights (and, unless skip_dc6dcn, half-contraction and dc6dcn) were
+    //         rebuilt for `cn`; false if the P1a CN-change threshold skipped the update.
+    bool updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool = nullptr,
                                     int num_threads = 1, bool skip_dc6dcn = false);
 
     /**

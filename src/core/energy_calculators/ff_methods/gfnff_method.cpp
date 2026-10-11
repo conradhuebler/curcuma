@@ -1352,6 +1352,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     const bool do_timing = (CurcumaLogger::get_verbosity() >= 2) || m_force_phase_timing;
     auto t_prep_total = std::chrono::high_resolution_clock::now();  // always measure, negligible overhead
     double t_cn = 0.0, t_eeq_topo = 0.0, t_cnf = 0.0, t_dcn = 0.0, t_d4_gw = 0.0, t_eeq_solve = 0.0, t_charge_dist = 0.0;
+    bool c6_current_from_gradient_path = false;  // see the gradient-path D4 block (Oct 2026)
 
     // WP5 (June 2026): self-consistent implicit solvation. Build the Born interaction
     // matrix at the current geometry and hand it to the EEQ solver so the charges feel
@@ -1582,11 +1583,17 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         if (m_d4_generator && !gpu_only && !reuse_cn) {
             t0 = std::chrono::high_resolution_clock::now();
             std::vector<double> cn_std(m_last_cn.data(), m_last_cn.data() + m_last_cn.size());
-            m_d4_generator->updateCNValuesForGradient(cn_std, pool, total_threads,
-                                                       /*skip_dc6dcn=*/false);
+            const bool weights_rebuilt = m_d4_generator->updateCNValuesForGradient(
+                cn_std, pool, total_threads, /*skip_dc6dcn=*/false);
             // Claude Generated (Sep 2026): the energy's C6 must follow the same weights the
             // gradient's dC6/dCN was just built from — see refreshDispersionC6().
-            refreshDispersionC6();
+            // Claude Generated (Oct 2026): remember that the C6 were rewritten from weights and
+            // half-contraction rebuilt for this very m_last_cn, so the energy-side refresh at the
+            // end of this function (same CN, same weights, same pair list) would reproduce them
+            // bit for bit and is skipped. Both conditions are required: if the P1a threshold
+            // skipped the weight rebuild, or the C6 were not rewritten (setup geometry, empty
+            // list), that refresh is the only one that brings C6 to the current CN.
+            c6_current_from_gradient_path = refreshDispersionC6() && weights_rebuilt;
             if (do_timing) {
                 t_d4_gw = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
             }
@@ -1709,6 +1716,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     // owned by updateCNValuesForGradient. Static-CN mode keeps its frozen C6 (reuse_cn).
     // -gfnff.dispersion_c6_update false restores the old frozen-C6 behaviour.
     if (!gpu_only && !reuse_cn && m_d4_generator && m_workspace && m_last_cn.size() == m_atomcount
+        && !c6_current_from_gradient_path
         && m_parameters.value("dispersion_c6_update", true)) {
         bool weights_fresh = false;
         auto t_c6 = std::chrono::high_resolution_clock::now();
@@ -2136,10 +2144,10 @@ bool GFNFF::dispersionC6Stale() const
              && m_disp_c6_geometry == m_geometry_bohr);
 }
 
-void GFNFF::refreshDispersionC6()
+bool GFNFF::refreshDispersionC6()
 {
     if (!dispersionC6Stale())
-        return;
+        return false;
 
     // C6_ij = sum_ab W_i^a W_j^b C6ref_ab from the Gaussian weights the generator holds for
     // THIS step (updateCNValuesForGradient() just rebuilt them). getChargeWeightedC6() is the
@@ -2151,10 +2159,15 @@ void GFNFF::refreshDispersionC6()
     auto& pairs = m_workspace->d4DispersionsForC6Refresh();
     const int P = static_cast<int>(pairs.size());
     if (P == 0)
-        return;
+        return false;
     const D4ParameterGenerator& gen = *m_d4_generator;
+    // Claude Generated (Oct 2026): contiguous pair blocks instead of stride T (stride put
+    // neighbouring pairs, which share atom rows and cache lines, on different threads).
+    // Every pair is written independently from read-only caches: values do not depend on it.
     auto worker = [&](int t_id, int T) {
-        for (int p = t_id; p < P; p += T) {
+        const int pb = static_cast<int>(static_cast<long long>(P) * t_id / T);
+        const int pe = static_cast<int>(static_cast<long long>(P) * (t_id + 1) / T);
+        for (int p = pb; p < pe; ++p) {
             GFNFFDispersion& d = pairs[p];
             d.C6 = gen.getChargeWeightedC6(m_atoms[d.i], m_atoms[d.j], d.i, d.j);
         }
@@ -2171,6 +2184,7 @@ void GFNFF::refreshDispersionC6()
     } else {
         worker(0, 1);
     }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
