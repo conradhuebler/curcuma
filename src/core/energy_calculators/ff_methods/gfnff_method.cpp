@@ -1285,42 +1285,54 @@ void GFNFF::updateDynamicState(TopologyInfo& topo) const {
 
 // ---------------------------------------------------------------------------
 // WP-FF-DistMatrix-Sharing (May 2026): centralized packed-triangular distance arrays.
-// Mirrors XTB gfnff_engrad.F90:175-195 — compute sqrab/srab once per energy call,
-// share across all FF term loops and the EEQ Phase-2 solver.
+// Mirrors XTB gfnff_engrad.F90:175-195 — compute srab once per energy call for the EEQ
+// Phase-2 solver (its only reader; the FF term loops compute their own distances).
 // ---------------------------------------------------------------------------
 
 void GFNFF::computeSharedDistances() const
 {
     const int N = m_geometry_bohr.rows();
+    m_shared_dist_too_close = false;
     if (N <= 0) return;
     const int M = N * (N + 1) / 2;
     if (m_shared_dist_N != N) {
-        m_shared_sqrab.resize(M);
-        m_shared_srab.resize(M);
+        m_shared_srab.resize(M);   // new allocation only when the atom count changes
         m_shared_dist_N = N;
     }
-    // Diagonal (i == j) lives at indices i*(i+1)/2 + i and represents distance 0.
-    // We zero them by zeroing the whole buffer first; off-diagonals are written in the loop.
-    // Cheaper than per-row diagonal stores in the parallel worker.
-    m_shared_sqrab.setZero();
-    m_shared_srab.setZero();
+    // Oct 2026: no setZero any more (it was 2 x 214 MB serial per call at N = 7320). Every slot a
+    // reader touches (j < i) is written below; the diagonal slots i*(i+1)/2 + i are never read: the
+    // EEQ solver (calculateFinalCharges: matrix build, verbosity-3 dump) only uses dist(i, j) with
+    // j < i. The squared-distance twin m_shared_sqrab had no reader and is gone.
+    // The EEQ atoms-too-close scan (r < 1e-10, formerly a second pass over the buffer) is folded in:
+    // the same comparison on the same stored value, OR-ed per worker.
+    std::atomic<bool> too_close{false};
 
     auto worker = [&](int t_id, int T) {
         // Same striped row partitioning as dist_worker in eeq_solver.cpp:2990.
+        bool local_too_close = false;
         for (int i = t_id; i < N; i += T) {
             const int ii = i * (i + 1) / 2;
             const double xi = m_geometry_bohr(i, 0);
             const double yi = m_geometry_bohr(i, 1);
             const double zi = m_geometry_bohr(i, 2);
+            double* row = m_shared_srab.data() + ii;
             for (int j = 0; j < i; ++j) {
                 const double dx = xi - m_geometry_bohr(j, 0);
                 const double dy = yi - m_geometry_bohr(j, 1);
                 const double dz = zi - m_geometry_bohr(j, 2);
-                const double rsq = dx*dx + dy*dy + dz*dz;
-                m_shared_sqrab[ii + j] = rsq;
-                m_shared_srab[ii + j]  = std::sqrt(rsq);
+                // Explicit FMA order (Oct 2026): this is what GCC (-O3 -march=native, default
+                // -ffp-contract=fast) emitted for 'dx*dx + dy*dy + dz*dz' in the vectorised body of
+                // the former loop, i.e. for every pair. The rewritten loop gets a scalar remainder
+                // which GCC contracts as fma(dz,dz,fma(dx,dx,dy*dy)) instead: ~280 of 26.8 M
+                // distances (polymer_2x) then differ in the last bit and the MD charges move at
+                // 1e-15. Spelling the contraction out keeps every path on the old rounding.
+                const double rsq = std::fma(dz, dz, std::fma(dy, dy, dx * dx));
+                const double r = std::sqrt(rsq);
+                row[j] = r;
+                local_too_close |= (r < 1e-10);
             }
         }
+        if (local_too_close) too_close.store(true, std::memory_order_relaxed);
     };
 
     auto* pool = threadPool();
@@ -1339,6 +1351,7 @@ void GFNFF::computeSharedDistances() const
     } else {
         worker(0, 1);
     }
+    m_shared_dist_too_close = too_close.load();
 }
 
 // ---------------------------------------------------------------------------
@@ -1415,8 +1428,9 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             if (!m_used_fused_cn_dcn) {
 #endif
             if (cn_cutoff_bohr > 0.0) {
+                // Oct 2026: rows over the pool, bitwise equal to the serial pass (see cn_calculator.cpp).
                 auto cn_result = CNCalculator::calculateGFNFFCNWithNeighbors(
-                    m_atoms, m_geometry_bohr, cn_cutoff_bohr);
+                    m_atoms, m_geometry_bohr, cn_cutoff_bohr, -7.5, 4.4, threadPool(), m_threads);
                 if (m_gpu_path_preallocated) {
                     std::memcpy(m_last_cn.data(), cn_result.cn_values.data(), m_atomcount * sizeof(double));
                 } else {
@@ -2682,7 +2696,7 @@ double GFNFF::calculationSingle(bool gradient)
 
     computeSharedDistances();
     if (m_eeq_solver) {
-        m_eeq_solver->setExternalDistances(&m_shared_srab);
+        m_eeq_solver->setExternalDistances(&m_shared_srab, &m_shared_dist_too_close);
     }
 
     // D4 pair-list skin check (Claude Generated, Sep 2026): must precede prepareCNAndEEQ(),

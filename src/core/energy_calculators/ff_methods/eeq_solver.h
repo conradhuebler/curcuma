@@ -516,7 +516,13 @@ public:
     /// lower-triangular distance array (srab[i*(i+1)/2 + j] for i > j, Bohr).
     /// When set, calculateFinalCharges skips its own O(N^2) distance loop and
     /// fills m_phase2_distances from this view. Lifetime managed by caller (GFNFF).
-    void setExternalDistances(const Eigen::VectorXd* srab) { m_external_srab = srab; }
+    /// too_close (optional, Oct 2026): flag the caller computed while writing srab (any off-diagonal
+    /// r_ij < 1e-10); when given, calculateFinalCharges skips its own atoms-too-close scan over srab.
+    void setExternalDistances(const Eigen::VectorXd* srab, const bool* too_close = nullptr)
+    {
+        m_external_srab = srab;
+        m_external_srab_too_close = too_close;
+    }
 
     /// WP5 (June 2026): self-consistent implicit-solvation reaction field. When set,
     /// calculateFinalCharges adds this symmetric nat×nat Born matrix B into the
@@ -1140,6 +1146,7 @@ private:
     /// When non-null, calculateFinalCharges fills m_phase2_distances from this instead of
     /// recomputing the O(N^2) sqrt loop.
     const Eigen::VectorXd* m_external_srab = nullptr;
+    const bool* m_external_srab_too_close = nullptr; ///< atoms-too-close flag of m_external_srab (owner GFNFF)
 
     /// WP5 (June 2026): implicit-solvation reaction-field Born matrix (nat×nat),
     /// added to the EEQ matrix in calculateFinalCharges. nullptr = gas phase.

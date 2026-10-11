@@ -214,3 +214,26 @@ scan); (3) the constraint rows are filled from `fraglist` in O(N), and the same 
 whole `-dump_gradient` file identical old/new in 58 comparisons (6 bulk/caffeine incl. polymer_2x at 1 and 16 threads, 31 GMTKN55 incl. 8 charged and 3 open-shell, 15 MOR41, 6 solver-path runs caffeine/peo201-chain with
 `diag`, `cholesky`, `lu`); 50 fs MD polymer_2x (16 threads) `md_diagnostics` file identical in all 50 steps; with `-eeq_solver.dump_charges true` even `e_coulomb_phase1/2` are bit-identical (5 systems). polymer_2x MD 20 fs,
 alternating, n=3: `eeq_solve` 239 -> 164 ms, step 469 -> 392 ms at 16 threads; 1 thread (noisy, other load) 390-527 -> 312-402 ms. Not done: one pass over A_nn for both energy forms (gemm instead of two gemv, rounding not guaranteed the same, at most 13 ms).
+
+## Distance buffer, plausibility test and CN without serial passes (Oct 11, 2026)
+
+Three exact changes in the CPU step (machine-tested, not human-tested):
+- `GFNFF::computeSharedDistances`: the squared-distance twin `m_shared_sqrab` had no reader and is gone (with its accessors); no `setZero` (2 x 214 MB at N = 7320), because only the
+  off-diagonal slots j < i are read (`dist(i, j)` in `EEQSolver::calculateFinalCharges`); the atoms-too-close test (r < 1e-10) is computed while writing and handed over with
+  `setExternalDistances(&srab, &flag)`, so the EEQ solver's second scan over the buffer is skipped (same message, same fallback charges). The distance is written as
+  `std::fma(dz, dz, std::fma(dy, dy, dx * dx))`: this is how GCC (-O3 -march=native, default `-ffp-contract=fast`) contracted the old expression in its vectorised loop; the
+  rewritten loop has a scalar remainder that GCC contracts differently (dy first), which changed ~280 of 26.8 M distances in the last bit and the MD charges at 1e-15 (found by the MD
+  md5, invisible in single points, which reuse the topology-stage charges).
+- Plausibility test after the Phase-2 solve: both q^T A_nn q in one pass over the rows of A_nn on the pool, fixed thread-independent order (4 partial sums per row, blocks of 64
+  rows summed in order) instead of two MKL dgemv. `e_coulomb_phase1/2` differ from before by 1-3 ulp (MKL's order cannot be rebuilt; MKL gemv per row block was tried and also differs);
+  they only feed the ratio test (> 5) and the `-eeq_solver.dump_charges` file, never charges, energy or gradient.
+- `CNCalculator::calculateGFNFFCNWithNeighbors`: pair scan i < j and CN sums parallel over rows when given the pool (`threads > 1`, N > 64); the neighbour lists are merged in the old
+  order (partners k < i ascending, then j > i), so each CN sum runs in the old order. One thread keeps the old serial code.
+
+Checks (md5 of the whole `-dump_gradient` file, old = HEAD e3eac812 build): 60 of 60 identical (8 bulk incl. polymer_2x at 1 and 16 threads and GFN2 caffeine, 6 solver paths
+diag/cholesky/lu, 31 GMTKN55 `[20::80]` incl. 4 charged and 6 open shell, 15 MOR41); `md_diagnostics` files identical: polymer_2x 50 fs 16 threads, 4 fs 1 thread, urea400-water1000 and
+peo201-water500 20 fs 16 threads. GPU (`-gpu cuda`, the changed code runs there only at setup): SP and 100 fs MD old/new inside the GPU run-to-run spread (n=3), step 21.26 -> 21.17 ms.
+Timing polymer_2x, MD 20 fs, alternating, n=3 (median of medians): 16 threads step 294.2 -> 227.8 ms (`eeq_solve` 157.9 -> 136.5, `cn` 19.4 -> 5.5, the distance buffer is not
+timed separately), wall clock (250-50 fs) 287.8 -> 224.1 ms per step; 1 thread step 674.9 -> 670.8 ms, where `cn` reads 19.0 -> 23.8 ms although the one-thread CN code is unchanged
+(not explained; process page faults and user time equal). Not tested: ROCm, periodic systems, ALPB, `eeq_matrix_rebuild_eps_bohr` > 0, other compilers (the FMA spelling fixes GCC's choice).
+The `GFNFF` class layout changed: rebuild the CUDA plugin and the test executables with it (`make` without target); stale `test_gfnff_gpu` aborts in malloc.

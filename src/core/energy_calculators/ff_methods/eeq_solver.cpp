@@ -3791,24 +3791,30 @@ Vector EEQSolver::calculateFinalCharges(
     if (use_external_srab) {
         srab = m_external_srab->data();
         // Quick atoms-too-close scan (only off-diagonal slots); rows striped over the workers.
+        // Oct 2026: skipped when the owner of srab (GFNFF::computeSharedDistances) computed the same
+        // flag (r < 1e-10 on the same stored values) while writing the buffer.
         std::atomic<bool> ext_too_close{false};
-        auto scan_worker = [&](int t_id, int T) {
-            for (int i = 1 + t_id; i < natoms; i += T) {
-                const double* row = srab + static_cast<size_t>(i) * (i + 1) / 2;
-                for (int j = 0; j < i; ++j) {
-                    if (row[j] < 1e-10) { ext_too_close.store(true, std::memory_order_relaxed); return; }
-                }
-            }
-        };
-        const int Ts = (num_threads > 1 && natoms > 64) ? std::min(num_threads, natoms) : 1;
-        if (Ts > 1 && pool) {
-            std::vector<std::future<void>> futures;
-            futures.reserve(Ts - 1);
-            for (int t = 1; t < Ts; ++t) futures.push_back(pool->enqueue(scan_worker, t, Ts));
-            scan_worker(0, Ts);
-            for (auto& f : futures) f.get();
+        if (m_external_srab_too_close) {
+            ext_too_close.store(*m_external_srab_too_close);
         } else {
-            scan_worker(0, 1);
+            auto scan_worker = [&](int t_id, int T) {
+                for (int i = 1 + t_id; i < natoms; i += T) {
+                    const double* row = srab + static_cast<size_t>(i) * (i + 1) / 2;
+                    for (int j = 0; j < i; ++j) {
+                        if (row[j] < 1e-10) { ext_too_close.store(true, std::memory_order_relaxed); return; }
+                    }
+                }
+            };
+            const int Ts = (num_threads > 1 && natoms > 64) ? std::min(num_threads, natoms) : 1;
+            if (Ts > 1 && pool) {
+                std::vector<std::future<void>> futures;
+                futures.reserve(Ts - 1);
+                for (int t = 1; t < Ts; ++t) futures.push_back(pool->enqueue(scan_worker, t, Ts));
+                scan_worker(0, Ts);
+                for (auto& f : futures) f.get();
+            } else {
+                scan_worker(0, 1);
+            }
         }
         if (ext_too_close.load()) {
             CurcumaLogger::error("EEQSolver::calculateFinalCharges: atoms too close (external srab)");
@@ -4359,20 +4365,73 @@ Vector EEQSolver::calculateFinalCharges(
         // Uses the cached A matrix directly — no O(N²) distance/erf recomputation.
         // E = 0.5 * q^T * A_nn * q - Σ q_i * chi_i   (chi_i = chi_corrected + cnf*sqrt(CN))
         {
-            // Oct 2026: view of the atom block instead of a 428 MB copy per step (N = 7320). The values
-            // are the same; both energies still read A_nn row-wise through one gemv each.
+            // Oct 2026: both quadratic forms q^T A_nn q (Phase-1 and Phase-2 charges) in ONE pass over
+            // the full rows of A_nn (428 MB at N = 7320), rows split over the pool. Formerly two serial
+            // MKL dgemv (24 ms). The summation order is fixed and independent of the thread count:
+            // per row 4 interleaved partial sums (j mod 4) combined as (s0+s1)+(s2+s3), then rows
+            // summed in order within blocks of 64 rows, then blocks in order. It is NOT the MKL order,
+            // so e_coul_p1/p2 move in the last bits; they only feed the ratio test below (> 5) and
+            // the dump_charges file, never the charges, energy or gradient.
             const MatrixCRef A_nn = A.topLeftCorner(natoms, natoms);
-            auto eeq_energy = [&](const Vector& q) -> double {
+            auto chi_term = [&](const Vector& q) -> double {
                 double chi_sum = 0.0;
                 for (int i = 0; i < natoms; ++i) {
                     EEQParameters params = getParameters(atoms[i], cn(i));
                     chi_sum += q(i) * (chi_corrected(i) + params.cnf * std::sqrt(std::abs(cn(i))));
                 }
-                return 0.5 * q.transpose() * A_nn * q - chi_sum;
+                return chi_sum;
             };
-
-            double e_coul_p1 = eeq_energy(topology_charges);
-            double e_coul_p2 = eeq_energy(new_charges);
+            double quad_p1 = 0.0, quad_p2 = 0.0;
+            {
+                constexpr int kRowBlock = 64;
+                const int nblocks = (natoms + kRowBlock - 1) / kRowBlock;
+                std::vector<double> part1(nblocks, 0.0), part2(nblocks, 0.0);
+                const double* q1 = topology_charges.data();
+                const double* q2 = new_charges.data();
+                const double* a0 = A_nn.data();
+                const Eigen::Index lda = A_nn.outerStride();
+                auto quad_worker = [&](int t_id, int T) {
+                    for (int b = t_id; b < nblocks; b += T) {
+                        const int i_end = std::min(natoms, (b + 1) * kRowBlock);
+                        double s1 = 0.0, s2 = 0.0;
+                        for (int i = b * kRowBlock; i < i_end; ++i) {
+                            const double* row = a0 + static_cast<size_t>(i) * lda;
+                            double r1[4] = {0.0, 0.0, 0.0, 0.0}, r2[4] = {0.0, 0.0, 0.0, 0.0};
+                            int j = 0;
+                            for (; j + 4 <= natoms; j += 4) {
+                                for (int k = 0; k < 4; ++k) {
+                                    r1[k] += row[j + k] * q1[j + k];
+                                    r2[k] += row[j + k] * q2[j + k];
+                                }
+                            }
+                            for (int k = 0; j < natoms; ++j, ++k) {
+                                r1[k] += row[j] * q1[j];
+                                r2[k] += row[j] * q2[j];
+                            }
+                            s1 += q1[i] * ((r1[0] + r1[1]) + (r1[2] + r1[3]));
+                            s2 += q2[i] * ((r2[0] + r2[1]) + (r2[2] + r2[3]));
+                        }
+                        part1[b] = s1;
+                        part2[b] = s2;
+                    }
+                };
+                const int Tq = (pool && num_threads > 1 && nblocks > 1) ? std::min(num_threads, nblocks) : 1;
+                if (Tq > 1) {
+                    std::vector<std::future<void>> futures;
+                    futures.reserve(Tq - 1);
+                    for (int t = 1; t < Tq; ++t) futures.push_back(pool->enqueue(quad_worker, t, Tq));
+                    quad_worker(0, Tq);
+                    for (auto& f : futures) f.get();
+                } else {
+                    quad_worker(0, 1);
+                }
+                for (int b = 0; b < nblocks; ++b) {
+                    quad_p1 += part1[b];
+                    quad_p2 += part2[b];
+                }
+            }
+            double e_coul_p1 = 0.5 * quad_p1 - chi_term(topology_charges);
+            double e_coul_p2 = 0.5 * quad_p2 - chi_term(new_charges);
             double max_q_p2 = new_charges.cwiseAbs().maxCoeff();
             double max_q_p1 = topology_charges.cwiseAbs().maxCoeff();
 

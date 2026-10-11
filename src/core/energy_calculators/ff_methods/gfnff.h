@@ -1322,14 +1322,12 @@ public:
     // Curcuma had 95 .norm() calls in forcefieldthread.cpp + 53 in eeq_solver.cpp,
     // each recomputing the same distances. This API centralizes the work.
 
-    /// Compute shared packed-triangular distance arrays from m_geometry_bohr.
-    /// Allocates/refreshes m_shared_sqrab and m_shared_srab (size N(N+1)/2).
+    /// Compute the shared packed-triangular distance array m_shared_srab (size N(N+1)/2) from
+    /// m_geometry_bohr and the atoms-too-close flag (any r_ij < 1e-10 Bohr) for the EEQ solver.
+    /// Only the off-diagonal slots (j < i) are written; nothing reads the diagonal slots.
     /// Thread-pool parallelized via threadPool().
-    /// Called from GFNFF::Calculation() after prepareCNAndEEQ, before m_workspace->calculate().
+    /// Called from GFNFF::Calculation() before prepareCNAndEEQ.
     void computeSharedDistances() const;
-
-    const Eigen::VectorXd& sharedSqrab() const { return m_shared_sqrab; }
-    const Eigen::VectorXd& sharedSrab()  const { return m_shared_srab; }
 
     /// Packed lower-triangular index for atom pair (i, j) with i != j.
     /// 0-based: idx = i*(i+1)/2 + j  for i > j.
@@ -2934,13 +2932,14 @@ private:
     double calculationSingle(bool gradient);            ///< the reference (single-variant) Calculation()
     CNDerivStore m_last_dcn; ///< CN derivatives (gradient only). Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
 
-    // WP-FF-DistMatrix-Sharing (May 2026): shared packed-triangular distance arrays.
-    // Filled by computeSharedDistances() once per energy call; consumed by
-    // ForceFieldThread term loops and EEQSolver phase-2.  Layout: lower-triangular,
-    // index via GFNFF::triIdx(i, j) = i*(i+1)/2 + j (i > j).
-    mutable Eigen::VectorXd m_shared_sqrab;
+    // WP-FF-DistMatrix-Sharing (May 2026): shared packed-triangular distance array.
+    // Filled by computeSharedDistances() once per energy call; its only reader is the EEQSolver
+    // phase 2 (setExternalDistances). Layout: lower-triangular, index via
+    // GFNFF::triIdx(i, j) = i*(i+1)/2 + j (i > j); the diagonal slots are allocated, never written
+    // or read. Oct 2026: the squared-distance twin m_shared_sqrab had no reader and is gone.
     mutable Eigen::VectorXd m_shared_srab;
     mutable int             m_shared_dist_N = 0;
+    mutable bool            m_shared_dist_too_close = false; ///< any r_ij < 1e-10 Bohr in m_shared_srab
 
     // Conversion factors
     static constexpr double HARTREE_TO_KCAL = 627.5094740631;

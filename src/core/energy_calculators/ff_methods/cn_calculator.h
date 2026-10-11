@@ -23,6 +23,7 @@
 #include <Eigen/Dense>
 
 class ConfigManager;  // Forward declaration — avoids circular include
+class CxxThreadPool;  // Forward declaration for the row-parallel CN pass
 
 /**
  * @brief Coordination Number Calculator
@@ -112,12 +113,17 @@ public:
     };
 
     /// WP-D Stage C: compute CN values, raw CN, and neighbor list in a single O(N²) pass.
+    /// Oct 2026: with pool and threads > 1 the pair scan (i < j) and the CN sums are split over
+    /// the pool by rows; results are bitwise those of the serial pass for any thread count
+    /// (same pair test, same neighbor order, same per-atom summation order).
     static CNResult calculateGFNFFCNWithNeighbors(
         const std::vector<int>& atoms,
         const Eigen::MatrixXd& geometry_bohr,
         double cn_cutoff_bohr,
         double kn = -7.5,
-        double cnmax = 4.4
+        double cnmax = 4.4,
+        CxxThreadPool* pool = nullptr,
+        int threads = 1
     );
 
     /**
