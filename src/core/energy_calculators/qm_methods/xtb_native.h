@@ -1621,8 +1621,8 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("eigensolver",  [&](const json& v){ if (v.is_string()) xtb.setEigensolver(v.get<std::string>()); });
     lookup("scf_damping",  [&](const json& v){ if (v.is_number()) xtb.setScfDamping(v.get<double>()); });
     lookup("scf_threshold",[&](const json& v){ if (v.is_number()) xtb.setScfThreshold(v.get<double>()); });
-    lookup("diis_start",   [&](const json& v){ if (v.is_number_integer()) xtb.setDiisStart(v.get<int>()); });
-    lookup("diis_subspace",[&](const json& v){ if (v.is_number_integer()) xtb.setDiisSubspace(v.get<int>()); });
+    lookup("diis_start",   [&](const json& v){ if (v.is_number()) xtb.setDiisStart(static_cast<int>(std::lround(v.get<double>()))); });   // CLI numbers arrive as double
+    lookup("diis_subspace",[&](const json& v){ if (v.is_number()) xtb.setDiisSubspace(static_cast<int>(std::lround(v.get<double>()))); });
     lookup("level_shift",  [&](const json& v){ if (v.is_number()) xtb.setLevelShift(v.get<double>()); });
     lookup("warm_start",   [&](const json& v){ if (v.is_boolean()) xtb.setWarmStart(v.get<bool>()); });
     lookup("keep_diis",    [&](const json& v){ if (v.is_boolean()) xtb.setKeepDiis(v.get<bool>()); });
@@ -1643,9 +1643,9 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_precond_rebuild_rms", [&](const json& v){ if (v.is_number()) xtb.setScfPrecondRebuildRms(v.get<double>()); });
     lookup("scf_precond_max_fragment_atoms", [&](const json& v){ if (v.is_number()) xtb.setScfPrecondMaxFragmentAtoms(static_cast<int>(std::lround(v.get<double>()))); });   // CLI numbers arrive as double
     lookup("scf_extrapolation",      [&](const json& v){ if (v.is_string())          xtb.setScfExtrapolation(v.get<std::string>()); });
-    lookup("scf_extrapolation_order",[&](const json& v){ if (v.is_number_integer())  xtb.setScfExtrapolationOrder(v.get<int>()); });
+    lookup("scf_extrapolation_order",[&](const json& v){ if (v.is_number())  xtb.setScfExtrapolationOrder(static_cast<int>(std::lround(v.get<double>()))); });
     lookup("scf_extrapolation_apply",[&](const json& v){ if (v.is_string())          xtb.setScfExtrapolationApply(v.get<std::string>()); });
-    lookup("scf_xlbomd_correctors",  [&](const json& v){ if (v.is_number_integer())  xtb.setScfXlbomdCorrectors(v.get<int>()); });
+    lookup("scf_xlbomd_correctors",  [&](const json& v){ if (v.is_number())  xtb.setScfXlbomdCorrectors(static_cast<int>(std::lround(v.get<double>()))); });
     lookup("electronic_temperature", [&](const json& v){ if (v.is_number()) xtb.setElectronicTemperature(v.get<double>()); });
     // Implicit solvation (Claude Generated, June 2026). solvent_model is a
     // descriptive name ("none"/"cpcm"/"gbsa"/"alpb"); legacy numeric codes (0..3) are

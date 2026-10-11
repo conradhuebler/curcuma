@@ -110,6 +110,21 @@ main() {
     assert_string_not_in_file "inconsistent parity" cl2_spin.log "radical with -spin 1: no parity warning"
     assert_numeric_match "$REF_CL2" "$(energy_of cl2_spin.log)" "$ENERGY_TOLERANCE" "Cl2- with -spin 1 equals xtb 6.7.1"
 
+    # (f) Int parameters given on the CLI arrive as double (diis_start 1 -> 1.0); the xtb lookups used to drop
+    #     them silently (is_number_integer). With -scf_mode diis the damped warmup length changes the iteration count.
+    run diis_default.log ureawater.xyz -scf_mode diis
+    run diis_start1.log ureawater.xyz -scf_mode diis -xtb.diis_start 1
+    local ND0=$(iters_of diis_default.log); local ND1=$(iters_of diis_start1.log)
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ -n "$ND0" ] && [ -n "$ND1" ] && [ "$ND0" != "$ND1" ]; then
+        echo -e "${GREEN}PASS${NC}: -xtb.diis_start 1 reaches the SCF (iterations $ND1 vs default $ND0)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo -e "${RED}FAIL${NC}: -xtb.diis_start 1 had no effect (iterations '$ND1', default '$ND0')"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+    assert_numeric_match "$(energy_of diis_default.log)" "$(energy_of diis_start1.log)" "$ENERGY_TOLERANCE" "diis_start does not change the energy"
+
     print_test_summary
     [ $TESTS_FAILED -eq 0 ] && exit 0 || exit 1
 }
