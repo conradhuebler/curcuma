@@ -93,6 +93,8 @@ Stand.
 - **`-scf_precond frag`, ungemessen**: Systeme > 600 Atome (CPU) bzw. > 1499 (GPU); M-Erneuerung in langer MD (> 500 fs, `-scf_precond_rebuild_rms`);
   Hessian mit der eingebauten Funktion (jedes Objekt ausgelenkter Geometrien baut sein eigenes M; gemessen nur der Prototyp bis 197 Atome); Fragmente über
   `-scf_precond_max_fragment_atoms` (Standard 100; Gewinn nur bis ~30 Atomen gemessen); Elemente außer H, C, N, O; Solvatation.
+- **`-scf_precond_segment_atoms` (RAS), ungemessen** (2026-10-12): gemessen nur PEO-Ketten (58, 212 Atome, n=1); offen: Proteine, Ringe/Aromaten, Ladungstrennung,
+  Wahl von Segmentgröße und Radius (nur 3/3.0 A), MD/Hessian mit segmentiertem M, Auslassen ungerader Cluster (Pfad nie ausgelöst). [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)
 - **`-scf_precond frag` auf der GPU, offen** (2026-10-11): umgesetzt nur für die vollresidente CUDA-Schleife ([docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), Abschnitt GPU). Mit Warnung ignoriert: ROCm, Vulkan, hostgetriebene CUDA-Schleife
   (Mischer auf dem Host, der CPU-Hook wäre dort direkt nutzbar), Mehr-GPU-SCF-Aufteilung (Eigenlöser/Dichte; ungetestet, nur ein Gerät hier).
   Ohne Wächter divergiert der unrelaxierte 599-Atom-Cluster mit Mischpräzision (151 Iterationen, harter Fehler, n=3).

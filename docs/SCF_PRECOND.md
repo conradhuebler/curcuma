@@ -22,8 +22,8 @@ so the fixed point and the energy do not change; only the number of SCF iteratio
   J_f by central differences (h = 1e-4, 2 dim_f SCC evaluations) at its converged state; B_f = -J_f^-1.
 - M = sum_f R_f^T D_f B_f R_f + C (additive Schwarz form; R_f gathers the fragment's shells, dipoles
   and quadrupoles from x, D_f = 1 because the blocks do not overlap, C = alpha on every index without a block).
-- M*v costs O(sum_f dim_f^2); no dense dim x dim matrix is formed. Overlapping blocks (with weights D_f)
-  fit the same storage, not implemented.
+- M*v costs O(sum_f dim_f^2); no dense dim x dim matrix is formed. Overlapping blocks: only the restricted form of
+  the segmentation below (zero rows outside the own atoms), no weighted partition of unity.
 - M is built at the first SCF of an XTB object that uses it and reused by every later SCF of that object
   (MD, optimisation steps); rebuilt for a new molecule or when the RMS displacement from the build geometry
   exceeds `-scf_precond_rebuild_rms`.
@@ -40,7 +40,9 @@ so the fixed point and the energy do not change; only the number of SCF iteratio
 | `-scf_precond` | `none` | `none` or `frag`; other values: warning, `none` |
 | `-scf_precond_guard` | `g2:4:best` | `g2:<n0>[:<ratio>][:keep][:best]`, `g1:<tau>[:keep][:best]` or `off`; only with `frag` |
 | `-scf_precond_rebuild_rms` | `0` | rebuild M when the RMS displacement from its build geometry exceeds this (Angstrom); 0 = never |
-| `-scf_precond_max_fragment_atoms` | `100` | molecules above this keep the scalar seed (one warning); 0 = no limit. A block costs 2*dim SCC-map evaluations (see below) |
+| `-scf_precond_max_fragment_atoms` | `100` | molecules above this keep the scalar seed (one warning) or are segmented; 0 = no limit. A block costs 2*dim SCC-map evaluations (see below) |
+| `-scf_precond_segment_atoms` | `0` | > 0: segment molecules above `-scf_precond_max_fragment_atoms`, this many heavy atoms per segment (section Segmentation); 0 = off |
+| `-scf_precond_segment_radius` | `3.0` | domain radius of a segment (Angstrom) |
 
 Developer environment variables (not for production runs):
 
@@ -52,7 +54,8 @@ Developer environment variables (not for production runs):
 | `CURCUMA_SCF_TRACE=1` | per CPU SCF iteration: residual norms of the q and multipole blocks and phase times on stderr; `SCFTRACE_GUARD` when the guard fires |
 
 `-verbosity 2` prints `SCF precond: frag, N fragments, dim D, built in T ms` and the block count, the
-atoms left on the scalar seed and the memory of M.
+atoms left on the scalar seed and the memory of M; with segmentation also the number of segments, the mean cluster size
+(atoms including caps) and the skipped segments.
 
 ## When it is ignored (one warning, scalar seed)
 
@@ -149,6 +152,36 @@ On the unrelaxed ureawater197 `frag` does not help (24 -> 33 iterations, guard).
   coarse matrix depends on the states at the Fermi level and changes with them. Code removed Oct 11, 2026; lab journal
   in the vault, 'curcuma GFN2-SCF-Vorkonditionierung', steps 7 to 10.
 
+## Segmentation of large molecules (`-scf_precond_segment_atoms`, Oct 12, 2026)
+
+Status: AI-generated, machine-tested only, human production testing pending. Code: `segmentFragment` and
+`XTB::buildFragmentPreconditioner` in `xtb_precond.cpp`.
+
+- Restricted additive Schwarz (Cai and Sarkis, SIAM J. Sci. Comput. 21, 792 (1999); Smith/Bjorstad/Gropp 1996): M = sum_i R_i^T D_i B_i R_i
+  with overlapping domains, D_i = 1 on the components of the segment's own atoms and 0 elsewhere; own atoms are disjoint, so no
+  component is counted twice.
+- Segments: heavy atoms in breadth-first order of the bond graph (start at the smallest index), consecutive groups of
+  `scf_precond_segment_atoms`; each H joins its nearest heavy atom. Domain: heavy atoms within `scf_precond_segment_radius` of an own heavy
+  atom, with their H. Cut bonds get an H cap on the bond axis at r_cov(atom) + r_cov(H).
+- Each domain is a neutral cluster (real atoms, then caps) built like a fragment job (own XTB, central-difference Jacobian, all jobs in
+  one thread pool, one result slot each); B_loc = -J_loc^-1 is restricted to the real atoms, rows of non-own atoms are set to zero
+  (stored, so the CUDA copy is unchanged). Clusters with an odd electron count (valence electrons + one per cap) are skipped; their own
+  atoms keep alpha (never triggered in the tests). A domain that covers the whole molecule gives the exact block rows: with R = 100 A the
+  SCF trace of PEO-58 is identical to the whole-molecule block (4 iterations).
+- Measurements (n=1 each, 9950X3D, `-sp -method gfn2`, `-scf_precond_segment_atoms 3`, R = 3.0, `-scf_precond_max_fragment_atoms 20`):
+
+| System | none | segmented | segments, mean cluster | build of M | energy |
+|---|---|---|---|---|---|
+| PEO 58 atoms (`peo8-chain.h-capped`), `-threads 2` / `1` | 11 | 5 / 5 | 8, 18.4 atoms | 0.18 s / 0.34 s | same 8 decimals |
+| PEO 212 atoms, `-threads 8` / `1` | 12 | 6 / 6 | 30, 19.6 atoms | 0.20 s / 1.39 s | -311.85122954 Eh in all |
+| PEO 212 atoms, `-gpu cuda` (RTX 5080), mixed precision / FP64 | 12 / 11 | 8 / 7 | as above | 0.20 s | same 8 decimals |
+
+  PEO chain 1410 atoms (`peo201-chain`), `-threads 12`, n=3 alternating: none 12 iterations, SCF 10.2 to 10.5 s, wall 11.9 to 12.4 s; segmented 7
+  iterations, SCF 5.7 to 5.9 s, M built in 0.95 s (202 segments), wall 8.4 to 8.5 s (-30 %), energy -2088.25340678 Eh in both. Short MD (5 fs, 12 threads,
+  n=2): wall 72.8 / 71.1 s without, 50.4 / 49.2 s with (-30 %). Also at a single point of 212 atoms the build (0.2 s) costs more than the SCF saves (68 ms).
+  The whole 212-atom block gave 4 iterations after 129.5 s of build (section Not measured). Not measured: other molecules than PEO,
+  other segment sizes and radii, MD or Hessian with a segmented M, rings and charge-separated molecules.
+
 ## Census: frag against none on GMTKN55 and MOR41 (Oct 12, 2026)
 
 Same binary, `-threads 1`, n=1 per structure, 2555 structures (open shells with `-spin`), 14 processes in parallel; single point
@@ -179,6 +212,7 @@ Hessian, ConfSearch) of the same molecule, not for single points; it is not the 
   M built in 129.5 s (one fragment is built serially), SCF 12 -> 4 iterations (164 -> 55 ms), i.e. break-even after about 1200 SCFs. The
   block of a single-fragment system is the exact Jacobian of the whole system. The iteration gain for ordinary fragments was measured up to ~30 atoms.
 - Not implemented: GFN1; ROCm, Vulkan and the host-driven CUDA loop; multi-GPU SCF split; open shells; charged systems and ionic fragments (NaCl needs
-  overlapping neighbourhoods of about R = 5 A for its soft dipole mode); overlapping Schwarz blocks.
+  overlapping neighbourhoods of about R = 5 A for its soft dipole mode); overlapping Schwarz blocks between molecules (segmentation
+  overlaps only inside one molecule).
 - The guard default is a rule from the prototype test set (24 scalar SCFs); on the unrelaxed 599-atom
   cluster it costs 4 iterations against `none` at 8 threads.

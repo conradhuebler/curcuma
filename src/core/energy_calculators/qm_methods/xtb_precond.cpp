@@ -137,14 +137,16 @@ SchwarzPreconditioner::SchwarzPreconditioner(int dim, double alpha)
 {
 }
 
-bool SchwarzPreconditioner::addBlock(Block block)
+bool SchwarzPreconditioner::addBlock(Block block, const std::vector<char>& covers)
 {
     const int n = static_cast<int>(block.index.size());
     if (n == 0 || block.B.rows() != n || block.B.cols() != n) return false;
     if (block.weight.size() != 0 && block.weight.size() != n) return false;
+    if (!covers.empty() && static_cast<int>(covers.size()) != n) return false;
     for (int i : block.index)
         if (i < 0 || i >= m_dim) return false;
-    for (int i : block.index) m_fallback(i) = 0.0;   // covered: C has no entry here
+    for (int k = 0; k < n; ++k)   // covered: C has no entry here
+        if (covers.empty() || covers[k]) m_fallback(block.index[k]) = 0.0;
     m_blocks.push_back(std::move(block));
     return true;
 }
@@ -236,16 +238,20 @@ void numericalScfJacobian(const Vector& x_star, const Vector& g_star,
     }
 }
 
+namespace {
+/// Pyykko-Atsumi single-bond covalent radius (Angstrom), 1.5 for elements outside the table.
+double covalentRadius(int z)
+{
+    return (z > 0 && z < static_cast<int>(Elements::CovalentRadius.size())) ? Elements::CovalentRadius[z] : 1.5;
+}
+} // namespace
+
 std::vector<std::vector<int>> detectCovalentFragments(const std::vector<int>& atoms,
                                                       const Matrix& geometry)
 {
     const int nat = static_cast<int>(atoms.size());
     std::vector<double> rcov(nat, 0.0);
-    for (int i = 0; i < nat; ++i) {
-        const int z = atoms[i];
-        rcov[i] = (z > 0 && z < static_cast<int>(Elements::CovalentRadius.size()))
-                      ? Elements::CovalentRadius[z] : 1.5;
-    }
+    for (int i = 0; i < nat; ++i) rcov[i] = covalentRadius(atoms[i]);
     // Union-find over the bond graph.
     std::vector<int> parent(nat);
     for (int i = 0; i < nat; ++i) parent[i] = i;
@@ -269,6 +275,107 @@ std::vector<std::vector<int>> detectCovalentFragments(const std::vector<int>& at
         frags[frag_of[r]].push_back(i);   // i ascending: each fragment is sorted
     }
     return frags;
+}
+
+ScfPrecondSegment::ScfPrecondSegment() = default;
+ScfPrecondSegment::~ScfPrecondSegment() = default;
+ScfPrecondSegment::ScfPrecondSegment(const ScfPrecondSegment&) = default;
+ScfPrecondSegment::ScfPrecondSegment(ScfPrecondSegment&&) noexcept = default;
+ScfPrecondSegment& ScfPrecondSegment::operator=(const ScfPrecondSegment&) = default;
+ScfPrecondSegment& ScfPrecondSegment::operator=(ScfPrecondSegment&&) noexcept = default;
+
+std::vector<ScfPrecondSegment> segmentFragment(const std::vector<int>& atoms, const Matrix& geometry,
+                                               const std::vector<int>& frag, int segment_heavy_atoms,
+                                               double radius)
+{
+    std::vector<ScfPrecondSegment> segs;
+    const int nf = static_cast<int>(frag.size());
+    if (nf == 0 || segment_heavy_atoms <= 0) return segs;
+
+    // Local positions 0..nf-1 refer to frag[]. Bond graph inside the fragment (same criterion as
+    // detectCovalentFragments), neighbours in ascending order.
+    std::vector<std::vector<int>> nbr(nf);
+    for (int a = 0; a < nf; ++a)
+        for (int b = a + 1; b < nf; ++b) {
+            const double cut = 1.25 * (covalentRadius(atoms[frag[a]]) + covalentRadius(atoms[frag[b]]));
+            if ((geometry.row(frag[a]) - geometry.row(frag[b])).squaredNorm() < cut * cut) {
+                nbr[a].push_back(b);
+                nbr[b].push_back(a);
+            }
+        }
+    std::vector<char> heavy(nf, 0);
+    bool any_heavy = false;
+    for (int a = 0; a < nf; ++a) { heavy[a] = atoms[frag[a]] > 1; any_heavy = any_heavy || heavy[a]; }
+    if (!any_heavy) std::fill(heavy.begin(), heavy.end(), 1);
+
+    // Heavy atoms in breadth-first order over heavy-heavy bonds; a heavy atom not reachable from
+    // the first start (bridged only through H) starts a new search at the smallest unvisited index.
+    std::vector<int> order;
+    std::vector<char> seen(nf, 0);
+    for (int s = 0; s < nf; ++s) {
+        if (!heavy[s] || seen[s]) continue;
+        std::vector<int> queue{ s };
+        seen[s] = 1;
+        for (std::size_t q = 0; q < queue.size(); ++q) {
+            const int a = queue[q];
+            order.push_back(a);
+            for (int b : nbr[a])
+                if (heavy[b] && !seen[b]) { seen[b] = 1; queue.push_back(b); }
+        }
+    }
+
+    // Every light atom (H) joins its nearest heavy atom.
+    std::vector<int> host(nf, -1);
+    for (int a = 0; a < nf; ++a) {
+        if (heavy[a]) { host[a] = a; continue; }
+        double best = std::numeric_limits<double>::max();
+        for (int b = 0; b < nf; ++b)
+            if (heavy[b]) {
+                const double d = (geometry.row(frag[a]) - geometry.row(frag[b])).squaredNorm();
+                if (d < best) { best = d; host[a] = b; }
+            }
+    }
+    std::vector<std::vector<int>> light_of(nf);
+    for (int a = 0; a < nf; ++a)
+        if (!heavy[a]) light_of[host[a]].push_back(a);
+
+    const double r2 = radius * radius;
+    const double rcov_h = covalentRadius(1);
+    for (std::size_t g0 = 0; g0 < order.size(); g0 += static_cast<std::size_t>(segment_heavy_atoms)) {
+        const std::size_t g1 = std::min(order.size(), g0 + static_cast<std::size_t>(segment_heavy_atoms));
+        std::vector<char> own(nf, 0), dom(nf, 0);
+        for (std::size_t g = g0; g < g1; ++g) {
+            own[order[g]] = 1;
+            for (int l : light_of[order[g]]) own[l] = 1;
+        }
+        // Domain: heavy atoms within radius of an own heavy atom, plus their light atoms.
+        for (int b = 0; b < nf; ++b) {
+            if (!heavy[b]) continue;
+            for (std::size_t g = g0; g < g1; ++g)
+                if ((geometry.row(frag[b]) - geometry.row(frag[order[g]])).squaredNorm() <= r2) {
+                    dom[b] = 1;
+                    for (int l : light_of[b]) dom[l] = 1;
+                    break;
+                }
+        }
+        ScfPrecondSegment seg;
+        std::vector<Eigen::RowVector3d> caps;
+        for (int a = 0; a < nf; ++a) {
+            if (own[a]) seg.own.push_back(frag[a]);
+            if (!dom[a]) continue;
+            seg.domain.push_back(frag[a]);
+            for (int k : nbr[a]) {
+                if (dom[k]) continue;
+                const Eigen::RowVector3d ra = geometry.row(frag[a]);
+                const Eigen::RowVector3d u = (geometry.row(frag[k]) - geometry.row(frag[a])).normalized();
+                caps.push_back(ra + u * (covalentRadius(atoms[frag[a]]) + rcov_h));
+            }
+        }
+        seg.caps = Matrix(static_cast<Eigen::Index>(caps.size()), 3);
+        for (std::size_t c = 0; c < caps.size(); ++c) seg.caps.row(static_cast<Eigen::Index>(c)) = caps[c];
+        segs.push_back(std::move(seg));
+    }
+    return segs;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -405,10 +512,28 @@ struct QuietLogScope {
     QuietLogScope(const QuietLogScope&) = delete;
     QuietLogScope& operator=(const QuietLogScope&) = delete;
 };
+
+/// Claude Generated (Oct 2026): one local cluster of the fragment preconditioner build - real atoms (global
+/// indices, block order) plus hydrogen cap positions; own[k] marks the real atoms whose rows enter M (all for a
+/// whole fragment). Special members out of line so that -Winline stays quiet.
+struct PrecondJob {
+    int frag = -1;
+    bool segment = false;
+    std::vector<int> real;
+    Matrix caps;
+    std::vector<char> own;
+    PrecondJob();
+    ~PrecondJob();
+    PrecondJob(PrecondJob&&) noexcept;
+    PrecondJob& operator=(PrecondJob&&) = delete;
+};
+PrecondJob::PrecondJob() = default;
+PrecondJob::~PrecondJob() = default;
+PrecondJob::PrecondJob(PrecondJob&&) noexcept = default;
 } // namespace
 
 /**
- * @brief Build M = sum_f R_f^T (-J_f^-1) R_f + alpha on the rest (Claude Generated, Oct 2026).
+ * @brief Build M = sum_i R_i^T D_i (-J_i^-1) R_i + alpha on the rest (Claude Generated, Oct 2026).
  *
  * Fragments: detectCovalentFragments. A fragment gets its own block unless it is a single atom,
  * has an odd number of valence electrons as a neutral species, or carries a net charge in the
@@ -416,9 +541,17 @@ struct QuietLogScope {
  * (scf_damping). Every included fragment runs its own neutral closed-shell GFN2 SCF (FP64,
  * default settings, the parent's electronic temperature, gas phase) and then the central-
  * difference Jacobian of its SCC map at its converged state (m_scf_jac_capture, h = 1e-4).
- * The fragments run in parallel over the -threads budget (std::thread, one XTB per fragment,
- * each serial); every result goes to its own slot, so the outcome does not depend on the thread
- * count or the scheduling.
+ *
+ * A fragment with more than scf_precond_max_fragment_atoms atoms keeps the scalar seed, unless
+ * scf_precond_segment_atoms > 0: then it is cut into segments (segmentFragment) and each segment
+ * contributes the rows of its own atoms of -J_loc^-1, J_loc the Jacobian of its hydrogen-capped,
+ * neutral local cluster (restricted additive Schwarz, D_i = 1 on own components, 0 elsewhere).
+ * A cluster with an odd electron count (valence electrons + one per cap) is skipped; its own atoms
+ * keep alpha. If the domain is the whole fragment the block is exact (no caps).
+ *
+ * All jobs (whole fragments and segments) run in one pool over the -threads budget (std::thread,
+ * one XTB per job, each serial); every result goes to its own slot, so the outcome does not depend
+ * on the thread count or the scheduling.
  *
  * @param err reason on failure
  * @return true if m_scf_precond_frag holds the new M
@@ -443,24 +576,57 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
     const bool have_eeq = (q_eeq.size() == nat && q_eeq.allFinite());
 
     enum class Skip { None, SingleAtom, OddElectrons, Charged, TooLarge };
+    const bool segmenting = (m_scf_precond_segment_atoms > 0);
     std::vector<Skip> skip(frags.size(), Skip::None);
-    std::vector<int> jobs;
+    std::vector<PrecondJob> jobs;
+    int n_seg_frags = 0, n_segments = 0, n_seg_odd = 0, n_seg_odd_atoms = 0;
     for (size_t f = 0; f < frags.size(); ++f) {
         const auto& a = frags[f];
         double nel = 0.0, q = 0.0;
         for (int i : a) { nel += m_wfn.n0_at(i); if (have_eeq) q += q_eeq(i); }
+        const bool large = m_scf_precond_max_frag_atoms > 0 && a.size() > static_cast<size_t>(m_scf_precond_max_frag_atoms);
         if (a.size() == 1) skip[f] = Skip::SingleAtom;
-        else if (m_scf_precond_max_frag_atoms > 0 && a.size() > static_cast<size_t>(m_scf_precond_max_frag_atoms)) skip[f] = Skip::TooLarge;
+        else if (large && !segmenting) skip[f] = Skip::TooLarge;
         else if ((std::llround(nel) % 2) != 0) skip[f] = Skip::OddElectrons;
         else if (!have_eeq || std::fabs(q) > 0.5) skip[f] = Skip::Charged;
-        else jobs.push_back(static_cast<int>(f));
+        else if (!large) {
+            PrecondJob j;
+            j.frag = static_cast<int>(f);
+            j.real = a;
+            j.own.assign(a.size(), 1);
+            jobs.push_back(std::move(j));
+        } else {
+            ++n_seg_frags;
+            for (ScfPrecondSegment& s : segmentFragment(m_atoms, m_geometry, a, m_scf_precond_segment_atoms,
+                                                        m_scf_precond_segment_radius)) {
+                ++n_segments;
+                double nel_c = static_cast<double>(s.caps.rows());   // one electron per H cap
+                for (int i : s.domain) nel_c += m_wfn.n0_at(i);
+                if ((std::llround(nel_c) % 2) != 0) {
+                    ++n_seg_odd;
+                    n_seg_odd_atoms += static_cast<int>(s.own.size());
+                    continue;
+                }
+                PrecondJob j;
+                j.frag = static_cast<int>(f);
+                j.segment = true;
+                j.own.assign(s.domain.size(), 0);
+                for (size_t k = 0, o = 0; k < s.domain.size(); ++k) {   // both lists ascending
+                    while (o < s.own.size() && s.own[o] < s.domain[k]) ++o;
+                    if (o < s.own.size() && s.own[o] == s.domain[k]) j.own[k] = 1;
+                }
+                j.real = std::move(s.domain);
+                j.caps = std::move(s.caps);
+                jobs.push_back(std::move(j));
+            }
+        }
     }
 
     // Elements outside the measured set (H, C, N, O): allowed, one warning per process.
     {
         std::set<int> other;
-        for (int f : jobs)
-            for (int i : frags[f])
+        for (const PrecondJob& j : jobs)
+            for (int i : j.real)
                 if (m_atoms[i] != 1 && m_atoms[i] != 6 && m_atoms[i] != 7 && m_atoms[i] != 8)
                     other.insert(m_atoms[i]);
         static std::atomic<bool> warned_elements{ false };
@@ -475,22 +641,29 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
         }
     }
 
-    // Per-fragment Jacobian -> block B_f = -J_f^-1.
+    // Per-job Jacobian -> block B = -J^-1, restricted to the real atoms, rows of non-own atoms zero.
     struct Result { bool ok = false; std::string why; PrecondMatrix B; };
     std::vector<Result> res(jobs.size());
     const double kT_parent = m_electronic_temp;
-    auto run_job = [&](size_t j) {
-        Result& r = res[j];
-        const auto& atoms = frags[jobs[j]];
+    auto run_job = [&](size_t jj) {
+        Result& r = res[jj];
+        const PrecondJob& job = jobs[jj];
+        const int nreal = static_cast<int>(job.real.size());
+        const int ncap = static_cast<int>(job.caps.rows());
+        const int nsub = nreal + ncap;
         try {
             Mol sub;
-            sub.m_number_atoms = static_cast<int>(atoms.size());
+            sub.m_number_atoms = nsub;
             sub.m_charge = 0;
             sub.m_spin = 0.0;
-            sub.m_geometry = Matrix(atoms.size(), 3);
-            for (std::size_t k = 0; k < atoms.size(); ++k) {
-                sub.m_atoms.push_back(m_atoms[atoms[k]]);
-                sub.m_geometry.row(k) = m_geometry.row(atoms[k]);
+            sub.m_geometry = Matrix(nsub, 3);
+            for (int k = 0; k < nreal; ++k) {
+                sub.m_atoms.push_back(m_atoms[job.real[k]]);
+                sub.m_geometry.row(k) = m_geometry.row(job.real[k]);
+            }
+            for (int c = 0; c < ncap; ++c) {   // caps last: their rows/columns are dropped below
+                sub.m_atoms.push_back(1);
+                sub.m_geometry.row(nreal + c) = job.caps.row(c);
             }
             XTB frag(m_method);
             frag.setScfGuess("eeq");
@@ -502,13 +675,28 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
             if (!frag.InitialiseMolecule(sub)) { r.why = "fragment initialisation failed"; return; }
             frag.Calculation(false);
             if (frag.hasError() || !frag.m_scf_converged) { r.why = "fragment SCF failed"; return; }
-            const int fdim = frag.m_basis.nsh + 9 * static_cast<int>(atoms.size());
+            const int fnsh = frag.m_basis.nsh;
+            const int fdim = fnsh + 9 * nsub;
             if (frag.m_scf_jac_result.rows() != fdim) { r.why = "fragment Jacobian missing"; return; }
-            for (std::size_t k = 0; k < atoms.size(); ++k)
-                if (frag.m_basis.nsh_at[k] != m_basis.nsh_at[atoms[k]]) { r.why = "shell count mismatch"; return; }
+            for (int k = 0; k < nreal; ++k)
+                if (frag.m_basis.nsh_at[k] != m_basis.nsh_at[job.real[k]]) { r.why = "shell count mismatch"; return; }
             Eigen::PartialPivLU<PrecondMatrix> lu(frag.m_scf_jac_result);
-            r.B = -lu.inverse();
-            if (!r.B.allFinite()) { r.why = "singular fragment Jacobian"; return; }
+            const PrecondMatrix Bloc = -lu.inverse();
+            if (!Bloc.allFinite()) { r.why = "singular fragment Jacobian"; return; }
+            if (ncap == 0 && !job.segment) { r.B = Bloc; r.ok = true; return; }   // whole fragment: local = block order
+            // Local SCC positions of the real atoms in block order (shells atom by atom, then dp
+            // and qp component-wise over the real atoms) and their own flags.
+            std::vector<int> sel;
+            std::vector<char> own_row;
+            for (int k = 0; k < nreal; ++k)
+                for (int s = 0; s < frag.m_basis.nsh_at[k]; ++s) { sel.push_back(frag.m_basis.ish_at[k] + s); own_row.push_back(job.own[k]); }
+            for (int c = 0; c < 9; ++c)   // dp k = 0..2, qp k = 0..5: offset nsh + c*nsub
+                for (int k = 0; k < nreal; ++k) { sel.push_back(fnsh + c * nsub + k); own_row.push_back(job.own[k]); }
+            const int n = static_cast<int>(sel.size());
+            r.B = PrecondMatrix::Zero(n, n);
+            for (int i = 0; i < n; ++i)
+                if (own_row[i])
+                    for (int k = 0; k < n; ++k) r.B(i, k) = Bloc(sel[i], sel[k]);
             r.ok = true;
         } catch (const std::exception& e) {
             r.why = e.what();
@@ -534,29 +722,40 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
     }
     const int saved_verbosity = CurcumaLogger::get_verbosity();   // restored by the scope above
 
-    // Assemble the Schwarz blocks (non-overlapping, D_f = 1).
+    // Assemble the Schwarz blocks (own rows disjoint, D_i = 1 on them).
     auto P = std::make_shared<SchwarzPreconditioner>(dim, alpha);
-    int n_block = 0, n_failed = 0, n_scalar_atoms = 0;
+    int n_block = 0, n_failed = 0, n_scalar_atoms = n_seg_odd_atoms;
+    long long seg_cluster_atoms = 0;
+    int n_seg_jobs = 0;
     std::string first_fail;
     for (size_t j = 0; j < jobs.size(); ++j) {
-        const auto& atoms = frags[jobs[j]];
+        const PrecondJob& job = jobs[j];
+        if (job.segment) {
+            ++n_seg_jobs;
+            seg_cluster_atoms += static_cast<long long>(job.real.size()) + job.caps.rows();
+        }
+        int n_own = 0;
+        for (char o : job.own) n_own += o ? 1 : 0;
         if (!res[j].ok) {
-            ++n_failed; n_scalar_atoms += static_cast<int>(atoms.size());
+            ++n_failed; n_scalar_atoms += n_own;
             if (first_fail.empty()) first_fail = res[j].why;
             continue;
         }
         SchwarzPreconditioner::Block b;
-        // Local order of the fragment SCC vector: shells atom by atom, then dp (k = x,y,z) and
-        // qp (k = xx,xy,yy,xz,yz,zz) component-wise over the fragment's atoms.
-        for (int a : atoms)
-            for (int s = 0; s < m_basis.nsh_at[a]; ++s) b.index.push_back(m_basis.ish_at[a] + s);
+        std::vector<char> covers;
+        // Order of the local SCC vector: shells atom by atom, then dp (k = x,y,z) and
+        // qp (k = xx,xy,yy,xz,yz,zz) component-wise over the real atoms.
+        for (size_t k = 0; k < job.real.size(); ++k) {
+            const int a = job.real[k];
+            for (int s = 0; s < m_basis.nsh_at[a]; ++s) { b.index.push_back(m_basis.ish_at[a] + s); covers.push_back(job.own[k]); }
+        }
         for (int k = 0; k < 3; ++k)
-            for (int a : atoms) b.index.push_back(nsh + k * nat + a);
+            for (size_t m = 0; m < job.real.size(); ++m) { b.index.push_back(nsh + k * nat + job.real[m]); covers.push_back(job.own[m]); }
         for (int k = 0; k < 6; ++k)
-            for (int a : atoms) b.index.push_back(nsh + 3 * nat + k * nat + a);
+            for (size_t m = 0; m < job.real.size(); ++m) { b.index.push_back(nsh + 3 * nat + k * nat + job.real[m]); covers.push_back(job.own[m]); }
         b.B = std::move(res[j].B);
-        if (!P->addBlock(std::move(b))) {
-            err = "inconsistent block for fragment " + std::to_string(jobs[j]);
+        if (!P->addBlock(std::move(b), covers)) {
+            err = "inconsistent block for fragment " + std::to_string(job.frag);
             return false;
         }
         ++n_block;
@@ -571,11 +770,12 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
         static std::atomic<bool> warned_large{ false };
         if (!warned_large.exchange(true))
             CurcumaLogger::warn(fmt::format("scf_precond frag: {} fragment(s) with more than {} atoms keep the scalar seed "
-                                            "(a fragment Jacobian costs 2*dim SCC-map evaluations, ~2 min for 212 atoms on one thread; raise scf_precond_max_fragment_atoms, 0 = no limit)",
+                                            "(a fragment Jacobian costs 2*dim SCC-map evaluations, ~2 min for 212 atoms on one thread; raise scf_precond_max_fragment_atoms, 0 = no limit, "
+                                            "or segment them with scf_precond_segment_atoms)",
                                             n_skip[4], m_scf_precond_max_frag_atoms));
     }
     if (n_failed > 0)
-        CurcumaLogger::warn(fmt::format("scf_precond frag: {} of {} fragment Jacobians failed (first: {}); "
+        CurcumaLogger::warn(fmt::format("scf_precond frag: {} of {} block Jacobians failed (first: {}); "
                                         "their atoms keep the scalar seed", n_failed, jobs.size(), first_fail));
 
     m_scf_precond_frag = P;
@@ -589,6 +789,11 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
                                         "odd electrons {}, charged {}, too large {}, failed {}), memory {:.3f} MB",
                                         n_block, n_scalar_atoms, n_skip[1], n_skip[2], n_skip[3], n_skip[4], n_failed,
                                         8.0 * static_cast<double>(P->storedDoubles()) / 1048576.0));
+        if (n_seg_frags > 0)
+            CurcumaLogger::info(fmt::format("SCF precond: {} fragment(s) segmented (RAS, {} heavy atoms per segment, R = {:.2f} A): "
+                                            "{} segments, mean cluster {:.1f} atoms incl. caps, {} skipped (odd electrons)",
+                                            n_seg_frags, m_scf_precond_segment_atoms, m_scf_precond_segment_radius, n_segments,
+                                            n_seg_jobs > 0 ? static_cast<double>(seg_cluster_atoms) / n_seg_jobs : 0.0, n_seg_odd));
     }
     return true;
 }

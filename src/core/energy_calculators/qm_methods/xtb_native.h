@@ -942,6 +942,8 @@ public:
     void setScfPrecondGuard(const std::string& s) { m_scf_precond_guard = s; }
     void setScfPrecondRebuildRms(double r)        { m_scf_precond_rebuild_rms = (r > 0.0) ? r : 0.0; }
     void setScfPrecondMaxFragmentAtoms(int n)     { m_scf_precond_max_frag_atoms = (n > 0) ? n : 0; }   // 0 = no limit
+    void setScfPrecondSegmentAtoms(int n)         { m_scf_precond_segment_atoms = (n > 0) ? n : 0; }    // 0 = no segmentation
+    void setScfPrecondSegmentRadius(double r)     { if (r > 0.0) m_scf_precond_segment_radius = r; }    // Angstrom
 
     // Warm-start: reuse converged charges from the previous geometry step.
     // Activated by MD/opt capabilities; also settable via -warm_start false.
@@ -1570,6 +1572,8 @@ private:
     std::string  m_scf_precond_guard = "g2:4:best"; // ScfPrecondGuard spec, "off" = no guard
     double       m_scf_precond_rebuild_rms = 0.0;   // Angstrom
     int          m_scf_precond_max_frag_atoms = 100;   // molecules above this keep the scalar seed (0 = no limit)
+    int          m_scf_precond_segment_atoms = 0;      // >0: segment larger molecules (RAS), heavy atoms per segment
+    double       m_scf_precond_segment_radius = 3.0;   // RAS domain radius around a segment (Angstrom)
     bool         m_scf_precond_warned = false;      // "ignored" warning given once per object
     std::string  m_scf_precond_guard_checked;       // guard spec already parsed (warn once per spec)
     std::shared_ptr<const SchwarzPreconditioner> m_scf_precond_frag;
@@ -1642,6 +1646,8 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_precond_guard",       [&](const json& v){ if (v.is_string()) xtb.setScfPrecondGuard(v.get<std::string>()); });
     lookup("scf_precond_rebuild_rms", [&](const json& v){ if (v.is_number()) xtb.setScfPrecondRebuildRms(v.get<double>()); });
     lookup("scf_precond_max_fragment_atoms", [&](const json& v){ if (v.is_number()) xtb.setScfPrecondMaxFragmentAtoms(static_cast<int>(std::lround(v.get<double>()))); });   // CLI numbers arrive as double
+    lookup("scf_precond_segment_atoms",  [&](const json& v){ if (v.is_number()) xtb.setScfPrecondSegmentAtoms(static_cast<int>(std::lround(v.get<double>()))); });   // CLI numbers arrive as double
+    lookup("scf_precond_segment_radius", [&](const json& v){ if (v.is_number()) xtb.setScfPrecondSegmentRadius(v.get<double>()); });
     lookup("scf_extrapolation",      [&](const json& v){ if (v.is_string())          xtb.setScfExtrapolation(v.get<std::string>()); });
     lookup("scf_extrapolation_order",[&](const json& v){ if (v.is_number())  xtb.setScfExtrapolationOrder(static_cast<int>(std::lround(v.get<double>()))); });
     lookup("scf_extrapolation_apply",[&](const json& v){ if (v.is_string())          xtb.setScfExtrapolationApply(v.get<std::string>()); });

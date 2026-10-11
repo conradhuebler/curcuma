@@ -28,15 +28,19 @@
  *     B_i  local block (here -J_f^-1 of one fragment)
  *     D_i  diagonal weights of block i (here 1: the blocks do not overlap)
  *     C    diagonal fallback alpha on every index that no block covers.
- *   This is the one-level part of a Schwarz decomposition (no coarse level). Overlapping blocks
- *   (neighbourhoods of a fragment, with weights D_i as a partition of unity on the overlap,
- *   as in restricted additive Schwarz) fit into the same storage and apply() (not implemented).
+ *   This is the one-level part of a Schwarz decomposition (no coarse level).
+ *   Large fragments (scf_precond_segment_atoms > 0, Oct 2026): restricted additive Schwarz. The
+ *   fragment is cut into segments (segmentFragment); each segment's Jacobian is computed on an
+ *   overlapping, hydrogen-capped local cluster, B_i = -J_loc^-1 is restricted to the cluster's real
+ *   atoms and only the rows of the segment's own atoms are kept (D_i = 1 there, 0 elsewhere; the
+ *   zero rows are stored, so the weights stay empty and the device copy is unchanged).
  *   Cost of apply(): O(sum_i dim_i^2); no dense dim x dim matrix is formed.
  *
  * References:
  *   D. D. Johnson, Phys. Rev. B 38, 12807 (1988) - modified Broyden method.
  *   V. Eyert, J. Comput. Phys. 124, 271 (1996) - Broyden methods, inverse-Jacobian seed.
  *   B. Smith, P. Bjorstad, W. Gropp, Domain Decomposition (Cambridge 1996) - additive Schwarz.
+ *   X.-C. Cai, M. Sarkis, SIAM J. Sci. Comput. 21, 792 (1999) - restricted additive Schwarz.
  *
  * Claude Generated (Oct 2026). AI-generated, machine-tested only; human production testing
  * pending. See docs/SCF_PRECOND.md.
@@ -133,8 +137,12 @@ public:
     SchwarzPreconditioner(int dim, double alpha);
 
     /// @brief Add a block. Indices must lie in [0, dim); B must be index.size() square.
+    /// @param covers local positions k (index[k]) on which the fallback C is removed; empty = all.
+    ///        A restricted-additive-Schwarz block (Claude Generated, Oct 2026) covers only the rows
+    ///        of its own atoms; its other rows are zero and its other indices keep C unless another
+    ///        block owns them.
     /// @return false (and nothing added) on inconsistent input.
-    bool addBlock(Block block);
+    bool addBlock(Block block, const std::vector<char>& covers = {});
 
     /// @brief M*v, O(sum_i dim_i^2).
     Vector apply(const Vector& v) const;
@@ -187,5 +195,49 @@ void numericalScfJacobian(const Vector& x_star, const Vector& g_star,
  */
 std::vector<std::vector<int>> detectCovalentFragments(const std::vector<int>& atoms,
                                                       const Matrix& geometry);
+
+/**
+ * @brief One segment of a large fragment for the restricted additive Schwarz (RAS) build
+ *        (Claude Generated, Oct 2026).
+ *
+ * own:    atoms whose rows of M this segment provides (disjoint between segments of a fragment)
+ * domain: own atoms plus the neighbourhood the local cluster is computed for, ascending indices
+ * caps:   ncap x 3 positions (Angstrom) of the hydrogen atoms that saturate the cut bonds
+ */
+struct ScfPrecondSegment {
+    std::vector<int> own;
+    std::vector<int> domain;
+    Matrix caps;
+    ScfPrecondSegment();
+    ~ScfPrecondSegment();
+    ScfPrecondSegment(const ScfPrecondSegment&);
+    ScfPrecondSegment(ScfPrecondSegment&&) noexcept;
+    ScfPrecondSegment& operator=(const ScfPrecondSegment&);
+    ScfPrecondSegment& operator=(ScfPrecondSegment&&) noexcept;
+};
+
+/**
+ * @brief Cut one covalent fragment into segments with overlapping domains for a restricted
+ *        additive Schwarz preconditioner (Claude Generated, Oct 2026).
+ *
+ * Restricted additive Schwarz (Cai and Sarkis, SIAM J. Sci. Comput. 21 (1999) 792; Smith, Bjorstad,
+ * Gropp, Domain Decomposition, 1996): every subdomain i is solved on an overlapping domain, but
+ * only the rows of its own, non-overlapping part enter M = sum_i R_i^T D_i B_i R_i (D_i = 1 on own
+ * components, 0 elsewhere), so no component is counted twice.
+ *
+ * Construction: heavy atoms (Z > 1; all atoms if the fragment has none) in breadth-first order of
+ * the bond graph (bond criterion of detectCovalentFragments, start at the smallest index, neighbours
+ * ascending), consecutive groups of @p segment_heavy_atoms heavy atoms; each H joins its nearest
+ * heavy atom. Domain: heavy atoms within @p radius (Angstrom) of any own heavy atom, with their H.
+ * Each bond from a domain atom h to a fragment atom k outside the domain gets a hydrogen cap on the
+ * axis h->k at the distance r_cov(h) + r_cov(H) (Pyykko-Atsumi radii). O(nf^2) for nf fragment atoms.
+ *
+ * @param atoms     atomic numbers of the whole system
+ * @param geometry  nat x 3 coordinates in Angstrom
+ * @param frag      atom indices of the fragment (ascending)
+ */
+std::vector<ScfPrecondSegment> segmentFragment(const std::vector<int>& atoms, const Matrix& geometry,
+                                               const std::vector<int>& frag, int segment_heavy_atoms,
+                                               double radius);
 
 } // namespace curcuma::xtb

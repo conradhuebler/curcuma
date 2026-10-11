@@ -1919,6 +1919,25 @@
    "description": "same system as peo201x2-water1500; comment: GFN-FF minimum"
   },
   {
+   "id": "peo8-chain.h-capped",
+   "class": "medium",
+   "file": "medium/peo8-chain.h-capped.xyz",
+   "format": "xyz",
+   "formula": "C16H34O8",
+   "natoms": 58,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 2101,
+   "sha256": "22eeb84d9dbb1cd673d241ce65a01ea590110efb5cbd70ab383fa06bb9b6bed8",
+   "provenance": {
+    "kind": "constructed",
+    "description": "Cut of the PEO chain peo201-chain: heavy atoms 0-23 (8 ethylene-oxide units, HO-(CH2CH2O)7-CH2CH2-) with their 33 H atoms (604-636), the cut bond C23-O24 saturated by one H on the C23->O24 axis at 1.09 A; formula C16H34O8. Geometry not relaxed at any level. Built Oct 2026 for the -scf_precond segmentation test."
+   },
+   "derived_from": "peo201-chain"
+  },
+  {
    "id": "phosphine.d-shell-validation",
    "class": "small",
    "file": "small/phosphine.d-shell-validation.xyz",

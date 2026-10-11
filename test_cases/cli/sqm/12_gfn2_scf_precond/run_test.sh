@@ -11,6 +11,8 @@
 #     error, and the first MD energy (same geometry, same fixed point) equals the run without the switch within
 #     1e-7 Eh. No iteration condition: frag does not improve the cold start on this structure (measured n=1,
 #     -sp -threads 8: none 24, frag 33 iterations; docs/SCF_PRECOND.md).
+# (i) -scf_precond_segment_atoms: a 58-atom PEO cut segmented (restricted additive Schwarz): same energy,
+#     fewer iterations, same result at -threads 1 and 2.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../test_utils.sh"
@@ -165,6 +167,33 @@ main() {
         echo -e "${RED}FAIL${NC}: -xtb.scf_xlbomd_correctors had no effect (correctors 1: $T_C1, 12: $T_C12)"
         TESTS_FAILED=$((TESTS_FAILED + 1))
     fi
+
+    # (i) segmentation of a large molecule (restricted additive Schwarz, Oct 2026): PEO cut of 58 atoms, forced
+    #     into segments by -scf_precond_max_fragment_atoms 20, 3 heavy atoms per segment -> 8 segments. Same
+    #     energy as without M (|dE| < 1e-6 Eh), fewer iterations, and the same energy and iteration count with
+    #     -threads 1 (one result slot per segment job). Measured: none 11, segmented 5 iterations, -83.89363037 Eh.
+    seg_run() {   # seg_run <log> <threads> [args...]
+        local LOG=$1; local NT=$2; shift 2
+        $CURCUMA -sp peo58.xyz -method gfn2 -threads "$NT" -verbosity 2 -no_bmt "$@" > "$LOG" 2>&1
+        assert_exit_code $? 0 "curcuma -sp peo58.xyz -threads $NT $*"
+    }
+    seg_run seg_none.log 2
+    seg_run seg_t2.log 2 -scf_precond frag -scf_precond_max_fragment_atoms 20 -scf_precond_segment_atoms 3
+    seg_run seg_t1.log 1 -scf_precond frag -scf_precond_max_fragment_atoms 20 -scf_precond_segment_atoms 3
+    assert_string_in_file "8 segments" seg_t2.log "segmented: 8 segments built"
+    local ES0=$(energy_of seg_none.log); local NS0=$(iters_of seg_none.log)
+    local ES2=$(energy_of seg_t2.log);   local NS2=$(iters_of seg_t2.log)
+    assert_numeric_match "$ES0" "$ES2" "0.000001" "segmented: energy equals the run without M"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ -n "$NS0" ] && [ -n "$NS2" ] && [ "$NS2" -lt "$NS0" ]; then
+        echo -e "${GREEN}PASS${NC}: segmented: fewer SCF iterations ($NS2 < $NS0)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo -e "${RED}FAIL${NC}: segmented: SCF iterations not reduced (segmented '$NS2', none '$NS0')"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+    assert_numeric_match "$ES2" "$(energy_of seg_t1.log)" "0.00000001" "segmented: -threads 1 gives the same energy as -threads 2"
+    assert_equals "$NS2" "$(iters_of seg_t1.log)" "segmented: -threads 1 gives the same iteration count as -threads 2"
 
     print_test_summary
     [ $TESTS_FAILED -eq 0 ] && exit 0 || exit 1
