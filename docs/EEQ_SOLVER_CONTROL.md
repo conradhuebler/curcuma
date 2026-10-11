@@ -237,3 +237,22 @@ Timing polymer_2x, MD 20 fs, alternating, n=3 (median of medians): 16 threads st
 timed separately), wall clock (250-50 fs) 287.8 -> 224.1 ms per step; 1 thread step 674.9 -> 670.8 ms, where `cn` reads 19.0 -> 23.8 ms although the one-thread CN code is unchanged
 (not explained; process page faults and user time equal). Not tested: ROCm, periodic systems, ALPB, `eeq_matrix_rebuild_eps_bohr` > 0, other compilers (the FMA spelling fixes GCC's choice).
 The `GFNFF` class layout changed: rebuild the CUDA plugin and the test executables with it (`make` without target); stale `test_gfnff_gpu` aborts in malloc.
+
+## Phase-2 matrix built in tiles (Oct 11, 2026)
+
+`EEQSolver::calculateFinalCharges` builds the N x N Coulomb block in 64 x 64 tiles of the lower triangle instead of one row per thread with a stride partition (machine-tested, not
+human-tested). Each element is computed once with the former expression and inputs (cutoff 0, far field 1/r, erf(r/sqrt(alpha_i+alpha_j))/r, diagonal gam_i + sqrt(2/pi)/sqrt(alpha_i))
+into a thread-local tile buffer, then stored row by row to A(i, J-block) and transposed to A(j, I-block). Threads take contiguous ranges of the tile list. For N > 2048 the stores are
+non-temporal (MOVNTI, `stream_store_double`): the 428 MB block at N = 7320 fits no cache, and a normal store reads each line first. The expression contains no a*b+c, so FMA
+contraction cannot differ; no element depends on the order or the thread. Unchanged: the matrix-cache reuse path (`eeq_matrix_rebuild_eps_bohr` > 0), constraint rows, Born matrix
+(ALPB), Phase 1, GPU code. No full `setZero` was or is needed: every cell of the N x N block is written; only the constraint rows/columns are zeroed.
+
+Checks: hash of the whole (N+nfrag)^2 matrix, old/new, each with the buffer pre-filled with 0 and with 777 (shows that every cell is written), 21 cases / 60 matrices identical
+(polymer_2x, peo201-chain, caffeine at 1 and 16 (4) threads, charged +1 peo201-chain and hydronium-water2, ALPB water caffeine/peo201-chain incl. Born matrix, MOR41 PR16 (Pd) and ED08
+(Ir), peo201-water500, urea400-water1000, `eeq_distance_cutoff 20` at 1 and 16 threads, MD 4 steps peo201-chain (also with `eeq_matrix_rebuild_eps_bohr 0.05`) and polymer_2x);
+md5 of the whole `-dump_gradient` file identical in 60 of 60 (8 bulk incl. GFN2 caffeine, 6 solver paths diag/cholesky/lu, 31 GMTKN55 `[10::80]` with 6 charged and 5 open shell,
+15 MOR41 `[2::6]`); `md_diagnostics` polymer_2x 50 fs 16 threads and 4 fs 1 thread identical; `e_coulomb_phase1/2` (`dump_charges`) identical (3 systems x 2 thread counts).
+GPU (`-gpu cuda`): the CPU build runs there only during setup (2 builds per run, SP and MD alike, counted with a temporary hash print).
+Timing polymer_2x (16 threads unless noted): matrix build alone (SP, temporary timer, n=3 x 2 calls, median) 37.5 -> 19.6 ms, 1 thread 55.0 -> 40.8 ms; MD 20 fs, alternating,
+n=3: `eeq_solve` 135.8 -> 120.0 ms, step 231.1 -> 212.2 ms; 1 thread step 670.5 -> 655.4 ms; wall clock (250-50 fs) 224.6 -> 207.2 ms per step.
+Not tested: ROCm, periodic systems, CPUs without SSE2 (plain stores), other compilers.

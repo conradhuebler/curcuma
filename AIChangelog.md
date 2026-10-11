@@ -16,6 +16,7 @@ below. If it needs measurements or a derivation, write them into the matching `d
 
 ## Jul - Sep 2026 (and some late June), 108 entries, full text in AIChangelog_2026-late.md
 
+- GFN-FF CPU EEQ Phase-2 matrix built in 64x64 tiles with non-temporal stores (Oct 11, 2026): build 37.5 -> 19.6 ms, MD step 231 -> 212 ms (polymer_2x, 16 thr, n=3), matrix bitwise ([docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md))
 - GFN-FF CPU MD polymer_2x 294 -> 228 ms/step (16 threads), bitwise: no dead sqrab/setZero, folded zero-distance test, one-pass plausibility test, row-parallel CN (Oct 11, 2026, [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md))
 - GPU GFN-FF MD: host list rebuilds (HB/XB, repulsion, D4) exact and parallel, staged pinned upload `-gfnff.gpu_staged_list_upload` (Oct 11, 2026): polymer_2x 33.7 -> 21.7 ms/step (n=3), CPU bitwise — docs/GFNFF-PERFORMANCE-ROADMAP.md
 - GPU GFN-FF MD: dispersion and EEQ solve overlap dc6dcn (K2/K3, Oct 11, 2026): `-gfnff.gpu_eeq_overlap`, `-gfnff.gpu_dispersion_overlap` (true), polymer_2x GPU step 34.1 -> 30.9 ms (n=3) — docs/GFNFF-PERFORMANCE-ROADMAP.md

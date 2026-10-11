@@ -61,6 +61,11 @@
 
 #include "src/core/blas_threads.h"  // ScopedBlasThreads — give threaded LAPACK the EnergyCalculator budget
 
+#include <cstring>
+#if defined(__x86_64__) && defined(__SSE2__)
+#include <immintrin.h>  // _mm_stream_si64 / _mm_sfence (non-temporal stores in the Phase-2 matrix build)
+#endif
+
 using namespace GFNFFParameters;  // Access to chi_eeq, gam_eeq, alpha_eeq, cnf_eeq
 
 // ===== Threaded Cholesky for the EEQ Schur solve (Claude Generated, Jun 2026) =====
@@ -85,6 +90,26 @@ namespace {
 // portable_erf from x >= 5.9216), so A_ij = 1/r. Test r^2 >= X2*(alpha_i+alpha_j) needs no sqrt/erf.
 // Same constant as COULOMB_FARFIELD_X2 in ff_workspace_gfnff.cpp. Switch: farfield_shortcut.
 constexpr double EEQ_FARFIELD_X2 = 6.5 * 6.5;
+
+/// Claude Generated (Oct 2026): store one double without reading its cache line first (MOVNTI on x86-64).
+/// Moves the 64 bits unchanged; used where a matrix far larger than the caches is written once.
+inline void stream_store_double(double* p, double v)
+{
+#if defined(__x86_64__) && defined(__SSE2__)
+    long long bits;
+    std::memcpy(&bits, &v, sizeof bits);
+    _mm_stream_si64(reinterpret_cast<long long*>(p), bits);
+#else
+    *p = v;
+#endif
+}
+/// Orders the non-temporal stores of this thread before later loads/stores (SFENCE).
+inline void stream_store_fence()
+{
+#if defined(__x86_64__) && defined(__SSE2__)
+    _mm_sfence();
+#endif
+}
 
 /// Rows per block of the threaded ppcg matvec (fixed, independent of the thread count => bitwise reproducible).
 constexpr int kPpcgMatvecBlockRows = 64;
@@ -4049,7 +4074,6 @@ Vector EEQSolver::calculateFinalCharges(
             ? eeq_dist_cutoff * eeq_dist_cutoff : 0.0;
         const bool farfield = m_farfield_shortcut;
 
-        int coulomb_progress_10pct = std::max(1, natoms / 10);
         bool show_coulomb_progress = (m_verbosity >= 3 && natoms >= 200 && iteration == 0);
         if (show_coulomb_progress && !reuse_offdiag) {
             fmt::print(stderr, "[EEQ] Phase 2: Coulomb matrix ({} atoms):", natoms);
@@ -4063,73 +4087,110 @@ Vector EEQSolver::calculateFinalCharges(
             for (int i = 0; i < natoms; ++i) {
                 A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
             }
-        } else
-        // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²) A-matrix
-        if (num_threads > 1 && natoms > 64) {
-            int T = std::min(num_threads, natoms);
-            auto amat_worker = [&](int t_id) {
-                for (int i = t_id; i < natoms; i += T) {
-                    A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
-                    for (int j = 0; j < i; ++j) {
-                        double r = dist(i, j);  // packed lookup
-                        if (EEQ_CUTOFF_SQ > 0.0 && r * r > EEQ_CUTOFF_SQ) {
-                            A(i, j) = A(j, i) = 0.0;
-                            continue;
+        } else {
+            // Claude Generated (Oct 2026): tiled build of the N x N Coulomb block.
+            // The lower triangle is cut into TILE x TILE tiles (I >= J). Each element
+            // A_ij = erf(r_ij / sqrt(alpha_i + alpha_j)) / r_ij (far field: 1 / r_ij; cutoff: 0;
+            // diagonal: gam_i + sqrt(2/pi) / sqrt(alpha_i)) is computed once, with the same
+            // expression and inputs as the former row loop, into a thread-local tile buffer;
+            // the tile is then stored row by row to A(i, J-block) and, transposed, to
+            // A(j, I-block), with non-temporal stores (the 428 MB matrix does not fit any cache,
+            // and a normal store first reads the line). The former row loop with a stride
+            // partition wrote A(j,i) column-wise over the whole matrix. Threads take contiguous
+            // ranges of the tile list. Element values depend neither on order nor on thread:
+            // the matrix is bitwise identical (checked by a full-matrix hash, docs/EEQ_SOLVER_CONTROL.md).
+            constexpr int TILE = 64;
+            const int nb = (natoms + TILE - 1) / TILE;
+            const long long ntiles = static_cast<long long>(nb) * (nb + 1) / 2;
+            double* const A_data = A.data();                       // RowMajor: A(i,j) = A_data[i*ld + j]
+            const size_t ld = static_cast<size_t>(A.cols());
+            const double* const alpha_p = alpha_corrected.data();
+            const double* const gam_p = gam_corrected.data();
+            const double cutoff_sq = EEQ_CUTOFF_SQ;
+            const bool use_farfield = farfield;
+            // Non-temporal stores only when the N x N block (8 N^2 bytes) is larger than ~32 MB
+            // (N > 2048); a small matrix stays in cache for the solve that follows.
+            const bool streaming = natoms > 2048;
+            auto tile_worker = [&, A_data, ld, alpha_p, gam_p, cutoff_sq, use_farfield, streaming](int t_id, int T) {
+                const long long t_begin = ntiles * t_id / T;
+                const long long t_end   = ntiles * (t_id + 1) / T;
+                if (t_begin >= t_end) return;
+                alignas(64) double buf[TILE * TILE];               // buf[(i-i0)*TILE + (j-j0)]
+                // Tile index t = I*(I+1)/2 + J (row-major over the lower triangle of tiles).
+                int I = 0;
+                while (static_cast<long long>(I + 1) * (I + 2) / 2 <= t_begin) ++I;
+                int J = static_cast<int>(t_begin - static_cast<long long>(I) * (I + 1) / 2);
+                for (long long t = t_begin; t < t_end; ++t) {
+                    const int i0 = I * TILE, i1 = std::min(natoms, i0 + TILE);
+                    const int j0 = J * TILE, j1 = std::min(natoms, j0 + TILE);
+                    for (int i = i0; i < i1; ++i) {
+                        const double* row = srab + static_cast<size_t>(i) * (i + 1) / 2;
+                        const int jend = (I == J) ? i : j1;
+                        double* b = buf + (i - i0) * TILE;     // b[j - j0] = A(i, j)
+                        for (int j = j0; j < jend; ++j) {
+                            const double r = row[j];
+                            double coulomb;
+                            if (cutoff_sq > 0.0 && r * r > cutoff_sq) {
+                                coulomb = 0.0;
+                            } else {
+                                const double a_sum = alpha_p[i] + alpha_p[j];
+                                if (use_farfield && r * r >= EEQ_FARFIELD_X2 * a_sum) {
+                                    coulomb = 1.0 / r;  // exact: erf(gamma r) == 1.0 (EEQ_FARFIELD_X2)
+                                } else {
+                                    double gamma_ij = 1.0 / std::sqrt(a_sum);
+                                    coulomb = curcuma_erf(gamma_ij * r) / r;
+                                }
+                            }
+                            b[j - j0] = coulomb;
                         }
-                        const double a_sum = alpha_corrected(i) + alpha_corrected(j);
-                        double coulomb;
-                        if (farfield && r * r >= EEQ_FARFIELD_X2 * a_sum) {
-                            coulomb = 1.0 / r;  // exact: erf(gamma r) == 1.0 (EEQ_FARFIELD_X2)
-                        } else {
-                            double gamma_ij = 1.0 / std::sqrt(a_sum);
-                            coulomb = curcuma_erf(gamma_ij * r) / r;
+                        if (I == J) {
+                            b[i - j0] = gam_p[i] + TSQRT2PI / std::sqrt(alpha_p[i]);
+                            for (int j = j0; j < i; ++j) buf[(j - i0) * TILE + (i - j0)] = b[j - j0];  // mirror in tile
                         }
-                        A(i, j) = coulomb;
-                        A(j, i) = coulomb;
                     }
-                    if (show_coulomb_progress && t_id == 0 && i > 0 && i % coulomb_progress_10pct == 0) {
-                        fmt::print(stderr, " {}%", (100 * i) / natoms);
-                        fflush(stderr);
+                    // Rows i of the tile -> A(i, j0..j1)
+                    for (int i = i0; i < i1; ++i) {
+                        const double* b = buf + (i - i0) * TILE;
+                        double* dst = A_data + static_cast<size_t>(i) * ld + j0;
+                        if (streaming) { for (int k = 0; k < j1 - j0; ++k) stream_store_double(dst + k, b[k]); }
+                        else           { for (int k = 0; k < j1 - j0; ++k) dst[k] = b[k]; }
+                    }
+                    // Transposed tile -> A(j, i0..i1) (off-diagonal tiles only)
+                    if (I != J) {
+                        for (int j = j0; j < j1; ++j) {
+                            double* dst = A_data + static_cast<size_t>(j) * ld + i0;
+                            const double* col = buf + (j - j0);   // col[k * TILE] = A(i0 + k, j)
+                            if (streaming) { for (int k = 0; k < i1 - i0; ++k) stream_store_double(dst + k, col[k * TILE]); }
+                            else           { for (int k = 0; k < i1 - i0; ++k) dst[k] = col[k * TILE]; }
+                        }
+                    }
+                    if (++J > I) {
+                        ++I;
+                        J = 0;
+                        if (show_coulomb_progress && t_id == 0 && I % std::max(1, nb / 10) == 0) {
+                            fmt::print(stderr, " {}%", (100 * (t - t_begin + 1)) / (t_end - t_begin));
+                            fflush(stderr);
+                        }
                     }
                 }
+                if (streaming) stream_store_fence();   // order the non-temporal stores before the join
             };
-            // Claude Generated (Mar 2026): pool->enqueue() reuses persistent workers
-            if (pool) {
+            const int T = (num_threads > 1 && natoms > 64)
+                ? static_cast<int>(std::min<long long>(num_threads, ntiles)) : 1;
+            if (T > 1 && pool) {
+                // Claude Generated (Mar 2026): pool->enqueue() reuses persistent workers
                 std::vector<std::future<void>> futures;
                 futures.reserve(T - 1);
-                for (int t = 1; t < T; ++t) futures.push_back(pool->enqueue(amat_worker, t));
-                amat_worker(0);
+                for (int t = 1; t < T; ++t) futures.push_back(pool->enqueue(tile_worker, t, T));
+                tile_worker(0, T);
                 for (auto& f : futures) f.get();
-            } else {
+            } else if (T > 1) {
                 std::vector<std::thread> threads(T - 1);
-                for (int t = 1; t < T; ++t) threads[t - 1] = std::thread(amat_worker, t);
-                amat_worker(0);
+                for (int t = 1; t < T; ++t) threads[t - 1] = std::thread(tile_worker, t, T);
+                tile_worker(0, T);
                 for (auto& th : threads) th.join();
-            }
-        } else {
-            for (int i = 0; i < natoms; ++i) {
-                A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
-                for (int j = 0; j < i; ++j) {
-                    double r = dist(i, j);  // packed lookup
-                    if (EEQ_CUTOFF_SQ > 0.0 && r * r > EEQ_CUTOFF_SQ) {
-                        A(i, j) = A(j, i) = 0.0;
-                        continue;
-                    }
-                    const double a_sum = alpha_corrected(i) + alpha_corrected(j);
-                    double coulomb;
-                    if (farfield && r * r >= EEQ_FARFIELD_X2 * a_sum) {
-                        coulomb = 1.0 / r;  // exact: erf(gamma r) == 1.0 (EEQ_FARFIELD_X2)
-                    } else {
-                        double gamma_ij = 1.0 / std::sqrt(a_sum);
-                        coulomb = curcuma_erf(gamma_ij * r) / r;
-                    }
-                    A(i, j) = coulomb;
-                    A(j, i) = coulomb;
-                }
-                if (show_coulomb_progress && i > 0 && i % coulomb_progress_10pct == 0) {
-                    fmt::print(stderr, " {}%", (100 * i) / natoms);
-                    fflush(stderr);
-                }
+            } else {
+                tile_worker(0, 1);
             }
         }
         if (show_coulomb_progress) fmt::print(stderr, " done\n");
