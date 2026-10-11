@@ -1012,6 +1012,7 @@ private:
     double m_localinv_rebuild = 1.0;    ///< eeq_localinv_rebuild_bohr (0 = rebuild every solve)
     std::shared_ptr<LocalInversePreconditioner> m_localinv;  ///< last build (also a failed one)
     const Matrix* m_ppcg_geometry = nullptr;  ///< Phase-2 geometry (Bohr) during dispatchSolve; null in Phase 1
+    const std::vector<int>* m_ppcg_atom_frag = nullptr;  ///< Phase-2 atom -> fragment (0-based, -1 none) during dispatchSolve
     CxxThreadPool* m_ppcg_pool = nullptr;     ///< pool for the parallel build (dispatchSolve)
     int    m_ppcg_threads = 1;
     long   m_localinv_builds = 0;            ///< successful builds

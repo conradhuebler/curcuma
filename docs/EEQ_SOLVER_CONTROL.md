@@ -205,3 +205,12 @@ solver. Machine-measured: 703 single points (588 GMTKN55 structures incl. all 32
 against `cholesky`; 13 gradients, |dg| <= 9e-13 Eh/Angstrom; NVE 2 ps on polymer_2x (GPU) and peo201-water500 (CPU), drift and spread of Etot equal to `diag`; no Jacobi
 fallback with the default radii. With truncated radii (4/6 Bohr) 6 of 588 builds were rejected (small ions) and caught by the Jacobi fallback. Not measured: open shell, `eeq_distance_cutoff` > 0,
 MD beyond 2 ps, ROCm. A -opt of peo201-chain ends in different basins from run to run (thread count, rounding at 1e-13); at both end geometries cholesky, diag and localinv give the same energy.
+
+## Phase 2 without per-step copies (Oct 11, 2026)
+
+`EEQSolver::calculateFinalCharges` no longer copies or zeroes per step: (1) the plausibility test after the solve reads A_nn through a `MatrixCRef` view (was a 428 MB copy at N = 7320); (2) the
+packed distance triangle `m_external_srab` (GFNFF::m_shared_srab, valid for the whole energy call, read only) is used in place and its atoms-too-close scan runs on the pool (was `setZero` + 214 MB copy + serial
+scan); (3) the constraint rows are filled from `fraglist` in O(N), and the same atom -> fragment map is handed to the projected PCG (`m_ppcg_atom_frag`), which otherwise reads it from C. Machine-tested: md5 of the
+whole `-dump_gradient` file identical old/new in 58 comparisons (6 bulk/caffeine incl. polymer_2x at 1 and 16 threads, 31 GMTKN55 incl. 8 charged and 3 open-shell, 15 MOR41, 6 solver-path runs caffeine/peo201-chain with
+`diag`, `cholesky`, `lu`); 50 fs MD polymer_2x (16 threads) `md_diagnostics` file identical in all 50 steps; with `-eeq_solver.dump_charges true` even `e_coulomb_phase1/2` are bit-identical (5 systems). polymer_2x MD 20 fs,
+alternating, n=3: `eeq_solve` 239 -> 164 ms, step 469 -> 392 ms at 16 threads; 1 thread (noisy, other load) 390-527 -> 312-402 ms. Not done: one pass over A_nn for both energy forms (gemm instead of two gemv, rounding not guaranteed the same, at most 13 ms).

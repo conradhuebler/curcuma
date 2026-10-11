@@ -2194,11 +2194,20 @@ Vector EEQSolver::solveWithProjectedPCG(
     int nfrag)
 {
     // Fragment membership from the 0/1 constraint block.
+    // Oct 2026: in Phase 2 the caller passes the atom -> fragment map it built the constraint rows
+    // from (O(N)); otherwise it is read off the 0/1 constraint block (O(nfrag*N)). Same result.
     std::vector<int> frag(natoms, 0);
     std::vector<double> nfrag_atoms(nfrag, 0.0);
-    for (int f = 0; f < nfrag; ++f)
-        for (int j = 0; j < natoms; ++j)
-            if (C(f, j) != 0.0) { frag[j] = f; nfrag_atoms[f] += 1.0; }
+    if (m_ppcg_atom_frag && static_cast<int>(m_ppcg_atom_frag->size()) == natoms) {
+        for (int j = 0; j < natoms; ++j) {
+            const int f = (*m_ppcg_atom_frag)[j];
+            if (f >= 0) { frag[j] = f; nfrag_atoms[f] += 1.0; }
+        }
+    } else {
+        for (int f = 0; f < nfrag; ++f)
+            for (int j = 0; j < natoms; ++j)
+                if (C(f, j) != 0.0) { frag[j] = f; nfrag_atoms[f] += 1.0; }
+    }
     for (int f = 0; f < nfrag; ++f)
         if (nfrag_atoms[f] == 0.0) return Vector();   // empty fragment: leave it to the direct solver
 
@@ -3768,28 +3777,45 @@ Vector EEQSolver::calculateFinalCharges(
     // Claude Generated (Mar 2026): Pre-allocated distance buffer — avoids 13 MB alloc per step (N=1280)
     // WP-FF-Packed-Triangular (May 2026): buffer is now packed lower-triangular (N(N+1)/2 doubles).
     ensurePhase2Buffers(natoms, nfrag);
-    m_phase2_distances.setZero();
 
     // WP-FF-DistMatrix-Sharing (May 2026): consume externally-computed packed srab
-    // when GFNFF provides it — skip the O(N²) sqrt loop entirely.
-    // Layout: srab[i*(i+1)/2 + j] = r_ij for i > j. Identical to m_phase2_distances now,
-    // so we can copy the whole vector in one shot.
+    // when GFNFF provides it - skip the O(N^2) sqrt loop entirely.
+    // Layout: srab[i*(i+1)/2 + j] = r_ij for i > j (identical to m_phase2_distances).
+    // Oct 2026: the external buffer is read in place (no 214 MB zero + copy per step). Its lifetime
+    // is the whole energy call (GFNFF::m_shared_srab, set in GFNFF::Calculation before prepareCNAndEEQ),
+    // and calculateFinalCharges only reads it. The atoms-too-close scan runs on the pool.
     const int srab_expected = natoms * (natoms + 1) / 2;
     const bool use_external_srab = (m_external_srab != nullptr)
                                 && (m_external_srab->size() == srab_expected);
+    const double* srab = m_phase2_distances.data();   // packed lower triangle, srab[i*(i+1)/2 + j]
     if (use_external_srab) {
-        m_phase2_distances = *m_external_srab;  // direct copy, layouts match
-        // Quick atoms-too-close scan (only off-diagonal slots)
-        for (int i = 1; i < natoms; ++i) {
-            const int ii = i * (i + 1) / 2;
-            for (int j = 0; j < i; ++j) {
-                if (m_phase2_distances[ii + j] < 1e-10) {
-                    CurcumaLogger::error("EEQSolver::calculateFinalCharges: atoms too close (external srab)");
-                    return generateFallbackCharges(natoms, total_charge, "zero distance in Phase 2 (external srab)");
+        srab = m_external_srab->data();
+        // Quick atoms-too-close scan (only off-diagonal slots); rows striped over the workers.
+        std::atomic<bool> ext_too_close{false};
+        auto scan_worker = [&](int t_id, int T) {
+            for (int i = 1 + t_id; i < natoms; i += T) {
+                const double* row = srab + static_cast<size_t>(i) * (i + 1) / 2;
+                for (int j = 0; j < i; ++j) {
+                    if (row[j] < 1e-10) { ext_too_close.store(true, std::memory_order_relaxed); return; }
                 }
             }
+        };
+        const int Ts = (num_threads > 1 && natoms > 64) ? std::min(num_threads, natoms) : 1;
+        if (Ts > 1 && pool) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(Ts - 1);
+            for (int t = 1; t < Ts; ++t) futures.push_back(pool->enqueue(scan_worker, t, Ts));
+            scan_worker(0, Ts);
+            for (auto& f : futures) f.get();
+        } else {
+            scan_worker(0, 1);
+        }
+        if (ext_too_close.load()) {
+            CurcumaLogger::error("EEQSolver::calculateFinalCharges: atoms too close (external srab)");
+            return generateFallbackCharges(natoms, total_charge, "zero distance in Phase 2 (external srab)");
         }
     } else {
+    m_phase2_distances.setZero();
 
     // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²) distance matrix
     std::atomic<bool> atoms_too_close{false};
@@ -3856,7 +3882,7 @@ Vector EEQSolver::calculateFinalCharges(
     }  // end if (!use_external_srab)
     // WP-FF-Packed-Triangular: lookup helper. Assumes j < i (Coulomb-build only reads lower triangle).
     auto dist = [&](int i, int j) -> double {
-        return m_phase2_distances[i * (i + 1) / 2 + j];
+        return srab[i * (i + 1) / 2 + j];
     };
 
     // Oct 2026: the WP7-D contact scan (minimum inter-fragment distance, O(N^2) per call) is gone:
@@ -4119,20 +4145,21 @@ Vector EEQSolver::calculateFinalCharges(
         }
 
         // 3. Setup fragment charge constraints
-        for (int f = 0; f < nfrag; ++f) {
-            int row = natoms + f;
-            for (int j = 0; j < natoms; ++j) {
-                bool in_fragment = false;
-                if (topology.has_value() && j < static_cast<int>(topology->fraglist.size())) {
-                    in_fragment = (topology->fraglist[j] == f + 1); // 1-indexed
-                } else {
-                    in_fragment = (f == 0); // Default all atoms to first fragment
-                }
-
-                if (in_fragment) {
-                    A(row, j) = 1.0;
-                    A(j, row) = 1.0;
-                }
+        // Oct 2026: O(N) from fraglist (atom -> fragment) instead of nfrag x N tests; same entries.
+        // atom_frag (0-based, -1 = in no fragment) is also handed to the projected PCG.
+        std::vector<int> atom_frag(natoms, -1);
+        for (int j = 0; j < natoms; ++j) {
+            int f = -1;
+            if (topology.has_value() && j < static_cast<int>(topology->fraglist.size())) {
+                f = topology->fraglist[j] - 1;                 // fraglist is 1-indexed
+            } else if (nfrag > 0) {
+                f = 0;                                          // default: all atoms in the first fragment
+            }
+            if (f < 0 || f >= nfrag) f = -1;
+            atom_frag[j] = f;
+            if (f >= 0) {
+                A(natoms + f, j) = 1.0;
+                A(j, natoms + f) = 1.0;
             }
         }
 
@@ -4255,10 +4282,12 @@ Vector EEQSolver::calculateFinalCharges(
         // Oct 2026: the local-inverse preconditioner of the projected PCG needs the geometry
         // (neighbourhoods) and may build in parallel; only this Phase-2 solve provides them.
         m_ppcg_geometry = &geometry_bohr;
+        m_ppcg_atom_frag = &atom_frag;
         m_ppcg_pool = pool;
         m_ppcg_threads = num_threads > 0 ? num_threads : 1;
         Vector new_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads, "final charges");
         m_ppcg_geometry = nullptr;
+        m_ppcg_atom_frag = nullptr;
         m_ppcg_pool = nullptr;
         if (m_verbosity >= 2) {
             const auto t_p2_end = std::chrono::high_resolution_clock::now();
@@ -4330,7 +4359,9 @@ Vector EEQSolver::calculateFinalCharges(
         // Uses the cached A matrix directly — no O(N²) distance/erf recomputation.
         // E = 0.5 * q^T * A_nn * q - Σ q_i * chi_i   (chi_i = chi_corrected + cnf*sqrt(CN))
         {
-            const Matrix& A_nn = A.topLeftCorner(natoms, natoms);
+            // Oct 2026: view of the atom block instead of a 428 MB copy per step (N = 7320). The values
+            // are the same; both energies still read A_nn row-wise through one gemv each.
+            const MatrixCRef A_nn = A.topLeftCorner(natoms, natoms);
             auto eeq_energy = [&](const Vector& q) -> double {
                 double chi_sum = 0.0;
                 for (int i = 0; i < natoms; ++i) {
