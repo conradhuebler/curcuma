@@ -334,7 +334,7 @@ Measured: 182 ms per energy call on polymer_2x on one A4500, EEQ ~79 ms, Coulomb
   "Malformed PARAM" warnings (18 in `ff_methods/eeq_solver.h`, 8 in `ff_methods/gfnff.h`) - multi-line
   PARAM macros that the extractor drops. Among the dropped names: `max_pcg_iterations`,
   `pcg_tolerance`, `pcg_large_threshold`, `gpu_block_jacobi_max_frag_atoms`,
-  `gpu_block_jacobi_max_nfrag`, `eeq_pcg_nfrag_threshold`, `eeq_contact_prefer_exact`,
+  `gpu_block_jacobi_max_nfrag`, `eeq_pcg_nfrag_threshold`, `eeq_contact_prefer_exact` (the last two removed since 2026-10, see EEQ_SOLVER_CONTROL.md),
   `eeq_distance_cutoff`, `eeq_extrapolation`, `solvent_model`; `solve_method` has no registry entry
   either. The values still reach the code in dotted form, but they are missing from `-help`, flat-flag
   routing and `-export_run`. Known trap (single-line PARAM rule), not yet cleaned up.

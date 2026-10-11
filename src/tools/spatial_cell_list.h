@@ -140,48 +140,78 @@ public:
     template <typename Func>
     void forEachPair(Func&& callback) const
     {
-        if (m_natoms == 0)
+        for (int i = 0; i < m_natoms; ++i)
+            forEachPairOfAtom(i, callback);
+    }
+
+    /*! @brief The pairs forEachPair() visits for one first atom @p i, in the same order.
+     *
+     *  Claude Generated (Oct 2026): forEachPair() is the loop over i of this function, so a
+     *  caller can split the atoms into ranges, work on the ranges in parallel and concatenate
+     *  their results in range order to get exactly the serial sequence of pairs.
+     *  @param callback  Invoked as callback(i, j, r2); every pair has i < j.
+     */
+    template <typename Func>
+    void forEachPairOfAtom(int i, Func&& callback) const
+    {
+        if (m_natoms == 0 || i < 0 || i >= m_natoms)
             return;
 
         const double cutoff_sq = m_cutoff * m_cutoff;
+        int cix, ciy, ciz;
+        atomCellCoords(i, cix, ciy, ciz);
 
-        for (int i = 0; i < m_natoms; ++i) {
-            int cix, ciy, ciz;
-            atomCellCoords(i, cix, ciy, ciz);
-
-            for (int dz = -1; dz <= 1; ++dz) {
-                int nz = ciz + dz;
-                if (nz < 0 || nz >= m_ncells_z)
+        for (int dz = -1; dz <= 1; ++dz) {
+            int nz = ciz + dz;
+            if (nz < 0 || nz >= m_ncells_z)
+                continue;
+            for (int dy = -1; dy <= 1; ++dy) {
+                int ny = ciy + dy;
+                if (ny < 0 || ny >= m_ncells_y)
                     continue;
-                for (int dy = -1; dy <= 1; ++dy) {
-                    int ny = ciy + dy;
-                    if (ny < 0 || ny >= m_ncells_y)
+                for (int dx = -1; dx <= 1; ++dx) {
+                    int nx = cix + dx;
+                    if (nx < 0 || nx >= m_ncells_x)
                         continue;
-                    for (int dx = -1; dx <= 1; ++dx) {
-                        int nx = cix + dx;
-                        if (nx < 0 || nx >= m_ncells_x)
-                            continue;
-                        int nci = cellIndex(nx, ny, nz);
+                    int nci = cellIndex(nx, ny, nz);
 
-                        // Eliminate duplicate pairs: only visit cells with
-                        // flat index >= current cell index.  When the cell
-                        // is the same, enforce j > i.
-                        if (nci < cellIndex(cix, ciy, ciz))
-                            continue;
+                    // Eliminate duplicate pairs: only visit cells with
+                    // flat index >= current cell index.  When the cell
+                    // is the same, enforce j > i.
+                    if (nci < cellIndex(cix, ciy, ciz))
+                        continue;
 
-                        const auto& cell = m_cells[nci];
-                        for (int j : cell) {
-                            if (nci == cellIndex(cix, ciy, ciz) && j <= i)
-                                continue;
-                            double r2 = (m_coords.row(i) - m_coords.row(j)).squaredNorm();
-                            if (r2 <= cutoff_sq) {
-                                callback(i, j, r2);
-                            }
+                    const auto& cell = m_cells[nci];
+                    for (int j : cell) {
+                        if (nci == cellIndex(cix, ciy, ciz) && j <= i)
+                            continue;
+                        double r2 = (m_coords.row(i) - m_coords.row(j)).squaredNorm();
+                        if (r2 <= cutoff_sq) {
+                            callback(i, j, r2);
                         }
                     }
                 }
             }
         }
+    }
+
+    /*! @brief Copy of this list that keeps only the atoms with keep[atom] != 0.
+     *
+     *  Claude Generated (Oct 2026): same grid (same bounding box, cell size and cell
+     *  numbering), every cell holds the kept atoms in their original order. Every query on the
+     *  copy therefore visits the kept atoms in the order the full list visits them and skips
+     *  the others, without computing their distances.
+     */
+    SpatialCellList subset(const std::vector<char>& keep) const
+    {
+        SpatialCellList out = *this;
+        for (auto& cell : out.m_cells) {
+            size_t w = 0;
+            for (int a : cell)
+                if (a >= 0 && a < static_cast<int>(keep.size()) && keep[a]) cell[w++] = a;
+            cell.resize(w);
+        }
+        return out;
     }
 
     /*! @brief Iterate over neighbors of atom @p i within a (possibly smaller) cutoff.

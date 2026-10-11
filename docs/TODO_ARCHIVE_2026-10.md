@@ -274,7 +274,7 @@ Der Verweis "Known Issue #33" im Eintrag "Unit System Migration" meint die Einhe
   Ladungen des Vorschritts (`m_ppcg_last_q`, in `solveWithProjectedPCG`). Die 758.7 ms sind
   also **mit** Warmstart.
 - **Was NICHT gezeigt ist**: dass dieser Stand nahe am Erreichbaren liegt. Die Auswahl ist eine
-  Heuristik mit handgesetzten Schwellen (`eeq_pcg_expected_iters` 30, `eeq_pcg_nfrag_threshold` 4,
+  Heuristik mit handgesetzten Schwellen (`eeq_pcg_expected_iters` 30, `eeq_pcg_nfrag_threshold` 4 [both removed 2026-10, see EEQ_SOLVER_CONTROL.md],
   `pcg_large_threshold` 500), und die einzige dokumentierte Skalierungszahl ist
   „polymer/1410: 44 -> 16 ms" aus der PARAM-Beschreibung (`eeq_solver.h:1099`) — ein 5x
   kleineres System. Ob 758.7 ms bei 7320 Atomen gut oder schlecht sind, ist unbelegt.

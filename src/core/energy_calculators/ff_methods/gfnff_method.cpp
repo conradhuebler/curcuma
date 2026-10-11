@@ -78,6 +78,7 @@ struct SetupScope {
 #include <cstring>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <functional>
 #include <omp.h>  // Claude Generated (February 2026): Phase 2 - OpenMP parallelization
 
@@ -646,6 +647,8 @@ GFNFF::GFNFF(const json& parameters)
         m_frag_sigma = std::max(1e-6, m_parameters.value("frag_charge_sigma", 0.05));
         m_frag_max_edges = std::max(0, std::min(10, m_parameters.value("frag_charge_max_edges", 4)));
         m_frag_max_placements = std::max(1, m_parameters.value("frag_charge_max_placements", 6));
+        m_frag_variant_memory_mb = std::max(0, m_parameters.value("frag_charge_variant_memory_mb", 8192));
+        m_frag_enumerate = m_parameters.value("frag_charge_enumerate", false);
         if (m_frag_ensemble && m_topology_mode == "react") {
             CurcumaLogger::warn("GFNFF: frag_charge_model ensemble is not available in react topology mode - using the reference rule");
             m_frag_ensemble = false;
@@ -760,6 +763,11 @@ void GFNFF::forwardEEQSolverParams(json& eeq_params) {
         eeq["eeq_refactor_force_every"] = m_parameters["eeq_refactor_force_every"];
     if (m_parameters.contains("eeq_refine_iters") && !eeq.contains("eeq_refine_iters"))
         eeq["eeq_refine_iters"] = m_parameters["eeq_refine_iters"];
+
+    // Claude Generated (Oct 2026): exact far-field shortcut of the matrix elements erf(gamma r)/r,
+    // one switch for the energy loop (FFWorkspace) and the EEQ matrix.
+    if (m_parameters.contains("farfield_shortcut") && !eeq.contains("farfield_shortcut"))
+        eeq["farfield_shortcut"] = m_parameters["farfield_shortcut"];
 }
 
 double GFNFF::getEEQDistanceCutoff() const {
@@ -1277,42 +1285,54 @@ void GFNFF::updateDynamicState(TopologyInfo& topo) const {
 
 // ---------------------------------------------------------------------------
 // WP-FF-DistMatrix-Sharing (May 2026): centralized packed-triangular distance arrays.
-// Mirrors XTB gfnff_engrad.F90:175-195 — compute sqrab/srab once per energy call,
-// share across all FF term loops and the EEQ Phase-2 solver.
+// Mirrors XTB gfnff_engrad.F90:175-195 — compute srab once per energy call for the EEQ
+// Phase-2 solver (its only reader; the FF term loops compute their own distances).
 // ---------------------------------------------------------------------------
 
 void GFNFF::computeSharedDistances() const
 {
     const int N = m_geometry_bohr.rows();
+    m_shared_dist_too_close = false;
     if (N <= 0) return;
     const int M = N * (N + 1) / 2;
     if (m_shared_dist_N != N) {
-        m_shared_sqrab.resize(M);
-        m_shared_srab.resize(M);
+        m_shared_srab.resize(M);   // new allocation only when the atom count changes
         m_shared_dist_N = N;
     }
-    // Diagonal (i == j) lives at indices i*(i+1)/2 + i and represents distance 0.
-    // We zero them by zeroing the whole buffer first; off-diagonals are written in the loop.
-    // Cheaper than per-row diagonal stores in the parallel worker.
-    m_shared_sqrab.setZero();
-    m_shared_srab.setZero();
+    // Oct 2026: no setZero any more (it was 2 x 214 MB serial per call at N = 7320). Every slot a
+    // reader touches (j < i) is written below; the diagonal slots i*(i+1)/2 + i are never read: the
+    // EEQ solver (calculateFinalCharges: matrix build, verbosity-3 dump) only uses dist(i, j) with
+    // j < i. The squared-distance twin m_shared_sqrab had no reader and is gone.
+    // The EEQ atoms-too-close scan (r < 1e-10, formerly a second pass over the buffer) is folded in:
+    // the same comparison on the same stored value, OR-ed per worker.
+    std::atomic<bool> too_close{false};
 
     auto worker = [&](int t_id, int T) {
         // Same striped row partitioning as dist_worker in eeq_solver.cpp:2990.
+        bool local_too_close = false;
         for (int i = t_id; i < N; i += T) {
             const int ii = i * (i + 1) / 2;
             const double xi = m_geometry_bohr(i, 0);
             const double yi = m_geometry_bohr(i, 1);
             const double zi = m_geometry_bohr(i, 2);
+            double* row = m_shared_srab.data() + ii;
             for (int j = 0; j < i; ++j) {
                 const double dx = xi - m_geometry_bohr(j, 0);
                 const double dy = yi - m_geometry_bohr(j, 1);
                 const double dz = zi - m_geometry_bohr(j, 2);
-                const double rsq = dx*dx + dy*dy + dz*dz;
-                m_shared_sqrab[ii + j] = rsq;
-                m_shared_srab[ii + j]  = std::sqrt(rsq);
+                // Explicit FMA order (Oct 2026): this is what GCC (-O3 -march=native, default
+                // -ffp-contract=fast) emitted for 'dx*dx + dy*dy + dz*dz' in the vectorised body of
+                // the former loop, i.e. for every pair. The rewritten loop gets a scalar remainder
+                // which GCC contracts as fma(dz,dz,fma(dx,dx,dy*dy)) instead: ~280 of 26.8 M
+                // distances (polymer_2x) then differ in the last bit and the MD charges move at
+                // 1e-15. Spelling the contraction out keeps every path on the old rounding.
+                const double rsq = std::fma(dz, dz, std::fma(dy, dy, dx * dx));
+                const double r = std::sqrt(rsq);
+                row[j] = r;
+                local_too_close |= (r < 1e-10);
             }
         }
+        if (local_too_close) too_close.store(true, std::memory_order_relaxed);
     };
 
     auto* pool = threadPool();
@@ -1331,6 +1351,7 @@ void GFNFF::computeSharedDistances() const
     } else {
         worker(0, 1);
     }
+    m_shared_dist_too_close = too_close.load();
 }
 
 // ---------------------------------------------------------------------------
@@ -1345,6 +1366,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     const bool do_timing = (CurcumaLogger::get_verbosity() >= 2) || m_force_phase_timing;
     auto t_prep_total = std::chrono::high_resolution_clock::now();  // always measure, negligible overhead
     double t_cn = 0.0, t_eeq_topo = 0.0, t_cnf = 0.0, t_dcn = 0.0, t_d4_gw = 0.0, t_eeq_solve = 0.0, t_charge_dist = 0.0;
+    bool c6_current_from_gradient_path = false;  // see the gradient-path D4 block (Oct 2026)
 
     // WP5 (June 2026): self-consistent implicit solvation. Build the Born interaction
     // matrix at the current geometry and hand it to the EEQ solver so the charges feel
@@ -1362,7 +1384,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     }
 
     // Static-Mode (WP-S1, May 2026): reuse cached CN/dcn/D4 outputs after first capture.
-    // m_last_cn, m_last_dcn, m_last_cnf, m_d4_generator's dc6dcn matrix retain previous values.
+    // m_last_cn, m_last_dcn, m_last_cnf, m_d4_generator's per-pair dc6dcn retain previous values.
     const bool reuse_cn = m_static_cn && m_static_state_captured;
     const bool freeze_eeq = m_static_charges && m_static_state_captured;
 
@@ -1406,8 +1428,9 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             if (!m_used_fused_cn_dcn) {
 #endif
             if (cn_cutoff_bohr > 0.0) {
+                // Oct 2026: rows over the pool, bitwise equal to the serial pass (see cn_calculator.cpp).
                 auto cn_result = CNCalculator::calculateGFNFFCNWithNeighbors(
-                    m_atoms, m_geometry_bohr, cn_cutoff_bohr);
+                    m_atoms, m_geometry_bohr, cn_cutoff_bohr, -7.5, 4.4, threadPool(), m_threads);
                 if (m_gpu_path_preallocated) {
                     std::memcpy(m_last_cn.data(), cn_result.cn_values.data(), m_atomcount * sizeof(double));
                 } else {
@@ -1570,16 +1593,22 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
 
         // D4 Gaussian weights + derivatives needed for dc6dcn.
         // gpu_only: GPU computes gw + dgw + dc6dcn entirely on device (Phase 6).
-        // CPU path: compute gw + dgw + dc6dcn matrix on CPU.
-        // Static-Mode (WP-S1): skip recompute when CN frozen — d4_generator's cached dc6dcn matrix stays valid.
+        // CPU path: compute gw + dgw + per-pair dc6dcn on CPU.
+        // Static-Mode (WP-S1): skip recompute when CN frozen — d4_generator's cached per-pair dc6dcn stays valid.
         if (m_d4_generator && !gpu_only && !reuse_cn) {
             t0 = std::chrono::high_resolution_clock::now();
             std::vector<double> cn_std(m_last_cn.data(), m_last_cn.data() + m_last_cn.size());
-            m_d4_generator->updateCNValuesForGradient(cn_std, pool, total_threads,
-                                                       /*skip_dc6dcn=*/false);
+            const bool weights_rebuilt = m_d4_generator->updateCNValuesForGradient(
+                cn_std, pool, total_threads, /*skip_dc6dcn=*/false);
             // Claude Generated (Sep 2026): the energy's C6 must follow the same weights the
             // gradient's dC6/dCN was just built from — see refreshDispersionC6().
-            refreshDispersionC6();
+            // Claude Generated (Oct 2026): remember that the C6 were rewritten from weights and
+            // half-contraction rebuilt for this very m_last_cn, so the energy-side refresh at the
+            // end of this function (same CN, same weights, same pair list) would reproduce them
+            // bit for bit and is skipped. Both conditions are required: if the P1a threshold
+            // skipped the weight rebuild, or the C6 were not rewritten (setup geometry, empty
+            // list), that refresh is the only one that brings C6 to the current CN.
+            c6_current_from_gradient_path = refreshDispersionC6() && weights_rebuilt;
             if (do_timing) {
                 t_d4_gw = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
             }
@@ -1702,6 +1731,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     // owned by updateCNValuesForGradient. Static-CN mode keeps its frozen C6 (reuse_cn).
     // -gfnff.dispersion_c6_update false restores the old frozen-C6 behaviour.
     if (!gpu_only && !reuse_cn && m_d4_generator && m_workspace && m_last_cn.size() == m_atomcount
+        && !c6_current_from_gradient_path
         && m_parameters.value("dispersion_c6_update", true)) {
         bool weights_fresh = false;
         auto t_c6 = std::chrono::high_resolution_clock::now();
@@ -2085,7 +2115,20 @@ void GFNFF::updateDispersionPairsIfNeeded(FFWorkspace* extra_ws)
     // topology charges, r_cut stamped by the generator. In the WP-A GPU mode
     // (m_skip_host_disp_pairs) the generator refreshes only CN + Gaussian weights and
     // returns an empty list — the GPU wrapper then rebuilds the list on the device.
-    auto pairs = m_d4_generator->GenerateDispersionPairsNative(m_atoms, m_geometry_bohr);
+    //
+    // Claude Generated (Oct 2026): run the rebuild on this instance's thread budget. During MD
+    // the process-wide OpenMP count is 1 (CxxThreadPool pins it), so the O(N^2) CN and pair
+    // loops of the generator ran serially (polymer_2x: 575 ms per rebuild, 9.4 M pairs). Every
+    // parallel region in the generator writes per atom, per row or per pair with a fixed
+    // order of summation, so the list and all values are independent of the thread count.
+    // Same budget rule as generateGFNFFParameterSet().
+    const int rebuild_threads = curcuma::intraParallelSuppressed() ? curcuma::intraThreadBudget() : m_threads;
+    std::vector<GFNFFDispersion> pairs;
+    {
+        curcuma::ScopedBlasThreads rebuild_omp_threads(rebuild_threads);
+        pairs = m_d4_generator->GenerateDispersionPairsNative(m_atoms, m_geometry_bohr,
+                                                               threadPool(), rebuild_threads);
+    }
     applyDispersionCutoff(pairs, false);
     const int new_count = static_cast<int>(pairs.size());
 
@@ -2129,10 +2172,10 @@ bool GFNFF::dispersionC6Stale() const
              && m_disp_c6_geometry == m_geometry_bohr);
 }
 
-void GFNFF::refreshDispersionC6()
+bool GFNFF::refreshDispersionC6()
 {
     if (!dispersionC6Stale())
-        return;
+        return false;
 
     // C6_ij = sum_ab W_i^a W_j^b C6ref_ab from the Gaussian weights the generator holds for
     // THIS step (updateCNValuesForGradient() just rebuilt them). getChargeWeightedC6() is the
@@ -2144,10 +2187,15 @@ void GFNFF::refreshDispersionC6()
     auto& pairs = m_workspace->d4DispersionsForC6Refresh();
     const int P = static_cast<int>(pairs.size());
     if (P == 0)
-        return;
+        return false;
     const D4ParameterGenerator& gen = *m_d4_generator;
+    // Claude Generated (Oct 2026): contiguous pair blocks instead of stride T (stride put
+    // neighbouring pairs, which share atom rows and cache lines, on different threads).
+    // Every pair is written independently from read-only caches: values do not depend on it.
     auto worker = [&](int t_id, int T) {
-        for (int p = t_id; p < P; p += T) {
+        const int pb = static_cast<int>(static_cast<long long>(P) * t_id / T);
+        const int pe = static_cast<int>(static_cast<long long>(P) * (t_id + 1) / T);
+        for (int p = pb; p < pe; ++p) {
             GFNFFDispersion& d = pairs[p];
             d.C6 = gen.getChargeWeightedC6(m_atoms[d.i], m_atoms[d.j], d.i, d.j);
         }
@@ -2164,6 +2212,7 @@ void GFNFF::refreshDispersionC6()
     } else {
         worker(0, 1);
     }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2647,7 +2696,7 @@ double GFNFF::calculationSingle(bool gradient)
 
     computeSharedDistances();
     if (m_eeq_solver) {
-        m_eeq_solver->setExternalDistances(&m_shared_srab);
+        m_eeq_solver->setExternalDistances(&m_shared_srab, &m_shared_dist_too_close);
     }
 
     // D4 pair-list skin check (Claude Generated, Sep 2026): must precede prepareCNAndEEQ(),
@@ -3770,6 +3819,7 @@ bool GFNFF::initializeForceField()
         int num_threads = m_threads;  // WP1
         m_workspace = std::make_unique<FFWorkspace>(num_threads);
         m_workspace->setAtomTypes(m_atoms);
+        m_workspace->setFarfieldShortcut(m_parameters.value("farfield_shortcut", true));  // Oct 2026; fallback = PARAM default
 
         // Keep a copy for external consumers (full pair lists only when a GPU wrapper asked
         // for them, bonded terms otherwise), then MOVE the set into the workspace. The former
@@ -4040,12 +4090,16 @@ GFNFF::BondHBRebuildResult GFNFF::rebuildBondHBData(
     result.bond_nr_hb.assign(nb, 0);
     result.bond_hb_H_atom.assign(nb, -1);
 
-    // Build A-H → B_atoms map from the new HB list (only N/O acceptors)
-    std::map<std::pair<int,int>, std::vector<int>> ah_to_b_atoms;
+    // Build A-H → B_atoms map from the new HB list (only N/O acceptors).
+    // Claude Generated (Oct 2026): hash map instead of std::map (only find() is used; each
+    // B list keeps the HB-list order), 56k entries per re-detection at 7320 atoms.
+    auto ah_key = [](int a, int h) { return (static_cast<long long>(a) << 32) ^ static_cast<unsigned int>(h); };
+    std::unordered_map<long long, std::vector<int>> ah_to_b_atoms;
+    ah_to_b_atoms.reserve(hbonds.size());
     for (const auto& hb : hbonds) {
         int z_b = (hb.k < m_atomcount) ? m_atoms[hb.k] : 0;
         if (z_b == 7 || z_b == 8)
-            ah_to_b_atoms[{hb.i, hb.j}].push_back(hb.k);
+            ah_to_b_atoms[ah_key(hb.i, hb.j)].push_back(hb.k);
     }
 
     for (int b = 0; b < nb; ++b) {
@@ -4056,7 +4110,7 @@ GFNFF::BondHBRebuildResult GFNFF::rebuildBondHBData(
         else continue;
         if (hbA >= m_atomcount || (m_atoms[hbA] != 7 && m_atoms[hbA] != 8)) continue;
 
-        auto it = ah_to_b_atoms.find({hbA, hbH});
+        auto it = ah_to_b_atoms.find(ah_key(hbA, hbH));
         if (it != ah_to_b_atoms.end() && !it->second.empty()) {
             result.bond_nr_hb[b] = static_cast<int>(it->second.size());
             result.bond_hb_H_atom[b] = hbH;
@@ -8785,6 +8839,17 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
     // Reference: gfnff_ini.f90:806-820
     std::vector<int> hb_hydrogens;
 
+    // Claude Generated (Oct 2026): partner of each atom in the FIRST bond of `bonds` that
+    // contains it - what the former per-hydrogen scan over the whole bond list returned
+    // (3 ms per re-detection at 7320 atoms), filled in one pass in the same bond order.
+    std::vector<int> first_bond_partner(m_atomcount, -1);
+    for (const auto& bond : bonds) {
+        if (bond.first >= 0 && bond.first < m_atomcount && first_bond_partner[bond.first] == -1)
+            first_bond_partner[bond.first] = bond.second;
+        if (bond.second >= 0 && bond.second < m_atomcount && first_bond_partner[bond.second] == -1)
+            first_bond_partner[bond.second] = bond.first;
+    }
+
     for (int h = 0; h < m_atomcount; ++h) {
         if (m_atoms[h] != 1) continue;  // Only hydrogens (Z=1)
 
@@ -8792,12 +8857,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
         if (topo_info.hybridization[h] == 1) continue;
 
         // Find bonded heavy atom A
-        int atom_A = -1;
-        for (const auto& bond : bonds) {
-            if (bond.first == h) atom_A = bond.second;
-            else if (bond.second == h) atom_A = bond.first;
-            if (atom_A != -1) break;
-        }
+        int atom_A = first_bond_partner[h];
 
         if (atom_A == -1) continue;  // H not bonded (should not happen)
 
@@ -8836,13 +8896,19 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
     // EXACT |E_HB| the energy kernel would compute is below this. 0 disables (old behaviour).
     const double hb_min_pair_energy = m_parameters.value("hb_min_pair_energy_eh", 1e-9);
 
-    // Pre-build bond lookup set for O(1) bonding checks
-    std::set<std::pair<int,int>> bond_set;
+    // Bond lookup. Claude Generated (Oct 2026): per-atom partner lists of the same bond list
+    // instead of a std::set of pairs (same answer for every (a, b), no tree search).
+    std::vector<std::vector<int>> bond_partners(m_atomcount);
     for (const auto& bond : bonds) {
-        bond_set.insert({std::min(bond.first, bond.second), std::max(bond.first, bond.second)});
+        if (bond.first >= 0 && bond.first < m_atomcount) bond_partners[bond.first].push_back(bond.second);
+        if (bond.second >= 0 && bond.second < m_atomcount) bond_partners[bond.second].push_back(bond.first);
     }
-    auto is_bonded = [&bond_set](int a, int b) -> bool {
-        return bond_set.count({std::min(a, b), std::max(a, b)}) > 0;
+    auto is_bonded = [&bond_partners, this](int a, int b) -> bool {
+        if (a < 0 || a >= m_atomcount) std::swap(a, b);
+        if (a < 0 || a >= m_atomcount) return false;
+        for (int p : bond_partners[a])
+            if (p == b) return true;
+        return false;
     };
 
     // Pre-build AB pair list (each pair once, i < j) — matches Fortran gfnff_ini.f90:822-839
@@ -8866,28 +8932,56 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
     if (hb_cell_threshold == 0 || m_atomcount >= hb_cell_threshold) {
         cell_list.build(m_geometry_bohr, std::sqrt(hbthr2));
         have_cell_list = true;
-        cell_list.forEachPair([&](int i, int j, double r2) {
-            if (r2 > hbthr1) return;  // ab_pairs only within sqrt(hbthr1)
+        // Claude Generated (Oct 2026): the per-atom part of the filter below (pi carbon, charge)
+        // decides first: atoms failing it are left out of a copy of the cell list with the
+        // same grid, so their pairs are never visited. The atoms are then walked in ranges in
+        // parallel (forEachPairOfAtom visits the pairs of one atom in forEachPair order) and
+        // the ranges concatenated in order: ab_pairs is the serial list, element for element.
+        auto ab_atom_ok = [&](int a) -> bool {
             // Fortran gfnff_ini.f90:882: if(at(i)==6 .and. piadr2(i)==0) cycle
-            if (m_atoms[i] == 6 && topo_info.pi_fragments[i] == 0) return;
-            if (m_atoms[j] == 6 && topo_info.pi_fragments[j] == 0) return;
-
+            if (m_atoms[a] == 6 && topo_info.pi_fragments[a] == 0) return false;
             // Fortran: qabthr=0.10, if(at(i)>10) ff=ff+0.2 → skip if q > +0.10 (or +0.30)
-            double q_thresh_i = 0.10;
-            if (m_atoms[i] > 10) q_thresh_i += 0.2;
-            if (charges[i] > q_thresh_i) return;
-
-            double q_thresh_j = 0.10;
-            if (m_atoms[j] > 10) q_thresh_j += 0.2;
-            if (charges[j] > q_thresh_j) return;
-
-            // HB strength criterion (check both directions) — mirrors Fortran gfnff_ini.f90:833
-            double strength1 = current_basicity[i] * current_acidity[j];
-            double strength2 = current_basicity[j] * current_acidity[i];
-            if (strength1 < 1e-6 && strength2 < 1e-6) return;
-
-            ab_pairs.push_back({i, j});
-        });
+            double q_thresh = 0.10;
+            if (m_atoms[a] > 10) q_thresh += 0.2;
+            return !(charges[a] > q_thresh);
+        };
+        std::vector<char> ab_ok(m_atomcount, 0);
+        for (int a = 0; a < m_atomcount; ++a) ab_ok[a] = ab_atom_ok(a) ? 1 : 0;
+        const SpatialCellList ab_cells = cell_list.subset(ab_ok);
+        auto ab_range = [&](int a, int b, std::vector<ABPair>& out) {
+            for (int i = a; i < b; ++i) {
+                if (!ab_ok[i]) continue;
+                ab_cells.forEachPairOfAtom(i, [&](int ii, int j, double r2) {
+                    if (r2 > hbthr1) return;  // ab_pairs only within sqrt(hbthr1)
+                    // HB strength criterion (check both directions) — mirrors Fortran gfnff_ini.f90:833
+                    double strength1 = current_basicity[ii] * current_acidity[j];
+                    double strength2 = current_basicity[j] * current_acidity[ii];
+                    if (strength1 < 1e-6 && strength2 < 1e-6) return;
+                    out.push_back({ii, j});
+                });
+            }
+        };
+        CxxThreadPool* ab_pool = threadPool();
+        const int ab_chunks = (ab_pool && m_threads > 1) ? std::min(m_atomcount, 8 * m_threads) : 1;
+        if (ab_chunks <= 1) {
+            ab_range(0, m_atomcount, ab_pairs);
+        } else {
+            std::vector<std::future<std::vector<ABPair>>> futures;
+            futures.reserve(ab_chunks);
+            for (int c = 0; c < ab_chunks; ++c) {
+                const int a = static_cast<int>(static_cast<long long>(m_atomcount) * c / ab_chunks);
+                const int b = static_cast<int>(static_cast<long long>(m_atomcount) * (c + 1) / ab_chunks);
+                futures.push_back(ab_pool->enqueue([&ab_range, a, b]() {
+                    std::vector<ABPair> local;
+                    ab_range(a, b, local);
+                    return local;
+                }));
+            }
+            for (auto& f : futures) {
+                auto local = f.get();
+                ab_pairs.insert(ab_pairs.end(), local.begin(), local.end());
+            }
+        }
     } else {
         for (int i = 0; i < m_atomcount; ++i) {
             // Claude Generated (Feb 25, 2026): Fix pi-carbon filter to match Fortran
@@ -8989,6 +9083,10 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
         // legacy path also reorders under threading). See docs/GFNFF_PERFORMANCE_LEVERS.md.
         std::vector<char> is_hb_hyd(m_atomcount, 0);
         for (int H : hb_hydrogens) is_hb_hyd[H] = 1;
+        // Claude Generated (Oct 2026): neighbour queries for case-1 hydrogens run on a copy of
+        // the cell list that holds only the HB hydrogens (same grid, same order), so the other
+        // ~60 % of the atoms are not visited; the callback skipped them anyway.
+        const SpatialCellList hyd_cells = cell_list.subset(is_hb_hyd);
         // Hydrogens bonded to each atom, restricted to HB-active hydrogens and built from the
         // same `bonds` list as is_bonded()/bond_set, so nhb2 needs no full-hydrogen scan.
         std::vector<std::vector<int>> hyd_on(m_atomcount);
@@ -9031,7 +9129,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                 for (int nb : topo_info.neighbor_lists[acceptor_parent])
                     if (nb != acceptor_B) hb.neighbors_C.push_back(nb);
             }
-            out.push_back(hb);
+            out.push_back(std::move(hb));
         };
 
         auto process_pair = [&](int i, int j, std::vector<GFNFFHydrogenBond>& out) {
@@ -9047,7 +9145,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                     make_nhb2(j, H, i, out);
                 }
             }
-            cell_list.forEachNeighbor(i, hbthr2, [&](int H, double r_iH_sq) {
+            hyd_cells.forEachNeighbor(i, hbthr2, [&](int H, double r_iH_sq) {
                 if (!is_hb_hyd[H]) return;
                 if (is_bonded(i, H) || is_bonded(j, H)) return;  // bonded to neither
                 const Vector r_H = m_geometry_bohr.row(H);
@@ -9069,7 +9167,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                     hb.acidity_B = current_acidity[j];
                     hb.q_H = charges[H]; hb.q_A = charges[i]; hb.q_B = charges[j];
                     hb.r_cut = 50.0;
-                    out.push_back(hb);
+                    out.push_back(std::move(hb));
                 }
             });
         };
@@ -9079,7 +9177,9 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
         const bool opt_parallel = (opt_pool != nullptr && opt_par_threshold >= 0
                                    && static_cast<int>(ab_pairs.size()) > opt_par_threshold);
         if (opt_parallel) {
-            int n_threads = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+            // Oct 2026: 4 chunks per hardware thread for load balance (was 1); the chunks are
+            // concatenated in order, so the list does not depend on their number.
+            int n_threads = 4 * std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
             std::vector<std::future<std::vector<GFNFFHydrogenBond>>> futures;
             futures.reserve(n_threads);
             size_t chunk = std::max<size_t>(1, ab_pairs.size() / n_threads);
@@ -9097,13 +9197,14 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
             for (auto& f : futures) {
                 auto local = f.get();
                 for (const auto& hb : local) { if (hb.case_type == 1) nhb1_count++; else nhb2_count++; }
-                hbonds.insert(hbonds.end(), local.begin(), local.end());
+                // Oct 2026: moved, not copied (the neighbour vectors of each entry were reallocated)
+                hbonds.insert(hbonds.end(), std::make_move_iterator(local.begin()), std::make_move_iterator(local.end()));
             }
         } else {
             std::vector<GFNFFHydrogenBond> local;
             for (const auto& ab : ab_pairs) process_pair(ab.i, ab.j, local);
             for (const auto& hb : local) { if (hb.case_type == 1) nhb1_count++; else nhb2_count++; }
-            hbonds.insert(hbonds.end(), local.begin(), local.end());
+            hbonds.insert(hbonds.end(), std::make_move_iterator(local.begin()), std::make_move_iterator(local.end()));
         }
     } else {
     // Claude Generated (Apr 2026): Parallelise main HB detection loop via CxxThreadPool.
@@ -11173,7 +11274,17 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
     std::vector<GFNFFRepulsion> nonbonded_reps;
 
     const std::vector<std::pair<int,int>>& cached_bonds = getCachedBondList();
-    std::set<std::pair<int, int>> bonded_set(cached_bonds.begin(), cached_bonds.end());
+    // Claude Generated (Oct 2026): "(i, j) is an entry of the bond list, in this order" - the
+    // question the former std::set<pair> of the list answered - from per-atom partner lists.
+    std::vector<std::vector<int>> listed_bond_partners(m_atomcount);
+    for (const auto& b : cached_bonds)
+        if (b.first >= 0 && b.first < m_atomcount) listed_bond_partners[b.first].push_back(b.second);
+    auto is_listed_bond = [&](int i, int j) -> bool {
+        if (i < 0 || i >= m_atomcount) return false;
+        for (int p : listed_bond_partners[i])
+            if (p == j) return true;
+        return false;
+    };
 
     // ===== BONDED REPULSION =====
     for (const auto& bond : cached_bonds) {
@@ -11225,7 +11336,7 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
         int i = std::min(ii, jj);
         int j = std::max(ii, jj);
         if (i == j) return false;
-        if (bonded_set.count({i, j}) > 0) return false;
+        if (is_listed_bond(i, j)) return false;
 
         int zi = m_atoms[i] - 1;
         int zj = m_atoms[j] - 1;
@@ -11287,7 +11398,7 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
     // parallel in contiguous static ranges and concatenate the ranges in order - the list is
     // identical to the serial one, element for element. The per-pair work (bonded-set lookup,
     // H...H topology lookup, sqrt) made this ~64 ms of every repulsion rebuild at 7320 atoms.
-    std::vector<std::pair<int, int>> cand;
+    const int rep_threads = std::max(1, m_threads);
     if (repulsionListIsDistanceFiltered()) {
         // Claude Generated (Sep 2026): build radius = kernel cutoff + optional Verlet skin
         // (nonbonded_skin_bohr, default 2 since Sep 27, 2026). Pairs between 20 and 20+skin are stored but the
@@ -11295,34 +11406,59 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
         // updateNonbondedRepulsionIfNeeded() rebuild only after skin/2 of atomic motion.
         SpatialCellList rep_cells;
         rep_cells.build(m_geometry_bohr, NB_REP_RCUT + nonbondedSkinBohr());
-        rep_cells.forEachPair([&](int i, int j, double /*r2*/) { cand.emplace_back(i, j); });
-    } else {
-        cand.reserve(static_cast<size_t>(m_atomcount) * (m_atomcount - 1) / 2);
-        for (int i = 0; i < m_atomcount; ++i)
-            for (int j = i + 1; j < m_atomcount; ++j)
-                cand.emplace_back(i, j);
-    }
-    const int rep_threads = std::max(1, m_threads);
-    if (m_rep_diag || rep_threads == 1 || cand.size() < 20000) {
-        nonbonded_reps.reserve(cand.size());
-        GFNFFRepulsion r;
-        for (const auto& c : cand)
-            if (make_nb_rep(c.first, c.second, r)) nonbonded_reps.push_back(r);
-    } else {
-        std::vector<std::vector<GFNFFRepulsion>> part(rep_threads);
-        const size_t n = cand.size();
-        #pragma omp parallel for num_threads(rep_threads) schedule(static, 1)
-        for (int t = 0; t < rep_threads; ++t) {
-            const size_t a = n * t / rep_threads, b = n * (t + 1) / rep_threads;
-            part[t].reserve(b - a);
+        // Claude Generated (Oct 2026): the serial candidate collection (forEachPair) is split
+        // as well. Atom ranges are walked in parallel with
+        // forEachPairOfAtom(), which visits the pairs of one atom in forEachPair() order, and
+        // the ranges are concatenated in order: the list is the serial one, element for element.
+        const int n_chunks = (m_rep_diag || rep_threads == 1) ? 1 : std::min(m_atomcount, 8 * rep_threads);
+        std::vector<std::vector<GFNFFRepulsion>> part(std::max(1, n_chunks));
+        auto run_chunk = [&](int c) {
+            const int a = static_cast<int>(static_cast<long long>(m_atomcount) * c / n_chunks);
+            const int b = static_cast<int>(static_cast<long long>(m_atomcount) * (c + 1) / n_chunks);
             GFNFFRepulsion r;
-            for (size_t k = a; k < b; ++k)
-                if (make_nb_rep(cand[k].first, cand[k].second, r)) part[t].push_back(r);
+            for (int i = a; i < b; ++i)
+                rep_cells.forEachPairOfAtom(i, [&](int ii, int jj, double /*r2*/) {
+                    if (make_nb_rep(ii, jj, r)) part[c].push_back(r);
+                });
+        };
+        if (n_chunks <= 1) {
+            if (n_chunks == 1) run_chunk(0);
+        } else {
+            #pragma omp parallel for num_threads(rep_threads) schedule(dynamic, 1)
+            for (int c = 0; c < n_chunks; ++c)
+                run_chunk(c);
         }
         size_t total = 0;
         for (const auto& pp : part) total += pp.size();
         nonbonded_reps.reserve(total);
         for (auto& pp : part) nonbonded_reps.insert(nonbonded_reps.end(), pp.begin(), pp.end());
+    } else {
+        std::vector<std::pair<int, int>> cand;
+        cand.reserve(static_cast<size_t>(m_atomcount) * (m_atomcount - 1) / 2);
+        for (int i = 0; i < m_atomcount; ++i)
+            for (int j = i + 1; j < m_atomcount; ++j)
+                cand.emplace_back(i, j);
+        if (m_rep_diag || rep_threads == 1 || cand.size() < 20000) {
+            nonbonded_reps.reserve(cand.size());
+            GFNFFRepulsion r;
+            for (const auto& c : cand)
+                if (make_nb_rep(c.first, c.second, r)) nonbonded_reps.push_back(r);
+        } else {
+            std::vector<std::vector<GFNFFRepulsion>> part(rep_threads);
+            const size_t n = cand.size();
+            #pragma omp parallel for num_threads(rep_threads) schedule(static, 1)
+            for (int t = 0; t < rep_threads; ++t) {
+                const size_t a = n * t / rep_threads, b = n * (t + 1) / rep_threads;
+                part[t].reserve(b - a);
+                GFNFFRepulsion r;
+                for (size_t k = a; k < b; ++k)
+                    if (make_nb_rep(cand[k].first, cand[k].second, r)) part[t].push_back(r);
+            }
+            size_t total = 0;
+            for (const auto& pp : part) total += pp.size();
+            nonbonded_reps.reserve(total);
+            for (auto& pp : part) nonbonded_reps.insert(nonbonded_reps.end(), pp.begin(), pp.end());
+        }
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {

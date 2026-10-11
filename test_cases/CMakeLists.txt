@@ -173,6 +173,26 @@ add_test(NAME gfnff_frag_charge_history
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(gfnff_frag_charge_history PROPERTIES TIMEOUT 120 LABELS "gfnff;frag_charge")
 
+# Claude Generated (Oct 2026): the bounded placement selection of frag_charge_model ensemble
+# (GFNFF::fragSelectPlacements) returns the same placements in the same order as the former full
+# enumeration (20000 random cases), and scales to hundreds of fragment groups (docs/FRAG_CHARGE_MODEL.md).
+add_executable(test_frag_charge_selection unit/test_frag_charge_selection.cpp)
+target_link_libraries(test_frag_charge_selection curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_frag_charge_selection REUSE_FROM curcuma_core)
+endif()
+add_test(NAME gfnff_frag_charge_selection COMMAND test_frag_charge_selection 20000)
+set_tests_properties(gfnff_frag_charge_selection PROPERTIES TIMEOUT 300 LABELS "gfnff;frag_charge")
+
+# Claude Generated (Oct 2026): -gpu backend vs EEQ solver names (rocm: auto/cholesky only; vulkan: all) - name logic, no device.
+add_executable(test_eeq_gpu_supports unit/test_eeq_gpu_supports.cpp)
+target_link_libraries(test_eeq_gpu_supports curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_eeq_gpu_supports REUSE_FROM curcuma_core)
+endif()
+add_test(NAME eeq_gpu_supports COMMAND test_eeq_gpu_supports)
+set_tests_properties(eeq_gpu_supports PROPERTIES TIMEOUT 60 LABELS "gfnff;eeq")
+
 # Copy reference data to build tree so tests can find them
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/reference_data
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
@@ -405,7 +425,7 @@ if(USE_CUDA)
              COMMAND test_gfnff_gpu
              WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
     set_tests_properties(gfnff_gpu_builtin_molecules
-        PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;validation")
+        PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;validation")
 
     # Per-molecule tests using the same reference data as CPU GFN-FF validation
     foreach(REF_FILE ${GFNFF_REF_FILES})
@@ -417,7 +437,7 @@ if(USE_CUDA)
                  COMMAND test_gfnff_gpu ${BUILD_REF_FILE}
                  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
         set_tests_properties(${GPU_TEST_NAME}
-            PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;validation")
+            PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;validation")
     endforeach()
 
     # Claude Generated (March 2026): GPU analytical vs numerical gradient test
@@ -453,7 +473,7 @@ foreach(EO_MOL triose caffeine)
                          ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/${EO_MOL}.xyz cuda
                  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
         set_tests_properties(gfnff_gpu_energy_only_geometry_${EO_MOL}
-            PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu")
+            PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu")
     endif()
 endforeach()
 
@@ -589,7 +609,7 @@ if(Python3_Interpreter_FOUND)
                          $<TARGET_FILE:curcuma>
                          ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/polymer_2x.xyz)
         set_tests_properties(gfnff_gpu_split_equals_single
-            PROPERTIES TIMEOUT 600 LABELS "gfnff_gpu;gpu" SKIP_RETURN_CODE 77)
+            PROPERTIES TIMEOUT 600 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu" SKIP_RETURN_CODE 77)
     endif()
 
     # Claude Generated (Sep 2026): adaptive (step-rejecting) integrator.
@@ -618,4 +638,15 @@ if(Python3_Interpreter_FOUND)
                      $<TARGET_FILE:curcuma>)
     set_tests_properties(md_time_axis
         PROPERTIES TIMEOUT 300 LABELS "md;integrator;gfnff;units")
+
+    # Claude Generated (Oct 2026): CPU curcuma single points (gfnff, gfn2) against the stored
+    # xtb 6.7.1 energies of the structure library. No xtb run; see scripts/check_xtb_library_energies.py.
+    add_test(NAME xtb_library_energies
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_xtb_library_energies.py
+                     --curcuma $<TARGET_FILE:curcuma>
+                     --reference ${CMAKE_CURRENT_SOURCE_DIR}/reference_data/xtb_library_energies.json
+                     --structures ${CMAKE_CURRENT_SOURCE_DIR}/structures)
+    set_tests_properties(xtb_library_energies
+        PROPERTIES TIMEOUT 900 LABELS "gfnff;sqm;xtb_reference")
 endif()

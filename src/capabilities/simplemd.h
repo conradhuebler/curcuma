@@ -492,6 +492,7 @@ private:
     bool m_run_prepared = false;         // true after prepareRun(), false after finalizeRun()
     bool m_run_aborted = false;          // mirrors former local `aborted` flag in start()
     std::vector<json> m_run_states;      // rescue states carried across step() calls
+    json m_last_dump_state;              // K6 (Oct 2026): state of the last WriteGeometry() dump, -rescue only
 
     // Claude Generated (Jun 2026): ConfSearch robustness gates (opt-in, default off)
     bool m_topo_check = false;           // abort on fragmentation; also gates bias deposition

@@ -266,8 +266,9 @@ public:
     void setCNDerivatives(const Vector& cn, const Vector& cnf,
                           const CNDerivStore& dcn);
 
-    /// Set dc6dcn pointer for D4 dispersion CN gradient
-    void setDC6DCNPtr(const Matrix* ptr) { m_dc6dcn_ptr = ptr; }
+    /// Set the per-pair dC6/dCN source for the D4 dispersion CN gradient (Claude Generated,
+    /// Oct 2026: per-pair arrays of the D4 generator instead of a dense N x N matrix)
+    void setDC6DCNPtr(const D4DC6DCNPairs* ptr) { m_dc6dcn_ptr = ptr; }
 
     /// Set baseline energy (e0 from parameter set)
     void setE0(double e0) { m_e0 = e0; }
@@ -305,6 +306,8 @@ public:
 
     void setStoreGradientComponents(bool v) { m_store_components = v; }
     void setPool(CxxThreadPool* pool) { m_pool = pool; }
+    /// Claude Generated (Oct 2026): exact far-field shortcut of the Coulomb pair loop (see calcCoulomb).
+    void setFarfieldShortcut(bool v) { m_farfield_shortcut = v; }
     int numThreads() const { return m_num_threads; }
 
     // Term enable flags (match ForceField flags)
@@ -430,7 +433,7 @@ private:
     Vector m_eeq_charges, m_topology_charges, m_d3_cn;
     Vector m_cn, m_cnf;
     CNDerivStore m_dcn;  // Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
-    const Matrix* m_dc6dcn_ptr = nullptr;
+    const D4DC6DCNPairs* m_dc6dcn_ptr = nullptr;
     double m_e0 = 0.0;
 
     // Coulomb self-energy parameters (O(N), extracted at init)
@@ -440,6 +443,8 @@ private:
     /// (GFN-FF only); see calcCoulomb().
     bool   m_coulomb_implicit = false;
     double m_coulomb_implicit_rcut = std::numeric_limits<double>::infinity();  // no cutoff, as the reference (Sep 2026)
+    /// Claude Generated (Oct 2026): skip erf/exp for gamma_ij*r >= 6.5 (erf = 1 exactly in FP64), see calcCoulomb.
+    bool   m_farfield_shortcut = true;
 
     // Term-enable flags
     bool m_dispersion_enabled = true;

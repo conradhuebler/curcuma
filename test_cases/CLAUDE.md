@@ -11,7 +11,7 @@ Longer guide (Feb 2026, not re-checked): [TESTING.md](TESTING.md).
 ## Where tests are registered
 
 - Root `CMakeLists.txt` (`add_subdirectory(test_cases)` onward): `molecule_comprehensive`, `AAAbGlc_*`, `confscan_*`, `energy_methods`, `parameter_io`, `confstat_*`
-- `test_cases/CMakeLists.txt`: the `test_*.cpp` executables (`gfnff_*`, `xtb_gradient_*`, `d4_dedq`, `gradient_unit_contract`, `md_*`, ...), `gfnff_val_*` (one per `reference_data/*.ref.json`)
+- `test_cases/CMakeLists.txt`: the `test_*.cpp` executables (`gfnff_*`, `xtb_gradient_*`, `d4_dedq`, `gradient_unit_contract`, `md_*`, ...), `gfnff_val_*` (one per `reference_data/*.ref.json`), `xtb_library_energies` (CPU gfnff/gfn2 vs stored xtb 6.7.1 energies, `scripts/check_xtb_library_energies.py`, no xtb run)
 - `test_cases/cli/CMakeLists.txt`: CLI tests, `add_cli_test(CATEGORY NAME)` registers `cli_<category>_<name>`; GPU categories only when the backend is built
 - `test_cases/sqm_reference/CMakeLists.txt`: `sqm_val_*` (1e-8 Eh energy gates for gfn1/gfn2), `sqm_solv_*`, `sqm_gbsa_*`, `gfnff_solv_*`, `d4_diag_*`
 

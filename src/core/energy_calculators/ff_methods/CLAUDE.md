@@ -12,7 +12,7 @@ D3/D4 fix records, GPU phase log, TODO checkboxes) is kept in
 - **`ff_terms.h`**: term structs shared by the workspace, `ForceField`, `GFNFF` and the GPU SoA headers.
 - **`ForceField`** (`forcefield.cpp/h`): UFF, UFF-D3, QMDFF, CG. Parameter generation in `ForceFieldGenerator`, JSON parameter caching, then hands the lists to its own `FFWorkspace`. `-method cg` takes `-load_ff_json FILE` (`cg_default`, `cg_per_atom`, `pair_interactions`, `bonds`); sphere gradient analytic, ellipsoids by finite differences.
 - **`GFNFF`** (`gfnff_method.cpp/h`, `gfnff_torsions.cpp`, `gfnff_inversions.cpp`, `gfnff_frag_charge.cpp`): topology, Phase-1 EEQ, FT-HMO pi-bond orders, native parameter generation (`generateGFNFFParameterSet()`), per-step CN and Phase-2 EEQ (`prepareCNAndEEQ()`), H/X-bond re-detection, ALPB, then `m_workspace->calculate()`. Owns the `CxxThreadPool`. `NumGrad()` and `NumGradFixedCharges()` run on the workspace.
-- **`EEQSolver`** (`eeq_solver.cpp/h`): Phase 1 topological, Phase 2 geometric (dxi/dgam/alpha corrections). Default Schur-Cholesky; projected PCG (`solveWithProjectedPCG`) from `eeq_ppcg_min_atoms` / `eeq_ppcg_min_nfrag` (0 = exact). The cached-factor mode is off (`eeq_refactor_eps_bohr` 0).
+- **`EEQSolver`** (`eeq_solver.cpp/h`): Phase 1 topological, Phase 2 geometric (dxi/dgam/alpha corrections). Default `auto` (`solve_method`): Schur-Cholesky below the thresholds, projected PCG (`solveWithProjectedPCG`) from `eeq_ppcg_min_atoms` / `eeq_ppcg_min_nfrag` (0 = exact), `localinv` preconditioner. The cached-factor mode is off (`eeq_refactor_eps_bohr` 0).
 - **No periodic boundary conditions** on the CPU path (documented, not re-checked); the GPU path has its own PBC handling.
 - **GPU** (`cuda/`, `rocm/`): one host wrapper template `GFNFFGpuMethodImpl<Backend>` in `qm_methods/gfnff_gpu_method_impl.h`; headers shared by CUDA and HIP through `gpu_rt.h`, `rocm/*_hip.h` are shims. ROCm was run on one Radeon 890M; the Sep 2026 header unification of the HIP side was not compiled (no ROCm SDK on the machine that made it). Details: [docs/GPU_TUNING.md](../../../../docs/GPU_TUNING.md), [docs/MULTI_GPU.md](../../../../docs/MULTI_GPU.md).
 
@@ -40,6 +40,7 @@ Each item was a real defect; evidence in [docs/KNOWN_ISSUES_ARCHIVE.md](../../..
 ## Dispersion
 
 - Shared D3 kernel (`d3param_generator.cpp`): validated only through the native GFN1 path against tblite (10 of 12 `sqm_reference` molecules at 1e-8, 2026-05-31). `uff-d3` and standalone D3 are not validated.
+- GPU `k_dispersion` reads no EEQ charge (`zetac6` holds the Phase-1 topology charges, C6/dC6dCN come from the CN); since K2 (Oct 2026) it runs right after `dc6dcn`, parallel to the EEQ solve.
 - GFN-FF dispersion follows the reference: D4 C6 from Casimir-Polder integration with CN-only Gaussian weights and the modified BJ damping of `gfnff_gdisp0.f90`, not standard D3/D4 (`../dispersion/d4param_generator.cpp`). The three-body ATM term is not in the reference and is off by default (`dispersion_atm`).
 - `uff-d3`: `ForceFieldGenerator::GenerateUFFD3Parameters()` merges UFF terms with the D3 pair list.
 - A shared CN utility exists (`cn_calculator.h`); `D3ParameterGenerator` and `EEQSolver` still have their own CN routines.
@@ -48,7 +49,6 @@ Each item was a real defect; evidence in [docs/KNOWN_ISSUES_ARCHIVE.md](../../..
 
 - Not implemented relative to the reference (notes of Apr 2026, not re-checked): hyperconjugation torsion modulation, metal-specific C6.
 - EEQ on GPU: FMM matrix-vector product (O(N log N)) and ROCm block-Jacobi mirror are open; ROCm many-fragment systems go to the exact CPU PCG above `eeq_rocm_cpu_fragment_threshold`.
-- `k_dispersion` cannot overlap with the EEQ solve in gradient mode (needs `dc6dcn` from the post-EEQ charges).
 - ROCm GFN-FF correctness gaps and GFN-FF open items: root `CLAUDE.md` "Open Items", [docs/MULTI_GPU_GAPS.md](../../../../docs/MULTI_GPU_GAPS.md), [docs/REV_GFNFF_TODO.md](../../../../docs/REV_GFNFF_TODO.md).
 
 ## References

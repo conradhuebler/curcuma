@@ -75,10 +75,14 @@ public:
      *
      * @param atoms Atomic numbers
      * @param geometry_bohr Coordinates in Bohr
+     * @param pool, num_threads  workers for the per-atom/per-pair helpers (Gaussian weights,
+     *        their derivatives, half-contraction, dC6/dCN); results do not depend on them
+     *        (Claude Generated, Oct 2026). The two O(N^2) loops use the caller's OpenMP setting.
      * @return Vector of GFNFFDispersion structs
      */
     std::vector<GFNFFDispersion> GenerateDispersionPairsNative(
-        const std::vector<int>& atoms, const Matrix& geometry_bohr);
+        const std::vector<int>& atoms, const Matrix& geometry_bohr,
+        CxxThreadPool* pool = nullptr, int num_threads = 1);
 
     // Individual parameter accessors
     double getC6(int atom_i, int atom_j, int ref_i = 0, int ref_j = 0) const;
@@ -101,7 +105,9 @@ public:
     // Claude Generated (Feb 15, 2026): dc6dcn computation for dispersion CN gradient
     // Reference: Fortran gfnff_gdisp0.f90:174-210, 262-305
     // @param skip_dc6dcn  If true, skip O(N²) dc6dcn matrix (GPU computes per-pair)
-    void updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool = nullptr,
+    // @return true if the Gaussian weights (and, unless skip_dc6dcn, half-contraction and dc6dcn) were
+    //         rebuilt for `cn`; false if the P1a CN-change threshold skipped the update.
+    bool updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool = nullptr,
                                     int num_threads = 1, bool skip_dc6dcn = false);
 
     /**
@@ -112,7 +118,9 @@ public:
      * derivatives it doesn't need.
      */
     void refreshC6WeightsForCN(const std::vector<double>& cn, CxxThreadPool* pool = nullptr, int num_threads = 1);
-    const Matrix& getDC6DCN() const { return m_dc6dcn; }
+    /// Per-pair dC6/dCN of the current pair list (Claude Generated, Oct 2026; replaces the dense
+    /// N x N matrix). Readers look a pair up with D4DC6DCNPairs::lookup().
+    const D4DC6DCNPairs& getDC6DCN() const { return m_dc6dcn; }
 
     // Claude Generated (March 2026): GPU dc6dcn Phase 2 — expose weight arrays
     const std::vector<std::vector<double>>& getGaussianWeights() const { return m_gaussian_weights; }
@@ -387,8 +395,10 @@ private:
     // Claude Generated (Feb 15, 2026): Gaussian weight derivatives and dc6dcn matrix
     // dgwdcn[atom_idx][ref_idx] = d(normalized_weight(ref))/d(CN(atom))
     std::vector<std::vector<double>> m_gaussian_weight_derivatives;
-    // dc6dcn(i,j) = dC6(i,j)/dCN(i) - asymmetric matrix
-    Matrix m_dc6dcn;
+    // Claude Generated (Oct 2026): per-pair dc6dcn instead of the dense asymmetric N x N matrix
+    // dc6dcn(i,j) = dC6(i,j)/dCN(i). m_dc6dcn.pairs is the in-cutoff pair list (below), and
+    // dc6_di/dc6_dj hold the former cells (i,j)/(j,i) of each pair; every other cell was 0.
+    D4DC6DCNPairs m_dc6dcn;
     bool m_dc6dcn_computed = false;
 
     // Claude Generated (Lever 3 Opt A, Jun 2026): in-cutoff dispersion pair list.
@@ -398,8 +408,9 @@ private:
     // Storing the in-cutoff pairs lets computeDC6DCN skip the unread beyond-cutoff
     // (and diagonal) cells — exactly bit-identical for every consumed entry.
     // Populated by GenerateDispersionPairsNative; reused by updateCNValuesForGradient
-    // (which has no geometry). When invalid, computeDC6DCN falls back to full N².
-    std::vector<std::pair<int, int>> m_dc6dcn_pairs;  // (i,j), i<j, |r_ij|<=cutoff
+    // (which has no geometry). Oct 2026: the list lives in m_dc6dcn.pairs ((i,j), i<j,
+    // |r_ij|<=cutoff, sorted). When invalid (GPU builds the list on device), computeDC6DCN
+    // computes nothing: the former full-N^2 fallback had no host reader.
     bool m_dc6dcn_pairs_valid = false;
 
     // Claude Generated (Lever 3 Opt B, Jun 2026): per-atom half-contraction of the
