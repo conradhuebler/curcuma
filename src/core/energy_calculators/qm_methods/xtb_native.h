@@ -58,6 +58,7 @@ class CxxThreadPool;
 
 #include "diis_accelerator.h"
 #include "broyden_mixer.h"
+#include "xtb_precond.h"
 
 namespace curcuma::xtb {
 
@@ -890,6 +891,11 @@ public:
     void setFp32StallPatience(int n)        { m_fp32_stall_patience = std::max(0, n); }
     void setFp32FalseFixpointFactor(double f) { m_fp32_false_fixpoint = f; }
     void setGpuMultipoleOtf(const std::string& m) { m_gpu_mp_otf = m; }
+    // Broyden seed preconditioner (Claude Generated, Oct 2026; xtb_precond.h, docs/SCF_PRECOND.md).
+    void setScfPrecond(const std::string& s)      { m_scf_precond = s; }
+    void setScfPrecondGuard(const std::string& s) { m_scf_precond_guard = s; }
+    void setScfPrecondRebuildRms(double r)        { m_scf_precond_rebuild_rms = (r > 0.0) ? r : 0.0; }
+    const std::string& scfPrecond() const         { return m_scf_precond; }
 
     // Warm-start: reuse converged charges from the previous geometry step.
     // Activated by MD/opt capabilities; also settable via -warm_start false.
@@ -1044,6 +1050,23 @@ private:
     // In-SCF potential v_at += dE_solv/dq = (B*q_at); energy added separately.
     void addSolvationPotential(Potential& pot) const;
     double energySolvation() const;
+
+    // SCF Jacobian debug dump (Claude Generated, Oct 2026; xtb_precond.cpp). Active only with the
+    // environment variable CURCUMA_SCF_JAC=<dir>; see the definition for the file format.
+    void writeScfJacobianDump(const std::string& dir, const Vector& x_star, const Vector& g_loop,
+                              double e_scc, const std::function<Vector(const Vector&)>& evalG);
+
+    // SCF preconditioner matrix for the Broyden step hook (Claude Generated, Oct 2026;
+    // xtb_precond.cpp). Active only with CURCUMA_SCF_PRECOND_FILE=<file>.
+    bool loadScfPrecondMatrix(const std::string& path, int dim, std::string& err);
+
+    // Broyden seed preconditioner (Claude Generated, Oct 2026; xtb_precond.cpp): picks the step
+    // hook (file > -scf_precond frag > none) and the guard for one SCF; builds or reuses the
+    // fragment M. Returns false only for an unusable CURCUMA_SCF_PRECOND_FILE.
+    bool selectScfPreconditioner(bool broyden_mode, bool cpu_loop, int dim,
+                                 std::function<Vector(const Vector&)>& hook,
+                                 ScfPrecondGuard& guard, std::string& err);
+    bool buildFragmentPreconditioner(std::string& err);
 
     // GFN2 multipole interactions (damped).
     void addMultipolePotential(Potential& pot) const;                    // xtb_multipole.cpp
@@ -1487,6 +1510,27 @@ private:
     DIISAccelerator m_diis;
     BroydenMixer    m_broyden;
 
+    // SCF preconditioner matrix M from CURCUMA_SCF_PRECOND_FILE (Claude Generated, Oct 2026,
+    // debug/experiment path). Read once per XTB object; re-read when path or mtime change.
+    std::shared_ptr<const PrecondMatrix> m_scf_precond_M;
+    std::string  m_scf_precond_path;
+    long long    m_scf_precond_mtime = 0;
+
+    // -scf_precond frag (Claude Generated, Oct 2026; xtb_precond.cpp). The block preconditioner is
+    // built at the first SCF that uses it and kept with the geometry it was built at; rebuilt for
+    // a new molecule or when the RMS displacement exceeds m_scf_precond_rebuild_rms (0 = never).
+    std::string  m_scf_precond = "none";            // none | frag
+    std::string  m_scf_precond_guard = "g2:4:best"; // ScfPrecondGuard spec, "off" = no guard
+    double       m_scf_precond_rebuild_rms = 0.0;   // Angstrom
+    bool         m_scf_precond_warned = false;      // "ignored" warning given once per object
+    std::string  m_scf_precond_guard_checked;       // guard spec already parsed (warn once per spec)
+    std::shared_ptr<const SchwarzPreconditioner> m_scf_precond_frag;
+    Matrix           m_scf_precond_geom;            // geometry (Angstrom) M was built at
+    std::vector<int> m_scf_precond_atoms;           // atomic numbers M was built for
+    // Fragment objects only: compute the SCC Jacobian after convergence into m_scf_jac_result.
+    bool          m_scf_jac_capture = false;
+    PrecondMatrix m_scf_jac_result;
+
     // Intra-molecule parallelism (Claude Generated). m_intra_threads is the budget
     // granted by the wrapper (global -threads); m_pool is the persistent worker pool,
     // created lazily by ensurePool() only for a single large molecule and reused
@@ -1540,6 +1584,10 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_fp32_stall_patience", [&](const json& v){ if (v.is_number()) xtb.setFp32StallPatience(static_cast<int>(v.get<double>())); });
     lookup("scf_fp32_false_fixpoint_factor", [&](const json& v){ if (v.is_number()) xtb.setFp32FalseFixpointFactor(v.get<double>()); });
     lookup("gpu_multipole_otf",       [&](const json& v){ if (v.is_string()) xtb.setGpuMultipoleOtf(v.get<std::string>()); });
+    // Broyden seed preconditioner (Claude Generated, Oct 2026, docs/SCF_PRECOND.md).
+    lookup("scf_precond",             [&](const json& v){ if (v.is_string()) xtb.setScfPrecond(v.get<std::string>()); });
+    lookup("scf_precond_guard",       [&](const json& v){ if (v.is_string()) xtb.setScfPrecondGuard(v.get<std::string>()); });
+    lookup("scf_precond_rebuild_rms", [&](const json& v){ if (v.is_number()) xtb.setScfPrecondRebuildRms(v.get<double>()); });
     lookup("scf_extrapolation",      [&](const json& v){ if (v.is_string())          xtb.setScfExtrapolation(v.get<std::string>()); });
     lookup("scf_extrapolation_order",[&](const json& v){ if (v.is_number_integer())  xtb.setScfExtrapolationOrder(v.get<int>()); });
     lookup("scf_extrapolation_apply",[&](const json& v){ if (v.is_string())          xtb.setScfExtrapolationApply(v.get<std::string>()); });

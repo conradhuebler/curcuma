@@ -2097,6 +2097,51 @@
    "description": "input of the optimisation test (directory optimisation/triose); the geometry level is not recorded"
   },
   {
+   "id": "urea-water-cluster197.unrelaxed",
+   "class": "clusters",
+   "file": "clusters/urea-water-cluster197.unrelaxed.xyz",
+   "format": "xyz",
+   "formula": "C16H110N32O39",
+   "natoms": 197,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 6388,
+   "sha256": "7f0c1306cbc556a9b6e54d12a6c018c03bb2f305849a55985f35c1e7c71cd8ab",
+   "provenance": {
+    "kind": "constructed",
+    "description": "Cut from the library structure urea400-water1000 (unknown provenance, legacy): whole molecules in order of the distance of their centroid from the centre of the bounding box, added while the atom count stays <= 200 (197 atoms); coordinates as in the source, not relaxed. Built Oct 2026 with a scratch script for the SCF preconditioner study (docs/SCF_PRECOND.md); hard SCF case for GFN2 (HOMO-LUMO gap about 0.2 eV between different molecules)."
+   },
+   "derived_from": "urea400-water1000",
+   "notes": "Test structure of cli_sqm_12_gfn2_scf_precond (MD part, guard fires)"
+  },
+  {
+   "id": "urea3-water8.gfn2-relaxed",
+   "class": "clusters",
+   "file": "clusters/urea3-water8.gfn2-relaxed.xyz",
+   "format": "xyz",
+   "formula": "C3H28N6O11",
+   "natoms": 48,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "equilibrium",
+   "size_bytes": 1996,
+   "sha256": "13e4e6bb881afa4caf400a886199ce1548b53920c6371c621092d0c5d000e89a",
+   "provenance": {
+    "kind": "optimized",
+    "program": "curcuma",
+    "version": "0.1 (g1632241c, release build)",
+    "method": "gfn2 (native)",
+    "convergence": "-opt.optimizer lbfgspp, default criteria: dE 0.1 kJ/mol, RMSD 0.01 A, gradient norm 5e-4 Eh/Bohr; converged after 773 steps, final gradient norm 4.87e-4 Eh/Bohr",
+    "description": "3 urea + 8 water: the 11 molecules of urea400-water1000 whose centroids lie nearest the box centre (whole molecules, 48 atoms), relaxed with native GFN2 (curcuma -opt ureawater48.xyz -method gfn2 -opt.optimizer lbfgspp -threads 4). Built Oct 2026 for the SCF preconditioner tests (docs/SCF_PRECOND.md); the optimisation log was not archived.",
+    "energy_eh": -83.04383863
+   },
+   "derived_from": "urea400-water1000",
+   "notes": "Test structure of cli_sqm_12_gfn2_scf_precond"
+  },
+  {
    "id": "urea400-water1000",
    "class": "bulk",
    "file": "bulk/urea400-water1000.xyz",

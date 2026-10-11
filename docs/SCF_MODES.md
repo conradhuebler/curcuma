@@ -36,6 +36,8 @@ through the `xtb` config scope to the native object.
 
 Aliases: `normal` -> `plain`, `levelshift`/`ls` -> `level-shift`, `pulay` -> `diis`.
 
+Opt-in preconditioner of the `broyden` seed for GFN2 (`-scf_precond frag`): [SCF_PRECOND.md](SCF_PRECOND.md).
+
 **Why `broyden` is different.** `diis`/`plain`/`level-shift` mix the density or
 Fock matrix; `broyden` mixes the low-dimensional self-consistent *charge* vector
 (shell charges, plus atomic dipoles/quadrupoles for GFN2) with an approximate

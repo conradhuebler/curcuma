@@ -180,6 +180,7 @@ write a restart file and finish. A second Ctrl-C while `stop` exists ends the pr
 ### More
 
 [docs/](docs/) holds one document per feature: the SCF modes ([docs/SCF_MODES.md](docs/SCF_MODES.md)),
+the opt-in GFN2 SCF preconditioner `-scf_precond frag` ([docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), experimental),
 solvation ([docs/SOLVATION.md](docs/SOLVATION.md)), temperature ramps
 ([docs/TEMPERATURE_RAMP.md](docs/TEMPERATURE_RAMP.md)), large-system MD
 ([docs/MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md)), PLUMED ([docs/PLUMED_HELP.md](docs/PLUMED_HELP.md)),

@@ -16,6 +16,7 @@ below. If it needs measurements or a derivation, write them into the matching `d
 
 ## Jul - Sep 2026 (and some late June), 108 entries, full text in AIChangelog_2026-late.md
 
+- SCF preconditioner (Oct 10-11, 2026): opt-in `-scf_precond frag` with guard `-scf_precond_guard` for the native GFN2 CPU Broyden loop (fragment Jacobians, additive Schwarz blocks), `xtb_precond.{h,cpp}`, test `cli_sqm_12`; a two-level variant with a charge-transfer coarse level was tested, no gain over frag (n=1), and removed; [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)
 - Test audit (Oct 9, 2026): cli_sqm_04..07 re-enabled at 1e-5 Eh (native gfn1/gfn2 vs TBLite, OH radical 2e-3); ConfScan counter tests print actual vs expected; 3 CLI tests stay disabled with documented reasons
 - Dead code removed (Oct 1, 2026): legacy CurcumaOpt, native_lbfgs_optimizer, modern_optimizer_simple (module `modern_optimizer` left the registry), accuracy_profile, munkress_2.h, 4 unused optimiser headers, RMSDDriver::MolAlignLib/Prepare*Template, D4Evaluator::launchGpuKernel, 2 helpers, 2 .backup files; ctest `cg_potentials` registered
 - GFN-FF D4: the C6 summation order depended on the verbosity level — FIXED (Sep 30, 2026, ported from revgfnff, Known Issue #38)

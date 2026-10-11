@@ -1,0 +1,5 @@
+# Structures from test_cases/structures (id, optionally 'as <file name>'); see structures/README.md
+urea3-water8.gfn2-relaxed as ureawater.xyz
+hydronium-water2 as hydronium.xyz
+na2cl2-isolated-ions as nacl.xyz
+urea-water-cluster197.unrelaxed as ureawater197.xyz

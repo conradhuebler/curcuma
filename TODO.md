@@ -61,6 +61,12 @@ Stand.
   Changelog nennt WP-S1 bis S3 als umgesetzt. WP-S4 (Validierungssuite, 32-Konfigurationen-Matrix) nicht geprüft.
   [docs/GFNFF_STATIC_WP4_VALIDATION_SUITE.md](docs/GFNFF_STATIC_WP4_VALIDATION_SUITE.md).
 - **Speicher für Systeme > 1000 Atome** (Molecule-Datenstruktur, Distanzmatrix-Cache): geplant, nicht begonnen.
+- **SCF-Vorkonditionierer `-scf_precond frag`** (Okt 2026, [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)), nicht umgesetzt: Ionen und geladene
+  Fragmente (nur Skalarschritt), offene Schalen, GFN1, GPU-/ROCm-Pfad (Schalter wird mit Warnung ignoriert).
+- **`-scf_precond frag`, ungemessen**: Systeme > 600 Atome; M-Erneuerung in langer MD (> 500 fs, `-scf_precond_rebuild_rms`);
+  Hessian mit > 200 Atomen (jedes Objekt der ausgelenkten Geometrien baut sein eigenes M); Elemente außer H, C, N, O; Solvatation.
+- **`-scf_precond frag`, überlappende Blöcke**: nicht weiterverfolgt; Fragmenteinbettung mit eingefrorener Umgebung gab auf dem unrelaxierten
+  197-Atom-Cluster 33 -> 32 Iterationen, grobe Ladungstransfer-Ebene nicht besser als frag (n=1, entfernt; docs/SCF_PRECOND.md).
 
 ## 3. Tests und Validierung
 
@@ -86,7 +92,7 @@ Stand.
 
 - CODATA-2018-Einheiten (`191cebe3`; Rest 0,0036 kcal/mol gegen pprcht auf polymer_2x nicht verfolgt), Known Issue #35.
 - `eeq_refactor_eps_bohr` Voreinstellung 0 (Faktor-Cache aus) und `nonbonded_skin_bohr` 2,0; Ladungsplatzierung `ensemble` (#31);
-  Stillstandserkennung `-opt.stall_steps` 20; `-scf_guess fragments`.
+  Stillstandserkennung `-opt.stall_steps` 20; `-scf_guess fragments`; `-scf_precond frag` (Okt 2026, opt-in).
 
 ## 5. Funktionen und Refactoring (niedrige Priorität)
 
@@ -106,6 +112,8 @@ Stand.
 Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projektstatus stehen im Vault und sind nur verlinkt.
 
 - `-scf_pseudo_diag` als Standard einschalten? (Messungen sprechen dafür, Abschnitt 2.)
+- `-scf_precond_guard`: Vorgabe `g2:4:best` kostet auf dem unrelaxierten 599-Atom-Cluster bei 8 Threads 4 Iterationen gegen `none` (Kriterium war <= 3);
+  über 5 Threadzahlen liegt frag (55-62) unter none (58-138). Varianten streuen 58-109, eine konvergiert nicht. Vorgabe behalten? [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)
 - `shouldUpdateHBXB()` korrigieren und damit von der Fortran-Referenz abweichen, oder als Referenzeigenschaft belassen?
 - UFF-/QMDFF-Gradient reparieren (Stand: "erstmal nicht")? `-seed` für die MD-Startgeschwindigkeiten reparieren (ändert jede MD)?
 - GPU-Bitgleichheit angehen (Sammel-Kernel statt `atomicAdd`) oder bei Ensemblevergleichen bleiben?

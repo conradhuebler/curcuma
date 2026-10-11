@@ -181,6 +181,8 @@ bool XTB::InitialiseMolecule()
     // system (different nsh/nat). Claude Generated.
     m_scf_history.clear();
     m_xlbomd_aux.clear();
+    // A new molecule needs a new SCF preconditioner (-scf_precond frag). Claude Generated (Oct 2026).
+    m_scf_precond_frag.reset();
 
     // ── Implicit solvation (Claude Generated, June 2026) ──
     // Build the self-consistent reaction-field model when a solvent is requested.
@@ -890,8 +892,19 @@ double XTB::Calculation(bool gradient)
     double dq_best_fp32 = 1.0e30;
     int    fp32_stall = 0;
     bool   fp32_exhausted = false;
+    // Claude Generated (Oct 2026): CURCUMA_SCF_JAC=<dir> dumps the numerical Jacobian of the SCC
+    // fixed-point map after convergence (writeScfJacobianDump). m_scf_jac_capture (set only on the
+    // fragment objects of -scf_precond frag, xtb_precond.cpp) computes the same Jacobian into
+    // m_scf_jac_result instead; such objects ignore CURCUMA_SCF_JAC. In both modes the whole SCF
+    // runs in FP64, so x* is an FP64 fixed point. Neither set: no effect on any numerical path.
+    const char* scf_jac_dir = m_scf_jac_capture ? nullptr : std::getenv("CURCUMA_SCF_JAC");
+    const bool  scf_jac_dump = (scf_jac_dir != nullptr && scf_jac_dir[0] != '\0');
+    const bool  scf_jac_active = scf_jac_dump || m_scf_jac_capture;
+    Vector scf_jac_x_star, scf_jac_g_star;   // converged input x* and its output G(x*) (CPU loop)
+    double scf_jac_e_scc = 0.0;
     auto fp32_wanted = [&](double dq_last) {
-        return m_scf_mixed_precision && !fp32_exhausted && (dq_last > m_scf_fp32_threshold);
+        return !scf_jac_active && m_scf_mixed_precision && !fp32_exhausted
+               && (dq_last > m_scf_fp32_threshold);
     };
     // Claude Generated (Sep 2026, measured on H200): the FP32 phase can converge to a fixed point
     // that is not the FP64 one. polymer_2x, nao 15444: FP32 reported max|dq| = 7.1e-6 at an energy
@@ -1240,6 +1253,29 @@ double XTB::Calculation(bool gradient)
     if (!use_resident_loop)
         ensureHostMultipoleIntegrals();
 
+    // Claude Generated (Oct 2026): Broyden seed preconditioner (xtb_precond.cpp). The scalar seed
+    // alpha*F is replaced by M*F with M ~ -J^-1: -scf_precond frag builds M block-wise from the
+    // isolated fragments, CURCUMA_SCF_PRECOND_FILE (developer override, wins) reads a dense M.
+    // Set after every (re)construction of m_broyden, CPU loop only. The guard (ScfPrecondGuard,
+    // -scf_precond_guard / CURCUMA_SCF_PRECOND_GUARD) falls back to the scalar step when the
+    // residual does not drop. scf_precond none and no file: nothing is set, the path is unchanged.
+    ScfPrecondGuard precond_guard;
+    {
+        const bool cpu_loop = !use_gpu_resident && !use_resident_loop && !use_device_potential;
+        std::function<Vector(const Vector&)> pc_hook;
+        std::string pc_err;
+        if (!selectScfPreconditioner(mode == ScfMode::Broyden, cpu_loop, packed_len, pc_hook,
+                                     precond_guard, pc_err)) {
+            m_scf_converged = false; m_scf_iterations = 0;
+            setHardError("SCF preconditioner file unusable: " + pc_err);
+            return m_E_total;
+        }
+        if (pc_hook)
+            broyden.setStepHook(std::move(pc_hook));
+        else if (broyden.hasStepHook())   // only with -keep_diis: a hook left from an earlier SCF
+            broyden.dropStepHook(true);
+    }
+
     double resident_band = 0.0;   // Tr(P H0) of the last device-resident step
     double resident_ecoul = 0.0, resident_ethird = 0.0, resident_emp = 0.0;  // its SCC energies
     const auto t_scf_start = clock::now();
@@ -1586,6 +1622,25 @@ double XTB::Calculation(bool gradient)
             setHardError(fmt::format("native SCF diverged: non-finite energy/charges at iteration {}", iter));
             return m_E_total;
         }
+        // Claude Generated (Oct 2026): CURCUMA_SCF_TRACE=1 prints, per CPU SCF iteration, the Broyden
+        // residual F = x_out - x_in split into the shell-charge block (q_sh) and the GFN2 multipole
+        // block (dp, qp) as max|F| and ||F||_2, plus the phase times in ms, to stderr. Read-only;
+        // no numerical path depends on it.
+        static const bool scf_trace = (std::getenv("CURCUMA_SCF_TRACE") != nullptr);
+        if (scf_trace) {
+            const Vector Fres = x_out_check - x_in;
+            const Eigen::Index nq = nsh;
+            const Eigen::Index nm = Fres.size() - nq;
+            const double q_max = Fres.head(nq).cwiseAbs().maxCoeff();
+            const double q_nrm = Fres.head(nq).norm();
+            const double m_max = (nm > 0) ? Fres.tail(nm).cwiseAbs().maxCoeff() : 0.0;
+            const double m_nrm = (nm > 0) ? Fres.tail(nm).norm() : 0.0;
+            fmt::print(stderr, "SCFTRACE iter {} nat {} qmax {:.6e} qnorm {:.6e} mpmax {:.6e} mpnorm {:.6e} "
+                               "t_pot {:.3f} t_fock {:.3f} t_solve {:.3f} t_mull {:.3f} t_energy {:.3f} t_iter {:.3f}\n",
+                       iter, nat, q_max, q_nrm, m_max, m_nrm,
+                       ms(t_iter0, t_pot), ms(t_pot, t_fock), ms(t_fock, t_solve),
+                       ms(t_solve, t_mull), ms(t_mull, clock::now()), ms(t_iter0, clock::now()));
+        }
         note_fp32_progress(dq);
         dq_prev = dq;   // drives the LevelShift fade-out on the next iteration
         const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
@@ -1617,6 +1672,11 @@ double XTB::Calculation(bool gradient)
             // acts on and what tblite converges on.
             if (checkConvergence_impl(dq, e_total_old, e_scc, thresh)) {
                 m_scf_converged = true;
+                if (scf_jac_active) {   // keep x* and G(x*) for the dump / capture below
+                    scf_jac_x_star = x_in;
+                    scf_jac_g_star = x_out_check;
+                    scf_jac_e_scc  = e_scc;
+                }
                 break;
             }
         }
@@ -1626,9 +1686,37 @@ double XTB::Calculation(bool gradient)
         // input x_in via the modified-Broyden quasi-Newton update; unpacking
         // writes the next input back into m_wfn so q_sh_old below tracks it.
         if (mode == ScfMode::Broyden) {
+            const auto t_mix0 = clock::now();
             const Vector x_out  = packSCC();
-            const Vector x_next = broyden.update(x_in, x_out);
+            // Claude Generated (Oct 2026): preconditioner guard. Uses only the residual norm of
+            // this iteration; on a hit M is dropped for the rest of this SCF (scalar step from the
+            // current x, history reset or kept). Off (default) or no hook: nothing is computed.
+            bool restart_from_best = false;
+            if (precond_guard.rule != ScfPrecondGuard::Rule::Off && broyden.hasStepHook()) {
+                const Vector Fres = x_out - x_in;
+                const double fnorm = Fres.norm();
+                if (precond_guard.fires(iter, x_in, Fres)) {
+                    broyden.dropStepHook(precond_guard.keep);
+                    restart_from_best = precond_guard.best;
+                    CurcumaLogger::warn_fmt("SCF preconditioner guard '{}' fired at iteration {} "
+                                            "(||F||_2 = {:.3e}, ||F_0||_2 = {:.3e}): scalar Broyden step "
+                                            "for the rest of this SCF ({} history, from {} x)",
+                                            precond_guard.name, iter, fnorm, precond_guard.f0,
+                                            precond_guard.keep ? "kept" : "reset",
+                                            precond_guard.best ? "best" : "current");
+                    if (scf_trace)
+                        fmt::print(stderr, "SCFTRACE_GUARD iter {} rule {}\n", iter, precond_guard.name);
+                }
+            }
+            // With "best", the scalar step is taken from the stored best input x_k and its output
+            // x_k + F_k (both from an earlier evaluation of the map).
+            const Vector x_next = restart_from_best
+                ? broyden.update(precond_guard.x_best, precond_guard.x_best + precond_guard.F_best)
+                : broyden.update(x_in, x_out);
+            restart_from_best = false;
             unpackSCC(x_next);
+            if (scf_trace)
+                fmt::print(stderr, "SCFTRACE_MIX iter {} t_mix {:.3f}\n", iter, ms(t_mix0, clock::now()));
         }
 
         q_sh_old = m_wfn.q_sh;
@@ -1689,6 +1777,70 @@ double XTB::Calculation(bool gradient)
                                  "-scf_allow_unconverged true accepts the unconverged energy",
                                  m_scf_iterations, dq_prev));
         return m_E_total;
+    }
+
+    // Claude Generated (Oct 2026): SCF Jacobian debug dump (CURCUMA_SCF_JAC=<dir>), before any
+    // post-SCF step. evalG is one pure evaluation of the SCC fixed-point map x -> G(x) of the CPU
+    // loop: unpack x -> potential (Coulomb, third order, GFN2 multipole + in-SCF D4, solvation)
+    // -> Fock -> FP64 eigensolve with Fermi occupations -> Mulliken charges and moments -> pack.
+    // No mixer, level shift, DIIS or FP32 state enters it. m_wfn / m_pot and the eigensolver
+    // timing counters are restored afterwards, so the post-SCF path sees the converged state.
+    if (scf_jac_active && m_scf_converged) {
+        const bool cpu_loop = !use_gpu_resident && !use_resident_loop && !use_device_potential;
+        const bool pure_eig = !m_external_eigensolver && m_eigensolver != "lobpcg"
+                              && m_eigensolver != "purify";
+        if (!cpu_loop || !pure_eig || mode != ScfMode::Broyden || scf_jac_x_star.size() == 0) {
+            if (scf_jac_dump)
+                CurcumaLogger::warn("CURCUMA_SCF_JAC: Jacobian dump skipped (needs the CPU SCF loop, "
+                                    "-scf_mode broyden and a stateless eigensolver mkl/native)");
+        } else {
+            const Wavefunction wfn_save = m_wfn;
+            const Potential    pot_save = m_pot;
+            const bool   fp32_save = m_eig_fp32;
+            const double t_save[5] = { m_t_xfx, m_t_diag, m_t_back, m_t_dens, m_t_xfx_copy };
+            const int    c_save[3] = { m_eig_calls_native, m_eig_calls_fp32, m_eig_calls_lapack };
+            bool eval_failed = false;
+            auto evalG = [&](const Vector& x) -> Vector {
+                unpackSCC(x);
+                m_pot.reset();
+                addCoulombShellPotential(m_pot);
+                addThirdOrderPotential(m_pot);
+                if (m_method == MethodType::GFN2) {
+                    addMultipolePotential(m_pot);
+                    addDispersionPotential(m_pot);
+                }
+                addSolvationPotential(m_pot);
+                const Matrix F = buildFock(m_H0, m_S, m_pot);
+                m_eig_fp32 = false;   // FP64 only in this mode
+                bool ok;
+                {
+                    MklThreadScope eig_scope(eig_threads);
+                    ok = solveEigen(F, m_S);
+                }
+                if (!ok) { eval_failed = true; return Vector::Constant(x.size(), std::nan("")); }
+                updatePopulations(m_S);
+                return packSCC();
+            };
+            if (scf_jac_dump) {
+                writeScfJacobianDump(scf_jac_dir, scf_jac_x_star, scf_jac_g_star, scf_jac_e_scc, evalG);
+                if (eval_failed)
+                    CurcumaLogger::warn("CURCUMA_SCF_JAC: an eigensolve failed during the Jacobian dump");
+            } else if (m_scf_jac_capture) {
+                // Fragment of -scf_precond frag: J at x* by central differences, h = 1e-4 (the
+                // default of the dump, with which the prototype measurements were made).
+                std::vector<double> J;
+                numericalScfJacobian(scf_jac_x_star, scf_jac_g_star, evalG, 1.0e-4, J, nullptr);
+                const int dim = static_cast<int>(scf_jac_x_star.size());
+                m_scf_jac_result = eval_failed ? PrecondMatrix()
+                                               : PrecondMatrix(Eigen::Map<const PrecondMatrix>(J.data(), dim, dim));
+            }
+            m_wfn = wfn_save;
+            m_pot = pot_save;
+            m_eig_fp32 = fp32_save;
+            m_t_xfx = t_save[0]; m_t_diag = t_save[1]; m_t_back = t_save[2];
+            m_t_dens = t_save[3]; m_t_xfx_copy = t_save[4];
+            m_eig_calls_native = c_save[0]; m_eig_calls_fp32 = c_save[1]; m_eig_calls_lapack = c_save[2];
+        }
     }
 
     // Claude Generated (Sep 2026): post-SCF host phase timings (printed with CURCUMA_GPU_PROFILE
