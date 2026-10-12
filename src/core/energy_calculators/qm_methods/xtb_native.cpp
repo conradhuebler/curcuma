@@ -1928,12 +1928,40 @@ double XTB::Calculation(bool gradient)
                     CurcumaLogger::warn("CURCUMA_SCF_JAC: an eigensolve failed during the Jacobian dump");
             } else if (m_scf_jac_capture) {
                 // Fragment of -scf_precond frag: J at x* by central differences, h = 1e-4 (the
-                // default of the dump, with which the prototype measurements were made).
-                std::vector<double> J;
-                numericalScfJacobian(scf_jac_x_star, scf_jac_g_star, evalG, 1.0e-4, J, nullptr);
+                // default of the dump, with which the prototype measurements were made), or by linear
+                // response (-scf_precond_jacobian response, Oct 2026). CURCUMA_SCF_JAC_COMPARE=1
+                // (developer switch) computes both and prints their deviation on stderr.
+                const bool use_resp = (m_scf_precond_jacobian == "response");
+                const bool compare = std::getenv("CURCUMA_SCF_JAC_COMPARE") != nullptr;
                 const int dim = static_cast<int>(scf_jac_x_star.size());
-                m_scf_jac_result = eval_failed ? PrecondMatrix()
-                                               : PrecondMatrix(Eigen::Map<const PrecondMatrix>(J.data(), dim, dim));
+                PrecondMatrix J_fd, J_resp;
+                double t_fd = 0.0, t_resp = 0.0;
+                if (!use_resp || compare) {
+                    const auto t0 = clock::now();
+                    std::vector<double> J;
+                    numericalScfJacobian(scf_jac_x_star, scf_jac_g_star, evalG, 1.0e-4, J, nullptr);
+                    t_fd = ms(t0, clock::now());
+                    if (!eval_failed) J_fd = Eigen::Map<const PrecondMatrix>(J.data(), dim, dim);
+                }
+                if (use_resp || compare) {
+                    const auto t0 = clock::now();
+                    std::string rerr;
+                    bool ok;
+                    {
+                        MklThreadScope eig_scope(eig_threads);
+                        ok = computeScfJacobianResponse(scf_jac_x_star, J_resp, rerr);
+                    }
+                    t_resp = ms(t0, clock::now());
+                    if (!ok) J_resp = PrecondMatrix();
+                }
+                m_scf_jac_result = use_resp ? J_resp : J_fd;
+                if (compare && J_fd.rows() == dim && J_resp.rows() == dim) {
+                    const PrecondMatrix Bf = Eigen::PartialPivLU<PrecondMatrix>(J_fd).inverse();
+                    const PrecondMatrix Br = Eigen::PartialPivLU<PrecondMatrix>(J_resp).inverse();
+                    fmt::print(stderr, "SCFJACCMP nat {} dim {} maxabs {:.3e} relfro {:.3e} inv_relfro {:.3e} t_fd_ms {:.1f} t_resp_ms {:.1f}\n",
+                               m_atomcount, dim, (J_resp - J_fd).cwiseAbs().maxCoeff(),
+                               (J_resp - J_fd).norm() / J_fd.norm(), (Br - Bf).norm() / Bf.norm(), t_fd, t_resp);
+                }
             }
             m_wfn = wfn_save;
             m_pot = pot_save;

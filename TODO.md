@@ -95,6 +95,8 @@ Stand.
   `-scf_precond_max_fragment_atoms` (Standard 100; Gewinn nur bis ~30 Atomen gemessen); Elemente außer H, C, N, O; Solvatation.
 - **`-scf_precond_segment_atoms` (RAS), ungemessen** (2026-10-12): gemessen nur PEO (58, 212, 1410 Atome), Polystyrol 325 und ein Peptid 309 Atome (n=1, 12->5, 15->6/7 Iterationen);
   offen: Proteine mit Resten als Einheit, Ladungstrennung, MD/Hessian mit segmentiertem M, Aufbaukosten bei Ringen (4-165 s unter Last). [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)
+- **`-scf_precond_jacobian response`** (2026-10-12): nur GFN2 geschlossenschalig, gemessen n=1 an PEO/Polystyrol/Peptid; offen: Standard auf `response` umstellen?, occ-occ/virt-virt-Paare auslassen
+  (etwa halbe GEMM-Kosten), analytische Potentialableitung statt Differenzen, weitere Nutzer von J (Hessian, Analyse). [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)
 - **`-scf_precond frag` auf der GPU, offen** (2026-10-11): umgesetzt nur für die vollresidente CUDA-Schleife ([docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), Abschnitt GPU). Mit Warnung ignoriert: ROCm, Vulkan, hostgetriebene CUDA-Schleife
   (Mischer auf dem Host, der CPU-Hook wäre dort direkt nutzbar), Mehr-GPU-SCF-Aufteilung (Eigenlöser/Dichte; ungetestet, nur ein Gerät hier).
   Ohne Wächter divergiert der unrelaxierte 599-Atom-Cluster mit Mischpräzision (151 Iterationen, harter Fehler, n=3).

@@ -716,6 +716,14 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
     struct Result { bool ok = false; std::string why; PrecondMatrix B; };
     std::vector<Result> res(jobs.size());
     const double kT_parent = m_electronic_temp;
+    // Cluster Jacobian: central differences (fd) or linear response (Oct 2026); unknown value -> fd, one warning.
+    std::string jac_mode = m_scf_precond_jacobian;
+    if (jac_mode != "fd" && jac_mode != "response") {
+        static std::atomic<bool> warned_jac{ false };
+        if (!warned_jac.exchange(true))
+            CurcumaLogger::warn("scf_precond_jacobian '" + jac_mode + "' unknown (fd | response); fd is used");
+        jac_mode = "fd";
+    }
     auto run_job = [&](size_t jj) {
         Result& r = res[jj];
         const PrecondJob& job = jobs[jj];
@@ -742,6 +750,7 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
             frag.setElectronicTemperature(kT_parent);
             frag.setD4AtmCutoff(m_d4_atm_cutoff);
             frag.setSto6gLegacy4sp(m_sto6g_legacy_4sp);
+            frag.setScfPrecondJacobian(jac_mode);
             frag.m_scf_jac_capture = true;
             if (!frag.InitialiseMolecule(sub)) { r.why = "fragment initialisation failed"; return; }
             frag.Calculation(false);
@@ -854,8 +863,8 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
     m_scf_precond_atoms = m_atoms;
     const double t_ms = std::chrono::duration<double, std::milli>(clk::now() - t0).count();
     if (saved_verbosity >= 2) {
-        CurcumaLogger::info(fmt::format("SCF precond: frag, {} fragments, dim {}, built in {:.1f} ms",
-                                        frags.size(), dim, t_ms));
+        CurcumaLogger::info(fmt::format("SCF precond: frag, {} fragments, dim {}, Jacobian {}, built in {:.1f} ms",
+                                        frags.size(), dim, jac_mode, t_ms));
         CurcumaLogger::info(fmt::format("SCF precond: {} blocks, scalar seed on {} atoms (single atoms {}, "
                                         "odd electrons {}, charged {}, too large {}, failed {}), memory {:.3f} MB",
                                         n_block, n_scalar_atoms, n_skip[1], n_skip[2], n_skip[3], n_skip[4], n_failed,
@@ -1032,6 +1041,18 @@ void XTB::writeScfJacobianDump(const std::string& dir, const Vector& x_star, con
     const double t_jac_ms = std::chrono::duration<double, std::milli>(clk::now() - t_jac0).count();
     writeD("J.bin", J.data(), J.size());
     writeD("J_fwd.bin", Jf.data(), Jf.size());
+    // Linear-response Jacobian (Oct 2026) for comparison with J.bin; GFN2 closed shell only.
+    double t_resp_ms = -1.0;
+    bool have_resp = false;
+    if (gfn2 && !openShell()) {
+        const auto t_r0 = clk::now();
+        PrecondMatrix Jr;
+        std::string rerr;
+        have_resp = computeScfJacobianResponse(x_star, Jr, rerr);
+        t_resp_ms = std::chrono::duration<double, std::milli>(clk::now() - t_r0).count();
+        if (have_resp) writeD("J_response.bin", Jr.data(), static_cast<size_t>(Jr.size()));   // row-major like J.bin
+        else CurcumaLogger::warn("CURCUMA_SCF_JAC: " + rerr);
+    }
 
     // Linearity test data: random perturbations of norm lin_scale * |x*| (default 1e-3) and real evaluations G(x*+delta).
     std::mt19937_64 rng(20261010ULL);
@@ -1083,6 +1104,7 @@ void XTB::writeScfJacobianDump(const std::string& dir, const Vector& x_star, con
     meta["residual_G_minus_x_maxabs"] = resid_max;
     meta["jacobian_time_ms"] = t_jac_ms;
     meta["jacobian_evaluations"] = 2 * dim;
+    meta["jacobian_response_time_ms"] = t_resp_ms;
     meta["lin_test_count"] = nlin;
     meta["lin_test_delta_norm"] = dnorm;
     meta["J_convention"] = "J.bin row-major float64 dim x dim; J[i,k] = (G_i(x*+h e_k) - G_i(x*-h e_k))/(2h) "
@@ -1093,6 +1115,7 @@ void XTB::writeScfJacobianDump(const std::string& dir, const Vector& x_star, con
         { "x_star.bin", "float64 [dim], converged SCC input of the last iteration" },
         { "g_star.bin", "float64 [dim], G(x*) evaluated by the dump (first of the two purity evaluations)" },
         { "J.bin", "float64 [dim, dim]" }, { "J_fwd.bin", "float64 [dim, dim]" },
+        { "J_response.bin", "float64 [dim, dim], linear-response Jacobian (computeScfJacobianResponse), same convention as J.bin; GFN2 closed shell only" },
         { "lin_delta.bin", "float64 [lin_test_count, dim], random delta" },
         { "lin_g.bin", "float64 [lin_test_count, dim], G(x*+delta)" },
         { "eta_sh.bin", "float64 [nsh], shell hardness = diagonal of gamma (Eh)" },

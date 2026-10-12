@@ -13,6 +13,7 @@
 #     -sp -threads 8: none 24, frag 33 iterations; docs/SCF_PRECOND.md).
 # (i) -scf_precond_segment_atoms: a 58-atom PEO cut segmented (restricted additive Schwarz): same energy,
 #     fewer iterations, same result at -threads 1 and 2.
+# (j) -scf_precond_jacobian response on the structure of (i): same energy as fd, iterations <= fd + 1.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../test_utils.sh"
@@ -194,6 +195,22 @@ main() {
     fi
     assert_numeric_match "$ES2" "$(energy_of seg_t1.log)" "0.00000001" "segmented: -threads 1 gives the same energy as -threads 2"
     assert_equals "$NS2" "$(iters_of seg_t1.log)" "segmented: -threads 1 gives the same iteration count as -threads 2"
+
+    # (j) -scf_precond_jacobian response (Oct 2026): the cluster Jacobians by linear response instead of central
+    #     differences. Same structure and switches as (i): same energy as the fd run (< 1e-8 Eh) and at most one
+    #     iteration more (measured: identical iteration count; |J_resp - J_fd| / |J_fd| ~ 1e-9).
+    seg_run seg_resp.log 2 -scf_precond frag -scf_precond_max_fragment_atoms 20 -scf_precond_segment_atoms 3 -scf_precond_jacobian response
+    assert_string_in_file "Jacobian response" seg_resp.log "response: Jacobian mode reported"
+    local ER=$(energy_of seg_resp.log); local NR=$(iters_of seg_resp.log)
+    assert_numeric_match "$ES2" "$ER" "0.00000001" "response: energy equals the fd run"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ -n "$NR" ] && [ -n "$NS2" ] && [ "$NR" -le $((NS2 + 1)) ]; then
+        echo -e "${GREEN}PASS${NC}: response: iterations $NR <= fd $NS2 + 1"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo -e "${RED}FAIL${NC}: response: iterations '$NR' > fd '$NS2' + 1"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
 
     print_test_summary
     [ $TESTS_FAILED -eq 0 ] && exit 0 || exit 1

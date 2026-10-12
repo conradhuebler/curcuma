@@ -812,6 +812,27 @@ public:
                              Eigen::MatrixXd& ddp_at,
                              Eigen::MatrixXd& dqp_at) const; // xtb_scf.cpp
 
+    /**
+     * @brief Jacobian J = G'(x*) - I of the SCC fixed-point map by linear response, without a new
+     *        eigensolve per column (Claude Generated, Oct 2026; xtb_response.cpp).
+     *
+     * GFN2, closed shell. x = [q_sh | dp | qp] (packSccVector layout). One eigensolve at v(x*),
+     * then for every column k: dv = dv/dx_k (central difference of the potential alone), dF in the
+     * MO basis, dP_pq = w_pq dF_pq with w_pq = (f_p - f_q)/(eps_p - eps_q) (Fermi derivative for
+     * degenerate pairs, chemical-potential shift for a fixed electron count), Mulliken/multipole
+     * projection of dP. Changes m_wfn and m_pot (the caller restores them). Row-major dim x dim,
+     * row = output component, same convention as numericalScfJacobian.
+     * @return false with @p err set if a precondition fails.
+     */
+    bool computeScfJacobianResponse(const Vector& x_star, PrecondMatrix& J, std::string& err);
+    /// SCC vector from m_wfn: q_sh, then dp and qp component-wise over atoms (GFN2) (Claude Generated, Oct 2026).
+    Vector packSccVector() const;
+    /// Inverse of packSccVector; q_at is rederived from q_sh (Claude Generated, Oct 2026).
+    void unpackSccVector(const Vector& x);
+    /// In-SCF potential of the SCC vector x (Coulomb, third order, GFN2 multipoles and D4, solvation),
+    /// the potential part of the fixed-point map; sets m_wfn charges to x (Claude Generated, Oct 2026).
+    Potential scfPotentialAt(const Vector& x);
+
     // Convergence
     bool isConverged() const { return m_scf_converged; }
     int  scfIterations() const { return m_scf_iterations; }
@@ -943,6 +964,7 @@ public:
     void setScfPrecondRebuildRms(double r)        { m_scf_precond_rebuild_rms = (r > 0.0) ? r : 0.0; }
     void setScfPrecondMaxFragmentAtoms(int n)     { m_scf_precond_max_frag_atoms = (n > 0) ? n : 0; }   // 0 = no limit
     void setScfPrecondSegmentAtoms(int n)         { m_scf_precond_segment_atoms = (n > 0) ? n : 0; }    // 0 = no segmentation
+    void setScfPrecondJacobian(const std::string& s) { m_scf_precond_jacobian = s; }   // fd | response
     void setScfPrecondSegmentRadius(double r)     { if (r > 0.0) m_scf_precond_segment_radius = r; }    // Angstrom
 
     // Warm-start: reuse converged charges from the previous geometry step.
@@ -1573,7 +1595,8 @@ private:
     double       m_scf_precond_rebuild_rms = 0.0;   // Angstrom
     int          m_scf_precond_max_frag_atoms = 100;   // molecules above this keep the scalar seed (0 = no limit)
     int          m_scf_precond_segment_atoms = 0;      // >0: segment larger molecules (RAS), heavy atoms per segment
-    double       m_scf_precond_segment_radius = 3.0;   // RAS domain radius around a segment (Angstrom)
+    std::string  m_scf_precond_jacobian = "fd";      // cluster Jacobian: fd (central differences) | response
+    double       m_scf_precond_segment_radius = 2.0;   // RAS domain radius around a segment (Angstrom)
     bool         m_scf_precond_warned = false;      // "ignored" warning given once per object
     std::string  m_scf_precond_guard_checked;       // guard spec already parsed (warn once per spec)
     std::shared_ptr<const SchwarzPreconditioner> m_scf_precond_frag;
@@ -1647,6 +1670,7 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_precond_rebuild_rms", [&](const json& v){ if (v.is_number()) xtb.setScfPrecondRebuildRms(v.get<double>()); });
     lookup("scf_precond_max_fragment_atoms", [&](const json& v){ if (v.is_number()) xtb.setScfPrecondMaxFragmentAtoms(static_cast<int>(std::lround(v.get<double>()))); });   // CLI numbers arrive as double
     lookup("scf_precond_segment_atoms",  [&](const json& v){ if (v.is_number()) xtb.setScfPrecondSegmentAtoms(static_cast<int>(std::lround(v.get<double>()))); });   // CLI numbers arrive as double
+    lookup("scf_precond_jacobian",       [&](const json& v){ if (v.is_string()) xtb.setScfPrecondJacobian(v.get<std::string>()); });
     lookup("scf_precond_segment_radius", [&](const json& v){ if (v.is_number()) xtb.setScfPrecondSegmentRadius(v.get<double>()); });
     lookup("scf_extrapolation",      [&](const json& v){ if (v.is_string())          xtb.setScfExtrapolation(v.get<std::string>()); });
     lookup("scf_extrapolation_order",[&](const json& v){ if (v.is_number())  xtb.setScfExtrapolationOrder(static_cast<int>(std::lround(v.get<double>()))); });

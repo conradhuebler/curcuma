@@ -42,7 +42,8 @@ so the fixed point and the energy do not change; only the number of SCF iteratio
 | `-scf_precond_rebuild_rms` | `0` | rebuild M when the RMS displacement from its build geometry exceeds this (Angstrom); 0 = never |
 | `-scf_precond_max_fragment_atoms` | `100` | molecules above this keep the scalar seed (one warning) or are segmented; 0 = no limit. A block costs 2*dim SCC-map evaluations (see below) |
 | `-scf_precond_segment_atoms` | `0` | > 0: segment molecules above `-scf_precond_max_fragment_atoms`, this many heavy atoms per segment (section Segmentation); 0 = off |
-| `-scf_precond_segment_radius` | `3.0` | domain radius of a segment (Angstrom) |
+| `-scf_precond_segment_radius` | `2.0` | domain radius of a segment (Angstrom) |
+| `-scf_precond_jacobian` | `fd` | cluster Jacobian: `fd` central differences, `response` linear response (section Response Jacobian); other values: warning, `fd` |
 
 Developer environment variables (not for production runs):
 
@@ -51,6 +52,7 @@ Developer environment variables (not for production runs):
 | `CURCUMA_SCF_PRECOND_FILE=<file>` | dense M (dim x dim float64, row-major) from a file; wins over `-scf_precond` |
 | `CURCUMA_SCF_PRECOND_GUARD=<spec>` | guard spec, wins over `-scf_precond_guard` (also used with the file) |
 | `CURCUMA_SCF_JAC=<dir>` | after convergence, write J (central and forward differences), x*, G(x*), gamma, eta, multipole kernels, orbitals to `<dir>`; `CURCUMA_SCF_JAC_H`, `_LINTEST`, `_LINSCALE` tune it |
+| `CURCUMA_SCF_JAC_COMPARE=1` | every cluster Jacobian of `-scf_precond frag` by both methods; stderr line `SCFJACCMP` (max abs and relative Frobenius deviation of J and of J^-1, times) and `SCFJACRESP` (phase times of the response) |
 | `CURCUMA_SCF_TRACE=1` | per CPU SCF iteration: residual norms of the q and multipole blocks and phase times on stderr; `SCFTRACE_GUARD` when the guard fires |
 
 `-verbosity 2` prints `SCF precond: frag, N fragments, dim D, built in T ms` and the block count, the
@@ -203,7 +205,34 @@ Status: AI-generated, machine-tested only, human production testing pending. Cod
   single points alternating, n=1 MD): single point polystyrene wall 1.2 s -> 3.2 to 3.9 s (SCF 1.0 -> 0.4 s, M 2.5 to 3.3 s), peptide 1.4 to 1.6 s -> 4.8 to 5.9 s
   (SCF 1.15 to 1.33 -> 0.54 to 0.62 s, M 4.0 to 5.1 s): a single point does not pay, break-even about 6 to 7 SCFs. MD (1 fs steps): 10 fs wall 11.8, 10.8 s ->
   10.3, 9.9 s (polystyrene, n=2) and 12.2 s -> 12.7, 13.0 s (peptide, n=2); 40 fs polystyrene 41.0 -> 26.6 s (-35 %), peptide 44.6 -> 32.3 s (-28 %). Energies equal.
+  Radius scan (Oct 12, 2026, k = 2 or 3, R = 2.0 to 3.5, n=1, `-threads 12`, load 16 to 29; all energies equal): the build cost falls steeply with R, the iterations
+  rise by at most 1. Polystyrene k = 3: R 3.0 -> 2.0 gives 5 -> 6 iterations, build 2.7 -> 0.32 s; peptide k = 3: R 3.0 -> 2.0 gives 7 -> 8, build 5.2 -> 0.87 s; peo212 R 2.0: 7, 0.09 s.
+  Default radius changed from 3.0 to 2.0 A. Confirmed with R = 2.0, k = 3 (n=3 alternating single points, wall none -> segmented): polystyrene 1.35, 1.42, 1.35 s -> 1.20, 1.24,
+  1.10 s (a single point already pays); peptide 1.59, 1.60, 1.43 s -> 1.95, 1.89, 1.83 s (build 0.87 to 0.92 s, break-even about 1.5 SCFs). MD 40 fs (n=1): peptide 44.6 -> 25.6 s,
+  polystyrene 41.0 -> 22.5 s (-43 / -45 %). PEO 1410 atoms, R = 2.0 (n=2, loaded machine): 12 -> 8 iterations, build 0.54 s.
+  Build cost split of a 58-atom cluster (1 thread, per SCC-map evaluation): eigensolver `dsyevd` 43 %, its reduction and back-transformation 15 %, potential 13 %, Fock 10 %, rest 11 %.
   Not measured: molecules other than PEO, this polystyrene and this peptide (both only as GFN-FF minima, not GFN2 relaxed); Hessian with a segmented M; charge-separated molecules.
+
+## Response Jacobian (`-scf_precond_jacobian response`, Oct 12, 2026)
+
+Status: AI-generated, machine-tested only, human production testing pending. Code: `XTB::computeScfJacobianResponse` in
+`xtb_response.cpp` (independent of the preconditioner; GFN2, closed shell). `CURCUMA_SCF_JAC=<dir>` also writes `J_response.bin`.
+
+- One eigensolve at v(x*), then per column k: dv = dv/dx_k by central differences of the potential alone (no eigensolve; exact for the
+  linear terms and the quadratic third-order term, O(h^2) for D4), dF' = C^T dF C, dP'_pq = w_pq dF'_pq with
+  w_pq = (f_p - f_q)/(eps_p - eps_q), for |eps_p - eps_q| < 1e-8 the mean of f'_p = -f_p (1 - f_p/2)/kT (Fermi-Dirac, f in [0,2]), on
+  the diagonal dP'_pp = f'_p (dF'_pp - dmu) with dmu = sum f'_p dF'_pp / sum f'_p (fixed electron count), dP = C dP' C^T, Mulliken and
+  multipole projection. Columns are batched into two GEMMs (C^T M and dP' C^T). Coupled-perturbed SCF form: Pople, Krishnan, Schlegel,
+  Binkley, Int. J. Quantum Chem. Symp. 13, 225 (1979).
+- Accuracy against central differences (h = 1e-4), n=1 per system: PEO 58 atoms (one block) max |dJ| 2.8e-9, relative Frobenius 5.7e-10,
+  of J^-1 2.2e-10; urea3-water8 (48 atoms, whole system, dump) 6.7e-9 / 1.4e-9 / 6.0e-10; all segment clusters (k = 3, R = 2.0) of
+  polystyrene 325 atoms (21 clusters, 15-24 atoms), peptide 309 atoms (39 clusters, 9-37 atoms; the 20-atom cluster 8.6e-9 / 1.6e-9 / 5.7e-10)
+  and PEO 212 (30 clusters): worst 2.4e-8 / 4.1e-9 / 1.6e-9. The deviation is at the level of the finite-difference error of fd itself.
+- SCF (`-threads 12`, k = 3, R = 2.0, n=1, machine under load): polystyrene fd 6 / response 6 iterations, build 296 / 107 ms; peptide 8 / 8,
+  789 / 278 ms; PEO 212 7 / 7, 78 / 38 ms; energies identical to 8 decimals.
+- Build time of one whole-molecule block (`-threads 1`, n=3 alternating, load average 18-20, so only indicative): PEO 58 atoms fd 2.3-5.0 s,
+  response 1.2-1.4 s; PEO 100 atoms (cut of `peo201-chain`, not in the library) fd 27.8-47.5 s, response 5.3-5.6 s. Phase times of the
+  response for PEO 58 (nao 130, dim 604): GEMMs 416 ms, potential differences 189 ms, rest 170 ms.
 
 ## Census: frag against none on GMTKN55 and MOR41 (Oct 12, 2026)
 
