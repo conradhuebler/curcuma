@@ -282,3 +282,17 @@ Hessian, ConfSearch) of the same molecule, not for single points; it is not the 
   overlaps only inside one molecule).
 - The guard default is a rule from the prototype test set (24 scalar SCFs); on the unrelaxed 599-atom
   cluster it costs 4 iterations against `none` at 8 threads.
+
+## Hessian and MD with segmentation (Oct 12, 2026)
+
+Campaign by an agent on a frozen binary (commit `773f8e17`, GFN2, `-threads 12`, machine load 17 to 28, wall times indicative only, n=2 per variant, one structure per system, seed 7);
+iteration counts re-derived from the raw SCFTRACE files by the operator. Segmentation k = 3, R = 2.0.
+
+- MD NVE 200 fs (`-thermostat none -print 1`): peptide 309 atoms 10.99 -> 6.00 SCF iterations per step, wall 722 / 466 s -> 286 / 302 s; polystyrene 325 atoms 9.97 -> 5.00, wall 406 / 420 s -> 264 / 259 s.
+  No ageing of M over 200 fs (blocks of 40 steps constant at 6.0 and 5.0). Energies: seg against none differ by at most 1.1e-5 Eh in Etot (peptide) and 2e-6 Eh (polystyrene,
+  output resolution 1e-6); the 4 to 9 mEh fluctuation of Etot is the same in both variants (dt 1 fs, start at a GFN-FF minimum).
+- Hessian (semi-numerical, 12 threads): iterations per displaced SCF 6.6 to 7.2 -> 3.2 to 3.8; wall time urea3-water8 -6 to -8 %, 82-atom polystyrene -15 to -23 %, 67-atom peptide no gain
+  (seg 8.9 / 9.1 s against 7.2 / 8.5 s). Frequencies differ from none by 0.3 to 0.8 cm^-1 (SCF threshold effect; none against none is exactly 0.0).
+- Finding: the SCF count of the Hessian runs shows one build of M per worker thread (segmented PS5: 60 extra SCFs = 12 threads x 5 segments; PEP5: 96 = 12 x 8), not one build per Hessian.
+  The M of a worker is built from the same geometry, so sharing M across the workers would remove 11 of 12 builds (TODO.md).
+- Not measured: Hessian of the 309/325-atom systems, other thread counts, other conformers.
