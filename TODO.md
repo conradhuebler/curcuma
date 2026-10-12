@@ -96,6 +96,7 @@ Stand.
 - **`-scf_precond_segment_atoms` (RAS), ungemessen** (2026-10-12): gemessen nur PEO (58, 212, 1410 Atome), Polystyrol 325 und ein Peptid 309 Atome (n=1, 12->5, 15->6/7 Iterationen);
   offen: Proteine mit Resten als Einheit, Ladungstrennung, MD/Hessian mit segmentiertem M, Aufbaukosten bei Ringen (4-165 s unter Last). [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)
 - **Hessian baut M je Worker-Thread** (2026-10-12): 12 Threads = 12 Aufbauten (PS5 60 Zusatz-SCFs = 12 x 5 Segmente); M zwischen den Workern teilen. Messung: [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), Abschnitt Hessian and MD.
+- **GFN2-MD: Etot springt in den ersten 3 Schritten um 4 bis 6 mEh** (2026-10-12, Peptid/Polystyrol 309/325 Atome, NVE, 1 fs, mit und ohne `scf_precond`); Ursache offen, 200 fs belegen keine Langzeitstabilitaet (Zeitschritt, `-scf_threshold`, laengerer Lauf pruefen).
 - **`-scf_precond_jacobian response`** (2026-10-12): GFN2 und GFN1 (CPU), geschlossenschalig, gemessen n=1 an PEO/Polystyrol/Peptid; offen: Standard auf `response` umstellen?, occ-occ/virt-virt-Paare auslassen
   (etwa halbe GEMM-Kosten), analytische Potentialableitung statt Differenzen, weitere Nutzer von J (Hessian, Analyse). [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)
 - **`-scf_precond frag` auf der GPU, offen** (2026-10-11): umgesetzt nur für die vollresidente CUDA-Schleife ([docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), Abschnitt GPU). Mit Warnung ignoriert: ROCm, Vulkan, hostgetriebene CUDA-Schleife
