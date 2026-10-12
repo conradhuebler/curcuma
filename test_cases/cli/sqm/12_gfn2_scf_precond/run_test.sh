@@ -15,6 +15,7 @@
 #     fewer iterations, same result at -threads 1 and 2.
 # (j) -scf_precond_jacobian response on the structure of (i): same energy as fd, iterations <= fd + 1.
 # (k) GFN1 with segmentation and response Jacobian on the same structure: same energy as without M, iterations <= none.
+# (l) Hessian with a segmented M shared by the workers: frequencies within 1 cm-1 of no M, fewer iterations, one build.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../test_utils.sh"
@@ -233,6 +234,47 @@ main() {
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
         echo -e "${RED}FAIL${NC}: GFN1: iterations '$NG1' > '$NG0' without M"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+
+    # (l) Hessian with a segmented M (Oct 2026): the Hessian builds M once at the reference geometry and its
+    #     worker threads share it (XTB::adoptSharedPreconditioner). methyl-a-d-glucopyranoside (27 atoms), forced
+    #     into segments by -scf_precond_max_fragment_atoms 10: frequencies equal the run without M within 1 cm-1
+    #     (SCF-threshold noise, measured 0.5), fewer SCF iterations, M built once (4 segment clusters, not 4 per worker).
+    hess_run() {   # hess_run <name> [args...]
+        local NAME=$1; shift
+        CURCUMA_SCF_TRACE=1 $CURCUMA -hessian glc.xyz -method gfn2 -threads 4 -verbosity 1 -no_bmt "$@" > "$NAME.out" 2> "$NAME.err"
+        assert_exit_code $? 0 "curcuma -hessian glc.xyz $*"
+    }
+    hess_run h_none
+    hess_run h_seg -scf_precond frag -scf_precond_max_fragment_atoms 10 -scf_precond_segment_atoms 3
+    local HN=$(awk '$1=="SCFTRACE" && $2=="iter" && $5==27' h_none.err | wc -l)
+    local HS=$(awk '$1=="SCFTRACE" && $2=="iter" && $5==27' h_seg.err | wc -l)
+    local HB=$(awk '$1=="SCFTRACE" && $2=="iter" && $3==0 && $5!=27' h_seg.err | wc -l)
+    local FDEV=$(python3 - h_none.out h_seg.out <<'PY'
+import re, sys
+def freqs(f):
+    t = re.sub(r'\x1b\[[0-9;]*m', '', open(f, errors='replace').read())
+    i = t.index('Vibrational Frequencies'); j = t.index('Finished after', i)
+    return [float(m.group(1)) for m in re.finditer(r'([0-9.]+)(\(i\)|\(\*\))?', t[i + 30:j])]
+a, b = freqs(sys.argv[1]), freqs(sys.argv[2])
+print('%.3f' % max(abs(x - y) for x, y in zip(a, b)) if a and len(a) == len(b) else 'mismatch')
+PY
+)
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ "$FDEV" != "mismatch" ] && python3 -c "import sys; sys.exit(0 if float('$FDEV') <= 1.0 else 1)" 2>/dev/null; then
+        echo -e "${GREEN}PASS${NC}: Hessian: frequencies equal the run without M (max deviation $FDEV cm-1)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo -e "${RED}FAIL${NC}: Hessian: frequency deviation '$FDEV' cm-1"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ "$HS" -gt 0 ] && [ "$HS" -lt "$HN" ] && [ "$HB" -eq 4 ]; then
+        echo -e "${GREEN}PASS${NC}: Hessian: SCF iterations $HS < $HN, M built once ($HB cluster SCFs)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo -e "${RED}FAIL${NC}: Hessian: iterations $HS vs $HN, cluster SCFs $HB (expected 4)"
         TESTS_FAILED=$((TESTS_FAILED + 1))
     fi
 

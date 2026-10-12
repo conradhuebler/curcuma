@@ -533,6 +533,9 @@ bool XTB::selectScfPreconditioner(bool broyden_mode, bool cpu_loop, bool device_
                                         "{:.3f} A, rebuilding M", rms, m_scf_precond_rebuild_rms);
         }
     }
+    if (rebuild && adoptSharedPreconditioner()) {
+        rebuild = false;   // another XTB object of this process built M for the same molecule (Hessian workers)
+    }
     if (rebuild) {
         std::string build_err;
         if (!buildFragmentPreconditioner(build_err)) {
@@ -558,6 +561,74 @@ bool XTB::selectScfPreconditioner(bool broyden_mode, bool cpu_loop, bool device_
         m_scf_precond_guard_checked = m_scf_precond_guard;
     }
     return true;
+}
+
+/* ------------------------------------------------------------------------- *
+ *  Process-wide sharing of M between XTB objects (Claude Generated, Oct 2026)
+ * ------------------------------------------------------------------------- */
+namespace {
+/// One shared M: the key holds every input M depends on besides the geometry; the entry lives only
+/// as long as some XTB object holds M (weak_ptr), so the cache never grows beyond the live objects.
+struct SharedPrecondEntry {
+    std::string key;
+    Matrix geom;
+    std::weak_ptr<const SchwarzPreconditioner> M;
+};
+std::mutex& sharedPrecondMutex() { static std::mutex m; return m; }
+std::vector<SharedPrecondEntry>& sharedPrecondCache() { static std::vector<SharedPrecondEntry> c; return c; }
+} // namespace
+
+/// Key of M without the geometry: method, charge, atoms and every parameter that enters the build.
+std::string XTB::scfPrecondShareKey() const
+{
+    std::string k = fmt::format("{}|{}|{:.17g}|{:.17g}|{}|{:.17g}|{}|{}|{:.17g}|{}|", static_cast<int>(m_method), m_charge,
+                                m_electronic_temp, m_d4_atm_cutoff, m_sto6g_legacy_4sp ? 1 : 0, m_scf_damping,
+                                m_scf_precond_max_frag_atoms, m_scf_precond_segment_atoms, m_scf_precond_segment_radius,
+                                m_scf_precond_jacobian);
+    for (int z : m_atoms) k += std::to_string(z) + ",";
+    return k;
+}
+
+/**
+ * @brief Take over an M that another live XTB object of this process built for the same molecule
+ *        (Claude Generated, Oct 2026).
+ *
+ * The semi-numerical Hessian gives every worker thread its own XTB object; without sharing each of
+ * them built its own M at its first displaced geometry. An entry is used if its key matches
+ * (scfPrecondShareKey) and the RMS displacement from its build geometry is at most
+ * scf_precond_rebuild_rms, or 0.01 A when that is 0 (Hessian steps are 0.005 Bohr on one atom).
+ * M is immutable (shared_ptr<const>), so sharing is thread-safe; m_scf_precond_geom becomes the
+ * build geometry of the shared M, so the rebuild rule keeps measuring from there.
+ */
+bool XTB::adoptSharedPreconditioner()
+{
+    const std::string key = scfPrecondShareKey();
+    const double tol = (m_scf_precond_rebuild_rms > 0.0) ? m_scf_precond_rebuild_rms : 0.01;
+    std::lock_guard<std::mutex> lk(sharedPrecondMutex());
+    auto& cache = sharedPrecondCache();
+    cache.erase(std::remove_if(cache.begin(), cache.end(),
+                               [](const SharedPrecondEntry& e) { return e.M.expired(); }), cache.end());
+    for (const SharedPrecondEntry& e : cache) {
+        if (e.key != key || e.geom.rows() != m_geometry.rows()) continue;
+        const double rms = std::sqrt((m_geometry - e.geom).rowwise().squaredNorm().mean());
+        if (rms > tol) continue;
+        std::shared_ptr<const SchwarzPreconditioner> M = e.M.lock();
+        if (!M) continue;
+        m_scf_precond_frag = M;
+        m_scf_precond_geom = e.geom;
+        m_scf_precond_atoms = m_atoms;
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info_fmt("SCF precond: M shared with another calculator of this process (RMS {:.4f} A from its build geometry)", rms);
+        return true;
+    }
+    return false;
+}
+
+/// Register a freshly built M for adoptSharedPreconditioner (Claude Generated, Oct 2026).
+void XTB::publishSharedPreconditioner()
+{
+    std::lock_guard<std::mutex> lk(sharedPrecondMutex());
+    sharedPrecondCache().push_back({ scfPrecondShareKey(), m_scf_precond_geom, m_scf_precond_frag });
 }
 
 /* ------------------------------------------------------------------------- *
@@ -862,6 +933,7 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
     m_scf_precond_frag = P;
     m_scf_precond_geom = m_geometry;
     m_scf_precond_atoms = m_atoms;
+    publishSharedPreconditioner();
     const double t_ms = std::chrono::duration<double, std::milli>(clk::now() - t0).count();
     if (saved_verbosity >= 2) {
         CurcumaLogger::info(fmt::format("SCF precond: frag, {} fragments, dim {}, Jacobian {}, built in {:.1f} ms",

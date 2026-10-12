@@ -294,5 +294,22 @@ iteration counts re-derived from the raw SCFTRACE files by the operator. Segment
 - Hessian (semi-numerical, 12 threads): iterations per displaced SCF 6.6 to 7.2 -> 3.2 to 3.8; wall time urea3-water8 -6 to -8 %, 82-atom polystyrene -15 to -23 %, 67-atom peptide no gain
   (seg 8.9 / 9.1 s against 7.2 / 8.5 s). Frequencies differ from none by 0.3 to 0.8 cm^-1 (SCF threshold effect; none against none is exactly 0.0).
 - Finding: the SCF count of the Hessian runs shows one build of M per worker thread (segmented PS5: 60 extra SCFs = 12 threads x 5 segments; PEP5: 96 = 12 x 8), not one build per Hessian.
-  The M of a worker is built from the same geometry, so sharing M across the workers would remove 11 of 12 builds (TODO.md).
-- Not measured: Hessian of the 309/325-atom systems, other thread counts, other conformers.
+  The M of a worker is built from the same geometry, so sharing M across the workers would remove 11 of 12 builds.
+- Fixed (Oct 12, 2026, AI-generated, machine-tested): the Hessian builds M once at the reference geometry before the workers start (one extra
+  SCF, not on GPU runs) and keeps that calculator alive; the workers' XTB objects take M over from a process-wide cache
+  (`XTB::adoptSharedPreconditioner`: key = method, charge, atoms and every build parameter; geometry within `scf_precond_rebuild_rms`, or
+  0.01 A when that is 0; weak references, so an entry lives only as long as an object holds M). Measured (`-threads 12`, n=3 alternating, old
+  binary `773f8e17`-based frozen copy): PS5 60 -> 5 cluster SCFs, wall 4.04 / 4.22 / 4.34 -> 3.80 / 4.05 / 3.80 s; PEP5 96 -> 8, wall 3.18 / 3.19 ->
+  2.59 / 2.59 s (third pair under a load spike: 6.0 / 19.4 s); iterations per displaced SCF unchanged (3.18 / 3.73). Frequencies old against new
+  0.8 (PS5) and 0.6 (PEP5) cm^-1 at the default threshold (M now from the reference geometry instead of each worker's first displacement; the
+  same size as none against seg); with `-scf_threshold 1e-7` PEP5 old against new 0.000 cm^-1. Test `cli_sqm_12` (l).
+- Not measured: other conformers; GPU Hessian (there each worker still builds its own M).
+
+## GPU with segmentation (Oct 12, 2026)
+
+Campaign by an agent (frozen binary and CUDA plugin of `c19047e3`, RTX 5080, resident loop, `-gpu_strict true`, n=3 alternating, machine load 26 to 164 from other jobs, so wall times are noisy by up to a factor 3).
+Iterations (none -> seg): urea3-water8 12 -> 8 (frag), peo212 12 -> 8, polystyrene 325 atoms 14 -> 8, peptide 309 atoms 16 -> 9, PEO 1410 atoms 12 -> 10 (seg and seg+response). All energies equal to 1e-8 Eh, no fallback,
+no "ignored" message. M on the device 0.22 to 20.4 MB (chain), device memory unchanged within the nvidia-smi resolution (2730 against 2750 MiB). M is built on the CPU, 0.3 to 7 s depending on load: a single point is slower in wall time
+(peptide 2.4 -> 5.3 s, chain 15.4 -> 22.5 s under load). In the one low-load pair (chain, n=2) the SCF time fell by 11 % (1621 / 1592 ms -> 1413 / 1420 ms seg, 1428 / 1421 ms seg+response) and the build took 750 to 804 ms (fd) or 288 to 297 ms
+(response). MD 40 fs: chain 501 s -> 527 s (n=1 each, load 35), peptide no difference (n=5): 40 fs is too short to amortise the build. Not measured: a quiet machine, MD longer than 40 fs, building M on the device, Hessian on the GPU
+(the Hessian builds M once per worker there, see above), GFN1 on the GPU (not supported).

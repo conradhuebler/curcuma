@@ -1138,6 +1138,11 @@ private:
                                  std::function<Vector(const Vector&)>& hook,
                                  ScfPrecondGuard& guard, std::string& err);
     bool buildFragmentPreconditioner(std::string& err);
+    // Process-wide sharing of M between XTB objects of the same molecule (Claude Generated, Oct 2026;
+    // xtb_precond.cpp): Hessian workers take over the M of the first builder instead of building their own.
+    bool adoptSharedPreconditioner();
+    void publishSharedPreconditioner();
+    std::string scfPrecondShareKey() const;
 
     // GFN2 multipole interactions (damped).
     void addMultipolePotential(Potential& pot) const;                    // xtb_multipole.cpp

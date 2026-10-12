@@ -5,3 +5,4 @@ na2cl2-isolated-ions as nacl.xyz
 urea-water-cluster197.unrelaxed as ureawater197.xyz
 cl2-anion as cl2.xyz
 peo8-chain.h-capped as peo58.xyz
+methyl-a-d-glucopyranoside as glc.xyz

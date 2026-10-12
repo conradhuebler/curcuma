@@ -20,6 +20,7 @@
 
 #include <Eigen/Dense>
 #include <iomanip>
+#include <memory>
 #include <sstream>
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
@@ -352,6 +353,30 @@ void Hessian::LoadHessian(const std::string& file)
 
 void Hessian::start()
 {
+    // Claude Generated (Oct 2026): with -scf_precond (native xTB) the preconditioner M is built once at the
+    // reference geometry by this calculator, before the workers start; the workers' XTB objects take it over
+    // (XTB::adoptSharedPreconditioner, process-wide, alive while this object lives) instead of each building
+    // its own M at its first displaced geometry. Without -scf_precond nothing happens here.
+    std::unique_ptr<EnergyCalculator> precond_owner;
+    if (m_hess_calc) {
+        auto precond_of = [](const json& j) -> std::string {
+            if (j.contains("xtb") && j["xtb"].is_object() && j["xtb"].contains("scf_precond") && j["xtb"]["scf_precond"].is_string())
+                return j["xtb"]["scf_precond"].get<std::string>();
+            if (j.contains("scf_precond") && j["scf_precond"].is_string())
+                return j["scf_precond"].get<std::string>();
+            return "none";
+        };
+        // GPU runs: no extra calculator (it would hold a device context during the whole Hessian); the workers then
+        // build their own M as before.
+        if (precond_of(m_controller) != "none" && !curcuma::GpuDevicePool::instance().active()) {
+            precond_owner = std::make_unique<EnergyCalculator>(m_method, m_controller);
+            precond_owner->setVerbosity(0);
+            precond_owner->setParameter(m_parameter);
+            precond_owner->setMolecule(m_molecule.getMolInfo());
+            precond_owner->CalculateEnergy(false);
+            CurcumaLogger::set_verbosity(m_verbosity);
+        }
+    }
     if (m_hess_calc) {
 
         if (m_hess == 1) {
