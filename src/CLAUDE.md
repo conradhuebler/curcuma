@@ -1,45 +1,27 @@
-# CLAUDE.md - Curcuma Source Directory
+# CLAUDE.md - src/
 
-## Overview
+Source tree of curcuma. Project-wide rules are in the root [CLAUDE.md](../CLAUDE.md); every
+subdirectory listed below has its own CLAUDE.md.
 
-This directory contains the complete Curcuma source code organized into four main subsystems:
-- **capabilities/** - High-level molecular modeling tasks and applications
-- **core/** - Core computational engines and data structures
-- **tools/** - Utilities and file I/O operations
-- **helpers/** - Development tools and standalone utilities
+## Layout
 
-## Structure
+- `capabilities/` - user-facing commands (`-opt`, `-md`, `-confsearch`, ...); many derive from `CurcumaMethod`
+- `core/` - Molecule, EnergyCalculator, ParameterRegistry/ConfigManager, logger, units; methods in `core/energy_calculators/`
+- `tools/` - file-format readers, geometry helpers, TrajectoryWriter, BMT output directories
+- `helpers/` - standalone helper programs, most of them optional CMake targets
+- `main.cpp` - CLI entry point (`CLI2Json`, command dispatch)
+- `global_config.h.in`, `version.h.in` - `configure_file` templates (CMakeLists.txt)
+- `pch.h`, `pch/` - precompiled headers (`USE_PCH`)
+- `molecules/` - monomer XYZ files (PDMAEMA, PEO, PPO); no code in `src/` references this directory
 
-```
-src/
-├── capabilities/          # Application-level functionality
-├── core/                 # Core computational engines  
-├── tools/                # Utilities and I/O
-├── helpers/              # Development tools
-├── main.cpp              # Main application entry point
-└── global_config.h.in    # Global configuration template
-```
+## Conventions for all of src/
 
-## Development Standards
-
-### Code Quality
-- All new functions marked as "Claude Generated" for traceability
-- Doxygen-ready documentation for new and frequently used functions
-- Remove completed TODO hashtags when approved
-- Use std::cout for debugging within `#ifdef DEBUG_ON #endif`
-- Port std::cout to fmt for non-debugging console output
-- Replace deprecated suprafit functions when compiler warnings appear
-
-### Error Handling
-- Implement comprehensive error handling and logging
-- Maintain backward compatibility where possible
-- Check CMakeLists.txt and includes for DEBUG_ON configuration
-
-### Architecture Principles
-- Each subsystem maintains its own CLAUDE.md with specific information
-- Variable sections contain short-term information and current bugs
-- Preserved sections contain permanent knowledge and patterns
-- Instructions blocks contain future tasks and development visions
+- Mark new functions "Claude Generated"; doxygen-ready comments for new and frequently used functions
+- Console output goes through `CurcumaLogger` or fmt, not `std::cout`; plain ASCII only (root CLAUDE.md)
+- Diagnostic dumps: verbosity level 3 or an env switch `CURCUMA_*`; never select a numerical path by the print level
+- Replace deprecated function calls when the compiler warns about them
+- Error handling and logging for every new code path; keep backward compatibility where possible
+- Remove a TODO marker once the work is done and approved
 
 ## Instructions Block
 
@@ -47,13 +29,6 @@ src/
 
 *This section is reserved for operator/programmer instructions and approved future development tasks*
 
-## Variable Section
-
-### Current Development Focus
-- GFN-FF implementation complete and operational (`energy_calculators/ff_methods/`) — See [docs/GFNFF_STATUS.md](../docs/GFNFF_STATUS.md)
-- Universal parameter caching system working (96% speedup for iterative calculations)
-- Enhanced force field multi-threading support
-
 ---
 
-*This file provides overview information relevant to ALL subdirectories in src/*
+Previous version (status notes, removed 2026-10-01): [docs/archive/SRC_NOTES_2026-10.md](../docs/archive/SRC_NOTES_2026-10.md)

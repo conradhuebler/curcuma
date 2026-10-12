@@ -402,7 +402,7 @@ genuine sub-0.1-kcal fine-precision.
 > **Superseded (Sep 2026)**: that last sentence was wrong again. The PR30/PR31 ~0.07 kcal residual
 > was the X-bond B-search cutoff — curcuma pruned candidate B atoms at a hardcoded 10 Bohr on the
 > **X-B** distance, while the reference prunes on **A-B** against `hbthr2` = 450 Bohr^2 (21.2 Bohr),
-> `gfnff_ini2.f90:751-757`. See CLAUDE.md Known Issue #12(d). Per-structure vs pprcht is now
+> `gfnff_ini2.f90:751-757`. See KNOWN_ISSUES_ARCHIVE.md Known Issue #12(d). Per-structure vs pprcht is now
 > **MAD 0.00067, max 0.012 kcal**, 1 structure above 0.01 (was MAD 0.00429, max 0.070, 9 above 0.01):
 > PR30 +0.070 → −0.0005, PR31 +0.070 → −0.0005, ED09 +0.054 → −0.0003. 15 of the 95 structures
 > changed, none by more than 0.071 kcal. Lesson worth keeping: a residual that is small, scattered

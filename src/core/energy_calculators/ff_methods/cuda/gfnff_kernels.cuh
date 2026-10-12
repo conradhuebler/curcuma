@@ -138,6 +138,21 @@ __global__ void k_add_coulomb_parts(int n3, int nparts, const double* __restrict
 constexpr int GFNFF_COUL_TILE = 128;
 
 /**
+ * @brief Far-field threshold of the erf-damped Coulomb pair, (gamma_ij r)^2 >= 36.
+ *
+ * Claude Generated (Oct 2026). Exact up to rounding, NOT a cutoff: for gamma_ij r >= 6, tested as
+ * r^2 >= 36 (alp_i + alp_j) without sqrt or division, erf(gamma_ij r) is exactly 1.0 in FP64 (CUDA
+ * erf returns 1.0 from x = 5.9007 on, erfc(6) = 2.2e-17 < half an ulp of 1) and the Gaussian
+ * exp(-(gamma_ij r)^2) <= 2.3e-16. The pair is then q_i q_j / r, and its matrix element 1 / r, without
+ * evaluating erf or exp. Used by k_coulomb, k_coulomb_implicit, k_coulomb_tiles and the EEQ matrix
+ * builds (k_eeq_build_matrix, k_eeq_build_augmented, k_eeq_build_fragment_matrices). The matrix
+ * builds use 1.0 / r (bit-identical to erf()/r). k_coulomb_tiles and k_coulomb_implicit use rsqrt
+ * (1 ulp) when r_cut is infinite (the default), and sqrt plus division inside a finite cutoff;
+ * k_coulomb (stored pair list with per-pair cutoff) always uses sqrt plus division.
+ */
+constexpr double GFNFF_COUL_FARFIELD_X2 = 36.0;
+
+/**
  * @brief Implicit all-pairs Coulomb (erf-damped), each pair i<j evaluated ONCE.
  *
  * Claude Generated (Sep 2026). Same physics as k_coulomb_implicit, which evaluates every pair
@@ -629,7 +644,7 @@ void upload_refn_const(const int* data, int n);
 // ============================================================================
 // GPU CN pair list generation (Apr 2026)
 // Two-pass kernels: count valid pairs, then write (i, j, rcov_sum).
-// Replaces CPU generateCNPairList() O(N^2) loop.
+// Replaces the former host O(N^2) CN pair loop.
 // ============================================================================
 
 __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(
@@ -639,6 +654,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(
     const double* __restrict__ cz,
     const int*    __restrict__ atom_types,
     double        cutoff_factor,
+    double        extra_bohr,
     int*          d_count);
 
 __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
@@ -648,6 +664,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
     const double* __restrict__ cz,
     const int*    __restrict__ atom_types,
     double        cutoff_factor,
+    double        extra_bohr,
     int*          d_counter,
     int*          idx_i,
     int*          idx_j,

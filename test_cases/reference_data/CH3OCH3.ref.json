@@ -1,7 +1,7 @@
 {
   "molecule": {
     "name": "CH3OCH3",
-    "geometry_file": "test_cases/molecules/larger/CH3OCH3.xyz",
+    "geometry_file": "test_cases/structures/small/dimethyl-ether.xyz",
     "atoms": [
       {
         "element": "C",

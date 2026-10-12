@@ -39,7 +39,7 @@
 // CNDerivStore::diag, m_*_cn_correction.
 //
 // `Matrix` (= MatrixXd, ColumnMajor) typedef stays untouched for non-N×3 data
-// (Hessian, A-matrix, m_dc6dcn, distance matrices). The external getGradient()
+// (Hessian, A-matrix, distance matrices). The external getGradient()
 // API still returns Matrix (ColumnMajor) — Eigen converts at the boundary.
 using GeoGradMatrix = Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>;
 

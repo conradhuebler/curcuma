@@ -13,7 +13,9 @@ TEST_NAME="sqm - 07: GFN1-xTB Extended Single Point (gfnff-shared molecules)"
 TEST_DIR="$SCRIPT_DIR"
 METHOD="gfn1"
 
-ENERGY_TOLERANCE="0.001"
+# Tolerance 1e-5 Eh: the native implementation matches the TBLite references to about 5e-9 Eh (measured 2026-10-09);
+# the sqm_val_* gates check 1e-8 against the same references.
+ENERGY_TOLERANCE="0.00001"
 
 # Reference: TBLite gfn1 (generated 2026-04-25 from release/curcuma)
 REF_HCl="-4.683871705040322"
@@ -25,6 +27,7 @@ REF_C6H5COOH="-27.416918767094856"
 run_single() {
     local MOL=$1
     local REF=$2
+    local TOL=${3:-$ENERGY_TOLERANCE}
     local LOG="out_${MOL%.xyz}.log"
 
     cd "$TEST_DIR"
@@ -41,7 +44,7 @@ run_single() {
         return 1
     fi
 
-    assert_numeric_match "$REF" "$E" "$ENERGY_TOLERANCE" "$MOL total energy"
+    assert_numeric_match "$REF" "$E" "$TOL" "$MOL total energy"
 }
 
 main() {
@@ -51,7 +54,9 @@ main() {
 
     run_single HCl.xyz               "$REF_HCl"
     run_single HH.xyz                "$REF_HH"
-    run_single OH.xyz                "$REF_OH"
+    # OH is an open-shell radical computed without -spin: native and the closed-shell TBLite reference differ by 8.2e-4 Eh
+    # (measured 2026-10-09, same for gfn1 and gfn2); kept at 2e-3 so that this molecule does not hide behind the other four
+    run_single OH.xyz                "$REF_OH" 0.002
     run_single acetic_acid_dimer.xyz "$REF_ACETIC_DIMER"
     run_single C6H5COOH.xyz          "$REF_C6H5COOH"
 

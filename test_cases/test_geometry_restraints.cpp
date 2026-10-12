@@ -30,7 +30,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
 #include "src/core/molecule.h"
-#include "core/test_molecule_registry.h"
+#include "unit/test_molecule_registry.h"
 
 #include <cmath>
 #include <iostream>

@@ -1,0 +1,5 @@
+# Structures from test_cases/structures (id, optionally 'as <file name>'); see structures/README.md
+peo201-chain as chain.xyz
+caffeine as caffeine.xyz
+hydronium-water2 as h3op_h2o2.xyz
+cl2-anion as cl2m.xyz

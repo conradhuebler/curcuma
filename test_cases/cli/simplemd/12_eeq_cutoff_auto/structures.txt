@@ -1,0 +1,3 @@
+# Structures from test_cases/structures (id, optionally 'as <file name>'); see structures/README.md
+caffeine
+na2cl2-isolated-ions as NaCl.xyz

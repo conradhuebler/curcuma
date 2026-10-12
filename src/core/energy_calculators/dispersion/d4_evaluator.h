@@ -77,10 +77,6 @@ struct D4Params {
  * Thread safety: the evaluator itself is stateless; concurrent calls are
  * safe as long as the backing D4ParameterGenerator's read-only data is
  * stable for the geometry under evaluation.
- *
- * CUDA hook: launchGpuKernel() is a documented extension point — empty in
- * this AP. GFN-FF's existing GPU pipeline does not go through this class;
- * future GFN2-CUDA work can plug in a damping-aware kernel here.
  */
 class D4Evaluator {
 public:
@@ -108,6 +104,9 @@ public:
     //   disp_sum_out  s6·t6 + s8·r4r2ij·t8 (so the caller can reuse it for
     //                 the CN chain rule without recomputing)
     //
+    //   pair_index    position of the pair in the generator's pair list if known (O(1)
+    //                 dc6dcn lookup); otherwise the lookup binary-searches (Oct 2026)
+    //
     // Returns false if the pair is beyond cutoff or degenerate (E=0, grad=0).
     bool pairEnergyAndGradient(const GFNFFDispersion& pair,
                                const Eigen::Vector3d& rij_bohr,
@@ -116,7 +115,8 @@ public:
                                Eigen::Vector3d& dE_dr_vec,
                                double& dE_dCN_i,
                                double& dE_dCN_j,
-                               double& disp_sum_out) const;
+                               double& disp_sum_out,
+                               std::size_t pair_index = static_cast<std::size_t>(-1)) const;
 
     // ---------- whole-molecule (GFN2 style) ----------
     //
@@ -171,12 +171,6 @@ public:
 
     // ---------- CUDA hook (not used in this AP) ----------
     //
-    // Place-holder for a future GFN2-CUDA path. GFN-FF's existing kernel
-    // (gfnff_kernels.cu::k_dispersion) does NOT route through here — it
-    // consumes the precomputed pair data directly. Adding a GFN2 GPU path
-    // later will likely add a new kernel variant selected by m_params.damping.
-    virtual void launchGpuKernel(/* TODO: device buffers */) const {}
-
     const D4Params& params() const { return m_params; }
 
     // Invalidate the geometry-keyed pair-list cache (WP2, Claude Generated). Called by

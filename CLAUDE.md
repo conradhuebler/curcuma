@@ -53,9 +53,6 @@ Every new method or capability added by AI must include in its CLAUDE.md:
   - ❌ DON'T: Multi-paragraph explanations, code examples, historical details
   - ✅ DO: Brief statements with links to detailed docs if needed
   - ✅ DO: "✅ **Feature name** - Brief description" for completed items
-- Remove completed/resolved items after 2-3 updates (move to git history)
-- Tasks corresponding to code must be placed in the correct CLAUDE.md file
-- Each CLAUDE.md has a variable part (short-term info, bugs) and preserved part (permanent knowledge)
 - **Instructions blocks** contain operator-defined future tasks and visions for code development
 - Only include information important for ALL subdirectories in main CLAUDE.md
 - Preserve new knowledge from conversations but keep it brief
@@ -64,6 +61,7 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - **Keep git commits concise and focused**
 - **Rule of thumb**: If a CLAUDE.md section exceeds 20 lines, consider if it's better placed elsewhere
 - Newly added features need a precise and short documentation under docs/, a link to the documentation from claude.md and a note in the readme
+
 ## Development Guidelines
 
 ### Code Organization
@@ -101,8 +99,8 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - Reformulate and clarify task and vision entries if not already marked as CLAUDE formatted
 - In case of compiler warning for deprecated functions, replace the old function call with the new one
 - Implement timing analysis for complex functions
-- Keep track of significant improvements in AIChangelog.md, one line per fact
-- **Complex Architecture Documentation**: Factory patterns, dispatchers, and multi-step workflows require comprehensive inline documentation following ARCHITECTURE_DOCUMENTATION.md standards
+- Keep track of significant improvements in AIChangelog.md, one line per fact (the file is an index; long entries live in docs/changelog/, open tasks in TODO.md, old TODO text in docs/TODO_ARCHIVE_2026-10.md)
+- **Complex Architecture Documentation**: Factory patterns, dispatchers, and multi-step workflows require comprehensive inline documentation following docs/ARCHITECTURE_DOCUMENTATION.md standards
 - **BMT output compatibility (MANDATORY)**: Every capability that writes output files MUST route them through `outputPath()` (CurcumaMethod subclasses) or `BMTUtils::outputPath()` (standalone handlers). Hardcoded CWD paths are not permitted. Verify with `-no_bmt` (legacy) and default BMT mode before merging.
 - **No UTF symbols in terminal output**: Do not use Unicode box-drawing characters, emoji, arrows (->), checkmarks, or any non-ASCII symbols in fmt::print/std::cout output. Use plain ASCII only. Reason: breaks output in many terminal emulators, log files, and remote shells. CurcumaLogger colored output is exempt (uses ANSI codes, not Unicode).
 
@@ -118,13 +116,13 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - **Constructor**: Use `ParameterRegistry::getInstance().getDefaultJson("module")` instead of static JSON
 - **Build Verification**: Run `make GenerateParams` and check for validation warnings
 - **Documentation**: See reference implementation in `src/capabilities/analysis.h`
-- **Migration Guide**: Follow [docs/PARAMETER_MIGRATION_GUIDE.md](docs/PARAMETER_MIGRATION_GUIDE.md) for existing capabilities
+- **Migration Guide**: Follow [docs/archive/PARAMETER_MIGRATION_GUIDE.md](docs/archive/PARAMETER_MIGRATION_GUIDE.md) for existing capabilities
 
 #### Copyright and File Headers
 - **Copyright ownership**: All copyright remains with Conrad Hübler as the project owner and AI instructor
-- **Year updates**: Always update copyright year to current year when modifying files
+- **Years**: a new file gets the current year; an existing header keeps its range, no mass edits of the years
 - **Claude contributions**: Mark Claude-generated code sections but copyright stays with Conrad
-- **Format**: `Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>`
+- **Format**: `Copyright (C) <first year> - <last year> Conrad Hübler <Conrad.Huebler@gmx.net>`
 - **AI acknowledgment**: Add Claude contribution notes in code comments, not copyright headers
 
 #### Code Structure Guidelines
@@ -136,119 +134,39 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 
 ## Current Capabilities
 
-### 1. Quantum Mechanical Methods
+Long form with all measurements: [docs/CAPABILITY_NOTES_2026.md](docs/CAPABILITY_NOTES_2026.md). Campaign history and
+numbers: [docs/KNOWN_ISSUES_ARCHIVE.md](docs/KNOWN_ISSUES_ARCHIVE.md).
 
-#### Native Implementations (Educational, No External Dependencies)
+> **Default method is `gfnff` for every capability** (`-sp`, `-opt`, `-md`, `-hessian`, `-confsearch`, `-casino`): fast,
+> general purpose. **`gfn2` is the accurate one** (native GFN2-xTB, ~100x slower, with electronic structure). `uff` is
+> no capability's default; it stays the default only of `ForceFieldGenerator`'s own `method` parameter, which selects
+> the force field that class builds (uff | uff-d3 | qmdff | cg).
 
-> **Default method is `gfnff` for every capability** (`-sp`, `-opt`, `-md`, `-hessian`,
-> `-confsearch`, `-casino`): it is the **fast** general-purpose choice. **`gfn2` is the
-> accurate one** — native GFN2-xTB, ~100x slower, but with electronic structure. `uff`
-> remains available but is no longer any capability's default (Sep 2026). The one place
-> `uff` stays the default is `ForceFieldGenerator`'s own `method` parameter, which selects
-> which *force field* the FF engine builds (uff | uff-d3 | qmdff | cg) — GFN-FF does not
-> go through that class, and its `ff_type = 4` branch there is dead code since the legacy
-> `ForceField` GFN-FF path was removed.
+> ⚠️ **All native QM/FF methods are 🤖 AI-implemented and ⚙️ machine-tested only. None is ✅ TESTED.** Validate against an
+> external reference before research use.
 
-> ⚠️ **All native QM methods are AI-implemented and machine-tested only — not human production tested.**
-> Results should be validated against external references (TBLite, Ulysses, XTB) before use in research.
+| Method | Status / what was checked | Docs |
+|---|---|---|
+| `gfn2` native | 11/12 `sqm_reference` at 1e-8 vs tblite (231-atom `complex` open); GMTKN55 vs xtb 6.7.1 within 0.017 kcal/mol (D4 ATM cutoff split, `-xtb.d4_atm_cutoff 40.0` removes it); open shell, d-shell, MOR41 95/95 < 1e-6 Eh vs tblite | SQM_VALIDATION.md, SCF_MODES.md, SQM_DSHELL_WP.md |
+| `gfn1` native | 14/16 `sqm_reference` at 1e-8 (He2, `complex` open); halogen-bond term; residual 0.011 kcal/mol is the xtb/tblite STO-6G split (`-xtb.sto6g_legacy_4sp true`) | SQM_WP2_gfn1_accuracy.md |
+| `gfnff` native | port of GFN-FF; vs pprcht/gfnff over every structure: MOR41 and GMTKN55 max 0.07 kcal/mol (Known Issue #25); S30L-CI max 0.58, from the deliberate sTors deviation (0.05 with `-gfnff.storsion_reference_loop_bug true`, #12); vs xtb differs where xtb and pprcht differ (#6, #21) | GFNFF_STATUS.md, S30L_GFNNF_VALIDATION.md |
+| `pm3`/`am1`/`mndo` native | 21/21 tests vs Ulysses (< 4 µEh) | MNDO_INTEGRALS.md |
+| `eht` native | machine-tested | |
+| External | TBLite (`tblite-*`, `ipea1`), XTB (`xtb-*`), Ulysses (`ugfn2`, PM6, RM1 ...), ORCA, DFT-D3/D4, `xtb-gfnff` | |
+| Force fields | UFF, QMDFF, coarse-grained `cg` (`-load_ff_json`), parameter caching for all | CLEANUP_2026_09.md |
 
-- ⚠️ **Extended Hückel Theory (EHT)** - AI-implemented, machine-tested
-- ⚠️ **GFN2-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn2` backend; `-opt` works; Broyden SCF default (`-scf_mode diis|plain|level-shift`, `-scf_guess h0|eeq|fragments`, the last opt-in for clusters of small molecules); a NaN or unconverged SCF is an error since Sep 27, 2026 (`-scf_allow_unconverged true` accepts the latter); 11/12 sqm_reference @1e-8 vs tblite (only 231-atom `complex` open) — [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md), [docs/SCF_MODES.md](docs/SCF_MODES.md)
-  - **d-shell support (X-I1, June 2026)**: S/P/Cl/Si/… (main-group d) now compute via the cartesian→spherical transform, ≤1e-8 Eh vs tblite. CPU + **CUDA GPU** (validated on a GTX 1660: energy bit-identical to CPU, gradient ~1e-16) + **ROCm GPU** (B6 port, validated on a Radeon 890M/gfx1150: energy bit-identical to CPU at 8 dp, `-opt` tracks the CPU trajectory); **Vulkan d still falls back to CPU** (GLSL shaders pending). Transition metals enabled but **unvalidated**. See [docs/SQM_DSHELL_WP.md](docs/SQM_DSHELL_WP.md)
-  - **Threading**: intra-molecule `-threads N` (setup 4×, gradient 3.6×), which since Sep 2026 drives the eigensolve too (`-eigensolver_max_threads N` caps it separately) — [docs/SQM_THREADING.md](docs/SQM_THREADING.md)
-  - **Tuning knobs are CLI flags** (Sep 2026): `-scf_reduce`, `-eigensolver_max_threads`, `-scf_fp32_stall_patience`, `-scf_fp32_false_fixpoint_factor`, `-gpu_multipole_otf` — the former environment variables still work and still win. `scripts/tuning_sweep.py` scans them on the machine it runs on, checks every result's energy against the baseline and prints a command line — [docs/GPU_TUNING.md](docs/GPU_TUNING.md) sections 4-5
-  - **Integral setup** (Jul 2026): shell-pair-blocked overlap/multipole/gradient kernels — setup 209→91 ms, gfn2 total 1199→1083 ms on complex/231 — [docs/SQM_PERFORMANCE.md](docs/SQM_PERFORMANCE.md)
-  - **Integral numerics caveat**: those kernels are algebraically exact but ~1 ulp off the old values (GCC FMA contraction); energies bit-identical, gradients ≤1.7e-14 Eh/Bohr
-  - **Eigensolvers**: opt-in `-eigensolver native|purify|lobpcg`, `CURCUMA_EIG_TRED2=blocked` (MKL-free / GPU-portable) — [docs/SQM_EIGENSOLVE_GPU.md](docs/SQM_EIGENSOLVE_GPU.md)
-  - **Large systems**: `-large_system_mode fragments|dc|sparse` scales SCF past ~1000 atoms — [docs/SQM_LARGE_SYSTEMS.md](docs/SQM_LARGE_SYSTEMS.md)
-  - **SCF extrapolation**: `-scf_extrapolation aspc|gauss` cuts SCF iters in opt/MD (caffeine gfn2 215→90); experimental `xlbomd` = extended-Lagrangian MD — [docs/SQM_SCF_EXTRAPOLATION.md](docs/SQM_SCF_EXTRAPOLATION.md)
-  - **GPU backends** (`-gpu cuda|rocm|vulkan|auto`): all three device-resident through `-opt`/`-md`; ROCm has FP32 mixed-precision ON by default (real win), Vulkan is opt-in only (eigensolve-bound, no speedup). Detail in [docs/SQM_GPU.md](docs/SQM_GPU.md) / [docs/SQM_ROCM.md](docs/SQM_ROCM.md) / [docs/SQM_VULKAN.md](docs/SQM_VULKAN.md); roadmap in [docs/SQM_GPU_ROADMAP.md](docs/SQM_GPU_ROADMAP.md)
-  - **GPU fallbacks are counted** (Sep 28, 2026, 🤖): summary after every run, `-gpu_strict true` = exit 3 at the first one (`src/core/gpu_fallback.h`, [docs/GPU_TUNING.md](docs/GPU_TUNING.md) section 1)
-  - **Multi-GPU** (Sep 2026, 🤖 machine-tested): `-gpu_device N`; batch workers (`-sp`/`-opt` multi-XYZ, ConfSearch, Hessian) leased over a device pool (`-gpu_devices`, `-gpu_workers_per_device`); 7k-atom GFN2 fits one 20 GB card (screened integrals, on-the-fly multipoles); tuning options for manual tweaking in [docs/GPU_TUNING.md](docs/GPU_TUNING.md); multi-GPU eigensolve + density **on by default above 4000 basis functions when several GPUs are visible** (`-gpu_eigensolver_devices`/`-gpu_density_devices ... |none`; cuSOLVERMp/NCCL, cusolverMg FP64 fallback; polymer_2x 419 -> 194 s on 4 GPUs) — [docs/MULTI_GPU.md](docs/MULTI_GPU.md)
-  - **All GPU backends are runtime `dlopen` plugins** (`libcurcuma_{cuda,rocm,vulkan}.so`; CUDA Jul 2026, ROCm/Vulkan Sep 2026): the main binary has no backend symbol or `#ifdef`, CPU-only runs start in ~9 ms; `-gpu <backend>` loads the plugin lazily and warns + falls back to CPU when it is absent; `-methods` lists the plugins found. ROCm plugin build unverified (no SDK here). See [docs/GPU_PLUGIN_STARTUP.md](docs/GPU_PLUGIN_STARTUP.md)
-- ⚠️ **GFN1-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn1` backend; `-opt` works; Broyden SCF default; 14/16 sqm_reference @1e-8 vs tblite (He2 + `complex` remain) — [docs/SQM_WP2_gfn1_accuracy.md](docs/SQM_WP2_gfn1_accuracy.md); **halogen-bond correction** (B-X···A, GFN1-only) implemented Sep 2026, GMTKN55 MAD 0.041→0.00007 kcal/mol; the residual max 0.011 is the xtb-vs-tblite STO-6G 4s/4p split for Z=19-36 (`-xtb.sto6g_legacy_4sp true` reproduces xtb bit-for-bit) — Known Issue #7
-  - **GFN2 GPU pseudo-diagonalisation** (Sep 29, 2026, 🤖 machine-tested, opt-in): `-scf_pseudo_diag` replaces most FP32 eigensolves by one occupied-virtual rotation + S-re-orthonormalisation (polymer_2x 4 GPUs 113 -> 89 s; MOR41/GMTKN55 on the GPU identical); `-scf_pseudo_diag_fp64` does it in FP64 too, with an exact W for the gradient - correct but slower on FP64-weak cards, meant for full-rate-FP64 GPUs (unmeasured) — [docs/GFN2_GPU_COST_PLAN.md](docs/GFN2_GPU_COST_PLAN.md)
-  - **GFN-FF, one molecule on several GPUs** (Sep 29, 2026, 🤖 machine-tested): Coulomb tiles + projected-PCG EEQ split over the devices (`-gfnff.gpu_split_devices auto|list|none`, from 1000 / 4000 atoms); each-pair-once Coulomb kernel; single fragments take projected PCG like the CPU. polymer_2x MD step 0.377 s (1 GPU, Sep 28) -> 0.076 s (4 GPUs) — [docs/GPU_TUNING.md](docs/GPU_TUNING.md) section 3
-- ⚠️ **PM3/AM1/MNDO (Native NDDO)** - AI-implemented, machine-tested; 21/21 tests vs Ulysses reference (< 4 µEh)
-- ⚠️ **Native GFN-FF** - AI-implemented, machine-tested; see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md); S30L vs xtb 6.6.1 (Jul 2026): 29/30 within ~0.5 kcal/mol after F1/F2/CLI/F3/ipis + Jul 8 torsion fixes (MAD 433→1.20); residuals: 23 (.CHRG/harness quirk, curcuma judged correct), 30/AB (bond pibo) — see [docs/S30L_GFNNF_VALIDATION.md](docs/S30L_GFNNF_VALIDATION.md). **Fragment-charge placement for charged multi-fragment species changed default (Sep 2026)**: the carrier is now chosen by chemistry, not atom index (`-gfnff.frag_charge_model` default `reference`→`ensemble`) — fixes a real index bug (GMTKN55 WATER27 reaction MAD 58.6→21.4); a continuous cross-threshold window stays opt-in (`frag_charge_s_max`, default `1.0` = off) since it is a net loss for plain GFN-FF alone — see Known Issue #31, [docs/FRAG_CHARGE_MODEL.md](docs/FRAG_CHARGE_MODEL.md). A reused calculator's energy-only calls now also see the current CN and D4 C6 (Known Issue #32).
+- **GPU** (`-gpu cuda|rocm|vulkan|auto`): runtime `dlopen` plugins, CPU-only runs need none. CUDA (run on H200, RTX 5090, RTX 5080, RTX A4500, GTX 1660) and ROCm (Radeon 890M gfx1150 only) for gfn1/gfn2/gfnff, Vulkan opt-in. Multi-GPU, tuning flags, ROCm build unverified: [SQM_GPU.md](docs/SQM_GPU.md), [MULTI_GPU.md](docs/MULTI_GPU.md), [GPU_TUNING.md](docs/GPU_TUNING.md), [GPU_PLUGIN_STARTUP.md](docs/GPU_PLUGIN_STARTUP.md). GPU fallbacks are counted; `-gpu_strict true` exits at the first.
+- **SCF** (native xTB): Broyden default; `-scf_mode`, `-scf_guess h0|eeq|fragments`; NaN or unconverged SCF is an error (`-scf_allow_unconverged true`); `-scf_extrapolation aspc|gauss`; `-large_system_mode fragments|dc|sparse`; threads `-threads N`: [SCF_MODES.md](docs/SCF_MODES.md), [SQM_LARGE_SYSTEMS.md](docs/SQM_LARGE_SYSTEMS.md), [SQM_THREADING.md](docs/SQM_THREADING.md).
+- **Solvation**: TBLite (CPCM/GB/ALPB), Ulysses GBSA, native gfn1/gfn2 ALPB+GBSA (≤1e-8 Eh vs tblite), native GFN-FF ALPB (≤1e-8 Eh vs xtb 6.7.1); native CPCM pending: [SOLVATION.md](docs/SOLVATION.md), [SQM_SOLVATION_WP.md](docs/SQM_SOLVATION_WP.md).
+- **Optimisation**: LBFGS and others, constraints; default `auto` optimiser can abort on a high-symmetry system whose only active mode is totally symmetric (use `-opt.optimizer lbfgs`).
+- **ConfSearch details** (dual-method, restart, seeding, reporting, ConfGen, release pass, `-seed_vary`, MTD screen): `docs/CONFSEARCH_*.md`, notes in [CONFSEARCH_DEVELOPMENT_NOTES.md](docs/CONFSEARCH_DEVELOPMENT_NOTES.md), measured levers and the Oct 2026 review in [CONFSEARCH_POTENTIAL_REVIEW.md](docs/CONFSEARCH_POTENTIAL_REVIEW.md). Long-form bullets: [CAPABILITY_NOTES_2026.md](docs/CAPABILITY_NOTES_2026.md).
+- **ConfSearch / ConfScan / RMSD**: ConfScan filter protocol for structures with topological symmetry (energy, rotational constants, Vietoris-Rips barcodes, permutation reuse): preprint [ChemRxiv 10.26434/chemrxiv.15009180/v1](https://chemrxiv.org/doi/full/10.26434/chemrxiv.15009180/v1); dual-method (`-md_method`, `-opt_method`), restartable (`-restart`), MTD screen: [CONFSEARCH_DUAL_METHOD.md](docs/CONFSEARCH_DUAL_METHOD.md), [CONFSEARCH_RESTART.md](docs/CONFSEARCH_RESTART.md), [CONFSEARCH_MTD_SCREEN.md](docs/CONFSEARCH_MTD_SCREEN.md).
+- **MD**: SimpleMD, temperature ramps/regions ([TEMPERATURE_RAMP.md](docs/TEMPERATURE_RAMP.md)), step-rejecting integrator `-adaptive_step` (off by default), PLUMED `-mtd`. **MD times recorded before `ef462fcf` (Sep 2026) must be multiplied by 1.9516.** Large-system MD: [MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md).
+- **Other**: `-interaction` (E(AB)-E(A)-E(B), S30L modes), NEB, trajectory analysis (parallel, TrajectoryWriter), scattering, Hessian, persistent diagram, orbitals.
+- **Output**: default BMT directory (Basename.Method.Timestamp), `-bak` copies files back, `-no_bmt` writes to CWD (see `src/tools/CLAUDE.md`).
+- **Core**: MNDO integrals ([MNDO_INTEGRALS.md](docs/MNDO_INTEGRALS.md)); one force-field engine `FFWorkspace` (legacy `ForceField`/`ForceFieldThread` GFN-FF path removed Sep 2026, [CLEANUP_2026_09.md](docs/CLEANUP_2026_09.md)).
 
-#### External Interfaces (Production Quality, Requires Compilation)
-- **TBLite Interface** - Tight-binding DFT methods (GFN1, GFN2, iPEA1) + **Solvation** (CPCM, GB, ALPB)
-- **XTB Interface** - Extended tight-binding methods (GFN-FF, GFN1, GFN2)
-- **Ulysses Interface** - Semi-empirical methods (PM3, PM6, AM1, MNDO, RM1, etc.) + **Solvation** (GBSA)
-- **Native GFN-FF** - Curcuma's own implementation (`gfnff`) - ✅ **IMPLEMENTED**
-
-### 2. Force Field Methods
-- **Universal Force Field (UFF)** - General-purpose molecular mechanics
-- **GFN-FF** (`gfnff`) - ✅ **FULLY IMPLEMENTED** - See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
-- ⚠️ **Coarse-grained beads** (`cg`, Sep 2026, AI/machine-tested) - LJ spheres/ellipsoids on the workspace engine, input via `-load_ff_json FILE` (`cg_default`, `cg_per_atom`, `pair_interactions`); analytic sphere gradient - see [docs/CLEANUP_2026_09.md](docs/CLEANUP_2026_09.md)
-- **QMDFF** - Quantum Mechanically Derived Force Fields
-- **Universal Parameter Caching** - Automatic save/load for all FF methods
-
-### 3. Solvation Models (Implicit Solvent)
-- ✅ **TBLite Solvation** - CPCM, GB (Generalized Born), ALPB for GFN methods. ⚠️ Pending in the `USE_TBLITE=OFF` dev build (see [docs/SOLVATION.md](docs/SOLVATION.md)) - unaffected: native ALPB/GBSA below.
-- ✅ **Ulysses Solvation** - GBSA (Generalized Born + SA) for GFN/MNDO methods
-- ⚠️ **Native GFN1/GFN2 ALPB + GBSA** (June 2026, AI/machine-tested) - self-consistent
-  ALPB (`-xtb.solvent_model alpb`, P16 kernel) and GBSA (`-xtb.solvent_model gbsa`, Still kernel)
-  in the native xTB SCF, matching tblite total ΔG (Born + CDS + shift; CM5 for gfn1) to
-  ≤1e-8 Eh on the validation set (CPU + GPU); `-method gfn2 -xtb.solvent water -xtb.solvent_model gbsa`
-  (legacy numeric codes 3/2 still accepted). CPCM native solvation still pending.
-  See [docs/SQM_SOLVATION_WP.md](docs/SQM_SOLVATION_WP.md)
-- ⚠️ **Native GFN-FF ALPB** (June 2026, AI/machine-tested) - self-consistent: the Born
-  reaction field couples into the EEQ solve (`A_eeq += B`), so charges polarize in the solvent.
-  `-method gfnff -gfnff.solvent water -gfnff.solvent_model alpb` matches **xtb 6.7.1** (`--gfnff
-  --alpb`) to **≤1e-8 Eh** (7 mol × 4 solvents); analytic gradient FD-validated. GFN-FF has
-  no separate GBSA (reference uses ALPB), so `-gfnff.solvent_model gbsa` maps to ALPB. See
-  [docs/SQM_SOLVATION_WP.md](docs/SQM_SOLVATION_WP.md) WP5
-- **25+ Solvents** - water, methanol, DMSO, acetone, benzene, etc.
-- **Auto-Activation** - Specify `-solvent water` to enable
-- **Documentation** - See [docs/SOLVATION.md](docs/SOLVATION.md) for details
-
-### 4. Dispersion and Non-Covalent Corrections
-- **DFT-D3** - Grimme's D3 dispersion correction
-- **DFT-D4** - Next-generation D4 dispersion correction
-- **H4 Correction** - Hydrogen bonding and halogen bonding corrections
-
-### 5. Geometry Optimization
-- **LBFGS Optimizer** - Limited-memory Broyden-Fletcher-Goldfarb-Shanno
-- **Multiple Convergence Criteria** - Energy, gradient, RMSD-based
-- 🤖 **Convergence presets** (`-convergence_preset loose|normal|tight|verytight`, reworked Aug 2026) - one decade per step in every criterion, step cap scaled with the atom count (`max(50,1N)`/`max(500,10N)`/`max(1000,25N)`/`max(5000,100N)`); single definition in `optimisation/convergence_presets.h` instead of three copies. Measured: the thresholds alone cost 13 % (656 vs 750 steps), so the cap is what separates the presets -- see [docs/OPT_CONVERGENCE_PRESETS.md](docs/OPT_CONVERGENCE_PRESETS.md)
-- **Constrained Optimization** - Distance, angle, and dihedral constraints
-
-### 6. Conformational Analysis ✅ REFACTORED 2025
-- **ConfSearch** - Systematic conformational searching (unified trajectory framework); supports **dual-method** runs (`-md_method` explore + pre-opt, `-opt_method` refine + rank; both fall back to `-method`) — see [docs/CONFSEARCH_DUAL_METHOD.md](docs/CONFSEARCH_DUAL_METHOD.md); **restartable** via `-restart` (self-contained checkpoint: bias pool + cumulative + seeds + schedule, written to CWD + BMT) — see [docs/CONFSEARCH_RESTART.md](docs/CONFSEARCH_RESTART.md); **registry-backed since Jul 2026** (67 PARAMs) so its flags are no longer auto-routed away, and every child computation (MD / 4 opt sites / 2 ConfScan passes) shares one `ChildConfig()` carrying charge, spin, gpu and the method sub-scopes; **RMSD-MTD bias speedup (Jul 2026)**: a rigorous Gaussian-cutoff screen (`-rmsd_mtd_screen`, default ON, physics-preserving) skips far hills before the Kabsch, plus an enforced pool cap (`-rmsd_mtd_max_gaussians`) — see [docs/CONFSEARCH_MTD_SCREEN.md](docs/CONFSEARCH_MTD_SCREEN.md); **RMSD-aware seeding (Jul 2026)**: `-seed_selection diverse` (default) requires `-seed_min_rmsd` spacing between the seeds of a cycle instead of taking the N lowest energies — see [docs/CONFSEARCH_SEEDING.md](docs/CONFSEARCH_SEEDING.md); **reporting + per-cycle output + two-stage refinement (Jul 2026)**: reference energies from the initial optimisation (no cross-method delta), per-phase ensemble energies, per-cycle ensemble + best-structure files on both levels (`-cycle_output`), and `-phase3b_two_stage` (crude opt -> dedup -> accurate opt) — see [docs/CONFSEARCH_REPORTING.md](docs/CONFSEARCH_REPORTING.md); **selection moved onto the ranking surface (Aug 2026)**: `-phase3b_two_stage` is now the DEFAULT, because deduplicating/selecting on the exploration surface is not merely suboptimal but wrong here — WITHIN one cycle of a 107-atom peptide gfnff and gfn2 correlate at **r = -0.32/-0.46** (the gfnff favourite is gfn2 rank 9-10 of 13-14, +68 kJ/mol) and a run 121 kJ/mol deeper on gfnff gave a 67 kJ/mol worse gfn2 result; a gfn2 single point on the gfnff geometry is better (r = +0.40) but insufficient, since the SP->opt relaxation spans 149-368 kJ/mol vs ~80 kJ/mol conformer spread. Also new: a cheap pre-filter before the quadratic dedup (`-reduce_prefilter_window`/`-reduce_prefilter_energy_tol`), opt-in polar-X-H restraints against proton transfer in every optimisation (`-hold_polar_h`; measured on a 107-atom peptide, 32 of 96 structures of one cycle were tautomers and they were the DEEPEST ones), and `-confgen_method auto` so RECOMBINE still runs (at gfnff) when the search explores with a QM method
-- 🤖 **ConfGen** (`-confgen`, Jul 2026) - torsion/energy-decomposition analysis of an existing ensemble: rotatable torsions + rotamer states from the topology, and the per-term contribution of a single state change measured from **matched pairs** (Hamming-1 ensemble pairs). Also measures torsion-torsion couplings (double-mutant cycles) and scores constant/additive/+coupling models by **cross-validation**. Measured on two ensembles: the torsion-state model explains only ~15 % of the out-of-sample energy variation (couplings do not fix it), so ranking proposals by it is ruled out. `-generate true` therefore uses the model only to pick which untried state combinations to BUILD; every proposal is optimised, topology-checked (reaction products rejected) and compared against re-optimised templates. Measured: 7 new conformers from a 108-member ensemble. Available inside ConfSearch as **Phase 3c** (`-confgen_phase true`). **NCI pattern (Aug 2026, `-nci_analysis` default ON)**: the torsion description models the wrong physics — the exact variance attribution over the GFN-FF terms gives HBond +58 %, Dispersion +30 %, Coulomb +25 %, **Torsion −7 %** — so every conformer also gets a discrete non-covalent pattern (H-bonds, halogen bonds, electrostatic + close contacts). Measured on 142 structures: 119 distinct torsion vectors vs 141 NCI patterns, 28 of the 29 torsion-identical pairs separated by the H-bond subset alone, and the unreachable GOAT reference is at torsion distance 0 from an ensemble member but never below 6 H-bonds from any. It separates but does not yet predict. The pattern is also a **move set** (`-nci_generate`): break/form a hydrogen bond via distance restraints, then release and optimise freely. Measured (budget 20): torsions 11 new conformers, NCI 1-2 -- the move holds its target pattern in 7 of 13 cases but mostly lands in known minima, and its ranking (`+population` of the formed bond) drives to over-bridged structures, i.e. AWAY from the missing reference. **Depth beyond 3 (Aug 2026)**: the candidate ball grows combinatorially (29 torsions: 4.4e3 at depth 2, 4.9e7 at depth 5) and was materialised whole — `-proposal_depth 5` died with `std::bad_alloc`. The shell sizes are now computed exactly beforehand; below `-proposal_candidate_cap` (200000) the ball is enumerated as before (byte-identical at depth 2), above it sampled (`-proposal_seed`). Depths 5 and 7 run; measured: almost only new conformers (23/23) and the best contact overlap with GOAT of any generated set, but energetically worse and still no closer than the source ensemble. ConfSearch's `-confgen_depth` default therefore moved 2 -> **3**, the measured optimum (29/29 new, best 9.1 kJ/mol below the ensemble minimum vs 0.4 at depth 2). — see [docs/CONFSEARCH_PROPOSALS.md](docs/CONFSEARCH_PROPOSALS.md)
-- **ConfScan** - Conformational scanning along reaction coordinates
-- **RMSD Analysis** - Structure comparison and alignment
-- **Energy-based Filtering** - Automatic conformer ranking
-- **Refactored Geometry Commands** - TrajectoryWriter for JSON format (Phase 5)
-
-### 7. Molecular Dynamics
-- **SimpleMD** - Basic molecular dynamics simulation
-- ⚠️ **Temperature ramps / live T / thermal regions** (Jun 2026, AI/machine-tested) - `setTargetTemperature()` live setpoint; multi-stage `temp_ramp`/`temp_schedule` (`steps`/`reach` modes); per-atom-subset `temp_regions` (Berendsen/CSVR/Andersen; NH falls back to global). No-region path byte-identical to legacy. See [docs/TEMPERATURE_RAMP.md](docs/TEMPERATURE_RAMP.md)
-- ⚠️ **Step-rejecting integrator** (`-adaptive_step`, Sep 2026, AI/machine-tested) - redoes a step subdivided when it violates conservation; two self-calibrating channels, the global energy drift and (`-adaptive_step_local`, on with it) the **hottest atom over the per-atom mean**, which keeps its contrast at 7320 atoms where the global one loses it. **Off by default**, explicit `false` and `-adaptive_step_local false` bit-identical. polymer_2x 300 fs NVE dt=0.5: **+67.59 -> +0.53 Eh, 2175 -> 246 K**, with 92 of 104 rejections from the local channel alone. Measurements in [docs/MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md)
-- ⚠️ **MD time step FIXED** (`ef462fcf`, Sep 2026, AI/machine-tested) - SimpleMD advanced **1.9516 fs per requested fs** (the step multiplied a velocity in sqrt(Eh/amu) as if it were A/fs), so every MD in curcuma - all methods, ConfSearch exploration included - ran with a step ~2x too large and `-MaxTime` stretched by the same factor. Energies, forces, temperature and energy conservation were unaffected and correct; only the clock was wrong, which is why nothing caught it. Now converted in `Verlet()`/`Rattle()`/`NoseHover()` via `CurcumaUnit::Constants::FS_TO_MD_TIME`; new ctest `md_time_axis` ties the reported time to a Hessian frequency. **Every MD time recorded before this commit must be multiplied by 1.9516.**
-- **Large-system MD** - why a GFN-FF MD of 7320 atoms heats: **one water molecule collapses** (H-O-H 103.4 -> 3.6 deg, that molecule alone +10.96 Eh, 12 atoms holding 99 % of the kinetic energy). Not size, not truncation - the water and polymer halves each conserve, and the earlier "dt^2 truncation" reading is corrected in [docs/MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md)
-- **NEB Docking** - Nudged elastic band for transition states
-- **Trajectory Analysis** - Analysis of MD trajectories
-- **PLUMED Metadynamics** - Enhanced sampling via PLUMED2 plugin (`-mtd` flag) — see [docs/PLUMED_HELP.md](docs/PLUMED_HELP.md)
-
-### 8. Analysis Tools
-- **✅ Parallel Analysis** - Frame-level parallelization with CxxThreadPool (3-8x speedup, January 2026)
-
-### 9. Output Directory System
-- **🤖 BMT (Basename.Method.Timestamp)** - Default output directory for all commands — see `src/tools/CLAUDE.md`
-- **`-bak` flag** - Copy specified files from BMT directory back to CWD
-- **`-no_bmt`** - Disable BMT, write output to CWD (legacy behavior)
-- **✅ TrajectoryWriter** - Unified output system for Human/CSV/JSON/DAT formats
-- **✅ Scattering Analysis** - P(q)/S(q) with logarithmic q-spacing and automatic gnuplot visualization (2026)
-- **RMSD Calculations** - Root-mean-square deviation analysis
-- **Persistent Diagram** - Topological data analysis
-- **Hessian Analysis** - Second derivative calculations
-- **Orbital Analysis** - Molecular orbital visualization and analysis
-
-### 10. Core Computational Libraries
-- ✅ **MNDO Integrals** - Dewar-Thiel multipole expansion for semi-empirical 2e⁻ integrals, see [docs/MNDO_INTEGRALS.md](docs/MNDO_INTEGRALS.md)
+Older (2025) work: `AIChangelog.md` and git history.
 
 ## Architecture
 
@@ -290,7 +208,7 @@ Modern force field engine with:
 - **Method-aware loading** - validates parameter compatibility
 - **Multi-threading safety** - controllable caching for concurrent calculations
 
-#### QM Interface (`src/core/qm_methods/interface/abstract_interface.h`)
+#### QM Interface (`src/core/energy_calculators/qm_methods/interface/abstract_interface.h`)
 Unified interface for all quantum mechanical methods:
 ```cpp
 class QMInterface {
@@ -310,7 +228,7 @@ curcuma/
 │   ├── capabilities/          # High-level molecular modeling tasks
 │   │   ├── confscan.cpp      # Conformational scanning
 │   │   ├── confsearch.cpp    # Conformational searching  
-│   │   ├── curcumaopt.cpp    # Geometry optimization
+│   │   ├── optimizer_driver.cpp # Geometry optimization (OptimizerDriver)
 │   │   ├── simplemd.cpp      # Molecular dynamics
 │   │   └── rmsd.cpp          # Structure analysis
 │   ├── core/                 # Core computational engines
@@ -335,7 +253,7 @@ curcuma/
 │   │   │       ├── forcefield.cpp         # Force field engine + verbosity  
 │   │   │       ├── forcefieldgenerator.cpp # Parameter generation + verbosity
 │   │   │       ├── ff_workspace*.cpp      # Partitioned energy/gradient engine (all FF methods)
-│   │   │       ├── gfnff_method.cpp      # Native GFN-FF implementation (4329 lines)
+│   │   │       ├── gfnff_method.cpp      # Native GFN-FF implementation
 │   │   │       ├── gfnff.h               # GFN-FF class interface
 │   │   │       ├── gfnff_inversions.cpp   # GFN-FF inversion terms
 │   │   │       ├── gfnff_torsions.cpp     # GFN-FF torsion terms
@@ -351,21 +269,9 @@ curcuma/
 └── CMakeLists.txt           # Build configuration
 ```
 
-## Completed Developments (2026)
+## Past Developments
 
-✅ **GFN-FF / GFN1 / GFN2 cleanup + speedup** (Sep 2026, AI/machine-tested) - one FF engine
-(`FFWorkspace`; legacy `ForceField`/`ForceFieldThread` GFN-FF path and its per-step feed
-removed), native xTB decoupled from `QMDriver`, duplicate parameter headers / old NDDO classes /
-dead EEQ paths deleted (~20k lines), table-driven `MethodFactory` registry + one shared
-sub-scope list, exact hot-path fixes (LAPACK scratch, HB-gradient index, EEQ views). Energies
-identical to the last digit; GFN-FF SP 1.35-1.9x, GFN1 polymer 1.45x. Numbers, method and
-open items in [docs/CLEANUP_2026_09.md](docs/CLEANUP_2026_09.md)
-
-> Older 2025 work (parameter registry, polymorphic EnergyCalculator, native GFN2/GFN1/PM3, MNDO integrals, GFN-FF full implementation, scattering, analysis parallelization, dependency gating) is in `AIChangelog.md` + git history.
-
-✅ **`-interaction` capability** (June 2026) - supramolecular interaction energy `E(AB)−E(A)−E(B)` for the S30L host-guest set; modes: S30L A/B/AB dir (+`.CHRG`), batch vs `reference_s30l` (MAD/RMSD), explicit `-fragA/-fragB`, single-AB auto-split
-✅ **GFN-FF aromatic ring torsions fixed** (June 2026) - acyclic-only pi-sp3 rules were wrongly applied to ring torsions; gated on `!in_ring`; S30L host A now bit-identical to Fortran, validation 18/18 — see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
-✅ **GFN-FF GPU HB-freeze resolved + per-frame gradient diagnostic** (June 2026) - the GPU HB-charge freeze is correct (matches CPU+Fortran); `test_gfnff_grad_traj` is the clean force metric (MD heat-exchange is not) — see [docs/GPU_GFNNF_DISCREPANCIES.md](docs/GPU_GFNNF_DISCREPANCIES.md)
+Moved to [docs/CAPABILITY_NOTES_2026.md](docs/CAPABILITY_NOTES_2026.md) (GFN-FF/GFN1/GFN2 cleanup Sep 2026, `-interaction`, GFN-FF ring torsions, GPU HB freeze) and `AIChangelog.md`.
 
 ## Build and Test Commands
 
@@ -394,19 +300,21 @@ ctest -R "cli_rmsd_01" --verbose
 ./curcuma -opt input.xyz -method gfn2         # GFN2 optimization
 ```
 
-**Test Status**: 26/26 CLI Tests passing (100%) ✅
+**Test count**: `ctest -N` in `release/` lists 333 tests (Oct 1, 2026); run `ctest` for the current result. The per-category counts above are historical.
 
 ## Project Management
 
-- **Knowledge store (Obsidian vault)**: `~/Nextcloud/Obsidan/Wissen/` — German, operator-owned. Holds the curcuma **project notes** (`Projekte/curcuma *.md`: status, open points), the **lab journal** for computational campaigns (`Labor/curcuma *.md`, append-only, mandatory fields incl. commit + dirty state + diff), and the **reusable method knowledge** (`Wissen/curcuma.md`, `Wissen/Governance-Regeln für KI-Coding-Agenten an wissenschaftlichem Code.md`, `Wissen/Agentisches Arbeiten.md`). **Read `00 Regeln.md` there before writing anything into it.** Division of labour: code, changelog and bug history stay in this repository; method knowledge, campaign records and project status go to the vault. Cross-project agent rules are in `~/.claude/CLAUDE.md`, which links the vault.
-- **Prioritized TODO List**: See [TODO.md](TODO.md)
-- **Module Docs**: Each `src/` subdirectory has CLAUDE.md with specific tasks
-- **GFN-FF Status**: See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md) for implementation details
-- **Technical Debt**: Identified debt in GFN-FF / native xTB / QM interfaces / EnergyCalculator / RMSD-alignment API — [docs/TECHNICAL_DEBT.md](docs/TECHNICAL_DEBT.md)
-- **rev-gfnff backlog**: places where curcuma's GFN-FF could be *better* than the reference, each one checked against an external reference (r2SCAN-3c / GFN2 / DLPNO / experiment) rather than against xtb — [docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md). Port fidelity stays the default; this collects the deliberate deviations and the open method limitations.
-- **Regression check before/after a change** (Sep 2026): `scripts/refset_regression.py` runs every structure of MOR41/GMTKN55 through TWO curcuma binaries (the old one built from a worktree is the reference) and reports which energies moved — the question "did my change alter anything", independent of xtb and usable without it. `scripts/scan_convergence.py` tells whether an outlier is a real change or a non-converged SCF (GMTKN55/gfn2 has exactly three: the `G21IP` single-atom cations). Latest result and the traps: [docs/REGRESSION_CHECK.md](docs/REGRESSION_CHECK.md)
-- **Benchmark Test-Set Retrieval** (Sep 2026): `scripts/fetch_testset.py` fetches Grimme-group sets (MOR41 auto, GMTKN55 auto via git, S30L manual/paywalled) on demand into the layout `scripts/mor41_validation.py`/`scripts/s30l_*.py` expect; `scripts/gmtkn55_compare.py` runs the same curcuma-vs-xtb per-structure check across GMTKN55's 54 subsets — gfn2 MAD 0.000, gfn1 MAD 0.00007, gfnff MAD ~0.26 kcal/mol (see Known Issue #1 for the port-fidelity history); open-shell structures are included (see Known Issue #6) — see [docs/GMTKN55_VALIDATION.md](docs/GMTKN55_VALIDATION.md). **Caches energies in `_run/energies.json` and reuses them unless `--recompute` is passed** — after a code change, drop the `<subset>/<name>|cur|<method>` keys first, or the "comparison" silently re-reports the old numbers; `scripts/testset_perf.py` benchmarks CPU/threading/GPU wall-clock on whatever set is fetched — see [docs/TESTSET_RETRIEVAL.md](docs/TESTSET_RETRIEVAL.md)
-- **S30L-CI dataset** (Sep 2026, manually supplied — not in `fetch_testset.py`'s registry): 30 host-guest complexes, the counterion variant of S30L (charged guests 23-30 get an explicit counterion atom instead of a bare net charge). `test_cases/s30lci_test_set/` (gitignored per-structure dirs, tracked `reference_s30lci`/`README`), run via `scripts/s30lci_gfnff_compare.py`. Result: curcuma vs xtb MAD **0.386** kcal/mol over all 30 structures (was 1.92 before a pyrrole-Hückel veto fix and an amide-H chi correction fix, both Sep 2026 — see `AIChangelog.md`). Per-**term** against pprcht over all 90 fragments (A/B/AB): MAD **0.0007**, max 0.047 kcal/mol, **0/90 above 0.05** (was 15/90, max 6.91) — see Known Issue #1.
+- **Knowledge store (Obsidian vault)**: `~/Nextcloud/Obsidan/Wissen/`, German, operator-owned. Read its `00 Regeln.md` before writing anything into it.
+  - `Projekte/curcuma *.md`: project status; `Labor/curcuma *.md`: lab journal for computational campaigns (append-only, mandatory fields incl. commit, dirty state, diff); `Offene Fragen/`: scientific questions without an owner; `Wissen/curcuma.md` and related notes: reusable method knowledge.
+  - Code, changelog and bug history stay in this repository; method knowledge, campaign records and project status go to the vault. Cross-project agent rules: `~/.claude/CLAUDE.md`.
+- **Prioritized TODO list**: [TODO.md](TODO.md). **Module docs**: each `src/` subdirectory has a CLAUDE.md.
+- **Status and validation**: [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md), [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md), [docs/GMTKN55_VALIDATION.md](docs/GMTKN55_VALIDATION.md), [docs/MOR41_VALIDATION.md](docs/MOR41_VALIDATION.md), [docs/S30L_GFNNF_VALIDATION.md](docs/S30L_GFNNF_VALIDATION.md), [docs/GRADIENT_VALIDATION.md](docs/GRADIENT_VALIDATION.md); technical debt: [docs/TECHNICAL_DEBT.md](docs/TECHNICAL_DEBT.md).
+- **rev-gfnff backlog**: places where GFN-FF could be better than the reference, each checked against an external reference (r2SCAN-3c, GFN2, DLPNO, experiment): [docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md). Port fidelity stays the default.
+- **Regression check before/after a change**: `scripts/refset_regression.py` runs MOR41/GMTKN55 through two curcuma binaries (reference built from a worktree) and reports which energies moved; `scripts/scan_convergence.py` separates real changes from non-converged SCF. See [docs/REGRESSION_CHECK.md](docs/REGRESSION_CHECK.md).
+- **Benchmark sets**: `scripts/fetch_testset.py` fetches MOR41 and GMTKN55 on demand (S30L is manual/paywalled); `scripts/gmtkn55_compare.py` caches energies in `_run/energies.json` and reuses them unless `--recompute` is passed (see Validation Traps); `scripts/testset_perf.py` benchmarks wall-clock. See [docs/TESTSET_RETRIEVAL.md](docs/TESTSET_RETRIEVAL.md), [docs/GMTKN55_VALIDATION.md](docs/GMTKN55_VALIDATION.md).
+- **EEQ solver**: `-eeq_solver.solve_method auto|cholesky|ppcg|pcg|lu|ldlt|batched` (alias `-gfnff.solve`), same names on CPU and `-gpu cuda`, `auto` switches to ppcg at 500 atoms (`eeq_ppcg_min_atoms`; local-inverse preconditioner by default, `-eeq_solver.eeq_ppcg_precond diag` restores Jacobi), unknown name = error, verbosity 1 names the running path: [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md). Benchmark: `scripts/eeq_solver_benchmark.py <library id> --curcuma BIN [--xtb xtb]`, [docs/EEQ_SOLVER_BENCHMARK.md](docs/EEQ_SOLVER_BENCHMARK.md).
+- **Before merging a branch with compute or performance changes**: skill `/pre-merge-check` (user-level, source in the vault `_artefacts/skills/pre-merge-check/`, project profile profil-curcuma in the same vault folder): parity matrix across backends (CPU, CUDA, ROCm, Vulkan), dead code, merge risks, acceptance (bitwise md5 incl. MD diagnostics, GPU against its own scatter, full `make` + `ctest -j1`). Method note: vault `Wissen/Merge-Prüfung vor dem Merge - Parität und Altlasten.md`.
+- **S30L-CI** (manually supplied, not in `fetch_testset.py`): 30 host-guest complexes with explicit counterions, `test_cases/s30lci_test_set/` (per-structure dirs gitignored, `reference_s30lci`/`README` tracked), run via `scripts/s30lci_gfnff_compare.py`.
 
 ## Workflow States
 - **ADD**: Features to be added
@@ -415,13 +323,26 @@ ctest -R "cli_rmsd_01" --verbose
 - **TESTED**: Works (by operator feedback)
 - **APPROVED**: Move to changelog, remove from CLAUDE.md
 
-### Documentation Update Rules
-- **Replace debugging details with architecture decisions** when issues are resolved
-- **Remove unnecessary pointer addresses and crash investigation specifics**
-- **Focus on architectural clarity** rather than technical debugging information
-- **Document the "why" behind design decisions** for future reference
-- **Eliminate redundant information** that doesn't add architectural value
-- **Prioritize clean, maintainable documentation** over verbose troubleshooting history
+## Where Things Go
+
+One home per kind of information; copies drift apart. `scripts/check_docs.py` enforces the mechanical parts: run it
+before committing, or enable the hook with `git config core.hooksPath scripts/git-hooks`.
+
+| Kind | Home |
+|---|---|
+| Rules, invariants, traps, layout of a directory | the `CLAUDE.md` of that directory (root 500 lines, others 120, no line over 600 characters) |
+| Open code tasks and defects | `TODO.md`, open items only, at most 3 lines each |
+| Bug report, measurement, campaign | one dated document in `docs/` plus one index line in `AIChangelog.md` |
+| Method status and validation | `docs/<METHOD>_STATUS.md` or `docs/*_VALIDATION.md` |
+| Test structures (geometry, charge, spin, provenance) | `test_cases/structures/` (manifest, naming and provenance rules in its README); no structure file anywhere else |
+| Scientific questions without an owner, project status | the vault (`Offene Fragen/`, `Projekte/`); `TODO.md` links to the note by name, no copy |
+| History | git log and the `AIChangelog.md` index |
+
+- No dated status sections, "Completed" lists or fix narratives in a CLAUDE.md. No new markdown file in the repository root (README, CLAUDE, TODO, AIChangelog only) and no completion or summary reports; the changelog line is the record.
+- A statement about the code ("X exists", "default is Y") is checked against the code when it is written; a path in backticks must exist. What was not checked says so.
+- Closing a task is one change: remove its TODO entry, add the changelog line, close or strike the linked vault note.
+- Dead code: code without a caller is deleted in the same change that removes its last caller (git is the archive); no `.backup`/`.orig` files. Code that stays off on purpose carries the comment `INACTIVE (date): reason, switch` and a TODO entry. Known candidates: `TODO.md`, section "Löschkandidaten".
+- Open questions: code-bound ones in `TODO.md`, section "Entscheidungen und Fragen"; scientific ones in the vault. Each side holds links, not copies.
 
 ## Git Best Practices
 - **Only commit source files**: Use `git add <file>` for specific files, never `git add -A` without review
@@ -452,7 +373,7 @@ ctest -R "cli_rmsd_01" --verbose
 - `CurcumaLogger::info()` - Level ≥2 (default)
 - `CurcumaLogger::param()` - Level ≥2 (blue, structured output)
 - `CurcumaLogger::energy_abs()` - Energy output with units
-- `CurcumaLogger::citation()` - Level ≥2 (green)
+- `CurcumaLogger::citation()` - registers a reference, printed at program end at any level (see docs/LOGGING_SYSTEM.md)
 
 #### **Implementation Status**
 - **QM Methods**: EHT, XTB, TBLite, Ulysses ✅
@@ -476,62 +397,34 @@ ctest -R "cli_rmsd_01" --verbose
 - **Flat-flag auto-routing (2026)**: Any registered PARAM is reachable by its flat name (`-cn_cutoff_bohr 5.5` routes to `controller["gfnff"]["cn_cutoff_bohr"]` because the registry records ownership). Same-name in the active command's module wins; truly ambiguous names (multiple owners, none matching) warn and stay in the command module. Dotted form `-<module>.<param>` always works for disambiguation. Unregistered/legacy flags stay in the command module (unchanged).
 - **JSON round-trip (2026)**: `-export_run file.json` writes the resolved controller plus `_command`, `_input`, and full registry defaults for every touched module. `-import_config file.json` performs a recursive deep merge (CLI wins at every depth). Invoking `curcuma -import_config run.json` reads `_command`/`_input` from the JSON, so the file alone is enough to replay a run. See [docs/CLI_ROUND_TRIP.md](docs/CLI_ROUND_TRIP.md).
 
-## Planned Development
+## Validation Method and Traps
 
-### TRAJECTORY ANALYSIS CONSOLIDATION
-**Status**: ✅ Phases 1-3 complete (Jan 2026) — see [docs/ANALYSIS_CONSOLIDATION_PLAN.md](docs/ANALYSIS_CONSOLIDATION_PLAN.md)
-- ✅ TrajectoryWriter, analysis.cpp migration, TrajectoryStatistics extended
-- ⏳ Phase 4: Migrate `trajectoryanalysis.cpp` + `rmsdtraj.cpp` (optional)
-- ⏳ Phase 5-6: Cleanup geometry commands, ProgressTracker (optional)
+Learned during the Jul - Sep 2026 GFN-FF / xTB validation (evidence per item in
+[docs/KNOWN_ISSUES_ARCHIVE.md](docs/KNOWN_ISSUES_ARCHIVE.md)). Reference sets and runners: `scripts/refset_regression.py`,
+`scripts/gmtkn55_compare.py`, `scripts/mor41_validation.py`, `scripts/s30lci_gfnff_compare.py`, `scripts/gradient_compare.py`.
 
----
+- **Arbitrate with a third opinion.** For GFN-FF run pprcht/gfnff (`external/gfnff`, `cmake -Dbuild_exe=ON`): curcuma != pprcht == xtb is a curcuma bug; curcuma == pprcht != xtb is a reference split (#13, #21). tblite, not xtb, is the reference for gfn1/gfn2 (#27, #30).
+- **Term diff before theory.** Compare bond/angle/torsion/Coulomb/dispersion/HB/XB separately (`-verbosity 2`); a constant error per structural motif, doubling with the motif, is one wrong parameter (#12, #16).
+- **Characterise a set by every structure, never a sample** (#23, #24).
+- **Caches fake results.** `gmtkn55_compare.py` reuses `_run/energies.json` (drop the keys or `--recompute`); GFN-FF writes `<basename>.topo.json` next to the input, so delete it before re-measuring and use a fresh directory per structure when file names repeat (#11, #28). Cache keys must carry every input the content depends on (#21c).
+- **Check that the build happened.** Test `make`'s exit status, not a grep for "error"; a changed default argument in a header may not trigger a rebuild (#15, #30).
+- **Hardcoded fallbacks are the defaults** for `GFNFF::GFNFF(const json&)`: changing a PARAM default in `gfnff.h` alone has no runtime effect (#31).
+- **Element-indexed tables: check the length first.** Three 15-entry-short tables were undefined behaviour for Z >= 72 (#22).
+- **No numerical path may depend on the print level** (#38) or on atom order (#34); per-structure benchmarks cannot see reused-calculator bugs (#32).
+- **Gradients**: validate against a central finite difference of curcuma's own energy with Angstrom displacements (`gradient_unit_contract`); the `getGradient()` contract is Eh/Angstrom (#28). A converged SCF criterion must cover everything the mixer mixes (#29).
+- **Deliberate deviations from a reference** are opt-in/out switches, listed with defaults in the archive's switch table (`-xtb.sto6g_legacy_4sp`, `-xtb.d4_atm_cutoff`, `-gfnff.storsion_reference_loop_bug`, `-gfnff.frag_charge_model reference`, ...).
 
-### Breaking Changes (Test-Driven)
-- **Molecule data structure refactoring**: Hybrid SOA/AOS design for better performance
-  - **PHASE 1**: ✅ Comprehensive test suite with refactoring-specific validation
-    - `src/core/test_molecule.cpp`: 15 test categories covering all functionality
-    - `src/core/REFACTORING_ROADMAP.md`: Detailed phase-by-phase plan
-    - Tests include current behavior AND validation for planned improvements
-    - Specific tests for: XYZ parser unification, cache granularity, fragment O(1) lookup, type safety
-  - **PHASE 2**: XYZ Comment Parser unification (eliminate 10 duplicate functions)
-    - **CRITICAL**: Production comment formats must not break (ORCA, XTB, simple energy)
-    - See `XYZ_COMMENT_FORMATS.md` for required format compatibility
-  - **PHASE 3**: Granular cache system (replace single m_dirty flag)
-  - **PHASE 4**: Fragment system O(1) lookups (replace std::map)
-  - **PHASE 5**: Type-safe ElementType enum (replace int elements)
-  - **PHASE 6**: Unified atom structure with zero-copy geometry access
-  - **CRITICAL**: All existing functionality must remain API-compatible
+## Open Items
 
-## Known Issues
+Complete table with sources: [docs/KNOWN_ISSUES_ARCHIVE.md](docs/KNOWN_ISSUES_ARCHIVE.md#open-items). New bug reports go to the archive
+and `AIChangelog.md`, not into this file; only open items and traps stay here.
 
-1. **GFN-FF Limitations & port fidelity**: see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md#known-limitations) for known limitations (D4 dispersion, EEQ integration, metal parameters). Port fidelity against the Fortran reference (pprcht/gfnff) reached floor precision on all three validation sets after an extensive Sep 2026 bug-hunt (full history: `AIChangelog.md`, search "GFN-FF"): MOR41 MAD 0.0005, GMTKN55 MAD 0.00017, S30L-CI MAD 0.001-0.025 kcal/mol — see [docs/MOR41_VALIDATION.md](docs/MOR41_VALIDATION.md), [docs/GMTKN55_VALIDATION.md](docs/GMTKN55_VALIDATION.md). The remaining GMTKN55-vs-**xtb** deviation (MAD ~0.26 kcal/mol, dominated by `MB16-43`/`AL2X6`) is a documented pprcht-vs-xtb reference split, not a curcuma bug — see [docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md). Opt-in flags that reproduce specific reference-implementation quirks bit-for-bit (for cross-checking against xtb rather than pprcht/tblite): `-gfnff.storsion_reference_loop_bug`, `-gfnff.frag_charge_autodetect`, `-xtb.sto6g_legacy_4sp`, `-xtb.d4_atm_cutoff 40.0`.
-
-2. **Verbosity scoping across threads (residual, open)**: the global `CurcumaLogger` verbosity level is a shared static and cannot be cleanly scoped per `CxxThreadPool` worker; pool-owning helpers (`PerformMolecularDynamics`/`PerformOptimisation`) and energy-method setup re-assert the level at their boundaries as a deliberate workaround. A full fix needs `thread_local` verbosity — out of scope for now. See [docs/CONFSEARCH_ROADMAP.md](docs/CONFSEARCH_ROADMAP.md) #1.
-
-3. **ConfSearch cross-cycle bias growth (open decision)**: without `rmsd_mtd_freeze_inherited`/`temp_abort` (both default ON) the MTD bias can grow to 2–98 Eh over several cycles, tearing MD trajectories apart from cycle 2 on. Three guards (fragment gate, `geometry_abort_factor`, a warning naming the tallest hill when a phase hands on nothing) make this visible and keep the pool clean, but do not bound the hill height — whether to also cap it by default (`-rmsd_mtd_max_height`) is a still-open decision about search behaviour. See [docs/CONFSEARCH_ROADMAP.md](docs/CONFSEARCH_ROADMAP.md).
-
-4. **Native GFN1/GFN2 transition metals — FIXED (Jul 2026)**: six bugs in shell-index/STO-NG-table/overlap/dispersion handling for d-block elements, all root-caused and fixed; native GFN1/GFN2 now reproduce tblite to <1e-6 Eh on all 95 MOR41 structures including transition metals (was up to 507 kcal/mol off in reaction energies). Full history in `AIChangelog.md`. GFN-FF's own transition-metal handling is covered by the port-fidelity note under Known Issue #1.
-
-5. **Cross-platform (Wine vs. native Windows) GFN-FF determinism (Aug 2026)**: Wine's reimplementation of the Windows math-CRT DLL can round `erf`/`acos`/`exp`/`log` differently in the last bit than native Windows, occasionally flipping a GFN-FF/EEQ classification threshold (CN cutoffs, angle thresholds) into a different discrete decision. Fixed with self-contained fdlibm-derived replacements behind `-DUSE_PORTABLE_MATH=ON` (on for the Windows nightly build, off by default). **Not yet confirmed on a real Windows machine** (none available) — only architecturally immune to the identified failure mode. See [docs/PORTABLE_ERF.md](docs/PORTABLE_ERF.md).
-
-6. **Open shell for native gfn1/gfn2 — FIXED (Sep 2026)**: `-spin N` now reaches the SCF and gives the reference's open-shell energy (previously silently ignored: `-spin 0` and `-spin 1` returned the identical closed-shell number). Same pass also added an SCF-runaway guard: a converged-charge sanity check that retries from a bare H0 guess when the EEQ initial guess lands on a spurious third-order-energy stationary point (surfaced as gfn1 `W4-11/so3`, -108 Eh vs xtb's -17.6). Validated over every GMTKN55 structure with a nonzero unpaired-electron count (gfn2 MAD 0.00000, gfn1 MAD 0.00002 vs xtb). Full history in `AIChangelog.md`.
-
-7. **GFN1: halogen-bond term implemented, STO-6G 4s/4p split identified as the residual — FIXED (Sep 2026)**: `XTB::calcHalogenBondEnergy()` was a stub returning 0.0 for the whole B-X···A correction (GFN1-only, purely geometric — no density needed); implemented per Grimme/Bannwarth/Shushkov, GMTKN55 gfn1 MAD 0.041→0.00007 kcal/mol. The tiny residual (max 0.011 kcal/mol) on Z=19-36 elements is an xtb-vs-tblite STO-6G basis-table split (tblite's is the more accurate table, verified against the exact Slater function); `-xtb.sto6g_legacy_4sp true` reproduces the xtb binary bit-for-bit. Full history in `AIChangelog.md`.
-
-8. **Gradients: two unit bugs — FIXED (Sep 2026)**: GFN-FF returned its gradient in the wrong unit (Bohr instead of the Eh/Angstrom contract every other method and consumer uses — MD forces were ~1.89× too small) and every method's Hessian-derived vibrational frequency was too high (a Bohr/Angstrom mismatch in `Hessian::ConvertHessian()`, partly masked by an empirical offset). Both found via the first set-wide gradient validation; new regression test `gradient_unit_contract` (verified to fail on a pre-fix binary). One CLI test's golden value legitimately changed (`cli_simplemd_14`, a react-topology recombination threshold that depended on the too-weak forces). MD/opt verified safe after the fix (NVE drift scales as dt² for all three methods; optimised minima match `xtb --opt tight` to ≤0.0085 kcal/mol over 90 optimisations). Pre-existing, unrelated caveat: the default `auto` optimiser can still abort with "Energy rise exceeded maximum allowed" on a perfectly symmetric input whose only active mode is totally symmetric (`-opt.optimizer lbfgs` works around it). Full history + validation in `AIChangelog.md` / [docs/GRADIENT_VALIDATION.md](docs/GRADIENT_VALIDATION.md).
-
-9. **GFN2: SCF convergence criterion ignored the multipole moments its own mixer was already mixing — FIXED (Sep 2026)**: the convergence test only checked shell charges, not the full mixed vector (`packSCC()`) the Broyden mixer actually works on — for a symmetric molecule like H2, shell charges converge in 2 iterations while the multipole moments are still moving, giving a gradient error up to 60 % while the energy stayed correct to 1e-8 (O(dP²) vs O(dP) error scaling). Fixed by testing the residual on the same vector the mixer mixes; GFN1 is bit-identical by construction (it only ever mixed shell charges). After this fix curcuma's analytic gradient reproduces the finite difference of its own energy on every checked GMTKN55 gradient outlier (0 failures). Full history in `AIChangelog.md`.
-
-10. **GFN2: last energy residual is the D4 three-body cutoff — reference split, not a bug (Sep 2026)**: curcuma follows tblite's D4 ATM (three-body dispersion) cutoff (25 Bohr) rather than xtb's (40 Bohr) — the two reference implementations genuinely differ here, and tblite's is the one curcuma's parameter tables are otherwise verified against (and the wider cutoff costs ~45 % more runtime on large systems). `-xtb.d4_atm_cutoff 40.0` reproduces the xtb binary exactly; with it, GMTKN55 gfn2-vs-xtb MAD drops to 0.000 over all 2458 structures, confirming this cutoff was the entire remaining discrepancy.
-
-11. **GFN-FF MD/opt consistency fixes (Sep 2026, AI/machine-tested)**: a never-bonded pair could pass with zero repulsion (non-bonded repulsion list now rebuilt from the current geometry), and the D4 two-body C6 was frozen at setup while its gradient was not (energy and gradient belonged to different functions, up to 1.1e-3 Eh in MD; `refreshDispersionC6()`). Still open: the ATM-term C6 is stale too (term off by default since Sep 25), and the reference's HB/XB RMSD trigger is off by sqrt(natoms) (kept for port fidelity). Also fixed: H...H repulsion read the BFS distance instead of `bpair`; amide-H factor is atom-order dependent in the reference (`amideh_acidity_order_bug`); 911/2557 structures are atom-numbering dependent in the reference itself ([docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md) #12).
-
-12. **Units unified to CODATA 2018, CN radii CPU==GPU, Coulomb cutoff removed (Sep 25, 2026)**: CPU/GPU used different Bohr radii in the CN radii; the electrostatics was hard-cut at 100 Bohr (polymer_2x +112.7 kcal/mol vs pprcht, now 0.0044); `-DUSE_LEGACY_UNIT_CONSTANTS=ON` restores the old values bit for bit — [docs/UNIT_CONSTANTS.md](docs/UNIT_CONSTANTS.md).
-
-13. **Determinism and multi-GPU (Sep 27-29, 2026)**: CPU GFN-FF is bit-reproducible at a fixed thread count; not bit-identical across thread counts, GPU run to run, or CPU vs GPU (MD trajectories separate after ~0.7 ps on polymer_2x; compare ensembles). Multi-GPU gap analysis: [docs/MULTI_GPU_GAPS.md](docs/MULTI_GPU_GAPS.md); open on ROCm (no hardware here): GFN-FF computes no Coulomb term by default (workaround `-gfnff.gpu_coulomb_implicit false`). Fixed: Hessian with several workers printed no frequencies; CUDA plugin Eigen-ABI leak (~194 MB/structure); GFN-FF `topology_mode` default is now `constant` (polymer_2x GPU MD step 0.38 -> 0.20 s).
-
-14. **GFN-FF charge carrier for charged multi-fragment systems (Sep 2026, AI-generated, machine-tested; human testing pending)**: the charge went to whichever fragment held atom 1; now each integer placement is a full GFN-FF evaluation and the carrier is chosen by electrostatics (`gfnff_frag_charge.cpp`, new default; `reference` mode bit-identical on GMTKN55/MOR41/S30L-CI). Cost: BH76RC MAD 43.67 -> 49.07 (the old wrong placement partly cancelled unphysical ion energetics). Not tested: periodic systems, GPU, long MD with the window on.
-
-15. **GFN-FF: reused calculator used stale CN and D4 C6 on energy-only calls (Sep 2026)**: Coulomb self-energy CN and the per-pair C6 were refreshed only on gradient calls (reused Cl2- gradient error 1.77e-2 -> 9.9e-12 Eh/A). Per-structure benchmarks never reuse an instance and could not see it. `cli_curcumaopt_07` golden file regenerated. Open: a reused instance re-detects its H-bond list only on an RMSD gate (~3e-7 Eh).
-
-16. **GFN-FF D4: C6 summation order depended on the verbosity level (Sep 30, 2026)**: the half-contraction fast path ran only at verbosity < 3; 1 ulp differences were amplified by react-mode MD (90 vs 136 rebuilds). Fast path now unconditional, debug path behind `CURCUMA_C6DEBUG`. Rule: no numerical path may be selected by the print level.
+- GFN-FF energy depends on atom numbering in pprcht and curcuma (911/2557 GMTKN55+MOR41 structures; REV_GFNFF_TODO #12) (#34)
+- ROCm GFN-FF: no Coulomb term by default (F-1), `-scf_mixed_precision false` ignored (G2-13), wave32 assumption (F-17) (#37)
+- Bit-identical results only at a fixed CPU thread count; GPU not run-to-run reproducible (#36)
+- `shouldUpdateHBXB()` RMSD trigger off by `sqrt(natoms)` (ported from the reference, left); D4 ATM C6 frozen at setup (#33)
+- `DC13/c20bowl` Coulomb -6.29 kcal/mol, not root-caused (#14); gfn1/gfn2 gradients vs xtb at exactly coincident coordinates (#28)
+- Charge placement (#31) untested for periodic systems, GPU runtime, many fragments; `-DUSE_PORTABLE_MATH` unconfirmed on Windows (#7)
+- `-hold_polar_h` (#39): unit bug fixed Oct 2026, earlier results carry it; default `hold_polar_h_force` 5.0 is ~4x stiffer than an X-H bond (4/12 converge vs 10/12 free), weaker k untested against proton transfer; ANCOPT still scales the gradient by 1.889
+- Verbosity cannot be scoped across `CxxThreadPool` workers (#3); ConfSearch wide-hill MTD blow-up ([CONFSEARCH_ROADMAP.md](docs/CONFSEARCH_ROADMAP.md))
+- GFN-FF is a force field: 60-70 kcal/mol from DLPNO on MOR41 reactions (#6); accuracy work in [docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md)

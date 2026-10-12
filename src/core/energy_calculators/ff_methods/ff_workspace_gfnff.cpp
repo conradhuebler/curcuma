@@ -674,6 +674,9 @@ void FFWorkspace::calcDispersion(int p)
     Matrix grad_before;
     if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
 
+    // Pair-list position hint for the dc6dcn lookup: the D4 list is walked in its own
+    // (sorted) order, so after the first binary search each lookup is a direct hit.
+    std::size_t dc6_hint = static_cast<std::size_t>(begin);
     for (int idx = begin; idx < end; ++idx) {
         const auto& disp = m_dispersions[idx];
 
@@ -706,12 +709,13 @@ void FFWorkspace::calcDispersion(int p)
             acc.gradient.row(disp.i) += grad.transpose();
             acc.gradient.row(disp.j) -= grad.transpose();
 
-            // dc6dcn chain-rule
-            if (m_dc6dcn_ptr && m_dc6dcn_ptr->size() > 0 &&
-                disp.i < m_dc6dcn_ptr->rows() && disp.j < m_dc6dcn_ptr->cols()) {
+            // dc6dcn chain-rule (Oct 2026: per-pair lookup; a pair outside the D4 list had a
+            // zero matrix cell, and subtracting 0 left dEdcn unchanged, so it is skipped)
+            double dc6_di, dc6_dj;
+            if (m_dc6dcn_ptr && m_dc6dcn_ptr->lookup(disp.i, disp.j, dc6_hint, dc6_di, dc6_dj)) {
                 double disp_value = disp_sum * disp.zetac6;
-                acc.dEdcn(disp.i) -= (*m_dc6dcn_ptr)(disp.i, disp.j) * disp_value;
-                acc.dEdcn(disp.j) -= (*m_dc6dcn_ptr)(disp.j, disp.i) * disp_value;
+                acc.dEdcn(disp.i) -= dc6_di * disp_value;
+                acc.dEdcn(disp.j) -= dc6_dj * disp_value;
             }
         }
     }
@@ -734,6 +738,8 @@ void FFWorkspace::calcD4Dispersion(int p)
     Matrix grad_before;
     if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
 
+    // Pair-list position hint for the dc6dcn lookup (see calcDispersion).
+    std::size_t dc6_hint = static_cast<std::size_t>(begin);
     for (int idx = begin; idx < end; ++idx) {
         const auto& disp = m_d4_dispersions[idx];
 
@@ -766,11 +772,12 @@ void FFWorkspace::calcD4Dispersion(int p)
             acc.gradient.row(disp.i) += grad.transpose();
             acc.gradient.row(disp.j) -= grad.transpose();
 
-            if (m_dc6dcn_ptr && m_dc6dcn_ptr->size() > 0 &&
-                disp.i < m_dc6dcn_ptr->rows() && disp.j < m_dc6dcn_ptr->cols()) {
+            // dc6dcn chain-rule, per-pair lookup (see calcDispersion)
+            double dc6_di, dc6_dj;
+            if (m_dc6dcn_ptr && m_dc6dcn_ptr->lookup(disp.i, disp.j, dc6_hint, dc6_di, dc6_dj)) {
                 double disp_value = disp_sum * disp.zetac6;
-                acc.dEdcn(disp.i) -= (*m_dc6dcn_ptr)(disp.i, disp.j) * disp_value;
-                acc.dEdcn(disp.j) -= (*m_dc6dcn_ptr)(disp.j, disp.i) * disp_value;
+                acc.dEdcn(disp.i) -= dc6_di * disp_value;
+                acc.dEdcn(disp.j) -= dc6_dj * disp_value;
             }
         }
     }
@@ -860,6 +867,15 @@ void FFWorkspace::calcNonbondedRepulsion(int p)
 // Reference: Fortran gfnff_engrad.F90:1378-1389
 // ============================================================================
 
+// Claude Generated (Oct 2026): exact far-field shortcut of the Coulomb pair term
+// E = q_i q_j erf(gamma r)/r, gamma = 1/sqrt(alpha_i+alpha_j). For gamma r >= 6.5 (gamma^2 r^2 >= 42.25)
+// erf(gamma r) is exactly 1.0 in FP64 (std::erf and portable_erf return 1.0 from x >= 5.9216, checked on
+// 34 M grid points) and exp(-42.25) = 4.4e-19, so the derivative term gamma*exp*2/sqrt(pi)/r is ~3e-18
+// relative to erf/r^2, below half an ulp: the pair becomes q_i q_j / r and the force -q_i q_j / r^3 * d.
+// The test r^2 >= X2*(alpha_i+alpha_j) needs neither sqrt nor erf nor exp. Switch: -gfnff.farfield_shortcut.
+static constexpr double COULOMB_FARFIELD_GAMMA_R = 6.5;
+static constexpr double COULOMB_FARFIELD_X2 = COULOMB_FARFIELD_GAMMA_R * COULOMB_FARFIELD_GAMMA_R;  // 42.25
+
 void FFWorkspace::calcCoulomb(int p)
 {
     auto& acc = m_accumulators[p];
@@ -880,6 +896,7 @@ void FFWorkspace::calcCoulomb(int p)
         const double sqrt_pi = 1.772453850905516;
         const bool have_q = (m_eeq_charges.size() == m_natoms);
         const bool have_alp = (m_coul_alp.size() == m_natoms);
+        const bool far_field = m_farfield_shortcut;
         if (have_q && have_alp) {
             for (int i = atom_begin; i < atom_end; ++i) {
                 const double qi = m_eeq_charges(i);
@@ -891,10 +908,27 @@ void FFWorkspace::calcCoulomb(int p)
                     const double alp_j = m_coul_alp(j);
                     if (std::isnan(qj) || alp_j <= 0.0) continue;
                     const Eigen::Vector3d rij_vec = ri - m_geometry.row(j).transpose();
+                    const double r2 = rij_vec.squaredNorm();
+                    const double alp_sum = alp_i + alp_j;
+                    if (far_field && r2 >= COULOMB_FARFIELD_X2 * alp_sum) {
+                        // Far field: erf(gamma r) == 1.0 exactly, the exp term is below one ulp of
+                        // 1/r^2 (see COULOMB_FARFIELD_X2). Same operations as the general branch
+                        // with erf_term = 1.0 and derf_dr dropped, so the result is bit-identical.
+                        const double rij = std::sqrt(r2);  // == rij_vec.norm()
+                        if (rij > m_coulomb_implicit_rcut) continue;
+                        acc.energy.coulomb += qi * qj / rij;
+                        if (m_do_gradient) {
+                            const double dEdr_pair = qi * qj * (-1.0 / (rij * rij));
+                            const Eigen::Vector3d grad = dEdr_pair * rij_vec / rij;
+                            acc.gradient.row(i) += grad.transpose();
+                            acc.gradient.row(j) -= grad.transpose();
+                        }
+                        continue;
+                    }
                     const double rij = rij_vec.norm();
                     if (rij > m_coulomb_implicit_rcut || rij < 1e-10) continue;
 
-                    const double gamma_ij = 1.0 / std::sqrt(alp_i + alp_j);
+                    const double gamma_ij = 1.0 / std::sqrt(alp_sum);
                     const double gamma_r = gamma_ij * rij;
                     const double erf_term = curcuma_erf(gamma_r);
                     acc.energy.coulomb += qi * qj * erf_term / rij;
@@ -937,6 +971,17 @@ void FFWorkspace::calcCoulomb(int p)
         }
 
         double gamma_r = coul.gamma_ij * rij;
+        if (m_farfield_shortcut && gamma_r >= COULOMB_FARFIELD_GAMMA_R) {
+            // Far field, same exact shortcut as the implicit loop above.
+            acc.energy.coulomb += qi * qj / rij;
+            if (m_do_gradient) {
+                const double dEdr_pair = qi * qj * (-1.0 / (rij * rij));
+                Eigen::Vector3d grad = dEdr_pair * rij_vec / rij;
+                acc.gradient.row(coul.i) += grad.transpose();
+                acc.gradient.row(coul.j) -= grad.transpose();
+            }
+            continue;
+        }
         double erf_term = curcuma_erf(gamma_r);
         double energy_pair = qi * qj * erf_term / rij;
         acc.energy.coulomb += energy_pair;

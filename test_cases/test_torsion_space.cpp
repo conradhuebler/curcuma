@@ -15,7 +15,7 @@
  */
 
 #include "src/capabilities/torsion_space.h"
-#include "core/test_molecule_registry.h"
+#include "unit/test_molecule_registry.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/molecule.h"
 

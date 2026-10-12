@@ -10,7 +10,7 @@ Runners:
 * `scripts/gradient_compare.py` — set-wide `max |g_curcuma − g_xtb|` per structure.
 * `scripts/gradient_arbitrate.py` — for one structure, decides **which** code is right by
   finite-differencing each program's *own* total energy.
-* `test_cases/check_gradient_units.py` — the permanent `gradient_unit_contract` ctest.
+* `test_cases/scripts/check_gradient_units.py` — the permanent `gradient_unit_contract` ctest.
 
 ```bash
 python scripts/gradient_compare.py --set gmtkn55 --method all
@@ -97,7 +97,7 @@ structures Known Issues #21/#22 name as that split — not a gradient defect.
 
 ## Two bugs this validation found (both fixed, Sep 2026)
 
-See CLAUDE.md Known Issue #28 for the full account.
+See KNOWN_ISSUES_ARCHIVE.md Known Issue #28 for the full account.
 
 1. **GFN-FF returned Eh/Bohr where the interface contract is Eh/Angstrom**, so MD forces
    were a factor 1/au = 1.8897 too small. Found by NVE energy conservation, which

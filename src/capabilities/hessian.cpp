@@ -473,7 +473,7 @@ Vector Hessian::ConvertHessian(Matrix& hessian)
     //   gfn1  1490.4/3515.4/3621.4  vs xtb 1490.57/3515.28/3626.07
     //   gfn2  1574.9/3486.3/3487.0  vs xtb 1574.99/3486.05/3491.64
     //   gfnff 1631.9/3635.0/3637.6  vs xtb 1632.01/3634.77/3637.31
-    // Guarded by the ctest `gradient_unit_contract` (test_cases/check_gradient_units.py).
+    // Guarded by the ctest `gradient_unit_contract` (test_cases/scripts/check_gradient_units.py).
     //
     // A Hessian READ from file (ReadHessian) is divided by au^2 on input, so this
     // factor cancels there and such a file is taken as Eh/Bohr^2 — the usual

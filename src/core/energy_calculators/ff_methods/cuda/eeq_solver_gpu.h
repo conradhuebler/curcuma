@@ -255,26 +255,6 @@ public:
     bool isFragmentTopoValid() const;
 
     /**
-     * @brief WP7-B: cache the minimum atom-atom distance between different fragments.
-     *
-     * Claude Generated (May 2026): O(N²) scan over the fragment-sorted atom map
-     * (uploadFragmentTopology() must have been called first). Computes the minimum
-     * |r_i - r_j|² over all pairs (i,j) with different fragment IDs and caches the
-     * squared result. Used by the dispatch in gfnff_gpu_method.cpp to decide whether
-     * to warn before running the batched (cross-fragment-Coulomb-dropping) solver.
-     *
-     * Coordinates are CPU-side Bohr; this scan happens once per topology build, not
-     * per MD step. If never called, getMinFragmentDistanceSq() returns -1.
-     */
-    void updateMinFragmentDistance(const double* host_x,
-                                   const double* host_y,
-                                   const double* host_z,
-                                   int natoms);
-
-    /// WP7-B: cached squared min inter-fragment distance (Bohr²). -1 if not yet computed.
-    double getMinFragmentDistanceSq() const;
-
-    /**
      * @brief WP7-C: GPU PCG solver for nfrag>=1 (May 2026).
      *
      * Iterative O(k·N²) replacement for the WP7-A Cholesky path. Reuses WP7-A's
@@ -349,6 +329,71 @@ public:
     );
 
     /**
+     * @brief Local-inverse preconditioner for the WP7-E projected PCG (eeq_ppcg_precond localinv).
+     *
+     * Claude Generated (Oct 2026). Built on the host (EEQSolver::buildLocalInverse, maths in
+     * eeq_solver.h, LocalInversePreconditioner) and uploaded here as CSR: G (N x N), H = G C^T
+     * (N x nfrag) and the dense S^-1 = (C G C^T)^-1 (nfrag x nfrag). While set, the projected
+     * PCG applies z = G r - H S^-1 C G r instead of the diagonal Jacobi. CUDA only (the ROCm
+     * build has no definition; the wrapper calls it only for Backend::has_device_schur).
+     * @return false if the upload failed (preconditioner stays off)
+     */
+    bool setLocalInversePreconditioner(int N, int nfrag,
+        const std::vector<int>& G_rowptr, const std::vector<int>& G_col, const std::vector<double>& G_val,
+        const std::vector<int>& H_rowptr, const std::vector<int>& H_col, const std::vector<double>& H_val,
+        const std::vector<double>& S_inv);
+    void clearLocalInversePreconditioner();
+    bool localInversePreconditionerActive() const;
+    /// Solves in which the local inverse showed rz <= 0 / pAp <= 0 or stalled and Jacobi redid the solve.
+    long localInverseRuntimeFallbacks() const;
+
+    /**
+     * @brief Build the local inverse G on the device (Claude Generated, Oct 2026).
+     *
+     * Marks a build for the next solveWithDeviceRHSAndGPUProjectedPCG call: there, after the EEQ
+     * matrix A is on the device, G is built from it (one thread block per atom: neighbours within
+     * ext_bohr in ascending atom order, dense block A[E,E] gathered from the device matrix,
+     * Cholesky + one column of the inverse in shared memory, entries within radius_bohr kept,
+     * G = (Gl + Gl^T)/2). The device applies z = P G r (P = orthogonal projection onto the
+     * fragment constraints) instead of the host's constraint form G - H S^-1 H^T, so no S and no
+     * nfrag limit. Definiteness: every local Cholesky pivot must be > 0 (else the build is
+     * rejected), rz <= 0 / pAp <= 0 / stall stop the CG, and the converged charges must pass a
+     * true residual |P(b - A q)| <= 2 tol; each failure redoes the solve with Jacobi.
+     * Not available with the multi-GPU split (no full matrix on one device).
+     */
+    void requestLocalInverseDeviceBuild(double radius_bohr, double ext_bohr);
+    /**
+     * K3 (Oct 2026, Claude Generated): cudaEvent_t (as void*) recorded on the workspace main stream
+     * after the solve inputs (coordinates, rhs_atoms) are written. When set, the WP7-E projected PCG
+     * waits on this event instead of the legacy-stream barrier, which also waited for dc6dcn and every
+     * Phase-1 worker stream. The caller sets it right before a solve and clears it (nullptr) after;
+     * the other solve paths keep their implicit legacy-stream ordering.
+     */
+    void setInputReadyEvent(void* cuda_event);
+    /**
+     * K2/K3 (Oct 2026, Claude Generated): give the solver stream the greatest device priority, so the
+     * latency-bound CG kernels (symv, dots, one host round trip per iteration) are scheduled ahead of
+     * pending blocks of dc6dcn / dispersion running on default-priority streams; those fill the gaps.
+     * Recreates the stream and rebinds the cuSOLVER/cuBLAS handles; call between solves.
+     * @return false if the runtime refused (stream unchanged).
+     */
+    bool setStreamPriorityHigh(bool high);
+    /// true when a device build can run for N atoms (single device, full matrix present).
+    bool localInverseDeviceBuildPossible(int N) const;
+    /// Counters of the local inverse on this device (builds of both kinds, failures, fallbacks).
+    struct LocalInverseDeviceStats {
+        long   builds = 0;              ///< successful device builds
+        long   build_failures = 0;      ///< rejected device builds (pivot <= 0, pattern error, test hook)
+        long   runtime_fallbacks = 0;   ///< solves redone with Jacobi (host or device build)
+        long   residual_fallbacks = 0;  ///< part of runtime_fallbacks: true-residual check failed
+        double last_build_ms = 0.0;     ///< wall time of the last device build (host clock, synchronised)
+        double total_build_ms = 0.0;
+        double last_true_residual_ratio = 0.0;  ///< |P(b - A q)| / tol of the last accepted device-build solve
+        std::string last_why;           ///< reason of the last rejection or fallback
+    };
+    LocalInverseDeviceStats localInverseDeviceStats() const;
+
+    /**
      * @brief Batched per-fragment EEQ: independent N_f×N_f Cholesky + host Schur per fragment.
      *
      * Claude Generated (May 2026): Replaces single N×N Cholesky for nfrag > 1 systems.
@@ -378,6 +423,48 @@ public:
         const std::vector<double>& rhs_constraints,
         double cutoff_sq = 0.0,
         bool force_refactor = true);
+
+    /**
+     * @brief Dense LU of the augmented EEQ system on the device (-eeq_solver.solve_method lu).
+     *
+     * Claude Generated (Oct 2026). Same semantics as the CPU `lu` (EEQSolver::dispatchSolve,
+     * Eigen PartialPivLU of the full (N+nfrag) x (N+nfrag) matrix [A C^T; C 0]): the augmented
+     * matrix is built on the device (column-major, M = N + nfrag), factorized with
+     * cusolverDnDgetrf (partial pivoting) and solved for the one right-hand side
+     * [b_atoms; Q_frag] with cusolverDnDgetrs. No Schur complement, no lazy factor reuse:
+     * refactorized on every call, like the CPU. Works for nfrag >= 1.
+     *
+     * Needs uploadFragmentTopology() (d_atom_frag) and keeps an M x M device matrix
+     * (623 MB at N = 7320, nfrag = 1502) for the lifetime of the solver.
+     * On success: charges in d_rhs[0..N-1] (getDeviceChargesPtr()). Returns false on an
+     * invalid topology, a too large system (M*M > INT_MAX) or an exactly singular U.
+     */
+    /**
+     * @brief Bunch-Kaufman LDL^T of A_nn on the device (-eeq_solver.solve_method ldlt). Claude Generated (Oct 2026).
+     *
+     * Same semantics as the CPU ldlt (solveSchurLDLT: LAPACK dsytrf on A_nn, then the nfrag x nfrag
+     * Schur complement): cusolverDnDsytrf (lower) + cusolverDnXsytrs on [b_atoms | C^T], then the
+     * WP7-A reduction and Schur solve. Overwrites d_A (the cached Cholesky/LU factor of WP5-A/WP7-A
+     * is invalidated). Memory as WP7-A: N x N matrix + N x (nfrag+1) right-hand sides.
+     * On success: charges in d_rhs[0..N-1]. Returns false on an invalid topology or info != 0.
+     */
+    bool solveWithDeviceRHSAndGPUSchurLDLT(
+        int natoms, int nfrag,
+        const double* cx, const double* cy, const double* cz,
+        const double* d_alpha,
+        const double* d_gam,
+        const double* d_rhs_atoms,
+        const std::vector<double>& rhs_constraints,
+        double cutoff_sq = 0.0);
+
+    bool solveWithDeviceRHSAndGPUAugmentedLU(
+        int natoms, int nfrag,
+        const double* cx, const double* cy, const double* cz,
+        const double* d_alpha,
+        const double* d_gam,
+        const double* d_rhs_atoms,
+        const std::vector<double>& rhs_constraints,
+        double cutoff_sq = 0.0);
 
 private:
     std::unique_ptr<EEQSolverGPUImpl> m_impl;

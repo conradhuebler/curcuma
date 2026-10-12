@@ -102,14 +102,14 @@ An SCF result is only returned when it is one. Three cases now end the calculati
 - **Not converged within the iteration limit** (fixed at 150; the log counts 151 iterations) — as
   in xtb and tblite. `-scf_allow_unconverged true` restores the old behaviour (warning + last
   energy) for anyone who knowingly accepts it.
-- **Implausible charges after the bare-H0 retry** — the runaway guard of CLAUDE.md Known Issue #9
+- **Implausible charges after the bare-H0 retry** — the runaway guard of KNOWN_ISSUES_ARCHIVE.md Known Issue #9
   used to return the retry's result even when it was just as impossible.
 
 The GPU-resident loop now names the failing stage (eigensolve, density, Broyden, ...) instead of
 reporting "failed at iteration N" without a reason. Not tested: the ROCm mirror (no SDK here) still
 reports without a reason.
 
-Consequence for existing data: GMTKN55 `G21IP/b+`, `be+`, `c+` (gfn2) never converged (CLAUDE.md
+Consequence for existing data: GMTKN55 `G21IP/b+`, `be+`, `c+` (gfn2) never converged (KNOWN_ISSUES_ARCHIVE.md
 Known Issue #9) and now fail instead of printing a meaningless number (checked: `c+` exits 1, with
 `-scf_allow_unconverged true` it prints -0.78818677 Eh as before). An MD stops at SimpleMD's existing
 per-step check ("Simulation got unstable, exiting!"); measured on C+ with a He 25 A away: one step,

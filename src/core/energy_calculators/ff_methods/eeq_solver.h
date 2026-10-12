@@ -34,6 +34,8 @@
 
 #include <Eigen/Dense>
 #include <deque>
+#include <functional>
+#include <string>
 #include <vector>
 #include <memory>
 #include <optional>
@@ -80,7 +82,64 @@ enum class EEQSolveMethod {
     Batched,        ///< Per-fragment Cholesky (GPU only); CPU falls back to SchurCholesky
     PCG,            ///< Preconditioned Conjugate Gradient with warm start
     ProjectedPCG,   ///< Constraint-projected PCG on A_nn: ONE iterative solve for any number of fragments
-    Auto            ///< Auto-select via first-call benchmark (SchurCholesky vs PCG)
+    Auto            ///< Threshold rule: ProjectedPCG for N >= eeq_ppcg_min_atoms and nfrag >= eeq_ppcg_min_nfrag, else SchurCholesky. Resolved by EEQSolver::resolveMethod (CPU and GPU share it).
+};
+
+/**
+ * @brief Local-inverse preconditioner for the projected PCG of the EEQ system (opt-in,
+ *        `-eeq_solver.eeq_ppcg_precond localinv`). Claude Generated (Oct 2026).
+ *
+ * **Problem.** The fragment-constrained EEQ system is the KKT system
+ *     A q + C^T lambda = b,   C q = d,
+ * A = A_nn (N x N, SPD: hardness diagonal + erf(r_ij/sqrt(a_i+a_j))/r_ij), C the 0/1 fragment
+ * membership (nfrag x N). The projected CG (EEQSolver::solveWithProjectedPCG) iterates on the
+ * tangent space null(C): residuals are projected with P = I - C^T (C C^T)^-1 C.
+ *
+ * **Constraint preconditioner** (Gould, Hribar, Nocedal, SIAM J. Sci. Comput. 23 (2001) 1376;
+ * Keller, Gould, Wathen, SIAM J. Matrix Anal. Appl. 21 (2000) 1300). For any SPD G ~ A^-1 the
+ * preconditioned residual is the solution z of
+ *     [G^-1 C^T; C 0] [z; mu] = [r; 0]   =>   z = P_G r,
+ *     P_G = G - G C^T S^-1 C G,   S = C G C^T  (nfrag x nfrag, SPD).
+ * Properties used by the CG: (i) C P_G = 0, so z and every search direction stay in null(C) and
+ * q keeps satisfying C q = d; (ii) P_G is symmetric, P_G C^T = 0, and for r in null(C), r != 0,
+ *     r^T P_G r = |G^1/2 r|^2 - |G^1/2 C^T S^-1 C G r|^2 > 0
+ * (Cauchy-Schwarz in the G inner product; equality only for r in range(C^T), which is orthogonal
+ * to null(C)) - P_G is positive definite on the tangent space exactly when G is SPD. (iii) For
+ * G = A^-1, P_G = (P A P)^+ on null(C): the ideal preconditioner. The Jacobi path is the special
+ * case G = diag(A)^-1, where S is diagonal (fragments are disjoint).
+ *
+ * **G = local inverse** (a sparse approximate inverse built from local dense inverses; cf.
+ * Benzi, J. Comput. Phys. 182 (2002) 418, section 5). A is long-ranged, A^-1 is short-ranged
+ * (screening by the hardness diagonal). For each atom i: E_i = atoms within R_ext of i, invert
+ * the dense block A[E_i,E_i] (here: Cholesky + one solve for the column of i), keep the entries
+ * of row i with r_ij <= R. G_ij = (Gl_ij + Gl_ji)/2. Symmetrising does not guarantee
+ * definiteness, so G is checked with a sparse Cholesky; S is factorised the same way. Any
+ * failure (or rz <= 0 / pAp <= 0 during the CG) means Jacobi is used instead - never a wrong M.
+ *
+ * Cost: build O(N n_ext^3 / 3) with n_ext ~ atoms within R_ext (independent per atom, parallel,
+ * the result does not depend on the thread count); per CG iteration two sparse products and
+ * one nfrag-size sparse triangular solve pair, against one dense N^2 matvec.
+ */
+struct LocalInversePreconditioner {
+    bool ok = false;           ///< false: build failed (G or S not SPD) - use Jacobi
+    std::string why;           ///< reason of a failed build
+    int natoms = 0;
+    int nfrag = 0;
+    std::vector<int> frag;     ///< fragment index of every atom (from C)
+    Matrix geometry;           ///< geometry (Bohr) of the build, for the rebuild criterion
+    Eigen::SparseMatrix<double, Eigen::RowMajor> G;  ///< symmetric local inverse, N x N
+    Eigen::SparseMatrix<double, Eigen::RowMajor> H;  ///< G C^T, N x nfrag
+    Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> S_llt;  ///< factor of S = C G C^T
+    Matrix S_inv;              ///< dense S^-1 (nfrag x nfrag) when the GPU applies it (else empty)
+    double nnz_per_row = 0.0;  ///< mean stored entries per row of G
+    double mean_block = 0.0;   ///< mean dense block size n_ext
+    double build_ms = 0.0;
+    double blocks_ms = 0.0;    ///< part of build_ms: neighbour lists + dense block inverses
+    double check_ms = 0.0;     ///< part of build_ms: sparse Cholesky of G (definiteness check)
+    double sinv_ms = 0.0;      ///< part of build_ms: dense S^-1 (GPU path only)
+
+    /// z = P_G r = G r - H S^-1 C G r. Deterministic (fixed summation order).
+    void apply(const Vector& r, Vector& z, Vector& t) const;
 };
 
 /**
@@ -366,8 +425,68 @@ public:
     /**
      * @brief Parse solve method string to enum (public so GPU dispatch can reuse).
      * Claude Generated - March 2026; moved to public for WP7-B (May 2026).
+     *
+     * Canonical names: auto, cholesky, ldlt, lu, pcg, ppcg, batched. Aliases: schur_cholesky
+     * (= cholesky), projected_pcg (= ppcg). Oct 2026: an unknown name throws
+     * std::invalid_argument listing the valid names (it used to fall back to auto silently).
      */
     static EEQSolveMethod parseSolveMethod(const std::string& method_str);
+
+    /// Canonical CLI name of a method ("cholesky", "ppcg", ...).
+    static const char* methodName(EEQSolveMethod m);
+
+    /// Print an "EEQ solver: ..." line at verbosity 1, once per distinct line process-wide
+    /// (several calculator instances, e.g. batch workers, must not repeat it). Thread-safe.
+    static void reportSolverLine(const std::string& line);
+
+    /// Comma separated list of the canonical names (for messages).
+    static std::string validMethodNames();
+
+    /// True when the GPU back-end (`cuda`, `rocm`, `vulkan`) has a device implementation of the method
+    /// (auto resolves to a supported one). Oct 2026: lu (dense augmented LU, cuSOLVER getrf) and ldlt
+    /// (cusolverDnDsytrf + Xsytrs on A_nn, Schur) run on CUDA only - requesting an unsupported one with
+    /// -gpu is an error, not a silent substitute. ROCm: only auto and cholesky (no device ppcg/pcg/batched).
+    /// Vulkan: GFN-FF runs on the CPU, so every name is accepted.
+    static bool gpuSupports(EEQSolveMethod m, const std::string& backend = "cuda");
+
+    /// Comma separated names a back-end can run (for the error message). Claude Generated (Oct 2026).
+    static std::string gpuMethodNames(const std::string& backend);
+
+    /**
+     * @brief Energy error of the batched solve, estimated to second order. Claude Generated (Oct 2026).
+     *
+     * The batched solver minimises the EEQ functional E(q) = 1/2 q^T A q - x^T q with the
+     * inter-fragment blocks of A set to zero. Its charges q_b leave the residual r = A q_b - x of
+     * the full system; with the per-fragment charge constraints the exact energy excess is
+     * E(q_b) - E(q*) = 1/2 r^T (P A P)^+ r. Replacing A by its fragment-diagonal part gives
+     *   dE ~ 1/2 sum_f r_f^T d_f,   [A_ff 1; 1^T 0] [d_f; mu] = [r_f; 0],
+     * i.e. one block-Jacobi step with the same blocks the batched solve factorised. Exact when
+     * the coupling is weak; it only uses the residual (one O(N^2) matrix-vector product) and
+     * the fragment blocks.
+     *
+     * @param residual        r = A q_b - x over all atoms (A_nn and the atom right-hand side)
+     * @param fragment_atoms  atom indices of each fragment
+     * @param A_elem          element (i, j) of A_nn for atoms of the same fragment
+     * @return estimated E(q_b) - E(q*) in Eh (>= 0)
+     */
+    static double estimateBatchedError(const Vector& residual,
+                                       const std::vector<std::vector<int>>& fragment_atoms,
+                                       const std::function<double(int, int)>& A_elem);
+
+    /// Last batched-error estimate of this solver (Eh), -1 when none was made. Claude Generated (Oct 2026).
+    double lastBatchedErrorEstimate() const { return m_last_batched_error; }
+
+    /**
+     * @brief Resolve the requested method to the one that runs. Claude Generated (Oct 2026).
+     *
+     * ONE rule for CPU and GPU. Every explicit method is returned unchanged (the user's choice
+     * is never overridden by a size threshold). Auto becomes ProjectedPCG when
+     * natoms >= min_atoms and min_nfrag > 0 and nfrag >= min_nfrag (eeq_ppcg_min_atoms /
+     * eeq_ppcg_min_nfrag, default 500 / 1), otherwise SchurCholesky. Auto never picks an
+     * inexact method (batched).
+     */
+    static EEQSolveMethod resolveMethod(EEQSolveMethod requested, int natoms, int nfrag,
+                                        int min_atoms, int min_nfrag);
 
     /// WP-S3 (May 2026): post-init override for `eeq_distance_cutoff` (Bohr).
     /// Set by GFNFF after Phase-1 when the auto-detection heuristic triggers
@@ -398,7 +517,13 @@ public:
     /// lower-triangular distance array (srab[i*(i+1)/2 + j] for i > j, Bohr).
     /// When set, calculateFinalCharges skips its own O(N^2) distance loop and
     /// fills m_phase2_distances from this view. Lifetime managed by caller (GFNFF).
-    void setExternalDistances(const Eigen::VectorXd* srab) { m_external_srab = srab; }
+    /// too_close (optional, Oct 2026): flag the caller computed while writing srab (any off-diagonal
+    /// r_ij < 1e-10); when given, calculateFinalCharges skips its own atoms-too-close scan over srab.
+    void setExternalDistances(const Eigen::VectorXd* srab, const bool* too_close = nullptr)
+    {
+        m_external_srab = srab;
+        m_external_srab_too_close = too_close;
+    }
 
     /// WP5 (June 2026): self-consistent implicit-solvation reaction field. When set,
     /// calculateFinalCharges adds this symmetric nat×nat Born matrix B into the
@@ -690,7 +815,8 @@ private:
         int nfrag,
         int total_charge,
         CxxThreadPool* pool = nullptr,   // Claude Generated (WP2, May 2026): pool for Stage-4 batched parallelisation
-        int num_threads = 1               // Default 1 keeps existing callers (Phase 1, solveEEQ) serial
+        int num_threads = 1,              // Default 1 keeps existing callers (Phase 1, solveEEQ) serial
+        const char* phase = ""            // label for the verbosity-1 "EEQ solver:" line
     );
 
     /**
@@ -738,6 +864,31 @@ private:
         const Vector& rhs_constraints,
         int natoms,
         int nfrag);
+
+public:
+    /**
+     * @brief Build the local-inverse preconditioner (see LocalInversePreconditioner).
+     * @param geometry_bohr N x 3 coordinates in Bohr (neighbourhoods)
+     * @param frag          fragment index per atom, 0..nfrag-1
+     * @param fill_block    fills the dense block A[idx, idx] (lower triangle suffices) into
+     *                      the column-major n x n buffer `out`; called concurrently from
+     *                      several threads, must be read-only on shared data
+     * @param radius_bohr   R: entries kept per row; ext_bohr: R_ext, block that is inverted
+     * @return always non-null; ->ok tells whether it may be used
+     * Claude Generated (Oct 2026). Result is bit-identical for any thread count.
+     */
+    static std::shared_ptr<LocalInversePreconditioner> buildLocalInverse(
+        const Matrix& geometry_bohr, const std::vector<int>& frag, int nfrag,
+        const std::function<void(const std::vector<int>& idx, double* out)>& fill_block,
+        double radius_bohr, double ext_bohr, CxxThreadPool* pool, int num_threads,
+        bool want_dense_S_inverse = false);
+
+    /// Statistics of the local-inverse preconditioner (test and benchmark hooks).
+    long localInverseBuilds() const { return m_localinv_builds; }
+    long localInverseBuildFailures() const { return m_localinv_build_failures; }
+    long localInverseRuntimeFallbacks() const { return m_localinv_runtime_fallbacks; }
+
+private:
 
     Vector solveWithSchurCholesky(
         const MatrixCRef& A_nn,
@@ -800,6 +951,10 @@ private:
 
         /// Apply z = M^-1 r blockwise. Atoms not in any fragment fall back to identity (z = r).
         Vector apply(const Vector& r) const;
+
+        /// Apply Z = M^-1 R to all columns of R at once (one multi-RHS triangular solve per fragment).
+        /// Not bit-identical to apply() per column (blocked kernel). Claude Generated (Oct 2026).
+        Matrix applyColumns(const Matrix& R) const;
     };
 
     /// Build BlockJacobiPC from A_nn and the fragment constraint matrix C (nfrag × natoms).
@@ -855,6 +1010,22 @@ private:
     double m_ppcg_tol = 1e-12;          ///< relative residual tolerance (|P r| <= tol * (|b|+1))
     int    m_ppcg_max_iter = 500;       ///< iteration cap; non-convergence falls back to Schur-Cholesky
     Vector m_ppcg_last_q;               ///< warm start (previous step's charges)
+    // Local-inverse preconditioner of the projected PCG (Claude Generated, Oct 2026), see
+    // LocalInversePreconditioner. On by default (eeq_ppcg_precond = localinv), diag restores Jacobi.
+    bool   m_farfield_shortcut = true;  ///< from farfield_shortcut (default true), see eeq_solver.cpp
+    bool   m_ppcg_localinv = false;     ///< set from eeq_ppcg_precond in the constructor (default localinv)
+    double m_localinv_radius = 8.0;     ///< eeq_localinv_radius_bohr (kept entries per row)
+    double m_localinv_ext = 10.0;       ///< eeq_localinv_ext_bohr (block that is inverted)
+    double m_localinv_rebuild = 1.0;    ///< eeq_localinv_rebuild_bohr (0 = rebuild every solve)
+    std::shared_ptr<LocalInversePreconditioner> m_localinv;  ///< last build (also a failed one)
+    const Matrix* m_ppcg_geometry = nullptr;  ///< Phase-2 geometry (Bohr) during dispatchSolve; null in Phase 1
+    const std::vector<int>* m_ppcg_atom_frag = nullptr;  ///< Phase-2 atom -> fragment (0-based, -1 none) during dispatchSolve
+    CxxThreadPool* m_ppcg_pool = nullptr;     ///< pool for the parallel build (dispatchSolve)
+    int    m_ppcg_threads = 1;
+    long   m_localinv_builds = 0;            ///< successful builds
+    long   m_localinv_build_failures = 0;    ///< builds rejected (G or S not positive definite)
+    long   m_localinv_runtime_fallbacks = 0; ///< solves restarted with Jacobi (rz <= 0 or pAp <= 0)
+    double m_localinv_build_ms_total = 0.0;  ///< wall time of all build attempts
     double m_matrix_rebuild_eps = 0.0;  ///< WP-EEQ-Matrix-Cache: max displacement before A_nn off-diag rebuild (0 = disabled)
 
     // ===== Cached Data for Energy Calculation =====
@@ -895,10 +1066,6 @@ public:
 
 private:
 
-    // Auto-solver benchmark state
-    // Claude Generated - March 2026 (Auto-solver selection)
-    mutable EEQSolveMethod m_selected_method = EEQSolveMethod::SchurCholesky;  ///< Method chosen by auto-benchmark
-    mutable bool m_auto_benchmark_done = false;  ///< Whether auto-benchmark has run
 
     // WP7-B (May 2026): warn-once flag for CPU "batched" → cholesky fallback
     mutable bool m_batched_cpu_warned = false;
@@ -907,13 +1074,11 @@ private:
     // uniform/placeholder charges; read via lastSolveFailed(), reset via clearSolveStatus().
     mutable bool m_last_solve_failed = false;
 
-    // WP7-D (Jun 2026): contact-aware dispatch. Minimum inter-fragment atom distance
-    // (Bohr) at the current geometry, computed in calculateFinalCharges from the packed
-    // distances + topology->fraglist and read by dispatchSolve. -1 = not computed
-    // (single fragment, or no topology) → treated as "in contact" so the safe exact
-    // path is chosen. The approximate batched solver drops cross-fragment Coulomb, so it
-    // is auto-selected only when fragments are well-separated (>= eeq_batched_min_distance).
-    mutable double m_contact_min_dist = -1.0;
+    // Oct 2026: energy criterion for the explicit batched solver (replaces the old minimum
+    // inter-fragment distance, eeq_batched_min_distance, and its per-step O(N^2) contact scan).
+    double m_batched_max_error = 1e-6;                 ///< eeq_batched_max_error_eh (0 = no check)
+    mutable std::vector<std::string> m_batched_checked; ///< "<phase>:<natoms>:<nfrag>" already estimated
+    mutable double m_last_batched_error = -1.0;         ///< last estimate (Eh), -1 = none
 
     // Convergence statistics — accumulate across calls, print summary instead of per-call spam
     // Claude Generated (April 2026)
@@ -982,6 +1147,7 @@ private:
     /// When non-null, calculateFinalCharges fills m_phase2_distances from this instead of
     /// recomputing the O(N^2) sqrt loop.
     const Eigen::VectorXd* m_external_srab = nullptr;
+    const bool* m_external_srab_too_close = nullptr; ///< atoms-too-close flag of m_external_srab (owner GFNFF)
 
     /// WP5 (June 2026): implicit-solvation reaction-field Born matrix (nat×nat),
     /// added to the EEQ matrix in calculateFinalCharges. nullptr = gas phase.
@@ -1036,18 +1202,23 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "Auto-calculate coordination numbers if not provided", "Algorithm", {})
     PARAM(use_iterative_refinement, Bool, false,
           "Use iterative refinement for EEQ Phase 2", "Algorithm", {})
-    PARAM(solve_method, String, "cholesky",
-          "EEQ linear solve algorithm: cholesky | ldlt | batched | pcg | auto | lu (legacy). "
-          "GPU paths: cholesky → WP5-A/WP7-A (exact, full N×N Cholesky); "
-          "batched → WP7-B (per-fragment Cholesky, ignores cross-fragment Coulomb — "
-          "use only for well-separated fragments, see eeq_batched_min_distance; "
-          "auto/pcg no longer auto-select it for in-contact fragments, see "
-          "eeq_contact_prefer_exact). "
-          "Legacy alias 'schur_cholesky' maps to 'cholesky'. "
+    PARAM(solve_method, String, "auto",
+          "EEQ linear solve algorithm, same names on CPU and GPU (-gpu cuda selects the device path): "
+          "auto | cholesky | ppcg | pcg | lu | ldlt | batched. An explicit name is never overridden by a "
+          "size threshold. auto (default) = ppcg when N >= eeq_ppcg_min_atoms (500) and nfrag >= "
+          "eeq_ppcg_min_nfrag (1), else cholesky; it never picks an inexact method. "
+          "cholesky = dense Cholesky on A_nn + Schur complement (GPU: WP5-A/WP7-A); "
+          "ppcg = projected PCG, one iterative solve for any nfrag (GPU: WP7-E); "
+          "pcg = per-fragment PCG with block-Jacobi, nfrag+1 solves (GPU: WP7-C); "
+          "batched = per-fragment solves that IGNORE cross-fragment Coulomb, inexact unless the "
+          "fragments are well separated, see eeq_batched_max_error_eh (GPU: WP7-B). "
+          "Aliases: schur_cholesky = cholesky, projected_pcg = ppcg. An unknown name is an error. "
+          "The verbosity-1 line 'EEQ solver:' names the method and the device that run. "
           "ldlt = Bunch-Kaufman LDL^T on A_nn + Schur; equals cholesky for SPD A_nn (all "
           "gas-phase systems). NOT an automatic fallback: for an indefinite A_nn (e.g. the "
           "implicit-solvation reaction field) the robust path is cholesky's augmented-LU "
-          "fallback, which ldlt does not reproduce.",
+          "fallback, which ldlt does not reproduce. lu = dense LU of the augmented (N+nfrag) system "
+          "(GPU: CUDA only, cuSOLVER getrf). ldlt on the GPU: CUDA only, cuSOLVER sytrf + Schur.",
           "Algorithm", {})
     // Claude Generated (Sep 2026): defaults of max_pcg_iterations and pcg_large_system_iterations set
     // to the values the code actually used. Until Sep 28, 2026 the parameter parser dropped both
@@ -1093,29 +1264,15 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "fragment is split. This is the dominant cost for that regime — "
           "gpu_block_jacobi_max_frag_atoms alone does not fix it. Diagonal Jacobi is always "
           "correct, just converges in more PCG iterations.", "Algorithm", {})
-    PARAM(eeq_pcg_nfrag_threshold, Int, 4,
-          "Auto solver: prefer SchurCholesky when nfrag >= this threshold. "
-          "Cholesky factorizes A_nn once and amortizes the cost over nfrag back-substitutions "
-          "via BLAS-3, which beats nfrag independent PCG solves once nfrag is moderate.",
-          "Algorithm", {})
-    PARAM(eeq_pcg_expected_iters, Int, 30,
-          "Auto solver: expected average PCG iteration count. Used in the cost model "
-          "k_pcg*(nfrag+1) > N/6 to decide between PCG and SchurCholesky.",
-          "Algorithm", {})
     PARAM(eeq_distance_cutoff, Double, 0.0,
           "Distance cutoff in Bohr for Coulomb matrix sparsification (0 = no cutoff, matches Fortran goed_gfnff). Non-zero values violate Hellmann-Feynman vs. the full Coulomb energy and degrade MD energy conservation.", "Advanced", {})
-    PARAM(eeq_batched_min_distance, Double, 15.0,
-          "Minimum atom-atom distance between different fragments (Bohr) below which "
-          "fragments are considered in contact. Used both to warn for an explicit batched "
-          "solve and (with eeq_contact_prefer_exact) to auto-route in-contact systems to "
-          "the exact solver. 0 = disable the check. Default 15 Bohr ~ 8 Angstrom.",
-          "Advanced", {})
-    PARAM(eeq_contact_prefer_exact, Bool, true,
-          "Auto/PCG dispatch: when a highly fragmented system has fragments in contact "
-          "(min inter-fragment distance below eeq_batched_min_distance, or unknown), prefer "
-          "the exact solver (SchurCholesky/PCG+block-Jacobi, cross-fragment Coulomb retained) "
-          "over the approximate batched per-fragment solve. Set false to keep the old "
-          "density-only batched auto-selection.",
+    // Oct 2026: replaces eeq_batched_min_distance (a fixed distance, 15 Bohr) and the dead
+    // eeq_contact_prefer_exact (auto no longer selects batched at all).
+    PARAM(eeq_batched_max_error_eh, Double, 1e-6,
+          "Explicit batched solver: warn when the estimated energy error from the dropped "
+          "inter-fragment Coulomb coupling exceeds this many Eh. The estimate (second order, "
+          "one block-Jacobi step on the residual of the full EEQ system) is made once per "
+          "topology and charge phase, on CPU and GPU. 0 = no estimate.",
           "Advanced", {})
     PARAM(dump_charges, Bool, false,
           "Save Phase 1 and Phase 2 charges to charges_dump_N<size>.json for analysis", "Advanced", {})
@@ -1125,9 +1282,36 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "0 = never force (only geometry-triggered). Recommended: 100 for long MD runs.", "Algorithm", {})
     PARAM(eeq_refine_iters, Int, 1, "A4: iterative-refinement steps applied when the EEQ solve reuses a cached Cholesky factor - only with eeq_refactor_eps_bohr > 0. Each step costs O(N^2) and shrinks the stale-factor error geometrically; measured in MD at eps 0.05 Bohr: 1 step leaves 1e-5 to 8e-4 e, 3 steps about 1e-7 e. 0 disables refinement.", "Algorithm", {})
     PARAM(eeq_ppcg_min_nfrag, Int, 1, "Projected-PCG EEQ solve is selected automatically when the system has at least this many fragments AND at least eeq_ppcg_min_atoms atoms: ONE iterative solve on the constraint tangent space instead of the dense factorisation (+ nfrag extra solves). 0 disables the automatic choice (solve_method ppcg still forces it, eeq_ppcg_min_atoms keeps small systems exact). Converged to eeq_ppcg_tol; polymer/1410: 44 -> 16 ms per solve, dE 1e-12 Eh.", "Algorithm", {})
+    // Claude Generated (Oct 2026): exact far-field shortcut of erf(gamma r)/r, see gfnff.h farfield_shortcut.
+    PARAM(farfield_shortcut, Bool, true, "Exact far-field shortcut of the EEQ matrix elements: for gamma_ij*r >= 6.5 erf(gamma_ij*r) is exactly 1.0 in FP64, so A_ij = 1/r without erf. Bit-identical to the full evaluation in the cases checked; false evaluates erf for every pair. Forwarded from gfnff.farfield_shortcut.", "Performance", {})
     PARAM(eeq_ppcg_min_atoms, Int, 500, "Minimum atom count for the automatic projected-PCG choice (small systems stay on the exact Schur-Cholesky solve).", "Algorithm", {})
     PARAM(eeq_ppcg_tol, Double, 1e-12, "Projected-PCG relative residual tolerance |P r| <= tol (|b|+1); 1e-12 gives energy/gradient deviations ~1e-12 from the direct solve (1e-10 saves ~15% of the iterations).", "Algorithm", {})
     PARAM(eeq_ppcg_max_iter, Int, 500, "Projected-PCG iteration cap; on non-convergence the exact Schur-Cholesky solve is used for that step.", "Algorithm", {})
+    // Claude Generated (Oct 2026): local-inverse preconditioner of the projected PCG; default since Oct 10, 2026.
+    PARAM(eeq_ppcg_precond, String, "localinv",
+          "Preconditioner of the projected PCG (ppcg): localinv (default since Oct 10, 2026) | diag (diagonal Jacobi, "
+          "the former default). localinv is a "
+          "sparse local inverse of the EEQ matrix: per atom the dense block of all atoms within "
+          "eeq_localinv_ext_bohr is inverted and the entries within eeq_localinv_radius_bohr are kept; "
+          "used through a constraint preconditioner so the fragment charges stay exact. Only the "
+          "Phase-2 (final) charges use it; it needs fewer iterations but costs a build. If the "
+          "symmetrised inverse is not positive definite the solve uses diag (warning, counted). "
+          "See docs/EEQ_SOLVER_CONTROL.md.",
+          "Algorithm", {"ppcg_precond"})
+    PARAM(eeq_localinv_radius_bohr, Double, 8.0,
+          "localinv: entries of the local inverse kept per row, pairs within this distance (Bohr).",
+          "Algorithm", {})
+    PARAM(eeq_localinv_ext_bohr, Double, 10.0,
+          "localinv: radius (Bohr) of the dense block that is inverted per atom; >= eeq_localinv_radius_bohr. "
+          "Build cost grows with the cube of the atoms inside it.",
+          "Algorithm", {})
+    PARAM(eeq_localinv_rebuild_bohr, Double, 1.0,
+          "localinv: rebuild the preconditioner when any atom moved more than this (Bohr) since the "
+          "last build; 0 = rebuild at every solve. A stale preconditioner never changes the charges "
+          "(the CG still converges to eeq_ppcg_tol), only the iteration count. Measured on a 7320-atom "
+          "MD (1 fs steps): 1.0 rebuilds every ~7 steps for +1 iteration (15 -> 16); the GPU needs it, "
+          "a per-step rebuild there costs more than it saves.",
+          "Algorithm", {})
     PARAM(eeq_matrix_rebuild_eps_bohr, Double, 0.0,
           "WP-EEQ-Matrix-Cache: max atom displacement (Bohr) before A_nn Coulomb off-diagonal is "
           "rebuilt from scratch. When below this AND CN drift < 0.05, the cached off-diagonal is "

@@ -19,7 +19,7 @@ electrons, nocc 9626), commit `bfbdc569`, `CURCUMA_GPU_PROFILE=1`.
 
 ## Stage 0: measurements (done)
 
-- **0.1 Process grid.** `test_cases/cuda/bench_syevd_mp.cpp` now takes the grid rows as 5th
+- **0.1 Process grid.** `scripts/gpu_bench/bench_syevd_mp.cpp` now takes the grid rows as 5th
   argument. n = 15444, 4 GPUs: FP32 1x4 nb128 5.28 s, 2x2 nb64/128/256 5.59/5.32/5.23 s; FP64 1x4
   20.54 s, 2x2 21.62/21.00/20.98 s. **No gain** - the 1 x ndev layout stays. The block size was
   already tuned (GPU_TUNING.md).
