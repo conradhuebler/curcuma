@@ -425,6 +425,6 @@ and `AIChangelog.md`, not into this file; only open items and traps stay here.
 - `shouldUpdateHBXB()` RMSD trigger off by `sqrt(natoms)` (ported from the reference, left); D4 ATM C6 frozen at setup (#33)
 - `DC13/c20bowl` Coulomb -6.29 kcal/mol, not root-caused (#14); gfn1/gfn2 gradients vs xtb at exactly coincident coordinates (#28)
 - Charge placement (#31) untested for periodic systems, GPU runtime, many fragments; `-DUSE_PORTABLE_MATH` unconfirmed on Windows (#7)
-- `-hold_polar_h` (#39): unit bug fixed Oct 2026, earlier results carry it; default `hold_polar_h_force` 5.0 is ~4x stiffer than an X-H bond (4/12 converge vs 10/12 free), weaker k untested against proton transfer; ANCOPT still scales the gradient by 1.889
+- `-hold_polar_h` (#39): restraint unit bug fixed Oct 2026 (earlier `-hold_polar_h` results carry it); in the ConfSearch RELAX step k = 5 converges (1/41 unsuccessful, n = 2 seeds), a plain `-opt` probe was slower (4/12); whether a weaker k still prevents proton transfer is untested (no tautomers arise at 600 K even without restraints); ANCOPT still scales the gradient by 1.889
 - Verbosity cannot be scoped across `CxxThreadPool` workers (#3); ConfSearch wide-hill MTD blow-up ([CONFSEARCH_ROADMAP.md](docs/CONFSEARCH_ROADMAP.md))
 - GFN-FF is a force field: 60-70 kcal/mol from DLPNO on MOR41 reactions (#6); accuracy work in [docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md)
