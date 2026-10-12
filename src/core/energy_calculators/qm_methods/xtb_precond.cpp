@@ -308,19 +308,80 @@ std::vector<ScfPrecondSegment> segmentFragment(const std::vector<int>& atoms, co
     for (int a = 0; a < nf; ++a) { heavy[a] = atoms[frag[a]] > 1; any_heavy = any_heavy || heavy[a]; }
     if (!any_heavy) std::fill(heavy.begin(), heavy.end(), 1);
 
-    // Heavy atoms in breadth-first order over heavy-heavy bonds; a heavy atom not reachable from
-    // the first start (bridged only through H) starts a new search at the smallest unvisited index.
-    std::vector<int> order;
+    // Ring bonds = non-bridges of the heavy-atom bond graph (Tarjan low-link, iterative DFS).
+    // bridge_to[a] holds the neighbours b with a-b a bridge.
+    std::vector<std::set<int>> bridge_to(nf);
+    {
+        std::vector<int> tin(nf, -1), low(nf, 0), parent(nf, -1);
+        std::vector<std::size_t> it(nf, 0);
+        int timer = 0;
+        for (int s = 0; s < nf; ++s) {
+            if (!heavy[s] || tin[s] >= 0) continue;
+            std::vector<int> stack{ s };
+            tin[s] = low[s] = timer++;
+            while (!stack.empty()) {
+                const int a = stack.back();
+                if (it[a] < nbr[a].size()) {
+                    const int b = nbr[a][it[a]++];
+                    if (!heavy[b] || b == parent[a]) continue;
+                    if (tin[b] >= 0) { low[a] = std::min(low[a], tin[b]); continue; }
+                    parent[b] = a;
+                    tin[b] = low[b] = timer++;
+                    stack.push_back(b);
+                } else {
+                    stack.pop_back();
+                    const int p = parent[a];
+                    if (p >= 0) {
+                        low[p] = std::min(low[p], low[a]);
+                        if (low[a] > tin[p]) { bridge_to[p].insert(a); bridge_to[a].insert(p); }
+                    }
+                }
+            }
+        }
+    }
+    // A heavy-heavy bond may be cut only if it is a bridge (not in a ring) and a single bond:
+    // r_ij / (r_cov,i + r_cov,j) >= 0.95 (Pyykko-Atsumi single-bond radii; measured ratios: single
+    // ~1.0, amide C-N ~0.94, aromatic ~0.92, C=O ~0.88). Atoms joined by uncuttable bonds form one
+    // unit (union-find) that is never split: a hydrogen cap there would not give a closed shell.
+    auto cuttable = [&](int a, int b) {
+        if (!bridge_to[a].count(b)) return false;
+        const double r = (geometry.row(frag[a]) - geometry.row(frag[b])).norm();
+        return r / (covalentRadius(atoms[frag[a]]) + covalentRadius(atoms[frag[b]])) >= 0.95;
+    };
+    std::vector<int> unit(nf);
+    for (int a = 0; a < nf; ++a) unit[a] = a;
+    auto root = [&](int i) {
+        while (unit[i] != i) { unit[i] = unit[unit[i]]; i = unit[i]; }
+        return i;
+    };
+    for (int a = 0; a < nf; ++a)
+        if (heavy[a])
+            for (int b : nbr[a])
+                if (b > a && heavy[b] && !cuttable(a, b)) {
+                    const int ra = root(a), rb = root(b);
+                    if (ra != rb) unit[std::max(ra, rb)] = std::min(ra, rb);   // root = smallest index
+                }
+    std::vector<std::vector<int>> members(nf);   // heavy atoms per unit root, ascending
+    for (int a = 0; a < nf; ++a)
+        if (heavy[a]) members[root(a)].push_back(a);
+
+    // Units in breadth-first order over the bonds between units (start at the smallest index,
+    // neighbours in ascending order of their member atoms); an unreachable unit starts a new search.
+    std::vector<int> order;   // unit roots
     std::vector<char> seen(nf, 0);
     for (int s = 0; s < nf; ++s) {
-        if (!heavy[s] || seen[s]) continue;
-        std::vector<int> queue{ s };
-        seen[s] = 1;
+        if (!heavy[s] || seen[root(s)]) continue;
+        std::vector<int> queue{ root(s) };
+        seen[root(s)] = 1;
         for (std::size_t q = 0; q < queue.size(); ++q) {
-            const int a = queue[q];
-            order.push_back(a);
-            for (int b : nbr[a])
-                if (heavy[b] && !seen[b]) { seen[b] = 1; queue.push_back(b); }
+            const int u = queue[q];
+            order.push_back(u);
+            std::vector<int> next;
+            for (int a : members[u])
+                for (int b : nbr[a])
+                    if (heavy[b] && !seen[root(b)]) { seen[root(b)] = 1; next.push_back(root(b)); }
+            std::sort(next.begin(), next.end());   // root = smallest member index
+            queue.insert(queue.end(), next.begin(), next.end());
         }
     }
 
@@ -341,20 +402,29 @@ std::vector<ScfPrecondSegment> segmentFragment(const std::vector<int>& atoms, co
 
     const double r2 = radius * radius;
     const double rcov_h = covalentRadius(1);
-    for (std::size_t g0 = 0; g0 < order.size(); g0 += static_cast<std::size_t>(segment_heavy_atoms)) {
-        const std::size_t g1 = std::min(order.size(), g0 + static_cast<std::size_t>(segment_heavy_atoms));
-        std::vector<char> own(nf, 0), dom(nf, 0);
-        for (std::size_t g = g0; g < g1; ++g) {
-            own[order[g]] = 1;
-            for (int l : light_of[order[g]]) own[l] = 1;
+    for (std::size_t g0 = 0; g0 < order.size();) {
+        // Fill the segment with whole units until it holds >= segment_heavy_atoms heavy atoms.
+        std::vector<int> own_heavy;
+        std::size_t g1 = g0;
+        while (g1 < order.size() && static_cast<int>(own_heavy.size()) < segment_heavy_atoms) {
+            own_heavy.insert(own_heavy.end(), members[order[g1]].begin(), members[order[g1]].end());
+            ++g1;
         }
-        // Domain: heavy atoms within radius of an own heavy atom, plus their light atoms.
+        g0 = g1;
+        std::vector<char> own(nf, 0), dom(nf, 0);
+        for (int a : own_heavy) {
+            own[a] = 1;
+            for (int l : light_of[a]) own[l] = 1;
+        }
+        // Domain: every unit with a heavy atom within radius of an own heavy atom, with the light atoms.
         for (int b = 0; b < nf; ++b) {
-            if (!heavy[b]) continue;
-            for (std::size_t g = g0; g < g1; ++g)
-                if ((geometry.row(frag[b]) - geometry.row(frag[order[g]])).squaredNorm() <= r2) {
-                    dom[b] = 1;
-                    for (int l : light_of[b]) dom[l] = 1;
+            if (!heavy[b] || dom[b]) continue;
+            for (int o : own_heavy)
+                if ((geometry.row(frag[b]) - geometry.row(frag[o])).squaredNorm() <= r2) {
+                    for (int m : members[root(b)]) {
+                        dom[m] = 1;
+                        for (int l : light_of[m]) dom[l] = 1;
+                    }
                     break;
                 }
         }
@@ -364,8 +434,9 @@ std::vector<ScfPrecondSegment> segmentFragment(const std::vector<int>& atoms, co
             if (own[a]) seg.own.push_back(frag[a]);
             if (!dom[a]) continue;
             seg.domain.push_back(frag[a]);
-            for (int k : nbr[a]) {
-                if (dom[k]) continue;
+            if (!heavy[a]) continue;
+            for (int k : nbr[a]) {   // cut bonds: heavy-heavy, between units, hence cuttable single bonds
+                if (dom[k] || !heavy[k]) continue;
                 const Eigen::RowVector3d ra = geometry.row(frag[a]);
                 const Eigen::RowVector3d u = (geometry.row(frag[k]) - geometry.row(frag[a])).normalized();
                 caps.push_back(ra + u * (covalentRadius(atoms[frag[a]]) + rcov_h));
@@ -791,9 +862,9 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
                                         8.0 * static_cast<double>(P->storedDoubles()) / 1048576.0));
         if (n_seg_frags > 0)
             CurcumaLogger::info(fmt::format("SCF precond: {} fragment(s) segmented (RAS, {} heavy atoms per segment, R = {:.2f} A): "
-                                            "{} segments, mean cluster {:.1f} atoms incl. caps, {} skipped (odd electrons)",
+                                            "{} segments, mean cluster {:.1f} atoms incl. caps, {} skipped (odd electrons, {} atoms on the scalar seed)",
                                             n_seg_frags, m_scf_precond_segment_atoms, m_scf_precond_segment_radius, n_segments,
-                                            n_seg_jobs > 0 ? static_cast<double>(seg_cluster_atoms) / n_seg_jobs : 0.0, n_seg_odd));
+                                            n_seg_jobs > 0 ? static_cast<double>(seg_cluster_atoms) / n_seg_jobs : 0.0, n_seg_odd, n_seg_odd_atoms));
     }
     return true;
 }

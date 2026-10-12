@@ -225,12 +225,15 @@ struct ScfPrecondSegment {
  * only the rows of its own, non-overlapping part enter M = sum_i R_i^T D_i B_i R_i (D_i = 1 on own
  * components, 0 elsewhere), so no component is counted twice.
  *
- * Construction: heavy atoms (Z > 1; all atoms if the fragment has none) in breadth-first order of
- * the bond graph (bond criterion of detectCovalentFragments, start at the smallest index, neighbours
- * ascending), consecutive groups of @p segment_heavy_atoms heavy atoms; each H joins its nearest
- * heavy atom. Domain: heavy atoms within @p radius (Angstrom) of any own heavy atom, with their H.
- * Each bond from a domain atom h to a fragment atom k outside the domain gets a hydrogen cap on the
- * axis h->k at the distance r_cov(h) + r_cov(H) (Pyykko-Atsumi radii). O(nf^2) for nf fragment atoms.
+ * Construction: only single bonds outside rings are cut. A heavy-heavy bond (bond criterion of
+ * detectCovalentFragments) is cuttable if it is a bridge of the heavy-atom bond graph and
+ * r_ij / (r_cov,i + r_cov,j) >= 0.95 (Pyykko-Atsumi radii; aromatic ~0.92, C=O ~0.88, amide C-N
+ * ~0.94, single ~1.0). Heavy atoms (Z > 1; all atoms if the fragment has none) joined by uncuttable
+ * bonds form units that are never split. Units in breadth-first order (start at the smallest index,
+ * neighbours ascending) are collected into a segment until it holds >= @p segment_heavy_atoms heavy
+ * atoms; each H joins its nearest heavy atom. Domain: every unit with a heavy atom within @p radius
+ * (Angstrom) of an own heavy atom, with the H. Each cut heavy-heavy bond h-k (k outside) gets a
+ * hydrogen cap on the axis h->k at r_cov(h) + r_cov(H). O(nf^2) for nf fragment atoms.
  *
  * @param atoms     atomic numbers of the whole system
  * @param geometry  nat x 3 coordinates in Angstrom

@@ -1938,6 +1938,29 @@
    "derived_from": "peo201-chain"
   },
   {
+   "id": "pep20-peptide.gfnff-min",
+   "class": "large",
+   "file": "large/pep20-peptide.gfnff-min.xyz",
+   "format": "xyz",
+   "formula": "C101H149N29O30",
+   "natoms": 309,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "equilibrium",
+   "size_bytes": 11919,
+   "sha256": "29f5440c9a755371db88b49c0e2e898dd66d1bd22e9560af7670d415c16d61cd",
+   "provenance": {
+    "kind": "optimized",
+    "program": "curcuma",
+    "version": "0.0.142",
+    "method": "gfnff",
+    "convergence": "LBFGS (curcuma -opt, default thresholds) ended without the not-converged warning after 1680 steps",
+    "description": "Neutral 20-residue peptide GASFVKELTYQNDHGAIWRG (C-terminus COOH, N-terminus NH2, no proline), 309 atoms, 5 rings; SMILES -> obabel gen3d -> MMFF94 minimisation -> curcuma gfnff optimisation (E = -55.077077 Eh). Local minimum of a floppy chain, not a global one; not relaxed with GFN2."
+   },
+   "notes": "Built to test -scf_precond segmentation on a non-PEO molecule with rings and amide bonds. GFN2 SCF: 15 iterations without M."
+  },
+  {
    "id": "phosphine.d-shell-validation",
    "class": "small",
    "file": "small/phosphine.d-shell-validation.xyz",
@@ -1982,6 +2005,29 @@
     "fragment_2xx"
    ],
    "description": "comment line: test fragment with 2 Xx connection atoms; deliberately invalid element Xx"
+  },
+  {
+   "id": "polystyrene20.gfnff-min",
+   "class": "large",
+   "file": "large/polystyrene20.gfnff-min.xyz",
+   "format": "xyz",
+   "formula": "C161H164",
+   "natoms": 325,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "equilibrium",
+   "size_bytes": 12671,
+   "sha256": "817a914304d750ca770b549cb157cd0ff99b875756c7f8fd0f2eecaae23e0ada",
+   "provenance": {
+    "kind": "optimized",
+    "program": "curcuma",
+    "version": "0.0.142",
+    "method": "gfnff",
+    "convergence": "LBFGS (curcuma -opt, default thresholds) ended without the not-converged warning after 1040 steps",
+    "description": "Atactic-unspecified polystyrene, 20 repeat units CH2-CH(C6H5), H-terminated, 325 atoms; SMILES -> obabel gen3d -> curcuma gfnff optimisation (E = -62.171411 Eh). Local minimum of a flexible chain, not relaxed with GFN2."
+   },
+   "notes": "Built to test -scf_precond segmentation on a molecule with aromatic rings. GFN2 SCF: 12 iterations without M."
   },
   {
    "id": "silane.d-shell-validation",

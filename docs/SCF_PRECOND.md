@@ -160,13 +160,16 @@ Status: AI-generated, machine-tested only, human production testing pending. Cod
 - Restricted additive Schwarz (Cai and Sarkis, SIAM J. Sci. Comput. 21, 792 (1999); Smith/Bjorstad/Gropp 1996): M = sum_i R_i^T D_i B_i R_i
   with overlapping domains, D_i = 1 on the components of the segment's own atoms and 0 elsewhere; own atoms are disjoint, so no
   component is counted twice.
-- Segments: heavy atoms in breadth-first order of the bond graph (start at the smallest index), consecutive groups of
-  `scf_precond_segment_atoms`; each H joins its nearest heavy atom. Domain: heavy atoms within `scf_precond_segment_radius` of an own heavy
-  atom, with their H. Cut bonds get an H cap on the bond axis at r_cov(atom) + r_cov(H).
+- Only single bonds outside rings are cut (Oct 12, 2026, second version): a heavy-heavy bond is cuttable if it is a bridge of the heavy-atom
+  bond graph (not in a ring) and r_ij / (r_cov,i + r_cov,j) >= 0.95 (measured ratios: single ~1.0, amide C-N 0.94, aromatic 0.92-0.93,
+  C=O 0.88). Heavy atoms joined by uncuttable bonds form units (rings, C=O, amide groups) that are never split.
+- Segments: units in breadth-first order (start at the smallest index), collected until a segment holds >= `scf_precond_segment_atoms`
+  heavy atoms; each H joins its nearest heavy atom. Domain: every unit with a heavy atom within `scf_precond_segment_radius` of an own
+  heavy atom, with the H. Cut bonds get an H cap on the bond axis at r_cov(atom) + r_cov(H).
 - Each domain is a neutral cluster (real atoms, then caps) built like a fragment job (own XTB, central-difference Jacobian, all jobs in
   one thread pool, one result slot each); B_loc = -J_loc^-1 is restricted to the real atoms, rows of non-own atoms are set to zero
   (stored, so the CUDA copy is unchanged). Clusters with an odd electron count (valence electrons + one per cap) are skipped; their own
-  atoms keep alpha (never triggered in the tests). A domain that covers the whole molecule gives the exact block rows: with R = 100 A the
+  atoms keep alpha (counted at verbosity 2; 0 in all runs of the second version). A domain that covers the whole molecule gives the exact block rows: with R = 100 A the
   SCF trace of PEO-58 is identical to the whole-molecule block (4 iterations).
 - Measurements (n=1 each, 9950X3D, `-sp -method gfn2`, `-scf_precond_segment_atoms 3`, R = 3.0, `-scf_precond_max_fragment_atoms 20`):
 
@@ -179,8 +182,28 @@ Status: AI-generated, machine-tested only, human production testing pending. Cod
   PEO chain 1410 atoms (`peo201-chain`), `-threads 12`, n=3 alternating: none 12 iterations, SCF 10.2 to 10.5 s, wall 11.9 to 12.4 s; segmented 7
   iterations, SCF 5.7 to 5.9 s, M built in 0.95 s (202 segments), wall 8.4 to 8.5 s (-30 %), energy -2088.25340678 Eh in both. Short MD (5 fs, 12 threads,
   n=2): wall 72.8 / 71.1 s without, 50.4 / 49.2 s with (-30 %). Also at a single point of 212 atoms the build (0.2 s) costs more than the SCF saves (68 ms).
-  The whole 212-atom block gave 4 iterations after 129.5 s of build (section Not measured). Not measured: other molecules than PEO,
-  other segment sizes and radii, MD or Hessian with a segmented M, rings and charge-separated molecules.
+  The whole 212-atom block gave 4 iterations after 129.5 s of build (section Not measured).
+- First version (cut any bond): polystyrene 20 units (325 atoms) and a 20-residue peptide (309 atoms) gave no gain (12 -> 13, 15 -> 14
+  iterations), most segments skipped for an odd electron count (scalar seed on 196 / 156 atoms); cause: cuts through aromatic rings,
+  C=O and amide C-N bonds (counted on the segments of k = 3, R = 3.0). Second version, `-threads 12`, n=1 each, machine under load
+  (load average 28-37, build times only indicative); energies identical to the run without M to 8 decimals in every row; no segment
+  skipped, no cluster SCF failed:
+
+| System (atoms), none | k / R (A) | iterations | segments | mean cluster (atoms incl. caps) | build of M (s) |
+|---|---|---|---|---|---|
+| PEO 212, none 12 | 3 / 3.0, 4 / 3.0, 4 / 4.0 | 6, 6, 6 | 30, 23, 23 | 19.6, 20.8, 44.0 | 0.37, 0.44, 7.5 |
+| polystyrene 325, none 12 | 3 / 3.0, 4 / 3.0, 4 / 4.0 | 5, 5, 5 | 21, 20, 20 | 42.0, 43.0, 69.7 | 6.3, 4.1, 26.9 |
+| peptide 309, none 15 | 3 / 3.0, 4 / 3.0, 4 / 4.0 | 7, 7, 6 | 39, 32, 32 | 37.6, 41.0, 65.9 | 7.1, 15.5, 92.7 |
+| peptide 309 | 8 / 3.0, 8 / 4.0 | 7, 6 | 18, 18 | 51.0, 80.0 | 16.1, 118.9 |
+| peptide 309 | 12 / 3.0, 12 / 4.0 | 7, 6 | 13, 13 | 58.7, 90.3 | 30.8, 164.7 |
+
+  Larger segments (k = 8, 12, about one residue) do not lower the iteration count further; R = 4.0 saves one iteration on the peptide at
+  5 to 10 times the build cost. Rings and amide groups make the clusters about twice as large as on PEO, so the build costs seconds.
+  Total cost (library structures `polystyrene20.gfnff-min`, `pep20-peptide.gfnff-min`, k = 3, R = 3.0, `-threads 12`, machine load about 29 from other jobs, n=3
+  single points alternating, n=1 MD): single point polystyrene wall 1.2 s -> 3.2 to 3.9 s (SCF 1.0 -> 0.4 s, M 2.5 to 3.3 s), peptide 1.4 to 1.6 s -> 4.8 to 5.9 s
+  (SCF 1.15 to 1.33 -> 0.54 to 0.62 s, M 4.0 to 5.1 s): a single point does not pay, break-even about 6 to 7 SCFs. MD (1 fs steps): 10 fs wall 11.8, 10.8 s ->
+  10.3, 9.9 s (polystyrene, n=2) and 12.2 s -> 12.7, 13.0 s (peptide, n=2); 40 fs polystyrene 41.0 -> 26.6 s (-35 %), peptide 44.6 -> 32.3 s (-28 %). Energies equal.
+  Not measured: molecules other than PEO, this polystyrene and this peptide (both only as GFN-FF minima, not GFN2 relaxed); Hessian with a segmented M; charge-separated molecules.
 
 ## Census: frag against none on GMTKN55 and MOR41 (Oct 12, 2026)
 
