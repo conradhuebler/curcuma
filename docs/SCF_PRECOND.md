@@ -1,4 +1,4 @@
-# Fragment SCF preconditioner for the native GFN2 Broyden mixer (`-scf_precond frag`)
+# Fragment SCF preconditioner for the native GFN2 and GFN1 Broyden mixer (`-scf_precond frag`)
 
 Status: AI-generated, machine-tested only, human production testing pending. Opt-in; the default
 (`-scf_precond none`) leaves the SCF path bit-identical to the state before this feature.
@@ -61,7 +61,7 @@ atoms left on the scalar seed and the memory of M; with segmentation also the nu
 
 ## When it is ignored (one warning, scalar seed)
 
-GFN1; GPU SCF paths other than the fully device-resident CUDA loop (host-driven device loops: ROCm, Vulkan,
+GFN1 on any GPU path (GFN1 has no resident device loop; CPU loop only); GPU SCF paths other than the fully device-resident CUDA loop (host-driven device loops: ROCm, Vulkan,
 CUDA without the resident loop); a multi-GPU SCF split (eigensolver or density over several devices at this basis
 size); `-large_system_mode` other than `none`; `-scf_mode` other than `broyden`; total
 charge != 0; open shell or odd electron count; no fragment qualifies for a block. Per fragment, single
@@ -216,7 +216,7 @@ Status: AI-generated, machine-tested only, human production testing pending. Cod
 ## Response Jacobian (`-scf_precond_jacobian response`, Oct 12, 2026)
 
 Status: AI-generated, machine-tested only, human production testing pending. Code: `XTB::computeScfJacobianResponse` in
-`xtb_response.cpp` (independent of the preconditioner; GFN2, closed shell). `CURCUMA_SCF_JAC=<dir>` also writes `J_response.bin`.
+`xtb_response.cpp` (independent of the preconditioner; GFN2 and GFN1, closed shell). `CURCUMA_SCF_JAC=<dir>` also writes `J_response.bin`.
 
 - One eigensolve at v(x*), then per column k: dv = dv/dx_k by central differences of the potential alone (no eigensolve; exact for the
   linear terms and the quadratic third-order term, O(h^2) for D4), dF' = C^T dF C, dP'_pq = w_pq dF'_pq with
@@ -233,6 +233,20 @@ Status: AI-generated, machine-tested only, human production testing pending. Cod
 - Build time of one whole-molecule block (`-threads 1`, n=3 alternating, load average 18-20, so only indicative): PEO 58 atoms fd 2.3-5.0 s,
   response 1.2-1.4 s; PEO 100 atoms (cut of `peo201-chain`, not in the library) fd 27.8-47.5 s, response 5.3-5.6 s. Phase times of the
   response for PEO 58 (nao 130, dim 604): GEMMs 416 ms, potential differences 189 ms, rest 170 ms.
+
+## GFN1 (Oct 12, 2026)
+
+Status: AI-generated, machine-tested only, human production testing pending. GFN1 mixes only the shell charges (x = q_sh, dim = nsh;
+`packSCC`), so a block holds only the shell indices of its atoms; fragments, segmentation and the response Jacobian are otherwise the same.
+The GFN1 potential in x is Coulomb (gamma) plus the atom-resolved third order (v_at); the halogen-bond and D3 terms do not depend on the
+charges and are not part of the map. CPU loop only: on a GPU path the switch is ignored with one warning.
+
+- Response against central differences (`CURCUMA_SCF_JAC_COMPARE=1`, n=1, relative Frobenius of J / of J^-1): PEO 58 (one block)
+  3.1e-10 / 2.2e-10; urea3-water8 whole system (dump, dim 96) 1.2e-9 / 7.2e-10, its 11 fragments <= 1.4e-9 / 9.6e-10; segment clusters
+  (k = 3, R = 2.0) of polystyrene 325 (21) <= 1.2e-9 / 5.1e-10 and of the peptide 309 (39) <= 2.0e-9 / 9.0e-10.
+- SCF (`-threads 12`, n=1, machine under load, energies identical to 8 decimals in every row), iterations none / frag fd / frag response,
+  build fd / response: polystyrene 10 / 6 / 7, 248 / 147 ms; peptide 11 / 8 / 8, 489 / 247 ms; PEO 212 9 / 8 / 8, 163 / 165 ms (segments
+  k = 3 with `-scf_precond_max_fragment_atoms 20`); urea3-water8 (11 fragments) 10 / 7 / 7, 94 / 120 ms.
 
 ## Census: frag against none on GMTKN55 and MOR41 (Oct 12, 2026)
 
@@ -263,7 +277,7 @@ Hessian, ConfSearch) of the same molecule, not for single points; it is not the 
   off only in a long MD or Hessian run. Measured once (n=1, `-threads 8`, PEO 212 atoms as ONE fragment, `-scf_precond_max_fragment_atoms 300`):
   M built in 129.5 s (one fragment is built serially), SCF 12 -> 4 iterations (164 -> 55 ms), i.e. break-even after about 1200 SCFs. The
   block of a single-fragment system is the exact Jacobian of the whole system. The iteration gain for ordinary fragments was measured up to ~30 atoms.
-- Not implemented: GFN1; ROCm, Vulkan and the host-driven CUDA loop; multi-GPU SCF split; open shells; charged systems and ionic fragments (NaCl needs
+- Not implemented: GFN1 on the GPU; ROCm, Vulkan and the host-driven CUDA loop; multi-GPU SCF split; open shells; charged systems and ionic fragments (NaCl needs
   overlapping neighbourhoods of about R = 5 A for its soft dipole mode); overlapping Schwarz blocks between molecules (segmentation
   overlaps only inside one molecule).
 - The guard default is a rule from the prototype test set (24 scalar SCFs); on the unrelaxed 599-atom

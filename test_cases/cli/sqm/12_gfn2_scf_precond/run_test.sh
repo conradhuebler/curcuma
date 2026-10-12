@@ -14,6 +14,7 @@
 # (i) -scf_precond_segment_atoms: a 58-atom PEO cut segmented (restricted additive Schwarz): same energy,
 #     fewer iterations, same result at -threads 1 and 2.
 # (j) -scf_precond_jacobian response on the structure of (i): same energy as fd, iterations <= fd + 1.
+# (k) GFN1 with segmentation and response Jacobian on the same structure: same energy as without M, iterations <= none.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../test_utils.sh"
@@ -209,6 +210,29 @@ main() {
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
         echo -e "${RED}FAIL${NC}: response: iterations '$NR' > fd '$NS2' + 1"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+
+    # (k) GFN1 (Oct 2026): -scf_precond frag with segmentation and the response Jacobian on the structure of (i).
+    #     GFN1 mixes only the shell charges. Same energy as without M (< 1e-6 Eh), iterations <= without M.
+    g1_run() {   # g1_run <log> [args...]
+        local LOG=$1; shift
+        $CURCUMA -sp peo58.xyz -method gfn1 -threads 2 -verbosity 2 -no_bmt "$@" > "$LOG" 2>&1
+        assert_exit_code $? 0 "curcuma -sp peo58.xyz -method gfn1 $*"
+    }
+    g1_run g1_none.log
+    g1_run g1_seg.log -scf_precond frag -scf_precond_max_fragment_atoms 20 -scf_precond_segment_atoms 3 -scf_precond_jacobian response
+    assert_string_in_file "8 segments" g1_seg.log "GFN1: 8 segments built"
+    assert_string_not_in_file "ignored" g1_seg.log "GFN1: switch not ignored"
+    local EG0=$(energy_of g1_none.log); local NG0=$(iters_of g1_none.log)
+    local EG1=$(energy_of g1_seg.log);  local NG1=$(iters_of g1_seg.log)
+    assert_numeric_match "$EG0" "$EG1" "0.000001" "GFN1: energy equals the run without M"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ -n "$NG0" ] && [ -n "$NG1" ] && [ "$NG1" -le "$NG0" ]; then
+        echo -e "${GREEN}PASS${NC}: GFN1: iterations $NG1 <= $NG0 without M"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo -e "${RED}FAIL${NC}: GFN1: iterations '$NG1' > '$NG0' without M"
         TESTS_FAILED=$((TESTS_FAILED + 1))
     fi
 

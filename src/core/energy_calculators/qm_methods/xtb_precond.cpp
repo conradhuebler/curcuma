@@ -459,7 +459,8 @@ std::vector<ScfPrecondSegment> segmentFragment(const std::vector<int>& atoms, co
  * Order: CURCUMA_SCF_PRECOND_FILE (developer override, dense M from a file; prototype
  * behaviour) > scf_precond (none | frag). With scf_precond none and no file the
  * function returns immediately and touches nothing, so the default SCF path is unchanged.
- * Conditions under which 'frag' is ignored (one warning per XTB object): not GFN2,
+ * Conditions under which 'frag' is ignored (one warning per XTB object): neither GFN1 nor GFN2
+ * (GFN1: CPU loop only, its SCC vector is q_sh alone),
  * not the Broyden mode, neither the CPU loop nor a device loop that applies M itself
  * (@p device_loop, the fully device-resident CUDA loop; @p no_device_reason names why a GPU
  * path cannot), total charge != 0, open shell or odd electron count. With @p device_loop the
@@ -507,9 +508,10 @@ bool XTB::selectScfPreconditioner(bool broyden_mode, bool cpu_loop, bool device_
         warn_once("unknown value (none | frag)");
         return true;
     }
-    if (m_method != MethodType::GFN2) { warn_once("implemented for GFN2 only"); return true; }
+    if (m_method != MethodType::GFN2 && m_method != MethodType::GFN1) { warn_once("implemented for GFN1 and GFN2 only"); return true; }
     if (!broyden_mode) { warn_once("needs -scf_mode broyden"); return true; }
     if (!cpu_loop && !device_loop) { warn_once(no_device_reason); return true; }
+    if (!cpu_loop && m_method != MethodType::GFN2) { warn_once("the device preconditioner is implemented for GFN2 only (GFN1: CPU SCF loop)"); return true; }
     if (m_charge != 0) { warn_once(fmt::format("total charge {} (neutral systems only)", m_charge)); return true; }
     const long long nel = std::llround(m_wfn.nocc);
     if (openShell() || (nel % 2) != 0) {
@@ -633,7 +635,8 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
     const auto t0 = clk::now();
     const int nat = m_atomcount;
     const int nsh = m_basis.nsh;
-    const int dim = nsh + 9 * nat;
+    const int nmp = (m_method == MethodType::GFN2) ? 9 : 0;   // GFN2 mixes dp (3) and qp (6) per atom, GFN1 only q_sh
+    const int dim = nsh + nmp * nat;
     const double alpha = m_scf_damping;
 
     const std::vector<std::vector<int>> frags = detectCovalentFragments(m_atoms, m_geometry);
@@ -756,7 +759,7 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
             frag.Calculation(false);
             if (frag.hasError() || !frag.m_scf_converged) { r.why = "fragment SCF failed"; return; }
             const int fnsh = frag.m_basis.nsh;
-            const int fdim = fnsh + 9 * nsub;
+            const int fdim = fnsh + nmp * nsub;
             if (frag.m_scf_jac_result.rows() != fdim) { r.why = "fragment Jacobian missing"; return; }
             for (int k = 0; k < nreal; ++k)
                 if (frag.m_basis.nsh_at[k] != m_basis.nsh_at[job.real[k]]) { r.why = "shell count mismatch"; return; }
@@ -770,7 +773,7 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
             std::vector<char> own_row;
             for (int k = 0; k < nreal; ++k)
                 for (int s = 0; s < frag.m_basis.nsh_at[k]; ++s) { sel.push_back(frag.m_basis.ish_at[k] + s); own_row.push_back(job.own[k]); }
-            for (int c = 0; c < 9; ++c)   // dp k = 0..2, qp k = 0..5: offset nsh + c*nsub
+            for (int c = 0; c < nmp; ++c)   // GFN2: dp k = 0..2, qp k = 0..5 at offset nsh + c*nsub
                 for (int k = 0; k < nreal; ++k) { sel.push_back(fnsh + c * nsub + k); own_row.push_back(job.own[k]); }
             const int n = static_cast<int>(sel.size());
             r.B = PrecondMatrix::Zero(n, n);
@@ -823,16 +826,14 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
         }
         SchwarzPreconditioner::Block b;
         std::vector<char> covers;
-        // Order of the local SCC vector: shells atom by atom, then dp (k = x,y,z) and
+        // Order of the local SCC vector: shells atom by atom, then (GFN2) dp (k = x,y,z) and
         // qp (k = xx,xy,yy,xz,yz,zz) component-wise over the real atoms.
         for (size_t k = 0; k < job.real.size(); ++k) {
             const int a = job.real[k];
             for (int s = 0; s < m_basis.nsh_at[a]; ++s) { b.index.push_back(m_basis.ish_at[a] + s); covers.push_back(job.own[k]); }
         }
-        for (int k = 0; k < 3; ++k)
+        for (int k = 0; k < nmp; ++k)   // GFN2 only: dp (k < 3) at nsh + k*nat, qp at nsh + 3*nat + (k-3)*nat
             for (size_t m = 0; m < job.real.size(); ++m) { b.index.push_back(nsh + k * nat + job.real[m]); covers.push_back(job.own[m]); }
-        for (int k = 0; k < 6; ++k)
-            for (size_t m = 0; m < job.real.size(); ++m) { b.index.push_back(nsh + 3 * nat + k * nat + job.real[m]); covers.push_back(job.own[m]); }
         b.B = std::move(res[j].B);
         if (!P->addBlock(std::move(b), covers)) {
             err = "inconsistent block for fragment " + std::to_string(job.frag);
@@ -1041,10 +1042,10 @@ void XTB::writeScfJacobianDump(const std::string& dir, const Vector& x_star, con
     const double t_jac_ms = std::chrono::duration<double, std::milli>(clk::now() - t_jac0).count();
     writeD("J.bin", J.data(), J.size());
     writeD("J_fwd.bin", Jf.data(), Jf.size());
-    // Linear-response Jacobian (Oct 2026) for comparison with J.bin; GFN2 closed shell only.
+    // Linear-response Jacobian (Oct 2026) for comparison with J.bin; closed shell only.
     double t_resp_ms = -1.0;
     bool have_resp = false;
-    if (gfn2 && !openShell()) {
+    if (!openShell()) {
         const auto t_r0 = clk::now();
         PrecondMatrix Jr;
         std::string rerr;
@@ -1115,7 +1116,7 @@ void XTB::writeScfJacobianDump(const std::string& dir, const Vector& x_star, con
         { "x_star.bin", "float64 [dim], converged SCC input of the last iteration" },
         { "g_star.bin", "float64 [dim], G(x*) evaluated by the dump (first of the two purity evaluations)" },
         { "J.bin", "float64 [dim, dim]" }, { "J_fwd.bin", "float64 [dim, dim]" },
-        { "J_response.bin", "float64 [dim, dim], linear-response Jacobian (computeScfJacobianResponse), same convention as J.bin; GFN2 closed shell only" },
+        { "J_response.bin", "float64 [dim, dim], linear-response Jacobian (computeScfJacobianResponse), same convention as J.bin; closed shell only" },
         { "lin_delta.bin", "float64 [lin_test_count, dim], random delta" },
         { "lin_g.bin", "float64 [lin_test_count, dim], G(x*+delta)" },
         { "eta_sh.bin", "float64 [nsh], shell hardness = diagonal of gamma (Eh)" },

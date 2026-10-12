@@ -737,12 +737,16 @@ bool XTB::computeScfJacobianResponse(const Vector& x_star, PrecondMatrix& J, std
     const int nao = m_basis.nao;
     const int nsh = m_basis.nsh;
     const int nat = m_atomcount;
-    const int dim = nsh + 9 * nat;
-    if (m_method != MethodType::GFN2) { err = "response Jacobian: GFN2 only"; return false; }
+    const bool gfn2 = (m_method == MethodType::GFN2);
+    const int nmp = gfn2 ? 9 : 0;   // GFN2: dp and qp per atom; GFN1 mixes q_sh only
+    const int dim = nsh + nmp * nat;
+    if (!gfn2 && m_method != MethodType::GFN1) { err = "response Jacobian: GFN1 and GFN2 only"; return false; }
     if (openShell()) { err = "response Jacobian: closed shell only"; return false; }
     if (x_star.size() != dim) { err = "response Jacobian: SCC vector length mismatch"; return false; }
-    ensureHostMultipoleIntegrals();
-    if (!m_mp_initialized) { err = "response Jacobian: multipole integrals missing"; return false; }
+    if (gfn2) {
+        ensureHostMultipoleIntegrals();
+        if (!m_mp_initialized) { err = "response Jacobian: multipole integrals missing"; return false; }
+    }
 
     // 1. Orbitals of F(v(x*)).
     const Potential pot0 = scfPotentialAt(x_star);
@@ -770,12 +774,14 @@ bool XTB::computeScfJacobianResponse(const Vector& x_star, PrecondMatrix& J, std
         }
 
     // 3. AO-side matrices SC = S C, V_k = D_k^T C (k = 0..2 dipole, 3..8 quadrupole).
-    std::array<Matrix, 10> V;
+    std::array<Matrix, 10> V;   // GFN1: only V[0]
     V[0].noalias() = m_S * C;
-    for (int k = 0; k < 3; ++k) V[1 + k].noalias() = m_dp_int[k].transpose() * C;
-    for (int k = 0; k < 6; ++k) V[4 + k].noalias() = m_qp_int[k].transpose() * C;
+    if (gfn2) {
+        for (int k = 0; k < 3; ++k) V[1 + k].noalias() = m_dp_int[k].transpose() * C;
+        for (int k = 0; k < 6; ++k) V[4 + k].noalias() = m_qp_int[k].transpose() * C;
+    }
     std::array<Matrix, 10> Vt;
-    for (int c = 0; c < 10; ++c) Vt[c] = V[c].transpose();
+    for (int c = 0; c <= nmp; ++c) Vt[c] = V[c].transpose();
 
     // 4. Columns in batches. Phase times for the developer switch CURCUMA_SCF_JAC_COMPARE.
     using rclk = std::chrono::steady_clock;
@@ -804,6 +810,7 @@ bool XTB::computeScfJacobianResponse(const Vector& x_star, PrecondMatrix& J, std
                 const int at = m_basis.ao2at[mu];
                 const double u0 = (pp.v_sh(sh) + pp.v_at(at) - pm.v_sh(sh) - pm.v_at(at)) / (2.0 * h);
                 blk.row(mu) = u0 * V[0].row(mu);
+                if (!gfn2) continue;
                 for (int d = 0; d < 3; ++d) {
                     const double u = (pp.v_dp(d, at) - pm.v_dp(d, at)) / (2.0 * h);
                     if (u != 0.0) blk.row(mu) += u * V[1 + d].row(mu);
@@ -840,7 +847,7 @@ bool XTB::computeScfJacobianResponse(const Vector& x_star, PrecondMatrix& J, std
             Eigen::RowVectorXd g(nao);
             g = Vt[0].cwiseProduct(Z).colwise().sum();            // sum_p SC(mu,p) Z(p,mu)
             for (int mu = 0; mu < nao; ++mu) out(m_basis.ao2sh[mu]) -= g(mu);
-            for (int d = 0; d < 9; ++d) {
+            for (int d = 0; d < nmp; ++d) {
                 g = Vt[1 + d].cwiseProduct(Z).colwise().sum();
                 for (int mu = 0; mu < nao; ++mu) out(nsh + d * nat + m_basis.ao2at[mu]) -= g(mu);
             }

@@ -816,7 +816,7 @@ public:
      * @brief Jacobian J = G'(x*) - I of the SCC fixed-point map by linear response, without a new
      *        eigensolve per column (Claude Generated, Oct 2026; xtb_response.cpp).
      *
-     * GFN2, closed shell. x = [q_sh | dp | qp] (packSccVector layout). One eigensolve at v(x*),
+     * GFN1 or GFN2, closed shell. x = [q_sh | dp | qp] for GFN2, [q_sh] for GFN1 (packSccVector layout). One eigensolve at v(x*),
      * then for every column k: dv = dv/dx_k (central difference of the potential alone), dF in the
      * MO basis, dP_pq = w_pq dF_pq with w_pq = (f_p - f_q)/(eps_p - eps_q) (Fermi derivative for
      * degenerate pairs, chemical-potential shift for a fixed electron count), Mulliken/multipole
