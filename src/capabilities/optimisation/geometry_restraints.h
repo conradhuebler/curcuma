@@ -80,9 +80,12 @@ struct DistanceRestraint {
  *
  * UNITS -- the single most error-prone part, so it is stated explicitly:
  *  - the geometry passed in is in ANGSTROM (curcuma's Molecule geometry),
- *  - the gradient is in Eh/BOHR (curcuma's optimiser convention),
- *  - dphi/dr therefore comes out in rad/Angstrom and is converted with
- *    d/dBohr = d/dAngstrom * (Angstrom per Bohr) = * 0.529177...
+ *  - the gradient is in Eh/ANGSTROM: it is added to EnergyCalculator::Gradient(), which is
+ *    Eh/Angstrom for every method (docs/GRADIENT_VALIDATION.md), and the optimisers step in
+ *    Angstrom. dE/dr is therefore used as is, no conversion.
+ *    Claude Generated (Oct 2026): until then this term was multiplied by 0.529177 (an obsolete
+ *    Eh/Bohr assumption), so restraint energy and gradient disagreed by that factor and the
+ *    LBFGSpp line search stopped with "zero step" whenever a restraint was stretched.
  *  - the returned energy is in Hartree and MUST be added to the method energy: the LBFGSpp line
  *    search only accepts a step that lowers the RETURNED energy, so a gradient-only bias would be
  *    fought by the line search instead of followed (the same lesson as the interactive-grab bias in
@@ -175,7 +178,7 @@ public:
     /**
      * @brief Add the restraint energy and gradient.
      * @param geometry  atom positions in Angstrom (natoms x 3)
-     * @param gradient  flat gradient in Eh/Bohr, atom-major (3*natoms); restraint terms are ADDED
+     * @param gradient  flat gradient in Eh/Angstrom, atom-major (3*natoms); restraint terms are ADDED
      * @return the restraint energy in Hartree (to be added to the method energy)
      */
     double apply(const Geometry& geometry, Vector& gradient) const
@@ -195,8 +198,8 @@ public:
                 continue; // coincident atoms: the direction is undefined, leave it to the method
             const double delta = dist - r.target;
             energy += 0.5 * r.force * delta * delta;
-            // Eh/Angstrom -> Eh/Bohr, same conversion as the dihedral part below.
-            const Eigen::Vector3d grad_i = (r.force * delta * kAngstromPerBohr / dist) * d;
+            // dE/dr_i [Eh/Angstrom] = k (r - r0) (r_i - r_j)/r
+            const Eigen::Vector3d grad_i = (r.force * delta / dist) * d;
             for (int c = 0; c < 3; ++c) {
                 gradient[3 * r.i + c] += grad_i(c);
                 gradient[3 * r.j + c] -= grad_i(c);
@@ -223,8 +226,8 @@ public:
 
             energy += 0.5 * r.force * delta * delta;
 
-            // dE/dr [Eh/Angstrom] = k * delta * dphi/dr [rad/Angstrom]; -> Eh/Bohr
-            const double prefactor = r.force * delta * kAngstromPerBohr;
+            // dE/dr [Eh/Angstrom] = k * delta * dphi/dr [rad/Angstrom]
+            const double prefactor = r.force * delta;
             const int idx[4] = { r.i, r.j, r.k, r.l };
             for (int a = 0; a < 4; ++a)
                 for (int c = 0; c < 3; ++c)
@@ -256,10 +259,6 @@ public:
     }
 
 private:
-    // CODATA-2018 Bohr radius in Angstrom (mirrors CurcumaUnit; kept local so this header stays
-    // usable from the optimiser without pulling in the unit system).
-    static constexpr double kAngstromPerBohr = 0.52917721067;
-
     std::vector<DihedralRestraint> m_dihedrals;
     std::vector<DistanceRestraint> m_distances;
 };

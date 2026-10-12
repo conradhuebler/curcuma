@@ -122,7 +122,10 @@ double LBFGSppObjectiveFunction::operator()(const Vector& x, Vector& grad)
         // biased surface (see bindRestraints). Energy and gradient are updated together --
         // the line search accepts a step by the returned energy, so a gradient-only bias would be
         // fought by it (the identical lesson as the interactive-grab bias below).
-        if (m_restraints && !m_restraints->empty())
+        // Claude Generated (Oct 2026): NOT on the primed (reused) evaluation -- the driver's
+        // evaluateEnergyAndGradient() has already added the restraints to the energy/gradient that
+        // prime() hands over, so adding them again counted them twice at the start geometry.
+        if (!reuse && m_restraints && !m_restraints->empty())
             energy += m_restraints->apply(m_molecule->getGeometry(), grad);
 
         // Apply constraints to gradient
