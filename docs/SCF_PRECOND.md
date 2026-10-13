@@ -313,3 +313,9 @@ no "ignored" message. M on the device 0.22 to 20.4 MB (chain), device memory unc
 (peptide 2.4 -> 5.3 s, chain 15.4 -> 22.5 s under load). In the one low-load pair (chain, n=2) the SCF time fell by 11 % (1621 / 1592 ms -> 1413 / 1420 ms seg, 1428 / 1421 ms seg+response) and the build took 750 to 804 ms (fd) or 288 to 297 ms
 (response). MD 40 fs: chain 501 s -> 527 s (n=1 each, load 35), peptide no difference (n=5): 40 fs is too short to amortise the build. Not measured: a quiet machine, MD longer than 40 fs, building M on the device, Hessian on the GPU
 (the Hessian builds M once per worker there, see above), GFN1 on the GPU (not supported).
+
+Repeat on a quiet machine (Oct 13, 2026, current HEAD, RTX 5080, resident loop, `-gpu_strict true`, load 0.2 to 3 for the single points, n=3 alternating, all energies equal to 1e-8 Eh, no fallback):
+iterations none -> seg: peo212 12 -> 8, polystyrene 14 -> 8, peptide 16 -> 9, chain 12 -> 10; SCF time 170 -> 146, 266 -> 203, 281 -> 206, 1559 -> 1373 ms; build of M 54 / 23 (peo212), 199 to 221 / 75 to 78 (polystyrene),
+561 to 568 / 153 to 167 (peptide), 330 / 138 ms (chain) with fd / response. Wall time of a single point with seg+response against none: peo212 0.49 / 0.50 to 0.54 s, polystyrene 0.65 / 0.66 s, peptide 0.73 to 0.76 / 0.65 to 0.67 s (+15 %),
+chain 3.05 to 3.16 / 3.14 to 3.30 s (up to -7 %). MD 100 fs (seg+response, n=2, load 3 to 14): chain 285.7, 271.9 s -> 259.6, 242.0 s (-9 / -11 %), peptide 25.9, 26.0 s -> 20.4, 20.4 s (-21 %); end energies equal within 1e-4 Eh (chain, GPU scatter)
+and 1e-6 Eh (peptide). The earlier statement "no gain in wall time" refers to the loaded campaign above and is superseded for MD.
