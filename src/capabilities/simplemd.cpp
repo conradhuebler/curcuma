@@ -2568,7 +2568,16 @@ bool SimpleMD::step()
 
     if (m_step % m_dump == 0) {
         if (bool write = WriteGeometry()) {
-            m_run_states.push_back(WriteRestartInformation());
+            // K6 (Oct 2026, Claude Generated): m_run_states is read only by the -rescue branch
+            // below; without -rescue it was a 640 kB-per-dump copy (polymer_2x) that nobody read.
+            // With -rescue, reuse the state WriteGeometry() -> TriggerWriteRestart() just built
+            // (nothing changes the restart state in between) instead of building it twice.
+            if (m_rescue) {
+                if (m_last_dump_state.is_null())
+                    m_last_dump_state = WriteRestartInformation();
+                m_run_states.push_back(std::move(m_last_dump_state));
+            }
+            m_last_dump_state = json();
             m_current_rescue = 0;
             // WP-S2 (May 2026): append diagnostics record parallel to XYZ trajectory
             if (m_md_diagnostics && m_diag_writer) {
@@ -4819,7 +4828,11 @@ bool SimpleMD::WriteGeometry()
         geometry(i, 1) = m_eigen_geometry.data()[3 * i + 1];
         geometry(i, 2) = m_eigen_geometry.data()[3 * i + 2];
     }
-    TriggerWriteRestart();
+    // K6 (Oct 2026): keep the state for the -rescue history in step(); unused otherwise.
+    if (m_rescue)
+        m_last_dump_state = TriggerWriteRestart();
+    else
+        TriggerWriteRestart();
     m_molecule.setGeometry(geometry);
 
     // Claude Generated (Nov 2025): Write VTF trajectory for CG systems

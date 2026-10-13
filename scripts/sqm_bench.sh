@@ -19,7 +19,9 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CURCUMA="$REPO/release/curcuma"
 TBLITE="$REPO/release_tblite/_deps/tblite-build/app/tblite"
 XTB="$(command -v xtb || true)"
-MOLDIR="$REPO/test_cases/sqm_reference/molecules"
+# molecules come from the structure library test_cases/structures, staged under the names used below
+declare -A MOLID=([H2O]=water.ideal-c2v [caffeine]=caffeine [triose]=trisaccharide-c18h32o16 [complex]=macrocycle-bgal
+  [acetic_acid_dimer]=acetic-acid-dimer [C6H6]=benzene.ideal-d6h [CH4]=methane.ideal-td [NH3]=ammonia.ideal-c3v [HCN]=hydrogen-cyanide)
 
 N=${1:-3}; shift 2>/dev/null || true
 MOLS=("$@"); [ ${#MOLS[@]} -eq 0 ] && MOLS=(caffeine triose complex)
@@ -27,6 +29,8 @@ CORE=0
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OMP_MAX_ACTIVE_LEVELS=1
 PIN=(taskset -c $CORE)
 SCRATCH="$(mktemp -d /tmp/sqmbench.XXXXXX)"
+MOLDIR="$SCRATCH/molecules"
+for m in "${MOLS[@]}"; do python3 "$REPO/scripts/structlib.py" stage "$MOLDIR" "$m=${MOLID[$m]}"; done
 strip() { sed -r 's/\x1b\[[0-9;]*m//g'; }
 
 # min wall (ms) over N runs of "$@", stdout/stderr discarded, run in $SCRATCH

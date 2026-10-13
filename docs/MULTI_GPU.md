@@ -27,7 +27,7 @@ Caveat: the polymer (1410 atoms) runs had ollama occupying 9-12 GB per GPU; the 
 
 - GFN-FF single point is >98 % CPU setup (topology + parameters); the GPU energy call is 137 ms. Gate G0e: passed -> multi-GPU cannot speed up a GFN-FF SP.
 - GPU gfn2/gfn1 wall minus reported TOTAL: ~0.7-1 s untimed (context/plugin init, uploads).
-- GFN-FF CPU vs GPU energy differs by 5.7e-7 Eh on polymer_2x (not investigated; GPU EEQ cutoff suspected). **Superseded (Sep 25, 2026)**: the cause was different Bohr radii in the CPU and GPU CN radii; CPU == GPU to all 10 printed decimals since, CLAUDE.md Known Issue #33(a).
+- GFN-FF CPU vs GPU energy differs by 5.7e-7 Eh on polymer_2x (not investigated; GPU EEQ cutoff suspected). **Superseded (Sep 25, 2026)**: the cause was different Bohr radii in the CPU and GPU CN radii; CPU == GPU to all 10 printed decimals since, KNOWN_ISSUES_ARCHIVE.md Known Issue #33(a).
 
 ### GFN-FF MD, polymer_2x, 50 steps, dt 1 fs, -threads 36 (GPU run used the wrong gradient unit, see below)
 
@@ -52,7 +52,7 @@ Caveat: the polymer (1410 atoms) runs had ollama occupying 9-12 GB per GPU; the 
 
 ### Dense eigensolver, n = 15444 (GFN2 nao of polymer_2x), random symmetric matrix
 
-Tool: `test_cases/cuda/bench_syevd_mg.cpp` (standalone, build line in its header). Solve time only; data already on the device(s). Eigenvalues Dn vs Mg agree to 1e-13.
+Tool: `scripts/gpu_bench/bench_syevd_mg.cpp` (standalone, build line in its header). Solve time only; data already on the device(s). Eigenvalues Dn vs Mg agree to 1e-13.
 
 | Solver | GPUs | FP64 | FP32 | memory per GPU (FP64) |
 |---|---|---|---|---|
@@ -66,7 +66,7 @@ Tool: `test_cases/cuda/bench_syevd_mg.cpp` (standalone, build line in its header
 - On the A4500 FP32 is 6.6x faster than FP64. Multi-GPU therefore only helps the FP64 iterations (the final polishing steps of the mixed-precision SCF) and as a memory enabler (4.0 vs 9.1 GB per device).
 - PCIe topology (PIX vs NODE) makes no measurable difference here.
 - `cusolverMg` is marked **deprecated** in CUDA 13.3 (successor: cuSOLVERMp on NCCL/CAL). Integrated as FP64-only fallback; the eigenvalue-sum check used here did not catch its unusable FP32 eigenvectors at this size (see step 3).
-- cuSOLVERMp 0.9.1 (same matrix): FP64 1 GPU 50.2 s, 2 GPUs 36.3 s, 4 GPUs 20.7 s (nb 128); FP32 4 GPUs 5.24 s, 2 GPUs 7.36 s; 1.5-2.7 GB per GPU. Tool: `test_cases/cuda/bench_syevd_mp.cpp`.
+- cuSOLVERMp 0.9.1 (same matrix): FP64 1 GPU 50.2 s, 2 GPUs 36.3 s, 4 GPUs 20.7 s (nb 128); FP32 4 GPUs 5.24 s, 2 GPUs 7.36 s; 1.5-2.7 GB per GPU. Tool: `scripts/gpu_bench/bench_syevd_mp.cpp`.
 - Cusolver Mg layout pitfall: the column blocks are dealt out **cyclically** (block b -> device b % ndev). A contiguous layout returns wrong eigenvalues without any error.
 
 ### Not yet measured

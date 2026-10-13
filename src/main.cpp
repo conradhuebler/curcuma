@@ -2273,7 +2273,14 @@ int executeSimpleMD(const json& controller, int argc, char** argv) {
     auto* md = new SimpleMD(md_controller, false);
     initializeBMT(md, argv[2], "md", controller);
     md->setMolecule(mol);
-    md->Initialise();
+    // Claude Generated (Oct 2026): a failed setup (unknown method, unsupported EEQ solver for the
+    // device, ...) used to print the error and still end with exit code 0, which scripts read as
+    // success. Initialise() already returns false with the reason logged.
+    if (!md->Initialise()) {
+        CurcumaLogger::error("MD setup failed - no simulation was run");
+        delete md;
+        return 1;
+    }
     md->start();
     md->processBakFiles();
     delete md;

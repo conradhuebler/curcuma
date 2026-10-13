@@ -1,7 +1,7 @@
 {
   "molecule": {
     "name": "O3",
-    "geometry_file": "../test_cases/molecules/trimers/O3.xyz",
+    "geometry_file": "../test_cases/structures/small/ozone.xyz",
     "atoms": [
       {
         "element": "O",

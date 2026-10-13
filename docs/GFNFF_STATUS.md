@@ -4,6 +4,13 @@
 **Implementation**: AI-generated, machine-tested — **human production testing pending**
 **Location**: `src/core/energy_calculators/ff_methods/`
 
+## xtb library regression gate (Oct 11, 2026) 🤖⚙️
+
+- ctest `xtb_library_energies` (label `gfnff;sqm`, CPU, 4 threads): gfnff and gfn2 single points vs the stored xtb 6.7.1 energies in `test_cases/reference_data/xtb_library_energies.json`; no xtb run at test time.
+- GFN-FF: 1e-5 Eh vs xtb; known deviations (|d| > 1e-5, 8 structures, e.g. macrocycle-bgal, jl22-bgal) only must reproduce the stored difference to 1e-5 Eh. Charged structures use the `frag_charge_model reference` baseline.
+- GFN2: 1e-4 Eh vs xtb for natoms <= 500 (measured max 5.2e-5); peo201-chain (1410 atoms, D4 ATM split) only with `--include-large`.
+- Limit: for known-deviation structures the check compares differences derived from the same JSON, so an error in the stored `gfnff_xtb` alone is not detected (negative probe: `gfnff_curcuma` +1e-3 fails, `gfnff_xtb` +1e-3 passes).
+
 ## React topology mode (Aug 2026) 🤖⚙️
 
 Dynamic bond topology for MD: `-gfnff.topology_mode react` re-detects bonds with a
@@ -392,7 +399,7 @@ load-bearing part.
 
 **Original issue**: Dispersion GradComp fails on large molecules (triose 2.1e-4, complex 4.1e-4, polymer 4.9e-4 vs tol 1e-4), attributed to √N accumulation of small per-pair C6/CN parameter differences.
 
-**Re-verified Sep 2026** (`test_gfnff_validation` on the current committed references, `ctest -R gfnff_val_{polymer,complex,triose}`): dispersion GradComp max_err is now **7.5e-9 (triose), 8.9e-9 (complex), 9.9e-9 (polymer)** — five orders of magnitude under the old values and the 1e-4 tolerance, and every other component (Bond/Angle/Torsion/Repulsion/Coulomb/HBond) passes with similar margin. The √N precision limit described above no longer reproduces; likely fixed incidentally by later D3/D4 precision work (e.g. the C6/CN reference-table and CN-cutoff fixes in CLAUDE.md Known Issues #5) without this doc being updated at the time.
+**Re-verified Sep 2026** (`test_gfnff_validation` on the current committed references, `ctest -R gfnff_val_{polymer,complex,triose}`): dispersion GradComp max_err is now **7.5e-9 (triose), 8.9e-9 (complex), 9.9e-9 (polymer)** — five orders of magnitude under the old values and the 1e-4 tolerance, and every other component (Bond/Angle/Torsion/Repulsion/Coulomb/HBond) passes with similar margin. The √N precision limit described above no longer reproduces; likely fixed incidentally by later D3/D4 precision work (e.g. the C6/CN reference-table and CN-cutoff fixes in KNOWN_ISSUES_ARCHIVE.md Known Issues #5) without this doc being updated at the time.
 - **Status**: RESOLVED - no longer a caveat for large-system dispersion gradients.
 
 ### Coulomb Precision Limit on Complex (Mar 12, 2026) - ACCEPTED
@@ -441,6 +448,15 @@ Remaining dispersion GradComp deviation is a separate precision limit (see above
 **Fixed bugs**:
 1. **Phase 2 cnmax cap**: Removed incorrect `min(cn, 4.4)` cap on fractional CN in Phase 2. Fortran goed_gfnff uses `sqrt(cn(i))` directly without cnmax limit.
 2. **Phase 2 metal chi-shift**: mchishift now only applied in Phase 1 (matching Fortran gfnff_ini.f90:417 vs 715).
+
+## CPU far-field shortcut of the Coulomb term (Oct 10, 2026)
+
+Claude Generated, machine-tested only (human production testing pending). For `gamma_ij*r >= 6.5` (`gamma_ij = 1/sqrt(alpha_i+alpha_j)`) `erf` is exactly 1.0 in FP64 and `exp(-42.25) = 4.4e-19` lies below one ulp of the force, so `FFWorkspace::calcCoulomb` (implicit and stored pair loop) uses `q_i q_j/r` and `-q_i q_j/r^3`, and the EEQ matrix (`calculateFinalCharges` both loops, `buildCorrectedEEQMatrix`) uses `1/r`, without `erf`/`exp`. Test `r^2 >= 42.25 (alpha_i+alpha_j)` before any sqrt. Switch: `-gfnff.farfield_shortcut false` (gfnff scope, forwarded to `eeq_solver`) restores the full evaluation.
+
+- Pair share: polymer_2x 99.9 % far field (measured by the Sonnet agent); peo201-chain (1410 atoms) 980058 of 993345 pairs (98.7 %), caffeine 117 of 276 (counted with a temporary counter, removed).
+- Bit identity (energy 15 digits + gradient dump, md5, `-threads 1/16/2`, shortcut build vs the build before): polymer_2x 1 and 16 threads, peo201-water500, urea400-water1000, peo201-chain, caffeine (16 threads): 5 of 5 identical; 31 GMTKN55 structures (every 80th plus charged ones: 8 charged with `reference` model, 3 open shell): 31 of 31; 15 MOR41 (every 6th): 15 of 15. MD 50 fs polymer_2x, 16 threads: diagnostics energies, charges, gradient norms identical in all 50 steps.
+- Time, polymer_2x MD 20 fs (median of the per-step values, n=3 alternating, load 2.5-3.3): `step_total` 525 -> 467 ms at 16 threads, 1745 -> 871 ms at 1 thread; `eeq_solve` 247 -> 237 and 584 -> 386 ms.
+- Not covered: Phase 1 EEQ matrix (topological distances, `alpha` instead of `alpha_corrected`, not touched), periodic systems, other methods (gfn1/gfn2 do not use this path), GPU (always shortcut). Test: `test_cases/cli/gfnff/09_farfield_shortcut`.
 
 ## Next Refinement Steps
 

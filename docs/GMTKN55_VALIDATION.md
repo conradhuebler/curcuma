@@ -20,7 +20,7 @@ machine).
 
 Nothing is skipped any more: native gfn1/gfn2 gained the open-shell (two-channel Fermi)
 occupation in Sep 2026, so the 320 structures with a nonzero `.UHF` are now compared too
-(CLAUDE.md Known Issue #9). Split by shell:
+(KNOWN_ISSUES_ARCHIVE.md Known Issue #9). Split by shell:
 
 | method | closed shell | | open shell | |
 |---|---:|---:|---:|---:|
@@ -31,11 +31,11 @@ occupation in Sep 2026, so the 320 structures with a nonzero `.UHF` are now comp
 \* `W4-11/so3` with gfn1 used to sit at 56738 kcal/mol here — an SCF that converged to a
 spurious stationary point (max |q| = 13.9 e) out of the EEQ initial guess. curcuma now
 rejects a physically impossible converged charge distribution and repeats from the bare H0,
-which reproduces xtb to 1e-8; see CLAUDE.md Known Issue #9.
+which reproduces xtb to 1e-8; see KNOWN_ISSUES_ARCHIVE.md Known Issue #9.
 
 The gfn1 row was **MAD 0.041 / max 11.93** until Sep 2026, and every one of its 41
 deviations above 0.1 kcal/mol was in `HAL59`: the GFN1 halogen-bond correction was a stub
-returning 0.0 (CLAUDE.md Known Issue #26). With the term ported, `HAL59` goes MAD
+returning 0.0 (KNOWN_ISSUES_ARCHIVE.md Known Issue #26). With the term ported, `HAL59` goes MAD
 0.950 → **0.00128**, max 11.93 → 0.011, and no subset is above 0.011 any more. What is
 left is **not a curcuma error**: it is the xtb-vs-tblite STO-6G 4s/4p split (Known Issue
 #27), which curcuma resolves in tblite's favour on a measured basis-quality argument.
@@ -44,7 +44,7 @@ structures containing a Z=19–36 element from MAD 0.00313 / max 0.01056 to
 **0.0000056 / 0.0000143** kcal/mol — i.e. the split is the whole of it.
 
 The gfnff row was 3.389 after the two isolated-ion EEQ fixes below, 3.462 after the
-pyrrole pi-veto fix (CLAUDE.md Known Issue #10), and reached **2.117** with the four
+pyrrole pi-veto fix (KNOWN_ISSUES_ARCHIVE.md Known Issue #10), and reached **2.117** with the four
 term-level fixes of Known Issue #12 - the nitro pi-electron count and the sp2-N-H bond
 strength being the two GMTKN55 exercises heavily (`Amino20x4` MAD 5.664 -> 0.001,
 max 26.9 -> 0.016). Known Issue #13 (two-fragment charge placement) then took it to
@@ -241,7 +241,7 @@ Verified via GMTKN55 RC21/... no, via DIPCS10/G21IP/ALK8: `curcuma -sp ... -meth
 for Li+/Be+/Be2+/Na+/Mg2+ now all match `xtb --gfnff --sp` to <1e-6 Eh. Full project ctest
 suite (`ctest`, 234 tests): 58/58 `gfnff`-labelled tests pass; the 21 failures in the full
 run are pre-existing/environmental (missing `release_tblite/` reference-dump tree, 17
-tests; `cli_curcumaopt_07_opt_multixyz` documented golden-value drift, CLAUDE.md Known
+tests; `cli_curcumaopt_07_opt_multixyz` documented golden-value drift, KNOWN_ISSUES_ARCHIVE.md Known
 Issues; 3 unit-test binaries not rebuilt since before this session) - none touch GFN-FF/EEQ.
 
 ## GFN-FF: remaining outliers (unrelated to the two fixes above)
@@ -280,7 +280,7 @@ none involve isolated atoms or Li/Be, so neither fix above touches them:
   better: the dgam fix is more correct but doesn't guarantee every individual multi-term
   structure's cancellation improves), `YBDE18` (N-C ylide/dative-bond dissociation, -61 to
   -82), `DC13/c20bowl` (curved all-sp2 carbon bowl, +500, unchanged - the global max). Same
-  bug class as the topology/hybridization-classification fixes already logged in CLAUDE.md
+  bug class as the topology/hybridization-classification fixes already logged in KNOWN_ISSUES_ARCHIVE.md
   Known Issues #6 (GFN-FF FT-HMO / bpair / hybridization fixes) - plausible further
   instances, not root-caused individually here.
 

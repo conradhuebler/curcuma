@@ -5338,33 +5338,6 @@ void FFWorkspaceHip::setUnitCell(const double* cell_bohr_9, const double* cell_b
 // GPU-only CN chain-rule setters (Claude Generated March 2026)
 // ============================================================================
 
-void FFWorkspaceHip::setCNPairList(const std::vector<int>& idx_i,
-                                    const std::vector<int>& idx_j,
-                                    const std::vector<double>& rcov_sum)
-{
-    const int np = static_cast<int>(idx_i.size());
-    if (np == 0 || idx_j.size() != idx_i.size() || rcov_sum.size() != idx_i.size()) return;
-
-    m_cn_pair_i    = idx_i;
-    m_cn_pair_j    = idx_j;
-    m_cn_pair_rcov = rcov_sum;
-    m_cn_n_pairs   = np;
-
-    // Upload to GPU
-    auto& impl = *m_impl;
-    impl.d_cn_idx_i.alloc(np);
-    impl.d_cn_idx_j.alloc(np);
-    impl.d_cn_rcov_sum.alloc(np);
-    impl.d_cn_idx_i.upload(idx_i.data(), np);
-    impl.d_cn_idx_j.upload(idx_j.data(), np);
-    impl.d_cn_rcov_sum.upload(rcov_sum.data(), np);
-    impl.n_cn_pairs = np;
-    m_cn_pairs_on_gpu = true;
-
-    if (CurcumaLogger::get_verbosity() >= 3)
-        CurcumaLogger::info(fmt::format("  GPU CN chain-rule: {} pairs uploaded", np));
-}
-
 void FFWorkspaceHip::setDlogDCN(const Vector& dlogdcn)
 {
     m_dlogdcn = dlogdcn;
@@ -5440,29 +5413,6 @@ void FFWorkspaceHip::generateCNPairListOnGPU()
 
     if (CurcumaLogger::get_verbosity() >= 3)
         CurcumaLogger::info(fmt::format("  GPU CN pair list: {} pairs generated on GPU", h_count));
-}
-
-void FFWorkspaceHip::updateDispersionDC6DCN(const Matrix& dc6dcn)
-{
-    // Claude Generated (March 2026): Extract per-pair dc6dcn values and upload to GPU.
-    // Eliminates the CPU round-trip (download dEdcn, add dispersion, re-upload).
-    const int nd = static_cast<int>(m_disp_idx_i_host.size());
-    if (nd == 0 || dc6dcn.size() == 0) return;
-
-    for (int k = 0; k < nd; ++k) {
-        int i = m_disp_idx_i_host[k];
-        int j = m_disp_idx_j_host[k];
-        if (i < dc6dcn.rows() && j < dc6dcn.cols()) {
-            m_h_dc6dcn_ij[k] = dc6dcn(i, j);
-            m_h_dc6dcn_ji[k] = dc6dcn(j, i);
-        } else {
-            m_h_dc6dcn_ij[k] = 0.0;
-            m_h_dc6dcn_ji[k] = 0.0;
-        }
-    }
-
-    m_impl->disp.dc6dcn_ij.upload(m_h_dc6dcn_ij.data(), nd);
-    m_impl->disp.dc6dcn_ji.upload(m_h_dc6dcn_ji.data(), nd);
 }
 
 // ============================================================================

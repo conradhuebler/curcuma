@@ -497,8 +497,6 @@ set(curcuma_core_SRC
         src/capabilities/persistentdiagram.cpp
         src/capabilities/analysenciplot.cpp
         src/capabilities/curcumamethod.cpp
-        # Native LBFGS optimizer - Claude Generated (disabled, superseded by native_optimizer_adapters)
-        # src/capabilities/native_lbfgs_optimizer.cpp
         src/capabilities/confscan.cpp
         src/capabilities/confsearch.cpp
         src/capabilities/shared_bias_pool.cpp
@@ -1550,10 +1548,6 @@ endif()
 add_executable(curcuma_helper
         src/helpers/main.cpp)
         
-# cli_helper disabled - requires cli_parser.h (native-gfnff WIP)
-# add_executable(cli_helper
-#         src/helpers/cli_test.cpp)
-
 add_executable(parallel_scf
         src/helpers/parallel_scf.cpp)
 target_link_libraries(parallel_scf curcuma_core)
@@ -1586,13 +1580,13 @@ target_sources(Continuous
 )
 add_test(NAME molecule_comprehensive COMMAND test_molecule)
 
-add_test(NAME AAAbGal_dtemplate COMMAND AAAbGal dtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME AAAbGal_free COMMAND AAAbGal free WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME AAAbGal_template COMMAND AAAbGal template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME AAAbGal_subspace COMMAND AAAbGal subspace WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-#add_test(NAME AAAbGal_incremental COMMAND AAAbGal incr WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGlc_dtemplate COMMAND AAAbGlc dtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGlc_free COMMAND AAAbGlc free WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGlc_template COMMAND AAAbGlc template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGlc_subspace COMMAND AAAbGlc subspace WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+#add_test(NAME AAAbGlc_incremental COMMAND AAAbGlc incr WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 
-#set_tests_properties(AAAbGal_incremental PROPERTIES TIMEOUT 300)
+#set_tests_properties(AAAbGlc_incremental PROPERTIES TIMEOUT 300)
 
 add_test(NAME confscan_subspace COMMAND confscan_test subspace WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME confscan_free COMMAND confscan_test free WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
@@ -1621,7 +1615,7 @@ add_test(NAME energy_methods COMMAND test_energy_methods WORKING_DIRECTORY ${PRO
 # Claude Generated: Parameter I/O system comprehensive tests (October 2025)
 add_test(
     NAME parameter_io_tests
-    COMMAND bash ${CMAKE_SOURCE_DIR}/test_cases/test_parameter_io.sh
+    COMMAND bash ${CMAKE_SOURCE_DIR}/test_cases/scripts/test_parameter_io.sh
     WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
 )
 

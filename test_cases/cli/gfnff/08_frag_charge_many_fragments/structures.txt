@@ -1,0 +1,4 @@
+# Structures from test_cases/structures (id, optionally 'as <file name>'); see structures/README.md
+peo201-water500 as peo_water.xyz
+hydronium-water2 as h3op_h2o2.xyz
+water8-cluster as water8.xyz

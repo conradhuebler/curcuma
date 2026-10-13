@@ -13,7 +13,7 @@
 #     quick  : small molecule subset, no MD
 #     OUTDIR : where to keep logs/gradients (default: /tmp/curcuma_regbench)
 #
-# Molecules come from test_cases/ (sqm_reference set + polymer). Add your own by dropping
+# Molecules come from the structure library test_cases/structures (sqm reference set + polymer). Add your own by dropping
 # NAME.xyz into $OUTDIR/mols before running (charge via CHG[NAME] below).
 #
 # Claude Generated (Sep 2026). Not human production-tested.
@@ -22,10 +22,13 @@ REF=$(readlink -f "$1"); NEW=$(readlink -f "$2"); QUICK=${3:-}; OUT=${4:-/tmp/cu
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 mkdir -p "$OUT/mols"
-for f in H2O caffeine H2S PH3 acetic_acid_dimer triose complex; do
-  [ -f "$OUT/mols/$f.xyz" ] || cp "$REPO/test_cases/sqm_reference/molecules/$f.xyz" "$OUT/mols/"
+# structure library ids (test_cases/structures) of the benchmark molecules
+declare -A MOLID=([H2O]=water.ideal-c2v [caffeine]=caffeine [H2S]=hydrogen-sulfide.d-shell-validation
+  [PH3]=phosphine.d-shell-validation [acetic_acid_dimer]=acetic-acid-dimer [triose]=trisaccharide-c18h32o16
+  [complex]=macrocycle-bgal [polymer]=peo201-chain)
+for f in "${!MOLID[@]}"; do
+  [ -f "$OUT/mols/$f.xyz" ] || python3 "$REPO/scripts/structlib.py" stage "$OUT/mols" "$f=${MOLID[$f]}"
 done
-[ -f "$OUT/mols/polymer.xyz" ] || cp "$REPO/test_cases/molecules/larger/polymer.xyz" "$OUT/mols/"
 declare -A CHG=()
 LIST="H2O caffeine H2S PH3 acetic_acid_dimer triose complex polymer"
 [ "$QUICK" = quick ] && LIST="caffeine triose complex"

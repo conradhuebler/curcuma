@@ -87,8 +87,6 @@ settings.ini
 # Test artifacts (CLI and unit tests) - Claude Generated October 2025
 # Build directory isolation: test outputs should be in build/test_cases/
 # Exceptions for legitimate test fixtures
-!test_cases/optimisation/makrocyclic/input.opt.xyz
-!test_cases/optimisation/makrocyclic/input.trj.xyz
 
 # Test output files (generated during test runs)
 test_cases/**/*.trj.xyz
@@ -179,7 +177,6 @@ node_modules
 gfnff_topo
 gfnff_charges
 gfnff_adjacency
-gfnff_validate.py
 gfnff_validation_results.json
 gfnff_comparison_results.csv
 *.engrad
@@ -254,3 +251,11 @@ scripts/gpu_bench/run/
 
 # scripts/tuning_sweep.py scratch directory (default workdir)
 tuning_sweep_run/
+
+# caches written next to structure library files
+test_cases/structures/**/*.topo.json
+test_cases/structures/**/*.param.json
+
+# structure library files are tracked whatever their name (for example *.opt.xyz, *build-*)
+!test_cases/structures/**/*.xyz
+!test_cases/structures/**/*.vtf

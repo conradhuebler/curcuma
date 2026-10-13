@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <chrono>
 #include <fstream>  // Claude Generated (Mar 5, 2026): For diagnostic JSON output
 #include <limits>
@@ -1840,22 +1841,45 @@ void D4ParameterGenerator::computeGaussianWeightDerivatives(CxxThreadPool* pool,
     }
 }
 
-// Claude Generated (Feb 15, 2026): Compute dc6dcn matrix from weight derivatives and C6 references
+// Claude Generated (Feb 15, 2026): Compute dc6dcn from weight derivatives and C6 references
 // Reference: Fortran gfnff_gdisp0.f90:262-305 (get_atomic_c6_d4 dc6dcn part)
 //
 // dc6dcn(i,j) = dC6(i,j)/dCN(i) = sum_{ri,rj} dgwdcn(ri,i) * gw(rj,j) * c6ref(ri,rj,Zi,Zj)
 // dc6dcn(j,i) = dC6(i,j)/dCN(j) = sum_{ri,rj} gw(ri,i) * dgwdcn(rj,j) * c6ref(ri,rj,Zi,Zj)
+//
+// Claude Generated (Oct 2026): stored per pair of the pair list (m_dc6dcn.dc6_di/dc6_dj[p])
+// instead of in a dense N x N matrix that was zeroed every call (429 MB at 7320 atoms) and
+// filled only at the pair-list cells. Each value is computed by the same kernel with the same
+// summation order as before, so every value a reader sees is bit-identical.
 void D4ParameterGenerator::computeDC6DCN(CxxThreadPool* pool, int num_threads)
 {
     // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²×M²)
-    int natoms = static_cast<int>(m_atoms.size());
-    m_dc6dcn = Matrix::Zero(natoms, natoms);
+    if (!m_dc6dcn_pairs_valid) {
+        // No pair list on the host (GPU builds it on device and computes dc6dcn there). The
+        // former full-N^2 fallback had no host reader in that mode; computing nothing keeps
+        // the 429 MB matrix out of every path. Readers find no pair and add nothing.
+        m_dc6dcn.dc6_di.clear();
+        m_dc6dcn.dc6_dj.clear();
+        m_dc6dcn_computed = false;
+        if (CurcumaLogger::get_verbosity() >= 3)
+            CurcumaLogger::warn("D4 computeDC6DCN called without a host pair list; dC6/dCN not computed");
+        return;
+    }
 
-    // Per-pair dc6/dCN kernel. For i<j writes (i,j)=dC6(i,j)/dCN(i) and
-    // (j,i)=dC6(i,j)/dCN(j); for i==j (full-N² fallback only) writes the diagonal
-    // sum. Each unordered pair is the sole writer of its two cells, so any
-    // partition over pairs/rows is race-free without buffering.
-    auto pair_kernel = [&](int i, int j) {
+    const int P = static_cast<int>(m_dc6dcn.pairs.size());
+    m_dc6dcn.dc6_di.resize(P);
+    m_dc6dcn.dc6_dj.resize(P);
+    double* out_di = m_dc6dcn.dc6_di.data();
+    double* out_dj = m_dc6dcn.dc6_dj.data();
+
+    // Per-pair dc6/dCN kernel for pair p = (i, j), i < j. Writes the former matrix cells
+    // (i,j) -> out_di[p] and (j,i) -> out_dj[p]; 0.0 where the matrix kept its zero (element
+    // out of range, no weights). Each pair is its own sole writer: any partition is race-free.
+    auto pair_kernel = [&](int p) {
+        const int i = m_dc6dcn.pairs[p].first;
+        const int j = m_dc6dcn.pairs[p].second;
+        out_di[p] = 0.0;
+        out_dj[p] = 0.0;
         int Zi = m_atoms[i];
         int elem_i = Zi - 1;
         if (elem_i < 0 || elem_i >= MAX_ELEM) return;
@@ -1902,78 +1926,39 @@ void D4ParameterGenerator::computeDC6DCN(CxxThreadPool* pool, int num_threads)
             }
         }
 
-        if (i == j) {
-            m_dc6dcn(i, i) = dc6_di + dc6_dj;
-        } else {
-            m_dc6dcn(i, j) = dc6_di;  // dC6(i,j)/dCN(i)
-            m_dc6dcn(j, i) = dc6_dj;  // dC6(i,j)/dCN(j) — unique writer
-        }
+        out_di[p] = dc6_di;  // dC6(i,j)/dCN(i)
+        out_dj[p] = dc6_dj;  // dC6(i,j)/dCN(j)
     };
 
-    // Lever 3 Opt A: iterate only the in-cutoff pair list — exactly the dc6dcn
-    // entries the gradient consumer reads. Beyond-cutoff cells and the diagonal
-    // stay 0 (never read). Bit-identical for every consumed entry. Falls back to
-    // the full-N² double loop when the list is unavailable (GPU skip / first call).
-    if (m_dc6dcn_pairs_valid) {
-        const int P = static_cast<int>(m_dc6dcn_pairs.size());
-        auto pl_worker = [&](int t_id, int T) {
-            for (int p = t_id; p < P; p += T)
-                pair_kernel(m_dc6dcn_pairs[p].first, m_dc6dcn_pairs[p].second);
-        };
-        if (num_threads > 1 && P > 64) {
-            int T = std::min(num_threads, P);
-            if (pool) {
-                std::vector<std::future<void>> futures;
-                futures.reserve(T - 1);
-                for (int t = 1; t < T; ++t)
-                    futures.push_back(pool->enqueue(pl_worker, t, T));
-                pl_worker(0, T);
-                for (auto& f : futures) f.get();
-            } else {
-                std::vector<std::thread> threads(T - 1);
-                for (int t = 1; t < T; ++t)
-                    threads[t - 1] = std::thread(pl_worker, t, T);
-                pl_worker(0, T);
-                for (auto& th : threads) th.join();
-            }
-        } else {
-            pl_worker(0, 1);
-        }
-        m_dc6dcn_computed = true;
-        return;
-    }
-
-    // Fallback: original full-N² row-partitioned loop. Each thread owns row i and
-    // iterates j >= i, so it is the sole writer of cells (i,j) and (j,i).
-    auto dc6_worker = [&](int t_id, int T) {
-        for (int i = t_id; i < natoms; i += T) {
-            int elem_i = m_atoms[i] - 1;
-            if (elem_i < 0 || elem_i >= MAX_ELEM) continue;
-            if (m_gaussian_weights[i].empty() || m_gaussian_weight_derivatives[i].empty()) continue;
-            for (int j = i; j < natoms; ++j) pair_kernel(i, j);
-        }
+    // Lever 3 Opt A: only the in-cutoff pair list - exactly the entries the gradient reads.
+    // Claude Generated (Oct 2026): contiguous pair blocks (neighbouring pairs share rows and
+    // cache lines of the C6 half-contraction). Each value has one writer, so the partition
+    // does not change any value.
+    auto pl_worker = [&](int t_id, int T) {
+        const int pb = static_cast<int>(static_cast<long long>(P) * t_id / T);
+        const int pe = static_cast<int>(static_cast<long long>(P) * (t_id + 1) / T);
+        for (int p = pb; p < pe; ++p)
+            pair_kernel(p);
     };
-
-    if (num_threads > 1 && natoms > 64) {
-        int T = std::min(num_threads, natoms);
+    if (num_threads > 1 && P > 64) {
+        int T = std::min(num_threads, P);
         if (pool) {
             std::vector<std::future<void>> futures;
             futures.reserve(T - 1);
             for (int t = 1; t < T; ++t)
-                futures.push_back(pool->enqueue(dc6_worker, t, T));
-            dc6_worker(0, T);
+                futures.push_back(pool->enqueue(pl_worker, t, T));
+            pl_worker(0, T);
             for (auto& f : futures) f.get();
         } else {
             std::vector<std::thread> threads(T - 1);
             for (int t = 1; t < T; ++t)
-                threads[t - 1] = std::thread(dc6_worker, t, T);
-            dc6_worker(0, T);
+                threads[t - 1] = std::thread(pl_worker, t, T);
+            pl_worker(0, T);
             for (auto& th : threads) th.join();
         }
     } else {
-        dc6_worker(0, 1);
+        pl_worker(0, 1);
     }
-
     m_dc6dcn_computed = true;
 }
 
@@ -1981,13 +1966,13 @@ void D4ParameterGenerator::computeDC6DCN(CxxThreadPool* pool, int num_threads)
 // Called from GFNFF::Calculation() when gradient is requested
 // Reference: Fortran gfnff_gdisp0.f90:382-395 - dc6dcn used for dispersion gradient
 // Claude Generated (Apr 2026): P1a — Skip recomputation when CN change < threshold (MD optimization)
-void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool, int num_threads, bool skip_dc6dcn)
+bool D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool, int num_threads, bool skip_dc6dcn)
 {
     m_cn_values = cn;
 
     // P1a: Skip recomputation if CN change is below threshold
     if (canSkipGaussianWeightsUpdate(cn)) {
-        return;  // gw, dgw, dc6dcn all unchanged — valid for this step
+        return false;  // gw, dgw, dc6dcn all unchanged — valid for this step
     }
 
     // Recompute gaussian weights with new CN values
@@ -2000,7 +1985,7 @@ void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& 
     // GPU will compute dc6dcn per dispersion pair directly.
     if (!skip_dc6dcn) {
         // Lever 3 Opt B: rebuild the half-contraction (CN changed → weights changed)
-        // before computeDC6DCN. Reuses m_dc6dcn_pairs from the last pair-list build.
+        // before computeDC6DCN. Reuses m_dc6dcn.pairs from the last pair-list build.
         precomputeC6HalfContraction(pool, num_threads);
         computeDC6DCN(pool, num_threads);
     }
@@ -2008,6 +1993,7 @@ void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& 
     // Store CN for next step's threshold check
     m_prev_cn_values = cn;
     m_cn_cached = true;
+    return true;
 }
 
 // Claude Generated (Sep 2026, Known Issue #32): stale-CN fix B — see header. Weights +
@@ -2044,7 +2030,7 @@ void D4ParameterGenerator::recordCNValues(const std::vector<double>& cn)
 // Claude Generated (March 2026): Native dispersion pair generation — bypasses JSON entirely
 // For 1410 atoms (993345 pairs), JSON overhead was ~10 seconds. Native: ~1 second.
 std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative(
-    const std::vector<int>& atoms, const Matrix& geometry_bohr)
+    const std::vector<int>& atoms, const Matrix& geometry_bohr, CxxThreadPool* pool, int num_threads)
 {
     m_atoms = atoms;
 
@@ -2068,7 +2054,7 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     // Step 3: Pre-compute Gaussian weights and C6 reference matrix
     if (!m_data_initialized) initializeReferenceData();
     if (!c6CacheCoversAtoms()) precomputeC6ReferenceMatrix();
-    precomputeGaussianWeights();
+    precomputeGaussianWeights(pool, num_threads);
 
     // WP-A (Jun 2026): with gpu_disp_pairs_on_device the GPU builds the pair list +
     // dc6dcn on the device, reusing only the CN + Gaussian weights computed above.
@@ -2083,8 +2069,8 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     // both the energy loop's getChargeWeightedC6 fast path and computeDC6DCN consume
     // the per-atom half-contraction. computeGaussianWeightDerivatives moved up from
     // after the loop (it depends only on CN, always ran unconditionally).
-    computeGaussianWeightDerivatives();
-    precomputeC6HalfContraction();
+    computeGaussianWeightDerivatives(pool, num_threads);
+    precomputeC6HalfContraction(pool, num_threads);
 
     // Step 4: Generate pairs as native structs (no JSON!)
     double a1 = m_config.get<double>("d4_a1", 0.58);
@@ -2105,86 +2091,110 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     constexpr double disp_cutoff_bohr = PAIR_BUILD_CUTOFF_BOHR;  // 60.0 (header constant, Sep 2026)
     constexpr double disp_cutoff_sq = disp_cutoff_bohr * disp_cutoff_bohr;
 
-    // Claude Generated (Sep 2026): pairs are collected per row i and concatenated in i order,
-    // so the list comes out in the serial (i, j) order for every thread count and every run.
-    // Before, thread-local lists were appended in thread-ARRIVAL order under omp critical: the
-    // pair order - and with it the workspace partitioning and the summation order - changed
-    // from run to run, and a 4-thread water8 single point differed in the last bit between
-    // runs (6 repeats, 4 distinct gradients; with -gfnff.dispersion false all 6 identical).
+    // Claude Generated (Sep 2026): pairs are emitted in the serial (i, j) order for every thread
+    // count and every run. Before, thread-local lists were appended in thread-ARRIVAL order under
+    // omp critical: the pair order - and with it the workspace partitioning and the summation
+    // order - changed from run to run, and a 4-thread water8 single point differed in the last
+    // bit between runs (6 repeats, 4 distinct gradients; with -gfnff.dispersion false all 6
+    // identical).
+    //
+    // Claude Generated (Oct 2026): two passes instead of one vector per row plus a serial
+    // concatenation (the concatenation alone was 57 ms of every MD rebuild at 7320 atoms,
+    // 9.4 M pairs): pass 1 counts the pairs of row i, pass 2 writes them at the row's offset.
+    // Same pair set, same order, same values: the per-pair factors that depend only on the atom
+    // (zeta) or on the element pair (r4r2ij, R0^2) are taken from tables filled with the
+    // identical expressions, in the same (i-element, j-element) operand order.
     const int n_at = static_cast<int>(m_atoms.size());
-    std::vector<std::vector<GFNFFDispersion>> row_pairs(n_at);
+    auto pair_in_list = [&](int i, int j) -> bool {
+        const double r2 = (geometry_bohr.row(i) - geometry_bohr.row(j)).squaredNorm();
+        if (r2 > disp_cutoff_sq) return false;
+        const int atom_i = m_atoms[i];
+        const int atom_j = m_atoms[j];
+        return !(atom_i < 1 || atom_i > MAX_ELEM || atom_j < 1 || atom_j > MAX_ELEM);
+    };
+
+    // zeta(Z_i, q_i) per atom (charge source exactly as the former per-pair code)
+    std::vector<double> zeta_atom(n_at, 1.0);
+    for (int i = 0; i < n_at; ++i) {
+        double q_i;
+        if (m_topology_charges.size() > 0)
+            q_i = (i < static_cast<int>(m_topology_charges.size())) ? m_topology_charges(i) : 0.0;
+        else
+            q_i = (i < static_cast<int>(m_eeq_charges.size())) ? m_eeq_charges(i) : 0.0;
+        zeta_atom[i] = GFNFFParameters::zetaChargeScale(m_atoms[i], q_i);
+    }
+    // r4r2ij and R0^2 per ordered element pair of the elements present (slot = index in elems)
+    std::vector<int> elems;
+    std::vector<int> elem_slot(MAX_ELEM + 1, -1);
+    for (int Z : m_atoms)
+        if (Z >= 1 && Z <= MAX_ELEM && elem_slot[Z] < 0) {
+            elem_slot[Z] = static_cast<int>(elems.size());
+            elems.push_back(Z);
+        }
+    const int ne = static_cast<int>(elems.size());
+    std::vector<double> r4r2_tab(static_cast<size_t>(ne) * ne), r0sq_tab(static_cast<size_t>(ne) * ne);
+    for (int a = 0; a < ne; ++a)
+        for (int b = 0; b < ne; ++b) {
+            double sqrt_zr4r2_i = getSqrtZr4r2(elems[a]);
+            double sqrt_zr4r2_j = getSqrtZr4r2(elems[b]);
+            double r4r2ij = 3.0 * sqrt_zr4r2_i * sqrt_zr4r2_j;
+            r4r2_tab[static_cast<size_t>(a) * ne + b] = r4r2ij;
+            r0sq_tab[static_cast<size_t>(a) * ne + b] = std::pow(a1 * std::sqrt(r4r2ij) + a2, 2);
+        }
+
+    // Pass 1: pairs per row, then row offsets
+    std::vector<size_t> row_offset(static_cast<size_t>(n_at) + 1, 0);
     {
-        // Claude Generated 2026 - MSVC's OpenMP (2.0 semantics) requires a signed
-        // loop index; GCC/Clang accept size_t fine, so this was never caught before.
         #pragma omp parallel for schedule(dynamic, 10)
         for (int i = 0; i < n_at; ++i) {
-            std::vector<GFNFFDispersion>& local_pairs = row_pairs[i];
+            size_t c = 0;
+            for (int j = i + 1; j < n_at; ++j)
+                if (pair_in_list(i, j)) ++c;
+            row_offset[i + 1] = c;
+        }
+    }
+    for (int i = 0; i < n_at; ++i) row_offset[i + 1] += row_offset[i];
+    all_pairs.resize(row_offset[n_at]);
+    // Lever 3 Opt A (Jun 2026): the in-cutoff pair list is captured for computeDC6DCN, which
+    // only needs the entries the gradient consumer reads - exactly these pairs (i < j, within
+    // the 60 Bohr cutoff, (i, j) order as D4DC6DCNPairs::lookup() requires);
+    // updateCNValuesForGradient reuses it. Oct 2026: written in the same pass as the list.
+    m_dc6dcn.pairs.resize(all_pairs.size());
+
+    // Pass 2: fill each row at its offset
+    {
+        #pragma omp parallel for schedule(dynamic, 10)
+        for (int i = 0; i < n_at; ++i) {
+            size_t k = row_offset[i];
+            const int atom_i = m_atoms[i];
             for (int j = i + 1; j < n_at; ++j) {
-                double r2 = (geometry_bohr.row(i) - geometry_bohr.row(j)).squaredNorm();
-                if (r2 > disp_cutoff_sq) continue;
+                if (!pair_in_list(i, j)) continue;
+                const int atom_j = m_atoms[j];
+                const size_t e = static_cast<size_t>(elem_slot[atom_i]) * ne + elem_slot[atom_j];
 
-                int atom_i = m_atoms[i];
-                int atom_j = m_atoms[j];
-
-                if (atom_i < 1 || atom_i > MAX_ELEM || atom_j < 1 || atom_j > MAX_ELEM)
-                    continue;
-
-                double c6 = getChargeWeightedC6(atom_i, atom_j, i, j);
-                double sqrt_zr4r2_i = getSqrtZr4r2(atom_i);
-                double sqrt_zr4r2_j = getSqrtZr4r2(atom_j);
-                double r4r2ij = 3.0 * sqrt_zr4r2_i * sqrt_zr4r2_j;
-                double r0_sq = std::pow(a1 * std::sqrt(r4r2ij) + a2, 2);
-
-                double q_i, q_j;
-                if (m_topology_charges.size() > 0) {
-                    q_i = (i < static_cast<size_t>(m_topology_charges.size())) ? m_topology_charges(i) : 0.0;
-                    q_j = (j < static_cast<size_t>(m_topology_charges.size())) ? m_topology_charges(j) : 0.0;
-                } else {
-                    q_i = (i < static_cast<size_t>(m_eeq_charges.size())) ? m_eeq_charges(i) : 0.0;
-                    q_j = (j < static_cast<size_t>(m_eeq_charges.size())) ? m_eeq_charges(j) : 0.0;
-                }
-                double zetac6 = GFNFFParameters::zetaChargeScale(atom_i, q_i)
-                              * GFNFFParameters::zetaChargeScale(atom_j, q_j);
-
-                GFNFFDispersion d;
-                d.i = static_cast<int>(i);
-                d.j = static_cast<int>(j);
-                d.C6 = c6;
-                d.r4r2ij = r4r2ij;
-                d.r0_squared = r0_sq;
+                m_dc6dcn.pairs[k] = std::make_pair(i, j);
+                GFNFFDispersion& d = all_pairs[k++];
+                d.i = i;
+                d.j = j;
+                d.C6 = getChargeWeightedC6(atom_i, atom_j, i, j);
+                d.r4r2ij = r4r2_tab[e];
+                d.r0_squared = r0sq_tab[e];
                 // D4 two-body cutoff, tblite's realspace_cutoff(disp2=50) (disp/d4.f90:82).
                 // xtb passes 60.0 (scf_module.F90:766) but the difference is unmeasurable:
                 // with 60 instead of 50 the worst GMTKN55 gfn2 deviation moves 0.01667 ->
                 // 0.01666 kcal/mol. The whole deviation is the THREE-body cutoff instead
                 // (-xtb.d4_atm_cutoff). Measured Sep 2026; Claude Generated.
                 d.r_cut = PAIR_EVAL_CUTOFF_BOHR;  // 50.0 (header constant, Sep 2026)
-                d.zetac6 = zetac6;
+                d.zetac6 = zeta_atom[i] * zeta_atom[j];
                 // P1c (Apr 2026): Legacy D3 fields removed from GFNFFDispersion
-
-                local_pairs.push_back(d);
             }
         }
     }
-    {
-        size_t n_pairs = 0;
-        for (const auto& row : row_pairs) n_pairs += row.size();
-        all_pairs.reserve(n_pairs);
-        for (auto& row : row_pairs) {
-            all_pairs.insert(all_pairs.end(), row.begin(), row.end());
-            std::vector<GFNFFDispersion>().swap(row);  // release as we go (large systems)
-        }
-    }
 
-    // Lever 3 Opt A (Jun 2026): capture the in-cutoff pair list. computeDC6DCN only
-    // needs entries the gradient consumer reads — exactly the dispersion pairs (i<j,
-    // within the 60 Bohr cutoff) collected above. updateCNValuesForGradient reuses it.
-    m_dc6dcn_pairs.clear();
-    m_dc6dcn_pairs.reserve(all_pairs.size());
-    for (const auto& d : all_pairs) m_dc6dcn_pairs.emplace_back(d.i, d.j);
     m_dc6dcn_pairs_valid = true;
 
     // dc6dcn for the gradient (derivatives + half-contraction already built above).
-    computeDC6DCN();
+    computeDC6DCN(pool, num_threads);
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::result_fmt("D4 native dispersion: {} pairs generated", all_pairs.size());

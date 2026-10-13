@@ -299,10 +299,12 @@ PARAM(frag_charge_tau, Double, 1.0, "frag_charge_model ensemble: temperature in 
 PARAM(frag_charge_sigma, Double, 0.05, "frag_charge_model ensemble: width in elementary charges of the weighting between chemically DIFFERENT charge carriers that the electron-count parity rule leaves tied, by the free single-constraint Phase-1 EEQ charge each carrier holds. Chemically identical carriers, e.g. the two ends of a symmetric X...X- pair, are weighted by their energies with frag_charge_tau instead.", "Advanced", {})
 PARAM(frag_charge_max_edges, Int, 4, "frag_charge_model ensemble: maximum number of fragment-fragment contacts inside the window that are blended - 2^n corners are evaluated. Contacts beyond this count, the most separated first, are treated as fully separated and a warning is printed.", "Advanced", {})
 PARAM(frag_charge_max_placements, Int, 6, "frag_charge_model ensemble: maximum number of integer charge placements evaluated per corner. With more groups the candidates are pre-selected by the free single-constraint Phase-1 EEQ charge of each group.", "Advanced", {})
+PARAM(frag_charge_variant_memory_mb, Int, 8192, "frag_charge_model ensemble: memory budget in MB for the charge variants held at the same time. Each variant is a complete GFN-FF instance; its size is estimated as 72 bytes * N^2 (measured 64-74 bytes * N^2 at N = 2822 and 6200 atoms). When placements x corners would exceed the budget, fewer placements per corner are evaluated (the ones with the lowest free-charge score are dropped), corners with the smallest weight are dropped if needed, variants not used in the current step are released, and a warning is printed once. At least one variant is always kept. The default leaves every system below about 4400 atoms unchanged at frag_charge_s_max 1.0.", "Advanced", {})
+PARAM(frag_charge_enumerate, Bool, false, "frag_charge_model ensemble, validation only: select the charge placements by enumerating ALL C(|charge|+G-1, |charge|) distributions over the G fragment groups, as before Oct 2026, instead of the bounded dynamic-programming selection that gives the same placements in the same order. Refused, with a warning, above 2 million distributions (memory).", "Advanced", {})
 PARAM(cn_cutoff_bohr, Double, 10.0, "CN neighbor list cutoff radius in Bohr (reference cnthr=100 Bohr^2=10 Bohr). 0 = use accuracy-based threshold instead.", "Advanced", {})
 PARAM(cn_accuracy, Double, 1.0, "CN accuracy for threshold calculation (cnthr = 100 - log10(acc)*50). Only used when cn_cutoff_bohr = 0. Set to 0 for full O(N^2) reference mode.", "Advanced", {})
 PARAM(solve, String, "auto",
-      "EEQ solver method: lu, schur_cholesky, pcg, auto. Passed to eeq_solver.", "Algorithm", {})
+      "EEQ solver: auto | cholesky | ppcg | pcg | lu | ldlt | batched, CPU and GPU (-gpu cuda). Alias of -eeq_solver.solve_method, which wins if both are set to a non-auto value. See eeq_solver.solve_method.", "Algorithm", {})
 PARAM(eeq_max_iterations, Int, -1,
       "Max EEQ PCG iterations. -1 = use adaptive default (200 small, 5000 large). Passed to eeq_solver.", "Algorithm", {})
 PARAM(eeq_tolerance, Double, -1.0,
@@ -343,6 +345,10 @@ PARAM(eeq_refine_iters, Int, 1, "A4: iterative-refinement steps when the EEQ sol
 PARAM(gpu_cn_pair_regen, Bool, true, "Task 10: regenerate the GPU CN-derivative pair list when the topology-displacement check fires (atoms moved past 0.5 Bohr). true keeps the list fresh during opt/MD; false reverts to the legacy build-once-and-latch behaviour.", "Performance", {})
 PARAM(gpu_cn_pair_regen_every, Int, 0, "Task 10: force GPU CN-derivative pair-list regeneration every N gradient steps (0 = topology-triggered only). MD safety net for slow drift below the displacement threshold.", "Performance", {})
 PARAM(gpu_cn_pair_cutoff_factor, Double, 2.5, "Task 10: GPU CN-derivative pair-list cutoff = factor*(rcov_i+rcov_j). Default 2.5 (erf-CN derivative ~exp(-126) beyond this). Larger = more pairs toward the CPU 40 Bohr reach and slower; smaller = faster with more truncation error.", "Performance", {})
+PARAM(gpu_cn_pair_skin_bohr, Double, 1.0, "K1 (Oct 2026), CUDA only: Verlet skin of the GPU CN pair list in Bohr. The list keeps pairs up to factor*(rcov_i+rcov_j) + 2*skin and is rebuilt only when an atom moved more than skin + rs_min/2*(factor-1-8/7.5) since the last build, so no pair with an erf-CN term above 0.5*erfc(8) = 6e-30 is missing. Negative = legacy: rebuild whenever the 0.5 Bohr topology displacement check fires (every MD step).", "Performance", {})
+PARAM(gpu_eeq_overlap, Bool, true, "K3 (Oct 2026), CUDA only: the device projected-PCG EEQ solve waits only for its inputs (coordinates, right-hand side) and runs in parallel to the D4 dc6dcn kernel and the charge-independent kernels. false = legacy: it waits for all prior device work.", "Performance", {})
+PARAM(gpu_dispersion_overlap, Bool, true, "K2 (Oct 2026), CUDA only: the gradient-mode D4 dispersion kernel starts right after dc6dcn, parallel to the EEQ solve; it reads no EEQ charge. false = legacy: it runs after the EEQ solve. Changes only the summation order of the atomic gradient adds.", "Performance", {})
+PARAM(gpu_staged_list_upload, Bool, true, "Oct 2026, CUDA only: during MD the rebuilt D4 dispersion and repulsion pair lists are converted by -threads host threads into a pinned double buffer and copied asynchronously in chunks (polymer_2x, 9.4 M D4 pairs: 118 -> 48 ms per rebuild, 16 threads). The device receives the same bytes. false = legacy serial conversion and blocking pageable copies.", "Performance", {})
 PARAM(hb_accuracy, Double, 0.1, "Task 11: HB-list accuracy driving the Fortran thresholds hbthr1 = 200 - log10(acc)*50, hbthr2 = 400 - log10(acc)*50 (Bohr^2). Smaller = larger cutoffs = more HB pairs = more accurate but slower. 0.1 reproduces the gfnff reference.", "Performance", {})
 PARAM(hb_thr1_bohr2, Double, 0.0, "Task 11: direct override of hbthr1, the A-B distance-squared cutoff for nhb2 detection (Bohr^2). 0 = derive from hb_accuracy.", "Performance", {})
 PARAM(hb_thr2_bohr2, Double, 0.0, "Task 11: direct override of hbthr2, the A-H-B sum-of-squares cutoff for nhb1 detection (Bohr^2). 0 = derive from hb_accuracy.", "Performance", {})
@@ -357,6 +363,7 @@ PARAM(eeq_mixed_precision, Bool, false, "WP-B GPU only: factor the EEQ Coulomb m
 PARAM(eeq_mixed_precision_iters, Int, 2, "WP-B GPU only: number of FP64-residual / FP32-correction refinement steps for eeq_mixed_precision. Minimum 1. Two steps reach FP64 accuracy on the validation set.", "Performance", {})
 PARAM(coulomb_r_cut, Double, 0.0, "GFN-FF electrostatics: per-pair distance cutoff in Bohr. 0 (default since Sep 25, 2026) = no cutoff, as the reference goed_gfnff and as the EEQ solve itself, which never truncates. A positive value is a HARD cutoff without switching: a pair crossing it changes the energy discontinuously - on a 500-water cluster, moving one oxygen by 0.0005 Angstrom jumped the energy by 5 kJ/mol and made the analytic gradient wrong by 0.96 Eh/Angstrom at that atom - and it truncates the long-range 1/r sum: the former default of 100 Bohr put polymer_2x, 7320 atoms and 88 Angstrom wide, 112.7 kcal/mol above the reference. Systems below about 53 Angstrom never reach 100 Bohr. Only set a value for speed, knowing both effects.", "Performance", {})
 PARAM(coulomb_implicit, Bool, true, "CPU: evaluate the N^2/2 Coulomb pairs on the fly from the per-atom EEQ charges and alpeeq instead of building and storing a pair list. The stored list costs 128 bytes per pair - 3.4 GB and ~0.5 s of pure write bandwidth at 7320 atoms, which threading does not remove (measured). Energies agree with the stored path to rounding; set false for the stored list (e.g. to compare). Not used with eeq_distance_cutoff > 0, where the list is already short.", "Performance", {})
+PARAM(farfield_shortcut, Bool, true, "CPU exact far-field shortcut: for gamma_ij*r >= 6.5 (gamma_ij = 1/sqrt(alpha_i+alpha_j)) erf(gamma_ij*r) is exactly 1.0 in FP64 and exp(-(gamma_ij*r)^2) <= 4.4e-19 is below one ulp of the force, so the Coulomb pair energy/force (FFWorkspace::calcCoulomb) and the EEQ matrix element erf(gamma r)/r (final charges, corrected EEQ matrix) are evaluated as q_i q_j/r, -q_i q_j/r^3 and 1/r without erf/exp. Bit-identical to the full evaluation in the cases checked (set false to compare). Forwarded to eeq_solver.farfield_shortcut. The CUDA kernels always use the shortcut, with the threshold 6.0 instead of 6.5 (gamma_ij*r); ROCm and Vulkan have none.", "Performance", {})
 PARAM(gpu_coulomb_implicit, Bool, true, "GPU only: the device enumerates all Coulomb atom pairs itself (per-atom gather, gamma_ij from per-atom alpeeq) instead of reading an N^2/2 pair list built on the host. Saves the host list (24.5 M pairs / 2.7 GB and ~1.5 s at 7320 atoms). Not used with eeq_distance_cutoff > 0. Set false for the stored pair list.", "Performance", {})
 PARAM(gpu_disp_pairs_on_device, Bool, false, "WP-A GPU only: build the D4 dispersion pair list on the device via a two-pass enumeration plus per-pair C6 contraction, replacing the host O(N^2) GenerateDispersionPairsNative loop and the per-build H2D upload. Default OFF keeps the proven host build. Bit-identical to the host list up to the FP order of the device Gaussian weights. Measured Sep 2026 on polymer_2x (7320 atoms): pair build 630 -> 32 ms, SP wall 6.8 -> 5.6 s, energy identical; see docs/GPU_TUNING.md.", "Performance", {})
 PARAM(eeq_rocm_cpu_fragment_threshold, Int, 16, "ROCm GFN-FF only: fragment count at or above which the device EEQ solve is replaced by the exact CPU PCG block-Jacobi warm-start solver, whose O(N^2 k) cost beats the device dense N x N Cholesky O(N^3) for solvent boxes and keeps ROCm charges identical to the CPU path. Set 0 to always use the device solve.", "Performance", {})
@@ -766,6 +773,39 @@ public:
     /// frag_charge_model ensemble: number of charge variants evaluated in the last call (0 = inactive)
     int fragEnsembleVariantCount() const { return m_frag_last_nvariants; }
 
+    /// frag_charge_model resolved to ensemble (false: reference rule, or react topology mode). Claude Generated (Oct 2026).
+    bool fragEnsembleRequested() const { return m_frag_ensemble; }
+
+    /**
+     * @brief Charge placements of the frag_charge_model ensemble for one corner (bounded selection)
+     *
+     * A placement distributes nq = |charge| units (sign `unit`, +1 or -1) over G groups. Rank per
+     * placement = sum over groups of [odd electron count] + (G+1)*[no electron left], with
+     * nelec[g] the electrons of the NEUTRAL group; score S = sum_g (unit*c_g) * qfree_g[g] / nq
+     * (summed in group order, as the full enumeration did). Returns the minimum-rank placements:
+     * all of them in the old enumeration order (lexicographically descending) if there are at
+     * most max_placements, else the max_placements best by S (ties: enumeration order).
+     * Dynamic programming over (group, units used) with pruning by safe dominance:
+     * O(G * nq^2 * max_placements) time, O(G * nq) memory; bit-identical to
+     * fragEnumeratePlacements() (equivalence test: test_frag_charge_selection).
+     * exact_tiebreak is set false only if a pathological cluster of near-equal scores (within
+     * rounding) had to be truncated, where the tie order may then differ from the enumeration.
+     * Claude Generated (Oct 2026).
+     */
+    static std::vector<std::vector<int>> fragSelectPlacements(int nq, double unit, const std::vector<long>& nelec,
+        const std::vector<double>& qfree_g, int max_placements, bool* exact_tiebreak = nullptr);
+
+    /**
+     * @brief Reference for fragSelectPlacements(): the pre-Oct-2026 full enumeration
+     *
+     * Enumerates all C(nq+G-1, nq) compositions (memory grows like G^nq), keeps the minimum
+     * rank, stable-sorts by S if more than max_placements remain and truncates. Validation and
+     * tests only (-gfnff.frag_charge_enumerate). Claude Generated (Oct 2026), code moved from
+     * fragEnsembleBlend().
+     */
+    static std::vector<std::vector<int>> fragEnumeratePlacements(int nq, double unit, const std::vector<long>& nelec,
+        const std::vector<double>& qfree_g, int max_placements);
+
     /**
      * @brief Retrieve cached topology information, computing it once if needed
      * @return Reference to topology information
@@ -1056,8 +1096,10 @@ public:
      * `d4_cn_cache_threshold` skip: when no CN changed by more than the threshold, the weights
      * (and therefore C6 and dC6/dCN) are left at the previous step, consistently for both.
      * Controlled by the `dispersion_c6_update` PARAM (default on).
+     * @return true if the C6 of the installed D4 pair list were rewritten from the generator's
+     *         current weights (stale geometry, non-empty list); false if nothing was done.
      */
-    void refreshDispersionC6();
+    bool refreshDispersionC6();
 
     /// Claude Generated (Sep 2026): true if the stored D4 C6 were computed at a different
     /// geometry than the current one (and the C6 refresh is enabled). See refreshDispersionC6().
@@ -1220,7 +1262,6 @@ public:
         std::vector<std::vector<int>> neighbors;  ///< symmetric neighbor list (reusable by D4/EEQ)
     };
     const Vector& getLastCNF() const { return m_last_cnf; }
-    const Matrix* getDC6DCNPtr() const { return m_d4_generator ? &m_d4_generator->getDC6DCN() : nullptr; }
     FFWorkspace* getWorkspace() const { return m_workspace.get(); }
     /// GPU wrappers: keep the FULL parameter set for consumeCachedParameterSet() (default: bonded terms only).
     void setKeepFullParameterSet(bool keep) { m_keep_full_parameter_set = keep; }
@@ -1284,14 +1325,12 @@ public:
     // Curcuma had 95 .norm() calls in forcefieldthread.cpp + 53 in eeq_solver.cpp,
     // each recomputing the same distances. This API centralizes the work.
 
-    /// Compute shared packed-triangular distance arrays from m_geometry_bohr.
-    /// Allocates/refreshes m_shared_sqrab and m_shared_srab (size N(N+1)/2).
+    /// Compute the shared packed-triangular distance array m_shared_srab (size N(N+1)/2) from
+    /// m_geometry_bohr and the atoms-too-close flag (any r_ij < 1e-10 Bohr) for the EEQ solver.
+    /// Only the off-diagonal slots (j < i) are written; nothing reads the diagonal slots.
     /// Thread-pool parallelized via threadPool().
-    /// Called from GFNFF::Calculation() after prepareCNAndEEQ, before m_workspace->calculate().
+    /// Called from GFNFF::Calculation() before prepareCNAndEEQ.
     void computeSharedDistances() const;
-
-    const Eigen::VectorXd& sharedSqrab() const { return m_shared_sqrab; }
-    const Eigen::VectorXd& sharedSrab()  const { return m_shared_srab; }
 
     /// Packed lower-triangular index for atom pair (i, j) with i != j.
     /// 0-based: idx = i*(i+1)/2 + j  for i > j.
@@ -2866,6 +2905,10 @@ private:
     double m_frag_sigma = 0.05;          ///< e, width of the free-charge softmax over carrier classes
     int m_frag_max_edges = 4;
     int m_frag_max_placements = 6;
+    int m_frag_variant_memory_mb = 8192; ///< budget for the held variants (Claude Generated, Oct 2026)
+    bool m_frag_enumerate = false;       ///< validation: full enumeration of the placements (pre-Oct-2026 path)
+    bool m_frag_warned_memory = false;
+    bool m_frag_warned_select = false;
     struct FragContact { int i, j; double thr, L, dL; };   // dL = dL/ds
     struct FragEdge { int f, g; double lambda = 1.0; std::vector<FragContact> contacts; };
     struct FragVariant {
@@ -2892,13 +2935,14 @@ private:
     double calculationSingle(bool gradient);            ///< the reference (single-variant) Calculation()
     CNDerivStore m_last_dcn; ///< CN derivatives (gradient only). Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
 
-    // WP-FF-DistMatrix-Sharing (May 2026): shared packed-triangular distance arrays.
-    // Filled by computeSharedDistances() once per energy call; consumed by
-    // ForceFieldThread term loops and EEQSolver phase-2.  Layout: lower-triangular,
-    // index via GFNFF::triIdx(i, j) = i*(i+1)/2 + j (i > j).
-    mutable Eigen::VectorXd m_shared_sqrab;
+    // WP-FF-DistMatrix-Sharing (May 2026): shared packed-triangular distance array.
+    // Filled by computeSharedDistances() once per energy call; its only reader is the EEQSolver
+    // phase 2 (setExternalDistances). Layout: lower-triangular, index via
+    // GFNFF::triIdx(i, j) = i*(i+1)/2 + j (i > j); the diagonal slots are allocated, never written
+    // or read. Oct 2026: the squared-distance twin m_shared_sqrab had no reader and is gone.
     mutable Eigen::VectorXd m_shared_srab;
     mutable int             m_shared_dist_N = 0;
+    mutable bool            m_shared_dist_too_close = false; ///< any r_ij < 1e-10 Bohr in m_shared_srab
 
     // Conversion factors
     static constexpr double HARTREE_TO_KCAL = 627.5094740631;
