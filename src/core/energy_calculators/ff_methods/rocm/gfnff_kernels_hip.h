@@ -597,6 +597,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(
     const double* __restrict__ cz,
     const int*    __restrict__ atom_types,
     double        cutoff_factor,
+    double        extra_bohr,
     int*          d_count);
 
 __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
@@ -606,6 +607,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
     const double* __restrict__ cz,
     const int*    __restrict__ atom_types,
     double        cutoff_factor,
+    double        extra_bohr,
     int*          d_counter,
     int*          idx_i,
     int*          idx_j,

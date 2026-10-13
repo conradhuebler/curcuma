@@ -128,6 +128,16 @@ Remaining cost: 0.82 ms per CG iteration (dense `dsymv`), EEQ about 55-65 ms per
 iterations by about half on the CPU test (14 vs 32 at 2910 atoms) and is the next lever, together with the dispersion/Coulomb kernels
 (about 20 + 11 ms).
 
+### F6 result: CN pair skin, lower-triangle EEQ matrix, Coulomb pair once (branch `feature/rocm-gfnff-step-speed`, Oct 13, 2026)
+Profile before (rocprofv3, 7320 atoms, per step, GPU 91 % busy): EEQ `hemv` 57 ms, Coulomb 19.6, dispersion 10.0, `dc6dcn` 7.9, EEQ matrix build 7.1, CN pair generation 12.3 (list rebuilt every step), repulsion 4.7, H bonds 2.8. Three changes by a subagent, checked by the author:
+- CN pair-list Verlet skin on ROCm (CUDA K1; `-gfnff.gpu_cn_pair_skin_bohr`, trait `has_cn_pair_skin`): 12.1 -> 0.95 ms per step, list rebuilt 4 times in 51 steps.
+- EEQ matrix written as the lower triangle only, coalesced (`k_eeq_build_matrix_hip`): 7.13 -> 4.95 ms. The LU fallback (dgetrf) still gets the full matrix; that path did not run in any test.
+- `k_coulomb_tiles_hip`: each pair once, 128-atom tiles (replaces `k_coulomb_dense`): 19.7 -> 9.75 ms; Coulomb energy equal to 10 decimals.
+- Not kept: extrapolated warm start of the PPCG: median CG iterations 37 -> 36 (6200 atoms) and 69 -> 67 (7320), 100 solves each; below the 10 % threshold, and the wrapper cannot tell MD from optimisation.
+
+MD time per step ((t120 - t20)/100, 3 alternating runs, spread < 2 ms, author's own measurement): urea400-water1000 124.6 -> 106.1 ms (CPU 179.8), peo201x2-water1500 122.7 -> 101.2 ms (CPU 145.2). Subagent: 127.2 -> 107.5 and 130.7 -> 108.8 ms, profile step period 130.1 -> 107.8 ms. Energy, Epot/Ekin/Etot and last-frame coordinates equal to the printed 6-8 decimals against the previous binary on 7 systems (subagent) and on 4 bulk systems (author); `ctest -R "gpu|rocm|eeq|gfnff"` 104 of 104. Not checked: periodic cells, the LU fallback, other GPUs.
+Remaining per step (7320 atoms): EEQ `hemv` 57 ms (69 CG iterations, memory-bandwidth bound), dispersion 10.0, `dc6dcn` 8.1, Coulomb 9.75, EEQ matrix build 5.0.
+
 ## 2. GFN2 (native xTB, `-gpu rocm`)
 
 114 atoms (frame 1 of c33h45n9-agal-frames44), `-sp`, `-verbosity 3`, ROCm vs CPU:

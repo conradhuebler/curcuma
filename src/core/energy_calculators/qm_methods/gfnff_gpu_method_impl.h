@@ -16,7 +16,7 @@
  *       static constexpr const char* workspace_name = "FFWorkspaceGPU"; // error text
  *       static constexpr bool has_device_schur      = true;   // false on ROCm
  *       static constexpr bool has_device_ppcg       = true;   // WP7-E projected PCG (ROCm too, Oct 2026)
- *       static constexpr bool has_cn_pair_skin      = true;   // false on ROCm (K1, Oct 2026)
+ *       static constexpr bool has_cn_pair_skin      = true;   // K1 CN pair-list skin (ROCm too, Oct 2026)
  *       static constexpr bool has_stream_overlap    = true;   // false on ROCm (K2/K3, Oct 2026)
  *       static constexpr int  default_eeq_cpu_fragment_threshold = 0;   // 16 on ROCm
  *       static void downloadDoubles(double* host, const double* device, int n);

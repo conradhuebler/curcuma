@@ -49,8 +49,9 @@ struct GFNFFRocmBackend {
     static constexpr bool has_device_ppcg = true;
     /// No multi-GPU split on ROCm (CUDA only, Sep 2026).
     static constexpr bool has_multi_gpu_split = false;
-    /// K1 (Oct 2026): CN pair-list skin not ported; ROCm keeps the legacy rebuild on the topology check.
-    static constexpr bool has_cn_pair_skin = false;
+    /// K1 (Oct 2026, Claude Generated): CN pair list as a Verlet list with skin
+    /// (gpu_cn_pair_skin_bohr), rebuilt on its own displacement test (cnPairListStale()).
+    static constexpr bool has_cn_pair_skin = true;
     /// K2/K3 (Oct 2026): dispersion and the device EEQ solve overlap dc6dcn on own streams
     /// (recordEEQInputsReady(), launchDispersionGradientEarly(), EEQ setInputReadyEvent()).
     static constexpr bool has_stream_overlap = false;

@@ -601,16 +601,25 @@ __global__ void k_coulomb_gather(
     blockReduceAddEnergy(local_E, energy);
 }
 
-// Claude Generated (June 2026): dense, coalesced, shared-memory-tiled N-body Coulomb for ROCm.
-// The CSR gather (k_coulomb_gather) removed the FP64-atomic contention but stayed memory-bound
-// (random cx[partner] reads). For the all-pairs GFN-FF Coulomb the partner set is "every other
-// atom", so a classic N-body tile — block-cooperatively stage a tile of (x,y,z,q,alpha) into
-// shared memory, every thread sweeps the tile for its own atom — turns the scattered reads into
-// coalesced ones and reuses each loaded atom blockDim times. gamma_ij = 1/sqrt(alpha_i+alpha_j)
-// is recomputed on the fly from the per-atom charge-corrected EEQ alpha (the exact value the CPU
-// baked into gamma_ij), so the result is bit-identical to k_coulomb. One thread owns atom a's
-// output (3 atomicAdd/atom, safe vs cross-stream grad writers). TILE == blockDim.x (<=256).
-__global__ void k_coulomb_dense(
+// Claude Generated (Oct 2026): pair-once tiled Coulomb for ROCm (port of the idea of CUDA k_coulomb_tiles).
+//
+// E = sum_{i<j} q_i q_j erf(gamma_ij r_ij) / r_ij,   gamma_ij = 1/sqrt(alp_i + alp_j)
+// dE/dr = q_i q_j (2 gamma/sqrt(pi) exp(-gamma^2 r^2) / r - erf(gamma r) / r^2)
+// k_coulomb_dense evaluated every pair twice (once from each atom's row, 0.5 * E each). Here
+// block (bj, bi) with bi <= bj handles tile pair (bi, bj) of GFNFF_COUL_TILE_HIP atoms each, and
+// every pair i < j once: thread t owns atom i = bi*T + t, the j tile sits in shared memory, and the
+// j gradients are accumulated in shared memory (rotated walk jj = (t + k) mod T so concurrent shared
+// atomics rarely hit the same slot) and added to the global gradient once per block.
+// Per pair the arithmetic is that of k_coulomb_dense (sqrt and division, no rsqrt; far field
+// r^2 >= 36 (alp_i + alp_j), i.e. gamma r >= 6, with erf == 1 exactly; r_cut / 1e-10 test before the
+// far-field test; pairs with a NaN charge skipped; applyMIC), so per-pair energies and forces are
+// bit-identical to the old kernel and only the summation order changes.
+// Launch: grid dim3(nb, nb), nb = ceil(N / T), block T; blocks with bj < bi return at once.
+// Formerly k_coulomb_dense (June 2026: coalesced shared-memory N-body sweep over all ordered pairs).
+constexpr int GFNFF_COUL_TILE_HIP = 128;   ///< atoms per tile == block size (power of two)
+
+__global__ __launch_bounds__(GFNFF_COUL_TILE_HIP)
+void k_coulomb_tiles_hip(
     int N,
     const double* __restrict__ alpha,    // per-atom charge-corrected EEQ alpha (== gamma source)
     const double* __restrict__ cx,
@@ -621,61 +630,70 @@ __global__ void k_coulomb_dense(
     double*                    grad,
     double*                    energy)
 {
-    __shared__ double sx[256], sy[256], sz[256], sq[256], sa[256];
-    const int tid = threadIdx.x;
-    const int a   = blockIdx.x * blockDim.x + tid;
+    constexpr int T = GFNFF_COUL_TILE_HIP;
+    const int bj = blockIdx.x;
+    const int bi = blockIdx.y;
+    if (bj < bi) return;   // block-uniform: each unordered tile pair once
 
-    const bool active = (a < N) && !isnan(charges[a]);
-    double xa = 0, ya = 0, za = 0, qa = 0, aa = 0;
-    if (a < N) { xa = cx[a]; ya = cy[a]; za = cz[a]; qa = charges[a]; aa = alpha[a]; }
+    __shared__ double sx[T], sy[T], sz[T], sq[T], sa[T];
+    __shared__ double sgx[T], sgy[T], sgz[T];
+    const int t  = threadIdx.x;
+    const int i  = bi * T + t;
+    const int jl = bj * T + t;
 
-    double gx = 0.0, gy = 0.0, gz = 0.0, local_E = 0.0;
+    if (jl < N) { sx[t] = cx[jl]; sy[t] = cy[jl]; sz[t] = cz[jl]; sq[t] = charges[jl]; sa[t] = alpha[jl]; }
+    else        { sx[t] = sy[t] = sz[t] = 0.0; sq[t] = 0.0; sa[t] = 1.0; }
+    sgx[t] = 0.0; sgy[t] = 0.0; sgz[t] = 0.0;
+    __syncthreads();
+
+    const bool active = (i < N) && !isnan(charges[i]);
+    double xi = 0, yi = 0, zi = 0, qi = 0, ai = 0;
+    if (active) { xi = cx[i]; yi = cy[i]; zi = cz[i]; qi = charges[i]; ai = alpha[i]; }
+    const bool diag = (bi == bj);
     const double inv_sqrt_pi = 0.5641895835477563;
+    double gx = 0.0, gy = 0.0, gz = 0.0, local_E = 0.0;
 
-    for (int tile = 0; tile < N; tile += blockDim.x) {
-        const int j = tile + tid;
-        if (j < N) { sx[tid] = cx[j]; sy[tid] = cy[j]; sz[tid] = cz[j];
-                     sq[tid] = charges[j]; sa[tid] = alpha[j]; }
-        __syncthreads();
-
-        if (active) {
-            const int jmax = min((int)blockDim.x, N - tile);
-            for (int t = 0; t < jmax; ++t) {
-                const int jg = tile + t;
-                if (jg == a) continue;
-                double dx = xa - sx[t];
-                double dy = ya - sy[t];
-                double dz = za - sz[t];
-                applyMIC(dx, dy, dz);
-                double r2  = dx*dx + dy*dy + dz*dz;
-                double rij = sqrt(r2);
-                if (rij <= r_cut && rij >= 1e-10) {
-                    double qj = sq[t];
-                    if (!isnan(qj)) {
-                        const double asum = aa + sa[t];
-                        double erf_v, dEdr;
-                        if (r2 >= 36.0 * asum) {   // far field (gamma r >= 6), see k_coulomb: no sqrt of asum, no erf/exp
-                            erf_v = 1.0;
-                            dEdr  = qa * qj * (-1.0 / (rij * rij));
-                        } else {
-                            double g       = 1.0 / sqrt(asum);
-                            double gamma_r = g * rij;
-                            erf_v = erf(gamma_r);
-                            double exp_v = exp(-gamma_r * gamma_r);
-                            double derf  = g * exp_v * (2.0 * inv_sqrt_pi);
-                            dEdr = qa * qj * (derf / rij - erf_v / (rij * rij));
-                        }
-                        local_E += 0.5 * qa * qj * erf_v / rij;
-                        double fac   = dEdr / rij;          // force on a = fac*(ra - rp)
-                        gx += fac*dx; gy += fac*dy; gz += fac*dz;
-                    }
-                }
+    if (active) {
+        for (int k = 0; k < T; ++k) {
+            const int jj = (t + k) & (T - 1);
+            const int j  = bj * T + jj;
+            if (j >= N || (diag && j <= i)) continue;
+            double dx = xi - sx[jj];
+            double dy = yi - sy[jj];
+            double dz = zi - sz[jj];
+            applyMIC(dx, dy, dz);
+            double r2  = dx*dx + dy*dy + dz*dz;
+            double rij = sqrt(r2);
+            if (!(rij <= r_cut && rij >= 1e-10)) continue;
+            const double qj = sq[jj];
+            if (isnan(qj)) continue;
+            const double asum = ai + sa[jj];
+            double erf_v, dEdr;
+            if (r2 >= 36.0 * asum) {   // far field (gamma r >= GFNFF_COUL_FARFIELD_GAMMA_R): erf == 1, no erf/exp
+                erf_v = 1.0;
+                dEdr  = qi * qj * (-1.0 / (rij * rij));
+            } else {
+                double g       = 1.0 / sqrt(asum);
+                double gamma_r = g * rij;
+                erf_v = erf(gamma_r);
+                double exp_v = exp(-gamma_r * gamma_r);
+                double derf  = g * exp_v * (2.0 * inv_sqrt_pi);
+                dEdr = qi * qj * (derf / rij - erf_v / (rij * rij));
             }
+            local_E += qi * qj * erf_v / rij;
+            const double fac = dEdr / rij;   // force on i = fac*(ri - rj), on j the negative
+            const double fx = fac*dx, fy = fac*dy, fz = fac*dz;
+            gx += fx; gy += fy; gz += fz;
+            atomicAdd(&sgx[jj], -fx);
+            atomicAdd(&sgy[jj], -fy);
+            atomicAdd(&sgz[jj], -fz);
         }
-        __syncthreads();
+        add_grad(grad, i, gx, gy, gz);
     }
+    __syncthreads();
+    if (jl < N && (sgx[t] != 0.0 || sgy[t] != 0.0 || sgz[t] != 0.0))
+        add_grad(grad, jl, sgx[t], sgy[t], sgz[t]);
 
-    if (active) add_grad(grad, a, gx, gy, gz);
     blockReduceAddEnergy(local_E, energy);
 }
 
@@ -3310,6 +3328,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(
     const double* __restrict__ cz,
     const int*    __restrict__ atom_types,
     double        cutoff_factor,
+    double        extra_bohr,    // K1 (Oct 2026, Claude Generated): 2*skin of the Verlet list, 0 = legacy
     int*          d_count)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -3344,7 +3363,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(
     double rcov_j = d_rcov_d3[zj - 1] * CN_RCOV_SCALE;
     double rcov_sum = rcov_i + rcov_j;
 
-    if (rij < cutoff_factor * rcov_sum && rij > 1e-10) {
+    if (rij < cutoff_factor * rcov_sum + extra_bohr && rij > 1e-10) {
         atomicAdd(d_count, 1);
     }
 }
@@ -3357,6 +3376,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
     const double* __restrict__ cz,
     const int*    __restrict__ atom_types,
     double        cutoff_factor,
+    double        extra_bohr,    // K1 (Oct 2026, Claude Generated): 2*skin of the Verlet list, 0 = legacy
     int*          d_counter,
     int*          idx_i,
     int*          idx_j,
@@ -3391,7 +3411,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
     double rcov_j = d_rcov_d3[zj - 1] * CN_RCOV_SCALE;
     double rcov_sum_val = rcov_i + rcov_j;
 
-    if (rij < cutoff_factor * rcov_sum_val && rij > 1e-10) {
+    if (rij < cutoff_factor * rcov_sum_val + extra_bohr && rij > 1e-10) {
         int idx = atomicAdd(d_counter, 1);
         idx_i[idx] = i;
         idx_j[idx] = j;
@@ -4521,7 +4541,7 @@ struct FFWorkspaceHipImpl {
     RepulsionSoA   nonbonded_rep;   ///< Non-bonded repulsion pairs
     CoulombSoA     coulomb;         ///< Coulomb pairs (gamma + cutoff only; charges dynamic)
     // Claude Generated (Sep 2026): implicit all-pairs Coulomb (no pair list), the HIP counterpart of
-    // the CUDA path. k_coulomb_dense enumerates every pair from the per-atom alpeeq (d_coul_alp).
+    // the CUDA path. k_coulomb_tiles_hip enumerates every pair from the per-atom alpeeq (d_coul_alp).
     bool           coulomb_implicit = false;
     double         coulomb_rcut = 100.0;
     BondSoA        bonds;           ///< Bond stretching
@@ -4570,6 +4590,8 @@ struct FFWorkspaceHipImpl {
     // GPU topology displacement check buffers (Claude Generated March 2026)
     RefCoordSoA ref_coords;  ///< Reference geometry SoA (rx[N], ry[N], rz[N]) — Phase 10, March 2026
     CudaBuffer<int>    d_disp_flag;       ///< [1] exceeded flag for displacement check
+    RefCoordSoA        cn_ref_coords;     ///< K1 (Oct 2026, Claude Generated): geometry of the last CN pair-list build
+    CudaBuffer<int>    d_cn_disp_flag;    ///< K1 (Oct 2026, Claude Generated): [1] flag for cnPairListStale()
 
     // GPU CN computation buffers (Phase 1: GPU migration)
     // Claude Generated (March 2026): CN computed entirely on GPU
@@ -5414,6 +5436,7 @@ void FFWorkspaceHip::generateCNPairListOnGPU()
         impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
         impl.d_atom_types.ptr,
         m_cn_pair_cutoff_factor,  // cutoff_factor (Task #10: tunable)
+        2.0 * m_cn_pair_skin_bohr, // K1 (Oct 2026): Verlet skin, 0 = legacy list
         impl.d_cn_pair_counter.ptr);
     checkCuda(hipStreamSynchronize(impl.stream), "k_generate_cn_pairs_count sync");
 
@@ -5444,6 +5467,7 @@ void FFWorkspaceHip::generateCNPairListOnGPU()
         impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
         impl.d_atom_types.ptr,
         m_cn_pair_cutoff_factor,  // cutoff_factor (Task #10: tunable)
+        2.0 * m_cn_pair_skin_bohr, // K1 (Oct 2026): Verlet skin, 0 = legacy list
         impl.d_cn_pair_counter.ptr,
         impl.d_cn_idx_i.ptr,
         impl.d_cn_idx_j.ptr,
@@ -5451,9 +5475,52 @@ void FFWorkspaceHip::generateCNPairListOnGPU()
     checkCuda(hipStreamSynchronize(impl.stream), "k_generate_cn_pairs_write sync");
 
     m_cn_pairs_on_gpu = true;
+    ++m_cn_pair_builds;
+
+    // K1 (Oct 2026, Claude Generated): remember the geometry this list was built from, so
+    // cnPairListStale() can measure the largest atom displacement since this build.
+    if (impl.cn_ref_coords.empty()) impl.cn_ref_coords.alloc(N);
+    checkCuda(hipMemcpyAsync(impl.cn_ref_coords.d_rx.ptr, impl.coords.d_x.ptr, N * sizeof(double),
+                             hipMemcpyDeviceToDevice, impl.stream), "CN pair ref: D2D x");
+    checkCuda(hipMemcpyAsync(impl.cn_ref_coords.d_ry.ptr, impl.coords.d_y.ptr, N * sizeof(double),
+                             hipMemcpyDeviceToDevice, impl.stream), "CN pair ref: D2D y");
+    checkCuda(hipMemcpyAsync(impl.cn_ref_coords.d_rz.ptr, impl.coords.d_z.ptr, N * sizeof(double),
+                             hipMemcpyDeviceToDevice, impl.stream), "CN pair ref: D2D z");
 
     if (CurcumaLogger::get_verbosity() >= 3)
-        CurcumaLogger::info(fmt::format("  GPU CN pair list: {} pairs generated on GPU", h_count));
+        CurcumaLogger::info(fmt::format("  GPU CN pair list: {} pairs generated on GPU (build {})",
+                                        h_count, m_cn_pair_builds));
+}
+
+// ============================================================================
+// K1 (Oct 2026, Claude Generated): staleness test of the CN pair list (port of the CUDA
+// FFWorkspaceGPU::cnPairListStale). True when some atom moved more than max_disp_bohr
+// since the last generateCNPairListOnGPU() (or when no list reference exists yet). Uses
+// the flag kernel of checkDisplacement(), but against the pair-list reference geometry,
+// which is independent of the topology reference used by checkDisplacement().
+// ============================================================================
+bool FFWorkspaceHip::cnPairListStale(double max_disp_bohr)
+{
+    if (!m_impl) return true;
+    auto& impl = *m_impl;
+    if (impl.cn_ref_coords.empty() || impl.coords.empty()) return true;
+    if (!impl.d_cn_disp_flag.ptr) impl.d_cn_disp_flag.alloc(1);
+
+    int zero = 0;
+    checkCuda(hipMemcpyAsync(impl.d_cn_disp_flag.ptr, &zero, sizeof(int),
+                             hipMemcpyHostToDevice, impl.stream), "cnPairListStale: zero flag");
+    LaunchConfig cfg = getLaunchConfig(m_natoms, m_block_size);
+    k_check_displacement<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        m_natoms,
+        impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+        impl.cn_ref_coords.d_rx.ptr, impl.cn_ref_coords.d_ry.ptr, impl.cn_ref_coords.d_rz.ptr,
+        max_disp_bohr * max_disp_bohr,
+        impl.d_cn_disp_flag.ptr);
+    int result = 0;
+    checkCuda(hipMemcpyAsync(&result, impl.d_cn_disp_flag.ptr, sizeof(int),
+                             hipMemcpyDeviceToHost, impl.stream), "cnPairListStale: download flag");
+    checkCuda(hipStreamSynchronize(impl.stream), "cnPairListStale: sync");
+    return result != 0;
 }
 
 // ============================================================================
@@ -6342,18 +6409,17 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
 
     // k_coulomb (needs EEQ charges)
     if (m_coulomb_enabled && impl.coulomb_implicit) {
-        const int coul_block = 128;
-        const int grid = (m_natoms + coul_block - 1) / coul_block;
-        k_coulomb_dense<<<grid, coul_block, 0, impl.stream_pairwise>>>(
+        const int nb = (m_natoms + GFNFF_COUL_TILE_HIP - 1) / GFNFF_COUL_TILE_HIP;
+        k_coulomb_tiles_hip<<<dim3(nb, nb), GFNFF_COUL_TILE_HIP, 0, impl.stream_pairwise>>>(
             m_natoms, impl.d_coul_alp.ptr,
             impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
             impl.d_charges.ptr, impl.coulomb_rcut,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_COUL]);
-        checkCuda(hipGetLastError(), "k_coulomb_dense (implicit) launch");
+        checkCuda(hipGetLastError(), "k_coulomb_tiles_hip (implicit) launch");
     } else if (m_coulomb_enabled && impl.coulomb.n > 0) {
         // ROCm: the pair k_coulomb's ~6M FP64 atomicAdd dominated the MD step. Preferred path is
-        // the dense, coalesced, shared-mem-tiled N-body kernel (k_coulomb_dense) which also fixes
+        // the shared-memory tiled all-pairs kernel (k_coulomb_tiles_hip, each pair once) which also fixes
         // the gather's random-memory bottleneck; it needs the per-atom charge-corrected EEQ alpha
         // (== the source of the precomputed gamma_ij) to recompute gamma on the fly. If the EEQ
         // topology alpha is not resident, fall back to the CSR gather (still atomic-light).
@@ -6366,15 +6432,15 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
         const long all_pairs = static_cast<long>(impl.coulomb.csr_N) * (impl.coulomb.csr_N - 1) / 2;
         const bool coulomb_all_pairs = (static_cast<long>(impl.coulomb.n) == all_pairs);
         if (impl.eeq_topo.valid && impl.eeq_topo.d_alpha_corrected.ptr && coulomb_all_pairs) {
-            int grid = (impl.coulomb.csr_N + coul_block - 1) / coul_block;
-            k_coulomb_dense<<<grid, coul_block, 0, impl.stream_pairwise>>>(
+            const int nb = (impl.coulomb.csr_N + GFNFF_COUL_TILE_HIP - 1) / GFNFF_COUL_TILE_HIP;
+            k_coulomb_tiles_hip<<<dim3(nb, nb), GFNFF_COUL_TILE_HIP, 0, impl.stream_pairwise>>>(
                 impl.coulomb.csr_N,
                 impl.eeq_topo.d_alpha_corrected.ptr,
                 impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
                 impl.d_charges.ptr, impl.coulomb.r_cut_scalar,
                 impl.d_grad.ptr,
                 &impl.d_energies.ptr[impl.E_COUL]);
-            checkCuda(hipGetLastError(), "k_coulomb_dense launch");
+            checkCuda(hipGetLastError(), "k_coulomb_tiles_hip launch");
         } else {
             k_coulomb_gather<<<impl.coulomb.csr_N, coul_block, 0, impl.stream_pairwise>>>(
                 impl.coulomb.csr_N,

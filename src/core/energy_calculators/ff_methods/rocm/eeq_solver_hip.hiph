@@ -29,9 +29,16 @@
 // sqrt(2/pi) — EEQ self-energy diagonal (matches cuda/eeq_solver_gpu.cu TSQRT2PI_GPU)
 __device__ constexpr double TSQRT2PI_HIP = 0.797884560802866;
 
-// Build N x N EEQ Coulomb matrix on device (column-major, both triangles).
-// Verbatim port of cuda/eeq_solver_gpu.cu::k_eeq_build_matrix (file-local, distinct name
-// to avoid clashing with the gfnff_kernels_hip.h k_eeq_* declarations).
+// Build the N x N EEQ Coulomb matrix on device (column-major).
+// Claude Generated (Oct 2026): one thread block per column j; its threads walk the rows i >= j,
+// so consecutive threads store consecutive addresses A[j*N + i] (coalesced). The lower triangle is
+// all that rocsolver_dpotrf/dpotrs, rocsolver_spotrf (mixed precision), rocblas_dsymm and the PPCG
+// matvec (rocblas_dsymv, fill_lower) read. full_matrix = true also mirrors each value into the
+// upper triangle A[i*N + j] (strided store), which only the LU fallback (rocsolver_dgetrf/dgetrs)
+// needs. The values are those of the former both-triangle kernel (port of
+// cuda/eeq_solver_gpu.cu::k_eeq_build_matrix): same expressions with i the row and j the column,
+// far field r^2 >= 36 (alpha_i + alpha_j) with erf == 1.0 exactly.
+// Launch: grid N blocks (one per column), any block size.
 __global__ __launch_bounds__(256, 4)
 void k_eeq_build_matrix_hip(
     int N,
@@ -41,36 +48,34 @@ void k_eeq_build_matrix_hip(
     const double* __restrict__ alpha,
     const double* __restrict__ gam,
     double* __restrict__ A,
-    double cutoff_sq)
+    double cutoff_sq,
+    bool full_matrix)
 {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int n_lower = N * (N + 1) / 2;
-    if (tid >= n_lower) return;
+    const int j = blockIdx.x;   // column
+    if (j >= N) return;
+    const double xj = cx[j], yj = cy[j], zj = cz[j], aj = alpha[j];
+    double* col = A + static_cast<size_t>(j) * N;
 
-    int i = static_cast<int>((-1.0 + sqrt(1.0 + 8.0 * static_cast<double>(tid))) * 0.5);
-    while (i * (i + 1) / 2 > tid) --i;
-    while ((i + 1) * (i + 2) / 2 <= tid) ++i;
-    int j = tid - i * (i + 1) / 2;
-
-    if (i == j) {
-        A[i * N + i] = gam[i] + TSQRT2PI_HIP / sqrt(alpha[i]);
-    } else {
-        double dx = cx[i] - cx[j];
-        double dy = cy[i] - cy[j];
-        double dz = cz[i] - cz[j];
+    for (int i = j + threadIdx.x; i < N; i += blockDim.x) {   // rows i >= j
+        if (i == j) {
+            col[i] = gam[i] + TSQRT2PI_HIP / sqrt(alpha[i]);
+            continue;
+        }
+        double dx = cx[i] - xj;
+        double dy = cy[i] - yj;
+        double dz = cz[i] - zj;
         double r_sq = dx * dx + dy * dy + dz * dz;
+        double val;
         if (cutoff_sq > 0.0 && r_sq > cutoff_sq) {
-            A[j * N + i] = 0.0;
-            A[i * N + j] = 0.0;
+            val = 0.0;
         } else {
             double r = sqrt(r_sq);
-            const double asum = alpha[i] + alpha[j];
-            double val;
+            const double asum = alpha[i] + aj;
             if (r_sq >= 36.0 * asum) val = 1.0 / r;   // far field: erf == 1.0, bit-identical
             else                     val = erf((1.0 / sqrt(asum)) * r) / r;
-            A[j * N + i] = val;
-            A[i * N + j] = val;
         }
+        col[i] = val;
+        if (full_matrix) A[static_cast<size_t>(i) * N + j] = val;
     }
 }
 
@@ -414,17 +419,16 @@ static bool eeqBuildFactorSolve(
     // factor, so there is no win — and that regime is routed to the exact CPU PCG anyway.
     const bool use_mixed = impl.m_mixed_precision && nfrag <= 1;
 
-    auto buildMatrix = [&]() {
-        int n_lower = N * (N + 1) / 2;
-        int block = 256, grid = (n_lower + block - 1) / block;
-        k_eeq_build_matrix_hip<<<grid, block, 0, impl.stream>>>(
-            N, cx, cy, cz, d_alpha, d_gam, impl.d_A.ptr, cutoff_sq);
+    // full_matrix: the LU fallback (dgetrf) reads both triangles, Cholesky only the lower one.
+    auto buildMatrix = [&](bool full_matrix) {
+        k_eeq_build_matrix_hip<<<N, 256, 0, impl.stream>>>(
+            N, cx, cy, cz, d_alpha, d_gam, impl.d_A.ptr, cutoff_sq, full_matrix);
         // d_A is factorised in place below: the projected PCG must rebuild its matrix.
         impl.m_pcg_M_inv_valid = false;
     };
 
     if (do_refactor) {
-        buildMatrix();
+        buildMatrix(false);
 
         // WP-B: try the FP32 Cholesky first. On SPD success d_A stays the FP64 matrix and
         // the factor lives in d_A_f32; on non-SPD we fall through to the FP64 dpotrf/LU path
@@ -451,7 +455,7 @@ static bool eeqBuildFactorSolve(
             if (*impl.h_info != 0) {
                 // Indefinite -> LU with partial pivoting (potrf corrupted A, rebuild first)
                 impl.m_last_chol_info = *impl.h_info;
-                buildMatrix();
+                buildMatrix(true);
                 if (rocsolver_dgetrf(impl.handle, N, N, impl.d_A.ptr, N, impl.d_lu_pivots.ptr,
                                      impl.d_info.ptr) != rocblas_status_success) return false;
                 if (hipMemcpyAsync(impl.h_info, impl.d_info.ptr, sizeof(int),
@@ -743,10 +747,9 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(
     const bool do_refactor = force_refactor || !impl.m_pcg_M_inv_valid || (N != m_last_N);
     if (do_refactor) {
         impl.d_pcg_M_inv.ensure(N);
-        const int n_lower = N * (N + 1) / 2;
-        const int block = 256, grid = (n_lower + block - 1) / block;
-        k_eeq_build_matrix_hip<<<grid, block, 0, impl.stream>>>(
-            N, cx, cy, cz, d_alpha_corrected, d_gam_corrected, impl.d_A.ptr, cutoff_sq);
+        // Lower triangle only: rocblas_dsymv (fill_lower) and the diagonal are all the PPCG reads.
+        k_eeq_build_matrix_hip<<<N, 256, 0, impl.stream>>>(
+            N, cx, cy, cz, d_alpha_corrected, d_gam_corrected, impl.d_A.ptr, cutoff_sq, false);
         // d_A now holds the matrix, not a factor: the dense path must refactor next time.
         impl.m_has_cached_factor = false;
         impl.m_cached_factor_mixed = false;
