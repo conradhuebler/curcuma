@@ -35,6 +35,9 @@
 // sqrt(2/pi) — EEQ self-energy diagonal (matches cuda/eeq_solver_gpu.cu TSQRT2PI_GPU)
 __device__ constexpr double TSQRT2PI_HIP = 0.797884560802866;
 
+/// Mixed-precision projected PCG (Claude Generated, Oct 2026): default of CURCUMA_ROCM_EEQ_FP32.
+constexpr bool kRocmEeqFp32Default = true;
+
 // Build the N x N EEQ Coulomb matrix on device (column-major).
 // Claude Generated (Oct 2026): one thread block per column j; its threads walk the rows i >= j,
 // so consecutive threads store consecutive addresses A[j*N + i] (coalesced). The lower triangle is
@@ -44,6 +47,12 @@ __device__ constexpr double TSQRT2PI_HIP = 0.797884560802866;
 // needs. The values are those of the former both-triangle kernel (port of
 // cuda/eeq_solver_gpu.cu::k_eeq_build_matrix): same expressions with i the row and j the column,
 // far field r^2 >= 36 (alpha_i + alpha_j) with erf == 1.0 exactly.
+// Claude Generated (Oct 2026): Af != nullptr also stores the lower triangle rounded to FP32
+// (same layout, ld N), read by the mixed-precision projected PCG (rocblas_ssymv).
+// use_rsqrt = true forms 1/r as rsqrt(r^2) (one FP64 reciprocal square root instead of sqrt and a
+// division; differs from 1.0 / sqrt(r^2) in the last bits, measured max 4e-16 relative at 7320 atoms,
+// build 5.3 -> 3.2 ms on the RX 9060 XT). Only the mixed-precision projected PCG sets it, whose
+// residual tolerance is far above that level; the other paths keep the expressions above.
 // Launch: grid N blocks (one per column), any block size.
 __global__ __launch_bounds__(256, 4)
 void k_eeq_build_matrix_hip(
@@ -55,16 +64,20 @@ void k_eeq_build_matrix_hip(
     const double* __restrict__ gam,
     double* __restrict__ A,
     double cutoff_sq,
-    bool full_matrix)
+    bool full_matrix,
+    float* __restrict__ Af = nullptr,
+    bool use_rsqrt = false)
 {
     const int j = blockIdx.x;   // column
     if (j >= N) return;
     const double xj = cx[j], yj = cy[j], zj = cz[j], aj = alpha[j];
     double* col = A + static_cast<size_t>(j) * N;
+    float* colf = Af ? Af + static_cast<size_t>(j) * N : nullptr;
 
     for (int i = j + threadIdx.x; i < N; i += blockDim.x) {   // rows i >= j
         if (i == j) {
             col[i] = gam[i] + TSQRT2PI_HIP / sqrt(alpha[i]);
+            if (colf) colf[i] = static_cast<float>(col[i]);
             continue;
         }
         double dx = cx[i] - xj;
@@ -74,6 +87,11 @@ void k_eeq_build_matrix_hip(
         double val;
         if (cutoff_sq > 0.0 && r_sq > cutoff_sq) {
             val = 0.0;
+        } else if (use_rsqrt) {
+            const double inv_r = rsqrt(r_sq);
+            const double asum = alpha[i] + aj;
+            if (r_sq >= 36.0 * asum) val = inv_r;   // far field: erf == 1.0
+            else                     val = erf((1.0 / sqrt(asum)) * (r_sq * inv_r)) * inv_r;
         } else {
             double r = sqrt(r_sq);
             const double asum = alpha[i] + aj;
@@ -81,6 +99,7 @@ void k_eeq_build_matrix_hip(
             else                     val = erf((1.0 / sqrt(asum)) * r) / r;
         }
         col[i] = val;
+        if (colf) colf[i] = static_cast<float>(val);
         if (full_matrix) A[static_cast<size_t>(i) * N + j] = val;
     }
 }
@@ -167,6 +186,19 @@ struct EEQSolverHipImpl {
     bool                m_pcg_M_inv_valid = false;
     bool                m_ppcg_warm_valid = false;
     long                m_ppcg_total_calls = 0, m_ppcg_total_iters = 0, m_ppcg_nonconv_calls = 0;
+
+    // Mixed-precision projected PCG (Claude Generated, Oct 2026). The matrix build also writes the
+    // lower triangle in FP32 into d_A_f32 (shared with the WP-B FP32 factor; every build of either
+    // path invalidates the other); the CG matvec A p is rocblas_ssymv on it, while q, r, z, p and all
+    // reductions stay FP64 and the residual is replaced by the true FP64 residual P(b - A q)
+    // (rocblas_dsymv on d_A) whenever |r| fell by the factor m_fp32_delta, and before convergence is
+    // accepted. Convergence is therefore tested on the true FP64 residual, |P(b - A q)| <= tol.
+    bool                m_fp32_A_valid = false;  ///< d_A_f32 holds the PPCG matrix of the last build
+    bool                m_fp32_alloc_failed = false; ///< FP32 copy did not fit: FP64 matvec only
+    double              m_fp32_delta = 1e-4;     ///< reliable-update factor (|r| < delta max|r| -> true residual)
+    double              m_ppcg_last_true_sq = -1.0;  ///< true |P(b-Aq)|^2 of the last converged FP32 solve
+    CudaBuffer<float>   d_pcg_p32, d_pcg_Ap32;   ///< [N] FP32 matvec in/out
+    long                m_ppcg_total_mv64 = 0, m_ppcg_total_mv32 = 0;
 
     // Local-inverse preconditioner, host build (Claude Generated, Oct 2026): port of the CUDA
     // host-build mode. G (N x N) and H = G C^T (N x nfrag) as CSR, dense S^-1 (nfrag x nfrag),
@@ -429,6 +461,7 @@ static int mixedFactorHip(EEQSolverHipImpl& impl, int N)
 
     int block = 256, grid = (n2 + block - 1) / block;
     k_cast_d2f_hip<<<grid, block, 0, impl.stream>>>(impl.d_A.ptr, impl.d_A_f32.ptr, n2);
+    impl.m_fp32_A_valid = false;   // d_A_f32 now holds the WP-B factor, not the PPCG matrix
 
     // rocSOLVER manages the spotrf workspace internally (no buffer-size query, unlike cuSOLVER).
     if (rocsolver_spotrf(impl.handle, rocblas_fill_lower, N, impl.d_A_f32.ptr, N,
@@ -509,6 +542,7 @@ static bool eeqBuildFactorSolve(
             N, cx, cy, cz, d_alpha, d_gam, impl.d_A.ptr, cutoff_sq, full_matrix);
         // d_A is factorised in place below: the projected PCG must rebuild its matrix.
         impl.m_pcg_M_inv_valid = false;
+        impl.m_fp32_A_valid = false;
     };
 
     if (do_refactor) {
@@ -738,17 +772,65 @@ static bool eeqMatvecHip(EEQSolverHipImpl& impl, int N, const double* x, double*
            == rocblas_status_success;
 }
 
+/// y = A32 x with the FP32 lower triangle in impl.d_A_f32 (rocblas_ssymv, FP32 accumulation); x is
+/// rounded to FP32 and the product widened to FP64. Relative error about 1e-6 of |A| |x|: used only
+/// for the CG search-direction product, never for a residual that decides convergence.
+/// Claude Generated (Oct 2026).
+static bool eeqMatvecF32Hip(EEQSolverHipImpl& impl, int N, const double* x, double* y)
+{
+    const float one = 1.0f, zero = 0.0f;
+    const int blk = 256, grd = (N + blk - 1) / blk;
+    k_cast_d2f_hip<<<grd, blk, 0, impl.stream>>>(x, impl.d_pcg_p32.ptr, N);
+    rocblas_set_pointer_mode(impl.handle, rocblas_pointer_mode_host);
+    if (rocblas_ssymv(impl.handle, rocblas_fill_lower, N, &one, impl.d_A_f32.ptr, N, impl.d_pcg_p32.ptr, 1,
+                      &zero, impl.d_pcg_Ap32.ptr, 1) != rocblas_status_success)
+        return false;
+    k_cast_f2d_hip<<<grd, blk, 0, impl.stream>>>(impl.d_pcg_Ap32.ptr, y, N);
+    return true;
+}
+
+/// r = P (b - A q) with the FP64 matrix, and |r|^2 into d_rnorm (device pointer). Claude Generated
+/// (Oct 2026); the same steps start every projected PCG solve.
+static bool ppcgTrueResidualHip(EEQSolverHipImpl& impl, int N, int nfrag, const double* d_b, const double* d_q,
+                                double* d_rnorm)
+{
+    const int blk = 256, grd = (N + blk - 1) / blk;
+    if (!eeqMatvecHip(impl, N, d_q, impl.d_pcg_Ap.ptr)) return false;
+    k_pcg_init_residual<<<grd, blk, 0, impl.stream>>>(N, d_b, impl.d_pcg_Ap.ptr, impl.d_pcg_r.ptr);
+    ppcgProjectResidualHip(impl, N, nfrag, impl.d_pcg_r.ptr);
+    rocblas_set_pointer_mode(impl.handle, rocblas_pointer_mode_device);
+    const bool ok = rocblas_ddot(impl.handle, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_r.ptr, 1, d_rnorm)
+                    == rocblas_status_success;
+    rocblas_set_pointer_mode(impl.handle, rocblas_pointer_mode_host);
+    return ok;
+}
+
 /// One projected PCG solve; d_q is the warm start on input and the charges on output (port of
 /// runProjectedPCG). One host synchronisation per iteration (|r|^2 and the breakdown flag);
 /// alpha and beta are formed on the device. Returns true only on |r|^2 <= tol^2.
+/// fp32 = true (Claude Generated, Oct 2026): mixed precision with reliable updates (van der Vorst and
+/// Ye, SIAM J. Sci. Comput. 22 (2000) 1635; the scheme of Clark et al., Comput. Phys. Commun. 181
+/// (2010) 1517). A p uses the FP32 matrix (eeqMatvecF32Hip); everything else is FP64. The recursive
+/// residual r is replaced by the true FP64 residual P(b - A q) when |r| < m_fp32_delta * max|r| since
+/// the last replacement, and whenever |r|^2 <= tol^2; only the true residual can end the solve, so
+/// the accepted q satisfy the same criterion |P(b - A q)| <= tol as the FP64 solve. p is kept across
+/// a replacement (beta from the replaced r) unless the replacement changed |r| by more than 10%, then
+/// p = z (restart). Requires impl.m_fp32_A_valid. Measured on the RX 9060 XT, 7320 atoms, localinv:
+/// 16 iterations as in FP64, with 4 FP64 and 16 FP32 matvecs per solve instead of 17-18 FP64 ones.
 static bool runProjectedPCGHip(EEQSolverHipImpl& impl, int N, int nfrag,
-                               const double* d_b, double* d_q, int max_iter, double tol)
+                               const double* d_b, double* d_q, int max_iter, double tol, bool fp32 = false)
 {
     impl.d_pcg_r.ensure(N);
     impl.d_pcg_z.ensure(N);
     impl.d_pcg_p.ensure(N);
     impl.d_pcg_Ap.ensure(N);
     impl.d_ppcg_scal.ensure(6);
+    if (fp32) {
+        impl.d_pcg_p32.ensure(N);
+        impl.d_pcg_Ap32.ensure(N);
+    }
+    impl.m_ppcg_last_true_sq = -1.0;
+    long mv64 = 0, mv32 = 0, n_replace = 0;
     rocblas_handle blas = impl.handle;
     hipStream_t    s    = impl.stream;
     const int blk = 256, grd = (N + blk - 1) / blk, grd_f = (nfrag + blk - 1) / blk;
@@ -761,6 +843,7 @@ static bool runProjectedPCGHip(EEQSolverHipImpl& impl, int N, int nfrag,
 
     // r = P (b - A q); z = precondition(r); p = z; rz = r.z; |r|^2.
     if (!eeqMatvecHip(impl, N, d_q, impl.d_pcg_Ap.ptr)) return false;
+    ++mv64;
     k_pcg_init_residual<<<grd, blk, 0, s>>>(N, d_b, impl.d_pcg_Ap.ptr, impl.d_pcg_r.ptr);
     ppcgProjectResidualHip(impl, N, nfrag, impl.d_pcg_r.ptr);
     ppcgPreconditionHip(impl, N, nfrag, impl.d_pcg_r.ptr, impl.d_pcg_z.ptr);
@@ -793,10 +876,18 @@ static bool runProjectedPCGHip(EEQSolverHipImpl& impl, int N, int nfrag,
     int  iters = 0;
     int  cur = 0;   // slot of the current rz (two slots used alternately)
     bool blas_ok = true;
+    // FP32 mode: largest |r|^2 since the last true residual (the initial one is true).
+    double rmax_sq = h_rnorm_sq;
+    bool   restart_p = false;   // FP32 mode: p = z after a replacement that moved |r| by > 10%
+    long   n_restart = 0;
+    if (converged && fp32) impl.m_ppcg_last_true_sq = h_rnorm_sq;
 
     for (int k = 0; k < max_iter && !converged; ++k) {
         iters = k + 1;
-        if (!eeqMatvecHip(impl, N, impl.d_pcg_p.ptr, impl.d_pcg_Ap.ptr)) { blas_ok = false; break; }
+        const bool mv_ok = fp32 ? eeqMatvecF32Hip(impl, N, impl.d_pcg_p.ptr, impl.d_pcg_Ap.ptr)
+                                : eeqMatvecHip(impl, N, impl.d_pcg_p.ptr, impl.d_pcg_Ap.ptr);
+        if (!mv_ok) { blas_ok = false; break; }
+        if (fp32) ++mv32; else ++mv64;
         rocblas_set_pointer_mode(blas, rocblas_pointer_mode_device);
         if (rocblas_ddot(blas, N, impl.d_pcg_p.ptr, 1, impl.d_pcg_Ap.ptr, 1, d_scal + 2) != rocblas_status_success) {
             blas_ok = false; break;
@@ -811,15 +902,41 @@ static bool runProjectedPCGHip(EEQSolverHipImpl& impl, int N, int nfrag,
             || hipStreamSynchronize(s) != hipSuccess) { blas_ok = false; break; }
         h_rnorm_sq = h_back[0];
         if (h_back[1] != 0.0) break;   // pAp <= 0 or degenerate rz
-        if (h_rnorm_sq <= tol * tol) { converged = true; break; }
+        if (fp32) {
+            // Reliable update: replace r by the true FP64 residual when the recursive one says
+            // "converged" or has dropped by delta since the last replacement.
+            rmax_sq = std::max(rmax_sq, h_rnorm_sq);
+            const double d2 = impl.m_fp32_delta * impl.m_fp32_delta;
+            if (h_rnorm_sq <= tol * tol || h_rnorm_sq < d2 * rmax_sq) {
+                if (!ppcgTrueResidualHip(impl, N, nfrag, d_b, d_q, d_scal + 3)) { blas_ok = false; break; }
+                ++mv64;
+                ++n_replace;
+                rocblas_set_pointer_mode(blas, rocblas_pointer_mode_device);
+                if (hipMemcpyAsync(h_back, d_scal + 3, sizeof(double), hipMemcpyDeviceToHost, s) != hipSuccess
+                    || hipStreamSynchronize(s) != hipSuccess) { blas_ok = false; break; }
+                const double rec_sq = h_rnorm_sq;
+                h_rnorm_sq = h_back[0];
+                rmax_sq = h_rnorm_sq;
+                if (h_rnorm_sq <= tol * tol) { converged = true; impl.m_ppcg_last_true_sq = h_rnorm_sq; break; }
+                // Recursive and true residual differ by more than 10% in norm: beta from the old rz
+                // would keep p almost parallel to the previous direction, so restart with p = z.
+                restart_p = !(h_rnorm_sq <= 1.21 * rec_sq && h_rnorm_sq >= 0.81 * rec_sq);
+                if (restart_p) ++n_restart;
+            }
+        } else if (h_rnorm_sq <= tol * tol) { converged = true; break; }
 
         ppcgPreconditionHip(impl, N, nfrag, impl.d_pcg_r.ptr, impl.d_pcg_z.ptr);
         if (rocblas_ddot(blas, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_z.ptr, 1, d_scal + (1 - cur)) != rocblas_status_success) {
             blas_ok = false; break;
         }
         if (li_on) k_li_check_rz_hip<<<1, 1, 0, s>>>(d_scal + (1 - cur), d_scal + 4);
-        k_ppcg_update_p_hip<<<grd, blk, 0, s>>>(N, d_scal + (1 - cur), d_scal + cur,
-                                                impl.d_pcg_z.ptr, impl.d_pcg_p.ptr, d_scal + 4);
+        if (restart_p) {
+            (void)hipMemcpyAsync(impl.d_pcg_p.ptr, impl.d_pcg_z.ptr, N * sizeof(double), hipMemcpyDeviceToDevice, s);
+            restart_p = false;
+        } else {
+            k_ppcg_update_p_hip<<<grd, blk, 0, s>>>(N, d_scal + (1 - cur), d_scal + cur,
+                                                    impl.d_pcg_z.ptr, impl.d_pcg_p.ptr, d_scal + 4);
+        }
         cur = 1 - cur;
     }
     rocblas_set_pointer_mode(blas, rocblas_pointer_mode_host);   // the dense path uses host scalars
@@ -827,12 +944,16 @@ static bool runProjectedPCGHip(EEQSolverHipImpl& impl, int N, int nfrag,
 
     impl.m_ppcg_total_calls += 1;
     impl.m_ppcg_total_iters += iters;
+    impl.m_ppcg_total_mv64 += mv64;
+    impl.m_ppcg_total_mv32 += mv32;
     // CURCUMA_PPCG_ITERS=1 prints the iteration count of every solve (same hook as CUDA).
     static const bool print_iters = [] { const char* e = std::getenv("CURCUMA_PPCG_ITERS"); return e && *e && *e != '0'; }();
     if (print_iters)
-        fprintf(stderr, "PPCG ROCm N=%d nfrag=%d iters=%d converged=%d |r|^2=%.3e precond=%s\n",
+        fprintf(stderr, "PPCG ROCm N=%d nfrag=%d iters=%d converged=%d |r|^2=%.3e precond=%s matvec=%s "
+                        "mv64=%ld mv32=%ld replaced=%ld restarts=%ld\n",
                 N, nfrag, iters, converged ? 1 : 0, h_rnorm_sq,
-                li_on ? (impl.m_li_device ? "localinv gpu build=device" : "localinv gpu build=host") : "diag");
+                li_on ? (impl.m_li_device ? "localinv gpu build=device" : "localinv gpu build=host") : "diag",
+                fp32 ? "fp32" : "fp64", mv64, mv32, n_replace, n_restart);
     if (!converged) impl.m_ppcg_nonconv_calls += 1;
     return converged;
 }
@@ -1380,12 +1501,42 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(
     if (hipMemcpy(impl.d_ppcg_b.ptr, d_rhs_atoms, N * sizeof(double), hipMemcpyDeviceToDevice) != hipSuccess)
         return false;
 
-    const bool do_refactor = force_refactor || !impl.m_pcg_M_inv_valid || (N != m_last_N);
+    // Mixed-precision matvec (Claude Generated, Oct 2026): CURCUMA_ROCM_EEQ_FP32=0 restores the FP64
+    // matvec, CURCUMA_ROCM_EEQ_FP32_DELTA sets the reliable-update factor (see runProjectedPCGHip).
+    static const bool fp32_env = [] {
+        const char* e = std::getenv("CURCUMA_ROCM_EEQ_FP32");
+        return e && *e ? (*e != '0') : kRocmEeqFp32Default;
+    }();
+    static const double fp32_delta = [] {
+        const char* e = std::getenv("CURCUMA_ROCM_EEQ_FP32_DELTA");
+        const double v = e && *e ? std::atof(e) : 1e-4;
+        return (v > 0.0 && v < 1.0) ? v : 1e-4;
+    }();
+    impl.m_fp32_delta = fp32_delta;
+    // The FP32 copy needs N*N floats (CudaBuffer counts in int); a failed allocation is not retried.
+    bool want_fp32 = fp32_env && !impl.m_fp32_alloc_failed
+                     && static_cast<long long>(N) * N <= std::numeric_limits<int>::max();
+    if (want_fp32) {
+        try {
+            const int n2 = N * N;
+            if (impl.d_A_f32.n < n2) impl.d_A_f32.alloc(n2);
+        } catch (const std::exception&) {
+            want_fp32 = false;   // no room for the FP32 copy: FP64 matvec from now on
+            impl.m_fp32_alloc_failed = true;
+            impl.m_fp32_A_valid = false;
+        }
+    }
+
+    const bool do_refactor = force_refactor || !impl.m_pcg_M_inv_valid || (N != m_last_N)
+                             || (want_fp32 && !impl.m_fp32_A_valid);
     if (do_refactor) {
         impl.d_pcg_M_inv.ensure(N);
-        // Lower triangle only: rocblas_dsymv (fill_lower) and the diagonal are all the PPCG reads.
+        // Lower triangle only: rocblas_dsymv (fill_lower) and the diagonal are all the PPCG reads;
+        // with want_fp32 the same kernel also writes the FP32 lower triangle into d_A_f32.
         k_eeq_build_matrix_hip<<<N, 256, 0, impl.stream>>>(
-            N, cx, cy, cz, d_alpha_corrected, d_gam_corrected, impl.d_A.ptr, cutoff_sq, false);
+            N, cx, cy, cz, d_alpha_corrected, d_gam_corrected, impl.d_A.ptr, cutoff_sq, false,
+            want_fp32 ? impl.d_A_f32.ptr : nullptr, want_fp32);
+        impl.m_fp32_A_valid = want_fp32;
         // d_A now holds the matrix, not a factor: the dense path must refactor next time.
         impl.m_has_cached_factor = false;
         impl.m_cached_factor_mixed = false;
@@ -1437,9 +1588,19 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(
         if (hipMemcpyAsync(impl.d_li_q0.ptr, impl.d_rhs.ptr, N * sizeof(double),
                            hipMemcpyDeviceToDevice, impl.stream) != hipSuccess) return false;
     }
-    bool ok = runProjectedPCGHip(impl, N, nfrag, impl.d_ppcg_b.ptr, impl.d_rhs.ptr, max_iter, tol);
+    const bool use_fp32 = want_fp32 && impl.m_fp32_A_valid;
+    bool ok = runProjectedPCGHip(impl, N, nfrag, impl.d_ppcg_b.ptr, impl.d_rhs.ptr, max_iter, tol, use_fp32);
     bool residual_failed = false;
-    if (ok && li_on && impl.m_li_device) {
+    if (ok && li_on && impl.m_li_device && use_fp32 && impl.m_ppcg_last_true_sq >= 0.0) {
+        // The FP32 solve ended on the true FP64 residual |P(b - A q)| <= tol, which passes the
+        // acceptance check below (2 tol) without another matvec.
+        impl.m_li_stats.last_true_residual_ratio = (tol > 0.0) ? std::sqrt(impl.m_ppcg_last_true_sq) / tol : 0.0;
+        if (liTestModeHip() == 3) {   // test hook, as below
+            ok = false;
+            residual_failed = true;
+            impl.m_li_stats.residual_fallbacks += 1;
+        }
+    } else if (ok && li_on && impl.m_li_device) {
         // Acceptance of a device-built G (Claude Generated, Oct 2026, port of the CUDA check): no global
         // definiteness check was made, and an indefinite M can let the recursive CG residual drift from
         // the true one. One extra matvec: |P(b - A q)| must be <= 2 tol.
@@ -1475,7 +1636,7 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(
                                         impl.m_li_runtime_fallbacks));
         if (hipMemcpyAsync(impl.d_rhs.ptr, impl.d_li_q0.ptr, N * sizeof(double),
                            hipMemcpyDeviceToDevice, impl.stream) != hipSuccess) return false;
-        ok = runProjectedPCGHip(impl, N, nfrag, impl.d_ppcg_b.ptr, impl.d_rhs.ptr, max_iter, tol);
+        ok = runProjectedPCGHip(impl, N, nfrag, impl.d_ppcg_b.ptr, impl.d_rhs.ptr, max_iter, tol, use_fp32);
     }
     if (!ok) return false;
 
