@@ -9,8 +9,9 @@
  * indefinite matrices like the reference does — and solve [b | C^T] (nfrag+1 columns) with
  * rocsolver_dpotrs/dgetrs, returning z1/Z2 to the host.
  *
- * Oct 2026 (Claude Generated): the WP7-E projected PCG (solveWithDeviceRHSAndGPUProjectedPCG,
- * diagonal Jacobi only) is ported as well; it returns the charges on the device.
+ * Oct 2026 (Claude Generated): the WP7-E projected PCG (solveWithDeviceRHSAndGPUProjectedPCG)
+ * is ported as well; it returns the charges on the device. Preconditioner: diagonal Jacobi, or the
+ * host-built local inverse uploaded by setLocalInversePreconditioner (no device build).
  *
  * The device-resident GPU-Schur / PCG / batched variants return false: the host wrapper
  * (gfnff_hip_method.cpp) then applies its own exact CPU Schur complement to z1/Z2 (works for
@@ -161,6 +162,18 @@ struct EEQSolverHipImpl {
     bool                m_pcg_M_inv_valid = false;
     bool                m_ppcg_warm_valid = false;
     long                m_ppcg_total_calls = 0, m_ppcg_total_iters = 0, m_ppcg_nonconv_calls = 0;
+
+    // Local-inverse preconditioner, host build (Claude Generated, Oct 2026): port of the CUDA
+    // host-build mode. G (N x N) and H = G C^T (N x nfrag) as CSR, dense S^-1 (nfrag x nfrag),
+    // all built by EEQSolver::buildLocalInverse on the host and uploaded by
+    // setLocalInversePreconditioner(). While m_li_valid, z = G r - H S^-1 C G r replaces Jacobi.
+    CudaBuffer<int>     d_li_G_rowptr, d_li_G_col, d_li_H_rowptr, d_li_H_col;
+    CudaBuffer<double>  d_li_G_val, d_li_H_val, d_li_S_inv;
+    CudaBuffer<double>  d_li_t, d_li_mu;         ///< [nfrag] t = C G r, mu = S^-1 t
+    CudaBuffer<double>  d_li_q0;                 ///< [N] start vector kept for a Jacobi redo
+    bool                m_li_valid = false;
+    int                 m_li_N = 0, m_li_nfrag = 0;
+    long                m_li_runtime_fallbacks = 0;  ///< solves redone with Jacobi (rz/pAp <= 0, stall)
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -279,6 +292,58 @@ __global__ void k_ppcg_update_p_hip(int N, const double* __restrict__ rz_new, co
     if (i >= N) return;
     const double beta = *rz_new / old;
     p[i] = z[i] + beta * p[i];
+}
+
+// ---------------------------------------------------------------------------------------------
+// Local-inverse preconditioner kernels (Claude Generated, Oct 2026). Ports of
+// cuda/eeq_solver_gpu.cu k_li_csr_spmv / k_li_check_rz and a block-per-row variant of
+// k_li_dense_gemv (summation order differs, rounding only); the operator they apply,
+// z = G r - H S^-1 C G r, is derived in eeq_solver.h (LocalInversePreconditioner).
+// ---------------------------------------------------------------------------------------------
+
+/// y = M x (subtract = 0) or y -= M x (subtract = 1) for a CSR matrix M. One thread per row,
+/// fixed summation order inside a row (deterministic).
+__global__ void k_li_csr_spmv_hip(int nrows, const int* __restrict__ rp, const int* __restrict__ col,
+                                  const double* __restrict__ val, const double* __restrict__ x,
+                                  double* __restrict__ y, int subtract)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nrows) return;
+    double s = 0.0;
+    for (int e = rp[i]; e < rp[i + 1]; ++e) s += val[e] * x[col[e]];
+    if (subtract) y[i] -= s; else y[i] = s;
+}
+
+/// mu = S^-1 t with S^-1 dense and symmetric (n x n), stored as the host build writes it (row i at
+/// Sinv + i n). One thread block per row: the threads read row i contiguously, then a shared-memory
+/// tree reduction in fixed order (deterministic). The CUDA kernel k_li_dense_gemv uses one thread per
+/// row; at nfrag ~ 1500 that is 6 thread blocks on this GPU and measured 0.36 ms per call on the
+/// RX 9060 XT (gfx1200), 40 % of one dense EEQ matvec. Launch: grid n, LI_GEMV_BLOCK threads.
+constexpr int LI_GEMV_BLOCK = 128;
+__global__ __launch_bounds__(LI_GEMV_BLOCK)
+void k_li_dense_gemv_rows_hip(int n, const double* __restrict__ Sinv, const double* __restrict__ t,
+                              double* __restrict__ mu)
+{
+    __shared__ double red[LI_GEMV_BLOCK];
+    const int i = blockIdx.x;
+    if (i >= n) return;
+    const double* row = Sinv + static_cast<size_t>(i) * n;
+    double s = 0.0;
+    for (int j = threadIdx.x; j < n; j += LI_GEMV_BLOCK) s += row[j] * t[j];
+    red[threadIdx.x] = s;
+    __syncthreads();
+    for (int w = LI_GEMV_BLOCK / 2; w > 0; w >>= 1) {
+        if (threadIdx.x < w) red[threadIdx.x] += red[threadIdx.x + w];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) mu[i] = red[0];
+}
+
+/// Breakdown flag of the local inverse: rz <= 0 means the preconditioner is not positive definite
+/// on the constraint space; sets *flag (read by the CG loop, which then stops).
+__global__ void k_li_check_rz_hip(const double* __restrict__ rz, double* flag)
+{
+    if (blockIdx.x == 0 && threadIdx.x == 0 && !(*rz > 0.0)) *flag = 1.0;
 }
 
 static void ensureHResultHip(EEQSolverHipImpl& impl, int needed) {
@@ -588,14 +653,15 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUPCG(int, int, const double*, const do
 // WP7-E projected PCG on ROCm (Claude Generated, Oct 2026)
 // ---------------------------------------------------------------------------------------------
 // Port of cuda/eeq_solver_gpu.cu runProjectedPCG / solveWithDeviceRHSAndGPUProjectedPCG with the
-// diagonal Jacobi preconditioner only. The CG runs in the constraint tangent space
+// diagonal Jacobi preconditioner and (Oct 2026) the host-built local inverse. The CG runs in the constraint tangent space
 // C v = 0 (C: fragment indicator rows), starting from a feasible q (sum_{i in f} q_i = Q_f):
 //   r = P (b - A q),  z = M^-1 r - M^-1 C^T (C M^-1 C^T)^-1 C M^-1 r,  p = z,
 //   alpha = r.z / p.A p,  q += alpha p,  r = P (r - alpha A p),  beta = r.z_new / r.z_old.
 // P subtracts the per-fragment mean. A is the dense EEQ matrix (k_eeq_build_matrix_hip, lower
 // triangle read by rocblas_dsymv). The converged q are the charges of the constrained EEQ system
-// (no Schur step). Not ported: local-inverse preconditioner (k_li_*), multi-GPU split, the K3
-// input event and stream priority; the wrapper does not call those for ROCm.
+// (no Schur step). Not ported: the device build of the local inverse (k_li_count, k_li_blocks, ...)
+// and its true-residual check, multi-GPU split, the K3 input event and stream priority; the
+// wrapper does not call those for ROCm.
 // =============================================================================================
 
 /// r <- P r: subtract the per-fragment mean (port of ppcgProjectResidual).
@@ -608,11 +674,28 @@ static void ppcgProjectResidualHip(EEQSolverHipImpl& impl, int N, int nfrag, dou
     k_frag_scatter_add_hip<<<grd, blk, 0, impl.stream>>>(N, d_v, impl.d_atom_frag.ptr, impl.d_frag_delta_scratch.ptr);
 }
 
-/// z <- M^-1 r with the M-weighted per-fragment correction, C z = 0 (port of the Jacobi branch of
-/// ppcgPrecondition).
+/// true while an uploaded local inverse matches this solve (N and nfrag of the build).
+static inline bool localInverseOnHip(const EEQSolverHipImpl& impl, int N, int nfrag)
+{
+    return impl.m_li_valid && impl.m_li_N == N && impl.m_li_nfrag == nfrag;
+}
+
+/// z <- preconditioned r with C z = 0 (port of ppcgPrecondition, host-build branches only).
+/// Local inverse (Claude Generated, Oct 2026): z = G r; t = C z; mu = S^-1 t; z -= H mu.
+/// Otherwise diagonal Jacobi z = M^-1 r with the M-weighted per-fragment correction.
 static void ppcgPreconditionHip(EEQSolverHipImpl& impl, int N, int nfrag, const double* d_r, double* d_z)
 {
     const int blk = 256, grd = (N + blk - 1) / blk;
+    if (localInverseOnHip(impl, N, nfrag)) {
+        k_li_csr_spmv_hip<<<grd, blk, 0, impl.stream>>>(N, impl.d_li_G_rowptr.ptr, impl.d_li_G_col.ptr,
+                                                        impl.d_li_G_val.ptr, d_r, d_z, 0);
+        FRAG_SUM_HIP(impl, nfrag, d_z, impl.d_li_t.ptr, impl.stream);
+        k_li_dense_gemv_rows_hip<<<nfrag, LI_GEMV_BLOCK, 0, impl.stream>>>(nfrag, impl.d_li_S_inv.ptr,
+                                                                          impl.d_li_t.ptr, impl.d_li_mu.ptr);
+        k_li_csr_spmv_hip<<<grd, blk, 0, impl.stream>>>(N, impl.d_li_H_rowptr.ptr, impl.d_li_H_col.ptr,
+                                                        impl.d_li_H_val.ptr, impl.d_li_mu.ptr, d_z, 1);
+        return;
+    }
     k_pcg_apply_precond<<<grd, blk, 0, impl.stream>>>(N, impl.d_pcg_M_inv.ptr, d_r, d_z);
     FRAG_SUM_HIP(impl, nfrag, d_z, impl.d_frag_sum_scratch.ptr, impl.stream);
     k_frag_precond_correct_hip<<<grd, blk, 0, impl.stream>>>(
@@ -664,14 +747,22 @@ static bool runProjectedPCGHip(EEQSolverHipImpl& impl, int N, int nfrag,
         rocblas_set_pointer_mode(blas, rocblas_pointer_mode_host);
         return false;
     }
+    // Local inverse (Oct 2026): rz <= 0 means M is not positive definite; the flag (slot 4) is read
+    // back with |r|^2 and stops the solve, the caller redoes it with Jacobi (as CUDA).
+    const bool li_on = localInverseOnHip(impl, N, nfrag);
+    if (li_on) k_li_check_rz_hip<<<1, 1, 0, s>>>(d_scal + 0, d_scal + 4);
     double* h_back = impl.h_ppcg_back;
-    if (hipMemcpyAsync(h_back, d_scal + 3, sizeof(double), hipMemcpyDeviceToHost, s) != hipSuccess
+    if (hipMemcpyAsync(h_back, d_scal + 3, 2 * sizeof(double), hipMemcpyDeviceToHost, s) != hipSuccess
         || hipStreamSynchronize(s) != hipSuccess) {
         rocblas_set_pointer_mode(blas, rocblas_pointer_mode_host);
         return false;
     }
     double h_rnorm_sq = h_back[0];
     bool converged = (h_rnorm_sq <= tol * tol);
+    if (li_on && !converged && h_back[1] != 0.0) {
+        rocblas_set_pointer_mode(blas, rocblas_pointer_mode_host);
+        return false;
+    }
     int  iters = 0;
     int  cur = 0;   // slot of the current rz (two slots used alternately)
     bool blas_ok = true;
@@ -699,6 +790,7 @@ static bool runProjectedPCGHip(EEQSolverHipImpl& impl, int N, int nfrag,
         if (rocblas_ddot(blas, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_z.ptr, 1, d_scal + (1 - cur)) != rocblas_status_success) {
             blas_ok = false; break;
         }
+        if (li_on) k_li_check_rz_hip<<<1, 1, 0, s>>>(d_scal + (1 - cur), d_scal + 4);
         k_ppcg_update_p_hip<<<grd, blk, 0, s>>>(N, d_scal + (1 - cur), d_scal + cur,
                                                 impl.d_pcg_z.ptr, impl.d_pcg_p.ptr, d_scal + 4);
         cur = 1 - cur;
@@ -711,8 +803,8 @@ static bool runProjectedPCGHip(EEQSolverHipImpl& impl, int N, int nfrag,
     // CURCUMA_PPCG_ITERS=1 prints the iteration count of every solve (same hook as CUDA).
     static const bool print_iters = [] { const char* e = std::getenv("CURCUMA_PPCG_ITERS"); return e && *e && *e != '0'; }();
     if (print_iters)
-        fprintf(stderr, "PPCG ROCm N=%d nfrag=%d iters=%d converged=%d |r|^2=%.3e precond=diag\n",
-                N, nfrag, iters, converged ? 1 : 0, h_rnorm_sq);
+        fprintf(stderr, "PPCG ROCm N=%d nfrag=%d iters=%d converged=%d |r|^2=%.3e precond=%s\n",
+                N, nfrag, iters, converged ? 1 : 0, h_rnorm_sq, li_on ? "localinv gpu build=host" : "diag");
     if (!converged) impl.m_ppcg_nonconv_calls += 1;
     return converged;
 }
@@ -778,8 +870,27 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(
         if (hipStreamSynchronize(impl.stream) != hipSuccess) return false;
     }
 
-    if (!runProjectedPCGHip(impl, N, nfrag, impl.d_ppcg_b.ptr, impl.d_rhs.ptr, max_iter, tol))
-        return false;
+    // Local inverse (Claude Generated, Oct 2026, port of the CUDA host-build mode): keep the start
+    // vector, so a breakdown (rz <= 0, pAp <= 0) or a stall is redone with the diagonal Jacobi from
+    // the same start. The uploaded M is dropped afterwards; the wrapper rebuilds or stays on Jacobi.
+    const bool li_on = localInverseOnHip(impl, N, nfrag);
+    if (li_on) {
+        impl.d_li_q0.ensure(N);
+        if (hipMemcpyAsync(impl.d_li_q0.ptr, impl.d_rhs.ptr, N * sizeof(double),
+                           hipMemcpyDeviceToDevice, impl.stream) != hipSuccess) return false;
+    }
+    bool ok = runProjectedPCGHip(impl, N, nfrag, impl.d_ppcg_b.ptr, impl.d_rhs.ptr, max_iter, tol);
+    if (!ok && li_on) {
+        impl.m_li_valid = false;
+        impl.m_li_runtime_fallbacks += 1;
+        CurcumaLogger::warn(fmt::format("EEQ GPU ppcg localinv: breakdown (rz <= 0 / pAp <= 0) or stall, solve "
+                                        "repeated with diagonal Jacobi (fallbacks so far: {})",
+                                        impl.m_li_runtime_fallbacks));
+        if (hipMemcpyAsync(impl.d_rhs.ptr, impl.d_li_q0.ptr, N * sizeof(double),
+                           hipMemcpyDeviceToDevice, impl.stream) != hipSuccess) return false;
+        ok = runProjectedPCGHip(impl, N, nfrag, impl.d_ppcg_b.ptr, impl.d_rhs.ptr, max_iter, tol);
+    }
+    if (!ok) return false;
 
     impl.d_ppcg_q_persistent.ensure(N);
     (void)hipMemcpyAsync(impl.d_ppcg_q_persistent.ptr, impl.d_rhs.ptr, N * sizeof(double),
@@ -787,6 +898,51 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(
     impl.m_ppcg_warm_valid = true;
     return hipStreamSynchronize(impl.stream) == hipSuccess;
 }
+
+// =============================================================================================
+// Local-inverse preconditioner upload (Claude Generated, Oct 2026): port of
+// cuda/eeq_solver_gpu.cu EEQSolverGPU::setLocalInversePreconditioner (host-build mode only; the
+// device build, multi-GPU and the true-residual check of the device build are not ported).
+// =============================================================================================
+
+/// Uploads G, H (CSR) and the dense S^-1 built by EEQSolver::buildLocalInverse; on success the
+/// projected PCG applies z = G r - H S^-1 C G r. Returns false (preconditioner off) on a size
+/// mismatch or a failed allocation/copy.
+bool EEQSolverHip::setLocalInversePreconditioner(int N, int nfrag,
+    const std::vector<int>& G_rowptr, const std::vector<int>& G_col, const std::vector<double>& G_val,
+    const std::vector<int>& H_rowptr, const std::vector<int>& H_col, const std::vector<double>& H_val,
+    const std::vector<double>& S_inv)
+{
+    auto& impl = *m_impl;
+    impl.m_li_valid = false;
+    if (N < 1 || nfrag < 1 || static_cast<int>(G_rowptr.size()) != N + 1 || static_cast<int>(H_rowptr.size()) != N + 1
+        || G_col.size() != G_val.size() || H_col.size() != H_val.size()
+        || static_cast<long long>(S_inv.size()) != static_cast<long long>(nfrag) * nfrag)
+        return false;
+    try {
+        // CudaBuffer::upload is a blocking hipMemcpy (the host vectors are the caller's).
+        impl.d_li_G_rowptr.upload(G_rowptr);
+        impl.d_li_G_col.upload(G_col);
+        impl.d_li_G_val.upload(G_val);
+        impl.d_li_H_rowptr.upload(H_rowptr);
+        impl.d_li_H_col.upload(H_col);
+        impl.d_li_H_val.upload(H_val);
+        impl.d_li_S_inv.upload(S_inv);
+        impl.d_li_t.ensure(nfrag);
+        impl.d_li_mu.ensure(nfrag);
+    } catch (const std::exception& e) {
+        CurcumaLogger::warn(fmt::format("EEQ GPU ppcg localinv: upload failed ({})", e.what()));
+        return false;
+    }
+    impl.m_li_N = N;
+    impl.m_li_nfrag = nfrag;
+    impl.m_li_valid = true;
+    return true;
+}
+
+void EEQSolverHip::clearLocalInversePreconditioner() { m_impl->m_li_valid = false; }
+bool EEQSolverHip::localInversePreconditionerActive() const { return m_impl->m_li_valid; }
+long EEQSolverHip::localInverseRuntimeFallbacks() const { return m_impl->m_li_runtime_fallbacks; }
 
 bool EEQSolverHip::solveWithDeviceRHSAndGPUSchurBatched(int, int, const double*, const double*, const double*,
                                                         const double*, const double*, const double*,

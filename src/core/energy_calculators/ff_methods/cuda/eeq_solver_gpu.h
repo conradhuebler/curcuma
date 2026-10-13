@@ -334,8 +334,9 @@ public:
      * Claude Generated (Oct 2026). Built on the host (EEQSolver::buildLocalInverse, maths in
      * eeq_solver.h, LocalInversePreconditioner) and uploaded here as CSR: G (N x N), H = G C^T
      * (N x nfrag) and the dense S^-1 = (C G C^T)^-1 (nfrag x nfrag). While set, the projected
-     * PCG applies z = G r - H S^-1 C G r instead of the diagonal Jacobi. CUDA only (the ROCm
-     * build has no definition; the wrapper calls it only for Backend::has_device_schur).
+     * PCG applies z = G r - H S^-1 C G r instead of the diagonal Jacobi. CUDA and (Oct 2026)
+     * ROCm (rocm/eeq_solver_hip.hiph); the wrapper calls it for Backend::has_localinv_upload.
+     * The device-build members below are CUDA only (no ROCm definition).
      * @return false if the upload failed (preconditioner stays off)
      */
     bool setLocalInversePreconditioner(int N, int nfrag,

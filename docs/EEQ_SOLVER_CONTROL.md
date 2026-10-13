@@ -18,13 +18,13 @@ overridden by a size threshold.
 | `lu` | dense LU of the augmented (N+nfrag) system | yes | augmented LU, cuSOLVER getrf/getrs (Oct 2026; ROCm: error; Vulkan: CPU solver) |
 | `ldlt` | dense Bunch-Kaufman LDL^T of A_nn + Schur (`dsytrf` + `dsytrs2`) | yes | cuSOLVER `sytrf` + `Xsytrs` (in blocks of 1024 right-hand sides) + Schur (Oct 2026; ROCm: error; Vulkan: CPU solver) |
 
-ROCm has a device `ppcg` (Oct 2026, `has_device_ppcg`, diagonal Jacobi only, no `localinv`) but no device `pcg`/`batched` (`has_device_schur=false`): `pcg`, `batched`, `lu`, `ldlt` with `-gpu rocm` are an error naming the valid names (`auto, cholesky, ppcg`). `cholesky` runs the dense device Cholesky of the WP2 path plus the host Schur step (verbosity 1: `cholesky ... [GPU ROCm, WP2 dense Cholesky + CPU Schur]`). `auto` and `ppcg` run the device projected PCG (`... WP7-E projected PCG, diagonal Jacobi`); with 16 or more fragments a stalled device solve uses the CPU solver for that step, and giving `-gfnff.eeq_rocm_cpu_fragment_threshold` explicitly forces the CPU solver from that fragment count on. Names checked by `eeq_gpu_supports` (no device); the device solve measured in [ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md).
+ROCm has a device `ppcg` (Oct 2026, `has_device_ppcg`; diagonal Jacobi or, with the default `eeq_ppcg_precond localinv`, the host-built local inverse uploaded as CSR, `has_localinv_upload`; no device build of the local inverse) but no device `pcg`/`batched` (`has_device_schur=false`): `pcg`, `batched`, `lu`, `ldlt` with `-gpu rocm` are an error naming the valid names (`auto, cholesky, ppcg`). `cholesky` runs the dense device Cholesky of the WP2 path plus the host Schur step (verbosity 1: `cholesky ... [GPU ROCm, WP2 dense Cholesky + CPU Schur]`). `auto` and `ppcg` run the device projected PCG (`... WP7-E projected PCG, diagonal Jacobi`); with 16 or more fragments a stalled device solve uses the CPU solver for that step, and giving `-gfnff.eeq_rocm_cpu_fragment_threshold` explicitly forces the CPU solver from that fragment count on. Names checked by `eeq_gpu_supports` (no device); the device solve measured in [ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md).
 
 | | CPU | CUDA | ROCm / Vulkan |
 |---|---|---|---|
 | `ppcg` stop | relative: `eeq_ppcg_tol` 1e-12, `|P r| <= tol (|b|+1)` | absolute on `|r|`: `pcg_tolerance` 1e-10 | ROCm: as CUDA (absolute `|r| <= tol`); Vulkan: no device `ppcg` |
 | far-field shortcut (`farfield_shortcut`) | gamma_ij*r >= 6.5 (`COULOMB_FARFIELD_X2` = 42.25) | gamma_ij*r >= 6.0 (`GFNFF_COUL_FARFIELD_X2` = 36) | none |
-| `localinv` preconditioner | yes | yes | no (ROCm: diagonal Jacobi only, about twice the CG iterations on the CPU test; Vulkan runs the CPU) |
+| `localinv` preconditioner | yes | yes | ROCm: host build + device apply (Oct 13, 2026; median CG iterations 56-69 -> 13-15 at 1410-7320 atoms); Vulkan runs the CPU |
 
 Aliases `schur_cholesky` = `cholesky`, `projected_pcg` = `ppcg`. **An unknown name is an error** that lists the valid ones (it used to mean `auto`).
 The thresholds are arguments: `-eeq_solver.eeq_ppcg_min_atoms`, `-eeq_solver.eeq_ppcg_min_nfrag` (0 = auto never picks `ppcg`).
@@ -108,7 +108,7 @@ z = G r - G C^T S^-1 C G r with S = C G C^T, so the iterates stay on the fragmen
   G changes only the iteration count, never the converged charges (same `eeq_ppcg_tol`).
 - **Reproducibility**: the build is independent of the thread count (one thread per atom row, fixed summation order); MD charges at a fixed
   thread count are bit-identical between runs. The GPU path as a whole is not bit-reproducible (two diag runs: charges within 9e-12 e).
-- **CUDA only** on the device side: `localinv`, `pcg`, `batched`, `lu`, `ldlt`; ROCm has `ppcg` with the diagonal Jacobi preconditioner.
+- **CUDA only** on the device side: the device build of `localinv`, `pcg`, `batched`, `lu`, `ldlt`; ROCm has `ppcg` with Jacobi or the host-built `localinv`. The host build costs 37 ms (7320 atoms, 12 builds in 100 steps) to 247 ms (urea400-water1000, 6200 atoms, 15 builds), of which 204 ms is the serial sparse Cholesky definiteness check of G: on that system `localinv` makes the ROCm MD step slower than `diag` (126.5 vs 107.8 ms).
 
 ### GPU: build on the device (Oct 10, 2026)
 

@@ -16,6 +16,7 @@
  *       static constexpr const char* workspace_name = "FFWorkspaceGPU"; // error text
  *       static constexpr bool has_device_schur      = true;   // false on ROCm
  *       static constexpr bool has_device_ppcg       = true;   // WP7-E projected PCG (ROCm too, Oct 2026)
+ *       static constexpr bool has_localinv_upload   = true;   // host-built localinv upload (ROCm too, Oct 2026)
  *       static constexpr bool has_cn_pair_skin      = true;   // K1 CN pair-list skin (ROCm too, Oct 2026)
  *       static constexpr bool has_stream_overlap    = true;   // false on ROCm (K2/K3, Oct 2026)
  *       static constexpr int  default_eeq_cpu_fragment_threshold = 0;   // 16 on ROCm
@@ -310,10 +311,10 @@ private:
     double m_eeq_ppcg_tolerance  = 1e-10;  ///< GPU tol is absolute on |r| (unlike CPU's relative eeq_ppcg_tol)
     int    m_eeq_ppcg_min_nfrag  = 1;      ///< Auto strategy: prefer ProjectedPCG over PCG when nfrag>=this
     int    m_eeq_ppcg_min_atoms  = 500;    ///< ... and N>=this
-    // Claude Generated (Oct 2026): local-inverse preconditioner of WP7-E (eeq_ppcg_precond localinv),
-    // CUDA only. Built on the device (EEQSolverGPU::requestLocalInverseDeviceBuild, default) or, with
+    // Claude Generated (Oct 2026): local-inverse preconditioner of WP7-E (eeq_ppcg_precond localinv).
+    // CUDA: built on the device (EEQSolverGPU::requestLocalInverseDeviceBuild, default) or, with
     // CURCUMA_LOCALINV_HOST_BUILD=1 or the multi-GPU split, on the host by EEQSolver::buildLocalInverse
-    // and uploaded as CSR.
+    // and uploaded as CSR. ROCm: host build and upload only (has_localinv_upload).
     bool   m_eeq_localinv = false;
     double m_eeq_localinv_radius = 8.0;
     double m_eeq_localinv_ext = 10.0;
@@ -1373,12 +1374,17 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
             if (gpu_eeq_applicable) {
                 if constexpr (!Backend::has_device_schur) {
                     // ROCm: no device pcg/batched/Schur/lu/ldlt (EEQSolver::gpuSupports allows auto, cholesky
-                    // and ppcg). Oct 2026: projected PCG with the diagonal Jacobi (no localinv on ROCm);
-                    // every other solve is the dense device Cholesky of WP2 plus the host Schur step.
-                    if (resolved_method == EEQSolveMethod::ProjectedPCG && m_eeq_gpu->isFragmentTopoValid())
-                        path = m_eeq_nfrag == 1 ? "WP7-E projected PCG, one fragment, diagonal Jacobi"
-                                                : "WP7-E projected PCG, diagonal Jacobi";
-                    else
+                    // and ppcg). Oct 2026: projected PCG with the diagonal Jacobi or the host-built local
+                    // inverse (eeq_ppcg_precond); every other solve is the dense device Cholesky of WP2
+                    // plus the host Schur step.
+                    if (resolved_method == EEQSolveMethod::ProjectedPCG && m_eeq_gpu->isFragmentTopoValid()) {
+                        if (m_eeq_localinv)
+                            path = m_eeq_nfrag == 1 ? "WP7-E projected PCG, one fragment, precond=localinv gpu build=host"
+                                                    : "WP7-E projected PCG, precond=localinv gpu build=host";
+                        else
+                            path = m_eeq_nfrag == 1 ? "WP7-E projected PCG, one fragment, diagonal Jacobi"
+                                                    : "WP7-E projected PCG, diagonal Jacobi";
+                    } else
                         path = "WP2 dense Cholesky + CPU Schur";
                 } else if (resolved_method == EEQSolveMethod::LU) {
                     path = "augmented LU (getrf)";
@@ -2132,15 +2138,19 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 template <class Backend>
 void GFNFFGpuMethodImpl<Backend>::prepareLocalInverseGPU(int N, double cutoff_sq)
 {
-    if constexpr (!Backend::has_device_schur) {
-        (void)N; (void)cutoff_sq;   // CUDA only: the ROCm solver has no upload entry point
+    if constexpr (!Backend::has_localinv_upload) {
+        (void)N; (void)cutoff_sq;   // backend without an upload entry point
     } else {
         if (!m_eeq_localinv) return;
         const int nfrag = m_eeq_nfrag;
-        // Oct 2026: default is the device build; the host build stays for the multi-GPU split and as
-        // comparison (CURCUMA_LOCALINV_HOST_BUILD=1).
-        static const bool host_build_env = [] { const char* e = std::getenv("CURCUMA_LOCALINV_HOST_BUILD"); return e && *e && *e != '0'; }();
-        const bool device_build = !host_build_env && m_eeq_gpu->localInverseDeviceBuildPossible(N);
+        // Oct 2026: on CUDA the default is the device build; the host build stays for the multi-GPU
+        // split and as comparison (CURCUMA_LOCALINV_HOST_BUILD=1). ROCm (Claude Generated, Oct 2026)
+        // has the host build only (no device build, has_device_schur = false).
+        bool device_build = false;
+        if constexpr (Backend::has_device_schur) {
+            static const bool host_build_env = [] { const char* e = std::getenv("CURCUMA_LOCALINV_HOST_BUILD"); return e && *e && *e != '0'; }();
+            device_build = !host_build_env && m_eeq_gpu->localInverseDeviceBuildPossible(N);
+        }
         if (!device_build && nfrag > kLocalInvMaxNfrag) {
             if (!m_eeq_li) {
                 CurcumaLogger::warn(fmt::format("EEQ GPU ppcg localinv: nfrag = {} > {} (dense S^-1 on the device), "
@@ -2171,18 +2181,20 @@ void GFNFFGpuMethodImpl<Backend>::prepareLocalInverseGPU(int N, double cutoff_sq
         }
         if (!rebuild) return;
 
-        if (device_build) {
-            // The device builds G inside the next WP7-E solve, from the matrix assembled there; this
-            // record keeps the geometry for the rebuild rule, finishLocalInverseGPU books the result.
-            auto rec = std::make_shared<LocalInversePreconditioner>();
-            rec->natoms = N;
-            rec->nfrag = nfrag;
-            rec->frag = frag;
-            rec->geometry = X;
-            rec->ok = true;
-            m_eeq_li = rec;
-            m_eeq_gpu->requestLocalInverseDeviceBuild(m_eeq_localinv_radius, m_eeq_localinv_ext);
-            return;
+        if constexpr (Backend::has_device_schur) {
+            if (device_build) {
+                // The device builds G inside the next WP7-E solve, from the matrix assembled there; this
+                // record keeps the geometry for the rebuild rule, finishLocalInverseGPU books the result.
+                auto rec = std::make_shared<LocalInversePreconditioner>();
+                rec->natoms = N;
+                rec->nfrag = nfrag;
+                rec->frag = frag;
+                rec->geometry = X;
+                rec->ok = true;
+                m_eeq_li = rec;
+                m_eeq_gpu->requestLocalInverseDeviceBuild(m_eeq_localinv_radius, m_eeq_localinv_ext);
+                return;
+            }
         }
 
         std::vector<double> alpha(N), gam(N);
@@ -2272,6 +2284,15 @@ void GFNFFGpuMethodImpl<Backend>::finishLocalInverseGPU()
         m_eeq_li_seen_dev_builds = st.builds;
         m_eeq_li_seen_dev_failures = st.build_failures;
         m_eeq_li_seen_runtime = st.runtime_fallbacks;
+    } else if constexpr (Backend::has_localinv_upload) {
+        // ROCm (Claude Generated, Oct 2026): host build only, so builds and rejections are booked in
+        // prepareLocalInverseGPU; here only the Jacobi re-solves, as GPU fallbacks like on CUDA.
+        if (!m_eeq_localinv) return;
+        const long rt = m_eeq_gpu->localInverseRuntimeFallbacks();
+        for (long k = m_eeq_li_seen_runtime; k < rt; ++k)
+            curcuma::reportGpuFallback("GFN-FF EEQ: localinv re-solve with Jacobi",
+                                       "breakdown (rz <= 0 / pAp <= 0) or stall");
+        m_eeq_li_seen_runtime = rt;
     }
 }
 

@@ -44,6 +44,10 @@ struct GFNFFCudaBackend {
     static constexpr bool has_device_schur = true;
     /// WP7-E projected PCG on the device (Claude Generated, Oct 2026: separate trait since ROCm has it too).
     static constexpr bool has_device_ppcg = true;
+    /// Local-inverse preconditioner of WP7-E uploaded from a host build (setLocalInversePreconditioner).
+    /// Claude Generated (Oct 2026, separate trait since ROCm has it too); the device build stays under
+    /// has_device_schur.
+    static constexpr bool has_localinv_upload = true;
     /// Multi-GPU split of one molecule (Coulomb tiles + EEQ PCG). Claude Generated (Sep 2026).
     static constexpr bool has_multi_gpu_split = true;
     /// K1 (Oct 2026): CN pair list as a Verlet list with skin (cnPairListStale(), setCNPairSkin()).

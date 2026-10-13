@@ -45,8 +45,11 @@ struct GFNFFRocmBackend {
     /// the wrapper reports it at verbosity 3 instead of warning.
     static constexpr bool has_device_schur = false;
     /// Oct 2026 (Claude Generated): the WP7-E projected PCG (solveWithDeviceRHSAndGPUProjectedPCG)
-    /// is ported, diagonal Jacobi only (no local-inverse preconditioner on ROCm).
+    /// is ported (diagonal Jacobi, or the local inverse below).
     static constexpr bool has_device_ppcg = true;
+    /// Claude Generated (Oct 2026): the local-inverse preconditioner of the projected PCG, built on the
+    /// host (EEQSolver::buildLocalInverse) and uploaded (setLocalInversePreconditioner); no device build.
+    static constexpr bool has_localinv_upload = true;
     /// No multi-GPU split on ROCm (CUDA only, Sep 2026).
     static constexpr bool has_multi_gpu_split = false;
     /// K1 (Oct 2026, Claude Generated): CN pair list as a Verlet list with skin
