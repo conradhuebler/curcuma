@@ -40,6 +40,7 @@ Each item was a real defect; evidence in [docs/KNOWN_ISSUES_ARCHIVE.md](../../..
 ## Dispersion
 
 - Shared D3 kernel (`d3param_generator.cpp`): validated only through the native GFN1 path against tblite (10 of 12 `sqm_reference` molecules at 1e-8, 2026-05-31). `uff-d3` and standalone D3 are not validated.
+- ROCm (Oct 2026): the gradient-mode dispersion is the fused gather `k_dispersion_gather_uv` (C6 and dC6/dCN per edge from per-atom u/v vectors, no `k_dc6dcn_per_pair`); `CURCUMA_ROCM_DISP_FUSED=0` selects the unfused path.
 - GPU `k_dispersion` reads no EEQ charge (`zetac6` holds the Phase-1 topology charges, C6/dC6dCN come from the CN); since K2 (Oct 2026) it runs right after `dc6dcn`, parallel to the EEQ solve.
 - GFN-FF dispersion follows the reference: D4 C6 from Casimir-Polder integration with CN-only Gaussian weights and the modified BJ damping of `gfnff_gdisp0.f90`, not standard D3/D4 (`../dispersion/d4param_generator.cpp`). The three-body ATM term is not in the reference and is off by default (`dispersion_atm`).
 - `uff-d3`: `ForceFieldGenerator::GenerateUFFD3Parameters()` merges UFF terms with the D3 pair list.

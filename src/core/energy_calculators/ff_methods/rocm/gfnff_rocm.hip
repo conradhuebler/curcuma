@@ -270,8 +270,9 @@ __global__ void k_dispersion(
 // ~6M grad + ~2M dEdcn FP64 atomicAdd over 943k pairs. One thread owns atom a, sweeps a's CSR
 // edges, accumulates force (force on a = fac*(ra-rp), fac pair-symmetric), half-energy and the
 // dEdcn term locally, then writes grad[a] (3 atomicAdd) + dEdcn[a] (1 atomicAdd). The dynamic
-// per-pair dc6dcn stays pair-indexed (read via csr_pairidx; csr_is_i picks ij vs ji), so it is
-// bit-identical to k_dispersion and needs no per-step CSR rebuild.
+// per-pair dc6dcn stays pair-indexed (read via csr_pairidx; csr_is_i picks ij vs ji) and needs no
+// per-step CSR rebuild. Oct 2026: pair arithmetic without sqrt and with one division (equal to
+// k_dispersion up to FP rounding); the default gradient path is k_dispersion_gather_uv below.
 __global__ void k_dispersion_gather(
     int N,
     const int*    __restrict__ csr_off,
@@ -313,23 +314,28 @@ __global__ void k_dispersion_gather(
             double dz = za - cz[p];
             applyMIC(dx, dy, dz);
             double r2  = dx*dx + dy*dy + dz*dz;
-            double rij = sqrt(r2);
-            if (rij <= r_cut[tid] && rij >= 1e-10) {
+            // Claude Generated (Oct 2026): cutoff tested on r^2 (no sqrt), t6 and t8 from one FP64
+            // reciprocal, and fac = (dE/dr)/r without the r factor that cancels. Same terms as
+            // k_dispersion up to FP rounding. r <= 60 Bohr keeps (r6+R0^6)(r8+R0^8) below ~1e25.
+            const double rc = r_cut[tid];
+            if (r2 <= rc * rc && r2 >= 1e-20) {
                 double r4   = r2 * r2;
                 double r6   = r4 * r2;
                 double r0s  = r0_sq[tid];
                 double r0_6 = r0s * r0s * r0s;
-                double t6   = 1.0 / (r6 + r0_6);
                 double r8   = r6 * r2;
                 double r0_8 = r0_6 * r0s;
-                double t8   = 1.0 / (r8 + r0_8);
+                double den6 = r6 + r0_6;
+                double den8 = r8 + r0_8;
+                double inv  = 1.0 / (den6 * den8);
+                double t6   = den8 * inv;
+                double t8   = den6 * inv;
                 double rr   = r4r2ij[tid];
                 double disp_sum = t6 + 2.0 * rr * t8;
                 local_E += 0.5 * (-C6[tid] * disp_sum * zetac6[tid]);
                 double d6   = -6.0 * r4 * t6 * t6;
                 double d8   = -8.0 * r4 * r2 * t8 * t8;
-                double dEdr = -C6[tid] * zetac6[tid] * (d6 + 2.0 * rr * d8) * rij;
-                double fac  = dEdr / rij;          // force on a = fac*(ra - rp)
+                double fac  = -C6[tid] * zetac6[tid] * (d6 + 2.0 * rr * d8);   // force on a = fac*(ra - rp)
                 gx += fac*dx; gy += fac*dy; gz += fac*dz;
                 if (has_dcn) {
                     double disp_value = disp_sum * zetac6[tid];
@@ -356,6 +362,110 @@ __global__ void k_dispersion_gather(
     if (lane == 0 && a < N) {
         add_grad(grad, a, sgx[0], sgy[0], sgz[0]);
         if (dc6dcn_ij != nullptr && dEdcn != nullptr) atomicAdd(&dEdcn[a], sdc[0]);
+    }
+
+    blockReduceAddEnergy(local_E, energy);
+}
+
+// Claude Generated (Oct 2026): k_dispersion_gather with C6 and dC6/dCN computed in the edge loop from the
+// factorised D4 sums (k_disp_uv) instead of being read from the per-pair arrays C6 / dc6dcn_ij / dc6dcn_ji.
+// From atom a's side, for any partner p: C6(a,p) = sum_r v(a,Zp,r) gw(p,r) and dC6/dCN_a = sum_r u(a,Zp,r) gw(p,r).
+// For a = idx_j this uses C6ref(Za,Zp,ra,rp) = C6ref(Zp,Za,rp,ra); the host enables this kernel only when the
+// uploaded reference table is bitwise symmetric (c6_table_symmetric). Each pair's C6 is now formed twice (once
+// per CSR direction) with different rounding; k_dc6dcn_per_pair_uv and its 3 x n per-pair writes are skipped.
+// Same energy/force formula as k_dispersion_gather.
+/// @param atom_ctype [N] compact element type per atom
+/// @param uv         [N * ntypes * 2*D4_MAX_REF] output of k_disp_uv for the current gw
+/// @param gw         [N * D4_MAX_REF] Gaussian weights k_disp_uv was built from (zero-padded)
+/// @param dEdcn      [N] CN chain-rule accumulator (nullptr: no dC6/dCN term)
+__global__ void k_dispersion_gather_uv(
+    int N, int ntypes,
+    const int*    __restrict__ csr_off,
+    const int*    __restrict__ csr_partner,
+    const int*    __restrict__ csr_pairidx,
+    const int*    __restrict__ atom_ctype,
+    const double* __restrict__ uv,
+    const double* __restrict__ gw,
+    const double* __restrict__ r4r2ij,
+    const double* __restrict__ r0_sq,
+    const double* __restrict__ zetac6,
+    const double* __restrict__ r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    dEdcn,
+    double*                    grad,
+    double*                    energy)
+{
+    const int a = blockIdx.x;
+    const int lane = threadIdx.x, nlanes = blockDim.x;
+    double local_E = 0.0;
+    double gx = 0.0, gy = 0.0, gz = 0.0, dEdcn_a = 0.0;
+
+    if (a < N) {
+        const double xa = cx[a], ya = cy[a], za = cz[a];
+        const bool has_dcn = (dEdcn != nullptr);
+        const double* uv_a = uv + (size_t)a * ntypes * (2 * D4_MAX_REF);
+        const int s = csr_off[a], e = csr_off[a + 1];
+        for (int t = s + lane; t < e; t += nlanes) {
+            const int p   = csr_partner[t];
+            const int tid = csr_pairidx[t];
+            double dx = xa - cx[p];
+            double dy = ya - cy[p];
+            double dz = za - cz[p];
+            applyMIC(dx, dy, dz);
+            double r2  = dx*dx + dy*dy + dz*dz;
+            const double rc = r_cut[tid];
+            if (r2 <= rc * rc && r2 >= 1e-20) {
+                const double* u  = uv_a + atom_ctype[p] * (2 * D4_MAX_REF);
+                const double* v  = u + D4_MAX_REF;
+                const double* gp = gw + p * D4_MAX_REF;
+                double c6 = 0.0, dc6 = 0.0;
+#pragma unroll
+                for (int r = 0; r < D4_MAX_REF; ++r) {
+                    const double g = gp[r];
+                    c6  += v[r] * g;
+                    dc6 += u[r] * g;
+                }
+                double r4   = r2 * r2;
+                double r6   = r4 * r2;
+                double r0s  = r0_sq[tid];
+                double r0_6 = r0s * r0s * r0s;
+                double r8   = r6 * r2;
+                double r0_8 = r0_6 * r0s;
+                double den6 = r6 + r0_6;
+                double den8 = r8 + r0_8;
+                double inv  = 1.0 / (den6 * den8);
+                double t6   = den8 * inv;
+                double t8   = den6 * inv;
+                double rr   = r4r2ij[tid];
+                double zc   = zetac6[tid];
+                double disp_sum = t6 + 2.0 * rr * t8;
+                local_E += 0.5 * (-c6 * disp_sum * zc);
+                double d6   = -6.0 * r4 * t6 * t6;
+                double d8   = -8.0 * r4 * r2 * t8 * t8;
+                double fac  = -c6 * zc * (d6 + 2.0 * rr * d8);   // force on a = fac*(ra - rp)
+                gx += fac*dx; gy += fac*dy; gz += fac*dz;
+                if (has_dcn) dEdcn_a += -dc6 * (disp_sum * zc);
+            }
+        }
+    }
+
+    __shared__ double sgx[256], sgy[256], sgz[256], sdc[256];
+    sgx[lane] = gx; sgy[lane] = gy; sgz[lane] = gz; sdc[lane] = dEdcn_a;
+    __syncthreads();
+    for (int stride = nlanes >> 1; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            sgx[lane] += sgx[lane + stride];
+            sgy[lane] += sgy[lane + stride];
+            sgz[lane] += sgz[lane + stride];
+            sdc[lane] += sdc[lane + stride];
+        }
+        __syncthreads();
+    }
+    if (lane == 0 && a < N) {
+        add_grad(grad, a, sgx[0], sgy[0], sgz[0]);
+        if (dEdcn != nullptr) atomicAdd(&dEdcn[a], sdc[0]);
     }
 
     blockReduceAddEnergy(local_E, energy);
@@ -3112,62 +3222,106 @@ __global__ GFNFF_KERNEL_BOUNDS void k_gaussian_weights(
     }
 }
 
-__global__ void k_dc6dcn_per_pair(
-    int n_pairs,
-    const int*    __restrict__ idx_i,
-    const int*    __restrict__ idx_j,
+// ============================================================================
+// D4 C6 and dC6/dCN per pair, factorised over the partner element.
+// Claude Generated (Oct 2026). The double sum
+//   C6(i,j)        = sum_ri sum_rj gw(i,ri)  gw(j,rj)  C6ref(Zi,Zj,ri,rj)
+//   dC6(i,j)/dCN_i = sum_ri sum_rj dgw(i,ri) gw(j,rj)  C6ref(Zi,Zj,ri,rj)
+//   dC6(i,j)/dCN_j = sum_ri sum_rj gw(i,ri)  dgw(j,rj) C6ref(Zi,Zj,ri,rj)
+// is split into a per-atom half that depends only on atom i and the ELEMENT of j,
+//   u(i,e,rj) = sum_ri dgw(i,ri) C6ref(Zi,e,ri,rj),   v(i,e,rj) = sum_ri gw(i,ri) C6ref(Zi,e,ri,rj),
+// and a per-pair half C6 = sum_rj v(i,Zj,rj) gw(j,rj), dC6/dCN_i = sum_rj u(i,Zj,rj) gw(j,rj),
+// dC6/dCN_j = sum_rj v(i,Zj,rj) dgw(j,rj): 21 FP64 FMA per pair instead of up to 3 x 49.
+// Same terms as the double sum (reference entries with |C6ref| < 1e-20 are dropped in both);
+// the products are summed in a different order (FP rounding only).
+// Elements are compacted to the types present (ctype_elem); u/v layout
+// uv[(atom * ntypes + type) * 2*D4_MAX_REF + {0..6: u, 7..13: v}], zero beyond nref.
+// Reference: d4param_generator.cpp:computeDC6DCN(), Fortran gfnff_gdisp0.f90:262-305
+// ============================================================================
+
+/// Per-atom half of the factorised D4 C6 / dC6dCN sums: one thread per (atom, element type).
+/// @param natoms      number of atoms
+/// @param ntypes      number of element types present in the system
+/// @param atom_types  [N] atomic numbers (1-based)
+/// @param ctype_elem  [ntypes] 0-based element index of each compact type
+/// @param gw, dgw     [N * D4_MAX_REF] Gaussian weights and their CN derivatives (zero-padded)
+/// @param c6_flat     [MAX_ELEM^2 * MAX_REF^2] C6 reference table
+/// @param uv          [N * ntypes * 2 * D4_MAX_REF] output u (dgw-contracted) and v (gw-contracted)
+__global__ void k_disp_uv(
+    int natoms, int ntypes,
     const int*    __restrict__ atom_types,
+    const int*    __restrict__ ctype_elem,
     const double* __restrict__ gw,
     const double* __restrict__ dgw,
     const double* __restrict__ c6_flat,
+    double*       __restrict__ uv)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= natoms * ntypes) return;
+    const int a = k / ntypes;
+    const int e = k - a * ntypes;
+    double* out = uv + (size_t)k * (2 * D4_MAX_REF);
+
+    const int ea = atom_types[a] - 1;
+    const int eb = ctype_elem[e];
+    if (ea < 0 || ea >= D4_MAX_ELEM || eb < 0 || eb >= D4_MAX_ELEM) {
+        for (int r = 0; r < 2 * D4_MAX_REF; ++r) out[r] = 0.0;
+        return;
+    }
+    int nra = d_refn_const[ea]; if (nra > D4_MAX_REF) nra = D4_MAX_REF;
+    int nrb = d_refn_const[eb]; if (nrb > D4_MAX_REF) nrb = D4_MAX_REF;
+    const size_t c6_base = (size_t)ea * D4_MAX_ELEM * D4_MAX_REF * D4_MAX_REF
+                         + (size_t)eb * D4_MAX_REF * D4_MAX_REF;
+    double g[D4_MAX_REF], dg[D4_MAX_REF];
+    for (int r = 0; r < D4_MAX_REF; ++r) { g[r] = gw[a * D4_MAX_REF + r]; dg[r] = dgw[a * D4_MAX_REF + r]; }
+
+    for (int rb = 0; rb < D4_MAX_REF; ++rb) {
+        double u = 0.0, v = 0.0;
+        if (rb < nrb) {
+            for (int ra = 0; ra < nra; ++ra) {
+                const double c6ref = c6_flat[c6_base + ra * D4_MAX_REF + rb];
+                if (fabs(c6ref) < 1e-20) continue;
+                u += dg[ra] * c6ref;
+                v += g[ra] * c6ref;
+            }
+        }
+        out[rb]              = u;
+        out[D4_MAX_REF + rb] = v;
+    }
+}
+
+/// Per-pair half of the factorised D4 sums (see the block comment above): one thread per pair.
+/// @param uv         output of k_disp_uv for the same gw/dgw
+/// @param atom_ctype [N] compact element type of each atom
+/// @param c6_out     [n] C6(i,j) at the current CN, or nullptr (C6 kept)
+__global__ void k_dc6dcn_per_pair_uv(
+    int n_pairs, int ntypes,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ atom_ctype,
+    const double* __restrict__ uv,
+    const double* __restrict__ gw,
+    const double* __restrict__ dgw,
     double*       __restrict__ dc6dcn_ij,
     double*       __restrict__ dc6dcn_ji,
     double*       __restrict__ c6_out)
 {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_pairs) return;
-
-    int ai = idx_i[tid];
-    int aj = idx_j[tid];
-
-    // Element indices (0-based)
-    int ei = atom_types[ai] - 1;
-    int ej = atom_types[aj] - 1;
-
-    int nri = d_refn_const[ei];
-    int nrj = d_refn_const[ej];
-
-    // C6 flat index base: elem_i * MAX_ELEM * MAX_REF² + elem_j * MAX_REF²
-    size_t c6_base = (size_t)ei * D4_MAX_ELEM * D4_MAX_REF * D4_MAX_REF
-                   + (size_t)ej * D4_MAX_REF * D4_MAX_REF;
-
-    // Weight array offsets: atom * MAX_REF
-    int gw_i_base = ai * D4_MAX_REF;
-    int gw_j_base = aj * D4_MAX_REF;
-
-    double dc6_ij = 0.0;
-    double dc6_ji = 0.0;
-    double c6     = 0.0;   // Claude Generated (Sep 2026): C6 itself, same double sum
-
-    for (int ri = 0; ri < nri; ++ri) {
-        double dgw_i_ri = dgw[gw_i_base + ri];
-        double gw_i_ri  = gw[gw_i_base + ri];
-
-        for (int rj = 0; rj < nrj; ++rj) {
-            double c6ref = c6_flat[c6_base + ri * D4_MAX_REF + rj];
-            if (fabs(c6ref) < 1e-20) continue;
-
-            // dc6dcn(i,j) = dC6(i,j)/dCN(i) = Σ dgw(i,ri) * gw(j,rj) * C6ref
-            dc6_ij += dgw_i_ri * gw[gw_j_base + rj] * c6ref;
-
-            // dc6dcn(j,i) = dC6(i,j)/dCN(j) = Σ gw(i,ri) * dgw(j,rj) * C6ref
-            dc6_ji += gw_i_ri * dgw[gw_j_base + rj] * c6ref;
-
-            // C6(i,j) = Σ gw(i,ri) * gw(j,rj) * C6ref (Caldeweyher 2019 CN-weighted C6)
-            c6 += gw_i_ri * gw[gw_j_base + rj] * c6ref;
-        }
+    const int ai = idx_i[tid];
+    const int aj = idx_j[tid];
+    const double* u  = uv + ((size_t)ai * ntypes + atom_ctype[aj]) * (2 * D4_MAX_REF);
+    const double* v  = u + D4_MAX_REF;
+    const double* gj = gw  + aj * D4_MAX_REF;
+    const double* dj = dgw + aj * D4_MAX_REF;
+    double dc6_ij = 0.0, dc6_ji = 0.0, c6 = 0.0;
+#pragma unroll
+    for (int r = 0; r < D4_MAX_REF; ++r) {
+        const double g = gj[r];
+        dc6_ij += u[r] * g;
+        dc6_ji += v[r] * dj[r];
+        c6     += v[r] * g;
     }
-
     dc6dcn_ij[tid] = dc6_ij;
     dc6dcn_ji[tid] = dc6_ji;
     if (c6_out) c6_out[tid] = c6;
@@ -4625,6 +4779,16 @@ struct FFWorkspaceHipImpl {
     // Uploaded via upload_refn_const() / upload_refcn_const() at init
     bool               dc6dcn_gpu_ready = false; ///< true after C6 table + refn uploaded
 
+    // Claude Generated (Oct 2026): factorised D4 C6 / dC6dCN sums (k_disp_uv, k_dc6dcn_per_pair_uv).
+    int                disp_ntypes = 0;        ///< element types present (compact index)
+    CudaBuffer<int>    d_atom_ctype;           ///< [N] compact element type per atom
+    CudaBuffer<int>    d_ctype_elem;           ///< [disp_ntypes] 0-based element per compact type
+    CudaBuffer<double> d_disp_uv;              ///< [N * disp_ntypes * 2*D4_MAX_REF] u | v per (atom, type)
+    bool disp_uv_valid        = false; ///< d_disp_uv matches d_gw/d_dgw (cleared when the pair list is replaced)
+    bool disp_pair_c6_current = true;  ///< disp.C6 / dc6dcn_* hold the values of the last d_disp_uv
+    bool c6_table_symmetric   = false; ///< C6ref(Zi,Zj,ri,rj) == C6ref(Zj,Zi,rj,ri) bitwise (fused gather allowed)
+    bool disp_fused_enabled   = true;  ///< CURCUMA_ROCM_DISP_FUSED=0 switches the fused gather off
+
     // WP-A (Jun 2026): on-device D4 dispersion pair-list build buffers
     CudaBuffer<double> d_sqrtzr4r2;        ///< [118] sqrt(Z·r4/r2) per element
     CudaBuffer<double> d_topo_q;           ///< [N] Phase-1 topology charges (for zetac6)
@@ -4912,6 +5076,7 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
 
     // --- Upload static SoA interaction lists ---
     m_impl->disp.upload(params.dispersions, natoms, stream);
+    m_impl->disp_uv_valid = false; m_impl->disp_pair_c6_current = true;  // Oct 2026: new pair list, d_disp_uv stale
     m_impl->bonded_rep.upload(params.bonded_repulsions, stream);
     m_impl->nonbonded_rep.upload(params.nonbonded_repulsions, stream);
     m_impl->coulomb.upload(params.coulombs, natoms, stream);
@@ -4983,6 +5148,22 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
     // Upload atom types once (static during simulation)
     std::vector<int> h_atom_types = atom_types;  // copy
     m_impl->d_atom_types.upload(h_atom_types, stream);
+
+    // Claude Generated (Oct 2026): compact element types for the factorised D4 C6 sums (k_disp_uv).
+    {
+        std::vector<int> type_of_elem(D4_MAX_ELEM, -1), ctype_elem, atom_ctype(natoms, 0);
+        for (int a = 0; a < natoms; ++a) {
+            const int e = atom_types[a] - 1;
+            if (e < 0 || e >= D4_MAX_ELEM) continue;      // k_disp_uv writes zeros for such atoms
+            if (type_of_elem[e] < 0) { type_of_elem[e] = static_cast<int>(ctype_elem.size()); ctype_elem.push_back(e); }
+            atom_ctype[a] = type_of_elem[e];
+        }
+        if (ctype_elem.empty()) ctype_elem.push_back(-1);
+        m_impl->disp_ntypes = static_cast<int>(ctype_elem.size());
+        m_impl->d_ctype_elem.upload(ctype_elem, stream);
+        m_impl->d_atom_ctype.upload(atom_ctype, stream);
+        m_impl->d_disp_uv.alloc(natoms * m_impl->disp_ntypes * 2 * D4_MAX_REF);
+    }
 
     // --- HB alpha chain-rule: allocate zz buffer + build (H,B) pair list ---
     m_impl->d_zz_hb.alloc(natoms);
@@ -5359,6 +5540,7 @@ void FFWorkspaceHip::updateDispersion(const std::vector<GFNFFDispersion>& pairs)
     // pairs. Mechanical mirror, unverified (no ROCm SDK here).
     auto& impl = *m_impl;
     impl.disp.upload(pairs, m_natoms, impl.stream);
+    { impl.disp_uv_valid = false; impl.disp_pair_c6_current = true; }  // Oct 2026: new pair list, d_disp_uv stale
     const int nd = impl.disp.n;
     if (impl.dc6dcn_gpu_ready && nd > 0) {
         impl.disp.dc6dcn_ij.ensure(nd);
@@ -5535,6 +5717,25 @@ void FFWorkspaceHip::uploadC6ReferenceTable(const std::vector<double>& c6_flat,
     // Upload C6 reference table (one-time, ~3.1 MB)
     impl.d_c6_flat.upload(c6_flat.data(), static_cast<int>(c6_flat.size()));
 
+    // Claude Generated (Oct 2026): k_dispersion_gather_uv evaluates C6(a,p) from either atom's side,
+    // which needs C6ref(Zi,Zj,ri,rj) == C6ref(Zj,Zi,rj,ri). The D4 generator stores both halves with the
+    // same value (d4param_generator.cpp); check it bitwise instead of relying on it.
+    {
+        const size_t R = D4_MAX_REF, E = D4_MAX_ELEM;
+        bool sym = (c6_flat.size() >= E * E * R * R);
+        for (size_t ei = 0; sym && ei < E; ++ei)
+            for (size_t ej = ei; sym && ej < E; ++ej)
+                for (size_t ri = 0; sym && ri < R; ++ri)
+                    for (size_t rj = 0; rj < R; ++rj)
+                        if (c6_flat[((ei * E + ej) * R + ri) * R + rj] != c6_flat[((ej * E + ei) * R + rj) * R + ri]) { sym = false; break; }
+        impl.c6_table_symmetric = sym;
+        const char* env = std::getenv("CURCUMA_ROCM_DISP_FUSED");
+        impl.disp_fused_enabled = !(env && std::string(env) == "0");
+        if (CurcumaLogger::get_verbosity() >= 3)
+            CurcumaLogger::info(fmt::format("  D4 C6 table symmetric: {}, fused dispersion gather: {}",
+                                            sym ? "yes" : "no", (sym && impl.disp_fused_enabled) ? "on" : "off"));
+    }
+
     // Upload refn array (118 ints) to constant memory (Phase 8: broadcast via L1)
     upload_refn_const(refn.data(), static_cast<int>(refn.size()));
 
@@ -5543,7 +5744,7 @@ void FFWorkspaceHip::uploadC6ReferenceTable(const std::vector<double>& c6_flat,
     impl.d_gw.alloc(gw_size);
     impl.d_dgw.alloc(gw_size);
 
-    // Pre-allocate dc6dcn output buffers (written by k_dc6dcn_per_pair kernel)
+    // Pre-allocate dc6dcn output buffers (written by k_dc6dcn_per_pair_uv)
     const int nd = impl.disp.n;
     if (nd > 0) {
         impl.disp.dc6dcn_ij.alloc(nd);
@@ -5555,6 +5756,32 @@ void FFWorkspaceHip::uploadC6ReferenceTable(const std::vector<double>& c6_flat,
     m_h_dgw_flat.resize(gw_size, 0.0);
 
     impl.dc6dcn_gpu_ready = true;
+}
+
+/// Claude Generated (Oct 2026): factorised C6 / dC6dCN per pair from the current d_gw / d_dgw:
+/// k_disp_uv (per atom and element type) then k_dc6dcn_per_pair_uv (per pair). Writes C6 only
+/// when c6_update is set (per-step C6 refresh), as the former k_dc6dcn_per_pair did.
+/// With with_uv false only the per-pair half runs (d_disp_uv must be current).
+static void launchDispC6PerPair(FFWorkspaceHipImpl& impl, int natoms, bool c6_update,
+                                int block_size, hipStream_t stream, bool with_uv = true)
+{
+    const int nd = impl.disp.n;
+    if (nd == 0 || natoms <= 0 || impl.disp_ntypes <= 0) return;
+    if (with_uv) {
+        LaunchConfig cfg_uv = getLaunchConfig(natoms * impl.disp_ntypes, block_size);
+        k_disp_uv<<<cfg_uv.gridSize, cfg_uv.blockSize, 0, stream>>>(
+            natoms, impl.disp_ntypes, impl.d_atom_types.ptr, impl.d_ctype_elem.ptr,
+            impl.d_gw.ptr, impl.d_dgw.ptr, impl.d_c6_flat.ptr, impl.d_disp_uv.ptr);
+        impl.disp_uv_valid = true;
+    }
+    impl.disp_pair_c6_current = true;
+    LaunchConfig cfg = getLaunchConfig(nd, block_size);
+    k_dc6dcn_per_pair_uv<<<cfg.gridSize, cfg.blockSize, 0, stream>>>(
+        nd, impl.disp_ntypes,
+        impl.disp.idx_i.ptr, impl.disp.idx_j.ptr, impl.d_atom_ctype.ptr,
+        impl.d_disp_uv.ptr, impl.d_gw.ptr, impl.d_dgw.ptr,
+        impl.disp.dc6dcn_ij.ptr, impl.disp.dc6dcn_ji.ptr,
+        c6_update ? impl.disp.C6.ptr : nullptr);
 }
 
 void FFWorkspaceHip::computeDC6DCNOnGPU(const std::vector<std::vector<double>>& gw,
@@ -5582,23 +5809,10 @@ void FFWorkspaceHip::computeDC6DCNOnGPU(const std::vector<std::vector<double>>& 
     impl.d_gw.upload(m_h_gw_flat.data(), gw_size);
     impl.d_dgw.upload(m_h_dgw_flat.data(), gw_size);
 
-    // Launch dc6dcn per-pair kernel (Phase 6: dynamic block size)
-    LaunchConfig cfg = getLaunchConfig(nd, m_block_size);
-    // refn read from constant memory d_refn_const (Phase 8)
-    k_dc6dcn_per_pair<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
-        nd,
-        impl.disp.idx_i.ptr,
-        impl.disp.idx_j.ptr,
-        impl.d_atom_types.ptr,
-        impl.d_gw.ptr,
-        impl.d_dgw.ptr,
-        impl.d_c6_flat.ptr,
-        impl.disp.dc6dcn_ij.ptr,
-        impl.disp.dc6dcn_ji.ptr,
-        m_disp_c6_update ? impl.disp.C6.ptr : nullptr   // Sep 2026: per-step C6 refresh
-    );
+    // Factorised C6 / dc6dcn per pair (Oct 2026; refn read from constant memory d_refn_const)
+    launchDispC6PerPair(impl, N, m_disp_c6_update, m_block_size, impl.stream);
 
-    // No sync needed here: k_dc6dcn_per_pair runs on impl.stream (main stream).
+    // No sync needed here: k_disp_uv + k_dc6dcn_per_pair_uv run on impl.stream (main stream).
     // launchChargeDependentAndFinish() does hipStreamWaitEvent(stream_pairwise, stream)
     // before launching k_dispersion, which guarantees dc6dcn is ready.
     // Phase 4a: Removed unnecessary hipStreamSynchronize (Claude Generated March 2026)
@@ -5687,6 +5901,7 @@ void FFWorkspaceHip::generateDispersionPairListOnGPU(
     impl.d_disp_pair_counter.download(&h_count, 1);
     checkCuda(hipStreamSynchronize(impl.stream), "download disp pair count");
 
+    { impl.disp_uv_valid = false; impl.disp_pair_c6_current = true; }  // Oct 2026: new pair list, d_disp_uv stale
     // (Re)allocate the DispersionSoA to the device-counted pair count.
     impl.disp.n = h_count;
     impl.disp.idx_i.alloc(h_count);
@@ -5796,18 +6011,22 @@ void FFWorkspaceHip::computeGaussianWeightsOnGPU(bool use_cn_final)
         impl.d_gw.ptr,
         impl.d_dgw.ptr);
 
-    LaunchConfig cfg_dc6 = getLaunchConfig(nd, m_block_size);
-    k_dc6dcn_per_pair<<<cfg_dc6.gridSize, cfg_dc6.blockSize, 0, impl.stream>>>(
-        nd,
-        impl.disp.idx_i.ptr,
-        impl.disp.idx_j.ptr,
-        impl.d_atom_types.ptr,
-        impl.d_gw.ptr,
-        impl.d_dgw.ptr,
-        impl.d_c6_flat.ptr,
-        impl.disp.dc6dcn_ij.ptr,
-        impl.disp.dc6dcn_ji.ptr,
-        m_disp_c6_update ? impl.disp.C6.ptr : nullptr);  // Sep 2026: per-step C6 refresh
+    // Claude Generated (Oct 2026): factorised C6 sums. In gradient mode (use_cn_final false) with the
+    // per-step C6 refresh on and a symmetric reference table, only the per-atom half runs here and
+    // k_dispersion_gather_uv forms C6 and dC6/dCN per edge; the per-pair arrays are then stale and are
+    // filled before the next energy-only k_dispersion (prepareAndLaunchChargeIndependent).
+    const bool fused = !use_cn_final && m_disp_c6_update && impl.c6_table_symmetric && impl.disp_fused_enabled
+                       && impl.disp.csr_N == N;
+    if (fused) {
+        LaunchConfig cfg_uv = getLaunchConfig(N * impl.disp_ntypes, m_block_size);
+        k_disp_uv<<<cfg_uv.gridSize, cfg_uv.blockSize, 0, impl.stream>>>(
+            N, impl.disp_ntypes, impl.d_atom_types.ptr, impl.d_ctype_elem.ptr,
+            impl.d_gw.ptr, impl.d_dgw.ptr, impl.d_c6_flat.ptr, impl.d_disp_uv.ptr);
+        impl.disp_uv_valid = true;
+        impl.disp_pair_c6_current = false;
+    } else {
+        launchDispC6PerPair(impl, N, m_disp_c6_update, m_block_size, impl.stream);
+    }
     // No explicit sync needed: stream ordering + event_upload fence in
     // prepareAndLaunchChargeIndependent guarantees dc6dcn is ready before k_dispersion on sA.
 }
@@ -5933,6 +6152,10 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     // (computeGaussianWeightsOnGPU runs after Phase 1 on d_cn; dc6dcn is only
     // ready on stream_pairwise after the Phase-2 event_upload fence).
     if (m_dispersion_enabled && !gradient) {
+        // Claude Generated (Oct 2026): after fused gradient steps the per-pair C6 is stale (frozen-CN
+        // energy calls reach this without a weight refresh); fill it from the current d_disp_uv first.
+        if (!impl.disp_pair_c6_current && impl.disp_uv_valid)
+            launchDispC6PerPair(impl, m_natoms, m_disp_c6_update, m_block_size, sA, /*with_uv=*/false);
         LaunchConfig cfg = getLaunchConfig(impl.disp.n, m_block_size);
         k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
             impl.disp.n,
@@ -6386,9 +6609,21 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
     if (m_dispersion_enabled && gradient) {
         // ROCm: per-atom gather (grad + dEdcn accumulated locally) instead of the pair kernel —
         // the deferred gradient-mode k_dispersion's ~8M FP64 atomicAdd was the dominant MD cost.
-        // Dynamic dc6dcn stays pair-indexed (read via csr_pairidx); bit-identical to k_dispersion.
+        // Fused path (Oct 2026, default): C6 and dC6/dCN per edge from d_disp_uv, no per-pair C6/dc6dcn
+        // arrays. Otherwise (CURCUMA_ROCM_DISP_FUSED=0, no per-step C6 refresh, asymmetric C6 table,
+        // stale d_disp_uv) the per-pair arrays are read via csr_pairidx. Both equal k_dispersion up to FP rounding.
         const int disp_block = 64;   // one workgroup per atom (power of two for the tree reduction)
         int grid = impl.disp.csr_N;
+        if (impl.disp_uv_valid && !impl.disp_pair_c6_current) {
+            // Claude Generated (Oct 2026): C6 and dC6/dCN formed per edge from d_disp_uv (fused path).
+            k_dispersion_gather_uv<<<grid, disp_block, 0, impl.stream_pairwise>>>(
+                impl.disp.csr_N, impl.disp_ntypes,
+                impl.disp.csr_off.ptr, impl.disp.csr_partner.ptr, impl.disp.csr_pairidx.ptr,
+                impl.d_atom_ctype.ptr, impl.d_disp_uv.ptr, impl.d_gw.ptr,
+                impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr, impl.disp.zetac6.ptr, impl.disp.r_cut.ptr,
+                impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+                impl.d_dEdcn.ptr, impl.d_grad.ptr, &impl.d_energies.ptr[impl.E_DISP]);
+        } else {
         k_dispersion_gather<<<grid, disp_block, 0, impl.stream_pairwise>>>(
             impl.disp.csr_N,
             impl.disp.csr_off.ptr, impl.disp.csr_partner.ptr,
@@ -6404,6 +6639,7 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
             impl.d_dEdcn.ptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_DISP]);
+        }
         checkCuda(hipGetLastError(), "k_dispersion_gather launch");
     }
 

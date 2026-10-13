@@ -491,29 +491,36 @@ __global__ GFNFF_KERNEL_BOUNDS void k_cn_compute(
     double        threshold_sq);             ///< distance cutoff squared (Bohr²)
 
 // ============================================================================
-// DC6DCN per-pair kernel (Phase 2 GPU optimization)
-// Claude Generated (March 2026): Compute dc6/dcn directly per dispersion pair,
-// eliminating O(N²) CPU matrix construction.
+// D4 C6 / dC6dCN per pair, factorised over the partner element (Claude Generated, Oct 2026).
+// Replaces the March 2026 k_dc6dcn_per_pair double loop; definitions and formulas in gfnff_rocm.hip.
+// refn is read from d_refn_const (constant memory, uploaded via upload_refn_const).
 // ============================================================================
 
-/// Compute dC6(i,j)/dCN(i) and dC6(i,j)/dCN(j) for each dispersion pair.
-/// Formula: dc6dcn(i,j) = Σ_{ri,rj} dgw(i,ri) * gw(j,rj) * C6_ref(Zi,Zj,ri,rj)
-/// Thread layout: 1 thread per dispersion pair.
-/// Reference: d4param_generator.cpp:computeDC6DCN(), Fortran gfnff_gdisp0.f90:262-305
-__global__ GFNFF_KERNEL_BOUNDS void k_dc6dcn_per_pair(
-    int n_pairs,
-    const int*    __restrict__ idx_i,          ///< [n] pair atom i indices
-    const int*    __restrict__ idx_j,          ///< [n] pair atom j indices
+/// Per-atom half: u(i,e,r) = sum_ri dgw(i,ri) C6ref(Zi,e,ri,r), v(i,e,r) = sum_ri gw(i,ri) C6ref(Zi,e,ri,r).
+/// Thread layout: 1 thread per (atom, element type present).
+__global__ GFNFF_KERNEL_BOUNDS void k_disp_uv(
+    int natoms, int ntypes,
     const int*    __restrict__ atom_types,     ///< [N] atomic numbers (1-based)
+    const int*    __restrict__ ctype_elem,     ///< [ntypes] 0-based element of each compact type
     const double* __restrict__ gw,             ///< [N * MAX_REF] Gaussian weights (padded)
     const double* __restrict__ dgw,            ///< [N * MAX_REF] weight derivatives
-    const double* __restrict__ c6_flat,        ///< [MAX_ELEM² * MAX_REF²] C6 reference table
+    const double* __restrict__ c6_flat,        ///< [MAX_ELEM^2 * MAX_REF^2] C6 reference table
+    double*       __restrict__ uv);            ///< [N * ntypes * 2*MAX_REF] output u | v
+
+/// Per-pair half: C6 = v.gw_j, dC6/dCN_i = u.gw_j, dC6/dCN_j = v.dgw_j (21 FMA per pair).
+/// Thread layout: 1 thread per dispersion pair.
+/// Reference: d4param_generator.cpp:computeDC6DCN(), Fortran gfnff_gdisp0.f90:262-305
+__global__ GFNFF_KERNEL_BOUNDS void k_dc6dcn_per_pair_uv(
+    int n_pairs, int ntypes,
+    const int*    __restrict__ idx_i,          ///< [n] pair atom i indices
+    const int*    __restrict__ idx_j,          ///< [n] pair atom j indices
+    const int*    __restrict__ atom_ctype,     ///< [N] compact element type per atom
+    const double* __restrict__ uv,             ///< output of k_disp_uv
+    const double* __restrict__ gw,             ///< [N * MAX_REF] Gaussian weights (padded)
+    const double* __restrict__ dgw,            ///< [N * MAX_REF] weight derivatives
     double*       __restrict__ dc6dcn_ij,      ///< [n] output: dC6(i,j)/dCN(i)
     double*       __restrict__ dc6dcn_ji,      ///< [n] output: dC6(i,j)/dCN(j)
-    double*       __restrict__ c6_out          ///< [n] output: C6(i,j) at the current CN, or nullptr
-    // refn read from d_refn_const (constant memory, uploaded via upload_refn_const)
-    // Claude Generated (Sep 2026): mirror of the CUDA per-step C6 refresh (unverified: no ROCm SDK here).
-);
+    double*       __restrict__ c6_out);        ///< [n] output: C6(i,j) at the current CN, or nullptr
 
 // ============================================================================
 // GPU dlogdcn computation (Apr 2026)
