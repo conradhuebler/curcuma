@@ -1,457 +1,165 @@
 # Curcuma Development TODO List
 
-**Stand**: 2026-03-13
-**Quelle**: Extrahiert aus allen CLAUDE.md-Dateien
-**Test Status**: 26/26 CLI tests passing (100%) ✅
-
----
-
-## 🔴 KRITISCH / HÖCHSTE PRIORITÄT
-
-*No critical blockers remaining!* All SimpleMD issues resolved.
-
----
-
-## 🟢 COARSE GRAINING DEVELOPMENT
-
-### ✅ CG Integration - Phases 1-5 (COMPLETE - Oct/Nov 2025)
-- Phase 1: Molecule helper functions (isCGSystem, hasMixedSystem, getCGAtoms)
-- Phase 2: JSON parameter loading in forcefield.cpp
-- Phase 3: VTF reader/writer in formats.h
-- Phase 4: Testing & validation (unit tests + CLI test)
-- Phase 5: SimpleMD CG integration (PBC, 10x timestep scaling, VTF output, orientational infrastructure)
-
-### 🔵 CG Potentials - Phase 6: Ellipsoidal Extensions (OPTIONAL - LOWEST PRIORITY)
-- **Status**: 🟡 PREPARED
-- **Priority**: 🔵 LOW - After SimpleMD integration
-- **Task**: Implement angle-dependent energy for ellipsoidal particles
-- **Betroffene Dateien**: src/core/energy_calculators/ff_methods/cg_potentials.cpp, src/capabilities/casino.cpp
-- **Aufwand**: ~4-5 h (after Phase 5 complete)
-- **Current Status**: All infrastructure prepared (rotation matrices, ellipsoid detection, fallback energy)
-- **Remaining**:
-  - Complete `calculateEffectiveDistance()` for ellipsoid-ellipsoid interactions
-  - Implement orientation-dependent potential in `calculateCGPairEnergy()`
-  - Activate rotational moves in Casino
-  - Test ellipsoidal shape calculations
-
----
-
-## 🟡 TESTING & VALIDATION (test_cases/CLAUDE.md:296-303)
-
-### Scientific Validation Enhancement
-- **Status**: ⏳ PENDING
-- **Task**: Erweitere wissenschaftliche Validierung für alle Tests (RMSD tolerances, energy convergence)
-- **Dateien**: test_cases/cli/test_utils.sh, test_cases/cli/*/run_test.sh
-- **Note**: All tests now passing (26/26), ready for enhanced validation
-
-### Expected Failure Pattern für invalid_method Tests
-- **Status**: ⏳ PENDING
-- **Task**: Implementiere Pattern für Tests, die bewusst fehlschlagen sollen
-- **Tests betroffen**:
-  - test_cases/cli/curcumaopt/03_invalid_method/run_test.sh
-  - test_cases/cli/rmsd/03_invalid_method/run_test.sh
-  - test_cases/cli/confscan/03_invalid_rmsd_method/run_test.sh
-- **Dateien**: test_cases/cli/test_utils.sh
-
-### Performance Benchmarks & Regression Tests
-- **Status**: ⏳ PLANNED
-- **Task**: Füge Performance-Benchmarks hinzu für Regressions-Detection
-- **Dateien**: test_cases/CMakeLists.txt, test_cases/cli/test_utils.sh
-
-### test_molecule.cpp Extension
-- **Status**: ⏳ PENDING
-- **Task**: Erweitere für geplantes Molecule SOA/AOS Refactoring (Phase 2-6)
-- **Dateien**: test_cases/test_molecule.cpp
-- **Abhängigkeit**: Molecule Refactoring Phases müssen geplant sein
-
----
-
-## 🟢 CORE DEVELOPMENT (src/core/)
-
-### GFN-FF Static-Mode Performance Initiative (4-WP-Bundle, 2026-05)
-- **Status**: 🤖 GEPLANT — basiert auf Analyse "C++ schneller als xtb"
-- **Ziel**: Polymer 1000 NVE ICX 130 s → ~63 s (40 % schneller als xtb-Fortran)
-- **WP-S1**: [Frozen CN/Charges](docs/GFNFF_STATIC_WP1_FROZEN_STATE.md) — 3 PARAMs, ~150 LoC, ~1 Tag
-- **WP-S2**: [MD-Diagnostics JSONL](docs/GFNFF_STATIC_WP2_MD_DIAGNOSTICS.md) — Streaming-Dump, ~1 Tag
-- **WP-S3**: [EEQ-Cutoff Auto-Default](docs/GFNFF_STATIC_WP3_EEQ_CUTOFF_DEFAULT.md) — 12 ms/Step save, ~0.5+1 Tag
-- **WP-S4**: [Validation-Suite + Re-Capture](docs/GFNFF_STATIC_WP4_VALIDATION_SUITE.md) — 32-Konfig-Matrix, ~1.5 Tage
-- **Reihenfolge**: S1 → S2 (parallel zu S3) → S4
-- **Risiko**: S1/S3 sind physikalische Approximationen — S4 ist die Sicherheits-Klammer
-
-### cgfnff Parameter Generation Bug
-- **Status**: ❌ OPEN
-- **Problem**: Parameter generation creates null JSON values
-- **Betroffene Dateien**: src/core/energy_calculators/qm_methods/gfnff.cpp
-- **Verweis**: CLAUDE.md - Known Issues, src/core/CLAUDE.md:104
-- **Konsequenz**: Native GFN-FF nicht einsatzbereit
-
-### Missing Real GFN-FF Parameters
-- **Status**: ❌ OPEN
-- **Problem**: Placeholders statt echter physikalischer Parameter
-- **Betroffene Dateien**: src/core/energy_calculators/qm_methods/gfnff.cpp
-- **Verweis**: src/core/CLAUDE.md:105
-- **Abhängigkeit**: Benötigt theoretische Implementierung oder externe Daten
-
-### Unit System Migration (CODATA-2018)
-- **Status**: ⏳ IN PROGRESS
-- **Task**: Replace hardcoded constants mit `CurcumaUnit` namespace functions
-- **Betroffene Dateien**: Multiple legacy files mit hardcoded constants
-- **Verweis**: src/core/CLAUDE.md:113, CLAUDE.md:296
-- **Gewinn**: Centralized, documented, CODATA-2018 compliant constants
-
-### Memory Optimization for Large Systems (>1000 atoms)
-- **Status**: ⏳ PLANNED
-- **Task**: Optimize Molecule data structure and distance matrix caching
-- **Betroffene Dateien**: src/core/molecule.cpp/h, src/core/energy_calculators/ff_methods/forcefield.cpp
-- **Verweis**: src/core/CLAUDE.md:106, CLAUDE.md - Performance Notes
-- **Performance Impact**: Critical for large molecular systems
-
----
-
-## 🔵 CAPABILITIES & ANALYSIS (src/capabilities/)
-
-### ConfScan Verbosity Enhancement
-- **Status**: ⏳ PENDING
-- **Problem**: Accept/Reject messages not visible at default verbosity level
-- **Task**: Adjust CurcumaLogger calls to be visible at level ≥1
-- **Betroffene Dateien**: src/capabilities/confscan.cpp
-- **Verweis**: src/capabilities/CLAUDE.md:84
-
-### SimpleMD Wall Potential Physics
-- **Status**: ⏳ PENDING (LOW PRIORITY)
-- **Task**: Verify wall potential physics (boundary logic, force calculations)
-- **Betroffene Dateien**: src/capabilities/simplemd.cpp/h
-- **Verweis**: src/capabilities/CLAUDE.md:85
-- **Note**: Tests now passing (7/7) - functionality works, physics validation pending
-
-### RMSD Strategy Pattern - Phase 3
-- **Status**: ⏳ PENDING
-- **Task**: Complete Strategy pattern refactoring for RMSD module
-- **Betroffene Dateien**: src/capabilities/rmsd.cpp/h
-- **Verweis**: src/capabilities/CLAUDE.md:80
-- **Phases**: Phase 1-2 ✅, Phase 3 ⏳
-
-### ConfSearch: CxxThreadPool Crash mit threads=1 + Progress-Bar
-- **Status**: ⏳ PENDING
-- **Problem**: CxxThreadPool im Legacy-Modus crashed bei threads=1 (SIGSEGV nach Optimization). Discrete-Progress-Bar funktioniert nur im Legacy-Modus (ParallelLoop ruft updateStatus()), nicht im Worker-Pool-Modus.
-- **Task**: 
-  1. Crash in CxxThreadPool Legacy-Modus bei threads=1 debuggen und fixen
-  2. Alternative: Progress-Bar im Worker-Pool-Modus aktivieren (updateStatus() während wait() poll)
-  3. Danach: Serial-Path in PerformOptimisation() entfernen, unified CxxThreadPool für alle threads
-- **Betroffene Dateien**: src/capabilities/confsearch.cpp, external/CxxThreadPool/include/CxxThreadPool.hpp
-- **Verweis**: confsearch-branch, May 2026
-- **Workaround**: Aktuell Serial-Path für threads <= 1, Parallel-Path (Legacy-Modus) für threads > 1
-
-### ConfSearch: GPU + Multi-Threading (Future)
-- **Status**: ⏳ PLANNED
-- **Problem**: Bei threads > 1 konkurrieren mehrere MD-Instanzen um die GPU. Aktuell wird GPU deaktiviert wenn threads > 1.
-- **Task**: 
-  1. Implementiere GPU-Lock (Mutex) oder Queue, sodass nur 1 Thread gleichzeitig die GPU nutzt
-  2. Alternative: Ein Thread bekommt GPU-CUDA, andere nutzen CPU-Fallback
-  3. Dann kann GPU auch bei threads > 1 aktiviert werden
-- **Betroffene Dateien**: src/capabilities/confsearch.cpp, src/core/energycalculator.cpp
-- **Verweis**: confsearch-branch, May 2026
-- **Workaround**: Aktuell wird GPU auf "none" gesetzt wenn threads > 1
-
-### Enhanced Conformational Search Algorithms
-- **Status**: ⏳ PLANNED
-- **Betroffene Dateien**: src/capabilities/confsearch.cpp/h
-- **Verweis**: src/capabilities/CLAUDE.md:76
-
-### Improved Trajectory Analysis Tools
-- **Status**: ⏳ PLANNED
-- **Betroffene Dateien**: src/capabilities/rmsdtraj.cpp/h
-- **Verweis**: src/capabilities/CLAUDE.md:77
-
----
-
-## 🟣 MOLECULE REFACTORING - Test-Driven Breaking Changes
-
-**Status**: ✅ Phase 1 DONE, ⏳ Phase 2-6 PENDING
-**Test-Driven Approach**: src/core/test_molecule.cpp (15 test categories)
-**Critical Requirement**: All existing functionality must remain API-compatible
-
-### Phase 2: XYZ Comment Parser Unification
-- **Status**: ⏳ PENDING
-- **Task**: Eliminate 10 duplicate XYZ parser functions
-- **Betroffene Dateien**: src/core/molecule.cpp/h
-- **Critical Constraint**: Production comment formats must NOT break (ORCA, XTB, simple energy)
-- **Reference**: docs/XYZ_COMMENT_FORMATS.md
-- **Verweis**: CLAUDE.md - Planned Development
-
-### Phase 3: Granular Cache System
-- **Status**: ⏳ PLANNED
-- **Task**: Replace single `m_dirty` flag with fine-grained cache invalidation
-- **Betroffene Dateien**: src/core/molecule.cpp/h
-- **Performance Impact**: Selective recalculation instead of full cache invalidation
-
-### Phase 4: Fragment System O(1) Lookups
-- **Status**: ⏳ PLANNED
-- **Task**: Replace std::map with optimized lookup structure
-- **Betroffene Dateien**: src/core/molecule.cpp/h
-
-### Phase 5: Type-Safe ElementType Enum
-- **Status**: ⏳ PLANNED
-- **Task**: Replace int element indices with ElementType enum
-- **Betroffene Dateien**: src/core/molecule.cpp/h, src/core/units.h
-
-### Phase 6: Unified Atom Structure with Zero-Copy Geometry
-- **Status**: ⏳ PLANNED
-- **Task**: Implement SOA/AOS hybrid design for geometry access
-- **Betroffene Dateien**: src/core/molecule.cpp/h
-
----
-
-## 📊 PRIORITY MATRIX
-
-| Priority | Component | Count | Status |
-|----------|-----------|-------|--------|
-| 🔴 KRITISCH | None | 0 | ✅ ALL RESOLVED |
-| 🟢 DONE (CG Phase 5) | SimpleMD CG Integration | 1 | ✅ COMPLETE |
-| 🟢 DONE (CG Phases 1-4) | CG Core + VTF + Testing | 4 | ✅ COMPLETE |
-| 🔵 LOW (CG Phase 6) | Ellipsoidal Extensions | 1 | 🟡 PREPARED |
-| 🟡 TESTING | Scientific validation | 4 | ⏳ PENDING |
-| 🟢 CORE | Parameter/Memory/Units | 4 | ⏳ PENDING |
-| 🔵 CAPABILITIES | Confscan/RMSD/SimpleMD Physics | 4 | ⏳ PENDING |
-| 🟣 REFACTORING | Molecule Phase 2-6 | 5 | ⏳ PLANNED |
-| **TOTAL** | | **23** | **5 ✅ + 16 ⏳ + 2 🟡** |
-
----
-
-## 🔧 TESTING STATUS BY MODULE
-
-- **RMSD**: 6/6 ✅ (100%)
-- **ConfScan**: 7/7 ✅ (100%)
-- **CurcumaOpt**: 6/6 ✅ (100%)
-- **SimpleMD**: 7/7 ✅ (100%) - **FIXED October 28, 2025**
-- **Overall**: 26/26 ✅ (100%) 🎯
-
----
-
-**Last Updated**: 2025-11-14
-**Next Review**: When starting CG implementation (Phase 1: Molecule helpers) or cgfnff debugging
-
-## Native QM Methods (GFN2, GFN1, PM3) - November 2025
-
-### ✅ Completed (Phase 1-4)
-
-- [x] GFN2-xTB native implementation structure
-- [x] GFN2 core algorithms (CN, Hamiltonian, SCF, energies)
-- [x] GFN2 analytical gradients (Electronic, Repulsion, Coulomb, CN) - ✅ **NEW Feb 2026**
-- [x] GFN1-xTB native implementation with halogen bond correction
-- [x] PM3 NDDO implementation (H, C, N, O)
-- [x] Integration into MethodFactory with priority fallbacks
-- [x] Educational documentation (NATIVE_QM_IMPLEMENTATION_STATUS.md)
-- [x] **Parameter loader infrastructure** (`gfn2_params_loader.h/cpp`) with real TBLite parameters for all 86 elements - ✅ **NEW Feb 2026**
-- [x] **Ulysses methods documentation** - Complete guide for 27 semi-empirical methods (AM1, MNDO, PM6, etc.)
-- [x] **Overlap Derivatives** analytical implementation in `STOIntegrals.hpp` - ✅ **NEW Feb 2026**
-
-### 🔧 TODO: Parameter Expansion (Medium Priority)
-
-**Files**: `gfn2_params_loader.cpp`, `gfn2_params_loader.h`
-**Status**: ✅ Infrastructure and 86-element DB complete, ⏳ Extension needed
-
-**GFN2 Real Parameters from TBLite** (Foundation ✅, Extension needed):
-- [x] ✅ Parameter loader class structure (`ParameterDatabase`)
-- [x] ✅ Shell-resolved parameter structures (`ShellParams`, `ElementParams`, `PairParams`)
-- [x] ✅ Hardcoded real parameters for all 86 elements (basic set) - ✅ **UPDATED Feb 2026**
-- [x] ✅ Element-pair specific Hamiltonian scaling (C-H, C-C, C-N, C-O, N-H, O-H)
-- [x] ✅ Exact shell-Hubbard corrections from TBLite (SHELL_HUBBARD_CORR) - ✅ **NEW March 2026**
-- [x] ✅ D4 dispersion integration (USE_D4 conditional) - ✅ **NEW March 2026**
-- [ ] ⏳ Full TOML parser implementation (currently: stub)
-- [x] ✅ Complete periodic table coverage (86 elements) - ✅ **UPDATED Feb 2026**
-- [ ] ⏳ Extract polynomial corrections poly(r) for all pairs
-- [ ] ⏳ Extract complete gamma-AB Coulomb kernel parameters
-- [ ] ⏳ Extract full AES2 multipole parameters (quadrupoles)
-- [ ] ⏳ Validate against TBLite reference energies (<1% error target)
-
-**GFN1 Real Parameters from TBLite**:
-- [ ] Create `gfn1_params_loader.h/cpp` (analogous structure)
-- [ ] Extract simplified parameter set (no ES3)
-- [ ] Extract halogen bond parameters for F, Cl, Br, I, At
-- [ ] Validate against TBLite GFN1 reference
-
-**Implementation Notes**:
-- ✅ Foundation in place: See `gfn2_params_loader.cpp:41-318`
-- ✅ Educational transparency: Comments explain each parameter's physical meaning
-- ⏳ Next step: Implement `parseSimpleTOML()` or use external TOML library (toml11)
-- ⏳ Alternative: Continue hardcoding parameters from TBLite source for remaining elements
-
-### 🎯 TODO: PM3 Element Extension (Medium Priority)
-
-**Critical Missing Elements**:
-- [ ] F (Fluorine) - Important for pharmaceuticals
-- [ ] Cl (Chlorine) - Common in organic chemistry
-- [ ] S (Sulfur) - Biochemistry (cysteine, methionine)
-- [ ] P (Phosphorus) - DNA, ATP, phosphates
-
-**Parameter Source**: MOPAC parameter database
-- URL: http://openmopac.net/manual/parameters.html
-- Format: U_ss, U_pp, beta_s, beta_p, zeta_s, zeta_p, alpha, Gaussian terms
-
-**Extended Elements** (Lower Priority):
-- [ ] Br, I (heavier halogens)
-- [ ] Si, Se (semiconductors, proteins)
-- [ ] Transition metals (Fe, Cu, Zn for catalysis)
-
-### ⚡ TODO: Performance Improvements (Optional)
-
-**Analytical Gradients** (Speedup: 10-20x for optimizations):
-- [x] Implement Hellmann-Feynman theorem derivatives - ✅ **DONE Feb 2026**
-- [x] GFN2: dH/dR, dS/dR analytical formulas (STOIntegrals) - ✅ **DONE Feb 2026**
-- [ ] GFN1: Simplified derivative terms
-- [ ] PM3: NDDO gradient formulas from MOPAC
-- [ ] Benchmark: H2O optimization (numerical vs analytical)
-
-**SCF Acceleration**:
-- [ ] DIIS (Direct Inversion in Iterative Subspace)
-- [ ] Level shifting for difficult convergence
-- [ ] Adaptive damping parameters
-
-### 🧪 TODO: Validation and Testing
-
-**Test Molecules** (Small):
-- [ ] H2O - HOMO/LUMO, dipole moment
-- [ ] CH4 - Symmetry, C-H bonds
-- [ ] NH3 - Lone pair, pyramidal geometry
-- [ ] H2CO - Carbonyl, planarity
-
-**Comparison Targets**:
-- [x] GFN2 native vs TBLite (energy error < 1% with real params) - D4 + Shell-Hubbard completed March 2026
-- [ ] GFN1 native vs TBLite (energy error < 1%)
-- [ ] PM3 native vs MOPAC (energy error < 5%)
-
-**Properties to Validate**:
-- [ ] Total energy (Hartree)
-- [ ] HOMO/LUMO gap (eV)
-- [ ] Mulliken charges
-- [ ] Dipole moment (Debye)
-- [ ] Gradient accuracy (force = -gradient)
-
-### 📋 TODO: Integration Tasks
-
-**D3/D4 Dispersion**:
-- [x] GFN2 D4 integration (March 2026) - calculateDispersionEnergy() implemented
-- [ ] Fix `dftd3interface.h/cpp` issues
-- [ ] Fix `dftd4interface.h/cpp` issues
-- [ ] Connect GFN1 to D3 (replace stub)
-- [ ] Connect GFN2 to D4 (replace stub)
-- [ ] Validate dispersion energies for Ar2, benzene dimer
-
-**Heat of Formation** (PM3-specific):
-- [ ] Implement ΔH_f calculation from atomization energy
-- [ ] Add experimental reference data for validation
-- [ ] Compare with MOPAC heats of formation
-
-### 📚 Documentation TODO
-
-- [ ] Add example usage to CLAUDE.md for each method
-- [ ] Create tutorial: "When to use GFN2 vs GFN1 vs PM3"
-- [ ] Document parameter extraction workflow
-- [ ] Add benchmark comparison tables (TBLite, MOPAC, Ulysses)
-
-### 🚫 NOT TODO (Use Existing Interfaces)
-
-**These methods already available via Ulysses - no native implementation needed**:
-- ❌ AM1 - Available: `method = "am1"` (Ulysses)
-- ❌ MNDO - Available: `method = "mndo"` (Ulysses)
-- ❌ PM6 - Available: `method = "pm6"` (Ulysses)
-- ❌ RM1 - Available: `method = "rm1"` (Ulysses)
-- ❌ PM3PDDG - Available: `method = "pm3pddg"` (Ulysses)
-
-**Reason**: Ulysses interface provides production-quality implementations with full validation. Native implementations only needed for educational purposes or when external dependencies unavailable.
-
-### 📊 Status Summary
-
-**Implementation**: ✅ 100% Complete (3 methods, ~2767 lines)
-**Integration**: ✅ 100% Complete (MethodFactory, CMakeLists.txt)
-**Parameters**: ⚠️ 30% Complete (approximations work, real params TODO)
-**Validation**: ⏸️ 0% Complete (needs test molecules)
-**Performance**: ⚠️ 50% Complete (numerical gradients slow, analytical TODO)
-
-**Next Recommended Action**: Extract GFN2 parameters from TBLite TOML for production accuracy.
-
----
-
-*Last Updated: November 2025*
-*See: docs/NATIVE_QM_IMPLEMENTATION_STATUS.md for full details*
-
----
-
-## 🔴 BUILD SYSTEM - CONDITIONAL COMPILATION FIXES (November 2025)
-
-### Status: PARTIALLY FIXED - Build 2 Working, Others Need Deeper Fixes
-
-**Session Date**: November 2025
-**Task**: Test all 5 build configurations with different CMake options (USE_D3, USE_D4, USE_TBLITE, USE_ULYSSES, USE_XTB)
-
-### Build Test Results
-
-| Build | Config | Status | Notes |
-|-------|--------|--------|-------|
-| **Build 1** | Minimal (UFF, EHT only) | ❌ FAILED | `s-dftd3.h` not found - gfnff.cpp includes D3 unconditionally |
-| **Build 2** | Standard (TBLite, Ulysses, D3) | ✅ **SUCCESS** | ✅ Verified working: UFF & GFN2 methods tested |
-| **Build 3** | Full QM (+ XTB) | ❌ FAILED | Same D3 header chain issue |
-| **Build 4** | D4 Dispersion | ❌ FAILED | D3 dependency blocks build |
-| **Build 5** | TBLite only | ❌ FAILED | D3/D4 guard chain |
-
-### Root Cause Analysis
-
-**Problem**: Cascading `#ifdef` guards only protect headers, not implementations:
-```
-gfnff.cpp (always compiles)
-  → #include "forcefield.h"
-    → #include "forcefieldthread.h"
-      → #ifdef USE_D3 #include "dftd3interface.h" #endif
-        → #include "s-dftd3.h"  (UNGUARDED INCLUDE!)
-```
-
-When `USE_D3=OFF`, compiler skips the `#ifdef` but still tries to compile the file, causing `s-dftd3.h` not found error.
-
-### Fixes Applied ✅
-
-1. **`dftd3interface.h`** - Wrapped entire header with `#ifdef USE_D3...#endif`
-2. **`dftd4interface.h`** - Wrapped entire header with `#ifdef USE_D4...#endif`
-3. **`forcefieldthread.h`** - Wrapped `D3Thread` class definition with `#ifdef USE_D3...#endif`
-4. **`forcefieldthread.cpp`** - Wrapped D3Thread implementation with `#ifdef USE_D3...#endif`
-
-### Remaining Work (To Fix Builds 1, 3, 4, 5)
-
-**Critical files still needing protection**:
-- [ ] `gfnff.cpp` - Always compiled, needs conditional compilation or restructuring
-- [ ] `forcefield.cpp` - D3Thread instantiation (line ~470) needs `#ifdef USE_D3` guard
-- [ ] `gfnff.h` - Consider lazy-loading or factory pattern for D3/D4 dependencies
-- [ ] Add H4Thread guards (same pattern as D3Thread)
-
-### Build 2 (Standard) - PRODUCTION READY ✅
-
-**Verified Methods:**
-```bash
-./curcuma -sp water.xyz -method uff    # ✅ Works
-./curcuma -sp water.xyz -method gfn2   # ✅ Works (via TBLite)
-```
-
-**Available Methods in Build 2:**
-- UFF (universal force field) - native
-- EHT (extended Hückel theory) - native
-- GFN2 (tight-binding DFT via TBLite) - recommended
-- GFN1 (TBLite or Ulysses fallback)
-- iPEA1 (TBLite)
-- PM6, PM3, AM1, MNDO (Ulysses semi-empirical)
-
-### Recommendations
-
-**Short term**: Protect gfnff.cpp and forcefield.cpp with conditional compilation
-**Medium term**: Refactor include chain - move D3/D4/H4 threads to separate file
-**Long term**: Use CMake-level validation + CI/CD pipeline for all build configurations
-
-### Test Infrastructure
-
-Created `/home/conrad/src/curcuma/build_test/` with 5 isolated builds for regression testing.
-
-See `docs/BUILD_SYSTEM_ROADMAP.md` for detailed implementation plan.
-
----
-
-**Last Updated**: 2025-11-08 (Build System Testing)
-**Next Review**: After implementing remaining Build 1/3/4/5 fixes or when starting CG Phase 5
+**Stand**: 2026-10-01. Die frühere Fassung (1380 Zeilen, mit Messprotokollen und erledigten Untersuchungen) steht
+unverändert in [docs/TODO_ARCHIVE_2026-10.md](docs/TODO_ARCHIVE_2026-10.md); die Detailmessungen zu den Einträgen unten
+sind dort unter der jeweiligen Überschrift zu finden.
+
+Regeln für diese Datei: ein Eintrag hat höchstens drei Zeilen (Was, warum es offen ist, wo die Details stehen). Erledigtes
+gehört in `AIChangelog.md` bzw. das Archiv, Fehlerberichte in [docs/KNOWN_ISSUES_ARCHIVE.md](docs/KNOWN_ISSUES_ARCHIVE.md).
+"Geprüft" heißt: am angegebenen Datum gegen den Quelltext gelesen, nicht neu gemessen. Dateien und Zeilen gelten für diesen
+Stand.
+
+## 1. Korrektheit (offen)
+
+- **GFN-FF-Energie hängt von der Atomnummerierung ab** (911 von 2557 Strukturen, bis 237 kcal/mol bei geladenen Mehrfragment-Systemen;
+  in pprcht und curcuma). Referenzeigenschaft, kein Portierungsfehler. [docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md) #12, Known Issue #34.
+- **ROCm-GFN-FF ohne Coulomb-Term** als Voreinstellung seit `ab6e3f5e` (F-1, Umgehung `-gfnff.gpu_coulomb_implicit false`); GFN1/GFN2 auf ROCm
+  ignorieren `-scf_mixed_precision false` (G2-13); Energiesummen nehmen wave32 an (F-17). Keine ROCm-Hardware, nur dokumentiert:
+  [docs/MULTI_GPU_GAPS.md](docs/MULTI_GPU_GAPS.md).
+- **Exitcode bei fehlgeschlagenem Setup**: `-md` gibt seit `a2b7c5f0` 1 zurück; prüfen, ob dasselbe für `-opt` und `-sp` gilt (nicht geprüft).
+- **UFF- und QMDFF-Gradient falsch** (Eintrag vom 2026-09-27: UFF-Winkel ohne den Faktor -sin(theta); Fix vorbereitet, Betreiber: "erstmal nicht").
+  Nicht erneut geprüft; Details im Archiv unter "UFF- und QMDFF-Gradient falsch".
+- **`-seed` wirkt nicht auf die Anfangsgeschwindigkeiten der MD.** Geprüft 2026-10-01: `SimpleMD::InitVelocities()` (`simplemd.cpp:1141`)
+  zieht aus `static std::default_random_engine generator` (Z. 1143) mit festem Standardseed. Ein Fix ändert jede MD-Startgeschwindigkeit.
+- **`shouldUpdateHBXB()`: RMSD-Formel ohne Faktor `sqrt(natoms)`** (`gfnff_method.cpp:3058`, geprüft 2026-10-01). Bei 7320 Atomen
+  ~13,6 Å mittlere Verschiebung bis zum Auslösen. Aus der Fortran-Referenz übernommen (`gfnff_ini2.f90:717`); vor einer Änderung gegen
+  MOR41/GMTKN55 prüfen und das Abweichen von der Referenz entscheiden.
+- **D4-ATM-C6 auf den Tripeln bleibt auf dem Setup-Wert eingefroren.** Ohne Wirkung, solange `dispersion_atm` aus ist (Voreinstellung).
+  Ein Paar, das erst später in 60 Bohr eintritt, wurde nicht durch einen Test erzeugt. [docs/GFNFF_PAIR_LIST_REFRESH.md](docs/GFNFF_PAIR_LIST_REFRESH.md).
+- **Optimierer**: (a) der eigene L-BFGS bleibt bei Koffein/GFN-FF ab Schritt 33 stehen (die Stillstandserkennung `-opt.stall_steps` beendet
+  den Lauf inzwischen, Ursache nur per Codelesung); (b) `mixture2`: kein Abstieg an einer N-H···O=C-Brücke, nicht eingegrenzt;
+  (c) der `auto`-Optimierer kann bei hochsymmetrischen Systemen mit nur totalsymmetrischer Mode abbrechen (Td-CH4, gfn1; `-opt.optimizer lbfgs` geht).
+- **GFN-FF-NVE-Drift auf `complex`** (231 Atome): 6,1e-3 Eh über 1 ps bei dt 0,5 fs, unabhängig vom EEQ-Löser. Nicht untersucht. Auch `-gpu cuda` polymer_2x NVE 400 fs: Etot -0,0548 Eh in allen Läufen, schon vor den Optimierungen vom 2026-10-11 (n=2 je Binary).
+- **SIGSEGV am Ursprung nicht gefunden** (2026-09-24; ASan, compute-sanitizer, gdb ohne Treffer). Eintrag im Archiv.
+- **`DC13/c20bowl`**: Coulomb -6,29 kcal/mol gegen die Referenz, Ladungen ~6x zu groß, nicht eingegrenzt (Known Issue #14).
+- **Reproduzierbarkeit**: GPU läuft nicht bitgleich (`atomicAdd`-Reihenfolge); CPU nicht bitgleich über verschiedene Threadzahlen
+  (`FFWorkspace` partitioniert nach Threadzahl). Betreiber 2026-09-27: später. Erster Schritt: Repulsion als Sammel-Kernel hinter
+  einem Schalter, messen auf A4500 und H200. Archiv: "CPU/GPU-Trajektorien-Divergenz" und "Bitgleichheit".
+- **Verbosity** ist ein geteilter Static und lässt sich über `CxxThreadPool`-Worker nicht sauber scopen (Known Issue #3).
+- **ConfSearch**: Wide-Hill-MTD-Aufblähung innerhalb eines Laufs; `threads=1` im Legacy-Modus mit Fortschrittsbalken (SIGSEGV nach der
+  Optimierung, Eintrag von 2025, nicht erneut geprüft). [docs/CONFSEARCH_ROADMAP.md](docs/CONFSEARCH_ROADMAP.md).
+- **Windows**: `-DUSE_PORTABLE_MATH=ON` nicht auf einer echten Windows-Maschine bestätigt ([docs/PORTABLE_ERF.md](docs/PORTABLE_ERF.md)).
+- **Ladungsplatzierung** (Known Issue #31) nicht getestet für periodische Systeme, GPU-Laufzeit, viele Fragmente in Kontakt und lange MD mit
+  `frag_charge_s_max` > 1.
+
+## 2. Leistung
+
+- **GFN2 auf der GPU, Eigenlöser = 73 % des Laufs** (polymer_2x, 1x A4500). Offen:
+  (a) `-scf_pseudo_diag` als Standard einschalten (Betreiberentscheidung, Messungen sprechen dafür);
+  (b) `-scf_pseudo_diag_fp64` auf einer GPU mit vollem FP64 (H200) messen;
+  (c) CPU-Pfad für `-scf_pseudo_diag` in `XTB::solveEigen` (Schätzung 20 bis 25 %, nicht implementiert, kein Gewinn unter ~1500 Basisfunktionen);
+  (d) Teilspektrum: der residente Loop übergibt `n_eig = 0`, Grund unbekannt, schließt sich derzeit mit der verteilten FP64-Lösung aus;
+  (e) Schwellen `gpu_eigensolver_min_nao` (4000) und `gpu_density_min_nao` nachmessen;
+  (f) `purify`/`lobpcg` gibt es nur auf der CPU, auf der GPU ist es der einzige Hebel, der die Skalierung ändert;
+  (g) Setup und Integrale (32 s) nie im Detail profiliert.
+  **`scf_fp32_stall_patience` nicht ändern**, bis die Fixpunktfrage (Schritt 1 weicht um 2,7e-6 Eh ab) geklärt ist.
+  Zahlen und Begründungen: Archiv, Abschnitt "GPU-SCF GFN1/GFN2"; [docs/GFN2_GPU_COST_PLAN.md](docs/GFN2_GPU_COST_PLAN.md).
+- **GPU-Gradient GFN1/GFN2**: Punkte 1 bis 6 umgesetzt; offen: der H0-Paar-Kernel (454 ms) ist einzelkartig, und `densityPatternDistributed`
+  kopiert die C-Spaltenscheiben bei jedem Aufruf neu. [docs/SQM_PERFORMANCE.md](docs/SQM_PERFORMANCE.md).
+- **GFN-FF-MD, EEQ-Löser** (polymer_2x): offen sind ein matrixfreier Matvec nur für Systeme > 20000 Atome sowie localinv mit offener Schale, `eeq_distance_cutoff` > 0 und MD über 2 ps
+  (messen). Erledigtes (lokale Inverse, symmetrisches Matvec, Fernfeld-Kurzschluss CPU/CUDA) steht in `AIChangelog.md` und [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md);
+  Journal: Vault-Laborjournal "curcuma EEQ-Solver Benchmark".
+- **GPU-Lauf rechnet Host-`D4DC6DCNPairs` ohne Leser** (Paket 2, 2026-10-11): `computeDC6DCN` am Ende von `GenerateDispersionPairsNative` im `-gpu`-Lauf, ~216 MiB (24 B x 9,4 Mio. Paare) und Rechenzeit je Neubau; Guard braucht GPU-Modus-API
+  in D4-Generator/GFNFF/Wrapper (P1a-Skip in `updateCNValuesForGradient` beachten). HIP liest `m_disp_idx_*_host` und füllt `m_h_dc6dcn_*` noch (nicht kompilierbar hier).
+- **GPU-GFN-FF-MD, Schrittzerlegung polymer_2x** (Stand 21,7 ms je Schritt, vorher 38,4; erledigt: `AIChangelog.md`, [docs/GFNFF-PERFORMANCE-ROADMAP.md](docs/GFNFF-PERFORMANCE-ROADMAP.md)):
+  offen: CG-Iterationen unter Last (K5); Host-Neubau überlappt nicht mit Gerätearbeit (HB 12,8 ms alle 10, Repulsion 11 ms alle ~8, D4 125 ms alle ~83 Schritte); K1-K3 und gestaffeltes Hochladen auf ROCm. Journal: Labor/curcuma EEQ-Solver Benchmark.
+- **ROCm-GFN-FF, Rückstand** (Hardware nötig, groß): nur `auto`/`cholesky` zulässig (kein Geräte-ppcg, kein localinv); fehlen: K1-Fehlerbehebung (CN-Liste jeden Schritt),
+  Fernfeld, K2/K3, gestaffelter Upload. [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md).
+- **GPU-Fernfeld und Toleranz angleichen**: Fernfeld in den Mehr-GPU-Kernel `k_eeq_build_cols` (`eeq_solver_gpu.cu`, klein); CUDA-Schwelle 6,0 auf 6,5 wie CPU (nicht bitgleich, mit Messung);
+  GPU-ppcg auf relatives `eeq_ppcg_tol` statt absolutem `pcg_tolerance` (ändert Ergebnisse).
+- **CPU-MD-Schritt polymer_2x** (Stand 212 ms bei 16 Threads, vorher 294; erledigt: `AIChangelog.md`, [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md)): offen Coulomb vektorisiert (~6 ms),
+  `d4_gw` (E) (~10-15 ms); 1 Thread: `cn` +4,8 ms ungeklärt. Journal: Labor/curcuma EEQ-Solver Benchmark, Abschnitt "CPU-MD-Schritt polymer_2x zerlegt".
+- **EEQ-Löser im CPU-MD** (Stand 164 ms je Schritt bei 16 Threads, vorher 240; erledigt: `AIChangelog.md`, [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md)): offen beide Energieformen des Plausibilitätstests
+  in einem Durchlauf (gemm statt 2 dgemv, 13 ms, Rundung nicht gesichert); Matrix wird jeden Schritt neu gebaut (48 ms). Nicht exakt: eps-Wiederverwendung der Matrix, Extrapolation, lockerere Toleranz.
+- **GFN-FF CPU `d4_gw`** (Stand 34 ms je Schritt bei 16 Threads, vorher 103; erledigt: `AIChangelog.md`, [docs/GFNFF-PERFORMANCE-ROADMAP.md](docs/GFNFF-PERFORMANCE-ROADMAP.md)):
+  offen (D) C6 und dc6 in einem Durchlauf, (E) C6 erst in `calcD4Dispersion`. Nicht exakt: Paare bei kleiner CN-Änderung auslassen (#32).
+- **Genauigkeitsprofile `-accuracy loose|normal|high` (geplant, nicht begonnen, Betreiber 2026-10-10: jetzt nicht umsetzen)**: der Parameter `accuracy` (`gfnff.h:285`, `eeq_solver.h:1182`) wird nur
+  durchgereicht, nichts liest ihn. Plan: eine zentrale Auflösung wie bei der Solver-Wahl, `normal` = heutiges Referenzverhalten bitgleich, Einzelschalter überschreiben; zuerst ein Scan der Schalter
+  (`eeq_ppcg_tol`, `cn_`/`hb_accuracy`, `eeq_distance_cutoff`, `coulomb_r_cut`, `dispersion_cutoff_bohr`) mit Fehler in E, F, NVE-Drift und Zeit, dann Fehlerbudget je Stufe; Abschneidegrenzen nur mit glatter Auslaufzone und konsistenter EEQ-Matrix. Offen: Stufennamen, Budget, `gfnff` oder `revgfnff`.
+- **GFN-FF Static-Mode-Initiative** (Mai 2026): die PARAMs `static_charges`/`static_cn` (WP-S1) sind im Code (`gfnff.h:323`), und der
+  Changelog nennt WP-S1 bis S3 als umgesetzt. WP-S4 (Validierungssuite, 32-Konfigurationen-Matrix) nicht geprüft.
+  [docs/GFNFF_STATIC_WP4_VALIDATION_SUITE.md](docs/GFNFF_STATIC_WP4_VALIDATION_SUITE.md).
+- **Speicher für Systeme > 1000 Atome** (Molecule-Datenstruktur, Distanzmatrix-Cache): geplant, nicht begonnen.
+
+## 3. Tests und Validierung
+
+- **xtb-Referenzenergien der Teststruktur-Bibliothek** (2026-10-11, `test_cases/reference_data/xtb_library_energies.json`): 66 Strukturen GFN-FF, 64 GFN2 gerechnet (peo201-chain 1410 Atome GFN2: +1,6e-3 Eh, mit `d4_atm_cutoff 40.0` +2,6e-5). GFN-FF: 57 <= 1e-6 Eh, 8 > 1e-4 (hydronium-water2 -0,169 Eh Standard `ensemble` gegen xtb Referenzregel;
+  jl22-bgal/macrocycle-bgal 173/231 Atome +0,25 bis +0,80 kcal/mol, nicht erklärt: `storsion_reference_loop_bug` ändert nichts, Term-Vergleich und pprcht/gfnff als dritte Meinung stehen aus). GFN2: max 5,2e-5 Eh, mit `-xtb.d4_atm_cutoff 40.0` auf macrocycle-bgal 5e-5 -> -2e-7 Eh. Offen: ctest gegen die Datei (Toleranzen), 4 Strukturen > 3000 Atome ohne xtb-GFN-FF (xtb wird bei 6200 und 7320 Atomen am 48-GB-Deckel getötet; curcuma 5 s), na2cl2 GFN2 xtb unkonvergiert.
+
+- `cli_simplemd_08/09` (Essigsäuredimer, CSVR, dt 1 fs) gegen das gemergte Binary mit der MD-Uhr-Korrektur (`ef462fcf`) erneut laufen lassen (Known Issue #32).
+- `test_cg_potentials` ist seit 2026-10-01 als ctest `cg_potentials` registriert (besteht); der CG-Beispielaufruf mit VTF-Eingabe endet mit "Failed to initialize ForceField
+  engine" (`docs/archive/CG.md`, geprüft 2026-10-01).
+- **Zwei ctests scheitern reproduzierbar** (am 2026-10-01 auf `master` und auf `fix/remove-dead-code` gleich, `confscan_dtemplate` 3 von 3 Läufen auf `master`): `xtb_cpscf` (Gate (C), Antwort Mulliken gegen EEQ: H2 8.2e-5 gegen 1e-6, H2O und HCN je über 1.5e-4), `test_orca_interface` ("O2 triplet mult=3" in `methodToOrcaKeyword`), `confscan_dtemplate` (bis 2026-10-09 erwartet 17/2/1/305, tatsächlich 14/5/1/237 unabhängig von `CurcumaThreads` 1/4/24; die Zähler sind jetzt die aktuellen des Binaries und gleich denen von `confscan_free`/`confscan_subspace`; ob `dtemplate` tatsächlich wie `subspace` rechnet oder die alten Werte vor 2026-08 anders zustande kamen, ist nicht geklärt). Die Einordnung "flaky" für `confscan_dtemplate` in älteren Notizen trifft nicht zu.
+- **Voller ctest 2026-10-11** (Paket 4, CPU-only ohne `-march=native` und CUDA-Build, je 9 rot, `confscan_dtemplate` grün): `test_orca_interface` scheitert auch bei "O2 quartet mult=5" (nicht nur Triplett); `cli_errors_01` bis `_06` und `parameter_io_tests` codieren `${PROJECT_ROOT}/release/curcuma` fest (grün mit umgebogenem Pfad, ohne `release/` rot);
+  Warnung `-Wdelete-non-virtual-dtor` auf `delete md` in `src/main.cpp` (`SimpleMD`, virtuelle Funktionen, Destruktor nicht virtuell: `simplemd.h:813`); nicht gebaut: MinGW, ROCm (Compiler fehlen).
+- **Strukturbibliothek** (`test_cases/structures/`, Phasen 0 bis 4 erledigt): 69 Strukturen, alle Tests und Skripte lesen sie; 65 % der Herkunftsangaben sind `unknown`
+  (Altbestand, nur abgeleitet). Offen: Phase 4 (getrackte `.out`-Dateien als Beleg,
+  115 untracked Laufausgaben in `test_cases/` entfernen, Berichte in `test_cases/cli/` ins Archiv), case.json je Test. Das Optimierungslevel der `unknown`-Strukturen
+  kann nur der Betreiber nachtragen (`python3 scripts/structlib.py report --list-unknown`).
+- Wissenschaftliche Validierung der CLI-Tests ausbauen (RMSD-Toleranzen, Energiekonvergenz); Muster für absichtlich fehlschlagende
+  Tests (`03_invalid_method` in `curcumaopt`, `rmsd`, `confscan`); Performance-Benchmarks für Regressionserkennung.
+- **Testfall-Audit (2026-10-09)**: Drei CLI-Tests bleiben deaktiviert: `cli_curcumaopt_02` (ruft trotz Namens `-method uff` auf, doppelt `01`), `cli_sqm_10`
+  (erwartet Log-Marker, die `-opt` nicht schreibt; Konvergenz an `input.opt.xyz` prüfen), `cli_sqm_11` (braucht TBLite). `cli_sqm_04` bis `07` sind wieder aktiv (Toleranz 1e-5,
+  `OH` als Radikal ohne `-spin` mit 2e-3, Abweichung 8,2e-4 Eh zur geschlossenschaligen TBLite-Referenz). `simplemd` (16 von 17 Tests) und `curcumaopt` (7 von 7) prüfen nur Exit-Code,
+  Dateien oder Zeichenketten, keine Zahlen (Energieerhaltung, Temperatur, Drift).
+- **CG-Testbeispiel und `mc_cg_chain`** (2026-10-09): `test_cases/cg/` (`cg_params.json`, `simple_beads.vtf`; die `.vtf` ist als `cg-spheres2` in der Strukturbibliothek, die Parameterdatei nicht) ist untracked und soll als ctest eingebunden werden. `test_cases/mc_cg_chain/` (README, Casino- und Kraftfeld-Konfiguration, 100-Perlen-Kette als VTF, Laufskript; ebenfalls untracked) muss aufgearbeitet werden: Struktur in die Bibliothek, Lauf als Test.
+- **Trisaccharid als optimierte Struktur** (2026-10-09): `trisaccharide-c18h32o16` (xtb 6.6.0, Methode unvermerkt) soll durch `.gfn2-opt` ersetzt werden (und `.gfnff-opt` für GFN-FF). Blockiert: TBLite-Referenzen `sqm_reference/reference_data/triose_gfn{1,2}.ref.json` und die GFN-FF-Terme `reference_data/triose.ref.json` gelten für die alte Geometrie und müssen dort neu erzeugt werden (`USE_TBLITE` im `release/`-Build aus); danach `triose=` in `test_cases/CMakeLists.txt` (Zeilen 18, 27) umstellen. GFN-FF-Minimum liegt 1,0 Å (RMSD) von der xtb-Geometrie, Ursache offen.
+- ConfScan: Accept/Reject-Meldungen bei Standard-Verbosity nicht sichtbar (Eintrag von 2025, nicht erneut geprüft).
+
+## 4. Betreiber-Prüfung offen (🤖/⚙️, nur Sie vergeben ✅)
+
+- CODATA-2018-Einheiten (`191cebe3`; Rest 0,0036 kcal/mol gegen pprcht auf polymer_2x nicht verfolgt), Known Issue #35.
+- `eeq_refactor_eps_bohr` Voreinstellung 0 (Faktor-Cache aus) und `nonbonded_skin_bohr` 2,0; Ladungsplatzierung `ensemble` (#31);
+  Stillstandserkennung `-opt.stall_steps` 20; `-scf_guess fragments`.
+
+## 5. Funktionen und Refactoring (niedrige Priorität)
+
+- **CG Phase 6**: winkelabhängige Ellipsoid-Energie (`calculateEffectiveDistance`, `calculateCGPairEnergy`, Rotationszüge in Casino). Phase 1 bis 5 sind umgesetzt.
+- SimpleMD: Physik des Wandpotentials prüfen; RMSD-Strategy-Pattern Phase 3; erweiterte ConfSearch-Algorithmen; bessere Trajektorienanalyse;
+  ConfSearch mit GPU und mehreren Threads (nur noch relevant, solange der GPU-Geräte-Pool inaktiv ist, Korrektur 2026-09-28).
+- **Trajektorienanalyse zusammenführen** (optional): Phasen 1 bis 3 sind laut `docs/ANALYSIS_CONSOLIDATION_PLAN.md` fertig; offen sind das Umstellen von `trajectoryanalysis.cpp` und `rmsdtraj.cpp` auf die gemeinsame Ausgabe/Statistik und das Aufräumen der Geometriebefehle. Stand des Plans: Dezember 2025, nicht geprüft.
+- **Molecule-Refactoring** (Phasen 3 bis 6; die zehn `setXYZComment_N`-Funktionen der Phase 2 gibt es im Code nicht mehr, `src/core/xyz_comment_parser.*` existiert; Stand der übrigen Phasen nicht geprüft): granulare Caches, O(1)-Fragmentzugriff, `ElementType`-Enum,
+  SOA/AOS. Plan: `src/core/REFACTORING_ROADMAP.md`, Formate: `src/core/XYZ_COMMENT_FORMATS.md`.
+- **Native QM** (Stand November 2025, nicht geprüft): GFN2-Parametererweiterung, PM3-Elementumfang (F u. a.), Validierungsmoleküle, Doku
+  "Wann GFN2, GFN1 oder PM3". Der Elementumfang von PM3 im Code ist nicht verifiziert.
+- **Build-System** (Stand November 2025, nicht geprüft): bedingte Kompilierung, fünf Build-Varianten, nur der Standardbuild war damals fehlerfrei.
+  Seit 2026-09-30 baut `make` in `release/` wieder mit Exit 0; die übrigen Varianten vor einer Wiederaufnahme neu messen.
+
+## 6. Entscheidungen und Fragen
+
+Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projektstatus stehen im Vault und sind nur verlinkt.
+
+- `-scf_pseudo_diag` als Standard einschalten? (Messungen sprechen dafür, Abschnitt 2.)
+- `shouldUpdateHBXB()` korrigieren und damit von der Fortran-Referenz abweichen, oder als Referenzeigenschaft belassen?
+- UFF-/QMDFF-Gradient reparieren (Stand: "erstmal nicht")? `-seed` für die MD-Startgeschwindigkeiten reparieren (ändert jede MD)?
+- GPU-Bitgleichheit angehen (Sammel-Kernel statt `atomicAdd`) oder bei Ensemblevergleichen bleiben?
+- Vault, fachliche Fragen: `Offene Fragen/` ("Valenzanteil im reaktiven GFN-FF", "Veraltete C6-Dispersion und Paarlisten in inaktiven Topologie-Ecken",
+  "Lücke zwischen GFN2-xTB und Doppelhybrid-Methoden schließen", "RRHO-Näherung durch MD ... ersetzen", "Ladungsplatzierung bei geladenen Mehrfragment-Systemen in GFN-FF - was ist physikalisch besser", Known Issue #31).
+- Vault, Projektstatus: `Projekte/curcuma rev-gfnff`, `curcuma GPU-Backends`, `curcuma MD-Stabilität großer Systeme`, `curcuma ConfSearch Weiterentwicklung`,
+  `curcuma GFN-FF Transitionsmetalle (MOR41)`, `curcuma Reaktives GFN-FF (react-Topologie)`, `curcuma Konformerenfilter (reorder_paper)`.
+
+## 7. Löschkandidaten
+
+Am 2026-10-01 auf dem Branch `fix/remove-dead-code` entfernt: curcumaopt.cpp, `native_lbfgs_optimizer.*`, `optimisation/modern_optimizer_simple.*`, munkress_2.h,
+vier ungenutzte `optimiser/*.h`, core/accuracy_profile.cpp (inkludierte einen nicht vorhandenen Header), `RMSDDriver::MolAlignLib()` und `Prepare*Template()`,
+`D4Evaluator::launchGpuKernel()`, helpers/cli_test.cpp und gfnff_test.cpp, zwei untracked `.backup`-Dateien. Volle Testsuite danach: dieselben drei bekannten Ausfälle wie vorher.
+
+Offen, Aufrufer vor dem Löschen erneut suchen:
+- `src/capabilities/curcumaopt.h`: hält den PARAM-Block des Moduls `opt` (28 Parameter); die Klasse `CurcumaOpt` ist ohne Implementierung. Die Parameter müssen erst in ein anderes Header umziehen.
+- `src/capabilities/rmsd/rmsd_costmatrix.*`, `rmsd_assignment.*` (`CostMatrixCalculator`, `MunkresAssignmentSolver`): kompiliert und von `rmsd_strategies.h` eingebunden, die Klassen selbst werden nirgends aufgerufen. Entscheidung nötig, ob die Strategien sie künftig nutzen sollen.
+- `main.cpp` führt `modern_optimizer` noch in der Liste der Scope-Module; das Modul existiert nicht mehr.
+- `src/helpers/`: `imagewrite.cpp`, `storage_bench.cpp`, `polymer_topo.cpp`, `gfnff_term_validator.cpp` ohne CMake-Target (eigenständige `main()`-Programme).
+
+## 8. Aus der alten Liste entfernt (überholt oder erledigt)
+
+| Eintrag | Grund |
+|---|---|
+| "cgfnff Parameter Generation Bug", "Missing Real GFN-FF Parameters" | GFN-FF ist vollständig, die Dateien und das Problem existieren nicht mehr |
+| "`gpu_strict` fehlt" | umgesetzt, `src/core/gpu_fallback.h`, [docs/GPU_TUNING.md](docs/GPU_TUNING.md) Abschnitt 1 |
+| CG Phase 1 bis 5 | umgesetzt |
+| EEQ-Warmstart über die q-Loop-Durchgänge | umgesetzt und nachgemessen 2026-09-18 |
+| `make` in `release/` scheitert an CUDA-Unittests | behoben 2026-09-30 |
+| Dispersionspaarliste, Repulsionspaarliste | behoben, Known Issue #33 |
+| Optimierer: Liniensuchfehlschlag als Konvergenz, Abbruch ohne Struktur, SCF-Unsinn als Ergebnis | behoben 2026-09-27 |
+| Hessian: SCF-Schwelle erreicht die Worker nicht | behoben 2026-09-29 |
+| Cholesky-Faktor-Cache in der MD nicht exakt | Cache standardmäßig aus (`eeq_refactor_eps_bohr` 0), Betreiber-Prüfung offen (Abschnitt 4) |

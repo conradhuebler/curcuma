@@ -10,7 +10,7 @@ Runners:
 * `scripts/gradient_compare.py` — set-wide `max |g_curcuma − g_xtb|` per structure.
 * `scripts/gradient_arbitrate.py` — for one structure, decides **which** code is right by
   finite-differencing each program's *own* total energy.
-* `test_cases/check_gradient_units.py` — the permanent `gradient_unit_contract` ctest.
+* `test_cases/scripts/check_gradient_units.py` — the permanent `gradient_unit_contract` ctest.
 
 ```bash
 python scripts/gradient_compare.py --set gmtkn55 --method all
@@ -97,7 +97,7 @@ structures Known Issues #21/#22 name as that split — not a gradient defect.
 
 ## Two bugs this validation found (both fixed, Sep 2026)
 
-See CLAUDE.md Known Issue #28 for the full account.
+See KNOWN_ISSUES_ARCHIVE.md Known Issue #28 for the full account.
 
 1. **GFN-FF returned Eh/Bohr where the interface contract is Eh/Angstrom**, so MD forces
    were a factor 1/au = 1.8897 too small. Found by NVE energy conservation, which
@@ -173,7 +173,10 @@ correctly: E = -4.27427100 vs xtb's -4.27427080 Eh, C-H 1.08609 vs 1.08580 A.
   — see the note below).
 - **Open**: a first unit probe on `-method uff`, `eht` and `qmdff` gave gradient/FD ratios
   of 10.8, ~0 and 1.02 on H2O, i.e. none of them clearly honours the Eh/Angstrom contract.
-  Not investigated; the `gradient_unit_contract` ctest deliberately covers only the three
-  validated methods.
+  The `gradient_unit_contract` ctest deliberately covers only the three validated methods.
+  **Update Sep 27, 2026**: for UFF and QMDFF this is not a unit problem but wrong chain rules
+  (UFF angle: missing −sinθ, so the wrong sign; QMDFF angle: missing sinθ; QMDFF bond: missing
+  dx/dr = −r0/r²). A prepared fix brings both to the FD print floor (~4e-5 Eh/Å); deferred by
+  the operator, details in TODO.md "UFF- und QMDFF-Gradient falsch". EHT not investigated.
 
 Human production testing pending until the operator removes this note.

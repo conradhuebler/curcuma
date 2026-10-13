@@ -1589,22 +1589,23 @@ struct XtbHipContext::Impl {
 #endif // HAVE_ROCSOLVER
 };
 
-XtbHipContext::XtbHipContext()
+XtbHipContext::XtbHipContext(int device)
     : m_impl(std::make_unique<Impl>())
 {
     int count = 0;
     if (hipGetDeviceCount(&count) != hipSuccess || count <= 0)
         return;
-    if (hipSetDevice(0) != hipSuccess)
+    const int dev = device < 0 ? 0 : device;   // Claude Generated (Sep 2026, multi-GPU)
+    if (dev >= count || hipSetDevice(dev) != hipSuccess)
         return;
 
     hipDeviceProp_t prop;
-    if (hipGetDeviceProperties(&prop, 0) != hipSuccess)
+    if (hipGetDeviceProperties(&prop, dev) != hipSuccess)
         return;
     if (hipStreamCreate(&m_impl->stream) != hipSuccess)
         return;
 
-    m_impl->device = 0;
+    m_impl->device = dev;
     m_impl->name   = prop.name;
     m_impl->ok     = true;
 }
@@ -1612,6 +1613,7 @@ XtbHipContext::XtbHipContext()
 XtbHipContext::~XtbHipContext()
 {
     if (!m_impl) return;
+    bindDevice();   // free device memory on the device that owns it
 #ifdef HAVE_ROCSOLVER
     m_impl->freeEeq();
     m_impl->freeDispersion();
@@ -1632,6 +1634,12 @@ std::string XtbHipContext::deviceName() const
 }
 
 int XtbHipContext::deviceId() const { return m_impl ? m_impl->device : -1; }
+
+bool XtbHipContext::bindDevice() const
+{
+    if (!m_impl || m_impl->device < 0) return false;
+    return hipSetDevice(m_impl->device) == hipSuccess;
+}
 
 bool XtbHipContext::deviceAvailable()
 {

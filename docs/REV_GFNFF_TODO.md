@@ -18,7 +18,7 @@ quantity is a hard-coded ab-initio constant or a plain coding slip, curcuma may 
 fidelity gets curcuma to reproduce GFN-FF; the entries here are what makes it describe the
 chemistry better than GFN-FF does — including refitting parameters where the functional
 form itself is the limit. Bond-breaking and transition states (entries 4, 6, 9, 10) are the
-obvious targets, and the `reactff2` branch feeds in through entries 11-15, which say what a
+obvious targets, and the `reactff2` branch feeds in through entries 14-18, which say what a
 refit has to supply before the reactive mode can drop its empirical filters.
 
 ## Already deviating from the reference by default
@@ -46,6 +46,19 @@ SIZE, so pprcht *and* xtb evaluate one entry m times and drop the rest. Its `ere
 DLPNO-CCSD(T) diphenylacetylene value, **not a fitted parameter**, so summing correctly
 cannot invalidate anything. curcuma sums; `-gfnff.storsion_reference_loop_bug true`
 reproduces the reference. Status: **done, default correct.**
+
+### 11. `amideh_acidity_order_bug` — the amide-H factor depends on the atom order
+`gfnff_ini.f90:793-798` resets `hbaci(i)` and scales `hbaci(nb(1,i))` by 0.80 for an amide H
+in the SAME loop. The factor lands on the nitrogen, so it survives only when the nitrogen has
+the smaller atom index; otherwise the nitrogen's own later reset erases it and every H-bond
+of that N-H comes out **1/0.8 = 1.25x** stronger. Found by the permutation audit of entry 12:
+in a 65-structure sample, 8 peptides (PCONF21, Amino20x4) differed from pprcht by up to
+0.30 kcal/mol **only in permuted atom orders**, all of it in the H-bond term, every affected
+triple exactly 1.25x (instrumented `abhgfnff_eg*`). An energy that changes when the atoms
+are renumbered is wrong by symmetry, no external method needed. curcuma always applies the
+factor (usual input files put N before its H, so this is also what the fit saw);
+`-gfnff.amideh_acidity_order_bug true` reproduces the reference — with it the same 65
+structures match pprcht in every order. Status: **done, default correct.**
 
 ## Open — physics known to be wrong in BOTH implementations
 
@@ -330,6 +343,45 @@ doing because nothing downstream — MD, conformer search, optimisation — can 
 about otherwise. It did not, and could not, make GFN-FF more accurate. Any real accuracy
 gain has to come from the deliberate deviations collected in this file.
 
+### 12. GFN-FF energies depend on the atom numbering
+A physical energy must be invariant under relabelling of the atoms. Measured (Sep 2026) by
+running every MOR41 + GMTKN55 structure in its original order plus three random
+permutations: **911 of 2557 structures change**, 698 of them by more than 0.01 kcal/mol.
+**pprcht shows the same spreads** (AHB21/21: 239.353 kcal/mol in both codes), and with entry
+11's switch curcuma matches pprcht in every order on a 65-structure sample — so this is the
+reference's behaviour, faithfully ported, not a curcuma slip. Classified by the term that
+carries the spread (curcuma default, spread = max − min over the four orders):
+
+| class | term | n | max (kcal/mol) | mechanism |
+|---|---|---:|---:|---|
+| charged | Coulomb | 89 | 237 | net charge goes to the fragment that contains atom 1 (Known Issue #13: the both-placements trial is dead code in the reference) |
+| charged | bond | 5 | 64 | not traced |
+| neutral | Coulomb | 492 | 1.3 | not traced; most likely the index-cutoff `piadr` in the dgam amide rule (Known Issue #11), unverified |
+| neutral | inversion | 106 | 9.9 | not traced; the out-of-plane term is evaluated for one neighbour ordering per centre, not symmetrised (hypothesis) |
+| neutral | bond | 2 | 19.6 | MB16-43 only, not traced |
+
+Examples: `ICONF/N3P3H12_1` 7.8, `RSE43/P25` 4.3, `BHPERI/04ts` 2.4 kcal/mol, all inversion.
+**What a fix needs**: each mechanism has to be made order-independent, and for most of them the
+choice of the invariant value is not free — symmetrising the inversion term or placing the
+charge by a physical rule changes energies in the ORIGINAL order too, i.e. against what the
+parameters were fitted on. That needs an external verdict (r²SCAN-3c on the affected
+structures) before it can become a default. The charge placement is the largest and the
+clearest: which fragment carries an ion's charge must follow the chemistry, not the input
+file. Status: **open, measured, mechanisms partly identified.**
+
+### 13. Three-body (ATM) dispersion is absent from GFN-FF
+GFN-FF's dispersion is pairwise (`gfnff_gdisp0.f90` `d3_gradient`); D4 proper carries an
+Axilrod-Teller-Muto term with s9 = 1. curcuma had carried a D4 ATM term restricted to BONDED
+i-j-k triples since Dec 2025 (`e529b740`, imported with the generic D3/D4 ATM). That variant is
+physically empty: the zero damping (alp = 14, r0 ≈ 7 Bohr) suppresses exactly the bonded
+triples it lists, and the term never exceeded 0.025 kcal/mol over MOR41 + GMTKN55 — while
+removing it halved the per-structure MAD against pprcht (0.00014 → 0.00007 kcal/mol,
+58 → 8 structures above 0.001). It is now off (`-gfnff.dispersion_atm true` restores it).
+A **real** ATM term over all triples within a cutoff is a candidate for rev-gfnff, most
+relevant for large dispersion-bound complexes (S30L), but GFN-FF was fitted without any
+three-body dispersion, so adding it means refitting the dispersion scaling against an external
+reference. Status: **candidate, no external verdict yet.**
+
 ## What react-gfnff needs from a refit
 
 The reactive topology mode ([GFNFF_REACT_TOPOLOGY.md](GFNFF_REACT_TOPOLOGY.md)) works, and
@@ -343,7 +395,7 @@ These entries are **not** externally arbitrated the way entries 1-10 are. They a
 gaps rather than measured deviations, and they are marked as such so nobody quotes a number
 from here that has not been measured.
 
-### 11. A topology change is a step in the potential energy
+### 14. A topology change is a step in the potential energy
 
 Rebuilding the bond list regenerates every bonded term, the repulsion partition and the EEQ
 constraints at once, so the energy jumps: measured H + H → H₂, about −450 kJ/mol arriving in
@@ -358,7 +410,7 @@ switches semi-smoothly is joined by the repulsion re-partition. That is a change
 functional form, and the parameters were fitted for a fixed topology, so it cannot be done
 by re-tuning alone.
 
-### 12. The formation and break radii are geometric factors, not energetics
+### 15. The formation and break radii are geometric factors, not energetics
 
 Formation is optimistic (1.6 × the covalent sum) because the non-bonded repulsion wall
 limits the capture radius; retention is conservative (2.6) because the Gaussian well of the
@@ -370,7 +422,7 @@ there: remove a bond where **its own** well has decayed past a threshold. That n
 bond term's depth and width to be trustworthy far from equilibrium, which is exactly where
 GFN-FF was never fitted — see entry 6 for the same problem at a transition state.
 
-### 13. The valence cap is a rule where an energy belongs
+### 16. The valence cap is a rule where an energy belongs
 
 A new bond forms only while both partners' used valence (Σ bond orders, σ = 1 plus the
 Hückel π order) stays within the element valence plus one exchange slot. Without it a hot,
@@ -383,19 +435,19 @@ valence (ReaxFF-style). Its shape and offset are what the QM reference has to su
 deliberately hyper-coordinated species, computed at a level that resolves the penalty. That
 is a genuine parametrisation task and the clearest candidate for "QM-learned" in this file.
 
-### 14. The refractory period hides an energy pump
+### 17. The refractory period hides an energy pump
 
 A pair whose bond broke may not re-form for 10 scans (~25 fs). Without it the form/break
 cycle pumps the recombination energy through the thermostat repeatedly: measured for
 N₂ + 3 H₂ at 3500 K in a 3.5 Å wall over 20 ps, 301 events without cap and refractory
 against 35 with, and a NaN in the first case.
 
-This is a timer compensating for entry 11. With a continuous energy at the exchange point
+This is a timer compensating for entry 14. With a continuous energy at the exchange point
 there is nothing to pump and the refractory period has no work left to do. It is listed
 separately because it is the cheapest test of whether a refit succeeded: if the refractory
 period can be set to zero without the event count exploding, the discontinuity is gone.
 
-### 15. There is no reference data for the reactions this is aimed at
+### 18. There is no reference data for the reactions this is aimed at
 
 GFN-FF is not parametrised for transition states, and entry 6 measures the angle term at ~⅓
 of the correct stiffness at an SN2 saddle. A reactive force field is judged on barriers and

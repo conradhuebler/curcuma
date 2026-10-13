@@ -32,7 +32,7 @@ Diese Datei enthält die wissenschaftlichen Referenzwerte für alle CLI-Tests.
 
 ## ConfScan Tests (⚙️ Maschinell validiert: 7/7)
 
-Eingabe für alle Szenarien: `conformers.xyz` (= `test_cases/confscan/input.xyz`,
+Eingabe für alle Szenarien: `conformers.xyz` (= `test_cases/structures/ensembles/c33h45n9-agal-frames44.xyz`,
 44 Konformere, 114 Atome). Jedes Szenario nutzt EIGENE, gemessene Goldwerte und
 prüft zusätzlich den vollständigen Result-Fingerprint aus stdout:
 `<accepted> <reorder> <reuse> <skipped>`. Goldwerte gemessen Juni 2026

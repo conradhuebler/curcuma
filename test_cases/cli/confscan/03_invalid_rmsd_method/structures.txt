@@ -1,0 +1,2 @@
+# Structures from test_cases/structures (id, optionally 'as <file name>'); see structures/README.md
+c33h45n9-agal-frames44 as conformers.xyz

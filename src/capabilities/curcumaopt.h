@@ -1,6 +1,6 @@
 /*
  * <Handling optimisation of structures. >
- * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -84,6 +84,8 @@ namespace {
     PARAM(max_iterations, Int, 5000, "Maximum number of optimization steps", "Convergence", { "max_iter", "MaxIter" })
     PARAM(convergence_count, Int, 7, "Convergence bit field: 1=energy, 2=RMSD, 4=gradient, 8=optimizer-internal (7=all main criteria)", "Convergence", { "conv_count", "ConvCount" })
     PARAM(max_energy_rise, Double, 100.0, "Maximum allowed energy rise [kJ/mol] before abort", "Convergence", { "maxrise" })
+    PARAM(stall_steps, Int, 20, "Stop as not converged, no progress, after this many consecutive steps in which the geometry moved less than stall_rmsd; 0 disables the check", "Convergence", {})
+    PARAM(stall_rmsd, Double, 1e-6, "Per-step RMSD [Angstrom] below which a step counts as no movement for stall_steps", "Convergence", {})
 
     // Output
     PARAM(write_trajectory, Bool, true, "Write optimization trajectory to .trj.xyz", "Output", { "write_xyz", "writeXYZ" })

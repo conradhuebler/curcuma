@@ -1,6 +1,6 @@
 {
   "molecule": "caffeine",
-  "geometry_file": "test_cases/molecules/larger/caffeine.xyz",
+  "geometry_file": "test_cases/structures/medium/caffeine.xyz",
   "charge": 0,
   "spin_unpaired": 0,
   "method": "gfn1",

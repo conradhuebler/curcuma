@@ -128,7 +128,6 @@ struct EEQSolverHipImpl {
     // solveWithDeviceRHS + CPU-Schur path since the GPU-Schur variants return false).
     bool                m_frag_topo_valid = false;
     std::vector<int>    m_fraglist;
-    double              m_min_frag_dist_sq = -1.0;
 };
 
 static void ensureHResultHip(EEQSolverHipImpl& impl, int needed) {
@@ -425,7 +424,16 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUSchurGeneral(int, int, const double*,
 bool EEQSolverHip::solveWithDeviceRHSAndGPUPCG(int, int, const double*, const double*, const double*,
                                                const double*, const double*, const double*,
                                                const std::vector<int>&, const std::vector<double>&,
-                                               int, double, double, bool) {
+                                               int, double, double, bool, int, int) {
+    return false;
+}
+
+// WP7-E (Sep 2026): projected-PCG single-solve port, CUDA-only for now — same not-ported
+// convention as the other device-resident variants above.
+bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(int, int, const double*, const double*, const double*,
+                                                        const double*, const double*, const double*,
+                                                        const std::vector<int>&, const std::vector<double>&,
+                                                        int, double, double, bool) {
     return false;
 }
 
@@ -440,21 +448,3 @@ void EEQSolverHip::uploadFragmentTopology(int /*nfrag*/, const std::vector<int>&
     m_impl->m_frag_topo_valid = true;  // marks nfrag>1 GPU-applicable -> solveWithDeviceRHS + CPU Schur
 }
 bool   EEQSolverHip::isFragmentTopoValid() const { return m_impl->m_frag_topo_valid; }
-double EEQSolverHip::getMinFragmentDistanceSq() const { return m_impl->m_min_frag_dist_sq; }
-
-void EEQSolverHip::updateMinFragmentDistance(const double* hx, const double* hy, const double* hz, int natoms) {
-    double mind = -1.0;
-    const std::vector<int>& fl = m_impl->m_fraglist;
-    if (!fl.empty() && static_cast<int>(fl.size()) == natoms) {
-        mind = 1e300;
-        for (int i = 0; i < natoms; ++i)
-            for (int j = i + 1; j < natoms; ++j)
-                if (fl[i] != fl[j]) {
-                    double dx = hx[i]-hx[j], dy = hy[i]-hy[j], dz = hz[i]-hz[j];
-                    double d2 = dx*dx + dy*dy + dz*dz;
-                    if (d2 < mind) mind = d2;
-                }
-        if (mind == 1e300) mind = -1.0;
-    }
-    m_impl->m_min_frag_dist_sq = mind;
-}

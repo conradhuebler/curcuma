@@ -28,6 +28,7 @@
 #pragma once
 
 #include "src/core/global.h"
+#include <limits>
 #include "gfnff_parameters.h"
 #include "ff_terms.h"  // Bond, Angle, Dihedral, Inversion, vdW, EQ, CNDerivStore, GeoGradMatrix
 
@@ -36,6 +37,7 @@
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 
+#include <functional>
 #include <future>
 #include <memory>
 #include <vector>
@@ -191,6 +193,9 @@ struct PartitionRanges {
     std::pair<int,int> bonded_reps = {0,0};
     std::pair<int,int> nonbonded_reps = {0,0};
     std::pair<int,int> coulombs = {0,0};
+    /// Implicit Coulomb (no stored pair list): the ATOM range [first, second) this partition
+    /// owns as the outer index i, balanced by pair count. Claude Generated (Sep 2026).
+    std::pair<int,int> coulomb_atoms = {0,0};
     std::pair<int,int> hbonds = {0,0};
     std::pair<int,int> xbonds = {0,0};
     std::pair<int,int> atm_triples = {0,0};
@@ -249,13 +254,21 @@ public:
     /// Set D3 coordination numbers (for dynamic r0)
     void setD3CN(const Vector& cn) { m_d3_cn = cn; }
 
+    /// Set the CN read by the Coulomb self-energy's chi(CN) = chi_base + cnf*sqrt(CN) term.
+    /// Claude Generated (Sep 2026, Known Issue #32): must be refreshed on EVERY evaluation,
+    /// energy-only calls included - before, only setCNDerivatives() (gradient calls) wrote
+    /// m_cn, so an energy-only call on a reused calculator evaluated the EN term with the CN
+    /// of the last gradient geometry.
+    void setCN(const Vector& cn) { m_cn = cn; }
+
     /// Set CN, CNF, and CN derivatives (gradient only)
     /// Claude Generated (WP4, May 2026): dcn now CNDerivStore (pair-list) instead of std::vector<SpMatrix>
     void setCNDerivatives(const Vector& cn, const Vector& cnf,
                           const CNDerivStore& dcn);
 
-    /// Set dc6dcn pointer for D4 dispersion CN gradient
-    void setDC6DCNPtr(const Matrix* ptr) { m_dc6dcn_ptr = ptr; }
+    /// Set the per-pair dC6/dCN source for the D4 dispersion CN gradient (Claude Generated,
+    /// Oct 2026: per-pair arrays of the D4 generator instead of a dense N x N matrix)
+    void setDC6DCNPtr(const D4DC6DCNPairs* ptr) { m_dc6dcn_ptr = ptr; }
 
     /// Set baseline energy (e0 from parameter set)
     void setE0(double e0) { m_e0 = e0; }
@@ -293,6 +306,8 @@ public:
 
     void setStoreGradientComponents(bool v) { m_store_components = v; }
     void setPool(CxxThreadPool* pool) { m_pool = pool; }
+    /// Claude Generated (Oct 2026): exact far-field shortcut of the Coulomb pair loop (see calcCoulomb).
+    void setFarfieldShortcut(bool v) { m_farfield_shortcut = v; }
     int numThreads() const { return m_num_threads; }
 
     // Term enable flags (match ForceField flags)
@@ -323,9 +338,87 @@ public:
     void updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds);
     void updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds);
 
+    /**
+     * @brief Replace the bonded/non-bonded repulsion pair lists and re-partition.
+     *
+     * Claude Generated (Sep 2026): the non-bonded repulsion list is built once from a
+     * hard 20 Bohr distance cutoff (GFNFF::generateRepulsionPairsNative()) and, unlike
+     * HB/XB, was never refreshed during MD — a pair that starts beyond the cutoff and
+     * diffuses inside it is never added, so it can pass through the geometric wall with
+     * zero repulsive force (see GFNFF::updateNonbondedRepulsionIfNeeded()). Mirrors
+     * updateHBonds()/updateXBonds(): cheap vector swap + range re-partition, no other
+     * workspace state touched.
+     */
+    void updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
+                          const std::vector<GFNFFRepulsion>& nonbonded_reps);
+
+    /**
+     * @brief Replace the D4 dispersion pair list and re-partition.
+     *
+     * Claude Generated (Sep 2026): counterpart to updateRepulsion() for the D4 pair list
+     * (see GFNFF::updateDispersionPairsIfNeeded()). Takes the list by rvalue: at 7320 atoms
+     * it holds ~9.5 M pairs (~0.7 GB), so a copy per rebuild is not affordable.
+     */
+    void updateD4Dispersions(std::vector<GFNFFDispersion>&& pairs);
+
+    /// Current D4 pair list (read-only; GPU re-upload source after a rebuild)
+    const std::vector<GFNFFDispersion>& d4Dispersions() const { return m_d4_dispersions; }
+
+    /**
+     * @brief Mutable access to the D4 pair list, for the per-step C6 refresh only.
+     *
+     * Claude Generated (Sep 2026): GFNFF::refreshDispersionC6() rewrites each pair's C6 from
+     * the current-step Gaussian weights. The pair set itself must not be changed through this
+     * accessor (the partition ranges would go stale) — use updateD4Dispersions() for that.
+     */
+    std::vector<GFNFFDispersion>& d4DispersionsForC6Refresh() { return m_d4_dispersions; }
+
+    /**
+     * @brief Replace the explicit Coulomb pair list and re-partition.
+     *
+     * Claude Generated (Sep 2026): only used when an explicit, distance-truncated Coulomb list
+     * exists (eeq_distance_cutoff > 0, or coulomb_implicit=false). The implicit path enumerates
+     * every pair every step and has no list to go stale. See GFNFF::updateCoulombPairsIfNeeded().
+     */
+    void updateCoulombPairs(std::vector<GFNFFCoulomb>&& pairs);
+
+    /// Current explicit Coulomb pair list (read-only; GPU re-upload source)
+    const std::vector<GFNFFCoulomb>& coulombPairs() const { return m_coulombs; }
+
+    /// Master bond list (read-only; used to re-derive the bond-HB cross reference)
+    const std::vector<Bond>& bonds() const { return m_bonds; }
+
+    /**
+     * @brief Replace the bond-HB cross reference after an HB re-detection.
+     *
+     * Claude Generated (Sep 2026): the HB-modified bond term (egbond_hb, bond.nr_hb >= 1) and
+     * the H-bond coordination number (computeHBCoordinationNumbers) read m_bond_hb_data and
+     * bond.nr_hb. Both were filled once at setup and never refreshed on the CPU after
+     * updateHBXBIfNeeded() replaced the HB list — the GPU path already did this
+     * (GFNFF::rebuildBondHBData() -> updateBondHBMetadata()), so the two engines diverged
+     * after the first HB re-detection. Mirrors the GPU update.
+     *
+     * @param nr_hb  One entry per bond in m_bonds order (number of N/O acceptors of its A-H)
+     * @param data   The (A, H, B-atoms) entries for all bonds with nr_hb >= 1
+     */
+    void updateBondHBData(const std::vector<int>& nr_hb, std::vector<BondHBEntry>&& data);
+
     // Access master interaction list sizes (for diagnostics)
     int bondCount() const { return static_cast<int>(m_bonds.size()); }
     int dispersionPairCount() const { return static_cast<int>(m_dispersions.size() + m_d4_dispersions.size()); }
+
+    /// Visit the installed D4 pair list so GFNFF can refresh the per-pair C6(CN) every call
+    /// (Claude Generated, Sep 2026, Known Issue #32). Only C6 may be changed; the list itself
+    /// stays fixed. Returns the number of lists visited (1 if a D4 pair list exists, else 0).
+    int forEachD4PairList(const std::function<void(std::vector<GFNFFDispersion>&)>& f)
+    {
+        int n = 0;
+        if (!m_d4_dispersions.empty()) {
+            f(m_d4_dispersions);
+            ++n;
+        }
+        return n;
+    }
     int getHBondCount() const { return static_cast<int>(m_hbonds.size()); }
     int getXBondCount() const { return static_cast<int>(m_xbonds.size()); }
 
@@ -340,11 +433,18 @@ private:
     Vector m_eeq_charges, m_topology_charges, m_d3_cn;
     Vector m_cn, m_cnf;
     CNDerivStore m_dcn;  // Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
-    const Matrix* m_dc6dcn_ptr = nullptr;
+    const D4DC6DCNPairs* m_dc6dcn_ptr = nullptr;
     double m_e0 = 0.0;
 
     // Coulomb self-energy parameters (O(N), extracted at init)
     Vector m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_cnf, m_coul_chi_static;
+    /// Claude Generated (Sep 2026): evaluate the N^2/2 Coulomb pairs on the fly from the per-atom
+    /// data (charges + alpeeq) instead of reading a stored pair list. Set from the parameter set
+    /// (GFN-FF only); see calcCoulomb().
+    bool   m_coulomb_implicit = false;
+    double m_coulomb_implicit_rcut = std::numeric_limits<double>::infinity();  // no cutoff, as the reference (Sep 2026)
+    /// Claude Generated (Oct 2026): skip erf/exp for gamma_ij*r >= 6.5 (erf = 1 exactly in FP64), see calcCoulomb.
+    bool   m_farfield_shortcut = true;
 
     // Term-enable flags
     bool m_dispersion_enabled = true;

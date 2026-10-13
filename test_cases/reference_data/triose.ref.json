@@ -1,7 +1,7 @@
 {
   "molecule": {
     "name": "triose",
-    "geometry_file": "test_cases/molecules/larger/triose.xyz",
+    "geometry_file": "test_cases/structures/large/trisaccharide-c18h32o16.xyz",
     "atoms": [
       {
         "element": "O",

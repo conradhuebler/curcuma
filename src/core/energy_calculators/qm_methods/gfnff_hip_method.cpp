@@ -31,6 +31,17 @@ void GFNFFRocmBackend::downloadDoubles(double* host, const double* device, int n
     hipMemcpy(host, device, n * sizeof(double), hipMemcpyDeviceToHost);
 }
 
+int GFNFFRocmBackend::deviceCount()
+{
+    int n = 0;
+    return hipGetDeviceCount(&n) == hipSuccess ? n : 0;
+}
+
+bool GFNFFRocmBackend::setDevice(int device)
+{
+    return hipSetDevice(device) == hipSuccess;
+}
+
 // ---------------------------------------------------------------------------
 // Explicit instantiation of the shared wrapper for the ROCm backend
 // ---------------------------------------------------------------------------

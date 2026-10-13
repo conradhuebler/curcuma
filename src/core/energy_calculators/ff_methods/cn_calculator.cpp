@@ -1,15 +1,19 @@
 /*
  * Coordination Number Calculator Implementation
- * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * Claude Generated - Consolidated from D3ParameterGenerator
  */
 
+#include "src/core/units.h"
 #include "cn_calculator.h"
+#include "gfnff_par.h"  // gfnff_cn_rcov_bohr: the one CN radius source (Sep 2026)
 #include "src/core/curcuma_logger.h"
 #include "src/core/math_compat.h"
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include <cmath>
+#include <future>
 #include <algorithm>
 
 #ifdef _OPENMP
@@ -57,7 +61,7 @@ std::vector<double> CNCalculator::calculateD3CN(
     // vs tblite that vanishes once the 25-Bohr cutoff matches tblite's CN.
     // Geometry is in Angstrom.
     const double cn_cutoff_ang = (cn_cutoff_bohr > 0.0)
-        ? cn_cutoff_bohr * 0.529177210903  // CODATA-2018 bohr radius (Angstrom)
+        ? cn_cutoff_bohr * CurcumaUnit::Length::BOHR_TO_ANGSTROM
         : 0.0;
 
     std::vector<double> cn_values(atoms.size(), 0.0);
@@ -129,23 +133,14 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
     // WP-D (May 2026): optional out_cn_raw lets callers reuse the raw N²-erf
     // result for dcn computation instead of recomputing it.
 
-    const double ANG2BOHR = 1.8897259886;  // 1 Angstrom = 1.8897259886 Bohr
-
     const int natoms = static_cast<int>(atoms.size());
     std::vector<double> cn_values(natoms, 0.0);
     if (out_cn_raw) out_cn_raw->assign(natoms, 0.0);
 
-    // GFN-FF CN scaling factor (Reference: gfnff_param.f90:381-404)
-    const double k_scaled = 4.0 / 3.0;
-
     // Pre-compute scaled covalent radii in Bohr (avoids repeated lookup in inner loop)
     std::vector<double> rcov_bohr(natoms, 0.0);
-    for (int i = 0; i < natoms; ++i) {
-        int elem = atoms[i] - 1;
-        if (elem >= 0 && elem < static_cast<int>(COVALENT_RADII.size())) {
-            rcov_bohr[i] = k_scaled * COVALENT_RADII[elem] * ANG2BOHR;
-        }
-    }
+    for (int i = 0; i < natoms; ++i)
+        rcov_bohr[i] = GFNFFParameters::gfnff_cn_rcov_bohr(atoms[i]);
 
     // Claude Generated (Mar 2026, Phase 4): Parallelized outer loop — each atom independent
     #pragma omp parallel for schedule(dynamic, 32)
@@ -216,7 +211,7 @@ void CNCalculator::addD3CNGradient(
     // dispersion cutoff) so the CN derivative is consistent with the (cut) CN
     // used in the energy.
     const double cn_cutoff_ang = (cn_cutoff_bohr > 0.0)
-        ? cn_cutoff_bohr * 0.529177210903  // CODATA-2018 bohr radius (Angstrom)
+        ? cn_cutoff_bohr * CurcumaUnit::Length::BOHR_TO_ANGSTROM
         : 0.0;
 
     const int natoms = static_cast<int>(atoms.size());
@@ -282,18 +277,12 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
      *    No cutoff, full O(N²) calculation. For verification only.
      */
 
-    const double ANG2BOHR = 1.8897259886;
     const int natoms = static_cast<int>(atoms.size());
-    const double k_scaled = 4.0 / 3.0;
 
     // Pre-compute scaled covalent radii in Bohr
     std::vector<double> rcov_bohr(natoms, 0.0);
-    for (int i = 0; i < natoms; ++i) {
-        int elem = atoms[i] - 1;
-        if (elem >= 0 && elem < static_cast<int>(COVALENT_RADII.size())) {
-            rcov_bohr[i] = k_scaled * COVALENT_RADII[elem] * ANG2BOHR;
-        }
-    }
+    for (int i = 0; i < natoms; ++i)
+        rcov_bohr[i] = GFNFFParameters::gfnff_cn_rcov_bohr(atoms[i]);
 
     // Mode selection
     if (cn_cutoff_bohr > 0.0) {
@@ -370,18 +359,15 @@ CNCalculator::CNResult CNCalculator::calculateGFNFFCNWithNeighbors(
     const Eigen::MatrixXd& geometry_bohr,
     double cn_cutoff_bohr,
     double kn,
-    double cnmax)
+    double cnmax,
+    CxxThreadPool* pool,
+    int threads)
 {
     const int natoms = static_cast<int>(atoms.size());
-    const double ANG2BOHR = 1.8897259886;
-    const double k_scaled = 4.0 / 3.0;
 
     std::vector<double> rcov_bohr(natoms, 0.0);
-    for (int i = 0; i < natoms; ++i) {
-        int elem = atoms[i] - 1;
-        if (elem >= 0 && elem < static_cast<int>(COVALENT_RADII.size()))
-            rcov_bohr[i] = k_scaled * COVALENT_RADII[elem] * ANG2BOHR;
-    }
+    for (int i = 0; i < natoms; ++i)
+        rcov_bohr[i] = GFNFFParameters::gfnff_cn_rcov_bohr(atoms[i]);
 
     CNResult result;
     result.cn_values.resize(natoms, 0.0);
@@ -390,40 +376,98 @@ CNCalculator::CNResult CNCalculator::calculateGFNFFCNWithNeighbors(
     result.cutoff_sq = cn_cutoff_bohr * cn_cutoff_bohr;
     const double cutoff_sq = result.cutoff_sq;
 
-    // Build symmetric neighbor list (upper-triangle traversal)
-    for (int i = 0; i < natoms; ++i) {
-        if (rcov_bohr[i] == 0.0) continue;
-        Eigen::Vector3d pos_i = geometry_bohr.row(i);
-        for (int j = i + 1; j < natoms; ++j) {
-            if (rcov_bohr[j] == 0.0) continue;
-            double dx = pos_i(0) - geometry_bohr(j, 0);
-            double dy = pos_i(1) - geometry_bohr(j, 1);
-            double dz = pos_i(2) - geometry_bohr(j, 2);
-            double dist_sq = dx*dx + dy*dy + dz*dz;
-            if (dist_sq < cutoff_sq) {
-                result.neighbors[i].push_back(j);
-                result.neighbors[j].push_back(i);
+    // Oct 2026: parallel over rows, bitwise equal to the former serial pass for any thread count.
+    // (a) Upper-triangle scan exactly as before (pair i < j, dist_sq from x_i - x_j), rows striped
+    //     over the pool; each row i collects its partners j > i in ascending order in upper[i].
+    // (b) Serial O(pairs) merge: neighbors[i] = {k < i : i in upper[k]} (ascending k, because k
+    //     is visited in ascending order) followed by upper[i]. This is the order the serial build
+    //     produced with its two push_backs per pair, so the CN sum below runs over the partners in
+    //     the same order.
+    // (c) CN per row (unchanged expressions), rows striped over the pool.
+    const int T = (pool && threads > 1 && natoms > 64) ? std::min(threads, natoms) : 1;
+    if (T == 1) {
+        // Serial: the original single pass (no merge step, no extra lists).
+        for (int i = 0; i < natoms; ++i) {
+            if (rcov_bohr[i] == 0.0) continue;
+            Eigen::Vector3d pos_i = geometry_bohr.row(i);
+            for (int j = i + 1; j < natoms; ++j) {
+                if (rcov_bohr[j] == 0.0) continue;
+                double dx = pos_i(0) - geometry_bohr(j, 0);
+                double dy = pos_i(1) - geometry_bohr(j, 1);
+                double dz = pos_i(2) - geometry_bohr(j, 2);
+                double dist_sq = dx*dx + dy*dy + dz*dz;
+                if (dist_sq < cutoff_sq) {
+                    result.neighbors[i].push_back(j);
+                    result.neighbors[j].push_back(i);
+                }
             }
         }
     }
 
-    // Compute CN iterating only neighbors — capture cn_raw before log-compression
-    for (int i = 0; i < natoms; ++i) {
-        if (rcov_bohr[i] == 0.0) continue;
-        double cn_raw_i = 0.0;
-        for (int j : result.neighbors[i]) {
-            double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
-            double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
-            double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
-            double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
-            double rcov_ij = rcov_bohr[i] + rcov_bohr[j];
-            double dr = (dist - rcov_ij) / rcov_ij;
-            cn_raw_i += 0.5 * (1.0 + curcuma_erf(kn * dr));
+    std::vector<std::vector<int>> upper(T > 1 ? natoms : 0);
+    auto upper_worker = [&](int t_id, int T) {
+        for (int i = t_id; i < natoms; i += T) {
+            if (rcov_bohr[i] == 0.0) continue;
+            Eigen::Vector3d pos_i = geometry_bohr.row(i);
+            std::vector<int>& up = upper[i];
+            for (int j = i + 1; j < natoms; ++j) {
+                if (rcov_bohr[j] == 0.0) continue;
+                double dx = pos_i(0) - geometry_bohr(j, 0);
+                double dy = pos_i(1) - geometry_bohr(j, 1);
+                double dz = pos_i(2) - geometry_bohr(j, 2);
+                double dist_sq = dx*dx + dy*dy + dz*dz;
+                if (dist_sq < cutoff_sq) {
+                    up.push_back(j);
+                }
+            }
         }
-        result.cn_raw[i] = cn_raw_i;
-        result.cn_values[i] = curcuma_log(1.0 + curcuma_exp(cnmax))
-                            - curcuma_log(1.0 + curcuma_exp(cnmax - cn_raw_i));
+    };
+
+    auto cn_worker = [&](int t_id, int T) {
+        for (int i = t_id; i < natoms; i += T) {
+            if (rcov_bohr[i] == 0.0) continue;
+            // Compute CN iterating only neighbors — capture cn_raw before log-compression
+            double cn_raw_i = 0.0;
+            for (int j : result.neighbors[i]) {
+                double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
+                double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
+                double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
+                double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+                double rcov_ij = rcov_bohr[i] + rcov_bohr[j];
+                double dr = (dist - rcov_ij) / rcov_ij;
+                cn_raw_i += 0.5 * (1.0 + curcuma_erf(kn * dr));
+            }
+            result.cn_raw[i] = cn_raw_i;
+            result.cn_values[i] = curcuma_log(1.0 + curcuma_exp(cnmax))
+                                - curcuma_log(1.0 + curcuma_exp(cnmax - cn_raw_i));
+        }
+    };
+
+    auto run = [&](auto& worker) {
+        if (T > 1) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t) futures.push_back(pool->enqueue(worker, t, T));
+            worker(0, T);
+            for (auto& f : futures) f.get();
+        } else {
+            worker(0, 1);
+        }
+    };
+
+    if (T > 1) {
+        run(upper_worker);
+        std::vector<int> nlower(natoms, 0);
+        for (int k = 0; k < natoms; ++k)
+            for (int j : upper[k]) ++nlower[j];
+        for (int i = 0; i < natoms; ++i)
+            result.neighbors[i].reserve(nlower[i] + upper[i].size());
+        for (int k = 0; k < natoms; ++k)
+            for (int j : upper[k]) result.neighbors[j].push_back(k);
+        for (int i = 0; i < natoms; ++i)
+            result.neighbors[i].insert(result.neighbors[i].end(), upper[i].begin(), upper[i].end());
     }
+    run(cn_worker);
 
     return result;
 }

@@ -3064,7 +3064,8 @@ __global__ void k_dc6dcn_per_pair(
     const double* __restrict__ dgw,
     const double* __restrict__ c6_flat,
     double*       __restrict__ dc6dcn_ij,
-    double*       __restrict__ dc6dcn_ji)
+    double*       __restrict__ dc6dcn_ji,
+    double*       __restrict__ c6_out)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_pairs) return;
@@ -3089,6 +3090,7 @@ __global__ void k_dc6dcn_per_pair(
 
     double dc6_ij = 0.0;
     double dc6_ji = 0.0;
+    double c6     = 0.0;   // Claude Generated (Sep 2026): C6 itself, same double sum
 
     for (int ri = 0; ri < nri; ++ri) {
         double dgw_i_ri = dgw[gw_i_base + ri];
@@ -3103,11 +3105,15 @@ __global__ void k_dc6dcn_per_pair(
 
             // dc6dcn(j,i) = dC6(i,j)/dCN(j) = Σ gw(i,ri) * dgw(j,rj) * C6ref
             dc6_ji += gw_i_ri * dgw[gw_j_base + rj] * c6ref;
+
+            // C6(i,j) = Σ gw(i,ri) * gw(j,rj) * C6ref (Caldeweyher 2019 CN-weighted C6)
+            c6 += gw_i_ri * gw[gw_j_base + rj] * c6ref;
         }
     }
 
     dc6dcn_ij[tid] = dc6_ij;
     dc6dcn_ji[tid] = dc6_ji;
+    if (c6_out) c6_out[tid] = c6;
 }
 
 // ============================================================================
@@ -4473,6 +4479,10 @@ struct FFWorkspaceHipImpl {
     RepulsionSoA   bonded_rep;      ///< Bonded repulsion pairs
     RepulsionSoA   nonbonded_rep;   ///< Non-bonded repulsion pairs
     CoulombSoA     coulomb;         ///< Coulomb pairs (gamma + cutoff only; charges dynamic)
+    // Claude Generated (Sep 2026): implicit all-pairs Coulomb (no pair list), the HIP counterpart of
+    // the CUDA path. k_coulomb_dense enumerates every pair from the per-atom alpeeq (d_coul_alp).
+    bool           coulomb_implicit = false;
+    double         coulomb_rcut = 100.0;
     BondSoA        bonds;           ///< Bond stretching
     AngleSoA       angles;          ///< Angle bending
     DihedralSoA    dihedrals;       ///< Standard + extra torsions (combined)
@@ -4842,6 +4852,10 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
     m_impl->bonded_rep.upload(params.bonded_repulsions, stream);
     m_impl->nonbonded_rep.upload(params.nonbonded_repulsions, stream);
     m_impl->coulomb.upload(params.coulombs, natoms, stream);
+    if (params.coulomb_implicit && params.coul_self_alp.size() == natoms) {
+        m_impl->coulomb_implicit = true;
+        m_impl->coulomb_rcut = params.coulomb_implicit_rcut;
+    }
     m_impl->bonds.upload(params.bonds, atom_types, stream);
     m_impl->angles.upload(params.angles, atom_types, stream);
     m_impl->dihedrals.upload(params.dihedrals, params.extra_dihedrals, atom_types, stream);
@@ -4939,7 +4953,15 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
 
     // --- Extract per-atom Coulomb self-energy params (for CPU postProcess TERM 2+3) ---
     // Mirrors FFWorkspace::setInteractionLists() lines 90-118
-    if (!params.coulombs.empty()) {
+    if (params.coulomb_implicit && params.coul_self_alp.size() == natoms) {
+        // No pair list to scan: the per-atom self-energy inputs come straight from the
+        // parameter set (GFNFF::generateCoulombSelfEnergyNative).
+        m_coul_chi_base   = params.coul_self_chi_base;
+        m_coul_gam        = params.coul_self_gam;
+        m_coul_alp        = params.coul_self_alp;
+        m_coul_chi_static = params.coul_self_chi_static;
+        setCoulombSelfEnergyParams(m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_chi_static);
+    } else if (!params.coulombs.empty()) {
         m_coul_chi_base  = Vector::Zero(natoms);
         m_coul_gam       = Vector::Zero(natoms);
         m_coul_alp       = Vector::Zero(natoms);
@@ -5258,6 +5280,44 @@ void FFWorkspaceHip::updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,
     m_last_xbonds = xbonds;
 }
 
+void FFWorkspaceHip::updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
+                                       const std::vector<GFNFFRepulsion>& nonbonded_reps)
+{
+    // Claude Generated (Sep 2026): mirror of FFWorkspaceGPU::updateRepulsion (ff_workspace_gpu.cu)
+    // for the ROCm plugin. See GFNFF::updateNonbondedRepulsionIfNeeded().
+    m_impl->bonded_rep.upload(bonded_reps, m_impl->stream);
+    m_impl->nonbonded_rep.upload(nonbonded_reps, m_impl->stream);
+}
+
+void FFWorkspaceHip::updateDispersion(const std::vector<GFNFFDispersion>& pairs)
+{
+    // Claude Generated (Sep 2026): mirror of FFWorkspaceGPU::updateDispersion (ff_workspace_gpu.cu);
+    // the ROCm DispersionSoA::upload() additionally rebuilds the per-atom gather CSR from the new
+    // pairs. Mechanical mirror, unverified (no ROCm SDK here).
+    auto& impl = *m_impl;
+    impl.disp.upload(pairs, m_natoms, impl.stream);
+    const int nd = impl.disp.n;
+    if (impl.dc6dcn_gpu_ready && nd > 0) {
+        impl.disp.dc6dcn_ij.ensure(nd);
+        impl.disp.dc6dcn_ji.ensure(nd);
+    }
+    m_disp_idx_i_host.resize(nd);
+    m_disp_idx_j_host.resize(nd);
+    m_h_dc6dcn_ij.assign(nd, 0.0);
+    m_h_dc6dcn_ji.assign(nd, 0.0);
+    for (int k = 0; k < nd; ++k) {
+        m_disp_idx_i_host[k] = pairs[k].i;
+        m_disp_idx_j_host[k] = pairs[k].j;
+    }
+}
+
+void FFWorkspaceHip::updateCoulombPairs(const std::vector<GFNFFCoulomb>& pairs)
+{
+    // Claude Generated (Sep 2026): mirror of FFWorkspaceGPU::updateCoulombPairs; the ROCm
+    // CoulombSoA::upload() also rebuilds its gather CSR. Unverified (no ROCm SDK here).
+    m_impl->coulomb.upload(pairs, m_natoms, m_impl->stream);
+}
+
 void FFWorkspaceHip::setDispersionEnabled(bool v)  { m_dispersion_enabled = v; }
 void FFWorkspaceHip::setHBondEnabled(bool v)        { m_hbond_enabled = v; }
 void FFWorkspaceHip::setRepulsionEnabled(bool v)    { m_repulsion_enabled = v; }
@@ -5277,33 +5337,6 @@ void FFWorkspaceHip::setUnitCell(const double* cell_bohr_9, const double* cell_b
 // ============================================================================
 // GPU-only CN chain-rule setters (Claude Generated March 2026)
 // ============================================================================
-
-void FFWorkspaceHip::setCNPairList(const std::vector<int>& idx_i,
-                                    const std::vector<int>& idx_j,
-                                    const std::vector<double>& rcov_sum)
-{
-    const int np = static_cast<int>(idx_i.size());
-    if (np == 0 || idx_j.size() != idx_i.size() || rcov_sum.size() != idx_i.size()) return;
-
-    m_cn_pair_i    = idx_i;
-    m_cn_pair_j    = idx_j;
-    m_cn_pair_rcov = rcov_sum;
-    m_cn_n_pairs   = np;
-
-    // Upload to GPU
-    auto& impl = *m_impl;
-    impl.d_cn_idx_i.alloc(np);
-    impl.d_cn_idx_j.alloc(np);
-    impl.d_cn_rcov_sum.alloc(np);
-    impl.d_cn_idx_i.upload(idx_i.data(), np);
-    impl.d_cn_idx_j.upload(idx_j.data(), np);
-    impl.d_cn_rcov_sum.upload(rcov_sum.data(), np);
-    impl.n_cn_pairs = np;
-    m_cn_pairs_on_gpu = true;
-
-    if (CurcumaLogger::get_verbosity() >= 3)
-        CurcumaLogger::info(fmt::format("  GPU CN chain-rule: {} pairs uploaded", np));
-}
 
 void FFWorkspaceHip::setDlogDCN(const Vector& dlogdcn)
 {
@@ -5382,29 +5415,6 @@ void FFWorkspaceHip::generateCNPairListOnGPU()
         CurcumaLogger::info(fmt::format("  GPU CN pair list: {} pairs generated on GPU", h_count));
 }
 
-void FFWorkspaceHip::updateDispersionDC6DCN(const Matrix& dc6dcn)
-{
-    // Claude Generated (March 2026): Extract per-pair dc6dcn values and upload to GPU.
-    // Eliminates the CPU round-trip (download dEdcn, add dispersion, re-upload).
-    const int nd = static_cast<int>(m_disp_idx_i_host.size());
-    if (nd == 0 || dc6dcn.size() == 0) return;
-
-    for (int k = 0; k < nd; ++k) {
-        int i = m_disp_idx_i_host[k];
-        int j = m_disp_idx_j_host[k];
-        if (i < dc6dcn.rows() && j < dc6dcn.cols()) {
-            m_h_dc6dcn_ij[k] = dc6dcn(i, j);
-            m_h_dc6dcn_ji[k] = dc6dcn(j, i);
-        } else {
-            m_h_dc6dcn_ij[k] = 0.0;
-            m_h_dc6dcn_ji[k] = 0.0;
-        }
-    }
-
-    m_impl->disp.dc6dcn_ij.upload(m_h_dc6dcn_ij.data(), nd);
-    m_impl->disp.dc6dcn_ji.upload(m_h_dc6dcn_ji.data(), nd);
-}
-
 // ============================================================================
 // Phase 2: GPU dc6dcn per-pair computation (Claude Generated March 2026)
 // ============================================================================
@@ -5476,7 +5486,8 @@ void FFWorkspaceHip::computeDC6DCNOnGPU(const std::vector<std::vector<double>>& 
         impl.d_dgw.ptr,
         impl.d_c6_flat.ptr,
         impl.disp.dc6dcn_ij.ptr,
-        impl.disp.dc6dcn_ji.ptr
+        impl.disp.dc6dcn_ji.ptr,
+        m_disp_c6_update ? impl.disp.C6.ptr : nullptr   // Sep 2026: per-step C6 refresh
     );
 
     // No sync needed here: k_dc6dcn_per_pair runs on impl.stream (main stream).
@@ -5687,7 +5698,8 @@ void FFWorkspaceHip::computeGaussianWeightsOnGPU(bool use_cn_final)
         impl.d_dgw.ptr,
         impl.d_c6_flat.ptr,
         impl.disp.dc6dcn_ij.ptr,
-        impl.disp.dc6dcn_ji.ptr);
+        impl.disp.dc6dcn_ji.ptr,
+        m_disp_c6_update ? impl.disp.C6.ptr : nullptr);  // Sep 2026: per-step C6 refresh
     // No explicit sync needed: stream ordering + event_upload fence in
     // prepareAndLaunchChargeIndependent guarantees dc6dcn is ready before k_dispersion on sA.
 }
@@ -6288,7 +6300,17 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
     }
 
     // k_coulomb (needs EEQ charges)
-    if (m_coulomb_enabled && impl.coulomb.n > 0) {
+    if (m_coulomb_enabled && impl.coulomb_implicit) {
+        const int coul_block = 128;
+        const int grid = (m_natoms + coul_block - 1) / coul_block;
+        k_coulomb_dense<<<grid, coul_block, 0, impl.stream_pairwise>>>(
+            m_natoms, impl.d_coul_alp.ptr,
+            impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+            impl.d_charges.ptr, impl.coulomb_rcut,
+            impl.d_grad.ptr,
+            &impl.d_energies.ptr[impl.E_COUL]);
+        checkCuda(hipGetLastError(), "k_coulomb_dense (implicit) launch");
+    } else if (m_coulomb_enabled && impl.coulomb.n > 0) {
         // ROCm: the pair k_coulomb's ~6M FP64 atomicAdd dominated the MD step. Preferred path is
         // the dense, coalesced, shared-mem-tiled N-body kernel (k_coulomb_dense) which also fixes
         // the gather's random-memory bottleneck; it needs the per-atom charge-corrected EEQ alpha
@@ -6773,22 +6795,10 @@ void FFWorkspaceHip::computeCN(const std::vector<int>& atom_types)
     // Reference: gfnff_cn.f90:66-126, cn_calculator.cpp:99-155
     constexpr double kn = -7.5;          // CN decay constant
     constexpr double cnmax = 4.4;       // Squashing limit
-    constexpr double threshold_factor = 2.5;  // Cutoff factor for rcov
-    constexpr double ANG2BOHR = 1.8897259886;
-
-    // Pre-compute threshold squared (largest possible distance)
-    // Use max covalent radius * threshold_factor as conservative cutoff
-    const auto& rcov_d3 = GFNFFParameters::covalent_rad_d3;  // in Bohr
-    double max_rcov = 0.0;
-    for (int i = 0; i < N; ++i) {
-        int z = atom_types[i];
-        if (z >= 1 && z <= static_cast<int>(rcov_d3.size())) {
-            max_rcov = std::max(max_rcov, rcov_d3[z - 1]);
-        }
-    }
-    // rcov_d3 is already scaled by 4/3, use conservative threshold
-    double threshold_sq = (threshold_factor * 2.0 * max_rcov * ANG2BOHR) * (threshold_factor * 2.0 * max_rcov * ANG2BOHR);
-    threshold_sq = 900.0;  // Use 30 Bohr cutoff (same as CNCalculator)
+    // Distance cutoff of the O(N^2) CN sum: 30 Bohr. Sep 2026: dead rcov-based estimate
+    // (overwritten right after, with a CODATA-1986 factor on radii already in Bohr) removed,
+    // mirroring the CUDA file - Claude Generated; uncompiled here (no ROCm SDK).
+    const double threshold_sq = 900.0;
 
     // Ensure CN buffers are allocated
     if (impl.d_cn_raw.n < N) impl.d_cn_raw.alloc(N);

@@ -286,7 +286,6 @@ public:
 
     void setThreads(int threads) { m_threads = threads; }
 
-    bool MolAlignLib();
     static std::pair<double, Matrix> MakeCostMatrix(const Geometry& reference, const Geometry& target, const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms, int costmatrix);
 
     Geometry Gradient() const;
@@ -303,8 +302,6 @@ public:
     std::pair<double, Matrix> MakeCostMatrix(const Geometry& reference, const Geometry& target);
     std::pair<double, Matrix> MakeCostMatrix(const std::vector<int>& reference, const std::vector<int>& target);
     std::pair<double, Matrix> MakeCostMatrix(const Matrix& rotation);
-    std::pair<std::vector<int>, std::vector<int>> PrepareHeavyTemplate();
-    std::pair<std::vector<int>, std::vector<int>> PrepareAtomTemplate(const std::vector<int>& templateatom);
 
 private:
     /* Read Controller has to be implemented for all */
@@ -337,10 +334,6 @@ private:
     void CheckTopology();
 
     Matrix OptimiseRotation(const Eigen::Matrix3d& rotation);
-
-    std::pair<std::vector<int>, std::vector<int>> PrepareDistanceTemplate();
-
-    std::pair<std::vector<int>, std::vector<int>> PrepareAtomTemplate(int templateatom);
 
     void FinaliseTemplate();
 

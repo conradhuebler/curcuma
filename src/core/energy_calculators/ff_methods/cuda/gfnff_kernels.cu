@@ -177,10 +177,12 @@ __global__ void k_dispersion(
     double*                    grad,
     double*                    energy)
 {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
     double local_E = 0.0;
 
-    if (tid < n) {
+    // K2 (Oct 2026): grid-stride loop. With the full grid (gridDim*blockDim >= n) every thread
+    // handles at most one pair, exactly as before; a capped grid (background launch) loops.
+    const int stride = gridDim.x * blockDim.x;
+    for (int tid = blockIdx.x * blockDim.x + threadIdx.x; tid < n; tid += stride) {
         int i = idx_i[tid], j = idx_j[tid];
         double dx = cx[i] - cx[j];
         double dy = cy[i] - cy[j];
@@ -200,7 +202,7 @@ __global__ void k_dispersion(
             double t8   = 1.0 / (r8 + r0_8);
 
             double disp_sum = t6 + 2.0 * r4r2ij[tid] * t8;
-            local_E = -C6[tid] * disp_sum * zetac6[tid];
+            local_E += -C6[tid] * disp_sum * zetac6[tid];   // 0.0 + x == x: unchanged for one pair
 
             // Gradient: dE/dr via chain rule
             double d6   = -6.0 * r4 * t6 * t6;
@@ -360,15 +362,25 @@ __global__ void k_coulomb(
             double qi = charges[i];
             double qj = charges[j];
             if (!isnan(qi) && !isnan(qj)) {
-                double gamma_r = gamma_ij[tid] * rij;
-                double erf_v   = erf(gamma_r);
-                local_E = qi * qj * erf_v / rij;
+                const double g = gamma_ij[tid];
+                double fac;
+                if (g * g * r2 >= GFNFF_COUL_FARFIELD_X2) {
+                    // Far field (Claude Generated, Oct 2026): erf == 1, exp term < 2.3e-16, see
+                    // GFNFF_COUL_FARFIELD_X2. E = qq/r, fac = dEdr/r = -qq/r^3. sqrt and division
+                    // (no rsqrt): this path carries a per-pair cutoff, tested on rij above.
+                    local_E = qi * qj / rij;
+                    fac     = -(qi * qj) / (r2 * rij);
+                } else {
+                    double gamma_r = g * rij;
+                    double erf_v   = erf(gamma_r);
+                    local_E = qi * qj * erf_v / rij;
 
-                static const double inv_sqrt_pi = 0.5641895835477563;
-                double exp_v  = exp(-gamma_r * gamma_r);
-                double derf   = gamma_ij[tid] * exp_v * (2.0 * inv_sqrt_pi);
-                double dEdr   = qi * qj * (derf / rij - erf_v / (rij * rij));
-                double fac    = dEdr / rij;
+                    static const double inv_sqrt_pi = 0.5641895835477563;
+                    double exp_v  = exp(-gamma_r * gamma_r);
+                    double derf   = g * exp_v * (2.0 * inv_sqrt_pi);
+                    double dEdr   = qi * qj * (derf / rij - erf_v / (rij * rij));
+                    fac           = dEdr / rij;
+                }
                 add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
                 add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
             }
@@ -376,6 +388,210 @@ __global__ void k_coulomb(
     }
 
     blockReduceAddEnergy(local_E, energy);
+}
+
+// Implicit all-pairs Coulomb, see gfnff_kernels.cuh. Pair arithmetic identical to k_coulomb.
+__global__ void k_coulomb_implicit(
+    int natoms,
+    const double* __restrict__ alp,
+    double                     r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ charges,
+    double*                    grad,
+    double*                    energy)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    double local_E = 0.0;
+
+    if (i < natoms) {
+        const double qi = charges[i];
+        if (!isnan(qi)) {
+            static const double inv_sqrt_pi = 0.5641895835477563;
+            const bool no_cut = isinf(r_cut);   // default: no Coulomb cutoff (coulomb_r_cut)
+            double gx = 0.0, gy = 0.0, gz = 0.0, e_half = 0.0;
+            for (int j = 0; j < natoms; ++j) {
+                if (j == i) continue;
+                double dx  = cx[i] - cx[j];
+                double dy  = cy[i] - cy[j];
+                double dz  = cz[i] - cz[j];
+                applyMIC(dx, dy, dz);
+                double r2  = dx*dx + dy*dy + dz*dz;
+                const double asum = alp[i] + alp[j];
+                if (no_cut && r2 >= GFNFF_COUL_FARFIELD_X2 * asum) {
+                    // Far field, no cutoff (Claude Generated, Oct 2026): same arithmetic as
+                    // k_coulomb_tiles (erf == 1, exp term < 2.3e-16, rsqrt).
+                    const double qj = charges[j];
+                    if (isnan(qj)) continue;
+                    const double ri = rsqrt(r2);
+                    const double e  = qi * qj * ri;
+                    e_half += 0.5 * e;
+                    const double f = -e * ri * ri;
+                    gx += f*dx; gy += f*dy; gz += f*dz;
+                    continue;
+                }
+                double rij = sqrt(r2);
+                if (rij > r_cut || rij < 1e-10) continue;
+                double qj = charges[j];
+                if (isnan(qj)) continue;
+                double fac;
+                if (r2 >= GFNFF_COUL_FARFIELD_X2 * asum) {
+                    // Far field inside a finite cutoff: sqrt and division (Claude Generated, Oct 2026).
+                    e_half += 0.5 * (qi * qj / rij);
+                    fac     = -(qi * qj) / (r2 * rij);
+                } else {
+                    double gamma_ij = 1.0 / sqrt(asum);
+                    double gamma_r = gamma_ij * rij;
+                    double erf_v   = erf(gamma_r);
+                    e_half += 0.5 * (qi * qj * erf_v / rij);
+                    double exp_v  = exp(-gamma_r * gamma_r);
+                    double derf   = gamma_ij * exp_v * (2.0 * inv_sqrt_pi);
+                    double dEdr   = qi * qj * (derf / rij - erf_v / (rij * rij));
+                    fac           = dEdr / rij;
+                }
+                gx += fac*dx; gy += fac*dy; gz += fac*dz;
+            }
+            local_E = e_half;
+            add_grad(grad, i, gx, gy, gz);   // atomic: other kernels may touch atom i concurrently
+        }
+    }
+
+    blockReduceAddEnergy(local_E, energy);
+}
+
+// ============================================================================
+// Kernel 3b: tiled implicit Coulomb, each pair once (Claude Generated, Sep 2026)
+//
+// E = sum_{i<j} q_i q_j erf(gamma_ij r_ij) / r_ij,   gamma_ij = 1/sqrt(alp_i + alp_j)
+// dE/dr = q_i q_j (2 gamma/sqrt(pi) exp(-gamma^2 r^2) / r - erf(gamma r) / r^2)
+// Identical to k_coulomb_implicit, but every pair is evaluated once: that kernel pays the
+// erf + exp of each pair twice (once from each atom's row), which dominated the GFN-FF MD step
+// on large systems (polymer_2x, 7320 atoms: 85 ms of ~180 ms per energy call, nsys Sep 29).
+// Thread t of tile (bi, bj) owns atom i = bi*T + t; it walks the j tile in a rotated order
+// (jj = (t + k) mod T) so that concurrent shared-memory atomics on the j gradients rarely collide.
+// Far field (Oct 2026): pairs with r^2 >= 36 (alp_i + alp_j) skip erf/exp (GFNFF_COUL_FARFIELD_X2);
+// polymer_2x: 11.2 -> 2.4 ms per call on an RTX 5080 (CUPTI, n = 22 calls), energy unchanged at 1e-13 Eh.
+// ============================================================================
+
+__global__ void k_coulomb_tiles(
+    int natoms,
+    const int* __restrict__    tiles,
+    const double* __restrict__ alp,
+    double                     r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ charges,
+    double*                    grad,
+    double*                    energy)
+{
+    constexpr int T = GFNFF_COUL_TILE;
+    __shared__ double sx[T], sy[T], sz[T], sq[T], sa[T];
+    __shared__ double sgx[T], sgy[T], sgz[T];
+
+    const int bi = tiles[2 * blockIdx.x];
+    const int bj = tiles[2 * blockIdx.x + 1];
+    const int t  = threadIdx.x;
+    const int i  = bi * T + t;
+    const int jl = bj * T + t;
+
+    if (jl < natoms) {
+        sx[t] = cx[jl]; sy[t] = cy[jl]; sz[t] = cz[jl];
+        sq[t] = charges[jl]; sa[t] = alp[jl];
+    } else {
+        sx[t] = sy[t] = sz[t] = 0.0; sq[t] = nan(""); sa[t] = 1.0;
+    }
+    sgx[t] = 0.0; sgy[t] = 0.0; sgz[t] = 0.0;
+    __syncthreads();
+
+    double local_E = 0.0;
+    double gx = 0.0, gy = 0.0, gz = 0.0;
+    const bool active = (i < natoms);
+    const double xi = active ? cx[i] : 0.0;
+    const double yi = active ? cy[i] : 0.0;
+    const double zi = active ? cz[i] : 0.0;
+    const double qi = active ? charges[i] : nan("");
+    const double ai = active ? alp[i] : 1.0;
+    const bool diag = (bi == bj);
+    const bool no_cut = isinf(r_cut);   // default: no Coulomb cutoff (coulomb_r_cut)
+    static const double two_inv_sqrt_pi = 1.1283791670955126;
+
+    if (active && !isnan(qi)) {
+        for (int k = 0; k < T; ++k) {
+            const int jj = (t + k) & (T - 1);
+            const int j  = bj * T + jj;
+            if (j >= natoms || (diag && j <= i)) continue;
+            const double qj = sq[jj];
+            if (isnan(qj)) continue;
+            double dx = xi - sx[jj];
+            double dy = yi - sy[jj];
+            double dz = zi - sz[jj];
+            applyMIC(dx, dy, dz);
+            const double r2  = dx * dx + dy * dy + dz * dz;
+            const double asum = ai + sa[jj];
+            const double qq   = qi * qj;
+            double fac;
+            if (no_cut && r2 >= GFNFF_COUL_FARFIELD_X2 * asum) {
+                // Far field, no cutoff (Claude Generated, Oct 2026): erf(gamma r) == 1 and the exp
+                // term is < 2.3e-16 (GFNFF_COUL_FARFIELD_X2). rsqrt (1 ulp) replaces sqrt and two
+                // divisions. r2 >= 36 asum > 0, so the r < 1e-10 guard below cannot apply here.
+                const double ri = rsqrt(r2);
+                const double e  = qq * ri;
+                local_E += e;
+                fac = -e * ri * ri;
+                const double fx = fac * dx, fy = fac * dy, fz = fac * dz;
+                gx += fx; gy += fy; gz += fz;
+                atomicAdd(&sgx[jj], -fx);
+                atomicAdd(&sgy[jj], -fy);
+                atomicAdd(&sgz[jj], -fz);
+                continue;
+            }
+            const double rij = sqrt(r2);
+            if (rij > r_cut || rij < 1e-10) continue;
+            if (r2 >= GFNFF_COUL_FARFIELD_X2 * asum) {
+                // Far field inside a finite cutoff: same shortcut with sqrt and division,
+                // taken after applyMIC and the unchanged cutoff test.
+                local_E += qq / rij;
+                fac = -qq / (r2 * rij);
+            } else {
+                const double gamma_ij = 1.0 / sqrt(asum);
+                const double gamma_r  = gamma_ij * rij;
+                const double erf_v    = erf(gamma_r);
+                local_E += qq * erf_v / rij;
+                const double derf = gamma_ij * exp(-gamma_r * gamma_r) * two_inv_sqrt_pi;
+                fac = qq * (derf / rij - erf_v / r2) / rij;
+            }
+            const double fx = fac * dx, fy = fac * dy, fz = fac * dz;
+            gx += fx; gy += fy; gz += fz;
+            atomicAdd(&sgx[jj], -fx);
+            atomicAdd(&sgy[jj], -fy);
+            atomicAdd(&sgz[jj], -fz);
+        }
+        add_grad(grad, i, gx, gy, gz);
+    }
+    __syncthreads();
+    if (jl < natoms && (sgx[t] != 0.0 || sgy[t] != 0.0 || sgz[t] != 0.0))
+        add_grad(grad, jl, sgx[t], sgy[t], sgz[t]);
+
+    blockReduceAddEnergy(local_E, energy);
+}
+
+__global__ void k_add_coulomb_parts(int n3, int nparts, const double* __restrict__ parts,
+                                    const double* __restrict__ part_E,
+                                    double* grad, double* energy)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k < n3) {
+        double s = 0.0;
+        for (int p = 0; p < nparts; ++p) s += parts[static_cast<size_t>(p) * n3 + k];
+        atomicAdd(&grad[k], s);   // other streams add to d_grad concurrently
+    }
+    if (k == 0) {
+        double e = 0.0;
+        for (int p = 0; p < nparts; ++p) e += part_E[p];
+        atomicAdd(energy, e);
+    }
 }
 
 // ============================================================================
@@ -2802,7 +3018,8 @@ __global__ void k_dc6dcn_per_pair(
     const double* __restrict__ dgw,
     const double* __restrict__ c6_flat,
     double*       __restrict__ dc6dcn_ij,
-    double*       __restrict__ dc6dcn_ji)
+    double*       __restrict__ dc6dcn_ji,
+    double*       __restrict__ c6_out)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_pairs) return;
@@ -2827,6 +3044,7 @@ __global__ void k_dc6dcn_per_pair(
 
     double dc6_ij = 0.0;
     double dc6_ji = 0.0;
+    double c6     = 0.0;   // Claude Generated (Sep 2026): C6 itself, same double sum
 
     for (int ri = 0; ri < nri; ++ri) {
         double dgw_i_ri = dgw[gw_i_base + ri];
@@ -2841,11 +3059,15 @@ __global__ void k_dc6dcn_per_pair(
 
             // dc6dcn(j,i) = dC6(i,j)/dCN(j) = Σ gw(i,ri) * dgw(j,rj) * C6ref
             dc6_ji += gw_i_ri * dgw[gw_j_base + rj] * c6ref;
+
+            // C6(i,j) = Σ gw(i,ri) * gw(j,rj) * C6ref (Caldeweyher 2019 CN-weighted C6)
+            c6 += gw_i_ri * gw[gw_j_base + rj] * c6ref;
         }
     }
 
     dc6dcn_ij[tid] = dc6_ij;
     dc6dcn_ji[tid] = dc6_ji;
+    if (c6_out) c6_out[tid] = c6;
 }
 
 // ============================================================================
@@ -2854,7 +3076,7 @@ __global__ void k_dc6dcn_per_pair(
 
 // ============================================================================
 // GPU CN pair list generation (Apr 2026)
-// Two-pass kernels replacing CPU generateCNPairList() O(N^2) loop.
+// Two-pass kernels replacing the former host O(N^2) CN pair loop.
 // ============================================================================
 
 /// Pass 1: count valid pairs. 1 thread = 1 upper-triangle pair (i<j).
@@ -2865,6 +3087,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(
     const double* __restrict__ cz,
     const int*    __restrict__ atom_types,
     double        cutoff_factor,
+    double        extra_bohr,
     int*          d_count)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2899,7 +3122,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(
     double rcov_j = d_rcov_d3[zj - 1] * CN_RCOV_SCALE;
     double rcov_sum = rcov_i + rcov_j;
 
-    if (rij < cutoff_factor * rcov_sum && rij > 1e-10) {
+    if (rij < cutoff_factor * rcov_sum + extra_bohr && rij > 1e-10) {
         atomicAdd(d_count, 1);
     }
 }
@@ -2912,6 +3135,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
     const double* __restrict__ cz,
     const int*    __restrict__ atom_types,
     double        cutoff_factor,
+    double        extra_bohr,
     int*          d_counter,
     int*          idx_i,
     int*          idx_j,
@@ -2946,7 +3170,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
     double rcov_j = d_rcov_d3[zj - 1] * CN_RCOV_SCALE;
     double rcov_sum_val = rcov_i + rcov_j;
 
-    if (rij < cutoff_factor * rcov_sum_val && rij > 1e-10) {
+    if (rij < cutoff_factor * rcov_sum_val + extra_bohr && rij > 1e-10) {
         int idx = atomicAdd(d_counter, 1);
         idx_i[idx] = i;
         idx_j[idx] = j;
@@ -3422,6 +3646,62 @@ __global__ void k_eeq_block_jacobi_apply(
     }
 }
 
+// ── WP7-E: GPU projected PCG kernels (Sep 2026) ──────────────────────────────
+__global__ void k_frag_sum(int N,
+                            const double* __restrict__ v,
+                            const int*    __restrict__ atom_frag,
+                            double*       __restrict__ frag_sum)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    atomicAdd(&frag_sum[atom_frag[i]], v[i]);
+}
+
+__global__ void k_frag_scatter_add(int N,
+                                    double*       __restrict__ v,
+                                    const int*    __restrict__ atom_frag,
+                                    const double* __restrict__ frag_delta)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    v[i] += frag_delta[atom_frag[i]];
+}
+
+__global__ void k_frag_project_delta(int nfrag,
+                                      const double* __restrict__ frag_sum,
+                                      const double* __restrict__ inv_frag_atoms,
+                                      double*       __restrict__ frag_delta)
+{
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= nfrag) return;
+    frag_delta[f] = -frag_sum[f] * inv_frag_atoms[f];
+}
+
+__global__ void k_frag_feasibility_delta(int nfrag,
+                                          const double* __restrict__ frag_sum,
+                                          const double* __restrict__ rhs_constraints,
+                                          const double* __restrict__ inv_frag_atoms,
+                                          double*       __restrict__ frag_delta)
+{
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= nfrag) return;
+    frag_delta[f] = (rhs_constraints[f] - frag_sum[f]) * inv_frag_atoms[f];
+}
+
+__global__ void k_frag_precond_correct(int N,
+                                        const double* __restrict__ Minv,
+                                        const int*    __restrict__ atom_frag,
+                                        const double* __restrict__ frag_sum,
+                                        const double* __restrict__ frag_sM,
+                                        double*       __restrict__ z)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    int f = atom_frag[i];
+    double sM = frag_sM[f];
+    if (sM > 0.0) z[i] -= Minv[i] * frag_sum[f] / sM;
+}
+
 // ============================================================================
 // WP2: k_build_eeq_rhs — GPU-side EEQ RHS construction
 // Claude Generated (May 2026): Eliminates CPU sync for EEQ RHS per MD step.
@@ -3580,8 +3860,11 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_build_fragment_matrices(
             Af[li * Nf + lj] = 0.0;
         } else {
             double r          = sqrt(r_sq);
-            double gamma_ij   = 1.0 / sqrt(alpha[gi] + alpha[gj]);
-            double val        = erf(gamma_ij * r) / r;
+            const double asum = alpha[gi] + alpha[gj];
+            // Far field (Claude Generated, Oct 2026): erf == 1.0 exactly, value bit-identical
+            double val        = (r_sq >= GFNFF_COUL_FARFIELD_X2 * asum)
+                                    ? 1.0 / r
+                                    : erf((1.0 / sqrt(asum)) * r) / r;
             Af[lj * Nf + li] = val;  // lower triangle (col=lj, row=li)
             Af[li * Nf + lj] = val;  // upper triangle (col=li, row=lj)
         }

@@ -1,248 +1,47 @@
-# CLAUDE.md - Energy Calculators Directory
+# CLAUDE.md - src/core/energy_calculators/
 
-## Overview
+Every energy method behind one interface. `EnergyCalculator` (`src/core/energycalculator.*`) owns one
+`std::unique_ptr<ComputationalMethod>` that `MethodFactory::create(name, json)` builds.
 
-The energy_calculators directory contains the **new polymorphic architecture** for computational methods in Curcuma. This represents a complete refactoring of the previous EnergyCalculator system, implemented in January 2025.
+## Layout
 
-## Architecture
+- `computational_method.h` - the abstract interface
+- `method_factory.{h,cpp}` - table-driven registry (`methodTable()`, one `MethodDescriptor` per family)
+- `gpu_plugin.{h,cpp}` - runtime `dlopen` loader for `libcurcuma_{cuda,rocm,vulkan}.so` ([docs/GPU_PLUGIN_STARTUP.md](../../../docs/GPU_PLUGIN_STARTUP.md))
+- `qm_methods/` - native xTB/EHT/NDDO and external QM wrappers (own CLAUDE.md)
+- `ff_methods/` - FFWorkspace engine, GFN-FF, UFF/QMDFF/CG (own CLAUDE.md)
+- `dispersion/` - D4 data, charge model and evaluator (own CLAUDE.md)
+- `ENERGY_SYSTEM_OVERVIEW.md` - CLI-to-library parameter flow (Oct 2025, not re-checked)
 
-### Core Design Principles
+## ComputationalMethod contract
 
-- **Single Interface**: All computational methods (QM and MM) implement the same `ComputationalMethod` interface
-- **Polymorphism Over Templates**: Educational clarity through direct virtual function calls
-- **Method Hierarchies**: Priority-based resolution with automatic fallbacks
-- **API Compatibility**: All existing EnergyCalculator usage works unchanged
-- **Thread Safety**: Enhanced concurrency support maintained
+- Pure virtuals include `setMolecule`, `updateGeometry`, `calculateEnergy(bool gradient)`, `getGradient`, `getCharges`, `hasGradient`, `getEnergyDecomposition`
+- `getGradient()` returns **Eh/Angstrom** (the header only says "appropriate units"); guarded by the `gradient_unit_contract` ctest
+- Optional virtuals (`getCN`, orbital data, per-term energies, warm start) have no-op defaults
 
-### Directory Structure
+## Method resolution (`methodTable()`, first matching name wins)
 
-```
-energy_calculators/
-├── computational_method.h      # Base interface for all methods
-├── method_factory.cpp/h        # Priority-based method creation
-├── qm_methods/                 # Quantum method wrappers
-│   ├── eht_method.cpp/h        # Extended Hückel Theory wrapper
-│   ├── xtb_method.cpp/h        # XTB interface wrapper  
-│   ├── tblite_method.cpp/h     # TBLite interface wrapper
-│   └── ulysses_method.cpp/h    # Ulysses interface wrapper
-└── ff_methods/                 # Force field wrappers
-    └── forcefield_method.cpp/h # ForceField wrapper with threading
-```
+- `gfn1`, `gfn2`: `NativeXtbMethod`; `-gpu cuda|rocm|vulkan` goes through the plugins
+- `eht`: `EHTMethod`; `pm3`, `am1`, `mndo`, `pm6`: native `NDDOMethod` (their rows precede the Ulysses row)
+- `gfnff`, `gfnff-fast`: native GFN-FF; `uff`, `uff-d3`, `qmdff`, `cg`, `cg-lj`: `ForceFieldMethod`
+- Explicit external providers: `xtb-gfn1/2` (TBLite, else xtb binary), `tblite-gfn1/2`, `ipea1` (TBLite), `xtb-gfnff`, Ulysses names (`ugfn2`, `rm1`, `*-d3h4x`, ...), `d3`/`d4` (s-dftd3/cpp-d4), ORCA composites
+- Unknown names raise `MethodCreationException` with "Did you mean" suggestions; `curcuma -methods` prints the table
 
-## Core Components
+## Adding a method
 
-### ComputationalMethod Interface
+1. A `ComputationalMethod` subclass with its `PARAM` block
+2. One row in `MethodFactory::methodTable()`
+3. Its JSON sub-scope name in `MethodFactory::methodParameterScopes()`, the list EnergyCalculator, opt, MD, Hessian and ConfSearch forward
 
-**Base class for all computational methods** - provides unified API:
+## Parameter flow and traps
 
-```cpp
-class ComputationalMethod {
-public:
-    virtual ~ComputationalMethod() = default;
-    virtual bool setMolecule(const Mol& mol) = 0;
-    virtual double calculateEnergy(bool gradient = false) = 0;
-    virtual Matrix getGradient() const = 0;
-    virtual Vector getCharges() const = 0;
-    virtual bool supportsGradients() const = 0;
-    virtual std::string getMethodName() const = 0;
-};
-```
+- `XTBMethod`, `TBLiteMethod`, `UlyssesMethod` and `ForceFieldMethod` (for `ForceFieldGenerator`) hand a `ConfigManager` to the code they wrap
+- Native wrappers merge JSON onto in-code defaults (`NativeXtbMethod::getDefaultConfig()`, `value(key, fallback)` in EHT, GFN-FF)
+- For GFN-FF a PARAM default change alone has no runtime effect (root CLAUDE.md); for the other native wrappers not checked
+- `EnergyCalculator`'s JSON constructors re-attach only the scopes in `methodParameterScopes()`; its `ConfigManager` constructors re-attach none
+- Verbosity: wrappers map CurcumaLogger levels 0-3 onto the libraries (`XTB_VERBOSITY_*`, `tblite_set_context_verbosity` 0/1/3)
 
-### MethodFactory System
+---
 
-**Table-driven registry (Sep 2026)**: `MethodFactory::methodTable()` holds one `MethodDescriptor`
-per method family (names/aliases, family, description, availability probe, providers in priority
-order, creator lambda). `create()`, `getAvailableMethods()`, `isMethodAvailable()`,
-`getMethodInfo()` and `printAvailableMethods()` (`curcuma -methods`) all read that table.
-
-**Adding a method**: (1) a `ComputationalMethod` subclass with its `PARAM` block, (2) one row in
-`methodTable()`, (3) add its JSON sub-scope name to `MethodFactory::methodParameterScopes()` if
-it has one — that list is what EnergyCalculator / opt / MD / ConfSearch forward, so no per-site
-lists to keep in sync.
-
-#### **Method Hierarchies** (canonical, AP3 April 2026 — see top-level CLAUDE.md)
-```cpp
-// gfn1 / gfn2: NATIVE curcuma xTB is canonical (no external dependency)
-"gfn1" / "gfn2"  -> NativeXtbMethod  (curcuma::xtb::XTB)
-// External GFN providers are explicit, not fallbacks:
-"xtb-gfn1/2"     -> TBLite (USE_TBLITE) -> XTB binary (USE_XTB)
-"tblite-gfn1/2"  -> TBLite (forces that backend)
-"ipea1"          -> TBLite ; "ugfn1/2" -> Ulysses
-```
-
-#### **Method Creation**
-```cpp
-std::unique_ptr<ComputationalMethod> method =
-    MethodFactory::createMethod("gfn2", config);  // -> NativeXtbMethod (GFN2)
-```
-
-## Method Implementations
-
-### QM Method Wrappers
-
-All QM methods are wrapped to provide the same interface while preserving their individual capabilities:
-
-- **EHTMethod**: Wraps native Extended Hückel Theory implementation
-- **XTBMethod**: Wraps XTB interface with synchronized verbosity
-- **TBLiteMethod**: Wraps TBLite interface with context verbosity control  
-- **UlyssesMethod**: Wraps Ulysses interface with SCF progress tracking
-
-### Force Field Wrapper
-
-**ForceFieldMethod** wraps the ForceField class while maintaining:
-- **Threading** via the shared `FFWorkspace` engine (see `ff_methods/CLAUDE.md`)
-- **Parameter generation** integration with ForceFieldGenerator  
-- **Universal caching** with 96% speedup for iterative calculations
-- **Thread safety** controls for concurrent access
-
-## Integration with EnergyCalculator
-
-```cpp
-// Single polymorphic method pointer
-std::unique_ptr<ComputationalMethod> m_method;
-m_method = MethodFactory::createMethod(method_name, config);
-return m_method->calculateEnergy(gradient);
-```
-
-## ConfigManager Integration (October 2025)
-
-**Complete parameter management modernization** - All computational methods now use type-safe ConfigManager system.
-
-### Parameter Flow Architecture
-
-The ConfigManager system provides **end-to-end type-safe parameter passing** from user input through the polymorphic architecture to low-level interfaces:
-
-```
-User CLI/JSON
-    ↓
-Capability (e.g., Opt, SimpleMD)
-    ↓ Creates ConfigManager("opt", controller)
-EnergyCalculator(method, ConfigManager&)
-    ↓ Delegates to ConfigManager constructor
-    ↓ Exports JSON for backward compatibility
-MethodFactory::createMethod(method, json)
-    ↓ Creates method-specific wrapper
-Method Wrapper (e.g., XTBMethod, TBLiteMethod)
-    ↓ Creates ConfigManager("xtb", json)
-QM/FF Interface (e.g., XTBInterface, ForceFieldGenerator)
-    ↓ Type-safe access: config.get<int>("accuracy")
-External Library (XTB, TBLite, ForceField engine)
-```
-
-### Implementation Details
-
-#### **EnergyCalculator Constructor (Phase 3C - Oktober 2025)**
-
-**Delegating Constructor Pattern** for backward compatibility:
-
-```cpp
-// Modern ConfigManager constructor
-EnergyCalculator::EnergyCalculator(const std::string& method, const ConfigManager& config)
-    : m_method_name(method)
-{
-    m_controller = config.exportConfig();  // Convert to JSON for compatibility
-    createMethod(method, m_controller);
-}
-
-// Old JSON constructor delegates to ConfigManager version
-EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller)
-    : EnergyCalculator(method, ConfigManager("energycalculator", controller))
-{
-}
-```
-
-**Benefits**:
-- Single implementation point (no code duplication)
-- All 12 capabilities work unchanged
-- Seamless JSON ↔ ConfigManager conversion
-
-#### **Method Wrapper Integration (Phase 3B)**
-
-All method wrappers create ConfigManager instances for their interfaces:
-
-```cpp
-// Example: TBLiteMethod wrapper
-TBLiteMethod::TBLiteMethod(const std::string& method_name, const json& config)
-{
-    ConfigManager tblite_config("tblite", config);  // Extract tblite-specific params
-    m_tblite = std::make_unique<TBLiteInterface>(tblite_config);
-}
-
-// Example: XTBMethod wrapper
-XTBMethod::XTBMethod(const std::string& method_name, const json& config)
-{
-    ConfigManager xtb_config("xtb", config);  // Extract xtb-specific params
-    m_xtb = std::make_unique<XTBInterface>(xtb_config);
-}
-```
-
-#### **QM/FF Interface Constructors (Phase 3B)**
-
-All interfaces accept ConfigManager for type-safe parameter access:
-
-```cpp
-// Example: XTBInterface constructor
-XTBInterface::XTBInterface(const ConfigManager& config)
-    : m_config(config)
-{
-    // Type-safe parameter access with defaults from PARAM definitions
-    m_accuracy = m_config.get<int>("accuracy", 2);
-    m_SCFmaxiter = m_config.get<int>("max_iterations", 100);
-    m_Tele = m_config.get<double>("electronic_temperature", 300.0);
-    m_spin = m_config.get<double>("spin", 0.0);
-}
-```
-
-### Migration Status (October 2025)
-
-| Component | Status | Details |
-|-----------|--------|---------|
-| **Phase 3A**: Parameter Definitions | ✅ COMPLETE | 240 parameters across 12 modules with PARAM macros |
-| **Phase 3B**: Interface Constructors | ✅ COMPLETE | All 8 QM/FF interfaces accept ConfigManager |
-| **Phase 3B**: Method Wrappers | ✅ COMPLETE | All 8 wrappers create ConfigManager for interfaces |
-| **Phase 3C**: EnergyCalculator Integration | ✅ COMPLETE | Delegating constructors, full backward compatibility |
-
-**Remaining TODOs**:
-- DFT-D3/D4 `UpdateParameters()` methods still use JSON (low priority, seldom used)
-- Native GFN-FF parameter generation completeness (theoretical work needed)
-
-### Key Benefits
-
-1. **Type Safety**: `config.get<int>("accuracy")` catches type errors at compile time
-2. **Single Source of Truth**: PARAM definitions in headers generate all defaults
-3. **Automatic Validation**: Build-time parameter extraction via `make GenerateParams`
-4. **Zero Runtime Overhead**: ConfigManager resolves to direct member variable access
-5. **Educational Clarity**: Easy to trace parameter flow from CLI to library call
-
-### Documentation Resources
-
-For complete parameter flow examples and detailed architecture diagrams, see:
-- **`ENERGY_SYSTEM_OVERVIEW.md`**: Complete parameter journey with step-by-step code examples
-- **`qm_methods/QM_ARCHITECTURE.md`**: ConfigManager integration details and extension guidelines
-- **`energy_modules_migration_guide.md`**: Phase-by-phase migration documentation with all 3 phases
-
-## Universal Verbosity Integration
-
-All wrapped methods support the **4-level verbosity system**:
-
-- **Level 0**: Silent mode (zero output for optimization/MD)
-- **Level 1**: Final results only (energies, convergence)  
-- **Level 2**: Scientific analysis (HOMO/LUMO, properties, energy decomposition)
-- **Level 3**: Complete debug (full orbital listings, timing, algorithm details)
-
-### Native Library Integration
-
-- **XTB**: `XTB_VERBOSITY_MUTED/MINIMAL/FULL` synchronized with CurcumaLogger
-- **TBLite**: Context verbosity (0/1/3) controlled by CurcumaLogger levels
-- **Ulysses**: Direct CurcumaLogger integration for SCF progress
-- **EHT**: Native CurcumaLogger implementation with orbital analysis
-
-## Development Status
-
-### ✅ Complete
-- Polymorphic architecture, MethodFactory, ConfigManager integration (Phases 3A-3C)
-- 240 parameters with PARAM macros, all 8 QM/FF interfaces accept ConfigManager
-- Universal verbosity, thread safety, error handling
-
-### 🟡 Remaining TODOs
-- **DFT-D3/D4 UpdateParameters**: Migrate to ConfigManager (low priority, seldom used)
+Previous version (ConfigManager migration phases, code examples, status tables, removed 2026-10-01):
+[docs/archive/ENERGY_CALCULATORS_NOTES_2026-10.md](../../../docs/archive/ENERGY_CALCULATORS_NOTES_2026-10.md)

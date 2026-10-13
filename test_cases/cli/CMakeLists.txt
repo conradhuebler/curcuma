@@ -21,6 +21,34 @@ macro(add_cli_test CATEGORY TEST_NAME)
     file(COPY ${TEST_FILES}
          DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${CATEGORY}/${TEST_NAME})
 
+    # Structures from the library test_cases/structures: structures.txt in the test directory lists one structure per
+    # line, "<id>" (file name <id>.xyz) or "<id> as <file name>". Bytes are copied unchanged (see structures/README.md).
+    set(_struct_list "${CMAKE_CURRENT_SOURCE_DIR}/${CATEGORY}/${TEST_NAME}/structures.txt")
+    if(EXISTS "${_struct_list}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_struct_list}")
+        file(STRINGS "${_struct_list}" _struct_lines)
+        foreach(_line IN LISTS _struct_lines)
+            string(STRIP "${_line}" _line)
+            if(_line STREQUAL "" OR _line MATCHES "^#")
+                continue()
+            endif()
+            if(_line MATCHES "^([^ ]+) +as +([^ ]+)$")
+                set(_sid "${CMAKE_MATCH_1}")
+                set(_sname "${CMAKE_MATCH_2}")
+            else()
+                set(_sid "${_line}")
+                set(_sname "${_line}.xyz")
+            endif()
+            file(GLOB _smatch "${CURCUMA_STRUCTURES_DIR}/*/${_sid}.xyz"
+                              "${CURCUMA_STRUCTURES_DIR}/*/${_sid}.vtf")
+            list(LENGTH _smatch _smatch_n)
+            if(NOT _smatch_n EQUAL 1)
+                message(FATAL_ERROR "structure '${_sid}' listed in ${_struct_list} is not in test_cases/structures exactly once")
+            endif()
+            configure_file("${_smatch}" "${CMAKE_CURRENT_BINARY_DIR}/${CATEGORY}/${TEST_NAME}/${_sname}" COPYONLY)
+        endforeach()
+    endif()
+
     # Copy shared test utilities to category and cli directories
     file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/test_utils.sh
          DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${CATEGORY}/)
@@ -58,7 +86,8 @@ endmacro()
 
 add_cli_test(curcumaopt 01_default_uff_opt)
 add_cli_test(curcumaopt 02_gfn2_single_point)
-# AP3 (2026-04-25): gfn2 now routes to native xTB; TBLite golden ref no longer valid until AP5.
+# cli_curcumaopt_02 stays disabled: despite its name the script runs '-method uff' and duplicates 01_default_uff_opt; it needs a decision what it
+# should test (checked 2026-10-09: one of its three assertions fails).
 set_tests_properties(cli_curcumaopt_02_gfn2_single_point PROPERTIES DISABLED TRUE)
 add_cli_test(curcumaopt 03_invalid_method)
 add_cli_test(curcumaopt 04_lbfgs_params)
@@ -73,6 +102,24 @@ set_tests_properties(cli_curcumaopt_07_opt_multixyz PROPERTIES TIMEOUT 300 LABEL
 
 add_cli_test(gfnff 01_complex_gfnff_singlepoint)
 add_cli_test(gfnff 02_caffeine_gfnff_energy_components)
+# Claude Generated (Sep 24, 2026; ported to master Sep 27, 2026): chemistry-aware, continuous
+# fragment-charge placement (-gfnff.frag_charge_model ensemble, Known Issue #31, docs/FRAG_CHARGE_MODEL.md).
+add_cli_test(gfnff 05_frag_charge_ensemble)
+set_tests_properties(cli_gfnff_05_frag_charge_ensemble PROPERTIES TIMEOUT 900 LABELS "gfnff;frag_charge")
+# Claude Generated (Oct 2026): the ensemble with hundreds of fragments - bounded memory (no full enumeration of the
+# charge distributions), index-free carrier, equality with the former enumeration, variant memory budget.
+add_cli_test(gfnff 08_frag_charge_many_fragments)
+set_tests_properties(cli_gfnff_08_frag_charge_many_fragments PROPERTIES TIMEOUT 600 LABELS "gfnff;frag_charge")
+
+# Claude Generated (Oct 2026): EEQ solver control (auto thresholds, explicit names, alias, typo, GPU gap).
+add_cli_test(gfnff 06_eeq_solver_control)
+set_tests_properties(cli_gfnff_06_eeq_solver_control PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff;eeq")
+# Claude Generated (Oct 2026): local-inverse preconditioner of the projected PCG (eeq_ppcg_precond localinv).
+add_cli_test(gfnff 07_eeq_localinv)
+set_tests_properties(cli_gfnff_07_eeq_localinv PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff;eeq")
+# Claude Generated (Oct 2026): exact far-field shortcut of the CPU Coulomb term and EEQ matrix (-gfnff.farfield_shortcut), bit-identity.
+add_cli_test(gfnff 09_farfield_shortcut)
+set_tests_properties(cli_gfnff_09_farfield_shortcut PROPERTIES TIMEOUT 900 LABELS "gfnff;eeq")
 
 # =============================================================================
 # GPU GFN-FF Tests — only registered when USE_CUDA=ON
@@ -81,14 +128,14 @@ add_cli_test(gfnff 02_caffeine_gfnff_energy_components)
 if(USE_CUDA)
     add_cli_test(gfnff_gpu 01_gfnff_gpu_singlepoint)
     set_tests_properties(cli_gfnff_gpu_01_gfnff_gpu_singlepoint
-        PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;cli")
+        PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;cli")
 endif()
 
 # ROCm GFN-FF — only when USE_ROCM=ON. Self-skips at runtime if no HIP device.
 if(USE_ROCM)
     add_cli_test(gfnff_gpu 02_rocm_singlepoint)
     set_tests_properties(cli_gfnff_gpu_02_rocm_singlepoint
-        PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;rocm;cli")
+        PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm;cli")
 endif()
 
 # =============================================================================
@@ -98,15 +145,15 @@ endif()
 if(USE_VULKAN)
     add_cli_test(gpu_gradient 01_vulkan_gfn1_gradient)
     set_tests_properties(cli_gpu_gradient_01_vulkan_gfn1_gradient
-        PROPERTIES TIMEOUT 120 LABELS "gpu_gradient;gpu;vulkan;cli")
+        PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gpu_gradient;gpu;vulkan;cli")
     # X-AP4: GFN2 D4 EEQ charge-response gradient on the device (q-response).
     add_cli_test(gpu_gradient 02_vulkan_gfn2_qresponse)
     set_tests_properties(cli_gpu_gradient_02_vulkan_gfn2_qresponse
-        PROPERTIES TIMEOUT 120 LABELS "gpu_gradient;gpu;vulkan;cli")
+        PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gpu_gradient;gpu;vulkan;cli")
     # V-AP2: GFN2 AO multipole integrals on the device.
     add_cli_test(gpu_multipole 01_vulkan_gfn2_multipole)
     set_tests_properties(cli_gpu_multipole_01_vulkan_gfn2_multipole
-        PROPERTIES TIMEOUT 120 LABELS "gpu_multipole;gpu;vulkan;cli")
+        PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gpu_multipole;gpu;vulkan;cli")
 endif()
 
 # =============================================================================
@@ -191,12 +238,13 @@ set_tests_properties(cli_confsearch_01_gfnff_smoke PROPERTIES TIMEOUT 400 LABELS
 # add_cli_test(cg 01_single_point)
 
 # =============================================================================
-# Analysis Tests (1 scenario)
+# Analysis Tests (2 scenarios)
 # =============================================================================
 
 add_cli_test(analysis 01_parallel_equivalence)
 # 100 Frames × Scattering braucht länger als Standard-30s
 set_tests_properties(cli_analysis_01_parallel_equivalence PROPERTIES TIMEOUT 120)
+add_cli_test(analysis 02_scattering_options)
 
 # =============================================================================
 # CLI Routing Tests — Claude Generated 2026
@@ -243,12 +291,9 @@ add_cli_test(sqm 09_ngfn2_baseline_singlepoint)    # native ngfn2 broken-state s
 add_cli_test(sqm 10_gfn2_optimization_smoke)       # gfn2 -opt anchor (gradient = zero pre-AP-4)
 add_cli_test(sqm 11_gfn2_provider_check)           # routing anchor — updated for AP 3 (native backend)
 
-# AP3 (2026-04-25): gfn2/gfn1 route to native xTB. TBLite golden refs invalid until AP5.
-set_tests_properties(cli_sqm_04_gfn1_singlepoint PROPERTIES DISABLED TRUE)
-set_tests_properties(cli_sqm_05_gfn2_singlepoint PROPERTIES DISABLED TRUE)
-set_tests_properties(cli_sqm_06_gfn2_extended_singlepoint PROPERTIES DISABLED TRUE)
-set_tests_properties(cli_sqm_07_gfn1_extended_singlepoint PROPERTIES DISABLED TRUE)
-# AP3: gfn2 -opt still broken (gradient = zero), disable until AP4 restores gradient.
+# cli_sqm_04..07 are enabled since 2026-10-09: the native gfn1/gfn2 match the TBLite references (4e-9 Eh, OH radical 8e-4 Eh).
+# cli_sqm_10 stays disabled: it expects the log markers 'Geometry Optimisation converged' / 'gfn2 Final Energy', which -opt does not print
+# at the verbosity used (checked 2026-10-09); the gradient exists since AP4. The test needs a convergence check on input.opt.xyz instead.
 set_tests_properties(cli_sqm_10_gfn2_optimization_smoke PROPERTIES DISABLED TRUE)
 
 # Claude Generated (Sep 2026): test 11 asserts `-method ipea1` routes to and matches

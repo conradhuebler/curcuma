@@ -42,6 +42,15 @@ struct GFNFFCudaBackend {
     /// CUDA implements the device Schur EEQ solves (WP5-A / WP7-A / WP7-B / WP7-C),
     /// so a failure there is a real numerical failure and is warned about.
     static constexpr bool has_device_schur = true;
+    /// Multi-GPU split of one molecule (Coulomb tiles + EEQ PCG). Claude Generated (Sep 2026).
+    static constexpr bool has_multi_gpu_split = true;
+    /// K1 (Oct 2026): CN pair list as a Verlet list with skin (cnPairListStale(), setCNPairSkin()).
+    static constexpr bool has_cn_pair_skin = true;
+    /// K2/K3 (Oct 2026): dispersion and the device EEQ solve overlap dc6dcn on own streams
+    /// (recordEEQInputsReady(), launchDispersionGradientEarly(), EEQ setInputReadyEvent()).
+    static constexpr bool has_stream_overlap = true;
+    /// Oct 2026: staged pinned upload of rebuilt pair lists (setStagedListUpload()).
+    static constexpr bool has_staged_list_upload = true;
 
     /// 0 = never route the EEQ to the CPU PCG; the device Schur paths handle nfrag>1.
     static constexpr int default_eeq_cpu_fragment_threshold = 0;
@@ -49,6 +58,11 @@ struct GFNFFCudaBackend {
     /// Blocking device->host copy of n doubles (GPU-Schur charge download).
     /// Defined in gfnff_gpu_method.cpp so <cuda_runtime.h> stays out of this header.
     static void downloadDoubles(double* host, const double* device, int n);
+
+    /// Multi-GPU (Claude Generated, Sep 2026): number of visible devices, and make `device`
+    /// current on the calling thread (the runtime's current device is per host thread).
+    static int  deviceCount();
+    static bool setDevice(int device);
 };
 
 // The wrapper is instantiated in exactly one translation unit (gfnff_gpu_method.cpp,

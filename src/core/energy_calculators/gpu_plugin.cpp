@@ -151,6 +151,60 @@ std::unique_ptr<ComputationalMethod> createGfnff(const std::string& backend, con
     return std::unique_ptr<ComputationalMethod>(method);
 }
 
+int deviceCount(const std::string& backend)
+{
+    void* handle = pluginHandle(backend, /*quiet=*/true);
+    if (!handle)
+        return 0;
+    using count_fn = int (*)();
+    count_fn fn = resolveSymbol<count_fn>(handle, "curcuma_" + backend + "_device_count");
+    return fn ? fn() : 1;   // pre-multi-GPU plugin: one (default) device
+}
+
+// Claude Generated (Sep 2026): which distributed-eigensolver backends this plugin can reach
+// ("mp", "mg", "mp,mg", "none ..."). Optional symbol - an older plugin returns "" and the
+// caller stays silent. The point is that `curcuma -methods` answers "was this build linked
+// against cuSOLVERMp, or is it the 15x-slower cusolverMg fallback?" without a calculation.
+std::string mgpuBackends(const std::string& backend)
+{
+    void* handle = pluginHandle(backend, /*quiet=*/true);
+    if (!handle)
+        return {};
+    using str_fn = const char* (*)();
+    str_fn fn = resolveSymbol<str_fn>(handle, "curcuma_" + backend + "_mgpu_backends");
+    if (!fn)
+        return {};
+    const char* s = fn();
+    return s ? std::string(s) : std::string();
+}
+
+json deviceInfo(const std::string& backend, int index)
+{
+    void* handle = pluginHandle(backend, /*quiet=*/true);
+    if (!handle)
+        return json::object();
+    using info_fn = int (*)(int, char*, int);
+    info_fn fn = resolveSymbol<info_fn>(handle, "curcuma_" + backend + "_device_info");
+    if (!fn)
+        return json::object();
+    std::string buf(1024, '\0');
+    int need = fn(index, buf.data(), static_cast<int>(buf.size()));
+    if (need < 0)
+        return json::object();
+    if (need >= static_cast<int>(buf.size())) {
+        buf.assign(static_cast<size_t>(need) + 1, '\0');
+        need = fn(index, buf.data(), static_cast<int>(buf.size()));
+        if (need < 0)
+            return json::object();
+    }
+    buf.resize(static_cast<size_t>(need));
+    try {
+        return json::parse(buf);
+    } catch (...) {
+        return json::object();
+    }
+}
+
 bool available(const std::string& backend)
 {
     return pluginHandle(backend, /*quiet=*/true) != nullptr;

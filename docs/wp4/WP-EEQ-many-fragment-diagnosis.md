@@ -62,7 +62,7 @@ SchurCholesky is O(N³/3 + N²·nfrag), and at nfrag=1400 the Schur term
   explodes. The O(N²·k) argument fails because k is large.
 - **Batched is 7–10× faster but wrong by 1.08 Eh (680 kcal/mol)** — it drops the
   cross-fragment Coulomb by construction, which is exactly why
-  `eeq_contact_prefer_exact` routes contacting fragments away from it.
+  `eeq_contact_prefer_exact` routes contacting fragments away from it (parameter removed since 2026-10; `auto` never picks batched, see EEQ_SOLVER_CONTROL.md).
 
 **The current default is the best of the three.** There is no better solver to
 switch to; the win has to come from *not solving from scratch every step*.

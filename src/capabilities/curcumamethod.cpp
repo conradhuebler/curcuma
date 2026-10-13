@@ -151,13 +151,18 @@ CurcumaMethod::~CurcumaMethod()
 }
 
 // Claude Generated 2025: Enhanced restart writing with automatic checksum and version
-void CurcumaMethod::TriggerWriteRestart()
+// K6 (Oct 2026): returns the plain WriteRestartInformation() state (before the metadata is added),
+// so a caller that needs the same state again (SimpleMD -rescue) does not build it a second time.
+// Null when WriteRestartInformation() threw.
+nlohmann::json CurcumaMethod::TriggerWriteRestart()
 {
     ensureOutputDir();
     std::ofstream restart_file(outputPath("curcuma_restart.json"));
     nlohmann::json restart;
+    nlohmann::json plain_state;
     try {
         nlohmann::json state = WriteRestartInformation();
+        plain_state = state;
 
         // Add metadata
         state["format_version"] = "1.0";
@@ -188,6 +193,7 @@ void CurcumaMethod::TriggerWriteRestart()
         restart_file << restart << std::endl;
     } catch (nlohmann::json::type_error& e) {
     }
+    return plain_state;
 }
 
 StringList CurcumaMethod::RestartFiles() const

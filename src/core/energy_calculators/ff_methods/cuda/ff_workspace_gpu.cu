@@ -16,6 +16,7 @@
  */
 
 #include "ff_workspace_gpu.h"
+#include <limits>
 #include "gfnff_soa.h"
 #include "gfnff_kernels.cuh"
 
@@ -29,9 +30,12 @@
 
 #include <Eigen/Dense>
 
+#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <algorithm>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 // Matrix, Vector, SpMatrix are defined in global.h (via ff_workspace_gpu.h -> ff_workspace.h)
@@ -604,6 +608,10 @@ struct FFWorkspaceGPUImpl {
     RepulsionSoA   bonded_rep;      ///< Bonded repulsion pairs
     RepulsionSoA   nonbonded_rep;   ///< Non-bonded repulsion pairs
     CoulombSoA     coulomb;         ///< Coulomb pairs (gamma + cutoff only; charges dynamic)
+    // Claude Generated (Sep 2026): implicit all-pairs Coulomb (no pair list).
+    bool               coulomb_implicit = false;
+    double             coulomb_rcut = std::numeric_limits<double>::infinity();  // no cutoff (Sep 2026)
+    // (per-atom alpeeq: the existing self-energy buffer d_coul_alp, same values)
     BondSoA        bonds;           ///< Bond stretching
     AngleSoA       angles;          ///< Angle bending
     DihedralSoA    dihedrals;       ///< Standard + extra torsions (combined)
@@ -644,12 +652,53 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_coul_chi_base; ///< [N]
     CudaBuffer<double> d_coul_gam;      ///< [N]
     CudaBuffer<double> d_coul_alp;      ///< [N]
+    // Claude Generated (Sep 2026, F-3): multi-GPU Coulomb split
+    struct CoulSplitPart {
+        int dev = -1, t0 = 0, t1 = 0;
+        cudaStream_t stream = nullptr;
+        cudaEvent_t  done   = nullptr;
+        CudaBuffer<double> x, y, z, q, alp, grad, E;
+        CudaBuffer<int> tiles;
+    };
+    int own_device = -1;
+    bool pbc_active = false;
+    std::vector<int> coul_split_devs;
+    int coul_split_min_atoms = 0;
+    std::vector<std::unique_ptr<CoulSplitPart>> coul_parts;
+    int coul_split_natoms = -1;
+    int coul_own_tiles = 0;
+    CudaBuffer<double> d_coul_part_grad;   ///< [nparts * 3N] partial gradients from the helpers
+    CudaBuffer<double> d_coul_part_E;      ///< [nparts]
+    cudaEvent_t ev_coul = nullptr;
+    bool coul_split_failed = false;
+    std::string coul_split_status;
+    long coul_split_calls = 0;
+    void releaseCoulSplit() {
+        for (auto& pp : coul_parts) {
+            if (!pp) continue;
+            cudaSetDevice(pp->dev);
+            pp->x.free(); pp->y.free(); pp->z.free(); pp->q.free(); pp->alp.free();
+            pp->grad.free(); pp->E.free(); pp->tiles.free();
+            if (pp->done)   cudaEventDestroy(pp->done);
+            if (pp->stream) cudaStreamDestroy(pp->stream);
+        }
+        coul_parts.clear();
+        if (own_device >= 0) cudaSetDevice(own_device);
+        d_coul_part_grad.free(); d_coul_part_E.free();
+        coul_split_natoms = -1;
+    }
+    // Claude Generated (Sep 2026): tile-pair list for k_coulomb_tiles (bi <= bj, GFNFF_COUL_TILE atoms)
+    CudaBuffer<int>    d_coul_tiles;    ///< [2*coul_ntiles]
+    int                coul_ntiles = 0;
+    int                coul_tiles_natoms = -1;
     bool               coul_self_on_gpu = false;
     bool               use_mixed_precision = false;  ///< TODO: Restore to true after GPU gradient debugging complete
 
     // GPU topology displacement check buffers (Claude Generated March 2026)
     RefCoordSoA ref_coords;  ///< Reference geometry SoA (rx[N], ry[N], rz[N]) — Phase 10, March 2026
     CudaBuffer<int>    d_disp_flag;       ///< [1] exceeded flag for displacement check
+    RefCoordSoA        cn_ref_coords;     ///< K1 (Oct 2026): geometry of the last CN pair-list build
+    CudaBuffer<int>    d_cn_disp_flag;    ///< K1 (Oct 2026): [1] flag for cnPairListStale()
 
     // GPU CN computation buffers (Phase 1: GPU migration)
     // Claude Generated (March 2026): CN computed entirely on GPU
@@ -768,7 +817,138 @@ struct FFWorkspaceGPUImpl {
     /// records them — that one-way dependency is safe under cudaStreamCaptureModeThreadLocal.
     cudaEvent_t     event_p2_pairwise             = nullptr;
     cudaEvent_t     event_p2_upload               = nullptr;
+    // K2/K3 (Oct 2026, Claude Generated): stream overlap of dc6dcn, EEQ solve and dispersion.
+    cudaEvent_t     event_eeq_inputs              = nullptr; ///< main: coords + rhs_atoms written (K3)
+    cudaEvent_t     event_disp_ready              = nullptr; ///< main: dc6dcn/C6 written (K2)
+    cudaEvent_t     event_disp_done               = nullptr; ///< pairwise: early k_dispersion done (K2)
+
+    // Claude Generated (Oct 2026): pinned double buffer of the staged pair-list upload
+    // (stagedListUpload(), used by updateDispersion() / updateRepulsion() during MD).
+    void*           list_stage[2]                 = {nullptr, nullptr};
+    size_t          list_stage_bytes              = 0;
+    cudaEvent_t     list_stage_ev[2]              = {nullptr, nullptr};
 };
+
+// ============================================================================
+// Staged upload of a rebuilt pair list (Claude Generated, Oct 2026)
+// ============================================================================
+//
+// During MD the D4 and repulsion pair lists are rebuilt on the host and copied to the
+// device (HB/XB keep the SoA upload; 50k entries). The SoA upload functions above convert
+// the whole list serially into fresh
+// std::vectors and copy each column with a blocking pageable cudaMemcpy: for the 9.4 M-pair
+// D4 list of polymer_2x that was 118 ms per rebuild (27 ms allocation, 39 ms conversion,
+// 30 ms copy, 22 ms host mirrors, the latter removed Oct 2026). Here the list is converted in chunks into a 2 x 32 MB
+// pinned buffer by several host threads, and each chunk is copied asynchronously while the
+// next one is converted. The device receives exactly the same bytes; the function returns
+// after the last copy has finished, like the blocking copies it replaces.
+
+namespace {
+
+/// One device column of a SoA list: destination and element size.
+struct StageColumn {
+    void*  dst;
+    size_t elem;
+};
+
+/// Run fn(a, b) on contiguous sub-ranges of [k0, k1) with up to T host threads.
+template <class F>
+void hostParallelRanges(size_t k0, size_t k1, int T, F&& fn)
+{
+    const size_t n = k1 - k0;
+    if (T <= 1 || n < 32768) {
+        fn(k0, k1);
+        return;
+    }
+    std::vector<std::thread> workers;
+    workers.reserve(T - 1);
+    for (int t = 1; t < T; ++t)
+        workers.emplace_back([&fn, k0, n, t, T]() { fn(k0 + n * t / T, k0 + n * (t + 1) / T); });
+    fn(k0, k0 + n / T);
+    for (auto& w : workers) w.join();
+}
+
+/// Copy nrec records into the device columns. fill(a, b, k0, host) writes records [a, b) into
+/// the host columns host[c], record k at index k - k0. Returns when all copies are done.
+template <class Fill>
+void stagedListUpload(FFWorkspaceGPUImpl& impl, size_t nrec, const StageColumn* cols, int ncols,
+                      int threads, Fill&& fill)
+{
+    if (nrec == 0 || ncols <= 0) return;
+    constexpr size_t kStageBytes = size_t(32) << 20;
+    constexpr size_t kAlign = 256;
+    if (!impl.list_stage[0]) {
+        for (int b = 0; b < 2; ++b) {
+            checkCuda(cudaMallocHost(&impl.list_stage[b], kStageBytes), "cudaMallocHost list stage");
+            checkCuda(cudaEventCreateWithFlags(&impl.list_stage_ev[b], cudaEventDisableTiming),
+                      "cudaEventCreate list stage");
+        }
+        impl.list_stage_bytes = kStageBytes;
+    }
+    size_t rec_bytes = 0;
+    for (int c = 0; c < ncols; ++c) rec_bytes += cols[c].elem;
+    const size_t chunk = std::max<size_t>(1, (impl.list_stage_bytes - kAlign * ncols) / rec_bytes);
+
+    std::vector<char*> host(ncols);
+    bool used[2] = {false, false};
+    size_t step = 0;
+    for (size_t k0 = 0; k0 < nrec; k0 += chunk, ++step) {
+        const int b = static_cast<int>(step & 1);
+        const size_t k1 = std::min(nrec, k0 + chunk);
+        if (used[b])  // the copy that last read this half must be finished before it is refilled
+            checkCuda(cudaEventSynchronize(impl.list_stage_ev[b]), "list stage event sync");
+        char* base = static_cast<char*>(impl.list_stage[b]);
+        size_t off = 0;
+        for (int c = 0; c < ncols; ++c) {
+            host[c] = base + off;
+            off += (chunk * cols[c].elem + kAlign - 1) / kAlign * kAlign;
+        }
+        char* const* hc = host.data();
+        hostParallelRanges(k0, k1, threads, [&](size_t a, size_t e) { fill(a, e, k0, hc); });
+        for (int c = 0; c < ncols; ++c)
+            checkCuda(cudaMemcpyAsync(static_cast<char*>(cols[c].dst) + k0 * cols[c].elem, host[c],
+                                      (k1 - k0) * cols[c].elem, cudaMemcpyHostToDevice, impl.stream),
+                      "list stage H2D");
+        checkCuda(cudaEventRecord(impl.list_stage_ev[b], impl.stream), "list stage event record");
+        used[b] = true;
+    }
+    checkCuda(cudaStreamSynchronize(impl.stream), "list stage stream sync");
+}
+
+/// Repulsion list (bonded or non-bonded) through the staged upload; same device content as
+/// RepulsionSoA::upload().
+void stagedRepulsionUpload(FFWorkspaceGPUImpl& impl, RepulsionSoA& soa,
+                           const std::vector<GFNFFRepulsion>& v, int threads)
+{
+    soa.n = static_cast<int>(v.size());
+    if (soa.n == 0) return;
+    soa.idx_i.ensure(soa.n);
+    soa.idx_j.ensure(soa.n);
+    soa.alpha.ensure(soa.n);
+    soa.repab.ensure(soa.n);
+    soa.r_cut.ensure(soa.n);
+    const StageColumn cols[] = { { soa.alpha.ptr, sizeof(double) }, { soa.repab.ptr, sizeof(double) },
+                                 { soa.r_cut.ptr, sizeof(double) }, { soa.idx_i.ptr, sizeof(int) },
+                                 { soa.idx_j.ptr, sizeof(int) } };
+    stagedListUpload(impl, v.size(), cols, 5, threads,
+        [&v](size_t a, size_t e, size_t k0, char* const* h) {
+            double* alpha = reinterpret_cast<double*>(h[0]);
+            double* repab = reinterpret_cast<double*>(h[1]);
+            double* rcut  = reinterpret_cast<double*>(h[2]);
+            int*    ii    = reinterpret_cast<int*>(h[3]);
+            int*    jj    = reinterpret_cast<int*>(h[4]);
+            for (size_t k = a; k < e; ++k) {
+                const size_t q = k - k0;
+                alpha[q] = v[k].alpha;
+                repab[q] = v[k].repab;
+                rcut[q]  = v[k].r_cut;
+                ii[q]    = v[k].i;
+                jj[q]    = v[k].j;
+            }
+        });
+}
+
+}  // namespace
 
 // ============================================================================
 // FFWorkspaceGPU Constructor
@@ -825,6 +1005,7 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
               "pinned alloc m_h_energies");
 
     m_impl = std::make_unique<FFWorkspaceGPUImpl>();
+    cudaGetDevice(&m_impl->own_device);   // Claude Generated (Sep 2026): home device of the Coulomb split
     m_impl->N = natoms;
 
     // Create dedicated CUDA streams for multi-stream concurrency
@@ -839,6 +1020,15 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     checkCuda(cudaEventCreateWithFlags(&m_impl->event_upload, cudaEventDisableTiming), "cudaEventCreate upload");
     checkCuda(cudaEventCreateWithFlags(&m_impl->event_p2_pairwise, cudaEventDisableTiming), "cudaEventCreate p2_pairwise");
     checkCuda(cudaEventCreateWithFlags(&m_impl->event_p2_upload, cudaEventDisableTiming), "cudaEventCreate p2_upload");
+    checkCuda(cudaEventCreateWithFlags(&m_impl->event_eeq_inputs, cudaEventDisableTiming), "cudaEventCreate eeq_inputs");
+    checkCuda(cudaEventCreateWithFlags(&m_impl->event_disp_ready, cudaEventDisableTiming), "cudaEventCreate disp_ready");
+    checkCuda(cudaEventCreateWithFlags(&m_impl->event_disp_done, cudaEventDisableTiming), "cudaEventCreate disp_done");
+    {   // K2 (Oct 2026): grid of the early dispersion launch
+        int dev = 0;
+        if (cudaGetDevice(&dev) != cudaSuccess
+            || cudaDeviceGetAttribute(&m_sm_count, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess)
+            m_sm_count = 0;   // 0 = full grid
+    }
     // Claude Generated (May 2026): timing-enabled events for stream-level kernel timing
     checkCuda(cudaEventCreate(&m_impl->timing_sA_start), "cudaEventCreate timing_sA_start");
     checkCuda(cudaEventCreate(&m_impl->timing_sA_end),   "cudaEventCreate timing_sA_end");
@@ -861,19 +1051,6 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     // Upload covalent radii for HB/XB vdW radii lookup (Å units)
     upload_covalent_radii(GFNFFParameters::covalent_radii.data(),
                           static_cast<int>(GFNFFParameters::covalent_radii.size()));
-
-    // Store dispersion pair indices on host for per-step dc6dcn extraction
-    {
-        const int nd = static_cast<int>(params.dispersions.size());
-        m_disp_idx_i_host.resize(nd);
-        m_disp_idx_j_host.resize(nd);
-        m_h_dc6dcn_ij.resize(nd, 0.0);
-        m_h_dc6dcn_ji.resize(nd, 0.0);
-        for (int k = 0; k < nd; ++k) {
-            m_disp_idx_i_host[k] = params.dispersions[k].i;
-            m_disp_idx_j_host[k] = params.dispersions[k].j;
-        }
-    }
 
     // Store topology charges for BATM kernel; uploaded once below (static per topology)
     m_topology_charges = params.topology_charges;
@@ -968,11 +1145,29 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
         }
     }
 
+    // Claude Generated (Sep 2026): upload phase timings with CURCUMA_GFNFF_PROFILE.
+    const bool up_prof = std::getenv("CURCUMA_GFNFF_PROFILE") != nullptr;
+    auto up_t = std::chrono::high_resolution_clock::now();
+    auto up_mark = [&](const char* name) {
+        if (!up_prof) return;
+        const auto t = std::chrono::high_resolution_clock::now();
+        CurcumaLogger::result(fmt::format("  gpu upload: {:<32s} {:9.1f} ms", name,
+                                          std::chrono::duration<double, std::milli>(t - up_t).count()));
+        up_t = t;
+    };
+    up_mark("start (after validation)");
     // --- Upload static SoA interaction lists ---
     m_impl->disp.upload(params.dispersions, stream);
+    up_mark("dispersion pairs");
     m_impl->bonded_rep.upload(params.bonded_repulsions, stream);
     m_impl->nonbonded_rep.upload(params.nonbonded_repulsions, stream);
+    up_mark("repulsion pairs");
     m_impl->coulomb.upload(params.coulombs, stream);
+    if (params.coulomb_implicit && params.coul_self_alp.size() == natoms) {
+        m_impl->coulomb_implicit = true;
+        m_impl->coulomb_rcut = params.coulomb_implicit_rcut;
+    }
+    up_mark("coulomb pairs");
     m_impl->bonds.upload(params.bonds, atom_types, stream);
     m_impl->angles.upload(params.angles, atom_types, stream);
     m_impl->dihedrals.upload(params.dihedrals, params.extra_dihedrals, atom_types, stream);
@@ -986,6 +1181,7 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_last_xbonds = params.xbonds;   // init CPU mirror for debug comparison
     m_impl->hbonds.upload(params.hbonds, atom_types, stream);
     m_last_hbonds = params.hbonds;   // init CPU mirror for debug comparison
+    up_mark("bonded + HB/XB/ATM/BATM lists");
 
     // --- Allocate dynamic per-step buffers ---
     const int N3 = 3 * natoms;
@@ -1070,7 +1266,15 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
 
     // --- Extract per-atom Coulomb self-energy params (for CPU postProcess TERM 2+3) ---
     // Mirrors FFWorkspace::setInteractionLists() lines 90-118
-    if (!params.coulombs.empty()) {
+    if (params.coulomb_implicit && params.coul_self_alp.size() == natoms) {
+        // No pair list to scan: the per-atom self-energy inputs come straight from the
+        // parameter set (GFNFF::generateCoulombSelfEnergyNative, same formulas as fillPair).
+        m_coul_chi_base   = params.coul_self_chi_base;
+        m_coul_gam        = params.coul_self_gam;
+        m_coul_alp        = params.coul_self_alp;
+        m_coul_chi_static = params.coul_self_chi_static;
+        setCoulombSelfEnergyParams(m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_chi_static);
+    } else if (!params.coulombs.empty()) {
         m_coul_chi_base  = Vector::Zero(natoms);
         m_coul_gam       = Vector::Zero(natoms);
         m_coul_alp       = Vector::Zero(natoms);
@@ -1104,6 +1308,7 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
         m_eeq_charges = params.eeq_charges;
     m_e0 = params.e0;
 
+    up_mark("buffers + HB alpha + coulomb self-energy scan");
     // Synchronise: wait for all uploads to finish
     checkCuda(cudaStreamSynchronize(stream), "init sync");
 
@@ -1132,6 +1337,9 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
         if (m_impl->stream_pairwise) cudaStreamSynchronize(m_impl->stream_pairwise);
         if (m_impl->stream_bonded)   cudaStreamSynchronize(m_impl->stream_bonded);
         if (m_impl->stream_threebody)cudaStreamSynchronize(m_impl->stream_threebody);
+        // Claude Generated (Sep 2026): helper devices of the Coulomb split first (switches device).
+        m_impl->releaseCoulSplit();
+        if (m_impl->ev_coul) cudaEventDestroy(m_impl->ev_coul);
 
         if (m_impl->event_pairwise)    cudaEventDestroy(m_impl->event_pairwise);
         if (m_impl->event_bonded)      cudaEventDestroy(m_impl->event_bonded);
@@ -1139,6 +1347,13 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
         if (m_impl->event_upload)      cudaEventDestroy(m_impl->event_upload);
         if (m_impl->event_p2_pairwise) cudaEventDestroy(m_impl->event_p2_pairwise);
         if (m_impl->event_p2_upload)   cudaEventDestroy(m_impl->event_p2_upload);
+        if (m_impl->event_eeq_inputs)  cudaEventDestroy(m_impl->event_eeq_inputs);
+        if (m_impl->event_disp_ready)  cudaEventDestroy(m_impl->event_disp_ready);
+        if (m_impl->event_disp_done)   cudaEventDestroy(m_impl->event_disp_done);
+        for (int b = 0; b < 2; ++b) {   // Oct 2026: staged list upload buffers
+            if (m_impl->list_stage_ev[b]) cudaEventDestroy(m_impl->list_stage_ev[b]);
+            if (m_impl->list_stage[b])    cudaFreeHost(m_impl->list_stage[b]);
+        }
 
         if (m_impl->stream)          cudaStreamDestroy(m_impl->stream);
         if (m_impl->stream_pairwise) cudaStreamDestroy(m_impl->stream_pairwise);
@@ -1218,9 +1433,162 @@ void FFWorkspaceGPU::invalidateGraph()
 // Per-step state setters
 // ============================================================================
 
+// Claude Generated (Sep 2026, F-3): multi-GPU Coulomb split, see ff_workspace_gpu.h.
+void FFWorkspaceGPU::setCoulombSplitDevices(const std::vector<int>& helper_devices, int min_atoms)
+{
+    auto& impl = *m_impl;
+    if (impl.own_device < 0) cudaGetDevice(&impl.own_device);
+    impl.releaseCoulSplit();
+    impl.coul_split_devs.clear();
+    for (int d : helper_devices)
+        if (d != impl.own_device) impl.coul_split_devs.push_back(d);
+    impl.coul_split_min_atoms = min_atoms;
+    impl.coul_split_failed = false;
+    impl.coul_split_status.clear();
+}
+
+std::string FFWorkspaceGPU::coulombSplitStatus() const
+{
+    const auto& I = *m_impl;
+    if (I.coul_split_devs.empty()) return {};
+    if (!I.coul_split_status.empty()) return I.coul_split_status;
+    if (I.coul_parts.empty())
+        return "configured, not used (needs implicit Coulomb, no PBC and N >= "
+               + std::to_string(I.coul_split_min_atoms) + ")";
+    std::string list = std::to_string(I.own_device);
+    for (int d : I.coul_split_devs) list += "," + std::to_string(d);
+    return "Coulomb tiles on devices [" + list + "], " + std::to_string(I.coul_split_calls) + " calls";
+}
+
+bool FFWorkspaceGPU::prepareCoulombSplit()
+{
+    auto& impl = *m_impl;
+    if (impl.coul_split_devs.empty() || impl.coul_split_failed || impl.pbc_active
+        || m_natoms < impl.coul_split_min_atoms) {
+        if (!impl.coul_parts.empty()) impl.releaseCoulSplit();
+        return false;
+    }
+    if (impl.coul_split_natoms == m_natoms && !impl.coul_parts.empty()) return true;
+    impl.releaseCoulSplit();
+    const int N = m_natoms;
+    const int nparts = static_cast<int>(impl.coul_split_devs.size()) + 1;
+    std::vector<int> bounds(nparts + 1, 0);
+    for (int k = 0; k <= nparts; ++k)
+        bounds[k] = static_cast<int>((static_cast<long long>(impl.coul_ntiles) * k) / nparts);
+    std::vector<int> tiles(2 * static_cast<size_t>(impl.coul_ntiles));
+    impl.d_coul_tiles.download(tiles.data(), 2 * impl.coul_ntiles);
+    try {
+        for (int h = 0; h < nparts - 1; ++h) {
+            auto part = std::make_unique<FFWorkspaceGPUImpl::CoulSplitPart>();
+            part->dev = impl.coul_split_devs[h];
+            part->t0 = bounds[h + 1];
+            part->t1 = bounds[h + 2];
+            if (cudaSetDevice(part->dev) != cudaSuccess)
+                throw std::runtime_error("cudaSetDevice(" + std::to_string(part->dev) + ") failed");
+            int can = 0;
+            cudaDeviceCanAccessPeer(&can, part->dev, impl.own_device);
+            if (can) cudaDeviceEnablePeerAccess(impl.own_device, 0);
+            cudaGetLastError();
+            if (cudaStreamCreate(&part->stream) != cudaSuccess
+                || cudaEventCreateWithFlags(&part->done, cudaEventDisableTiming) != cudaSuccess)
+                throw std::runtime_error("stream/event setup failed on device " + std::to_string(part->dev));
+            part->x.alloc(N); part->y.alloc(N); part->z.alloc(N); part->q.alloc(N); part->alp.alloc(N);
+            part->grad.alloc(3 * N); part->E.alloc(1);
+            const int nt = part->t1 - part->t0;
+            part->tiles.alloc(2 * nt);
+            part->tiles.upload(tiles.data() + 2 * static_cast<size_t>(part->t0), 2 * nt);
+            impl.coul_parts.push_back(std::move(part));
+        }
+        cudaSetDevice(impl.own_device);
+        for (int d : impl.coul_split_devs) {
+            int can = 0;
+            cudaDeviceCanAccessPeer(&can, impl.own_device, d);
+            if (can) cudaDeviceEnablePeerAccess(d, 0);
+        }
+        cudaGetLastError();
+        impl.d_coul_part_grad.alloc(3 * N * (nparts - 1));
+        impl.d_coul_part_E.alloc(nparts - 1);
+        if (!impl.ev_coul) cudaEventCreateWithFlags(&impl.ev_coul, cudaEventDisableTiming);
+        impl.coul_own_tiles = bounds[1];
+        impl.coul_split_natoms = N;
+    } catch (const std::exception& e) {
+        impl.releaseCoulSplit();
+        cudaSetDevice(impl.own_device);
+        impl.coul_split_failed = true;
+        impl.coul_split_status = std::string("unavailable: ") + e.what();
+        return false;
+    }
+    return true;
+}
+
+void FFWorkspaceGPU::launchCoulombSplit()
+{
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+    const size_t b1 = sizeof(double) * static_cast<size_t>(N);
+    double* E_slot = &impl.d_energies.ptr[impl.E_COUL];
+    cudaEventRecord(impl.ev_coul, impl.stream_pairwise);   // coords + charges are final here
+    int h = 0;
+    for (auto& pp : impl.coul_parts) {
+        auto& P = *pp;
+        cudaSetDevice(P.dev);
+        cudaStreamWaitEvent(P.stream, impl.ev_coul, 0);
+        cudaMemcpyPeerAsync(P.x.ptr, P.dev, impl.coords.d_x.ptr, impl.own_device, b1, P.stream);
+        cudaMemcpyPeerAsync(P.y.ptr, P.dev, impl.coords.d_y.ptr, impl.own_device, b1, P.stream);
+        cudaMemcpyPeerAsync(P.z.ptr, P.dev, impl.coords.d_z.ptr, impl.own_device, b1, P.stream);
+        cudaMemcpyPeerAsync(P.q.ptr, P.dev, impl.d_charges.ptr, impl.own_device, b1, P.stream);
+        cudaMemcpyPeerAsync(P.alp.ptr, P.dev, impl.d_coul_alp.ptr, impl.own_device, b1, P.stream);
+        cudaMemsetAsync(P.grad.ptr, 0, 3 * b1, P.stream);
+        cudaMemsetAsync(P.E.ptr, 0, sizeof(double), P.stream);
+        k_coulomb_tiles<<<P.t1 - P.t0, GFNFF_COUL_TILE, 0, P.stream>>>(
+            N, P.tiles.ptr, P.alp.ptr, impl.coulomb_rcut, P.x.ptr, P.y.ptr, P.z.ptr, P.q.ptr,
+            P.grad.ptr, P.E.ptr);
+        cudaMemcpyPeerAsync(impl.d_coul_part_grad.ptr + static_cast<size_t>(h) * 3 * N, impl.own_device,
+                            P.grad.ptr, P.dev, 3 * b1, P.stream);
+        cudaMemcpyPeerAsync(impl.d_coul_part_E.ptr + h, impl.own_device, P.E.ptr, P.dev,
+                            sizeof(double), P.stream);
+        cudaEventRecord(P.done, P.stream);
+        ++h;
+    }
+    cudaSetDevice(impl.own_device);
+    if (impl.coul_own_tiles > 0)
+        k_coulomb_tiles<<<impl.coul_own_tiles, GFNFF_COUL_TILE, 0, impl.stream_pairwise>>>(
+            N, impl.d_coul_tiles.ptr, impl.d_coul_alp.ptr, impl.coulomb_rcut,
+            impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+            impl.d_charges.ptr, impl.d_grad.ptr, E_slot);
+    for (auto& pp : impl.coul_parts)
+        cudaStreamWaitEvent(impl.stream_pairwise, pp->done, 0);
+    const int n3 = 3 * N;
+    k_add_coulomb_parts<<<(n3 + 255) / 256, 256, 0, impl.stream_pairwise>>>(
+        n3, static_cast<int>(impl.coul_parts.size()), impl.d_coul_part_grad.ptr,
+        impl.d_coul_part_E.ptr, impl.d_grad.ptr, E_slot);
+    ++impl.coul_split_calls;
+}
+
+// Claude Generated (Sep 2026): build the (bi <= bj) tile-pair list of k_coulomb_tiles once per
+// atom count. Row-major over the upper triangle; a contiguous sub-range is a balanced share
+// for another device.
+void FFWorkspaceGPU::ensureCoulombTiles()
+{
+    auto& impl = *m_impl;
+    if (impl.coul_tiles_natoms == m_natoms && impl.coul_ntiles > 0) return;
+    const int nb = (m_natoms + GFNFF_COUL_TILE - 1) / GFNFF_COUL_TILE;
+    std::vector<int> tiles;
+    tiles.reserve(static_cast<size_t>(nb) * (nb + 1));
+    for (int bi = 0; bi < nb; ++bi)
+        for (int bj = bi; bj < nb; ++bj) { tiles.push_back(bi); tiles.push_back(bj); }
+    impl.coul_ntiles = static_cast<int>(tiles.size() / 2);
+    impl.d_coul_tiles.alloc(static_cast<int>(tiles.size()));
+    impl.d_coul_tiles.upload(tiles.data(), static_cast<int>(tiles.size()));
+    impl.coul_tiles_natoms = m_natoms;
+}
+
 void FFWorkspaceGPU::setEEQCharges(const Vector& q)
 {
     m_eeq_charges = q;
+    // Claude Generated (Sep 2026): host charges supersede any pending device copy, so the
+    // upload in launchChargeDependentAndFinish() must not be skipped.
+    m_device_charges_ready = false;
 }
 
 void FFWorkspaceGPU::setEEQDeviceCharges(const double* d_src)
@@ -1377,16 +1745,105 @@ void FFWorkspaceGPU::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
     // Claude Generated (March 2026): Needed because updateHBXBIfNeeded() may find
     // additional HBonds on re-detection that weren't in the initial parameter set.
     m_impl->hbonds.upload(hbonds, atom_types, m_impl->stream);
-    // Store for CPU vs GPU comparison debugging
-    m_last_hbonds = hbonds;
+    // Store for CPU vs GPU comparison debugging. Oct 2026: only where that comparison runs
+    // (verbosity >= 3 in the GPU wrapper); the deep copy was ~1 ms per MD re-detection.
+    if (CurcumaLogger::get_verbosity() >= 3)
+        m_last_hbonds = hbonds;
+    else
+        m_last_hbonds.clear();
 }
 
 void FFWorkspaceGPU::updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,
                                     const std::vector<int>& atom_types)
 {
     m_impl->xbonds.upload(xbonds, atom_types, m_impl->stream);
-    // Store for CPU vs GPU comparison debugging
-    m_last_xbonds = xbonds;
+    // Store for CPU vs GPU comparison debugging (verbosity >= 3 only, see updateHBonds())
+    if (CurcumaLogger::get_verbosity() >= 3)
+        m_last_xbonds = xbonds;
+    else
+        m_last_xbonds.clear();
+}
+
+void FFWorkspaceGPU::updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
+                                       const std::vector<GFNFFRepulsion>& nonbonded_reps)
+{
+    // Claude Generated (Sep 2026): RepulsionSoA::upload() sets its own `n` (the count used
+    // by every kernel launch) from the passed vector on every call and grows the backing
+    // CudaBuffer only if the new count exceeds current capacity — safe for both a growing
+    // and a shrinking pair count, no separate resize path needed.
+    if (m_staged_list_upload) {   // Oct 2026: same device content, see stagedListUpload()
+        stagedRepulsionUpload(*m_impl, m_impl->bonded_rep, bonded_reps, m_host_threads);
+        stagedRepulsionUpload(*m_impl, m_impl->nonbonded_rep, nonbonded_reps, m_host_threads);
+        return;
+    }
+    m_impl->bonded_rep.upload(bonded_reps, m_impl->stream);
+    m_impl->nonbonded_rep.upload(nonbonded_reps, m_impl->stream);
+}
+
+void FFWorkspaceGPU::updateDispersion(const std::vector<GFNFFDispersion>& pairs)
+{
+    // Claude Generated (Sep 2026): see the declaration. DispersionSoA::upload() sets disp.n from
+    // the vector (also for 0 pairs) and grows each buffer only when needed.
+    auto& impl = *m_impl;
+    if (m_staged_list_upload) {
+        // Oct 2026: staged upload (see stagedListUpload()); fills the device columns with the
+        // values of the serial path.
+        DispersionSoA& d = impl.disp;
+        d.n = static_cast<int>(pairs.size());
+        const int nd = d.n;
+        if (nd == 0) return;
+        d.idx_i.ensure(nd);
+        d.idx_j.ensure(nd);
+        d.C6.ensure(nd);
+        d.r4r2ij.ensure(nd);
+        d.r0_sq.ensure(nd);
+        d.zetac6.ensure(nd);
+        d.r_cut.ensure(nd);
+        if (impl.dc6dcn_gpu_ready) {
+            d.dc6dcn_ij.ensure(nd);
+            d.dc6dcn_ji.ensure(nd);
+        }
+        const StageColumn cols[] = { { d.C6.ptr, sizeof(double) }, { d.r4r2ij.ptr, sizeof(double) },
+                                     { d.r0_sq.ptr, sizeof(double) }, { d.zetac6.ptr, sizeof(double) },
+                                     { d.r_cut.ptr, sizeof(double) }, { d.idx_i.ptr, sizeof(int) },
+                                     { d.idx_j.ptr, sizeof(int) } };
+        stagedListUpload(impl, pairs.size(), cols, 7, m_host_threads,
+            [&pairs](size_t a, size_t e, size_t k0, char* const* h) {
+                double* c6   = reinterpret_cast<double*>(h[0]);
+                double* r4r2 = reinterpret_cast<double*>(h[1]);
+                double* r0sq = reinterpret_cast<double*>(h[2]);
+                double* zeta = reinterpret_cast<double*>(h[3]);
+                double* rcut = reinterpret_cast<double*>(h[4]);
+                int*    ii   = reinterpret_cast<int*>(h[5]);
+                int*    jj   = reinterpret_cast<int*>(h[6]);
+                for (size_t k = a; k < e; ++k) {
+                    const size_t q = k - k0;
+                    const GFNFFDispersion& p = pairs[k];
+                    c6[q]   = p.C6;
+                    r4r2[q] = p.r4r2ij;
+                    r0sq[q] = p.r0_squared;
+                    zeta[q] = p.zetac6;
+                    rcut[q] = p.r_cut;
+                    ii[q]   = p.i;
+                    jj[q]   = p.j;
+                }
+            });
+        return;
+    }
+    impl.disp.upload(pairs, impl.stream);
+    const int nd = impl.disp.n;
+
+    // Per-pair dc6dcn outputs of k_dc6dcn_per_pair (allocated once in uploadC6ReferenceTable()).
+    if (impl.dc6dcn_gpu_ready && nd > 0) {
+        impl.disp.dc6dcn_ij.ensure(nd);
+        impl.disp.dc6dcn_ji.ensure(nd);
+    }
+}
+
+void FFWorkspaceGPU::updateCoulombPairs(const std::vector<GFNFFCoulomb>& pairs)
+{
+    // Claude Generated (Sep 2026): CoulombSoA::upload() sets coulomb.n from the vector.
+    m_impl->coulomb.upload(pairs, m_impl->stream);
 }
 
 void FFWorkspaceGPU::setDispersionEnabled(bool v)  { m_dispersion_enabled = v; }
@@ -1403,38 +1860,12 @@ void FFWorkspaceGPU::setUnitCell(const double* cell_bohr_9, const double* cell_b
     cudaMemcpyToSymbol(d_lattice_inv, cell_bohr_inv_9, 9 * sizeof(double));
     int flag = has_pbc ? 1 : 0;
     cudaMemcpyToSymbol(d_has_pbc, &flag, sizeof(int));
+    m_impl->pbc_active = has_pbc;   // the Coulomb split runs without PBC only (helpers have no cell)
 }
 
 // ============================================================================
 // GPU-only CN chain-rule setters (Claude Generated March 2026)
 // ============================================================================
-
-void FFWorkspaceGPU::setCNPairList(const std::vector<int>& idx_i,
-                                    const std::vector<int>& idx_j,
-                                    const std::vector<double>& rcov_sum)
-{
-    const int np = static_cast<int>(idx_i.size());
-    if (np == 0 || idx_j.size() != idx_i.size() || rcov_sum.size() != idx_i.size()) return;
-
-    m_cn_pair_i    = idx_i;
-    m_cn_pair_j    = idx_j;
-    m_cn_pair_rcov = rcov_sum;
-    m_cn_n_pairs   = np;
-
-    // Upload to GPU
-    auto& impl = *m_impl;
-    impl.d_cn_idx_i.alloc(np);
-    impl.d_cn_idx_j.alloc(np);
-    impl.d_cn_rcov_sum.alloc(np);
-    impl.d_cn_idx_i.upload(idx_i.data(), np);
-    impl.d_cn_idx_j.upload(idx_j.data(), np);
-    impl.d_cn_rcov_sum.upload(rcov_sum.data(), np);
-    impl.n_cn_pairs = np;
-    m_cn_pairs_on_gpu = true;
-
-    if (CurcumaLogger::get_verbosity() >= 3)
-        CurcumaLogger::info(fmt::format("  GPU CN chain-rule: {} pairs uploaded", np));
-}
 
 void FFWorkspaceGPU::setDlogDCN(const Vector& dlogdcn)
 {
@@ -1449,7 +1880,7 @@ void FFWorkspaceGPU::setDlogDCN(const Vector& dlogdcn)
 
 // ============================================================================
 // GPU CN pair list generation (Apr 2026)
-// Replaces CPU generateCNPairList() O(N^2) loop with two-pass GPU kernels.
+// Two-pass GPU kernels (replaced the former host O(N^2) loop, removed Oct 2026).
 // ============================================================================
 void FFWorkspaceGPU::generateCNPairListOnGPU()
 {
@@ -1471,6 +1902,7 @@ void FFWorkspaceGPU::generateCNPairListOnGPU()
         impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
         impl.d_atom_types.ptr,
         m_cn_pair_cutoff_factor,  // cutoff_factor (Task #10: tunable)
+        2.0 * m_cn_pair_skin_bohr, // K1 (Oct 2026): Verlet skin, 0 = legacy list
         impl.d_cn_pair_counter.ptr);
     checkCuda(cudaStreamSynchronize(impl.stream), "k_generate_cn_pairs_count sync");
 
@@ -1501,6 +1933,7 @@ void FFWorkspaceGPU::generateCNPairListOnGPU()
         impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
         impl.d_atom_types.ptr,
         m_cn_pair_cutoff_factor,  // cutoff_factor (Task #10: tunable)
+        2.0 * m_cn_pair_skin_bohr, // K1 (Oct 2026): Verlet skin, 0 = legacy list
         impl.d_cn_pair_counter.ptr,
         impl.d_cn_idx_i.ptr,
         impl.d_cn_idx_j.ptr,
@@ -1508,9 +1941,52 @@ void FFWorkspaceGPU::generateCNPairListOnGPU()
     checkCuda(cudaStreamSynchronize(impl.stream), "k_generate_cn_pairs_write sync");
 
     m_cn_pairs_on_gpu = true;
+    ++m_cn_pair_builds;
+
+    // K1 (Oct 2026, Claude Generated): remember the geometry this list was built from, so
+    // cnPairListStale() can measure the largest atom displacement since this build.
+    if (impl.cn_ref_coords.empty()) impl.cn_ref_coords.alloc(N);
+    checkCuda(cudaMemcpyAsync(impl.cn_ref_coords.d_rx.ptr, impl.coords.d_x.ptr, N * sizeof(double),
+                              cudaMemcpyDeviceToDevice, impl.stream), "CN pair ref: D2D x");
+    checkCuda(cudaMemcpyAsync(impl.cn_ref_coords.d_ry.ptr, impl.coords.d_y.ptr, N * sizeof(double),
+                              cudaMemcpyDeviceToDevice, impl.stream), "CN pair ref: D2D y");
+    checkCuda(cudaMemcpyAsync(impl.cn_ref_coords.d_rz.ptr, impl.coords.d_z.ptr, N * sizeof(double),
+                              cudaMemcpyDeviceToDevice, impl.stream), "CN pair ref: D2D z");
 
     if (CurcumaLogger::get_verbosity() >= 3)
-        CurcumaLogger::info(fmt::format("  GPU CN pair list: {} pairs generated on GPU", h_count));
+        CurcumaLogger::info(fmt::format("  GPU CN pair list: {} pairs generated on GPU (build {})",
+                                        h_count, m_cn_pair_builds));
+}
+
+// ============================================================================
+// K1 (Oct 2026, Claude Generated): staleness test of the CN pair list.
+// True when some atom moved more than max_disp_bohr since the last
+// generateCNPairListOnGPU() (or when no list reference exists yet). Uses the same
+// flag kernel as checkDisplacement(), but against the pair-list reference geometry,
+// which is independent of the topology reference used by checkDisplacement().
+// ============================================================================
+bool FFWorkspaceGPU::cnPairListStale(double max_disp_bohr)
+{
+    if (!m_impl) return true;
+    auto& impl = *m_impl;
+    if (impl.cn_ref_coords.empty() || impl.coords.empty()) return true;
+    if (!impl.d_cn_disp_flag.ptr) impl.d_cn_disp_flag.alloc(1);
+
+    int zero = 0;
+    checkCuda(cudaMemcpyAsync(impl.d_cn_disp_flag.ptr, &zero, sizeof(int),
+                              cudaMemcpyHostToDevice, impl.stream), "cnPairListStale: zero flag");
+    LaunchConfig cfg = getLaunchConfig(m_natoms, m_block_size);
+    k_check_displacement<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        m_natoms,
+        impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+        impl.cn_ref_coords.d_rx.ptr, impl.cn_ref_coords.d_ry.ptr, impl.cn_ref_coords.d_rz.ptr,
+        max_disp_bohr * max_disp_bohr,
+        impl.d_cn_disp_flag.ptr);
+    int result = 0;
+    checkCuda(cudaMemcpyAsync(&result, impl.d_cn_disp_flag.ptr, sizeof(int),
+                              cudaMemcpyDeviceToHost, impl.stream), "cnPairListStale: download flag");
+    checkCuda(cudaStreamSynchronize(impl.stream), "cnPairListStale: sync");
+    return result != 0;
 }
 
 // ============================================================================
@@ -1585,8 +2061,6 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
 
     if (h_count == 0) {
         impl.disp_built_on_gpu = true;
-        m_disp_idx_i_host.clear();
-        m_disp_idx_j_host.clear();
         return;
     }
 
@@ -1606,44 +2080,11 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
         impl.disp.zetac6.ptr, impl.disp.r_cut.ptr);
     checkCuda(cudaStreamSynchronize(impl.stream), "k_disp_pairs_build sync");
 
-    // Keep the host idx mirror + dc6dcn staging consistent (CPU dc6dcn fallback /
-    // displacement consumers). One download per build (topology-change frequency).
-    m_disp_idx_i_host.resize(h_count);
-    m_disp_idx_j_host.resize(h_count);
-    impl.disp.idx_i.download(m_disp_idx_i_host.data(), h_count);
-    impl.disp.idx_j.download(m_disp_idx_j_host.data(), h_count);
-    checkCuda(cudaStreamSynchronize(impl.stream), "download disp idx mirror");
-    m_h_dc6dcn_ij.assign(h_count, 0.0);
-    m_h_dc6dcn_ji.assign(h_count, 0.0);
-
     impl.disp_built_on_gpu = true;
 
     if (CurcumaLogger::get_verbosity() >= 2)
         CurcumaLogger::info(fmt::format(
             "  GPU D4 dispersion pair list: {} pairs built on GPU (was host O(N^2) + upload)", h_count));
-}
-
-void FFWorkspaceGPU::updateDispersionDC6DCN(const Matrix& dc6dcn)
-{
-    // Claude Generated (March 2026): Extract per-pair dc6dcn values and upload to GPU.
-    // Eliminates the CPU round-trip (download dEdcn, add dispersion, re-upload).
-    const int nd = static_cast<int>(m_disp_idx_i_host.size());
-    if (nd == 0 || dc6dcn.size() == 0) return;
-
-    for (int k = 0; k < nd; ++k) {
-        int i = m_disp_idx_i_host[k];
-        int j = m_disp_idx_j_host[k];
-        if (i < dc6dcn.rows() && j < dc6dcn.cols()) {
-            m_h_dc6dcn_ij[k] = dc6dcn(i, j);
-            m_h_dc6dcn_ji[k] = dc6dcn(j, i);
-        } else {
-            m_h_dc6dcn_ij[k] = 0.0;
-            m_h_dc6dcn_ji[k] = 0.0;
-        }
-    }
-
-    m_impl->disp.dc6dcn_ij.upload(m_h_dc6dcn_ij.data(), nd);
-    m_impl->disp.dc6dcn_ji.upload(m_h_dc6dcn_ji.data(), nd);
 }
 
 // ============================================================================
@@ -1717,7 +2158,8 @@ void FFWorkspaceGPU::computeDC6DCNOnGPU(const std::vector<std::vector<double>>& 
         impl.d_dgw.ptr,
         impl.d_c6_flat.ptr,
         impl.disp.dc6dcn_ij.ptr,
-        impl.disp.dc6dcn_ji.ptr
+        impl.disp.dc6dcn_ji.ptr,
+        m_disp_c6_update ? impl.disp.C6.ptr : nullptr   // Sep 2026: per-step C6 refresh
     );
 
     // No sync needed here: k_dc6dcn_per_pair runs on impl.stream (main stream).
@@ -1793,9 +2235,69 @@ void FFWorkspaceGPU::computeGaussianWeightsOnGPU(bool use_cn_final)
         impl.d_dgw.ptr,
         impl.d_c6_flat.ptr,
         impl.disp.dc6dcn_ij.ptr,
-        impl.disp.dc6dcn_ji.ptr);
+        impl.disp.dc6dcn_ji.ptr,
+        m_disp_c6_update ? impl.disp.C6.ptr : nullptr);  // Sep 2026: per-step C6 refresh
     // No explicit sync needed: stream ordering + event_upload fence in
     // prepareAndLaunchChargeIndependent guarantees dc6dcn is ready before k_dispersion on sA.
+}
+
+// ============================================================================
+// K2/K3 (Oct 2026, Claude Generated): overlap of dc6dcn, EEQ solve and dispersion
+// ============================================================================
+
+void FFWorkspaceGPU::recordEEQInputsReady()
+{
+    // Everything the device EEQ reads that changes per step is written on the main stream
+    // before this point: coordinates (setGeometry) and rhs_atoms (k_build_eeq_rhs, Phase 1).
+    // alpha/gam/chi/cnf are synchronous uploads at topology changes.
+    cudaEventRecord(m_impl->event_eeq_inputs, m_impl->stream);
+}
+
+void* FFWorkspaceGPU::eeqInputsReadyEvent() const
+{
+    return m_impl ? static_cast<void*>(m_impl->event_eeq_inputs) : nullptr;
+}
+
+bool FFWorkspaceGPU::launchDispersionGradientEarly()
+{
+    auto& impl = *m_impl;
+    m_disp_grad_launched = false;
+    // Single-stream debug mode keeps the per-kernel snapshot order (dispersion in Phase 2).
+    if (!m_dispersion_enabled || impl.d_grad_after_bonds.ptr)
+        return false;
+
+    // Inputs of k_dispersion: coords (main, setGeometry), disp SoA idx/r4r2ij/r0_sq/zetac6/r_cut
+    // (pair-list build, host-synchronous), C6 + dc6dcn_ij/ji (k_dc6dcn_per_pair on main, just
+    // enqueued). d_grad/d_dEdcn/d_energies were zeroed on main in Phase 1. No EEQ charge is read.
+    cudaEventRecord(impl.event_disp_ready, impl.stream);
+    cudaStreamWaitEvent(impl.stream_pairwise, impl.event_disp_ready, 0);
+    // One block per SM (grid-stride loop in k_dispersion): the CG kernels of the EEQ solve on the
+    // high-priority solver stream then find free SM slots instead of queueing behind dispersion
+    // blocks. Measured on polymer_2x (RTX 5080, 84 SMs, CUPTI step median, n=1 each): full grid
+    // 18.4 ms, 1 block/SM 15.9, 0.75/SM 16.9, 1.5/SM 16.1. Fewer blocks also mean fewer
+    // blockReduceAddEnergy atomics on the one E_DISP slot.
+    LaunchConfig cfg = getLaunchConfig(impl.disp.n, m_block_size);
+    if (m_sm_count > 0) cfg.gridSize = std::min(cfg.gridSize, m_sm_count);
+    k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
+        impl.disp.n,
+        impl.disp.idx_i.ptr,  impl.disp.idx_j.ptr,
+        impl.disp.C6.ptr,     impl.disp.r4r2ij.ptr,
+        impl.disp.r0_sq.ptr,  impl.disp.zetac6.ptr,
+        impl.disp.r_cut.ptr,
+        impl.disp.dc6dcn_ij.ptr,
+        impl.disp.dc6dcn_ji.ptr,
+        impl.coords.d_x.ptr,
+        impl.coords.d_y.ptr,
+        impl.coords.d_z.ptr,
+        impl.d_dEdcn.ptr,
+        impl.d_grad.ptr,
+        &impl.d_energies.ptr[impl.E_DISP]);
+    checkCuda(cudaGetLastError(), "k_dispersion (early) launch");
+    // Phase 2 makes the main stream wait on this before anything else (outside any graph capture),
+    // so the dEdcn snapshot, k_coulomb_postprocess, k_cn_chainrule and the downloads follow it.
+    cudaEventRecord(impl.event_disp_done, impl.stream_pairwise);
+    m_disp_grad_launched = true;
+    return true;
 }
 
 // ============================================================================
@@ -2298,6 +2800,15 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // Claude Generated (May 2026): Phase 2 timing start
     if (m_record_kernel_timings) cudaEventRecord(impl.timing_p2_start, stream);
 
+    // K2 (Oct 2026): k_dispersion was enqueued on stream_pairwise after dc6dcn. Order the main
+    // stream after it here, before any Phase-2 capture begins, so every Phase-2 consumer of
+    // d_grad/d_dEdcn/E_DISP (snapshot, postprocess, CN chain rule, downloads) follows it.
+    const bool disp_launched_early = m_disp_grad_launched && gradient;
+    if (m_disp_grad_launched) {
+        cudaStreamWaitEvent(stream, impl.event_disp_done, 0);
+        m_disp_grad_launched = false;
+    }
+
     // =========================================================================
     // WP4 (May 2026): Phase-2 CUDA-Graph capture / replay
     //   Two graph slots — one for gradient=true, one for energy-only — kept in step
@@ -2311,6 +2822,8 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // are fully synchronized to the main stream before Phase-2 entries execute.
     // Phase-1-internal events (event_bonded, event_threebody) are NOT externally signaled
     // after graph replay → Phase-2 must NOT wait on them in that case.
+    // (Sep 28, 2026: with d_grad_snapshot always allocated, Phase-1 never runs as a graph, so
+    // p1_was_graph is always false today; kept for when graph capture is re-enabled.)
     const bool p1_was_graph = impl.m_graph_phase1_valid;
 
     // WP5-A fix: d_grad_snapshot is only allocated at verbosity >= 3 now.
@@ -2369,7 +2882,8 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // computeGaussianWeightsOnGPU() was called after Phase 1 (using d_cn, current step)
     // and runs on the main stream. The event_upload fence above ensures stream_pairwise
     // sees the completed dc6dcn values before k_dispersion launches.
-    if (m_dispersion_enabled && gradient) {
+    // K2 (Oct 2026): skipped when launchDispersionGradientEarly() already enqueued it.
+    if (m_dispersion_enabled && gradient && !disp_launched_early) {
         LaunchConfig cfg = getLaunchConfig(impl.disp.n, m_block_size);
         k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
             impl.disp.n,
@@ -2389,7 +2903,33 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     }
 
     // k_coulomb (needs EEQ charges)
-    if (m_coulomb_enabled && impl.coulomb.n > 0) {
+    if (m_coulomb_enabled && impl.coulomb_implicit) {
+        // Claude Generated (Sep 2026): each pair once (k_coulomb_tiles); the row-wise kernel
+        // evaluated every pair twice. CURCUMA_GFNFF_COULOMB_ROWWISE=1 selects the old kernel.
+        static const bool rowwise = [] {
+            const char* e = std::getenv("CURCUMA_GFNFF_COULOMB_ROWWISE");
+            return e && *e && std::string(e) != "0";
+        }();
+        if (rowwise) {
+            LaunchConfig cfg = getLaunchConfig(m_natoms, m_block_size);
+            k_coulomb_implicit<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
+                m_natoms, impl.d_coul_alp.ptr, impl.coulomb_rcut,
+                impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+                impl.d_charges.ptr, impl.d_grad.ptr, &impl.d_energies.ptr[impl.E_COUL]);
+            checkCuda(cudaGetLastError(), "k_coulomb_implicit launch");
+        } else {
+            ensureCoulombTiles();
+            if (prepareCoulombSplit()) {
+                launchCoulombSplit();
+            } else {
+                k_coulomb_tiles<<<impl.coul_ntiles, GFNFF_COUL_TILE, 0, impl.stream_pairwise>>>(
+                    m_natoms, impl.d_coul_tiles.ptr, impl.d_coul_alp.ptr, impl.coulomb_rcut,
+                    impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+                    impl.d_charges.ptr, impl.d_grad.ptr, &impl.d_energies.ptr[impl.E_COUL]);
+            }
+            checkCuda(cudaGetLastError(), "k_coulomb_tiles launch");
+        }
+    } else if (m_coulomb_enabled && impl.coulomb.n > 0) {
         LaunchConfig cfg = getLaunchConfig(impl.coulomb.n, m_block_size);
         k_coulomb<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
             impl.coulomb.n,
@@ -2851,22 +3391,10 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
     // Reference: gfnff_cn.f90:66-126, cn_calculator.cpp:99-155
     constexpr double kn = -7.5;          // CN decay constant
     constexpr double cnmax = 4.4;       // Squashing limit
-    constexpr double threshold_factor = 2.5;  // Cutoff factor for rcov
-    constexpr double ANG2BOHR = 1.8897259886;
-
-    // Pre-compute threshold squared (largest possible distance)
-    // Use max covalent radius * threshold_factor as conservative cutoff
-    const auto& rcov_d3 = GFNFFParameters::covalent_rad_d3;  // in Bohr
-    double max_rcov = 0.0;
-    for (int i = 0; i < N; ++i) {
-        int z = atom_types[i];
-        if (z >= 1 && z <= static_cast<int>(rcov_d3.size())) {
-            max_rcov = std::max(max_rcov, rcov_d3[z - 1]);
-        }
-    }
-    // rcov_d3 is already scaled by 4/3, use conservative threshold
-    double threshold_sq = (threshold_factor * 2.0 * max_rcov * ANG2BOHR) * (threshold_factor * 2.0 * max_rcov * ANG2BOHR);
-    threshold_sq = 900.0;  // Use 30 Bohr cutoff (same as CNCalculator)
+    // Distance cutoff of the O(N^2) CN sum: 30 Bohr. Sep 2026: the dead rcov-based estimate
+    // that was computed and then overwritten here (with a CODATA-1986 Angstrom->Bohr factor
+    // applied to radii already in Bohr) is removed - Claude Generated.
+    const double threshold_sq = 900.0;
 
     // Ensure CN buffers are allocated
     if (impl.d_cn_raw.n < N) impl.d_cn_raw.alloc(N);
@@ -3166,3 +3694,4 @@ void FFWorkspaceGPU::updateReferenceGeometry()
                                cudaMemcpyDeviceToDevice, impl.stream),
               "updateReferenceGeometry: D2D copy z");
 }
+
