@@ -132,6 +132,14 @@ curcuma -rmsd a.xyz b.xyz                   # RMSD (reorders atoms if needed)
 curcuma -confsearch mol.xyz -md_method gfnff -opt_method gfn2
 ```
 
+**Container walls**: `-md.wall_potential harmonic|logfermi|pbc`. The first two push an
+escaping atom back and do work on it; the harmonic force constant is `wall_temp * kB`, far
+too soft at its 298 K default to hold a hot gas. `pbc` exerts no force and instead moves a
+whole molecule that left the container back in on the opposite side, so it neither heats nor
+lets anything out. It is a container, not a periodic cell: the energy has no minimum image,
+so interactions are not continued across the boundary (see
+[docs/WP-PERIODIC-NONBONDED.md](docs/WP-PERIODIC-NONBONDED.md)).
+
 ### Getting help
 
 | Command | Output |

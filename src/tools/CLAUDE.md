@@ -4,6 +4,16 @@ Utilities used across curcuma. Mostly header-only `inline` functions; `bmt_utils
 `trajectory_writer.cpp` are compiled. Element data and unit constants are NOT here (`src/core/elements.h`,
 `periodic_table.h`, `units.h`).
 
+## GeometryTools (`geometry.h`)
+
+Header-only helpers over `Position`/`Geometry`. Besides the translation/rotation
+utilities: `Distance`, `Centroid`, and since Sep 2026 `Angle` (degrees, clamped acos),
+`Dihedral` (signed degrees, IUPAC) and `GyrationRadius(const Geometry&)` (unweighted —
+the mass-weighted, PBC-aware and per-fragment variants live on `Molecule::GyrationRadius`,
+which has the masses). Shared with the qurcuma GUI so the same numbers appear in its
+measurement HUD and its live plots. Pinned by the `geometry_tools` ctest.
+
+
 ## Files
 
 | File | Content |

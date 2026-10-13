@@ -38,6 +38,7 @@
 
 /* Claude Generated 2025: Hessian Parameter Registry - replaces static HessianJson */
 BEGIN_PARAMETER_DEFINITION(hessian)
+MODULE_INFO("Hessian, vibrational frequencies and thermochemistry.", "Calculation", {"hessian"})
     PARAM(calculate, Bool, true, "Perform Hessian calculation.", "Execution", {"hess_calc"})
     PARAM(read, Bool, false, "Read Hessian from a file.", "Input", {"hess_read"})
     PARAM(read_file, String, "hessian.json", "File to read Hessian from.", "Input", {"hess_read_file"})

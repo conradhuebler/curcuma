@@ -20,6 +20,10 @@
 
 #pragma once
 
+#include "external_potentials.h"
+
+#include <mutex>
+
 #include <chrono>
 #include <deque>
 #include <ctime>
@@ -185,7 +189,11 @@ enum class WallGeometry {
 // Claude Generated 2025: Type-safe wall potential
 enum class WallPotentialType {
     LogFermi,
-    Harmonic
+    Harmonic,
+    /// Claude Generated (Sep 2026): no potential at all — a molecule that leaves
+    /// the container is translated back in on the opposite side, so the container
+    /// keeps its content without doing work on it. See wrapIntoContainer().
+    Periodic
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -228,8 +236,33 @@ public:
 
     /** Execute one MD step (position+velocity update, thermostat, rattle, output
      *  for the current step counter). Returns false when the simulation should
-     *  terminate (m_unstable, maxtime reached, CheckStop()). */
+     *  terminate; stopReason() then says why. */
     bool step();
+
+    /**
+     * @brief Why step() last returned false (Claude Generated Sep 2026).
+     *
+     * A driver that runs the loop itself (the qurcuma GUI) cannot see curcuma's
+     * console output, and every abort message is gated behind verbosity >= 1
+     * while the normal end-of-time exit prints nothing at all. Without this a
+     * finished run and a run that fell apart look identical to the caller.
+     */
+    enum class StopReason {
+        Running,     ///< step() has not returned false yet
+        NotPrepared, ///< prepareRun() was not called, or the run was already torn down
+        MaxTime,     ///< the configured simulation time is reached — the normal end
+        StopFile,    ///< a file named "stop" appeared in the working directory
+        Unstable,    ///< NaN/Inf in gradient, velocities or energy
+        EpotAbort,   ///< epot_abort: the mean potential energy left its window
+        TempAbort,   ///< temp_abort: the mean temperature ran away from the target
+        TopoCheck    ///< topo_check: the molecule broke into more fragments than it started with
+    };
+
+    /// Why the run ended. Meaningful once step() has returned false.
+    StopReason stopReason() const { return m_stop_reason; }
+
+    /// One plain sentence for stopReason(), for a driver that reports to a user.
+    std::string stopReasonText() const;
 
     /** Final printout, final trajectory frame, plumed/metadynamics finalize,
      *  curcuma_final.json. Automatically invoked at end of start(). */
@@ -241,10 +274,56 @@ public:
      *  Hartree/Bohr (same units as m_eigen_gradient). */
     void applyExternalForces(const Geometry& forces);
 
+    /**
+     * @brief Replace the configured external potentials while the run is going.
+     *
+     * @p list has the shape of the `external_potentials` parameter. Applied before
+     * the next step, like the thermostat setpoint and the wall parameters, so an
+     * agent can adjust a pull and watch the response. Accumulated work starts over
+     * with the new set: it belongs to the potential that did it.
+     *
+     * Returns false and fills @p error when the list does not parse; the previous
+     * set then stays in force. Thread-safe. Claude Generated 2026.
+     */
+    bool setExternalPotentials(const json& list, std::string* error = nullptr);
+
+    /** @brief The configured potentials, their settings and the work they did. */
+    json externalPotentials() const;
+
+    /** @brief Total work the external potentials have done, in Eh. Cheap enough to
+     *  ask for every frame, unlike externalPotentials(). Claude Generated 2026. */
+    double externalWork() const;
+
     // Getters for stepwise GUI feedback
     const Geometry& positions() const { return m_eigen_geometry; }
     const Geometry& velocities() const { return m_eigen_velocities; }
     const Geometry& gradient() const { return m_eigen_gradient; }
+    /// Claude Generated 2026 - Where the run got to. Pure; the trajectory and
+    /// restart files are written by the run itself, not by asking for this.
+    ///
+    /// Note for whoever merges the reactff2 line: stopReason() lives there and
+    /// belongs in here as "stop_reason". It is left out rather than guessed,
+    /// because a run that ended badly reporting nothing is better than one
+    /// reporting a reason it does not have.
+    json Results() const override;
+
+    /**
+     * @brief Volume of the confinement container in Angstrom^3, 0 when there is
+     * none or when curcuma sizes it at run time (all bounds still zero).
+     *
+     * Claude Generated 2026 - the run knows its own box; a caller that wants a
+     * density should not have to reconstruct it from the controller.
+     */
+    double containerVolume() const;
+
+    /**
+     * @brief Density of the contents of the container in g/cm^3, 0 without a
+     * sized container. In a fixed box with a fixed number of molecules this does
+     * not change during the run: its use is checking a packing, not following one.
+     * Claude Generated 2026.
+     */
+    double density() const;
+
     double potentialEnergy() const { return m_Epot; }
     double kineticEnergy() const { return m_Ekin; }
     double currentTemperature() const { return m_T; }
@@ -322,6 +401,34 @@ private:
 
     bool WriteGeometry();
     void applyPeriodicBoundaryConditions();  // Claude Generated (Oct 2025): PBC wrapping
+
+    /**
+     * @brief Re-enter molecules that left the wall container on the opposite side.
+     *
+     * Claude Generated (Sep 2026). Active only for wall_potential = pbc; a no-op
+     * otherwise. Unlike the harmonic and logfermi walls this exerts NO force and
+     * therefore adds no energy: a confining potential has to push a hot atom back,
+     * which heats the system (and, at the harmonic default, is too soft to hold it
+     * at all), whereas wrapping only relocates it.
+     *
+     * Whole fragments are moved by one common vector, never single atoms: tearing a
+     * molecule across the boundary would stretch its bonds to container size, which
+     * the force field would read as a dissociation (and the reactive topology scan
+     * would then actually break the bond).
+     *
+     * A rectangular container wraps per axis, the way a periodic cell does. A sphere
+     * cannot tile space, so a fragment leaving at r is placed at the antipodal point
+     * the same distance inside the boundary; that is a container rule, not a lattice.
+     *
+     * INCOMPLETE, and knowingly so: the GFN-FF energy has no minimum-image
+     * convention, so a wrapped fragment does not continue its interactions across
+     * the boundary and its destination can be genuinely occupied (measured: a wrap
+     * to 0.024 A, NaN one step later). Until the non-bonded terms are periodic this
+     * refuses a wrap into occupied space and reflects the fragment elastically
+     * instead. Contained and free of heating, but not periodic. The real fix is
+     * docs/WP-PERIODIC-NONBONDED.md.
+     */
+    void wrapIntoContainer();
     /*! \brief Claude Generated (Sep 2026): run one integration step, with optional step
      *  rejection (adaptive_step). Without it this is a plain call to Integrator(). */
     void IntegratorStep();
@@ -385,6 +492,8 @@ private:
     void StepRamp(RampState& rs, double& T0, double measuredT);  ///< advance one schedule by one step
     void UpdateTemperatureRamp();                                ///< drive global + region setpoints (called each step)
     void ParseThermalRegions();                                  ///< read temp_regions specs from the controller
+    void ParseExternalPotentials();                              ///< read external_potentials from the controller
+    void ApplyExternalPotentials();                              ///< add their energy and gradient, and advance the work
     void ResolveThermalRegions();                                ///< resolve atom indices + default complement (needs molecule)
     double RegionTemperature(const std::vector<int>& atoms, int dof) const;  ///< instantaneous T of an atom subset
     void ApplyThermostat();
@@ -489,8 +598,20 @@ private:
     // Stepwise-API state (Claude Generated 2026)
     Geometry m_external_forces;          // additive per-atom force contribution, cleared after use
     bool m_external_forces_pending = false;
+
+    // Claude Generated 2026 - Configured external potentials: unlike the injection
+    // above they persist, they are described by the controller, and they carry the
+    // work they have done. Guarded because a caller changes them mid-run.
+    std::vector<curcuma::ExternalPotential> m_external_potentials;
+    std::vector<curcuma::ExternalPotential> m_pending_external_potentials;
+    bool m_pending_external_potentials_valid = false;
+    mutable std::mutex m_external_potential_mutex;
+    Geometry m_previous_geometry;        // for the work integral over one step
+    double m_external_potential_energy = 0.0;
     bool m_run_prepared = false;         // true after prepareRun(), false after finalizeRun()
     bool m_run_aborted = false;          // mirrors former local `aborted` flag in start()
+    bool m_wall_wrap = false;            ///< wall_potential=pbc: wrap instead of push (wrapIntoContainer)
+    StopReason m_stop_reason = StopReason::Running;  ///< see stopReason()
     std::vector<json> m_run_states;      // rescue states carried across step() calls
     json m_last_dump_state;              // K6 (Oct 2026): state of the last WriteGeometry() dump, -rescue only
 
@@ -672,30 +793,47 @@ private:
     // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
     // Claude Generated - Parameter Registry Integration (October 2025)
     BEGIN_PARAMETER_DEFINITION(simplemd)
+    MODULE_INFO("Molecular dynamics: integrator, thermostat, constraints, walls and bias potentials.", "Dynamics", {"md"})
 
     // --- Basic Simulation Parameters ---
-    PARAM(method, String, "gfnff", "Energy calculation method. Default gfnff: the fast choice for MD and conformer sampling. gfn2 is the more accurate one (semi-empirical QM, ~100x slower); uff/qmdff remain available.", "Basic", {})
-    PARAM(temperature, Double, 298.15, "Target temperature in Kelvin.", "Basic", {"T"})
-    PARAM(initial_temperature, Double, -1.0, "Initial temperature for velocity sampling (K). -1: same as 'temperature'. Use this to anneal into the target or to start cold/warm; the thermostat still drives toward 'temperature'. Ignored on restart (velocities come from the restart file).", "Basic", {"T_init", "T0", "initT"})
-    PARAM(time_step, Double, 1.0, "Integration time step in femtoseconds.", "Basic", {"dt"})
-    PARAM(max_time, Double, 1000.0, "Maximum simulation time in femtoseconds.", "Basic", {"MaxTime"})
-    PARAM(charge, Int, 0, "Total charge of the system.", "Basic", {})
-    PARAM(spin, Int, 0, "Total spin multiplicity of the system (0=singlet, 1=doublet).", "Basic", {"Spin"})
+    // master's texts and its gfnff default, this branch's tier/unit/bound
+    // annotations. The default matters: master moved every capability to gfnff.
+    PARAM(method, String, "gfnff", "Energy calculation method. Default gfnff: the fast choice for MD and conformer sampling. gfn2 is the more accurate one (semi-empirical QM, ~100x slower); uff/qmdff remain available.", "Basic", {},
+        "tier=primary")
+    PARAM(temperature, Double, 298.15, "Target temperature in Kelvin.", "Basic", {"T"},
+        "tier=primary; unit=K; min=0")
+    PARAM(initial_temperature, Double, -1.0, "Initial temperature for velocity sampling (K). -1: same as 'temperature'. Use this to anneal into the target or to start cold/warm; the thermostat still drives toward 'temperature'. Ignored on restart (velocities come from the restart file).", "Basic", {"T_init", "T0", "initT"},
+        "unit=K")
+    PARAM(time_step, Double, 1.0, "Integration time step in femtoseconds.", "Basic", {"dt"},
+        "tier=primary; unit=fs; min=0")
+    PARAM(max_time, Double, 1000.0, "Maximum simulation time in femtoseconds.", "Basic", {"MaxTime"},
+        "tier=primary; unit=fs; min=0")
+    PARAM(charge, Int, 0, "Total charge of the system.", "Basic", {},
+        "tier=primary")
+    PARAM(spin, Int, 0, "Total spin multiplicity of the system (0=singlet, 1=doublet).", "Basic", {"Spin"},
+        "tier=primary")
     PARAM(seed, Int, -1, "Random seed (-1: time, 0: auto).", "Basic", {})
-    PARAM(threads, Int, 1, "Number of parallel threads.", "Basic", {})
+    PARAM(threads, Int, 1, "Number of parallel threads.", "Basic", {},
+        "min=1")
 
     // --- Thermostat ---
-    PARAM(thermostat, String, "csvr", "Thermostat type: berendsen|andersen|nosehover|csvr|none.", "Thermostat", {})
-    PARAM(coupling, Double, 10.0, "Thermostat coupling time in fs.", "Thermostat", {})
-    PARAM(andersen_probability, Double, 0.001, "Andersen thermostat collision probability.", "Thermostat", {})
-    PARAM(chain_length, Int, 3, "Chain length for Nosé-Hoover thermostat.", "Thermostat", {"chainlength"})
+    PARAM(thermostat, String, "csvr", "Thermostat type.", "Thermostat", {},
+        "tier=primary; enum=csvr|berendsen|andersen|nosehover|none")
+    PARAM(coupling, Double, 10.0, "Thermostat coupling time in fs.", "Thermostat", {},
+        "unit=fs; min=0")
+    PARAM(andersen_probability, Double, 0.001, "Andersen thermostat collision probability.", "Thermostat", {},
+        "min=0; max=1")
+    PARAM(chain_length, Int, 3, "Chain length for Nosé-Hoover thermostat.", "Thermostat", {"chainlength"},
+        "min=1")
 
     // --- System Control ---
-    PARAM(remove_com_motion, Double, 100.0, "Remove translation/rotation every N fs.", "System", {"rm_COM"})
+    PARAM(remove_com_motion, Double, 100.0, "Remove translation/rotation every N fs.", "System", {"rm_COM"},
+        "unit=fs")
     PARAM(remove_com_mode, Int, 1, "Removal mode (0:none, 1:trans only, 2:rot only, 3:both). Rotation removal is opt-in (use 2 or 3).", "System", {"rmrottrans"})
     PARAM(no_center, Bool, false, "Disable centering of the molecule at the origin.", "System", {"nocenter"})
     PARAM(use_com, Bool, false, "Use center of mass (otherwise geometric center).", "System", {"COM"})
-    PARAM(hydrogen_mass, Int, 1, "Hydrogen mass scaling factor for HMR.", "System", {"hmass"})
+    PARAM(hydrogen_mass, Int, 1, "Hydrogen mass scaling factor for HMR.", "System", {"hmass"},
+        "min=1")
 
     // --- Adaptive step (Claude Generated, Sep 2026) ---
     PARAM(adaptive_step, Bool, false, "Repeat an integration step with a subdivided time step when it violates energy conservation. Standard step rejection: neither a constraint nor a mass modification, the trajectory stays the same physics. Off by default.", "Algorithm", {})
@@ -719,7 +857,7 @@ private:
     PARAM(no_restart, Bool, false, "Disable automatic loading from restart files.", "Restart", {"norestart"})
 
     // --- RATTLE Constraints ---
-    PARAM(rattle, Int, 0, "RATTLE constraint algorithm (0:off, 1:on, 2:H-only).", "RATTLE", {})
+    PARAM(rattle, Int, 0, "RATTLE constraint algorithm (0:off, 1:on, 2:H-only). Not available with gfnff topology_mode=react (constraints are frozen at initialisation).", "RATTLE", {})
     PARAM(rattle_12, Bool, true, "Constrain 1-2 bond distances.", "RATTLE", {})
     PARAM(rattle_13, Bool, false, "Constrain 1-3 distances (angles).", "RATTLE", {})
     PARAM(rattle_tol_12, Double, 1e-4, "Tolerance for 1-2 constraints (squared Bohr).", "RATTLE", {})
@@ -727,17 +865,28 @@ private:
     PARAM(rattle_max_iterations, Int, 100, "Maximum RATTLE iterations.", "RATTLE", {"rattle_maxiter"})
 
     // --- Wall Potentials ---
-    PARAM(wall_type, String, "none", "Wall type: none|spheric|rect.", "Walls", {"wall"})
-    PARAM(wall_potential, String, "harmonic", "Wall potential function: logfermi|harmonic.", "Walls", {})
-    PARAM(wall_radius, Double, 0.0, "Radius for spherical wall (Å). Auto-sized if 0.", "Walls", {"wall_spheric_radius"})
-    PARAM(wall_temp, Double, 298.15, "Wall temperature/strength in K.", "Walls", {})
-    PARAM(wall_beta, Double, 6.0, "Steepness parameter for wall potential.", "Walls", {})
-    PARAM(wall_x_min, Double, 0.0, "Min x-boundary for rectangular wall (Å).", "Walls", {})
-    PARAM(wall_x_max, Double, 0.0, "Max x-boundary for rectangular wall (Å).", "Walls", {})
-    PARAM(wall_y_min, Double, 0.0, "Min y-boundary for rectangular wall (Å).", "Walls", {})
-    PARAM(wall_y_max, Double, 0.0, "Max y-boundary for rectangular wall (Å).", "Walls", {})
-    PARAM(wall_z_min, Double, 0.0, "Min z-boundary for rectangular wall (Å).", "Walls", {})
-    PARAM(wall_z_max, Double, 0.0, "Max z-boundary for rectangular wall (Å).", "Walls", {})
+    PARAM(wall_type, String, "none", "Wall type: none|spheric|rect.", "Walls", {"wall"},
+        "enum=none|spheric|rect")
+    PARAM(wall_potential, String, "harmonic", "Wall behaviour: logfermi|harmonic push escaping atoms back (and do work on them); pbc exerts no force and instead moves a whole molecule that left the container back in on the opposite side. pbc is a container, not a periodic cell: the energy has no minimum image, so interactions are not continued across the boundary and a molecule whose destination is occupied is reflected instead (see docs/WP-PERIODIC-NONBONDED.md).", "Walls", {},
+        "enum=logfermi|harmonic|pbc; requires=wall_type!=none")
+    PARAM(wall_radius, Double, 0.0, "Radius for spherical wall (Å). Auto-sized if 0.", "Walls", {"wall_spheric_radius"},
+        "unit=A; min=0; requires=wall_type=spheric")
+    PARAM(wall_temp, Double, 298.15, "Wall temperature/strength in K.", "Walls", {},
+        "unit=K; min=0; requires=wall_type!=none")
+    PARAM(wall_beta, Double, 6.0, "Steepness parameter for wall potential.", "Walls", {},
+        "min=0; requires=wall_type!=none")
+    PARAM(wall_x_min, Double, 0.0, "Min x-boundary for rectangular wall (Å).", "Walls", {},
+        "unit=A; requires=wall_type=rect")
+    PARAM(wall_x_max, Double, 0.0, "Max x-boundary for rectangular wall (Å).", "Walls", {},
+        "unit=A; requires=wall_type=rect")
+    PARAM(wall_y_min, Double, 0.0, "Min y-boundary for rectangular wall (Å).", "Walls", {},
+        "unit=A; requires=wall_type=rect")
+    PARAM(wall_y_max, Double, 0.0, "Max y-boundary for rectangular wall (Å).", "Walls", {},
+        "unit=A; requires=wall_type=rect")
+    PARAM(wall_z_min, Double, 0.0, "Min z-boundary for rectangular wall (Å).", "Walls", {},
+        "unit=A; requires=wall_type=rect")
+    PARAM(wall_z_max, Double, 0.0, "Max z-boundary for rectangular wall (Å).", "Walls", {},
+        "unit=A; requires=wall_type=rect")
 
     // --- Metadynamics (PLUMED) ---
     PARAM(mtd, Bool, false, "Enable PLUMED metadynamics.", "Metadynamics", {})
@@ -745,13 +894,17 @@ private:
 
     // --- RMSD-based Metadynamics (Internal) ---
     PARAM(rmsd_mtd, Bool, false, "Enable internal RMSD-based metadynamics.", "RMSD-MTD", {})
-    PARAM(rmsd_mtd_k, Double, 0.01, "Hill-height constant: bias height W_i = k * counter_i (Eh). The force is the exact gradient of the bias, so k is ~100x smaller than the pre-2026 value.", "RMSD-MTD", {"k_rmsd"})
-    PARAM(rmsd_mtd_alpha, Double, 10.0, "Width parameter for RMSD Gaussians.", "RMSD-MTD", {"alpha_rmsd"})
+    PARAM(rmsd_mtd_k, Double, 0.01, "Hill-height constant: bias height W_i = k * counter_i (Eh). The force is the exact gradient of the bias, so k is ~100x smaller than the pre-2026 value.", "RMSD-MTD", {"k_rmsd"},
+        "requires=rmsd_mtd")
+    PARAM(rmsd_mtd_alpha, Double, 10.0, "Width parameter for RMSD Gaussians.", "RMSD-MTD", {"alpha_rmsd"},
+        "requires=rmsd_mtd")
     PARAM(rmsd_mtd_pace, Int, 1, "DEPRECATED and ignored under the strided scheme (use rmsd_mtd_deposit_stride). Only honoured by rmsd_mtd_scheme=legacy.", "RMSD-MTD", {"mtd_steps"})
     PARAM(rmsd_mtd_max_gaussians, Int, -1, "Maximum number of stored bias structures.", "RMSD-MTD", {"max_rmsd_N"})
     PARAM(rmsd_mtd_ref_file, String, "none", "File with reference structures for RMSD-MTD.", "RMSD-MTD", {"rmsd_ref_file"})
-    PARAM(rmsd_mtd_atoms, String, "-1", "Atom indices to use for RMSD calculation.", "RMSD-MTD", {"rmsd_atoms"})
-    PARAM(rmsd_mtd_dt, Double, 2000.0, "Well-tempered bias temperature Delta_T (K). Only used when wtmtd=true, and only for the reported well-tempered energy -- it never affects the force or the exploration.", "RMSD-MTD", {"rmsd_DT"})
+    PARAM(rmsd_mtd_atoms, String, "-1", "Atom indices to use for RMSD calculation.", "RMSD-MTD", {"rmsd_atoms"},
+        "requires=rmsd_mtd")
+    PARAM(rmsd_mtd_dt, Double, 2000.0, "Well-tempered bias temperature Delta_T (K). Only used when wtmtd=true, and only for the reported well-tempered energy -- it never affects the force or the exploration.", "RMSD-MTD", {"rmsd_DT"},
+        "unit=K; requires=wtmtd")
     PARAM(rmsd_mtd_max_height, Int, 0, "Cap the per-structure hill counter used in the bias force: W_i = k * min(counter_i, cap). 0 = unbounded (legacy). Stops the shared bias pool from heating the dynamics over many runs (counter_i grows on every visit).", "RMSD-MTD", {})
     PARAM(rmsd_mtd_freeze_inherited, Bool, false, "Freeze the hill heights of bias structures already present at this MD run's start; only structures deposited during this run gain height. Bounds the cumulative bias force across successive shared-pool runs (geometry sharing is preserved).", "RMSD-MTD", {})
     PARAM(rmsd_mtd_screen, Bool, true, "Skip bias hills whose Gaussian contribution is provably negligible, using a rotation/translation-invariant RMSD lower bound (principal radii of gyration of the RMSD subset) plus a Gaussian cutoff. Physics-preserving: energy, force and the visited set are unaffected. false = evaluate every hill (legacy).", "RMSD-MTD", {})
@@ -785,8 +938,16 @@ private:
     PARAM(temp_abort_delta, Double, 300.0, "Abort when <T> exceeds (target T + temp_abort_delta) Kelvin. <= 0 disables this threshold. Only active when temp_abort=true.", "ConfSearch", {})
 
     // --- Temperature Ramp (Jun 2026, Claude Generated) ---
+    // Claude Generated 2026 - Registered at last. It was read from the controller by
+    // ParseThermalRegions() but never declared, so it had no default, never showed up
+    // in -export_config, and no schema could describe it.
+    PARAM(external_potentials, Json, "[]", "Directed external potentials: a list of {kind, atoms, ...} objects. kind is constant_force (direction, magnitude in Eh/A), centroid_harmonic (target, k in Eh/A^2) or distance_harmonic (atoms_b, k, r0 in A). atoms uses the selection grammar. Persistent, unlike the transient force injection, and changeable while the run is going.", "External Potentials", {},
+        "tier=primary")
+    PARAM(temp_regions, Json, "[]", "Per-region thermostats: a list of {atoms, temperature, schedule} objects. atoms uses the selection grammar.", "Temperature Ramp", {},
+        "tier=advanced")
     PARAM(temp_ramp, Bool, false, "Enable a multi-stage temperature ramp schedule (see temp_schedule). A live GUI slider / setTargetTemperature() overrides it for the rest of the run.", "Temperature Ramp", {})
-    PARAM(temp_schedule, String, "", "Ramp schedule 'target:mode:value;...'. mode=steps ramps the setpoint linearly from the previous target to <target> over <value> integration steps; mode=reach jumps the setpoint to <target> and advances once |<T>-target| < value Kelvin. Example: '500:steps:5000;500:steps:2000;300:reach:10'.", "Temperature Ramp", {})
+    PARAM(temp_schedule, String, "", "Ramp schedule 'target:mode:value;...'. mode=steps ramps the setpoint linearly from the previous target to <target> over <value> integration steps; mode=reach jumps the setpoint to <target> and advances once |<T>-target| < value Kelvin. Example: '500:steps:5000;500:steps:2000;300:reach:10'.", "Temperature Ramp", {},
+        "requires=temp_ramp")
 
     END_PARAMETER_DEFINITION
     // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^

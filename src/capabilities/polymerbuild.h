@@ -480,6 +480,7 @@ private:
 
     // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
     BEGIN_PARAMETER_DEFINITION(polymerbuild)
+    MODULE_INFO("Build polymer chains from monomer fragments.", "Assembly", {"polymerbuild"})
 
     // Sequence options
     PARAM(sequence, String, "", "Polymer sequence string (e.g., (A)10-B-(C)5)", "Assembly", { "seq" })

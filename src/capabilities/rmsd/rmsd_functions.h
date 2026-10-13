@@ -57,12 +57,16 @@ CURCUMA_NO_TREE_VECTORIZE inline Eigen::Matrix3d BestFitRotation(const Geometry&
         Cov += reference.row(i).transpose() * target.row(i);
     }
 
-    // Sichere Determinantenberechnung für numerische Stabilität
-    double detCov = Cov.determinant();
-
-    // Spezieller Fall: Wenn Cov nahe an einer Nullmatrix ist
-    if (std::abs(detCov) < 1e-10) {
-        // Rückgabe einer Matrix, die nah an der Identität ist
+    // Claude Generated (Sep 2026): the guard used to test det(Cov) < 1e-10, but a
+    // vanishing determinant means the covariance is RANK DEFICIENT, not degenerate:
+    // every planar structure (benzene, any three atoms, any flat fragment) has
+    // det(Cov) = 0 while its Kabsch rotation is perfectly well defined, and the SVD
+    // below recovers it. Bailing out to the identity there left planar molecules
+    // unaligned and their RMSD reported against the unrotated target — measured on a
+    // square rotated by 90 degrees: RMSD sqrt(2) instead of 0. Only a covariance
+    // matrix that is numerically ZERO carries no orientation at all (no spread, or
+    // one atom), which is what this guard is for; that is a norm, not a determinant.
+    if (Cov.norm() < 1e-10) {
         return factor * Eigen::Matrix3d::Identity();
     }
 

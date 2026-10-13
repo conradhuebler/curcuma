@@ -248,6 +248,7 @@ private:
     // an integer literal makes std::any hold int, getDefaultJson's any_cast<double> throws and
     // the key is SILENTLY dropped from the defaults -> Json2KeyWord then throws an uncaught -1.
     BEGIN_PARAMETER_DEFINITION(confsearch)
+    MODULE_INFO("Conformer search driven by metadynamics and optimisation.", "Conformational", {"confsearch"})
 
     // --- Methods ---
     PARAM(method, String, "gfnff", "Energy method used for both phases unless md_method or opt_method override it. Default gfnff: the fast general-purpose choice (native GFN-FF). gfn2 is the accurate one (native GFN2-xTB, ~100x slower); gfn1, eht, pm3, uff, qmdff also available.", "Methods", {})

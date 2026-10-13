@@ -35,6 +35,7 @@
 
 /* Claude Generated 2025: TrajectoryAnalysis Parameter Registry - replaces static TrajectoryAnalysisJson */
 BEGIN_PARAMETER_DEFINITION(trajectoryanalysis)
+MODULE_INFO("Per-frame trajectory metrics: gyration radius, end-to-end distance, inertia.", "Analysis", {"traj"})
     PARAM(properties, String, "all", "Properties to calculate: all|basic|geometric|cg.", "Analysis", {})
     PARAM(output_format, String, "human", "Output format: human|json|csv.", "Output", {})
     PARAM(output_file, String, "", "File to save results.", "Output", {})

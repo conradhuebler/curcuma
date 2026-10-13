@@ -118,6 +118,18 @@ void ParameterRegistry::printHelp(const std::string& module) const
             case ParamType::Bool:
                 std::cout << "bool";
                 break;
+            case ParamType::StringList:
+                std::cout << "list";
+                break;
+            case ParamType::Json:
+                std::cout << "json";
+                break;
+            case ParamType::Selection:
+                std::cout << "selection";
+                break;
+            case ParamType::Path:
+                std::cout << "path";
+                break;
             }
             std::cout << ">";
 
@@ -137,11 +149,44 @@ void ParameterRegistry::printHelp(const std::string& module) const
                 case ParamType::Bool:
                     std::cout << (std::any_cast<bool>(param->defaultValue) ? "true" : "false");
                     break;
+                case ParamType::StringList:
+                case ParamType::Json:
+                case ParamType::Selection:
+                case ParamType::Path:
+                    std::cout << std::any_cast<std::string>(param->defaultValue);
+                    break;
                 }
             } catch (...) {
                 std::cout << "?";
             }
-            std::cout << ")" << std::endl;
+            std::cout << ")";
+            // Claude Generated 2026 - What used to live in prose, if it was written
+            // down at all: the unit, the permitted values, and when the parameter
+            // matters in the first place.
+            if (!param->unit.empty())
+                std::cout << " [" << param->unit << "]";
+            if (!param->allowed.empty()) {
+                std::cout << " {";
+                for (size_t i = 0; i < param->allowed.size(); ++i)
+                    std::cout << (i ? "|" : "") << param->allowed[i];
+                std::cout << "}";
+            }
+            if (param->hasMinimum || param->hasMaximum) {
+                std::cout << " range: ";
+                if (param->hasMinimum)
+                    std::cout << param->minimum;
+                std::cout << "..";
+                if (param->hasMaximum)
+                    std::cout << param->maximum;
+            }
+            if (!param->relevantWhen.empty())
+                std::cout << " (only when " << param->relevantWhen << ")";
+            if (param->deprecated) {
+                std::cout << " DEPRECATED";
+                if (!param->replacedBy.empty())
+                    std::cout << ", use " << param->replacedBy;
+            }
+            std::cout << std::endl;
 
             // Show help text
             std::cout << "      " << param->helpText << std::endl;
@@ -195,6 +240,35 @@ json ParameterRegistry::getDefaultJson(const std::string& module) const
             case ParamType::Bool:
                 result[param.name] = std::any_cast<bool>(param.defaultValue);
                 break;
+            // Claude Generated 2026 - Selection and Path are strings that carry a
+            // meaning; StringList and Json hold their default as JSON text so a
+            // structured parameter can have one at all. temp_regions is the case
+            // that made this necessary: an array of objects, read from the
+            // controller but never registered, so it had no default and never
+            // appeared in -export_config.
+            case ParamType::Selection:
+            case ParamType::Path:
+                result[param.name] = std::any_cast<std::string>(param.defaultValue);
+                break;
+            case ParamType::StringList:
+            case ParamType::Json: {
+                const std::string text = std::any_cast<std::string>(param.defaultValue);
+                if (text.empty()) {
+                    result[param.name] = (param.type == ParamType::StringList)
+                        ? nlohmann::json::array()
+                        : nlohmann::json::object();
+                    break;
+                }
+                nlohmann::json parsed = nlohmann::json::parse(text, nullptr, false);
+                if (parsed.is_discarded()) {
+                    std::cerr << "Warning: default of parameter " << param.name
+                              << " in module " << module << " is not valid JSON: "
+                              << text << std::endl;
+                    parsed = nlohmann::json::object();
+                }
+                result[param.name] = parsed;
+                break;
+            }
             }
         } catch (const std::bad_any_cast& e) {
             std::cerr << "Warning: Failed to cast default value for parameter "
@@ -206,6 +280,40 @@ json ParameterRegistry::getDefaultJson(const std::string& module) const
 }
 
 // Claude Generated: Validate registry for duplicates and type consistency
+// Claude Generated 2026 - Modules as concepts, not just as buckets of parameters.
+void ParameterRegistry::addModule(ModuleDefinition&& definition)
+{
+    if (definition.name.empty())
+        return;
+    module_registry[definition.name] = std::move(definition);
+}
+
+const ModuleDefinition* ParameterRegistry::findModule(const std::string& name) const
+{
+    const auto it = module_registry.find(name);
+    return it == module_registry.end() ? nullptr : &it->second;
+}
+
+std::vector<ModuleDefinition> ParameterRegistry::modules() const
+{
+    std::vector<ModuleDefinition> result;
+    result.reserve(module_registry.size());
+    for (const auto& entry : module_registry)
+        result.push_back(entry.second);
+    return result;
+}
+
+std::vector<std::string> ParameterRegistry::modulesForCommand(const std::string& command) const
+{
+    std::vector<std::string> result;
+    for (const auto& entry : module_registry) {
+        const auto& commands = entry.second.commands;
+        if (std::find(commands.begin(), commands.end(), command) != commands.end())
+            result.push_back(entry.first);
+    }
+    return result;
+}
+
 bool ParameterRegistry::validateRegistry() const
 {
     bool valid = true;

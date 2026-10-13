@@ -51,6 +51,14 @@ Each item was a real defect; evidence in [docs/KNOWN_ISSUES_ARCHIVE.md](../../..
 - EEQ on GPU: FMM matrix-vector product (O(N log N)) and ROCm block-Jacobi mirror are open; ROCm many-fragment systems go to the exact CPU PCG above `eeq_rocm_cpu_fragment_threshold`.
 - ROCm GFN-FF correctness gaps and GFN-FF open items: root `CLAUDE.md` "Open Items", [docs/MULTI_GPU_GAPS.md](../../../../docs/MULTI_GPU_GAPS.md), [docs/REV_GFNFF_TODO.md](../../../../docs/REV_GFNFF_TODO.md).
 
+## Reactive topology mode (`-gfnff.react`)
+
+Detail: [docs/GFNFF_REACT_TOPOLOGY.md](../../../../docs/GFNFF_REACT_TOPOLOGY.md). Not re-checked after the merge of master (Oct 2026).
+- NVT-only (dE_jump at rebuild events, logged); rebuild == fresh-init bit-identical (ctest `gfnff_react_fd_gradient`, `cli_simplemd_13/14/15`, `gfnff_react_filters`).
+- Public topology/event API on `GFNFF`: `reactiveBonds()`, `reactiveBondOrders()`, `reactiveRebuildCount()`, `consumeReactEvents()`; reached through `ComputationalMethod::gfnffInstance()` (a vtable hook, because the GPU method lives in a dlopen plugin).
+- The react set owns the bond list even when empty (no silent geometric re-detection); refractory blocks N scans; exchange resolution decrements sigma counts and skips same-scan formations.
+- `rattle` is refused with react (constraints are frozen at initialisation).
+
 ## References
 
 FFWorkspace implements the formulas of Fortran `gfnff_engrad.F90`; parameter generation follows Spicher and Grimme, Angew. Chem. Int. Ed. 59 (2020) 15665; D3: Grimme et al., J. Chem. Phys. 132, 154104 (2010).
