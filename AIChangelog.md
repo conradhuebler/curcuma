@@ -16,6 +16,7 @@ below. If it needs measurements or a derivation, write them into the matching `d
 
 ## Jul - Sep 2026 (and some late June), 108 entries, full text in AIChangelog_2026-late.md
 
+- `-gpu auto` uses the CPU for native GFN-FF below 900 atoms on ROCm (`-gfnff.gpu_auto_min_atoms`, Oct 13, 2026): ROCm MD step 14x slower than the CPU at 24 atoms, break-even near 900 atoms; ctest `cli_gfnff_gpu_03_auto_small_system_cpu` - [docs/GPU_TUNING.md](docs/GPU_TUNING.md)
 - ROCm dispersion kernels (branch `feature/rocm-dispersion-speed`, Oct 13, 2026): per-atom u/v C6 sums, no sqrt/division by r, fused gather; 18.4 -> 7.5 ms per step, MD step 55.4 -> 47.4 ms (7320 atoms, CPU 145.1) - [docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md)
 - ROCm localinv built on the device (branch `feature/rocm-eeq-localinv`, Oct 13, 2026): build 247 -> 11 ms (urea400-water1000), MD step 124.4 -> 88.7 ms (6200 atoms, CPU 180.1) and 58.7 -> 55.2 ms (7320, CPU 144.9) - [docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md)
 - ROCm localinv preconditioner, host build (branch `feature/rocm-eeq-localinv`, Oct 13, 2026): CG iterations 69 -> 15, MD step 101.9 -> 58.7 ms (7320 atoms, CPU 146.0) but 104.7 -> 124.1 ms on urea400-water1000 (host build 247 ms) - [docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md)

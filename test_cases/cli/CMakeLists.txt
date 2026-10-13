@@ -136,6 +136,15 @@ if(USE_ROCM)
     add_cli_test(gfnff_gpu 02_rocm_singlepoint)
     set_tests_properties(cli_gfnff_gpu_02_rocm_singlepoint
         PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm;cli")
+    # Claude Generated (Oct 2026): -gpu auto uses the CPU for a 24-atom GFN-FF system (gfnff.gpu_auto_min_atoms 900).
+    # Without a ROCm plugin or device the note cannot appear; the alternative message covers that case.
+    add_test(NAME cli_gfnff_gpu_03_auto_small_system_cpu
+             COMMAND $<TARGET_FILE:curcuma> -sp ${CMAKE_SOURCE_DIR}/test_cases/structures/medium/caffeine.xyz
+                     -method gfnff -gpu auto -no_bmt -verbosity 2
+             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(cli_gfnff_gpu_03_auto_small_system_cpu
+        PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;rocm;cli"
+                   PASS_REGULAR_EXPRESSION "-gpu auto uses the CPU for 24 atoms|found no GPU plugin")
 endif()
 
 # =============================================================================

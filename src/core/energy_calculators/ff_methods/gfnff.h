@@ -316,6 +316,8 @@ PARAM(eeq_accuracy, Double, 1e-6,
 // gfnff_method.cpp::forwardEEQSolverParams. Removing the duplicate here eliminates the
 // 30.0-vs-0.0 default discrepancy that overrode the Fortran-matching behaviour.
 // PARAM(eeq_distance_cutoff, Double, 30.0, ...) — REMOVED, see eeq_solver.h:965
+PARAM(gpu_auto_min_atoms, Int, 900,
+      "With -gpu auto on ROCm, native GFN-FF systems with fewer atoms than this run on the CPU (measured break-even, RX 9060 XT against 10 CPU threads: GPU slower below about 900 atoms). An explicit -gpu rocm is never overridden. 0 = auto always uses the GPU. CUDA is not affected.", "Advanced", {})
 PARAM(gpu_block_size, Int, 0,
       "GPU kernel block size (0 = adaptive, 32/64/128/256/512). 512 = max occupancy. Passed to ff_workspace_gpu.", "Advanced", {})
 PARAM(nb_cell_list_min_atoms, Int, 800,
