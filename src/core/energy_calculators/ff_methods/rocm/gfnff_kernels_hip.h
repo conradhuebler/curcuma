@@ -381,8 +381,40 @@ __global__ GFNFF_KERNEL_BOUNDS void k_hbonds(
     const double* __restrict__ cx,
     const double* __restrict__ cy,
     const double* __restrict__ cz,
+    const int*    __restrict__ slot_off,  ///< [n+1] slot range per triple (slot mode), nullptr otherwise
+    double*       __restrict__ slot_g,    ///< [3*nslots] per-slot gradient (slot mode), nullptr: atomicAdd into grad
+    const double* __restrict__ Qs_H,      ///< [n] precomputed charge scaling of q_H (nullptr: computed in the kernel)
+    const double* __restrict__ Qs_A,      ///< [n] same for -q_A
+    const double* __restrict__ Qs_B,      ///< [n] same for -q_B
     double*                    grad,
     double*                    energy
+);
+
+/// Claude Generated (Oct 2026): non-bonded repulsion as a per-atom gather over a directed-edge CSR
+/// (one workgroup per atom, 3 atomicAdd per atom). Same pair formula as k_repulsion up to FP rounding.
+__global__ __launch_bounds__(256) void k_repulsion_gather(
+    int N,
+    const int*    __restrict__ csr_off,      ///< [N+1]
+    const int*    __restrict__ csr_partner,  ///< [2n] partner atom per directed edge
+    const int*    __restrict__ csr_pairidx,  ///< [2n] pair index per directed edge
+    const double* __restrict__ alpha,
+    const double* __restrict__ repab,
+    const double* __restrict__ r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    grad,
+    double*                    energy
+);
+
+/// Claude Generated (Oct 2026): per-atom sum of per-slot gradient vectors (k_hbonds slot mode).
+/// One workgroup per atom, 3 atomicAdd per atom with at least one slot.
+__global__ __launch_bounds__(256) void k_slot_gather(
+    int N,
+    const int*    __restrict__ atom_off,    ///< [N+1]
+    const int*    __restrict__ atom_slots,  ///< [nslots] slot indices grouped by atom
+    const double* __restrict__ slot_g,      ///< [3*nslots]
+    double*                    grad
 );
 
 // ============================================================================

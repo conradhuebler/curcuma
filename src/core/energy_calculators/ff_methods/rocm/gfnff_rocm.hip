@@ -522,6 +522,128 @@ __global__ void k_repulsion(
     blockReduceAddEnergy(local_E, energy);
 }
 
+// Claude Generated (Oct 2026): per-atom gather variant of k_repulsion for the non-bonded list on ROCm.
+// On gfx1200 every FP64 atomicAdd is a compare-and-swap loop (global_atomic_cmpswap_b64), and the pair
+// kernel issues 6 of them per pair; the list is grouped by the lower atom index, so the lanes of a
+// wavefront hit the same grad[3*i] address and serialise (8.3 ms per step for 1.47M pairs, 6200 atoms).
+// Here one workgroup owns atom a and sweeps a's CSR row (each pair appears once per direction), sums the
+// force on a and half the pair energy in registers and writes grad[a] with 3 atomicAdd per atom.
+// Same pair formula as k_repulsion (E = repab exp(-alpha r^1.5) / r), with one reciprocal of r instead
+// of three divisions: equal to k_repulsion up to FP rounding. Force on a = fac * (r_a - r_p).
+/// @param N           number of atoms (grid size; one workgroup per atom, blockDim a power of two <= 256)
+/// @param csr_off     [N+1] row offsets of the directed-edge CSR
+/// @param csr_partner [2n] partner atom per directed edge
+/// @param csr_pairidx [2n] index of the pair in the RepulsionSoA arrays
+/// @param alpha,repab,r_cut [n] per-pair constants (RepulsionSoA)
+/// @param grad        [3N] gradient (3 atomicAdd per atom)
+/// @param energy      [1] energy slot (block reduction + one atomicAdd per block)
+__global__ void k_repulsion_gather(
+    int N,
+    const int*    __restrict__ csr_off,
+    const int*    __restrict__ csr_partner,
+    const int*    __restrict__ csr_pairidx,
+    const double* __restrict__ alpha,
+    const double* __restrict__ repab,
+    const double* __restrict__ r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    grad,
+    double*                    energy)
+{
+    const int a = blockIdx.x;
+    const int lane = threadIdx.x, nlanes = blockDim.x;
+    double local_E = 0.0;
+    double gx = 0.0, gy = 0.0, gz = 0.0;
+
+    if (a < N) {
+        const double xa = cx[a], ya = cy[a], za = cz[a];
+        const int s = csr_off[a], e = csr_off[a + 1];
+        for (int t = s + lane; t < e; t += nlanes) {
+            const int p = csr_partner[t];
+            const int k = csr_pairidx[t];
+            double dx = xa - cx[p];
+            double dy = ya - cy[p];
+            double dz = za - cz[p];
+            applyMIC(dx, dy, dz);
+            double r2  = dx*dx + dy*dy + dz*dz;
+            double rij = sqrt(r2);
+            if (rij <= r_cut[k] && rij >= 1e-8) {
+                const double sr    = sqrt(rij);
+                const double alp   = alpha[k];
+                const double rep   = repab[k];
+                const double alp_r = alp * (rij * sr);
+                if (!isnan(alp_r) && !isnan(rep) && alp_r <= 700.0) {
+                    const double inv_r  = 1.0 / rij;
+                    const double base_E = rep * exp(-alp_r) * inv_r;
+                    local_E += 0.5 * base_E;
+                    // dE/dr = -E/r - 1.5 alpha sqrt(r) E; fac = (dE/dr) / r
+                    const double fac = -(base_E * inv_r + 1.5 * alp * sr * base_E) * inv_r;
+                    gx += fac * dx; gy += fac * dy; gz += fac * dz;
+                }
+            }
+        }
+    }
+
+    __shared__ double sgx[256], sgy[256], sgz[256];
+    sgx[lane] = gx; sgy[lane] = gy; sgz[lane] = gz;
+    __syncthreads();
+    for (int stride = nlanes >> 1; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            sgx[lane] += sgx[lane + stride];
+            sgy[lane] += sgy[lane + stride];
+            sgz[lane] += sgz[lane + stride];
+        }
+        __syncthreads();
+    }
+    if (lane == 0 && a < N)
+        add_grad(grad, a, sgx[0], sgy[0], sgz[0]);
+
+    blockReduceAddEnergy(local_E, energy);
+}
+
+// Claude Generated (Oct 2026): per-atom sum of per-slot gradient contributions written by a scatter-free
+// term kernel (k_hbonds in slot mode). slot_g holds one 3-vector per slot, atom_slots lists the slots that
+// belong to atom a (CSR by atom). One workgroup per atom, shared-memory tree reduction, 3 atomicAdd per
+// atom (other streams add to grad concurrently).
+/// @param N          number of atoms (grid size; blockDim a power of two <= 256)
+/// @param atom_off   [N+1] row offsets into atom_slots
+/// @param atom_slots [nslots] slot indices grouped by owning atom
+/// @param slot_g     [3*nslots] gradient contribution per slot (x, y, z)
+/// @param grad       [3N] gradient (atomicAdd)
+__global__ void k_slot_gather(
+    int N,
+    const int*    __restrict__ atom_off,
+    const int*    __restrict__ atom_slots,
+    const double* __restrict__ slot_g,
+    double*                    grad)
+{
+    const int a = blockIdx.x;
+    const int lane = threadIdx.x, nlanes = blockDim.x;
+    double gx = 0.0, gy = 0.0, gz = 0.0;
+    int s = 0, e = 0;
+    if (a < N) { s = atom_off[a]; e = atom_off[a + 1]; }
+    for (int t = s + lane; t < e; t += nlanes) {
+        const int sl = atom_slots[t];
+        gx += slot_g[3*sl];
+        gy += slot_g[3*sl + 1];
+        gz += slot_g[3*sl + 2];
+    }
+    __shared__ double sgx[256], sgy[256], sgz[256];
+    sgx[lane] = gx; sgy[lane] = gy; sgz[lane] = gz;
+    __syncthreads();
+    for (int stride = nlanes >> 1; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            sgx[lane] += sgx[lane + stride];
+            sgy[lane] += sgy[lane + stride];
+            sgz[lane] += sgz[lane + stride];
+        }
+        __syncthreads();
+    }
+    if (lane == 0 && a < N && e > s)
+        add_grad(grad, a, sgx[0], sgy[0], sgz[0]);
+}
+
 // ============================================================================
 // Kernel 2b: Repulsion with FP32 intermediates (mixed precision)
 // Claude Generated (March 2026): Halves register pressure for intermediates.
@@ -2268,6 +2390,25 @@ __global__ void k_gather_hb_charges(
     }
 }
 
+// Claude Generated (Oct 2026): per-triple charge scaling factors Q_H, Q_A, Q_B of k_hbonds, formed once per
+// charge upload (the HB charges are frozen at topology build, or refreshed by k_gather_hb_charges) instead of
+// three exp per triple and step. Same function and arguments as in k_hbonds.
+/// @param n          number of HB triples
+/// @param q_H,q_A,q_B [n] HB charges per triple
+/// @param Qs_H,Qs_A,Qs_B [n] output: d_charge_scaling(q_H), d_charge_scaling(-q_A), d_charge_scaling(-q_B)
+__global__ void k_hb_charge_scaling(
+    int n,
+    const double* __restrict__ q_H, const double* __restrict__ q_A, const double* __restrict__ q_B,
+    double* __restrict__ Qs_H, double* __restrict__ Qs_A, double* __restrict__ Qs_B)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < n) {
+        Qs_H[tid] = d_charge_scaling(q_H[tid], 15.0, 1.0);    // HB_ST_D, HB_SF_D of k_hbonds
+        Qs_A[tid] = d_charge_scaling(-q_A[tid], 15.0, 1.0);
+        Qs_B[tid] = d_charge_scaling(-q_B[tid], 15.0, 1.0);
+    }
+}
+
 __global__ void k_hbonds(
     int n,
     const int*    __restrict__ idx_i,
@@ -2295,13 +2436,25 @@ __global__ void k_hbonds(
     const double* __restrict__ cx,
     const double* __restrict__ cy,
     const double* __restrict__ cz,
+    const int*    __restrict__ slot_off,
+    double*       __restrict__ slot_g,
+    const double* __restrict__ Qs_H,
+    const double* __restrict__ Qs_A,
+    const double* __restrict__ Qs_B,
     double*                    grad,
     double*                    energy)
 {
+    // Claude Generated (Oct 2026): slot mode (slot_g != nullptr). Instead of FP64 atomicAdd into grad (a CAS
+    // loop on gfx1200; the triples of one H/A sit next to each other, so the lanes of a wavefront collide),
+    // every gradient contribution is stored in this triple's own slots [slot_off[tid], slot_off[tid+1]):
+    // A, H, B, neighbours of B (case >= 2), then C and the neighbours of C (case 3 with a parent). Each slot
+    // is written by this thread only; k_slot_gather sums them per atom. Inactive triples zero their slots.
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     double local_E = 0.0;
+    bool slots_written = false;
 
     if (tid < n) {
+    const int sbase = slot_g ? slot_off[tid] : 0;
 
     // Constants
     const double HB_SCUT_D = 22.0;
@@ -2340,9 +2493,10 @@ __global__ void k_hbonds(
     double r_HB_4 = r2HB * r2HB;
     double denom_DA = 1.0 / (r_AH_4 + r_HB_4);
 
-    double Q_H = d_charge_scaling(q_H[tid], HB_ST_D, HB_SF_D);
-    double Q_A = d_charge_scaling(-q_A[tid], HB_ST_D, HB_SF_D);
-    double Q_B = d_charge_scaling(-q_B[tid], HB_ST_D, HB_SF_D);
+    // Claude Generated (Oct 2026): Qs_* (k_hb_charge_scaling, same function) when given: 3 exp per triple fewer.
+    double Q_H = Qs_H ? Qs_H[tid] : d_charge_scaling(q_H[tid], HB_ST_D, HB_SF_D);
+    double Q_A = Qs_A ? Qs_A[tid] : d_charge_scaling(-q_A[tid], HB_ST_D, HB_SF_D);
+    double Q_B = Qs_B ? Qs_B[tid] : d_charge_scaling(-q_B[tid], HB_ST_D, HB_SF_D);
 
     double bas = (Q_A * basicity_A[tid] * r_AH_4 + Q_B * basicity_B[tid] * r_HB_4) * denom_DA;
     double aci = (acidity_B[tid] * r_AH_4 + acidity_A[tid] * r_HB_4) * denom_DA;
@@ -2351,8 +2505,18 @@ __global__ void k_hbonds(
     double r_vdw_AB = ((eA >= 0 && eA < 100) ? d_cov_radii[eA] : 1.0)
                     + ((eB >= 0 && eB < 100) ? d_cov_radii[eB] : 1.0);
 
-    double damp_short = d_damping_short_range(r_AB, r_vdw_AB, HB_SCUT_D, HB_ALP_D);
-    double damp_long = d_damping_long_range(r_AB, HB_LONGCUT_D, HB_ALP_D);
+    // Claude Generated (Oct 2026): d_damping_short_range / d_damping_long_range written out so that the
+    // gradient reuses (scut r_vdw / r^2)^6 and (r^2 / longcut)^6 instead of recomputing them (same operations,
+    // same values bitwise).
+    double p_short = 1.0, p_long = 1.0;
+    {
+        const double rr = r_AB * r_AB;
+        const double ratio_s = HB_SCUT_D * r_vdw_AB / rr;
+        const double ratio_l = rr / HB_LONGCUT_D;
+        for (int i = 0; i < (int)HB_ALP_D; ++i) { p_short *= ratio_s; p_long *= ratio_l; }
+    }
+    double damp_short = 1.0 / (1.0 + p_short);
+    double damp_long = 1.0 / (1.0 + p_long);
     double damp_env = damp_short * damp_long;
 
     // Out-of-line damping
@@ -2360,9 +2524,14 @@ __global__ void k_hbonds(
     double expo = (HB_BACUT_D / r_vdw_AB) * (rahprbh / r_AB - 1.0);
 
     if (expo <= 15.0) {
-    double damp_outl = 2.0 / (1.0 + exp(expo));
+    const double exp_expo = exp(expo);   // also ratio2 of the gradient
+    double damp_outl = 2.0 / (1.0 + exp_expo);
 
     // Neighbor out-of-line (Case >= 2)
+    // Claude Generated (Oct 2026): |A - nb| and |B - nb| of the first HB_NB_CACHE neighbours are kept for the
+    // gradient loop below (same values bitwise: the difference vectors there are the negated ones).
+    constexpr int HB_NB_CACHE = 4;
+    double c_ranb[HB_NB_CACHE], c_rbnb[HB_NB_CACHE];
     double outl_nb_tot = 1.0;
     if (ct >= 2) {
         int nb_off = nb_B_offset[tid];
@@ -2375,6 +2544,7 @@ __global__ void k_hbonds(
             double dBnb_x = nbx-bx, dBnb_y = nby-by, dBnb_z = nbz-bz;
             double r_Anb = sqrt(dAnb_x*dAnb_x + dAnb_y*dAnb_y + dAnb_z*dAnb_z);
             double r_Bnb = sqrt(dBnb_x*dBnb_x + dBnb_y*dBnb_y + dBnb_z*dBnb_z);
+            if (ni < HB_NB_CACHE) { c_ranb[ni] = r_Anb; c_rbnb[ni] = r_Bnb; }
             double expo_nb = (hbnbcut_save / r_vdw_AB) * ((r_Anb + r_Bnb) / r_AB - 1.0);
             outl_nb_tot *= (2.0 / (1.0 + exp(-expo_nb)) - 1.0);
         }
@@ -2383,7 +2553,7 @@ __global__ void k_hbonds(
     // Case 4: Virtual LP — save state for gradient
     double outl_lp = 1.0;
     double lp_dist_c4 = 0, lp_vx_c4 = 0, lp_vy_c4 = 0, lp_vz_c4 = 0;
-    double vnorm_c4 = 0, ralp_c4 = 0, expo_lp_c4 = 0;
+    double vnorm_c4 = 0, ralp_c4 = 0, expo_lp_c4 = 0, exp_lp_c4 = 0;   // exp_lp_c4: Oct 2026, reused by the gradient
     double lpx_c4 = 0, lpy_c4 = 0, lpz_c4 = 0;
     int nbb_lp_c4 = 0;
     if (ct == 4) {
@@ -2406,7 +2576,8 @@ __global__ void k_hbonds(
                 double dAlp_x = ax - lpx_c4, dAlp_y = ay - lpy_c4, dAlp_z = az - lpz_c4;
                 ralp_c4 = sqrt(dAlp_x*dAlp_x + dAlp_y*dAlp_y + dAlp_z*dAlp_z);
                 expo_lp_c4 = (HBLPCUT_D / r_vdw_AB) * ((ralp_c4 + lp_dist_c4 + 1e-12) / r_AB - 1.0);
-                outl_lp = 2.0 / (1.0 + exp(expo_lp_c4));
+                exp_lp_c4 = exp(expo_lp_c4);
+                outl_lp = 2.0 / (1.0 + exp_lp_c4);
             } else {
                 nbb_lp_c4 = 0;
             }
@@ -2495,15 +2666,13 @@ __global__ void k_hbonds(
     double rbh2 = r_HB * r_HB;
     double rah2 = r_AH * r_AH;
 
-    // Damping derivative intermediates
-    double ratio1_pow = 1.0;
-    { double ratio1 = rab2 / HB_LONGCUT_D; for (int p=0; p<(int)HB_ALP_D; ++p) ratio1_pow *= ratio1; }
-    double ratio3_pow = 1.0;
-    { double shortcut = HB_SCUT_D * r_vdw_AB; double ratio3 = shortcut / rab2; for (int p=0; p<(int)HB_ALP_D; ++p) ratio3_pow *= ratio3; }
+    // Damping derivative intermediates (Oct 2026: the powers and exp(expo) come from the energy part)
+    const double ratio1_pow = p_long;    // (rab2 / longcut)^6
+    const double ratio3_pow = p_short;   // (scut r_vdw / rab2)^6
     double ddamp = (-2.0 * HB_ALP_D * ratio1_pow / (1.0 + ratio1_pow))
                  + ( 2.0 * HB_ALP_D * ratio3_pow / (1.0 + ratio3_pow));
 
-    double ratio2 = exp(expo);
+    const double ratio2 = exp_expo;
 
     // Distance vectors (Fortran convention: A-B, A-H, B-H)
     double drab_x = ax-bx, drab_y = ay-by, drab_z = az-bz;
@@ -2564,8 +2733,12 @@ __global__ void k_hbonds(
                 double nbx = cx[nb], nby = cy[nb], nbz = cz[nb];
                 double dranb_x = ax-nbx, dranb_y = ay-nby, dranb_z = az-nbz;
                 double drbnb_x = bx-nbx, drbnb_y = by-nby, drbnb_z = bz-nbz;
-                double ranb = sqrt(dranb_x*dranb_x + dranb_y*dranb_y + dranb_z*dranb_z);
-                double rbnb = sqrt(drbnb_x*drbnb_x + drbnb_y*drbnb_y + drbnb_z*drbnb_z);
+                double ranb, rbnb;
+                if (ni < HB_NB_CACHE) { ranb = c_ranb[ni]; rbnb = c_rbnb[ni]; }
+                else {
+                    ranb = sqrt(dranb_x*dranb_x + dranb_y*dranb_y + dranb_z*dranb_z);
+                    rbnb = sqrt(drbnb_x*drbnb_x + drbnb_y*drbnb_y + drbnb_z*drbnb_z);
+                }
                 double ranbprbnb = ranb + rbnb + 1e-12;
 
                 double expo_nb_i = (hbnbcut_g / r_vdw_AB) * (ranbprbnb / r_AB - 1.0);
@@ -2588,7 +2761,12 @@ __global__ void k_hbonds(
                 gi_nb = tmp2 / rbnb;
                 double dgb_nb_x = gi_nb * drbnb_x, dgb_nb_y = gi_nb * drbnb_y, dgb_nb_z = gi_nb * drbnb_z;
                 gb_x += dgb_nb_x; gb_y += dgb_nb_y; gb_z += dgb_nb_z;
-                add_grad(grad, nb, -dga_nb_x - dgb_nb_x, -dga_nb_y - dgb_nb_y, -dga_nb_z - dgb_nb_z);
+                if (slot_g) {
+                    double* g = slot_g + 3 * (sbase + 3 + ni);   // first write of this slot
+                    g[0] = -dga_nb_x - dgb_nb_x; g[1] = -dga_nb_y - dgb_nb_y; g[2] = -dga_nb_z - dgb_nb_z;
+                } else {
+                    add_grad(grad, nb, -dga_nb_x - dgb_nb_x, -dga_nb_y - dgb_nb_y, -dga_nb_z - dgb_nb_z);
+                }
             }
         }
 
@@ -2646,7 +2824,14 @@ __global__ void k_hbonds(
 
             // gangl_3body: row0=B, row1=C, row2=H
             gb_x += bterm_c3 * dedb_x; gb_y += bterm_c3 * dedb_y; gb_z += bterm_c3 * dedb_z;
-            add_grad(grad, C_idx, bterm_c3 * (-deda_x), bterm_c3 * (-deda_y), bterm_c3 * (-deda_z));
+            // Slot mode: C sits after the nb_B slots, its neighbours D follow (same order as nb_C_flat).
+            const int sC = sbase + 3 + nb_B_count[tid];
+            if (slot_g) {
+                double* g = slot_g + 3 * sC;   // first write of the C slot
+                g[0] = bterm_c3 * (-deda_x); g[1] = bterm_c3 * (-deda_y); g[2] = bterm_c3 * (-deda_z);
+            } else {
+                add_grad(grad, C_idx, bterm_c3 * (-deda_x), bterm_c3 * (-deda_y), bterm_c3 * (-deda_z));
+            }
             gh_x += bterm_c3 * (-dedc_x); gh_y += bterm_c3 * (-dedc_y); gh_z += bterm_c3 * (-dedc_z);
 
             // Torsion gradient: D-B-C-H for each neighbor of C
@@ -2658,7 +2843,13 @@ __global__ void k_hbonds(
             // We need etors/et_k for each k, so we need individual et values
             for (int ni = 0; ni < nc_cnt; ++ni) {
                 int D_idx = nb_C_flat[nc_off + ni];
-                if (D_idx == B) continue;
+                if (D_idx == B) {
+                    if (slot_g) {
+                        double* g = slot_g + 3 * (sC + 1 + ni);
+                        g[0] = 0.0; g[1] = 0.0; g[2] = 0.0;
+                    }
+                    continue;
+                }
 
                 double derivate[4][3];
                 double phi = dihedral_angle_grad(cx, cy, cz, D_idx, B, C_idx, H, derivate, true);
@@ -2674,9 +2865,16 @@ __global__ void k_hbonds(
                 double factor_k = (fabs(et) > 1e-12) ? etors / et : 0.0;
                 double t_k = factor_k * tterm_c3;
 
-                add_grad(grad, D_idx, t_k * dij * derivate[0][0], t_k * dij * derivate[0][1], t_k * dij * derivate[0][2]);
+                if (slot_g) {
+                    double* gD = slot_g + 3 * (sC + 1 + ni);
+                    gD[0] = t_k * dij * derivate[0][0]; gD[1] = t_k * dij * derivate[0][1]; gD[2] = t_k * dij * derivate[0][2];
+                    double* gC = slot_g + 3 * sC;
+                    gC[0] += t_k * dij * derivate[2][0]; gC[1] += t_k * dij * derivate[2][1]; gC[2] += t_k * dij * derivate[2][2];
+                } else {
+                    add_grad(grad, D_idx, t_k * dij * derivate[0][0], t_k * dij * derivate[0][1], t_k * dij * derivate[0][2]);
+                    add_grad(grad, C_idx, t_k * dij * derivate[2][0], t_k * dij * derivate[2][1], t_k * dij * derivate[2][2]);
+                }
                 gb_x += t_k * dij * derivate[1][0]; gb_y += t_k * dij * derivate[1][1]; gb_z += t_k * dij * derivate[1][2];
-                add_grad(grad, C_idx, t_k * dij * derivate[2][0], t_k * dij * derivate[2][1], t_k * dij * derivate[2][2]);
                 gh_x += t_k * dij * derivate[3][0]; gh_y += t_k * dij * derivate[3][1]; gh_z += t_k * dij * derivate[3][2];
             }
         }
@@ -2686,7 +2884,7 @@ __global__ void k_hbonds(
             double lpterm = -rdamp * Q_H * damp_outl * outl_nb_tot * eangl * etors * const_val;
             double rblp = lp_dist_c4;
             double ralpprblp = ralp_c4 + rblp + 1e-12;
-            double ratio2_lp = exp(expo_lp_c4);
+            double ratio2_lp = exp_lp_c4;   // nbb_lp_c4 > 0 implies it was set in the energy part
 
             // LP out-of-line: rab
             double tmp3 = -2.0 * lpterm * ratio2_lp * expo_lp_c4
@@ -2734,8 +2932,13 @@ __global__ void k_hbonds(
                 double gnb_share_z = gnb_z / (double)nbb_lp_c4;
                 int nb_off = nb_B_offset[tid];
                 for (int ni = 0; ni < nbb_lp_c4; ++ni) {
-                    int nb = nb_B_flat[nb_off + ni];
-                    add_grad(grad, nb, -gnb_share_x, -gnb_share_y, -gnb_share_z);
+                    if (slot_g) {
+                        double* g = slot_g + 3 * (sbase + 3 + ni);   // already written by the out-of-line loop
+                        g[0] += -gnb_share_x; g[1] += -gnb_share_y; g[2] += -gnb_share_z;
+                    } else {
+                        int nb = nb_B_flat[nb_off + ni];
+                        add_grad(grad, nb, -gnb_share_x, -gnb_share_y, -gnb_share_z);
+                    }
                 }
             }
         }
@@ -2796,12 +2999,27 @@ __global__ void k_hbonds(
         gh_x += -dga_o_x - dgb_o_x; gh_y += -dga_o_y - dgb_o_y; gh_z += -dga_o_z - dgb_o_z;
     }
 
-    add_grad(grad, A, ga_x, ga_y, ga_z);
-    add_grad(grad, B, gb_x, gb_y, gb_z);
-    add_grad(grad, H, gh_x, gh_y, gh_z);
+    if (slot_g) {
+        double* g = slot_g + 3 * sbase;   // slots 0, 1, 2 = A, H, B
+        g[0] = ga_x; g[1] = ga_y; g[2] = ga_z;
+        g[3] = gh_x; g[4] = gh_y; g[5] = gh_z;
+        g[6] = gb_x; g[7] = gb_y; g[8] = gb_z;
+        slots_written = true;
+    } else {
+        add_grad(grad, A, ga_x, ga_y, ga_z);
+        add_grad(grad, B, gb_x, gb_y, gb_z);
+        add_grad(grad, H, gh_x, gh_y, gh_z);
+    }
 
     } // expo <= 15.0
     } // r_AB in range
+
+    // Slot mode: a triple outside the range contributes nothing; clear its slots.
+    if (slot_g && !slots_written) {
+        for (int s = sbase; s < slot_off[tid + 1]; ++s) {
+            slot_g[3*s] = 0.0; slot_g[3*s + 1] = 0.0; slot_g[3*s + 2] = 0.0;
+        }
+    }
     } // tid < n
 
     blockReduceAddEnergy(local_E, energy);
@@ -4176,6 +4394,26 @@ static void checkCuda(hipError_t err, const char* msg) {
         throw std::runtime_error(std::string(msg) + ": " + hipGetErrorString(err));
 }
 
+// Claude Generated (Oct 2026): atomic-free gather tables of the ROCm backend (FP64 atomicAdd is a CAS loop on gfx1200).
+/// Directed-edge CSR of the non-bonded repulsion list for k_repulsion_gather (rebuilt with the list).
+struct HipPairGatherCSR {
+    CudaBuffer<int> off;      ///< [N+1] row offsets
+    CudaBuffer<int> partner;  ///< [2n] partner atom per directed edge
+    CudaBuffer<int> pairidx;  ///< [2n] pair index into the RepulsionSoA arrays
+    int N = 0;
+};
+/// Per-triple gradient slots of the H-bond list for k_hbonds slot mode + k_slot_gather (rebuilt with the list).
+struct HipHBSlotTables {
+    CudaBuffer<int>    slot_off;    ///< [n+1] slot range per triple: A, H, B, nb(B) (case >= 2), C + nb(C) (case 3)
+    CudaBuffer<int>    atom_off;    ///< [N+1] row offsets into atom_slots
+    CudaBuffer<int>    atom_slots;  ///< [nslots] slot indices grouped by atom
+    CudaBuffer<double> slot_g;      ///< [3*nslots] per-slot gradient written by k_hbonds
+    CudaBuffer<double> Qs_H, Qs_A, Qs_B;  ///< [n] charge scaling per triple (k_hb_charge_scaling)
+    int nslots = 0;
+    int N = 0;
+    int nq = 0;                     ///< triples covered by Qs_* (0: k_hbonds computes the scaling itself)
+};
+
 // ============================================================================
 // SoA upload implementations (declared in gfnff_soa.h)
 // ============================================================================
@@ -4603,12 +4841,76 @@ void XBondSoA::upload(const std::vector<GFNFFHalogenBond>& v,
 }
 
 // ---------------------------------------------------------------------------
+/// Claude Generated (Oct 2026): per-triple slot ranges and the per-atom slot CSR for k_hbonds slot mode, built
+/// from the host SoA arrays of fillHBondSoA (device order). Slot order per triple must match k_hbonds: A, H, B,
+/// then nb(B) if case >= 2, then C and nb(C) if case == 3 and the parent index is >= 0. Slots whose atom is
+/// outside [0, natoms) are not gathered.
+static void buildHBSlotTables(int n, const std::vector<int>& h_i, const std::vector<int>& h_j, const std::vector<int>& h_k,
+                              const std::vector<int>& h_case,
+                              const std::vector<int>& nbB_off, const std::vector<int>& nbB_cnt, const std::vector<int>& nbB_flat,
+                              const std::vector<int>& acc_parent,
+                              const std::vector<int>& nbC_off, const std::vector<int>& nbC_cnt, const std::vector<int>& nbC_flat,
+                              int natoms, HipHBSlotTables& T)
+{
+    T.N = natoms;
+    std::vector<int> slot_off(n + 1, 0);
+    int tot = 0;
+    for (int m = 0; m < n; ++m) {
+        slot_off[m] = tot;
+        tot += 3 + (h_case[m] >= 2 ? nbB_cnt[m] : 0)
+                 + ((h_case[m] == 3 && acc_parent[m] >= 0) ? 1 + nbC_cnt[m] : 0);
+    }
+    slot_off[n] = tot;
+    T.nslots = tot;
+    std::vector<int> slot_atom(tot);
+    for (int m = 0; m < n; ++m) {
+        int q = slot_off[m];
+        slot_atom[q++] = h_i[m]; slot_atom[q++] = h_j[m]; slot_atom[q++] = h_k[m];
+        if (h_case[m] >= 2)
+            for (int t = 0; t < nbB_cnt[m]; ++t) slot_atom[q++] = nbB_flat[nbB_off[m] + t];
+        if (h_case[m] == 3 && acc_parent[m] >= 0) {
+            slot_atom[q++] = acc_parent[m];
+            for (int t = 0; t < nbC_cnt[m]; ++t) slot_atom[q++] = nbC_flat[nbC_off[m] + t];
+        }
+    }
+    std::vector<int> atom_off(natoms + 1, 0);
+    for (int a : slot_atom)
+        if (a >= 0 && a < natoms) ++atom_off[a + 1];
+    for (int a = 0; a < natoms; ++a) atom_off[a + 1] += atom_off[a];
+    std::vector<int> atom_slots(atom_off[natoms]);
+    std::vector<int> cur(atom_off.begin(), atom_off.end() - 1);
+    for (int q = 0; q < tot; ++q) {
+        const int a = slot_atom[q];
+        if (a >= 0 && a < natoms) atom_slots[cur[a]++] = q;
+    }
+    T.slot_off.upload(slot_off);
+    T.atom_off.upload(atom_off);
+    if (!atom_slots.empty()) T.atom_slots.upload(atom_slots);
+    if (T.slot_g.n < 3 * tot) T.slot_g.alloc(3 * (tot + tot / 8));   // headroom: the list grows and shrinks between refreshes
+}
+
+// Claude Generated (Oct 2026): body of HBondSoA::upload with an optional permutation: device triple m is
+// v[perm[m]] (perm == nullptr: identity). Used to group the triples by case type (fillHBondSoA callers).
+static void fillHBondSoA(HBondSoA& s, const std::vector<GFNFFHydrogenBond>& vin, const int* perm,
+                         const std::vector<int>& atom_types, hipStream_t stream,
+                         HipHBSlotTables* T = nullptr, int natoms = 0);
+
 void HBondSoA::upload(const std::vector<GFNFFHydrogenBond>& v,
                        const std::vector<int>& atom_types,
                        hipStream_t stream)
 {
-    n = static_cast<int>(v.size());
+    fillHBondSoA(*this, v, nullptr, atom_types, stream);
+}
+
+static void fillHBondSoA(HBondSoA& s, const std::vector<GFNFFHydrogenBond>& vin, const int* perm,
+                         const std::vector<int>& atom_types, hipStream_t stream,
+                         HipHBSlotTables* T, int natoms)
+{
+    int& n = s.n;
+    n = static_cast<int>(vin.size());
+    if (T) { T->nslots = 0; T->N = natoms; }   // Oct 2026: an empty list must not gather stale slots
     if (n == 0) return;
+    const std::vector<GFNFFHydrogenBond>& v = vin;   // packed in list order, permuted below
 
     const int nat = static_cast<int>(atom_types.size());
     std::vector<int>    h_i(n), h_j(n), h_k(n);
@@ -4664,24 +4966,41 @@ void HBondSoA::upload(const std::vector<GFNFFHydrogenBond>& v,
         for (int nb : v[m].neighbors_C) h_nbC_flat[offC++] = nb;
     }
 
-    total_nb_B = total_B;
-    total_nb_C = total_C;
+    s.total_nb_B = total_B;
+    s.total_nb_C = total_C;
 
-    idx_i.upload(h_i, stream);  idx_j.upload(h_j, stream);  idx_k.upload(h_k, stream);
-    elem_A.upload(h_eA, stream);  elem_B.upload(h_eB, stream);
-    q_H.upload(h_qH, stream);  q_A.upload(h_qA, stream);  q_B.upload(h_qB, stream);
-    basicity_A.upload(h_basA, stream);  basicity_B.upload(h_basB, stream);
-    acidity_A.upload(h_aciA, stream);   acidity_B.upload(h_aciB, stream);
-    r_cut.upload(h_rcut, stream);
-    case_type.upload(h_case, stream);
-    nb_B_offset.upload(h_nbB_offset, stream);
-    nb_B_count.upload(h_nbB_count, stream);
-    if (total_B > 0) nb_B_flat.upload(h_nbB_flat, stream);
-    acceptor_parent.upload(h_acc_parent, stream);
-    nb_C_offset.upload(h_nbC_offset, stream);
-    nb_C_count.upload(h_nbC_count, stream);
-    if (total_C > 0) nb_C_flat.upload(h_nbC_flat, stream);
-    repz_B.upload(h_repz, stream);
+    // Claude Generated (Oct 2026): device triple m = list triple perm[m]. Only the per-triple arrays are
+    // permuted; nb_B_flat / nb_C_flat stay in list order (each triple carries its own offset and count).
+    if (perm) {
+        auto permute = [&](auto& a) {
+            std::remove_reference_t<decltype(a)> t(a.size());
+            for (int m = 0; m < n; ++m) t[m] = a[perm[m]];
+            a.swap(t);
+        };
+        permute(h_i); permute(h_j); permute(h_k); permute(h_eA); permute(h_eB); permute(h_case);
+        permute(h_qH); permute(h_qA); permute(h_qB); permute(h_basA); permute(h_basB); permute(h_aciA); permute(h_aciB);
+        permute(h_rcut); permute(h_nbB_offset); permute(h_nbB_count); permute(h_acc_parent);
+        permute(h_nbC_offset); permute(h_nbC_count); permute(h_repz);
+    }
+
+    s.idx_i.upload(h_i, stream);  s.idx_j.upload(h_j, stream);  s.idx_k.upload(h_k, stream);
+    s.elem_A.upload(h_eA, stream);  s.elem_B.upload(h_eB, stream);
+    s.q_H.upload(h_qH, stream);  s.q_A.upload(h_qA, stream);  s.q_B.upload(h_qB, stream);
+    s.basicity_A.upload(h_basA, stream);  s.basicity_B.upload(h_basB, stream);
+    s.acidity_A.upload(h_aciA, stream);   s.acidity_B.upload(h_aciB, stream);
+    s.r_cut.upload(h_rcut, stream);
+    s.case_type.upload(h_case, stream);
+    s.nb_B_offset.upload(h_nbB_offset, stream);
+    s.nb_B_count.upload(h_nbB_count, stream);
+    if (total_B > 0) s.nb_B_flat.upload(h_nbB_flat, stream);
+    s.acceptor_parent.upload(h_acc_parent, stream);
+    s.nb_C_offset.upload(h_nbC_offset, stream);
+    s.nb_C_count.upload(h_nbC_count, stream);
+    if (total_C > 0) s.nb_C_flat.upload(h_nbC_flat, stream);
+    s.repz_B.upload(h_repz, stream);
+
+    if (T) buildHBSlotTables(n, h_i, h_j, h_k, h_case, h_nbB_offset, h_nbB_count, h_nbB_flat,
+                             h_acc_parent, h_nbC_offset, h_nbC_count, h_nbC_flat, natoms, *T);
 }
 
 // ============================================================================
@@ -4709,6 +5028,14 @@ struct FFWorkspaceHipImpl {
     ATMSoA         atm;             ///< Axilrod-Teller-Muto 3-body dispersion
     XBondSoA       xbonds;          ///< Halogen bonds
     HBondSoA       hbonds;          ///< Hydrogen bonds
+
+    // Claude Generated (Oct 2026): atomic-free gather tables (FP64 atomicAdd is a CAS loop on gfx1200).
+    using PairGatherCSR = HipPairGatherCSR;
+    using HBSlotTables  = HipHBSlotTables;
+    PairGatherCSR nb_rep_csr;
+    HBSlotTables hb_slots;
+    bool rep_gather_enabled = true;  ///< CURCUMA_ROCM_REP_GATHER=0 restores the pair kernel k_repulsion (non-bonded list)
+    bool hb_gather_enabled  = true;  ///< CURCUMA_ROCM_HB_GATHER=0 restores k_hbonds with atomicAdd
 
     // Dynamic buffers (reset + upload each calculation step)
     CoordSoA    coords;      ///< Current geometry SoA (x[N], y[N], z[N]) — Phase 10, March 2026
@@ -4875,6 +5202,69 @@ struct FFWorkspaceHipImpl {
     hipEvent_t     event_p2_pairwise             = nullptr;
     hipEvent_t     event_p2_upload               = nullptr;
 };
+
+/// Claude Generated (Oct 2026): directed-edge CSR of a repulsion pair list for k_repulsion_gather.
+/// Pair k = (i, j) becomes the edges i -> j and j -> i, both carrying k; rows keep the list order.
+/// Pairs with an atom index outside [0, natoms) are left out (the pair kernel would read out of bounds).
+static void buildRepulsionGatherCSR(const std::vector<GFNFFRepulsion>& v, int natoms,
+                                    FFWorkspaceHipImpl::PairGatherCSR& c)
+{
+    c.N = natoms;
+    const int n = static_cast<int>(v.size());
+    auto ok = [natoms](int a) { return a >= 0 && a < natoms; };
+    std::vector<int> off(natoms + 1, 0);
+    for (int k = 0; k < n; ++k)
+        if (ok(v[k].i) && ok(v[k].j)) { ++off[v[k].i + 1]; ++off[v[k].j + 1]; }
+    for (int a = 0; a < natoms; ++a) off[a + 1] += off[a];
+    const int tot = off[natoms];
+    std::vector<int> part(tot), pidx(tot);
+    std::vector<int> cur(off.begin(), off.end() - 1);
+    for (int k = 0; k < n; ++k) {
+        const int i = v[k].i, j = v[k].j;
+        if (!ok(i) || !ok(j)) continue;
+        int pi = cur[i]++; part[pi] = j; pidx[pi] = k;
+        int pj = cur[j]++; part[pj] = i; pidx[pj] = k;
+    }
+    c.off.upload(off);
+    if (tot > 0) { c.partner.upload(part); c.pairidx.upload(pidx); }
+}
+
+/// Claude Generated (Oct 2026): device order of the H-bond triples, grouped by case type (stable within a case).
+/// k_hbonds branches on the case (case 1 gradient, neighbour loops for case >= 2, angle and torsions for case 3);
+/// in list order the cases alternate every ~4 triples (urea400-water1000), so most wavefronts ran every branch.
+static std::vector<int> hbCasePermutation(const std::vector<GFNFFHydrogenBond>& v)
+{
+    // Counting sort on the case type (one sequential pass to count, one to place): stable, O(n). A comparison
+    // sort over the ~180-byte structs cost tens of ms per HB list refresh at 582k triples.
+    const int n = static_cast<int>(v.size());
+    std::vector<int> ct(n);
+    int ct_max = 0;
+    for (int m = 0; m < n; ++m) { ct[m] = std::max(0, v[m].case_type); ct_max = std::max(ct_max, ct[m]); }
+    std::vector<int> start(ct_max + 2, 0);
+    for (int m = 0; m < n; ++m) ++start[ct[m] + 1];
+    for (int c = 0; c <= ct_max; ++c) start[c + 1] += start[c];
+    std::vector<int> perm(n);
+    for (int m = 0; m < n; ++m) perm[start[ct[m]]++] = m;
+    return perm;
+}
+
+/// Claude Generated (Oct 2026): fill the per-triple charge scaling factors (k_hb_charge_scaling) for the current
+/// HB charges; synchronises impl.stream so that the next k_hbonds launch (stream C) sees them.
+static void updateHBChargeScaling(FFWorkspaceHipImpl& impl)
+{
+    auto& T = impl.hb_slots;
+    T.nq = 0;
+    if (!impl.hb_gather_enabled || impl.hbonds.n <= 0)
+        return;
+    const int n = impl.hbonds.n;
+    T.Qs_H.ensure(n); T.Qs_A.ensure(n); T.Qs_B.ensure(n);
+    k_hb_charge_scaling<<<(n + 255) / 256, 256, 0, impl.stream>>>(
+        n, impl.hbonds.q_H.ptr, impl.hbonds.q_A.ptr, impl.hbonds.q_B.ptr,
+        T.Qs_H.ptr, T.Qs_A.ptr, T.Qs_B.ptr);
+    checkCuda(hipGetLastError(), "k_hb_charge_scaling launch");
+    checkCuda(hipStreamSynchronize(impl.stream), "k_hb_charge_scaling sync");
+    T.nq = n;
+}
 
 // ============================================================================
 // FFWorkspaceHip Constructor
@@ -5079,6 +5469,15 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
     m_impl->disp_uv_valid = false; m_impl->disp_pair_c6_current = true;  // Oct 2026: new pair list, d_disp_uv stale
     m_impl->bonded_rep.upload(params.bonded_repulsions, stream);
     m_impl->nonbonded_rep.upload(params.nonbonded_repulsions, stream);
+    // Claude Generated (Oct 2026): atomic-free gathers for the non-bonded repulsion and the H bonds.
+    {
+        const char* env_rep = std::getenv("CURCUMA_ROCM_REP_GATHER");
+        const char* env_hb  = std::getenv("CURCUMA_ROCM_HB_GATHER");
+        m_impl->rep_gather_enabled = !(env_rep && std::string(env_rep) == "0");
+        m_impl->hb_gather_enabled  = !(env_hb  && std::string(env_hb)  == "0");
+    }
+    if (m_impl->rep_gather_enabled)
+        buildRepulsionGatherCSR(params.nonbonded_repulsions, natoms, m_impl->nb_rep_csr);
     m_impl->coulomb.upload(params.coulombs, natoms, stream);
     if (params.coulomb_implicit && params.coul_self_alp.size() == natoms) {
         m_impl->coulomb_implicit = true;
@@ -5095,7 +5494,14 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
     m_impl->atm.upload(params.atm_triples, atom_types, stream);
     m_impl->xbonds.upload(params.xbonds, atom_types, stream);
     m_last_xbonds = params.xbonds;   // init CPU mirror for debug comparison
-    m_impl->hbonds.upload(params.hbonds, atom_types, stream);
+    if (m_impl->hb_gather_enabled) {
+        // Claude Generated (Oct 2026): triples grouped by case type, slot tables in the same order
+        const std::vector<int> perm = hbCasePermutation(params.hbonds);
+        fillHBondSoA(m_impl->hbonds, params.hbonds, perm.data(), atom_types, stream, &m_impl->hb_slots, natoms);
+    } else {
+        m_impl->hbonds.upload(params.hbonds, atom_types, stream);
+    }
+    updateHBChargeScaling(*m_impl);   // Claude Generated (Oct 2026)
     m_last_hbonds = params.hbonds;   // init CPU mirror for debug comparison
 
     // --- Allocate dynamic per-step buffers ---
@@ -5511,7 +5917,14 @@ void FFWorkspaceHip::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
     // Re-upload HBond SoA after dynamic re-detection.
     // Claude Generated (March 2026): Needed because updateHBXBIfNeeded() may find
     // additional HBonds on re-detection that weren't in the initial parameter set.
-    m_impl->hbonds.upload(hbonds, atom_types, m_impl->stream);
+    if (m_impl->hb_gather_enabled) {
+        // Claude Generated (Oct 2026): triples grouped by case type, slot tables in the same order
+        const std::vector<int> perm = hbCasePermutation(hbonds);
+        fillHBondSoA(m_impl->hbonds, hbonds, perm.data(), atom_types, m_impl->stream, &m_impl->hb_slots, m_natoms);
+    } else {
+        m_impl->hbonds.upload(hbonds, atom_types, m_impl->stream);
+    }
+    updateHBChargeScaling(*m_impl);   // Claude Generated (Oct 2026)
     // Store for CPU vs GPU comparison debugging
     m_last_hbonds = hbonds;
 }
@@ -5531,6 +5944,8 @@ void FFWorkspaceHip::updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_r
     // for the ROCm plugin. See GFNFF::updateNonbondedRepulsionIfNeeded().
     m_impl->bonded_rep.upload(bonded_reps, m_impl->stream);
     m_impl->nonbonded_rep.upload(nonbonded_reps, m_impl->stream);
+    if (m_impl->rep_gather_enabled)
+        buildRepulsionGatherCSR(nonbonded_reps, m_natoms, m_impl->nb_rep_csr);   // Claude Generated (Oct 2026)
 }
 
 void FFWorkspaceHip::updateDispersion(const std::vector<GFNFFDispersion>& pairs)
@@ -6213,6 +6628,19 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
                 impl.coords.d_z.ptr,
                 impl.d_grad.ptr,
                 &impl.d_energies.ptr[impl.E_NBREP]);
+        } else if (impl.rep_gather_enabled && impl.nb_rep_csr.N == N) {
+            // Claude Generated (Oct 2026): per-atom gather, one workgroup of 64 lanes per atom (power of two
+            // for the tree reduction); no per-pair atomicAdd (a CAS loop on gfx1200).
+            k_repulsion_gather<<<std::max(1, N), 64, 0, sA>>>(
+                impl.nb_rep_csr.N,
+                impl.nb_rep_csr.off.ptr, impl.nb_rep_csr.partner.ptr, impl.nb_rep_csr.pairidx.ptr,
+                impl.nonbonded_rep.alpha.ptr, impl.nonbonded_rep.repab.ptr,
+                impl.nonbonded_rep.r_cut.ptr,
+                impl.coords.d_x.ptr,
+                impl.coords.d_y.ptr,
+                impl.coords.d_z.ptr,
+                impl.d_grad.ptr,
+                &impl.d_energies.ptr[impl.E_NBREP]);
         } else {
             k_repulsion<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
                 impl.nonbonded_rep.n,
@@ -6443,6 +6871,8 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     if (m_hbond_enabled) {
         // Phase 8: hbonds.n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.hbonds.n, m_block_size);
+        // Claude Generated (Oct 2026): slot mode (per-triple slots + per-atom gather) unless disabled.
+        const bool hb_slots = impl.hb_gather_enabled && impl.hb_slots.N == N && impl.hb_slots.nslots > 0;
         k_hbonds<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
             impl.hbonds.n,
             impl.hbonds.idx_i.ptr, impl.hbonds.idx_j.ptr, impl.hbonds.idx_k.ptr,
@@ -6461,8 +6891,18 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
             impl.coords.d_x.ptr,
             impl.coords.d_y.ptr,
             impl.coords.d_z.ptr,
+            hb_slots ? impl.hb_slots.slot_off.ptr : nullptr,
+            hb_slots ? impl.hb_slots.slot_g.ptr : nullptr,
+            (impl.hb_slots.nq == impl.hbonds.n) ? impl.hb_slots.Qs_H.ptr : nullptr,
+            (impl.hb_slots.nq == impl.hbonds.n) ? impl.hb_slots.Qs_A.ptr : nullptr,
+            (impl.hb_slots.nq == impl.hbonds.n) ? impl.hb_slots.Qs_B.ptr : nullptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_HBOND]);
+        if (hb_slots) {
+            k_slot_gather<<<std::max(1, N), 64, 0, sC>>>(
+                impl.hb_slots.N, impl.hb_slots.atom_off.ptr, impl.hb_slots.atom_slots.ptr,
+                impl.hb_slots.slot_g.ptr, impl.d_grad.ptr);
+        }
     }
     // Per-kernel snapshot: after all stream C kernels (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_sC.ptr) {
@@ -6522,6 +6962,7 @@ void FFWorkspaceHip::refreshHBChargesFromDevice()
         impl.d_charges.ptr,
         impl.hbonds.q_A.ptr, impl.hbonds.q_H.ptr, impl.hbonds.q_B.ptr);
     checkCuda(hipGetLastError(), "k_gather_hb_charges launch");
+    updateHBChargeScaling(impl);   // Claude Generated (Oct 2026): Q_* follow the refreshed charges (synchronises)
     // Ensure the q arrays are fully written before the next step's HB (Phase 1) reads them.
     hipStreamSynchronize(impl.stream);
 }
