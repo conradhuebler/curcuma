@@ -42,11 +42,16 @@ run() {   # run <log> <xyz> [args...]
     assert_exit_code $? 0 "curcuma -sp $XYZ $*"
 }
 
+# Since the SimpleMD output rework (origin/master, Oct 2026) the MD prints no calculator lines ("Final Energy", "SCF precond: ...")
+# any more: the first MD energy is Epot of the table row at t = 0, the cluster SCFs of the preconditioner build show in SCFTRACE.
+md_first_epot() { sed 's/\x1b\[[0-9;]*m//g' "$1" | grep -E '^ +0\.000000 ' | head -1 | awk '{print $2}'; }
+count_scf_starts() { sed 's/\x1b\[[0-9;]*m//g' "$1" | grep -c '^SCFTRACE iter 0 '; }
+
 first_energy() { sed 's/\x1b\[[0-9;]*m//g' "$1" | grep -oP 'Final Energy: \K[-0-9.]+' | head -1; }
 
 run_md() {   # run_md <name> [args...]: 5 fs NVE GFN2 MD, stdout and stderr to <name>.log
     local NAME=$1; shift
-    $CURCUMA -md ureawater197.xyz -method gfn2 -max_time 5 -time_step 1 -temperature 300 \
+    CURCUMA_SCF_TRACE=1 $CURCUMA -md ureawater197.xyz -method gfn2 -max_time 5 -time_step 1 -temperature 300 \
         -thermostat none -seed 42 -threads 1 -verbosity 2 -no_bmt "$@" > "$NAME.log" 2>&1
     assert_exit_code $? 0 "curcuma -md ureawater197.xyz $*"
 }
@@ -90,8 +95,16 @@ main() {
     # (d) MD on a structure where the guard fires: no error, same first energy
     run_md md_none
     run_md md_frag -scf_precond frag
-    assert_string_in_file "SCF precond: frag, 39 fragments" md_frag.log "MD frag: preconditioner built (39 fragments)"
-    local EF0=$(first_energy md_none.log); local EF1=$(first_energy md_frag.log)
+    local N0=$(count_scf_starts md_none.log); local N1=$(count_scf_starts md_frag.log)
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ "$((N1 - N0))" -eq 39 ]; then
+        echo -e "${GREEN}PASS${NC}: MD frag: preconditioner built (39 fragment SCFs more than without: $N1 against $N0 SCF starts)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo -e "${RED}FAIL${NC}: MD frag: expected 39 more SCF starts than without the switch (none $N0, frag $N1)"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+    local EF0=$(md_first_epot md_none.log); local EF1=$(md_first_epot md_frag.log)
     TESTS_RUN=$((TESTS_RUN + 1))
     if [ -n "$EF0" ] && [ -n "$EF1" ]; then
         echo -e "${GREEN}PASS${NC}: MD frag: first energies found ($EF0, $EF1)"
