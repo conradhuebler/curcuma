@@ -670,20 +670,6 @@ void XTB::computeMullikenChargeResponse(const Vector& dEdq, Matrix& grad_out) co
 /* ------------------------------------------------------------------ *
  *  SCC-map Jacobian by linear response (Claude Generated, Oct 2026)  *
  * ------------------------------------------------------------------ */
-Vector XTB::packSccVector() const
-{
-    const int nsh = m_basis.nsh;
-    const int nat = m_atomcount;
-    if (m_method != MethodType::GFN2) return m_wfn.q_sh;
-    Vector v = Vector::Zero(nsh + 9 * nat);
-    v.head(nsh) = m_wfn.q_sh;
-    if (m_wfn.dp_at.cols() == nat)
-        for (int k = 0; k < 3; ++k) v.segment(nsh + k * nat, nat) = m_wfn.dp_at.row(k).transpose();
-    if (m_wfn.qp_at.cols() == nat)
-        for (int k = 0; k < 6; ++k) v.segment(nsh + 3 * nat + k * nat, nat) = m_wfn.qp_at.row(k).transpose();
-    return v;
-}
-
 void XTB::unpackSccVector(const Vector& x)
 {
     const int nsh = m_basis.nsh;
@@ -788,7 +774,9 @@ bool XTB::computeScfJacobianResponse(const Vector& x_star, PrecondMatrix& J, std
     auto since = [](rclk::time_point a) { return std::chrono::duration<double, std::milli>(rclk::now() - a).count(); };
     double t_pot = 0.0, t_asm = 0.0, t_gemm = 0.0, t_rest = 0.0;
     const double h = 1.0e-4;
-    const int nb = std::max(1, std::min(dim, static_cast<int>(8.0e6 / (static_cast<double>(nao) * nao))));
+    // Batch of columns: four buffers of nb*nao^2 doubles (M, B, dP', Z); 2e6 doubles each = 64 MB per job, so
+    // a dozen parallel fragment jobs stay below 1 GB (Oct 2026: against 8e6 per buffer the same time on PEO 58/100 atoms, J equal to 6e-17).
+    const int nb = std::max(1, std::min(dim, static_cast<int>(2.0e6 / (static_cast<double>(nao) * nao))));
     J.resize(dim, dim);
     Matrix Mb(nao, static_cast<Eigen::Index>(nb) * nao), Bb, Pb(static_cast<Eigen::Index>(nb) * nao, nao), Zb;
     Vector xp = x_star;

@@ -816,7 +816,7 @@ public:
      * @brief Jacobian J = G'(x*) - I of the SCC fixed-point map by linear response, without a new
      *        eigensolve per column (Claude Generated, Oct 2026; xtb_response.cpp).
      *
-     * GFN1 or GFN2, closed shell. x = [q_sh | dp | qp] for GFN2, [q_sh] for GFN1 (packSccVector layout). One eigensolve at v(x*),
+     * GFN1 or GFN2, closed shell. x = [q_sh | dp | qp] for GFN2, [q_sh] for GFN1 (packSCC layout in Calculation()). One eigensolve at v(x*),
      * then for every column k: dv = dv/dx_k (central difference of the potential alone), dF in the
      * MO basis, dP_pq = w_pq dF_pq with w_pq = (f_p - f_q)/(eps_p - eps_q) (Fermi derivative for
      * degenerate pairs, chemical-potential shift for a fixed electron count), Mulliken/multipole
@@ -825,9 +825,8 @@ public:
      * @return false with @p err set if a precondition fails.
      */
     bool computeScfJacobianResponse(const Vector& x_star, PrecondMatrix& J, std::string& err);
-    /// SCC vector from m_wfn: q_sh, then dp and qp component-wise over atoms (GFN2) (Claude Generated, Oct 2026).
-    Vector packSccVector() const;
-    /// Inverse of packSccVector; q_at is rederived from q_sh (Claude Generated, Oct 2026).
+    /// SCC vector x (q_sh, then GFN2 dp and qp component-wise over atoms, as packSCC in Calculation()) into m_wfn;
+    /// q_at is rederived from q_sh (Claude Generated, Oct 2026).
     void unpackSccVector(const Vector& x);
     /// In-SCF potential of the SCC vector x (Coulomb, third order, GFN2 multipoles and D4, solvation),
     /// the potential part of the fixed-point map; sets m_wfn charges to x (Claude Generated, Oct 2026).
@@ -962,10 +961,13 @@ public:
     void setScfPrecond(const std::string& s)      { m_scf_precond = s; }
     void setScfPrecondGuard(const std::string& s) { m_scf_precond_guard = s; }
     void setScfPrecondRebuildRms(double r)        { m_scf_precond_rebuild_rms = (r > 0.0) ? r : 0.0; }
-    void setScfPrecondMaxFragmentAtoms(int n)     { m_scf_precond_max_frag_atoms = (n > 0) ? n : 0; }   // 0 = no limit
+    void setScfPrecondMaxFragmentAtoms(int n);    // 0 = no limit, negative: warning, default 100 (xtb_precond.cpp)
     void setScfPrecondSegmentAtoms(int n)         { m_scf_precond_segment_atoms = (n > 0) ? n : 0; }    // 0 = no segmentation
     void setScfPrecondJacobian(const std::string& s) { m_scf_precond_jacobian = s; }   // fd | response
-    void setScfPrecondSegmentRadius(double r)     { if (r > 0.0) m_scf_precond_segment_radius = r; }    // Angstrom
+    void setScfPrecondSegmentRadius(double r);    // Angstrom; <= 0: warning, value kept (xtb_precond.cpp)
+    // Internal (no CLI parameter): take part in the process-wide sharing of M (adoptSharedPreconditioner).
+    // Set only by the Hessian for its worker calculators and the reference calculator (Claude Generated, Oct 2026).
+    void setScfPrecondShare(bool b)               { m_scf_precond_share = b; }
 
     // Warm-start: reuse converged charges from the previous geometry step.
     // Activated by MD/opt capabilities; also settable via -warm_start false.
@@ -1603,6 +1605,8 @@ private:
     std::string  m_scf_precond_jacobian = "fd";      // cluster Jacobian: fd (central differences) | response
     double       m_scf_precond_segment_radius = 2.0;   // RAS domain radius around a segment (Angstrom)
     bool         m_scf_precond_warned = false;      // "ignored" warning given once per object
+    bool         m_scf_precond_input_warned = false;   // invalid setter input warned once per object
+    bool         m_scf_precond_share = false;       // share M process-wide (Hessian workers only)
     std::string  m_scf_precond_guard_checked;       // guard spec already parsed (warn once per spec)
     std::shared_ptr<const SchwarzPreconditioner> m_scf_precond_frag;
     // Device copy (Claude Generated, Oct 2026): M of m_scf_precond_dev_src is uploaded to the
@@ -1675,6 +1679,8 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_precond_rebuild_rms", [&](const json& v){ if (v.is_number()) xtb.setScfPrecondRebuildRms(v.get<double>()); });
     lookup("scf_precond_max_fragment_atoms", [&](const json& v){ if (v.is_number()) xtb.setScfPrecondMaxFragmentAtoms(static_cast<int>(std::lround(v.get<double>()))); });   // CLI numbers arrive as double
     lookup("scf_precond_segment_atoms",  [&](const json& v){ if (v.is_number()) xtb.setScfPrecondSegmentAtoms(static_cast<int>(std::lround(v.get<double>()))); });   // CLI numbers arrive as double
+    // Internal key set by the Hessian (not a registered parameter): share M between its worker calculators.
+    lookup("_scf_precond_share",         [&](const json& v){ if (v.is_boolean()) xtb.setScfPrecondShare(v.get<bool>()); });
     lookup("scf_precond_jacobian",       [&](const json& v){ if (v.is_string()) xtb.setScfPrecondJacobian(v.get<std::string>()); });
     lookup("scf_precond_segment_radius", [&](const json& v){ if (v.is_number()) xtb.setScfPrecondSegmentRadius(v.get<double>()); });
     lookup("scf_extrapolation",      [&](const json& v){ if (v.is_string())          xtb.setScfExtrapolation(v.get<std::string>()); });

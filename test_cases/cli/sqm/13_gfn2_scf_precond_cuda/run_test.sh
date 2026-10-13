@@ -90,7 +90,8 @@ main() {
     $CURCUMA -sp ureawater.xyz -method gfn1 -gpu cuda -gpu_strict true -threads 4 -verbosity 1 -no_bmt \
         -scf_precond frag > gfn1.log 2>&1
     assert_exit_code $? 0 "GFN1 GPU run with -gpu_strict true"
-    assert_string_in_file "scf_precond 'frag' ignored:" gfn1.log "GFN1: warning printed"
+    # GFN1 has no device-resident loop; its CUDA path is host-driven (measured message, Oct 2026).
+    assert_string_in_file "scf_precond 'frag' ignored: host-driven GPU SCF path" gfn1.log "GFN1: host-driven-GPU warning printed"
 
     print_test_summary
     [ $TESTS_FAILED -eq 0 ] && exit 0 || exit 1

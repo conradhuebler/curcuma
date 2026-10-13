@@ -94,8 +94,8 @@ Stand.
 - **`-scf_precond frag`, ungemessen**: Systeme > 600 Atome (CPU) bzw. > 1499 (GPU); M-Erneuerung in langer MD (> 500 fs, `-scf_precond_rebuild_rms`);
   Hessian mit der eingebauten Funktion (jedes Objekt ausgelenkter Geometrien baut sein eigenes M; gemessen nur der Prototyp bis 197 Atome); Fragmente über
   `-scf_precond_max_fragment_atoms` (Standard 100; Gewinn nur bis ~30 Atomen gemessen); Elemente außer H, C, N, O; Solvatation.
-- **`-scf_precond_segment_atoms` (RAS), ungemessen** (2026-10-12): gemessen nur PEO (58, 212, 1410 Atome), Polystyrol 325 und ein Peptid 309 Atome (n=1, 12->5, 15->6/7 Iterationen);
-  offen: Proteine mit Resten als Einheit, Ladungstrennung, MD/Hessian mit segmentiertem M, Aufbaukosten bei Ringen (4-165 s unter Last). [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)
+- **`-scf_precond_segment_atoms` (RAS), offen** (2026-10-12): gemessen PEO (58, 212, 1410 Atome), Polystyrol 325 und ein Peptid 309 Atome (n=1, 12->5, 15->6/7 Iterationen);
+  gemessen auch MD 200 fs und Hessian (M von den Hessian-Workern geteilt); offen: GPU-Hessian baut M weiterhin je Worker, lange MD (> 200 fs), ladungsgetrennte Systeme, Proteine mit Resten als Einheit. [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)
 - **GFN2-MD: Etot springt in den ersten 3 Schritten um 4 bis 6 mEh** (2026-10-12, Peptid/Polystyrol 309/325 Atome, NVE, 1 fs, mit und ohne `scf_precond`); Ursache offen, 200 fs belegen keine Langzeitstabilitaet (Zeitschritt, `-scf_threshold`, laengerer Lauf pruefen).
 - **`-scf_precond_jacobian response`** (2026-10-12): GFN2 und GFN1 (CPU), geschlossenschalig, gemessen n=1 an PEO/Polystyrol/Peptid; offen: Standard auf `response` umstellen?, occ-occ/virt-virt-Paare auslassen
   (etwa halbe GEMM-Kosten), analytische Potentialableitung statt Differenzen, weitere Nutzer von J (Hessian, Analyse). [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)

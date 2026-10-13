@@ -18,7 +18,7 @@ so the fixed point and the energy do not change; only the number of SCF iteratio
 - Modified Broyden (Johnson, PRB 38, 12807 (1988); Eyert, J. Comput. Phys. 124, 271 (1996)) updates an
   inverse-Jacobian estimate H_n from the history, with the seed H_0 = alpha*I. Here H_0 = M.
 - Fragments: connected components of the bond graph r_ij < 1.25 (r_i + r_j), Pyykko-Atsumi covalent radii.
-- For each fragment f: own neutral closed-shell GFN2 SCF of the isolated fragment (FP64), then
+- For each fragment f: own neutral closed-shell GFN1/GFN2 SCF (method of the parent) of the isolated fragment (FP64), then
   J_f by central differences (h = 1e-4, 2 dim_f SCC evaluations) at its converged state; B_f = -J_f^-1.
 - M = sum_f R_f^T D_f B_f R_f + C (additive Schwarz form; R_f gathers the fragment's shells, dipoles
   and quadrupoles from x, D_f = 1 because the blocks do not overlap, C = alpha on every index without a block).
@@ -26,7 +26,8 @@ so the fixed point and the energy do not change; only the number of SCF iteratio
   the segmentation below (zero rows outside the own atoms), no weighted partition of unity.
 - M is built at the first SCF of an XTB object that uses it and reused by every later SCF of that object
   (MD, optimisation steps); rebuilt for a new molecule or when the RMS displacement from the build geometry
-  exceeds `-scf_precond_rebuild_rms`.
+  exceeds `-scf_precond_rebuild_rms`. Different XTB objects do not share M, except the worker calculators of one Hessian
+  (section Hessian and MD); ConfSearch or parallel optimisations each build their own.
 - Guard (default `g2:4:best`): with f_n = ||F_n||_2 of the full residual, if f_4 / f_0 >= 0.15, M is dropped
   for the rest of that SCF and the scalar step restarts from the stored input x_k with the smallest f_k
   (x_k + alpha F_k, no new map evaluation). `g1:<tau>` instead fires at n >= 2 if f_n > tau min_{k<n} f_k;
@@ -40,9 +41,9 @@ so the fixed point and the energy do not change; only the number of SCF iteratio
 | `-scf_precond` | `none` | `none` or `frag`; other values: warning, `none` |
 | `-scf_precond_guard` | `g2:4:best` | `g2:<n0>[:<ratio>][:keep][:best]`, `g1:<tau>[:keep][:best]` or `off`; only with `frag` |
 | `-scf_precond_rebuild_rms` | `0` | rebuild M when the RMS displacement from its build geometry exceeds this (Angstrom); 0 = never |
-| `-scf_precond_max_fragment_atoms` | `100` | molecules above this keep the scalar seed (one warning) or are segmented; 0 = no limit. A block costs 2*dim SCC-map evaluations (see below) |
-| `-scf_precond_segment_atoms` | `0` | > 0: segment molecules above `-scf_precond_max_fragment_atoms`, this many heavy atoms per segment (section Segmentation); 0 = off |
-| `-scf_precond_segment_radius` | `2.0` | domain radius of a segment (Angstrom) |
+| `-scf_precond_max_fragment_atoms` | `100` | molecules above this keep the scalar seed (one warning) or are segmented; 0 = no limit, negative: warning, 100. A block costs 2*dim SCC-map evaluations (see below) |
+| `-scf_precond_segment_atoms` | `0` | > 0: segment molecules above `-scf_precond_max_fragment_atoms`, at least this many heavy atoms per segment, whole rings and multiple bonds (section Segmentation); 0 = off |
+| `-scf_precond_segment_radius` | `2.0` | domain radius of a segment (Angstrom), default from the radius scan (section Segmentation); <= 0: warning, value kept |
 | `-scf_precond_jacobian` | `fd` | cluster Jacobian: `fd` central differences, `response` linear response (section Response Jacobian); other values: warning, `fd` |
 
 Developer environment variables (not for production runs):
@@ -272,7 +273,7 @@ Hessian, ConfSearch) of the same molecule, not for single points; it is not the 
   above 599 atoms; Hessian with the built-in M (each displaced-geometry object builds its own M; only the prototype with a file matrix was measured, up to 197 atoms); MD longer than
   500 fs; RMS drift above 1 A; GPU other than one RTX 5080 (section GPU); multi-GPU nodes.
 - Fragment size (`-scf_precond_max_fragment_atoms`, default 100, 0 = no limit): a fragment Jacobian costs 2*dim evaluations of its SCC map
-  (dim = nsh + 9*atoms). Measured on one thread, PEO chains as ONE molecule (`CURCUMA_SCF_JAC`, same algorithm, n=1): 58 atoms 1.4 s,
+  (dim = nsh + 9*atoms for GFN2, nsh for GFN1). Measured on one thread, PEO chains as ONE molecule (`CURCUMA_SCF_JAC`, same algorithm, n=1): 58 atoms 1.4 s,
   212 atoms 120 s (about N^3.4; 100 atoms about 10 s and 300 atoms several minutes are extrapolated, not measured). A large molecule pays
   off only in a long MD or Hessian run. Measured once (n=1, `-threads 8`, PEO 212 atoms as ONE fragment, `-scf_precond_max_fragment_atoms 300`):
   M built in 129.5 s (one fragment is built serially), SCF 12 -> 4 iterations (164 -> 55 ms), i.e. break-even after about 1200 SCFs. The
@@ -297,7 +298,8 @@ iteration counts re-derived from the raw SCFTRACE files by the operator. Segment
   The M of a worker is built from the same geometry, so sharing M across the workers would remove 11 of 12 builds.
 - Fixed (Oct 12, 2026, AI-generated, machine-tested): the Hessian builds M once at the reference geometry before the workers start (one extra
   SCF, not on GPU runs) and keeps that calculator alive; the workers' XTB objects take M over from a process-wide cache
-  (`XTB::adoptSharedPreconditioner`: key = method, charge, atoms and every build parameter; geometry within `scf_precond_rebuild_rms`, or
+  (`XTB::adoptSharedPreconditioner`, used only by objects the Hessian marks with the internal key `xtb._scf_precond_share`, only for
+  `gfn1`/`gfn2`, so other parallel users of XTB keep their own M and do not depend on thread timing; key = method, charge, atoms and every build parameter; geometry within `scf_precond_rebuild_rms`, or
   0.01 A when that is 0; weak references, so an entry lives only as long as an object holds M). Measured (`-threads 12`, n=3 alternating, old
   binary `773f8e17`-based frozen copy): PS5 60 -> 5 cluster SCFs, wall 4.04 / 4.22 / 4.34 -> 3.80 / 4.05 / 3.80 s; PEP5 96 -> 8, wall 3.18 / 3.19 ->
   2.59 / 2.59 s (third pair under a load spike: 6.0 / 19.4 s); iterations per displaced SCF unchanged (3.18 / 3.73). Frequencies old against new

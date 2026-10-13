@@ -563,6 +563,30 @@ bool XTB::selectScfPreconditioner(bool broyden_mode, bool cpu_loop, bool device_
     return true;
 }
 
+/// Setters with input checks (Claude Generated, Oct 2026): one warning per object for invalid values.
+void XTB::setScfPrecondMaxFragmentAtoms(int n)
+{
+    if (n < 0) {
+        if (!m_scf_precond_input_warned)
+            CurcumaLogger::warn(fmt::format("scf_precond_max_fragment_atoms {} is negative; the default 100 is used (0 = no limit)", n));
+        m_scf_precond_input_warned = true;
+        m_scf_precond_max_frag_atoms = 100;
+        return;
+    }
+    m_scf_precond_max_frag_atoms = n;
+}
+
+void XTB::setScfPrecondSegmentRadius(double r)
+{
+    if (!(r > 0.0)) {
+        if (!m_scf_precond_input_warned)
+            CurcumaLogger::warn(fmt::format("scf_precond_segment_radius {} must be positive; {:.2f} A is kept", r, m_scf_precond_segment_radius));
+        m_scf_precond_input_warned = true;
+        return;
+    }
+    m_scf_precond_segment_radius = r;
+}
+
 /* ------------------------------------------------------------------------- *
  *  Process-wide sharing of M between XTB objects (Claude Generated, Oct 2026)
  * ------------------------------------------------------------------------- */
@@ -594,7 +618,9 @@ std::string XTB::scfPrecondShareKey() const
  *        (Claude Generated, Oct 2026).
  *
  * The semi-numerical Hessian gives every worker thread its own XTB object; without sharing each of
- * them built its own M at its first displaced geometry. An entry is used if its key matches
+ * them built its own M at its first displaced geometry. Only objects marked with setScfPrecondShare(true)
+ * (the Hessian's workers and its reference calculator) take part, so other parallel users of XTB
+ * (ConfSearch, batch optimisations) keep their own M and their results do not depend on thread timing. An entry is used if its key matches
  * (scfPrecondShareKey) and the RMS displacement from its build geometry is at most
  * scf_precond_rebuild_rms, or 0.01 A when that is 0 (Hessian steps are 0.005 Bohr on one atom).
  * M is immutable (shared_ptr<const>), so sharing is thread-safe; m_scf_precond_geom becomes the
@@ -602,6 +628,7 @@ std::string XTB::scfPrecondShareKey() const
  */
 bool XTB::adoptSharedPreconditioner()
 {
+    if (!m_scf_precond_share) return false;
     const std::string key = scfPrecondShareKey();
     const double tol = (m_scf_precond_rebuild_rms > 0.0) ? m_scf_precond_rebuild_rms : 0.01;
     std::lock_guard<std::mutex> lk(sharedPrecondMutex());
@@ -627,6 +654,7 @@ bool XTB::adoptSharedPreconditioner()
 /// Register a freshly built M for adoptSharedPreconditioner (Claude Generated, Oct 2026).
 void XTB::publishSharedPreconditioner()
 {
+    if (!m_scf_precond_share) return;
     std::lock_guard<std::mutex> lk(sharedPrecondMutex());
     sharedPrecondCache().push_back({ scfPrecondShareKey(), m_scf_precond_geom, m_scf_precond_frag });
 }
@@ -682,7 +710,7 @@ PrecondJob::PrecondJob(PrecondJob&&) noexcept = default;
  * Fragments: detectCovalentFragments. A fragment gets its own block unless it is a single atom,
  * has an odd number of valence electrons as a neutral species, or carries a net charge in the
  * single-shot EEQ model (|sum q_EEQ| > 0.5 e) - then its indices keep the scalar alpha
- * (scf_damping). Every included fragment runs its own neutral closed-shell GFN2 SCF (FP64,
+ * (scf_damping). Every included fragment runs its own neutral closed-shell GFN1/GFN2 SCF (FP64,
  * default settings, the parent's electronic temperature, gas phase) and then the central-
  * difference Jacobian of its SCC map at its converged state (m_scf_jac_capture, h = 1e-4).
  *

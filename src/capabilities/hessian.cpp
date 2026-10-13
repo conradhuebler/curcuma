@@ -19,6 +19,7 @@
  */
 
 #include <Eigen/Dense>
+#include <algorithm>
 #include <iomanip>
 #include <memory>
 #include <sstream>
@@ -368,7 +369,14 @@ void Hessian::start()
         };
         // GPU runs: no extra calculator (it would hold a device context during the whole Hessian); the workers then
         // build their own M as before.
-        if (precond_of(m_controller) != "none" && !curcuma::GpuDevicePool::instance().active()) {
+        // Only the native xTB methods have the preconditioner (MethodFactory maps exactly "gfn1"/"gfn2" to NativeXtbMethod).
+        std::string method_lc = m_method;
+        std::transform(method_lc.begin(), method_lc.end(), method_lc.begin(), ::tolower);
+        const bool native_xtb = (method_lc == "gfn1" || method_lc == "gfn2");
+        if (native_xtb && precond_of(m_controller) != "none" && !curcuma::GpuDevicePool::instance().active()) {
+            // Mark the reference calculator and the workers (all built from m_controller) for sharing M; internal key.
+            if (!m_controller.contains("xtb") || !m_controller["xtb"].is_object()) m_controller["xtb"] = json::object();
+            m_controller["xtb"]["_scf_precond_share"] = true;
             precond_owner = std::make_unique<EnergyCalculator>(m_method, m_controller);
             precond_owner->setVerbosity(0);
             precond_owner->setParameter(m_parameter);
