@@ -292,15 +292,20 @@ __global__ void k_dispersion_gather(
     double*                    grad,
     double*                    energy)
 {
-    int a = blockIdx.x * blockDim.x + threadIdx.x;
+    // Claude Generated (Oct 2026): one workgroup per atom, lanes stride the atom's CSR row. The former
+    // one-thread-per-atom loop made neighbouring lanes read CSR rows ~N_partner entries apart (no coalescing);
+    // 38 ms per step on 7320 atoms (rocprofv3), the largest kernel after the Coulomb far-field branch.
+    // Same pair terms; the per-atom sums are added in a different order (FP reordering only).
+    const int a = blockIdx.x;
+    const int lane = threadIdx.x, nlanes = blockDim.x;
     double local_E = 0.0;
+    double gx = 0.0, gy = 0.0, gz = 0.0, dEdcn_a = 0.0;
 
     if (a < N) {
         const double xa = cx[a], ya = cy[a], za = cz[a];
-        double gx = 0.0, gy = 0.0, gz = 0.0, dEdcn_a = 0.0;
         const bool has_dcn = (dc6dcn_ij != nullptr && dEdcn != nullptr);
         const int s = csr_off[a], e = csr_off[a + 1];
-        for (int t = s; t < e; ++t) {
+        for (int t = s + lane; t < e; t += nlanes) {
             const int p   = csr_partner[t];
             const int tid = csr_pairidx[t];
             double dx = xa - cx[p];
@@ -333,8 +338,24 @@ __global__ void k_dispersion_gather(
                 }
             }
         }
-        add_grad(grad, a, gx, gy, gz);
-        if (has_dcn) atomicAdd(&dEdcn[a], dEdcn_a);
+    }
+
+    // Reduce the force components and dEdcn over the workgroup (shared-memory tree), lane 0 writes.
+    __shared__ double sgx[256], sgy[256], sgz[256], sdc[256];
+    sgx[lane] = gx; sgy[lane] = gy; sgz[lane] = gz; sdc[lane] = dEdcn_a;
+    __syncthreads();
+    for (int stride = nlanes >> 1; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            sgx[lane] += sgx[lane + stride];
+            sgy[lane] += sgy[lane + stride];
+            sgz[lane] += sgz[lane + stride];
+            sdc[lane] += sdc[lane + stride];
+        }
+        __syncthreads();
+    }
+    if (lane == 0 && a < N) {
+        add_grad(grad, a, sgx[0], sgy[0], sgz[0]);
+        if (dc6dcn_ij != nullptr && dEdcn != nullptr) atomicAdd(&dEdcn[a], sdc[0]);
     }
 
     blockReduceAddEnergy(local_E, energy);
@@ -479,13 +500,18 @@ __global__ void k_coulomb(
             double qj = charges[j];
             if (!isnan(qi) && !isnan(qj)) {
                 double gamma_r = gamma_ij[tid] * rij;
-                double erf_v   = erf(gamma_r);
+                double erf_v, dEdr;
+                if (gamma_r >= GFNFF_COUL_FARFIELD_GAMMA_R) {   // far field: erf == 1, Gaussian < 2.3e-16
+                    erf_v = 1.0;
+                    dEdr  = qi * qj * (-1.0 / (rij * rij));
+                } else {
+                    erf_v = erf(gamma_r);
+                    static const double inv_sqrt_pi = 0.5641895835477563;
+                    double exp_v  = exp(-gamma_r * gamma_r);
+                    double derf   = gamma_ij[tid] * exp_v * (2.0 * inv_sqrt_pi);
+                    dEdr = qi * qj * (derf / rij - erf_v / (rij * rij));
+                }
                 local_E = qi * qj * erf_v / rij;
-
-                static const double inv_sqrt_pi = 0.5641895835477563;
-                double exp_v  = exp(-gamma_r * gamma_r);
-                double derf   = gamma_ij[tid] * exp_v * (2.0 * inv_sqrt_pi);
-                double dEdr   = qi * qj * (derf / rij - erf_v / (rij * rij));
                 double fac    = dEdr / rij;
                 add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
                 add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
@@ -539,11 +565,17 @@ __global__ void k_coulomb_gather(
                 if (!isnan(qp)) {
                     double g       = csr_gamma[t];
                     double gamma_r = g * rij;
-                    double erf_v   = erf(gamma_r);
+                    double erf_v, dEdr;
+                    if (gamma_r >= GFNFF_COUL_FARFIELD_GAMMA_R) {   // far field, see k_coulomb
+                        erf_v = 1.0;
+                        dEdr  = qa * qp * (-1.0 / (rij * rij));
+                    } else {
+                        erf_v = erf(gamma_r);
+                        double exp_v = exp(-gamma_r * gamma_r);
+                        double derf  = g * exp_v * (2.0 * inv_sqrt_pi);
+                        dEdr = qa * qp * (derf / rij - erf_v / (rij * rij));
+                    }
                     local_E += 0.5 * qa * qp * erf_v / rij;
-                    double exp_v = exp(-gamma_r * gamma_r);
-                    double derf  = g * exp_v * (2.0 * inv_sqrt_pi);
-                    double dEdr  = qa * qp * (derf / rij - erf_v / (rij * rij));
                     double fac   = dEdr / rij;            // force on a = fac*(ra - rp)
                     gx += fac*dx; gy += fac*dy; gz += fac*dz;
                 }
@@ -620,13 +652,20 @@ __global__ void k_coulomb_dense(
                 if (rij <= r_cut && rij >= 1e-10) {
                     double qj = sq[t];
                     if (!isnan(qj)) {
-                        double g       = 1.0 / sqrt(aa + sa[t]);
-                        double gamma_r = g * rij;
-                        double erf_v   = erf(gamma_r);
+                        const double asum = aa + sa[t];
+                        double erf_v, dEdr;
+                        if (r2 >= 36.0 * asum) {   // far field (gamma r >= 6), see k_coulomb: no sqrt of asum, no erf/exp
+                            erf_v = 1.0;
+                            dEdr  = qa * qj * (-1.0 / (rij * rij));
+                        } else {
+                            double g       = 1.0 / sqrt(asum);
+                            double gamma_r = g * rij;
+                            erf_v = erf(gamma_r);
+                            double exp_v = exp(-gamma_r * gamma_r);
+                            double derf  = g * exp_v * (2.0 * inv_sqrt_pi);
+                            dEdr = qa * qj * (derf / rij - erf_v / (rij * rij));
+                        }
                         local_E += 0.5 * qa * qj * erf_v / rij;
-                        double exp_v = exp(-gamma_r * gamma_r);
-                        double derf  = g * exp_v * (2.0 * inv_sqrt_pi);
-                        double dEdr  = qa * qj * (derf / rij - erf_v / (rij * rij));
                         double fac   = dEdr / rij;          // force on a = fac*(ra - rp)
                         gx += fac*dx; gy += fac*dy; gz += fac*dz;
                     }
@@ -3787,8 +3826,10 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_build_fragment_matrices(
             Af[li * Nf + lj] = 0.0;
         } else {
             double r          = sqrt(r_sq);
-            double gamma_ij   = 1.0 / sqrt(alpha[gi] + alpha[gj]);
-            double val        = erf(gamma_ij * r) / r;
+            const double asum = alpha[gi] + alpha[gj];
+            double val;
+            if (r_sq >= 36.0 * asum) val = 1.0 / r;   // far field: erf == 1.0, bit-identical
+            else                     val = erf((1.0 / sqrt(asum)) * r) / r;
             Af[lj * Nf + li] = val;  // lower triangle (col=lj, row=li)
             Af[li * Nf + lj] = val;  // upper triangle (col=li, row=lj)
         }
@@ -6279,8 +6320,8 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
         // ROCm: per-atom gather (grad + dEdcn accumulated locally) instead of the pair kernel —
         // the deferred gradient-mode k_dispersion's ~8M FP64 atomicAdd was the dominant MD cost.
         // Dynamic dc6dcn stays pair-indexed (read via csr_pairidx); bit-identical to k_dispersion.
-        const int disp_block = 128;
-        int grid = (impl.disp.csr_N + disp_block - 1) / disp_block;
+        const int disp_block = 64;   // one workgroup per atom (power of two for the tree reduction)
+        int grid = impl.disp.csr_N;
         k_dispersion_gather<<<grid, disp_block, 0, impl.stream_pairwise>>>(
             impl.disp.csr_N,
             impl.disp.csr_off.ptr, impl.disp.csr_partner.ptr,

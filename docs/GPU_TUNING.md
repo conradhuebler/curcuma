@@ -175,7 +175,7 @@ evaluate q_i q_j / r (energy) and 1/r (EEQ matrix) instead of erf and exp. This 
 Affected: `k_coulomb_tiles`, `k_coulomb_implicit` (rsqrt when there is no `coulomb_r_cut`, otherwise sqrt
 and division after the unchanged cutoff test), `k_coulomb` (sqrt and division), and the matrix builds
 `k_eeq_build_matrix`, `k_eeq_build_augmented`, `k_eeq_build_fragment_matrices` (1.0/r). Not changed:
-`k_eeq_build_cols` (multi-GPU split, keeps erf; same values since erf is 1.0 there) and the ROCm kernels.
+`k_eeq_build_cols` (multi-GPU split, keeps erf; same values since erf is 1.0 there). The ROCm kernels got the same far-field branch on Oct 13, 2026 (see [ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md)).
 - EEQ matrix: bit-identical, 0 differing elements in 25 builds over 12 systems (4 to 7320 atoms, incl. MOR41
   PR16/PR24/PR25 and an 8-water cluster where 252 of 276 pairs take the shortcut).
 - Single points (11 systems, every Coulomb kernel variant, with and without `coulomb_r_cut 60`

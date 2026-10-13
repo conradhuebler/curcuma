@@ -82,7 +82,7 @@ statement is as old as its entry and may have been closed by a later one.
 | `shouldUpdateHBXB()` trigger is `sqrt(sum_sq)/natoms`, off by `sqrt(natoms)`; same in the reference, left for fidelity | #33 | TODO.md |
 | Energy depends on atom numbering in pprcht AND curcuma (911 of 2557 structures; up to 237 kcal/mol for charged multi-fragment systems) | #34 | REV_GFNFF_TODO.md #12 |
 | Bit-identical results only at a fixed CPU thread count; GPU `atomicAdd` order; CPU vs GPU | #36 | TODO.md "Bitgleichheit" |
-| ROCm GFN-FF: no Coulomb term by default (F-1); GFN1/GFN2 ignore `-scf_mixed_precision false` (G2-13); wave32 reductions (F-17) | #37 | MULTI_GPU_GAPS.md |
+| ROCm: GFN1/GFN2 ignore `-scf_mixed_precision false` (G2-13); wave32 reductions (F-17) | #37 | MULTI_GPU_GAPS.md |
 | Method limits, not bugs: GFN-FF is 60-70 kcal/mol from DLPNO on MOR41 reactions (#6), Cl2- delocalisation (#17), CH2- bend (#18), F-C-H bend softness (#19), conformer sets (#20) | #6 #17 #18 #19 #20 | REV_GFNFF_TODO.md |
 | `MB16-43` and `AL2X6/al2me6`: xtb and pprcht disagree; curcuma follows pprcht | #21-#23 | GMTKN55_VALIDATION.md |
 

@@ -37,6 +37,13 @@
 #define D4_MAX_ELEM 118
 #define D4_MAX_REF  7
 
+/// Far-field threshold of the erf-damped Coulomb pair: gamma_ij r >= 6, tested as r^2 >= 36 (alp_i + alp_j).
+/// Claude Generated (Oct 2026). Not a cutoff: HIP erf(x) is exactly 1.0 for x >= 6 in FP64 (0 of 3e8 sampled
+/// points in [6, 9] differ, gfx1200; between 5.9007 and 6.0 it is not yet 1.0, so the threshold stays at 6) and
+/// the Gaussian of the force is below exp(-36) = 2.3e-16. The pair is then q_i q_j / r (matrix element 1 / r).
+/// Same switch as CUDA GFNFF_COUL_FARFIELD_X2 (cuda/gfnff_kernels.cuh).
+#define GFNFF_COUL_FARFIELD_GAMMA_R 6.0
+
 // ============================================================================
 // Pairwise kernels: 1 thread = 1 pair
 // ============================================================================

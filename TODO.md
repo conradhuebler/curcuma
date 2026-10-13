@@ -13,9 +13,9 @@ Stand.
 
 - **GFN-FF-Energie hängt von der Atomnummerierung ab** (911 von 2557 Strukturen, bis 237 kcal/mol bei geladenen Mehrfragment-Systemen;
   in pprcht und curcuma). Referenzeigenschaft, kein Portierungsfehler. [docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md) #12, Known Issue #34.
-- **ROCm-GFN-FF ohne Coulomb-Term** als Voreinstellung seit `ab6e3f5e` (F-1, Umgehung `-gfnff.gpu_coulomb_implicit false`); GFN1/GFN2 auf ROCm
-  ignorieren `-scf_mixed_precision false` (G2-13); Energiesummen nehmen wave32 an (F-17). Keine ROCm-Hardware, nur dokumentiert:
-  [docs/MULTI_GPU_GAPS.md](docs/MULTI_GPU_GAPS.md).
+- **ROCm**: GFN1/GFN2 ignorieren `-scf_mixed_precision false` (G2-13); Energiesummen nehmen wave32 an (F-17). Dokumentiert in
+  [docs/MULTI_GPU_GAPS.md](docs/MULTI_GPU_GAPS.md). Leistung (EEQ auf der CPU, rocSOLVER-Eigenloeser):
+  [docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md).
 - **Exitcode bei fehlgeschlagenem Setup**: `-md` gibt seit `a2b7c5f0` 1 zurück; prüfen, ob dasselbe für `-opt` und `-sp` gilt (nicht geprüft).
 - **UFF- und QMDFF-Gradient falsch** (Eintrag vom 2026-09-27: UFF-Winkel ohne den Faktor -sin(theta); Fix vorbereitet, Betreiber: "erstmal nicht").
   Nicht erneut geprüft; Details im Archiv unter "UFF- und QMDFF-Gradient falsch".

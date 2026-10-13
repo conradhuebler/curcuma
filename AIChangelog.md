@@ -16,6 +16,9 @@ below. If it needs measurements or a derivation, write them into the matching `d
 
 ## Jul - Sep 2026 (and some late June), 108 entries, full text in AIChangelog_2026-late.md
 
+- ROCm GFN-FF kernels (branch `fix/rocm-coulomb-farfield`, Oct 13, 2026): Coulomb far-field branch + workgroup-per-atom dispersion gather; kernel time/step 117 -> 63 ms, MD time = CPU at 6200-7320 atoms, energies equal - [docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md)
+- ROCm performance analysis on gfx1200 (Oct 13, 2026): GFN-FF Coulomb far-field branch 49 -> 8.5 ms standalone, EEQ on CPU is half the step, GFN2 rocSOLVER eigensolve is the floor; priorities - [docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md), `scripts/rocm_microbench/`
+- ROCm vs CPU vs CUDA evaluated on gfx1200 (Oct 13, 2026): GFN-FF/GFN2 energies equal CPU at 8 dp (24-7320 atoms), ROCm not faster than CPU, feature gaps to CUDA, F-1 already fixed - [docs/ROCM_EVALUATION_2026-10-13.md](docs/ROCM_EVALUATION_2026-10-13.md)
 - ctest `xtb_library_energies`: CPU gfnff/gfn2 vs stored xtb 6.7.1 energies of the structure library, no xtb run (Oct 11, 2026): `test_cases/scripts/check_xtb_library_energies.py`, [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
 - CUDA GFN-FF: dead host D4 dc6dcn/CN pair paths removed (Oct 11, 2026): `updateDispersionDC6DCN`, `setCNPairList`, host `generateCNPairList`, CUDA host mirrors; device arrays bitwise unchanged, GPU MD peak RSS -216 MiB (polymer_2x)
 - GFN-FF CPU EEQ Phase-2 matrix built in 64x64 tiles with non-temporal stores (Oct 11, 2026): build 37.5 -> 19.6 ms, MD step 231 -> 212 ms (polymer_2x, 16 thr, n=3), matrix bitwise ([docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md))

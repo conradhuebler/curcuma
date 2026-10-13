@@ -419,7 +419,7 @@ Complete table with sources: [docs/KNOWN_ISSUES_ARCHIVE.md](docs/KNOWN_ISSUES_AR
 and `AIChangelog.md`, not into this file; only open items and traps stay here.
 
 - GFN-FF energy depends on atom numbering in pprcht and curcuma (911/2557 GMTKN55+MOR41 structures; REV_GFNFF_TODO #12) (#34)
-- ROCm GFN-FF: no Coulomb term by default (F-1), `-scf_mixed_precision false` ignored (G2-13), wave32 assumption (F-17) (#37)
+- ROCm: `-scf_mixed_precision false` ignored (G2-13), wave32 assumption (F-17) (#37)
 - Bit-identical results only at a fixed CPU thread count; GPU not run-to-run reproducible (#36)
 - `shouldUpdateHBXB()` RMSD trigger off by `sqrt(natoms)` (ported from the reference, left); D4 ATM C6 frozen at setup (#33)
 - `DC13/c20bowl` Coulomb -6.29 kcal/mol, not root-caused (#14); gfn1/gfn2 gradients vs xtb at exactly coincident coordinates (#28)

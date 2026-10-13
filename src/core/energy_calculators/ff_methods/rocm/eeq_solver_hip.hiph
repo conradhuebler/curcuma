@@ -61,8 +61,10 @@ void k_eeq_build_matrix_hip(
             A[i * N + j] = 0.0;
         } else {
             double r = sqrt(r_sq);
-            double gamma_ij = 1.0 / sqrt(alpha[i] + alpha[j]);
-            double val = erf(gamma_ij * r) / r;
+            const double asum = alpha[i] + alpha[j];
+            double val;
+            if (r_sq >= 36.0 * asum) val = 1.0 / r;   // far field: erf == 1.0, bit-identical
+            else                     val = erf((1.0 / sqrt(asum)) * r) / r;
             A[j * N + i] = val;
             A[i * N + j] = val;
         }
