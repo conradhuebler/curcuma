@@ -30,6 +30,7 @@
 #include "src/core/global.h"
 
 #include <Eigen/Dense>
+#include <functional>
 #include <vector>
 #include <cmath>
 
@@ -91,6 +92,7 @@ public:
             }
             m_vin_last = vin;
             m_F_last   = F;
+            if (m_hook) return vin + m_hook(F);
             return vin + m_alpha * F;
         }
 
@@ -101,10 +103,13 @@ public:
             // Residual did not change — take a linear step, keep history.
             m_vin_last = vin;
             m_F_last   = F;
+            if (m_hook) return vin + m_hook(F);
             return vin + m_alpha * F;
         }
         dF /= norm;
-        const Vector u = m_alpha * dF + (vin - m_vin_last) / norm;
+        Vector u;
+        if (m_hook) u = m_hook(dF) + (vin - m_vin_last) / norm;
+        else        u = m_alpha * dF + (vin - m_vin_last) / norm;
 
         // Append to history with unit weight (robust default).
         m_dF.push_back(dF);
@@ -135,7 +140,9 @@ public:
         const Eigen::VectorXd gamma = beta * c;
 
         // x_{n+1} = x_n + alpha*F - sum_k w_k gamma_k u_k
-        Vector vnext = vin + m_alpha * F;
+        Vector vnext;
+        if (m_hook) vnext = vin + m_hook(F);
+        else        vnext = vin + m_alpha * F;
         for (int k = 0; k < M; ++k)
             vnext -= m_w[k] * gamma(k) * m_u[k];
 
@@ -145,6 +152,38 @@ public:
     }
 
     int iterations() const { return m_iter; }
+
+    /**
+     * @brief Optional replacement of the scalar step alpha*F (Claude Generated, Oct 2026).
+     *
+     * The hook maps a residual (or residual difference) F to the step that stands in for
+     * alpha*F: in the first linear step, in the "residual unchanged" linear step, in the
+     * Jacobian seed alpha*F of every update and in u = alpha*dF + dx/|dF|. Empty (default)
+     * keeps the original scalar code path unchanged. No preconditioner logic is provided here.
+     */
+    void setStepHook(std::function<Vector(const Vector&)> hook) { m_hook = std::move(hook); }
+    bool hasStepHook() const { return static_cast<bool>(m_hook); }
+
+    /**
+     * @brief Remove the step hook and continue with the scalar seed alpha*F (Claude Generated, Oct 2026).
+     *
+     * keep_history = false: the history is forgotten; the next update() is a plain linear step
+     * x + alpha*F from the current input. keep_history = true: the stored update vectors
+     * u_k = hook(dF_k) + dx_k/|dF_k| are rewritten to u_k - hook(dF_k) + alpha*dF_k, which are
+     * exactly (up to rounding) the vectors the scalar mixer builds from the same (x, F) history,
+     * so the secant information survives. Neither variant evaluates the SCC map.
+     */
+    void dropStepHook(bool keep_history)
+    {
+        if (!m_hook) return;
+        if (keep_history) {
+            for (size_t k = 0; k < m_u.size(); ++k)
+                m_u[k] += m_alpha * m_dF[k] - m_hook(m_dF[k]);
+        } else {
+            reset();
+        }
+        m_hook = nullptr;
+    }
 
 private:
     double m_alpha;
@@ -157,4 +196,5 @@ private:
     std::vector<Vector> m_dF;     ///< normalised residual changes
     std::vector<Vector> m_u;      ///< Broyden update vectors
     std::vector<double> m_w;      ///< per-history weights
+    std::function<Vector(const Vector&)> m_hook;  ///< optional replacement of alpha*F (empty = scalar)
 };

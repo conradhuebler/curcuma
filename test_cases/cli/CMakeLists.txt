@@ -290,6 +290,13 @@ add_cli_test(sqm 08_ngfn1_baseline_singlepoint)    # native ngfn1 vs TBLite-gfn1
 add_cli_test(sqm 09_ngfn2_baseline_singlepoint)    # native ngfn2 broken-state snapshot
 add_cli_test(sqm 10_gfn2_optimization_smoke)       # gfn2 -opt anchor (gradient = zero pre-AP-4)
 add_cli_test(sqm 11_gfn2_provider_check)           # routing anchor — updated for AP 3 (native backend)
+add_cli_test(sqm 12_gfn2_scf_precond)              # -scf_precond frag: same energy, fewer SCF iterations, ignored for ions (Oct 2026)
+# -scf_precond frag on the device-resident CUDA loop (Oct 2026); exit 77 (skip) without a usable CUDA device.
+if(USE_CUDA)
+    add_cli_test(sqm 13_gfn2_scf_precond_cuda)
+    set_tests_properties(cli_sqm_13_gfn2_scf_precond_cuda
+        PROPERTIES TIMEOUT 300 RESOURCE_LOCK "gpu" LABELS "sqm;gpu;cli" SKIP_RETURN_CODE 77)
+endif()
 
 # cli_sqm_04..07 are enabled since 2026-10-09: the native gfn1/gfn2 match the TBLite references (4e-9 Eh, OH radical 8e-4 Eh).
 # cli_sqm_10 stays disabled: it expects the log markers 'Geometry Optimisation converged' / 'gfn2 Final Energy', which -opt does not print

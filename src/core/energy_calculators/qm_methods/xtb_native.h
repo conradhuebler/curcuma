@@ -58,6 +58,7 @@ class CxxThreadPool;
 
 #include "diis_accelerator.h"
 #include "broyden_mixer.h"
+#include "xtb_precond.h"
 
 namespace curcuma::xtb {
 
@@ -353,6 +354,33 @@ struct Wavefunction {
  *  Any method returning false makes the caller fall back to the CPU path for the
  *  whole calculation, so an unavailable / failing device never corrupts results.
  * ------------------------------------------------------------------------- */
+/**
+ * @brief Flat copy of the -scf_precond frag block matrix M for a device upload
+ *        (Claude Generated, Oct 2026; SchwarzPreconditioner::flatten, xtb_precond.h).
+ *
+ * M v = fallback .* v + sum_b R_b^T B_b R_b v on the packed SCC vector [q_sh | dp | qp] of
+ * length N in the DEVICE packing (moments atom-major: dp at nsh + 3*atom + k, qp at
+ * nsh + 3*nat + 6*atom + k; the host packSCC is component-major). Block b covers idx[idx_off[b] .. idx_off[b+1]) with its row-major matrix at
+ * B[b_off[b]]; fallback holds alpha (scf_damping) on indices outside every block, 0 inside.
+ */
+struct GpuPrecondFlat {
+    int N = 0;
+    int max_dim = 0;               ///< largest block
+    std::vector<int> idx_off;      ///< nblocks + 1
+    std::vector<int> idx;
+    std::vector<int> b_off;        ///< nblocks + 1
+    std::vector<double> B;
+    std::vector<double> fallback;  ///< N
+    int nblocks() const { return idx_off.empty() ? 0 : static_cast<int>(idx_off.size()) - 1; }
+    GpuPrecondFlat();    // out of line (xtb_precond.cpp) so that -Winline stays quiet
+    ~GpuPrecondFlat();
+};
+
+/// Guard callback of the device Broyden (Claude Generated, Oct 2026): called once per update
+/// while M is active with the update index n (0-based in this SCF) and ||F_n||_2; sets
+/// *store_best when x_n/F_n are to be kept as the "best" pair; returns true to drop M.
+using GpuBroydenGuardFn = std::function<bool(int n, double fnorm, bool* store_best)>;
+
 struct GpuScfBackend {
     virtual ~GpuScfBackend() = default;
     virtual bool begin(const Matrix& H0, const Matrix& S,
@@ -516,6 +544,25 @@ struct GpuScfBackend {
     /// Per-phase device timings (CURCUMA_GPU_PROFILE), "" when unsupported/disabled.
     /// Claude Generated (Sep 2026).
     virtual std::string profileReport() const { return {}; }
+
+    /* ----- Broyden seed preconditioner in the resident loop (Oct 2026) ---- *
+     * -scf_precond frag on the device (Claude Generated, docs/SCF_PRECOND.md): the device
+     * Broyden of the fully resident loop replaces alpha*F by M*F (linear step and seed) and
+     * alpha*dF by M*dF (update vectors u), like BroydenMixer::setStepHook on the host. Call
+     * residentSetPreconditioner after beginResidentLoop (which clears it); data == nullptr
+     * reactivates the upload already resident under @p tag. The guard runs on ||F||_2 of each
+     * update (one scalar to the host); on a hit M is dropped as in BroydenMixer::dropStepHook
+     * (keep: history rewritten to the scalar form, otherwise reset), and with @p best the next
+     * step starts from the stored device copies x_best + alpha*F_best. Default: unsupported. */
+    virtual bool supportsResidentPreconditioner() const { return false; }
+    /// Tag of the M upload resident on the device (0 = none).
+    virtual unsigned long long residentPreconditionerTag() const { return 0; }
+    /// True if a multi-GPU split (eigensolver or density over several devices) would engage
+    /// for a basis of @p nao functions; the device preconditioner is then not used.
+    virtual bool multiGpuScfSplit(int nao) const { (void)nao; return false; }
+    virtual bool residentSetPreconditioner(const GpuPrecondFlat* data, unsigned long long tag,
+                                           GpuBroydenGuardFn guard, bool keep, bool best)
+    { (void)data; (void)tag; (void)guard; (void)keep; (void)best; return false; }
 
     virtual bool residentScfStep(bool fp32, double& dq, double& e_band, double& e_coulomb,
                                  double& e_third, double& e_multipole)
@@ -765,6 +812,26 @@ public:
                              Eigen::MatrixXd& ddp_at,
                              Eigen::MatrixXd& dqp_at) const; // xtb_scf.cpp
 
+    /**
+     * @brief Jacobian J = G'(x*) - I of the SCC fixed-point map by linear response, without a new
+     *        eigensolve per column (Claude Generated, Oct 2026; xtb_response.cpp).
+     *
+     * GFN1 or GFN2, closed shell. x = [q_sh | dp | qp] for GFN2, [q_sh] for GFN1 (packSCC layout in Calculation()). One eigensolve at v(x*),
+     * then for every column k: dv = dv/dx_k (central difference of the potential alone), dF in the
+     * MO basis, dP_pq = w_pq dF_pq with w_pq = (f_p - f_q)/(eps_p - eps_q) (Fermi derivative for
+     * degenerate pairs, chemical-potential shift for a fixed electron count), Mulliken/multipole
+     * projection of dP. Changes m_wfn and m_pot (the caller restores them). Row-major dim x dim,
+     * row = output component, same convention as numericalScfJacobian.
+     * @return false with @p err set if a precondition fails.
+     */
+    bool computeScfJacobianResponse(const Vector& x_star, PrecondMatrix& J, std::string& err);
+    /// SCC vector x (q_sh, then GFN2 dp and qp component-wise over atoms, as packSCC in Calculation()) into m_wfn;
+    /// q_at is rederived from q_sh (Claude Generated, Oct 2026).
+    void unpackSccVector(const Vector& x);
+    /// In-SCF potential of the SCC vector x (Coulomb, third order, GFN2 multipoles and D4, solvation),
+    /// the potential part of the fixed-point map; sets m_wfn charges to x (Claude Generated, Oct 2026).
+    Potential scfPotentialAt(const Vector& x);
+
     // Convergence
     bool isConverged() const { return m_scf_converged; }
     int  scfIterations() const { return m_scf_iterations; }
@@ -890,6 +957,17 @@ public:
     void setFp32StallPatience(int n)        { m_fp32_stall_patience = std::max(0, n); }
     void setFp32FalseFixpointFactor(double f) { m_fp32_false_fixpoint = f; }
     void setGpuMultipoleOtf(const std::string& m) { m_gpu_mp_otf = m; }
+    // Broyden seed preconditioner (Claude Generated, Oct 2026; xtb_precond.h, docs/SCF_PRECOND.md).
+    void setScfPrecond(const std::string& s)      { m_scf_precond = s; }
+    void setScfPrecondGuard(const std::string& s) { m_scf_precond_guard = s; }
+    void setScfPrecondRebuildRms(double r)        { m_scf_precond_rebuild_rms = (r > 0.0) ? r : 0.0; }
+    void setScfPrecondMaxFragmentAtoms(int n);    // 0 = no limit, negative: warning, default 100 (xtb_precond.cpp)
+    void setScfPrecondSegmentAtoms(int n)         { m_scf_precond_segment_atoms = (n > 0) ? n : 0; }    // 0 = no segmentation
+    void setScfPrecondJacobian(const std::string& s) { m_scf_precond_jacobian = s; }   // fd | response
+    void setScfPrecondSegmentRadius(double r);    // Angstrom; <= 0: warning, value kept (xtb_precond.cpp)
+    // Internal (no CLI parameter): take part in the process-wide sharing of M (adoptSharedPreconditioner).
+    // Set only by the Hessian for its worker calculators and the reference calculator (Claude Generated, Oct 2026).
+    void setScfPrecondShare(bool b)               { m_scf_precond_share = b; }
 
     // Warm-start: reuse converged charges from the previous geometry step.
     // Activated by MD/opt capabilities; also settable via -warm_start false.
@@ -1044,6 +1122,29 @@ private:
     // In-SCF potential v_at += dE_solv/dq = (B*q_at); energy added separately.
     void addSolvationPotential(Potential& pot) const;
     double energySolvation() const;
+
+    // SCF Jacobian debug dump (Claude Generated, Oct 2026; xtb_precond.cpp). Active only with the
+    // environment variable CURCUMA_SCF_JAC=<dir>; see the definition for the file format.
+    void writeScfJacobianDump(const std::string& dir, const Vector& x_star, const Vector& g_loop,
+                              double e_scc, const std::function<Vector(const Vector&)>& evalG);
+
+    // SCF preconditioner matrix for the Broyden step hook (Claude Generated, Oct 2026;
+    // xtb_precond.cpp). Active only with CURCUMA_SCF_PRECOND_FILE=<file>.
+    bool loadScfPrecondMatrix(const std::string& path, int dim, std::string& err);
+
+    // Broyden seed preconditioner (Claude Generated, Oct 2026; xtb_precond.cpp): picks the step
+    // hook (file > -scf_precond frag > none) and the guard for one SCF; builds or reuses the
+    // fragment M. Returns false only for an unusable CURCUMA_SCF_PRECOND_FILE.
+    bool selectScfPreconditioner(bool broyden_mode, bool cpu_loop, bool device_loop,
+                                 const std::string& no_device_reason, int dim,
+                                 std::function<Vector(const Vector&)>& hook,
+                                 ScfPrecondGuard& guard, std::string& err);
+    bool buildFragmentPreconditioner(std::string& err);
+    // Process-wide sharing of M between XTB objects of the same molecule (Claude Generated, Oct 2026;
+    // xtb_precond.cpp): Hessian workers take over the M of the first builder instead of building their own.
+    bool adoptSharedPreconditioner();
+    void publishSharedPreconditioner();
+    std::string scfPrecondShareKey() const;
 
     // GFN2 multipole interactions (damped).
     void addMultipolePotential(Potential& pot) const;                    // xtb_multipole.cpp
@@ -1487,6 +1588,38 @@ private:
     DIISAccelerator m_diis;
     BroydenMixer    m_broyden;
 
+    // SCF preconditioner matrix M from CURCUMA_SCF_PRECOND_FILE (Claude Generated, Oct 2026,
+    // debug/experiment path). Read once per XTB object; re-read when path or mtime change.
+    std::shared_ptr<const PrecondMatrix> m_scf_precond_M;
+    std::string  m_scf_precond_path;
+    long long    m_scf_precond_mtime = 0;
+
+    // -scf_precond frag (Claude Generated, Oct 2026; xtb_precond.cpp). The block preconditioner is
+    // built at the first SCF that uses it and kept with the geometry it was built at; rebuilt for
+    // a new molecule or when the RMS displacement exceeds m_scf_precond_rebuild_rms (0 = never).
+    std::string  m_scf_precond = "none";            // none | frag
+    std::string  m_scf_precond_guard = "g2:4:best"; // ScfPrecondGuard spec, "off" = no guard
+    double       m_scf_precond_rebuild_rms = 0.0;   // Angstrom
+    int          m_scf_precond_max_frag_atoms = 100;   // molecules above this keep the scalar seed (0 = no limit)
+    int          m_scf_precond_segment_atoms = 0;      // >0: segment larger molecules (RAS), heavy atoms per segment
+    std::string  m_scf_precond_jacobian = "fd";      // cluster Jacobian: fd (central differences) | response
+    double       m_scf_precond_segment_radius = 2.0;   // RAS domain radius around a segment (Angstrom)
+    bool         m_scf_precond_warned = false;      // "ignored" warning given once per object
+    bool         m_scf_precond_input_warned = false;   // invalid setter input warned once per object
+    bool         m_scf_precond_share = false;       // share M process-wide (Hessian workers only)
+    std::string  m_scf_precond_guard_checked;       // guard spec already parsed (warn once per spec)
+    std::shared_ptr<const SchwarzPreconditioner> m_scf_precond_frag;
+    // Device copy (Claude Generated, Oct 2026): M of m_scf_precond_dev_src is uploaded to the
+    // resident CUDA loop under m_scf_precond_dev_tag (process-unique, 0 = none) and re-uploaded
+    // only when the device holds another tag.
+    std::shared_ptr<const SchwarzPreconditioner> m_scf_precond_dev_src;
+    unsigned long long m_scf_precond_dev_tag = 0;
+    Matrix           m_scf_precond_geom;            // geometry (Angstrom) M was built at
+    std::vector<int> m_scf_precond_atoms;           // atomic numbers M was built for
+    // Fragment objects only: compute the SCC Jacobian after convergence into m_scf_jac_result.
+    bool          m_scf_jac_capture = false;
+    PrecondMatrix m_scf_jac_result;
+
     // Intra-molecule parallelism (Claude Generated). m_intra_threads is the budget
     // granted by the wrapper (global -threads); m_pool is the persistent worker pool,
     // created lazily by ensurePool() only for a single large molecule and reused
@@ -1524,8 +1657,8 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("eigensolver",  [&](const json& v){ if (v.is_string()) xtb.setEigensolver(v.get<std::string>()); });
     lookup("scf_damping",  [&](const json& v){ if (v.is_number()) xtb.setScfDamping(v.get<double>()); });
     lookup("scf_threshold",[&](const json& v){ if (v.is_number()) xtb.setScfThreshold(v.get<double>()); });
-    lookup("diis_start",   [&](const json& v){ if (v.is_number_integer()) xtb.setDiisStart(v.get<int>()); });
-    lookup("diis_subspace",[&](const json& v){ if (v.is_number_integer()) xtb.setDiisSubspace(v.get<int>()); });
+    lookup("diis_start",   [&](const json& v){ if (v.is_number()) xtb.setDiisStart(static_cast<int>(std::lround(v.get<double>()))); });   // CLI numbers arrive as double
+    lookup("diis_subspace",[&](const json& v){ if (v.is_number()) xtb.setDiisSubspace(static_cast<int>(std::lround(v.get<double>()))); });
     lookup("level_shift",  [&](const json& v){ if (v.is_number()) xtb.setLevelShift(v.get<double>()); });
     lookup("warm_start",   [&](const json& v){ if (v.is_boolean()) xtb.setWarmStart(v.get<bool>()); });
     lookup("keep_diis",    [&](const json& v){ if (v.is_boolean()) xtb.setKeepDiis(v.get<bool>()); });
@@ -1540,10 +1673,20 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_fp32_stall_patience", [&](const json& v){ if (v.is_number()) xtb.setFp32StallPatience(static_cast<int>(v.get<double>())); });
     lookup("scf_fp32_false_fixpoint_factor", [&](const json& v){ if (v.is_number()) xtb.setFp32FalseFixpointFactor(v.get<double>()); });
     lookup("gpu_multipole_otf",       [&](const json& v){ if (v.is_string()) xtb.setGpuMultipoleOtf(v.get<std::string>()); });
+    // Broyden seed preconditioner (Claude Generated, Oct 2026, docs/SCF_PRECOND.md).
+    lookup("scf_precond",             [&](const json& v){ if (v.is_string()) xtb.setScfPrecond(v.get<std::string>()); });
+    lookup("scf_precond_guard",       [&](const json& v){ if (v.is_string()) xtb.setScfPrecondGuard(v.get<std::string>()); });
+    lookup("scf_precond_rebuild_rms", [&](const json& v){ if (v.is_number()) xtb.setScfPrecondRebuildRms(v.get<double>()); });
+    lookup("scf_precond_max_fragment_atoms", [&](const json& v){ if (v.is_number()) xtb.setScfPrecondMaxFragmentAtoms(static_cast<int>(std::lround(v.get<double>()))); });   // CLI numbers arrive as double
+    lookup("scf_precond_segment_atoms",  [&](const json& v){ if (v.is_number()) xtb.setScfPrecondSegmentAtoms(static_cast<int>(std::lround(v.get<double>()))); });   // CLI numbers arrive as double
+    // Internal key set by the Hessian (not a registered parameter): share M between its worker calculators.
+    lookup("_scf_precond_share",         [&](const json& v){ if (v.is_boolean()) xtb.setScfPrecondShare(v.get<bool>()); });
+    lookup("scf_precond_jacobian",       [&](const json& v){ if (v.is_string()) xtb.setScfPrecondJacobian(v.get<std::string>()); });
+    lookup("scf_precond_segment_radius", [&](const json& v){ if (v.is_number()) xtb.setScfPrecondSegmentRadius(v.get<double>()); });
     lookup("scf_extrapolation",      [&](const json& v){ if (v.is_string())          xtb.setScfExtrapolation(v.get<std::string>()); });
-    lookup("scf_extrapolation_order",[&](const json& v){ if (v.is_number_integer())  xtb.setScfExtrapolationOrder(v.get<int>()); });
+    lookup("scf_extrapolation_order",[&](const json& v){ if (v.is_number())  xtb.setScfExtrapolationOrder(static_cast<int>(std::lround(v.get<double>()))); });
     lookup("scf_extrapolation_apply",[&](const json& v){ if (v.is_string())          xtb.setScfExtrapolationApply(v.get<std::string>()); });
-    lookup("scf_xlbomd_correctors",  [&](const json& v){ if (v.is_number_integer())  xtb.setScfXlbomdCorrectors(v.get<int>()); });
+    lookup("scf_xlbomd_correctors",  [&](const json& v){ if (v.is_number())  xtb.setScfXlbomdCorrectors(static_cast<int>(std::lround(v.get<double>()))); });
     lookup("electronic_temperature", [&](const json& v){ if (v.is_number()) xtb.setElectronicTemperature(v.get<double>()); });
     // Implicit solvation (Claude Generated, June 2026). solvent_model is a
     // descriptive name ("none"/"cpcm"/"gbsa"/"alpb"); legacy numeric codes (0..3) are

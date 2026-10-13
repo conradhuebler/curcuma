@@ -10,7 +10,7 @@ Detailed architecture: `QM_ARCHITECTURE.md` in this directory and [docs/SQM_VALI
 ## Layout
 
 - **Wrappers** (`ComputationalMethod`): `native_xtb_method.*` (gfn1/gfn2), `xtb_method.*` (external XTB), `xtb_gpu_method.*`, `xtb_hip_method.*`, `xtb_vulkan_method.*`, `gfnff_method.*` (adapter to the native GFN-FF in `../ff_methods/`), `eht_method.*`, `nddo_method.*`, `orca_method.*`, `dispersion_method.*`. External: `tbliteinterface.*`, `xtbinterface.*`, `ulyssesinterface.*`, `orcainterface.*`, `dftd3interface.*`, `dftd4interface.*`.
-- **Native xTB** (`xtb_native.cpp/h` and the `xtb_*.cpp` group: `xtb_h0`, `xtb_scf`, `xtb_gradient`, `xtb_coulomb`, `xtb_multipole`, `xtb_thirdorder`, `xtb_response`, `xtb_dc`, `xtb_fragment_scf`, `xtb_sparse`): `curcuma::xtb::XTB` implements `QMInterface` directly and does not derive from `QMDriver`. The only GFN1/GFN2 parameter tables are `parameters/gfn1_params.hpp` and `parameters/gfn2_params.hpp`.
+- **Native xTB** (`xtb_native.cpp/h` and the `xtb_*.cpp` group: `xtb_h0`, `xtb_scf`, `xtb_gradient`, `xtb_coulomb`, `xtb_multipole`, `xtb_thirdorder`, `xtb_response`, `xtb_dc`, `xtb_fragment_scf`, `xtb_sparse`, `xtb_precond`): `curcuma::xtb::XTB` implements `QMInterface` directly and does not derive from `QMDriver`. The only GFN1/GFN2 parameter tables are `parameters/gfn1_params.hpp` and `parameters/gfn2_params.hpp`.
 - **Driver** (`qm_driver.cpp/h`): base class for the STO/GTO-basis methods EHT and NDDO (matrix storage, `MakeOverlap/MakeH` hooks). NDDO (`nddo.*`, `nddo_params.*`) covers MNDO/AM1/PM3/PM6.
 - **Integrals and solvers**: `STOIntegrals.hpp`, `GTOIntegrals.hpp`, `STO_CGTO.hpp`, `xtb_ao_utils.hpp`, `xtb_multipole_ints.hpp`, `native_eigensolver.*`, `ParallelEigenSolver.hpp`, `basissetparser.hpp`, GPU contexts under `cuda/` and the plugin loader `../gpu_plugin.*`.
 - **Interface** (`interface/abstract_interface.h`, `interface/ulysses.*`): `QMInterface` with `InitialiseMolecule()`, `Calculation(gradient, verbose)`, `Charges()`, `BondOrders()`, `Gradient()`.
@@ -35,6 +35,8 @@ Methods are created by `MethodFactory` (`../method_factory.cpp`, table-driven, s
 - Element-indexed tables: transition-metal shells are ordered `[d,s,p]`, so parameters indexed by angular momentum must not be read by shell index (#5).
 - Silent mode (verbosity 0) must produce no output except errors; verbosity levels and logger functions: [docs/LOGGING_SYSTEM.md](../../../../docs/LOGGING_SYSTEM.md). No numerical path may depend on the print level.
 - GPU backends are runtime plugins; fallbacks to the CPU are counted and reported (`gpu_fallback.h`).
+- The Broyden seed hook (`BroydenMixer::setStepHook`, `-scf_precond frag`, `xtb_precond.h`) may change only the path, never the fixed point; with `-scf_precond none` nothing is set; the guard (`-scf_precond_guard`) only removes the hook (and with `best` restarts the scalar step from the best earlier input) (AI-generated, machine-tested; [docs/SCF_PRECOND.md](../../../../docs/SCF_PRECOND.md)).
+- The device copy of M (resident CUDA loop, `XtbGpuContext::broydenSetPreconditioner`) uses the device packing of the SCC vector (moments atom-major, the host `packSCC` is component-major); `xtb_native.cpp` remaps the indices before the upload. Without M the device Broyden runs its unchanged kernels (AI-generated, machine-tested).
 
 ## ORCA interface (🤖 AI-generated, pending human production test)
 
