@@ -13,6 +13,7 @@ Stand.
 
 - **GFN-FF-Energie hängt von der Atomnummerierung ab** (911 von 2557 Strukturen, bis 237 kcal/mol bei geladenen Mehrfragment-Systemen;
   in pprcht und curcuma). Referenzeigenschaft, kein Portierungsfehler. [docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md) #12, Known Issue #34.
+- **Periodisches GFN-FF fehlt** (zurueckgestellt, Entscheidung Okt. 2026): die CPU nutzt das Gitter nirgends, die ROCm-Kernel haben `applyMIC` und `setUnitCell`, aber `unitcell 9 9 9` aendert die Energie von `water8-cluster` weder auf CPU noch auf ROCm (8 Stellen). Plan und Stand: [docs/GFNFF-CPU.md](docs/GFNFF-CPU.md), [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md) ("Periodic boundary conditions: not implemented").
 - **ROCm gegen CPU bei Cl2-Anion** (`clusters/cl2-anion.xyz`, `-charge -1`, `-md -MaxTime 100 -dt 1`): Schritt 0 und 20 fs gleich, nach 100 Schritten Epot -0.9983 (ROCm) gegen -1.1458 Eh (CPU, threadunabhaengig); schon vor den ROCm-Aenderungen vom 13. Okt. 2026, Ursache nicht untersucht.
 - **ROCm**: GFN1/GFN2 ignorieren `-scf_mixed_precision false` (G2-13); Energiesummen nehmen wave32 an (F-17). Dokumentiert in
   [docs/MULTI_GPU_GAPS.md](docs/MULTI_GPU_GAPS.md). Leistung (EEQ auf der CPU, rocSOLVER-Eigenloeser):
