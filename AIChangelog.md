@@ -16,6 +16,7 @@ below. If it needs measurements or a derivation, write them into the matching `d
 
 ## Jul - Sep 2026 (and some late June), 108 entries, full text in AIChangelog_2026-late.md
 
+- ROCm HB/XB list refresh (branch `feature/rocm-hb-detection`, Oct 13, 2026): detection with double-precision pre-tests, lean device fill, no CPU-workspace copy; refresh host time 226.9 -> 52.2 ms, MD step 71.8 -> 54.7 ms (urea400-water1000, CPU 172.9), lists and CPU path bit-identical.
 - ROCm HB and repulsion kernels (branch `feature/rocm-hb-repulsion-kernels`, Oct 13, 2026): per-atom gathers, HB gradient slots, triples grouped by case; urea `k_hbonds` 15.5 -> 3.6 ms, repulsion 8.3 -> 1.7 ms, MD step 78.1 -> 71.5 ms (CPU 180.3) - [docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md)
 - `-gpu auto` uses the CPU for native GFN-FF below 900 atoms on ROCm (`-gfnff.gpu_auto_min_atoms`, Oct 13, 2026): ROCm MD step 14x slower than the CPU at 24 atoms, break-even near 900 atoms; ctest `cli_gfnff_gpu_03_auto_small_system_cpu` - [docs/GPU_TUNING.md](docs/GPU_TUNING.md)
 - ROCm dispersion kernels (branch `feature/rocm-dispersion-speed`, Oct 13, 2026): per-atom u/v C6 sums, no sqrt/division by r, fused gather; 18.4 -> 7.5 ms per step, MD step 55.4 -> 47.4 ms (7320 atoms, CPU 145.1) - [docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md)

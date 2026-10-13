@@ -71,10 +71,19 @@
 
 #include <atomic>
 #include <chrono>
+#include <type_traits>
 #include <sstream>
 #include <cmath>
 #include <cstring>
 #include <memory>
+
+/// Claude Generated (Oct 2026): true iff the backend traits declare `lean_hb_refresh = true` (ROCm); a
+/// backend without the member (CUDA) gets false and keeps its previous HB/XB refresh path unchanged.
+template <class B, class = void>
+struct gfnffBackendLeanHBRefresh : std::false_type {};
+template <class B>
+struct gfnffBackendLeanHBRefresh<B, std::void_t<decltype(B::lean_hb_refresh)>>
+    : std::bool_constant<B::lean_hb_refresh> {};
 
 template <class Backend>
 class GFNFFGpuMethodImpl : public ComputationalMethod {
@@ -544,6 +553,10 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
             coul_implicit = m_parameters["gfnff"].value("gpu_coulomb_implicit", coul_implicit);
         m_gfnff->setImplicitCoulombPairs(coul_implicit);
         m_gfnff->setKeepFullParameterSet(true);  // consumeCachedParameterSet() needs every pair list
+        // Claude Generated (Oct 2026): the wrapper never runs the CPU workspace of m_gfnff (no
+        // GFNFF::Calculation()), so its HB/XB lists need no update on a re-detection (ROCm only).
+        if constexpr (gfnffBackendLeanHBRefresh<Backend>::value)
+            m_gfnff->setSkipHostHBWorkspaceUpdate(true);
     }
 
     // CPU topology + parameter generation (same as CPU gfnff)
@@ -745,6 +758,10 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         // staged pinned upload (same bytes, parallel conversion); fallback is the PARAM default.
         if constexpr (Backend::has_staged_list_upload)
             m_gpu_workspace->setStagedListUpload(cfg_get_bool("gpu_staged_list_upload", true), m_host_threads);
+        // Claude Generated (Oct 2026): ROCm packs the refreshed HB list with the -threads host threads; the
+        // staged upload stays off there (the setter is the only way to pass the thread count).
+        if constexpr (gfnffBackendLeanHBRefresh<Backend>::value && !Backend::has_staged_list_upload)
+            m_gpu_workspace->setStagedListUpload(false, m_host_threads);
         // Claude Generated (Sep 2026): per-step D4 C6 refresh on the device, same switch as the
         // CPU path (GFNFF::refreshDispersionC6()).
         m_gpu_workspace->setDispersionC6Update(cfg_get_bool("dispersion_c6_update", true));

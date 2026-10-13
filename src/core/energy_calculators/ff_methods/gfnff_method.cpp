@@ -1948,11 +1948,17 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
     const TopologyInfo& topo = getCachedTopology();
 
     // Re-detect HB/XB pairs with Phase-1 charges (topology_charges)
-    auto new_hbonds_native = detectHydrogenBondsNative(topo.topology_charges);
+    // Claude Generated (Oct 2026): the entries of the previous list are reused as the slots of the
+    // new one: the detection move-assigns the new entries into them on the pool workers (which also
+    // frees the old neighbour vectors there), instead of appending 582k entries on one thread into
+    // fresh memory and destroying the old list afterwards on this thread (urea400-water1000).
+    std::vector<GFNFFHydrogenBond> hb_storage;
+    hb_storage.swap(m_last_hbonds);
+    auto new_hbonds_native = detectHydrogenBondsNative(topo.topology_charges, &hb_storage);
     auto new_xbonds_native = detectHalogenBondsNative(topo.topology_charges);
 
-    // Update internal workspace
-    if (m_workspace) {
+    // Update internal workspace (not when a GPU method owns the lists, setSkipHostHBWorkspaceUpdate)
+    if (m_workspace && !m_skip_host_hb_workspace) {
         m_workspace->updateHBonds(new_hbonds_native);
         m_workspace->updateXBonds(new_xbonds_native);
     }
@@ -1969,7 +1975,7 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
     // kept the setup-time one, so CPU and GPU diverged from the first re-detection on. Same
     // cross-reference as generateGFNFFParameterSet(), applied to the CPU workspace(s) here.
     if (m_parameters.value("hbond", true)) {
-        for (FFWorkspace* ws : { m_workspace.get(), extra_ws }) {
+        for (FFWorkspace* ws : { m_skip_host_hb_workspace ? nullptr : m_workspace.get(), extra_ws }) {
             if (!ws) continue;
             auto hb_update = rebuildBondHBData(new_hbonds_native, ws->bonds());
             ws->updateBondHBData(hb_update.bond_nr_hb, std::move(hb_update.bond_hb_data));
@@ -4090,34 +4096,63 @@ GFNFF::BondHBRebuildResult GFNFF::rebuildBondHBData(
     result.bond_nr_hb.assign(nb, 0);
     result.bond_hb_H_atom.assign(nb, -1);
 
-    // Build A-H → B_atoms map from the new HB list (only N/O acceptors).
-    // Claude Generated (Oct 2026): hash map instead of std::map (only find() is used; each
-    // B list keeps the HB-list order), 56k entries per re-detection at 7320 atoms.
-    auto ah_key = [](int a, int h) { return (static_cast<long long>(a) << 32) ^ static_cast<unsigned int>(h); };
-    std::unordered_map<long long, std::vector<int>> ah_to_b_atoms;
-    ah_to_b_atoms.reserve(hbonds.size());
+    // Claude Generated (Oct 2026): only the (A, H) pairs of X-H bonds with A = N or O are ever
+    // looked up, so the B lists are collected for those keys alone (per-H key table, a few
+    // entries per hydrogen) instead of a hash map over the (A, H) pair of every H bond (case 1
+    // included). Same B lists in HB-list order, same entries in bond order; 16 -> 6.6 ms per
+    // call with 582k H bonds (urea400-water1000).
+    auto bond_key_atoms = [&](const Bond& bond, int& hbA, int& hbH) -> bool {
+        hbH = -1; hbA = -1;
+        if (bond.i < m_atomcount && m_atoms[bond.i] == 1) { hbH = bond.i; hbA = bond.j; }
+        else if (bond.j < m_atomcount && m_atoms[bond.j] == 1) { hbH = bond.j; hbA = bond.i; }
+        else return false;
+        return !(hbA >= m_atomcount || (m_atoms[hbA] != 7 && m_atoms[hbA] != 8));
+    };
+    // Keys per hydrogen as CSR: key_A[key_off[H] .. key_off[H+1]) are the A atoms, key ids in
+    // key_id; the same (A, H) from two bonds shares one key, as in the former map.
+    std::vector<int> key_off(m_atomcount + 1, 0);
+    for (int b = 0; b < nb; ++b) {
+        int hbA, hbH;
+        if (bond_key_atoms(bonds[b], hbA, hbH)) ++key_off[hbH + 1];
+    }
+    for (int a = 0; a < m_atomcount; ++a) key_off[a + 1] += key_off[a];
+    std::vector<int> key_A(key_off[m_atomcount], -1), key_id(key_off[m_atomcount], -1);
+    std::vector<int> key_fill(key_off.begin(), key_off.end() - 1);
+    std::vector<int> bond_key(nb, -1);
+    int nkeys = 0;
+    for (int b = 0; b < nb; ++b) {
+        int hbA, hbH;
+        if (!bond_key_atoms(bonds[b], hbA, hbH)) continue;
+        int id = -1;
+        for (int q = key_off[hbH]; q < key_fill[hbH]; ++q)
+            if (key_A[q] == hbA) { id = key_id[q]; break; }
+        if (id < 0) {
+            id = nkeys++;
+            key_A[key_fill[hbH]] = hbA;
+            key_id[key_fill[hbH]] = id;
+            ++key_fill[hbH];
+        }
+        bond_key[b] = id;
+    }
+    std::vector<std::vector<int>> key_B(nkeys);
     for (const auto& hb : hbonds) {
         int z_b = (hb.k < m_atomcount) ? m_atoms[hb.k] : 0;
-        if (z_b == 7 || z_b == 8)
-            ah_to_b_atoms[ah_key(hb.i, hb.j)].push_back(hb.k);
+        if (z_b != 7 && z_b != 8) continue;
+        if (hb.j < 0 || hb.j >= m_atomcount) continue;
+        for (int q = key_off[hb.j]; q < key_fill[hb.j]; ++q)
+            if (key_A[q] == hb.i) { key_B[key_id[q]].push_back(hb.k); break; }
     }
 
     for (int b = 0; b < nb; ++b) {
-        const Bond& bond = bonds[b];
-        int hbH = -1, hbA = -1;
-        if (bond.i < m_atomcount && m_atoms[bond.i] == 1) { hbH = bond.i; hbA = bond.j; }
-        else if (bond.j < m_atomcount && m_atoms[bond.j] == 1) { hbH = bond.j; hbA = bond.i; }
-        else continue;
-        if (hbA >= m_atomcount || (m_atoms[hbA] != 7 && m_atoms[hbA] != 8)) continue;
-
-        auto it = ah_to_b_atoms.find(ah_key(hbA, hbH));
-        if (it != ah_to_b_atoms.end() && !it->second.empty()) {
-            result.bond_nr_hb[b] = static_cast<int>(it->second.size());
-            result.bond_hb_H_atom[b] = hbH;
-            BondHBEntry entry;
-            entry.A = hbA; entry.H = hbH; entry.B_atoms = it->second;
-            result.bond_hb_data.push_back(entry);
-        }
+        const int id = bond_key[b];
+        if (id < 0 || key_B[id].empty()) continue;
+        int hbA, hbH;
+        bond_key_atoms(bonds[b], hbA, hbH);
+        result.bond_nr_hb[b] = static_cast<int>(key_B[id].size());
+        result.bond_hb_H_atom[b] = hbH;
+        BondHBEntry entry;
+        entry.A = hbA; entry.H = hbH; entry.B_atoms = key_B[id];
+        result.bond_hb_data.push_back(entry);
     }
     return result;
 }
@@ -8761,7 +8796,8 @@ double GFNFF::estimateXBStrength(int A, int X, int B,
     return std::abs(R_damp * Q_B * acidity_X * Q_X);
 }
 
-std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& charges) const
+std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& charges,
+                                                                std::vector<GFNFFHydrogenBond>* storage) const
 {
     // Claude Generated (March 2026): Native struct version of detectHydrogenBonds
     auto start_time = std::chrono::high_resolution_clock::now();
@@ -8769,6 +8805,11 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
     using namespace GFNFFParameters;
 
     std::vector<GFNFFHydrogenBond> hbonds;
+    // Oct 2026: the entries of the previous list (see updateHBXBIfNeeded()) are reused as the
+    // slots of the new list in the parallel cell-list branch below; the other branches do not use
+    // them (they are destroyed on return).
+    std::vector<GFNFFHydrogenBond> recycled;
+    if (storage) recycled.swap(*storage);
 
     // Claude Generated (2025): Phase 2.1 - Hydrogen Bond Detection
     // Reference: gfnff_ini.f90:806-839 and gfnff_ini2.f90:1063-1113
@@ -9132,7 +9173,70 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
             out.push_back(std::move(hb));
         };
 
-        auto process_pair = [&](int i, int j, std::vector<GFNFFHydrogenBond>& out) {
+        // Claude Generated (Oct 2026): the case-1 strength test of estimateHBStrengthCase1() on
+        // plain doubles (no Vector copies). Returns +1 (keep) or -1 (drop) only when the value is
+        // more than a relative 1e-6 away from the threshold and the out-of-line exponent is more
+        // than 1e-6 away from its cut at 15; otherwise 0 and the caller runs the exact function.
+        // The two evaluations differ by a few ulp in the distances, which moves the estimate by a
+        // relative amount far below 1e-6 (every factor is a product, quotient, power or exp of
+        // positive, well-conditioned terms), so every decision equals the exact one.
+        auto case1StrengthDecision = [&](int A, int H, int B, double thr) -> int {
+            using namespace GFNFFParameters;
+            const double ax = m_geometry_bohr(A, 0), ay = m_geometry_bohr(A, 1), az = m_geometry_bohr(A, 2);
+            const double hx = m_geometry_bohr(H, 0), hy = m_geometry_bohr(H, 1), hz = m_geometry_bohr(H, 2);
+            const double bx = m_geometry_bohr(B, 0), by = m_geometry_bohr(B, 1), bz = m_geometry_bohr(B, 2);
+            const double r_AH = std::sqrt((hx - ax) * (hx - ax) + (hy - ay) * (hy - ay) + (hz - az) * (hz - az));
+            const double r_HB = std::sqrt((bx - hx) * (bx - hx) + (by - hy) * (by - hy) + (bz - hz) * (bz - hz));
+            const double r_AB = std::sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay) + (bz - az) * (bz - az));
+            const double r_vdw_AB = covalent_radii[m_atoms[A] - 1] + covalent_radii[m_atoms[B] - 1];
+            const double expo_outl = (HB_BACUT / r_vdw_AB) * ((r_AH + r_HB) / r_AB - 1.0);
+            if (std::abs(expo_outl - 15.0) < 1e-6) return 0;
+            if (expo_outl > 15.0) return (0.0 < thr * (1.0 - 1e-6)) ? -1 : 0;
+            // Upper bound first (no pow): Q_* < 1, damp_short < 1, bas <= max(Q_A b_A, Q_B b_B),
+            // aci <= max(a_A, a_B) (weighted means), 2/(1+e^x) <= 2 e^-x, damp_long with t^6 as a
+            // product. Most candidates are rejected here.
+            const double bA = current_basicity[A], bB = current_basicity[B];
+            const double aA = current_acidity[A], aB = current_acidity[B];
+            if (bA >= 0.0 && bB >= 0.0 && aA >= 0.0 && aB >= 0.0) {
+                const double t = r_AB * r_AB / HB_LONGCUT;
+                const double t2 = t * t;
+                const double outl_bound = (expo_outl > 0.0) ? 2.0 * std::exp(-expo_outl) : 2.0;
+                const double bound = std::max(bA, bB) * std::max(aA, aB) / (1.0 + t2 * t2 * t2)
+                    / (r_AB * r_AB * r_AB) * outl_bound;
+                if (std::isfinite(bound) && bound < thr * (1.0 - 1e-6)) return -1;
+            }
+            const double damp_outl = 2.0 / (1.0 + std::exp(expo_outl));
+            const double r_AH_4 = r_AH * r_AH * r_AH * r_AH;
+            const double r_HB_4 = r_HB * r_HB * r_HB * r_HB;
+            const double denom_DA = 1.0 / (r_AH_4 + r_HB_4);
+            const double Q_H = ws_charge_scaling(charges[H], HB_ST, HB_SF);
+            const double Q_A = ws_charge_scaling(-charges[A], HB_ST, HB_SF);
+            const double Q_B = ws_charge_scaling(-charges[B], HB_ST, HB_SF);
+            const double bas = (Q_A * current_basicity[A] * r_AH_4 + Q_B * current_basicity[B] * r_HB_4) * denom_DA;
+            const double aci = (current_acidity[B] * r_AH_4 + current_acidity[A] * r_HB_4) * denom_DA;
+            const double damp_short = ws_damping_short_range(r_AB, r_vdw_AB, HB_SCUT, HB_ALP);
+            const double damp_long = ws_damping_long_range(r_AB, HB_LONGCUT, HB_ALP);
+            const double rdamp = damp_short * damp_long / (r_AB * r_AB * r_AB);
+            const double est = std::abs(bas * aci * rdamp * Q_H * damp_outl);
+            if (!std::isfinite(est)) return 0;
+            if (est < thr * (1.0 - 1e-6)) return -1;
+            if (est > thr * (1.0 + 1e-6)) return 1;
+            return 0;
+        };
+
+        // Claude Generated (Oct 2026): the hydrogens around atom i (forEachNeighbor order, with
+        // the squared distance it computed) are the same for every pair (i, j); ab_pairs holds
+        // the pairs of one i consecutively, so each worker collects them once per i and walks
+        // the copy for every j. Same sequence, same r_iH^2 values as one query per pair.
+        // Stored as separate arrays so that the distance pre-test below vectorises; `crit` and
+        // `pass` are scratch arrays of the same length.
+        struct HCandidateCache {
+            int i = -1;
+            std::vector<int> H;
+            std::vector<double> r2, x, y, z, crit;
+            std::vector<int> pass;
+        };
+        auto process_pair = [&](int i, int j, std::vector<GFNFFHydrogenBond>& out, HCandidateCache& hcache) {
             const Vector r_i = m_geometry_bohr.row(i);
             const Vector r_j = m_geometry_bohr.row(j);
             const double r_AB_sq = (r_i - r_j).squaredNorm();
@@ -9145,18 +9249,78 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                     make_nhb2(j, H, i, out);
                 }
             }
-            hyd_cells.forEachNeighbor(i, hbthr2, [&](int H, double r_iH_sq) {
-                if (!is_hb_hyd[H]) return;
-                if (is_bonded(i, H) || is_bonded(j, H)) return;  // bonded to neither
-                const Vector r_H = m_geometry_bohr.row(H);
-                const double r_jH_sq = (r_j - r_H).squaredNorm();
-                if (r_AB_sq + r_iH_sq + r_jH_sq < hbthr2) {
+            // Claude Generated (Oct 2026): conservative pre-test of the case-1 criterion below on
+            // plain doubles, before the bond look-ups and the Vector copy of r_H. r_jH^2 computed
+            // here differs from the Eigen value by a few ulp; with the relative margin 1e-9 a
+            // rejected hydrogen fails the exact test r_AB^2 + r_iH^2 + r_jH^2 < hbthr2 as well, so
+            // the visited sequence and every appended entry are unchanged. 85 % of the visits on
+            // urea400-water1000 end here.
+            const double xj = m_geometry_bohr(j, 0), yj = m_geometry_bohr(j, 1), zj = m_geometry_bohr(j, 2);
+            const double case1_reject = hbthr2 * (1.0 + 1e-9);
+            const double case1_accept = hbthr2 * (1.0 - 1e-9);
+            if (hcache.i != i) {
+                hcache.H.clear(); hcache.r2.clear(); hcache.x.clear(); hcache.y.clear(); hcache.z.clear();
+                hyd_cells.forEachNeighbor(i, hbthr2, [&](int H, double r_iH_sq) {
+                    hcache.H.push_back(H);
+                    hcache.r2.push_back(r_iH_sq);
+                    hcache.x.push_back(m_geometry_bohr(H, 0));
+                    hcache.y.push_back(m_geometry_bohr(H, 1));
+                    hcache.z.push_back(m_geometry_bohr(H, 2));
+                });
+                hcache.crit.resize(hcache.H.size());
+                hcache.pass.resize(hcache.H.size());
+                hcache.i = i;
+            }
+            // Pass 1 (vectorisable): the plain-double criterion for every candidate; pass 2 keeps
+            // the indices below the reject bound in their original order.
+            const int ncand = static_cast<int>(hcache.H.size());
+            {
+                const double* cx = hcache.x.data();
+                const double* cy = hcache.y.data();
+                const double* cz = hcache.z.data();
+                const double* cr = hcache.r2.data();
+                double* cc = hcache.crit.data();
+                for (int q = 0; q < ncand; ++q) {
+                    const double dx = xj - cx[q];
+                    const double dy = yj - cy[q];
+                    const double dz = zj - cz[q];
+                    cc[q] = r_AB_sq + cr[q] + (dx * dx + dy * dy + dz * dz);
+                }
+            }
+            int npass = 0;
+            {
+                const double* cc = hcache.crit.data();
+                int* pp = hcache.pass.data();
+                for (int q = 0; q < ncand; ++q) {
+                    pp[npass] = q;
+                    npass += (cc[q] < case1_reject) ? 1 : 0;
+                }
+            }
+            for (int pq = 0; pq < npass; ++pq) {
+                const int q = hcache.pass[pq];
+                const int H = hcache.H[q];
+                const double r_iH_sq = hcache.r2[q];
+                const double crit = hcache.crit[q];
+                if (!is_hb_hyd[H]) continue;
+                if (is_bonded(i, H) || is_bonded(j, H)) continue;  // bonded to neither
+                // Claude Generated (Oct 2026): outside the +-1e-9 band the plain-double value
+                // decides the same as the exact Eigen expression; inside it the exact one decides.
+                if (!(crit < case1_accept)) {
+                    const Vector r_H = m_geometry_bohr.row(H);
+                    const double r_jH_sq = (r_j - r_H).squaredNorm();
+                    if (!(r_AB_sq + r_iH_sq + r_jH_sq < hbthr2)) continue;
+                }
+                {
                     if (hb_min_pair_energy > 0.0) {
-                        const double est = estimateHBStrengthCase1(i, H, j,
-                            current_basicity[i], current_basicity[j],
-                            current_acidity[i], current_acidity[j],
-                            charges[H], charges[i], charges[j]);
-                        if (est < hb_min_pair_energy) return;
+                        const int dec = case1StrengthDecision(i, H, j, hb_min_pair_energy);
+                        if (dec < 0) continue;
+                        if (dec == 0) {
+                            const double est = estimateHBStrengthCase1(i, H, j,
+                                current_basicity[i], current_basicity[j],
+                                current_acidity[i], current_acidity[j],
+                                charges[H], charges[i], charges[j]);
+                            if (est < hb_min_pair_energy) continue;
+                        }
                     }
                     GFNFFHydrogenBond hb;
                     hb.case_type = 1;
@@ -9169,7 +9333,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                     hb.r_cut = 50.0;
                     out.push_back(std::move(hb));
                 }
-            });
+            }
         };
 
         CxxThreadPool* opt_pool = threadPool();
@@ -9189,20 +9353,42 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                 if (start >= ab_pairs.size()) break;
                 futures.push_back(opt_pool->enqueue([&, start, end]() {
                     std::vector<GFNFFHydrogenBond> local;
+                    HCandidateCache hcache;
                     for (size_t idx = start; idx < end; ++idx)
-                        process_pair(ab_pairs[idx].i, ab_pairs[idx].j, local);
+                        process_pair(ab_pairs[idx].i, ab_pairs[idx].j, local, hcache);
                     return local;
                 }));
             }
+            // Claude Generated (Oct 2026): the chunks are placed in order at their offsets by the
+            // pool workers (move assignment into a list of the final length, built on the
+            // recycled entries of the previous list) instead of being appended one after the
+            // other by this thread, which took ~19 ms for 582k entries (urea400-water1000).
+            std::vector<std::vector<GFNFFHydrogenBond>> locals;
+            locals.reserve(futures.size());
             for (auto& f : futures) {
-                auto local = f.get();
-                for (const auto& hb : local) { if (hb.case_type == 1) nhb1_count++; else nhb2_count++; }
-                // Oct 2026: moved, not copied (the neighbour vectors of each entry were reallocated)
-                hbonds.insert(hbonds.end(), std::make_move_iterator(local.begin()), std::make_move_iterator(local.end()));
+                locals.push_back(f.get());
             }
+            std::vector<size_t> offsets(locals.size() + 1, 0);
+            for (size_t c = 0; c < locals.size(); ++c) {
+                offsets[c + 1] = offsets[c] + locals[c].size();
+                for (const auto& hb : locals[c]) { if (hb.case_type == 1) nhb1_count++; else nhb2_count++; }
+            }
+            const size_t base = hbonds.size();   // 0: nothing is appended before this point
+            if (base == 0) hbonds.swap(recycled);
+            hbonds.resize(base + offsets.back());
+            std::vector<std::future<void>> placed;
+            placed.reserve(locals.size());
+            for (size_t c = 0; c < locals.size(); ++c) {
+                placed.push_back(opt_pool->enqueue([&hbonds, &locals, &offsets, base, c]() {
+                    std::move(locals[c].begin(), locals[c].end(), hbonds.begin() + static_cast<std::ptrdiff_t>(base + offsets[c]));
+                    std::vector<GFNFFHydrogenBond>().swap(locals[c]);
+                }));
+            }
+            for (auto& f : placed) f.get();
         } else {
             std::vector<GFNFFHydrogenBond> local;
-            for (const auto& ab : ab_pairs) process_pair(ab.i, ab.j, local);
+            HCandidateCache hcache;
+            for (const auto& ab : ab_pairs) process_pair(ab.i, ab.j, local, hcache);
             for (const auto& hb : local) { if (hb.case_type == 1) nhb1_count++; else nhb2_count++; }
             hbonds.insert(hbonds.end(), std::make_move_iterator(local.begin()), std::make_move_iterator(local.end()));
         }

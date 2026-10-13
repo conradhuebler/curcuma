@@ -4290,6 +4290,7 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_gather_rhs_fragments(
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"  // covalent_rad_d3
 
 #include <cstdlib>  // std::getenv (CURCUMA_GFNFF_GPU_FREEZE_HBQ opt-out)
+#include <thread>  // Claude Generated (Oct 2026): host threads of the HB list packing (hipHostParallelFor)
 
 #include "src/core/curcuma_logger.h"
 
@@ -4402,8 +4403,28 @@ struct HipPairGatherCSR {
     CudaBuffer<int> pairidx;  ///< [2n] pair index into the RepulsionSoA arrays
     int N = 0;
 };
+/// Claude Generated (Oct 2026): host arrays of one HB list upload (fillHBondSoA, buildHBSlotTables), kept between
+/// refreshes so that a refresh neither zero-fills nor page-faults ~100 MB of fresh memory at 582k triples. Every
+/// element that is uploaded is written in each fill.
+struct HipHBHostStage {
+    std::vector<int>    i, j, k, eA, eB, cs, nbB_off, nbB_cnt, acc_parent, nbC_off, nbC_cnt, nbB_flat, nbC_flat;
+    std::vector<double> qH, qA, qB, basA, basB, aciA, aciB, rcut, repz;
+    std::vector<int>    slot_off, slot_atom, atom_off, atom_slots;
+    std::vector<std::vector<int>> hist;
+};
+
+/// Claude Generated (Oct 2026): resize a staging array, with 1/8 headroom on growth (the HB list grows and shrinks
+/// by about 1 % between refreshes, so it is reallocated rarely).
+template <typename V>
+static void hbStageResize(V& a, size_t m)
+{
+    if (a.capacity() < m) a.reserve(m + m / 8);
+    a.resize(m);
+}
+
 /// Per-triple gradient slots of the H-bond list for k_hbonds slot mode + k_slot_gather (rebuilt with the list).
 struct HipHBSlotTables {
+    HipHBHostStage stage;           ///< Oct 2026: host arrays reused across HB list refreshes
     CudaBuffer<int>    slot_off;    ///< [n+1] slot range per triple: A, H, B, nb(B) (case >= 2), C + nb(C) (case 3)
     CudaBuffer<int>    atom_off;    ///< [N+1] row offsets into atom_slots
     CudaBuffer<int>    atom_slots;  ///< [nslots] slot indices grouped by atom
@@ -4841,19 +4862,43 @@ void XBondSoA::upload(const std::vector<GFNFFHalogenBond>& v,
 }
 
 // ---------------------------------------------------------------------------
+/// Claude Generated (Oct 2026): run f(begin, end) over [0, n) split into `threads` contiguous ranges, the first
+/// range on the calling thread. Every caller writes disjoint index ranges, so the result does not depend on the
+/// thread count. Below `min_per_thread` items per thread fewer threads are used.
+template <typename F>
+static void hipHostParallelFor(int n, int threads, F&& f, int min_per_thread = 16384)
+{
+    if (n <= 0) return;
+    int t = std::max(1, std::min(threads, n / std::max(1, min_per_thread)));
+    if (t <= 1) { f(0, n); return; }
+    std::vector<std::thread> pool;
+    pool.reserve(t - 1);
+    for (int c = 1; c < t; ++c) {
+        const int b = static_cast<int>(static_cast<long long>(n) * c / t);
+        const int e = static_cast<int>(static_cast<long long>(n) * (c + 1) / t);
+        pool.emplace_back([&f, b, e]() { f(b, e); });
+    }
+    f(0, static_cast<int>(static_cast<long long>(n) / t));
+    for (auto& th : pool) th.join();
+}
+
+// ---------------------------------------------------------------------------
 /// Claude Generated (Oct 2026): per-triple slot ranges and the per-atom slot CSR for k_hbonds slot mode, built
 /// from the host SoA arrays of fillHBondSoA (device order). Slot order per triple must match k_hbonds: A, H, B,
 /// then nb(B) if case >= 2, then C and nb(C) if case == 3 and the parent index is >= 0. Slots whose atom is
-/// outside [0, natoms) are not gathered.
+/// outside [0, natoms) are not gathered. The per-atom slot lists hold the slots in ascending order (k_slot_gather
+/// sums them in that order); the counting sort is split over `threads` ranges of slots with one histogram per
+/// range, which places every slot exactly where the serial counting sort does.
 static void buildHBSlotTables(int n, const std::vector<int>& h_i, const std::vector<int>& h_j, const std::vector<int>& h_k,
                               const std::vector<int>& h_case,
                               const std::vector<int>& nbB_off, const std::vector<int>& nbB_cnt, const std::vector<int>& nbB_flat,
                               const std::vector<int>& acc_parent,
                               const std::vector<int>& nbC_off, const std::vector<int>& nbC_cnt, const std::vector<int>& nbC_flat,
-                              int natoms, HipHBSlotTables& T)
+                              int natoms, HipHBSlotTables& T, int threads)
 {
     T.N = natoms;
-    std::vector<int> slot_off(n + 1, 0);
+    std::vector<int>& slot_off = T.stage.slot_off;
+    hbStageResize(slot_off, n + 1);
     int tot = 0;
     for (int m = 0; m < n; ++m) {
         slot_off[m] = tot;
@@ -4862,30 +4907,57 @@ static void buildHBSlotTables(int n, const std::vector<int>& h_i, const std::vec
     }
     slot_off[n] = tot;
     T.nslots = tot;
-    std::vector<int> slot_atom(tot);
-    for (int m = 0; m < n; ++m) {
-        int q = slot_off[m];
-        slot_atom[q++] = h_i[m]; slot_atom[q++] = h_j[m]; slot_atom[q++] = h_k[m];
-        if (h_case[m] >= 2)
-            for (int t = 0; t < nbB_cnt[m]; ++t) slot_atom[q++] = nbB_flat[nbB_off[m] + t];
-        if (h_case[m] == 3 && acc_parent[m] >= 0) {
-            slot_atom[q++] = acc_parent[m];
-            for (int t = 0; t < nbC_cnt[m]; ++t) slot_atom[q++] = nbC_flat[nbC_off[m] + t];
+    std::vector<int>& slot_atom = T.stage.slot_atom;
+    hbStageResize(slot_atom, tot);
+    hipHostParallelFor(n, threads, [&](int m0, int m1) {
+        for (int m = m0; m < m1; ++m) {
+            int q = slot_off[m];
+            slot_atom[q++] = h_i[m]; slot_atom[q++] = h_j[m]; slot_atom[q++] = h_k[m];
+            if (h_case[m] >= 2)
+                for (int t = 0; t < nbB_cnt[m]; ++t) slot_atom[q++] = nbB_flat[nbB_off[m] + t];
+            if (h_case[m] == 3 && acc_parent[m] >= 0) {
+                slot_atom[q++] = acc_parent[m];
+                for (int t = 0; t < nbC_cnt[m]; ++t) slot_atom[q++] = nbC_flat[nbC_off[m] + t];
+            }
         }
+    });
+    // Stable counting sort of the slots by atom: range r of slots counts into hist[r], the start of range r in the
+    // list of atom a is atom_off[a] + sum of hist[r' < r][a].
+    const int nr = std::max(1, std::min(threads, tot / 65536));
+    std::vector<std::vector<int>>& hist = T.stage.hist;
+    hist.resize(nr);
+    for (auto& h : hist) h.assign(natoms, 0);
+    auto range_begin = [&](int r) { return static_cast<int>(static_cast<long long>(tot) * r / nr); };
+    hipHostParallelFor(nr, nr, [&](int r0, int r1) {
+        for (int r = r0; r < r1; ++r) {
+            auto& h = hist[r];
+            for (int q = range_begin(r); q < range_begin(r + 1); ++q) {
+                const int a = slot_atom[q];
+                if (a >= 0 && a < natoms) ++h[a];
+            }
+        }
+    }, 1);
+    std::vector<int>& atom_off = T.stage.atom_off;
+    atom_off.assign(natoms + 1, 0);
+    for (int a = 0; a < natoms; ++a) {
+        int c = 0;
+        for (int r = 0; r < nr; ++r) { const int h = hist[r][a]; hist[r][a] = atom_off[a] + c; c += h; }
+        atom_off[a + 1] = atom_off[a] + c;
     }
-    std::vector<int> atom_off(natoms + 1, 0);
-    for (int a : slot_atom)
-        if (a >= 0 && a < natoms) ++atom_off[a + 1];
-    for (int a = 0; a < natoms; ++a) atom_off[a + 1] += atom_off[a];
-    std::vector<int> atom_slots(atom_off[natoms]);
-    std::vector<int> cur(atom_off.begin(), atom_off.end() - 1);
-    for (int q = 0; q < tot; ++q) {
-        const int a = slot_atom[q];
-        if (a >= 0 && a < natoms) atom_slots[cur[a]++] = q;
-    }
-    T.slot_off.upload(slot_off);
-    T.atom_off.upload(atom_off);
-    if (!atom_slots.empty()) T.atom_slots.upload(atom_slots);
+    std::vector<int>& atom_slots = T.stage.atom_slots;
+    hbStageResize(atom_slots, atom_off[natoms]);
+    hipHostParallelFor(nr, nr, [&](int r0, int r1) {
+        for (int r = r0; r < r1; ++r) {
+            auto& cur = hist[r];
+            for (int q = range_begin(r); q < range_begin(r + 1); ++q) {
+                const int a = slot_atom[q];
+                if (a >= 0 && a < natoms) atom_slots[cur[a]++] = q;
+            }
+        }
+    }, 1);
+    T.slot_off.upload(slot_off.data(), n + 1);
+    T.atom_off.upload(atom_off.data(), natoms + 1);
+    if (atom_off[natoms] > 0) T.atom_slots.upload(atom_slots.data(), atom_off[natoms]);
     if (T.slot_g.n < 3 * tot) T.slot_g.alloc(3 * (tot + tot / 8));   // headroom: the list grows and shrinks between refreshes
 }
 
@@ -4893,7 +4965,7 @@ static void buildHBSlotTables(int n, const std::vector<int>& h_i, const std::vec
 // v[perm[m]] (perm == nullptr: identity). Used to group the triples by case type (fillHBondSoA callers).
 static void fillHBondSoA(HBondSoA& s, const std::vector<GFNFFHydrogenBond>& vin, const int* perm,
                          const std::vector<int>& atom_types, hipStream_t stream,
-                         HipHBSlotTables* T = nullptr, int natoms = 0);
+                         HipHBSlotTables* T = nullptr, int natoms = 0, int threads = 1);
 
 void HBondSoA::upload(const std::vector<GFNFFHydrogenBond>& v,
                        const std::vector<int>& atom_types,
@@ -4902,86 +4974,88 @@ void HBondSoA::upload(const std::vector<GFNFFHydrogenBond>& v,
     fillHBondSoA(*this, v, nullptr, atom_types, stream);
 }
 
+// Oct 2026: the arrays are written directly in device order (no separate permutation pass) by `threads` host
+// threads over disjoint triple ranges; the neighbour lists nb_B_flat / nb_C_flat are stored in device order too
+// (each triple carries its own offset and count, so k_hbonds reads the same values).
 static void fillHBondSoA(HBondSoA& s, const std::vector<GFNFFHydrogenBond>& vin, const int* perm,
                          const std::vector<int>& atom_types, hipStream_t stream,
-                         HipHBSlotTables* T, int natoms)
+                         HipHBSlotTables* T, int natoms, int threads)
 {
     int& n = s.n;
     n = static_cast<int>(vin.size());
     if (T) { T->nslots = 0; T->N = natoms; }   // Oct 2026: an empty list must not gather stale slots
     if (n == 0) return;
-    const std::vector<GFNFFHydrogenBond>& v = vin;   // packed in list order, permuted below
+    const std::vector<GFNFFHydrogenBond>& v = vin;
 
     const int nat = static_cast<int>(atom_types.size());
-    std::vector<int>    h_i(n), h_j(n), h_k(n);
-    std::vector<int>    h_eA(n), h_eB(n), h_case(n);
-    std::vector<double> h_qH(n), h_qA(n), h_qB(n);
-    std::vector<double> h_basA(n), h_basB(n), h_aciA(n), h_aciB(n);
-    std::vector<double> h_rcut(n);
-    std::vector<int>    h_nbB_offset(n), h_nbB_count(n);
-    std::vector<int>    h_acc_parent(n);
-    std::vector<int>    h_nbC_offset(n), h_nbC_count(n);
-    std::vector<double> h_repz(n);
+    HipHBHostStage local_stage;
+    HipHBHostStage& st = T ? T->stage : local_stage;
+    for (auto* a : { &st.i, &st.j, &st.k, &st.eA, &st.eB, &st.cs, &st.nbB_cnt, &st.acc_parent, &st.nbC_cnt })
+        hbStageResize(*a, n);
+    for (auto* a : { &st.qH, &st.qA, &st.qB, &st.basA, &st.basB, &st.aciA, &st.aciB, &st.rcut, &st.repz })
+        hbStageResize(*a, n);
+    hbStageResize(st.nbB_off, n + 1);
+    hbStageResize(st.nbC_off, n + 1);
+    std::vector<int>    &h_i = st.i, &h_j = st.j, &h_k = st.k;
+    std::vector<int>    &h_eA = st.eA, &h_eB = st.eB, &h_case = st.cs;
+    std::vector<double> &h_qH = st.qH, &h_qA = st.qA, &h_qB = st.qB;
+    std::vector<double> &h_basA = st.basA, &h_basB = st.basB, &h_aciA = st.aciA, &h_aciB = st.aciB;
+    std::vector<double> &h_rcut = st.rcut;
+    std::vector<int>    &h_nbB_offset = st.nbB_off, &h_nbB_count = st.nbB_cnt;
+    std::vector<int>    &h_acc_parent = st.acc_parent;
+    std::vector<int>    &h_nbC_offset = st.nbC_off, &h_nbC_count = st.nbC_cnt;
+    std::vector<double> &h_repz = st.repz;
 
-    // First pass: count total neighbors
-    int total_B = 0, total_C = 0;
+    // Pass 1: per-triple values in device order
+    hipHostParallelFor(n, threads, [&](int m0, int m1) {
+        for (int m = m0; m < m1; ++m) {
+            const GFNFFHydrogenBond& hb = v[perm ? perm[m] : m];
+            h_i[m]     = hb.i;   // donor A
+            h_j[m]     = hb.j;   // hydrogen H
+            h_k[m]     = hb.k;   // acceptor B
+            h_eA[m]    = (hb.i < nat) ? atom_types[hb.i] : 0;
+            h_eB[m]    = (hb.k < nat) ? atom_types[hb.k] : 0;
+            h_qH[m]    = hb.q_H;
+            h_qA[m]    = hb.q_A;
+            h_qB[m]    = hb.q_B;
+            h_basA[m]  = hb.basicity_A;
+            h_basB[m]  = hb.basicity_B;
+            h_aciA[m]  = hb.acidity_A;
+            h_aciB[m]  = hb.acidity_B;
+            h_rcut[m]  = hb.r_cut;
+            h_case[m]  = hb.case_type;
+            h_acc_parent[m] = hb.acceptor_parent_index;
+            // repz_B for case 4
+            const int zB = (hb.k < nat) ? atom_types[hb.k] : 0;
+            h_repz[m] = (zB >= 1 && zB <= 86) ? GFNFFParameters::repz[zB - 1] : 1.0;
+            h_nbB_count[m] = static_cast<int>(hb.neighbors_B.size());
+            h_nbC_count[m] = static_cast<int>(hb.neighbors_C.size());
+        }
+    });
+    // Offsets of the neighbour lists (device order)
+    h_nbB_offset[0] = 0; h_nbC_offset[0] = 0;
     for (int m = 0; m < n; ++m) {
-        total_B += static_cast<int>(v[m].neighbors_B.size());
-        total_C += static_cast<int>(v[m].neighbors_C.size());
+        h_nbB_offset[m + 1] = h_nbB_offset[m] + h_nbB_count[m];
+        h_nbC_offset[m + 1] = h_nbC_offset[m] + h_nbC_count[m];
     }
-
-    std::vector<int> h_nbB_flat(total_B);
-    std::vector<int> h_nbC_flat(total_C);
-    int offB = 0, offC = 0;
-
-    for (int m = 0; m < n; ++m) {
-        h_i[m]     = v[m].i;   // donor A
-        h_j[m]     = v[m].j;   // hydrogen H
-        h_k[m]     = v[m].k;   // acceptor B
-        h_eA[m]    = (v[m].i < nat) ? atom_types[v[m].i] : 0;
-        h_eB[m]    = (v[m].k < nat) ? atom_types[v[m].k] : 0;
-        h_qH[m]    = v[m].q_H;
-        h_qA[m]    = v[m].q_A;
-        h_qB[m]    = v[m].q_B;
-        h_basA[m]  = v[m].basicity_A;
-        h_basB[m]  = v[m].basicity_B;
-        h_aciA[m]  = v[m].acidity_A;
-        h_aciB[m]  = v[m].acidity_B;
-        h_rcut[m]  = v[m].r_cut;
-        h_case[m]  = v[m].case_type;
-        h_acc_parent[m] = v[m].acceptor_parent_index;
-
-        // repz_B for case 4
-        int zB = (v[m].k < nat) ? atom_types[v[m].k] : 0;
-        h_repz[m] = (zB >= 1 && zB <= 86) ? GFNFFParameters::repz[zB - 1] : 1.0;
-
-        // Pack neighbors_B
-        h_nbB_offset[m] = offB;
-        h_nbB_count[m]  = static_cast<int>(v[m].neighbors_B.size());
-        for (int nb : v[m].neighbors_B) h_nbB_flat[offB++] = nb;
-
-        // Pack neighbors_C
-        h_nbC_offset[m] = offC;
-        h_nbC_count[m]  = static_cast<int>(v[m].neighbors_C.size());
-        for (int nb : v[m].neighbors_C) h_nbC_flat[offC++] = nb;
-    }
+    const int total_B = h_nbB_offset[n], total_C = h_nbC_offset[n];
+    std::vector<int>& h_nbB_flat = st.nbB_flat;
+    std::vector<int>& h_nbC_flat = st.nbC_flat;
+    hbStageResize(h_nbB_flat, total_B);
+    hbStageResize(h_nbC_flat, total_C);
+    // Pass 2: neighbour lists
+    hipHostParallelFor(n, threads, [&](int m0, int m1) {
+        for (int m = m0; m < m1; ++m) {
+            const GFNFFHydrogenBond& hb = v[perm ? perm[m] : m];
+            int ob = h_nbB_offset[m];
+            for (int nb : hb.neighbors_B) h_nbB_flat[ob++] = nb;
+            int oc = h_nbC_offset[m];
+            for (int nb : hb.neighbors_C) h_nbC_flat[oc++] = nb;
+        }
+    });
 
     s.total_nb_B = total_B;
     s.total_nb_C = total_C;
-
-    // Claude Generated (Oct 2026): device triple m = list triple perm[m]. Only the per-triple arrays are
-    // permuted; nb_B_flat / nb_C_flat stay in list order (each triple carries its own offset and count).
-    if (perm) {
-        auto permute = [&](auto& a) {
-            std::remove_reference_t<decltype(a)> t(a.size());
-            for (int m = 0; m < n; ++m) t[m] = a[perm[m]];
-            a.swap(t);
-        };
-        permute(h_i); permute(h_j); permute(h_k); permute(h_eA); permute(h_eB); permute(h_case);
-        permute(h_qH); permute(h_qA); permute(h_qB); permute(h_basA); permute(h_basB); permute(h_aciA); permute(h_aciB);
-        permute(h_rcut); permute(h_nbB_offset); permute(h_nbB_count); permute(h_acc_parent);
-        permute(h_nbC_offset); permute(h_nbC_count); permute(h_repz);
-    }
 
     s.idx_i.upload(h_i, stream);  s.idx_j.upload(h_j, stream);  s.idx_k.upload(h_k, stream);
     s.elem_A.upload(h_eA, stream);  s.elem_B.upload(h_eB, stream);
@@ -4990,17 +5064,17 @@ static void fillHBondSoA(HBondSoA& s, const std::vector<GFNFFHydrogenBond>& vin,
     s.acidity_A.upload(h_aciA, stream);   s.acidity_B.upload(h_aciB, stream);
     s.r_cut.upload(h_rcut, stream);
     s.case_type.upload(h_case, stream);
-    s.nb_B_offset.upload(h_nbB_offset, stream);
+    s.nb_B_offset.upload(h_nbB_offset.data(), n, stream);
     s.nb_B_count.upload(h_nbB_count, stream);
     if (total_B > 0) s.nb_B_flat.upload(h_nbB_flat, stream);
     s.acceptor_parent.upload(h_acc_parent, stream);
-    s.nb_C_offset.upload(h_nbC_offset, stream);
+    s.nb_C_offset.upload(h_nbC_offset.data(), n, stream);
     s.nb_C_count.upload(h_nbC_count, stream);
     if (total_C > 0) s.nb_C_flat.upload(h_nbC_flat, stream);
     s.repz_B.upload(h_repz, stream);
 
     if (T) buildHBSlotTables(n, h_i, h_j, h_k, h_case, h_nbB_offset, h_nbB_count, h_nbB_flat,
-                             h_acc_parent, h_nbC_offset, h_nbC_count, h_nbC_flat, natoms, *T);
+                             h_acc_parent, h_nbC_offset, h_nbC_count, h_nbC_flat, natoms, *T, threads);
 }
 
 // ============================================================================
@@ -5502,7 +5576,8 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
         m_impl->hbonds.upload(params.hbonds, atom_types, stream);
     }
     updateHBChargeScaling(*m_impl);   // Claude Generated (Oct 2026)
-    m_last_hbonds = params.hbonds;   // init CPU mirror for debug comparison
+    if (CurcumaLogger::get_verbosity() >= 3)   // Oct 2026: debug mirror only where it is read (see updateHBonds)
+        m_last_hbonds = params.hbonds;   // init CPU mirror for debug comparison
 
     // --- Allocate dynamic per-step buffers ---
     const int N3 = 3 * natoms;
@@ -5918,15 +5993,21 @@ void FFWorkspaceHip::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
     // Claude Generated (March 2026): Needed because updateHBXBIfNeeded() may find
     // additional HBonds on re-detection that weren't in the initial parameter set.
     if (m_impl->hb_gather_enabled) {
-        // Claude Generated (Oct 2026): triples grouped by case type, slot tables in the same order
+        // Claude Generated (Oct 2026): triples grouped by case type, slot tables in the same order; packed by
+        // the -threads host threads (m_host_threads, set through setStagedListUpload() by the wrapper)
         const std::vector<int> perm = hbCasePermutation(hbonds);
-        fillHBondSoA(m_impl->hbonds, hbonds, perm.data(), atom_types, m_impl->stream, &m_impl->hb_slots, m_natoms);
+        fillHBondSoA(m_impl->hbonds, hbonds, perm.data(), atom_types, m_impl->stream, &m_impl->hb_slots, m_natoms,
+                     m_host_threads);
     } else {
         m_impl->hbonds.upload(hbonds, atom_types, m_impl->stream);
     }
     updateHBChargeScaling(*m_impl);   // Claude Generated (Oct 2026)
-    // Store for CPU vs GPU comparison debugging
-    m_last_hbonds = hbonds;
+    // Host copy of the list, read only by the wrapper's CPU-vs-GPU list comparison at verbosity >= 3.
+    // Claude Generated (Oct 2026): not kept below that level (13-30 ms per refresh at 582k H bonds).
+    if (CurcumaLogger::get_verbosity() >= 3)
+        m_last_hbonds = hbonds;
+    else
+        std::vector<GFNFFHydrogenBond>().swap(m_last_hbonds);
 }
 
 void FFWorkspaceHip::updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,

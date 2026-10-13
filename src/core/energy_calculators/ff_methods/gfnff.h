@@ -827,6 +827,12 @@ public:
     /// EEQ distance cutoff. Must be set before InitialiseMolecule. No effect on the CPU path.
     void setImplicitCoulombPairs(bool v) { m_implicit_coulomb_pairs = v; }
 
+    /// Claude Generated (Oct 2026): set by a GPU method that never runs this object's CPU
+    /// workspace (ROCm wrapper): updateHBXBIfNeeded() then re-detects the HB/XB lists for
+    /// getLastHBonds()/getLastXBonds() but does not copy them into m_workspace nor rebuild its
+    /// bond-HB data (12 + 16 ms per re-detection at 582k H bonds). No effect on the CPU path.
+    void setSkipHostHBWorkspaceUpdate(bool v) { m_skip_host_hb_workspace = v; }
+
     /**
      * @brief Export topology information for restart/topology I/O
      * @return JSON object with topology data (fragments, charges, hybridization, CN)
@@ -1522,7 +1528,10 @@ private:
     bool repulsionListIsDistanceFiltered() const;
 
     /// Detect hydrogen bonds as native GFNFFHydrogenBond structs
-    std::vector<GFNFFHydrogenBond> detectHydrogenBondsNative(const Vector& charges) const;
+    /// @param storage  Optional previous list (Claude Generated, Oct 2026): taken over, its entries are reused as
+    ///                 the slots of the result in the parallel cell-list path (same result as without it)
+    std::vector<GFNFFHydrogenBond> detectHydrogenBondsNative(const Vector& charges,
+                                                             std::vector<GFNFFHydrogenBond>* storage = nullptr) const;
 
     /// Detect halogen bonds as native GFNFFHalogenBond structs
     std::vector<GFNFFHalogenBond> detectHalogenBondsNative(const Vector& charges) const;
@@ -2809,6 +2818,7 @@ private:
 
     // Claude Generated (March 2026): Topology persistence in param.json
     bool m_cache_topology = true;   ///< Cache Phase-1 EEQ topology in param.json (opt-out)
+    bool m_skip_host_hb_workspace = false;  ///< Oct 2026: GPU wrapper owns the HB/XB lists (setSkipHostHBWorkspaceUpdate)
     bool m_skip_host_disp_pairs = false;  ///< WP-A: GPU builds D4 pairs; skip host O(N^2) loop
     bool m_implicit_coulomb_pairs = false; ///< GPU enumerates Coulomb pairs; skip host list
     bool m_print_timing = true;     ///< Print init timing summary at verbosity >= 1

@@ -63,6 +63,13 @@ struct GFNFFRocmBackend {
     static constexpr bool has_stream_overlap = false;
     /// Oct 2026: staged pinned list upload not ported (serial SoA upload as before).
     static constexpr bool has_staged_list_upload = false;
+    /// Claude Generated (Oct 2026): HB/XB list refresh without the host-side copies that nothing on this
+    /// backend reads: GFNFF does not update its own CPU workspace's HB/XB lists and bond-HB data
+    /// (setSkipHostHBWorkspaceUpdate), and FFWorkspaceHip::updateHBonds packs the new list with -threads host
+    /// threads (setStagedListUpload(false, threads) passes the count; the staged upload itself stays off).
+    /// Detected by gfnffBackendLeanHBRefresh in gfnff_gpu_method_impl.h; a backend without the member (CUDA)
+    /// keeps the previous behaviour.
+    static constexpr bool lean_hb_refresh = true;
 
     /// Deliverable 3 (Jun 2026): from 16 fragments on, the dense device Cholesky (O(N^3) plus a
     /// host Schur step over nfrag+1 columns) is not used. Oct 2026: there the device projected PCG
