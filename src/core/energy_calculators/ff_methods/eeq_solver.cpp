@@ -934,9 +934,11 @@ bool EEQSolver::gpuSupports(EEQSolveMethod m, const std::string& backend) {
     // Vulkan: GFN-FF runs on the CPU there (gpu_plugin_entry_vulkan.cpp), so the CPU solves every name.
     if (backend == "vulkan")
         return true;
-    // ROCm: no device ppcg/pcg/batched path (has_device_schur=false); only the dense Cholesky route exists.
+    // ROCm: no device pcg/batched/lu/ldlt path (has_device_schur=false); the dense Cholesky route and,
+    // since Oct 2026 (Claude Generated), the projected PCG with the diagonal Jacobi exist.
     if (backend == "rocm")
-        return m == EEQSolveMethod::Auto || m == EEQSolveMethod::SchurCholesky;
+        return m == EEQSolveMethod::Auto || m == EEQSolveMethod::SchurCholesky
+            || m == EEQSolveMethod::ProjectedPCG;
     if (m == EEQSolveMethod::LU || m == EEQSolveMethod::LDLT)
         return backend == "cuda";   // Oct 2026: augmented LU (getrf) and LDL^T (sytrf) exist only in the CUDA plugin
     return m == EEQSolveMethod::Auto || m == EEQSolveMethod::SchurCholesky || m == EEQSolveMethod::ProjectedPCG

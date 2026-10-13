@@ -16,6 +16,7 @@ below. If it needs measurements or a derivation, write them into the matching `d
 
 ## Jul - Sep 2026 (and some late June), 108 entries, full text in AIChangelog_2026-late.md
 
+- ROCm device projected PCG for the GFN-FF EEQ (branch `feature/rocm-eeq-ppcg`, Oct 13, 2026): diagonal Jacobi, `-eeq_solver.solve_method ppcg` on `-gpu rocm`; MD step 182 -> 125 ms (6200 atoms), 150 -> 123 ms (7320), CPU 180 / 146; charges within 1.1e-10 of exact - [docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md)
 - ROCm GFN-FF kernels (branch `fix/rocm-coulomb-farfield`, Oct 13, 2026): Coulomb far-field branch + workgroup-per-atom dispersion gather; kernel time/step 117 -> 63 ms, MD time = CPU at 6200-7320 atoms, energies equal - [docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md)
 - ROCm performance analysis on gfx1200 (Oct 13, 2026): GFN-FF Coulomb far-field branch 49 -> 8.5 ms standalone, EEQ on CPU is half the step, GFN2 rocSOLVER eigensolve is the floor; priorities - [docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md), `scripts/rocm_microbench/`
 - ROCm vs CPU vs CUDA evaluated on gfx1200 (Oct 13, 2026): GFN-FF/GFN2 energies equal CPU at 8 dp (24-7320 atoms), ROCm not faster than CPU, feature gaps to CUDA, F-1 already fixed - [docs/ROCM_EVALUATION_2026-10-13.md](docs/ROCM_EVALUATION_2026-10-13.md)

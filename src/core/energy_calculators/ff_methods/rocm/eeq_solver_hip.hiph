@@ -9,6 +9,9 @@
  * indefinite matrices like the reference does — and solve [b | C^T] (nfrag+1 columns) with
  * rocsolver_dpotrs/dgetrs, returning z1/Z2 to the host.
  *
+ * Oct 2026 (Claude Generated): the WP7-E projected PCG (solveWithDeviceRHSAndGPUProjectedPCG,
+ * diagonal Jacobi only) is ported as well; it returns the charges on the device.
+ *
  * The device-resident GPU-Schur / PCG / batched variants return false: the host wrapper
  * (gfnff_hip_method.cpp) then applies its own exact CPU Schur complement to z1/Z2 (works for
  * nfrag==1 AND nfrag>1), so the final charges match the CPU EEQ within FP. This keeps the
@@ -130,7 +133,148 @@ struct EEQSolverHipImpl {
     // solveWithDeviceRHS + CPU-Schur path since the GPU-Schur variants return false).
     bool                m_frag_topo_valid = false;
     std::vector<int>    m_fraglist;
+
+    // WP7-E projected PCG (Claude Generated, Oct 2026): port of the CUDA single-solve PPCG with
+    // the diagonal Jacobi preconditioner. Topology-constant buffers are filled by
+    // uploadFragmentTopology(); per-call scratch grows lazily in runProjectedPCGHip().
+    int                 m_nfrag_topo = 0;        ///< nfrag of the uploaded topology
+    bool                m_ppcg_topo_valid = false; ///< projected-PCG topology buffers uploaded
+    CudaBuffer<int>     d_atom_frag;             ///< [N] 0-based fragment id per atom
+    CudaBuffer<int>     d_frag_atom_offsets;     ///< [nfrag+1] CSR offsets into d_frag_atom_map
+    CudaBuffer<int>     d_frag_atom_map;         ///< [N] atom indices sorted by fragment (stable)
+    CudaBuffer<double>  d_frag_inv_atoms;        ///< [nfrag] 1 / atoms per fragment
+    CudaBuffer<double>  d_frag_sM;               ///< [nfrag] sum of M_inv over the fragment
+    CudaBuffer<double>  d_frag_sum_scratch;      ///< [nfrag] per-fragment sums
+    CudaBuffer<double>  d_frag_delta_scratch;    ///< [nfrag] per-fragment shifts
+    CudaBuffer<double>  d_rhs_constraints_dev;   ///< [nfrag] target fragment charges
+    CudaBuffer<double>  d_ppcg_q_persistent;     ///< [N] warm start (last accepted charges)
+    CudaBuffer<double>  d_ppcg_b;                ///< [N] private copy of the atom RHS
+    CudaBuffer<double>  d_pcg_M_inv;             ///< [N] 1 / A_ii
+    CudaBuffer<double>  d_pcg_r, d_pcg_z, d_pcg_p, d_pcg_Ap;   ///< [N] CG vectors
+    CudaBuffer<double>  d_ppcg_scal;             ///< [6] rz0, rz1, pAp, |r|^2, flag, -
+    double*             h_ppcg_back = nullptr;   ///< pinned [4] scalar read-back
+    bool                m_pcg_M_inv_valid = false;
+    bool                m_ppcg_warm_valid = false;
+    long                m_ppcg_total_calls = 0, m_ppcg_total_iters = 0, m_ppcg_nonconv_calls = 0;
 };
+
+// ---------------------------------------------------------------------------------------------
+// WP7-E projected-PCG fragment kernels (Claude Generated, Oct 2026). Verbatim ports of
+// cuda/gfnff_kernels.cu k_frag_sum / k_frag_scatter_add / k_frag_project_delta /
+// k_frag_feasibility_delta / k_frag_precond_correct (file-local _hip names). The fragment sums use
+// k_frag_sum is replaced by the segmented k_frag_sum_seg_hip (fixed summation order, no atomics).
+// ---------------------------------------------------------------------------------------------
+
+/// frag_sum[f] = sum of v over the atoms of fragment f. One thread block per fragment over the
+/// fragment-sorted atom map (CSR: frag_atom_offsets, frag_atom_map), fixed summation order.
+/// Replaces the CUDA atomicAdd scatter (k_frag_sum): on gfx1200 the double atomics on the few
+/// addresses of large fragments (polymer chains) cost as much as half a dense matvec.
+/// Launch with FRAG_SUM_BLOCK threads per block.
+constexpr int FRAG_SUM_BLOCK = 64;
+__global__ __launch_bounds__(FRAG_SUM_BLOCK)
+void k_frag_sum_seg_hip(int nfrag, const double* __restrict__ v,
+                        const int* __restrict__ frag_atom_offsets, const int* __restrict__ frag_atom_map,
+                        double* __restrict__ frag_sum)
+{
+    __shared__ double red[FRAG_SUM_BLOCK];
+    const int f = blockIdx.x;
+    if (f >= nfrag) return;
+    const int a0 = frag_atom_offsets[f], a1 = frag_atom_offsets[f + 1];
+    double acc = 0.0;
+    for (int k = a0 + threadIdx.x; k < a1; k += FRAG_SUM_BLOCK) acc += v[frag_atom_map[k]];
+    red[threadIdx.x] = acc;
+    __syncthreads();
+    for (int w = FRAG_SUM_BLOCK / 2; w > 0; w >>= 1) {
+        if (threadIdx.x < w) red[threadIdx.x] += red[threadIdx.x + w];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) frag_sum[f] = red[0];
+}
+
+/// Launch helper: per-fragment sums of d_v into d_out (overwritten, no zeroing needed).
+#define FRAG_SUM_HIP(impl, nfrag, d_v, d_out, strm) \
+    k_frag_sum_seg_hip<<<(nfrag), FRAG_SUM_BLOCK, 0, (strm)>>>((nfrag), (d_v), \
+        (impl).d_frag_atom_offsets.ptr, (impl).d_frag_atom_map.ptr, (d_out))
+
+/// v[i] += frag_delta[fragment of i].
+__global__ void k_frag_scatter_add_hip(int N, double* __restrict__ v,
+                                       const int* __restrict__ atom_frag,
+                                       const double* __restrict__ frag_delta)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    v[i] += frag_delta[atom_frag[i]];
+}
+
+/// Projection onto sum_{i in f} v_i = 0: delta_f = -sum_f / N_f.
+__global__ void k_frag_project_delta_hip(int nfrag, const double* __restrict__ frag_sum,
+                                         const double* __restrict__ inv_frag_atoms,
+                                         double* __restrict__ frag_delta)
+{
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= nfrag) return;
+    frag_delta[f] = -frag_sum[f] * inv_frag_atoms[f];
+}
+
+/// Feasible start: delta_f = (Q_f - sum_f) / N_f, so that sum_{i in f} q_i = Q_f afterwards.
+__global__ void k_frag_feasibility_delta_hip(int nfrag, const double* __restrict__ frag_sum,
+                                             const double* __restrict__ rhs_constraints,
+                                             const double* __restrict__ inv_frag_atoms,
+                                             double* __restrict__ frag_delta)
+{
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= nfrag) return;
+    frag_delta[f] = (rhs_constraints[f] - frag_sum[f]) * inv_frag_atoms[f];
+}
+
+/// M-weighted correction of the Jacobi-preconditioned residual: z_i -= M_i sum_f(z) / sM_f,
+/// which makes C z = 0 (sum of z over every fragment vanishes).
+__global__ void k_frag_precond_correct_hip(int N, const double* __restrict__ Minv,
+                                           const int* __restrict__ atom_frag,
+                                           const double* __restrict__ frag_sum,
+                                           const double* __restrict__ frag_sM,
+                                           double* __restrict__ z)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    int f = atom_frag[i];
+    double sM = frag_sM[f];
+    if (sM > 0.0) z[i] -= Minv[i] * frag_sum[f] / sM;
+}
+
+/// q += alpha p, r -= alpha Ap with alpha = rz / pAp read on the device (port of
+/// k_ppcg_update_qr). pAp <= 0 (non-descent) sets *flag and leaves q, r unchanged.
+__global__ void k_ppcg_update_qr_hip(int N, const double* __restrict__ rz, const double* __restrict__ pAp,
+                                     const double* __restrict__ p, const double* __restrict__ Ap,
+                                     double* __restrict__ q, double* __restrict__ r, double* flag)
+{
+    const double den = *pAp;
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (!(den > 0.0)) {
+        if (i == 0) *flag = 1.0;
+        return;
+    }
+    if (i >= N) return;
+    const double alpha = *rz / den;
+    q[i] += alpha * p[i];
+    r[i] -= alpha * Ap[i];
+}
+
+/// p = z + beta p with beta = rz_new / rz_old on the device (port of k_ppcg_update_p);
+/// |rz_old| < 1e-30 sets *flag.
+__global__ void k_ppcg_update_p_hip(int N, const double* __restrict__ rz_new, const double* __restrict__ rz_old,
+                                    const double* __restrict__ z, double* __restrict__ p, double* flag)
+{
+    const double old = *rz_old;
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (fabs(old) < 1e-30) {
+        if (i == 0) *flag = 1.0;
+        return;
+    }
+    if (i >= N) return;
+    const double beta = *rz_new / old;
+    p[i] = z[i] + beta * p[i];
+}
 
 static void ensureHResultHip(EEQSolverHipImpl& impl, int needed) {
     if (needed <= impl.h_result_size) return;
@@ -164,6 +308,8 @@ EEQSolverHip::EEQSolverHip(int max_natoms)
     m_impl->h_result_size = initial;
     if (hipHostMalloc(&m_impl->h_info, sizeof(int)) != hipSuccess)
         throw std::runtime_error("EEQSolverHip: hipHostMalloc h_info failed");
+    if (hipHostMalloc(&m_impl->h_ppcg_back, 4 * sizeof(double)) != hipSuccess)
+        throw std::runtime_error("EEQSolverHip: hipHostMalloc h_ppcg_back failed");
 }
 
 EEQSolverHip::~EEQSolverHip()
@@ -171,6 +317,7 @@ EEQSolverHip::~EEQSolverHip()
     if (m_impl) {
         if (m_impl->h_result) hipHostFree(m_impl->h_result);
         if (m_impl->h_info)   hipHostFree(m_impl->h_info);
+        if (m_impl->h_ppcg_back) hipHostFree(m_impl->h_ppcg_back);
         if (m_impl->handle)   rocblas_destroy_handle(m_impl->handle);
         if (m_impl->stream)   hipStreamDestroy(m_impl->stream);
     }
@@ -272,6 +419,8 @@ static bool eeqBuildFactorSolve(
         int block = 256, grid = (n_lower + block - 1) / block;
         k_eeq_build_matrix_hip<<<grid, block, 0, impl.stream>>>(
             N, cx, cy, cz, d_alpha, d_gam, impl.d_A.ptr, cutoff_sq);
+        // d_A is factorised in place below: the projected PCG must rebuild its matrix.
+        impl.m_pcg_M_inv_valid = false;
     };
 
     if (do_refactor) {
@@ -406,7 +555,8 @@ bool EEQSolverHip::solveAndComputeCharges(int, int, const double*, const double*
 
 // Device-resident GPU-Schur / PCG / batched variants: not ported. Returning false routes
 // the host wrapper to solveWithDeviceRHS()/solve() + its own exact CPU Schur complement.
-double* EEQSolverHip::getDeviceChargesPtr() { return nullptr; }
+// The projected PCG (WP7-E, below) is ported and leaves its charges in d_rhs[0..N-1].
+double* EEQSolverHip::getDeviceChargesPtr() { return m_impl->d_rhs.ptr; }
 bool    EEQSolverHip::isUsingLUFallback() const { return m_impl->m_using_lu; }
 int     EEQSolverHip::getLastCholInfo() const { return m_impl->m_last_chol_info; }
 
@@ -430,13 +580,209 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUPCG(int, int, const double*, const do
     return false;
 }
 
-// WP7-E (Sep 2026): projected-PCG single-solve port, CUDA-only for now — same not-ported
-// convention as the other device-resident variants above.
-bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(int, int, const double*, const double*, const double*,
-                                                        const double*, const double*, const double*,
-                                                        const std::vector<int>&, const std::vector<double>&,
-                                                        int, double, double, bool) {
-    return false;
+// =============================================================================================
+// WP7-E projected PCG on ROCm (Claude Generated, Oct 2026)
+// ---------------------------------------------------------------------------------------------
+// Port of cuda/eeq_solver_gpu.cu runProjectedPCG / solveWithDeviceRHSAndGPUProjectedPCG with the
+// diagonal Jacobi preconditioner only. The CG runs in the constraint tangent space
+// C v = 0 (C: fragment indicator rows), starting from a feasible q (sum_{i in f} q_i = Q_f):
+//   r = P (b - A q),  z = M^-1 r - M^-1 C^T (C M^-1 C^T)^-1 C M^-1 r,  p = z,
+//   alpha = r.z / p.A p,  q += alpha p,  r = P (r - alpha A p),  beta = r.z_new / r.z_old.
+// P subtracts the per-fragment mean. A is the dense EEQ matrix (k_eeq_build_matrix_hip, lower
+// triangle read by rocblas_dsymv). The converged q are the charges of the constrained EEQ system
+// (no Schur step). Not ported: local-inverse preconditioner (k_li_*), multi-GPU split, the K3
+// input event and stream priority; the wrapper does not call those for ROCm.
+// =============================================================================================
+
+/// r <- P r: subtract the per-fragment mean (port of ppcgProjectResidual).
+static void ppcgProjectResidualHip(EEQSolverHipImpl& impl, int N, int nfrag, double* d_v)
+{
+    const int blk = 256, grd = (N + blk - 1) / blk, grd_f = (nfrag + blk - 1) / blk;
+    FRAG_SUM_HIP(impl, nfrag, d_v, impl.d_frag_sum_scratch.ptr, impl.stream);
+    k_frag_project_delta_hip<<<grd_f, blk, 0, impl.stream>>>(
+        nfrag, impl.d_frag_sum_scratch.ptr, impl.d_frag_inv_atoms.ptr, impl.d_frag_delta_scratch.ptr);
+    k_frag_scatter_add_hip<<<grd, blk, 0, impl.stream>>>(N, d_v, impl.d_atom_frag.ptr, impl.d_frag_delta_scratch.ptr);
+}
+
+/// z <- M^-1 r with the M-weighted per-fragment correction, C z = 0 (port of the Jacobi branch of
+/// ppcgPrecondition).
+static void ppcgPreconditionHip(EEQSolverHipImpl& impl, int N, int nfrag, const double* d_r, double* d_z)
+{
+    const int blk = 256, grd = (N + blk - 1) / blk;
+    k_pcg_apply_precond<<<grd, blk, 0, impl.stream>>>(N, impl.d_pcg_M_inv.ptr, d_r, d_z);
+    FRAG_SUM_HIP(impl, nfrag, d_z, impl.d_frag_sum_scratch.ptr, impl.stream);
+    k_frag_precond_correct_hip<<<grd, blk, 0, impl.stream>>>(
+        N, impl.d_pcg_M_inv.ptr, impl.d_atom_frag.ptr, impl.d_frag_sum_scratch.ptr, impl.d_frag_sM.ptr, d_z);
+}
+
+/// y = A x, A symmetric (lower triangle of impl.d_A), host scalars.
+static bool eeqMatvecHip(EEQSolverHipImpl& impl, int N, const double* x, double* y)
+{
+    const double one = 1.0, zero = 0.0;
+    rocblas_set_pointer_mode(impl.handle, rocblas_pointer_mode_host);
+    return rocblas_dsymv(impl.handle, rocblas_fill_lower, N, &one, impl.d_A.ptr, N, x, 1, &zero, y, 1)
+           == rocblas_status_success;
+}
+
+/// One projected PCG solve; d_q is the warm start on input and the charges on output (port of
+/// runProjectedPCG). One host synchronisation per iteration (|r|^2 and the breakdown flag);
+/// alpha and beta are formed on the device. Returns true only on |r|^2 <= tol^2.
+static bool runProjectedPCGHip(EEQSolverHipImpl& impl, int N, int nfrag,
+                               const double* d_b, double* d_q, int max_iter, double tol)
+{
+    impl.d_pcg_r.ensure(N);
+    impl.d_pcg_z.ensure(N);
+    impl.d_pcg_p.ensure(N);
+    impl.d_pcg_Ap.ensure(N);
+    impl.d_ppcg_scal.ensure(6);
+    rocblas_handle blas = impl.handle;
+    hipStream_t    s    = impl.stream;
+    const int blk = 256, grd = (N + blk - 1) / blk, grd_f = (nfrag + blk - 1) / blk;
+
+    // Feasible start: q_i += (Q_f - sum_{j in f} q_j) / N_f.
+    FRAG_SUM_HIP(impl, nfrag, d_q, impl.d_frag_sum_scratch.ptr, s);
+    k_frag_feasibility_delta_hip<<<grd_f, blk, 0, s>>>(nfrag, impl.d_frag_sum_scratch.ptr,
+        impl.d_rhs_constraints_dev.ptr, impl.d_frag_inv_atoms.ptr, impl.d_frag_delta_scratch.ptr);
+    k_frag_scatter_add_hip<<<grd, blk, 0, s>>>(N, d_q, impl.d_atom_frag.ptr, impl.d_frag_delta_scratch.ptr);
+
+    // r = P (b - A q); z = precondition(r); p = z; rz = r.z; |r|^2.
+    if (!eeqMatvecHip(impl, N, d_q, impl.d_pcg_Ap.ptr)) return false;
+    k_pcg_init_residual<<<grd, blk, 0, s>>>(N, d_b, impl.d_pcg_Ap.ptr, impl.d_pcg_r.ptr);
+    ppcgProjectResidualHip(impl, N, nfrag, impl.d_pcg_r.ptr);
+    ppcgPreconditionHip(impl, N, nfrag, impl.d_pcg_r.ptr, impl.d_pcg_z.ptr);
+    (void)hipMemcpyAsync(impl.d_pcg_p.ptr, impl.d_pcg_z.ptr, N * sizeof(double), hipMemcpyDeviceToDevice, s);
+
+    double* d_scal = impl.d_ppcg_scal.ptr;   // [rz0, rz1, pAp, rnorm, flag, -]
+    (void)hipMemsetAsync(d_scal, 0, 6 * sizeof(double), s);
+    rocblas_set_pointer_mode(blas, rocblas_pointer_mode_device);
+    if (rocblas_ddot(blas, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_z.ptr, 1, d_scal + 0) != rocblas_status_success
+        || rocblas_ddot(blas, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_r.ptr, 1, d_scal + 3) != rocblas_status_success) {
+        rocblas_set_pointer_mode(blas, rocblas_pointer_mode_host);
+        return false;
+    }
+    double* h_back = impl.h_ppcg_back;
+    if (hipMemcpyAsync(h_back, d_scal + 3, sizeof(double), hipMemcpyDeviceToHost, s) != hipSuccess
+        || hipStreamSynchronize(s) != hipSuccess) {
+        rocblas_set_pointer_mode(blas, rocblas_pointer_mode_host);
+        return false;
+    }
+    double h_rnorm_sq = h_back[0];
+    bool converged = (h_rnorm_sq <= tol * tol);
+    int  iters = 0;
+    int  cur = 0;   // slot of the current rz (two slots used alternately)
+    bool blas_ok = true;
+
+    for (int k = 0; k < max_iter && !converged; ++k) {
+        iters = k + 1;
+        if (!eeqMatvecHip(impl, N, impl.d_pcg_p.ptr, impl.d_pcg_Ap.ptr)) { blas_ok = false; break; }
+        rocblas_set_pointer_mode(blas, rocblas_pointer_mode_device);
+        if (rocblas_ddot(blas, N, impl.d_pcg_p.ptr, 1, impl.d_pcg_Ap.ptr, 1, d_scal + 2) != rocblas_status_success) {
+            blas_ok = false; break;
+        }
+        k_ppcg_update_qr_hip<<<grd, blk, 0, s>>>(N, d_scal + cur, d_scal + 2, impl.d_pcg_p.ptr,
+                                                 impl.d_pcg_Ap.ptr, d_q, impl.d_pcg_r.ptr, d_scal + 4);
+        ppcgProjectResidualHip(impl, N, nfrag, impl.d_pcg_r.ptr);
+        if (rocblas_ddot(blas, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_r.ptr, 1, d_scal + 3) != rocblas_status_success) {
+            blas_ok = false; break;
+        }
+        if (hipMemcpyAsync(h_back, d_scal + 3, 2 * sizeof(double), hipMemcpyDeviceToHost, s) != hipSuccess
+            || hipStreamSynchronize(s) != hipSuccess) { blas_ok = false; break; }
+        h_rnorm_sq = h_back[0];
+        if (h_back[1] != 0.0) break;   // pAp <= 0 or degenerate rz
+        if (h_rnorm_sq <= tol * tol) { converged = true; break; }
+
+        ppcgPreconditionHip(impl, N, nfrag, impl.d_pcg_r.ptr, impl.d_pcg_z.ptr);
+        if (rocblas_ddot(blas, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_z.ptr, 1, d_scal + (1 - cur)) != rocblas_status_success) {
+            blas_ok = false; break;
+        }
+        k_ppcg_update_p_hip<<<grd, blk, 0, s>>>(N, d_scal + (1 - cur), d_scal + cur,
+                                                impl.d_pcg_z.ptr, impl.d_pcg_p.ptr, d_scal + 4);
+        cur = 1 - cur;
+    }
+    rocblas_set_pointer_mode(blas, rocblas_pointer_mode_host);   // the dense path uses host scalars
+    if (!blas_ok) converged = false;
+
+    impl.m_ppcg_total_calls += 1;
+    impl.m_ppcg_total_iters += iters;
+    // CURCUMA_PPCG_ITERS=1 prints the iteration count of every solve (same hook as CUDA).
+    static const bool print_iters = [] { const char* e = std::getenv("CURCUMA_PPCG_ITERS"); return e && *e && *e != '0'; }();
+    if (print_iters)
+        fprintf(stderr, "PPCG ROCm N=%d nfrag=%d iters=%d converged=%d |r|^2=%.3e precond=diag\n",
+                N, nfrag, iters, converged ? 1 : 0, h_rnorm_sq);
+    if (!converged) impl.m_ppcg_nonconv_calls += 1;
+    return converged;
+}
+
+bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(
+    int natoms, int nfrag,
+    const double* cx, const double* cy, const double* cz,
+    const double* d_alpha_corrected,
+    const double* d_gam_corrected,
+    const double* d_rhs_atoms,
+    const std::vector<int>& /*fraglist*/,
+    const std::vector<double>& rhs_constraints,
+    int    max_iter,
+    double tol,
+    double cutoff_sq,
+    bool   force_refactor)
+{
+    auto& impl = *m_impl;
+    const int N = natoms;
+    if (nfrag < 1 || !impl.m_ppcg_topo_valid || impl.m_nfrag_topo != nfrag) return false;
+    if (impl.d_atom_frag.n < N || impl.d_frag_inv_atoms.n < nfrag || impl.d_frag_atom_offsets.n < nfrag + 1)
+        return false;
+    if (N > m_max_natoms) return false;   // d_A holds max_natoms^2 doubles
+
+    // Ordering against the workspace streams that wrote coordinates and d_rhs_atoms: a blocking
+    // hipMemcpy on the null stream waits for all blocking streams (the same implicit ordering the
+    // dense path relies on), and gives the CG a private copy of b.
+    impl.d_ppcg_b.ensure(N);
+    if (hipMemcpy(impl.d_ppcg_b.ptr, d_rhs_atoms, N * sizeof(double), hipMemcpyDeviceToDevice) != hipSuccess)
+        return false;
+
+    const bool do_refactor = force_refactor || !impl.m_pcg_M_inv_valid || (N != m_last_N);
+    if (do_refactor) {
+        impl.d_pcg_M_inv.ensure(N);
+        const int n_lower = N * (N + 1) / 2;
+        const int block = 256, grid = (n_lower + block - 1) / block;
+        k_eeq_build_matrix_hip<<<grid, block, 0, impl.stream>>>(
+            N, cx, cy, cz, d_alpha_corrected, d_gam_corrected, impl.d_A.ptr, cutoff_sq);
+        // d_A now holds the matrix, not a factor: the dense path must refactor next time.
+        impl.m_has_cached_factor = false;
+        impl.m_cached_factor_mixed = false;
+        const int blk = 256, grd = (N + blk - 1) / blk;
+        k_pcg_extract_diag_inv<<<grd, blk, 0, impl.stream>>>(N, impl.d_A.ptr, impl.d_pcg_M_inv.ptr);
+        // sM[f] = sum_{i in f} M_inv[i], used by the projected preconditioner.
+        FRAG_SUM_HIP(impl, nfrag, impl.d_pcg_M_inv.ptr, impl.d_frag_sM.ptr, impl.stream);
+        impl.m_pcg_M_inv_valid = true;
+        m_last_N = N;
+    }
+
+    impl.d_rhs.ensure(N);
+    // Warm start from the last accepted solution, else zero.
+    if (impl.m_ppcg_warm_valid && impl.d_ppcg_q_persistent.n >= N)
+        (void)hipMemcpyAsync(impl.d_rhs.ptr, impl.d_ppcg_q_persistent.ptr, N * sizeof(double),
+                       hipMemcpyDeviceToDevice, impl.stream);
+    else
+        (void)hipMemsetAsync(impl.d_rhs.ptr, 0, N * sizeof(double), impl.stream);
+
+    {
+        std::vector<double> h_rc(nfrag, 0.0);
+        for (int f = 0; f < nfrag && f < (int)rhs_constraints.size(); ++f) h_rc[f] = rhs_constraints[f];
+        // Pageable source: hipMemcpyAsync returns after the copy has been staged.
+        if (hipMemcpyAsync(impl.d_rhs_constraints_dev.ptr, h_rc.data(), nfrag * sizeof(double),
+                           hipMemcpyHostToDevice, impl.stream) != hipSuccess) return false;
+        if (hipStreamSynchronize(impl.stream) != hipSuccess) return false;
+    }
+
+    if (!runProjectedPCGHip(impl, N, nfrag, impl.d_ppcg_b.ptr, impl.d_rhs.ptr, max_iter, tol))
+        return false;
+
+    impl.d_ppcg_q_persistent.ensure(N);
+    (void)hipMemcpyAsync(impl.d_ppcg_q_persistent.ptr, impl.d_rhs.ptr, N * sizeof(double),
+                   hipMemcpyDeviceToDevice, impl.stream);
+    impl.m_ppcg_warm_valid = true;
+    return hipStreamSynchronize(impl.stream) == hipSuccess;
 }
 
 bool EEQSolverHip::solveWithDeviceRHSAndGPUSchurBatched(int, int, const double*, const double*, const double*,
@@ -445,8 +791,49 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUSchurBatched(int, int, const double*,
     return false;
 }
 
-void EEQSolverHip::uploadFragmentTopology(int /*nfrag*/, const std::vector<int>& fraglist, int /*natoms*/) {
-    m_impl->m_fraglist = fraglist;
-    m_impl->m_frag_topo_valid = true;  // marks nfrag>1 GPU-applicable -> solveWithDeviceRHS + CPU Schur
+// Stores the fragment list (dense path) and, Claude Generated (Oct 2026), uploads the
+// topology-constant buffers of the projected PCG: 0-based fragment id per atom and 1/N_f.
+void EEQSolverHip::uploadFragmentTopology(int nfrag, const std::vector<int>& fraglist, int natoms) {
+    auto& impl = *m_impl;
+    const int N = natoms;
+    impl.m_fraglist = fraglist;
+    impl.m_frag_topo_valid = true;    // marks nfrag>1 GPU-applicable (dense + CPU Schur), as before
+    impl.m_ppcg_topo_valid = false;
+    impl.m_pcg_M_inv_valid = false;
+    impl.m_ppcg_warm_valid = false;   // warm start invalid after a topology change
+    impl.m_nfrag_topo = nfrag;
+    if (nfrag < 1 || static_cast<int>(fraglist.size()) < N) return;
+
+    std::vector<int>    h_atom_frag(N, 0);
+    std::vector<double> h_inv_atoms(nfrag, 0.0);
+    std::vector<int>    sizes(nfrag, 0);
+    for (int i = 0; i < N; ++i) {
+        const int f = fraglist[i] - 1;   // fraglist is 1-based
+        if (f < 0 || f >= nfrag) return; // inconsistent topology: projected PCG stays unavailable
+        h_atom_frag[i] = f;
+        ++sizes[f];
+    }
+    for (int f = 0; f < nfrag; ++f) h_inv_atoms[f] = sizes[f] > 0 ? 1.0 / static_cast<double>(sizes[f]) : 0.0;
+    std::vector<int> h_offsets(nfrag + 1, 0), h_map(N, 0), pos(nfrag, 0);
+    for (int f = 0; f < nfrag; ++f) h_offsets[f + 1] = h_offsets[f] + sizes[f];
+    for (int i = 0; i < N; ++i) { const int f = h_atom_frag[i]; h_map[h_offsets[f] + pos[f]++] = i; }
+
+    impl.d_atom_frag.ensure(N);
+    impl.d_frag_atom_offsets.ensure(nfrag + 1);
+    impl.d_frag_atom_map.ensure(N);
+    impl.d_frag_inv_atoms.ensure(nfrag);
+    impl.d_frag_sM.ensure(nfrag);
+    impl.d_frag_sum_scratch.ensure(nfrag);
+    impl.d_frag_delta_scratch.ensure(nfrag);
+    impl.d_rhs_constraints_dev.ensure(nfrag);
+    impl.d_ppcg_q_persistent.ensure(N);
+    if (hipMemcpy(impl.d_atom_frag.ptr, h_atom_frag.data(), N * sizeof(int), hipMemcpyHostToDevice) != hipSuccess
+        || hipMemcpy(impl.d_frag_atom_offsets.ptr, h_offsets.data(), (nfrag + 1) * sizeof(int),
+                     hipMemcpyHostToDevice) != hipSuccess
+        || hipMemcpy(impl.d_frag_atom_map.ptr, h_map.data(), N * sizeof(int), hipMemcpyHostToDevice) != hipSuccess
+        || hipMemcpy(impl.d_frag_inv_atoms.ptr, h_inv_atoms.data(), nfrag * sizeof(double),
+                     hipMemcpyHostToDevice) != hipSuccess)
+        return;
+    impl.m_ppcg_topo_valid = true;
 }
 bool   EEQSolverHip::isFragmentTopoValid() const { return m_impl->m_frag_topo_valid; }

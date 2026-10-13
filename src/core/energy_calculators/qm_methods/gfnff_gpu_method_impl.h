@@ -15,6 +15,7 @@
  *       static constexpr const char* name           = "CUDA";           // log prose
  *       static constexpr const char* workspace_name = "FFWorkspaceGPU"; // error text
  *       static constexpr bool has_device_schur      = true;   // false on ROCm
+ *       static constexpr bool has_device_ppcg       = true;   // WP7-E projected PCG (ROCm too, Oct 2026)
  *       static constexpr bool has_cn_pair_skin      = true;   // false on ROCm (K1, Oct 2026)
  *       static constexpr bool has_stream_overlap    = true;   // false on ROCm (K2/K3, Oct 2026)
  *       static constexpr int  default_eeq_cpu_fragment_threshold = 0;   // 16 on ROCm
@@ -338,6 +339,10 @@ private:
     // device Schur paths). From eeq_rocm_cpu_fragment_threshold; the traits supply the
     // per-backend default (0 for CUDA, 16 for ROCm).
     int    m_eeq_cpu_fragment_threshold = Backend::default_eeq_cpu_fragment_threshold;
+    /// Claude Generated (Oct 2026), ROCm: eeq_rocm_cpu_fragment_threshold given explicitly. Then
+    /// nfrag >= threshold always takes the CPU EEQ (the pre-Oct-2026 route), also when the solver
+    /// resolves to ppcg; by default the device projected PCG runs there.
+    bool   m_eeq_cpu_route_forced = false;
 
     bool m_split_configured = false;  ///< Claude Generated (Sep 2026): multi-GPU split set up
     bool m_split_reported = false;
@@ -735,9 +740,12 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         // no device Schur paths (ROCm). The key is documented as "ROCm only", and on CUDA the
         // host EEQ it selects is the path that segfaults inside a CUDA process on polymer_2x
         // (TECHNICAL_DEBT.md F-Q9), so the CUDA wrapper keeps its trait default (0).
-        if constexpr (!Backend::has_device_schur)
+        if constexpr (!Backend::has_device_schur) {
             m_eeq_cpu_fragment_threshold = cfg_get_int("eeq_rocm_cpu_fragment_threshold",
                                                        Backend::default_eeq_cpu_fragment_threshold);
+            m_eeq_cpu_route_forced = gfnff_cfg.contains("eeq_rocm_cpu_fragment_threshold")
+                                  || m_parameters.contains("eeq_rocm_cpu_fragment_threshold");
+        }
 
         // Phase 2: Upload C6 reference table for GPU dc6dcn per-pair computation
         D4ParameterGenerator* d4 = m_gfnff->getD4Generator();
@@ -841,7 +849,7 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
             // WP6: upload fragment topology for batched Cholesky (nfrag > 1), and since Sep 2026
             // also for one fragment on the device-Schur backend, which then takes the projected
             // PCG from eeq_ppcg_min_atoms on like the CPU (F-4; see singleFragmentPPCG()).
-            if (m_eeq_nfrag > 1 || (m_eeq_nfrag == 1 && Backend::has_device_schur)) {
+            if (m_eeq_nfrag > 1 || (m_eeq_nfrag == 1 && (Backend::has_device_schur || Backend::has_device_ppcg))) {
                 m_eeq_gpu->uploadFragmentTopology(m_eeq_nfrag, m_eeq_fraglist, natoms);
                 // WP7-B: cache min inter-fragment distance for batched-solver warning.
                 m_eeq_batched_check_pending = true;  // batched error estimate once per topology
@@ -1214,7 +1222,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         m_eeq_nfrag           = topo_params.nfrag;
 
         // WP6: upload fragment topology for batched Cholesky (nfrag > 1); one fragment too (F-4)
-        if (m_eeq_nfrag > 1 || (m_eeq_nfrag == 1 && Backend::has_device_schur)) {
+        if (m_eeq_nfrag > 1 || (m_eeq_nfrag == 1 && (Backend::has_device_schur || Backend::has_device_ppcg))) {
             m_eeq_gpu->uploadFragmentTopology(m_eeq_nfrag, m_eeq_fraglist, N);
             // WP7-B: refresh min inter-fragment distance after topology rebuild.
             m_eeq_batched_check_pending = true;  // batched error estimate once per topology
@@ -1236,6 +1244,29 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     //   4. a rejected or failed device solve keeps the last accepted charges (reported as a
     //      GPU fallback, src/core/gpu_fallback.h)
     Vector charges(N);
+    // Deliverable 3 (Jun 2026) / Oct 2026, ROCm only (threshold 0 on CUDA): exact CPU EEQ
+    // (prepareCNAndEEQ with the configured solver; auto = projected PCG for many fragments) for
+    // high fragment counts where the device has no usable solve. The normal device path leaves CN
+    // GPU-resident (WP5-D), so m_gpu_cn_final is synced to the current geometry first.
+    auto eeqCpuFragmentRoute = [&]() {
+        m_gpu_workspace->finalizeCNForCPU(m_gpu_cn_final);
+        m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/false);
+        charges = m_gfnff->getLastCharges();
+        m_gpu_workspace->setEEQCharges(charges);
+    };
+    // Claude Generated (Oct 2026): a ROCm many-fragment system whose solver resolves to ppcg takes
+    // the device projected PCG (WP7-E) instead of the CPU route, unless the threshold was given
+    // explicitly (m_eeq_cpu_route_forced). Same resolution rule as the dispatch below.
+    const bool many_frag_cpu_route = m_eeq_cpu_fragment_threshold > 0
+        && m_eeq_nfrag >= m_eeq_cpu_fragment_threshold;
+    bool many_frag_device_ppcg = false;
+    if constexpr (Backend::has_device_ppcg) {
+        many_frag_device_ppcg = many_frag_cpu_route && !m_eeq_cpu_route_forced
+            && m_gpu_workspace->isEEQTopoValid() && m_eeq_gpu->isFragmentTopoValid()
+            && EEQSolver::resolveMethod(m_eeq_strategy, N, m_eeq_nfrag, m_eeq_ppcg_min_atoms,
+                                        m_eeq_ppcg_min_nfrag) == EEQSolveMethod::ProjectedPCG;
+    }
+    bool cpu_route_after_device = false;   ///< device ppcg failed on a many-fragment ROCm system
     if (m_gpu_workspace->frozenCharges()) {
         // Static-Mode (WP-S1): GPU d_charges retain previous-step values, no upload needed.
         // CPU-side charges fetched for any consumer that still needs them.
@@ -1262,26 +1293,18 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         }
         charges = m_gfnff->getLastCharges();
         m_gpu_workspace->setEEQCharges(charges);
-    } else if (m_eeq_cpu_fragment_threshold > 0
-               && m_eeq_nfrag >= m_eeq_cpu_fragment_threshold) {
+    } else if (many_frag_cpu_route && !many_frag_device_ppcg) {
         // Deliverable 3 (Jun 2026), ROCm only (threshold 0 on CUDA): high fragment count
-        // (solvent box). The device EEQ does a dense N x N Cholesky for nfrag>1 - O(N^3),
-        // intractable here - and the device PCG/batched/general-Schur variants are not
-        // ported on ROCm (they return false). Route to the CPU EEQ (prepareCNAndEEQ), which solves
-        // with the configured solver (auto: projected PCG for many fragments, O(N^2 k)) and keeps
-        // the charges identical to the CPU path.
+        // (solvent box) and the solver does not resolve to ppcg (or the threshold was given
+        // explicitly). The device EEQ would be a dense N x N Cholesky plus a host Schur step over
+        // nfrag+1 columns, intractable here; the device PCG/batched/general-Schur variants are not
+        // ported on ROCm. Route to the CPU EEQ, which keeps the charges identical to the CPU path.
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info(fmt::format(
-                "EEQ GPU Phase 2: nfrag={} >= {} - routing to exact CPU PCG (device dense Cholesky avoided)",
+                "EEQ GPU Phase 2: nfrag={} >= {} - routing to the exact CPU EEQ (device dense Cholesky avoided)",
                 m_eeq_nfrag, m_eeq_cpu_fragment_threshold));
         }
-        // The normal device path leaves CN GPU-resident (WP5-D), so m_gpu_cn_final is stale
-        // here. Sync the current-geometry CN to the CPU before the CPU EEQ solve (mirrors the
-        // pre-dispatch finalize at the top of this function for the other CPU-EEQ branches).
-        m_gpu_workspace->finalizeCNForCPU(m_gpu_cn_final);
-        m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/false);
-        charges = m_gfnff->getLastCharges();
-        m_gpu_workspace->setEEQCharges(charges);
+        eeqCpuFragmentRoute();
     } else {
         // === GPU EEQ: Build Coulomb matrix + Cholesky solve on GPU ===
         // WP2: use topology-constant alpha/gam/chi/cnf already on GPU;
@@ -1338,7 +1361,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 
         // One fragment: projected PCG (WP7-E) when it is the resolved method; WP5-A stays the fallback.
         // It is also what lets the multi-GPU split (gpu_split_devices) reach single-fragment molecules.
-        const bool single_frag_ppcg = Backend::has_device_schur && m_eeq_nfrag == 1
+        const bool single_frag_ppcg = Backend::has_device_ppcg && m_eeq_nfrag == 1
             && resolved_method == EEQSolveMethod::ProjectedPCG
             && m_eeq_gpu->isFragmentTopoValid();
         const bool single_frag_pcg = Backend::has_device_schur && m_eeq_nfrag == 1
@@ -1349,9 +1372,14 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
             const char* path = "CPU-fallback";
             if (gpu_eeq_applicable) {
                 if constexpr (!Backend::has_device_schur) {
-                    // ROCm: no device ppcg/pcg/batched/Schur (EEQSolver::gpuSupports allows auto and cholesky
-                    // only); every solve is the dense device Cholesky of WP2 plus the host Schur step.
-                    path = "WP2 dense Cholesky + CPU Schur";
+                    // ROCm: no device pcg/batched/Schur/lu/ldlt (EEQSolver::gpuSupports allows auto, cholesky
+                    // and ppcg). Oct 2026: projected PCG with the diagonal Jacobi (no localinv on ROCm);
+                    // every other solve is the dense device Cholesky of WP2 plus the host Schur step.
+                    if (resolved_method == EEQSolveMethod::ProjectedPCG && m_eeq_gpu->isFragmentTopoValid())
+                        path = m_eeq_nfrag == 1 ? "WP7-E projected PCG, one fragment, diagonal Jacobi"
+                                                : "WP7-E projected PCG, diagonal Jacobi";
+                    else
+                        path = "WP2 dense Cholesky + CPU Schur";
                 } else if (resolved_method == EEQSolveMethod::LU) {
                     path = "augmented LU (getrf)";
                 } else if (resolved_method == EEQSolveMethod::LDLT) {
@@ -1369,8 +1397,10 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                 }
             }
             // Once per run (and again if the path changes), not every MD/opt step.
-            // On ROCm "auto" may resolve to projected PCG by size, but only the dense Cholesky runs there.
-            const EEQSolveMethod shown_method = Backend::has_device_schur ? resolved_method : EEQSolveMethod::SchurCholesky;
+            // On ROCm only ppcg and the dense Cholesky run on the device; anything else is shown as cholesky.
+            const EEQSolveMethod shown_method = (Backend::has_device_schur
+                                                 || resolved_method == EEQSolveMethod::ProjectedPCG)
+                ? resolved_method : EEQSolveMethod::SchurCholesky;
             const std::string line = fmt::format("EEQ solver (final charges): {}{} [GPU {}, {}], N={}, nfrag={}",
                 EEQSolver::methodName(shown_method),
                 m_eeq_strategy == EEQSolveMethod::Auto ? " (auto)" : "",
@@ -1570,6 +1600,12 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                         finishLocalInverseGPU();
                         if (eeq_ok) {
                             used_gpu_schur = true;
+                        } else if (many_frag_device_ppcg) {
+                            // ROCm many-fragment system (Claude Generated, Oct 2026): no dense fallback
+                            // (nfrag+1 right-hand sides plus a host Schur step), the exact CPU EEQ instead.
+                            cpu_route_after_device = true;
+                            CurcumaLogger::warn("EEQ GPU: WP7-E projected PCG stalled, using the CPU EEQ for this step");
+                            curcuma::reportGpuFallback("GFN-FF EEQ: projected PCG stalled, CPU EEQ step");
                         } else {
                             CurcumaLogger::warn("EEQ GPU: WP7-E projected PCG stalled, falling through to WP7-A");
                             curcuma::reportGpuFallback("GFN-FF EEQ: projected PCG stalled, dense Cholesky step");
@@ -1629,7 +1665,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                     // Replaces D2H of z1+Z2 (~N·(1+nfrag) doubles) with D2H of
                     // Cz1+S (nfrag + nfrag² doubles) and a tiny CPU Gauss-elim.
                     // Cross-fragment Coulomb correctly retained (single N×N Cholesky).
-                    if (!eeq_ok && m_eeq_gpu->isFragmentTopoValid()) {
+                    if (!eeq_ok && !cpu_route_after_device && m_eeq_gpu->isFragmentTopoValid()) {
                         eeq_ok = m_eeq_gpu->solveWithDeviceRHSAndGPUSchurGeneral(
                             N, m_eeq_nfrag,
                             m_gpu_workspace->getDeviceXPtr(),
@@ -1653,7 +1689,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                             }
                         }
                     }
-                    if (!eeq_ok) {
+                    if (!eeq_ok && !cpu_route_after_device) {
                         // Fallback: WP2 exact GPU solve + CPU Schur complement.
                         // Triggers when fragment topo invalid OR Cholesky failed in WP7-A.
                         if constexpr (Backend::has_device_schur) {
@@ -1864,6 +1900,9 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                         m_eeq_gpu->getLastCholInfo()));
                 }
                 if (gpu_charges_accepted) used_gpu_eeq = true;
+            } else if (cpu_route_after_device) {
+                eeqCpuFragmentRoute();   // reported above (projected PCG stalled)
+                used_gpu_eeq = true;     // charges are the exact CPU solution, not a fallback to old ones
             } else {
                 CurcumaLogger::warn("GPU EEQ Cholesky failed (not SPD), falling back to CPU solver");
                 curcuma::reportGpuFallback("GFN-FF EEQ: device Cholesky failed (not SPD)");

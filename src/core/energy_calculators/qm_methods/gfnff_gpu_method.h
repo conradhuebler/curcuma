@@ -42,6 +42,8 @@ struct GFNFFCudaBackend {
     /// CUDA implements the device Schur EEQ solves (WP5-A / WP7-A / WP7-B / WP7-C),
     /// so a failure there is a real numerical failure and is warned about.
     static constexpr bool has_device_schur = true;
+    /// WP7-E projected PCG on the device (Claude Generated, Oct 2026: separate trait since ROCm has it too).
+    static constexpr bool has_device_ppcg = true;
     /// Multi-GPU split of one molecule (Coulomb tiles + EEQ PCG). Claude Generated (Sep 2026).
     static constexpr bool has_multi_gpu_split = true;
     /// K1 (Oct 2026): CN pair list as a Verlet list with skin (cnPairListStale(), setCNPairSkin()).

@@ -48,7 +48,7 @@ Each item was a real defect; evidence in [docs/KNOWN_ISSUES_ARCHIVE.md](../../..
 ## Open items
 
 - Not implemented relative to the reference (notes of Apr 2026, not re-checked): hyperconjugation torsion modulation, metal-specific C6.
-- EEQ on GPU: FMM matrix-vector product (O(N log N)) and ROCm block-Jacobi mirror are open; ROCm many-fragment systems go to the exact CPU PCG above `eeq_rocm_cpu_fragment_threshold`.
+- EEQ on GPU: FMM matrix-vector product (O(N log N)) and the ROCm `localinv` preconditioner are open; ROCm runs the device projected PCG (diagonal Jacobi), many-fragment systems use the exact CPU EEQ only when it stalls or `eeq_rocm_cpu_fragment_threshold` is given explicitly.
 - ROCm GFN-FF correctness gaps and GFN-FF open items: root `CLAUDE.md` "Open Items", [docs/MULTI_GPU_GAPS.md](../../../../docs/MULTI_GPU_GAPS.md), [docs/REV_GFNFF_TODO.md](../../../../docs/REV_GFNFF_TODO.md).
 
 ## References

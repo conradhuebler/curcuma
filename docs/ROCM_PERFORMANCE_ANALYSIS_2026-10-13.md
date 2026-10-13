@@ -104,6 +104,30 @@ Checks against the unchanged baseline binary (copy of the pre-change `release/cu
   periodic cells (`applyMIC` path); charged or multi-fragment systems with very different alpha; other GPUs; the CPU-vs-ROCm trajectory
   divergence over long runs.
 
+### F2 result: device projected PCG on ROCm (branch `feature/rocm-eeq-ppcg`, Oct 13, 2026)
+Port of CUDA WP7-E into `ff_methods/rocm/eeq_solver_hip.hiph` (written by a subagent, checked by the author of this document):
+projected PCG with the diagonal Jacobi preconditioner, `rocblas_dsymv` for the matrix-vector product, fragment sums as one block per
+fragment (the first version with `atomicAdd` was slower than the CPU route, 172 ms/step). Not ported: `localinv` (`k_li_*`), multi-GPU,
+input events. `-eeq_solver.solve_method ppcg` is accepted with `-gpu rocm`; many-fragment systems whose solver resolves to ppcg use it
+by default, a stalled device solve uses the CPU EEQ for that step, and giving `-gfnff.eeq_rocm_cpu_fragment_threshold` explicitly forces
+the old CPU route. CUDA code paths are unchanged in the source; the CUDA build was not compiled or run here.
+
+MD time per step (t(MaxTime 120) - t(MaxTime 20)) / 100, 3 alternating runs per binary, spread < 2 ms (author's own measurement):
+
+| System | atoms / fragments | ROCm before | ROCm now | CPU |
+|---|---|---|---|---|
+| urea400-water1000 | 6200 / 1400 | 182 ms | 125 ms | 180 ms |
+| peo201x2-water1500.gfnff-min | 7320 / 1502 | 150 ms | 123 ms | 146 ms |
+
+ROCm is now 1.4x (6200 atoms) and 1.2x (7320 atoms) faster than the CPU. The subagent measured 157 -> 130 ms and 185 -> 128 ms for the
+same systems. Charges against the exact Cholesky solution: max |dq| 3.7e-11 to 1.1e-10 over 20 MD steps on 1410, 2910, 6200 and 7320
+atoms (subagent measurement, 4 systems; baseline CPU PPCG vs exact: up to 6.0e-11); 35-79 CG iterations. Epot/Ekin/Etot of a 100-step
+MD equal to 6 printed decimals between new ROCm, previous ROCm and CPU on the same four systems (author's own check, 2 printed rows each).
+`ctest -R "gpu|rocm|eeq|gfnff"`: 104 of 104 pass; `eeq_gpu_supports` was changed to expect `auto, cholesky, ppcg` for ROCm.
+Remaining cost: 0.82 ms per CG iteration (dense `dsymv`), EEQ about 55-65 ms per step at 7320 atoms; `localinv` would cut the
+iterations by about half on the CPU test (14 vs 32 at 2910 atoms) and is the next lever, together with the dispersion/Coulomb kernels
+(about 20 + 11 ms).
+
 ## 2. GFN2 (native xTB, `-gpu rocm`)
 
 114 atoms (frame 1 of c33h45n9-agal-frames44), `-sp`, `-verbosity 3`, ROCm vs CPU:
@@ -169,7 +193,7 @@ the real hook before choosing a default. Also relevant for `-gpu auto`: today it
 |---|---|---|---|---|---|
 | 1 | DONE (branch, uncommitted): far-field branch in `k_coulomb_dense`, `k_coulomb_gather` and EEQ matrix builds (threshold x >= 6) | measured 49 -> 8.5 ms, equal to 12 digits | gfnff 7320 atoms: -40 ms/step | small (one condition per kernel) | low; keep the pair kernels bit-comparable by testing against CPU as in `ROCM_EVALUATION` |
 | 1b | DONE (branch, uncommitted): workgroup-per-atom `k_dispersion_gather` | profiler: 37.9 -> 11.2 ms | step -27 ms | small | low |
-| 2 | Device PPCG for the EEQ on ROCm (port of CUDA WP7-D) | CPU EEQ 100-120 ms is half the step | gfnff many-fragment systems ROCm faster than CPU (est.) | large | medium |
+| 2 | DONE (branch `feature/rocm-eeq-ppcg`): device PPCG for the EEQ on ROCm (port of CUDA WP7-D) | CPU EEQ 100-120 ms is half the step | gfnff many-fragment systems ROCm faster than CPU (est.) | large | medium |
 | 3 | G4: choose host eigensolver below a measured crossover; `-gpu auto` must not pick a 5x slower path | rocSOLVER syevd 10.7 ms vs CPU 4.5 ms at n~256-300 | gfn2 small/medium: ROCm time ~ CPU time instead of 5x | small | low |
 | 4 | G1: cached-L reduction (2 trsm + syevd + trsm) instead of `dsygvd` | measured 1.25-2x on the solve | gfn2 large: modest | medium | low-medium (SCF equivalence) |
 | 5 | G3: GEMM-only pseudo-diagonalisation | CUDA precedent, ROCm GEMM/eig ratio 30-100x | large for nao > 1000 | large | medium-high (validation) |

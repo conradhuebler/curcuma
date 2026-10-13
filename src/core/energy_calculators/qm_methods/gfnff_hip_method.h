@@ -44,6 +44,9 @@ struct GFNFFRocmBackend {
     /// Schur complement.  That is the expected path here, not a numerical failure, so
     /// the wrapper reports it at verbosity 3 instead of warning.
     static constexpr bool has_device_schur = false;
+    /// Oct 2026 (Claude Generated): the WP7-E projected PCG (solveWithDeviceRHSAndGPUProjectedPCG)
+    /// is ported, diagonal Jacobi only (no local-inverse preconditioner on ROCm).
+    static constexpr bool has_device_ppcg = true;
     /// No multi-GPU split on ROCm (CUDA only, Sep 2026).
     static constexpr bool has_multi_gpu_split = false;
     /// K1 (Oct 2026): CN pair-list skin not ported; ROCm keeps the legacy rebuild on the topology check.
@@ -54,8 +57,9 @@ struct GFNFFRocmBackend {
     /// Oct 2026: staged pinned list upload not ported (serial SoA upload as before).
     static constexpr bool has_staged_list_upload = false;
 
-    /// Deliverable 3 (Jun 2026): from 16 fragments on, the EEQ goes to the exact CPU
-    /// PCG — the device path would do a dense N x N Cholesky (O(N^3)) for nfrag>1.
+    /// Deliverable 3 (Jun 2026): from 16 fragments on, the dense device Cholesky (O(N^3) plus a
+    /// host Schur step over nfrag+1 columns) is not used. Oct 2026: there the device projected PCG
+    /// runs when the solver resolves to ppcg; otherwise, or when it fails, the exact CPU EEQ.
     static constexpr int default_eeq_cpu_fragment_threshold = 16;
 
     /// Blocking device->host copy of n doubles (GPU-Schur charge download).
