@@ -14,10 +14,11 @@
  * local inverse built on the device (requestLocalInverseDeviceBuild, default), or the host-built
  * local inverse uploaded by setLocalInversePreconditioner.
  *
- * The device-resident GPU-Schur / PCG / batched variants return false: the host wrapper
- * (gfnff_hip_method.cpp) then applies its own exact CPU Schur complement to z1/Z2 (works for
- * nfrag==1 AND nfrag>1), so the final charges match the CPU EEQ within FP. This keeps the
- * port small while giving full opt/MD parity.
+ * Oct 2026 (Claude Generated): the device Schur variants (WP5-A solveWithDeviceRHSAndGPUSchur,
+ * WP7-A solveWithDeviceRHSAndGPUSchurGeneral) run for small systems only (N <= ~120, at most 8
+ * fragments; one-workgroup Cholesky in LDS, k_eeq_small_chol_schur_hip). For larger systems they,
+ * and the PCG / batched variants, return false: the host wrapper then takes solveWithDeviceRHS()
+ * and applies its own exact CPU Schur complement to z1/Z2 (nfrag==1 and nfrag>1).
  *
  * Included once into gfnff_rocm.hip (single TU). CudaBuffer<T>/hip helpers come from
  * gfnff_soa_hip.h (already included by the master before this file). */
@@ -225,7 +226,30 @@ struct EEQSolverHipImpl {
     int                 m_li_max_smem = -1;          ///< LDS per workgroup (bytes), queried once
     int                 m_li_wave = 0;               ///< wavefront size of the device, queried once
     EEQSolverHip::LocalInverseDeviceStats m_li_stats;
+
+    /// Claude Generated (Oct 2026): LDS bytes per workgroup for k_eeq_small_chol_schur_hip (WP5-A,
+    /// small one-fragment systems); -1 until queried.
+    long                m_small_lds_limit = -1;
+    double*             h_small_q = nullptr;     ///< pinned [N] charges of the last small-system solve
+    int                 h_small_q_n = 0;
 };
+
+/// Claude Generated (Oct 2026): host copy of the charges of the last small-system solve on this host
+/// thread (device pointer, pinned host copy, count). Read by curcumaRocmEEQHostCharges(); every solve
+/// entry point clears it first, so it never outlives the solve that produced it.
+struct RocmEEQHostCopy { const double* dev = nullptr; const double* host = nullptr; int n = 0; };
+static thread_local RocmEEQHostCopy g_rocm_eeq_host_copy;
+
+/// Claude Generated (Oct 2026): copies the charges of the last small-system device EEQ solve from its
+/// pinned host copy when device and n match it; false otherwise (the caller downloads them).
+/// Declared in qm_methods/gfnff_hip_method.h (GFNFFRocmBackend::downloadEEQCharges).
+bool curcumaRocmEEQHostCharges(double* host, const double* device, int n)
+{
+    const RocmEEQHostCopy& c = g_rocm_eeq_host_copy;
+    if (!host || !device || c.dev != device || c.n != n || !c.host) return false;
+    std::memcpy(host, c.host, static_cast<size_t>(n) * sizeof(double));
+    return true;
+}
 
 // ---------------------------------------------------------------------------------------------
 // WP7-E projected-PCG fragment kernels (Claude Generated, Oct 2026). Verbatim ports of
@@ -439,6 +463,8 @@ EEQSolverHip::~EEQSolverHip()
         if (m_impl->h_result) hipHostFree(m_impl->h_result);
         if (m_impl->h_info)   hipHostFree(m_impl->h_info);
         if (m_impl->h_ppcg_back) hipHostFree(m_impl->h_ppcg_back);
+        if (m_impl->h_small_q) (void)hipHostFree(m_impl->h_small_q);
+        if (g_rocm_eeq_host_copy.host == m_impl->h_small_q) g_rocm_eeq_host_copy = RocmEEQHostCopy{};
         if (m_impl->handle)   rocblas_destroy_handle(m_impl->handle);
         if (m_impl->stream)   hipStreamDestroy(m_impl->stream);
     }
@@ -530,6 +556,7 @@ static bool eeqBuildFactorSolve(
 {
     const int nrhs = nfrag + 1;
     const bool do_refactor = force_refactor || !impl.m_has_cached_factor || (N != last_N);
+    g_rocm_eeq_host_copy = RocmEEQHostCopy{};   // d_rhs is rewritten below
 
     // WP-B: mixed precision only on the factor-dominated few-fragment path (nfrag<=1, nrhs<=2).
     // For large nfrag (solvent) nrhs ~ N makes the FP64 residual GEMM as costly as the FP64
@@ -675,24 +702,332 @@ bool EEQSolverHip::solveAndComputeCharges(int, int, const double*, const double*
     return false;  // not used in production (CUDA marks it deprecated too)
 }
 
-// Device-resident GPU-Schur / PCG / batched variants: not ported. Returning false routes
-// the host wrapper to solveWithDeviceRHS()/solve() + its own exact CPU Schur complement.
-// The projected PCG (WP7-E, below) is ported and leaves its charges in d_rhs[0..N-1].
+// Device-resident GPU-Schur variants: small systems only (below); PCG / batched: not ported.
+// Returning false routes the host wrapper to solveWithDeviceRHS()/solve() + its own exact CPU
+// Schur complement. The projected PCG (WP7-E, below) and the small-system Schur path leave their
+// charges in d_rhs[0..N-1].
 double* EEQSolverHip::getDeviceChargesPtr() { return m_impl->d_rhs.ptr; }
+
+/// K3 is not used on ROCm (Claude Generated, Oct 2026): every solve keeps its null-stream ordering.
+void EEQSolverHip::setInputReadyEvent(void*) {}
+
+/// Not ported to ROCm (Claude Generated, Oct 2026): the solver stream keeps its default priority.
+bool EEQSolverHip::setStreamPriorityHigh(bool) { return false; }
+
 bool    EEQSolverHip::isUsingLUFallback() const { return m_impl->m_using_lu; }
 int     EEQSolverHip::getLastCholInfo() const { return m_impl->m_last_chol_info; }
 
-bool EEQSolverHip::solveWithDeviceRHSAndGPUSchur(int, int, const double*, const double*, const double*,
-                                                 const double*, const double*, const double*,
-                                                 const std::vector<int>&, double, double, bool) {
-    return false;
+// =============================================================================================
+// Device EEQ for small systems (WP5-A one fragment, WP7-A few fragments) on ROCm
+// (Claude Generated, Oct 2026)
+//
+// The constrained EEQ system of a molecule with nf fragments (fragment charges Q_f) is solved as on
+// the dense path: Cholesky A = L L^T of the N x N Coulomb matrix, A z1 = b and A Z2 = C^T (column f
+// is 1 on the atoms of fragment f), then the Schur complement
+//     S lambda = C z1 - Q,  S = C Z2  (nf x nf),   q = z1 - Z2 lambda.
+// One workgroup does the factorisation, the substitutions and the Schur step with the packed lower
+// triangle in LDS (N(N+1)/2 doubles, N up to about 120 on 64 KB). The matrix itself is built by
+// k_eeq_build_matrix_hip, the kernel of the dense path, so the matrix entries are bit-identical; the
+// Schur step uses the summation order and the pivoted Gaussian elimination of the host code in
+// GFNFFGpuMethodImpl::calculateEnergy. Results differ from the dense path (rocsolver_dpotrf/dpotrs)
+// only by the rounding of the different factorisation order.
+//
+// Why: FP64 is slow on this hardware and the dense path is latency bound for small N. At 66 atoms it
+// costs 7 kernels (rocsolver potf2 ~110 us, potrs ~65 us), three host round trips, two pageable
+// copies and a host Schur step per MD step; this path is two kernels and one status read-back.
+//
+// A non-positive or NaN pivot sets *status = 1 + k (k = column); the caller returns false and the
+// wrapper takes the dense path (rocsolver Cholesky with LU fallback), as before.
+// =============================================================================================
+constexpr int EEQ_SMALL_THREADS = 512;   ///< workgroup size of k_eeq_small_chol_schur_hip (best of 256/512/1024)
+constexpr int EEQ_SMALL_MAX_NF  = 8;     ///< largest fragment count of the small path
+
+/// Fragment target charges Q_f, passed by value.
+struct EEQSmallQ { double q[EEQ_SMALL_MAX_NF]; };
+
+/// LDS bytes of k_eeq_small_chol_schur_hip: packed lower triangle, column k of L and 1/L_kk,
+/// 2 (nf+1) solution columns, a flag and the nf x nf Schur system.
+static inline size_t eeqSmallLdsBytes(int N, int nf)
+{
+    const size_t n = static_cast<size_t>(N);
+    return (n * (n + 1) / 2 + 2 * n + 2 * n * (nf + 1) + 4 + static_cast<size_t>(nf) * (nf + 2)) * sizeof(double);
 }
 
-bool EEQSolverHip::solveWithDeviceRHSAndGPUSchurGeneral(int, int, const double*, const double*, const double*,
-                                                        const double*, const double*, const double*,
-                                                        const std::vector<int>&, const std::vector<double>&,
-                                                        double, bool) {
-    return false;
+/// Row r and column c (c <= r) of entry e of a packed lower triangle stored row by row.
+__device__ __forceinline__ void eeqSmallTriIndex(int e, int& r, int& c)
+{
+    r = static_cast<int>((sqrtf(8.0f * static_cast<float>(e) + 1.0f) - 1.0f) * 0.5f);
+    while (r * (r + 1) / 2 > e) --r;
+    while ((r + 1) * (r + 2) / 2 <= e) ++r;
+    c = e - r * (r + 1) / 2;
+}
+
+/// One workgroup of T threads, dynamic LDS eeqSmallLdsBytes(N, nf). See the block comment above.
+template <int T>
+__global__ __launch_bounds__(T)
+void k_eeq_small_chol_schur_hip(
+    int N, int nf,
+    const double* __restrict__ A,          ///< [N*N] k_eeq_build_matrix_hip output (lower, column-major)
+    const double* __restrict__ rhs_atoms,  ///< [N] b
+    const int* __restrict__ atom_frag,     ///< [N] 0-based fragment of each atom (nullptr: all fragment 0)
+    EEQSmallQ qfrag,                       ///< target charge per fragment
+    double* __restrict__ q_out,            ///< [N] charges (d_rhs[0..N-1], getDeviceChargesPtr contract)
+    int* __restrict__ status)              ///< 0 = success, 1 + k = pivot k not positive
+{
+    extern __shared__ double lds[];
+    const int nc = nf + 1;                                // solution columns: b, then one per fragment
+    double* L    = lds;                                   // packed lower, row i starts at i(i+1)/2
+    double* colk = L + static_cast<size_t>(N) * (N + 1) / 2;   // column k of L (current step)
+    double* invd = colk + N;                              // 1 / L_kk
+    double* z    = invd + N;                              // [nc][N] solutions
+    double* w    = z + nc * N;                            // [nc][N] forward-substitution results
+    double* red  = w + nc * N;                            // [4] red[0] = fail flag
+    double* Sw   = red + 4;                               // [nf*nf] Schur matrix, row-major
+    double* rhsw = Sw + nf * nf;                          // [nf]
+    double* lamw = rhsw + nf;                             // [nf]
+    const int t = threadIdx.x;
+
+    // 1. Lower triangle into LDS (packed by rows) and the right-hand sides [b | C^T].
+    const int ntri = N * (N + 1) / 2;
+    for (int e = t; e < ntri; e += T) {
+        int i, j;
+        eeqSmallTriIndex(e, i, j);
+        L[e] = A[static_cast<size_t>(j) * N + i];
+    }
+    for (int i = t; i < N; i += T) {
+        const int fi = atom_frag ? atom_frag[i] : 0;
+        z[i] = rhs_atoms[i];
+        for (int f = 0; f < nf; ++f) z[(f + 1) * N + i] = (fi == f) ? 1.0 : 0.0;
+    }
+    __syncthreads();
+
+    // 2. Right-looking Cholesky A = L L^T with the forward substitution L w = [b | C^T] folded in.
+    //    FP64 is slow on this hardware, so the pivot 1/L_kk = rsqrt(d) is formed once, by thread 0,
+    //    right after its own update of entry (k, k) in step k - 1, and passed on through LDS (the
+    //    diagonal of L is not stored). Column k is scaled by 1/L_kk (as LAPACK dpotf2) into colk;
+    //    the rank-1 update of the trailing triangle pairs rows r and m-1-r (m+1 entries per pair) and
+    //    gives each pair P = T / pairs threads. The right-hand-side columns are updated like rows.
+    //    Measured on the RX 9060 XT (one workgroup, T = 512, test matrices): 66 atoms ~90 us, 114 atoms ~165 us for
+    //    factorisation, substitutions and Schur step together.
+    if (t == 0) {
+        const double d = L[0];
+        red[0] = (d > 0.0) ? 0.0 : 1.0;
+        invd[0] = rsqrt(d);
+    }
+    __syncthreads();
+    for (int k = 0; k < N; ++k) {
+        if (red[0] != 0.0) {   // uniform: written before the last barrier
+            if (t == 0) *status = 1 + k;
+            return;
+        }
+        const double inv = invd[k];
+        for (int i = k + 1 + t; i < N; i += T) {
+            const double c = L[i * (i + 1) / 2 + k] * inv;
+            colk[i] = c;
+            L[i * (i + 1) / 2 + k] = c;
+        }
+        __syncthreads();
+        const int m = N - k - 1;
+        if (m > 0) {
+            const int npairs = (m + 1) / 2;
+            const int P = max(1, T / npairs);
+            const int pr = t / P, l = t - pr * P;
+            if (pr < npairs) {
+                for (int h = 0; h < 2; ++h) {
+                    const int r = (h == 0) ? pr : m - 1 - pr;
+                    if (h == 1 && r == pr) break;
+                    const int i = k + 1 + r;
+                    const double ci = colk[i];
+                    double* rowi = L + i * (i + 1) / 2 + k + 1;
+                    const double* cj = colk + k + 1;
+                    for (int c = l; c <= r; c += P) rowi[c] -= ci * cj[c];
+                    if (h == 0 && t == 0) {   // row k+1 of the trailing triangle is entry (k+1, k+1)
+                        const double v = rowi[0];
+                        red[0] = (v > 0.0) ? 0.0 : 1.0;
+                        invd[k + 1] = rsqrt(v);
+                    }
+                }
+            }
+        }
+        for (int c = 0; c < nc; ++c) {   // forward substitution, rows below k
+            const double y = z[c * N + k] * inv;
+            for (int i = k + 1 + t; i < N; i += T) z[c * N + i] -= colk[i] * y;
+            if (t == 0) w[c * N + k] = y;
+        }
+        __syncthreads();
+    }
+
+    // 3. Backward substitution L^T x = w (x into z) by the first wave alone: wave-synchronous, so the
+    //    N steps need no workgroup barrier (__syncwarp orders the LDS accesses).
+    if (t < 32) {
+        for (int k = N - 1; k >= 0; --k) {
+            const double ik = invd[k];
+            const double* rowk = L + k * (k + 1) / 2;
+            for (int c = 0; c < nc; ++c) {
+                const double x = w[c * N + k] * ik;
+                for (int i = t; i < k; i += 32) w[c * N + i] -= rowk[i] * x;
+                if (t == 0) z[c * N + k] = x;
+            }
+            __syncwarp();
+        }
+    }
+    __syncthreads();
+
+    // 4. Schur step, as the host code: S(f,g) = sum_{i in f} Z2[i,g], rhs(f) = sum_{i in f} z1[i] - Q_f
+    //    (ascending i), Gaussian elimination with partial pivoting, back substitution.
+    const double* z1 = z;
+    const double* Z2 = z + N;
+    if (t < nf * nf + nf) {
+        const int f = (t < nf * nf) ? t / nf : t - nf * nf;
+        const double* col = (t < nf * nf) ? Z2 + (t % nf) * N : z1;
+        double sum = 0.0;
+        for (int i = 0; i < N; ++i)
+            if ((atom_frag ? atom_frag[i] : 0) == f) sum += col[i];
+        if (t < nf * nf) Sw[t] = sum;
+        else             rhsw[f] = sum - qfrag.q[f];
+    }
+    __syncthreads();
+    if (t == 0) {
+        for (int col = 0; col < nf; ++col) {
+            int pivot = col;
+            double maxv = fabs(Sw[col * nf + col]);
+            for (int row = col + 1; row < nf; ++row) {
+                const double v = fabs(Sw[row * nf + col]);
+                if (v > maxv) { maxv = v; pivot = row; }
+            }
+            if (pivot != col) {
+                for (int kk = 0; kk < nf; ++kk) {
+                    const double tmp = Sw[col * nf + kk]; Sw[col * nf + kk] = Sw[pivot * nf + kk]; Sw[pivot * nf + kk] = tmp;
+                }
+                const double tmp = rhsw[col]; rhsw[col] = rhsw[pivot]; rhsw[pivot] = tmp;
+            }
+            const double inv_d = (fabs(Sw[col * nf + col]) > 1e-15) ? 1.0 / Sw[col * nf + col] : 0.0;
+            for (int row = col + 1; row < nf; ++row) {
+                const double fac = Sw[row * nf + col] * inv_d;
+                for (int kk = col + 1; kk < nf; ++kk) Sw[row * nf + kk] -= fac * Sw[col * nf + kk];
+                rhsw[row] -= fac * rhsw[col];
+                Sw[row * nf + col] = 0.0;
+            }
+        }
+        for (int i = nf - 1; i >= 0; --i) {
+            double l = rhsw[i];
+            for (int j = i + 1; j < nf; ++j) l -= Sw[i * nf + j] * lamw[j];
+            const double diag = Sw[i * nf + i];
+            lamw[i] = (fabs(diag) > 1e-15) ? l / diag : 0.0;
+        }
+    }
+    __syncthreads();
+    for (int i = t; i < N; i += T) {
+        double q = z1[i];
+        for (int f = 0; f < nf; ++f) q -= Z2[f * N + i] * lamw[f];
+        q_out[i] = q;
+    }
+    if (t == 0) *status = 0;
+}
+
+/// Claude Generated (Oct 2026): run the small-system device EEQ (see k_eeq_small_chol_schur_hip) for nf
+/// fragments. Returns false, leaving the dense path to the wrapper, when CURCUMA_ROCM_EEQ_SMALL=0, the
+/// system does not fit (N > 128, nf > EEQ_SMALL_MAX_NF, LDS), the factor is to be reused (force_refactor
+/// false), mixed precision is on, the fragment map is missing, or the Cholesky meets a non-positive
+/// pivot. Both kernels run on the null stream, which orders them after all work on the (blocking)
+/// workspace streams that wrote coordinates and d_rhs_atoms; one pinned status read-back ends the call.
+/// On success the charges are in d_rhs[0..N-1] (getDeviceChargesPtr).
+static bool eeqSmallSolveHip(EEQSolverHipImpl& impl, int N, int nf,
+                             const double* cx, const double* cy, const double* cz,
+                             const double* d_alpha, const double* d_gam, const double* d_rhs_atoms,
+                             const std::vector<double>& qfrag, double cutoff_sq, bool force_refactor)
+{
+    static const bool enabled = [] {
+        const char* e = std::getenv("CURCUMA_ROCM_EEQ_SMALL");
+        return !(e && *e == '0');
+    }();
+    g_rocm_eeq_host_copy = RocmEEQHostCopy{};
+    if (!enabled || nf < 1 || nf > EEQ_SMALL_MAX_NF || N < 1 || N > 128 || !force_refactor
+        || impl.m_mixed_precision || !d_rhs_atoms || !d_alpha || !d_gam)
+        return false;
+    const int* atom_frag = nullptr;
+    if (nf > 1) {
+        if (!impl.m_ppcg_topo_valid || impl.m_nfrag_topo != nf || impl.d_atom_frag.n < N) return false;
+        atom_frag = impl.d_atom_frag.ptr;
+    }
+    if (impl.m_small_lds_limit < 0) {
+        hipDeviceProp_t prop{};
+        int dev = 0;
+        impl.m_small_lds_limit = (hipGetDevice(&dev) == hipSuccess && hipGetDeviceProperties(&prop, dev) == hipSuccess)
+            ? static_cast<long>(prop.sharedMemPerBlock) : 0;
+    }
+    const size_t lds = eeqSmallLdsBytes(N, nf);
+    if (static_cast<long>(lds) > impl.m_small_lds_limit) return false;
+
+    EEQSmallQ q{};
+    for (int f = 0; f < nf; ++f) q.q[f] = (f < static_cast<int>(qfrag.size())) ? qfrag[f] : 0.0;
+
+    impl.d_rhs.ensure(N);
+    if (impl.h_small_q_n < N) {
+        if (impl.h_small_q) (void)hipHostFree(impl.h_small_q);
+        impl.h_small_q = nullptr;
+        impl.h_small_q_n = 0;
+        if (hipHostMalloc(reinterpret_cast<void**>(&impl.h_small_q), 128 * sizeof(double)) != hipSuccess) return false;
+        impl.h_small_q_n = 128;
+    }
+    // Ordering against the workspace streams that wrote coordinates and d_rhs_atoms: in the single-stream
+    // mode an event on the workspace main stream (everything enqueued so far) orders the solve on the
+    // workspace's auxiliary stream (g_rocm_small_eeq_*, gfnff_rocm.hip; measurements there); otherwise
+    // the null stream, which waits for all (blocking) streams.
+    hipStream_t s = hipStream_t(nullptr);
+    if (g_rocm_small_eeq_stream && g_rocm_small_eeq_aux && g_rocm_small_eeq_event) {
+        if (hipEventRecord(g_rocm_small_eeq_event, g_rocm_small_eeq_stream) != hipSuccess
+            || hipStreamWaitEvent(g_rocm_small_eeq_aux, g_rocm_small_eeq_event, 0) != hipSuccess)
+            return false;
+        s = g_rocm_small_eeq_aux;
+    }
+    // Matrix by the dense path's kernel (bit-identical entries); d_A is overwritten, so the cached
+    // dense factor and the projected-PCG matrix are invalid afterwards.
+    k_eeq_build_matrix_hip<<<N, 256, 0, s>>>(N, cx, cy, cz, d_alpha, d_gam, impl.d_A.ptr, cutoff_sq, false);
+    impl.m_pcg_M_inv_valid = false;
+    impl.m_fp32_A_valid = false;
+    impl.m_has_cached_factor = false;
+    impl.m_cached_factor_mixed = false;
+    hipLaunchKernelGGL(k_eeq_small_chol_schur_hip<EEQ_SMALL_THREADS>, dim3(1), dim3(EEQ_SMALL_THREADS), lds,
+                       s, N, nf, impl.d_A.ptr, d_rhs_atoms, atom_frag, q, impl.d_rhs.ptr, impl.d_info.ptr);
+    if (hipGetLastError() != hipSuccess) return false;
+    // Status and charges in one read-back; the wrapper takes the charges from the host copy
+    // (GFNFFRocmBackend::downloadEEQCharges) instead of a second blocking download.
+    if (hipMemcpyAsync(impl.h_info, impl.d_info.ptr, sizeof(int), hipMemcpyDeviceToHost, s) != hipSuccess
+        || hipMemcpyAsync(impl.h_small_q, impl.d_rhs.ptr, N * sizeof(double), hipMemcpyDeviceToHost, s) != hipSuccess)
+        return false;
+    if (hipStreamSynchronize(s) != hipSuccess) return false;
+    if (*impl.h_info != 0) return false;   // not SPD: the wrapper's dense path factors again (LU fallback)
+    impl.m_using_lu = false;
+    impl.m_last_chol_info = 0;
+    g_rocm_eeq_host_copy = RocmEEQHostCopy{impl.d_rhs.ptr, impl.h_small_q, N};
+    return true;
+}
+
+/// WP5-A (one fragment): small systems only, see eeqSmallSolveHip(); false otherwise (dense path).
+bool EEQSolverHip::solveWithDeviceRHSAndGPUSchur(int natoms, int nfrag,
+                                                 const double* cx, const double* cy, const double* cz,
+                                                 const double* d_alpha_corrected, const double* d_gam_corrected,
+                                                 const double* d_rhs_atoms,
+                                                 const std::vector<int>& /*fraglist*/, double rhs_c0,
+                                                 double cutoff_sq, bool force_refactor)
+{
+    if (nfrag != 1) return false;
+    return eeqSmallSolveHip(*m_impl, natoms, 1, cx, cy, cz, d_alpha_corrected, d_gam_corrected, d_rhs_atoms,
+                            std::vector<double>{rhs_c0}, cutoff_sq, force_refactor);
+}
+
+/// WP7-A (a few fragments): small systems only, see eeqSmallSolveHip(); false otherwise (dense path).
+bool EEQSolverHip::solveWithDeviceRHSAndGPUSchurGeneral(int natoms, int nfrag,
+                                                        const double* cx, const double* cy, const double* cz,
+                                                        const double* d_alpha_corrected, const double* d_gam_corrected,
+                                                        const double* d_rhs_atoms,
+                                                        const std::vector<int>& /*fraglist*/,
+                                                        const std::vector<double>& rhs_constraints,
+                                                        double cutoff_sq, bool force_refactor)
+{
+    return eeqSmallSolveHip(*m_impl, natoms, nfrag, cx, cy, cz, d_alpha_corrected, d_gam_corrected, d_rhs_atoms,
+                            rhs_constraints, cutoff_sq, force_refactor);
 }
 
 bool EEQSolverHip::solveWithDeviceRHSAndGPUPCG(int, int, const double*, const double*, const double*,
@@ -1489,6 +1824,7 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(
 {
     auto& impl = *m_impl;
     const int N = natoms;
+    g_rocm_eeq_host_copy = RocmEEQHostCopy{};   // Oct 2026: d_rhs is rewritten below
     if (nfrag < 1 || !impl.m_ppcg_topo_valid || impl.m_nfrag_topo != nfrag) return false;
     if (impl.d_atom_frag.n < N || impl.d_frag_inv_atoms.n < nfrag || impl.d_frag_atom_offsets.n < nfrag + 1)
         return false;

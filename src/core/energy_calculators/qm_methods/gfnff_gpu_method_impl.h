@@ -85,6 +85,14 @@ template <class B>
 struct gfnffBackendLeanHBRefresh<B, std::void_t<decltype(B::lean_hb_refresh)>>
     : std::bool_constant<B::lean_hb_refresh> {};
 
+/// Claude Generated (Oct 2026): true when the backend has a static downloadEEQCharges(host, device, n)
+/// (ROCm: charges of its small-system device EEQ come from a host copy made with the status read-back).
+/// A backend without the member (CUDA) gets false and keeps Backend::downloadDoubles unchanged.
+template <class B, class = void>
+struct gfnffBackendEEQChargeDownload : std::false_type {};
+template <class B>
+struct gfnffBackendEEQChargeDownload<B, std::void_t<decltype(&B::downloadEEQCharges)>> : std::true_type {};
+
 template <class Backend>
 class GFNFFGpuMethodImpl : public ComputationalMethod {
 public:
@@ -1789,8 +1797,12 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
             if (eeq_ok) {
                 if (used_gpu_schur) {
                     // Download for storeChargesFromGPU() — EEQ stream already synced.
-                    Backend::downloadDoubles(m_eeq_charges_gpu.data(),
-                                             m_eeq_gpu->getDeviceChargesPtr(), N);
+                    if constexpr (gfnffBackendEEQChargeDownload<Backend>::value)
+                        Backend::downloadEEQCharges(m_eeq_charges_gpu.data(),
+                                                    m_eeq_gpu->getDeviceChargesPtr(), N);
+                    else
+                        Backend::downloadDoubles(m_eeq_charges_gpu.data(),
+                                                 m_eeq_gpu->getDeviceChargesPtr(), N);
                     // Test hook (Claude Generated, Sep 2026): CURCUMA_EEQ_GPU_FORCE_REJECT=1
                     // rejects every GPU EEQ solution, so the fallback below can be exercised on
                     // a well-conditioned molecule. Read once; zero cost when unset.

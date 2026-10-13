@@ -195,6 +195,53 @@ __global__ void k_check_displacement(
         atomicOr(exceeded_flag, 1);
 }
 
+/// Claude Generated (Oct 2026): both displacement tests of a step in one single-workgroup launch,
+/// without a zeroed flag buffer: flags[0] = some atom moved more than sqrt(thr_sq) from (rx, ry, rz)
+/// (topology reference, checkDisplacement), flags[1] the same against (qx, qy, qz) with qthr_sq (CN
+/// pair-list reference, cnPairListStale); qx == nullptr skips the second test (flags[1] = 0).
+/// Same per-atom test as k_check_displacement. Launch: one workgroup of 1024 threads.
+__global__ __launch_bounds__(1024)
+void k_check_displacement_pair(
+    int N,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const double* __restrict__ rx, const double* __restrict__ ry, const double* __restrict__ rz,
+    double thr_sq,
+    const double* __restrict__ qx, const double* __restrict__ qy, const double* __restrict__ qz,
+    double qthr_sq,
+    int* __restrict__ flags)
+{
+    int f0 = 0, f1 = 0;
+    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        if (rx) {
+            const double dx = cx[i] - rx[i];
+            const double dy = cy[i] - ry[i];
+            const double dz = cz[i] - rz[i];
+            if (dx*dx + dy*dy + dz*dz > thr_sq) f0 = 1;
+        }
+        if (qx) {
+            const double dx = cx[i] - qx[i];
+            const double dy = cy[i] - qy[i];
+            const double dz = cz[i] - qz[i];
+            if (dx*dx + dy*dy + dz*dz > qthr_sq) f1 = 1;
+        }
+    }
+    f0 = __syncthreads_or(f0);
+    f1 = __syncthreads_or(f1);
+    if (threadIdx.x == 0) { flags[0] = f0; flags[1] = f1; }
+}
+
+/// Claude Generated (Oct 2026): zero the per-step accumulators of Phase 1 (energy, gradient, dE/dCN,
+/// per-term energies) in one launch instead of four hipMemsetAsync blits.
+__global__ void k_zero_step_accumulators(double* __restrict__ energy, double* __restrict__ grad, int n3,
+                                         double* __restrict__ dEdcn, int n, double* __restrict__ energies, int nslots)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n3) grad[i] = 0.0;
+    if (i < n) dEdcn[i] = 0.0;
+    if (i < nslots) energies[i] = 0.0;
+    if (i == 0) *energy = 0.0;
+}
+
 // ============================================================================
 // Kernel 1: D4 Dispersion
 // E = -C6 * zetac6 * (1/(r^6+R0^6) + 2*r4r2ij/(r^8+R0^8))
@@ -848,9 +895,36 @@ __global__ void k_coulomb_gather(
 // bit-identical to the old kernel and only the summation order changes.
 // Launch: grid dim3(nb, nb), nb = ceil(N / T), block T; blocks with bj < bi return at once.
 // Formerly k_coulomb_dense (June 2026: coalesced shared-memory N-body sweep over all ordered pairs).
-constexpr int GFNFF_COUL_TILE_HIP = 128;   ///< atoms per tile == block size (power of two)
+constexpr int GFNFF_COUL_TILE_HIP = 128;   ///< default atoms per tile == block size (power of two)
 
-__global__ __launch_bounds__(GFNFF_COUL_TILE_HIP)
+/// Claude Generated (Oct 2026): below this atom count the per-step kernels run on the main stream only
+/// (FFWorkspaceHipImpl::single_stream). Every switch between hardware queues costs the GPU tens of
+/// microseconds on the RX 9060 XT, more than small kernels gain from running side by side
+/// (MD ms/step, worker streams -> main stream only: 24 atoms 0.77 -> 0.56, 66: 0.96 -> 0.68,
+/// 114: 1.17 -> 0.94, 300: 1.81 -> 1.71; but 600: 2.43 -> 2.70, 1002: 3.04 -> 3.24).
+constexpr int kRocmSingleStreamMaxAtoms = 500;
+
+/// Claude Generated (Oct 2026): streams of the single-stream workspace whose step is being computed on this
+/// host thread (set in prepareAndLaunchChargeIndependent, nullptr otherwise). The small-system device EEQ
+/// (eeq_solver_hip.hiph, same translation unit) records g_rocm_small_eeq_event on the main stream and runs
+/// on the auxiliary stream (stream_threebody, idle in this mode) behind it. Measured on the RX 9060 XT
+/// (MD ms/step, 24 atoms): on the main stream 0.62, on the null stream 0.46 or 0.95 depending on how many
+/// streams the process had created (their spread over the four hardware queues), on the auxiliary
+/// workspace stream 0.44 with either stream count.
+static thread_local hipStream_t g_rocm_small_eeq_stream = nullptr;
+static thread_local hipStream_t g_rocm_small_eeq_aux = nullptr;
+static thread_local hipEvent_t  g_rocm_small_eeq_event = nullptr;
+
+// Claude Generated (Oct 2026): i tile (block size, TI >= 32 for the wave reduction) and j tile (TJ)
+// are separate template parameters. Block (bj, bi) handles i in [bi*TI, bi*TI+TI) and j in
+// [bj*TJ, bj*TJ+TJ), every pair with j > i once; blocks whose whole j range lies at or below their
+// smallest i return at once. TI == TJ == 128 is the former kernel (same pairs per block, same walk
+// order, bit-identical). Small systems take smaller tiles: at 66 atoms the 128 tile is a single
+// workgroup on one compute unit and the FP64 erf/exp of all 2145 pairs ran there (~140 us on the
+// RX 9060 XT); with 32 x 8 tiles 27 workgroups share the work. Per-pair arithmetic is unchanged;
+// only the summation order of energy and gradient differs between tile shapes.
+template <int TI, int TJ>
+__global__ __launch_bounds__(TI)
 void k_coulomb_tiles_hip(
     int N,
     const double* __restrict__ alpha,    // per-atom charge-corrected EEQ alpha (== gamma source)
@@ -862,34 +936,35 @@ void k_coulomb_tiles_hip(
     double*                    grad,
     double*                    energy)
 {
-    constexpr int T = GFNFF_COUL_TILE_HIP;
+    static_assert((TJ & (TJ - 1)) == 0 && TJ <= TI && TI % 32 == 0, "tile shapes: TJ power of two <= TI, TI wave multiple");
     const int bj = blockIdx.x;
     const int bi = blockIdx.y;
-    if (bj < bi) return;   // block-uniform: each unordered tile pair once
+    if (bj * TJ + TJ - 1 <= bi * TI) return;   // block-uniform: no pair with j > i in this block
 
-    __shared__ double sx[T], sy[T], sz[T], sq[T], sa[T];
-    __shared__ double sgx[T], sgy[T], sgz[T];
+    __shared__ double sx[TJ], sy[TJ], sz[TJ], sq[TJ], sa[TJ];
+    __shared__ double sgx[TJ], sgy[TJ], sgz[TJ];
     const int t  = threadIdx.x;
-    const int i  = bi * T + t;
-    const int jl = bj * T + t;
+    const int i  = bi * TI + t;
 
-    if (jl < N) { sx[t] = cx[jl]; sy[t] = cy[jl]; sz[t] = cz[jl]; sq[t] = charges[jl]; sa[t] = alpha[jl]; }
-    else        { sx[t] = sy[t] = sz[t] = 0.0; sq[t] = 0.0; sa[t] = 1.0; }
-    sgx[t] = 0.0; sgy[t] = 0.0; sgz[t] = 0.0;
+    if (t < TJ) {
+        const int jl = bj * TJ + t;
+        if (jl < N) { sx[t] = cx[jl]; sy[t] = cy[jl]; sz[t] = cz[jl]; sq[t] = charges[jl]; sa[t] = alpha[jl]; }
+        else        { sx[t] = sy[t] = sz[t] = 0.0; sq[t] = 0.0; sa[t] = 1.0; }
+        sgx[t] = 0.0; sgy[t] = 0.0; sgz[t] = 0.0;
+    }
     __syncthreads();
 
     const bool active = (i < N) && !isnan(charges[i]);
     double xi = 0, yi = 0, zi = 0, qi = 0, ai = 0;
     if (active) { xi = cx[i]; yi = cy[i]; zi = cz[i]; qi = charges[i]; ai = alpha[i]; }
-    const bool diag = (bi == bj);
     const double inv_sqrt_pi = 0.5641895835477563;
     double gx = 0.0, gy = 0.0, gz = 0.0, local_E = 0.0;
 
     if (active) {
-        for (int k = 0; k < T; ++k) {
-            const int jj = (t + k) & (T - 1);
-            const int j  = bj * T + jj;
-            if (j >= N || (diag && j <= i)) continue;
+        for (int k = 0; k < TJ; ++k) {
+            const int jj = (t + k) & (TJ - 1);
+            const int j  = bj * TJ + jj;
+            if (j >= N || j <= i) continue;
             double dx = xi - sx[jj];
             double dy = yi - sy[jj];
             double dz = zi - sz[jj];
@@ -920,13 +995,66 @@ void k_coulomb_tiles_hip(
             atomicAdd(&sgy[jj], -fy);
             atomicAdd(&sgz[jj], -fz);
         }
-        add_grad(grad, i, gx, gy, gz);
+        if (gx != 0.0 || gy != 0.0 || gz != 0.0 || TI == TJ)   // TI == TJ: former behaviour (always add)
+            add_grad(grad, i, gx, gy, gz);
     }
     __syncthreads();
-    if (jl < N && (sgx[t] != 0.0 || sgy[t] != 0.0 || sgz[t] != 0.0))
-        add_grad(grad, jl, sgx[t], sgy[t], sgz[t]);
+    if (t < TJ) {
+        const int jl = bj * TJ + t;
+        if (jl < N && (sgx[t] != 0.0 || sgy[t] != 0.0 || sgz[t] != 0.0))
+            add_grad(grad, jl, sgx[t], sgy[t], sgz[t]);
+    }
 
     blockReduceAddEnergy(local_E, energy);
+}
+
+/// Claude Generated (Oct 2026): tile shape of k_coulomb_tiles_hip for N atoms. From 2000 atoms on the
+/// former 128 x 128 kernel runs unchanged (bit-identical results; at 2910 atoms 32 x 16 was within 5 %,
+/// at 6200 atoms slower). Below, j tiles of 16 / 8 / 4 atoms spread the pairs over more workgroups.
+/// Kernel time per step on the RX 9060 XT (gfx1200, 128x128 -> chosen shape, 101 calls each):
+/// 24 atoms 52 -> 24 us (32x8), 66: 141 -> 27 us, 114: 269 -> 36 us, 300: 182 -> 56 us,
+/// 600: 216 -> 131 us (32x16), 1002: 404 -> 233 us (32x16).
+/// CURCUMA_ROCM_COUL_TILE=TIxTJ forces a shape (128x128 = former kernel; 64x64, 32x32, 32x16, 32x8, 32x4).
+static void coulombTileShapeHip(int N, int& ti, int& tj)
+{
+    static const int forced = [] {
+        const char* e = std::getenv("CURCUMA_ROCM_COUL_TILE");
+        if (!e || !*e) return 0;
+        const std::string v(e);
+        if (v == "128x128") return 1;
+        if (v == "64x64")   return 2;
+        if (v == "32x32")   return 3;
+        if (v == "32x16")   return 4;
+        if (v == "32x8")    return 5;
+        if (v == "32x4")    return 6;
+        return 0;
+    }();
+    int sel = forced;
+    if (sel == 0) {
+        if      (N >= 2000) sel = 1;
+        else if (N >= 400)  sel = 4;
+        else if (N >= 48)   sel = 5;
+        else                sel = 6;
+    }
+    static const int TIs[7] = {128, 128, 64, 32, 32, 32, 32}, TJs[7] = {128, 128, 64, 32, 16, 8, 4};
+    ti = TIs[sel]; tj = TJs[sel];
+}
+
+/// Claude Generated (Oct 2026): launch k_coulomb_tiles_hip with the shape of coulombTileShapeHip().
+static void launchCoulombTilesHip(int N, const double* alpha, const double* cx, const double* cy, const double* cz,
+                                  const double* charges, double r_cut, double* grad, double* energy, hipStream_t stream)
+{
+    int ti = GFNFF_COUL_TILE_HIP, tj = GFNFF_COUL_TILE_HIP;
+    coulombTileShapeHip(N, ti, tj);
+    const dim3 grid((N + tj - 1) / tj, (N + ti - 1) / ti);
+#define COUL_TILES_LAUNCH(A, B) k_coulomb_tiles_hip<A, B><<<grid, A, 0, stream>>>(N, alpha, cx, cy, cz, charges, r_cut, grad, energy)
+    if      (ti == 128) COUL_TILES_LAUNCH(128, 128);
+    else if (ti == 64)  COUL_TILES_LAUNCH(64, 64);
+    else if (tj == 32)  COUL_TILES_LAUNCH(32, 32);
+    else if (tj == 16)  COUL_TILES_LAUNCH(32, 16);
+    else if (tj == 8)   COUL_TILES_LAUNCH(32, 8);
+    else                COUL_TILES_LAUNCH(32, 4);
+#undef COUL_TILES_LAUNCH
 }
 
 // ============================================================================
@@ -4422,9 +4550,65 @@ static void hbStageResize(V& a, size_t m)
     a.resize(m);
 }
 
+/// Claude Generated (Oct 2026): pinned staging arena for the H-bond list uploads of the single-stream mode.
+/// CudaBuffer::upload is a blocking hipMemcpy from pageable memory (~30 us each on the RX 9060 XT, 24 per
+/// refresh at 66 atoms); here each array is copied into pinned memory and sent with hipMemcpyAsync on the
+/// main stream. put() waits for the stream before it reuses or replaces the block.
+struct HipUploadArena {
+    bool   enabled = false;
+    char*  base = nullptr;
+    size_t cap = 0, used = 0;
+    HipUploadArena() = default;
+    HipUploadArena(const HipUploadArena&) = delete;
+    HipUploadArena& operator=(const HipUploadArena&) = delete;
+    ~HipUploadArena() { if (base) (void)hipHostFree(base); }
+    /// Pinned copy of bytes at src (256-byte aligned); nullptr if no pinned memory could be had.
+    void* put(const void* src, size_t bytes, hipStream_t stream)
+    {
+        const size_t need = (bytes + 255) & ~static_cast<size_t>(255);
+        if (used + need > cap) {
+            (void)hipStreamSynchronize(stream);   // pending copies read the old block
+            if (need > cap) {
+                if (base) (void)hipHostFree(base);
+                base = nullptr;
+                cap = 0;
+                const size_t ncap = std::max<size_t>(need, std::max<size_t>(2 * cap, 1 << 16));
+                if (hipHostMalloc(reinterpret_cast<void**>(&base), ncap) != hipSuccess) { base = nullptr; return nullptr; }
+                cap = ncap;
+            }
+            used = 0;
+        }
+        char* dst = base + used;
+        std::memcpy(dst, src, bytes);
+        used += need;
+        return dst;
+    }
+};
+
+/// Claude Generated (Oct 2026): upload count elements; through the arena (async from pinned memory,
+/// capacity with 25 % headroom so a list that grows by a few entries is not reallocated) when it is
+/// enabled, else CudaBuffer::upload as before.
+template <typename T>
+static void stagedUploadHip(CudaBuffer<T>& buf, const T* src, int count, hipStream_t stream, HipUploadArena* A)
+{
+    if (count <= 0) return;
+    if (!A || !A->enabled) { buf.upload(src, count, stream); return; }
+    if (buf.n < count) buf.alloc(count + count / 4 + 16);
+    void* pinned = A->put(src, static_cast<size_t>(count) * sizeof(T), stream);
+    if (!pinned) { buf.upload(src, count, stream); return; }
+    checkCuda(hipMemcpyAsync(buf.ptr, pinned, static_cast<size_t>(count) * sizeof(T), hipMemcpyHostToDevice, stream),
+              "staged list upload");
+}
+template <typename T>
+static void stagedUploadHip(CudaBuffer<T>& buf, const std::vector<T>& v, hipStream_t stream, HipUploadArena* A)
+{
+    stagedUploadHip(buf, v.data(), static_cast<int>(v.size()), stream, A);
+}
+
 /// Per-triple gradient slots of the H-bond list for k_hbonds slot mode + k_slot_gather (rebuilt with the list).
 struct HipHBSlotTables {
     HipHBHostStage stage;           ///< Oct 2026: host arrays reused across HB list refreshes
+    HipUploadArena arena;           ///< Oct 2026: staged uploads (single-stream mode)
     CudaBuffer<int>    slot_off;    ///< [n+1] slot range per triple: A, H, B, nb(B) (case >= 2), C + nb(C) (case 3)
     CudaBuffer<int>    atom_off;    ///< [N+1] row offsets into atom_slots
     CudaBuffer<int>    atom_slots;  ///< [nslots] slot indices grouped by atom
@@ -4433,6 +4617,7 @@ struct HipHBSlotTables {
     int nslots = 0;
     int N = 0;
     int nq = 0;                     ///< triples covered by Qs_* (0: k_hbonds computes the scaling itself)
+    hipStream_t upload_stream = nullptr;   ///< Oct 2026: stream of the staged uploads (set by fillHBondSoA)
 };
 
 // ============================================================================
@@ -4955,9 +5140,10 @@ static void buildHBSlotTables(int n, const std::vector<int>& h_i, const std::vec
             }
         }
     }, 1);
-    T.slot_off.upload(slot_off.data(), n + 1);
-    T.atom_off.upload(atom_off.data(), natoms + 1);
-    if (atom_off[natoms] > 0) T.atom_slots.upload(atom_slots.data(), atom_off[natoms]);
+    HipUploadArena* A = &T.arena;
+    stagedUploadHip(T.slot_off, slot_off.data(), n + 1, T.upload_stream, A);
+    stagedUploadHip(T.atom_off, atom_off.data(), natoms + 1, T.upload_stream, A);
+    if (atom_off[natoms] > 0) stagedUploadHip(T.atom_slots, atom_slots.data(), atom_off[natoms], T.upload_stream, A);
     if (T.slot_g.n < 3 * tot) T.slot_g.alloc(3 * (tot + tot / 8));   // headroom: the list grows and shrinks between refreshes
 }
 
@@ -5057,21 +5243,28 @@ static void fillHBondSoA(HBondSoA& s, const std::vector<GFNFFHydrogenBond>& vin,
     s.total_nb_B = total_B;
     s.total_nb_C = total_C;
 
-    s.idx_i.upload(h_i, stream);  s.idx_j.upload(h_j, stream);  s.idx_k.upload(h_k, stream);
-    s.elem_A.upload(h_eA, stream);  s.elem_B.upload(h_eB, stream);
-    s.q_H.upload(h_qH, stream);  s.q_A.upload(h_qA, stream);  s.q_B.upload(h_qB, stream);
-    s.basicity_A.upload(h_basA, stream);  s.basicity_B.upload(h_basB, stream);
-    s.acidity_A.upload(h_aciA, stream);   s.acidity_B.upload(h_aciB, stream);
-    s.r_cut.upload(h_rcut, stream);
-    s.case_type.upload(h_case, stream);
-    s.nb_B_offset.upload(h_nbB_offset.data(), n, stream);
-    s.nb_B_count.upload(h_nbB_count, stream);
-    if (total_B > 0) s.nb_B_flat.upload(h_nbB_flat, stream);
-    s.acceptor_parent.upload(h_acc_parent, stream);
-    s.nb_C_offset.upload(h_nbC_offset.data(), n, stream);
-    s.nb_C_count.upload(h_nbC_count, stream);
-    if (total_C > 0) s.nb_C_flat.upload(h_nbC_flat, stream);
-    s.repz_B.upload(h_repz, stream);
+    // Oct 2026 (Claude Generated): staged uploads in the single-stream mode (T->arena.enabled), see
+    // HipUploadArena; otherwise the blocking CudaBuffer::upload as before. The stage vectors are resized
+    // with headroom, so the element counts are passed explicitly.
+    HipUploadArena* A = T ? &T->arena : nullptr;
+    if (T) T->upload_stream = stream;
+    stagedUploadHip(s.idx_i, h_i.data(), n, stream, A);  stagedUploadHip(s.idx_j, h_j.data(), n, stream, A);
+    stagedUploadHip(s.idx_k, h_k.data(), n, stream, A);
+    stagedUploadHip(s.elem_A, h_eA.data(), n, stream, A);  stagedUploadHip(s.elem_B, h_eB.data(), n, stream, A);
+    stagedUploadHip(s.q_H, h_qH.data(), n, stream, A);  stagedUploadHip(s.q_A, h_qA.data(), n, stream, A);
+    stagedUploadHip(s.q_B, h_qB.data(), n, stream, A);
+    stagedUploadHip(s.basicity_A, h_basA.data(), n, stream, A);  stagedUploadHip(s.basicity_B, h_basB.data(), n, stream, A);
+    stagedUploadHip(s.acidity_A, h_aciA.data(), n, stream, A);   stagedUploadHip(s.acidity_B, h_aciB.data(), n, stream, A);
+    stagedUploadHip(s.r_cut, h_rcut.data(), n, stream, A);
+    stagedUploadHip(s.case_type, h_case.data(), n, stream, A);
+    stagedUploadHip(s.nb_B_offset, h_nbB_offset.data(), n, stream, A);
+    stagedUploadHip(s.nb_B_count, h_nbB_count.data(), n, stream, A);
+    if (total_B > 0) stagedUploadHip(s.nb_B_flat, h_nbB_flat.data(), total_B, stream, A);
+    stagedUploadHip(s.acceptor_parent, h_acc_parent.data(), n, stream, A);
+    stagedUploadHip(s.nb_C_offset, h_nbC_offset.data(), n, stream, A);
+    stagedUploadHip(s.nb_C_count, h_nbC_count.data(), n, stream, A);
+    if (total_C > 0) stagedUploadHip(s.nb_C_flat, h_nbC_flat.data(), total_C, stream, A);
+    stagedUploadHip(s.repz_B, h_repz.data(), n, stream, A);
 
     if (T) buildHBSlotTables(n, h_i, h_j, h_k, h_case, h_nbB_offset, h_nbB_count, h_nbB_flat,
                              h_acc_parent, h_nbC_offset, h_nbC_count, h_nbC_flat, natoms, *T, threads);
@@ -5147,6 +5340,44 @@ struct FFWorkspaceHipImpl {
     CudaBuffer<int>    d_disp_flag;       ///< [1] exceeded flag for displacement check
     RefCoordSoA        cn_ref_coords;     ///< K1 (Oct 2026, Claude Generated): geometry of the last CN pair-list build
     CudaBuffer<int>    d_cn_disp_flag;    ///< K1 (Oct 2026, Claude Generated): [1] flag for cnPairListStale()
+    // Claude Generated (Oct 2026): lean per-step bookkeeping (CURCUMA_ROCM_LEAN_STEP=0 restores the former
+    // sequence): both displacement tests in one launch with one pinned read-back, no dc6dcn skip test
+    // (its flag has no reader), CN host copies only when finalizeCNForCPU() asks, one zeroing kernel.
+    bool               lean_step = true;
+    CudaBuffer<int>    d_disp_flags2;     ///< [2] flags of k_check_displacement_pair
+    int*               h_disp_flags = nullptr;   ///< pinned [2] read-back of d_disp_flags2
+    double             cn_stale_thr = -1.0;      ///< threshold of the last cnPairListStale() call (Bohr)
+    /// Claude Generated (Oct 2026): all per-step kernels on the main stream (no worker streams, no
+    /// cross-stream events) below kRocmSingleStreamMaxAtoms; CURCUMA_ROCM_SINGLE_STREAM=1/0 forces it.
+    bool               single_stream = false;
+    /// Claude Generated (Oct 2026): host mirrors of the two displacement references (x, y, z blocks of N),
+    /// copied from the pinned geometry that setGeometry() uploaded. With single_stream the displacement
+    /// tests run on the host (same per-atom test), which saves a device round trip per step.
+    std::vector<double> h_ref_xyz, h_cnref_xyz;
+    bool               h_geom_ok = false, h_ref_ok = false, h_cnref_ok = false;
+    /// Claude Generated (Oct 2026): inputs of the last HB/XB list uploads (single_stream mode only). The
+    /// forced HB re-detection every hb_update_force_every steps mostly finds the same lists; an identical
+    /// input leaves the device arrays as they are instead of ~30 blocking uploads.
+    std::vector<GFNFFHydrogenBond> prev_hb_input;
+    bool               prev_hb_valid = false;
+    std::vector<int>    prev_alpha_h, prev_alpha_b;
+    std::vector<double> prev_alpha_rcov;
+    bool               prev_alpha_valid = false;
+    std::vector<int>    prev_nr_hb, prev_hb_H;
+    bool               prev_bond_hb_valid = false;
+    bool               prev_xb_valid = false;
+    /// Claude Generated (Oct 2026): CN host copies for finalizeCNForCPU() (single-stream mode): event after
+    /// k_dlogdcn, copies on the idle stream_threebody, so the host EEQ waits for the CN only, not for
+    /// Phase 1. No stream of its own: one more stream doubled the 66-atom step (0.59 -> 1.17 ms), the
+    /// hardware queues are then shared differently.
+    hipEvent_t         event_cn_ready = nullptr;
+    bool               cn_event_recorded = false;
+    hipEvent_t         event_eeq_order = nullptr;   ///< Oct 2026: main -> auxiliary stream order of the small EEQ
+    /// Claude Generated (Oct 2026): K2 on the single-stream path - the gradient-mode dispersion gather
+    /// was launched by launchDispersionGradientEarly() this step (Phase 2 skips it).
+    bool               disp_launched_early = false;
+    double*            h_charges_stage = nullptr;   ///< pinned [N] staging for the host-EEQ charge upload
+    int                cn_stale_cached = -1;     ///< flag computed ahead by checkDisplacement(), -1 = none
 
     // GPU CN computation buffers (Phase 1: GPU migration)
     // Claude Generated (March 2026): CN computed entirely on GPU
@@ -5336,7 +5567,10 @@ static void updateHBChargeScaling(FFWorkspaceHipImpl& impl)
         n, impl.hbonds.q_H.ptr, impl.hbonds.q_A.ptr, impl.hbonds.q_B.ptr,
         T.Qs_H.ptr, T.Qs_A.ptr, T.Qs_B.ptr);
     checkCuda(hipGetLastError(), "k_hb_charge_scaling launch");
-    checkCuda(hipStreamSynchronize(impl.stream), "k_hb_charge_scaling sync");
+    // Oct 2026 (Claude Generated): k_hbonds reads Qs_* later on the same stream; the single-stream mode
+    // leaves out this host wait.
+    if (!impl.single_stream)
+        checkCuda(hipStreamSynchronize(impl.stream), "k_hb_charge_scaling sync");
     T.nq = n;
 }
 
@@ -5406,6 +5640,10 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
     checkCuda(hipStreamCreate(&m_impl->stream_pairwise), "hipStreamCreate pairwise");
     checkCuda(hipStreamCreate(&m_impl->stream_bonded), "hipStreamCreate bonded");
     checkCuda(hipStreamCreate(&m_impl->stream_threebody), "hipStreamCreate threebody");
+    checkCuda(hipEventCreateWithFlags(&m_impl->event_cn_ready, hipEventDisableTiming), "hipEventCreate cn_ready");
+    checkCuda(hipEventCreateWithFlags(&m_impl->event_eeq_order, hipEventDisableTiming), "hipEventCreate eeq_order");
+    checkCuda(hipHostMalloc(reinterpret_cast<void**>(&m_impl->h_charges_stage), std::max(1, natoms) * sizeof(double)),
+              "pinned alloc h_charges_stage");
     checkCuda(hipEventCreateWithFlags(&m_impl->event_pairwise, hipEventDisableTiming), "hipEventCreate pairwise");
     checkCuda(hipEventCreateWithFlags(&m_impl->event_bonded, hipEventDisableTiming), "hipEventCreate bonded");
     checkCuda(hipEventCreateWithFlags(&m_impl->event_threebody, hipEventDisableTiming), "hipEventCreate threebody");
@@ -5626,6 +5864,20 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
     m_impl->d_dc6dcn_block_max.alloc(32);
     m_impl->d_dc6dcn_skip.alloc(1);
     hipHostAlloc(&m_impl->h_dc6dcn_skip, sizeof(int), hipHostMallocDefault);
+    if (m_impl->h_dc6dcn_skip) *m_impl->h_dc6dcn_skip = 0;
+    {   // Claude Generated (Oct 2026): lean per-step bookkeeping, see FFWorkspaceHipImpl::lean_step
+        const char* env = std::getenv("CURCUMA_ROCM_LEAN_STEP");
+        m_impl->lean_step = !(env && std::string(env) == "0");
+        m_impl->d_disp_flags2.alloc(2);
+        if (!m_impl->h_disp_flags)
+            checkCuda(hipHostMalloc(reinterpret_cast<void**>(&m_impl->h_disp_flags), 2 * sizeof(int)),
+                      "pinned alloc h_disp_flags");
+        m_impl->h_disp_flags[0] = m_impl->h_disp_flags[1] = 0;
+        const char* env_ss = std::getenv("CURCUMA_ROCM_SINGLE_STREAM");
+        if (env_ss && *env_ss) m_impl->single_stream = (*env_ss != '0');
+        else                   m_impl->single_stream = m_impl->lean_step && natoms < kRocmSingleStreamMaxAtoms;
+        m_impl->hb_slots.arena.enabled = m_impl->single_stream;   // staged HB list uploads (HipUploadArena)
+    }
     // Upload atom types once (static during simulation)
     std::vector<int> h_atom_types = atom_types;  // copy
     m_impl->d_atom_types.upload(h_atom_types, stream);
@@ -5742,6 +5994,11 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
 
 FFWorkspaceHip::~FFWorkspaceHip()
 {
+    if (m_impl && g_rocm_small_eeq_stream == m_impl->stream) {
+        g_rocm_small_eeq_stream = nullptr;
+        g_rocm_small_eeq_aux = nullptr;
+        g_rocm_small_eeq_event = nullptr;
+    }
     if (m_impl) {
         // Synchronize all streams before destroying
         if (m_impl->stream)          hipStreamSynchronize(m_impl->stream);
@@ -5760,6 +6017,9 @@ FFWorkspaceHip::~FFWorkspaceHip()
         if (m_impl->stream_pairwise) hipStreamDestroy(m_impl->stream_pairwise);
         if (m_impl->stream_bonded)   hipStreamDestroy(m_impl->stream_bonded);
         if (m_impl->stream_threebody)hipStreamDestroy(m_impl->stream_threebody);
+        if (m_impl->event_cn_ready)  (void)hipEventDestroy(m_impl->event_cn_ready);
+        if (m_impl->event_eeq_order) (void)hipEventDestroy(m_impl->event_eeq_order);
+        if (m_impl->h_charges_stage) (void)hipHostFree(m_impl->h_charges_stage);
 
         // Phase 8: destroy phase-1 graph objects
         if (m_impl->m_graph_exec_phase1) hipGraphExecDestroy(m_impl->m_graph_exec_phase1);
@@ -5788,6 +6048,7 @@ FFWorkspaceHip::~FFWorkspaceHip()
     if (m_h_dlogdcn)    hipHostFree(m_h_dlogdcn);
     if (m_h_energies)   hipHostFree(m_h_energies);
     if (m_impl && m_impl->h_dc6dcn_skip) hipHostFree(m_impl->h_dc6dcn_skip);
+    if (m_impl && m_impl->h_disp_flags) (void)hipHostFree(m_impl->h_disp_flags);
 }
 
 // ============================================================================
@@ -5903,6 +6164,16 @@ void FFWorkspaceHip::updateHBAlphaPairs(const std::vector<BondHBEntry>& bond_hb_
             hb_rcov.push_back(rcovij);
         }
     }
+    // Claude Generated (Oct 2026): unchanged pair list -> device arrays unchanged (single_stream mode only).
+    if (m_impl->single_stream) {
+        if (m_impl->prev_alpha_valid && hb_h_idx == m_impl->prev_alpha_h && hb_b_idx == m_impl->prev_alpha_b
+            && hb_rcov == m_impl->prev_alpha_rcov)
+            return;
+        m_impl->prev_alpha_h = hb_h_idx;
+        m_impl->prev_alpha_b = hb_b_idx;
+        m_impl->prev_alpha_rcov = hb_rcov;
+        m_impl->prev_alpha_valid = true;
+    }
     m_impl->hb_alpha.upload(hb_h_idx, hb_b_idx, hb_rcov, m_impl->stream);
 }
 
@@ -5916,6 +6187,13 @@ void FFWorkspaceHip::updateBondHBMetadata(const std::vector<int>& nr_hb,
     if (nb == 0) return;
     if (static_cast<int>(nr_hb.size()) != nb || static_cast<int>(hb_H_atom.size()) != nb)
         return;
+    // Claude Generated (Oct 2026): unchanged metadata -> device arrays unchanged (single_stream mode only).
+    if (m_impl->single_stream) {
+        if (m_impl->prev_bond_hb_valid && nr_hb == m_impl->prev_nr_hb && hb_H_atom == m_impl->prev_hb_H) return;
+        m_impl->prev_nr_hb = nr_hb;
+        m_impl->prev_hb_H = hb_H_atom;
+        m_impl->prev_bond_hb_valid = true;
+    }
     m_impl->bonds.nr_hb.upload(nr_hb.data(), nb, m_impl->stream);
     m_impl->bonds.hb_H_atom.upload(hb_H_atom.data(), nb, m_impl->stream);
 }
@@ -5986,9 +6264,48 @@ void FFWorkspaceHip::setCoulombSelfEnergyParams(const Vector& chi_base, const Ve
     }
 }
 
+/// Claude Generated (Oct 2026): true when two H-bond lists agree in every field fillHBondSoA() uploads
+/// (and hbCasePermutation() reads), so the device arrays built from them are identical.
+static bool sameHBondInput(const std::vector<GFNFFHydrogenBond>& a, const std::vector<GFNFFHydrogenBond>& b)
+{
+    if (a.size() != b.size()) return false;
+    for (size_t m = 0; m < a.size(); ++m) {
+        const GFNFFHydrogenBond& x = a[m];
+        const GFNFFHydrogenBond& y = b[m];
+        if (x.i != y.i || x.j != y.j || x.k != y.k || x.case_type != y.case_type
+            || x.acceptor_parent_index != y.acceptor_parent_index
+            || x.q_H != y.q_H || x.q_A != y.q_A || x.q_B != y.q_B
+            || x.basicity_A != y.basicity_A || x.basicity_B != y.basicity_B
+            || x.acidity_A != y.acidity_A || x.acidity_B != y.acidity_B || x.r_cut != y.r_cut
+            || x.neighbors_A != y.neighbors_A || x.neighbors_B != y.neighbors_B || x.neighbors_C != y.neighbors_C)
+            return false;
+    }
+    return true;
+}
+
+/// Claude Generated (Oct 2026): the same for halogen bonds (fields of XBondSoA::upload).
+static bool sameXBondInput(const std::vector<GFNFFHalogenBond>& a, const std::vector<GFNFFHalogenBond>& b)
+{
+    if (a.size() != b.size()) return false;
+    for (size_t m = 0; m < a.size(); ++m) {
+        const GFNFFHalogenBond& x = a[m];
+        const GFNFFHalogenBond& y = b[m];
+        if (x.i != y.i || x.j != y.j || x.k != y.k || x.basicity_B != y.basicity_B || x.acidity_X != y.acidity_X
+            || x.q_X != y.q_X || x.q_B != y.q_B || x.r_cut != y.r_cut)
+            return false;
+    }
+    return true;
+}
+
 void FFWorkspaceHip::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
                                     const std::vector<int>& atom_types)
 {
+    // Claude Generated (Oct 2026): unchanged list -> device arrays unchanged (single_stream mode only).
+    if (m_impl->single_stream) {
+        if (m_impl->prev_hb_valid && sameHBondInput(hbonds, m_impl->prev_hb_input)) return;
+        m_impl->prev_hb_input = hbonds;
+        m_impl->prev_hb_valid = true;
+    }
     // Re-upload HBond SoA after dynamic re-detection.
     // Claude Generated (March 2026): Needed because updateHBXBIfNeeded() may find
     // additional HBonds on re-detection that weren't in the initial parameter set.
@@ -6013,9 +6330,12 @@ void FFWorkspaceHip::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
 void FFWorkspaceHip::updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,
                                     const std::vector<int>& atom_types)
 {
+    // Claude Generated (Oct 2026): unchanged list -> device arrays unchanged (single_stream mode only).
+    if (m_impl->single_stream && m_impl->prev_xb_valid && sameXBondInput(xbonds, m_last_xbonds)) return;
     m_impl->xbonds.upload(xbonds, atom_types, m_impl->stream);
     // Store for CPU vs GPU comparison debugging
     m_last_xbonds = xbonds;
+    m_impl->prev_xb_valid = true;
 }
 
 void FFWorkspaceHip::updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
@@ -6094,11 +6414,43 @@ void FFWorkspaceHip::setDlogDCN(const Vector& dlogdcn)
 // GPU CN pair list generation (Apr 2026)
 // Replaces CPU generateCNPairList() O(N^2) loop with two-pass GPU kernels.
 // ============================================================================
+/// Claude Generated (Oct 2026): host copy of the geometry last uploaded by setGeometry() (the values the
+/// device coordinates hold), for the host displacement tests of the single-stream mode.
+static bool copyHostGeometryMirror(bool geom_ok, int N, const double* hx, const double* hy, const double* hz,
+                                   std::vector<double>& dst)
+{
+    if (!geom_ok || !hx || !hy || !hz) return false;
+    dst.resize(3 * static_cast<size_t>(N));
+    std::memcpy(dst.data(), hx, N * sizeof(double));
+    std::memcpy(dst.data() + N, hy, N * sizeof(double));
+    std::memcpy(dst.data() + 2 * N, hz, N * sizeof(double));
+    return true;
+}
+
+/// Claude Generated (Oct 2026): true when some atom of (hx, hy, hz) is farther than sqrt(thr_sq) from the
+/// reference ref (x, y, z blocks of N); the per-atom test of k_check_displacement.
+static bool hostDisplacementExceeded(int N, const double* hx, const double* hy, const double* hz,
+                                     const std::vector<double>& ref, double thr_sq)
+{
+    const double* rx = ref.data();
+    const double* ry = rx + N;
+    const double* rz = ry + N;
+    for (int i = 0; i < N; ++i) {
+        const double dx = hx[i] - rx[i];
+        const double dy = hy[i] - ry[i];
+        const double dz = hz[i] - rz[i];
+        if (dx*dx + dy*dy + dz*dz > thr_sq) return true;
+    }
+    return false;
+}
+
 void FFWorkspaceHip::generateCNPairListOnGPU()
 {
     auto& impl = *m_impl;
     const int N = m_natoms;
     if (N <= 0) return;
+
+    impl.cn_stale_cached = -1;   // Oct 2026: the pair-list reference changes below
 
     // Ensure counter buffer is allocated
     if (!impl.d_cn_pair_counter.ptr) impl.d_cn_pair_counter.alloc(1);
@@ -6158,6 +6510,7 @@ void FFWorkspaceHip::generateCNPairListOnGPU()
     // K1 (Oct 2026, Claude Generated): remember the geometry this list was built from, so
     // cnPairListStale() can measure the largest atom displacement since this build.
     if (impl.cn_ref_coords.empty()) impl.cn_ref_coords.alloc(N);
+    impl.h_cnref_ok = copyHostGeometryMirror(impl.h_geom_ok, N, m_h_x, m_h_y, m_h_z, impl.h_cnref_xyz);
     checkCuda(hipMemcpyAsync(impl.cn_ref_coords.d_rx.ptr, impl.coords.d_x.ptr, N * sizeof(double),
                              hipMemcpyDeviceToDevice, impl.stream), "CN pair ref: D2D x");
     checkCuda(hipMemcpyAsync(impl.cn_ref_coords.d_ry.ptr, impl.coords.d_y.ptr, N * sizeof(double),
@@ -6182,6 +6535,28 @@ bool FFWorkspaceHip::cnPairListStale(double max_disp_bohr)
     if (!m_impl) return true;
     auto& impl = *m_impl;
     if (impl.cn_ref_coords.empty() || impl.coords.empty()) return true;
+    // Claude Generated (Oct 2026): lean path - the flag was computed by checkDisplacement() for this
+    // geometry and threshold; otherwise compute it here (one launch, pinned read-back).
+    if (impl.lean_step && impl.h_disp_flags) {
+        if (impl.cn_stale_cached >= 0 && impl.cn_stale_thr == max_disp_bohr) {
+            const int r = impl.cn_stale_cached;
+            impl.cn_stale_cached = -1;
+            return r != 0;
+        }
+        impl.cn_stale_thr = max_disp_bohr;
+        if (impl.single_stream && impl.h_cnref_ok && impl.h_geom_ok)   // host test (see checkDisplacement)
+            return hostDisplacementExceeded(m_natoms, m_h_x, m_h_y, m_h_z, impl.h_cnref_xyz,
+                                            max_disp_bohr * max_disp_bohr);
+        k_check_displacement_pair<<<1, 1024, 0, impl.stream>>>(
+            m_natoms, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+            nullptr, nullptr, nullptr, 0.0,
+            impl.cn_ref_coords.d_rx.ptr, impl.cn_ref_coords.d_ry.ptr, impl.cn_ref_coords.d_rz.ptr,
+            max_disp_bohr * max_disp_bohr, impl.d_disp_flags2.ptr);
+        checkCuda(hipMemcpyAsync(impl.h_disp_flags, impl.d_disp_flags2.ptr, 2 * sizeof(int),
+                                 hipMemcpyDeviceToHost, impl.stream), "cnPairListStale: download flags");
+        checkCuda(hipStreamSynchronize(impl.stream), "cnPairListStale: sync");
+        return impl.h_disp_flags[1] != 0;
+    }
     if (!impl.d_cn_disp_flag.ptr) impl.d_cn_disp_flag.alloc(1);
 
     int zero = 0;
@@ -6547,6 +6922,10 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     auto& impl = *m_impl;
     const int N = m_natoms;
     hipStream_t stream = impl.stream;
+    impl.disp_launched_early = false;   // Oct 2026: set again by launchDispersionGradientEarly() this step
+    g_rocm_small_eeq_stream = impl.single_stream ? stream : nullptr;   // Oct 2026, see its declaration
+    g_rocm_small_eeq_aux = impl.single_stream ? impl.stream_threebody : nullptr;
+    g_rocm_small_eeq_event = impl.single_stream ? impl.event_eeq_order : nullptr;
 
     // =========================================================================
     // Phase 8: CUDA Graph fast path (Claude Generated March 2026)
@@ -6580,11 +6959,18 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     // =========================================================================
     // 1. Zero GPU accumulators (total + per-term)
     // =========================================================================
+    if (impl.lean_step) {   // Claude Generated (Oct 2026): one kernel instead of four blits
+        const int nz = std::max(3 * N, static_cast<int>(FFWorkspaceHipImpl::N_ENERGY_SLOTS));
+        k_zero_step_accumulators<<<(nz + 255) / 256, 256, 0, stream>>>(
+            impl.d_energy.ptr, impl.d_grad.ptr, 3 * N, impl.d_dEdcn.ptr, N,
+            impl.d_energies.ptr, FFWorkspaceHipImpl::N_ENERGY_SLOTS);
+    } else {
     hipMemsetAsync(impl.d_energy.ptr, 0, sizeof(double),         stream);
     hipMemsetAsync(impl.d_grad.ptr,   0, 3*N*sizeof(double),     stream);
     hipMemsetAsync(impl.d_dEdcn.ptr,  0, N*sizeof(double),       stream);
     hipMemsetAsync(impl.d_energies.ptr, 0,
                     FFWorkspaceHipImpl::N_ENERGY_SLOTS * sizeof(double), stream);
+    }
 
     // =========================================================================
     // 2. Upload CN (NOT EEQ charges — those come later)
@@ -6624,12 +7010,14 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     // Per-kernel diagnostic mode: force all kernels onto main stream so
     // snapshots reflect exactly one kernel's contribution at a time.
     // Normal mode: 3 parallel streams for maximum GPU occupancy.
-    hipStream_t sA = force_single_stream ? stream : impl.stream_pairwise;
-    hipStream_t sB = force_single_stream ? stream : impl.stream_bonded;
-    hipStream_t sC = force_single_stream ? stream : impl.stream_threebody;
+    // Oct 2026 (Claude Generated): impl.single_stream also keeps everything on the main stream.
+    const bool one_stream = force_single_stream || impl.single_stream;
+    hipStream_t sA = one_stream ? stream : impl.stream_pairwise;
+    hipStream_t sB = one_stream ? stream : impl.stream_bonded;
+    hipStream_t sC = one_stream ? stream : impl.stream_threebody;
 
     // Ensure all uploads on main stream are visible to worker streams
-    if (!force_single_stream) {
+    if (!one_stream) {
         hipEventRecord(impl.event_upload, stream);
         hipStreamWaitEvent(sA, impl.event_upload, 0);
         hipStreamWaitEvent(sB, impl.event_upload, 0);
@@ -7048,6 +7436,48 @@ void FFWorkspaceHip::refreshHBChargesFromDevice()
     hipStreamSynchronize(impl.stream);
 }
 
+/// Claude Generated (Oct 2026): the gradient-mode dispersion gather of Phase 2 (former inline block of
+/// launchChargeDependentAndFinish), also launched early by launchDispersionGradientEarly().
+static void launchDispersionGatherHip(FFWorkspaceHipImpl& impl, hipStream_t sP)
+{
+    {
+        // ROCm: per-atom gather (grad + dEdcn accumulated locally) instead of the pair kernel —
+        // the deferred gradient-mode k_dispersion's ~8M FP64 atomicAdd was the dominant MD cost.
+        // Fused path (Oct 2026, default): C6 and dC6/dCN per edge from d_disp_uv, no per-pair C6/dc6dcn
+        // arrays. Otherwise (CURCUMA_ROCM_DISP_FUSED=0, no per-step C6 refresh, asymmetric C6 table,
+        // stale d_disp_uv) the per-pair arrays are read via csr_pairidx. Both equal k_dispersion up to FP rounding.
+        const int disp_block = 64;   // one workgroup per atom (power of two for the tree reduction)
+        int grid = impl.disp.csr_N;
+        if (impl.disp_uv_valid && !impl.disp_pair_c6_current) {
+            // Claude Generated (Oct 2026): C6 and dC6/dCN formed per edge from d_disp_uv (fused path).
+            k_dispersion_gather_uv<<<grid, disp_block, 0, sP>>>(
+                impl.disp.csr_N, impl.disp_ntypes,
+                impl.disp.csr_off.ptr, impl.disp.csr_partner.ptr, impl.disp.csr_pairidx.ptr,
+                impl.d_atom_ctype.ptr, impl.d_disp_uv.ptr, impl.d_gw.ptr,
+                impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr, impl.disp.zetac6.ptr, impl.disp.r_cut.ptr,
+                impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+                impl.d_dEdcn.ptr, impl.d_grad.ptr, &impl.d_energies.ptr[impl.E_DISP]);
+        } else {
+        k_dispersion_gather<<<grid, disp_block, 0, sP>>>(
+            impl.disp.csr_N,
+            impl.disp.csr_off.ptr, impl.disp.csr_partner.ptr,
+            impl.disp.csr_pairidx.ptr, impl.disp.csr_is_i.ptr,
+            impl.disp.C6.ptr,     impl.disp.r4r2ij.ptr,
+            impl.disp.r0_sq.ptr,  impl.disp.zetac6.ptr,
+            impl.disp.r_cut.ptr,
+            impl.disp.dc6dcn_ij.ptr,
+            impl.disp.dc6dcn_ji.ptr,
+            impl.coords.d_x.ptr,
+            impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr,
+            impl.d_dEdcn.ptr,
+            impl.d_grad.ptr,
+            &impl.d_energies.ptr[impl.E_DISP]);
+        }
+        checkCuda(hipGetLastError(), "k_dispersion_gather launch");
+    }
+}
+
 double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
 {
     auto& impl = *m_impl;
@@ -7110,7 +7540,14 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
     if (m_device_charges_ready) {
         m_device_charges_ready = false;  // consumed; next step will upload normally
     } else if (m_eeq_charges.size() == N) {
-        impl.d_charges.upload(m_eeq_charges.data(), N, stream);
+        if (impl.lean_step && impl.h_charges_stage && impl.d_charges.n >= N) {
+            // Claude Generated (Oct 2026): pinned stage + async copy instead of a blocking pageable upload.
+            std::memcpy(impl.h_charges_stage, m_eeq_charges.data(), N * sizeof(double));
+            checkCuda(hipMemcpyAsync(impl.d_charges.ptr, impl.h_charges_stage, N * sizeof(double), hipMemcpyHostToDevice,
+                                     stream), "staged EEQ charge upload");
+        } else {
+            impl.d_charges.upload(m_eeq_charges.data(), N, stream);
+        }
     }
 
     // =========================================================================
@@ -7121,59 +7558,30 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
     // Record event on main stream (after charge upload) so pairwise stream can wait.
     // WP4: dedicated phase-2 event (event_p2_upload) to keep capture isolated from
     // phase-1's event_upload, which is recorded inside the phase-1 graph.
-    hipEventRecord(impl.event_p2_upload, stream);
-    hipStreamWaitEvent(impl.stream_pairwise, impl.event_p2_upload, 0);
+    // Oct 2026 (Claude Generated): with impl.single_stream the pairwise kernels run on the main stream
+    // and the cross-stream events of this phase are left out (stream order is the dependency).
+    const bool one_stream = impl.single_stream;
+    hipStream_t sP = one_stream ? stream : impl.stream_pairwise;
+    if (!one_stream) {
+        hipEventRecord(impl.event_p2_upload, stream);
+        hipStreamWaitEvent(impl.stream_pairwise, impl.event_p2_upload, 0);
+    }
 
     // k_dispersion (gradient mode): deferred from Phase 1.
     // computeGaussianWeightsOnGPU() was called after Phase 1 (using d_cn, current step)
     // and runs on the main stream. The event_upload fence above ensures stream_pairwise
     // sees the completed dc6dcn values before k_dispersion launches.
-    if (m_dispersion_enabled && gradient) {
-        // ROCm: per-atom gather (grad + dEdcn accumulated locally) instead of the pair kernel —
-        // the deferred gradient-mode k_dispersion's ~8M FP64 atomicAdd was the dominant MD cost.
-        // Fused path (Oct 2026, default): C6 and dC6/dCN per edge from d_disp_uv, no per-pair C6/dc6dcn
-        // arrays. Otherwise (CURCUMA_ROCM_DISP_FUSED=0, no per-step C6 refresh, asymmetric C6 table,
-        // stale d_disp_uv) the per-pair arrays are read via csr_pairidx. Both equal k_dispersion up to FP rounding.
-        const int disp_block = 64;   // one workgroup per atom (power of two for the tree reduction)
-        int grid = impl.disp.csr_N;
-        if (impl.disp_uv_valid && !impl.disp_pair_c6_current) {
-            // Claude Generated (Oct 2026): C6 and dC6/dCN formed per edge from d_disp_uv (fused path).
-            k_dispersion_gather_uv<<<grid, disp_block, 0, impl.stream_pairwise>>>(
-                impl.disp.csr_N, impl.disp_ntypes,
-                impl.disp.csr_off.ptr, impl.disp.csr_partner.ptr, impl.disp.csr_pairidx.ptr,
-                impl.d_atom_ctype.ptr, impl.d_disp_uv.ptr, impl.d_gw.ptr,
-                impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr, impl.disp.zetac6.ptr, impl.disp.r_cut.ptr,
-                impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
-                impl.d_dEdcn.ptr, impl.d_grad.ptr, &impl.d_energies.ptr[impl.E_DISP]);
-        } else {
-        k_dispersion_gather<<<grid, disp_block, 0, impl.stream_pairwise>>>(
-            impl.disp.csr_N,
-            impl.disp.csr_off.ptr, impl.disp.csr_partner.ptr,
-            impl.disp.csr_pairidx.ptr, impl.disp.csr_is_i.ptr,
-            impl.disp.C6.ptr,     impl.disp.r4r2ij.ptr,
-            impl.disp.r0_sq.ptr,  impl.disp.zetac6.ptr,
-            impl.disp.r_cut.ptr,
-            impl.disp.dc6dcn_ij.ptr,
-            impl.disp.dc6dcn_ji.ptr,
-            impl.coords.d_x.ptr,
-            impl.coords.d_y.ptr,
-            impl.coords.d_z.ptr,
-            impl.d_dEdcn.ptr,
-            impl.d_grad.ptr,
-            &impl.d_energies.ptr[impl.E_DISP]);
-        }
-        checkCuda(hipGetLastError(), "k_dispersion_gather launch");
-    }
+    if (m_dispersion_enabled && gradient && !impl.disp_launched_early)
+        launchDispersionGatherHip(impl, sP);
+    impl.disp_launched_early = false;
 
     // k_coulomb (needs EEQ charges)
     if (m_coulomb_enabled && impl.coulomb_implicit) {
-        const int nb = (m_natoms + GFNFF_COUL_TILE_HIP - 1) / GFNFF_COUL_TILE_HIP;
-        k_coulomb_tiles_hip<<<dim3(nb, nb), GFNFF_COUL_TILE_HIP, 0, impl.stream_pairwise>>>(
-            m_natoms, impl.d_coul_alp.ptr,
+        launchCoulombTilesHip(m_natoms, impl.d_coul_alp.ptr,
             impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
             impl.d_charges.ptr, impl.coulomb_rcut,
             impl.d_grad.ptr,
-            &impl.d_energies.ptr[impl.E_COUL]);
+            &impl.d_energies.ptr[impl.E_COUL], sP);
         checkCuda(hipGetLastError(), "k_coulomb_tiles_hip (implicit) launch");
     } else if (m_coulomb_enabled && impl.coulomb.n > 0) {
         // ROCm: the pair k_coulomb's ~6M FP64 atomicAdd dominated the MD step. Preferred path is
@@ -7190,17 +7598,15 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
         const long all_pairs = static_cast<long>(impl.coulomb.csr_N) * (impl.coulomb.csr_N - 1) / 2;
         const bool coulomb_all_pairs = (static_cast<long>(impl.coulomb.n) == all_pairs);
         if (impl.eeq_topo.valid && impl.eeq_topo.d_alpha_corrected.ptr && coulomb_all_pairs) {
-            const int nb = (impl.coulomb.csr_N + GFNFF_COUL_TILE_HIP - 1) / GFNFF_COUL_TILE_HIP;
-            k_coulomb_tiles_hip<<<dim3(nb, nb), GFNFF_COUL_TILE_HIP, 0, impl.stream_pairwise>>>(
-                impl.coulomb.csr_N,
+            launchCoulombTilesHip(impl.coulomb.csr_N,
                 impl.eeq_topo.d_alpha_corrected.ptr,
                 impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
                 impl.d_charges.ptr, impl.coulomb.r_cut_scalar,
                 impl.d_grad.ptr,
-                &impl.d_energies.ptr[impl.E_COUL]);
+                &impl.d_energies.ptr[impl.E_COUL], sP);
             checkCuda(hipGetLastError(), "k_coulomb_tiles_hip launch");
         } else {
-            k_coulomb_gather<<<impl.coulomb.csr_N, coul_block, 0, impl.stream_pairwise>>>(
+            k_coulomb_gather<<<impl.coulomb.csr_N, coul_block, 0, sP>>>(
                 impl.coulomb.csr_N,
                 impl.coulomb.csr_off.ptr, impl.coulomb.csr_partner.ptr,
                 impl.coulomb.csr_gamma.ptr, impl.coulomb.csr_rcut.ptr,
@@ -7215,7 +7621,7 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
     }
     // Re-record pairwise event to include k_coulomb completion.
     // WP4: event_p2_pairwise — phase-2-dedicated, never aliased with phase-1 graph.
-    hipEventRecord(impl.event_p2_pairwise, impl.stream_pairwise);
+    if (!one_stream) hipEventRecord(impl.event_p2_pairwise, impl.stream_pairwise);
 
     // =========================================================================
     // 3. Postprocess on main stream
@@ -7230,9 +7636,11 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
         // Wait for pairwise+bonded streams (dEdcn dependency for qtmp subtraction).
         // event_p2_pairwise: Phase-2-dedicated — always wait (records k_coulomb completion).
         // event_bonded: Phase-1-internal — skip if Phase-1 ran as graph (already sequenced).
-        hipStreamWaitEvent(stream, impl.event_p2_pairwise, 0);
-        if (!p1_was_graph)
-            hipStreamWaitEvent(stream, impl.event_bonded, 0);
+        if (!one_stream) {
+            hipStreamWaitEvent(stream, impl.event_p2_pairwise, 0);
+            if (!p1_was_graph)
+                hipStreamWaitEvent(stream, impl.event_bonded, 0);
+        }
 
         // d_dEdcn_snapshot must always be populated — dEdcnTotal() is public API
         // used by external code (tests, chain-rule validation) regardless of verbosity.
@@ -7271,10 +7679,12 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
         && !m_frozen_cn) {
         // event_p2_pairwise: Phase-2-dedicated — always wait.
         // event_bonded/threebody: Phase-1-internal — skip if Phase-1 ran as graph.
-        hipStreamWaitEvent(stream, impl.event_p2_pairwise, 0);
-        if (!p1_was_graph) {
-            hipStreamWaitEvent(stream, impl.event_bonded, 0);
-            hipStreamWaitEvent(stream, impl.event_threebody, 0);
+        if (!one_stream) {
+            hipStreamWaitEvent(stream, impl.event_p2_pairwise, 0);
+            if (!p1_was_graph) {
+                hipStreamWaitEvent(stream, impl.event_bonded, 0);
+                hipStreamWaitEvent(stream, impl.event_threebody, 0);
+            }
         }
 
         if (need_snapshots) {
@@ -7306,10 +7716,12 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
     // Final fence before D2H: wait for all Phase-2 stream work.
     // event_p2_pairwise: Phase-2-dedicated (dispersion + Coulomb on stream_pairwise).
     // event_bonded/threebody: Phase-1-internal — skip if Phase-1 ran as graph.
-    hipStreamWaitEvent(stream, impl.event_p2_pairwise, 0);
-    if (!p1_was_graph) {
-        hipStreamWaitEvent(stream, impl.event_bonded, 0);
-        hipStreamWaitEvent(stream, impl.event_threebody, 0);
+    if (!one_stream) {
+        hipStreamWaitEvent(stream, impl.event_p2_pairwise, 0);
+        if (!p1_was_graph) {
+            hipStreamWaitEvent(stream, impl.event_bonded, 0);
+            hipStreamWaitEvent(stream, impl.event_threebody, 0);
+        }
     }
 
     checkCuda(hipGetLastError(), "postprocess final check");
@@ -7440,7 +7852,7 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
     // WP5-C (May 2026): Update skip-pending flag from async D2H copy.
     // h_dc6dcn_skip was written by k_check_dc6dcn_skip_final → hipMemcpyAsync on the
     // same stream; now that the stream is synchronized, the host buffer is valid.
-    m_dc6dcn_skip_pending = (impl.h_dc6dcn_skip != nullptr && *impl.h_dc6dcn_skip != 0);
+    m_dc6dcn_skip_pending = !impl.lean_step && (impl.h_dc6dcn_skip != nullptr && *impl.h_dc6dcn_skip != 0);
 
     // Extract per-term energies from pinned buffer
     const double e_disp      = m_h_energies[impl.E_DISP];
@@ -7629,6 +8041,7 @@ void FFWorkspaceHip::setGeometry(const GeoGradMatrix& geom)
     auto& impl = *m_impl;
     const int N = m_natoms;
     if (geom.rows() != N) return;
+    impl.cn_stale_cached = -1;   // Claude Generated (Oct 2026): flag computed ahead belongs to the old geometry
 
     // Fill pinned staging buffers in-place, then async DMA to GPU (SoA layout).
     // Claude Generated (Phase 10, March 2026): SoA pinned buffers for coalesced warp reads.
@@ -7637,6 +8050,7 @@ void FFWorkspaceHip::setGeometry(const GeoGradMatrix& geom)
         m_h_y[i] = geom(i, 1);
         m_h_z[i] = geom(i, 2);
     }
+    impl.h_geom_ok = true;
     if (impl.coords.empty()) impl.coords.alloc(N);
     hipMemcpyAsync(impl.coords.d_x.ptr, m_h_x, N*sizeof(double),
                     hipMemcpyHostToDevice, impl.stream);
@@ -7721,7 +8135,9 @@ void FFWorkspaceHip::computeCN(const std::vector<int>& atom_types)
     // Stage 1: per-block max reduction → d_block_max[].
     // Stage 2: single block reduces d_block_max[] → d_dc6dcn_skip[0].
     // Asynchronous D2H copy of skip flag (read by caller in next step).
-    {
+    // Oct 2026 (Claude Generated): skipped on the lean path - nothing reads the flag
+    // (FFWorkspaceGPU::shouldSkipDc6dcn() has no caller); CURCUMA_ROCM_LEAN_STEP=0 restores it.
+    if (!impl.lean_step) {
         // BOUNDS_LIGHT kernels — cap block at 256.
         LaunchConfig cfg_skip = getLaunchConfigLight(N, m_block_size);
         // Zero d_dc6dcn_skip before Stage 2 writes the final flag.
@@ -7746,16 +8162,24 @@ void FFWorkspaceHip::computeCN(const std::vector<int>& atom_types)
     k_dlogdcn<<<cfg_dlog.gridSize, cfg_dlog.blockSize, 0, impl.stream>>>(
         N, impl.d_cn_raw.ptr, impl.d_dlogdcn.ptr, std::exp(cnmax)
     );
+    if (impl.single_stream && impl.event_cn_ready) {   // Claude Generated (Oct 2026), see finalizeCNForCPU()
+        checkCuda(hipEventRecord(impl.event_cn_ready, impl.stream), "record cn_ready");
+        impl.cn_event_recorded = true;
+    }
 
     // Download CN_final, CN_raw, and dlogdcn to pre-allocated pinned buffers
     // Claude Generated (March 2026): Avoids heap corruption from CUDA allocator
     // CN_raw needed for correct dlogdcn computation (chain-rule gradient)
-    hipMemcpyAsync(m_h_cn_final, impl.d_cn_final.ptr, N * sizeof(double),
-                    hipMemcpyDeviceToHost, impl.stream);
-    hipMemcpyAsync(m_h_cn_raw, impl.d_cn_raw.ptr, N * sizeof(double),
-                    hipMemcpyDeviceToHost, impl.stream);
-    hipMemcpyAsync(m_h_dlogdcn, impl.d_dlogdcn.ptr, N * sizeof(double),
-                    hipMemcpyDeviceToHost, impl.stream);
+    // Oct 2026 (Claude Generated): on the lean path finalizeCNForCPU() enqueues these copies, the only
+    // place that reads the host buffers (the normal device-EEQ step never does).
+    if (!impl.lean_step) {
+        hipMemcpyAsync(m_h_cn_final, impl.d_cn_final.ptr, N * sizeof(double),
+                        hipMemcpyDeviceToHost, impl.stream);
+        hipMemcpyAsync(m_h_cn_raw, impl.d_cn_raw.ptr, N * sizeof(double),
+                        hipMemcpyDeviceToHost, impl.stream);
+        hipMemcpyAsync(m_h_dlogdcn, impl.d_dlogdcn.ptr, N * sizeof(double),
+                        hipMemcpyDeviceToHost, impl.stream);
+    }
     // G-P1 (Apr 2026): Sync deferred — caller calls finalizeCNForCPU() after Phase 4 launch.
     // GPU finishes CN kernel in ~0.15ms; by the time finalizeCNForCPU() is reached (~0.3ms
     // later after Phase 4 launch overhead), the stream is already complete → no sleep penalty.
@@ -7767,6 +8191,27 @@ void FFWorkspaceHip::computeCN(const std::vector<int>& atom_types)
 void FFWorkspaceHip::finalizeCNForCPU(Vector& out_cn)
 {
     const int N = m_natoms;
+    auto& impl = *m_impl;
+    if (impl.lean_step && impl.d_cn_final.n >= N && impl.d_cn_raw.n >= N && impl.d_dlogdcn.n >= N) {
+        // Claude Generated (Oct 2026): the copies computeCN() enqueues on the former path. With the event of
+        // computeCN() (single-stream mode) they run on the otherwise idle stream_threebody right behind
+        // k_dlogdcn, so the host (EEQ on the CPU) does not wait for the Phase-1 kernels queued after it;
+        // d_cn_final, d_cn_raw and d_dlogdcn are not written again before the next computeCN().
+        const bool early = impl.cn_event_recorded && impl.single_stream && impl.stream_threebody;
+        hipStream_t s = early ? impl.stream_threebody : impl.stream;
+        if (early) checkCuda(hipStreamWaitEvent(s, impl.event_cn_ready, 0), "finalizeCNForCPU: wait cn_ready");
+        checkCuda(hipMemcpyAsync(m_h_cn_final, impl.d_cn_final.ptr, N * sizeof(double), hipMemcpyDeviceToHost, s),
+                  "finalizeCNForCPU: cn_final");
+        checkCuda(hipMemcpyAsync(m_h_cn_raw, impl.d_cn_raw.ptr, N * sizeof(double), hipMemcpyDeviceToHost, s),
+                  "finalizeCNForCPU: cn_raw");
+        checkCuda(hipMemcpyAsync(m_h_dlogdcn, impl.d_dlogdcn.ptr, N * sizeof(double), hipMemcpyDeviceToHost, s),
+                  "finalizeCNForCPU: dlogdcn");
+        checkCuda(hipStreamSynchronize(s), "finalizeCNForCPU: sync");
+        if (out_cn.size() != N) out_cn.resize(N);
+        std::memcpy(out_cn.data(), m_h_cn_final, N * sizeof(double));
+        m_cn_computed = true;
+        return;
+    }
     hipStreamSynchronize(m_impl->stream);   // returns near-instantly if GPU already done
     if (out_cn.size() != N) out_cn.resize(N);
     std::memcpy(out_cn.data(), m_h_cn_final, N * sizeof(double));
@@ -7832,6 +8277,24 @@ void FFWorkspaceHip::synchronizeMainStream()
 {
     if (m_impl && m_impl->stream)
         checkCuda(hipStreamSynchronize(m_impl->stream), "synchronizeMainStream");
+}
+
+/// K3 is not used on ROCm (Claude Generated, Oct 2026): running the device EEQ on its own stream behind an
+/// input event was measured slower (hardware-queue switches); no event, the solve keeps its null-stream order.
+void FFWorkspaceHip::recordEEQInputsReady() {}
+void* FFWorkspaceHip::eeqInputsReadyEvent() const { return nullptr; }
+
+/// K2 on ROCm (Claude Generated, Oct 2026), single-stream mode only: the gradient-mode dispersion gather
+/// reads geometry, dc6dcn / d_disp_uv and the Phase-1 topology charges, never the EEQ charges, so it is
+/// enqueued right after the Gaussian weights; while the host solves the EEQ (many-fragment route) the GPU
+/// works on it. Same stream, same order relative to the other gradient writers as in Phase 2, so the
+/// result is unchanged. Returns false (Phase 2 launches it) with worker streams or without dispersion.
+bool FFWorkspaceHip::launchDispersionGradientEarly()
+{
+    if (!m_impl || !m_impl->single_stream || !m_dispersion_enabled) return false;
+    launchDispersionGatherHip(*m_impl, m_impl->stream);
+    m_impl->disp_launched_early = true;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -7907,6 +8370,32 @@ bool FFWorkspaceHip::checkDisplacement(double threshold)
     auto& impl = *m_impl;
     if (impl.ref_coords.empty() || impl.coords.empty()) return true;
 
+    // Claude Generated (Oct 2026): lean path - one launch for this test and, when cnPairListStale() has
+    // been used before, its test against the CN pair-list reference; one pinned read-back.
+    if (impl.lean_step && impl.single_stream && impl.h_ref_ok && impl.h_geom_ok) {
+        // Claude Generated (Oct 2026): host test against the host mirrors, no device round trip.
+        const bool want_cn = impl.cn_stale_thr >= 0.0 && !impl.cn_ref_coords.empty() && impl.h_cnref_ok;
+        impl.cn_stale_cached = want_cn
+            ? (hostDisplacementExceeded(m_natoms, m_h_x, m_h_y, m_h_z, impl.h_cnref_xyz,
+                                        impl.cn_stale_thr * impl.cn_stale_thr) ? 1 : 0)
+            : -1;
+        return hostDisplacementExceeded(m_natoms, m_h_x, m_h_y, m_h_z, impl.h_ref_xyz, threshold * threshold);
+    }
+    if (impl.lean_step && impl.h_disp_flags) {
+        const bool want_cn = impl.cn_stale_thr >= 0.0 && !impl.cn_ref_coords.empty();
+        k_check_displacement_pair<<<1, 1024, 0, impl.stream>>>(
+            m_natoms, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+            impl.ref_coords.d_rx.ptr, impl.ref_coords.d_ry.ptr, impl.ref_coords.d_rz.ptr, threshold * threshold,
+            want_cn ? impl.cn_ref_coords.d_rx.ptr : nullptr, want_cn ? impl.cn_ref_coords.d_ry.ptr : nullptr,
+            want_cn ? impl.cn_ref_coords.d_rz.ptr : nullptr, impl.cn_stale_thr * impl.cn_stale_thr,
+            impl.d_disp_flags2.ptr);
+        checkCuda(hipMemcpyAsync(impl.h_disp_flags, impl.d_disp_flags2.ptr, 2 * sizeof(int),
+                                 hipMemcpyDeviceToHost, impl.stream), "checkDisplacement: download flags");
+        checkCuda(hipStreamSynchronize(impl.stream), "checkDisplacement: sync");
+        impl.cn_stale_cached = want_cn ? impl.h_disp_flags[1] : -1;
+        return impl.h_disp_flags[0] != 0;
+    }
+
     // Zero the flag
     int zero = 0;
     checkCuda(hipMemcpyAsync(impl.d_disp_flag.ptr, &zero, sizeof(int),
@@ -7944,6 +8433,7 @@ void FFWorkspaceHip::updateReferenceGeometry()
 {
     if (!m_impl || m_impl->coords.empty()) return;
     auto& impl = *m_impl;
+    impl.h_ref_ok = copyHostGeometryMirror(impl.h_geom_ok, m_natoms, m_h_x, m_h_y, m_h_z, impl.h_ref_xyz);
 
     // Allocate ref_coords on first call
     if (impl.ref_coords.empty()) {

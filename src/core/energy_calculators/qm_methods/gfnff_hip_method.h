@@ -23,6 +23,10 @@
 #include "../ff_methods/rocm/eeq_solver_hip.h"
 #include "gfnff_gpu_method_impl.h"
 
+/// Claude Generated (Oct 2026): defined in ff_methods/rocm/eeq_solver_hip.hiph (same plugin): copies the
+/// charges of the last small-system device EEQ solve of this host thread when device and n match.
+bool curcumaRocmEEQHostCharges(double* host, const double* device, int n);
+
 /**
  * @brief ROCm backend traits for GFNFFGpuMethodImpl.
  *
@@ -60,7 +64,10 @@ struct GFNFFRocmBackend {
     static constexpr bool has_cn_pair_skin = true;
     /// K2/K3 (Oct 2026): dispersion and the device EEQ solve overlap dc6dcn on own streams
     /// (recordEEQInputsReady(), launchDispersionGradientEarly(), EEQ setInputReadyEvent()).
-    static constexpr bool has_stream_overlap = false;
+    /// Claude Generated (Oct 2026): on ROCm only K2, and only in the single-stream mode (below 500 atoms):
+    /// the dispersion gather is enqueued right after the Gaussian weights, so the GPU works on it while the
+    /// host solves the EEQ. K3 is a no-op here (no input event, setStreamPriorityHigh() returns false).
+    static constexpr bool has_stream_overlap = true;
     /// Oct 2026: staged pinned list upload not ported (serial SoA upload as before).
     static constexpr bool has_staged_list_upload = false;
     /// Claude Generated (Oct 2026): HB/XB list refresh without the host-side copies that nothing on this
@@ -79,6 +86,16 @@ struct GFNFFRocmBackend {
     /// Blocking device->host copy of n doubles (GPU-Schur charge download).
     /// Defined in gfnff_hip_method.cpp so <hip/hip_runtime.h> stays out of this header.
     static void downloadDoubles(double* host, const double* device, int n);
+
+    /// Claude Generated (Oct 2026): charge download after a device EEQ solve. The small-system solve
+    /// (rocm/eeq_solver_hip.hiph) already read its charges back with its status; they are copied from
+    /// that pinned host copy, anything else is downloaded. Detected by gfnffBackendEEQChargeDownload in
+    /// gfnff_gpu_method_impl.h; a backend without the member (CUDA) calls downloadDoubles as before.
+    static void downloadEEQCharges(double* host, const double* device, int n)
+    {
+        if (!curcumaRocmEEQHostCharges(host, device, n))
+            downloadDoubles(host, device, n);
+    }
 
     /// Multi-GPU (Claude Generated, Sep 2026): number of visible devices, and make `device`
     /// current on the calling thread (the runtime's current device is per host thread).
