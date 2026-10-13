@@ -336,7 +336,7 @@ public:
      * (N x nfrag) and the dense S^-1 = (C G C^T)^-1 (nfrag x nfrag). While set, the projected
      * PCG applies z = G r - H S^-1 C G r instead of the diagonal Jacobi. CUDA and (Oct 2026)
      * ROCm (rocm/eeq_solver_hip.hiph); the wrapper calls it for Backend::has_localinv_upload.
-     * The device-build members below are CUDA only (no ROCm definition).
+     * The device-build members below are defined for CUDA and (Oct 2026) ROCm; the multi-GPU split is CUDA only.
      * @return false if the upload failed (preconditioner stays off)
      */
     bool setLocalInversePreconditioner(int N, int nfrag,

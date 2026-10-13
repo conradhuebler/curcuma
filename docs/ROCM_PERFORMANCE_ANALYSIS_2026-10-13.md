@@ -143,6 +143,13 @@ Port of the CUDA host-build mode (`EEQSolver::buildLocalInverse` on the CPU, CSR
 MD time per step (3 alternating runs, spread < 1 ms, author's measurement): peo201x2-water1500 (7320 atoms) 101.9 -> 58.7 ms (CPU 146.0); urea400-water1000 (6200 atoms) 104.7 -> 124.1 ms (CPU 179.5), slower than Jacobi. EEQ span per step at 7320 atoms 73.0 -> 22.6 ms (subagent, rocprofv3, 29 steps).
 Cause of the urea result (subagent measurement): each host build takes a median 247 ms (7320 atoms: 37 ms), 15 builds in 100 steps, 204 ms of each in the serial sparse Cholesky check of G; the cause of the difference between the two systems was not examined. With `-eeq_solver.eeq_localinv_rebuild_bohr 2.0` (n = 1) 7 builds and 106.6 ms/step. Open: device build, a cheaper or asynchronous definiteness check, or a ROCm default of `diag`.
 
+### F8 result: local inverse built on the device (branch `feature/rocm-eeq-localinv`, Oct 13, 2026)
+Port of the CUDA device build (kernels `k_li_pack_f_hip`, `k_li_count_hip`, `k_li_blocks_hip`, `k_li_symmetrize_hip`, `k_li_test_perturb_hip`; z = P G r; true-residual check |P(b - A q)| <= 2 tol with Jacobi re-solve; blocks gathered from the lower triangle of the EEQ matrix). Default on ROCm; `CURCUMA_LOCALINV_HOST_BUILD=1` selects the host build. A build takes 3.6 / 3.9 / 11.0 / 7.9 ms at 1410 / 2910 / 6200 / 7320 atoms (host build 11.8 / 15.1 / 247 / 37 ms; medians of 8-15 builds per 100 steps; subagent). Latency bound, not FP64 bound; no block used the global-memory path at the default radii (block median/max 20-57 / 87-91 atoms; with `eeq_localinv_ext_bohr 14` at 7320 atoms 1913 atoms did, build 52 ms).
+Max |dq| against the exact Cholesky solution over 20 steps (device / host / diag): 2.0e-11 / 1.7e-11 / 4.0e-11 (1410), 3.3e-11 / 2.6e-11 / 3.7e-11 (2910), 1.0e-10 / 1.5e-10 / 1.1e-10 (6200), 3.1e-11 / 1.4e-11 / 3.7e-11 (7320); median CG iterations 13, 14, 12, 16. Epot/Ekin/Etot of 100 steps equal at 6 decimals against the host-build binary and the CPU (author's check, 4 systems).
+MD time per step (3 alternating runs, author's measurement): urea400-water1000 124.4 (host build) -> 88.7 ms (CPU 180.1; Jacobi 104.7); peo201x2-water1500 58.7 -> 55.2 ms (CPU 144.9). Subagent: 127.2 -> 92.4 and 66.3 -> 62.8 ms. `ctest -R "gpu|rocm|eeq|gfnff"` 104 of 104; no ctest exercises the ROCm device build; the CUDA build was not compiled after the trait changes.
+
+Cumulative at 7320 atoms: 157 ms (ROCm after the first PPCG port, subagent, n=3) -> 55.2 ms, CPU 144.9 ms, i.e. 2.6x faster than the CPU; before this work ROCm was 1.4x slower than the CPU.
+
 ## 2. GFN2 (native xTB, `-gpu rocm`)
 
 114 atoms (frame 1 of c33h45n9-agal-frames44), `-sp`, `-verbosity 3`, ROCm vs CPU:

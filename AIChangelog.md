@@ -16,6 +16,7 @@ below. If it needs measurements or a derivation, write them into the matching `d
 
 ## Jul - Sep 2026 (and some late June), 108 entries, full text in AIChangelog_2026-late.md
 
+- ROCm localinv built on the device (branch `feature/rocm-eeq-localinv`, Oct 13, 2026): build 247 -> 11 ms (urea400-water1000), MD step 124.4 -> 88.7 ms (6200 atoms, CPU 180.1) and 58.7 -> 55.2 ms (7320, CPU 144.9) - [docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md)
 - ROCm localinv preconditioner, host build (branch `feature/rocm-eeq-localinv`, Oct 13, 2026): CG iterations 69 -> 15, MD step 101.9 -> 58.7 ms (7320 atoms, CPU 146.0) but 104.7 -> 124.1 ms on urea400-water1000 (host build 247 ms) - [docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md)
 - ROCm GFN-FF step time (branch `feature/rocm-gfnff-step-speed`, Oct 13, 2026): CN pair skin, lower-triangle EEQ matrix, each-pair-once Coulomb tiles; MD step 122.7 -> 101.2 ms (7320 atoms), CPU 145.2; trajectories unchanged - [docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md)
 - ROCm device projected PCG for the GFN-FF EEQ (branch `feature/rocm-eeq-ppcg`, Oct 13, 2026): diagonal Jacobi, `-eeq_solver.solve_method ppcg` on `-gpu rocm`; MD step 182 -> 125 ms (6200 atoms), 150 -> 123 ms (7320), CPU 180 / 146; charges within 1.1e-10 of exact - [docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md)

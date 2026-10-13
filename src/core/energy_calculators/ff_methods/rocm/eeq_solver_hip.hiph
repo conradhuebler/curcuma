@@ -10,8 +10,9 @@
  * rocsolver_dpotrs/dgetrs, returning z1/Z2 to the host.
  *
  * Oct 2026 (Claude Generated): the WP7-E projected PCG (solveWithDeviceRHSAndGPUProjectedPCG)
- * is ported as well; it returns the charges on the device. Preconditioner: diagonal Jacobi, or the
- * host-built local inverse uploaded by setLocalInversePreconditioner (no device build).
+ * is ported as well; it returns the charges on the device. Preconditioner: diagonal Jacobi, the
+ * local inverse built on the device (requestLocalInverseDeviceBuild, default), or the host-built
+ * local inverse uploaded by setLocalInversePreconditioner.
  *
  * The device-resident GPU-Schur / PCG / batched variants return false: the host wrapper
  * (gfnff_hip_method.cpp) then applies its own exact CPU Schur complement to z1/Z2 (works for
@@ -24,7 +25,11 @@
 #include "eeq_solver_hip.h"
 #include <rocblas/rocblas.h>
 #include <rocsolver/rocsolver.h>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 // sqrt(2/pi) — EEQ self-energy diagonal (matches cuda/eeq_solver_gpu.cu TSQRT2PI_GPU)
@@ -174,6 +179,20 @@ struct EEQSolverHipImpl {
     bool                m_li_valid = false;
     int                 m_li_N = 0, m_li_nfrag = 0;
     long                m_li_runtime_fallbacks = 0;  ///< solves redone with Jacobi (rz/pAp <= 0, stall)
+
+    // Device build of the local inverse (Claude Generated, Oct 2026): port of the CUDA
+    // buildLocalInverseOnDevice. m_li_device = true: G was built here from d_A and is applied as
+    // z = P G r (no H, no S^-1). Members mirror cuda/eeq_solver_gpu.cu EEQSolverGPUImpl.
+    bool                m_li_device = false;
+    bool                m_li_build_pending = false;  ///< requestLocalInverseDeviceBuild() was called
+    double              m_li_radius = 8.0, m_li_ext = 10.0;
+    CudaBuffer<int>     d_li_nblk, d_li_nkeep, d_li_fail, d_li_atoms;
+    CudaBuffer<float4>  d_li_xf;                     ///< float copy of the coordinates (prefilter)
+    CudaBuffer<unsigned int> d_li_maxabs;
+    CudaBuffer<double>  d_li_Gl_val, d_li_scratch;
+    int                 m_li_max_smem = -1;          ///< LDS per workgroup (bytes), queried once
+    int                 m_li_wave = 0;               ///< wavefront size of the device, queried once
+    EEQSolverHip::LocalInverseDeviceStats m_li_stats;
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -659,9 +678,9 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUPCG(int, int, const double*, const do
 //   alpha = r.z / p.A p,  q += alpha p,  r = P (r - alpha A p),  beta = r.z_new / r.z_old.
 // P subtracts the per-fragment mean. A is the dense EEQ matrix (k_eeq_build_matrix_hip, lower
 // triangle read by rocblas_dsymv). The converged q are the charges of the constrained EEQ system
-// (no Schur step). Not ported: the device build of the local inverse (k_li_count, k_li_blocks, ...)
-// and its true-residual check, multi-GPU split, the K3 input event and stream priority; the
-// wrapper does not call those for ROCm.
+// (no Schur step). The device build of the local inverse and its true-residual check are ported
+// (Oct 2026, buildLocalInverseOnDeviceHip). Not ported: multi-GPU split, the K3 input event and
+// stream priority; the wrapper does not call those for ROCm.
 // =============================================================================================
 
 /// r <- P r: subtract the per-fragment mean (port of ppcgProjectResidual).
@@ -680,12 +699,20 @@ static inline bool localInverseOnHip(const EEQSolverHipImpl& impl, int N, int nf
     return impl.m_li_valid && impl.m_li_N == N && impl.m_li_nfrag == nfrag;
 }
 
-/// z <- preconditioned r with C z = 0 (port of ppcgPrecondition, host-build branches only).
-/// Local inverse (Claude Generated, Oct 2026): z = G r; t = C z; mu = S^-1 t; z -= H mu.
+/// z <- preconditioned r with C z = 0 (port of ppcgPrecondition).
+/// Local inverse built on the device (Claude Generated, Oct 2026): z = P G r, P = I - C^T (C C^T)^-1 C
+/// (subtract the fragment mean); symmetric and positive definite on null(C) whenever G is.
+/// Local inverse built on the host (Oct 2026): z = G r; t = C z; mu = S^-1 t; z -= H mu.
 /// Otherwise diagonal Jacobi z = M^-1 r with the M-weighted per-fragment correction.
 static void ppcgPreconditionHip(EEQSolverHipImpl& impl, int N, int nfrag, const double* d_r, double* d_z)
 {
     const int blk = 256, grd = (N + blk - 1) / blk;
+    if (localInverseOnHip(impl, N, nfrag) && impl.m_li_device) {
+        k_li_csr_spmv_hip<<<grd, blk, 0, impl.stream>>>(N, impl.d_li_G_rowptr.ptr, impl.d_li_G_col.ptr,
+                                                        impl.d_li_G_val.ptr, d_r, d_z, 0);
+        ppcgProjectResidualHip(impl, N, nfrag, d_z);
+        return;
+    }
     if (localInverseOnHip(impl, N, nfrag)) {
         k_li_csr_spmv_hip<<<grd, blk, 0, impl.stream>>>(N, impl.d_li_G_rowptr.ptr, impl.d_li_G_col.ptr,
                                                         impl.d_li_G_val.ptr, d_r, d_z, 0);
@@ -804,9 +831,526 @@ static bool runProjectedPCGHip(EEQSolverHipImpl& impl, int N, int nfrag,
     static const bool print_iters = [] { const char* e = std::getenv("CURCUMA_PPCG_ITERS"); return e && *e && *e != '0'; }();
     if (print_iters)
         fprintf(stderr, "PPCG ROCm N=%d nfrag=%d iters=%d converged=%d |r|^2=%.3e precond=%s\n",
-                N, nfrag, iters, converged ? 1 : 0, h_rnorm_sq, li_on ? "localinv gpu build=host" : "diag");
+                N, nfrag, iters, converged ? 1 : 0, h_rnorm_sq,
+                li_on ? (impl.m_li_device ? "localinv gpu build=device" : "localinv gpu build=host") : "diag");
     if (!converged) impl.m_ppcg_nonconv_calls += 1;
     return converged;
+}
+
+// =============================================================================================
+// Device build of the local-inverse preconditioner on ROCm (Claude Generated, Oct 2026)
+// ---------------------------------------------------------------------------------------------
+// Port of the CUDA device build (cuda/eeq_solver_gpu.cu, k_li_pack_f / k_li_count / k_li_blocks /
+// k_li_symmetrize / k_li_test_perturb / buildLocalInverseOnDevice). Same construction as the host
+// EEQSolver::buildLocalInverse (maths: eeq_solver.h, LocalInversePreconditioner): for every atom i the
+// dense block B = A[E_i, E_i] over the atoms within R_ext (ascending atom index, i included) is
+// Cholesky-factorised, the column of i of B^-1 is solved, and its entries for atoms within R are
+// row i of Gl; G = (Gl + Gl^T) / 2, applied as z = P G r (ppcgPreconditionHip).
+// ROCm specifics:
+//   * B is gathered from d_A, which k_eeq_build_matrix_hip writes as the LOWER triangle only. The
+//     neighbour list is ascending, so B(r, c) with r >= c is A(idx[r], idx[c]) with idx[r] >= idx[c],
+//     i.e. a lower-triangle element; the upper triangle of d_A is never read (same gather as CUDA).
+//   * the ordered neighbour scan uses wavefront ballots with the device's warpSize (wave32 on
+//     gfx1200, wave64 elsewhere); no lane count is hard-coded. The Cholesky work distribution uses
+//     the same wave-sized groups; correctness does not depend on the width (barriers separate steps).
+//   * the dynamic LDS of a bucket is checked against hipDeviceAttributeMaxSharedMemoryPerBlock; a
+//     bucket whose largest block does not fit keeps the packed factor in global scratch.
+// Definiteness: every local pivot must be > 0, the CG stops on rz <= 0 / pAp <= 0, and a converged
+// solve must pass the true-residual check |P(b - A q)| <= 2 tol; each failure is handled as on CUDA.
+// Reproducible: one workgroup per atom row in a fixed order; no floating-point atomics.
+// =============================================================================================
+
+/// Threads per workgroup of the count and block kernels (as kThreads in the CUDA build).
+constexpr int LI_THREADS_HIP = 128;
+/// Matrix elements a thread loads before storing them in the gather of k_li_blocks_hip.
+constexpr int LI_GATHER_BATCH = 8;
+/// 2D thread tile of the trailing Cholesky update in k_li_blocks_hip (rows x columns = threads).
+constexpr int LI_TILE_R = 16;
+constexpr int LI_TILE_C = LI_THREADS_HIP / LI_TILE_R;
+static_assert(LI_TILE_R * LI_TILE_C == LI_THREADS_HIP, "tile must cover the workgroup");
+/// Block-size buckets of the build: width LI_BUCKET_STEP up to LI_BUCKET_LAST, one bucket above.
+constexpr int LI_BUCKET_STEP = 8;
+constexpr int LI_BUCKET_LAST = 128;
+
+/// Squared distance with the multiplications and additions kept separate (no FMA contraction), so
+/// that li_r2_hip(i, j) == li_r2_hip(j, i) bitwise and k_li_count_hip and k_li_blocks_hip agree.
+__device__ __forceinline__ double li_r2_hip(const double* __restrict__ cx, const double* __restrict__ cy,
+                                            const double* __restrict__ cz, int i, int j)
+{
+#pragma clang fp contract(off)
+    const double dx = cx[i] - cx[j], dy = cy[i] - cy[j], dz = cz[i] - cz[j];
+    const double xx = dx * dx, yy = dy * dy, zz = dz * dz;
+    return (xx + yy) + zz;
+}
+
+/// Start of column c in a packed column-major lower triangle of order n.
+__device__ __forceinline__ int li_col_hip(int c, int n) { return c * n - (c * (c - 1)) / 2; }
+
+/// Single-precision coordinates shifted by atom 0 (prefilter only), w = 0; maxabs[0] receives
+/// max |shifted coordinate| as float bits (non-negative floats order like unsigned ints).
+__global__ void k_li_pack_f_hip(int N, const double* __restrict__ cx, const double* __restrict__ cy,
+                                const double* __restrict__ cz, float4* __restrict__ xf, unsigned int* maxabs)
+{
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= N) return;
+    const float x = static_cast<float>(cx[j] - cx[0]);
+    const float y = static_cast<float>(cy[j] - cy[0]);
+    const float z = static_cast<float>(cz[j] - cz[0]);
+    xf[j] = make_float4(x, y, z, 0.0f);
+    const float m = fmaxf(fabsf(x), fmaxf(fabsf(y), fabsf(z)));
+    atomicMax(maxabs, __float_as_uint(m));
+}
+
+/// Squared-distance bound of the float prefilter: every pair with exact r^2 <= E2 has float r^2 <=
+/// this (8 eps_f maxabs per coordinate, as CUDA li_prefilter_bound); the decision uses li_r2_hip.
+__device__ __forceinline__ float li_prefilter_bound_hip(double E2, const unsigned int* maxabs)
+{
+    const double delta = 8.0 * 1.2e-7 * static_cast<double>(__uint_as_float(*maxabs)) + 1e-6;
+    const double r = sqrt(E2) + 2.0 * sqrt(3.0) * delta;
+    return static_cast<float>(r * r * (1.0 + 1e-5));
+}
+
+/// Per atom (one workgroup each, grid-stride): block size n_i (atoms within R_ext, i included) and
+/// kept entries k_i (within R). Integer LDS atomics only (order-independent sums).
+__global__ __launch_bounds__(LI_THREADS_HIP)
+void k_li_count_hip(int N, const double* __restrict__ cx, const double* __restrict__ cy,
+                    const double* __restrict__ cz, const float4* __restrict__ xf,
+                    const unsigned int* __restrict__ maxabs, double E2, double R2,
+                    int* __restrict__ nblk, int* __restrict__ nkeep)
+{
+    __shared__ int s_n, s_k;
+    const float E2f = li_prefilter_bound_hip(E2, maxabs);
+    for (int i = blockIdx.x; i < N; i += gridDim.x) {
+        if (threadIdx.x == 0) { s_n = 0; s_k = 0; }
+        __syncthreads();
+        const float4 pi = xf[i];
+        int n = 0, k = 0;
+        for (int j = threadIdx.x; j < N; j += blockDim.x) {
+            const float4 pj = xf[j];
+            const float fx = pi.x - pj.x, fy = pi.y - pj.y, fz = pi.z - pj.z;
+            if (fx * fx + fy * fy + fz * fz > E2f) continue;   // certainly outside R_ext
+            const double r2 = li_r2_hip(cx, cy, cz, i, j);
+            if (r2 <= E2) { ++n; if (r2 <= R2) ++k; }
+        }
+        atomicAdd(&s_n, n);
+        atomicAdd(&s_k, k);
+        __syncthreads();
+        if (threadIdx.x == 0) { nblk[i] = s_n; nkeep[i] = s_k; }
+        __syncthreads();
+    }
+}
+
+/// Row i of Gl for the atoms atoms[0..count) (one workgroup per atom, grid-stride). Port of
+/// k_li_blocks: (a) neighbours within R_ext in ascending order (wave w scans the w-th contiguous
+/// index segment with ballots, the per-wave lists are concatenated in wave order), (b) packed lower
+/// triangle of B gathered from the lower triangle of A, (c) right-looking Cholesky fused with the
+/// forward solve L z = e_k, (e) back solve L^T x = z, (f) kept entries. fail: 1 = pivot <= 0,
+/// 2 = neighbour or kept count differs from k_li_count_hip.
+/// ROCm restructuring of the CUDA steps (c)-(e) (same factorisation and solves, other rounding):
+/// the kernel is bound by latency, not by FP64 work (measured on the RX 9060 XT, urea400-water1000,
+/// block mean 54 atoms: 19-21 ms per build in the CUDA form, about 11 ms in this form). The packed
+/// triangle keeps the unscaled column entries U and 1/sqrt(pivot) (rsqrt) is kept per column, so a
+/// pivot step needs one barrier instead of three; the forward solve rides along the factorisation as
+/// an extra right-hand side; the back solve writes the solved entries to a separate array (one barrier
+/// per step instead of two); the trailing update runs on a 2D thread tile with one fma per element.
+/// LDS layout (use_global = 0): U (n_max(n_max+1)/2 doubles), y, z, dinv (n_max doubles each), idx
+/// (n_max ints), keep (n_max bytes, padded to 16), wave lists (nwaves * n_max ints); with
+/// use_global = 1, U, y, z and dinv live in a per-workgroup slice of gscratch.
+__global__ __launch_bounds__(LI_THREADS_HIP)
+void k_li_blocks_hip(int N, const int* __restrict__ atoms, int count,
+                     const double* __restrict__ cx, const double* __restrict__ cy,
+                     const double* __restrict__ cz, const float4* __restrict__ xf,
+                     const unsigned int* __restrict__ maxabs, double E2, double R2,
+                     const double* __restrict__ A, int lda,
+                     const int* __restrict__ nblk, const int* __restrict__ rowptr, int n_max,
+                     int* __restrict__ Gcol, double* __restrict__ Glval, int* fail,
+                     int use_global, double* gscratch, long long gstride)
+{
+    extern __shared__ double li_smem_hip[];
+    const int W = warpSize;
+    const int tid = threadIdx.x, lane = tid % W, wave = tid / W, nwaves = blockDim.x / W;
+    const int bd = blockDim.x;
+    const long long npk = static_cast<long long>(n_max) * (n_max + 1) / 2;
+    double* L;
+    int* idx;
+    if (use_global) {
+        L = gscratch + static_cast<long long>(blockIdx.x) * gstride;
+        idx = reinterpret_cast<int*>(li_smem_hip);
+    } else {
+        L = li_smem_hip;
+        idx = reinterpret_cast<int*>(li_smem_hip + npk + 3 * n_max);
+    }
+    double* y = L + npk;       // right-hand side, forward-substituted in place (unscaled)
+    double* z = y + n_max;     // solved entries: L^-1 e_k after (c), column k of B^-1 after (e)
+    double* dinv = z + n_max;  // 1 / L(c, c)
+    unsigned char* keep = reinterpret_cast<unsigned char*>(idx + n_max);
+    int* wlist = reinterpret_cast<int*>(keep + ((n_max + 15) / 16) * 16);   // nwaves * n_max: (j << 1) | kept
+
+    __shared__ int s_k;
+    __shared__ int s_wcnt[LI_THREADS_HIP];   // one count per wave (at most LI_THREADS_HIP waves)
+    const float E2f = li_prefilter_bound_hip(E2, maxabs);
+    const unsigned long long lanes_below = (lane == 0) ? 0ull : ((~0ull) >> (64 - lane));
+
+    for (int b = blockIdx.x; b < count; b += gridDim.x) {
+        const int i = atoms[b];
+        if (tid == 0) s_k = -1;
+        const float4 pi = xf[i];
+        // (a) ordered neighbour scan; segment bounds are uniform per wave, so every lane reaches the ballot.
+        const int seg0 = static_cast<int>(static_cast<long long>(N) * wave / nwaves);
+        const int seg1 = static_cast<int>(static_cast<long long>(N) * (wave + 1) / nwaves);
+        int* wl = wlist + wave * n_max;
+        int cnt = 0;
+        for (int j0 = seg0; j0 < seg1; j0 += W) {
+            const int j = j0 + lane;
+            bool in = false, kept = false;
+            if (j < seg1) {
+                const float4 pj = xf[j];
+                const float fx = pi.x - pj.x, fy = pi.y - pj.y, fz = pi.z - pj.z;
+                if (fx * fx + fy * fy + fz * fz <= E2f) {
+                    const double r2 = li_r2_hip(cx, cy, cz, i, j);
+                    in = (r2 <= E2);
+                    kept = (r2 <= R2);
+                }
+            }
+            const unsigned long long m = __ballot(in ? 1 : 0);
+            if (in) {
+                const int p = cnt + __popcll(m & lanes_below);
+                if (p < n_max) wl[p] = (j << 1) | (kept ? 1 : 0);
+            }
+            cnt += __popcll(m);
+        }
+        if (lane == 0) s_wcnt[wave] = cnt;
+        __syncthreads();
+        int off = 0, n = 0;
+        for (int w = 0; w < nwaves; ++w) { if (w < wave) off += s_wcnt[w]; n += s_wcnt[w]; }
+        if (n <= n_max) {
+            for (int p = lane; p < cnt; p += W) {
+                const int v = wl[p], j = v >> 1;
+                idx[off + p] = j;
+                keep[off + p] = static_cast<unsigned char>(v & 1);
+                if (j == i) s_k = off + p;
+            }
+        }
+        __syncthreads();
+        const int k = s_k;
+        if (n > n_max || n != nblk[i] || k < 0) {
+            if (tid == 0) atomicExch(fail, 2);
+            return;
+        }
+        // (b) packed lower triangle of B: B(r, c) = A(idx[r], idx[c]), idx[r] >= idx[c] (lower triangle);
+        //     right-hand side e_k.
+        //     Flattened over all threads, LI_GATHER_BATCH independent loads in flight per thread: the
+        //     reads are scattered over the N x N matrix, so the gather is bound by memory latency.
+        {
+            int c = 0, r = tid;
+            while (c < n && r >= n) { r -= n; ++c; r += c; }
+            while (c < n) {
+                double v[LI_GATHER_BATCH];
+                int dst[LI_GATHER_BATCH];
+#pragma unroll
+                for (int u = 0; u < LI_GATHER_BATCH; ++u) {
+                    if (c < n) {
+                        dst[u] = li_col_hip(c, n) + (r - c);
+                        v[u] = A[static_cast<long long>(idx[c]) * lda + idx[r]];
+                        r += bd;
+                        while (c < n && r >= n) { r -= n; ++c; r += c; }
+                    } else {
+                        dst[u] = -1;
+                        v[u] = 0.0;
+                    }
+                }
+#pragma unroll
+                for (int u = 0; u < LI_GATHER_BATCH; ++u)
+                    if (dst[u] >= 0) L[dst[u]] = v[u];
+            }
+        }
+        for (int m = tid; m < n; m += bd) y[m] = (m == k) ? 1.0 : 0.0;
+        __syncthreads();
+        // (c) right-looking Cholesky B = L L^T with the forward solve L z = e_k (z_m = 0 for m < k).
+        //     The packed triangle keeps U, the entries as they stand when their column is the pivot
+        //     column (a column is never updated after that); L(r, c) = U(r, c) dinv_c with
+        //     dinv_c = 1 / sqrt(U(c, c)). Step kk: every thread forms dinv itself from the pivot (final
+        //     after the previous barrier, uniform decision on pivot <= 0), so one barrier per step.
+        //     Trailing update U(r, c) -= (U(c, kk) w) U(r, kk), w = dinv^2, on a 2D thread tile
+        //     (LI_TILE_R rows x LI_TILE_C columns), one FP64 fma per element.
+        bool failed = false;
+        const int tr = tid % LI_TILE_R, tc = tid / LI_TILE_R;
+        for (int kk = 0; kk < n; ++kk) {
+            const double* Uk = L + li_col_hip(kk, n);
+            const double p = Uk[0];
+            if (!(p > 0.0)) { failed = true; break; }
+            const double inv = rsqrt(p);
+            const double w = inv * inv;
+            if (tid == 0) dinv[kk] = inv;
+            for (int c0 = kk + 1; c0 < n; c0 += LI_TILE_C) {
+                const int c = c0 + tc;
+                if (c >= n) continue;
+                const double lcw = Uk[c - kk] * w;
+                double* Uc = L + li_col_hip(c, n);
+#pragma unroll 2
+                for (int r0 = c0; r0 < n; r0 += LI_TILE_R) {
+                    const int r = r0 + tr;
+                    if (r >= c && r < n) Uc[r - c] -= lcw * Uk[r - kk];
+                }
+            }
+            // forward solve: z_kk = y_kk dinv, y_r -= L(r, kk) z_kk (no-op for kk < k, where y_kk = 0)
+            if (kk >= k) {
+                const double zk = y[kk] * inv;
+                const double sk = zk * inv;
+                if (tid == 0) z[kk] = zk;
+                for (int r = kk + 1 + tid; r < n; r += bd) y[r] -= Uk[r - kk] * sk;
+            } else if (tid == 0) {
+                z[kk] = 0.0;
+            }
+            __syncthreads();
+        }
+        if (failed) {
+            if (tid == 0) atomicExch(fail, 1);
+            return;
+        }
+        for (int m = tid; m < n; m += bd) y[m] = z[m];
+        __syncthreads();
+        // (e) L^T x = z, column-oriented: x_c = y_c dinv_c (all threads), y_r -= L(c, r) x_c for r < c;
+        //     x_c goes to z, so step c writes no value another thread reads in the same step.
+        for (int c = n - 1; c >= 0; --c) {
+            const double xc = y[c] * dinv[c];
+            if (tid == 0) z[c] = xc;
+            for (int r = tid; r < c; r += bd) y[r] -= (L[li_col_hip(r, n) + (c - r)] * dinv[r]) * xc;
+            __syncthreads();
+        }
+        double* x = z;
+        // (f) kept entries of row i, ascending columns
+        if (tid == 0) {
+            int p = rowptr[i];
+            const int pend = rowptr[i + 1];
+            for (int m = 0; m < n; ++m) {
+                if (!keep[m]) continue;
+                if (p < pend) { Gcol[p] = idx[m]; Glval[p] = x[m]; }
+                ++p;
+            }
+            if (p != pend) atomicExch(fail, 2);
+        }
+        __syncthreads();
+    }
+}
+
+/// G_ij = (Gl_ij + Gl_ji) / 2 on the (symmetric) pattern; Gl_ji by binary search in row j.
+__global__ void k_li_symmetrize_hip(int N, const int* __restrict__ rowptr, const int* __restrict__ col,
+                                    const double* __restrict__ Glval, double* __restrict__ Gval, int* fail)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    for (int e = rowptr[i]; e < rowptr[i + 1]; ++e) {
+        const int j = col[e];
+        int lo = rowptr[j], hi = rowptr[j + 1] - 1, pos = -1;
+        while (lo <= hi) {
+            const int mid = (lo + hi) >> 1;
+            const int c = col[mid];
+            if (c == i) { pos = mid; break; }
+            if (c < i) lo = mid + 1; else hi = mid - 1;
+        }
+        if (pos < 0) { atomicExch(fail, 3); return; }
+        Gval[e] = 0.5 * Glval[e] + 0.5 * Glval[pos];
+    }
+}
+
+/// Test hook CURCUMA_LOCALINV_TEST_INDEFINITE (as CUDA): 1 = G -> -G, 2 = G_ii -> -G_ii for every
+/// 10th atom, 3 = the true-residual check fails every time. 0 / unset = off.
+static int liTestModeHip()
+{
+    static const int mode = [] { const char* e = std::getenv("CURCUMA_LOCALINV_TEST_INDEFINITE"); return e ? std::atoi(e) : 0; }();
+    return mode;
+}
+
+/// Kernel of the test hook (modes 1 and 2).
+__global__ void k_li_test_perturb_hip(int N, const int* __restrict__ rowptr, const int* __restrict__ col,
+                                      double* __restrict__ Gval, int mode)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    for (int e = rowptr[i]; e < rowptr[i + 1]; ++e)
+        if (mode == 1 || (mode == 2 && col[e] == i && i % 10 == 0)) Gval[e] = -Gval[e];
+}
+
+/// Builds G on the device from impl.d_A (current EEQ matrix, lower triangle, column-major). On
+/// success the preconditioner is active in device mode (m_li_device). Returns false with a reason;
+/// the caller then runs Jacobi. Claude Generated (Oct 2026), port of buildLocalInverseOnDevice.
+static bool buildLocalInverseOnDeviceHip(EEQSolverHipImpl& impl, int N, int nfrag, const double* cx,
+                                         const double* cy, const double* cz, std::string& why)
+{
+    hipStream_t s = impl.stream;
+    // The matrix assembly queued before is not part of the build time.
+    if (hipStreamSynchronize(s) != hipSuccess) { why = "stream error before the build"; return false; }
+    const auto t0 = std::chrono::steady_clock::now();
+    impl.m_li_valid = false;
+    const double R2 = impl.m_li_radius * impl.m_li_radius;
+    const double E2 = impl.m_li_ext * impl.m_li_ext;
+    try {
+        impl.d_li_nblk.ensure(N);
+        impl.d_li_nkeep.ensure(N);
+        impl.d_li_fail.ensure(1);
+        impl.d_li_G_rowptr.ensure(N + 1);
+        impl.d_li_xf.ensure(N);
+        impl.d_li_maxabs.ensure(1);
+        impl.d_li_atoms.ensure(N);
+    } catch (const std::exception& e) {
+        why = std::string("device allocation failed: ") + e.what();
+        return false;
+    }
+    (void)hipMemsetAsync(impl.d_li_maxabs.ptr, 0, sizeof(unsigned int), s);
+    k_li_pack_f_hip<<<(N + 255) / 256, 256, 0, s>>>(N, cx, cy, cz, impl.d_li_xf.ptr, impl.d_li_maxabs.ptr);
+    k_li_count_hip<<<N, LI_THREADS_HIP, 0, s>>>(N, cx, cy, cz, impl.d_li_xf.ptr, impl.d_li_maxabs.ptr, E2, R2,
+                                                impl.d_li_nblk.ptr, impl.d_li_nkeep.ptr);
+    std::vector<int> nblk(N), nkeep(N);
+    if (hipMemcpyAsync(nblk.data(), impl.d_li_nblk.ptr, N * sizeof(int), hipMemcpyDeviceToHost, s) != hipSuccess
+        || hipMemcpyAsync(nkeep.data(), impl.d_li_nkeep.ptr, N * sizeof(int), hipMemcpyDeviceToHost, s) != hipSuccess
+        || hipStreamSynchronize(s) != hipSuccess) {
+        why = "count download failed";
+        return false;
+    }
+    const double count_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+
+    std::vector<int> rowptr(N + 1, 0);
+    int n_max = 0;
+    double sum_block = 0.0;
+    for (int i = 0; i < N; ++i) {
+        rowptr[i + 1] = rowptr[i] + nkeep[i];
+        n_max = std::max(n_max, nblk[i]);
+        sum_block += nblk[i];
+    }
+    const int nnz = rowptr[N];
+    if (impl.m_li_max_smem < 0) {
+        int dev = 0, v = 0, w = 0;
+        (void)hipGetDevice(&dev);
+        if (hipDeviceGetAttribute(&v, hipDeviceAttributeMaxSharedMemoryPerBlock, dev) != hipSuccess) v = 0;
+        if (hipDeviceGetAttribute(&w, hipDeviceAttributeWarpSize, dev) != hipSuccess) w = 0;
+        impl.m_li_max_smem = v;
+        impl.m_li_wave = w;
+    }
+    if (impl.m_li_wave <= 0 || LI_THREADS_HIP % impl.m_li_wave != 0) {
+        why = "wavefront size of the device not usable for the build";
+        return false;
+    }
+    try {
+        impl.d_li_G_col.ensure(nnz);
+        impl.d_li_G_val.ensure(nnz);
+        impl.d_li_Gl_val.ensure(nnz);
+    } catch (const std::exception& e) {
+        why = std::string("device allocation failed: ") + e.what();
+        return false;
+    }
+    if (hipMemcpyAsync(impl.d_li_G_rowptr.ptr, rowptr.data(), (N + 1) * sizeof(int), hipMemcpyHostToDevice, s) != hipSuccess) {
+        why = "rowptr upload failed";
+        return false;
+    }
+    (void)hipMemsetAsync(impl.d_li_fail.ptr, 0, sizeof(int), s);
+
+    // Buckets of block size in steps of LI_BUCKET_STEP up to LI_BUCKET_LAST, then one for the rest,
+    // each launched with the LDS of its largest block; a bucket that does not fit into the LDS of one
+    // workgroup uses global scratch. Finer than the CUDA buckets (32/64/128/larger): the kernel is
+    // latency bound and the LDS per workgroup sets how many atoms are in flight per WGP.
+    const int nbuckets = LI_BUCKET_LAST / LI_BUCKET_STEP + 1;
+    std::vector<int> bucket_limit(nbuckets);
+    for (int bkt = 0; bkt + 1 < nbuckets; ++bkt) bucket_limit[bkt] = (bkt + 1) * LI_BUCKET_STEP;
+    bucket_limit[nbuckets - 1] = std::max(n_max, LI_BUCKET_LAST + 1);
+    std::vector<int> order;
+    order.reserve(N);
+    std::vector<int> bucket_begin(nbuckets + 1, 0), bucket_nmax(nbuckets, 0);
+    for (int bkt = 0; bkt < nbuckets; ++bkt) {
+        bucket_begin[bkt] = static_cast<int>(order.size());
+        const int lo = bkt == 0 ? 0 : bucket_limit[bkt - 1];
+        for (int i = 0; i < N; ++i)
+            if (nblk[i] > lo && nblk[i] <= bucket_limit[bkt]) { order.push_back(i); bucket_nmax[bkt] = std::max(bucket_nmax[bkt], nblk[i]); }
+    }
+    bucket_begin[nbuckets] = static_cast<int>(order.size());
+    if (hipMemcpyAsync(impl.d_li_atoms.ptr, order.data(), order.size() * sizeof(int), hipMemcpyHostToDevice, s) != hipSuccess) {
+        why = "atom order upload failed";
+        return false;
+    }
+    const int nwaves = LI_THREADS_HIP / impl.m_li_wave;
+    int n_global = 0;   // atoms whose block was factorised in global scratch
+    for (int bkt = 0; bkt < nbuckets; ++bkt) {
+        const int count = bucket_begin[bkt + 1] - bucket_begin[bkt];
+        if (count == 0) continue;
+        const int nb = bucket_nmax[bkt];
+        const long long npk = static_cast<long long>(nb) * (nb + 1) / 2;
+        const size_t small_bytes = static_cast<size_t>(nb) * (sizeof(int) + 1) + 16
+                                 + static_cast<size_t>(nwaves) * nb * sizeof(int) + 16;
+        const size_t full_bytes = static_cast<size_t>(npk + 3 * nb) * sizeof(double) + small_bytes;
+        const size_t static_reserve = 1024;   // s_k, s_wcnt and alignment
+        const bool use_global = full_bytes + static_reserve > static_cast<size_t>(impl.m_li_max_smem);
+        if (use_global && small_bytes + static_reserve > static_cast<size_t>(impl.m_li_max_smem)) {
+            why = "local block too large for the workgroup LDS (atom list)";
+            return false;
+        }
+        const size_t smem = use_global ? small_bytes : full_bytes;
+        int grid = count;
+        long long gstride = 0;
+        if (use_global) {
+            n_global += count;
+            gstride = ((npk + 3 * nb + 31) / 32) * 32;
+            const long long budget = 256LL * 1024 * 1024 / sizeof(double);   // 256 MB of scratch at most
+            grid = static_cast<int>(std::max(1LL, std::min<long long>(count, budget / gstride)));
+            try {
+                impl.d_li_scratch.ensure(static_cast<int>(grid * gstride));
+            } catch (const std::exception& e) {
+                why = std::string("scratch allocation failed: ") + e.what();
+                return false;
+            }
+        }
+        k_li_blocks_hip<<<grid, LI_THREADS_HIP, smem, s>>>(N, impl.d_li_atoms.ptr + bucket_begin[bkt], count, cx, cy, cz,
+                                                           impl.d_li_xf.ptr, impl.d_li_maxabs.ptr, E2, R2,
+                                                           impl.d_A.ptr, N, impl.d_li_nblk.ptr,
+                                                           impl.d_li_G_rowptr.ptr, nb, impl.d_li_G_col.ptr,
+                                                           impl.d_li_Gl_val.ptr, impl.d_li_fail.ptr, use_global ? 1 : 0,
+                                                           use_global ? impl.d_li_scratch.ptr : nullptr, gstride);
+    }
+    if (hipGetLastError() != hipSuccess) {
+        why = "launch of k_li_blocks_hip failed";
+        return false;
+    }
+    {
+        const int blk = 256, grd = (N + blk - 1) / blk;
+        k_li_symmetrize_hip<<<grd, blk, 0, s>>>(N, impl.d_li_G_rowptr.ptr, impl.d_li_G_col.ptr,
+                                                impl.d_li_Gl_val.ptr, impl.d_li_G_val.ptr, impl.d_li_fail.ptr);
+        const int test_mode = liTestModeHip();
+        if (test_mode == 1 || test_mode == 2)
+            k_li_test_perturb_hip<<<grd, blk, 0, s>>>(N, impl.d_li_G_rowptr.ptr, impl.d_li_G_col.ptr,
+                                                      impl.d_li_G_val.ptr, test_mode);
+    }
+    int h_fail = 0;
+    if (hipMemcpyAsync(&h_fail, impl.d_li_fail.ptr, sizeof(int), hipMemcpyDeviceToHost, s) != hipSuccess
+        || hipStreamSynchronize(s) != hipSuccess) {
+        why = "build failed on the device";
+        return false;
+    }
+    const double build_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    impl.m_li_stats.last_build_ms = build_ms;
+    impl.m_li_stats.total_build_ms += build_ms;
+
+    // Test hook shared with the host build: CURCUMA_LOCALINV_TEST_REJECT=1 rejects every build.
+    static const bool test_reject = [] { const char* e = std::getenv("CURCUMA_LOCALINV_TEST_REJECT"); return e && *e && *e != '0'; }();
+    if (h_fail == 1) why = "a dense block A[E,E] is not positive definite (local Cholesky pivot <= 0)";
+    else if (h_fail == 2) why = "neighbour list of the device build inconsistent";
+    else if (h_fail == 3) why = "pattern of the device-built G is not symmetric";
+    else if (test_reject) why = "rejected by CURCUMA_LOCALINV_TEST_REJECT";
+    const bool ok = (h_fail == 0) && !test_reject;
+
+    static const bool print_iters = [] { const char* e = std::getenv("CURCUMA_PPCG_ITERS"); return e && *e && *e != '0'; }();
+    if (print_iters) {
+        std::vector<int> sorted_blk(nblk);
+        std::nth_element(sorted_blk.begin(), sorted_blk.begin() + N / 2, sorted_blk.end());
+        fprintf(stderr, "LOCALINV ROCm device build ok=%d build_ms=%.2f count_ms=%.2f nnz_row=%.1f block_mean=%.1f "
+                        "block_median=%d block_max=%d global_atoms=%d lds_max=%d wave=%d\n",
+                ok ? 1 : 0, build_ms, count_ms, static_cast<double>(nnz) / N, sum_block / N, sorted_blk[N / 2], n_max,
+                n_global, impl.m_li_max_smem, impl.m_li_wave);
+    }
+    if (!ok) return false;
+    impl.m_li_N = N;
+    impl.m_li_nfrag = nfrag;
+    impl.m_li_device = true;
+    impl.m_li_valid = true;
+    return true;
 }
 
 bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(
@@ -853,6 +1397,20 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(
         m_last_N = N;
     }
 
+    // Claude Generated (Oct 2026): local inverse built on the device from the matrix just assembled
+    // (requested by the wrapper via requestLocalInverseDeviceBuild when its rebuild criterion fired).
+    if (impl.m_li_build_pending) {
+        impl.m_li_build_pending = false;
+        std::string why;
+        if (buildLocalInverseOnDeviceHip(impl, N, nfrag, cx, cy, cz, why)) {
+            impl.m_li_stats.builds += 1;
+        } else {
+            impl.m_li_valid = false;
+            impl.m_li_stats.build_failures += 1;
+            impl.m_li_stats.last_why = why;
+        }
+    }
+
     impl.d_rhs.ensure(N);
     // Warm start from the last accepted solution, else zero.
     if (impl.m_ppcg_warm_valid && impl.d_ppcg_q_persistent.n >= N)
@@ -880,11 +1438,40 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(
                            hipMemcpyDeviceToDevice, impl.stream) != hipSuccess) return false;
     }
     bool ok = runProjectedPCGHip(impl, N, nfrag, impl.d_ppcg_b.ptr, impl.d_rhs.ptr, max_iter, tol);
+    bool residual_failed = false;
+    if (ok && li_on && impl.m_li_device) {
+        // Acceptance of a device-built G (Claude Generated, Oct 2026, port of the CUDA check): no global
+        // definiteness check was made, and an indefinite M can let the recursive CG residual drift from
+        // the true one. One extra matvec: |P(b - A q)| must be <= 2 tol.
+        constexpr double kTrueResidualFactor = 2.0;
+        double h_true_sq = std::numeric_limits<double>::infinity();
+        if (eeqMatvecHip(impl, N, impl.d_rhs.ptr, impl.d_pcg_Ap.ptr)) {
+            const int blk = 256, grd = (N + blk - 1) / blk;
+            k_pcg_init_residual<<<grd, blk, 0, impl.stream>>>(N, impl.d_ppcg_b.ptr, impl.d_pcg_Ap.ptr, impl.d_pcg_r.ptr);
+            ppcgProjectResidualHip(impl, N, nfrag, impl.d_pcg_r.ptr);
+            rocblas_set_pointer_mode(impl.handle, rocblas_pointer_mode_host);
+            if (rocblas_ddot(impl.handle, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_r.ptr, 1, &h_true_sq) != rocblas_status_success)
+                h_true_sq = std::numeric_limits<double>::infinity();
+        }
+        const double ratio = (tol > 0.0) ? std::sqrt(h_true_sq) / tol : 0.0;
+        static const bool print_iters = [] { const char* e = std::getenv("CURCUMA_PPCG_ITERS"); return e && *e && *e != '0'; }();
+        if (print_iters) fprintf(stderr, "LOCALINV ROCm true residual |P(b-Aq)|/tol=%.3f\n", ratio);
+        if (liTestModeHip() == 3) h_true_sq = std::numeric_limits<double>::infinity();   // test hook
+        if (!(h_true_sq <= kTrueResidualFactor * kTrueResidualFactor * tol * tol)) {
+            ok = false;
+            residual_failed = true;
+            impl.m_li_stats.residual_fallbacks += 1;
+        } else {
+            impl.m_li_stats.last_true_residual_ratio = ratio;
+        }
+    }
     if (!ok && li_on) {
-        impl.m_li_valid = false;
+        impl.m_li_valid = false;   // never continue with this M; the wrapper rebuilds or stays on Jacobi
         impl.m_li_runtime_fallbacks += 1;
-        CurcumaLogger::warn(fmt::format("EEQ GPU ppcg localinv: breakdown (rz <= 0 / pAp <= 0) or stall, solve "
-                                        "repeated with diagonal Jacobi (fallbacks so far: {})",
+        impl.m_li_stats.runtime_fallbacks += 1;
+        impl.m_li_stats.last_why = residual_failed ? "true residual above 2 tol" : "breakdown (rz <= 0 / pAp <= 0) or stall";
+        CurcumaLogger::warn(fmt::format("EEQ GPU ppcg localinv: {}, solve repeated with diagonal Jacobi "
+                                        "(fallbacks so far: {})", impl.m_li_stats.last_why,
                                         impl.m_li_runtime_fallbacks));
         if (hipMemcpyAsync(impl.d_rhs.ptr, impl.d_li_q0.ptr, N * sizeof(double),
                            hipMemcpyDeviceToDevice, impl.stream) != hipSuccess) return false;
@@ -901,8 +1488,8 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(
 
 // =============================================================================================
 // Local-inverse preconditioner upload (Claude Generated, Oct 2026): port of
-// cuda/eeq_solver_gpu.cu EEQSolverGPU::setLocalInversePreconditioner (host-build mode only; the
-// device build, multi-GPU and the true-residual check of the device build are not ported).
+// cuda/eeq_solver_gpu.cu EEQSolverGPU::setLocalInversePreconditioner (host-build mode; the device
+// build is buildLocalInverseOnDeviceHip above; multi-GPU is not ported).
 // =============================================================================================
 
 /// Uploads G, H (CSR) and the dense S^-1 built by EEQSolver::buildLocalInverse; on success the
@@ -936,6 +1523,7 @@ bool EEQSolverHip::setLocalInversePreconditioner(int N, int nfrag,
     }
     impl.m_li_N = N;
     impl.m_li_nfrag = nfrag;
+    impl.m_li_device = false;
     impl.m_li_valid = true;
     return true;
 }
@@ -943,6 +1531,22 @@ bool EEQSolverHip::setLocalInversePreconditioner(int N, int nfrag,
 void EEQSolverHip::clearLocalInversePreconditioner() { m_impl->m_li_valid = false; }
 bool EEQSolverHip::localInversePreconditionerActive() const { return m_impl->m_li_valid; }
 long EEQSolverHip::localInverseRuntimeFallbacks() const { return m_impl->m_li_runtime_fallbacks; }
+
+/// Marks a device build of the local inverse for the next projected-PCG solve (Claude Generated,
+/// Oct 2026; same contract as the CUDA member, see eeq_solver_gpu.h).
+void EEQSolverHip::requestLocalInverseDeviceBuild(double radius_bohr, double ext_bohr)
+{
+    auto& impl = *m_impl;
+    impl.m_li_radius = radius_bohr;
+    impl.m_li_ext = std::max(ext_bohr, radius_bohr);
+    impl.m_li_build_pending = true;
+    impl.m_li_valid = false;   // the previous G must not be used with the new geometry's request pending
+}
+
+/// ROCm has no multi-GPU split: a device build is possible whenever the dense matrix fits d_A.
+bool EEQSolverHip::localInverseDeviceBuildPossible(int N) const { return N >= 1 && N <= m_max_natoms; }
+
+EEQSolverHip::LocalInverseDeviceStats EEQSolverHip::localInverseDeviceStats() const { return m_impl->m_li_stats; }
 
 bool EEQSolverHip::solveWithDeviceRHSAndGPUSchurBatched(int, int, const double*, const double*, const double*,
                                                         const double*, const double*, const double*,

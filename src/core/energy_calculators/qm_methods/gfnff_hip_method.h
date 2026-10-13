@@ -48,8 +48,11 @@ struct GFNFFRocmBackend {
     /// is ported (diagonal Jacobi, or the local inverse below).
     static constexpr bool has_device_ppcg = true;
     /// Claude Generated (Oct 2026): the local-inverse preconditioner of the projected PCG, built on the
-    /// host (EEQSolver::buildLocalInverse) and uploaded (setLocalInversePreconditioner); no device build.
+    /// host (EEQSolver::buildLocalInverse) and uploaded (setLocalInversePreconditioner).
     static constexpr bool has_localinv_upload = true;
+    /// Claude Generated (Oct 2026): device build of the local inverse (requestLocalInverseDeviceBuild,
+    /// localInverseDeviceStats); the default, CURCUMA_LOCALINV_HOST_BUILD=1 selects the host build.
+    static constexpr bool has_localinv_device_build = true;
     /// No multi-GPU split on ROCm (CUDA only, Sep 2026).
     static constexpr bool has_multi_gpu_split = false;
     /// K1 (Oct 2026, Claude Generated): CN pair list as a Verlet list with skin

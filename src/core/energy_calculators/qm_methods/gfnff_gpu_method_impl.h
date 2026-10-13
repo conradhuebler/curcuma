@@ -17,6 +17,7 @@
  *       static constexpr bool has_device_schur      = true;   // false on ROCm
  *       static constexpr bool has_device_ppcg       = true;   // WP7-E projected PCG (ROCm too, Oct 2026)
  *       static constexpr bool has_localinv_upload   = true;   // host-built localinv upload (ROCm too, Oct 2026)
+ *       static constexpr bool has_localinv_device_build = true; // device-built localinv (ROCm too, Oct 2026)
  *       static constexpr bool has_cn_pair_skin      = true;   // K1 CN pair-list skin (ROCm too, Oct 2026)
  *       static constexpr bool has_stream_overlap    = true;   // false on ROCm (K2/K3, Oct 2026)
  *       static constexpr int  default_eeq_cpu_fragment_threshold = 0;   // 16 on ROCm
@@ -312,9 +313,9 @@ private:
     int    m_eeq_ppcg_min_nfrag  = 1;      ///< Auto strategy: prefer ProjectedPCG over PCG when nfrag>=this
     int    m_eeq_ppcg_min_atoms  = 500;    ///< ... and N>=this
     // Claude Generated (Oct 2026): local-inverse preconditioner of WP7-E (eeq_ppcg_precond localinv).
-    // CUDA: built on the device (EEQSolverGPU::requestLocalInverseDeviceBuild, default) or, with
-    // CURCUMA_LOCALINV_HOST_BUILD=1 or the multi-GPU split, on the host by EEQSolver::buildLocalInverse
-    // and uploaded as CSR. ROCm: host build and upload only (has_localinv_upload).
+    // CUDA and ROCm (Oct 2026): built on the device (requestLocalInverseDeviceBuild, default,
+    // has_localinv_device_build) or, with CURCUMA_LOCALINV_HOST_BUILD=1 or the CUDA multi-GPU split,
+    // on the host by EEQSolver::buildLocalInverse and uploaded as CSR (has_localinv_upload).
     bool   m_eeq_localinv = false;
     double m_eeq_localinv_radius = 8.0;
     double m_eeq_localinv_ext = 10.0;
@@ -332,6 +333,19 @@ private:
     /// After a WP7-E solve: books device builds/rejections and reports every Jacobi re-solve as a
     /// GPU fallback (curcuma::reportGpuFallback, -gpu_strict). Claude Generated (Oct 2026).
     void finishLocalInverseGPU();
+    /// true when the local inverse for N atoms is built on the device (backend has the device build,
+    /// CURCUMA_LOCALINV_HOST_BUILD unset, and the solver can build it, e.g. no multi-GPU split).
+    /// Claude Generated (Oct 2026).
+    bool localInverseDeviceBuildSelected(int N) const
+    {
+        if constexpr (Backend::has_localinv_device_build) {
+            static const bool host_build_env = [] { const char* e = std::getenv("CURCUMA_LOCALINV_HOST_BUILD"); return e && *e && *e != '0'; }();
+            return !host_build_env && m_eeq_gpu && m_eeq_gpu->localInverseDeviceBuildPossible(N);
+        } else {
+            (void)N;
+            return false;
+        }
+    }
 
     // Deliverable 3 (Jun 2026): fragment count at/above which the device EEQ solve is
     // replaced by the exact CPU PCG/block-Jacobi solver. The device path does a dense
@@ -1378,7 +1392,10 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                     // inverse (eeq_ppcg_precond); every other solve is the dense device Cholesky of WP2
                     // plus the host Schur step.
                     if (resolved_method == EEQSolveMethod::ProjectedPCG && m_eeq_gpu->isFragmentTopoValid()) {
-                        if (m_eeq_localinv)
+                        if (m_eeq_localinv && localInverseDeviceBuildSelected(N))
+                            path = m_eeq_nfrag == 1 ? "WP7-E projected PCG, one fragment, precond=localinv gpu build=device"
+                                                    : "WP7-E projected PCG, precond=localinv gpu build=device";
+                        else if (m_eeq_localinv && m_eeq_nfrag <= kLocalInvMaxNfrag)
                             path = m_eeq_nfrag == 1 ? "WP7-E projected PCG, one fragment, precond=localinv gpu build=host"
                                                     : "WP7-E projected PCG, precond=localinv gpu build=host";
                         else
@@ -2143,14 +2160,9 @@ void GFNFFGpuMethodImpl<Backend>::prepareLocalInverseGPU(int N, double cutoff_sq
     } else {
         if (!m_eeq_localinv) return;
         const int nfrag = m_eeq_nfrag;
-        // Oct 2026: on CUDA the default is the device build; the host build stays for the multi-GPU
-        // split and as comparison (CURCUMA_LOCALINV_HOST_BUILD=1). ROCm (Claude Generated, Oct 2026)
-        // has the host build only (no device build, has_device_schur = false).
-        bool device_build = false;
-        if constexpr (Backend::has_device_schur) {
-            static const bool host_build_env = [] { const char* e = std::getenv("CURCUMA_LOCALINV_HOST_BUILD"); return e && *e && *e != '0'; }();
-            device_build = !host_build_env && m_eeq_gpu->localInverseDeviceBuildPossible(N);
-        }
+        // Oct 2026: the default is the device build (CUDA, and ROCm since Oct 2026); the host build
+        // stays for the CUDA multi-GPU split and as comparison (CURCUMA_LOCALINV_HOST_BUILD=1).
+        const bool device_build = localInverseDeviceBuildSelected(N);
         if (!device_build && nfrag > kLocalInvMaxNfrag) {
             if (!m_eeq_li) {
                 CurcumaLogger::warn(fmt::format("EEQ GPU ppcg localinv: nfrag = {} > {} (dense S^-1 on the device), "
@@ -2181,7 +2193,7 @@ void GFNFFGpuMethodImpl<Backend>::prepareLocalInverseGPU(int N, double cutoff_sq
         }
         if (!rebuild) return;
 
-        if constexpr (Backend::has_device_schur) {
+        if constexpr (Backend::has_localinv_device_build) {
             if (device_build) {
                 // The device builds G inside the next WP7-E solve, from the matrix assembled there; this
                 // record keeps the geometry for the rebuild rule, finishLocalInverseGPU books the result.
@@ -2264,7 +2276,7 @@ void GFNFFGpuMethodImpl<Backend>::prepareLocalInverseGPU(int N, double cutoff_sq
 template <class Backend>
 void GFNFFGpuMethodImpl<Backend>::finishLocalInverseGPU()
 {
-    if constexpr (Backend::has_device_schur) {
+    if constexpr (Backend::has_localinv_device_build) {
         if (!m_eeq_localinv) return;
         const auto st = m_eeq_gpu->localInverseDeviceStats();
         if (st.builds > m_eeq_li_seen_dev_builds) {
