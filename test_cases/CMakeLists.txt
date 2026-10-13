@@ -475,6 +475,24 @@ foreach(EO_MOL triose caffeine)
         set_tests_properties(gfnff_gpu_energy_only_geometry_${EO_MOL}
             PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu")
     endif()
+    # Claude Generated (Oct 2026): the same check on ROCm, with the fused dispersion gather (default) and with
+    # CURCUMA_ROCM_DISP_FUSED=0 (per-pair C6/dC6dCN kernel). The fused path leaves the per-pair C6 stale in gradient
+    # calls and refills it before the next energy-only call; this test is the only one that runs that refill.
+    if(USE_ROCM)
+        add_test(NAME gfnff_rocm_energy_only_geometry_${EO_MOL}
+                 COMMAND test_gfnff_energy_only_geometry
+                         ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/${EO_MOL}.xyz rocm
+                 WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+        set_tests_properties(gfnff_rocm_energy_only_geometry_${EO_MOL}
+            PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm")
+        add_test(NAME gfnff_rocm_energy_only_geometry_unfused_${EO_MOL}
+                 COMMAND test_gfnff_energy_only_geometry
+                         ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/${EO_MOL}.xyz rocm
+                 WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+        set_tests_properties(gfnff_rocm_energy_only_geometry_unfused_${EO_MOL}
+            PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm"
+                       ENVIRONMENT "CURCUMA_ROCM_DISP_FUSED=0")
+    endif()
 endforeach()
 
 
