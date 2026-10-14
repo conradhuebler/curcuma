@@ -20,9 +20,10 @@ ROCm `-opt` of a 114-atom and a 66-atom molecule is 3x slower than the CPU (n = 
 
 ## Where the ROCm time goes (gfn2, peo201-chain, 1410 atoms, nao 3222, 15.0 s)
 
-SCF 12.4 s (82 %), of which the generalized eigensolve 11.7 s: 7 FP32 iterations at 0.64 s and 5 FP64 iterations at
-1.55 s (switch at `scf_fp32_threshold` 1e-3). Setup 1.2 s (`k_overlap_h0` 0.46 s), D4 ATM 3-body 1.2 s (one FP64 kernel,
-`k_d4_atm`). peo201-water500 (2910 atoms, nao 6222, 79 s): eigensolve 86 %, FP32 3.4 s and FP64 9.4 s per iteration.
+SCF 12.4 s (82 %), of which the "solve eigen" timer shows 11.7 s: 7 FP32 iterations at 0.64 s and 5 FP64 iterations at
+1.55 s (switch at `scf_fp32_threshold` 1e-3); the solver itself is 9.7 s of that (7 x 428 + 5 x 1337 ms), the remaining
+2.0 s is the FP64 density GEMM (see below). Setup 1.2 s (`k_overlap_h0` 0.46 s), D4 ATM 3-body 1.2 s (one FP64 kernel,
+`k_d4_atm`). peo201-water500 (2910 atoms, nao 6222, 79 s): "solve eigen" timer 86 % (FP32 3.4 s and FP64 9.4 s per iteration, density GEMM included; at standalone dgemm speed 1.1 s per iteration it would be about 13 s of the 68 s, estimate).
 rocprofv3 on the 1410-atom run: GPU busy 13.0 of about 15 s; FP64 GEMM kernels (inside sygst/syevd) 5.5 s,
 `latrd` (tridiagonalisation, gemv) 1.8 s.
 
@@ -33,13 +34,27 @@ rocprofv3 on the 1410-atom run: GPU busy 13.0 of about 15 s; FP64 GEMM kernels (
 | 3222 | 410 / 1327 | 240 / 966 | 148 / 247 | 23 / 149 | 6.8 / 0.43 |
 | 6222 | 1992 / 7998 | 1534 / 6212 | 365 / 994 | 88 / 885 | 7.2 / 0.43 |
 
-In curcuma the same solves take 640 / 1550 ms (n = 3222) and 3.4 / 9.4 s (n = 6222), 1.2 to 1.7 times the standalone
-numbers (random test matrices, cause not investigated). Jacobi, QR and bisection variants are 10 to 50 times slower than
+In curcuma the solver call is as fast as standalone: temporary timers in `resSolveMP` (not committed) gave 416 to 435 ms
+(ssygvd, hipEvent 417 to 426 ms, n = 7 calls) and 1330 to 1396 ms (dsygvd, n = 5 calls) at n = 3222, so the earlier
+impression of "1.2 to 1.7 times slower" came from comparing the SCF iteration time (640 / 1545 ms) and the
+"solve eigen" timer of `-verbosity 3` (11.7 s = 7 x 428 + 5 x 1337 ms + about 2.0 s) with the standalone number.
+The difference is the density matrix: `resDensity` computes P = (C diag(occ)) C^T with a full n x n x n `rocblas_dgemm`
+(`xtb_hip_context.hip`, `resDensity`), although columns beyond `ncol` are zero. rocprofv3 shows one FP64 GEMM kernel of
+165 ms per iteration (n = 3222; 0.43 TFLOPS peak FP64 gives 2 n^3 / 0.43e12 = 160 ms), and thread count does not matter
+(`-threads` 1 / 4 / 10: 710 / 655 / 660 ms per FP32 iteration, n = 1). Jacobi, QR and bisection variants are 10 to 50 times slower than
 syevd (`syevdj` 80 s at n = 6222). FP32 purification (2 GEMM + geam per iteration, 17.3 ms at n = 3222, 120 ms at 6222)
 only beats sygvd below about 10 to 16 iterations (arithmetic from the table, not a converging purification).
 
+## Density GEMM (new finding, same day)
+
+P is built with a full n^3 FP64 GEMM. Using only the `ncol` occupied columns and a symmetric rank-k update
+(`rocblas_dsyrk` on C diag(sqrt(occ)), valid because occupations are non-negative) would cut the flops by about a factor 4
+(E: 165 -> about 40 ms per iteration at n = 3222, 12 iterations: about 1.5 s of the 15 s run; at n = 6222 about 10 s of
+79 s). Not implemented; results change at rounding level only. In FP32 iterations the same product could run in FP32.
+
 ## Levers (estimates marked E are arithmetic on the numbers above, not measured in curcuma)
 
+0. **Density GEMM** (previous section).
 1. **Precomputed L instead of potrf + sygst per iteration.** The device already holds L (S is constant per geometry);
    F' = L^-1 F L^-T needs two trsm (7 ms each FP32, 85 ms FP64 at n = 3222). E: FP32 solve 410 -> 265 ms (-35 %),
    FP64 1327 -> 1190 ms (-10 %).
