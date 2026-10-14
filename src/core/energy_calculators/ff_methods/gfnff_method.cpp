@@ -4423,7 +4423,10 @@ GFNFF::BondHBRebuildResult GFNFF::rebuildBondHBDataCore(
     {
         const size_t nhbs = n_hb;
         const int T = (nhbs < 20000) ? 1 : std::max(1, m_threads);
-        const int nchunk = (T == 1) ? 1 : 4 * T;
+        // Oct 2026: 16 chunks per thread (was 4). A device-built list grouped by case type (ROCm) has all hits
+        // (cases 2-4) in its last quarter; with 4 chunks per thread those heavy chunks were scheduled last
+        // (3.1-4.0 ms instead of 2.0-2.5 ms at 590k triples). The joined result does not depend on the count.
+        const int nchunk = (T == 1) ? 1 : 16 * T;
         std::vector<std::vector<std::pair<int, int>>> hits(nchunk);
         auto scan = [&](int c) {
             const size_t a = nhbs * c / nchunk, e = nhbs * (c + 1) / nchunk;

@@ -4016,6 +4016,550 @@ __global__ __launch_bounds__(DISP_ROW_BLOCK) void k_disp_csr_lower(
 }
 
 // ============================================================================
+// Device-side H-bond detection (Claude Generated, Oct 2026): port of the CUDA kernels of
+// cuda/gfnff_kernels.cu (d_hb_* helpers and k_hb_to_float unchanged; AB pairs per row (k_hb_ab_rows), k_hb_detect with
+// row counting; ordering by rows instead of a sort of 64-bit keys, see FFWorkspaceHip::detectHBondsOnDevice()).
+// Host reference: GFNFF::detectHydrogenBondsNative(), cell-list branch (process_pair / make_nhb2 and
+// case1StrengthDecision / estimateHBStrengthCase1). Constants as in k_hbonds.
+// ============================================================================
+
+__device__ __forceinline__ bool d_hb_bonded(int a, int b, const int* __restrict__ off, const int* __restrict__ idx)
+{
+    for (int p = off[a]; p < off[a + 1]; ++p)
+        if (idx[p] == b) return true;
+    return false;
+}
+
+__device__ __forceinline__ double d_hb_dist2(const double* __restrict__ cx, const double* __restrict__ cy,
+                                              const double* __restrict__ cz, int a, int b)
+{
+    const double dx = cx[a] - cx[b], dy = cy[a] - cy[b], dz = cz[a] - cz[b];
+    return dx * dx + dy * dy + dz * dz;
+}
+
+/// |E_HB| of a case-1 triple, the formula of estimateHBStrengthCase1() (and of the energy kernel).
+__device__ double d_hb_case1_strength(const double* __restrict__ cx, const double* __restrict__ cy,
+                                       const double* __restrict__ cz, const int* __restrict__ Z,
+                                       const double* __restrict__ bas, const double* __restrict__ aci,
+                                       const double* __restrict__ q, int A, int H, int B, double thr)
+{
+    const double r_AH = sqrt(d_hb_dist2(cx, cy, cz, A, H));
+    const double r_HB = sqrt(d_hb_dist2(cx, cy, cz, H, B));
+    const double r_AB = sqrt(d_hb_dist2(cx, cy, cz, A, B));
+    const double r_vdw = d_cov_radii[Z[A] - 1] + d_cov_radii[Z[B] - 1];
+    // Upper bound first (case1StrengthDecision() of the host): no pow, rejects most candidates. Valid for
+    // non-negative basicities and acidities; returns 0 when the bound is below the threshold.
+    {
+        const double expo_b = (49.0 / r_vdw) * ((r_AH + r_HB) / r_AB - 1.0);
+        if (expo_b > 15.0) return 0.0;
+        const double bA = bas[A], bB = bas[B], aA = aci[A], aB = aci[B];
+        if (bA >= 0.0 && bB >= 0.0 && aA >= 0.0 && aB >= 0.0) {
+            const double t = r_AB * r_AB / 85.0;
+            const double t2 = t * t;
+            const double outl_bound = (expo_b > 0.0) ? 2.0 * exp(-expo_b) : 2.0;
+            const double bound = fmax(bA, bB) * fmax(aA, aB) / (1.0 + t2 * t2 * t2) / (r_AB * r_AB * r_AB) * outl_bound;
+            if (isfinite(bound) && bound < thr * (1.0 - 1e-6)) return 0.0;
+        }
+    }
+    const double r_AH_4 = r_AH * r_AH * r_AH * r_AH;
+    const double r_HB_4 = r_HB * r_HB * r_HB * r_HB;
+    const double denom_DA = 1.0 / (r_AH_4 + r_HB_4);
+    const double Q_H = d_charge_scaling(q[H], 15.0, 1.0);
+    const double Q_A = d_charge_scaling(-q[A], 15.0, 1.0);
+    const double Q_B = d_charge_scaling(-q[B], 15.0, 1.0);
+    const double b = (Q_A * bas[A] * r_AH_4 + Q_B * bas[B] * r_HB_4) * denom_DA;
+    const double a = (aci[B] * r_AH_4 + aci[A] * r_HB_4) * denom_DA;
+    const double ratio_s = 22.0 * r_vdw / (r_AB * r_AB);
+    const double damp_short = 1.0 / (1.0 + pow(ratio_s, 6.0));
+    const double damp_long = 1.0 / (1.0 + pow(r_AB * r_AB / 85.0, 6.0));
+    const double expo = (49.0 / r_vdw) * ((r_AH + r_HB) / r_AB - 1.0);
+    const double damp_outl = (expo > 15.0) ? 0.0 : 2.0 / (1.0 + exp(expo));
+    const double rdamp = damp_short * damp_long / (r_AB * r_AB * r_AB);
+    return fabs(b * a * rdamp * (Q_H * damp_outl));
+}
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_to_float(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    float* fx, float* fy, float* fz)
+{
+    const int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= N) return;
+    fx[a] = static_cast<float>(cx[a]); fy[a] = static_cast<float>(cy[a]); fz[a] = static_cast<float>(cz[a]);
+}
+
+/// Claude Generated (Oct 2026): float copies of the HB hydrogen positions in hyd_list order, packed (x, y, z, unused)
+/// for the case-1 loop of k_hb_detect_rows: one coalesced 16-byte load per candidate instead of the index load
+/// followed by three dependent gathers (k_hb_detect_rows 10.8 -> 8.8 ms at 6200 atoms on the RX 9060 XT).
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_pack_hyd(int n_hyd, const int* __restrict__ hyd_list,
+                                                        const float* __restrict__ fx, const float* __restrict__ fy,
+                                                        const float* __restrict__ fz, float4* __restrict__ hpos)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= n_hyd) return;
+    const int H = hyd_list[k];
+    hpos[k] = make_float4(fx[H], fy[H], fz[H], 0.f);
+}
+
+/// FP32 evaluation of the case-1 strength of d_hb_case1_strength(): returns -1 (surely below thr), +1 (surely at
+/// or above thr) or 0 (within a 1 % band around thr or a borderline out-of-line exponent: the caller runs the
+/// double path). The float evaluation is good to about 1e-5 relative, the 1 % band covers it with a wide margin.
+__device__ __forceinline__ int d_hb_strength_decision_f(
+    const float* __restrict__ fx, const float* __restrict__ fy, const float* __restrict__ fz,
+    const int* __restrict__ Z, const double* __restrict__ bas, const double* __restrict__ aci,
+    const double* __restrict__ q, int A, int H, int B, float thr)
+{
+    const float ax = fx[H] - fx[A], ay = fy[H] - fy[A], az = fz[H] - fz[A];
+    const float hx = fx[B] - fx[H], hy = fy[B] - fy[H], hz = fz[B] - fz[H];
+    const float bx = fx[B] - fx[A], by = fy[B] - fy[A], bz = fz[B] - fz[A];
+    const float r_AH2 = ax * ax + ay * ay + az * az;
+    const float r_HB2 = hx * hx + hy * hy + hz * hz;
+    const float r_AB2 = bx * bx + by * by + bz * bz;
+    const float r_AH = sqrtf(r_AH2), r_HB = sqrtf(r_HB2), r_AB = sqrtf(r_AB2);
+    const float r_vdw = static_cast<float>(d_cov_radii[Z[A] - 1] + d_cov_radii[Z[B] - 1]);
+    const float expo = (49.f / r_vdw) * ((r_AH + r_HB) / r_AB - 1.f);
+    if (expo > 15.01f) return -1;              // damping is exactly 0 beyond 15
+    if (expo > 14.99f) return 0;               // borderline: the double path decides
+    const float bA = static_cast<float>(bas[A]), bB = static_cast<float>(bas[B]);
+    const float aA = static_cast<float>(aci[A]), aB = static_cast<float>(aci[B]);
+    const float r_AH4 = r_AH2 * r_AH2, r_HB4 = r_HB2 * r_HB2;
+    const float denom = 1.f / (r_AH4 + r_HB4);
+    auto cs = [](float qq) { const float e = expf(15.f * qq); return e / (e + 1.f); };
+    const float Q_H = cs(static_cast<float>(q[H]));
+    const float Q_A = cs(-static_cast<float>(q[A]));
+    const float Q_B = cs(-static_cast<float>(q[B]));
+    const float b = (Q_A * bA * r_AH4 + Q_B * bB * r_HB4) * denom;
+    const float a = (aB * r_AH4 + aA * r_HB4) * denom;
+    const float rs = 22.f * r_vdw / r_AB2;
+    const float rs2 = rs * rs;
+    const float damp_short = 1.f / (1.f + rs2 * rs2 * rs2);
+    const float t = r_AB2 / 85.f;
+    const float t2 = t * t;
+    const float damp_long = 1.f / (1.f + t2 * t2 * t2);
+    const float damp_outl = 2.f / (1.f + expf(expo));
+    const float est = fabsf(b * a * (damp_short * damp_long / (r_AB2 * r_AB)) * (Q_H * damp_outl));
+    if (!isfinite(est)) return 0;
+    if (est < 0.99f * thr) return -1;
+    if (est > 1.01f * thr) return 1;
+    return 0;
+}
+
+/// Claude Generated (Oct 2026): AB pairs of the H-bond detection, same predicate as the CUDA k_hb_ab_pairs, but one
+/// workgroup per atom i (partners j > i over the threads) instead of one thread per upper-triangle index: no
+/// double-precision sqrt for the index mapping and no work at all for atoms that cannot be donor or acceptor
+/// (one thread per pair: 2.9 ms, per row: 0.3 ms on the RX 9060 XT at 6200 atoms). Arrival order (atomic slot).
+__global__ __launch_bounds__(256) void k_hb_ab_rows(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const double* __restrict__ bas, const double* __restrict__ aci, const char* __restrict__ ab_ok,
+    double thr1, int cap, int* d_counter, int* ab_i, int* ab_j)
+{
+    const int i = blockIdx.x;
+    if (i >= N || !ab_ok[i]) return;
+    const double bi = bas[i], ai = aci[i];
+    for (int j = i + 1 + static_cast<int>(threadIdx.x); j < N; j += blockDim.x) {
+        if (!ab_ok[j]) continue;
+        if (d_hb_dist2(cx, cy, cz, i, j) > thr1) continue;
+        const double s1 = bi * aci[j], s2 = bas[j] * ai;
+        if (s1 < 1e-6 && s2 < 1e-6) continue;
+        const int pos = atomicAdd(d_counter, 1);
+        if (pos < cap) { ab_i[pos] = i; ab_j[pos] = j; }
+    }
+}
+
+/// Claude Generated (Oct 2026): threads per AB pair (one workgroup per pair) in k_hb_detect_rows and capacity of its
+/// shared-memory candidate queue. The kernel synchronises with __syncthreads and shared-memory atomics only (no
+/// shuffle, ballot or other wavefront intrinsic), so it is correct for wave32 (gfx11xx, gfx12xx) and wave64 alike.
+constexpr int HB_DETECT_THREADS = 128;
+constexpr int HB_DETECT_QUEUE = 1024;
+constexpr int HB_DETECT_PER_THREAD = 4;   ///< hydrogens per thread and pre-filter round (queue holds two rounds)
+
+/// Claude Generated (Oct 2026): the H-bond triples of the CUDA k_hb_detect (cuda/gfnff_kernels.cu, same tests in the
+/// same order), one workgroup per AB pair. Thread 0 emits the nhb2 triples (cases 2-4). For case 1 the threads first
+/// apply the float pre-filter to the HB hydrogens and queue the survivors in shared memory (about 1 % of the
+/// hydrogens at 6200 atoms); the queue is then worked off by all threads (exact double tests, bonded tests, strength
+/// decision), so the slow path does not run on one lane while the others of its wavefront wait (8.8 -> 4.2 ms at
+/// 6200 atoms, 76k AB pairs x 3600 hydrogens, RX 9060 XT). Emission: the
+/// workgroup reserves its slots with one global atomic per queue round. Each triple goes to an unordered slot together
+/// with its row, row = (case - 1) * N + A (case_rows) or A, whose length is counted in row_count;
+/// FFWorkspaceHip::detectHBondsOnDevice() orders the rows afterwards. Counting continues past `cap` (the caller reruns).
+__global__ __launch_bounds__(HB_DETECT_THREADS) void k_hb_detect_rows(
+    int n_ab, const int* __restrict__ ab_i, const int* __restrict__ ab_j,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const float* __restrict__ fx, const float* __restrict__ fy, const float* __restrict__ fz, int N,
+    const int* __restrict__ Z, const double* __restrict__ bas, const double* __restrict__ aci,
+    const double* __restrict__ q,
+    const int* __restrict__ hyd_list, const float4* __restrict__ hpos, int n_hyd,
+    const int* __restrict__ bond_off, const int* __restrict__ bond_idx,
+    const int* __restrict__ hyd_off, const int* __restrict__ hyd_idx,
+    const int* __restrict__ nbr_off, const int* __restrict__ nbr_idx,
+    double thr2, double min_pair_energy, int case_rows,
+    int cap, int* d_counter, int* row_count,
+    int* e_A, int* e_H, int* e_B, int* e_ct, int* e_par)
+{
+    __shared__ int s_queue[HB_DETECT_QUEUE];
+    __shared__ int s_qn, s_emit, s_base;
+    const int pair = blockIdx.x;
+    if (pair >= n_ab) return;   // uniform per workgroup
+    const int tid = threadIdx.x;
+    const int i = ab_i[pair], j = ab_j[pair];
+    const double r_AB_sq = d_hb_dist2(cx, cy, cz, i, j);
+
+    auto store = [&](int pos, int A, int H, int B, int ct, int par) {
+        atomicAdd(row_count + (case_rows ? (ct - 1) * N + A : A), 1);
+        if (pos < cap) {
+            e_A[pos] = A; e_H[pos] = H; e_B[pos] = B; e_ct[pos] = ct; e_par[pos] = par;
+        }
+    };
+
+    // nhb2: hydrogen bonded to the donor (make_nhb2): case 2, 3 (carbonyl-like acceptor O) or 4 (two-coordinate N)
+    if (tid == 0) {
+        s_qn = 0; s_emit = 0;
+        if (!d_hb_bonded(i, j, bond_off, bond_idx)) {
+            auto emit_nhb2 = [&](int donor, int H, int acc) {
+                int ct = 2, par = -1;
+                const int deg = nbr_off[acc + 1] - nbr_off[acc];
+                if (Z[acc] == 8 && deg == 1) {
+                    const int parent = nbr_idx[nbr_off[acc]];
+                    if (Z[parent] == 6 || Z[parent] == 7) { ct = 3; par = parent; }
+                } else if (Z[acc] == 7 && deg == 2) {
+                    ct = 4;
+                }
+                store(atomicAdd(d_counter, 1), donor, H, acc, ct, par);
+            };
+            for (int p = hyd_off[i]; p < hyd_off[i + 1]; ++p) emit_nhb2(i, hyd_idx[p], j);
+            for (int p = hyd_off[j]; p < hyd_off[j + 1]; ++p) {
+                const int H = hyd_idx[p];
+                if (d_hb_bonded(i, H, bond_off, bond_idx)) continue;  // bonded to i takes precedence
+                emit_nhb2(j, H, i);
+            }
+        }
+    }
+    __syncthreads();
+
+    // case 1: hydrogen bonded to neither, sum-of-squared-distances criterion (gfnff_ini2.f90:742). Float pre-filter
+    // (relative margin 1e-4) into the queue, then the double test that decides as on the host.
+    const float fxi = fx[i], fyi = fy[i], fzi = fz[i], fxj = fx[j], fyj = fy[j], fzj = fz[j];
+    const float f_rab = static_cast<float>(r_AB_sq);
+    const float f_reject = static_cast<float>(thr2) * 1.0001f;
+    // exact case-1 test of queued hydrogen hq (true: emit (i, H, j))
+    auto exact = [&](int hq) -> bool {
+        const int H = hyd_list[hq];
+        if (H == i) return false;                              // forEachNeighbor excludes the query atom
+        const double r_iH_sq = d_hb_dist2(cx, cy, cz, i, H);
+        if (r_iH_sq > thr2) return false;                      // cell query radius sqrt(thr2)
+        const double r_jH_sq = d_hb_dist2(cx, cy, cz, j, H);
+        if (!(r_AB_sq + r_iH_sq + r_jH_sq < thr2)) return false;
+        if (d_hb_bonded(i, H, bond_off, bond_idx) || d_hb_bonded(j, H, bond_off, bond_idx)) return false;
+        if (min_pair_energy > 0.0) {
+            const int dec = d_hb_strength_decision_f(fx, fy, fz, Z, bas, aci, q, i, H, j, static_cast<float>(min_pair_energy));
+            if (dec < 0) return false;
+            if (dec == 0) {                                    // within the float margin: the exact (double) value decides
+                const double est = d_hb_case1_strength(cx, cy, cz, Z, bas, aci, q, i, H, j, min_pair_energy);
+                if (est < min_pair_energy) return false;       // NaN keeps the entry, as on the host
+            }
+        }
+        return true;
+    };
+    constexpr int round = HB_DETECT_THREADS * HB_DETECT_PER_THREAD;
+    for (int h0 = 0; h0 < n_hyd; h0 += round) {
+        for (int u = 0; u < HB_DETECT_PER_THREAD; ++u) {
+            const int hq = h0 + u * HB_DETECT_THREADS + tid;
+            if (hq >= n_hyd) break;
+            const float4 hp = hpos[hq];
+            const float ax = hp.x - fxi, ay = hp.y - fyi, az = hp.z - fzi;
+            const float f_ih = ax * ax + ay * ay + az * az;
+            const float bx = hp.x - fxj, by = hp.y - fyj, bz = hp.z - fzj;
+            if (!(f_ih > f_reject) && !(f_rab + f_ih + (bx * bx + by * by + bz * bz) > f_reject))
+                s_queue[atomicAdd(&s_qn, 1)] = hq;
+        }
+        __syncthreads();
+        const int qn = s_qn;   // uniform after the barrier
+        __syncthreads();       // every thread has read s_qn before the next round appends to it
+        if (qn + round <= HB_DETECT_QUEUE && h0 + round < n_hyd) continue;   // room for one more round
+        // work off the queue in rounds of HB_DETECT_THREADS; one global atomic per round reserves the slots
+        for (int r0 = 0; r0 < qn; r0 += HB_DETECT_THREADS) {
+            const int x = r0 + tid;
+            const int hq_x = (x < qn) ? s_queue[x] : -1;
+            const bool emit = (hq_x >= 0) && exact(hq_x);
+            const int local = emit ? atomicAdd(&s_emit, 1) : -1;
+            __syncthreads();
+            if (tid == 0) { s_base = (s_emit > 0) ? atomicAdd(d_counter, s_emit) : 0; }
+            __syncthreads();
+            if (emit) store(s_base + local, i, hyd_list[hq_x], j, 1, -1);
+            __syncthreads();
+            if (tid == 0) s_emit = 0;
+            __syncthreads();
+        }
+        if (tid == 0) s_qn = 0;
+        __syncthreads();
+    }
+}
+// ---------------------------------------------------------------------------
+// Claude Generated (Oct 2026): exclusive scan of an int array on the device (out has n + 1 entries, out[n] is the
+// total; *total_out receives it as well when given). Three launches: tiles of HB_SCAN_TILE elements, the tile sums
+// in one workgroup, the tile offsets added. Shared-memory scan with __syncthreads only (no wavefront intrinsic).
+// ---------------------------------------------------------------------------
+constexpr int HB_SCAN_THREADS = 256;
+constexpr int HB_SCAN_ITEMS = 4;
+constexpr int HB_SCAN_TILE = HB_SCAN_THREADS * HB_SCAN_ITEMS;
+
+/// Exclusive prefix of v over the workgroup (HB_SCAN_THREADS threads); *total receives the sum.
+__device__ inline int hbBlockExclusiveScan(int v, int* s, int* total)
+{
+    const int t = threadIdx.x;
+    s[t] = v;
+    __syncthreads();
+    for (int off = 1; off < HB_SCAN_THREADS; off <<= 1) {
+        const int x = (t >= off) ? s[t - off] : 0;
+        __syncthreads();
+        s[t] += x;
+        __syncthreads();
+    }
+    const int incl = s[t];
+    *total = s[HB_SCAN_THREADS - 1];
+    __syncthreads();   // s is reused by the caller
+    return incl - v;
+}
+
+__global__ __launch_bounds__(HB_SCAN_THREADS) void k_hb_scan_tiles(int n, const int* __restrict__ in,
+                                                                   int* __restrict__ out, int* __restrict__ tile_sums)
+{
+    __shared__ int s[HB_SCAN_THREADS];
+    const int base = blockIdx.x * HB_SCAN_TILE + threadIdx.x * HB_SCAN_ITEMS;
+    int v[HB_SCAN_ITEMS];
+    int sum = 0;
+    for (int k = 0; k < HB_SCAN_ITEMS; ++k) {
+        v[k] = (base + k < n) ? in[base + k] : 0;
+        sum += v[k];
+    }
+    int total = 0;
+    int run = hbBlockExclusiveScan(sum, s, &total);
+    for (int k = 0; k < HB_SCAN_ITEMS; ++k) {
+        if (base + k < n) out[base + k] = run;
+        run += v[k];
+    }
+    if (threadIdx.x == 0) tile_sums[blockIdx.x] = total;
+}
+
+__global__ __launch_bounds__(HB_SCAN_THREADS) void k_hb_scan_tile_sums(int ntiles, int* __restrict__ tile_sums,
+                                                                       int* __restrict__ out, int n,
+                                                                       int* __restrict__ total_out)
+{
+    __shared__ int s[HB_SCAN_THREADS];
+    int carry = 0;
+    for (int b0 = 0; b0 < ntiles; b0 += HB_SCAN_THREADS) {
+        const int b = b0 + static_cast<int>(threadIdx.x);
+        const int v = (b < ntiles) ? tile_sums[b] : 0;
+        int total = 0;
+        const int ex = hbBlockExclusiveScan(v, s, &total);
+        if (b < ntiles) tile_sums[b] = carry + ex;
+        carry += total;
+    }
+    if (threadIdx.x == 0) {
+        out[n] = carry;
+        if (total_out) *total_out = carry;
+    }
+}
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_scan_add(int n, int* __restrict__ out, const int* __restrict__ tile_sums)
+{
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t < n) out[t] += tile_sums[t / HB_SCAN_TILE];
+}
+
+// ---------------------------------------------------------------------------
+// Claude Generated (Oct 2026): ordering of rows. The scatter puts each element into its row in arrival order;
+// k_hb_row_sort then sorts each row (one workgroup per row) by its key: (H, B) for the triples (key H*N+B), the
+// slot index for the per-atom slot lists. Keys within a row are unique, so the result does not depend on the
+// arrival order. Bitonic network in its "flip" form (every comparator puts the smaller key at the lower index), so a
+// row of length L that is not a power of two is sorted by skipping every comparator whose upper index is >= L
+// (those positions act as +infinity and never move). Rows up to the launch's shared capacity (the next power of two
+// of the longest row, at most HB_SORT_SHM entries) are sorted in shared memory,
+// longer ones in place in global memory with the keys recomputed from the values.
+// ---------------------------------------------------------------------------
+constexpr int HB_SORT_THREADS = 256;
+constexpr int HB_SORT_SHM = 4096;   ///< largest row sorted in shared memory (48 KB for the triples)
+
+/// Element e of a row: atomic slot within its row (arrival order).
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_row_scatter(int n, const int* __restrict__ row_of_a,
+                                                           const int* __restrict__ row_of_ct, int N, int case_rows,
+                                                           const int* __restrict__ row_off, int* __restrict__ row_fill,
+                                                           int* __restrict__ out)
+{
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= n) return;
+    // triples: row = (case - 1) * N + A (case_rows) or A; slots (row_of_ct == nullptr): row = atom
+    const int a = row_of_a[e];
+    if (a < 0 || a >= N) return;   // slots of atoms outside [0, N) are not gathered (buildHBSlotTables)
+    const int row = (row_of_ct && case_rows) ? (row_of_ct[e] - 1) * N + a : a;
+    out[row_off[row] + atomicAdd(row_fill + row, 1)] = e;
+}
+
+/// Key of value v: H*N+B of triple v (eH != nullptr) or v itself (slot index).
+__device__ __forceinline__ long long hbRowKey(int v, const int* __restrict__ eH, const int* __restrict__ eB, int N)
+{
+    return eH ? static_cast<long long>(eH[v]) * N + eB[v] : static_cast<long long>(v);
+}
+
+/// Sorts n_rows rows of vals (row r is vals[row_off[r] .. row_off[r+1])) ascending by hbRowKey.
+__global__ __launch_bounds__(HB_SORT_THREADS) void k_hb_row_sort(int n_rows, const int* __restrict__ row_off,
+                                                                 int* __restrict__ vals, const int* __restrict__ eH,
+                                                                 const int* __restrict__ eB, int N, int shm_cap)
+{
+    // dynamic shared memory of the launch: shm_cap keys (8 bytes) and values (4 bytes) for the triples (eH given),
+    // shm_cap values only for the slot lists (the value is the key)
+    extern __shared__ long long s_dyn[];
+    const int r = blockIdx.x;
+    if (r >= n_rows) return;
+    const int off = row_off[r];
+    const int L = row_off[r + 1] - off;
+    if (L <= 1) return;
+    int* v = vals + off;
+    const bool with_key = (eH != nullptr);
+    long long* s_key = s_dyn;
+    int* s_val = with_key ? reinterpret_cast<int*>(s_dyn + shm_cap) : reinterpret_cast<int*>(s_dyn);
+    int P = 1;
+    while (P < L) P <<= 1;
+    const bool shm = (L <= shm_cap);
+    if (shm) {
+        for (int x = threadIdx.x; x < L; x += blockDim.x) {
+            s_val[x] = v[x];
+            if (with_key) s_key[x] = hbRowKey(v[x], eH, eB, N);
+        }
+        __syncthreads();
+    }
+    auto cmpswap = [&](int a, int b) {
+        if (shm) {
+            if (with_key) {
+                if (s_key[a] > s_key[b]) {
+                    const long long tk = s_key[a]; s_key[a] = s_key[b]; s_key[b] = tk;
+                    const int tv = s_val[a]; s_val[a] = s_val[b]; s_val[b] = tv;
+                }
+            } else if (s_val[a] > s_val[b]) {
+                const int tv = s_val[a]; s_val[a] = s_val[b]; s_val[b] = tv;
+            }
+        } else if (hbRowKey(v[a], eH, eB, N) > hbRowKey(v[b], eH, eB, N)) {
+            const int tv = v[a]; v[a] = v[b]; v[b] = tv;
+        }
+    };
+    const int half_P = P >> 1;
+    for (int k = 2; k <= P; k <<= 1) {
+        const int hk = k >> 1;
+        for (int idx = threadIdx.x; idx < half_P; idx += blockDim.x) {   // flip: i with its mirror in the k-block
+            const int a = (idx / hk) * k + (idx % hk);
+            const int b = a ^ (k - 1);
+            if (b < L) cmpswap(a, b);
+        }
+        __syncthreads();
+        for (int d = k >> 2; d > 0; d >>= 1) {                           // half-cleaners
+            for (int idx = threadIdx.x; idx < half_P; idx += blockDim.x) {
+                const int a = (idx / d) * 2 * d + (idx % d);
+                const int b = a + d;
+                if (b < L) cmpswap(a, b);
+            }
+            __syncthreads();
+        }
+    }
+    if (shm)
+        for (int x = threadIdx.x; x < L; x += blockDim.x) v[x] = s_val[x];
+}
+
+/// Claude Generated (Oct 2026): *out = max over cnt[0..n) (one workgroup of HB_SORT_THREADS threads).
+__global__ __launch_bounds__(HB_SORT_THREADS) void k_hb_max(int n, const int* __restrict__ cnt, int* __restrict__ out)
+{
+    __shared__ int s[HB_SORT_THREADS];
+    int m = 0;
+    for (int x = threadIdx.x; x < n; x += blockDim.x) m = max(m, cnt[x]);
+    s[threadIdx.x] = m;
+    __syncthreads();
+    for (int h = HB_SORT_THREADS / 2; h > 0; h >>= 1) {
+        if (static_cast<int>(threadIdx.x) < h) s[threadIdx.x] = max(s[threadIdx.x], s[threadIdx.x + h]);
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) *out = s[0];
+}
+
+/// Claude Generated (Oct 2026): port of k_hb_fill_columns; triple t of the final order is element order[t] of the
+/// unordered emission. Also writes the gradient-slot count of each triple (k_hbonds slot mode, buildHBSlotTables).
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_fill_columns_rows(
+    int n, const int* __restrict__ order,
+    const int* __restrict__ e_A, const int* __restrict__ e_H, const int* __restrict__ e_B,
+    const int* __restrict__ in_ct, const int* __restrict__ in_par, const int* __restrict__ Z,
+    const double* __restrict__ bas, const double* __restrict__ aci, const double* __restrict__ q,
+    const double* __restrict__ repz, const int* __restrict__ nbr_off, const int* __restrict__ nbr_idx,
+    int* idx_i, int* idx_j, int* idx_k, int* elem_A, int* elem_B,
+    double* q_H, double* q_A, double* q_B, double* bas_A, double* bas_B, double* aci_A, double* aci_B,
+    double* r_cut, int* case_type, int* acc_parent, double* repz_B, int* nbB_count, int* nbC_count,
+    int* slot_count)
+{
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n) return;
+    const int src = order[t];
+    const int A = e_A[src], H = e_H[src], B = e_B[src];
+    const int ct = in_ct[src];
+    const int par = in_par[src];
+    idx_i[t] = A; idx_j[t] = H; idx_k[t] = B;
+    elem_A[t] = Z[A]; elem_B[t] = Z[B];
+    q_H[t] = q[H]; q_A[t] = q[A]; q_B[t] = q[B];
+    bas_A[t] = bas[A]; bas_B[t] = bas[B];
+    aci_A[t] = aci[A]; aci_B[t] = aci[B];
+    r_cut[t] = 50.0;
+    case_type[t] = ct;
+    acc_parent[t] = par;
+    const int zB = Z[B];
+    repz_B[t] = (zB >= 1 && zB <= 86) ? repz[zB - 1] : 1.0;
+    const int cB = (ct >= 2) ? (nbr_off[B + 1] - nbr_off[B]) : 0;
+    int cC = 0;
+    if (ct == 3) {
+        for (int p = nbr_off[par]; p < nbr_off[par + 1]; ++p)
+            if (nbr_idx[p] != B) ++cC;
+    }
+    nbB_count[t] = cB;
+    nbC_count[t] = cC;
+    if (slot_count)
+        slot_count[t] = 3 + (ct >= 2 ? cB : 0) + ((ct == 3 && par >= 0) ? 1 + cC : 0);
+}
+
+/// Claude Generated (Oct 2026): port of k_hb_fill_neighbors plus the owning atom of every gradient slot in the
+/// order of buildHBSlotTables (A, H, B, nb(B) for case >= 2, C and nb(C) for case 3 with a parent) and the
+/// per-atom slot counts (atom_cnt, atoms outside [0, N) not counted).
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_fill_neighbors_slots(
+    int n, int N, const int* __restrict__ idx_i, const int* __restrict__ idx_j, const int* __restrict__ idx_k,
+    const int* __restrict__ case_type, const int* __restrict__ acc_parent,
+    const int* __restrict__ nbr_off, const int* __restrict__ nbr_idx,
+    const int* __restrict__ nbB_offset, const int* __restrict__ nbC_offset, int* nbB_flat, int* nbC_flat,
+    const int* __restrict__ slot_off, int* slot_atom, int* atom_cnt)
+{
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n) return;
+    const int ct = case_type[t];
+    const int B = idx_k[t];
+    const int par = acc_parent[t];
+    if (ct >= 2) {
+        int w = nbB_offset[t];
+        for (int p = nbr_off[B]; p < nbr_off[B + 1]; ++p) nbB_flat[w++] = nbr_idx[p];
+        if (ct == 3) {
+            w = nbC_offset[t];
+            for (int p = nbr_off[par]; p < nbr_off[par + 1]; ++p)
+                if (nbr_idx[p] != B) nbC_flat[w++] = nbr_idx[p];
+        }
+    }
+    if (!slot_off) return;
+    int s = slot_off[t];
+    auto put = [&](int a) {
+        slot_atom[s++] = a;
+        if (a >= 0 && a < N) atomicAdd(atom_cnt + a, 1);
+    };
+    put(idx_i[t]); put(idx_j[t]); put(B);
+    if (ct >= 2)
+        for (int p = nbr_off[B]; p < nbr_off[B + 1]; ++p) put(nbr_idx[p]);
+    if (ct == 3 && par >= 0) {
+        put(par);
+        for (int p = nbr_off[par]; p < nbr_off[par + 1]; ++p)
+            if (nbr_idx[p] != B) put(nbr_idx[p]);
+    }
+}
+
+// ============================================================================
 // Utility: zero device array
 // ============================================================================
 
@@ -4622,7 +5166,7 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_gather_rhs_fragments(
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"  // covalent_rad_d3
 
 #include <cstdlib>  // std::getenv (CURCUMA_GFNFF_GPU_FREEZE_HBQ opt-out)
-#include <thread>  // Claude Generated (Oct 2026): host threads of the HB list packing (hipHostParallelFor)
+#include <thread>
 
 #include "src/core/curcuma_logger.h"
 
@@ -4735,6 +5279,40 @@ struct HipPairGatherCSR {
     CudaBuffer<int> pairidx;  ///< [2n] pair index into the RepulsionSoA arrays
     int N = 0;
 };
+/// Claude Generated (Oct 2026): buffers of the device-side H-bond detection (FFWorkspaceHip::detectHBondsOnDevice()).
+/// Buffers only grow (ensure); e_* and order are the candidate buffers of `cap` entries (24 bytes each).
+struct HipHBDetectDev {
+    CudaBuffer<double> bas, aci, q, repz;
+    CudaBuffer<char>   ab_ok;
+    CudaBuffer<int>    hyd_list, bond_off, bond_idx, hyd_off, hyd_idx, nbr_off, nbr_idx;
+    CudaBuffer<int>    counter, ab_counter, ab_i, ab_j;
+    CudaBuffer<float>  fx, fy, fz;
+    CudaBuffer<float4> hpos;                         ///< [n_hyd] packed HB hydrogen positions (k_hb_pack_hyd)
+    CudaBuffer<int>    e_A, e_H, e_B, e_ct, e_par;   ///< [cap] triples in arrival order
+    CudaBuffer<int>    order;                        ///< [cap] arrival index of triple t of the final order
+    CudaBuffer<int>    row_cnt, row_off, row_fill;   ///< rows (case, A) or A: counts, offsets [R+1], fill cursors
+    CudaBuffer<int>    slot_cnt, slot_atom, atom_cnt; ///< gradient slots per triple, owning atom per slot, per atom
+    CudaBuffer<int>    scan_tiles, totals;           ///< scan scratch; [5] totals (nb_B, nb_C, slots, longest rows)
+    int ab_cap = 0, cap = 0;
+    int*   pin = nullptr;                           ///< pinned host stage of the (A, H, B) download
+    size_t pin_n = 0;
+    HipHBDetectDev() = default;
+    HipHBDetectDev(const HipHBDetectDev&) = delete;
+    HipHBDetectDev& operator=(const HipHBDetectDev&) = delete;
+    ~HipHBDetectDev() { if (pin) (void)hipHostFree(pin); }
+    /// Pinned stage of at least m ints (grows with 1/8 headroom); nullptr if no pinned memory could be had.
+    int* pinned(size_t m)
+    {
+        if (m <= pin_n) return pin;
+        if (pin) (void)hipHostFree(pin);
+        pin = nullptr; pin_n = 0;
+        const size_t want = m + m / 8;
+        if (hipHostMalloc(reinterpret_cast<void**>(&pin), want * sizeof(int)) != hipSuccess) { pin = nullptr; return nullptr; }
+        pin_n = want;
+        return pin;
+    }
+};
+
 /// Claude Generated (Oct 2026): host arrays of one HB list upload (fillHBondSoA, buildHBSlotTables), kept between
 /// refreshes so that a refresh neither zero-fills nor page-faults ~100 MB of fresh memory at 582k triples. Every
 /// element that is uploaded is written in each fill.
@@ -5505,6 +6083,7 @@ struct FFWorkspaceHipImpl {
     using HBSlotTables  = HipHBSlotTables;
     PairGatherCSR nb_rep_csr;
     HBSlotTables hb_slots;
+    HipHBDetectDev hbdet;            ///< Claude Generated (Oct 2026): device-side H-bond detection buffers
     bool rep_gather_enabled = true;  ///< CURCUMA_ROCM_REP_GATHER=0 restores the pair kernel k_repulsion (non-bonded list)
     bool hb_gather_enabled  = true;  ///< CURCUMA_ROCM_HB_GATHER=0 restores k_hbonds with atomicAdd
 
@@ -6529,6 +7108,273 @@ void FFWorkspaceHip::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
         m_last_hbonds = hbonds;
     else
         std::vector<GFNFFHydrogenBond>().swap(m_last_hbonds);
+}
+
+/// Claude Generated (Oct 2026): grow a device buffer with 1/8 headroom (the H-bond list changes by about 1 % between
+/// refreshes; ensure() without headroom reallocated on every growth, about 1 ms each at 590k triples).
+template <typename T>
+static void hbEnsure(CudaBuffer<T>& b, int count)
+{
+    if (count > b.n) b.alloc(count + count / 8 + 16);
+}
+
+/// Claude Generated (Oct 2026): k_hb_row_sort with the shared memory of the longest row (next power of two of
+/// max_row, at most HB_SORT_SHM entries): 12 bytes per entry for the triples (eH given), 4 for the slot lists. Less
+/// shared memory than a fixed 4096-entry buffer lets more workgroups run per compute unit.
+static void hbLaunchRowSort(int n_rows, const int* row_off, int* vals, const int* eH, const int* eB, int N, int max_row,
+                            hipStream_t stream)
+{
+    if (n_rows <= 0 || max_row <= 1) return;
+    int cap = 1;
+    while (cap < max_row && cap < HB_SORT_SHM) cap <<= 1;
+    const size_t bytes = static_cast<size_t>(cap) * (eH ? sizeof(long long) + sizeof(int) : sizeof(int));
+    const int threads = std::min(HB_SORT_THREADS, std::max(64, cap / 2));
+    k_hb_row_sort<<<n_rows, threads, bytes, stream>>>(n_rows, row_off, vals, eH, eB, N, cap);
+    checkCuda(hipGetLastError(), "k_hb_row_sort launch");
+}
+
+/// Claude Generated (Oct 2026): exclusive scan of n ints on the device (k_hb_scan_*); out holds n + 1 entries,
+/// out[n] = total, also written to *total_out (device pointer) when given.
+static void hbDeviceExclusiveScan(const int* in, int* out, int n, CudaBuffer<int>& tiles, int* total_out,
+                                  hipStream_t stream)
+{
+    const int ntiles = std::max(1, (n + HB_SCAN_TILE - 1) / HB_SCAN_TILE);
+    tiles.ensure(ntiles);
+    k_hb_scan_tiles<<<ntiles, HB_SCAN_THREADS, 0, stream>>>(n, in, out, tiles.ptr);
+    k_hb_scan_tile_sums<<<1, HB_SCAN_THREADS, 0, stream>>>(ntiles, tiles.ptr, out, n, total_out);
+    if (n > 0) {
+        const LaunchConfig c = getLaunchConfigLight(n);
+        k_hb_scan_add<<<c.gridSize, c.blockSize, 0, stream>>>(n, out, tiles.ptr);
+    }
+    checkCuda(hipGetLastError(), "hb scan launch");
+}
+
+/// Claude Generated (Oct 2026): ROCm port of FFWorkspaceGPU::detectHBondsOnDevice() (cuda/ff_workspace_gpu.cu).
+/// Same tests as the CUDA kernels (here k_hb_ab_rows, k_hb_detect_rows); the order is built without a sort of 64-bit keys: each
+/// triple is counted into its row (case, A) while it is emitted, the rows get their offsets by a device scan, the
+/// triples are scattered into their rows and k_hb_row_sort orders each row by (H, B). The result is the list
+/// sorted by (A, H, B) (the CUDA order) and then grouped by case type, stably, i.e. exactly what fillHBondSoA()
+/// with hbCasePermutation() uploads from that list. With CURCUMA_ROCM_HB_GATHER=0 the rows are the A alone (no
+/// case grouping, no slot tables), as in updateHBonds(). The gradient-slot tables of the gather mode
+/// (buildHBSlotTables()) are built on the device as well: slot ranges by a scan, the per-atom slot lists by
+/// counting, scatter and a per-atom row sort of the slot indices (ascending, as on the host).
+int FFWorkspaceHip::detectHBondsOnDevice(const GFNFFHBDetectInputs& in, std::vector<int>& hb_i,
+                                         std::vector<int>& hb_j, std::vector<int>& hb_k,
+                                         std::vector<int>* hb_case, std::vector<int>* hb_parent)
+{
+    auto& impl = *m_impl;
+    HipHBDetectDev& D = impl.hbdet;
+    HBondSoA& soa = impl.hbonds;
+    HipHBSlotTables& T = impl.hb_slots;
+    const int N = m_natoms;
+    hipStream_t stream = impl.stream;
+    const bool gather = impl.hb_gather_enabled;   // case-grouped order and slot tables (fillHBondSoA with T)
+
+    // the device list replaces whatever updateHBonds() uploaded last
+    impl.prev_hb_valid = false;
+    std::vector<GFNFFHydrogenBond>().swap(impl.prev_hb_input);
+    std::vector<GFNFFHydrogenBond>().swap(m_last_hbonds);
+
+    // inputs (a few arrays of N and the CSR lists)
+    D.bas.upload(in.basicity.data(), N);
+    D.aci.upload(in.acidity.data(), N);
+    D.q.upload(in.charge.data(), N);
+    D.ab_ok.upload(in.ab_ok.data(), N);
+    D.hyd_list.upload(in.hb_hyd_list.data(), static_cast<int>(in.hb_hyd_list.size()));
+    D.bond_off.upload(in.bond_off.data(), N + 1);
+    D.bond_idx.upload(in.bond_idx.data(), static_cast<int>(in.bond_idx.size()));
+    D.hyd_off.upload(in.hyd_off.data(), N + 1);
+    D.hyd_idx.upload(in.hyd_idx.data(), static_cast<int>(in.hyd_idx.size()));
+    D.nbr_off.upload(in.nbr_off.data(), N + 1);
+    D.nbr_idx.upload(in.nbr_idx.data(), static_cast<int>(in.nbr_idx.size()));
+    if (!D.repz.ptr) {
+        std::vector<double> repz86(86, 1.0);
+        for (size_t z = 0; z < repz86.size() && z < GFNFFParameters::repz.size(); ++z) repz86[z] = GFNFFParameters::repz[z];
+        D.repz.upload(repz86.data(), 86);
+    }
+    D.counter.ensure(1);
+    D.ab_counter.ensure(1);
+    D.totals.ensure(5);
+
+    // pass 1: AB pairs (compacted, arrival order); pass 2: one workgroup per AB pair. Both
+    // count past the capacity on overflow; the pass is then rerun with a larger buffer.
+    D.fx.ensure(N); D.fy.ensure(N); D.fz.ensure(N);
+    {
+        const LaunchConfig c = getLaunchConfigLight(N, m_block_size);
+        k_hb_to_float<<<c.gridSize, c.blockSize, 0, stream>>>(N, impl.coords.d_x.ptr, impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr, D.fx.ptr, D.fy.ptr, D.fz.ptr);
+        checkCuda(hipGetLastError(), "k_hb_to_float launch");
+        const int n_hyd = static_cast<int>(in.hb_hyd_list.size());
+        D.hpos.ensure(std::max(1, n_hyd));
+        if (n_hyd > 0) {
+            const LaunchConfig ch = getLaunchConfigLight(n_hyd, m_block_size);
+            k_hb_pack_hyd<<<ch.gridSize, ch.blockSize, 0, stream>>>(n_hyd, D.hyd_list.ptr, D.fx.ptr, D.fy.ptr, D.fz.ptr,
+                                                                    D.hpos.ptr);
+            checkCuda(hipGetLastError(), "k_hb_pack_hyd launch");
+        }
+    }
+    int n_ab = 0;
+    int ab_cap = std::max(D.ab_cap, 1 << 17);
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        D.ab_i.ensure(ab_cap); D.ab_j.ensure(ab_cap);
+        checkCuda(hipMemsetAsync(D.ab_counter.ptr, 0, sizeof(int), stream), "hb ab counter reset");
+        k_hb_ab_rows<<<std::max(1, N), 256, 0, stream>>>(
+            N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, D.bas.ptr, D.aci.ptr, D.ab_ok.ptr,
+            in.hbthr1, ab_cap, D.ab_counter.ptr, D.ab_i.ptr, D.ab_j.ptr);
+        checkCuda(hipGetLastError(), "k_hb_ab_rows launch");
+        D.ab_counter.download(&n_ab, 1, stream);
+        checkCuda(hipStreamSynchronize(stream), "hb ab count download");
+        if (n_ab <= ab_cap) break;
+        ab_cap = n_ab + n_ab / 4;
+    }
+    D.ab_cap = std::max(D.ab_cap, ab_cap);
+    if (n_ab > ab_cap) throw std::runtime_error("ROCm H-bond detection: AB pair count exceeds the buffer after reruns");
+
+    const int R = gather ? 4 * N : N;   // rows: (case - 1) * N + A, or A
+    D.row_cnt.ensure(R); D.row_off.ensure(R + 1); D.row_fill.ensure(std::max(R, N));
+    int cap = std::max(D.cap, 1 << 20);
+    int count = 0, max_row = 0;
+    for (int attempt = 0; attempt < 4 && n_ab > 0; ++attempt) {
+        D.e_A.ensure(cap); D.e_H.ensure(cap); D.e_B.ensure(cap); D.e_ct.ensure(cap); D.e_par.ensure(cap);
+        checkCuda(hipMemsetAsync(D.counter.ptr, 0, sizeof(int), stream), "hb counter reset");
+        checkCuda(hipMemsetAsync(D.row_cnt.ptr, 0, sizeof(int) * R, stream), "hb row count reset");
+        k_hb_detect_rows<<<n_ab, HB_DETECT_THREADS, 0, stream>>>(
+            n_ab, D.ab_i.ptr, D.ab_j.ptr, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+            D.fx.ptr, D.fy.ptr, D.fz.ptr, N, impl.d_atom_types.ptr, D.bas.ptr, D.aci.ptr, D.q.ptr,
+            D.hyd_list.ptr, D.hpos.ptr, static_cast<int>(in.hb_hyd_list.size()),
+            D.bond_off.ptr, D.bond_idx.ptr, D.hyd_off.ptr, D.hyd_idx.ptr, D.nbr_off.ptr, D.nbr_idx.ptr,
+            in.hbthr2, in.min_pair_energy, gather ? 1 : 0, cap, D.counter.ptr, D.row_cnt.ptr,
+            D.e_A.ptr, D.e_H.ptr, D.e_B.ptr, D.e_ct.ptr, D.e_par.ptr);
+        checkCuda(hipGetLastError(), "k_hb_detect_rows launch");
+        k_hb_max<<<1, HB_SORT_THREADS, 0, stream>>>(R, D.row_cnt.ptr, D.totals.ptr + 3);
+        D.counter.download(&count, 1, stream);
+        checkCuda(hipMemcpyAsync(&max_row, D.totals.ptr + 3, sizeof(int), hipMemcpyDeviceToHost, stream), "hb max row");
+        checkCuda(hipStreamSynchronize(stream), "hb count download");
+        if (count <= cap) break;
+        cap = count + count / 4;
+    }
+    D.cap = std::max(D.cap, cap);
+    if (count > cap) throw std::runtime_error("ROCm H-bond detection: entry count exceeds the buffer after reruns");
+
+    const int n = count;
+    soa.n = n;
+    hb_i.clear(); hb_j.clear(); hb_k.clear();
+    if (hb_case) hb_case->clear();
+    if (hb_parent) hb_parent->clear();
+    if (gather) { T.nslots = 0; T.N = N; }   // an empty list must not gather stale slots (fillHBondSoA)
+    if (n == 0) {
+        soa.total_nb_B = 0; soa.total_nb_C = 0;
+        updateHBChargeScaling(impl);
+        return 0;
+    }
+
+    // order: row offsets, arrival-order scatter into the rows, then each row sorted by (H, B)
+    hbDeviceExclusiveScan(D.row_cnt.ptr, D.row_off.ptr, R, D.scan_tiles, nullptr, stream);
+    checkCuda(hipMemsetAsync(D.row_fill.ptr, 0, sizeof(int) * R, stream), "hb row fill reset");
+    hbEnsure(D.order, n);
+    {
+        const LaunchConfig c = getLaunchConfigLight(n, m_block_size);
+        k_hb_row_scatter<<<c.gridSize, c.blockSize, 0, stream>>>(n, D.e_A.ptr, D.e_ct.ptr, N, gather ? 1 : 0,
+            D.row_off.ptr, D.row_fill.ptr, D.order.ptr);
+        hbLaunchRowSort(R, D.row_off.ptr, D.order.ptr, D.e_H.ptr, D.e_B.ptr, N, max_row, stream);
+        checkCuda(hipGetLastError(), "hb row order launch");
+    }
+
+    // SoA columns (the arrays of HBondSoA::upload), neighbour offsets and slot ranges by scans
+    CudaBuffer<int>* icols[] = { &soa.idx_i, &soa.idx_j, &soa.idx_k, &soa.elem_A, &soa.elem_B, &soa.case_type,
+                                 &soa.nb_B_count, &soa.acceptor_parent, &soa.nb_C_count };
+    CudaBuffer<double>* dcols[] = { &soa.q_H, &soa.q_A, &soa.q_B, &soa.basicity_A, &soa.basicity_B,
+                                    &soa.acidity_A, &soa.acidity_B, &soa.r_cut, &soa.repz_B };
+    for (auto* b : icols) hbEnsure(*b, n);
+    for (auto* b : dcols) hbEnsure(*b, n);
+    hbEnsure(soa.nb_B_offset, n + 1);
+    hbEnsure(soa.nb_C_offset, n + 1);
+    if (gather) { hbEnsure(D.slot_cnt, n); hbEnsure(T.slot_off, n + 1); }
+    const LaunchConfig cfg = getLaunchConfigLight(n, m_block_size);
+    k_hb_fill_columns_rows<<<cfg.gridSize, cfg.blockSize, 0, stream>>>(
+        n, D.order.ptr, D.e_A.ptr, D.e_H.ptr, D.e_B.ptr, D.e_ct.ptr, D.e_par.ptr, impl.d_atom_types.ptr,
+        D.bas.ptr, D.aci.ptr, D.q.ptr, D.repz.ptr, D.nbr_off.ptr, D.nbr_idx.ptr,
+        soa.idx_i.ptr, soa.idx_j.ptr, soa.idx_k.ptr, soa.elem_A.ptr, soa.elem_B.ptr,
+        soa.q_H.ptr, soa.q_A.ptr, soa.q_B.ptr, soa.basicity_A.ptr, soa.basicity_B.ptr,
+        soa.acidity_A.ptr, soa.acidity_B.ptr, soa.r_cut.ptr, soa.case_type.ptr, soa.acceptor_parent.ptr,
+        soa.repz_B.ptr, soa.nb_B_count.ptr, soa.nb_C_count.ptr, gather ? D.slot_cnt.ptr : nullptr);
+    checkCuda(hipGetLastError(), "k_hb_fill_columns_rows launch");
+    hbDeviceExclusiveScan(soa.nb_B_count.ptr, soa.nb_B_offset.ptr, n, D.scan_tiles, D.totals.ptr + 0, stream);
+    hbDeviceExclusiveScan(soa.nb_C_count.ptr, soa.nb_C_offset.ptr, n, D.scan_tiles, D.totals.ptr + 1, stream);
+    if (gather)
+        hbDeviceExclusiveScan(D.slot_cnt.ptr, T.slot_off.ptr, n, D.scan_tiles, D.totals.ptr + 2, stream);
+    int totals[3] = { 0, 0, 0 };
+    D.totals.download(totals, gather ? 3 : 2, stream);
+    checkCuda(hipStreamSynchronize(stream), "hb totals download");
+    soa.total_nb_B = totals[0];
+    soa.total_nb_C = totals[1];
+    const int nslots = gather ? totals[2] : 0;
+    if (soa.total_nb_B > 0) hbEnsure(soa.nb_B_flat, soa.total_nb_B);
+    if (soa.total_nb_C > 0) hbEnsure(soa.nb_C_flat, soa.total_nb_C);
+    if (gather) {
+        hbEnsure(D.slot_atom, nslots);
+        D.atom_cnt.ensure(N + 1);
+        checkCuda(hipMemsetAsync(D.atom_cnt.ptr, 0, sizeof(int) * N, stream), "hb atom count reset");
+    }
+    k_hb_fill_neighbors_slots<<<cfg.gridSize, cfg.blockSize, 0, stream>>>(
+        n, N, soa.idx_i.ptr, soa.idx_j.ptr, soa.idx_k.ptr, soa.case_type.ptr, soa.acceptor_parent.ptr,
+        D.nbr_off.ptr, D.nbr_idx.ptr, soa.nb_B_offset.ptr, soa.nb_C_offset.ptr, soa.nb_B_flat.ptr, soa.nb_C_flat.ptr,
+        gather ? T.slot_off.ptr : nullptr, D.slot_atom.ptr, D.atom_cnt.ptr);
+    checkCuda(hipGetLastError(), "k_hb_fill_neighbors_slots launch");
+
+    if (gather) {
+        // per-atom slot lists (buildHBSlotTables): counts -> offsets, scatter, slots ascending within each atom
+        T.atom_off.ensure(N + 1);
+        hbDeviceExclusiveScan(D.atom_cnt.ptr, T.atom_off.ptr, N, D.scan_tiles, nullptr, stream);
+        hbEnsure(T.atom_slots, std::max(1, nslots));
+        checkCuda(hipMemsetAsync(D.row_fill.ptr, 0, sizeof(int) * N, stream), "hb slot fill reset");
+        const LaunchConfig cs = getLaunchConfigLight(nslots, m_block_size);
+        k_hb_row_scatter<<<cs.gridSize, cs.blockSize, 0, stream>>>(nslots, D.slot_atom.ptr, nullptr, N, 0,
+            T.atom_off.ptr, D.row_fill.ptr, T.atom_slots.ptr);
+        k_hb_max<<<1, HB_SORT_THREADS, 0, stream>>>(N, D.atom_cnt.ptr, D.totals.ptr + 4);
+        int max_slots = 0;
+        checkCuda(hipMemcpyAsync(&max_slots, D.totals.ptr + 4, sizeof(int), hipMemcpyDeviceToHost, stream), "hb max slots");
+        checkCuda(hipStreamSynchronize(stream), "hb max slots sync");
+        hbLaunchRowSort(N, T.atom_off.ptr, T.atom_slots.ptr, nullptr, nullptr, N, max_slots, stream);
+        checkCuda(hipGetLastError(), "hb slot lists launch");
+        T.nslots = nslots;
+        T.N = N;
+        if (T.slot_g.n < 3 * nslots) T.slot_g.alloc(3 * (nslots + nslots / 8));   // headroom as buildHBSlotTables
+    }
+    updateHBChargeScaling(impl);
+
+    // (A, H, B) to the host through a pinned stage (pageable copies ran at about 4 GB/s: 1.6 ms at 590k triples)
+    int* pin = D.pinned(3 * static_cast<size_t>(n));
+    if (pin) {
+        const size_t bytes = sizeof(int) * static_cast<size_t>(n);
+        checkCuda(hipMemcpyAsync(pin, soa.idx_i.ptr, bytes, hipMemcpyDeviceToHost, stream), "hb triple download");
+        checkCuda(hipMemcpyAsync(pin + n, soa.idx_j.ptr, bytes, hipMemcpyDeviceToHost, stream), "hb triple download");
+        checkCuda(hipMemcpyAsync(pin + 2 * static_cast<size_t>(n), soa.idx_k.ptr, bytes, hipMemcpyDeviceToHost, stream),
+                  "hb triple download");
+    } else {
+        hb_i.resize(n); hb_j.resize(n); hb_k.resize(n);
+        soa.idx_i.download(hb_i.data(), n, stream);
+        soa.idx_j.download(hb_j.data(), n, stream);
+        soa.idx_k.download(hb_k.data(), n, stream);
+    }
+    if (hb_case) { hb_case->resize(n); soa.case_type.download(hb_case->data(), n, stream); }
+    if (hb_parent) { hb_parent->resize(n); soa.acceptor_parent.download(hb_parent->data(), n, stream); }
+    checkCuda(hipStreamSynchronize(stream), "hb triple download sync");
+    if (pin) {
+        hb_i.assign(pin, pin + n);
+        hb_j.assign(pin + n, pin + 2 * static_cast<size_t>(n));
+        hb_k.assign(pin + 2 * static_cast<size_t>(n), pin + 3 * static_cast<size_t>(n));
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        const double cand_mb = (5.0 * D.e_A.n + D.order.n) * sizeof(int) / 1048576.0;
+        const double row_mb = (3.0 * std::max(R, N) + 1.0) * sizeof(int) / 1048576.0;
+        const double slot_mb = (static_cast<double>(D.slot_atom.n) + D.slot_cnt.n) * sizeof(int) / 1048576.0;
+        CurcumaLogger::info(fmt::format("  [DEBUG] ROCm HB detection: {} AB pairs, {} triples, {} slots; device "
+                                        "buffers: candidates {:.1f} MB (cap {}), rows {:.2f} MB, slot scratch {:.1f} MB",
+                                        n_ab, n, nslots, cand_mb, D.cap, row_mb, slot_mb));
+    }
+    return n;
 }
 
 void FFWorkspaceHip::updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,

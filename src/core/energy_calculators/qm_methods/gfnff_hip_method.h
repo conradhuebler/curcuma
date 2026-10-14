@@ -70,7 +70,9 @@ struct GFNFFRocmBackend {
     static constexpr bool has_stream_overlap = true;
     /// Oct 2026: staged pinned list upload not ported (serial SoA upload as before).
     static constexpr bool has_staged_list_upload = false;
-    static constexpr bool has_device_hb_detect = false;
+    /// Claude Generated (Oct 2026): H-bond triples enumerated on the device (FFWorkspaceHip::detectHBondsOnDevice(),
+    /// rows by (case, A) instead of a key sort); -gfnff.gpu_hb_detect_on_device false restores the host detection.
+    static constexpr bool has_device_hb_detect = true;
     /// Claude Generated (Oct 2026): -gfnff.gpu_disp_pairs_on_device defaults to true on ROCm as well (ordered
     /// device build with the gather CSR on the device, FFWorkspaceHip::generateDispersionPairListOnGPU);
     /// -gfnff.gpu_disp_pairs_on_device false restores the host build.

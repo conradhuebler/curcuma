@@ -797,7 +797,7 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         // staged pinned upload (same bytes, parallel conversion); fallback is the PARAM default.
         if constexpr (Backend::has_staged_list_upload)
             m_gpu_workspace->setStagedListUpload(cfg_get_bool("gpu_staged_list_upload", true), m_host_threads);
-        // Claude Generated (Oct 2026): H-bond triples enumerated on the device (CUDA only, opt-in).
+        // Claude Generated (Oct 2026): H-bond triples enumerated on the device (CUDA and ROCm, default on).
         if constexpr (Backend::has_device_hb_detect) {
             m_hb_detect_on_device = cfg_get_bool("gpu_hb_detect_on_device", true);
             m_hb_detect_verify = m_hb_detect_on_device && cfg_get_bool("gpu_hb_detect_verify", false);

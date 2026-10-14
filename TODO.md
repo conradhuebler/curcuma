@@ -73,7 +73,7 @@ Stand.
   in D4-Generator/GFNFF/Wrapper (P1a-Skip in `updateCNValuesForGradient` beachten). HIP liest `m_disp_idx_*_host` und füllt `m_h_dc6dcn_*` noch (nicht kompilierbar hier).
 - **GPU-GFN-FF-MD, Schrittzerlegung polymer_2x** (Stand 21,7 ms je Schritt, vorher 38,4; erledigt: `AIChangelog.md`, [docs/GFNFF-PERFORMANCE-ROADMAP.md](docs/GFNFF-PERFORMANCE-ROADMAP.md)):
   offen: CG-Iterationen unter Last (K5); Host-Neubau überlappt nicht mit Gerätearbeit (HB 12,8 ms alle 10, Repulsion 11 ms alle ~8, D4 125 ms alle ~83 Schritte); K1-K3 und gestaffeltes Hochladen auf ROCm. Journal: Labor/curcuma EEQ-Solver Benchmark.
-- **CUDA GFN-FF MD, Schrittpausen urea400-water1000** (Stand 2026-10-14, [docs/GPU_STEP_PAUSES_2026-10-14.md](docs/GPU_STEP_PAUSES_2026-10-14.md)): offen: ROCm-Spiegel von D4-Setup-Reihenfolge, -Sortierung und HB-Erkennung (`gfnff_rocm.hip`, hier nicht kompilierbar; beide Schalter sind auf CUDA Standard, auf ROCm aus);
+- **CUDA GFN-FF MD, Schrittpausen urea400-water1000** (Stand 2026-10-14, [docs/GPU_STEP_PAUSES_2026-10-14.md](docs/GPU_STEP_PAUSES_2026-10-14.md)): offen: ROCm-Spiegel der D4-Setup-Reihenfolge (`gfnff_rocm.hip`); D4-Sortierung und HB-Erkennung sind auf ROCm gespiegelt, beide Schalter dort Standard;
   geladene Mehrfragmentsysteme laufen auf der CPU (15-fach langsamer je MD-Schritt bei 2910 Atomen), Ladungsmodell: Vault "curcuma Ladungsträger-Heuristik", Abschnitt GPU-Aspekte. Journal: Labor/curcuma GPU-Backends.
 - **ROCm-GFN-FF, Rückstand** (Hardware nötig, groß): nur `auto`/`cholesky` zulässig (kein Geräte-ppcg, kein localinv); fehlen: K1-Fehlerbehebung (CN-Liste jeden Schritt),
   Fernfeld, K2/K3, gestaffelter Upload. [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md).

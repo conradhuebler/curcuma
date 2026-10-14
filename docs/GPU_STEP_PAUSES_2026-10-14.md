@@ -61,8 +61,7 @@ host rule (only its parallel legacy branch prunes).
 
 Not checked: gradients over long runs, `-opt` beyond caffeine (38 steps, trajectory equal) and a 399-step unconverged cluster
 optimisation (scatter between identical runs larger than the on/off difference), charged systems with several fragments (CPU
-fallback), memory of the device buffers (about 20 B per candidate entry plus the sort), ROCm (not compilable here; trait
-`has_device_hb_detect` is false there), MOR41/GMTKN55.
+fallback), memory of the device buffers (about 20 B per candidate entry plus the sort), MOR41/GMTKN55. ROCm: own section below.
 
 ## `gpu_disp_pairs_on_device` checked further (same day)
 
@@ -71,8 +70,7 @@ fallback), memory of the device buffers (about 20 B per candidate entry plus the
 peo201-chain (2.9), peo201-water500 (5.5), peo201x2-water1500 (16.0 ms); mean and longest step lower with the switch on the three
 bulk systems (peo201x2-water1500: mean 19.9 -> 18.4 ms, longest step 174 -> 36 ms). Energies in step 50 equal on 9 digits.
 Both `gpu_disp_pairs_on_device` and `gpu_hb_detect_on_device` default to **true on CUDA since Oct 14, 2026** (operator decision after
-these checks). On ROCm the H-bond switch has no effect (trait `has_device_hb_detect` false); the D4 switch is mirrored there (next
-section). With the defaults
+these checks). Both switches are mirrored on ROCm (next two sections). With the defaults
 (urea400-water1000, 200 steps, n = 1): mean step 18.1 ms (36.3 ms at the start of the session), longest step 48 ms (234 ms), median
 14.9 ms; each switch set to `false` restores its former cost (H-bond refresh 8.0 -> 35.9 ms, D4 rebuild 23 -> 167-218 ms), E(step 100) equal in
 all four combinations.
@@ -100,6 +98,46 @@ the pair index of the lower half by binary search. Buffers grow only (`ensure`),
   unchanged (36.2 and 36.6 ms), mean step 52.8 -> 49.0 and 47.0 -> 42.6 ms. Of the 47 ms, 16 are the host CN and Gaussian
   weights, about 13 the C6 contraction.
 
+## ROCm mirror of the device H-bond detection (same day, RX 9060 XT gfx1200, `-threads 10`)
+
+`FFWorkspaceHip::detectHBondsOnDevice()` (`gfnff_rocm.hip`, trait `has_device_hb_detect` true, default on,
+`-gfnff.gpu_hb_detect_on_device false` is the way off). Same tests as the CUDA kernels; the build links no rocPRIM/hipCUB, so
+the order is made without a key sort: `k_hb_detect_rows` counts every triple into its row (case, A) while emitting it, a device
+scan gives the row offsets, the triples are scattered into their rows and `k_hb_row_sort` (one workgroup per row, bitonic
+in shared memory sized by the longest row) orders each row by (H, B). The result is the list sorted by (A, H, B) and grouped
+by case type, which is what `fillHBondSoA()` with `hbCasePermutation()` uploads; the gather-slot tables (`buildHBSlotTables()`)
+are built on the device the same way (rows = atoms, key = slot index). AB pairs are enumerated per row (`k_hb_ab_rows`), the
+case-1 test runs one workgroup per AB pair with a shared-memory queue of the float pre-filter survivors. No wavefront
+intrinsic is used (only `__syncthreads` and atomics), so wave32 and wave64 need no separate path. `CURCUMA_ROCM_HB_GATHER=0`
+gives rows by A only and no slot tables, as in `updateHBonds()`.
+
+- **Same list as the host** (`-gfnff.gpu_hb_detect_verify true`): 28 structures from 3 to 7320 atoms (halogens: fi-pyridine,
+  na2cl2; charged: caffeine +1, hydronium-water2 +1 with `-gfnff.frag_charge_model reference`), 5 refreshes each, and 31
+  refreshes along 300 MD steps of acetic-acid dimer, pep20, urea400-water1000 (582k to 605k triples) and peo201x2-water1500:
+  0 differences, 0 duplicates in 264 refreshes.
+- **Same device arrays**: a temporary comparison of every uploaded array (SoA columns, neighbour lists, slot offsets, per-atom
+  slot lists) against `fillHBondSoA()` of the same triples sorted on the host: 0 differences in 239 lists, also with the
+  shared-memory cap of the row sort forced to 16 entries (global-memory path, 35 lists) and with `CURCUMA_ROCM_HB_GATHER=0`
+  (30 lists).
+- **Time per refresh**, 3 alternating runs of 200 MD steps per binary (n = 60 refreshes each), median before -> after:
+  urea400-water1000 `gpu_hbxb_update` 48.1 -> 13.0 ms (detection 28.1 -> 9.5, upload 17.4 -> 1.0, `rebuildBondHBData`
+  2.4 -> 2.2); peo201x2-water1500 8.9 -> 3.9 ms. MD step (n = 597): median 43.16 -> 43.10 and 44.85 -> 44.81 ms, mean
+  55.86 -> 51.99 and 50.90 -> 50.11 ms, longest 129.8 -> 99.9 and 86.7 -> 87.4 ms. Energy of step 100: before and after differ
+  by at most 1.1e-12 Eh (three runs each).
+- `rebuildBondHBDataCore()` now uses 16 chunks per thread instead of 4: in the case-grouped order all hits (cases 2-4) are in
+  the last quarter of the list and were scheduled last (3.1-4.0 ms instead of 2.0-2.5 ms at 590k triples); the joined result
+  does not depend on the chunk count.
+- **Single points** (16 structures, 2 to 7320 atoms, on / off / `-gpu none`): on against off dE <= 3.4e-13 Eh, dgradient <=
+  2.2e-16 Eh/A; on against CPU dE <= 1.8e-11 Eh, dgradient <= 1.6e-13 Eh/A (off against CPU the same).
+- **Device memory** on urea400-water1000: candidate buffers 22.5 MB (five ints per entry, capacity 2^20, plus the order),
+  slot scratch 12.9 MB (2.4 M slots), rows 0.3 MB; pinned host stage of the triple download about 8 MB.
+- `ctest -R "gpu|rocm|gfnff" -j1`: 110 tests, 109 passed, `cli_simplemd_14_gfnff_react_h_recombination` failed (fails before
+  this change as well).
+
+Not checked: wave64 hardware and gfx1150 (only gfx1200 was run), trajectories beyond 300 steps, `-opt`, MOR41/GMTKN55,
+charged systems with several fragments under the ensemble charge model (CPU fallback), the CUDA build of the shared changes
+(PARAM text, `rebuildBondHBDataCore()` chunk count; not compiled here).
+
 ## Checked
 
 - Energies in steps 0, 10 and 100 equal to the previous binary within 1e-12 Eh for every change above (GPU runs are not bitwise
@@ -119,7 +157,6 @@ the pair index of the lower half by binary search. Buffers grow only (`ensure`),
 
 ## Not implemented
 
-- ROCm mirror of the device H-bond detection.
 - D4 and repulsion rebuild stay on the step that triggers them (no overlap with device work).
 
 Human production testing is pending.
