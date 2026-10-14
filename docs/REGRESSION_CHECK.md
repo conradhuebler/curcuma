@@ -91,11 +91,11 @@ ROCm against CPU of the same binary (`-gpu rocm` against `-gpu none`, n = 1 per 
   in the device kernel, gfnff gives 0 of 95 differences; the binary from before the ROCm work shows the old values, so the
   discrepancy predates the branch chain. Short MD (50 steps, PR05, PR26, ED26, n = 3): last frame identical, average Epot
   <= 6.3e-15 Eh. The CUDA kernel got the same source change and was not compiled. Test: `cli_gfnff_gpu_04_rocm_metal_dispersion`.
-- **GMTKN55** gfnff: 25 of 2462 differ (MAD 0.59 kcal/mol, max 131.6 kcal/mol): WATER27 (H3O+, OH- water clusters), BH76 anion
+- **GMTKN55** gfnff: 25 of 2462 differed (MAD 0.59 kcal/mol, max 131.6 kcal/mol): WATER27 (H3O+, OH- water clusters), BH76 anion
   complexes, `PArel/h2s2o72`, `G21IP/IP_64`, `SIE4x4/h2o2+_*`. Cause: net charge. The GPU wrapper does not run
-  `GFNFF::Calculation()`, so the CPU default `frag_charge_model ensemble` does not act; with `-gfnff.frag_charge_model reference`
-  ROCm and CPU agree (BH76/hoch3fcomp1, WATER27/H3OpH2O3, PArel/h2s2o72, n = 1 each, 4 decimals equal). The wrapper prints a warning
-  at setup (`gfnff_gpu_method_impl.h`). Not changed.
+  `GFNFF::Calculation()`, so the CPU default `frag_charge_model ensemble` did not act; with `-gfnff.frag_charge_model reference`
+  ROCm and CPU agreed (BH76/hoch3fcomp1, WATER27/H3OpH2O3, PArel/h2s2o72, n = 1 each, 4 decimals equal). Since the CPU fallback for
+  charged multi-fragment systems (docs/FRAG_CHARGE_MODEL.md) the comparison gives 0 of 2462 differences.
 
 ## Traps this caught (do not repeat them)
 

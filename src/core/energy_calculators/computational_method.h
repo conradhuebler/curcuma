@@ -124,6 +124,16 @@ public:
      * plugin emits, is what works across that boundary.
      */
     virtual GFNFF* gfnffInstance() const { return nullptr; }
+
+    /**
+     * @brief True if this method set up a molecule it should not calculate (Claude Generated, Oct 2026).
+     *
+     * A GPU GFN-FF wrapper answers true when the CPU applies a charge rule that the device path does not
+     * (net charge on several fragments with frag_charge_model ensemble). EnergyCalculator::setMolecule()
+     * then reports a GPU fallback and replaces the method by the CPU one. Virtual for the same reason as
+     * gfnffInstance(): the plugins derive from an `extern template` base.
+     */
+    virtual bool requestsCpuFallback() const { return false; }
     
     /**
      * @brief Copy gradient into pre-allocated target (avoids heap allocation).

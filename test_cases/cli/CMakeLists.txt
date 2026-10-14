@@ -140,6 +140,10 @@ if(USE_ROCM)
     add_cli_test(gfnff_gpu 04_rocm_metal_dispersion)
     set_tests_properties(cli_gfnff_gpu_04_rocm_metal_dispersion
         PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm;cli")
+    # Claude Generated (Oct 2026): charged multi-fragment system, GPU request falls back to the CPU method (frag_charge_model ensemble).
+    add_cli_test(gfnff_gpu 05_rocm_charged_fragments)
+    set_tests_properties(cli_gfnff_gpu_05_rocm_charged_fragments
+        PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm;cli")
     # Claude Generated (Oct 2026): -gpu auto uses the CPU for a 24-atom GFN-FF system (gfnff.gpu_auto_min_atoms 900).
     # Without a ROCm plugin or device the note cannot appear; the alternative message covers that case.
     add_test(NAME cli_gfnff_gpu_03_auto_small_system_cpu

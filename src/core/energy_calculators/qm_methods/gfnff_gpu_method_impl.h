@@ -154,6 +154,7 @@ public:
     /// the plugin. Claude Generated (Sep 2026).
     GFNFF* getGFNFF() const { return m_gfnff.get(); }
     GFNFF* gfnffInstance() const override { return m_gfnff.get(); }
+    bool requestsCpuFallback() const override { return m_cpu_fallback_requested; }
     /// Device index this method is pinned to (-1 = runtime default). Claude Generated (Sep 2026).
     int gpuDevice() const { return m_gpu_device; }
 
@@ -191,6 +192,7 @@ private:
     // WP2: cached topology-constant EEQ data (avoid prepareEEQParametersForGPU per step)
     std::vector<int>    m_eeq_fraglist;          ///< [N] fragment IDs (topology-constant)
     std::vector<double> m_eeq_rhs_constraints;   ///< [nfrag] target charges (topology-constant)
+    bool                m_cpu_fallback_requested = false;  ///< charged multi-fragment system: CPU method wanted (see requestsCpuFallback())
     int                 m_eeq_nfrag = 1;         ///< number of fragments (topology-constant)
 
     json             m_parameters;
@@ -594,18 +596,12 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     m_initialized = true;
 
     // Claude Generated (Oct 2026): the GPU wrapper never calls GFNFF::Calculation(), so the
-    // frag_charge_model ensemble (CPU default) does not act here: the reference rule puts the whole
-    // net charge on the fragment holding atom 1. Say so, once per run, when it would have mattered.
-    if (m_eeq_nfrag > 1 && mol.m_charge != 0 && m_gfnff->fragEnsembleRequested()) {
-        static std::atomic<bool> warned{ false };
-        if (!warned.exchange(true)) {
-            CurcumaLogger::warn(fmt::format(
-                "GFN-FF {}: net charge {} on {} fragments - the GPU path uses the reference charge placement "
-                "(whole charge on the fragment holding atom 1), the CPU default frag_charge_model ensemble is not "
-                "applied; energies can differ from the CPU. Set -gfnff.frag_charge_model reference to silence "
-                "this warning and make the CPU use the same rule.", Backend::name, mol.m_charge, m_eeq_nfrag));
-        }
-    }
+    // frag_charge_model ensemble (CPU default) does not act here: the reference rule would put the whole
+    // net charge on the fragment holding atom 1 (GMTKN55 gfnff, ROCm against CPU: 25 of 2462 structures
+    // differ, up to 131 kcal/mol, all of them charged). A charged molecule with several fragments therefore
+    // asks EnergyCalculator for the CPU method (requestsCpuFallback()); -gfnff.frag_charge_model reference
+    // keeps the GPU and makes the CPU use the same rule.
+    m_cpu_fallback_requested = (m_eeq_nfrag > 1 && mol.m_charge != 0 && m_gfnff->fragEnsembleRequested());
 
     CitationRegistry::cite("gfnff");
     CitationRegistry::cite("d4", "gfnff");
