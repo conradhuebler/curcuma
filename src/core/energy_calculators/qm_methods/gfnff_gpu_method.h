@@ -61,7 +61,7 @@ struct GFNFFCudaBackend {
     static constexpr bool has_staged_list_upload = true;
     /// Oct 2026: device-side H-bond detection (FFWorkspaceGPU::detectHBondsOnDevice()).
     static constexpr bool has_device_hb_detect = true;
-    /// Oct 14, 2026: -gfnff.gpu_disp_pairs_on_device defaults to true (CUDA); ROCm keeps it off.
+    /// Oct 14, 2026: -gfnff.gpu_disp_pairs_on_device defaults to true (CUDA and ROCm).
     static constexpr bool default_disp_pairs_on_device = true;
 
     /// 0 = never route the EEQ to the CPU PCG; the device Schur paths handle nfrag>1.

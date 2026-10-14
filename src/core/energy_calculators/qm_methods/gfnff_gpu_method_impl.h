@@ -578,17 +578,14 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     // generator to skip its O(N^2) pair loop (keep only CN + gw the device reuses).
     // Must be set before InitialiseMolecule triggers host parameter generation.
     {
-        // Claude Generated (Oct 14, 2026): default on for CUDA (device build, sorted like the host list; checked on 27
-        // structures, docs/GPU_STEP_PAUSES_2026-10-14.md). The ROCm build lacks the setup-order and sort fixes: there it
-        // stays off unless CURCUMA_ROCM_DISP_PAIRS_ON_DEVICE is set as well. The gfnff scope wins over the top level.
+        // Claude Generated (Oct 14, 2026): default on for CUDA and ROCm (device build in the host pair order; checked on
+        // 27 structures on CUDA and 16 on ROCm, docs/GPU_STEP_PAUSES_2026-10-14.md). The gfnff scope wins over the top level.
         bool disp_dev = Backend::default_disp_pairs_on_device;
         if (m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object()
             && m_parameters["gfnff"].contains("gpu_disp_pairs_on_device"))
             disp_dev = m_parameters["gfnff"].value("gpu_disp_pairs_on_device", disp_dev);
         else
             disp_dev = m_parameters.value("gpu_disp_pairs_on_device", disp_dev);
-        if constexpr (!Backend::default_disp_pairs_on_device)
-            disp_dev = disp_dev && std::getenv("CURCUMA_ROCM_DISP_PAIRS_ON_DEVICE") != nullptr;
         m_disp_pairs_requested = disp_dev;
         m_gfnff->setSkipHostDispPairs(disp_dev);
         // Claude Generated (Sep 2026): the device enumerates the Coulomb pairs itself;

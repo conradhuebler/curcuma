@@ -3707,6 +3707,52 @@ __device__ inline void dispPairFromTid(int tid, int N, int& i, int& j)
     j = tid - i * (2 * N - i - 1) / 2 + i + 1;
 }
 
+/// Claude Generated (Oct 2026): per-pair static D4 data of the pair (i, j), shared by
+/// k_disp_pairs_build and k_disp_pairs_static (same expressions as before the split).
+__device__ inline void dispPairStaticData(
+    int i, int j, int zi, int zj,
+    const double* __restrict__ gw, const double* __restrict__ c6_flat,
+    const double* __restrict__ sqrtzr4r2, const double* __restrict__ topo_q,
+    const double* __restrict__ zeta_zeff, const double* __restrict__ zeta_c,
+    double a1, double a2,
+    double& c6_out, double& r4r2_out, double& r0sq_out, double& zeta_out)
+{
+    // C6 = Σ_{ri,rj} gw_i[ri]·gw_j[rj]·c6ref  (== getChargeWeightedC6, CN-only weighting)
+    int ei = zi - 1, ej = zj - 1;
+    int nri = d_refn_const[ei];
+    int nrj = d_refn_const[ej];
+    size_t c6_base = (size_t)ei * D4_MAX_ELEM * D4_MAX_REF * D4_MAX_REF
+                   + (size_t)ej * D4_MAX_REF * D4_MAX_REF;
+    int gi = i * D4_MAX_REF;
+    int gj = j * D4_MAX_REF;
+    double c6 = 0.0;
+    for (int ri = 0; ri < nri; ++ri) {
+        double wi = gw[gi + ri];
+        size_t b = c6_base + (size_t)ri * D4_MAX_REF;
+        for (int rj = 0; rj < nrj; ++rj) {
+            double c6ref = c6_flat[b + rj];
+            if (fabs(c6ref) < 1e-20) continue;
+            c6 += wi * gw[gj + rj] * c6ref;
+        }
+    }
+
+    double si = sqrtzr4r2[ei];
+    double sj = sqrtzr4r2[ej];
+    double r4r2ij = 3.0 * si * sj;
+    double t = a1 * sqrt(r4r2ij) + a2;
+    double r0_sq = t * t;
+
+    double qi = topo_q[i];
+    double qj = topo_q[j];
+    double zsi = (zi >= 1 && zi <= 86) ? zetaChargeScaleDev(zeta_zeff[zi - 1], zeta_c[zi - 1], qi) : 1.0;
+    double zsj = (zj >= 1 && zj <= 86) ? zetaChargeScaleDev(zeta_zeff[zj - 1], zeta_c[zj - 1], qj) : 1.0;
+
+    c6_out   = c6;
+    r4r2_out = r4r2ij;
+    r0sq_out = r0_sq;
+    zeta_out = zsi * zsj;
+}
+
 __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_count(
     int N,
     const double* __restrict__ cx,
@@ -3779,35 +3825,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     double r2 = dx * dx + dy * dy + dz * dz;
     if (r2 > cutoff_sq) return;
 
-    // C6 = Σ_{ri,rj} gw_i[ri]·gw_j[rj]·c6ref  (== getChargeWeightedC6, CN-only weighting)
-    int ei = zi - 1, ej = zj - 1;
-    int nri = d_refn_const[ei];
-    int nrj = d_refn_const[ej];
-    size_t c6_base = (size_t)ei * D4_MAX_ELEM * D4_MAX_REF * D4_MAX_REF
-                   + (size_t)ej * D4_MAX_REF * D4_MAX_REF;
-    int gi = i * D4_MAX_REF;
-    int gj = j * D4_MAX_REF;
-    double c6 = 0.0;
-    for (int ri = 0; ri < nri; ++ri) {
-        double wi = gw[gi + ri];
-        size_t b = c6_base + (size_t)ri * D4_MAX_REF;
-        for (int rj = 0; rj < nrj; ++rj) {
-            double c6ref = c6_flat[b + rj];
-            if (fabs(c6ref) < 1e-20) continue;
-            c6 += wi * gw[gj + rj] * c6ref;
-        }
-    }
-
-    double si = sqrtzr4r2[ei];
-    double sj = sqrtzr4r2[ej];
-    double r4r2ij = 3.0 * si * sj;
-    double t = a1 * sqrt(r4r2ij) + a2;
-    double r0_sq = t * t;
-
-    double qi = topo_q[i];
-    double qj = topo_q[j];
-    double zsi = (zi >= 1 && zi <= 86) ? zetaChargeScaleDev(zeta_zeff[zi - 1], zeta_c[zi - 1], qi) : 1.0;
-    double zsj = (zj >= 1 && zj <= 86) ? zetaChargeScaleDev(zeta_zeff[zj - 1], zeta_c[zj - 1], qj) : 1.0;
+    double c6, r4r2ij, r0_sq, zeta;
+    dispPairStaticData(i, j, zi, zj, gw, c6_flat, sqrtzr4r2, topo_q, zeta_zeff, zeta_c, a1, a2,
+                       c6, r4r2ij, r0_sq, zeta);
 
     int slot = atomicAdd(d_counter, 1);
     out_i[slot]    = i;
@@ -3815,8 +3835,184 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     out_C6[slot]   = c6;
     out_r4r2[slot] = r4r2ij;
     out_r0sq[slot] = r0_sq;
-    out_zeta[slot] = zsi * zsj;
+    out_zeta[slot] = zeta;
     out_rcut[slot] = 50.0;  // D4 pair-energy cutoff (struct default, matches host)
+}
+
+// ============================================================================
+// Claude Generated (Oct 2026): ordered device build of the D4 pair list and of its per-atom
+// gather CSR. k_disp_pairs_build above takes its output slot from a global atomic counter, so
+// the pair order depended on the arrival order of the wavefronts; the CSR then had to be built
+// on the host from a downloaded copy of the indices (13.7 M pairs at 6200 atoms: 137 ms of host
+// loops, 13-26 ms download, 10 ms upload per rebuild). Here one workgroup owns one atom row:
+//   k_disp_rows_count : lo[a] = #partners p < a, hi[a] = #partners p > a in the list
+//   (host)            : exclusive scans -> pair row offsets rowoff (over hi), csr_off (over lo+hi)
+//   k_disp_rows_build : partners in ascending order (wavefront ballot + per-tile prefix); pair
+//                       (a, p > a) goes to slot rowoff[a] + rank, i.e. the host order of
+//                       GenerateDispersionPairsNative (i ascending, j ascending = key i*N+j);
+//                       CSR row of a = all partners ascending, is_i = (p > a)
+//   k_disp_pairs_static: C6, r4r2ij, R0^2, zetac6, r_cut per pair (one thread per pair)
+//   k_disp_csr_lower  : csr_pairidx of the p < a half by binary search of a in the
+//                       (ascending) idx_j row of p
+// The CSR rows are those DispersionSoA::upload builds from the same pair list: there each row
+// receives its entries in pair order, which for a list sorted by i*N+j is ascending partner order.
+// ============================================================================
+
+/// Same predicate as k_disp_pairs_count / k_disp_pairs_build for the pair (i, j), i < j.
+__device__ inline bool dispPairInList(int i, int j,
+                                      const double* __restrict__ cx, const double* __restrict__ cy,
+                                      const double* __restrict__ cz, const int* __restrict__ atom_types,
+                                      double cutoff_sq)
+{
+    const int zi = atom_types[i];
+    const int zj = atom_types[j];
+    if (zi < 1 || zi > D4_MAX_ELEM || zj < 1 || zj > D4_MAX_ELEM) return false;
+    const double dx = cx[i] - cx[j];
+    const double dy = cy[i] - cy[j];
+    const double dz = cz[i] - cz[j];
+    const double r2 = dx * dx + dy * dy + dz * dz;
+    return !(r2 > cutoff_sq);
+}
+
+constexpr int DISP_ROW_BLOCK = 256;
+
+/// Claude Generated (Oct 2026): per-atom partner counts below (lo) and above (hi) the atom index.
+__global__ __launch_bounds__(DISP_ROW_BLOCK) void k_disp_rows_count(
+    int N,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const int* __restrict__ atom_types, double cutoff_sq,
+    int* __restrict__ lo, int* __restrict__ hi)
+{
+    __shared__ int s_lo[DISP_ROW_BLOCK];
+    __shared__ int s_hi[DISP_ROW_BLOCK];
+    const int a = blockIdx.x;
+    if (a >= N) return;
+    int nlo = 0, nhi = 0;
+    for (int p = threadIdx.x; p < N; p += blockDim.x) {
+        if (p == a) continue;
+        const int i = p < a ? p : a;
+        const int j = p < a ? a : p;
+        if (dispPairInList(i, j, cx, cy, cz, atom_types, cutoff_sq)) {
+            if (p < a) ++nlo; else ++nhi;
+        }
+    }
+    s_lo[threadIdx.x] = nlo;
+    s_hi[threadIdx.x] = nhi;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (static_cast<int>(threadIdx.x) < s) {
+            s_lo[threadIdx.x] += s_lo[threadIdx.x + s];
+            s_hi[threadIdx.x] += s_hi[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) { lo[a] = s_lo[0]; hi[a] = s_hi[0]; }
+}
+
+/// Claude Generated (Oct 2026): writes the pair indices (a, p > a) in ascending p at rowoff[a] and
+/// the CSR row of atom a (all partners ascending). csr_pairidx of the p < a half: k_disp_csr_lower;
+/// per-pair static data: k_disp_pairs_static (one thread per pair: here most lanes of a tile have
+/// no pair, and the C6 contraction took 17-27 of 20-31 ms at 13.7 M pairs when done in this kernel).
+__global__ __launch_bounds__(DISP_ROW_BLOCK) void k_disp_rows_build(
+    int N,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const int* __restrict__ atom_types, double cutoff_sq,
+    const int* __restrict__ lo, const int* __restrict__ rowoff, const int* __restrict__ csr_off,
+    int* __restrict__ out_i, int* __restrict__ out_j,
+    int* __restrict__ csr_partner, int* __restrict__ csr_pairidx, int* __restrict__ csr_is_i)
+{
+    __shared__ int s_scan[DISP_ROW_BLOCK / 32];   // per-wavefront counts of the current tile
+    const int a = blockIdx.x;
+    if (a >= N) return;
+    const int t = threadIdx.x;
+    const int row_csr = csr_off[a];
+    const int row_pair = rowoff[a];
+    const int n_lo = lo[a];
+    int base = 0;   // partners of a found in the previous tiles
+    for (int p0 = 0; p0 < N; p0 += DISP_ROW_BLOCK) {
+        const int p = p0 + t;
+        bool in = false;
+        if (p < N && p != a) {
+            const int i = p < a ? p : a;
+            const int j = p < a ? a : p;
+            in = dispPairInList(i, j, cx, cy, cz, atom_types, cutoff_sq);
+        }
+        // tile prefix count of the flags: ballot + popcount within the wavefront, then the
+        // wavefront totals (warpSize 32 or 64, at most DISP_ROW_BLOCK / 32 of them)
+        const int lane = t % warpSize;
+        const int wave = t / warpSize;
+        const int nwave = DISP_ROW_BLOCK / warpSize;
+        const unsigned long long mask = __ballot(in ? 1 : 0);
+        const int in_wave = __popcll(mask & ((1ull << lane) - 1ull));
+        if (lane == 0) s_scan[wave] = __popcll(mask);
+        __syncthreads();
+        int before = 0, tile_total = 0;
+        for (int w = 0; w < nwave; ++w) {
+            if (w < wave) before += s_scan[w];
+            tile_total += s_scan[w];
+        }
+        if (in) {
+            const int rank = base + before + in_wave;       // rank of p among the partners of a
+            const int e = row_csr + rank;
+            csr_partner[e] = p;
+            csr_is_i[e]    = (p > a) ? 1 : 0;
+            if (p > a) {
+                const int k = row_pair + rank - n_lo;
+                out_i[k]    = a;
+                out_j[k]    = p;
+                csr_pairidx[e] = k;
+            }
+        }
+        base += tile_total;
+        __syncthreads();   // s_scan is rewritten by the next tile
+    }
+}
+
+/// Claude Generated (Oct 2026): per-pair static D4 data (C6 contraction, r4r2ij, R0^2, zetac6,
+/// r_cut) for the ordered list, one thread per pair.
+__global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_static(
+    int n, const int* __restrict__ idx_i, const int* __restrict__ idx_j,
+    const int* __restrict__ atom_types,
+    const double* __restrict__ gw, const double* __restrict__ c6_flat,
+    const double* __restrict__ sqrtzr4r2, const double* __restrict__ topo_q,
+    const double* __restrict__ zeta_zeff, const double* __restrict__ zeta_c,
+    double a1, double a2,
+    double* __restrict__ out_C6, double* __restrict__ out_r4r2, double* __restrict__ out_r0sq,
+    double* __restrict__ out_zeta, double* __restrict__ out_rcut)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= n) return;
+    const int i = idx_i[k];
+    const int j = idx_j[k];
+    double c6, r4r2ij, r0_sq, zeta;
+    dispPairStaticData(i, j, atom_types[i], atom_types[j], gw, c6_flat, sqrtzr4r2, topo_q,
+                       zeta_zeff, zeta_c, a1, a2, c6, r4r2ij, r0_sq, zeta);
+    out_C6[k]   = c6;
+    out_r4r2[k] = r4r2ij;
+    out_r0sq[k] = r0_sq;
+    out_zeta[k] = zeta;
+    out_rcut[k] = 50.0;  // D4 pair-energy cutoff (struct default, matches host)
+}
+
+/// Claude Generated (Oct 2026): pair index of the CSR entries (a, p < a): the pair (p, a) sits
+/// in the row of p, whose idx_j are ascending.
+__global__ __launch_bounds__(DISP_ROW_BLOCK) void k_disp_csr_lower(
+    int N, const int* __restrict__ lo, const int* __restrict__ rowoff, const int* __restrict__ csr_off,
+    const int* __restrict__ idx_j, const int* __restrict__ csr_partner, int* __restrict__ csr_pairidx)
+{
+    const int a = blockIdx.x;
+    if (a >= N) return;
+    const int s = csr_off[a];
+    const int n_lo = lo[a];
+    for (int t = threadIdx.x; t < n_lo; t += blockDim.x) {
+        const int p = csr_partner[s + t];
+        int l = rowoff[p], r = rowoff[p + 1];        // search a in idx_j[l, r)
+        while (l < r) {
+            const int m = l + ((r - l) >> 1);
+            if (idx_j[m] < a) l = m + 1; else r = m;
+        }
+        csr_pairidx[s + t] = l;                       // idx_j[l] == a by construction
+    }
 }
 
 // ============================================================================
@@ -6726,8 +6922,9 @@ void FFWorkspaceHip::uploadRefCN(const std::vector<std::vector<double>>& refcn)
 // WP-A (Jun 2026): on-device D4 dispersion pair-list build. HIP mirror of
 // FFWorkspaceGPU::generateDispersionPairListOnGPU (cuda/ff_workspace_gpu.cu).
 // Replaces the host O(N^2) GenerateDispersionPairsNative loop + the per-build H2D
-// upload of the pair SoA. ROCm-specific extra step: rebuild the per-atom CSR
-// adjacency (k_dispersion_gather) from the device-built pair list.
+// upload of the pair SoA. ROCm-specific extra step: the per-atom CSR adjacency
+// (k_dispersion_gather). Default (Oct 2026): ordered build k_disp_rows_* with the CSR on
+// the device; CURCUMA_GPU_DISP_SORT=0: atomic-slot build, CSR rebuilt on the host.
 // ============================================================================
 
 void FFWorkspaceHip::generateDispersionPairListOnGPU(
@@ -6765,6 +6962,81 @@ void FFWorkspaceHip::generateDispersionPairListOnGPU(
     }
 
     if (!impl.d_disp_pair_counter.ptr) impl.d_disp_pair_counter.alloc(1);
+
+    // Claude Generated (Oct 2026): ordered build (k_disp_rows_*): pairs in the host order i*N+j and
+    // the gather CSR built on the device, no index download. CURCUMA_GPU_DISP_SORT=0 keeps the
+    // arrival-order build below (atomic slot, host CSR rebuild), as on CUDA.
+    const char* env_sort = std::getenv("CURCUMA_GPU_DISP_SORT");
+    if (!(env_sort && env_sort[0] == '0')) {
+        const double cut_sq = cutoff_bohr * cutoff_bohr;
+        CudaBuffer<int> d_lo, d_hi, d_rowoff;
+        d_lo.alloc(N);
+        d_hi.alloc(N);
+        k_disp_rows_count<<<N, DISP_ROW_BLOCK, 0, impl.stream>>>(
+            N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+            impl.d_atom_types.ptr, cut_sq, d_lo.ptr, d_hi.ptr);
+        std::vector<int> h_lo(N), h_hi(N);
+        d_lo.download(h_lo.data(), N, impl.stream);
+        d_hi.download(h_hi.data(), N, impl.stream);
+        checkCuda(hipStreamSynchronize(impl.stream), "k_disp_rows_count sync");
+        std::vector<int> rowoff(N + 1, 0), off(N + 1, 0);
+        for (int a = 0; a < N; ++a) {
+            rowoff[a + 1] = rowoff[a] + h_hi[a];
+            off[a + 1]    = off[a] + h_lo[a] + h_hi[a];
+        }
+        const int n = rowoff[N];
+        if (off[N] != 2 * n)
+            throw std::runtime_error(fmt::format("GPU D4 pair build: CSR size {} != 2 x {} pairs", off[N], n));
+
+        { impl.disp_uv_valid = false; impl.disp_pair_c6_current = true; }  // new pair list, d_disp_uv stale
+        impl.disp.n = n;
+        impl.disp.csr_N = N;
+        m_disp_idx_i_host.clear();   // no reader on this path (the host CSR rebuild below is skipped)
+        m_disp_idx_j_host.clear();
+        // capacity only: the kernels use impl.disp.n, so the buffers are not shrunk (no free + malloc per rebuild)
+        impl.disp.idx_i.ensure(n);
+        impl.disp.idx_j.ensure(n);
+        impl.disp.C6.ensure(n);
+        impl.disp.r4r2ij.ensure(n);
+        impl.disp.r0_sq.ensure(n);
+        impl.disp.zetac6.ensure(n);
+        impl.disp.r_cut.ensure(n);
+        impl.disp.dc6dcn_ij.ensure(n);
+        impl.disp.dc6dcn_ji.ensure(n);
+        impl.disp.csr_partner.ensure(2 * n);
+        impl.disp.csr_pairidx.ensure(2 * n);
+        impl.disp.csr_is_i.ensure(2 * n);
+        impl.disp.csr_off.upload(off, impl.stream);
+        if (n > 0) {
+            d_rowoff.upload(rowoff, impl.stream);
+            k_disp_rows_build<<<N, DISP_ROW_BLOCK, 0, impl.stream>>>(
+                N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+                impl.d_atom_types.ptr, cut_sq,
+                d_lo.ptr, d_rowoff.ptr, impl.disp.csr_off.ptr,
+                impl.disp.idx_i.ptr, impl.disp.idx_j.ptr,
+                impl.disp.csr_partner.ptr, impl.disp.csr_pairidx.ptr, impl.disp.csr_is_i.ptr);
+            LaunchConfig cfg_st = getLaunchConfig(n, m_block_size);
+            k_disp_pairs_static<<<cfg_st.gridSize, cfg_st.blockSize, 0, impl.stream>>>(
+                n, impl.disp.idx_i.ptr, impl.disp.idx_j.ptr, impl.d_atom_types.ptr,
+                impl.d_gw.ptr, impl.d_c6_flat.ptr,
+                impl.d_sqrtzr4r2.ptr, impl.d_topo_q.ptr,
+                impl.d_zeta_zeff.ptr, impl.d_zeta_c.ptr,
+                a1, a2,
+                impl.disp.C6.ptr, impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr,
+                impl.disp.zetac6.ptr, impl.disp.r_cut.ptr);
+            k_disp_csr_lower<<<N, DISP_ROW_BLOCK, 0, impl.stream>>>(
+                N, d_lo.ptr, d_rowoff.ptr, impl.disp.csr_off.ptr,
+                impl.disp.idx_j.ptr, impl.disp.csr_partner.ptr, impl.disp.csr_pairidx.ptr);
+            checkCuda(hipGetLastError(), "k_disp_rows_build launch");
+        }
+        // d_lo / d_rowoff are freed on return: finish the kernels first.
+        checkCuda(hipStreamSynchronize(impl.stream), "k_disp_rows_build sync");
+        impl.disp_built_on_gpu = true;
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info(fmt::format(
+                "  GPU D4 dispersion pair list: {} pairs built on GPU in host order, gather CSR on GPU", n));
+        return;
+    }
 
     const double cutoff_sq = cutoff_bohr * cutoff_bohr;
     const int n_total = N * (N - 1) / 2;

@@ -71,11 +71,34 @@ fallback), memory of the device buffers (about 20 B per candidate entry plus the
 peo201-chain (2.9), peo201-water500 (5.5), peo201x2-water1500 (16.0 ms); mean and longest step lower with the switch on the three
 bulk systems (peo201x2-water1500: mean 19.9 -> 18.4 ms, longest step 174 -> 36 ms). Energies in step 50 equal on 9 digits.
 Both `gpu_disp_pairs_on_device` and `gpu_hb_detect_on_device` default to **true on CUDA since Oct 14, 2026** (operator decision after
-these checks). On ROCm the H-bond switch has no effect (trait `has_device_hb_detect` false) and the D4 switch needs the environment
-variable `CURCUMA_ROCM_DISP_PAIRS_ON_DEVICE` as well, because the setup-order and sort fixes are not mirrored there. With the defaults
+these checks). On ROCm the H-bond switch has no effect (trait `has_device_hb_detect` false); the D4 switch is mirrored there (next
+section). With the defaults
 (urea400-water1000, 200 steps, n = 1): mean step 18.1 ms (36.3 ms at the start of the session), longest step 48 ms (234 ms), median
 14.9 ms; each switch set to `false` restores its former cost (H-bond refresh 8.0 -> 35.9 ms, D4 rebuild 23 -> 167-218 ms), E(step 100) equal in
 all four combinations.
+
+## ROCm mirror of the device D4 build (same day, RX 9060 XT, `-threads 10`)
+
+Before, `gfnff_rocm.hip` built the list with an atomic slot (arrival order) and then rebuilt the per-atom gather CSR on the
+host. Phase split of one rebuild on urea400-water1000 (13.7 M pairs, 3 rebuilds, ms): count 3.9, build 21-35 (incl. nine
+`hipFree`/`hipMalloc`), index download 13-26, host CSR loops 123-137, CSR upload 10; host CN and Gaussian weights 16.
+Now (`FFWorkspaceHip::generateDispersionPairListOnGPU`): one workgroup per atom counts its partners below and above its index
+(`k_disp_rows_count`), the host scans the two N-vectors, `k_disp_rows_build` writes the pairs in ascending partner order
+(host order, key i*N+j, no sort needed) and the CSR rows, `k_disp_pairs_static` contracts C6 per pair, `k_disp_csr_lower` finds
+the pair index of the lower half by binary search. Buffers grow only (`ensure`), no index download.
+`CURCUMA_GPU_DISP_SORT=0` keeps the former path. Default on for ROCm as well; `-gfnff.gpu_disp_pairs_on_device false` is the way off.
+
+- Same list: a temporary comparison against the former kernel, sorted on the host, and against the host CSR loop gave 0
+  differences in pairs, order, the five per-pair values (bitwise), CSR and offsets for 16 single points (2 to 7320 atoms) and
+  9 MD rebuilds (urea400-water1000, peo201x2-water1500).
+- `-sp` on 16 structures from 2 to 7320 atoms (on / off / `-gpu none`): on against off ΔE <= 1.1e-13 Eh, Δgradient <=
+  1.7e-16 Eh/A; on against CPU ΔE <= 1.8e-11 Eh, Δgradient <= 1.6e-13 Eh/A (off against CPU the same).
+- 100 MD steps on / off: E(last step) differs by 3.4e-13 Eh on urea400-water1000 and on peo201x2-water1500; last frame equal at
+  the written precision (1e-6 A).
+- 200 MD steps, 3 alternating runs per binary, default before (host build) / after (device build): D4 rebuild median 427 -> 47 ms
+  (max 464 -> 58, n = 6) on urea400-water1000 and 306 -> 42 ms (max 340 -> 42, n = 9) on peo201x2-water1500; median step
+  unchanged (36.2 and 36.6 ms), mean step 52.8 -> 49.0 and 47.0 -> 42.6 ms. Of the 47 ms, 16 are the host CN and Gaussian
+  weights, about 13 the C6 contraction.
 
 ## Checked
 
@@ -91,13 +114,12 @@ all four combinations.
   charged ones); several runs for the scatter of the medians.
 - The device HB list was not compared byte for byte (equal energies only); memory use (pinned stage 2 x 32 MB, repulsion chunk
   cache about 70 MB at 6200 atoms, the D4 sort needs about 275 MB temporarily).
-- ROCm (not compilable here): `gfnff_rocm.hip` has the same unsorted device D4 build and the same setup-before-`setGeometry`
-  order; the HB/XB and repulsion changes reach it through the shared wrapper only.
+- ROCm: the HB/XB and repulsion changes reach it through the shared wrapper only.
 - MOR41/GMTKN55 regression (`scripts/refset_regression.py`): detection code is unchanged, not run.
 
 ## Not implemented
 
-- ROCm mirror of the device D4 fixes and of the device H-bond detection.
+- ROCm mirror of the device H-bond detection.
 - D4 and repulsion rebuild stay on the step that triggers them (no overlap with device work).
 
 Human production testing is pending.
