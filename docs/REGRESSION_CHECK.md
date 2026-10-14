@@ -65,6 +65,28 @@ non-converged in the OLD binary as well. The GFN-FF rows are the strongest
 statement in the table, because those runs take a genuinely different code path
 (implicit Coulomb pairs) and still reproduce every energy bit for bit.
 
+## Measured, Oct 14, 2026 (ROCm work, branch `feature/rocm-launch-latency` at `aaa510e6`)
+
+Reference: `origin/master` `e0ab0c23`, built from a worktree with the same options as `release/` except `USE_ROCM=OFF`
+(`USE_BLAS=ON`, `USE_GFNFF_FAST_EXP=ON`, `USE_AVX2=ON`). `--jobs` 10, one run per structure and binary (n = 1).
+
+| set | method | structures | compared | differ | failed in both binaries |
+|---|---|---:|---:|---:|---:|
+| MOR41 | gfnff, gfn1, gfn2 | 95 | 95 | 0 | 0 |
+| GMTKN55 | gfnff | 2462 | 2462 | 0 | 0 |
+| GMTKN55 | gfn1 | 2462 | 2461 | 0 | 1 (`G21EA/EA_16`, no energy from either binary) |
+| GMTKN55 | gfn2 | 2462 | 2459 | 0 | 3 (`G21IP/c+` and two more, no energy from either binary) |
+
+This compares CPU runs; the ROCm kernels are not part of it. The shared HB/XB detection code was changed on the branch
+(faster search with exact fallback), so 0 differences on both sets is the relevant result for it.
+
+ROCm against CPU of the same binary (`-gpu rocm` against `-gpu none`, MOR41, `--jobs 2`, n = 1 per structure):
+gfn1 and gfn2 0 of 95 differ. gfnff 6 of 95 differ (MAD 0.093 kcal/mol, max 1.59 kcal/mol; listed: PR26, PR28, PR27, PR05,
+ED26 and one more of smaller size). All listed structures contain Mn (PR05) or Ru (PR26, 27, 28, ED26); the other 36 structures with
+transition metals do not differ. For PR05 and ED26 only the dispersion term differs (PR05 -0.0123707 on the CPU against
+-0.0147244 Eh on ROCm, ED26 -0.0586428 against -0.0609685 Eh); all other terms are equal to 10 decimals. The binary from the start of this
+work session (before the first ROCm commit) gives the same two values, so the difference predates the branch chain. Cause not examined.
+
 ## Traps this caught (do not repeat them)
 
 - **Rebuilding while a comparison runs.** The first GMTKN55 pass of this session
