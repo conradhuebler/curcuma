@@ -5387,6 +5387,32 @@ static void stagedUploadHip(CudaBuffer<T>& buf, const std::vector<T>& v, hipStre
     stagedUploadHip(buf, v.data(), static_cast<int>(v.size()), stream, A);
 }
 
+/// Claude Generated (Oct 2026): pinned host stage of the repulsion list refresh (stagedRepulsionUploadHip), kept
+/// between refreshes. Grows with 1/8 headroom (the non-bonded list changes by well under 1 % per refresh), so a
+/// refresh neither allocates nor page-faults host memory. cnt holds the per-thread atom degrees of the gather CSR.
+struct HipRepStage {
+    char*  pin = nullptr;
+    size_t cap = 0;
+    std::vector<int> cnt;
+    HipRepStage() = default;
+    HipRepStage(const HipRepStage&) = delete;
+    HipRepStage& operator=(const HipRepStage&) = delete;
+    ~HipRepStage() { if (pin) (void)hipHostFree(pin); }
+    /// Pinned block of at least bytes; nullptr if no pinned memory could be had. Callers synchronise the
+    /// stream that read the previous contents before calling.
+    char* get(size_t bytes)
+    {
+        if (bytes <= cap) return pin;
+        if (pin) (void)hipHostFree(pin);
+        pin = nullptr;
+        cap = 0;
+        const size_t want = bytes + bytes / 8;
+        if (hipHostMalloc(reinterpret_cast<void**>(&pin), want) != hipSuccess) { pin = nullptr; return nullptr; }
+        cap = want;
+        return pin;
+    }
+};
+
 /// Per-triple gradient slots of the H-bond list for k_hbonds slot mode + k_slot_gather (rebuilt with the list).
 struct HipHBSlotTables {
     HipHBHostStage stage;           ///< Oct 2026: host arrays reused across HB list refreshes
@@ -6084,6 +6110,7 @@ struct FFWorkspaceHipImpl {
     PairGatherCSR nb_rep_csr;
     HBSlotTables hb_slots;
     HipHBDetectDev hbdet;            ///< Claude Generated (Oct 2026): device-side H-bond detection buffers
+    HipRepStage    rep_stage;        ///< Claude Generated (Oct 2026): pinned stage of the repulsion list refresh
     bool rep_gather_enabled = true;  ///< CURCUMA_ROCM_REP_GATHER=0 restores the pair kernel k_repulsion (non-bonded list)
     bool hb_gather_enabled  = true;  ///< CURCUMA_ROCM_HB_GATHER=0 restores k_hbonds with atomicAdd
 
@@ -6315,6 +6342,136 @@ static void buildRepulsionGatherCSR(const std::vector<GFNFFRepulsion>& v, int na
     }
     c.off.upload(off);
     if (tot > 0) { c.partner.upload(part); c.pairidx.upload(pidx); }
+}
+
+/// Claude Generated (Oct 2026): repulsion list refresh through the pinned stage impl.rep_stage; the device receives
+/// the same bytes as RepulsionSoA::upload() for both lists plus buildRepulsionGatherCSR() for the non-bonded one
+/// (when gather is true). The non-bonded list is packed by up to `threads` host threads over contiguous ranges of
+/// pairs; each range counts its own atom degrees, and its directed edges are placed after those of the lower ranges,
+/// so every CSR row keeps the ascending pair order of the serial build. Copies are hipMemcpyAsync on impl.stream (the
+/// SoA columns go out while the CSR is scattered); returns after the stream is synchronised, since the repulsion
+/// kernels run on another stream. Device buffers grow with 1/8 headroom. urea400-water1000 (1.47 M pairs): the
+/// serial path spent ~25 ms per refresh, mostly in fresh host vectors and the serial CSR build, ~2 ms in the copies.
+/// @return false if no pinned memory could be had (nothing was uploaded; the caller takes the serial path)
+static bool stagedRepulsionUploadHip(FFWorkspaceHipImpl& impl, const std::vector<GFNFFRepulsion>& bonded,
+                                     const std::vector<GFNFFRepulsion>& nonbonded, bool gather, int natoms,
+                                     int threads)
+{
+    auto al = [](size_t b) { return (b + 255) & ~static_cast<size_t>(255); };
+    auto soaBytes = [&al](size_t m) { return 3 * al(m * sizeof(double)) + 2 * al(m * sizeof(int)); };
+    const size_t nb = bonded.size(), nn = nonbonded.size();
+    const size_t bytes = soaBytes(nb) + soaBytes(nn)
+                       + (gather ? al((natoms + 1) * sizeof(int)) + 2 * al(2 * nn * sizeof(int)) : 0);
+    char* base = impl.rep_stage.get(bytes);
+    if (!base) return false;
+
+    struct Cols { double *alpha, *repab, *rcut; int *ii, *jj; };
+    size_t used = 0;
+    auto carve = [&](size_t b) { char* p = base + used; used += al(b); return p; };
+    auto cols = [&](size_t m) {
+        Cols c;
+        c.alpha = reinterpret_cast<double*>(carve(m * sizeof(double)));
+        c.repab = reinterpret_cast<double*>(carve(m * sizeof(double)));
+        c.rcut  = reinterpret_cast<double*>(carve(m * sizeof(double)));
+        c.ii    = reinterpret_cast<int*>(carve(m * sizeof(int)));
+        c.jj    = reinterpret_cast<int*>(carve(m * sizeof(int)));
+        return c;
+    };
+    const Cols cb = cols(nb), cn = cols(nn);
+    auto pack = [](const std::vector<GFNFFRepulsion>& v, const Cols& c, size_t a, size_t e) {
+        for (size_t k = a; k < e; ++k) {
+            c.alpha[k] = v[k].alpha;
+            c.repab[k] = v[k].repab;
+            c.rcut[k]  = v[k].r_cut;
+            c.ii[k]    = v[k].i;
+            c.jj[k]    = v[k].j;
+        }
+    };
+    auto ok = [natoms](int a) { return a >= 0 && a < natoms; };
+
+    // Ranges of the non-bonded list: identical in both passes (the CSR placement depends on them).
+    const int T = (nn < 32768) ? 1 : std::max(1, std::min(threads, static_cast<int>(nn / 16384)));
+    auto rangeOf = [nn, T](int t, size_t& a, size_t& e) { a = nn * t / T; e = nn * (t + 1) / T; };
+    auto runT = [T](auto&& fn) {
+        if (T == 1) { fn(0); return; }
+        std::vector<std::thread> pool;
+        pool.reserve(T - 1);
+        for (int t = 1; t < T; ++t) pool.emplace_back([&fn, t]() { fn(t); });
+        fn(0);
+        for (auto& th : pool) th.join();
+    };
+    std::vector<int>& cnt = impl.rep_stage.cnt;
+    if (gather) cnt.assign(static_cast<size_t>(T) * natoms, 0);
+
+    // Pass 1: SoA columns and, for the gather CSR, per-range atom degrees.
+    pack(bonded, cb, 0, nb);
+    runT([&](int t) {
+        size_t a, e;
+        rangeOf(t, a, e);
+        pack(nonbonded, cn, a, e);
+        if (!gather) return;
+        int* deg = cnt.data() + static_cast<size_t>(t) * natoms;
+        for (size_t k = a; k < e; ++k) {
+            const int i = cn.ii[k], j = cn.jj[k];
+            if (ok(i) && ok(j)) { ++deg[i]; ++deg[j]; }
+        }
+    });
+
+    hipStream_t s = impl.stream;
+    auto put = [s](auto& buf, const auto* src, size_t m) {
+        if (m == 0) return;
+        const int mi = static_cast<int>(m);
+        if (buf.n < mi) buf.alloc(mi + mi / 8 + 16);
+        checkCuda(hipMemcpyAsync(buf.ptr, src, m * sizeof(*src), hipMemcpyHostToDevice, s), "staged repulsion upload");
+    };
+    auto putSoA = [&put](RepulsionSoA& soa, const Cols& c, size_t m) {
+        soa.n = static_cast<int>(m);
+        put(soa.idx_i, c.ii, m);
+        put(soa.idx_j, c.jj, m);
+        put(soa.alpha, c.alpha, m);
+        put(soa.repab, c.repab, m);
+        put(soa.r_cut, c.rcut, m);
+    };
+    putSoA(impl.bonded_rep, cb, nb);
+    putSoA(impl.nonbonded_rep, cn, nn);
+
+    // Pass 2: gather CSR. Row offsets from the summed degrees, then the start of range t in row a is the row
+    // offset plus the degrees of the lower ranges in that row.
+    if (gather) {
+        int* off = reinterpret_cast<int*>(carve((natoms + 1) * sizeof(int)));
+        int* part = reinterpret_cast<int*>(carve(2 * nn * sizeof(int)));
+        int* pidx = reinterpret_cast<int*>(carve(2 * nn * sizeof(int)));
+        off[0] = 0;
+        for (int a = 0; a < natoms; ++a) {
+            int run = off[a];
+            for (int t = 0; t < T; ++t) {
+                int& c = cnt[static_cast<size_t>(t) * natoms + a];
+                const int d = c;
+                c = run;   // becomes the write cursor of range t in row a
+                run += d;
+            }
+            off[a + 1] = run;
+        }
+        const int tot = off[natoms];
+        runT([&](int t) {
+            size_t a, e;
+            rangeOf(t, a, e);
+            int* cur = cnt.data() + static_cast<size_t>(t) * natoms;
+            for (size_t k = a; k < e; ++k) {
+                const int i = cn.ii[k], j = cn.jj[k];
+                if (!ok(i) || !ok(j)) continue;
+                const int pi = cur[i]++; part[pi] = j; pidx[pi] = static_cast<int>(k);
+                const int pj = cur[j]++; part[pj] = i; pidx[pj] = static_cast<int>(k);
+            }
+        });
+        FFWorkspaceHipImpl::PairGatherCSR& c = impl.nb_rep_csr;
+        c.N = natoms;
+        put(c.off, off, static_cast<size_t>(natoms) + 1);
+        put(c.partner, part, static_cast<size_t>(tot));
+        put(c.pairidx, pidx, static_cast<size_t>(tot));
+    }
+    checkCuda(hipStreamSynchronize(s), "staged repulsion upload sync");
+    return true;
 }
 
 /// Claude Generated (Oct 2026): device order of the H-bond triples, grouped by case type (stable within a case).
@@ -7393,6 +7550,12 @@ void FFWorkspaceHip::updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_r
 {
     // Claude Generated (Sep 2026): mirror of FFWorkspaceGPU::updateRepulsion (ff_workspace_gpu.cu)
     // for the ROCm plugin. See GFNFF::updateNonbondedRepulsionIfNeeded().
+    // Claude Generated (Oct 2026): -gfnff.gpu_staged_list_upload (default true) takes the pinned staged path with the
+    // -threads host threads, same device bytes; false, or no pinned memory, keeps the serial path below.
+    if (m_staged_list_upload
+        && stagedRepulsionUploadHip(*m_impl, bonded_reps, nonbonded_reps, m_impl->rep_gather_enabled, m_natoms,
+                                    m_host_threads))
+        return;
     m_impl->bonded_rep.upload(bonded_reps, m_impl->stream);
     m_impl->nonbonded_rep.upload(nonbonded_reps, m_impl->stream);
     if (m_impl->rep_gather_enabled)

@@ -295,6 +295,8 @@ public:
     /// Claude Generated (Oct 2026): staged upload of rebuilt pair lists (updateDispersion(),
     /// updateRepulsion()): chunked conversion by `threads` host threads into a pinned double
     /// buffer, asynchronous copies. Same device content as the serial upload (enabled = false).
+    /// ROCm (Oct 2026): updateRepulsion() only, one pinned block kept across refreshes; `threads`
+    /// also sets the host threads of the ROCm HB list pack.
     void setStagedListUpload(bool enabled, int threads)
     {
         m_staged_list_upload = enabled;

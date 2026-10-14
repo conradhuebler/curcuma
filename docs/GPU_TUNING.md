@@ -208,7 +208,7 @@ and division after the unchanged cutoff test), `k_coulomb` (sqrt and division), 
 
 ### GPU MD performance switches (CUDA only, Oct 2026)
 
-Measurements and derivations: [GFNFF-PERFORMANCE-ROADMAP.md](GFNFF-PERFORMANCE-ROADMAP.md) (polymer_2x, 7320 atoms, RTX 5080, 16 threads). All four are ignored on ROCm. Machine-tested only; ROCm and the multi-GPU split not checked.
+Measurements and derivations: [GFNFF-PERFORMANCE-ROADMAP.md](GFNFF-PERFORMANCE-ROADMAP.md) (polymer_2x, 7320 atoms, RTX 5080, 16 threads). On ROCm they are ignored unless the row names ROCm. Machine-tested only; ROCm and the multi-GPU split not checked.
 
 | Option | Default | Effect |
 |---|---|---|
@@ -216,7 +216,7 @@ Measurements and derivations: [GFNFF-PERFORMANCE-ROADMAP.md](GFNFF-PERFORMANCE-R
 | `-gfnff.gpu_cn_pair_skin_bohr S` | 1.0 | Verlet skin of the CN pair list: rebuilt on the device only when an atom moved further than the skin criterion, not every MD step; negative = old behaviour. Applies to CUDA and, since Oct 13, 2026, ROCm (CN pair kernels 12.1 -> 0.95 ms per step at 7320 atoms; 4 rebuilds in 51 steps). CUDA roadmap: 94 rebuilds in 1000 steps instead of 397 in 400, `ff_total` median 24.0 -> 19.3 ms. |
 | `-gfnff.gpu_eeq_overlap true\|false` | true | The device projected-PCG solver waits only for its inputs and runs on a high-priority stream parallel to dc6dcn and the charge-independent kernels. |
 | `-gfnff.gpu_dispersion_overlap true\|false` | true | The D4 dispersion gradient starts right after dc6dcn, parallel to the EEQ solve (changes only the summation order of atomic adds). Roadmap, both overlaps together: wall clock 34.1 -> 30.9 ms/step (n=3); without the solver priority no gain. |
-| `-gfnff.gpu_staged_list_upload true\|false` | true | Rebuilt D4/repulsion pair lists and (since Oct 14, 2026) the H-bond list go through a pinned double buffer filled by `-threads` host threads, copied asynchronously. Roadmap, together with the parallel host rebuilds: 33.7 -> 21.7 ms/step (1000 vs 250 fs, n=3). |
+| `-gfnff.gpu_staged_list_upload true\|false` | true | Rebuilt D4/repulsion pair lists and (since Oct 14, 2026) the H-bond list go through a pinned double buffer filled by `-threads` host threads, copied asynchronously. Roadmap, together with the parallel host rebuilds: 33.7 -> 21.7 ms/step (1000 vs 250 fs, n=3). ROCm (Oct 14, 2026): repulsion lists and their gather CSR only, one pinned block kept across rebuilds, upload 25.4 -> 4.6 ms at 1.47 M pairs ([GPU_STEP_PAUSES_2026-10-14.md](GPU_STEP_PAUSES_2026-10-14.md)). |
 
 Environment variables:
 

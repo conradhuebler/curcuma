@@ -138,6 +138,38 @@ Not checked: wave64 hardware and gfx1150 (only gfx1200 was run), trajectories be
 charged systems with several fragments under the ensemble charge model (CPU fallback), the CUDA build of the shared changes
 (PARAM text, `rebuildBondHBDataCore()` chunk count; not compiled here).
 
+## ROCm repulsion list upload (same day, RX 9060 XT gfx1200, `-threads 10`)
+
+Phase split of the old upload (`gpu_rep_upload`, 25.4 ms median on urea400-water1000, 1.47 M non-bonded pairs; temporary
+timers, n = 28 refreshes, medians): SoA conversion 9.1 ms (fresh host vectors 4.4, serial pack 3.3, pageable copy 1.4, device
+reallocation 0 in the median), gather CSR 13.3 ms (degree count 4.6, fresh vectors 1.8, serial scatter 6.1, copy 0.8), bonded
+list 0.4 ms. The copies were not the cost; the serial host work into freshly allocated vectors was.
+`FFWorkspaceHip::updateRepulsion()` now calls `stagedRepulsionUploadHip()` when `-gfnff.gpu_staged_list_upload` is true (the
+default; trait `has_staged_list_upload` is now true on ROCm, where the switch selects this path only): both SoA lists and the
+gather CSR are written by the `-threads` host threads into one pinned block kept across refreshes (1/8 headroom, about 79 MB at
+1.47 M pairs by the layout), each thread range counts its own atom degrees and places its edges after those of the lower ranges
+(row order as in the serial build), copies are `hipMemcpyAsync` on the main stream followed by one synchronisation, device
+buffers grow with 1/8 headroom. `false`, or no pinned memory, keeps the serial path.
+
+- **Device arrays** (temporary byte comparison against the serial build, removed afterwards): 0 differences in all five SoA
+  columns of both lists, `n`, and the CSR (`off`, `partner`, `pairidx`, `N`) over 15 + 15 refreshes on urea400-water1000
+  (`-threads` 10 and 3), 13 + 13 on peo201x2-water1500, 9 with `CURCUMA_ROCM_REP_GATHER=0`, 23 on peo201-chain.
+- **Time**, 3 alternating runs of 200 MD steps per binary against a copy of the previous build, median (max) before -> after:
+  urea400-water1000 (n = 81 refreshes) `gpu_rep_update` 35.7 (54.5) -> 15.1 (28.1) ms, `gpu_rep_upload` 25.4 (28.6) -> 4.6
+  (13.0) ms; peo201x2-water1500 (n = 75, 0.92 M pairs) 19.3 (27.6) -> 9.0 (18.5) ms and 12.9 (17.5) -> 3.0 (9.3) ms. The maximum
+  is the first refresh of each run (pinned and device allocation); later ones stay at or below 5.3 ms. MD step (n = 600): median
+  43.21 -> 43.26 and 45.08 -> 45.12 ms (the refresh steps are not the median), mean 52.23 -> 49.56 and 50.43 -> 49.21 ms.
+- **Energies**: Epot of step 100 over the 6 runs per system within 8e-13 Eh (urea) and 1e-13 Eh (peo); `-sp` on 12 structures
+  from 2 to 7320 atoms against `-gpu none`: dE <= 1.8e-11 Eh, dgradient <= 1.5e-13 Eh/A (a single point does not refresh the
+  list, so this checks only that nothing else moved).
+- `ctest -R "gpu|rocm|gfnff" -j1`: 110 tests, 109 passed, `cli_simplemd_14_gfnff_react_h_recombination` failed (fails before as
+  well, see above).
+
+Not checked: the CUDA build of the shared changes (trait removal `lean_hb_refresh`, comments; not compiled here), wave64 and
+gfx1150, runs longer than 200 steps, `-threads` other than 3 and 10 for the time, pinned memory exhaustion (the fallback path
+was not forced), memory use beyond the layout estimate. The remaining 10.5 ms of the urea400-water1000 refresh are the host list
+generation in `gfnff_method.cpp`, unchanged here.
+
 ## Checked
 
 - Energies in steps 0, 10 and 100 equal to the previous binary within 1e-12 Eh for every change above (GPU runs are not bitwise

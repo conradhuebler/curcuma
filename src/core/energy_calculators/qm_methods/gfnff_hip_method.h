@@ -68,8 +68,10 @@ struct GFNFFRocmBackend {
     /// the dispersion gather is enqueued right after the Gaussian weights, so the GPU works on it while the
     /// host solves the EEQ. K3 is a no-op here (no input event, setStreamPriorityHigh() returns false).
     static constexpr bool has_stream_overlap = true;
-    /// Oct 2026: staged pinned list upload not ported (serial SoA upload as before).
-    static constexpr bool has_staged_list_upload = false;
+    /// Claude Generated (Oct 2026): -gfnff.gpu_staged_list_upload reaches the ROCm workspace; there it selects the
+    /// pinned staged upload of the repulsion lists only (FFWorkspaceHip::updateRepulsion). The D4 list is built on
+    /// the device, the HB list is packed by -threads host threads regardless of the switch.
+    static constexpr bool has_staged_list_upload = true;
     /// Claude Generated (Oct 2026): H-bond triples enumerated on the device (FFWorkspaceHip::detectHBondsOnDevice(),
     /// rows by (case, A) instead of a key sort); -gfnff.gpu_hb_detect_on_device false restores the host detection.
     static constexpr bool has_device_hb_detect = true;
@@ -77,13 +79,6 @@ struct GFNFFRocmBackend {
     /// device build with the gather CSR on the device, FFWorkspaceHip::generateDispersionPairListOnGPU);
     /// -gfnff.gpu_disp_pairs_on_device false restores the host build.
     static constexpr bool default_disp_pairs_on_device = true;
-    /// Claude Generated (Oct 2026): HB/XB list refresh without the host-side copies that nothing on this
-    /// backend reads: GFNFF does not update its own CPU workspace's HB/XB lists and bond-HB data
-    /// (setSkipHostHBWorkspaceUpdate), and FFWorkspaceHip::updateHBonds packs the new list with -threads host
-    /// threads (setStagedListUpload(false, threads) passes the count; the staged upload itself stays off).
-    /// Detected by gfnffBackendLeanHBRefresh in gfnff_gpu_method_impl.h; a backend without the member (CUDA)
-    /// keeps the previous behaviour.
-    static constexpr bool lean_hb_refresh = true;
 
     /// Deliverable 3 (Jun 2026): from 16 fragments on, the dense device Cholesky (O(N^3) plus a
     /// host Schur step over nfrag+1 columns) is not used. Oct 2026: there the device projected PCG

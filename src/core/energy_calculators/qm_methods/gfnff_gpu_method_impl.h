@@ -77,14 +77,6 @@
 #include <cstring>
 #include <memory>
 
-/// Claude Generated (Oct 2026): true iff the backend traits declare `lean_hb_refresh = true` (ROCm); a
-/// backend without the member (CUDA) gets false and keeps its previous HB/XB refresh path unchanged.
-template <class B, class = void>
-struct gfnffBackendLeanHBRefresh : std::false_type {};
-template <class B>
-struct gfnffBackendLeanHBRefresh<B, std::void_t<decltype(B::lean_hb_refresh)>>
-    : std::bool_constant<B::lean_hb_refresh> {};
-
 /// Claude Generated (Oct 2026): true when the backend has a static downloadEEQCharges(host, device, n)
 /// (ROCm: charges of its small-system device EEQ come from a host copy made with the status read-back).
 /// A backend without the member (CUDA) gets false and keeps Backend::downloadDoubles unchanged.
@@ -802,10 +794,6 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
             m_hb_detect_on_device = cfg_get_bool("gpu_hb_detect_on_device", true);
             m_hb_detect_verify = m_hb_detect_on_device && cfg_get_bool("gpu_hb_detect_verify", false);
         }
-        // Claude Generated (Oct 2026): ROCm packs the refreshed HB list with the -threads host threads; the
-        // staged upload stays off there (the setter is the only way to pass the thread count).
-        if constexpr (gfnffBackendLeanHBRefresh<Backend>::value && !Backend::has_staged_list_upload)
-            m_gpu_workspace->setStagedListUpload(false, m_host_threads);
         // Claude Generated (Sep 2026): per-step D4 C6 refresh on the device, same switch as the
         // CPU path (GFNFF::refreshDispersionC6()).
         m_gpu_workspace->setDispersionC6Update(cfg_get_bool("dispersion_c6_update", true));
