@@ -35,7 +35,7 @@ the named phases add up to `total` for every step above twice the median.
   the arrival at the atomic counter, now sorted by `i*N+j` (host order; switch `CURCUMA_GPU_DISP_SORT=0` keeps the arrival
   order). Rebuild 169 to 217 -> 23 ms, median step 15.3 -> 15.4 ms (default off: 15.4).
 
-Result with default parameters (200 steps): median 15.4 -> 15.4 ms, mean 36.3 -> 23.2 ms, steps > 100 ms 22 -> 2 (the two D4 rebuilds).
+Result of the host-side changes alone (200 steps): median 15.4 -> 15.4 ms, mean 36.3 -> 23.2 ms, steps > 100 ms 22 -> 2 (the two D4 rebuilds); with the two device switches (now the CUDA default) see below.
 What remains per step (mean, estimated from the intervals above): HB/XB about 3.5 ms, repulsion 1.8 ms, D4 1.9 ms (0.2 with the switch).
 
 ## Device-side H-bond detection (`-gfnff.gpu_hb_detect_on_device`, CUDA, opt-in)
@@ -70,7 +70,12 @@ fallback), memory of the device buffers (about 20 B per candidate entry plus the
 5e-16 Eh/A. MD (2 alternating runs each): median step equal for caffeine (0.35 ms), trisaccharide (0.71), urea cluster (1.86),
 peo201-chain (2.9), peo201-water500 (5.5), peo201x2-water1500 (16.0 ms); mean and longest step lower with the switch on the three
 bulk systems (peo201x2-water1500: mean 19.9 -> 18.4 ms, longest step 174 -> 36 ms). Energies in step 50 equal on 9 digits.
-The default stays `false` until the ROCm side has the same setup-order and sort fixes.
+Both `gpu_disp_pairs_on_device` and `gpu_hb_detect_on_device` default to **true on CUDA since Oct 14, 2026** (operator decision after
+these checks). On ROCm the H-bond switch has no effect (trait `has_device_hb_detect` false) and the D4 switch needs the environment
+variable `CURCUMA_ROCM_DISP_PAIRS_ON_DEVICE` as well, because the setup-order and sort fixes are not mirrored there. With the defaults
+(urea400-water1000, 200 steps, n = 1): mean step 18.1 ms (36.3 ms at the start of the session), longest step 48 ms (234 ms), median
+14.9 ms; each switch set to `false` restores its former cost (H-bond refresh 8.0 -> 35.9 ms, D4 rebuild 23 -> 167-218 ms), E(step 100) equal in
+all four combinations.
 
 ## Checked
 
@@ -93,6 +98,6 @@ The default stays `false` until the ROCm side has the same setup-order and sort 
 ## Not implemented
 
 - ROCm mirror of the device D4 fixes and of the device H-bond detection.
-- `gpu_disp_pairs_on_device` as default; D4 and repulsion rebuild stay on the step that triggers them (no overlap with device work).
+- D4 and repulsion rebuild stay on the step that triggers them (no overlap with device work).
 
 Human production testing is pending.

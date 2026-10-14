@@ -71,6 +71,7 @@ struct GFNFFRocmBackend {
     /// Oct 2026: staged pinned list upload not ported (serial SoA upload as before).
     static constexpr bool has_staged_list_upload = false;
     static constexpr bool has_device_hb_detect = false;
+    static constexpr bool default_disp_pairs_on_device = false;
     /// Claude Generated (Oct 2026): HB/XB list refresh without the host-side copies that nothing on this
     /// backend reads: GFNFF does not update its own CPU workspace's HB/XB lists and bond-HB data
     /// (setSkipHostHBWorkspaceUpdate), and FFWorkspaceHip::updateHBonds packs the new list with -threads host

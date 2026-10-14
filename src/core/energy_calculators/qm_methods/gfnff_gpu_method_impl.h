@@ -417,6 +417,7 @@ private:
     void verifyDeviceHBList(const std::vector<int>& di, const std::vector<int>& dj, const std::vector<int>& dk,
                             const std::vector<int>& dcase, const std::vector<int>& dparent);
     bool m_disp_pairs_on_device = false;  ///< WP-A mode active (gpu_disp_pairs_on_device)
+    bool m_disp_pairs_requested = false;  ///< the D4 pair list is built on the device (setting, backend default, ROCm env)
     bool m_hb_detect_on_device = false;   ///< Oct 2026: H-bond triples enumerated on the device (gpu_hb_detect_on_device)
     bool m_hb_detect_verify = false;      ///< compare the device list with the host detection at every refresh
 };
@@ -577,9 +578,18 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     // generator to skip its O(N^2) pair loop (keep only CN + gw the device reuses).
     // Must be set before InitialiseMolecule triggers host parameter generation.
     {
-        bool disp_dev = m_parameters.value("gpu_disp_pairs_on_device", false);
-        if (m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
-            disp_dev = disp_dev || m_parameters["gfnff"].value("gpu_disp_pairs_on_device", false);
+        // Claude Generated (Oct 14, 2026): default on for CUDA (device build, sorted like the host list; checked on 27
+        // structures, docs/GPU_STEP_PAUSES_2026-10-14.md). The ROCm build lacks the setup-order and sort fixes: there it
+        // stays off unless CURCUMA_ROCM_DISP_PAIRS_ON_DEVICE is set as well. The gfnff scope wins over the top level.
+        bool disp_dev = Backend::default_disp_pairs_on_device;
+        if (m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object()
+            && m_parameters["gfnff"].contains("gpu_disp_pairs_on_device"))
+            disp_dev = m_parameters["gfnff"].value("gpu_disp_pairs_on_device", disp_dev);
+        else
+            disp_dev = m_parameters.value("gpu_disp_pairs_on_device", disp_dev);
+        if constexpr (!Backend::default_disp_pairs_on_device)
+            disp_dev = disp_dev && std::getenv("CURCUMA_ROCM_DISP_PAIRS_ON_DEVICE") != nullptr;
+        m_disp_pairs_requested = disp_dev;
         m_gfnff->setSkipHostDispPairs(disp_dev);
         // Claude Generated (Sep 2026): the device enumerates the Coulomb pairs itself;
         // `-gpu_coulomb_implicit false` restores the host pair list.
@@ -792,7 +802,7 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
             m_gpu_workspace->setStagedListUpload(cfg_get_bool("gpu_staged_list_upload", true), m_host_threads);
         // Claude Generated (Oct 2026): H-bond triples enumerated on the device (CUDA only, opt-in).
         if constexpr (Backend::has_device_hb_detect) {
-            m_hb_detect_on_device = cfg_get_bool("gpu_hb_detect_on_device", false);
+            m_hb_detect_on_device = cfg_get_bool("gpu_hb_detect_on_device", true);
             m_hb_detect_verify = m_hb_detect_on_device && cfg_get_bool("gpu_hb_detect_verify", false);
         }
         // Claude Generated (Oct 2026): ROCm packs the refreshed HB list with the -threads host threads; the
@@ -829,7 +839,7 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
             // overwritten here). Needs CN + gw on the device first. Default OFF: the
             // proven host build stays the reference; the ROCm workspace additionally rebuilds
             // the gather CSR. See docs/GFNFF_PERFORMANCE_LEVERS.md.
-            if (cfg_get_bool("gpu_disp_pairs_on_device", false)) {
+            if (m_disp_pairs_requested) {
                 m_disp_pairs_on_device = true;
                 buildDispersionPairsOnDevice();
                 if (CurcumaLogger::get_verbosity() >= 1)
