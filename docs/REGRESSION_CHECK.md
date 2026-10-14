@@ -80,12 +80,13 @@ Reference: `origin/master` `e0ab0c23`, built from a worktree with the same optio
 This compares CPU runs; the ROCm kernels are not part of it. The shared HB/XB detection code was changed on the branch
 (faster search with exact fallback), so 0 differences on both sets is the relevant result for it.
 
-ROCm against CPU of the same binary (`-gpu rocm` against `-gpu none`, MOR41, `--jobs 2`, n = 1 per structure):
-gfn1 and gfn2 0 of 95 differ. gfnff 6 of 95 differ (MAD 0.093 kcal/mol, max 1.59 kcal/mol; listed: PR26, PR28, PR27, PR05,
-ED26 and one more of smaller size). All listed structures contain Mn (PR05) or Ru (PR26, 27, 28, ED26); the other 36 structures with
-transition metals do not differ. For PR05 and ED26 only the dispersion term differs (PR05 -0.0123707 on the CPU against
--0.0147244 Eh on ROCm, ED26 -0.0586428 against -0.0609685 Eh); all other terms are equal to 10 decimals. The binary from the start of this
-work session (before the first ROCm commit) gives the same two values, so the difference predates the branch chain. Cause not examined.
+ROCm against CPU of the same binary (`-gpu rocm` against `-gpu none`, MOR41, n = 1 per structure and mode):
+gfn1 and gfn2 0 of 95 differ. gfnff 6 of 95 differ at the 8-decimal print (MAD 0.093 kcal/mol, max 1.59 kcal/mol): ED05 and PR05
+(both Mn structures of the set) and ED26, PR26, PR27, PR28 (4 of the 16 Ru structures; the other 12 Ru structures and all
+other metal structures are equal). For PR05 and ED26 only the dispersion term differs (PR05 -0.0123707 on the CPU against
+-0.0147244 Eh on ROCm, ED26 -0.0586428 against -0.0609685 Eh); all other terms are equal to 10 decimals; the other four were not
+split by term. The binary from the start of this work session (before the first ROCm commit) gives the same two
+values for PR05 and ED26, so the difference predates the branch chain (the other four were not run with it). Cause not examined.
 
 ## Traps this caught (do not repeat them)
 
