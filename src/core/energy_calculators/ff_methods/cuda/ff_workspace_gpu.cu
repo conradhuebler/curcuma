@@ -608,6 +608,18 @@ void HBondSoA::upload(const std::vector<GFNFFHydrogenBond>& v,
 // FFWorkspaceGPUImpl — CUDA-internal state (not visible outside this .cu)
 // ============================================================================
 
+/// Claude Generated (Oct 2026): buffers of the device-side H-bond detection (detectHBondsOnDevice()).
+struct HBDetectDev {
+    CudaBuffer<double> bas, aci, q, repz;
+    CudaBuffer<char>   ab_ok;
+    CudaBuffer<int>    hyd_list, bond_off, bond_idx, hyd_off, hyd_idx, nbr_off, nbr_idx;
+    CudaBuffer<int>    counter, ct, par, perm, ab_counter, ab_i, ab_j;
+    CudaBuffer<float>  fx, fy, fz;
+    int ab_cap = 0;
+    CudaBuffer<long long> key;
+    int cap = 0;
+};
+
 struct FFWorkspaceGPUImpl {
     // Static SoA buffers (uploaded once at construction)
     DispersionSoA  disp;            ///< D4 dispersion pairs
@@ -629,6 +641,7 @@ struct FFWorkspaceGPUImpl {
     ATMSoA         atm;             ///< Axilrod-Teller-Muto 3-body dispersion
     XBondSoA       xbonds;          ///< Halogen bonds
     HBondSoA       hbonds;          ///< Hydrogen bonds
+    HBDetectDev    hbdet;           ///< device-side H-bond detection buffers (Oct 2026)
 
     // Dynamic buffers (reset + upload each calculation step)
     CoordSoA    coords;      ///< Current geometry SoA (x[N], y[N], z[N]) — Phase 10, March 2026
@@ -1866,6 +1879,152 @@ void FFWorkspaceGPU::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
         m_last_hbonds = hbonds;
     else
         m_last_hbonds.clear();
+}
+
+int FFWorkspaceGPU::detectHBondsOnDevice(const GFNFFHBDetectInputs& in, std::vector<int>& hb_i,
+                                         std::vector<int>& hb_j, std::vector<int>& hb_k,
+                                         std::vector<int>* hb_case, std::vector<int>* hb_parent)
+{
+    auto& impl = *m_impl;
+    HBDetectDev& D = impl.hbdet;
+    HBondSoA& soa = impl.hbonds;
+    const int N = m_natoms;
+    auto pol = thrust::cuda::par.on(impl.stream);
+
+    // inputs (a few arrays of N and the CSR lists: well below 1 MB on urea400-water1000)
+    D.bas.upload(in.basicity.data(), N);
+    D.aci.upload(in.acidity.data(), N);
+    D.q.upload(in.charge.data(), N);
+    D.ab_ok.upload(in.ab_ok.data(), N);
+    D.hyd_list.upload(in.hb_hyd_list.data(), static_cast<int>(in.hb_hyd_list.size()));
+    D.bond_off.upload(in.bond_off.data(), N + 1);
+    D.bond_idx.upload(in.bond_idx.data(), static_cast<int>(in.bond_idx.size()));
+    D.hyd_off.upload(in.hyd_off.data(), N + 1);
+    D.hyd_idx.upload(in.hyd_idx.data(), static_cast<int>(in.hyd_idx.size()));
+    D.nbr_off.upload(in.nbr_off.data(), N + 1);
+    D.nbr_idx.upload(in.nbr_idx.data(), static_cast<int>(in.nbr_idx.size()));
+    {
+        std::vector<double> repz86(86, 1.0);
+        for (size_t z = 0; z < repz86.size() && z < GFNFFParameters::repz.size(); ++z) repz86[z] = GFNFFParameters::repz[z];
+        D.repz.upload(repz86.data(), 86);
+    }
+    if (!D.counter.ptr) D.counter.alloc(1);
+
+    // pass 1: AB pairs (compacted), pass 2: one warp per AB pair; both write into buffers of a capacity that grows
+    // when the counter shows an overflow (the kernels count past the end and the pass is rerun larger)
+    const long long n_pairs = static_cast<long long>(N) * (N - 1) / 2;
+    D.fx.ensure(N); D.fy.ensure(N); D.fz.ensure(N);
+    if (!D.ab_counter.ptr) D.ab_counter.alloc(1);
+    {
+        auto c = getLaunchConfigLight(N, m_block_size);
+        k_hb_to_float<<<c.gridSize, c.blockSize, 0, impl.stream>>>(N, impl.coords.d_x.ptr, impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr, D.fx.ptr, D.fy.ptr, D.fz.ptr);
+        checkCuda(cudaGetLastError(), "k_hb_to_float launch");
+    }
+    int n_ab = 0;
+    int ab_cap = std::max(D.ab_cap, 1 << 17);
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        D.ab_i.ensure(ab_cap); D.ab_j.ensure(ab_cap);
+        int zero = 0;
+        D.ab_counter.upload(&zero, 1);
+        auto cfg = getLaunchConfig(static_cast<int>(n_pairs), m_block_size);
+        k_hb_ab_pairs<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+            N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, D.bas.ptr, D.aci.ptr, D.ab_ok.ptr,
+            in.hbthr1, ab_cap, D.ab_counter.ptr, D.ab_i.ptr, D.ab_j.ptr);
+        checkCuda(cudaGetLastError(), "k_hb_ab_pairs launch");
+        checkCuda(cudaStreamSynchronize(impl.stream), "k_hb_ab_pairs sync");
+        D.ab_counter.download(&n_ab, 1);
+        checkCuda(cudaStreamSynchronize(impl.stream), "hb ab count download");
+        if (n_ab <= ab_cap) break;
+        ab_cap = n_ab + n_ab / 4;
+    }
+    D.ab_cap = std::max(D.ab_cap, ab_cap);
+    if (n_ab > ab_cap) throw std::runtime_error("GPU H-bond detection: AB pair count exceeds the buffer after reruns");
+
+    int cap = std::max(D.cap, 1 << 20);
+    int count = 0;
+    for (int attempt = 0; attempt < 4 && n_ab > 0; ++attempt) {
+        D.key.ensure(cap); D.ct.ensure(cap); D.par.ensure(cap);
+        int zero = 0;
+        D.counter.upload(&zero, 1);
+        const int threads = 128;   // 4 warps per block, one warp per AB pair
+        const long long blocks = (static_cast<long long>(n_ab) * 32 + threads - 1) / threads;
+        k_hb_detect<<<static_cast<unsigned>(blocks), threads, 0, impl.stream>>>(
+            n_ab, D.ab_i.ptr, D.ab_j.ptr, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+            D.fx.ptr, D.fy.ptr, D.fz.ptr, N, impl.d_atom_types.ptr, D.bas.ptr, D.aci.ptr, D.q.ptr,
+            D.hyd_list.ptr, static_cast<int>(in.hb_hyd_list.size()),
+            D.bond_off.ptr, D.bond_idx.ptr, D.hyd_off.ptr, D.hyd_idx.ptr, D.nbr_off.ptr, D.nbr_idx.ptr,
+            in.hbthr1, in.hbthr2, in.min_pair_energy, cap, D.counter.ptr, D.key.ptr, D.ct.ptr, D.par.ptr);
+        checkCuda(cudaGetLastError(), "k_hb_detect launch");
+        checkCuda(cudaStreamSynchronize(impl.stream), "k_hb_detect sync");
+        D.counter.download(&count, 1);
+        checkCuda(cudaStreamSynchronize(impl.stream), "hb count download");
+        if (count <= cap) break;
+        cap = count + count / 4;
+    }
+    D.cap = std::max(D.cap, cap);
+    if (count > cap) throw std::runtime_error("GPU H-bond detection: entry count exceeds the buffer after reruns");
+
+    const int n = count;
+    soa.n = n;
+    hb_i.clear(); hb_j.clear(); hb_k.clear();
+    if (hb_case) hb_case->clear();
+    if (hb_parent) hb_parent->clear();
+    if (n == 0) { soa.total_nb_B = 0; soa.total_nb_C = 0; return 0; }
+
+    // deterministic order: sort by (A, H, B)
+    D.perm.ensure(n);
+    thrust::device_ptr<int> pp(D.perm.ptr);
+    thrust::device_ptr<long long> pk(D.key.ptr);
+    thrust::sequence(pol, pp, pp + n);
+    thrust::sort_by_key(pol, pk, pk + n, pp);
+
+    CudaBuffer<int>* icols[] = { &soa.idx_i, &soa.idx_j, &soa.idx_k, &soa.elem_A, &soa.elem_B, &soa.case_type,
+                                 &soa.nb_B_offset, &soa.nb_B_count, &soa.acceptor_parent, &soa.nb_C_offset,
+                                 &soa.nb_C_count };
+    CudaBuffer<double>* dcols[] = { &soa.q_H, &soa.q_A, &soa.q_B, &soa.basicity_A, &soa.basicity_B,
+                                    &soa.acidity_A, &soa.acidity_B, &soa.r_cut, &soa.repz_B };
+    for (auto* b : icols) b->ensure(n);
+    for (auto* b : dcols) b->ensure(n);
+    {
+        auto cfg = getLaunchConfigLight(n, m_block_size);   // the two fill kernels are __launch_bounds__(256, 4)
+        k_hb_fill_columns<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+            n, N, D.key.ptr, D.perm.ptr, D.ct.ptr, D.par.ptr, impl.d_atom_types.ptr, D.bas.ptr, D.aci.ptr, D.q.ptr,
+            D.repz.ptr, D.nbr_off.ptr, D.nbr_idx.ptr,
+            soa.idx_i.ptr, soa.idx_j.ptr, soa.idx_k.ptr, soa.elem_A.ptr, soa.elem_B.ptr,
+            soa.q_H.ptr, soa.q_A.ptr, soa.q_B.ptr, soa.basicity_A.ptr, soa.basicity_B.ptr,
+            soa.acidity_A.ptr, soa.acidity_B.ptr, soa.r_cut.ptr, soa.case_type.ptr, soa.acceptor_parent.ptr,
+            soa.repz_B.ptr, soa.nb_B_count.ptr, soa.nb_C_count.ptr);
+        checkCuda(cudaGetLastError(), "k_hb_fill_columns launch");
+        thrust::device_ptr<int> cB(soa.nb_B_count.ptr), oB(soa.nb_B_offset.ptr);
+        thrust::device_ptr<int> cC(soa.nb_C_count.ptr), oC(soa.nb_C_offset.ptr);
+        thrust::exclusive_scan(pol, cB, cB + n, oB);
+        thrust::exclusive_scan(pol, cC, cC + n, oC);
+        int lastB[2] = {0, 0}, lastC[2] = {0, 0};   // {offset, count} of the last entry
+        checkCuda(cudaMemcpyAsync(&lastB[0], soa.nb_B_offset.ptr + n - 1, sizeof(int), cudaMemcpyDeviceToHost, impl.stream), "hb tail");
+        checkCuda(cudaMemcpyAsync(&lastB[1], soa.nb_B_count.ptr + n - 1, sizeof(int), cudaMemcpyDeviceToHost, impl.stream), "hb tail");
+        checkCuda(cudaMemcpyAsync(&lastC[0], soa.nb_C_offset.ptr + n - 1, sizeof(int), cudaMemcpyDeviceToHost, impl.stream), "hb tail");
+        checkCuda(cudaMemcpyAsync(&lastC[1], soa.nb_C_count.ptr + n - 1, sizeof(int), cudaMemcpyDeviceToHost, impl.stream), "hb tail");
+        checkCuda(cudaStreamSynchronize(impl.stream), "hb fill sync");
+        soa.total_nb_B = lastB[0] + lastB[1];
+        soa.total_nb_C = lastC[0] + lastC[1];
+        if (soa.total_nb_B > 0) soa.nb_B_flat.ensure(soa.total_nb_B);
+        if (soa.total_nb_C > 0) soa.nb_C_flat.ensure(soa.total_nb_C);
+        k_hb_fill_neighbors<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+            n, soa.idx_k.ptr, soa.case_type.ptr, soa.acceptor_parent.ptr, D.nbr_off.ptr, D.nbr_idx.ptr,
+            soa.nb_B_offset.ptr, soa.nb_C_offset.ptr, soa.nb_B_flat.ptr, soa.nb_C_flat.ptr);
+        checkCuda(cudaStreamSynchronize(impl.stream), "k_hb_fill_neighbors sync");
+    }
+
+    hb_i.resize(n); hb_j.resize(n); hb_k.resize(n);
+    soa.idx_i.download(hb_i.data(), n, impl.stream);
+    soa.idx_j.download(hb_j.data(), n, impl.stream);
+    soa.idx_k.download(hb_k.data(), n, impl.stream);
+    if (hb_case) { hb_case->resize(n); soa.case_type.download(hb_case->data(), n, impl.stream); }
+    if (hb_parent) { hb_parent->resize(n); soa.acceptor_parent.download(hb_parent->data(), n, impl.stream); }
+    checkCuda(cudaStreamSynchronize(impl.stream), "hb triple download sync");
+    m_last_hbonds.clear();
+    return n;
 }
 
 void FFWorkspaceGPU::updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,

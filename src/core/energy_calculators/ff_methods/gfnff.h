@@ -36,6 +36,7 @@
 #include "src/core/global.h"
 #include "src/core/functional_groups.h"
 #include "src/core/periodic_table.h"
+#include <functional>
 #include <algorithm>
 #include <tuple>
 #include <utility>
@@ -352,6 +353,8 @@ PARAM(gpu_cn_pair_cutoff_factor, Double, 2.5, "Task 10: GPU CN-derivative pair-l
 PARAM(gpu_cn_pair_skin_bohr, Double, 1.0, "K1 (Oct 2026), CUDA only: Verlet skin of the GPU CN pair list in Bohr. The list keeps pairs up to factor*(rcov_i+rcov_j) + 2*skin and is rebuilt only when an atom moved more than skin + rs_min/2*(factor-1-8/7.5) since the last build, so no pair with an erf-CN term above 0.5*erfc(8) = 6e-30 is missing. Negative = legacy: rebuild whenever the 0.5 Bohr topology displacement check fires (every MD step).", "Performance", {})
 PARAM(gpu_eeq_overlap, Bool, true, "K3 (Oct 2026), CUDA only: the device projected-PCG EEQ solve waits only for its inputs (coordinates, right-hand side) and runs in parallel to the D4 dc6dcn kernel and the charge-independent kernels. false = legacy: it waits for all prior device work.", "Performance", {})
 PARAM(gpu_dispersion_overlap, Bool, true, "K2 (Oct 2026), CUDA only: the gradient-mode D4 dispersion kernel starts right after dc6dcn, parallel to the EEQ solve; it reads no EEQ charge. false = legacy: it runs after the EEQ solve. Changes only the summation order of the atomic gradient adds.", "Performance", {})
+PARAM(gpu_hb_detect_on_device, Bool, false, "Oct 2026, CUDA only, opt-in: the H-bond (A, H, B) triples are enumerated on the device at every HB/XB refresh (one thread per atom pair, strength test of the host case-1 pruning) instead of by the host detection plus upload; the list is sorted by (A, H, B), case 1 has A < B. Halogen bonds stay on the host. Same triple set as the host list (check with gpu_hb_detect_verify); the order differs, so energies agree to the rounding of the summation order. false = host detection.", "Performance", {})
+PARAM(gpu_hb_detect_verify, Bool, false, "Oct 2026, with gpu_hb_detect_on_device: at every refresh also run the host detection and print the set difference (HBVERIFY lines on stderr, a warning when the lists differ). Diagnostic, costs the host detection time.", "Performance", {})
 PARAM(gpu_staged_list_upload, Bool, true, "Oct 2026, CUDA only: during MD the rebuilt D4 dispersion, repulsion and (Oct 14, 2026) H-bond lists are converted by -threads host threads into a pinned double buffer and copied asynchronously in chunks (polymer_2x, 9.4 M D4 pairs: 118 -> 48 ms per rebuild, 16 threads). The device receives the same bytes. false = legacy serial conversion and blocking pageable copies.", "Performance", {})
 PARAM(hb_accuracy, Double, 0.1, "Task 11: HB-list accuracy driving the Fortran thresholds hbthr1 = 200 - log10(acc)*50, hbthr2 = 400 - log10(acc)*50 (Bohr^2). Smaller = larger cutoffs = more HB pairs = more accurate but slower. 0.1 reproduces the gfnff reference.", "Performance", {})
 PARAM(hb_thr1_bohr2, Double, 0.0, "Task 11: direct override of hbthr1, the A-B distance-squared cutoff for nhb2 detection (Bohr^2). 0 = derive from hb_accuracy.", "Performance", {})
@@ -998,6 +1001,29 @@ public:
     /// True if updateHBXBIfNeeded() ran and changed lists since last call
     bool consumeHBXBUpdate() { bool r = m_hbxb_updated; m_hbxb_updated = false; return r; }
 
+    // ---- Device-side H-bond detection (Claude Generated, Oct 2026; CUDA, -gfnff.gpu_hb_detect_on_device) ----
+
+    /// Per-atom inputs of the H-bond detection in flat arrays, the part of detectHydrogenBondsNative() that
+    /// is O(N): basicity/acidity with the functional-group overrides, the HB hydrogens, the donor/acceptor
+    /// atom filter, the thresholds, and the neighbour / bond / hydrogen-on-atom lists as CSR. The device
+    /// enumerates the (A, H, B) triples from them (FFWorkspaceGPU::detectHBondsOnDevice()).
+    using HBDetectInputs = GFNFFHBDetectInputs;
+    HBDetectInputs prepareHBDetectInputs(const Vector& charges) const;
+
+    /// The trigger part of updateHBXBIfNeeded() (periodic forced rebuild or RMSD test), with its bookkeeping.
+    /// True when the lists have to be rebuilt now.
+    bool hbxbRefreshDue();
+
+    /// Halogen bonds from the host detection (they stay on the host: a few entries).
+    std::vector<GFNFFHalogenBond> detectXBForDevice() const;
+
+    /// Host detection of the H-bond list as the reference of the device list (verification only).
+    std::vector<GFNFFHydrogenBond> detectHBHostReference() const;
+
+    /// Bookkeeping after a device-side re-detection: stores the XB list, the counts and the reference geometry,
+    /// invalidates the host H-bond list and flags the update (consumeHBXBUpdate()).
+    void commitHBXBDeviceUpdate(int n_hb, std::vector<GFNFFHalogenBond>&& xbonds);
+
     /**
      * @brief Periodically rebuild the bonded/non-bonded repulsion pair lists from the
      * current geometry.
@@ -1231,6 +1257,13 @@ public:
      * @param bonds   Static bond list from GFNFFParameterSet (m_gpu_params->bonds)
      * @return BondHBRebuildResult with updated bond_hb_data, per-bond nr_hb, per-bond hb_H_atom
      */
+    /// Same as above from plain (A, H, B) arrays (device detection, which keeps no host struct list)
+    /// Shared body of the two rebuilds: n entries, get(m, A, H, B) returns entry m
+    BondHBRebuildResult rebuildBondHBDataCore(size_t n, const std::function<void(size_t, int&, int&, int&)>& get,
+                                              const std::vector<Bond>& bonds) const;
+    BondHBRebuildResult rebuildBondHBDataFromTriples(const std::vector<int>& hb_i, const std::vector<int>& hb_j,
+                                                     const std::vector<int>& hb_k,
+                                                     const std::vector<Bond>& bonds) const;
     BondHBRebuildResult rebuildBondHBData(const std::vector<GFNFFHydrogenBond>& hbonds,
                                            const std::vector<Bond>& bonds) const;
 

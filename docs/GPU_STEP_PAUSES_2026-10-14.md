@@ -38,6 +38,40 @@ the named phases add up to `total` for every step above twice the median.
 Result with default parameters (200 steps): median 15.4 -> 15.4 ms, mean 36.3 -> 23.2 ms, steps > 100 ms 22 -> 2 (the two D4 rebuilds).
 What remains per step (mean, estimated from the intervals above): HB/XB about 3.5 ms, repulsion 1.8 ms, D4 1.9 ms (0.2 with the switch).
 
+## Device-side H-bond detection (`-gfnff.gpu_hb_detect_on_device`, CUDA, opt-in)
+
+The (A, H, B) triples are enumerated on the device instead of by the host detection plus upload: `k_hb_ab_pairs` compacts the
+AB pairs, `k_hb_detect` (one warp per AB pair, lanes over the HB hydrogens, float pre-filter, three-valued float strength
+decision with the double formula for the 1 % band) emits the triples, they are sorted by (A, H, B) and `k_hb_fill_columns` /
+`k_hb_fill_neighbors` write the H-bond SoA. Only (A, H, B) go back to the host for `rebuildBondHBDataFromTriples()`. Halogen
+bonds stay on the host. Host inputs: `GFNFF::prepareHBDetectInputs()` (a copy of the O(N) part of the host detection, kept in
+step by the verification mode), trigger `GFNFF::hbxbRefreshDue()`. Case 1 triples have A < B by atom index (the host orientation
+follows its cell order, the energy is symmetric); below `nb_cell_list_min_atoms` the pruning of weak case-1 triples follows the
+host rule (only its parallel legacy branch prunes).
+
+- **Same list as the host**: `-gfnff.gpu_hb_detect_verify true` runs the host detection at every refresh and prints the set
+  difference (`HBVERIFY` lines). 21 structures from 3 to 7320 atoms, 4 refreshes each, and 31 refreshes along 300 MD steps of
+  urea400-water1000, peo201x2-water1500, acetic-acid dimer and pep20: 0 differences, 0 duplicates (582k to 605k triples on urea).
+- **Time per re-detection** on urea400-water1000 (median of 19, RTX 5090, 12 threads): `gpu_hbxb_update` 36.2 -> 8.1 ms
+  (device enumeration 2.3 ms, sort 0.3, SoA 1, download 1.7, host inputs 0.7, `rebuildBondHBData` 2.0); mean MD step 23.2 -> 19.9 ms,
+  median 15.4 -> 14.9 ms. peo201x2-water1500: 6.8 -> 3.1 ms. Step 100 energy equal to 1e-10 Eh.
+- **Single points** (16 structures, 12 to 7320 atoms): device list against host list ΔE <= 4.6e-13 Eh, Δgradient <= 5.6e-16 Eh/A.
+- First version of the kernel took 78 ms (one thread per pair, 0.4 % of the 19 M threads active, each looping over 3600
+  hydrogens, and double-precision `pow`/`exp`/division in the strength test on a GPU with 1/64 double rate).
+
+Not checked: gradients over long runs, `-opt` beyond caffeine (38 steps, trajectory equal) and a 399-step unconverged cluster
+optimisation (scatter between identical runs larger than the on/off difference), charged systems with several fragments (CPU
+fallback), memory of the device buffers (about 20 B per candidate entry plus the sort), ROCm (not compilable here; trait
+`has_device_hb_detect` is false there), MOR41/GMTKN55.
+
+## `gpu_disp_pairs_on_device` checked further (same day)
+
+27 structures from 2 to 7320 atoms (`-sp`, energy and gradient, off / on / CPU): on against off ΔE <= 3e-13 Eh, Δgradient <=
+5e-16 Eh/A. MD (2 alternating runs each): median step equal for caffeine (0.35 ms), trisaccharide (0.71), urea cluster (1.86),
+peo201-chain (2.9), peo201-water500 (5.5), peo201x2-water1500 (16.0 ms); mean and longest step lower with the switch on the three
+bulk systems (peo201x2-water1500: mean 19.9 -> 18.4 ms, longest step 174 -> 36 ms). Energies in step 50 equal on 9 digits.
+The default stays `false` until the ROCm side has the same setup-order and sort fixes.
+
 ## Checked
 
 - Energies in steps 0, 10 and 100 equal to the previous binary within 1e-12 Eh for every change above (GPU runs are not bitwise
@@ -58,7 +92,7 @@ What remains per step (mean, estimated from the intervals above): HB/XB about 3.
 
 ## Not implemented
 
-- HB/XB detection kernel on the device (the 35 ms per re-detection would shrink to the upload; large, must return the host list).
+- ROCm mirror of the device D4 fixes and of the device H-bond detection.
 - `gpu_disp_pairs_on_device` as default; D4 and repulsion rebuild stay on the step that triggers them (no overlap with device work).
 
 Human production testing is pending.

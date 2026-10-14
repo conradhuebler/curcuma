@@ -1024,4 +1024,99 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_gather_rhs_fragments(
     int           nfrag
 );
 
+
+// ============================================================================
+// Device-side H-bond detection (Claude Generated, Oct 2026; -gfnff.gpu_hb_detect_on_device)
+// Port of the cell-list branch of GFNFF::detectHydrogenBondsNative(): same (A, H, B) triples, A < B
+// by atom index for case 1 (the host orientation follows its cell order, the energy is symmetric).
+// ============================================================================
+
+/// Pass 1: one thread per atom pair i < j; the pairs that can be an AB pair (both atoms ab_ok, r^2 <= thr1,
+/// basicity x acidity criterion) are appended to ab_i / ab_j at positions from d_counter (>= cap: counted only).
+__global__ GFNFF_KERNEL_BOUNDS void k_hb_ab_pairs(
+    int N,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ bas,
+    const double* __restrict__ aci,
+    const char*   __restrict__ ab_ok,
+    double        thr1,
+    int           cap,
+    int*          d_counter,
+    int*          ab_i,
+    int*          ab_j);
+
+/// double -> float copies of the coordinates for the pre-filter of k_hb_detect.
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_to_float(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    float* fx, float* fy, float* fz);
+
+/// Pass 2: one warp per AB pair. Lane 0 emits the case 2/3/4 entries (hydrogen bonded to the donor); the lanes
+/// split the HB hydrogens for the case 1 entries (hydrogen bonded to neither, strength test of
+/// estimateHBStrengthCase1()). Entries go to key/ct/par at positions from d_counter (>= cap: counted only).
+__global__ GFNFF_KERNEL_BOUNDS void k_hb_detect(
+    int n_ab,
+    const int*    __restrict__ ab_i,
+    const int*    __restrict__ ab_j,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const float*  __restrict__ fx,     ///< float copies of the coordinates (pre-filter only)
+    const float*  __restrict__ fy,
+    const float*  __restrict__ fz,
+    int           N,
+    const int*    __restrict__ Z,
+    const double* __restrict__ bas,
+    const double* __restrict__ aci,
+    const double* __restrict__ q,
+    const int*    __restrict__ hyd_list,   ///< HB hydrogens
+    int           n_hyd,
+    const int*    __restrict__ bond_off,
+    const int*    __restrict__ bond_idx,
+    const int*    __restrict__ hyd_off,
+    const int*    __restrict__ hyd_idx,
+    const int*    __restrict__ nbr_off,
+    const int*    __restrict__ nbr_idx,
+    double        thr1,
+    double        thr2,
+    double        min_pair_energy,
+    int           cap,
+    int*          d_counter,
+    long long*    out_key,     ///< (A*N + H)*N + B
+    int*          out_ct,      ///< case type 1..4
+    int*          out_par);    ///< acceptor parent (case 3) or -1
+
+/// One thread per sorted entry: the 20 columns of HBondSoA except the packed neighbour arrays.
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_fill_columns(
+    int n, int N,
+    const long long* __restrict__ key_sorted,
+    const int*       __restrict__ perm,
+    const int*       __restrict__ in_ct,
+    const int*       __restrict__ in_par,
+    const int*       __restrict__ Z,
+    const double*    __restrict__ bas,
+    const double*    __restrict__ aci,
+    const double*    __restrict__ q,
+    const double*    __restrict__ repz,   ///< [86]
+    const int*       __restrict__ nbr_off,
+    const int*       __restrict__ nbr_idx,
+    int* idx_i, int* idx_j, int* idx_k, int* elem_A, int* elem_B,
+    double* q_H, double* q_A, double* q_B,
+    double* bas_A, double* bas_B, double* aci_A, double* aci_B,
+    double* r_cut, int* case_type, int* acc_parent, double* repz_B,
+    int* nbB_count, int* nbC_count);
+
+/// One thread per entry: copy neighbors_B (case >= 2) and neighbors_C (case 3, parent neighbours except B).
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_fill_neighbors(
+    int n,
+    const int* __restrict__ idx_k,
+    const int* __restrict__ case_type,
+    const int* __restrict__ acc_parent,
+    const int* __restrict__ nbr_off,
+    const int* __restrict__ nbr_idx,
+    const int* __restrict__ nbB_offset,
+    const int* __restrict__ nbC_offset,
+    int* nbB_flat, int* nbC_flat);
+
 #endif // USE_CUDA

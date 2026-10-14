@@ -3912,3 +3912,275 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_gather_rhs_fragments(
     // Write to col0 of this fragment's RHS block (col1 = ones, pre-filled at topo upload)
     d_rhs_blocks[frag_offsets_rhs[f] + local_k] = d_rhs_global[gi];
 }
+
+// ============================================================================
+// Device-side H-bond detection (Claude Generated, Oct 2026)
+// Host reference: GFNFF::detectHydrogenBondsNative(), cell-list branch (process_pair / make_nhb2 and
+// case1StrengthDecision / estimateHBStrengthCase1). Constants as in k_hbonds.
+// ============================================================================
+
+__device__ __forceinline__ bool d_hb_bonded(int a, int b, const int* __restrict__ off, const int* __restrict__ idx)
+{
+    for (int p = off[a]; p < off[a + 1]; ++p)
+        if (idx[p] == b) return true;
+    return false;
+}
+
+__device__ __forceinline__ double d_hb_dist2(const double* __restrict__ cx, const double* __restrict__ cy,
+                                              const double* __restrict__ cz, int a, int b)
+{
+    const double dx = cx[a] - cx[b], dy = cy[a] - cy[b], dz = cz[a] - cz[b];
+    return dx * dx + dy * dy + dz * dz;
+}
+
+/// |E_HB| of a case-1 triple, the formula of estimateHBStrengthCase1() (and of the energy kernel).
+__device__ double d_hb_case1_strength(const double* __restrict__ cx, const double* __restrict__ cy,
+                                       const double* __restrict__ cz, const int* __restrict__ Z,
+                                       const double* __restrict__ bas, const double* __restrict__ aci,
+                                       const double* __restrict__ q, int A, int H, int B, double thr)
+{
+    const double r_AH = sqrt(d_hb_dist2(cx, cy, cz, A, H));
+    const double r_HB = sqrt(d_hb_dist2(cx, cy, cz, H, B));
+    const double r_AB = sqrt(d_hb_dist2(cx, cy, cz, A, B));
+    const double r_vdw = d_cov_radii[Z[A] - 1] + d_cov_radii[Z[B] - 1];
+    // Upper bound first (case1StrengthDecision() of the host): no pow, rejects most candidates. Valid for
+    // non-negative basicities and acidities; returns 0 when the bound is below the threshold.
+    {
+        const double expo_b = (49.0 / r_vdw) * ((r_AH + r_HB) / r_AB - 1.0);
+        if (expo_b > 15.0) return 0.0;
+        const double bA = bas[A], bB = bas[B], aA = aci[A], aB = aci[B];
+        if (bA >= 0.0 && bB >= 0.0 && aA >= 0.0 && aB >= 0.0) {
+            const double t = r_AB * r_AB / 85.0;
+            const double t2 = t * t;
+            const double outl_bound = (expo_b > 0.0) ? 2.0 * exp(-expo_b) : 2.0;
+            const double bound = fmax(bA, bB) * fmax(aA, aB) / (1.0 + t2 * t2 * t2) / (r_AB * r_AB * r_AB) * outl_bound;
+            if (isfinite(bound) && bound < thr * (1.0 - 1e-6)) return 0.0;
+        }
+    }
+    const double r_AH_4 = r_AH * r_AH * r_AH * r_AH;
+    const double r_HB_4 = r_HB * r_HB * r_HB * r_HB;
+    const double denom_DA = 1.0 / (r_AH_4 + r_HB_4);
+    const double Q_H = d_charge_scaling(q[H], 15.0, 1.0);
+    const double Q_A = d_charge_scaling(-q[A], 15.0, 1.0);
+    const double Q_B = d_charge_scaling(-q[B], 15.0, 1.0);
+    const double b = (Q_A * bas[A] * r_AH_4 + Q_B * bas[B] * r_HB_4) * denom_DA;
+    const double a = (aci[B] * r_AH_4 + aci[A] * r_HB_4) * denom_DA;
+    const double ratio_s = 22.0 * r_vdw / (r_AB * r_AB);
+    const double damp_short = 1.0 / (1.0 + pow(ratio_s, 6.0));
+    const double damp_long = 1.0 / (1.0 + pow(r_AB * r_AB / 85.0, 6.0));
+    const double expo = (49.0 / r_vdw) * ((r_AH + r_HB) / r_AB - 1.0);
+    const double damp_outl = (expo > 15.0) ? 0.0 : 2.0 / (1.0 + exp(expo));
+    const double rdamp = damp_short * damp_long / (r_AB * r_AB * r_AB);
+    return fabs(b * a * rdamp * (Q_H * damp_outl));
+}
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_to_float(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    float* fx, float* fy, float* fz)
+{
+    const int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= N) return;
+    fx[a] = static_cast<float>(cx[a]); fy[a] = static_cast<float>(cy[a]); fz[a] = static_cast<float>(cz[a]);
+}
+
+/// FP32 evaluation of the case-1 strength of d_hb_case1_strength(): returns -1 (surely below thr), +1 (surely at
+/// or above thr) or 0 (within a 1 % band around thr or a borderline out-of-line exponent: the caller runs the
+/// double path). The float evaluation is good to about 1e-5 relative, the 1 % band covers it with a wide margin.
+__device__ __forceinline__ int d_hb_strength_decision_f(
+    const float* __restrict__ fx, const float* __restrict__ fy, const float* __restrict__ fz,
+    const int* __restrict__ Z, const double* __restrict__ bas, const double* __restrict__ aci,
+    const double* __restrict__ q, int A, int H, int B, float thr)
+{
+    const float ax = fx[H] - fx[A], ay = fy[H] - fy[A], az = fz[H] - fz[A];
+    const float hx = fx[B] - fx[H], hy = fy[B] - fy[H], hz = fz[B] - fz[H];
+    const float bx = fx[B] - fx[A], by = fy[B] - fy[A], bz = fz[B] - fz[A];
+    const float r_AH2 = ax * ax + ay * ay + az * az;
+    const float r_HB2 = hx * hx + hy * hy + hz * hz;
+    const float r_AB2 = bx * bx + by * by + bz * bz;
+    const float r_AH = sqrtf(r_AH2), r_HB = sqrtf(r_HB2), r_AB = sqrtf(r_AB2);
+    const float r_vdw = static_cast<float>(d_cov_radii[Z[A] - 1] + d_cov_radii[Z[B] - 1]);
+    const float expo = (49.f / r_vdw) * ((r_AH + r_HB) / r_AB - 1.f);
+    if (expo > 15.01f) return -1;              // damping is exactly 0 beyond 15
+    if (expo > 14.99f) return 0;               // borderline: the double path decides
+    const float bA = static_cast<float>(bas[A]), bB = static_cast<float>(bas[B]);
+    const float aA = static_cast<float>(aci[A]), aB = static_cast<float>(aci[B]);
+    const float r_AH4 = r_AH2 * r_AH2, r_HB4 = r_HB2 * r_HB2;
+    const float denom = 1.f / (r_AH4 + r_HB4);
+    auto cs = [](float qq) { const float e = expf(15.f * qq); return e / (e + 1.f); };
+    const float Q_H = cs(static_cast<float>(q[H]));
+    const float Q_A = cs(-static_cast<float>(q[A]));
+    const float Q_B = cs(-static_cast<float>(q[B]));
+    const float b = (Q_A * bA * r_AH4 + Q_B * bB * r_HB4) * denom;
+    const float a = (aB * r_AH4 + aA * r_HB4) * denom;
+    const float rs = 22.f * r_vdw / r_AB2;
+    const float rs2 = rs * rs;
+    const float damp_short = 1.f / (1.f + rs2 * rs2 * rs2);
+    const float t = r_AB2 / 85.f;
+    const float t2 = t * t;
+    const float damp_long = 1.f / (1.f + t2 * t2 * t2);
+    const float damp_outl = 2.f / (1.f + expf(expo));
+    const float est = fabsf(b * a * (damp_short * damp_long / (r_AB2 * r_AB)) * (Q_H * damp_outl));
+    if (!isfinite(est)) return 0;
+    if (est < 0.99f * thr) return -1;
+    if (est > 1.01f * thr) return 1;
+    return 0;
+}
+
+__global__ GFNFF_KERNEL_BOUNDS void k_hb_ab_pairs(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const double* __restrict__ bas, const double* __restrict__ aci, const char* __restrict__ ab_ok,
+    double thr1, int cap, int* d_counter, int* ab_i, int* ab_j)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int n_total = N * (N - 1) / 2;
+    if (tid >= n_total) return;
+    int i, j;
+    dispPairFromTid(tid, N, i, j);
+    if (j >= N) return;
+    if (!ab_ok[i] || !ab_ok[j]) return;
+    if (d_hb_dist2(cx, cy, cz, i, j) > thr1) return;
+    const double s1 = bas[i] * aci[j], s2 = bas[j] * aci[i];
+    if (s1 < 1e-6 && s2 < 1e-6) return;
+    const int pos = atomicAdd(d_counter, 1);
+    if (pos < cap) { ab_i[pos] = i; ab_j[pos] = j; }
+}
+
+__global__ GFNFF_KERNEL_BOUNDS void k_hb_detect(
+    int n_ab, const int* __restrict__ ab_i, const int* __restrict__ ab_j,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const float* __restrict__ fx, const float* __restrict__ fy, const float* __restrict__ fz, int N,
+    const int* __restrict__ Z, const double* __restrict__ bas, const double* __restrict__ aci,
+    const double* __restrict__ q,
+    const int* __restrict__ hyd_list, int n_hyd,
+    const int* __restrict__ bond_off, const int* __restrict__ bond_idx,
+    const int* __restrict__ hyd_off, const int* __restrict__ hyd_idx,
+    const int* __restrict__ nbr_off, const int* __restrict__ nbr_idx,
+    double thr1, double thr2, double min_pair_energy,
+    int cap, int* d_counter, long long* out_key, int* out_ct, int* out_par)
+{
+    const int warp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    const int lane = threadIdx.x & 31;
+    if (warp >= n_ab) return;
+    const int i = ab_i[warp], j = ab_j[warp];
+    const double r_AB_sq = d_hb_dist2(cx, cy, cz, i, j);
+
+    const long long NN = N;
+    auto emit = [&](int A, int H, int B, int ct, int par) {
+        const int pos = atomicAdd(d_counter, 1);
+        if (pos < cap) {
+            out_key[pos] = (static_cast<long long>(A) * NN + H) * NN + B;
+            out_ct[pos] = ct;
+            out_par[pos] = par;
+        }
+    };
+
+    // nhb2: hydrogen bonded to the donor (make_nhb2): case 2, 3 (carbonyl-like acceptor O) or 4 (two-coordinate N)
+    if (lane == 0 && !d_hb_bonded(i, j, bond_off, bond_idx)) {
+        auto emit_nhb2 = [&](int donor, int H, int acc) {
+            int ct = 2, par = -1;
+            const int deg = nbr_off[acc + 1] - nbr_off[acc];
+            if (Z[acc] == 8 && deg == 1) {
+                const int parent = nbr_idx[nbr_off[acc]];
+                if (Z[parent] == 6 || Z[parent] == 7) { ct = 3; par = parent; }
+            } else if (Z[acc] == 7 && deg == 2) {
+                ct = 4;
+            }
+            emit(donor, H, acc, ct, par);
+        };
+        for (int p = hyd_off[i]; p < hyd_off[i + 1]; ++p) emit_nhb2(i, hyd_idx[p], j);
+        for (int p = hyd_off[j]; p < hyd_off[j + 1]; ++p) {
+            const int H = hyd_idx[p];
+            if (d_hb_bonded(i, H, bond_off, bond_idx)) continue;  // bonded to i takes precedence
+            emit_nhb2(j, H, i);
+        }
+    }
+
+    // case 1: hydrogen bonded to neither, sum-of-squared-distances criterion (gfnff_ini2.f90:742). The lanes
+    // split the HB hydrogens; a float pre-filter (relative margin 1e-4, far above the float rounding of the
+    // squared distances) rejects most of them before the double test, which decides as on the host.
+    const float fxi = fx[i], fyi = fy[i], fzi = fz[i], fxj = fx[j], fyj = fy[j], fzj = fz[j];
+    const float f_rab = static_cast<float>(r_AB_sq);
+    const float f_reject = static_cast<float>(thr2) * 1.0001f;
+    for (int hq = lane; hq < n_hyd; hq += 32) {
+        const int H = hyd_list[hq];
+        const float hx = fx[H], hy = fy[H], hz = fz[H];
+        const float ax = hx - fxi, ay = hy - fyi, az = hz - fzi;
+        const float f_ih = ax * ax + ay * ay + az * az;
+        if (f_ih > f_reject) continue;
+        const float bx = hx - fxj, by = hy - fyj, bz = hz - fzj;
+        if (f_rab + f_ih + (bx * bx + by * by + bz * bz) > f_reject) continue;
+        if (H == i) continue;                                  // forEachNeighbor excludes the query atom
+        const double r_iH_sq = d_hb_dist2(cx, cy, cz, i, H);
+        if (r_iH_sq > thr2) continue;                          // cell query radius sqrt(thr2)
+        const double r_jH_sq = d_hb_dist2(cx, cy, cz, j, H);
+        if (!(r_AB_sq + r_iH_sq + r_jH_sq < thr2)) continue;
+        if (d_hb_bonded(i, H, bond_off, bond_idx) || d_hb_bonded(j, H, bond_off, bond_idx)) continue;
+        if (min_pair_energy > 0.0) {
+            const int dec = d_hb_strength_decision_f(fx, fy, fz, Z, bas, aci, q, i, H, j, static_cast<float>(min_pair_energy));
+            if (dec < 0) continue;
+            if (dec == 0) {                                    // within the float margin: the exact (double) value decides
+                const double est = d_hb_case1_strength(cx, cy, cz, Z, bas, aci, q, i, H, j, min_pair_energy);
+                if (est < min_pair_energy) continue;           // NaN keeps the entry, as on the host
+            }
+        }
+        emit(i, H, j, 1, -1);
+    }
+}
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_fill_columns(
+    int n, int N, const long long* __restrict__ key_sorted, const int* __restrict__ perm,
+    const int* __restrict__ in_ct, const int* __restrict__ in_par, const int* __restrict__ Z,
+    const double* __restrict__ bas, const double* __restrict__ aci, const double* __restrict__ q,
+    const double* __restrict__ repz, const int* __restrict__ nbr_off, const int* __restrict__ nbr_idx,
+    int* idx_i, int* idx_j, int* idx_k, int* elem_A, int* elem_B,
+    double* q_H, double* q_A, double* q_B, double* bas_A, double* bas_B, double* aci_A, double* aci_B,
+    double* r_cut, int* case_type, int* acc_parent, double* repz_B, int* nbB_count, int* nbC_count)
+{
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n) return;
+    const long long key = key_sorted[t];
+    const long long NN = N;
+    const int B = static_cast<int>(key % NN);
+    const int H = static_cast<int>((key / NN) % NN);
+    const int A = static_cast<int>(key / (NN * NN));
+    const int src = perm[t];
+    const int ct = in_ct[src];
+    const int par = in_par[src];
+    idx_i[t] = A; idx_j[t] = H; idx_k[t] = B;
+    elem_A[t] = Z[A]; elem_B[t] = Z[B];
+    q_H[t] = q[H]; q_A[t] = q[A]; q_B[t] = q[B];
+    bas_A[t] = bas[A]; bas_B[t] = bas[B];
+    aci_A[t] = aci[A]; aci_B[t] = aci[B];
+    r_cut[t] = 50.0;
+    case_type[t] = ct;
+    acc_parent[t] = par;
+    const int zB = Z[B];
+    repz_B[t] = (zB >= 1 && zB <= 86) ? repz[zB - 1] : 1.0;
+    nbB_count[t] = (ct >= 2) ? (nbr_off[B + 1] - nbr_off[B]) : 0;
+    int cC = 0;
+    if (ct == 3) {
+        for (int p = nbr_off[par]; p < nbr_off[par + 1]; ++p)
+            if (nbr_idx[p] != B) ++cC;
+    }
+    nbC_count[t] = cC;
+}
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_fill_neighbors(
+    int n, const int* __restrict__ idx_k, const int* __restrict__ case_type, const int* __restrict__ acc_parent,
+    const int* __restrict__ nbr_off, const int* __restrict__ nbr_idx,
+    const int* __restrict__ nbB_offset, const int* __restrict__ nbC_offset, int* nbB_flat, int* nbC_flat)
+{
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n) return;
+    const int ct = case_type[t];
+    if (ct < 2) return;
+    const int B = idx_k[t];
+    int w = nbB_offset[t];
+    for (int p = nbr_off[B]; p < nbr_off[B + 1]; ++p) nbB_flat[w++] = nbr_idx[p];
+    if (ct == 3) {
+        const int par = acc_parent[t];
+        w = nbC_offset[t];
+        for (int p = nbr_off[par]; p < nbr_off[par + 1]; ++p)
+            if (nbr_idx[p] != B) nbC_flat[w++] = nbr_idx[p];
+    }
+}

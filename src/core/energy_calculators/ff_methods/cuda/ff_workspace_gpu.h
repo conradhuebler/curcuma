@@ -244,6 +244,21 @@ public:
     /// Uses HBAlphaSoA + BondSoA; no CPU loop or H2D upload.
     void computeBondHBCN();
 
+    /**
+     * @brief Device-side H-bond detection (Claude Generated, Oct 2026, -gfnff.gpu_hb_detect_on_device)
+     *
+     * Enumerates the (A, H, B) triples of GFNFF::detectHydrogenBondsNative() on the device from the flat
+     * per-atom inputs (GFNFF::prepareHBDetectInputs()), sorts them by key (A*N+H)*N+B and writes the H-bond SoA
+     * directly (what updateHBonds() uploads). Case 1 triples have A < B by atom index. The caller must
+     * invalidateGraph() afterwards (hbonds.n changed). Needs the current geometry on the device.
+     * @param hb_i,hb_j,hb_k  host copies of the triples in list order (rebuildBondHBDataFromTriples())
+     * @param hb_case,hb_parent  optional host copies of case type and acceptor parent (verification)
+     * @return number of triples
+     */
+    int detectHBondsOnDevice(const GFNFFHBDetectInputs& in, std::vector<int>& hb_i, std::vector<int>& hb_j,
+                             std::vector<int>& hb_k, std::vector<int>* hb_case = nullptr,
+                             std::vector<int>* hb_parent = nullptr);
+
     /// Re-upload HBond SoA after dynamic re-detection (called after updateHBXBIfNeeded)
     void updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
                       const std::vector<int>& atom_types);

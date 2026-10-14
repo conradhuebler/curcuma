@@ -412,7 +412,13 @@ private:
     /// current CN + Gaussian weights (factored out of initGPUWorkspace() so the skin-triggered
     /// rebuild of GFNFF::updateDispersionPairsIfNeeded() can repeat it).
     void buildDispersionPairsOnDevice();
+    /// Claude Generated (Oct 2026): compare the device H-bond list with detectHydrogenBondsNative() (sets, case 1
+    /// with A < B); prints a summary to stderr and warns on a difference (-gfnff.gpu_hb_detect_verify).
+    void verifyDeviceHBList(const std::vector<int>& di, const std::vector<int>& dj, const std::vector<int>& dk,
+                            const std::vector<int>& dcase, const std::vector<int>& dparent);
     bool m_disp_pairs_on_device = false;  ///< WP-A mode active (gpu_disp_pairs_on_device)
+    bool m_hb_detect_on_device = false;   ///< Oct 2026: H-bond triples enumerated on the device (gpu_hb_detect_on_device)
+    bool m_hb_detect_verify = false;      ///< compare the device list with the host detection at every refresh
 };
 
 // ---------------------------------------------------------------------------
@@ -784,6 +790,11 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         // staged pinned upload (same bytes, parallel conversion); fallback is the PARAM default.
         if constexpr (Backend::has_staged_list_upload)
             m_gpu_workspace->setStagedListUpload(cfg_get_bool("gpu_staged_list_upload", true), m_host_threads);
+        // Claude Generated (Oct 2026): H-bond triples enumerated on the device (CUDA only, opt-in).
+        if constexpr (Backend::has_device_hb_detect) {
+            m_hb_detect_on_device = cfg_get_bool("gpu_hb_detect_on_device", false);
+            m_hb_detect_verify = m_hb_detect_on_device && cfg_get_bool("gpu_hb_detect_verify", false);
+        }
         // Claude Generated (Oct 2026): ROCm packs the refreshed HB list with the -threads host threads; the
         // staged upload stays off there (the setter is the only way to pass the thread count).
         if constexpr (gfnffBackendLeanHBRefresh<Backend>::value && !Backend::has_staged_list_upload)
@@ -1099,14 +1110,36 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 
     // --- Step 2c: Dynamic HB/XB re-detection (must happen before kernel launch) ---
     auto t_hbxb_start = std::chrono::high_resolution_clock::now();
-    m_gfnff->updateHBXBIfNeeded(nullptr);
-    bool hbxb_updated = m_gfnff->consumeHBXBUpdate();
+    bool hbxb_updated = false;
+    bool hb_on_device = false;                       // the H-bond list of this refresh was built on the device
+    std::vector<int> dev_hb_i, dev_hb_j, dev_hb_k;   // its (A, H, B) triples on the host
+    if constexpr (Backend::has_device_hb_detect) {
+        if (m_hb_detect_on_device) {
+            hb_on_device = true;
+            if (m_gfnff->hbxbRefreshDue()) {
+                const Vector& topo_q = m_gfnff->getTopologyInfo().topology_charges;
+                const auto in = m_gfnff->prepareHBDetectInputs(topo_q);
+                std::vector<int> dev_case, dev_parent;
+                const int n_hb = m_gpu_workspace->detectHBondsOnDevice(in, dev_hb_i, dev_hb_j, dev_hb_k,
+                    m_hb_detect_verify ? &dev_case : nullptr, m_hb_detect_verify ? &dev_parent : nullptr);
+                if (m_hb_detect_verify)
+                    verifyDeviceHBList(dev_hb_i, dev_hb_j, dev_hb_k, dev_case, dev_parent);
+                m_gfnff->commitHBXBDeviceUpdate(n_hb, m_gfnff->detectXBForDevice());
+                hbxb_updated = m_gfnff->consumeHBXBUpdate();
+            }
+        }
+    }
+    if (!hb_on_device) {
+        m_gfnff->updateHBXBIfNeeded(nullptr);
+        hbxb_updated = m_gfnff->consumeHBXBUpdate();
+    }
     const auto t_hb_det_end = std::chrono::high_resolution_clock::now();
     m_last_gpu_prep_timing.hb_detect = std::chrono::duration<double, std::milli>(t_hb_det_end - t_hbxb_start).count();
     m_last_gpu_prep_timing.hb_rebuild = 0.0;
     m_last_gpu_prep_timing.hb_upload = 0.0;
     if (hbxb_updated) {
-        m_gpu_workspace->updateHBonds(m_gfnff->getLastHBonds(), m_atom_types);
+        if (!hb_on_device)
+            m_gpu_workspace->updateHBonds(m_gfnff->getLastHBonds(), m_atom_types);
         m_gpu_workspace->updateXBonds(m_gfnff->getLastXBonds(), m_atom_types);
         const auto t_hb_up1 = std::chrono::high_resolution_clock::now();
         m_last_gpu_prep_timing.hb_upload = std::chrono::duration<double, std::milli>(t_hb_up1 - t_hb_det_end).count();
@@ -1117,8 +1150,9 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         // Reference: Fortran gfnff_ini2.f90:1008-1060 (bond_hb_AHB_set0/set1)
         if (m_gpu_params) {
             const auto t_hb_rb0 = std::chrono::high_resolution_clock::now();
-            auto hb_update = m_gfnff->rebuildBondHBData(
-                m_gfnff->getLastHBonds(), m_gpu_params->bonds);
+            auto hb_update = hb_on_device
+                ? m_gfnff->rebuildBondHBDataFromTriples(dev_hb_i, dev_hb_j, dev_hb_k, m_gpu_params->bonds)
+                : m_gfnff->rebuildBondHBData(m_gfnff->getLastHBonds(), m_gpu_params->bonds);
             const auto t_hb_rb1 = std::chrono::high_resolution_clock::now();
             m_last_gpu_prep_timing.hb_rebuild = std::chrono::duration<double, std::milli>(t_hb_rb1 - t_hb_rb0).count();
 
@@ -1195,7 +1229,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         std::chrono::high_resolution_clock::now() - t_coul_start).count();
 
     // HB/XB pair list consistency: CPU vs GPU (verbosity >= 3)
-    if (CurcumaLogger::get_verbosity() >= 3) {
+    if (CurcumaLogger::get_verbosity() >= 3 && !hb_on_device) {
         const auto& hb_cpu = m_gfnff->getLastHBonds();
         const auto& hb_gpu = m_gpu_workspace->getLastHBonds();
         if (hb_cpu.size() != hb_gpu.size()) {
@@ -2564,6 +2598,42 @@ json GFNFFGpuMethodImpl<Backend>::getStreamTimings() const
     add("atm",            kt.atm);
     add("batm",           kt.batm);
     return out;
+}
+
+template <class Backend>
+void GFNFFGpuMethodImpl<Backend>::verifyDeviceHBList(const std::vector<int>& di, const std::vector<int>& dj,
+                                                     const std::vector<int>& dk, const std::vector<int>& dcase,
+                                                     const std::vector<int>& dparent)
+{
+    using Entry = std::array<int, 5>;   // A, H, B, case, parent
+    auto canon = [](int A, int H, int B, int ct, int par) {
+        if (ct == 1 && A > B) std::swap(A, B);   // case 1: the host orientation follows its cell order
+        return Entry{A, H, B, ct, par};
+    };
+    std::vector<Entry> dev, host;
+    dev.reserve(di.size());
+    for (size_t m = 0; m < di.size(); ++m) dev.push_back(canon(di[m], dj[m], dk[m], dcase[m], dparent[m]));
+    const auto hb = m_gfnff->detectHBHostReference();
+    host.reserve(hb.size());
+    for (const auto& x : hb) host.push_back(canon(x.i, x.j, x.k, x.case_type, x.acceptor_parent_index));
+    std::sort(dev.begin(), dev.end());
+    std::sort(host.begin(), host.end());
+    std::vector<Entry> only_dev, only_host;
+    std::set_difference(dev.begin(), dev.end(), host.begin(), host.end(), std::back_inserter(only_dev));
+    std::set_difference(host.begin(), host.end(), dev.begin(), dev.end(), std::back_inserter(only_host));
+    long long dup_dev = 0;
+    for (size_t m = 1; m < dev.size(); ++m) if (dev[m] == dev[m - 1]) ++dup_dev;
+    fmt::print(stderr, "HBVERIFY device {} host {} only-device {} only-host {} duplicates-device {}\n",
+               dev.size(), host.size(), only_dev.size(), only_host.size(), dup_dev);
+    auto show = [](const char* tag, const std::vector<Entry>& v) {
+        for (size_t m = 0; m < v.size() && m < 5; ++m)
+            fmt::print(stderr, "HBVERIFY   {} A={} H={} B={} case={} parent={}\n", tag, v[m][0], v[m][1], v[m][2], v[m][3], v[m][4]);
+    };
+    show("only-device", only_dev);
+    show("only-host", only_host);
+    if (!only_dev.empty() || !only_host.empty())
+        CurcumaLogger::warn(fmt::format("GPU H-bond detection differs from the host list: {} only on the device, {} only on the host",
+                                         only_dev.size(), only_host.size()));
 }
 
 template <class Backend>

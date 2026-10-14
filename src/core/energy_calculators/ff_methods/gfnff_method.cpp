@@ -1935,7 +1935,7 @@ GFNFF::EEQGPUParams GFNFF::prepareEEQParametersForGPU(const Vector& cn) const
 // Claude Generated (March 2026): Exposed for GPU orchestration
 // ---------------------------------------------------------------------------
 
-void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
+bool GFNFF::hbxbRefreshDue()
 {
     // Task #11 (Jun 2026): optional periodic forced rebuild for continuous MD where
     // near-threshold pairs must be re-classified faster than the RMSD trigger fires.
@@ -1947,11 +1947,20 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
         // Claude Generated (Apr 2026): If lists were freshly built during init and geometry
         // has not changed, skip redundant re-detection. This saves ~8s on large single-points.
         if (m_hbxb_fresh && !shouldUpdateHBXB(m_geometry_bohr))
-            return;
+            return false;
 
         if (!shouldUpdateHBXB(m_geometry_bohr))
-            return;
+            return false;
     }
+    return true;
+}
+
+void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
+{
+    // Claude Generated (Oct 2026): the trigger moved into hbxbRefreshDue() (same logic, same counters)
+    // so the device-side detection can use it too.
+    if (!hbxbRefreshDue())
+        return;
 
     // Store old counts for verbose output
     int old_hb_count = m_hb_reference ? m_hb_reference->nhb_count : 0;
@@ -2015,6 +2024,166 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
         CurcumaLogger::param("XB pairs", fmt::format("{} → {}", old_xb_count, m_hb_reference->nxb_count));
         CurcumaLogger::param("Dispersion pairs", std::to_string(old_disp_count) + " (static)");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Device-side H-bond detection: host inputs (Claude Generated, Oct 2026)
+// ---------------------------------------------------------------------------
+
+GFNFF::HBDetectInputs GFNFF::prepareHBDetectInputs(const Vector& charges) const
+{
+    // The O(N) part of detectHydrogenBondsNative() (steps 0 and 1, the thresholds, the atom filter of the
+    // AB pairs, the bond partner and hydrogen-on-atom lists), copied from there and kept in step with it:
+    // the device list is compared against the host list by -gfnff.gpu_hb_detect_verify.
+    using namespace GFNFFParameters;
+    HBDetectInputs in;
+    const int n = m_atomcount;
+    in.natoms = n;
+    const TopologyInfo& topo_info = getCachedTopology();
+    const auto& bonds = getCachedBondList();
+
+    in.basicity.resize(n);
+    in.acidity.resize(n);
+    FunctionalGroupDetector detector(n, m_atoms, topo_info.neighbor_lists, topo_info.hybridization,
+                                     topo_info.pi_fragments);
+    for (int i = 0; i < n; ++i) {
+        in.basicity[i] = hb_basicity[m_atoms[i]];
+        in.acidity[i] = hb_acidity[m_atoms[i]];
+        if (m_atoms[i] == 8) {
+            if (detector.isCarbonylOxygen(i)) in.basicity[i] = 0.68;
+            else if (detector.isNitroOxygen(i)) in.basicity[i] = 0.47;
+        } else if (m_atoms[i] == 6 && topo_info.neighbor_lists[i].size() == 2) {
+            const int n1 = topo_info.neighbor_lists[i][0];
+            const int n2 = topo_info.neighbor_lists[i][1];
+            Vector r_i = m_geometry_bohr.row(i);
+            Vector v1 = Vector(m_geometry_bohr.row(n1)) - r_i;
+            Vector v2 = Vector(m_geometry_bohr.row(n2)) - r_i;
+            double cos_phi = v1.dot(v2) / (v1.norm() * v2.norm());
+            double phi_deg = curcuma_acos(std::clamp(cos_phi, -1.0, 1.0)) * 180.0 / M_PI;
+            if (phi_deg < 150.0 && charges[i] > -0.4) in.basicity[i] = 1.46;
+        }
+    }
+    const bool amideh_order_bug = m_parameters.value("amideh_acidity_order_bug", false);
+    for (int i = 0; i < n; ++i) {
+        if (detector.isAmideHydrogen(i)) {
+            int nitrogen = topo_info.neighbor_lists[i][0];
+            if (!amideh_order_bug || nitrogen < i) in.acidity[nitrogen] *= 0.80;
+        }
+    }
+
+    // HB-capable hydrogens (step 1)
+    std::vector<int> first_bond_partner(n, -1);
+    for (const auto& bond : bonds) {
+        if (bond.first >= 0 && bond.first < n && first_bond_partner[bond.first] == -1)
+            first_bond_partner[bond.first] = bond.second;
+        if (bond.second >= 0 && bond.second < n && first_bond_partner[bond.second] == -1)
+            first_bond_partner[bond.second] = bond.first;
+    }
+    in.is_hb_hyd.assign(n, 0);
+    for (int h = 0; h < n; ++h) {
+        if (m_atoms[h] != 1) continue;
+        if (topo_info.hybridization[h] == 1) continue;
+        const int atom_A = first_bond_partner[h];
+        if (atom_A == -1) continue;
+        double q_threshold = 0.01;
+        if (m_atoms[atom_A] > 10) q_threshold -= 0.20;
+        if (topo_info.hybridization[atom_A] == 3 && m_atoms[atom_A] == 6) q_threshold += 0.05;
+        if (charges[h] > q_threshold) {
+            in.is_hb_hyd[h] = 1;
+            in.hb_hyd_list.push_back(h);
+        }
+    }
+
+    const double hb_acc = m_parameters.value("hb_accuracy", 0.1);
+    const double thr1_override = m_parameters.value("hb_thr1_bohr2", 0.0);
+    const double thr2_override = m_parameters.value("hb_thr2_bohr2", 0.0);
+    in.hbthr1 = (thr1_override > 0.0) ? thr1_override : (200.0 - std::log10(hb_acc) * 50.0);
+    in.hbthr2 = (thr2_override > 0.0) ? thr2_override : (400.0 - std::log10(hb_acc) * 50.0);
+    in.min_pair_energy = m_parameters.value("hb_min_pair_energy_eh", 1e-9);
+    // Below the cell-list threshold the host takes its legacy loop, and only its parallel variant (more than
+    // hb_parallel_min_pairs AB pairs) prunes the weak case-1 triples; the serial variant keeps them. The same list
+    // needs the same rule here (the AB pair count is the legacy one: no distance filter, j < i).
+    const int cell_threshold = m_parameters.value("nb_cell_list_min_atoms",
+        m_parameters.value("hb_cell_list_min_atoms", 800));
+    const bool legacy_branch = !(cell_threshold == 0 || n >= cell_threshold);
+
+    // atom filter of the AB pairs (ab_atom_ok of the cell-list branch)
+    in.ab_ok.assign(n, 0);
+    for (int a = 0; a < n; ++a) {
+        bool ok = true;
+        if (m_atoms[a] == 6 && topo_info.pi_fragments[a] == 0) ok = false;
+        double q_thresh = 0.10;
+        if (m_atoms[a] > 10) q_thresh += 0.2;
+        if (charges[a] > q_thresh) ok = false;
+        in.ab_ok[a] = ok ? 1 : 0;
+    }
+
+    if (legacy_branch) {
+        long long n_ab = 0;
+        for (int i = 0; i < n; ++i) {
+            if (!in.ab_ok[i]) continue;
+            for (int j = 0; j < i; ++j) {
+                if (!in.ab_ok[j]) continue;
+                if (in.basicity[i] * in.acidity[j] < 1e-6 && in.basicity[j] * in.acidity[i] < 1e-6) continue;
+                ++n_ab;
+            }
+        }
+        const int par_threshold = m_parameters.value("hb_parallel_min_pairs", 500);
+        const bool legacy_parallel = (threadPool() != nullptr && par_threshold >= 0 && n_ab > par_threshold);
+        if (!legacy_parallel) in.min_pair_energy = 0.0;
+    }
+
+    // CSR lists
+    in.charge.assign(charges.data(), charges.data() + charges.size());
+    in.nbr_off.assign(n + 1, 0);
+    for (int a = 0; a < n; ++a) in.nbr_off[a + 1] = in.nbr_off[a] + static_cast<int>(topo_info.neighbor_lists[a].size());
+    in.nbr_idx.reserve(in.nbr_off[n]);
+    for (int a = 0; a < n; ++a)
+        for (int nb : topo_info.neighbor_lists[a]) in.nbr_idx.push_back(nb);
+
+    std::vector<std::vector<int>> partners(n), hyd_on(n);
+    for (const auto& bond : bonds) {
+        const int a = bond.first, b = bond.second;
+        if (a >= 0 && a < n) partners[a].push_back(b);
+        if (b >= 0 && b < n) partners[b].push_back(a);
+        if (in.is_hb_hyd[a]) hyd_on[b].push_back(a);
+        if (in.is_hb_hyd[b]) hyd_on[a].push_back(b);
+    }
+    in.bond_off.assign(n + 1, 0);
+    in.hyd_off.assign(n + 1, 0);
+    for (int a = 0; a < n; ++a) {
+        in.bond_off[a + 1] = in.bond_off[a] + static_cast<int>(partners[a].size());
+        in.hyd_off[a + 1] = in.hyd_off[a] + static_cast<int>(hyd_on[a].size());
+    }
+    in.bond_idx.reserve(in.bond_off[n]);
+    in.hyd_idx.reserve(in.hyd_off[n]);
+    for (int a = 0; a < n; ++a) {
+        for (int p : partners[a]) in.bond_idx.push_back(p);
+        for (int h : hyd_on[a]) in.hyd_idx.push_back(h);
+    }
+    return in;
+}
+
+std::vector<GFNFFHalogenBond> GFNFF::detectXBForDevice() const
+{
+    return detectHalogenBondsNative(getCachedTopology().topology_charges);
+}
+
+std::vector<GFNFFHydrogenBond> GFNFF::detectHBHostReference() const
+{
+    return detectHydrogenBondsNative(getCachedTopology().topology_charges);
+}
+
+void GFNFF::commitHBXBDeviceUpdate(int n_hb, std::vector<GFNFFHalogenBond>&& xbonds)
+{
+    m_last_hbonds.clear();   // the device list is the only copy (see GFNFFGpuMethodImpl, device detection)
+    m_last_xbonds = std::move(xbonds);
+    m_hbxb_updated = true;
+    m_hb_reference = HBReferenceGeometry{};
+    m_hb_reference->reference_positions = m_geometry_bohr;
+    m_hb_reference->nhb_count = n_hb;
+    m_hb_reference->nxb_count = static_cast<int>(m_last_xbonds.size());
+    m_hb_reference->needs_update = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -4186,6 +4355,24 @@ GFNFF::BondHBRebuildResult GFNFF::rebuildBondHBData(
     const std::vector<GFNFFHydrogenBond>& hbonds,
     const std::vector<Bond>& bonds) const
 {
+    return rebuildBondHBDataCore(hbonds.size(),
+        [&hbonds](size_t m, int& A, int& H, int& B) { const auto& hb = hbonds[m]; A = hb.i; H = hb.j; B = hb.k; },
+        bonds);
+}
+
+GFNFF::BondHBRebuildResult GFNFF::rebuildBondHBDataFromTriples(
+    const std::vector<int>& hb_i, const std::vector<int>& hb_j, const std::vector<int>& hb_k,
+    const std::vector<Bond>& bonds) const
+{
+    return rebuildBondHBDataCore(hb_i.size(),
+        [&](size_t m, int& A, int& H, int& B) { A = hb_i[m]; H = hb_j[m]; B = hb_k[m]; },
+        bonds);
+}
+
+GFNFF::BondHBRebuildResult GFNFF::rebuildBondHBDataCore(
+    size_t n_hb, const std::function<void(size_t, int&, int&, int&)>& get_hb,
+    const std::vector<Bond>& bonds) const
+{
     BondHBRebuildResult result;
     const int nb = static_cast<int>(bonds.size());
     result.bond_nr_hb.assign(nb, 0);
@@ -4234,7 +4421,7 @@ GFNFF::BondHBRebuildResult GFNFF::rebuildBondHBData(
     // hits in list order, and the chunks are joined in order, so each key's B list is the serial one.
     std::vector<std::vector<int>> key_B(nkeys);
     {
-        const size_t nhbs = hbonds.size();
+        const size_t nhbs = n_hb;
         const int T = (nhbs < 20000) ? 1 : std::max(1, m_threads);
         const int nchunk = (T == 1) ? 1 : 4 * T;
         std::vector<std::vector<std::pair<int, int>>> hits(nchunk);
@@ -4242,12 +4429,13 @@ GFNFF::BondHBRebuildResult GFNFF::rebuildBondHBData(
             const size_t a = nhbs * c / nchunk, e = nhbs * (c + 1) / nchunk;
             auto& out = hits[c];
             for (size_t m = a; m < e; ++m) {
-                const auto& hb = hbonds[m];
-                int z_b = (hb.k < m_atomcount) ? m_atoms[hb.k] : 0;
+                int hb_A, hb_H, hb_B;
+                get_hb(m, hb_A, hb_H, hb_B);
+                int z_b = (hb_B < m_atomcount) ? m_atoms[hb_B] : 0;
                 if (z_b != 7 && z_b != 8) continue;
-                if (hb.j < 0 || hb.j >= m_atomcount) continue;
-                for (int q = key_off[hb.j]; q < key_fill[hb.j]; ++q)
-                    if (key_A[q] == hb.i) { out.emplace_back(key_id[q], hb.k); break; }
+                if (hb_H < 0 || hb_H >= m_atomcount) continue;
+                for (int q = key_off[hb_H]; q < key_fill[hb_H]; ++q)
+                    if (key_A[q] == hb_A) { out.emplace_back(key_id[q], hb_B); break; }
             }
         };
         if (nchunk == 1) {
