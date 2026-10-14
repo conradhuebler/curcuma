@@ -29,6 +29,7 @@ below. If it needs measurements or a derivation, write them into the matching `d
 
 ## Jul - Sep 2026 (and some late June), 108 entries, full text in AIChangelog_2026-late.md
 
+- Failing ctest entries after merging origin/master (Oct 14, 2026): 11 of 353, logger thread override hides confscan summary, level mismatch in scattering test, react and BLAS-dependent SCF cases open; table in `docs/BROKEN_TESTS_2026-10-14.md`.
 - ROCm small-system step latency (branch `feature/rocm-launch-latency`, Oct 13, 2026): device EEQ for N <= 128, Coulomb tile shape by size, single-stream below 500 atoms, lean bookkeeping; 66 atoms 1.526 -> 0.571 ms/step (CPU 0.271), 300 atoms now faster than CPU, results identical.
 - ROCm EEQ PPCG with FP32 matvec (branch `feature/rocm-eeq-fp32-matvec`, Oct 13, 2026): FP32 matrix copy, FP64 vectors and true-residual updates; MD step 45.5 -> 38.3 ms (7320 atoms, CPU 145.5), 54.6 -> 50.6 ms (6200 atoms); average Epot within 2e-12 Eh.
 - ROCm HB/XB list refresh (branch `feature/rocm-hb-detection`, Oct 13, 2026): detection with double-precision pre-tests, lean device fill, no CPU-workspace copy; refresh host time 226.9 -> 52.2 ms, MD step 71.8 -> 54.7 ms (urea400-water1000, CPU 172.9), lists and CPU path bit-identical.
