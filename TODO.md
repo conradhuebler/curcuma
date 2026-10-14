@@ -73,6 +73,8 @@ Stand.
   in D4-Generator/GFNFF/Wrapper (P1a-Skip in `updateCNValuesForGradient` beachten). HIP liest `m_disp_idx_*_host` und füllt `m_h_dc6dcn_*` noch (nicht kompilierbar hier).
 - **GPU-GFN-FF-MD, Schrittzerlegung polymer_2x** (Stand 21,7 ms je Schritt, vorher 38,4; erledigt: `AIChangelog.md`, [docs/GFNFF-PERFORMANCE-ROADMAP.md](docs/GFNFF-PERFORMANCE-ROADMAP.md)):
   offen: CG-Iterationen unter Last (K5); Host-Neubau überlappt nicht mit Gerätearbeit (HB 12,8 ms alle 10, Repulsion 11 ms alle ~8, D4 125 ms alle ~83 Schritte); K1-K3 und gestaffeltes Hochladen auf ROCm. Journal: Labor/curcuma EEQ-Solver Benchmark.
+- **CUDA GFN-FF MD, Schrittpausen urea400-water1000** (Stand 2026-10-14, [docs/GPU_STEP_PAUSES_2026-10-14.md](docs/GPU_STEP_PAUSES_2026-10-14.md)): offen: HB/XB-Erkennungskernel (35 ms alle 10 Schritte), `gpu_disp_pairs_on_device` als Standard
+  (nach Polymer, kleine, geladene Systeme und Gradient), ROCm-Spiegel der D4-Setup-Reihenfolge und -Sortierung (`gfnff_rocm.hip`, hier nicht kompilierbar). Journal: Labor/curcuma GPU-Backends.
 - **ROCm-GFN-FF, Rückstand** (Hardware nötig, groß): nur `auto`/`cholesky` zulässig (kein Geräte-ppcg, kein localinv); fehlen: K1-Fehlerbehebung (CN-Liste jeden Schritt),
   Fernfeld, K2/K3, gestaffelter Upload. [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md).
 - **GPU-Fernfeld und Toleranz angleichen**: Fernfeld in den Mehr-GPU-Kernel `k_eeq_build_cols` (`eeq_solver_gpu.cu`, klein); CUDA-Schwelle 6,0 auf 6,5 wie CPU (nicht bitgleich, mit Messung);

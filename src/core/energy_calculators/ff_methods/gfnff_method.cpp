@@ -2062,9 +2062,11 @@ void GFNFF::updateNonbondedRepulsionIfNeeded(FFWorkspace* extra_ws)
     // declaration) — that function must not be called a third time per its own
     // "heap corruption" warning at its FFWorkspace-construction call site, and it would
     // regenerate every term (bonds/angles/torsions/...), not just the two we need.
-    auto [bonded_rep, nonbonded_rep] = generateRepulsionPairsNative();
+    // Claude Generated (Oct 2026): the previous non-bonded list is dead from here on (the workspace and
+    // the GPU copy are overwritten below), so its storage is reused for the new one.
+    auto [bonded_rep, nonbonded_rep] = generateRepulsionPairsNative(&m_last_nonbonded_reps);
 
-    if (m_workspace)
+    if (m_workspace && !m_skip_host_rep_workspace)
         m_workspace->updateRepulsion(bonded_rep, nonbonded_rep);
     if (extra_ws)
         extra_ws->updateRepulsion(bonded_rep, nonbonded_rep);
@@ -4227,13 +4229,37 @@ GFNFF::BondHBRebuildResult GFNFF::rebuildBondHBData(
         }
         bond_key[b] = id;
     }
+    // Claude Generated (Oct 2026): the pass over the H-bond list (582k entries of ~200 bytes each on
+    // urea400-water1000, memory-bound) runs in parallel chunks; every chunk records its (key, B)
+    // hits in list order, and the chunks are joined in order, so each key's B list is the serial one.
     std::vector<std::vector<int>> key_B(nkeys);
-    for (const auto& hb : hbonds) {
-        int z_b = (hb.k < m_atomcount) ? m_atoms[hb.k] : 0;
-        if (z_b != 7 && z_b != 8) continue;
-        if (hb.j < 0 || hb.j >= m_atomcount) continue;
-        for (int q = key_off[hb.j]; q < key_fill[hb.j]; ++q)
-            if (key_A[q] == hb.i) { key_B[key_id[q]].push_back(hb.k); break; }
+    {
+        const size_t nhbs = hbonds.size();
+        const int T = (nhbs < 20000) ? 1 : std::max(1, m_threads);
+        const int nchunk = (T == 1) ? 1 : 4 * T;
+        std::vector<std::vector<std::pair<int, int>>> hits(nchunk);
+        auto scan = [&](int c) {
+            const size_t a = nhbs * c / nchunk, e = nhbs * (c + 1) / nchunk;
+            auto& out = hits[c];
+            for (size_t m = a; m < e; ++m) {
+                const auto& hb = hbonds[m];
+                int z_b = (hb.k < m_atomcount) ? m_atoms[hb.k] : 0;
+                if (z_b != 7 && z_b != 8) continue;
+                if (hb.j < 0 || hb.j >= m_atomcount) continue;
+                for (int q = key_off[hb.j]; q < key_fill[hb.j]; ++q)
+                    if (key_A[q] == hb.i) { out.emplace_back(key_id[q], hb.k); break; }
+            }
+        };
+        if (nchunk == 1) {
+            scan(0);
+        } else {
+            #pragma omp parallel for num_threads(T) schedule(dynamic, 1)
+            for (int c = 0; c < nchunk; ++c) scan(c);
+        }
+        std::vector<int> cnt(nkeys, 0);
+        for (const auto& h : hits) for (const auto& kb : h) ++cnt[kb.first];
+        for (int id = 0; id < nkeys; ++id) key_B[id].reserve(cnt[id]);
+        for (const auto& h : hits) for (const auto& kb : h) key_B[kb.first].push_back(kb.second);
     }
 
     for (int b = 0; b < nb; ++b) {
@@ -11537,7 +11563,7 @@ GFNFF::CoulombSelfEnergy GFNFF::generateCoulombSelfEnergyNative() const
     return self;
 }
 
-std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::generateRepulsionPairsNative() const
+std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::generateRepulsionPairsNative(std::vector<GFNFFRepulsion>* reuse_nonbonded) const
 {
     // Claude Generated (March 2026): Native struct version of generateGFNFFRepulsionPairs
     // Reference: Fortran gfnff_engrad.F90:467-495 (bonded), 255-276 (non-bonded)
@@ -11683,6 +11709,13 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
         // (nonbonded_skin_bohr, default 2 since Sep 27, 2026). Pairs between 20 and 20+skin are stored but the
         // kernel still skips them (r.r_cut stays NB_REP_RCUT); they are the reserve that lets
         // updateNonbondedRepulsionIfNeeded() rebuild only after skin/2 of atomic motion.
+        // Claude Generated (Oct 2026): take over the old list's memory (all entries are overwritten below)
+        // and size the per-chunk vectors from its length, instead of growing 96 vectors by push_back.
+        size_t prev_total = 0;
+        if (reuse_nonbonded) {
+            prev_total = reuse_nonbonded->size();
+            nonbonded_reps.swap(*reuse_nonbonded);
+        }
         SpatialCellList rep_cells;
         rep_cells.build(m_geometry_bohr, NB_REP_RCUT + nonbondedSkinBohr());
         // Claude Generated (Oct 2026): the serial candidate collection (forEachPair) is split
@@ -11690,7 +11723,12 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
         // forEachPairOfAtom(), which visits the pairs of one atom in forEachPair() order, and
         // the ranges are concatenated in order: the list is the serial one, element for element.
         const int n_chunks = (m_rep_diag || rep_threads == 1) ? 1 : std::min(m_atomcount, 8 * rep_threads);
-        std::vector<std::vector<GFNFFRepulsion>> part(std::max(1, n_chunks));
+        std::vector<std::vector<GFNFFRepulsion>> part_local;
+        std::vector<std::vector<GFNFFRepulsion>>& part = reuse_nonbonded ? m_rep_part_cache : part_local;
+        part.resize(std::max(1, n_chunks));
+        for (auto& pp : part) pp.clear();   // keeps the capacity of the previous rebuild
+        if (prev_total > 0)
+            for (auto& pp : part) pp.reserve(prev_total / part.size() + prev_total / part.size() / 8 + 16);
         auto run_chunk = [&](int c) {
             const int a = static_cast<int>(static_cast<long long>(m_atomcount) * c / n_chunks);
             const int b = static_cast<int>(static_cast<long long>(m_atomcount) * (c + 1) / n_chunks);
@@ -11709,8 +11747,16 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
         }
         size_t total = 0;
         for (const auto& pp : part) total += pp.size();
-        nonbonded_reps.reserve(total);
-        for (auto& pp : part) nonbonded_reps.insert(nonbonded_reps.end(), pp.begin(), pp.end());
+        // Same order as the serial concatenation: chunk c lands at the sum of the sizes before it. Every
+        // entry is overwritten, so the (reused) storage is only resized, never cleared.
+        nonbonded_reps.resize(total);
+        {
+            std::vector<size_t> off(part.size() + 1, 0);
+            for (size_t c = 0; c < part.size(); ++c) off[c + 1] = off[c] + part[c].size();
+            #pragma omp parallel for num_threads(rep_threads) schedule(static)
+            for (int c = 0; c < static_cast<int>(part.size()); ++c)
+                std::copy(part[c].begin(), part[c].end(), nonbonded_reps.begin() + off[c]);
+        }
     } else {
         std::vector<std::pair<int, int>> cand;
         cand.reserve(static_cast<size_t>(m_atomcount) * (m_atomcount - 1) / 2);

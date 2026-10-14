@@ -352,7 +352,7 @@ PARAM(gpu_cn_pair_cutoff_factor, Double, 2.5, "Task 10: GPU CN-derivative pair-l
 PARAM(gpu_cn_pair_skin_bohr, Double, 1.0, "K1 (Oct 2026), CUDA only: Verlet skin of the GPU CN pair list in Bohr. The list keeps pairs up to factor*(rcov_i+rcov_j) + 2*skin and is rebuilt only when an atom moved more than skin + rs_min/2*(factor-1-8/7.5) since the last build, so no pair with an erf-CN term above 0.5*erfc(8) = 6e-30 is missing. Negative = legacy: rebuild whenever the 0.5 Bohr topology displacement check fires (every MD step).", "Performance", {})
 PARAM(gpu_eeq_overlap, Bool, true, "K3 (Oct 2026), CUDA only: the device projected-PCG EEQ solve waits only for its inputs (coordinates, right-hand side) and runs in parallel to the D4 dc6dcn kernel and the charge-independent kernels. false = legacy: it waits for all prior device work.", "Performance", {})
 PARAM(gpu_dispersion_overlap, Bool, true, "K2 (Oct 2026), CUDA only: the gradient-mode D4 dispersion kernel starts right after dc6dcn, parallel to the EEQ solve; it reads no EEQ charge. false = legacy: it runs after the EEQ solve. Changes only the summation order of the atomic gradient adds.", "Performance", {})
-PARAM(gpu_staged_list_upload, Bool, true, "Oct 2026, CUDA only: during MD the rebuilt D4 dispersion and repulsion pair lists are converted by -threads host threads into a pinned double buffer and copied asynchronously in chunks (polymer_2x, 9.4 M D4 pairs: 118 -> 48 ms per rebuild, 16 threads). The device receives the same bytes. false = legacy serial conversion and blocking pageable copies.", "Performance", {})
+PARAM(gpu_staged_list_upload, Bool, true, "Oct 2026, CUDA only: during MD the rebuilt D4 dispersion, repulsion and (Oct 14, 2026) H-bond lists are converted by -threads host threads into a pinned double buffer and copied asynchronously in chunks (polymer_2x, 9.4 M D4 pairs: 118 -> 48 ms per rebuild, 16 threads). The device receives the same bytes. false = legacy serial conversion and blocking pageable copies.", "Performance", {})
 PARAM(hb_accuracy, Double, 0.1, "Task 11: HB-list accuracy driving the Fortran thresholds hbthr1 = 200 - log10(acc)*50, hbthr2 = 400 - log10(acc)*50 (Bohr^2). Smaller = larger cutoffs = more HB pairs = more accurate but slower. 0.1 reproduces the gfnff reference.", "Performance", {})
 PARAM(hb_thr1_bohr2, Double, 0.0, "Task 11: direct override of hbthr1, the A-B distance-squared cutoff for nhb2 detection (Bohr^2). 0 = derive from hb_accuracy.", "Performance", {})
 PARAM(hb_thr2_bohr2, Double, 0.0, "Task 11: direct override of hbthr2, the A-H-B sum-of-squares cutoff for nhb1 detection (Bohr^2). 0 = derive from hb_accuracy.", "Performance", {})
@@ -834,6 +834,8 @@ public:
     /// getLastHBonds()/getLastXBonds() but does not copy them into m_workspace nor rebuild its
     /// bond-HB data (12 + 16 ms per re-detection at 582k H bonds). No effect on the CPU path.
     void setSkipHostHBWorkspaceUpdate(bool v) { m_skip_host_hb_workspace = v; }
+    /// Claude Generated (Oct 2026): GPU wrappers read the repulsion lists from getLast*Repulsions() and never run the CPU workspace; skips the 1.5 M-entry copy into it per rebuild.
+    void setSkipHostRepulsionWorkspaceUpdate(bool v) { m_skip_host_rep_workspace = v; }
 
     /**
      * @brief Export topology information for restart/topology I/O
@@ -1527,7 +1529,10 @@ private:
     CoulombSelfEnergy generateCoulombSelfEnergyNative() const;
 
     /// Generate repulsion pair parameters as native GFNFFRepulsion structs (bonded + nonbonded)
-    std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> generateRepulsionPairsNative() const;
+    /// @param reuse_nonbonded optional storage of the previous non-bonded list (Oct 2026): its memory is taken over
+    ///        and overwritten, so a rebuild during MD does not fault in a fresh 1.5 M-entry vector. Same list as without.
+    std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> generateRepulsionPairsNative(
+        std::vector<GFNFFRepulsion>* reuse_nonbonded = nullptr) const;
 
     /// Generate dispersion pair parameters as native GFNFFDispersion structs + ATM triples + method name
     std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> generateDispersionPairsNative() const;
@@ -2843,6 +2848,10 @@ private:
 
     // Claude Generated (March 2026): Topology persistence in param.json
     bool m_cache_topology = true;   ///< Cache Phase-1 EEQ topology in param.json (opt-out)
+    /// Claude Generated (Oct 2026): per-chunk buffers of generateRepulsionPairsNative() kept between MD rebuilds (only
+    /// when the caller passes reuse storage): no 70 MB free + page-faulting re-allocation per refresh at 6200 atoms.
+    mutable std::vector<std::vector<GFNFFRepulsion>> m_rep_part_cache;
+    bool m_skip_host_rep_workspace = false;  ///< Oct 2026: GPU wrapper owns the repulsion lists (setSkipHostRepulsionWorkspaceUpdate)
     bool m_skip_host_hb_workspace = false;  ///< Oct 2026: GPU wrapper owns the HB/XB lists (setSkipHostHBWorkspaceUpdate)
     bool m_skip_host_disp_pairs = false;  ///< WP-A: GPU builds D4 pairs; skip host O(N^2) loop
     bool m_implicit_coulomb_pairs = false; ///< GPU enumerates Coulomb pairs; skip host list

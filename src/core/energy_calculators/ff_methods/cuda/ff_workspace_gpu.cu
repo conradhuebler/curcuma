@@ -37,6 +37,12 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
+#include <thrust/device_ptr.h>
+#include <thrust/execution_policy.h>
+#include <thrust/gather.h>
+#include <thrust/sequence.h>
+#include <thrust/sort.h>
+#include <thrust/transform.h>
 
 // Matrix, Vector, SpMatrix are defined in global.h (via ff_workspace_gpu.h -> ff_workspace.h)
 // global.h: Matrix = Eigen::Matrix<double, Dynamic, Dynamic, RowMajor>
@@ -948,6 +954,112 @@ void stagedRepulsionUpload(FFWorkspaceGPUImpl& impl, RepulsionSoA& soa,
         });
 }
 
+/// Claude Generated (Oct 2026): hydrogen-bond list through the staged upload; same device content as
+/// HBondSoA::upload() (urea400-water1000: 582k triples, the serial conversion was 32-46 ms per
+/// re-detection). The two packed neighbour arrays are filled in the same pass at precomputed offsets.
+void stagedHBondUpload(FFWorkspaceGPUImpl& impl, HBondSoA& soa, const std::vector<GFNFFHydrogenBond>& v,
+                       const std::vector<int>& atom_types, int threads)
+{
+    soa.n = static_cast<int>(v.size());
+    if (soa.n == 0) return;
+    const size_t n = v.size();
+    const int nat = static_cast<int>(atom_types.size());
+
+    // Offsets of the packed neighbour arrays: per-range sums in parallel, a short serial prefix over the
+    // ranges, then the offsets of each range in parallel (the serial pass over the ~200-byte entries
+    // was ~5 ms of a re-detection at 582k triples).
+    std::vector<int> offB(n), offC(n);
+    int total_B = 0, total_C = 0;
+    {
+        const int T = (n < 32768) ? 1 : std::max(1, threads);
+        std::vector<int> sumB(T, 0), sumC(T, 0);
+        auto range = [&](int t, size_t& a, size_t& e) { a = n * t / T; e = n * (t + 1) / T; };
+        auto run = [&](auto&& fn) {
+            if (T == 1) { fn(0); return; }
+            std::vector<std::thread> w;
+            for (int t = 1; t < T; ++t) w.emplace_back([&fn, t]() { fn(t); });
+            fn(0);
+            for (auto& x : w) x.join();
+        };
+        run([&](int t) {
+            size_t a, e; range(t, a, e);
+            int sb = 0, sc = 0;
+            for (size_t m = a; m < e; ++m) {
+                sb += static_cast<int>(v[m].neighbors_B.size());
+                sc += static_cast<int>(v[m].neighbors_C.size());
+            }
+            sumB[t] = sb; sumC[t] = sc;
+        });
+        std::vector<int> baseB(T, 0), baseC(T, 0);
+        for (int t = 0; t < T; ++t) {
+            baseB[t] = total_B; baseC[t] = total_C;
+            total_B += sumB[t]; total_C += sumC[t];
+        }
+        run([&](int t) {
+            size_t a, e; range(t, a, e);
+            int ob = baseB[t], oc = baseC[t];
+            for (size_t m = a; m < e; ++m) {
+                offB[m] = ob; offC[m] = oc;
+                ob += static_cast<int>(v[m].neighbors_B.size());
+                oc += static_cast<int>(v[m].neighbors_C.size());
+            }
+        });
+    }
+    std::vector<int> h_nbB_flat(total_B), h_nbC_flat(total_C);
+
+    CudaBuffer<int>* icols[] = { &soa.idx_i, &soa.idx_j, &soa.idx_k, &soa.elem_A, &soa.elem_B, &soa.case_type,
+                                 &soa.nb_B_offset, &soa.nb_B_count, &soa.acceptor_parent, &soa.nb_C_offset,
+                                 &soa.nb_C_count };
+    CudaBuffer<double>* dcols[] = { &soa.q_H, &soa.q_A, &soa.q_B, &soa.basicity_A, &soa.basicity_B,
+                                    &soa.acidity_A, &soa.acidity_B, &soa.r_cut, &soa.repz_B };
+    StageColumn cols[20];
+    int nc = 0;
+    for (auto* b : icols) { b->ensure(soa.n); cols[nc++] = { b->ptr, sizeof(int) }; }
+    for (auto* b : dcols) { b->ensure(soa.n); cols[nc++] = { b->ptr, sizeof(double) }; }
+
+    stagedListUpload(impl, n, cols, nc, threads,
+        [&](size_t a, size_t e, size_t k0, char* const* h) {
+            int* i_i = reinterpret_cast<int*>(h[0]);   int* i_j = reinterpret_cast<int*>(h[1]);
+            int* i_k = reinterpret_cast<int*>(h[2]);   int* eA  = reinterpret_cast<int*>(h[3]);
+            int* eB  = reinterpret_cast<int*>(h[4]);   int* cs  = reinterpret_cast<int*>(h[5]);
+            int* bO  = reinterpret_cast<int*>(h[6]);   int* bC  = reinterpret_cast<int*>(h[7]);
+            int* par = reinterpret_cast<int*>(h[8]);   int* cO  = reinterpret_cast<int*>(h[9]);
+            int* cC  = reinterpret_cast<int*>(h[10]);
+            double* qH = reinterpret_cast<double*>(h[11]);  double* qA = reinterpret_cast<double*>(h[12]);
+            double* qB = reinterpret_cast<double*>(h[13]);  double* bA = reinterpret_cast<double*>(h[14]);
+            double* bB = reinterpret_cast<double*>(h[15]);  double* aA = reinterpret_cast<double*>(h[16]);
+            double* aB = reinterpret_cast<double*>(h[17]);  double* rc = reinterpret_cast<double*>(h[18]);
+            double* rz = reinterpret_cast<double*>(h[19]);
+            for (size_t m = a; m < e; ++m) {
+                const size_t q = m - k0;
+                const GFNFFHydrogenBond& x = v[m];
+                i_i[q] = x.i;  i_j[q] = x.j;  i_k[q] = x.k;
+                eA[q] = (x.i < nat) ? atom_types[x.i] : 0;
+                const int zB = (x.k < nat) ? atom_types[x.k] : 0;
+                eB[q] = zB;
+                cs[q] = x.case_type;
+                par[q] = x.acceptor_parent_index;
+                qH[q] = x.q_H;  qA[q] = x.q_A;  qB[q] = x.q_B;
+                bA[q] = x.basicity_A;  bB[q] = x.basicity_B;
+                aA[q] = x.acidity_A;   aB[q] = x.acidity_B;
+                rc[q] = x.r_cut;
+                rz[q] = (zB >= 1 && zB <= 86) ? GFNFFParameters::repz[zB - 1] : 1.0;
+                bO[q] = offB[m];  bC[q] = static_cast<int>(x.neighbors_B.size());
+                cO[q] = offC[m];  cC[q] = static_cast<int>(x.neighbors_C.size());
+                int w = offB[m];
+                for (int nb : x.neighbors_B) h_nbB_flat[w++] = nb;
+                w = offC[m];
+                for (int nb : x.neighbors_C) h_nbC_flat[w++] = nb;
+            }
+        });
+
+    soa.total_nb_B = total_B;
+    soa.total_nb_C = total_C;
+    if (total_B > 0) soa.nb_B_flat.upload(h_nbB_flat, impl.stream);
+    if (total_C > 0) soa.nb_C_flat.upload(h_nbC_flat, impl.stream);
+    checkCuda(cudaStreamSynchronize(impl.stream), "hbond flat upload sync");
+}
+
 }  // namespace
 
 // ============================================================================
@@ -1744,7 +1856,10 @@ void FFWorkspaceGPU::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
     // Re-upload HBond SoA after dynamic re-detection.
     // Claude Generated (March 2026): Needed because updateHBXBIfNeeded() may find
     // additional HBonds on re-detection that weren't in the initial parameter set.
-    m_impl->hbonds.upload(hbonds, atom_types, m_impl->stream);
+    if (m_staged_list_upload)   // Oct 2026: same device content, see stagedHBondUpload()
+        stagedHBondUpload(*m_impl, m_impl->hbonds, hbonds, atom_types, m_host_threads);
+    else
+        m_impl->hbonds.upload(hbonds, atom_types, m_impl->stream);
     // Store for CPU vs GPU comparison debugging. Oct 2026: only where that comparison runs
     // (verbosity >= 3 in the GPU wrapper); the deep copy was ~1 ms per MD re-detection.
     if (CurcumaLogger::get_verbosity() >= 3)
@@ -1994,6 +2109,12 @@ bool FFWorkspaceGPU::cnPairListStale(double max_disp_bohr)
 // Two-pass (count + build) device replacement for the host
 // GenerateDispersionPairsNative O(N²) loop + per-build H2D upload. Opt-in.
 // ============================================================================
+/// Claude Generated (Oct 2026): sort key of a dispersion pair, unique per (i<j): i*N+j.
+struct DispPairKey {
+    long long N;
+    __host__ __device__ long long operator()(int a, int b) const { return static_cast<long long>(a) * N + b; }
+};
+
 void FFWorkspaceGPU::generateDispersionPairListOnGPU(
     const std::vector<double>& gw_flat,
     const std::vector<double>& sqrtzr4r2,
@@ -2079,6 +2200,55 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
         impl.disp.C6.ptr, impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr,
         impl.disp.zetac6.ptr, impl.disp.r_cut.ptr);
     checkCuda(cudaStreamSynchronize(impl.stream), "k_disp_pairs_build sync");
+
+    // Claude Generated (Oct 2026): put the pairs in the host's serial (i, j) order. k_disp_pairs_build
+    // takes its slot from a global atomic counter, so the order depended on which warp arrived first:
+    // the dispersion kernels then summed in a run-dependent order and read the per-pair arrays with
+    // less locality than the host list. Sort by key i*N+j (unique per pair), apply the permutation to
+    // the seven per-pair arrays (dc6dcn_ij/ji are filled later, per index). CURCUMA_GPU_DISP_SORT=0
+    // keeps the arrival order (for A/B timing).
+    {
+        const char* env_sort = std::getenv("CURCUMA_GPU_DISP_SORT");
+        if (!(env_sort && env_sort[0] == '0')) {
+            const int n = h_count;
+            CudaBuffer<long long> d_key;
+            CudaBuffer<int>       d_perm;
+            CudaBuffer<double>    d_tmp;
+            d_key.alloc(n);
+            d_perm.alloc(n);
+            d_tmp.alloc(n);
+            auto pol = thrust::cuda::par.on(impl.stream);
+            thrust::device_ptr<const int> pi(impl.disp.idx_i.ptr), pj(impl.disp.idx_j.ptr);
+            thrust::device_ptr<long long> pk(d_key.ptr);
+            thrust::device_ptr<int>       pp(d_perm.ptr);
+            thrust::transform(pol, pi, pi + n, pj, pk, DispPairKey{static_cast<long long>(N)});
+            thrust::sequence(pol, pp, pp + n);
+            thrust::sort_by_key(pol, pk, pk + n, pp);
+            thrust::device_ptr<double> pt(d_tmp.ptr);
+            auto permute_d = [&](double* arr) {
+                thrust::device_ptr<double> pa(arr);
+                thrust::gather(pol, pp, pp + n, pa, pt);
+                checkCuda(cudaMemcpyAsync(arr, d_tmp.ptr, sizeof(double) * n,
+                                          cudaMemcpyDeviceToDevice, impl.stream), "disp sort copy");
+            };
+            permute_d(impl.disp.C6.ptr);
+            permute_d(impl.disp.r4r2ij.ptr);
+            permute_d(impl.disp.r0_sq.ptr);
+            permute_d(impl.disp.zetac6.ptr);
+            permute_d(impl.disp.r_cut.ptr);
+            // idx_i / idx_j last: the key was built from them; reuse d_tmp bits through an int view.
+            auto permute_i = [&](int* arr) {
+                thrust::device_ptr<int> pa(arr);
+                thrust::device_ptr<int> pti(reinterpret_cast<int*>(d_tmp.ptr));
+                thrust::gather(pol, pp, pp + n, pa, pti);
+                checkCuda(cudaMemcpyAsync(arr, d_tmp.ptr, sizeof(int) * n,
+                                          cudaMemcpyDeviceToDevice, impl.stream), "disp sort copy");
+            };
+            permute_i(impl.disp.idx_i.ptr);
+            permute_i(impl.disp.idx_j.ptr);
+            checkCuda(cudaStreamSynchronize(impl.stream), "disp pair sort sync");
+        }
+    }
 
     impl.disp_built_on_gpu = true;
 
