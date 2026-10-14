@@ -3543,21 +3543,29 @@ __global__ GFNFF_KERNEL_BOUNDS void k_gaussian_weights(
         dnorm += dew;
     }
 
-    // Phase 2: Normalize and compute derivatives via quotient rule
-    if (norm > 1e-10) {
-        double inv_norm = 1.0 / norm;
-        double inv_norm2 = inv_norm * inv_norm;
+    // Phase 2: Normalize and compute derivatives via quotient rule.
+    // Claude Generated (Oct 2026): same rule as D4ParameterGenerator::precomputeGaussianWeights()
+    // and computeGaussianWeightDerivatives(): always divide by the finite sum (1/sum is finite for
+    // any nonzero sum, also for atoms whose reference CNs are far from the actual CN, e.g. Mn and Ru
+    // in carbonyl complexes) and guard each value against NaN/Inf from a true underflow, where the
+    // reference with the maximal CN gets weight 1 and the derivative 0. The former `norm > 1e-10`
+    // switch collapsed such atoms onto the first reference (ROCm MOR41 gfnff: PR05, ED05, PR26-28,
+    // ED26 differed from the CPU by up to 1.6 kcal/mol in the dispersion term).
+    {
+        double max_cn_ref = d_refcn_const[refcn_base];
+        for (int r = 1; r < nref; ++r)
+            max_cn_ref = fmax(max_cn_ref, d_refcn_const[refcn_base + r]);
+        const double inv_norm = 1.0 / norm;
+        const double inv_norm2 = 1.0 / (norm * norm);
         for (int r = 0; r < nref; ++r) {
-            gw[base + r]  = expw[r] * inv_norm;
-            dgw[base + r] = (dexpw[r] * norm - expw[r] * dnorm) * inv_norm2;
-        }
-    } else {
-        // Fallback: first reference gets weight 1.0
-        gw[base] = 1.0;
-        dgw[base] = 0.0;
-        for (int r = 1; r < nref; ++r) {
-            gw[base + r]  = 0.0;
-            dgw[base + r] = 0.0;
+            double g = expw[r] * inv_norm;
+            if (!isfinite(g))
+                g = (d_refcn_const[refcn_base + r] == max_cn_ref) ? 1.0 : 0.0;
+            double dg = (dexpw[r] * norm - expw[r] * dnorm) * inv_norm2;
+            if (!isfinite(dg))
+                dg = 0.0;
+            gw[base + r]  = g;
+            dgw[base + r] = dg;
         }
     }
 

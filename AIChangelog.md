@@ -29,6 +29,7 @@ below. If it needs measurements or a derivation, write them into the matching `d
 
 ## Jul - Sep 2026 (and some late June), 108 entries, full text in AIChangelog_2026-late.md
 
+- Fix GPU D4 Gaussian weights for atoms with far-away reference CNs (Oct 14, 2026): ROCm/CUDA kernel used `norm > 1e-10` and the first reference, CPU always normalises; MOR41 gfnff ROCm vs CPU 6 -> 0 of 95 differences (Mn, Ru); charged-system GPU divergence traced to the missing frag_charge_model ensemble; test `cli_gfnff_gpu_04_rocm_metal_dispersion`.
 - Reference-set regression of the ROCm branch chain (Oct 14, 2026): MOR41 (gfnff, gfn1, gfn2) and GMTKN55 (gfnff, gfn1, gfn2) CPU energies identical to origin/master (0 differences); ROCm gfnff differs from CPU on 6 of 95 MOR41 structures (Mn, Ru dispersion, predates the branches), see `docs/REGRESSION_CHECK.md`.
 - Failing ctest entries after merging origin/master (Oct 14, 2026): 11 of 353, logger thread override hides confscan summary, level mismatch in scattering test, react and BLAS-dependent SCF cases open; table in `docs/BROKEN_TESTS_2026-10-14.md`.
 - ROCm small-system step latency (branch `feature/rocm-launch-latency`, Oct 13, 2026): device EEQ for N <= 128, Coulomb tile shape by size, single-stream below 500 atoms, lean bookkeeping; 66 atoms 1.526 -> 0.571 ms/step (CPU 0.271), 300 atoms now faster than CPU, results identical.

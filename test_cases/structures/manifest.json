@@ -1728,6 +1728,26 @@
    "legacy": true
   },
   {
+   "id": "mor41-pr05",
+   "class": "small",
+   "file": "small/mor41-pr05.xyz",
+   "format": "xyz",
+   "formula": "C6HMnO6",
+   "natoms": 14,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "equilibrium",
+   "size_bytes": 767,
+   "sha256": "57d1439ed544940242475911f84728952784a85663b934f0cd9b384c0ad0e34c",
+   "provenance": {
+    "kind": "database",
+    "reference": "Dohm, Hansen, Steinmetz, Grimme, Checinski, J. Chem. Theory Comput. 14, 2596 (2018), MOR41 structure PR05",
+    "description": "Mn carbonyl complex MnC6H3O5 (14 atoms, 5 CO and 3 H), MOR41 PR05; transition-metal case for the GPU D4 weights"
+   },
+   "notes": "Fetched with scripts/fetch_testset.py fetch mor41 (Uni Bonn tarball); geometry copied unchanged from mol.xyz"
+  },
+  {
    "id": "na2cl2-isolated-ions",
    "class": "clusters",
    "file": "clusters/na2cl2-isolated-ions.xyz",
