@@ -245,6 +245,16 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dBroyF, dBroyFLast, dBroyVinLast, dBroyDFtmp;  // length N
     CudaBuffer<double> dBroyDFmat, dBroyUmat;                    // N × max_hist (col-major)
     CudaBuffer<double> dBroyGram, dBroyC, dBroyGamma;            // M×M / M / M
+    // Broyden seed preconditioner M (Claude Generated, Oct 2026; broydenSetPreconditioner).
+    // The blocks stay resident under pc_tag; pc_active / the guard are per SCF (broydenBegin).
+    int    broyden_step = 0;                 // updates since broydenBegin (guard index n)
+    bool   pc_active = false, pc_keep = false, pc_best = false;
+    int    pc_N = 0, pc_nblocks = 0, pc_maxdim = 0, pc_fired_at = -1;
+    unsigned long long pc_tag = 0;
+    BroydenGuard pc_guard;
+    CudaBuffer<double> dPcB, dPcFb;          // concatenated row-major blocks / C (length N)
+    CudaBuffer<int>    dPcIdx, dPcIoff, dPcBoff;
+    CudaBuffer<double> dPcTmp, dPcXbest, dPcFbest;  // length N
 
     // Stage 6 (S6.5): fused device-driven loop. The geometry-fixed scalars + the
     // convergence dq scratch; everything else reuses the resident Stage 2-5/6
@@ -3088,6 +3098,59 @@ __global__ void k_broyden_dfu(double* __restrict__ dfcol, double* __restrict__ u
     ucol[i]  = alpha * dfn + (vin[i] - vinlast[i]) * inv_norm;
 }
 
+// ---- Broyden seed preconditioner kernels (Claude Generated, Oct 2026) ------
+// out = C v with C = fallback (alpha on indices outside every Schwarz block, 0 inside).
+__global__ void k_pc_diag(double* __restrict__ out, const double* __restrict__ fb,
+                          const double* __restrict__ v, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = fb[i] * v[i];
+}
+
+// out += R_b^T B_b R_b v, one CUDA block per Schwarz block b: gather v_b = R_b v into shared
+// memory, one warp per row of B_b (row-major) with a shuffle reduction, scatter-add the row
+// result. The blocks of -scf_precond frag do not overlap, so every out[i] receives one add onto
+// C v = 0 and the result does not depend on the order (atomicAdd only guards overlapping input).
+__global__ void k_pc_blocks(double* __restrict__ out, const double* __restrict__ v,
+                            const double* __restrict__ B, const int* __restrict__ boff,
+                            const int* __restrict__ ioff, const int* __restrict__ idx)
+{
+    extern __shared__ double vl[];
+    const int b = blockIdx.x;
+    const int i0 = ioff[b];
+    const int n = ioff[b + 1] - i0;
+    const double* Bb = B + boff[b];
+    for (int k = threadIdx.x; k < n; k += blockDim.x) vl[k] = v[idx[i0 + k]];
+    __syncthreads();
+    const int lane = threadIdx.x & 31;
+    const int nwarp = blockDim.x >> 5;
+    for (int r = threadIdx.x >> 5; r < n; r += nwarp) {
+        const double* row = Bb + static_cast<size_t>(r) * n;
+        double sum = 0.0;
+        for (int j = lane; j < n; j += 32) sum += row[j] * vl[j];
+        for (int o = 16; o > 0; o >>= 1) sum += __shfl_down_sync(0xffffffffu, sum, o);
+        if (lane == 0) atomicAdd(&out[idx[i0 + r]], sum);
+    }
+}
+
+// u = M dF + (vin - vin_last)/|dF|: the preconditioned Broyden direction (Mdf = M dF_n already
+// computed). BroydenMixer::update with a step hook. Claude Generated (Oct 2026).
+__global__ void k_broyden_u_pc(double* __restrict__ ucol, const double* __restrict__ mdf,
+                               const double* __restrict__ vin, const double* __restrict__ vinlast,
+                               double inv_norm, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) ucol[i] = mdf[i] + (vin[i] - vinlast[i]) * inv_norm;
+}
+
+// Guard with "keep": u_k += alpha dF_k - M dF_k (BroydenMixer::dropStepHook(true)).
+__global__ void k_broyden_u_unprecond(double* __restrict__ ucol, const double* __restrict__ dfcol,
+                                      const double* __restrict__ mdf, double alpha, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) ucol[i] += alpha * dfcol[i] - mdf[i];
+}
+
 // Single-thread solve of (w0²I + a)·gamma = c (M ≤ 20; a col-major M×M, symmetric):
 // Gaussian elimination with partial pivoting → gamma = (w0²I+a)^{-1}·c, the host
 // beta·c (BroydenMixer::update lines 133-135). Claude Generated.
@@ -5715,6 +5778,118 @@ bool XtbGpuContext::broydenBegin(int N, double alpha, int max_hist, double w0)
     }
     m_impl->broyden_N = N; m_impl->broyden_iter = 0; m_impl->broyden_push = 0;
     m_impl->broyden_maxhist = max_hist; m_impl->broyden_alpha = alpha; m_impl->broyden_w0 = w0;
+    // Claude Generated (Oct 2026): a new SCF starts without M; the blocks stay resident (pc_tag).
+    m_impl->broyden_step = 0;
+    m_impl->pc_active = false;
+    m_impl->pc_guard = nullptr;
+    m_impl->pc_fired_at = -1;
+    return true;
+}
+
+/* ---- Broyden seed preconditioner (Claude Generated, Oct 2026) ----------- */
+bool XtbGpuContext::broydenSetPreconditioner(const BroydenPrecond* pc, unsigned long long tag,
+                                             BroydenGuard guard, bool keep, bool best)
+{
+    if (!ok() || tag == 0) return false;
+    Impl& I = *m_impl;
+    I.last_error.clear();
+    I.pc_active = false;
+    const int N = I.broyden_N;
+    if (N <= 0) { I.last_error = "device Broyden not initialised"; return false; }
+    if (pc) {
+        if (pc->N != N || pc->nblocks < 0 || !pc->fallback
+            || (pc->nblocks > 0 && (!pc->idx_off || !pc->idx || !pc->b_off || !pc->B))) {
+            I.last_error = "preconditioner size does not match the device Broyden vector";
+            return false;
+        }
+        // The gathered block vector lives in shared memory (48 KB without opt-in): 6144 doubles.
+        if (pc->max_dim > 6144) {
+            I.last_error = "a fragment block exceeds 6144 SCC entries (shared-memory limit of the device kernel)";
+            return false;
+        }
+        I.pc_tag = 0;   // invalid until the upload below completed
+        try {
+            const int nidx = pc->nblocks > 0 ? pc->idx_off[pc->nblocks] : 0;
+            const int nB = pc->nblocks > 0 ? pc->b_off[pc->nblocks] : 0;
+            I.dPcFb.upload(pc->fallback, N);
+            if (pc->nblocks > 0) {
+                I.dPcIoff.upload(pc->idx_off, pc->nblocks + 1);
+                I.dPcBoff.upload(pc->b_off, pc->nblocks + 1);
+                I.dPcIdx.upload(pc->idx, nidx);
+                I.dPcB.upload(pc->B, nB);
+            }
+        } catch (const std::exception& e) {
+            I.last_error = std::string("preconditioner upload failed: ") + e.what();
+            return false;
+        }
+        I.pc_N = N; I.pc_nblocks = pc->nblocks; I.pc_maxdim = pc->max_dim;
+        I.pc_tag = tag;
+    } else if (I.pc_tag != tag || I.pc_N != N) {
+        I.last_error = "no resident preconditioner with this tag";
+        return false;
+    }
+    try {
+        I.dPcTmp.ensure(N); I.dPcXbest.ensure(N); I.dPcFbest.ensure(N);
+    } catch (const std::exception& e) {
+        I.last_error = std::string("preconditioner scratch allocation failed: ") + e.what();
+        return false;
+    }
+    I.pc_guard = std::move(guard);
+    I.pc_keep = keep; I.pc_best = best;
+    I.pc_fired_at = -1;
+    I.pc_active = true;
+    return true;
+}
+
+unsigned long long XtbGpuContext::broydenPreconditionerTag() const { return m_impl ? m_impl->pc_tag : 0; }
+bool XtbGpuContext::broydenPreconditionerActive() const { return m_impl && m_impl->pc_active; }
+int XtbGpuContext::broydenGuardFiredAt() const { return m_impl ? m_impl->pc_fired_at : -1; }
+
+bool XtbGpuContext::multiGpuScfSplit(int nao) const
+{
+    if (!m_impl) return false;
+    const Impl& I = *m_impl;
+    return (I.dist_devices.size() > 1 && nao >= I.dist_min_nao)
+        || (!I.dens_devices.empty() && nao >= I.dens_min_nao);
+}
+
+bool XtbGpuContext::applyBroydenPreconditioner(const double* src, double* dst)
+{
+    Impl& I = *m_impl;
+    cudaStream_t stream = I.stream;
+    const int N = I.pc_N;
+    const int b1 = 256;
+    k_pc_diag<<<(N + b1 - 1) / b1, b1, 0, stream>>>(dst, I.dPcFb.ptr, src, N);
+    if (I.pc_nblocks > 0) {
+        const size_t smem = sizeof(double) * static_cast<size_t>(std::max(1, I.pc_maxdim));
+        k_pc_blocks<<<I.pc_nblocks, 128, smem, stream>>>(dst, src, I.dPcB.ptr, I.dPcBoff.ptr,
+                                                         I.dPcIoff.ptr, I.dPcIdx.ptr);
+    }
+    return cudaGetLastError() == cudaSuccess;
+}
+
+bool XtbGpuContext::dropBroydenPreconditioner(bool keep)
+{
+    Impl& I = *m_impl;
+    if (!I.pc_active) return true;
+    const int N = I.broyden_N;
+    if (keep) {
+        // Rewrite the stored u_k to the scalar form; the column order of the ring is irrelevant.
+        const int M = (I.broyden_push < I.broyden_maxhist) ? I.broyden_push : I.broyden_maxhist;
+        const int b1 = 256, grid = (N + b1 - 1) / b1;
+        for (int k = 0; k < M; ++k) {
+            double* df = I.dBroyDFmat.ptr + static_cast<size_t>(k) * N;
+            double* u = I.dBroyUmat.ptr + static_cast<size_t>(k) * N;
+            if (!applyBroydenPreconditioner(df, I.dPcTmp.ptr)) return false;
+            k_broyden_u_unprecond<<<grid, b1, 0, I.stream>>>(u, df, I.dPcTmp.ptr, I.broyden_alpha, N);
+            if (cudaGetLastError() != cudaSuccess) return false;
+        }
+    } else {
+        // BroydenMixer::reset() before update(): the update in progress becomes the first one.
+        I.broyden_iter = 1;
+        I.broyden_push = 0;
+    }
+    I.pc_active = false;
     return true;
 }
 
@@ -5736,14 +5911,47 @@ bool XtbGpuContext::runBroydenUpdate(const double* dvin, const double* dvout, do
     k_vec_sub<<<grid, b1, 0, stream>>>(m_impl->dBroyF.ptr, dvout, dvin, N);
     if (cudaGetLastError() != cudaSuccess) return false;
     ++m_impl->broyden_iter;
+    const int step = m_impl->broyden_step++;
+
+    // Claude Generated (Oct 2026): preconditioner guard on ||F||_2 (host rule, one scalar back).
+    // Without M (default) none of this runs and the update below is the unchanged scalar path.
+    const double one_pc = 1.0;
+    const double* vin_eff = dvin;   // x_best after a guard hit with "best"
+    if (m_impl->pc_active && m_impl->pc_guard) {
+        double fnorm = 0.0;
+        if (cublasDnrm2(m_impl->cublas, N, m_impl->dBroyF.ptr, 1, &fnorm) != CUBLAS_STATUS_SUCCESS)
+            return false;
+        bool store_best = false;
+        const bool hit = m_impl->pc_guard(step, fnorm, &store_best);
+        if (store_best) {
+            cudaMemcpyAsync(m_impl->dPcXbest.ptr, dvin, bytesN, cudaMemcpyDeviceToDevice, stream);
+            cudaMemcpyAsync(m_impl->dPcFbest.ptr, m_impl->dBroyF.ptr, bytesN, cudaMemcpyDeviceToDevice, stream);
+        }
+        if (hit) {
+            m_impl->pc_fired_at = step;
+            if (!dropBroydenPreconditioner(m_impl->pc_keep)) return false;
+            if (m_impl->pc_best) {
+                vin_eff = m_impl->dPcXbest.ptr;
+                cudaMemcpyAsync(m_impl->dBroyF.ptr, m_impl->dPcFbest.ptr, bytesN, cudaMemcpyDeviceToDevice, stream);
+            }
+        }
+    }
+    const bool pc = m_impl->pc_active;
+    // vnext += M F (preconditioned seed; replaces the daxpy with alpha).
+    auto add_MF = [&]() -> bool {
+        if (!applyBroydenPreconditioner(m_impl->dBroyF.ptr, m_impl->dPcTmp.ptr)) return false;
+        return cublasDaxpy(m_impl->cublas, N, &one_pc, m_impl->dPcTmp.ptr, 1, dvnext, 1) == CUBLAS_STATUS_SUCCESS;
+    };
 
     auto linear_step = [&]() -> bool {
-        // vnext = vin + alpha·F; store vin_last, F_last.
-        if (cudaMemcpyAsync(dvnext, dvin, bytesN, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+        // vnext = vin + alpha·F (or vin + M·F); store vin_last, F_last.
+        if (cudaMemcpyAsync(dvnext, vin_eff, bytesN, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
             return false;
-        if (cublasDaxpy(m_impl->cublas, N, &alpha, m_impl->dBroyF.ptr, 1, dvnext, 1) != CUBLAS_STATUS_SUCCESS)
+        if (pc) {
+            if (!add_MF()) return false;
+        } else if (cublasDaxpy(m_impl->cublas, N, &alpha, m_impl->dBroyF.ptr, 1, dvnext, 1) != CUBLAS_STATUS_SUCCESS)
             return false;
-        cudaMemcpyAsync(m_impl->dBroyVinLast.ptr, dvin, bytesN, cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(m_impl->dBroyVinLast.ptr, vin_eff, bytesN, cudaMemcpyDeviceToDevice, stream);
         cudaMemcpyAsync(m_impl->dBroyFLast.ptr, m_impl->dBroyF.ptr, bytesN, cudaMemcpyDeviceToDevice, stream);
         return true;
     };
@@ -5765,8 +5973,17 @@ bool XtbGpuContext::runBroydenUpdate(const double* dvin, const double* dvout, do
     k_broyden_dfu<<<grid, b1, 0, stream>>>(
         m_impl->dBroyDFmat.ptr + static_cast<size_t>(slot) * N,
         m_impl->dBroyUmat.ptr + static_cast<size_t>(slot) * N,
-        m_impl->dBroyDFtmp.ptr, dvin, m_impl->dBroyVinLast.ptr, alpha, inv_norm, N);
+        m_impl->dBroyDFtmp.ptr, vin_eff, m_impl->dBroyVinLast.ptr, alpha, inv_norm, N);
     if (cudaGetLastError() != cudaSuccess) return false;
+    if (pc) {   // u = M dF + dx/|dF| overwrites the scalar u of k_broyden_dfu (Oct 2026)
+        if (!applyBroydenPreconditioner(m_impl->dBroyDFmat.ptr + static_cast<size_t>(slot) * N,
+                                        m_impl->dPcTmp.ptr))
+            return false;
+        k_broyden_u_pc<<<grid, b1, 0, stream>>>(m_impl->dBroyUmat.ptr + static_cast<size_t>(slot) * N,
+                                                m_impl->dPcTmp.ptr, vin_eff, m_impl->dBroyVinLast.ptr,
+                                                inv_norm, N);
+        if (cudaGetLastError() != cudaSuccess) return false;
+    }
     ++m_impl->broyden_push;
     const int M = (m_impl->broyden_push < maxh) ? m_impl->broyden_push : maxh;
 
@@ -5785,16 +6002,18 @@ bool XtbGpuContext::runBroydenUpdate(const double* dvin, const double* dvout, do
                                          m_impl->dBroyGamma.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
 
-    // vnext = vin + alpha·F − Umat·gamma.
-    if (cudaMemcpyAsync(dvnext, dvin, bytesN, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+    // vnext = vin + alpha·F − Umat·gamma  (vin + M·F − Umat·gamma with the preconditioner).
+    if (cudaMemcpyAsync(dvnext, vin_eff, bytesN, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
         return false;
-    if (cublasDaxpy(m_impl->cublas, N, &alpha, m_impl->dBroyF.ptr, 1, dvnext, 1) != CUBLAS_STATUS_SUCCESS)
+    if (pc) {
+        if (!add_MF()) return false;
+    } else if (cublasDaxpy(m_impl->cublas, N, &alpha, m_impl->dBroyF.ptr, 1, dvnext, 1) != CUBLAS_STATUS_SUCCESS)
         return false;
     if (cublasDgemv(m_impl->cublas, CUBLAS_OP_N, N, M, &neg, m_impl->dBroyUmat.ptr, N,
                     m_impl->dBroyGamma.ptr, 1, &one, dvnext, 1) != CUBLAS_STATUS_SUCCESS)
         return false;
     // store vin_last = vin, F_last = F.
-    cudaMemcpyAsync(m_impl->dBroyVinLast.ptr, dvin, bytesN, cudaMemcpyDeviceToDevice, stream);
+    cudaMemcpyAsync(m_impl->dBroyVinLast.ptr, vin_eff, bytesN, cudaMemcpyDeviceToDevice, stream);
     cudaMemcpyAsync(m_impl->dBroyFLast.ptr, m_impl->dBroyF.ptr, bytesN, cudaMemcpyDeviceToDevice, stream);
     return true;
 }

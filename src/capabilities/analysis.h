@@ -232,10 +232,13 @@ private:  // Private member variables - Claude Generated 2026
 
     // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
     BEGIN_PARAMETER_DEFINITION(analysis)
+    MODULE_INFO("Trajectory and structure analysis: geometric properties, topology, scattering.", "Analysis", {"analysis"})
 
     // Analysis options - Claude Generated
-    PARAM(properties, String, "all", "Properties to calculate: all|basic|geometric|cg|topology", "Analysis", {})
-    PARAM(output_format, String, "human", "Output format: human|json|csv", "Output", { "format" })
+    PARAM(properties, String, "all", "Properties to calculate: all|basic|geometric|cg|topology", "Analysis", {},
+        "tier=primary; enum=all|basic|geometric|cg|topology")
+    PARAM(output_format, String, "human", "Output format: human|json|csv", "Output", { "format" },
+        "tier=primary; enum=human|json|csv")
     PARAM(output_file, String, "", "Optional output file path", "Output", { "out" })
     PARAM(fragments, Bool, true, "Include per-fragment analysis", "Analysis", {})
     PARAM(ripser, Bool, false, "Include basic topological analysis", "Topology", {})
@@ -243,11 +246,13 @@ private:  // Private member variables - Claude Generated 2026
 
     // Trajectory statistics options - Claude Generated
     PARAM(metrics, String, "gyration,rout,end2end", "Comma-separated trajectory metrics: gyration|rout|end2end|com|inertia|mass|all", "Trajectory", {})
-    PARAM(statistics, String, "none", "Statistics mode: none|cumulative|moving|all", "Trajectory", { "stats" })
+    PARAM(statistics, String, "none", "Statistics mode: none|cumulative|moving|all", "Trajectory", { "stats" },
+        "enum=none|cumulative|moving|all")
     PARAM(window, Int, 10, "Moving average window size", "Trajectory", {})
 
     // Parallelization options - Claude Generated 2026
-    PARAM(threads, Int, 4, "Number of threads for parallel frame analysis (1=sequential, 2-16=parallel). Higher values speed up trajectory analysis but require more memory.", "Performance", {})
+    PARAM(threads, Int, 4, "Number of threads for parallel frame analysis (1=sequential, 2-16=parallel). Higher values speed up trajectory analysis but require more memory.", "Performance", {},
+        "min=1")
 
     // Frame selection and stride options - Claude Generated 2026
     PARAM(frames, String, "", "Frame selection (e.g., '1:5,8,10:12', 'last' or '1:-1'=all, 'N:N'=single)", "Trajectory", {})
@@ -264,10 +269,13 @@ private:  // Private member variables - Claude Generated 2026
     PARAM(topological_exclude_hydrogen, Bool, false, "Exclude hydrogen atoms from analysis", "Topology", {})
     PARAM(topological_print_elements, Bool, false, "Include element symbols in output", "Topology", {})
     PARAM(topological_print_energy, Bool, false, "Include molecular energies in output", "Topology", {})
-    PARAM(topological_image_format, String, "png", "Image output format: png|jpg|bmp|tga", "Topology", {})
-    PARAM(topological_colormap, String, "hot", "Image colormap: grayscale|jet|hot|viridis|coolwarm", "Topology", {})
+    PARAM(topological_image_format, String, "png", "Image output format: png|jpg|bmp|tga", "Topology", {},
+        "enum=png|jpg|bmp|tga")
+    PARAM(topological_colormap, String, "hot", "Image colormap: grayscale|jet|hot|viridis|coolwarm", "Topology", {},
+        "enum=grayscale|jet|hot|viridis|coolwarm")
     PARAM(topological_resolution, String, "800x800", "Image resolution (e.g., 800x800, 1024x1024)", "Topology", {})
-    PARAM(topological_post_processing, String, "none", "Post-processing: none|adaptive|ring_focused", "Topology", {})
+    PARAM(topological_post_processing, String, "none", "Post-processing: none|adaptive|ring_focused", "Topology", {},
+        "enum=none|adaptive|ring_focused")
     PARAM(topological_temperature, Double, 2.0, "Enhancement temperature parameter", "Topology Advanced", {})
     PARAM(topological_damping, Double, 1.5, "Damping strength for processing", "Topology Advanced", {})
     PARAM(topological_preserve_structure, Bool, true, "Maintain original structure during processing", "Topology Advanced", {})
@@ -278,8 +286,10 @@ private:  // Private member variables - Claude Generated 2026
     PARAM(scattering_q_min, Double, 0.01, "Minimum q value (Å⁻¹)", "Scattering", {"qmin"})
     PARAM(scattering_q_max, Double, 2.0, "Maximum q value (Å⁻¹)", "Scattering", {"qmax"})
     PARAM(scattering_q_steps, Int, 100, "Number of q points", "Scattering", {"qsteps"})
-    PARAM(scattering_q_spacing, String, "log", "Q-spacing mode: log|linear", "Scattering", {"qspacing"})
-    PARAM(scattering_form_factor, String, "auto", "Form factor type: auto|cromer_mann|cg_sphere", "Scattering", {"ff"})
+    PARAM(scattering_q_spacing, String, "log", "Q-spacing mode: log|linear", "Scattering", {"qspacing"},
+        "enum=log|linear")
+    PARAM(scattering_form_factor, String, "auto", "Form factor type: auto|cromer_mann|cg_sphere", "Scattering", {"ff"},
+        "enum=auto|cromer_mann|cg_sphere")
     PARAM(scattering_cg_radius, Double, 3.0, "CG bead radius for sphere form factor (Å)", "Scattering Advanced", {})
     PARAM(scattering_angular_samples, Int, 50, "Angular samples for S(q) spherical averaging", "Scattering Advanced", {})
 

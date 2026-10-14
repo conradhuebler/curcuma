@@ -510,6 +510,9 @@ set(curcuma_core_SRC
         src/capabilities/rmsd/rmsd_costmatrix.cpp
         src/capabilities/rmsd/rmsd_assignment.cpp
         src/capabilities/rmsdtraj.cpp
+        src/capabilities/external_potentials.cpp
+        src/capabilities/measurement.cpp
+        src/tools/cif.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/md_diagnostics.cpp
         src/capabilities/analysis.cpp
@@ -535,6 +538,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/xtb_scf.cpp
         src/core/energy_calculators/qm_methods/xtb_fragment_scf.cpp
         src/core/energy_calculators/qm_methods/xtb_dc.cpp
+        src/core/energy_calculators/qm_methods/xtb_precond.cpp
         src/core/energy_calculators/qm_methods/xtb_sparse.cpp
         src/core/energy_calculators/qm_methods/native_eigensolver.cpp
         src/core/energy_calculators/qm_methods/xtb_multipole.cpp
@@ -624,6 +628,9 @@ set(curcuma_cap_SRC
         src/capabilities/rmsd/rmsd_costmatrix.cpp
         src/capabilities/rmsd/rmsd_assignment.cpp
         src/capabilities/rmsdtraj.cpp
+        src/capabilities/external_potentials.cpp
+        src/capabilities/measurement.cpp
+        src/tools/cif.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/md_diagnostics.cpp
         src/capabilities/analysis.cpp

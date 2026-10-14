@@ -763,6 +763,16 @@ json CLI2Json(int argc, char** argv)
         std::string sub = current.substr(0, 1);
 
         if (sub == "-") {
+            // Claude Generated (Oct 2026): a flag token that contains whitespace ("-spin 1" as ONE
+            // argv entry, e.g. from a shell variable that was not word-split) used to become the
+            // boolean key "spin 1" and was silently ignored - the run then reported a closed-shell
+            // energy for a radical. No parameter name contains whitespace, so refuse it.
+            if (current.find_first_of(" \t\r\n") != std::string::npos) {
+                CurcumaLogger::error("Command-line argument '" + current
+                    + "' contains whitespace: flag and value must be separate arguments "
+                      "(check shell quoting / variable expansion).");
+                exit(1);
+            }
             current.erase(0, 1);
             // Claude Generated (Jun 2026): canonicalize hyphens to underscores in CLI
             // parameter names so "-opt-method" matches the JSON key "opt_method".
@@ -1681,21 +1691,9 @@ int executeRMSD(const json& controller, int argc, char** argv) {
 
     // Write RMSD results as JSON
     {
-        json rmsd_result;
-        rmsd_result["rmsd"] = driver->RMSD();
-        rmsd_result["rmsd_raw"] = driver->RMSDRaw();
-
-        // Permutation vector: identity if no reordering was performed
-        std::vector<int> permutation = driver->ReorderRules();
-        if (permutation.empty()) {
-            permutation.resize(driver->ReferenceAligned().AtomCount());
-            std::iota(permutation.begin(), permutation.end(), 0);
-        }
-        rmsd_result["permutation"] = permutation;
-        rmsd_result["reference_xyz"] = driver->ReferenceAligned().XYZString();
-        // Geometry whose deviation equals RMSD() (reordered+aligned, or plain best-fit when
-        // no reorder ran). Same result as the old TargetReorderd()/TargetAligned() fallback.
-        rmsd_result["reorder_xyz"] = driver->TargetForRMSD().XYZString();
+        // Claude Generated 2026 - The document now comes from the driver; the file
+        // names are the only part the CLI knows and the driver does not.
+        json rmsd_result = driver->Results();
         rmsd_result["reference_file"] = reffile;
         rmsd_result["target_file"] = tarfile;
 

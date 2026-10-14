@@ -82,6 +82,7 @@ public:
 
     /// Access underlying GFNFF for diagnostics (e.g. workspace dEdcn)
     GFNFF* getGFNFF() const { return m_gfnff.get(); }
+    GFNFF* gfnffInstance() const override { return m_gfnff.get(); }
 
 private:
     std::unique_ptr<GFNFF> m_gfnff;

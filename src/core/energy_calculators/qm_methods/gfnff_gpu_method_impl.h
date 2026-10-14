@@ -147,6 +147,13 @@ public:
     json getStreamTimings() const override;
     void setForcePhaseTiming(bool on) override;
 
+    /// CPU-side GFNFF instance (topology, EEQ charges, react bond list and its
+    /// events). Overrides the virtual hook rather than being a plain inline
+    /// accessor: this class lives in a dlopen plugin and derives from an
+    /// `extern template` base, so only a vtable dispatch is resolvable from outside
+    /// the plugin. Claude Generated (Sep 2026).
+    GFNFF* getGFNFF() const { return m_gfnff.get(); }
+    GFNFF* gfnffInstance() const override { return m_gfnff.get(); }
     /// Device index this method is pinned to (-1 = runtime default). Claude Generated (Sep 2026).
     int gpuDevice() const { return m_gpu_device; }
 
