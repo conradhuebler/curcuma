@@ -849,7 +849,26 @@ bool XTB::calculateGradientGpu()
     for (int ao = 0; ao < nao; ++ao)
         v_ao(ao) = m_pot.v_sh(m_basis.ao2sh[ao]) + m_pot.v_at(m_basis.ao2at[ao]);
 
-    const int nocc_orbs = static_cast<int>(std::round(m_wfn.nocc / 2.0));
+    // Energy-weighted density W = sum_i f_i eps_i C_i C_i^T with the per-MO occupations f_i
+    // (0..2) that built the density, as in calculateGradient (xtb_gradient.cpp, focc branch).
+    // Every device backend forms W as C diag(2 eps_k) C^T over its first `ncol` columns, i.e. it
+    // assumes f = 2 for those columns. Passing eps_w(k) = 0.5 f_k eps_k with ncol = last column
+    // with f > 1e-12 makes the device W equal to the occupation-weighted one, so an open-shell
+    // SOMO (f = 1) and Fermi-smeared fractional occupations are weighted correctly. For integer
+    // occupations {2,...,2,0,...} eps_w == eps bit for bit (0.5*2.0 == 1.0) and ncol equals the
+    // former round(nocc/2), so closed-shell results are unchanged. Without focc (should not
+    // happen on the resident path, xtb_native.cpp rebuilds it from eps) the old integer
+    // closed-shell weighting is kept. Claude Generated (Oct 2026).
+    int nocc_orbs = static_cast<int>(std::round(m_wfn.nocc / 2.0));
+    Vector eps_w = m_wfn.eps;
+    if (m_wfn.focc.size() == nao && m_wfn.eps.size() == nao) {
+        int ncol = 0;
+        for (int i = 0; i < nao; ++i)
+            if (m_wfn.focc(i) > 1.0e-12) ncol = i + 1;
+        for (int i = 0; i < nao; ++i)
+            eps_w(i) = (i < ncol) ? (0.5 * m_wfn.focc(i)) * m_wfn.eps(i) : 0.0;
+        nocc_orbs = ncol;
+    }
 
     // GFN2 multipole potentials for the device multipole-integral Pulay term.
     Eigen::MatrixXd v_dp_empty, v_qp_empty;
@@ -864,7 +883,7 @@ bool XTB::calculateGradientGpu()
     const Eigen::MatrixXd C_empty;
     Matrix grad_dev;   // nat×3, Eh/Bohr (sections 1/2/3 incl. GFN2 multipole Pulay)
     Vector dEdcn;      // nat
-    if (!m_gpu_scf->gradient(P_empty, C_empty, m_wfn.eps, nocc_orbs, v_ao, m_wfn.q_sh,
+    if (!m_gpu_scf->gradient(P_empty, C_empty, eps_w, nocc_orbs, v_ao, m_wfn.q_sh,
                              v_dp, v_qp, grad_dev, dEdcn, /*pc_resident=*/true))
         return false;
     if (grad_dev.rows() != nat || grad_dev.cols() != 3 || dEdcn.size() != nat)

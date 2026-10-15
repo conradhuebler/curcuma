@@ -349,9 +349,11 @@ void XTB::addMultipolePotential(Potential& pot,
     // exact). Hence amat_sd[k](i,j) == -amat_sd[k](j,i), amat_dd[a][b](i,j) == amat_dd[a][b](j,i)
     // and amat_sq[k](i,j) == amat_sq[k](j,i), and every term can be read from column i (contiguous
     // in j). Each accumulator keeps its former summation order over j, but the results are not
-    // bit-identical to the strided loops: last-bit differences in v_qp and E_mp on caffeine and
-    // water (GCC -march=native; cause not traced, presumably a different multiply-add
-    // contraction). Converged energies of caffeine, water1002 and peo201 agree to 1e-10 Eh.
+    // bit-identical to the strided loops: last-bit differences in v_qp only (v_dp, v_at stay bit
+    // identical). Cause (GCC 16, -O3 -mavx2 -mfma, 10 geometries): the former strided v_qp loop was
+    // auto-vectorized, so its products were rounded without FMA except a scalar FMA tail of nat%4
+    // iterations, and its kernel term was fma(round(2*qk*qp), mpscale, v); the contiguous loops
+    // contract every j and unroll k. With -ffp-contract=off old and new agree bit for bit. Converged energies of caffeine, water1002 and peo201 agree to 1e-10 Eh.
     // Threaded over the target atom i as before (disjoint output columns).
     const int mp_threads = effectiveIntraThreads(nat);
     pot.v_dp.resize(3, nat);
