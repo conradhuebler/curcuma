@@ -28,6 +28,7 @@
 #include "../parameters/xtb_params_extra.hpp"     // covalent_rad_d3_au / pauling_en / atomic_rad_au
 #endif
 
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -55,6 +56,20 @@ __global__ void k_scale_cols(const double* A, const double* d, double* B, int n)
     if (i >= n || j >= n) return;
     const int idx = i + j * n;
     B[idx] = A[idx] * d[j];
+}
+/**
+ * @brief Copy the lower triangle of a column-major n x n matrix onto its upper triangle.
+ *
+ * rocblas_dsyrk writes only the requested (lower) triangle; the population/band and
+ * gradient kernels read the full symmetric density, so P(i,j) = P(j,i) for i < j.
+ * Claude Generated (Oct 2026).
+ */
+__global__ void k_mirror_lower(double* P, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;   // row
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;   // column
+    if (i >= n || j >= n || i >= j) return;
+    P[i + static_cast<size_t>(j) * n] = P[j + static_cast<size_t>(i) * n];
 }
 // Mulliken populations + band-energy partials from the resident density P (symmetric):
 //   out[i]   = Σ_j P[i,j]·S[i,j],   out[n+i] = Σ_j P[i,j]·H0[i,j].
@@ -966,16 +981,137 @@ struct XtbHipContext::Impl {
         fp32_n = n;
         return true;
     }
+    // ----- cached Cholesky factor of the resident overlap (Claude Generated, Oct 2026) -----
+    // sygvd = potrf(S) + sygst + syevd + trsm. S (dS0) is fixed for one geometry, so the
+    // factor L (S = L L^T, lower) is computed once per S and the per-iteration solve runs
+    // sygst -> syevd -> trsm with it. The cache key is (n, s_version); s_version is bumped
+    // whenever dS0 is (re)written or reallocated. computeIntegrals already factors dS0 into
+    // dL; that factor is reused when it belongs to the current S (dL_ver == s_version), else
+    // the private buffer dLc holds it. dLc32 is the FP32 copy of the FP64 factor.
+    bool    opt_cached_chol  = true;    ///< -xtb.rocm_cached_cholesky (default true)
+    bool    opt_density_syrk = false;   ///< -xtb.rocm_density_syrk (default false)
+    unsigned long long s_version = 1;   ///< bumped on every write/realloc of dS0
+    unsigned long long dL_ver = 0;      ///< s_version for which dL = chol(dS0) is valid (0 = none)
+    double* dLc = nullptr;   int chol_n = 0;   unsigned long long chol_ver = 0;
+    float*  dLc32 = nullptr; int chol32_n = 0; unsigned long long chol32_ver = 0;
+    const double* curL = nullptr;       ///< FP64 factor of the current S (dL or dLc), set by cholFp64
+    bool    chol_alloc_failed = false;  ///< allocation failed once: stay on sygvd (no retry per step)
+
+    void freeCholCache() {
+        if (dLc) (void)hipFree(dLc);
+        if (dLc32) (void)hipFree(dLc32);
+        dLc = nullptr; dLc32 = nullptr; chol_n = chol32_n = 0; chol_ver = chol32_ver = 0; curL = nullptr;
+    }
+    /**
+     * @brief Lower Cholesky factor L of the resident overlap dS0 (S = L L^T), FP64.
+     * @param n matrix dimension (must equal res_n)
+     * @return device pointer to L (column-major, lower triangle valid) or nullptr when the
+     *         cache is off or allocation/factorisation failed; the caller then uses sygvd.
+     * Called before dF is touched, so a nullptr return leaves the sygvd fallback intact.
+     */
+    const double* cholFp64(int n) {
+        curL = nullptr;
+        if (!opt_cached_chol || chol_alloc_failed || n <= 0 || n != res_n || !dS0) return nullptr;
+        if (dL && bnao == n && dL_ver == s_version) { curL = dL; return curL; }   // from computeIntegrals
+        if (dLc && chol_n == n && chol_ver == s_version) { curL = dLc; return curL; }
+        const size_t nn = static_cast<size_t>(n) * n;
+        if (chol_n != n || !dLc) {
+            if (dLc) (void)hipFree(dLc);
+            dLc = nullptr; chol_n = 0; chol_ver = 0;
+            if (hipMalloc(&dLc, nn * sizeof(double)) != hipSuccess) {
+                dLc = nullptr; chol_alloc_failed = true; (void)hipGetLastError(); return nullptr;
+            }
+            chol_n = n;
+        }
+        if (hipMemcpyAsync(dLc, dS0, nn * sizeof(double), hipMemcpyDeviceToDevice, stream) != hipSuccess) return nullptr;
+        if (rocsolver_dpotrf(handle, rocblas_fill_lower, n, dLc, n, dInfo) != rocblas_status_success) return nullptr;
+        if (hipStreamSynchronize(stream) != hipSuccess) return nullptr;
+        rocblas_int info = 0;
+        if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return nullptr;
+        if (info != 0) return nullptr;   // S not positive definite: sygvd reports it the usual way
+        chol_ver = s_version;
+        curL = dLc;
+        return curL;
+    }
+    /**
+     * @brief FP32 copy of the FP64 factor from cholFp64 (rounded once per S), or nullptr.
+     */
+    const float* cholFp32(int n) {
+        const double* L = cholFp64(n);
+        if (!L) return nullptr;
+        if (dLc32 && chol32_n == n && chol32_ver == s_version) return dLc32;
+        const size_t nn = static_cast<size_t>(n) * n;
+        if (chol32_n != n || !dLc32) {
+            if (dLc32) (void)hipFree(dLc32);
+            dLc32 = nullptr; chol32_n = 0; chol32_ver = 0;
+            if (hipMalloc(&dLc32, nn * sizeof(float)) != hipSuccess) {
+                dLc32 = nullptr; (void)hipGetLastError(); return nullptr;
+            }
+            chol32_n = n;
+        }
+        const int blk = 256; const int g = static_cast<int>((nn + blk - 1) / blk);
+        hipLaunchKernelGGL(k_d2f, dim3(g), dim3(blk), 0, stream, L, dLc32, nn);
+        chol32_ver = s_version;
+        return dLc32;
+    }
+
+    /**
+     * @brief FP64 generalized eigensolve F C = S C eps on the resident matrices.
+     *
+     * dF holds F on entry and C (ascending eigenvalues) on exit, dEps the eigenvalues.
+     * With the cached factor: dsygst (itype 1, lower) -> dsyevd -> dtrsm (C = L^-T Y), the
+     * same sequence rocsolver_dsygvd runs after its own potrf. Otherwise dsygvd on a copy
+     * of dS0. Claude Generated (Oct 2026, the sygvd branch moved here from resSolve/resSolveMP).
+     */
+    bool eigensolveFp64(int n) {
+        const size_t nn = static_cast<size_t>(n) * n;
+        const double* L = cholFp64(n);
+        if (L) {
+            double* Lw = const_cast<double*>(L);   // non-const in the API; not written (checked)
+            if (rocsolver_dsygst(handle, rocblas_eform_ax, rocblas_fill_lower, n, dF, n, Lw, n)
+                != rocblas_status_success) return false;
+            if (rocsolver_dsyevd(handle, rocblas_evect_original, rocblas_fill_lower, n, dF, n,
+                                 dEps, dE, dInfo) != rocblas_status_success) return false;
+            const double one = 1.0;
+            if (rocblas_dtrsm(handle, rocblas_side_left, rocblas_fill_lower, rocblas_operation_transpose,
+                              rocblas_diagonal_non_unit, n, n, &one, Lw, n, dF, n) != rocblas_status_success) return false;
+        } else {
+            if (hipMemcpyAsync(dS, dS0, nn * sizeof(double), hipMemcpyDeviceToDevice, stream) != hipSuccess) return false;
+            if (hipStreamSynchronize(stream) != hipSuccess) return false;
+            // F C = S C eps on the device; dF <- eigenvectors (ascending), dS destroyed.
+            if (rocsolver_dsygvd(handle, rocblas_eform_ax, rocblas_evect_original, rocblas_fill_lower,
+                                 n, dF, n, dS, n, dEps, dE, dInfo) != rocblas_status_success) return false;
+        }
+        if (hipDeviceSynchronize() != hipSuccess) return false;
+        rocblas_int info = 0;
+        if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        return info == 0;
+    }
+
     // FP32 generalized eigensolve: dF/dS0 (FP64) → ssygvd → dF (C, FP64) + dEps (FP64).
     // dS0 stays intact (resident overlap). Returns false on any error → caller can retry FP64.
+    // With the cached factor (opt_cached_chol): ssygst -> ssyevd -> strsm on the FP32 copy
+    // of the FP64 factor instead of ssygvd (which would refactor the FP32-rounded S).
     bool eigensolveFp32(int n) {
         if (!ensureFp32(n)) return false;
         const size_t nn = static_cast<size_t>(n) * n;
         const int blk = 256; const int g = static_cast<int>((nn + blk - 1) / blk);
+        const float* L32 = cholFp32(n);
         hipLaunchKernelGGL(k_d2f, dim3(g), dim3(blk), 0, stream, dF, dF32, nn);    // F → FP32
-        hipLaunchKernelGGL(k_d2f, dim3(g), dim3(blk), 0, stream, dS0, dS32, nn);   // S → FP32 (work)
-        if (rocsolver_ssygvd(handle, rocblas_eform_ax, rocblas_evect_original, rocblas_fill_lower,
-                             n, dF32, n, dS32, n, dEps32, dE32, dInfo) != rocblas_status_success) return false;
+        if (L32) {
+            float* Lw = const_cast<float*>(L32);   // rocSOLVER/rocBLAS take non-const B; not written
+            if (rocsolver_ssygst(handle, rocblas_eform_ax, rocblas_fill_lower, n, dF32, n, Lw, n)
+                != rocblas_status_success) return false;
+            if (rocsolver_ssyevd(handle, rocblas_evect_original, rocblas_fill_lower, n, dF32, n,
+                                 dEps32, dE32, dInfo) != rocblas_status_success) return false;
+            const float onef = 1.0f;   // C = L^-T Y (back-transform, as in sygvd itype 1 lower)
+            if (rocblas_strsm(handle, rocblas_side_left, rocblas_fill_lower, rocblas_operation_transpose,
+                              rocblas_diagonal_non_unit, n, n, &onef, Lw, n, dF32, n) != rocblas_status_success) return false;
+        } else {
+            hipLaunchKernelGGL(k_d2f, dim3(g), dim3(blk), 0, stream, dS0, dS32, nn);   // S → FP32 (work)
+            if (rocsolver_ssygvd(handle, rocblas_eform_ax, rocblas_evect_original, rocblas_fill_lower,
+                                 n, dF32, n, dS32, n, dEps32, dE32, dInfo) != rocblas_status_success) return false;
+        }
         if (hipDeviceSynchronize() != hipSuccess) return false;
         rocblas_int info = 0;
         if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return false;
@@ -1042,51 +1178,56 @@ struct XtbHipContext::Impl {
         for (void* p : { (void*)dH0, (void*)dS0, (void*)dvao, (void*)dP, (void*)dCw, (void*)dOcc, (void*)dPB })
             if (p) hipFree(p);
         dH0 = dS0 = dvao = dP = dCw = dOcc = dPB = nullptr; res_n = 0;
+        freeCholCache();   // the factor belongs to dS0 (Claude Generated, Oct 2026)
+        ++s_version;
     }
 
     bool resBegin(const double* H0, const double* S, int n) {
         if (!ok || n <= 0 || !ensureResident(n)) return false;
         const size_t nn = static_cast<size_t>(n) * n;
         if (hipMemcpy(dH0, H0, nn * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        ++s_version;   // new S: invalidates the cached Cholesky factor (Claude Generated, Oct 2026)
         if (hipMemcpy(dS0, S,  nn * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
         return true;
     }
-    // fp32=true (X-AP3): solve this step with rocsolver_ssygvd (FP32) — far-from-convergence
-    // -scf_mixed_precision iterations. dF holds C (FP64) + dEps the eigenvalues either way.
+    // fp32=true (X-AP3): solve this step in FP32 (ssygvd, or the cached-factor chain) — far-
+    // from-convergence -scf_mixed_precision iterations. dF holds C (FP64) + dEps the eigenvalues
+    // either way.
     bool resSolve(const double* v_ao, double* eps_out, bool fp32) {
         const int n = res_n; if (n <= 0) return false;
-        const size_t nn = static_cast<size_t>(n) * n;
         if (hipMemcpy(dvao, v_ao, n * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
         dim3 blk(16, 16), grd((n + 15) / 16, (n + 15) / 16);
         hipLaunchKernelGGL(k_fock, grd, blk, 0, stream, dH0, dS0, dvao, dF, n);   // F → dF
         if (fp32) {
             if (!eigensolveFp32(n)) return false;   // dF ← C (FP64), dEps ← eps (FP64)
         } else {
-            if (hipMemcpyAsync(dS, dS0, nn * sizeof(double), hipMemcpyDeviceToDevice, stream) != hipSuccess) return false;
-            if (hipStreamSynchronize(stream) != hipSuccess) return false;
-            // F C = S C ε on the device; dF ← eigenvectors (ascending), dS destroyed.
-            if (rocsolver_dsygvd(handle, rocblas_eform_ax, rocblas_evect_original, rocblas_fill_lower,
-                                 n, dF, n, dS, n, dEps, dE, dInfo) != rocblas_status_success) return false;
-            if (hipDeviceSynchronize() != hipSuccess) return false;
-            rocblas_int info = 0;
-            if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return false;
-            if (info != 0) return false;
+            if (!eigensolveFp64(n)) return false;   // dF <- C (ascending), dEps <- eps
         }
         if (hipMemcpy(eps_out, dEps, n * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
         return true;   // dF holds C resident, ascending order
     }
     bool resDensity(const double* occ, int ncol, double* pop_ao, double* band) {
         const int n = res_n; if (n <= 0 || ncol < 0 || ncol > n) return false;
+        // Claude Generated (Oct 2026), opt-in -xtb.rocm_density_syrk: P = Cw Cw^T with
+        // Cw = C(:, :ncol) diag(sqrt(occ)) via rocblas_dsyrk (lower triangle, n^2 ncol flops
+        // instead of 2 n^2 ncol), then mirrored to the full matrix the kernels read. Needs
+        // occ >= 0; any negative occupation keeps the GEMM path.
+        bool syrk = opt_density_syrk && ncol > 0;
+        for (int r = 0; syrk && r < ncol; ++r) if (!(occ[r] >= 0.0)) syrk = false;
         std::vector<double> occ_full(n, 0.0);          // ascending order matches C columns
-        for (int r = 0; r < ncol; ++r) occ_full[r] = occ[r];
+        for (int r = 0; r < ncol; ++r) occ_full[r] = syrk ? std::sqrt(occ[r]) : occ[r];
         if (hipMemcpy(dOcc, occ_full.data(), n * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
         dim3 blk(16, 16), grd((n + 15) / 16, (n + 15) / 16);
-        hipLaunchKernelGGL(k_scale_cols, grd, blk, 0, stream, dF, dOcc, dCw, n);   // Cw = C·diag(occ)
+        hipLaunchKernelGGL(k_scale_cols, grd, blk, 0, stream, dF, dOcc, dCw, n);   // Cw = C·diag(occ or sqrt(occ))
         const double one = 1.0, zero = 0.0;
         // P = Cw · Cᵀ
         // Claude Generated (Oct 2026): only the first ncol columns carry weight, so the inner
         // dimension is ncol instead of n (same sum, the dropped terms were exact zeros).
-        if (ncol > 0) {
+        if (syrk) {
+            if (rocblas_dsyrk(handle, rocblas_fill_lower, rocblas_operation_none, n, ncol,
+                              &one, dCw, n, &zero, dP, n) != rocblas_status_success) return false;
+            hipLaunchKernelGGL(k_mirror_lower, grd, blk, 0, stream, dP, n);   // upper <- lower
+        } else if (ncol > 0) {
             if (rocblas_dgemm(handle, rocblas_operation_none, rocblas_operation_transpose,
                               n, n, ncol, &one, dCw, n, dF, n, &zero, dP, n) != rocblas_status_success) return false;
         } else if (hipMemsetAsync(dP, 0, static_cast<size_t>(n) * n * sizeof(double), stream) != hipSuccess) return false;
@@ -1182,6 +1323,7 @@ struct XtbHipContext::Impl {
     bool begBasis(const XtbHipBasisData& bd) {
         if (!ok || bd.nao <= 0 || !ensureResident(bd.nao)) return false;  // allocates dH0/dS0/...
         bnat = bd.nat; bnsh = bd.nsh; bnao = bd.nao; bnprim = bd.nprim_total; bis_gfn2 = bd.is_gfn2;
+        ++s_version; dL_ver = 0;   // dS0/dL contents are stale until computeIntegrals (Oct 2026)
         bool g = true;
         g &= up(dz, bd.z, bnat);
         g &= up(dsh2at, bd.sh2at, bnsh);    g &= up(dang_sh, bd.ang_sh, bnsh);
@@ -1292,6 +1434,7 @@ struct XtbHipContext::Impl {
 
     bool computeIntegrals(const double* xyz) {
         if (!basis_ready || bnao <= 0) return false;
+        ++s_version; dL_ver = 0;   // dS0 is rebuilt below; dL matches it once potrf succeeds
         if (hipMemcpy(dxyz, xyz, 3 * static_cast<size_t>(bnat) * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
         { dim3 b(64), gr((bnat + 63) / 64);
           hipLaunchKernelGGL(k_cn, gr, b, 0, stream, bnat, dxyz, dz, bis_gfn2, dcovrad, dcn); }
@@ -1313,6 +1456,7 @@ struct XtbHipContext::Impl {
         rocblas_int info = 0;
         if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return false;
         if (info != 0) return false;   // dS0/dH0 are now the device-built integrals (resident)
+        dL_ver = s_version;            // dL = chol(dS0): reused by the cached-Cholesky solve
         // GFN2: build dp_int/qp_int on the device too (resident overlap dS0 just built),
         // so they are resident for the multipole Fock/moments + downloadable for the host gradient.
         if (bis_gfn2 && !computeMultipole()) return false;
@@ -1348,7 +1492,6 @@ struct XtbHipContext::Impl {
     // then F −= ½·multipole(v_dp,v_qp); solve F C = S C ε via rocSOLVER (dF ← C resident).
     bool resSolveMP(const double* v_ao, const double* v_dp, const double* v_qp, double* eps_out, bool fp32) {
         const int n = res_n; if (n <= 0 || !beginResidentMP()) return false;
-        const size_t nn = static_cast<size_t>(n) * n;
         if (hipMemcpy(dvao, v_ao, n * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
         if (hipMemcpy(dVdp, v_dp, 3 * static_cast<size_t>(bnat) * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
         if (hipMemcpy(dVqp, v_qp, 6 * static_cast<size_t>(bnat) * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
@@ -1359,14 +1502,7 @@ struct XtbHipContext::Impl {
         if (fp32) {
             if (!eigensolveFp32(n)) return false;   // dF ← C (FP64), dEps ← eps (FP64)
         } else {
-            if (hipMemcpyAsync(dS, dS0, nn * sizeof(double), hipMemcpyDeviceToDevice, stream) != hipSuccess) return false;
-            if (hipStreamSynchronize(stream) != hipSuccess) return false;
-            if (rocsolver_dsygvd(handle, rocblas_eform_ax, rocblas_evect_original, rocblas_fill_lower,
-                                 n, dF, n, dS, n, dEps, dE, dInfo) != rocblas_status_success) return false;
-            if (hipDeviceSynchronize() != hipSuccess) return false;
-            rocblas_int info = 0;
-            if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return false;
-            if (info != 0) return false;
+            if (!eigensolveFp64(n)) return false;   // dF <- C (ascending), dEps <- eps
         }
         return hipMemcpy(eps_out, dEps, n * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess;
     }
@@ -1686,6 +1822,18 @@ bool XtbHipContext::solveGeneralized(const double* F, const double* S, int n,
     if (hipMemcpy(C_colmajor, d.dF, nn * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
     if (hipMemcpy(eps_out, d.dEps, n * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
     return true;
+#endif
+}
+
+// Claude Generated (Oct 2026): resident-solver switches, see the header.
+void XtbHipContext::setSolverOptions(bool cached_cholesky, bool density_syrk)
+{
+#ifndef HAVE_ROCSOLVER
+    (void)cached_cholesky; (void)density_syrk;
+#else
+    if (!m_impl) return;
+    m_impl->opt_cached_chol  = cached_cholesky;
+    m_impl->opt_density_syrk = density_syrk;
 #endif
 }
 

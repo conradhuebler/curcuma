@@ -98,6 +98,36 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
     // resident on the device — the Fock build + populations are HIP kernels, the density a
     // rocBLAS GEMM, the eigensolve rocSOLVER. GFN1 runs the isotropic loop, GFN2 the
     // multipole loop (R-AP2).
+    // Resident-solver switches -xtb.rocm_cached_cholesky (default true) and
+    // -xtb.rocm_density_syrk (default false); the fallbacks here are the defaults of the
+    // PARAM block in native_xtb_method.h. Claude Generated (Oct 2026).
+    {
+        auto cfgBool = [&config](const char* key, bool def) -> bool {
+            const json* x = nullptr;
+            if (config.contains("xtb") && config["xtb"].is_object() && config["xtb"].contains(key))
+                x = &config["xtb"][key];
+            else if (config.contains(key))
+                x = &config[key];
+            if (!x) return def;
+            if (x->is_boolean()) return x->get<bool>();
+            if (x->is_number()) return x->get<double>() != 0.0;
+            if (x->is_string()) {
+                const std::string v = x->get<std::string>();
+                if (v == "true" || v == "1" || v == "on") return true;
+                if (v == "false" || v == "0" || v == "off") return false;
+            }
+            return def;
+        };
+        const bool cached_chol  = cfgBool("rocm_cached_cholesky", true);
+        const bool density_syrk = cfgBool("rocm_density_syrk", false);
+        ctx->setSolverOptions(cached_chol, density_syrk);
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info(fmt::format(
+                "{}: ROCm solver: {} eigensolve, density via {}", getMethodName(),
+                cached_chol ? "cached-Cholesky (sygst/syevd/trsm)" : "sygvd",
+                density_syrk ? "dsyrk" : "dgemm"));
+    }
+
     m_scf_backend = std::make_unique<HipScfBackend>(ctx);
     xtb->setGpuScfBackend(m_scf_backend.get());
 

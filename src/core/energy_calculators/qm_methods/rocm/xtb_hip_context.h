@@ -104,10 +104,23 @@ public:
     // Keeps H0/S (and the per-iteration density + MO coefficients) RESIDENT on the
     // device for one geometry; only length-n vectors cross the bus per iteration. The
     // Fock build + Mulliken populations are HIP __global__ kernels (hipcc), the density
-    // is a rocBLAS GEMM, and the generalized eigensolve is rocSOLVER dsygvd (which
-    // returns ascending eigenpairs directly — no host reduction / sort). All matrices
+    // is a rocBLAS GEMM (or SYRK, setSolverOptions), and the generalized eigensolve is
+    // rocSOLVER sygst/syevd/trsm with the cached factor of S, or dsygvd (both return
+    // ascending eigenpairs directly — no host reduction / sort). All matrices
     // n×n column-major; H0/S/P symmetric. Any false → caller falls back to the CPU.
     // Claude Generated (Stage 2, GFN1 isotropic).
+
+    /**
+     * @brief Switches of the resident solver path (Claude Generated, Oct 2026).
+     * @param cached_cholesky factor S = L L^T once per geometry and solve each SCF step with
+     *        sygst -> syevd -> trsm instead of sygvd (FP64 and FP32); default true
+     *        (-xtb.rocm_cached_cholesky). Falls back to sygvd if the factor buffer cannot be
+     *        allocated or S is not positive definite.
+     * @param density_syrk build the density with rocblas_dsyrk on C diag(sqrt(occ)) and mirror
+     *        the lower triangle; default false (-xtb.rocm_density_syrk). Negative occupations
+     *        keep the GEMM path.
+     */
+    void setSolverOptions(bool cached_cholesky, bool density_syrk);
 
     /// Upload the geometry-constant H0, overlap S; allocate the resident work buffers.
     bool residentBegin(const double* H0_colmajor, const double* S_colmajor, int n);
