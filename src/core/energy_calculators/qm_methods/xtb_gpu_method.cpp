@@ -709,7 +709,7 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                 if (x->is_string()) { try { return std::stod(x->get<std::string>()); } catch (...) {} }
                 return def;
             };
-            bool pseudo = false;
+            bool pseudo = true;   // Oct 15, 2026: default on (PARAM scf_pseudo_diag)
             if (const json* x = scfval("scf_pseudo_diag"))
                 pseudo = x->is_boolean() ? x->get<bool>()
                        : x->is_number()  ? x->get<double>() != 0.0
