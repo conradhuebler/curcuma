@@ -57,6 +57,7 @@ WP0 (Gerüst/Setup)
 | WP7 | B3LYP-Hybrid (+ exakter Austausch) | ⚠️ offen | `WP7_b3lyp_hybrid.md` |
 | WP8 | Analytischer Gradient | ⚙️ machine-tested für `hf`/`hf-3c` (Sep 2026, vs PySCF ≤2e-10 Eh/Bohr); DFT-Anteil offen | `WP8_analytischer_gradient.md` |
 | WP9 | Integration, CLI, Parameter, Doku, CTest | ⚠️ offen | `WP9_integration_doku_ctest.md` |
+| WP10-14 | RI/Dichtefitting, MO-Transformation + MP2, MP3-MP5, RCCSD, Bewertung Schwarz-Ansaetze | ⚠️ nur Plan, nichts implementiert | `WP10_korrelation_ri_mpn_ccsd.md` |
 
 Vor jedem WP: `make -j4` in `release/` grün ohne Warning. Nach jedem WP: `ctest`.
 Volle Plandatei: `/home/conrad/.claude/plans/wir-wollen-dft-in-clever-gizmo.md`.
