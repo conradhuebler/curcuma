@@ -35,6 +35,7 @@
 #include "computational_method.h"   // ComputationalMethod, json (global namespace)
 #include "qm_methods/qm_gpu_backend.h"  // qmint::QMGpuJK
 #include "qm_methods/qm_gpu_scf_backend.h"  // qmint::QMGpuSCF (Q-G4)
+#include "qm_methods/qm_gpu_grad_backend.h"  // qmint::QMGpuGrad2e (Q-G7)
 
 namespace gpu_plugin {
 
@@ -86,6 +87,15 @@ std::unique_ptr<qmint::QMGpuJK> createQmDirectJK(const std::string& backend, con
  * `why` when the plugin/entry point is missing or an allocation fails. Claude Generated (Oct 2026).
  */
 std::unique_ptr<qmint::QMGpuSCF> createQmScf(const std::string& backend, int n, int device, std::string& why);
+
+/**
+ * Native-QM two-electron gradient builder (Q-G7): integral-direct derivative integrals contracted
+ * with the density on the device. `tables`/`extra` from qmint::buildEriGradGpuTables (cartesian,
+ * raised Hermite tables). nullptr with a reason in `why` when the plugin/entry point is missing,
+ * the basis is unsupported or an allocation fails. Claude Generated (Oct 2026).
+ */
+std::unique_ptr<qmint::QMGpuGrad2e> createQmGrad2e(const std::string& backend, const qmint::QMGpuEriTables& tables,
+                                                   const qmint::QMGpuGradExtra& extra, int device, std::string& why);
 
 /// True if the plugin library libcurcuma_<backend>.so can be loaded (cached; a failed probe
 /// is not retried and, unlike the create* calls, is silent). Used for `-gpu auto` and

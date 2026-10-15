@@ -90,6 +90,9 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(gpu_scf_min_nbf, Int, 200,
           "gpu_scf auto: smallest number of basis functions for the device-resident SCF loop. Below it the host loop is faster (cuSOLVER syevd is latency-bound for small matrices: ~3 ms at 114 functions on an RTX 5090 vs ~1.2 ms on 4 CPU threads); measured crossover near 200 functions.",
           "Performance", {})
+    PARAM(gpu_grad, String, "auto",
+          "With -gpu cuda|auto, two-electron part of the analytic RHF gradient on the device (Q-G7: derivative integrals of every canonical shell quartet contracted with the density at once, integral-direct, O(n^2) device memory; density-weighted quartet screening at eri_screening/100, 0 = every quartet). auto | on (device whenever -gpu is active; the one-electron part stays on the CPU) | off (CPU). Any device error falls back to the CPU and is counted as qm_grad.",
+          "Performance", {})
     PARAM(scf_max_iterations, Int, 100,
           "Maximum number of SCF iterations.",
           "SCF", {})
@@ -271,6 +274,12 @@ private:
     int m_gpu_scf_min_nbf = 200;             // auto: device loop from this basis size on
     mutable std::unique_ptr<qmint::QMGpuSCF> m_gpu_scf_state;
     mutable bool m_gpu_scf_failed = false;   // device loop failed once: host loop from then on
+    // Q-G7 (Oct 2026): two-electron gradient on the device (-qm.gpu_grad auto|on|off).
+    std::string m_gpu_grad = "auto";
+    mutable bool m_gpu_grad_failed = false;  // device gradient failed once: CPU from then on
+    /// Device 2e gradient from the cartesian density Pc (Eh/Bohr, natoms x 3). False = not requested
+    /// or failed (failure counted as qm_grad); the caller then runs qmint::gradientTwoElectron.
+    bool gpuGradientTwoElectron(const Matrix& Pc, Matrix& g2, std::string& info) const;
     // Energy components for the HF run (Hartree). E_elec = 0.5 Tr(P(H+F)).
     double m_e_elec = 0.0;
     double m_et = 0.0, m_ev = 0.0, m_ej = 0.0, m_ex = 0.0;

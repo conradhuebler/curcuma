@@ -237,7 +237,16 @@ struct EriGpuTables {
     std::vector<int> pc_off, pc_pairs;      ///< Q-G3: shell pairs grouped by (LA, LB)
     double prim_thr = 0.0, pref = 0.0, screening = 0.0;
     double device_mem_limit_mb = 0.0;       ///< copied into the view (-qm.gpu_max_memory_mb)
+    // Q-G7 (2e gradient, buildEriGradGpuTables only): E then holds the raised Hermite tables
+    std::vector<int> sh_atom;               ///< per shell: atom index
+    std::vector<double> pp_ea, pp_eb;       ///< per primitive pair: exponents of its two primitives
     QMGpuEriTables view() const;
+    // Special members out of line: the implicit inline destructor trips -Winline.
+    EriGpuTables();
+    EriGpuTables(const EriGpuTables&);
+    EriGpuTables& operator=(const EriGpuTables&);
+    EriGpuTables& operator=(EriGpuTables&&) noexcept;
+    ~EriGpuTables();
 };
 
 /// @brief Fill `out` for the device ERI build (same arguments as buildERI). Returns false
@@ -248,6 +257,15 @@ struct EriGpuTables {
 /// screens them with the density per build (as DirectJK). Memory then stays O(npair).
 bool buildEriGpuTables(const std::vector<GTO::Orbital>& basis, double screening, const Matrix* Q,
                        EriGpuTables& out, std::string& why, bool list_quartets = true);
+
+/// @brief Tables for the device two-electron gradient (Q-G7, Claude Generated Oct 2026): the
+/// integral-direct tables of buildEriGpuTables in the CARTESIAN basis (Q = nullptr, no quartet
+/// list) with the Hermite tables of every primitive pair rebuilt one angular-momentum step
+/// higher on both shells (as makeShellPair(..., 1, 1) for gradientTwoElectron), plus the shell
+/// atoms and primitive exponents. Same shells, shell pairs, primitive-pair order and Schwarz
+/// factors as the device J/K tables. False (+ reason) for L > 2.
+bool buildEriGradGpuTables(const std::vector<GTO::Orbital>& basis, double screening, EriGpuTables& out,
+                           std::string& why);
 
 /// @brief Boys function F_n(T) = int_0^1 t^(2n) exp(-T t^2) dt for n = 0..maxN.
 /// Grid (spacing 0.05) + 7-term Taylor + downward recurrence below T = 36, closed

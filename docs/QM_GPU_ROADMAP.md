@@ -1,8 +1,8 @@
 # Native ab-initio QM (HF / HF-3c / KS-DFT): performance and GPU roadmap
 
 > Status: 🤖 AI-authored. Sections 1-2 are **implemented and machine-tested** (CPU only,
-> Sep 2026). Section 3 is a plan; stages Q-G1 to Q-G4 are implemented (Oct 2026,
-> AI-generated, machine-tested on one RTX 5090 only), Q-G5 onward are proposals.
+> Sep 2026). Section 3 is a plan; stages Q-G1 to Q-G4 and Q-G7 (2e gradient) are implemented
+> (Oct 2026, AI-generated, machine-tested on one RTX 5090 only), Q-G5 and Q-G6 are proposals.
 
 The native xTB GPU work ([SQM_GPU.md](SQM_GPU.md), [SQM_GPU_ROADMAP.md](SQM_GPU_ROADMAP.md),
 [SQM_PERFORMANCE.md](SQM_PERFORMANCE.md), [MULTI_GPU.md](MULTI_GPU.md)) produced a set of
@@ -89,6 +89,7 @@ anything is enabled by default.
 | Q-G4 | **done Oct 2026** (see below): device-resident SCF loop: Fock -> Löwdin-reduced eigensolve (`cusolverDnDsyevd`) -> density -> DIIS; host polls O(1) scalars per iteration | Stage 6 (fully resident loop) |
 | Q-G5 | mixed precision far from convergence (FP32 ERI/J/K with FP64 correction on dP), never accepting convergence on an FP32 step | X-AP3 (FP32 eigensolve early in the SCF) |
 | Q-G6 | multi-GPU: distribute shell-quartet batches over the device pool | [MULTI_GPU.md](MULTI_GPU.md) |
+| Q-G7 | **done Oct 2026** (see below): two-electron part of the analytic RHF gradient on the device, integral-direct | Stage 3 kernels reused for the gradient |
 
 **Q-G1 (Oct 2026, 🤖 AI-generated, ⚙️ machine-tested; RTX 5090 only)**: `-gpu cuda|auto` uploads the stored
 ERI tensor once per geometry (`cuda/qm_gpu_jk.cu`, plugin entry `curcuma_cuda_create_qm_jk`, seam
@@ -140,7 +141,7 @@ themselves are latency-bound (one quartet's primitives run serially). `ctest -L 
 
 Not tested / not implemented: other GPUs and compute capabilities, ROCm/Vulkan (no QM entry point),
 f functions (CPU fallback), systems beyond naphthalene (the tensor must fit into device memory; ~260
-functions on a 32 GB card), multi-GPU, the analytic gradient (2e part stays on the CPU), timings with an
+functions on a 32 GB card), multi-GPU, the analytic gradient (2e part on the CPU at the time; on the device since Q-G7), timings with an
 sm_120-native build. The block kernel for d classes is a first, unoptimised version (benzene: ~2/3 of the
 kernel time); the thread kernel for classes up to 81 components did not compile in reasonable time.
 
@@ -294,9 +295,91 @@ Not tested: other GPUs (a consumer card has a low FP64 rate; a data-centre card 
 not measured), ROCm/Vulkan (no entry point), n > 274, other basis sets than def2-SVP and MINIX, open shell (not
 implemented anywhere), linear-dependent bases (X built on the host as before, no canonical orthogonalisation
 with dropped vectors), multi-GPU, the device loop inside MD.
-Not implemented: the DIIS subspace solve on the device (m x m, host), device-side gradient (unchanged CPU),
+Not implemented: the DIIS subspace solve on the device (m x m, host), device-side gradient (CPU at the time; 2e part on the device since Q-G7),
 a speed-based auto choice (threshold only, measured on this card with 4 CPU threads; with more CPU threads
 the host eigensolve gets faster and the crossover moves up).
+
+**Q-G7 (Oct 2026, 🤖 AI-generated, ⚙️ machine-tested; RTX 5090 only)**: two-electron part of the analytic
+RHF gradient on the device (`cuda/qm_gpu_grad.cu`, entry `curcuma_cuda_create_qm_grad2e`, seam
+`qm_gpu_grad_backend.h` -- separate so that the ~9 min kernel TUs need not recompile -- loader
+`gpu_plugin::createQmGrad2e`, hook `QMEngine::computeGradient` / `gpuGradientTwoElectron` in `qm_engine.cpp`).
+Same quantity as `qmint::gradientTwoElectron`: g = 1/2 sum D (mn|ls)^x with D = P P - 1/4 (P P + P P) of the
+cartesian density, canonical shell quartets weighted 1/2 deg, derivatives on A, B, C, the one on D from
+translational invariance, one-atom quartets skipped. Integral-direct (no derivative-integral or ERI
+tensor; device memory P, Pmax plus pair tables, 25 MB for pyrene). Tables: `qmint::buildEriGradGpuTables` =
+the Q-G3 tables in the cartesian basis with the Hermite tables rebuilt one step higher on both shells
+(the centre derivative 2a g(l+1) - l g(l-1) then is a modified 1D Hermite coefficient; d-shell
+derivatives reach f-type orders through these tables, so s, p, d run on the device, nothing falls back
+for def2-SVP/MINIX). Contraction: per ket primitive pair Dket_ab(h) = sum_cd D c c E E E, per primitive
+quartet K_ab(tuv) = sum_h Dket_ab(h) R(tuv + h) contracted with the derivative bra coefficients (d/dA,
+d/dB); d/dC from the same routine on (CD|AB). One warp per shell quartet; "primitive mode" (lanes over
+primitive quartets, R in thread-local memory) when the bra has < 32 Hermite entries; per-block shared
+accumulation, FP64 atomics (last bits schedule-dependent). Screen: Q_AB Q_CD (Pmax_AB Pmax_CD + 1/4 (...)) <
+`eri_screening`/100 (the derivative integrals are not bounded by the Schwarz factors; at 1e-12 instead
+of 1e-14 benzene was off by 2.6e-10 vs 6.2e-12 Eh/Bohr, for 5 % fewer quartets); `-qm.eri_screening 0`
+evaluates every quartet like the CPU. The 1e part stays on the CPU.
+
+Selection: `-qm.gpu_grad auto` (default) and `on` both use the device whenever `-gpu cuda|auto` is active
+(the device was faster than 4 CPU threads at every measured size, H2O included); `off` keeps the CPU. Any
+failure falls back to the CPU, counted as `qm_grad`. Independent of the SCF path: checked after the stored
+device tensor (Q-G2, default), the uploaded CPU tensor (Q-G1, `-qm.gpu_eri false`), device-direct J/K
+(Q-G3) and the device-resident loop (Q-G4); cartesian 6d, unscreened, HF-3c/MINIX. Diagnostics:
+`CURCUMA_QM_GPU_GRAD_CHECK=1` also runs the CPU 2e gradient from the same density and prints the
+difference; `CURCUMA_QM_SCF_TRACE=1` prints one line per gradient (`2e=device|cpu`, times), visible in
+`-opt`; `CURCUMA_QM_GPU_GRAD_PROFILE=1` serialises the class launches and times them.
+
+Validation (HF/def2-SVP, `scf_threshold 1e-10`, 24 CPU threads; "2e dev - CPU" from the same density via
+the check switch; totals from `-sp -dump_gradient`, Eh/Bohr; PySCF 2.14 `RHF` conv_tol 1e-12,
+`nuc_grad_method()`; ORCA 6.1 `! HF def2-SVP TightSCF NoAutoStart EnGrad`). CPU reference runs used the
+stored host tensor (`-qm.scf_direct off`) for naphthalene to pyrene; pyrene's device run had to go
+device-direct (tensor does not fit the card) and was converged to 1e-8 only:
+
+| system (natoms) | 2e dev - CPU | sum of dev 2e | total dev run - CPU run | dev - PySCF | dev - ORCA |
+|---|---:|---:|---:|---:|---:|
+| H2O (3) | 3.1e-15 | 4.7e-15 | 3.6e-15 | 1.0e-9 | 1.9e-7 |
+| formaldehyde (4) | 1.2e-14 | 8.0e-15 | 1.2e-14 | 1.6e-9 | 1.4e-6 (VeryTightSCF: 2.8e-7) |
+| benzene (12) | 6.2e-12 | 1.3e-13 | 6.2e-12 | 5.1e-11 | 1.7e-7 |
+| naphthalene (18) | 5.0e-12 | 2.5e-13 | 5.1e-12 | 3.5e-10 | not run |
+| anthracene (24) | 3.5e-12 | 6.0e-14 | 3.4e-12 | 7.2e-10 (*) | 8.6e-8 |
+| pyrene (26) | 1.5e-11 | 2.4e-13 | 3.8e-10 (SCF 1e-8) | 2.1e-9 | not run |
+
+(*) PySCF flags anthracene as not converged against `conv_tol_grad 1e-7` (also after `newton()`); its energy
+equals curcuma's to 1e-12. The CPU gradient has the same distance to PySCF and ORCA as the device one in
+every row; the ORCA distance shrinks with ORCA's SCF threshold (formaldehyde 1.4e-6 -> 2.8e-7), so it is
+ORCA's convergence, not the gradient. Sum of the total device gradient <= 5e-12. Finite difference of the
+device-run energy (H2O, Angstrom displacements, central, 15-decimal energies): 2.1e-8 Eh/Angstrom at h = 1e-4,
+5.2e-7 at 5e-4 (h^2 scaling, truncation). ctests `qm_gpu_grad_*` (9): H2O (+FD), formaldehyde, benzene,
+benzene device-direct, benzene device-resident SCF, H2O Q-G1 upload, H2O cartesian, formaldehyde unscreened
+(<= 1e-12), H2O HF-3c.
+
+Timing (single gradient, warm JIT cache, ms; device = whole 2e call incl. host tables and setup; the 1e part
+is on the CPU in both columns and listed separately):
+
+| system (n cart.) | 2e CPU 4 thr | 2e CPU 24 thr | 2e device | of which kernels | 1e CPU 4 thr | speed-up vs 24 thr |
+|---|---:|---:|---:|---:|---:|---:|
+| H2O | 12.0 | 5.8 | 7.9 | 6.9 | 2.7 | 0.7x |
+| formaldehyde | 77.2 | 28.5 | 19.3 | 17.2 | 7.5 | 1.5x |
+| benzene | 5301 | 1671 | 188 | 172 | 121 | 8.9x |
+| naphthalene | 34508 | 10863 | 828 | 790 | 415 | 13x |
+| anthracene | 120956 | 35818 | 2032 | 1957 | 1049 | 18x |
+| pyrene | 192100 | 56277 | 3134 | 3038 | 1421 | 18x |
+
+Whole `-opt` (wall, same start geometry, identical optimiser path and final geometry to the 6 printed
+decimals): formaldehyde HF-3c 17 gradients, GPU 0.47-0.57 s vs CPU 0.24 s (4 threads; small system, plugin
+and context dominate), final -113.115469 Eh = reference minimum; distorted benzene HF/def2-SVP 25 steps, 29
+gradients, GPU 13.4 s vs CPU 203.5 s (4 threads) / 76.5 s (24 threads), final -230.536045 Eh in all three. In
+the benzene GPU run the 2e gradients took 5.4 s and the CPU 1e part 3.3 s: the 1e part is now the next
+cost (it is O(n^2 natoms) with no screening).
+
+Not tested: other GPUs (consumer card, low FP64 rate; a data-centre card will shift the numbers), ROCm/Vulkan
+(no entry point), f functions (none in the basis files; the table builder refuses L > 2 and the CPU runs),
+more than 26 atoms / 274 functions, basis sets other than def2-SVP and MINIX, open shell (not implemented
+anywhere), MD with the device gradient, `-gpu_strict`. Not implemented: 1e gradient on the device, primitive
+screening, batching of several primitive quartets per warp in entry mode (the warp runs one at a time;
+Boys on one lane), reuse of the device tables between SCF and gradient (rebuilt per gradient, 15-95 ms).
+Observed while validating (not caused by this stage): the integral-direct SCF (CPU `DirectJK` and Q-G3 alike)
+stalls near ||dP|| ~ 1e-8 for naphthalene and pyrene and does not reach `scf_threshold` 1e-9 / 1e-10 within
+100 iterations, so tight gradients of direct runs are limited by the SCF, not by the gradient.
 
 Caveats carried over: speed-ups are hardware-specific and must be measured (the Vulkan
 FP32 path gave no win); FMA contraction changes the last ulp, so tests compare energies

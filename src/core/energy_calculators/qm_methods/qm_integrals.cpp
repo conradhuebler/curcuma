@@ -1556,6 +1556,51 @@ bool buildEriGpuTables(const std::vector<GTO::Orbital>& basis, double screening,
     return true;
 }
 
+// Q-G7 (Claude Generated, Oct 2026): tables for the device 2e gradient. The shell/pair/primitive
+// layout is the integral-direct one above, in the cartesian basis (the gradient is formed with the
+// cartesian density, as gradientTwoElectron); only the Hermite tables are replaced by the raised
+// ones (L+1 on both shells, the same hermiteCoeffs calls as makeShellPair(..., 1, 1)), in the same
+// primitive-pair order, so pp_E_off keeps pointing at the matching primitive pair.
+bool buildEriGradGpuTables(const std::vector<GTO::Orbital>& basis, double screening, EriGpuTables& t,
+                           std::string& why)
+{
+    if (!buildEriGpuTables(basis, screening, nullptr, t, why, /*list_quartets=*/false)) return false;
+    if (BoysTable::NMAX < 4 * t.maxL + 1) { why = "Boys table too short for the gradient"; return false; }
+    const std::vector<EriShell> sh = groupShells(basis);
+    const int ns = (int)sh.size();
+    t.sh_atom.resize(ns);
+    for (int s = 0; s < ns; ++s) t.sh_atom[s] = basis[sh[s].first].atom;
+    const int np = (int)t.pr_A.size();
+    t.E.clear();
+    t.pp_ea.assign(t.pp_ia.size(), 0.0);
+    t.pp_eb.assign(t.pp_ia.size(), 0.0);
+    for (int i = 0; i < np; ++i) {
+        const EriShell& a = sh[t.pr_A[i]];
+        const EriShell& b = sh[t.pr_B[i]];
+        for (int k = t.pr_prim_off[i]; k < t.pr_prim_off[i] + t.pr_nprim[i]; ++k) {
+            const double ea = a.exps[t.pp_ia[k]], eb = b.exps[t.pp_ib[k]];
+            double p, Px, Py, Pz;
+            const double K = gaussianProductK(ea, eb, a.x, a.y, a.z, b.x, b.y, b.z, p, Px, Py, Pz);
+            t.pp_ea[k] = ea;
+            t.pp_eb[k] = eb;
+            t.pp_E_off[k] = (long long)t.E.size();
+            const auto ex = flattenHermite(hermiteCoeffs(a.L + 1, b.L + 1, Px - a.x, Px - b.x, p, K));
+            const auto ey = flattenHermite(hermiteCoeffs(a.L + 1, b.L + 1, Py - a.y, Py - b.y, p, 1.0));
+            const auto ez = flattenHermite(hermiteCoeffs(a.L + 1, b.L + 1, Pz - a.z, Pz - b.z, p, 1.0));
+            t.E.insert(t.E.end(), ex.begin(), ex.end());
+            t.E.insert(t.E.end(), ey.begin(), ey.end());
+            t.E.insert(t.E.end(), ez.begin(), ez.end());
+        }
+    }
+    return true;
+}
+
+EriGpuTables::EriGpuTables() = default;
+EriGpuTables::EriGpuTables(const EriGpuTables&) = default;
+EriGpuTables& EriGpuTables::operator=(const EriGpuTables&) = default;
+EriGpuTables& EriGpuTables::operator=(EriGpuTables&&) noexcept = default;
+EriGpuTables::~EriGpuTables() = default;
+
 QMGpuEriTables EriGpuTables::view() const
 {
     QMGpuEriTables v;

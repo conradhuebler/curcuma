@@ -225,6 +225,27 @@ std::unique_ptr<qmint::QMGpuSCF> createQmScf(const std::string& backend, int n, 
     return std::unique_ptr<qmint::QMGpuSCF>(static_cast<qmint::QMGpuSCF*>(p));
 }
 
+// Claude Generated (Oct 2026, Q-G7): two-electron gradient on the device.
+std::unique_ptr<qmint::QMGpuGrad2e> createQmGrad2e(const std::string& backend, const qmint::QMGpuEriTables& tables,
+                                                   const qmint::QMGpuGradExtra& extra, int device, std::string& why)
+{
+    void* handle = pluginHandle(backend, /*quiet=*/true);
+    if (!handle) {
+        why = "plugin libcurcuma_" + backend + ".so not loadable";
+        return nullptr;
+    }
+    using create_fn = void* (*)(const qmint::QMGpuEriTables*, const qmint::QMGpuGradExtra*, int, char*, int);
+    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_grad2e");
+    if (!fn) {
+        why = "plugin has no entry point curcuma_" + backend + "_create_qm_grad2e";
+        return nullptr;
+    }
+    char buf[512] = { 0 };
+    void* p = fn(&tables, &extra, device, buf, (int)sizeof buf);
+    if (!p) why = buf;
+    return std::unique_ptr<qmint::QMGpuGrad2e>(static_cast<qmint::QMGpuGrad2e*>(p));
+}
+
 int deviceCount(const std::string& backend)
 {
     void* handle = pluginHandle(backend, /*quiet=*/true);

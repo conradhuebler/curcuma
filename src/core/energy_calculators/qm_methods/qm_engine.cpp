@@ -21,6 +21,8 @@
 
 #include "qm_engine.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/energy_calculators/gpu_plugin.h"
+#include "src/core/gpu_fallback.h"
 #include "src/core/units.h"
 
 #include <fmt/format.h>
@@ -140,6 +142,13 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
             m_gpu_scf = config["gpu_scf"].get<bool>() ? "on" : "off";
         else if (config["gpu_scf"].is_string())
             m_gpu_scf = config["gpu_scf"].get<std::string>();
+    }
+    if (config.contains("gpu_grad")) {
+        // Accept a CLI boolean too (-qm.gpu_grad true/false). Claude Generated (Oct 2026, Q-G7).
+        if (config["gpu_grad"].is_boolean())
+            m_gpu_grad = config["gpu_grad"].get<bool>() ? "on" : "off";
+        else if (config["gpu_grad"].is_string())
+            m_gpu_grad = config["gpu_grad"].get<std::string>();
     }
     if (config.contains("gpu_scf_min_nbf") && config["gpu_scf_min_nbf"].is_number())
         m_gpu_scf_min_nbf = static_cast<int>(std::lround(config["gpu_scf_min_nbf"].get<double>()));
@@ -508,19 +517,96 @@ bool QMEngine::computeGradient()
         for (int k = 0; k < 3; ++k)
             posBohr(i, k) = Length::angstrom_to_bohr(m_geometry(i, k));
 
+    // The one-electron part always runs on the CPU (O(n^2 natoms), small next to the 2e part).
     const Matrix g1 = qmint::gradientOneElectron(m_gto_basis, m_atoms, posBohr, Pc, Wc, m_threads);
     const auto t1 = std::chrono::steady_clock::now();
-    const Matrix g2 = qmint::gradientTwoElectron(m_gto_basis, Pc, m_atomcount, m_threads);
+    // Q-G7: two-electron part on the device when -gpu and -qm.gpu_grad allow it, else CPU.
+    Matrix g2;
+    std::string dev_info;
+    const bool on_device = gpuGradientTwoElectron(Pc, g2, dev_info);
+    if (!on_device) g2 = qmint::gradientTwoElectron(m_gto_basis, Pc, m_atomcount, m_threads);
     const auto t2 = std::chrono::steady_clock::now();
     const Matrix gn = calculateCoreRepulsionGradient();
     m_gradient = g1 + g2 + gn;
     m_gradient_parts = { g1, g2, gn };
 
+    auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    // Diagnostic (Q-G7): -opt silences the method; CURCUMA_QM_SCF_TRACE=1 (the Q-G4 switch) also
+    // prints one ASCII line per gradient with the place and time of the 2e part.
+    if (const char* tr = std::getenv("CURCUMA_QM_SCF_TRACE"); tr && tr[0] == '1')
+        fmt::print(stderr, "QM gradient trace: 2e={} 2e_ms={:.1f} 1e_ms={:.1f}\n", on_device ? "device" : "cpu",
+                   ms(t1, t2), ms(t0, t1));
     if (CurcumaLogger::get_verbosity() >= 2) {
-        auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
         CurcumaLogger::info(fmt::format(
-            "QM: analytic gradient |g| = {:.6e} Eh/Bohr (1e {:.1f} ms, 2e {:.1f} ms, {} threads)",
-            m_gradient.norm(), ms(t0, t1), ms(t1, t2), m_threads));
+            "QM: analytic gradient |g| = {:.6e} Eh/Bohr (1e {:.1f} ms, 2e {:.1f} ms {}, {} threads)",
+            m_gradient.norm(), ms(t0, t1), ms(t1, t2), on_device ? "on the device: " + dev_info : "CPU", m_threads));
+    }
+    return true;
+}
+
+// Claude Generated (Oct 2026, Q-G7): two-electron gradient on the device. Tables are rebuilt per
+// call (they depend on the geometry; the gradient is formed once per geometry). The device sees the
+// same cartesian density as qmint::gradientTwoElectron and the same canonical quartets; the only
+// difference is the density-weighted quartet screen (threshold -qm.eri_screening / 100, 0 = all
+// quartets, as the CPU). CURCUMA_QM_GPU_GRAD_CHECK=1 also runs the CPU reference and prints one
+// comparison line (test_cases/qm_gpu/check_qm_gpu_grad.py parses it).
+bool QMEngine::gpuGradientTwoElectron(const Matrix& Pc, Matrix& g2, std::string& info) const
+{
+    if (!gpuRequested() || m_gpu_grad_failed) return false;
+    if (m_gpu_grad == "off" || m_gpu_grad == "false") return false;
+    if (m_gpu_grad != "auto" && m_gpu_grad != "on" && m_gpu_grad != "true") {
+        static bool warned = false;
+        if (!warned && CurcumaLogger::get_verbosity() >= 1) {
+            warned = true;
+            CurcumaLogger::warn(fmt::format("QM: unknown -qm.gpu_grad '{}' (use auto|on|off); using auto", m_gpu_grad));
+        }
+    }
+    const std::string backend = (m_gpu == "auto") ? gpu_plugin::firstAvailable() : m_gpu;
+    if (backend == "none" || !gpu_plugin::available(backend)) {
+        m_gpu_grad_failed = true;
+        curcuma::reportGpuFallback("qm_grad", "no GPU plugin for -gpu " + m_gpu);
+        return false;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    qmint::EriGpuTables tables;
+    std::string why;
+    std::unique_ptr<qmint::QMGpuGrad2e> dev;
+    if (qmint::buildEriGradGpuTables(m_gto_basis, m_eri_screening, tables, why)) {
+        qmint::QMGpuGradExtra extra;
+        extra.natoms = m_atomcount;
+        extra.sh_atom = tables.sh_atom.data();
+        extra.nprimpair = (int)tables.pp_ea.size();
+        extra.pp_ea = tables.pp_ea.data();
+        extra.pp_eb = tables.pp_eb.data();
+        dev = gpu_plugin::createQmGrad2e(backend, tables.view(), extra, m_gpu_device, why);
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+    Matrix g = Matrix::Zero(m_atomcount, 3);
+    const Matrix P = Pc;  // row-major, contiguous
+    // The derivative integrals are not bounded by the Schwarz factors of the undifferentiated ones
+    // (the centre derivative brings factors 2 alpha), so the quartet screen runs two orders tighter
+    // than the ERI screen: benzene/def2-SVP 2.6e-10 (1e-12) vs 6.2e-12 Eh/Bohr (1e-14) from the
+    // unscreened CPU gradient, for 5 % more quartets. 0 keeps every quartet (as the CPU).
+    const double grad_thr = m_eri_screening * 1.0e-2;
+    if (!dev || !dev->compute(P.data(), grad_thr, g.data())) {
+        m_gpu_grad_failed = true;
+        curcuma::reportGpuFallback("qm_grad", "device 2e gradient " + std::string(dev ? "kernel failed" : "not possible: " + why));
+        return false;
+    }
+    g2 = g;
+    const auto t2 = std::chrono::steady_clock::now();
+    auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    info = fmt::format("{} ({}; host tables + setup {:.1f} ms)", dev->name(), dev->stats(), ms(t0, t1));
+    if (const char* chk = std::getenv("CURCUMA_QM_GPU_GRAD_CHECK"); chk && chk[0] == '1') {
+        const auto c0 = std::chrono::steady_clock::now();
+        const Matrix gc = qmint::gradientTwoElectron(m_gto_basis, Pc, m_atomcount, m_threads);
+        const double cpu_ms = ms(c0, std::chrono::steady_clock::now());
+        const Eigen::RowVector3d sd = g2.colwise().sum(), sc = gc.colwise().sum();
+        CurcumaLogger::result(fmt::format(
+            "QM GPU grad check: natoms={} max|dev-cpu|={:.3e} max|cpu|={:.3e} sum_dev=({:.3e},{:.3e},{:.3e}) "
+            "sum_cpu=({:.3e},{:.3e},{:.3e}) quartets={} dev_ms={:.1f} cpu_ms={:.1f}",
+            m_atomcount, (g2 - gc).cwiseAbs().maxCoeff(), gc.cwiseAbs().maxCoeff(), sd(0), sd(1), sd(2), sc(0), sc(1),
+            sc(2), dev->lastQuartets(), ms(t0, t2), cpu_ms));
     }
     return true;
 }
