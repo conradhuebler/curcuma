@@ -332,6 +332,8 @@ struct XtbGpuContext::Impl {
         double*      dPsp   = nullptr;   // partial density on the pattern (nnz)
         int*         dRow   = nullptr;   // pattern (geometry-constant)
         int*         dCol   = nullptr;
+        int*         dUp    = nullptr;   // entries with row <= col
+        int*         dPerm  = nullptr;   // transposed entry
         int          cap_cols = 0;
         int          cap_nnz  = 0;
         long         pattern_gen = -1;
@@ -352,7 +354,8 @@ struct XtbGpuContext::Impl {
             cudaSetDevice(h.device);
             for (void** p : { reinterpret_cast<void**>(&h.dC), reinterpret_cast<void**>(&h.dCw),
                               reinterpret_cast<void**>(&h.dOcc), reinterpret_cast<void**>(&h.dPsp),
-                              reinterpret_cast<void**>(&h.dRow), reinterpret_cast<void**>(&h.dCol) })
+                              reinterpret_cast<void**>(&h.dRow), reinterpret_cast<void**>(&h.dCol),
+                              reinterpret_cast<void**>(&h.dUp), reinterpret_cast<void**>(&h.dPerm) })
                 if (*p) { cudaFree(*p); *p = nullptr; }
             if (h.done) { cudaEventDestroy(h.done); h.done = nullptr; }
             if (h.stream) { cudaStreamDestroy(h.stream); h.stream = nullptr; }
@@ -981,6 +984,8 @@ struct XtbGpuContext::Impl {
     double sp_fraction = 1.0;        // nnz / nao^2
     double sp_rmax = 0.0;            // largest element-pair cutoff (Bohr)
     CudaBuffer<int>    dSpRow, dSpCol, dSpColPtr, dSpPerm;
+    CudaBuffer<int>    dSpUp;        ///< entries with row <= col (Oct 2026: k_density_sp_sym computes these, mirrors via dSpPerm)
+    int                sp_nup = 0;
     // Claude Generated (Sep 29, 2026): atom-pair screen for the dense S/H0 build in screened
     // mode. Element kind per atom and the squared element-pair cutoff (the same table the pair
     // pattern is built from, slightly widened), so k_overlap_h0 skips the atom pairs whose
@@ -998,7 +1003,7 @@ struct XtbGpuContext::Impl {
     // kernels read P and W ONLY at stored screened pairs (verified exhaustively - see
     // computeGradient) and at the AO diagonal (always in-pattern by construction, see
     // buildScreenedPairs). dSpW is the pattern-only twin of dSpP for the energy-weighted
-    // density W (built by the *_spP gradient kernels below via k_density_sp, weight 2*eps
+    // density W (built by the *_spP gradient kernels below via k_density_sp_sym, weight 2*eps
     // instead of occ); dSpDiagIdx[mu] is the pair-storage index e of the (mu,mu) entry,
     // computed once in buildScreenedPairs (same loop that builds dSpRow/dSpCol, no extra
     // scan). Neither is needed when the geometry is small enough to stay dense.
@@ -1026,7 +1031,7 @@ struct XtbGpuContext::Impl {
         releaseDensityHelpers();
         mp_otf = false;
         p_dense_valid = true;
-        for (CudaBuffer<int>* b : { &dSpRow, &dSpCol, &dSpColPtr, &dSpPerm, &dSpDiagIdx })
+        for (CudaBuffer<int>* b : { &dSpRow, &dSpCol, &dSpColPtr, &dSpPerm, &dSpDiagIdx, &dSpUp })
             b->free();
         h_sp_row.clear(); h_sp_row.shrink_to_fit();
         h_sp_col.clear(); h_sp_col.shrink_to_fit();
@@ -2025,12 +2030,20 @@ __global__ void k_multipole_moments_sp(double* dp_at, double* qp_at, const doubl
 // the dense nao x nao product: P(row,col) = sum_k Cw(row,k) C(col,k) with Cw = C diag(occ),
 // the same sum the dense GEMM P = Cw C^T performs for that element. polymer_2x: 6 % of the
 // elements (the dense GEMM was 26 % of the SCF time) and no dense P buffer during the loop.
-__global__ void k_density_sp(int nnz, const int* __restrict__ row, const int* __restrict__ col,
-                             const double* __restrict__ Cw, const double* __restrict__ C,
-                             int n, int ncol, double* __restrict__ Psp)
+// (Kernel below; the one-thread-per-entry version without the symmetry was removed Oct 2026.)
+// Symmetric variant (Claude Generated, Oct 2026): P(r,c) = P(c,r), and the screened pattern is
+// symmetric (perm[e] = transposed entry). Only the entries with row <= col (up[]) are evaluated and
+// both e and perm[e] are written, so every entry is written exactly once and the FMA count halves.
+// P(c,r) is now the sum of Cw(r,k) C(c,k) instead of Cw(c,k) C(r,k): the same value up to FP64
+// rounding (the two orders of the product differ in the last bit) and exactly symmetric.
+__global__ void k_density_sp_sym(int nup, const int* __restrict__ up, const int* __restrict__ row,
+                                 const int* __restrict__ col, const int* __restrict__ perm,
+                                 const double* __restrict__ Cw, const double* __restrict__ C,
+                                 int n, int ncol, double* __restrict__ Psp)
 {
-    const int e = blockIdx.x * blockDim.x + threadIdx.x;
-    if (e >= nnz) return;
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= nup) return;
+    const int e = up[t];
     const size_t r = static_cast<size_t>(row[e]), c = static_cast<size_t>(col[e]);
     double acc = 0.0;
     for (int k = 0; k < ncol; ++k) {
@@ -2038,6 +2051,7 @@ __global__ void k_density_sp(int nnz, const int* __restrict__ row, const int* __
         acc += Cw[r + off] * C[c + off];
     }
     Psp[e] = acc;
+    Psp[perm[e]] = acc;
 }
 
 // pop(mu) = sum_nu P(mu,nu) S(mu,nu) from pattern-only P (both at the transposed entry).
@@ -4067,7 +4081,7 @@ bool XtbGpuContext::residentDensity(const double* occ, int ncol, int n,
 //
 // Point 6 (Claude Generated, Sep 2026): for_weighted_density retargets the same column-split
 // SDDMM at the gradient's W = C_occ*diag(2eps)*C_occ^T instead of the SCF loop's P. Both are
-// the identical sum-over-occupied-columns pattern (k_density_sp doesn't know or care what the
+// the identical sum-over-occupied-columns pattern (k_density_sp_sym doesn't know or care what the
 // weight vector means), so nothing below needs duplicating - only which CudaBuffer the result
 // lands in changes. The caller (computeGradient) uploads its own weight vector (2*eps) into
 // the SAME dOcc buffer the SCF loop uses before calling this, so dOcc itself needs no
@@ -4159,9 +4173,13 @@ bool XtbGpuContext::densityPatternDistributed(int n, int ncol, bool for_weighted
             if (h.dPsp) cudaFree(h.dPsp);
             if (h.dRow) cudaFree(h.dRow);
             if (h.dCol) cudaFree(h.dCol);
+            if (h.dUp) cudaFree(h.dUp);
+            if (h.dPerm) cudaFree(h.dPerm);
             if (cudaMalloc(reinterpret_cast<void**>(&h.dPsp), sizeof(double) * I.sp_nnz) != cudaSuccess
                 || cudaMalloc(reinterpret_cast<void**>(&h.dRow), sizeof(int) * I.sp_nnz) != cudaSuccess
-                || cudaMalloc(reinterpret_cast<void**>(&h.dCol), sizeof(int) * I.sp_nnz) != cudaSuccess)
+                || cudaMalloc(reinterpret_cast<void**>(&h.dCol), sizeof(int) * I.sp_nnz) != cudaSuccess
+                || cudaMalloc(reinterpret_cast<void**>(&h.dUp), sizeof(int) * I.sp_nup) != cudaSuccess
+                || cudaMalloc(reinterpret_cast<void**>(&h.dPerm), sizeof(int) * I.sp_nnz) != cudaSuccess)
                 return fail("alloc pattern");
             h.cap_nnz = I.sp_nnz;
             h.pattern_gen = -1;
@@ -4175,6 +4193,10 @@ bool XtbGpuContext::densityPatternDistributed(int n, int ncol, bool for_weighted
             if (cudaMemcpyPeerAsync(h.dRow, h.device, I.dSpRow.ptr, I.device,
                                     sizeof(int) * I.sp_nnz, h.stream) != cudaSuccess
                 || cudaMemcpyPeerAsync(h.dCol, h.device, I.dSpCol.ptr, I.device,
+                                       sizeof(int) * I.sp_nnz, h.stream) != cudaSuccess
+                || cudaMemcpyPeerAsync(h.dUp, h.device, I.dSpUp.ptr, I.device,
+                                       sizeof(int) * I.sp_nup, h.stream) != cudaSuccess
+                || cudaMemcpyPeerAsync(h.dPerm, h.device, I.dSpPerm.ptr, I.device,
                                        sizeof(int) * I.sp_nnz, h.stream) != cudaSuccess)
                 return fail("copy pattern");
             h.pattern_gen = I.pattern_generation;
@@ -4189,8 +4211,8 @@ bool XtbGpuContext::densityPatternDistributed(int n, int ncol, bool for_weighted
         const dim3 grid((n + block.x - 1) / block.x, (kn + block.y - 1) / block.y);
         k_scale_cols<<<grid, block, 0, h.stream>>>(h.dCw, h.dC, h.dOcc, n, kn);
         const int bs = 256;
-        k_density_sp<<<(I.sp_nnz + bs - 1) / bs, bs, 0, h.stream>>>(
-            I.sp_nnz, h.dRow, h.dCol, h.dCw, h.dC, n, kn, h.dPsp);
+        k_density_sp_sym<<<(I.sp_nup + bs - 1) / bs, bs, 0, h.stream>>>(
+            I.sp_nup, h.dUp, h.dRow, h.dCol, h.dPerm, h.dCw, h.dC, n, kn, h.dPsp);
         if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess) return fail("helper kernels", e);
         if (cudaMemcpyPeerAsync(h.stage, I.device, h.dPsp, h.device,
                                 sizeof(double) * I.sp_nnz, h.stream) != cudaSuccess
@@ -4205,8 +4227,8 @@ bool XtbGpuContext::densityPatternDistributed(int n, int ncol, bool for_weighted
         const dim3 grid((n + block.x - 1) / block.x, (own_cols + block.y - 1) / block.y);
         k_scale_cols<<<grid, block, 0, I.stream>>>(I.dCw.ptr, I.dC.ptr, I.dOcc.ptr, n, own_cols);
         const int bs = 256;
-        k_density_sp<<<(I.sp_nnz + bs - 1) / bs, bs, 0, I.stream>>>(
-            I.sp_nnz, I.dSpRow.ptr, I.dSpCol.ptr, I.dCw.ptr, I.dC.ptr, n, own_cols, target.ptr);
+        k_density_sp_sym<<<(I.sp_nup + bs - 1) / bs, bs, 0, I.stream>>>(
+            I.sp_nup, I.dSpUp.ptr, I.dSpRow.ptr, I.dSpCol.ptr, I.dSpPerm.ptr, I.dCw.ptr, I.dC.ptr, n, own_cols, target.ptr);
         if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess) return fail("own slice", e);
     }
 
@@ -4247,14 +4269,14 @@ bool XtbGpuContext::residentDensityResident(int n, int ncol, double* band_out)
     if (split_done) {
         I.p_dense_valid = false;
     } else if (I.sparse) {
-        // Claude Generated (Sep 2026): pattern-only density (see k_density_sp). A row-major
+        // Claude Generated (Sep 2026): pattern-only density (see k_density_sp_sym). A row-major
         // variant (contiguous rows, occ applied in the kernel) was measured 8x slower on polymer
         // (4.69 vs 0.60 s over 12 SCF steps) and dropped.
         try { I.dSpP.ensure(I.sp_nnz); } catch (...) { return false; }
         if (ncol > 0) {
             const int bs = 256;
-            k_density_sp<<<(I.sp_nnz + bs - 1) / bs, bs, 0, stream>>>(
-                I.sp_nnz, I.dSpRow.ptr, I.dSpCol.ptr, I.dCw.ptr, I.dC.ptr, n, ncol, I.dSpP.ptr);
+            k_density_sp_sym<<<(I.sp_nup + bs - 1) / bs, bs, 0, stream>>>(
+                I.sp_nup, I.dSpUp.ptr, I.dSpRow.ptr, I.dSpCol.ptr, I.dSpPerm.ptr, I.dCw.ptr, I.dC.ptr, n, ncol, I.dSpP.ptr);
             if (cudaGetLastError() != cudaSuccess) return false;
         } else {
             I.dSpP.zero(I.sp_nnz, stream);
@@ -4800,6 +4822,14 @@ bool XtbGpuContext::buildScreenedPairs(const double* xyz_bohr, bool& use_sparse)
         I.dSpRow.upload(I.h_sp_row.data(), static_cast<int>(nnz), I.stream);
         I.dSpCol.upload(I.h_sp_col.data(), static_cast<int>(nnz), I.stream);
         I.dSpPerm.upload(perm.data(), static_cast<int>(nnz), I.stream);
+        {   // entries of the upper triangle (row <= col), the ones k_density_sp_sym evaluates
+            std::vector<int> up;
+            up.reserve(static_cast<size_t>(nnz) / 2 + static_cast<size_t>(nao));
+            for (long long e = 0; e < nnz; ++e)
+                if (I.h_sp_row[e] <= I.h_sp_col[e]) up.push_back(static_cast<int>(e));
+            I.sp_nup = static_cast<int>(up.size());
+            I.dSpUp.upload(up.data(), I.sp_nup, I.stream);
+        }
         I.dSpColPtr.upload(colptr.data(), nao + 1, I.stream);
         I.dSpDiagIdx.upload(diag_idx.data(), nao, I.stream);
     } catch (const std::exception& ex) {
@@ -4910,7 +4940,7 @@ bool XtbGpuContext::computeIntegrals(const double* xyz_bohr)
             }
         } else {
             for (CudaBuffer<double>* buf : { &I.dSpS, &I.dSpH0, &I.dSpTmp, &I.dSpDp, &I.dSpQp }) buf->free();
-            for (CudaBuffer<int>* buf : { &I.dSpRow, &I.dSpCol, &I.dSpColPtr, &I.dSpPerm }) buf->free();
+            for (CudaBuffer<int>* buf : { &I.dSpRow, &I.dSpCol, &I.dSpColPtr, &I.dSpPerm, &I.dSpUp }) buf->free();
             I.h_sp_row.clear(); I.h_sp_col.clear();
             I.dS.ensure(static_cast<int>(nn));
             I.dH0.ensure(static_cast<int>(nn));
@@ -6509,7 +6539,7 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
         } else {
             m_impl->dSpW.ensure(m_impl->sp_nnz);
         }
-        // dCw only ever holds nao x nocc_orbs (k_scale_cols/k_density_sp write no more than
+        // dCw only ever holds nao x nocc_orbs (k_scale_cols/k_density_sp_sym write no more than
         // that) - was allocated at the full nao x nao here although residentDensityResident
         // already sizes it correctly; fixed while touching this block (memory only, no
         // measured time effect - flagged by the operator, not a separate optimisation).
@@ -6534,7 +6564,7 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
         if (!ensureDenseDensity(nao)) return false;   // dense geometry: rebuild if stale
     }
     // use_pattern_pw: nothing to do - dSpP already holds the converged pattern density
-    // from the SCF loop's last iteration (built by the SAME k_density_sp call the loop
+    // from the SCF loop's last iteration (built by the SAME k_density_sp_sym call the loop
     // already ran for the population/band energy, from the SAME dCw/dC this call reuses
     // via pc_resident). Point 1+2 together: no dense P, no download, no DGEMM rebuild.
     m_impl->profMark("grad: dense density rebuild (ensureDenseDensity)");
@@ -6554,12 +6584,12 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
 
     // Energy-weighted density W = C_occ · diag(2·ε_occ) · C_occᵀ.
     // Point 2 (Claude Generated, Sep 2026): on the pattern path, build W ONLY at the stored
-    // screened pairs with the same SDDMM kernel (k_density_sp) the SCF loop already uses for
+    // screened pairs with the same SDDMM kernel (k_density_sp_sym) the SCF loop already uses for
     // P, weight swapped for 2*eps - no nao x nao DGEMM. polymer_2x: 12.75 s -> measured below.
     // Point 6 (Claude Generated, Sep 2026): W is this same SDDMM, so it can go through
     // densityPatternDistributed exactly like the SCF loop's P does - see its
     // for_weighted_density flag. dOcc already holds 2*eps (uploaded just above) and the
-    // full-nao dCw computed here is kept as the fallback the single-device k_density_sp below
+    // full-nao dCw computed here is kept as the fallback the single-device k_density_sp_sym below
     // still needs when the split is not configured or the geometry is too small to split.
     // Claude Generated (Sep 29, 2026): after a pseudo-diagonalisation step the columns of C span the
     // right occupied space but do not diagonalise the occupied block of the Fock matrix, so
@@ -6610,9 +6640,9 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
                 && densityPatternDistributed(nao, nocc_orbs, /*for_weighted_density=*/true);
             if (!w_split) {
                 const int bs = 256;
-                k_density_sp<<<(m_impl->sp_nnz + bs - 1) / bs, bs, 0, stream>>>(
-                    m_impl->sp_nnz, m_impl->dSpRow.ptr, m_impl->dSpCol.ptr,
-                    m_impl->dCw.ptr, m_impl->dC.ptr, nao, nocc_orbs, m_impl->dSpW.ptr);
+                k_density_sp_sym<<<(m_impl->sp_nup + bs - 1) / bs, bs, 0, stream>>>(
+                    m_impl->sp_nup, m_impl->dSpUp.ptr, m_impl->dSpRow.ptr, m_impl->dSpCol.ptr,
+                    m_impl->dSpPerm.ptr, m_impl->dCw.ptr, m_impl->dC.ptr, nao, nocc_orbs, m_impl->dSpW.ptr);
                 if (cudaGetLastError() != cudaSuccess) return false;
             }
         } else if (cublasDgemm(m_impl->cublas, CUBLAS_OP_N, CUBLAS_OP_T, nao, nao, nocc_orbs,
