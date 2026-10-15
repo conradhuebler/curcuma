@@ -99,7 +99,7 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
     // rocBLAS GEMM, the eigensolve rocSOLVER. GFN1 runs the isotropic loop, GFN2 the
     // multipole loop (R-AP2).
     // Resident-solver switches -xtb.rocm_cached_cholesky (default true),
-    // -xtb.rocm_density_syrk (default false) and -xtb.rocm_explicit_linv (default false); the fallbacks here are the defaults of the
+    // -xtb.rocm_density_syrk (default false) and -xtb.rocm_explicit_linv (default true); the fallbacks here are the defaults of the
     // PARAM block in native_xtb_method.h. Claude Generated (Oct 2026).
     {
         auto cfgBool = [&config](const char* key, bool def) -> bool {
@@ -120,7 +120,7 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
         };
         const bool cached_chol  = cfgBool("rocm_cached_cholesky", true);
         const bool density_syrk = cfgBool("rocm_density_syrk", false);
-        const bool explicit_linv = cfgBool("rocm_explicit_linv", false);   // Claude Generated (Oct 2026)
+        const bool explicit_linv = cfgBool("rocm_explicit_linv", true);    // Claude Generated (Oct 2026), default true since Oct 15
         ctx->setSolverOptions(cached_chol, density_syrk, explicit_linv);
         if (CurcumaLogger::get_verbosity() >= 2)
             CurcumaLogger::info(fmt::format(
@@ -163,6 +163,58 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
 #endif
 }
 
-XtbHipComputationalMethod::~XtbHipComputationalMethod() = default;
+// The destructor reports what an optimiser or MD driver kept silent: they run the energy
+// calls at logger verbosity 0, so a fallback seen there is still pending here and is printed
+// at level 1, as printGpuFallbackSummary() does for the GPU fallback summary.
+// Claude Generated (Oct 2026).
+XtbHipComputationalMethod::~XtbHipComputationalMethod() { reportSolverFallbacks(true); }
+
+// Claude Generated (Oct 2026): one notice per kind of solver fallback and method object.
+double XtbHipComputationalMethod::calculateEnergy(bool gradient)
+{
+    const double e = XtbGpuAdapter::calculateEnergy(gradient);
+    reportSolverFallbacks();
+    return e;
+}
+
+// Claude Generated (Oct 2026). The resident solver (xtb_hip_context.hip) keeps running on a
+// slower device path when the explicit L^-1 or the cached Cholesky factor cannot be formed;
+// the results stay the same up to rounding. The plugin context has no logger, so the events
+// are read here. These are GPU-internal path changes, not CPU fallbacks, so they are not
+// counted in the gpu_fallback registry (which -gpu_strict turns into an exit).
+void XtbHipComputationalMethod::reportSolverFallbacks(bool final_report)
+{
+    XtbHipContext* ctx = context();
+    if (!ctx) return;
+    const unsigned ev = ctx->solverFallbackEvents();
+    const unsigned fresh = ev & ~m_reported_fallbacks
+        & (XtbHipContext::kFallbackLinvAlloc | XtbHipContext::kFallbackLinvTrtri
+           | XtbHipContext::kFallbackCholFailed);
+    if (!fresh) return;
+    // At verbosity 0 the warning would be swallowed: keep the bits pending for a later call;
+    // the final report (destructor) raises the level to 1 for these lines.
+    const int saved_verbosity = CurcumaLogger::get_verbosity();
+    if (saved_verbosity < 1 && !final_report) return;
+    if (saved_verbosity < 1) CurcumaLogger::set_verbosity(1);
+    m_reported_fallbacks |= fresh;
+    const char* src = (ev & XtbHipContext::kFallbackInjected)
+        ? " [forced by CURCUMA_ROCM_FAIL_LINV]" : "";
+    if (fresh & XtbHipContext::kFallbackLinvAlloc)
+        CurcumaLogger::warn(fmt::format(
+            "{}: ROCm solver: the explicit L^-1 buffer could not be allocated; the SCF uses the "
+            "cached-Cholesky path (sygst/syevd/trsm) for the rest of the run{} (reported once)",
+            getMethodName(), src));
+    if (fresh & XtbHipContext::kFallbackLinvTrtri)
+        CurcumaLogger::warn(fmt::format(
+            "{}: ROCm solver: trtri could not invert the Cholesky factor of S; this geometry uses "
+            "the cached-Cholesky path (sygst/syevd/trsm), later geometries try L^-1 again{} "
+            "(reported once)", getMethodName(), src));
+    if (fresh & XtbHipContext::kFallbackCholFailed)
+        CurcumaLogger::warn(fmt::format(
+            "{}: ROCm solver: the cached Cholesky factor of S could not be formed (allocation "
+            "failed or potrf reported S not positive definite); the affected geometries use "
+            "rocsolver sygvd instead{} (reported once)", getMethodName(), src));
+    if (saved_verbosity < 1) CurcumaLogger::set_verbosity(saved_verbosity);
+}
 
 #endif // USE_ROCM

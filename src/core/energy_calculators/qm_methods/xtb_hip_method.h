@@ -44,6 +44,22 @@ public:
     explicit XtbHipComputationalMethod(curcuma::xtb::MethodType method,
                                        const json& config = json{});
     ~XtbHipComputationalMethod() override;
+
+    /**
+     * @brief Energy (and gradient) as in XtbGpuAdapter, then one warning per new solver
+     *        fallback of the resident ROCm SCF (XtbHipContext::solverFallbackEvents()).
+     *        Each kind of fallback is reported once per method object, not per geometry; while
+     *        the logger is at verbosity 0 (optimiser/MD steps) it stays pending and is printed
+     *        by a later call or, at level 1, by the destructor.
+     *        Claude Generated (Oct 2026).
+     */
+    double calculateEnergy(bool gradient = false) override;
+
+private:
+    /// Prints a warning for every bit of the context's fallback mask not reported yet;
+    /// below verbosity 1 only when final_report is true (then at level 1).
+    void reportSolverFallbacks(bool final_report = false);
+    unsigned m_reported_fallbacks = 0;   ///< SolverFallbackEvent bits already printed
 };
 
 #endif // USE_ROCM

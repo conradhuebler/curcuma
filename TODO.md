@@ -53,7 +53,9 @@ Stand.
 
 ## 2. Leistung
 
-- **GFN1/GFN2 auf ROCm** (Stand 2026-10-14, [docs/ROCM_GFN_POTENTIAL_2026-10-14.md](docs/ROCM_GFN_POTENTIAL_2026-10-14.md)): `-gpu auto` nimmt ROCm bei jeder Größe, die CPU gewinnt unter ca. 1000 Atomen; Eigenlöser 86 % (2910 Atome). Hebel: (0) Dichte-GEMM: innere Dimension ncol ist umgesetzt (peo201-chain 15.1 -> 14.3 s, n=2), syrk opt-in (`-xtb.rocm_density_syrk`, -3.8 %, n=4), (a) L vorab ist umgesetzt (nur potrf entfaellt, -1.6 %); `-xtb.rocm_explicit_linv` (trmm statt sygst, -9.6 %) ist Opt-in, Default-Entscheidung und FP64 bei n=6222 (langsamer) offen, (b) späterer FP64-Wechsel (`-scf_fp32_threshold 1e-5`: -19 % Wanduhr, n=1), (c) Pseudo-Diagonalisierung wie CUDA, (d) auto-Schwelle für xTB.
+- **GFN1/GFN2 auf ROCm** (Stand 2026-10-15, [docs/ROCM_GFN_POTENTIAL_2026-10-14.md](docs/ROCM_GFN_POTENTIAL_2026-10-14.md)): erledigt sind Dichte-GEMM über ncol, gecachter Cholesky-Faktor, syrk (Opt-in) und explizites L^-1 (Default seit 2026-10-15, peo201-chain 14.18 -> 12.85 s, n=3) mit einmaligem Fallback-Hinweis.
+  Offen: `-gpu auto` nimmt ROCm bei jeder Größe (CPU gewinnt unter ca. 1000 Atomen); Host-Threads auf ROCm Default 1 (CUDA 8); Multipol-Potential/-Energie auf das Gerät; restliche Host-Lücke pro Iteration; D4-ATM 1.2 s; späterer FP64-Wechsel (-19 %, n=1); Pseudo-Diagonalisierung wie CUDA.
+  CUDA-`w_from_goo` (`xtb_gpu_context.cu`) nimmt noch geschlossene Schale an; CUDA/Vulkan mit der Open-Shell-Gradientenkorrektur nicht gelaufen.
 - **GFN2 auf der GPU, Eigenlöser = 73 % des Laufs** (polymer_2x, 1x A4500). Offen:
   (a) `-scf_pseudo_diag` als Standard einschalten (Betreiberentscheidung, Messungen sprechen dafür);
   (b) `-scf_pseudo_diag_fp64` auf einer GPU mit vollem FP64 (H200) messen;

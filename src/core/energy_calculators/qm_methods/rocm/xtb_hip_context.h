@@ -123,9 +123,29 @@ public:
      *        FP64, plus its FP32 rounding) and run each step as F' = Linv F Linv^T (two trmm),
      *        syevd, C = Linv^T Y (trmm) instead of sygst/syevd/trsm; default false
      *        (-xtb.rocm_explicit_linv). Falls back to sygst/trsm if trtri or allocation fails.
+     *        Default true since Oct 15, 2026.
      *        Claude Generated (Oct 2026).
      */
-    void setSolverOptions(bool cached_cholesky, bool density_syrk, bool explicit_linv = false);
+    void setSolverOptions(bool cached_cholesky, bool density_syrk, bool explicit_linv = true);
+
+    /// Bits of solverFallbackEvents(). Claude Generated (Oct 2026).
+    enum SolverFallbackEvent : unsigned {
+        kFallbackLinvAlloc  = 1u,  ///< Linv (FP64 or FP32) buffer allocation failed -> sygst/trsm
+        kFallbackLinvTrtri  = 2u,  ///< trtri failed or reported info != 0 -> sygst/trsm for that S
+        kFallbackCholFailed = 4u,  ///< cached factor not formed (allocation or potrf) -> sygvd
+        kFallbackInjected   = 8u   ///< CURCUMA_ROCM_FAIL_LINV is set (diagnostic fault injection)
+    };
+
+    /**
+     * @brief Bitmask (SolverFallbackEvent) of the solver fallbacks that happened since this
+     *        context was created; bits are only ever set. The plugin context has no logger, so
+     *        the method wrapper reads this after each calculation and prints each new bit once.
+     *
+     * The diagnostic environment variable CURCUMA_ROCM_FAIL_LINV=alloc|trtri|chol (read once
+     * per process) forces the corresponding failure so that the fallback and its notice can be
+     * tested; kFallbackInjected is then set as well. Claude Generated (Oct 2026).
+     */
+    unsigned solverFallbackEvents() const;
 
     /// Upload the geometry-constant H0, overlap S; allocate the resident work buffers.
     bool residentBegin(const double* H0_colmajor, const double* S_colmajor, int n);

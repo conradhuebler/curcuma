@@ -30,6 +30,7 @@
 
 #include <cmath>
 #include <memory>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -997,15 +998,31 @@ struct XtbHipContext::Impl {
     const double* curL = nullptr;       ///< FP64 factor of the current S (dL or dLc), set by cholFp64
     bool    chol_alloc_failed = false;  ///< allocation failed once: stay on sygvd (no retry per step)
     // ----- explicit inverse factor Linv = L^-1 (Claude Generated, Oct 2026) -----
-    // Opt-in -xtb.rocm_explicit_linv: Linv is formed once per S (rocsolver_dtrtri on a copy of
+    // -xtb.rocm_explicit_linv (default true): Linv is formed once per S (rocsolver_dtrtri on a copy of
     // the cached FP64 factor; dLinv32 is its FP32 rounding) and each step reduces with two
     // rocblas_trmm, F' = Linv F Linv^T, and back-transforms with C = Linv^T Y (trmm) instead of
     // sygst/trsm. Same cache key (n, s_version) as the factor. Any failure -> sygst/trsm path.
-    bool    opt_explicit_linv = false;  ///< -xtb.rocm_explicit_linv (default false)
+    bool    opt_explicit_linv = true;   ///< -xtb.rocm_explicit_linv (default true since Oct 15, 2026)
     double* dLinv = nullptr;   int linv_n = 0;   unsigned long long linv_ver = 0;
     float*  dLinv32 = nullptr; int linv32_n = 0; unsigned long long linv32_ver = 0;
     bool    linv_alloc_failed = false;  ///< allocation failed once: no retry per step
     unsigned long long linv_bad_ver = 0; ///< s_version for which trtri reported a singular L
+    unsigned long long chol_bad_ver = 0; ///< s_version for which potrf failed (no retry per step)
+    // ----- fallback events (Claude Generated, Oct 2026) -----
+    // Bits of XtbHipContext::SolverFallbackEvent, read by the method wrapper, which prints each
+    // new bit once (this TU has no logger). fail_inject is the diagnostic fault injection of
+    // CURCUMA_ROCM_FAIL_LINV (0 none, 1 alloc, 2 trtri, 3 chol), read once per process.
+    unsigned fallback_events = 0;
+    int      fail_inject = failInjectMode();
+    static int failInjectMode() {
+        static const int mode = [] {
+            const char* e = std::getenv("CURCUMA_ROCM_FAIL_LINV");
+            if (!e) return 0;
+            const std::string v(e);
+            return v == "alloc" ? 1 : v == "trtri" ? 2 : v == "chol" ? 3 : 0;
+        }();
+        return mode;
+    }
 
     void freeCholCache() {
         if (dLc) (void)hipFree(dLc);
@@ -1025,6 +1042,10 @@ struct XtbHipContext::Impl {
     const double* cholFp64(int n) {
         curL = nullptr;
         if (!opt_cached_chol || chol_alloc_failed || n <= 0 || n != res_n || !dS0) return nullptr;
+        if (chol_bad_ver == s_version) return nullptr;   // potrf failed for this S already
+        if (fail_inject == 3) {   // CURCUMA_ROCM_FAIL_LINV=chol: behave as if potrf failed
+            chol_bad_ver = s_version; fallback_events |= XtbHipContext::kFallbackCholFailed; return nullptr;
+        }
         if (dL && bnao == n && dL_ver == s_version) { curL = dL; return curL; }   // from computeIntegrals
         if (dLc && chol_n == n && chol_ver == s_version) { curL = dLc; return curL; }
         const size_t nn = static_cast<size_t>(n) * n;
@@ -1032,7 +1053,8 @@ struct XtbHipContext::Impl {
             if (dLc) (void)hipFree(dLc);
             dLc = nullptr; chol_n = 0; chol_ver = 0;
             if (hipMalloc(&dLc, nn * sizeof(double)) != hipSuccess) {
-                dLc = nullptr; chol_alloc_failed = true; (void)hipGetLastError(); return nullptr;
+                dLc = nullptr; chol_alloc_failed = true; (void)hipGetLastError();
+                fallback_events |= XtbHipContext::kFallbackCholFailed; return nullptr;
             }
             chol_n = n;
         }
@@ -1041,7 +1063,9 @@ struct XtbHipContext::Impl {
         if (hipStreamSynchronize(stream) != hipSuccess) return nullptr;
         rocblas_int info = 0;
         if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return nullptr;
-        if (info != 0) return nullptr;   // S not positive definite: sygvd reports it the usual way
+        if (info != 0) {   // S not positive definite: sygvd reports it the usual way
+            chol_bad_ver = s_version; fallback_events |= XtbHipContext::kFallbackCholFailed; return nullptr;
+        }
         chol_ver = s_version;
         curL = dLc;
         return curL;
@@ -1058,7 +1082,8 @@ struct XtbHipContext::Impl {
             if (dLc32) (void)hipFree(dLc32);
             dLc32 = nullptr; chol32_n = 0; chol32_ver = 0;
             if (hipMalloc(&dLc32, nn * sizeof(float)) != hipSuccess) {
-                dLc32 = nullptr; (void)hipGetLastError(); return nullptr;
+                dLc32 = nullptr; (void)hipGetLastError();
+                fallback_events |= XtbHipContext::kFallbackCholFailed; return nullptr;
             }
             chol32_n = n;
         }
@@ -1084,18 +1109,24 @@ struct XtbHipContext::Impl {
         if (linv_n != n || !dLinv) {
             if (dLinv) (void)hipFree(dLinv);
             dLinv = nullptr; linv_n = 0; linv_ver = 0;
-            if (hipMalloc(&dLinv, nn * sizeof(double)) != hipSuccess) {
-                dLinv = nullptr; linv_alloc_failed = true; (void)hipGetLastError(); return nullptr;
+            if (fail_inject == 1 || hipMalloc(&dLinv, nn * sizeof(double)) != hipSuccess) {
+                dLinv = nullptr; linv_alloc_failed = true; (void)hipGetLastError();
+                fallback_events |= XtbHipContext::kFallbackLinvAlloc; return nullptr;
             }
             linv_n = n;
         }
         if (hipMemcpyAsync(dLinv, L, nn * sizeof(double), hipMemcpyDeviceToDevice, stream) != hipSuccess) return nullptr;
         if (rocsolver_dtrtri(handle, rocblas_fill_lower, rocblas_diagonal_non_unit, n, dLinv, n, dInfo)
-            != rocblas_status_success) { linv_bad_ver = s_version; return nullptr; }
+            != rocblas_status_success) {
+            linv_bad_ver = s_version; fallback_events |= XtbHipContext::kFallbackLinvTrtri; return nullptr;
+        }
         if (hipStreamSynchronize(stream) != hipSuccess) return nullptr;
         rocblas_int info = 0;
         if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return nullptr;
-        if (info != 0) { linv_bad_ver = s_version; return nullptr; }
+        if (fail_inject == 2) info = 1;   // CURCUMA_ROCM_FAIL_LINV=trtri: behave as if L were singular
+        if (info != 0) {
+            linv_bad_ver = s_version; fallback_events |= XtbHipContext::kFallbackLinvTrtri; return nullptr;
+        }
         linv_ver = s_version;
         return dLinv;
     }
@@ -1111,7 +1142,8 @@ struct XtbHipContext::Impl {
             if (dLinv32) (void)hipFree(dLinv32);
             dLinv32 = nullptr; linv32_n = 0; linv32_ver = 0;
             if (hipMalloc(&dLinv32, nn * sizeof(float)) != hipSuccess) {
-                dLinv32 = nullptr; linv_alloc_failed = true; (void)hipGetLastError(); return nullptr;
+                dLinv32 = nullptr; linv_alloc_failed = true; (void)hipGetLastError();
+                fallback_events |= XtbHipContext::kFallbackLinvAlloc; return nullptr;
             }
             linv32_n = n;
         }
@@ -1937,6 +1969,17 @@ void XtbHipContext::setSolverOptions(bool cached_cholesky, bool density_syrk, bo
     m_impl->opt_explicit_linv = explicit_linv;
     m_impl->opt_cached_chol  = cached_cholesky;
     m_impl->opt_density_syrk = density_syrk;
+#endif
+}
+
+// Claude Generated (Oct 2026): solver fallback bitmask, see the header.
+unsigned XtbHipContext::solverFallbackEvents() const
+{
+#ifndef HAVE_ROCSOLVER
+    return 0u;
+#else
+    if (!m_impl) return 0u;
+    return m_impl->fallback_events | (m_impl->fail_inject ? kFallbackInjected : 0u);
 #endif
 }
 
