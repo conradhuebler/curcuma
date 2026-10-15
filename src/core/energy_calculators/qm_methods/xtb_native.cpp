@@ -1368,6 +1368,10 @@ double XTB::Calculation(bool gradient)
     double resident_band = 0.0;   // Tr(P H0) of the last device-resident step
     double resident_ecoul = 0.0, resident_ethird = 0.0, resident_emp = 0.0;  // its SCC energies
     const auto t_scf_start = clock::now();
+    // Claude Generated (Oct 2026): only UpdateMolecule cleared the flag, so a second Calculation on
+    // the same geometry (the bare-H0 retry after implausible charges) inherited "converged" from the
+    // first SCF and an SCF that ran out of iterations was accepted with exit code 0.
+    m_scf_converged = false;
     int iter;
     for (iter = 0; iter < max_iter; ++iter) {
         const auto t_iter0 = clock::now();

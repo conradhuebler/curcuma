@@ -53,6 +53,7 @@ Stand.
 
 ## 2. Leistung
 
+- **gfn2 D4-Zweikoerper-Gradient bei komprimiertem caffeine (Skalierung <= 0.55)**: analytisch weicht um bis 2.8 Eh/A von FD ab (gfn1 und 0.60 fehlerfrei); alle Backends gleich, Ursache offen (Werkzeug `CURCUMA_MP_GRAD_AUDIT`). Zusaetzlich D4-Gewichtsfallback in `cuda/xtb_gpu_context.cu` (~Zeile 2487) wie in `d4param_generator.cpp` nachziehen; erschoepfte SCF meldet 151 statt 150 Iterationen.
 - **GFN1/GFN2 auf ROCm** (Stand 2026-10-15, [docs/ROCM_GFN_POTENTIAL_2026-10-14.md](docs/ROCM_GFN_POTENTIAL_2026-10-14.md)): erledigt sind Dichte-GEMM über ncol, gecachter Cholesky-Faktor, syrk (Opt-in) und explizites L^-1 (Default seit 2026-10-15, peo201-chain 14.18 -> 12.85 s, n=3) mit einmaligem Fallback-Hinweis.
   Offen: `-gpu auto` nimmt ROCm bei jeder Größe (CPU gewinnt unter ca. 1000 Atomen); Host-Threads auf ROCm Default 1 (CUDA 8); Multipol-Potential/-Energie auf das Gerät; restliche Host-Lücke pro Iteration; D4-ATM 1.2 s; späterer FP64-Wechsel (-19 %, n=1); Pseudo-Diagonalisierung wie CUDA.
   CUDA-`w_from_goo` (`xtb_gpu_context.cu`) nimmt noch geschlossene Schale an; CUDA/Vulkan mit der Open-Shell-Gradientenkorrektur nicht gelaufen.

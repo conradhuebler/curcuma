@@ -1567,12 +1567,19 @@ D4ParameterGenerator::buildAtomRefW(int Z, size_t atom_idx, double q,
         expw[ir] = ew; expd[ir] = ed;
         norm += ew; dnorm += ed;
     }
-    const double ninv = (norm > 0.0) ? 1.0 / norm : 0.0;
+    // dftd4 weight_references: norm = 1/sum. When the CN lies so far beyond every reference
+    // that every Gaussian underflows (sum = 0, e.g. CN > ~15 for C in compressed geometries),
+    // gwk is exceptional and dftd4 puts the whole weight on the reference with the largest
+    // (covalent) CN. Returning gwk = 0 instead zeroed C6 for that atom: the energy jumped and
+    // the ATM CN chain rule divided 0/0 (NaN gradient). Claude Generated (Oct 2026).
+    double maxcn = 0.0;
+    for (int ir = 0; ir < nref; ++ir) maxcn = std::max(maxcn, refcovcn[ir]);
+    const double ninv = 1.0 / norm;
 
     for (int ir = 0; ir < nref; ++ir) {
         double gwk  = expw[ir] * ninv;
         double dgwk = ninv * (expd[ir] - expw[ir] * dnorm * ninv);
-        if (!std::isfinite(gwk))  gwk  = 0.0;
+        if (!std::isfinite(gwk))  gwk  = (refcovcn[ir] == maxcn) ? 1.0 : 0.0;
         if (!std::isfinite(dgwk)) dgwk = 0.0;
         const double qref = m_refq[elem][ir] + zeff;
         const double qmod = q + zeff;
