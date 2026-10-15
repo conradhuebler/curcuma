@@ -949,6 +949,12 @@ public:
     void setMixedPrecision(bool b)      { m_scf_mixed_precision = b; }
     void setFp32Threshold(double t)     { if (t > 0.0) m_scf_fp32_threshold = t; }
     void setGpuPartialDiag(bool b)      { m_gpu_partial_diag = b; }
+    // CPU pseudo-diagonalisation (opt-in, Claude Generated Oct 2026): replace the eigensolve of the
+    // middle SCF iterations by one first-order rotation between occupied and virtual orbitals plus an
+    // S-orthonormalisation (GEMMs only). See XTB::pseudoDiagStepCpu(). Default off.
+    void setPseudoDiagCpu(bool on, double max_dq, int max_steps, int min_nao)
+    { m_pseudo_cpu = on; if (max_dq > 0.0) m_pseudo_max_dq = max_dq; if (max_steps > 0) m_pseudo_max_steps = max_steps; if (min_nao >= 0) m_pseudo_min_nao = min_nao; }
+    int  pseudoDiagCpuCounts(int& rejected) const { rejected = m_pseudo_rejected; return m_pseudo_taken; }
     // Performance knobs, all with their measured defaults (see the PARAM help in
     // native_xtb_method.h). Claude Generated (Sep 2026).
     void setEigensolverMaxThreads(int n)    { m_eig_max_threads = std::max(0, n); }
@@ -1178,6 +1184,7 @@ private:
     void buildOrthonormalizer();
     // Diagonalise F in S metric, update wavefunction populations.
     bool solveEigen(const Matrix& F, const Matrix& S);                   // xtb_scf.cpp
+    bool pseudoDiagStepCpu(const Matrix& F);                            // xtb_scf.cpp (Oct 2026)
     void updatePopulations(const Matrix& S);                             // xtb_scf.cpp
 
     // Device-resident GFN1 SCF helpers (Claude Generated, GPU port Stage 2),
@@ -1480,6 +1487,16 @@ private:
     // Optional GPU eigensolver; default unset → CPU path unchanged. Claude Generated.
     ExternalEigensolver m_external_eigensolver;
     bool        m_eig_fp32 = false;              // per-iteration flag set by the SCF loop
+    // CPU pseudo-diagonalisation state (Oct 2026): flags set by the SCF loop, counters for the log.
+    bool        m_pseudo_cpu = false;
+    double      m_pseudo_max_dq = 0.05;
+    int         m_pseudo_max_steps = 8;
+    int         m_pseudo_min_nao = 1500;         // below this the eigensolve is cheap and the extra full solve costs more
+    bool        m_eig_pseudo = false;            // this iteration may take a pseudo step (set by the SCF loop)
+    bool        m_pseudo_used = false;           // this iteration DID take one (convergence is never accepted on it)
+    bool        m_pseudo_c_valid = false;        // m_wfn.C holds this SCF's eigenvectors (full solve or pseudo step)
+    int         m_pseudo_consecutive = 0;
+    int         m_pseudo_taken = 0, m_pseudo_rejected = 0;
     // Optional device-resident SCF backend (GPU port Stage 2); non-owning, set by
     // the GPU wrapper, default null → CPU SCF unchanged. Claude Generated.
     GpuScfBackend* m_gpu_scf = nullptr;
@@ -1665,6 +1682,14 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_mixed_precision", [&](const json& v){ if (v.is_boolean()) xtb.setMixedPrecision(v.get<bool>()); });
     lookup("scf_fp32_threshold",  [&](const json& v){ if (v.is_number()) xtb.setFp32Threshold(v.get<double>()); });
     lookup("scf_gpu_partial_diag",[&](const json& v){ if (v.is_boolean()) xtb.setGpuPartialDiag(v.get<bool>()); });
+    {   // Oct 2026: CPU pseudo-diagonalisation (the GPU flag scf_pseudo_diag is read by the GPU wrapper)
+        bool pd = false; double pdq = 0.0; int pst = 0; int pmin = -1;
+        lookup("scf_pseudo_diag_cpu", [&](const json& v){ if (v.is_boolean()) pd = v.get<bool>(); });
+        lookup("scf_pseudo_diag_max_dq", [&](const json& v){ if (v.is_number()) pdq = v.get<double>(); });
+        lookup("scf_pseudo_diag_max_steps", [&](const json& v){ if (v.is_number()) pst = static_cast<int>(std::lround(v.get<double>())); });
+        lookup("scf_pseudo_diag_cpu_min_nao", [&](const json& v){ if (v.is_number()) pmin = static_cast<int>(std::lround(v.get<double>())); });
+        xtb.setPseudoDiagCpu(pd, pdq, pst, pmin);
+    }
     // Performance knobs (Claude Generated, Sep 2026). Defaults are the measured ones;
     // these exist so a machine can be tuned without a rebuild (scripts/tuning_sweep.py).
     lookup("eigensolver_max_threads", [&](const json& v){ if (v.is_number()) xtb.setEigensolverMaxThreads(static_cast<int>(v.get<double>())); });

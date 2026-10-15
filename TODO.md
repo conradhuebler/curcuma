@@ -56,7 +56,8 @@ Stand.
 - **GFN2 auf der GPU, Eigenlöser = 73 % des Laufs** (polymer_2x, 1x A4500). Offen:
   (a) erledigt 15. Okt. 2026: `-scf_pseudo_diag` ist Standard (Betreiberentscheidung); polymer_2x 4x A4500 113,6 -> 90,0 s;
   (b) `-scf_pseudo_diag_fp64` auf einer GPU mit vollem FP64 (H200) messen;
-  (c) CPU-Pfad für `-scf_pseudo_diag` in `XTB::solveEigen` (Schätzung 20 bis 25 %, nicht implementiert, kein Gewinn unter ~1500 Basisfunktionen); vom Betreiber am 15. Okt. 2026 nach dem verteilten Pseudo-Schritt eingeplant; (d) Pseudo-Schritt auf mehrere GPUs verteilen (läuft heute auf Device 0, ~3,4 s je Iteration auf polymer_2x, geschätzt 1,3 s);
+  (c) CPU-Pfad `-scf_pseudo_diag_cpu` erledigt 15. Okt. 2026 (opt-in, EXPERIMENTAL): polymer GFN2 -9 %, GFN1 -19 %, [docs/GFN2_GPU_COST_PLAN.md](docs/GFN2_GPU_COST_PLAN.md); offen: Default-Entscheidung, MOR41/GMTKN55-Lauf, FP32-GEMMs für die FP32-Phase;
+  (d) Pseudo-Schritt auf mehrere GPUs verteilen: nach Messung verworfen (Schritt 2,3 s von 3,4 s je Iteration, geschätzter Gewinn 5 s von 90),
   (d) Teilspektrum: der residente Loop übergibt `n_eig = 0`, Grund unbekannt, schließt sich derzeit mit der verteilten FP64-Lösung aus;
   (e) Schwellen `gpu_eigensolver_min_nao` (4000) und `gpu_density_min_nao` nachmessen;
   (f) `purify`/`lobpcg` gibt es nur auf der CPU, auf der GPU ist es der einzige Hebel, der die Skalierung ändert;

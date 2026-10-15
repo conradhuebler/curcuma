@@ -1368,6 +1368,7 @@ double XTB::Calculation(bool gradient)
     double resident_band = 0.0;   // Tr(P H0) of the last device-resident step
     double resident_ecoul = 0.0, resident_ethird = 0.0, resident_emp = 0.0;  // its SCC energies
     const auto t_scf_start = clock::now();
+    m_pseudo_c_valid = false; m_pseudo_consecutive = 0; m_pseudo_used = false; m_eig_pseudo = false;   // Oct 2026
     int iter;
     for (iter = 0; iter < max_iter; ++iter) {
         const auto t_iter0 = clock::now();
@@ -1630,6 +1631,11 @@ double XTB::Calculation(bool gradient)
             // (previous max|dq| above the threshold; iter 0 starts in FP32 via dq_prev=1e30),
             // reverting to FP64 near convergence so the converged energy is FP64. Claude Generated.
             m_eig_fp32 = fp32_wanted(dq_prev);
+            // Oct 2026 (opt-in -scf_pseudo_diag_cpu): a pseudo-diagonalisation step may replace the
+            // eigensolve while the residual is below scf_pseudo_diag_max_dq and still above 10x the
+            // convergence threshold, so the last iterations are full solves (exact eigenpairs for the gradient).
+            m_eig_pseudo = m_pseudo_cpu && !scf_jac_active && iter > 0
+                           && dq_prev < m_pseudo_max_dq && dq_prev > 10.0 * thresh;
 
             // Diagonalize. Let MKL thread the eigensolve (dsygst/dsyevd/dtrsm) for a
             // single large molecule; the surrounding MklSerialScope keeps MKL serial
@@ -1766,7 +1772,7 @@ double XTB::Calculation(bool gradient)
         // XL-BOMD corrector: optionally require a minimum number of corrector SCF
         // cycles (scf_xlbomd_correctors) before accepting convergence, polishing the
         // density beyond the loose threshold. Default 1 = no effect. Claude Generated.
-        if (iter > 0 && !m_eig_fp32
+        if (iter > 0 && !m_eig_fp32 && !m_pseudo_used
             && (!xlbomd_corrector_step || iter + 1 >= m_scf_xlbomd_correctors)) {
             // dq is the full-SCC-vector residual computed above (shell charges for
             // GFN1, + atomic multipole moments for GFN2), matching what the mixer
