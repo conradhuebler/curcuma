@@ -134,6 +134,15 @@ option(USE_VULKAN
 # USE_AVX2 or USE_MARCH_NATIVE alongside); CMake errors out if AVX2 cannot be enabled.
 option(USE_GFNFF_FAST_EXP
     "Enable SIMD-vectorized exp() in GFN-FF dcn hot loop (WP-D Stage B, requires AVX2)" OFF)
+# Sep 2026: every unit conversion uses CODATA 2018 (src/core/units.h). ON restores the
+# per-site constants curcuma used before (seven Bohr radii incl. the GFN-FF Fortran literal
+# 0.52917726, older Hartree factors) bit for bit - for reproducing earlier results and for
+# exact comparison with reference codes. See docs/UNIT_CONSTANTS.md.
+option(USE_LEGACY_UNIT_CONSTANTS
+    "Use the pre-Sep-2026 per-site unit constants instead of CODATA 2018 everywhere" OFF)
+if(USE_LEGACY_UNIT_CONSTANTS)
+    add_compile_definitions(CURCUMA_LEGACY_UNIT_CONSTANTS=1)
+endif()
 option(GFNFF_CN_DCN_FUSION
     "Enable fused CN+DCN single-pass (WP-D Stage D, no SIMD dependency)" OFF)
 if(GFNFF_CN_DCN_FUSION)
@@ -397,7 +406,15 @@ elseif(USE_AVX2)
 endif()
 if(NOT CURCUMA_EIGEN_ALIGN EQUAL 0)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DEIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN}")
-    message(STATUS "Eigen: EIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN} (pinned for g++/GPU-TU ABI parity)")
+    # Claude Generated (Sep 2026): the same pin for nvcc. The hipcc TUs got it in Jun 2026, the
+    # CUDA .cu TUs never did: ff_workspace_gpu.cu / gfnff_kernels.cu / xtb_gpu_context.cu include
+    # Eigen, so the CUDA plugin carried Eigen's inline allocation code in two ABIs (16 from nvcc,
+    # 64 from g++) and the linker kept one. An Eigen vector allocated with one and freed with the
+    # other aborts with "free(): invalid pointer" - which is what the March 2026 "CUDA heap
+    # corruption" workaround (deliberately leaking the host GFNFF object and parameter set, ~194 MB
+    # per structure in a GPU batch) was hiding (docs/MULTI_GPU_GAPS.md F-16).
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -DEIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN}")
+    message(STATUS "Eigen: EIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN} (pinned for g++/nvcc/hipcc ABI parity)")
 endif()
 
 # WP-D Stage B (May 2026): USE_GFNFF_FAST_EXP requires AVX2. Either USE_AVX2 or
@@ -480,8 +497,6 @@ set(curcuma_core_SRC
         src/capabilities/persistentdiagram.cpp
         src/capabilities/analysenciplot.cpp
         src/capabilities/curcumamethod.cpp
-        # Native LBFGS optimizer - Claude Generated (disabled, superseded by native_optimizer_adapters)
-        # src/capabilities/native_lbfgs_optimizer.cpp
         src/capabilities/confscan.cpp
         src/capabilities/confsearch.cpp
         src/capabilities/shared_bias_pool.cpp
@@ -495,6 +510,9 @@ set(curcuma_core_SRC
         src/capabilities/rmsd/rmsd_costmatrix.cpp
         src/capabilities/rmsd/rmsd_assignment.cpp
         src/capabilities/rmsdtraj.cpp
+        src/capabilities/external_potentials.cpp
+        src/capabilities/measurement.cpp
+        src/tools/cif.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/md_diagnostics.cpp
         src/capabilities/analysis.cpp
@@ -520,6 +538,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/xtb_scf.cpp
         src/core/energy_calculators/qm_methods/xtb_fragment_scf.cpp
         src/core/energy_calculators/qm_methods/xtb_dc.cpp
+        src/core/energy_calculators/qm_methods/xtb_precond.cpp
         src/core/energy_calculators/qm_methods/xtb_sparse.cpp
         src/core/energy_calculators/qm_methods/native_eigensolver.cpp
         src/core/energy_calculators/qm_methods/xtb_multipole.cpp
@@ -529,6 +548,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/ff_methods/gfnff_method.cpp
         src/core/energy_calculators/ff_methods/gfnff_torsions.cpp
         src/core/energy_calculators/ff_methods/gfnff_inversions.cpp
+        src/core/energy_calculators/ff_methods/gfnff_frag_charge.cpp
         src/core/energy_calculators/ff_methods/ff_workspace.cpp
         src/core/energy_calculators/ff_methods/ff_workspace_gfnff.cpp
         src/core/energy_calculators/ff_methods/ff_workspace_uff.cpp
@@ -541,6 +561,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/method_factory.cpp
         src/core/energy_calculators/gpu_plugin.cpp
         src/core/gpu_device_pool.cpp
+        src/core/gpu_fallback.cpp
         src/core/energy_calculators/qm_methods/eht_method.cpp
         src/core/energy_calculators/qm_methods/native_xtb_method.cpp
         src/core/energy_calculators/qm_methods/nddo.cpp
@@ -613,6 +634,9 @@ set(curcuma_cap_SRC
         src/capabilities/rmsd/rmsd_costmatrix.cpp
         src/capabilities/rmsd/rmsd_assignment.cpp
         src/capabilities/rmsdtraj.cpp
+        src/capabilities/external_potentials.cpp
+        src/capabilities/measurement.cpp
+        src/tools/cif.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/md_diagnostics.cpp
         src/capabilities/analysis.cpp
@@ -1051,6 +1075,20 @@ if(USE_CUDA)
     # the compiler's own default and a later set(... CACHE) is ignored.
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
         set(CMAKE_CUDA_ARCHITECTURES "${_curcuma_cuda_archs}" CACHE STRING "CUDA architectures")
+    else()
+        # Claude Generated (Sep 2026): a CACHE STRING is only ever written once - if this
+        # build directory already has ANY value (from a prior -DCMAKE_CUDA_ARCHITECTURES=...,
+        # an inherited env var, or a cluster module/toolchain file), the branch above never
+        # runs again on any later `cmake`/`make` in the same directory, and the toolkit-aware
+        # default (which already includes 90 for H100/H200) is silently skipped forever - the
+        # likely cause of "no GPU speedup on H200" when the cached value predates that card.
+        # This is not a curcuma bug, just CMake CACHE semantics; make it visible instead of
+        # silent. Fix: wipe this build dir (or `cmake --fresh`) to let the default apply, or
+        # pass an explicit -DCMAKE_CUDA_ARCHITECTURES=<your target, e.g. 90 for H200>.
+        message(STATUS "CMAKE_CUDA_ARCHITECTURES already cached as '${CMAKE_CUDA_ARCHITECTURES}' "
+                       "(NOT curcuma's toolkit-aware default '${_curcuma_cuda_archs}') - "
+                       "if this build targets a different GPU, wipe this build directory "
+                       "or pass -DCMAKE_CUDA_ARCHITECTURES explicitly.")
     endif()
     enable_language(CUDA)
     set(CMAKE_CUDA_STANDARD 17)
@@ -1113,7 +1151,7 @@ if(USE_CUDA)
         add_library(curcuma_cuda_mgpu SHARED
             src/core/energy_calculators/qm_methods/cuda/xtb_distributed_eigensolver.cpp)
         target_include_directories(curcuma_cuda_mgpu PRIVATE ${PROJECT_SOURCE_DIR})
-        target_link_libraries(curcuma_cuda_mgpu PRIVATE CUDA::cudart)
+        target_link_libraries(curcuma_cuda_mgpu PRIVATE CUDA::cudart CUDA::cublas)
         target_compile_definitions(curcuma_cuda_mgpu PRIVATE USE_CUDA)
         set_target_properties(curcuma_cuda_mgpu PROPERTIES
             POSITION_INDEPENDENT_CODE ON
@@ -1521,10 +1559,6 @@ endif()
 add_executable(curcuma_helper
         src/helpers/main.cpp)
         
-# cli_helper disabled - requires cli_parser.h (native-gfnff WIP)
-# add_executable(cli_helper
-#         src/helpers/cli_test.cpp)
-
 add_executable(parallel_scf
         src/helpers/parallel_scf.cpp)
 target_link_libraries(parallel_scf curcuma_core)
@@ -1557,13 +1591,13 @@ target_sources(Continuous
 )
 add_test(NAME molecule_comprehensive COMMAND test_molecule)
 
-add_test(NAME AAAbGal_dtemplate COMMAND AAAbGal dtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME AAAbGal_free COMMAND AAAbGal free WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME AAAbGal_template COMMAND AAAbGal template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME AAAbGal_subspace COMMAND AAAbGal subspace WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-#add_test(NAME AAAbGal_incremental COMMAND AAAbGal incr WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGlc_dtemplate COMMAND AAAbGlc dtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGlc_free COMMAND AAAbGlc free WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGlc_template COMMAND AAAbGlc template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGlc_subspace COMMAND AAAbGlc subspace WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+#add_test(NAME AAAbGlc_incremental COMMAND AAAbGlc incr WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 
-#set_tests_properties(AAAbGal_incremental PROPERTIES TIMEOUT 300)
+#set_tests_properties(AAAbGlc_incremental PROPERTIES TIMEOUT 300)
 
 add_test(NAME confscan_subspace COMMAND confscan_test subspace WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME confscan_free COMMAND confscan_test free WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
@@ -1592,7 +1626,7 @@ add_test(NAME energy_methods COMMAND test_energy_methods WORKING_DIRECTORY ${PRO
 # Claude Generated: Parameter I/O system comprehensive tests (October 2025)
 add_test(
     NAME parameter_io_tests
-    COMMAND bash ${CMAKE_SOURCE_DIR}/test_cases/test_parameter_io.sh
+    COMMAND bash ${CMAKE_SOURCE_DIR}/test_cases/scripts/test_parameter_io.sh
     WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
 )
 

@@ -58,7 +58,8 @@ bool D4Evaluator::pairEnergyAndGradient(const GFNFFDispersion& pair,
                                         Eigen::Vector3d& dE_dr_vec,
                                         double& dE_dCN_i,
                                         double& dE_dCN_j,
-                                        double& disp_sum_out) const
+                                        double& disp_sum_out,
+                                        std::size_t pair_index) const
 {
     E = 0.0;
     dE_dr_vec.setZero();
@@ -114,11 +115,14 @@ bool D4Evaluator::pairEnergyAndGradient(const GFNFFDispersion& pair,
     //   E_pair = -C6 · disp_sum · ζc6
     //   dE/dCN_i (via dC6/dCN_i) = -dc6dcn(i,j) · disp_sum · ζc6
     const double dc_factor = disp_sum * pair.zetac6;
+    // Oct 2026: per-pair dc6dcn of the generator (former dense-matrix cells (i,j), (j,i));
+    // a pair missing from the list had zero cells, i.e. dE_dCN stays 0.
     if (m_data) {
-        const Matrix& dc = m_data->getDC6DCN();
-        if (dc.rows() > pair.i && dc.cols() > pair.j) {
-            dE_dCN_i = -dc(pair.i, pair.j) * dc_factor;
-            dE_dCN_j = -dc(pair.j, pair.i) * dc_factor;
+        double dc_i, dc_j;
+        std::size_t hint = pair_index;
+        if (m_data->getDC6DCN().lookup(pair.i, pair.j, hint, dc_i, dc_j)) {
+            dE_dCN_i = -dc_i * dc_factor;
+            dE_dCN_j = -dc_j * dc_factor;
         }
     }
     return true;
@@ -235,7 +239,8 @@ double D4Evaluator::computeEnergyAndGradient(const std::vector<int>& atoms,
             double disp_sum = 0.0;
 
             if (!pairEnergyAndGradient(pair, rij, with_gradient,
-                                       E_pair, dE_dr, dEdCN_i, dEdCN_j, disp_sum)) {
+                                       E_pair, dE_dr, dEdCN_i, dEdCN_j, disp_sum,
+                                       static_cast<std::size_t>(p))) {
                 continue;
             }
 

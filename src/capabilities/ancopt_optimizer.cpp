@@ -1,6 +1,6 @@
 /*
  * <AncOpt Optimizer Implementation>
- * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * Port of AncOpt from XTB by Stefan Grimme
  * Original: external/xtb/src/optimizer.f90
@@ -21,6 +21,7 @@
 #endif
 #endif
 
+#include "src/core/units.h"
 #include "ancopt_optimizer.h"
 #include "optimisation/rf_solver.h"
 #include "src/core/citation_registry.h"
@@ -186,6 +187,9 @@ bool ANCCoordinates::generateANC(const Matrix& cartesian_hessian, const Vector& 
     }
 
     // Initialize internal coordinates from Cartesian
+    for (int dof : frozen_dofs)
+        if (dof >= 0 && dof < n3)
+            B.row(dof).setZero();
     setCartesian(xyz);
 
     CurcumaLogger::success("ANC generated with " + std::to_string(nvar) + " internal coordinates");
@@ -339,6 +343,9 @@ bool ANCCoordinates::generateANCLanczos(const Matrix& H, const Vector& xyz,
         std::swap(hess(i, i), hess(j, j));
     }
 
+    for (int dof : frozen_dofs)
+        if (dof >= 0 && dof < n3)
+            B.row(dof).setZero();
     setCartesian(xyz);
 
     auto t_end = clk::now();
@@ -452,6 +459,18 @@ bool ANCOptimizer::InitializeOptimizerInternal() {
 
     // Calculate number of internal coordinates
     int nvar = 3 * m_molecule.AtomCount() - (is_linear ? 5 : 6);
+    // Claude Generated (Sep 2026) - Held atoms take their coordinates out, and with
+    // three or more of them held nothing is left of free translation or rotation
+    // (one held atom leaves the three rotations about it, two the one about their axis).
+    const std::vector<int> frozen = frozenDofs();
+    m_anc->frozen_dofs = frozen;
+    if (!frozen.empty()) {
+        const int held = int(frozen.size()) / 3;
+        const int free_atoms = m_molecule.AtomCount() - held;
+        nvar = 3 * free_atoms - (held >= 3 ? 0 : held == 2 ? 1 : 3);
+        CurcumaLogger::info_fmt("ANCOpt: {} atoms held, {} internal coordinates for the rest",
+            held, nvar);
+    }
 
     // Claude Nov 2025: BUG FIX - Ensure nvar is positive
     if (nvar <= 0) {
@@ -505,8 +524,12 @@ bool ANCOptimizer::InitializeOptimizerInternal() {
     // Generate initial model Hessian
     Matrix cart_hess = generateModelHessian(m_molecule);
 
-    // Project out translations and rotations
-    projectTranslationsRotations(cart_hess, m_molecule);
+    // Project out translations and rotations -- or, with held atoms, the held
+    // coordinates: then there is no free rigid-body motion to project.
+    if (frozen.empty())
+        projectTranslationsRotations(cart_hess, m_molecule);
+    else
+        projectFrozenAtoms(cart_hess);
 
     // Generate ANC from Hessian
     if (!generateANCFromHessian(cart_hess, m_molecule)) {
@@ -574,7 +597,10 @@ Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates
 
         // Generate new model Hessian
         Matrix cart_hess = generateModelHessian(m_molecule);
-        projectTranslationsRotations(cart_hess, m_molecule);
+        if (m_anc->frozen_dofs.empty())
+            projectTranslationsRotations(cart_hess, m_molecule);
+        else
+            projectFrozenAtoms(cart_hess);
 
         // Regenerate ANC
         Vector current_xyz(3 * m_molecule.AtomCount());
@@ -671,7 +697,7 @@ Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates
     // which is NOT in the reference. For systems with many internal coordinates the
     // sqrt(nvar) scaling of the true step norm was shrunk to a tiny per-step radius,
     // producing "slurring" optimization with many small steps.
-    double maxdispl_ang = m_maxdispl * 0.529177; // Bohr → Å
+    double maxdispl_ang = m_maxdispl * CurcumaUnit::Length::bohr_radius_or_legacy(0.529177); // Bohr → Å
     for (int i = 0; i < m_displ.size(); ++i) {
         if (std::abs(m_displ(i)) > maxdispl_ang) {
             m_displ(i) = std::copysign(maxdispl_ang, m_displ(i));
@@ -681,7 +707,7 @@ Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates
     // XTB: exit micro-loop (= regenerate ANC) if step norm > 2.0 Bohr after iter 2.
     // This prevents the Hessian from being updated with a garbage step.
     // Reference: XTB optimizer.f90 relax() Zeile 733-736
-    if (m_micro_current > 2 && m_displ.norm() > 2.0 * 0.529177) {
+    if (m_micro_current > 2 && m_displ.norm() > 2.0 * CurcumaUnit::Length::bohr_radius_or_legacy(0.529177)) {
         CurcumaLogger::warn_fmt("Large step detected ({:.3f} A), forcing ANC regeneration",
                                 m_displ.norm());
         m_needs_anc_regeneration = true;
@@ -851,7 +877,7 @@ Matrix ANCOptimizer::generateModelHessian(const Molecule& mol) {
     // Conversion: 1 Bohr = 0.529177 Å
     // Geometry stored in Å, parameters in Bohr.
     // Hessian units: Eh/Å² (consistent with gradient in Eh/Å).
-    const double A2B = 1.0 / 0.529177; // Å → Bohr
+    const double A2B = CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.0 / 0.529177); // Å → Bohr
     const double A2B2 = A2B * A2B;     // for converting Eh/Bohr² → Eh/Å²
 
     // Lindh 1995 reference distances r0 [Bohr] (Table 1), indexed by period:
@@ -1027,6 +1053,29 @@ Matrix ANCOptimizer::generateModelHessian(const Molecule& mol) {
 }
 
 
+
+std::vector<int> ANCOptimizer::frozenDofs() const
+{
+    std::vector<int> dofs;
+    if (!m_context.use_constraints)
+        return dofs;
+    for (size_t i = 0; i < m_context.atom_constraints.size() && int(i) < m_molecule.AtomCount(); ++i) {
+        if (m_context.atom_constraints[i] == 0)
+            for (int k = 0; k < 3; ++k)
+                dofs.push_back(3 * int(i) + k);
+    }
+    return dofs;
+}
+
+void ANCOptimizer::projectFrozenAtoms(Matrix& hessian) const
+{
+    for (int dof : m_anc->frozen_dofs) {
+        if (dof < 0 || dof >= hessian.rows())
+            continue;
+        hessian.row(dof).setZero();
+        hessian.col(dof).setZero();
+    }
+}
 
 bool ANCOptimizer::generateANCFromHessian(const Matrix& cart_hess, const Molecule& mol) {
     // Convert Cartesian coordinates to flat vector

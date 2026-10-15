@@ -73,7 +73,7 @@ void FFWorkspace::setInteractionLists(GFNFFParameterSet&& params)
 
     // Method type and distance unit factor
     m_method_type = params.method_type;
-    m_au = (m_method_type != FFMethodType::GFN_FF) ? 1.889726125 : 1.0;
+    m_au = (m_method_type != FFMethodType::GFN_FF) ? CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.889726125) : 1.0;
 
     m_dispersion_enabled = params.dispersion_enabled;
     m_hbond_enabled = params.hbond_enabled;
@@ -229,6 +229,47 @@ void FFWorkspace::updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds)
     for (int t = 0; t < T; ++t) {
         m_partitions[t].xbonds = linearRange(m_xbonds.size(), t, T);
     }
+}
+
+void FFWorkspace::updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
+                                   const std::vector<GFNFFRepulsion>& nonbonded_reps)
+{
+    m_bonded_reps = bonded_reps;
+    m_nonbonded_reps = nonbonded_reps;
+    // Re-partition repulsion ranges only (same pattern as updateHBonds/updateXBonds)
+    int T = m_num_threads;
+    for (int t = 0; t < T; ++t) {
+        m_partitions[t].bonded_reps = linearRange(m_bonded_reps.size(), t, T);
+        m_partitions[t].nonbonded_reps = linearRange(m_nonbonded_reps.size(), t, T);
+    }
+}
+
+void FFWorkspace::updateD4Dispersions(std::vector<GFNFFDispersion>&& pairs)
+{
+    // Claude Generated (Sep 2026): same swap + re-partition pattern as updateRepulsion().
+    m_d4_dispersions = std::move(pairs);
+    int T = m_num_threads;
+    for (int t = 0; t < T; ++t)
+        m_partitions[t].d4_dispersions = linearRange(m_d4_dispersions.size(), t, T);
+}
+
+void FFWorkspace::updateCoulombPairs(std::vector<GFNFFCoulomb>&& pairs)
+{
+    // Claude Generated (Sep 2026): same swap + re-partition pattern as updateRepulsion().
+    // The per-atom self-energy parameters (m_coul_*) are topology-only and stay untouched.
+    m_coulombs = std::move(pairs);
+    int T = m_num_threads;
+    for (int t = 0; t < T; ++t)
+        m_partitions[t].coulombs = linearRange(m_coulombs.size(), t, T);
+}
+
+void FFWorkspace::updateBondHBData(const std::vector<int>& nr_hb, std::vector<BondHBEntry>&& data)
+{
+    // Claude Generated (Sep 2026): see the declaration. nr_hb is indexed like m_bonds.
+    const size_t nb = std::min(nr_hb.size(), m_bonds.size());
+    for (size_t b = 0; b < nb; ++b)
+        m_bonds[b].nr_hb = nr_hb[b];
+    m_bond_hb_data = std::move(data);
 }
 
 void FFWorkspace::setCoulombSelfEnergyParams(const Vector& chi_base, const Vector& gam,

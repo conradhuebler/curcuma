@@ -1,7 +1,7 @@
 {
   "molecule": {
     "name": "complex",
-    "geometry_file": "test_cases/molecules/larger/complex.xyz",
+    "geometry_file": "test_cases/structures/clusters/macrocycle-bgal.xyz",
     "atoms": [
       {
         "element": "C",

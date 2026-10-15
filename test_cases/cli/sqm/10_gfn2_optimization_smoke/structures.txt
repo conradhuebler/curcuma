@@ -1,0 +1,4 @@
+# Structures from test_cases/structures (id, optionally 'as <file name>'); see structures/README.md
+caffeine
+methane as CH4.xyz
+water

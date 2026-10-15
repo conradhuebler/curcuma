@@ -19,13 +19,16 @@
  */
 
 #include <Eigen/Dense>
+#include <algorithm>
 #include <iomanip>
+#include <memory>
 #include <sstream>
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
+#include "src/core/energy_calculators/method_factory.h"
 #include "src/core/intra_parallel_context.h"
 #include "src/core/gpu_device_pool.h"
 
@@ -219,6 +222,14 @@ void HessianThread::Threaded()
 Hessian::Hessian(const std::string& method, const json& controller, bool silent)
     : Hessian(method, ConfigManager("hessian", controller), silent)
 {
+    // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md H-2): ConfigManager keeps only scalar
+    // top-level keys, so method sub-scopes (xtb, gfnff, eeq_solver, ...) handed in by
+    // executeHessian were dropped before the displacement workers built their EnergyCalculators
+    // (-scf_threshold changed the frequencies by exactly 0). Re-attach them.
+    for (const std::string& scope : MethodFactory::methodParameterScopes()) {
+        if (controller.contains(scope) && controller[scope].is_object())
+            m_controller[scope] = controller[scope];
+    }
 }
 
 Hessian::Hessian(const json& controller, bool silent)
@@ -343,6 +354,37 @@ void Hessian::LoadHessian(const std::string& file)
 
 void Hessian::start()
 {
+    // Claude Generated (Oct 2026): with -scf_precond (native xTB) the preconditioner M is built once at the
+    // reference geometry by this calculator, before the workers start; the workers' XTB objects take it over
+    // (XTB::adoptSharedPreconditioner, process-wide, alive while this object lives) instead of each building
+    // its own M at its first displaced geometry. Without -scf_precond nothing happens here.
+    std::unique_ptr<EnergyCalculator> precond_owner;
+    if (m_hess_calc) {
+        auto precond_of = [](const json& j) -> std::string {
+            if (j.contains("xtb") && j["xtb"].is_object() && j["xtb"].contains("scf_precond") && j["xtb"]["scf_precond"].is_string())
+                return j["xtb"]["scf_precond"].get<std::string>();
+            if (j.contains("scf_precond") && j["scf_precond"].is_string())
+                return j["scf_precond"].get<std::string>();
+            return "none";
+        };
+        // GPU runs: no extra calculator (it would hold a device context during the whole Hessian); the workers then
+        // build their own M as before.
+        // Only the native xTB methods have the preconditioner (MethodFactory maps exactly "gfn1"/"gfn2" to NativeXtbMethod).
+        std::string method_lc = m_method;
+        std::transform(method_lc.begin(), method_lc.end(), method_lc.begin(), ::tolower);
+        const bool native_xtb = (method_lc == "gfn1" || method_lc == "gfn2");
+        if (native_xtb && precond_of(m_controller) != "none" && !curcuma::GpuDevicePool::instance().active()) {
+            // Mark the reference calculator and the workers (all built from m_controller) for sharing M; internal key.
+            if (!m_controller.contains("xtb") || !m_controller["xtb"].is_object()) m_controller["xtb"] = json::object();
+            m_controller["xtb"]["_scf_precond_share"] = true;
+            precond_owner = std::make_unique<EnergyCalculator>(m_method, m_controller);
+            precond_owner->setVerbosity(0);
+            precond_owner->setParameter(m_parameter);
+            precond_owner->setMolecule(m_molecule.getMolInfo());
+            precond_owner->CalculateEnergy(false);
+            CurcumaLogger::set_verbosity(m_verbosity);
+        }
+    }
     if (m_hess_calc) {
 
         if (m_hess == 1) {
@@ -356,6 +398,12 @@ void Hessian::start()
         LoadMolecule(m_read_xyz);
         LoadHessian(m_read_file);
     }
+    // Claude Generated (Sep 2026): the displacement workers build their own EnergyCalculators,
+    // whose save/restore of the process-wide logger level interleaves when several run at once
+    // (CLAUDE.md Known Issue #3) and can leave it at 0 - the frequencies were then computed but
+    // never printed with -threads > 1. Re-assert the level at the pool boundary, as the MD/opt
+    // pool helpers do.
+    CurcumaLogger::set_verbosity(m_verbosity);
 
     m_frequencies = ConvertHessian(m_hessian);
 
@@ -458,7 +506,7 @@ Vector Hessian::ConvertHessian(Matrix& hessian)
     //   gfn1  1490.4/3515.4/3621.4  vs xtb 1490.57/3515.28/3626.07
     //   gfn2  1574.9/3486.3/3487.0  vs xtb 1574.99/3486.05/3491.64
     //   gfnff 1631.9/3635.0/3637.6  vs xtb 1632.01/3634.77/3637.31
-    // Guarded by the ctest `gradient_unit_contract` (test_cases/check_gradient_units.py).
+    // Guarded by the ctest `gradient_unit_contract` (test_cases/scripts/check_gradient_units.py).
     //
     // A Hessian READ from file (ReadHessian) is divided by au^2 on input, so this
     // factor cancels there and such a file is taken as Eh/Bohr^2 — the usual
@@ -586,8 +634,15 @@ void Hessian::CalculateHessianThreaded()
     if (m_method.compare("gfnff") == 0) {
         m_threads = 1;
         CurcumaLogger::warn("GFN-FF enforces single thread approach for numerical stability");
+    } else if (curcuma::GpuDevicePool::instance().active()) {
+        // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md G2-16): one displacement worker per
+        // GPU slot at least (each worker leases its device, HessianThread::execute); the default
+        // -threads 1 used to leave every GPU but device 0 idle.
+        m_threads = std::min(std::max(m_threads, curcuma::GpuDevicePool::instance().capacity()),
+                             static_cast<int>(m_molecule.AtomCount()));
     }
     std::vector<std::vector<int>> threads(m_threads);
+    pool->setActiveThreadCount(m_threads);   // m_threads may have changed above (atom count, GFN-FF, GPU slots)
 
     for (int i = 0; i < m_molecule.AtomCount(); ++i) {
         atoms.push_back(i);

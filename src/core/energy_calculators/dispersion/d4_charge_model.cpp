@@ -5,6 +5,7 @@
  * Claude Generated 2026 — AP ∂q/∂x (Phase 2).
  */
 
+#include "src/core/units.h"
 #include "d4_charge_model.h"
 
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"  // covalent radii + CN form
@@ -18,7 +19,7 @@ namespace curcuma::dispersion {
 namespace {
     constexpr double TSQRT2PI       = 0.797884560802866;   // sqrt(2/π)
     constexpr double TWO_OVER_SQRTPI = 1.1283791670955126; // 2/sqrt(π)
-    constexpr double ANG2BOHR        = 1.8897259886;
+    constexpr double ANG2BOHR        = CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.8897259886);
     constexpr double K_SCALED        = 4.0 / 3.0;          // GFN-FF CN radius scaling
     constexpr double KN              = -7.5;               // GFN-FF erf-CN steepness
     constexpr double CNMAX           = 4.4;                // CN log-compression cap

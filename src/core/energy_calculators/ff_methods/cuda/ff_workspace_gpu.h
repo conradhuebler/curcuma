@@ -36,6 +36,7 @@
 #include "../gfnff_parameters.h"       // GFNFFParameterSet
 #include "../gfnff.h"                  // GFNFF::EEQGPUParams (WP2)
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -59,7 +60,7 @@ struct FFWorkspaceGPUImpl;
  *   gpu_ws.setGeometry(geom);           // Bohr row-major N×3
  *   gpu_ws.setEEQCharges(q);            // N EEQ charges
  *   gpu_ws.setD3CN(cn);                 // N D3 coordination numbers
- *   gpu_ws.updateDispersionDC6DCN(dc6dcn); // N×N dc6/dcn matrix
+ *   gpu_ws.computeDC6DCNOnGPU(gw, dgw);  // per-pair dc6/dcn on the device
  *   double E = gpu_ws.calculate(true);
  *   Matrix G = gpu_ws.gradient();       // N×3 Hartree/Bohr
  */
@@ -92,6 +93,21 @@ public:
 
     /// Set dynamic EEQ charges (geometry-dependent, size N)
     void setEEQCharges(const Vector& q);
+    /// Build the k_coulomb_tiles tile-pair list for the current atom count (Claude Generated, Sep 2026).
+    void ensureCoulombTiles();
+
+    /**
+     * @brief Split the implicit Coulomb term of ONE molecule over several GPUs (Claude Generated,
+     * Sep 2026, docs/MULTI_GPU_GAPS.md F-3). The tile-pair list of k_coulomb_tiles is divided into
+     * equal ranges; each helper evaluates its range on its own copy of coordinates/charges and
+     * the partial gradient/energy is added on this device. Off for periodic systems.
+     * @param helper_devices other devices (not this one); empty = off
+     * @param min_atoms      use it only from this many atoms on
+     */
+    void setCoulombSplitDevices(const std::vector<int>& helper_devices, int min_atoms);
+    std::string coulombSplitStatus() const;
+    bool prepareCoulombSplit();
+    void launchCoulombSplit();
 
     /// WP5-A: D2D path — charges already on GPU after GPU Schur complement.
     /// Enqueues a D2D copy on the main workspace stream; no H2D upload happens
@@ -176,20 +192,6 @@ public:
     // =========================================================================
 
     /**
-     * @brief Set CN pair list for GPU CN chain-rule gradient kernel.
-     *
-     * All atom pairs (i,j) within CN cutoff, with pre-computed scaled
-     * covalent radius sums. Uploaded to GPU once; geometry checked at runtime.
-     *
-     * @param idx_i      Atom i indices (size n_pairs)
-     * @param idx_j      Atom j indices (size n_pairs)
-     * @param rcov_sum   Scaled covalent radius sum per pair: 4/3*(rcov_i+rcov_j) in Bohr
-     */
-    void setCNPairList(const std::vector<int>& idx_i,
-                       const std::vector<int>& idx_j,
-                       const std::vector<double>& rcov_sum);
-
-    /**
      * @brief Set per-atom dlogdcn (logistic squashing factor for CN chain-rule).
      * dlogdcn[i] = exp(cnmax) / (exp(cnmax) + exp(cn_raw[i]))
      * Must be called every step after CN computation.
@@ -201,7 +203,7 @@ public:
      * @brief Generate CN pair list entirely on GPU (Apr 2026).
      *
      * Two-pass kernel: count valid pairs, allocate buffers, write (i,j,rcov_sum).
-     * Replaces CPU generateCNPairList() O(N^2) loop.
+     * Replaced the former host O(N^2) pair loop (removed Oct 2026).
      * Coordinates and atom types must already be on GPU.
      */
     void generateCNPairListOnGPU();
@@ -250,6 +252,49 @@ public:
     void updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,
                       const std::vector<int>& atom_types);
 
+    /**
+     * @brief Re-upload the bonded/non-bonded repulsion SoA after a periodic rebuild.
+     *
+     * Claude Generated (Sep 2026): counterpart to updateHBonds()/updateXBonds() for the
+     * repulsion pair lists (see GFNFF::updateNonbondedRepulsionIfNeeded()). RepulsionSoA::n
+     * is set from the passed vector's size on every call, so this is resize-aware in both
+     * directions (growing or shrinking pair count) without any extra bookkeeping — the
+     * underlying CudaBuffer reallocates only when the new count exceeds its current
+     * capacity, and the SoA's own `n` (used for every kernel launch bound) always reflects
+     * the just-uploaded count.
+     */
+    void updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
+                          const std::vector<GFNFFRepulsion>& nonbonded_reps);
+
+    /**
+     * @brief Re-upload the D4 dispersion SoA after a skin-triggered rebuild.
+     *
+     * Claude Generated (Sep 2026): counterpart to updateRepulsion() for the D4 pair list (see
+     * GFNFF::updateDispersionPairsIfNeeded()). Besides the pair SoA itself, three pieces of state
+     * are sized by the pair count and must follow it: the per-pair dc6dcn device buffers written
+     * by k_dc6dcn_per_pair (no host mirror since Oct 2026). The caller must invalidateGraph()
+     * afterwards (disp.n changed).
+     */
+    void updateDispersion(const std::vector<GFNFFDispersion>& pairs);
+
+    /// Claude Generated (Oct 2026): staged upload of rebuilt pair lists (updateDispersion(),
+    /// updateRepulsion()): chunked conversion by `threads` host threads into a pinned double
+    /// buffer, asynchronous copies. Same device content as the serial upload (enabled = false).
+    void setStagedListUpload(bool enabled, int threads)
+    {
+        m_staged_list_upload = enabled;
+        m_host_threads = std::max(1, threads);
+    }
+
+    /**
+     * @brief Re-upload the explicit Coulomb pair SoA (eeq_distance_cutoff > 0 only).
+     *
+     * Claude Generated (Sep 2026): see GFNFF::updateCoulombPairsIfNeeded(). The per-atom
+     * self-energy parameters are topology-only and are not touched. The caller must
+     * invalidateGraph() afterwards (coulomb.n changed).
+     */
+    void updateCoulombPairs(const std::vector<GFNFFCoulomb>& pairs);
+
     /// Get last uploaded HBond list (for CPU vs GPU comparison debugging)
     const std::vector<GFNFFHydrogenBond>& getLastHBonds() const { return m_last_hbonds; }
 
@@ -266,17 +311,6 @@ public:
                                      const Vector& alp,
                                      const Vector& chi_static);
 
-    /**
-     * @brief Upload per-pair dc6/dcn values for dispersion dEdcn on GPU.
-     *
-     * Extracts dc6dcn(i,j) and dc6dcn(j,i) for each dispersion pair from
-     * the full N×N matrix and uploads to GPU SoA arrays.
-     * Must be called every gradient step (dc6dcn is CN-dependent).
-     *
-     * @param dc6dcn  N×N matrix: dc6dcn(i,j) = dC6(i,j)/dCN(i)
-     */
-    void updateDispersionDC6DCN(const Matrix& dc6dcn);
-
     // =========================================================================
     // Phase 2: GPU dc6dcn per-pair computation (Claude Generated March 2026)
     // =========================================================================
@@ -291,7 +325,7 @@ public:
 
     /**
      * @brief Upload Gaussian weights + derivatives and compute dc6dcn per pair on GPU.
-     * Replaces: CPU computeDC6DCN() O(N²) + updateDispersionDC6DCN() extraction.
+     * Replaces the CPU computeDC6DCN() O(N²) matrix and its per-pair host extraction.
      * @param gw   Nested [N][nref] Gaussian weights (will be flattened to [N×MAX_REF])
      * @param dgw  Nested [N][nref] weight derivatives
      */
@@ -347,6 +381,9 @@ public:
     // =========================================================================
 
     void setDispersionEnabled(bool v);
+    /// Claude Generated (Sep 2026): let k_dc6dcn_per_pair also rewrite the per-pair C6 from the
+    /// current-step Gaussian weights (GFN-FF `dispersion_c6_update`, see GFNFF::refreshDispersionC6()).
+    void setDispersionC6Update(bool v) { m_disp_c6_update = v; }
     void setHBondEnabled(bool v);
     void setRepulsionEnabled(bool v);
     void setCoulombEnabled(bool v);
@@ -373,6 +410,18 @@ public:
     /// CPU 40 Bohr reach. Read from the gpu_cn_pair_cutoff_factor PARAM.
     void setCNPairCutoffFactor(double f) { m_cn_pair_cutoff_factor = f; }
     double getCNPairCutoffFactor() const { return m_cn_pair_cutoff_factor; }
+
+    /// K1 (Oct 2026, Claude Generated): Verlet skin of the CN pair list in Bohr. The list
+    /// holds pairs with r < factor*(rcov_i+rcov_j) + 2*skin; 0 reproduces the legacy list.
+    void setCNPairSkin(double skin_bohr) { m_cn_pair_skin_bohr = skin_bohr > 0.0 ? skin_bohr : 0.0; }
+    double getCNPairSkin() const { return m_cn_pair_skin_bohr; }
+
+    /// K1 (Oct 2026, Claude Generated): true when an atom moved more than max_disp_bohr since
+    /// the last generateCNPairListOnGPU() (own reference geometry, set by every build).
+    bool cnPairListStale(double max_disp_bohr);
+
+    /// Number of CN pair-list builds since construction (diagnostics).
+    long cnPairListBuilds() const { return m_cn_pair_builds; }
 
     // =========================================================================
     // GPU Topology Displacement Check (Claude Generated March 2026)
@@ -506,6 +555,29 @@ public:
     /// Claude Generated (March 2026): Required before cross-stream reads (e.g. EEQSolverGPU).
     void synchronizeMainStream();
 
+    /**
+     * K3 (Oct 2026, Claude Generated): record an event on the main stream once the inputs of the
+     * device EEQ solve are written (coordinates from setGeometry(), rhs_atoms from k_build_eeq_rhs
+     * in Phase 1). Call after prepareAndLaunchChargeIndependent() and BEFORE the D4 Gaussian weights
+     * / dc6dcn are enqueued, so a solver stream that waits on eeqInputsReadyEvent() runs in parallel
+     * to dc6dcn and the Phase-1 worker streams instead of behind them (the solver's legacy-stream
+     * barrier waits for every blocking stream).
+     */
+    void recordEEQInputsReady();
+    /// cudaEvent_t of recordEEQInputsReady() as void* (keeps CUDA types out of host headers).
+    void* eeqInputsReadyEvent() const;
+
+    /**
+     * K2 (Oct 2026, Claude Generated): launch the gradient-mode k_dispersion on the pairwise stream
+     * right after dc6dcn instead of in Phase 2. k_dispersion reads only geometry, the dispersion SoA
+     * (C6 refreshed by k_dc6dcn_per_pair, zetac6 from the Phase-1 topology charges baked in at
+     * pair-list build) and dc6dcn; it never reads the Phase-2 EEQ charges. It accumulates into
+     * d_grad, d_dEdcn and the E_DISP slot with atomicAdd, as before. Call after
+     * computeGaussianWeightsOnGPU(false). Returns false (and Phase 2 launches it as before) in the
+     * single-stream debug mode or when dispersion is off.
+     */
+    bool launchDispersionGradientEarly();
+
     // =========================================================================
     // WP2: GPU-side EEQ topology parameters (Claude Generated May 2026)
     // =========================================================================
@@ -574,10 +646,6 @@ private:
 
     // GPU CN chain-rule state (replaces sparse dcn matrices)
     Vector m_dlogdcn;                       ///< [N] logistic squashing factor
-    std::vector<int>    m_cn_pair_i;        ///< CN pair atom i indices
-    std::vector<int>    m_cn_pair_j;        ///< CN pair atom j indices
-    std::vector<double> m_cn_pair_rcov;     ///< CN pair scaled cov. radius sum
-    int                 m_cn_n_pairs = 0;   ///< Number of CN pairs
     bool                m_cn_pairs_on_gpu = false; ///< Whether CN pairs uploaded to GPU
     double              m_kn = -7.5;        ///< CN exponential decay constant
 
@@ -585,6 +653,8 @@ private:
     Vector  m_eeq_charges;
     Vector  m_topology_charges;
     bool    m_device_charges_ready = false;  ///< WP5-A: set by setEEQDeviceCharges(), skips H2D upload
+    int     m_sm_count             = 0;      ///< K2 (Oct 2026): SMs of the device, grid of the early dispersion
+    bool    m_disp_grad_launched   = false;  ///< K2 (Oct 2026): k_dispersion already enqueued this step
 
     // WP5-C (May 2026): GPU-side D4 dc6dcn skip-check state
     bool    m_dc6dcn_skip_pending = false;   ///< skip flag from previous step (read in current step)
@@ -598,11 +668,15 @@ private:
     std::vector<GFNFFHydrogenBond> m_last_hbonds;
     std::vector<GFNFFHalogenBond> m_last_xbonds;
 
-    // Host-side dispersion pair indices (for per-step dc6dcn extraction)
+    // Staged pair-list upload (setStagedListUpload(), Oct 2026)
+    bool m_staged_list_upload = false;
+    int  m_host_threads = 1;
+
+    // ROCm only (rocm/gfnff_rocm.hip; the CUDA source does not touch them since Oct 2026):
+    // host D4 pair indices for the ROCm gather-CSR rebuild, and the ROCm dc6dcn staging
+    // vectors, still filled there. Kept because the HIP source cannot be compiled here.
     std::vector<int> m_disp_idx_i_host;
     std::vector<int> m_disp_idx_j_host;
-
-    // Per-step dc6dcn staging buffer (pre-allocated, reused)
     std::vector<double> m_h_dc6dcn_ij;
     std::vector<double> m_h_dc6dcn_ji;
 
@@ -613,6 +687,7 @@ private:
 
     // Term enable flags
     bool m_dispersion_enabled = true;
+    bool m_disp_c6_update = true;   ///< Claude Generated (Sep 2026): per-step C6 refresh in k_dc6dcn_per_pair
     bool m_hbond_enabled      = true;
     bool m_repulsion_enabled  = true;
     bool m_coulomb_enabled    = true;
@@ -623,6 +698,8 @@ private:
 
     // Task #10 (Jun 2026): CN-derivative pair-list cutoff factor (× rcov sum)
     double m_cn_pair_cutoff_factor = 2.5;
+    double m_cn_pair_skin_bohr = 0.0;   ///< K1 (Oct 2026): pair-list skin, 0 = legacy
+    long   m_cn_pair_builds = 0;        ///< K1 (Oct 2026): build counter
 
     // Pre-allocated pinned staging buffers for async DMA transfers.
     // Claude Generated (March 2026): Pinned memory enables true async H2D/D2H via

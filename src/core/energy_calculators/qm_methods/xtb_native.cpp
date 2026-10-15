@@ -27,6 +27,7 @@
 
 #include "STO_CGTO.hpp"
 #include "src/core/curcuma_logger.h"
+#include "src/core/molecule.h"  // Molecule::GetFragments for the fragment SCF guess (Sep 2026)
 #include "src/core/citation_registry.h"
 #include "src/core/config_manager.h"
 #include "src/core/charge_extrapolation.h"
@@ -42,11 +43,41 @@
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <stdexcept>
+#include <thread>
+#include <vector>
 
 namespace curcuma::xtb {
+
+namespace {
+/// Transpose a square n x n matrix in place, in 64 x 64 tiles over up to 8 host threads
+/// (Claude Generated, Sep 29, 2026). Pure element swaps, so the result is exact. Used to
+/// turn a column-major device download into curcuma's row-major Matrix without a temporary.
+void transposeSquareInPlace(double* a, int n)
+{
+    constexpr int T = 64;
+    const int nb = (n + T - 1) / T;
+    const unsigned nt = std::max(1u, std::min(8u, std::thread::hardware_concurrency()));
+    auto work = [&](unsigned t) {
+        for (int bi = static_cast<int>(t); bi < nb; bi += static_cast<int>(nt)) {
+            const int i0 = bi * T, i1 = std::min(n, i0 + T);
+            for (int bj = bi; bj < nb; ++bj) {
+                const int j0 = bj * T, j1 = std::min(n, j0 + T);
+                for (int i = i0; i < i1; ++i)
+                    for (int j = (bi == bj ? i + 1 : j0); j < j1; ++j)
+                        std::swap(a[static_cast<size_t>(i) * n + j], a[static_cast<size_t>(j) * n + i]);
+            }
+        }
+    };
+    std::vector<std::thread> pool;
+    for (unsigned t = 0; t < nt; ++t) pool.emplace_back(work, t);
+    for (auto& th : pool) th.join();
+}
+} // namespace
 
 /* ------------------------------------------------------------------------- *
  *  Lifecycle
@@ -151,6 +182,8 @@ bool XTB::InitialiseMolecule()
     // system (different nsh/nat). Claude Generated.
     m_scf_history.clear();
     m_xlbomd_aux.clear();
+    // A new molecule needs a new SCF preconditioner (-scf_precond frag). Claude Generated (Oct 2026).
+    m_scf_precond_frag.reset();
 
     // ── Implicit solvation (Claude Generated, June 2026) ──
     // Build the self-consistent reaction-field model when a solvent is requested.
@@ -273,6 +306,97 @@ bool XTB::seedEEQGuess(Vector& q_sh_out)
                                    m_basis.nsh_at[iat] > 0 ? m_basis.nsh_at[iat] : 1));
         q_sh_out(s) = q_at(iat) * w;
     }
+    return true;
+}
+
+/* ------------------------------------------------------------------------- *
+ *  Fragment initial guess (Claude Generated, Sep 2026; operator's proposal).
+ *
+ *  Large clusters of many small molecules (mixture2: 1000 water + 400 urea,
+ *  6200 atoms) have a tiny GFN2 HOMO-LUMO gap (~0.1 eV per xtb 6.7.1), and the
+ *  first Fock matrix built from EEQ or bare-H0 charges moves up to ~2.5 e
+ *  between distant molecules; the SCF then runs away (measured: energy
+ *  +2e5 Eh by iteration 3, on CPU and GPU, FP32 and FP64). Starting from the
+ *  converged state of every isolated molecule puts iteration 0 next to the
+ *  physical solution. Each fragment is converged in its actual geometry, so the
+ *  GFN2 atomic dipoles/quadrupoles are already in the lab frame - no rotation
+ *  or molecule-type matching needed. Fragments = Molecule::GetFragments(), the
+ *  same partition large_system_mode=fragments uses.
+ * ------------------------------------------------------------------------- */
+bool XTB::seedFragmentGuess(Vector& q_sh_out, Matrix& dp_out, Matrix& qp_out)
+{
+    const int nsh = m_basis.nsh;
+    const int nat = m_atomcount;
+    if (nat <= 0 || nsh <= 0)
+        return false;
+    // A net charge cannot be assigned to fragments unambiguously - same limitation as
+    // large_system_mode=fragments. The caller falls back to the EEQ guess.
+    if (std::abs(static_cast<double>(m_charge)) > 1.0e-12)
+        return false;
+
+    const auto t0 = std::chrono::high_resolution_clock::now();
+
+    Mol full;
+    full.m_number_atoms = nat;
+    full.m_charge = 0;
+    full.m_spin = 0.0;
+    full.m_atoms = m_atoms;
+    full.m_geometry = m_geometry;
+    const std::vector<std::vector<int>> fragments = Molecule(full).GetFragments();
+    if (fragments.size() <= 1)
+        return false;
+
+    q_sh_out = Vector::Zero(nsh);
+    dp_out = Matrix::Zero(3, nat);
+    qp_out = Matrix::Zero(6, nat);
+
+    // The fragment SCFs are an implementation detail of the guess: keep their output
+    // (one SCF table per fragment) out of the log, restore the level afterwards.
+    const int saved_verbosity = CurcumaLogger::get_verbosity();
+    CurcumaLogger::set_verbosity(0);
+    bool ok = true;
+    int max_iter = 0, not_converged = 0;
+    for (const auto& atoms : fragments) {
+        Mol sub;
+        sub.m_number_atoms = static_cast<int>(atoms.size());
+        sub.m_charge = 0;
+        sub.m_spin = 0.0;
+        sub.m_geometry = Matrix(atoms.size(), 3);
+        for (std::size_t k = 0; k < atoms.size(); ++k) {
+            sub.m_atoms.push_back(m_atoms[atoms[k]]);
+            sub.m_geometry.row(k) = m_geometry.row(atoms[k]);
+        }
+        XTB frag(m_method);
+        frag.setScfGuess("eeq");   // never recurse into the fragment guess
+        frag.setIntraThreads(1);
+        if (!frag.InitialiseMolecule(sub)) { ok = false; break; }
+        frag.Calculation(false);
+        if (!frag.m_wfn.q_sh.allFinite()) { ok = false; break; }
+        max_iter = std::max(max_iter, frag.m_scf_iterations);
+        if (!frag.m_scf_converged) ++not_converged;
+        for (std::size_t k = 0; k < atoms.size(); ++k) {
+            const int a = atoms[k];
+            const int n = m_basis.nsh_at[a];
+            if (frag.m_basis.nsh_at[k] != n) { ok = false; break; }
+            q_sh_out.segment(m_basis.ish_at[a], n) = frag.m_wfn.q_sh.segment(frag.m_basis.ish_at[k], n);
+            if (m_method == MethodType::GFN2) {
+                dp_out.col(a) = frag.m_wfn.dp_at.col(k);
+                qp_out.col(a) = frag.m_wfn.qp_at.col(k);
+            }
+        }
+        if (!ok) break;
+    }
+    CurcumaLogger::set_verbosity(saved_verbosity);
+    if (!ok)
+        return false;
+
+    const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::high_resolution_clock::now() - t0).count();
+    if (saved_verbosity >= 1)
+        CurcumaLogger::result(fmt::format(
+            "SCF initial guess: {} fragments converged separately ({:.0f} ms, <= {} iterations{})",
+            fragments.size(), ms, max_iter,
+            not_converged ? fmt::format(", {} not converged", not_converged) : std::string()));
     return true;
 }
 
@@ -421,6 +545,9 @@ double XTB::Calculation(bool gradient)
     // SCF-setup block below) and their result (gpu_computed) is reused there, so the
     // device build runs exactly once. Any failure / non-resident mode → full host build.
     Matrix S, H0;
+    // Claude Generated (Sep 29, 2026): device path only - split of the "overlap + H0" bucket into
+    // the device integral build and the download of S/H0/L/gamma into the host matrices.
+    auto t_dev_built = t_cn;
     bool gpu_computed = false;        // device integral build succeeded (reused below)
     bool integrals_from_device = false;
     // X-I1: device d kernels are backend-gated. CUDA supports them; ROCm/Vulkan
@@ -446,15 +573,38 @@ double XTB::Calculation(bool gradient)
             if (basis_ok) m_gpu_basis_dirty = false;
         }
         gpu_computed = basis_ok && m_gpu_scf->beginComputed(gbf.xyz_bohr);
+        t_dev_built = clock::now();
         if (gpu_computed) {
             const int nao = m_basis.nao, nsh = m_basis.nsh;
-            Eigen::MatrixXd Scm(nao, nao), H0cm(nao, nao), Lcm(nao, nao), Gcm(nsh, nsh);
-            if (m_gpu_scf->downloadOverlap(Scm) && m_gpu_scf->downloadH0(H0cm)
-                && m_gpu_scf->downloadCholesky(Lcm) && m_gpu_scf->downloadGamma(Gcm)) {
-                m_S     = Scm;   // col-major device → row-major Matrix (S symmetric)
-                m_H0    = H0cm;  // H0 symmetric
-                m_X     = Lcm;   // m_X is column-major Eigen::MatrixXd → direct
-                m_gamma = Gcm;
+            // Claude Generated (Sep 29, 2026): download straight into the members. S and H0 come
+            // column-major into the row-major m_S/m_H0 and are then transposed in place, which
+            // gives exactly the element-wise copy the old temporaries made (m_S(i,j) = S(i,j))
+            // without two 1.9 GB temporaries and four serial copies (polymer_2x: 2.4 s -> see
+            // docs/GFN2_GPU_COST_PLAN.md stage 1a). Backends without the raw download keep the
+            // old path.
+            const auto td0 = clock::now();
+            bool got = false;
+            m_S.resize(nao, nao);
+            m_H0.resize(nao, nao);
+            if (m_gpu_scf->downloadOverlapInto(m_S.data()) && m_gpu_scf->downloadH0Into(m_H0.data())) {
+                transposeSquareInPlace(m_S.data(), nao);
+                transposeSquareInPlace(m_H0.data(), nao);
+                got = m_gpu_scf->downloadCholesky(m_X) && m_gpu_scf->downloadGamma(m_gamma);
+            } else {
+                Eigen::MatrixXd Scm(nao, nao), H0cm(nao, nao), Lcm(nao, nao), Gcm(nsh, nsh);
+                if (m_gpu_scf->downloadOverlap(Scm) && m_gpu_scf->downloadH0(H0cm)
+                    && m_gpu_scf->downloadCholesky(Lcm) && m_gpu_scf->downloadGamma(Gcm)) {
+                    m_S     = Scm;   // col-major device → row-major Matrix
+                    m_H0    = H0cm;
+                    m_X     = Lcm;   // m_X is column-major Eigen::MatrixXd → direct
+                    m_gamma = Gcm;
+                    got = true;
+                }
+            }
+            if (got) {
+                if (verb >= 3)
+                    CurcumaLogger::info_fmt("    S/H0/L/gamma download into the host copies: {:.0f} ms",
+                                            ms(td0, clock::now()));
                 integrals_from_device = true;
                 if (verb >= 2)
                     CurcumaLogger::info("SCF: integrals built on GPU device "
@@ -533,6 +683,10 @@ double XTB::Calculation(bool gradient)
         CurcumaLogger::info("Setup timing:");
         CurcumaLogger::info_fmt("  coordination numbers : {:8.2f} ms", ms(t0, t_cn));
         CurcumaLogger::info_fmt("  overlap + H0         : {:8.2f} ms", ms(t_cn, t_h0));
+        if (integrals_from_device) {
+            CurcumaLogger::info_fmt("    device build (S/H0/L/gamma) : {:8.2f} ms", ms(t_cn, t_dev_built));
+            CurcumaLogger::info_fmt("    host download + copy        : {:8.2f} ms", ms(t_dev_built, t_h0));
+        }
         CurcumaLogger::info_fmt("  orthonormalizer      : {:8.2f} ms", ms(t_h0, t_ortho));
         CurcumaLogger::info_fmt("  Coulomb gamma matrix : {:8.2f} ms", ms(t_ortho, t_gamma));
         if (m_method == MethodType::GFN2) {
@@ -680,9 +834,31 @@ double XTB::Calculation(bool gradient)
         }
         if (verb >= scf_min)
             CurcumaLogger::result("SCF initial guess: warm-start from previous step");
-    } else if (m_scf_guess == "eeq" && !m_force_h0_guess) {
+    } else if ((m_scf_guess == "eeq" || m_scf_guess == "fragments") && !m_force_h0_guess) {
+        bool seeded = false;
+        if (m_scf_guess == "fragments") {
+            Vector q_sh_guess;
+            Matrix dp_guess, qp_guess;
+            if (seedFragmentGuess(q_sh_guess, dp_guess, qp_guess)) {
+                q_sh_old   = q_sh_guess;
+                m_wfn.q_sh = q_sh_guess;
+                m_wfn.q_at.setZero(m_atomcount);
+                for (int s = 0; s < nsh; ++s)
+                    m_wfn.q_at(m_basis.sh2at[s]) += q_sh_guess(s);
+                if (m_method == MethodType::GFN2) {
+                    m_wfn.dp_at = dp_guess;
+                    m_wfn.qp_at = qp_guess;
+                }
+                seeded = true;
+            } else if (verb >= scf_min) {
+                CurcumaLogger::warn("Fragment initial guess unavailable (one fragment, charged "
+                                    "system or a failed fragment SCF); using the EEQ guess");
+            }
+        }
         Vector q_sh_guess;
-        if (seedEEQGuess(q_sh_guess)) {
+        if (seeded) {
+            // fragment guess set above
+        } else if (seedEEQGuess(q_sh_guess)) {
             q_sh_old   = q_sh_guess;
             m_wfn.q_sh = q_sh_guess;
             m_wfn.q_at.setZero(m_atomcount);
@@ -717,8 +893,19 @@ double XTB::Calculation(bool gradient)
     double dq_best_fp32 = 1.0e30;
     int    fp32_stall = 0;
     bool   fp32_exhausted = false;
+    // Claude Generated (Oct 2026): CURCUMA_SCF_JAC=<dir> dumps the numerical Jacobian of the SCC
+    // fixed-point map after convergence (writeScfJacobianDump). m_scf_jac_capture (set only on the
+    // fragment objects of -scf_precond frag, xtb_precond.cpp) computes the same Jacobian into
+    // m_scf_jac_result instead; such objects ignore CURCUMA_SCF_JAC. In both modes the whole SCF
+    // runs in FP64, so x* is an FP64 fixed point. Neither set: no effect on any numerical path.
+    const char* scf_jac_dir = m_scf_jac_capture ? nullptr : std::getenv("CURCUMA_SCF_JAC");
+    const bool  scf_jac_dump = (scf_jac_dir != nullptr && scf_jac_dir[0] != '\0');
+    const bool  scf_jac_active = scf_jac_dump || m_scf_jac_capture;
+    Vector scf_jac_x_star, scf_jac_g_star;   // converged input x* and its output G(x*) (CPU loop)
+    double scf_jac_e_scc = 0.0;
     auto fp32_wanted = [&](double dq_last) {
-        return m_scf_mixed_precision && !fp32_exhausted && (dq_last > m_scf_fp32_threshold);
+        return !scf_jac_active && m_scf_mixed_precision && !fp32_exhausted
+               && (dq_last > m_scf_fp32_threshold);
     };
     // Claude Generated (Sep 2026, measured on H200): the FP32 phase can converge to a fixed point
     // that is not the FP64 one. polymer_2x, nao 15444: FP32 reported max|dq| = 7.1e-6 at an energy
@@ -1067,6 +1254,117 @@ double XTB::Calculation(bool gradient)
     if (!use_resident_loop)
         ensureHostMultipoleIntegrals();
 
+    // Claude Generated (Oct 2026): Broyden seed preconditioner (xtb_precond.cpp). The scalar seed
+    // alpha*F is replaced by M*F with M ~ -J^-1: -scf_precond frag builds M block-wise from the
+    // isolated fragments, CURCUMA_SCF_PRECOND_FILE (developer override, wins) reads a dense M.
+    // Set after every (re)construction of m_broyden, CPU loop only. The guard (ScfPrecondGuard,
+    // -scf_precond_guard / CURCUMA_SCF_PRECOND_GUARD) falls back to the scalar step when the
+    // residual does not drop. scf_precond none and no file: nothing is set, the path is unchanged.
+    //
+    // GPU (Claude Generated, Oct 2026): the fully device-resident CUDA loop mixes on the device,
+    // so there M is uploaded once per build (flat blocks) and applied by the device Broyden; the
+    // guard runs there on ||F||_2 with the host-side rule (ScfPrecondGuard::firesNorm) as a
+    // callback. Every other GPU path (host-driven device loops: ROCm, Vulkan, CUDA without the
+    // resident loop) and a multi-GPU SCF split ignore the switch with one warning. Not counted
+    // as a GPU fallback (nothing moves to the CPU), so -gpu_strict does not stop on it.
+    ScfPrecondGuard precond_guard;
+    struct DeviceGuardState { ScfPrecondGuard g; int fired_at = -1; double fnorm = 0.0; };
+    std::shared_ptr<DeviceGuardState> device_guard;   // set only when M runs on the device
+    {
+        const bool cpu_loop = !use_gpu_resident && !use_resident_loop && !use_device_potential;
+        bool device_loop = false;
+        std::string no_device_reason;
+        if (use_resident_loop) {
+            if (!m_gpu_scf->supportsResidentPreconditioner())
+                no_device_reason = "this GPU backend has no device preconditioner";
+            else if (m_gpu_scf->multiGpuScfSplit(m_basis.nao))
+                no_device_reason = "a multi-GPU SCF split (eigensolver or density over several devices) is active";
+            else
+                device_loop = true;
+        } else if (!cpu_loop) {
+            no_device_reason = "host-driven GPU SCF path (ROCm, Vulkan, or CUDA without the fully "
+                               "device-resident loop); implemented for the CPU loop and the resident CUDA loop";
+        }
+        std::function<Vector(const Vector&)> pc_hook;
+        std::string pc_err;
+        if (!selectScfPreconditioner(mode == ScfMode::Broyden, cpu_loop, device_loop, no_device_reason,
+                                     packed_len, pc_hook, precond_guard, pc_err)) {
+            m_scf_converged = false; m_scf_iterations = 0;
+            setHardError("SCF preconditioner file unusable: " + pc_err);
+            return m_E_total;
+        }
+        if (pc_hook && device_loop) {
+            pc_hook = nullptr;   // the device applies M itself
+            const auto t_up0 = clock::now();
+            std::string why;
+            if (m_scf_precond_dev_src != m_scf_precond_frag) {   // new M: new process-unique tag
+                static std::atomic<unsigned long long> next_tag{ 0 };
+                m_scf_precond_dev_src = m_scf_precond_frag;
+                m_scf_precond_dev_tag = ++next_tag;
+            }
+            GpuPrecondFlat flat;
+            const bool resident = (m_gpu_scf->residentPreconditionerTag() == m_scf_precond_dev_tag);
+            if (!resident) {
+                flat.N = m_scf_precond_frag->dim();
+                if (!m_scf_precond_frag->flatten(flat.idx_off, flat.idx, flat.b_off, flat.B,
+                                                 flat.fallback, flat.max_dim)) {
+                    why = "M has weighted blocks or more than 2^31 entries";
+                } else {
+                    // M is built on the host packing (packSCC: dp at nsh + k*nat + atom, qp at
+                    // nsh + 3*nat + k*nat + atom); the device packs the moments atom-major
+                    // (Eigen 3 x nat / 6 x nat storage: nsh + 3*atom + k, nsh + 3*nat + 6*atom + k).
+                    auto to_device = [nsh, nat](int j) {
+                        if (j < nsh) return j;
+                        if (j < nsh + 3 * nat) { const int r = j - nsh; return nsh + 3 * (r % nat) + r / nat; }
+                        const int r = j - nsh - 3 * nat;
+                        return nsh + 3 * nat + 6 * (r % nat) + r / nat;
+                    };
+                    for (int& j : flat.idx) j = to_device(j);
+                    std::vector<double> fb(flat.fallback.size());
+                    for (int j = 0; j < static_cast<int>(fb.size()); ++j) fb[to_device(j)] = flat.fallback[j];
+                    flat.fallback.swap(fb);
+                }
+            }
+            auto st = std::make_shared<DeviceGuardState>();
+            st->g = precond_guard;
+            GpuBroydenGuardFn guard_fn;
+            if (precond_guard.rule != ScfPrecondGuard::Rule::Off)
+                guard_fn = [st](int n, double f, bool* store_best) {
+                    bool new_best = false;
+                    const bool hit = st->g.firesNorm(n, f, &new_best);
+                    if (store_best) *store_best = new_best;
+                    if (hit) { st->fired_at = n; st->fnorm = f; }
+                    return hit;
+                };
+            if (why.empty()
+                && m_gpu_scf->residentSetPreconditioner(resident ? nullptr : &flat, m_scf_precond_dev_tag,
+                                                        guard_fn, precond_guard.keep, precond_guard.best)) {
+                device_guard = st;
+                const char* guard_name = precond_guard.rule == ScfPrecondGuard::Rule::Off
+                                             ? "off" : precond_guard.name.c_str();
+                if (!resident && verb >= 2)
+                    CurcumaLogger::info_fmt("SCF precond: device M uploaded to the resident GPU loop ({} blocks, "
+                                            "largest {}, {:.3f} MB, {:.1f} ms), guard '{}'",
+                                            m_scf_precond_frag->blockCount(), flat.max_dim,
+                                            8.0 * static_cast<double>(flat.B.size() + flat.fallback.size()) / 1048576.0,
+                                            ms(t_up0, clock::now()), guard_name);
+                else if (resident && verb >= 3)
+                    CurcumaLogger::info_fmt("SCF precond: device M reused (resident), guard '{}'", guard_name);
+            } else {
+                if (why.empty()) why = m_gpu_scf->lastError();
+                if (!m_scf_precond_warned)
+                    CurcumaLogger::warn("scf_precond 'frag' ignored: the device preconditioner could not be set up"
+                                        + (why.empty() ? std::string() : " (" + why + ")")
+                                        + "; scalar Broyden seed (scf_damping) is used");
+                m_scf_precond_warned = true;
+            }
+        } else if (pc_hook) {
+            broyden.setStepHook(std::move(pc_hook));
+        } else if (broyden.hasStepHook()) {   // only with -keep_diis: a hook left from an earlier SCF
+            broyden.dropStepHook(true);
+        }
+    }
+
     double resident_band = 0.0;   // Tr(P H0) of the last device-resident step
     double resident_ecoul = 0.0, resident_ethird = 0.0, resident_emp = 0.0;  // its SCC energies
     const auto t_scf_start = clock::now();
@@ -1107,6 +1405,14 @@ double XTB::Calculation(bool gradient)
             m_E_third_order = ethird; m_E_multipole = emp;
             const double e_scc = eb + ecoul + ethird + emp;
             const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
+            // A non-finite SCC state is a failure, never convergence (Sep 2026, see the CPU loop).
+            if (!std::isfinite(dq) || !std::isfinite(e_scc)) {
+                CurcumaLogger::warn_fmt("XTB::Calculation: SCF produced non-finite values at iteration {} "
+                                        "(E = {}, max|dq| = {}) - diverged", iter, e_scc, dq);
+                m_scf_converged = false; m_scf_iterations = iter + 1;
+                setHardError(fmt::format("native SCF diverged: non-finite energy/charges at iteration {}", iter));
+                return m_E_total;
+            }
             note_fp32_progress(dq);
             dq_prev = dq;
             if (verb >= scf_min) {
@@ -1119,6 +1425,18 @@ double XTB::Calculation(bool gradient)
                 m_scf_converged = true;
                 e_total_old = e_scc;
                 break;
+            }
+            // Claude Generated (Oct 2026): the device guard decided inside this step's Broyden
+            // update; report it like the CPU loop (which never checks a converged iteration).
+            if (device_guard && device_guard->fired_at == iter) {
+                const ScfPrecondGuard& g = device_guard->g;
+                CurcumaLogger::warn_fmt("SCF preconditioner guard '{}' fired at iteration {} "
+                                        "(||F||_2 = {:.3e}, ||F_0||_2 = {:.3e}): scalar Broyden step "
+                                        "for the rest of this SCF ({} history, from {} x; device)",
+                                        g.name, iter, device_guard->fnorm, g.f0,
+                                        g.keep ? "kept" : "reset", g.best ? "best" : "current");
+                if (std::getenv("CURCUMA_SCF_TRACE"))
+                    fmt::print(stderr, "SCFTRACE_GUARD iter {} rule {} device\n", iter, g.name);
             }
             e_total_old = e_scc;
             continue;
@@ -1391,7 +1709,39 @@ double XTB::Calculation(bool gradient)
         // iteration, so the SCF exited after 2 cycles with the moments unconverged and
         // the analytic gradient came out 0.0330 instead of 0.0211 Eh/Bohr (60 % off,
         // while the energy still matched xtb to 1e-8). Claude Generated.
-        const double dq = (packSCC() - x_in).cwiseAbs().maxCoeff();
+        const Vector x_out_check = packSCC();
+        const double dq = (x_out_check - x_in).cwiseAbs().maxCoeff();
+        // Claude Generated (Sep 2026): a non-finite SCC state is a failure, not convergence. With
+        // -scf_mode diis on a 1846-atom water/urea cluster the charges turned NaN at iteration 6;
+        // maxCoeff() over the NaN vector then came out 0, dE too, and the SCF "converged" to
+        // +540710 Eh, which was returned as a valid single point. Test the vectors themselves,
+        // not only dq.
+        if (!std::isfinite(dq) || !std::isfinite(e_scc) || !x_out_check.allFinite() || !x_in.allFinite()) {
+            CurcumaLogger::warn_fmt("XTB::Calculation: SCF produced non-finite values at iteration {} "
+                                    "(E = {}) - diverged", iter, e_scc);
+            m_scf_converged = false; m_scf_iterations = iter + 1;
+            setHardError(fmt::format("native SCF diverged: non-finite energy/charges at iteration {}", iter));
+            return m_E_total;
+        }
+        // Claude Generated (Oct 2026): CURCUMA_SCF_TRACE=1 prints, per CPU SCF iteration, the Broyden
+        // residual F = x_out - x_in split into the shell-charge block (q_sh) and the GFN2 multipole
+        // block (dp, qp) as max|F| and ||F||_2, plus the phase times in ms, to stderr. Read-only;
+        // no numerical path depends on it.
+        static const bool scf_trace = (std::getenv("CURCUMA_SCF_TRACE") != nullptr);
+        if (scf_trace) {
+            const Vector Fres = x_out_check - x_in;
+            const Eigen::Index nq = nsh;
+            const Eigen::Index nm = Fres.size() - nq;
+            const double q_max = Fres.head(nq).cwiseAbs().maxCoeff();
+            const double q_nrm = Fres.head(nq).norm();
+            const double m_max = (nm > 0) ? Fres.tail(nm).cwiseAbs().maxCoeff() : 0.0;
+            const double m_nrm = (nm > 0) ? Fres.tail(nm).norm() : 0.0;
+            fmt::print(stderr, "SCFTRACE iter {} nat {} qmax {:.6e} qnorm {:.6e} mpmax {:.6e} mpnorm {:.6e} "
+                               "t_pot {:.3f} t_fock {:.3f} t_solve {:.3f} t_mull {:.3f} t_energy {:.3f} t_iter {:.3f}\n",
+                       iter, nat, q_max, q_nrm, m_max, m_nrm,
+                       ms(t_iter0, t_pot), ms(t_pot, t_fock), ms(t_fock, t_solve),
+                       ms(t_solve, t_mull), ms(t_mull, clock::now()), ms(t_iter0, clock::now()));
+        }
         note_fp32_progress(dq);
         dq_prev = dq;   // drives the LevelShift fade-out on the next iteration
         const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
@@ -1423,6 +1773,11 @@ double XTB::Calculation(bool gradient)
             // acts on and what tblite converges on.
             if (checkConvergence_impl(dq, e_total_old, e_scc, thresh)) {
                 m_scf_converged = true;
+                if (scf_jac_active) {   // keep x* and G(x*) for the dump / capture below
+                    scf_jac_x_star = x_in;
+                    scf_jac_g_star = x_out_check;
+                    scf_jac_e_scc  = e_scc;
+                }
                 break;
             }
         }
@@ -1432,9 +1787,37 @@ double XTB::Calculation(bool gradient)
         // input x_in via the modified-Broyden quasi-Newton update; unpacking
         // writes the next input back into m_wfn so q_sh_old below tracks it.
         if (mode == ScfMode::Broyden) {
+            const auto t_mix0 = clock::now();
             const Vector x_out  = packSCC();
-            const Vector x_next = broyden.update(x_in, x_out);
+            // Claude Generated (Oct 2026): preconditioner guard. Uses only the residual norm of
+            // this iteration; on a hit M is dropped for the rest of this SCF (scalar step from the
+            // current x, history reset or kept). Off (default) or no hook: nothing is computed.
+            bool restart_from_best = false;
+            if (precond_guard.rule != ScfPrecondGuard::Rule::Off && broyden.hasStepHook()) {
+                const Vector Fres = x_out - x_in;
+                const double fnorm = Fres.norm();
+                if (precond_guard.fires(iter, x_in, Fres)) {
+                    broyden.dropStepHook(precond_guard.keep);
+                    restart_from_best = precond_guard.best;
+                    CurcumaLogger::warn_fmt("SCF preconditioner guard '{}' fired at iteration {} "
+                                            "(||F||_2 = {:.3e}, ||F_0||_2 = {:.3e}): scalar Broyden step "
+                                            "for the rest of this SCF ({} history, from {} x)",
+                                            precond_guard.name, iter, fnorm, precond_guard.f0,
+                                            precond_guard.keep ? "kept" : "reset",
+                                            precond_guard.best ? "best" : "current");
+                    if (scf_trace)
+                        fmt::print(stderr, "SCFTRACE_GUARD iter {} rule {}\n", iter, precond_guard.name);
+                }
+            }
+            // With "best", the scalar step is taken from the stored best input x_k and its output
+            // x_k + F_k (both from an earlier evaluation of the map).
+            const Vector x_next = restart_from_best
+                ? broyden.update(precond_guard.x_best, precond_guard.x_best + precond_guard.F_best)
+                : broyden.update(x_in, x_out);
+            restart_from_best = false;
             unpackSCC(x_next);
+            if (scf_trace)
+                fmt::print(stderr, "SCFTRACE_MIX iter {} t_mix {:.3f}\n", iter, ms(t_mix0, clock::now()));
         }
 
         q_sh_old = m_wfn.q_sh;
@@ -1486,6 +1869,109 @@ double XTB::Calculation(bool gradient)
                                     m_scf_iterations, ms(t_scf_start, t_scf_end));
     }
 
+    // Claude Generated (Sep 2026): an unconverged SCF is not a result. It used to be returned
+    // like one - level shift on a 1846-atom water/urea cluster ended after 150 iterations at
+    // +3080 Eh with exit code 0. xtb and tblite stop with an error here too. The explicit opt-out
+    // keeps the old behaviour for anyone who knowingly accepts a nearly converged energy.
+    if (!m_scf_converged && !m_scf_allow_unconverged) {
+        setHardError(fmt::format("native SCF did not converge within {} iterations (last max|dq| = {:.2e}); "
+                                 "-scf_allow_unconverged true accepts the unconverged energy",
+                                 m_scf_iterations, dq_prev));
+        return m_E_total;
+    }
+
+    // Claude Generated (Oct 2026): SCF Jacobian debug dump (CURCUMA_SCF_JAC=<dir>), before any
+    // post-SCF step. evalG is one pure evaluation of the SCC fixed-point map x -> G(x) of the CPU
+    // loop: unpack x -> potential (Coulomb, third order, GFN2 multipole + in-SCF D4, solvation)
+    // -> Fock -> FP64 eigensolve with Fermi occupations -> Mulliken charges and moments -> pack.
+    // No mixer, level shift, DIIS or FP32 state enters it. m_wfn / m_pot and the eigensolver
+    // timing counters are restored afterwards, so the post-SCF path sees the converged state.
+    if (scf_jac_active && m_scf_converged) {
+        const bool cpu_loop = !use_gpu_resident && !use_resident_loop && !use_device_potential;
+        const bool pure_eig = !m_external_eigensolver && m_eigensolver != "lobpcg"
+                              && m_eigensolver != "purify";
+        if (!cpu_loop || !pure_eig || mode != ScfMode::Broyden || scf_jac_x_star.size() == 0) {
+            if (scf_jac_dump)
+                CurcumaLogger::warn("CURCUMA_SCF_JAC: Jacobian dump skipped (needs the CPU SCF loop, "
+                                    "-scf_mode broyden and a stateless eigensolver mkl/native)");
+        } else {
+            const Wavefunction wfn_save = m_wfn;
+            const Potential    pot_save = m_pot;
+            const bool   fp32_save = m_eig_fp32;
+            const double t_save[5] = { m_t_xfx, m_t_diag, m_t_back, m_t_dens, m_t_xfx_copy };
+            const int    c_save[3] = { m_eig_calls_native, m_eig_calls_fp32, m_eig_calls_lapack };
+            bool eval_failed = false;
+            auto evalG = [&](const Vector& x) -> Vector {
+                unpackSCC(x);
+                m_pot.reset();
+                addCoulombShellPotential(m_pot);
+                addThirdOrderPotential(m_pot);
+                if (m_method == MethodType::GFN2) {
+                    addMultipolePotential(m_pot);
+                    addDispersionPotential(m_pot);
+                }
+                addSolvationPotential(m_pot);
+                const Matrix F = buildFock(m_H0, m_S, m_pot);
+                m_eig_fp32 = false;   // FP64 only in this mode
+                bool ok;
+                {
+                    MklThreadScope eig_scope(eig_threads);
+                    ok = solveEigen(F, m_S);
+                }
+                if (!ok) { eval_failed = true; return Vector::Constant(x.size(), std::nan("")); }
+                updatePopulations(m_S);
+                return packSCC();
+            };
+            if (scf_jac_dump) {
+                writeScfJacobianDump(scf_jac_dir, scf_jac_x_star, scf_jac_g_star, scf_jac_e_scc, evalG);
+                if (eval_failed)
+                    CurcumaLogger::warn("CURCUMA_SCF_JAC: an eigensolve failed during the Jacobian dump");
+            } else if (m_scf_jac_capture) {
+                // Fragment of -scf_precond frag: J at x* by central differences, h = 1e-4 (the
+                // default of the dump, with which the prototype measurements were made), or by linear
+                // response (-scf_precond_jacobian response, Oct 2026). CURCUMA_SCF_JAC_COMPARE=1
+                // (developer switch) computes both and prints their deviation on stderr.
+                const bool use_resp = (m_scf_precond_jacobian == "response");
+                const bool compare = std::getenv("CURCUMA_SCF_JAC_COMPARE") != nullptr;
+                const int dim = static_cast<int>(scf_jac_x_star.size());
+                PrecondMatrix J_fd, J_resp;
+                double t_fd = 0.0, t_resp = 0.0;
+                if (!use_resp || compare) {
+                    const auto t0 = clock::now();
+                    std::vector<double> J;
+                    numericalScfJacobian(scf_jac_x_star, scf_jac_g_star, evalG, 1.0e-4, J, nullptr);
+                    t_fd = ms(t0, clock::now());
+                    if (!eval_failed) J_fd = Eigen::Map<const PrecondMatrix>(J.data(), dim, dim);
+                }
+                if (use_resp || compare) {
+                    const auto t0 = clock::now();
+                    std::string rerr;
+                    bool ok;
+                    {
+                        MklThreadScope eig_scope(eig_threads);
+                        ok = computeScfJacobianResponse(scf_jac_x_star, J_resp, rerr);
+                    }
+                    t_resp = ms(t0, clock::now());
+                    if (!ok) J_resp = PrecondMatrix();
+                }
+                m_scf_jac_result = use_resp ? J_resp : J_fd;
+                if (compare && J_fd.rows() == dim && J_resp.rows() == dim) {
+                    const PrecondMatrix Bf = Eigen::PartialPivLU<PrecondMatrix>(J_fd).inverse();
+                    const PrecondMatrix Br = Eigen::PartialPivLU<PrecondMatrix>(J_resp).inverse();
+                    fmt::print(stderr, "SCFJACCMP nat {} dim {} maxabs {:.3e} relfro {:.3e} inv_relfro {:.3e} t_fd_ms {:.1f} t_resp_ms {:.1f}\n",
+                               m_atomcount, dim, (J_resp - J_fd).cwiseAbs().maxCoeff(),
+                               (J_resp - J_fd).norm() / J_fd.norm(), (Br - Bf).norm() / Bf.norm(), t_fd, t_resp);
+                }
+            }
+            m_wfn = wfn_save;
+            m_pot = pot_save;
+            m_eig_fp32 = fp32_save;
+            m_t_xfx = t_save[0]; m_t_diag = t_save[1]; m_t_back = t_save[2];
+            m_t_dens = t_save[3]; m_t_xfx_copy = t_save[4];
+            m_eig_calls_native = c_save[0]; m_eig_calls_fp32 = c_save[1]; m_eig_calls_lapack = c_save[2];
+        }
+    }
+
     // Claude Generated (Sep 2026): post-SCF host phase timings (printed with CURCUMA_GPU_PROFILE
     // or verbosity 3) - on a 7k-atom GPU run this block took 40 s.
     std::vector<std::pair<const char*, double>> post_t;
@@ -1515,9 +2001,18 @@ double XTB::Calculation(bool gradient)
     // need the dense P and C on the host (band energy comes from the device, the gradient is
     // on the device). Rebuilding and downloading them took 16 s at 7320 atoms; they are fetched
     // on demand (host gradient fallback, property accessors after ensureHostWavefunction).
+    //
+    // Point 1 (Claude Generated, Sep 2026): the above previously forced finalize() whenever a
+    // gradient was requested, even though calculateGradientGpu() (called below with the SAME
+    // gate as device_grad_will_run) never reads m_wfn.P/C - it passes pc_resident=true and
+    // reads dP/dC straight off the device (xtb_gradient.cpp:859-868). Skip finalize() there too;
+    // ensureHostWavefunction() downloads on demand for the few paths that still need the host
+    // matrices (host gradient fallback, property accessors) - see xtb_multipole.cpp:44.
+    const bool device_grad_will_run = gradient && use_gpu_resident && m_gpu_scf
+        && m_gpu_scf->supportsGradient();
     m_wfn_on_device = false;
     if (use_gpu_resident && m_gpu_scf) {
-        if (use_resident_loop && m_mp_ints_deferred && !gradient)
+        if (use_resident_loop && m_mp_ints_deferred && (!gradient || device_grad_will_run))
             m_wfn_on_device = true;
         else
             m_gpu_scf->finalize(m_wfn.P, m_wfn.C);
@@ -1762,6 +2257,15 @@ double XTB::Calculation(bool gradient)
             const double e_retry = Calculation(gradient);
             m_in_scf_retry = false;
             m_force_h0_guess = false;
+            // Claude Generated (Sep 2026): if the bare-H0 retry lands on an impossible charge
+            // distribution too, the result is not usable - it used to be returned anyway.
+            if (!hasError() && m_wfn.q_at.size() == m_atomcount) {
+                const double q_retry = m_wfn.q_at.cwiseAbs().maxCoeff();
+                if (!(q_retry <= q_bound))   // also catches NaN
+                    setHardError(fmt::format("native SCF converged to an implausible charge distribution "
+                                             "(max |q| = {:.2f} e > {:.2f}) also from the bare-H0 guess",
+                                             q_retry, q_bound));
+            }
             return e_retry;
         }
     }
@@ -2242,6 +2746,17 @@ void XTB::buildReferenceOccupations()
             CurcumaLogger::param("open_shell_nuhf", static_cast<int>(std::lround(nuhf)));
             CurcumaLogger::param("n_alpha", m_nalpha);
             CurcumaLogger::param("n_beta", m_nbeta);
+        }
+        // Claude Generated (Oct 2026): an electron count whose parity contradicts -spin
+        // (odd electrons without -spin, or -spin 2 on a doublet) gives fractional alpha/beta
+        // occupations - tblite's behaviour, but xtb 6.7.1 defaults an odd count to a doublet.
+        // CH3 without -spin: -3.56397536 Eh vs xtb -3.56265832. Warn, do not change numbers.
+        const long nel = std::lround(m_wfn.nocc);
+        if (std::abs(m_wfn.nocc - nel) < 1e-6 && ((nel - std::lround(nuhf)) % 2) != 0
+            && CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::warn(fmt::format("native xTB: {} electrons with {} unpaired (-spin) "
+                "have inconsistent parity; occupations are fractional. For a radical pass "
+                "-spin <multiplicity-1>.", nel, std::lround(nuhf)));
         }
     }
     m_wfn.q_at.setZero(m_basis.nat);

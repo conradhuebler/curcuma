@@ -1,7 +1,7 @@
 {
   "molecule": {
     "name": "OH",
-    "geometry_file": "../test_cases/molecules/dimers/OH.xyz",
+    "geometry_file": "../test_cases/structures/small/hydroxyl.xyz",
     "atoms": [
       {
         "element": "O",

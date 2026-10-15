@@ -18,6 +18,7 @@
  * Claude Generated 2025 - Native D3 parameter generation from GFN-FF Fortran reference
  */
 
+#include "src/core/units.h"
 #include "d3param_generator.h"
 #include "cn_calculator.h"
 #include "../../curcuma_logger.h"
@@ -28,8 +29,8 @@
 
 // Complete s-dftd3 reference data (MAX_REF=7 - fixes 1.48x energy error)
 // Data split across:
-// - test_cases/reference_data/d3_reference_cn.cpp (721 CN values)
-// - test_cases/reference_data/d3_reference_c6.cpp (262,444 C6 values)
+// - d3_reference_cn.cpp (721 CN values)
+// - d3_reference_c6.cpp (262,444 C6 values)
 // Include declarations for automatic linking
 #include "d3_reference_data.h"
 
@@ -967,7 +968,7 @@ double D3ParameterGenerator::getTotalEnergy() const
         double r_angstrom = (pos_i - pos_j).norm();
 
         // Convert to Bohr (D3 formulas use atomic units)
-        const double angstrom_to_bohr = 1.88972612546;  // CurcumaUnit::AngstromToBohr
+        const double angstrom_to_bohr = CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.88972612546);
         double r = r_angstrom * angstrom_to_bohr;
 
         // Becke-Johnson damping formula (all in Bohr)
@@ -1130,7 +1131,7 @@ double D3ParameterGenerator::getEnergyAndGradient(bool need_gradient,
         return 0.0;
     }
 
-    const double au = 1.88972612546;  // Angstrom -> Bohr
+    const double au = CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.88972612546);  // Angstrom -> Bohr
     const size_t n = m_atoms.size();
 
     double a1 = m_config.get<double>("d3_a1", 0.4);

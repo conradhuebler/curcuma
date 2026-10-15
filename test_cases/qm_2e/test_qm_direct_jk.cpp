@@ -15,7 +15,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/energy_calculators/qm_methods/qm_engine.h"
 #include "src/core/energy_calculators/qm_methods/qm_integrals.hpp"
-#include "core/test_molecule_registry.h"
+#include "unit/test_molecule_registry.h"
 
 #include <cmath>
 #include <cstdio>

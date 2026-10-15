@@ -1083,8 +1083,22 @@ nlohmann::json ConfSearch::ChildConfig(const std::string& method, int threads) c
     cfg["charge"] = m_charge;
     cfg["spin"] = m_spin;
     cfg["verbosity"] = m_verbosity;
-    if (!m_gpu.empty() && m_gpu != "none")
+    if (!m_gpu.empty() && m_gpu != "none") {
         cfg["gpu"] = m_gpu;
+        // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md G2-14): the other global GPU keys
+        // (main.cpp global_params) reached no child, so e.g. -gpu_device, -gpu_sparse_integrals
+        // or -gpu_memory_check were silently ignored inside ConfSearch. A child that runs in a
+        // leased batch worker still gets its device from the lease (EnergyCalculator), and the
+        // multi-GPU split keys are ignored there with a warning (xtb_gpu_method.cpp).
+        for (const char* key : { "gpu_device", "gpu_devices", "gpu_workers_per_device", "gpu_memory_check",
+                                 "gpu_sparse_integrals", "gpu_eigensolver_devices", "gpu_eigensolver_backend",
+                                 "gpu_eigensolver_block", "gpu_eigensolver_min_nao", "gpu_eigensolver_fp32",
+                                 "gpu_eigensolver_verify", "gpu_density_devices", "gpu_density_min_nao",
+                                 "gpu_strict" }) {
+            if (m_controller.contains(key))
+                cfg[key] = m_controller[key];
+        }
+    }
 
     // Method sub-scopes that EnergyCalculator re-merges before building the method. Mirrors
     // kEnergyCalcMethodScopes in src/core/energycalculator.cpp -- without this,

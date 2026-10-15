@@ -38,6 +38,7 @@
 #include "native_xtb_method.h"   // NativeXtbMethod + curcuma::xtb::MethodType + XTB seam
 
 #include "src/core/curcuma_logger.h"
+#include "src/core/gpu_fallback.h"
 
 #include <fmt/format.h>
 
@@ -106,9 +107,14 @@ public:
             CurcumaLogger::warn(fmt::format(
                 "{}: {} {} is not usable (index out of range or init failed); running CPU path",
                 m_cpu->getMethodName(), device_label, m_device));
+            curcuma::reportGpuFallback(fmt::format("{}: {} not usable, calculation on the CPU",
+                                                   m_cpu->getMethodName(), device_label),
+                                       fmt::format("device {}", m_device));
         } else {
             CurcumaLogger::warn(fmt::format(
                 "{}: no usable {}; running CPU path", m_cpu->getMethodName(), device_label));
+            curcuma::reportGpuFallback(fmt::format("{}: no usable {}, calculation on the CPU",
+                                                   m_cpu->getMethodName(), device_label));
         }
     }
 

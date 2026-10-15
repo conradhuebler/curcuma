@@ -30,11 +30,15 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+import structlib  # noqa: E402
 
 SYSTEMS = {
-    "caffeine": REPO_ROOT / "test_cases/molecules/larger/caffeine.xyz",
-    "polymer":  REPO_ROOT / "test_cases/molecules/larger/polymer.xyz",
-    "mixture":  REPO_ROOT / "test_cases/molecules/larger/mixture.xyz",
+    # structure library ids (test_cases/structures); "mixture" was mixture.xyz, which is not in the repository; the
+    # 400 urea + 1000 water box mixture2.xyz is the library entry urea400-water1000
+    "caffeine": Path(structlib.library_path("caffeine")),
+    "polymer":  Path(structlib.library_path("peo201-chain")),
+    "mixture":  Path(structlib.library_path("urea400-water1000")),
 }
 
 MODES = {

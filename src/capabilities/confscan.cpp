@@ -918,6 +918,9 @@ void ConfScan::start()
     if (m_molecules.empty() && !Filename().empty())
         openFile();
 
+    // Claude Generated (Oct 2026): the filter protocol is described in the ConfScan preprint
+    CitationRegistry::cite("confscan");
+
     SetUp();
     RunTimer timer(false);
     std::ofstream result_file;

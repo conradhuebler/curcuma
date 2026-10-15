@@ -19,6 +19,7 @@
 
 #ifdef USE_CUDA
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -248,6 +249,10 @@ public:
     /// "" when not configured, else backend/device/solve summary or the reason it is not used.
     std::string distributedEigensolverStatus() const;
 
+    /// "" or why part of the multi-GPU eigensolve runs on this device anyway (no cuBLASMp for the
+    /// FP64 generalized path, -scf_gpu_partial_diag). Claude Generated (Sep 2026, G2-7).
+    std::string distributedEigensolverDegradation() const;
+
     /**
      * @brief Spread the screened-pattern density of the resident SCF over several GPUs.
      * @param devices helper devices (this context's own device is skipped); empty disables it
@@ -256,6 +261,15 @@ public:
      * an approximation. Per SCF step only the column slices of C travel. Claude Generated (Sep 2026).
      */
     void setDensityDevices(const std::vector<int>& devices, int min_nao = 4000);
+    /// Stage 2 of docs/GFN2_GPU_COST_PLAN.md (Claude Generated, Sep 29, 2026): FP32 SCF steps
+    /// replace the full diagonalisation by one occupied-virtual rotation of the previous
+    /// eigenvectors (pseudo-diagonalisation, Stewart/Csaszar/Pulay 1982) once the previous step's
+    /// max|dq| is below max_dq, at most max_steps times in a row; a full solve follows otherwise,
+    /// and whenever the HOMO-LUMO gap estimate is small against kT or a rotation is large.
+    /// fp64: also in FP64 steps (the whole SCF where mixed precision is off, the final steps otherwise).
+    void setPseudoDiagonalisation(bool on, double max_dq, int max_steps, bool fp64 = false);
+    /// Pseudo-diagonalisation steps taken / tried and rejected since the last beginResidentLoop.
+    void pseudoDiagonalisationCounts(int& taken, int& rejected) const;
 
     /// "" when not configured, else the devices used and the number of split steps.
     std::string densityDevicesStatus() const;
@@ -474,6 +488,45 @@ public:
     bool broydenBegin(int N, double alpha, int max_hist, double w0);
     bool broydenUpdate(int N, const double* vin, const double* vout, double* vnext);
 
+    /* ----- Broyden seed preconditioner (Claude Generated, Oct 2026) ------ *
+     * -scf_precond frag on the device (docs/SCF_PRECOND.md). M = sum_b R_b^T B_b R_b + C is
+     * block-diagonal on the packed SCC vector: block b covers the indices
+     * idx[idx_off[b] .. idx_off[b+1]) with the row-major matrix B + b_off[b]; C = fallback
+     * (alpha outside every block, 0 inside). With M set, runBroydenUpdate uses M*F instead of
+     * alpha*F in the linear step and the seed, and u = M*dF + dx/|dF| (BroydenMixer step hook).
+     * M*v: one CUDA block per Schwarz block, v gathered into shared memory, one warp per row.
+     * broydenBegin clears the active state, the guard and the fired index; the uploaded blocks
+     * stay resident under their tag, so a later SCF with the same M passes pc = nullptr.
+     *
+     * Guard: while M is active every update computes ||F||_2 (cublasDnrm2, one scalar to the
+     * host) and calls guard(n, ||F||, &store_best) with the update index n since broydenBegin.
+     * store_best: x_n and F_n are copied into device buffers. A true return drops M like
+     * BroydenMixer::dropStepHook(keep) - keep: u_k += alpha*dF_k - M*dF_k, otherwise the history
+     * is reset - and with best the update continues from x_best with F_best. No evaluation of the
+     * SCC map. An empty guard means no guard. */
+    struct BroydenPrecond {
+        int N = 0, nblocks = 0, max_dim = 0;
+        const int* idx_off = nullptr;   ///< nblocks + 1
+        const int* idx = nullptr;
+        const int* b_off = nullptr;     ///< nblocks + 1
+        const double* B = nullptr;
+        const double* fallback = nullptr;  ///< N
+    };
+    using BroydenGuard = std::function<bool(int n, double fnorm, bool* store_best)>;
+    /// Activate M for the current SCF (after broydenBegin). pc = nullptr reuses the resident upload,
+    /// which must carry @p tag. False (M stays off, last error set) on a size mismatch, a block
+    /// larger than the shared-memory limit, or a failed upload.
+    bool broydenSetPreconditioner(const BroydenPrecond* pc, unsigned long long tag,
+                                  BroydenGuard guard, bool keep, bool best);
+    /// Tag of the resident M upload (0 = none).
+    unsigned long long broydenPreconditionerTag() const;
+    /// True while M is applied (set and not dropped by the guard).
+    bool broydenPreconditionerActive() const;
+    /// Update index at which the guard dropped M in this SCF, -1 = not fired.
+    int broydenGuardFiredAt() const;
+    /// True if a multi-GPU eigensolver or density split would engage for @p nao basis functions.
+    bool multiGpuScfSplit(int nao) const;
+
     /* ----- Stage 6 (S6.5): fully device-resident GFN2 SCF loop ----------- *
      * beginResidentLoop uploads the initial SCC guess (q_sh/dp_at/qp_at), the
      * EEQ-guess q_at, and the reference shell/atom occupations once, and sets up
@@ -501,7 +554,14 @@ private:
     size_t estimateStorageBytes(int nat, int nsh, int nao, bool is_gfn2, double nnz) const;
 
     /// Pattern density over the helper devices of setDensityDevices(); false = caller falls back.
-    bool densityPatternDistributed(int n, int ncol);
+    /// Point 6 (Claude Generated, Sep 2026): for_weighted_density selects the target pattern
+    /// buffer - false (default, SCF loop) writes P into dSpP from the resident dOcc
+    /// (occupation weights); true (gradient's W = C_occ*diag(2eps)*C_occ^T) writes into dSpW
+    /// instead, reading whatever the caller has already uploaded into dOcc (computeGradient
+    /// uploads 2*eps there before calling this). Same SDDMM, same column split, only the
+    /// weight vector's content and the output buffer differ - both already live in Impl, so no
+    /// new device buffers are needed for this.
+    bool densityPatternDistributed(int n, int ncol, bool for_weighted_density = false);
     // Storage-independent building blocks (dense or screened). Claude Generated (Sep 2026).
     bool buildFockIntoC(int n, bool multipole);
     bool populationsAndBand(int n, double* band_out);
@@ -511,6 +571,10 @@ private:
     /// Device-pointer Broyden update core (S6.4); shared by broydenUpdate (test
     /// upload/download) and the fused resident loop. Queues all work on the stream.
     bool runBroydenUpdate(const double* dvin, const double* dvout, double* dvnext);
+    /// dst = M*src on the device (dst must not alias src). Claude Generated (Oct 2026).
+    bool applyBroydenPreconditioner(const double* src, double* dst);
+    /// Guard hit: drop M, rewrite (keep) or reset the history. Claude Generated (Oct 2026).
+    bool dropBroydenPreconditioner(bool keep);
 
     /// Reduce the resident Fock in dC to standard form with the cached L, solve
     /// it and back-transform → generalized eigenvectors in dC, ascending
@@ -525,6 +589,9 @@ private:
     /// round-trip. The default true downloads eps_out as before.
     bool eigensolveResidentFock(double* eps_out, bool fp32, int n_eig = 0,
                                 bool download_eps = true);
+    /// The full solve behind eigensolveResidentFock (which may take a pseudo-diagonalisation
+    /// step instead, see setPseudoDiagonalisation).
+    bool eigensolveResidentFockFull(double* eps_out, bool fp32, int n_eig, bool download_eps);
     /// Stage 6: device potential build + Fock + eigensolve from the RESIDENT mixed
     /// SCC inputs (dPotQsh/dInDpAt/dInQpAt + dD4W/dD4dWq) — the body of
     /// residentSolvePotential without the host uploads. Shared by it and the fused

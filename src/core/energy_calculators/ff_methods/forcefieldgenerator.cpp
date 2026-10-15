@@ -1,6 +1,6 @@
 /*
  * < Generic force field class for curcuma . >
- * Copyright (C) 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2024 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,6 +17,7 @@
  *
  */
 
+#include "src/core/units.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/global.h"
 #include "src/core/topology.h"
@@ -72,9 +73,9 @@ ForceFieldGenerator::ForceFieldGenerator(const ConfigManager& config)
     m_parameter["hh_rep_r0"] = config.get<double>("hh_rep_r0", 2.3);
     m_parameter["bond_force"] = config.get<double>("bond_force", 1.0584 / 7.25 * 1.8);
     m_parameter["angle_force"] = config.get<double>("angle_force", 1.0584 / 7.25);
-    m_parameter["torsion_force"] = config.get<double>("torsion_force", 1.0 / 627.503);
-    m_parameter["inversion_force"] = config.get<double>("inversion_force", 1.0 / 627.503);
-    m_parameter["vdw_force"] = config.get<double>("vdw_force", 1.0 / 627.503);
+    m_parameter["torsion_force"] = config.get<double>("torsion_force", 1.0 / CurcumaUnit::Energy::hartree_to_kcalmol_or_legacy(627.503));
+    m_parameter["inversion_force"] = config.get<double>("inversion_force", 1.0 / CurcumaUnit::Energy::hartree_to_kcalmol_or_legacy(627.503));
+    m_parameter["vdw_force"] = config.get<double>("vdw_force", 1.0 / CurcumaUnit::Energy::hartree_to_kcalmol_or_legacy(627.503));
     m_parameter["h4_scaling"] = config.get<double>("h4_scaling", 0.0);
     m_parameter["hh_scaling"] = config.get<double>("hh_scaling", 0.0);
     m_parameter["e0"] = config.get<double>("energy_offset", 0.0);
