@@ -123,6 +123,8 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
     // QMDriver's default of 4 threads whatever -qm.threads said (Sep 2026).
     if (config.contains("threads") && config["threads"].is_number())
         m_threads = std::max(1, static_cast<int>(std::lround(config["threads"].get<double>())));
+    if (config.contains("gpu") && config["gpu"].is_string())
+        m_gpu = config["gpu"].get<std::string>();
     if (config.contains("eri_screening") && config["eri_screening"].is_number())
         m_eri_screening = config["eri_screening"].get<double>();
     if (config.contains("scf_max_iterations") && config["scf_max_iterations"].is_number())
@@ -233,6 +235,7 @@ bool QMEngine::UpdateMolecule()
     m_eri_ready = false;
     m_eri_active_ready = false;
     m_direct = qmint::DirectJK();
+    m_gpu_jk.reset();
     m_scf_ready = false;
     m_scf_converged = false;
     return InitialiseMolecule();
@@ -247,6 +250,7 @@ void QMEngine::resetForNewMolecule()
     m_eri_ready = false;
     m_eri_active_ready = false;
     m_direct = qmint::DirectJK();
+    m_gpu_jk.reset();
     m_scf_ready = false;
     m_scf_converged = false;
     m_warm_C = Matrix();
@@ -352,6 +356,7 @@ void QMEngine::buildOneElectronIntegrals()
     // New geometry -> invalidate the WP3 active-basis ERI and SCF caches.
     m_eri_active_ready = false;
     m_direct = qmint::DirectJK();
+    m_gpu_jk.reset();
     m_scf_ready = false;
     m_Q = Matrix();  // rebuilt in the spherical branch; stays empty for cartesian_d
 
@@ -373,6 +378,7 @@ void QMEngine::buildOneElectronIntegrals()
     m_Q = Q;
     m_eri_active_ready = false;  // geometry change invalidates the active ERI
     m_direct = qmint::DirectJK();
+    m_gpu_jk.reset();
     if (Q.size() == 0) {
         m_S = Scart;
         m_T = Tcart;

@@ -151,6 +151,18 @@ std::unique_ptr<ComputationalMethod> createGfnff(const std::string& backend, con
     return std::unique_ptr<ComputationalMethod>(method);
 }
 
+std::unique_ptr<qmint::QMGpuJK> createQmJK(const std::string& backend, const double* eri, int n, int device)
+{
+    void* handle = pluginHandle(backend, /*quiet=*/true);
+    if (!handle)
+        return nullptr;
+    using create_fn = void* (*)(const double*, int, int);
+    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_jk");
+    if (!fn)
+        return nullptr;
+    return std::unique_ptr<qmint::QMGpuJK>(static_cast<qmint::QMGpuJK*>(fn(eri, n, device)));
+}
+
 int deviceCount(const std::string& backend)
 {
     void* handle = pluginHandle(backend, /*quiet=*/true);

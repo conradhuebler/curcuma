@@ -24,6 +24,9 @@
 
 #pragma once
 
+#include "qm_gpu_backend.h"
+#include <memory>
+
 #include "src/core/global.h"
 #include "src/core/parameter_macros.h"
 
@@ -231,6 +234,10 @@ private:
     std::string m_scf_direct = "auto";       // auto | on | off
     double m_eri_max_memory_mb = 4000.0;     // auto: largest stored ERI tensor
     mutable qmint::DirectJK m_direct;
+    // GPU J/K (Q-G1, Oct 2026): stored tensor resident on the device; -gpu cuda|auto.
+    std::string m_gpu = "none";
+    mutable std::unique_ptr<qmint::QMGpuJK> m_gpu_jk;
+    mutable bool m_gpu_failed = false;       // upload/build failed once: stay on the CPU
     mutable long m_direct_quartets = 0;      // shell quartets computed in the last SCF (stats)
     // Energy components for the HF run (Hartree). E_elec = 0.5 Tr(P(H+F)).
     double m_e_elec = 0.0;
@@ -254,6 +261,7 @@ private:
     // J(P), K(P) from the stored tensor or integral-direct (useDirectSCF()).
     void buildJK(const Matrix& P, Matrix& J, Matrix& K) const;
     bool useDirectSCF() const;
+    bool gpuJK(const qmint::ERITensor& eri, const Matrix& P, Matrix& J, Matrix& K) const;
 
     // Solve the generalized eigenproblem F C = S C eps via the Lowdin reduce:
     //   eps, Ctil = eig(X^T F X);  C = X Ctil.

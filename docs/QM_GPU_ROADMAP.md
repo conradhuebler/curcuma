@@ -83,12 +83,23 @@ anything is enabled by default.
 
 | Stage | content | xTB precedent |
 |---|---|---|
-| Q-G1 | J/K from the stored tensor on the device (cuBLAS GEMV/GEMM), host SCF unchanged | Stage 1 (single offloaded hot spot) |
+| Q-G1 | **done Oct 2026** (see below): J/K from the stored tensor on the device, host SCF unchanged | Stage 1 (single offloaded hot spot) |
 | Q-G2 | device ERI kernel: one work item per shell quartet (or per primitive quartet for high L), fed by the flat `ShellPair`/`PrimPair` tables of section 1 | Stage 3 (integrals on device) |
 | Q-G3 | integral-direct J/K on the device (section 2), density-weighted screening, FP64 accumulation | `-gpu_multipole_otf`, screened integrals |
 | Q-G4 | device-resident SCF loop: Fock -> Löwdin-reduced eigensolve (reuse the xTB `cusolverDnDsyevd` path) -> density -> DIIS; host polls O(1) scalars per iteration | Stage 6 (fully resident loop) |
 | Q-G5 | mixed precision far from convergence (FP32 ERI/J/K with FP64 correction on dP), never accepting convergence on an FP32 step | X-AP3 (FP32 eigensolve early in the SCF) |
 | Q-G6 | multi-GPU: distribute shell-quartet batches over the device pool | [MULTI_GPU.md](MULTI_GPU.md) |
+
+**Q-G1 (Oct 2026, 🤖 AI-generated, ⚙️ machine-tested; RTX 5090 only)**: `-gpu cuda|auto` uploads the stored
+ERI tensor once per geometry (`cuda/qm_gpu_jk.cu`, plugin entry `curcuma_cuda_create_qm_jk`, seam
+`qm_gpu_backend.h`, loader `gpu_plugin::createQmJK`); each Fock build moves only P in and J, K out.
+Upload failure / missing plugin falls back to the CPU and is counted (`reportGpuFallback("qm_jk")`).
+Benzene HF/def2-SVP (114 functions, 12 iterations, 4 CPU threads): J/K builds 686 -> 179 ms, SCF loop
+879 -> 199 ms, plus a one-off 168 ms upload; energy -230.53597729 identical to 8 decimals (PySCF
+value). The ERI build (615 ms) is now the dominant cost, which is what Q-G2 addresses. Direct SCF
+(tensor above `-qm.eri_max_memory_mb`) stays on the CPU. `ctest -L qm_gpu` (CPU vs GPU, 1e-9 Eh;
+skipped without a device). Not tested: other GPUs, ROCm/Vulkan (no QM entry point), n > ~260
+(tensor must fit in device memory).
 
 Caveats carried over: speed-ups are hardware-specific and must be measured (the Vulkan
 FP32 path gave no win); FMA contraction changes the last ulp, so tests compare energies

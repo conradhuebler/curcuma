@@ -1104,6 +1104,8 @@ if(USE_CUDA)
         # Claude Generated (2026-06): native xTB GPU kernels (compiled by nvcc).
         # The host-side wrapper (xtb_gpu_method.cpp) is added below as a normal source.
         src/core/energy_calculators/qm_methods/cuda/xtb_gpu_context.cu
+        # Claude Generated (Oct 2026): native QM J/K on the device (Q-G1)
+        src/core/energy_calculators/qm_methods/cuda/qm_gpu_jk.cu
     )
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY LANGUAGE CUDA)
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY CUDA_SEPARABLE_COMPILATION ON)

@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "computational_method.h"   // ComputationalMethod, json (global namespace)
+#include "qm_methods/qm_gpu_backend.h"  // qmint::QMGpuJK
 
 namespace gpu_plugin {
 
@@ -51,6 +52,13 @@ std::unique_ptr<ComputationalMethod> createNativeXtb(const std::string& backend,
  * Returns nullptr on failure (caller falls back to CPU). Claude Generated.
  */
 std::unique_ptr<ComputationalMethod> createGfnff(const std::string& backend, const json& config);
+
+/**
+ * Native-QM J/K builder with the stored ERI tensor (n^4 doubles, row-major (mn|ls)) resident
+ * on the device. nullptr when the plugin/entry point is missing or the upload fails (the
+ * caller falls back to the CPU and reports it). Claude Generated (Oct 2026, Q-G1).
+ */
+std::unique_ptr<qmint::QMGpuJK> createQmJK(const std::string& backend, const double* eri, int n, int device);
 
 /// True if the plugin library libcurcuma_<backend>.so can be loaded (cached; a failed probe
 /// is not retried and, unlike the create* calls, is silent). Used for `-gpu auto` and
