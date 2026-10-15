@@ -594,6 +594,28 @@ __global__ void k_add_coulomb_parts(int n3, int nparts, const double* __restrict
     }
 }
 
+__global__ void k_add_disp_parts(int N, int nparts, const double* __restrict__ gparts,
+                                 const double* __restrict__ dparts, const double* __restrict__ part_E,
+                                 double* grad, double* dEdcn, double* energy)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k < 3 * N) {
+        double s = 0.0;
+        for (int p = 0; p < nparts; ++p) s += gparts[static_cast<size_t>(p) * 3 * N + k];
+        atomicAdd(&grad[k], s);   // other streams add to d_grad concurrently
+    }
+    if (k < N) {
+        double s = 0.0;
+        for (int p = 0; p < nparts; ++p) s += dparts[static_cast<size_t>(p) * N + k];
+        atomicAdd(&dEdcn[k], s);
+    }
+    if (k == 0) {
+        double e = 0.0;
+        for (int p = 0; p < nparts; ++p) e += part_E[p];
+        atomicAdd(energy, e);
+    }
+}
+
 // ============================================================================
 // Kernel 4: Bond Stretching
 // r0 = (r0_base_i + cnfak_i*cn[i] + r0_base_j + cnfak_j*cn[j] + rabshift) * ff

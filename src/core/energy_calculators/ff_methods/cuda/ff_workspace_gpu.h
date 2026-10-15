@@ -109,6 +109,19 @@ public:
     bool prepareCoulombSplit();
     void launchCoulombSplit();
 
+    /**
+     * @brief Split the D4 dispersion pair list (k_dc6dcn_per_pair + k_dispersion) of ONE molecule
+     * over the helper devices of setCoulombSplitDevices() (Claude Generated, Oct 2026). Contiguous
+     * pair ranges; every helper keeps its own copy of the pair data, C6 and dC6/dCN of its range
+     * (rebuilt when the pair list changes) and returns partial gradient, dE/dCN and energy.
+     * Off for periodic systems, below the Coulomb split's atom threshold, and with
+     * CURCUMA_GFNFF_DISP_SPLIT=0.
+     */
+    bool prepareDispSplit();
+    void launchDispSplitHelpers(bool gradient);
+    void appendDispSplitParts(void* stream);
+    std::string dispSplitStatus() const;
+
     /// WP5-A: D2D path — charges already on GPU after GPU Schur complement.
     /// Enqueues a D2D copy on the main workspace stream; no H2D upload happens
     /// in launchChargeDependentAndFinish() for this step.
@@ -687,6 +700,7 @@ private:
 
     // Term enable flags
     bool m_dispersion_enabled = true;
+    bool m_disp_helpers_launched = false;  ///< Oct 2026: helper devices hold this step's dispersion pairs (launchDispSplitHelpers)
     bool m_disp_c6_update = true;   ///< Claude Generated (Sep 2026): per-step C6 refresh in k_dc6dcn_per_pair
     bool m_hbond_enabled      = true;
     bool m_repulsion_enabled  = true;

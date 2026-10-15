@@ -2041,6 +2041,21 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 
     ++m_calc_count;
 
+    // Claude Generated (Oct 2026): CURCUMA_GFNFF_STEPPHASE=1 prints one line per calculator call
+    // (ms): cn, dlogdcn, hb_cn, hbxb (fired flag), launch, eeq_solve, coulomb+postprocess, total.
+    {
+        static const bool phase_log = [] {
+            const char* e = std::getenv("CURCUMA_GFNFF_STEPPHASE");
+            return e && *e && std::string(e) != "0";
+        }();
+        if (phase_log) {
+            const auto& T = m_last_gpu_prep_timing;
+            fmt::print(stderr, "STEPPHASE {} grad={} cn={:.2f} dlogdcn={:.2f} hb_cn={:.2f} hbxb={:.2f}{} launch={:.2f} eeq={:.2f} coul={:.2f} total={:.2f}\n",
+                       m_calc_count, gradient ? 1 : 0, T.cn, T.dlogdcn, T.hb_cn, T.hbxb, hbxb_updated ? "[F]" : "",
+                       T.launch, T.eeq_solve, T.coulomb_postprocess, T.total);
+        }
+    }
+
     if (CurcumaLogger::get_verbosity() >= 2) {
         // Claude Generated (Apr 2026): Granular GPU timing + wallclock-normalized breakdown
         // Fix (May 2026): t_hbxb now measures actual updateHBXBIfNeeded duration (was ≈0).

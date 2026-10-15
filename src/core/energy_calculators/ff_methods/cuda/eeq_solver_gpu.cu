@@ -401,8 +401,7 @@ void k_eeq_build_matrix(
  * @brief Column block [c0, c0+ncols) of the EEQ matrix, column-major (N rows), for the
  * multi-GPU split. Claude Generated (Sep 2026). Same element formula and operand order as
  * k_eeq_build_matrix (i = max(row,col), j = min(row,col)), so the values are bit-identical.
- * It still calls erf() in the far field (multi-GPU only, not run on a one-GPU machine); the
- * result equals k_eeq_build_matrix's 1/r there because erf saturates to 1.0 (GFNFF_COUL_FARFIELD_X2).
+ * Far field uses 1/r like k_eeq_build_matrix (erf saturates to 1.0, GFNFF_COUL_FARFIELD_X2).
  */
 __global__ __launch_bounds__(256, 4)
 void k_eeq_build_cols(int N, int c0, int ncols,
@@ -429,8 +428,14 @@ void k_eeq_build_cols(int N, int c0, int ncols,
             v = 0.0;
         } else {
             const double r = sqrt(r_sq);
-            const double gamma_ij = 1.0 / sqrt(alpha[i] + alpha[j]);
-            v = erf(gamma_ij * r) / r;
+            const double asum = alpha[i] + alpha[j];
+            if (r_sq >= GFNFF_COUL_FARFIELD_X2 * asum) {
+                // Far field (Claude Generated, Oct 2026): same shortcut as k_eeq_build_matrix, erf == 1.0
+                v = 1.0 / r;
+            } else {
+                const double gamma_ij = 1.0 / sqrt(asum);
+                v = erf(gamma_ij * r) / r;
+            }
         }
     }
     A_blk[tid] = v;
@@ -2981,8 +2986,19 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUProjectedPCG(
         std::string why;
         bool built = false;
         if (use_split) {
-            why = "multi-GPU split active (no full matrix on one device)";
+            // Oct 2026: the blocks need the full dense matrix. The split keeps only column blocks, so
+            // assemble the dense matrix once on the own device for this rebuild (about every 8 MD steps);
+            // a host build of the local inverse cost ~70 ms per rebuild on polymer_2x.
             impl.m_li_valid = false;
+            try {
+                impl.d_A.ensure(N * N);
+                const int n_lower = N * (N + 1) / 2;
+                k_eeq_build_matrix<<<(n_lower + 255) / 256, 256, 0, impl.stream>>>(
+                    N, cx, cy, cz, d_alpha_corrected, d_gam_corrected, impl.d_A.ptr, cutoff_sq);
+                built = buildLocalInverseOnDevice(impl, N, nfrag, cx, cy, cz, why);
+            } catch (const std::exception& e) {
+                why = std::string("dense matrix for the split rebuild: ") + e.what();
+            }
         } else {
             built = buildLocalInverseOnDevice(impl, N, nfrag, cx, cy, cz, why);
         }
@@ -3170,7 +3186,12 @@ bool EEQSolverGPU::setStreamPriorityHigh(bool high)
     return true;
 }
 
-bool EEQSolverGPU::localInverseDeviceBuildPossible(int N) const { return !splitWanted(*m_impl, N); }
+bool EEQSolverGPU::localInverseDeviceBuildPossible(int N) const
+{
+    // Split: the build needs the dense N x N matrix on the own device (8 N^2 bytes); keep it to sizes
+    // that fit comfortably, larger systems keep the host build.
+    return !splitWanted(*m_impl, N) || N <= 20000;
+}
 
 EEQSolverGPU::LocalInverseDeviceStats EEQSolverGPU::localInverseDeviceStats() const { return m_impl->m_li_stats; }
 

@@ -222,6 +222,8 @@ Environment variables:
 | Variable | Effect |
 |---|---|
 | `CURCUMA_GFNFF_PROFILE=1` | Setup phase timings summed over both q-loop topology passes (the verbosity-2 report shows only the last pass) and the GPU upload phases. |
+| `CURCUMA_GFNFF_DISP_SPLIT=0` | Default on. With the Coulomb split active (several devices, N >= split threshold, no PBC) the D4 dispersion pairs (`k_dc6dcn_per_pair` + `k_dispersion`, ~16 ms per step on one A4500 at polymer_2x) are divided into contiguous ranges over the devices; 0 keeps them all on the first device. Results differ from one device only by FP64 summation order (SP gradient 1 vs 4 A4500: max 1e-15 Eh/Angstrom). Turn off for A/B timing. |
+| `CURCUMA_GFNFF_STEPPHASE=1` | One stderr line per GFN-FF GPU calculator call: ms for cn, dlogdcn, hb_cn, hbxb (`[F]` = refresh fired), launch, eeq, coulomb, total. For finding the expensive steps of an MD run. |
 
 Threading note: GFN-FF topology and parameter generation use OpenMP with the GFN-FF thread budget (`-threads N`); inside batch workers they use the batch's per-worker share. Before Sep 2026 they silently ran on one thread.
 

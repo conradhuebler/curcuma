@@ -687,6 +687,42 @@ struct FFWorkspaceGPUImpl {
         d_coul_part_grad.free(); d_coul_part_E.free();
         coul_split_natoms = -1;
     }
+    // Claude Generated (Oct 2026): multi-GPU dispersion split (contiguous pair ranges per device).
+    struct DispSplitPart {
+        int dev = -1, p0 = 0, p1 = 0;
+        cudaStream_t stream = nullptr;
+        cudaEvent_t  done   = nullptr;
+        CudaBuffer<int> idx_i, idx_j, atom_types;
+        CudaBuffer<double> C6, r4r2ij, r0_sq, zetac6, r_cut, dc6ij, dc6ji;
+        CudaBuffer<double> x, y, z, gw, dgw, c6flat, grad, dEdcn, E;
+    };
+    std::vector<std::unique_ptr<DispSplitPart>> disp_parts;
+    long disp_gen = 0;                 ///< bumped whenever the dispersion pair list is replaced
+    long disp_split_gen = -1;          ///< disp_gen the helper copies belong to
+    int  disp_own_n = 0;               ///< pairs [0, disp_own_n) stay on the own device
+    int  disp_split_natoms = -1;
+    bool disp_split_failed = false;
+    std::string disp_split_status;
+    long disp_split_calls = 0;
+    std::vector<int> refn_host;        ///< refn table as uploaded to the own device's constant memory
+    CudaBuffer<double> d_disp_part_grad, d_disp_part_dEdcn, d_disp_part_E;
+    cudaEvent_t ev_disp_in = nullptr;
+    void releaseDispSplit() {
+        for (auto& pp : disp_parts) {
+            if (!pp) continue;
+            cudaSetDevice(pp->dev);
+            pp->idx_i.free(); pp->idx_j.free(); pp->atom_types.free();
+            pp->C6.free(); pp->r4r2ij.free(); pp->r0_sq.free(); pp->zetac6.free(); pp->r_cut.free();
+            pp->dc6ij.free(); pp->dc6ji.free(); pp->x.free(); pp->y.free(); pp->z.free();
+            pp->gw.free(); pp->dgw.free(); pp->c6flat.free(); pp->grad.free(); pp->dEdcn.free(); pp->E.free();
+            if (pp->done)   cudaEventDestroy(pp->done);
+            if (pp->stream) cudaStreamDestroy(pp->stream);
+        }
+        disp_parts.clear();
+        if (own_device >= 0) cudaSetDevice(own_device);
+        d_disp_part_grad.free(); d_disp_part_dEdcn.free(); d_disp_part_E.free();
+        disp_split_gen = -1; disp_split_natoms = -1; disp_own_n = 0;
+    }
     // Claude Generated (Sep 2026): tile-pair list for k_coulomb_tiles (bi <= bj, GFNFF_COUL_TILE atoms)
     CudaBuffer<int>    d_coul_tiles;    ///< [2*coul_ntiles]
     int                coul_ntiles = 0;
@@ -1338,6 +1374,7 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
         if (m_impl->stream_bonded)   cudaStreamSynchronize(m_impl->stream_bonded);
         if (m_impl->stream_threebody)cudaStreamSynchronize(m_impl->stream_threebody);
         // Claude Generated (Sep 2026): helper devices of the Coulomb split first (switches device).
+        m_impl->releaseDispSplit();
         m_impl->releaseCoulSplit();
         if (m_impl->ev_coul) cudaEventDestroy(m_impl->ev_coul);
 
@@ -1565,6 +1602,182 @@ void FFWorkspaceGPU::launchCoulombSplit()
     ++impl.coul_split_calls;
 }
 
+// ============================================================================
+// Multi-GPU dispersion split (Claude Generated, Oct 2026)
+// D4 dispersion E = -sum_pairs C6 f(r) zetac6 is a pair sum; the pairs are independent, so a
+// contiguous range of the pair list goes to each device. Per step a helper evaluates
+// k_dc6dcn_per_pair (needs gw/dgw of all atoms, copied from the own device) and k_dispersion on
+// its range and returns grad[3N], dE/dCN[N] and E; the own device adds them (atomicAdd, other
+// streams write d_grad concurrently). The C6 refresh of k_dc6dcn_per_pair writes the helper's
+// private C6 slice, so energy-only calls (no dc6dcn) see the C6 of the last gradient step
+// exactly as on one device. Summation order differs from the one-device run (FP64 rounding).
+// ============================================================================
+std::string FFWorkspaceGPU::dispSplitStatus() const
+{
+    const auto& I = *m_impl;
+    if (I.coul_split_devs.empty()) return {};
+    if (!I.disp_split_status.empty()) return I.disp_split_status;
+    if (I.disp_parts.empty()) return "configured, not used";
+    std::string list = std::to_string(I.own_device);
+    for (auto& pp : I.disp_parts) list += "," + std::to_string(pp->dev);
+    return "dispersion pairs on devices [" + list + "], " + std::to_string(I.disp_split_calls) + " calls";
+}
+
+bool FFWorkspaceGPU::prepareDispSplit()
+{
+    auto& impl = *m_impl;
+    static const bool env_off = [] {
+        const char* e = std::getenv("CURCUMA_GFNFF_DISP_SPLIT");
+        return e && std::string(e) == "0";
+    }();
+    constexpr int kMinPairs = 200000;   // below this the peer copies cost more than the kernels
+    if (env_off || !m_dispersion_enabled || impl.coul_split_devs.empty() || impl.disp_split_failed
+        || impl.pbc_active || m_natoms < impl.coul_split_min_atoms || impl.disp.n < kMinPairs
+        || !impl.dc6dcn_gpu_ready || impl.refn_host.empty()) {
+        if (!impl.disp_parts.empty()) {
+            // Own C6 of the helper ranges is stale; pairs in them must never be read from the own device.
+            impl.releaseDispSplit();
+            impl.disp_split_failed = true;
+            impl.disp_split_status = "switched off after start (conditions changed); restart the run";
+        }
+        return false;
+    }
+    if (impl.disp_split_gen == impl.disp_gen && impl.disp_split_natoms == m_natoms && !impl.disp_parts.empty())
+        return true;
+    impl.releaseDispSplit();
+    const int N = m_natoms;
+    const int nd = impl.disp.n;
+    const int nparts = static_cast<int>(impl.coul_split_devs.size()) + 1;
+    std::vector<int> bounds(nparts + 1, 0);
+    for (int k = 0; k <= nparts; ++k)
+        bounds[k] = static_cast<int>((static_cast<long long>(nd) * k) / nparts);
+    try {
+        for (int h = 0; h < nparts - 1; ++h) {
+            auto part = std::make_unique<FFWorkspaceGPUImpl::DispSplitPart>();
+            part->dev = impl.coul_split_devs[h];
+            part->p0 = bounds[h + 1];
+            part->p1 = bounds[h + 2];
+            const int n = part->p1 - part->p0;
+            if (cudaSetDevice(part->dev) != cudaSuccess)
+                throw std::runtime_error("cudaSetDevice(" + std::to_string(part->dev) + ") failed");
+            int can = 0;
+            cudaDeviceCanAccessPeer(&can, part->dev, impl.own_device);
+            if (can) cudaDeviceEnablePeerAccess(impl.own_device, 0);
+            cudaGetLastError();
+            if (cudaStreamCreate(&part->stream) != cudaSuccess
+                || cudaEventCreateWithFlags(&part->done, cudaEventDisableTiming) != cudaSuccess)
+                throw std::runtime_error("stream/event setup failed on device " + std::to_string(part->dev));
+            upload_refn_const(impl.refn_host.data(), static_cast<int>(impl.refn_host.size()));
+            part->idx_i.alloc(n); part->idx_j.alloc(n);
+            part->C6.alloc(n); part->r4r2ij.alloc(n); part->r0_sq.alloc(n); part->zetac6.alloc(n);
+            part->r_cut.alloc(n); part->dc6ij.alloc(n); part->dc6ji.alloc(n);
+            part->x.alloc(N); part->y.alloc(N); part->z.alloc(N);
+            part->atom_types.alloc(N);
+            part->gw.alloc(N * D4_MAX_REF); part->dgw.alloc(N * D4_MAX_REF);
+            part->c6flat.alloc(impl.d_c6_flat.n);
+            part->grad.alloc(3 * N); part->dEdcn.alloc(N); part->E.alloc(1);
+            const int own = impl.own_device;
+            auto cp = [&](void* dst, const void* src, size_t bytes) {
+                cudaMemcpyPeer(dst, part->dev, src, own, bytes);
+            };
+            const size_t o = static_cast<size_t>(part->p0);
+            cp(part->idx_i.ptr, impl.disp.idx_i.ptr + o, sizeof(int) * n);
+            cp(part->idx_j.ptr, impl.disp.idx_j.ptr + o, sizeof(int) * n);
+            cp(part->C6.ptr, impl.disp.C6.ptr + o, sizeof(double) * n);
+            cp(part->r4r2ij.ptr, impl.disp.r4r2ij.ptr + o, sizeof(double) * n);
+            cp(part->r0_sq.ptr, impl.disp.r0_sq.ptr + o, sizeof(double) * n);
+            cp(part->zetac6.ptr, impl.disp.zetac6.ptr + o, sizeof(double) * n);
+            cp(part->r_cut.ptr, impl.disp.r_cut.ptr + o, sizeof(double) * n);
+            cp(part->atom_types.ptr, impl.d_atom_types.ptr, sizeof(int) * N);
+            cp(part->c6flat.ptr, impl.d_c6_flat.ptr, sizeof(double) * impl.d_c6_flat.n);
+            impl.disp_parts.push_back(std::move(part));
+        }
+        cudaSetDevice(impl.own_device);
+        for (auto& pp : impl.disp_parts) {
+            int can = 0;
+            cudaDeviceCanAccessPeer(&can, impl.own_device, pp->dev);
+            if (can) cudaDeviceEnablePeerAccess(pp->dev, 0);
+        }
+        cudaGetLastError();
+        const int nh = nparts - 1;
+        impl.d_disp_part_grad.alloc(3 * N * nh);
+        impl.d_disp_part_dEdcn.alloc(N * nh);
+        impl.d_disp_part_E.alloc(nh);
+        if (!impl.ev_disp_in) cudaEventCreateWithFlags(&impl.ev_disp_in, cudaEventDisableTiming);
+        impl.disp_own_n = bounds[1];
+        impl.disp_split_gen = impl.disp_gen;
+        impl.disp_split_natoms = N;
+        // The own device wrote its slice only; the helpers start from the list-build C6.
+        cudaDeviceSynchronize();
+    } catch (const std::exception& e) {
+        impl.releaseDispSplit();
+        cudaSetDevice(impl.own_device);
+        impl.disp_split_failed = true;
+        impl.disp_split_status = std::string("unavailable: ") + e.what();
+        return false;
+    }
+    return true;
+}
+
+/// Enqueue the helper work of one step. Must run after the own device's coordinates (and, for
+/// the gradient, the Gaussian weights d_gw/d_dgw) are final on impl.stream. Needs prepareDispSplit().
+void FFWorkspaceGPU::launchDispSplitHelpers(bool gradient)
+{
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+    const size_t b1 = sizeof(double) * static_cast<size_t>(N);
+    cudaEventRecord(impl.ev_disp_in, impl.stream);
+    int h = 0;
+    for (auto& pp : impl.disp_parts) {
+        auto& P = *pp;
+        const int n = P.p1 - P.p0;
+        cudaSetDevice(P.dev);
+        cudaStreamWaitEvent(P.stream, impl.ev_disp_in, 0);
+        cudaMemcpyPeerAsync(P.x.ptr, P.dev, impl.coords.d_x.ptr, impl.own_device, b1, P.stream);
+        cudaMemcpyPeerAsync(P.y.ptr, P.dev, impl.coords.d_y.ptr, impl.own_device, b1, P.stream);
+        cudaMemcpyPeerAsync(P.z.ptr, P.dev, impl.coords.d_z.ptr, impl.own_device, b1, P.stream);
+        cudaMemsetAsync(P.grad.ptr, 0, 3 * b1, P.stream);
+        cudaMemsetAsync(P.dEdcn.ptr, 0, b1, P.stream);
+        cudaMemsetAsync(P.E.ptr, 0, sizeof(double), P.stream);
+        LaunchConfig cfg = getLaunchConfig(n, m_block_size);
+        if (gradient) {
+            const size_t bw = sizeof(double) * static_cast<size_t>(N) * D4_MAX_REF;
+            cudaMemcpyPeerAsync(P.gw.ptr, P.dev, impl.d_gw.ptr, impl.own_device, bw, P.stream);
+            cudaMemcpyPeerAsync(P.dgw.ptr, P.dev, impl.d_dgw.ptr, impl.own_device, bw, P.stream);
+            k_dc6dcn_per_pair<<<cfg.gridSize, cfg.blockSize, 0, P.stream>>>(
+                n, P.idx_i.ptr, P.idx_j.ptr, P.atom_types.ptr, P.gw.ptr, P.dgw.ptr, P.c6flat.ptr,
+                P.dc6ij.ptr, P.dc6ji.ptr, m_disp_c6_update ? P.C6.ptr : nullptr);
+        }
+        k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, P.stream>>>(
+            n, P.idx_i.ptr, P.idx_j.ptr, P.C6.ptr, P.r4r2ij.ptr, P.r0_sq.ptr, P.zetac6.ptr, P.r_cut.ptr,
+            gradient ? P.dc6ij.ptr : nullptr, gradient ? P.dc6ji.ptr : nullptr,
+            P.x.ptr, P.y.ptr, P.z.ptr, P.dEdcn.ptr, P.grad.ptr, P.E.ptr);
+        cudaMemcpyPeerAsync(impl.d_disp_part_grad.ptr + static_cast<size_t>(h) * 3 * N, impl.own_device,
+                            P.grad.ptr, P.dev, 3 * b1, P.stream);
+        cudaMemcpyPeerAsync(impl.d_disp_part_dEdcn.ptr + static_cast<size_t>(h) * N, impl.own_device,
+                            P.dEdcn.ptr, P.dev, b1, P.stream);
+        cudaMemcpyPeerAsync(impl.d_disp_part_E.ptr + h, impl.own_device, P.E.ptr, P.dev,
+                            sizeof(double), P.stream);
+        cudaEventRecord(P.done, P.stream);
+        ++h;
+    }
+    cudaSetDevice(impl.own_device);
+}
+
+/// After the own device's k_dispersion on pairs [0, disp_own_n): wait for the helpers and add their parts.
+void FFWorkspaceGPU::appendDispSplitParts(void* stream_)
+{
+    auto& impl = *m_impl;
+    cudaStream_t stream = static_cast<cudaStream_t>(stream_);
+    const int N = m_natoms;
+    for (auto& pp : impl.disp_parts) cudaStreamWaitEvent(stream, pp->done, 0);
+    k_add_disp_parts<<<(3 * N + 255) / 256, 256, 0, stream>>>(
+        N, static_cast<int>(impl.disp_parts.size()), impl.d_disp_part_grad.ptr,
+        impl.d_disp_part_dEdcn.ptr, impl.d_disp_part_E.ptr, impl.d_grad.ptr, impl.d_dEdcn.ptr,
+        &impl.d_energies.ptr[impl.E_DISP]);
+    ++impl.disp_split_calls;
+}
+
 // Claude Generated (Sep 2026): build the (bi <= bj) tile-pair list of k_coulomb_tiles once per
 // atom count. Row-major over the upper triangle; a contiguous sub-range is a balanced share
 // for another device.
@@ -1785,6 +1998,7 @@ void FFWorkspaceGPU::updateDispersion(const std::vector<GFNFFDispersion>& pairs)
     // Claude Generated (Sep 2026): see the declaration. DispersionSoA::upload() sets disp.n from
     // the vector (also for 0 pairs) and grows each buffer only when needed.
     auto& impl = *m_impl;
+    ++impl.disp_gen;
     if (m_staged_list_upload) {
         // Oct 2026: staged upload (see stagedListUpload()); fills the device columns with the
         // values of the serial path.
@@ -2001,6 +2215,7 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
     double a1, double a2, double cutoff_bohr)
 {
     auto& impl = *m_impl;
+    ++impl.disp_gen;
     const int N = m_natoms;
     if (N <= 0) return;
     if (!impl.dc6dcn_gpu_ready) {
@@ -2101,6 +2316,7 @@ void FFWorkspaceGPU::uploadC6ReferenceTable(const std::vector<double>& c6_flat,
 
     // Upload refn array (118 ints) to constant memory (Phase 8: broadcast via L1)
     upload_refn_const(refn.data(), static_cast<int>(refn.size()));
+    impl.refn_host = refn;   // helpers of the dispersion split need the same constant table
 
     // Pre-allocate gw/dgw GPU buffers
     const int gw_size = m_natoms * D4_MAX_REF;
@@ -2146,6 +2362,9 @@ void FFWorkspaceGPU::computeDC6DCNOnGPU(const std::vector<std::vector<double>>& 
     impl.d_gw.upload(m_h_gw_flat.data(), gw_size);
     impl.d_dgw.upload(m_h_dgw_flat.data(), gw_size);
 
+    // Oct 2026: this path refreshes C6/dc6dcn of the WHOLE list on the own device; the helper copies
+    // of the dispersion split would be stale, so drop them (rebuilt from the fresh C6 on next use).
+    if (!impl.disp_parts.empty()) { impl.releaseDispSplit(); m_disp_helpers_launched = false; }
     // Launch dc6dcn per-pair kernel (Phase 6: dynamic block size)
     LaunchConfig cfg = getLaunchConfig(nd, m_block_size);
     // refn read from constant memory d_refn_const (Phase 8)
@@ -2225,9 +2444,12 @@ void FFWorkspaceGPU::computeGaussianWeightsOnGPU(bool use_cn_final)
         impl.d_gw.ptr,
         impl.d_dgw.ptr);
 
-    LaunchConfig cfg_dc6 = getLaunchConfig(nd, m_block_size);
+    // Oct 2026: with the dispersion split the own device handles pairs [0, disp_own_n) only.
+    const bool split = prepareDispSplit();
+    const int nd_own = split ? impl.disp_own_n : nd;
+    LaunchConfig cfg_dc6 = getLaunchConfig(nd_own, m_block_size);
     k_dc6dcn_per_pair<<<cfg_dc6.gridSize, cfg_dc6.blockSize, 0, impl.stream>>>(
-        nd,
+        nd_own,
         impl.disp.idx_i.ptr,
         impl.disp.idx_j.ptr,
         impl.d_atom_types.ptr,
@@ -2237,6 +2459,10 @@ void FFWorkspaceGPU::computeGaussianWeightsOnGPU(bool use_cn_final)
         impl.disp.dc6dcn_ij.ptr,
         impl.disp.dc6dcn_ji.ptr,
         m_disp_c6_update ? impl.disp.C6.ptr : nullptr);  // Sep 2026: per-step C6 refresh
+    if (split) {
+        launchDispSplitHelpers(true);
+        m_disp_helpers_launched = true;
+    }
     // No explicit sync needed: stream ordering + event_upload fence in
     // prepareAndLaunchChargeIndependent guarantees dc6dcn is ready before k_dispersion on sA.
 }
@@ -2276,10 +2502,11 @@ bool FFWorkspaceGPU::launchDispersionGradientEarly()
     // blocks. Measured on polymer_2x (RTX 5080, 84 SMs, CUPTI step median, n=1 each): full grid
     // 18.4 ms, 1 block/SM 15.9, 0.75/SM 16.9, 1.5/SM 16.1. Fewer blocks also mean fewer
     // blockReduceAddEnergy atomics on the one E_DISP slot.
-    LaunchConfig cfg = getLaunchConfig(impl.disp.n, m_block_size);
+    const int nd_own = m_disp_helpers_launched ? impl.disp_own_n : impl.disp.n;
+    LaunchConfig cfg = getLaunchConfig(nd_own, m_block_size);
     if (m_sm_count > 0) cfg.gridSize = std::min(cfg.gridSize, m_sm_count);
     k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
-        impl.disp.n,
+        nd_own,
         impl.disp.idx_i.ptr,  impl.disp.idx_j.ptr,
         impl.disp.C6.ptr,     impl.disp.r4r2ij.ptr,
         impl.disp.r0_sq.ptr,  impl.disp.zetac6.ptr,
@@ -2293,6 +2520,10 @@ bool FFWorkspaceGPU::launchDispersionGradientEarly()
         impl.d_grad.ptr,
         &impl.d_energies.ptr[impl.E_DISP]);
     checkCuda(cudaGetLastError(), "k_dispersion (early) launch");
+    if (m_disp_helpers_launched) {
+        appendDispSplitParts(impl.stream_pairwise);
+        m_disp_helpers_launched = false;
+    }
     // Phase 2 makes the main stream wait on this before anything else (outside any graph capture),
     // so the dEdcn snapshot, k_coulomb_postprocess, k_cn_chainrule and the downloads follow it.
     cudaEventRecord(impl.event_disp_done, impl.stream_pairwise);
@@ -2421,9 +2652,12 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // (computeGaussianWeightsOnGPU runs after Phase 1 on d_cn; dc6dcn is only
     // ready on stream_pairwise after the Phase-2 event_upload fence).
     if (m_dispersion_enabled && !gradient) {
-        LaunchConfig cfg = getLaunchConfig(impl.disp.n, m_block_size);
+        const bool split = prepareDispSplit();
+        if (split) launchDispSplitHelpers(false);
+        const int nd_own = split ? impl.disp_own_n : impl.disp.n;
+        LaunchConfig cfg = getLaunchConfig(nd_own, m_block_size);
         k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
-            impl.disp.n,
+            nd_own,
             impl.disp.idx_i.ptr,  impl.disp.idx_j.ptr,
             impl.disp.C6.ptr,     impl.disp.r4r2ij.ptr,
             impl.disp.r0_sq.ptr,  impl.disp.zetac6.ptr,
@@ -2436,6 +2670,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.d_dEdcn.ptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_DISP]);
+        if (split) appendDispSplitParts(sA);
     }
     if (m_repulsion_enabled) {
         // Phase 8: n > 0 guard removed — n=0 produces a 1-block no-op (graph-capture safe)
@@ -2884,9 +3119,10 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // sees the completed dc6dcn values before k_dispersion launches.
     // K2 (Oct 2026): skipped when launchDispersionGradientEarly() already enqueued it.
     if (m_dispersion_enabled && gradient && !disp_launched_early) {
-        LaunchConfig cfg = getLaunchConfig(impl.disp.n, m_block_size);
+        const int nd_own = m_disp_helpers_launched ? impl.disp_own_n : impl.disp.n;
+        LaunchConfig cfg = getLaunchConfig(nd_own, m_block_size);
         k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
-            impl.disp.n,
+            nd_own,
             impl.disp.idx_i.ptr,  impl.disp.idx_j.ptr,
             impl.disp.C6.ptr,     impl.disp.r4r2ij.ptr,
             impl.disp.r0_sq.ptr,  impl.disp.zetac6.ptr,
@@ -2900,6 +3136,10 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_DISP]);
         checkCuda(cudaGetLastError(), "k_dispersion launch");
+        if (m_disp_helpers_launched) {
+            appendDispSplitParts(impl.stream_pairwise);
+            m_disp_helpers_launched = false;
+        }
     }
 
     // k_coulomb (needs EEQ charges)

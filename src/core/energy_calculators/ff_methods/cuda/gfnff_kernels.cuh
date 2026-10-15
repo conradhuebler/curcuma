@@ -134,6 +134,12 @@ __global__ void k_add_coulomb_parts(int n3, int nparts, const double* __restrict
                                     const double* __restrict__ part_E,
                                     double* grad, double* energy);
 
+/// grad += sum_k gparts[k*3N..], dEdcn += sum_k dparts[k*N..], energy += sum_k part_E[k]
+/// (multi-GPU dispersion reduce). Claude Generated (Oct 2026).
+__global__ void k_add_disp_parts(int N, int nparts, const double* __restrict__ gparts,
+                                 const double* __restrict__ dparts, const double* __restrict__ part_E,
+                                 double* grad, double* dEdcn, double* energy);
+
 /// Tile size of k_coulomb_tiles (atoms per tile, power of two).
 constexpr int GFNFF_COUL_TILE = 128;
 
