@@ -53,7 +53,7 @@ Stand.
 
 ## 2. Leistung
 
-- **GFN1/GFN2 auf ROCm** (Stand 2026-10-14, [docs/ROCM_GFN_POTENTIAL_2026-10-14.md](docs/ROCM_GFN_POTENTIAL_2026-10-14.md)): `-gpu auto` nimmt ROCm bei jeder Größe, die CPU gewinnt unter ca. 1000 Atomen; Eigenlöser 86 % (2910 Atome). Hebel: (0) Dichte-GEMM nur mit besetzten Spalten und syrk (bisher volles n^3-dgemm, 165 ms/Iteration bei n=3222), (a) L vorab statt potrf+sygst je Iteration, (b) späterer FP64-Wechsel (`-scf_fp32_threshold 1e-5`: -19 % Wanduhr, n=1), (c) Pseudo-Diagonalisierung wie CUDA, (d) auto-Schwelle für xTB.
+- **GFN1/GFN2 auf ROCm** (Stand 2026-10-14, [docs/ROCM_GFN_POTENTIAL_2026-10-14.md](docs/ROCM_GFN_POTENTIAL_2026-10-14.md)): `-gpu auto` nimmt ROCm bei jeder Größe, die CPU gewinnt unter ca. 1000 Atomen; Eigenlöser 86 % (2910 Atome). Hebel: (0) Dichte-GEMM: innere Dimension ncol ist umgesetzt (peo201-chain 15.1 -> 14.3 s, n=2), syrk noch offen, (a) L vorab statt potrf+sygst je Iteration, (b) späterer FP64-Wechsel (`-scf_fp32_threshold 1e-5`: -19 % Wanduhr, n=1), (c) Pseudo-Diagonalisierung wie CUDA, (d) auto-Schwelle für xTB.
 - **GFN2 auf der GPU, Eigenlöser = 73 % des Laufs** (polymer_2x, 1x A4500). Offen:
   (a) `-scf_pseudo_diag` als Standard einschalten (Betreiberentscheidung, Messungen sprechen dafür);
   (b) `-scf_pseudo_diag_fp64` auf einer GPU mit vollem FP64 (H200) messen;

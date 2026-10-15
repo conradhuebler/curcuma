@@ -1084,8 +1084,12 @@ struct XtbHipContext::Impl {
         hipLaunchKernelGGL(k_scale_cols, grd, blk, 0, stream, dF, dOcc, dCw, n);   // Cw = C·diag(occ)
         const double one = 1.0, zero = 0.0;
         // P = Cw · Cᵀ
-        if (rocblas_dgemm(handle, rocblas_operation_none, rocblas_operation_transpose,
-                          n, n, n, &one, dCw, n, dF, n, &zero, dP, n) != rocblas_status_success) return false;
+        // Claude Generated (Oct 2026): only the first ncol columns carry weight, so the inner
+        // dimension is ncol instead of n (same sum, the dropped terms were exact zeros).
+        if (ncol > 0) {
+            if (rocblas_dgemm(handle, rocblas_operation_none, rocblas_operation_transpose,
+                              n, n, ncol, &one, dCw, n, dF, n, &zero, dP, n) != rocblas_status_success) return false;
+        } else if (hipMemsetAsync(dP, 0, static_cast<size_t>(n) * n * sizeof(double), stream) != hipSuccess) return false;
         dim3 blk1(64), grd1((n + 63) / 64);
         hipLaunchKernelGGL(k_popband, grd1, blk1, 0, stream, dP, dS0, dH0, dPB, n);
         if (hipStreamSynchronize(stream) != hipSuccess) return false;
@@ -1256,8 +1260,12 @@ struct XtbHipContext::Impl {
         { dim3 b(16, 16), gr((nao + 15) / 16, (nao + 15) / 16);
           hipLaunchKernelGGL(k_scale_cols, gr, b, 0, stream, dF, dOcc, dCw, nao); }
         const double one = 1.0, zero = 0.0;
-        if (rocblas_dgemm(handle, rocblas_operation_none, rocblas_operation_transpose,
-                          nao, nao, nao, &one, dCw, nao, dF, nao, &zero, dW, nao) != rocblas_status_success) return false;
+        // Claude Generated (Oct 2026): inner dimension = number of weighted columns (rest are zero).
+        const int kocc = std::min(nocc_orbs, nao);
+        if (kocc > 0) {
+            if (rocblas_dgemm(handle, rocblas_operation_none, rocblas_operation_transpose,
+                              nao, nao, kocc, &one, dCw, nao, dF, nao, &zero, dW, nao) != rocblas_status_success) return false;
+        } else if (hipMemsetAsync(dW, 0, static_cast<size_t>(nao) * nao * sizeof(double), stream) != hipSuccess) return false;
         if (hipMemsetAsync(dGrad, 0, 3 * nat * sizeof(double), stream) != hipSuccess) return false;
         if (hipMemsetAsync(dEdcn_buf, 0, nat * sizeof(double), stream) != hipSuccess) return false;
         const double kexp = 1.5, rexp = 1.0, kexp_light = bis_gfn2 ? 1.0 : 1.5;
