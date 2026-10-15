@@ -119,8 +119,13 @@ public:
      * @param density_syrk build the density with rocblas_dsyrk on C diag(sqrt(occ)) and mirror
      *        the lower triangle; default false (-xtb.rocm_density_syrk). Negative occupations
      *        keep the GEMM path.
+     * @param explicit_linv with the cached factor, form Linv = L^-1 once per geometry (trtri,
+     *        FP64, plus its FP32 rounding) and run each step as F' = Linv F Linv^T (two trmm),
+     *        syevd, C = Linv^T Y (trmm) instead of sygst/syevd/trsm; default false
+     *        (-xtb.rocm_explicit_linv). Falls back to sygst/trsm if trtri or allocation fails.
+     *        Claude Generated (Oct 2026).
      */
-    void setSolverOptions(bool cached_cholesky, bool density_syrk);
+    void setSolverOptions(bool cached_cholesky, bool density_syrk, bool explicit_linv = false);
 
     /// Upload the geometry-constant H0, overlap S; allocate the resident work buffers.
     bool residentBegin(const double* H0_colmajor, const double* S_colmajor, int n);

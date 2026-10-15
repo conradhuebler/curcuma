@@ -996,11 +996,24 @@ struct XtbHipContext::Impl {
     float*  dLc32 = nullptr; int chol32_n = 0; unsigned long long chol32_ver = 0;
     const double* curL = nullptr;       ///< FP64 factor of the current S (dL or dLc), set by cholFp64
     bool    chol_alloc_failed = false;  ///< allocation failed once: stay on sygvd (no retry per step)
+    // ----- explicit inverse factor Linv = L^-1 (Claude Generated, Oct 2026) -----
+    // Opt-in -xtb.rocm_explicit_linv: Linv is formed once per S (rocsolver_dtrtri on a copy of
+    // the cached FP64 factor; dLinv32 is its FP32 rounding) and each step reduces with two
+    // rocblas_trmm, F' = Linv F Linv^T, and back-transforms with C = Linv^T Y (trmm) instead of
+    // sygst/trsm. Same cache key (n, s_version) as the factor. Any failure -> sygst/trsm path.
+    bool    opt_explicit_linv = false;  ///< -xtb.rocm_explicit_linv (default false)
+    double* dLinv = nullptr;   int linv_n = 0;   unsigned long long linv_ver = 0;
+    float*  dLinv32 = nullptr; int linv32_n = 0; unsigned long long linv32_ver = 0;
+    bool    linv_alloc_failed = false;  ///< allocation failed once: no retry per step
+    unsigned long long linv_bad_ver = 0; ///< s_version for which trtri reported a singular L
 
     void freeCholCache() {
         if (dLc) (void)hipFree(dLc);
         if (dLc32) (void)hipFree(dLc32);
         dLc = nullptr; dLc32 = nullptr; chol_n = chol32_n = 0; chol_ver = chol32_ver = 0; curL = nullptr;
+        if (dLinv) (void)hipFree(dLinv);
+        if (dLinv32) (void)hipFree(dLinv32);
+        dLinv = nullptr; dLinv32 = nullptr; linv_n = linv32_n = 0; linv_ver = linv32_ver = 0;
     }
     /**
      * @brief Lower Cholesky factor L of the resident overlap dS0 (S = L L^T), FP64.
@@ -1056,6 +1069,59 @@ struct XtbHipContext::Impl {
     }
 
     /**
+     * @brief Explicit inverse Linv = L^-1 of the cached FP64 factor of dS0 (lower triangle valid).
+     * @param n matrix dimension (must equal res_n)
+     * @return device pointer or nullptr when the switch is off, the factor is unavailable, the
+     *         buffer cannot be allocated or trtri reports a singular L; the caller then keeps the
+     *         sygst/trsm path. Claude Generated (Oct 2026).
+     */
+    const double* linvFp64(int n) {
+        if (!opt_explicit_linv || linv_alloc_failed || linv_bad_ver == s_version) return nullptr;
+        const double* L = cholFp64(n);
+        if (!L) return nullptr;
+        if (dLinv && linv_n == n && linv_ver == s_version) return dLinv;
+        const size_t nn = static_cast<size_t>(n) * n;
+        if (linv_n != n || !dLinv) {
+            if (dLinv) (void)hipFree(dLinv);
+            dLinv = nullptr; linv_n = 0; linv_ver = 0;
+            if (hipMalloc(&dLinv, nn * sizeof(double)) != hipSuccess) {
+                dLinv = nullptr; linv_alloc_failed = true; (void)hipGetLastError(); return nullptr;
+            }
+            linv_n = n;
+        }
+        if (hipMemcpyAsync(dLinv, L, nn * sizeof(double), hipMemcpyDeviceToDevice, stream) != hipSuccess) return nullptr;
+        if (rocsolver_dtrtri(handle, rocblas_fill_lower, rocblas_diagonal_non_unit, n, dLinv, n, dInfo)
+            != rocblas_status_success) { linv_bad_ver = s_version; return nullptr; }
+        if (hipStreamSynchronize(stream) != hipSuccess) return nullptr;
+        rocblas_int info = 0;
+        if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return nullptr;
+        if (info != 0) { linv_bad_ver = s_version; return nullptr; }
+        linv_ver = s_version;
+        return dLinv;
+    }
+    /**
+     * @brief FP32 rounding of linvFp64 (once per S), or nullptr. Claude Generated (Oct 2026).
+     */
+    const float* linvFp32(int n) {
+        const double* Li = linvFp64(n);
+        if (!Li) return nullptr;
+        if (dLinv32 && linv32_n == n && linv32_ver == s_version) return dLinv32;
+        const size_t nn = static_cast<size_t>(n) * n;
+        if (linv32_n != n || !dLinv32) {
+            if (dLinv32) (void)hipFree(dLinv32);
+            dLinv32 = nullptr; linv32_n = 0; linv32_ver = 0;
+            if (hipMalloc(&dLinv32, nn * sizeof(float)) != hipSuccess) {
+                dLinv32 = nullptr; linv_alloc_failed = true; (void)hipGetLastError(); return nullptr;
+            }
+            linv32_n = n;
+        }
+        const int blk = 256; const int g = static_cast<int>((nn + blk - 1) / blk);
+        hipLaunchKernelGGL(k_d2f, dim3(g), dim3(blk), 0, stream, Li, dLinv32, nn);
+        linv32_ver = s_version;
+        return dLinv32;
+    }
+
+    /**
      * @brief FP64 generalized eigensolve F C = S C eps on the resident matrices.
      *
      * dF holds F on entry and C (ascending eigenvalues) on exit, dEps the eigenvalues.
@@ -1065,8 +1131,25 @@ struct XtbHipContext::Impl {
      */
     bool eigensolveFp64(int n) {
         const size_t nn = static_cast<size_t>(n) * n;
-        const double* L = cholFp64(n);
-        if (L) {
+        const double* Li = linvFp64(n);
+        const double* L = Li ? nullptr : cholFp64(n);
+        if (Li) {
+            // Claude Generated (Oct 2026), -xtb.rocm_explicit_linv: F' = Linv F Linv^T with two
+            // out-of-place trmm (dS is the work buffer of the sygvd branch, free here), then
+            // syevd on the lower triangle and C = Linv^T Y in place. F is mirrored lower ->
+            // upper first so that, like sygst, only the lower triangle of F enters.
+            const double one = 1.0;
+            dim3 b2(16, 16), g2((n + 15) / 16, (n + 15) / 16);
+            hipLaunchKernelGGL(k_mirror_lower, g2, b2, 0, stream, dF, n);
+            if (rocblas_dtrmm(handle, rocblas_side_left, rocblas_fill_lower, rocblas_operation_none,
+                              rocblas_diagonal_non_unit, n, n, &one, Li, n, dF, n, dS, n) != rocblas_status_success) return false;
+            if (rocblas_dtrmm(handle, rocblas_side_right, rocblas_fill_lower, rocblas_operation_transpose,
+                              rocblas_diagonal_non_unit, n, n, &one, Li, n, dS, n, dF, n) != rocblas_status_success) return false;
+            if (rocsolver_dsyevd(handle, rocblas_evect_original, rocblas_fill_lower, n, dF, n,
+                                 dEps, dE, dInfo) != rocblas_status_success) return false;
+            if (rocblas_dtrmm(handle, rocblas_side_left, rocblas_fill_lower, rocblas_operation_transpose,
+                              rocblas_diagonal_non_unit, n, n, &one, Li, n, dF, n, dF, n) != rocblas_status_success) return false;
+        } else if (L) {
             double* Lw = const_cast<double*>(L);   // non-const in the API; not written (checked)
             if (rocsolver_dsygst(handle, rocblas_eform_ax, rocblas_fill_lower, n, dF, n, Lw, n)
                 != rocblas_status_success) return false;
@@ -1096,9 +1179,28 @@ struct XtbHipContext::Impl {
         if (!ensureFp32(n)) return false;
         const size_t nn = static_cast<size_t>(n) * n;
         const int blk = 256; const int g = static_cast<int>((nn + blk - 1) / blk);
-        const float* L32 = cholFp32(n);
+        const float* Li32 = linvFp32(n);
+        const float* L32 = Li32 ? nullptr : cholFp32(n);
+        bool c_in_s32 = false;   // explicit-Linv path leaves C in dS32
+        if (Li32) {   // F mirrored lower -> upper in FP64 (see eigensolveFp64), Claude Generated (Oct 2026)
+            dim3 b2(16, 16), g2((n + 15) / 16, (n + 15) / 16);
+            hipLaunchKernelGGL(k_mirror_lower, g2, b2, 0, stream, dF, n);
+        }
         hipLaunchKernelGGL(k_d2f, dim3(g), dim3(blk), 0, stream, dF, dF32, nn);    // F → FP32
-        if (L32) {
+        if (Li32) {
+            // -xtb.rocm_explicit_linv: F' = Linv F Linv^T (two out-of-place strmm via dS32),
+            // ssyevd, C = Linv^T Y out of place into dS32 (converted to FP64 from there).
+            const float onef = 1.0f;
+            if (rocblas_strmm(handle, rocblas_side_left, rocblas_fill_lower, rocblas_operation_none,
+                              rocblas_diagonal_non_unit, n, n, &onef, Li32, n, dF32, n, dS32, n) != rocblas_status_success) return false;
+            if (rocblas_strmm(handle, rocblas_side_right, rocblas_fill_lower, rocblas_operation_transpose,
+                              rocblas_diagonal_non_unit, n, n, &onef, Li32, n, dS32, n, dF32, n) != rocblas_status_success) return false;
+            if (rocsolver_ssyevd(handle, rocblas_evect_original, rocblas_fill_lower, n, dF32, n,
+                                 dEps32, dE32, dInfo) != rocblas_status_success) return false;
+            if (rocblas_strmm(handle, rocblas_side_left, rocblas_fill_lower, rocblas_operation_transpose,
+                              rocblas_diagonal_non_unit, n, n, &onef, Li32, n, dF32, n, dS32, n) != rocblas_status_success) return false;
+            c_in_s32 = true;
+        } else if (L32) {
             float* Lw = const_cast<float*>(L32);   // rocSOLVER/rocBLAS take non-const B; not written
             if (rocsolver_ssygst(handle, rocblas_eform_ax, rocblas_fill_lower, n, dF32, n, Lw, n)
                 != rocblas_status_success) return false;
@@ -1117,7 +1219,7 @@ struct XtbHipContext::Impl {
         if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return false;
         if (info != 0) return false;
         const int gn = static_cast<int>((nn + blk - 1) / blk), gn1 = (n + blk - 1) / blk;
-        hipLaunchKernelGGL(k_f2d, dim3(gn), dim3(blk), 0, stream, dF32, dF, nn);   // C → FP64 (dF)
+        hipLaunchKernelGGL(k_f2d, dim3(gn), dim3(blk), 0, stream, c_in_s32 ? dS32 : dF32, dF, nn);   // C → FP64 (dF)
         hipLaunchKernelGGL(k_f2d, dim3(gn1), dim3(blk), 0, stream, dEps32, dEps, n); // eps → FP64
         return hipStreamSynchronize(stream) == hipSuccess;
     }
@@ -1826,12 +1928,13 @@ bool XtbHipContext::solveGeneralized(const double* F, const double* S, int n,
 }
 
 // Claude Generated (Oct 2026): resident-solver switches, see the header.
-void XtbHipContext::setSolverOptions(bool cached_cholesky, bool density_syrk)
+void XtbHipContext::setSolverOptions(bool cached_cholesky, bool density_syrk, bool explicit_linv)
 {
 #ifndef HAVE_ROCSOLVER
-    (void)cached_cholesky; (void)density_syrk;
+    (void)cached_cholesky; (void)density_syrk; (void)explicit_linv;
 #else
     if (!m_impl) return;
+    m_impl->opt_explicit_linv = explicit_linv;
     m_impl->opt_cached_chol  = cached_cholesky;
     m_impl->opt_density_syrk = density_syrk;
 #endif

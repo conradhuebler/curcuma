@@ -98,8 +98,8 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
     // resident on the device — the Fock build + populations are HIP kernels, the density a
     // rocBLAS GEMM, the eigensolve rocSOLVER. GFN1 runs the isotropic loop, GFN2 the
     // multipole loop (R-AP2).
-    // Resident-solver switches -xtb.rocm_cached_cholesky (default true) and
-    // -xtb.rocm_density_syrk (default false); the fallbacks here are the defaults of the
+    // Resident-solver switches -xtb.rocm_cached_cholesky (default true),
+    // -xtb.rocm_density_syrk (default false) and -xtb.rocm_explicit_linv (default false); the fallbacks here are the defaults of the
     // PARAM block in native_xtb_method.h. Claude Generated (Oct 2026).
     {
         auto cfgBool = [&config](const char* key, bool def) -> bool {
@@ -120,11 +120,14 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
         };
         const bool cached_chol  = cfgBool("rocm_cached_cholesky", true);
         const bool density_syrk = cfgBool("rocm_density_syrk", false);
-        ctx->setSolverOptions(cached_chol, density_syrk);
+        const bool explicit_linv = cfgBool("rocm_explicit_linv", false);   // Claude Generated (Oct 2026)
+        ctx->setSolverOptions(cached_chol, density_syrk, explicit_linv);
         if (CurcumaLogger::get_verbosity() >= 2)
             CurcumaLogger::info(fmt::format(
                 "{}: ROCm solver: {} eigensolve, density via {}", getMethodName(),
-                cached_chol ? "cached-Cholesky (sygst/syevd/trsm)" : "sygvd",
+                !cached_chol ? "sygvd"
+                             : (explicit_linv ? "cached-Cholesky with explicit L^-1 (trmm/syevd/trmm)"
+                                              : "cached-Cholesky (sygst/syevd/trsm)"),
                 density_syrk ? "dsyrk" : "dgemm"));
     }
 
