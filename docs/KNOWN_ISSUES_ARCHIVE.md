@@ -62,6 +62,7 @@ in the open-items table below; **info** = no defect.
 | 36 | GFN-FF | run-to-run determinism | partial |
 | 37 | GFN-FF GPU | gaps from the multi-GPU analysis | fixed (CUDA) / open (ROCm) |
 | 38 | GFN-FF | D4 C6 summation order depended on verbosity | fixed |
+| 39 | GFN2 GPU | open-shell structures: GPU energy differs from the CPU by up to 49 kcal/mol (GFN1 does not) | **open** |
 
 ## Open items
 
@@ -428,3 +429,10 @@ CPU GFN-FF is now bit-reproducible at a fixed thread count — the D4 pair list 
 ## #38 GFN-FF D4: the C6 summation order depended on the verbosity level — FIXED (Sep 30, 2026, ported from revgfnff, AI/machine-tested)
 
 `D4ParameterGenerator::getChargeWeightedC6` took its half-contraction fast path only at verbosity < 3 and the flat double loop otherwise (so a debug print could fire); the two orders differ by 1 ulp in C6, invisible in a single point but amplified by react-mode MD until a 2000 K ethane cell gave 90 rebuilds / +471 kJ/mol at `-verbosity 1-3` and 136 / +0.6 at `-verbosity 4`. Fast path is now unconditional, the debug fall-through opens on `CURCUMA_C6DEBUG`; default-verbosity results unchanged. Rule: no numerical path may be selected by the print level. Full `ctest` unchanged (same 3 pre-existing failures).
+
+## #39 GFN2 on the GPU: open-shell energies differ from the CPU by up to 49 kcal/mol, GFN1 does not (found Oct 16, 2026, AI/machine-tested; open)
+
+Found by running all of GMTKN55 (2462 structures) through `-gpu cuda` and the CPU (`-method gfn2`, single thread, `.CHRG`/`.UHF` applied as `-charge`/`-spin`). 66 structures differ by more than 1e-6 kcal/mol, 35 by more than 1e-3; 65 of the 66 have a `.UHF` file (open shell, 27 neutral and 38 charged radicals/ions), the 66th (`MCONF/43`, 6.3e-6 kcal/mol, one last digit) is a closed-shell rounding case. The largest: `W4-11/bn3pi` 49.1, `BH76/RKT11` 26.8, `BH76/RKT14` 25.9, `BH76/RKT17` 14.5, `BH76/RKT19` 14.3 kcal/mol; the GPU energy is lower each time (bn3pi: GPU -4.00583144, CPU -3.92755064 Eh). All 1600 + 398 closed-shell structures agree (0 differences > 1e-6 except the one above); GFN1 agrees on all 2461 evaluated structures (1 last-digit case); GFN-FF agrees on all 2462; MOR41 agrees (GFN2: 1 last digit of 95).
+
+**Not caused by the Oct 2026 multi-GPU work**: the binary built from `9ef9b98c` (the commit that session started from) gives the same GPU energies (`|ref_gpu - new_gpu|` <= 6.3e-6 kcal/mol on all 66, 0 on 60 random other structures), and the GPU result does not change with `-scf_pseudo_diag false`, `-gpu_sparse_integrals false` or `-scf_mixed_precision false`. The log of these runs names the path "GPU eigensolver active (cuSOLVER Dsyevd, FP64); SCF/integrals/gradient on CPU (Stage 1)", i.e. the SCF runs on the CPU and only the eigensolve is delegated. Not investigated further: which side is right (no tblite/xtb binary on this machine; the CPU open-shell path is the one validated against tblite, docs/SQM_VALIDATION.md), and why GFN1 is unaffected.
+

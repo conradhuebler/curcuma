@@ -10,6 +10,7 @@ gehört in `AIChangelog.md` bzw. das Archiv, Fehlerberichte in [docs/KNOWN_ISSUE
 Stand.
 
 ## 1. Korrektheit (offen)
+- **GFN2 auf der GPU: offene Schalen weichen von der CPU ab** (Known Issue #39, 15./16. Okt. 2026): 65 GMTKN55-Strukturen mit `.UHF`, bis 49 kcal/mol (`W4-11/bn3pi`), GPU-Energie jeweils tiefer; GFN1 und GFN-FF nicht betroffen; vor der Multi-GPU-Arbeit identisch vorhanden (Master `9ef9b98c`). Ursache offen; bis dahin offene Schalen mit GFN2 auf der CPU rechnen.
 
 - **Flat-Flag ohne Modulpräfix erreicht den nativen xTB nicht** (bestätigt 2026-10-11, n=1): `-diis_start 1` landet laut `-export_run` in `/opt` und `/sp`, nicht in `/xtb`; der Name ist in
   `curcumaopt.h`, `lbfgs.h` und `native_xtb_method.h` registriert, bei `-verbosity 2` kommt keine Warnung. `-xtb.diis_start 1` wirkt (seit `1bb4781b`). Ursache im Routing nicht untersucht;
