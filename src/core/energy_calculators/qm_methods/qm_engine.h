@@ -25,6 +25,7 @@
 #pragma once
 
 #include "qm_gpu_backend.h"
+#include "qm_gpu_scf_backend.h"
 #include <memory>
 
 #include "src/core/global.h"
@@ -82,6 +83,12 @@ BEGIN_PARAMETER_DEFINITION(qm)
           "Performance", {})
     PARAM(gpu_max_memory_mb, Double, 0.0,
           "With -gpu: treat the device as having at most this much free memory (MB) when deciding whether the stored ERI tensor fits (0 = the real free device memory). For testing the integral-direct device path on small systems.",
+          "Performance", {})
+    PARAM(gpu_scf, String, "auto",
+          "With -gpu cuda|auto, device-resident SCF loop (Q-G4): Fock build, DIIS error and extrapolation, X^T F X eigensolve (cuSOLVER) and density stay on the device, the host only receives scalars per iteration; same iterations and convergence test as the host loop, which stays the fallback. auto (when the J/K build runs on the device, stored tensor or integral-direct, and the basis has at least gpu_scf_min_nbf functions) | on (whenever the J/K build runs on the device, any size; otherwise reported as a fallback) | off (host SCF loop).",
+          "Performance", {})
+    PARAM(gpu_scf_min_nbf, Int, 200,
+          "gpu_scf auto: smallest number of basis functions for the device-resident SCF loop. Below it the host loop is faster (cuSOLVER syevd is latency-bound for small matrices: ~3 ms at 114 functions on an RTX 5090 vs ~1.2 ms on 4 CPU threads); measured crossover near 200 functions.",
           "Performance", {})
     PARAM(scf_max_iterations, Int, 100,
           "Maximum number of SCF iterations.",
@@ -258,6 +265,12 @@ private:
     mutable bool m_gpu_direct_failed = false;
     mutable bool m_gpu_jk_checked = false;   // CURCUMA_QM_GPU_JK_CHECK ran for this geometry
     mutable long m_direct_quartets = 0;      // shell quartets computed in the last SCF (stats)
+    // Q-G4 (Oct 2026): device-resident SCF loop (-qm.gpu_scf auto|on|off). The state object
+    // survives geometry changes (it holds no geometry data across SCFs), recreated if n changes.
+    std::string m_gpu_scf = "auto";
+    int m_gpu_scf_min_nbf = 200;             // auto: device loop from this basis size on
+    mutable std::unique_ptr<qmint::QMGpuSCF> m_gpu_scf_state;
+    mutable bool m_gpu_scf_failed = false;   // device loop failed once: host loop from then on
     // Energy components for the HF run (Hartree). E_elec = 0.5 Tr(P(H+F)).
     double m_e_elec = 0.0;
     double m_et = 0.0, m_ev = 0.0, m_ej = 0.0, m_ex = 0.0;
@@ -273,6 +286,15 @@ private:
 
     // --- WP3 closed-shell HF-SCF (implementation in qm_scf.cpp) ---
     bool runSCF();  ///< DIIS/damping SCF; sets m_density/m_fock/m_total_energy
+    /// Q-G4: the same SCF iterations on device-resident matrices. Returns 1 converged,
+    /// 0 not converged (same meaning as the host loop), -1 device path not usable or a device
+    /// error (the caller then runs the host loop from the same start density).
+    int runSCFDevice(int n_occ, bool direct, bool use_diis, double damping);
+    /// Q-G4: device J/K builder the resident loop can drive (nullptr = host loop).
+    qmint::QMGpuJK* gpuScfJK(bool direct) const;
+    /// Common tail of both loops after convergence: final full J/K build, energies, MO slots.
+    void finishConvergedSCF(const Matrix& C, const Vector& eps, int n_occ, int iterations, double delta_P,
+                            bool direct, double loop_ms, double fock_ms, double eig_ms, const std::string& device_stats);
 
     // Fock build in the active basis: F = H + 2 J(P) - K(P) (closed-shell RHF).
     // J_mu_nu = sum P_lam_sig (mu nu | lam sig); K_mu_nu = sum P_lam_sig (mu lam | nu sig).

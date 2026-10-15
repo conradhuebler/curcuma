@@ -53,6 +53,18 @@ __global__ void pmaxKernel(const double* __restrict__ P, const int* __restrict__
     Pmax[B * ns + A] = m;
 }
 
+/// Q-G4: J = (Jt + Jt^T)/2, K = (Kt + Kt^T)/2 into separate output buffers (device side of the
+/// host loop in QmGpuDirectJkCuda::build). Claude Generated (Oct 2026).
+__global__ void symmetriseKernel(const double* __restrict__ Jt, const double* __restrict__ Kt,
+                                 double* __restrict__ J, double* __restrict__ K, int n)
+{
+    const size_t k = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= (size_t)n * n) return;
+    const size_t a = k / n, b = k % n, kt = b * n + a;
+    J[k] = 0.5 * (Jt[k] + Jt[kt]);
+    K[k] = 0.5 * (Kt[k] + Kt[kt]);
+}
+
 class QmGpuDirectJkCuda final : public qmint::QMGpuJK {
 public:
     QmGpuDirectJkCuda() = default;
@@ -105,6 +117,55 @@ public:
         const auto t0 = std::chrono::steady_clock::now();
         const size_t n2 = (size_t)m_n * m_n;
         if (cudaMemcpy(m_P, P, n2 * sizeof(double), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+        float kms = 0.0f;
+        unsigned long long cnt = 0;
+        if (!runKernels(kms)) return false;
+        if (cudaMemcpy(J, m_J, n2 * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess
+            || cudaMemcpy(K, m_K, n2 * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess
+            || cudaMemcpy(&cnt, m_counter, sizeof cnt, cudaMemcpyDeviceToHost) != cudaSuccess)
+            return false;
+        // J = (Jt + Jt^T)/2, K = (Kt + Kt^T)/2, as DirectJK::build
+        const int n = m_n;
+        for (int a = 0; a < n; ++a)
+            for (int b = a; b < n; ++b) {
+                const double js = 0.5 * (J[(size_t)a * n + b] + J[(size_t)b * n + a]);
+                const double ks = 0.5 * (K[(size_t)a * n + b] + K[(size_t)b * n + a]);
+                J[(size_t)a * n + b] = J[(size_t)b * n + a] = js;
+                K[(size_t)a * n + b] = K[(size_t)b * n + a] = ks;
+            }
+        m_last_quartets = (long long)cnt;
+        ++m_builds;
+        m_kernel_ms += kms;
+        m_total_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        return true;
+    }
+
+    // Q-G4 (Claude Generated, Oct 2026): device-pointer variant for the resident SCF loop. The
+    // symmetrisation runs on the device with the same expression as the host loop above
+    // (0.5 * (a + b), commutative, so bit-identical to build() for the same Jt, Kt).
+    bool buildDevice(const double* dP, double* dJ, double* dK) override
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        const size_t n2 = (size_t)m_n * m_n;
+        if (cudaMemcpy(m_P, dP, n2 * sizeof(double), cudaMemcpyDeviceToDevice) != cudaSuccess) return false;
+        float kms = 0.0f;
+        if (!runKernels(kms)) return false;
+        symmetriseKernel<<<(unsigned)((n2 + 255) / 256), 256>>>(m_J, m_K, dJ, dK, m_n);
+        unsigned long long cnt = 0;
+        if (cudaGetLastError() != cudaSuccess
+            || cudaMemcpy(&cnt, m_counter, sizeof cnt, cudaMemcpyDeviceToHost) != cudaSuccess)
+            return false;
+        m_last_quartets = (long long)cnt;
+        ++m_builds;
+        m_kernel_ms += kms;
+        m_total_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        return true;
+    }
+
+    /// Pmax + all quartet-class launches on m_P into the unsymmetrised m_J, m_K; synchronous.
+    bool runKernels(float& kms)
+    {
+        const size_t n2 = (size_t)m_n * m_n;
         cudaMemset(m_J, 0, n2 * sizeof(double));
         cudaMemset(m_K, 0, n2 * sizeof(double));
         cudaMemset(m_counter, 0, sizeof(unsigned long long));
@@ -134,26 +195,7 @@ public:
             if (cudaStreamSynchronize(s) != cudaSuccess) return false;
         cudaEventRecord(m_e1);
         if (cudaEventSynchronize(m_e1) != cudaSuccess || cudaGetLastError() != cudaSuccess) return false;
-        float kms = 0.0f;
         cudaEventElapsedTime(&kms, m_e0, m_e1);
-        unsigned long long cnt = 0;
-        if (cudaMemcpy(J, m_J, n2 * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess
-            || cudaMemcpy(K, m_K, n2 * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess
-            || cudaMemcpy(&cnt, m_counter, sizeof cnt, cudaMemcpyDeviceToHost) != cudaSuccess)
-            return false;
-        // J = (Jt + Jt^T)/2, K = (Kt + Kt^T)/2, as DirectJK::build
-        const int n = m_n;
-        for (int a = 0; a < n; ++a)
-            for (int b = a; b < n; ++b) {
-                const double js = 0.5 * (J[(size_t)a * n + b] + J[(size_t)b * n + a]);
-                const double ks = 0.5 * (K[(size_t)a * n + b] + K[(size_t)b * n + a]);
-                J[(size_t)a * n + b] = J[(size_t)b * n + a] = js;
-                K[(size_t)a * n + b] = K[(size_t)b * n + a] = ks;
-            }
-        m_last_quartets = (long long)cnt;
-        ++m_builds;
-        m_kernel_ms += kms;
-        m_total_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         return true;
     }
 

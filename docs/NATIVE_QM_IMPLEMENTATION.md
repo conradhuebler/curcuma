@@ -23,6 +23,13 @@ LDA/PBE/B3LYP (WP5-WP7) are still open: those methods intentionally return the
 nuclear repulsion only. ⚠️ AI-generated / ⚙️ machine-tested only — no human
 production test, and the validation set is 10 molecules in a H-Ne basis.
 
+## Status summary
+
+(Moved here in Oct 2026 from the status table of `src/core/energy_calculators/qm_methods/CLAUDE.md`, whose line limit it exceeded.)
+
+- **Compared with**: `hf` vs ORCA 6.1 10/10 ≤4e-9 Eh (`ctest -L 'qm_1e|qm_2e'`); `hf-3c` every term vs PySCF+simple-dftd3 ≤4e-11 Eh on 17 molecules (`ctest -L qm_hf3c`); analytic `hf`/`hf-3c` gradient vs PySCF(+sdftd3) ≤2e-10 Eh/Bohr, `-opt` to the reference minimum (`ctest -L qm_grad`); LDA/PBE/B3LYP open
+- **Code and notes**: `QMEngine : public QMDriver` (`qm_engine.*`, `qm_scf.cpp`, `qm_integrals.*`, wrapper `qm_method.*`; renamed from `DFT`/`dft_*` Sep 2026, params `-qm.*`, legacy `-dft.*` merged). `HF3CMethod` (`hf3c_method.*`) = HF/MINIX + D3(BJ, `createForHF3C`, s9=0) + gCP/SRB (`gcp.*`, simple-dftd3 port; Slater exponents kept single-precision like the Fortran literals). ERI shell-quartet blocked + Schwarz (`-qm.eri_screening`) + OpenMP (`-qm.threads`) + on-the-fly 5d, see [docs/QM_GPU_ROADMAP.md](QM_GPU_ROADMAP.md). `UpdateMolecule()` now invalidates the integral/SCF caches (was silently reusing the first geometry). ⚠️ AI-generated / ⚙️ machine-tested only; closed shell, H-Ne. Integral-direct SCF (`qmint::DirectJK`, `-qm.scf_direct auto|on|off`, Sep 2026) removes the n^4 memory wall; `auto` keeps the faster stored tensor below `-qm.eri_max_memory_mb`. Gradient (WP8, Sep 2026): `gradientOneElectron`/`gradientTwoElectron` in `qm_integrals.cpp` (centre-derivative of Gaussians, two-step MD contraction), `QMEngine::computeGradient()` (Eh/Bohr; wrappers return Eh/Å); `-qm.threads` was silently ignored until then (integer-only JSON test). History (Jul 2026 kernel defects etc.): [docs/NATIVE_QM_IMPLEMENTATION.md](NATIVE_QM_IMPLEMENTATION.md).
+
 ## WP3 -- HF-SCF vs ORCA 6.1 (July 2026)
 
 `curcuma -sp <mol>.xyz -method hf` (def2-SVP, default spherical 5d, default SAD

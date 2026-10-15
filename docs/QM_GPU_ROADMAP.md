@@ -1,8 +1,8 @@
 # Native ab-initio QM (HF / HF-3c / KS-DFT): performance and GPU roadmap
 
 > Status: 🤖 AI-authored. Sections 1-2 are **implemented and machine-tested** (CPU only,
-> Sep 2026). Section 3 is a plan; stages Q-G1, Q-G2 and Q-G3 are implemented (Oct 2026,
-> AI-generated, machine-tested on one RTX 5090 only), Q-G4 onward are proposals.
+> Sep 2026). Section 3 is a plan; stages Q-G1 to Q-G4 are implemented (Oct 2026,
+> AI-generated, machine-tested on one RTX 5090 only), Q-G5 onward are proposals.
 
 The native xTB GPU work ([SQM_GPU.md](SQM_GPU.md), [SQM_GPU_ROADMAP.md](SQM_GPU_ROADMAP.md),
 [SQM_PERFORMANCE.md](SQM_PERFORMANCE.md), [MULTI_GPU.md](MULTI_GPU.md)) produced a set of
@@ -86,7 +86,7 @@ anything is enabled by default.
 | Q-G1 | **done Oct 2026** (see below): J/K from the stored tensor on the device, host SCF unchanged | Stage 1 (single offloaded hot spot) |
 | Q-G2 | **done Oct 2026** (see below): device ERI kernel, one work item per shell quartet, fed by the flat `ShellPair`/`PrimPair` tables of section 1 | Stage 3 (integrals on device) |
 | Q-G3 | **done Oct 2026** (see below): integral-direct J/K on the device (section 2), density-weighted screening, FP64 accumulation | `-gpu_multipole_otf`, screened integrals |
-| Q-G4 | device-resident SCF loop: Fock -> Löwdin-reduced eigensolve (reuse the xTB `cusolverDnDsyevd` path) -> density -> DIIS; host polls O(1) scalars per iteration | Stage 6 (fully resident loop) |
+| Q-G4 | **done Oct 2026** (see below): device-resident SCF loop: Fock -> Löwdin-reduced eigensolve (`cusolverDnDsyevd`) -> density -> DIIS; host polls O(1) scalars per iteration | Stage 6 (fully resident loop) |
 | Q-G5 | mixed precision far from convergence (FP32 ERI/J/K with FP64 correction on dP), never accepting convergence on an FP32 step | X-AP3 (FP32 eigensolve early in the SCF) |
 | Q-G6 | multi-GPU: distribute shell-quartet batches over the device pool | [MULTI_GPU.md](MULTI_GPU.md) |
 
@@ -216,8 +216,87 @@ gradient (2e part stays on the CPU), an sm_120-native build. Not reproducible bi
 atomics make the last bits of J/K schedule-dependent; the computed quartet count of the incremental
 builds differed by 13 of 352461446 between two pyrene runs (the CPU direct path differs too between 4
 and 24 threads: 352461552 vs 352462036). Not implemented: compaction of the screened quartets (every
-rectangle element is launched), device-side symmetrisation, the resident SCF (Q-G4), FP32 (Q-G5); the
+rectangle element is launched), device-side symmetrisation, the resident SCF (Q-G4, added later, below), FP32 (Q-G5); the
 `auto` choice between stored and direct looks only at memory, not at speed.
+
+**Q-G4 (Oct 2026, 🤖 AI-generated, ⚙️ machine-tested; RTX 5090 only)**: device-resident RHF SCF loop
+(`cuda/qm_gpu_scf.cu`, entry `curcuma_cuda_create_qm_scf`, seam `qm_gpu_scf_backend.h` -- a separate header
+so that the ~9 min kernel TUs need not recompile when it changes -- loader `gpu_plugin::createQmScf`, driver
+`QMEngine::runSCFDevice` in `qm_scf.cpp`). The loop control stays on the host and is the host loop's: same
+Fock cadence (full, or incremental on P - P_ref with a full rebuild every 8 builds in direct mode), same
+convergence test ||P_new - P||_F < `scf_threshold`, same damping, same guess/warm start, same final full J/K
+build (`finishConvergedSCF`, shared). The DIIS/ADIIS class was split into subspace logic
+(`QMScfAccelerator`: slots, coefficients from the m x m Gram/ADIIS matrices) and storage (`HostDiisStore`
+on the host, the device history in `QMGpuSCF`), so both loops solve the same small problems with the same
+code. Per iteration on the device: F = H + J - 1/2 K with J/K from the existing builders through the new
+`QMGpuJK::buildDevice` (P, J, K device pointers; stored tensor Q-G1/Q-G2 or device-direct Q-G3, the latter
+symmetrised on the device with the host expression); e = X^T (FPS - SPF) X and max|e| (cuBLAS); the Gram
+matrix <e_i, e_j> and the ADIIS model reduced on the device (deterministic two-stage sums), solved on the
+host (m <= 8); F_use = sum c_i F_i; F' = X^T F_use X, `cusolverDnDsyevd`, C = X C'; P_new = 2 C_occ C_occ^T
+(`cublasDsyrk` + mirror, exactly symmetric); ||P_new - P|| and E = 1/2 Tr(P_new (H + F)). Transfers per
+iteration: three or four scalars, the m x m matrices, m coefficients; only the converged P, C and eps come
+back (the final F from the shared full build). X is built on the host once per geometry (Löwdin S^-1/2, as
+before). The state object (matrices, cuBLAS/cuSOLVER handles, warmed up once) survives geometry changes and
+is rebuilt only when n changes.
+
+Selection: `-qm.gpu_scf auto` (default) uses the device loop when J/K run on the device and the basis has at
+least `-qm.gpu_scf_min_nbf` (200) functions; `on` for any size (no device J/K builder = counted fallback);
+`off` keeps the host loop. Any device error falls back to the host loop from the same start density, counted
+as `qm_scf`. Checked: `-gpu cuda -qm.gpu_scf on -qm.gpu_eri false -qm.scf_direct on -qm.gpu_direct off`
+(J/K on the CPU) reports `17 x qm_scf` over an `-opt` and reaches the same minimum. No numerical path depends
+on the print level; `CURCUMA_QM_SCF_TRACE=1` prints one line per converged SCF (loop, n, iterations, start,
+E_elec) where `-opt` / batch `-sp` silence the method.
+
+Validation (HF/def2-SVP, `-qm.threads 4`; E_tot = E_elec + E_nn from the 10-decimal printout; ORCA 6.1
+`! HF def2-SVP TightSCF NoAutoStart`; CPU = `-gpu none -qm.threads 24`). Device loop (`-qm.gpu_scf on`) and
+host loop (`off`) use the same J/K builder (stored device tensor; pyrene device-direct):
+
+| system (n) | iter dev / host / CPU | E_tot device loop | = host loop, = CPU | ORCA 6.1 | dev - ORCA |
+|---|---:|---:|---:|---:|---:|
+| H2O (24) | 12 / 12 / 12 | -75.9534444233 | yes, yes (10 dp) | -75.953444424 | 7e-10 |
+| formaldehyde (38) | 16 / 16 / 16 | -113.7703303142 | yes, yes | -113.770330312 | -2.2e-9 |
+| benzene (114) | 12 / 12 / 12 | -230.5359772878 | yes, yes | -230.535977292 | 4.2e-9 |
+| naphthalene (180) | 16 / 16 / 16 | -383.0665753163 | yes, yes | -383.066575319 | 2.7e-9 |
+| anthracene (246) | 19 / 19 / 19 | -535.5888176085 | yes, yes | -535.588817613 | 4.5e-9 |
+| pyrene (274) | 21 / 21 / 21 | -611.2999868478 | yes, yes | -611.299986845 | -2.8e-9 |
+
+ctests `qm_gpu_scf_*` (E_elec device loop vs host loop vs CPU <= 1e-9, equal iteration counts): H2O,
+formaldehyde, benzene, benzene device-direct (incremental builds, 12241450 quartets), H2O cartesian 6d,
+H2O HF-3c/MINIX, formaldehyde `-qm.scf_mode adiis` (17 iterations), H2O `plain` damping (43 iterations); all
+E_elec identical to 10 decimals. `-opt -method hf-3c -gpu cuda -qm.gpu_scf on` (formaldehyde): 17 SCFs, all
+in the device loop, 16 warm-started, iteration counts identical to host loop and CPU, one E_elec of 17
+differs by 1e-10 (last printed digit), final energy -113.11546881 Eh (reference minimum -113.1154688146).
+An unconverged SCF (benzene, `-qm.scf_max_iterations 4`) is reported as an error by both loops with the same
+diagnostic energy (-230.50392362 Eh). A 4-frame batch `-sp` (naphthalene, perturbed naphthalene, anthracene, perturbed anthracene; state rebuilt at
+the n change): identical E_elec and iterations, device vs host loop.
+
+Timing (RTX 5090, warm JIT cache, ms; "rest" = SCF loop minus Fock builds, per iteration; host eigensolve =
+Eigen/LAPACK on 4 threads, device = X^T F X + syevd; setup = SCF state incl. cuSOLVER/cuBLAS warm-up, once
+per process and basis size, not in the loop time):
+
+| system (n) | iter | loop host / device | Fock host / device | eigensolve per iter host / device | rest per iter host / device | device setup |
+|---|---:|---:|---:|---:|---:|---:|
+| H2O (24) | 12 | 0.6 / 7.1 | 0.2 / 0.2 | 0.02 / 0.48 | 0.03 / 0.57 | 72 |
+| formaldehyde (38) | 16 | 2.2 / 17.7 | 0.5 / 0.3 | 0.09 / 0.97 | 0.11 / 1.09 | 71 |
+| benzene (114) | 12 | 28.5 / 51.4 | 10.7 / 9.9 | 1.20 / 3.28 | 1.48 / 3.46 | 72 |
+| naphthalene (180) | 16 | 170 / 176 | 108 / 106 | 2.79 / 4.14 | 3.84 / 4.38 | 78 |
+| anthracene (246) | 19 | 698 / 635 | 537 / 531 | 5.71 / 5.14 | 8.45 / 5.45 | 79 |
+| pyrene (274, direct) | 21 | 16206 / 16061 | 15956 / 15930 | 7.73 / 5.92 | 11.90 / 6.25 | 75 |
+
+Whole single points are unchanged within noise (benzene 0.45 / 0.54 s, anthracene 2.23 / 2.24 s, pyrene
+18.13 / 18.13 s, two pyrene repeats agree within 0.1 s). The device loop is slower below ~200 functions:
+`cusolverDnDsyevd` is latency-bound (standalone, same card: 0.44 ms at n = 24, 3.1 ms at 114, 5.8 ms at 274;
+`syevj` was 2-4x slower and is not used), and the state setup costs ~75 ms once. Above that it saves 3-6 ms
+per iteration (host DIIS matrix products and eigensolve), which is < 1 % of an SCF whose J/K build is
+integral-direct; the stage matters only if J/K become much cheaper (Q-G5) or n grows well beyond 274.
+
+Not tested: other GPUs (a consumer card has a low FP64 rate; a data-centre card may change the balance,
+not measured), ROCm/Vulkan (no entry point), n > 274, other basis sets than def2-SVP and MINIX, open shell (not
+implemented anywhere), linear-dependent bases (X built on the host as before, no canonical orthogonalisation
+with dropped vectors), multi-GPU, the device loop inside MD.
+Not implemented: the DIIS subspace solve on the device (m x m, host), device-side gradient (unchanged CPU),
+a speed-based auto choice (threshold only, measured on this card with 4 CPU threads; with more CPU threads
+the host eigensolve gets faster and the crossover moves up).
 
 Caveats carried over: speed-ups are hardware-specific and must be measured (the Vulkan
 FP32 path gave no win); FMA contraction changes the last ulp, so tests compare energies

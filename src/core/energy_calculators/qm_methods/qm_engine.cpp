@@ -134,6 +134,15 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
         else if (config["gpu_direct"].is_string())
             m_gpu_direct = config["gpu_direct"].get<std::string>();
     }
+    if (config.contains("gpu_scf")) {
+        // Accept a CLI boolean too (-qm.gpu_scf true/false). Claude Generated (Oct 2026, Q-G4).
+        if (config["gpu_scf"].is_boolean())
+            m_gpu_scf = config["gpu_scf"].get<bool>() ? "on" : "off";
+        else if (config["gpu_scf"].is_string())
+            m_gpu_scf = config["gpu_scf"].get<std::string>();
+    }
+    if (config.contains("gpu_scf_min_nbf") && config["gpu_scf_min_nbf"].is_number())
+        m_gpu_scf_min_nbf = static_cast<int>(std::lround(config["gpu_scf_min_nbf"].get<double>()));
     if (config.contains("gpu_max_memory_mb") && config["gpu_max_memory_mb"].is_number())
         m_gpu_max_memory_mb = config["gpu_max_memory_mb"].get<double>();
     if (config.contains("gpu_device") && config["gpu_device"].is_number())
@@ -270,6 +279,7 @@ void QMEngine::resetForNewMolecule()
     m_gpu_jk_checked = false;
     m_scf_ready = false;
     m_scf_converged = false;
+    m_gpu_scf_state.reset();
     m_warm_C = Matrix();
     m_warm_atoms.clear();
 }

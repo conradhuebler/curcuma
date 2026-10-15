@@ -10,10 +10,10 @@
 #include <cstddef>
 #include <string>
 
-// Claude Generated (Oct 2026, Q-G1/Q-G2/Q-G3 of docs/QM_GPU_ROADMAP.md): backend-free interface the
+// Claude Generated (Oct 2026, Q-G1..Q-G4 of docs/QM_GPU_ROADMAP.md): backend-free interface the
 // QMEngine drives a GPU through. The concrete classes live in a runtime plugin
 // (libcurcuma_cuda.so, entries curcuma_cuda_create_qm_jk / curcuma_cuda_create_qm_eri_jk /
-// curcuma_cuda_create_qm_direct_jk), so the core carries no CUDA symbol.
+// curcuma_cuda_create_qm_direct_jk / curcuma_cuda_create_qm_scf), so the core carries no CUDA symbol.
 namespace qmint {
 
 /// Coulomb/exchange builder on a device: either holding the stored ERI tensor (Q-G1/Q-G2) or
@@ -36,6 +36,10 @@ public:
     virtual std::string stats() const { return std::string(); }
     /// Integral-direct builders: shell quartets computed in the last build() (Q-G3), else 0.
     virtual long long lastQuartets() const { return 0; }
+    /// Q-G4 (resident SCF): same as build(), but P, J, K are DEVICE pointers (n x n, on the
+    /// device this builder runs on); J and K come back symmetrised exactly as from build().
+    /// Synchronous: the result is complete on return. False = unsupported or device error.
+    virtual bool buildDevice(const double* /*dP*/, double* /*dJ*/, double* /*dK*/) { return false; }
 };
 
 /// Flat, pointer-only description of everything the device ERI kernel needs (Q-G2).

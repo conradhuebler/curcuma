@@ -109,6 +109,17 @@ bool QmGpuJkCuda::build(const double* P, double* J, double* K)
     return cudaMemcpy(K, m_K, n2 * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess;
 }
 
+// Claude Generated (Oct 2026, Q-G4): device-pointer build for the resident SCF loop; the same
+// kernel as build(), so J/K are bit-identical to the host-transfer variant.
+bool QmGpuJkCuda::buildDevice(const double* dP, double* dJ, double* dK)
+{
+    if (!m_E) return false;
+    const size_t n2 = (size_t)m_n * m_n;
+    jkKernel<<<(unsigned)n2, 256>>>(m_E, dP, dJ, dK, m_n);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    return cudaDeviceSynchronize() == cudaSuccess;
+}
+
 bool QmGpuJkCuda::downloadERI(double* host) const
 {
     if (!m_E) return false;

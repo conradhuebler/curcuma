@@ -30,6 +30,8 @@ public:
     bool ok() const { return m_E != nullptr; }
 
     bool build(const double* P, double* J, double* K) override;
+    /// Q-G4: P, J, K on the device (resident SCF loop); synchronous.
+    bool buildDevice(const double* dP, double* dJ, double* dK) override;
     std::string name() const override { return m_name; }
     int n() const override { return m_n; }
     bool downloadERI(double* host) const override;

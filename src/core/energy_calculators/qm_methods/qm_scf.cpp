@@ -97,62 +97,74 @@ bool lowdinOrthonormalizer(const Eigen::MatrixXd& S, Eigen::MatrixXd& X)
 // =================================================================================
 namespace {
 
+// Claude Generated (Oct 2026, Q-G4): the accelerator is split into the subspace logic (which
+// entries exist, which coefficients to use) and the storage of F, P, e. The host loop keeps the
+// matrices in HostDiisStore; the device-resident loop keeps them on the device (QMGpuSCF) and
+// only ships the m x m Gram/ADIIS matrices here. Both loops therefore solve the SAME small
+// problems with the SAME code; only the O(m^2 n^2) inner products are computed elsewhere.
 class QMScfAccelerator {
 public:
     QMScfAccelerator(int max_size, bool adiis) : m_max(std::max(2, max_size)), m_adiis(adiis) {}
 
-    /// Store F (built from P) and return max|e| of its orthonormal-basis error.
-    double push(const Matrix& F, const Matrix& P, const Matrix& S, const Matrix& X)
-    {
-        const Matrix FPS = F * P * S;
-        const Matrix e = X.transpose() * (FPS - FPS.transpose()) * X;
-        m_F.push_back(F);
-        m_P.push_back(P);
-        m_e.push_back(e);
-        if ((int)m_F.size() > m_max) {
-            m_F.erase(m_F.begin());
-            m_P.erase(m_P.begin());
-            m_e.erase(m_e.begin());
-        }
-        m_last_err = e.cwiseAbs().maxCoeff();
-        return m_last_err;
-    }
+    /// Number of storage slots the history needs.
+    int capacity() const { return m_max; }
 
-    /// Fock matrix to diagonalise next.
-    Matrix extrapolate()
+    /// Reserve the storage slot for a new (F, P, e) entry; the oldest entry is dropped when
+    /// the history is full and its slot reused. Returns the slot index.
+    int push()
     {
-        if (m_F.size() < 2) return m_F.back();
-        if (!m_adiis || m_last_err < 1e-4) return diis();
-        if (m_last_err > 1e-1) return adiis();
+        int slot = static_cast<int>(m_slots.size());
+        if ((int)m_slots.size() >= m_max) {
+            slot = m_slots.front();
+            m_slots.erase(m_slots.begin());
+        }
+        m_slots.push_back(slot);
+        return slot;
+    }
+    void setLastError(double e) { m_last_err = e; }
+    /// Slots of the stored entries, oldest first.
+    const std::vector<int>& slots() const { return m_slots; }
+    /// Which subspace data coefficients() will read for the current entries/error.
+    bool needsDiis() const { return m_slots.size() >= 2 && (!m_adiis || m_last_err <= 1e-1); }
+    bool needsAdiis() const { return m_slots.size() >= 2 && m_adiis && m_last_err >= 1e-4; }
+
+    /// Coefficients c over slots() (oldest first) of the Fock matrix to diagonalise next,
+    /// F = sum c_i F_i. G = error Gram matrix <e_i, e_j> (needsDiis()), a/M = ADIIS model
+    /// (needsAdiis(), see HostDiisStore::adiisData()).
+    Eigen::VectorXd coefficients(const Eigen::MatrixXd& G, const Eigen::VectorXd& a, const Eigen::MatrixXd& M) const
+    {
+        const int m = static_cast<int>(m_slots.size());
+        if (m < 2) return unitNewest(m);
+        if (!m_adiis || m_last_err < 1e-4) return diis(G);
+        if (m_last_err > 1e-1) return adiis(a, M);
         const double w = (std::log10(m_last_err) + 4.0) / 3.0;  // 0 at 1e-4 .. 1 at 1e-1
-        return w * adiis() + (1.0 - w) * diis();
+        return w * adiis(a, M) + (1.0 - w) * diis(G);
     }
 
 private:
     int m_max;
     bool m_adiis;
     double m_last_err = 0.0;
-    std::vector<Matrix> m_F, m_P, m_e;
+    std::vector<int> m_slots;
 
-    Matrix combine(const Eigen::VectorXd& c) const
+    static Eigen::VectorXd unitNewest(int m)
     {
-        Matrix F = Matrix::Zero(m_F[0].rows(), m_F[0].cols());
-        for (int i = 0; i < c.size(); ++i) F += c(i) * m_F[m_F.size() - c.size() + i];
-        return F;
+        Eigen::VectorXd c = Eigen::VectorXd::Zero(std::max(1, m));
+        c(c.size() - 1) = 1.0;
+        return c;
     }
 
-    Matrix diis()
+    static Eigen::VectorXd diis(const Eigen::MatrixXd& G)
     {
         // Solve the bordered Pulay system; if it is singular (nearly dependent error
         // vectors), drop the oldest entries until it is not.
-        for (int first = 0; first + 2 <= (int)m_F.size(); ++first) {
-            const int n = (int)m_F.size() - first;
+        const int m = static_cast<int>(G.rows());
+        for (int first = 0; first + 2 <= m; ++first) {
+            const int n = m - first;
             Eigen::MatrixXd B = Eigen::MatrixXd::Zero(n + 1, n + 1);
-            for (int i = 0; i < n; ++i)
-                for (int j = 0; j <= i; ++j)
-                    B(i, j) = B(j, i) = m_e[first + i].cwiseProduct(m_e[first + j]).sum();
+            B.topLeftCorner(n, n) = G.bottomRightCorner(n, n);
             const double scale = B.topLeftCorner(n, n).diagonal().maxCoeff();
-            if (scale <= 0.0) return m_F.back();
+            if (scale <= 0.0) return unitNewest(m);
             B.topLeftCorner(n, n) /= scale;  // conditioning only; the solution is scale-free
             for (int i = 0; i < n; ++i) B(i, n) = B(n, i) = -1.0;
             Eigen::VectorXd rhs = Eigen::VectorXd::Zero(n + 1);
@@ -161,24 +173,16 @@ private:
             if (lu.rank() < n + 1 || lu.rcond() < 1e-14) continue;
             const Eigen::VectorXd c = lu.solve(rhs).head(n);
             if (!c.allFinite()) continue;
-            return combine(c);
+            Eigen::VectorXd full = Eigen::VectorXd::Zero(m);
+            full.tail(n) = c;
+            return full;
         }
-        return m_F.back();
+        return unitNewest(m);
     }
 
-    Matrix adiis() const
+    static Eigen::VectorXd adiis(const Eigen::VectorXd& a, Eigen::MatrixXd M)
     {
-        const int n = (int)m_F.size();
-        const Matrix& Pn = m_P.back();
-        const Matrix& Fn = m_F.back();
-        Eigen::VectorXd a(n);
-        Eigen::MatrixXd M(n, n);
-        for (int i = 0; i < n; ++i) {
-            const Matrix dP = m_P[i] - Pn;
-            a(i) = dP.cwiseProduct(Fn).sum();
-            for (int j = 0; j < n; ++j)
-                M(i, j) = dP.cwiseProduct(m_F[j] - Fn).sum();
-        }
+        const int n = static_cast<int>(a.size());
         M = 0.5 * (M + M.transpose()).eval();
         // c_i = t_i^2 / sum t^2 keeps c on the simplex; gradient descent with
         // backtracking on t (n <= subspace size, so this is cheap).
@@ -208,7 +212,55 @@ private:
             }
             if (!accepted) break;
         }
-        return combine(c);
+        return c;
+    }
+};
+
+// Integral-direct SCF: full J/K rebuild after this many incremental builds (host and device loop).
+constexpr int kDirectRebuild = 8;
+
+// Host storage of the DIIS/ADIIS history (the device loop keeps the same data in QMGpuSCF).
+struct HostDiisStore {
+    std::vector<Matrix> F, P, e;  // indexed by slot
+
+    explicit HostDiisStore(int slots) : F(slots), P(slots), e(slots) {}
+
+    /// Store F (built from P) in `slot`, form its orthonormal-basis error and return max|e|.
+    double push(int slot, const Matrix& Fi, const Matrix& Pi, const Matrix& S, const Matrix& X)
+    {
+        const Matrix FPS = Fi * Pi * S;
+        e[slot] = X.transpose() * (FPS - FPS.transpose()) * X;
+        F[slot] = Fi;
+        P[slot] = Pi;
+        return e[slot].cwiseAbs().maxCoeff();
+    }
+    Eigen::MatrixXd gram(const std::vector<int>& sl) const
+    {
+        const int m = static_cast<int>(sl.size());
+        Eigen::MatrixXd G(m, m);
+        for (int i = 0; i < m; ++i)
+            for (int j = 0; j <= i; ++j) G(i, j) = G(j, i) = e[sl[i]].cwiseProduct(e[sl[j]]).sum();
+        return G;
+    }
+    /// ADIIS (ARH) model, n = newest: a_i = Tr[(P_i - P_n) F_n], M_ij = Tr[(P_i - P_n)(F_j - F_n)].
+    void adiisData(const std::vector<int>& sl, Eigen::VectorXd& a, Eigen::MatrixXd& M) const
+    {
+        const int m = static_cast<int>(sl.size());
+        const Matrix& Pn = P[sl.back()];
+        const Matrix& Fn = F[sl.back()];
+        a.resize(m);
+        M.resize(m, m);
+        for (int i = 0; i < m; ++i) {
+            const Matrix dP = P[sl[i]] - Pn;
+            a(i) = dP.cwiseProduct(Fn).sum();
+            for (int j = 0; j < m; ++j) M(i, j) = dP.cwiseProduct(F[sl[j]] - Fn).sum();
+        }
+    }
+    Matrix combine(const std::vector<int>& sl, const Eigen::VectorXd& c) const
+    {
+        Matrix out = Matrix::Zero(F[sl[0]].rows(), F[sl[0]].cols());
+        for (int i = 0; i < c.size(); ++i) out += c(i) * F[sl[i]];
+        return out;
     }
 };
 
@@ -287,9 +339,20 @@ bool QMEngine::runSCF()
                              fmt::format("{} (Tr(PS) = {:.6f})", m_last_warm_start ? "warm start" : m_scf_guess,
                                          m_density.cwiseProduct(m_S).sum()));
 
+    // Q-G4: device-resident loop (same iterations on device matrices); -1 = not usable or a
+    // device error, then the host loop below runs from the same start density.
+    if (gpuRequested() && m_gpu_scf != "off" && m_gpu_scf != "false" && !m_gpu_scf_failed) {
+        const Matrix guess = m_density;
+        const int r = runSCFDevice(n_occ, direct, use_diis, damping);
+        if (r >= 0) return r == 1;
+        m_density = guess;
+        m_direct_quartets = 0;
+    }
+
     QMScfAccelerator diis(m_diis_subspace, m_scf_mode == "adiis");
+    HostDiisStore store(diis.capacity());
     const auto t_scf0 = std::chrono::steady_clock::now();
-    double t_fock_ms = 0.0;
+    double t_fock_ms = 0.0, t_eig_ms = 0.0;
 
     m_scf_converged = false;
     m_scf_iterations = 0;
@@ -299,7 +362,6 @@ bool QMEngine::runSCF()
     // converges and the density-weighted screening then skips most quartets.
     // A full build every kDirectRebuild iterations bounds the accumulated
     // screening error; the final energy always comes from a full build.
-    constexpr int kDirectRebuild = 8;
     Matrix J_acc, K_acc, P_ref;
     int since_full = 0;
     auto fockFromDensity = [&](const Matrix& P) -> Matrix {
@@ -340,18 +402,25 @@ bool QMEngine::runSCF()
         // history can support it; use the extrapolated Fock for the diagonalization.
         Matrix fock_use = fock;
         if (use_diis && iter >= m_diis_start) {
-            diis.push(fock, m_density, m_S, m_X);
-            fock_use = diis.extrapolate();
+            const int slot = diis.push();
+            diis.setLastError(store.push(slot, fock, m_density, m_S, m_X));
+            Eigen::MatrixXd G, M;
+            Eigen::VectorXd a;
+            if (diis.needsDiis()) G = store.gram(diis.slots());
+            if (diis.needsAdiis()) store.adiisData(diis.slots(), a, M);
+            fock_use = store.combine(diis.slots(), diis.coefficients(G, a, M));
         }
 
         // Solve F C = S C eps (Lowdin-reduced standard problem).
         Matrix C;
         Vector eps;
+        const auto t_e0 = std::chrono::steady_clock::now();
         if (!solveFock(fock_use, C, eps)) {
             CurcumaLogger::error(fmt::format(
                 "QM SCF: diagonalization failed at iteration {}", iter + 1));
             return false;
         }
+        t_eig_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_e0).count();
 
         // New density from the occupied MOs.
         Matrix density_new = buildDensity(C, n_occ);
@@ -377,38 +446,9 @@ bool QMEngine::runSCF()
 
         if (delta_P < m_scf_threshold) {
             m_density = density_new;
-            // Self-consistent final Fock from ONE full J/K build (never incremental).
-            Matrix J, K;
-            buildJK(m_density, J, K);
-            m_fock = m_H + J - 0.5 * K;
-            m_scf_converged = true;
-
-            // Final energy + components from the converged density and Fock.
-            m_et = m_density.cwiseProduct(m_T).sum();
-            m_ev = m_density.cwiseProduct(m_V).sum();
-            m_ej = 0.5 * m_density.cwiseProduct(J).sum();
-            m_ex = -0.25 * m_density.cwiseProduct(K).sum();
-            m_e_elec = 0.5 * m_density.cwiseProduct(m_H + m_fock).sum();
-
-            // Store the MO spectrum for wrapper compatibility (QMDriver slots).
-            m_mo = C;
-            // Keep the occupied orbitals for the next geometry's warm start.
-            m_warm_C = C.leftCols(n_occ);
-            m_warm_atoms = m_atoms;
-            m_energies = eps;
-
-            if (CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::success(fmt::format(
-                    "QM HF SCF converged in {} iterations (dP = {:.3e}, start: {})",
-                    iter + 1, delta_P, m_last_warm_start ? "previous geometry" : m_scf_guess));
-                CurcumaLogger::info(fmt::format("QM: SCF loop {:.1f} ms, of which Fock (J/K) builds {:.1f} ms{}",
-                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_scf0).count(),
-                    t_fock_ms,
-                    direct ? fmt::format(" (integral-direct{}, {} shell quartets computed)",
-                                         m_gpu_djk ? " on " + m_gpu_djk->name() : std::string(), m_direct_quartets)
-                           : std::string()));
-                if (m_gpu_djk) CurcumaLogger::info("QM: device direct J/K: " + m_gpu_djk->stats());
-            }
+            finishConvergedSCF(C, eps, n_occ, iter + 1, delta_P, direct,
+                               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_scf0).count(),
+                               t_fock_ms, t_eig_ms, std::string());
             return true;
         }
 
@@ -421,6 +461,194 @@ bool QMEngine::runSCF()
     m_fock = buildFock(m_density);
     m_e_elec = 0.5 * m_density.cwiseProduct(m_H + m_fock).sum();
     return false;
+}
+
+// Claude Generated (Oct 2026, Q-G4): common tail of the host and the device loop. The final
+// Fock matrix and the energy components always come from ONE full J/K build of the converged
+// density through buildJK() (never incremental), identical for both loops.
+void QMEngine::finishConvergedSCF(const Matrix& C, const Vector& eps, int n_occ, int iterations, double delta_P,
+                                  bool direct, double loop_ms, double fock_ms, double eig_ms,
+                                  const std::string& device_stats)
+{
+    Matrix J, K;
+    buildJK(m_density, J, K);
+    m_fock = m_H + J - 0.5 * K;
+    m_scf_converged = true;
+
+    // Final energy + components from the converged density and Fock.
+    m_et = m_density.cwiseProduct(m_T).sum();
+    m_ev = m_density.cwiseProduct(m_V).sum();
+    m_ej = 0.5 * m_density.cwiseProduct(J).sum();
+    m_ex = -0.25 * m_density.cwiseProduct(K).sum();
+    m_e_elec = 0.5 * m_density.cwiseProduct(m_H + m_fock).sum();
+
+    // Store the MO spectrum for wrapper compatibility (QMDriver slots).
+    m_mo = C;
+    // Keep the occupied orbitals for the next geometry's warm start.
+    m_warm_C = C.leftCols(n_occ);
+    m_warm_atoms = m_atoms;
+    m_energies = eps;
+
+    // Diagnostic (Q-G4): -opt and batch -sp silence the method, so the loop choice and warm start
+    // are not visible there; CURCUMA_QM_SCF_TRACE=1 prints one ASCII line per converged SCF.
+    if (const char* tr = std::getenv("CURCUMA_QM_SCF_TRACE"); tr && tr[0] == '1')
+        fmt::print(stderr, "QM SCF trace: loop={} n={} iterations={} start={} E_elec={:.10f}\n",
+                   device_stats.empty() ? "host" : "device", m_nbf, iterations,
+                   m_last_warm_start ? "warm" : m_scf_guess, m_e_elec);
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success(fmt::format(
+            "QM HF SCF converged in {} iterations (dP = {:.3e}, start: {}{})",
+            iterations, delta_P, m_last_warm_start ? "previous geometry" : m_scf_guess,
+            device_stats.empty() ? std::string() : ", device-resident loop"));
+        CurcumaLogger::info(fmt::format("QM: SCF loop {:.1f} ms, of which Fock (J/K) builds {:.1f} ms, eigensolve{} {:.1f} ms{}",
+            loop_ms, fock_ms, device_stats.empty() ? "" : " + density", eig_ms,
+            direct ? fmt::format(" (integral-direct{}, {} shell quartets computed)",
+                                 m_gpu_djk ? " on " + m_gpu_djk->name() : std::string(), m_direct_quartets)
+                   : std::string()));
+        if (!device_stats.empty()) CurcumaLogger::info("QM: device SCF: " + device_stats);
+        if (m_gpu_djk) CurcumaLogger::info("QM: device direct J/K: " + m_gpu_djk->stats());
+    }
+}
+
+// Claude Generated (Oct 2026, Q-G4): device J/K builder for the resident loop -- the same
+// object buildJK() would use for this SCF (stored device tensor, or device integral-direct).
+qmint::QMGpuJK* QMEngine::gpuScfJK(bool direct) const
+{
+    if (direct) return (gpuDirectAllowed() && ensureGpuDirect()) ? m_gpu_djk.get() : nullptr;
+    return ensureGpuJK() ? m_gpu_jk.get() : nullptr;
+}
+
+// Claude Generated (Oct 2026, Q-G4 of docs/QM_GPU_ROADMAP.md): device-resident SCF loop.
+// Step for step the host loop of runSCF(): same Fock cadence (full / incremental on dP with a
+// full rebuild every kDirectRebuild builds), same DIIS/ADIIS subspace logic (QMScfAccelerator,
+// only the inner products come from the device), same convergence test ||P_new - P||_F <
+// scf_threshold, same damping, same final full J/K build (finishConvergedSCF). P, F, the DIIS
+// history and C stay on the device; per iteration the host gets max|e|, the m x m subspace
+// matrices, ||dP|| and E, and sends m coefficients. Any device error: counted fallback
+// ("qm_scf"), return -1, and the caller restarts the host loop from the same guess.
+int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping)
+{
+    const int n = m_nbf;
+    const bool forced = (m_gpu_scf == "on" || m_gpu_scf == "true");
+    if (!forced && m_gpu_scf != "auto") {
+        static bool warned = false;
+        if (!warned && CurcumaLogger::get_verbosity() >= 1) {
+            warned = true;
+            CurcumaLogger::warn(fmt::format("QM: unknown -qm.gpu_scf '{}' (use auto|on|off); using auto", m_gpu_scf));
+        }
+    }
+    if (!forced && n < m_gpu_scf_min_nbf) return -1;  // auto: host loop is faster for small bases
+    qmint::QMGpuJK* jk = gpuScfJK(direct);
+    if (!jk) {
+        if (forced) curcuma::reportGpuFallback("qm_scf", "J/K not on the device; host SCF loop");
+        return -1;
+    }
+    auto fail = [&](const std::string& what) {
+        m_gpu_scf_failed = true;
+        m_gpu_scf_state.reset();
+        curcuma::reportGpuFallback("qm_scf", "device SCF loop: " + what + " failed; host SCF loop");
+        return -1;
+    };
+    const auto t_setup0 = std::chrono::steady_clock::now();
+    if (!m_gpu_scf_state || m_gpu_scf_state->n() != n) {
+        m_gpu_scf_state.reset();
+        const std::string backend = (m_gpu == "auto") ? gpu_plugin::firstAvailable() : m_gpu;
+        std::string why;
+        m_gpu_scf_state = gpu_plugin::createQmScf(backend, n, m_gpu_device, why);
+        if (!m_gpu_scf_state) return fail("state creation (" + why + ")");
+    }
+    qmint::QMGpuSCF& dev = *m_gpu_scf_state;
+    QMScfAccelerator diis(m_diis_subspace, m_scf_mode == "adiis");
+    if (!dev.setup(m_H.data(), m_S.data(), m_X.data(), n_occ, diis.capacity())) return fail("setup");
+    if (!dev.setDensity(m_density.data())) return fail("density upload");
+    const double setup_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_setup0).count();
+
+    const auto t_scf0 = std::chrono::steady_clock::now();
+    double t_fock_ms = 0.0, t_eig_ms = 0.0;
+    m_scf_converged = false;
+    m_scf_iterations = 0;
+    bool have_ref = false;
+    int since_full = 0;
+
+    for (int iter = 0; iter < m_scf_max_iter; ++iter) {
+        m_scf_iterations = iter + 1;
+
+        // Fock (host: fockFromDensity)
+        const bool full = !direct || !have_ref || since_full >= kDirectRebuild;
+        const auto t_f0 = std::chrono::steady_clock::now();
+        if (!dev.buildFock(jk, full)) return fail("Fock build");
+        have_ref = true;
+        since_full = full ? 0 : since_full + 1;
+        if (direct) m_direct_quartets += jk->lastQuartets();
+        const double fock_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_f0).count();
+        t_fock_ms += fock_ms;
+
+        // DIIS / ADIIS: history on the device, subspace solve here
+        const auto t_d0 = std::chrono::steady_clock::now();
+        if (use_diis && iter >= m_diis_start) {
+            const int slot = diis.push();
+            double err = 0.0;
+            if (!dev.diisPush(slot, err)) return fail("DIIS error vector");
+            diis.setLastError(err);
+            const std::vector<int>& sl = diis.slots();
+            const int m = static_cast<int>(sl.size());
+            Eigen::MatrixXd G, M;
+            Eigen::VectorXd a;
+            if (diis.needsDiis()) {
+                std::vector<double> B((size_t)m * m);
+                if (!dev.diisErrorGram(sl.data(), m, B.data())) return fail("DIIS Gram matrix");
+                G = Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>(B.data(), m, m);
+            }
+            if (diis.needsAdiis()) {
+                std::vector<double> av((size_t)m), Mv((size_t)m * m);
+                if (!dev.adiisData(sl.data(), m, av.data(), Mv.data())) return fail("ADIIS model");
+                a = Eigen::Map<const Eigen::VectorXd>(av.data(), m);
+                M = Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>(Mv.data(), m, m);
+            }
+            const Eigen::VectorXd c = diis.coefficients(G, a, M);
+            if (!dev.selectFock(sl.data(), c.data(), m)) return fail("DIIS extrapolation");
+        } else if (!dev.selectFock(nullptr, nullptr, 0)) {
+            return fail("Fock selection");
+        }
+
+        const double diis_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_d0).count();
+
+        // eigensolve, density, convergence scalars
+        double delta_P = 0.0, e_elec = 0.0;
+        const auto t_e0 = std::chrono::steady_clock::now();
+        if (!dev.solveAndDensity(delta_P, e_elec)) return fail("eigensolve / density");
+        const double eig_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_e0).count();
+        t_eig_ms += eig_ms;
+
+        if (CurcumaLogger::get_verbosity() >= 3)
+            CurcumaLogger::param(fmt::format("SCF iter {}", iter + 1),
+                                 fmt::format("dP = {:.3e}, E_elec = {:.10f} Eh (device; Fock {:.2f} ms, DIIS {:.2f} ms, "
+                                             "eigensolve + density {:.2f} ms)",
+                                             delta_P, e_elec, fock_ms, diis_ms, eig_ms));
+
+        if (delta_P < m_scf_threshold) {
+            Matrix P(n, n), C(n, n);
+            Vector eps(n);
+            if (!dev.downloadDensity(true, P.data()) || !dev.downloadOrbitals(C.data(), eps.data()))
+                return fail("result download");
+            m_density = P;
+            finishConvergedSCF(C, eps, n_occ, iter + 1, delta_P, direct,
+                               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_scf0).count(),
+                               t_fock_ms, t_eig_ms,
+                               fmt::format("{} on {} (state setup {:.1f} ms)", dev.stats(), dev.name(), setup_ms));
+            return 1;
+        }
+        if (!dev.acceptDensity(damping)) return fail("density update");
+    }
+
+    // Ran out of iterations: as the host loop, last density/Fock for diagnostics.
+    Matrix P(n, n);
+    if (!dev.downloadDensity(false, P.data())) return fail("density download");
+    m_density = P;
+    m_fock = buildFock(m_density);
+    m_e_elec = 0.5 * m_density.cwiseProduct(m_H + m_fock).sum();
+    return 0;
 }
 
 // =================================================================================

@@ -34,6 +34,7 @@
 
 #include "computational_method.h"   // ComputationalMethod, json (global namespace)
 #include "qm_methods/qm_gpu_backend.h"  // qmint::QMGpuJK
+#include "qm_methods/qm_gpu_scf_backend.h"  // qmint::QMGpuSCF (Q-G4)
 
 namespace gpu_plugin {
 
@@ -78,6 +79,13 @@ std::unique_ptr<qmint::QMGpuJK> createQmEriJK(const std::string& backend, const 
  */
 std::unique_ptr<qmint::QMGpuJK> createQmDirectJK(const std::string& backend, const qmint::QMGpuEriTables& tables,
                                                  int device, std::string& why);
+
+/**
+ * Native-QM device-resident SCF state (Q-G4) for n basis functions: device matrices plus
+ * cuBLAS/cuSOLVER handles; the SCF driver stays in QMEngine::runSCF. nullptr with a reason in
+ * `why` when the plugin/entry point is missing or an allocation fails. Claude Generated (Oct 2026).
+ */
+std::unique_ptr<qmint::QMGpuSCF> createQmScf(const std::string& backend, int n, int device, std::string& why);
 
 /// True if the plugin library libcurcuma_<backend>.so can be loaded (cached; a failed probe
 /// is not retried and, unlike the create* calls, is silent). Used for `-gpu auto` and
