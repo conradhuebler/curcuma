@@ -3122,6 +3122,12 @@ void disp_pair_cost_scan(int n, const int* idx_i, const int* idx_j, const int* a
     thrust::inclusive_scan(thrust::cuda::par.on(stream), out, out + n, out);
 }
 
+void exclusive_scan_int(const int* in, int* out, int n, cudaStream_t stream)
+{
+    if (n <= 0) return;
+    thrust::exclusive_scan(thrust::cuda::par.on(stream), in, in + n, out);
+}
+
 // ============================================================================
 // Utility: zero device array
 // ============================================================================
@@ -3335,7 +3341,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_count(
     double r2 = dx * dx + dy * dy + dz * dz;
     if (r2 > cutoff_sq) return;
 
-    atomicAdd(d_count, 1);
+    atomicAdd(&d_count[i], 1);   // per-row count (Oct 2026): rows are placed in order by the build pass
 }
 
 __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
@@ -3353,6 +3359,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     const double* __restrict__ zeta_c,
     double        a1,
     double        a2,
+    const int*    __restrict__ row_off,
     int*          d_counter,
     int*          out_i,
     int*          out_j,
@@ -3410,7 +3417,10 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     double zsi = (zi >= 1 && zi <= 86) ? zetaChargeScaleDev(zeta_zeff[zi - 1], zeta_c[zi - 1], qi) : 1.0;
     double zsj = (zj >= 1 && zj <= 86) ? zetaChargeScaleDev(zeta_zeff[zj - 1], zeta_c[zj - 1], qj) : 1.0;
 
-    int slot = atomicAdd(d_counter, 1);
+    // Oct 2026: grouped by row i (row_off from an exclusive scan of the row counts), so that the list is
+    // ordered like the host list; an arrival-ordered atomic slot scattered the pairs and made
+    // k_dc6dcn_per_pair 1.9x and k_dispersion 1.6x slower (non-coalesced gw/coordinate loads).
+    int slot = row_off[i] + atomicAdd(&d_counter[i], 1);
     out_i[slot]    = i;
     out_j[slot]    = j;
     out_C6[slot]   = c6;

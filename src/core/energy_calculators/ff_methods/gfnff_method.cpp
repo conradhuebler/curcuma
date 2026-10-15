@@ -1958,8 +1958,17 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
     int old_xb_count = m_hb_reference ? m_hb_reference->nxb_count : 0;
     int old_disp_count = m_workspace ? m_workspace->dispersionPairCount() : 0;
 
+    static const bool hb_sub_log = [] { const char* e = std::getenv("CURCUMA_GFNFF_STEPPHASE"); return e && *e && std::string(e) != "0"; }();
+    auto hbs_t = std::chrono::steady_clock::now();
+    auto hbs_lap = [&](const char* what) {
+        if (!hb_sub_log) return;
+        const auto now = std::chrono::steady_clock::now();
+        fmt::print(stderr, "HBXBDET {} {:.2f}\n", what, std::chrono::duration<double, std::milli>(now - hbs_t).count());
+        hbs_t = now;
+    };
     // Get current topology with updated geometry
     const TopologyInfo& topo = getCachedTopology();
+    hbs_lap("getCachedTopology");
 
     // Re-detect HB/XB pairs with Phase-1 charges (topology_charges)
     // Claude Generated (Oct 2026): the entries of the previous list are reused as the slots of the
@@ -1968,8 +1977,11 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
     // fresh memory and destroying the old list afterwards on this thread (urea400-water1000).
     std::vector<GFNFFHydrogenBond> hb_storage;
     hb_storage.swap(m_last_hbonds);
+    hbs_lap("swap");
     auto new_hbonds_native = detectHydrogenBondsNative(topo.topology_charges, &hb_storage);
+    hbs_lap("detectHB");
     auto new_xbonds_native = detectHalogenBondsNative(topo.topology_charges);
+    hbs_lap("detectXB");
 
     // Update internal workspace (not when a GPU method owns the lists, setSkipHostHBWorkspaceUpdate)
     if (m_workspace && !m_skip_host_hb_workspace) {
@@ -1996,6 +2008,7 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
         }
     }
 
+    hbs_lap("workspace_updates");
     // Store re-detected lists for external consumers (e.g. GPU SoA re-upload)
     m_last_hbonds = std::move(new_hbonds_native);
     m_last_xbonds = std::move(new_xbonds_native);
@@ -8892,6 +8905,14 @@ double GFNFF::estimateXBStrength(int A, int X, int B,
 std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& charges,
                                                                 std::vector<GFNFFHydrogenBond>* storage) const
 {
+    static const bool dhb_log = [] { const char* e = std::getenv("CURCUMA_GFNFF_STEPPHASE"); return e && *e && std::string(e) != "0"; }();
+    auto dhb_t = std::chrono::steady_clock::now();
+    auto dhb_lap = [&](const char* what) {
+        if (!dhb_log) return;
+        const auto now = std::chrono::steady_clock::now();
+        fmt::print(stderr, "DHB {} {:.2f}\n", what, std::chrono::duration<double, std::milli>(now - dhb_t).count());
+        dhb_t = now;
+    };
     // Claude Generated (March 2026): Native struct version of detectHydrogenBonds
     auto start_time = std::chrono::high_resolution_clock::now();
 
@@ -9011,6 +9032,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
     }
 
     CurcumaLogger::info(fmt::format("Found {} HB hydrogens", hb_hydrogens.size()));
+    dhb_lap("step0_and_hydrogens");
 
     // Step 2 & 3: Identify potential acceptor-donor pairs (A-B) and actual HB contacts
     // Claude Generated (Feb 25, 2026): Rewritten to match Fortran gfnff_ini2.f90:700-748
@@ -9142,6 +9164,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
         }
     }
 
+    dhb_lap("ab_pairs");
     // Lambda to create HB native entry for nhb2 (Case 2, 3, or 4). Returns true iff an entry
     // was actually appended (false on the pre-existing is_bonded skip or the new lever-1
     // strength skip) so callers can keep the verbosity-3 nhb2_count diagnostic accurate.
@@ -9429,6 +9452,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
             }
         };
 
+        dhb_lap("pre_loop_setup");
         CxxThreadPool* opt_pool = threadPool();
         const int opt_par_threshold = m_parameters.value("hb_parallel_min_pairs", 500);
         const bool opt_parallel = (opt_pool != nullptr && opt_par_threshold >= 0
@@ -9670,6 +9694,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
         }
     }
     }  // end Lever 1 branch: if (have_cell_list) { optimized } else { legacy full scan }
+    dhb_lap("hb_loop_total");
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format("Detected {} hydrogen bonds", hbonds.size()));

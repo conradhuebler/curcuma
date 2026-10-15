@@ -773,7 +773,8 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_topo_q;       ///< [N] Phase-1 topology charges (for zetac6)
     CudaBuffer<double> d_zeta_zeff;    ///< [86] zeta zeff per element
     CudaBuffer<double> d_zeta_c;       ///< [86] zeta c per element
-    CudaBuffer<int>    d_disp_pair_counter; ///< [1] atomic counter for the two-pass build
+    CudaBuffer<int>    d_disp_pair_counter; ///< [N] per-row counts / fill counters of the two-pass build
+    CudaBuffer<int>    d_disp_row_off;      ///< [N+1] exclusive scan of the row counts
     bool               disp_built_on_gpu = false; ///< true when disp SoA was device-built
 
     // Diagnostic snapshot buffers (GPU-side, no pipeline stall)
@@ -2265,21 +2266,27 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
         impl.d_topo_q.upload(q.data(), N);
     }
 
-    if (!impl.d_disp_pair_counter.ptr) impl.d_disp_pair_counter.alloc(1);
+    // Oct 2026: per-row counts + exclusive scan, so the list is grouped by row i like the host list.
+    if (impl.d_disp_pair_counter.n < N) impl.d_disp_pair_counter.alloc(N);       // row counts, then row fill counters
+    if (impl.d_disp_row_off.n < N + 1) impl.d_disp_row_off.alloc(N + 1);
 
     const double cutoff_sq = cutoff_bohr * cutoff_bohr;
     const int n_total = N * (N - 1) / 2;
     auto cfg = getLaunchConfig(n_total, m_block_size);
 
-    // Pass 1: count surviving pairs.
-    int h_count = 0;
-    impl.d_disp_pair_counter.upload(&h_count, 1);
+    // Pass 1: count surviving pairs per row i.
+    cudaMemsetAsync(impl.d_disp_pair_counter.ptr, 0, sizeof(int) * N, impl.stream);
     k_disp_pairs_count<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
         N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
         impl.d_atom_types.ptr, cutoff_sq, impl.d_disp_pair_counter.ptr);
+    exclusive_scan_int(impl.d_disp_pair_counter.ptr, impl.d_disp_row_off.ptr, N, impl.stream);
+    int h_last[2] = { 0, 0 };   // row_off[N-1] + count[N-1] = total
+    checkCuda(cudaMemcpyAsync(&h_last[0], impl.d_disp_row_off.ptr + (N - 1), sizeof(int),
+                              cudaMemcpyDeviceToHost, impl.stream), "disp row_off last");
+    checkCuda(cudaMemcpyAsync(&h_last[1], impl.d_disp_pair_counter.ptr + (N - 1), sizeof(int),
+                              cudaMemcpyDeviceToHost, impl.stream), "disp count last");
     checkCuda(cudaStreamSynchronize(impl.stream), "k_disp_pairs_count sync");
-    impl.d_disp_pair_counter.download(&h_count, 1);
-    checkCuda(cudaStreamSynchronize(impl.stream), "download disp pair count");
+    const int h_count = h_last[0] + h_last[1];
 
     // (Re)allocate the DispersionSoA to the device-counted pair count.
     impl.disp.n = h_count;
@@ -2299,8 +2306,7 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
     }
 
     // Pass 2: write idx + per-pair static data (C6 contraction, r4r2ij, R0², zetac6).
-    int h_zero = 0;
-    impl.d_disp_pair_counter.upload(&h_zero, 1);
+    cudaMemsetAsync(impl.d_disp_pair_counter.ptr, 0, sizeof(int) * N, impl.stream);
     k_disp_pairs_build<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
         N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
         impl.d_atom_types.ptr, cutoff_sq,
@@ -2308,6 +2314,7 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
         impl.d_sqrtzr4r2.ptr, impl.d_topo_q.ptr,
         impl.d_zeta_zeff.ptr, impl.d_zeta_c.ptr,
         a1, a2,
+        impl.d_disp_row_off.ptr,
         impl.d_disp_pair_counter.ptr,
         impl.disp.idx_i.ptr, impl.disp.idx_j.ptr,
         impl.disp.C6.ptr, impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr,

@@ -647,6 +647,9 @@ void upload_covalent_radii(const double* radii, int n);
 void upload_refcn_const(const double* data, int n);
 void upload_refn_const(const int* data, int n);
 
+/// Exclusive prefix sum of n ints on the device (Claude Generated, Oct 2026).
+void exclusive_scan_int(const int* in, int* out, int n, cudaStream_t stream);
+
 /// Inclusive prefix sum of the per-pair work estimate of the dispersion list (multi-GPU split),
 /// out[n] on the current device; needs upload_refn_const() on this device. Claude Generated (Oct 2026).
 void disp_pair_cost_scan(int n, const int* idx_i, const int* idx_j, const int* atom_types,
@@ -666,7 +669,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(
     const int*    __restrict__ atom_types,
     double        cutoff_factor,
     double        extra_bohr,
-    int*          d_count);
+    int*          d_count);   ///< [N] per-row counts (zeroed before)
 
 __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
     int N,
@@ -719,7 +722,8 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     const double* __restrict__ zeta_c,      ///< [86] zeta c per element
     double        a1,
     double        a2,
-    int*          d_counter,
+    const int*    __restrict__ row_off,   ///< [N] exclusive scan of the per-row counts of pass 1
+    int*          d_counter,              ///< [N] per-row fill counters (zeroed)
     int*          out_i,
     int*          out_j,
     double*       out_C6,
