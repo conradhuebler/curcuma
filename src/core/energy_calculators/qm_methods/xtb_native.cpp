@@ -1369,6 +1369,7 @@ double XTB::Calculation(bool gradient)
     double resident_ecoul = 0.0, resident_ethird = 0.0, resident_emp = 0.0;  // its SCC energies
     const auto t_scf_start = clock::now();
     m_pseudo_c_valid = false; m_pseudo_consecutive = 0; m_pseudo_used = false; m_eig_pseudo = false;   // Oct 2026
+    m_pseudo_taken = m_pseudo_rejected = 0;
     int iter;
     for (iter = 0; iter < max_iter; ++iter) {
         const auto t_iter0 = clock::now();
@@ -1874,6 +1875,8 @@ double XTB::Calculation(bool gradient)
             CurcumaLogger::warn_fmt("SCF NOT converged after {} iterations ({:.1f} ms)",
                                     m_scf_iterations, ms(t_scf_start, t_scf_end));
     }
+    if (m_pseudo_cpu && verb >= 2)
+        CurcumaLogger::info_fmt("SCF: CPU pseudo-diagonalisation steps: {} taken, {} rejected or gated", m_pseudo_taken, m_pseudo_rejected);
 
     // Claude Generated (Sep 2026): an unconverged SCF is not a result. It used to be returned
     // like one - level shift on a 1846-atom water/urea cluster ended after 150 iterations at
