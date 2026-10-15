@@ -1576,9 +1576,16 @@ D4ParameterGenerator::buildAtomRefW(int Z, size_t atom_idx, double q,
     for (int ir = 0; ir < nref; ++ir) maxcn = std::max(maxcn, refcovcn[ir]);
     const double ninv = 1.0 / norm;
 
+    // d(gwk)/dCN = (expd - gwk*dnorm)/norm. Claude Generated (Oct 2026): written as
+    // expd*ninv - gwk*(dnorm*ninv). The dftd4 order ninv*(expd - expw*dnorm*ninv) forms
+    // expw*dnorm first; for CN far above every reference (norm < ~1e-154) that product
+    // underflows to 0 while ninv is huge, so dgwk became -2*wf*(CN - refcn) (~ -80 for N
+    // at CN 10.5) although gwk is constant there: D4 gradient off by up to 2.4 Eh/Bohr on
+    // caffeine scaled by 0.45-0.55. Both factors stay finite here; the energy is unchanged.
+    const double dnorm_n = dnorm * ninv;
     for (int ir = 0; ir < nref; ++ir) {
         double gwk  = expw[ir] * ninv;
-        double dgwk = ninv * (expd[ir] - expw[ir] * dnorm * ninv);
+        double dgwk = expd[ir] * ninv - gwk * dnorm_n;
         if (!std::isfinite(gwk))  gwk  = (refcovcn[ir] == maxcn) ? 1.0 : 0.0;
         if (!std::isfinite(dgwk)) dgwk = 0.0;
         const double qref = m_refq[elem][ir] + zeff;

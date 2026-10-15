@@ -31,7 +31,12 @@ Measured (each line: structure, sample size, what was not checked):
   kernels and 520 -> 322 ms span, FP64 span 1422 -> 1279 ms. |dE| against sygst/trsm <= 1.7e-11 Eh over 14 cases (7
   structures, gfn1 and gfn2: caffeine, caffeine+ doublet, Cl2- doublet, MOR41 PR22, water1002, peo201-chain, caffeine
   compressed to 0.6). cond2(S) <= 56 over 234 screened structures (MOR41, C60ISO, HEAVY28, DC13, UPU23, AL2X6, HEAVYSB11
-  and local test structures, gfn2); caffeine compressed to 0.5 reaches 1.1e3 and 1.8e3 (the two methods' bases), |dE| <= 3.4e-12 Eh. At n = 6222 the FP64
+  and local test structures, gfn2); caffeine compressed to 0.5 reaches 1.1e3 and 1.8e3 (the two methods' bases), |dE| <= 3.4e-12 Eh.
+  Stress test: caffeine, an 8-water cluster and a Rh complex scaled about the centroid from 1.0 to 0.10 reach cond2(S)
+  4.5e6; over 40 valid geometries x gfn1/gfn2 x 7 solver paths max |dE| against the CPU is 6.0e-11 Eh (L^-1), 4.9e-11
+  (sygst), 5.7e-11 (sygvd). At the CPU, the gfn2 D4 gradient of these compressed geometries disagreed with finite
+  differences (up to 6.1 Eh/A, caffeine scaled 0.40 to 0.55); that was a host-side D4 weight-derivative underflow, fixed
+  for every backend (`AIChangelog.md`). At n = 6222 the FP64
   trmm reduction is slower than sygst in a standalone benchmark (1139 against 993 ms); peo201-water500 (2910 atoms) off
   72.82 s / on 71.87 s (n = 1), peak VRAM 8.0 of 17.1 GB.
 - **All 8 switch combinations** on peo201-chain (n = 2 each): max |dE| 1.5e-11 Eh, median wall 14.45 s (all off) to
@@ -39,7 +44,9 @@ Measured (each line: structure, sample size, what was not checked):
   12.85 s median (12.94 / 12.85 / 12.83 s, n = 3), `-xtb.rocm_explicit_linv false` 14.18 s (n = 3, run after the default
   runs, not alternating).
 - **Dynamics and optimisation**: 100-step MD of caffeine and a 114-atom molecule, max |dEpot| against the CPU 1.9e-7 Eh,
-  the same as the sygst path; trtri runs once per geometry (101 calls in 100 MD steps). Caffeine `-opt` 33 steps, same
+  the same as the sygst path; trtri runs once per geometry (101 calls in 100 MD steps). gfn1 NVE MD, 100 steps, against
+  the CPU: caffeine max |dEpot| 1.2e-7 Eh, the 114-atom molecule 4.8e-7 Eh (n = 1 each); gfn2 peo201-chain (1410 atoms)
+  30 steps max |dEpot| 1.8e-6 Eh, peak VRAM 2.63 GB (n = 1). Caffeine `-opt` 33 steps, same
   final energy with and without L^-1. 114-atom `-opt` (n = 1 per path): final energies of all paths and the CPU within
   1.4e-6 Eh; the 1e-7 Eh agreement criterion fails for every path including the sygst path (different optimiser
   trajectories); wall gfn2 38.0 s (L^-1), 58.0 s (cached factor), 60.3 s (sygvd), 22.2 s (CPU), cause of the L^-1 gap not
@@ -161,5 +168,6 @@ rounding level only. In FP32 iterations the same product could still run in FP32
 ## Not measured
 
 MD or `-opt` per-step cost of GFN2 on ROCm (only whole optimisations, n = 3); gradient phases on the device; gfn1
-eigensolve split; memory; gfx1150; systems with transition metals; CPU large-system modes (`-large_system_mode`) as the
+eigensolve split; memory beyond the two peak-VRAM readings above; gfx1150; transition metals beyond MOR41 PR22 and the
+Rh complex of the stress test (energies only); CPU large-system modes (`-large_system_mode`) as the
 comparison at 1410 atoms (the CPU time above is the default mode).
