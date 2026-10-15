@@ -1108,6 +1108,9 @@ if(USE_CUDA)
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_jk.cu
         # Claude Generated (Oct 2026): native QM ERI tensor built on the device (Q-G2)
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_eri.cu
+        # Claude Generated (Oct 2026): native QM integral-direct J/K on the device (Q-G3);
+        # own TU so it compiles in parallel with qm_gpu_eri.cu (shared qm_gpu_eri_kernels.cuh)
+        src/core/energy_calculators/qm_methods/cuda/qm_gpu_direct.cu
     )
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY LANGUAGE CUDA)
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY CUDA_SEPARABLE_COMPILATION ON)

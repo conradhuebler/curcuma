@@ -1441,7 +1441,7 @@ ERITensor buildERI(const std::vector<GTO::Orbital>& basis, int threads, double s
 // factors and screens exactly like the CPU. The CPU path itself is untouched.
 // ---------------------------------------------------------------------------
 bool buildEriGpuTables(const std::vector<GTO::Orbital>& basis, double screening, const Matrix* Q,
-                       EriGpuTables& t, std::string& why)
+                       EriGpuTables& t, std::string& why, bool list_quartets)
 {
     t = EriGpuTables();
     const std::vector<EriShell> sh = groupShells(basis);
@@ -1483,6 +1483,7 @@ bool buildEriGpuTables(const std::vector<GTO::Orbital>& basis, double screening,
     for (const ShellPair& sp : pairs) {
         t.pr_A.push_back(sp.A);
         t.pr_B.push_back(sp.B);
+        t.pr_schwarz.push_back(sp.schwarz);
         t.pr_prim_off.push_back((int)t.pp_ia.size());
         t.pr_nprim.push_back((int)sp.prims.size());
         for (const PrimPair& pp : sp.prims) {
@@ -1499,6 +1500,23 @@ bool buildEriGpuTables(const std::vector<GTO::Orbital>& basis, double screening,
             t.E.insert(t.E.end(), pp.Ez.begin(), pp.Ez.end());
         }
     }
+
+    t.prim_thr = screening * 1.0e-3;  // as in buildERI
+    t.pref = 2.0 * std::pow(PI, 2.5);
+    t.screening = screening;
+
+    // Q-G3 (Claude Generated, Oct 2026): shell pairs bucketed by pair class LA*3 + LB, CPU
+    // order inside a bucket. Integral-direct enumerates bucket x bucket on the device.
+    {
+        std::vector<int> cnt(9, 0);
+        for (int i = 0; i < np; ++i) ++cnt[sh[pairs[i].A].L * 3 + sh[pairs[i].B].L];
+        t.pc_off.assign(10, 0);
+        for (int k = 0; k < 9; ++k) t.pc_off[k + 1] = t.pc_off[k] + cnt[k];
+        std::vector<int> fillp(t.pc_off.begin(), t.pc_off.end() - 1);
+        t.pc_pairs.resize(np);
+        for (int i = 0; i < np; ++i) t.pc_pairs[fillp[sh[pairs[i].A].L * 3 + sh[pairs[i].B].L]++] = i;
+    }
+    if (!list_quartets) return true;
 
     // Canonical quartets (i <= j) passing the shell-level Schwarz test, bucketed by
     // class (LA, LB, LC, LD); the order inside a bucket is the CPU loop order.
@@ -1535,9 +1553,6 @@ bool buildEriGpuTables(const std::vector<GTO::Orbital>& basis, double screening,
         t.class_L.push_back(k % 3);
     }
     t.class_off.push_back(total);
-
-    t.prim_thr = screening * 1.0e-3;  // as in buildERI
-    t.pref = 2.0 * std::pow(PI, 2.5);
     return true;
 }
 
@@ -1589,6 +1604,11 @@ QMGpuEriTables EriGpuTables::view() const
     v.boys_ntaylor = BoysTable::NTAYLOR;
     v.boys_dT = BoysTable::dT;
     v.boys_Tmax = BoysTable::Tmax;
+    v.device_mem_limit_mb = device_mem_limit_mb;
+    v.screening = screening;
+    v.pr_schwarz = pr_schwarz.data();
+    v.pc_off = pc_off.empty() ? nullptr : pc_off.data();
+    v.pc_pairs = pc_pairs.data();
     return v;
 }
 

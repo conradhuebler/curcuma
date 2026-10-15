@@ -69,6 +69,16 @@ std::unique_ptr<qmint::QMGpuJK> createQmJK(const std::string& backend, const dou
 std::unique_ptr<qmint::QMGpuJK> createQmEriJK(const std::string& backend, const qmint::QMGpuEriTables& tables,
                                               int device, std::string& why);
 
+/**
+ * Native-QM integral-direct J/K builder (Q-G3): no stored tensor, every screened shell quartet
+ * is recomputed per build on the device and contracted with P at once; O(n^2) device memory.
+ * `tables` from qmint::buildEriGpuTables(..., list_quartets = false). nullptr with a reason in
+ * `why` when the plugin/entry point is missing, the basis is unsupported or an allocation
+ * fails. Claude Generated (Oct 2026).
+ */
+std::unique_ptr<qmint::QMGpuJK> createQmDirectJK(const std::string& backend, const qmint::QMGpuEriTables& tables,
+                                                 int device, std::string& why);
+
 /// True if the plugin library libcurcuma_<backend>.so can be loaded (cached; a failed probe
 /// is not retried and, unlike the create* calls, is silent). Used for `-gpu auto` and
 /// for the "was this backend built?" checks — the core no longer needs USE_CUDA/USE_ROCM/

@@ -233,15 +233,21 @@ struct EriGpuTables {
     std::vector<int> q_bra, q_ket;
     std::vector<long long> class_off;
     std::vector<int> class_L;
-    double prim_thr = 0.0, pref = 0.0;
+    std::vector<double> pr_schwarz;         ///< Q-G3: per shell pair
+    std::vector<int> pc_off, pc_pairs;      ///< Q-G3: shell pairs grouped by (LA, LB)
+    double prim_thr = 0.0, pref = 0.0, screening = 0.0;
+    double device_mem_limit_mb = 0.0;       ///< copied into the view (-qm.gpu_max_memory_mb)
     QMGpuEriTables view() const;
 };
 
 /// @brief Fill `out` for the device ERI build (same arguments as buildERI). Returns false
 /// (and leaves a reason in `why`) when the basis has angular momentum above d, which the
 /// device kernel does not handle. Claude Generated (Oct 2026, Q-G2).
+/// `list_quartets` = false (Q-G3, integral-direct): the O(npair^2) list of Schwarz-screened
+/// quartets is not built; the device enumerates pair-class x pair-class rectangles instead and
+/// screens them with the density per build (as DirectJK). Memory then stays O(npair).
 bool buildEriGpuTables(const std::vector<GTO::Orbital>& basis, double screening, const Matrix* Q,
-                       EriGpuTables& out, std::string& why);
+                       EriGpuTables& out, std::string& why, bool list_quartets = true);
 
 /// @brief Boys function F_n(T) = int_0^1 t^(2n) exp(-T t^2) dt for n = 0..maxN.
 /// Grid (spacing 0.05) + 7-term Taylor + downward recurrence below T = 36, closed

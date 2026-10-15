@@ -404,7 +404,10 @@ bool QMEngine::runSCF()
                 CurcumaLogger::info(fmt::format("QM: SCF loop {:.1f} ms, of which Fock (J/K) builds {:.1f} ms{}",
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_scf0).count(),
                     t_fock_ms,
-                    direct ? fmt::format(" (integral-direct, {} shell quartets computed)", m_direct_quartets) : std::string()));
+                    direct ? fmt::format(" (integral-direct{}, {} shell quartets computed)",
+                                         m_gpu_djk ? " on " + m_gpu_djk->name() : std::string(), m_direct_quartets)
+                           : std::string()));
+                if (m_gpu_djk) CurcumaLogger::info("QM: device direct J/K: " + m_gpu_djk->stats());
             }
             return true;
         }
@@ -552,6 +555,8 @@ Matrix QMEngine::buildFock(const Matrix& P) const
 // tensor (fastest J/K) as long as it fits in -qm.eri_max_memory_mb.
 bool QMEngine::useDirectSCF() const
 {
+    // Q-G3: -qm.gpu_direct on forces integral-direct J/K on the device for every -gpu run.
+    if (m_gpu_direct == "on" && gpuRequested() && !m_gpu_direct_failed) return true;
     if (m_scf_direct == "on" || m_scf_direct == "true") return true;
     if (m_scf_direct == "off" || m_scf_direct == "false") return false;
     if (m_scf_direct != "auto" && CurcumaLogger::get_verbosity() >= 1)
@@ -595,8 +600,16 @@ bool QMEngine::ensureGpuJK() const
         const auto t0 = std::chrono::steady_clock::now();
         qmint::EriGpuTables tables;
         std::string why;
-        const bool ok = qmint::buildEriGpuTables(m_gto_basis, m_eri_screening, m_Q.size() != 0 ? &m_Q : nullptr,
-                                                 tables, why);
+        bool ok = true;
+        const double tensor_mb = std::pow((double)m_nbf, 4) * 8.0 / 1.0e6;
+        if (m_gpu_max_memory_mb > 0.0 && tensor_mb > m_gpu_max_memory_mb) {
+            // -qm.gpu_max_memory_mb: decided on the host, no tables built
+            ok = false;
+            why = fmt::format("ERI tensor {:.1f} MB above -qm.gpu_max_memory_mb {:.1f}", tensor_mb, m_gpu_max_memory_mb);
+        } else {
+            ok = qmint::buildEriGpuTables(m_gto_basis, m_eri_screening, m_Q.size() != 0 ? &m_Q : nullptr, tables, why);
+            tables.device_mem_limit_mb = m_gpu_max_memory_mb;
+        }
         const auto t1 = std::chrono::steady_clock::now();
         if (ok) m_gpu_jk = gpu_plugin::createQmEriJK(backend, tables.view(), m_gpu_device, why);
         if (m_gpu_jk) {
@@ -616,7 +629,13 @@ bool QMEngine::ensureGpuJK() const
             return true;
         }
         m_gpu_eri_failed = true;
-        curcuma::reportGpuFallback("qm_eri", "device ERI build not possible: " + why);
+        if (!hostTensorAllowed() && gpuDirectAllowed()) {
+            // Q-G3: not a CPU fallback -- the SCF goes integral-direct on the device next.
+            if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::info("QM: no stored device ERI tensor (" + why + "); J/K integral-direct on the device");
+        } else {
+            curcuma::reportGpuFallback("qm_eri", "device ERI build not possible: " + why);
+        }
     }
     // Q-G1: CPU tensor + upload. Not when the host may not hold the tensor (direct SCF then).
     if (!hostTensorAllowed()) return false;
@@ -682,8 +701,129 @@ bool QMEngine::gpuBuildJK(const Matrix& P, Matrix& J, Matrix& K) const
     return true;
 }
 
+// Claude Generated (Oct 2026, Q-G3): integral-direct J/K on the device. Used whenever the SCF
+// runs integral-direct (useDirectSCF()) with -gpu and -qm.gpu_direct auto|on. The device
+// builder recomputes the screened shell quartets per call exactly like qmint::DirectJK (same
+// tables, same density-weighted screen), so the incremental-on-dP scheme of runSCF() applies
+// unchanged. Any failure: CPU DirectJK, counted as "qm_direct".
+bool QMEngine::gpuDirectAllowed() const
+{
+    static bool warned = false;
+    if (!warned && m_gpu_direct != "auto" && m_gpu_direct != "on" && m_gpu_direct != "off" && CurcumaLogger::get_verbosity() >= 1) {
+        warned = true;
+        CurcumaLogger::warn(fmt::format("QM: unknown -qm.gpu_direct '{}' (use auto|on|off); using auto", m_gpu_direct));
+    }
+    return gpuRequested() && m_gpu_direct != "off" && !m_gpu_direct_failed;
+}
+
+bool QMEngine::ensureGpuDirect() const
+{
+    if (m_gpu_djk) return true;
+    if (!gpuDirectAllowed()) return false;
+    const std::string backend = (m_gpu == "auto") ? gpu_plugin::firstAvailable() : m_gpu;
+    if (backend == "none" || !gpu_plugin::available(backend)) {
+        m_gpu_direct_failed = true;
+        curcuma::reportGpuFallback("qm_direct", "no GPU plugin for -gpu " + m_gpu);
+        return false;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    qmint::EriGpuTables tables;
+    std::string why;
+    const bool ok = qmint::buildEriGpuTables(m_gto_basis, m_eri_screening, m_Q.size() != 0 ? &m_Q : nullptr,
+                                             tables, why, /*list_quartets=*/false);
+    const auto t1 = std::chrono::steady_clock::now();
+    if (ok) m_gpu_djk = gpu_plugin::createQmDirectJK(backend, tables.view(), m_gpu_device, why);
+    if (!m_gpu_djk) {
+        m_gpu_direct_failed = true;
+        curcuma::reportGpuFallback("qm_direct", "device integral-direct J/K not possible: " + why);
+        return false;
+    }
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        const int n = m_gpu_djk->n();
+        CurcumaLogger::info(fmt::format(
+            "QM: integral-direct J/K on {} ({} basis functions; stored tensor would need {:.1f} MB; setup {:.1f} ms, "
+            "host tables {:.1f} ms)",
+            m_gpu_djk->name(), n, std::pow((double)n, 4) * 8.0 / 1.0e6,
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
+            std::chrono::duration<double, std::milli>(t1 - t0).count()));
+    }
+    return true;
+}
+
+bool QMEngine::gpuDirectBuild(const Matrix& P, Matrix& J, Matrix& K) const
+{
+    if (!m_gpu_djk) return false;
+    const int n = m_gpu_djk->n();
+    const Matrix Pc = P;
+    J = Matrix::Zero(n, n);
+    K = Matrix::Zero(n, n);
+    if (!m_gpu_djk->build(Pc.data(), J.data(), K.data())) {
+        m_gpu_direct_failed = true;
+        m_gpu_djk.reset();
+        curcuma::reportGpuFallback("qm_direct", "device integral-direct J/K build failed");
+        return false;
+    }
+    m_direct_quartets += m_gpu_djk->lastQuartets();
+    if (!m_gpu_jk_checked) {
+        m_gpu_jk_checked = true;
+        if (const char* chk = std::getenv("CURCUMA_QM_GPU_JK_CHECK"); chk && chk[0] == '1')
+            checkGpuDirectJK(Pc, J, K);
+    }
+    return true;
+}
+
+// Claude Generated (Oct 2026, Q-G3): CURCUMA_QM_GPU_JK_CHECK=1 compares J and K of the FIRST
+// device integral-direct build (a full density) with (a) the CPU DirectJK, (b) the stored
+// device tensor (Q-G2) if it fits on the card, (c) the stored CPU tensor if the host may hold
+// it. One ASCII line, parsed by test_cases/qm_gpu/check_qm_gpu_direct.py. Diagnostic only.
+void QMEngine::checkGpuDirectJK(const Matrix& P, const Matrix& J, const Matrix& K) const
+{
+    auto maxdiff = [](const Matrix& a, const Matrix& b) {
+        return (a.rows() == b.rows() && a.cols() == b.cols()) ? (a - b).cwiseAbs().maxCoeff() : -1.0;
+    };
+    const long dev_q = (long)m_gpu_djk->lastQuartets();
+    // (a) CPU integral-direct, same tables and screen
+    const auto t0 = std::chrono::steady_clock::now();
+    const qmint::DirectJK cpu(m_gto_basis, m_eri_screening, m_Q.size() != 0 ? &m_Q : nullptr);
+    Matrix Jc, Kc;
+    const long cpu_q = cpu.build(P, Jc, Kc, m_threads);
+    const double cpu_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    std::string line = fmt::format(
+        "QM GPU JK check: n={} quartets_dev={} quartets_cpu={} max|J|={:.3e} max|K|={:.3e} "
+        "dJ_cpu_direct={:.3e} dK_cpu_direct={:.3e} cpu_direct_ms={:.1f}",
+        J.rows(), dev_q, cpu_q, J.cwiseAbs().maxCoeff(), K.cwiseAbs().maxCoeff(), maxdiff(J, Jc), maxdiff(K, Kc), cpu_ms);
+    // (b) stored device tensor
+    const std::string backend = (m_gpu == "auto") ? gpu_plugin::firstAvailable() : m_gpu;
+    qmint::EriGpuTables tables;
+    std::string why;
+    std::unique_ptr<qmint::QMGpuJK> stored;
+    if (qmint::buildEriGpuTables(m_gto_basis, m_eri_screening, m_Q.size() != 0 ? &m_Q : nullptr, tables, why))
+        stored = gpu_plugin::createQmEriJK(backend, tables.view(), m_gpu_device, why);
+    if (stored) {
+        const int n = stored->n();
+        Matrix Js = Matrix::Zero(n, n), Ks = Matrix::Zero(n, n);
+        if (stored->build(P.data(), Js.data(), Ks.data()))
+            line += fmt::format(" dJ_dev_stored={:.3e} dK_dev_stored={:.3e}", maxdiff(J, Js), maxdiff(K, Ks));
+        else
+            line += " dJ_dev_stored=failed";
+    } else {
+        line += " dJ_dev_stored=n/a(" + why + ")";
+    }
+    stored.reset();
+    // (c) stored CPU tensor
+    if (hostTensorAllowed()) {
+        const qmint::ERITensor eri = qmint::buildERI(m_gto_basis, m_threads, m_eri_screening, m_Q.size() != 0 ? &m_Q : nullptr);
+        const Matrix Jh = qmint::buildCoulomb(eri, P, m_threads), Kh = qmint::buildExchange(eri, P, m_threads);
+        line += fmt::format(" dJ_cpu_stored={:.3e} dK_cpu_stored={:.3e}", maxdiff(J, Jh), maxdiff(K, Kh));
+    } else {
+        line += " dJ_cpu_stored=n/a(host limit)";
+    }
+    CurcumaLogger::result(line);
+}
+
 // J(P), K(P) in the active basis: from the stored tensor (device or host), or
-// integral-direct (shell-pair tables built on the first call per geometry).
+// integral-direct (device first with -gpu, Q-G3; shell-pair tables built on the first call
+// per geometry).
 void QMEngine::buildJK(const Matrix& P, Matrix& J, Matrix& K) const
 {
     if (!useDirectSCF()) {
@@ -696,6 +836,7 @@ void QMEngine::buildJK(const Matrix& P, Matrix& J, Matrix& K) const
             return;
         }
     }
+    if (gpuDirectAllowed() && ensureGpuDirect() && gpuDirectBuild(P, J, K)) return;
     if (!m_direct.ready()) {
         m_direct = qmint::DirectJK(m_gto_basis, m_eri_screening, m_Q.size() != 0 ? &m_Q : nullptr);
         if (CurcumaLogger::get_verbosity() >= 2)

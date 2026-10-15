@@ -10,13 +10,15 @@
 #include <cstddef>
 #include <string>
 
-// Claude Generated (Oct 2026, Q-G1/Q-G2 of docs/QM_GPU_ROADMAP.md): backend-free interface the
+// Claude Generated (Oct 2026, Q-G1/Q-G2/Q-G3 of docs/QM_GPU_ROADMAP.md): backend-free interface the
 // QMEngine drives a GPU through. The concrete classes live in a runtime plugin
-// (libcurcuma_cuda.so, entries curcuma_cuda_create_qm_jk / curcuma_cuda_create_qm_eri_jk), so the
-// core carries no CUDA symbol.
+// (libcurcuma_cuda.so, entries curcuma_cuda_create_qm_jk / curcuma_cuda_create_qm_eri_jk /
+// curcuma_cuda_create_qm_direct_jk), so the core carries no CUDA symbol.
 namespace qmint {
 
-/// Coulomb/exchange builder holding the two-electron integrals on a device.
+/// Coulomb/exchange builder on a device: either holding the stored ERI tensor (Q-G1/Q-G2) or
+/// integral-direct (Q-G3: every screened shell quartet recomputed per build and contracted
+/// with P straight away, as qmint::DirectJK; O(n^2) device memory).
 /// Same definitions as buildCoulomb/buildExchange in qm_integrals.hpp:
 ///   J_mn = sum_ls P_ls (mn|ls),  K_mn = sum_ls P_ls (ml|ns)
 /// P, J, K are n x n row-major, contiguous.
@@ -32,6 +34,8 @@ public:
     virtual bool downloadERI(double* /*host*/) const { return false; }
     /// One line of device-side timings (context, uploads, kernels), empty if none. (Q-G2)
     virtual std::string stats() const { return std::string(); }
+    /// Integral-direct builders: shell quartets computed in the last build() (Q-G3), else 0.
+    virtual long long lastQuartets() const { return 0; }
 };
 
 /// Flat, pointer-only description of everything the device ERI kernel needs (Q-G2).
@@ -84,6 +88,14 @@ struct QMGpuEriTables {
     const double* boys_f = nullptr;
     int boys_npts = 0, boys_ntab = 0, boys_ntaylor = 0;
     double boys_dT = 0.0, boys_Tmax = 0.0;
+    // Q-G3 (Oct 2026)
+    double device_mem_limit_mb = 0.0;  ///< > 0: treat the card as having at most this much free memory
+    double screening = 0.0;            ///< Schwarz / density-weighted threshold (-qm.eri_screening)
+    const double* pr_schwarz = nullptr;  ///< per shell pair: sqrt(max |(ab|ab)|) (ShellPair::schwarz)
+    /// Integral-direct only (built with list_quartets = false; q_bra/q_ket then empty):
+    /// shell pairs grouped by pair class k = LA*3 + LB (9 classes), CPU order inside a class.
+    const int* pc_off = nullptr;       ///< 10 offsets into pc_pairs
+    const int* pc_pairs = nullptr;
 };
 
 } // namespace qmint

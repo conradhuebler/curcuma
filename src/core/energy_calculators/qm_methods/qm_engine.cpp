@@ -127,6 +127,15 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
         m_gpu = config["gpu"].get<std::string>();
     if (config.contains("gpu_eri") && config["gpu_eri"].is_boolean())
         m_gpu_eri = config["gpu_eri"].get<bool>();
+    if (config.contains("gpu_direct")) {
+        // Accept a CLI boolean too (-qm.gpu_direct true/false).
+        if (config["gpu_direct"].is_boolean())
+            m_gpu_direct = config["gpu_direct"].get<bool>() ? "on" : "off";
+        else if (config["gpu_direct"].is_string())
+            m_gpu_direct = config["gpu_direct"].get<std::string>();
+    }
+    if (config.contains("gpu_max_memory_mb") && config["gpu_max_memory_mb"].is_number())
+        m_gpu_max_memory_mb = config["gpu_max_memory_mb"].get<double>();
     if (config.contains("gpu_device") && config["gpu_device"].is_number())
         m_gpu_device = std::max(0, static_cast<int>(std::lround(config["gpu_device"].get<double>())));
     if (config.contains("eri_screening") && config["eri_screening"].is_number())
@@ -240,6 +249,8 @@ bool QMEngine::UpdateMolecule()
     m_eri_active_ready = false;
     m_direct = qmint::DirectJK();
     m_gpu_jk.reset();
+    m_gpu_djk.reset();
+    m_gpu_jk_checked = false;
     m_scf_ready = false;
     m_scf_converged = false;
     return InitialiseMolecule();
@@ -255,6 +266,8 @@ void QMEngine::resetForNewMolecule()
     m_eri_active_ready = false;
     m_direct = qmint::DirectJK();
     m_gpu_jk.reset();
+    m_gpu_djk.reset();
+    m_gpu_jk_checked = false;
     m_scf_ready = false;
     m_scf_converged = false;
     m_warm_C = Matrix();
@@ -361,6 +374,8 @@ void QMEngine::buildOneElectronIntegrals()
     m_eri_active_ready = false;
     m_direct = qmint::DirectJK();
     m_gpu_jk.reset();
+    m_gpu_djk.reset();
+    m_gpu_jk_checked = false;
     m_scf_ready = false;
     m_Q = Matrix();  // rebuilt in the spherical branch; stays empty for cartesian_d
 
@@ -383,6 +398,8 @@ void QMEngine::buildOneElectronIntegrals()
     m_eri_active_ready = false;  // geometry change invalidates the active ERI
     m_direct = qmint::DirectJK();
     m_gpu_jk.reset();
+    m_gpu_djk.reset();
+    m_gpu_jk_checked = false;
     if (Q.size() == 0) {
         m_S = Scart;
         m_T = Tcart;

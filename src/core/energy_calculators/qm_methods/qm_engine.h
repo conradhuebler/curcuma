@@ -77,6 +77,12 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(gpu_eri, Bool, true,
           "With -gpu cuda|auto: build the stored ERI tensor on the device (Q-G2) instead of on the CPU followed by an upload (Q-G1). Falls back to the CPU build when the basis has f functions or the tensor does not fit into device memory.",
           "Performance", {})
+    PARAM(gpu_direct, String, "auto",
+          "With -gpu cuda|auto, integral-direct J/K on the device (Q-G3: screened shell quartets recomputed per Fock build and contracted with the density at once; O(n^2) device memory): auto (whenever the SCF runs integral-direct, i.e. scf_direct on, or auto and the stored tensor fits neither the host limit eri_max_memory_mb nor the device) | on (force it for every -gpu run, also when the tensor would fit) | off (integral-direct SCF stays on the CPU).",
+          "Performance", {})
+    PARAM(gpu_max_memory_mb, Double, 0.0,
+          "With -gpu: treat the device as having at most this much free memory (MB) when deciding whether the stored ERI tensor fits (0 = the real free device memory). For testing the integral-direct device path on small systems.",
+          "Performance", {})
     PARAM(scf_max_iterations, Int, 100,
           "Maximum number of SCF iterations.",
           "SCF", {})
@@ -245,6 +251,12 @@ private:
     bool m_gpu_eri = true;
     int m_gpu_device = 0;
     mutable bool m_gpu_eri_failed = false;   // device ERI build failed once: Q-G1 upload path
+    // Q-G3 (Oct 2026): integral-direct J/K on the device (-qm.gpu_direct auto|on|off).
+    std::string m_gpu_direct = "auto";
+    double m_gpu_max_memory_mb = 0.0;        // > 0: pretend the device has at most this much free memory
+    mutable std::unique_ptr<qmint::QMGpuJK> m_gpu_djk;
+    mutable bool m_gpu_direct_failed = false;
+    mutable bool m_gpu_jk_checked = false;   // CURCUMA_QM_GPU_JK_CHECK ran for this geometry
     mutable long m_direct_quartets = 0;      // shell quartets computed in the last SCF (stats)
     // Energy components for the HF run (Hartree). E_elec = 0.5 Tr(P(H+F)).
     double m_e_elec = 0.0;
@@ -275,6 +287,11 @@ private:
     bool ensureGpuJK() const;
     bool gpuBuildJK(const Matrix& P, Matrix& J, Matrix& K) const;
     void checkGpuEri() const;  // CURCUMA_QM_GPU_ERI_CHECK=1 diagnostic (Q-G2)
+    // Q-G3: integral-direct J/K on the device (-qm.gpu_direct); CPU DirectJK on any failure.
+    bool gpuDirectAllowed() const;
+    bool ensureGpuDirect() const;
+    bool gpuDirectBuild(const Matrix& P, Matrix& J, Matrix& K) const;
+    void checkGpuDirectJK(const Matrix& P, const Matrix& J, const Matrix& K) const;  // CURCUMA_QM_GPU_JK_CHECK=1
 
     // Solve the generalized eigenproblem F C = S C eps via the Lowdin reduce:
     //   eps, Ctil = eig(X^T F X);  C = X Ctil.
