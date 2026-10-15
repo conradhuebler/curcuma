@@ -5,8 +5,9 @@
   [../QM_GPU_ROADMAP.md](../QM_GPU_ROADMAP.md).
 - **Referenzen auf dieser Maschine:** PySCF (venv `~/.venvs/qmref`), ORCA 6.1 (`~/Downloads/orca_6_1_0_...`).
   Jeder Test muss spaeter auf einer anderen Maschine noch einmal gegen ORCA laufen (Betreibervorgabe).
-- Reihenfolge und Abhaengigkeiten: WP10 (RI) -> WP11 (MO-Transformation + MP2) -> WP12 (MP3-MP5) und
-  WP13 (RCCSD); WP14 ist die Auswertung der Schwarz-Frage und haengt an WP10.
+- Reihenfolge und Abhaengigkeiten: WP11 (kanonisches MP2, O(N^5)) zuerst, dann WP10 (RI) und RI-MP2, danach
+  WP13 (RCCSD); WP12 (MP3-MP5) ist **gestrichen** (Betreiber, Okt 2026: gemeint war MP2). WP14 ist die Auswertung
+  der Schwarz-Frage.
 
 ## Warum diese Reihenfolge
 
@@ -29,7 +30,7 @@ xTB-Erfahrungen zu uebernehmen.
 - **Fehlt im Repo:** Hilfsbasissaetze. Vorhanden sind nur `def2-SVP`, `def2-SV(P)`, `MINIX` (Orbitalbasen).
   Benoetigt: `def2/J`, `def2/JK` und `def2-SVP/C` (Weigend et al.), im selben Dateiformat. Beschaffung und
   Lizenz/Quelle (EMSL/Basis-Set-Exchange) klaeren, nichts aus dem Gedaechtnis eintippen.
-- **Metrikinverse:** `J_PQ` ist SPD, aber schlecht konditioniert. Optionen: Cholesky mit Pivotierung,
+- **Metrikinverse** (Kostenanteil klein, siehe WP14): `J_PQ` ist SPD, aber schlecht konditioniert. Optionen: Cholesky mit Pivotierung,
   Eigenzerlegung mit Abschneiden kleiner Eigenwerte (`J^-1/2`), oder Cholesky-Zerlegung der AO-ERI
   (pivotiert, keine Hilfsbasis, Fehler ueber Schwelle einstellbar -- naeher an der Referenz, siehe WP14).
 - **Validierung:** gegen PySCF `density_fit()` mit identischer Hilfsbasis (Erwartung: Uebereinstimmung nahe
@@ -51,25 +52,12 @@ xTB-Erfahrungen zu uebernehmen.
 - **Offen:** Gradient (Z-Vektor, relaxierte Dichte) ist ein eigenes Arbeitspaket; ohne ihn ist MP2 nur
   Einzelpunkt, kein `-opt`.
 
-## WP12 -- MP3, MP4, MP5
+## WP12 -- MP3 bis MP5: gestrichen
 
-**Praezisierung noetig:** gemeint ist hier die Moeller-Plesset-Reihe in dritter bis fuenfter Ordnung (MP5
-woertlich genommen). Falls eigentlich MP2 gemeint war, ist das mit WP11 erledigt.
-
-- **MP3:** zusaetzlich zu MP2 zweite Ordnung der Amplituden, Skalierung O(n^6) -- im Wesentlichen ein
-  CCD-Schritt mit festem T2. Moderat, gut machbar.
-- **MP4 (SDQ, dann mit T):** SDQ O(n^6); die Tripel (T) O(n^7) und deutlich mehr Terme.
-- **MP5:** O(n^8), sehr viele Terme (Singles bis Quadruples); handgeschriebene Formeln sind fehleranfaellig.
-  Realistischer Weg: ueber ein generisches Tensorkontraktionsgeruest (Diagramme/Einstein-Summen) oder Ableitung
-  aus der CC-Maschinerie (WP13), dann Vergleich gegen eine unabhaengige Referenz.
-- **Ehrliche Einordnung:** die MPn-Reihe divergiert oder oszilliert fuer viele Systeme; MP3-MP5 sind in der
-  Praxis kaum noch im Einsatz (CC ist robuster). Der Wert ist hier **didaktisch** (Konvergenzverhalten der Reihe
-  zeigen) und als Test der Tensor-Infrastruktur.
-- **Referenz:** nicht geprueft, welche der Programme auf dieser Maschine MP3-MP5 anbieten (PySCF: MP2 sicher,
-  hoehere Ordnungen vermutlich nicht; ORCA: vor dem Einsatz in der Handbuchversion 6.1 nachlesen). Eine
-  unabhaengige Pruefung von MP3-MP5 ist in kleinen Systemen (H2, HeH+, LiH in minimaler Basis) moeglich, indem die
-  Stoerungsreihe im vollen Determinantenraum (volle CI-Matrix, PySCF `fci`) mit Hamiltonian-Vektor-Produkten
-  ausgewertet wird -- aufwendig, aber unabhaengig von der Diagrammformel-Implementierung.
+Betreiberentscheidung Okt 2026: gemeint war MP2, und zwar die O(N^5)-Variante (kanonisches MP2 mit
+4-Index-Transformation, danach RI-MP2, das formal ebenfalls N^5 skaliert, aber mit kleinerem Vorfaktor). MP3-MP5
+sind nicht Teil des Plans; der fruehere Abschnitt (MP5 mit O(n^8), Pruefung ueber den vollen Determinantenraum)
+steht in der Git-Historie dieser Datei.
 
 ## WP13 -- Closed-shell CCSD (RCCSD)
 
@@ -102,7 +90,7 @@ Die folgende Tabelle ist eine **Hypothesenliste aus dem Quelltext und der Litera
 
 | Matrix-Operation in der Engine | Struktur | Passt der Schwarz-Gedanke? | Bewertung |
 |---|---|---|---|
-| **RI-Metrik** `J_PQ` (WP10) und `J^-1` | Coulomb-Matrix, langreichweitig, Inverse lokal -- **dieselbe Struktur wie die EEQ-Matrix** | Ueberlappende atomzentrierte Fit-Domaenen mit lokaler exakter Inverse = lokales Dichtefitting (aus der Literatur erinnert, nicht nachgeschlagen: atompaar-/domaenenlokales Dichtefitting, wie es lokale Korrelationsmethoden nutzen) | **Aussichtsreichster Kandidat.** Wirkt als Loeser/Vorkonditionierer oder als Naeherung der Fitkoeffizienten. Neu zu messen: Energiefehler gegen globales DF, Konditionszahl, Skalierung |
+| **RI-Metrik** `J_PQ`, `J^-1` bzw. `J^-1/2` (WP10, WP11) | Coulomb-Matrix, langreichweitig; ob die Inverse im Hilfsbasissatz lokal ist, ist **nicht gemessen** (bei EEQ ja, dort aber eine Punktladungs-Matrix mit einer Funktion je Atom; ein Hilfsbasissatz hat viele, stark ueberlappende Funktionen je Atom) | ueberlappende atomzentrierte Fit-Domaenen mit lokaler exakter Inverse (lokales Dichtefitting, aus der Literatur erinnert, nicht nachgeschlagen) | **Nebenkandidat, kleiner Hebel** (Kostenrechnung unten). Erst Python-Messung der Inverse-Abfallstruktur |
 | **Fock-Diagonalisierung** (O(n^3), `solveFock`) | dicht, nicht lokal im Spektrum | Gebietszerlegung entspricht Divide-and-Conquer / lokalisierten Orbitalen; fuer xTB existiert `-large_system_mode dc` | Fuer die ab-initio-Engine erst sinnvoll bei vielen hundert Atomen; Genauigkeitsverlust gegenueber exaktem Eigenproblem ist **die** Kosten-Nutzen-Frage. Niedrige Prioritaet |
 | **SCF-Konvergenz** (DIIS/Level-Shift) | iterative Fixpunktsuche | Vorkonditionierung des SCF-Schrittes (dielektrische Antwort, siehe Vault *SCF-Vorkonditionierung und dielektrische Antwort*, bei GFN2 schon umgesetzt) | Uebertragbarkeit auf HF plausibel, aber HF hat anders strukturierte Antwort; nur nach Messung der Iterationszahlen auf grossen Systemen |
 | **J/K-Aufbau** | Kontraktion mit 4-Index-Tensor | Cauchy-Schwarz-Screening (existiert); Schwarz-Zerlegung hilft hier nicht, die Arbeit ist die Integralauswertung | Kein Ansatzpunkt fuer Gebietszerlegung; Screening ist bereits der richtige Mechanismus |
@@ -111,8 +99,27 @@ Die folgende Tabelle ist eine **Hypothesenliste aus dem Quelltext und der Litera
 
 **Folgerungen:**
 
-1. Die einzige Stelle mit derselben mathematischen Struktur wie der belegte Fall ist die **RI-Metrik**. WP14
-   beginnt daher mit WP10 und einer Python-Rekonstruktion (wie in der EEQ-Erkundung: erst Python, dann C++).
+1. **Korrektur (Okt 2026, auf Nachfrage des Betreibers):** die erste Fassung nannte RI-J den aussichtsreichsten
+   Kandidaten. Das war zu stark. Kostenrechnung (n Basisfunktionen, N_aux Hilfsfunktionen, grobe Ordnungen):
+
+   | Groesse | RI-J-Kontraktion n^2 N_aux (je SCF-Iteration) | Metrik-Anwendung N_aux^2 (je Iteration) | Metrik-Zerlegung N_aux^3 (einmalig) |
+   |---|---|---|---|
+   | n=114, N_aux~500 (Benzol/def2-SVP) | 6.5e6 | 2.5e5 | 1.2e8 |
+   | n=1000, N_aux~5000 | 5.0e9 | 2.5e7 | 1.2e11 |
+   | n=5000, N_aux~25000 | 6.2e11 | 6.2e8 | 1.6e13 (dichte Inverse 5 GB) |
+
+   (Annahme N_aux ~ 5n; Rechnung hier im Gespraech mit Python-Taschenrechner, nicht an der Engine gemessen.)
+   Fuer HF mit RI-J ist die Metrik also **nicht** der Engpass: sie macht ein Hundertstel der Kontraktion aus, die
+   einmalige Zerlegung wird erst ab einigen tausend Basisfunktionen und wegen des Speichers relevant. Der Hebel bei
+   RI-J ist die Dreizentren-Integralformung samt Screening, nicht die Metrik.
+   Im **RI-MP2** ist die Metrik-Anwendung `J^-1/2` auf `(ia|Q)` mit o v N_aux^2 spuerbarer, aber immer noch
+   kleiner als die Energiekontraktion o^2 v^2 N_aux (Benzol/def2-SVP: 4.9e8 gegen 1.9e9, bei o=100, v=900,
+   N_aux=5000: 2.2e12 gegen 4.0e13). Auch dort ist der N^5-Hauptterm eine GEMM-Kontraktion, kein Loeser-Problem.
+   Der Betreiber hatte die Vermutung, dass Schwarz-artige Ansaetze eher bei korrelierten Methoden greifen; die
+   Rechnung stuetzt das **teilweise**: die Metrik spielt dort eine groessere Rolle als bei RI-J, der wirkliche
+   Skalierungshebel der korrelierten Methoden ist aber die lokale Korrelation (Paar- und Virtuellraum-Truncation,
+   PNO/DLPNO), also eine Gebietszerlegung des Wellenfunktionsraums und nicht der Metrikinversion. Das ist
+   ausdruecklich ausserhalb des Umfangs (siehe WP13).
 2. Ein **gelerntes** Modul ist fuer QM-Matrizen nicht begruendet: Trainingsdaten waeren exakt und kostenlos (wie bei
    EEQ), aber die EEQ-Messung zeigt, dass die exakte lokale Inverse billig ist und kaum Raum laesst. Das gilt hier
    bis zum Gegenbeweis ebenso.
@@ -129,8 +136,10 @@ Die folgende Tabelle ist eine **Hypothesenliste aus dem Quelltext und der Litera
 
 ## Offene Entscheidungen fuer den Betreiber
 
-1. **MP5 woertlich?** (siehe WP12; MP2/MP3 sind die ueblichen Ziele.)
+0. Betreibervorschlag Okt 2026: den WP14-Entwurf erst nach der Python-Messung der Metrik-Inversen von einem starken
+   Modell (Opus oder Fable) durchdenken lassen.
+
+1. ~~MP5 woertlich?~~ Erledigt: MP2 (O(N^5)), WP12 gestrichen.
 2. Hilfsbasissaetze beschaffen (Quelle/Lizenz) -- Voraussetzung fuer WP10/WP11-RI.
 3. (T)-Korrektur und Gradienten in den Plan aufnehmen?
-4. Soll der Schwarz-Teil (WP14) im Vault als eigener Pfad in *curcuma Schwarz-Attention* gefuehrt werden
-   (Vault-Regeln, Pfad 5: QM-Matrizen) oder nur hier?
+4. ~~Vault-Fuehrung der Schwarz-Bewertung~~ Erledigt: Pfad 5 in der Vault-Notiz *curcuma Schwarz-Attention*.
