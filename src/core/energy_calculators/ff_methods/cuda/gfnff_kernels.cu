@@ -17,6 +17,8 @@
  * Coordinate layout: SoA — separate cx[N], cy[N], cz[N] arrays (Phase 10, March 2026)
  */
 
+#include <thrust/execution_policy.h>
+#include <thrust/scan.h>
 #include "gfnff_kernels.cuh"
 #include <cuda_runtime.h>
 #include <math.h>
@@ -3098,6 +3100,26 @@ __global__ void k_dc6dcn_per_pair(
     dc6dcn_ij[tid] = dc6_ij;
     dc6dcn_ji[tid] = dc6_ji;
     if (c6_out) c6_out[tid] = c6;
+}
+
+// Claude Generated (Oct 2026): cost of one dispersion pair for the multi-GPU split. k_dc6dcn_per_pair
+// loops over nref(i) x nref(j) reference pairs (1..49), k_dispersion costs about the same as an average
+// dc6dcn pair, so cost = nref_i * nref_j + 10. Inclusive prefix sum over the pair list.
+__global__ void k_disp_pair_cost(int n, const int* __restrict__ idx_i, const int* __restrict__ idx_j,
+                                 const int* __restrict__ atom_types, long long* __restrict__ out)
+{
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n) return;
+    out[t] = static_cast<long long>(d_refn_const[atom_types[idx_i[t]] - 1])
+           * d_refn_const[atom_types[idx_j[t]] - 1] + 10;
+}
+
+void disp_pair_cost_scan(int n, const int* idx_i, const int* idx_j, const int* atom_types,
+                         long long* out, cudaStream_t stream)
+{
+    if (n <= 0) return;
+    k_disp_pair_cost<<<(n + 255) / 256, 256, 0, stream>>>(n, idx_i, idx_j, atom_types, out);
+    thrust::inclusive_scan(thrust::cuda::par.on(stream), out, out + n, out);
 }
 
 // ============================================================================

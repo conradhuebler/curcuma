@@ -647,6 +647,11 @@ void upload_covalent_radii(const double* radii, int n);
 void upload_refcn_const(const double* data, int n);
 void upload_refn_const(const int* data, int n);
 
+/// Inclusive prefix sum of the per-pair work estimate of the dispersion list (multi-GPU split),
+/// out[n] on the current device; needs upload_refn_const() on this device. Claude Generated (Oct 2026).
+void disp_pair_cost_scan(int n, const int* idx_i, const int* idx_j, const int* atom_types,
+                         long long* out, cudaStream_t stream);
+
 // ============================================================================
 // GPU CN pair list generation (Apr 2026)
 // Two-pass kernels: count valid pairs, then write (i, j, rcov_sum).

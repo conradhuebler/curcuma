@@ -2203,7 +2203,11 @@ static bool splitPrepare(EEQSolverGPUImpl& impl, int N)
             cudaDeviceCanAccessPeer(&can, part->dev, impl.own_device);
             if (can) cudaDeviceEnablePeerAccess(impl.own_device, 0);
             cudaGetLastError();   // "already enabled" is fine
-            if (cudaStreamCreate(&part->stream) != cudaSuccess
+            // Oct 2026: highest priority: the matvec chain of the PCG is the critical path and must overtake
+            // the dispersion helper kernels queued on the same device.
+            int prio_lo = 0, prio_hi = 0;
+            cudaDeviceGetStreamPriorityRange(&prio_lo, &prio_hi);
+            if (cudaStreamCreateWithPriority(&part->stream, cudaStreamDefault, prio_hi) != cudaSuccess
                 || cudaEventCreateWithFlags(&part->done, cudaEventDisableTiming) != cudaSuccess
                 || cublasCreate(&part->blas) != CUBLAS_STATUS_SUCCESS
                 || cublasSetStream(part->blas, part->stream) != CUBLAS_STATUS_SUCCESS)

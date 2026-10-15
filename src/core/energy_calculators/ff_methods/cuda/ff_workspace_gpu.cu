@@ -1648,10 +1648,25 @@ bool FFWorkspaceGPU::prepareDispSplit()
     const int N = m_natoms;
     const int nd = impl.disp.n;
     const int nparts = static_cast<int>(impl.coul_split_devs.size()) + 1;
+    // Equal WORK per device, not equal pair count: the first pairs belong to the chain atoms with many D4
+    // references (dc6dcn 4.4 ms on 1/4 of the pairs), the last ones to waters (1.4 ms).
     std::vector<int> bounds(nparts + 1, 0);
-    for (int k = 0; k <= nparts; ++k)
-        bounds[k] = static_cast<int>((static_cast<long long>(nd) * k) / nparts);
+    bounds[nparts] = nd;
     try {
+        CudaBuffer<long long> d_scan;
+        d_scan.alloc(nd);
+        disp_pair_cost_scan(nd, impl.disp.idx_i.ptr, impl.disp.idx_j.ptr, impl.d_atom_types.ptr,
+                            d_scan.ptr, impl.stream);
+        checkCuda(cudaStreamSynchronize(impl.stream), "disp cost scan");
+        auto at = [&](int i) { long long v = 0; cudaMemcpy(&v, d_scan.ptr + i, sizeof(v), cudaMemcpyDeviceToHost); return v; };
+        const long long total = at(nd - 1);
+        for (int k = 1; k < nparts; ++k) {
+            const long long target = total * k / nparts;
+            int lo = 0, hi = nd - 1;   // first index with scan >= target
+            while (lo < hi) { const int mid = lo + (hi - lo) / 2; if (at(mid) >= target) hi = mid; else lo = mid + 1; }
+            bounds[k] = std::max(lo + 1, bounds[k - 1]);
+        }
+        d_scan.free();
         for (int h = 0; h < nparts - 1; ++h) {
             auto part = std::make_unique<FFWorkspaceGPUImpl::DispSplitPart>();
             part->dev = impl.coul_split_devs[h];
@@ -1664,7 +1679,11 @@ bool FFWorkspaceGPU::prepareDispSplit()
             cudaDeviceCanAccessPeer(&can, part->dev, impl.own_device);
             if (can) cudaDeviceEnablePeerAccess(impl.own_device, 0);
             cudaGetLastError();
-            if (cudaStreamCreate(&part->stream) != cudaSuccess
+            // Oct 2026: lowest priority, so the EEQ helper work (high priority) overtakes the dispersion blocks
+            int prio_lo = 0, prio_hi = 0;
+            cudaDeviceGetStreamPriorityRange(&prio_lo, &prio_hi);
+            const int kLowPriority = prio_lo;
+            if (cudaStreamCreateWithPriority(&part->stream, cudaStreamDefault, kLowPriority) != cudaSuccess
                 || cudaEventCreateWithFlags(&part->done, cudaEventDisableTiming) != cudaSuccess)
                 throw std::runtime_error("stream/event setup failed on device " + std::to_string(part->dev));
             upload_refn_const(impl.refn_host.data(), static_cast<int>(impl.refn_host.size()));
@@ -2444,8 +2463,15 @@ void FFWorkspaceGPU::computeGaussianWeightsOnGPU(bool use_cn_final)
         impl.d_gw.ptr,
         impl.d_dgw.ptr);
 
-    // Oct 2026: with the dispersion split the own device handles pairs [0, disp_own_n) only.
+    // Oct 2026: the helpers of the dispersion split need coordinates + gw/dgw only; start them here,
+    // before the own dc6dcn kernel, instead of after it (they used to wait ~4 ms for it).
     const bool split = prepareDispSplit();
+    if (split) {
+        launchDispSplitHelpers(true);
+        m_disp_helpers_launched = true;
+    }
+
+    // Oct 2026: with the dispersion split the own device handles pairs [0, disp_own_n) only.
     const int nd_own = split ? impl.disp_own_n : nd;
     LaunchConfig cfg_dc6 = getLaunchConfig(nd_own, m_block_size);
     k_dc6dcn_per_pair<<<cfg_dc6.gridSize, cfg_dc6.blockSize, 0, impl.stream>>>(
@@ -2459,10 +2485,6 @@ void FFWorkspaceGPU::computeGaussianWeightsOnGPU(bool use_cn_final)
         impl.disp.dc6dcn_ij.ptr,
         impl.disp.dc6dcn_ji.ptr,
         m_disp_c6_update ? impl.disp.C6.ptr : nullptr);  // Sep 2026: per-step C6 refresh
-    if (split) {
-        launchDispSplitHelpers(true);
-        m_disp_helpers_launched = true;
-    }
     // No explicit sync needed: stream ordering + event_upload fence in
     // prepareAndLaunchChargeIndependent guarantees dc6dcn is ready before k_dispersion on sA.
 }
@@ -2652,8 +2674,11 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // (computeGaussianWeightsOnGPU runs after Phase 1 on d_cn; dc6dcn is only
     // ready on stream_pairwise after the Phase-2 event_upload fence).
     if (m_dispersion_enabled && !gradient) {
-        const bool split = prepareDispSplit();
-        if (split) launchDispSplitHelpers(false);
+        // computeGaussianWeightsOnGPU() has already started the helpers (with the C6 refresh of this
+        // geometry) unless the CN is frozen; then start them here without dc6dcn.
+        bool split = m_disp_helpers_launched;
+        if (!split && prepareDispSplit()) { launchDispSplitHelpers(false); split = true; }
+        m_disp_helpers_launched = false;
         const int nd_own = split ? impl.disp_own_n : impl.disp.n;
         LaunchConfig cfg = getLaunchConfig(nd_own, m_block_size);
         k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
