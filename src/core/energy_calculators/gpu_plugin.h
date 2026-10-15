@@ -60,6 +60,15 @@ std::unique_ptr<ComputationalMethod> createGfnff(const std::string& backend, con
  */
 std::unique_ptr<qmint::QMGpuJK> createQmJK(const std::string& backend, const double* eri, int n, int device);
 
+/**
+ * Native-QM J/K builder whose ERI tensor is computed ON the device from the flat tables
+ * (qmint::buildEriGpuTables); nothing of size n^4 crosses the bus. nullptr with a reason in
+ * `why` when the plugin/entry point is missing, the basis is unsupported (L > 2) or the
+ * tensor does not fit into device memory. Claude Generated (Oct 2026, Q-G2).
+ */
+std::unique_ptr<qmint::QMGpuJK> createQmEriJK(const std::string& backend, const qmint::QMGpuEriTables& tables,
+                                              int device, std::string& why);
+
 /// True if the plugin library libcurcuma_<backend>.so can be loaded (cached; a failed probe
 /// is not retried and, unlike the create* calls, is silent). Used for `-gpu auto` and
 /// for the "was this backend built?" checks — the core no longer needs USE_CUDA/USE_ROCM/

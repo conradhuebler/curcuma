@@ -40,6 +40,8 @@
  */
 
 #include "qm_engine.h"
+
+#include <cstdlib>
 #include "src/core/energy_calculators/gpu_plugin.h"
 #include "src/core/gpu_fallback.h"
 #include "src/core/curcuma_logger.h"
@@ -262,7 +264,7 @@ bool QMEngine::runSCF()
     }
     // Two-electron part: stored tensor (built once here) or integral-direct.
     const bool direct = useDirectSCF();
-    if (!direct) {
+    if (!direct && !ensureGpuJK()) {
         const qmint::ERITensor& eri = eriActive();  // builds (and caches) on first call
         if (eri.n() != n) {
             CurcumaLogger::error(fmt::format(
@@ -554,36 +556,120 @@ bool QMEngine::useDirectSCF() const
     if (m_scf_direct == "off" || m_scf_direct == "false") return false;
     if (m_scf_direct != "auto" && CurcumaLogger::get_verbosity() >= 1)
         CurcumaLogger::warn(fmt::format("QM: unknown -qm.scf_direct '{}' (use auto|on|off); using auto", m_scf_direct));
-    const double n = static_cast<double>(m_nbf);
-    return n * n * n * n * 8.0 / 1.0e6 > m_eri_max_memory_mb;
+    if (hostTensorAllowed()) return false;
+    // Q-G2: a tensor built on the device needs no host memory, so auto keeps the stored
+    // (device) tensor as long as it fits into device memory.
+    if (gpuRequested() && m_gpu_eri && ensureGpuJK()) return false;
+    return true;
 }
 
-// Claude Generated (Oct 2026, Q-G1): J/K on the device from the stored tensor. The tensor is
-// uploaded on the first build per geometry (m_gpu_jk is reset with the ERI). Any failure
-// falls back to the CPU for the rest of the run and is counted (gpu_fallback).
-bool QMEngine::gpuJK(const qmint::ERITensor& eri, const Matrix& P, Matrix& J, Matrix& K) const
+// Claude Generated (Oct 2026, Q-G1/Q-G2): J/K on the device from a device-resident tensor.
+// Q-G2 (default, -qm.gpu_eri true): the tensor is computed on the device from the flat
+// shell-pair tables (qmint::buildEriGpuTables) and never exists on the host.
+// Q-G1 (fallback): CPU tensor, uploaded once per geometry (only if the host may hold it).
+// m_gpu_jk is reset with the ERI caches. Every failure falls back to the CPU and is
+// counted (gpu_fallback): "qm_eri" for the device build, "qm_jk" for the J/K path.
+bool QMEngine::gpuRequested() const
 {
-    if (m_gpu == "none" || m_gpu == "cpu" || m_gpu.empty() || m_gpu_failed) return false;
-    if (!m_gpu_jk) {
-        const std::string backend = (m_gpu == "auto") ? gpu_plugin::firstAvailable() : m_gpu;
-        if (backend == "none" || !gpu_plugin::available(backend)) {
-            m_gpu_failed = true;
-            curcuma::reportGpuFallback("qm_jk", "no GPU plugin for -gpu " + m_gpu);
-            return false;
-        }
-        const auto t0 = std::chrono::steady_clock::now();
-        m_gpu_jk = gpu_plugin::createQmJK(backend, eri.data(), eri.n(), 0);
-        if (!m_gpu_jk) {
-            m_gpu_failed = true;
-            curcuma::reportGpuFallback("qm_jk", "device upload of the ERI tensor failed (" + backend + ")");
-            return false;
-        }
-        if (CurcumaLogger::get_verbosity() >= 2)
-            CurcumaLogger::info(fmt::format("QM: J/K on {} ({} basis functions, ERI uploaded in {:.1f} ms)",
-                m_gpu_jk->name(), eri.n(),
-                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count()));
+    return !(m_gpu == "none" || m_gpu == "cpu" || m_gpu.empty() || m_gpu_failed);
+}
+
+bool QMEngine::hostTensorAllowed() const
+{
+    if (m_scf_direct == "off" || m_scf_direct == "false") return true;
+    const double n = static_cast<double>(m_nbf);
+    return n * n * n * n * 8.0 / 1.0e6 <= m_eri_max_memory_mb;
+}
+
+bool QMEngine::ensureGpuJK() const
+{
+    if (!gpuRequested()) return false;
+    if (m_gpu_jk) return true;
+    const std::string backend = (m_gpu == "auto") ? gpu_plugin::firstAvailable() : m_gpu;
+    if (backend == "none" || !gpu_plugin::available(backend)) {
+        m_gpu_failed = true;
+        curcuma::reportGpuFallback("qm_jk", "no GPU plugin for -gpu " + m_gpu);
+        return false;
     }
-    const int n = eri.n();
+    if (m_gpu_eri && !m_gpu_eri_failed) {
+        const auto t0 = std::chrono::steady_clock::now();
+        qmint::EriGpuTables tables;
+        std::string why;
+        const bool ok = qmint::buildEriGpuTables(m_gto_basis, m_eri_screening, m_Q.size() != 0 ? &m_Q : nullptr,
+                                                 tables, why);
+        const auto t1 = std::chrono::steady_clock::now();
+        if (ok) m_gpu_jk = gpu_plugin::createQmEriJK(backend, tables.view(), m_gpu_device, why);
+        if (m_gpu_jk) {
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                const auto t2 = std::chrono::steady_clock::now();
+                const int n = m_gpu_jk->n();
+                CurcumaLogger::info(fmt::format(
+                    "QM: built 4-centre ERI on {} ({} basis functions, {:.1f} MB on the device) in {:.1f} ms "
+                    "(host tables {:.1f} ms; device: {}); J/K on {}",
+                    m_gpu_jk->name(), n, (double)n * n * n * n * 8.0 / 1.0e6,
+                    std::chrono::duration<double, std::milli>(t2 - t0).count(),
+                    std::chrono::duration<double, std::milli>(t1 - t0).count(), m_gpu_jk->stats(), m_gpu_jk->name()));
+            }
+            // Diagnostic (test_cases/qm_gpu): element-wise device tensor vs the CPU buildERI.
+            if (const char* chk = std::getenv("CURCUMA_QM_GPU_ERI_CHECK"); chk && chk[0] == '1')
+                checkGpuEri();
+            return true;
+        }
+        m_gpu_eri_failed = true;
+        curcuma::reportGpuFallback("qm_eri", "device ERI build not possible: " + why);
+    }
+    // Q-G1: CPU tensor + upload. Not when the host may not hold the tensor (direct SCF then).
+    if (!hostTensorAllowed()) return false;
+    const qmint::ERITensor& eri = eriActive();
+    const auto t0 = std::chrono::steady_clock::now();
+    m_gpu_jk = gpu_plugin::createQmJK(backend, eri.data(), eri.n(), m_gpu_device);
+    if (!m_gpu_jk) {
+        m_gpu_failed = true;
+        curcuma::reportGpuFallback("qm_jk", "device upload of the ERI tensor failed (" + backend + ")");
+        return false;
+    }
+    if (CurcumaLogger::get_verbosity() >= 2)
+        CurcumaLogger::info(fmt::format("QM: J/K on {} ({} basis functions, ERI uploaded in {:.1f} ms)",
+            m_gpu_jk->name(), eri.n(),
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count()));
+    return true;
+}
+
+// Claude Generated (Oct 2026, Q-G2): CURCUMA_QM_GPU_ERI_CHECK=1 downloads the device tensor and
+// compares it element by element with the CPU tensor (same screening, same 5d/6d basis).
+// Prints one ASCII line that test_cases/qm_gpu/check_qm_gpu_eri.py parses. Diagnostic only:
+// it costs a full CPU ERI build and n^4 doubles of host memory.
+void QMEngine::checkGpuEri() const
+{
+    if (!m_gpu_jk) return;
+    const int n = m_gpu_jk->n();
+    std::vector<double> dev((size_t)n * n * n * n);
+    if (!m_gpu_jk->downloadERI(dev.data())) {
+        CurcumaLogger::error("QM GPU ERI check: download of the device tensor failed");
+        return;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    const qmint::ERITensor cpu = qmint::buildERI(m_gto_basis, m_threads, m_eri_screening, m_Q.size() != 0 ? &m_Q : nullptr);
+    const double cpu_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    double max_abs = 0.0, max_ref = 0.0;
+    size_t nbad = 0, zero_mismatch = 0;
+    const double* c = cpu.data();
+    for (size_t k = 0; k < dev.size(); ++k) {
+        const double d = std::abs(dev[k] - c[k]);
+        max_abs = std::max(max_abs, d);
+        max_ref = std::max(max_ref, std::abs(c[k]));
+        if (d > 1e-12) ++nbad;
+        if ((dev[k] == 0.0) != (c[k] == 0.0)) ++zero_mismatch;
+    }
+    CurcumaLogger::result(fmt::format(
+        "QM GPU ERI check: n={} elements={} max|dev-cpu|={:.3e} max|cpu|={:.3e} above_1e-12={} zero_pattern_mismatch={} cpu_build_ms={:.1f}",
+        n, dev.size(), max_abs, max_ref, nbad, zero_mismatch, cpu_ms));
+}
+
+bool QMEngine::gpuBuildJK(const Matrix& P, Matrix& J, Matrix& K) const
+{
+    if (!m_gpu_jk) return false;
+    const int n = m_gpu_jk->n();
     const Matrix Pc = P;
     J = Matrix::Zero(n, n);
     K = Matrix::Zero(n, n);
@@ -596,16 +682,19 @@ bool QMEngine::gpuJK(const qmint::ERITensor& eri, const Matrix& P, Matrix& J, Ma
     return true;
 }
 
-// J(P), K(P) in the active basis: from the stored tensor, or integral-direct
-// (shell-pair tables built on the first call per geometry).
+// J(P), K(P) in the active basis: from the stored tensor (device or host), or
+// integral-direct (shell-pair tables built on the first call per geometry).
 void QMEngine::buildJK(const Matrix& P, Matrix& J, Matrix& K) const
 {
     if (!useDirectSCF()) {
-        const qmint::ERITensor& eri = eriActive();
-        if (gpuJK(eri, P, J, K)) return;
-        J = qmint::buildCoulomb(eri, P, m_threads);
-        K = qmint::buildExchange(eri, P, m_threads);
-        return;
+        if (ensureGpuJK() && gpuBuildJK(P, J, K)) return;
+        // re-evaluated: after a device failure the host may not be allowed to hold the tensor
+        if (!useDirectSCF()) {
+            const qmint::ERITensor& eri = eriActive();
+            J = qmint::buildCoulomb(eri, P, m_threads);
+            K = qmint::buildExchange(eri, P, m_threads);
+            return;
+        }
     }
     if (!m_direct.ready()) {
         m_direct = qmint::DirectJK(m_gto_basis, m_eri_screening, m_Q.size() != 0 ? &m_Q : nullptr);

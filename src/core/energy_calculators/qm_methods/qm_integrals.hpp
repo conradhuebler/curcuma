@@ -33,8 +33,10 @@
 #include "src/core/global.h"  // Matrix (Eigen::MatrixXd RowMajor)
 
 #include "GTOIntegrals.hpp"  // GTO::Orbital, GTO::OrbitalType
+#include "qm_gpu_backend.h"  // QMGpuEriTables (pointer view, no CUDA)
 
 #include <memory>
+#include <string>
 #include <vector>
 
 /**
@@ -210,6 +212,36 @@ private:
 /// the spherical tensor (Q.cols()^4) -- the cartesian tensor is never stored.
 ERITensor buildERI(const std::vector<GTO::Orbital>& basis, int threads = 1, double screening = 0.0,
                    const Matrix* Q = nullptr);
+
+/// @brief Host-side storage of the flat tables the device ERI kernel reads (Q-G2).
+///
+/// Built from the same groupShells / makeShellOutput / makeScreeningPairs data as
+/// buildERI, so shell- and primitive-level screening decide identically; the canonical
+/// quartets that survive the shell-level Schwarz test are listed and grouped by the
+/// angular-momentum class (LA, LB, LC, LD). view() hands pointers into these vectors to the
+/// plugin (qm_gpu_backend.h). Claude Generated (Oct 2026).
+struct EriGpuTables {
+    int n_out = 0, maxL = 0;
+    std::vector<int> sh_L, sh_ncomp, sh_nprim, sh_lmn_off, sh_coef_off, sh_out_first, sh_out_width, sh_T_off;
+    std::vector<int> lmn;
+    std::vector<double> coef, T;
+    std::vector<int> pr_A, pr_B, pr_prim_off, pr_nprim;
+    std::vector<int> pp_ia, pp_ib;
+    std::vector<double> pp_p, pp_P, pp_schwarz;
+    std::vector<long long> pp_E_off;
+    std::vector<double> E;
+    std::vector<int> q_bra, q_ket;
+    std::vector<long long> class_off;
+    std::vector<int> class_L;
+    double prim_thr = 0.0, pref = 0.0;
+    QMGpuEriTables view() const;
+};
+
+/// @brief Fill `out` for the device ERI build (same arguments as buildERI). Returns false
+/// (and leaves a reason in `why`) when the basis has angular momentum above d, which the
+/// device kernel does not handle. Claude Generated (Oct 2026, Q-G2).
+bool buildEriGpuTables(const std::vector<GTO::Orbital>& basis, double screening, const Matrix* Q,
+                       EriGpuTables& out, std::string& why);
 
 /// @brief Boys function F_n(T) = int_0^1 t^(2n) exp(-T t^2) dt for n = 0..maxN.
 /// Grid (spacing 0.05) + 7-term Taylor + downward recurrence below T = 36, closed

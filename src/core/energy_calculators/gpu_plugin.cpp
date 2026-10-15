@@ -163,6 +163,27 @@ std::unique_ptr<qmint::QMGpuJK> createQmJK(const std::string& backend, const dou
     return std::unique_ptr<qmint::QMGpuJK>(static_cast<qmint::QMGpuJK*>(fn(eri, n, device)));
 }
 
+// Claude Generated (Oct 2026, Q-G2): ERI tensor built on the device.
+std::unique_ptr<qmint::QMGpuJK> createQmEriJK(const std::string& backend, const qmint::QMGpuEriTables& tables,
+                                              int device, std::string& why)
+{
+    void* handle = pluginHandle(backend, /*quiet=*/true);
+    if (!handle) {
+        why = "plugin libcurcuma_" + backend + ".so not loadable";
+        return nullptr;
+    }
+    using create_fn = void* (*)(const qmint::QMGpuEriTables*, int, char*, int);
+    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_eri_jk");
+    if (!fn) {
+        why = "plugin has no entry point curcuma_" + backend + "_create_qm_eri_jk";
+        return nullptr;
+    }
+    char buf[512] = { 0 };
+    void* p = fn(&tables, device, buf, (int)sizeof buf);
+    if (!p) why = buf;
+    return std::unique_ptr<qmint::QMGpuJK>(static_cast<qmint::QMGpuJK*>(p));
+}
+
 int deviceCount(const std::string& backend)
 {
     void* handle = pluginHandle(backend, /*quiet=*/true);

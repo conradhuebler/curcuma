@@ -1435,6 +1435,164 @@ ERITensor buildERI(const std::vector<GTO::Orbital>& basis, int threads, double s
 }
 
 // ---------------------------------------------------------------------------
+// Flat tables for the device ERI kernel (Claude Generated, Oct 2026, Q-G2).
+// Everything here is copied out of the SAME structures buildERI uses, so the
+// device sees the same shells, primitive-pair order, Hermite tables and Schwarz
+// factors and screens exactly like the CPU. The CPU path itself is untouched.
+// ---------------------------------------------------------------------------
+bool buildEriGpuTables(const std::vector<GTO::Orbital>& basis, double screening, const Matrix* Q,
+                       EriGpuTables& t, std::string& why)
+{
+    t = EriGpuTables();
+    const std::vector<EriShell> sh = groupShells(basis);
+    const ShellOutput o = makeShellOutput(sh, (int)basis.size(), Q);
+    t.n_out = o.n;
+    if (o.n == 0) { why = "empty basis"; return false; }
+    const int ns = (int)sh.size();
+    for (const EriShell& s : sh) t.maxL = std::max(t.maxL, s.L);
+    if (t.maxL > 2) {
+        why = "angular momentum L=" + std::to_string(t.maxL) + " (device kernel handles s, p, d)";
+        return false;
+    }
+    if (BoysTable::NMAX < 4 * t.maxL) { why = "Boys table too short"; return false; }
+
+    for (int A = 0; A < ns; ++A) {
+        const EriShell& s = sh[A];
+        const int nc = (int)s.lmn.size(), np = (int)s.exps.size();
+        t.sh_L.push_back(s.L);
+        t.sh_ncomp.push_back(nc);
+        t.sh_nprim.push_back(np);
+        t.sh_lmn_off.push_back((int)t.lmn.size());
+        for (const auto& c : s.lmn) t.lmn.insert(t.lmn.end(), c.begin(), c.end());
+        t.sh_coef_off.push_back((int)t.coef.size());
+        for (int c = 0; c < nc; ++c)
+            for (int p = 0; p < np; ++p) t.coef.push_back(s.coef[c][p]);
+        t.sh_out_first.push_back(o.first[A]);
+        t.sh_out_width.push_back(o.width[A]);
+        if (!o.spherical || o.identity[A]) {
+            t.sh_T_off.push_back(-1);
+        } else {
+            t.sh_T_off.push_back((int)t.T.size());
+            for (int a = 0; a < nc; ++a)
+                for (int j = 0; j < o.width[A]; ++j) t.T.push_back(o.T[A](a, j));
+        }
+    }
+
+    const std::vector<ShellPair> pairs = makeScreeningPairs(sh);
+    const int np = (int)pairs.size();
+    for (const ShellPair& sp : pairs) {
+        t.pr_A.push_back(sp.A);
+        t.pr_B.push_back(sp.B);
+        t.pr_prim_off.push_back((int)t.pp_ia.size());
+        t.pr_nprim.push_back((int)sp.prims.size());
+        for (const PrimPair& pp : sp.prims) {
+            t.pp_ia.push_back(pp.ia);
+            t.pp_ib.push_back(pp.ib);
+            t.pp_p.push_back(pp.p);
+            t.pp_P.push_back(pp.Px);
+            t.pp_P.push_back(pp.Py);
+            t.pp_P.push_back(pp.Pz);
+            t.pp_schwarz.push_back(pp.schwarz);
+            t.pp_E_off.push_back((long long)t.E.size());
+            t.E.insert(t.E.end(), pp.Ex.begin(), pp.Ex.end());
+            t.E.insert(t.E.end(), pp.Ey.begin(), pp.Ey.end());
+            t.E.insert(t.E.end(), pp.Ez.begin(), pp.Ez.end());
+        }
+    }
+
+    // Canonical quartets (i <= j) passing the shell-level Schwarz test, bucketed by
+    // class (LA, LB, LC, LD); the order inside a bucket is the CPU loop order.
+    const int nkey = 81;  // L <= 2 per shell
+    auto key = [&](int i, int j) {
+        return ((sh[pairs[i].A].L * 3 + sh[pairs[i].B].L) * 3 + sh[pairs[j].A].L) * 3 + sh[pairs[j].B].L;
+    };
+    std::vector<long long> count(nkey, 0);
+    for (int i = 0; i < np; ++i)
+        for (int j = i; j < np; ++j)
+            if (!(pairs[i].schwarz * pairs[j].schwarz < screening)) ++count[key(i, j)];
+    std::vector<long long> start(nkey, 0), fill(nkey, 0);
+    long long total = 0;
+    for (int k = 0; k < nkey; ++k) {
+        start[k] = total;
+        total += count[k];
+    }
+    t.q_bra.resize(total);
+    t.q_ket.resize(total);
+    for (int i = 0; i < np; ++i)
+        for (int j = i; j < np; ++j) {
+            if (pairs[i].schwarz * pairs[j].schwarz < screening) continue;
+            const int k = key(i, j);
+            const long long at = start[k] + fill[k]++;
+            t.q_bra[at] = i;
+            t.q_ket[at] = j;
+        }
+    for (int k = 0; k < nkey; ++k) {
+        if (count[k] == 0) continue;
+        t.class_off.push_back(start[k]);
+        t.class_L.push_back(k / 27);
+        t.class_L.push_back((k / 9) % 3);
+        t.class_L.push_back((k / 3) % 3);
+        t.class_L.push_back(k % 3);
+    }
+    t.class_off.push_back(total);
+
+    t.prim_thr = screening * 1.0e-3;  // as in buildERI
+    t.pref = 2.0 * std::pow(PI, 2.5);
+    return true;
+}
+
+QMGpuEriTables EriGpuTables::view() const
+{
+    QMGpuEriTables v;
+    v.n_out = n_out;
+    v.nshell = (int)sh_L.size();
+    v.npair = (int)pr_A.size();
+    v.nprimpair = (int)pp_ia.size();
+    v.prim_thr = prim_thr;
+    v.pref = pref;
+    v.sh_L = sh_L.data();
+    v.sh_ncomp = sh_ncomp.data();
+    v.sh_nprim = sh_nprim.data();
+    v.sh_lmn_off = sh_lmn_off.data();
+    v.sh_coef_off = sh_coef_off.data();
+    v.sh_out_first = sh_out_first.data();
+    v.sh_out_width = sh_out_width.data();
+    v.sh_T_off = sh_T_off.data();
+    v.lmn = lmn.data();
+    v.n_lmn = (int)lmn.size();
+    v.coef = coef.data();
+    v.n_coef = (int)coef.size();
+    v.T = T.data();
+    v.n_T = (int)T.size();
+    v.pr_A = pr_A.data();
+    v.pr_B = pr_B.data();
+    v.pr_prim_off = pr_prim_off.data();
+    v.pr_nprim = pr_nprim.data();
+    v.pp_ia = pp_ia.data();
+    v.pp_ib = pp_ib.data();
+    v.pp_p = pp_p.data();
+    v.pp_P = pp_P.data();
+    v.pp_schwarz = pp_schwarz.data();
+    v.pp_E_off = pp_E_off.data();
+    v.E = E.data();
+    v.n_E = (long long)E.size();
+    v.q_bra = q_bra.data();
+    v.q_ket = q_ket.data();
+    v.nquartet = (long long)q_bra.size();
+    v.nclass = (int)class_L.size() / 4;
+    v.class_off = class_off.data();
+    v.class_L = class_L.data();
+    const BoysTable& b = boysTable();
+    v.boys_f = b.f.data();
+    v.boys_npts = b.npts;
+    v.boys_ntab = BoysTable::NTAB;
+    v.boys_ntaylor = BoysTable::NTAYLOR;
+    v.boys_dT = BoysTable::dT;
+    v.boys_Tmax = BoysTable::Tmax;
+    return v;
+}
+
+// ---------------------------------------------------------------------------
 // Integral-direct J/K (Claude Generated, Sep 2026)
 //
 // Instead of storing (mu nu|lam sig) (n^4 doubles), every screened canonical shell

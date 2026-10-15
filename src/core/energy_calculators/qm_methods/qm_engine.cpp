@@ -125,6 +125,10 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
         m_threads = std::max(1, static_cast<int>(std::lround(config["threads"].get<double>())));
     if (config.contains("gpu") && config["gpu"].is_string())
         m_gpu = config["gpu"].get<std::string>();
+    if (config.contains("gpu_eri") && config["gpu_eri"].is_boolean())
+        m_gpu_eri = config["gpu_eri"].get<bool>();
+    if (config.contains("gpu_device") && config["gpu_device"].is_number())
+        m_gpu_device = std::max(0, static_cast<int>(std::lround(config["gpu_device"].get<double>())));
     if (config.contains("eri_screening") && config["eri_screening"].is_number())
         m_eri_screening = config["eri_screening"].get<double>();
     if (config.contains("scf_max_iterations") && config["scf_max_iterations"].is_number())

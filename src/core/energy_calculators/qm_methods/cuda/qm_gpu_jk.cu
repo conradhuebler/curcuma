@@ -6,12 +6,13 @@
  */
 
 // Claude Generated (Oct 2026): the stored (n^2 x n^2) ERI tensor is uploaded once per
-// geometry; every Fock build then only moves P (n^2) in and J, K (2 n^2) out.
+// geometry (Q-G1) or built on the device (Q-G2, qm_gpu_eri.cu); every Fock build then only
+// moves P (n^2) in and J, K (2 n^2) out.
 // J_mn = sum_t E[(mn), t] P[t]            (t = lam*n + sig, contiguous)
 // K_mn = sum_{l,s} E[m,l,n,s] P[l,s]      (s contiguous, l strided by n^2)
 // One thread block per (m,n); FP64 accumulation, fixed reduction order (deterministic).
 
-#include "../qm_gpu_backend.h"
+#include "qm_gpu_jk_cuda.h"
 
 #include <cuda_runtime.h>
 
@@ -54,55 +55,78 @@ __global__ void jkKernel(const double* __restrict__ E, const double* __restrict_
     }
 }
 
-class QmGpuJkCuda final : public qmint::QMGpuJK {
-public:
-    QmGpuJkCuda(const double* eri, int n, int device)
-        : m_n(n)
-    {
-        if (device >= 0 && cudaSetDevice(device) != cudaSuccess) return;
-        const size_t n2 = (size_t)n * n;
-        if (cudaMalloc(&m_E, n2 * n2 * sizeof(double)) != cudaSuccess) { m_E = nullptr; return; }
-        if (cudaMalloc(&m_P, n2 * sizeof(double)) != cudaSuccess
-            || cudaMalloc(&m_J, n2 * sizeof(double)) != cudaSuccess
-            || cudaMalloc(&m_K, n2 * sizeof(double)) != cudaSuccess) { release(); return; }
-        if (cudaMemcpy(m_E, eri, n2 * n2 * sizeof(double), cudaMemcpyHostToDevice) != cudaSuccess)
-            release();
-        cudaDeviceProp prop{};
-        cudaGetDeviceProperties(&prop, device >= 0 ? device : 0);
-        m_name = std::string("cuda:") + prop.name;
-    }
-    ~QmGpuJkCuda() override { release(); }
-    bool ok() const { return m_E != nullptr; }
-
-    bool build(const double* P, double* J, double* K) override
-    {
-        if (!m_E) return false;
-        const size_t n2 = (size_t)m_n * m_n;
-        if (cudaMemcpy(m_P, P, n2 * sizeof(double), cudaMemcpyHostToDevice) != cudaSuccess) return false;
-        jkKernel<<<(unsigned)n2, 256>>>(m_E, m_P, m_J, m_K, m_n);
-        if (cudaGetLastError() != cudaSuccess) return false;
-        if (cudaMemcpy(J, m_J, n2 * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
-        return cudaMemcpy(K, m_K, n2 * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess;
-    }
-    std::string name() const override { return m_name; }
-    int n() const override { return m_n; }
-
-private:
-    void release()
-    {
-        cudaFree(m_E); cudaFree(m_P); cudaFree(m_J); cudaFree(m_K);
-        m_E = m_P = m_J = m_K = nullptr;
-    }
-    int m_n;
-    double *m_E = nullptr, *m_P = nullptr, *m_J = nullptr, *m_K = nullptr;
-    std::string m_name = "cuda";
-};
-
 } // namespace
+
+namespace qmgpu {
+
+void warmJkKernel()
+{
+    cudaFuncAttributes a{};
+    cudaFuncGetAttributes(&a, jkKernel);
+}
+
+bool QmGpuJkCuda::allocWork(int device)
+{
+    const size_t n2 = (size_t)m_n * m_n;
+    if (cudaMalloc(&m_P, n2 * sizeof(double)) != cudaSuccess
+        || cudaMalloc(&m_J, n2 * sizeof(double)) != cudaSuccess
+        || cudaMalloc(&m_K, n2 * sizeof(double)) != cudaSuccess)
+        return false;
+    cudaDeviceProp prop{};
+    cudaGetDeviceProperties(&prop, device >= 0 ? device : 0);
+    m_name = std::string("cuda:") + prop.name;
+    return true;
+}
+
+QmGpuJkCuda::QmGpuJkCuda(const double* eri, int n, int device)
+    : m_n(n)
+{
+    if (device >= 0 && cudaSetDevice(device) != cudaSuccess) return;
+    const size_t n2 = (size_t)n * n;
+    if (cudaMalloc(&m_E, n2 * n2 * sizeof(double)) != cudaSuccess) { m_E = nullptr; return; }
+    if (!allocWork(device)) { release(); return; }
+    if (cudaMemcpy(m_E, eri, n2 * n2 * sizeof(double), cudaMemcpyHostToDevice) != cudaSuccess)
+        release();
+}
+
+QmGpuJkCuda::QmGpuJkCuda(double* d_eri, int n, int device, bool /*adopt*/)
+    : m_n(n)
+{
+    m_E = d_eri;
+    if (!allocWork(device)) release();
+}
+
+QmGpuJkCuda::~QmGpuJkCuda() { release(); }
+
+bool QmGpuJkCuda::build(const double* P, double* J, double* K)
+{
+    if (!m_E) return false;
+    const size_t n2 = (size_t)m_n * m_n;
+    if (cudaMemcpy(m_P, P, n2 * sizeof(double), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    jkKernel<<<(unsigned)n2, 256>>>(m_E, m_P, m_J, m_K, m_n);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    if (cudaMemcpy(J, m_J, n2 * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+    return cudaMemcpy(K, m_K, n2 * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess;
+}
+
+bool QmGpuJkCuda::downloadERI(double* host) const
+{
+    if (!m_E) return false;
+    const size_t n2 = (size_t)m_n * m_n;
+    return cudaMemcpy(host, m_E, n2 * n2 * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess;
+}
+
+void QmGpuJkCuda::release()
+{
+    cudaFree(m_E); cudaFree(m_P); cudaFree(m_J); cudaFree(m_K);
+    m_E = m_P = m_J = m_K = nullptr;
+}
+
+} // namespace qmgpu
 
 extern "C" void* curcuma_cuda_create_qm_jk(const double* eri, int n, int device)
 {
-    auto* b = new QmGpuJkCuda(eri, n, device);
+    auto* b = new qmgpu::QmGpuJkCuda(eri, n, device);
     if (!b->ok()) { delete b; return nullptr; }
     return static_cast<qmint::QMGpuJK*>(b);
 }

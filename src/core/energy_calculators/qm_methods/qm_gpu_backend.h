@@ -1,5 +1,5 @@
 /*
- * < Device seam of the native QM engine (J/K builds) >
+ * < Device seam of the native QM engine (ERI build, J/K builds) >
  * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software under GPL-3.0
@@ -7,11 +7,13 @@
 
 #pragma once
 
+#include <cstddef>
 #include <string>
 
-// Claude Generated (Oct 2026, Q-G1 of docs/QM_GPU_ROADMAP.md): backend-free interface the
-// QMEngine drives a GPU through. The concrete class lives in a runtime plugin
-// (libcurcuma_cuda.so, entry curcuma_cuda_create_qm_jk), so the core carries no CUDA symbol.
+// Claude Generated (Oct 2026, Q-G1/Q-G2 of docs/QM_GPU_ROADMAP.md): backend-free interface the
+// QMEngine drives a GPU through. The concrete classes live in a runtime plugin
+// (libcurcuma_cuda.so, entries curcuma_cuda_create_qm_jk / curcuma_cuda_create_qm_eri_jk), so the
+// core carries no CUDA symbol.
 namespace qmint {
 
 /// Coulomb/exchange builder holding the two-electron integrals on a device.
@@ -25,6 +27,63 @@ public:
     virtual bool build(const double* P, double* J, double* K) = 0;
     virtual std::string name() const = 0;
     virtual int n() const = 0;
+    /// Copy the device tensor (n^4 doubles, layout of ERITensor) to the host. Used by the
+    /// CPU-vs-GPU tensor test; false if not supported or on a device error. (Q-G2)
+    virtual bool downloadERI(double* /*host*/) const { return false; }
+    /// One line of device-side timings (context, uploads, kernels), empty if none. (Q-G2)
+    virtual std::string stats() const { return std::string(); }
+};
+
+/// Flat, pointer-only description of everything the device ERI kernel needs (Q-G2).
+/// Filled on the host by qmint::EriGpuTables::view() (qm_integrals.cpp) from exactly the
+/// same shell-pair tables, Schwarz factors and primitive ordering the CPU buildERI uses,
+/// so the screening decisions are identical. All arrays are host memory; the plugin
+/// copies them. Indices refer to:
+///   shells       s = 0..nshell-1 (same grouping as the CPU kernel)
+///   shell pairs  i = 0..npair-1, A <= B, CPU order
+///   prim pairs   k = pr_prim_off[i] .. + pr_nprim[i]-1, sorted by Schwarz factor (largest first)
+///   quartets     canonical (i, j), j >= i, Schwarz-screened, grouped by angular-momentum class
+struct QMGpuEriTables {
+    int n_out = 0;           ///< active basis dimension; the tensor has n_out^4 entries
+    int nshell = 0, npair = 0, nprimpair = 0;
+    double prim_thr = 0.0;   ///< primitive-quartet threshold (screening * 1e-3, as on the CPU)
+    double pref = 0.0;       ///< 2 pi^(5/2), computed on the host as in the CPU kernel
+    // per shell
+    const int* sh_L = nullptr;
+    const int* sh_ncomp = nullptr;
+    const int* sh_nprim = nullptr;
+    const int* sh_lmn_off = nullptr;   ///< into lmn (3 ints per component)
+    const int* sh_coef_off = nullptr;  ///< into coef, layout [component][primitive]
+    const int* sh_out_first = nullptr; ///< first index in the active basis
+    const int* sh_out_width = nullptr; ///< number of active functions
+    const int* sh_T_off = nullptr;     ///< into T (ncomp x width, row-major); -1 = identity
+    const int* lmn = nullptr; int n_lmn = 0;
+    const double* coef = nullptr; int n_coef = 0;
+    const double* T = nullptr; int n_T = 0;
+    // per shell pair
+    const int* pr_A = nullptr;
+    const int* pr_B = nullptr;
+    const int* pr_prim_off = nullptr;
+    const int* pr_nprim = nullptr;
+    // per primitive pair
+    const int* pp_ia = nullptr;
+    const int* pp_ib = nullptr;
+    const double* pp_p = nullptr;      ///< composite exponent
+    const double* pp_P = nullptr;      ///< product centre, 3 per pair
+    const double* pp_schwarz = nullptr;
+    const long long* pp_E_off = nullptr; ///< into E: Ex, Ey, Ez consecutive, each (LA+LB+1)(LA+1)(LB+1)
+    const double* E = nullptr; long long n_E = 0;
+    // canonical quartets after shell-level screening, grouped by class
+    const int* q_bra = nullptr;        ///< shell-pair index i
+    const int* q_ket = nullptr;        ///< shell-pair index j >= i
+    long long nquartet = 0;
+    int nclass = 0;
+    const long long* class_off = nullptr; ///< nclass+1 offsets into q_bra/q_ket
+    const int* class_L = nullptr;      ///< 4 per class: LA LB LC LD
+    // Boys table of qm_integrals.cpp (grid + Taylor), copied verbatim
+    const double* boys_f = nullptr;
+    int boys_npts = 0, boys_ntab = 0, boys_ntaylor = 0;
+    double boys_dT = 0.0, boys_Tmax = 0.0;
 };
 
 } // namespace qmint

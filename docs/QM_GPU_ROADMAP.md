@@ -1,8 +1,8 @@
 # Native ab-initio QM (HF / HF-3c / KS-DFT): performance and GPU roadmap
 
 > Status: 🤖 AI-authored. Sections 1-2 are **implemented and machine-tested** (CPU only,
-> Sep 2026). Section 3 is a **proposed** plan, not implemented. No GPU code for
-> the QM engine exists yet.
+> Sep 2026). Section 3 is a plan; stages Q-G1 and Q-G2 are implemented (Oct 2026,
+> AI-generated, machine-tested on one RTX 5090 only), Q-G3 onward are proposals.
 
 The native xTB GPU work ([SQM_GPU.md](SQM_GPU.md), [SQM_GPU_ROADMAP.md](SQM_GPU_ROADMAP.md),
 [SQM_PERFORMANCE.md](SQM_PERFORMANCE.md), [MULTI_GPU.md](MULTI_GPU.md)) produced a set of
@@ -84,7 +84,7 @@ anything is enabled by default.
 | Stage | content | xTB precedent |
 |---|---|---|
 | Q-G1 | **done Oct 2026** (see below): J/K from the stored tensor on the device, host SCF unchanged | Stage 1 (single offloaded hot spot) |
-| Q-G2 | device ERI kernel: one work item per shell quartet (or per primitive quartet for high L), fed by the flat `ShellPair`/`PrimPair` tables of section 1 | Stage 3 (integrals on device) |
+| Q-G2 | **done Oct 2026** (see below): device ERI kernel, one work item per shell quartet, fed by the flat `ShellPair`/`PrimPair` tables of section 1 | Stage 3 (integrals on device) |
 | Q-G3 | integral-direct J/K on the device (section 2), density-weighted screening, FP64 accumulation | `-gpu_multipole_otf`, screened integrals |
 | Q-G4 | device-resident SCF loop: Fock -> Löwdin-reduced eigensolve (reuse the xTB `cusolverDnDsyevd` path) -> density -> DIIS; host polls O(1) scalars per iteration | Stage 6 (fully resident loop) |
 | Q-G5 | mixed precision far from convergence (FP32 ERI/J/K with FP64 correction on dP), never accepting convergence on an FP32 step | X-AP3 (FP32 eigensolve early in the SCF) |
@@ -100,6 +100,47 @@ value). The ERI build (615 ms) is now the dominant cost, which is what Q-G2 addr
 (tensor above `-qm.eri_max_memory_mb`) stays on the CPU. `ctest -L qm_gpu` (CPU vs GPU, 1e-9 Eh;
 skipped without a device). Not tested: other GPUs, ROCm/Vulkan (no QM entry point), n > ~260
 (tensor must fit in device memory).
+
+**Q-G2 (Oct 2026, 🤖 AI-generated, ⚙️ machine-tested; RTX 5090 only)**: with `-gpu cuda|auto` the stored
+tensor is computed on the device (`cuda/qm_gpu_eri.cu`, entry `curcuma_cuda_create_qm_eri_jk`) and handed
+to the Q-G1 J/K builder without a host copy. The host flattens the same shell/primitive-pair tables,
+Hermite coefficients, Schwarz factors and Boys grid the CPU `buildERI` uses (`qmint::buildEriGpuTables`,
+seam struct `QMGpuEriTables`), so both screens decide identically. Kernels: one thread per shell quartet
+for the classes with <= 27 cartesian components (template per (LA,LB,LC,LD), R^n kept in one in-place
+simplex), one block per quartet for the larger d classes (R^n in shared memory, one component per
+thread, no atomics); 6d->5d per quartet; each tensor element written once (canonical orbit
+representative) then copied to its 8 permutations; classes on 8 streams. FP64 throughout.
+`-qm.gpu_eri false` keeps the Q-G1 upload path. In `scf_direct auto` a device-built tensor is used even
+above `-qm.eri_max_memory_mb` (it needs no host memory) as long as it fits the card. Fallbacks (counted as
+`qm_eri`): f functions or higher (the GTO basis type has no f anyway), tensor larger than free device
+memory, any CUDA error -> CPU ERI + Q-G1 upload, or CPU direct SCF when the host may not hold the tensor.
+
+Measured (HF/def2-SVP, 4 CPU threads, `-gpu cuda`, warm JIT cache; the plugin is built for sm_75 and
+JIT-compiled for sm_120 on the first run after each rebuild, which took 3.6 s once):
+
+| system (spherical n) | CPU ERI build | device ERI kernels | GPU ERI path incl. host tables + context | max abs tensor diff | E diff |
+|---|---:|---:|---:|---:|---:|
+| H2O (24) | 2.8 ms | 18.1 ms | 98 ms (context+module load 79 ms) | 8.9e-16 | 0 (8 dp) |
+| formaldehyde (38) | 13.1 ms | 33.5 ms | 114 ms (context 79 ms) | 5.8e-15 | 0 (8 dp) |
+| benzene (114) | 612 ms | 71.9 ms | 170 ms (host tables 16 ms, context 81 ms) | 5.8e-15 | 0 (8 dp) |
+| naphthalene (180) | 3.1 s (stored, `scf_direct off`) | 251 ms | 389 ms (host tables 50 ms, context 79 ms) | 5.8e-15 | 0 (8 dp) |
+
+Tensor diffs from `CURCUMA_QM_GPU_ERI_CHECK=1` (download + element-wise compare with the CPU tensor, same
+screening; also with `-qm.eri_screening 0` and `-qm.cartesian_d true` on H2O/formaldehyde/benzene, all
+<= 5.8e-15, 0 elements above 1e-12). Whole single points (wall): benzene CPU 1.46 s -> Q-G1 1.06 s -> Q-G2
+0.45 s; naphthalene CPU (auto = integral-direct) 25.6 s -> Q-G2 0.95 s, E = -383.07275442 Eh = PySCF
+-383.0727544204 for the same hand-built D2h geometry. In this session the Q-G1 benzene J/K builds took
+10.8 ms in total (12 iterations), not the 179 ms recorded above; the cause of that difference was not
+investigated. Small molecules gain nothing: the ~80 ms context + module load dominates, the ERI kernels
+themselves are latency-bound (one quartet's primitives run serially). `ctest -L qm_gpu`: `qm_gpu_eri_*`
+(tensor <= 1e-12, energy <= 1e-9 vs CPU, incl. cartesian, unscreened, HF-3c/MINIX) and `qm_gpu_jk_*`.
+`-opt -method hf-3c -gpu cuda` (formaldehyde) reaches the same minimum energy as the CPU (6 dp printed).
+
+Not tested / not implemented: other GPUs and compute capabilities, ROCm/Vulkan (no QM entry point),
+f functions (CPU fallback), systems beyond naphthalene (the tensor must fit into device memory; ~260
+functions on a 32 GB card), multi-GPU, the analytic gradient (2e part stays on the CPU), timings with an
+sm_120-native build. The block kernel for d classes is a first, unoptimised version (benzene: ~2/3 of the
+kernel time); the thread kernel for classes up to 81 components did not compile in reasonable time.
 
 Caveats carried over: speed-ups are hardware-specific and must be measured (the Vulkan
 FP32 path gave no win); FMA contraction changes the last ulp, so tests compare energies

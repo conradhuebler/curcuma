@@ -74,6 +74,9 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(eri_max_memory_mb, Double, 4000.0,
           "scf_direct auto: largest stored ERI tensor (n^4 * 8 bytes, in MB) before the SCF switches to integral-direct J/K.",
           "Performance", {})
+    PARAM(gpu_eri, Bool, true,
+          "With -gpu cuda|auto: build the stored ERI tensor on the device (Q-G2) instead of on the CPU followed by an upload (Q-G1). Falls back to the CPU build when the basis has f functions or the tensor does not fit into device memory.",
+          "Performance", {})
     PARAM(scf_max_iterations, Int, 100,
           "Maximum number of SCF iterations.",
           "SCF", {})
@@ -238,6 +241,10 @@ private:
     std::string m_gpu = "none";
     mutable std::unique_ptr<qmint::QMGpuJK> m_gpu_jk;
     mutable bool m_gpu_failed = false;       // upload/build failed once: stay on the CPU
+    // Q-G2 (Oct 2026): the tensor itself is computed on the device (-qm.gpu_eri, default on).
+    bool m_gpu_eri = true;
+    int m_gpu_device = 0;
+    mutable bool m_gpu_eri_failed = false;   // device ERI build failed once: Q-G1 upload path
     mutable long m_direct_quartets = 0;      // shell quartets computed in the last SCF (stats)
     // Energy components for the HF run (Hartree). E_elec = 0.5 Tr(P(H+F)).
     double m_e_elec = 0.0;
@@ -261,7 +268,13 @@ private:
     // J(P), K(P) from the stored tensor or integral-direct (useDirectSCF()).
     void buildJK(const Matrix& P, Matrix& J, Matrix& K) const;
     bool useDirectSCF() const;
-    bool gpuJK(const qmint::ERITensor& eri, const Matrix& P, Matrix& J, Matrix& K) const;
+    // GPU J/K (Q-G1/Q-G2): ensureGpuJK() creates the device builder once per geometry --
+    // device-built tensor first, else CPU tensor + upload; gpuBuildJK() runs one Fock build.
+    bool gpuRequested() const;
+    bool hostTensorAllowed() const;
+    bool ensureGpuJK() const;
+    bool gpuBuildJK(const Matrix& P, Matrix& J, Matrix& K) const;
+    void checkGpuEri() const;  // CURCUMA_QM_GPU_ERI_CHECK=1 diagnostic (Q-G2)
 
     // Solve the generalized eigenproblem F C = S C eps via the Lowdin reduce:
     //   eps, Ctil = eig(X^T F X);  C = X Ctil.
