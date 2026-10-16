@@ -398,6 +398,16 @@ public:
     /// GpuScfBackend docs in xtb_native.h). Claude Generated (Sep 2026).
     bool dispersionGradient(int nat, const double* W, const double* dWq, const double* dWc,
                             double* e_atom_out, double* grad_out, double* dEdcn_out, double* dEdq_out);
+    /**
+     * Whole post-SCF D4 of GFN2 on the device (Claude Generated, Oct 2026): weights W/dWq/dWc from the converged
+     * charges, 2-body energy and gradient, the ATM three-body term (q = 0 weights, C6 matrices, neighbour list and
+     * kernel), and the dE/dCN fold with the EN-weighted covalent CN. Needs beginDispersion + beginDispersionWeights
+     * of the same geometry. energy_out = E_2body + E_ATM (Eh), grad_out [3 nat] Eh/Bohr including the CN fold,
+     * dEdq_out [nat] = dE_2body/dq. rad/en/kn/k4/k5/k6: tables of d4_ncoord. False = the caller uses the host flow.
+     */
+    bool d4PostScfDevice(int nat, const double* q_at, bool with_atm, double s9, double a1, double a2, double alp,
+                         double atm_cutoff, double cn_cutoff, const double* rad, const double* en, double kn,
+                         double k4, double k5, double k6, double* energy_out, double* grad_out, double* dEdq_out);
     bool dispersionATM(int nat, const double* c6, const double* dc6dcn,
                        double s9, double a1, double a2, double alp, double cutoff,
                        double* e_atom_out, double* grad_out, double* dEdcn_out);

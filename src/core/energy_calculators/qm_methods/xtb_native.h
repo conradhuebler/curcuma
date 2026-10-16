@@ -625,6 +625,16 @@ struct GpuScfBackend {
                                double* e_atom_out, double* grad_out, double* dEdcn_out)
     { (void)nat; (void)c6; (void)dc6dcn; (void)s9; (void)a1; (void)a2; (void)alp; (void)cutoff;
       (void)e_atom_out; (void)grad_out; (void)dEdcn_out; return false; }
+    /// Claude Generated (Oct 2026): the whole post-SCF D4 of GFN2 on the device (weights from the converged
+    /// charges, 2-body, ATM incl. its C6 matrices and neighbour list, dE/dCN fold). energy_out = E_2body + E_ATM,
+    /// grad_out [3 nat] Eh/Bohr (CN fold included), dEdq_out = dE_2body/dq. Default false -> host flow.
+    virtual bool d4PostScfDevice(int nat, const double* q_at, bool with_atm, double s9, double a1, double a2,
+                                 double alp, double atm_cutoff, double cn_cutoff, const double* rad,
+                                 const double* en, double kn, double k4, double k5, double k6,
+                                 double* energy_out, double* grad_out, double* dEdq_out)
+    { (void)nat; (void)q_at; (void)with_atm; (void)s9; (void)a1; (void)a2; (void)alp; (void)atm_cutoff;
+      (void)cn_cutoff; (void)rad; (void)en; (void)kn; (void)k4; (void)k5; (void)k6; (void)energy_out;
+      (void)grad_out; (void)dEdq_out; return false; }
     /// Stage 6 (S6.2b): upload the q-independent D4 reference tables once per
     /// geometry so the fused resident loop rebuilds W/dWq on the device from the
     /// resident SCF charges (no host buildRefWFlat per iteration). Arrays are

@@ -29,6 +29,8 @@
 #include <set>
 #include <thread>
 #include <vector>
+#include <thrust/execution_policy.h>
+#include <thrust/scan.h>
 
 // CudaBuffer<T> (RAII cudaMalloc/cudaFree) — the project's established device
 // allocation helper; routing every allocation through it is the mitigation for
@@ -176,6 +178,11 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dD4dWc, dD4Eat, dD4Grad, dD4Dcn;   // nat*7 / nat / 3 nat / nat
     CudaBuffer<double> dD4AtmC6, dD4AtmDc6;               // nat^2 each (q=0 reference)
     CudaBuffer<int>    dD4NbPtr, dD4Nb;                   // ATM neighbour list
+    // Oct 2026: whole post-SCF D4 on the device (d4PostScfDevice)
+    CudaBuffer<double> dD4Rad, dD4En;                     // covalent-CN tables (119)
+    CudaBuffer<double> dD4Q, dD4QZero, dD4W0, dD4dWq0, dD4dWc0;
+    CudaBuffer<double> dAtmEat, dAtmGrad, dAtmDcn, dD4Dtot, dD4Gtot;
+    CudaBuffer<int>    dD4NbCnt;
     std::vector<double> h_d4_xyz;                         // host copy of the D4 geometry
 
     // Stage 6 (S6.2b): q-independent per-atom reference data so the device rebuilds
@@ -2462,7 +2469,8 @@ __global__ void k_d4_build_refw(int nat, int max_ref, const double* __restrict__
                                 const double* __restrict__ zeff, const int* __restrict__ nref,
                                 const double* __restrict__ refcn, const double* __restrict__ refcovcn,
                                 const double* __restrict__ refq,
-                                double* __restrict__ W, double* __restrict__ dWq)
+                                double* __restrict__ W, double* __restrict__ dWq,
+                                double* __restrict__ dWc = nullptr)   // Oct 2026: dW/dCN for the post-SCF gradient
 {
     const int a = blockIdx.x * blockDim.x + threadIdx.x;
     if (a >= nat) return;
@@ -2470,7 +2478,7 @@ __global__ void k_d4_build_refw(int nat, int max_ref, const double* __restrict__
     constexpr int MAXCN = 19;
     const int MR = max_ref;                       // 7
     const size_t base = static_cast<size_t>(a) * MR;
-    for (int ir = 0; ir < MR; ++ir) { W[base + ir] = 0.0; dWq[base + ir] = 0.0; }
+    for (int ir = 0; ir < MR; ++ir) { W[base + ir] = 0.0; dWq[base + ir] = 0.0; if (dWc) dWc[base + ir] = 0.0; }
     int nr = nref[a];
     if (nr <= 0) return;
     if (nr > MR) nr = MR;
@@ -2488,21 +2496,23 @@ __global__ void k_d4_build_refw(int nat, int max_ref, const double* __restrict__
         cnc[icn] += 1;
     }
     // CN-Gaussian weights gwk = expw/norm (uses refcovcn, dftd4 weight_references).
-    double expw[7];
-    double norm = 0.0;
+    double expw[7], expd[7];
+    double norm = 0.0, dnorm = 0.0;
     for (int ir = 0; ir < nr; ++ir) {
         int icn = static_cast<int>(lround(refcn[base + ir]));
         if (icn < 0) icn = 0; if (icn > MAXCN) icn = MAXCN;
         const int k = cnc[icn];
         const int ngw = k * (k + 1) / 2;
         const double dcov = cna - refcovcn[base + ir];
-        double ew = 0.0;
+        double ew = 0.0, ed = 0.0;
         for (int igw = 1; igw <= ngw; ++igw) {
             const double wfe = igw * wf;
-            ew += exp(-wfe * dcov * dcov);
+            const double gwe = exp(-wfe * dcov * dcov);
+            ew += gwe;
+            ed += 2.0 * wfe * (refcovcn[base + ir] - cna) * gwe;   // d(gw)/dCN (host buildAtomRefW)
         }
-        expw[ir] = ew;
-        norm += ew;
+        expw[ir] = ew; expd[ir] = ed;
+        norm += ew; dnorm += ed;
     }
     const double ninv = (norm > 0.0) ? 1.0 / norm : 0.0;
     const double qmod = q[a] + zef;
@@ -2510,8 +2520,14 @@ __global__ void k_d4_build_refw(int nat, int max_ref, const double* __restrict__
         double gwk = expw[ir] * ninv;
         if (!isfinite(gwk)) gwk = 0.0;
         const double qref = refq[base + ir] + zef;
-        W[base + ir]   = gwk * d4_zeta_dev(ga, gia, qref, qmod);
+        const double zt = d4_zeta_dev(ga, gia, qref, qmod);
+        W[base + ir]   = gwk * zt;
         dWq[base + ir] = gwk * d4_dzeta_dev(ga, gia, qref, qmod);
+        if (dWc) {
+            double dgwk = ninv * (expd[ir] - expw[ir] * dnorm * ninv);
+            if (!isfinite(dgwk)) dgwk = 0.0;
+            dWc[base + ir] = dgwk * zt;
+        }
     }
 }
 
@@ -5737,6 +5753,231 @@ bool XtbGpuContext::dispersionATM(int nat, const double* c6, const double* dc6dc
     I.dD4AtmC6.free();
     I.dD4AtmDc6.free();
     return okk;
+}
+
+/* ====================================================================== *
+ *  Whole post-SCF D4 of GFN2 on the device (Claude Generated, Oct 2026).
+ *  Replaces the host steps around dispersionGradient / dispersionATM:
+ *   - W, dWq, dWc from the converged charges (k_d4_build_refw with dWc) instead of buildRefWFlat,
+ *   - the q = 0 reference weights and the nat x nat C6 / dC6/dCN matrices of the ATM term
+ *     (k_d4_atm_c6mat) instead of buildAtmC6Flat and a 2 nat^2 upload,
+ *   - the ATM neighbour list (count / scan / fill) instead of the threaded host O(N^2) scan,
+ *   - the dE/dCN fold with the EN-weighted covalent CN (k_d4_cn_fold) instead of
+ *     addD4CovalentCNGradient.
+ *  Same formulas as D4ParameterGenerator::buildAtomRefW / contractC6Gfn2 / buildAtmC6Flat and
+ *  curcuma::dispersion::addD4CovalentCNGradient; only the order of summation can differ.
+ * ====================================================================== */
+
+// C6 and dC6/dCN of the q = 0 reference weights (ATM): c6[a*nat+b] = c6[b*nat+a],
+// dc6[a*nat+b] = dC6(a,b)/dCN_a, dc6[b*nat+a] = dC6(a,b)/dCN_b  (host buildAtmC6Flat).
+__global__ void k_d4_atm_c6mat(int nat, const int* __restrict__ Z, const int* __restrict__ nref,
+                               const double* __restrict__ W0, const double* __restrict__ dWc0,
+                               const double* __restrict__ c6flat,
+                               double* __restrict__ c6m, double* __restrict__ dc6m)
+{
+    const long long t = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (t >= static_cast<long long>(nat) * nat) return;
+    const int a = static_cast<int>(t / nat), b = static_cast<int>(t % nat);
+    if (b > a) return;
+    constexpr int MR = 7, ME = 118;
+    const int ea = Z[a] - 1, eb = Z[b] - 1;
+    double c6 = 0.0, di = 0.0, dj = 0.0;
+    if (ea >= 0 && ea < ME && eb >= 0 && eb < ME) {
+        const int nra = min(nref[a], MR), nrb = min(nref[b], MR);
+        const size_t base = static_cast<size_t>(ea) * ME * MR * MR + static_cast<size_t>(eb) * MR * MR;
+        const double* Wa = W0 + static_cast<size_t>(a) * MR;
+        const double* Wb = W0 + static_cast<size_t>(b) * MR;
+        const double* dWa = dWc0 + static_cast<size_t>(a) * MR;
+        const double* dWb = dWc0 + static_cast<size_t>(b) * MR;
+        for (int ra = 0; ra < nra; ++ra)
+            for (int rb = 0; rb < nrb; ++rb) {
+                const double c6ref = c6flat[base + static_cast<size_t>(ra) * MR + rb];
+                c6 += Wa[ra] * Wb[rb] * c6ref;
+                di += dWa[ra] * Wb[rb] * c6ref;
+                dj += Wa[ra] * dWb[rb] * c6ref;
+            }
+    }
+    const size_t nat_s = static_cast<size_t>(nat);
+    c6m[a * nat_s + b] = c6;  c6m[b * nat_s + a] = c6;
+    dc6m[a * nat_s + b] = di; dc6m[b * nat_s + a] = dj;
+}
+
+// Neighbour list of the ATM term: atoms x != a with |r_x - r_a|^2 <= cut2, ascending (one thread per row).
+__global__ void k_d4_nb_count(int nat, const double* __restrict__ xyz, double cut2, int* __restrict__ cnt)
+{
+    const int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= nat) return;
+    int c = 0;
+    for (int x = 0; x < nat; ++x) {
+        if (x == a) continue;
+        const double dx = xyz[3*x] - xyz[3*a], dy = xyz[3*x+1] - xyz[3*a+1], dz = xyz[3*x+2] - xyz[3*a+2];
+        if (dx*dx + dy*dy + dz*dz <= cut2) ++c;
+    }
+    cnt[a] = c;
+}
+
+__global__ void k_d4_nb_fill(int nat, const double* __restrict__ xyz, double cut2,
+                             const int* __restrict__ off, int* __restrict__ nb)
+{
+    const int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= nat) return;
+    int p = off[a];
+    for (int x = 0; x < nat; ++x) {
+        if (x == a) continue;
+        const double dx = xyz[3*x] - xyz[3*a], dy = xyz[3*x+1] - xyz[3*a+1], dz = xyz[3*x+2] - xyz[3*a+2];
+        if (dx*dx + dy*dy + dz*dz <= cut2) nb[p++] = x;
+    }
+}
+
+__global__ void k_d4_add2(int n, const double* __restrict__ a, const double* __restrict__ b, double* __restrict__ out)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = a[i] + b[i];
+}
+
+// grad += sum_pairs (dEdcn_i + dEdcn_j) dcountf/r (R_i - R_j) with the EN-weighted erf CN of dftd4
+// (curcuma::dispersion::addD4CovalentCNGradient), gathered per atom (no atomics).
+__global__ void k_d4_cn_fold(int nat, const int* __restrict__ Z, const double* __restrict__ xyz,
+                             const double* __restrict__ dEdcn, const double* __restrict__ rad,
+                             const double* __restrict__ en, double kn, double k4, double k5, double k6,
+                             double cutoff, double* __restrict__ grad)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const int zi = Z[i];
+    if (zi < 1 || zi > 118) return;
+    const double hlfosqrtpi = 1.0 / 1.7724538509055159;
+    double gx = 0.0, gy = 0.0, gz = 0.0;
+    for (int j = 0; j < nat; ++j) {
+        if (j == i) continue;
+        const int zj = Z[j];
+        if (zj < 1 || zj > 118) continue;
+        const double rx = xyz[3*i] - xyz[3*j], ry = xyz[3*i+1] - xyz[3*j+1], rz = xyz[3*i+2] - xyz[3*j+2];
+        const double r = sqrt(rx*rx + ry*ry + rz*rz);
+        if (r > cutoff || r < 1e-12) continue;
+        const double rcovij = rad[zi] + rad[zj];
+        const double rr = r / rcovij;
+        const double t = fabs(en[zi] - en[zj]) + k5;
+        const double den = k4 * exp(-(t * t) / k6);
+        const double u = kn * (rr - 1.0);
+        const double dcountf = den * (-kn * hlfosqrtpi * exp(-(u * u))) / rcovij;
+        const double factor = (dEdcn[i] + dEdcn[j]) * dcountf / r;
+        gx += factor * rx; gy += factor * ry; gz += factor * rz;
+    }
+    grad[3*i] += gx; grad[3*i+1] += gy; grad[3*i+2] += gz;
+}
+
+bool XtbGpuContext::d4PostScfDevice(int nat, const double* q_at, bool with_atm, double s9, double a1, double a2,
+                                    double alp, double atm_cutoff, double cn_cutoff,
+                                    const double* rad, const double* en, double kn, double k4, double k5,
+                                    double k6, double* energy_out, double* grad_out, double* dEdq_out)
+{
+    Impl& I = *m_impl;
+    if (!ok() || nat <= 0 || nat != I.d4_nat || !q_at || !rad || !en || !energy_out || !grad_out || !dEdq_out
+        || I.dD4C6Flat.empty() || I.dD4Cn.n < nat || I.dD4Refcn.n < nat * Impl::D4_MAX_REF
+        || static_cast<int>(I.h_d4_xyz.size()) != 3 * nat)
+        return false;
+    cudaStream_t stream = I.stream;
+    const int MR = Impl::D4_MAX_REF;
+    const int wlen = nat * MR;
+    const size_t nn = static_cast<size_t>(nat) * nat;
+    if (with_atm && nn > static_cast<size_t>(INT_MAX)) return false;
+    try {
+        I.dD4Q.ensure(nat); I.dD4W.ensure(wlen); I.dD4dWq.ensure(wlen); I.dD4dWc.ensure(wlen);
+        I.dD4Eat.ensure(nat); I.dD4Grad.ensure(3 * nat); I.dD4Dcn.ensure(nat); I.dD4Dedq.ensure(nat);
+        I.dD4Dtot.ensure(nat); I.dD4Gtot.ensure(3 * nat);
+        if (I.dD4Rad.n < 119) { I.dD4Rad.ensure(119); I.dD4En.ensure(119); }
+        if (with_atm) {
+            I.dD4QZero.ensure(nat); I.dD4W0.ensure(wlen); I.dD4dWq0.ensure(wlen); I.dD4dWc0.ensure(wlen);
+            I.dAtmEat.ensure(nat); I.dAtmGrad.ensure(3 * nat); I.dAtmDcn.ensure(nat);
+            I.dD4NbCnt.ensure(nat + 1); I.dD4NbPtr.ensure(nat + 1);
+            I.dD4AtmC6.ensure(static_cast<int>(nn)); I.dD4AtmDc6.ensure(static_cast<int>(nn));
+        }
+    } catch (...) {
+        I.last_error = "device allocation for the post-SCF D4 failed";
+        return false;
+    }
+    I.dD4Q.upload(q_at, nat, stream);
+    I.dD4Rad.upload(rad, 119, stream);
+    I.dD4En.upload(en, 119, stream);
+    const int b = 128, g = (nat + b - 1) / b;
+    const double cut2 = I.d4_cut * I.d4_cut;
+
+    // 1. W, dWq, dWc at the converged charges; 2-body energy / gradient / dE/dCN / dE/dq.
+    k_d4_build_refw<<<g, b, 0, stream>>>(nat, MR, I.dD4Q.ptr, I.dD4Cn.ptr, I.dD4Gi.ptr, I.dD4Zeff.ptr,
+        I.dD4Nref.ptr, I.dD4Refcn.ptr, I.dD4Refcovcn.ptr, I.dD4Refq.ptr, I.dD4W.ptr, I.dD4dWq.ptr, I.dD4dWc.ptr);
+    k_d4_grad<<<g, b, 0, stream>>>(
+        nat, 118, MR, I.dD4Z.ptr, I.dD4Nref.ptr, I.dD4Sqrt.ptr, I.dD4Xyz.ptr, I.dD4C6Flat.ptr,
+        I.dD4W.ptr, I.dD4dWq.ptr, I.dD4dWc.ptr, I.d4_s6, I.d4_s8, I.d4_a1, I.d4_a2, cut2,
+        I.dD4Eat.ptr, I.dD4Grad.ptr, I.dD4Dcn.ptr, I.dD4Dedq.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+
+    const double* dcn_final = I.dD4Dcn.ptr;
+    const double* grad_final = I.dD4Grad.ptr;
+    std::vector<double> e_atm;
+    if (with_atm) {
+        // 2. ATM: reference weights at q = 0, C6 matrices, neighbour list, three-body kernel.
+        cudaMemsetAsync(I.dD4QZero.ptr, 0, sizeof(double) * nat, stream);
+        k_d4_build_refw<<<g, b, 0, stream>>>(nat, MR, I.dD4QZero.ptr, I.dD4Cn.ptr, I.dD4Gi.ptr, I.dD4Zeff.ptr,
+            I.dD4Nref.ptr, I.dD4Refcn.ptr, I.dD4Refcovcn.ptr, I.dD4Refq.ptr, I.dD4W0.ptr, I.dD4dWq0.ptr, I.dD4dWc0.ptr);
+        const long long tot = static_cast<long long>(nat) * nat;
+        k_d4_atm_c6mat<<<static_cast<unsigned>((tot + 255) / 256), 256, 0, stream>>>(
+            nat, I.dD4Z.ptr, I.dD4Nref.ptr, I.dD4W0.ptr, I.dD4dWc0.ptr, I.dD4C6Flat.ptr,
+            I.dD4AtmC6.ptr, I.dD4AtmDc6.ptr);
+        const double atm_cut2 = atm_cutoff * atm_cutoff;
+        k_d4_nb_count<<<g, b, 0, stream>>>(nat, I.dD4Xyz.ptr, atm_cut2, I.dD4NbCnt.ptr);
+        cudaMemsetAsync(I.dD4NbCnt.ptr + nat, 0, sizeof(int), stream);
+        thrust::exclusive_scan(thrust::cuda::par.on(stream), I.dD4NbCnt.ptr, I.dD4NbCnt.ptr + nat + 1, I.dD4NbPtr.ptr);   // nbptr[nat] = total
+        int total = 0;
+        cudaMemcpyAsync(&total, I.dD4NbPtr.ptr + nat, sizeof(int), cudaMemcpyDeviceToHost, stream);
+        if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+        try { I.dD4Nb.ensure(std::max(1, total)); } catch (...) { return false; }
+        k_d4_nb_fill<<<g, b, 0, stream>>>(nat, I.dD4Xyz.ptr, atm_cut2, I.dD4NbPtr.ptr, I.dD4Nb.ptr);
+        if (I.thread_per_atom) {
+            const int bt = 64;
+            k_d4_atm_nl<<<(nat + bt - 1) / bt, bt, 0, stream>>>(
+                nat, I.dD4Xyz.ptr, I.dD4Sqrt.ptr, I.dD4AtmC6.ptr, I.dD4AtmDc6.ptr, I.dD4NbPtr.ptr, I.dD4Nb.ptr,
+                s9, a1, a2, alp, atm_cut2, I.dAtmEat.ptr, I.dAtmGrad.ptr, I.dAtmDcn.ptr);
+        } else {
+            const int bw = 128;
+            const long long threads = 32LL * nat;
+            k_d4_atm_nl_w<<<static_cast<unsigned>((threads + bw - 1) / bw), bw, 0, stream>>>(
+                nat, I.dD4Xyz.ptr, I.dD4Sqrt.ptr, I.dD4AtmC6.ptr, I.dD4AtmDc6.ptr, I.dD4NbPtr.ptr, I.dD4Nb.ptr,
+                s9, a1, a2, alp, atm_cut2, I.dAtmEat.ptr, I.dAtmGrad.ptr, I.dAtmDcn.ptr);
+        }
+        if (cudaGetLastError() != cudaSuccess) return false;
+        k_d4_add2<<<(3 * nat + 255) / 256, 256, 0, stream>>>(3 * nat, I.dD4Grad.ptr, I.dAtmGrad.ptr, I.dD4Gtot.ptr);
+        k_d4_add2<<<(nat + 255) / 256, 256, 0, stream>>>(nat, I.dD4Dcn.ptr, I.dAtmDcn.ptr, I.dD4Dtot.ptr);
+        dcn_final = I.dD4Dtot.ptr;
+        grad_final = I.dD4Gtot.ptr;
+        e_atm.resize(nat);
+        I.dAtmEat.download(e_atm.data(), nat, stream);
+    }
+    // 3. CN chain rule of dE/dCN into the gradient (in place on the final buffer).
+    if (grad_final == I.dD4Grad.ptr) {   // 2-body only: work on the total buffer, keep dD4Grad intact
+        cudaMemcpyAsync(I.dD4Gtot.ptr, I.dD4Grad.ptr, sizeof(double) * 3 * nat, cudaMemcpyDeviceToDevice, stream);
+        grad_final = I.dD4Gtot.ptr;
+    }
+    k_d4_cn_fold<<<g, b, 0, stream>>>(nat, I.dD4Z.ptr, I.dD4Xyz.ptr, dcn_final, I.dD4Rad.ptr, I.dD4En.ptr,
+                                       kn, k4, k5, k6, cn_cutoff, I.dD4Gtot.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    std::vector<double> e2(nat);
+    I.dD4Eat.download(e2.data(), nat, stream);
+    I.dD4Gtot.download(grad_out, 3 * nat, stream);
+    I.dD4Dedq.download(dEdq_out, nat, stream);
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    double E = 0.0;
+    for (int a = 0; a < nat; ++a) E += e2[a];
+    E *= 0.5;                                     // 2-body: the gather counts every pair twice
+    if (with_atm) {
+        double ea = 0.0;
+        for (int a = 0; a < nat; ++a) ea += e_atm[a];
+        E += ea / 3.0;                            // every triple is counted by its three members
+    }
+    *energy_out = E;
+    I.dD4AtmC6.free();
+    I.dD4AtmDc6.free();
+    return true;
 }
 
 /* ====================================================================== *

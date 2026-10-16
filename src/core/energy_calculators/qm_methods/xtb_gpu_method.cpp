@@ -384,6 +384,16 @@ public:
                                     e_atom_out, grad_out, dEdcn_out);
     }
 
+    bool d4PostScfDevice(int nat, const double* q_at, bool with_atm, double s9, double a1, double a2, double alp,
+                         double atm_cutoff, double cn_cutoff, const double* rad, const double* en, double kn,
+                         double k4, double k5, double k6, double* energy_out, double* grad_out,
+                         double* dEdq_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->d4PostScfDevice(nat, q_at, with_atm, s9, a1, a2, alp, atm_cutoff, cn_cutoff, rad, en,
+                                      kn, k4, k5, k6, energy_out, grad_out, dEdq_out);
+    }
+
     // ---- Device D4 reference weights from resident q_at (Stage 6, S6.2b) ---
     bool beginDispersionWeights(const std::vector<double>& cn, const std::vector<double>& gi,
                                 const std::vector<double>& zeff, const std::vector<double>& refcn,

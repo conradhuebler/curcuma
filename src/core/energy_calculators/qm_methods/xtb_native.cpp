@@ -3129,6 +3129,35 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
     const auto td0 = d4clk::now();
     double E = 0.0;
     bool disp_grad_device = false;
+    // Claude Generated (Oct 2026): everything below on the device in one call (weights, 2-body, ATM with its C6
+    // matrices and neighbour list, dE/dCN fold); the host flow after it stays as the fallback and for the
+    // backends without the call. CURCUMA_D4_POSTSCF_DEVICE=0 forces the host flow.
+    bool d4_all_device = false;
+    if (m_gpu_scf && m_gpu_scf->supportsDeviceDispersion() && m_d4_prepared) {
+        const char* env_off = std::getenv("CURCUMA_D4_POSTSCF_DEVICE");
+        if (!(env_off && env_off[0] == '0')) {
+            const int nat = m_atomcount;
+            const auto tab = curcuma::dispersion::d4CovalentCNTables();
+            std::vector<double> qv(nat), gflat(3 * nat, 0.0), dq(nat, 0.0);
+            for (int a = 0; a < nat; ++a) qv[a] = (a < m_wfn.q_at.size()) ? m_wfn.q_at(a) : 0.0;
+            double e_dev = 0.0;
+            if (m_gpu_scf->d4PostScfDevice(nat, qv.data(), /*with_atm=*/true, 5.0, 0.52, 5.0, 16.0,
+                                           m_d4_atm_cutoff, /*cn_cutoff=*/30.0, tab.rad, tab.en,
+                                           tab.kn, tab.k4, tab.k5, tab.k6, &e_dev, gflat.data(), dq.data())) {
+                m_disp_gradient = Matrix::Zero(nat, 3);
+                m_disp_dEdq = Vector::Zero(nat);
+                for (int a = 0; a < nat; ++a) {
+                    m_disp_gradient(a, 0) = gflat[3 * a + 0];
+                    m_disp_gradient(a, 1) = gflat[3 * a + 1];
+                    m_disp_gradient(a, 2) = gflat[3 * a + 2];
+                    m_disp_dEdq(a) = dq[a];
+                }
+                m_disp_dEdcn = Vector();   // folded on the device (as the host fold clears it)
+                E = e_dev;
+                d4_all_device = true;
+            }
+        }
+    }
     // Stage 5 (Part B2): the whole 2-body D4 (energy + gradient + dE/dCN + dE/dq) on the
     // device in one gather, reusing the geometry-fixed reference data uploaded during the SCF
     // (beginDispersion). The host then adds ATM + the CN-distribution + the q-response on top,
@@ -3136,7 +3165,7 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
     // (m_wfn.q_at == getZetaCharges, set above) and CN (m_cn_values) the host path uses, so the
     // result matches the host D4Evaluator to FP-reassociation (~1e-12 energy, gradient FD-grade).
     // Returns false → host fallback (CUDA, or if the device reference was not uploaded).
-    if (m_gpu_scf && m_gpu_scf->supportsDeviceDispersion()) {
+    if (!d4_all_device && m_gpu_scf && m_gpu_scf->supportsDeviceDispersion()) {
         const int nat = m_atomcount;
         std::vector<double> W, dWq, dWc;
         m_d4_generator->buildRefWFlat(m_atoms, m_wfn.q_at, W, dWq, dWc);
@@ -3159,7 +3188,7 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
             disp_grad_device = true;
         }
     }
-    if (!disp_grad_device) {
+    if (!disp_grad_device && !d4_all_device) {
         // WP2-ext: let the D4 pair loop fan out over the same gated intra-thread budget.
         m_d4_evaluator->setThreads(effectiveIntraThreads(m_atomcount));
         E = m_d4_evaluator->computeEnergyAndGradient(
@@ -3179,8 +3208,8 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
     // gather sums each unique triple once per member → total ATM E = ⅓·Σ e_atom; grad/dEdcn
     // accumulate on top of the 2-body. Params mirror the D4Params block above (GFN2: s9=5.0,
     // a1=0.52, a2=5.0, alpha=16.0; computeATM cutoff default 25.0 Bohr). Returns false → host.
-    bool atm_device = false;
-    if (disp_grad_device && m_gpu_scf) {
+    bool atm_device = d4_all_device;
+    if (!d4_all_device && disp_grad_device && m_gpu_scf) {
         const int nat = m_atomcount;
         std::vector<double> c6f, dc6f;
         const auto ta0 = d4clk::now();
