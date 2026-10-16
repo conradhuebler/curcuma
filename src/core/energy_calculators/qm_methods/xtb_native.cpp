@@ -20,6 +20,7 @@
  */
 
 #include "xtb_native.h"
+#include "xtb_coulomb.hpp"   // atom_hubbard_deriv_gfn1 (GFN1 resident loop)
 
 #include "parameters/gfn1_params.hpp"
 #include "parameters/gfn2_params.hpp"
@@ -1229,6 +1230,33 @@ double XTB::Calculation(bool gradient)
                 : "SCF: resident-loop setup unavailable; host-driven device-potential loop");
     }
 
+    // Claude Generated (Oct 2026): GFN1 on the fully device-resident loop (shell charges only; v_sh = gamma q_sh,
+    // v_at = Gamma_A q_A^2). Needs the device-built integrals (resident gamma, L). Solvation keeps the host-driven
+    // GFN1 device loop (the CM5 reaction field is not on the device). `-gpu_gfn1_resident false` /
+    // CURCUMA_GFN1_RESIDENT=0 switch it off.
+    bool gfn1_resident = false;
+    if (!use_resident_loop && m_method == MethodType::GFN1 && use_gpu_resident && gpu_computed
+        && mode == ScfMode::Broyden && !m_solvation && m_gpu_scf->supportsResidentLoopGfn1()) {
+        bool want = m_gpu_gfn1_resident;
+        if (const char* e = std::getenv("CURCUMA_GFN1_RESIDENT")) want = (e[0] != '0');
+        if (want) {
+            const int nocc_pairs = static_cast<int>(std::floor(m_wfn.nocc / 2.0));
+            const int b_maxhist = (m_diis_subspace > 2) ? 20 : m_diis_subspace;
+            std::vector<double> g3at(nat);
+            for (int i = 0; i < nat; ++i) g3at[i] = coulomb::atom_hubbard_deriv_gfn1(m_basis.z[i]);
+            use_resident_loop = m_gpu_scf->beginResidentLoopGfn1(m_wfn.q_sh, m_wfn.q_at, m_wfn.n0_sh, m_wfn.n0_at,
+                                                                 g3at, m_electronic_temp, m_wfn.nocc, nocc_pairs,
+                                                                 damp, b_maxhist, 0.01);
+            if (use_resident_loop && openShell())
+                use_resident_loop = m_gpu_scf->setResidentOpenShell(m_nalpha, m_nbeta);
+            gfn1_resident = use_resident_loop;
+            if (verb >= 2)
+                CurcumaLogger::info(use_resident_loop
+                    ? "SCF: fully device-resident GFN1 loop (host polls only dq + energy scalars)"
+                    : "SCF: GFN1 resident-loop setup unavailable; host-driven device loop");
+        }
+    }
+
     // AP1 (Claude Generated): GPU partial diagonalisation window. The device density
     // only needs the occupied(+buffer) eigenvectors, so the resident eigensolve can
     // compute just the lowest gpu_n_eig pairs (cusolverDnDsyevdx) instead of the full
@@ -2002,8 +2030,8 @@ double XTB::Calculation(bool gradient)
     if (use_resident_loop && m_gpu_scf) {
         m_wfn.q_sh.resize(m_basis.nsh);
         m_wfn.q_at.resize(m_atomcount);
-        m_wfn.dp_at.resize(3, m_atomcount);
-        m_wfn.qp_at.resize(6, m_atomcount);
+        m_wfn.dp_at = Eigen::MatrixXd::Zero(3, m_atomcount);
+        m_wfn.qp_at = Eigen::MatrixXd::Zero(6, m_atomcount);
         m_wfn.eps.resize(m_basis.nao);
         m_gpu_scf->residentLoopCharges(m_wfn.q_sh, m_wfn.q_at, m_wfn.dp_at, m_wfn.qp_at, m_wfn.eps);
     }
@@ -2027,7 +2055,7 @@ double XTB::Calculation(bool gradient)
         && m_gpu_scf->supportsGradient();
     m_wfn_on_device = false;
     if (use_gpu_resident && m_gpu_scf) {
-        if (use_resident_loop && m_mp_ints_deferred && (!gradient || device_grad_will_run))
+        if (use_resident_loop && (m_mp_ints_deferred || gfn1_resident) && (!gradient || device_grad_will_run))
             m_wfn_on_device = true;
         else
             m_gpu_scf->finalize(m_wfn.P, m_wfn.C);
@@ -2053,7 +2081,7 @@ double XTB::Calculation(bool gradient)
     // it once at the converged charges before forming m_F (the gradient block below
     // rebuilds it again, but m_F must be consistent here too).
     // (not needed when the wavefunction stays on the device: no host Fock, no host gradient)
-    if (use_device_potential && !m_wfn_on_device) {
+    if ((use_device_potential || gfn1_resident) && !m_wfn_on_device) {
         m_pot.reset();
         addCoulombShellPotential(m_pot);
         addThirdOrderPotential(m_pot);
@@ -2065,7 +2093,7 @@ double XTB::Calculation(bool gradient)
     // Claude Generated (Sep 2026): m_F is only read by debug dumps / consistency audits. With
     // deferred host multipole integrals (large system on the GPU) skip the O(nao^2) host
     // rebuild instead of forcing the 17 GB integral build just for it.
-    if (m_mp_ints_deferred)
+    if (m_mp_ints_deferred || m_wfn_on_device)
         m_F.resize(0, 0);
     else
         m_F = buildFock(m_H0, m_S, m_pot);

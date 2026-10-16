@@ -207,6 +207,7 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dMpDkernel;  // on-site dipole XC kernel, nat
     CudaBuffer<double> dMpQkernel;  // on-site quadrupole XC kernel, nat
     CudaBuffer<double> dGamma3;     // per-shell third-order hardness Γ_s, nsh
+    CudaBuffer<double> dGamma3At;   // Oct 2026: per-atom third-order hardness Γ_A (GFN1 resident loop), nat
     CudaBuffer<double> dPotQsh;     // uploaded shell charges q_sh, nsh
     CudaBuffer<double> dInDpAt;     // uploaded atomic dipoles dp_at, 3·nat
     CudaBuffer<double> dInQpAt;     // uploaded atomic quadrupoles qp_at, 6·nat
@@ -228,6 +229,7 @@ struct XtbGpuContext::Impl {
     // Open shell on the resident loop (Oct 2026): the two spin channels, summed into dOcc.
     CudaBuffer<double> dOccA, dOccB;
     bool   loop_open = false;
+    bool   loop_gfn1 = false;        // Oct 2026: the resident loop runs GFN1 (shell charges only, atom-resolved third order)
     double loop_nalpha = 0.0, loop_nbeta = 0.0;
     CudaBuffer<int>    dOccNcol;    // last column with occ>1e-12 (1 int)
 
@@ -5826,13 +5828,21 @@ bool XtbGpuContext::sccEnergy(int nat, int nsh, double* e_coulomb, double* e_thi
     if (cudaMemsetAsync(m_impl->dESca.ptr, 0, sizeof(double) * 2, stream) != cudaSuccess)
         return false;
     const int block = 256;
-    if (m_impl->dGamma3.n >= nsh && e_third) {
+    if (m_impl->loop_gfn1 && e_third) {
+        // GFN1: atom-resolved, E3 = sum_A Gamma_A q_A^3 / 3 over the output atomic charges.
+        const int grid = (nat + block - 1) / block;
+        k_energy_third_order_shell<<<grid, block, block * sizeof(double), stream>>>(
+            nat, m_impl->dQat.ptr, m_impl->dGamma3At.ptr, m_impl->dESca.ptr + 0);
+        if (cudaGetLastError() != cudaSuccess) return false;
+    } else if (m_impl->dGamma3.n >= nsh && e_third) {
         const int grid = (nsh + block - 1) / block;
         k_energy_third_order_shell<<<grid, block, block * sizeof(double), stream>>>(
             nsh, m_impl->dQsh.ptr, m_impl->dGamma3.ptr, m_impl->dESca.ptr + 0);
         if (cudaGetLastError() != cudaSuccess) return false;
     }
-    if (m_impl->mp_otf && e_multipole) {
+    if (m_impl->loop_gfn1) {
+        // no multipole terms in GFN1
+    } else if (m_impl->mp_otf && e_multipole) {
         if (m_impl->thread_per_atom) {
             const int grid = (nat + block - 1) / block;
             k_energy_multipole_otf<<<grid, block, block * sizeof(double), stream>>>(
@@ -6183,7 +6193,54 @@ bool XtbGpuContext::beginResidentLoop(int nsh, int nat, int nao, double Tele, do
     m_impl->loop_nsh = nsh; m_impl->loop_nat = nat; m_impl->loop_nao = nao;
     m_impl->loop_Tele = Tele; m_impl->loop_nelec = n_elec; m_impl->loop_nocc_pairs = nocc_pairs;
     m_impl->loop_open = false; m_impl->loop_nalpha = m_impl->loop_nbeta = 0.0;
+    m_impl->loop_gfn1 = false;
     m_impl->last_dq = 1e300;             // a new SCF starts without usable previous eigenvectors
+    m_impl->cprev_valid = m_impl->cprev64_valid = false;
+    m_impl->pseudo_consecutive = m_impl->pseudo_consecutive64 = 0;
+    m_impl->pseudo_taken = m_impl->pseudo_rejected = 0;
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+// Claude Generated (Oct 2026): the fully device-resident loop for GFN1. Same fused iteration as GFN2
+// without the D4 weights (GFN1's dispersion is not charge dependent), the multipole potential and the
+// atomic moments: the SCC vector is the shell charges alone, v_sh = gamma q_sh, v_at = Gamma_A q_A^2
+// (atom-resolved third order, GFN1: coulomb::potential_third_order_atom). gamma3_at is Gamma_A per atom.
+bool XtbGpuContext::beginResidentLoopGfn1(int nsh, int nat, int nao, double Tele, double n_elec,
+                                          int nocc_pairs, const double* q_sh0, const double* q_at0,
+                                          const double* n0_sh, const double* n0_at,
+                                          const double* gamma3_at, double alpha, int max_hist, double w0)
+{
+    if (!ok() || nsh <= 0 || nat <= 0 || nao <= 0 || nao != m_impl->resident_n
+        || m_impl->dGamma.empty() || m_impl->basis_nat != nat
+        || !q_sh0 || !q_at0 || !n0_sh || !n0_at || !gamma3_at)
+        return false;
+    cudaStream_t stream = m_impl->stream;
+    try {
+        m_impl->dQat.ensure(nat); m_impl->dQsh.ensure(nsh);
+        m_impl->dN0sh.ensure(nsh); m_impl->dN0at.ensure(nat);
+        m_impl->dPotQsh.ensure(nsh); m_impl->dVsh.ensure(nsh); m_impl->dVat.ensure(nat);
+        m_impl->dGamma3At.ensure(nat);
+        m_impl->dDq.ensure(1);
+        m_impl->dOccMu.ensure(1); m_impl->dOccNcol.ensure(1);
+    } catch (...) {
+        m_impl->last_error = "device allocation for the GFN1 resident loop failed";
+        return false;
+    }
+    m_impl->dPotQsh.upload(q_sh0, nsh, stream);
+    m_impl->dQat.upload(q_at0, nat, stream);
+    m_impl->dN0sh.upload(n0_sh, nsh, stream);
+    m_impl->dN0at.upload(n0_at, nat, stream);
+    m_impl->dGamma3At.upload(gamma3_at, nat, stream);
+    m_impl->pot_nsh = nsh;
+    m_impl->resident_nat = nat;   // the multipole upload (GFN2) is what sets it otherwise
+    // No multipole matrices, no solvation: a stale GFN2 upload must not leak into this loop.
+    m_impl->solv_active = false;
+    if (!broydenBegin(nsh, alpha, max_hist, w0)) return false;
+    m_impl->loop_nsh = nsh; m_impl->loop_nat = nat; m_impl->loop_nao = nao;
+    m_impl->loop_Tele = Tele; m_impl->loop_nelec = n_elec; m_impl->loop_nocc_pairs = nocc_pairs;
+    m_impl->loop_open = false; m_impl->loop_nalpha = m_impl->loop_nbeta = 0.0;
+    m_impl->loop_gfn1 = true;
+    m_impl->last_dq = 1e300;
     m_impl->cprev_valid = m_impl->cprev64_valid = false;
     m_impl->pseudo_consecutive = m_impl->pseudo_consecutive64 = 0;
     m_impl->pseudo_taken = m_impl->pseudo_rejected = 0;
@@ -6207,19 +6264,24 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
     const int b = 128;
     m_impl->profStart();
 
+    const bool g1 = m_impl->loop_gfn1;   // GFN1: shell charges only, no D4 weights, no multipoles
     // 1. D4 reference weights from the current (previous-output) resident q_at.
-    k_d4_build_refw<<<(nat + b - 1) / b, b, 0, stream>>>(
-        nat, Impl::D4_MAX_REF, m_impl->dQat.ptr, m_impl->dD4Cn.ptr, m_impl->dD4Gi.ptr,
-        m_impl->dD4Zeff.ptr, m_impl->dD4Nref.ptr, m_impl->dD4Refcn.ptr,
-        m_impl->dD4Refcovcn.ptr, m_impl->dD4Refq.ptr, m_impl->dD4W.ptr, m_impl->dD4dWq.ptr);
-    if (cudaGetLastError() != cudaSuccess) return fail("D4 reference-weight kernel failed");
-    m_impl->profMark("scf: D4 reference weights");
+    if (!g1) {
+        k_d4_build_refw<<<(nat + b - 1) / b, b, 0, stream>>>(
+            nat, Impl::D4_MAX_REF, m_impl->dQat.ptr, m_impl->dD4Cn.ptr, m_impl->dD4Gi.ptr,
+            m_impl->dD4Zeff.ptr, m_impl->dD4Nref.ptr, m_impl->dD4Refcn.ptr,
+            m_impl->dD4Refcovcn.ptr, m_impl->dD4Refq.ptr, m_impl->dD4W.ptr, m_impl->dD4dWq.ptr);
+        if (cudaGetLastError() != cudaSuccess) return fail("D4 reference-weight kernel failed");
+        m_impl->profMark("scf: D4 reference weights");
+    }
 
     // 2. Potential build (overwrites dQat with the input-derived q_at) + Fock +
     //    eigensolve; eps stays resident (no download).
     m_impl->in_resident_step = true;
-    const bool solved = buildDevicePotentialAndSolve(nao, fp32, /*n_eig=*/0, /*eps_out=*/nullptr,
-                                                     /*download_eps=*/false);
+    const bool solved = g1 ? buildDevicePotentialAndSolveGfn1(nao, fp32, /*n_eig=*/0, /*eps_out=*/nullptr,
+                                                               /*download_eps=*/false)
+                           : buildDevicePotentialAndSolve(nao, fp32, /*n_eig=*/0, /*eps_out=*/nullptr,
+                                                          /*download_eps=*/false);
     m_impl->in_resident_step = false;
     if (!solved) return fail("potential build / Fock / eigensolve failed");
 
@@ -6264,7 +6326,7 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
     k_qat_scatter<<<(nao + b - 1) / b, b, 0, stream>>>(nao, m_impl->dPop.ptr,
                                                        m_impl->dAo2at.ptr, m_impl->dQat.ptr);
     // Atomic multipole moments dp_at/qp_at from the resident density (resident).
-    if (!multipoleMomentsResident(nao, nat)) return fail("atomic multipole moments failed");
+    if (!g1 && !multipoleMomentsResident(nao, nat)) return fail("atomic multipole moments failed");
     m_impl->profMark("scf: charges + multipole moments");
 
     // 6. SCC energy components (resident charges/moments).
@@ -6273,6 +6335,18 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
 
     // 8. Broyden: pack input [dPotQsh; dInDpAt; dInQpAt] + output [dQsh; dDpAt; dQpAt],
     //    mix, and unpack the next input back into the resident dPotQsh/dInDpAt/dInQpAt.
+    //    GFN1 mixes the shell charges alone.
+    if (g1) {
+        double* vin = m_impl->dBroyVin.ptr;
+        double* vout = m_impl->dBroyVout.ptr;
+        cudaMemcpyAsync(vin, m_impl->dPotQsh.ptr, sizeof(double) * nsh, cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(vout, m_impl->dQsh.ptr, sizeof(double) * nsh, cudaMemcpyDeviceToDevice, stream);
+        k_maxabsdiff<<<1, blk, blk * sizeof(double), stream>>>(vout, vin, nsh, m_impl->dDq.ptr);
+        if (cudaGetLastError() != cudaSuccess) return fail("convergence (max|dq|) kernel failed");
+        m_impl->dDq.download(dq_out, 1, stream);
+        if (!runBroydenUpdate(vin, vout, m_impl->dBroyVnext.ptr)) return fail("device Broyden update failed");
+        cudaMemcpyAsync(m_impl->dPotQsh.ptr, m_impl->dBroyVnext.ptr, sizeof(double) * nsh, cudaMemcpyDeviceToDevice, stream);
+    } else
     {
         double* vin = m_impl->dBroyVin.ptr;
         double* vout = m_impl->dBroyVout.ptr;
@@ -6312,8 +6386,8 @@ bool XtbGpuContext::residentLoopCharges(double* q_sh, double* q_at, double* dp_a
     const int nsh = m_impl->loop_nsh, nat = m_impl->loop_nat, nao = m_impl->loop_nao;
     if (q_sh)  m_impl->dQsh.download(q_sh, nsh, stream);
     if (q_at)  m_impl->dQat.download(q_at, nat, stream);
-    if (dp_at) m_impl->dDpAt.download(dp_at, 3 * nat, stream);
-    if (qp_at) m_impl->dQpAt.download(qp_at, 6 * nat, stream);
+    if (dp_at && !m_impl->loop_gfn1) m_impl->dDpAt.download(dp_at, 3 * nat, stream);
+    if (qp_at && !m_impl->loop_gfn1) m_impl->dQpAt.download(qp_at, 6 * nat, stream);
     if (eps)   m_impl->dEps.download(eps, nao, stream);
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
@@ -6560,6 +6634,39 @@ bool XtbGpuContext::buildDevicePotentialAndSolve(int n, bool fp32, int n_eig,
     return eigensolveResidentFock(eps_out, fp32, n_eig, download_eps);
 }
 
+// Claude Generated (Oct 2026): GFN1 potential from the resident mixed shell charges: v_sh = gamma q_sh,
+// v_at = Gamma_A q_A^2 (q_A = sum of the shell charges of A), then Fock (no multipole) + eigensolve.
+bool XtbGpuContext::buildDevicePotentialAndSolveGfn1(int n, bool fp32, int n_eig,
+                                                     double* eps_out, bool download_eps)
+{
+    cudaStream_t stream = m_impl->stream;
+    const int nat = m_impl->resident_nat;
+    const int nsh = m_impl->pot_nsh;
+    const int b = 128;
+    m_impl->dQat.zero(nat, stream);
+    k_qsh_to_qat<<<(nsh + b - 1) / b, b, 0, stream>>>(nsh, m_impl->dPotQsh.ptr,
+                                                      m_impl->dSh2at.ptr, m_impl->dQat.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    {
+        const double one = 1.0, zero = 0.0;
+        if (cublasDgemv(m_impl->cublas, CUBLAS_OP_N, nsh, nsh, &one, m_impl->dGamma.ptr, nsh,
+                        m_impl->dPotQsh.ptr, 1, &zero, m_impl->dVsh.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+            return false;
+    }
+    m_impl->dVat.zero(nat, stream);
+    k_vsh_third<<<(nat + b - 1) / b, b, 0, stream>>>(nat, m_impl->dQat.ptr, m_impl->dGamma3At.ptr,
+                                                     m_impl->dVat.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    k_expand_vao<<<(n + b - 1) / b, b, 0, stream>>>(n, m_impl->dVsh.ptr, m_impl->dVat.ptr,
+                                                    m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr,
+                                                    m_impl->dVao.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    m_impl->profMark("scf: potential (gamma, third order)");
+    if (!buildFockIntoC(n, /*multipole=*/false)) return false;
+    m_impl->profMark("scf: Fock build");
+    return eigensolveResidentFock(eps_out, fp32, n_eig, download_eps);
+}
+
 bool XtbGpuContext::computeOverlapGrad(const double* xyz_bohr, double* dSdR_out)
 {
     if (!ok() || m_impl->basis_nao <= 0 || !xyz_bohr || !dSdR_out) return false;
@@ -6610,7 +6717,11 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     // nao x nao buffer at all. use_pattern_pw selects that fast path; pc_resident=false
     // (explicit P/C upload) and the small/dense-geometry case keep the original dense
     // buffers unchanged as the reference/fallback.
-    const bool use_pattern_pw = pc_resident && m_impl->sparse;
+    // Claude Generated (Oct 16, 2026): only when the pattern density is the CURRENT one. The host-driven
+    // loops (GFN1 before the resident loop existed, GFN2 without it) fill the dense dP and never dSpP;
+    // reading the unallocated dSpP faulted in k_grad_cn_onsite_spP (illegal memory access, GFN1 with
+    // screened storage from ~1400 atoms on). p_dense_valid says which of the two is current.
+    const bool use_pattern_pw = pc_resident && m_impl->sparse && !m_impl->p_dense_valid;
 
     // Claude Generated (Sep 2026): phase marks for the device gradient, same
     // profMark/CURCUMA_GPU_PROFILE mechanism as the integral build and the resident

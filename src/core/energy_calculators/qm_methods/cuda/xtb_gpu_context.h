@@ -544,6 +544,13 @@ public:
                            double alpha, int max_hist, double w0);
     /** Open shell on the resident loop: two Fermi fillings (n_alpha, n_beta), summed. Call after
      *  beginResidentLoop (which resets it to the closed-shell filling). Claude Generated (Oct 2026). */
+    /** GFN1 on the resident loop (Claude Generated, Oct 2026): shell charges only, v_sh = gamma q_sh,
+     *  v_at = Gamma_A q_A^2 (atom-resolved third order, gamma3_at = Gamma_A per atom), no D4 weights, no
+     *  multipoles. residentScfStep / residentLoopCharges are shared with GFN2 (dp/qp are not touched). */
+    bool beginResidentLoopGfn1(int nsh, int nat, int nao, double Tele, double n_elec, int nocc_pairs,
+                               const double* q_sh0, const double* q_at0, const double* n0_sh,
+                               const double* n0_at, const double* gamma3_at,
+                               double alpha, int max_hist, double w0);
     bool setResidentOpenShell(double n_alpha, double n_beta);
     bool residentScfStep(bool fp32, double* dq_out, double* e_band, double* e_coulomb,
                          double* e_third, double* e_multipole);
@@ -601,6 +608,9 @@ private:
     /// resident step.
     bool buildDevicePotentialAndSolve(int n, bool fp32, int n_eig, double* eps_out,
                                       bool download_eps);
+    /// GFN1 counterpart (shell gamma + atom-resolved third order, no D4/multipole).
+    bool buildDevicePotentialAndSolveGfn1(int n, bool fp32, int n_eig, double* eps_out,
+                                          bool download_eps);
     /// Stage 6: density + Mulliken-AO from the RESIDENT occupations (dOcc), keeping
     /// the populations resident (no pop_ao download). band_out = Σ P⊙H0.
     bool residentDensityResident(int n, int ncol, double* band_out);

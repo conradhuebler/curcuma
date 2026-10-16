@@ -7,8 +7,9 @@
 # (b) -gpu cuda -scf_precond frag: M is applied on the device, same energy (1e-7 Eh), fewer SCF iterations
 # (c) the GPU frag energy equals the CPU frag energy (1e-7 Eh)
 # (d) unrelaxed 197-atom cluster: the guard (default g2:4:best) fires on the device, energy unchanged
-# (e) GFN1 on the GPU with -gpu_strict true: switch ignored with a warning, exit code 0 (an ignored
-#     switch is not a counted GPU fallback)
+# (e) GFN1 on the GPU (fully device-resident loop since Oct 2026) with -gpu_strict true: the device
+#     preconditioner is GFN2 only, so the switch is ignored with a warning (not a counted GPU fallback), exit code 0,
+#     energy equal to the run without the switch
 # Skipped (exit 77) when the run in (a) reports no usable CUDA device or plugin.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -86,12 +87,15 @@ main() {
     assert_numeric_match "$(energy_of u197_none.log)" "$(energy_of u197_frag.log)" "$ENERGY_TOLERANCE" \
         "unrelaxed 197: energy with the guard equals the run without the switch"
 
-    # (e) GFN1: ignored, not a GPU fallback under -gpu_strict
+    # (e) GFN1: switch ignored, not a GPU fallback under -gpu_strict
     $CURCUMA -sp ureawater.xyz -method gfn1 -gpu cuda -gpu_strict true -threads 4 -verbosity 1 -no_bmt \
         -scf_precond frag > gfn1.log 2>&1
     assert_exit_code $? 0 "GFN1 GPU run with -gpu_strict true"
-    # GFN1 has no device-resident loop; its CUDA path is host-driven (measured message, Oct 2026).
-    assert_string_in_file "scf_precond 'frag' ignored: host-driven GPU SCF path" gfn1.log "GFN1: host-driven-GPU warning printed"
+    assert_string_in_file "the device preconditioner is implemented for GFN2 only" gfn1.log "GFN1: switch ignored with a warning"
+    $CURCUMA -sp ureawater.xyz -method gfn1 -gpu cuda -threads 4 -verbosity 1 -no_bmt \
+        -scf_precond none > gfn1_none.log 2>&1
+    assert_numeric_match "$(energy_of gfn1_none.log)" "$(energy_of gfn1.log)" "$ENERGY_TOLERANCE" \
+        "GFN1: energy with -scf_precond frag equals the run without the switch"
 
     print_test_summary
     [ $TESTS_FAILED -eq 0 ] && exit 0 || exit 1

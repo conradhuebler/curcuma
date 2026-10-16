@@ -528,6 +528,15 @@ struct GpuScfBackend {
      * converged charges once at the end (finalize() still downloads P/C). Default
      * false → the per-iteration host-driven loop. GFN2 device-potential path. */
     virtual bool supportsResidentLoop() const { return false; }
+    /// Claude Generated (Oct 2026): the fully device-resident loop for GFN1 (shell charges only; atom-resolved
+    /// third order with Gamma_A per atom). Backends without it keep the host-driven GFN1 device loop.
+    virtual bool supportsResidentLoopGfn1() const { return false; }
+    virtual bool beginResidentLoopGfn1(const Vector& q_sh0, const Vector& q_at0, const Vector& n0_sh,
+                                       const Vector& n0_at, const std::vector<double>& gamma3_at,
+                                       double Tele, double n_elec, int nocc_pairs,
+                                       double alpha, int max_hist, double w0)
+    { (void)q_sh0; (void)q_at0; (void)n0_sh; (void)n0_at; (void)gamma3_at; (void)Tele; (void)n_elec;
+      (void)nocc_pairs; (void)alpha; (void)max_hist; (void)w0; return false; }
     /* Open shell on the resident loop (Oct 16, 2026, Known Issue #39): call AFTER a successful
      * beginResidentLoop to fill the orbitals as two Fermi fillings (n_alpha, n_beta) over the same
      * eigenvectors, summed (tblite nspin == 1, XTB::occupationsFromEps). Default false: the loop
@@ -954,6 +963,7 @@ public:
     void setMixedPrecision(bool b)      { m_scf_mixed_precision = b; }
     void setFp32Threshold(double t)     { if (t > 0.0) m_scf_fp32_threshold = t; }
     void setGpuPartialDiag(bool b)      { m_gpu_partial_diag = b; }
+    void setGpuGfn1Resident(bool b)     { m_gpu_gfn1_resident = b; }
     // CPU pseudo-diagonalisation (opt-in, Claude Generated Oct 2026): replace the eigensolve of the
     // middle SCF iterations by one first-order rotation between occupied and virtual orbitals plus an
     // S-orthonormalisation (GEMMs only). See XTB::pseudoDiagStepCpu(). Default off.
@@ -1480,6 +1490,7 @@ private:
     // turns this back OFF — it is measured net-negative there (see xtb_vulkan_method.cpp).
     bool        m_scf_mixed_precision = true;
     double      m_scf_fp32_threshold  = 1.0e-3;  // switch FP32→FP64 once max|dq| < this
+    bool        m_gpu_gfn1_resident   = true;    // Oct 2026: GFN1 on the fully device-resident loop (scf_gpu_gfn1_resident)
     bool        m_gpu_partial_diag    = false;   // opt-in GPU partial diagonalisation (AP1; net-neutral, see PARAM)
     // Tunables that were environment variables / hard-coded heuristics until Sep 2026.
     // Defaults reproduce the previous behaviour exactly. Claude Generated.
@@ -1687,6 +1698,7 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_mixed_precision", [&](const json& v){ if (v.is_boolean()) xtb.setMixedPrecision(v.get<bool>()); });
     lookup("scf_fp32_threshold",  [&](const json& v){ if (v.is_number()) xtb.setFp32Threshold(v.get<double>()); });
     lookup("scf_gpu_partial_diag",[&](const json& v){ if (v.is_boolean()) xtb.setGpuPartialDiag(v.get<bool>()); });
+    lookup("scf_gpu_gfn1_resident",[&](const json& v){ if (v.is_boolean()) xtb.setGpuGfn1Resident(v.get<bool>()); });
     {   // Oct 2026: CPU pseudo-diagonalisation (the GPU flag scf_pseudo_diag is read by the GPU wrapper)
         bool pd = false; double pdq = 0.0; int pst = 0; int pmin = -1;
         lookup("scf_pseudo_diag_cpu", [&](const json& v){ if (v.is_boolean()) pd = v.get<bool>(); });

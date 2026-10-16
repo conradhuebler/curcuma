@@ -415,6 +415,20 @@ public:
                                         n0_sh.data(), n0_at.data(), alpha, max_hist, w0);
     }
 
+    bool supportsResidentLoopGfn1() const override { return true; }
+    bool beginResidentLoopGfn1(const Vector& q_sh0, const Vector& q_at0, const Vector& n0_sh,
+                               const Vector& n0_at, const std::vector<double>& gamma3_at,
+                               double Tele, double n_elec, int nocc_pairs,
+                               double alpha, int max_hist, double w0) override
+    {
+        if (!m_ctx) return false;
+        const int nsh = static_cast<int>(q_sh0.size());
+        const int nat = static_cast<int>(q_at0.size());
+        if (nsh <= 0 || nat <= 0 || m_n <= 0 || static_cast<int>(gamma3_at.size()) != nat) return false;
+        return m_ctx->beginResidentLoopGfn1(nsh, nat, m_n, Tele, n_elec, nocc_pairs, q_sh0.data(), q_at0.data(),
+                                            n0_sh.data(), n0_at.data(), gamma3_at.data(), alpha, max_hist, w0);
+    }
+
     bool setResidentOpenShell(double n_alpha, double n_beta) override
     {
         return m_ctx && m_ctx->setResidentOpenShell(n_alpha, n_beta);

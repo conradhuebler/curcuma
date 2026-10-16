@@ -53,6 +53,7 @@ Stand.
 
 ## 2. Leistung
 
+- **Host-Rechnung im GPU-Lauf (Prüfung 16. Okt. 2026, peo201-water500, 2910 Atome, `-sp -gradient`, 4x A4500; `-threads 1` und `-threads 16` gleich schnell = nichts davon skaliert)**: GFN1 28,5 s gesamt, davon Dispersion nach dem SCF auf dem Host 9,5 s (D3-BJ Paarschleife `D3ParameterGenerator::getEnergyAndGradient` + `computeDC6DCN` + `CNCalculator::addD3CNGradient`, seriell), Setup 4,9 s, Abstoßung/Halogenbindung/Entropie 0,15 s. GFN2 12,4 s: Dispersion nach dem SCF 0,6 s (D4 ATM, `buildRefWFlat` auf dem Host), Setup 3,2 s (nicht aufgeschlüsselt), Abstoßung 0,13 s. Offen: D3 (GFN1) und D4-ATM/Gewichte (GFN2) auf die Karte, Setup aufschlüsseln.
 - **GFN2 auf der GPU, Eigenlöser = 73 % des Laufs** (polymer_2x, 1x A4500). Offen:
   (a) erledigt 15. Okt. 2026: `-scf_pseudo_diag` ist Standard (Betreiberentscheidung); polymer_2x 4x A4500 113,6 -> 90,0 s;
   (b) `-scf_pseudo_diag_fp64` auf einer GPU mit vollem FP64 (H200) messen;
