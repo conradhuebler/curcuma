@@ -40,6 +40,13 @@
 #include <string>
 #include <vector>
 
+namespace qmri {
+class RIJK;  // qm_ri.h (WP10 density fitting)
+}
+namespace qmint {
+class QMGpuRI;  // qm_gpu_ri_backend.h
+}
+
 /**
  * @brief Electronic-structure level selector (set by the method name, not a parameter)
  *
@@ -96,6 +103,25 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(gpu_grad1e, String, "auto",
           "With -gpu cuda|auto, one-electron part of the analytic RHF gradient on the device (Q-G8: overlap, kinetic and nuclear-attraction derivative integrals, basis and Hellmann-Feynman parts, contracted with the density and the energy-weighted density; reads the same device tables as the two-electron part). auto | on (device whenever -gpu is active) | off (CPU). The nuclear repulsion gradient stays on the host. Any device error falls back to the CPU and is counted as qm_grad1e.",
           "Performance", {})
+    // WP10 (Claude Generated, Oct 2026): density fitting, implementation in qm_ri.cpp
+    PARAM(ri, String, "off",
+          "Density fitting (resolution of the identity) for the two-electron part: off (exact integrals, the reference) | j (RI-J: Coulomb from the fit, exchange exact) | jk (RI-JK: Coulomb and exchange from the fit, Weigend 2002). A method variant: energies differ from the exact path by the fitting error (about 1e-5 Eh per atom). No analytic gradient with RI (-opt and -gradient stop with an error).",
+          "DensityFitting", {})
+    PARAM(ri_aux, String, "auto",
+          "Auxiliary basis for -qm.ri: auto (def2-universal-JFIT for j, def2-universal-JKFIT for jk) | def2/J | def2/JK | path to a Turbomole-format basis file. Shipped files: def2-universal-JFIT.turbomole, def2-universal-JKFIT.turbomole (H-Ne).",
+          "DensityFitting", {})
+    PARAM(ri_metric, String, "cholesky",
+          "Factorisation of the Coulomb metric J_PQ = (P|Q): cholesky (J = L L^T, falls back to eigen if J is not numerically positive definite) | eigen (J^-1/2 from the eigendecomposition, eigenvalues of the Coulomb-normalised metric below ri_metric_cutoff dropped).",
+          "DensityFitting", {})
+    PARAM(ri_metric_cutoff, Double, 1.0e-10,
+          "ri_metric eigen: eigenvalue cutoff of the Coulomb-normalised metric ((P|P) = 1).",
+          "DensityFitting", {})
+    PARAM(ri_max_memory_mb, Double, 16000.0,
+          "Host memory limit for the stored 3-index tensor (naux x n^2 x 8 bytes, MB). Above it the SCF stops with an error (no silent switch to the exact path).",
+          "DensityFitting", {})
+    PARAM(gpu_ri, String, "auto",
+          "With -gpu cuda|auto and -qm.ri j|jk: the RI contractions (J from the 3-index tensor, K as GEMM + SYRK, cuBLAS FP64) on the device; integrals and metric stay on the host. auto | on | off. Any device error falls back to the CPU and is counted as qm_ri.",
+          "DensityFitting", {})
     PARAM(scf_max_iterations, Int, 100,
           "Maximum number of SCF iterations.",
           "SCF", {})
@@ -295,6 +321,35 @@ private:
     /// False = failed (counted as qm_grad1e); the caller then runs qmint::gradientOneElectron.
     bool gpuGradientOneElectron(const qmint::EriGpuTables* tables, const std::string& why_tables, const std::string& backend,
                                 const Matrix& posBohr, const Matrix& Pc, const Matrix& Wc, Matrix& g1, std::string& info) const;
+    // WP10 (Claude Generated, Oct 2026): density fitting (-qm.ri j|jk), implementation in qm_ri.cpp.
+    // shared_ptr: deleter fixed at construction, so qm_ri.h is not needed where QMEngine is destroyed.
+    std::string m_ri_mode = "off";           // off | j | jk
+    std::string m_ri_aux = "auto";
+    std::string m_ri_metric = "cholesky";    // cholesky | eigen
+    double m_ri_metric_cutoff = 1.0e-10;
+    double m_ri_max_memory_mb = 16000.0;
+    std::string m_gpu_ri = "auto";
+    mutable std::string m_ri_file;
+    mutable std::shared_ptr<qmri::RIJK> m_ri;
+    mutable bool m_ri_failed = false;
+    mutable double m_ri_build_ms = 0.0;
+    mutable long m_ri_builds = 0;
+    mutable double m_ri_factor_ms = 0.0;
+    void riReport() const;                   ///< verbosity 2: RI build count/time of the last SCF
+    mutable std::shared_ptr<qmint::QMGpuRI> m_gpu_ri_dev;
+    mutable bool m_gpu_ri_failed = false, m_gpu_ri_checked = false;
+    void readRIConfig(const json& config);
+    void resetRI();                          ///< new geometry / molecule
+    bool ensureRI() const;                   ///< setup once per geometry; false = error reported
+    bool gpuRIBuild(const Matrix& P, Matrix& J, Matrix* K) const;
+    void riDump(const std::string& prefix) const;
+public:
+    /// True when -qm.ri j|jk is active for this engine (method variant, see qm_ri.h).
+    bool riActive() const;
+    const std::string& riMode() const { return m_ri_mode; }
+    /// True when the RI setup for the current geometry failed (aux basis, memory limit, metric).
+    bool riSetupFailed() const { return riActive() && m_ri_failed; }
+private:
     // Energy components for the HF run (Hartree). E_elec = 0.5 Tr(P(H+F)).
     double m_e_elec = 0.0;
     double m_et = 0.0, m_ev = 0.0, m_ej = 0.0, m_ex = 0.0;
@@ -323,8 +378,10 @@ private:
     // Fock build in the active basis: F = H + 2 J(P) - K(P) (closed-shell RHF).
     // J_mu_nu = sum P_lam_sig (mu nu | lam sig); K_mu_nu = sum P_lam_sig (mu lam | nu sig).
     Matrix buildFock(const Matrix& P) const;
-    // J(P), K(P) from the stored tensor or integral-direct (useDirectSCF()).
+    // J(P), K(P): exact path or, with -qm.ri j|jk, the density fit (dispatcher in qm_ri.cpp).
     void buildJK(const Matrix& P, Matrix& J, Matrix& K) const;
+    // Exact J(P), K(P) from the stored tensor or integral-direct (useDirectSCF()).
+    void buildJKExact(const Matrix& P, Matrix& J, Matrix& K) const;
     bool useDirectSCF() const;
     // GPU J/K (Q-G1/Q-G2): ensureGpuJK() creates the device builder once per geometry --
     // device-built tensor first, else CPU tensor + upload; gpuBuildJK() runs one Fock build.

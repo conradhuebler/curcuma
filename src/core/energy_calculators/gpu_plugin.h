@@ -37,6 +37,7 @@
 #include "qm_methods/qm_gpu_scf_backend.h"  // qmint::QMGpuSCF (Q-G4)
 #include "qm_methods/qm_gpu_grad_backend.h"  // qmint::QMGpuGrad2e (Q-G7)
 #include "qm_methods/qm_gpu_grad1e_backend.h"  // qmint::QMGpuGrad1e (Q-G8)
+#include "qm_methods/qm_gpu_ri_backend.h"  // qmint::QMGpuRI (WP10)
 
 namespace gpu_plugin {
 
@@ -107,6 +108,15 @@ std::unique_ptr<qmint::QMGpuGrad2e> createQmGrad2e(const std::string& backend, c
  */
 std::unique_ptr<qmint::QMGpuGrad1e> createQmGrad1e(const std::string& backend, const qmint::QMGpuEriTables& tables,
                                                    const qmint::QMGpuGrad1eExtra& extra, int device, std::string& why);
+
+/**
+ * Native-QM density-fitting contractions (WP10): uploads the fitted 3-index tensor T (nfit x n^2,
+ * row-major, host pointer) once; J/K builds then run as cuBLAS GEMMs (qm_gpu_ri_backend.h). nullptr
+ * with a reason in `why` when the plugin/entry point is missing or the tensor does not fit.
+ * Claude Generated (Oct 2026).
+ */
+std::unique_ptr<qmint::QMGpuRI> createQmRI(const std::string& backend, const double* T, int nfit, int n, int device,
+                                           std::string& why);
 
 /// True if the plugin library libcurcuma_<backend>.so can be loaded (cached; a failed probe
 /// is not retried and, unlike the create* calls, is silent). Used for `-gpu auto` and

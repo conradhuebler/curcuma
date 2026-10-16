@@ -399,9 +399,12 @@ bool QMEngine::runSCF()
             hvals += fmt::format(" {:.4f}", hv(i));
         CurcumaLogger::info(hvals);
     }
-    // Two-electron part: stored tensor (built once here) or integral-direct.
-    const bool direct = useDirectSCF();
-    if (!direct && !ensureGpuJK()) {
+    // Two-electron part: stored tensor (built once here) or integral-direct. WP10: RI-JK needs
+    // neither (no 4-index tensor, full builds only); RI-J keeps the exact path for the exchange.
+    const bool ri_jk = riActive() && m_ri_mode == "jk";
+    if (riActive() && !ensureRI()) return false;
+    const bool direct = !ri_jk && useDirectSCF();
+    if (!ri_jk && !direct && !ensureGpuJK()) {
         const qmint::ERITensor& eri = eriActive();  // builds (and caches) on first call
         if (eri.n() != n) {
             CurcumaLogger::error(fmt::format(
@@ -426,7 +429,7 @@ bool QMEngine::runSCF()
 
     // Q-G4: device-resident loop (same iterations on device matrices); -1 = not usable or a
     // device error, then the host loop below runs from the same start density.
-    if (gpuRequested() && m_gpu_scf != "off" && m_gpu_scf != "false" && !m_gpu_scf_failed) {
+    if (!riActive() && gpuRequested() && m_gpu_scf != "off" && m_gpu_scf != "false" && !m_gpu_scf_failed) {
         const Matrix guess = m_density;
         const int r = runSCFDevice(n_occ, direct, use_diis, damping);
         if (r >= 0) return r == 1;
@@ -1145,7 +1148,7 @@ void QMEngine::checkGpuDirectJK(const Matrix& P, const Matrix& J, const Matrix& 
 // J(P), K(P) in the active basis: from the stored tensor (device or host), or
 // integral-direct (device first with -gpu, Q-G3; shell-pair tables built on the first call
 // per geometry).
-void QMEngine::buildJK(const Matrix& P, Matrix& J, Matrix& K) const
+void QMEngine::buildJKExact(const Matrix& P, Matrix& J, Matrix& K) const
 {
     if (!useDirectSCF()) {
         if (ensureGpuJK() && gpuBuildJK(P, J, K)) return;

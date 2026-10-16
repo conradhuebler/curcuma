@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "WP10 density fitting references (HF/def2-SVP total energies, Eh). Claude Generated (Oct 2026).",
+    "pyscf: PySCF (venv ~/.venvs/qmref) RHF conv_tol 1e-12; RI-JK = mf.density_fit(auxbasis=...), RI-J = DF Coulomb",
+    "  (df.DF(mol, auxbasis).get_jk(with_k=False)) + exact exchange (scf.hf.get_jk); the auxiliary basis is read from",
+    "  src/core/energy_calculators/qm_methods/def2-universal-{JFIT,JKFIT}.turbomole by the script, so both programs use",
+    "  the same numbers. spherical: cart=False; cartesian: cart=True for orbital and auxiliary basis.",
+    "orca: ORCA 6.1.0, '! RHF def2-SVP NORI|RIJONX def2/J|RIJK def2/JK VeryTightSCF' (own integral thresholds).",
+    "Geometries: qm_grad/H2O_distorted.xyz, qm_1e/NH3.xyz, qm_grad/formaldehyde_distorted.xyz, qm_hf3c/benzene.xyz."
+  ],
+  "H2O": {
+    "xyz": "../qm_grad/H2O_distorted.xyz",
+    "pyscf": {"off": -75.9534444233, "j": -75.9535706760, "jk": -75.9533909924},
+    "orca": {"off": -75.953444423963, "j": -75.953570676605, "jk": -75.953390993033},
+    "pyscf_cartesian": {"off": -75.9546465581, "j": -75.9547471890, "jk": -75.9546159606}
+  },
+  "NH3": {
+    "xyz": "../qm_1e/NH3.xyz",
+    "pyscf": {"off": -56.1400975532, "j": -56.1402393646, "jk": -56.1400758658},
+    "orca": {"off": -56.140097551964, "j": -56.140239363313, "jk": -56.140075864548}
+  },
+  "formaldehyde": {
+    "xyz": "../qm_grad/formaldehyde_distorted.xyz",
+    "pyscf": {"off": -113.7703303143, "j": -113.7704540852, "jk": -113.7702284010},
+    "orca": {"off": -113.770330312640, "j": -113.770454083516, "jk": -113.770228399391}
+  },
+  "benzene": {
+    "xyz": "../qm_hf3c/benzene.xyz",
+    "pyscf": {"off": -230.5359772878, "j": -230.5362806561, "jk": -230.5358608795},
+    "orca": {"off": -230.535977287381, "j": -230.536280655869, "jk": -230.535860879011}
+  }
+}
