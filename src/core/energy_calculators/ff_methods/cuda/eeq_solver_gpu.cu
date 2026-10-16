@@ -72,6 +72,7 @@ struct EEQSolverGPUImpl {
         cublasHandle_t blas   = nullptr;
         cudaEvent_t    done   = nullptr;
         CudaBuffer<double> A, x, y, z, alpha, gam, p, yblk;
+        CudaBuffer<float> Af, xf, yf;   ///< Oct 2026: FP32 block, its input slice and result (mixed-precision matvec)
     };
     int own_device = -1;
     std::vector<int> split_devs;                 ///< helper devices (configured)
@@ -80,6 +81,11 @@ struct EEQSolverGPUImpl {
     int split_N = 0;
     int split_c1_own = 0;
     CudaBuffer<double> d_A_own;                  ///< [N * c1_own] own column block
+    CudaBuffer<float> d_A_own_f, d_xf, d_yf;     ///< Oct 2026: FP32 block of this device, input and result vectors
+    double ppcg_true_sq = -1.0;                  ///< Oct 2026: |P(b-Aq)|^2 of the last mixed solve (measured with the FP64 matvec), <0 if unknown
+    bool split_mixed_req = true;                 ///< Oct 2026: mixed precision requested (gpu_eeq_mixed_precision)
+    double mixed_rho = 1e-5;                     ///< round reduction of the mixed solve (gpu_eeq_mixed_rho)
+    bool split_mixed = false;                    ///< Oct 2026: matvec of the split runs in FP32 (CURCUMA_EEQ_MIXED)
     CudaBuffer<double> d_ppcg_scal;              ///< PCG device scalars (Sep 2026, one sync per iteration)
     cudaEvent_t ev_split = nullptr;              ///< recorded on stream, waited on by helpers
     bool split_failed = false;
@@ -89,6 +95,7 @@ struct EEQSolverGPUImpl {
         for (auto& pp : split_parts) {
             if (!pp) continue;
             cudaSetDevice(pp->dev);
+            pp->Af.free(); pp->xf.free(); pp->yf.free();
             pp->A.free(); pp->x.free(); pp->y.free(); pp->z.free(); pp->alpha.free();
             pp->gam.free(); pp->p.free(); pp->yblk.free();
             if (pp->blas)   cublasDestroy(pp->blas);
@@ -97,7 +104,7 @@ struct EEQSolverGPUImpl {
         }
         split_parts.clear();
         if (own_device >= 0) cudaSetDevice(own_device);
-        d_A_own.free();
+        d_A_own.free(); d_A_own_f.free(); d_xf.free(); d_yf.free();
         split_N = 0;
     }
 
@@ -407,7 +414,8 @@ __global__ __launch_bounds__(256, 4)
 void k_eeq_build_cols(int N, int c0, int ncols,
                       const double* __restrict__ cx, const double* __restrict__ cy,
                       const double* __restrict__ cz, const double* __restrict__ alpha,
-                      const double* __restrict__ gam, double* __restrict__ A_blk, double cutoff_sq)
+                      const double* __restrict__ gam, double* __restrict__ A_blk, double cutoff_sq,
+                      float* __restrict__ A_blk32 = nullptr)
 {
     const long long tid = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
     const long long tot = static_cast<long long>(N) * ncols;
@@ -439,6 +447,7 @@ void k_eeq_build_cols(int N, int c0, int ncols,
         }
     }
     A_blk[tid] = v;
+    if (A_blk32) A_blk32[tid] = static_cast<float>(v);   // Oct 2026: FP32 copy for the mixed-precision matvec
 }
 
 /// 1 / A_ii straight from alpha/gam (= k_pcg_extract_diag_inv on the full matrix). Claude Generated.
@@ -543,6 +552,14 @@ void EEQSolverGPU::setSplitDevices(const std::vector<int>& helper_devices, int m
     m_impl->split_min_atoms = min_atoms;
     m_impl->split_failed = false;
     m_impl->split_status.clear();
+}
+
+// Claude Generated (Oct 2026): see eeq_solver_gpu.h.
+void EEQSolverGPU::setSplitMixedPrecision(bool on, double rho)
+{
+    m_impl->releaseSplit();   // the FP32 blocks are allocated with the split
+    m_impl->split_mixed_req = on;
+    if (rho > 0.0) m_impl->mixed_rho = rho;
 }
 
 std::string EEQSolverGPU::splitStatus() const
@@ -2185,6 +2202,7 @@ static bool splitPrepare(EEQSolverGPUImpl& impl, int N)
 {
     if (impl.split_N == N && !impl.split_parts.empty()) return true;
     impl.releaseSplit();
+    { const char* e = std::getenv("CURCUMA_EEQ_MIXED"); impl.split_mixed = impl.split_mixed_req && !(e && *e == '0'); }
     const int nparts = static_cast<int>(impl.split_devs.size()) + 1;
     // Equal column shares; this device takes the first block.
     std::vector<int> bounds(nparts + 1, 0);
@@ -2216,6 +2234,7 @@ static bool splitPrepare(EEQSolverGPUImpl& impl, int N)
             part->x.alloc(N); part->y.alloc(N); part->z.alloc(N);
             part->alpha.alloc(N); part->gam.alloc(N);
             part->p.alloc(N); part->yblk.alloc(nc);
+            if (impl.split_mixed) { part->Af.alloc(N * nc); part->xf.alloc(N); part->yf.alloc(nc); }
             impl.split_parts.push_back(std::move(part));
         }
         cudaSetDevice(impl.own_device);
@@ -2227,6 +2246,7 @@ static bool splitPrepare(EEQSolverGPUImpl& impl, int N)
         cudaGetLastError();
         impl.split_c1_own = bounds[1];
         impl.d_A_own.alloc(N * impl.split_c1_own);
+        if (impl.split_mixed) { impl.d_A_own_f.alloc(N * impl.split_c1_own); impl.d_xf.alloc(N); impl.d_yf.alloc(N); }
         if (!impl.ev_split) cudaEventCreateWithFlags(&impl.ev_split, cudaEventDisableTiming);
         impl.split_N = N;
     } catch (const std::exception& e) {
@@ -2259,18 +2279,48 @@ static void splitBuild(EEQSolverGPUImpl& impl, int N, const double* cx, const do
         const int blk = 256;
         const int grd = static_cast<int>((tot + blk - 1) / blk);
         k_eeq_build_cols<<<grd, blk, 0, P.stream>>>(N, P.c0, nc, P.x.ptr, P.y.ptr, P.z.ptr,
-                                                     P.alpha.ptr, P.gam.ptr, P.A.ptr, cutoff_sq);
+                                                     P.alpha.ptr, P.gam.ptr, P.A.ptr, cutoff_sq,
+                                                     impl.split_mixed ? P.Af.ptr : nullptr);
     }
     cudaSetDevice(impl.own_device);
     const long long tot = static_cast<long long>(N) * impl.split_c1_own;
     const int blk = 256;
     const int grd = static_cast<int>((tot + blk - 1) / blk);
     k_eeq_build_cols<<<grd, blk, 0, impl.stream>>>(N, 0, impl.split_c1_own, cx, cy, cz,
-                                                   alpha, gam, impl.d_A_own.ptr, cutoff_sq);
+                                                   alpha, gam, impl.d_A_own.ptr, cutoff_sq,
+                                                   impl.split_mixed ? impl.d_A_own_f.ptr : nullptr);
     ++impl.split_builds;
 }
 
 /// y = A x with the column blocks spread over the devices. x and y live on this device.
+static void splitMatvecF32(EEQSolverGPUImpl& impl, int N, const double* x, double* y)
+{
+    // Oct 2026: FP32 matrix, FP32 vectors, FP64 result vector. Halves the matrix traffic and the peer copies.
+    const float one = 1.0f, zero = 0.0f;
+    const int blk = 256, grd = (N + blk - 1) / blk;
+    k_cast_d2f<<<grd, blk, 0, impl.stream>>>(x, impl.d_xf.ptr, N);
+    cudaEventRecord(impl.ev_split, impl.stream);
+    for (auto& pp : impl.split_parts) {
+        auto& P = *pp;
+        const int nc = P.c1 - P.c0;
+        cudaSetDevice(P.dev);
+        cudaStreamWaitEvent(P.stream, impl.ev_split, 0);
+        cudaMemcpyPeerAsync(P.xf.ptr, P.dev, impl.d_xf.ptr, impl.own_device, sizeof(float) * N, P.stream);
+        cublasSetPointerMode(P.blas, CUBLAS_POINTER_MODE_HOST);
+        cublasSgemv(P.blas, CUBLAS_OP_T, N, nc, &one, P.Af.ptr, N, P.xf.ptr, 1, &zero, P.yf.ptr, 1);
+        cudaMemcpyPeerAsync(impl.d_yf.ptr + P.c0, impl.own_device, P.yf.ptr, P.dev, sizeof(float) * nc, P.stream);
+        cudaEventRecord(P.done, P.stream);
+    }
+    cudaSetDevice(impl.own_device);
+    cublasSetPointerMode(impl.cublas_handle, CUBLAS_POINTER_MODE_HOST);
+    cublasSgemv(impl.cublas_handle, CUBLAS_OP_T, N, impl.split_c1_own, &one, impl.d_A_own_f.ptr, N,
+                impl.d_xf.ptr, 1, &zero, impl.d_yf.ptr, 1);
+    for (auto& pp : impl.split_parts)
+        cudaStreamWaitEvent(impl.stream, pp->done, 0);
+    k_cast_f2d<<<grd, blk, 0, impl.stream>>>(impl.d_yf.ptr, y, N);
+    ++impl.split_matvecs;
+}
+
 static void splitMatvec(EEQSolverGPUImpl& impl, int N, const double* x, double* y)
 {
     const double one = 1.0, zero = 0.0;
@@ -2296,9 +2346,10 @@ static void splitMatvec(EEQSolverGPUImpl& impl, int N, const double* x, double* 
 }
 
 /// A x through the split when it is set up for N, else the single-device dense symv.
-static void eeqMatvec(EEQSolverGPUImpl& impl, int N, const double* x, double* y)
+static void eeqMatvec(EEQSolverGPUImpl& impl, int N, const double* x, double* y, bool exact = false)
 {
     if (impl.split_N == N && !impl.split_parts.empty()) {
+        if (impl.split_mixed && !exact) { splitMatvecF32(impl, N, x, y); return; }
         splitMatvec(impl, N, x, y);
         return;
     }
@@ -2354,6 +2405,7 @@ static bool runProjectedPCG(EEQSolverGPUImpl& impl, int N, int nfrag,
     if (impl.d_pcg_p.n  < N) impl.d_pcg_p.alloc(N);
     if (impl.d_pcg_Ap.n < N) impl.d_pcg_Ap.alloc(N);
     if (impl.d_pcg_dot_scratch.n   < 2) impl.d_pcg_dot_scratch.alloc(2);
+    impl.ppcg_true_sq = -1.0;
     if (impl.d_pcg_rnorm_scratch.n < 1) impl.d_pcg_rnorm_scratch.alloc(1);
 
     cublasHandle_t blas = impl.cublas_handle;
@@ -2380,7 +2432,7 @@ static bool runProjectedPCG(EEQSolverGPUImpl& impl, int N, int nfrag,
 
     // --- r = b − A·q ; project(r) ; z = precondition(r) ; p = z ; rz = r·z ---
     checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_HOST), "ptr host (ppcg init)");
-    eeqMatvec(impl, N, d_q, impl.d_pcg_Ap.ptr);   // dense symv or the multi-GPU split
+    eeqMatvec(impl, N, d_q, impl.d_pcg_Ap.ptr, true);   // dense symv or the multi-GPU split
     {
         int blk = 256, grd = (N + blk - 1) / blk;
         k_pcg_init_residual<<<grd, blk, 0, s>>>(N, d_rhs_atoms, impl.d_pcg_Ap.ptr, impl.d_pcg_r.ptr);
@@ -2405,6 +2457,15 @@ static bool runProjectedPCG(EEQSolverGPUImpl& impl, int N, int nfrag,
 
     bool converged = (h_rnorm_sq <= tol * tol);
     int  iters     = 0;
+    // Oct 2026: mixed precision (CURCUMA_EEQ_MIXED): the iteration matvec runs on the FP32 copy of the matrix,
+    // everything else in FP64. The FP32 matvec perturbs A by ~1e-7 relative, so the recursion residual drifts
+    // from b - A q; a round therefore stops at max(tol, rho * |r at its start|), the true residual is recomputed
+    // with the FP64 matvec and the Krylov space is restarted from it (defect correction).
+    const bool mixed = impl.split_mixed && impl.split_N == N && !impl.split_parts.empty();
+    const double kMixedRho = impl.mixed_rho;
+    double round_tol = tol;
+    if (mixed) round_tol = std::max(tol, kMixedRho * std::sqrt(h_rnorm_sq));
+    int rounds = 1;
     // Oct 2026: with the local inverse, rz <= 0 means it is not positive definite: stop (the
     // caller redoes the solve with Jacobi).
     const bool li_on = impl.m_li_valid && impl.m_li_N == N && impl.m_li_nfrag == nfrag;
@@ -2446,7 +2507,30 @@ static bool runProjectedPCG(EEQSolverGPUImpl& impl, int N, int nfrag,
         h_rnorm_sq = h_back[0];
         if (h_back[1] != 0.0) break;   // pAp <= 0 or degenerate rz (see k_ppcg_update_*)
 
-        if (h_rnorm_sq <= tol * tol) { converged = true; break; }
+        if (h_rnorm_sq <= round_tol * round_tol) {
+            if (!mixed) { converged = true; break; }
+            // end of a round: true residual with the FP64 matvec, restart from it
+            if (++rounds > 12) break;
+            checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_HOST), "ptr host (ppcg restart)");
+            eeqMatvec(impl, N, d_q, impl.d_pcg_Ap.ptr, true);
+            k_pcg_init_residual<<<grd_n, blk_n, 0, s>>>(N, d_rhs_atoms, impl.d_pcg_Ap.ptr, impl.d_pcg_r.ptr);
+            ppcgProjectResidual(impl, N, nfrag, impl.d_pcg_r.ptr);
+            ppcgPrecondition(impl, N, nfrag, impl.d_pcg_r.ptr, impl.d_pcg_z.ptr);
+            checkCublasEEQ(cublasDcopy(blas, N, impl.d_pcg_z.ptr, 1, impl.d_pcg_p.ptr, 1), "Dcopy p=z (ppcg restart)");
+            checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_DEVICE), "ptr dev (ppcg restart)");
+            checkCublasEEQ(cublasDdot(blas, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_z.ptr, 1, d_scal + 0), "Ddot rz (ppcg restart)");
+            checkCublasEEQ(cublasDdot(blas, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_r.ptr, 1, d_scal + 3), "Ddot rnorm (ppcg restart)");
+            cudaMemsetAsync(d_scal + 4, 0, sizeof(double), s);
+            double h4[4] = { 0.0, 0.0, 0.0, 0.0 };
+            checkCudaEEQ(cudaMemcpyAsync(h4, d_scal, 4 * sizeof(double), cudaMemcpyDeviceToHost, s), "D2H restart (ppcg)");
+            checkCudaEEQ(cudaStreamSynchronize(s), "sync restart (ppcg)");
+            cur = 0;
+            h_rnorm_sq = h4[3];
+            if (h_rnorm_sq <= tol * tol) { converged = true; impl.ppcg_true_sq = h_rnorm_sq; break; }
+            if (li_on && !(h4[0] > 0.0)) break;
+            round_tol = std::max(tol, kMixedRho * std::sqrt(h_rnorm_sq));
+            continue;
+        }
 
         ppcgPrecondition(impl, N, nfrag, impl.d_pcg_r.ptr, impl.d_pcg_z.ptr);
         checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_DEVICE), "ptr dev (ppcg)");
@@ -2463,8 +2547,8 @@ static bool runProjectedPCG(EEQSolverGPUImpl& impl, int N, int nfrag,
     // Claude Generated (Sep 2026): CURCUMA_PPCG_ITERS=1 prints the iteration count of every solve.
     static const bool print_iters = [] { const char* e = std::getenv("CURCUMA_PPCG_ITERS"); return e && *e && *e != '0'; }();
     if (print_iters)
-        fprintf(stderr, "PPCG N=%d nfrag=%d iters=%d converged=%d |r|^2=%.3e%s\n",
-                N, nfrag, iters, converged ? 1 : 0, h_rnorm_sq,
+        fprintf(stderr, "PPCG N=%d nfrag=%d iters=%d converged=%d |r|^2=%.3e rounds=%d%s\n",
+                N, nfrag, iters, converged ? 1 : 0, h_rnorm_sq, mixed ? rounds : 0,
                 li_on ? (impl.m_li_device ? " precond=localinv gpu build=device" : " precond=localinv gpu build=host") : "");
     if (!converged) impl.m_ppcg_nonconv_calls += 1;
     return converged;
@@ -3055,16 +3139,18 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUProjectedPCG(
         // drift away from the true one. One extra matvec: |P(b - A q)| must be <= 2 tol (the
         // recursion gap from rounding is far below tol for a positive definite M).
         constexpr double kTrueResidualFactor = 2.0;
-        eeqMatvec(impl, N, impl.d_rhs.ptr, impl.d_pcg_Ap.ptr);
-        {
-            const int blk = 256, grd = (N + blk - 1) / blk;
-            k_pcg_init_residual<<<grd, blk, 0, impl.stream>>>(N, d_rhs_atoms, impl.d_pcg_Ap.ptr, impl.d_pcg_r.ptr);
+        double h_true_sq = impl.ppcg_true_sq;   // mixed solve: the last restart measured exactly this quantity
+        if (h_true_sq < 0.0) {
+            eeqMatvec(impl, N, impl.d_rhs.ptr, impl.d_pcg_Ap.ptr, true);
+            {
+                const int blk = 256, grd = (N + blk - 1) / blk;
+                k_pcg_init_residual<<<grd, blk, 0, impl.stream>>>(N, d_rhs_atoms, impl.d_pcg_Ap.ptr, impl.d_pcg_r.ptr);
+            }
+            ppcgProjectResidual(impl, N, nfrag, impl.d_pcg_r.ptr);
+            checkCublasEEQ(cublasSetPointerMode(impl.cublas_handle, CUBLAS_POINTER_MODE_HOST), "ptr host (li true res)");
+            checkCublasEEQ(cublasDdot(impl.cublas_handle, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_r.ptr, 1, &h_true_sq),
+                           "Ddot true residual (li)");
         }
-        ppcgProjectResidual(impl, N, nfrag, impl.d_pcg_r.ptr);
-        double h_true_sq = 0.0;
-        checkCublasEEQ(cublasSetPointerMode(impl.cublas_handle, CUBLAS_POINTER_MODE_HOST), "ptr host (li true res)");
-        checkCublasEEQ(cublasDdot(impl.cublas_handle, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_r.ptr, 1, &h_true_sq),
-                       "Ddot true residual (li)");
         const double ratio = (tol > 0.0) ? std::sqrt(h_true_sq) / tol : 0.0;
         static const bool print_iters = [] { const char* e = std::getenv("CURCUMA_PPCG_ITERS"); return e && *e && *e != '0'; }();
         if (print_iters) fprintf(stderr, "LOCALINV GPU true residual |P(b-Aq)|/tol=%.3f\n", ratio);

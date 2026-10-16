@@ -882,6 +882,8 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
             }
             if (devs.size() > 1) {
                 m_gpu_workspace->setCoulombSplitDevices(devs, min_atoms);
+                m_eeq_gpu->setSplitMixedPrecision(cfg_get_bool("gpu_eeq_mixed_precision", true),
+                                                  cfg_get_dbl("gpu_eeq_mixed_rho", 1e-5));
                 m_eeq_gpu->setSplitDevices(devs, std::max(min_atoms, cfg_get_int("gpu_split_eeq_min_atoms", 4000)));
                 m_split_configured = true;
             }
