@@ -777,6 +777,12 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<int>    d_disp_row_off;      ///< [N+1] exclusive scan of the row counts
     bool               disp_built_on_gpu = false; ///< true when disp SoA was device-built
 
+    // Oct 2026: on-device non-bonded repulsion pair-list build (tables change with the topology only).
+    CudaBuffer<int>       d_rep_valid, d_rep_metal, d_rep_hh_dist;
+    CudaBuffer<double>    d_rep_dum, d_rep_repz;
+    CudaBuffer<long long> d_rep_bond_keys, d_rep_hh_keys;
+    CudaBuffer<int>       d_rep_counter, d_rep_row_off;   ///< [N] row counts / fill counters, [N+1] offsets
+
     // Diagnostic snapshot buffers (GPU-side, no pipeline stall)
     // Claude Generated (March 2026): Device-to-device copy instead of sync+download
     CudaBuffer<double> d_dEdcn_snapshot;   ///< [N] copy of dEdcn before qtmp
@@ -2326,6 +2332,70 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
     if (CurcumaLogger::get_verbosity() >= 2)
         CurcumaLogger::info(fmt::format(
             "  GPU D4 dispersion pair list: {} pairs built on GPU (was host O(N^2) + upload)", h_count));
+}
+
+// ============================================================================
+// Oct 2026: on-device non-bonded repulsion pair-list build, replacement of the host
+// generateRepulsionPairsNative() (26 ms per rebuild on polymer_2x with 16 threads) plus the
+// 6 ms upload. Same two-pass scheme as the D4 list above.
+// ============================================================================
+void FFWorkspaceGPU::generateNonbondedRepulsionOnGPU(const GFNFF::RepulsionDeviceInputs& in)
+{
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+    if (N <= 1) return;
+
+    impl.d_rep_valid.upload(in.valid);
+    impl.d_rep_metal.upload(in.metal);
+    impl.d_rep_dum.upload(in.dum);
+    impl.d_rep_repz.upload(in.repz);
+    impl.d_rep_bond_keys.upload(in.bond_keys);
+    impl.d_rep_hh_keys.upload(in.hh_keys);
+    impl.d_rep_hh_dist.upload(in.hh_dist);
+
+    RepDevTables t{};
+    t.valid = impl.d_rep_valid.ptr;  t.metal = impl.d_rep_metal.ptr;
+    t.dum = impl.d_rep_dum.ptr;      t.repz = impl.d_rep_repz.ptr;
+    t.bond_keys = impl.d_rep_bond_keys.ptr;  t.n_bond_keys = static_cast<int>(in.bond_keys.size());
+    t.hh_keys = impl.d_rep_hh_keys.ptr;      t.hh_dist = impl.d_rep_hh_dist.ptr;
+    t.n_hh_keys = static_cast<int>(in.hh_keys.size());
+    t.repscaln = in.repscaln;  t.hhfac = in.hhfac;  t.hh13 = in.hh13;  t.hh14 = in.hh14;
+    t.r_cut = in.r_cut_bohr;
+
+    if (impl.d_rep_counter.n < N) impl.d_rep_counter.alloc(N);
+    if (impl.d_rep_row_off.n < N + 1) impl.d_rep_row_off.alloc(N + 1);
+
+    const double cutoff_sq = in.build_radius_bohr * in.build_radius_bohr;
+    auto cfg = getLaunchConfig(N * (N - 1) / 2, m_block_size);
+
+    cudaMemsetAsync(impl.d_rep_counter.ptr, 0, sizeof(int) * N, impl.stream);
+    k_rep_pairs_count<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, cutoff_sq, t, impl.d_rep_counter.ptr);
+    exclusive_scan_int(impl.d_rep_counter.ptr, impl.d_rep_row_off.ptr, N, impl.stream);
+    int h_last[2] = { 0, 0 };
+    checkCuda(cudaMemcpyAsync(&h_last[0], impl.d_rep_row_off.ptr + (N - 1), sizeof(int),
+                              cudaMemcpyDeviceToHost, impl.stream), "rep row_off last");
+    checkCuda(cudaMemcpyAsync(&h_last[1], impl.d_rep_counter.ptr + (N - 1), sizeof(int),
+                              cudaMemcpyDeviceToHost, impl.stream), "rep count last");
+    checkCuda(cudaStreamSynchronize(impl.stream), "k_rep_pairs_count sync");
+    const int h_count = h_last[0] + h_last[1];
+
+    auto& nb = impl.nonbonded_rep;
+    nb.n = h_count;
+    if (nb.idx_i.n < h_count) {   // grow only: the SoA keeps its capacity across rebuilds
+        const int cap = h_count + h_count / 8;
+        nb.idx_i.alloc(cap); nb.idx_j.alloc(cap); nb.alpha.alloc(cap); nb.repab.alloc(cap); nb.r_cut.alloc(cap);
+    }
+    if (h_count == 0) return;
+
+    cudaMemsetAsync(impl.d_rep_counter.ptr, 0, sizeof(int) * N, impl.stream);
+    k_rep_pairs_build<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, impl.d_atom_types.ptr,
+        cutoff_sq, t, impl.d_rep_row_off.ptr, impl.d_rep_counter.ptr,
+        nb.idx_i.ptr, nb.idx_j.ptr, nb.alpha.ptr, nb.repab.ptr, nb.r_cut.ptr);
+    checkCuda(cudaStreamSynchronize(impl.stream), "k_rep_pairs_build sync");
+    if (CurcumaLogger::get_verbosity() >= 3)
+        CurcumaLogger::info(fmt::format("  GPU non-bonded repulsion list: {} pairs built on GPU", h_count));
 }
 
 // ============================================================================

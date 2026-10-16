@@ -370,6 +370,7 @@ PARAM(coulomb_implicit, Bool, true, "CPU: evaluate the N^2/2 Coulomb pairs on th
 PARAM(farfield_shortcut, Bool, true, "CPU exact far-field shortcut: for gamma_ij*r >= 6.5 (gamma_ij = 1/sqrt(alpha_i+alpha_j)) erf(gamma_ij*r) is exactly 1.0 in FP64 and exp(-(gamma_ij*r)^2) <= 4.4e-19 is below one ulp of the force, so the Coulomb pair energy/force (FFWorkspace::calcCoulomb) and the EEQ matrix element erf(gamma r)/r (final charges, corrected EEQ matrix) are evaluated as q_i q_j/r, -q_i q_j/r^3 and 1/r without erf/exp. Bit-identical to the full evaluation in the cases checked (set false to compare). Forwarded to eeq_solver.farfield_shortcut. The CUDA kernels always use the shortcut, with the threshold 6.0 instead of 6.5 (gamma_ij*r); ROCm and Vulkan have none.", "Performance", {})
 PARAM(gpu_coulomb_implicit, Bool, true, "GPU only: the device enumerates all Coulomb atom pairs itself (per-atom gather, gamma_ij from per-atom alpeeq) instead of reading an N^2/2 pair list built on the host. Saves the host list (24.5 M pairs / 2.7 GB and ~1.5 s at 7320 atoms). Not used with eeq_distance_cutoff > 0. Set false for the stored pair list.", "Performance", {})
 PARAM(gpu_disp_pairs_on_device, Bool, true, "WP-A GPU only: build the D4 dispersion pair list on the device via a two-pass enumeration plus per-pair C6 contraction, replacing the host O(N^2) GenerateDispersionPairsNative loop and the per-build H2D upload. Default ON for CUDA since Oct 2026 (ROCm: off); false keeps the host build. Bit-identical to the host list up to the FP order of the device Gaussian weights. Measured Sep 2026 on polymer_2x (7320 atoms): pair build 630 -> 32 ms, SP wall 6.8 -> 5.6 s, energy identical; see docs/GPU_TUNING.md.", "Performance", {})
+PARAM(gpu_rep_pairs_on_device, Bool, true, "GPU only (CUDA): rebuild the non-bonded repulsion pair list on the device (two-pass enumeration with the per-pair alpha and repab) when the Verlet skin rule fires, instead of the host generateRepulsionPairsNative() plus upload (26 + 6 ms per rebuild on polymer_2x with 16 threads, every ~8 MD steps). Default ON since Oct 2026; false keeps the host build. ROCm always uses the host build. Only active for systems with a distance-filtered list (nb_cell_list_min_atoms).", "Performance", {})
 PARAM(eeq_rocm_cpu_fragment_threshold, Int, 16, "ROCm GFN-FF only: fragment count at or above which the dense device Cholesky is not used. By default the device projected PCG runs there when the EEQ solver resolves to ppcg (CPU EEQ only if it stalls); giving this key explicitly forces the exact CPU EEQ (PCG block-Jacobi warm start) from that fragment count on, which keeps ROCm charges identical to the CPU path. Set 0 to always use the device solve.", "Performance", {})
 // Implicit solvation (WP5, Claude Generated June 2026). Registering these here is
 // what makes -gfnff.solvent reach GFNFF::InitialiseMolecule (the value was silently
@@ -1030,6 +1031,36 @@ public:
 
     /// True if updateNonbondedRepulsionIfNeeded() rebuilt the lists since last check
     bool consumeNonbondedRepulsionUpdate() { bool r = m_nb_rep_updated; m_nb_rep_updated = false; return r; }
+
+    /**
+     * @brief Per-atom and per-pair tables from which a device rebuilds the non-bonded repulsion list.
+     *
+     * Claude Generated (Oct 2026): the pair term of generateRepulsionPairsNative() is
+     * alpha = sqrt(dum_i * dum_j) * ff, repab = repz_i * repz_j * REPSCALN, r_cut = 20 Bohr, with
+     * dum_i = repan[Z_i] * (1 + q_i * QREPSCAL) * (1 + NREPSCAL / (1 + cn_i^2)) per atom and ff a
+     * function of the element pair (H-H: HHFAC, times HH13REP / HH14REP for topological distance
+     * 2 / 3). Everything except the distance test depends on the topology only, so these tables
+     * stay valid until the next topology rebuild.
+     */
+    struct RepulsionDeviceInputs {
+        std::vector<int> valid;             ///< [N] 1 if the element has repulsion parameters
+        std::vector<int> metal;             ///< [N] 1 if PeriodicTable::getMetalType(Z) > 0
+        std::vector<double> dum;            ///< [N] per-atom alpha factor
+        std::vector<double> repz;           ///< [N] effective nuclear charge factor
+        std::vector<long long> bond_keys;   ///< sorted i * N + j of bond-list entries with i < j (excluded pairs)
+        std::vector<long long> hh_keys;     ///< sorted i * N + j (i < j) of H-H pairs at topological distance 2 or 3
+        std::vector<int> hh_dist;           ///< distance (2 or 3) belonging to hh_keys
+        double repscaln = 0.0, hhfac = 0.0, hh13 = 0.0, hh14 = 0.0;
+        double build_radius_bohr = 0.0;     ///< 20 Bohr kernel cutoff + Verlet skin
+        double r_cut_bohr = 20.0;           ///< value stored as GFNFFRepulsion::r_cut
+    };
+
+    /// Fills the tables above; false if the topology cannot be mapped (the caller keeps the host build).
+    bool repulsionDeviceInputs(RepulsionDeviceInputs& out) const;
+
+    /// Claude Generated (Oct 2026): the GPU wrapper rebuilds the non-bonded repulsion list on the device;
+    /// updateNonbondedRepulsionIfNeeded() then only decides WHEN (skin rule, counters) and flags the update.
+    void setSkipHostRepulsionPairs(bool v) { m_skip_host_rep_pairs = v; }
 
     /// Last rebuilt bonded/non-bonded repulsion pair lists (for GPU SoA re-upload)
     const std::vector<GFNFFRepulsion>& getLastBondedRepulsions() const { return m_last_bonded_reps; }
@@ -2844,6 +2875,7 @@ private:
     // Claude Generated (March 2026): Topology persistence in param.json
     bool m_cache_topology = true;   ///< Cache Phase-1 EEQ topology in param.json (opt-out)
     bool m_skip_host_hb_workspace = false;  ///< Oct 2026: GPU wrapper owns the HB/XB lists (setSkipHostHBWorkspaceUpdate)
+    bool m_skip_host_rep_pairs = false;   ///< Oct 2026: the GPU wrapper builds the non-bonded repulsion list
     bool m_skip_host_disp_pairs = false;  ///< WP-A: GPU builds D4 pairs; skip host O(N^2) loop
     bool m_implicit_coulomb_pairs = false; ///< GPU enumerates Coulomb pairs; skip host list
     bool m_print_timing = true;     ///< Print init timing summary at verbosity >= 1

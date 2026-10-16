@@ -61,7 +61,7 @@ Stand.
   (d) Teilspektrum: der residente Loop übergibt `n_eig = 0`, Grund unbekannt, schließt sich derzeit mit der verteilten FP64-Lösung aus;
   (e) Schwellen `gpu_eigensolver_min_nao` (4000) und `gpu_density_min_nao` nachmessen;
   (f) `purify`/`lobpcg` gibt es nur auf der CPU, auf der GPU ist es der einzige Hebel, der die Skalierung ändert;
-  (g) Setup und Integrale (32 s) nie im Detail profiliert.
+  (g) Setup ist profiliert (~13 s, nsys, GFN2_GPU_COST_PLAN.md 0.3); Integrale/Setup nur bei Bedarf weiter.
   **`scf_fp32_stall_patience` nicht ändern**, bis die Fixpunktfrage (Schritt 1 weicht um 2,7e-6 Eh ab) geklärt ist.
   Zahlen und Begründungen: Archiv, Abschnitt "GPU-SCF GFN1/GFN2"; [docs/GFN2_GPU_COST_PLAN.md](docs/GFN2_GPU_COST_PLAN.md).
 - **GPU-Gradient GFN1/GFN2**: Punkte 1 bis 6 umgesetzt; offen: der H0-Paar-Kernel (454 ms) ist einzelkartig, und `densityPatternDistributed`
@@ -73,7 +73,7 @@ Stand.
 - **GPU-Lauf rechnet Host-`D4DC6DCNPairs` ohne Leser** (Paket 2, 2026-10-11): `computeDC6DCN` am Ende von `GenerateDispersionPairsNative` im `-gpu`-Lauf, ~216 MiB (24 B x 9,4 Mio. Paare) und Rechenzeit je Neubau; Guard braucht GPU-Modus-API
   in D4-Generator/GFNFF/Wrapper (P1a-Skip in `updateCNValuesForGradient` beachten). HIP liest `m_disp_idx_*_host` und füllt `m_h_dc6dcn_*` noch (nicht kompilierbar hier).
 - **GPU-GFN-FF-MD, Schrittzerlegung polymer_2x** (Stand 21,7 ms je Schritt, vorher 38,4; erledigt: `AIChangelog.md`, [docs/GFNFF-PERFORMANCE-ROADMAP.md](docs/GFNFF-PERFORMANCE-ROADMAP.md)):
-  offen: CG-Iterationen unter Last (K5); Host-Neubau überlappt nicht mit Gerätearbeit (HB 12,8 ms alle 10, Repulsion 11 ms alle ~8, D4 125 ms alle ~83 Schritte); K1-K3 und gestaffeltes Hochladen auf ROCm. Journal: Labor/curcuma EEQ-Solver Benchmark.
+  offen: CG-Iterationen unter Last (K5); Host-Neubau überlappt nicht mit Gerätearbeit (Stand 16. Okt. 2026, 296 Schritte, 20,0 ms/Schritt: HB/XB 2,2 ms/Schritt, CN-Liste K1 1,0, Repulsion-Geräteneubau 0,9, D4 0,7; Repulsion lief vorher auf dem Host, 3,3 ms/Schritt); K1-K3 und gestaffeltes Hochladen auf ROCm. Journal: Labor/curcuma EEQ-Solver Benchmark.
 - **ROCm-GFN-FF, Rückstand** (Hardware nötig, groß): nur `auto`/`cholesky` zulässig (kein Geräte-ppcg, kein localinv); fehlen: K1-Fehlerbehebung (CN-Liste jeden Schritt),
   Fernfeld, K2/K3, gestaffelter Upload. [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md).
 - **GPU-Fernfeld und Toleranz angleichen**: Fernfeld in den Mehr-GPU-Kernel `k_eeq_build_cols` (`eeq_solver_gpu.cu`, klein); CUDA-Schwelle 6,0 auf 6,5 wie CPU (nicht bitgleich, mit Messung);

@@ -93,6 +93,13 @@ struct gfnffBackendEEQChargeDownload : std::false_type {};
 template <class B>
 struct gfnffBackendEEQChargeDownload<B, std::void_t<decltype(&B::downloadEEQCharges)>> : std::true_type {};
 
+/// Claude Generated (Oct 2026): true iff the backend traits declare `has_device_repulsion_build = true` (CUDA).
+template <class B, class = void>
+struct gfnffBackendRepulsionBuild : std::false_type {};
+template <class B>
+struct gfnffBackendRepulsionBuild<B, std::void_t<decltype(B::has_device_repulsion_build)>>
+    : std::bool_constant<B::has_device_repulsion_build> {};
+
 template <class Backend>
 class GFNFFGpuMethodImpl : public ComputationalMethod {
 public:
@@ -401,6 +408,7 @@ private:
     /// rebuild of GFNFF::updateDispersionPairsIfNeeded() can repeat it).
     void buildDispersionPairsOnDevice();
     bool m_disp_pairs_on_device = false;  ///< WP-A mode active (gpu_disp_pairs_on_device)
+    bool m_rep_pairs_on_device = false;   ///< Oct 2026: non-bonded repulsion list rebuilt on the device (gpu_rep_pairs_on_device)
 };
 
 // ---------------------------------------------------------------------------
@@ -592,6 +600,20 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     // Upload parameters to GPU + create CPU residual
     if (!initGPUWorkspace()) {
         return false;
+    }
+
+    // Oct 2026: from here on the non-bonded repulsion list is rebuilt on the device (default on for CUDA,
+    // `-gfnff.gpu_rep_pairs_on_device false` keeps the host build). Set after the setup build on purpose.
+    if constexpr (gfnffBackendRepulsionBuild<Backend>::value) {
+        bool rep_dev = true;
+        if (m_parameters.contains("gpu_rep_pairs_on_device")) rep_dev = m_parameters.value("gpu_rep_pairs_on_device", rep_dev);
+        if (m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
+            rep_dev = m_parameters["gfnff"].value("gpu_rep_pairs_on_device", rep_dev);
+        typename GFNFF::RepulsionDeviceInputs probe;
+        if (rep_dev && m_gfnff->repulsionDeviceInputs(probe)) {
+            m_rep_pairs_on_device = true;
+            m_gfnff->setSkipHostRepulsionPairs(true);
+        }
     }
     auto t_init_end = std::chrono::high_resolution_clock::now();
 
@@ -1159,6 +1181,22 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     // once). See GFNFF::updateNonbondedRepulsionIfNeeded() for the full rationale.
     m_gfnff->updateNonbondedRepulsionIfNeeded(nullptr);
     gap_lap("repulsion_host_build");
+    if constexpr (gfnffBackendRepulsionBuild<Backend>::value) {
+        if (m_rep_pairs_on_device && m_gfnff->consumeNonbondedRepulsionUpdate()) {
+            // The skin rule fired on the host; the list is rebuilt from the device coordinates. The
+            // tables depend on the topology only and are cheap to collect, so no cache to invalidate.
+            typename GFNFF::RepulsionDeviceInputs rep_in;
+            if (m_gfnff->repulsionDeviceInputs(rep_in)) {
+                m_gpu_workspace->generateNonbondedRepulsionOnGPU(rep_in);   // device coordinates set at the start of the call
+                m_gpu_workspace->invalidateGraph();
+            } else {
+                m_has_error = true;
+                m_error_message = "GFN-FF GPU: repulsion tables unavailable after the device build was enabled";
+                CurcumaLogger::error(m_error_message);
+                return 0.0;
+            }
+        }
+    }
     if (m_gfnff->consumeNonbondedRepulsionUpdate()) {
         m_gpu_workspace->updateRepulsion(m_gfnff->getLastBondedRepulsions(),
                                           m_gfnff->getLastNonbondedRepulsions());

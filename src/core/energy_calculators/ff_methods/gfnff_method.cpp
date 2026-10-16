@@ -2065,6 +2065,13 @@ void GFNFF::updateNonbondedRepulsionIfNeeded(FFWorkspace* extra_ws)
     m_rep_list_ref_geometry = m_geometry_bohr;
     ++m_rep_rebuild_count;
 
+    if (m_skip_host_rep_pairs) {
+        // Oct 2026 (Claude Generated): only the decision is made here; the wrapper rebuilds the list on
+        // the device from repulsionDeviceInputs() and the current coordinates.
+        m_nb_rep_updated = true;
+        return;
+    }
+
     auto start_time = std::chrono::high_resolution_clock::now();
 
     int old_bonded_count = static_cast<int>(m_last_bonded_reps.size());
@@ -11775,6 +11782,56 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
     (void)duration;
 
     return {std::move(bonded_reps), std::move(nonbonded_reps)};
+}
+
+bool GFNFF::repulsionDeviceInputs(RepulsionDeviceInputs& out) const
+{
+    // Claude Generated (Oct 2026): same per-atom arithmetic and the same pair exclusions as
+    // make_nb_rep() in generateRepulsionPairsNative(); see the struct doc in gfnff.h.
+    using namespace GFNFFParameters;
+    const int N = m_atomcount;
+    const TopologyInfo& topo = getCachedTopology();
+    const bool hh_use_bpair = m_parameters.value("hh_repulsion_bpair", true);
+    const SparseTopoTable& hh_table = hh_use_bpair ? topo.bpair : topo.topo_distances;
+    if (hh_table.n != N || hh_table.default_value == 2 || hh_table.default_value == 3)
+        return false;
+
+    out = RepulsionDeviceInputs{};
+    out.valid.assign(N, 0);
+    out.metal.assign(N, 0);
+    out.dum.assign(N, 0.0);
+    out.repz.assign(N, 1.0);
+    for (int i = 0; i < N; ++i) {
+        const int zi = m_atoms[i] - 1;
+        out.valid[i] = (zi >= 0 && zi < static_cast<int>(repan_angewChem2020.size())) ? 1 : 0;
+        out.metal[i] = PeriodicTable::getMetalType(m_atoms[i]) > 0 ? 1 : 0;
+        if (!out.valid[i]) continue;
+        out.repz[i] = (zi < static_cast<int>(repz.size())) ? repz[zi] : 1.0;
+        const double qa = (i < topo.topology_charges.size()) ? topo.topology_charges[i] : 0.0;
+        const double cn = (i < topo.neighbor_counts.size()) ? topo.neighbor_counts[i] : 0.0;
+        const double fn = 1.0 + NREPSCAL / (1.0 + cn * cn);
+        out.dum[i] = repan_angewChem2020[zi] * (1.0 + qa * QREPSCAL) * fn;
+    }
+    // The host skips a pair only if (i, j) with i < j is a bond-list entry in that order.
+    for (const auto& b : getCachedBondList())
+        if (b.first >= 0 && b.second < N && b.first < b.second)
+            out.bond_keys.push_back(static_cast<long long>(b.first) * N + b.second);
+    std::sort(out.bond_keys.begin(), out.bond_keys.end());
+    for (int i = 0; i < N; ++i) {
+        if (m_atoms[i] != 1) continue;
+        for (const auto& e : hh_table.row(i))
+            if (e.first > i && e.first < N && m_atoms[e.first] == 1 && (e.second == 2 || e.second == 3)) {
+                out.hh_keys.push_back(static_cast<long long>(i) * N + e.first);
+                out.hh_dist.push_back(e.second);
+            }
+    }
+    // rows are sorted by j, atoms are visited by i: the keys are already sorted
+    out.repscaln = REPSCALN;
+    out.hhfac = HHFAC;
+    out.hh13 = HH13REP;
+    out.hh14 = HH14REP;
+    out.build_radius_bohr = 20.0 + nonbondedSkinBohr();
+    return true;
 }
 
 std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GFNFF::generateDispersionPairsNative() const

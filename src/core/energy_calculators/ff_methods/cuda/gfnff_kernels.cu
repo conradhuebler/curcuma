@@ -3430,6 +3430,78 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     out_rcut[slot] = 50.0;  // D4 pair-energy cutoff (struct default, matches host)
 }
 
+// ---------------------------------------------------------------------------
+// Non-bonded repulsion pair list on the device (Claude Generated, Oct 2026)
+// ---------------------------------------------------------------------------
+__device__ inline int repKeyFind(const long long* keys, int n, long long key)
+{
+    int lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        const int mid = (lo + hi) >> 1;
+        const long long v = keys[mid];
+        if (v == key) return mid;
+        if (v < key) lo = mid + 1; else hi = mid - 1;
+    }
+    return -1;
+}
+
+/// Pair survives the distance test, has valid elements and is not an excluded bond (i < j).
+__device__ inline bool repPairWanted(int N, int i, int j, const double* cx, const double* cy, const double* cz,
+                                     double cutoff_sq, const RepDevTables& t)
+{
+    if (!t.valid[i] || !t.valid[j]) return false;
+    const double dx = cx[i] - cx[j], dy = cy[i] - cy[j], dz = cz[i] - cz[j];
+    if (dx * dx + dy * dy + dz * dz > cutoff_sq) return false;
+    return repKeyFind(t.bond_keys, t.n_bond_keys, static_cast<long long>(i) * N + j) < 0;
+}
+
+__global__ GFNFF_KERNEL_BOUNDS void k_rep_pairs_count(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    double cutoff_sq, RepDevTables t, int* d_count)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N * (N - 1) / 2) return;
+    int i, j;
+    dispPairFromTid(tid, N, i, j);
+    if (j >= N) return;
+    if (repPairWanted(N, i, j, cx, cy, cz, cutoff_sq, t)) atomicAdd(&d_count[i], 1);
+}
+
+__global__ GFNFF_KERNEL_BOUNDS void k_rep_pairs_build(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const int* __restrict__ atom_types, double cutoff_sq, RepDevTables t,
+    const int* __restrict__ row_off, int* d_counter,
+    int* out_i, int* out_j, double* out_alpha, double* out_repab, double* out_rcut)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N * (N - 1) / 2) return;
+    int i, j;
+    dispPairFromTid(tid, N, i, j);
+    if (j >= N) return;
+    if (!repPairWanted(N, i, j, cx, cy, cz, cutoff_sq, t)) return;
+
+    // element-pair factor, same branch order as make_nb_rep()
+    const int zi = atom_types[i], zj = atom_types[j];
+    double ff = 1.0;
+    if (zi == 1 && zj == 1) {
+        ff = t.hhfac;
+        const int k = repKeyFind(t.hh_keys, t.n_hh_keys, static_cast<long long>(i) * N + j);
+        if (k >= 0) ff *= (t.hh_dist[k] == 2) ? t.hh13 : t.hh14;
+    } else if ((zi == 1 && t.metal[j]) || (zj == 1 && t.metal[i])) {
+        ff = 0.85;
+    } else if ((zi == 1 && zj == 6) || (zj == 1 && zi == 6)) {
+        ff = 0.91;
+    } else if ((zi == 1 && zj == 8) || (zj == 1 && zi == 8)) {
+        ff = 1.04;
+    }
+    const int slot = row_off[i] + atomicAdd(&d_counter[i], 1);
+    out_i[slot] = i;
+    out_j[slot] = j;
+    out_alpha[slot] = sqrt(t.dum[i] * t.dum[j]) * ff;
+    out_repab[slot] = t.repz[i] * t.repz[j] * t.repscaln;
+    out_rcut[slot] = t.r_cut;
+}
+
 // ============================================================================
 // GPU HB CN per-bond computation (Apr 2026)
 // Replaces CPU HB CN loop in gfnff_gpu_method.cpp.

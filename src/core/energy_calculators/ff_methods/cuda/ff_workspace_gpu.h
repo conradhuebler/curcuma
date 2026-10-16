@@ -279,6 +279,11 @@ public:
     void updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
                           const std::vector<GFNFFRepulsion>& nonbonded_reps);
 
+    /// Claude Generated (Oct 2026): rebuild the NON-bonded repulsion list on the device from the current
+    /// device coordinates (replaces updateRepulsion() for that list; the bonded list is unchanged). The
+    /// coordinates must be uploaded; the caller invalidates the graph.
+    void generateNonbondedRepulsionOnGPU(const GFNFF::RepulsionDeviceInputs& inputs);
+
     /**
      * @brief Re-upload the D4 dispersion SoA after a skin-triggered rebuild.
      *

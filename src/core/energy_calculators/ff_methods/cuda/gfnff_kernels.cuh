@@ -735,6 +735,37 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
 );
 
 // ============================================================================
+// Non-bonded repulsion pair list on the device (Claude Generated, Oct 2026)
+// Two-pass (count per row i, build) like the D4 list. Pair term and exclusions as in
+// GFNFF::generateRepulsionPairsNative() / make_nb_rep(): alpha = sqrt(dum_i dum_j) * ff,
+// repab = repz_i repz_j * repscaln. Pairs between the kernel cutoff and the Verlet build radius
+// are stored; the repulsion kernel skips them through r_cut.
+// ============================================================================
+struct RepDevTables {
+    const int*       valid;       ///< [N]
+    const int*       metal;       ///< [N]
+    const double*    dum;         ///< [N]
+    const double*    repz;        ///< [N]
+    const long long* bond_keys;   ///< sorted, n_bond_keys entries
+    int              n_bond_keys;
+    const long long* hh_keys;     ///< sorted, n_hh_keys entries
+    const int*       hh_dist;     ///< 2 or 3 per hh key
+    int              n_hh_keys;
+    double           repscaln, hhfac, hh13, hh14;
+    double           r_cut;
+};
+
+__global__ GFNFF_KERNEL_BOUNDS void k_rep_pairs_count(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    double cutoff_sq, RepDevTables t, int* d_count);
+
+__global__ GFNFF_KERNEL_BOUNDS void k_rep_pairs_build(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const int* __restrict__ atom_types, double cutoff_sq, RepDevTables t,
+    const int* __restrict__ row_off, int* d_counter,
+    int* out_i, int* out_j, double* out_alpha, double* out_repab, double* out_rcut);
+
+// ============================================================================
 // GPU HB CN per-bond computation (Apr 2026)
 // Replaces CPU HB CN loop in gfnff_gpu_method.cpp.
 // ============================================================================
