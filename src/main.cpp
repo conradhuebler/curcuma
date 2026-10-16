@@ -961,6 +961,22 @@ json CLI2Json(int argc, char** argv)
             if (matches_current)
                 continue;
 
+            // Claude Generated (Oct 16, 2026): a name several modules register (-electronic_temperature:
+            // tblite, ulysses, xtb) is routed to the module of the selected -method when that module is
+            // one of the owners. Before, it stayed in the command module with a warning and no method
+            // ever read it (-electronic_temperature 40000 did not change a native gfn2 energy).
+            if (owners.size() > 1 && key.contains("method") && key["method"].is_string()) {
+                const std::string method_scope = MethodFactory::parameterScopeForMethod(key["method"].get<std::string>());
+                if (!method_scope.empty()
+                    && std::find(owners.begin(), owners.end(), method_scope) != owners.end()) {
+                    CurcumaLogger::info("CLI flag -" + pname + " is registered in several modules; routed to -"
+                        + method_scope + "." + pname + " for the selected method \"" + key["method"].get<std::string>() + "\".");
+                    reroute_targets[method_scope][pname] = it.value();
+                    reroute_remove.push_back(pname);
+                    continue;
+                }
+            }
+
             if (owners.size() > 1) {
                 std::string candidates;
                 for (size_t i = 0; i < owners.size(); ++i) {
