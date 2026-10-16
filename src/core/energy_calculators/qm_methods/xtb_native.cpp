@@ -1206,7 +1206,12 @@ double XTB::Calculation(bool gradient)
     // occupations, then drive m_gpu_scf->residentScfStep below. Falls back to the
     // host-driven device-potential loop on any failure. GFN2 only.
     bool use_resident_loop = false;
-    if (use_device_potential && mode == ScfMode::Broyden && m_gpu_scf->supportsResidentLoop()) {
+    // Oct 16, 2026 (Known Issue #39): the resident loop fills the orbitals from the total electron count
+    // alone (closed-shell Fermi filling); it knows nothing of n_alpha/n_beta. For an open shell it computed
+    // the closed-shell state instead (GMTKN55 W4-11/bn3pi: -4.00583 against -3.92755 Eh on the CPU, 65 such
+    // structures up to 49 kcal/mol), so open shells keep the host-driven loop, whose occupations
+    // (occupationsFromEps) are open-shell aware.
+    if (use_device_potential && mode == ScfMode::Broyden && m_gpu_scf->supportsResidentLoop() && !openShell()) {
         std::vector<double> rcn, rgi, rzeff, rrefcn, rrefcovcn, rrefq;
         std::vector<int> rnref;
         exportD4RefWDeviceData(rcn, rgi, rzeff, rrefcn, rrefcovcn, rrefq, rnref);
@@ -2017,8 +2022,10 @@ double XTB::Calculation(bool gradient)
     // reads dP/dC straight off the device (xtb_gradient.cpp:859-868). Skip finalize() there too;
     // ensureHostWavefunction() downloads on demand for the few paths that still need the host
     // matrices (host gradient fallback, property accessors) - see xtb_multipole.cpp:44.
+    // Oct 16, 2026 (Known Issue #39): the device gradient builds W from integer closed-shell occupations
+    // (2 eps for the first nocc_orbs); an open shell takes the host gradient, which uses focc.
     const bool device_grad_will_run = gradient && use_gpu_resident && m_gpu_scf
-        && m_gpu_scf->supportsGradient();
+        && m_gpu_scf->supportsGradient() && !openShell();
     m_wfn_on_device = false;
     if (use_gpu_resident && m_gpu_scf) {
         if (use_resident_loop && m_mp_ints_deferred && (!gradient || device_grad_will_run))
@@ -2177,7 +2184,7 @@ double XTB::Calculation(bool gradient)
         // CN chain-rule (4) on the host. Falls back to the full CPU gradient if the
         // backend has no gradient.
         bool gpu_grad = false;
-        if (use_gpu_resident && m_gpu_scf && m_gpu_scf->supportsGradient())
+        if (use_gpu_resident && m_gpu_scf && m_gpu_scf->supportsGradient() && !openShell())
             gpu_grad = calculateGradientGpu();
         if (!gpu_grad) {
             ensureHostWavefunction();
