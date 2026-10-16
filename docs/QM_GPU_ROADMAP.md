@@ -113,6 +113,28 @@ thresholds, other GPUs than the RTX 5090. The floor grows with size (benzene to 
 systems may stall at the default 1e-6 (extrapolated, not measured); the rule applies there as well. Regression check:
 `qm_direct_jk` part (4).
 
+**DIIS history at the switch (Oct 16, 2026; AI-generated, machine-tested).** At the switch the DIIS/ADIIS history
+now drops every entry whose Fock matrix came from an incremental build (`QMScfAccelerator::dropIncrementalEntries()`,
+host and device loop); entries from the periodic full rebuilds stay. Variants compared with a temporary switch
+(HF/def2-SVP, CPU direct, 24 threads, 4 repeats; device: pyrene, 5-8 repeats): clear the whole history (A) gives
+nearly the same counts but up to +3 on device pyrene/ADIIS 1e-10; keeping the newest 1-3 entries (B) gains little or
+loses (methanol 1e-10 keep3: 32 vs 26). Iterations before -> after (switch iteration in brackets):
+
+| system (switch) | 1e-10 diis | 1e-10 adiis | 1e-8 diis | 1e-8 adiis |
+|---|---|---|---|---|
+| methanol (24) | 26 -> 25 | 21 (no switch) | 17 (no switch) | 17 (no switch) |
+| benzene (17-18) | 26 -> 21 | 25 -> 20 | 22 -> 19 | 20 -> 18 |
+| naphthalene (21) | 29 -> 25 | 26-27 -> 25-26 | 24 -> 22 | 23 -> 22 |
+| anthracene (22-23) | 29-30 -> 29-30 | 31-32 -> 31-32 | 26 -> 24 | 28 -> 25 |
+| pyrene CPU (24) | 34 -> 33 | 34 -> 34-35 | 32 -> 26 | 29 -> 28 |
+| pyrene device loop / gpu_scf off (24) | 35-37 -> 34-36 | 35-36 -> 36-37 | 32 -> 26 | 29 -> 28 |
+
+Methanol 1e-11: diis 28 -> 26-27, adiis 30-32 -> 27. The only case that got worse is pyrene ADIIS at 1e-10 (median
++1, single runs up to +2 on the device); J/K summation order makes repeated runs differ by about 1 iteration.
+E_elec unchanged to 10 decimals in every run; default threshold 1e-6 unchanged (naphthalene 16/18, anthracene 19/19
+iterations, diis/adiis, rule does not fire). Not tested: plain mode, systems larger than pyrene, warm-started
+geometry sequences, other GPUs than the RTX 5090. The gap to the stored tensor remains (naphthalene 25 vs 23).
+
 ## 3. Proposed GPU stages (mirroring the xTB stages)
 
 Each stage keeps the rules that made the xTB port trustworthy: runtime `dlopen` plugin

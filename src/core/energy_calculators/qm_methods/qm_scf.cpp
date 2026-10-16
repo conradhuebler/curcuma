@@ -53,6 +53,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <string>
 
@@ -106,22 +107,39 @@ namespace {
 // problems with the SAME code; only the O(m^2 n^2) inner products are computed elsewhere.
 class QMScfAccelerator {
 public:
-    QMScfAccelerator(int max_size, bool adiis) : m_max(std::max(2, max_size)), m_adiis(adiis) {}
+    /// History depth max_size is clamped to 2..64 (one bit per slot in m_full_mask).
+    QMScfAccelerator(int max_size, bool adiis) : m_max(std::clamp(max_size, 2, 64)), m_adiis(adiis) {}
 
     /// Number of storage slots the history needs.
     int capacity() const { return m_max; }
 
     /// Reserve the storage slot for a new (F, P, e) entry; the oldest entry is dropped when
-    /// the history is full and its slot reused. Returns the slot index.
-    int push()
+    /// the history is full and its slot reused, otherwise the lowest free slot is taken.
+    /// full_build: F came from a full J/K build (see dropIncrementalEntries()). Returns the slot.
+    int push(bool full_build = true)
     {
-        int slot = static_cast<int>(m_slots.size());
+        int slot = 0;
         if ((int)m_slots.size() >= m_max) {
             slot = m_slots.front();
             m_slots.erase(m_slots.begin());
+        } else {
+            while (std::find(m_slots.begin(), m_slots.end(), slot) != m_slots.end()) ++slot;
         }
         m_slots.push_back(slot);
+        const std::uint64_t bit = std::uint64_t(1) << slot;
+        m_full_mask = full_build ? (m_full_mask | bit) : (m_full_mask & ~bit);
         return slot;
+    }
+    /// Claude Generated (Oct 2026): drop every entry whose Fock matrix came from an incremental
+    /// J/K build. Called when DirectFockCadence switches to full builds: those Fock matrices carry
+    /// the incremental screening noise, and keeping them in the Pulay subspace costs iterations
+    /// (measured: 1-6 fewer iterations without them, docs/QM_GPU_ROADMAP.md section 2).
+    void dropIncrementalEntries()
+    {
+        std::vector<int> kept;
+        for (int slot : m_slots)
+            if (m_full_mask & (std::uint64_t(1) << slot)) kept.push_back(slot);
+        m_slots = kept;
     }
     void setLastError(double e) { m_last_err = e; }
     /// Slots of the stored entries, oldest first.
@@ -148,6 +166,7 @@ private:
     bool m_adiis;
     double m_last_err = 0.0;
     std::vector<int> m_slots;
+    std::uint64_t m_full_mask = 0;  // bit s set: F in slot s came from a full J/K build (slots < 64)
 
     static Eigen::VectorXd unitNewest(int m)
     {
@@ -236,7 +255,8 @@ constexpr int kDirectRebuild = 8;
 // on recorded ||dP|| traces at scf_threshold 1e-10: no trigger in the stored-tensor and full-build
 // traces of benzene, naphthalene, anthracene; the pyrene full-build trace (slow tail near 2e-10)
 // would trigger 3 iterations before convergence; on incremental traces it fires 1-4 iterations
-// after the floor is reached.
+// after the floor is reached. At the switch the DIIS history drops its entries from incremental
+// builds (QMScfAccelerator::dropIncrementalEntries()).
 constexpr int kIncrementalStallCount = 2;
 constexpr double kIncrementalProgress = 0.5;
 constexpr double kIncrementalStallMaxDP = 1.0e-4;
@@ -469,7 +489,7 @@ bool QMEngine::runSCF()
         // history can support it; use the extrapolated Fock for the diagonalization.
         Matrix fock_use = fock;
         if (use_diis && iter >= m_diis_start) {
-            const int slot = diis.push();
+            const int slot = diis.push(cadence.since_full == 0);
             diis.setLastError(store.push(slot, fock, m_density, m_S, m_X));
             Eigen::MatrixXd G, M;
             Eigen::VectorXd a;
@@ -518,7 +538,10 @@ bool QMEngine::runSCF()
                                t_fock_ms, t_eig_ms, std::string());
             return true;
         }
-        if (cadence.observe(delta_P)) reportIncrementalStall(iter, cadence.best_dP, m_eri_screening);
+        if (cadence.observe(delta_P)) {
+            reportIncrementalStall(iter, cadence.best_dP, m_eri_screening);
+            diis.dropIncrementalEntries();  // keep only Fock matrices from full builds
+        }
 
         // Density update: damped (plain) or direct (diis -- the extrapolation
         // already smoothed the Fock). Reuses NDDO's update form.
@@ -653,7 +676,7 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
         // DIIS / ADIIS: history on the device, subspace solve here
         const auto t_d0 = std::chrono::steady_clock::now();
         if (use_diis && iter >= m_diis_start) {
-            const int slot = diis.push();
+            const int slot = diis.push(cadence.since_full == 0);
             double err = 0.0;
             if (!dev.diisPush(slot, err)) return fail("DIIS error vector");
             diis.setLastError(err);
@@ -705,7 +728,10 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
                                fmt::format("{} on {} (state setup {:.1f} ms)", dev.stats(), dev.name(), setup_ms));
             return 1;
         }
-        if (cadence.observe(delta_P)) reportIncrementalStall(iter, cadence.best_dP, m_eri_screening);
+        if (cadence.observe(delta_P)) {
+            reportIncrementalStall(iter, cadence.best_dP, m_eri_screening);
+            diis.dropIncrementalEntries();  // keep only Fock matrices from full builds
+        }
         if (!dev.acceptDensity(damping)) return fail("density update");
     }
 
