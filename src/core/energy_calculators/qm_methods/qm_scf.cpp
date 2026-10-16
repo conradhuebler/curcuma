@@ -50,8 +50,10 @@
 
 #include <Eigen/Dense>
 #include <fmt/format.h>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <string>
 
 namespace {
@@ -219,6 +221,69 @@ private:
 // Integral-direct SCF: full J/K rebuild after this many incremental builds (host and device loop).
 constexpr int kDirectRebuild = 8;
 
+// Claude Generated (Oct 2026): Fock-build cadence of the integral-direct SCF, shared by the host
+// and the device loop. Incremental builds on dP = P - P_ref are screened with the same absolute
+// threshold as a full build (Q_AB Q_CD max|dP| < eri_screening), so each one drops terms of up to
+// eri_screening per quartet whatever the size of dP. That error does not shrink with dP: the
+// accumulated Fock matrix carries a path-dependent noise of ~1e-10 Eh (naphthalene/def2-SVP at
+// eri_screening 1e-12), which shows up as a floor of ||dP||_F ~ 1e-8 (benzene) to 3e-7 (anthracene,
+// pyrene); below it the SCF cannot converge (docs/QM_GPU_ROADMAP.md section 2, "Incremental-build floor").
+// A full build is a fixed function of P (its screen only sees P), so full builds converge like the
+// stored tensor. Rule: once ||dP|| (below kIncrementalStallMaxDP) has not fallen below
+// kIncrementalProgress times its smallest earlier value for kIncrementalStallCount iterations in a
+// row, the rest of this SCF uses full builds. A run that converges before it stalls (every default
+// run measured) is unchanged; a false trigger costs time, never accuracy. The constants were chosen
+// on recorded ||dP|| traces at scf_threshold 1e-10: no trigger in the stored-tensor and full-build
+// traces of benzene, naphthalene, anthracene; the pyrene full-build trace (slow tail near 2e-10)
+// would trigger 3 iterations before convergence; on incremental traces it fires 1-4 iterations
+// after the floor is reached.
+constexpr int kIncrementalStallCount = 2;
+constexpr double kIncrementalProgress = 0.5;
+constexpr double kIncrementalStallMaxDP = 1.0e-4;
+
+struct DirectFockCadence {
+    bool direct = false;
+    bool have_ref = false;          // a full build exists (J/K of P_ref accumulated)
+    int since_full = 0;             // incremental builds since the last full one
+    bool incremental_off = false;   // stall seen: full builds for the rest of this SCF
+    double best_dP = std::numeric_limits<double>::infinity();
+    int stall = 0;
+
+    explicit DirectFockCadence(bool d) : direct(d) {}
+    bool nextFull() const { return !direct || !have_ref || incremental_off || since_full >= kDirectRebuild; }
+    void built(bool full)
+    {
+        have_ref = true;
+        since_full = full ? 0 : since_full + 1;
+    }
+    /// Feed ||P_new - P||_F of this iteration; true when incremental builds were just switched off.
+    bool observe(double delta_P)
+    {
+        if (!direct || incremental_off) return false;
+        const bool progress = delta_P < kIncrementalProgress * best_dP;
+        best_dP = std::min(best_dP, delta_P);
+        if (progress) {
+            stall = 0;
+            return false;
+        }
+        if (delta_P < kIncrementalStallMaxDP && ++stall >= kIncrementalStallCount) {
+            incremental_off = true;
+            return true;
+        }
+        return false;
+    }
+};
+
+// One line at verbosity >= 2 when the incremental scheme is switched off (diagnostic only).
+void reportIncrementalStall(int iter, double best_dP, double screening)
+{
+    if (CurcumaLogger::get_verbosity() >= 2)
+        CurcumaLogger::info(fmt::format(
+            "QM: integral-direct SCF: incremental J/K builds stalled near ||dP|| = {:.2e} (screening noise of "
+            "eri_screening {:.1e}); full J/K builds from iteration {} on",
+            best_dP, screening, iter + 2));
+}
+
 // Host storage of the DIIS/ADIIS history (the device loop keeps the same data in QMGpuSCF).
 struct HostDiisStore {
     std::vector<Matrix> F, P, e;  // indexed by slot
@@ -362,19 +427,21 @@ bool QMEngine::runSCF()
     // converges and the density-weighted screening then skips most quartets.
     // A full build every kDirectRebuild iterations bounds the accumulated
     // screening error; the final energy always comes from a full build.
+    // When ||dP|| stalls at the incremental screening noise, full builds only
+    // (DirectFockCadence).
     Matrix J_acc, K_acc, P_ref;
-    int since_full = 0;
+    DirectFockCadence cadence(direct);
     auto fockFromDensity = [&](const Matrix& P) -> Matrix {
-        if (!direct || P_ref.size() == 0 || since_full >= kDirectRebuild) {
+        const bool full = cadence.nextFull();
+        if (full) {
             buildJK(P, J_acc, K_acc);
-            since_full = 0;
         } else {
             Matrix dJ, dK;
             buildJK(P - P_ref, dJ, dK);
             J_acc += dJ;
             K_acc += dK;
-            ++since_full;
         }
+        cadence.built(full);
         P_ref = P;
         return m_H + J_acc - 0.5 * K_acc;
     };
@@ -451,6 +518,7 @@ bool QMEngine::runSCF()
                                t_fock_ms, t_eig_ms, std::string());
             return true;
         }
+        if (cadence.observe(delta_P)) reportIncrementalStall(iter, cadence.best_dP, m_eri_screening);
 
         // Density update: damped (plain) or direct (diis -- the extrapolation
         // already smoothed the Fock). Reuses NDDO's update form.
@@ -568,18 +636,16 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
     double t_fock_ms = 0.0, t_eig_ms = 0.0;
     m_scf_converged = false;
     m_scf_iterations = 0;
-    bool have_ref = false;
-    int since_full = 0;
+    DirectFockCadence cadence(direct);
 
     for (int iter = 0; iter < m_scf_max_iter; ++iter) {
         m_scf_iterations = iter + 1;
 
         // Fock (host: fockFromDensity)
-        const bool full = !direct || !have_ref || since_full >= kDirectRebuild;
+        const bool full = cadence.nextFull();
         const auto t_f0 = std::chrono::steady_clock::now();
         if (!dev.buildFock(jk, full)) return fail("Fock build");
-        have_ref = true;
-        since_full = full ? 0 : since_full + 1;
+        cadence.built(full);
         if (direct) m_direct_quartets += jk->lastQuartets();
         const double fock_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_f0).count();
         t_fock_ms += fock_ms;
@@ -639,6 +705,7 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
                                fmt::format("{} on {} (state setup {:.1f} ms)", dev.stats(), dev.name(), setup_ms));
             return 1;
         }
+        if (cadence.observe(delta_P)) reportIncrementalStall(iter, cadence.best_dP, m_eri_screening);
         if (!dev.acceptDensity(damping)) return fail("density update");
     }
 

@@ -9,6 +9,9 @@
  *     screening at the default 1e-12) must reach the stored-tensor energy.
  * (3) The same along a geometry sequence (UpdateMolecule + warm start), which
  *     checks that the direct shell-pair tables are rebuilt per geometry.
+ * (4) Tight threshold: benzene with -qm.scf_direct on and scf_threshold 1e-10 must
+ *     converge (incremental builds stall near ||dP|| ~ 1e-8 here; the SCF then
+ *     switches to full builds, DirectFockCadence in qm_scf.cpp) and reach the PySCF energy.
  *
  * Claude Generated (Sep 2026). GPL-3.0.
  */
@@ -28,6 +31,7 @@ static Mol registryMol(const char* name)
 }
 static Mol water() { return registryMol("H2O"); }
 static Mol methanol() { return registryMol("CH3OH"); }
+static Mol benzene() { return registryMol("C6H6"); }
 
 // (1) kernel check
 static bool checkKernel(const char* name, const Mol& mol, bool cartesian)
@@ -107,6 +111,24 @@ static bool checkGeometrySequence()
     return ok;
 }
 
+// (4) Claude Generated (Oct 2026): integral-direct SCF at a threshold below the incremental
+// screening noise. Before the stall rule this run ended unconverged after 60 iterations with
+// ||dP|| between 2e-9 and 8e-9. Reference: PySCF 2.14.0 RHF/def2-SVP (spherical), conv_tol 1e-12,
+// on the same geometry (library id benzene.validation): -230.5352741383 Eh.
+static bool checkTightDirect()
+{
+    const double e_ref = -230.5352741383;
+    json cfg = { { "basis", "def2-SVP" }, { "scf_threshold", 1e-10 }, { "scf_max_iterations", 60 },
+                 { "scf_direct", "on" }, { "threads", 4 } };
+    QMEngine ed(QMFunctional::HF, cfg);
+    ed.QMInterface::InitialiseMolecule(benzene());
+    const double e = ed.Calculation(false);
+    const bool ok = ed.scfConverged() && std::abs(e - e_ref) < 1e-8;
+    std::printf("tight  benzene        direct scf_threshold 1e-10: %s in %d it, E %.10f, E - E_PySCF %.2e  %s\n",
+                ed.scfConverged() ? "converged" : "NOT converged", ed.scfIterations(), e, e - e_ref, ok ? "ok" : "FAIL");
+    return ok;
+}
+
 int main()
 {
     CurcumaLogger::set_verbosity(0);
@@ -117,5 +139,6 @@ int main()
     ok &= checkSCF("water", water());
     ok &= checkSCF("methanol", methanol());
     ok &= checkGeometrySequence();
+    ok &= checkTightDirect();
     return ok ? 0 : 1;
 }

@@ -75,6 +75,44 @@ Since then the kernel itself is ~3x faster (tabulated Boys function, ket-primiti
 contraction, primitive screening, larger pair on the bra side): benzene direct 28.4 -> 8.6 s,
 naphthalene 195 -> 58 s; details in [NATIVE_QM_IMPLEMENTATION.md](NATIVE_QM_IMPLEMENTATION.md).
 
+**Incremental-build floor (Oct 16, 2026; AI-generated, machine-tested).** An incremental build on
+dP is screened with the same absolute threshold as a full one (`Q_ab Q_cd max|dP| < eri_screening`),
+so each build drops up to `eri_screening` per quartet however small dP is; the accumulated Fock matrix
+carries a path-dependent error that does not shrink with dP. Measured (HF/def2-SVP, CPU, 16 threads,
+diagnostic build comparing each Fock matrix with a full build and an unscreened one): naphthalene full
+build vs unscreened 5.0e-11 Eh (fixed), accumulated incremental vs full 2e-11 to 1.2e-10 Eh (varies),
+DIIS error max|e| stuck near 6e-10. ||dP||_F (AO basis) then floats at about 1e-8 (benzene), 3e-8
+(naphthalene), 1e-7 to 3e-7 (anthracene, pyrene) and never reaches 1e-9 or 1e-10 (CPU direct and
+device-direct alike). The floor moves with the screening threshold (naphthalene: 1e-8 to 7e-8 at 1e-12,
+1e-10 to 1e-9 at 1e-14, below 1e-10 at 1e-16) and disappears with a full build every iteration (23 iterations,
+the same as the stored tensor), so it comes from the incremental screening and not from DIIS or the
+convergence test. The full build is a fixed function of P (its screen sees only P, the quartet count stays
+constant near convergence), so full builds converge like the stored tensor.
+Fix (`DirectFockCadence` in `qm_scf.cpp`, host and device loop): once ||dP|| (below 1e-4) has not
+dropped below half its smallest earlier value for 2 iterations in a row, the rest of that SCF uses full
+builds. Convergence test and `eri_screening` are unchanged; verbosity 2 prints one line when it fires.
+
+| HF/def2-SVP, `-qm.scf_direct on` | before (60 it max) | after: iterations (switch at) | stored tensor | abs(E after - ORCA 6.1) |
+|---|---|---|---|---|
+| benzene (library `benzene.validation`), 1e-10, 4 threads | not converged | 24 (17) | - | PySCF: 1.1e-11 |
+| naphthalene 1e-10 | not converged | 29 (21) | 23 | 2.7e-9 |
+| anthracene 1e-10 | not converged | 30 (22) | - | 4.4e-9 |
+| pyrene 1e-10, CPU | not converged | 34 (24) | - | 2.8e-9 |
+| pyrene 1e-10, `-gpu cuda -qm.gpu_direct on` (device-resident loop) | not converged | 36 (24) | - | 2.8e-9 |
+
+At the default `scf_threshold` 1e-6 the rule never fired (CPU: benzene, naphthalene, anthracene, pyrene;
+device-direct: pyrene): same iteration counts and energies to 10 decimals; SCF loop times within the
+run-to-run spread (pyrene CPU 44.4-44.6 s before, 44.6-44.8 s after; device 16.05 s both). The quartet
+counts of repeated runs differ by up to ~700 in both versions (threaded summation order in J/K). Cost
+when it fires: 2-8 iterations more than the stored tensor or a full-build-only run, those with full builds. The device 2e gradient
+(screen `eri_screening`/100) is one build with the full density and has no such floor; device vs CPU
+gradient after a direct SCF at 1e-10: 5.1e-12 (naphthalene), 1.5e-11 Eh/Bohr (pyrene).
+`-qm.scf_mode adiis`, naphthalene 1e-10: not converged before, 27 iterations (switch at 21) after.
+Not tested: systems larger than pyrene, plain mode, warm-started geometry sequences at tight
+thresholds, other GPUs than the RTX 5090. The floor grows with size (benzene to pyrene: 1e-8 to 3e-7), so somewhat larger
+systems may stall at the default 1e-6 (extrapolated, not measured); the rule applies there as well. Regression check:
+`qm_direct_jk` part (4).
+
 ## 3. Proposed GPU stages (mirroring the xTB stages)
 
 Each stage keeps the rules that made the xTB port trustworthy: runtime `dlopen` plugin
@@ -226,7 +264,7 @@ rectangle element is launched), device-side symmetrisation, the resident SCF (Q-
 (`cuda/qm_gpu_scf.cu`, entry `curcuma_cuda_create_qm_scf`, seam `qm_gpu_scf_backend.h` -- a separate header
 so that the ~9 min kernel TUs need not recompile when it changes -- loader `gpu_plugin::createQmScf`, driver
 `QMEngine::runSCFDevice` in `qm_scf.cpp`). The loop control stays on the host and is the host loop's: same
-Fock cadence (full, or incremental on P - P_ref with a full rebuild every 8 builds in direct mode), same
+Fock cadence (full, or incremental on P - P_ref with a full rebuild every 8 builds in direct mode, full only after a stall, section 2), same
 convergence test ||P_new - P||_F < `scf_threshold`, same damping, same guess/warm start, same final full J/K
 build (`finishConvergedSCF`, shared). The DIIS/ADIIS class was split into subspace logic
 (`QMScfAccelerator`: slots, coefficients from the m x m Gram/ADIIS matrices) and storage (`HostDiisStore`
