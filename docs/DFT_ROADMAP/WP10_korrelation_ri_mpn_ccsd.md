@@ -159,10 +159,16 @@ Produktionstest steht aus.** Schritt 2 (RI-MP2): eigener Abschnitt unten.
 
   | System (n, o, v) | CPU 1 Thread | CPU 16 Threads | GPU (gespeicherter Device-Tensor) |
   |---|---|---|---|
-  | Benzol voll (114, 21, 93) | 3517 / 6.0 ms | 913 / 1.0 ms | 64 / 0.3 ms |
-  | Benzol fc (114, 15, 93) | 2458 / 3.6 ms | 656 / 0.5 ms | 63 / 0.2 ms |
-  | Naphthalin voll (180, 34, 146) | 57171 / 41 ms | 10196 / 6.8 ms | 199 / 0.7 ms |
-  | Naphthalin fc (180, 24, 146) | nicht gemessen | 7364 / 3.0 ms | 135 / 0.4 ms |
+  | Benzol voll (114, 21, 93) | 267 / 6.1 ms (Nachmessung, siehe Korrektur) | 68 / 1.0 ms (Nachmessung) | 64 / 0.3 ms |
+  | Benzol fc (114, 15, 93) | 2458 / 3.6 ms (ueberholt) | 656 / 0.5 ms (ueberholt) | 63 / 0.2 ms |
+  | Naphthalin voll (180, 34, 146) | 57171 / 41 ms (ueberholt, nicht nachgemessen) | 551 / 7.1 ms (Nachmessung) | 199 / 0.7 ms |
+  | Naphthalin fc (180, 24, 146) | nicht gemessen | 7364 / 3.0 ms (ueberholt) | 135 / 0.4 ms |
+
+  **Korrektur (Okt 2026, Nachmessung nach dem Merge, `-method mp2 -gpu none -qm.scf_threshold 1e-10`, Benzol, n=1):**
+  Transformation / Energie 267 / 6.1 ms (1 Thread), 117 / 2.0 ms (4 Threads), 68 / 1.0 ms (16 Threads); Naphthalin
+  (`-qm.scf_direct off`, 16 Threads) 551 / 7.1 ms. Die mit "ueberholt" markierten CPU-Werte der Tabelle sind 10 bis 20 mal
+  groesser als diese Nachmessung und waren nicht reproduzierbar; Ursache nicht geklaert (Vermutung, nicht geprueft:
+  Messung unter Last durch einen gleichzeitigen Build). Die GPU-Werte wurden nicht neu gemessen.
 
   CPU-Naphthalin mit `-qm.scf_direct off` (Tensor gespeichert); mit Standard (direkte SCF) kommt der Neuaufbau des
   Tensors dazu (8398 MB, 1572 ms). GPU mit `-qm.gpu_direct on`: Neuaufbau auf dem Host + Upload (599 ms) vor der
@@ -303,7 +309,7 @@ Lauf inkl. SCF; kanonisch CPU mit `-qm.scf_direct off` (gespeicherter Tensor), G
   mit ~1.7 TFLOPS (126 ms). Der kanonische GPU-Pfad bleibt bei diesen Groessen insgesamt gleich schnell, weil die
   Device-SCF den Tensor ohnehin haelt.
 - Die kanonischen CPU-Zeiten hier (Benzol 68 ms bei 16 Threads) sind viel kleiner als die der WP11-Tabelle oben
-  (913 ms); gemessen auf diesem Stand mit `-qm.scf_direct off`, Ursache des Unterschieds nicht untersucht.
+  (913 ms); bestaetigt durch Nachmessung des Leiters (siehe Korrektur in der WP11-Zeitentabelle).
 - **Nicht getestet:** Elemente ausser H, C, N, O, F (Li-Ne-Hilfsbasisdaten geladen, kein Molekuel gerechnet),
   geladene Molekuele, kartesische Basis (`-qm.cartesian_d true`), andere Orbitalbasen als def2-SVP, Systeme ueber
   246 BF, `-qm.ri j` + RI-MP2 nur auf H2O (JFIT, Tensor der SCF wiederverwendet: E(HF) und E_corr gegen PySCF mit
