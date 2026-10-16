@@ -35,6 +35,8 @@ public:
     std::string name() const override { return m_name; }
     int n() const override { return m_n; }
     bool downloadERI(double* host) const override;
+    /// WP11 (MP2): the stored device tensor, read by cuda/qm_gpu_mp2.cu.
+    const double* deviceERI() const override { return m_E; }
     std::string stats() const override { return m_stats; }
     void setStats(const std::string& s) { m_stats = s; }
 

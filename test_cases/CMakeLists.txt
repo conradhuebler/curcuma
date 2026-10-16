@@ -654,6 +654,8 @@ add_subdirectory(qm_grad)
 add_subdirectory(qm_gpu)
 # Native HF with density fitting (RI-J / RI-JK, WP10) vs PySCF + ORCA. Oct 2026.
 add_subdirectory(qm_ri)
+# Native canonical MP2 (WP11) vs PySCF, CPU and -gpu cuda. Oct 2026.
+add_subdirectory(qm_mp2)
 
 # Claude Generated (Sep 2026): interface-level gradient + frequency contract.
 # Guards two things nothing else covered:

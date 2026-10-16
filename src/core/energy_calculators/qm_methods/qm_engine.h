@@ -45,6 +45,8 @@ class RIJK;  // qm_ri.h (WP10 density fitting)
 }
 namespace qmint {
 class QMGpuRI;  // qm_gpu_ri_backend.h
+struct MP2Options;  // WP11, qm_mp2.h
+struct MP2Result;
 }
 
 /**
@@ -223,6 +225,10 @@ public:
     double scfThreshold() const { return m_scf_threshold; }
     // Energy components {ET, EV, EJ, Ex, E_elec} for the HF run (Hartree).
     std::vector<double> energyComponents() const;
+
+    /// WP11 (Claude Generated, Oct 2026): canonical closed-shell MP2 on the converged RHF of the
+    /// last Calculation(); CPU or device (-qm.gpu_mp2). Implemented in qm_mp2.cpp. False on error.
+    bool computeMP2(const qmint::MP2Options& opt, qmint::MP2Result& res);
 
 private:
     // Method identity
