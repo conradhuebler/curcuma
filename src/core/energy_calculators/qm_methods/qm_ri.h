@@ -157,6 +157,11 @@ public:
     const Matrix& tensor() const { return m_T; }
     /// mode j: J^-1 g applied on the host (exposed for the device path)
     Eigen::VectorXd fitCoefficients(const Eigen::VectorXd& g) const;
+    /// RI-MP2 (Claude Generated, Oct 2026): X has one row per row of tensor() and was obtained from
+    /// tensor() by a linear map on the orbital pair index (e.g. (Q|mn) -> (Q|ia)). Applies the metric
+    /// factor so that X^T X is the fitted integral: mode j (raw tensor) cholesky X := L^-1 X, eigen
+    /// X := w^-1/2 U^T X (nfit rows); mode jk: unchanged (the tensor is already B = L^-1 T).
+    void fitRows(Matrix& X) const;
     double tensorMB() const { return (double)m_T.rows() * m_T.cols() * 8.0 / 1.0e6; }
     std::string stats() const { return m_stats; }
     /// Time spent in factorDensity() since the last takeFactorMs() (diagnostic).

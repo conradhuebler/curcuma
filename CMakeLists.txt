@@ -575,6 +575,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/hf3c_method.cpp
         src/core/energy_calculators/qm_methods/qm_mp2.cpp
         src/core/energy_calculators/qm_methods/mp2_method.cpp
+        src/core/energy_calculators/qm_methods/qm_rimp2.cpp
         src/core/energy_calculators/qm_methods/gfnff_method.cpp
         src/core/energy_calculators/qm_methods/xtb_method.cpp
         src/core/energy_calculators/qm_methods/tblite_method.cpp
@@ -1124,6 +1125,8 @@ if(USE_CUDA)
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_ri.cu
         # Claude Generated (Oct 2026): native QM canonical MP2 on the device (WP11), cuBLAS only
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_mp2.cu
+        # Claude Generated (Oct 2026): native QM RI-MP2 pair energies on the device, cuBLAS only
+        src/core/energy_calculators/qm_methods/cuda/qm_gpu_rimp2.cu
     )
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY LANGUAGE CUDA)
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY CUDA_SEPARABLE_COMPILATION ON)

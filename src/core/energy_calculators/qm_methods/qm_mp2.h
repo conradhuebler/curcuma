@@ -57,6 +57,10 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(gpu_mp2, String, "auto",
           "With -gpu cuda|auto, MP2 transformation and energy sum on the device (cuBLAS DGEMM, FP64): auto | on (device whenever -gpu is active) | off (CPU). Reuses the stored device ERI tensor of the SCF, else uploads the host tensor. Any device error falls back to the CPU and is counted as qm_mp2.",
           "Correlation", {})
+    // Claude Generated (Oct 2026): RI-MP2 (methods ri-mp2, scs-ri-mp2, sos-ri-mp2), implementation qm_rimp2.cpp
+    PARAM(ri_mp2_aux, String, "def2-universal-JKFIT",
+          "RI-MP2: auxiliary basis for the correlation fit (ia|jb) ~ sum_P B_ia^P B_jb^P: def2-universal-JKFIT (default) | def2-universal-JFIT (def2/JK, def2/J accepted) | path to a Turbomole-format file. No def2-SVP/C file ships with curcuma, so RI-MP2 here uses a JK/J fitting set as correlation fitting basis: a method variant, not identical to RI-MP2/def2-SVP/C of other programs. Independent of -qm.ri (the SCF stays exact unless -qm.ri j|jk is given).",
+          "Correlation", {})
 END_PARAMETER_DEFINITION
 
 namespace qmint {
@@ -66,7 +70,9 @@ struct MP2Options {
     bool frozen_core = false;
     double max_memory_mb = 32000.0;  ///< host n^4 tensor limit when the SCF stored none
     double batch_mb = 2000.0;        ///< first-quarter batch memory
-    std::string gpu_mp2 = "auto";    ///< auto | on | off
+    std::string gpu_mp2 = "auto";    ///< auto | on | off (canonical and RI path)
+    bool ri = false;                 ///< RI-MP2 instead of canonical MP2 (QMEngine::computeRIMP2)
+    std::string ri_aux = "def2-universal-JKFIT";  ///< RI-MP2 auxiliary basis (-qm.ri_mp2_aux)
 };
 
 /// Result of one MP2 evaluation (Hartree, milliseconds).
@@ -82,6 +88,12 @@ struct MP2Result {
     double t_energy_ms = 0.0;     ///< pair-energy sum
     bool on_device = false;
     std::string info;             ///< where the tensor came from, batches, device stats
+    // RI-MP2 only (Claude Generated, Oct 2026)
+    bool ri = false;
+    int n_aux = 0;                ///< fitted auxiliary functions (rows of B)
+    std::string aux_name;         ///< e.g. def2-universal-JKFIT
+    double t_ri_setup_ms = 0.0;   ///< 3-index integrals (mn|P) + metric (0 when the SCF's RI tensor is reused)
+    std::string scf_ri;           ///< "" (exact SCF) or e.g. "RI-JK def2-universal-JKFIT"
 };
 
 /// Number of frozen core orbitals for an atom of nuclear charge Z (chemical core of the
@@ -101,5 +113,23 @@ int frozenCoreOrbitals(int Z);
 /// Claude Generated (Oct 2026, WP11).
 void mp2EnergyHost(const double* eri, int n, const Matrix& C, const Vector& eps, int n_frozen, int n_occ,
                    int threads, double batch_mb, MP2Result& res);
+
+/// @brief C (m x n) = A (m x k) * B(n x k)^T, all row-major and contiguous (lda = ldb = k, ldc = n).
+/// Own register-blocked kernel (4 x 4 dot products, single thread): the build links the system BLAS
+/// through Eigen, which on the development machine is the single-threaded reference netlib BLAS
+/// (~2.7 GFLOPS); this kernel ran at ~29 GFLOPS per thread there. Callers thread over independent calls.
+/// Claude Generated (Oct 2026, RI-MP2).
+void gemmABt(const double* A, int m, const double* B, int n, int k, double* C);
+
+/// @brief RI-MP2 pair energies from the fitted 3-index tensor on the host.
+/// @param B   fitted (ia|P) factors, layout [i][a][P] (o*v rows of naux), so that
+///            (ia|jb) = sum_P B[i][a][P] B[j][b][P]
+/// @param eo, ev  active occupied (o) and virtual (v) orbital energies
+/// Same E_OS / E_SS expression as mp2EnergyHost; loops over pairs i >= j (the (j,i) pair has the
+/// same energy), one v x v GEMM per pair, pair energies summed in fixed order afterwards (result
+/// independent of the thread count). Fills e_os, e_ss, t_energy_ms.
+/// Claude Generated (Oct 2026, RI-MP2).
+void riMp2EnergyHost(const double* B, int o, int v, int naux, const double* eo, const double* ev, int threads,
+                     MP2Result& res);
 
 }  // namespace qmint

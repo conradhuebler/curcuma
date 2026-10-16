@@ -534,6 +534,13 @@ const std::vector<MethodDescriptor>& MethodFactory::methodTable()
           [](const std::string& m, const json& c) -> std::unique_ptr<ComputationalMethod> {
               CurcumaLogger::success("Method '" + m + "' resolved to native canonical MP2");
               return std::make_unique<MP2Method>(m, c); } },
+        // Claude Generated (Oct 2026): RI-MP2 on the native RHF (aux -qm.ri_mp2_aux, default def2-universal-JKFIT).
+        { {"ri-mp2", "scs-ri-mp2", "sos-ri-mp2"}, "Quantum Methods (native)",
+          "Native RI-MP2 / SCS / SOS on the native RHF (aux def2-universal-JKFIT by default, a JK set as correlation fitting basis, not def2-SVP/C; H-Ne, closed shell, energy only)",
+          always, {{"Native", always}},
+          [](const std::string& m, const json& c) -> std::unique_ptr<ComputationalMethod> {
+              CurcumaLogger::success("Method '" + m + "' resolved to native RI-MP2");
+              return std::make_unique<MP2Method>(m, c); } },
         // ---- native force fields ----
         { {"gfnff", "gfnff-fast"}, "Force Fields (native)", "GFN-FF, native (gfnff-fast: frozen charges/CN; -gpu cuda|rocm)",
           always, {{"Native", always},

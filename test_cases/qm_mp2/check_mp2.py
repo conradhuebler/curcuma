@@ -11,6 +11,9 @@ def2-SVP spherical, frozen=None or the chemical frozen core).
                 (ctest SKIP) when no CUDA plugin / device is usable
   --cpu-check   also runs the CPU path (same flags without -gpu) and requires |dE_corr| <= --tol-cpu
   --extra=...   further flags (one string)
+  --ri-ref F    RI-MP2 mode (methods ri-mp2, scs-ri-mp2, sos-ri-mp2): compare with F (reference_ri.json,
+                scripts/rimp2_reference.py: PySCF with the same auxiliary basis files); --aux selects the
+                auxiliary set (adds -qm.ri_mp2_aux), --scf rijk adds -qm.ri jk (RI-JK SCF reference)
 Passes when every compared quantity agrees within --tol (default 1e-8 Eh; E(HF) within --tol-hf).
 """
 import argparse, json, os, re, subprocess, sys
@@ -27,10 +30,20 @@ ap.add_argument("--extra", default="")
 ap.add_argument("--tol", type=float, default=1e-8)
 ap.add_argument("--tol-hf", type=float, default=1e-8)
 ap.add_argument("--tol-cpu", type=float, default=1e-10)
+ap.add_argument("--ri-ref", default="")
+ap.add_argument("--aux", default="def2-universal-JKFIT")
+ap.add_argument("--scf", default="exact", choices=["exact", "rijk"])
 a = ap.parse_args()
 
-R = json.load(open(a.ref))["cases"][a.mol]
-ref = R["fc" if a.fc else "full"]
+if a.ri_ref:
+    # Claude Generated (Oct 2026, RI-MP2)
+    RC = json.load(open(a.ri_ref))["cases"][a.mol]
+    R = {"xyz": RC["xyz"], "hf": RC[a.scf]["hf"]}
+    ref = RC[a.scf][a.aux]["fc" if a.fc else "full"]
+    a.extra += " -qm.ri_mp2_aux " + a.aux + (" -qm.ri jk" if a.scf == "rijk" else "")
+else:
+    R = json.load(open(a.ref))["cases"][a.mol]
+    ref = R["fc" if a.fc else "full"]
 xyz = os.path.join(os.path.dirname(os.path.abspath(a.ref)), "..", R["xyz"])
 PAT = {
     "hf": r"E\(HF\)\s*=\s*(-?\d+\.\d+) Eh",
@@ -67,17 +80,20 @@ def run(gpu):
 
 v, txt = run(a.gpu)
 for line in txt.splitlines():
-    if "MP2 timing" in line or "canonical MP2" in line:
+    if "MP2 timing" in line or "canonical MP2" in line or "RI-MP2 (aux" in line:
         print(line.strip())
+if a.ri_ref and ("RI-MP2 (aux " + a.aux) not in txt:
+    sys.exit("the RI-MP2 path with aux " + a.aux + " did not run")
 if a.gpu:
-    if "MP2 timing" not in txt or re.search(r"MP2 timing:.*\(cuda", txt) is None:
+    dev = r"RI-MP2 timing:.*energy on cuda" if a.ri_ref else r"MP2 timing:.*\(cuda"
+    if "MP2 timing" not in txt or re.search(dev, txt) is None:
         sys.exit("the device MP2 path did not run")
     if "GPU fallbacks during this run" in txt:
         print(txt[-3000:])
         sys.exit("the -gpu run reported a fallback")
 
 expect_total = R["hf"] + {"mp2": ref["e_corr"], "scs-mp2": 1.2 * ref["e_os"] + ref["e_ss"] / 3.0,
-                          "sos-mp2": 1.3 * ref["e_os"]}[a.method]
+                          "sos-mp2": 1.3 * ref["e_os"]}[a.method.replace("ri-", "")]
 checks = [
     ("E(HF)", v["hf"], R["hf"], a.tol_hf),
     ("E_OS", v["os"], ref["e_os"], a.tol),

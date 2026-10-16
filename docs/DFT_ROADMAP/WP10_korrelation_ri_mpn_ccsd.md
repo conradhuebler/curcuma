@@ -1,8 +1,9 @@
 # WP10-WP14 -- Dichtefitting (RI), MPn und CCSD, plus Bewertung von Schwarz-Ansaetzen
 
-- **Status:** WP10 RI-J/RI-JK (HF, CPU + CUDA) und WP11 Schritt 1+3 (kanonisches RMP2, SCS/SOS, CPU + CUDA) sind
-  implementiert, 🤖 AI-generated, ⚙️ machine-tested (Okt 2026, Abschnitte WP10 und WP11 unten); RI-C/RI-MP2,
-  Gradienten und WP13-WP15 sind Plan.
+- **Status:** WP10 RI-J/RI-JK (HF, CPU + CUDA), WP11 Schritt 1+3 (kanonisches RMP2, SCS/SOS, CPU + CUDA) und
+  WP11 Schritt 2 (RI-MP2 mit def2-universal-JKFIT/-JFIT als Korrelations-Hilfsbasis, CPU + CUDA) sind
+  implementiert, 🤖 AI-generated, ⚙️ machine-tested (Okt 2026, Abschnitte WP10, WP11 und RI-MP2 unten); RI-MP2 mit
+  def2-SVP/C, Gradienten und WP13-WP15 sind Plan.
 - **Abhaengigkeit:** WP3 (RHF, ERI-Engine, `QMEngine`), fuer die GPU-Teile die Stufen Q-G1/Q-G2 aus
   [../QM_GPU_ROADMAP.md](../QM_GPU_ROADMAP.md).
 - **Referenzen auf dieser Maschine:** PySCF (venv `~/.venvs/qmref`), ORCA 6.1 (`~/Downloads/orca_6_1_0_...`).
@@ -51,8 +52,9 @@ Metrik, Fit, Parser, Engine-Anbindung), `cuda/qm_gpu_ri.cu` + `qm_gpu_ri_backend
   PCCP 8, 1057 (2006) fuer def2/J; Weigend, PCCP 4, 4285 (2002) fuer def2/JK) -- **Lizenzfrage fuer den Betreiber
   offen**. Der lokale JKFIT-Download bricht
   nach Pd ab (H-Ne vollstaendig). Dieselben Daten wie ORCA `def2/J`/`def2/JK` (Energien unten auf 2e-9 Eh).
-  **def2-SVP/C (RI-C) fehlt**: RI-MP2 ist nicht implementiert und ist nach dem Merge mit WP11 zu planen.
-- **Nicht implementiert:** RI-C/RI-MP2, Gradient mit RI (`-opt`/`-gradient` mit `-qm.ri j|jk` brechen mit Fehler ab,
+  **def2-SVP/C (RI-C) fehlt**: RI-MP2 benutzt deshalb def2-universal-JKFIT (Standard) oder -JFIT als
+  Korrelations-Hilfsbasis (Betreiberentscheidung Okt 2026; Abschnitt RI-MP2 unten).
+- **Nicht implementiert:** RI-C mit def2-SVP/C, Gradient mit RI (`-opt`/`-gradient` mit `-qm.ri j|jk` brechen mit Fehler ab,
   `ctest qm_ri_gradient_error`), hf-3c mit RI (ignoriert mit Warnung: HF-3c ist mit exakten Integralen in MINIX
   definiert, `qm_ri_hf3c_ignored`), offene Schalen, Elemente ab Na, integral-direktes RI, lokales Fitten,
   Speicherkompression des 3-Index-Tensors (voll n^2, nicht n(n+1)/2), device-residenter SCF-Loop mit RI (RI laeuft
@@ -127,7 +129,7 @@ Metrik, Fit, Parser, Engine-Anbindung), `cuda/qm_gpu_ri.cu` + `qm_gpu_ri_backend
 ## WP11 -- MO-Transformation und MP2
 
 **Stand Okt 2026: Schritt 1 (CPU und GPU) und Schritt 3 umgesetzt; 🤖 AI-generated, ⚙️ machine-tested, menschlicher
-Produktionstest steht aus.** Schritt 2 (RI-MP2) offen (wartet auf WP10).
+Produktionstest steht aus.** Schritt 2 (RI-MP2): eigener Abschnitt unten.
 
 - **Code:** `qm_mp2.{h,cpp}` (Parameter, `qmint::mp2EnergyHost`, `QMEngine::computeMP2`), `mp2_method.{h,cpp}`
   (Methoden `mp2`, `scs-mp2`, `sos-mp2`), `cuda/qm_gpu_mp2.cu` + Naht `qm_gpu_mp2_backend.h` (Eintrag
@@ -168,7 +170,7 @@ Produktionstest steht aus.** Schritt 2 (RI-MP2) offen (wartet auf WP10).
 - **Nicht getestet:** offene Schale (nicht implementiert), Elemente ausser H, C, N, O, F (Li-Ne-frozen-core-Regel nur auf
   C, N, O, F gegen PySCF/ORCA geprueft), andere Basen als def2-SVP, kartesisch 6d, Systeme ueber 180 BF, ROCm/Vulkan
   (keine Implementierung, `-gpu rocm` faellt gezaehlt auf die CPU), geladene Molekuele.
-- **Nicht implementiert gegenueber ORCA/PySCF:** RI-MP2, integral-direktes MP2, MP2-Gradient und -Dichte,
+- **Nicht implementiert gegenueber ORCA/PySCF:** integral-direktes MP2, MP2-Gradient und -Dichte,
   frei waehlbare SCS-Faktoren, Ausnutzung der Permutationssymmetrie in der Transformation (Faktor ~2 offen).
 
 Vergleich (Eh; curcuma `-qm.scf_threshold 1e-10 -qm.threads 16`; ORCA ExtremeSCF, 9 gedruckte Stellen; "SCS - ORCA"
@@ -201,6 +203,115 @@ Urspruenglicher Plan:
   Startpunkt. Zuerst die CPU-Version fertigstellen und validieren.
 - **Offen:** Gradient (Z-Vektor, relaxierte Dichte) ist ein eigenes Arbeitspaket; ohne ihn ist MP2 nur
   Einzelpunkt, kein `-opt`.
+
+## WP11 Schritt 2 -- RI-MP2
+
+**Stand Okt 2026: closed-shell RI-MP2 (CPU und CUDA), 🤖 AI-generated, ⚙️ machine-tested; menschlicher
+Produktionstest steht aus.** Code: `qm_rimp2.cpp` (`QMEngine::computeRIMP2`, `qmint::riMp2EnergyHost`,
+`qmint::gemmABt`), `RIJK::fitRows` in `qm_ri.cpp`, `cuda/qm_gpu_rimp2.cu` + Naht `qm_gpu_rimp2_backend.h`
+(Eintrag `curcuma_cuda_qm_rimp2_energy`), Methoden in `mp2_method.cpp`. Tests `test_cases/qm_mp2/` (`qm_rimp2_*`),
+Referenzen `scripts/rimp2_reference.py` -> `test_cases/qm_mp2/reference_ri.json`.
+
+- **Hilfsbasis (Methodenvariante):** curcuma hat keine def2-SVP/C-Datei. Nach Betreiberentscheidung dient
+  def2-universal-JKFIT (Standard) bzw. -JFIT als Korrelations-Hilfsbasis (`-qm.ri_mp2_aux`, auch def2/JK, def2/J
+  oder ein Dateipfad). Das ist **nicht** RI-MP2/def2-SVP/C anderer Programme; die Ausgabe sagt es ("RI-MP2 (aux
+  def2-universal-JKFIT; ... method variant, not RI-MP2/def2-SVP/C)").
+- **Methoden:** `ri-mp2`, `scs-ri-mp2`, `sos-ri-mp2` (gleiche OS/SS-Aufteilung und Faktoren wie kanonisch),
+  `-qm.frozen_core` wie kanonisch. Die SCF bleibt exakt (`-qm.ri off`); mit `-qm.ri jk` ist E(HF) die RI-JK-Energie,
+  die Ausgabe markiert das (`E(HF) = ... (RI-JK def2-universal-JKFIT SCF)`), und bei gleicher Hilfsbasisdatei wird
+  der RI-Tensor der SCF wiederverwendet (kein zweites Setup).
+- **Algorithmus:** eigenes RIJK-Setup im Modus j (rohe (Q|mn) + Metrikfaktor, Cholesky Standard, `eigen` ueber
+  `-qm.ri_metric`), dann (Q|ia) = Co^T T^Q Cv je Hilfsfunktion, Metrikfaktor auf die o v Spalten (`fitRows`; billiger
+  als auf n^2 Spalten), Transposition zu B[i][a][P]. Energie CPU: Paare i >= j, je Paar eine v x v-Kontraktion
+  K = B_i B_j^T, Faktor 2 fuer i != j, Paarenergien in fester Reihenfolge summiert (unabhaengig von der Threadzahl).
+  GPU: B einmal hochgeladen, je i-Block eine cuBLAS-DGEMM (FP64), Paarenergie-Kernel wie kanonisch (ohne
+  i <-> j-Symmetrie). Kein Batching auf der CPU noetig (Zusatzspeicher je Thread v^2).
+- **Speicher:** Setup-Tensor naux n^2 (Grenze `-qm.ri_max_memory_mb`, Fehler mit Groessenangabe), B o v naux
+  zweimal (vor/nach Transposition, gleiche Grenze). Anthracen: Tensor 596 MB, B 92 MB.
+- **GPU:** `-qm.gpu_mp2 auto|on|off` gilt fuer den kanonischen und den RI-Pfad (kein eigener Schalter); Fehler ->
+  CPU, gezaehlt als `qm_ri_mp2`. Nur die Energie (GEMM + Summe) laeuft auf dem Device; Integrale, Metrik und
+  B-Transformation bleiben auf dem Host.
+- **Gradient:** keiner; `-opt`/`-gradient` brechen mit "ri-mp2 has no analytic gradient" ab (`qm_rimp2_opt_error`).
+- **BLAS (gemessen):** das Release-Build linkt die Referenz-netlib-libblas (einfaedig); Eigen-GEMM laeuft darueber
+  mit 2.7 GFLOPS (199 x 1230 x 9353). Eigens interne GEMM (ohne `EIGEN_USE_BLAS`) erreicht 58-60 GFLOPS auf einem
+  Thread, ist aber nicht pro Datei abschaltbar (`EIGEN_USE_BLAS` gilt global ueber PCH/`curcuma_eigen_config.h`,
+  gemischte Instanziierungen waeren ein ODR-Verstoss). Deshalb `qmint::gemmABt` (4x4-Registerbloecke, Skalarprodukte
+  entlang des zusammenhaengenden Index): 29 GFLOPS auf 1 Thread, 369 GFLOPS mit 16 Threads in der Paarschleife
+  (netlib in derselben Schleife: 5.6 bzw. 78 GFLOPS). BLAS-Auswahl des Builds nicht geaendert.
+
+**Validierung** (HF/def2-SVP sphaerisch, `-qm.scf_threshold 1e-10`, curcuma 16 Threads). PySCF 2.14: Hilfsbasis aus
+curcumas eigenen `.turbomole`-Dateien gelesen (gleiche Daten), manuelle Auswertung ueber `df.incore.cholesky_eri`,
+gegen `mp.dfmp2.DFMP2` <= 3e-15 Eh; gleiche naux (z.B. Benzol 558). ORCA 6.1: `! RHF RI-MP2 def2-SVP ExtremeSCF
+NoFrozenCore|FrozenCore` + `%basis AuxC "def2/JK" end` (Ausgabe: "AuxC ... def2/JK", 113 Funktionen fuer H2O, keine
+J/K-Hilfsbasis in der SCF, also exakte SCF), SCS ueber `%mp2 DoSCS true end` (dann ist die gedruckte
+RI-MP2-Korrelationsenergie die SCS-Energie). RI-Fehler = RI-MP2 minus kanonisches MP2 (WP11, gleiche SCF).
+
+| Molekuel | | E_corr RI-MP2 (JKFIT) | - PySCF | - ORCA | SCS - ORCA | RI - kanonisch (Eh) | je Atom |
+|---|---|---|---|---|---|---|---|
+| H2O | voll | -0.2000132566 | 5.9e-10 | 4.0e-10 | 4.9e-11 | -2.90e-05 | -9.7e-06 |
+| H2O | fc | -0.1974146621 | 6.3e-10 | -9.1e-11 | 5.2e-11 | -2.91e-05 | -9.7e-06 |
+| NH3 | voll | -0.1935490206 | -9.4e-11 | 3.5e-10 | 1.8e-10 | 8.73e-05 | 2.2e-05 |
+| NH3 | fc | -0.1907850152 | -9.4e-11 | 8.3e-10 | 1.8e-10 | 8.70e-05 | 2.2e-05 |
+| CH4 | voll | -0.1645809798 | 1.5e-10 | 1.9e-10 | -6.6e-11 | 1.54e-04 | 3.1e-05 |
+| CH4 | fc | -0.1610852210 | 1.4e-10 | -2.2e-11 | 6.9e-10 | 1.54e-04 | 3.1e-05 |
+| HF | voll | -0.2015397788 | -4.1e-10 | 2.0e-10 | -1.3e-10 | -3.40e-05 | -1.7e-05 |
+| HF | fc | -0.1995015462 | -4.1e-10 | -1.9e-10 | 2.0e-10 | -3.41e-05 | -1.7e-05 |
+| H2O verzerrt | voll | -0.2000448210 | -3.1e-10 | -1.6e-11 | 4.3e-10 | -2.92e-05 | -9.7e-06 |
+| H2O verzerrt | fc | -0.1974439973 | -3.2e-10 | 7.0e-10 | 5.8e-10 | -2.93e-05 | -9.8e-06 |
+| Formaldehyd verzerrt | voll | -0.3259877876 | 3.0e-10 | 3.5e-10 | 1.1e-09 | 1.19e-05 | 3.0e-06 |
+| Formaldehyd verzerrt | fc | -0.3208798889 | 2.9e-10 | 1.1e-09 | 9.5e-10 | 1.18e-05 | 2.9e-06 |
+| Formaldehyd | voll | -0.3214440762 | -1.7e-09 | 8.0e-10 | 5.4e-10 | 1.01e-05 | 2.5e-06 |
+| Formaldehyd | fc | -0.3162082526 | -1.7e-09 | 4.3e-10 | 9.0e-10 | 9.88e-06 | 2.5e-06 |
+| Benzol | voll | -0.7969025894 | -2.5e-10 | 1.6e-09 | 1.2e-09 | 1.28e-04 | 1.1e-05 |
+| Benzol | fc | -0.7793356368 | -2.5e-10 | 1.2e-09 | 1.2e-09 | 1.27e-04 | 1.1e-05 |
+| Naphthalin | voll | -1.3240815899 | 6.3e-10 | - | - | 1.46e-04 | 8.1e-06 |
+| Naphthalin | fc | -1.2945641517 | 6.8e-10 | - | - | 1.44e-04 | 8.0e-06 |
+| Anthracen | voll | -1.8526760336 (`-qm.scf_threshold 1e-8`) | - | - | - | 1.61e-04 | 6.7e-06 |
+
+- JFIT (H2O, Benzol, voll und fc): - PySCF <= 5.8e-10, - ORCA (`AuxC "def2/J"`) <= 1.8e-9, SCS - ORCA <= 1.6e-9.
+- RI-JK-SCF + RI-MP2 (`-qm.ri jk`, Tensor wiederverwendet; H2O, Formaldehyd, Benzol, voll und fc): E(HF) - PySCF
+  <= 4.6e-12, - ORCA (`! RIJK def2/JK`) <= 7.7e-10; E_corr - PySCF <= 1.7e-9, - ORCA <= 1.7e-9, SCS - ORCA <= 1.3e-9.
+- `ctest -L qm_mp2`: 58/58 (davon 28 neue RI-MP2-Tests, 3 davon auf der GPU); groesste Abweichung zu PySCF in den Tests
+  1.7e-9 Eh (Formaldehyd). GPU gegen CPU: E_corr auf allen 12 Stellen gleich (Benzol voll/fc, Formaldehyd fc;
+  Naphthalin/Anthracen 1.3e-11 bzw. 1.1e-11 Unterschied, andere Summationsreihenfolge).
+- Der RI-Fehler (3e-6 bis 3e-5 Eh je Atom) ist eine Messung, kein Testkriterium. Mit def2-SVP/C waere er nach der
+  Literatur kleiner (aus dem Gedaechtnis, nicht gemessen; keine def2-SVP/C-Datei vorhanden).
+
+**Zeiten** (Intel Core Ultra 9 285K, RTX 5090, netlib-BLAS, `-qm.scf_threshold 1e-8`, volle Korrelation; ms des
+MP2-Teils: kanonisch Transformation / Energie, RI Setup / B-Transformation / Energie; Wand und max RSS fuer den ganzen
+Lauf inkl. SCF; kanonisch CPU mit `-qm.scf_direct off` (gespeicherter Tensor), GPU mit dem Device-Tensor der SCF; RI
+"exakt" = exakte SCF (Standard `scf_direct auto`, Naphthalin/Anthracen integral-direkt), "RI-JK" = `-qm.ri jk`):
+
+| System (n, o, v, naux) | Pfad | 1 Thread | 16 Threads | GPU |
+|---|---|---|---|---|
+| Benzol (114, 21, 93, 558) | kanonisch | 271 / 6.1 ms; 4.3 s, 1.6 GB | 68 / 1.1 ms; 1.25 s, 1.8 GB | 63 / 0.3 ms; 0.63 s |
+| | RI, SCF exakt | 236 / 58 / 74 ms; 4.3 s, 1.4 GB | 35 / 8.4 / 5.1 ms; 1.21 s | 35 / 9.3 / 55 ms; 0.66 s |
+| | RI, SCF RI-JK | 0 / 26 / 74 ms; 1.31 s, 138 MB | 0 / 5.3 / 5.2 ms; 0.23 s | 0 / 6.8 / 3.9 ms; 0.62 s |
+| Naphthalin (180, 34, 146, 894) | kanonisch | 2584 / 30 ms; 27.8 s, 9.8 GB | 561 / 6.9 ms; 8.9 s, 10.4 GB | 199 / 0.7 ms; 1.30 s |
+| | RI, SCF exakt | 867 / 309 / 771 ms; 131 s, 372 MB | 114 / 33 / 51 ms; 9.9 s | 115 / 34 / 77 ms; 1.33 s |
+| | RI, SCF RI-JK | 0 / 147 / 772 ms; 7.7 s, 369 MB | 0 / 18 / 51 ms; 1.08 s | 0 / 20 / 30 ms; 1.19 s |
+| Anthracen (246, 47, 199, 1230) | kanonisch | nicht gerechnet | 3685 / 35 ms; 34.2 s, 31.3 GB | 1125 / 2.1 ms; 3.6 s |
+| | RI, SCF exakt | 2002 / 1301 / 3828 ms; 371 s, 852 MB | 278 / 148 / 327 ms; 27.7 s | 275 / 142 / 135 ms; 3.0 s |
+| | RI, SCF RI-JK | 0 / 518 / 3809 ms; 28.9 s, 839 MB | 0 / 54 / 288 ms; 3.6 s | 0 / 56 / 135 ms; 2.4 s |
+
+- **Ehrlich:** der RI-Korrelationsteil ist auf der CPU (16 Threads) 3x (Naphthalin) bis 5x (Anthracen) schneller als
+  die kanonische Transformation, der Speicher faellt von n^4 (31 GB Anthracen) auf unter 1 GB. Die Wandzeit bestimmt
+  mit exakter SCF aber die SCF (integral-direkt: Naphthalin 1 Thread 131 s gegen 28 s kanonisch mit gespeichertem
+  Tensor); erst mit `-qm.ri jk` wird der ganze Lauf schnell (Anthracen 3.6 s gegen 34 s). Auf der GPU ist die
+  RI-Energie bei Benzol/Naphthalin mit exakter SCF langsamer als 16 CPU-Threads (55 bzw. 77 ms): der erste
+  cuBLAS-Aufruf im Prozess kostet ~50 ms (mit RI-JK-SCF, cuBLAS schon geladen, 3.9 ms); bei Anthracen laeuft die GEMM
+  mit ~1.7 TFLOPS (126 ms). Der kanonische GPU-Pfad bleibt bei diesen Groessen insgesamt gleich schnell, weil die
+  Device-SCF den Tensor ohnehin haelt.
+- Die kanonischen CPU-Zeiten hier (Benzol 68 ms bei 16 Threads) sind viel kleiner als die der WP11-Tabelle oben
+  (913 ms); gemessen auf diesem Stand mit `-qm.scf_direct off`, Ursache des Unterschieds nicht untersucht.
+- **Nicht getestet:** Elemente ausser H, C, N, O, F (Li-Ne-Hilfsbasisdaten geladen, kein Molekuel gerechnet),
+  geladene Molekuele, kartesische Basis (`-qm.cartesian_d true`), andere Orbitalbasen als def2-SVP, Systeme ueber
+  246 BF, `-qm.ri j` + RI-MP2 nur auf H2O (JFIT, Tensor der SCF wiederverwendet: E(HF) und E_corr gegen PySCF mit
+  DF-Coulomb + exaktem Austausch 4e-12 bzw. 8.0e-11 Eh, von Hand, nicht im ctest), Metrik `eigen` mit verworfenen Funktionen, `-hessian`/`-md` mit ri-mp2, ROCm/Vulkan (keine
+  Implementierung), Speichergrenzen-Fehler (nur Codepfad).
+- **Nicht implementiert gegenueber ORCA/PySCF:** def2-SVP/C (und jede andere -/C-Basis als Datei), RI-MP2-Gradient,
+  offene Schalen, integral-direkte 3-Index-Integrale (Setup-Tensor naux n^2 voll im Speicher), Batching der
+  B-Transformation fuer sehr grosse Systeme, i <-> j-Symmetrie auf der GPU.
 
 ## WP12 -- MP3 bis MP5: gestrichen
 
@@ -332,7 +443,8 @@ Die folgende Tabelle ist eine **Hypothesenliste aus dem Quelltext und der Litera
    Modell (Opus oder Fable) durchdenken lassen.
 
 1. ~~MP5 woertlich?~~ Erledigt: MP2 (O(N^5)), WP12 gestrichen.
-2. Hilfsbasissaetze: def2/J und def2/JK liegen vor (BSE, H-Ne, Okt 2026); offen sind die Lizenzfrage und
-   def2-SVP/C fuer RI-MP2.
+2. Hilfsbasissaetze: def2/J und def2/JK liegen vor (BSE, H-Ne, Okt 2026); offen ist die Lizenzfrage. RI-MP2 nutzt
+   nach Betreiberentscheidung def2-universal-JKFIT/-JFIT als Korrelations-Hilfsbasis; ob def2-SVP/C nachgeladen
+   werden soll, ist offen.
 3. (T)-Korrektur und Gradienten in den Plan aufnehmen?
 4. ~~Vault-Fuehrung der Schwarz-Bewertung~~ Erledigt: Pfad 5 in der Vault-Notiz *curcuma Schwarz-Attention*.

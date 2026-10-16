@@ -6,6 +6,9 @@
  *   mp2      E = E(RHF) + E_OS + E_SS
  *   scs-mp2  E = E(RHF) + 1.2 E_OS + 1/3 E_SS   (Grimme 2003)
  *   sos-mp2  E = E(RHF) + 1.3 E_OS              (Jung et al. 2004)
+ *   ri-mp2, scs-ri-mp2, sos-ri-mp2: the same with density-fitted (ia|jb) (QMEngine::computeRIMP2,
+ *            qm_rimp2.cpp; auxiliary basis -qm.ri_mp2_aux, default def2-universal-JKFIT -- a JK fitting
+ *            set as correlation fitting basis, a method variant; Claude Generated, Oct 2026)
  * on top of the native QMEngine (RHF, -qm.basis, -qm.* SCF settings). The MP2 part is
  * QMEngine::computeMP2 (qm_mp2.cpp); its settings are the qm-module parameters in qm_mp2.h
  * (-qm.frozen_core, -qm.mp2_max_memory_mb, -qm.mp2_batch_mb, -qm.gpu_mp2).
@@ -31,7 +34,7 @@
 
 class MP2Method : public ComputationalMethod {
 public:
-    /// variant: "mp2" | "scs-mp2" | "sos-mp2" (selects which correlation energy the total uses)
+    /// variant: "mp2" | "scs-mp2" | "sos-mp2" | "ri-mp2" | "scs-ri-mp2" | "sos-ri-mp2"
     MP2Method(const std::string& variant, const json& config = json{});
     ~MP2Method() override = default;
 

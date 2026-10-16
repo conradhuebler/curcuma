@@ -52,6 +52,9 @@ MP2Method::MP2Method(const std::string& variant, const json& config)
     if (ec.contains("mp2_batch_mb") && ec["mp2_batch_mb"].is_number())
         m_options.batch_mb = ec["mp2_batch_mb"].get<double>();
     m_options.gpu_mp2 = lowerString(ec, "gpu_mp2", "auto");
+    // RI-MP2 variants (Claude Generated, Oct 2026): ri-mp2, scs-ri-mp2, sos-ri-mp2
+    m_options.ri = m_variant.find("ri-mp2") != std::string::npos;
+    m_options.ri_aux = lowerString(ec, "ri_mp2_aux", m_options.ri_aux);
 }
 
 bool MP2Method::setMolecule(const Mol& mol)
@@ -92,23 +95,33 @@ double MP2Method::calculateEnergy(bool gradient)
         m_error_message = "MP2: the RHF SCF did not converge";
         return m_e_hf;
     }
-    if (!m_engine->computeMP2(m_options, m_result)) {
+    if (!(m_options.ri ? m_engine->computeRIMP2(m_options, m_result) : m_engine->computeMP2(m_options, m_result))) {
         m_error = true;
         m_error_message = "MP2: correlation energy failed (see the error above)";
         return m_e_hf;
     }
-    const double e_corr = (m_variant == "scs-mp2") ? m_result.e_scs()
-        : (m_variant == "sos-mp2")                  ? m_result.e_sos()
-                                                    : m_result.e_corr();
+    const bool scs = m_variant.rfind("scs-", 0) == 0, sos = m_variant.rfind("sos-", 0) == 0;
+    const double e_corr = scs ? m_result.e_scs() : sos ? m_result.e_sos() : m_result.e_corr();
     m_e_total = m_e_hf + e_corr;
 
     const int v = CurcumaLogger::get_verbosity();
     if (v >= 1) {
-        CurcumaLogger::result(fmt::format("native {} -- RHF reference, canonical MP2 ({} basis functions, {} frozen "
-                                          "core orbital(s), {} active occupied, {} virtual)",
-                                          m_variant, m_result.n_basis, m_result.n_frozen, m_result.n_occ_active,
-                                          m_result.n_virt));
-        CurcumaLogger::result(fmt::format("  E(HF)          = {:.12f} Eh", m_e_hf));
+        if (m_options.ri) {
+            // Label carries the auxiliary set: JK/J fitting sets used as correlation fitting basis (no def2-SVP/C)
+            CurcumaLogger::result(fmt::format("native {} -- RHF reference ({}), RI-MP2 (aux {}; {} fitted functions; "
+                                              "method variant, not RI-MP2/def2-SVP/C) ({} basis functions, {} frozen "
+                                              "core orbital(s), {} active occupied, {} virtual)",
+                                              m_variant, m_result.scf_ri.empty() ? "exact integrals" : m_result.scf_ri,
+                                              m_result.aux_name, m_result.n_aux, m_result.n_basis, m_result.n_frozen,
+                                              m_result.n_occ_active, m_result.n_virt));
+        } else {
+            CurcumaLogger::result(fmt::format("native {} -- RHF reference, canonical MP2 ({} basis functions, {} frozen "
+                                              "core orbital(s), {} active occupied, {} virtual)",
+                                              m_variant, m_result.n_basis, m_result.n_frozen, m_result.n_occ_active,
+                                              m_result.n_virt));
+        }
+        CurcumaLogger::result(fmt::format("  E(HF)          = {:.12f} Eh{}", m_e_hf,
+                                          m_result.scf_ri.empty() ? "" : "  (" + m_result.scf_ri + " SCF)"));
         CurcumaLogger::result(fmt::format("  E(corr, {:7s}) = {:.12f} Eh", m_variant, e_corr));
         if (v >= 2) {
             CurcumaLogger::result(fmt::format("  E(MP2 OS)      = {:.12f} Eh", m_result.e_os));
@@ -116,9 +129,14 @@ double MP2Method::calculateEnergy(bool gradient)
             CurcumaLogger::result(fmt::format("  E(MP2 corr)    = {:.12f} Eh", m_result.e_corr()));
             CurcumaLogger::result(fmt::format("  E(SCS-MP2 corr)= {:.12f} Eh  (1.2 OS + 1/3 SS)", m_result.e_scs()));
             CurcumaLogger::result(fmt::format("  E(SOS-MP2 corr)= {:.12f} Eh  (1.3 OS)", m_result.e_sos()));
-            CurcumaLogger::info(fmt::format("MP2 timing: integrals {:.1f} ms, transformation {:.1f} ms, energy {:.1f} ms ({})",
-                                            m_result.t_integrals_ms, m_result.t_transform_ms, m_result.t_energy_ms,
-                                            m_result.info));
+            if (m_options.ri)
+                CurcumaLogger::info(fmt::format("RI-MP2 timing: RI setup {:.1f} ms, B transformation {:.1f} ms, energy {:.1f} ms ({})",
+                                                m_result.t_ri_setup_ms, m_result.t_transform_ms, m_result.t_energy_ms,
+                                                m_result.info));
+            else
+                CurcumaLogger::info(fmt::format("MP2 timing: integrals {:.1f} ms, transformation {:.1f} ms, energy {:.1f} ms ({})",
+                                                m_result.t_integrals_ms, m_result.t_transform_ms, m_result.t_energy_ms,
+                                                m_result.info));
         }
         CurcumaLogger::result(fmt::format("  E({})  = {:.12f} Eh", m_variant, m_e_total));
         CurcumaLogger::energy_abs(m_e_total, "total " + m_variant + " energy");

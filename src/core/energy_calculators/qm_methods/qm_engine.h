@@ -229,6 +229,10 @@ public:
     /// WP11 (Claude Generated, Oct 2026): canonical closed-shell MP2 on the converged RHF of the
     /// last Calculation(); CPU or device (-qm.gpu_mp2). Implemented in qm_mp2.cpp. False on error.
     bool computeMP2(const qmint::MP2Options& opt, qmint::MP2Result& res);
+    /// RI-MP2 (Claude Generated, Oct 2026): density-fitted closed-shell MP2 on the converged RHF,
+    /// auxiliary basis opt.ri_aux; reuses the SCF's RI tensor when -qm.ri j|jk ran with the same
+    /// auxiliary file. CPU or device (-qm.gpu_mp2). Implemented in qm_rimp2.cpp. False on error.
+    bool computeRIMP2(const qmint::MP2Options& opt, qmint::MP2Result& res);
 
 private:
     // Method identity

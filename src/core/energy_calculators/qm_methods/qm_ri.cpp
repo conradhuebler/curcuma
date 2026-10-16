@@ -863,6 +863,24 @@ Eigen::VectorXd RIJK::fitCoefficients(const Eigen::VectorXd& g) const
     return g;  // mode jk: the tensor already carries the metric (B), c = B . D
 }
 
+// Claude Generated (Oct 2026, RI-MP2): the same metric factor as the jk setup applies to the
+// n^2 columns, here applied to the (usually much shorter) transformed rows.
+void RIJK::fitRows(Matrix& X) const
+{
+    if (m_opt.mode == "jk") return;  // tensor already fitted
+    const int threads = std::max(1, m_opt.threads);
+    if (m_L.size()) {
+        lowerSolveRows(m_L, X, threads);
+        return;
+    }
+    if (m_U.size()) {
+        const Eigen::MatrixXd F = m_w.cwiseSqrt().cwiseInverse().asDiagonal() * m_U.transpose();
+        Matrix out;
+        leftMultiplyRows(F, X, out, threads);
+        X.swap(out);
+    }
+}
+
 Matrix RIJK::coulomb(const Matrix& P) const
 {
     const int n = m_n, threads = std::max(1, m_opt.threads);

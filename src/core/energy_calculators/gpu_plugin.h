@@ -39,6 +39,7 @@
 #include "qm_methods/qm_gpu_grad1e_backend.h"  // qmint::QMGpuGrad1e (Q-G8)
 #include "qm_methods/qm_gpu_ri_backend.h"  // qmint::QMGpuRI (WP10)
 #include "qm_methods/qm_gpu_mp2_backend.h"  // qmint::QMGpuMP2Input/Output (WP11)
+#include "qm_methods/qm_gpu_rimp2_backend.h"  // qmint::QMGpuRIMP2Input/Output (RI-MP2)
 
 namespace gpu_plugin {
 
@@ -126,6 +127,14 @@ std::unique_ptr<qmint::QMGpuRI> createQmRI(const std::string& backend, const dou
  */
 bool qmMp2Energy(const std::string& backend, const qmint::QMGpuMP2Input& in, qmint::QMGpuMP2Output& out,
                  std::string& why);
+
+/**
+ * Native-QM RI-MP2 pair energies on the device: (ia|jb) = sum_P B_ia^P B_jb^P as cuBLAS DGEMM per
+ * occupied batch plus the pair-energy sum, FP64. False with a reason in `why` when the plugin/entry
+ * point is missing, the device memory is too small or a device call fails. Claude Generated (Oct 2026).
+ */
+bool qmRiMp2Energy(const std::string& backend, const qmint::QMGpuRIMP2Input& in, qmint::QMGpuRIMP2Output& out,
+                   std::string& why);
 
 /// True if the plugin library libcurcuma_<backend>.so can be loaded (cached; a failed probe
 /// is not retried and, unlike the create* calls, is silent). Used for `-gpu auto` and

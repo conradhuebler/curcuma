@@ -309,6 +309,27 @@ bool qmMp2Energy(const std::string& backend, const qmint::QMGpuMP2Input& in, qmi
     return ok != 0;
 }
 
+// Claude Generated (Oct 2026): RI-MP2 pair energies on the device.
+bool qmRiMp2Energy(const std::string& backend, const qmint::QMGpuRIMP2Input& in, qmint::QMGpuRIMP2Output& out,
+                   std::string& why)
+{
+    void* handle = pluginHandle(backend, /*quiet=*/true);
+    if (!handle) {
+        why = "plugin libcurcuma_" + backend + ".so not loadable";
+        return false;
+    }
+    using fn_t = int (*)(const qmint::QMGpuRIMP2Input*, qmint::QMGpuRIMP2Output*, char*, int);
+    fn_t fn = resolveSymbol<fn_t>(handle, "curcuma_" + backend + "_qm_rimp2_energy");
+    if (!fn) {
+        why = "plugin has no entry point curcuma_" + backend + "_qm_rimp2_energy";
+        return false;
+    }
+    char buf[512] = { 0 };
+    const int ok = fn(&in, &out, buf, (int)sizeof buf);
+    if (!ok) why = buf;
+    return ok != 0;
+}
+
 int deviceCount(const std::string& backend)
 {
     void* handle = pluginHandle(backend, /*quiet=*/true);
