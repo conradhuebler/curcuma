@@ -3017,6 +3017,37 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
         // computes C6/C8/energy/gradient directly from the references, so the
         // O(N²) JSON pair list that GenerateParameters builds is pure overhead
         // here (≈0.5 s on complex/231). Claude Generated.
+        // Claude Generated (Oct 2026): CN, weights, pair energy / gradient / dE/dCN and the CN chain rule on the
+        // device (XtbGpuContext::d3DispersionDevice); the host code below is the fallback and the reference.
+        // CURCUMA_D3_DEVICE=0 forces it.
+        if (m_gpu_scf) {
+            const char* env_off = std::getenv("CURCUMA_D3_DEVICE");
+            if (!(env_off && env_off[0] == '0')) {
+                const int nat = m_atomcount;
+                const auto tb = d3.buildDeviceTables(m_atoms);
+                const auto& rcov = CNCalculator::covalentRadiiD3();
+                std::vector<double> xyz(3 * static_cast<size_t>(nat)), gflat(need_gradient ? 3 * nat : 0, 0.0);
+                for (int i = 0; i < nat; ++i)
+                    for (int k = 0; k < 3; ++k) xyz[3 * i + k] = m_geometry(i, k);
+                double e_dev = 0.0;
+                if (tb.nt > 0 && m_gpu_scf->d3DispersionDevice(
+                        nat, m_atoms.data(), xyz.data(), tb.nt, tb.atom_type.data(), tb.c6tab.data(), tb.r6tab.data(),
+                        tb.nref.data(), tb.refcn.data(), rcov.data(), static_cast<int>(rcov.size()),
+                        tb.s6, tb.s8, tb.a1, tb.a2, /*k1=*/16.0, /*k2=*/4.0 / 3.0,
+                        /*cn_cut_ang=*/25.0 * CurcumaUnit::Length::BOHR_TO_ANGSTROM,
+                        CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.88972612546), au,
+                        need_gradient, &e_dev, gflat.data())) {
+                    m_disp_gradient = Matrix::Zero(nat, 3);
+                    m_disp_dEdcn = Vector();
+                    if (need_gradient) {
+                        for (int i = 0; i < nat; ++i)
+                            for (int k = 0; k < 3; ++k) m_disp_gradient(i, k) = gflat[3 * i + k];
+                    }
+                    m_disp_gradient_valid = need_gradient;
+                    return e_dev;
+                }
+            }
+        }
         const auto t_d3a = std::chrono::steady_clock::now();
         d3.prepareForEnergyGradient(m_atoms, m_geometry);
         const auto t_d3b = std::chrono::steady_clock::now();

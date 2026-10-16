@@ -384,6 +384,18 @@ public:
                                     e_atom_out, grad_out, dEdcn_out);
     }
 
+    bool d3DispersionDevice(int nat, const int* Z, const double* xyz_ang, int nt, const int* atom_type,
+                            const double* c6tab, const double* r6tab, const int* nref_tab,
+                            const double* refcn_tab, const double* rcov_ang, int nrcov,
+                            double s6, double s8, double a1, double a2, double k1, double k2,
+                            double cn_cut_ang, double bohr_per_ang, double fold_unit,
+                            bool need_gradient, double* energy_out, double* grad_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->d3DispersionDevice(nat, Z, xyz_ang, nt, atom_type, c6tab, r6tab, nref_tab, refcn_tab,
+                                         rcov_ang, nrcov, s6, s8, a1, a2, k1, k2, cn_cut_ang, bohr_per_ang,
+                                         fold_unit, need_gradient, energy_out, grad_out);
+    }
     bool d4PostScfDevice(int nat, const double* q_at, bool with_atm, double s9, double a1, double a2, double alp,
                          double atm_cutoff, double cn_cutoff, const double* rad, const double* en, double kn,
                          double k4, double k5, double k6, double* energy_out, double* grad_out,

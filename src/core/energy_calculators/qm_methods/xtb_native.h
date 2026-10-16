@@ -625,6 +625,17 @@ struct GpuScfBackend {
                                double* e_atom_out, double* grad_out, double* dEdcn_out)
     { (void)nat; (void)c6; (void)dc6dcn; (void)s9; (void)a1; (void)a2; (void)alp; (void)cutoff;
       (void)e_atom_out; (void)grad_out; (void)dEdcn_out; return false; }
+    /// Claude Generated (Oct 2026): GFN1 D3(BJ) dispersion on the device (see XtbGpuContext::d3DispersionDevice).
+    virtual bool d3DispersionDevice(int nat, const int* Z, const double* xyz_ang, int nt, const int* atom_type,
+                                    const double* c6tab, const double* r6tab, const int* nref_tab,
+                                    const double* refcn_tab, const double* rcov_ang, int nrcov,
+                                    double s6, double s8, double a1, double a2, double k1, double k2,
+                                    double cn_cut_ang, double bohr_per_ang, double fold_unit,
+                                    bool need_gradient, double* energy_out, double* grad_out)
+    { (void)nat; (void)Z; (void)xyz_ang; (void)nt; (void)atom_type; (void)c6tab; (void)r6tab; (void)nref_tab;
+      (void)refcn_tab; (void)rcov_ang; (void)nrcov; (void)s6; (void)s8; (void)a1; (void)a2; (void)k1; (void)k2;
+      (void)cn_cut_ang; (void)bohr_per_ang; (void)fold_unit; (void)need_gradient; (void)energy_out;
+      (void)grad_out; return false; }
     /// Claude Generated (Oct 2026): the whole post-SCF D4 of GFN2 on the device (weights from the converged
     /// charges, 2-body, ATM incl. its C6 matrices and neighbour list, dE/dCN fold). energy_out = E_2body + E_ATM,
     /// grad_out [3 nat] Eh/Bohr (CN fold included), dEdq_out = dE_2body/dq. Default false -> host flow.

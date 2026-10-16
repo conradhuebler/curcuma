@@ -405,6 +405,19 @@ public:
      * of the same geometry. energy_out = E_2body + E_ATM (Eh), grad_out [3 nat] Eh/Bohr including the CN fold,
      * dEdq_out [nat] = dE_2body/dq. rad/en/kn/k4/k5/k6: tables of d4_ncoord. False = the caller uses the host flow.
      */
+    /**
+     * GFN1 D3(BJ) dispersion on the device (Claude Generated, Oct 2026): D3 CN, Gaussian weights, two-body
+     * energy / direct gradient / dE/dCN and the CN chain rule (D3ParameterGenerator::buildDeviceTables supplies
+     * the element-pair tables). xyz_ang in Angstrom. energy_out in Eh; grad_out [3 nat] in Eh/Bohr (CN fold
+     * included, only written when need_gradient). bohr_per_ang is the factor of getEnergyAndGradient, fold_unit
+     * the `au` of the host fold. False = the caller uses the host D3.
+     */
+    bool d3DispersionDevice(int nat, const int* Z, const double* xyz_ang, int nt, const int* atom_type,
+                            const double* c6tab, const double* r6tab, const int* nref_tab,
+                            const double* refcn_tab, const double* rcov_ang, int nrcov,
+                            double s6, double s8, double a1, double a2, double k1, double k2,
+                            double cn_cut_ang, double bohr_per_ang, double fold_unit,
+                            bool need_gradient, double* energy_out, double* grad_out);
     bool d4PostScfDevice(int nat, const double* q_at, bool with_atm, double s9, double a1, double a2, double alp,
                          double atm_cutoff, double cn_cutoff, const double* rad, const double* en, double kn,
                          double k4, double k5, double k6, double* energy_out, double* grad_out, double* dEdq_out);

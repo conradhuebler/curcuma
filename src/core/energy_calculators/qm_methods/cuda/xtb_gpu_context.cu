@@ -183,6 +183,9 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dD4Q, dD4QZero, dD4W0, dD4dWq0, dD4dWc0;
     CudaBuffer<double> dAtmEat, dAtmGrad, dAtmDcn, dD4Dtot, dD4Gtot;
     CudaBuffer<int>    dD4NbCnt;
+    // Oct 2026: GFN1 D3(BJ) dispersion on the device (d3DispersionDevice)
+    CudaBuffer<int>    dD3Z, dD3Type, dD3Nref;
+    CudaBuffer<double> dD3Xyz, dD3Cn, dD3Gw, dD3Dgw, dD3Eat, dD3Grad, dD3Dcn, dD3C6, dD3R6, dD3Refcn, dD3Rcov;
     std::vector<double> h_d4_xyz;                         // host copy of the D4 geometry
 
     // Stage 6 (S6.2b): q-independent per-atom reference data so the device rebuilds
@@ -5977,6 +5980,208 @@ bool XtbGpuContext::d4PostScfDevice(int nat, const double* q_at, bool with_atm, 
     *energy_out = E;
     I.dD4AtmC6.free();
     I.dD4AtmDc6.free();
+    return true;
+}
+
+/* ====================================================================== *
+ *  GFN1 D3(BJ) dispersion on the device (Claude Generated, Oct 2026).
+ *  Port of D3ParameterGenerator::prepareForEnergyGradient (CN, Gaussian weights),
+ *  getEnergyAndGradient (two-body energy, direct gradient, dE/dCN with the dC6/dCN of computeDC6DCN)
+ *  and CNCalculator::addD3CNGradient. Geometry in Angstrom as on the host; every atom gathers over all
+ *  partners (no atomics, the pair terms are antisymmetric/symmetric exactly as on the host's i < j loop).
+ * ====================================================================== */
+constexpr int D3_MR = 7, D3_ME = 103;
+
+__global__ void k_d3_cn(int nat, const int* __restrict__ Z, const double* __restrict__ xyz,
+                        const double* __restrict__ rcov, int nrcov, double k1, double k2, double cut_ang,
+                        double* __restrict__ cn)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const int ei = Z[i] - 1;
+    double c = 0.0;
+    if (ei >= 0 && ei < nrcov) {
+        const double rci = rcov[ei];
+        for (int j = 0; j < nat; ++j) {
+            if (j == i) continue;
+            const int ej = Z[j] - 1;
+            if (ej < 0 || ej >= nrcov) continue;
+            const double dx = xyz[3*i] - xyz[3*j], dy = xyz[3*i+1] - xyz[3*j+1], dz = xyz[3*i+2] - xyz[3*j+2];
+            const double r = sqrt(dx*dx + dy*dy + dz*dz);
+            if (cut_ang > 0.0 && r > cut_ang) continue;
+            const double arg = -k1 * (k2 * (rci + rcov[ej]) / r - 1.0);
+            c += 1.0 / (1.0 + exp(arg));
+        }
+    }
+    cn[i] = c;
+}
+
+__global__ void k_d3_weights(int nat, const int* __restrict__ Z, const double* __restrict__ cn,
+                             const int* __restrict__ nref_tab, const double* __restrict__ refcn_tab,
+                             double* __restrict__ gw, double* __restrict__ dgw)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    for (int r = 0; r < D3_MR; ++r) { gw[i * D3_MR + r] = 0.0; dgw[i * D3_MR + r] = 0.0; }
+    const int e = Z[i] - 1;
+    if (e < 0 || e >= D3_ME) return;
+    const int nref = min(nref_tab[e], D3_MR);
+    if (nref <= 0) return;
+    const double wf = 4.0;
+    double raw[D3_MR], rawd[D3_MR];
+    double sum = 0.0, dsum = 0.0, max_cn_ref = refcn_tab[e * D3_MR];
+    for (int r = 0; r < nref; ++r) {
+        const double cref = refcn_tab[e * D3_MR + r];
+        const double diff = cn[i] - cref;
+        raw[r] = exp(-wf * diff * diff);
+        rawd[r] = -2.0 * wf * diff * raw[r];
+        sum += raw[r]; dsum += rawd[r];
+        if (r > 0) max_cn_ref = fmax(max_cn_ref, cref);
+    }
+    const double inv = 1.0 / sum;
+    for (int r = 0; r < nref; ++r) {
+        double g = raw[r] * inv;
+        if (!isfinite(g)) g = (refcn_tab[e * D3_MR + r] == max_cn_ref) ? 1.0 : 0.0;
+        gw[i * D3_MR + r] = g;
+        double d = (rawd[r] * sum - raw[r] * dsum) / (sum * sum);
+        if (!isfinite(d)) d = 0.0;
+        dgw[i * D3_MR + r] = d;
+    }
+}
+
+__global__ void k_d3_pairs(int nat, int nt, const int* __restrict__ Z, const int* __restrict__ atype,
+                           const int* __restrict__ nref_tab, const double* __restrict__ xyz,
+                           const double* __restrict__ gw, const double* __restrict__ dgw,
+                           const double* __restrict__ c6tab, const double* __restrict__ r6tab,
+                           double s6, double s8, double a1, double a2, double bohr_per_ang, int need_grad,
+                           double* __restrict__ e_atom, double* __restrict__ grad, double* __restrict__ dEdcn)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    e_atom[i] = 0.0; grad[3*i] = grad[3*i+1] = grad[3*i+2] = 0.0; dEdcn[i] = 0.0;
+    const int ti = atype[i];
+    if (ti < 0) return;
+    const int ni = min(nref_tab[Z[i] - 1], D3_MR);
+    if (ni <= 0) return;
+    double eacc = 0.0, gx = 0.0, gy = 0.0, gz = 0.0, dcnacc = 0.0;
+    for (int j = 0; j < nat; ++j) {
+        if (j == i) continue;
+        const int tj = atype[j];
+        if (tj < 0) continue;
+        const int nj = min(nref_tab[Z[j] - 1], D3_MR);
+        if (nj <= 0) continue;
+        const double* T = c6tab + (static_cast<size_t>(ti) * nt + tj) * (D3_MR * D3_MR);
+        double c6 = 0.0, dc6i = 0.0;
+        for (int ra = 0; ra < ni; ++ra) {
+            const double wi = gw[i * D3_MR + ra], dwi = dgw[i * D3_MR + ra];
+            for (int rb = 0; rb < nj; ++rb) {
+                const double c6ref = T[ra * D3_MR + rb];
+                c6 += wi * gw[j * D3_MR + rb] * c6ref;
+                if (need_grad) dc6i += dwi * gw[j * D3_MR + rb] * c6ref;
+            }
+        }
+        if (c6 <= 0.0) continue;
+        const double r6_ratio = r6tab[static_cast<size_t>(ti) * nt + tj];
+        const double c8 = c6 * r6_ratio;
+        const double dx = xyz[3*i] - xyz[3*j], dy = xyz[3*i+1] - xyz[3*j+1], dz = xyz[3*i+2] - xyz[3*j+2];
+        const double r_ang = sqrt(dx*dx + dy*dy + dz*dz);
+        if (r_ang < 1e-6) continue;
+        const double r = r_ang * bohr_per_ang;
+        const double r2 = r * r;
+        const double r0 = a1 * sqrt(r6_ratio) + a2;
+        const double r6_0 = pow(r0, 6.0), r8_0 = pow(r0, 8.0);
+        const double t6 = 1.0 / (pow(r, 6.0) + r6_0);
+        const double t8 = 1.0 / (pow(r, 8.0) + r8_0);
+        eacc += (-s6 * c6 * t6) + (-s8 * c8 * t8);
+        if (!need_grad) continue;
+        const double d6 = -6.0 * r2 * r2 * t6 * t6;
+        const double d8 = -8.0 * r2 * r2 * r2 * t8 * t8;
+        const double gdisp = s6 * d6 + s8 * r6_ratio * d8;
+        const double fac = -c6 * gdisp;
+        gx += fac * (dx * bohr_per_ang); gy += fac * (dy * bohr_per_ang); gz += fac * (dz * bohr_per_ang);
+        const double edisp = s6 * t6 + s8 * r6_ratio * t8;
+        dcnacc -= dc6i * edisp;
+    }
+    e_atom[i] = eacc;
+    grad[3*i] = gx; grad[3*i+1] = gy; grad[3*i+2] = gz;
+    dEdcn[i] = dcnacc;
+}
+
+__global__ void k_d3_cn_fold(int nat, const int* __restrict__ Z, const double* __restrict__ xyz,
+                             const double* __restrict__ dEdcn, const double* __restrict__ rcov, int nrcov,
+                             double k1, double k2, double unit, double cut_ang, double* __restrict__ grad)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const int ei = Z[i] - 1;
+    if (ei < 0 || ei >= nrcov) return;
+    double gx = 0.0, gy = 0.0, gz = 0.0;
+    for (int j = 0; j < nat; ++j) {
+        if (j == i) continue;
+        const int ej = Z[j] - 1;
+        if (ej < 0 || ej >= nrcov) continue;
+        const double rx = xyz[3*i] - xyz[3*j], ry = xyz[3*i+1] - xyz[3*j+1], rz = xyz[3*i+2] - xyz[3*j+2];
+        const double r = sqrt(rx*rx + ry*ry + rz*rz);
+        if (r < 1e-10) continue;
+        if (cut_ang > 0.0 && r > cut_ang) continue;
+        const double r0 = rcov[ei] + rcov[ej];
+        const double count = 1.0 / (1.0 + exp(-k1 * (k2 * r0 / r - 1.0)));
+        const double dcount_dr = -count * (1.0 - count) * k1 * k2 * r0 / (r * r);
+        const double factor = (dEdcn[i] + dEdcn[j]) * dcount_dr / r;
+        gx += factor * rx * unit; gy += factor * ry * unit; gz += factor * rz * unit;
+    }
+    grad[3*i] += gx; grad[3*i+1] += gy; grad[3*i+2] += gz;
+}
+
+bool XtbGpuContext::d3DispersionDevice(int nat, const int* Z, const double* xyz_ang, int nt, const int* atom_type,
+                                       const double* c6tab, const double* r6tab, const int* nref_tab,
+                                       const double* refcn_tab, const double* rcov_ang, int nrcov,
+                                       double s6, double s8, double a1, double a2, double k1, double k2,
+                                       double cn_cut_ang, double bohr_per_ang, double fold_unit,
+                                       bool need_gradient, double* energy_out, double* grad_out)
+{
+    Impl& I = *m_impl;
+    if (!ok() || nat <= 0 || nt <= 0 || !Z || !xyz_ang || !atom_type || !c6tab || !r6tab || !nref_tab
+        || !refcn_tab || !rcov_ang || !energy_out || (need_gradient && !grad_out))
+        return false;
+    cudaStream_t stream = I.stream;
+    try {
+        I.dD3Z.ensure(nat); I.dD3Type.ensure(nat); I.dD3Xyz.ensure(3 * nat);
+        I.dD3Cn.ensure(nat); I.dD3Gw.ensure(nat * D3_MR); I.dD3Dgw.ensure(nat * D3_MR);
+        I.dD3Eat.ensure(nat); I.dD3Grad.ensure(3 * nat); I.dD3Dcn.ensure(nat);
+        I.dD3C6.ensure(nt * nt * D3_MR * D3_MR); I.dD3R6.ensure(nt * nt);
+        I.dD3Nref.ensure(D3_ME); I.dD3Refcn.ensure(D3_ME * D3_MR); I.dD3Rcov.ensure(nrcov);
+    } catch (...) {
+        I.last_error = "device allocation for the GFN1 D3 dispersion failed";
+        return false;
+    }
+    I.dD3Z.upload(Z, nat, stream);
+    I.dD3Type.upload(atom_type, nat, stream);
+    I.dD3Xyz.upload(xyz_ang, 3 * nat, stream);
+    I.dD3C6.upload(c6tab, nt * nt * D3_MR * D3_MR, stream);
+    I.dD3R6.upload(r6tab, nt * nt, stream);
+    I.dD3Nref.upload(nref_tab, D3_ME, stream);
+    I.dD3Refcn.upload(refcn_tab, D3_ME * D3_MR, stream);
+    I.dD3Rcov.upload(rcov_ang, nrcov, stream);
+    const int b = 128, g = (nat + b - 1) / b;
+    k_d3_cn<<<g, b, 0, stream>>>(nat, I.dD3Z.ptr, I.dD3Xyz.ptr, I.dD3Rcov.ptr, nrcov, k1, k2, cn_cut_ang, I.dD3Cn.ptr);
+    k_d3_weights<<<g, b, 0, stream>>>(nat, I.dD3Z.ptr, I.dD3Cn.ptr, I.dD3Nref.ptr, I.dD3Refcn.ptr,
+                                      I.dD3Gw.ptr, I.dD3Dgw.ptr);
+    k_d3_pairs<<<g, b, 0, stream>>>(nat, nt, I.dD3Z.ptr, I.dD3Type.ptr, I.dD3Nref.ptr, I.dD3Xyz.ptr,
+                                    I.dD3Gw.ptr, I.dD3Dgw.ptr, I.dD3C6.ptr, I.dD3R6.ptr, s6, s8, a1, a2,
+                                    bohr_per_ang, need_gradient ? 1 : 0,
+                                    I.dD3Eat.ptr, I.dD3Grad.ptr, I.dD3Dcn.ptr);
+    if (need_gradient)
+        k_d3_cn_fold<<<g, b, 0, stream>>>(nat, I.dD3Z.ptr, I.dD3Xyz.ptr, I.dD3Dcn.ptr, I.dD3Rcov.ptr, nrcov,
+                                          k1, k2, fold_unit, cn_cut_ang, I.dD3Grad.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    std::vector<double> e(nat);
+    I.dD3Eat.download(e.data(), nat, stream);
+    if (need_gradient) I.dD3Grad.download(grad_out, 3 * nat, stream);
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    double E = 0.0;
+    for (int a = 0; a < nat; ++a) E += e[a];
+    *energy_out = 0.5 * E;   // every pair is gathered from both of its atoms
     return true;
 }
 
