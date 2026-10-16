@@ -305,10 +305,9 @@ CSVR issue below, the absolute comparison with k_MD holds only to about 20 %.
 
 ## Known open issues
 
-- **CSVR noise term**: `SimpleMD::CSVR()` and `ApplyThermostatRegion` draw the noise sum from
-  chi2(dof) instead of chi2(dof-1) (Bussi 2007). Reported mean T is ~5 % high (ethane: 316 K at a
-  300 K setpoint, 18 effective DOF; 304 K with a test patch). **Not fixed** - it affects every CSVR
-  trajectory in the program; operator decision pending. Shifts absolute rates by about 20 %.
+- **CSVR noise term** fixed (Oct 16, 2026): chi2(dof-1) as in Bussi 2007 Eq. A7; ethane mean T 315.4 -> 299.0 K at a 300 K setpoint
+  (4 x 25 ps, n=4 seeds). All NEB-MD numbers recorded before this fix were taken at ~316 K; the validation below predates it
+  and is **not reproduced** by the fixed binary (free-MD reference 1.77/1.62 instead of 1.45/1.45 kcal/mol, cause open).
 - `m_dof` now subtracts the scalar s-constraint.
 - RNG: initial velocities (`SimpleMD::InitVelocities`) and Andersen use a function-local static
   generator shared by all SimpleMD instances of a process; seeds are therefore not independently

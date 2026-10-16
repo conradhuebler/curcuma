@@ -2375,7 +2375,9 @@ void SimpleMD::ApplyThermostatRegion(const std::vector<int>& atoms, double T0, i
         const double Ekin_target = 0.5 * kb_Eh * T0 * dof;
         const double c = std::exp(-(m_dT / 2.0 * m_respa) / m_coupling);
         std::normal_distribution<double> dnorm{ 0.0, 1.0 };
-        std::chi_squared_distribution<double> dchi{ static_cast<double>(dof) };
+        // Claude Generated: Bussi 2007 (JCP 126, 014101) Eq. A7: R1 is drawn separately, the
+        // remaining sum of squares is chi2(Nf-1), not chi2(Nf).
+        std::chi_squared_distribution<double> dchi{ static_cast<double>(std::max(1, static_cast<int>(dof) - 1)) };
         const double R = dnorm(m_rng);
         const double SNf = dchi(m_rng);
         const double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (dof * Ekin)
@@ -4881,7 +4883,9 @@ void SimpleMD::CSVR()
     // first call with a different molecule). A stale distribution with the wrong DOF
     // produces wrong fluctuation widths in the CSVR rescaling.
     if (m_dof != m_csvr_last_dof) {
-        m_csvr_chi = std::chi_squared_distribution<float>(static_cast<float>(m_dof));
+        // Claude Generated: Bussi 2007 (JCP 126, 014101) Eq. A7: R1 is drawn separately,
+        // the remaining sum of squares is chi2(Nf-1), not chi2(Nf).
+        m_csvr_chi = std::chi_squared_distribution<float>(static_cast<float>(std::max(1, static_cast<int>(m_dof) - 1)));
         m_csvr_last_dof = m_dof;
     }
     double R = m_csvr_norm(m_rng);
