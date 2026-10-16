@@ -58,7 +58,83 @@ void XTB::ensureHostMultipoleIntegrals()
     setupMultipole(false);   // full host build (integrals + radii + interaction matrices)
 }
 
-void XTB::setupMultipole(bool integrals_on_device)
+/* ------------------------------------------------------------------ *
+ *  Interaction matrices of the multipole electrostatics (step 5 of     *
+ *  setupMultipole), as a separate member so that they can be built on  *
+ *  demand: with the device-built matrices (CUDA resident loop) the     *
+ *  host copies are only needed by the host fallbacks. Claude Generated *
+ *  (Oct 2026).                                                         *
+ * ------------------------------------------------------------------ */
+void XTB::buildMultipoleInteractionMatrices() const
+{
+    const int nat = m_atomcount;
+    using namespace curcuma::xtb::gfn2_params;
+    std::vector<double> xyz_bohr(3 * nat);
+    for (int i = 0; i < nat; ++i) {
+        xyz_bohr[3 * i + 0] = m_geometry(i, 0) * AA_TO_AU;
+        xyz_bohr[3 * i + 1] = m_geometry(i, 1) * AA_TO_AU;
+        xyz_bohr[3 * i + 2] = m_geometry(i, 2) * AA_TO_AU;
+    }
+    for (int k = 0; k < 3; ++k) m_mp_amat_sd[k] = Eigen::MatrixXd::Zero(nat, nat);
+    for (int a = 0; a < 3; ++a)
+        for (int b = 0; b < 3; ++b) m_mp_amat_dd[a][b] = Eigen::MatrixXd::Zero(nat, nat);
+    for (int k = 0; k < 6; ++k) m_mp_amat_sq[k] = Eigen::MatrixXd::Zero(nat, nat);
+
+    // Parallel over the source atom i (Claude Generated): every amat_*(j, i) entry
+    // is written for column i only, so striping over i touches disjoint columns.
+    const int amat_threads = effectiveIntraThreads(nat);
+    parallelStripes(amat_threads, [&](int tid, int nth) {
+    for (int i = tid; i < nat; i += nth) {
+        for (int j = 0; j < nat; ++j) {
+            if (i == j) continue;
+            const double vx = xyz_bohr[3*i+0] - xyz_bohr[3*j+0];
+            const double vy = xyz_bohr[3*i+1] - xyz_bohr[3*j+1];
+            const double vz = xyz_bohr[3*i+2] - xyz_bohr[3*j+2];
+            const double r1  = std::sqrt(vx*vx + vy*vy + vz*vz);
+            const double g1  = 1.0 / r1;
+            const double g3  = g1 * g1 * g1;
+            const double g5  = g3 * g1 * g1;
+            const double rr  = 0.5 * (m_mp_mrad[j] + m_mp_mrad[i]) * g1;
+            const double fdmp3 = 1.0 / (1.0 + 6.0 * std::pow(rr, mp_dmp3));
+            const double fdmp5 = 1.0 / (1.0 + 6.0 * std::pow(rr, mp_dmp5));
+
+            // amat_sd (charge-dipole): row=target(j), col=source(i)
+            m_mp_amat_sd[0](j, i) += vx * g3 * fdmp3;
+            m_mp_amat_sd[1](j, i) += vy * g3 * fdmp3;
+            m_mp_amat_sd[2](j, i) += vz * g3 * fdmp3;
+
+            // amat_dd (dipole-dipole)
+            const double dd_iso  = g3 * fdmp5;
+            const double dd_anis = 3.0 * g5 * fdmp5;
+            for (int a = 0; a < 3; ++a) {
+                const double va = (a == 0) ? vx : ((a == 1) ? vy : vz);
+                for (int b = 0; b < 3; ++b) {
+                    const double vb = (b == 0) ? vx : ((b == 1) ? vy : vz);
+                    m_mp_amat_dd[a][b](j, i) +=
+                        ((a == b) ? dd_iso : 0.0) - va * vb * dd_anis;
+                }
+            }
+
+            // amat_sq (charge-quadrupole), packed (xx, xy, yy, xz, yz, zz)
+            m_mp_amat_sq[0](j, i) += vx * vx * g5 * fdmp5;
+            m_mp_amat_sq[1](j, i) += 2.0 * vx * vy * g5 * fdmp5;
+            m_mp_amat_sq[2](j, i) += vy * vy * g5 * fdmp5;
+            m_mp_amat_sq[3](j, i) += 2.0 * vx * vz * g5 * fdmp5;
+            m_mp_amat_sq[4](j, i) += 2.0 * vy * vz * g5 * fdmp5;
+            m_mp_amat_sq[5](j, i) += vz * vz * g5 * fdmp5;
+        }
+    }
+    });  // parallelStripes over i
+
+    m_mp_amat_deferred = false;
+}
+
+void XTB::ensureHostMultipoleMatrices() const
+{
+    if (m_mp_amat_deferred && m_mp_initialized) buildMultipoleInteractionMatrices();
+}
+
+void XTB::setupMultipole(bool integrals_on_device, bool defer_amat)
 {
     const int nat = m_atomcount;
     const int nao = m_basis.nao;
@@ -243,56 +319,11 @@ void XTB::setupMultipole(bool integrals_on_device)
     tmp_cn = mp_clock::now();
 
     // ---- 5. Interaction matrices ----
-    for (int k = 0; k < 3; ++k) m_mp_amat_sd[k] = Eigen::MatrixXd::Zero(nat, nat);
-    for (int a = 0; a < 3; ++a)
-        for (int b = 0; b < 3; ++b) m_mp_amat_dd[a][b] = Eigen::MatrixXd::Zero(nat, nat);
-    for (int k = 0; k < 6; ++k) m_mp_amat_sq[k] = Eigen::MatrixXd::Zero(nat, nat);
-
-    // Parallel over the source atom i (Claude Generated): every amat_*(j, i) entry
-    // is written for column i only, so striping over i touches disjoint columns.
-    const int amat_threads = effectiveIntraThreads(nat);
-    parallelStripes(amat_threads, [&](int tid, int nth) {
-    for (int i = tid; i < nat; i += nth) {
-        for (int j = 0; j < nat; ++j) {
-            if (i == j) continue;
-            const double vx = xyz_bohr[3*i+0] - xyz_bohr[3*j+0];
-            const double vy = xyz_bohr[3*i+1] - xyz_bohr[3*j+1];
-            const double vz = xyz_bohr[3*i+2] - xyz_bohr[3*j+2];
-            const double r1  = std::sqrt(vx*vx + vy*vy + vz*vz);
-            const double g1  = 1.0 / r1;
-            const double g3  = g1 * g1 * g1;
-            const double g5  = g3 * g1 * g1;
-            const double rr  = 0.5 * (m_mp_mrad[j] + m_mp_mrad[i]) * g1;
-            const double fdmp3 = 1.0 / (1.0 + 6.0 * std::pow(rr, mp_dmp3));
-            const double fdmp5 = 1.0 / (1.0 + 6.0 * std::pow(rr, mp_dmp5));
-
-            // amat_sd (charge-dipole): row=target(j), col=source(i)
-            m_mp_amat_sd[0](j, i) += vx * g3 * fdmp3;
-            m_mp_amat_sd[1](j, i) += vy * g3 * fdmp3;
-            m_mp_amat_sd[2](j, i) += vz * g3 * fdmp3;
-
-            // amat_dd (dipole-dipole)
-            const double dd_iso  = g3 * fdmp5;
-            const double dd_anis = 3.0 * g5 * fdmp5;
-            for (int a = 0; a < 3; ++a) {
-                const double va = (a == 0) ? vx : ((a == 1) ? vy : vz);
-                for (int b = 0; b < 3; ++b) {
-                    const double vb = (b == 0) ? vx : ((b == 1) ? vy : vz);
-                    m_mp_amat_dd[a][b](j, i) +=
-                        ((a == b) ? dd_iso : 0.0) - va * vb * dd_anis;
-                }
-            }
-
-            // amat_sq (charge-quadrupole), packed (xx, xy, yy, xz, yz, zz)
-            m_mp_amat_sq[0](j, i) += vx * vx * g5 * fdmp5;
-            m_mp_amat_sq[1](j, i) += 2.0 * vx * vy * g5 * fdmp5;
-            m_mp_amat_sq[2](j, i) += vy * vy * g5 * fdmp5;
-            m_mp_amat_sq[3](j, i) += 2.0 * vx * vz * g5 * fdmp5;
-            m_mp_amat_sq[4](j, i) += 2.0 * vy * vz * g5 * fdmp5;
-            m_mp_amat_sq[5](j, i) += vz * vz * g5 * fdmp5;
-        }
+    if (defer_amat) {
+        m_mp_amat_deferred = true;   // the device builds them; the host fallbacks call ensureHostMultipoleMatrices()
+    } else {
+        buildMultipoleInteractionMatrices();
     }
-    });  // parallelStripes over i
 
     // B0: publish the sub-phase split for the verbosity-3 setup report.
     {
@@ -330,6 +361,7 @@ void XTB::addMultipolePotential(Potential& pot,
                                  const Eigen::MatrixXd& qp_at) const
 {
     if (!m_mp_initialized) return;
+    ensureHostMultipoleMatrices();
     const int nat = m_atomcount;
 
     // --- vdp(k, iat) = Σ_jat amat_sd[k](iat,jat)·q_at(jat)
@@ -424,6 +456,7 @@ void XTB::addMultipolePotential(Potential& pot) const
 double XTB::energyMultipole() const
 {
     if (!m_mp_initialized) return 0.0;
+    ensureHostMultipoleMatrices();
     const int nat = m_atomcount;
     double e = 0.0;
 

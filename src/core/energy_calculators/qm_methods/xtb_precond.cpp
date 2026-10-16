@@ -1109,6 +1109,7 @@ void XTB::writeScfJacobianDump(const std::string& dir, const Vector& x_star, con
     writeVec("eta_sh.bin", eta_sh);
     writeMat("gamma_sh.bin", m_gamma);
     writeVec("third_sh.bin", third_sh);
+    if (gfn2 && m_mp_initialized) ensureHostMultipoleMatrices();   // developer dump: needs the host copies
     const bool have_mp = gfn2 && m_mp_initialized && static_cast<int>(m_mp_dkernel.size()) == nat
                          && m_mp_amat_sd[0].rows() == nat;
     if (have_mp) {

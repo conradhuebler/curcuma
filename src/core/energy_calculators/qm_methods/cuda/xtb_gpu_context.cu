@@ -185,6 +185,9 @@ struct XtbGpuContext::Impl {
     CudaBuffer<int>    dD4NbCnt;
     // Oct 2026: GFN1 D3(BJ) dispersion on the device (d3DispersionDevice)
     CudaBuffer<int>    dD3Z, dD3Type, dD3Nref;
+    CudaBuffer<int>    dRepEz;                    // repulsion energy (repulsionEnergyDevice)
+    CudaBuffer<double> dTlXyz, dTlDcn, dTlRcov, dTlGrad, dTlQ, dTlDp, dTlQp, dTlMrad, dTlCn, dTlRad, dTlVcn, dTlDer, dTlGmp;   // gradientTailDevice
+    CudaBuffer<double> dRepEXyz, dRepEAlpha, dRepEZeff, dRepEAt;
     CudaBuffer<double> dD3Xyz, dD3Cn, dD3Gw, dD3Dgw, dD3Eat, dD3Grad, dD3Dcn, dD3C6, dD3R6, dD3Refcn, dD3Rcov;
     std::vector<double> h_d4_xyz;                         // host copy of the D4 geometry
 
@@ -239,6 +242,7 @@ struct XtbGpuContext::Impl {
     // Open shell on the resident loop (Oct 2026): the two spin channels, summed into dOcc.
     CudaBuffer<double> dOccA, dOccB;
     bool   loop_open = false;
+    bool   potentials_resident = false;   // Oct 2026: dVao/dVdp/dVqp hold the converged potentials (convergedPotentials)
     bool   loop_gfn1 = false;        // Oct 2026: the resident loop runs GFN1 (shell charges only, atom-resolved third order)
     double loop_nalpha = 0.0, loop_nbeta = 0.0;
     CudaBuffer<int>    dOccNcol;    // last column with occ>1e-12 (1 int)
@@ -6133,6 +6137,240 @@ __global__ void k_d3_cn_fold(int nat, const int* __restrict__ Z, const double* _
     grad[3*i] += gx; grad[3*i+1] += gy; grad[3*i+2] += gz;
 }
 
+// Claude Generated (Oct 2026): xTB repulsion energy on the device. Same pair term as XTB::calcRepulsionEnergy
+// (E = Z_i Z_j / R^rexp exp(-sqrt(a_i a_j) R^kexp), kexp_light for H/He pairs in GFN2); one thread per atom i sums
+// the pairs j < i, the per-atom sums are added on the host.
+__global__ void k_rep_energy(int nat, int is_gfn2, const int* __restrict__ z, const double* __restrict__ xyz,
+                             const double* __restrict__ alpha, const double* __restrict__ zeff,
+                             double kexp, double rexp, double kexp_light, double* __restrict__ e_atom)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const int zi = z[i];
+    double e = 0.0;
+    for (int j = 0; j < i; ++j) {
+        const double dx = xyz[3*i] - xyz[3*j], dy = xyz[3*i+1] - xyz[3*j+1], dz = xyz[3*i+2] - xyz[3*j+2];
+        const double r = sqrt(dx*dx + dy*dy + dz*dz);
+        if (r < 1.0e-12) continue;
+        const double alpha_pair = sqrt(alpha[i] * alpha[j]);
+        double kexp_pair = kexp;
+        if (is_gfn2 && zi <= 2 && z[j] <= 2) kexp_pair = kexp_light;
+        e += (zeff[i] * zeff[j] / pow(r, rexp)) * exp(-alpha_pair * pow(r, kexp_pair));
+    }
+    e_atom[i] = e;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Claude Generated (Oct 2026): the host O(nat^2) tail of the GPU gradient on the device.
+//   section 5 (GFN2): direct multipole interaction gradient over the atomic moments dp_at / qp_at plus the
+//                     dE/dr_mp that turns into dE/dCN through the damping radius mrad(CN);
+//   section 4:        CN chain rule of dE/dCN into the Cartesian gradient (GFN1 logistic CN, GFN2 double logistic).
+// Same formulas as XTB::calculateGradientGpu (xtb_gradient.cpp); every atom gathers over all partners (the
+// host loop adds to both members of the pair i > j, the gather evaluates the pair from either side).
+// ---------------------------------------------------------------------------------------------
+__device__ __forceinline__ void d_mp_grad_pair(int iat, int jat, const double* __restrict__ xyz,
+                                               const double* __restrict__ mrad, double dmp3, double dmp5,
+                                               const double* __restrict__ q, const double* __restrict__ dp,
+                                               const double* __restrict__ qp, double& gx, double& gy,
+                                               double& gz, double& fddr, bool& valid)
+{
+    const double vx = xyz[3*jat+0] - xyz[3*iat+0];
+    const double vy = xyz[3*jat+1] - xyz[3*iat+1];
+    const double vz = xyz[3*jat+2] - xyz[3*iat+2];
+    const double r2 = vx*vx + vy*vy + vz*vz;
+    valid = !(r2 < 1.0e-12);
+    gx = gy = gz = fddr = 0.0;
+    if (!valid) return;
+    const double r1 = sqrt(r2);
+    const double g1 = 1.0 / r1;
+    const double g3 = g1*g1*g1, g5 = g3*g1*g1, g7 = g5*g1*g1;
+    const double rr_dmp = 0.5 * (mrad[iat] + mrad[jat]);
+    const double fdmp3 = 1.0 / (1.0 + 6.0 * pow(rr_dmp * g1, dmp3));
+    const double fdmp5 = 1.0 / (1.0 + 6.0 * pow(rr_dmp * g1, dmp5));
+    const double ddmp3 = g5 * fdmp3 * (-3.0 + dmp3 * (1.0 - fdmp3));
+    const double ddmp5 = fdmp5 * (-5.0 - dmp5 * (fdmp5 - 1.0));
+    const double* dpi = dp + 3 * iat; const double* dpj = dp + 3 * jat;
+    const double* qpi = qp + 6 * iat; const double* qpj = qp + 6 * jat;
+    const double qi = q[iat], qj = q[jat];
+
+    const double dpiqj = (vx*dpi[0]+vy*dpi[1]+vz*dpi[2]) * qj;
+    const double qidpj = (vx*dpj[0]+vy*dpj[1]+vz*dpj[2]) * qi;
+    const double diff_sd = dpiqj - qidpj;
+    gx = -ddmp3*vx*diff_sd + fdmp3*g3*(qi*dpj[0] - qj*dpi[0]);
+    gy = -ddmp3*vy*diff_sd + fdmp3*g3*(qi*dpj[1] - qj*dpi[1]);
+    gz = -ddmp3*vz*diff_sd + fdmp3*g3*(qi*dpj[2] - qj*dpi[2]);
+    const double fddr_sd = 3.0*diff_sd*dmp3*fdmp3*g3*(fdmp3/rr_dmp)*pow(rr_dmp*g1, dmp3);
+
+    const double dpidpj = dpi[0]*dpj[0] + dpi[1]*dpj[1] + dpi[2]*dpj[2];
+    const double dpiv = vx*dpi[0] + vy*dpi[1] + vz*dpi[2];
+    const double dpjv = vx*dpj[0] + vy*dpj[1] + vz*dpj[2];
+    const double edd = dpidpj*r2 - 3.0*dpjv*dpiv;
+    gx += -2.0*fdmp5*g5*dpidpj*vx + 3.0*fdmp5*g5*(dpiv*dpj[0]+dpjv*dpi[0]) - edd*ddmp5*g7*vx;
+    gy += -2.0*fdmp5*g5*dpidpj*vy + 3.0*fdmp5*g5*(dpiv*dpj[1]+dpjv*dpi[1]) - edd*ddmp5*g7*vy;
+    gz += -2.0*fdmp5*g5*dpidpj*vz + 3.0*fdmp5*g5*(dpiv*dpj[2]+dpjv*dpi[2]) - edd*ddmp5*g7*vz;
+    const double fddr_dd = 3.0*edd*dmp5*fdmp5*g5*(fdmp5/rr_dmp)*pow(rr_dmp*g1, dmp5);
+
+    const double eq =
+          (qj*qpi[0]+qpj[0]*qi)*vx*vx
+        + 2.0*(qj*qpi[1]+qpj[1]*qi)*vx*vy
+        + (qj*qpi[2]+qpj[2]*qi)*vy*vy
+        + 2.0*(qj*qpi[3]+qpj[3]*qi)*vx*vz
+        + 2.0*(qj*qpi[4]+qpj[4]*qi)*vy*vz
+        + (qj*qpi[5]+qpj[5]*qi)*vz*vz;
+    const double tivx = qpi[0]*vx+qpi[1]*vy+qpi[3]*vz;
+    const double tivy = qpi[1]*vx+qpi[2]*vy+qpi[4]*vz;
+    const double tivz = qpi[3]*vx+qpi[4]*vy+qpi[5]*vz;
+    const double tjvx = qpj[0]*vx+qpj[1]*vy+qpj[3]*vz;
+    const double tjvy = qpj[1]*vx+qpj[2]*vy+qpj[4]*vz;
+    const double tjvz = qpj[3]*vx+qpj[4]*vy+qpj[5]*vz;
+    gx += -eq*ddmp5*g7*vx - 2.0*fdmp5*g5*(qi*tjvx+qj*tivx);
+    gy += -eq*ddmp5*g7*vy - 2.0*fdmp5*g5*(qi*tjvy+qj*tivy);
+    gz += -eq*ddmp5*g7*vz - 2.0*fdmp5*g5*(qi*tjvz+qj*tivz);
+    const double fddr_sq = eq*3.0*dmp5*fdmp5*g5*(fdmp5/rr_dmp)*pow(rr_dmp*g1, dmp5);
+    fddr = fddr_sd + fddr_dd + fddr_sq;
+}
+
+__global__ void k_grad_tail_mp(int nat, const double* __restrict__ xyz, const double* __restrict__ mrad,
+                               double dmp3, double dmp5, const double* __restrict__ q,
+                               const double* __restrict__ dp, const double* __restrict__ qp,
+                               double* __restrict__ grad, double* __restrict__ dEdr)
+{
+    const int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= nat) return;
+    double gx = 0.0, gy = 0.0, gz = 0.0, fd = 0.0;
+    for (int b = 0; b < nat; ++b) {
+        if (b == a) continue;
+        double px, py, pz, pf; bool ok;
+        if (b < a) {                    // host pair (iat = a, jat = b): +g on a
+            d_mp_grad_pair(a, b, xyz, mrad, dmp3, dmp5, q, dp, qp, px, py, pz, pf, ok);
+            if (!ok) continue;
+            gx += px; gy += py; gz += pz;
+        } else {                        // host pair (iat = b, jat = a): -g on a
+            d_mp_grad_pair(b, a, xyz, mrad, dmp3, dmp5, q, dp, qp, px, py, pz, pf, ok);
+            if (!ok) continue;
+            gx -= px; gy -= py; gz -= pz;
+        }
+        fd += pf;
+    }
+    grad[3*a] = gx; grad[3*a+1] = gy; grad[3*a+2] = gz;
+    dEdr[a] = fd;
+}
+
+// dE/dCN += dE/dr_mp * d(mrad)/dCN   (host: t2 = (rmax - rad) / (1 + t1), dmrad/dCN = -t2 kexp t1 / (1 + t1))
+__global__ void k_grad_tail_dcn(int nat, const double* __restrict__ dEdr, const double* __restrict__ cn,
+                                const double* __restrict__ rad, const double* __restrict__ vcn,
+                                double shift, double kexp, double rmax, double* __restrict__ dEdcn)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const double arg = cn[i] - vcn[i] - shift;
+    const double t1 = exp(-kexp * arg);
+    const double t2 = (rmax - rad[i]) / (1.0 + t1);
+    dEdcn[i] += dEdr[i] * (-t2 * kexp * t1 / (1.0 + t1));
+}
+
+__global__ void k_grad_tail_cn(int nat, int is_gfn1, const double* __restrict__ xyz,
+                               const double* __restrict__ rcov, const double* __restrict__ dEdcn,
+                               double* __restrict__ grad)
+{
+    const int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= nat) return;
+    double gx = 0.0, gy = 0.0, gz = 0.0;
+    for (int b = 0; b < nat; ++b) {
+        if (b == a) continue;
+        const double dx = xyz[3*a] - xyz[3*b], dy = xyz[3*a+1] - xyz[3*b+1], dz = xyz[3*a+2] - xyz[3*b+2];
+        const double r2 = dx*dx + dy*dy + dz*dz;
+        if (r2 < 1.0e-12) continue;
+        const double r = sqrt(r2);
+        const double rc = rcov[a] + rcov[b];
+        double dcndr;
+        if (is_gfn1) {
+            const double k = 16.0;
+            const double c = 1.0 / (1.0 + exp(-k * (rc / r - 1.0)));
+            dcndr = -c * (1.0 - c) * k * rc / r2;
+        } else {
+            const double ka = 10.0, kb = 20.0, rs = 2.0;
+            const double c1 = 1.0 / (1.0 + exp(-ka * (rc / r - 1.0)));
+            const double c2 = 1.0 / (1.0 + exp(-kb * ((rc + rs) / r - 1.0)));
+            const double dc1dr = -c1 * (1.0 - c1) * ka * rc / r2;
+            const double dc2dr = -c2 * (1.0 - c2) * kb * (rc + rs) / r2;
+            dcndr = dc1dr * c2 + c1 * dc2dr;
+        }
+        const double factor = (dEdcn[a] + dEdcn[b]) * dcndr / r;
+        gx += factor * dx; gy += factor * dy; gz += factor * dz;
+    }
+    grad[3*a] += gx; grad[3*a+1] += gy; grad[3*a+2] += gz;
+}
+
+bool XtbGpuContext::gradientTailDevice(int nat, bool is_gfn2, bool with_mp, const double* xyz_bohr,
+                                       const double* dEdcn, const double* rcov_au, const double* q_at,
+                                       const double* dp_at, const double* qp_at, const double* mrad,
+                                       const double* cn, const double* rad, const double* vcn, double dmp3,
+                                       double dmp5, double shift, double kexp, double rmax, double* grad_out)
+{
+    Impl& I = *m_impl;
+    if (!ok() || nat <= 0 || !xyz_bohr || !dEdcn || !rcov_au || !grad_out
+        || (with_mp && (!q_at || !dp_at || !qp_at || !mrad || !cn || !rad || !vcn)))
+        return false;
+    cudaStream_t stream = I.stream;
+    try {
+        I.dTlXyz.ensure(3 * nat); I.dTlDcn.ensure(nat); I.dTlRcov.ensure(nat); I.dTlGrad.ensure(3 * nat);
+        if (with_mp) {
+            I.dTlQ.ensure(nat); I.dTlDp.ensure(3 * nat); I.dTlQp.ensure(6 * nat); I.dTlMrad.ensure(nat);
+            I.dTlCn.ensure(nat); I.dTlRad.ensure(nat); I.dTlVcn.ensure(nat); I.dTlDer.ensure(nat);
+            I.dTlGmp.ensure(3 * nat);
+        }
+    } catch (...) { return false; }
+    I.dTlXyz.upload(xyz_bohr, 3 * nat, stream);
+    I.dTlDcn.upload(dEdcn, nat, stream);
+    I.dTlRcov.upload(rcov_au, nat, stream);
+    const int b = 128, g = (nat + b - 1) / b;
+    cudaMemsetAsync(I.dTlGrad.ptr, 0, sizeof(double) * 3 * nat, stream);
+    if (with_mp) {
+        I.dTlQ.upload(q_at, nat, stream); I.dTlDp.upload(dp_at, 3 * nat, stream);
+        I.dTlQp.upload(qp_at, 6 * nat, stream); I.dTlMrad.upload(mrad, nat, stream);
+        I.dTlCn.upload(cn, nat, stream); I.dTlRad.upload(rad, nat, stream); I.dTlVcn.upload(vcn, nat, stream);
+        k_grad_tail_mp<<<g, b, 0, stream>>>(nat, I.dTlXyz.ptr, I.dTlMrad.ptr, dmp3, dmp5, I.dTlQ.ptr, I.dTlDp.ptr,
+                                            I.dTlQp.ptr, I.dTlGmp.ptr, I.dTlDer.ptr);
+        k_grad_tail_dcn<<<g, b, 0, stream>>>(nat, I.dTlDer.ptr, I.dTlCn.ptr, I.dTlRad.ptr, I.dTlVcn.ptr, shift,
+                                             kexp, rmax, I.dTlDcn.ptr);
+        cudaMemcpyAsync(I.dTlGrad.ptr, I.dTlGmp.ptr, sizeof(double) * 3 * nat, cudaMemcpyDeviceToDevice, stream);
+    }
+    k_grad_tail_cn<<<g, b, 0, stream>>>(nat, is_gfn2 ? 0 : 1, I.dTlXyz.ptr, I.dTlRcov.ptr, I.dTlDcn.ptr,
+                                        I.dTlGrad.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    I.dTlGrad.download(grad_out, 3 * nat, stream);
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+bool XtbGpuContext::repulsionEnergyDevice(int nat, bool is_gfn2, const int* z, const double* xyz_bohr,
+                                          const double* alpha, const double* zeff, double kexp, double rexp,
+                                          double kexp_light, double* energy_out)
+{
+    Impl& I = *m_impl;
+    if (!ok() || nat <= 0 || !z || !xyz_bohr || !alpha || !zeff || !energy_out) return false;
+    cudaStream_t stream = I.stream;
+    try {
+        I.dRepEz.ensure(nat); I.dRepEXyz.ensure(3 * nat); I.dRepEAlpha.ensure(nat);
+        I.dRepEZeff.ensure(nat); I.dRepEAt.ensure(nat);
+    } catch (...) { return false; }
+    I.dRepEz.upload(z, nat, stream);
+    I.dRepEXyz.upload(xyz_bohr, 3 * nat, stream);
+    I.dRepEAlpha.upload(alpha, nat, stream);
+    I.dRepEZeff.upload(zeff, nat, stream);
+    const int b = 128;
+    k_rep_energy<<<(nat + b - 1) / b, b, 0, stream>>>(nat, is_gfn2 ? 1 : 0, I.dRepEz.ptr, I.dRepEXyz.ptr,
+        I.dRepEAlpha.ptr, I.dRepEZeff.ptr, kexp, rexp, kexp_light, I.dRepEAt.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    std::vector<double> e(nat);
+    I.dRepEAt.download(e.data(), nat, stream);
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    double E = 0.0;
+    for (int a = 0; a < nat; ++a) E += e[a];
+    *energy_out = E;
+    return true;
+}
+
 bool XtbGpuContext::d3DispersionDevice(int nat, const int* Z, const double* xyz_ang, int nt, const int* atom_type,
                                        const double* c6tab, const double* r6tab, const int* nref_tab,
                                        const double* refcn_tab, const double* rcov_ang, int nrcov,
@@ -6954,6 +7192,80 @@ bool XtbGpuContext::beginPotentialOnTheFly(int nat, int nsh, const double* xyz_b
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
 
+// Claude Generated (Oct 2026): fill the stored multipole interaction matrices on the device (same element formula
+// as the host step 5 of setupMultipole and as the on-the-fly kernels). Element (row t, col s): v = x_s - x_t,
+// stored column-major (index t + s*nat); the diagonal stays zero.
+__global__ void k_mp_build_amat(int nat, const double* __restrict__ xyz, const double* __restrict__ mrad,
+                                double dmp3, double dmp5, double* __restrict__ sd, double* __restrict__ dd,
+                                double* __restrict__ sq)
+{
+    const long long tid = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const long long nn = static_cast<long long>(nat) * nat;
+    if (tid >= nn) return;
+    const int t = static_cast<int>(tid % nat), c = static_cast<int>(tid / nat);   // row t, col s = c
+    if (t == c) return;
+    double vsd[3], vdd[9], vsq[6];
+    d_mp_amat_pair(xyz[3*c] - xyz[3*t], xyz[3*c+1] - xyz[3*t+1], xyz[3*c+2] - xyz[3*t+2],
+                   0.5 * (mrad[t] + mrad[c]), dmp3, dmp5, vsd, vdd, vsq);
+    for (int k = 0; k < 3; ++k) sd[k * nn + tid] = vsd[k];
+    for (int k = 0; k < 9; ++k) dd[k * nn + tid] = vdd[k];
+    for (int k = 0; k < 6; ++k) sq[k * nn + tid] = vsq[k];
+}
+
+bool XtbGpuContext::beginPotentialStored(int nat, int nsh, const double* xyz_bohr, const double* mrad,
+                                         double dmp3, double dmp5, const double* dkernel,
+                                         const double* qkernel, const double* gamma3)
+{
+    if (!ok() || nat <= 0 || nsh <= 0 || !xyz_bohr || !mrad || !dkernel || !qkernel || !gamma3)
+        return false;
+    cudaStream_t stream = m_impl->stream;
+    const size_t nn = static_cast<size_t>(nat) * static_cast<size_t>(nat);
+    {
+        const size_t need = 18 * nn * sizeof(double);
+        size_t free_b = 0, total_b = 0;
+        if (m_impl->memory_check && cudaMemGetInfo(&free_b, &total_b) == cudaSuccess
+            && need + (64ull << 20) > free_b) {
+            m_impl->last_error = "the stored GFN2 multipole interaction matrices do not fit on the device";
+            return false;
+        }
+    }
+    try {
+        m_impl->dMpAmatSD.ensure(static_cast<int>(3 * nn));
+        m_impl->dMpAmatDD.ensure(static_cast<int>(9 * nn));
+        m_impl->dMpAmatSQ.ensure(static_cast<int>(6 * nn));
+        m_impl->dMpXyz.ensure(3 * nat);
+        m_impl->dMpRad.ensure(nat);
+        m_impl->dMpDkernel.ensure(nat);
+        m_impl->dMpQkernel.ensure(nat);
+        m_impl->dGamma3.ensure(nsh);
+        m_impl->dPotQsh.ensure(nsh);
+        m_impl->dInDpAt.ensure(3 * nat);
+        m_impl->dInQpAt.ensure(6 * nat);
+        m_impl->dVsh.ensure(nsh);
+        m_impl->dVat.ensure(nat);
+        m_impl->dQat.ensure(nat);
+    } catch (...) {
+        m_impl->last_error = "device allocation for the stored GFN2 multipole interaction matrices failed";
+        return false;
+    }
+    m_impl->dMpXyz.upload(xyz_bohr, 3 * nat, stream);
+    m_impl->dMpRad.upload(mrad, nat, stream);
+    m_impl->dMpDkernel.upload(dkernel, nat, stream);
+    m_impl->dMpQkernel.upload(qkernel, nat, stream);
+    m_impl->dGamma3.upload(gamma3, nsh, stream);
+    cudaMemsetAsync(m_impl->dMpAmatSD.ptr, 0, sizeof(double) * 3 * nn, stream);
+    cudaMemsetAsync(m_impl->dMpAmatDD.ptr, 0, sizeof(double) * 9 * nn, stream);
+    cudaMemsetAsync(m_impl->dMpAmatSQ.ptr, 0, sizeof(double) * 6 * nn, stream);
+    k_mp_build_amat<<<static_cast<unsigned>((nn + 255) / 256), 256, 0, stream>>>(
+        nat, m_impl->dMpXyz.ptr, m_impl->dMpRad.ptr, dmp3, dmp5, m_impl->dMpAmatSD.ptr,
+        m_impl->dMpAmatDD.ptr, m_impl->dMpAmatSQ.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    m_impl->mp_otf = false;
+    m_impl->pot_nsh = nsh;
+    m_impl->solv_active = false;
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
 // WP4b (Claude Generated June 2026): upload the nat×nat Born interaction matrix B so
 // the device potential build adds the in-SCF reaction field v_at += B·q_at. Call once
 // per geometry after beginPotential() (GFN2 Mulliken path only). born_mat is the
@@ -7000,8 +7312,9 @@ bool XtbGpuContext::residentSolvePotential(const double* q_sh, const double* dp_
 // (dPotQsh/dInDpAt/dInQpAt + dD4W/dD4dWq, set by an upload or by the fused step)
 // → Fock → eigensolve. Identical to residentSolvePotential's body minus the host
 // uploads; download_eps=false keeps the eigenvalues resident for the device loop.
-bool XtbGpuContext::buildDevicePotentialAndSolve(int n, bool fp32, int n_eig,
-                                                 double* eps_out, bool download_eps)
+// Claude Generated (Oct 2026): the potential half of buildDevicePotentialAndSolve (D4 dE/dq, gamma q_sh + third
+// order, multipole potential, solvation, expansion to v_ao), reused for the converged potentials of the gradient.
+bool XtbGpuContext::buildDevicePotentialOnly(int n)
 {
     cudaStream_t stream = m_impl->stream;
     const int nat = m_impl->resident_nat;
@@ -7072,6 +7385,13 @@ bool XtbGpuContext::buildDevicePotentialAndSolve(int n, bool fp32, int n_eig,
                                                     m_impl->dVao.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
 
+    return true;
+}
+
+bool XtbGpuContext::buildDevicePotentialAndSolve(int n, bool fp32, int n_eig,
+                                                 double* eps_out, bool download_eps)
+{
+    if (!buildDevicePotentialOnly(n)) return false;
     m_impl->profMark("scf: potential (D4 dE/dq, gamma, multipole)");
     // F = H0 − ½·S·(v_ao⊕v_ao) + GFN2 multipole; then eigensolve (shared path).
     if (!buildFockIntoC(n, /*multipole=*/true)) return false;
@@ -7082,8 +7402,7 @@ bool XtbGpuContext::buildDevicePotentialAndSolve(int n, bool fp32, int n_eig,
 
 // Claude Generated (Oct 2026): GFN1 potential from the resident mixed shell charges: v_sh = gamma q_sh,
 // v_at = Gamma_A q_A^2 (q_A = sum of the shell charges of A), then Fock (no multipole) + eigensolve.
-bool XtbGpuContext::buildDevicePotentialAndSolveGfn1(int n, bool fp32, int n_eig,
-                                                     double* eps_out, bool download_eps)
+bool XtbGpuContext::buildDevicePotentialOnlyGfn1(int n)
 {
     cudaStream_t stream = m_impl->stream;
     const int nat = m_impl->resident_nat;
@@ -7107,10 +7426,47 @@ bool XtbGpuContext::buildDevicePotentialAndSolveGfn1(int n, bool fp32, int n_eig
                                                     m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr,
                                                     m_impl->dVao.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
+    return true;
+}
+
+bool XtbGpuContext::buildDevicePotentialAndSolveGfn1(int n, bool fp32, int n_eig,
+                                                     double* eps_out, bool download_eps)
+{
+    if (!buildDevicePotentialOnlyGfn1(n)) return false;
     m_impl->profMark("scf: potential (gamma, third order)");
     if (!buildFockIntoC(n, /*multipole=*/false)) return false;
     m_impl->profMark("scf: Fock build");
     return eigensolveResidentFock(eps_out, fp32, n_eig, download_eps);
+}
+
+// Claude Generated (Oct 2026): the potentials the gradient needs (v_ao, and for GFN2 v_dp / v_qp) at the CONVERGED
+// output charges of the resident loop, built on the device. The host used to rebuild them from the downloaded
+// charges (addCoulombShellPotential, addMultipolePotential: 13 + 327 ms on peo201-water500 GFN2) and upload them.
+bool XtbGpuContext::convergedPotentials(bool gfn2)
+{
+    Impl& I = *m_impl;
+    I.potentials_resident = false;
+    if (!ok() || I.loop_nao <= 0 || I.loop_gfn1 == gfn2) return false;
+    cudaStream_t stream = I.stream;
+    const int nsh = I.loop_nsh, nat = I.loop_nat, nao = I.loop_nao;
+    const int b = 128;
+    if (cudaMemcpyAsync(I.dPotQsh.ptr, I.dQsh.ptr, sizeof(double) * nsh, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+        return false;
+    bool good;
+    if (gfn2) {
+        if (cudaMemcpyAsync(I.dInDpAt.ptr, I.dDpAt.ptr, sizeof(double) * 3 * nat, cudaMemcpyDeviceToDevice, stream) != cudaSuccess
+            || cudaMemcpyAsync(I.dInQpAt.ptr, I.dQpAt.ptr, sizeof(double) * 6 * nat, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+            return false;
+        k_d4_build_refw<<<(nat + b - 1) / b, b, 0, stream>>>(
+            nat, Impl::D4_MAX_REF, I.dQat.ptr, I.dD4Cn.ptr, I.dD4Gi.ptr, I.dD4Zeff.ptr, I.dD4Nref.ptr,
+            I.dD4Refcn.ptr, I.dD4Refcovcn.ptr, I.dD4Refq.ptr, I.dD4W.ptr, I.dD4dWq.ptr);
+        good = buildDevicePotentialOnly(nao);
+    } else {
+        good = buildDevicePotentialOnlyGfn1(nao);
+    }
+    if (!good || cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    I.potentials_resident = true;
+    return true;
 }
 
 bool XtbGpuContext::computeOverlapGrad(const double* xyz_bohr, double* dSdR_out)
@@ -7138,7 +7494,8 @@ bool XtbGpuContext::computeOverlapGrad(const double* xyz_bohr, double* dSdR_out)
 bool XtbGpuContext::computeGradient(const double* P, const double* C, const double* eps,
                                     int nocc_orbs, const double* v_ao, const double* q_sh,
                                     const double* v_dp, const double* v_qp,
-                                    double* grad_out, double* dEdcn_out, bool pc_resident)
+                                    double* grad_out, double* dEdcn_out, bool pc_resident,
+                                    bool resident_potentials)
 {
     // AP8 (Claude Generated): pc_resident=true reuses the resident density dP and MO
     // coefficients dC the device-resident SCF already left on the GPU (downloaded
@@ -7146,7 +7503,8 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     // host→device uploads (~2 ms/step on complex). The caller (calculateGradientGpu,
     // only invoked on the device-resident path) guarantees they are the converged
     // values; the gradient only reads dP/dC, so reuse is bit-identical to uploading.
-    if (!ok() || m_impl->basis_nao <= 0 || !eps || !v_ao || !q_sh
+    if (resident_potentials && !m_impl->potentials_resident) return false;
+    if (!ok() || m_impl->basis_nao <= 0 || !eps || (!resident_potentials && (!v_ao || !q_sh))
         || !grad_out || !dEdcn_out || (!pc_resident && (!P || !C)))
         return false;
     const int nat = m_impl->basis_nat;
@@ -7215,11 +7573,13 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     // already ran for the population/band energy, from the SAME dCw/dC this call reuses
     // via pc_resident). Point 1+2 together: no dense P, no download, no DGEMM rebuild.
     m_impl->profMark("grad: dense density rebuild (ensureDenseDensity)");
-    m_impl->dVao.upload(v_ao, nao, stream);
-    m_impl->dQsh.upload(q_sh, nsh, stream);
+    if (!resident_potentials) {
+        m_impl->dVao.upload(v_ao, nao, stream);
+        m_impl->dQsh.upload(q_sh, nsh, stream);
+    }
     // GFN2 multipole potentials (converged) for the multipole-integral Pulay term.
-    const bool with_mp = (m_impl->basis_is_gfn2 && v_dp && v_qp);
-    if (with_mp) {
+    const bool with_mp = (m_impl->basis_is_gfn2 && (resident_potentials || (v_dp && v_qp)));
+    if (with_mp && !resident_potentials) {
         try {
             if (m_impl->dVdp.n < 3 * nat) m_impl->dVdp.alloc(3 * nat);
             if (m_impl->dVqp.n < 6 * nat) m_impl->dVqp.alloc(6 * nat);

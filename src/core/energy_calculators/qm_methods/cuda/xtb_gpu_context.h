@@ -331,7 +331,11 @@ public:
     bool computeGradient(const double* P, const double* C, const double* eps,
                          int nocc_orbs, const double* v_ao, const double* q_sh,
                          const double* v_dp, const double* v_qp,
-                         double* grad_out, double* dEdcn_out, bool pc_resident = false);
+                         double* grad_out, double* dEdcn_out, bool pc_resident = false,
+                         bool resident_potentials = false);
+    /// Build v_ao (and for GFN2 v_dp / v_qp) at the converged charges of the resident loop on the device; the next
+    /// computeGradient(..., resident_potentials = true) uses them (Claude Generated, Oct 2026).
+    bool convergedPotentials(bool gfn2);
 
     /// Allocate the resident SCF work buffers (C/P/Cw/eps/occ/pop + cuSOLVER
     /// dsyevd workspace) sized to the basis nao, and mark the device-computed
@@ -412,6 +416,20 @@ public:
      * included, only written when need_gradient). bohr_per_ang is the factor of getEnergyAndGradient, fold_unit
      * the `au` of the host fold. False = the caller uses the host D3.
      */
+    /**
+     * The host O(nat^2) tail of the GPU gradient on the device (Claude Generated, Oct 2026): for GFN2 (with_mp) the
+     * direct multipole interaction gradient and the dE/dr_mp -> dE/dCN conversion through the damping radius,
+     * then the CN chain rule of dEdcn (plus that conversion) into the Cartesian gradient. xyz in Bohr, dEdcn [nat]
+     * as the host holds it before section 5, rcov_au the D3 covalent radii in Bohr. dp_at is [k + 3 atom],
+     * qp_at [k + 6 atom]. grad_out [3 nat] Eh/Bohr is the sum of both sections, to be added to the gradient.
+     */
+    bool gradientTailDevice(int nat, bool is_gfn2, bool with_mp, const double* xyz_bohr, const double* dEdcn,
+                            const double* rcov_au, const double* q_at, const double* dp_at, const double* qp_at,
+                            const double* mrad, const double* cn, const double* rad, const double* vcn,
+                            double dmp3, double dmp5, double shift, double kexp, double rmax, double* grad_out);
+    /// xTB repulsion energy on the device (Claude Generated, Oct 2026); alpha / zeff are the per-atom parameters.
+    bool repulsionEnergyDevice(int nat, bool is_gfn2, const int* z, const double* xyz_bohr, const double* alpha,
+                               const double* zeff, double kexp, double rexp, double kexp_light, double* energy_out);
     bool d3DispersionDevice(int nat, const int* Z, const double* xyz_ang, int nt, const int* atom_type,
                             const double* c6tab, const double* r6tab, const int* nref_tab,
                             const double* refcn_tab, const double* rcov_ang, int nrcov,
@@ -440,6 +458,10 @@ public:
     /// Same as beginPotential, but without the 18 nat² interaction matrices: the device
     /// rebuilds their elements per iteration from the geometry (Bohr) and the damping radii.
     /// Claude Generated (Sep 2026, large systems).
+    /// Same state as beginPotential(), but the stored interaction matrices are built on the device from the
+    /// geometry and the damping radii (Claude Generated, Oct 2026): no 18 nat^2 doubles on the host or over the bus.
+    bool beginPotentialStored(int nat, int nsh, const double* xyz_bohr, const double* mrad, double dmp3,
+                              double dmp5, const double* dkernel, const double* qkernel, const double* gamma3);
     bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr, const double* mrad,
                                 double dmp3, double dmp5, const double* dkernel,
                                 const double* qkernel, const double* gamma3);
@@ -631,6 +653,8 @@ private:
     /// resident step.
     bool buildDevicePotentialAndSolve(int n, bool fp32, int n_eig, double* eps_out,
                                       bool download_eps);
+    bool buildDevicePotentialOnly(int n);       ///< the potential half of the above (Oct 2026)
+    bool buildDevicePotentialOnlyGfn1(int n);
     /// GFN1 counterpart (shell gamma + atom-resolved third order, no D4/multipole).
     bool buildDevicePotentialAndSolveGfn1(int n, bool fp32, int n_eig, double* eps_out,
                                           bool download_eps);

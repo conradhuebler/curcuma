@@ -625,6 +625,27 @@ struct GpuScfBackend {
                                double* e_atom_out, double* grad_out, double* dEdcn_out)
     { (void)nat; (void)c6; (void)dc6dcn; (void)s9; (void)a1; (void)a2; (void)alp; (void)cutoff;
       (void)e_atom_out; (void)grad_out; (void)dEdcn_out; return false; }
+    /// Claude Generated (Oct 2026): potentials of the gradient at the converged charges of the resident loop built on the
+    /// device (XtbGpuContext::convergedPotentials) and the gradient that reads them (no host potential, no upload).
+    virtual bool prepareConvergedPotentials(bool gfn2) { (void)gfn2; return false; }
+    virtual bool gradientResident(const Vector& eps, int nocc_orbs, Matrix& grad_out, Vector& dEdcn_out)
+    { (void)eps; (void)nocc_orbs; (void)grad_out; (void)dEdcn_out; return false; }
+    /// Claude Generated (Oct 2026): sections 5 (GFN2 direct multipole) and 4 (CN chain rule) of the GPU gradient
+    /// on the device (see XtbGpuContext::gradientTailDevice).
+    virtual bool gradientTailDevice(int nat, bool is_gfn2, bool with_mp, const double* xyz_bohr,
+                                    const double* dEdcn, const double* rcov_au, const double* q_at,
+                                    const double* dp_at, const double* qp_at, const double* mrad,
+                                    const double* cn, const double* rad, const double* vcn, double dmp3,
+                                    double dmp5, double shift, double kexp, double rmax, double* grad_out)
+    { (void)nat; (void)is_gfn2; (void)with_mp; (void)xyz_bohr; (void)dEdcn; (void)rcov_au; (void)q_at;
+      (void)dp_at; (void)qp_at; (void)mrad; (void)cn; (void)rad; (void)vcn; (void)dmp3; (void)dmp5;
+      (void)shift; (void)kexp; (void)rmax; (void)grad_out; return false; }
+    /// Claude Generated (Oct 2026): xTB repulsion energy on the device (see XtbGpuContext::repulsionEnergyDevice).
+    virtual bool repulsionEnergyDevice(int nat, bool is_gfn2, const int* z, const double* xyz_bohr,
+                                       const double* alpha, const double* zeff, double kexp, double rexp,
+                                       double kexp_light, double* energy_out)
+    { (void)nat; (void)is_gfn2; (void)z; (void)xyz_bohr; (void)alpha; (void)zeff; (void)kexp; (void)rexp;
+      (void)kexp_light; (void)energy_out; return false; }
     /// Claude Generated (Oct 2026): GFN1 D3(BJ) dispersion on the device (see XtbGpuContext::d3DispersionDevice).
     virtual bool d3DispersionDevice(int nat, const int* Z, const double* xyz_ang, int nt, const int* atom_type,
                                     const double* c6tab, const double* r6tab, const int* nref_tab,
@@ -676,6 +697,14 @@ struct GpuScfBackend {
     /// otherwise. Claude Generated (Sep 2026).
     virtual std::string lastError() const { return {}; }
     virtual bool supportsOnTheFlyMultipole() const { return false; }
+    /// Claude Generated (Oct 2026): the stored multipole interaction matrices are built on the device from the
+    /// geometry (no host matrices); needs setupMultipole(..., defer_amat) on the host side.
+    virtual bool supportsStoredMultipoleOnDevice() const { return false; }
+    virtual bool beginPotentialStored(int nat, int nsh, const double* xyz_bohr, const double* mrad,
+                                      double dmp3, double dmp5, const double* dkernel, const double* qkernel,
+                                      const double* gamma3)
+    { (void)nat; (void)nsh; (void)xyz_bohr; (void)mrad; (void)dmp3; (void)dmp5; (void)dkernel; (void)qkernel;
+      (void)gamma3; return false; }
     virtual bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr,
                                         const double* mrad, double dmp3, double dmp5,
                                         const double* dkernel, const double* qkernel,
@@ -1130,7 +1159,11 @@ private:
     // integrals_on_device=true: skip the O(nao²) CPU dp_int/qp_int integral build
     // (already filled by GpuScfBackend::downloadMultipoleInts); only the CN-damping
     // radii + atom-pair interaction matrices are computed. Claude Generated (Stage 3m).
-    void setupMultipole(bool integrals_on_device = false);   // xtb_multipole.cpp (GFN2)
+    void setupMultipole(bool integrals_on_device = false, bool defer_amat = false);   // xtb_multipole.cpp (GFN2)
+    /// Oct 2026: the nat x nat multipole interaction matrices (step 5), built on demand when the device holds them.
+    void buildMultipoleInteractionMatrices() const;
+    void ensureHostMultipoleMatrices() const;
+    mutable bool m_mp_amat_deferred = false;
     /// Build the host dense dipole/quadrupole AO integrals if their build was deferred
     /// because a large system runs the fully device-resident GPU SCF (Claude Generated,
     /// Sep 2026). Every host path that reads m_dp_int/m_qp_int calls this first.
@@ -1383,15 +1416,16 @@ private:
     std::array<Eigen::MatrixXd, 6> m_qp_int;   // quadrupole integrals (GFN2), each nao×nao
 
     // GFN2 multipole interaction matrices (built once per geometry)
-    std::array<Eigen::MatrixXd, 3> m_mp_amat_sd;
-    std::array<std::array<Eigen::MatrixXd, 3>, 3> m_mp_amat_dd;
-    std::array<Eigen::MatrixXd, 6> m_mp_amat_sq;
+    mutable std::array<Eigen::MatrixXd, 3> m_mp_amat_sd;
+    mutable std::array<std::array<Eigen::MatrixXd, 3>, 3> m_mp_amat_dd;
+    mutable std::array<Eigen::MatrixXd, 6> m_mp_amat_sq;
     std::vector<double> m_mp_mrad;
     std::vector<double> m_mp_dkernel;
     std::vector<double> m_mp_qkernel;
     bool m_mp_initialized = false;
     bool m_mp_ints_deferred = false;   // host m_dp_int/m_qp_int not built yet (GPU large system)
     bool m_wfn_on_device = false;      // converged P/C not downloaded yet (GPU large system)
+    bool m_dev_potentials = false;     // Oct 2026: the gradient reads the potentials the device built (no host m_pot)
 
     // B0 (Jul 2026): setupMultipole() sub-phase timings (ms), for the verbosity-3
     // setup report. The single "multipole setup" bucket could not be attributed.

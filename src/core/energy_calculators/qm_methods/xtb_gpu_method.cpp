@@ -301,6 +301,22 @@ public:
         return true;
     }
 
+    bool prepareConvergedPotentials(bool gfn2) override { return m_ctx && m_ctx->convergedPotentials(gfn2); }
+    bool gradientResident(const Vector& eps, int nocc_orbs, Matrix& grad_out, Vector& dEdcn_out) override
+    {
+        if (!m_ctx || m_n <= 0 || m_nat <= 0 || static_cast<int>(eps.size()) < nocc_orbs) return false;
+        std::vector<double> grad(3 * m_nat, 0.0), dEdcn(m_nat, 0.0);
+        if (!m_ctx->computeGradient(nullptr, nullptr, eps.data(), nocc_orbs, nullptr, nullptr, nullptr, nullptr,
+                                    grad.data(), dEdcn.data(), /*pc_resident=*/true, /*resident_potentials=*/true))
+            return false;
+        grad_out.resize(m_nat, 3);
+        for (int i = 0; i < m_nat; ++i)
+            for (int k = 0; k < 3; ++k) grad_out(i, k) = grad[3 * i + k];
+        dEdcn_out.resize(m_nat);
+        for (int i = 0; i < m_nat; ++i) dEdcn_out(i) = dEdcn[i];
+        return true;
+    }
+
     // ---- Single-shot D4 EEQ charge model (Stage 5, Part A) ----------------
     bool supportsDeviceEeq() const override { return true; }
 
@@ -384,6 +400,24 @@ public:
                                     e_atom_out, grad_out, dEdcn_out);
     }
 
+    bool gradientTailDevice(int nat, bool is_gfn2, bool with_mp, const double* xyz_bohr, const double* dEdcn,
+                            const double* rcov_au, const double* q_at, const double* dp_at, const double* qp_at,
+                            const double* mrad, const double* cn, const double* rad, const double* vcn,
+                            double dmp3, double dmp5, double shift, double kexp, double rmax,
+                            double* grad_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->gradientTailDevice(nat, is_gfn2, with_mp, xyz_bohr, dEdcn, rcov_au, q_at, dp_at, qp_at, mrad,
+                                         cn, rad, vcn, dmp3, dmp5, shift, kexp, rmax, grad_out);
+    }
+    bool repulsionEnergyDevice(int nat, bool is_gfn2, const int* z, const double* xyz_bohr, const double* alpha,
+                               const double* zeff, double kexp, double rexp, double kexp_light,
+                               double* energy_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->repulsionEnergyDevice(nat, is_gfn2, z, xyz_bohr, alpha, zeff, kexp, rexp, kexp_light,
+                                            energy_out);
+    }
     bool d3DispersionDevice(int nat, const int* Z, const double* xyz_ang, int nt, const int* atom_type,
                             const double* c6tab, const double* r6tab, const int* nref_tab,
                             const double* refcn_tab, const double* rcov_ang, int nrcov,
@@ -550,6 +584,14 @@ public:
     }
 
     bool supportsOnTheFlyMultipole() const override { return true; }
+    bool supportsStoredMultipoleOnDevice() const override { return true; }
+    bool beginPotentialStored(int nat, int nsh, const double* xyz_bohr, const double* mrad, double dmp3,
+                              double dmp5, const double* dkernel, const double* qkernel,
+                              const double* gamma3) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->beginPotentialStored(nat, nsh, xyz_bohr, mrad, dmp3, dmp5, dkernel, qkernel, gamma3);
+    }
     std::string lastError() const override { return m_ctx ? m_ctx->lastError() : std::string(); }
     bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr, const double* mrad,
                                 double dmp3, double dmp5, const double* dkernel,

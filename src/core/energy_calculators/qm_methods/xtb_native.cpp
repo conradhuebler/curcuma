@@ -665,8 +665,19 @@ double XTB::Calculation(bool gradient)
         const double mp_bytes = 9.0 * static_cast<double>(m_basis.nao) * m_basis.nao * sizeof(double);
         const bool defer = !mp_on_device && integrals_from_device && m_gpu_scf
             && m_gpu_scf->supportsResidentLoop() && m_scf_mode == ScfMode::Broyden
-            && m_d4_charge_source != "cpscf" && mp_bytes > 2.0e9;
-        setupMultipole(mp_on_device || defer);
+            && m_d4_charge_source != "cpscf" && (mp_bytes > 2.0e9 || !std::getenv("CURCUMA_MP_INTS_EAGER"));
+        // Claude Generated (Oct 2026): the threshold is gone - the resident loop and the device gradient build the
+        // AO dipole/quadrupole integrals themselves, so the eager host O(nao^2) loop (712 ms on polymer, nao 3222)
+        // was pure host work; the host fallbacks make them on demand (ensureHostMultipoleIntegrals).
+        // CURCUMA_MP_INTS_EAGER=1 restores the eager build below 2 GB.
+        // Claude Generated (Oct 2026): the nat x nat interaction matrices (host O(nat^2) build, 0.23 s at 2910
+        // atoms, plus an 18 nat^2 upload) are built by the device on the CUDA resident path; the host copies are
+        // made on demand by the host fallbacks (ensureHostMultipoleMatrices). CURCUMA_MP_AMAT_DEVICE=0 keeps
+        // the host build.
+        bool defer_amat = integrals_from_device && m_gpu_scf && m_gpu_scf->supportsResidentLoop()
+            && m_gpu_scf->supportsStoredMultipoleOnDevice() && m_scf_mode == ScfMode::Broyden;
+        if (const char* e = std::getenv("CURCUMA_MP_AMAT_DEVICE")) defer_amat = defer_amat && (e[0] != '0');
+        setupMultipole(mp_on_device || defer, defer_amat);
         m_mp_ints_deferred = defer;
         if (defer && verb >= 2)
             CurcumaLogger::info(fmt::format("SCF: host GFN2 multipole integrals deferred ({:.1f} GB; "
@@ -1150,6 +1161,22 @@ double XTB::Calculation(bool gradient)
                 nat, nsh, xyzb.data(), m_mp_mrad.data(), gfn2_params::mp_dmp3, gfn2_params::mp_dmp5,
                 dk.data(), qk.data(), g3.data());
         } else {
+            // Device build of the stored matrices first (no host matrices, no 18 nat^2 upload); the host path
+            // below is the fallback and needs the host copies.
+            if (m_gpu_scf->supportsStoredMultipoleOnDevice()) {
+                std::vector<double> xyzb(3 * static_cast<size_t>(nat));
+                for (int i = 0; i < nat; ++i)
+                    for (int k = 0; k < 3; ++k) xyzb[3 * i + k] = m_geometry(i, k) * AA_TO_AU;
+                use_device_potential = m_gpu_scf->beginPotentialStored(
+                    nat, nsh, xyzb.data(), m_mp_mrad.data(), gfn2_params::mp_dmp3, gfn2_params::mp_dmp5,
+                    dk.data(), qk.data(), g3.data());
+                if (use_device_potential) {
+                    mp_stored_on_device = true;
+                    if (verb >= 2) CurcumaLogger::info("SCF: GFN2 multipole interaction matrices built on the device");
+                }
+            }
+            if (!use_device_potential) {
+            ensureHostMultipoleMatrices();
             std::vector<double> sd(3 * nn), dd(9 * nn), sq(6 * nn);
             for (int k = 0; k < 3; ++k)
                 std::memcpy(sd.data() + static_cast<size_t>(k) * nn, m_mp_amat_sd[k].data(), nn * sizeof(double));
@@ -1180,6 +1207,7 @@ double XTB::Calculation(bool gradient)
                     gfn2_params::mp_dmp5, dk.data(), qk.data(), g3.data());
                 mp_stored_on_device = !use_device_potential;
             }
+            }   // !use_device_potential after the device build
         }
         // WP4b: upload the Born matrix so the device build adds v_at += B·q_at in-SCF.
         // On failure, drop to the host-driven loop (which still applies solvation).
@@ -2055,7 +2083,12 @@ double XTB::Calculation(bool gradient)
         && m_gpu_scf->supportsGradient();
     m_wfn_on_device = false;
     if (use_gpu_resident && m_gpu_scf) {
-        if (use_resident_loop && (m_mp_ints_deferred || gfn1_resident) && (!gradient || device_grad_will_run))
+        // The converged P/C stay on the device only for big systems (as before for GFN2: dense multipole integrals
+        // above 2 GB, nao > ~5270); the small ones keep the public accessors (getDensity, MolecularOrbitals)
+        // filled. The multipole integrals themselves are deferred for every size (see above), which does not
+        // need P/C on the host.
+        const bool big_wfn = 9.0 * static_cast<double>(m_basis.nao) * m_basis.nao * sizeof(double) > 2.0e9;
+        if (use_resident_loop && big_wfn && (m_mp_ints_deferred || gfn1_resident) && (!gradient || device_grad_will_run))
             m_wfn_on_device = true;
         else
             m_gpu_scf->finalize(m_wfn.P, m_wfn.C);
@@ -2186,10 +2219,24 @@ double XTB::Calculation(bool gradient)
     if (gradient) {
         // Rebuild potential with converged shell charges before computing gradient.
         // (m_pot was overwritten during SCF; final values must be regenerated.)
-        m_pot.reset();
-        addCoulombShellPotential(m_pot);
-        addThirdOrderPotential(m_pot);
-        if (m_method == MethodType::GFN2) addMultipolePotential(m_pot);
+        const auto t_gp0 = clock::now();
+        // Claude Generated (Oct 2026): on the resident loop the device builds the converged potentials itself
+        // (convergedPotentials: gamma q_sh, third order, multipole, D4 dE/dq, solvation not supported) and the
+        // gradient reads them from there; the host m_pot is only rebuilt for the host fallbacks below.
+        // CURCUMA_GRAD_DEVPOT=0 keeps the host rebuild.
+        m_dev_potentials = false;
+        if (use_resident_loop && m_gpu_scf && !m_solvation
+            && (m_method == MethodType::GFN1 || (m_method == MethodType::GFN2 && m_d4_variational_qresp))) {
+            const char* env_off = std::getenv("CURCUMA_GRAD_DEVPOT");
+            if (!(env_off && env_off[0] == '0'))
+                m_dev_potentials = m_gpu_scf->prepareConvergedPotentials(m_method == MethodType::GFN2);
+        }
+        auto rebuild_host_potentials = [&]() {
+            m_pot.reset();
+            addCoulombShellPotential(m_pot);
+            addThirdOrderPotential(m_pot);
+            if (m_method == MethodType::GFN2) addMultipolePotential(m_pot);
+
         // Exact GFN2 self-consistent-D4 q-response (F5): tblite folds dE_D4/dq into
         // pot%vat (dispersion%get_potential) so the charge-Pulay -P·(v_a+v_b)·dS + the
         // W = Σf·ε·ccᵀ term (ε already carry the in-SCF D4 potential) reproduce the full
@@ -2203,6 +2250,10 @@ double XTB::Calculation(bool gradient)
         // energies — omitting v_solv would make the two inconsistent. The explicit
         // ∂E_solv/∂R is added separately below via m_solvation->addGradient.
         addSolvationPotential(m_pot);
+        };
+        const auto t_gp1 = clock::now();
+        if (!m_dev_potentials) rebuild_host_potentials();
+        const auto t_gp2 = clock::now();
 
         // Stage 4 (Claude Generated): native nuclear gradient on the device when the
         // SCF ran device-resident. GFN1: repulsion/H0-Pulay/Coulomb (1/2/3) on the
@@ -2211,8 +2262,18 @@ double XTB::Calculation(bool gradient)
         // CN chain-rule (4) on the host. Falls back to the full CPU gradient if the
         // backend has no gradient.
         bool gpu_grad = false;
+        const auto t_gp3 = clock::now();
         if (use_gpu_resident && m_gpu_scf && m_gpu_scf->supportsGradient())
             gpu_grad = calculateGradientGpu();
+        if (verb >= 3 || std::getenv("CURCUMA_GPU_PROFILE"))
+            CurcumaLogger::result(fmt::format(
+                "  Gradient host phases: device potentials {}, host potential rebuild {:.1f} ms, "
+                "calculateGradientGpu {:.1f} ms",
+                m_dev_potentials ? "yes" : "no", ms(t_gp1, t_gp2), ms(t_gp3, clock::now())));
+        if (!gpu_grad && m_dev_potentials) {   // host fallback needs the host potentials
+            m_dev_potentials = false;
+            rebuild_host_potentials();
+        }
         if (!gpu_grad) {
             ensureHostWavefunction();
             ensureHostMultipoleIntegrals();

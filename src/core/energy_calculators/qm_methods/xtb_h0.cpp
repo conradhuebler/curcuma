@@ -379,6 +379,30 @@ double XTB::calcRepulsionEnergy() const
         xyz_bohr[3 * i + 2] = m_geometry(i, 2) * AA_TO_AU;
     }
 
+    // Claude Generated (Oct 2026): the O(nat^2) pair sum on the device when the GPU SCF is active
+    // (CURCUMA_REP_DEVICE=0 keeps the host loop).
+    if (m_gpu_scf) {
+        const char* env_off = std::getenv("CURCUMA_REP_DEVICE");
+        if (!(env_off && env_off[0] == '0')) {
+            const bool g1 = (m_method == MethodType::GFN1);
+            std::vector<double> alpha(nat), zeff(nat);
+            bool table_ok = true;
+            for (int i = 0; i < nat; ++i) {
+                const int z = m_atoms[i];
+                if (z < 1) { table_ok = false; break; }
+                alpha[i] = g1 ? gfn1_params::rep_alpha[z - 1] : gfn2_params::rep_alpha[z - 1];
+                zeff[i]  = g1 ? gfn1_params::rep_zeff[z - 1]  : gfn2_params::rep_zeff[z - 1];
+            }
+            double e_dev = 0.0;
+            if (table_ok && m_gpu_scf->repulsionEnergyDevice(
+                    nat, !g1, m_atoms.data(), xyz_bohr.data(), alpha.data(), zeff.data(),
+                    g1 ? gfn1_params::rep_kexp : gfn2_params::rep_kexp,
+                    g1 ? gfn1_params::rep_rexp : gfn2_params::rep_rexp,
+                    g1 ? gfn1_params::rep_kexp : gfn2_params::rep_kexp_light, &e_dev))
+                return e_dev;
+        }
+    }
+
     for (int i = 0; i < nat; ++i) {
         const int zi = m_atoms[i];
         for (int j = 0; j < i; ++j) {
