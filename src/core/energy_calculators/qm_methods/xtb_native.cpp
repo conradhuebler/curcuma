@@ -3003,16 +3003,23 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
         // Claude Generated (May 2026): analytical gradient replaces central
         // finite differences. The direct geometry gradient + CN chain rule
         // are computed in one pass through the D3 pair list.
+        const auto t_d3init0 = std::chrono::steady_clock::now();
+        const bool d3_first = !m_d3_generator;
         if (!m_d3_generator) {
             m_d3_generator = std::make_unique<::D3ParameterGenerator>(
                 ::D3ParameterGenerator::createForGFN1());
         }
+        if (d3_first && (CurcumaLogger::get_verbosity() >= 3 || std::getenv("CURCUMA_GPU_PROFILE")))
+            CurcumaLogger::result(fmt::format("  GFN1 D3 (host): generator construction {:.1f} ms",
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_d3init0).count()));
         ::D3ParameterGenerator& d3 = *m_d3_generator;
         // Lightweight prepare (CN + Gaussian weights only) — getEnergyAndGradient
         // computes C6/C8/energy/gradient directly from the references, so the
         // O(N²) JSON pair list that GenerateParameters builds is pure overhead
         // here (≈0.5 s on complex/231). Claude Generated.
+        const auto t_d3a = std::chrono::steady_clock::now();
         d3.prepareForEnergyGradient(m_atoms, m_geometry);
+        const auto t_d3b = std::chrono::steady_clock::now();
 
         if (!need_gradient) {
             m_disp_gradient = Matrix::Zero(m_atomcount, 3);
@@ -3027,6 +3034,7 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
         m_disp_dEdcn = Vector::Zero(m_atomcount);
         const double e_disp = d3.getEnergyAndGradient(
             /*need_gradient=*/true, m_disp_gradient, m_disp_dEdcn);
+        const auto t_d3c = std::chrono::steady_clock::now();
 
         // CN chain rule: fold Σ_A dE_D3/dCN_A · ∂CN_A/∂R into the cached
         // gradient using the D3 exponential counting function's derivative.
@@ -3040,6 +3048,13 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
                 m_atoms, m_geometry, m_disp_dEdcn, m_disp_gradient,
                 /*k1=*/16.0, /*k2=*/4.0/3.0, /*distance_unit_to_bohr=*/au);
             m_disp_dEdcn = Vector();
+        }
+        if (CurcumaLogger::get_verbosity() >= 3 || std::getenv("CURCUMA_GPU_PROFILE")) {
+            const auto t_d3d = std::chrono::steady_clock::now();
+            auto msd = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) {
+                return std::chrono::duration<double, std::milli>(b - a).count(); };
+            CurcumaLogger::result(fmt::format("  GFN1 D3 (host): CN + weights {:.1f} ms, energy/gradient/dC6dCN {:.1f} ms, CN chain rule {:.1f} ms",
+                                              msd(t_d3a, t_d3b), msd(t_d3b, t_d3c), msd(t_d3c, t_d3d)));
         }
 
         m_disp_gradient_valid = true;
