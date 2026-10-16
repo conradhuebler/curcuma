@@ -40,6 +40,10 @@ public:
     /// device this builder runs on); J and K come back symmetrised exactly as from build().
     /// Synchronous: the result is complete on return. False = unsupported or device error.
     virtual bool buildDevice(const double* /*dP*/, double* /*dJ*/, double* /*dK*/) { return false; }
+    /// WP11 (MP2 on the device, Claude Generated Oct 2026): device pointer of the stored tensor
+    /// (n^4 doubles, ERITensor layout, on the device this builder runs on), nullptr if the
+    /// builder holds none (integral-direct) or the backend does not expose it. Read-only.
+    virtual const double* deviceERI() const { return nullptr; }
 };
 
 /// Flat, pointer-only description of everything the device ERI kernel needs (Q-G2).

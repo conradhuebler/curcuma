@@ -37,6 +37,7 @@
 #include "qm_methods/qm_gpu_scf_backend.h"  // qmint::QMGpuSCF (Q-G4)
 #include "qm_methods/qm_gpu_grad_backend.h"  // qmint::QMGpuGrad2e (Q-G7)
 #include "qm_methods/qm_gpu_grad1e_backend.h"  // qmint::QMGpuGrad1e (Q-G8)
+#include "qm_methods/qm_gpu_mp2_backend.h"  // qmint::QMGpuMP2Input/Output (WP11)
 
 namespace gpu_plugin {
 
@@ -107,6 +108,14 @@ std::unique_ptr<qmint::QMGpuGrad2e> createQmGrad2e(const std::string& backend, c
  */
 std::unique_ptr<qmint::QMGpuGrad1e> createQmGrad1e(const std::string& backend, const qmint::QMGpuEriTables& tables,
                                                    const qmint::QMGpuGrad1eExtra& extra, int device, std::string& why);
+
+/**
+ * Native-QM canonical MP2 on the device (WP11): four-index transformation with DGEMM and the
+ * pair-energy sum, FP64. False with a reason in `why` when the plugin/entry point is missing, the
+ * device memory is too small or a device call fails. Claude Generated (Oct 2026).
+ */
+bool qmMp2Energy(const std::string& backend, const qmint::QMGpuMP2Input& in, qmint::QMGpuMP2Output& out,
+                 std::string& why);
 
 /// True if the plugin library libcurcuma_<backend>.so can be loaded (cached; a failed probe
 /// is not retried and, unlike the create* calls, is silent). Used for `-gpu auto` and

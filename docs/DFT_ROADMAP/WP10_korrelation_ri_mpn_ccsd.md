@@ -1,6 +1,7 @@
 # WP10-WP14 -- Dichtefitting (RI), MPn und CCSD, plus Bewertung von Schwarz-Ansaetzen
 
-- **Status:** 🤖 AI-generated Plan, **nichts davon ist implementiert oder getestet.** Stand Okt 2026.
+- **Status:** 🤖 AI-generated Plan. Umgesetzt (Okt 2026, AI-generated, machine-tested): nur WP11 Schritt 1 (kanonisches
+  RMP2, CPU + CUDA) und Schritt 3 (SCS/SOS), siehe WP11. Alles andere ist nicht implementiert.
 - **Abhaengigkeit:** WP3 (RHF, ERI-Engine, `QMEngine`), fuer die GPU-Teile die Stufen Q-G1/Q-G2 aus
   [../QM_GPU_ROADMAP.md](../QM_GPU_ROADMAP.md).
 - **Referenzen auf dieser Maschine:** PySCF (venv `~/.venvs/qmref`), ORCA 6.1 (`~/Downloads/orca_6_1_0_...`).
@@ -39,6 +40,70 @@ xTB-Erfahrungen zu uebernehmen.
 - **Nicht im Umfang:** COSX/RIJCOSX (ORCA-spezifisch), Gradient (spaeter, eigener Schritt).
 
 ## WP11 -- MO-Transformation und MP2
+
+**Stand Okt 2026: Schritt 1 (CPU und GPU) und Schritt 3 umgesetzt; 🤖 AI-generated, ⚙️ machine-tested, menschlicher
+Produktionstest steht aus.** Schritt 2 (RI-MP2) offen (wartet auf WP10).
+
+- **Code:** `qm_mp2.{h,cpp}` (Parameter, `qmint::mp2EnergyHost`, `QMEngine::computeMP2`), `mp2_method.{h,cpp}`
+  (Methoden `mp2`, `scs-mp2`, `sos-mp2`), `cuda/qm_gpu_mp2.cu` + Naht `qm_gpu_mp2_backend.h` (Eintrag
+  `curcuma_cuda_qm_mp2_energy`). Parameter: `-qm.frozen_core` (Standard aus; H-He 0, Li-Ne 1s, Na-Ar [He]2s2p ...),
+  `-qm.mp2_batch_mb` (2000), `-qm.mp2_max_memory_mb` (32000), `-qm.gpu_mp2 auto|on|off`. `-sp` gibt E(HF)+E_corr der
+  gewaehlten Variante, `-verbosity 2` zusaetzlich E_OS, E_SS, SCS (1.2/0.333), SOS (1.3) und die Zeitaufteilung.
+- **Algorithmus:** vier Ein-Index-Transformationen in Batches ueber i (Schritt 1 als hohe schmale GEMM, OpenMP ueber
+  Zeilenbloecke; Schritte 2-4 je i; Energie je i, weil (ia|jb) und (ib|ja) im selben i-Block liegen). Zusatzspeicher
+  batch*(n^3 + o v^2) auf der CPU, batch*(n^3 + n^2 v) auf der GPU, nie der o^2 v^2-Tensor.
+- **Tensorquelle:** gespeicherter Host-Tensor der SCF; sonst Download des Device-Tensors; sonst Neuaufbau mit
+  `buildERI`, wenn n^4*8 Byte <= `-qm.mp2_max_memory_mb` (bei integral-direkter SCF), darueber Abbruch mit Fehler.
+  **Kein integral-direktes MP2**, also Grenze n^4 im Hostspeicher. GPU: gespeicherter Device-Tensor (Q-G1/Q-G2,
+  `QMGpuJK::deviceERI`), sonst Host-Tensor hochgeladen; Fehler -> CPU, gezaehlt als `qm_mp2`.
+- **Gradient:** keiner. Eine Gradientenanforderung ist ein Fehler ("mp2 has no analytic gradient"): `-opt` und
+  `-sp -gradient` brechen damit ab (geprueft, `qm_mp2_opt_error`); `-hessian` meldet ihn fuer jede Auslenkung, laeuft
+  aber weiter und schreibt keine Frequenzen (Verhalten von `hessian.cpp`, nicht geaendert); `-md` nicht getestet.
+- **Validierung** (def2-SVP sphaerisch, `-qm.scf_threshold 1e-10`): `ctest -L qm_mp2` (30 Tests) gegen PySCF 2.14
+  `mp.MP2` (RHF conv_tol 1e-12, `scripts/mp2_reference.py` -> `test_cases/qm_mp2/reference.json`) auf H2O, NH3, CH4,
+  HF, H2O/Formaldehyd verzerrt, Formaldehyd, Benzol, je voll und frozen core: alle E_OS, E_SS, E_corr, SCS, SOS
+  innerhalb 1e-8, groesste Abweichung 1.8e-9 Eh (Benzol voll). ORCA 6.1 `! RHF MP2|SCS-MP2 def2-SVP ExtremeSCF
+  NoFrozenCore|FrozenCore` (druckt 9 Nachkommastellen) auf denselben 16 Faellen: E_corr und E_SCS innerhalb 2.0e-9 Eh
+  (Tabelle unten). Mit `VeryTightSCF` lag ORCA selbst bis 7.6e-8 von PySCF entfernt (Formaldehyd verzerrt);
+  ExtremeSCF ist fuer den Vergleich noetig. Naphthalin (180 BF, nicht im ctest): 5.0e-10 (voll), 5.1e-10 (fc) gegen
+  PySCF. GPU gegen CPU: E_corr auf allen 12 gedruckten Stellen gleich (Benzol, Naphthalin, Formaldehyd).
+- **Zeiten** (RTX 5090, Hostspeicher 256 GB; CPU-BLAS dieser Maschine ist die **Referenz-netlib-libblas**,
+  einfaedig, das bremst die CPU-Zahlen; MKL/OpenBLAS nicht gemessen). MP2-Anteil ohne SCF, Transformation / Energie:
+
+  | System (n, o, v) | CPU 1 Thread | CPU 16 Threads | GPU (gespeicherter Device-Tensor) |
+  |---|---|---|---|
+  | Benzol voll (114, 21, 93) | 3517 / 6.0 ms | 913 / 1.0 ms | 64 / 0.3 ms |
+  | Benzol fc (114, 15, 93) | 2458 / 3.6 ms | 656 / 0.5 ms | 63 / 0.2 ms |
+  | Naphthalin voll (180, 34, 146) | 57171 / 41 ms | 10196 / 6.8 ms | 199 / 0.7 ms |
+  | Naphthalin fc (180, 24, 146) | nicht gemessen | 7364 / 3.0 ms | 135 / 0.4 ms |
+
+  CPU-Naphthalin mit `-qm.scf_direct off` (Tensor gespeichert); mit Standard (direkte SCF) kommt der Neuaufbau des
+  Tensors dazu (8398 MB, 1572 ms). GPU mit `-qm.gpu_direct on`: Neuaufbau auf dem Host + Upload (599 ms) vor der
+  Transformation. Device-Speicher Naphthalin (gerechnet, nicht gemessen): Tensor 8398 MB + Batch 34*84.5 MB.
+- **Nicht getestet:** offene Schale (nicht implementiert), Elemente ausser H, C, N, O, F (Li-Ne-frozen-core-Regel nur auf
+  C, N, O, F gegen PySCF/ORCA geprueft), andere Basen als def2-SVP, kartesisch 6d, Systeme ueber 180 BF, ROCm/Vulkan
+  (keine Implementierung, `-gpu rocm` faellt gezaehlt auf die CPU), geladene Molekuele.
+- **Nicht implementiert gegenueber ORCA/PySCF:** RI-MP2, integral-direktes MP2, MP2-Gradient und -Dichte,
+  frei waehlbare SCS-Faktoren, Ausnutzung der Permutationssymmetrie in der Transformation (Faktor ~2 offen).
+
+Vergleich (Eh; curcuma `-qm.scf_threshold 1e-10 -qm.threads 16`; ORCA ExtremeSCF, 9 gedruckte Stellen; "SCS - ORCA"
+gegen `! SCS-MP2`, das zusammen mit E_corr die OS/SS-Aufteilung prueft):
+
+| Molekuel | E_corr voll | - PySCF | - ORCA | SCS - ORCA | E_corr fc | - PySCF | - ORCA | SCS - ORCA |
+|---|---|---|---|---|---|---|---|---|
+| H2O | -0.1999842841 | 6.0e-10 | -5.2e-11 | 1.3e-10 | -0.1973855431 | 6.3e-10 | -1.4e-10 | 7.5e-10 |
+| NH3 | -0.1936363035 | -9.3e-11 | 5.3e-10 | 4.2e-10 | -0.1908720455 | -9.3e-11 | 4.8e-10 | 8.4e-10 |
+| CH4 | -0.1647349435 | 1.5e-10 | 4.6e-10 | 1.1e-10 | -0.1612389364 | 1.4e-10 | 6.0e-10 | 5.4e-10 |
+| HF | -0.2015058020 | -4.1e-10 | -4.9e-11 | 1.9e-10 | -0.1994674300 | -4.1e-10 | 3.1e-11 | 1.4e-10 |
+| H2O_distorted | -0.2000156496 | -3.1e-10 | 3.5e-10 | 6.5e-10 | -0.1974146809 | -3.2e-10 | 9.9e-11 | 3.3e-10 |
+| formaldehyde_distorted | -0.3259997291 | 3.0e-10 | 9.0e-10 | 1.1e-09 | -0.3208916624 | 2.9e-10 | 6.3e-10 | 1.1e-09 |
+| formaldehyde | -0.3214541495 | -1.7e-09 | 5.4e-10 | 6.1e-10 | -0.3162181368 | -1.7e-09 | 1.2e-09 | 6.1e-10 |
+| benzene | -0.7970301248 | -1.8e-09 | 1.2e-09 | 1.1e-09 | -0.7794624731 | -1.8e-09 | 1.9e-09 | 2.0e-09 |
+
+Die Restabweichungen (1e-10 bis 2e-9) liegen in der Groessenordnung der SCF-Konvergenz der Referenzen (PySCF
+conv_tol_grad = sqrt(conv_tol) = 1e-6) und der Schwarz-Schwelle 1e-12; nicht weiter zerlegt.
+
+Urspruenglicher Plan:
 
 - **Schritt 1 (kanonisch, ohne RI):** halbtransformierter Tensor (mn|ia), dann (ia|jb). O(n^5), Speicher
   O(o v n^2). Closed-shell RMP2 mit eingefrorenem Rumpf (`-qm.frozen_core`). Validierung gegen PySCF `mp.MP2`

@@ -652,6 +652,8 @@ add_subdirectory(qm_hf3c)
 # Native HF / HF-3c analytic gradient vs FD + PySCF (+ simple-dftd3). Sep 2026.
 add_subdirectory(qm_grad)
 add_subdirectory(qm_gpu)
+# Native canonical MP2 (WP11) vs PySCF, CPU and -gpu cuda. Oct 2026.
+add_subdirectory(qm_mp2)
 
 # Claude Generated (Sep 2026): interface-level gradient + frequency contract.
 # Guards two things nothing else covered:

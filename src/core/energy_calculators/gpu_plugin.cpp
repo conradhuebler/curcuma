@@ -267,6 +267,27 @@ std::unique_ptr<qmint::QMGpuGrad1e> createQmGrad1e(const std::string& backend, c
     return std::unique_ptr<qmint::QMGpuGrad1e>(static_cast<qmint::QMGpuGrad1e*>(p));
 }
 
+// Claude Generated (Oct 2026, WP11): canonical MP2 energy on the device.
+bool qmMp2Energy(const std::string& backend, const qmint::QMGpuMP2Input& in, qmint::QMGpuMP2Output& out,
+                 std::string& why)
+{
+    void* handle = pluginHandle(backend, /*quiet=*/true);
+    if (!handle) {
+        why = "plugin libcurcuma_" + backend + ".so not loadable";
+        return false;
+    }
+    using fn_t = int (*)(const qmint::QMGpuMP2Input*, qmint::QMGpuMP2Output*, char*, int);
+    fn_t fn = resolveSymbol<fn_t>(handle, "curcuma_" + backend + "_qm_mp2_energy");
+    if (!fn) {
+        why = "plugin has no entry point curcuma_" + backend + "_qm_mp2_energy";
+        return false;
+    }
+    char buf[512] = { 0 };
+    const int ok = fn(&in, &out, buf, (int)sizeof buf);
+    if (!ok) why = buf;
+    return ok != 0;
+}
+
 int deviceCount(const std::string& backend)
 {
     void* handle = pluginHandle(backend, /*quiet=*/true);

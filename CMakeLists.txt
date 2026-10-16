@@ -572,6 +572,8 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/qm_scf.cpp
         src/core/energy_calculators/qm_methods/gcp.cpp
         src/core/energy_calculators/qm_methods/hf3c_method.cpp
+        src/core/energy_calculators/qm_methods/qm_mp2.cpp
+        src/core/energy_calculators/qm_methods/mp2_method.cpp
         src/core/energy_calculators/qm_methods/gfnff_method.cpp
         src/core/energy_calculators/qm_methods/xtb_method.cpp
         src/core/energy_calculators/qm_methods/tblite_method.cpp
@@ -1117,6 +1119,8 @@ if(USE_CUDA)
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_grad.cu
         # Claude Generated (Oct 2026): native QM one-electron gradient on the device (Q-G8)
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_grad1e.cu
+        # Claude Generated (Oct 2026): native QM canonical MP2 on the device (WP11), cuBLAS only
+        src/core/energy_calculators/qm_methods/cuda/qm_gpu_mp2.cu
     )
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY LANGUAGE CUDA)
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
