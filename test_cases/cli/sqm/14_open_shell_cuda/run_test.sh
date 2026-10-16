@@ -3,17 +3,20 @@
 # Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
 # Claude Generated (Oct 2026). AI-generated, machine-tested only.
 #
-# Until Oct 16, 2026 the fully device-resident GFN2 loop filled the orbitals as a closed shell (energy up to
-# 49 kcal/mol too low for triplets) and the device gradient of GFN1 and GFN2 built W from integer closed-shell
-# occupations (gradient error up to 0.3 Eh/A). Open shells now use the host-driven loop and the host gradient.
-# Triplet N2 (-spin 2) and the OH radical (-spin 1), GFN1 and GFN2, GPU against CPU:
-#   energy within 1e-7 Eh, every gradient component within 1e-6 Eh/A.
+# Until Oct 16, 2026 (Known Issues #39, #40) the fully device-resident GFN2 loop filled the orbitals as a closed
+# shell (energy up to 49 kcal/mol too low for triplets), and the device gradient of GFN1 and GFN2 built W from
+# integer closed-shell occupations (gradient error up to 0.3 Eh/A for open shells, 0.06 Eh/A for fractional
+# occupations). Open shells now use the host-driven SCF loop; the device gradient takes the occupations f_k.
+# Cases, GFN1 and GFN2, GPU against CPU: triplet N2 (-spin 2), the OH radical (-spin 1), and benzene with a
+# 10000 K Fermi smearing (fractional occupations, closed shell):
+#   energy within 1e-7 Eh, every gradient component within 1e-6 Eh/A (-scf_threshold 1e-8: at the default 1e-5
+#   the SCF noise of the two sides is already ~1e-6 Eh/A).
 # Skipped (exit 77) when the GPU run reports no usable CUDA device or plugin.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../test_utils.sh"
 
-TEST_NAME="sqm - 14: open-shell GFN1/GFN2 on the CUDA path against the CPU"
+TEST_NAME="sqm - 14: open shells and fractional occupations, GFN1/GFN2 on the CUDA path against the CPU"
 TEST_DIR="$SCRIPT_DIR"
 ENERGY_TOLERANCE="0.0000001"
 GRADIENT_TOLERANCE="0.000001"
@@ -24,7 +27,7 @@ energy_of() { strip "$1" | grep -oP 'Single Point Energy = \K[-0-9.e]+' | head -
 run() {   # run <log> <grad> <xyz> <method> <spin> [args...]
     local LOG=$1; local GRAD=$2; local XYZ=$3; local METHOD=$4; local SPIN=$5; shift 5
     $CURCUMA -sp "$XYZ" -method "$METHOD" -spin "$SPIN" -gradient -dump_gradient "$GRAD" -threads 1 \
-        -verbosity 2 -no_bmt "$@" > "$LOG" 2>&1
+        -scf_threshold 1e-8 -verbosity 2 -no_bmt "$@" > "$LOG" 2>&1
     echo "EXIT $?" >> "$LOG"
 }
 
@@ -50,13 +53,14 @@ main() {
     cd "$TEST_DIR"
     cleanup_test_artifacts
 
-    for CASE in "n2.xyz 2" "oh.xyz 1"; do
-        set -- $CASE
-        local XYZ=$1; local SPIN=$2
+    # <file> <spin> <extra arguments>
+    local CASES=("n2.xyz|2|" "oh.xyz|1|" "benzene.xyz|0|-xtb.electronic_temperature 10000")
+    for CASE in "${CASES[@]}"; do
+        IFS='|' read -r XYZ SPIN EXTRA <<< "$CASE"
         for METHOD in gfn2 gfn1; do
             local TAG="${XYZ%.xyz}_${METHOD}"
-            run "${TAG}_cpu.log" "${TAG}_cpu.grad" "$XYZ" "$METHOD" "$SPIN"
-            run "${TAG}_gpu.log" "${TAG}_gpu.grad" "$XYZ" "$METHOD" "$SPIN" -gpu cuda
+            run "${TAG}_cpu.log" "${TAG}_cpu.grad" "$XYZ" "$METHOD" "$SPIN" $EXTRA
+            run "${TAG}_gpu.log" "${TAG}_gpu.grad" "$XYZ" "$METHOD" "$SPIN" -gpu cuda $EXTRA
             if strip "${TAG}_gpu.log" | grep -qiE "no usable CUDA device|requires a CUDA build|plugin"; then
                 echo -e "${YELLOW}SKIP${NC}: no usable CUDA device or plugin"
                 exit 77

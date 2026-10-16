@@ -2022,10 +2022,8 @@ double XTB::Calculation(bool gradient)
     // reads dP/dC straight off the device (xtb_gradient.cpp:859-868). Skip finalize() there too;
     // ensureHostWavefunction() downloads on demand for the few paths that still need the host
     // matrices (host gradient fallback, property accessors) - see xtb_multipole.cpp:44.
-    // Oct 16, 2026 (Known Issue #39): the device gradient builds W from integer closed-shell occupations
-    // (2 eps for the first nocc_orbs); an open shell takes the host gradient, which uses focc.
     const bool device_grad_will_run = gradient && use_gpu_resident && m_gpu_scf
-        && m_gpu_scf->supportsGradient() && !openShell();
+        && m_gpu_scf->supportsGradient();
     m_wfn_on_device = false;
     if (use_gpu_resident && m_gpu_scf) {
         if (use_resident_loop && m_mp_ints_deferred && (!gradient || device_grad_will_run))
@@ -2184,7 +2182,7 @@ double XTB::Calculation(bool gradient)
         // CN chain-rule (4) on the host. Falls back to the full CPU gradient if the
         // backend has no gradient.
         bool gpu_grad = false;
-        if (use_gpu_resident && m_gpu_scf && m_gpu_scf->supportsGradient() && !openShell())
+        if (use_gpu_resident && m_gpu_scf && m_gpu_scf->supportsGradient())
             gpu_grad = calculateGradientGpu();
         if (!gpu_grad) {
             ensureHostWavefunction();

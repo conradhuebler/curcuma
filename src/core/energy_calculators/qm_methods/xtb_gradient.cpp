@@ -849,7 +849,23 @@ bool XTB::calculateGradientGpu()
     for (int ao = 0; ao < nao; ++ao)
         v_ao(ao) = m_pot.v_sh(m_basis.ao2sh[ao]) + m_pot.v_at(m_basis.ao2at[ao]);
 
-    const int nocc_orbs = static_cast<int>(std::round(m_wfn.nocc / 2.0));
+    int nocc_orbs = static_cast<int>(std::round(m_wfn.nocc / 2.0));
+    // Oct 16, 2026 (Known Issue #40): the device builds W = sum_k 2 eps_k C_k C_k^T over the first nocc_orbs
+    // orbitals, i.e. integer closed-shell occupations. With the Fermi smearing of electronic_temperature > 0
+    // the occupations are fractional (small HOMO-LUMO gap: PCl3_TS, (NH3)2 2+, strained C60 isomers: GPU
+    // gradient up to 0.033 Eh/A off) and for an open shell they are the sum of the two spin fillings. The
+    // host gradient uses W = sum_k f_k eps_k C_k C_k^T (f = focc, see calculateGradient); hand the device the
+    // same weights through the existing interface: eps_eff = f eps / 2 over the leading ncol orbitals.
+    Vector eps_eff = m_wfn.eps;
+    if (m_wfn.focc.size() == nao && m_wfn.eps.size() == nao) {
+        int ncol = 0;
+        for (int i = 0; i < nao; ++i)
+            if (m_wfn.focc(i) > 1.0e-12) ncol = i + 1;
+        if (ncol > 0) {
+            nocc_orbs = ncol;
+            eps_eff = 0.5 * m_wfn.focc.cwiseProduct(m_wfn.eps);
+        }
+    }
 
     // GFN2 multipole potentials for the device multipole-integral Pulay term.
     Eigen::MatrixXd v_dp_empty, v_qp_empty;
@@ -864,7 +880,7 @@ bool XTB::calculateGradientGpu()
     const Eigen::MatrixXd C_empty;
     Matrix grad_dev;   // nat×3, Eh/Bohr (sections 1/2/3 incl. GFN2 multipole Pulay)
     Vector dEdcn;      // nat
-    if (!m_gpu_scf->gradient(P_empty, C_empty, m_wfn.eps, nocc_orbs, v_ao, m_wfn.q_sh,
+    if (!m_gpu_scf->gradient(P_empty, C_empty, eps_eff, nocc_orbs, v_ao, m_wfn.q_sh,
                              v_dp, v_qp, grad_dev, dEdcn, /*pc_resident=*/true))
         return false;
     if (grad_dev.rows() != nat || grad_dev.cols() != 3 || dEdcn.size() != nat)
