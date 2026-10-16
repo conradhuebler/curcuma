@@ -415,6 +415,11 @@ public:
                                         n0_sh.data(), n0_at.data(), alpha, max_hist, w0);
     }
 
+    bool setResidentOpenShell(double n_alpha, double n_beta) override
+    {
+        return m_ctx && m_ctx->setResidentOpenShell(n_alpha, n_beta);
+    }
+
     bool residentScfStep(bool fp32, double& dq, double& e_band, double& e_coulomb,
                          double& e_third, double& e_multipole) override
     {

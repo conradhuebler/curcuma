@@ -528,6 +528,11 @@ struct GpuScfBackend {
      * converged charges once at the end (finalize() still downloads P/C). Default
      * false → the per-iteration host-driven loop. GFN2 device-potential path. */
     virtual bool supportsResidentLoop() const { return false; }
+    /* Open shell on the resident loop (Oct 16, 2026, Known Issue #39): call AFTER a successful
+     * beginResidentLoop to fill the orbitals as two Fermi fillings (n_alpha, n_beta) over the same
+     * eigenvectors, summed (tblite nspin == 1, XTB::occupationsFromEps). Default false: the loop
+     * only knows the closed-shell filling and the caller keeps the host-driven loop. */
+    virtual bool setResidentOpenShell(double n_alpha, double n_beta) { (void)n_alpha; (void)n_beta; return false; }
     /* X-I1: true if the backend's device integral/SCF/gradient kernels handle d
      * shells. Default false -> the XTB engine routes d systems to the CPU path
      * (m_has_dshell gate). The CUDA backend overrides to true; ROCm/Vulkan keep

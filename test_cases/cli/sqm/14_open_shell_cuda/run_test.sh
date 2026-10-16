@@ -6,7 +6,8 @@
 # Until Oct 16, 2026 (Known Issues #39, #40) the fully device-resident GFN2 loop filled the orbitals as a closed
 # shell (energy up to 49 kcal/mol too low for triplets), and the device gradient of GFN1 and GFN2 built W from
 # integer closed-shell occupations (gradient error up to 0.3 Eh/A for open shells, 0.06 Eh/A for fractional
-# occupations). Open shells now use the host-driven SCF loop; the device gradient takes the occupations f_k.
+# occupations). Open shells now fill the orbitals with n_alpha / n_beta on the device (resident loop, GFN2) or on
+# the host (GFN1); the device gradient takes the occupations f_k.
 # Cases, GFN1 and GFN2, GPU against CPU: triplet N2 (-spin 2), the OH radical (-spin 1), and benzene with a
 # 10000 K Fermi smearing (fractional occupations, closed shell):
 #   energy within 1e-7 Eh, every gradient component within 1e-6 Eh/A (-scf_threshold 1e-8: at the default 1e-5
@@ -67,6 +68,10 @@ main() {
             fi
             assert_string_in_file "EXIT 0" "${TAG}_cpu.log" "$TAG CPU run: exit code 0"
             assert_string_in_file "EXIT 0" "${TAG}_gpu.log" "$TAG GPU run: exit code 0"
+            if [ "$METHOD" = gfn2 ]; then
+                # Oct 16, 2026: open shells run on the device-resident loop (two Fermi fillings on the device).
+                assert_string_in_file "fully device-resident loop" "${TAG}_gpu.log" "$TAG GPU run: device-resident loop"
+            fi
             assert_numeric_match "$(energy_of ${TAG}_cpu.log)" "$(energy_of ${TAG}_gpu.log)" "$ENERGY_TOLERANCE" \
                 "$TAG: GPU energy equals the CPU energy"
             check_gradient "${TAG}_cpu.grad" "${TAG}_gpu.grad" "$TAG: GPU gradient equals the CPU gradient"

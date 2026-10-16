@@ -225,6 +225,10 @@ struct XtbGpuContext::Impl {
     // carry the converged chemical potential + the occupied-column count for the
     // component test. Claude Generated.
     CudaBuffer<double> dOccMu;      // chemical potential µ (1 double)
+    // Open shell on the resident loop (Oct 2026): the two spin channels, summed into dOcc.
+    CudaBuffer<double> dOccA, dOccB;
+    bool   loop_open = false;
+    double loop_nalpha = 0.0, loop_nbeta = 0.0;
     CudaBuffer<int>    dOccNcol;    // last column with occ>1e-12 (1 int)
 
     // Stage 6 (S6.3): device SCC energy. dEScratch holds γ·q_sh (nsh) for the
@@ -3027,6 +3031,81 @@ __global__ void k_occupations(const double* __restrict__ eps, double* __restrict
     if (tid == 0) { if (mu_out) *mu_out = mu_f; if (ncol_out) *ncol_out = static_cast<int>(sdata[0]); }
 }
 
+// ---- Open-shell occupation (Claude Generated, Oct 2026) ----------------------
+// Port of XTB::fermiFillingChannel (xtb_scf.cpp), tblite get_aufbau_filling + get_fermi_filling_:
+// aufbau filling of one spin channel with nel electrons, then (kT > 0) Newton iterations on the Fermi
+// level with the target occt = homo. Same start value, same x < 50 cut, same stopping rules (200 cycles,
+// total_dfermi == 0, |occt - total| <= sqrt(eps)). The block-tree sums differ from the host's sequential
+// sums only in rounding. One block; sdata holds 2 * blockDim doubles (number sum and derivative sum).
+__device__ void occupation_channel(const double* __restrict__ eps, double* __restrict__ out, int n,
+                                   double nel, double kT, double* sdata)
+{
+    __shared__ double s_ef;
+    const int tid = threadIdx.x, nt = blockDim.x;
+    for (int i = tid; i < n; i += nt) out[i] = 0.0;
+    __syncthreads();
+    if (n == 0 || nel <= 0.0) return;
+    int homo = static_cast<int>(floor(nel));
+    for (int i = tid; i < min(homo, n); i += nt) out[i] = 1.0;
+    const double frac = nel - floor(nel);
+    if (tid == 0 && homo < n) out[homo] = frac;
+    if (frac > 0.5) ++homo;
+    __syncthreads();
+    if (homo <= 0) return;
+    if (kT <= 0.0) return;
+    if (tid == 0) s_ef = 0.5 * (eps[max(homo, 1) - 1] + eps[min(homo + 1, n) - 1]);
+    __syncthreads();
+    const double occt = static_cast<double>(homo);
+    const double thr = 1.4901161193847656e-08;   // sqrt(epsilon(double))
+    for (int cycle = 0; cycle < 200; ++cycle) {
+        double pn = 0.0, pd = 0.0;
+        const double ef = s_ef;
+        for (int i = tid; i < n; i += nt) {
+            double f = 0.0, df = 0.0;
+            const double x = (eps[i] - ef) / kT;
+            if (x < 50.0) {
+                const double ex = exp(x);
+                f = 1.0 / (ex + 1.0);
+                df = ex / (kT * (ex + 1.0) * (ex + 1.0));
+            }
+            out[i] = f;
+            pn += f; pd += df;
+        }
+        sdata[tid] = pn; sdata[nt + tid] = pd; __syncthreads();
+        for (int s = nt >> 1; s > 0; s >>= 1) {
+            if (tid < s) { sdata[tid] += sdata[tid + s]; sdata[nt + tid] += sdata[nt + tid + s]; }
+            __syncthreads();
+        }
+        const double total_number = sdata[0], total_dfermi = sdata[nt];
+        __syncthreads();
+        if (total_dfermi == 0.0) break;
+        if (tid == 0) s_ef += (occt - total_number) / total_dfermi;
+        __syncthreads();
+        if (fabs(occt - total_number) <= thr) break;
+    }
+    __syncthreads();
+}
+
+__global__ void k_occupations_uhf(const double* __restrict__ eps, double* __restrict__ occ,
+                                  double* __restrict__ occ_a, double* __restrict__ occ_b, int n, double kT,
+                                  double n_alpha, double n_beta, int* ncol_out)
+{
+    extern __shared__ double sdata[];   // 2 * blockDim doubles
+    const int tid = threadIdx.x, nt = blockDim.x;
+    occupation_channel(eps, occ_a, n, n_alpha, kT, sdata);
+    occupation_channel(eps, occ_b, n, n_beta, kT, sdata);
+    int local_ncol = 0;
+    for (int i = tid; i < n; i += nt) {
+        const double o = occ_a[i] + occ_b[i];
+        occ[i] = o;
+        if (o > 1.0e-12) local_ncol = i + 1;
+    }
+    __syncthreads();
+    sdata[tid] = static_cast<double>(local_ncol); __syncthreads();
+    for (int s = nt >> 1; s > 0; s >>= 1) { if (tid < s) sdata[tid] = fmax(sdata[tid], sdata[tid + s]); __syncthreads(); }
+    if (tid == 0 && ncol_out) *ncol_out = static_cast<int>(sdata[0]);
+}
+
 // ---- Stage 6 (S6.3) SCC energy kernels ------------------------------------
 // GFN2 shell third-order energy E = Σ_s q_sh(s)³·Γ_s/3 (coulomb::energy_third_order,
 // GFN2 branch). Grid-stride block reduction → atomicAdd into e_out (pre-zeroed).
@@ -3745,7 +3824,7 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
     Impl& I = *m_impl;
     const int n = I.resident_n;
     const bool partial = (n_eig > 0 && n_eig < n);
-    const bool closed_shell = std::fabs(I.loop_nelec - 2.0 * I.loop_nocc_pairs) < 1e-9;
+    const bool closed_shell = !I.loop_open && std::fabs(I.loop_nelec - 2.0 * I.loop_nocc_pairs) < 1e-9;
     const bool pseudo_ok = I.pseudo_enabled && I.in_resident_step && !partial && closed_shell
         && I.loop_nao == n && I.last_dq < I.pseudo_max_dq;
     auto finish_pseudo = [&](const char* what) {
@@ -6103,6 +6182,7 @@ bool XtbGpuContext::beginResidentLoop(int nsh, int nat, int nao, double Tele, do
     if (!broydenBegin(nsh + 9 * nat, alpha, max_hist, w0)) return false;
     m_impl->loop_nsh = nsh; m_impl->loop_nat = nat; m_impl->loop_nao = nao;
     m_impl->loop_Tele = Tele; m_impl->loop_nelec = n_elec; m_impl->loop_nocc_pairs = nocc_pairs;
+    m_impl->loop_open = false; m_impl->loop_nalpha = m_impl->loop_nbeta = 0.0;
     m_impl->last_dq = 1e300;             // a new SCF starts without usable previous eigenvectors
     m_impl->cprev_valid = m_impl->cprev64_valid = false;
     m_impl->pseudo_consecutive = m_impl->pseudo_consecutive64 = 0;
@@ -6147,9 +6227,17 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
     const double kT = m_impl->loop_Tele * 3.166808e-6;
     const int use_fermi = (m_impl->loop_Tele > 0.0) ? 1 : 0;
     const int blk = 256;
-    k_occupations<<<1, blk, blk * sizeof(double), stream>>>(
-        m_impl->dEps.ptr, m_impl->dOcc.ptr, nao, kT, m_impl->loop_nelec,
-        m_impl->loop_nocc_pairs, use_fermi, m_impl->dOccMu.ptr, m_impl->dOccNcol.ptr);
+    if (m_impl->loop_open) {
+        // Open shell: n_alpha / n_beta fillings over the same eigenvectors (setResidentOpenShell).
+        try { m_impl->dOccA.ensure(nao); m_impl->dOccB.ensure(nao); } catch (...) { return fail("open-shell occupation buffers"); }
+        k_occupations_uhf<<<1, blk, 2 * blk * sizeof(double), stream>>>(
+            m_impl->dEps.ptr, m_impl->dOcc.ptr, m_impl->dOccA.ptr, m_impl->dOccB.ptr, nao, kT,
+            m_impl->loop_nalpha, m_impl->loop_nbeta, m_impl->dOccNcol.ptr);
+    } else {
+        k_occupations<<<1, blk, blk * sizeof(double), stream>>>(
+            m_impl->dEps.ptr, m_impl->dOcc.ptr, nao, kT, m_impl->loop_nelec,
+            m_impl->loop_nocc_pairs, use_fermi, m_impl->dOccMu.ptr, m_impl->dOccNcol.ptr);
+    }
     if (cudaGetLastError() != cudaSuccess) return fail("occupation kernel failed");
     // Claude Generated (Sep 2026): build P from the occupied columns only (last column with
     // occ > 1e-12, reported by the kernel), exactly like the CPU density (xtb_scf.cpp,
@@ -6183,12 +6271,6 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
     if (!sccEnergy(nat, nsh, e_coulomb, e_third, e_multipole)) return fail("SCC energy failed");
     m_impl->profMark("scf: SCC energy");
 
-    // 7. Convergence dq = max|q_sh_out − q_sh_in| (q_sh_in = current dPotQsh).
-    k_maxabsdiff<<<1, blk, blk * sizeof(double), stream>>>(m_impl->dQsh.ptr, m_impl->dPotQsh.ptr,
-                                                           nsh, m_impl->dDq.ptr);
-    if (cudaGetLastError() != cudaSuccess) return fail("convergence (max|dq|) kernel failed");
-    m_impl->dDq.download(dq_out, 1, stream);
-
     // 8. Broyden: pack input [dPotQsh; dInDpAt; dInQpAt] + output [dQsh; dDpAt; dQpAt],
     //    mix, and unpack the next input back into the resident dPotQsh/dInDpAt/dInQpAt.
     {
@@ -6202,6 +6284,14 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
         cudaMemcpyAsync(vout, m_impl->dQsh.ptr, sizeof(double) * nsh, cudaMemcpyDeviceToDevice, stream);
         cudaMemcpyAsync(vout + off_dp, m_impl->dDpAt.ptr, sizeof(double) * 3 * nat, cudaMemcpyDeviceToDevice, stream);
         cudaMemcpyAsync(vout + off_qp, m_impl->dQpAt.ptr, sizeof(double) * 6 * nat, cudaMemcpyDeviceToDevice, stream);
+        // 7. Convergence dq = max|x_out - x_in| over the FULL SCC vector the mixer works on: shell charges
+        //    AND the atomic dipole/quadrupole moments, like the CPU loop (XTB::Calculation, Known Issue #29).
+        //    Until Oct 16, 2026 this was the shell charges alone: for a molecule whose shell charges are
+        //    pinned by symmetry (H2, H2+) the loop stopped after 2 iterations with the moments unconverged
+        //    (GMTKN55 W4-11/h2 and SIE4x4/h2+_1.0: gradient 0.0020 against 0.0098 Eh/A at the default threshold).
+        k_maxabsdiff<<<1, blk, blk * sizeof(double), stream>>>(vout, vin, nsh + 9 * nat, m_impl->dDq.ptr);
+        if (cudaGetLastError() != cudaSuccess) return fail("convergence (max|dq|) kernel failed");
+        m_impl->dDq.download(dq_out, 1, stream);
         if (!runBroydenUpdate(vin, vout, m_impl->dBroyVnext.ptr)) return fail("device Broyden update failed");
         cudaMemcpyAsync(m_impl->dPotQsh.ptr, m_impl->dBroyVnext.ptr, sizeof(double) * nsh, cudaMemcpyDeviceToDevice, stream);
         cudaMemcpyAsync(m_impl->dInDpAt.ptr, m_impl->dBroyVnext.ptr + off_dp, sizeof(double) * 3 * nat, cudaMemcpyDeviceToDevice, stream);
@@ -6737,6 +6827,16 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     const bool ok_sync = cudaStreamSynchronize(stream) == cudaSuccess;
     m_impl->profMark("grad: download + sync");
     return ok_sync;
+}
+
+bool XtbGpuContext::setResidentOpenShell(double n_alpha, double n_beta)
+{
+    if (!ok() || m_impl->loop_nao <= 0 || n_alpha < 0.0 || n_beta < 0.0) return false;
+    m_impl->loop_open = true;
+    m_impl->loop_nalpha = n_alpha;
+    m_impl->loop_nbeta = n_beta;
+    m_impl->loop_nelec = n_alpha + n_beta;
+    return true;
 }
 
 // Stage 6 (S6.1): device occupation. Component-test entry — uploads a frozen eps

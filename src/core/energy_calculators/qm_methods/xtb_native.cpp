@@ -1206,12 +1206,7 @@ double XTB::Calculation(bool gradient)
     // occupations, then drive m_gpu_scf->residentScfStep below. Falls back to the
     // host-driven device-potential loop on any failure. GFN2 only.
     bool use_resident_loop = false;
-    // Oct 16, 2026 (Known Issue #39): the resident loop fills the orbitals from the total electron count
-    // alone (closed-shell Fermi filling); it knows nothing of n_alpha/n_beta. For an open shell it computed
-    // the closed-shell state instead (GMTKN55 W4-11/bn3pi: -4.00583 against -3.92755 Eh on the CPU, 65 such
-    // structures up to 49 kcal/mol), so open shells keep the host-driven loop, whose occupations
-    // (occupationsFromEps) are open-shell aware.
-    if (use_device_potential && mode == ScfMode::Broyden && m_gpu_scf->supportsResidentLoop() && !openShell()) {
+    if (use_device_potential && mode == ScfMode::Broyden && m_gpu_scf->supportsResidentLoop()) {
         std::vector<double> rcn, rgi, rzeff, rrefcn, rrefcovcn, rrefq;
         std::vector<int> rnref;
         exportD4RefWDeviceData(rcn, rgi, rzeff, rrefcn, rrefcovcn, rrefq, rnref);
@@ -1222,6 +1217,12 @@ double XTB::Calculation(bool gradient)
             && m_gpu_scf->beginResidentLoop(m_wfn.q_sh, m_wfn.dp_at, m_wfn.qp_at, m_wfn.q_at,
                                             m_wfn.n0_sh, m_wfn.n0_at, m_electronic_temp,
                                             m_wfn.nocc, nocc_pairs, damp, b_maxhist, 0.01);
+        // Oct 16, 2026 (Known Issue #39): the loop's default occupation is the closed-shell filling from
+        // the total electron count; an open shell needs the two spin fillings (n_alpha, n_beta) on the
+        // device. A backend without them keeps the host-driven loop, whose occupations
+        // (occupationsFromEps) are open-shell aware.
+        if (use_resident_loop && openShell())
+            use_resident_loop = m_gpu_scf->setResidentOpenShell(m_nalpha, m_nbeta);
         if (verb >= 2)
             CurcumaLogger::info(use_resident_loop
                 ? "SCF: fully device-resident loop (host polls only dq + energy scalars)"

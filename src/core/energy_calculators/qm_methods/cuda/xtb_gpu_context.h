@@ -542,6 +542,9 @@ public:
                            const double* qp_at0, const double* q_at0,
                            const double* n0_sh, const double* n0_at,
                            double alpha, int max_hist, double w0);
+    /** Open shell on the resident loop: two Fermi fillings (n_alpha, n_beta), summed. Call after
+     *  beginResidentLoop (which resets it to the closed-shell filling). Claude Generated (Oct 2026). */
+    bool setResidentOpenShell(double n_alpha, double n_beta);
     bool residentScfStep(bool fp32, double* dq_out, double* e_band, double* e_coulomb,
                          double* e_third, double* e_multipole);
     bool residentLoopCharges(double* q_sh, double* q_at, double* dp_at, double* qp_at,
