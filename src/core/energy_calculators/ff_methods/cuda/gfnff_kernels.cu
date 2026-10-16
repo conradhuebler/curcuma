@@ -3102,6 +3102,82 @@ __global__ void k_dc6dcn_per_pair(
     if (c6_out) c6_out[tid] = c6;
 }
 
+// ---------------------------------------------------------------------------
+// Tabulated dc6dcn (Claude Generated, Oct 2026)
+// k_dc6dcn_per_pair contracts the reference table for every pair: 3 sums over nref(i) x nref(j) terms.
+// Both factors of that contraction depend on one atom and the partner ELEMENT only, so they are
+// tabulated once per atom and element type:
+//   A[a][t][r'] = sum_r gw_a[r] * C6ref(Z_a, Z_t; r, r')      (partner reference r' of element t)
+//   W[a][t][r'] = sum_r gw_a[r] * C6ref(Z_t, Z_a; r', r)
+// and the pair needs nref terms only:
+//   C6(i,j)      = sum_rj gw_j[rj]  A[i][t_j][rj]
+//   dC6/dCN(j)   = sum_rj dgw_j[rj] A[i][t_j][rj]
+//   dC6/dCN(i)   = sum_ri dgw_i[ri] W[j][t_i][ri]
+// identical to the double loop up to the order of summation (|C6ref| < 1e-20 skipped as there).
+// ---------------------------------------------------------------------------
+__global__ void k_d4_partner_tables(int N, int nt, const int* __restrict__ type_z, const int* __restrict__ atom_types,
+                                    const double* __restrict__ gw, const double* __restrict__ c6_flat,
+                                    double* __restrict__ A, double* __restrict__ W)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N * nt) return;
+    const int a = tid / nt, t = tid % nt;
+    const int za = atom_types[a] - 1, zt = type_z[t] - 1;
+    const int nra = d_refn_const[za], nrt = d_refn_const[zt];
+    const size_t base_at = (static_cast<size_t>(za) * D4_MAX_ELEM + zt) * D4_MAX_REF * D4_MAX_REF;
+    const size_t base_ta = (static_cast<size_t>(zt) * D4_MAX_ELEM + za) * D4_MAX_REF * D4_MAX_REF;
+    for (int rp = 0; rp < D4_MAX_REF; ++rp) {
+        double sa = 0.0, sw = 0.0;
+        if (rp < nrt) {
+            for (int r = 0; r < nra; ++r) {
+                const double g = gw[a * D4_MAX_REF + r];
+                const double c_at = c6_flat[base_at + r * D4_MAX_REF + rp];
+                if (fabs(c_at) >= 1e-20) sa += g * c_at;
+                const double c_ta = c6_flat[base_ta + rp * D4_MAX_REF + r];
+                if (fabs(c_ta) >= 1e-20) sw += g * c_ta;
+            }
+        }
+        A[(static_cast<size_t>(a) * nt + t) * D4_MAX_REF + rp] = sa;
+        W[(static_cast<size_t>(a) * nt + t) * D4_MAX_REF + rp] = sw;
+    }
+}
+
+__global__ void k_dc6dcn_per_pair_tab(int n_pairs, const int* __restrict__ idx_i, const int* __restrict__ idx_j,
+                                      const int* __restrict__ atom_types, const int* __restrict__ atype_idx, int nt,
+                                      const double* __restrict__ gw, const double* __restrict__ dgw,
+                                      const double* __restrict__ A, const double* __restrict__ W,
+                                      double* __restrict__ dc6dcn_ij, double* __restrict__ dc6dcn_ji,
+                                      double* __restrict__ c6_out)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_pairs) return;
+    const int ai = idx_i[tid], aj = idx_j[tid];
+    const int nri = d_refn_const[atom_types[ai] - 1], nrj = d_refn_const[atom_types[aj] - 1];
+    const double* Aij = A + (static_cast<size_t>(ai) * nt + atype_idx[aj]) * D4_MAX_REF;
+    const double* Wji = W + (static_cast<size_t>(aj) * nt + atype_idx[ai]) * D4_MAX_REF;
+    double c6 = 0.0, dji = 0.0, dij = 0.0;
+    for (int rj = 0; rj < nrj; ++rj) {
+        c6  += gw[aj * D4_MAX_REF + rj] * Aij[rj];
+        dji += dgw[aj * D4_MAX_REF + rj] * Aij[rj];
+    }
+    for (int ri = 0; ri < nri; ++ri)
+        dij += dgw[ai * D4_MAX_REF + ri] * Wji[ri];
+    dc6dcn_ij[tid] = dij;
+    dc6dcn_ji[tid] = dji;
+    if (c6_out) c6_out[tid] = c6;
+}
+
+void launch_dc6dcn_tabulated(cudaStream_t s, int N, int nt, int n_pairs, const int* idx_i, const int* idx_j,
+                             const int* atom_types, const int* atype_idx, const int* type_z,
+                             const double* gw, const double* dgw, const double* c6_flat, double* A, double* W,
+                             double* dc6ij, double* dc6ji, double* c6_out, int block)
+{
+    k_d4_partner_tables<<<(N * nt + 127) / 128, 128, 0, s>>>(N, nt, type_z, atom_types, gw, c6_flat, A, W);
+    if (n_pairs <= 0) return;
+    k_dc6dcn_per_pair_tab<<<(n_pairs + block - 1) / block, block, 0, s>>>(
+        n_pairs, idx_i, idx_j, atom_types, atype_idx, nt, gw, dgw, A, W, dc6ij, dc6ji, c6_out);
+}
+
 // Claude Generated (Oct 2026): cost of one dispersion pair for the multi-GPU split. k_dc6dcn_per_pair
 // loops over nref(i) x nref(j) reference pairs (1..49), k_dispersion costs about the same as an average
 // dc6dcn pair, so cost = nref_i * nref_j + 10. Inclusive prefix sum over the pair list.

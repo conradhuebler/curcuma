@@ -688,6 +688,36 @@ struct FFWorkspaceGPUImpl {
         coul_split_natoms = -1;
     }
     // Claude Generated (Oct 2026): multi-GPU dispersion split (contiguous pair ranges per device).
+    /// Oct 2026: partner tables of the tabulated dc6dcn kernel for the device that owns the buffers.
+    struct Dc6Tab {
+        CudaBuffer<double> A, W;
+        CudaBuffer<int> atype_idx, type_z;
+        int nt = 0;
+        bool ok() const { return nt > 0; }
+        /// Types and buffers for the atoms in `z` (atomic numbers); nt = 0 if more than max_types are present.
+        void prepare(const std::vector<int>& z, int max_types)
+        {
+            nt = 0;
+            std::vector<int> types;
+            for (int e : z)
+                if (std::find(types.begin(), types.end(), e) == types.end()) types.push_back(e);
+            std::sort(types.begin(), types.end());
+            if (static_cast<int>(types.size()) > max_types || types.empty()) return;
+            std::vector<int> idx(z.size());
+            for (size_t a = 0; a < z.size(); ++a)
+                idx[a] = static_cast<int>(std::find(types.begin(), types.end(), z[a]) - types.begin());
+            nt = static_cast<int>(types.size());
+            atype_idx.upload(idx);
+            type_z.upload(types);
+            A.alloc(static_cast<int>(z.size()) * nt * D4_MAX_REF);
+            W.alloc(static_cast<int>(z.size()) * nt * D4_MAX_REF);
+        }
+        void release() { A.free(); W.free(); atype_idx.free(); type_z.free(); nt = 0; }
+    };
+    Dc6Tab dc6tab;                         ///< own device
+    std::vector<int> host_atom_types;      ///< atomic numbers, kept for Dc6Tab::prepare
+    bool dc6_tab_enabled = true;           ///< CURCUMA_DC6DCN_TABLES=0 restores k_dc6dcn_per_pair
+
     struct DispSplitPart {
         int dev = -1, p0 = 0, p1 = 0;
         cudaStream_t stream = nullptr;
@@ -695,6 +725,7 @@ struct FFWorkspaceGPUImpl {
         CudaBuffer<int> idx_i, idx_j, atom_types;
         CudaBuffer<double> C6, r4r2ij, r0_sq, zetac6, r_cut, dc6ij, dc6ji;
         CudaBuffer<double> x, y, z, gw, dgw, c6flat, grad, dEdcn, E;
+        Dc6Tab tab;
     };
     std::vector<std::unique_ptr<DispSplitPart>> disp_parts;
     long disp_gen = 0;                 ///< bumped whenever the dispersion pair list is replaced
@@ -714,6 +745,7 @@ struct FFWorkspaceGPUImpl {
             pp->idx_i.free(); pp->idx_j.free(); pp->atom_types.free();
             pp->C6.free(); pp->r4r2ij.free(); pp->r0_sq.free(); pp->zetac6.free(); pp->r_cut.free();
             pp->dc6ij.free(); pp->dc6ji.free(); pp->x.free(); pp->y.free(); pp->z.free();
+            pp->tab.release();
             pp->gw.free(); pp->dgw.free(); pp->c6flat.free(); pp->grad.free(); pp->dEdcn.free(); pp->E.free();
             if (pp->done)   cudaEventDestroy(pp->done);
             if (pp->stream) cudaStreamDestroy(pp->stream);
@@ -1276,6 +1308,11 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     // Upload atom types once (static during simulation)
     std::vector<int> h_atom_types = atom_types;  // copy
     m_impl->d_atom_types.upload(h_atom_types, stream);
+    m_impl->host_atom_types = h_atom_types;
+    {   // Oct 2026: tabulated dc6dcn (CURCUMA_DC6DCN_TABLES=0 keeps k_dc6dcn_per_pair)
+        const char* e = std::getenv("CURCUMA_DC6DCN_TABLES");
+        m_impl->dc6_tab_enabled = !(e && *e == '0');
+    }
 
     // --- HB alpha chain-rule: allocate zz buffer + build (H,B) pair list ---
     m_impl->d_zz_hb.alloc(natoms);
@@ -1716,6 +1753,7 @@ bool FFWorkspaceGPU::prepareDispSplit()
             cp(part->r_cut.ptr, impl.disp.r_cut.ptr + o, sizeof(double) * n);
             cp(part->atom_types.ptr, impl.d_atom_types.ptr, sizeof(int) * N);
             cp(part->c6flat.ptr, impl.d_c6_flat.ptr, sizeof(double) * impl.d_c6_flat.n);
+            if (impl.dc6_tab_enabled) part->tab.prepare(impl.host_atom_types, 48);
             impl.disp_parts.push_back(std::move(part));
         }
         cudaSetDevice(impl.own_device);
@@ -1770,6 +1808,12 @@ void FFWorkspaceGPU::launchDispSplitHelpers(bool gradient)
             const size_t bw = sizeof(double) * static_cast<size_t>(N) * D4_MAX_REF;
             cudaMemcpyPeerAsync(P.gw.ptr, P.dev, impl.d_gw.ptr, impl.own_device, bw, P.stream);
             cudaMemcpyPeerAsync(P.dgw.ptr, P.dev, impl.d_dgw.ptr, impl.own_device, bw, P.stream);
+            if (P.tab.ok())
+                launch_dc6dcn_tabulated(P.stream, N, P.tab.nt, n, P.idx_i.ptr, P.idx_j.ptr, P.atom_types.ptr,
+                                        P.tab.atype_idx.ptr, P.tab.type_z.ptr, P.gw.ptr, P.dgw.ptr, P.c6flat.ptr,
+                                        P.tab.A.ptr, P.tab.W.ptr, P.dc6ij.ptr, P.dc6ji.ptr,
+                                        m_disp_c6_update ? P.C6.ptr : nullptr, cfg.blockSize);
+            else
             k_dc6dcn_per_pair<<<cfg.gridSize, cfg.blockSize, 0, P.stream>>>(
                 n, P.idx_i.ptr, P.idx_j.ptr, P.atom_types.ptr, P.gw.ptr, P.dgw.ptr, P.c6flat.ptr,
                 P.dc6ij.ptr, P.dc6ji.ptr, m_disp_c6_update ? P.C6.ptr : nullptr);
@@ -2464,6 +2508,14 @@ void FFWorkspaceGPU::computeDC6DCNOnGPU(const std::vector<std::vector<double>>& 
     // Launch dc6dcn per-pair kernel (Phase 6: dynamic block size)
     LaunchConfig cfg = getLaunchConfig(nd, m_block_size);
     // refn read from constant memory d_refn_const (Phase 8)
+    if (impl.dc6_tab_enabled && !impl.dc6tab.ok()) impl.dc6tab.prepare(impl.host_atom_types, 48);
+    if (impl.dc6tab.ok())
+        launch_dc6dcn_tabulated(impl.stream, N, impl.dc6tab.nt, nd, impl.disp.idx_i.ptr, impl.disp.idx_j.ptr,
+                                impl.d_atom_types.ptr, impl.dc6tab.atype_idx.ptr, impl.dc6tab.type_z.ptr,
+                                impl.d_gw.ptr, impl.d_dgw.ptr, impl.d_c6_flat.ptr, impl.dc6tab.A.ptr, impl.dc6tab.W.ptr,
+                                impl.disp.dc6dcn_ij.ptr, impl.disp.dc6dcn_ji.ptr,
+                                m_disp_c6_update ? impl.disp.C6.ptr : nullptr, cfg.blockSize);
+    else
     k_dc6dcn_per_pair<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
         nd,
         impl.disp.idx_i.ptr,
@@ -2551,6 +2603,14 @@ void FFWorkspaceGPU::computeGaussianWeightsOnGPU(bool use_cn_final)
     // Oct 2026: with the dispersion split the own device handles pairs [0, disp_own_n) only.
     const int nd_own = split ? impl.disp_own_n : nd;
     LaunchConfig cfg_dc6 = getLaunchConfig(nd_own, m_block_size);
+    if (impl.dc6_tab_enabled && !impl.dc6tab.ok()) impl.dc6tab.prepare(impl.host_atom_types, 48);
+    if (impl.dc6tab.ok())
+        launch_dc6dcn_tabulated(impl.stream, N, impl.dc6tab.nt, nd_own, impl.disp.idx_i.ptr, impl.disp.idx_j.ptr,
+                                impl.d_atom_types.ptr, impl.dc6tab.atype_idx.ptr, impl.dc6tab.type_z.ptr,
+                                impl.d_gw.ptr, impl.d_dgw.ptr, impl.d_c6_flat.ptr, impl.dc6tab.A.ptr, impl.dc6tab.W.ptr,
+                                impl.disp.dc6dcn_ij.ptr, impl.disp.dc6dcn_ji.ptr,
+                                m_disp_c6_update ? impl.disp.C6.ptr : nullptr, cfg_dc6.blockSize);
+    else
     k_dc6dcn_per_pair<<<cfg_dc6.gridSize, cfg_dc6.blockSize, 0, impl.stream>>>(
         nd_own,
         impl.disp.idx_i.ptr,

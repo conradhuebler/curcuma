@@ -734,6 +734,14 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     // refn read from d_refn_const (constant memory)
 );
 
+/// Tabulated replacement of k_dc6dcn_per_pair (Claude Generated, Oct 2026): builds the per-atom partner tables A, W
+/// ([N * nt * D4_MAX_REF] each) from gw, then the pair kernel. nt = number of distinct elements, type_z[t] their
+/// atomic numbers, atype_idx[a] the type index of atom a. Same outputs as k_dc6dcn_per_pair.
+void launch_dc6dcn_tabulated(cudaStream_t s, int N, int nt, int n_pairs, const int* idx_i, const int* idx_j,
+                             const int* atom_types, const int* atype_idx, const int* type_z,
+                             const double* gw, const double* dgw, const double* c6_flat, double* A, double* W,
+                             double* dc6ij, double* dc6ji, double* c6_out, int block);
+
 // ============================================================================
 // Non-bonded repulsion pair list on the device (Claude Generated, Oct 2026)
 // Two-pass (count per row i, build) like the D4 list. Pair term and exclusions as in
