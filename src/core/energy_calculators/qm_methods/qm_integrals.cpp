@@ -2162,8 +2162,12 @@ void quartetGradient(const std::vector<EriShell>& sh, const ShellPair& bra, cons
 // a quartet whose four shells share one atom contributes nothing and is skipped.
 // Compared with the Sep-2026 first version (every ORDERED bra pair against the
 // canonical kets, derivative on A only) this does ~4x fewer quartets.
-Matrix gradientTwoElectron(const std::vector<GTO::Orbital>& basis, const Matrix& P,
-                           int natoms, int threads)
+namespace {
+// Shared driver of gradientTwoElectron (exchange_only = false, the WP8 expression unchanged) and
+// gradientTwoElectronExchange (Claude Generated, Oct 2026, RI-J gradient: only the exchange part
+// D = -1/4 (P_ml P_ns + P_ms P_nl) of the same canonical-quartet sum).
+Matrix gradientTwoElectronImpl(const std::vector<GTO::Orbital>& basis, const Matrix& P,
+                               int natoms, int threads, bool exchange_only)
 {
     Matrix grad = Matrix::Zero(natoms, 3);
     if (basis.empty()) return grad;
@@ -2205,8 +2209,12 @@ Matrix gradientTwoElectron(const std::vector<GTO::Orbital>& basis, const Matrix&
                         for (int c = 0; c < nC; ++c)
                             for (int d = 0; d < nD; ++d) {
                                 const int m = A.first + a, n = B.first + b, l = C.first + c, s = D.first + d;
-                                Dq[((size_t)(a * nB + b) * nC + c) * nD + d] =
-                                    P(m, n) * P(l, s) - 0.25 * (P(m, l) * P(n, s) + P(m, s) * P(n, l));
+                                if (exchange_only)
+                                    Dq[((size_t)(a * nB + b) * nC + c) * nD + d] =
+                                        -0.25 * (P(m, l) * P(n, s) + P(m, s) * P(n, l));
+                                else
+                                    Dq[((size_t)(a * nB + b) * nC + c) * nD + d] =
+                                        P(m, n) * P(l, s) - 0.25 * (P(m, l) * P(n, s) + P(m, s) * P(n, l));
                             }
                 const double f = 0.5 * (bra.A != bra.B ? 2.0 : 1.0) * (ket.A != ket.B ? 2.0 : 1.0)
                                * (i != j ? 2.0 : 1.0);
@@ -2227,6 +2235,22 @@ Matrix gradientTwoElectron(const std::vector<GTO::Orbital>& basis, const Matrix&
     }
     (void)threads;
     return grad;
+}
+
+}  // namespace
+
+Matrix gradientTwoElectron(const std::vector<GTO::Orbital>& basis, const Matrix& P,
+                           int natoms, int threads)
+{
+    return gradientTwoElectronImpl(basis, P, natoms, threads, false);
+}
+
+// Declared in qm_ri.h (qm_integrals.hpp is included by the CUDA kernel units; a change there would
+// rebuild them). Claude Generated (Oct 2026, RI-J gradient).
+Matrix gradientTwoElectronExchange(const std::vector<GTO::Orbital>& basis, const Matrix& P,
+                                   int natoms, int threads)
+{
+    return gradientTwoElectronImpl(basis, P, natoms, threads, true);
 }
 
 }  // namespace qmint

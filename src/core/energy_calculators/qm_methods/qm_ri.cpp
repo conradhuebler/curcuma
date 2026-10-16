@@ -328,7 +328,14 @@ struct PrimPair {
     int ia = 0, ib = 0;
     double p = 0, Px = 0, Py = 0, Pz = 0;
     std::vector<double> Ex, Ey, Ez;  ///< flat Hermite tables, K folded into Ex
+    // Special members out of line: the implicit inline ones trip -Winline (RI gradient, Oct 2026).
+    PrimPair();
+    PrimPair(PrimPair&&) noexcept;
+    ~PrimPair();
 };
+PrimPair::PrimPair() = default;
+PrimPair::PrimPair(PrimPair&&) noexcept = default;
+PrimPair::~PrimPair() = default;
 
 /// A shell pair (A, B). An auxiliary function is the pair (C, unit s function on C).
 struct Pair {
@@ -563,10 +570,12 @@ struct OutMap {
     std::vector<Eigen::MatrixXd> T;  ///< empty = identity
     OutMap();
     OutMap(const OutMap&);
+    OutMap& operator=(const OutMap&);
     ~OutMap();  // out of line: the implicit inline one trips -Winline
 };
 OutMap::OutMap() = default;
 OutMap::OutMap(const OutMap&) = default;
+OutMap& OutMap::operator=(const OutMap&) = default;
 OutMap::~OutMap() = default;
 
 OutMap orbitalOutMap(const std::vector<Shell>& sh, int ncart, const Matrix* Q)
@@ -690,6 +699,10 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
                  const RIOptions& opt, std::string& why)
 {
     m_opt = opt;
+    m_aux = aux;
+    m_gL.resize(0, 0);
+    m_gU.resize(0, 0);
+    m_gw.resize(0);
     curcuma::ScopedBlasThreads blas_guard(std::max(1, opt.threads));
     const auto t0 = std::chrono::steady_clock::now();
     const std::vector<Shell> osh = orbitalShells(basis);
@@ -724,6 +737,10 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
 #pragma omp parallel for schedule(dynamic) num_threads(threads)
     for (int k = 0; k < npairs; ++k) opairs[k].schwarz = schwarzOf(opairs[k]);
     for (Pair& p : apairs) p.schwarz = schwarzOf(p);
+    m_osch.resize(npairs);
+    for (int k = 0; k < npairs; ++k) m_osch[k] = opairs[k].schwarz;
+    m_asch.resize(naux_sh);
+    for (int c = 0; c < naux_sh; ++c) m_asch[c] = apairs[c].schwarz;
     const double t_schwarz = msSince(t0);
 
     // 3-index tensor T(P, m*n + nn) = (P|m nn) in the active orbital basis
@@ -777,6 +794,7 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
         }
         dn(P) = 1.0 / std::sqrt(Jraw(P, P));
     }
+    m_dn = dn;
     Eigen::MatrixXd Jn = dn.asDiagonal() * Eigen::MatrixXd(Jraw) * dn.asDiagonal();
     for (int P = 0; P < N; ++P) T3.row(P) *= dn(P);
 
@@ -796,6 +814,7 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
             m_metric_used = "eigen (Cholesky failed)";
         } else {
             m_L = llt.matrixL();
+            m_gL = m_L;  // gradient: F^T = L^-T in both modes
             if (opt.mode == "jk") {
                 lowerSolveRows(m_L, T3, threads);  // B = L^-1 T (forward substitution, no explicit inverse)
                 m_L.resize(0, 0);
@@ -824,6 +843,8 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
             wk(k) = w(keep[k]);
         }
         m_nfit = (int)keep.size();
+        m_gU = U;  // gradient: F^T = U w^-1/2 in both modes
+        m_gw = wk;
         if (opt.mode == "jk") {
             // B = w^-1/2 U^T T  (J^-1 ~ U w^-1 U^T = (w^-1/2 U^T)^T (w^-1/2 U^T))
             const Eigen::MatrixXd F = wk.cwiseSqrt().cwiseInverse().asDiagonal() * U.transpose();
@@ -886,10 +907,13 @@ Matrix RIJK::coulomb(const Matrix& P) const
     const int n = m_n, threads = std::max(1, m_opt.threads);
     const Matrix Pc = P;  // contiguous row-major
     const Eigen::Index ncol = (Eigen::Index)n * n;
-    // g_Q = sum_mn T_Q,mn P_mn (one dot product per row)
-    Eigen::VectorXd g(m_nfit);
+    // g_Q = sum_mn T_Q,mn P_mn (one dot product per row). Rows of the tensor, not m_nfit: in mode j
+    // with the eigen metric the tensor keeps all naux rows while m_nfit counts the kept eigenvalues
+    // (fixed Oct 2026; before, a dropped eigenvalue in mode j read past g).
+    const int rows = (int)m_T.rows();
+    Eigen::VectorXd g(rows);
 #pragma omp parallel for schedule(static) num_threads(threads)
-    for (int Q = 0; Q < m_nfit; ++Q) {
+    for (int Q = 0; Q < rows; ++Q) {
         const double* t = m_T.data() + (size_t)Q * ncol;
         double s = 0.0;
         for (Eigen::Index k = 0; k < ncol; ++k) s += t[k] * Pc.data()[k];
@@ -904,7 +928,7 @@ Matrix RIJK::coulomb(const Matrix& P) const
         const Eigen::Index c0 = b * chunk, w = std::min(chunk, ncol - c0);
         double* out = J.data() + c0;
         for (Eigen::Index k = 0; k < w; ++k) out[k] = 0.0;
-        for (int Q = 0; Q < m_nfit; ++Q) {
+        for (int Q = 0; Q < rows; ++Q) {
             const double cq = c(Q);
             const double* t = m_T.data() + (size_t)Q * ncol + c0;
             for (Eigen::Index k = 0; k < w; ++k) out[k] += cq * t[k];
@@ -1000,6 +1024,714 @@ void RIJK::build(const Matrix& P, Matrix& J, Matrix* K) const
     *K = Kf;
 }
 
+// =================================================================================
+// 6. Analytic nuclear gradient of the RI energy (Claude Generated, Oct 2026)
+// =================================================================================
+//
+// Closed-shell RHF, spin-summed density P = 2 C_o C_o^T. Raw auxiliary basis {P}, Coulomb metric
+// J_PQ = (P|Q), 3-index integrals (mn|P), g_P = sum_mn (P|mn) P_mn.
+//
+//   E_J = 1/2 g^T J^-1 g                                   (RI-J and RI-JK)
+//   E_K = -1/4 sum_mnls P_mn P_ls sum_PQ (ml|P) [J^-1]_PQ (Q|ns)   (RI-JK only)
+//
+// The RI-SCF is variational for its own energy (F = H + J_RI - 1/2 K_RI with J_RI = dE_J/dP,
+// K_RI = -2 dE_K/dP), so only the explicit dependence on the integrals is differentiated; the
+// orbital (orthonormality) response is the -W dS term of the one-electron part, with W built from
+// the RI-SCF orbital energies. With d(J^-1) = -J^-1 (dJ) J^-1:
+//
+//   dE_J/dx = sum_P c_P sum_mn (mn|P)^x P_mn - 1/2 sum_PQ c_P c_Q (P|Q)^x,       c = J^-1 g
+//   dE_K/dx = -2 sum_P sum_mn (mn|P)^x Gam^P_mn + sum_PQ M_PQ (P|Q)^x
+//     Gam^P = 1/4 sum_Q [J^-1]_PQ (P (Q|..) P),   M = 1/4 J^-1 A J^-1,  A_RS = Tr((R|..) P (S|..) P)
+//
+// (P = 2 C_o C_o^T turns Gam^P_mn = sum_ij C_mi C_nj d^P_ij, d^P_ij = sum_Q [J^-1]_PQ (Q|ij) and
+// M_PQ = sum_ij d^P_ij d^Q_ij into AO quantities.) Weigend, Haeser, Patzelt, Ahlrichs, Chem. Phys.
+// Lett. 294, 143 (1998) (RI-J gradient); Weigend, Phys. Chem. Chem. Phys. 4, 4285 (2002) (RI-JK);
+// the same expressions as PySCF df/grad/rhf.py (auxbasis_response). Together:
+//
+//   dE/dx = sum_P sum_mn G^P_mn (mn|P)^x - sum_PQ M2_PQ (P|Q)^x,
+//   G^P = c_P P - 2 Gam^P,   M2 = 1/2 c c^T - M      (mode j: G^P = c_P P, M2 = 1/2 c c^T).
+//
+// With the stored fitted tensor B = F T_n (T_n = D T_raw, D_PP = 1/sqrt((P|P)), F = L^-1 for the
+// Cholesky metric J_n = L L^T, F = w^-1/2 U^T for the eigen metric), J_raw^-1 = D F^T F D:
+//   c = D F^T (B . P),  Gam = 1/4 D F^T (P B P),  M = 1/4 D F^T Z F D,  Z_RS = Tr(B^R P B^S P),
+// formed with the density factor P = V S V^T (Y^Q = V (S W^Q S) V^T, W^Q = V^T B^Q V, Z = W_s W^T).
+// With the eigen metric and dropped eigenvalues J^-1 is a pseudo-inverse and the formula is not the
+// exact derivative (not used by default; nothing is dropped at the default cutoff in the tests).
+//
+// Derivative integrals: d/dA_k of a cartesian Gaussian = 2 alpha (l+1_k) - l_k (l-1_k) (same
+// normalisation), from Hermite tables raised by one on both orbital shells (as gradientTwoElectron in
+// qm_integrals.cpp). (mn|P): derivatives on the centres of m and n, the one on the auxiliary centre
+// from translational invariance, d/dC = -(d/dA + d/dB). (P|Q): derivative on P's centre, Q's centre
+// gets the negative. Only first derivatives, so the raised orbital tables need L+1 (d -> f on the
+// derivative side) and the raised auxiliary tables L+1 (g -> h) only in the 2-index part.
+
+namespace {
+
+/// As makePair, Hermite tables raised by one on BOTH shells (centre derivatives of either shell).
+Pair makePairRaised(const Shell& A, const Shell& B)
+{
+    Pair pr;
+    pr.A = &A;
+    pr.B = &B;
+    for (size_t ia = 0; ia < A.exps.size(); ++ia)
+        for (size_t ib = 0; ib < B.exps.size(); ++ib) {
+            const double a = A.exps[ia], b = B.exps[ib];
+            PrimPair pp;
+            pp.ia = (int)ia;
+            pp.ib = (int)ib;
+            pp.p = a + b;
+            pp.Px = (a * A.x + b * B.x) / pp.p;
+            pp.Py = (a * A.y + b * B.y) / pp.p;
+            pp.Pz = (a * A.z + b * B.z) / pp.p;
+            const double ab2 = (A.x - B.x) * (A.x - B.x) + (A.y - B.y) * (A.y - B.y) + (A.z - B.z) * (A.z - B.z);
+            const double K = std::exp(-a * b / pp.p * ab2);
+            if (K == 0.0) continue;
+            pp.Ex = hermite(A.L + 1, B.L + 1, pp.Px - A.x, pp.Px - B.x, pp.p, K);
+            pp.Ey = hermite(A.L + 1, B.L + 1, pp.Py - A.y, pp.Py - B.y, pp.p, 1.0);
+            pp.Ez = hermite(A.L + 1, B.L + 1, pp.Pz - A.z, pp.Pz - B.z, pp.p, 1.0);
+            pr.prims.push_back(std::move(pp));
+        }
+    return pr;
+}
+
+/// Derivative integrals of one bra pair against one ket pair, contracted with cartesian weights:
+///   gA_k = sum_{a,b,cd} W[(a nB + b) nCD + cd] d/dA_k (ab|cd),  gB_k the same for the centre of B.
+/// bra: makePairRaised; ket: makePair (not differentiated here). The ket Hermite sum G_cd(t,u,v)
+/// is the one of pairBlock (bra Hermite range raised by one); per bra component pair it is first
+/// contracted with the weights, H = sum_cd W_cd G_cd, so each derivative term is one E E E H sum.
+void derivBlock(const Pair& bra, const Pair& ket, const double* W, bool wantB, double gA[3], double gB[3])
+{
+    const Shell& A = *bra.A;
+    const Shell& B = *bra.B;
+    const Shell& C = *ket.A;
+    const Shell& D = *ket.B;
+    const int nA = (int)A.lmn.size(), nB = (int)B.lmn.size(), nC = (int)C.lmn.size(), nD = (int)D.lmn.size();
+    const int nCD = nC * nD;
+    for (int k = 0; k < 3; ++k) gA[k] = gB[k] = 0.0;
+    const int LAB = A.L + B.L + 1, LCD = C.L + D.L, Ltot = LAB + LCD;
+    const int sAB_t = (A.L + 2) * (B.L + 2), sAB_i = B.L + 2;  // raised tables
+    const int sCD_t = (C.L + 1) * (D.L + 1), sCD_i = D.L + 1;
+    const int s = Ltot + 1;
+    auto at = [s](int t, int u, int v) { return ((size_t)t * s + u) * s + v; };
+    const int g = LAB + 1;
+    const size_t gsz = (size_t)g * g * g;
+    thread_local std::vector<double> F, R, lvl, G, H;
+    G.resize((size_t)nCD * gsz);
+    H.resize(gsz);
+
+    for (const PrimPair& pb : bra.prims) {
+        const double alpha = A.exps[pb.ia], beta = B.exps[pb.ib];
+        std::fill(G.begin(), G.end(), 0.0);
+        for (const PrimPair& pk : ket.prims) {
+            const double p = pb.p, q = pk.p, rho = p * q / (p + q);
+            const double Wx = pb.Px - pk.Px, Wy = pb.Py - pk.Py, Wz = pb.Pz - pk.Pz;
+            qmint::boysFunction(Ltot, rho * (Wx * Wx + Wy * Wy + Wz * Wz), F);
+            coulombR0(Ltot, Wx, Wy, Wz, rho, F, R, lvl);
+            const double pref = 2.0 * std::pow(PI, 2.5) / (p * q * std::sqrt(p + q));
+            for (int cc = 0; cc < nC; ++cc) {
+                const auto& lc = C.lmn[cc];
+                const double wc = pref * C.coef[cc][pk.ia];
+                for (int cd = 0; cd < nD; ++cd) {
+                    const double w = wc * D.coef[cd][pk.ib];
+                    if (w == 0.0) continue;
+                    const auto& ld = D.lmn[cd];
+                    const int tx = lc[0] + ld[0], ty = lc[1] + ld[1], tz = lc[2] + ld[2];
+                    double ex[16], ey[16], ez[16];
+                    for (int k = 0; k <= tx; ++k) ex[k] = ((k & 1) ? -1.0 : 1.0) * pk.Ex[k * sCD_t + lc[0] * sCD_i + ld[0]];
+                    for (int k = 0; k <= ty; ++k) ey[k] = ((k & 1) ? -1.0 : 1.0) * pk.Ey[k * sCD_t + lc[1] * sCD_i + ld[1]];
+                    for (int k = 0; k <= tz; ++k) ez[k] = ((k & 1) ? -1.0 : 1.0) * pk.Ez[k * sCD_t + lc[2] * sCD_i + ld[2]];
+                    double* Gcd = &G[(size_t)(cc * nD + cd) * gsz];
+                    for (int t = 0; t <= LAB; ++t)
+                        for (int u = 0; u <= LAB - t; ++u)
+                            for (int v = 0; v <= LAB - t - u; ++v) {
+                                double acc = 0.0;
+                                for (int k1 = 0; k1 <= tx; ++k1) {
+                                    if (ex[k1] == 0.0) continue;
+                                    double a2 = 0.0;
+                                    for (int k2 = 0; k2 <= ty; ++k2) {
+                                        if (ey[k2] == 0.0) continue;
+                                        const double* Rr = &R[at(t + k1, u + k2, v)];
+                                        double a3 = 0.0;
+                                        for (int k3 = 0; k3 <= tz; ++k3) a3 += ez[k3] * Rr[k3];
+                                        a2 += ey[k2] * a3;
+                                    }
+                                    acc += ex[k1] * a2;
+                                }
+                                Gcd[((size_t)t * g + u) * g + v] += w * acc;
+                            }
+                }
+            }
+        }
+        // (a'b'|H) for bra powers a, b (either one shifted by +-1 on one axis)
+        auto val = [&](const int a[3], const int b[3]) {
+            double sum = 0.0;
+            for (int t = 0; t <= a[0] + b[0]; ++t) {
+                const double et = pb.Ex[t * sAB_t + a[0] * sAB_i + b[0]];
+                if (et == 0.0) continue;
+                for (int u = 0; u <= a[1] + b[1]; ++u) {
+                    const double etu = et * pb.Ey[u * sAB_t + a[1] * sAB_i + b[1]];
+                    if (etu == 0.0) continue;
+                    const double* hrow = &H[((size_t)t * g + u) * g];
+                    double sv = 0.0;
+                    for (int v = 0; v <= a[2] + b[2]; ++v) sv += pb.Ez[v * sAB_t + a[2] * sAB_i + b[2]] * hrow[v];
+                    sum += etu * sv;
+                }
+            }
+            return sum;
+        };
+        for (int ca = 0; ca < nA; ++ca) {
+            const auto& la = A.lmn[ca];
+            for (int cb = 0; cb < nB; ++cb) {
+                const double c_ab = A.coef[ca][pb.ia] * B.coef[cb][pb.ib];
+                if (c_ab == 0.0) continue;
+                const double* w = W + (size_t)(ca * nB + cb) * nCD;
+                bool any = false;
+                for (int cd = 0; cd < nCD; ++cd) {
+                    if (w[cd] == 0.0) continue;
+                    const double* Gk = &G[(size_t)cd * gsz];
+                    if (!any) {
+                        for (size_t x = 0; x < gsz; ++x) H[x] = w[cd] * Gk[x];
+                        any = true;
+                    } else {
+                        for (size_t x = 0; x < gsz; ++x) H[x] += w[cd] * Gk[x];
+                    }
+                }
+                if (!any) continue;
+                const auto& lb = B.lmn[cb];
+                int a[3] = { la[0], la[1], la[2] }, b[3] = { lb[0], lb[1], lb[2] };
+                for (int k = 0; k < 3; ++k) {
+                    a[k] += 1;
+                    double dA = 2.0 * alpha * val(a, b);
+                    a[k] -= 2;
+                    if (la[k] > 0) dA -= la[k] * val(a, b);
+                    a[k] += 1;
+                    gA[k] += c_ab * dA;
+                    if (!wantB) continue;
+                    b[k] += 1;
+                    double dB = 2.0 * beta * val(a, b);
+                    b[k] -= 2;
+                    if (lb[k] > 0) dB -= lb[k] * val(a, b);
+                    b[k] += 1;
+                    gB[k] += c_ab * dB;
+                }
+            }
+        }
+    }
+}
+
+/// In place T := L^-T T (L lower triangular N x N, so L^T upper): back substitution row by row.
+void upperSolveRowsLT(const Eigen::MatrixXd& L, Matrix& T, int threads)
+{
+    const int N = (int)T.rows();
+    const Eigen::Index ncol = T.cols(), chunk = 128, nchunks = (ncol + chunk - 1) / chunk;
+    double* base = T.data();
+#pragma omp parallel for schedule(dynamic) num_threads(std::max(1, threads))
+    for (Eigen::Index b = 0; b < nchunks; ++b) {
+        const Eigen::Index c0 = b * chunk, w = std::min(chunk, ncol - c0);
+        for (int P = N - 1; P >= 0; --P) {
+            double* rp = base + (size_t)P * ncol + c0;
+            for (int Q = P + 1; Q < N; ++Q) {
+                const double l = L(Q, P);
+                if (l == 0.0) continue;
+                const double* rq = base + (size_t)Q * ncol + c0;
+                for (Eigen::Index k = 0; k < w; ++k) rp[k] -= l * rq[k];
+            }
+            const double inv = 1.0 / L(P, P);
+            for (Eigen::Index k = 0; k < w; ++k) rp[k] *= inv;
+        }
+    }
+}
+
+int threadId()
+{
+#ifdef _OPENMP
+    return omp_get_thread_num();
+#else
+    return 0;
+#endif
+}
+
+}  // namespace
+
+void RIJK::applyFitTranspose(Matrix& X) const
+{
+    const int threads = std::max(1, m_opt.threads);
+    if (m_gL.size()) {
+        upperSolveRowsLT(m_gL, X, threads);
+        return;
+    }
+    if (m_gU.size()) {
+        const Eigen::MatrixXd F2 = m_gU * m_gw.cwiseSqrt().cwiseInverse().asDiagonal();  // N x nfit
+        Matrix out;
+        leftMultiplyRows(F2, X, out, threads);
+        X.swap(out);
+        return;
+    }
+    throw std::logic_error("RIJK::applyFitTranspose: no metric factor (setup not run)");
+}
+
+bool RIJK::gradientDensities(const Matrix& P, Eigen::VectorXd& c, Matrix& G, Eigen::MatrixXd& M2, std::string& why) const
+{
+    const int n = m_n, N = m_naux, threads = std::max(1, m_opt.threads);
+    const int rows = (int)m_T.rows();  // mode jk: nfit (B), mode j: naux (T_n)
+    const Matrix Pc = P;               // contiguous row-major
+    const Eigen::Index ncol = (Eigen::Index)n * n;
+    // g_Q = sum_mn T_Q,mn P_mn
+    Eigen::VectorXd gq(rows);
+#pragma omp parallel for schedule(static) num_threads(threads)
+    for (int Q = 0; Q < rows; ++Q) {
+        const double* t = m_T.data() + (size_t)Q * ncol;
+        double s = 0.0;
+        for (Eigen::Index k = 0; k < ncol; ++k) s += t[k] * Pc.data()[k];
+        gq(Q) = s;
+    }
+    Eigen::VectorXd cn;
+    if (m_opt.mode == "j") {
+        cn = fitCoefficients(gq);  // J_n^-1 g_n
+    } else {
+        Matrix x(rows, 1);
+        for (int Q = 0; Q < rows; ++Q) x(Q, 0) = gq(Q);
+        applyFitTranspose(x);  // F^T (B . P)
+        cn = x.col(0);
+    }
+    c = m_dn.cwiseProduct(cn);  // raw auxiliary basis
+    M2 = 0.5 * c * c.transpose();
+    G.resize(0, 0);
+    if (m_opt.mode == "j") return true;
+
+    const double need_mb = (double)N * ncol * 8.0 / 1.0e6;
+    if (need_mb + tensorMB() > m_opt.max_memory_mb) {
+        why = fmt::format("RI-JK gradient needs {:.1f} MB for the 3-index densities in addition to the {:.1f} MB tensor, above "
+                          "-qm.ri_max_memory_mb {:g}",
+                          need_mb, tensorMB(), m_opt.max_memory_mb);
+        return false;
+    }
+    Eigen::MatrixXd V;
+    int npos = 0;
+    factorDensity(P, V, npos);
+    const int r = (int)V.cols(), r2 = r * r;
+    std::vector<double> Vr((size_t)n * r);  // row-major n x r
+    for (int l = 0; l < n; ++l)
+        for (int k = 0; k < r; ++k) Vr[(size_t)l * r + k] = V(l, k);
+    // Per fit row Q: X = B^Q V (n x r), W^Q = V^T X (r x r), Ws^Q = (s s^T) o W^Q, so that
+    // P B^Q P = V Ws^Q V^T. F^T acts on the auxiliary index only, hence F^T (P B P) = V (F^T Ws) V^T:
+    // the metric solve runs on the r^2 columns of Ws instead of the n^2 columns of P B P.
+    std::vector<double> Wr((size_t)rows * r2);
+    Matrix Ws(rows, r2);
+#pragma omp parallel num_threads(threads)
+    {
+        std::vector<double> X((size_t)n * r);
+#pragma omp for schedule(static)
+        for (int Q = 0; Q < rows; ++Q) {
+            const double* B = m_T.data() + (size_t)Q * ncol;
+            std::fill(X.begin(), X.end(), 0.0);
+            for (int m = 0; m < n; ++m) {
+                double* xm = &X[(size_t)m * r];
+                const double* bm = B + (size_t)m * n;
+                for (int l = 0; l < n; ++l) {
+                    const double b = bm[l];
+                    if (b == 0.0) continue;
+                    const double* vl = &Vr[(size_t)l * r];
+                    for (int k = 0; k < r; ++k) xm[k] += b * vl[k];
+                }
+            }
+            double* W = &Wr[(size_t)Q * r2];
+            std::fill(W, W + r2, 0.0);
+            for (int m = 0; m < n; ++m) {
+                const double* vm = &Vr[(size_t)m * r];
+                const double* xm = &X[(size_t)m * r];
+                for (int k = 0; k < r; ++k) {
+                    const double v = vm[k];
+                    if (v == 0.0) continue;
+                    double* wk = W + (size_t)k * r;
+                    for (int l = 0; l < r; ++l) wk[l] += v * xm[l];
+                }
+            }
+            double* ws = Ws.data() + (size_t)Q * r2;
+            for (int k = 0; k < r; ++k)
+                for (int l = 0; l < r; ++l) ws[(size_t)k * r + l] = ((k < npos) == (l < npos)) ? W[(size_t)k * r + l] : -W[(size_t)k * r + l];
+        }
+    }
+    // Z_RS = Tr(B^R P B^S P) = sum_kl Ws^R_kl W^S_kl
+    Matrix Z(rows, rows);
+#pragma omp parallel for schedule(dynamic) num_threads(threads)
+    for (int R = 0; R < rows; ++R) {
+        const double* a = Ws.data() + (size_t)R * r2;
+        for (int S = 0; S <= R; ++S) {
+            const double* b = &Wr[(size_t)S * r2];
+            double sum = 0.0;
+            for (int k = 0; k < r2; ++k) sum += a[k] * b[k];
+            Z(R, S) = sum;
+            Z(S, R) = sum;
+        }
+    }
+    std::vector<double>().swap(Wr);
+    // Gam = 1/4 D F^T (P B P) = 1/4 D V (F^T Ws) V^T  ->  G^P = c_P P - 1/2 D_PP V (F^T Ws)^P V^T
+    applyFitTranspose(Ws);  // N rows
+    G.resize(N, ncol);
+#pragma omp parallel num_threads(threads)
+    {
+        std::vector<double> U((size_t)n * r);
+#pragma omp for schedule(static)
+        for (int Pi = 0; Pi < N; ++Pi) {
+            const double* ws = Ws.data() + (size_t)Pi * r2;
+            // U = V Ws (n x r)
+            std::fill(U.begin(), U.end(), 0.0);
+            for (int m = 0; m < n; ++m) {
+                const double* vm = &Vr[(size_t)m * r];
+                double* um = &U[(size_t)m * r];
+                for (int k = 0; k < r; ++k) {
+                    const double v = vm[k];
+                    if (v == 0.0) continue;
+                    const double* wk = ws + (size_t)k * r;
+                    for (int l = 0; l < r; ++l) um[l] += v * wk[l];
+                }
+            }
+            // G^P = c_P P - 1/2 D_PP U V^T (symmetric: lower triangle computed and mirrored)
+            double* y = G.data() + (size_t)Pi * ncol;
+            const double cp = c(Pi), dp = -0.5 * m_dn(Pi);
+            for (int m = 0; m < n; ++m) {
+                const double* um = &U[(size_t)m * r];
+                for (int l = 0; l <= m; ++l) {
+                    const double* vl = &Vr[(size_t)l * r];
+                    double sum = 0.0;
+                    for (int k = 0; k < r; ++k) sum += um[k] * vl[k];
+                    const double vml = cp * Pc(m, l) + dp * sum;
+                    y[(size_t)m * n + l] = vml;
+                    y[(size_t)l * n + m] = cp * Pc(l, m) + dp * sum;
+                }
+            }
+        }
+    }
+    Matrix().swap(Ws);
+    // M = 1/4 D F^T Z F D  (F^T Z, transpose, F^T again; Z symmetric)
+    applyFitTranspose(Z);  // N x rows
+    Matrix Zt = Z.transpose();
+    applyFitTranspose(Zt);  // N x N
+    for (int Pi = 0; Pi < N; ++Pi)
+        for (int Qi = 0; Qi < N; ++Qi) M2(Pi, Qi) -= 0.25 * m_dn(Pi) * m_dn(Qi) * 0.5 * (Zt(Pi, Qi) + Zt(Qi, Pi));
+    return true;
+}
+
+namespace {
+
+/// Shell data shared by the host and the device 3-index gradient (built once per gradient).
+struct GradSetup {
+    std::vector<Shell> osh;
+    OutMap oo, ao;
+    std::vector<Eigen::MatrixXd> oT, aT;  ///< transposed transforms (active/spherical -> cartesian)
+    std::vector<Shell> units;
+    std::vector<Pair> apairs;              ///< (C, unit s) per auxiliary shell
+    std::vector<std::pair<int, int>> oidx; ///< canonical orbital shell pairs, order of RIJK::setup
+    GradSetup();
+    ~GradSetup();
+};
+GradSetup::GradSetup() = default;
+GradSetup::~GradSetup() = default;
+
+void buildGradSetup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const std::vector<Shell>& aux, bool spherical,
+                    GradSetup& gs)
+{
+    gs.osh = orbitalShells(basis);
+    gs.oo = orbitalOutMap(gs.osh, (int)basis.size(), Q);
+    gs.ao = auxOutMap(aux, spherical);
+    const int nsh = (int)gs.osh.size(), naux_sh = (int)aux.size();
+    gs.oT.assign(nsh, Eigen::MatrixXd());
+    gs.aT.assign(naux_sh, Eigen::MatrixXd());
+    for (int s = 0; s < nsh; ++s)
+        if (gs.oo.T[s].size()) gs.oT[s] = gs.oo.T[s].transpose();
+    for (int s = 0; s < naux_sh; ++s)
+        if (gs.ao.T[s].size()) gs.aT[s] = gs.ao.T[s].transpose();
+    gs.units.clear();
+    gs.units.reserve(aux.size());
+    for (const Shell& s : aux) gs.units.push_back(unitShell(s));
+    gs.apairs.clear();
+    gs.apairs.reserve(aux.size());
+    for (int s = 0; s < naux_sh; ++s) gs.apairs.push_back(makePair(aux[s], gs.units[s]));
+    gs.oidx.clear();
+    for (int A = 0; A < nsh; ++A)
+        for (int B = A; B < nsh; ++B) gs.oidx.push_back({ A, B });
+}
+
+/// Cartesian weight block W[a][b][c] of the 3-index density for orbital pair k and auxiliary shell cs
+/// (G^P_mn, or c_P P_mn when G is empty), back-transformed from the active/spherical functions. False
+/// when the block is skipped: one-centre block, or below the density-weighted Schwarz screen.
+bool weightBlock(const GradSetup& gs, const std::vector<Shell>& aux, int k, int cs, int n, const Matrix& G, const Eigen::VectorXd& c,
+                 const Matrix& Pc, double schwarz, double thr, std::vector<double>& blk, std::vector<double>& tmp)
+{
+    const int A = gs.oidx[k].first, B = gs.oidx[k].second;
+    if (gs.osh[A].atom == gs.osh[B].atom && gs.osh[B].atom == aux[cs].atom) return false;  // no gradient
+    const int wA = gs.oo.width[A], wB = gs.oo.width[B], wC = gs.ao.width[cs];
+    const bool fullG = G.size() != 0;
+    blk.resize((size_t)wA * wB * wC);
+    double gmax = 0.0;
+    for (int i = 0; i < wA; ++i)
+        for (int j = 0; j < wB; ++j) {
+            const Eigen::Index col = (Eigen::Index)(gs.oo.first[A] + i) * n + gs.oo.first[B] + j;
+            double* o = &blk[((size_t)i * wB + j) * wC];
+            for (int s = 0; s < wC; ++s) {
+                const int Pi = gs.ao.first[cs] + s;
+                const double v = fullG ? G(Pi, col) : c(Pi) * Pc.data()[col];
+                o[s] = v;
+                gmax = std::max(gmax, std::abs(v));
+            }
+        }
+    if (schwarz >= 0.0 && schwarz * gmax < thr) return false;
+    int d[3] = { wA, wB, wC };
+    if (gs.oT[A].size()) transformAxis3(blk, tmp, d, 0, gs.oT[A]);
+    if (gs.oT[B].size()) transformAxis3(blk, tmp, d, 1, gs.oT[B]);
+    if (gs.aT[cs].size()) transformAxis3(blk, tmp, d, 2, gs.aT[cs]);
+    return true;
+}
+
+}  // namespace
+
+Matrix RIJK::threeIndexGradient(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const Eigen::VectorXd& c, const Matrix& P,
+                                const Matrix& G, int natoms) const
+{
+    const int threads = std::max(1, m_opt.threads);
+    GradSetup gs;
+    buildGradSetup(basis, Q, m_aux, m_opt.spherical_aux, gs);
+    const int n = m_n, naux_sh = (int)m_aux.size(), npairs = (int)gs.oidx.size();
+    // The derivative integrals are not bounded by the Schwarz factors of the undifferentiated ones
+    // (factors 2 alpha), so the density-weighted screen runs two orders below the RI screening.
+    const double thr = m_opt.screening * 1.0e-2;
+    const bool haveSchwarz = (int)m_osch.size() == npairs && (int)m_asch.size() == naux_sh;
+    const Matrix Pc = P;
+    std::vector<Matrix> gt(threads, Matrix::Zero(natoms, 3));
+#pragma omp parallel num_threads(threads)
+    {
+        Matrix& g = gt[threadId()];
+        std::vector<double> blk, tmp;
+#pragma omp for schedule(dynamic)
+        for (int k = 0; k < npairs; ++k) {
+            const int A = gs.oidx[k].first, B = gs.oidx[k].second;
+            const int aA = gs.osh[A].atom, aB = gs.osh[B].atom;
+            Pair braR;
+            bool built = false;
+            for (int cs = 0; cs < naux_sh; ++cs) {
+                const double sch = haveSchwarz ? m_osch[k] * m_asch[cs] : -1.0;
+                if (!weightBlock(gs, m_aux, k, cs, n, G, c, Pc, sch, thr, blk, tmp)) continue;
+                if (!built) {
+                    braR = makePairRaised(gs.osh[A], gs.osh[B]);
+                    built = true;
+                }
+                double gA[3], gB[3];
+                derivBlock(braR, gs.apairs[cs], blk.data(), true, gA, gB);
+                const int aC = m_aux[cs].atom;
+                const double w = (A != B) ? 2.0 : 1.0;  // (A,B) and (B,A) blocks, symmetric G
+                for (int x = 0; x < 3; ++x) {
+                    g(aA, x) += w * gA[x];
+                    g(aB, x) += w * gB[x];
+                    g(aC, x) -= w * (gA[x] + gB[x]);
+                }
+            }
+        }
+    }
+    Matrix grad = Matrix::Zero(natoms, 3);
+    for (int t = 0; t < threads; ++t) grad += gt[t];
+    return grad;
+}
+
+// Claude Generated (Oct 2026): the same quantity as threeIndexGradient with the integrals on the device
+// (cuda/qm_gpu_ri_grad.cu). The host builds the shells, the Hermite tables of every primitive pair
+// (bra raised, kets plain), the screened task list and the cartesian weight blocks (weightBlock).
+bool RIJK::threeIndexGradientDevice(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const Eigen::VectorXd& c, const Matrix& P,
+                                    const Matrix& G, int natoms, const std::string& backend, int device, Matrix& grad,
+                                    std::string& info, std::string& why) const
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    const int threads = std::max(1, m_opt.threads);
+    GradSetup gs;
+    buildGradSetup(basis, Q, m_aux, m_opt.spherical_aux, gs);
+    const int n = m_n, nsh = (int)gs.osh.size(), naux_sh = (int)m_aux.size(), npairs = (int)gs.oidx.size();
+    const double thr = m_opt.screening * 1.0e-2;
+    const bool haveSchwarz = (int)m_osch.size() == npairs && (int)m_asch.size() == naux_sh;
+    const Matrix Pc = P;
+
+    // shells: orbital then auxiliary
+    std::vector<int> sh_L, sh_atom, sh_ncomp, sh_lmn_off, lmn, sh_nprim, sh_coef_off, sh_exp_off;
+    std::vector<double> coef, exps;
+    auto addShell = [&](const Shell& s) {
+        sh_L.push_back(s.L);
+        sh_atom.push_back(s.atom);
+        sh_ncomp.push_back((int)s.lmn.size());
+        sh_lmn_off.push_back((int)lmn.size());
+        for (const auto& t : s.lmn) lmn.insert(lmn.end(), t.begin(), t.end());
+        sh_nprim.push_back((int)s.exps.size());
+        sh_coef_off.push_back((int)coef.size());
+        for (const auto& cc : s.coef) coef.insert(coef.end(), cc.begin(), cc.end());
+        sh_exp_off.push_back((int)exps.size());
+        exps.insert(exps.end(), s.exps.begin(), s.exps.end());
+    };
+    for (const Shell& s : gs.osh) addShell(s);
+    for (const Shell& s : m_aux) addShell(s);
+    // primitive pairs and Hermite tables
+    std::vector<int> pp_ia, pp_ib, pair_pp_off(npairs), pair_npp(npairs), aux_pp_off(naux_sh), aux_npp(naux_sh), pair_A(npairs),
+        pair_B(npairs);
+    std::vector<double> pp_geom, E;
+    std::vector<long long> pp_E_off;
+    auto addPrims = [&](const Pair& pr) {
+        for (const PrimPair& pp : pr.prims) {
+            pp_ia.push_back(pp.ia);
+            pp_ib.push_back(pp.ib);
+            pp_geom.insert(pp_geom.end(), { pp.p, pp.Px, pp.Py, pp.Pz });
+            pp_E_off.push_back((long long)E.size());
+            E.insert(E.end(), pp.Ex.begin(), pp.Ex.end());
+            E.insert(E.end(), pp.Ey.begin(), pp.Ey.end());
+            E.insert(E.end(), pp.Ez.begin(), pp.Ez.end());
+        }
+    };
+    for (int k = 0; k < npairs; ++k) {
+        pair_A[k] = gs.oidx[k].first;
+        pair_B[k] = gs.oidx[k].second;
+        const Pair pr = makePairRaised(gs.osh[pair_A[k]], gs.osh[pair_B[k]]);
+        pair_pp_off[k] = (int)pp_ia.size();
+        pair_npp[k] = (int)pr.prims.size();
+        addPrims(pr);
+    }
+    for (int cs = 0; cs < naux_sh; ++cs) {
+        aux_pp_off[cs] = (int)pp_ia.size();
+        aux_npp[cs] = (int)gs.apairs[cs].prims.size();
+        addPrims(gs.apairs[cs]);
+    }
+    const double tables_ms = msSince(t0);
+    // tasks and weight blocks (per pair in parallel, concatenated in pair order)
+    std::vector<std::vector<int>> taux(npairs);
+    std::vector<std::vector<double>> tw(npairs);
+#pragma omp parallel num_threads(threads)
+    {
+        std::vector<double> blk, tmp;
+#pragma omp for schedule(dynamic)
+        for (int k = 0; k < npairs; ++k)
+            for (int cs = 0; cs < naux_sh; ++cs) {
+                const double sch = haveSchwarz ? m_osch[k] * m_asch[cs] : -1.0;
+                if (!weightBlock(gs, m_aux, k, cs, n, G, c, Pc, sch, thr, blk, tmp)) continue;
+                taux[k].push_back(cs);
+                tw[k].insert(tw[k].end(), blk.begin(), blk.end());
+            }
+    }
+    std::vector<long long> task_start(npairs + 1, 0), task_woff;
+    std::vector<int> task_aux;
+    std::vector<long long> pair_woff(npairs + 1, 0);
+    for (int k = 0; k < npairs; ++k) {
+        const int A = pair_A[k], B = pair_B[k];
+        const size_t bsz = gs.osh[A].lmn.size() * gs.osh[B].lmn.size();
+        size_t off = 0;
+        for (int cs : taux[k]) {
+            task_aux.push_back(cs);
+            task_woff.push_back(pair_woff[k] + (long long)off);
+            off += bsz * m_aux[cs].lmn.size();
+        }
+        pair_woff[k + 1] = pair_woff[k] + (long long)tw[k].size();
+        task_start[k + 1] = (long long)task_aux.size();
+    }
+    std::vector<double> W((size_t)pair_woff[npairs]);
+#pragma omp parallel for schedule(dynamic) num_threads(threads)
+    for (int k = 0; k < npairs; ++k) {
+        std::copy(tw[k].begin(), tw[k].end(), W.begin() + pair_woff[k]);
+        std::vector<double>().swap(tw[k]);
+    }
+    const double prep_ms = msSince(t0);
+
+    qmint::QMGpuRIGradInput in;
+    in.natoms = natoms;
+    in.nshell = nsh + naux_sh;
+    in.aux_base = nsh;
+    in.sh_L = sh_L.data();
+    in.sh_atom = sh_atom.data();
+    in.sh_ncomp = sh_ncomp.data();
+    in.sh_lmn_off = sh_lmn_off.data();
+    in.lmn = lmn.data();
+    in.nlmn = (int)lmn.size();
+    in.sh_nprim = sh_nprim.data();
+    in.sh_coef_off = sh_coef_off.data();
+    in.coef = coef.data();
+    in.ncoef = (int)coef.size();
+    in.sh_exp_off = sh_exp_off.data();
+    in.exps = exps.data();
+    in.nexp = (int)exps.size();
+    in.npairs = npairs;
+    in.pair_A = pair_A.data();
+    in.pair_B = pair_B.data();
+    in.pair_pp_off = pair_pp_off.data();
+    in.pair_npp = pair_npp.data();
+    in.aux_pp_off = aux_pp_off.data();
+    in.aux_npp = aux_npp.data();
+    in.npp = (int)pp_ia.size();
+    in.pp_ia = pp_ia.data();
+    in.pp_ib = pp_ib.data();
+    in.pp_geom = pp_geom.data();
+    in.pp_E_off = pp_E_off.data();
+    in.nE = (long long)E.size();
+    in.E = E.data();
+    in.task_start = task_start.data();
+    in.ntask = (long long)task_aux.size();
+    in.task_aux = task_aux.data();
+    in.task_woff = task_woff.data();
+    in.nW = (long long)W.size();
+    in.W = W.data();
+    Matrix g = Matrix::Zero(natoms, 3);  // row-major natoms x 3, as the device writes it
+    qmint::QMGpuRIGradOutput out;
+    if (!gpu_plugin::qmRiGrad(backend, in, g.data(), out, device, why)) return false;
+    grad = g;
+    info = fmt::format("device: host prep {:.1f} ms (tables {:.1f} ms; {} tasks, {:.1f} MB weights), upload {:.1f} ms, kernel {:.1f} ms",
+                       prep_ms, tables_ms,
+                       (long long)task_aux.size(), W.size() * 8.0 / 1.0e6, out.ms_upload, out.ms_kernel);
+    return true;
+}
+
+Matrix RIJK::metricGradient(const Eigen::MatrixXd& M2, int natoms) const
+{
+    const int threads = std::max(1, m_opt.threads);
+    const OutMap ao = auxOutMap(m_aux, m_opt.spherical_aux);
+    const int ns = (int)m_aux.size();
+    std::vector<Eigen::MatrixXd> aT(ns);
+    for (int s = 0; s < ns; ++s)
+        if (ao.T[s].size()) aT[s] = ao.T[s].transpose();
+    std::vector<Shell> units;
+    units.reserve(m_aux.size());
+    for (const Shell& s : m_aux) units.push_back(unitShell(s));
+    std::vector<Pair> apairs, apairsR;
+    apairs.reserve(ns);
+    apairsR.reserve(ns);
+    for (int s = 0; s < ns; ++s) {
+        apairs.push_back(makePair(m_aux[s], units[s]));
+        apairsR.push_back(makePairRaised(m_aux[s], units[s]));
+    }
+    std::vector<Matrix> gt(threads, Matrix::Zero(natoms, 3));
+#pragma omp parallel num_threads(threads)
+    {
+        Matrix& g = gt[threadId()];
+        std::vector<double> blk, tmp;
+#pragma omp for schedule(dynamic)
+        for (int cs = 0; cs < ns; ++cs) {
+            const int ac = m_aux[cs].atom;
+            for (int ds = cs + 1; ds < ns; ++ds) {
+                const int ad = m_aux[ds].atom;
+                if (ac == ad) continue;  // same centre: no gradient
+                const int wc = ao.width[cs], wd = ao.width[ds];
+                blk.resize((size_t)wc * wd);
+                for (int i = 0; i < wc; ++i)
+                    for (int j = 0; j < wd; ++j) blk[(size_t)i * wd + j] = M2(ao.first[cs] + i, ao.first[ds] + j);
+                int d[3] = { wc, 1, wd };
+                if (aT[cs].size()) transformAxis3(blk, tmp, d, 0, aT[cs]);
+                if (aT[ds].size()) transformAxis3(blk, tmp, d, 2, aT[ds]);
+                double gA[3], gB[3];
+                derivBlock(apairsR[cs], apairs[ds], blk.data(), false, gA, gB);
+                // (C,D) and (D,C) blocks equal (symmetric M2); d/dD = -d/dC
+                for (int x = 0; x < 3; ++x) {
+                    g(ac, x) += 2.0 * gA[x];
+                    g(ad, x) -= 2.0 * gA[x];
+                }
+            }
+        }
+    }
+    Matrix grad = Matrix::Zero(natoms, 3);
+    for (int t = 0; t < threads; ++t) grad += gt[t];
+    return grad;
+}
+
 }  // namespace qmri
 
 // =================================================================================
@@ -1038,6 +1770,7 @@ void QMEngine::readRIConfig(const json& config)
     m_ri_aux = optString(config, "ri_aux", m_ri_aux);
     m_ri_metric = lowerStr(optString(config, "ri_metric", m_ri_metric));
     m_gpu_ri = lowerStr(optString(config, "gpu_ri", m_gpu_ri));
+    m_gpu_ri_grad = lowerStr(optString(config, "gpu_ri_grad", m_gpu_ri_grad));
     if (config.contains("ri_metric_cutoff") && config["ri_metric_cutoff"].is_number())
         m_ri_metric_cutoff = config["ri_metric_cutoff"].get<double>();
     if (config.contains("ri_max_memory_mb") && config["ri_max_memory_mb"].is_number())
@@ -1050,6 +1783,68 @@ void QMEngine::resetRI()
     m_ri_failed = false;
     m_gpu_ri_dev.reset();
     m_gpu_ri_checked = false;
+}
+
+// Claude Generated (Oct 2026): two-electron part of the RI gradient (qmri::RIJK gradientDensities, threeIndexGradient[Device], metricGradient; derivation
+// in section 6 above); mode j adds the exact exchange gradient (same canonical-quartet kernel as the
+// exact path, exchange density only). Pc: cartesian density for the exact part.
+// On failure `info` holds the reason.
+bool QMEngine::riGradientTwoElectron(const Matrix& Pc, Matrix& g2, std::string& info) const
+{
+    if (!ensureRI()) {
+        info = "RI gradient: density fitting setup failed (-qm.ri " + m_ri_mode + ")";
+        return false;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    std::string why;
+    Eigen::VectorXd c;
+    Matrix G;
+    Eigen::MatrixXd M2;
+    const Matrix* Q = m_Q.size() != 0 ? &m_Q : nullptr;
+    if (!m_ri->gradientDensities(m_density, c, G, M2, why)) {
+        info = "RI gradient not possible: " + why;
+        return false;
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+    // 3-index part: device (-qm.gpu_ri_grad) or CPU; any device failure is a counted fallback.
+    Matrix g3;
+    std::string dev_info;
+    bool on_device = false;
+    const std::string be = gpuGradBackend(m_gpu_ri_grad, "gpu_ri_grad", "qm_ri_grad", m_gpu_ri_grad_failed);
+    if (!be.empty()) {
+        std::string dwhy;
+        on_device = m_ri->threeIndexGradientDevice(m_gto_basis, Q, c, m_density, G, m_atomcount, be, m_gpu_device, g3, dev_info, dwhy);
+        if (!on_device) {
+            m_gpu_ri_grad_failed = true;
+            curcuma::reportGpuFallback("qm_ri_grad", "device RI gradient not possible: " + dwhy);
+        }
+    }
+    if (!on_device) g3 = m_ri->threeIndexGradient(m_gto_basis, Q, c, m_density, G, m_atomcount);
+    const double t_3c = msGlue(t1);
+    if (on_device) {
+        if (const char* chk = std::getenv("CURCUMA_QM_GPU_RI_GRAD_CHECK"); chk && chk[0] == '1') {
+            const auto c0 = std::chrono::steady_clock::now();
+            const Matrix gc = m_ri->threeIndexGradient(m_gto_basis, Q, c, m_density, G, m_atomcount);
+            CurcumaLogger::result(fmt::format("QM GPU RI grad check: natoms={} max|dev-cpu|={:.3e} max|cpu|={:.3e} dev_ms={:.1f} cpu_ms={:.1f}",
+                                              m_atomcount, (g3 - gc).cwiseAbs().maxCoeff(), gc.cwiseAbs().maxCoeff(), t_3c, msGlue(c0)));
+        }
+    }
+    Matrix().swap(G);
+    const auto t2 = std::chrono::steady_clock::now();
+    Matrix g = g3 - m_ri->metricGradient(M2, m_atomcount);
+    const double t_2c = msGlue(t2), t_dens = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    const double t_ri = msGlue(t0);
+    double t_k = 0.0;
+    if (m_ri_mode == "j") {
+        const auto tk = std::chrono::steady_clock::now();
+        g += qmint::gradientTwoElectronExchange(m_gto_basis, Pc, m_atomcount, m_threads);
+        t_k = msGlue(tk);
+    }
+    g2 = g;
+    info = fmt::format("RI-{}: densities {:.1f} ms, 3-index {:.1f} ms {}, metric {:.1f} ms (total {:.1f} ms){}",
+                       m_ri_mode == "j" ? "J" : "JK", t_dens, t_3c, on_device ? "(" + dev_info + ")" : std::string("(CPU)"), t_2c, t_ri,
+                       m_ri_mode == "j" ? fmt::format(", exact exchange {:.1f} ms", t_k) : std::string());
+    return true;
 }
 
 // One line per SCF at verbosity 2: number and time of the RI J/K builds (diagnostic).
@@ -1189,7 +1984,7 @@ bool QMEngine::gpuRIBuild(const Matrix& P, Matrix& J, Matrix* K) const
     const Matrix Pc = P;
     J = Matrix::Zero(n, n);
     // Coulomb: g = T . vec(P) on the device; mode j needs c = J^-1 g on the host (N^2), then J = T^T c
-    std::vector<double> g((size_t)m_ri->nfit());
+    std::vector<double> g((size_t)m_ri->tensor().rows());  // mode j: naux rows (see RIJK::coulomb)
     if (!m_gpu_ri_dev->contract(Pc.data(), g.data())) return fail("device g = T vec(P) failed");
     Eigen::VectorXd c = m_ri->fitCoefficients(Eigen::Map<const Eigen::VectorXd>(g.data(), (Eigen::Index)g.size()));
     if (!m_gpu_ri_dev->coulomb(c.data(), J.data())) return fail("device J = T^T c failed");

@@ -8,6 +8,10 @@
  * compares the analytic gradient with the FD and with PySCF (+ simple-dftd3).
  *
  *   dump_qm_gradient <xyz> [--method hf|hf-3c] [--basis NAME] [--fd] [--h 1e-4]
+ *                    [--ri off|j|jk] [--ri_metric cholesky|eigen] [--cartesian] [--threads N]
+ *
+ * --ri (Oct 2026, RI gradient): density-fitted SCF and its analytic gradient; the FD then
+ * differentiates the RI energy.
  *
  * Claude Generated (Sep 2026). GPL-3.0.
  */
@@ -28,8 +32,9 @@ int main(int argc, char** argv)
         std::cerr << "usage: dump_qm_gradient <xyz> [--method hf|hf-3c] [--basis NAME] [--fd] [--h 1e-4]\n";
         return 1;
     }
-    std::string method = "hf", basis = "def2-SVP";
-    bool fd = false;
+    std::string method = "hf", basis = "def2-SVP", ri = "off", ri_metric = "cholesky";
+    bool fd = false, cartesian = false;
+    int threads = 0;  // 0: engine default
     double h = 1.0e-4;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
@@ -37,14 +42,21 @@ int main(int argc, char** argv)
         else if (a == "--basis" && i + 1 < argc) basis = argv[++i];
         else if (a == "--fd") fd = true;
         else if (a == "--h" && i + 1 < argc) h = std::stod(argv[++i]);
+        else if (a == "--ri" && i + 1 < argc) ri = argv[++i];
+        else if (a == "--ri_metric" && i + 1 < argc) ri_metric = argv[++i];
+        else if (a == "--cartesian") cartesian = true;
+        else if (a == "--threads" && i + 1 < argc) threads = std::stoi(argv[++i]);
     }
     CurcumaLogger::set_verbosity(0);
 
     std::map<std::string, int> Z{ { "H", 1 }, { "He", 2 }, { "Li", 3 }, { "Be", 4 }, { "B", 5 },
         { "C", 6 }, { "N", 7 }, { "O", 8 }, { "F", 9 }, { "Ne", 10 } };
     std::ifstream f(argv[1]);
-    int n;
-    f >> n;
+    int n = 0;
+    if (!(f >> n) || n <= 0) {
+        std::cerr << "dump_qm_gradient: cannot read " << argv[1] << "\n";
+        return 1;
+    }
     std::string line;
     std::getline(f, line);
     std::getline(f, line);
@@ -60,7 +72,13 @@ int main(int argc, char** argv)
         mol.m_atoms[i] = Z[s];
     }
 
-    const json cfg = { { "qm", { { "basis", basis }, { "scf_threshold", 1e-10 }, { "scf_max_iterations", 200 } } } };
+    json cfg = { { "qm", { { "basis", basis }, { "scf_threshold", 1e-10 }, { "scf_max_iterations", 200 } } } };
+    if (ri != "off") {
+        cfg["qm"]["ri"] = ri;
+        cfg["qm"]["ri_metric"] = ri_metric;
+    }
+    if (cartesian) cfg["qm"]["cartesian_d"] = true;
+    if (threads > 0) cfg["qm"]["threads"] = threads;
     auto make = [&]() -> std::unique_ptr<ComputationalMethod> {
         if (method == "hf-3c") return std::make_unique<HF3CMethod>(cfg);
         return std::make_unique<QMMethod>(QMFunctional::HF, cfg);

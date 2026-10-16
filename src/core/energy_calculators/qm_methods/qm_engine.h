@@ -107,7 +107,7 @@ BEGIN_PARAMETER_DEFINITION(qm)
           "Performance", {})
     // WP10 (Claude Generated, Oct 2026): density fitting, implementation in qm_ri.cpp
     PARAM(ri, String, "off",
-          "Density fitting (resolution of the identity) for the two-electron part: off (exact integrals, the reference) | j (RI-J: Coulomb from the fit, exchange exact) | jk (RI-JK: Coulomb and exchange from the fit, Weigend 2002). A method variant: energies differ from the exact path by the fitting error (about 1e-5 Eh per atom). No analytic gradient with RI (-opt and -gradient stop with an error).",
+          "Density fitting (resolution of the identity) for the two-electron part: off (exact integrals, the reference) | j (RI-J: Coulomb from the fit, exchange exact) | jk (RI-JK: Coulomb and exchange from the fit, Weigend 2002). A method variant: energies differ from the exact path by the fitting error (about 1e-5 Eh per atom). The analytic gradient is the derivative of the RI energy (fitted integrals and metric differentiated; RI-J keeps the exact exchange gradient).",
           "DensityFitting", {})
     PARAM(ri_aux, String, "auto",
           "Auxiliary basis for -qm.ri: auto (def2-universal-JFIT for j, def2-universal-JKFIT for jk) | def2/J | def2/JK | path to a Turbomole-format basis file. Shipped files: def2-universal-JFIT.turbomole, def2-universal-JKFIT.turbomole (H-Ne).",
@@ -123,6 +123,9 @@ BEGIN_PARAMETER_DEFINITION(qm)
           "DensityFitting", {})
     PARAM(gpu_ri, String, "auto",
           "With -gpu cuda|auto and -qm.ri j|jk: the RI contractions (J from the 3-index tensor, K as GEMM + SYRK, cuBLAS FP64) on the device; integrals and metric stay on the host. auto | on | off. Any device error falls back to the CPU and is counted as qm_ri.",
+          "DensityFitting", {})
+    PARAM(gpu_ri_grad, String, "auto",
+          "With -gpu cuda|auto and -qm.ri j|jk: the 3-index part of the RI gradient (derivative integrals (mn|P)^x contracted with the 3-index density) on the device; densities, metric part and the RI-J exact exchange gradient stay on the host. auto | on | off. Any device error falls back to the CPU and is counted as qm_ri_grad.",
           "DensityFitting", {})
     PARAM(scf_max_iterations, Int, 100,
           "Maximum number of SCF iterations.",
@@ -188,6 +191,10 @@ public:
     const Matrix& gradientBohr() const { return m_gradient; }
     /// Last gradient split into its parts (Eh/Bohr): {one-electron, two-electron, E_nn}.
     const std::vector<Matrix>& gradientParts() const { return m_gradient_parts; }
+    /// True when the last gradient request could not be served (RI gradient error); the reason is in
+    /// gradientError(). The gradient is then zero and must not be used. Claude Generated (Oct 2026).
+    bool gradientFailed() const { return m_gradient_failed; }
+    const std::string& gradientError() const { return m_gradient_error; }
 
     // Property access
     std::string getMethodNameStr() const;
@@ -353,6 +360,13 @@ private:
     bool ensureRI() const;                   ///< setup once per geometry; false = error reported
     bool gpuRIBuild(const Matrix& P, Matrix& J, Matrix* K) const;
     void riDump(const std::string& prefix) const;
+    // RI gradient (Claude Generated, Oct 2026): two-electron part of the RI energy gradient (Eh/Bohr);
+    // mode j adds the exact exchange part. Pc: cartesian density (for the exact exchange part).
+    bool riGradientTwoElectron(const Matrix& Pc, Matrix& g2, std::string& info) const;
+    std::string m_gpu_ri_grad = "auto";
+    mutable bool m_gpu_ri_grad_failed = false;
+    bool m_gradient_failed = false;
+    std::string m_gradient_error;
 public:
     /// True when -qm.ri j|jk is active for this engine (method variant, see qm_ri.h).
     bool riActive() const;

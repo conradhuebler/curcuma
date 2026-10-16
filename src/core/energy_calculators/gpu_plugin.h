@@ -40,6 +40,7 @@
 #include "qm_methods/qm_gpu_ri_backend.h"  // qmint::QMGpuRI (WP10)
 #include "qm_methods/qm_gpu_mp2_backend.h"  // qmint::QMGpuMP2Input/Output (WP11)
 #include "qm_methods/qm_gpu_rimp2_backend.h"  // qmint::QMGpuRIMP2Input/Output (RI-MP2)
+#include "qm_methods/qm_gpu_ri_grad_backend.h"  // qmint::QMGpuRIGradInput/Output (RI gradient)
 
 namespace gpu_plugin {
 
@@ -135,6 +136,14 @@ bool qmMp2Energy(const std::string& backend, const qmint::QMGpuMP2Input& in, qmi
  */
 bool qmRiMp2Energy(const std::string& backend, const qmint::QMGpuRIMP2Input& in, qmint::QMGpuRIMP2Output& out,
                    std::string& why);
+
+/**
+ * Native-QM RI gradient, 3-index part (derivative integrals (mn|P)^x contracted with the host's
+ * cartesian weight blocks), added into grad (natoms x 3, Eh/Bohr). False with a reason in `why` when
+ * the plugin/entry point is missing, a limit is exceeded or a device call fails. Claude Generated (Oct 2026).
+ */
+bool qmRiGrad(const std::string& backend, const qmint::QMGpuRIGradInput& in, double* grad, qmint::QMGpuRIGradOutput& out,
+              int device, std::string& why);
 
 /// True if the plugin library libcurcuma_<backend>.so can be loaded (cached; a failed probe
 /// is not retried and, unlike the create* calls, is silent). Used for `-gpu auto` and

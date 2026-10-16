@@ -2,8 +2,9 @@
 
 - **Status:** WP10 RI-J/RI-JK (HF, CPU + CUDA), WP11 Schritt 1+3 (kanonisches RMP2, SCS/SOS, CPU + CUDA) und
   WP11 Schritt 2 (RI-MP2 mit def2-universal-JKFIT/-JFIT als Korrelations-Hilfsbasis, CPU + CUDA) sind
-  implementiert, 🤖 AI-generated, ⚙️ machine-tested (Okt 2026, Abschnitte WP10, WP11 und RI-MP2 unten); RI-MP2 mit
-  def2-SVP/C, Gradienten und WP13-WP15 sind Plan.
+  implementiert, 🤖 AI-generated, ⚙️ machine-tested (Okt 2026, Abschnitte WP10, WP11 und RI-MP2 unten), ebenso der
+  analytische Gradient fuer RI-J/RI-JK-HF (Abschnitt "WP10 -- Gradient"); RI-MP2 mit def2-SVP/C, MP2-Gradienten und
+  WP13-WP15 sind Plan.
 - **Abhaengigkeit:** WP3 (RHF, ERI-Engine, `QMEngine`), fuer die GPU-Teile die Stufen Q-G1/Q-G2 aus
   [../QM_GPU_ROADMAP.md](../QM_GPU_ROADMAP.md).
 - **Referenzen auf dieser Maschine:** PySCF (venv `~/.venvs/qmref`), ORCA 6.1 (`~/Downloads/orca_6_1_0_...`).
@@ -54,8 +55,7 @@ Metrik, Fit, Parser, Engine-Anbindung), `cuda/qm_gpu_ri.cu` + `qm_gpu_ri_backend
   nach Pd ab (H-Ne vollstaendig). Dieselben Daten wie ORCA `def2/J`/`def2/JK` (Energien unten auf 2e-9 Eh).
   **def2-SVP/C (RI-C) fehlt**: RI-MP2 benutzt deshalb def2-universal-JKFIT (Standard) oder -JFIT als
   Korrelations-Hilfsbasis (Betreiberentscheidung Okt 2026; Abschnitt RI-MP2 unten).
-- **Nicht implementiert:** RI-C mit def2-SVP/C, Gradient mit RI (`-opt`/`-gradient` mit `-qm.ri j|jk` brechen mit Fehler ab,
-  `ctest qm_ri_gradient_error`), hf-3c mit RI (ignoriert mit Warnung: HF-3c ist mit exakten Integralen in MINIX
+- **Nicht implementiert:** RI-C mit def2-SVP/C, hf-3c mit RI (ignoriert mit Warnung: HF-3c ist mit exakten Integralen in MINIX
   definiert, `qm_ri_hf3c_ignored`), offene Schalen, Elemente ab Na, integral-direktes RI, lokales Fitten,
   Speicherkompression des 3-Index-Tensors (voll n^2, nicht n(n+1)/2), device-residenter SCF-Loop mit RI (RI laeuft
   im Host-Loop).
@@ -125,6 +125,68 @@ Metrik, Fit, Parser, Engine-Anbindung), `cuda/qm_gpu_ri.cu` + `qm_gpu_ri_backend
 - Das System-BLAS dieser Maschine ist die Referenz-BLAS (netlib, ein Thread); die schweren RI-Schritte
   (Vorwaertssubstitution, g = T vec(D), J, K) sind deshalb eigene OpenMP-Schleifen. Mit Eigen-GEMM auf netlib-BLAS
   dauerte das Setup fuer Naphthalin 8.5 s statt 0.1 s.
+
+## WP10 -- Gradient (RI-J, RI-JK)
+
+**Stand Okt 2026: analytischer Kerngradient der RI-HF-Energie, CPU und CUDA. 🤖 AI-generated, ⚙️ machine-tested;
+menschlicher Produktionstest steht aus.** Code: `qm_ri.cpp` Abschnitt 6 (Herleitung als Kommentar),
+`QMEngine::riGradientTwoElectron`, `cuda/qm_gpu_ri_grad.cu` + `qm_gpu_ri_grad_backend.h`; Tests `test_cases/qm_ri/`
+(`qm_ri_grad_*`, `qm_ri_opt_*`, `qm_gpu_ri_grad_*`), Referenzen `reference_grad.json`
+(`scripts/ri_gradient_reference.py`, `scripts/ri_opt_reference.py`).
+
+- **Verfahren:** dE/dx = sum_P sum_mn G^P_mn (mn|P)^x - sum_PQ M2_PQ (P|Q)^x mit G^P = c_P P - 2 Gam^P,
+  M2 = 1/2 c c^T - M (RI-J: Gam = M = 0); c = J^-1 g, Gam = 1/4 J^-1 (P (Q|..) P), M = 1/4 J^-1 Tr((R|..)P(S|..)P) J^-1
+  (Weigend/Haeser/Patzelt/Ahlrichs 1998, Weigend 2002; dieselben Ausdruecke wie PySCF `auxbasis_response`). Die
+  Metrik-Loesung laeuft auf der Dichtefaktor-Form V (F^T W) V^T (r^2 statt n^2 Spalten). Ableitungsintegrale:
+  angehobene Hermite-Tabellen auf beiden Orbitalschalen, Hilfszentrum per Translationsinvarianz. 1e-Teil, W-Term
+  (mit den RI-SCF-Orbitalenergien) und E_nn wie im exakten Pfad. RI-J: Austausch-Gradient exakt ueber
+  `qmint::gradientTwoElectronExchange` (gleicher Quartett-Kern, nur Austauschdichte; der exakte Pfad ist bitgleich,
+  Benzol 1 Thread md5 des `-dump_gradient` vorher/nachher gleich).
+- **Schalter:** `-qm.gpu_ri_grad auto|on|off` (3-Index-Teil auf dem Device, Fallback gezaehlt als `qm_ri_grad`).
+- **Validierung** (HF/def2-SVP, `-qm.scf_threshold 1e-10`, Eh/Bohr):
+  - vs PySCF 2.14 (`density_fit(JKFIT)` bzw. `density_fit(JFIT, only_dfj=True)`, `nuc_grad_method()`, dieselben
+    Hilfsbasisdateien, `conv_tol 1e-14`, `conv_tol_grad 1e-11`): max. Abweichung H2O 4.6e-11 (j, jk), NH3 2.5e-11,
+    Formaldehyd 6.1e-11, Benzol 2.5e-11/2.7e-11, Naphthalin 2.5e-11/2.6e-11, H2O kartesisch 4.6e-11/4.5e-11;
+    Formaldehyd jk mit `-qm.ri_metric eigen` (nichts verworfen) gleich. **Falle:** mit PySCF `conv_tol_grad 1e-8`
+    lag die Referenz selbst 1e-9..2e-9 daneben (PySCF-FD bestaetigte unseren Wert erst mit enger Konvergenz).
+  - vs ORCA 6.1 (`! HF def2-SVP RIJK def2/JK | RIJONX def2/J ExtremeSCF EnGrad`): H2O 6.9e-9 (j) / 7.5e-9 (jk),
+    Formaldehyd 8.8e-9 / 8.3e-9, Benzol 4.1e-9 / 4.8e-9; ORCA weicht von PySCF genauso ab (eigene Schwellen).
+  - Finite Differenz der eigenen RI-Energie (zentral, h = 1e-4 Bohr, `dump_qm_gradient --ri --fd`): H2O 2.7e-9 (j),
+    2.4e-9 (jk), NH3 2.1e-9 / 1.6e-9, H2O kartesisch 3.0e-9 / 2.6e-9 (FD-Abbruchfehler-Niveau).
+  - Summe der Komponenten <= 2.3e-12 Eh/Bohr (Naphthalin 2.3e-12, Formaldehyd 9e-13, sonst <= 2e-13).
+  - `-opt -qm.ri jk` (tight): H2O E = -75.9612828916, Formaldehyd -113.7796614858, gleich dem PySCF-RI-JK-Minimum
+    (scipy BFGS gtol 1e-7) auf 1e-12 Eh, Abstaende auf 5e-7 A (geomeTRIC nicht installiert).
+  - GPU vs CPU (3-Index-Teil, `CURCUMA_QM_GPU_RI_GRAD_CHECK=1`): Benzol 1.4e-13, Anthracen 3.7e-13 (max |g| ~20).
+- **Zeiten** (Intel Core Ultra 9 285K, 16 Threads, RTX 5090; `-qm.scf_threshold 1e-8`, 2e-Gradient in ms):
+
+  | System (n) | Pfad | 1e | 2e gesamt | davon Dichten / 3-Index / Metrik | Wand -sp -gradient |
+  |---|---|---|---|---|---|
+  | Benzol (114) | exakt CPU | 33 | 1564 | - | 2.8 s |
+  | | RI-J CPU | 34 | 1596 | 0.5 / 26 / 0.7, exakter Austausch 1568 | 2.9 s |
+  | | RI-JK CPU | 35 | 56 | 17 / 37 / 1.1 | 0.32 s |
+  | | exakt GPU | 3 | 173 | - | 0.76 s |
+  | | RI-JK GPU | 3 | 64 | 21 / 42 (Host 14, Upload 5, Kernel 22) / 1.3 | 0.58 s |
+  | Naphthalin (180) | exakt CPU | 116 | 10124 | - | 20.0 s |
+  | | RI-JK CPU | 118 | 204 | 66 / 135 / 2.5 | 1.35 s |
+  | | exakt GPU | 4 | 789 | - | 1.94 s |
+  | | RI-JK GPU | 4 | 196 | 65 / 125 (Host 46, Upload 13, Kernel 65) / 4.8 | 1.27 s |
+  | Anthracen (246) | exakt CPU | 340 | 43350 | - | 73.9 s |
+  | | RI-JK CPU | 331 | 596 | 218 / 371 / 5.3 | 4.3 s |
+  | | exakt GPU | 6 | 1960 | - | 4.6 s |
+  | | RI-JK GPU | 6 | 470 | 195 / 266 (Host 100, Upload 28, Kernel 135) / 7.1 | 2.7 s |
+
+- **Ehrlich:** RI-J spart beim HF-Gradienten nichts (der exakte Austausch-Gradient dominiert). Der Device-Kern fuer
+  den 3-Index-Teil ist nur so schnell wie 16 CPU-Threads (Benzol 42 gegen 37 ms, Anthracen 266 gegen 371 ms); der
+  Kernel selbst braucht bei Anthracen 135 ms, Host-Vorbereitung der Gewichtsbloecke (321 MB) und Upload 128 ms. Die
+  Plugin-Bibliothek wird fuer sm_75 gebaut; auf der RTX 5090 (sm_120) wird beim ersten Lauf PTX JIT-kompiliert
+  (~100 ms, danach im CUDA-Cache). Dichten und Metrikteil laufen nur auf dem Host.
+- **Getestet:** H2O, NH3, Formaldehyd, Benzol (ctest gegen PySCF), Naphthalin (manuell gegen PySCF), Anthracen (nur
+  Zeiten, GPU gegen CPU); kartesisch nur H2O; eigen-Metrik nur Formaldehyd jk, nichts verworfen.
+- **Nicht getestet:** Li, Be, B, F, Ne, He; geladene Systeme; eigen-Metrik mit verworfenen Eigenwerten (dann ist der
+  Gradient nicht die exakte Ableitung); Systeme ueber 24 Atome; ROCm/Vulkan (kein Device-Pfad); `-md` mit RI.
+- **Nicht implementiert:** RI-MP2-Gradient (eigenes Paket, Fehler bleibt), Device-Pfad fuer Dichten und Metrikteil,
+  RI-J-Austausch-Gradient auf dem Device (der exakte Q-G7-Kern rechnet J und K zusammen; mit RI-J laeuft der
+  Austauschteil auf der CPU).
 
 ## WP11 -- MO-Transformation und MP2
 

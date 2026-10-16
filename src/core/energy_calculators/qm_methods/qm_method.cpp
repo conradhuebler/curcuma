@@ -77,11 +77,11 @@ double QMMethod::calculateEnergy(bool gradient)
         // Claude Generated (Oct 2026, WP10): no energy without the fit the user asked for.
         m_has_error = true;
         m_error_message = "density fitting (-qm.ri " + m_engine->riMode() + ") setup failed, see the error above";
-    } else if (gradient && m_engine->riActive()) {
-        // Claude Generated (Oct 2026, WP10): fail loud instead of handing back a zero gradient.
+    } else if (gradient && m_engine->gradientFailed()) {
+        // Claude Generated (Oct 2026): fail loud instead of handing back a zero gradient
+        // (RI gradient not possible, e.g. memory limit for the 3-index densities).
         m_has_error = true;
-        m_error_message = "no analytic gradient with density fitting (-qm.ri " + m_engine->riMode()
-            + "); use -qm.ri off for -opt/-md/-gradient";
+        m_error_message = m_engine->gradientError();
     }
     return m_last_energy;
 }

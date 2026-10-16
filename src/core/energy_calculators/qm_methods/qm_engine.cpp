@@ -337,12 +337,11 @@ double QMEngine::Calculation(bool gradient)
     m_total_energy = m_e_elec + e_nn;
 
     // WP8: analytic gradient from the converged density (energy-only callers skip it).
-    // WP10: no RI gradient exists; QMMethod reports the request as an error (no number returned).
-    if (gradient && riActive()) {
-        m_gradient = Matrix::Zero(m_atomcount, 3);
-        CurcumaLogger::error("QM: no analytic gradient with density fitting (-qm.ri " + m_ri_mode
-                             + "); use -qm.ri off for -opt/-gradient");
-    } else if (gradient) {
+    // With -qm.ri j|jk the two-electron part is the derivative of the RI energy (qm_ri.cpp section 6);
+    // if it cannot be formed, m_gradient_failed is set and QMMethod reports an error (no number returned).
+    m_gradient_failed = false;
+    m_gradient_error.clear();
+    if (gradient) {
         if (m_scf_converged)
             computeGradient();
         else {
@@ -532,10 +531,13 @@ bool QMEngine::computeGradient()
         for (int k = 0; k < 3; ++k)
             posBohr(i, k) = Length::angstrom_to_bohr(m_geometry(i, k));
 
+    // RI (Oct 2026): the two-electron part comes from riGradientTwoElectron, so the exact-path device
+    // 2e gradient (Q-G7) is not asked for; the 1e part (Q-G8) is the same as without RI.
+    const bool ri = riActive();
     // Q-G7/Q-G8: the device gradient parts read one set of tables (cartesian, Hermite tables raised by
     // one on both shells), built once per gradient on the host when at least one part runs there.
     const std::string be1 = gpuGradBackend(m_gpu_grad1e, "gpu_grad1e", "qm_grad1e", m_gpu_grad1e_failed);
-    const std::string be2 = gpuGradBackend(m_gpu_grad, "gpu_grad", "qm_grad", m_gpu_grad_failed);
+    const std::string be2 = ri ? std::string() : gpuGradBackend(m_gpu_grad, "gpu_grad", "qm_grad", m_gpu_grad_failed);
     qmint::EriGpuTables tables;
     std::string tab_why;
     bool tables_ok = false;
@@ -551,11 +553,23 @@ bool QMEngine::computeGradient()
         && gpuGradientOneElectron(tables_ok ? &tables : nullptr, tab_why, be1, posBohr, Pc, Wc, g1, dev1_info);
     if (!on_device1) g1 = qmint::gradientOneElectron(m_gto_basis, m_atoms, posBohr, Pc, Wc, m_threads);
     const auto t1 = std::chrono::steady_clock::now();
-    // Two-electron part: device (Q-G7) or CPU.
+    // Two-electron part: RI (-qm.ri j|jk), device (Q-G7) or CPU.
     Matrix g2;
     std::string dev_info;
-    const bool on_device = !be2.empty() && gpuGradientTwoElectron(tables_ok ? &tables : nullptr, tab_why, be2, Pc, g2, dev_info);
-    if (!on_device) g2 = qmint::gradientTwoElectron(m_gto_basis, Pc, m_atomcount, m_threads);
+    bool on_device = false;
+    if (ri) {
+        if (!riGradientTwoElectron(Pc, g2, dev_info)) {
+            m_gradient = Matrix::Zero(m_atomcount, 3);
+            m_gradient_failed = true;
+            m_gradient_error = dev_info.empty() ? std::string("RI gradient failed") : dev_info;
+            CurcumaLogger::error("QM: " + m_gradient_error);
+            return false;
+        }
+        on_device = dev_info.find("device") != std::string::npos;
+    } else {
+        on_device = !be2.empty() && gpuGradientTwoElectron(tables_ok ? &tables : nullptr, tab_why, be2, Pc, g2, dev_info);
+        if (!on_device) g2 = qmint::gradientTwoElectron(m_gto_basis, Pc, m_atomcount, m_threads);
+    }
     const auto t2 = std::chrono::steady_clock::now();
     const Matrix gn = calculateCoreRepulsionGradient();
     m_gradient = g1 + g2 + gn;
@@ -571,7 +585,7 @@ bool QMEngine::computeGradient()
         CurcumaLogger::info(fmt::format(
             "QM: analytic gradient |g| = {:.6e} Eh/Bohr (device tables {:.1f} ms; 1e {:.1f} ms {}; 2e {:.1f} ms {}; {} threads)",
             m_gradient.norm(), ms(t_tab0, t_tab), ms(t_tab, t1), on_device1 ? "on the device: " + dev1_info : "CPU",
-            ms(t1, t2), on_device ? "on the device: " + dev_info : "CPU", m_threads));
+            ms(t1, t2), ri ? dev_info : (on_device ? "on the device: " + dev_info : "CPU"), m_threads));
     }
     return true;
 }

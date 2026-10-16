@@ -175,6 +175,26 @@ public:
     const Matrix& rawMetric() const { return m_raw_metric; }
     const Matrix& rawThreeIndex() const { return m_raw_T3; }
 
+    /// @brief Gradient of the RI energy (Claude Generated, Oct 2026; derivation in qm_ri.cpp, section 6), used by
+    /// QMEngine::riGradientTwoElectron: dE/dx = sum G^P_mn (mn|P)^x - sum M2_PQ (P|Q)^x (Eh/Bohr). mode j: only
+    /// the fitted Coulomb energy (the exact exchange gradient is qmint::gradientTwoElectronExchange).
+    /// Densities of the RI gradient in the raw (unnormalised, spherical or cartesian) auxiliary basis:
+    /// G (naux x n^2, active orbital basis; empty in mode j where G^P_mn = c_P P_mn) and the 2-index
+    /// density M2 (naux x naux), so that dE/dx = sum G^P_mn (mn|P)^x - sum M2_PQ (P|Q)^x.
+    /// Exposed for the device contraction (-qm.gpu_ri_grad). Claude Generated (Oct 2026).
+    bool gradientDensities(const Matrix& P, Eigen::VectorXd& c, Matrix& G, Eigen::MatrixXd& M2, std::string& why) const;
+    /// 2-index part sum_PQ M2_PQ (P|Q)^x (Eh/Bohr, natoms x 3) on the host (cheap, N^2 shell pairs).
+    Matrix metricGradient(const Eigen::MatrixXd& M2, int natoms) const;
+    /// 3-index part sum G^P_mn (mn|P)^x on the host. G empty: G^P_mn = c_P P_mn (mode j).
+    Matrix threeIndexGradient(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const Eigen::VectorXd& c, const Matrix& P,
+                              const Matrix& G, int natoms) const;
+    /// The same 3-index part with the integrals on the device (-qm.gpu_ri_grad, cuda/qm_gpu_ri_grad.cu); false with
+    /// a reason when the plugin, a limit or a device call fails (the caller then runs threeIndexGradient).
+    bool threeIndexGradientDevice(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const Eigen::VectorXd& c, const Matrix& P,
+                                  const Matrix& G, int natoms, const std::string& backend, int device, Matrix& grad,
+                                  std::string& info, std::string& why) const;
+    const std::vector<Shell>& auxShells() const { return m_aux; }
+
 private:
     RIOptions m_opt;
     int m_n = 0, m_naux = 0, m_nfit = 0;
@@ -185,6 +205,24 @@ private:
     Eigen::VectorXd m_w;              ///< mode j, eigen: kept eigenvalues
     Matrix m_raw_metric, m_raw_T3;
     mutable double m_factor_ms = 0.0;
+    // Gradient (Claude Generated, Oct 2026): kept from setup in both modes.
+    std::vector<Shell> m_aux;         ///< auxiliary shells (raw radial coefficients)
+    Eigen::VectorXd m_dn;             ///< Coulomb normalisation 1/sqrt((P|P)) per auxiliary function
+    Eigen::MatrixXd m_gL;             ///< cholesky: lower factor of the normalised metric (both modes)
+    Eigen::MatrixXd m_gU;             ///< eigen: kept eigenvectors (both modes)
+    Eigen::VectorXd m_gw;             ///< eigen: kept eigenvalues (both modes)
+    std::vector<double> m_osch;       ///< Schwarz factors of the canonical orbital shell pairs (A <= B, row-wise)
+    std::vector<double> m_asch;       ///< Schwarz factors of the auxiliary shells
+    /// X (nfit rows) := F^T X (naux rows), F the metric factor with B = F T_n (F = L^-1 or w^-1/2 U^T).
+    void applyFitTranspose(Matrix& X) const;
 };
 
 }  // namespace qmri
+
+namespace qmint {
+/// @brief Exchange part only, -1/8 sum (P_ml P_ns + P_ms P_nl) (mn|ls)^A, of the exact two-electron RHF
+/// gradient (Eh/Bohr): the same canonical-quartet kernel as gradientTwoElectron. Used by the RI-J
+/// gradient (Coulomb fitted, exchange exact). Defined in qm_integrals.cpp; declared here so that
+/// qm_integrals.hpp (included by the CUDA kernel units) stays untouched. Claude Generated (Oct 2026).
+Matrix gradientTwoElectronExchange(const std::vector<GTO::Orbital>& basis, const Matrix& P, int natoms, int threads = 1);
+}  // namespace qmint
