@@ -9,6 +9,8 @@
 #                   same iteration count as the host loop
 #   qm_gpu_grad_*   two-electron gradient on the device (Q-G7) vs the CPU 2e gradient (<= 1e-9 Eh/Bohr),
 #                   its translational invariance, total gradient vs the CPU run, FD on H2O
+#   qm_gpu_grad1e_* one-electron gradient on the device (Q-G8) vs the CPU 1e gradient from the same P, W
+#                   (<= 1e-10 Eh/Bohr), also with the 2e part on the CPU (-qm.gpu_grad off)
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     foreach(_case H2O:../qm_grad/H2O_distorted.xyz formaldehyde:../qm_grad/formaldehyde_distorted.xyz benzene:../qm_hf3c/benzene.xyz)
@@ -137,4 +139,22 @@ if(Python3_Interpreter_FOUND)
     set_tests_properties(qm_gpu_grad_H2O qm_gpu_grad_formaldehyde qm_gpu_grad_benzene qm_gpu_grad_benzene_direct
         qm_gpu_grad_benzene_scf qm_gpu_grad_H2O_upload qm_gpu_grad_H2O_cartesian qm_gpu_grad_formaldehyde_noscreen
         qm_gpu_grad_H2O_hf3c PROPERTIES TIMEOUT 1500 LABELS "qm_gpu;gpu" SKIP_RETURN_CODE 77)
+    # Q-G8 (Claude Generated, Oct 2026): one-electron gradient on the device (required, --require-1e);
+    # FD of the device-run energy on H2O; 1e alone on the device (2e on the CPU); cartesian 6d, HF-3c/MINIX,
+    # device-direct SCF + device 2e
+    add_test(NAME qm_gpu_grad1e_H2O COMMAND ${Python3_EXECUTABLE} ${_QMGG} --curcuma $<TARGET_FILE:curcuma> --xyz ${_QMGG_H2O}
+        --require-1e --fd)
+    add_test(NAME qm_gpu_grad1e_formaldehyde_cpu2e COMMAND ${Python3_EXECUTABLE} ${_QMGG} --curcuma $<TARGET_FILE:curcuma>
+        --xyz ${_QMGG_FORM} --require-1e --no-2e "--dev-extra=-qm.gpu_grad off")
+    add_test(NAME qm_gpu_grad1e_benzene COMMAND ${Python3_EXECUTABLE} ${_QMGG} --curcuma $<TARGET_FILE:curcuma> --xyz ${_QMGG_BENZ}
+        --require-1e)
+    add_test(NAME qm_gpu_grad1e_benzene_direct COMMAND ${Python3_EXECUTABLE} ${_QMGG} --curcuma $<TARGET_FILE:curcuma>
+        --xyz ${_QMGG_BENZ} --require-1e "--dev-extra=-qm.gpu_direct on -qm.scf_threshold 1e-8" --tol-total 1e-7)
+    add_test(NAME qm_gpu_grad1e_H2O_cartesian COMMAND ${Python3_EXECUTABLE} ${_QMGG} --curcuma $<TARGET_FILE:curcuma>
+        --xyz ${_QMGG_H2O} --require-1e "--extra=-qm.cartesian_d true")
+    add_test(NAME qm_gpu_grad1e_H2O_hf3c COMMAND ${Python3_EXECUTABLE} ${_QMGG} --curcuma $<TARGET_FILE:curcuma>
+        --xyz ${_QMGG_H2O} --require-1e --method hf-3c --basis MINIX)
+    set_tests_properties(qm_gpu_grad1e_H2O qm_gpu_grad1e_formaldehyde_cpu2e qm_gpu_grad1e_benzene
+        qm_gpu_grad1e_benzene_direct qm_gpu_grad1e_H2O_cartesian qm_gpu_grad1e_H2O_hf3c
+        PROPERTIES TIMEOUT 1500 LABELS "qm_gpu;gpu" SKIP_RETURN_CODE 77)
 endif()

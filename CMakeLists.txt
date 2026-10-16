@@ -1115,6 +1115,8 @@ if(USE_CUDA)
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_scf.cu
         # Claude Generated (Oct 2026): native QM two-electron gradient on the device (Q-G7)
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_grad.cu
+        # Claude Generated (Oct 2026): native QM one-electron gradient on the device (Q-G8)
+        src/core/energy_calculators/qm_methods/cuda/qm_gpu_grad1e.cu
     )
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY LANGUAGE CUDA)
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY CUDA_SEPARABLE_COMPILATION ON)

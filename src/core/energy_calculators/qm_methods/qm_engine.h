@@ -91,7 +91,10 @@ BEGIN_PARAMETER_DEFINITION(qm)
           "gpu_scf auto: smallest number of basis functions for the device-resident SCF loop. Below it the host loop is faster (cuSOLVER syevd is latency-bound for small matrices: ~3 ms at 114 functions on an RTX 5090 vs ~1.2 ms on 4 CPU threads); measured crossover near 200 functions.",
           "Performance", {})
     PARAM(gpu_grad, String, "auto",
-          "With -gpu cuda|auto, two-electron part of the analytic RHF gradient on the device (Q-G7: derivative integrals of every canonical shell quartet contracted with the density at once, integral-direct, O(n^2) device memory; density-weighted quartet screening at eri_screening/100, 0 = every quartet). auto | on (device whenever -gpu is active; the one-electron part stays on the CPU) | off (CPU). Any device error falls back to the CPU and is counted as qm_grad.",
+          "With -gpu cuda|auto, two-electron part of the analytic RHF gradient on the device (Q-G7: derivative integrals of every canonical shell quartet contracted with the density at once, integral-direct, O(n^2) device memory; density-weighted quartet screening at eri_screening/100, 0 = every quartet). auto | on (device whenever -gpu is active; the one-electron part is controlled by gpu_grad1e) | off (CPU). Any device error falls back to the CPU and is counted as qm_grad.",
+          "Performance", {})
+    PARAM(gpu_grad1e, String, "auto",
+          "With -gpu cuda|auto, one-electron part of the analytic RHF gradient on the device (Q-G8: overlap, kinetic and nuclear-attraction derivative integrals, basis and Hellmann-Feynman parts, contracted with the density and the energy-weighted density; reads the same device tables as the two-electron part). auto | on (device whenever -gpu is active) | off (CPU). The nuclear repulsion gradient stays on the host. Any device error falls back to the CPU and is counted as qm_grad1e.",
           "Performance", {})
     PARAM(scf_max_iterations, Int, 100,
           "Maximum number of SCF iterations.",
@@ -277,9 +280,21 @@ private:
     // Q-G7 (Oct 2026): two-electron gradient on the device (-qm.gpu_grad auto|on|off).
     std::string m_gpu_grad = "auto";
     mutable bool m_gpu_grad_failed = false;  // device gradient failed once: CPU from then on
-    /// Device 2e gradient from the cartesian density Pc (Eh/Bohr, natoms x 3). False = not requested
-    /// or failed (failure counted as qm_grad); the caller then runs qmint::gradientTwoElectron.
-    bool gpuGradientTwoElectron(const Matrix& Pc, Matrix& g2, std::string& info) const;
+    // Q-G8 (Oct 2026): one-electron gradient on the device (-qm.gpu_grad1e auto|on|off).
+    std::string m_gpu_grad1e = "auto";
+    mutable bool m_gpu_grad1e_failed = false;  // device 1e gradient failed once: CPU from then on
+    /// Backend for a device gradient part (mode = m_gpu_grad / m_gpu_grad1e), or "" when that part
+    /// runs on the CPU. A missing plugin is counted as a fallback under `tag` and sets `failed`.
+    std::string gpuGradBackend(const std::string& mode, const char* option, const char* tag, bool& failed) const;
+    /// Device 2e gradient from the cartesian density Pc (Eh/Bohr, natoms x 3) with the shared tables
+    /// (nullptr = table build failed, reason in `why`). False = failed (counted as qm_grad); the
+    /// caller then runs qmint::gradientTwoElectron.
+    bool gpuGradientTwoElectron(const qmint::EriGpuTables* tables, const std::string& why_tables, const std::string& backend,
+                                const Matrix& Pc, Matrix& g2, std::string& info) const;
+    /// Q-G8: device 1e gradient (S, T, V derivatives with Pc and Wc, Eh/Bohr) from the same tables.
+    /// False = failed (counted as qm_grad1e); the caller then runs qmint::gradientOneElectron.
+    bool gpuGradientOneElectron(const qmint::EriGpuTables* tables, const std::string& why_tables, const std::string& backend,
+                                const Matrix& posBohr, const Matrix& Pc, const Matrix& Wc, Matrix& g1, std::string& info) const;
     // Energy components for the HF run (Hartree). E_elec = 0.5 Tr(P(H+F)).
     double m_e_elec = 0.0;
     double m_et = 0.0, m_ev = 0.0, m_ej = 0.0, m_ex = 0.0;

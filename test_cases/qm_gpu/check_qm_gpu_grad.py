@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Two-electron gradient on the device (Q-G7) vs the CPU.
+"""Two-electron (Q-G7) and one-electron (Q-G8) gradient on the device vs the CPU.
 
 Claude Generated (Oct 2026). Two `curcuma -sp ... -dump_gradient` runs of the same structure:
   device : -gpu cuda with CURCUMA_QM_GPU_GRAD_CHECK=1 (the engine also evaluates the CPU 2e
@@ -8,6 +8,9 @@ Claude Generated (Oct 2026). Two `curcuma -sp ... -dump_gradient` runs of the sa
 Passes when
   * the device path ran (check line present, no counted GPU fallback),
   * max|g2e(device) - g2e(CPU)| <= --tol-2e (default 1e-9 Eh/Bohr, same density),
+  * if the 1e part ran on the device ("QM GPU grad1e check: ..." line, required with --require-1e):
+    max|g1e(device) - g1e(CPU)| <= --tol-1e (default 1e-10 Eh/Bohr, same P and W) and its
+    translational invariance |sum| <= --tol-sum (--no-2e: the 2e part is expected on the CPU),
   * |sum over atoms of g2e(device)| <= --tol-sum per direction (translational invariance),
   * max|g(device run) - g(CPU run)| <= --tol-total (default 1e-8 Eh/Bohr; two independent SCFs,
     scf_threshold 1e-10),
@@ -29,6 +32,9 @@ ap.add_argument("--basis", default="def2-SVP")
 ap.add_argument("--extra", default="", help="flags for both runs (one string, use --extra=...)")
 ap.add_argument("--dev-extra", default="", help="flags for the device run only")
 ap.add_argument("--tol-2e", type=float, default=1e-9)
+ap.add_argument("--tol-1e", type=float, default=1e-10)
+ap.add_argument("--require-1e", action="store_true", help="the 1e part must have run on the device (Q-G8)")
+ap.add_argument("--no-2e", action="store_true", help="the 2e part is expected on the CPU (e.g. -qm.gpu_grad off)")
 ap.add_argument("--tol-sum", type=float, default=1e-10)
 ap.add_argument("--tol-total", type=float, default=1e-8)
 ap.add_argument("--fd", action="store_true")
@@ -70,15 +76,29 @@ if "GPU fallbacks during this run" in txt:
     sys.exit("the device run reported a GPU fallback")
 m = re.search(r"QM GPU grad check: natoms=(\d+) max\|dev-cpu\|=(\S+) max\|cpu\|=(\S+) "
               r"sum_dev=\((\S+),(\S+),(\S+)\) sum_cpu=\((\S+),(\S+),(\S+)\) quartets=(\d+) dev_ms=(\S+) cpu_ms=(\S+)", txt)
-if not m:
+d2e, sum_dev = 0.0, 0.0
+if m:
+    print(m.group(0))
+    d2e = float(m.group(2))
+    sum_dev = max(abs(float(m.group(k))) for k in (4, 5, 6))
+elif not a.no_2e:
     print(txt[-3000:])
     sys.exit("no 'QM GPU grad check' line: the 2e gradient did not run on the device")
-print(m.group(0))
-d2e = float(m.group(2))
-sum_dev = max(abs(float(m.group(k))) for k in (4, 5, 6))
+m1 = re.search(r"QM GPU grad1e check: natoms=(\d+) max\|dev-cpu\|=(\S+) max\|cpu\|=(\S+) "
+               r"sum_dev=\((\S+),(\S+),(\S+)\) sum_cpu=\((\S+),(\S+),(\S+)\) dev_ms=(\S+) cpu_ms=(\S+)", txt)
+d1e, sum1 = 0.0, 0.0
+if m1:
+    print(m1.group(0))
+    d1e = float(m1.group(2))
+    sum1 = max(abs(float(m1.group(k))) for k in (4, 5, 6))
+elif a.require_1e:
+    print(txt[-3000:])
+    sys.exit("no 'QM GPU grad1e check' line: the 1e gradient did not run on the device")
 e_cpu, g_cpu, _ = run("none", a.extra, a.xyz, False)
 d_tot = max(abs(x - y) for x, y in zip(g_dev, g_cpu)) * BOHR_IN_ANGSTROM  # Eh/Bohr
-ok = d2e <= a.tol_2e and sum_dev <= a.tol_sum and d_tot <= a.tol_total
+ok = d2e <= a.tol_2e and sum_dev <= a.tol_sum and d_tot <= a.tol_total and d1e <= a.tol_1e and sum1 <= a.tol_sum
+if m1:
+    print(f"1e: max|dev-cpu| {d1e:.2e} Eh/Bohr, |sum_dev| {sum1:.1e}")
 print(f"2e: max|dev-cpu| {d2e:.2e} Eh/Bohr, |sum_dev| {sum_dev:.1e}; total gradient device run vs CPU run "
       f"{d_tot:.2e} Eh/Bohr; E diff {abs(e_dev - e_cpu):.1e} Eh")
 
