@@ -44,7 +44,9 @@ public:
     void setThreadCount(int threads) override { (void)threads; }
     void setParameters(const json& params) override { (void)params; }
     json getParameters() const override { return json{}; }
-    bool hasError() const override { return false; }
+    /// WP10: a gradient request with -qm.ri j|jk is an error (no RI gradient exists).
+    bool hasError() const override { return m_has_error; }
+    std::string getErrorMessage() const override { return m_error_message; }
 
     json getEnergyDecomposition() const override;
     bool saveToFile(const std::string& filename) const override { (void)filename; return false; }

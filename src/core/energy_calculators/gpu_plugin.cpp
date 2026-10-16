@@ -267,6 +267,27 @@ std::unique_ptr<qmint::QMGpuGrad1e> createQmGrad1e(const std::string& backend, c
     return std::unique_ptr<qmint::QMGpuGrad1e>(static_cast<qmint::QMGpuGrad1e*>(p));
 }
 
+// Claude Generated (Oct 2026, WP10): density-fitting (RI) contractions on the device.
+std::unique_ptr<qmint::QMGpuRI> createQmRI(const std::string& backend, const double* T, int nfit, int n, int device,
+                                           std::string& why)
+{
+    void* handle = pluginHandle(backend, /*quiet=*/true);
+    if (!handle) {
+        why = "plugin libcurcuma_" + backend + ".so not loadable";
+        return nullptr;
+    }
+    using create_fn = void* (*)(const double*, int, int, int, char*, int);
+    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_ri");
+    if (!fn) {
+        why = "plugin has no entry point curcuma_" + backend + "_create_qm_ri";
+        return nullptr;
+    }
+    char buf[512] = { 0 };
+    void* p = fn(T, nfit, n, device, buf, (int)sizeof buf);
+    if (!p) why = buf;
+    return std::unique_ptr<qmint::QMGpuRI>(static_cast<qmint::QMGpuRI*>(p));
+}
+
 int deviceCount(const std::string& backend)
 {
     void* handle = pluginHandle(backend, /*quiet=*/true);

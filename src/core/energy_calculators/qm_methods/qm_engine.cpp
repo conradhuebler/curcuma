@@ -188,6 +188,7 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
     }
     if (config.contains("eri_max_memory_mb") && config["eri_max_memory_mb"].is_number())
         m_eri_max_memory_mb = config["eri_max_memory_mb"].get<double>();
+    readRIConfig(config);  // WP10 -qm.ri* (qm_ri.cpp)
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format("Initializing native QM engine (functional={}, basis={})",
@@ -327,15 +328,21 @@ double QMEngine::Calculation(bool gradient)
     if (!m_scf_ready) {
         const bool ok = runSCF();
         m_scf_ready = true;
-        if (!ok) {
+        if (!ok && !riSetupFailed()) {  // WP10: a failed RI setup has reported its own error
             CurcumaLogger::error(fmt::format(
                 "QM HF SCF did not converge in {} iterations", m_scf_max_iter));
         }
+        if (riActive()) riReport();
     }
     m_total_energy = m_e_elec + e_nn;
 
     // WP8: analytic gradient from the converged density (energy-only callers skip it).
-    if (gradient) {
+    // WP10: no RI gradient exists; QMMethod reports the request as an error (no number returned).
+    if (gradient && riActive()) {
+        m_gradient = Matrix::Zero(m_atomcount, 3);
+        CurcumaLogger::error("QM: no analytic gradient with density fitting (-qm.ri " + m_ri_mode
+                             + "); use -qm.ri off for -opt/-gradient");
+    } else if (gradient) {
         if (m_scf_converged)
             computeGradient();
         else {
@@ -345,8 +352,9 @@ double QMEngine::Calculation(bool gradient)
     }
 
     if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::result(fmt::format("native QM -- HF/{} SCF {} ({} iterations)",
-            m_basis_name, m_scf_converged ? "converged" : "NOT converged",
+        CurcumaLogger::result(fmt::format("native QM -- HF/{}{} SCF {} ({} iterations)",
+            m_basis_name, riActive() ? (m_ri_mode == "j" ? " RI-J" : " RI-JK") : "",
+            m_scf_converged ? "converged" : "NOT converged",
             m_scf_iterations));
         if (m_scf_converged && CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::param("E_elec", fmt::format("{:.10f} Eh", m_e_elec));
@@ -397,6 +405,7 @@ void QMEngine::buildOneElectronIntegrals()
     const Matrix Hcart = Tcart + Vcart;
 
     // New geometry -> invalidate the WP3 active-basis ERI and SCF caches.
+    resetRI();  // WP10: fitted tensor belongs to the old geometry
     m_eri_active_ready = false;
     m_direct = qmint::DirectJK();
     m_gpu_jk.reset();

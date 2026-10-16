@@ -31,6 +31,12 @@ HF3CMethod::HF3CMethod(const json& config)
             "hf-3c: basis '{}' ignored -- HF-3c is defined with MINIX (use -method hf for other bases)",
             requested));
     engine_config["basis"] = "MINIX";
+    // WP10 (Claude Generated, Oct 2026): HF-3c is defined with exact integrals in MINIX, and no
+    // auxiliary set is fitted to MINIX; -qm.ri is ignored here (warning) rather than changing the method.
+    const std::string ri = engine_config.contains("ri") && engine_config["ri"].is_string() ? engine_config["ri"].get<std::string>() : "off";
+    if (ri != "off" && ri != "false" && CurcumaLogger::get_verbosity() >= 1)
+        CurcumaLogger::warn("hf-3c: -qm.ri " + ri + " ignored -- HF-3c uses exact integrals (use -method hf for RI)");
+    engine_config["ri"] = "off";
 
     m_engine = std::make_unique<QMEngine>(QMFunctional::HF, engine_config);
     m_d3 = std::make_unique<D3ParameterGenerator>(D3ParameterGenerator::createForHF3C());

@@ -1,6 +1,7 @@
 # WP10-WP14 -- Dichtefitting (RI), MPn und CCSD, plus Bewertung von Schwarz-Ansaetzen
 
-- **Status:** 🤖 AI-generated Plan, **nichts davon ist implementiert oder getestet.** Stand Okt 2026.
+- **Status:** WP10 RI-J/RI-JK (HF, CPU + CUDA) implementiert, 🤖 AI-generated, ⚙️ machine-tested (Okt 2026, Abschnitt
+  WP10 unten); RI-C, WP11-WP15 sind Plan.
 - **Abhaengigkeit:** WP3 (RHF, ERI-Engine, `QMEngine`), fuer die GPU-Teile die Stufen Q-G1/Q-G2 aus
   [../QM_GPU_ROADMAP.md](../QM_GPU_ROADMAP.md).
 - **Referenzen auf dieser Maschine:** PySCF (venv `~/.venvs/qmref`), ORCA 6.1 (`~/Downloads/orca_6_1_0_...`).
@@ -17,26 +18,110 @@ Integralberechnung zu Matrix-Multiplikationen (n^5 fuer die Transformation, n^5 
 Korrelation). Das ist GEMM-Arbeit und passt auf die GPU-Stufen; es ist aber **neu zu messen**, nicht aus den
 xTB-Erfahrungen zu uebernehmen.
 
-## WP10 -- Dichtefitting (RI-J, RI-JK, RI-C)
+## WP10 -- Dichtefitting (RI-J, RI-JK; RI-C offen)
 
-**Ziel:** 3-Index-Integrale `(mn|P)` mit Hilfsbasis `P`, Metrik `J_PQ = (P|Q)`, Fitkoeffizienten
-`c_P = sum_Q J^-1_PQ (Q|ls) P_ls`. Speicher O(n^2 N_aux) statt O(n^4).
+**Stand Okt 2026: RI-J und RI-JK fuer closed-shell HF, H-Ne, CPU und CUDA. 🤖 AI-generated, ⚙️ machine-tested;
+menschlicher Produktionstest steht aus.** Code: `src/core/energy_calculators/qm_methods/qm_ri.{h,cpp}` (Integrale,
+Metrik, Fit, Parser, Engine-Anbindung), `cuda/qm_gpu_ri.cu` + `qm_gpu_ri_backend.h` (GPU), Tests `test_cases/qm_ri/`.
 
-- **Nutzen:** RI-J (Coulomb) und RI-JK fuer HF/DFT; **RI-C** (Korrelations-Hilfsbasis) macht MP2 und
-  CCSD ueberhaupt erst fuer mittelgrosse Systeme moeglich. Auf der GPU sind es GEMMs.
-- **Preis, ehrlich:** die Energie aendert sich um etwa 1e-5 Eh pro Atom (hilfsbasisabhaengig). Das ist eine
-  **Methodenvariante** (`-qm.ri on|off`, Standard aus), kein Ersatz des exakten Pfads; der exakte Pfad bleibt die
-  Referenz fuer alle bestehenden Tests.
-- **Fehlt im Repo:** Hilfsbasissaetze. Vorhanden sind nur `def2-SVP`, `def2-SV(P)`, `MINIX` (Orbitalbasen).
-  Benoetigt: `def2/J`, `def2/JK` und `def2-SVP/C` (Weigend et al.), im selben Dateiformat. Beschaffung und
-  Lizenz/Quelle (EMSL/Basis-Set-Exchange) klaeren, nichts aus dem Gedaechtnis eintippen.
-- **Metrikinverse** (Kostenanteil klein, siehe WP14): `J_PQ` ist SPD, aber schlecht konditioniert. Optionen: Cholesky mit Pivotierung,
-  Eigenzerlegung mit Abschneiden kleiner Eigenwerte (`J^-1/2`), oder Cholesky-Zerlegung der AO-ERI
-  (pivotiert, keine Hilfsbasis, Fehler ueber Schwelle einstellbar -- naeher an der Referenz, siehe WP14).
-- **Validierung:** gegen PySCF `density_fit()` mit identischer Hilfsbasis (Erwartung: Uebereinstimmung nahe
-  Rundungsfehler, weil dasselbe Verfahren) und gegen ORCA `RIJK`/`RI-MP2`; zusaetzlich der Fehler gegen den exakten Pfad
-  als Messgroesse, nicht als Testkriterium.
-- **Nicht im Umfang:** COSX/RIJCOSX (ORCA-spezifisch), Gradient (spaeter, eigener Schritt).
+- **Schalter** (Parameter-Registry, Modul `qm`): `-qm.ri off|j|jk` (Standard off; der exakte Pfad bleibt die Referenz
+  aller bestehenden Tests), `-qm.ri_aux auto|def2/J|def2/JK|<Datei>` (auto: j -> def2-universal-JFIT, jk ->
+  def2-universal-JKFIT), `-qm.ri_metric cholesky|eigen`, `-qm.ri_metric_cutoff` (1e-10), `-qm.ri_max_memory_mb`
+  (16000), `-qm.gpu_ri auto|on|off`.
+- **Verfahren:** RI-J: `c = J^-1 g`, `g_P = (P|ls) D_ls`, `J_mn = (mn|P) c_P`; Austausch exakt (gespeicherter Tensor
+  oder integral-direkt wie ohne RI, entspricht ORCA `RIJONX`). RI-JK (Weigend 2002): `B = L^-1 (P|mn)` mit
+  `J = L L^T`, `K_mn = sum_Q (B^Q D B^Q)_mn` ueber `D = V S V^T` (Eigenvektoren von D, mit sqrt|lambda| skaliert),
+  einmal gespeichert (naux x n^2). Integrale: McMurchie-Davidson ueber Schalenpaare; eine Hilfsfunktion ist das Paar
+  aus ihr und einer s-Funktion mit Exponent 0 am selben Zentrum. Hilfsfunktionen kugelfoermig (Nullraum des
+  Laplace-Operators je L, gleiche Spanne wie die reellen Kugelflaechenfunktionen), mit `-qm.cartesian_d true`
+  kartesisch wie die Orbitalbasis. **Max L der Hilfsbasen fuer H-Ne: 4 (g)** (JFIT Li-Ne, JKFIT B-Ne); mit der
+  d-Orbitalbasis braucht `(mn|P)` L bis 8. Der vorhandene ERI-Code (GTO::Orbital, s-d) wird nicht benutzt.
+- **Metrik:** Cholesky ist Standard (stabil, kein Abschneiden, gleiche Wahl wie PySCF); faellt auf die
+  Eigenzerlegung zurueck, wenn J numerisch nicht positiv definit ist. Gemessene Eigenwerte der
+  Coulomb-normierten Metrik ((P|P) = 1): H2O def2/J 2.0e-4..8.8 (cond 4.4e4), H2O def2/JK 1.0e-6..10.9 (1.1e7),
+  Benzol def2/JK 2.7e-8..32 (1.2e9), Anthracen def2/JK 1.0e-8..49 (4.7e9), kartesische JK-Hilfsbasis H2O 1.5e-10..32
+  (2.1e11). Cholesky und `eigen` (Cutoff 1e-10, nichts verworfen) geben fuer Benzol RI-JK dasselbe E_elec auf 10
+  Stellen; `eigen` mit Cutoff 1e-6 verwirft 11 von 558 Funktionen und aendert E um -3.4e-6 Eh. Setup Benzol: Cholesky
+  24 ms, `eigen` 190 ms.
+- **Hilfsbasen (Herkunft, Lizenz):** `qm_methods/def2-universal-JFIT.turbomole` und `def2-universal-JKFIT.turbomole`,
+  H-Ne-Bloecke unveraendert aus dem Basis Set Exchange (Version 0.12, Turbomole-Format, Kopf "Data from Turbomole 7.3",
+  Kopf in den Dateien erhalten; byte-gleich mit dem Download geprueft). Der BSE-Kopf nennt keine Lizenz; BSE-Daten
+  werden ueblicherweise mit Zitat der Originalarbeit genutzt (aus dem Gedaechtnis, nicht nachgeschlagen: Weigend,
+  PCCP 8, 1057 (2006) fuer def2/J; Weigend, PCCP 4, 4285 (2002) fuer def2/JK) -- **Lizenzfrage fuer den Betreiber
+  offen**. Der lokale JKFIT-Download bricht
+  nach Pd ab (H-Ne vollstaendig). Dieselben Daten wie ORCA `def2/J`/`def2/JK` (Energien unten auf 2e-9 Eh).
+  **def2-SVP/C (RI-C) fehlt**: RI-MP2 ist nicht implementiert und ist nach dem Merge mit WP11 zu planen.
+- **Nicht implementiert:** RI-C/RI-MP2, Gradient mit RI (`-opt`/`-gradient` mit `-qm.ri j|jk` brechen mit Fehler ab,
+  `ctest qm_ri_gradient_error`), hf-3c mit RI (ignoriert mit Warnung: HF-3c ist mit exakten Integralen in MINIX
+  definiert, `qm_ri_hf3c_ignored`), offene Schalen, Elemente ab Na, integral-direktes RI, lokales Fitten,
+  Speicherkompression des 3-Index-Tensors (voll n^2, nicht n(n+1)/2), device-residenter SCF-Loop mit RI (RI laeuft
+  im Host-Loop).
+
+**Validierung (alle Zahlen gemessen, HF/def2-SVP, `-qm.scf_threshold 1e-10`):**
+
+- **Integrale vs PySCF** (H2O, kartesische Orbital- und Hilfsbasis, `-qm.eri_screening 0`, Dump ueber
+  `CURCUMA_QM_RI_DUMP=<prefix>`): (P|Q) Coulomb-normiert max. Abweichung 2.7e-11 (def2/J) / 2.9e-11 (def2/JK),
+  (mn|P) normiert 2.5e-11 / 2.6e-11, gefitteter Tensor sum_PQ (mn|P) J^-1 (Q|ls) 3.5e-11 (enthaelt f und g).
+- **Gesamtenergien** (Eh; PySCF mit denselben Hilfsbasisdateien, ORCA 6.1 `RIJONX def2/J` bzw. `RIJK def2/JK`,
+  `VeryTightSCF`):
+
+  | Molekuel | Modus | curcuma | -PySCF | -ORCA | RI-Fehler vs exakt (Eh, Eh/Atom) |
+  |---|---|---|---|---|---|
+  | H2O (verzerrt) | RI-J | -75.9535706759 | +1e-10 | +7.1e-10 | -1.26e-4, -4.2e-5 |
+  | H2O | RI-JK | -75.9533909924 | 0 | +6.3e-10 | +5.34e-5, +1.8e-5 |
+  | NH3 | RI-J | -56.1402393646 | 0 | -1.3e-9 | -1.42e-4, -3.5e-5 |
+  | NH3 | RI-JK | -56.1400758658 | 0 | -1.3e-9 | +2.17e-5, +5.4e-6 |
+  | Formaldehyd (verzerrt) | RI-J | -113.7704540851 | +1e-10 | -1.6e-9 | -1.24e-4, -3.1e-5 |
+  | Formaldehyd | RI-JK | -113.7702284010 | 0 | -1.6e-9 | +1.02e-4, +2.5e-5 |
+  | Benzol | RI-J | -230.5362806561 | 0 | -2.3e-10 | -3.03e-4, -2.5e-5 |
+  | Benzol | RI-JK | -230.5358608794 | +1e-10 | -3.9e-10 | +1.16e-4, +9.7e-6 |
+  | Naphthalin | RI-J | -383.0669931516 | 0 | -1.9e-9 | -4.18e-4, -2.3e-5 |
+  | Naphthalin | RI-JK | -383.0663624198 | 0 | -1.4e-9 | +2.13e-4, +1.2e-5 |
+
+  Kartesisch (H2O, PySCF `cart=True`): RI-J und RI-JK gleich auf 1e-10. GPU vs CPU (Benzol, erster J/K-Aufbau):
+  max|dJ| 2.8e-14, max|dK| 8.3e-14, E_elec gleich auf 10 Stellen. Getestet nur auf diesen Molekuelen (Elemente H, C,
+  N, O; Anthracen nur Zeiten). Nicht getestet: Li, Be, B, F, Ne, He (Hilfsbasisdaten geladen, aber kein Molekuel
+  gerechnet), geladene Systeme, lineare Abhaengigkeiten in groesseren Hilfsbasen, Systeme ueber 24 Atome, andere
+  Orbitalbasen als def2-SVP.
+
+**Zeiten** (Intel Core Ultra 9 285K, 24 Kerne, RTX 5090, `-qm.scf_threshold 1e-8`, ms je Fock-Aufbau = J/K-Zeit / Iterationen;
+"exakt" CPU = gespeicherter Tensor bei Benzol (1.3 GB), integral-direkt bei Naphthalin/Anthracen (Tensor ueber
+`eri_max_memory_mb`); "exakt" GPU = Tensor auf dem Device (Q-G2; 8.4 bzw. 29 GB), Anthracen mit Device-SCF-Loop):
+
+| System (n, naux JK) | Pfad | Setup | ms/Fock | Wand | max RSS |
+|---|---|---|---|---|---|
+| Benzol (114, 558) | exakt 1 Thr | ERI 1935 ms | 133 | 4.2 s | 1323 MB |
+| | RI-J 1 Thr | RI 172 ms + ERI 1933 ms | 136 | 4.5 s | 1360 MB |
+| | RI-JK 1 Thr | 391 ms | 47 | 1.3 s | 97 MB |
+| | exakt 16 Thr | ERI 285 ms | 51 | 1.25 s | 1323 MB |
+| | RI-JK 16 Thr | 56 ms | 4.5 | 0.27 s | 97 MB |
+| | exakt GPU | ERI 3668 ms (inkl. CUDA-Init) | 0.9 | 4.1 s | 634 MB |
+| | RI-JK GPU | 114 ms + Upload 80 ms | 12.5 | 0.64 s | 643 MB |
+| Naphthalin (180, 894) | exakt 1 Thr (direkt) | - | 5601 | 131 s | 45 MB |
+| | RI-JK 1 Thr | 1908 ms | 219 | 7.0 s | 281 MB |
+| | exakt 16 Thr (direkt) | - | 406 | 10.0 s | 53 MB |
+| | RI-J 16 Thr | 89 ms | 411 | 10.2 s | 199 MB |
+| | RI-JK 16 Thr | 235 ms | 25 | 1.3 s | 282 MB |
+| | exakt GPU | ERI 400 ms | 6.7 | 1.3 s | 517 MB |
+| | RI-JK GPU | 236 ms + Upload 80 ms | 17.7 | 1.3 s | 841 MB |
+| Anthracen (246, 1230) | exakt 1 Thr (direkt) | - | 14423 | 365 s | 59 MB |
+| | RI-J 1 Thr | 1407 ms | 13480 | 357 s | 431 MB |
+| | RI-JK 1 Thr | 5764 ms | 769 | 25.6 s | 655 MB |
+| | exakt 16 Thr (direkt) | - | 1045 | 27.8 s | 74 MB |
+| | RI-J 16 Thr | 193 ms | 1190 | 33.1 s | 447 MB |
+| | RI-JK 16 Thr | 699 ms | 87 | 4.2 s | 655 MB |
+| | exakt GPU | ERI 839 ms | 28.0 | 2.6 s | 756 MB |
+| | RI-JK GPU | 716 ms + Upload 105 ms | 29.6 | 3.0 s | 1192 MB |
+
+- **Ehrlich:** RI-J spart fuer HF nichts (der exakte Austausch rechnet J mit; nur Vorstufe fuer reine Funktionale).
+  Auf der GPU ist RI-JK nicht schneller als der exakte Pfad, solange der 4-Index-Tensor in den Device-Speicher
+  passt (Benzol 12.5 gegen 0.9 ms je Fock-Aufbau); dort zaehlt der Speicher (29 GB gegen 0.6 GB bei Anthracen). Auf
+  dem Device sind die Kontraktionen bei Anthracen etwa 3x schneller als 16 CPU-Threads, bei Benzol langsamer
+  (Latenz, Transfers je Aufbau; die Host-Zerlegung von D kostet bei Anthracen nur ~4 ms je Aufbau). Setup RI-JK
+  Anthracen bei 8 Threads: 3-Index-Integrale 363 ms, Vorwaertssubstitution B = L^-1 T 894 ms.
+- Das System-BLAS dieser Maschine ist die Referenz-BLAS (netlib, ein Thread); die schweren RI-Schritte
+  (Vorwaertssubstitution, g = T vec(D), J, K) sind deshalb eigene OpenMP-Schleifen. Mit Eigen-GEMM auf netlib-BLAS
+  dauerte das Setup fuer Naphthalin 8.5 s statt 0.1 s.
 
 ## WP11 -- MO-Transformation und MP2
 
@@ -182,6 +267,7 @@ Die folgende Tabelle ist eine **Hypothesenliste aus dem Quelltext und der Litera
    Modell (Opus oder Fable) durchdenken lassen.
 
 1. ~~MP5 woertlich?~~ Erledigt: MP2 (O(N^5)), WP12 gestrichen.
-2. Hilfsbasissaetze beschaffen (Quelle/Lizenz) -- Voraussetzung fuer WP10/WP11-RI.
+2. Hilfsbasissaetze: def2/J und def2/JK liegen vor (BSE, H-Ne, Okt 2026); offen sind die Lizenzfrage und
+   def2-SVP/C fuer RI-MP2.
 3. (T)-Korrektur und Gradienten in den Plan aufnehmen?
 4. ~~Vault-Fuehrung der Schwarz-Bewertung~~ Erledigt: Pfad 5 in der Vault-Notiz *curcuma Schwarz-Attention*.
