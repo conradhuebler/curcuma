@@ -808,6 +808,10 @@ __global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_map_to_bonds(
 // Fixed-point scales of the order-independent accumulators (gfnff_kernels.cu, fix_add): CN-like quantities are
 // small (< 64) and get 2^-56, forces and their chain-rule inputs 2^-52 (range +-2048 Eh/Bohr).
 constexpr double GFNFF_FIX_CN = 72057594037927936.0;          // 2^56
+// Energy slots: 2^48 (resolution 3.6e-15 Eh per thread/atom contribution, range +-32768 Eh per term); the dispersion
+// slot sums one rounded value per pair and uses 2^52 (range +-2048 Eh).
+constexpr double GFNFF_FIX_ENERGY = 281474976710656.0;        // 2^48
+constexpr double GFNFF_FIX_ENERGY_DISP = 4503599627370496.0;  // 2^52
 constexpr double GFNFF_FIX_FORCE = 4503599627370496.0;        // 2^52
 __global__ void k_fix_to_double(int n, double* __restrict__ buf, double inv_scale);
 __global__ void k_fix_copy(int n, const double* __restrict__ src, double* __restrict__ dst, double inv_scale);

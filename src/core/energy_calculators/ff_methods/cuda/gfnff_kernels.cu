@@ -108,29 +108,34 @@ __device__ __forceinline__ double warpReduceSum(double val)
 // before this point). Threads with no work contribute local_E = 0.0.
 // ============================================================================
 
-__device__ __forceinline__ void blockReduceAddEnergy(double local_E, double* energy)
+// Integer version (Oct 2026): thread values are fixed-point integers (multiples of 2^-48 Eh, dispersion 2^-52), so the warp, block and
+// atomic sums are associative and do not depend on which pair or atom a thread got - the energy is the same bit for
+// bit however an atomically built list was ordered. The slot is converted by k_fix_to_double at the end of the step.
+__device__ __forceinline__ void blockReduceAddEnergyFix(long long local_E, double* energy)
 {
-    // Step 1: Warp-level reduction using shuffle intrinsics
-    double warp_sum = warpReduceSum(local_E);
+    long long warp_sum = local_E;
+    for (int off = 16; off > 0; off >>= 1) warp_sum += __shfl_down_sync(0xffffffffu, warp_sum, off);
 
-    // Step 2: First lane of each warp writes to shared memory
-    // Max 32 warps per block (supports up to 1024 threads)
-    __shared__ double warp_sums[32];
-    int lane = threadIdx.x & 31;       // threadIdx.x % 32
-    int warp_id = threadIdx.x >> 5;    // threadIdx.x / 32
+    __shared__ long long warp_sums_fx[32];
+    int lane = threadIdx.x & 31;
+    int warp_id = threadIdx.x >> 5;
 
     if (lane == 0)
-        warp_sums[warp_id] = warp_sum;
+        warp_sums_fx[warp_id] = warp_sum;
     __syncthreads();
 
-    // Step 3: First warp reduces all warp sums
-    int num_warps = (blockDim.x + 31) >> 5;  // ceil(blockDim.x / 32)
+    int num_warps = (blockDim.x + 31) >> 5;
     if (warp_id == 0) {
-        double sum = (lane < num_warps) ? warp_sums[lane] : 0.0;
-        sum = warpReduceSum(sum);
+        long long sum = (lane < num_warps) ? warp_sums_fx[lane] : 0ll;
+        for (int off = 16; off > 0; off >>= 1) sum += __shfl_down_sync(0xffffffffu, sum, off);
         if (lane == 0)
-            atomicAdd(energy, sum);
+            atomicAdd(reinterpret_cast<unsigned long long*>(energy), static_cast<unsigned long long>(sum));
     }
+}
+
+__device__ __forceinline__ void blockReduceAddEnergy(double local_E, double* energy)
+{
+    blockReduceAddEnergyFix(static_cast<long long>(llrint(local_E * GFNFF_FIX_ENERGY)), energy);
 }
 
 // ============================================================================
@@ -221,7 +226,7 @@ __global__ void k_dispersion(
     double*                    grad,
     double*                    energy)
 {
-    double local_E = 0.0;
+    long long local_Efx = 0;
 
     // K2 (Oct 2026): grid-stride loop. With the full grid (gridDim*blockDim >= n) every thread
     // handles at most one pair, exactly as before; a capped grid (background launch) loops.
@@ -246,7 +251,7 @@ __global__ void k_dispersion(
             double t8   = 1.0 / (r8 + r0_8);
 
             double disp_sum = t6 + 2.0 * r4r2ij[tid] * t8;
-            local_E += -C6[tid] * disp_sum * zetac6[tid];   // 0.0 + x == x: unchanged for one pair
+            local_Efx += static_cast<long long>(llrint(-C6[tid] * disp_sum * zetac6[tid] * GFNFF_FIX_ENERGY_DISP));   // per pair: list order does not matter
 
             // Gradient: dE/dr via chain rule
             double d6   = -6.0 * r4 * t6 * t6;
@@ -265,7 +270,7 @@ __global__ void k_dispersion(
         }
     }
 
-    blockReduceAddEnergy(local_E, energy);
+    blockReduceAddEnergyFix(local_Efx, energy);
 }
 
 // ============================================================================
@@ -637,9 +642,9 @@ __global__ void k_add_coulomb_parts(int n3, int nparts, const double* __restrict
         atomicAdd(reinterpret_cast<unsigned long long*>(&grad[k]), s);   // other streams add to d_grad concurrently
     }
     if (k == 0) {
-        double e = 0.0;
-        for (int p = 0; p < nparts; ++p) e += part_E[p];
-        atomicAdd(energy, e);
+        unsigned long long e = 0ull;   // helper energies are fixed-point accumulators (blockReduceAddEnergy): integer sum
+        for (int p = 0; p < nparts; ++p) e += reinterpret_cast<const unsigned long long*>(part_E)[p];
+        atomicAdd(reinterpret_cast<unsigned long long*>(energy), e);
     }
 }
 
@@ -659,9 +664,9 @@ __global__ void k_add_disp_parts(int N, int nparts, const double* __restrict__ g
         atomicAdd(reinterpret_cast<unsigned long long*>(&dEdcn[k]), s);
     }
     if (k == 0) {
-        double e = 0.0;
-        for (int p = 0; p < nparts; ++p) e += part_E[p];
-        atomicAdd(energy, e);
+        unsigned long long e = 0ull;   // helper energies are fixed-point accumulators (blockReduceAddEnergy): integer sum
+        for (int p = 0; p < nparts; ++p) e += reinterpret_cast<const unsigned long long*>(part_E)[p];
+        atomicAdd(reinterpret_cast<unsigned long long*>(energy), e);
     }
 }
 
@@ -2705,7 +2710,7 @@ __global__ void k_coulomb_self(
     double E_en   = -q * chi;
     double E_self = 0.5 * q * q * (gam[i] + sqrt_2_over_pi / sqrt(alp[i]));
 
-    atomicAdd(energy, E_en + E_self);
+    fix_add(energy, E_en + E_self, GFNFF_FIX_ENERGY);
 }
 
 // ============================================================================

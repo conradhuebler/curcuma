@@ -3459,6 +3459,11 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     convert_dEdcn();   // no-op unless neither the Coulomb postprocess nor the chain rule ran
     if (gradient)      // last accumulation is done: fixed-point -> double before the download
         k_fix_to_double<<<(3*N + 255) / 256, 256, 0, stream>>>(3*N, impl.d_grad.ptr, 1.0 / GFNFF_FIX_FORCE);
+    // energy slots are fixed-point accumulators too (blockReduceAddEnergy, k_coulomb_postprocess, k_add_*_parts)
+    static_assert(FFWorkspaceGPUImpl::E_DISP == 0, "slot 0 is the dispersion slot (own fixed-point scale)");
+    k_fix_to_double<<<1, 1, 0, stream>>>(1, impl.d_energies.ptr, 1.0 / GFNFF_FIX_ENERGY_DISP);
+    k_fix_to_double<<<1, FFWorkspaceGPUImpl::N_ENERGY_SLOTS, 0, stream>>>(
+        FFWorkspaceGPUImpl::N_ENERGY_SLOTS - 1, impl.d_energies.ptr + 1, 1.0 / GFNFF_FIX_ENERGY);
     checkCuda(cudaGetLastError(), "postprocess final check");
 
     // Async energy download (pinned m_h_energies buffer)

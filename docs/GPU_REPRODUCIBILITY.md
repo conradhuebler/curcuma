@@ -43,9 +43,6 @@ all-host run: energies identical, gradient max 2.8e-14 (GFN2).
 
 ## What is still not bitwise
 
-- **GFN-FF energies on the GPU** (not the forces): the energy slots still accumulate with FP64 `atomicAdd`
-  (`blockReduceAddEnergy`, `k_add_*_parts`), so the printed Epot can differ in the last digits between runs. It does not
-  enter the dynamics. The charge and force path is bitwise, see the next section.
 - **GFN-FF list builds** still take their slot from an atomic counter (`k_disp_pairs_build`, `k_generate_cn_pairs_write`);
   the order of a list no longer matters because every sum over it is an integer sum.
 - **ROCm, Vulkan**: not looked at.
@@ -72,7 +69,7 @@ Measured (RTX A4500, `-method gfnff -gpu cuda`; AI-run, not human-reviewed):
 |---|---|
 | Gradient GPU vs CPU, polymer (1410 atoms) / caffeine (24) | max 1.7e-13 / 1.5e-13 Eh/A, energies equal to 8 decimals |
 | MD polymer, 5000 steps, 8 concurrent processes on 4 GPUs vs 1 solo run | trajectory file (1000 frames) md5-identical in 9 of 9; with only the charge path fixed (forces still atomic) the same test differed from the solo run at printed rows 283-322 of 1001 in 8 of 8; the unchanged original binary was not run in this test |
-| MD polymer_2x (7320 atoms), 300 steps, `-gpu_split_devices all` (4 GPUs) twice and `none` | trajectory md5-identical in 3 of 3 (split is a different summation partition) |
+| MD polymer_2x (7320 atoms), 300 steps, `-gpu_split_devices all` (4 GPUs) twice and `none` | trajectory file (6 printed digits) md5-identical in 3 of 3; full-precision final JSON identical for the two split runs, but split vs none differs at 1e-12 relative (Epot, Ekin): the EEQ matvec partition changes the charges in the last bits, so split and unsplit are not bitwise equal to each other |
 | `ctest -R "gfnff\|gpu\|cuda\|eeq"` | 278 of 278 passed |
 | Cost, polymer MD 5000 steps solo | 20 s before, 20-21 s after (3 runs) |
 
@@ -96,7 +93,24 @@ download.
 Not covered: the post-SCF tails that already ran fixed-order (D4, D3, multipole), the multi-GPU cuSOLVERMp path, GFN1 on
 the check set above (same kernels, not run separately).
 
+## GFN-FF energies: fixed-point too (Oct 17, 2026, AI/machine-tested)
+
+`blockReduceAddEnergy` rounds every thread value to an integer (2^-48 Eh; dispersion 2^-52, one rounded value per pair),
+sums integers through warp, block and atomic, `k_coulomb_postprocess` and the helper `k_add_*_parts` add integers; the
+14 slots are converted before the download (`k_fix_to_double`). The cause found on the way: the dispersion pair list is
+built in atomic-counter order, so the thread-to-pair map changed between runs and the floating-point thread sums with it.
+
+| Check | Result |
+|---|---|
+| polymer `-sp` gradient dump (energy 18 digits + gradient), 32 runs in 4 rounds of 8 concurrent processes, `-threads 1` | md5-identical 32 of 32; with the gradient already fixed-point, but FP energy blocks: 8 distinct energies (spread 1.8e-13 Eh) |
+| Energy GPU vs CPU | polymer 4.6e-12 Eh (2^-44 first try: 1e-10), caffeine 2.5e-14 Eh |
+| MD polymer 5000 steps, 8 concurrent + 1 solo | trajectory identical; final JSON (Epot, Etot, Ekin, geometry, velocities, gradient) one distinct value in 9 of 9 |
+| `ctest -R "gfnff\|gpu\|cuda\|eeq"` | 278 of 278 |
+
+Cost: energies carry a rounding error of up to 3.6e-15 Eh per thread value (random, grows with the square root of the
+number of contributions). Range +-32768 Eh per term, dispersion +-2048 Eh; beyond that the sum wraps silently.
+
 ## Options for the rest (not done)
 
-1. Energy slots of GFN-FF as fixed-point or block partials (bitwise Epot).
-2. ROCm and Vulkan: not looked at.
+1. ROCm and Vulkan: not looked at.
+2. Split vs unsplit GFN-FF (EEQ matvec partition) is not bitwise equal; same-configuration runs are.
