@@ -15,9 +15,10 @@ peo201-chain is gfn2 `-sp` on 1410 atoms (nao 3222), energy -2088.25340678 Eh in
 | `-xtb.rocm_cached_cholesky` | false (true until Oct 17) | S = L L^T once per geometry, each SCF step sygst, syevd, trsm instead of sygvd (FP64 and FP32); every new factor is probed (L L^T v = S v) and recomputed when it fails |
 | `-xtb.rocm_density_syrk` | false | density P = C diag(occ) C^T by `rocblas_dsyrk` on the occupied columns, lower triangle mirrored |
 | `-xtb.rocm_explicit_linv` | false (true Oct 15 to Oct 17) | with the cached factor (probed L (Linv v) = v): Linv = L^-1 once per geometry (`rocsolver_dtrtri`, FP64, FP32 copy), each step F' = Linv F Linv^T by two trmm, syevd, C = Linv^T Y by trmm. The speedups quoted below (-9.6 percent) belong to this switch and to the cached factor, both off by default since Oct 17 |
+| `-xtb.rocm_device_multipole` | false | gfn2 only: multipole potential and energy of the host SCF loop on the device (FP64), see [Device multipole potential](#device-multipole-potential-oct-17-2026) |
 
 Defaults live in the PARAM block of `native_xtb_method.h`, in `cfgBool(...)` in `xtb_hip_method.cpp` and in the member
-initialisers of `XtbHipContext::Impl` (`xtb_hip_context.hip`). Other backends ignore the three switches.
+initialisers of `XtbHipContext::Impl` (`xtb_hip_context.hip`). Other backends ignore these switches.
 
 Measured (each line: structure, sample size, what was not checked):
 
@@ -83,13 +84,42 @@ value prints exactly one notice, |dE| against the unset run <= 2.1e-13 Eh; gfn2 
 one notice per value and reaches the same final energy. Real allocation or trtri failures were not provoked; the
 injected failures skip the call (alloc, chol) or overwrite its result (trtri).
 
+### Device multipole potential (Oct 17, 2026)
+
+AI-generated, machine-tested. With `-xtb.rocm_device_multipole true` the GFN2 multipole potential (`v_at` shift, `v_dp`,
+`v_qp`) and the multipole energy of each SCF iteration run on the device (`k_mp_potential_stored`, `k_mp_energy_stored` in
+`xtb_hip_context.hip`, one block per atom, shared-memory reduction). The host still builds the interaction matrices in
+`setupMultipole()`; the 15 distinct ones (`amat_dd` is symmetric in its two indices) are uploaded once per
+`setupMultipole()` call, 15 nat^2 doubles (239 MB at 1410 atoms). Per iteration the host sends q_at, dp_at, qp_at and
+receives v_at, v_dp, v_qp (10 and 10 nat doubles); `v_dp`/`v_qp` stay on the device for the Fock build. Above 4 GB of
+matrices (about 5770 atoms), or when an allocation, a kernel or the solve without upload fails, the run continues on the
+host path and one `[WARN]` line is printed (same reporting rule as the solver fallbacks above). The multipole gradient
+stays on the host. With the switch off the host code path is unchanged.
+
+Measured against the switch off (gfn2 `-sp`, `-gpu rocm`, energy and `-dump_gradient`):
+
+| Structures | n | max dE (Eh) | max dG (Eh/A) |
+|---|---|---|---|
+| caffeine, caffeine +1 doublet, MOR41 AcCl AcI Bz CO ED01 ED07 ED16a ED24 PR07 PR16 PR25 PR41 | 14 (1 run each) | 4.3e-14 | 8.0e-14 |
+| peo201-chain (1410 atoms), sygvd and cached factor + L^-1 | 4 pairs | 4.5e-13 | 1.3e-14 |
+
+Against the CPU (`-gpu none`, same 15 structures, n = 1 each) the switch on and off show the same differences (max dE
+5.5e-12 Eh, max dG 2.7e-6 Eh/A, both MOR41 ED01; these come from the rest of the ROCm path, not from this switch).
+
+peo201-chain `-sp` at the default 1 host thread, 12 SCF iterations, runs alternating off/on (n = 3 each, median):
+wall 14.92 -> 14.38 s with the default sygvd solver, 13.35 -> 12.86 s with `-xtb.rocm_cached_cholesky true
+-xtb.rocm_explicit_linv true`. Per iteration (verbosity 3 timers): potential build 20.6 -> 6.9 ms (of which D4 5.8 and
+5.0 ms), multipole energy 14.75 -> 0.91 ms. The eigensolve (780 to 900 ms per iteration) stays the dominant part.
+Not run: optimisation or MD (re-upload per geometry), implicit solvent, open-shell MOR41-type metals beyond caffeine +1,
+the fallback paths (not provoked), peak VRAM.
+
 ### Open levers (Oct 15)
 
 - **Host threads**: the ROCm adapter passes `-threads` as given, so the default host work runs on 1 thread
   (`xtb_gpu_adapter.h`); the CUDA wrapper defaults to min(hardware threads, 8) (`xtb_gpu_method.cpp`). peo201-chain with
   `-threads 8`: 14.2 -> 13.78 s (n = 4, before the L^-1 default); not made the default.
-- **Multipole on the device**: potential and energy still run on the host (about 29 of the 44 ms host part per
-  iteration at 1 thread; 4.0 + 6.7 ms at 8 threads).
+- **Multipole on the device**: opt-in since Oct 17 (`-xtb.rocm_device_multipole`, see above); by default potential and
+  energy run on the host (about 29 of the 44 ms host part per iteration at 1 thread; 4.0 + 6.7 ms at 8 threads).
 - **Remaining host gap** per SCF iteration (D4 potential 5.9 ms serial, populations and moments 7 ms, Coulomb about 2 ms
   at 1 thread, peo201-chain, n = 1 run).
 - **D4 ATM 3-body** about 1.2 s per peo201-chain run (one FP64 kernel, `k_d4_atm`), unchanged.

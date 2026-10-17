@@ -611,6 +611,138 @@ __global__ void k_multipole_moments(double* dp_at, double* qp_at,
     }
 }
 
+// Claude Generated (Oct 2026), -xtb.rocm_device_multipole: the GFN2 multipole potential and
+// energy of the host SCF loop (XTB::addMultipolePotential / XTB::energyMultipole,
+// xtb_multipole.cpp) on the device, from the host-built interaction matrices.
+// amat holds 15 column-major nat x nat blocks, uploaded verbatim from the host:
+//   [0..2]  amat_sd[k]                    (exactly antisymmetric)
+//   [3..8]  amat_dd[0][0],[0][1],[0][2],[1][1],[1][2],[2][2]   (symmetric, [a][b] == [b][a])
+//   [9..14] amat_sq[k]  packed (xx, xy, yy, xz, yz, zz)       (symmetric)
+// Column i is contiguous in j, so every term is read from column i as on the host:
+//   amat_sd[k](i,j) = -sd_k(j,i),  amat_dd[a][b](i,j) = dd_ab(j,i),  amat_sq[k](i,j) = sq_k(j,i).
+// One block per target atom i; the threads stride over j and the partial sums are combined
+// by a shared-memory tree reduction with __syncthreads (no assumption on the wavefront size).
+// The block size must be a power of two (kMpBlock).
+//   vdp(k,i) = sum_j [ -sd_k(j,i) q_j + sum_a dd_ka(j,i) dp(a,j) ] + 2 dkernel_i dp(k,i)
+//   vqp(k,i) = sum_j sq_k(j,i) q_j + 2 qkernel_i qp(k,i) mpscale_q[k]
+//   v_at(i)  = sum_j [ sum_k sd_k(j,i) dp(k,j) + sum_k sq_k(j,i) qp(k,j) ]
+// Moments: dp[k + 3 j], qp[k + 6 j] (column-major 3 x nat / 6 x nat as Eigen on the host).
+constexpr int kMpBlock = 256;
+__global__ void k_mp_potential_stored(int nat, const double* __restrict__ amat,
+                                      const double* __restrict__ dkernel, const double* __restrict__ qkernel,
+                                      const double* __restrict__ q, const double* __restrict__ dp,
+                                      const double* __restrict__ qp,
+                                      double* __restrict__ v_dp, double* __restrict__ v_qp,
+                                      double* __restrict__ v_at)
+{
+    __shared__ double red[10][kMpBlock];
+    const int i = blockIdx.x;
+    const int t = threadIdx.x;
+    if (i >= nat) return;   // uniform per block
+    const size_t nn  = static_cast<size_t>(nat) * static_cast<size_t>(nat);
+    const size_t off = static_cast<size_t>(i) * static_cast<size_t>(nat);   // column i
+    const double* sd0 = amat + 0 * nn + off;
+    const double* sd1 = amat + 1 * nn + off;
+    const double* sd2 = amat + 2 * nn + off;
+    const double* d00 = amat + 3 * nn + off;
+    const double* d01 = amat + 4 * nn + off;
+    const double* d02 = amat + 5 * nn + off;
+    const double* d11 = amat + 6 * nn + off;
+    const double* d12 = amat + 7 * nn + off;
+    const double* d22 = amat + 8 * nn + off;
+    const double* sq  = amat + 9 * nn + off;   // block k at sq + k*nn
+    double vd0 = 0.0, vd1 = 0.0, vd2 = 0.0, acc = 0.0;
+    double vq[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    for (int j = t; j < nat; j += blockDim.x) {
+        const double qj = q[j];
+        const double p0 = dp[3 * j + 0], p1 = dp[3 * j + 1], p2 = dp[3 * j + 2];
+        const double s0 = sd0[j], s1 = sd1[j], s2 = sd2[j];
+        vd0 += -s0 * qj + d00[j] * p0 + d01[j] * p1 + d02[j] * p2;
+        vd1 += -s1 * qj + d01[j] * p0 + d11[j] * p1 + d12[j] * p2;
+        vd2 += -s2 * qj + d02[j] * p0 + d12[j] * p1 + d22[j] * p2;
+        acc += s0 * p0 + s1 * p1 + s2 * p2;
+        for (int k = 0; k < 6; ++k) {
+            const double sqk = sq[static_cast<size_t>(k) * nn + j];
+            vq[k] += sqk * qj;
+            acc   += sqk * qp[6 * j + k];
+        }
+    }
+    red[0][t] = vd0; red[1][t] = vd1; red[2][t] = vd2;
+    for (int k = 0; k < 6; ++k) red[3 + k][t] = vq[k];
+    red[9][t] = acc;
+    __syncthreads();
+    for (int st = blockDim.x >> 1; st > 0; st >>= 1) {
+        if (t < st)
+            for (int c = 0; c < 10; ++c) red[c][t] += red[c][t + st];
+        __syncthreads();
+    }
+    if (t == 0) {
+        const double mpscale_q[6] = {1.0, 2.0, 1.0, 2.0, 2.0, 1.0};
+        for (int k = 0; k < 3; ++k)
+            v_dp[3 * i + k] = red[k][0] + 2.0 * dkernel[i] * dp[3 * i + k];
+        for (int k = 0; k < 6; ++k)
+            v_qp[6 * i + k] = red[3 + k][0] + 2.0 * qkernel[i] * qp[6 * i + k] * mpscale_q[k];
+        v_at[i] = red[9][0];
+    }
+}
+
+// Claude Generated (Oct 2026): per-atom share of the GFN2 multipole energy (XTB::energyMultipole),
+// same matrix layout and reduction as k_mp_potential_stored. e_at[i] receives
+//   sum_j [ -sum_k dp(k,i) sd_k(j,i) q_j + 0.5 sum_ab dp(a,i) dd_ab(j,i) dp(b,j)
+//           + sum_k qp(k,i) sq_k(j,i) q_j ]
+//   + dkernel_i sum_k dp(k,i)^2 + qkernel_i sum_k qp(k,i)^2 mpscale_q[k];
+// the host adds the nat shares in atom order (deterministic).
+__global__ void k_mp_energy_stored(int nat, const double* __restrict__ amat,
+                                   const double* __restrict__ dkernel, const double* __restrict__ qkernel,
+                                   const double* __restrict__ q, const double* __restrict__ dp,
+                                   const double* __restrict__ qp, double* __restrict__ e_at)
+{
+    __shared__ double red[kMpBlock];
+    const int i = blockIdx.x;
+    const int t = threadIdx.x;
+    if (i >= nat) return;
+    const size_t nn  = static_cast<size_t>(nat) * static_cast<size_t>(nat);
+    const size_t off = static_cast<size_t>(i) * static_cast<size_t>(nat);
+    const double* sd0 = amat + 0 * nn + off;
+    const double* sd1 = amat + 1 * nn + off;
+    const double* sd2 = amat + 2 * nn + off;
+    const double* d00 = amat + 3 * nn + off;
+    const double* d01 = amat + 4 * nn + off;
+    const double* d02 = amat + 5 * nn + off;
+    const double* d11 = amat + 6 * nn + off;
+    const double* d12 = amat + 7 * nn + off;
+    const double* d22 = amat + 8 * nn + off;
+    const double* sq  = amat + 9 * nn + off;
+    const double a0 = dp[3 * i + 0], a1 = dp[3 * i + 1], a2 = dp[3 * i + 2];
+    double qi[6];
+    for (int k = 0; k < 6; ++k) qi[k] = qp[6 * i + k];
+    double e = 0.0;
+    for (int j = t; j < nat; j += blockDim.x) {
+        const double qj = q[j];
+        const double p0 = dp[3 * j + 0], p1 = dp[3 * j + 1], p2 = dp[3 * j + 2];
+        e -= (a0 * sd0[j] + a1 * sd1[j] + a2 * sd2[j]) * qj;
+        e += 0.5 * (a0 * (d00[j] * p0 + d01[j] * p1 + d02[j] * p2)
+                  + a1 * (d01[j] * p0 + d11[j] * p1 + d12[j] * p2)
+                  + a2 * (d02[j] * p0 + d12[j] * p1 + d22[j] * p2));
+        double sqq = 0.0;
+        for (int k = 0; k < 6; ++k) sqq += qi[k] * sq[static_cast<size_t>(k) * nn + j];
+        e += sqq * qj;
+    }
+    red[t] = e;
+    __syncthreads();
+    for (int st = blockDim.x >> 1; st > 0; st >>= 1) {
+        if (t < st) red[t] += red[t + st];
+        __syncthreads();
+    }
+    if (t == 0) {
+        const double mpscale_q[6] = {1.0, 2.0, 1.0, 2.0, 2.0, 1.0};
+        double es = red[0];
+        for (int k = 0; k < 3; ++k) es += dkernel[i] * dp[3 * i + k] * dp[3 * i + k];
+        for (int k = 0; k < 6; ++k) es += qkernel[i] * qi[k] * qi[k] * mpscale_q[k];
+        e_at[i] = es;
+    }
+}
+
 // FP32 mixed-precision (X-AP3): element-wise FP64<->FP32 conversion for the optional
 // rocsolver_ssygvd eigensolve path (far-from-convergence iterations of -scf_mixed_precision).
 __global__ void k_d2f(const double* __restrict__ src, float* __restrict__ dst, size_t n)
@@ -1620,6 +1752,7 @@ struct XtbHipContext::Impl {
             if (p) hipFree(p);
         dDpInt = dQpInt = dVdp = dVqp = dDpAt = dQpAt = nullptr;
         mp_computed = false;
+        mp_pot_valid = false;   // dVdp/dVqp reallocated (Claude Generated, Oct 2026)
         if (bis_gfn2) {
             const size_t nn = static_cast<size_t>(bnao) * bnao;
             g &= hipMalloc(&dDpInt, 3 * nn * sizeof(double)) == hipSuccess;
@@ -1768,6 +1901,119 @@ struct XtbHipContext::Impl {
         if (hipStreamSynchronize(stream) != hipSuccess) return false;
         if (hipMemcpy(dp_at, dDpAt, 3 * static_cast<size_t>(bnat) * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
         return hipMemcpy(qp_at, dQpAt, 6 * static_cast<size_t>(bnat) * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess;
+    }
+
+    // ----- device multipole potential of the host SCF loop (Claude Generated, Oct 2026) -----
+    // -xtb.rocm_device_multipole: the 15 nat^2 interaction matrices (k_mp_potential_stored) are
+    // uploaded once per host setupMultipole (the caller passes its version counter), the
+    // per-iteration potential writes dVdp/dVqp in place, so solveMultipole needs no upload.
+    double* dMpAmat = nullptr;   ///< 15 nat^2 (layout: k_mp_potential_stored)
+    double* dMpKern = nullptr;   ///< dkernel (nat) | qkernel (nat)
+    double* dMpIn   = nullptr;   ///< q (nat) | dp (3 nat) | qp (6 nat)
+    double* dMpOut  = nullptr;   ///< v_at (nat) or the per-atom energy shares (nat)
+    int     mp_nat  = 0;
+    unsigned long long mp_ver = 0;   ///< host version of the uploaded matrices (0 = none)
+    bool    mp_pot_valid = false;    ///< dVdp/dVqp hold a device-built potential (cleared by beginBasis)
+    std::string mp_error;            ///< why the last upload failed
+
+    void freeMpPot() {
+        for (void* p : { (void*)dMpAmat, (void*)dMpKern, (void*)dMpIn, (void*)dMpOut }) if (p) (void)hipFree(p);
+        dMpAmat = dMpKern = dMpIn = dMpOut = nullptr;
+        mp_nat = 0; mp_ver = 0; mp_pot_valid = false;
+    }
+    bool mpPotUpload(int nat, const double* const* mats, const double* dk, const double* qk,
+                     unsigned long long version, double max_bytes) {
+        if (!ok || nat <= 0 || version == 0) return false;
+        if (nat == mp_nat && version == mp_ver && dMpAmat) return true;   // already resident
+        const size_t nn = static_cast<size_t>(nat) * static_cast<size_t>(nat);
+        const double bytes = 15.0 * static_cast<double>(nn) * sizeof(double);
+        if (bytes > max_bytes) {
+            freeMpPot();
+            mp_error = "interaction matrices need " + std::to_string(bytes / 1.0e9).substr(0, 5)
+                     + " GB, above the limit of " + std::to_string(max_bytes / 1.0e9).substr(0, 5) + " GB";
+            return false;
+        }
+        if (nat != mp_nat || !dMpAmat) {
+            freeMpPot();
+            if (hipMalloc(&dMpAmat, 15 * nn * sizeof(double)) != hipSuccess
+                || hipMalloc(&dMpKern, 2 * static_cast<size_t>(nat) * sizeof(double)) != hipSuccess
+                || hipMalloc(&dMpIn, 10 * static_cast<size_t>(nat) * sizeof(double)) != hipSuccess
+                || hipMalloc(&dMpOut, static_cast<size_t>(nat) * sizeof(double)) != hipSuccess) {
+                (void)hipGetLastError();
+                freeMpPot();
+                mp_error = "device allocation of " + std::to_string(bytes / 1.0e9).substr(0, 5) + " GB failed";
+                return false;
+            }
+            mp_nat = nat;
+        }
+        mp_ver = 0;   // stays 0 until the whole upload succeeded
+        for (int b = 0; b < 15; ++b)
+            if (hipMemcpy(dMpAmat + static_cast<size_t>(b) * nn, mats[b], nn * sizeof(double),
+                          hipMemcpyHostToDevice) != hipSuccess) { mp_error = "matrix upload failed"; return false; }
+        if (hipMemcpy(dMpKern, dk, nat * sizeof(double), hipMemcpyHostToDevice) != hipSuccess
+            || hipMemcpy(dMpKern + nat, qk, nat * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) {
+            mp_error = "kernel upload failed"; return false;
+        }
+        mp_ver = version;
+        mp_error.clear();
+        return true;
+    }
+    bool mpUploadMoments(const double* q, const double* dp, const double* qp) {
+        const size_t n = static_cast<size_t>(mp_nat);
+        return hipMemcpy(dMpIn, q, n * sizeof(double), hipMemcpyHostToDevice) == hipSuccess
+            && hipMemcpy(dMpIn + n, dp, 3 * n * sizeof(double), hipMemcpyHostToDevice) == hipSuccess
+            && hipMemcpy(dMpIn + 4 * n, qp, 6 * n * sizeof(double), hipMemcpyHostToDevice) == hipSuccess;
+    }
+    // v_dp/v_qp land in dVdp/dVqp (resident, read by resSolveMPResident) and are also copied
+    // to the host, so the host Potential stays complete; v_at is returned.
+    bool mpPotential(const double* q, const double* dp, const double* qp,
+                     double* v_at, double* v_dp, double* v_qp) {
+        mp_pot_valid = false;
+        if (!dMpAmat || mp_ver == 0 || mp_nat != bnat || !dVdp || !dVqp) return false;
+        if (!mpUploadMoments(q, dp, qp)) return false;
+        const int nat = mp_nat;
+        const size_t n = static_cast<size_t>(nat);
+        hipLaunchKernelGGL(k_mp_potential_stored, dim3(nat), dim3(kMpBlock), 0, stream, nat,
+                           dMpAmat, dMpKern, dMpKern + nat, dMpIn, dMpIn + n, dMpIn + 4 * n,
+                           dVdp, dVqp, dMpOut);
+        if (hipGetLastError() != hipSuccess) return false;
+        if (hipStreamSynchronize(stream) != hipSuccess) return false;
+        if (hipMemcpy(v_at, dMpOut, n * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        if (hipMemcpy(v_dp, dVdp, 3 * n * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        if (hipMemcpy(v_qp, dVqp, 6 * n * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        mp_pot_valid = true;
+        return true;
+    }
+    bool mpEnergy(const double* q, const double* dp, const double* qp, double* e_out) {
+        if (!dMpAmat || mp_ver == 0 || mp_nat <= 0) return false;
+        if (!mpUploadMoments(q, dp, qp)) return false;
+        const int nat = mp_nat;
+        const size_t n = static_cast<size_t>(nat);
+        hipLaunchKernelGGL(k_mp_energy_stored, dim3(nat), dim3(kMpBlock), 0, stream, nat,
+                           dMpAmat, dMpKern, dMpKern + nat, dMpIn, dMpIn + n, dMpIn + 4 * n, dMpOut);
+        if (hipGetLastError() != hipSuccess) return false;
+        if (hipStreamSynchronize(stream) != hipSuccess) return false;
+        std::vector<double> e_at(n);
+        if (hipMemcpy(e_at.data(), dMpOut, n * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        double e = 0.0;
+        for (double v : e_at) e += v;
+        *e_out = e;
+        return true;
+    }
+    // resSolveMP without the v_dp/v_qp upload: uses the potential mpPotential left in dVdp/dVqp.
+    bool resSolveMPResident(const double* v_ao, double* eps_out, bool fp32) {
+        const int n = res_n; if (n <= 0 || !beginResidentMP() || !mp_pot_valid) return false;
+        if (hipMemcpy(dvao, v_ao, n * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        dim3 blk(16, 16), grd((n + 15) / 16, (n + 15) / 16);
+        hipLaunchKernelGGL(k_fock, grd, blk, 0, stream, dH0, dS0, dvao, dF, n);
+        hipLaunchKernelGGL(k_add_fock_multipole, grd, blk, 0, stream, dF, dDpInt, dQpInt,
+                           dVdp, dVqp, dao2at, n);
+        if (fp32) {
+            if (!eigensolveFp32(n)) return false;
+        } else {
+            if (!eigensolveFp64(n)) return false;
+        }
+        return hipMemcpy(eps_out, dEps, n * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess;
     }
 
     // ----- Stage 5 (Part B2): in-SCF GFN2 D4 dE_D4/dq ---------------------
@@ -2011,6 +2257,7 @@ XtbHipContext::~XtbHipContext()
     if (!m_impl) return;
     bindDevice();   // free device memory on the device that owns it
 #ifdef HAVE_ROCSOLVER
+    m_impl->freeMpPot();   // Claude Generated (Oct 2026)
     m_impl->freeEeq();
     m_impl->freeDispersion();
     m_impl->freeBasis();
@@ -2222,6 +2469,55 @@ bool XtbHipContext::solveMultipole(const double* v_ao, const double* v_dp,
 #else
     return m_impl && m_impl->ok && v_ao && v_dp && v_qp && eps_out
         && m_impl->resSolveMP(v_ao, v_dp, v_qp, eps_out, fp32);
+#endif
+}
+// Claude Generated (Oct 2026): -xtb.rocm_device_multipole entry points (see the header).
+bool XtbHipContext::beginMultipolePotential(int nat, const double* const* mats, const double* dkernel,
+                                            const double* qkernel, unsigned long long version,
+                                            double max_bytes)
+{
+#ifndef HAVE_ROCSOLVER
+    (void)nat; (void)mats; (void)dkernel; (void)qkernel; (void)version; (void)max_bytes; return false;
+#else
+    if (!m_impl || !m_impl->ok || !mats || !dkernel || !qkernel) return false;
+    for (int b = 0; b < 15; ++b) if (!mats[b]) return false;
+    return m_impl->mpPotUpload(nat, mats, dkernel, qkernel, version, max_bytes);
+#endif
+}
+std::string XtbHipContext::multipolePotentialError() const
+{
+#ifndef HAVE_ROCSOLVER
+    return "build without rocSOLVER";
+#else
+    return m_impl ? m_impl->mp_error : std::string();
+#endif
+}
+bool XtbHipContext::multipolePotential(const double* q_at, const double* dp_at, const double* qp_at,
+                                       double* v_at, double* v_dp, double* v_qp)
+{
+#ifndef HAVE_ROCSOLVER
+    (void)q_at; (void)dp_at; (void)qp_at; (void)v_at; (void)v_dp; (void)v_qp; return false;
+#else
+    return m_impl && m_impl->ok && q_at && dp_at && qp_at && v_at && v_dp && v_qp
+        && m_impl->mpPotential(q_at, dp_at, qp_at, v_at, v_dp, v_qp);
+#endif
+}
+bool XtbHipContext::multipoleEnergy(const double* q_at, const double* dp_at, const double* qp_at,
+                                    double* e_out)
+{
+#ifndef HAVE_ROCSOLVER
+    (void)q_at; (void)dp_at; (void)qp_at; (void)e_out; return false;
+#else
+    return m_impl && m_impl->ok && q_at && dp_at && qp_at && e_out
+        && m_impl->mpEnergy(q_at, dp_at, qp_at, e_out);
+#endif
+}
+bool XtbHipContext::solveMultipoleResident(const double* v_ao, double* eps_out, bool fp32)
+{
+#ifndef HAVE_ROCSOLVER
+    (void)v_ao; (void)eps_out; (void)fp32; return false;
+#else
+    return m_impl && m_impl->ok && v_ao && eps_out && m_impl->resSolveMPResident(v_ao, eps_out, fp32);
 #endif
 }
 bool XtbHipContext::multipoleMoments(double* dp_at, double* qp_at)

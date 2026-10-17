@@ -308,6 +308,7 @@ void XTB::setupMultipole(bool integrals_on_device)
     }
 
     m_mp_initialized = true;
+    ++m_mp_version;   // device copies of the matrices are stale (Claude Generated, Oct 2026)
 }
 
 /* ------------------------------------------------------------------ *

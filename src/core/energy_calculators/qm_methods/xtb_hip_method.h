@@ -60,6 +60,7 @@ private:
     /// below verbosity 1 only when final_report is true (then at level 1).
     void reportSolverFallbacks(bool final_report = false);
     unsigned m_reported_fallbacks = 0;   ///< SolverFallbackEvent bits already printed
+    bool m_reported_mp_fallback = false; ///< -xtb.rocm_device_multipole fallback printed (Claude Generated, Oct 2026)
 };
 
 #endif // USE_ROCM

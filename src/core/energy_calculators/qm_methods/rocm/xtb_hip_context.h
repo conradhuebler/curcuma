@@ -216,6 +216,42 @@ public:
     bool solveMultipole(const double* v_ao, const double* v_dp, const double* v_qp, double* eps_out, bool fp32 = false);
     bool multipoleMoments(double* dp_at, double* qp_at);
 
+    // ---- GFN2 multipole potential/energy of the host SCF loop on the device ----------------
+    // -xtb.rocm_device_multipole (Claude Generated, Oct 2026). The host builds the atomic
+    // interaction matrices (XTB::setupMultipole); they are uploaded once per host version and
+    // each SCF iteration sends only q_at/dp_at/qp_at (10 nat doubles). Same formulas as
+    // XTB::addMultipolePotential / XTB::energyMultipole (xtb_multipole.cpp), FP64.
+
+    /**
+     * @brief Upload the 15 distinct multipole interaction matrices and the on-site kernels.
+     * @param nat     number of atoms
+     * @param mats    15 host pointers to column-major nat x nat matrices, in the order
+     *                amat_sd[0..2], amat_dd[0][0], [0][1], [0][2], [1][1], [1][2], [2][2],
+     *                amat_sq[0..5] (amat_dd[b][a] == amat_dd[a][b] exactly, so 6 suffice)
+     * @param dkernel on-site dipole kernel (nat)
+     * @param qkernel on-site quadrupole kernel (nat)
+     * @param version host version of the matrices (> 0); an upload with the version already
+     *                resident is skipped
+     * @param max_bytes upper limit of the device buffer for the matrices (15 nat^2 doubles)
+     * @return false if the limit is exceeded, the allocation or the copy failed (the caller
+     *         keeps the host path); multipolePotentialError() says why
+     */
+    bool beginMultipolePotential(int nat, const double* const* mats, const double* dkernel,
+                                 const double* qkernel, unsigned long long version, double max_bytes);
+    /// Reason of the last failed beginMultipolePotential(), empty otherwise.
+    std::string multipolePotentialError() const;
+    /**
+     * @brief Multipole potential for the given charges and moments (column-major 3 x nat /
+     *        6 x nat). v_dp/v_qp stay resident for solveMultipoleResident() and are also
+     *        copied to v_dp/v_qp; v_at (nat) is the scalar shift (replaces, not adds).
+     */
+    bool multipolePotential(const double* q_at, const double* dp_at, const double* qp_at,
+                            double* v_at, double* v_dp, double* v_qp);
+    /// Multipole energy E_mp for the given charges and moments; per-atom shares summed on the host.
+    bool multipoleEnergy(const double* q_at, const double* dp_at, const double* qp_at, double* e_out);
+    /// solveMultipole() with the potential of the last multipolePotential() (no v_dp/v_qp upload).
+    bool solveMultipoleResident(const double* v_ao, double* eps_out, bool fp32 = false);
+
     // ---- In-SCF GFN2 D4 atom-potential dE_D4/dq (Stage 5, Part B2) -----------
     // Port of XTB::addDispersionPotential's per-reference dE_D4/dq onto the device, so
     // the host O(N²) D4 contraction drops out of the GFN2 SCF loop. beginDispersion uploads

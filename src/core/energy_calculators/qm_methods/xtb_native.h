@@ -471,6 +471,39 @@ struct GpuScfBackend {
                                 Vector& eps, bool fp32 = false, int n_eig = 0) { (void)v_ao; (void)v_dp; (void)v_qp; (void)eps; (void)fp32; (void)n_eig; return false; }
     virtual bool multipoleMoments(Eigen::MatrixXd& dp_at, Eigen::MatrixXd& qp_at) { (void)dp_at; (void)qp_at; return false; }
 
+    /* ----- GFN2 multipole potential/energy of the host-driven resident loop ------------ *
+     * Claude Generated (Oct 2026), ROCm -xtb.rocm_device_multipole. In the host-driven GFN2
+     * loop (no supportsDevicePotential) the host builds the whole potential; with this hook
+     * only the multipole part (XTB::addMultipolePotential, XTB::energyMultipole) runs on the
+     * device from the host-built interaction matrices. v_dp/v_qp then stay on the device for
+     * solveMultipoleResident (no per-iteration upload). Default false -> host path. */
+    /// True when the backend runs the multipole potential/energy on the device (opt-in switch).
+    virtual bool supportsDeviceMultipolePotential() const { return false; }
+    /// Upload the host interaction matrices of one setupMultipole() (version > 0); a call with
+    /// the version already on the device returns true without copying.
+    virtual bool beginMultipolePotential(const std::array<Eigen::MatrixXd, 3>& amat_sd,
+                                         const std::array<std::array<Eigen::MatrixXd, 3>, 3>& amat_dd,
+                                         const std::array<Eigen::MatrixXd, 6>& amat_sq,
+                                         const std::vector<double>& dkernel,
+                                         const std::vector<double>& qkernel,
+                                         unsigned long long version)
+    { (void)amat_sd; (void)amat_dd; (void)amat_sq; (void)dkernel; (void)qkernel; (void)version; return false; }
+    /// v_at = scalar shift (nat), v_dp (3 x nat), v_qp (6 x nat), as XTB::addMultipolePotential.
+    virtual bool multipolePotential(const Vector& q_at, const Eigen::MatrixXd& dp_at,
+                                    const Eigen::MatrixXd& qp_at, Vector& v_at,
+                                    Eigen::MatrixXd& v_dp, Eigen::MatrixXd& v_qp)
+    { (void)q_at; (void)dp_at; (void)qp_at; (void)v_at; (void)v_dp; (void)v_qp; return false; }
+    /// E_mp as XTB::energyMultipole for the given charges and moments.
+    virtual bool multipoleEnergy(const Vector& q_at, const Eigen::MatrixXd& dp_at,
+                                 const Eigen::MatrixXd& qp_at, double& e)
+    { (void)q_at; (void)dp_at; (void)qp_at; (void)e; return false; }
+    /// solveMultipole with the v_dp/v_qp of the last multipolePotential() call.
+    virtual bool solveMultipoleResident(const Eigen::VectorXd& v_ao, Vector& eps, bool fp32 = false)
+    { (void)v_ao; (void)eps; (void)fp32; return false; }
+    /// Called once by XTB::Calculation when the device multipole path failed and the host took
+    /// over; lets the backend record the event for its own notice. Default: nothing.
+    virtual void noteDeviceMultipoleFallback(const std::string& why) { (void)why; }
+
     /* ----- Single-shot D4 EEQ charge model (Stage 5, Part A) ------------- *
      * The default scf_guess=eeq and d4_charge_source=eeq both run the
      * curcuma::dispersion::D4ChargeModel (one (N+1) augmented LU solve per
@@ -1343,6 +1376,11 @@ private:
     std::array<Eigen::MatrixXd, 3> m_mp_amat_sd;
     std::array<std::array<Eigen::MatrixXd, 3>, 3> m_mp_amat_dd;
     std::array<Eigen::MatrixXd, 6> m_mp_amat_sq;
+    /// Bumped by every setupMultipole(); keys the device copy of the matrices above
+    /// (GpuScfBackend::beginMultipolePotential). Claude Generated (Oct 2026).
+    unsigned long long m_mp_version = 0;
+    /// The device multipole potential failed once in this object: stay on the host path.
+    bool m_mp_device_failed = false;
     std::vector<double> m_mp_mrad;
     std::vector<double> m_mp_dkernel;
     std::vector<double> m_mp_qkernel;

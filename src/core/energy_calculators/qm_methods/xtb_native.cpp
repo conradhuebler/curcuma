@@ -1196,6 +1196,33 @@ double XTB::Calculation(bool gradient)
                 : "SCF: device potential build unavailable; host potential build");
     }
 
+    // Claude Generated (Oct 2026), ROCm -xtb.rocm_device_multipole (opt-in): in the host-driven
+    // resident GFN2 loop (no device potential build) only the multipole potential and energy
+    // move to the device. The host interaction matrices are uploaded once per setupMultipole()
+    // (m_mp_version); per iteration q_at/dp_at/qp_at go up and v_at/v_dp/v_qp come back, while
+    // v_dp/v_qp also stay on the device for the Fock build. Any failure switches this object to
+    // the host path for good (m_mp_device_failed); the backend prints one notice.
+    bool use_dev_mp = false;
+    if (use_gpu_resident && gpu_multipole && !use_device_potential && m_mp_initialized
+        && !m_mp_device_failed && m_gpu_scf->supportsDeviceMultipolePotential()) {
+        use_dev_mp = m_gpu_scf->beginMultipolePotential(m_mp_amat_sd, m_mp_amat_dd, m_mp_amat_sq,
+                                                        m_mp_dkernel, m_mp_qkernel, m_mp_version);
+        if (!use_dev_mp) {
+            m_mp_device_failed = true;
+            m_gpu_scf->noteDeviceMultipoleFallback("upload of the interaction matrices");
+        }
+        if (verb >= 2)
+            CurcumaLogger::info(use_dev_mp
+                ? "SCF: GFN2 multipole potential and energy on the device (host interaction matrices)"
+                : "SCF: device multipole potential unavailable; host multipole potential");
+    }
+    // Device step failed: host path from here on (the matrices are still on the host).
+    auto dev_mp_failed = [&](const char* step) {
+        use_dev_mp = false;
+        m_mp_device_failed = true;
+        m_gpu_scf->noteDeviceMultipoleFallback(step);
+    };
+
     // Stage 6 (S6.5, Claude Generated): fully device-resident SCF loop. When the
     // backend supports it, the WHOLE per-iteration loop body (potential → Fock →
     // eigensolve → occupation → density → charges/moments → SCC energy → Broyden)
@@ -1470,7 +1497,16 @@ double XTB::Calculation(bool gradient)
 
             // GFN2 multipole
             if (m_method == MethodType::GFN2) {
-                addMultipolePotential(m_pot);
+                // -xtb.rocm_device_multipole: same assignments as addMultipolePotential
+                // (v_at replaced, v_dp/v_qp set), computed on the device. Claude Generated (Oct 2026).
+                bool mp_on_dev = false;
+                if (use_dev_mp) {
+                    mp_on_dev = m_gpu_scf->multipolePotential(m_wfn.q_at, m_wfn.dp_at, m_wfn.qp_at,
+                                                              m_pot.v_at, m_pot.v_dp, m_pot.v_qp);
+                    if (!mp_on_dev) dev_mp_failed("multipole potential");
+                }
+                if (!mp_on_dev)
+                    addMultipolePotential(m_pot);
                 // Self-consistent D4: exact per-reference dE_D4/dq into the atom potential.
                 const auto t_disp0 = clock::now();
                 addDispersionPotential(m_pot);
@@ -1505,6 +1541,16 @@ double XTB::Calculation(bool gradient)
             m_eig_fp32 = fp32_wanted(dq_prev);
             bool solve_ok;
             Eigen::VectorXd v_ao;  // host-expanded potential (non-device-potential path)
+            // GFN2 multipole solve. With -xtb.rocm_device_multipole the device already holds
+            // v_dp/v_qp (no upload); if that solve fails, the host copies in m_pot are uploaded
+            // as before. Claude Generated (Oct 2026).
+            auto solve_mp = [&](const Eigen::VectorXd& vao) -> bool {
+                if (use_dev_mp) {
+                    if (m_gpu_scf->solveMultipoleResident(vao, m_wfn.eps, m_eig_fp32)) return true;
+                    dev_mp_failed("resident multipole solve");
+                }
+                return m_gpu_scf->solveMultipole(vao, m_pot.v_dp, m_pot.v_qp, m_wfn.eps, m_eig_fp32, gpu_n_eig);
+            };
             if (use_device_potential) {
                 // Stage 5 (B3/B4): the device builds v_sh/v_at/v_dp/v_qp from the
                 // mixed q_sh/dp_at/qp_at + the host-built D4 reference weights, then
@@ -1531,7 +1577,7 @@ double XTB::Calculation(bool gradient)
                 // Device: F = H0 − ½·S·(v_ao⊕v_ao) [+ GFN2 multipole]; solve F C = S C ε.
                 // AP1: gpu_n_eig>0 solves only the lowest occupied(+buffer) eigenpairs.
                 solve_ok = gpu_multipole
-                    ? m_gpu_scf->solveMultipole(v_ao, m_pot.v_dp, m_pot.v_qp, m_wfn.eps, m_eig_fp32, gpu_n_eig)
+                    ? solve_mp(v_ao)
                     : m_gpu_scf->solve(v_ao, m_wfn.eps, m_eig_fp32, gpu_n_eig);
             }
             if (!solve_ok) {
@@ -1555,7 +1601,7 @@ double XTB::Calculation(bool gradient)
                         + "); switching to the full spectrum for the rest of the SCF.");
                 gpu_partial_diag = false; gpu_n_eig = 0;
                 const bool re_ok = gpu_multipole
-                    ? m_gpu_scf->solveMultipole(v_ao, m_pot.v_dp, m_pot.v_qp, m_wfn.eps, m_eig_fp32, gpu_n_eig)
+                    ? solve_mp(v_ao)
                     : m_gpu_scf->solve(v_ao, m_wfn.eps, m_eig_fp32, gpu_n_eig);
                 if (!re_ok) {
                     CurcumaLogger::warn("XTB::Calculation: GPU resident full re-solve failed at "
@@ -1679,7 +1725,17 @@ double XTB::Calculation(bool gradient)
         const auto t_e1 = clock::now();
         m_E_third_order   = energyThirdOrder();
         const auto t_e2 = clock::now();
-        m_E_multipole     = energyMultipole();
+        // -xtb.rocm_device_multipole: E_mp from the device copy of the interaction
+        // matrices, host energyMultipole() on failure. Claude Generated (Oct 2026).
+        {
+            double e_mp_dev = 0.0;
+            if (use_dev_mp && m_gpu_scf->multipoleEnergy(m_wfn.q_at, m_wfn.dp_at, m_wfn.qp_at, e_mp_dev)) {
+                m_E_multipole = e_mp_dev;
+            } else {
+                if (use_dev_mp) dev_mp_failed("multipole energy");
+                m_E_multipole = energyMultipole();
+            }
+        }
         const auto t_e3 = clock::now();
 
         // Band energy: Tr(P · H0). Device-resident path returns it from the GPU

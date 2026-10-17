@@ -56,6 +56,84 @@ public:
     // k_multipole_ints / k_grad_h0_pulay). The Vulkan GLSL shaders do not yet, so they
     // keep the base false (d systems route to the CPU path). Claude Generated.
     bool supportsDshell() const override { return true; }
+
+    // ---- BACKEND-SPECIFIC 3: multipole potential of the host-driven loop --------------
+    // Claude Generated (Oct 2026), -xtb.rocm_device_multipole (default false). The GFN2
+    // multipole potential and energy (XTB::addMultipolePotential / energyMultipole) run on the
+    // device from the host interaction matrices, uploaded once per setupMultipole(). Vulkan has
+    // no such kernels, so this is not in the shared template.
+    void setDeviceMultipole(bool on) { m_device_mp = on; }
+    bool supportsDeviceMultipolePotential() const override { return m_device_mp; }
+
+    /// Device limit for the 15 nat^2 doubles of the matrices (4 GB, nat up to about 5770).
+    static constexpr double kMpMaxBytes = 4.0e9;
+
+    bool beginMultipolePotential(const std::array<Eigen::MatrixXd, 3>& sd,
+                                 const std::array<std::array<Eigen::MatrixXd, 3>, 3>& dd,
+                                 const std::array<Eigen::MatrixXd, 6>& sq,
+                                 const std::vector<double>& dkernel,
+                                 const std::vector<double>& qkernel,
+                                 unsigned long long version) override
+    {
+        if (!m_ctx || m_nat <= 0) return false;
+        const Eigen::Index n = m_nat;
+        auto okm = [n](const Eigen::MatrixXd& m) { return m.rows() == n && m.cols() == n; };
+        const double* mats[15] = {
+            sd[0].data(), sd[1].data(), sd[2].data(),
+            dd[0][0].data(), dd[0][1].data(), dd[0][2].data(), dd[1][1].data(), dd[1][2].data(), dd[2][2].data(),
+            sq[0].data(), sq[1].data(), sq[2].data(), sq[3].data(), sq[4].data(), sq[5].data() };
+        bool shapes = static_cast<Eigen::Index>(dkernel.size()) == n
+                   && static_cast<Eigen::Index>(qkernel.size()) == n;
+        for (int k = 0; k < 3; ++k) shapes = shapes && okm(sd[k]);
+        for (int a = 0; a < 3; ++a) for (int b = a; b < 3; ++b) shapes = shapes && okm(dd[a][b]);
+        for (int k = 0; k < 6; ++k) shapes = shapes && okm(sq[k]);
+        if (!shapes) { m_mp_error = "matrix shapes do not match the atom count"; return false; }
+        if (!m_ctx->beginMultipolePotential(m_nat, mats, dkernel.data(), qkernel.data(), version,
+                                            kMpMaxBytes)) {
+            m_mp_error = m_ctx->multipolePotentialError();
+            return false;
+        }
+        return true;
+    }
+    bool multipolePotential(const Vector& q_at, const Eigen::MatrixXd& dp_at,
+                            const Eigen::MatrixXd& qp_at, Vector& v_at,
+                            Eigen::MatrixXd& v_dp, Eigen::MatrixXd& v_qp) override
+    {
+        if (!m_ctx || m_nat <= 0 || q_at.size() != m_nat
+            || dp_at.rows() != 3 || dp_at.cols() != m_nat
+            || qp_at.rows() != 6 || qp_at.cols() != m_nat) return false;
+        v_at.resize(m_nat);
+        v_dp.resize(3, m_nat);
+        v_qp.resize(6, m_nat);
+        return m_ctx->multipolePotential(q_at.data(), dp_at.data(), qp_at.data(),
+                                         v_at.data(), v_dp.data(), v_qp.data());
+    }
+    bool multipoleEnergy(const Vector& q_at, const Eigen::MatrixXd& dp_at,
+                         const Eigen::MatrixXd& qp_at, double& e) override
+    {
+        if (!m_ctx || m_nat <= 0 || q_at.size() != m_nat
+            || dp_at.rows() != 3 || dp_at.cols() != m_nat
+            || qp_at.rows() != 6 || qp_at.cols() != m_nat) return false;
+        return m_ctx->multipoleEnergy(q_at.data(), dp_at.data(), qp_at.data(), &e);
+    }
+    bool solveMultipoleResident(const Eigen::VectorXd& v_ao, Vector& eps, bool fp32) override
+    {
+        if (!m_ctx || static_cast<int>(v_ao.size()) != m_n) return false;
+        eps.resize(m_n);
+        return m_ctx->solveMultipoleResident(v_ao.data(), eps.data(), fp32);
+    }
+    void noteDeviceMultipoleFallback(const std::string& why) override
+    {
+        if (!m_mp_fallback.empty()) return;   // keep the first event
+        m_mp_fallback = why + (m_mp_error.empty() ? std::string() : " (" + m_mp_error + ")");
+    }
+    /// First device-multipole fallback of this backend ("" = none). Claude Generated (Oct 2026).
+    const std::string& deviceMultipoleFallback() const { return m_mp_fallback; }
+
+private:
+    bool        m_device_mp = false;
+    std::string m_mp_error;      ///< reason of the last failed upload
+    std::string m_mp_fallback;   ///< first fallback, read by reportSolverFallbacks
 };
 #endif // HAVE_ROCSOLVER
 }  // namespace
@@ -98,6 +176,7 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
     // resident on the device — the Fock build + populations are HIP kernels, the density a
     // rocBLAS GEMM, the eigensolve rocSOLVER. GFN1 runs the isotropic loop, GFN2 the
     // multipole loop (R-AP2).
+    bool device_multipole = false;   // -xtb.rocm_device_multipole (Claude Generated, Oct 2026)
     // Resident-solver switches -xtb.rocm_cached_cholesky (default false),
     // -xtb.rocm_density_syrk (default false) and -xtb.rocm_explicit_linv (default false); the fallbacks here are the defaults of the
     // PARAM block in native_xtb_method.h. Claude Generated (Oct 2026).
@@ -122,6 +201,9 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
         const bool density_syrk = cfgBool("rocm_density_syrk", false);
         const bool explicit_linv = cfgBool("rocm_explicit_linv", false);    // Claude Generated (Oct 2026), default false since Oct 17
         ctx->setSolverOptions(cached_chol, density_syrk, explicit_linv);
+        // Claude Generated (Oct 2026): -xtb.rocm_device_multipole, default false (PARAM default
+        // in native_xtb_method.h; this fallback is what takes effect without the key).
+        device_multipole = cfgBool("rocm_device_multipole", false);
         if (CurcumaLogger::get_verbosity() >= 2)
             CurcumaLogger::info(fmt::format(
                 "{}: ROCm solver: {} eigensolve, density via {}", getMethodName(),
@@ -129,9 +211,17 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
                              : (explicit_linv ? "cached-Cholesky with explicit L^-1 (trmm/syevd/trmm)"
                                               : "cached-Cholesky (sygst/syevd/trsm)"),
                 density_syrk ? "dsyrk" : "dgemm"));
+        if (CurcumaLogger::get_verbosity() >= 2 && device_multipole && getMethodName() == "gfn2")
+            CurcumaLogger::info(fmt::format(
+                "{}: ROCm multipole potential and energy on the device (-xtb.rocm_device_multipole)",
+                getMethodName()));
     }
 
-    m_scf_backend = std::make_unique<HipScfBackend>(ctx);
+    {
+        auto backend = std::make_unique<HipScfBackend>(ctx);
+        backend->setDeviceMultipole(device_multipole);
+        m_scf_backend = std::move(backend);
+    }
     xtb->setGpuScfBackend(m_scf_backend.get());
 
     // ROCm-SPECIFIC: FP64 is ~1/16 of FP32 on this iGPU and the per-iteration eigensolve
@@ -188,6 +278,23 @@ void XtbHipComputationalMethod::reportSolverFallbacks(bool final_report)
 {
     XtbHipContext* ctx = context();
     if (!ctx) return;
+#ifdef HAVE_ROCSOLVER
+    // Claude Generated (Oct 2026): -xtb.rocm_device_multipole fell back to the host potential.
+    // Same once-per-object rule as the solver notices below.
+    if (!m_reported_mp_fallback && m_scf_backend) {
+        const std::string& why = static_cast<HipScfBackend*>(m_scf_backend.get())->deviceMultipoleFallback();
+        const int v0 = CurcumaLogger::get_verbosity();
+        if (!why.empty() && (v0 >= 1 || final_report)) {
+            if (v0 < 1) CurcumaLogger::set_verbosity(1);
+            m_reported_mp_fallback = true;
+            CurcumaLogger::warn(fmt::format(
+                "{}: ROCm device multipole potential failed at the {}; the multipole potential and "
+                "energy are computed on the host for the rest of the run (reported once)",
+                getMethodName(), why));
+            if (v0 < 1) CurcumaLogger::set_verbosity(v0);
+        }
+    }
+#endif
     const unsigned ev = ctx->solverFallbackEvents();
     const unsigned fresh = ev & ~m_reported_fallbacks
         & (XtbHipContext::kFallbackLinvAlloc | XtbHipContext::kFallbackLinvTrtri
