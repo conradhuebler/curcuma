@@ -595,3 +595,12 @@ Die folgende Tabelle ist eine **Hypothesenliste aus dem Quelltext und der Litera
   Parallelisierung ueber Threads. Ob MKL sequential mit OpenMP-Schleifen aussenherum oder MKL mit Threads schneller ist,
   ist **nicht in den Produktivpfaden gemessen**. Offen: MKL-Threading-Schicht fuer grosse dichte Operationen (Eigenloeser,
   Eigen-GEMM im Host-SCF) bei n > 1000.
+- **Test mit gethreadeter MKL (`-DUSE_MKL=ON`, Build `build_mkl/`, nur CPU, Okt 2026, n=1 bis 3 je Zahl, 16 Threads):** das
+  Projekt unterstuetzt `USE_MKL=ON` (explizit `mkl_gnu_thread`; `find_package(BLAS)` loest sonst auf die sequentielle MKL
+  auf, CMake-Kommentar WP1 Juni 2026); `release/` ist ohne diese Option konfiguriert. Ergebnis: HF, MP2, RI-MP2 keine
+  Aenderung (Benzol HF 1.01 gegen 1.03 s, Naphthalin HF 7.50 gegen 7.65 s, MP2-Transformation Naphthalin 552 gegen 541 ms),
+  RI-Setup Naphthalin 148 gegen 238 ms (eine Messung, nicht wiederholt). GFN2 (`-method gfn2`, dichter Eigenloeser)
+  Polystyrol20 (325 Atome): 1.30 s gegen 0.68 s (3 Laeufe je, Streuung unter 2%), GFN1 1.29 gegen 0.60 s; bei 173 Atomen
+  (jl22-bgal) 0.25 gegen 0.26 s (5% langsamer). 48 Energien (gfn2 und gfn1, 24 Strukturen bis 120 Atome) beider Binaries
+  stimmen auf alle 8 gedruckten Dezimalstellen ueberein. Nicht gemessen: Systeme ueber 325 Atome, MD und Mehrmolekuel-Pools
+  (Oversubscription), `-gpu`-Pfade (der Testbuild hat kein CUDA-Plugin), ConfScan, vollstaendiges `ctest`.
