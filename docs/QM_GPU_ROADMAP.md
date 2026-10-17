@@ -534,3 +534,11 @@ back to the CPU must say so at verbosity >= 1.
 An algorithmic alternative that also reduces cost on the CPU is **RI-J / density fitting**
 (3-index integrals, O(n^3) memory); it changes the energy at the 1e-5 Eh level and is
 therefore an opt-in method variant, not a replacement of the exact path.
+
+**RI-JK scaling (Oct 2026, AI-generated, machine-tested):** the setup solve B = L^-1 T runs as threaded level-3
+calls on the host (heptacene n=510: 16.6 -> 2.1 s), optionally as streamed cublasDtrsm (`-qm.gpu_ri_fit on`,
+`cuda/qm_gpu_ri_fit.cu`, default off: 1.8 s on the RTX 5090, slower below n ~ 450, 15.3 vs 23.9 s at n=970); the
+device K build (GEMM + SYRK) is at about half the FP64 peak of the card. GPU wall heptacene 31.9 -> 13.8 s, CPU
+65.7 -> 23.0 s. Memory limit on the 32 GB card: n <= ~930-955 (tensor 8 naux n^2 bytes); C40H82 (n=970, 33.7 GB)
+falls back to the CPU contractions. Table, energies, what was not tested:
+[WP10 doc, "Skalierung RI-JK"](DFT_ROADMAP/WP10_korrelation_ri_mpn_ccsd.md#skalierung-ri-jk-okt-2026).

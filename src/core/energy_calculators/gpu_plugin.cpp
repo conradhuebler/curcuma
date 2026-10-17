@@ -309,6 +309,30 @@ std::unique_ptr<qmint::QMGpuRI> createQmRI(const std::string& backend, const dou
     return std::unique_ptr<qmint::QMGpuRI>(static_cast<qmint::QMGpuRI*>(p));
 }
 
+// Claude Generated (Oct 2026, WP10 scaling): RI-JK metric solve T := L^-1 T on the device.
+bool qmRiLowerSolve(const std::string& backend, double* T, int N, long ncol, const double* L, int device, int host_threads,
+                    bool& touched, std::string& why)
+{
+    touched = false;
+    void* handle = pluginHandle(backend, /*quiet=*/true);
+    if (!handle) {
+        why = "plugin libcurcuma_" + backend + ".so not loadable";
+        return false;
+    }
+    using fn_t = int (*)(double*, int, long, const double*, int, int, int*, char*, int);
+    fn_t fn = resolveSymbol<fn_t>(handle, "curcuma_" + backend + "_qm_ri_lower_solve");
+    if (!fn) {
+        why = "plugin has no entry point curcuma_" + backend + "_qm_ri_lower_solve";
+        return false;
+    }
+    char buf[512] = { 0 };
+    int t = 0;
+    const int ok = fn(T, N, ncol, L, device, host_threads, &t, buf, (int)sizeof buf);
+    touched = t != 0;
+    if (!ok) why = buf;
+    return ok != 0;
+}
+
 // Claude Generated (Oct 2026, WP11): canonical MP2 energy on the device.
 bool qmMp2Energy(const std::string& backend, const qmint::QMGpuMP2Input& in, qmint::QMGpuMP2Output& out,
                  std::string& why)

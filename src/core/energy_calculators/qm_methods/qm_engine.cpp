@@ -20,6 +20,7 @@
  */
 
 #include "qm_engine.h"
+#include "src/core/blas_threads.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/energy_calculators/gpu_plugin.h"
 #include "src/core/gpu_fallback.h"
@@ -398,6 +399,8 @@ void QMEngine::buildOneElectronIntegrals()
         for (int k = 0; k < 3; ++k)
             atomPosBohr(i, k) = Length::angstrom_to_bohr(m_geometry(i, k));
 
+    // OpenMP team for the row-parallel 1e builders (bit-identical for any count; Claude Generated, Oct 2026)
+    curcuma::ScopedBlasThreads omp_guard(std::max(1, m_threads));
     const Matrix Scart = qmint::buildOverlap(m_gto_basis);
     const Matrix Tcart = qmint::buildKinetic(m_gto_basis);
     const Matrix Vcart = qmint::buildNuclearAttraction(m_gto_basis, m_atoms, atomPosBohr);

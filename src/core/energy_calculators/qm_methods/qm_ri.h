@@ -42,6 +42,7 @@
 #include "GTOIntegrals.hpp"  // GTO::Orbital
 
 #include <array>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -124,6 +125,10 @@ struct RIOptions {
     double max_memory_mb = 16000.0;      ///< host limit for the 3-index tensor
     bool spherical_aux = true;           ///< false: cartesian aux functions (follows -qm.cartesian_d)
     int threads = 1;
+    /// Optional device solve T := L^-1 T for mode jk + Cholesky (QMEngine sets it for -qm.gpu_ri_fit).
+    /// Returns 1 = done, 0 = failed with T untouched (host solve follows), -1 = failed with T partly
+    /// overwritten (setup then fails with `why` starting "device metric solve"). Claude Generated (Oct 2026).
+    std::function<int(const Eigen::MatrixXd& L, Matrix& T, std::string& why)> device_lower_solve;
 };
 
 /// @brief Setup (3-index tensor, metric factor) once per geometry, then J/K builds per SCF iteration.
@@ -138,7 +143,9 @@ public:
 
     /// J(P) (and K(P) if K != nullptr and mode jk) in the active basis, same meaning as qmint::buildCoulomb /
     /// qmint::buildExchange: J_mn = sum P_ls (mn|ls), K_mn = sum P_ls (ml|ns), with the fitted integrals.
-    void build(const Matrix& P, Matrix& J, Matrix* K) const;
+    /// Vocc (optional, mode jk): n x r factor with P = Vocc Vocc^T exactly as the caller built P (sqrt(2) C_occ);
+    /// it replaces the eigen-factorisation of P. With K, J and K come from one pass over the tensor.
+    void build(const Matrix& P, Matrix& J, Matrix* K, const Eigen::MatrixXd* Vocc = nullptr) const;
 
     /// Coulomb fit only (any mode): J(P).
     Matrix coulomb(const Matrix& P) const;

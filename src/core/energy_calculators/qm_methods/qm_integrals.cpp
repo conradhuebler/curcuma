@@ -167,6 +167,9 @@ Matrix buildOverlap(const std::vector<GTO::Orbital>& basis)
 {
     const int n = (int)basis.size();
     Matrix S = Matrix::Zero(n, n);
+    // Rows in parallel (Claude Generated, Oct 2026): every element is computed by one thread exactly as
+    // before, so the matrix is bit-identical for any thread count (OpenMP team size of the caller).
+#pragma omp parallel for schedule(dynamic)
     for (int i = 0; i < n; ++i) {
         for (int j = i; j < n; ++j) {
             double v = contractedOverlap(basis[i], basis[j]);
@@ -262,6 +265,7 @@ Matrix buildKinetic(const std::vector<GTO::Orbital>& basis)
 {
     const int n = (int)basis.size();
     Matrix T = Matrix::Zero(n, n);
+#pragma omp parallel for schedule(dynamic)  // bit-identical, see buildOverlap
     for (int i = 0; i < n; ++i) {
         for (int j = i; j < n; ++j) {
             double v = contractedKineticPair(basis[i], basis[j]);
@@ -582,18 +586,20 @@ Matrix buildNuclearAttraction(const std::vector<GTO::Orbital>& basis,
     const int n = (int)basis.size();
     Matrix V = Matrix::Zero(n, n);
     const int natoms = (int)atomZ.size();
-    for (int C = 0; C < natoms; ++C) {
-        const double Z = atomZ[C];
-        if (Z == 0.0) continue;
-        const double Cx = atomPosBohr(C, 0);
-        const double Cy = atomPosBohr(C, 1);
-        const double Cz = atomPosBohr(C, 2);
-        for (int i = 0; i < n; ++i) {
-            for (int j = i; j < n; ++j) {
-                double v = -Z * contractedNuclearPair(basis[i], basis[j], Cx, Cy, Cz);
-                V(i, j) += v;
-                if (i != j) V(j, i) += v;
+    // Rows in parallel, centres C innermost (Claude Generated, Oct 2026; was serial with C outermost and
+    // ~3.5 s at 560 cartesian functions). Each element still sums its centres in ascending order starting
+    // from 0, so V is bit-identical to the serial loop for any thread count.
+#pragma omp parallel for schedule(dynamic)
+    for (int i = 0; i < n; ++i) {
+        for (int j = i; j < n; ++j) {
+            double sum = 0.0;
+            for (int C = 0; C < natoms; ++C) {
+                const double Z = atomZ[C];
+                if (Z == 0.0) continue;
+                sum += -Z * contractedNuclearPair(basis[i], basis[j], atomPosBohr(C, 0), atomPosBohr(C, 1), atomPosBohr(C, 2));
             }
+            V(i, j) = sum;
+            V(j, i) = sum;
         }
     }
     return V;

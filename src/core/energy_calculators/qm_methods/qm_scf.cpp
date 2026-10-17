@@ -514,6 +514,11 @@ bool QMEngine::runSCF()
 
         // New density from the occupied MOs.
         Matrix density_new = buildDensity(C, n_occ);
+        if (riActive() && m_ri_mode == "jk") {
+            // RI-JK: keep the orbital factor of this density for the exchange build (QMEngine::riOccFactor)
+            m_ri_occ_factor = std::sqrt(2.0) * Eigen::MatrixXd(C.leftCols(n_occ));
+            m_ri_occ_density = density_new;
+        }
 
         // Convergence: Frobenius norm of the density change.
         const double delta_P = (density_new - m_density).norm();

@@ -32,7 +32,7 @@ Metrik, Fit, Parser, Engine-Anbindung), `cuda/qm_gpu_ri.cu` + `qm_gpu_ri_backend
 - **Schalter** (Parameter-Registry, Modul `qm`): `-qm.ri off|j|jk` (Standard off; der exakte Pfad bleibt die Referenz
   aller bestehenden Tests), `-qm.ri_aux auto|def2/J|def2/JK|<Datei>` (auto: j -> def2-universal-JFIT, jk ->
   def2-universal-JKFIT), `-qm.ri_metric cholesky|eigen`, `-qm.ri_metric_cutoff` (1e-10), `-qm.ri_max_memory_mb`
-  (16000), `-qm.gpu_ri auto|on|off`.
+  (16000), `-qm.gpu_ri auto|on|off`, `-qm.gpu_ri_fit off|on` (Metrik-Loesung auf dem Device, Abschnitt "Skalierung RI-JK").
 - **Verfahren:** RI-J: `c = J^-1 g`, `g_P = (P|ls) D_ls`, `J_mn = (mn|P) c_P`; Austausch exakt (gespeicherter Tensor
   oder integral-direkt wie ohne RI, entspricht ORCA `RIJONX`). RI-JK (Weigend 2002): `B = L^-1 (P|mn)` mit
   `J = L L^T`, `K_mn = sum_Q (B^Q D B^Q)_mn` ueber `D = V S V^T` (Eigenvektoren von D, mit sqrt|lambda| skaliert),
@@ -127,7 +127,68 @@ Metrik, Fit, Parser, Engine-Anbindung), `cuda/qm_gpu_ri.cu` + `qm_gpu_ri_backend
 - BLAS: die schweren RI-Schritte (Vorwaertssubstitution, g = T vec(D), J, K) sind eigene OpenMP-Schleifen. Der Agent
   begruendete das mit der einthreadigen Referenz-netlib-BLAS (Setup Naphthalin mit Eigen-GEMM 8.5 s statt 0.1 s). Diese
   Begruendung gilt fuer das Release-Binary nicht, siehe Korrektur im Abschnitt "BLAS (Korrektur)" unten; die Schleifen
-  bleiben, sind aber nicht durch langsames BLAS erzwungen.
+  bleiben, sind aber nicht durch langsames BLAS erzwungen. **Ueberholt fuer Metrik-Loesung und J/K-Aufbau, siehe
+  "Skalierung RI-JK" unten** (dort Level-3-Aufrufe je Thread).
+
+### Skalierung RI-JK (Okt 2026)
+
+**🤖 AI-generated, ⚙️ machine-tested; menschlicher Produktionstest steht aus.** Profil vorher (heptacen, n=510,
+naux=2574, 16 Threads): "factor/B" 16.3 s, davon Cholesky der Metrik 0.1 s, der Rest die Vorwaertssubstitution
+B = L^-1 T als skalare Schleife (~100 GFLOPS); auf der GPU war das die Haelfte der Wandzeit. Geaendert:
+
+- **Metrik-Loesung** (`lowerSolveRows`, ebenso `upperSolveRowsLT`, `leftMultiplyRows` in `qm_ri.cpp`): je Thread ein
+  Spaltenblock (256 Spalten) des zeilenweisen Tensors, darauf EIN Level-3-Aufruf (Eigen `solveInPlace<OnTheRight>`,
+  mit `USE_BLAS` dtrsm der einfaedigen MKL), das OpenMP darueber ist unseres. Nur die Summationsreihenfolge aendert sich.
+- **Optional auf dem Device:** `-qm.gpu_ri_fit off|on|auto` (Standard off; `cuda/qm_gpu_ri_fit.cu`, Eintrag
+  `curcuma_cuda_qm_ri_lower_solve`): cublasDtrsm auf gestreamten Spaltenbloecken (2 Streams, gepinnte Puffer), B kommt
+  auf den Host zurueck (Gradient, RI-MP2, CPU-Fallback brauchen ihn). Fehler vor dem ersten Schreiben: Host-Loesung,
+  danach: Setup ohne Device wiederholt; beides gezaehlt als `qm_ri_fit`. Standard off, weil die RTX 5090 (FP64 1/64)
+  nur knapp schneller ist als der neue Host-Pfad und unter n ~ 450 langsamer (Tabelle).
+- **J/K-Aufbau CPU** (`RIJK::build`): ein Durchlauf ueber B je Aufbau statt drei: je Thread und Block von nq Zeilen
+  Y = M^T V (dgemm), g_q = sum_k s_k v_k . X^q_k, J += g_q B^q, K +-= Y Y^T (dsyrk); gleiche Zerlegung wie auf dem
+  Device. Vorher skalare Dreifachschleife fuer K plus zwei Speicherdurchlaeufe fuer J.
+- **Orbitalfaktor statt Eigenzerlegung:** `runSCF` merkt sich sqrt(2) C_occ zu der Dichte, die es daraus baut;
+  `buildJK` nimmt ihn, wenn es genau diese Matrix bekommt (bitweiser Vergleich), sonst wie bisher `factorDensity`
+  (SAD-Start, Daempfung). CPU und GPU. Spart die n^3-Zerlegung (heptacen ~21 ms je Aufbau).
+- **1e-Integrale** (`qm_integrals.cpp` S, T, V): Zeilen parallel (vorher seriell), V mit den Kernen innen in derselben
+  Reihenfolge, also bitgleich (Naphthalin exakt HF E_elec auf 10 Stellen gleich, `ctest -L qm_1e` gruen);
+  heptacen 3.5 s -> 0.28 s. Team-Groesse aus `-threads` (`ScopedBlasThreads` in `buildOneElectronIntegrals`).
+
+Zeiten (s Wand, je eine Messung, 16 Threads, Core Ultra 9 285K, RTX 5090, Standard-SCF-Schwelle, `-qm.ri jk`; GPU mit
+`-gpu cuda -qm.gpu_ri true -qm.gpu_scf true`):
+
+| System (n, naux) | CPU vorher | CPU nachher | GPU vorher | GPU nachher | GPU nachher + `gpu_ri_fit on` |
+|---|---|---|---|---|---|
+| Benzol (114, 558) | 0.21 | 0.12 | 0.61 | 0.54 | 0.47 |
+| Naphthalin (180, 894) | 0.90 | 0.46 | 0.98 | 0.74 | 0.89 |
+| Anthracen (246, 1230) | 2.93 | 1.38 | 2.02 | 1.31 | 1.49 |
+| Pentacen (378, 1902) | 16.7 | 6.55 | 9.16 | 5.16 | 5.18 |
+| C20H42 (490, 2256) | 32.6 | 11.3 | 22.6 | 7.44 | 7.26 |
+| Heptacen (510, 2574) | 65.7 | 23.0 | 31.9 | 13.8 | 13.4 |
+| C40H82 (970, 4476) | nicht gemessen | 145.5 | nicht gemessen | - | 131.8 (Kontraktionen CPU, s.u.) |
+
+- factor/B (Host / Device): Pentacen 3.41 -> 0.66 / 0.82 s, C20H42 12.9 -> 1.55 / 1.41 s, Heptacen 16.6 -> 2.14 /
+  1.77 s, C40H82 23.9 (Host) / 15.3 s (Device). Device-Werte enthalten die CUDA-Initialisierung (~0.15 s), die sonst
+  im ersten J/K-Aufbau anfaellt.
+- ms je J/K-Aufbau CPU: Pentacen 381 -> 159, C20H42 728 -> 373, Heptacen 1264 -> 508, C40H82 5060; GPU: 107 -> 100,
+  182 -> 165, 245 -> 226. Auf dem Device ist K (GEMM + SYRK, ~3 naux n^2 n_occ Flops, ~2e11 bei Heptacen) bei etwa der
+  Haelfte der FP64-Spitzenleistung der Karte; dort gibt es ohne weniger Flops nichts zu holen. CPU: 8 gegen 16 Threads
+  nur 173 gegen 159 ms (Pentacen), 24 Threads 175 ms (P-/E-Kerne, statische Verteilung fuer Determinismus).
+- **Energien:** E_elec (10 Stellen, `CURCUMA_QM_SCF_TRACE=1`) fuer alle sechs Systeme und alle Pfade gleich dem
+  Stand vorher, Ausnahme C20H42 GPU 1e-10 Eh; Iterationszahlen gleich. C40H82: Host- und Device-Loesung gleiche
+  E_elec, aber 19 gegen 18 Iterationen (Konvergenztest auf dP, nur Summationsreihenfolge verschieden).
+- **Speicher (Grenze fuer n):** Tensor 8 naux n^2 Byte, naux ~ 4.6 n (Alkane) bis 5.05 n (Acene), also ~37-40 n^3.
+  Device (32 GB, 32.6 GB frei gemeldet): Tensor bis ~32.5 GB, also n <= ~930 (Acene) bis ~955 (Alkane); C40H82
+  (n = 970, 33.7 GB) passt nicht, die Kontraktionen fallen gezaehlt auf die CPU (`qm_ri`). Host: Standard
+  `-qm.ri_max_memory_mb 16000` begrenzt auf n <= ~735-755; darueber muss der Wert erhoeht werden (C40H82 mit 40000).
+  Der RI-JK-Gradient braucht zusaetzlich naux n^2 fuer G. Gepackte Speicherung (m >= n, n(n+1)/2 Spalten) wuerde Tensor,
+  Metrik-Loesung und Transfers halbieren (Device n <= ~1150-1200, Host-Standard ~925-950); **nicht umgesetzt**, weil
+  sie den Speichervertrag von `tensor()` aendert, den `coulomb`, `build`, `gradientDensities`, RI-MP2 (`qm_rimp2.cpp`)
+  und die Device-Naht (`QMGpuRI`, neuer Entpack-Kernel) lesen.
+- **Nicht getestet:** `-qm.gpu_ri_fit` Fehlerpfade (Device-Fehler vor/nach dem ersten Schreiben), ROCm/Vulkan (kein
+  Eintrag, faellt gezaehlt zurueck), RI-JK mit `-qm.ri_metric eigen` bei grossen Systemen (`leftMultiplyRows` nur ueber
+  `ctest -L qm_ri`), RI-Gradient und RI-MP2 ueber n = 180 hinaus, andere Thread-Zahlen als 8/16/24, andere CPUs/GPUs,
+  wiederholte Messungen (alle Zeiten Einzelmessungen).
 
 ## WP10 -- Gradient (RI-J, RI-JK)
 

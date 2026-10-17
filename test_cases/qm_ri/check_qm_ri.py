@@ -207,6 +207,9 @@ if a.check == "gpu":
     if "GPU fallbacks during this run" in txt:
         print(txt[-3000:])
         sys.exit("the run reported a GPU fallback")
+    if "gpu_ri_fit on" in a.extra and "solve device" not in txt:  # -qm.gpu_ri_fit (Claude Generated, Oct 2026)
+        print(txt[-3000:])
+        sys.exit("-qm.gpu_ri_fit on, but the metric solve did not run on the device")
     dJ, dK = float(m.group(3)), float(m.group(4))
     e = energy(txt)
     d = e - ref["pyscf"][a.ri]

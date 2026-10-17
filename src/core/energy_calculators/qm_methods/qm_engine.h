@@ -124,6 +124,9 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(gpu_ri, String, "auto",
           "With -gpu cuda|auto and -qm.ri j|jk: the RI contractions (J from the 3-index tensor, K as GEMM + SYRK, cuBLAS FP64) on the device; integrals and metric stay on the host. auto | on | off. Any device error falls back to the CPU and is counted as qm_ri.",
           "DensityFitting", {})
+    PARAM(gpu_ri_fit, String, "off",
+          "With -gpu cuda|auto, -qm.ri jk, the Cholesky metric and -qm.gpu_ri not off: on = the setup solve B = L^-1 (P|mn) (naux^2 n^2 flops) as cublasDtrsm on streamed column chunks instead of the threaded host solve; B returns to the host (gradient, RI-MP2, CPU fallback use it). Same result up to the summation order. Default off: on an RTX 5090 (FP64 1/64 rate) it saved 0.4 s at 510 basis functions and was slower below ~450. off | on | auto (= on). A device error before any write falls back to the host solve, after a partial write the setup is repeated on the host; both are counted as qm_ri_fit.",
+          "DensityFitting", {})
     PARAM(gpu_ri_grad, String, "auto",
           "With -gpu cuda|auto and -qm.ri j|jk: the 3-index part of the RI gradient (derivative integrals (mn|P)^x contracted with the 3-index density) on the device; densities, metric part and the RI-J exact exchange gradient stay on the host. auto | on | off. Any device error falls back to the CPU and is counted as qm_ri_grad.",
           "DensityFitting", {})
@@ -358,19 +361,26 @@ private:
     mutable double m_ri_build_ms = 0.0;
     mutable long m_ri_builds = 0;
     mutable double m_ri_factor_ms = 0.0;
+    /// RI-JK (Claude Generated, Oct 2026): sqrt(2) C_occ of the density last built from orbitals in runSCF and that
+    /// density; buildJK uses the factor instead of an eigen-factorisation when it is handed exactly that matrix.
+    Eigen::MatrixXd m_ri_occ_factor;
+    Matrix m_ri_occ_density;
+    const Eigen::MatrixXd* riOccFactor(const Matrix& P) const;
     void riReport() const;                   ///< verbosity 2: RI build count/time of the last SCF
     mutable std::shared_ptr<qmint::QMGpuRI> m_gpu_ri_dev;
     mutable bool m_gpu_ri_failed = false, m_gpu_ri_checked = false;
     void readRIConfig(const json& config);
     void resetRI();                          ///< new geometry / molecule
     bool ensureRI() const;                   ///< setup once per geometry; false = error reported
-    bool gpuRIBuild(const Matrix& P, Matrix& J, Matrix* K) const;
+    bool gpuRIBuild(const Matrix& P, Matrix& J, Matrix* K, const Eigen::MatrixXd* Vocc = nullptr) const;
     void riDump(const std::string& prefix) const;
     // RI gradient (Claude Generated, Oct 2026): two-electron part of the RI energy gradient (Eh/Bohr);
     // mode j adds the exact exchange part. Pc: cartesian density (for the exact exchange part).
     bool riGradientTwoElectron(const Matrix& Pc, Matrix& g2, std::string& info) const;
     std::string m_gpu_ri_grad = "auto";
     mutable bool m_gpu_ri_grad_failed = false;
+    std::string m_gpu_ri_fit = "off";         ///< -qm.gpu_ri_fit: RI-JK metric solve on the device (Claude Generated, Oct 2026)
+    mutable bool m_gpu_ri_fit_failed = false;
     bool m_gradient_failed = false;
     std::string m_gradient_error;
     /// WP11: the active-basis AO tensor on the host for MP2 (stored SCF tensor, download of the device

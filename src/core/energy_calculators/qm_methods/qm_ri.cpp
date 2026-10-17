@@ -516,50 +516,41 @@ void transformAxis3(std::vector<double>& blk, std::vector<double>& tmp, int d[3]
     d[k] = nout;
 }
 
-// Dense kernels on the row-major tensor (N rows of length ncol = n^2). Written as plain loops over
-// column chunks (each thread owns a column range for all rows), because the build links the system
-// BLAS, which may be the single-threaded reference implementation (it is on the development machine).
+// Dense kernels on the row-major tensor (N rows of length ncol = n^2). Each thread owns a range of
+// columns for all rows and runs ONE level-3 call on it (Eigen; with -DUSE_BLAS Eigen hands it to the
+// linked BLAS, which is single-threaded MKL in the release build, so the threading is ours). The
+// column-major view of a column chunk is X = T(:, c0:c0+w)^T (w x N, leading dimension ncol), so a left
+// operation on T is a right operation on X. Up to Oct 2026 these were scalar loops (factor/B was ~half
+// of the GPU RI-JK wall time); the blocked form changes only the summation order (last bits).
+// Claude Generated (Oct 2026).
+constexpr Eigen::Index kRowChunk = 256;
+using StridedMap = Eigen::Map<Eigen::MatrixXd, 0, Eigen::OuterStride<>>;
 
-/// In place T := L^-1 T (L lower triangular N x N): forward substitution row by row.
+/// In place T := L^-1 T (L lower triangular N x N)  <=>  X := X L^-T per column chunk (dtrsm).
 void lowerSolveRows(const Eigen::MatrixXd& L, Matrix& T, int threads)
 {
-    const int N = (int)T.rows();
-    const Eigen::Index ncol = T.cols(), chunk = 128, nchunks = (ncol + chunk - 1) / chunk;
+    const Eigen::Index N = T.rows(), ncol = T.cols(), nchunks = (ncol + kRowChunk - 1) / kRowChunk;
     double* base = T.data();
 #pragma omp parallel for schedule(dynamic) num_threads(std::max(1, threads))
     for (Eigen::Index b = 0; b < nchunks; ++b) {
-        const Eigen::Index c0 = b * chunk, w = std::min(chunk, ncol - c0);
-        for (int P = 0; P < N; ++P) {
-            double* rp = base + (size_t)P * ncol + c0;
-            for (int Q = 0; Q < P; ++Q) {
-                const double l = L(P, Q);
-                if (l == 0.0) continue;
-                const double* rq = base + (size_t)Q * ncol + c0;
-                for (Eigen::Index k = 0; k < w; ++k) rp[k] -= l * rq[k];
-            }
-            const double inv = 1.0 / L(P, P);
-            for (Eigen::Index k = 0; k < w; ++k) rp[k] *= inv;
-        }
+        const Eigen::Index c0 = b * kRowChunk, w = std::min(kRowChunk, ncol - c0);
+        StridedMap X(base + c0, w, N, Eigen::OuterStride<>(ncol));
+        L.transpose().triangularView<Eigen::Upper>().solveInPlace<Eigen::OnTheRight>(X);
     }
 }
 
-/// out := F T (F: r x N, T: N x ncol row-major).
+/// out := F T (F: r x N, T: N x ncol row-major)  <=>  Out_chunk = X F^T (dgemm).
 void leftMultiplyRows(const Eigen::MatrixXd& F, const Matrix& T, Matrix& out, int threads)
 {
-    const int N = (int)T.rows(), r = (int)F.rows();
-    const Eigen::Index ncol = T.cols(), chunk = 128, nchunks = (ncol + chunk - 1) / chunk;
-    out = Matrix::Zero(r, ncol);
+    const Eigen::Index N = T.rows(), r = F.rows(), ncol = T.cols(), nchunks = (ncol + kRowChunk - 1) / kRowChunk;
+    out.resize(r, ncol);
+    const Eigen::MatrixXd Ft = F.transpose();
 #pragma omp parallel for schedule(dynamic) num_threads(std::max(1, threads))
     for (Eigen::Index b = 0; b < nchunks; ++b) {
-        const Eigen::Index c0 = b * chunk, w = std::min(chunk, ncol - c0);
-        for (int P = 0; P < N; ++P) {
-            const double* tp = T.data() + (size_t)P * ncol + c0;
-            for (int i = 0; i < r; ++i) {
-                const double f = F(i, P);
-                double* o = out.data() + (size_t)i * ncol + c0;
-                for (Eigen::Index k = 0; k < w; ++k) o[k] += f * tp[k];
-            }
-        }
+        const Eigen::Index c0 = b * kRowChunk, w = std::min(kRowChunk, ncol - c0);
+        Eigen::Map<const Eigen::MatrixXd, 0, Eigen::OuterStride<>> X(T.data() + c0, w, N, Eigen::OuterStride<>(ncol));
+        StridedMap O(out.data() + c0, w, r, Eigen::OuterStride<>(ncol));
+        O.noalias() = X * Ft;
     }
 }
 
@@ -805,6 +796,8 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
         return false;
     }
     double wmin = std::numeric_limits<double>::quiet_NaN(), wmax = wmin;
+    double t_chol = 0.0;  // Cholesky of the metric alone (diagnostic split of factor/B)
+    std::string solve_where = "host";
     int dropped = 0;
     m_metric_used = metric;
     if (metric == "cholesky") {
@@ -815,8 +808,21 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
         } else {
             m_L = llt.matrixL();
             m_gL = m_L;  // gradient: F^T = L^-T in both modes
+            t_chol = msSince(t3);
             if (opt.mode == "jk") {
-                lowerSolveRows(m_L, T3, threads);  // B = L^-1 T (forward substitution, no explicit inverse)
+                // B = L^-1 T (triangular solve, no explicit inverse): on the device if the caller asks for it
+                // and it works, else on the host. Both are the same solve; only the summation order differs.
+                int dev = 0;
+                if (opt.device_lower_solve) {
+                    std::string dwhy;
+                    dev = opt.device_lower_solve(m_L, T3, dwhy);
+                    if (dev < 0) {
+                        why = "device metric solve failed after writing part of the tensor: " + dwhy;
+                        return false;
+                    }
+                    solve_where = dev == 1 ? "device" : "host (device failed: " + dwhy + ")";
+                }
+                if (dev != 1) lowerSolveRows(m_L, T3, threads);
                 m_L.resize(0, 0);
             }
             m_T.swap(T3);
@@ -869,8 +875,9 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
                       dropped ? fmt::format(", {} dropped below {:.1e}", dropped, opt.metric_cutoff) : std::string());
     m_stats = fmt::format(
         "naux {} (fit rows {}), n {}, tensor {:.1f} MB; metric {} ({}); setup: Schwarz {:.1f} ms, 3-index {:.1f} ms ({} of {} shell "
-        "blocks), metric {:.1f} ms, factor/B {:.1f} ms",
-        N, m_nfit, n, tensorMB(), m_metric_used, cond, t_schwarz, t_3c, blocks, blocks + skipped, t_2c, t_fac);
+        "blocks), metric {:.1f} ms, factor/B {:.1f} ms{}",
+        N, m_nfit, n, tensorMB(), m_metric_used, cond, t_schwarz, t_3c, blocks, blocks + skipped, t_2c, t_fac,
+        t_chol > 0.0 ? fmt::format(" (Cholesky {:.1f} ms, solve {})", t_chol, solve_where) : std::string());
     return true;
 }
 
@@ -955,27 +962,45 @@ void RIJK::factorDensity(const Matrix& P, Eigen::MatrixXd& V, int& npos)
     npos = (int)pos.size();
 }
 
-void RIJK::build(const Matrix& P, Matrix& J, Matrix* K) const
+void RIJK::build(const Matrix& P, Matrix& J, Matrix* K, const Eigen::MatrixXd* Vocc) const
 {
-    J = coulomb(P);
-    if (!K) return;
+    if (!K) {
+        J = coulomb(P);
+        return;
+    }
     if (m_opt.mode != "jk") throw std::logic_error("RIJK::build: exchange needs mode jk");
     const int n = m_n, threads = std::max(1, m_opt.threads);
-    Eigen::MatrixXd V;
+    // Density factor P = V S V^T: the occupied orbitals (V = sqrt(2) C_occ, all signs +, given by the caller
+    // when P = 2 C_occ C_occ^T exactly) or the eigen-factorisation of P (n^3 on the host).
+    Eigen::MatrixXd Vown;
+    const Eigen::MatrixXd* Vp = Vocc;
     int npos = 0;
-    const auto tf = std::chrono::steady_clock::now();
-    factorDensity(P, V, npos);
-    m_factor_ms += msSince(tf);
-    const int r = (int)V.cols();
-    // V row-major (n x r) for contiguous rows; sign s_k = +1 (k < npos) or -1
-    std::vector<double> Vr((size_t)n * r);
-    for (int l = 0; l < n; ++l)
-        for (int k = 0; k < r; ++k) Vr[(size_t)l * r + k] = V(l, k);
-    // K_mn = sum_Q sum_k s_k X^Q_mk X^Q_nk with X^Q = B^Q V. Plain loops on purpose: the build links
-    // whatever BLAS the system has (single-threaded MKL on the development machine; measured only for netlib,
-    // which is ~10x slower than these loops); per thread a private lower triangle of K, Q statically
-    // distributed (deterministic for a fixed thread count), summed afterwards.
-    std::vector<std::vector<double>> Kt(threads);
+    if (Vp && Vp->rows() == n && Vp->cols() > 0) {
+        npos = (int)Vp->cols();
+    } else {
+        const auto tf = std::chrono::steady_clock::now();
+        factorDensity(P, Vown, npos);
+        m_factor_ms += msSince(tf);
+        Vp = &Vown;
+    }
+    const Eigen::MatrixXd& V = *Vp;
+    const int r = (int)V.cols(), nneg = r - npos;
+    // One pass over B for J and K (Claude Generated, Oct 2026; before: J = coulomb(P), two more passes over the
+    // naux x n^2 tensor, then K). nq consecutive rows of the row-major tensor are, read column-major,
+    // M = [B^Q0 .. B^Q0+nq-1] (n x nq n, every block symmetric), so Y = M^T V (nq n x r, dgemm) holds
+    // X^q = B^q V in row block q. Then, per batch:
+    //   g_q = Tr(B^q P) = sum_k s_k v_k . X^q_{:,k}      (the Coulomb fit coefficient; mode jk: c = g)
+    //   J  += g_q B^q                                    (while B^q is still in cache)
+    //   K  += Y+ Y+^T - Y- Y-^T                          (rank updates, dsyrk; the first npos columns of Y
+    //                                                     read as one column-major n x (nq npos) matrix are
+    //                                                     [.. (X^q)_{:,k} ..])
+    // The same GEMM + SYRK as the device (cuda/qm_gpu_ri.cu). Single-threaded BLAS calls, our own OpenMP over the
+    // batches; per thread private J and lower-triangle K, batches statically distributed (deterministic for a
+    // fixed thread count), summed in thread order. J equals coulomb(P) up to the summation order and the
+    // eigenvalues factorDensity drops (|lambda| <= 1e-13 max|lambda|; none with the orbital factor).
+    const int nq = std::clamp(512 / std::max(1, r) + 1, 1, 64);  // SYRK depth nq * r >= 512
+    const int nbatch = (m_nfit + nq - 1) / nq;
+    std::vector<Eigen::MatrixXd> Kt(threads), Jt(threads);
 #pragma omp parallel num_threads(threads)
     {
 #ifdef _OPENMP
@@ -983,44 +1008,53 @@ void RIJK::build(const Matrix& P, Matrix& J, Matrix* K) const
 #else
         const int tid = 0;
 #endif
-        std::vector<double>& Kl = Kt[tid];
-        Kl.assign((size_t)n * n, 0.0);
-        std::vector<double> X((size_t)n * r), Xs((size_t)n * r);
+        Eigen::MatrixXd& Kl = Kt[tid];
+        Eigen::MatrixXd& Jl = Jt[tid];
+        Kl = Eigen::MatrixXd::Zero(n, n);
+        Jl = Eigen::MatrixXd::Zero(n, n);
+        Eigen::MatrixXd Y;
 #pragma omp for schedule(static)
-        for (int Q = 0; Q < m_nfit; ++Q) {
-            const double* B = m_T.data() + (size_t)Q * n * n;
-            std::fill(X.begin(), X.end(), 0.0);
-            for (int m = 0; m < n; ++m) {
-                double* xm = &X[(size_t)m * r];
-                const double* bm = B + (size_t)m * n;
-                for (int l = 0; l < n; ++l) {
-                    const double b = bm[l];
-                    if (b == 0.0) continue;
-                    const double* vl = &Vr[(size_t)l * r];
-                    for (int k = 0; k < r; ++k) xm[k] += b * vl[k];
+        for (int b = 0; b < nbatch; ++b) {
+            const int Q0 = b * nq, cnt = std::min(nq, m_nfit - Q0);
+            const double* base = m_T.data() + (size_t)Q0 * n * n;
+            Eigen::Map<const Eigen::MatrixXd> M(base, n, (Eigen::Index)cnt * n);
+            Y.resize((Eigen::Index)cnt * n, r);
+            Y.noalias() = M.transpose() * V;
+            for (int q = 0; q < cnt; ++q) {
+                double g = 0.0;
+                for (int k = 0; k < r; ++k) {
+                    const double d = V.col(k).dot(Y.col(k).segment((Eigen::Index)q * n, n));
+                    g += k < npos ? d : -d;
                 }
-                double* sm = &Xs[(size_t)m * r];
-                for (int k = 0; k < r; ++k) sm[k] = k < npos ? xm[k] : -xm[k];
+                Jl.noalias() += g * Eigen::Map<const Eigen::MatrixXd>(base + (size_t)q * n * n, n, n);
             }
-            for (int m = 0; m < n; ++m) {
-                const double* sm = &Xs[(size_t)m * r];
-                double* km = &Kl[(size_t)m * n];
-                for (int q = 0; q <= m; ++q) {
-                    const double* xq = &X[(size_t)q * r];
-                    double s = 0.0;
-                    for (int k = 0; k < r; ++k) s += sm[k] * xq[k];
-                    km[q] += s;
-                }
+            if (npos > 0) {
+                Eigen::Map<const Eigen::MatrixXd> Yp(Y.data(), n, (Eigen::Index)cnt * npos);
+                Kl.selfadjointView<Eigen::Lower>().rankUpdate(Yp, 1.0);
+            }
+            if (nneg > 0) {
+                Eigen::Map<const Eigen::MatrixXd> Yn(Y.data() + (size_t)cnt * n * npos, n, (Eigen::Index)cnt * nneg);
+                Kl.selfadjointView<Eigen::Lower>().rankUpdate(Yn, -1.0);
             }
         }
     }
-    Matrix Kf = Matrix::Zero(n, n);
-    for (int t = 0; t < threads; ++t)
-        if (!Kt[t].empty())
-            for (int m = 0; m < n; ++m)
-            for (int q = 0; q <= m; ++q) Kf(m, q) += Kt[t][(size_t)m * n + q];
-    for (int m = 0; m < n; ++m)
-        for (int q = 0; q < m; ++q) Kf(q, m) = Kf(m, q);
+    Eigen::MatrixXd Ks = Eigen::MatrixXd::Zero(n, n), Js = Eigen::MatrixXd::Zero(n, n);
+    for (int t = 0; t < threads; ++t) {
+        if (Kt[t].size())
+            for (int q = 0; q < n; ++q)
+                for (int m = q; m < n; ++m) Ks(m, q) += Kt[t](m, q);
+        if (Jt[t].size()) Js += Jt[t];
+    }
+    Matrix Kf(n, n), Jf(n, n);
+    for (int q = 0; q < n; ++q)
+        for (int m = q; m < n; ++m) {
+            Kf(m, q) = Ks(m, q);
+            Kf(q, m) = Ks(m, q);
+            const double jm = 0.5 * (Js(m, q) + Js(q, m));  // exactly symmetric (each B^q is)
+            Jf(m, q) = jm;
+            Jf(q, m) = jm;
+        }
+    J = Jf;
     *K = Kf;
 }
 
@@ -1219,26 +1253,16 @@ void derivBlock(const Pair& bra, const Pair& ket, const double* W, bool wantB, d
     }
 }
 
-/// In place T := L^-T T (L lower triangular N x N, so L^T upper): back substitution row by row.
+/// In place T := L^-T T (L lower triangular N x N)  <=>  X := X L^-1 per column chunk (dtrsm, see lowerSolveRows).
 void upperSolveRowsLT(const Eigen::MatrixXd& L, Matrix& T, int threads)
 {
-    const int N = (int)T.rows();
-    const Eigen::Index ncol = T.cols(), chunk = 128, nchunks = (ncol + chunk - 1) / chunk;
+    const Eigen::Index N = T.rows(), ncol = T.cols(), nchunks = (ncol + kRowChunk - 1) / kRowChunk;
     double* base = T.data();
 #pragma omp parallel for schedule(dynamic) num_threads(std::max(1, threads))
     for (Eigen::Index b = 0; b < nchunks; ++b) {
-        const Eigen::Index c0 = b * chunk, w = std::min(chunk, ncol - c0);
-        for (int P = N - 1; P >= 0; --P) {
-            double* rp = base + (size_t)P * ncol + c0;
-            for (int Q = P + 1; Q < N; ++Q) {
-                const double l = L(Q, P);
-                if (l == 0.0) continue;
-                const double* rq = base + (size_t)Q * ncol + c0;
-                for (Eigen::Index k = 0; k < w; ++k) rp[k] -= l * rq[k];
-            }
-            const double inv = 1.0 / L(P, P);
-            for (Eigen::Index k = 0; k < w; ++k) rp[k] *= inv;
-        }
+        const Eigen::Index c0 = b * kRowChunk, w = std::min(kRowChunk, ncol - c0);
+        StridedMap X(base + c0, w, N, Eigen::OuterStride<>(ncol));
+        L.triangularView<Eigen::Lower>().solveInPlace<Eigen::OnTheRight>(X);
     }
 }
 
@@ -1771,6 +1795,7 @@ void QMEngine::readRIConfig(const json& config)
     m_ri_metric = lowerStr(optString(config, "ri_metric", m_ri_metric));
     m_gpu_ri = lowerStr(optString(config, "gpu_ri", m_gpu_ri));
     m_gpu_ri_grad = lowerStr(optString(config, "gpu_ri_grad", m_gpu_ri_grad));
+    m_gpu_ri_fit = lowerStr(optString(config, "gpu_ri_fit", m_gpu_ri_fit));
     if (config.contains("ri_metric_cutoff") && config["ri_metric_cutoff"].is_number())
         m_ri_metric_cutoff = config["ri_metric_cutoff"].get<double>();
     if (config.contains("ri_max_memory_mb") && config["ri_max_memory_mb"].is_number())
@@ -1783,6 +1808,17 @@ void QMEngine::resetRI()
     m_ri_failed = false;
     m_gpu_ri_dev.reset();
     m_gpu_ri_checked = false;
+    m_ri_occ_factor.resize(0, 0);
+    m_ri_occ_density.resize(0, 0);
+}
+
+// The orbital factor stored by runSCF if P is exactly the density it belongs to (bitwise; a damped or
+// extrapolated density is not), else nullptr (the J/K build then factorises P itself). Claude Generated (Oct 2026).
+const Eigen::MatrixXd* QMEngine::riOccFactor(const Matrix& P) const
+{
+    if (m_ri_occ_factor.size() == 0 || m_ri_occ_density.rows() != P.rows() || m_ri_occ_density.cols() != P.cols()) return nullptr;
+    if (!(m_ri_occ_density.array() == P.array()).all()) return nullptr;
+    return &m_ri_occ_factor;
 }
 
 // Claude Generated (Oct 2026): two-electron part of the RI gradient (qmri::RIJK gradientDensities, threeIndexGradient[Device], metricGradient; derivation
@@ -1883,8 +1919,41 @@ bool QMEngine::ensureRI() const
         opt.max_memory_mb = m_ri_max_memory_mb;
         opt.spherical_aux = !m_cartesian_d;
         opt.threads = m_threads;
+        // -qm.gpu_ri_fit (Claude Generated, Oct 2026): the B = L^-1 T solve on the device when the RI
+        // contractions will run there too. Failure before any write: host solve; after a partial write:
+        // setup repeated without the device. Both counted as qm_ri_fit.
+        const bool off = [](const std::string& v) { return v == "off" || v == "false"; }(m_gpu_ri_fit);
+        const bool ri_off = m_gpu_ri == "off" || m_gpu_ri == "false";
+        std::string fit_backend;
+        if (m_ri_mode == "jk" && !off && !ri_off && !m_gpu_ri_fit_failed && gpuRequested()) {
+            fit_backend = (m_gpu == "auto") ? gpu_plugin::firstAvailable() : m_gpu;
+            if (fit_backend == "none" || !gpu_plugin::available(fit_backend)) {
+                curcuma::reportGpuFallback("qm_ri_fit", "no GPU plugin for -gpu " + m_gpu);
+                fit_backend.clear();
+            }
+        }
+        if (!fit_backend.empty()) {
+            const int device = m_gpu_device, host_threads = std::max(1, m_threads);
+            opt.device_lower_solve = [fit_backend, device, host_threads](const Eigen::MatrixXd& L, Matrix& T, std::string& w) {
+                bool touched = false;
+                if (gpu_plugin::qmRiLowerSolve(fit_backend, T.data(), (int)T.rows(), (long)T.cols(), L.data(), device, host_threads,
+                                               touched, w))
+                    return 1;
+                return touched ? -1 : 0;
+            };
+        }
         auto ri = std::make_shared<qmri::RIJK>();
-        if (ri->setup(m_gto_basis, m_Q.size() != 0 ? &m_Q : nullptr, sh, opt, why)) {
+        bool ok = ri->setup(m_gto_basis, m_Q.size() != 0 ? &m_Q : nullptr, sh, opt, why);
+        if (opt.device_lower_solve && (!ok || ri->stats().find("solve host (device failed") != std::string::npos)) {
+            m_gpu_ri_fit_failed = true;
+            curcuma::reportGpuFallback("qm_ri_fit", ok ? "device metric solve failed, host solve used" : why);
+            if (!ok && why.rfind("device metric solve", 0) == 0) {
+                opt.device_lower_solve = nullptr;
+                ri = std::make_shared<qmri::RIJK>();
+                ok = ri->setup(m_gto_basis, m_Q.size() != 0 ? &m_Q : nullptr, sh, opt, why);
+            }
+        }
+        if (ok) {
             m_ri = ri;
             m_ri_file = file;
         }
@@ -1943,8 +2012,9 @@ void QMEngine::buildJK(const Matrix& P, Matrix& J, Matrix& K) const
         Matrix Jx;
         buildJKExact(P, Jx, K);
         if (!gpuRIBuild(P, J, nullptr)) J = m_ri->coulomb(P);
-    } else if (!gpuRIBuild(P, J, &K)) {
-        m_ri->build(P, J, &K);
+    } else {
+        const Eigen::MatrixXd* Vocc = riOccFactor(P);
+        if (!gpuRIBuild(P, J, &K, Vocc)) m_ri->build(P, J, &K, Vocc);
     }
     m_ri_build_ms += msGlue(t0);
     ++m_ri_builds;
@@ -1952,7 +2022,7 @@ void QMEngine::buildJK(const Matrix& P, Matrix& J, Matrix& K) const
 
 // -qm.gpu_ri auto|on|off: the RI contractions (J from the tensor, K as batched GEMM + SYRK) on the device.
 // Any device error: counted fallback "qm_ri", CPU from then on.
-bool QMEngine::gpuRIBuild(const Matrix& P, Matrix& J, Matrix* K) const
+bool QMEngine::gpuRIBuild(const Matrix& P, Matrix& J, Matrix* K, const Eigen::MatrixXd* Vocc) const
 {
     if (m_gpu_ri_failed || m_gpu_ri == "off" || m_gpu_ri == "false" || !gpuRequested()) return false;
     if (m_gpu_ri != "auto" && m_gpu_ri != "on" && m_gpu_ri != "true") {
@@ -1989,13 +2059,17 @@ bool QMEngine::gpuRIBuild(const Matrix& P, Matrix& J, Matrix* K) const
     Eigen::VectorXd c = m_ri->fitCoefficients(Eigen::Map<const Eigen::VectorXd>(g.data(), (Eigen::Index)g.size()));
     if (!m_gpu_ri_dev->coulomb(c.data(), J.data())) return fail("device J = T^T c failed");
     if (!K) return true;
-    Eigen::MatrixXd V;
-    int npos = 0;
-    const auto tf = std::chrono::steady_clock::now();
-    qmri::RIJK::factorDensity(P, V, npos);
-    m_ri_factor_ms += msGlue(tf);
+    Eigen::MatrixXd Vown;
+    const Eigen::MatrixXd* Vp = Vocc;
+    int npos = Vocc ? (int)Vocc->cols() : 0;
+    if (!Vp) {
+        const auto tf = std::chrono::steady_clock::now();
+        qmri::RIJK::factorDensity(P, Vown, npos);
+        m_ri_factor_ms += msGlue(tf);
+        Vp = &Vown;
+    }
     Matrix Kd = Matrix::Zero(n, n);
-    if (!m_gpu_ri_dev->exchange(V.data(), (int)V.cols(), npos, Kd.data())) return fail("device exchange build failed");
+    if (!m_gpu_ri_dev->exchange(Vp->data(), (int)Vp->cols(), npos, Kd.data())) return fail("device exchange build failed");
     *K = Kd;
     if (!m_gpu_ri_checked) {
         m_gpu_ri_checked = true;

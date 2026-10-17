@@ -131,6 +131,14 @@ std::unique_ptr<qmint::QMGpuRI> createQmRI(const std::string& backend, const dou
                                            std::string& why);
 
 /**
+ * RI-JK metric solve on the device (WP10 scaling): T := L^-1 T in place (T: N x ncol row-major host
+ * array, L: N x N lower triangular, column-major), cublasDtrsm on streamed column chunks. False with a
+ * reason; `touched` then says whether T was partly overwritten. Claude Generated (Oct 2026).
+ */
+bool qmRiLowerSolve(const std::string& backend, double* T, int N, long ncol, const double* L, int device, int host_threads,
+                    bool& touched, std::string& why);
+
+/**
  * Native-QM canonical MP2 on the device (WP11): four-index transformation with DGEMM and the
  * pair-energy sum, FP64. False with a reason in `why` when the plugin/entry point is missing, the
  * device memory is too small or a device call fails. Claude Generated (Oct 2026).
