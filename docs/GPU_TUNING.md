@@ -458,3 +458,16 @@ Done: `HBondSoA` upload through the staged pinned upload (`stagedHBondUpload`, s
 state are identical to the build before) 4.1 -> 2.6 ms per refresh (HB and XB together), i.e. about 0.15 ms per step.
 Remaining reducible parts: the pair loop of the detection (threads), `rebuildBondHBData` (serial host).
 
+#### Helper chain of the split matvec as a CUDA graph (Oct 17, 2026, tried and dropped)
+
+Each helper device's chain (copy of x, column dots, copy of y) was captured once per split setup and launched with
+`cudaGraphLaunch`. `cudaMemcpyPeerAsync` is refused during capture ("operation not permitted when stream is capturing"); `cudaMemcpyAsync` with
+`cudaMemcpyDefault` on the UVA addresses captures. Result (nsys, 100 steps, polymer_2x, 4x A4500): 5241 graph launches at 13.3 us average CPU time,
+against ~14 us for the three plain calls (`cudaMemcpyPeerAsync` 5.4 us, kernel launch 3.3 us, second copy 5.4 us) they replace.
+PCG span 4.80 (graphs off) vs 5.02 ms (on), step period 18.78 vs 19.21 ms, gap between two own-device column dots 161 vs 165 us; wall 19.03 / 19.31 ms
+(off, 2 x 3 runs) against 19.15 / 19.29 ms (on). The earlier reading that the CPU launch of the three helpers causes the ~100 us gap before the
+own kernel was therefore wrong: launching costs ~45 us in total. The 160 us between two matvecs is the ~20 small dependent kernels of the PCG
+(dots, updates, two projections, the preconditioner, a host round trip for the convergence test), each 1-15 us long with ~1 us gaps.
+What would shorten it is fewer dependent steps per iteration (one persistent kernel with grid synchronisation, or s-step/pipelined CG
+with one reduction per iteration), not cheaper launches.
+
