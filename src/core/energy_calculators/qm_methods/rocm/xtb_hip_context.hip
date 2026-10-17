@@ -72,6 +72,38 @@ __global__ void k_mirror_lower(double* P, int n)
     if (i >= n || j >= n || i >= j) return;
     P[i + static_cast<size_t>(j) * n] = P[j + static_cast<size_t>(i) * n];
 }
+/**
+ * @brief Probe kernels of the factor check: t = L^T v, y = L x, y = S v (S symmetric, lower stored).
+ *
+ * One thread per output row/column, O(n) work each; used by XtbHipContext::factorCheck to test
+ * L L^T v = S v and L (Linv v) = v with one fixed vector v, so a corrupt Cholesky factor or
+ * inverse is detected at O(n^2) cost per geometry. Claude Generated (Oct 2026).
+ */
+__global__ void k_chk_ltv(const double* L, const double* v, double* t, int n)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= n) return;
+    double a = 0.0;
+    for (int j = k; j < n; ++j) a += L[j + static_cast<size_t>(k) * n] * v[j];
+    t[k] = a;
+}
+__global__ void k_chk_lv(const double* L, const double* x, double* y, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    double a = 0.0;
+    for (int k = 0; k <= i; ++k) a += L[i + static_cast<size_t>(k) * n] * x[k];
+    y[i] = a;
+}
+__global__ void k_chk_sv(const double* S, const double* v, double* y, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    double a = 0.0;
+    for (int j = 0; j < n; ++j)
+        a += (i >= j ? S[i + static_cast<size_t>(j) * n] : S[j + static_cast<size_t>(i) * n]) * v[j];
+    y[i] = a;
+}
 // Mulliken populations + band-energy partials from the resident density P (symmetric):
 //   out[i]   = Σ_j P[i,j]·S[i,j],   out[n+i] = Σ_j P[i,j]·H0[i,j].
 __global__ void k_popband(const double* P, const double* S, const double* H0, double* out, int n)
@@ -989,7 +1021,7 @@ struct XtbHipContext::Impl {
     // whenever dS0 is (re)written or reallocated. computeIntegrals already factors dS0 into
     // dL; that factor is reused when it belongs to the current S (dL_ver == s_version), else
     // the private buffer dLc holds it. dLc32 is the FP32 copy of the FP64 factor.
-    bool    opt_cached_chol  = true;    ///< -xtb.rocm_cached_cholesky (default true)
+    bool    opt_cached_chol  = false;   ///< -xtb.rocm_cached_cholesky (default false since Oct 17, 2026)
     bool    opt_density_syrk = false;   ///< -xtb.rocm_density_syrk (default false)
     unsigned long long s_version = 1;   ///< bumped on every write/realloc of dS0
     unsigned long long dL_ver = 0;      ///< s_version for which dL = chol(dS0) is valid (0 = none)
@@ -998,16 +1030,26 @@ struct XtbHipContext::Impl {
     const double* curL = nullptr;       ///< FP64 factor of the current S (dL or dLc), set by cholFp64
     bool    chol_alloc_failed = false;  ///< allocation failed once: stay on sygvd (no retry per step)
     // ----- explicit inverse factor Linv = L^-1 (Claude Generated, Oct 2026) -----
-    // -xtb.rocm_explicit_linv (default true): Linv is formed once per S (rocsolver_dtrtri on a copy of
+    // -xtb.rocm_explicit_linv (default false): Linv is formed once per S (rocsolver_dtrtri on a copy of
     // the cached FP64 factor; dLinv32 is its FP32 rounding) and each step reduces with two
     // rocblas_trmm, F' = Linv F Linv^T, and back-transforms with C = Linv^T Y (trmm) instead of
     // sygst/trsm. Same cache key (n, s_version) as the factor. Any failure -> sygst/trsm path.
-    bool    opt_explicit_linv = true;   ///< -xtb.rocm_explicit_linv (default true since Oct 15, 2026)
+    bool    opt_explicit_linv = false;  ///< -xtb.rocm_explicit_linv (default false since Oct 17, 2026)
     double* dLinv = nullptr;   int linv_n = 0;   unsigned long long linv_ver = 0;
     float*  dLinv32 = nullptr; int linv32_n = 0; unsigned long long linv32_ver = 0;
     bool    linv_alloc_failed = false;  ///< allocation failed once: no retry per step
     unsigned long long linv_bad_ver = 0; ///< s_version for which trtri reported a singular L
     unsigned long long chol_bad_ver = 0; ///< s_version for which potrf failed (no retry per step)
+    unsigned long long chol_chk_ver = 0; ///< s_version for which the dL from computeIntegrals passed factorCheck
+    // ----- factor check (Claude Generated, Oct 2026) -----
+    // rocSOLVER potrf/sygvd were observed to return a wrong result in about 0.05 percent of the
+    // calls when several processes share the GPU (docs/ROCM_GFN_POTENTIAL_2026-10-14.md,
+    // scripts/rocsolver_concurrency_check.cpp). With the cached factor one wrong L would persist
+    // through the whole SCF, so every new L (and Linv) is probed once per geometry with a fixed
+    // vector: |L L^T v - S v| and |L (Linv v) - v| must stay at rounding level, else the factor is
+    // recomputed (twice at most) and the sygvd path takes over if it stays wrong.
+    double* dChk = nullptr; int chk_n = 0;   ///< 4 n doubles: v, t, y, s
+    int     chk_force_fail = 0;              ///< fault injection: number of checks still forced to fail
     // ----- fallback events (Claude Generated, Oct 2026) -----
     // Bits of XtbHipContext::SolverFallbackEvent, read by the method wrapper, which prints each
     // new bit once (this TU has no logger). fail_inject is the diagnostic fault injection of
@@ -1019,18 +1061,78 @@ struct XtbHipContext::Impl {
             const char* e = std::getenv("CURCUMA_ROCM_FAIL_LINV");
             if (!e) return 0;
             const std::string v(e);
-            return v == "alloc" ? 1 : v == "trtri" ? 2 : v == "chol" ? 3 : 0;
+            return v == "alloc" ? 1 : v == "trtri" ? 2 : v == "chol" ? 3
+                 : v == "factor" ? 4 : v == "factorall" ? 5 : 0;
         }();
         return mode;
     }
 
     void freeCholCache() {
+        if (dChk) (void)hipFree(dChk);
+        dChk = nullptr; chk_n = 0; chol_chk_ver = 0;
         if (dLc) (void)hipFree(dLc);
         if (dLc32) (void)hipFree(dLc32);
         dLc = nullptr; dLc32 = nullptr; chol_n = chol32_n = 0; chol_ver = chol32_ver = 0; curL = nullptr;
         if (dLinv) (void)hipFree(dLinv);
         if (dLinv32) (void)hipFree(dLinv32);
         dLinv = nullptr; dLinv32 = nullptr; linv_n = linv32_n = 0; linv_ver = linv32_ver = 0;
+    }
+    /**
+     * @brief Probe a factor: L L^T v = S v (Linv == nullptr) or L (Linv v) = v (Linv given).
+     * @param L the lower Cholesky factor of dS0
+     * @param Linv its inverse, or nullptr to test the factor itself
+     * @return true when the probe agrees to 1e-10 relative; Claude Generated (Oct 2026).
+     * Returns true when the probe buffers cannot be allocated (the check is skipped, not failed).
+     * CURCUMA_ROCM_FAIL_LINV=factor makes the first check of a process fail, =factorall all of them.
+     * Claude Generated (Oct 2026).
+     */
+    bool factorCheck(const double* L, const double* Linv, int n) {
+        if (fail_inject == 4 || fail_inject == 5) {
+            if (fail_inject == 5 || chk_force_fail == 0) { if (fail_inject == 4) chk_force_fail = -1; return false; }
+        }
+        if (!dChk || chk_n != n) {
+            if (dChk) (void)hipFree(dChk);
+            dChk = nullptr; chk_n = 0;
+            if (hipMalloc(&dChk, 4 * static_cast<size_t>(n) * sizeof(double)) != hipSuccess) {
+                dChk = nullptr; (void)hipGetLastError(); return true;
+            }
+            std::vector<double> v(n);
+            for (int i = 0; i < n; ++i) v[i] = 1.0 + 0.5 * std::sin(1.7 * i + 0.3);
+            if (hipMemcpy(dChk, v.data(), n * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) {
+                (void)hipFree(dChk); dChk = nullptr; (void)hipGetLastError(); return true;
+            }
+            chk_n = n;
+        }
+        double* dv = dChk; double* dt = dChk + n; double* dy = dChk + 2 * static_cast<size_t>(n); double* ds = dChk + 3 * static_cast<size_t>(n);
+        const dim3 b(64), g((n + 63) / 64);
+        if (!Linv) {
+            hipLaunchKernelGGL(k_chk_ltv, g, b, 0, stream, L, dv, dt, n);
+            hipLaunchKernelGGL(k_chk_lv, g, b, 0, stream, L, dt, dy, n);
+            hipLaunchKernelGGL(k_chk_sv, g, b, 0, stream, dS0, dv, ds, n);
+        } else {
+            hipLaunchKernelGGL(k_chk_lv, g, b, 0, stream, Linv, dv, dt, n);
+            hipLaunchKernelGGL(k_chk_lv, g, b, 0, stream, L, dt, dy, n);
+            hipLaunchKernelGGL(k_chk_lv, g, b, 0, stream, L, dv, ds, n);   // unused scratch (keeps one code path)
+        }
+        if (hipStreamSynchronize(stream) != hipSuccess) return true;
+        std::vector<double> y(n), t(n), v(n);
+        if (hipMemcpy(y.data(), dy, n * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return true;
+        if (hipMemcpy(t.data(), ds, n * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return true;
+        if (hipMemcpy(v.data(), dv, n * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return true;
+        const std::vector<double>& ref = Linv ? v : t;   // S v for the factor, v itself for L (Linv v)
+        double err = 0.0, sc = 1.0;
+        for (int i = 0; i < n; ++i) { err = std::max(err, std::fabs(y[i] - ref[i])); sc = std::max(sc, std::fabs(ref[i])); }
+        return err <= 1.0e-10 * sc;
+    }
+    /// Recompute dLc = chol(dS0) once; true when potrf succeeded with info 0.
+    bool factorDLc(int n) {
+        const size_t nn = static_cast<size_t>(n) * n;
+        if (hipMemcpyAsync(dLc, dS0, nn * sizeof(double), hipMemcpyDeviceToDevice, stream) != hipSuccess) return false;
+        if (rocsolver_dpotrf(handle, rocblas_fill_lower, n, dLc, n, dInfo) != rocblas_status_success) return false;
+        if (hipStreamSynchronize(stream) != hipSuccess) return false;
+        rocblas_int info = 0;
+        if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        return info == 0;
     }
     /**
      * @brief Lower Cholesky factor L of the resident overlap dS0 (S = L L^T), FP64.
@@ -1046,7 +1148,11 @@ struct XtbHipContext::Impl {
         if (fail_inject == 3) {   // CURCUMA_ROCM_FAIL_LINV=chol: behave as if potrf failed
             chol_bad_ver = s_version; fallback_events |= XtbHipContext::kFallbackCholFailed; return nullptr;
         }
-        if (dL && bnao == n && dL_ver == s_version) { curL = dL; return curL; }   // from computeIntegrals
+        if (dL && bnao == n && dL_ver == s_version) {   // from computeIntegrals
+            if (chol_chk_ver == s_version) { curL = dL; return curL; }
+            if (factorCheck(dL, nullptr, n)) { chol_chk_ver = s_version; curL = dL; return curL; }
+            dL_ver = 0; fallback_events |= XtbHipContext::kFallbackFactorRetried;   // recompute into dLc below
+        }
         if (dLc && chol_n == n && chol_ver == s_version) { curL = dLc; return curL; }
         const size_t nn = static_cast<size_t>(n) * n;
         if (chol_n != n || !dLc) {
@@ -1058,13 +1164,20 @@ struct XtbHipContext::Impl {
             }
             chol_n = n;
         }
+        rocblas_int info = 0;
         if (hipMemcpyAsync(dLc, dS0, nn * sizeof(double), hipMemcpyDeviceToDevice, stream) != hipSuccess) return nullptr;
         if (rocsolver_dpotrf(handle, rocblas_fill_lower, n, dLc, n, dInfo) != rocblas_status_success) return nullptr;
         if (hipStreamSynchronize(stream) != hipSuccess) return nullptr;
-        rocblas_int info = 0;
         if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return nullptr;
         if (info != 0) {   // S not positive definite: sygvd reports it the usual way
             chol_bad_ver = s_version; fallback_events |= XtbHipContext::kFallbackCholFailed; return nullptr;
+        }
+        // factor check (see factorCheck): recompute a wrong factor at most twice, then give up
+        for (int attempt = 0; !factorCheck(dLc, nullptr, n); ++attempt) {
+            fallback_events |= XtbHipContext::kFallbackFactorRetried;
+            if (attempt >= 2 || !factorDLc(n)) {
+                chol_bad_ver = s_version; fallback_events |= XtbHipContext::kFallbackCholFailed; return nullptr;
+            }
         }
         chol_ver = s_version;
         curL = dLc;
@@ -1115,17 +1228,22 @@ struct XtbHipContext::Impl {
             }
             linv_n = n;
         }
-        if (hipMemcpyAsync(dLinv, L, nn * sizeof(double), hipMemcpyDeviceToDevice, stream) != hipSuccess) return nullptr;
-        if (rocsolver_dtrtri(handle, rocblas_fill_lower, rocblas_diagonal_non_unit, n, dLinv, n, dInfo)
-            != rocblas_status_success) {
-            linv_bad_ver = s_version; fallback_events |= XtbHipContext::kFallbackLinvTrtri; return nullptr;
-        }
-        if (hipStreamSynchronize(stream) != hipSuccess) return nullptr;
-        rocblas_int info = 0;
-        if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return nullptr;
-        if (fail_inject == 2) info = 1;   // CURCUMA_ROCM_FAIL_LINV=trtri: behave as if L were singular
-        if (info != 0) {
-            linv_bad_ver = s_version; fallback_events |= XtbHipContext::kFallbackLinvTrtri; return nullptr;
+        for (int attempt = 0;; ++attempt) {   // Linv = trtri(L), probed by L (Linv v) = v; one recompute
+            if (hipMemcpyAsync(dLinv, L, nn * sizeof(double), hipMemcpyDeviceToDevice, stream) != hipSuccess) return nullptr;
+            if (rocsolver_dtrtri(handle, rocblas_fill_lower, rocblas_diagonal_non_unit, n, dLinv, n, dInfo)
+                != rocblas_status_success) {
+                linv_bad_ver = s_version; fallback_events |= XtbHipContext::kFallbackLinvTrtri; return nullptr;
+            }
+            if (hipStreamSynchronize(stream) != hipSuccess) return nullptr;
+            rocblas_int info = 0;
+            if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return nullptr;
+            if (fail_inject == 2) info = 1;   // CURCUMA_ROCM_FAIL_LINV=trtri: behave as if L were singular
+            if (info != 0) {
+                linv_bad_ver = s_version; fallback_events |= XtbHipContext::kFallbackLinvTrtri; return nullptr;
+            }
+            if (factorCheck(L, dLinv, n)) break;
+            fallback_events |= XtbHipContext::kFallbackFactorRetried;
+            if (attempt >= 1) { linv_bad_ver = s_version; fallback_events |= XtbHipContext::kFallbackLinvTrtri; return nullptr; }
         }
         linv_ver = s_version;
         return dLinv;

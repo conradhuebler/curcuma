@@ -98,8 +98,8 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
     // resident on the device — the Fock build + populations are HIP kernels, the density a
     // rocBLAS GEMM, the eigensolve rocSOLVER. GFN1 runs the isotropic loop, GFN2 the
     // multipole loop (R-AP2).
-    // Resident-solver switches -xtb.rocm_cached_cholesky (default true),
-    // -xtb.rocm_density_syrk (default false) and -xtb.rocm_explicit_linv (default true); the fallbacks here are the defaults of the
+    // Resident-solver switches -xtb.rocm_cached_cholesky (default false),
+    // -xtb.rocm_density_syrk (default false) and -xtb.rocm_explicit_linv (default false); the fallbacks here are the defaults of the
     // PARAM block in native_xtb_method.h. Claude Generated (Oct 2026).
     {
         auto cfgBool = [&config](const char* key, bool def) -> bool {
@@ -118,9 +118,9 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
             }
             return def;
         };
-        const bool cached_chol  = cfgBool("rocm_cached_cholesky", true);
+        const bool cached_chol  = cfgBool("rocm_cached_cholesky", false);
         const bool density_syrk = cfgBool("rocm_density_syrk", false);
-        const bool explicit_linv = cfgBool("rocm_explicit_linv", true);    // Claude Generated (Oct 2026), default true since Oct 15
+        const bool explicit_linv = cfgBool("rocm_explicit_linv", false);    // Claude Generated (Oct 2026), default false since Oct 17
         ctx->setSolverOptions(cached_chol, density_syrk, explicit_linv);
         if (CurcumaLogger::get_verbosity() >= 2)
             CurcumaLogger::info(fmt::format(
@@ -189,7 +189,7 @@ void XtbHipComputationalMethod::reportSolverFallbacks(bool final_report)
     const unsigned ev = ctx->solverFallbackEvents();
     const unsigned fresh = ev & ~m_reported_fallbacks
         & (XtbHipContext::kFallbackLinvAlloc | XtbHipContext::kFallbackLinvTrtri
-           | XtbHipContext::kFallbackCholFailed);
+           | XtbHipContext::kFallbackCholFailed | XtbHipContext::kFallbackFactorRetried);
     if (!fresh) return;
     // At verbosity 0 the warning would be swallowed: keep the bits pending for a later call;
     // the final report (destructor) raises the level to 1 for these lines.
@@ -214,6 +214,10 @@ void XtbHipComputationalMethod::reportSolverFallbacks(bool final_report)
             "{}: ROCm solver: the cached Cholesky factor of S could not be formed (allocation "
             "failed or potrf reported S not positive definite); the affected geometries use "
             "rocsolver sygvd instead{} (reported once)", getMethodName(), src));
+    if (fresh & XtbHipContext::kFallbackFactorRetried)
+        CurcumaLogger::warn(fmt::format(
+            "{}: ROCm solver: rocSOLVER returned a Cholesky factor or inverse that failed the "
+            "L L^T v = S v probe and it was recomputed{} (reported once)", getMethodName(), src));
     if (saved_verbosity < 1) CurcumaLogger::set_verbosity(saved_verbosity);
 }
 

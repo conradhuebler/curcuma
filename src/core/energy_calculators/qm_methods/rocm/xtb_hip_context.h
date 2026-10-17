@@ -113,27 +113,30 @@ public:
     /**
      * @brief Switches of the resident solver path (Claude Generated, Oct 2026).
      * @param cached_cholesky factor S = L L^T once per geometry and solve each SCF step with
-     *        sygst -> syevd -> trsm instead of sygvd (FP64 and FP32); default true
-     *        (-xtb.rocm_cached_cholesky). Falls back to sygvd if the factor buffer cannot be
-     *        allocated or S is not positive definite.
+     *        sygst -> syevd -> trsm instead of sygvd (FP64 and FP32); default false since
+     *        Oct 17, 2026 (-xtb.rocm_cached_cholesky): one wrong factor lasts for the whole SCF.
+     *        Each new factor is probed (L L^T v = S v) and recomputed when it fails. Falls back to
+     *        sygvd if the factor buffer cannot be allocated, S is not positive definite or the
+     *        factor stays wrong.
      * @param density_syrk build the density with rocblas_dsyrk on C diag(sqrt(occ)) and mirror
      *        the lower triangle; default false (-xtb.rocm_density_syrk). Negative occupations
      *        keep the GEMM path.
      * @param explicit_linv with the cached factor, form Linv = L^-1 once per geometry (trtri,
      *        FP64, plus its FP32 rounding) and run each step as F' = Linv F Linv^T (two trmm),
      *        syevd, C = Linv^T Y (trmm) instead of sygst/syevd/trsm; default false
-     *        (-xtb.rocm_explicit_linv). Falls back to sygst/trsm if trtri or allocation fails.
-     *        Default true since Oct 15, 2026.
+     *        (-xtb.rocm_explicit_linv; true by default Oct 15 to Oct 17, 2026). Falls back to
+     *        sygst/trsm if trtri or allocation fails.
      *        Claude Generated (Oct 2026).
      */
-    void setSolverOptions(bool cached_cholesky, bool density_syrk, bool explicit_linv = true);
+    void setSolverOptions(bool cached_cholesky, bool density_syrk, bool explicit_linv = false);
 
     /// Bits of solverFallbackEvents(). Claude Generated (Oct 2026).
     enum SolverFallbackEvent : unsigned {
         kFallbackLinvAlloc  = 1u,  ///< Linv (FP64 or FP32) buffer allocation failed -> sygst/trsm
         kFallbackLinvTrtri  = 2u,  ///< trtri failed or reported info != 0 -> sygst/trsm for that S
         kFallbackCholFailed = 4u,  ///< cached factor not formed (allocation or potrf) -> sygvd
-        kFallbackInjected   = 8u   ///< CURCUMA_ROCM_FAIL_LINV is set (diagnostic fault injection)
+        kFallbackInjected   = 8u,  ///< CURCUMA_ROCM_FAIL_LINV is set (diagnostic fault injection)
+        kFallbackFactorRetried = 16u  ///< a Cholesky factor or inverse failed the probe and was recomputed
     };
 
     /**
@@ -141,7 +144,7 @@ public:
      *        context was created; bits are only ever set. The plugin context has no logger, so
      *        the method wrapper reads this after each calculation and prints each new bit once.
      *
-     * The diagnostic environment variable CURCUMA_ROCM_FAIL_LINV=alloc|trtri|chol (read once
+     * The diagnostic environment variable CURCUMA_ROCM_FAIL_LINV=alloc|trtri|chol|factor|factorall (read once
      * per process) forces the corresponding failure so that the fallback and its notice can be
      * tested; kFallbackInjected is then set as well. Claude Generated (Oct 2026).
      */

@@ -12,9 +12,9 @@ peo201-chain is gfn2 `-sp` on 1410 atoms (nao 3222), energy -2088.25340678 Eh in
 
 | Switch | Default | What it does |
 |---|---|---|
-| `-xtb.rocm_cached_cholesky` | true | S = L L^T once per geometry, each SCF step sygst, syevd, trsm instead of sygvd (FP64 and FP32) |
+| `-xtb.rocm_cached_cholesky` | false (true until Oct 17) | S = L L^T once per geometry, each SCF step sygst, syevd, trsm instead of sygvd (FP64 and FP32); every new factor is probed (L L^T v = S v) and recomputed when it fails |
 | `-xtb.rocm_density_syrk` | false | density P = C diag(occ) C^T by `rocblas_dsyrk` on the occupied columns, lower triangle mirrored |
-| `-xtb.rocm_explicit_linv` | true (since Oct 15) | with the cached factor: Linv = L^-1 once per geometry (`rocsolver_dtrtri`, FP64, FP32 copy), each step F' = Linv F Linv^T by two trmm, syevd, C = Linv^T Y by trmm |
+| `-xtb.rocm_explicit_linv` | false (true Oct 15 to Oct 17) | with the cached factor (probed L (Linv v) = v): Linv = L^-1 once per geometry (`rocsolver_dtrtri`, FP64, FP32 copy), each step F' = Linv F Linv^T by two trmm, syevd, C = Linv^T Y by trmm. The speedups quoted below (-9.6 percent) belong to this switch and to the cached factor, both off by default since Oct 17 |
 
 Defaults live in the PARAM block of `native_xtb_method.h`, in `cfgBool(...)` in `xtb_hip_method.cpp` and in the member
 initialisers of `XtbHipContext::Impl` (`xtb_hip_context.hip`). Other backends ignore the three switches.
@@ -171,3 +171,32 @@ MD or `-opt` per-step cost of GFN2 on ROCm (only whole optimisations, n = 3); gr
 eigensolve split; memory beyond the two peak-VRAM readings above; gfx1150; transition metals beyond MOR41 PR22 and the
 Rh complex of the stress test (energies only); CPU large-system modes (`-large_system_mode`) as the
 comparison at 1410 atoms (the CPU time above is the default mode).
+
+## Wrong rocSOLVER results with several processes on one GPU (Oct 16/17, 2026)
+
+AI-generated, machine-tested; measured on RX 9060 XT (gfx1200), ROCm 7.2.4, Linux 6.18.49, neutral caffeine, gfn2 `-sp`,
+`-scf_threshold 1e-10`, 145 geometries (the FD set of the gradient check) times repeats, 4 processes at a time unless noted.
+
+- **Symptom.** A run reports "SCF converged" and an energy that is off from the median of its geometry by 1e-8 to 9e-3 Eh,
+  without a warning. Share of such runs: 14 of 20300 and 7 of 8700 (cached factor on, the default until Oct 17); 0 of 13050 with
+  one process at a time (4350 + 8700), 1 of 8700 with two processes. CPU: 0 of 8700.
+- **Bisection.** 0 of 8700 at `9ef9b98c`, `948d7c12` and `e2c72cc1`; 7 of 8700 at `ca2ce18e` (introduces the cached
+  factor); FP32 steps without cache 10 of 8700, FP64 steps without cache 0 of 8700.
+- **Cause as far as found.** An in-process comparison of the cached solve with `rocsolver_dsygvd` on the same F and S
+  (4350 runs) found 146 runs where the eigenvalues differ by 8e-6 to 2.4e-3 Eh, constant over all SCF steps of the run.
+  In 83 recorded cases the cached factor was wrong (max |L L^T - S| up to 3.3e-3, normal 4e-16) or the factor was correct
+  and the `sygvd` result was wrong (generalized residual up to 3.5e-3, the cached result 1e-15). A program without curcuma
+  (`scripts/rocsolver_concurrency_check.cpp`, n = 66) shows the same: four processes at a time, `rocsolver_dpotrf` wrong in 6
+  and `rocsolver_dsygvd` in 8 of 12000 calls each; one process 0 of 12000; `rocblas_dgemm` 0 of 48000 (short run). Whether
+  the fault is in rocSOLVER, the driver or the hardware was not tested; no report was filed.
+- **Not the cause.** Host threads (`-threads 1`: 7 of 8700), shifted allocation addresses (0 of 200, one process),
+  the FP32 phase (`-scf_fp32_threshold 1e3`: 7 of 8700), reuse of the factor from the device integral build (8 of 8700 with
+  it disabled). Serialised kernels (`AMD_SERIALIZE_KERNEL=3 AMD_SERIALIZE_COPY=3`) left 2 of 8700.
+- **What was changed (Oct 17).** Both cache switches default to false. A new factor, and a new Linv, is probed once per
+  geometry with a fixed vector (`factorCheck` in `xtb_hip_context.hip`: |L L^T v - S v| and |L (Linv v) - v| below 1e-10
+  relative); a failing factor is recomputed twice at most, then `sygvd` is used; a notice is printed once per run
+  (`kFallbackFactorRetried`). `CURCUMA_ROCM_FAIL_LINV=factor|factorall` forces a failing probe for tests.
+- **Limits.** The probe sees a wrong factor, not a wrong `sygvd` result (the default path), a wrong `syevd`, or a wrong
+  `dgemm`. The default path and parallel jobs on one GPU therefore stay at risk; a GPU job per process is the safe use.
+  CUDA was not tested.
+
