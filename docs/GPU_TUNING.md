@@ -445,3 +445,16 @@ kernel, peer copy, event). Removing that needs the helper chain as a CUDA graph 
 helper thread; neither was tried. The PCG span (4.5 ms) is a quarter of the 18 ms step, the rest is the other kernels and the host stages
 (integrator gap, HB/XB refresh), so a 0.1 ms change is below the 1 ms run-to-run spread of the step time.
 
+### HB/XB refresh, where the time goes (Oct 17, 2026, AI-run, polymer_2x, `-threads 8`, 31 refreshes in 300 steps)
+
+`CURCUMA_GFNFF_STEPPHASE=1`, median per refresh: detection 20.2 ms (`detectHB` 20.3, of which the pair loop 16.0 and the A-B pair list 4.0
+at 8 threads; at 16 threads 9.7 and 2.6), `upload_hb_xb` 4.1 ms, `rebuildBondHBData` 1.95 ms, rest below 0.5 ms: 26.5 ms per refresh,
+2.7 ms per step on average (`hb_update_force_every` 10), during which the GPU is idle. The detection reads the geometry of the current
+step and Phase 1 (bonds with `nr_hb`, HB kernels) needs its result, so it cannot run ahead of or beside the GPU work of the same step
+without changing which step uses the list; only the EEQ solve is independent of the lists, and moving it before Phase 1
+means reordering the input events of the K3 overlap. Not done.
+
+Done: `HBondSoA` upload through the staged pinned upload (`stagedHBondUpload`, same device bytes: the 300-step trajectory and final
+state are identical to the build before) 4.1 -> 2.6 ms per refresh (HB and XB together), i.e. about 0.15 ms per step.
+Remaining reducible parts: the pair loop of the detection (threads), `rebuildBondHBData` (serial host).
+

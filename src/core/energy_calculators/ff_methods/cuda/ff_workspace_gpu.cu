@@ -1023,6 +1023,80 @@ void stagedRepulsionUpload(FFWorkspaceGPUImpl& impl, RepulsionSoA& soa,
         });
 }
 
+/// H-bond list through the staged upload (Claude Generated, Oct 2026); same device content as
+/// HBondSoA::upload(): that function converts serially and copies 21 columns with blocking pageable
+/// copies (4.1 ms per re-detection at 50k entries, polymer_2x). The fixed columns are filled by
+/// several host threads into the pinned stage; the two packed neighbour lists are filled by the
+/// same workers into host vectors at precomputed offsets (disjoint writes) and copied as before.
+void stagedHBondUpload(FFWorkspaceGPUImpl& impl, HBondSoA& soa, const std::vector<GFNFFHydrogenBond>& v,
+                       const std::vector<int>& atom_types, int threads)
+{
+    const int n = static_cast<int>(v.size());
+    soa.n = n;
+    if (n == 0) return;
+    const int nat = static_cast<int>(atom_types.size());
+    std::vector<int> offB(n), offC(n);
+    int total_B = 0, total_C = 0;
+    for (int m = 0; m < n; ++m) {
+        offB[m] = total_B; offC[m] = total_C;
+        total_B += static_cast<int>(v[m].neighbors_B.size());
+        total_C += static_cast<int>(v[m].neighbors_C.size());
+    }
+    std::vector<int> flatB(total_B), flatC(total_C);
+    soa.total_nb_B = total_B;
+    soa.total_nb_C = total_C;
+    soa.idx_i.ensure(n); soa.idx_j.ensure(n); soa.idx_k.ensure(n);
+    soa.elem_A.ensure(n); soa.elem_B.ensure(n); soa.case_type.ensure(n);
+    soa.q_H.ensure(n); soa.q_A.ensure(n); soa.q_B.ensure(n);
+    soa.basicity_A.ensure(n); soa.basicity_B.ensure(n); soa.acidity_A.ensure(n); soa.acidity_B.ensure(n);
+    soa.r_cut.ensure(n); soa.acceptor_parent.ensure(n); soa.repz_B.ensure(n);
+    soa.nb_B_offset.ensure(n); soa.nb_B_count.ensure(n); soa.nb_C_offset.ensure(n); soa.nb_C_count.ensure(n);
+    const StageColumn cols[] = {
+        { soa.idx_i.ptr, sizeof(int) },  { soa.idx_j.ptr, sizeof(int) },  { soa.idx_k.ptr, sizeof(int) },
+        { soa.elem_A.ptr, sizeof(int) }, { soa.elem_B.ptr, sizeof(int) }, { soa.case_type.ptr, sizeof(int) },
+        { soa.acceptor_parent.ptr, sizeof(int) },
+        { soa.nb_B_offset.ptr, sizeof(int) }, { soa.nb_B_count.ptr, sizeof(int) },
+        { soa.nb_C_offset.ptr, sizeof(int) }, { soa.nb_C_count.ptr, sizeof(int) },
+        { soa.q_H.ptr, sizeof(double) }, { soa.q_A.ptr, sizeof(double) }, { soa.q_B.ptr, sizeof(double) },
+        { soa.basicity_A.ptr, sizeof(double) }, { soa.basicity_B.ptr, sizeof(double) },
+        { soa.acidity_A.ptr, sizeof(double) },  { soa.acidity_B.ptr, sizeof(double) },
+        { soa.r_cut.ptr, sizeof(double) }, { soa.repz_B.ptr, sizeof(double) } };
+    stagedListUpload(impl, v.size(), cols, 20, threads,
+        [&](size_t a, size_t e, size_t k0, char* const* h) {
+            int* hi = reinterpret_cast<int*>(h[0]);  int* hj = reinterpret_cast<int*>(h[1]);
+            int* hk = reinterpret_cast<int*>(h[2]);  int* eA = reinterpret_cast<int*>(h[3]);
+            int* eB = reinterpret_cast<int*>(h[4]);  int* cs = reinterpret_cast<int*>(h[5]);
+            int* ap = reinterpret_cast<int*>(h[6]);
+            int* bo = reinterpret_cast<int*>(h[7]);  int* bc = reinterpret_cast<int*>(h[8]);
+            int* co = reinterpret_cast<int*>(h[9]);  int* cc = reinterpret_cast<int*>(h[10]);
+            double* qH = reinterpret_cast<double*>(h[11]); double* qA = reinterpret_cast<double*>(h[12]);
+            double* qB = reinterpret_cast<double*>(h[13]); double* bA = reinterpret_cast<double*>(h[14]);
+            double* bB = reinterpret_cast<double*>(h[15]); double* aA = reinterpret_cast<double*>(h[16]);
+            double* aB = reinterpret_cast<double*>(h[17]); double* rc = reinterpret_cast<double*>(h[18]);
+            double* rz = reinterpret_cast<double*>(h[19]);
+            for (size_t m = a; m < e; ++m) {
+                const size_t q = m - k0;
+                const GFNFFHydrogenBond& b = v[m];
+                hi[q] = b.i; hj[q] = b.j; hk[q] = b.k;
+                eA[q] = (b.i < nat) ? atom_types[b.i] : 0;
+                const int zB = (b.k < nat) ? atom_types[b.k] : 0;
+                eB[q] = zB;
+                cs[q] = b.case_type;
+                ap[q] = b.acceptor_parent_index;
+                qH[q] = b.q_H; qA[q] = b.q_A; qB[q] = b.q_B;
+                bA[q] = b.basicity_A; bB[q] = b.basicity_B; aA[q] = b.acidity_A; aB[q] = b.acidity_B;
+                rc[q] = b.r_cut;
+                rz[q] = (zB >= 1 && zB <= 86) ? GFNFFParameters::repz[zB - 1] : 1.0;
+                bo[q] = offB[m]; bc[q] = static_cast<int>(b.neighbors_B.size());
+                co[q] = offC[m]; cc[q] = static_cast<int>(b.neighbors_C.size());
+                int w = offB[m]; for (int nb : b.neighbors_B) flatB[w++] = nb;
+                w = offC[m];     for (int nb : b.neighbors_C) flatC[w++] = nb;
+            }
+        });
+    if (total_B > 0) soa.nb_B_flat.upload(flatB, impl.stream);
+    if (total_C > 0) soa.nb_C_flat.upload(flatC, impl.stream);
+}
+
 }  // namespace
 
 // ============================================================================
@@ -2032,7 +2106,10 @@ void FFWorkspaceGPU::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
     // Re-upload HBond SoA after dynamic re-detection.
     // Claude Generated (March 2026): Needed because updateHBXBIfNeeded() may find
     // additional HBonds on re-detection that weren't in the initial parameter set.
-    m_impl->hbonds.upload(hbonds, atom_types, m_impl->stream);
+    if (m_staged_list_upload)   // Oct 2026: same device content, see stagedHBondUpload()
+        stagedHBondUpload(*m_impl, m_impl->hbonds, hbonds, atom_types, m_host_threads);
+    else
+        m_impl->hbonds.upload(hbonds, atom_types, m_impl->stream);
     // Store for CPU vs GPU comparison debugging. Oct 2026: only where that comparison runs
     // (verbosity >= 3 in the GPU wrapper); the deep copy was ~1 ms per MD re-detection.
     if (CurcumaLogger::get_verbosity() >= 3)
