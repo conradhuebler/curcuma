@@ -69,7 +69,7 @@ Measured (RTX A4500, `-method gfnff -gpu cuda`; AI-run, not human-reviewed):
 |---|---|
 | Gradient GPU vs CPU, polymer (1410 atoms) / caffeine (24) | max 1.7e-13 / 1.5e-13 Eh/A, energies equal to 8 decimals |
 | MD polymer, 5000 steps, 8 concurrent processes on 4 GPUs vs 1 solo run | trajectory file (1000 frames) md5-identical in 9 of 9; with only the charge path fixed (forces still atomic) the same test differed from the solo run at printed rows 283-322 of 1001 in 8 of 8; the unchanged original binary was not run in this test |
-| MD polymer_2x (7320 atoms), 300 steps, `-gpu_split_devices all` (4 GPUs) twice and `none` | trajectory file (6 printed digits) md5-identical in 3 of 3; full-precision final JSON identical for the two split runs, but split vs none differs at 1e-12 relative (Epot, Ekin): the EEQ matvec partition changes the charges in the last bits, so split and unsplit are not bitwise equal to each other |
+| MD polymer_2x (7320 atoms), 300 steps, `-gpu_split_devices all` (4 GPUs) twice and `none` | trajectory file (6 printed digits) md5-identical in 3 of 3; full-precision final JSON identical for the two split runs; split vs none differs at 1e-12 relative (see the EEQ section below) |
 | `ctest -R "gfnff\|gpu\|cuda\|eeq"` | 278 of 278 passed |
 | Cost, polymer MD 5000 steps solo | 20 s before, 20-21 s after (3 runs) |
 
@@ -110,7 +110,23 @@ built in atomic-counter order, so the thread-to-pair map changed between runs an
 Cost: energies carry a rounding error of up to 3.6e-15 Eh per thread value (random, grows with the square root of the
 number of contributions). Range +-32768 Eh per term, dispersion +-2048 Eh; beyond that the sum wraps silently.
 
+## EEQ split matvec: fixed order (Oct 17, 2026, AI/machine-tested)
+
+The split EEQ matvec used `cublasDgemv/Sgemv` per column block. cuBLAS chooses its algorithm from the block shape, so
+the sum order of a column could depend on the number of GPUs (4 GPUs vs 2 GPUs: Ekin differed at 3.6e-13 relative). The
+split now calls `k_split_coldot_f64/f32` (block per column, 256 strided partials, fixed tree).
+
+| Check | Result |
+|---|---|
+| polymer_2x MD 300 steps, mixed precision (default): 4 GPUs twice, 3 GPUs, 2 GPUs | final JSON (Epot, Ekin, Etot, geometry, velocities) identical in 4 of 4 |
+| same, `-gpu_eeq_mixed_precision false`: 4 GPUs vs 2 GPUs | identical |
+| Split vs one GPU (`-gpu_split_devices none`) | still differs (Epot, Ekin at 1e-12 relative): the single device uses `cublasDsymv` in FP64, the split a FP32 matrix by default and a different kernel |
+| Time, polymer_2x 300 steps on 4 GPUs | 11 s before and after |
+| `ctest -R "gfnff\|gpu\|cuda\|eeq"` | 278 of 278 |
+
+Not covered: other N than 7320, the setup (`splitBuild`) and the Coulomb/dispersion split were not varied separately.
+
 ## Options for the rest (not done)
 
 1. ROCm and Vulkan: not looked at.
-2. Split vs unsplit GFN-FF (EEQ matvec partition) is not bitwise equal; same-configuration runs are.
+2. Split vs single-GPU GFN-FF is not bitwise equal (FP32 matrix and another kernel in the split); the result is independent of the number of split GPUs.

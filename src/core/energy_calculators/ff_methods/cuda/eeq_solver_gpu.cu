@@ -2296,11 +2296,44 @@ static void splitBuild(EEQSolverGPUImpl& impl, int N, const double* cx, const do
     ++impl.split_builds;
 }
 
+/// Column dot products in a fixed order (Claude Generated, Oct 2026): y[c] = sum_i A[i + c N] x[i], one block per
+/// column, thread t sums i = t, t+256, ... and a fixed tree adds the 256 partials. cuBLAS gemv picks its algorithm
+/// from the block shape (nc), so the result of a column could depend on the number of GPUs; this kernel does not.
+__global__ void k_split_coldot_f64(int N, const double* __restrict__ A, const double* __restrict__ x, double* __restrict__ y)
+{
+    __shared__ double sh[256];
+    const double* col = A + static_cast<size_t>(blockIdx.x) * N;
+    double acc = 0.0;
+    for (int i = threadIdx.x; i < N; i += 256) acc = fma(col[i], x[i], acc);
+    sh[threadIdx.x] = acc;
+    __syncthreads();
+    for (int s = 128; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sh[threadIdx.x] += sh[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) y[blockIdx.x] = sh[0];
+}
+
+/// FP32 matrix and vector, float partials per thread, the tree in double (the sum of 256 values).
+__global__ void k_split_coldot_f32(int N, const float* __restrict__ A, const float* __restrict__ x, float* __restrict__ y)
+{
+    __shared__ double sh[256];
+    const float* col = A + static_cast<size_t>(blockIdx.x) * N;
+    float acc = 0.0f;
+    for (int i = threadIdx.x; i < N; i += 256) acc = fmaf(col[i], x[i], acc);
+    sh[threadIdx.x] = static_cast<double>(acc);
+    __syncthreads();
+    for (int s = 128; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sh[threadIdx.x] += sh[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) y[blockIdx.x] = static_cast<float>(sh[0]);
+}
+
 /// y = A x with the column blocks spread over the devices. x and y live on this device.
 static void splitMatvecF32(EEQSolverGPUImpl& impl, int N, const double* x, double* y)
 {
     // Oct 2026: FP32 matrix, FP32 vectors, FP64 result vector. Halves the matrix traffic and the peer copies.
-    const float one = 1.0f, zero = 0.0f;
     const int blk = 256, grd = (N + blk - 1) / blk;
     k_cast_d2f<<<grd, blk, 0, impl.stream>>>(x, impl.d_xf.ptr, N);
     cudaEventRecord(impl.ev_split, impl.stream);
@@ -2310,15 +2343,12 @@ static void splitMatvecF32(EEQSolverGPUImpl& impl, int N, const double* x, doubl
         cudaSetDevice(P.dev);
         cudaStreamWaitEvent(P.stream, impl.ev_split, 0);
         cudaMemcpyPeerAsync(P.xf.ptr, P.dev, impl.d_xf.ptr, impl.own_device, sizeof(float) * N, P.stream);
-        cublasSetPointerMode(P.blas, CUBLAS_POINTER_MODE_HOST);
-        cublasSgemv(P.blas, CUBLAS_OP_T, N, nc, &one, P.Af.ptr, N, P.xf.ptr, 1, &zero, P.yf.ptr, 1);
+        k_split_coldot_f32<<<nc, 256, 0, P.stream>>>(N, P.Af.ptr, P.xf.ptr, P.yf.ptr);
         cudaMemcpyPeerAsync(impl.d_yf.ptr + P.c0, impl.own_device, P.yf.ptr, P.dev, sizeof(float) * nc, P.stream);
         cudaEventRecord(P.done, P.stream);
     }
     cudaSetDevice(impl.own_device);
-    cublasSetPointerMode(impl.cublas_handle, CUBLAS_POINTER_MODE_HOST);
-    cublasSgemv(impl.cublas_handle, CUBLAS_OP_T, N, impl.split_c1_own, &one, impl.d_A_own_f.ptr, N,
-                impl.d_xf.ptr, 1, &zero, impl.d_yf.ptr, 1);
+    k_split_coldot_f32<<<impl.split_c1_own, 256, 0, impl.stream>>>(N, impl.d_A_own_f.ptr, impl.d_xf.ptr, impl.d_yf.ptr);
     for (auto& pp : impl.split_parts)
         cudaStreamWaitEvent(impl.stream, pp->done, 0);
     k_cast_f2d<<<grd, blk, 0, impl.stream>>>(impl.d_yf.ptr, y, N);
@@ -2327,7 +2357,6 @@ static void splitMatvecF32(EEQSolverGPUImpl& impl, int N, const double* x, doubl
 
 static void splitMatvec(EEQSolverGPUImpl& impl, int N, const double* x, double* y)
 {
-    const double one = 1.0, zero = 0.0;
     cudaEventRecord(impl.ev_split, impl.stream);
     for (auto& pp : impl.split_parts) {
         auto& P = *pp;
@@ -2335,15 +2364,12 @@ static void splitMatvec(EEQSolverGPUImpl& impl, int N, const double* x, double* 
         cudaSetDevice(P.dev);
         cudaStreamWaitEvent(P.stream, impl.ev_split, 0);
         cudaMemcpyPeerAsync(P.p.ptr, P.dev, x, impl.own_device, sizeof(double) * N, P.stream);
-        cublasSetPointerMode(P.blas, CUBLAS_POINTER_MODE_HOST);
-        cublasDgemv(P.blas, CUBLAS_OP_T, N, nc, &one, P.A.ptr, N, P.p.ptr, 1, &zero, P.yblk.ptr, 1);
+        k_split_coldot_f64<<<nc, 256, 0, P.stream>>>(N, P.A.ptr, P.p.ptr, P.yblk.ptr);
         cudaMemcpyPeerAsync(y + P.c0, impl.own_device, P.yblk.ptr, P.dev, sizeof(double) * nc, P.stream);
         cudaEventRecord(P.done, P.stream);
     }
     cudaSetDevice(impl.own_device);
-    cublasSetPointerMode(impl.cublas_handle, CUBLAS_POINTER_MODE_HOST);
-    cublasDgemv(impl.cublas_handle, CUBLAS_OP_T, N, impl.split_c1_own, &one, impl.d_A_own.ptr, N,
-                x, 1, &zero, y, 1);
+    k_split_coldot_f64<<<impl.split_c1_own, 256, 0, impl.stream>>>(N, impl.d_A_own.ptr, x, y);
     for (auto& pp : impl.split_parts)
         cudaStreamWaitEvent(impl.stream, pp->done, 0);
     ++impl.split_matvecs;
