@@ -410,6 +410,16 @@ public:
         return m_ctx->gradientTailDevice(nat, is_gfn2, with_mp, xyz_bohr, dEdcn, rcov_au, q_at, dp_at, qp_at, mrad,
                                          cn, rad, vcn, dmp3, dmp5, shift, kexp, rmax, grad_out);
     }
+    bool d4CovalentCnDevice(int nat, const int* Z, const double* xyz_bohr, const double* rad, const double* en,
+                            double kn, double k4, double k5, double k6, double cutoff,
+                            double* cn_out) override
+    {
+        return m_ctx && m_ctx->d4CovalentCnDevice(nat, Z, xyz_bohr, rad, en, kn, k4, k5, k6, cutoff, cn_out);
+    }
+    bool downloadCn(double* cn_out, int nat) override
+    {
+        return m_ctx && cn_out && nat == m_nat && m_ctx->downloadCn(cn_out);
+    }
     bool repulsionEnergyDevice(int nat, bool is_gfn2, const int* z, const double* xyz_bohr, const double* alpha,
                                const double* zeff, double kexp, double rexp, double kexp_light,
                                double* energy_out) override

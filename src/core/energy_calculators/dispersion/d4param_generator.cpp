@@ -296,7 +296,12 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     auto t_cn_start = std::chrono::high_resolution_clock::now();
     if (m_use_d4_covalent_cn) {
         // GFN2: dftd4 EN-weighted covalent CN (no log-cap) for the C6 interpolation.
-        m_cn_values = curcuma::dispersion::computeD4CovalentCN(m_atoms, geometry_bohr);
+        if (m_precomputed_cn.size() == m_atoms.size()) {
+            m_cn_values = std::move(m_precomputed_cn);     // computed on the device by the caller (Oct 2026)
+            m_precomputed_cn.clear();
+        } else {
+            m_cn_values = curcuma::dispersion::computeD4CovalentCN(m_atoms, geometry_bohr);
+        }
     } else {
         m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr);
     }

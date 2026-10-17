@@ -1012,6 +1012,7 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
 void XTB::writeScfJacobianDump(const std::string& dir, const Vector& x_star, const Vector& g_loop,
                                double e_scc, const std::function<Vector(const Vector&)>& evalG)
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     namespace fs = std::filesystem;
     using clk = std::chrono::steady_clock;
     std::error_code ec;

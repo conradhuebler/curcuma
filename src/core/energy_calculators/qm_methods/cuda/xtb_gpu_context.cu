@@ -183,6 +183,8 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dD4Q, dD4QZero, dD4W0, dD4dWq0, dD4dWc0;
     CudaBuffer<double> dAtmEat, dAtmGrad, dAtmDcn, dD4Dtot, dD4Gtot;
     CudaBuffer<int>    dD4NbCnt;
+    CudaBuffer<int>    dD4CnZ;                    // d4CovalentCnDevice
+    CudaBuffer<double> dD4CnXyz, dD4CnOut;
     // Oct 2026: GFN1 D3(BJ) dispersion on the device (d3DispersionDevice)
     CudaBuffer<int>    dD3Z, dD3Type, dD3Nref;
     CudaBuffer<int>    dRepEz;                    // repulsion energy (repulsionEnergyDevice)
@@ -5872,6 +5874,55 @@ __global__ void k_d4_cn_fold(int nat, const int* __restrict__ Z, const double* _
         gx += factor * rx; gy += factor * ry; gz += factor * rz;
     }
     grad[3*i] += gx; grad[3*i+1] += gy; grad[3*i+2] += gz;
+}
+
+// EN-weighted covalent coordination number of dftd4 (curcuma::dispersion::computeD4CovalentCN) on the device:
+// every atom gathers over all partners within the cutoff (the host adds each pair to both members).
+__global__ void k_d4_cn(int nat, const int* __restrict__ Z, const double* __restrict__ xyz,
+                        const double* __restrict__ rad, const double* __restrict__ en, double kn, double k4,
+                        double k5, double k6, double cutoff, double* __restrict__ cn)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const int zi = Z[i];
+    double c = 0.0;
+    if (zi >= 1 && zi <= 118) {
+        for (int j = 0; j < nat; ++j) {
+            if (j == i) continue;
+            const int zj = Z[j];
+            if (zj < 1 || zj > 118) continue;
+            const double dx = xyz[3*i] - xyz[3*j], dy = xyz[3*i+1] - xyz[3*j+1], dz = xyz[3*i+2] - xyz[3*j+2];
+            const double r = sqrt(dx*dx + dy*dy + dz*dz);
+            if (r > cutoff) continue;
+            const double rr = r / (rad[zi] + rad[zj]);
+            const double t = fabs(en[zi] - en[zj]) + k5;
+            const double den = k4 * exp(-(t * t) / k6);
+            c += den * (0.5 * (1.0 + erf(-kn * (rr - 1.0))));
+        }
+    }
+    cn[i] = c;
+}
+
+bool XtbGpuContext::d4CovalentCnDevice(int nat, const int* Z, const double* xyz_bohr, const double* rad,
+                                       const double* en, double kn, double k4, double k5, double k6,
+                                       double cutoff, double* cn_out)
+{
+    Impl& I = *m_impl;
+    if (!ok() || nat <= 0 || !Z || !xyz_bohr || !rad || !en || !cn_out) return false;
+    cudaStream_t stream = I.stream;
+    try {
+        I.dD4CnZ.ensure(nat); I.dD4CnXyz.ensure(3 * nat); I.dD4CnOut.ensure(nat);
+        I.dD4Rad.ensure(119); I.dD4En.ensure(119);
+    } catch (...) { return false; }
+    I.dD4CnZ.upload(Z, nat, stream);
+    I.dD4CnXyz.upload(xyz_bohr, 3 * nat, stream);
+    I.dD4Rad.upload(rad, 119, stream);
+    I.dD4En.upload(en, 119, stream);
+    k_d4_cn<<<(nat + 127) / 128, 128, 0, stream>>>(nat, I.dD4CnZ.ptr, I.dD4CnXyz.ptr, I.dD4Rad.ptr, I.dD4En.ptr,
+                                                   kn, k4, k5, k6, cutoff, I.dD4CnOut.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    I.dD4CnOut.download(cn_out, nat, stream);
+    return cudaStreamSynchronize(stream) == cudaSuccess;
 }
 
 bool XtbGpuContext::d4PostScfDevice(int nat, const double* q_at, bool with_atm, double s9, double a1, double a2,

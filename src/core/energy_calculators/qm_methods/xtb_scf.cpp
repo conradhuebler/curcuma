@@ -205,6 +205,7 @@ int XTB::blasThreadsNow()
 
 void XTB::reduceToStandardForm(Eigen::MatrixXd& A, int n, int threads, bool& ok) const
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     ok = true;
     // -scf_reduce auto|sygst|trsm, -scf_reduce_threads N (Claude Generated, Sep 2026).
     // 'auto' with the default threshold of 8 is what this function did before.
@@ -242,6 +243,7 @@ void XTB::reduceToStandardForm(Eigen::MatrixXd& A, int n, int threads, bool& ok)
  * ------------------------------------------------------------------ */
 void XTB::buildOrthonormalizer()
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     const int nao = m_basis.nao;
     if (nao == 0 || m_S.rows() != nao) { m_X.resize(0, 0); return; }
 
@@ -298,6 +300,7 @@ void XTB::buildOrthonormalizer()
  * ------------------------------------------------------------------ */
 bool XTB::pseudoDiagStepCpu(const Matrix& F)
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     const int n = m_basis.nao;
     if (n < m_pseudo_min_nao || openShell() || m_X.rows() != n || m_wfn.C.rows() != n || m_wfn.C.cols() != n) return false;
     const long nel = std::lround(m_wfn.nocc);
@@ -349,6 +352,7 @@ bool XTB::pseudoDiagStepCpu(const Matrix& F)
 
 bool XTB::solveEigen(const Matrix& F, const Matrix& S)
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     const int nao = m_basis.nao;
     m_wfn.W_valid = false;            // only the purification path supplies W directly
 
@@ -1072,6 +1076,7 @@ void XTB::updatePopulationsFromPopAo(const Eigen::VectorXd& pop_ao)
  * ------------------------------------------------------------------ */
 Matrix XTB::buildFockFromPotential(const Potential& dpot) const
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     const int nao = m_basis.nao;
     const int nat = m_atomcount;
     Eigen::VectorXd v_ao;
@@ -1119,6 +1124,7 @@ void XTB::mullikenFromDensity(const Matrix& dP,
                                Eigen::MatrixXd& ddp_at,
                                Eigen::MatrixXd& dqp_at) const
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     const int nao = m_basis.nao;
     const int nsh = m_basis.nsh;
     const int nat = m_atomcount;

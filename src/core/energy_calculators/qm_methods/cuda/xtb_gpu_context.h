@@ -427,6 +427,10 @@ public:
                             const double* rcov_au, const double* q_at, const double* dp_at, const double* qp_at,
                             const double* mrad, const double* cn, const double* rad, const double* vcn,
                             double dmp3, double dmp5, double shift, double kexp, double rmax, double* grad_out);
+    /// EN-weighted covalent CN of dftd4 on the device (Claude Generated, Oct 2026); same tables and constants as
+    /// curcuma::dispersion::computeD4CovalentCN, cutoff in Bohr, cn_out [nat].
+    bool d4CovalentCnDevice(int nat, const int* Z, const double* xyz_bohr, const double* rad, const double* en,
+                            double kn, double k4, double k5, double k6, double cutoff, double* cn_out);
     /// xTB repulsion energy on the device (Claude Generated, Oct 2026); alpha / zeff are the per-atom parameters.
     bool repulsionEnergyDevice(int nat, bool is_gfn2, const int* z, const double* xyz_bohr, const double* alpha,
                                const double* zeff, double kexp, double rexp, double kexp_light, double* energy_out);

@@ -640,6 +640,13 @@ struct GpuScfBackend {
     { (void)nat; (void)is_gfn2; (void)with_mp; (void)xyz_bohr; (void)dEdcn; (void)rcov_au; (void)q_at;
       (void)dp_at; (void)qp_at; (void)mrad; (void)cn; (void)rad; (void)vcn; (void)dmp3; (void)dmp5;
       (void)shift; (void)kexp; (void)rmax; (void)grad_out; return false; }
+    /// Claude Generated (Oct 2026): D4 covalent CN and the Hamiltonian CN of the device-built integrals.
+    virtual bool d4CovalentCnDevice(int nat, const int* Z, const double* xyz_bohr, const double* rad,
+                                    const double* en, double kn, double k4, double k5, double k6, double cutoff,
+                                    double* cn_out)
+    { (void)nat; (void)Z; (void)xyz_bohr; (void)rad; (void)en; (void)kn; (void)k4; (void)k5; (void)k6;
+      (void)cutoff; (void)cn_out; return false; }
+    virtual bool downloadCn(double* cn_out, int nat) { (void)cn_out; (void)nat; return false; }
     /// Claude Generated (Oct 2026): xTB repulsion energy on the device (see XtbGpuContext::repulsionEnergyDevice).
     virtual bool repulsionEnergyDevice(int nat, bool is_gfn2, const int* z, const double* xyz_bohr,
                                        const double* alpha, const double* zeff, double kexp, double rexp,
@@ -812,13 +819,13 @@ public:
     double  getECoulombShell() const { return m_E_coulomb_shell; }
     double  getEThirdOrder()   const { return m_E_third_order; }
     double  getEMultipole()    const { return m_E_multipole; }
-    const Matrix& getOverlap() const { return m_S; }
+    const Matrix& getOverlap() const { ensureHostIntegrals(); return m_S; }
     // Bare Hamiltonian H0 (CN-shifted self-energies × hscale × overlap), the
     // reference for the Stage-3b GPU overlap/H0 validation. Claude Generated.
-    const Matrix& getBareHamiltonian() const { return m_H0; }
+    const Matrix& getBareHamiltonian() const { ensureHostIntegrals(); return m_H0; }
     // Shell-resolved Coulomb γ matrix (nsh×nsh), the reference for the Stage-3c
     // GPU gamma validation. Claude Generated.
-    const Eigen::MatrixXd& getGammaMatrix() const { return m_gamma; }
+    const Eigen::MatrixXd& getGammaMatrix() const { ensureHostIntegrals(); return m_gamma; }
     // GFN2 dipole (3) / traceless quadrupole (6) AO integral matrices (nao×nao),
     // the reference for the Stage-3d GPU multipole-integral validation. Built by
     // setupMultipole. Claude Generated.
@@ -1425,6 +1432,15 @@ private:
     bool m_mp_initialized = false;
     bool m_mp_ints_deferred = false;   // host m_dp_int/m_qp_int not built yet (GPU large system)
     bool m_wfn_on_device = false;      // converged P/C not downloaded yet (GPU large system)
+    /// Claude Generated (Oct 2026): S, H0, L (m_X) and gamma stay on the device after the device integral build and
+    /// are copied into the host matrices only when a host consumer asks (host SCF loop, host gradient, responses,
+    /// getters ...): downloaded from the device if it still holds this geometry, else rebuilt on the host.
+    /// CURCUMA_HOST_INTS_EAGER=1 downloads them at once as before.
+    void ensureHostIntegrals(const char* who = nullptr) const;
+    void ensureHostIntegralsImpl(const char* who);
+    mutable bool m_host_ints_deferred = false;
+    /// Oct 2026: hand the D4 generator the device-computed covalent CN (no host O(nat^2) loop in GenerateParameters).
+    void primeD4CnFromDevice(const Matrix& geom_bohr) const;
     bool m_dev_potentials = false;     // Oct 2026: the gradient reads the potentials the device built (no host m_pot)
 
     // B0 (Jul 2026): setupMultipole() sub-phase timings (ms), for the verbosity-3

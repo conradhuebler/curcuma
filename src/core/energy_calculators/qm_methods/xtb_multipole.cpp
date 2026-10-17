@@ -160,6 +160,7 @@ void XTB::setupMultipole(bool integrals_on_device, bool defer_amat)
     auto tmp_ao = tmp0, tmp_d = tmp0, tmp_shift = tmp0, tmp_cn = tmp0;
 
     if (!integrals_on_device) {
+    ensureHostIntegrals();   // origin shift below reads m_S
     // B1 (Jul 2026): as_cgto_shell() copies two std::vectors, and it used to be
     // called once per (mu,nu) AO pair -> ~nao^2 = 311k conversions (622k heap
     // allocations) on complex/231. The shells are geometry-independent, so build

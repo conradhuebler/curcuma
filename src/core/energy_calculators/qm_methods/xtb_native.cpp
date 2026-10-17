@@ -528,13 +528,22 @@ double XTB::Calculation(bool gradient)
     m_d4_prepared = false;
     m_d4_genparams_calls = 0;
 
-    // 1. Coordination numbers
-    Vector cn = computeCoordinationNumbers();
-    const auto t_cn = clock::now();
-
-    // 2. Self-energies
+    // 1. Coordination numbers + 2. self-energies. Claude Generated (Oct 2026): on the device-integral path the
+    // device computes both itself (beginComputed) and the CN is downloaded from there, so the host O(nat^2) loop
+    // is only run when the host builds the integrals (ensure_host_cn) or a host consumer needs it later.
+    Vector cn;
     Vector se;
-    getSelfEnergies(cn, se);
+    bool cn_ready = false;
+    auto ensure_host_cn = [&]() {
+        if (!cn_ready) {
+            cn = computeCoordinationNumbers();
+            getSelfEnergies(cn, se);
+            cn_ready = true;
+        }
+    };
+    const bool cn_from_device_ok = m_gpu_scf && m_scf_mode == ScfMode::Broyden && !std::getenv("CURCUMA_CN_HOST");
+    if (!cn_from_device_ok) ensure_host_cn();
+    const auto t_cn = clock::now();
 
     // 3+4. Overlap S, bare Hamiltonian H0, Cholesky L (=m_X), Coulomb gamma.
     // AP4 (Claude Generated): on the GPU device-resident path the device builds these
@@ -585,6 +594,14 @@ double XTB::Calculation(bool gradient)
             // old path.
             const auto td0 = clock::now();
             bool got = false;
+            // Claude Generated (Oct 2026): lazy host copies (ensureHostIntegrals); CURCUMA_HOST_INTS_EAGER=1 restores
+            // the immediate download. The host-driven loops, the host gradient and the responses ask for them.
+            const bool defer_ints = m_scf_mode == ScfMode::Broyden && !std::getenv("CURCUMA_HOST_INTS_EAGER");
+            if (defer_ints) {
+                got = true;
+                m_host_ints_deferred = true;
+                m_S.resize(0, 0); m_H0.resize(0, 0); m_X.resize(0, 0); m_gamma.resize(0, 0);
+            } else {
             m_S.resize(nao, nao);
             m_H0.resize(nao, nao);
             if (m_gpu_scf->downloadOverlapInto(m_S.data()) && m_gpu_scf->downloadH0Into(m_H0.data())) {
@@ -602,11 +619,21 @@ double XTB::Calculation(bool gradient)
                     got = true;
                 }
             }
+            }
             if (got) {
                 if (verb >= 3)
                     CurcumaLogger::info_fmt("    S/H0/L/gamma download into the host copies: {:.0f} ms",
                                             ms(td0, clock::now()));
                 integrals_from_device = true;
+                if (!cn_ready) {
+                    Vector cn_dev(m_atomcount);
+                    if (m_gpu_scf->downloadCn(cn_dev.data(), m_atomcount)) {
+                        cn = cn_dev;
+                        m_cn_cache = cn;            // the memo of computeCoordinationNumbers() for this geometry
+                        m_cn_cache_valid = true;
+                        cn_ready = true;
+                    }
+                }
                 if (verb >= 2)
                     CurcumaLogger::info("SCF: integrals built on GPU device "
                                         "(S/H0/Lowdin/gamma downloaded; host build skipped)");
@@ -622,6 +649,7 @@ double XTB::Calculation(bool gradient)
     auto t_gamma = t_cn;
     if (!integrals_from_device) {
         // Full host integral build (CPU path, or device build unavailable).
+        ensure_host_cn();
         getHamiltonianH0(se, S, H0);
         m_S  = S;
         m_H0 = H0;
@@ -690,6 +718,15 @@ double XTB::Calculation(bool gradient)
     if (m_solvation)
         m_solvation->update(m_atoms, m_geometry * AA_TO_AU);
     const auto t_setup = clock::now();
+    // Claude Generated (Oct 2026): host timing of the stretch between the integral setup and the first SCF iteration
+    // (CURCUMA_GPU_PROFILE / verbosity 3), to see what is still done on the host before the device loop starts.
+    std::vector<std::pair<std::string, double>> pre_t;
+    auto pre_tp = clock::now();
+    auto pre_mark = [&](const char* what) {
+        const auto now = clock::now();
+        pre_t.emplace_back(what, ms(pre_tp, now));
+        pre_tp = now;
+    };
 
     if (verb >= 3) {
         CurcumaLogger::info("Setup timing:");
@@ -1008,6 +1045,7 @@ double XTB::Calculation(bool gradient)
         if (m_wfn.qp_at.cols() != nat) m_wfn.qp_at = Eigen::MatrixXd::Zero(6, nat);
     }
 
+    pre_mark("initial guess (EEQ / warm start / fragments)");
     // Intra-iteration timing buckets (printed at verbosity >= 3). A handful of
     // steady_clock reads per phase — negligible vs the ms-scale work — so they
     // run unconditionally, matching the existing per-iter timer. Claude Generated.
@@ -1041,6 +1079,7 @@ double XTB::Calculation(bool gradient)
         CurcumaLogger::info_fmt("Eigensolve BLAS/LAPACK threads: {}{}", eig_threads,
                                 eig_cap > 0 ? " (eigensolver_max_threads cap)" : " (from -threads)");
 
+    pre_mark("thread budgets, eigensolver settings");
     // Device-resident SCF (Claude Generated, GPU port Stage 2). Enabled with the
     // default Broyden charge mixing and an available lower Cholesky factor L
     // (m_X). begin() uploads the geometry-constant H0/S/L once; the per-iteration
@@ -1055,7 +1094,7 @@ double XTB::Calculation(bool gradient)
     bool use_gpu_resident = false;
     bool gpu_multipole    = false;
     if (m_gpu_scf && mode == ScfMode::Broyden && (!m_has_dshell || m_gpu_scf->supportsDshell())
-        && m_X.rows() == m_basis.nao && m_X.cols() == m_basis.nao) {
+        && ((m_X.rows() == m_basis.nao && m_X.cols() == m_basis.nao) || m_host_ints_deferred)) {
         // Stage 3: the device-computed integral build (beginBasis once + beginComputed
         // per geometry: CN/S/H0/L on the device, no nao² upload) was hoisted into the
         // integral-build step above (AP4) so S/H0/L/gamma could be downloaded in place
@@ -1094,7 +1133,9 @@ double XTB::Calculation(bool gradient)
         // host potential (v_sh += γ·q_sh). γ is nsh² (cheap to download once per
         // geometry) and matches the CPU build to ~1e-13; the gemv stays on the
         // host (the rest of v_sh — third-order, D4 — is assembled there too).
-        if (use_gpu_resident && computed) {
+        // (Oct 2026: already in m_gamma when the integrals came from the device - the setup downloaded it; the second
+        // nsh^2 download cost 55 ms (GFN2) / 115 ms (GFN1) on peo201-water500 for the same numbers.)
+        if (use_gpu_resident && computed && !integrals_from_device) {
             Eigen::MatrixXd dev_gamma;
             if (m_gpu_scf->downloadGamma(dev_gamma)
                 && dev_gamma.rows() == m_gamma.rows()
@@ -1103,6 +1144,7 @@ double XTB::Calculation(bool gradient)
         }
     }
 
+    pre_mark("device-resident begin (H0/S/L, gamma download, multipole begin)");
     // Stage 5 (Part B3/B4, Claude Generated): full device GFN2 potential build.
     // When the backend supports it, the WHOLE per-iteration potential (γ·q_sh +
     // shell third-order + multipole v_dp/v_qp/v_at scalar shift + in-SCF D4) is
@@ -1225,6 +1267,7 @@ double XTB::Calculation(bool gradient)
                 : "SCF: device potential build unavailable; host potential build");
     }
 
+    pre_mark("device potential begin (D4 warm-up, multipole matrices, third order)");
     // Stage 6 (S6.5, Claude Generated): fully device-resident SCF loop. When the
     // backend supports it, the WHOLE per-iteration loop body (potential → Fock →
     // eigensolve → occupation → density → charges/moments → SCC energy → Broyden)
@@ -1258,6 +1301,7 @@ double XTB::Calculation(bool gradient)
                 : "SCF: resident-loop setup unavailable; host-driven device-potential loop");
     }
 
+    pre_mark("resident loop begin (D4 weights tables, Broyden)");
     // Claude Generated (Oct 2026): GFN1 on the fully device-resident loop (shell charges only; v_sh = gamma q_sh,
     // v_at = Gamma_A q_A^2). Needs the device-built integrals (resident gamma, L). Solvation keeps the host-driven
     // GFN1 device loop (the CM5 reaction field is not on the device). `-gpu_gfn1_resident false` /
@@ -1285,6 +1329,7 @@ double XTB::Calculation(bool gradient)
         }
     }
 
+    pre_mark("GFN1 resident loop begin");
     // AP1 (Claude Generated): GPU partial diagonalisation window. The device density
     // only needs the occupied(+buffer) eigenvectors, so the resident eigensolve can
     // compute just the lowest gpu_n_eig pairs (cusolverDnDsyevdx) instead of the full
@@ -1329,6 +1374,7 @@ double XTB::Calculation(bool gradient)
     // callback. Every other GPU path (host-driven device loops: ROCm, Vulkan, CUDA without the
     // resident loop) and a multi-GPU SCF split ignore the switch with one warning. Not counted
     // as a GPU fallback (nothing moves to the CPU), so -gpu_strict does not stop on it.
+    pre_mark("partial diagonalisation, deferred host integrals");
     ScfPrecondGuard precond_guard;
     struct DeviceGuardState { ScfPrecondGuard g; int fired_at = -1; double fnorm = 0.0; };
     std::shared_ptr<DeviceGuardState> device_guard;   // set only when M runs on the device
@@ -1429,10 +1475,12 @@ double XTB::Calculation(bool gradient)
 
     double resident_band = 0.0;   // Tr(P H0) of the last device-resident step
     double resident_ecoul = 0.0, resident_ethird = 0.0, resident_emp = 0.0;  // its SCC energies
+    pre_mark("preconditioner, SCF state");
     const auto t_scf_start = clock::now();
     m_pseudo_c_valid = false; m_pseudo_consecutive = 0; m_pseudo_used = false; m_eig_pseudo = false;   // Oct 2026
     m_pseudo_taken = m_pseudo_rejected = 0;
     int iter;
+    if (!use_resident_loop) ensureHostIntegrals();   // the host-driven loops read m_S / m_H0 / m_X
     for (iter = 0; iter < max_iter; ++iter) {
         const auto t_iter0 = clock::now();
 
@@ -2126,7 +2174,7 @@ double XTB::Calculation(bool gradient)
     // Claude Generated (Sep 2026): m_F is only read by debug dumps / consistency audits. With
     // deferred host multipole integrals (large system on the GPU) skip the O(nao^2) host
     // rebuild instead of forcing the 17 GB integral build just for it.
-    if (m_mp_ints_deferred || m_wfn_on_device)
+    if (m_mp_ints_deferred || m_wfn_on_device || m_host_ints_deferred)
         m_F.resize(0, 0);
     else
         m_F = buildFock(m_H0, m_S, m_pot);
@@ -2136,7 +2184,7 @@ double XTB::Calculation(bool gradient)
     // Claude Generated (Sep 2026): the device-resident step already evaluated these SCC energies
     // from the same converged output charges/moments the host would use (7320 atoms: 5 s of
     // O(nat^2) host work). Reused when the wavefunction stays on the device.
-    if (m_wfn_on_device) {
+    if (m_wfn_on_device || use_resident_loop) {
         m_E_coulomb_shell = resident_ecoul;
         m_E_third_order   = resident_ethird;
         m_E_multipole     = resident_emp;
@@ -2146,7 +2194,7 @@ double XTB::Calculation(bool gradient)
     }
     post_mark("Coulomb/third-order/multipole energies");
     // Band energy: Tr(P · H0) for electronic part (from the device when P stayed there)
-    m_E_electronic   += m_wfn_on_device ? resident_band : (m_wfn.P.cwiseProduct(m_H0)).sum();
+    m_E_electronic   += (m_wfn_on_device || use_resident_loop) ? resident_band : (m_wfn.P.cwiseProduct(m_H0)).sum();
     post_mark("band energy Tr(P H0)");
     // Electronic free-energy (Mermin/Fermi entropy) term g = -T*S. Zero for
     // gapped systems (occ ∈ {0,2}); only bites on small-gap systems with
@@ -2213,6 +2261,7 @@ double XTB::Calculation(bool gradient)
     else m_mo.resize(0, 0);
     m_energies = m_wfn.eps;
     m_num_electrons = static_cast<int>(m_wfn.nocc);
+    ensure_host_cn();
     m_coordination_numbers = cn;
 
     const auto t_grad0 = clock::now();
@@ -2301,6 +2350,10 @@ double XTB::Calculation(bool gradient)
         // Claude Generated (Sep 2026): the device uploads/EEQ guess/D4 warm-up between the
         // integral setup and the first SCF iteration were counted nowhere but TOTAL.
         CurcumaLogger::info_fmt("  pre-SCF      : {:8.2f} ms", ms(t_setup, t_scf_start));
+        if (verb >= 3 || std::getenv("CURCUMA_GPU_PROFILE")) {
+            for (const auto& [name, t] : pre_t)
+                CurcumaLogger::info_fmt("    pre-SCF: {:<62s} {:8.2f} ms", name, t);
+        }
         CurcumaLogger::info_fmt("  SCF ({:3d} it) : {:8.2f} ms", m_scf_iterations, ms(t_scf_start, t_scf_end));
         CurcumaLogger::info_fmt("  post-SCF E   : {:8.2f} ms", ms(t_scf_end, t_energies));
         if (gradient)
@@ -2391,6 +2444,7 @@ bool XTB::evaluateComponentsAtFixedDensity(
     const Eigen::MatrixXd& dp_at,
     const Eigen::MatrixXd& qp_at)
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     const int nat = m_basis.nat;
     const int nsh = m_basis.nsh;
     const int nao = m_basis.nao;
@@ -2491,6 +2545,7 @@ bool XTB::evaluateComponentsAtFixedDensity(
  * ------------------------------------------------------------------------- */
 void XTB::auditGfn2GradientTerms()
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     if (m_method != MethodType::GFN2 || !m_mp_initialized) {
         CurcumaLogger::warn("auditGfn2GradientTerms: needs a converged GFN2 + multipole state");
         return;
@@ -2906,6 +2961,8 @@ bool XTB::UpdateMolecule(const Matrix& geometry)
     //    Overlap and H0 depend on atom positions via STO-CGTO overlap integrals
     m_S.resize(0, 0);
     m_H0.resize(0, 0);
+    m_host_ints_deferred = false;   // Oct 2026: the lazy host copies belong to the old geometry
+    m_mp_amat_deferred = false;
 
     // 3. Fock matrix depends on geometry via H0 + potential
     m_F.resize(0, 0);
@@ -3055,6 +3112,59 @@ nlohmann::json XTB::getEnergyDecomposition() const
  *  GFN1 still uses D3 (separate AP) — returns 0 here for now, preserving
  *  the existing GFN1 behaviour at the cost of a small dispersion deficit.
  * ------------------------------------------------------------------------- */
+void XTB::ensureHostIntegrals(const char* who) const
+{
+    if (m_host_ints_deferred) const_cast<XTB*>(this)->ensureHostIntegralsImpl(who);
+}
+
+void XTB::ensureHostIntegralsImpl(const char* who)
+{
+    m_host_ints_deferred = false;    // first: the rebuild below calls functions that would ensure again
+    if (CurcumaLogger::get_verbosity() >= 3 || std::getenv("CURCUMA_GPU_PROFILE"))
+        CurcumaLogger::result(fmt::format("  host copies of S/H0/L/gamma fetched (first consumer: {})", who ? who : "getter"));
+    const int nao = m_basis.nao, nsh = m_basis.nsh;
+    bool got = false;
+    if (m_gpu_scf) {
+        m_S.resize(nao, nao);
+        m_H0.resize(nao, nao);
+        if (m_gpu_scf->downloadOverlapInto(m_S.data()) && m_gpu_scf->downloadH0Into(m_H0.data())) {
+            transposeSquareInPlace(m_S.data(), nao);
+            transposeSquareInPlace(m_H0.data(), nao);
+            got = m_gpu_scf->downloadCholesky(m_X) && m_gpu_scf->downloadGamma(m_gamma)
+                  && m_X.rows() == nao && m_gamma.rows() == nsh;
+        }
+    }
+    if (!got) {
+        // The device no longer holds this geometry (or a backend without raw downloads): the host build.
+        const Vector cn = computeCoordinationNumbers();
+        Vector se;
+        getSelfEnergies(cn, se);
+        Matrix S, H0;
+        getHamiltonianH0(se, S, H0);
+        m_S = S;
+        m_H0 = H0;
+        buildOrthonormalizer();
+        buildGammaMatrix();
+    }
+}
+
+// Claude Generated (Oct 2026): the dftd4 covalent CN of the next D4 GenerateParameters() from the device
+// (CURCUMA_D4_CN_DEVICE=0 keeps the host loop).
+void XTB::primeD4CnFromDevice(const Matrix& geom_bohr) const
+{
+    if (!m_gpu_scf || !m_d4_generator) return;
+    const char* env_off = std::getenv("CURCUMA_D4_CN_DEVICE");
+    if (env_off && env_off[0] == '0') return;
+    const int nat = m_atomcount;
+    std::vector<double> xyz(3 * static_cast<size_t>(nat)), cn(nat, 0.0);
+    for (int i = 0; i < nat; ++i)
+        for (int k = 0; k < 3; ++k) xyz[3 * i + k] = geom_bohr(i, k);
+    const auto tab = curcuma::dispersion::d4CovalentCNTables();
+    if (m_gpu_scf->d4CovalentCnDevice(nat, m_atoms.data(), xyz.data(), tab.rad, tab.en, tab.kn, tab.k4, tab.k5,
+                                      tab.k6, /*cutoff=*/30.0, cn.data()))
+        m_d4_generator->setPrecomputedCovalentCN(std::move(cn));
+}
+
 double XTB::calcDispersionEnergy(bool need_gradient) const
 {
     m_disp_gradient_valid = false;
@@ -3199,6 +3309,7 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
         // GFN2: use the dftd4 EN-weighted covalent CN (matches tblite's
         // get_coordination_number(rcov, en)) instead of the GFN-FF log-capped erf-CN.
         m_d4_generator->setD4CovalentCN(true);
+        primeD4CnFromDevice(geom_bohr);
         m_d4_generator->GenerateParameters(m_atoms, geom_bohr);
         ++m_d4_genparams_calls;
         m_d4_prepared = true;
@@ -3479,6 +3590,7 @@ bool XTB::computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const
     if (!m_d4_prepared) {
         m_d4_generator->setUseD4SingleShotEEQ(false);
         m_d4_generator->setD4CovalentCN(true);  // GFN2 dftd4 EN-weighted covalent CN
+        primeD4CnFromDevice(geom_bohr);
         m_d4_generator->GenerateParameters(m_atoms, geom_bohr);
         ++m_d4_genparams_calls;
         m_d4_prepared = true;

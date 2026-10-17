@@ -53,7 +53,7 @@ Stand.
 
 ## 2. Leistung
 
-- **Host-Rechnung im GPU-Lauf, Rest** (Stand 17. Okt. 2026): Auf der Karte sind jetzt D4/ATM nach dem SCF (GFN2), D3 (GFN1), Multipol-Matrizen, Abstoßungsenergie, Gradient-Schwanz und die Gradient-Potentiale (Tabelle in docs/GPU_TUNING.md). Offen: D4-CN + Gaussgewichte vor dem SCF (GenerateParameters, ~60 ms bei 2910 Atomen), Hamilton-CN (14 ms), GFN1-Halogenbindung, S/H0/L-Kopien auf den Host für Host-Rückfälle (0,2-0,4 s), die Verbosity-3-Stelle (GFN1, 9,5 s, nicht gefunden), ROCm/Vulkan unberührt. Mit `-threads 1` gleich schnell wie `-threads 16`: nichts davon skaliert.
+- **Host-Rechnung im GPU-Lauf, Rest** (Stand 17. Okt. 2026, zweite Runde): auf der Karte sind D4/ATM, D3, Multipol-Matrizen, Abstoßung, Gradient-Schwanz, Gradient-Potentiale, D4-CN, Hamilton-CN; S/H0/L/gamma werden nur auf Anforderung auf den Host kopiert (Tabelle in docs/GPU_TUNING.md). Offen: ROCm/Vulkan unberührt; Verbosity-3-Stelle (GFN1, 9,5 s, nicht gefunden); PR18 (MOR41) GFN2-Gradient springt selten um 4e-7 (GPU-Nichtreproduzierbarkeit, auch Host-gegen-Host). Mit `-threads 1` gleich schnell wie `-threads 16`: nichts davon skaliert.
 - **GFN2 auf der GPU, Eigenlöser = 73 % des Laufs** (polymer_2x, 1x A4500). Offen:
   (a) erledigt 15. Okt. 2026: `-scf_pseudo_diag` ist Standard (Betreiberentscheidung); polymer_2x 4x A4500 113,6 -> 90,0 s;
   (b) `-scf_pseudo_diag_fp64` auf einer GPU mit vollem FP64 (H200) messen;

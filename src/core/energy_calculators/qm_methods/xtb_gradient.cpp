@@ -50,6 +50,7 @@ namespace curcuma::xtb {
  * ========================================================================== */
 void XTB::calculateGradient()
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     const int nat = m_atomcount;
     const int nsh = m_basis.nsh;
     const int nao = m_basis.nao;
