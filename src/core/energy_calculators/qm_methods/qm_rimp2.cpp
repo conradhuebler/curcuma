@@ -272,19 +272,18 @@ bool QMEngine::computeRIMP2(const qmint::MP2Options& opt, qmint::MP2Result& res)
         const Matrix Co = m_mo.block(0, n_frozen, n, o);
         const Matrix Cv = m_mo.block(0, n_occ, n, v);
         const Matrix CoT = Co.transpose(), CvT = Cv.transpose();  // row-major o x n, v x n
-        const Matrix& T = ri->tensor();
-        const size_t n2 = (size_t)n * n;
 #ifdef _OPENMP
 #pragma omp parallel num_threads(threads)
 #endif
         {
-            std::vector<double> Y((size_t)o * n);
+            std::vector<double> Y((size_t)o * n), TQ((size_t)n * n);
 #ifdef _OPENMP
 #pragma omp for schedule(dynamic, 1)
 #endif
             for (int Q = 0; Q < nrows; ++Q) {
+                ri->unpackRow(Q, TQ.data());  // the tensor stores the packed lower triangle per row (qm_ri.h)
                 // T^Q is symmetric: (Co^T T^Q)[i][m] = sum_k CoT[i][k] T^Q[m][k]
-                qmint::gemmABt(CoT.data(), o, T.data() + (size_t)Q * n2, n, n, Y.data());
+                qmint::gemmABt(CoT.data(), o, TQ.data(), n, n, Y.data());
                 // (Q|ia) = sum_m Y[i][m] Cv[m][a] = sum_m Y[i][m] CvT[a][m]
                 qmint::gemmABt(Y.data(), o, CvT.data(), v, n, X.data() + (size_t)Q * ov);
             }

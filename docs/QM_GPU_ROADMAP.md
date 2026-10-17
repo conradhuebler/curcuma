@@ -539,6 +539,9 @@ therefore an opt-in method variant, not a replacement of the exact path.
 calls on the host (heptacene n=510: 16.6 -> 2.1 s), optionally as streamed cublasDtrsm (`-qm.gpu_ri_fit on`,
 `cuda/qm_gpu_ri_fit.cu`, default off: 1.8 s on the RTX 5090, slower below n ~ 450, 15.3 vs 23.9 s at n=970); the
 device K build (GEMM + SYRK) is at about half the FP64 peak of the card. GPU wall heptacene 31.9 -> 13.8 s, CPU
-65.7 -> 23.0 s. Memory limit on the 32 GB card: n <= ~930-955 (tensor 8 naux n^2 bytes); C40H82 (n=970, 33.7 GB)
-falls back to the CPU contractions. Table, energies, what was not tested:
-[WP10 doc, "Skalierung RI-JK"](DFT_ROADMAP/WP10_korrelation_ri_mpn_ccsd.md#skalierung-ri-jk-okt-2026).
+65.7 -> 23.0 s. Since then the 3-index tensor is stored packed (lower triangle, n(n+1)/2 columns, 8 naux n(n+1)/2
+bytes; device K unpacks per row block with the `unpackPairs` kernel in `cuda/qm_gpu_ri.cu`, plugin entry
+`curcuma_cuda_create_qm_ri_packed`): heptacene GPU 13.8 -> 12.4 s, CPU 23.2 -> 18.7 s, upload 444 -> 250 ms; memory
+limit on the 32 GB card n <= ~1155-1195 (estimated), C40H82 (n=970, 16.9 GB) now runs on the card, 146 -> 62 s.
+Tables, energies, what was not tested:
+[WP10 doc, "Skalierung RI-JK" and "Gepackter 3-Index-Tensor"](DFT_ROADMAP/WP10_korrelation_ri_mpn_ccsd.md#skalierung-ri-jk-okt-2026).

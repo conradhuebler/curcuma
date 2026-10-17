@@ -154,8 +154,9 @@ if a.check == "opt":
     sys.exit(0 if ok else 1)
 
 if a.check == "gradient_error":
-    # H2O/def2-SVP with def2-universal-JKFIT: tensor 0.52 MB (naux 113, n 24), the gradient needs as much again
-    rc, txt = run(["-method", "hf", "-qm.ri", a.ri, "-gradient", "-qm.ri_max_memory_mb", "0.8", "-verbosity", "1"])
+    # H2O/def2-SVP with def2-universal-JKFIT: packed tensor 0.27 MB (naux 113, n(n+1)/2 = 300; 0.52 MB before the
+    # packed layout, Oct 2026), the gradient needs as much again
+    rc, txt = run(["-method", "hf", "-qm.ri", a.ri, "-gradient", "-qm.ri_max_memory_mb", "0.4", "-verbosity", "1"])
     msg = "RI gradient not possible" in txt
     print(f"exit code {rc}, message {'found' if msg else 'missing'}")
     sys.exit(0 if (rc != 0 and msg) else 1)

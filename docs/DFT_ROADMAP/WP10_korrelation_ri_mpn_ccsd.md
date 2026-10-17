@@ -36,7 +36,7 @@ Metrik, Fit, Parser, Engine-Anbindung), `cuda/qm_gpu_ri.cu` + `qm_gpu_ri_backend
 - **Verfahren:** RI-J: `c = J^-1 g`, `g_P = (P|ls) D_ls`, `J_mn = (mn|P) c_P`; Austausch exakt (gespeicherter Tensor
   oder integral-direkt wie ohne RI, entspricht ORCA `RIJONX`). RI-JK (Weigend 2002): `B = L^-1 (P|mn)` mit
   `J = L L^T`, `K_mn = sum_Q (B^Q D B^Q)_mn` ueber `D = V S V^T` (Eigenvektoren von D, mit sqrt|lambda| skaliert),
-  einmal gespeichert (naux x n^2). Integrale: McMurchie-Davidson ueber Schalenpaare; eine Hilfsfunktion ist das Paar
+  einmal gespeichert (naux x n(n+1)/2, gepacktes unteres Dreieck je Zeile, Abschnitt "Gepackter 3-Index-Tensor"). Integrale: McMurchie-Davidson ueber Schalenpaare; eine Hilfsfunktion ist das Paar
   aus ihr und einer s-Funktion mit Exponent 0 am selben Zentrum. Hilfsfunktionen kugelfoermig (Nullraum des
   Laplace-Operators je L, gleiche Spanne wie die reellen Kugelflaechenfunktionen), mit `-qm.cartesian_d true`
   kartesisch wie die Orbitalbasis. **Max L der Hilfsbasen fuer H-Ne: 4 (g)** (JFIT Li-Ne, JKFIT B-Ne); mit der
@@ -59,8 +59,7 @@ Metrik, Fit, Parser, Engine-Anbindung), `cuda/qm_gpu_ri.cu` + `qm_gpu_ri_backend
   Korrelations-Hilfsbasis (Betreiberentscheidung Okt 2026; Abschnitt RI-MP2 unten).
 - **Nicht implementiert:** RI-C mit def2-SVP/C, hf-3c mit RI (ignoriert mit Warnung: HF-3c ist mit exakten Integralen in MINIX
   definiert, `qm_ri_hf3c_ignored`), offene Schalen, Elemente ab Na, integral-direktes RI, lokales Fitten,
-  Speicherkompression des 3-Index-Tensors (voll n^2, nicht n(n+1)/2), device-residenter SCF-Loop mit RI (RI laeuft
-  im Host-Loop).
+  device-residenter SCF-Loop mit RI (RI laeuft im Host-Loop).
 
 **Validierung (alle Zahlen gemessen, HF/def2-SVP, `-qm.scf_threshold 1e-10`):**
 
@@ -181,14 +180,73 @@ Zeiten (s Wand, je eine Messung, 16 Threads, Core Ultra 9 285K, RTX 5090, Standa
   Device (32 GB, 32.6 GB frei gemeldet): Tensor bis ~32.5 GB, also n <= ~930 (Acene) bis ~955 (Alkane); C40H82
   (n = 970, 33.7 GB) passt nicht, die Kontraktionen fallen gezaehlt auf die CPU (`qm_ri`). Host: Standard
   `-qm.ri_max_memory_mb 16000` begrenzt auf n <= ~735-755; darueber muss der Wert erhoeht werden (C40H82 mit 40000).
-  Der RI-JK-Gradient braucht zusaetzlich naux n^2 fuer G. Gepackte Speicherung (m >= n, n(n+1)/2 Spalten) wuerde Tensor,
-  Metrik-Loesung und Transfers halbieren (Device n <= ~1150-1200, Host-Standard ~925-950); **nicht umgesetzt**, weil
-  sie den Speichervertrag von `tensor()` aendert, den `coulomb`, `build`, `gradientDensities`, RI-MP2 (`qm_rimp2.cpp`)
-  und die Device-Naht (`QMGpuRI`, neuer Entpack-Kernel) lesen.
+  Der RI-JK-Gradient braucht zusaetzlich naux n^2 fuer G. (Stand vor der gepackten Speicherung, naechster Abschnitt.)
 - **Nicht getestet:** `-qm.gpu_ri_fit` Fehlerpfade (Device-Fehler vor/nach dem ersten Schreiben), ROCm/Vulkan (kein
   Eintrag, faellt gezaehlt zurueck), RI-JK mit `-qm.ri_metric eigen` bei grossen Systemen (`leftMultiplyRows` nur ueber
   `ctest -L qm_ri`), RI-Gradient und RI-MP2 ueber n = 180 hinaus, andere Thread-Zahlen als 8/16/24, andere CPUs/GPUs,
   wiederholte Messungen (alle Zeiten Einzelmessungen).
+
+### Gepackter 3-Index-Tensor (Okt 2026)
+
+**🤖 AI-generated, ⚙️ machine-tested; menschlicher Produktionstest steht aus.** (P|mn) und B^Q_mn sind symmetrisch in
+(m, n); jede Zeile von `RIJK::tensor()` haelt jetzt nur das untere Dreieck, Spalte `pairIndex(m, k) = m(m+1)/2 + k`
+(m >= k), n(n+1)/2 statt n^2 Spalten. Das ist die einzige Speicherform (kein Schalter, Begruendung unten).
+
+- **Setup:** schreibt nur das Dreieck; im Diagonalblock A == B bleibt der Wert mit m >= n, also derselbe, den die volle
+  Form (letzter Schreibzugriff) fuer beide Eintraege behielt. Metrik-Loesung (Host und `-qm.gpu_ri_fit`) wirkt nur auf
+  den Hilfsindex und laeuft unveraendert auf den halb so vielen Spalten. `CURCUMA_QM_RI_DUMP` entpackt auf n^2.
+- **Kontraktionen:** g_Q = sum_p T_Q,p w_p mit w = P_mm bzw. P_mk + P_km (`packContractionWeights`); J gepackt
+  akkumuliert und am Ende entpackt (`unpackSymmetric`). K (CPU, `RIJK::build`): je Zeile wird das Dreieck in einen
+  Puffer kopiert und als symmetrische Matrix mit V multipliziert (dsymm), dann SYRK wie bisher. Device
+  (`cuda/qm_gpu_ri.cu`): gepackt hochgeladen, g/J als dgemv auf den gepackten Spalten, fuer K entpackt ein Kernel
+  (`unpackPairs`) je Block von Zeilen in einen Puffer, danach GEMM + SYRK wie bisher. Plugin-Eintrag umbenannt in
+  `curcuma_cuda_create_qm_ri_packed` (ein altes Plugin wird gezaehlt abgelehnt statt den Tensor falsch zu lesen).
+- **Gradient:** G (naux x n(n+1)/2) ebenfalls gepackt, P darin symmetrisiert (bei exakt symmetrischem P ohne Wirkung);
+  `weightBlock` liest gepackt, die Device-Gewichte entstehen weiter auf dem Host. **RI-MP2:** je Zeile entpackt, dann die
+  bisherige Transformation (gleiche Zahlen).
+
+Zeiten (s, 16 Threads, Core Ultra 9 285K, RTX 5090, `-qm.ri jk`, Standard-SCF-Schwelle; Median aus 3 Laeufen ausser
+C40H82 = 1 Lauf; "vorher" = Binary von Commit 777d9708; GPU mit `-gpu cuda -qm.gpu_ri true -qm.gpu_scf true`):
+
+| System (n, naux) | Tensor MB | Setup ms CPU | ms/J-K CPU | Wand CPU | Upload ms GPU | ms/J-K GPU | Wand GPU |
+|---|---|---|---|---|---|---|---|
+| Benzol (114, 558) | 58 -> 29 | 44 -> 36 | 2.5 -> 1.5 | 0.14 -> 0.12 | 81 -> 66 | 13.4 -> 13.0 | 0.56 -> 0.45 |
+| Naphthalin (180, 894) | 232 -> 116 | 147 -> 112 | 12.0 -> 6.7 | 0.47 -> 0.34 | 80 -> 68 | 17.6 -> 16.7 | 0.75 -> 0.69 |
+| Anthracen (246, 1230) | 596 -> 299 | 380 -> 284 | 38.8 -> 21.2 | 1.40 -> 0.95 | 99 -> 80 | 26.4 -> 26.1 | 1.33 -> 1.21 |
+| Pentacen (378, 1902) | 2174 -> 1090 | 1425 -> 1023 | 161 -> 121 | 6.60 -> 5.17 | 212 -> 135 | 99.3 -> 97.5 | 5.15 -> 4.61 |
+| C20H42 (490, 2256) | 4333 -> 2171 | 2775 -> 1777 | 372 -> 289 | 11.3 -> 8.8 | 364 -> 213 | 165 -> 160 | 7.48 -> 6.25 |
+| Heptacen (510, 2574) | 5356 -> 2683 | 3851 -> 2589 | 510 -> 413 | 23.2 -> 18.7 | 444 -> 250 | 226 -> 228 | 13.8 -> 12.4 |
+| C40H82 (970, 4476) | 33692 -> 16863 | 33320 -> 18180 | 5048 -> 4152 | 147.6 -> 123.9 | - -> 1235 | 5082 (CPU) -> 1717 | 146.2 -> 62.1 |
+
+- **C40H82 passt jetzt auf die Karte:** vorher fiel die Kontraktion gezaehlt auf die CPU (`qm_ri`, 33.7 GB Tensor),
+  jetzt 16.9 GB auf dem Device, Wand 146 -> 62 s (mit `-qm.gpu_ri_fit on` 58.3 s, factor/B 12.1 -> 8.1 s). Beide mit
+  `-qm.ri_max_memory_mb 40000`: der Host-Standard 16000 reicht knapp nicht (16863 MB), die Meldung nennt die Groesse.
+- **Grenzen fuer n** (8 naux n(n+1)/2 Byte ~ 18.4 n^3 Alkane, 20.2 n^3 Acene): Host-Standard 16000 MB n <= ~925 (Acene)
+  bis ~955 (Alkane), vorher ~735-755; Device (32 GB, abzueglich ~1.1 GB Puffer) n <= ~1155 bis ~1195, vorher ~930-955.
+  Geschaetzt aus der Formel, nur C40H82 gemessen. Der RI-JK-Gradient braucht zusaetzlich naux n(n+1)/2 fuer G.
+- **Energien:** E_elec (10 Stellen) aller sieben Systeme, CPU und GPU, gleich dem Binary vorher, Ausnahme C20H42 GPU:
+  vorher -2163.0352272371, jetzt ...372 (= CPU-Wert; 1e-10, war schon vorher die GPU/CPU-Differenz).
+  Iterationen gleich bis auf C40H82 (CPU 19 -> 21, GPU 18; Konvergenztest auf dP, nur Summationsreihenfolge
+  verschieden, E_elec gleich).
+- **Kein Schalter:** nirgends langsamer als 5 % (schlechtester Fall Heptacen GPU ms/J-K +1 %, Wand -10 %); Energien
+  innerhalb 1e-10 Eh. Die CPU gewinnt durch den halben Speicherstrom im K-Aufbau (dsymm auf dem Dreieck), die GPU vor
+  allem durch Setup und Upload; der K-Aufbau auf dem Device bleibt FP64-rechenbegrenzt, der Entpack-Kernel kostet
+  dort ~1-2 %.
+- **Gradient und RI-MP2 gegen das Binary vorher** (`-qm.scf_threshold 1e-10`, 16 Threads): RI-MP2 (eigenes Setup und
+  RI-JK-Tensor der SCF wiederverwendet), Naphthalin und Anthracen, CPU und GPU: E(MP2 corr) auf 12 Stellen gleich.
+  RI-J-Gradient: max. Abweichung 1.4e-12 Eh/A. RI-JK-Gradient: 8.9e-11 (Naphthalin), 1.2e-10 (Anthracen), 2.7e-11 Eh/A
+  (Benzol); die Energie gleich auf 1e-12. Eingegrenzt an Benzol: der alte Host-Pfad war der Ausreisser -- alt mit
+  Device-Loesung (`-qm.gpu_ri_fit on`), neu Host, neu Device und `-qm.ri_metric eigen` liegen untereinander innerhalb
+  3e-13 bis 4e-12, alt Host liegt 2.7e-11 daneben; Threadzahl (1/8/16) und SCF-Schwelle (1e-10/1e-11) aendern den
+  Gradienten nur um <= 1.5e-12. Vermutete Ursache (nicht nachgewiesen): in der vollen Form wurden (m,n) und (n,m) in
+  verschiedenen Spaltenbloecken geloest, B war nicht bitweise symmetrisch, und der Gradient (zweite Metrik-Loesung) ist
+  darauf empfindlicher als die Energie. `ctest -L qm_ri` (Gradient vs PySCF, 5e-10 Eh/Bohr) gruen;
+  `CURCUMA_QM_RI_DUMP` (H2O) bitgleich zum Binary vorher (md5).
+- **Test angepasst:** `qm_ri_gradient_error` nutzte `-qm.ri_max_memory_mb 0.8`, mit dem halben Tensor (0.27 MB) passt
+  der Gradient dort jetzt hinein; Grenze auf 0.4 gesenkt (geprueft: mit 0.8 kein Fehler mehr, mit 0.4 die Meldung).
+- **Nicht getestet:** keine Messung von RI-Gradient/RI-MP2-Zeiten, `-qm.ri_metric
+  eigen` nur ueber `ctest -L qm_ri`, ROCm/Vulkan (keine Implementierung), andere GPUs/CPUs, Device-Speichergrenze
+  nicht ausgereizt (kein System zwischen n = 970 und ~1190 gerechnet).
 
 ## WP10 -- Gradient (RI-J, RI-JK)
 
@@ -419,8 +477,8 @@ Referenzen `scripts/rimp2_reference.py` -> `test_cases/qm_mp2/reference_ri.json`
   K = B_i B_j^T, Faktor 2 fuer i != j, Paarenergien in fester Reihenfolge summiert (unabhaengig von der Threadzahl).
   GPU: B einmal hochgeladen, je i-Block eine cuBLAS-DGEMM (FP64), Paarenergie-Kernel wie kanonisch (ohne
   i <-> j-Symmetrie). Kein Batching auf der CPU noetig (Zusatzspeicher je Thread v^2).
-- **Speicher:** Setup-Tensor naux n^2 (Grenze `-qm.ri_max_memory_mb`, Fehler mit Groessenangabe), B o v naux
-  zweimal (vor/nach Transposition, gleiche Grenze). Anthracen: Tensor 596 MB, B 92 MB.
+- **Speicher:** Setup-Tensor naux n(n+1)/2 (gepackt seit Okt 2026; Grenze `-qm.ri_max_memory_mb`, Fehler mit Groessenangabe), B o v naux
+  zweimal (vor/nach Transposition, gleiche Grenze). Anthracen: Tensor 596 MB (gepackt 299 MB), B 92 MB.
 - **GPU:** `-qm.gpu_mp2 auto|on|off` gilt fuer den kanonischen und den RI-Pfad (kein eigener Schalter); Fehler ->
   CPU, gezaehlt als `qm_ri_mp2`. Nur die Energie (GEMM + Summe) laeuft auf dem Device; Integrale, Metrik und
   B-Transformation bleiben auf dem Host.
@@ -503,7 +561,7 @@ Lauf inkl. SCF; kanonisch CPU mit `-qm.scf_direct off` (gespeicherter Tensor), G
   DF-Coulomb + exaktem Austausch 4e-12 bzw. 8.0e-11 Eh, von Hand, nicht im ctest), Metrik `eigen` mit verworfenen Funktionen, `-hessian`/`-md` mit ri-mp2, ROCm/Vulkan (keine
   Implementierung), Speichergrenzen-Fehler (nur Codepfad).
 - **Nicht implementiert gegenueber ORCA/PySCF:** def2-SVP/C (und jede andere -/C-Basis als Datei), RI-MP2-Gradient,
-  offene Schalen, integral-direkte 3-Index-Integrale (Setup-Tensor naux n^2 voll im Speicher), Batching der
+  offene Schalen, integral-direkte 3-Index-Integrale (Setup-Tensor naux n(n+1)/2 voll im Speicher), Batching der
   B-Transformation fuer sehr grosse Systeme, i <-> j-Symmetrie auf der GPU.
 
 ## WP12 -- MP3 bis MP5: gestrichen

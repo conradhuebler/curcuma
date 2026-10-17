@@ -8,7 +8,7 @@
 // Claude Generated (Oct 2026, WP10 scaling). AI-generated, machine-tested.
 //
 // qmri::RIJK::setup (mode jk, Cholesky metric) turns the Coulomb-normalised 3-index tensor T
-// (N x ncol, row-major on the host, ncol = n^2) into B = L^-1 T with J_n = L L^T. That solve costs
+// (N x ncol, row-major on the host, ncol = n(n+1)/2 packed pairs since Oct 2026, n^2 before) into B = L^-1 T with J_n = L L^T. That solve costs
 // N^2 ncol flops and was half of the GPU RI-JK wall time when it ran on the host. Here it runs as
 // cublasDtrsm on column chunks of T: the column-major view of columns c0..c0+w is X = T(:, c0:c0+w)^T
 // (w x N), and T := L^-1 T is X := X L^-T (side right, lower, transposed). Two streams, each with a

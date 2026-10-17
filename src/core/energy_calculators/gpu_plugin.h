@@ -122,9 +122,11 @@ std::unique_ptr<qmint::QMGpuGrad1e> createQmGrad1e(const std::string& backend, c
                                                    const qmint::QMGpuGrad1eExtra& extra, int device, std::string& why);
 
 /**
- * Native-QM density-fitting contractions (WP10): uploads the fitted 3-index tensor T (nfit x n^2,
- * row-major, host pointer) once; J/K builds then run as cuBLAS GEMMs (qm_gpu_ri_backend.h). nullptr
- * with a reason in `why` when the plugin/entry point is missing or the tensor does not fit.
+ * Native-QM density-fitting contractions (WP10): uploads the fitted 3-index tensor T (nfit x n(n+1)/2,
+ * packed lower triangle per row, row-major, host pointer) once; J/K builds then run as cuBLAS GEMMs
+ * (qm_gpu_ri_backend.h). Entry point curcuma_<backend>_create_qm_ri_packed (renamed with the packed
+ * layout, Oct 2026, so an older plugin is refused instead of misreading the tensor). nullptr with a
+ * reason in `why` when the plugin/entry point is missing or the tensor does not fit.
  * Claude Generated (Oct 2026).
  */
 std::unique_ptr<qmint::QMGpuRI> createQmRI(const std::string& backend, const double* T, int nfit, int n, int device,

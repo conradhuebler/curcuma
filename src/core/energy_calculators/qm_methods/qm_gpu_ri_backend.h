@@ -14,21 +14,23 @@
 
 namespace qmint {
 
-/// Device-resident fitted 3-index tensor T (nfit x n^2, row Q = symmetric n x n block) and the
-/// GEMM contractions of one RI J/K build (cuBLAS, FP64). The integrals, the metric and the
+/// Device-resident fitted 3-index tensor T (nfit x n(n+1)/2: row Q = packed lower triangle of the
+/// symmetric n x n block T_Q, column pairIndex(m, k) = m(m+1)/2 + k for m >= k, see qm_ri.h; packed since
+/// Oct 2026) and the contractions of one RI J/K build (cuBLAS, FP64). The integrals, the metric and the
 /// factorisation stay on the host (qmri::RIJK::setup); per build the host also forms the density
-/// factor V (eigenvectors of P, n^3) and, in mode j, c = J^-1 g (N^2). Every call returns false on a
-/// device error; the caller then runs the CPU contraction.
+/// factor V (eigenvectors of P, n^3, or sqrt(2) C_occ) and, in mode j, c = J^-1 g (N^2). Every call
+/// returns false on a device error; the caller then runs the CPU contraction.
 class QMGpuRI {
 public:
     virtual ~QMGpuRI() = default;
     virtual std::string name() const = 0;
-    /// g_Q = sum_mn T_Q,mn P_mn  (P: n x n, row-major; g: nfit)
-    virtual bool contract(const double* P, double* g) = 0;
-    /// J_mn = sum_Q T_Q,mn c_Q  (J: n x n, row-major)
+    /// g_Q = sum_p T_Q,p w_p with the packed contraction weights w of P (qmri::packContractionWeights:
+    /// P_mm, P_mk + P_km), i.e. sum_mk T_Q,mk P_mk  (w: n(n+1)/2; g: nfit)
+    virtual bool contract(const double* w, double* g) = 0;
+    /// J_p = sum_Q T_Q,p c_Q  (J: packed lower triangle, n(n+1)/2)
     virtual bool coulomb(const double* c, double* J) = 0;
     /// K = sum_Q (T_Q V+)(T_Q V+)^T - (T_Q V-)(T_Q V-)^T; V is n x r COLUMN-major, its first npos columns
-    /// carry the positive eigenvalues of P (K: n x n, row-major).
+    /// carry the positive eigenvalues of P (K: n x n full, row-major). T_Q is unpacked on the device per chunk.
     virtual bool exchange(const double* V, int r, int npos, double* K) = 0;
 };
 

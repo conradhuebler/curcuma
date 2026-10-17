@@ -119,13 +119,13 @@ BEGIN_PARAMETER_DEFINITION(qm)
           "ri_metric eigen: eigenvalue cutoff of the Coulomb-normalised metric ((P|P) = 1).",
           "DensityFitting", {})
     PARAM(ri_max_memory_mb, Double, 16000.0,
-          "Host memory limit for the stored 3-index tensor (naux x n^2 x 8 bytes, MB). Above it the SCF stops with an error (no silent switch to the exact path).",
+          "Host memory limit for the stored 3-index tensor (naux x n(n+1)/2 x 8 bytes, packed lower triangle, MB). Above it the SCF stops with an error (no silent switch to the exact path).",
           "DensityFitting", {})
     PARAM(gpu_ri, String, "auto",
           "With -gpu cuda|auto and -qm.ri j|jk: the RI contractions (J from the 3-index tensor, K as GEMM + SYRK, cuBLAS FP64) on the device; integrals and metric stay on the host. auto | on | off. Any device error falls back to the CPU and is counted as qm_ri.",
           "DensityFitting", {})
     PARAM(gpu_ri_fit, String, "off",
-          "With -gpu cuda|auto, -qm.ri jk, the Cholesky metric and -qm.gpu_ri not off: on = the setup solve B = L^-1 (P|mn) (naux^2 n^2 flops) as cublasDtrsm on streamed column chunks instead of the threaded host solve; B returns to the host (gradient, RI-MP2, CPU fallback use it). Same result up to the summation order. Default off: on an RTX 5090 (FP64 1/64 rate) it saved 0.4 s at 510 basis functions and was slower below ~450. off | on | auto (= on). A device error before any write falls back to the host solve, after a partial write the setup is repeated on the host; both are counted as qm_ri_fit.",
+          "With -gpu cuda|auto, -qm.ri jk, the Cholesky metric and -qm.gpu_ri not off: on = the setup solve B = L^-1 (P|mn) (naux^2 n(n+1)/2 flops on the packed pairs) as cublasDtrsm on streamed column chunks instead of the threaded host solve; B returns to the host (gradient, RI-MP2, CPU fallback use it). Same result up to the summation order. Default off: on an RTX 5090 (FP64 1/64 rate) it saved 0.4 s at 510 basis functions and was slower below ~450. off | on | auto (= on). A device error before any write falls back to the host solve, after a partial write the setup is repeated on the host; both are counted as qm_ri_fit.",
           "DensityFitting", {})
     PARAM(gpu_ri_grad, String, "auto",
           "With -gpu cuda|auto and -qm.ri j|jk: the 3-index part of the RI gradient (derivative integrals (mn|P)^x contracted with the 3-index density) on the device; densities, metric part and the RI-J exact exchange gradient stay on the host. auto | on | off. Any device error falls back to the CPU and is counted as qm_ri_grad.",

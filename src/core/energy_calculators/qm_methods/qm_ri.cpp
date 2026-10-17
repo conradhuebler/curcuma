@@ -31,6 +31,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -686,6 +687,31 @@ Matrix coulombMetric(const std::vector<Shell>& aux, bool spherical, int threads)
 // 4. RIJK
 // =================================================================================
 
+// Packed lower triangle -> full symmetric block (Claude Generated, Oct 2026): the lower rows are contiguous
+// in the packed vector (memcpy), the upper triangle is mirrored in 32 x 32 tiles (cache-friendly transpose).
+void unpackSymmetric(const double* p, int n, double* f)
+{
+    for (int m = 0; m < n; ++m) std::memcpy(f + (size_t)m * n, p + (size_t)m * (m + 1) / 2, sizeof(double) * (size_t)(m + 1));
+    constexpr int bs = 32;
+    for (int i0 = 0; i0 < n; i0 += bs)
+        for (int j0 = 0; j0 <= i0; j0 += bs) {
+            const int i1 = std::min(n, i0 + bs), j1 = std::min(n, j0 + bs);
+            for (int i = i0; i < i1; ++i)
+                for (int j = j0, je = std::min(j1, i); j < je; ++j) f[(size_t)j * n + i] = f[(size_t)i * n + j];
+        }
+}
+
+void packContractionWeights(const Matrix& P, std::vector<double>& w)
+{
+    const int n = (int)P.rows();
+    w.resize((size_t)n * (n + 1) / 2);
+    for (int m = 0; m < n; ++m) {
+        double* wm = w.data() + (size_t)m * (m + 1) / 2;
+        for (int k = 0; k < m; ++k) wm[k] = P(m, k) + P(k, m);
+        wm[m] = P(m, m);
+    }
+}
+
 bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const std::vector<Shell>& aux,
                  const RIOptions& opt, std::string& why)
 {
@@ -702,10 +728,11 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
     m_n = oo.n;
     m_naux = ao.n;
     const int n = m_n, N = m_naux;
-    const double need_mb = (double)N * n * n * 8.0 / 1.0e6 * (opt.metric == "eigen" && opt.mode == "jk" ? 2.0 : 1.0);
+    const Eigen::Index np = npair();  // packed columns n(n+1)/2 (Oct 2026; before n^2)
+    const double need_mb = (double)N * np * 8.0 / 1.0e6 * (opt.metric == "eigen" && opt.mode == "jk" ? 2.0 : 1.0);
     if (need_mb > opt.max_memory_mb) {
-        why = fmt::format("3-index tensor needs {:.0f} MB (naux {} x n^2 {}), above -qm.ri_max_memory_mb {:g}", need_mb, N,
-                          (long)n * n, opt.max_memory_mb);
+        why = fmt::format("3-index tensor needs {:.0f} MB (naux {} x n(n+1)/2 {}, packed), above -qm.ri_max_memory_mb {:g}", need_mb, N,
+                          (long)np, opt.max_memory_mb);
         return false;
     }
 
@@ -734,9 +761,12 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
     for (int c = 0; c < naux_sh; ++c) m_asch[c] = apairs[c].schwarz;
     const double t_schwarz = msSince(t0);
 
-    // 3-index tensor T(P, m*n + nn) = (P|m nn) in the active orbital basis
+    // 3-index tensor T(P, pairIndex(m, nn)) = (P|m nn) in the active orbital basis, lower triangle only. In a
+    // diagonal shell block (A == B) both (a,b) and (b,a) are computed; the one with m >= nn is kept, which is
+    // the value the full n^2 layout kept for both entries (last write in loop order), so the packed tensor
+    // holds the same numbers.
     const auto t1 = std::chrono::steady_clock::now();
-    Matrix T3 = Matrix::Zero(N, (Eigen::Index)n * n);
+    Matrix T3 = Matrix::Zero(N, np);
     long blocks = 0, skipped = 0;
 #pragma omp parallel for schedule(dynamic) num_threads(threads) reduction(+ : blocks, skipped)
     for (int k = 0; k < npairs; ++k) {
@@ -756,11 +786,10 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
             for (int a = 0; a < d[0]; ++a)
                 for (int b = 0; b < d[1]; ++b) {
                     const int m = oo.first[A] + a, nn = oo.first[B] + b;
+                    if (A == B && m < nn) continue;
                     const double* v = &buf[((size_t)a * d[1] + b) * d[2]];
-                    for (int p = 0; p < d[2]; ++p) {
-                        T3(ao.first[c] + p, (Eigen::Index)m * n + nn) = v[p];
-                        T3(ao.first[c] + p, (Eigen::Index)nn * n + m) = v[p];
-                    }
+                    const Eigen::Index col = pairIndex(m, nn);
+                    for (int p = 0; p < d[2]; ++p) T3(ao.first[c] + p, col) = v[p];
                 }
         }
     }
@@ -772,7 +801,8 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
     const double t_2c = msSince(t2);
     if (const char* dump = std::getenv("CURCUMA_QM_RI_DUMP"); dump && dump[0] != '\0') {
         m_raw_metric = Jraw;
-        m_raw_T3 = T3;
+        m_raw_T3.resize(N, (Eigen::Index)n * n);  // full n^2 columns for the dump (diagnostic)
+        for (int P = 0; P < N; ++P) unpackSymmetric(T3.data() + (size_t)P * np, n, m_raw_T3.data() + (size_t)P * n * n);
     }
 
     // Coulomb normalisation: every aux function scaled to (P|P) = 1. The fit is invariant to it;
@@ -912,8 +942,9 @@ void RIJK::fitRows(Matrix& X) const
 Matrix RIJK::coulomb(const Matrix& P) const
 {
     const int n = m_n, threads = std::max(1, m_opt.threads);
-    const Matrix Pc = P;  // contiguous row-major
-    const Eigen::Index ncol = (Eigen::Index)n * n;
+    std::vector<double> Pw;  // packed contraction weights (P_mm, P_mk + P_km)
+    packContractionWeights(P, Pw);
+    const Eigen::Index ncol = npair();
     // g_Q = sum_mn T_Q,mn P_mn (one dot product per row). Rows of the tensor, not m_nfit: in mode j
     // with the eigen metric the tensor keeps all naux rows while m_nfit counts the kept eigenvalues
     // (fixed Oct 2026; before, a dropped eigenvalue in mode j read past g).
@@ -923,17 +954,17 @@ Matrix RIJK::coulomb(const Matrix& P) const
     for (int Q = 0; Q < rows; ++Q) {
         const double* t = m_T.data() + (size_t)Q * ncol;
         double s = 0.0;
-        for (Eigen::Index k = 0; k < ncol; ++k) s += t[k] * Pc.data()[k];
+        for (Eigen::Index k = 0; k < ncol; ++k) s += t[k] * Pw[k];
         g(Q) = s;
     }
     const Eigen::VectorXd c = fitCoefficients(g);
-    // J_mn = sum_Q c_Q T_Q,mn (column chunks in parallel, Q summed in order)
-    Matrix J(n, n);
+    // J_p = sum_Q c_Q T_Q,p over the packed pairs (column chunks in parallel, Q summed in order), then unpacked
+    std::vector<double> Jp((size_t)ncol);
     const Eigen::Index chunk = 1024, nchunks = (ncol + chunk - 1) / chunk;
 #pragma omp parallel for schedule(static) num_threads(threads)
     for (Eigen::Index b = 0; b < nchunks; ++b) {
         const Eigen::Index c0 = b * chunk, w = std::min(chunk, ncol - c0);
-        double* out = J.data() + c0;
+        double* out = Jp.data() + c0;
         for (Eigen::Index k = 0; k < w; ++k) out[k] = 0.0;
         for (int Q = 0; Q < rows; ++Q) {
             const double cq = c(Q);
@@ -941,6 +972,8 @@ Matrix RIJK::coulomb(const Matrix& P) const
             for (Eigen::Index k = 0; k < w; ++k) out[k] += cq * t[k];
         }
     }
+    Matrix J(n, n);
+    unpackSymmetric(Jp.data(), n, J.data());
     return J;
 }
 
@@ -986,21 +1019,24 @@ void RIJK::build(const Matrix& P, Matrix& J, Matrix* K, const Eigen::MatrixXd* V
     const Eigen::MatrixXd& V = *Vp;
     const int r = (int)V.cols(), nneg = r - npos;
     // One pass over B for J and K (Claude Generated, Oct 2026; before: J = coulomb(P), two more passes over the
-    // naux x n^2 tensor, then K). nq consecutive rows of the row-major tensor are, read column-major,
-    // M = [B^Q0 .. B^Q0+nq-1] (n x nq n, every block symmetric), so Y = M^T V (nq n x r, dgemm) holds
-    // X^q = B^q V in row block q. Then, per batch:
+    // naux x n^2 tensor, then K). Per batch of nq fit rows, per row q:
+    //   X^q = B^q V   (n x r; B^q is stored as its packed lower triangle, copied into a full-storage buffer of
+    //                  which only the triangle is valid, and multiplied as a symmetric matrix, dsymm)
     //   g_q = Tr(B^q P) = sum_k s_k v_k . X^q_{:,k}      (the Coulomb fit coefficient; mode jk: c = g)
-    //   J  += g_q B^q                                    (while B^q is still in cache)
+    //   J_p += g_q B^q_p                                 (packed, while B^q is still in cache)
+    // X^q is row block q of Y (nq n x r, column-major), then
     //   K  += Y+ Y+^T - Y- Y-^T                          (rank updates, dsyrk; the first npos columns of Y
     //                                                     read as one column-major n x (nq npos) matrix are
     //                                                     [.. (X^q)_{:,k} ..])
-    // The same GEMM + SYRK as the device (cuda/qm_gpu_ri.cu). Single-threaded BLAS calls, our own OpenMP over the
-    // batches; per thread private J and lower-triangle K, batches statically distributed (deterministic for a
-    // fixed thread count), summed in thread order. J equals coulomb(P) up to the summation order and the
+    // The same SYRK as the device (cuda/qm_gpu_ri.cu). Single-threaded BLAS calls, our own OpenMP over the
+    // batches; per thread private packed J and lower-triangle K, batches statically distributed (deterministic
+    // for a fixed thread count), summed in thread order. J equals coulomb(P) up to the summation order and the
     // eigenvalues factorDensity drops (|lambda| <= 1e-13 max|lambda|; none with the orbital factor).
+    const Eigen::Index np = npair();
     const int nq = std::clamp(512 / std::max(1, r) + 1, 1, 64);  // SYRK depth nq * r >= 512
     const int nbatch = (m_nfit + nq - 1) / nq;
-    std::vector<Eigen::MatrixXd> Kt(threads), Jt(threads);
+    std::vector<Eigen::MatrixXd> Kt(threads);
+    std::vector<std::vector<double>> Jt(threads);
 #pragma omp parallel num_threads(threads)
     {
 #ifdef _OPENMP
@@ -1009,24 +1045,26 @@ void RIJK::build(const Matrix& P, Matrix& J, Matrix* K, const Eigen::MatrixXd* V
         const int tid = 0;
 #endif
         Eigen::MatrixXd& Kl = Kt[tid];
-        Eigen::MatrixXd& Jl = Jt[tid];
+        std::vector<double>& Jl = Jt[tid];
         Kl = Eigen::MatrixXd::Zero(n, n);
-        Jl = Eigen::MatrixXd::Zero(n, n);
-        Eigen::MatrixXd Y;
+        Jl.assign((size_t)np, 0.0);
+        Eigen::MatrixXd Y, F = Eigen::MatrixXd::Zero(n, n);  // only the upper triangle is ever written/read
 #pragma omp for schedule(static)
         for (int b = 0; b < nbatch; ++b) {
             const int Q0 = b * nq, cnt = std::min(nq, m_nfit - Q0);
-            const double* base = m_T.data() + (size_t)Q0 * n * n;
-            Eigen::Map<const Eigen::MatrixXd> M(base, n, (Eigen::Index)cnt * n);
             Y.resize((Eigen::Index)cnt * n, r);
-            Y.noalias() = M.transpose() * V;
             for (int q = 0; q < cnt; ++q) {
+                const double* tq = m_T.data() + (size_t)(Q0 + q) * np;
+                // column-major F(k, m) = B^q_mk for k <= m: the upper triangle of F holds the packed rows
+                for (int m = 0; m < n; ++m) std::memcpy(F.data() + (size_t)m * n, tq + (size_t)m * (m + 1) / 2, sizeof(double) * (size_t)(m + 1));
+                Y.middleRows((Eigen::Index)q * n, n).noalias() = F.selfadjointView<Eigen::Upper>() * V;
                 double g = 0.0;
                 for (int k = 0; k < r; ++k) {
                     const double d = V.col(k).dot(Y.col(k).segment((Eigen::Index)q * n, n));
                     g += k < npos ? d : -d;
                 }
-                Jl.noalias() += g * Eigen::Map<const Eigen::MatrixXd>(base + (size_t)q * n * n, n, n);
+                double* jl = Jl.data();
+                for (Eigen::Index p = 0; p < np; ++p) jl[p] += g * tq[p];
             }
             if (npos > 0) {
                 Eigen::Map<const Eigen::MatrixXd> Yp(Y.data(), n, (Eigen::Index)cnt * npos);
@@ -1038,22 +1076,22 @@ void RIJK::build(const Matrix& P, Matrix& J, Matrix* K, const Eigen::MatrixXd* V
             }
         }
     }
-    Eigen::MatrixXd Ks = Eigen::MatrixXd::Zero(n, n), Js = Eigen::MatrixXd::Zero(n, n);
+    Eigen::MatrixXd Ks = Eigen::MatrixXd::Zero(n, n);
+    std::vector<double> Js((size_t)np, 0.0);
     for (int t = 0; t < threads; ++t) {
         if (Kt[t].size())
             for (int q = 0; q < n; ++q)
                 for (int m = q; m < n; ++m) Ks(m, q) += Kt[t](m, q);
-        if (Jt[t].size()) Js += Jt[t];
+        if (!Jt[t].empty())
+            for (Eigen::Index p = 0; p < np; ++p) Js[p] += Jt[t][p];
     }
     Matrix Kf(n, n), Jf(n, n);
     for (int q = 0; q < n; ++q)
         for (int m = q; m < n; ++m) {
             Kf(m, q) = Ks(m, q);
             Kf(q, m) = Ks(m, q);
-            const double jm = 0.5 * (Js(m, q) + Js(q, m));  // exactly symmetric (each B^q is)
-            Jf(m, q) = jm;
-            Jf(q, m) = jm;
         }
+    unpackSymmetric(Js.data(), n, Jf.data());
     J = Jf;
     *K = Kf;
 }
@@ -1299,14 +1337,16 @@ bool RIJK::gradientDensities(const Matrix& P, Eigen::VectorXd& c, Matrix& G, Eig
     const int n = m_n, N = m_naux, threads = std::max(1, m_opt.threads);
     const int rows = (int)m_T.rows();  // mode jk: nfit (B), mode j: naux (T_n)
     const Matrix Pc = P;               // contiguous row-major
-    const Eigen::Index ncol = (Eigen::Index)n * n;
-    // g_Q = sum_mn T_Q,mn P_mn
+    const Eigen::Index ncol = npair(); // packed tensor and G columns
+    std::vector<double> Pw;
+    packContractionWeights(Pc, Pw);
+    // g_Q = sum_mn T_Q,mn P_mn = sum_p T_Q,p w_p
     Eigen::VectorXd gq(rows);
 #pragma omp parallel for schedule(static) num_threads(threads)
     for (int Q = 0; Q < rows; ++Q) {
         const double* t = m_T.data() + (size_t)Q * ncol;
         double s = 0.0;
-        for (Eigen::Index k = 0; k < ncol; ++k) s += t[k] * Pc.data()[k];
+        for (Eigen::Index k = 0; k < ncol; ++k) s += t[k] * Pw[k];
         gq(Q) = s;
     }
     Eigen::VectorXd cn;
@@ -1344,10 +1384,11 @@ bool RIJK::gradientDensities(const Matrix& P, Eigen::VectorXd& c, Matrix& G, Eig
     Matrix Ws(rows, r2);
 #pragma omp parallel num_threads(threads)
     {
-        std::vector<double> X((size_t)n * r);
+        std::vector<double> X((size_t)n * r), Bfull((size_t)n * n);
 #pragma omp for schedule(static)
         for (int Q = 0; Q < rows; ++Q) {
-            const double* B = m_T.data() + (size_t)Q * ncol;
+            unpackRow(Q, Bfull.data());
+            const double* B = Bfull.data();
             std::fill(X.begin(), X.end(), 0.0);
             for (int m = 0; m < n; ++m) {
                 double* xm = &X[(size_t)m * r];
@@ -1411,18 +1452,18 @@ bool RIJK::gradientDensities(const Matrix& P, Eigen::VectorXd& c, Matrix& G, Eig
                     for (int l = 0; l < r; ++l) um[l] += v * wk[l];
                 }
             }
-            // G^P = c_P P - 1/2 D_PP U V^T (symmetric: lower triangle computed and mirrored)
+            // G^P = c_P P - 1/2 D_PP U V^T (symmetric: packed lower triangle; P symmetrised, which changes
+            // nothing for an exactly symmetric density)
             double* y = G.data() + (size_t)Pi * ncol;
             const double cp = c(Pi), dp = -0.5 * m_dn(Pi);
             for (int m = 0; m < n; ++m) {
                 const double* um = &U[(size_t)m * r];
+                double* ym = y + (size_t)m * (m + 1) / 2;
                 for (int l = 0; l <= m; ++l) {
                     const double* vl = &Vr[(size_t)l * r];
                     double sum = 0.0;
                     for (int k = 0; k < r; ++k) sum += um[k] * vl[k];
-                    const double vml = cp * Pc(m, l) + dp * sum;
-                    y[(size_t)m * n + l] = vml;
-                    y[(size_t)l * n + m] = cp * Pc(l, m) + dp * sum;
+                    ym[l] = cp * (l == m ? Pc(m, m) : 0.5 * (Pc(m, l) + Pc(l, m))) + dp * sum;
                 }
             }
         }
@@ -1491,7 +1532,8 @@ bool weightBlock(const GradSetup& gs, const std::vector<Shell>& aux, int k, int 
     double gmax = 0.0;
     for (int i = 0; i < wA; ++i)
         for (int j = 0; j < wB; ++j) {
-            const Eigen::Index col = (Eigen::Index)(gs.oo.first[A] + i) * n + gs.oo.first[B] + j;
+            const int m = gs.oo.first[A] + i, l = gs.oo.first[B] + j;
+            const Eigen::Index col = fullG ? pairIndex(m, l) : (Eigen::Index)m * n + l;  // G packed, P full
             double* o = &blk[((size_t)i * wB + j) * wC];
             for (int s = 0; s < wC; ++s) {
                 const int Pi = gs.ao.first[cs] + s;
@@ -2051,13 +2093,16 @@ bool QMEngine::gpuRIBuild(const Matrix& P, Matrix& J, Matrix* K, const Eigen::Ma
                                             m_ri->tensorMB(), msGlue(t0)));
     }
     const int n = m_ri->n();
-    const Matrix Pc = P;
     J = Matrix::Zero(n, n);
-    // Coulomb: g = T . vec(P) on the device; mode j needs c = J^-1 g on the host (N^2), then J = T^T c
+    // Coulomb on the packed tensor: g = T . w (w = packed contraction weights of P) on the device; mode j needs
+    // c = J^-1 g on the host (N^2), then J_p = T^T c, unpacked on the host
+    std::vector<double> Pw, Jp((size_t)m_ri->npair());
+    qmri::packContractionWeights(P, Pw);
     std::vector<double> g((size_t)m_ri->tensor().rows());  // mode j: naux rows (see RIJK::coulomb)
-    if (!m_gpu_ri_dev->contract(Pc.data(), g.data())) return fail("device g = T vec(P) failed");
+    if (!m_gpu_ri_dev->contract(Pw.data(), g.data())) return fail("device g = T w(P) failed");
     Eigen::VectorXd c = m_ri->fitCoefficients(Eigen::Map<const Eigen::VectorXd>(g.data(), (Eigen::Index)g.size()));
-    if (!m_gpu_ri_dev->coulomb(c.data(), J.data())) return fail("device J = T^T c failed");
+    if (!m_gpu_ri_dev->coulomb(c.data(), Jp.data())) return fail("device J = T^T c failed");
+    qmri::unpackSymmetric(Jp.data(), n, J.data());
     if (!K) return true;
     Eigen::MatrixXd Vown;
     const Eigen::MatrixXd* Vp = Vocc;

@@ -114,6 +114,24 @@ Eigen::MatrixXd harmonicTransform(int L);
 Matrix coulombMetric(const std::vector<Shell>& aux, bool spherical, int threads = 1);
 
 // ---------------------------------------------------------------------------
+// Packed storage of symmetric orbital-pair quantities (Claude Generated, Oct 2026)
+// ---------------------------------------------------------------------------
+// (P|mn) = (P|nm), B^Q_mn = B^Q_nm and the gradient densities G^P_mn are symmetric in the orbital pair,
+// so each row of the 3-index tensor stores only the lower triangle m >= k, row by row:
+//   column index p(m, k) = m (m + 1) / 2 + k,   n (n + 1) / 2 columns instead of n^2.
+// A contraction sum_mk T_mk P_mk becomes sum_p T_p w_p with w = P_mm on the diagonal and P_mk + P_km off it.
+
+/// Packed column of the orbital pair (m, k) (either order).
+inline Eigen::Index pairIndex(int m, int k)
+{
+    return m >= k ? (Eigen::Index)m * (m + 1) / 2 + k : (Eigen::Index)k * (k + 1) / 2 + m;
+}
+/// Full symmetric n x n block (row-major = column-major) from a packed lower triangle.
+void unpackSymmetric(const double* packed, int n, double* full);
+/// Weights w (n(n+1)/2) so that sum_mk T_mk P_mk = sum_p T_p w_p for a symmetric T: w = P_mm, P_mk + P_km.
+void packContractionWeights(const Matrix& P, std::vector<double>& w);
+
+// ---------------------------------------------------------------------------
 // RI-J / RI-JK builder
 // ---------------------------------------------------------------------------
 
@@ -160,8 +178,13 @@ public:
     int nfit() const { return m_nfit; }          ///< rows of B (naux, or fewer after the eigen cutoff)
     const std::string& mode() const { return m_opt.mode; }
     const std::string& metricUsed() const { return m_metric_used; }
-    /// rows: fitted 3-index tensor, row Q holds n x n (row-major) -- B (mode jk) or (Q|mn) (mode j)
+    /// rows: fitted 3-index tensor, row Q holds the PACKED lower triangle of the symmetric n x n block
+    /// (npair() columns, pairIndex(m, k)) -- B (mode jk) or (Q|mn) (mode j). Packed since Oct 2026 (before: n^2
+    /// columns); unpackRow() gives the full block.
     const Matrix& tensor() const { return m_T; }
+    Eigen::Index npair() const { return (Eigen::Index)m_n * (m_n + 1) / 2; }
+    /// Full symmetric n x n block of tensor row Q into `full` (n^2 doubles).
+    void unpackRow(int Q, double* full) const { unpackSymmetric(m_T.data() + (size_t)Q * m_T.cols(), m_n, full); }
     /// mode j: J^-1 g applied on the host (exposed for the device path)
     Eigen::VectorXd fitCoefficients(const Eigen::VectorXd& g) const;
     /// RI-MP2 (Claude Generated, Oct 2026): X has one row per row of tensor() and was obtained from
@@ -178,7 +201,7 @@ public:
         m_factor_ms = 0.0;
         return t;
     }
-    /// Raw (unnormalised) metric and 3-index tensor kept for CURCUMA_QM_RI_DUMP (empty otherwise).
+    /// Raw (unnormalised) metric and 3-index tensor (full n^2 columns) kept for CURCUMA_QM_RI_DUMP (empty otherwise).
     const Matrix& rawMetric() const { return m_raw_metric; }
     const Matrix& rawThreeIndex() const { return m_raw_T3; }
 
@@ -186,7 +209,7 @@ public:
     /// QMEngine::riGradientTwoElectron: dE/dx = sum G^P_mn (mn|P)^x - sum M2_PQ (P|Q)^x (Eh/Bohr). mode j: only
     /// the fitted Coulomb energy (the exact exchange gradient is qmint::gradientTwoElectronExchange).
     /// Densities of the RI gradient in the raw (unnormalised, spherical or cartesian) auxiliary basis:
-    /// G (naux x n^2, active orbital basis; empty in mode j where G^P_mn = c_P P_mn) and the 2-index
+    /// G (naux x npair(), packed like tensor(), active orbital basis; empty in mode j where G^P_mn = c_P P_mn) and the 2-index
     /// density M2 (naux x naux), so that dE/dx = sum G^P_mn (mn|P)^x - sum M2_PQ (P|Q)^x.
     /// Exposed for the device contraction (-qm.gpu_ri_grad). Claude Generated (Oct 2026).
     bool gradientDensities(const Matrix& P, Eigen::VectorXd& c, Matrix& G, Eigen::MatrixXd& M2, std::string& why) const;
@@ -206,7 +229,7 @@ private:
     RIOptions m_opt;
     int m_n = 0, m_naux = 0, m_nfit = 0;
     std::string m_metric_used, m_stats;
-    Matrix m_T;                       ///< nfit x n^2
+    Matrix m_T;                       ///< nfit x n(n+1)/2 (packed lower triangle per row)
     Eigen::MatrixXd m_L;              ///< mode j, cholesky: lower Cholesky factor of the normalised metric
     Eigen::MatrixXd m_U;              ///< mode j, eigen: kept eigenvectors
     Eigen::VectorXd m_w;              ///< mode j, eigen: kept eigenvalues

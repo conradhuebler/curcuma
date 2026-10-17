@@ -298,9 +298,9 @@ std::unique_ptr<qmint::QMGpuRI> createQmRI(const std::string& backend, const dou
         return nullptr;
     }
     using create_fn = void* (*)(const double*, int, int, int, char*, int);
-    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_ri");
+    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_ri_packed");
     if (!fn) {
-        why = "plugin has no entry point curcuma_" + backend + "_create_qm_ri";
+        why = "plugin has no entry point curcuma_" + backend + "_create_qm_ri_packed (packed RI tensor)";
         return nullptr;
     }
     char buf[512] = { 0 };
