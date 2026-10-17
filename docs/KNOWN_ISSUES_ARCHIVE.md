@@ -419,6 +419,8 @@ pprcht is now built locally (`external/gfnff`, `cmake -Dbuild_exe=ON`, gfortran)
 
 CPU GFN-FF is now bit-reproducible at a fixed thread count — the D4 pair list was merged in thread-arrival order (`d4param_generator.cpp`), fixed. Still NOT bit-identical: different CPU thread counts (last bit, workspace partitioning), GPU run to run (FP `atomicAdd` gradient accumulation), CPU vs GPU. CPU/GPU MD trajectories therefore separate after ~0.7 ps on polymer_2x; compare ensembles there (operator decision Sep 27, 2026: accepted for now; GPU bit-reproducibility kept as a TODO). The solver choice is not the cause (two identical pre-fix CPU runs separated just as early). Details and options: TODO.md "Bitgleichheit".
 
+**Oct 17, 2026 (GPU SCF)**: the GFN1/GFN2 SCF on the GPU is bitwise reproducible now, also under load and on 4 GPUs (32 of 32 runs with one 17-digit trace); before, 28-31 % of the runs under 8 concurrent processes ended in a neighbouring SCF state (gradient 1.5e-7 Eh/A) because FP64 `atomicAdd` noise in the charge and moment sums crossed float rounding boundaries in the mixed-precision steps. Gradient kernels (5e-16 Eh/A) and GFN-FF (38 atomic sites, MD differs at 1e-10 after ~400 steps under load) are not bitwise. Details and options: [docs/GPU_REPRODUCIBILITY.md](GPU_REPRODUCIBILITY.md).
+
 ## #37 GFN-FF GPU/CPU correctness from the multi-GPU gap analysis (Sep 28, 2026, AI/machine-tested)
 
 — [docs/MULTI_GPU_GAPS.md](MULTI_GPU_GAPS.md):

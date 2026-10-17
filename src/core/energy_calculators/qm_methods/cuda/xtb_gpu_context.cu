@@ -254,6 +254,16 @@ struct XtbGpuContext::Impl {
     // atomicAdd targets). Claude Generated.
     CudaBuffer<double> dEScratch;   // γ·q_sh, nsh
     CudaBuffer<double> dESca;       // [E_third, E_multipole]
+    // Oct 2026: deterministic charges / moments. CSR offsets of the AO -> shell, AO -> atom and shell -> atom maps
+    // (valid when the maps are sorted, which they are for every basis curcuma builds): the per-shell / per-atom sums
+    // run in a fixed order in one thread instead of atomicAdd in arrival order. csr_ok false = the atomic kernels.
+    CudaBuffer<int>    dShAoOff, dAtAoOff, dAtShOff;
+    CudaBuffer<double> dMomPart;           // per-AO moment partials [nao * 9]
+    bool               csr_ok = false;
+    void launchQshFromPop(cudaStream_t s);
+    void launchQatFromPop(cudaStream_t s);
+    void launchQatFromQsh(const double* qsh, double* qat, cudaStream_t s);
+    CudaBuffer<double> dEPart3, dEPartM;   // Oct 2026: per-block partials of the energy kernels (fixed-order sum)
 
     // Stage 6 (S6.4): device Broyden mixer state. The packed SCC vector has length
     // broyden_N (= nsh + 9·nat for GFN2). The history dF/u live as the first M
@@ -1844,7 +1854,7 @@ __global__ void k_add_fock_multipole(double* F, const double* dp_int, const doub
 // dp_at/qp_at must be zeroed before launch.
 __global__ void k_multipole_moments(double* dp_at, double* qp_at,
                                     const double* P, const double* dp_int, const double* qp_int,
-                                    const int* ao2at, int n)
+                                    const int* ao2at, int n, double* part = nullptr)
 {
     const int mu = blockIdx.x * blockDim.x + threadIdx.x;
     if (mu < n) {
@@ -1855,13 +1865,13 @@ __global__ void k_multipole_moments(double* dp_at, double* qp_at,
             const double* dk = dp_int + static_cast<size_t>(k) * nn + col;
             double acc = 0.0;
             for (int nu = 0; nu < n; ++nu) acc += P[col + nu] * dk[nu];
-            atomicAdd(&dp_at[k + iat * 3], -acc);
+            if (part) part[static_cast<size_t>(mu) * 9 + k] = acc; else atomicAdd(&dp_at[k + iat * 3], -acc);
         }
         for (int k = 0; k < 6; ++k) {
             const double* qk = qp_int + static_cast<size_t>(k) * nn + col;
             double acc = 0.0;
             for (int nu = 0; nu < n; ++nu) acc += P[col + nu] * qk[nu];
-            atomicAdd(&qp_at[k + iat * 6], -acc);
+            if (part) part[static_cast<size_t>(mu) * 9 + 3 + k] = acc; else atomicAdd(&qp_at[k + iat * 6], -acc);
         }
     }
 }
@@ -2026,7 +2036,7 @@ __global__ void k_pop_ao_sp(double* __restrict__ pop, const double* __restrict__
 __global__ void k_multipole_moments_sp(double* dp_at, double* qp_at, const double* __restrict__ P,
                                        const double* __restrict__ dp_sp, const double* __restrict__ qp_sp,
                                        const int* __restrict__ row, const int* __restrict__ colptr,
-                                       const int* __restrict__ ao2at, int n, int nnz)
+                                       const int* __restrict__ ao2at, int n, int nnz, double* part = nullptr)
 {
     const int mu = blockIdx.x * blockDim.x + threadIdx.x;
     if (mu >= n) return;
@@ -2037,13 +2047,13 @@ __global__ void k_multipole_moments_sp(double* dp_at, double* qp_at, const doubl
         const double* dk = dp_sp + static_cast<size_t>(k) * ne;
         double acc = 0.0;
         for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) acc += P[col + row[e]] * dk[e];
-        atomicAdd(&dp_at[k + iat * 3], -acc);
+        if (part) part[static_cast<size_t>(mu) * 9 + k] = acc; else atomicAdd(&dp_at[k + iat * 3], -acc);
     }
     for (int k = 0; k < 6; ++k) {
         const double* qk = qp_sp + static_cast<size_t>(k) * ne;
         double acc = 0.0;
         for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) acc += P[col + row[e]] * qk[e];
-        atomicAdd(&qp_at[k + iat * 6], -acc);
+        if (part) part[static_cast<size_t>(mu) * 9 + 3 + k] = acc; else atomicAdd(&qp_at[k + iat * 6], -acc);
     }
 }
 
@@ -2095,7 +2105,7 @@ __global__ void k_pop_ao_spP(double* __restrict__ pop, const double* __restrict_
 __global__ void k_multipole_moments_spP(double* dp_at, double* qp_at, const double* __restrict__ Psp,
                                         const double* __restrict__ dp_sp, const double* __restrict__ qp_sp,
                                         const int* __restrict__ colptr, const int* __restrict__ ao2at,
-                                        int n, int nnz)
+                                        int n, int nnz, double* part = nullptr)
 {
     const int mu = blockIdx.x * blockDim.x + threadIdx.x;
     if (mu >= n) return;
@@ -2105,13 +2115,13 @@ __global__ void k_multipole_moments_spP(double* dp_at, double* qp_at, const doub
         const double* dk = dp_sp + static_cast<size_t>(k) * ne;
         double acc = 0.0;
         for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) acc += Psp[e] * dk[e];
-        atomicAdd(&dp_at[k + iat * 3], -acc);
+        if (part) part[static_cast<size_t>(mu) * 9 + k] = acc; else atomicAdd(&dp_at[k + iat * 3], -acc);
     }
     for (int k = 0; k < 6; ++k) {
         const double* qk = qp_sp + static_cast<size_t>(k) * ne;
         double acc = 0.0;
         for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) acc += Psp[e] * qk[e];
-        atomicAdd(&qp_at[k + iat * 6], -acc);
+        if (part) part[static_cast<size_t>(mu) * 9 + 3 + k] = acc; else atomicAdd(&qp_at[k + iat * 6], -acc);
     }
 }
 
@@ -2451,6 +2461,53 @@ __global__ void k_qsh_scatter(int nao, const double* __restrict__ pop,
     atomicAdd(&q_sh[ao2sh[mu]], -pop[mu]);
 }
 
+// Oct 2026: deterministic twins of the three atomic scatters. One thread per shell / atom sums its AOs (or
+// shells) in index order; q was pre-seeded with n0, so q = n0 - sum(pop) exactly as before up to the order.
+__global__ void k_qsh_gather(int nsh, const double* __restrict__ pop, const int* __restrict__ off,
+                             double* __restrict__ q_sh)
+{
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nsh) return;
+    double acc = 0.0;
+    for (int mu = off[s]; mu < off[s + 1]; ++mu) acc += pop[mu];
+    q_sh[s] -= acc;
+}
+
+__global__ void k_qat_gather(int nat, const double* __restrict__ pop, const int* __restrict__ off,
+                             double* __restrict__ q_at)
+{
+    const int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= nat) return;
+    double acc = 0.0;
+    for (int mu = off[a]; mu < off[a + 1]; ++mu) acc += pop[mu];
+    q_at[a] -= acc;
+}
+
+__global__ void k_qat_from_qsh(int nat, const double* __restrict__ q_sh, const int* __restrict__ off,
+                               double* __restrict__ q_at)
+{
+    const int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= nat) return;
+    double acc = 0.0;
+    for (int s = off[a]; s < off[a + 1]; ++s) acc += q_sh[s];
+    q_at[a] = acc;
+}
+
+// Per-atom sum of the per-AO moment partials (dp: 3, qp: 6 values per AO), negated like the atomic version.
+__global__ void k_mom_gather(int nat, const int* __restrict__ off, const double* __restrict__ part,
+                             double* __restrict__ dp_at, double* __restrict__ qp_at)
+{
+    const int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= nat) return;
+    double d[3] = {0.0, 0.0, 0.0}, q[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    for (int mu = off[a]; mu < off[a + 1]; ++mu) {
+        for (int k = 0; k < 3; ++k) d[k] += part[static_cast<size_t>(mu) * 9 + k];
+        for (int k = 0; k < 6; ++k) q[k] += part[static_cast<size_t>(mu) * 9 + 3 + k];
+    }
+    for (int k = 0; k < 3; ++k) dp_at[k + a * 3] = -d[k];
+    for (int k = 0; k < 6; ++k) qp_at[k + a * 6] = -q[k];
+}
+
 // Stage 6 (S6.2b): device ports of d4_zeta / d4_dzeta (d4_charge_scaling.h).
 __device__ __forceinline__ double d4_zeta_dev(double a, double c, double qref, double qmod)
 {
@@ -2784,7 +2841,7 @@ __global__ void k_energy_multipole_otf(int nat, const double* __restrict__ xyz, 
     }
     sdata[tid] = ei; __syncthreads();
     for (int st = blockDim.x >> 1; st > 0; st >>= 1) { if (tid < st) sdata[tid] += sdata[tid + st]; __syncthreads(); }
-    if (tid == 0) atomicAdd(e_out, sdata[0]);
+    if (tid == 0) e_out[blockIdx.x] = sdata[0];   // block partial (Oct 2026: deterministic, summed by k_sum_part)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2892,7 +2949,7 @@ __global__ void k_energy_multipole_otf_w(int nat, const double* __restrict__ xyz
     if (threadIdx.x == 0) {
         double s = 0.0;
         for (int w = 0; w < static_cast<int>(blockDim.x >> 5); ++w) s += sdata[w];
-        atomicAdd(e_out, s);
+        e_out[blockIdx.x] = s;   // block partial (Oct 2026: deterministic, summed by k_sum_part)
     }
 }
 
@@ -3137,6 +3194,14 @@ __global__ void k_occupations_uhf(const double* __restrict__ eps, double* __rest
 // GFN2 shell third-order energy E = Σ_s q_sh(s)³·Γ_s/3 (coulomb::energy_third_order,
 // GFN2 branch). Grid-stride block reduction → atomicAdd into e_out (pre-zeroed).
 // Claude Generated.
+// Sum of n block partials in index order (one thread): the deterministic replacement of atomicAdd(e_out, ..).
+__global__ void k_sum_part(int n, const double* __restrict__ part, double* __restrict__ out)
+{
+    double s = 0.0;
+    for (int i = 0; i < n; ++i) s += part[i];
+    *out = s;
+}
+
 __global__ void k_energy_third_order_shell(int nsh, const double* __restrict__ q_sh,
                                            const double* __restrict__ gamma3, double* e_out)
 {
@@ -3149,7 +3214,7 @@ __global__ void k_energy_third_order_shell(int nsh, const double* __restrict__ q
     }
     sdata[tid] = e; __syncthreads();
     for (int st = blockDim.x >> 1; st > 0; st >>= 1) { if (tid < st) sdata[tid] += sdata[tid + st]; __syncthreads(); }
-    if (tid == 0) atomicAdd(e_out, sdata[0]);
+    if (tid == 0) e_out[blockIdx.x] = sdata[0];   // block partial (Oct 2026: deterministic, summed by k_sum_part)
 }
 
 // GFN2 multipole energy E (XTB::energyMultipole): one thread per atom i sums its
@@ -3193,7 +3258,7 @@ __global__ void k_energy_multipole(int nat, const double* __restrict__ amat_sd,
     }
     sdata[tid] = ei; __syncthreads();
     for (int st = blockDim.x >> 1; st > 0; st >>= 1) { if (tid < st) sdata[tid] += sdata[tid + st]; __syncthreads(); }
-    if (tid == 0) atomicAdd(e_out, sdata[0]);
+    if (tid == 0) e_out[blockIdx.x] = sdata[0];   // block partial (Oct 2026: deterministic, summed by k_sum_part)
 }
 
 // ---- Stage 6 (S6.4) Broyden mixer kernels ---------------------------------
@@ -3722,6 +3787,12 @@ int XtbGpuContext::Impl::pseudoRotateOrthonormalise(int n, int no, const R* F, c
     std::memcpy(&max_theta, &maxbits, sizeof(float));
     I.pseudo_last_max_theta = max_theta;
     const double kT = I.loop_Tele * 3.166808e-6;
+    {   // Claude Generated (Oct 2026): CURCUMA_PSEUDO_TRACE=1 prints the quantities the gate decides on
+        static const bool trace = std::getenv("CURCUMA_PSEUDO_TRACE") != nullptr;
+        if (trace)
+            fprintf(stderr, "PSTRACE gate: homo %.17g lumo %.17g gap %.17g max_theta %.9g\n", stats[0], stats[1],
+                    stats[1] - stats[0], static_cast<double>(max_theta));
+    }
     if (!(stats[1] - stats[0] > std::max(30.0 * kT, 1.0e-3)) || !(max_theta < 0.1f)) return 0;
     mark("gap/theta check");
 
@@ -3854,6 +3925,10 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
     const bool closed_shell = !I.loop_open && std::fabs(I.loop_nelec - 2.0 * I.loop_nocc_pairs) < 1e-9;
     const bool pseudo_ok = I.pseudo_enabled && I.in_resident_step && !partial && closed_shell
         && I.loop_nao == n && I.last_dq < I.pseudo_max_dq;
+    static const bool pstrace = std::getenv("CURCUMA_PSEUDO_TRACE") != nullptr;
+    if (pstrace && I.in_resident_step)
+        fprintf(stderr, "PSTRACE call: fp32 %d pseudo_ok %d cprev %d consecutive %d last_dq %.17g\n", fp32 ? 1 : 0,
+                pseudo_ok ? 1 : 0, I.cprev_valid ? 1 : 0, I.pseudo_consecutive, I.last_dq);
     auto finish_pseudo = [&](const char* what) {
         ++I.pseudo_taken;
         I.profMark(what);
@@ -3863,10 +3938,12 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
     if (pseudo_ok && fp32 && I.cprev_valid && I.pseudo_consecutive < I.pseudo_max_steps) {
         if (I.pseudoDiagStep(n)) {
             ++I.pseudo_consecutive;
+            if (pstrace) fprintf(stderr, "PSTRACE pseudo step taken\n");
             I.cprev64_valid = false;   // the FP64 copy is now one step behind
             return finish_pseudo("eig FP32 pseudo: hand-over to the density");
         }
         ++I.pseudo_rejected;
+        if (pstrace) fprintf(stderr, "PSTRACE rejected (gate failed): full solve follows\n");
         // dCprev32 may be half-rotated; the full solve below refreshes it.
     } else if (pseudo_ok && !fp32 && I.pseudo_fp64 && (I.cprev64_valid || I.cprev_valid)
                && I.pseudo_consecutive64 < I.pseudo_max_steps) {
@@ -4732,6 +4809,34 @@ bool XtbGpuContext::beginBasis(const XtbGpuBasisData& b)
         // overlap-derivative kernel; cheap, uploaded for both methods).
         if (b.ao2at) m_impl->dAo2at.upload(b.ao2at, b.nao, m_impl->stream);
         if (b.ao2sh) m_impl->dAo2sh.upload(b.ao2sh, b.nao, m_impl->stream);
+        // Oct 2026: CSR offsets for the deterministic charge / moment sums (needs sorted AO -> shell -> atom maps).
+        m_impl->csr_ok = false;
+        if (b.ao2sh && b.ao2at && !std::getenv("CURCUMA_GPU_ATOMIC_SUMS")) {
+            auto build_off = [](const int* map, int n, int nbin, std::vector<int>& off) {
+                off.assign(nbin + 1, 0);
+                int prev = 0;
+                for (int i = 0; i < n; ++i) {
+                    if (map[i] < prev || map[i] >= nbin) return false;      // unsorted or out of range
+                    if (map[i] > prev + 1 && i > 0) return false;           // an empty bin
+                    prev = map[i];
+                    ++off[map[i] + 1];
+                }
+                if (n > 0 && map[0] != 0) return false;
+                for (int k = 0; k < nbin; ++k) {
+                    if (off[k + 1] == 0) return false;                       // empty bin
+                    off[k + 1] += off[k];
+                }
+                return true;
+            };
+            std::vector<int> sh_off, at_off, ats_off;
+            if (build_off(b.ao2sh, b.nao, b.nsh, sh_off) && build_off(b.ao2at, b.nao, b.nat, at_off)
+                && build_off(b.sh2at, b.nsh, b.nat, ats_off)) {
+                m_impl->dShAoOff.upload(sh_off.data(), b.nsh + 1, m_impl->stream);
+                m_impl->dAtAoOff.upload(at_off.data(), b.nat + 1, m_impl->stream);
+                m_impl->dAtShOff.upload(ats_off.data(), b.nat + 1, m_impl->stream);
+                m_impl->csr_ok = true;
+            }
+        }
         if (m_impl->dInfo.n < 1) m_impl->dInfo.alloc(1);
         // The nao²-sized integral storage (dense S/H0/L/dp/qp or the screened pair arrays)
         // is allocated by computeIntegrals, which knows the geometry.
@@ -5225,26 +5330,67 @@ bool XtbGpuContext::populationsAndBand(int n, double* band_out)
         == CUBLAS_STATUS_SUCCESS;
 }
 
+void XtbGpuContext::Impl::launchQshFromPop(cudaStream_t s)
+{
+    const int b = 128;
+    if (csr_ok) {
+        k_qsh_gather<<<(basis_nsh + b - 1) / b, b, 0, s>>>(basis_nsh, dPop.ptr, dShAoOff.ptr, dQsh.ptr);
+    } else {
+        k_qsh_scatter<<<(resident_n + b - 1) / b, b, 0, s>>>(resident_n, dPop.ptr, dAo2sh.ptr, dQsh.ptr);
+    }
+}
+
+void XtbGpuContext::Impl::launchQatFromPop(cudaStream_t s)
+{
+    const int b = 128;
+    if (csr_ok) {
+        k_qat_gather<<<(basis_nat + b - 1) / b, b, 0, s>>>(basis_nat, dPop.ptr, dAtAoOff.ptr, dQat.ptr);
+    } else {
+        k_qat_scatter<<<(resident_n + b - 1) / b, b, 0, s>>>(resident_n, dPop.ptr, dAo2at.ptr, dQat.ptr);
+    }
+}
+
+void XtbGpuContext::Impl::launchQatFromQsh(const double* qsh, double* qat, cudaStream_t s)
+{
+    const int b = 128;
+    if (csr_ok) {
+        k_qat_from_qsh<<<(basis_nat + b - 1) / b, b, 0, s>>>(basis_nat, qsh, dAtShOff.ptr, qat);
+    } else {
+        cudaMemsetAsync(qat, 0, sizeof(double) * basis_nat, s);
+        k_qsh_to_qat<<<(basis_nsh + b - 1) / b, b, 0, s>>>(basis_nsh, qsh, dSh2at.ptr, qat);
+    }
+}
+
 bool XtbGpuContext::multipoleMomentsResident(int n, int nat)
 {
     Impl& I = *m_impl;
     cudaStream_t stream = I.stream;
-    // Accumulator-scatter kernels need zeroed targets.
-    if (cudaMemsetAsync(I.dDpAt.ptr, 0, sizeof(double) * 3 * nat, stream) != cudaSuccess) return false;
-    if (cudaMemsetAsync(I.dQpAt.ptr, 0, sizeof(double) * 6 * nat, stream) != cudaSuccess) return false;
+    // Deterministic path (Oct 2026): per-AO partials, then a fixed-order sum per atom. The atomic accumulators need
+    // zeroed targets, the gather overwrites them.
+    double* part = nullptr;
+    if (I.csr_ok) {
+        try { I.dMomPart.ensure(static_cast<int>(static_cast<size_t>(n) * 9)); part = I.dMomPart.ptr; }
+        catch (...) { part = nullptr; }
+    }
+    if (!part) {
+        if (cudaMemsetAsync(I.dDpAt.ptr, 0, sizeof(double) * 3 * nat, stream) != cudaSuccess) return false;
+        if (cudaMemsetAsync(I.dQpAt.ptr, 0, sizeof(double) * 6 * nat, stream) != cudaSuccess) return false;
+    }
     const int b1 = 128;
     if (I.sparse && !I.p_dense_valid) {
         k_multipole_moments_spP<<<(n + b1 - 1) / b1, b1, 0, stream>>>(
             I.dDpAt.ptr, I.dQpAt.ptr, I.dSpP.ptr, I.dSpDp.ptr, I.dSpQp.ptr,
-            I.dSpColPtr.ptr, I.dAo2at.ptr, n, I.sp_nnz);
+            I.dSpColPtr.ptr, I.dAo2at.ptr, n, I.sp_nnz, part);
     } else if (I.sparse) {
         k_multipole_moments_sp<<<(n + b1 - 1) / b1, b1, 0, stream>>>(
             I.dDpAt.ptr, I.dQpAt.ptr, I.dP.ptr, I.dSpDp.ptr, I.dSpQp.ptr,
-            I.dSpRow.ptr, I.dSpColPtr.ptr, I.dAo2at.ptr, n, I.sp_nnz);
+            I.dSpRow.ptr, I.dSpColPtr.ptr, I.dAo2at.ptr, n, I.sp_nnz, part);
     } else {
         k_multipole_moments<<<(n + b1 - 1) / b1, b1, 0, stream>>>(
-            I.dDpAt.ptr, I.dQpAt.ptr, I.dP.ptr, I.dDpInt.ptr, I.dQpInt.ptr, I.dAo2at.ptr, n);
+            I.dDpAt.ptr, I.dQpAt.ptr, I.dP.ptr, I.dDpInt.ptr, I.dQpInt.ptr, I.dAo2at.ptr, n, part);
     }
+    if (part)
+        k_mom_gather<<<(nat + b1 - 1) / b1, b1, 0, stream>>>(nat, I.dAtAoOff.ptr, part, I.dDpAt.ptr, I.dQpAt.ptr);
     return cudaGetLastError() == cudaSuccess;
 }
 
@@ -5545,8 +5691,7 @@ bool XtbGpuContext::residentAtomicCharges(const double* n0_at, int nat, double* 
                         cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
         return false;
     const int b = 128;
-    k_qat_scatter<<<(nao + b - 1) / b, b, 0, stream>>>(nao, m_impl->dPop.ptr,
-                                                       m_impl->dAo2at.ptr, m_impl->dQat.ptr);
+    m_impl->launchQatFromPop(stream);
     if (cudaGetLastError() != cudaSuccess) return false;
     if (q_at_out) m_impl->dQat.download(q_at_out, nat, stream);
     return cudaStreamSynchronize(stream) == cudaSuccess;
@@ -5576,8 +5721,7 @@ bool XtbGpuContext::residentShellCharges(const double* n0_sh, int nsh, double* q
                         cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
         return false;
     const int b = 128;
-    k_qsh_scatter<<<(nao + b - 1) / b, b, 0, stream>>>(nao, m_impl->dPop.ptr,
-                                                       m_impl->dAo2sh.ptr, m_impl->dQsh.ptr);
+    m_impl->launchQshFromPop(stream);
     if (cudaGetLastError() != cudaSuccess) return false;
     if (q_sh_out) m_impl->dQsh.download(q_sh_out, nsh, stream);
     return cudaStreamSynchronize(stream) == cudaSuccess;
@@ -6560,19 +6704,24 @@ bool XtbGpuContext::sccEnergy(int nat, int nsh, double* e_coulomb, double* e_thi
 
     // E_third (GFN2 shell) + E_multipole via reductions into dESca[0..1].
     m_impl->dESca.ensure(2);
+    m_impl->dEPart3.ensure(nsh / 128 + 64);                // one partial per block (256 threads)
+    m_impl->dEPartM.ensure(nat / 2 + 64);                  // otf_w: 32 lanes per atom, 128 threads per block -> nat / 4 blocks
     if (cudaMemsetAsync(m_impl->dESca.ptr, 0, sizeof(double) * 2, stream) != cudaSuccess)
         return false;
     const int block = 256;
+    int e3_blocks = 0, em_blocks = 0;   // blocks that wrote a partial (the sums below read exactly these)
     if (m_impl->loop_gfn1 && e_third) {
         // GFN1: atom-resolved, E3 = sum_A Gamma_A q_A^3 / 3 over the output atomic charges.
         const int grid = (nat + block - 1) / block;
+        e3_blocks = grid;
         k_energy_third_order_shell<<<grid, block, block * sizeof(double), stream>>>(
-            nat, m_impl->dQat.ptr, m_impl->dGamma3At.ptr, m_impl->dESca.ptr + 0);
+            nat, m_impl->dQat.ptr, m_impl->dGamma3At.ptr, m_impl->dEPart3.ptr);
         if (cudaGetLastError() != cudaSuccess) return false;
     } else if (m_impl->dGamma3.n >= nsh && e_third) {
         const int grid = (nsh + block - 1) / block;
+        e3_blocks = grid;
         k_energy_third_order_shell<<<grid, block, block * sizeof(double), stream>>>(
-            nsh, m_impl->dQsh.ptr, m_impl->dGamma3.ptr, m_impl->dESca.ptr + 0);
+            nsh, m_impl->dQsh.ptr, m_impl->dGamma3.ptr, m_impl->dEPart3.ptr);
         if (cudaGetLastError() != cudaSuccess) return false;
     }
     if (m_impl->loop_gfn1) {
@@ -6580,28 +6729,34 @@ bool XtbGpuContext::sccEnergy(int nat, int nsh, double* e_coulomb, double* e_thi
     } else if (m_impl->mp_otf && e_multipole) {
         if (m_impl->thread_per_atom) {
             const int grid = (nat + block - 1) / block;
+            em_blocks = grid;
             k_energy_multipole_otf<<<grid, block, block * sizeof(double), stream>>>(
                 nat, m_impl->dMpXyz.ptr, m_impl->dMpRad.ptr, m_impl->mp_dmp3, m_impl->mp_dmp5,
                 m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dDpAt.ptr, m_impl->dQpAt.ptr,
-                m_impl->dQat.ptr, m_impl->dESca.ptr + 1);
+                m_impl->dQat.ptr, m_impl->dEPartM.ptr);
         } else {
             const int wb = 128;                              // 4 atoms (warps) per block
             const long long threads = 32LL * nat;
+            em_blocks = static_cast<int>((threads + wb - 1) / wb);
             k_energy_multipole_otf_w<<<static_cast<unsigned>((threads + wb - 1) / wb), wb,
                                        (wb / 32) * sizeof(double), stream>>>(
                 nat, m_impl->dMpXyz.ptr, m_impl->dMpRad.ptr, m_impl->mp_dmp3, m_impl->mp_dmp5,
                 m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dDpAt.ptr, m_impl->dQpAt.ptr,
-                m_impl->dQat.ptr, m_impl->dESca.ptr + 1);
+                m_impl->dQat.ptr, m_impl->dEPartM.ptr);
         }
         if (cudaGetLastError() != cudaSuccess) return false;
     } else if (!m_impl->dMpAmatSD.empty() && e_multipole) {
         const int grid = (nat + block - 1) / block;
+        em_blocks = grid;
         k_energy_multipole<<<grid, block, block * sizeof(double), stream>>>(
             nat, m_impl->dMpAmatSD.ptr, m_impl->dMpAmatDD.ptr, m_impl->dMpAmatSQ.ptr,
             m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dDpAt.ptr, m_impl->dQpAt.ptr,
-            m_impl->dQat.ptr, m_impl->dESca.ptr + 1);
+            m_impl->dQat.ptr, m_impl->dEPartM.ptr);
         if (cudaGetLastError() != cudaSuccess) return false;
     }
+    // Fixed-order sums of the block partials (the energy kernels used to atomicAdd them in launch order).
+    k_sum_part<<<1, 1, 0, stream>>>(e3_blocks, m_impl->dEPart3.ptr, m_impl->dESca.ptr + 0);
+    k_sum_part<<<1, 1, 0, stream>>>(em_blocks, m_impl->dEPartM.ptr, m_impl->dESca.ptr + 1);
     double esca[2] = {0.0, 0.0};
     m_impl->dESca.download(esca, 2, stream);
     if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
@@ -7054,12 +7209,10 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
     // q_sh = n0_sh − Σ_{μ∈s} pop_ao; q_at = n0_at − Σ_{μ∈A} pop_ao.
     if (cudaMemcpyAsync(m_impl->dQsh.ptr, m_impl->dN0sh.ptr, sizeof(double) * nsh,
                         cudaMemcpyDeviceToDevice, stream) != cudaSuccess) return fail("shell-charge copy failed");
-    k_qsh_scatter<<<(nao + b - 1) / b, b, 0, stream>>>(nao, m_impl->dPop.ptr,
-                                                       m_impl->dAo2sh.ptr, m_impl->dQsh.ptr);
+    m_impl->launchQshFromPop(stream);
     if (cudaMemcpyAsync(m_impl->dQat.ptr, m_impl->dN0at.ptr, sizeof(double) * nat,
                         cudaMemcpyDeviceToDevice, stream) != cudaSuccess) return fail("atomic-charge copy failed");
-    k_qat_scatter<<<(nao + b - 1) / b, b, 0, stream>>>(nao, m_impl->dPop.ptr,
-                                                       m_impl->dAo2at.ptr, m_impl->dQat.ptr);
+    m_impl->launchQatFromPop(stream);
     // Atomic multipole moments dp_at/qp_at from the resident density (resident).
     if (!g1 && !multipoleMomentsResident(nao, nat)) return fail("atomic multipole moments failed");
     m_impl->profMark("scf: charges + multipole moments");
@@ -7383,9 +7536,7 @@ bool XtbGpuContext::buildDevicePotentialOnly(int n)
         if (cudaGetLastError() != cudaSuccess) return false;
     }
     // q_at = Σ_{s∈A} q_sh(s) (input-derived, for the multipole potential).
-    m_impl->dQat.zero(nat, stream);
-    k_qsh_to_qat<<<(nsh + b - 1) / b, b, 0, stream>>>(nsh, m_impl->dPotQsh.ptr,
-                                                      m_impl->dSh2at.ptr, m_impl->dQat.ptr);
+    m_impl->launchQatFromQsh(m_impl->dPotQsh.ptr, m_impl->dQat.ptr, stream);
     if (cudaGetLastError() != cudaSuccess) return false;
     // v_sh = γ·q_sh (cuBLAS gemv on the resident symmetric γ) + shell third-order.
     {
@@ -7459,9 +7610,7 @@ bool XtbGpuContext::buildDevicePotentialOnlyGfn1(int n)
     const int nat = m_impl->resident_nat;
     const int nsh = m_impl->pot_nsh;
     const int b = 128;
-    m_impl->dQat.zero(nat, stream);
-    k_qsh_to_qat<<<(nsh + b - 1) / b, b, 0, stream>>>(nsh, m_impl->dPotQsh.ptr,
-                                                      m_impl->dSh2at.ptr, m_impl->dQat.ptr);
+    m_impl->launchQatFromQsh(m_impl->dPotQsh.ptr, m_impl->dQat.ptr, stream);
     if (cudaGetLastError() != cudaSuccess) return false;
     {
         const double one = 1.0, zero = 0.0;
