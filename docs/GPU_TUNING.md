@@ -471,3 +471,26 @@ own kernel was therefore wrong: launching costs ~45 us in total. The 160 us betw
 What would shorten it is fewer dependent steps per iteration (one persistent kernel with grid synchronisation, or s-step/pipelined CG
 with one reduction per iteration), not cheaper launches.
 
+#### Pipelined CG for the split EEQ solve (Oct 17, 2026, tried and dropped)
+
+Chronopoulos-Gear CG with the projected local-inverse preconditioner: `s = A p` by recurrence, one fused reduction
+(`r.u`, `w.u`, `r.r`, one block of 1024 threads) per iteration instead of three dependent dots, the projection applied once to `w`; mixed-precision
+rounds and restarts as before. It converged on every solve (polymer_2x, 60 MD steps).
+
+| | classic loop | pipelined CG |
+|---|---|---|
+| matvecs per solve (nsys, 40 steps) | 17.4 | 19.4 |
+| time between two own-device column dots | 157 us | 141 us |
+| PCG span on device 0 | 4.63 ms | 4.93 ms |
+| step period (nsys) / wall, 2 x 3 runs of 600 steps | 17.97 ms / 18.97 and 19.47 ms | 19.13 ms / 19.49 and 19.38 ms |
+
+The iteration got 10 % shorter and needs 2 more matvecs (the recurrence for `s` lags one step), so the solve is not faster. A second attempt that lets
+the helper kernel write its result straight into the own device's vector (no copy back) gave 19.06 and 19.19 ms: no change.
+
+What the iteration timeline shows (polymer_2x, 4 GPUs): the critical path of a matvec is the last helper. The CPU issues the three helper chains
+one after the other (events, peer copy, kernel, peer copy: 13-17 us each), the third helper's kernel starts ~50 us after the first, its result
+arrives ~25 us after the kernel ends, and only then do the dots follow. The own-device kernel (97 us) and the rest of the iteration (~25 us of
+small kernels, one host round trip) are in series with that. Remaining ideas, none tried: uneven column shares so the last-launched helper gets
+fewer columns (also changes the matrix build per device), one host thread per helper device to issue the chains in parallel, an in-kernel
+(persistent) PCG with grid synchronisation. Each is bounded by the PCG span of 4.5 of 18 ms.
+
