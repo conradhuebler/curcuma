@@ -147,6 +147,7 @@ public:
     GFNFF* getGFNFF() const { return m_gfnff.get(); }
     GFNFF* gfnffInstance() const override { return m_gfnff.get(); }
     bool requestsCpuFallback() const override { return m_cpu_fallback_requested; }
+    std::string cpuFallbackReason() const override { return m_cpu_fallback_reason; }
     /// Device index this method is pinned to (-1 = runtime default). Claude Generated (Sep 2026).
     int gpuDevice() const { return m_gpu_device; }
 
@@ -184,6 +185,7 @@ private:
     // WP2: cached topology-constant EEQ data (avoid prepareEEQParametersForGPU per step)
     std::vector<int>    m_eeq_fraglist;          ///< [N] fragment IDs (topology-constant)
     std::vector<double> m_eeq_rhs_constraints;   ///< [nfrag] target charges (topology-constant)
+    std::string         m_cpu_fallback_reason;             ///< text for the counted fallback (empty: charge-rule text)
     bool                m_cpu_fallback_requested = false;  ///< charged multi-fragment system: CPU method wanted (see requestsCpuFallback())
     int                 m_eeq_nfrag = 1;         ///< number of fragments (topology-constant)
 
@@ -622,6 +624,13 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     // asks EnergyCalculator for the CPU method (requestsCpuFallback()); -gfnff.frag_charge_model reference
     // keeps the GPU and makes the CPU use the same rule.
     m_cpu_fallback_requested = (m_eeq_nfrag > 1 && mol.m_charge != 0 && m_gfnff->fragEnsembleRequested());
+    // Claude Generated (Oct 2026): the ALPB solvation term exists only in GFNFF::Calculation(), which this
+    // wrapper never calls; before this check -gfnff.solvent water on -gpu rocm returned the gas-phase
+    // energy without a message (caffeine, 1 run: -4.67273706 against -4.68976245 Eh on the CPU).
+    if (m_gfnff->solvationActive()) {
+        m_cpu_fallback_requested = true;
+        m_cpu_fallback_reason = "GFN-FF: implicit solvent (ALPB) is not applied by the GPU path, calculation on the CPU";
+    }
 
     CitationRegistry::cite("gfnff");
     CitationRegistry::cite("d4", "gfnff");

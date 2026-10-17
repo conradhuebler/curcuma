@@ -144,15 +144,17 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
     if (CurcumaLogger::get_verbosity() >= 2) {
         // The format string must be a compile-time constant (fmt >= 9 checks it in a
         // consteval context), so the method-dependent part is selected as plain text.
+        // Claude Generated (Oct 2026): text corrected after a code reading (docs/ROCM_HOST_PARTS_2026-10-17.md):
+        // the SCF loop runs on the host with a device eigensolver; potentials, occupations and the mixer are host work.
         const char* detail = getMethodName() == "gfn2"
-            ? "integral build (CN/S/H0/L/gamma + dp/qp multipole) + multipole SCF + "
-              "nuclear gradient incl. multipole-integral Pulay on the GPU (Stage 4 / "
-              "R-AP3); only the multipole SD/DD/SQ interaction gradient + dispersion + "
-              "CN chain-rule on CPU"
-            : "integral build (CN/S/H0/L/gamma) + SCF + nuclear gradient on the GPU; "
-              "only the dispersion gradient + CN chain-rule on CPU (Stage 4)";
+            ? "integral build (CN/S/H0/L/gamma + dp/qp multipole), Fock, eigensolve, density and "
+              "nuclear gradient incl. multipole-integral Pulay and D4 pair terms on the GPU; "
+              "SCF potentials (Coulomb, third order, multipole, D4 weights), occupations, mixer, "
+              "multipole interaction gradient and CN chain-rule on the CPU"
+            : "integral build (CN/S/H0/L/gamma), Fock, eigensolve, density and nuclear gradient on the GPU; "
+              "SCF potentials, occupations, mixer, D3 dispersion, halogen bond and CN chain-rule on the CPU";
         CurcumaLogger::info(fmt::format(
-            "{}: ROCm fully device-resident (rocSOLVER + HIP kernels): {}",
+            "{}: ROCm device kernels (rocSOLVER + HIP) with a host SCF loop: {}",
             getMethodName(), detail));
     }
 #else

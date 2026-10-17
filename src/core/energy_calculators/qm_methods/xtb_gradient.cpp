@@ -838,7 +838,8 @@ void XTB::calculateGradient()
  * ============================================================================ */
 bool XTB::calculateGradientGpu()
 {
-    // X-I1: d device gradient is backend-gated (CUDA yes; ROCm/Vulkan -> CPU).
+    // X-I1: the device gradient is backend-gated by supportsGradient() (CUDA and ROCm yes, Vulkan -> CPU;
+    // corrected Oct 2026, the ROCm adapter has supportsGradient() = true).
     if (!m_gpu_scf || !m_gpu_scf->supportsGradient()
         || (m_has_dshell && !m_gpu_scf->supportsDshell())) return false;
     const int nat = m_atomcount;

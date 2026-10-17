@@ -782,6 +782,8 @@ public:
 
     /// frag_charge_model resolved to ensemble (false: reference rule, or react topology mode). Claude Generated (Oct 2026).
     bool fragEnsembleRequested() const { return m_frag_ensemble; }
+    /// True when an implicit solvent (ALPB) is active; the GPU wrappers do not apply it. Claude Generated (Oct 2026).
+    bool solvationActive() const { return m_solvation != nullptr; }
 
     /**
      * @brief Charge placements of the frag_charge_model ensemble for one corner (bounded selection)
