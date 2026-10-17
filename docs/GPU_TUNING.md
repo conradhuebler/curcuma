@@ -431,3 +431,17 @@ trajectories are not bit-identical to the build before, but they stay run-to-run
 (see GPU_REPRODUCIBILITY.md): 9 of 9 single-GPU MD final states equal, 4, 3 and 2 GPUs equal. Energy and gradient against
 the CPU: polymer 4.6e-12 Eh / 4.4e-14 Eh/A. The remaining cost of the matrix build is FP64 throughput (1/64 rate on this GPU).
 
+#### Tried and dropped (Oct 17, 2026, same setup, 3 runs of 600 steps per row, reverted)
+
+| Idea | Result |
+|---|---|
+| Smaller share of columns/tiles/pairs for the own device (device 0 busy 10.7 of 13.3 ms, helpers 8 ms): weight 0.4 to 1.0 for Coulomb, matrix build and dispersion | Weight 0.4: device-0 Coulomb 2.28 -> 1.30 ms and build 1.40 -> 0.74 ms, but the helpers slow to 2.1-2.45 and 1.5 ms; step period 17.97 -> 18.30 ms (nsys), wall 19.46 (1.0), 19.34 (0.8), 19.53 (0.6), 19.41 (0.4) ms: no gain |
+| PCG iteration: single-block dot (one launch instead of cublasDdot's two), projection sum + delta in one kernel | PCG span on device 0 4.59 -> 4.47 ms (nsys, 40 steps); wall 19.25 -> 19.10 and 19.44 ms: not measurable |
+| Own block launched first in the split matvec; larger own share of the EEQ columns (weight 1.5 / 2 / 3) | wall 19.98 / 20.49 / 21.82 ms (weight 1.0: 19.79): worse; weights 0.7 and 0.5: 19.14 / 19.16 ms, same as before |
+
+What the trace shows instead: one PCG iteration takes 0.26 ms, of which ~100 us is the own-device matvec kernel and ~100 us the gap
+before it, which is the CPU launching the three helper blocks (about 30 us each: set device, wait event, peer copy,
+kernel, peer copy, event). Removing that needs the helper chain as a CUDA graph per device or launches from a
+helper thread; neither was tried. The PCG span (4.5 ms) is a quarter of the 18 ms step, the rest is the other kernels and the host stages
+(integrator gap, HB/XB refresh), so a 0.1 ms change is below the 1 ms run-to-run spread of the step time.
+
