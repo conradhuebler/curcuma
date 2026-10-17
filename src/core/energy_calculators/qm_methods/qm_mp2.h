@@ -40,6 +40,9 @@
 #include "src/core/global.h"
 #include "src/core/parameter_macros.h"
 
+#include "GTOIntegrals.hpp"  // GTO::Orbital (gradientTwoElectronMP2)
+
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -94,6 +97,16 @@ struct MP2Result {
     std::string aux_name;         ///< e.g. def2-universal-JKFIT
     double t_ri_setup_ms = 0.0;   ///< 3-index integrals (mn|P) + metric (0 when the SCF's RI tensor is reused)
     std::string scf_ri;           ///< "" (exact SCF) or e.g. "RI-JK def2-universal-JKFIT"
+    // Analytic gradient only (Claude Generated, Oct 2026; QMEngine::computeMP2Gradient, qm_mp2_grad.cpp)
+    bool gradient = false;
+    double t_grad_amplitudes_ms = 0.0;  ///< (ia|jb), amplitudes, P_ij/P_ab, (i nu|jb)-contraction
+    double t_grad_backtrans_ms = 0.0;   ///< back-transformation to the AO 2PDM and the (kappa nu|lam sig) R contraction
+    double t_grad_zvector_ms = 0.0;     ///< Lagrangian J/K build + Z-vector (CPHF) iterations
+    double t_grad_density_ms = 0.0;     ///< relaxed density, energy-weighted density, 2PDM symmetrisation
+    double t_grad_deriv2e_ms = 0.0;     ///< derivative ERIs contracted with the full 2PDM
+    double t_grad_deriv1e_ms = 0.0;     ///< derivative S/T/V contracted with P and W
+    int zvector_iterations = 0;
+    double zvector_residual = 0.0;
 };
 
 /// Number of frozen core orbitals for an atom of nuclear charge Z (chemical core of the
@@ -131,5 +144,39 @@ void gemmABt(const double* A, int m, const double* B, int n, int k, double* C);
 /// Claude Generated (Oct 2026, RI-MP2).
 void riMp2EnergyHost(const double* B, int o, int v, int naux, const double* eo, const double* ev, int threads,
                      MP2Result& res);
+
+/// Intermediates of the closed-shell MP2 gradient that the host routine hands back (Claude Generated,
+/// Oct 2026). o = active occupied, v = virtual, n = basis functions. With
+///   t_ijab = (ia|jb) / (e_i + e_j - e_a - e_b),  T~_ijab = (c_os + c_ss) t_ijab - c_ss t_ijba
+/// (MP2: c_os = c_ss = 1, T~ = 2t - t^ba):
+struct MP2GradIntermediates {
+    Matrix Poo;  ///< o x o:  P_ij = -2 sum_kab T~_ikab t_jkab   (unrelaxed occupied block)
+    Matrix Pvv;  ///< v x v:  P_ab =  2 sum_ijc T~_ijac t_ijbc   (unrelaxed virtual block)
+    Matrix Y1;   ///< n x o:  Y1_{kappa i} = sum_{nu lam sig} (kappa nu|lam sig) R_i^{nu lam sig}
+    Matrix Y2;   ///< n x v:  Y2_{nu a}    = sum_{ijb} (i nu|jb) T~_ijab
+};
+
+/// @brief Canonical MP2 energy plus the gradient intermediates on the host (Claude Generated, Oct 2026).
+/// @param eri    active-basis AO tensor (as mp2EnergyHost)
+/// @param c_os, c_ss  spin-component scaling of the energy whose gradient is wanted (1, 1 for MP2)
+/// @param Gamma  output, n^4 doubles: back-transformed amplitudes Gamma_{mu nu lam sig} =
+///               sum_{ijab} T~_ijab C_mu,i C_nu,a C_lam,j C_sig,b (NOT symmetrised)
+/// Fills res.e_os/e_ss, out, and res.t_grad_amplitudes_ms / t_grad_backtrans_ms. Results do not depend on
+/// the thread count (fixed summation orders).
+void mp2GradientHost(const double* eri, int n, const Matrix& C, const Vector& eps, int n_frozen, int n_occ,
+                     double c_os, double c_ss, int threads, double batch_mb, double* Gamma, MP2GradIntermediates& out,
+                     MP2Result& res);
+
+/// @brief Gamma_cart = (Q x Q x Q x Q) Gamma_active for an n_act^4 tensor (Q: cartesian x active, block-diagonal
+/// per shell); out gets ncart^4 doubles. Used for the device MP2 2e gradient. Claude Generated (Oct 2026).
+void mp2ActiveToCartesian(const double* in, const Matrix& Q, std::unique_ptr<double[]>& out, int threads);
+
+/// @brief Two-electron part 1/2 sum D (mn|ls)^A (Eh/Bohr) of the MP2 gradient, D = RHF part of P (as
+/// gradientTwoElectron) + the separable P2 x P part + Dns. P, P2: CARTESIAN densities; Dns: non-separable
+/// 2PDM in the ACTIVE basis (n_act^4, full 8-fold symmetry), taken to the cartesian basis with Q per shell
+/// quartet (Q = nullptr or empty: active = cartesian). Implemented in qm_integrals.cpp (declared here so that
+/// qm_integrals.hpp, included by the CUDA units, stays untouched). Claude Generated (Oct 2026).
+Matrix gradientTwoElectronMP2(const std::vector<GTO::Orbital>& basis, const Matrix& P, const Matrix& P2,
+                              const double* Dns, const Matrix* Q, int natoms, int threads = 1);
 
 }  // namespace qmint

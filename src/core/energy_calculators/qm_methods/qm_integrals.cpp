@@ -2163,15 +2163,17 @@ void quartetGradient(const std::vector<EriShell>& sh, const ShellPair& bra, cons
 // Compared with the Sep-2026 first version (every ORDERED bra pair against the
 // canonical kets, derivative on A only) this does ~4x fewer quartets.
 namespace {
-// Shared driver of gradientTwoElectron (exchange_only = false, the WP8 expression unchanged) and
-// gradientTwoElectronExchange (Claude Generated, Oct 2026, RI-J gradient: only the exchange part
-// D = -1/4 (P_ml P_ns + P_ms P_nl) of the same canonical-quartet sum).
-Matrix gradientTwoElectronImpl(const std::vector<GTO::Orbital>& basis, const Matrix& P,
-                               int natoms, int threads, bool exchange_only)
+// Shared driver of gradientTwoElectron, gradientTwoElectronExchange and gradientTwoElectronMP2: the
+// canonical-quartet sum 1/2 sum D (mn|ls)^X with the quartet weights D filled per shell quartet by
+// `fill(braA, braB, ketA, ketB, Dq)` (component layout Dq[((a*nB+b)*nC+c)*nD+d], cartesian basis). The
+// fill must describe a D with the full 8-fold permutational symmetry of (mn|ls).
+// Templated driver: Claude Generated (Oct 2026, MP2 gradient); the loop itself is the WP8 one unchanged.
+template <class Fill>
+Matrix gradientTwoElectronDriver(const std::vector<GTO::Orbital>& basis, const std::vector<EriShell>& sh,
+                                 int natoms, int threads, Fill fill)
 {
     Matrix grad = Matrix::Zero(natoms, 3);
     if (basis.empty()) return grad;
-    const std::vector<EriShell> sh = groupShells(basis);
     const int ns = (int)sh.size();
     std::vector<int> atomOf(ns);
     for (int s = 0; s < ns; ++s) atomOf[s] = basis[sh[s].first].atom;
@@ -2194,28 +2196,11 @@ Matrix gradientTwoElectronImpl(const std::vector<GTO::Orbital>& basis, const Mat
 #endif
         for (int i = 0; i < np; ++i) {
             const ShellPair& bra = pairs[i];
-            const EriShell& A = sh[bra.A];
-            const EriShell& B = sh[bra.B];
             for (int j = i; j < np; ++j) {
                 const ShellPair& ket = pairs[j];
                 const int at[4] = { atomOf[bra.A], atomOf[bra.B], atomOf[ket.A], atomOf[ket.B] };
                 if (at[0] == at[1] && at[0] == at[2] && at[0] == at[3]) continue;
-                const EriShell& C = sh[ket.A];
-                const EriShell& D = sh[ket.B];
-                const int nA = (int)A.lmn.size(), nB = (int)B.lmn.size(), nC = (int)C.lmn.size(), nD = (int)D.lmn.size();
-                Dq.resize((size_t)nA * nB * nC * nD);
-                for (int a = 0; a < nA; ++a)
-                    for (int b = 0; b < nB; ++b)
-                        for (int c = 0; c < nC; ++c)
-                            for (int d = 0; d < nD; ++d) {
-                                const int m = A.first + a, n = B.first + b, l = C.first + c, s = D.first + d;
-                                if (exchange_only)
-                                    Dq[((size_t)(a * nB + b) * nC + c) * nD + d] =
-                                        -0.25 * (P(m, l) * P(n, s) + P(m, s) * P(n, l));
-                                else
-                                    Dq[((size_t)(a * nB + b) * nC + c) * nD + d] =
-                                        P(m, n) * P(l, s) - 0.25 * (P(m, l) * P(n, s) + P(m, s) * P(n, l));
-                            }
+                fill(bra.A, bra.B, ket.A, ket.B, Dq);
                 const double f = 0.5 * (bra.A != bra.B ? 2.0 : 1.0) * (ket.A != ket.B ? 2.0 : 1.0)
                                * (i != j ? 2.0 : 1.0);
                 double gA[3], gB[3], gC[3];
@@ -2237,6 +2222,36 @@ Matrix gradientTwoElectronImpl(const std::vector<GTO::Orbital>& basis, const Mat
     return grad;
 }
 
+// gradientTwoElectron (exchange_only = false, the WP8 expression unchanged) and gradientTwoElectronExchange
+// (Claude Generated, Oct 2026, RI-J gradient: only the exchange part D = -1/4 (P_ml P_ns + P_ms P_nl)).
+Matrix gradientTwoElectronImpl(const std::vector<GTO::Orbital>& basis, const Matrix& P,
+                               int natoms, int threads, bool exchange_only)
+{
+    if (basis.empty()) return Matrix::Zero(natoms, 3);
+    const std::vector<EriShell> sh = groupShells(basis);
+    auto fill = [&](int sA, int sB, int sC, int sD, std::vector<double>& Dq) {
+        const EriShell& A = sh[sA];
+        const EriShell& B = sh[sB];
+        const EriShell& C = sh[sC];
+        const EriShell& D = sh[sD];
+        const int nA = (int)A.lmn.size(), nB = (int)B.lmn.size(), nC = (int)C.lmn.size(), nD = (int)D.lmn.size();
+        Dq.resize((size_t)nA * nB * nC * nD);
+        for (int a = 0; a < nA; ++a)
+            for (int b = 0; b < nB; ++b)
+                for (int c = 0; c < nC; ++c)
+                    for (int d = 0; d < nD; ++d) {
+                        const int m = A.first + a, n = B.first + b, l = C.first + c, s = D.first + d;
+                        if (exchange_only)
+                            Dq[((size_t)(a * nB + b) * nC + c) * nD + d] =
+                                -0.25 * (P(m, l) * P(n, s) + P(m, s) * P(n, l));
+                        else
+                            Dq[((size_t)(a * nB + b) * nC + c) * nD + d] =
+                                P(m, n) * P(l, s) - 0.25 * (P(m, l) * P(n, s) + P(m, s) * P(n, l));
+                    }
+    };
+    return gradientTwoElectronDriver(basis, sh, natoms, threads, fill);
+}
+
 }  // namespace
 
 Matrix gradientTwoElectron(const std::vector<GTO::Orbital>& basis, const Matrix& P,
@@ -2251,6 +2266,58 @@ Matrix gradientTwoElectronExchange(const std::vector<GTO::Orbital>& basis, const
                                    int natoms, int threads)
 {
     return gradientTwoElectronImpl(basis, P, natoms, threads, true);
+}
+
+// Declared in qm_mp2.h (same reason as above). Claude Generated (Oct 2026, MP2 gradient).
+// D = P P - 1/4 (P P + P P)                                  (RHF, as gradientTwoElectron)
+//   + (P2_mn P_ls + P_mn P2_ls) - 1/4 (P2_ml P_ns + P_ml P2_ns + P2_ms P_nl + P_ms P2_nl)   (P2 x P_HF)
+//   + Dns, the non-separable MP2 part, given in the ACTIVE basis and taken to the cartesian one per
+//     shell quartet with the transposed blocks of Q (Gamma_cart = Q Gamma_act Q^T on every index).
+Matrix gradientTwoElectronMP2(const std::vector<GTO::Orbital>& basis, const Matrix& P, const Matrix& P2,
+                              const double* Dns, const Matrix* Q, int natoms, int threads)
+{
+    if (basis.empty()) return Matrix::Zero(natoms, 3);
+    const std::vector<EriShell> sh = groupShells(basis);
+    const ShellOutput so = makeShellOutput(sh, (int)basis.size(), Q);
+    const int na = so.n;
+    std::vector<Eigen::MatrixXd> Tt(sh.size());
+    for (size_t s = 0; s < sh.size(); ++s)
+        if (so.spherical && !so.identity[s]) Tt[s] = so.T[s].transpose();  // (width x ncomp): active -> cart
+    auto fill = [&](int sA, int sB, int sC, int sD, std::vector<double>& Dq) {
+        const EriShell& A = sh[sA];
+        const EriShell& B = sh[sB];
+        const EriShell& C = sh[sC];
+        const EriShell& D = sh[sD];
+        const int nA = (int)A.lmn.size(), nB = (int)B.lmn.size(), nC = (int)C.lmn.size(), nD = (int)D.lmn.size();
+        // non-separable block: active-basis read, then active -> cartesian on each index
+        thread_local std::vector<double> blk, tmp;
+        int d[4] = { so.width[sA], so.width[sB], so.width[sC], so.width[sD] };
+        const int f0 = so.first[sA], f1 = so.first[sB], f2 = so.first[sC], f3 = so.first[sD];
+        blk.resize((size_t)d[0] * d[1] * d[2] * d[3]);
+        for (int a = 0; a < d[0]; ++a)
+            for (int b = 0; b < d[1]; ++b)
+                for (int c = 0; c < d[2]; ++c) {
+                    const double* src = Dns + ((((size_t)(f0 + a) * na + (f1 + b)) * na + (f2 + c)) * na + f3);
+                    double* dst = &blk[(((size_t)a * d[1] + b) * d[2] + c) * d[3]];
+                    for (int e = 0; e < d[3]; ++e) dst[e] = src[e];
+                }
+        const int s4[4] = { sA, sB, sC, sD };
+        for (int k = 0; k < 4; ++k)
+            if (so.spherical && !so.identity[s4[k]]) transformAxis(blk, tmp, d, k, Tt[s4[k]]);
+        Dq.resize((size_t)nA * nB * nC * nD);
+        for (int a = 0; a < nA; ++a)
+            for (int b = 0; b < nB; ++b)
+                for (int c = 0; c < nC; ++c)
+                    for (int e = 0; e < nD; ++e) {
+                        const int m = A.first + a, n = B.first + b, l = C.first + c, s = D.first + e;
+                        const size_t idx = ((size_t)(a * nB + b) * nC + c) * nD + e;
+                        Dq[idx] = P(m, n) * P(l, s) - 0.25 * (P(m, l) * P(n, s) + P(m, s) * P(n, l))
+                                + (P2(m, n) * P(l, s) + P(m, n) * P2(l, s))
+                                - 0.25 * (P2(m, l) * P(n, s) + P(m, l) * P2(n, s) + P2(m, s) * P(n, l) + P(m, s) * P2(n, l))
+                                + blk[idx];
+                    }
+    };
+    return gradientTwoElectronDriver(basis, sh, natoms, threads, fill);
 }
 
 }  // namespace qmint

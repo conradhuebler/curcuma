@@ -3,8 +3,9 @@
 - **Status:** WP10 RI-J/RI-JK (HF, CPU + CUDA), WP11 Schritt 1+3 (kanonisches RMP2, SCS/SOS, CPU + CUDA) und
   WP11 Schritt 2 (RI-MP2 mit def2-universal-JKFIT/-JFIT als Korrelations-Hilfsbasis, CPU + CUDA) sind
   implementiert, 🤖 AI-generated, ⚙️ machine-tested (Okt 2026, Abschnitte WP10, WP11 und RI-MP2 unten), ebenso der
-  analytische Gradient fuer RI-J/RI-JK-HF (Abschnitt "WP10 -- Gradient"); RI-MP2 mit def2-SVP/C, MP2-Gradienten und
-  WP13-WP15 sind Plan.
+  analytische Gradient fuer RI-J/RI-JK-HF (Abschnitt "WP10 -- Gradient") und der analytische Gradient des kanonischen
+  MP2/SCS/SOS (CPU, 2e-Ableitungsteil auch CUDA; Abschnitt "WP11 -- MP2-Gradient"); RI-MP2 mit def2-SVP/C, der
+  RI-MP2-Gradient und WP13-WP15 sind Plan.
 - **Abhaengigkeit:** WP3 (RHF, ERI-Engine, `QMEngine`), fuer die GPU-Teile die Stufen Q-G1/Q-G2 aus
   [../QM_GPU_ROADMAP.md](../QM_GPU_ROADMAP.md).
 - **Referenzen auf dieser Maschine:** PySCF (venv `~/.venvs/qmref`), ORCA 6.1 (`~/Downloads/orca_6_1_0_...`).
@@ -205,9 +206,8 @@ Produktionstest steht aus.** Schritt 2 (RI-MP2): eigener Abschnitt unten.
   `buildERI`, wenn n^4*8 Byte <= `-qm.mp2_max_memory_mb` (bei integral-direkter SCF), darueber Abbruch mit Fehler.
   **Kein integral-direktes MP2**, also Grenze n^4 im Hostspeicher. GPU: gespeicherter Device-Tensor (Q-G1/Q-G2,
   `QMGpuJK::deviceERI`), sonst Host-Tensor hochgeladen; Fehler -> CPU, gezaehlt als `qm_mp2`.
-- **Gradient:** keiner. Eine Gradientenanforderung ist ein Fehler ("mp2 has no analytic gradient"): `-opt` und
-  `-sp -gradient` brechen damit ab (geprueft, `qm_mp2_opt_error`); `-hessian` meldet ihn fuer jede Auslenkung, laeuft
-  aber weiter und schreibt keine Frequenzen (Verhalten von `hessian.cpp`, nicht geaendert); `-md` nicht getestet.
+- **Gradient:** seit Okt 2026 analytisch (mp2, scs-mp2, sos-mp2, mit und ohne frozen core), eigener Abschnitt
+  "WP11 -- MP2-Gradient" unten; der fruehere Fehlertest `qm_mp2_opt_error` ist durch `qm_mp2_opt_*` ersetzt.
 - **Validierung** (def2-SVP sphaerisch, `-qm.scf_threshold 1e-10`): `ctest -L qm_mp2` (30 Tests) gegen PySCF 2.14
   `mp.MP2` (RHF conv_tol 1e-12, `scripts/mp2_reference.py` -> `test_cases/qm_mp2/reference.json`) auf H2O, NH3, CH4,
   HF, H2O/Formaldehyd verzerrt, Formaldehyd, Benzol, je voll und frozen core: alle E_OS, E_SS, E_corr, SCS, SOS
@@ -238,8 +238,8 @@ Produktionstest steht aus.** Schritt 2 (RI-MP2): eigener Abschnitt unten.
 - **Nicht getestet:** offene Schale (nicht implementiert), Elemente ausser H, C, N, O, F (Li-Ne-frozen-core-Regel nur auf
   C, N, O, F gegen PySCF/ORCA geprueft), andere Basen als def2-SVP, kartesisch 6d, Systeme ueber 180 BF, ROCm/Vulkan
   (keine Implementierung, `-gpu rocm` faellt gezaehlt auf die CPU), geladene Molekuele.
-- **Nicht implementiert gegenueber ORCA/PySCF:** integral-direktes MP2, MP2-Gradient und -Dichte,
-  frei waehlbare SCS-Faktoren, Ausnutzung der Permutationssymmetrie in der Transformation (Faktor ~2 offen).
+- **Nicht implementiert gegenueber ORCA/PySCF:** integral-direktes MP2, MP2-Dichte als Ausgabe (die relaxierte
+  Dichte existiert nur intern im Gradienten), frei waehlbare SCS-Faktoren, Ausnutzung der Permutationssymmetrie in der Transformation (Faktor ~2 offen).
 
 Vergleich (Eh; curcuma `-qm.scf_threshold 1e-10 -qm.threads 16`; ORCA ExtremeSCF, 9 gedruckte Stellen; "SCS - ORCA"
 gegen `! SCS-MP2`, das zusammen mit E_corr die OS/SS-Aufteilung prueft):
@@ -271,6 +271,68 @@ Urspruenglicher Plan:
   Startpunkt. Zuerst die CPU-Version fertigstellen und validieren.
 - **Offen:** Gradient (Z-Vektor, relaxierte Dichte) ist ein eigenes Arbeitspaket; ohne ihn ist MP2 nur
   Einzelpunkt, kein `-opt`.
+
+## WP11 -- MP2-Gradient
+
+**Stand Okt 2026: analytischer Kerngradient des kanonischen closed-shell MP2 (mp2, scs-mp2, sos-mp2; voller und
+eingefrorener Rumpf), CPU; der 2e-Ableitungsteil auch auf CUDA. 🤖 AI-generated, ⚙️ machine-tested, menschlicher
+Produktionstest steht aus.**
+
+- **Code:** `qm_mp2_grad.cpp` (Herleitung im Kommentarblock am Dateianfang; `qmint::mp2GradientHost`,
+  `QMEngine::computeMP2Gradient`, `QMEngine::mp2G4`, `qmint::mp2ActiveToCartesian`), `qmint::gradientTwoElectronMP2`
+  in `qm_integrals.cpp` (deklariert in `qm_mp2.h`; teilt `gradientTwoElectronDriver` mit dem RHF-Gradienten),
+  `cuda/qm_gpu_mp2_grad.cu` + Naht `qm_gpu_mp2_grad_backend.h` (Eintrag `curcuma_cuda_create_qm_mp2_grad2e`, Kopie
+  des Q-G7-Kerns mit anderem Quartettgewicht), `mp2_method.cpp` (Gradient in Eh/Angstrom). `-sp -gradient`,
+  `-opt -method mp2` und alles, was `getGradient()` nutzt, laufen damit.
+- **Verfahren:** Lagrange-/Z-Vektor-Formulierung (Handy-Schaefer) mit relaxierter Dichte, energiegewichteter Dichte und
+  nicht-separabler 2-Teilchen-Dichte Gamma = sum T~ C C C C im AO-Raum (n^4 auf dem Host); Frozen-Core ueber die
+  Rotationen Rumpf-aktiv (w_Ij = L1_Ij/(e_j - e_I)) und Rumpf-virtuell (im Z-Vektor). Amplituden und
+  Halbtransformationen in Batches ueber i wie die Energie (`-qm.mp2_batch_mb`), GEMMs mit `qmint::gemmABt`.
+  Z-Vektor: vorkonditioniertes CG mit Diagonale e_a - e_k, J/K vom exakten Pfad (gespeicherter Tensor bzw. Device);
+  nach integral-direkter SCF mit dem fuer MP2 neu gebauten Tensor (der direkte Builder hat einen Schwellen-Rauschboden,
+  Naphthalin blieb damit nach 100 Iterationen bei 1.7e-9 stehen). Abbruch bei max|r| <= 1e-10, Fehler ueber 1e-6.
+- **Validierung** (def2-SVP sphaerisch, `-qm.scf_threshold 1e-10`): `ctest -L qm_mp2` (`qm_mp2_grad_*`,
+  `qm_mp2_opt_*`, `qm_gpu_mp2_grad_*`, 29 neue Tests). Referenz `test_cases/qm_mp2/reference_grad.json` aus
+  `scripts/mp2_gradient_reference.py` (PySCF 2.14): **PySCFs analytischer MP2-Gradient
+  (`mp.MP2(mf).nuc_grad_method()`) weicht von der finiten Differenz der eigenen PySCF-MP2-Energie um bis zu 1.1e-7
+  Eh/Bohr ab** (H2O; unabhaengig von der CPHF-Toleranz 1e-9 oder 1e-13; Ursache nicht untersucht). Deshalb ist die
+  enge Referenz die Vierpunkt-Differenz der PySCF-Energie (h = 1e-3 Bohr, RHF conv_tol 1e-13).
+  curcuma gegen diese FD: H2O, NH3, CH4, HF, H2O/Formaldehyd verzerrt, Formaldehyd je voll und fc <= 6.5e-10,
+  Benzol 1.3e-9 (voll) / 1.4e-9 (fc) Eh/Bohr; gegen PySCF analytisch <= 1.1e-7; Energie <= 1.1e-11 Eh.
+  Gegen die zentrale Differenz der eigenen curcuma-Energie (h = 1e-4 Bohr): H2O verzerrt 2.8e-9 (voll und fc), NH3
+  1.6e-9 (voll und fc), SCS-MP2 Formaldehyd verzerrt 3.7e-9, SCS-MP2 H2O fc 2.6e-9, SOS-MP2 NH3 fc 1.6e-9.
+  Summe ueber Atome <= 1e-12. ORCA 6.1 (`! MP2 def2-SVP NoRI ExtremeSCF EnGrad NoAutoStart [No]FrozenCore`, .engrad)
+  gegen curcuma: H2O verzerrt 2.6e-8 / 2.0e-8 (fc), Formaldehyd verzerrt 2.4e-8 / 2.5e-8, Benzol 7.7e-8 / 7.3e-8,
+  Naphthalin (voll, nicht im ctest) 7.6e-8 Eh/Bohr (Energie 5.0e-10 Eh); ORCA liegt um denselben Betrag neben der PySCF-FD (2.0e-8 bis 7.6e-8), die Abweichung ist also ORCAs
+  eigene Genauigkeit (vermutlich Z-Vektor-Toleranz, nicht geprueft). `-opt -method mp2` (Preset tight) von den
+  verzerrten Startstrukturen: H2O E - E_min(PySCF) = 1.6e-13 Eh, max |d r_ij| = 1.7e-7 A; Formaldehyd 4.7e-11 Eh,
+  5.7e-6 A (PySCF-Minimum: scipy BFGS gtol 1e-7, `scripts/mp2_opt_reference.py`). GPU (2e-Teil) gegen CPU-2e-Teil
+  (`qm_gpu_mp2_grad_*`): Formaldehyd verzerrt 1.1e-14 / 2.5e-14 (fc), Benzol 1.4e-13 / 1.3e-13 Eh/Bohr.
+- **Zeiten** (ms, RTX 5090, CPU-BLAS = Referenz-netlib, `curcuma -sp X -method mp2 -gradient -qm.scf_threshold 1e-10
+  -qm.threads N -gpu none|cuda -verbosity 2`, Zeile "MP2 gradient timing"; Maschine sonst unbelastet; GPU = 2e-Ableitungsteil, 1e-Teil, SCF und Z-Vektor-J/K auf dem Device,
+  Amplituden/Ruecktransformation auf der CPU mit 16 Threads):
+
+  | System (n, o, v), voll | SCF | Amplituden | Rueck-transf. | Z-Vektor (It.) | Dichten | 2e-Abl. | 1e-Abl. | Wand |
+  |---|---|---|---|---|---|---|---|---|
+  | Benzol (114, 21, 93), 1 Thread | 2418 | 435 | 1179 | 1474 (10) | 930 | 21100 | 421 | 30.3 s |
+  | Benzol, 16 Threads | 937 | 120 | 334 | 606 (10) | 158 | 1605 | 34 | 4.3 s |
+  | Benzol, GPU | 42 | 113 | 312 | 13 (10) | 109 | 396 | 18 | 1.8 s |
+  | Naphthalin (180, 34, 146), 1 Thread | 158196 + 9779 Tensor | 4064 | 10635 | 11282 (14) | 6220 | 136051 | 1564 | 346 s |
+  | Naphthalin, 16 Threads | 11032 + 1585 Tensor | 1051 | 2872 | 4775 (14) | 1025 | 11372 | 122 | 34.9 s |
+  | Naphthalin, GPU | 236 (+ Download 8.4 GB) | 1024 | 2887 | 118 (14) | 743 | 2639 | 39 | 10.3 s |
+
+  Naphthalin CPU: integral-direkte SCF (Tensor 8398 MB > `-qm.eri_max_memory_mb` 4000), Tensor fuer MP2 neu gebaut.
+  GPU-2e-Teil Naphthalin: 2PDM nach kartesisch 682 ms (Host), Upload 780 ms, Kerne 1157 ms, 10.4 GB Device-Speicher;
+  Benzol 78 / 122 / 192 ms. GPU gegen CPU, ganzer Gradient Naphthalin: 2.6e-12 Eh/Bohr. Speicher Host (gerechnet):
+  Tensor n^4 + 2PDM n^4 (Naphthalin 2 x 8.4 GB) plus o v o v- und o n o v-Felder.
+- **Nicht getestet:** offene Schale (nicht implementiert), Elemente ausser H, C, N, O, F, andere Basen als def2-SVP,
+  kartesisch 6d, geladene Molekuele, Systeme ueber 180 BF, `-md` und `-hessian` mit mp2 (laufen ueber `getGradient()`,
+  nicht geprueft), ROCm/Vulkan (keine Implementierung, `-gpu rocm` faellt gezaehlt auf die CPU), entartete
+  Rumpf-/Valenz-Orbitalenergien (w_Ij teilt durch e_j - e_I).
+- **Nicht implementiert:** RI-MP2-Gradient (Fehler wie zuvor), MP2-Gradient mit RI-J/RI-JK-SCF (Fehler),
+  integral-direkter Gradient (n^4 Tensor und n^4 2-Teilchen-Dichte auf dem Host; Grenze `-qm.mp2_max_memory_mb` je
+  Feld), GPU fuer Amplituden, Ruecktransformation und Z-Vektor-Algebra (nur die J/K des Z-Vektors laufen ueber den
+  vorhandenen Device-Pfad, wenn die SCF auf dem Device lief), Dichte-/Dipolausgabe.
 
 ## WP11 Schritt 2 -- RI-MP2
 

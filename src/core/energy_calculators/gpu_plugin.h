@@ -36,6 +36,7 @@
 #include "qm_methods/qm_gpu_backend.h"  // qmint::QMGpuJK
 #include "qm_methods/qm_gpu_scf_backend.h"  // qmint::QMGpuSCF (Q-G4)
 #include "qm_methods/qm_gpu_grad_backend.h"  // qmint::QMGpuGrad2e (Q-G7)
+#include "qm_methods/qm_gpu_mp2_grad_backend.h"  // qmint::QMGpuMP2Grad2e (MP2 gradient)
 #include "qm_methods/qm_gpu_grad1e_backend.h"  // qmint::QMGpuGrad1e (Q-G8)
 #include "qm_methods/qm_gpu_ri_backend.h"  // qmint::QMGpuRI (WP10)
 #include "qm_methods/qm_gpu_mp2_backend.h"  // qmint::QMGpuMP2Input/Output (WP11)
@@ -101,6 +102,14 @@ std::unique_ptr<qmint::QMGpuSCF> createQmScf(const std::string& backend, int n, 
  */
 std::unique_ptr<qmint::QMGpuGrad2e> createQmGrad2e(const std::string& backend, const qmint::QMGpuEriTables& tables,
                                                    const qmint::QMGpuGradExtra& extra, int device, std::string& why);
+
+/**
+ * MP2-gradient two-electron derivative contraction on the device (RHF + separable + non-separable 2PDM,
+ * cartesian). Same tables as createQmGrad2e. nullptr with a reason in `why` when the plugin/entry point is
+ * missing, the basis is unsupported or the n^4 2PDM does not fit. Claude Generated (Oct 2026).
+ */
+std::unique_ptr<qmint::QMGpuMP2Grad2e> createQmMp2Grad2e(const std::string& backend, const qmint::QMGpuEriTables& tables,
+                                                         const qmint::QMGpuGradExtra& extra, int device, std::string& why);
 
 /**
  * Native-QM one-electron gradient builder (Q-G8): S, T, V derivative integrals contracted with the

@@ -184,6 +184,38 @@ void mp2EnergyHost(const double* eri, int n, const Matrix& C, const Vector& eps,
 //                else a fresh qmint::buildERI (same screening, same 5d transform) if
 //                n^4 * 8 bytes <= opt.max_memory_mb -- an integral-direct SCF stores no tensor and
 //                there is no integral-direct MP2 yet, so above that limit MP2 stops with an error.
+// Claude Generated (Oct 2026): host AO tensor for MP2 (energy and gradient), formerly a lambda in computeMP2.
+const double* QMEngine::mp2HostTensor(const qmint::MP2Options& opt, qmint::MP2Result& res, qmint::ERITensor& local,
+                                      std::string& tensor_src)
+{
+    const int n = m_nbf;
+    const double tensor_mb = std::pow((double)n, 4) * 8.0 / 1.0e6;
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool cached = (m_Q.size() == 0) ? m_eri_ready : m_eri_active_ready;
+    if (cached) {
+        tensor_src = "stored host tensor of the SCF";
+        return eriActive().data();
+    }
+    if (tensor_mb > opt.max_memory_mb) {
+        CurcumaLogger::error(fmt::format(
+            "MP2: the AO tensor ({:.1f} MB) is not stored (integral-direct SCF) and exceeds -qm.mp2_max_memory_mb "
+            "{:.1f}; integral-direct MP2 is not implemented", tensor_mb, opt.max_memory_mb));
+        return nullptr;
+    }
+    if (m_gpu_jk && m_gpu_jk->n() == n) {
+        local = qmint::ERITensor(n);
+        if (m_gpu_jk->downloadERI(local.data())) {
+            res.t_integrals_ms += msSince(t0);
+            tensor_src = fmt::format("device tensor downloaded ({:.1f} MB)", tensor_mb);
+            return local.data();
+        }
+    }
+    local = qmint::buildERI(m_gto_basis, m_threads, m_eri_screening, m_Q.size() != 0 ? &m_Q : nullptr);
+    res.t_integrals_ms += msSince(t0);
+    tensor_src = fmt::format("AO tensor rebuilt for MP2 ({:.1f} MB, {:.1f} ms)", tensor_mb, res.t_integrals_ms);
+    return local.data();
+}
+
 bool QMEngine::computeMP2(const qmint::MP2Options& opt, qmint::MP2Result& res)
 {
     res = qmint::MP2Result();
@@ -215,42 +247,15 @@ bool QMEngine::computeMP2(const qmint::MP2Options& opt, qmint::MP2Result& res)
     res.n_basis = n;
     if (res.n_virt == 0 || res.n_occ_active == 0) return true;  // nothing to correlate: E_corr = 0
 
-    const double tensor_mb = std::pow((double)n, 4) * 8.0 / 1.0e6;
     qmint::ERITensor local;  // temporary host tensor (download or rebuild), freed on return
     std::string tensor_src;
-    auto buildHostTensor = [&]() -> const double* {
-        const auto t0 = std::chrono::steady_clock::now();
-        const bool cached = (m_Q.size() == 0) ? m_eri_ready : m_eri_active_ready;
-        if (cached) {
-            tensor_src = "stored host tensor of the SCF";
-            return eriActive().data();
-        }
-        if (tensor_mb > opt.max_memory_mb) {
-            CurcumaLogger::error(fmt::format(
-                "MP2: the AO tensor ({:.1f} MB) is not stored (integral-direct SCF) and exceeds -qm.mp2_max_memory_mb "
-                "{:.1f}; integral-direct MP2 is not implemented", tensor_mb, opt.max_memory_mb));
-            return nullptr;
-        }
-        if (m_gpu_jk && m_gpu_jk->n() == n) {
-            local = qmint::ERITensor(n);
-            if (m_gpu_jk->downloadERI(local.data())) {
-                res.t_integrals_ms += msSince(t0);
-                tensor_src = fmt::format("device tensor downloaded ({:.1f} MB)", tensor_mb);
-                return local.data();
-            }
-        }
-        local = qmint::buildERI(m_gto_basis, m_threads, m_eri_screening, m_Q.size() != 0 ? &m_Q : nullptr);
-        res.t_integrals_ms += msSince(t0);
-        tensor_src = fmt::format("AO tensor rebuilt for MP2 ({:.1f} MB, {:.1f} ms)", tensor_mb, res.t_integrals_ms);
-        return local.data();
-    };
     // at most one acquisition per call (a device fallback must not rebuild the tensor)
     const double* host_eri = nullptr;
     bool host_tried = false;
     auto hostTensor = [&]() -> const double* {
         if (!host_tried) {
             host_tried = true;
-            host_eri = buildHostTensor();
+            host_eri = mp2HostTensor(opt, res, local, tensor_src);
         }
         return host_eri;
     };

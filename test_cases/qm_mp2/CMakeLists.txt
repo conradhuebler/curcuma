@@ -10,7 +10,15 @@
 #   qm_mp2_direct_*      integral-direct SCF: the tensor is rebuilt for MP2
 #   qm_mp2_batch1_*      -qm.mp2_batch_mb tiny: one occupied orbital per batch
 #   qm_mp2_threads1_*    one thread
-#   qm_mp2_opt_error     -opt with mp2 must stop with the "no analytic gradient" error
+#   qm_mp2_opt_<mol>     -opt -method mp2 reaches the PySCF MP2 minimum (replaces qm_mp2_opt_error, which checked
+#                        the "no analytic gradient" error before the MP2 gradient existed)
+#   qm_mp2_grad_*        analytic MP2 gradient (check_mp2_gradient.py, dump_qm_gradient) against reference_grad.json
+#                        from scripts/mp2_gradient_reference.py (PySCF 2.14, ~/.venvs/qmref: RHF conv_tol 1e-13,
+#                        conv_tol_grad 1e-11; four-point central difference of the PySCF MP2 energy, h = 1e-3 Bohr,
+#                        tol 1e-8 Eh/Bohr; PySCF's analytic mp.MP2(mf).nuc_grad_method() with CPHF tol 1e-13 within
+#                        2.5e-7, because it differs from its own FD by up to 1.1e-7); *_fd also against the FD of
+#                        curcuma's own energy (1e-7); scs/sos only against the own FD (PySCF has no SCS gradient)
+#   qm_gpu_mp2_grad_*    the same with -gpu cuda (2e derivative part on the device; label qm_gpu, exit 77 = skip)
 #   qm_gpu_mp2_*         -gpu cuda (label qm_gpu, exit 77 = skip without plugin/device)
 # RI-MP2 (methods ri-mp2, scs-ri-mp2, sos-ri-mp2; Claude Generated, Oct 2026) against reference_ri.json, produced by
 # scripts/rimp2_reference.py (PySCF 2.14 with the auxiliary basis read from curcuma's own
@@ -47,11 +55,44 @@ if(Python3_Interpreter_FOUND)
         qm_mp2_batch1_formaldehyde_fc qm_mp2_threads1_CH4)
     set_tests_properties(${_MP2_TESTS} PROPERTIES TIMEOUT 900 LABELS "qm_mp2")
 
-    # -opt needs a gradient: must fail with the clear error, not optimise on a wrong gradient
-    add_test(NAME qm_mp2_opt_error
-        COMMAND ${CMAKE_COMMAND} -E env sh -c
-            "$<TARGET_FILE:curcuma> -opt ${CMAKE_CURRENT_SOURCE_DIR}/../qm_1e/H2O.xyz -method mp2 -no_bmt 2>&1 | grep -q 'mp2 has no analytic gradient'")
-    set_tests_properties(qm_mp2_opt_error PROPERTIES TIMEOUT 300 LABELS "qm_mp2")
+    # MP2 gradient (Claude Generated, Oct 2026)
+    set(_MP2G ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check_mp2_gradient.py
+        --dump $<TARGET_FILE:dump_qm_gradient> --ref ${CMAKE_CURRENT_SOURCE_DIR}/reference_grad.json)
+    set(_MP2G_TESTS)
+    foreach(_mol H2O NH3 CH4 HF H2O_distorted formaldehyde_distorted formaldehyde benzene)
+        add_test(NAME qm_mp2_grad_${_mol} COMMAND ${_MP2G} --mol ${_mol})
+        add_test(NAME qm_mp2_grad_${_mol}_fc COMMAND ${_MP2G} --mol ${_mol} --fc)
+        list(APPEND _MP2G_TESTS qm_mp2_grad_${_mol} qm_mp2_grad_${_mol}_fc)
+    endforeach()
+    add_test(NAME qm_mp2_grad_fd_H2O_distorted COMMAND ${_MP2G} --mol H2O_distorted --fd)
+    add_test(NAME qm_mp2_grad_fd_NH3_fc COMMAND ${_MP2G} --mol NH3 --fc --fd)
+    add_test(NAME qm_mp2_grad_scs_formaldehyde_distorted COMMAND ${_MP2G} --mol formaldehyde_distorted --method scs-mp2 --fd)
+    add_test(NAME qm_mp2_grad_sos_NH3_fc COMMAND ${_MP2G} --mol NH3 --fc --method sos-mp2 --fd)
+    add_test(NAME qm_mp2_grad_direct_formaldehyde_distorted COMMAND ${_MP2G} --mol formaldehyde_distorted
+        "--extra=--qm scf_direct on")
+    add_test(NAME qm_mp2_grad_batch1_formaldehyde_fc COMMAND ${_MP2G} --mol formaldehyde --fc
+        "--extra=--qm mp2_batch_mb 0.001")
+    add_test(NAME qm_mp2_grad_threads1_H2O_distorted COMMAND ${_MP2G} --mol H2O_distorted --threads 1)
+    list(APPEND _MP2G_TESTS qm_mp2_grad_fd_H2O_distorted qm_mp2_grad_fd_NH3_fc qm_mp2_grad_scs_formaldehyde_distorted
+        qm_mp2_grad_sos_NH3_fc qm_mp2_grad_direct_formaldehyde_distorted qm_mp2_grad_batch1_formaldehyde_fc
+        qm_mp2_grad_threads1_H2O_distorted)
+    set_tests_properties(${_MP2G_TESTS} PROPERTIES TIMEOUT 1800 LABELS "qm_mp2")
+
+    # -opt -method mp2 must reach the PySCF minimum (until Oct 2026 this was qm_mp2_opt_error: the
+    # "no analytic gradient" error, now obsolete because the gradient exists)
+    foreach(_mol H2O formaldehyde)
+        add_test(NAME qm_mp2_opt_${_mol}
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check_mp2_opt.py --curcuma $<TARGET_FILE:curcuma>
+                --ref ${CMAKE_CURRENT_SOURCE_DIR}/reference_grad.json --mol ${_mol})
+        set_tests_properties(qm_mp2_opt_${_mol} PROPERTIES TIMEOUT 2500 LABELS "qm_mp2")
+    endforeach()
+
+    foreach(_mol formaldehyde_distorted benzene)
+        add_test(NAME qm_gpu_mp2_grad_${_mol} COMMAND ${_MP2G} --mol ${_mol} --gpu --curcuma $<TARGET_FILE:curcuma>)
+        add_test(NAME qm_gpu_mp2_grad_${_mol}_fc COMMAND ${_MP2G} --mol ${_mol} --fc --gpu --curcuma $<TARGET_FILE:curcuma>)
+        set_tests_properties(qm_gpu_mp2_grad_${_mol} qm_gpu_mp2_grad_${_mol}_fc
+            PROPERTIES TIMEOUT 1800 LABELS "qm_gpu;gpu;qm_mp2" SKIP_RETURN_CODE 77)
+    endforeach()
 
     # Device path: stored device tensor of the SCF (default), integral-direct SCF on the device
     # (tensor rebuilt on the host and uploaded), with the CPU result as second reference.

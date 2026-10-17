@@ -574,6 +574,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/gcp.cpp
         src/core/energy_calculators/qm_methods/hf3c_method.cpp
         src/core/energy_calculators/qm_methods/qm_mp2.cpp
+        src/core/energy_calculators/qm_methods/qm_mp2_grad.cpp
         src/core/energy_calculators/qm_methods/mp2_method.cpp
         src/core/energy_calculators/qm_methods/qm_rimp2.cpp
         src/core/energy_calculators/qm_methods/gfnff_method.cpp
@@ -1119,6 +1120,8 @@ if(USE_CUDA)
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_scf.cu
         # Claude Generated (Oct 2026): native QM two-electron gradient on the device (Q-G7)
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_grad.cu
+        # Claude Generated (Oct 2026): 2e derivative contraction of the MP2 gradient (copy of the Q-G7 kernel)
+        src/core/energy_calculators/qm_methods/cuda/qm_gpu_mp2_grad.cu
         # Claude Generated (Oct 2026): native QM one-electron gradient on the device (Q-G8)
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_grad1e.cu
         # Claude Generated (Oct 2026, WP10): density-fitting (RI) contractions, cuBLAS only

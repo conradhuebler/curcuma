@@ -11,6 +11,7 @@
 #include "qm_method.h"
 
 #include "src/core/curcuma_logger.h"
+#include "src/core/units.h"
 
 #include <fmt/format.h>
 
@@ -80,27 +81,40 @@ double MP2Method::calculateEnergy(bool gradient)
 {
     m_error = false;
     m_error_message.clear();
-    if (gradient) {
-        // No MP2 gradient (Z-vector / relaxed density, own work package). A zero or an HF gradient
-        // would silently optimise the wrong surface, so a gradient request is an error.
+    if (gradient && m_options.ri) {
+        // No RI-MP2 gradient. A zero or an HF gradient would silently optimise the wrong surface, so a
+        // gradient request is an error.
         m_error = true;
-        m_error_message = m_variant + " has no analytic gradient (energy only; use -sp, or hf for -opt/-md/-hessian)";
+        m_error_message = m_variant + " has no analytic gradient (energy only; use -sp, or mp2 / hf for -opt/-md/-hessian)";
         CurcumaLogger::error(m_error_message);
         return std::numeric_limits<double>::quiet_NaN();
     }
 
+    const bool scs = m_variant.rfind("scs-", 0) == 0, sos = m_variant.rfind("sos-", 0) == 0;
+    // Spin-component scaling of the correlation energy whose gradient is formed (Claude Generated, Oct 2026)
+    const double c_os = scs ? 1.2 : sos ? 1.3 : 1.0;
+    const double c_ss = scs ? 1.0 / 3.0 : sos ? 0.0 : 1.0;
     m_e_hf = m_engine->Calculation(false);
     if (!m_engine->scfConverged()) {
         m_error = true;
         m_error_message = "MP2: the RHF SCF did not converge";
         return m_e_hf;
     }
-    if (!(m_options.ri ? m_engine->computeRIMP2(m_options, m_result) : m_engine->computeMP2(m_options, m_result))) {
+    if (gradient) {
+        // Canonical MP2 gradient (Claude Generated, Oct 2026): energy and gradient from one pass
+        // (QMEngine::computeMP2Gradient, qm_mp2_grad.cpp). The engine works in Eh/Bohr.
+        if (!m_engine->computeMP2Gradient(m_options, c_os, c_ss, m_result)) {
+            m_error = true;
+            m_error_message = m_engine->gradientError().empty() ? std::string("MP2 gradient failed") : m_engine->gradientError();
+            m_gradient = Matrix::Zero(m_molecule.AtomCount(), 3);
+            return m_e_hf;
+        }
+        m_gradient = m_engine->gradientBohr() * CurcumaUnit::Length::ANGSTROM_TO_BOHR;  // -> Eh/Angstrom
+    } else if (!(m_options.ri ? m_engine->computeRIMP2(m_options, m_result) : m_engine->computeMP2(m_options, m_result))) {
         m_error = true;
         m_error_message = "MP2: correlation energy failed (see the error above)";
         return m_e_hf;
     }
-    const bool scs = m_variant.rfind("scs-", 0) == 0, sos = m_variant.rfind("sos-", 0) == 0;
     const double e_corr = scs ? m_result.e_scs() : sos ? m_result.e_sos() : m_result.e_corr();
     m_e_total = m_e_hf + e_corr;
 
@@ -129,7 +143,14 @@ double MP2Method::calculateEnergy(bool gradient)
             CurcumaLogger::result(fmt::format("  E(MP2 corr)    = {:.12f} Eh", m_result.e_corr()));
             CurcumaLogger::result(fmt::format("  E(SCS-MP2 corr)= {:.12f} Eh  (1.2 OS + 1/3 SS)", m_result.e_scs()));
             CurcumaLogger::result(fmt::format("  E(SOS-MP2 corr)= {:.12f} Eh  (1.3 OS)", m_result.e_sos()));
-            if (m_options.ri)
+            if (m_result.gradient)
+                CurcumaLogger::info(fmt::format(
+                    "MP2 gradient timing: amplitudes {:.1f} ms, back-transformation {:.1f} ms, Z-vector {:.1f} ms ({} iterations, "
+                    "max residual {:.1e}), densities {:.1f} ms, derivative integrals 2e {:.1f} ms, 1e {:.1f} ms ({})",
+                    m_result.t_grad_amplitudes_ms, m_result.t_grad_backtrans_ms, m_result.t_grad_zvector_ms,
+                    m_result.zvector_iterations, m_result.zvector_residual, m_result.t_grad_density_ms,
+                    m_result.t_grad_deriv2e_ms, m_result.t_grad_deriv1e_ms, m_result.info));
+            else if (m_options.ri)
                 CurcumaLogger::info(fmt::format("RI-MP2 timing: RI setup {:.1f} ms, B transformation {:.1f} ms, energy {:.1f} ms ({})",
                                                 m_result.t_ri_setup_ms, m_result.t_transform_ms, m_result.t_energy_ms,
                                                 m_result.info));

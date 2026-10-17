@@ -10,6 +10,10 @@
  *   dump_qm_gradient <xyz> [--method hf|hf-3c] [--basis NAME] [--fd] [--h 1e-4]
  *                    [--ri off|j|jk] [--ri_metric cholesky|eigen] [--cartesian] [--threads N]
  *
+ * --method mp2|scs-mp2|sos-mp2 (Oct 2026, MP2 gradient): native canonical MP2 (MP2Method);
+ * --frozen_core adds -qm.frozen_core true; --qm KEY VALUE sets any further qm-module key (VALUE parsed as
+ * JSON when possible, e.g. --qm scf_direct on, --qm mp2_batch_mb 0.001).
+ *
  * --ri (Oct 2026, RI gradient): density-fitted SCF and its analytic gradient; the FD then
  * differentiates the RI energy.
  *
@@ -17,6 +21,7 @@
  */
 #include "src/core/energy_calculators/qm_methods/hf3c_method.h"
 #include "src/core/energy_calculators/qm_methods/qm_method.h"
+#include "src/core/energy_calculators/qm_methods/mp2_method.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/units.h"
 
@@ -33,7 +38,8 @@ int main(int argc, char** argv)
         return 1;
     }
     std::string method = "hf", basis = "def2-SVP", ri = "off", ri_metric = "cholesky";
-    bool fd = false, cartesian = false;
+    bool fd = false, cartesian = false, frozen_core = false;
+    json qm_extra = json::object();
     int threads = 0;  // 0: engine default
     double h = 1.0e-4;
     for (int i = 2; i < argc; ++i) {
@@ -45,6 +51,12 @@ int main(int argc, char** argv)
         else if (a == "--ri" && i + 1 < argc) ri = argv[++i];
         else if (a == "--ri_metric" && i + 1 < argc) ri_metric = argv[++i];
         else if (a == "--cartesian") cartesian = true;
+        else if (a == "--frozen_core") frozen_core = true;
+        else if (a == "--qm" && i + 2 < argc) {
+            const std::string key = argv[++i], val = argv[++i];
+            const json parsed = json::parse(val, nullptr, false);
+            qm_extra[key] = parsed.is_discarded() ? json(val) : parsed;
+        }
         else if (a == "--threads" && i + 1 < argc) threads = std::stoi(argv[++i]);
     }
     CurcumaLogger::set_verbosity(0);
@@ -79,13 +91,20 @@ int main(int argc, char** argv)
     }
     if (cartesian) cfg["qm"]["cartesian_d"] = true;
     if (threads > 0) cfg["qm"]["threads"] = threads;
+    if (frozen_core) cfg["qm"]["frozen_core"] = true;
+    for (auto it = qm_extra.begin(); it != qm_extra.end(); ++it) cfg["qm"][it.key()] = it.value();
     auto make = [&]() -> std::unique_ptr<ComputationalMethod> {
         if (method == "hf-3c") return std::make_unique<HF3CMethod>(cfg);
+        if (method == "mp2" || method == "scs-mp2" || method == "sos-mp2") return std::make_unique<MP2Method>(method, cfg);
         return std::make_unique<QMMethod>(QMFunctional::HF, cfg);
     };
     auto m = make();
     m->setMolecule(mol);
     const double e = m->calculateEnergy(true);
+    if (m->hasError()) {
+        std::cerr << "dump_qm_gradient: " << m->getErrorMessage() << "\n";
+        return 2;
+    }
     // getGradient() is Eh/Angstrom by contract; report Eh/Bohr.
     const Matrix g = m->getGradient() * CurcumaUnit::Length::BOHR_TO_ANGSTROM;
 

@@ -58,7 +58,7 @@ WP0 (Gerüst/Setup)
 | WP8 | Analytischer Gradient | ⚙️ machine-tested für `hf`/`hf-3c` (Sep 2026, vs PySCF ≤2e-10 Eh/Bohr); DFT-Anteil offen | `WP8_analytischer_gradient.md` |
 | WP9 | Integration, CLI, Parameter, Doku, CTest | ⚠️ offen | `WP9_integration_doku_ctest.md` |
 | WP10 | RI-J / RI-JK fuer HF (`-qm.ri j\|jk`, def2/J, def2/JK, CPU + CUDA) inkl. analytischem Gradienten (`-opt`) | ⚙️ machine-tested (Okt 2026, Energie vs PySCF ≤1e-10 Eh, vs ORCA 6.1 ≤2e-9 Eh, 5 Molekuele; Gradient vs PySCF ≤6.1e-11 Eh/Bohr, vs ORCA ≤8.8e-9 Eh/Bohr); RI-C offen | `WP10_korrelation_ri_mpn_ccsd.md` |
-| WP11 | kanonisches RMP2/SCS/SOS (Schritt 1+3, CPU + CUDA, `-method mp2`) | ⚙️ machine-tested (Okt 2026, vs PySCF ≤1.8e-9 Eh, vs ORCA ≤2.0e-9 Eh, 16 Faelle); Gradient offen, RI-MP2 eigene Zeile | `WP10_korrelation_ri_mpn_ccsd.md` |
+| WP11 | kanonisches RMP2/SCS/SOS (Schritt 1+3, CPU + CUDA, `-method mp2`) und sein analytischer Gradient (Z-Vektor, frozen core; CPU, 2e-Teil auch CUDA) | ⚙️ machine-tested (Okt 2026, Energie vs PySCF ≤1.8e-9 Eh, vs ORCA ≤2.0e-9 Eh, 16 Faelle; Gradient vs PySCF-FD ≤1.4e-9 Eh/Bohr, 16 Faelle, vs ORCA ≤7.7e-8, `-opt` erreicht das PySCF-Minimum); RI-MP2 eigene Zeile | `WP10_korrelation_ri_mpn_ccsd.md` |
 | WP11/2 | RI-MP2/SCS/SOS (`-method ri-mp2`, Hilfsbasis def2-universal-JKFIT/-JFIT statt def2-SVP/C: Methodenvariante; CPU + CUDA) | ⚙️ machine-tested (Okt 2026, vs PySCF mit denselben Hilfsbasisdateien ≤1.7e-9 Eh, vs ORCA 6.1 AuxC def2/JK ≤1.8e-9 Eh, 16 Faelle + JFIT/RI-JK-SCF); def2-SVP/C und Gradient offen | `WP10_korrelation_ri_mpn_ccsd.md` |
 | WP12-15 | RCCSD, lokales PNO-MP2 (WP15), Bewertung Schwarz-Ansaetze (WP12 gestrichen) | ⚠️ nur Plan | `WP10_korrelation_ri_mpn_ccsd.md` |
 

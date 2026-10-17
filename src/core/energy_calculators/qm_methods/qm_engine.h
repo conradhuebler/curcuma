@@ -240,6 +240,12 @@ public:
     /// auxiliary basis opt.ri_aux; reuses the SCF's RI tensor when -qm.ri j|jk ran with the same
     /// auxiliary file. CPU or device (-qm.gpu_mp2). Implemented in qm_rimp2.cpp. False on error.
     bool computeRIMP2(const qmint::MP2Options& opt, qmint::MP2Result& res);
+    /// MP2 gradient (Claude Generated, Oct 2026): canonical closed-shell MP2 energy of the converged RHF of the
+    /// last Calculation() and the analytic nuclear gradient of E(RHF) + c_os E_OS + c_ss E_SS (relaxed density
+    /// from the Z-vector equations, exact integrals; frozen core supported). Fills res (energies, timings) and
+    /// gradientBohr()/gradientParts() ({1e, 2e, E_nn}, Eh/Bohr). False on error (reason in gradientError()).
+    /// Implemented in qm_mp2_grad.cpp.
+    bool computeMP2Gradient(const qmint::MP2Options& opt, double c_os, double c_ss, qmint::MP2Result& res);
 
 private:
     // Method identity
@@ -367,6 +373,16 @@ private:
     mutable bool m_gpu_ri_grad_failed = false;
     bool m_gradient_failed = false;
     std::string m_gradient_error;
+    /// WP11: the active-basis AO tensor on the host for MP2 (stored SCF tensor, download of the device
+    /// tensor, or a rebuild into `local` within opt.max_memory_mb); nullptr + error printed if impossible.
+    /// `src` describes where it came from; rebuild/download time is added to res.t_integrals_ms.
+    const double* mp2HostTensor(const qmint::MP2Options& opt, qmint::MP2Result& res, qmint::ERITensor& local,
+                                std::string& src);
+    /// MP2 gradient helper: C^T (4 J(X_ao) - 2 K(X_ao)) C for a symmetric MO matrix X; J/K from `eri` when given
+    /// (host tensor rebuilt for MP2 after an integral-direct SCF: exactly linear in X, no screening noise),
+    /// else from the engine's exact J/K builder (stored tensor, device, or integral-direct).
+    Matrix mp2G4(const Matrix& X_mo, const qmint::ERITensor* eri = nullptr) const;
+    mutable bool m_gpu_mp2_grad_failed = false;  ///< device MP2 2e derivative failed once: CPU from then on
 public:
     /// True when -qm.ri j|jk is active for this engine (method variant, see qm_ri.h).
     bool riActive() const;

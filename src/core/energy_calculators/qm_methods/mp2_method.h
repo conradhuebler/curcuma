@@ -13,8 +13,9 @@
  * QMEngine::computeMP2 (qm_mp2.cpp); its settings are the qm-module parameters in qm_mp2.h
  * (-qm.frozen_core, -qm.mp2_max_memory_mb, -qm.mp2_batch_mb, -qm.gpu_mp2).
  *
- * Energy only: there is no MP2 gradient (needs the Z-vector / relaxed density). A gradient
- * request (-opt, -md, -hessian, -sp -gradient) is an error, never a number.
+ * Analytic gradient (Claude Generated, Oct 2026) for mp2, scs-mp2, sos-mp2: relaxed density from the
+ * Z-vector equations, exact integrals, frozen core supported (QMEngine::computeMP2Gradient,
+ * qm_mp2_grad.cpp). The RI variants have no gradient: a gradient request with them is an error.
  * Closed shell, H-Ne (the engine's basis files).
  *
  * Claude Generated (Oct 2026, WP11). AI-generated, machine-tested.
@@ -42,7 +43,8 @@ public:
     bool updateGeometry(const Matrix& geometry) override;
     double calculateEnergy(bool gradient = false) override;
 
-    Matrix getGradient() const override { return Matrix::Zero(m_molecule.AtomCount(), 3); }
+    /// Eh/Angstrom (ComputationalMethod contract); zero unless the last calculateEnergy(true) succeeded.
+    Matrix getGradient() const override { return m_gradient.rows() == m_molecule.AtomCount() ? m_gradient : Matrix::Zero(m_molecule.AtomCount(), 3); }
     Vector getCharges() const override { return Vector::Zero(m_molecule.AtomCount()); }
     Vector getBondOrders() const override { return Vector::Zero(0); }
     Position getDipole() const override { return Position::Zero(); }
@@ -50,7 +52,7 @@ public:
     std::string getMethodName() const override { return m_variant; }
     bool isThreadSafe() const override { return true; }
 
-    bool hasGradient() const override { return false; }
+    bool hasGradient() const override { return !m_options.ri; }
     void setThreadCount(int threads) override { (void)threads; }
     void setParameters(const json& params) override { (void)params; }
     json getParameters() const override { return json{}; }
@@ -72,4 +74,5 @@ private:
     bool m_error = false;
     std::string m_error_message;
     double m_e_hf = 0.0, m_e_total = 0.0;
+    Matrix m_gradient;  ///< Eh/Angstrom, last analytic MP2 gradient
 };
