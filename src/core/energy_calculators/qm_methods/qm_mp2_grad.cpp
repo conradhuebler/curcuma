@@ -78,7 +78,7 @@
 //   pass 2 per i batch: R_i^{nu lam sig} = sum_jab T~_ijab C_nu a C_lam j C_sig b,
 //     Y1_{kappa i} = sum (kappa nu|lam sig) R_i^{nu lam sig} (L1 = 4 C^T Y1), Gamma += C_mu i R_i.
 // Memory: the n^4 AO tensor plus the n^4 Gamma plus O(o v o v + o n o v + batch n^3). The heavy GEMMs use
-// qmint::gemmABt (the linked BLAS may be the single-threaded reference netlib one) threaded with OpenMP.
+// qmint::gemmABt (the linked BLAS is single-threaded MKL on the development machine) threaded with OpenMP.
 // =================================================================================================
 
 #include "qm_engine.h"

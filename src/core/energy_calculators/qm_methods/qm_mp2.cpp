@@ -90,7 +90,7 @@ void mp2EnergyHost(const double* eri, int n, const Matrix& C, const Vector& eps,
         // 1. (i nu|lam sig) = sum_mu C_mu,i (mu nu|lam sig), as X1_cm (n^3 x ib) = E_cm (n^3 x n) * Co.
         //    X1_cm(rest, i) sits at rest + i*n^3, i.e. row-major X1[i][nu][lam][sig]. OpenMP over row
         //    blocks of the long dimension, one GEMM per block: the BLAS linked here may be single-threaded
-        //    (this machine: reference netlib libblas), so threading inside one dgemm cannot be relied on.
+        //    (this machine: MKL sequential, see WP10 doc "BLAS (Korrektur)"), so threading inside one dgemm cannot be relied on.
         {
             const Eigen::Index rows = (Eigen::Index)n3;
             const Eigen::Index chunk = std::max<Eigen::Index>(1024, (rows + 8 * threads - 1) / (8 * threads));

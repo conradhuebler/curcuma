@@ -123,9 +123,10 @@ Metrik, Fit, Parser, Engine-Anbindung), `cuda/qm_gpu_ri.cu` + `qm_gpu_ri_backend
   dem Device sind die Kontraktionen bei Anthracen etwa 3x schneller als 16 CPU-Threads, bei Benzol langsamer
   (Latenz, Transfers je Aufbau; die Host-Zerlegung von D kostet bei Anthracen nur ~4 ms je Aufbau). Setup RI-JK
   Anthracen bei 8 Threads: 3-Index-Integrale 363 ms, Vorwaertssubstitution B = L^-1 T 894 ms.
-- Das System-BLAS dieser Maschine ist die Referenz-BLAS (netlib, ein Thread); die schweren RI-Schritte
-  (Vorwaertssubstitution, g = T vec(D), J, K) sind deshalb eigene OpenMP-Schleifen. Mit Eigen-GEMM auf netlib-BLAS
-  dauerte das Setup fuer Naphthalin 8.5 s statt 0.1 s.
+- BLAS: die schweren RI-Schritte (Vorwaertssubstitution, g = T vec(D), J, K) sind eigene OpenMP-Schleifen. Der Agent
+  begruendete das mit der einthreadigen Referenz-netlib-BLAS (Setup Naphthalin mit Eigen-GEMM 8.5 s statt 0.1 s). Diese
+  Begruendung gilt fuer das Release-Binary nicht, siehe Korrektur im Abschnitt "BLAS (Korrektur)" unten; die Schleifen
+  bleiben, sind aber nicht durch langsames BLAS erzwungen.
 
 ## WP10 -- Gradient (RI-J, RI-JK)
 
@@ -216,8 +217,8 @@ Produktionstest steht aus.** Schritt 2 (RI-MP2): eigener Abschnitt unten.
   (Tabelle unten). Mit `VeryTightSCF` lag ORCA selbst bis 7.6e-8 von PySCF entfernt (Formaldehyd verzerrt);
   ExtremeSCF ist fuer den Vergleich noetig. Naphthalin (180 BF, nicht im ctest): 5.0e-10 (voll), 5.1e-10 (fc) gegen
   PySCF. GPU gegen CPU: E_corr auf allen 12 gedruckten Stellen gleich (Benzol, Naphthalin, Formaldehyd).
-- **Zeiten** (RTX 5090, Hostspeicher 256 GB; CPU-BLAS dieser Maschine ist die **Referenz-netlib-libblas**,
-  einfaedig, das bremst die CPU-Zahlen; MKL/OpenBLAS nicht gemessen). MP2-Anteil ohne SCF, Transformation / Energie:
+- **Zeiten** (RTX 5090, Hostspeicher 256 GB; CPU-BLAS: laut Korrektur im Abschnitt "BLAS (Korrektur)" bindet das Binary
+  MKL sequential, einfaedig, nicht netlib). MP2-Anteil ohne SCF, Transformation / Energie:
 
   | System (n, o, v) | CPU 1 Thread | CPU 16 Threads | GPU (gespeicherter Device-Tensor) |
   |---|---|---|---|
@@ -308,7 +309,7 @@ Produktionstest steht aus.**
   verzerrten Startstrukturen: H2O E - E_min(PySCF) = 1.6e-13 Eh, max |d r_ij| = 1.7e-7 A; Formaldehyd 4.7e-11 Eh,
   5.7e-6 A (PySCF-Minimum: scipy BFGS gtol 1e-7, `scripts/mp2_opt_reference.py`). GPU (2e-Teil) gegen CPU-2e-Teil
   (`qm_gpu_mp2_grad_*`): Formaldehyd verzerrt 1.1e-14 / 2.5e-14 (fc), Benzol 1.4e-13 / 1.3e-13 Eh/Bohr.
-- **Zeiten** (ms, RTX 5090, CPU-BLAS = Referenz-netlib, `curcuma -sp X -method mp2 -gradient -qm.scf_threshold 1e-10
+- **Zeiten** (ms, RTX 5090, CPU-BLAS = MKL sequential (siehe Korrektur), `curcuma -sp X -method mp2 -gradient -qm.scf_threshold 1e-10
   -qm.threads N -gpu none|cuda -verbosity 2`, Zeile "MP2 gradient timing"; Maschine sonst unbelastet; GPU = 2e-Ableitungsteil, 1e-Teil, SCF und Z-Vektor-J/K auf dem Device,
   Amplituden/Ruecktransformation auf der CPU mit 16 Threads):
 
@@ -407,7 +408,7 @@ RI-MP2-Korrelationsenergie die SCS-Energie). RI-Fehler = RI-MP2 minus kanonische
 - Der RI-Fehler (3e-6 bis 3e-5 Eh je Atom) ist eine Messung, kein Testkriterium. Mit def2-SVP/C waere er nach der
   Literatur kleiner (aus dem Gedaechtnis, nicht gemessen; keine def2-SVP/C-Datei vorhanden).
 
-**Zeiten** (Intel Core Ultra 9 285K, RTX 5090, netlib-BLAS, `-qm.scf_threshold 1e-8`, volle Korrelation; ms des
+**Zeiten** (Intel Core Ultra 9 285K, RTX 5090, MKL-sequential-BLAS (urspruenglich als netlib angegeben, siehe Korrektur), `-qm.scf_threshold 1e-8`, volle Korrelation; ms des
 MP2-Teils: kanonisch Transformation / Energie, RI Setup / B-Transformation / Energie; Wand und max RSS fuer den ganzen
 Lauf inkl. SCF; kanonisch CPU mit `-qm.scf_direct off` (gespeicherter Tensor), GPU mit dem Device-Tensor der SCF; RI
 "exakt" = exakte SCF (Standard `scf_direct auto`, Naphthalin/Anthracen integral-direkt), "RI-JK" = `-qm.ri jk`):
@@ -578,3 +579,19 @@ Die folgende Tabelle ist eine **Hypothesenliste aus dem Quelltext und der Litera
    werden soll, ist offen.
 3. (T)-Korrektur und Gradienten in den Plan aufnehmen?
 4. ~~Vault-Fuehrung der Schwarz-Bewertung~~ Erledigt: Pfad 5 in der Vault-Notiz *curcuma Schwarz-Attention*.
+
+## BLAS (Korrektur, Okt 2026)
+
+- **Befund:** mehrere Abschnitte oben (RI-MP2, RI-Gradient, MP2-Gradient) nennen die einthreadige Referenz-netlib-BLAS
+  als Bremse des Release-Builds. Das ist fuer das Binary falsch. `LD_DEBUG=bindings ./curcuma ...` zeigt, dass `dgemm_`,
+  `dgemv_`, `dtrsm_` aus `libmkl_intel_lp64.so.3` kommen; `libblas.so.3` (netlib) wird nur als Abhaengigkeit von
+  `liblapack.so.3` geladen. Das Binary linkt `libmkl_intel_lp64`, `libmkl_sequential`, `libmkl_core` (Threading-Schicht
+  **sequential**, also einfaedig), obwohl `USE_MKL=OFF` im Cache steht (CMake findet MKL ueber `find_package(BLAS)`).
+- **Gemessen** (Eigenstaendiges Testprogramm, Core Ultra 9 285K, n=1 je Zahl): `dgemm` 2000^3: netlib 4.4 GFLOPS, MKL
+  sequential 76.7, MKL gnu_thread 8 Threads 566, 16 Threads 751. Eigen-Produkt 199 x 1230 x 9353 (`EIGEN_USE_BLAS`):
+  netlib allein 4.2 GFLOPS, MKL sequential 68.3, Eigen eigene GEMM 23.9 (1 Thread) und 188 (OpenMP, 16 Threads).
+  Die 2.7 bis 4 GFLOPS der Agenten stammen aus einem separat gegen `-lblas` gelinkten Test, nicht aus dem Binary.
+- **Folge:** `qmint::gemmABt` (29 GFLOPS je Thread) ist pro Thread langsamer als MKL sequential (68), gewinnt nur durch die
+  Parallelisierung ueber Threads. Ob MKL sequential mit OpenMP-Schleifen aussenherum oder MKL mit Threads schneller ist,
+  ist **nicht in den Produktivpfaden gemessen**. Offen: MKL-Threading-Schicht fuer grosse dichte Operationen (Eigenloeser,
+  Eigen-GEMM im Host-SCF) bei n > 1000.

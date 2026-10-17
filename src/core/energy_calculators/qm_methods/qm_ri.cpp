@@ -972,8 +972,8 @@ void RIJK::build(const Matrix& P, Matrix& J, Matrix* K) const
     for (int l = 0; l < n; ++l)
         for (int k = 0; k < r; ++k) Vr[(size_t)l * r + k] = V(l, k);
     // K_mn = sum_Q sum_k s_k X^Q_mk X^Q_nk with X^Q = B^Q V. Plain loops on purpose: the build links
-    // whatever BLAS the system has (the reference netlib BLAS on the development machine, single-threaded
-    // and ~10x slower than these loops); per thread a private lower triangle of K, Q statically
+    // whatever BLAS the system has (single-threaded MKL on the development machine; measured only for netlib,
+    // which is ~10x slower than these loops); per thread a private lower triangle of K, Q statically
     // distributed (deterministic for a fixed thread count), summed afterwards.
     std::vector<std::vector<double>> Kt(threads);
 #pragma omp parallel num_threads(threads)

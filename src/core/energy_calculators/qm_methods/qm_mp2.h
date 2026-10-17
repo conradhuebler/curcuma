@@ -129,8 +129,9 @@ void mp2EnergyHost(const double* eri, int n, const Matrix& C, const Vector& eps,
 
 /// @brief C (m x n) = A (m x k) * B(n x k)^T, all row-major and contiguous (lda = ldb = k, ldc = n).
 /// Own register-blocked kernel (4 x 4 dot products, single thread): the build links the system BLAS
-/// through Eigen, which on the development machine is the single-threaded reference netlib BLAS
-/// (~2.7 GFLOPS); this kernel ran at ~29 GFLOPS per thread there. Callers thread over independent calls.
+/// through Eigen, which on the development machine is single-threaded MKL (sequential layer,
+/// ~68 GFLOPS per thread in a standalone Eigen test, see WP10 doc "BLAS (Korrektur)"); this kernel runs at ~29 GFLOPS
+/// per thread and wins only through threading. Callers thread over independent calls.
 /// Claude Generated (Oct 2026, RI-MP2).
 void gemmABt(const double* A, int m, const double* B, int n, int k, double* C);
 
