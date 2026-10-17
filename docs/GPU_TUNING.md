@@ -392,3 +392,25 @@ for machines where the distributed eigensolve is the point of the build. Default
   (or an NVIDIA HPC SDK `math_libs` / `comm_libs` directory). The library directories are baked into the RPATH of `libcurcuma_cuda_mgpu.so`, so the run host must see the same paths (shared file system) or have them on `LD_LIBRARY_PATH`. `cmake` prints which backends were found.
 
 - `CMAKE_CUDA_ARCHITECTURES` defaults to `75;80;86;89;90;100;120` with CUDA >= 13 (Turing to Blackwell, incl. H100/H200 sm_90). For fast local builds pass only your card, e.g. `-DCMAKE_CUDA_ARCHITECTURES=86`. A binary without the card's architecture falls back to JIT or fails the kernels.
+
+### CUDA break-even for GFN-FF, `-gpu auto` (measured Oct 17, 2026, AI-run)
+
+RTX A4500 against 16 CPU threads (36 cores visible), `-md`, `-method gfnff`, 1 run per cell, ms per step from the
+difference of two runs of different length (start-up cancels). `-gpu auto` on CUDA has no atom threshold
+(`gpu_auto_min_atoms` acts on ROCm only).
+
+| Atoms | CPU ms/step | GPU ms/step | GPU/CPU |
+|---|---|---|---|
+| 24 (caffeine) | 0.311 | 0.424 | 1.36 |
+| 66 (trisaccharide) | 1.339 | 0.899 | 0.67 |
+| 117 | 1.987 | 1.331 | 0.67 |
+| 231 | 2.925 | 2.193 | 0.75 |
+| 309 | 4.609 | 2.806 | 0.61 |
+| 1410 (peo201-chain) | 32.494 | 3.728 | 0.11 |
+| 2910 (peo201-water500) | 67.393 | 9.204 | 0.14 |
+
+Per-step break-even lies between 24 and 66 atoms. Each GPU process pays a fixed start-up: caffeine `-sp` 0.78 to 0.95 s
+with `-gpu cuda` against 0.02 to 0.05 s on the CPU (3 runs each). At 66 to 300 atoms the step gain is 0.4 to 1.8 ms, so the
+GPU needs roughly 500 to 2000 MD steps to repay it; for single points and short optimisations of small molecules it
+does not. Not measured: water boxes, charged or multi-fragment systems, other GPUs, CPU thread counts other than 16.
+
