@@ -1357,6 +1357,27 @@ __global__ void k_multipole_ints(
     qp_int[5*nn + mn] = 1.5 * qzz - tr;
 }
 
+// Order-independent gradient accumulation (Claude Generated, Oct 2026; docs/GPU_REPRODUCIBILITY.md): the contribution
+// is rounded to a multiple of 2^-52 and added as a 64-bit integer into the 8 bytes of the double buffer (integer
+// addition is associative, FP64 atomicAdd is not); k_grad_fix_to_double converts dGrad/dEdcn in place at the end of
+// computeGradient. Range +-2048 Eh/Bohr per component. The buffers are zeroed first (0 bits == 0.0).
+constexpr double GRAD_FIX = 4503599627370496.0;   // 2^52
+__device__ __forceinline__ void gfix_add(double* addr, double v)
+{
+    unsigned long long* a = reinterpret_cast<unsigned long long*>(addr);
+    while (fabs(v) >= 64.0) {
+        const double chunk = copysign(64.0, v);
+        atomicAdd(a, static_cast<unsigned long long>(llrint(chunk * GRAD_FIX)));
+        v -= chunk;
+    }
+    atomicAdd(a, static_cast<unsigned long long>(llrint(v * GRAD_FIX)));
+}
+__global__ void k_grad_fix_to_double(int n, double* __restrict__ buf)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) buf[i] = static_cast<double>(reinterpret_cast<long long*>(buf)[i]) * (1.0 / GRAD_FIX);
+}
+
 // Overlap derivative dS_μν/dR_{atom(μ)} for every AO pair: one thread per (μ,ν),
 // 3 components written to dSdR (contiguous 3·nn, column-major (μ,ν) at mu+nu*nao).
 // Crux primitive of the Stage-4 H0/Pulay gradient; validated standalone first.
@@ -1426,9 +1447,9 @@ __global__ void k_grad_repulsion(int nat, int is_gfn2, const int* __restrict__ z
         const double E_pair = zeffi * rep_zeff[j] / pow(r, rexp) * exp(-alpha_pair * r_kexp);
         const double dEdr = -(rexp / r + alpha_pair * kexp_pair * pow(r, kexp_pair - 1.0)) * E_pair;
         const double fx = dEdr*dx/r, fy = dEdr*dy/r, fz = dEdr*dz/r;
-        atomicAdd(&grad[3*i+0], fx); atomicAdd(&grad[3*j+0], -fx);
-        atomicAdd(&grad[3*i+1], fy); atomicAdd(&grad[3*j+1], -fy);
-        atomicAdd(&grad[3*i+2], fz); atomicAdd(&grad[3*j+2], -fz);
+        gfix_add(&grad[3*i+0], fx); gfix_add(&grad[3*j+0], -fx);
+        gfix_add(&grad[3*i+1], fy); gfix_add(&grad[3*j+1], -fy);
+        gfix_add(&grad[3*i+2], fz); gfix_add(&grad[3*j+2], -fz);
     }
 }
 
@@ -1440,7 +1461,7 @@ __global__ void k_grad_cn_onsite(int nao, const double* __restrict__ P,
     const int mu = blockIdx.x * blockDim.x + threadIdx.x;
     if (mu >= nao) return;
     const double Pmm = P[static_cast<size_t>(mu) + static_cast<size_t>(mu) * nao];
-    atomicAdd(&dEdcn[ao2at[mu]], (-kcn[ao2sh[mu]]) * Pmm);
+    gfix_add(&dEdcn[ao2at[mu]], (-kcn[ao2sh[mu]]) * Pmm);
 }
 
 // Point 2 (Claude Generated, Sep 2026): pattern-only twin - P(mu,mu) read straight out of the
@@ -1454,7 +1475,7 @@ __global__ void k_grad_cn_onsite_spP(int nao, const double* __restrict__ Psp,
     const int mu = blockIdx.x * blockDim.x + threadIdx.x;
     if (mu >= nao) return;
     const double Pmm = Psp[diag_idx[mu]];
-    atomicAdd(&dEdcn[ao2at[mu]], (-kcn[ao2sh[mu]]) * Pmm);
+    gfix_add(&dEdcn[ao2at[mu]], (-kcn[ao2sh[mu]]) * Pmm);
 }
 
 // Section 2b: H0/Pulay off-site gradient. One thread per AO pair (μ,ν) with iat<jat.
@@ -1593,13 +1614,13 @@ __device__ __forceinline__ void d_grad_h0_pulay_pair(
         Gz -= Pmn * term[2];
     }
 
-    atomicAdd(&grad[3*iat+0], Gx); atomicAdd(&grad[3*jat+0], -Gx);
-    atomicAdd(&grad[3*iat+1], Gy); atomicAdd(&grad[3*jat+1], -Gy);
-    atomicAdd(&grad[3*iat+2], Gz); atomicAdd(&grad[3*jat+2], -Gz);
+    gfix_add(&grad[3*iat+0], Gx); gfix_add(&grad[3*jat+0], -Gx);
+    gfix_add(&grad[3*iat+1], Gy); gfix_add(&grad[3*jat+1], -Gy);
+    gfix_add(&grad[3*iat+2], Gz); gfix_add(&grad[3*jat+2], -Gz);
 
     const double cn_c = h_factor * Pmn * Smn;
-    atomicAdd(&dEdcn[iat], (-kcn[isha]) * cn_c);
-    atomicAdd(&dEdcn[jat], (-kcn[ishb]) * cn_c);
+    gfix_add(&dEdcn[iat], (-kcn[isha]) * cn_c);
+    gfix_add(&dEdcn[jat], (-kcn[ishb]) * cn_c);
 }
 
 __global__ void k_grad_h0_pulay(
@@ -1725,9 +1746,9 @@ __global__ void k_grad_coulomb(int nsh, int is_gfn2, const int* __restrict__ sh2
             dgamma_dr = -pow(r1, gexp - 2.0) * pow(gamma, gexp + 1.0);
         }
         const double force = q_sh[is] * q_sh[js] * dgamma_dr;
-        atomicAdd(&grad[3*iat+0], force*dx); atomicAdd(&grad[3*jat+0], -force*dx);
-        atomicAdd(&grad[3*iat+1], force*dy); atomicAdd(&grad[3*jat+1], -force*dy);
-        atomicAdd(&grad[3*iat+2], force*dz); atomicAdd(&grad[3*jat+2], -force*dz);
+        gfix_add(&grad[3*iat+0], force*dx); gfix_add(&grad[3*jat+0], -force*dx);
+        gfix_add(&grad[3*iat+1], force*dy); gfix_add(&grad[3*jat+1], -force*dy);
+        gfix_add(&grad[3*iat+2], force*dz); gfix_add(&grad[3*jat+2], -force*dz);
     }
 }
 
@@ -7939,6 +7960,9 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     if (cudaGetLastError() != cudaSuccess) return false;
     m_impl->profMark("grad: Coulomb");
 
+    k_grad_fix_to_double<<<(3 * nat + 255) / 256, 256, 0, stream>>>(3 * nat, m_impl->dGrad.ptr);
+    k_grad_fix_to_double<<<(nat + 255) / 256, 256, 0, stream>>>(nat, m_impl->dEdcn.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
     m_impl->dGrad.download(grad_out, 3 * nat, stream);
     m_impl->dEdcn.download(dEdcn_out, nat, stream);
     const bool ok_sync = cudaStreamSynchronize(stream) == cudaSuccess;

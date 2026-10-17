@@ -43,8 +43,6 @@ all-host run: energies identical, gradient max 2.8e-14 (GFN2).
 
 ## What is still not bitwise
 
-- **Gradient (GFN1/GFN2)**: the gradient kernels accumulate with FP64 `atomicAdd` (`k_grad_repulsion`,
-  `k_grad_cn_onsite*`, `k_grad_h0_pulay*`, `k_grad_coulomb`): 1e-16 to 5e-16 Eh/A between runs. No decision depends on it.
 - **GFN-FF energies on the GPU** (not the forces): the energy slots still accumulate with FP64 `atomicAdd`
   (`blockReduceAddEnergy`, `k_add_*_parts`), so the printed Epot can differ in the last digits between runs. It does not
   enter the dynamics. The charge and force path is bitwise, see the next section.
@@ -83,8 +81,22 @@ varied, periodic systems and the EEQ split path with more than one fragment are 
 range of the accumulator is +-2048 Eh/Bohr per atom component (+-128 for CN-like terms, never reached); a clash beyond
 that would wrap silently. ROCm (`rocm/gfnff_kernels_hip.h`) has its own kernels and is unchanged.
 
+## GFN1/GFN2 gradient: same scheme (Oct 17, 2026, AI/machine-tested)
+
+`k_grad_repulsion`, `k_grad_cn_onsite*`, `k_grad_h0_pulay*` and `k_grad_coulomb` add with `gfix_add` (2^-52, 64-bit
+integer into the double buffer, `xtb_gpu_context.cu`); `k_grad_fix_to_double` converts `dGrad` and `dEdcn` before the
+download.
+
+| Check | Result |
+|---|---|
+| PR18 gradient (GFN2), 32 runs in 4 rounds of 8 concurrent processes on 4 GPUs + 1 solo run | dump file (energy and gradient, 17 digits) md5-identical in 33 of 33; before the change the gradient varied by 1e-16 to 5e-16 between runs |
+| MOR41 (95 structures), GFN2, `-scf_threshold 1e-10`, GPU vs CPU, 1 thread | energies equal to 8 decimals, max gradient difference 1.08e-10 Eh/A (bounded by the SCF threshold; the run before the change was not repeated) |
+| `ctest -R "sqm\|gpu\|cuda\|gfn"` | 430 of 431 passed; `cli_sqm_12` fails as before (BLAS, `docs/BROKEN_TESTS_2026-10-14.md`) |
+
+Not covered: the post-SCF tails that already ran fixed-order (D4, D3, multipole), the multi-GPU cuSOLVERMp path, GFN1 on
+the check set above (same kernels, not run separately).
+
 ## Options for the rest (not done)
 
-1. GFN1/GFN2 gradient kernels (`k_grad_*`) with the same fixed-point scheme (5e-16 Eh/A today, no decision depends on it).
-2. Energy slots of GFN-FF as fixed-point or block partials (bitwise Epot).
-3. A `-gpu_deterministic` switch is not needed for GFN-FF: the cost measured above is below the run-to-run noise.
+1. Energy slots of GFN-FF as fixed-point or block partials (bitwise Epot).
+2. ROCm and Vulkan: not looked at.
