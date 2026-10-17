@@ -78,6 +78,21 @@ public:
     void evaluate(const Geometry& R, double* s_out, double* z_out, Geometry* ds_dR,
                   Geometry* dz_dR = nullptr) const;
 
+    /*! \brief Flat-bottom wall on z ("tube potential"), Claude Generated 2026.
+     *
+     *      W(z) = 0                               z <= z_wall
+     *      W(z) = k/2 (z - z_wall)^2              z >  z_wall
+     *      dW/dR = k (z - z_wall) dz/dR           (0 inside the tube)
+     *
+     *  z in Angstrom^2, k in Eh/Angstrom^4, W in Eh, dW/dR in Eh/Angstrom (laboratory frame,
+     *  like dz/dR). `grad` is always resized and set (zero inside the tube). Returns W. */
+    double zWallEnergy(const Geometry& R, double z_wall, double k, Geometry* grad,
+                       double* z_out = nullptr) const;
+
+    /*! \brief Default wall stiffness, Claude Generated 2026: W = n_kT * kT at a penetration
+     *  delta = 0.2 z_wall, i.e. k = 2 n_kT kT / (0.2 z_wall)^2 (n_kT = 3). */
+    static double zWallDefaultK(double kT, double z_wall);
+
     /*! \brief Rule-of-thumb lambda from the mean squared spacing of the frames. */
     static double computeLambdaFromPath(const std::vector<Geometry>& path);
 

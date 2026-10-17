@@ -41,6 +41,9 @@ Stand.
 - **Windows**: `-DUSE_PORTABLE_MATH=ON` nicht auf einer echten Windows-Maschine bestätigt ([docs/PORTABLE_ERF.md](docs/PORTABLE_ERF.md)).
 - **Ladungsplatzierung** (Known Issue #31) nicht getestet für periodische Systeme, GPU-Laufzeit, viele Fragmente in Kontakt und lange MD mit
   `frag_charge_s_max` > 1.
+- **Fensteraufloesung ueber steilen Barrieren**: NEB-MD integriert dG/ds mit Trapez/Spline ueber `nimages` Fenster; Retro-DA GFN2: 12/23/34 Fenster geben dG_TST 91.5/71.8/67.0
+  (n=1). Noetig: Warnung bei grossem Sprung von dG/ds zwischen Nachbarfenstern, adaptive Verdichtung am Maximum, `nimages` mit `path_file` nicht ignorieren. [docs/NEB_MD.md](docs/NEB_MD.md).
+- **Restraint-Modus-Tube** (`umbrella_kz`) laeuft ueber `applyExternalForces` (einen Schritt verzoegert, nicht in `trueGradient()`), ueberschneidet sich mit `z_wall`.
 - **MD-Startgeschwindigkeiten und Andersen**: ein prozessweit geteilter statischer Generator, Seeds mehrerer SimpleMD-Instanzen nicht unabhängig reproduzierbar
   (NEB-MD-Fenster). Vault: Projekte-Notiz `curcuma NEB-MD Pfad-Sampling`.
 

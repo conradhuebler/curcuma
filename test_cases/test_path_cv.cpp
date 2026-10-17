@@ -12,6 +12,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <random>
 #include <vector>
 
 #include "generated/parameter_registry.h"
@@ -196,6 +197,52 @@ int main()
         std::cout << "   rotated-frame FD: rel err ds = " << rel_s << ", dz = " << rel_z << std::endl;
         check(rel_s < 1e-5, "ds/dR correct for a rotated (non-collinear) geometry");
         check(rel_z < 1e-5, "dz/dR correct for a rotated (non-collinear) geometry");
+
+        // (z wall, Claude Generated 2026) flat-bottom wall W = k/2 (z - z_wall)^2 for z > z_wall:
+        // energy and lab-frame gradient vs a central finite difference (Angstrom displacements) on
+        // a randomly displaced structure, once with the wall active (z_wall below z) and once
+        // inactive (z_wall above z: W and dW/dR must be exactly zero).
+        std::mt19937 gen(4711);
+        std::normal_distribution<double> nd(0.0, 0.1);
+        Geometry Rr = R5;
+        for (int a = 0; a < 5; ++a)
+            for (int c = 0; c < 3; ++c)
+                Rr(a, c) += nd(gen);
+        double zr = 0;
+        cv5.evaluate(Rr, nullptr, &zr, nullptr, nullptr);
+        std::cout << "   z wall test: z of the random structure = " << zr << " A^2" << std::endl;
+        const double kw = 0.8;
+        for (double zw : { zr - 0.05, zr + 0.05 }) { // z can be < 0 (log-sum-exp), so shift, not scale
+            Geometry gw;
+            const double W = cv5.zWallEnergy(Rr, zw, kw, &gw);
+            const double Wref = (zr > zw) ? 0.5 * kw * (zr - zw) * (zr - zw) : 0.0;
+            double err = 0, nrm = 0;
+            for (int a = 0; a < 5; ++a)
+                for (int c = 0; c < 3; ++c) {
+                    Geometry Rp = Rr, Rm = Rr;
+                    Rp(a, c) += h;
+                    Rm(a, c) -= h;
+                    const double fd = (cv5.zWallEnergy(Rp, zw, kw, nullptr) - cv5.zWallEnergy(Rm, zw, kw, nullptr)) / (2 * h);
+                    err += (fd - gw(a, c)) * (fd - gw(a, c));
+                    nrm += fd * fd;
+                }
+            if (zr > zw) {
+                const double rel = std::sqrt(err / std::max(nrm, 1e-30));
+                std::cout << "   z_wall = " << zw << ": W = " << W << " Eh, |dW/dR| = " << gw.norm()
+                          << ", rel err vs FD = " << rel << std::endl;
+                check(std::abs(W - Wref) < 1e-14 && W > 0.0 && rel < 1e-6,
+                      "z wall active: W = k/2 (z-z_wall)^2 and dW/dR vs FD (rel < 1e-6)");
+            } else {
+                std::cout << "   z_wall = " << zw << ": W = " << W << ", |dW/dR| = " << gw.norm()
+                          << ", |FD| = " << std::sqrt(nrm) << std::endl;
+                check(W == 0.0 && gw.norm() == 0.0 && nrm == 0.0, "z wall inactive inside the tube: W = 0, dW/dR = 0");
+            }
+        }
+        // Default stiffness: W = 3 kT at z = 1.2 z_wall.
+        const double kT = 9.500e-4, zw0 = 0.5;
+        const double k0 = PathCV::zWallDefaultK(kT, zw0);
+        check(std::abs(0.5 * k0 * (0.2 * zw0) * (0.2 * zw0) - 3.0 * kT) < 1e-15,
+              "zWallDefaultK: W(1.2 z_wall) = 3 kT");
     }
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : "SOME TESTS FAILED") << std::endl;

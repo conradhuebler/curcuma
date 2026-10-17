@@ -345,6 +345,17 @@ public:
         else if (!has && had && m_dof > 0)
             m_dof += 1;
     }
+    /** Claude Generated 2026: optional additional potential W(R) (e.g. NEB-MD's z wall).
+     *  fn(R, grad) returns W in Eh and sets grad = dW/dR in Eh/Angstrom. It is evaluated inside
+     *  the integrator right after the wall potentials, at the NEW positions, so it acts on both
+     *  velocity half-kicks like the potential itself (unlike applyExternalForces(), which is
+     *  computed by the caller at the start of the step). Being part of the potential, its
+     *  gradient IS contained in trueGradient(). Empty function = off (no extra evaluation).
+     *  Set after prepareRun(): the first half-kick of the first step does not contain it. */
+    using ExtraPotential = std::function<double(const Geometry& R, Geometry& grad)>;
+    void setExtraPotential(ExtraPotential fn) { m_extra_potential = std::move(fn); }
+    /** W at the current positions (Eh), 0 when no extra potential is set. */
+    double extraPotentialEnergy() const { return m_extra_energy; }
     /** Claude Generated 2026: number of degrees of freedom used for T and the thermostat. */
     int degreesOfFreedom() const { return m_dof; }
 
@@ -497,6 +508,9 @@ private:
     double m_single_step = 1;
     double m_dT = 0.5, m_currentStep = 0, m_maxtime = 1000;
     ScalarConstraint m_scalar_constraint;    // optional CV constraint (Claude Generated 2026)
+    ExtraPotential m_extra_potential;        // optional extra potential, see setExtraPotential()
+    double m_extra_energy = 0.0;             // its value at the current positions [Eh]
+    void ApplyExtraPotential();              // adds dW/dR to m_eigen_gradient (Claude Generated 2026)
     double m_scalar_target = 0.0, m_scalar_tol = 1e-8;
     int m_scalar_iters = 0;
     int m_spin = 0, m_charge = 0, m_print = 100;

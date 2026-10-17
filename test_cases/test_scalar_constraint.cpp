@@ -14,6 +14,7 @@
 #include <iostream>
 
 #include "generated/parameter_registry.h"
+#include "src/capabilities/path_cv.h"
 #include "src/capabilities/simplemd.h"
 #include "src/core/molecule.h"
 
@@ -89,6 +90,104 @@ static bool checkTrueGradient(const std::string& xyz)
     std::cout << "  trueGradient vs FD of Epot: rel err " << rel << " ; |gradient()-trueGradient()-F| = "
               << contamination << " ; |F| = " << F.norm() << std::endl;
     return rel < 1e-4 && contamination < 1e-8;
+}
+
+/*! \brief Claude Generated 2026: the z wall (PathCV::zWallEnergy via setExtraPotential) is part
+ *  of the potential the integrator samples.
+ *
+ *  (1) trueGradient() == d(E + W)/dR by central finite difference of Epot + W, with the wall
+ *      active, so NEB-MD's mean-force estimator <b . trueGradient()> averages b . grad(E + W);
+ *  (2) NVE with the s-type distance constraint plus the wall: Epot + Ekin + W is conserved as
+ *      well as Epot + Ekin without the wall (the wall is evaluated at the new positions inside
+ *      Rattle(), not lagged by one step like applyExternalForces()). */
+static bool checkExtraPotential(const std::string& xyz)
+{
+    Molecule mol(xyz);
+    const Geometry R0 = mol.getGeometry();
+    // two-frame reference path: R0 and R0 with one methyl H moved 0.3 A; z(R0) < 0
+    Geometry R1 = R0;
+    R1(2, 0) += 0.3;
+    PathCV cv({ R0, R1 }, mol, 100.0);
+    double z0 = 0.0;
+    cv.evaluate(R0, nullptr, &z0, nullptr, nullptr);
+    const double zw = z0 + 0.003, kw = 100.0; // narrow tube: thermal motion reaches the wall within fs
+    auto wallfn = [&cv, zw, kw](const Geometry& R, Geometry& g) { return cv.zWallEnergy(R, zw, kw, &g); };
+    auto dist = [](const Geometry& R, Geometry& g) {
+        g = Geometry::Zero(R.rows(), 3);
+        const Eigen::RowVector3d d = R.row(2) - R.row(5);
+        const double r = d.norm();
+        g.row(2) = d / r;
+        g.row(5) = -d / r;
+        return r;
+    };
+
+    // (1) gradient consistency
+    bool ok = true;
+    {
+        SimpleMD md(makeCtrl(0.5, 1), true);
+        md.setRestart(false);
+        md.setMolecule(mol);
+        md.Initialise();
+        md.prepareRun();
+        md.setExtraPotential(wallfn);
+        int s = 0;
+        for (; s < 400 && md.extraPotentialEnergy() <= 0.0; ++s)
+            md.step();
+        for (int t = 0; t < 3; ++t)
+            md.step();
+        const Geometry R = md.positions();
+        Geometry gw;
+        const double W = cv.zWallEnergy(R, zw, kw, &gw);
+        const Geometry gt = md.trueGradient();
+        double err = 0, nrm = 0;
+        const double h = 1e-4;
+        for (int a = 0; a < R.rows(); ++a)
+            for (int c = 0; c < 3; ++c) {
+                Geometry Rp = R, Rm = R;
+                Rp(a, c) += h;
+                Rm(a, c) -= h;
+                const double fd = (epotAt(xyz, Rp) + cv.zWallEnergy(Rp, zw, kw, nullptr)
+                                   - epotAt(xyz, Rm) - cv.zWallEnergy(Rm, zw, kw, nullptr)) / (2 * h);
+                err += (fd - gt(a, c)) * (fd - gt(a, c));
+                nrm += fd * fd;
+            }
+        const double rel = std::sqrt(err / std::max(nrm, 1e-30));
+        std::cout << "  z wall: active after " << s << " steps, W = " << W << " Eh (md: "
+                  << md.extraPotentialEnergy() << "), |dW/dR| = " << gw.norm()
+                  << ", trueGradient vs FD of Epot+W: rel err " << rel << std::endl;
+        ok = ok && W > 0.0 && std::abs(W - md.extraPotentialEnergy()) < 1e-14 && rel < 1e-4;
+    }
+    // (2) NVE conservation with constraint + wall
+    auto nve = [&](bool with_wall, double& span, double& drift, double& wmax) {
+        SimpleMD md(makeCtrl(0.5, 1), true);
+        md.setRestart(false);
+        md.setMolecule(mol);
+        md.Initialise();
+        md.prepareRun();
+        Geometry g0;
+        md.setScalarConstraint(dist, dist(md.positions(), g0), 1e-10);
+        if (with_wall)
+            md.setExtraPotential(wallfn);
+        double e0 = 0, emin = 1e30, emax = -1e30, elast = 0;
+        wmax = 0;
+        for (int s = 0; s < 2000; ++s) {
+            if (!md.step())
+                return false;
+            const double e = md.potentialEnergy() + md.kineticEnergy() + md.extraPotentialEnergy();
+            wmax = std::max(wmax, md.extraPotentialEnergy());
+            if (s == 10) e0 = e;
+            if (s >= 10) { emin = std::min(emin, e); emax = std::max(emax, e); elast = e; }
+        }
+        span = emax - emin;
+        drift = elast - e0;
+        return true;
+    };
+    double sf = 0, df = 0, wf = 0, sw = 0, dw = 0, ww = 0;
+    const bool r1 = nve(false, sf, df, wf), r2 = nve(true, sw, dw, ww);
+    std::cout << "  NVE constrained, 1 ps: no wall span " << sf << " drift " << df << " Eh | wall span " << sw
+              << " drift " << dw << " Eh, max W " << ww << " Eh" << std::endl;
+    ok = ok && r1 && r2 && ww > 0.0 && std::abs(dw) < 10.0 * std::max(std::abs(df), 1e-5);
+    return ok;
 }
 
 static Result run(const std::string& xyz, int a, int b, bool constrained, int nsteps, double dt, int rattle)
@@ -222,6 +321,7 @@ int main()
         }
     }
     check(checkTrueGradient(xyz), "trueGradient() == dE/dR (FD), gradient() carries the external force");
+    check(checkExtraPotential(xyz), "z wall: trueGradient() == d(E+W)/dR (FD); NVE Epot+Ekin+W drift <= 10x no-wall run");
     // Degrees of freedom of the constrained ensemble (Claude Generated 2026). The DOF
     // bookkeeping is checked exactly; <T> is reported (20 ps CSVR, 300 K, one seed) but not
     // asserted - see the AP0b note in docs: the CSVR noise term carries a separate bias.

@@ -165,6 +165,59 @@ void PathCV::evaluate(const Geometry& R, double* s_out, double* z_out, Geometry*
     }
 }
 
+double PathCV::zWallEnergy(const Geometry& R, double z_wall, double k, Geometry* grad,
+                           double* z_out) const
+{
+    // Claude Generated 2026: flat-bottom wall on the distance-from-path z ("tube").
+    //
+    // Why: with s held by a constraint, the surface s = s0 is a (3N-7)-dimensional set that can
+    // contain regions far from the reference path (retro-Diels-Alder: the dissociated ethylene
+    // region at z ~ 1.4-3.8 A^2 next to the TS). Nothing in the window dynamics restrains z, so
+    // the windows drift there. W confines them to z <= z_wall without touching the tube interior.
+    //
+    //   W(z)  = 0                          for z <= z_wall
+    //   W(z)  = k/2 (z - z_wall)^2         for z >  z_wall
+    //   dW/dR = W'(z) dz/dR = k (z - z_wall) dz/dR
+    //
+    // dz/dR comes from evaluate() in the laboratory frame (rmsdTo() returns lab-frame RMSD
+    // gradients), so dW/dR can be added to dE/dR directly. W and dW/dR are continuous at
+    // z = z_wall; the second derivative jumps there (harmless for velocity Verlet at the
+    // stiffness chosen by zWallDefaultK).
+    //
+    // Note on the free energy: the sampled ensemble is exp(-(E+W)/kT), so the PMF obtained with
+    // the wall is the PMF of the z-restricted system. It depends on z_wall.
+    const int nat = static_cast<int>(R.rows());
+    double s = 0.0, z = 0.0;
+    Geometry ds, dz;
+    evaluate(R, &s, &z, grad ? &ds : nullptr, grad ? &dz : nullptr);
+    if (z_out)
+        *z_out = z;
+    const double excess = z - z_wall;
+    if (excess <= 0.0 || k <= 0.0) {
+        if (grad)
+            *grad = Geometry::Zero(nat, 3);
+        return 0.0;
+    }
+    if (grad)
+        *grad = (k * excess) * dz;
+    return 0.5 * k * excess * excess;
+}
+
+double PathCV::zWallDefaultK(double kT, double z_wall)
+{
+    // Claude Generated 2026: stiffness so that a thermal excursion is stopped close to the wall.
+    // Require W = 3 kT at a penetration delta = 0.2 z_wall beyond the wall:
+    //     k/2 delta^2 = 3 kT   ->   k = 6 kT / (0.2 z_wall)^2 = 150 kT / z_wall^2
+    // The Boltzmann factor at that depth is exp(-3) = 0.05, so few samples reach z > 1.2 z_wall.
+    // Example 300 K (kT = 9.50e-4 Eh), z_wall = 0.5 A^2: k = 0.57 Eh/A^4. Force at that depth:
+    // |dW/dR| = k delta |dz/dR| with |dz/dR| ~ 2 d / sqrt(N) (whole 3N vector, d = RMSD ~
+    // sqrt(z)); 16 atoms: 0.57 * 0.1 * 2 * 0.77 / 4 = 0.022 Eh/A, below typical bonded forces.
+    if (z_wall <= 0.0)
+        return 0.0;
+    const double delta = 0.2 * z_wall;
+    return 2.0 * 3.0 * kT / (delta * delta);
+}
+
 double PathCV::s(const Geometry& R) const
 {
     double s_val = 0.0;

@@ -2891,6 +2891,19 @@ void SimpleMD::writeMtdProvenance()
  * next step() call. Forces are in Hartree/Bohr (same units as m_eigen_gradient).
  * The contribution is added additively and then cleared, so callers must re-queue
  * each step while a user drag is active. Shape check: forces must match (natoms, 3). */
+void SimpleMD::ApplyExtraPotential()
+{
+    // Claude Generated 2026: additional potential W(R) set by the caller (setExtraPotential()).
+    // Added to the gradient BEFORE m_gradient_true is stored, so trueGradient() = d(E + walls + W)/dR,
+    // i.e. the gradient of the potential the dynamics actually samples.
+    if (!m_extra_potential)
+        return;
+    Geometry g;
+    m_extra_energy = m_extra_potential(m_eigen_geometry, g);
+    if (g.rows() == m_eigen_gradient.rows() && g.cols() == m_eigen_gradient.cols())
+        m_eigen_gradient += g;
+}
+
 void SimpleMD::applyExternalForces(const Geometry& forces)
 {
     if (forces.rows() != m_natoms || forces.cols() != 3)
@@ -3202,6 +3215,7 @@ void SimpleMD::Verlet()
     }
 #endif
     WallPotential();
+    ApplyExtraPotential(); // Claude Generated 2026: e.g. NEB-MD z wall; part of trueGradient()
     // Claude Generated 2026: re-apply the external force so the second velocity half-kick
     // sees it too (time-symmetric for a constant external force; see step()).
     // Claude Generated 2026: remember the PURE gradient at the new position (potential +
@@ -3539,6 +3553,7 @@ void SimpleMD::Rattle()
     }
 #endif
     WallPotential();
+    ApplyExtraPotential(); // Claude Generated 2026: e.g. NEB-MD z wall; part of trueGradient()
     // Claude Generated 2026: re-apply the external force so the second velocity half-kick
     // sees it too (time-symmetric for a constant external force; see step()).
     // Claude Generated 2026: remember the PURE gradient at the new position (potential +

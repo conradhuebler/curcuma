@@ -373,6 +373,9 @@ private:
     std::vector<double> m_win_s2_sum;        // per window: sum of s^2
     std::vector<long> m_win_count;           // per window: samples
     std::vector<double> m_win_z_sum;         // per window: sum of z (transverse amplitude)
+    std::vector<double> m_win_z_max;         // per window: largest z (Claude Generated 2026)
+    std::vector<long> m_win_zwall_n;         // per window: samples with z > z_wall
+    std::vector<double> m_win_wall_sum;      // per window: sum of the wall energy W [Eh]
     /* Weighted per-window sums for the constrained scheme. Claude Generated 2026.
      * With s held exactly, every window contributes to a single value of s, so the binned
      * profile of the restrained scheme degenerates to one occupied bin per window. The
@@ -398,6 +401,8 @@ private:
         std::vector<long> count;
         std::vector<double> force, div, ssum, wsum;
         double win_s = 0.0, win_s2 = 0.0, win_z = 0.0;
+        double win_z_max = -1e300, win_wall = 0.0;  // z wall diagnostics (Claude Generated 2026)
+        long win_zwall_n = 0;
         double win_w = 0.0, win_wf = 0.0, win_wd = 0.0; // Z^-1/2 weighted sums
         long win_n = 0, rejected = 0, nonfinite = 0;
         std::vector<long> rejected_bin;              // Z-floor rejections per s bin (Claude Generated 2026)
@@ -450,6 +455,9 @@ private:
     double m_umbrella_k = 0.0;               // restraint strength (0 = auto, see setupUmbrella)
     double m_kz = 0.0;                       // tube restraint on the perpendicular CV z (0 = off)
     double m_z_tolerance = 0.05;             // free tube radius before the z restraint bites
+    double m_z_wall = 0.0;                   // flat-bottom wall on z [A^2], 0 = off (Claude Generated 2026)
+    double m_z_wall_k = 0.0;                 // its stiffness [Eh/A^4] (0 in the config = automatic)
+    bool m_window_trajectory = false;        // per-image .trj.xyz (Claude Generated 2026)
     bool m_umbrella_keep_springs = false;    // also keep the neighbour springs in umbrella mode
     int m_umbrella_bins = 100;               // histogram bins over s in [0,1]
     std::unique_ptr<PathCV> m_path_cv;       // frozen reference path
@@ -561,6 +569,9 @@ private:
     PARAM(ramp_steps, Int, 0, "Adiabatic switch-on: band steps over which the restraint constants (on s and on z) are raised smoothly from zero to their final values. 0 = use pmf_equilibration, so the switch-on finishes exactly when production sampling begins. Each image starts ON the path and AT its setpoint, where no restraint force is needed; applying full stiffness immediately delivers a shock that can push the image off the path, and once it is off, s is ill-defined and the restraint pushes in a meaningless direction with growing magnitude.", "FreeEnergy", {})
     PARAM(constrain, Bool, false, "Hold s by a genuine holonomic constraint (SHAKE on the positions, RATTLE on the velocities) instead of by a harmonic restraint. This is the only scheme in which holding is exact by construction: there is no stiffness that could be too small to hold the window or too large for the molecule to survive. Measured motivation: on a barrier flank the two requirements were k > 3 and k < 1 respectively, so no restraint exists. The price is the evaluation, which needs the Z^(-1/2) weighting of the constrained ensemble.", "FreeEnergy", {})
     PARAM(constrain_tolerance, Double, 1e-8, "Convergence threshold of the SHAKE iteration on |s - s0|.", "FreeEnergy", {})
+    PARAM(z_wall, Double, 0.0, "Flat-bottom wall ('tube') on the distance-from-path z in the stage-2 windows (Angstrom^2, same units as z): W = 0 for z <= z_wall, W = z_wall_k/2 (z - z_wall)^2 beyond. 0 = off. Applied inside the integrator as part of the potential, constrained and restraint mode alike; its gradient enters the mean force. The resulting PMF is that of the z-restricted system and depends on z_wall: compare only runs with equal z_wall. Choose it above the on-path z of the windows (e.g. 3x the largest mean z of windows that stay on the path).", "FreeEnergy", {})
+    PARAM(z_wall_k, Double, 0.0, "Stiffness of the z wall (Eh/Angstrom^4). 0 = automatic: W = 3 kT at a penetration of 0.2 z_wall, i.e. k = 150 kT / z_wall^2 (300 K, z_wall 0.5: 0.57).", "FreeEnergy", {})
+    PARAM(window_trajectory, Bool, false, "Write a trajectory per window/image (<base>.image_NN.trj.xyz) every simplemd dump_frequency steps. Off by default: the files grow with images x steps.", "Output", {})
     PARAM(adaptive_k, Bool, false, "Per-window restraint stiffness, calibrated from the locally measured slope of the profile. A single global k cannot hold every window: the requirement is k > (dG/ds)/(ds/2), and dG/ds is near zero in the basins but large on the barrier flanks - measured on helicene, the two flank windows slid by 0.9 and 1.4 window spacings while the two basin windows held at the same k. The calibration is legitimate because the conditional mean force is unbiased regardless of the restraint, so it can be read off during the equilibration phase and used for production.", "FreeEnergy", {})
     PARAM(adaptive_k_max, Double, 20.0, "Upper bound for the calibrated stiffness, as a multiple of umbrella_k. Prevents the calibration from prescribing a value at which the window no longer survives; if the bound binds, the profile is steeper than the sampling can hold and that is reported.", "FreeEnergy", {})
     PARAM(max_temperature, Double, 0.0, "A window whose instantaneous temperature exceeds this value (K) is declared dead: it is removed from the integration and from all averages, and reported by name. 0 = ten times the thermostat setpoint. Without this a blown-up window keeps contributing - the failure is invisible in the averages and only the final energy betrays it, which is how several runs in this work produced plausible-looking profiles from damaged windows.", "FreeEnergy", {})

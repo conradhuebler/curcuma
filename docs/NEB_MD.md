@@ -127,6 +127,9 @@ still run and can change the path that was read. Set `-nebmd.idpp false` (and
 | `cv_extend_length` | 0.0 | fraction of arclength | extension as a length; overrides `cv_extend`; typical 0.05-0.1 |
 | `umbrella` | false | - | sample on the path CV s; switched on by `scheme independent` |
 | `constrain` | false | - | hold s by SHAKE/RATTLE instead of a restraint (pipeline: true) |
+| `z_wall` | 0.0 | A^2 | flat-bottom wall on z in stage-2 windows, W = k/2 (z - z_wall)^2 for z > z_wall; 0 = off |
+| `z_wall_k` | 0.0 | Eh/A^4 | wall stiffness; 0 = automatic 150 kT/z_wall^2 (W = 3 kT at z = 1.2 z_wall) |
+| `window_trajectory` | false | - | write `<base>.image_NN.trj.xyz` every `simplemd.dump_frequency` steps (with `-no_bmt` in `<base>.image_NN.snapshots/`) |
 | `pmf_equilibration` | 200 | MD steps | steps discarded before mean-force averaging |
 | `fe_bins` | 100 | - | bins over s for the mean force (also for `cv_histogram`) |
 | `div_probes` | 1 | - | Hutchinson probes per step for `<div b>` |
@@ -136,6 +139,8 @@ still run and can change the path that was read. Set `-nebmd.idpp false` (and
 | `optimize` | false | - | CI-NEB before the MD |
 | `opt_fmax` | 0.02 | Eh/A | CI-NEB force threshold |
 | `max_temperature` | 0.0 | K | window declared dead above this T; 0 = 10 x setpoint |
+
+**Tube PMF** (`z_wall`): the wall is part of the sampled potential (inside the integrator, its gradient enters `<b . grad(E+W)>`), so G(s) is the PMF of the z-restricted system and depends on z_wall; compare G, barriers and rates only between runs with equal z_wall.
 
 All flags take the `-nebmd.` prefix; MD settings (method, `time_step`, `temperature`,
 `thermostat`, `seed`, `max_time`) go through `-simplemd.*`. The energy method is shared by the
@@ -152,7 +157,7 @@ is an error, because the band arclength it used is not a function of R.
   statistics, basin barrier and TST rate of the free trajectory.
 - `<base>.neb.wham.csv` (written whenever umbrella is on; meaningful only in restraint mode), `<base>.neb.opt.xyz` (CI-NEB), `<base>.neb.init.xyz`,
   `<base>.neb.path.xyz`, `<base>.neb.final.xyz`, `<base>.neb.energy.csv`,
-  `<base>.neb.cvtrace.csv` (`-nebmd.cv_trace`).
+  `<base>.neb.cvtrace.csv` (`-nebmd.cv_trace`; with `z_wall` > 0 an extra last column `W_wall` in Eh); the per-window log lists <z>, max z, fraction z > z_wall and <W>.
 
 ## String stage: force criterion, gain, start-path preparation (Oct 2026)
 
@@ -302,6 +307,101 @@ NEB vs reference TST +-25 %; no dead windows); n=1 per variation except the seed
 CSVR issue below, the absolute comparison with k_MD holds only to about 20 %.
 
 **All results come from ONE system.**
+
+## Re-measurement after the CSVR fix (Oct 16, 2026)
+
+> AI-generated analysis, machine-run, not human-reviewed. Raw numbers and scripts were kept in the session scratchpad only.
+
+**Ethane** (GFN-FF, same string, fixed thermostat, free MD 4 x 2 ns, n=4; old binary re-run on the same inputs):
+- The old binary sampled at ~316.7 K (= 300 K x 19/18); the fixed one at 299.3-300.9 K. The free-MD reference barrier
+  (160 bins) changed 1.45/1.45 -> 1.77/1.62 kcal/mol (fwd/rev). The change comes from the trajectories only (old
+  trajectories through both `cv_histogram` binaries: identical).
+- Analysis (derived, not separately measured): temperature scaling explains ~+0.11, the rest is statistics and the
+  maximum-over-noisy-bins bias (transition bins hold 72-123 frames). The torsion-basin barrier from the dihedral
+  rises +0.144 +- 0.05, compatible with the temperature. The fwd/rev asymmetry 0.15 is 1.1-1.9 sigma (n=4 x 2 ns), the
+  earlier perfect symmetry (0.013 +- 0.069) was luck.
+- NEB-MD (3 runs, own string each): basin barrier 1.549 (sd 0.010) fwd / 1.541 (0.014) rev, k_TST 0.142 / 0.144 /ps, no
+  dead windows. k_TST / k_MD is now 1.35-1.50 at equal temperature (was 1.08-1.27 across different temperatures).
+- Of the 8 pre-registered criteria, "NEB vs reference TST +-25 %" is not met (fwd +44 %, rev +14 % at 160 bins); CV, window
+  and dt variations were not repeated. Reference barrier depends on `fe_bins` by +0.3 (20 -> 320), so the old "1.50 vs 1.45
+  agreement" was within the spread, partly luck.
+
+**Helicene [6]** (GFN2, 300 K, ORCA 14-frame MEP, 4 threads, seed 1, n=1, 5927 s): no dead images (the 2026-10-03 defect did not
+recur); stage 1 not converged (noise-limited, f_sig 1.0e-3 Eh/A = 2 x ftol, arclength 2.981 -> 3.011 A still growing);
+stage 2 basin barrier 30.96 / 28.01, Eyring 33.27 / 30.31 (OptTS dE 31.88, RRHO dG 31.58), **reaction dG +2.96 (basin),
++3.89 (spline), +4.14 (nodes) instead of 0 by symmetry** (old run n=1: 2.3-2.5).
+- A basin-integrated reaction dG = 0 is a valid test (mirror symmetry fixes the basin populations, independent of the path
+  parametrisation); the node/spline value is not (it contains the end windows on extrapolated walls).
+- Measured, no MD: the reaction dG is independent of the basin half-width (0.05-0.3: 2.953-2.958); the 3 kcal/mol sit in the rise basin -> TS
+  (left 31.30, right 28.13), concentrated in the window pairs 3/10, 0/13, 5/8; window <Epot> drifts by 1.5-2.8 kcal/mol between
+  the halves of 20 ps (not ergodic). The start MEP and the string are energy-asymmetric (|E_i - E_(13-i)| up to 8.15 / 6.84);
+  with the C2 atom permutation the geometric asymmetry is 0.15-0.58 A (a first estimate of "2 A" ignored the permutation).
+- Separation runs (stage 2 only, 14 windows x 22 ps, n as stated): same string, seeds 1/2/3: basin reaction dG +2.96 / +2.22 / +2.33
+  (mean 2.50, sd 0.40, n=3); **mirrored reversed string** (frame k = sigma M frame(13-k), seed 1, n=1): **-2.60**, forward and
+  reverse barriers swapped (27.76/30.36 against 30.96/28.01). The asymmetry follows the string geometry, not the seed; window
+  noise alone does not explain it. The seeds share the start geometries, so sd 0.40 understates the full sampling variance. The
+  asymmetry sits mostly in the window pairs 0/13, 1/12, 2/11 (2.4-4.1 kcal/mol), less in 3/10. Open: whether this is a
+  path-dependent bias of the estimator or slow perpendicular modes that keep the memory of the start geometry (window
+  <Epot> drifts 1.5-2.8 kcal/mol within 20 ps).
+- Longer windows (original string, seed 1, n=1): 20 ps equilibration + 100 ps production per window (93 min, 14 threads): basin
+  reaction dG +1.91 (spline +2.86, nodes +3.07), same window pairs carry the asymmetry, outer pairs ~1 kcal/mol smaller. The
+  22 ps windows were not equilibrated (mean <Epot> over windows rises 49.18 -> 50.75 kcal/mol in 20 ps blocks, flat after ~60 ps;
+  the baseline had 2 ps equilibration, `pmf_equilibration` is in steps), but the dG did not go to 0. Together with the
+  mirror result this argues against pure non-ergodicity of the start geometry and for a systematic bias tied to the string
+  geometry; not proven (n=1; slow perpendicular modes can still be unconverged in the mean force).
+- `div_probes` 1 / 8 / 32 (seed 2, same trajectory, 22 ps): basin reaction dG 2.217 / 2.221 / 2.223, largest change of G 0.010
+  kcal/mol. The Hutchinson noise of -kT<div b> is not the source. A bias of the finite-difference `eps`, the Z weighting and the
+  constrained-ensemble correction are not excluded. `fe.csv` does not split dG/ds into b.gradE and -kT<div b>.
+- **Ethane with deliberately asymmetric paths** (stage 2 only on fixed paths, GFN-FF, 12 windows, n=3 seeds per path, reaction dG must be 0):
+  V0 (symmetric string) -0.017 +- 0.006; V1 (rotation phi = 120 t^2) -0.017 +- 0.012; V1 reversed +0.033 +- 0.012; V2 (one-sided
+  0.15 A distortion of the front carbon, path discontinuous between frames 5 and 6) -0.023 +- 0.015; V3 (substitute construction:
+  uniform back rotation plus one-sided front rotation) +0.010 +- 0.010 kcal/mol. Largest |dG| 0.04, fwd/rev barriers differ <= 0.03. An estimator
+  bias that grows with path asymmetry is **not reproduced on ethane** (about 100 times smaller than the helicene offset); logged sds
+  (0.006-0.015) are limited by the 0.01 printout resolution. V1 vs V1 reversed flips sign by 0.05 (marginal, n=3).
+  V2 changes the physical barrier readout: basin barrier 1.41 instead of 1.55, k_TST 0.24 instead of 0.14 /ps (x1.7, Eyring -0.32 kcal/mol)
+  for the same reaction; not investigated (path discontinuity, CV change at the dividing surface); k_TST depends on the dividing surface.
+  Not excluded for helicene: perpendicular metastable states with barriers far above kT that a window never leaves
+  (100 ps are too short to see it, the energy drift saturating does not exclude it).
+- **Exactly symmetrised helicene path** (P_sym = mean of the string and its sigma*M mirrored reversed copy after Kabsch fit per frame;
+  RMSD(P_sym(13-k), sigma M P_sym(k)) = 0.000000 A, frame energies symmetric, max 39.2 kcal/mol, end frames 0.0001 A from the originals;
+  stage 2, 22 ps windows, n=2 seeds): basin reaction dG -0.47 (seed 1) / +0.02 (seed 2), spline -0.47 / -0.06; basin barrier
+  28.39/28.85 and 28.50/28.48, Eyring 30.68/31.14 and 30.79/30.77 (xtb RRHO dG 31.58). The offset of +2 to +3 on the original string
+  is gone. So the offset is created by the path asymmetry, not by a code-level symmetry break (atom order, constraint,
+  integrator, thermostat). It does **not** separate sampling memory from an estimator bias: a symmetric path cancels both by symmetry.
+  Ethane shows no bias on asymmetric paths. n=2 gives no estimate of the dG spread on a symmetric path. For a symmetric reaction use
+  a symmetrised path; for a general reaction the dG error from an asymmetric path is unquantified (helicene: up to ~2.5 kcal/mol).
+- **Retro-Diels-Alder test FAILED with the default settings** (cyclohexene -> TS -> butadiene/ethylene complex, GFN2, 300 K, 16 atoms, 12 windows,
+  pipeline, n=3 seeds with own strings; start path linear Cartesian interpolation through the ORCA XTB2 TS): Eyring dG_TST 78.42 +- 0.71
+  kcal/mol, basin barrier 80.46 +- 1.16, against a classical harmonic dG(300 K) 67.68 (xtb --hess frequencies; sigma = 1, sigma 2
+  would give 67.26), quantum RRHO 65.86, potential barrier 70.65. A free-energy barrier above the potential barrier is not
+  physical for a good CV; the CV does not describe the reaction. Stage 1 did not converge (20 updates, f_sig 2.3e-3 Eh/A vs ftol
+  5e-4, string frames barely moved from the linear interpolation). In all seeds the windows from s = 0.457 (the TS position on the
+  path) on end up far from the path (last snapshot: forming C...C 3.0-3.85 A instead of 2.315 at the TS). `cv_extend_length 0`
+  (seed 1, n=1): dG_TST 74.61, windows 5-10 still off the path. Not diagnosed: z of the windows (`-nebmd.cv_trace`), relaxed string,
+  Diagnosis (Oct 17, 2026, n=1 seed, string relaxed for 200 ps: energy max 70.4 kcal/mol at forming C...C 2.25 A, f_sig plateau 2.3e-3 Eh/A
+  = 4.5 x ftol, not converged): stage 2 on this string holds s exactly (max |s - s0| < 1e-4 in all 12 windows) but windows 5-11
+  (s0 >= 0.458) leave the path sideways: mean z 1.4-3.8 A^2 against <= 0.1 on the windows 0-4, z > 0.5 after ~140 fs, last snapshot
+  forming C...C 3.4-6.7 A; |grad s| is 75 in window 5 (TS) against ~0.2 on the path. dG_TST 90.1 (invalid, WHAM 11 gaps). lambda = 777
+  (lambda d^2 = 1, CV spacing 0.036 A RMSD). Reading (derived from these numbers, not separately tested): far from all CV frames s
+  depends on tiny differences of the d^2 values, so the surface s = s0 contains the whole dissociated region (energy ~64 kcal/mol, below
+  the TS at 70.6, with large phase space); the constrained windows go there. The RMSD path CV is not a reaction coordinate that
+  separates basin A from a dissociated product; helicene and ethane have bound product basins. There is no z wall, no CV atom selection
+  and no trajectory output of stage-2 windows (.trj.xyz empty) in the current code. Bimolecular forward Diels-Alder is not usable (GFN2 complex bound by 1.6 kcal/mol, unbound in MD).
+  Update (Oct 17, 2026): `z_wall` implemented (flat-bottom wall on z, see parameter table). With the wall the windows stay in the tube
+  (|grad s| at the TS window 0.23 instead of 66-75), but dG_TST does **not** improve: 91.65 / 91.51 / 91.37 for z_wall 0.25 / 0.5 / 1.0
+  (seed 1) and 92.57 +- 1.07 for z_wall 0.5 (n=3 seeds), against 67.68 (pre-registered criterion: within 3 kcal/mol and sd < 1: not met).
+  Windows 0-4 are identical with and without the wall (the wall is never active there), so the excess is not produced by the escaping
+  windows: G(window 4, s = 0.373) = 61 kcal/mol with dG/ds = 1.10 Eh per unit s, window 5 -0.08; integrating that interval adds ~27 kcal/mol
+  while the frame potential energy changes by -1.4 (string energy maximum is at frame 4, s ~ 0.36). Cause found (Oct 17, 2026, seed 1, n=1 per setting): **window resolution**.
+  The profile is not thermal (spline barrier 99.1 / 98.1 / 91.8 at 10 / 50 / 300 K; dG/ds of windows 2-4 unchanged between 10 and 300 K; mean window
+  <Epot> follows the frame energies, sd scales with sqrt(T)). dG/ds falls from +1.1 to -0.1 Eh per unit s inside one window spacing (0.085); the
+  trapezoid/spline over-integrates that step. Denser windows (linearly interpolated path files, new windows start from unrelaxed
+  geometries): 12 / 23 / 34 windows give Eyring dG_TST 91.5 / 71.8 / 67.0 (classical harmonic reference 67.68, potential barrier 70.65), spline
+  barrier 91.8 / 72.0 / 67.2, basin reaction dG 77.8 / 59.9 / 50.3; at 34 windows dG/ds still drops from 1.1 to -0.1 within one spacing (0.028), so the
+  step is not fully resolved and the 34-window number may still move. `-nebmd.nimages` is ignored with `path_file` (the window count is the number of frames
+  of the path file). Windows 5-11 still press against the z wall (up to 27 % of samples beyond z_wall). Ethane (broad barrier, 12 windows) was not affected.
+  The agreement 67.0 vs 67.68 is one run per setting; it is not a validation.
+- The "GFN2 saddle path" quoted in the string section (mirror asymmetry 0.29) is not in `test_cases/helicene/`.
 
 ## Known open issues
 

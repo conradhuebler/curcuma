@@ -98,6 +98,9 @@ void NebMD::LoadControlJson()
     m_umbrella_bins = m_config.get<int>("umbrella_bins");
     m_kz = m_config.get<double>("umbrella_kz");
     m_z_tolerance = m_config.get<double>("umbrella_z_tolerance");
+    m_z_wall = std::max(m_config.get<double>("z_wall"), 0.0);       // Claude Generated 2026
+    m_z_wall_k = std::max(m_config.get<double>("z_wall_k"), 0.0);
+    m_window_trajectory = m_config.get<bool>("window_trajectory");
     m_umbrella_keep_springs = m_config.get<bool>("umbrella_keep_springs");
     m_reparametrize = m_config.get<int>("reparametrize");
     m_pmf = m_config.get<bool>("pmf");
@@ -271,6 +274,9 @@ void NebMD::resetPmfAccumulators(int nat)
     m_win_s2_sum.assign(m_nimages, 0.0);
     m_win_count.assign(m_nimages, 0);
     m_win_z_sum.assign(m_nimages, 0.0);
+    m_win_z_max.assign(m_nimages, -1e300);
+    m_win_zwall_n.assign(m_nimages, 0);
+    m_win_wall_sum.assign(m_nimages, 0.0);
     m_win_w.assign(m_nimages, 0.0);
     m_win_wf.assign(m_nimages, 0.0);
     m_win_wd.assign(m_nimages, 0.0);
@@ -878,7 +884,7 @@ bool NebMD::prepareImages()
     sd["no_center"] = true;            // CRITICAL: do not recenter each image (would break inter-image geometry)
     sd["remove_com_mode"] = 0;         // no COM/rotation removal (keeps the shared frame)
     sd["no_restart"] = true;           // never load stale per-image restart snapshots (NEB-MD owns state)
-    sd["write_xyz"] = false;           // suppress per-image trajectories; the band snapshot records the path
+    sd["write_xyz"] = m_window_trajectory; // per-image trajectories only on request (-nebmd.window_trajectory)
     sd["write_initial_state"] = false;
     sd["write_restart_frequency"] = -1; // disable per-image restart files (step() gates on `> -1` then `% freq`; 0 would SIGFPE)
     sd["opt"] = false;
@@ -1287,6 +1293,9 @@ bool NebMD::stepBand()
             m_win_s_sum[i] += loc[k].win_s;
             m_win_s2_sum[i] += loc[k].win_s2;
             m_win_z_sum[i] += loc[k].win_z;
+            m_win_z_max[i] = std::max(m_win_z_max[i], loc[k].win_z_max);
+            m_win_zwall_n[i] += loc[k].win_zwall_n;
+            m_win_wall_sum[i] += loc[k].win_wall;
             m_win_w[i] += loc[k].win_w;
             m_win_wf[i] += loc[k].win_wf;
             m_win_wd[i] += loc[k].win_wd;
@@ -1632,6 +1641,28 @@ void NebMD::setupUmbrella()
         CurcumaLogger::result_fmt("NEB-MD: s held by a holonomic constraint (SHAKE/RATTLE inside "
                                   "the integrator), tolerance {:.1e}", m_constrain_tol);
     }
+    // Claude Generated 2026: flat-bottom z wall (tube), W = k/2 (z - z_wall)^2 beyond z_wall.
+    // Handed to the integrator as part of the potential (SimpleMD::setExtraPotential), so it is
+    // evaluated at the new positions inside Verlet()/Rattle(), before the RATTLE velocity
+    // projection, and its gradient is contained in trueGradient(): the mean-force estimator
+    // then averages b.grad(E + W), the force of the ensemble exp(-(E+W)/kT) actually sampled.
+    if (m_z_wall > 0.0) {
+        if (m_z_wall_k <= 0.0)
+            m_z_wall_k = PathCV::zWallDefaultK(thermalEnergy(), m_z_wall);
+        for (int i = 0; i < m_nimages; ++i) {
+            if (!m_images[i])
+                continue;
+            const PathCV* cv = m_path_cv.get();
+            const double zw = m_z_wall, kw = m_z_wall_k;
+            m_images[i]->setExtraPotential([cv, zw, kw](const Geometry& R, Geometry& grad) {
+                return cv->zWallEnergy(R, zw, kw, &grad);
+            });
+        }
+        CurcumaLogger::result_fmt("NEB-MD: z wall at z = {:.4f} A^2, k = {:.4f} Eh/A^4 (W = {:.2f} kT at "
+                                  "z = 1.2 z_wall); the PMF is that of the z-restricted system",
+                                  m_z_wall, m_z_wall_k,
+                                  0.5 * m_z_wall_k * 0.04 * m_z_wall * m_z_wall / thermalEnergy());
+    }
     m_hist.assign(m_nimages, std::vector<int>(m_umbrella_bins, 0));
     m_umbrella_ssum.assign(m_nimages, 0.0);
     m_umbrella_n.assign(m_nimages, 0);
@@ -1923,12 +1954,18 @@ void NebMD::applyUmbrellaBias(int i, SimpleMD* img, Geometry& Fext) const
     if (m_cv_trace) {
         if (!m_cv_trace_file.is_open()) {
             m_cv_trace_file.open(outputPath(Basename() + ".neb.cvtrace.csv"));
-            m_cv_trace_file << "step,image,s,ds_step,grad_s_norm,z,T\n";
+            m_cv_trace_file << "step,image,s,ds_step,grad_s_norm,z,T"
+                            << (m_z_wall > 0.0 ? ",W_wall\n" : "\n"); // W_wall only with a z wall
         }
         m_cv_trace_file << m_step << "," << i << "," << fmt::format("{:.8f}", s) << ","
                         << fmt::format("{:.8f}", m_prev_s[i] < 0 ? 0.0 : std::abs(s - m_prev_s[i]))
                         << "," << fmt::format("{:.6f}", gnorm) << "," << fmt::format("{:.6f}", z)
-                        << "," << fmt::format("{:.2f}", img->currentTemperature()) << "\n";
+                        << "," << fmt::format("{:.2f}", img->currentTemperature());
+        if (m_z_wall > 0.0) { // Claude Generated 2026: wall energy in Eh from the same z
+            const double ex = std::max(z - m_z_wall, 0.0);
+            m_cv_trace_file << "," << fmt::format("{:.6e}", 0.5 * m_z_wall_k * ex * ex);
+        }
+        m_cv_trace_file << "\n";
     }
 
     if (m_constrain)
@@ -2897,6 +2934,8 @@ void NebMD::accumulateMeanForce(int i, SimpleMD* img, FeLocal& out, std::mt19937
     }
 
     // <b.grad E>: the true gradient, projected with the mass-weighted field.
+    // With a z wall (z_wall > 0) trueGradient() is d(E + W)/dR: W is part of the sampled
+    // potential (SimpleMD::setExtraPotential), so the estimator is that of the tube ensemble.
     const Geometry g = img->trueGradient(); // dE/dR in Eh/Angstrom
     double bdotg = 0.0;
     for (int a = 0; a < nat; ++a)
@@ -2964,6 +3003,12 @@ void NebMD::accumulateMeanForce(int i, SimpleMD* img, FeLocal& out, std::mt19937
         // best-fit RMSD distance from the path and therefore invariant under both, so
         // sqrt(<z>) is the transverse amplitude in the same metric as the path spacing.
         out.win_z += z;
+        // Claude Generated 2026: z wall diagnostics (fraction outside the tube, wall energy).
+        out.win_z_max = std::max(out.win_z_max, z);
+        if (m_z_wall > 0.0 && z > m_z_wall) {
+            ++out.win_zwall_n;
+            out.win_wall += 0.5 * m_z_wall_k * (z - m_z_wall) * (z - m_z_wall);
+        }
         out.win_w += w;
         out.win_wf += w * bdotg;
         out.win_wd += w * divb;
@@ -3300,6 +3345,9 @@ void NebMD::writeMeanForceProfile() const
                              "on this CV: s(first) {:.6f}, s(second) {:.6f}, s(second-to-last) {:.6f}, s(last) {:.6f}\n",
                              m_cv_path.size(), m_cv_frames, m_cv_extend, m_path_cv ? m_path_cv->lambda() : 0.0,
                              m_cv_orig_s[0], m_cv_orig_s[1], m_cv_orig_s[2], m_cv_orig_s[3]);
+        if (m_z_wall > 0.0) // Claude Generated 2026: only with a wall, so default output is unchanged
+            f << fmt::format("# z wall {:.6g} A^2, k {:.6g} Eh/A^4: PMF of the z-restricted system, compare only "
+                             "at equal z_wall\n", m_z_wall, m_z_wall_k);
         f << "estimator,s,dGds_Eh,G_kcal,samples,rejected_frac\n";
         auto frac = [](long n, long r) { return (n + r) > 0 ? static_cast<double>(r) / static_cast<double>(n + r) : 0.0; };
         for (size_t k = 0; k < sI.size(); ++k)
@@ -3325,6 +3373,15 @@ void NebMD::writeMeanForceProfile() const
         const double rej = 100.0 * m_fe_rejected / std::max<long>(total + m_fe_rejected, 1);
         CurcumaLogger::result_fmt("  discarded samples  : {:.1f} % (|grad s| collapsed); "
                                   "restraint force capped {} times", rej, m_bias_capped);
+    }
+    // Claude Generated 2026: per-window distance from the path (z) and the z wall statistics.
+    for (int i = 0; i < m_nimages; ++i) {
+        const double n = static_cast<double>(m_win_count[i]);
+        if (n < 1.0)
+            continue;
+        CurcumaLogger::result_fmt("  window {:2d}: s0 {:.4f}  <z> {:.4f}  max z {:.4f} A^2  z > z_wall {:.4f}  <W> {:.3e} Eh",
+                                  i, m_umbrella_s0[i], m_win_z_sum[i] / n, m_win_z_max[i],
+                                  m_win_zwall_n[i] / n, m_win_wall_sum[i] / n);
     }
     double amp = 0.0;
     int ampn = 0;
