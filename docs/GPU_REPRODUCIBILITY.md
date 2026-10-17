@@ -45,19 +45,46 @@ all-host run: energies identical, gradient max 2.8e-14 (GFN2).
 
 - **Gradient (GFN1/GFN2)**: the gradient kernels accumulate with FP64 `atomicAdd` (`k_grad_repulsion`,
   `k_grad_cn_onsite*`, `k_grad_h0_pulay*`, `k_grad_coulomb`): 1e-16 to 5e-16 Eh/A between runs. No decision depends on it.
-- **GFN-FF on the GPU**: 38 atomic sites in `gfnff_kernels.cu` (force accumulation of the bonded terms, Coulomb tiles,
-  dispersion, CN pairs), the EEQ reductions `k_eeq_reduce_sums` / `k_eeq_reduce_fragment_sums` (they set the
-  charges), and pair-list builds whose slot order comes from an atomic counter (`k_disp_pairs_build`,
-  `k_generate_cn_pairs_write`). MD on polymer (1410 atoms, 1000 steps): 3 sequential runs identical to the printed
-  10 decimals at 300 steps on 1 GPU and on 4 GPUs; with 8 concurrent runs the Epot of the runs first differs from a
-  solo run at print index 414 or 611 (of 1001, one print per step in units of 1 fs) and stays within 1e-10 up to step 1000.
+- **GFN-FF energies on the GPU** (not the forces): the energy slots still accumulate with FP64 `atomicAdd`
+  (`blockReduceAddEnergy`, `k_add_*_parts`), so the printed Epot can differ in the last digits between runs. It does not
+  enter the dynamics. The charge and force path is bitwise, see the next section.
+- **GFN-FF list builds** still take their slot from an atomic counter (`k_disp_pairs_build`, `k_generate_cn_pairs_write`);
+  the order of a list no longer matters because every sum over it is an integer sum.
 - **ROCm, Vulkan**: not looked at.
 - CPU runs at different thread counts differ in the last bit (Known Issue #36).
 
+## GFN-FF on the GPU: fixed-point accumulation (Oct 17, 2026, AI/machine-tested)
+
+Integer addition is associative, so a sum of 64-bit integers does not depend on the arrival order of the threads.
+`fix_add` (`gfnff_kernels.cu`) rounds a contribution to a multiple of 2^-52 (forces, dE/dCN, zz_hb) or 2^-56 (CN) and adds
+it as `unsigned long long` into the 8 bytes of the double buffer; `k_fix_to_double` converts in place when the
+accumulation is over (`k_fix_copy` for the diagnostic snapshots).
+
+- CN pairs and HB CN (`k_cn_compute_pairs`, `k_hb_cn_per_atom`) -> converted before the log squashing / bond map.
+- Fragment sums of the EEQ PCG: block per fragment over a CSR atom list (`k_frag_sum_csr`, built where `d_atom_frag` is
+  uploaded); `k_eeq_reduce_sums_det` (one block, fixed tree); `k_eeq_reduce_fragment_sums_csr`.
+- Forces: `add_grad` (all 62 sites), dispersion/bond dE/dCN, `zz_hb`, the shared-memory partner gradients of
+  `k_coulomb_tiles`; the partial buffers of the helper devices (`k_add_coulomb_parts`, `k_add_disp_parts`) are added as
+  integers. `d_dEdcn` is converted once before `k_coulomb_postprocess` / `k_cn_chainrule`, `d_grad` after the CN chain
+  rule and before the download.
+
+Measured (RTX A4500, `-method gfnff -gpu cuda`; AI-run, not human-reviewed):
+
+| Check | Result |
+|---|---|
+| Gradient GPU vs CPU, polymer (1410 atoms) / caffeine (24) | max 1.7e-13 / 1.5e-13 Eh/A, energies equal to 8 decimals |
+| MD polymer, 5000 steps, 8 concurrent processes on 4 GPUs vs 1 solo run | trajectory file (1000 frames) md5-identical in 9 of 9; with only the charge path fixed (forces still atomic) the same test differed from the solo run at printed rows 283-322 of 1001 in 8 of 8; the unchanged original binary was not run in this test |
+| MD polymer_2x (7320 atoms), 300 steps, `-gpu_split_devices all` (4 GPUs) twice and `none` | trajectory md5-identical in 3 of 3 (split is a different summation partition) |
+| `ctest -R "gfnff\|gpu\|cuda\|eeq"` | 278 of 278 passed |
+| Cost, polymer MD 5000 steps solo | 20 s before, 20-21 s after (3 runs) |
+
+Limits: one system class per MD test (peptide-like polymer, polymer_2x), one GPU model, HB/XB host stages were not
+varied, periodic systems and the EEQ split path with more than one fragment are not covered by the bitwise check. The
+range of the accumulator is +-2048 Eh/Bohr per atom component (+-128 for CN-like terms, never reached); a clash beyond
+that would wrap silently. ROCm (`rocm/gfnff_kernels_hip.h`) has its own kernels and is unchanged.
+
 ## Options for the rest (not done)
 
-1. GFN-FF EEQ reductions and pair-list builds deterministic (small; they feed the charges and the summation order).
-2. GFN-FF and GFN1/GFN2 gradient accumulation: per-term partial buffers with a fixed-order reduction per atom, or
-   64-bit fixed-point atomics (integer addition is associative; resolution/range trade-off 2^-56 / +-128 Eh/Bohr).
-   The first costs memory traffic, the second changes the numbers at 1e-17 per term.
-3. A `-gpu_deterministic` switch that bundles 1 and 2 and disables nothing else.
+1. GFN1/GFN2 gradient kernels (`k_grad_*`) with the same fixed-point scheme (5e-16 Eh/A today, no decision depends on it).
+2. Energy slots of GFN-FF as fixed-point or block partials (bitwise Epot).
+3. A `-gpu_deterministic` switch is not needed for GFN-FF: the cost measured above is below the run-to-run noise.

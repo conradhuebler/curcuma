@@ -237,6 +237,8 @@ struct EEQSolverGPUImpl {
     //   d_S_general[f*nfrag+g]    = Σ_{i∈frag_f} Z2[i,g] — reduction output
     //   d_lambda_general[f]       = Lagrange multipliers (H2D after CPU Schur)
     CudaBuffer<int>     d_atom_frag;
+    CudaBuffer<int>     d_frag_off;   // CSR of the atoms of each fragment (ascending), for deterministic fragment sums
+    CudaBuffer<int>     d_frag_idx;
     CudaBuffer<double>  d_rhs_constraint_cols;
     CudaBuffer<double>  d_Cz1_general;
     CudaBuffer<double>  d_S_general;
@@ -1072,8 +1074,7 @@ bool EEQSolverGPU::solveAndComputeCharges(
 
         // Reduce Cz1 = sum(z1) and S = sum(Z2_col0)
         int reduce_block = 256;
-        int reduce_grid = (N + reduce_block - 1) / reduce_block;
-        k_eeq_reduce_sums<<<reduce_grid, reduce_block,
+        k_eeq_reduce_sums_det<<<1, reduce_block,
                              2 * reduce_block * sizeof(double), m_impl->stream>>>(
             N, m_impl->d_rhs.ptr, m_impl->d_sums.ptr);
 
@@ -1302,8 +1303,8 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchur(
         m_impl->d_sums.alloc(2);
     cudaMemsetAsync(m_impl->d_sums.ptr, 0, 2 * sizeof(double), m_impl->stream);
 
-    int rb = 256, rg = (N + rb - 1) / rb;
-    k_eeq_reduce_sums<<<rg, rb, 2 * rb * sizeof(double), m_impl->stream>>>(
+    int rb = 256;
+    k_eeq_reduce_sums_det<<<1, rb, 2 * rb * sizeof(double), m_impl->stream>>>(
         N, m_impl->d_rhs.ptr, m_impl->d_sums.ptr);
 
     // Download only 2 scalars (16 bytes) for lambda — not the full N-vector
@@ -1398,11 +1399,11 @@ static void finishGeneralSchur(EEQSolverGPUImpl& impl, int N, int nfrag,
     cudaMemsetAsync(impl.d_S_general.ptr,   0, (size_t)nfrag * nfrag * sizeof(double), impl.stream);
     {
         int rb = 256;
-        int rg = (N + rb - 1) / rb;
-        k_eeq_reduce_fragment_sums<<<rg, rb, 0, impl.stream>>>(
+        int rg = (int)(((long long)nfrag * (nfrag + 1) + rb - 1) / rb);
+        k_eeq_reduce_fragment_sums_csr<<<rg, rb, 0, impl.stream>>>(
             N, nfrag,
             impl.d_rhs.ptr,
-            impl.d_atom_frag.ptr,
+            impl.d_frag_off.ptr, impl.d_frag_idx.ptr,
             impl.d_Cz1_general.ptr,
             impl.d_S_general.ptr);
     }
@@ -2045,9 +2046,9 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUPCG(
     cudaMemsetAsync(impl.d_Cz1_general.ptr, 0, nfrag * sizeof(double), impl.stream);
     cudaMemsetAsync(impl.d_S_general.ptr,   0, (size_t)nfrag * nfrag * sizeof(double), impl.stream);
     {
-        int rb = 256, rg = (N + rb - 1) / rb;
-        k_eeq_reduce_fragment_sums<<<rg, rb, 0, impl.stream>>>(
-            N, nfrag, impl.d_rhs.ptr, impl.d_atom_frag.ptr,
+        int rb = 256, rg = (int)(((long long)nfrag * (nfrag + 1) + rb - 1) / rb);
+        k_eeq_reduce_fragment_sums_csr<<<rg, rb, 0, impl.stream>>>(
+            N, nfrag, impl.d_rhs.ptr, impl.d_frag_off.ptr, impl.d_frag_idx.ptr,
             impl.d_Cz1_general.ptr, impl.d_S_general.ptr);
     }
 
@@ -2102,15 +2103,19 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUPCG(
 // Claude Generated.
 // ============================================================================
 
+// Deterministic fragment sum out[f] = sum_{i in f} v[i] (fixed order; replaces the atomicAdd k_frag_sum).
+static inline void fragSumDet(EEQSolverGPUImpl& impl, int nfrag, const double* d_v, double* d_out, cudaStream_t s)
+{
+    k_frag_sum_csr<<<nfrag, 256, 256 * sizeof(double), s>>>(nfrag, d_v, impl.d_frag_off.ptr, impl.d_frag_idx.ptr, d_out);
+}
+
 // r ← P·r, the projection onto the constraint tangent space: subtract the
 // per-fragment mean (mirrors the CPU `project` lambda).
 static inline void ppcgProjectResidual(EEQSolverGPUImpl& impl, int N, int nfrag, double* d_v)
 {
     cudaMemsetAsync(impl.d_frag_sum_scratch.ptr, 0, (size_t)nfrag * sizeof(double), impl.stream);
     {
-        int blk = 256, grd = (N + blk - 1) / blk;
-        k_frag_sum<<<grd, blk, 0, impl.stream>>>(
-            N, d_v, impl.d_atom_frag.ptr, impl.d_frag_sum_scratch.ptr);
+        fragSumDet(impl, nfrag, d_v, impl.d_frag_sum_scratch.ptr, impl.stream);
     }
     {
         int blk = 256, grd = (nfrag + blk - 1) / blk;
@@ -2172,7 +2177,7 @@ static inline void ppcgPrecondition(EEQSolverGPUImpl& impl, int N, int nfrag,
         k_li_csr_spmv<<<grd, blk, 0, impl.stream>>>(N, impl.d_li_G_rowptr.ptr, impl.d_li_G_col.ptr,
                                                     impl.d_li_G_val.ptr, d_r, d_z, 0);
         cudaMemsetAsync(impl.d_li_t.ptr, 0, (size_t)nfrag * sizeof(double), impl.stream);
-        k_frag_sum<<<grd, blk, 0, impl.stream>>>(N, d_z, impl.d_atom_frag.ptr, impl.d_li_t.ptr);
+        fragSumDet(impl, nfrag, d_z, impl.d_li_t.ptr, impl.stream);
         const int grd_f = (nfrag + blk - 1) / blk;
         k_li_dense_gemv<<<grd_f, blk, 0, impl.stream>>>(nfrag, impl.d_li_S_inv.ptr, impl.d_li_t.ptr, impl.d_li_mu.ptr);
         k_li_csr_spmv<<<grd, blk, 0, impl.stream>>>(N, impl.d_li_H_rowptr.ptr, impl.d_li_H_col.ptr,
@@ -2181,8 +2186,7 @@ static inline void ppcgPrecondition(EEQSolverGPUImpl& impl, int N, int nfrag,
     }
     k_pcg_apply_precond<<<grd, blk, 0, impl.stream>>>(N, impl.d_pcg_M_inv.ptr, d_r, d_z);
     cudaMemsetAsync(impl.d_frag_sum_scratch.ptr, 0, (size_t)nfrag * sizeof(double), impl.stream);
-    k_frag_sum<<<grd, blk, 0, impl.stream>>>(
-        N, d_z, impl.d_atom_frag.ptr, impl.d_frag_sum_scratch.ptr);
+    fragSumDet(impl, nfrag, d_z, impl.d_frag_sum_scratch.ptr, impl.stream);
     k_frag_precond_correct<<<grd, blk, 0, impl.stream>>>(
         N, impl.d_pcg_M_inv.ptr, impl.d_atom_frag.ptr,
         impl.d_frag_sum_scratch.ptr, impl.d_frag_sM.ptr, d_z);
@@ -2416,8 +2420,7 @@ static bool runProjectedPCG(EEQSolverGPUImpl& impl, int N, int nfrag,
     // --- Feasible start: q[i] += (rhs_constraints[frag[i]] − Σ_{j∈frag} q[j]) / N_frag. ---
     cudaMemsetAsync(impl.d_frag_sum_scratch.ptr, 0, (size_t)nfrag * sizeof(double), s);
     {
-        int blk = 256, grd = (N + blk - 1) / blk;
-        k_frag_sum<<<grd, blk, 0, s>>>(N, d_q, impl.d_atom_frag.ptr, impl.d_frag_sum_scratch.ptr);
+        fragSumDet(impl, nfrag, d_q, impl.d_frag_sum_scratch.ptr, s);
     }
     {
         int blk = 256, grd = (nfrag + blk - 1) / blk;
@@ -3056,9 +3059,7 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUProjectedPCG(
         // projected preconditioner; rebuilt whenever M_inv itself is rebuilt.
         cudaMemsetAsync(impl.d_frag_sM.ptr, 0, (size_t)nfrag * sizeof(double), impl.stream);
         {
-            int blk = 256, grd = (N + blk - 1) / blk;
-            k_frag_sum<<<grd, blk, 0, impl.stream>>>(
-                N, impl.d_pcg_M_inv.ptr, impl.d_atom_frag.ptr, impl.d_frag_sM.ptr);
+            fragSumDet(impl, nfrag, impl.d_pcg_M_inv.ptr, impl.d_frag_sM.ptr, impl.stream);
         }
         // No block-Jacobi here (unlike WP7-C): the CPU algorithm this ports uses only the
         // diagonal Jacobi. Measured Sep 29, 2026: an exact block inverse for every small fragment
@@ -3430,6 +3431,20 @@ void EEQSolverGPU::uploadFragmentTopology(int nfrag,
         impl.d_atom_frag.alloc(N);
         impl.d_rhs_constraint_cols.alloc(rhs_cols_size);
         impl.d_atom_frag.upload(h_atom_frag.data(), N);
+        {   // CSR (Oct 2026): fixed-order fragment sums, see k_frag_sum_csr
+            std::vector<int> off(nfrag + 1, 0), idx;
+            for (int i = 0; i < N; ++i)
+                if (h_atom_frag[i] >= 0 && h_atom_frag[i] < nfrag) ++off[h_atom_frag[i] + 1];
+            for (int f = 0; f < nfrag; ++f) off[f + 1] += off[f];
+            idx.assign(off[nfrag], 0);
+            std::vector<int> fill(off.begin(), off.end() - 1);
+            for (int i = 0; i < N; ++i)
+                if (h_atom_frag[i] >= 0 && h_atom_frag[i] < nfrag) idx[fill[h_atom_frag[i]]++] = i;
+            impl.d_frag_off.alloc(nfrag + 1);
+            impl.d_frag_off.upload(off.data(), nfrag + 1);
+            impl.d_frag_idx.alloc(std::max<size_t>(idx.size(), 1));
+            if (!idx.empty()) impl.d_frag_idx.upload(idx.data(), idx.size());
+        }
         checkCudaEEQ(cudaMemcpy(impl.d_rhs_constraint_cols.ptr,
                                  h_constraint_cols.data(),
                                  (size_t)rhs_cols_size * sizeof(double),

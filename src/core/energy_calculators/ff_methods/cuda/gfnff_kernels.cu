@@ -28,13 +28,55 @@
 // Device geometry helpers
 // ============================================================================
 
+// ============================================================================
+// Order-independent accumulation (Claude Generated, Oct 2026; docs/GPU_REPRODUCIBILITY.md)
+// FP64 atomicAdd depends on the arrival order of the threads, so two runs differ in the last bits and
+// the difference is amplified by the dynamics. Integer addition is associative: the contribution is
+// rounded to a multiple of 2^-FIX_BITS, added to the same 8 bytes as a 64-bit integer (two's
+// complement wraps harmlessly, only the final sum has to fit) and converted back in place by
+// k_fix_to_double once the accumulation is over. The buffer must be zeroed first (0 bits = 0 and 0.0).
+// ============================================================================
+__device__ __forceinline__ void fix_add_u64(unsigned long long* a, double v, double scale)
+{
+    while (fabs(v) >= 64.0) {                          // keep the scaled value inside long long
+        const double chunk = copysign(64.0, v);
+        atomicAdd(a, static_cast<unsigned long long>(llrint(chunk * scale)));
+        v -= chunk;
+    }
+    atomicAdd(a, static_cast<unsigned long long>(llrint(v * scale)));
+}
+
+__device__ __forceinline__ void fix_add(double* addr, double v, double scale)
+{
+    fix_add_u64(reinterpret_cast<unsigned long long*>(addr), v, scale);
+}
+
+/// Copy of a fixed-point accumulator as doubles (the accumulator itself stays untouched; diagnostic snapshots).
+__global__ void k_fix_copy(int n, const double* __restrict__ src, double* __restrict__ dst, double inv_scale)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    dst[i] = static_cast<double>(reinterpret_cast<const long long*>(src)[i]) * inv_scale;
+}
+
+/// In-place conversion of a fixed-point accumulator (see fix_add) into doubles.
+__global__ void k_fix_to_double(int n, double* __restrict__ buf, double inv_scale)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const long long x = reinterpret_cast<long long*>(buf)[i];
+    buf[i] = static_cast<double>(x) * inv_scale;
+}
+
 /// Add vector contribution to gradient (atomicAdd on x,y,z)
 __device__ __forceinline__ void add_grad(double* __restrict__ grad, int atom,
                                           double fx, double fy, double fz)
 {
-    atomicAdd(&grad[3*atom],   fx);
-    atomicAdd(&grad[3*atom+1], fy);
-    atomicAdd(&grad[3*atom+2], fz);
+    // Fixed-point (order-independent) accumulation: grad is an integer accumulator until
+    // k_fix_to_double converts it at the end of the step (FFWorkspaceGPU::calculate*, docs/GPU_REPRODUCIBILITY.md).
+    fix_add(&grad[3*atom],   fx, GFNFF_FIX_FORCE);
+    fix_add(&grad[3*atom+1], fy, GFNFF_FIX_FORCE);
+    fix_add(&grad[3*atom+2], fz, GFNFF_FIX_FORCE);
 }
 
 
@@ -217,8 +259,8 @@ __global__ void k_dispersion(
 
             if (dc6dcn_ij && dEdcn) {
                 double disp_value = disp_sum * zetac6[tid];
-                atomicAdd(&dEdcn[i], -dc6dcn_ij[tid] * disp_value);
-                atomicAdd(&dEdcn[j], -dc6dcn_ji[tid] * disp_value);
+                fix_add(&dEdcn[i], -dc6dcn_ij[tid] * disp_value, GFNFF_FIX_FORCE);
+                fix_add(&dEdcn[j], -dc6dcn_ji[tid] * disp_value, GFNFF_FIX_FORCE);
             }
         }
     }
@@ -490,7 +532,7 @@ __global__ void k_coulomb_tiles(
 {
     constexpr int T = GFNFF_COUL_TILE;
     __shared__ double sx[T], sy[T], sz[T], sq[T], sa[T];
-    __shared__ double sgx[T], sgy[T], sgz[T];
+    __shared__ unsigned long long sgx[T], sgy[T], sgz[T];   // fixed-point partner gradients (order-independent)
 
     const int bi = tiles[2 * blockIdx.x];
     const int bj = tiles[2 * blockIdx.x + 1];
@@ -504,7 +546,7 @@ __global__ void k_coulomb_tiles(
     } else {
         sx[t] = sy[t] = sz[t] = 0.0; sq[t] = nan(""); sa[t] = 1.0;
     }
-    sgx[t] = 0.0; sgy[t] = 0.0; sgz[t] = 0.0;
+    sgx[t] = 0ull; sgy[t] = 0ull; sgz[t] = 0ull;
     __syncthreads();
 
     double local_E = 0.0;
@@ -544,9 +586,9 @@ __global__ void k_coulomb_tiles(
                 fac = -e * ri * ri;
                 const double fx = fac * dx, fy = fac * dy, fz = fac * dz;
                 gx += fx; gy += fy; gz += fz;
-                atomicAdd(&sgx[jj], -fx);
-                atomicAdd(&sgy[jj], -fy);
-                atomicAdd(&sgz[jj], -fz);
+                fix_add_u64(&sgx[jj], -fx, GFNFF_FIX_FORCE);
+                fix_add_u64(&sgy[jj], -fy, GFNFF_FIX_FORCE);
+                fix_add_u64(&sgz[jj], -fz, GFNFF_FIX_FORCE);
                 continue;
             }
             const double rij = sqrt(r2);
@@ -566,15 +608,19 @@ __global__ void k_coulomb_tiles(
             }
             const double fx = fac * dx, fy = fac * dy, fz = fac * dz;
             gx += fx; gy += fy; gz += fz;
-            atomicAdd(&sgx[jj], -fx);
-            atomicAdd(&sgy[jj], -fy);
-            atomicAdd(&sgz[jj], -fz);
+            fix_add_u64(&sgx[jj], -fx, GFNFF_FIX_FORCE);
+            fix_add_u64(&sgy[jj], -fy, GFNFF_FIX_FORCE);
+            fix_add_u64(&sgz[jj], -fz, GFNFF_FIX_FORCE);
         }
         add_grad(grad, i, gx, gy, gz);
     }
     __syncthreads();
-    if (jl < natoms && (sgx[t] != 0.0 || sgy[t] != 0.0 || sgz[t] != 0.0))
-        add_grad(grad, jl, sgx[t], sgy[t], sgz[t]);
+    if (jl < natoms && (sgx[t] != 0ull || sgy[t] != 0ull || sgz[t] != 0ull)) {
+        const double inv = 1.0 / GFNFF_FIX_FORCE;   // exact: the value is a multiple of 2^-52 and is re-added unchanged
+        add_grad(grad, jl, static_cast<double>(static_cast<long long>(sgx[t])) * inv,
+                 static_cast<double>(static_cast<long long>(sgy[t])) * inv,
+                 static_cast<double>(static_cast<long long>(sgz[t])) * inv);
+    }
 
     blockReduceAddEnergy(local_E, energy);
 }
@@ -585,9 +631,10 @@ __global__ void k_add_coulomb_parts(int n3, int nparts, const double* __restrict
 {
     const int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k < n3) {
-        double s = 0.0;
-        for (int p = 0; p < nparts; ++p) s += parts[static_cast<size_t>(p) * n3 + k];
-        atomicAdd(&grad[k], s);   // other streams add to d_grad concurrently
+        // the helper devices' partial gradients are fixed-point accumulators (see fix_add): integer sum
+        unsigned long long s = 0ull;
+        for (int p = 0; p < nparts; ++p) s += reinterpret_cast<const unsigned long long*>(parts)[static_cast<size_t>(p) * n3 + k];
+        atomicAdd(reinterpret_cast<unsigned long long*>(&grad[k]), s);   // other streams add to d_grad concurrently
     }
     if (k == 0) {
         double e = 0.0;
@@ -602,14 +649,14 @@ __global__ void k_add_disp_parts(int N, int nparts, const double* __restrict__ g
 {
     const int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k < 3 * N) {
-        double s = 0.0;
-        for (int p = 0; p < nparts; ++p) s += gparts[static_cast<size_t>(p) * 3 * N + k];
-        atomicAdd(&grad[k], s);   // other streams add to d_grad concurrently
+        unsigned long long s = 0ull;   // fixed-point partial gradients: integer sum
+        for (int p = 0; p < nparts; ++p) s += reinterpret_cast<const unsigned long long*>(gparts)[static_cast<size_t>(p) * 3 * N + k];
+        atomicAdd(reinterpret_cast<unsigned long long*>(&grad[k]), s);   // other streams add to d_grad concurrently
     }
     if (k < N) {
-        double s = 0.0;
-        for (int p = 0; p < nparts; ++p) s += dparts[static_cast<size_t>(p) * N + k];
-        atomicAdd(&dEdcn[k], s);
+        unsigned long long s = 0ull;
+        for (int p = 0; p < nparts; ++p) s += reinterpret_cast<const unsigned long long*>(dparts)[static_cast<size_t>(p) * N + k];
+        atomicAdd(reinterpret_cast<unsigned long long*>(&dEdcn[k]), s);
     }
     if (k == 0) {
         double e = 0.0;
@@ -696,8 +743,8 @@ __global__ void k_bonds(
 
             if (dEdcn && cn && r0_base_i[tid] > 0.0) {
                 double yy = -dEdr;
-                atomicAdd(&dEdcn[i], yy * ff[tid] * cnfak_i[tid]);
-                atomicAdd(&dEdcn[j], yy * ff[tid] * cnfak_j[tid]);
+                fix_add(&dEdcn[i], yy * ff[tid] * cnfak_i[tid], GFNFF_FIX_FORCE);
+                fix_add(&dEdcn[j], yy * ff[tid] * cnfak_j[tid], GFNFF_FIX_FORCE);
             }
 
             if (zz_hb && nr_hb[tid] >= 1 && hb_H_atom) {
@@ -705,7 +752,7 @@ __global__ void k_bonds(
                 double zz = t1 * alpha_orig * dr * dr * E;
                 int H = hb_H_atom[tid];
                 if (H >= 0) {
-                    atomicAdd(&zz_hb[H], zz);
+                    fix_add(&zz_hb[H], zz, GFNFF_FIX_FORCE);
                 }
             }
         }
@@ -3347,8 +3394,8 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_cn_compute_pairs(
     double contrib = 0.5 * (1.0 + erf(arg));
 
     // Symmetric: both atoms i and j receive the contribution
-    atomicAdd(&cn_raw[i], contrib);
-    atomicAdd(&cn_raw[j], contrib);
+    fix_add(&cn_raw[i], contrib, GFNFF_FIX_CN);   // order-independent: the CN decides the charges
+    fix_add(&cn_raw[j], contrib, GFNFF_FIX_CN);
 }
 
 __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_logcn(
@@ -3613,7 +3660,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_per_atom(
     double arg = -kn * (r - rcovij) / rcovij;
     double contrib = 0.5 * (1.0 + erf(arg));
 
-    atomicAdd(&hb_cn_per_atom[H], contrib);
+    fix_add(&hb_cn_per_atom[H], contrib, GFNFF_FIX_CN);
 }
 
 __global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_map_to_bonds(
@@ -3679,6 +3726,60 @@ __global__ void k_eeq_reduce_sums(
         atomicAdd(&d_sums[0], s_z1[0]);   // Cz1
         atomicAdd(&d_sums[1], s_Z2[0]);   // S
     }
+}
+
+// Single-block twin of k_eeq_reduce_sums (Oct 2026): every thread sums a fixed strided slice, a fixed tree adds the
+// slices - the same two sums in the same order in every run (the block-wise atomicAdd added in arrival order).
+__global__ void k_eeq_reduce_sums_det(int N, const double* __restrict__ d_rhs, double* __restrict__ d_sums)
+{
+    extern __shared__ double sdata[];
+    double* s_z1 = sdata;
+    double* s_Z2 = sdata + blockDim.x;
+    const int tid = threadIdx.x;
+    double a = 0.0, b = 0.0;
+    for (int i = tid; i < N; i += blockDim.x) { a += d_rhs[i]; b += d_rhs[N + i]; }
+    s_z1[tid] = a; s_Z2[tid] = b;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) { s_z1[tid] += s_z1[tid + s]; s_Z2[tid] += s_Z2[tid + s]; }
+        __syncthreads();
+    }
+    if (tid == 0) { d_sums[0] = s_z1[0]; d_sums[1] = s_Z2[0]; }
+}
+
+// Fragment sums over a CSR list of the atoms of each fragment (ascending atom index): one block per fragment,
+// fixed strided slices and a fixed tree -> deterministic (k_frag_sum added in arrival order).
+__global__ void k_frag_sum_csr(int nfrag, const double* __restrict__ v, const int* __restrict__ off,
+                               const int* __restrict__ idx, double* __restrict__ out)
+{
+    extern __shared__ double sh[];
+    const int f = blockIdx.x;
+    if (f >= nfrag) return;
+    const int tid = threadIdx.x;
+    double a = 0.0;
+    for (int p = off[f] + tid; p < off[f + 1]; p += blockDim.x) a += v[idx[p]];
+    sh[tid] = a;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sh[tid] += sh[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) out[f] = sh[0];
+}
+
+// Deterministic twin of k_eeq_reduce_fragment_sums: one thread per (fragment, column), atoms in ascending order.
+// Column 0 -> Cz1[f], column g + 1 -> S[f * nfrag + g].
+__global__ void k_eeq_reduce_fragment_sums_csr(int N, int nfrag, const double* __restrict__ d_rhs,
+                                               const int* __restrict__ off, const int* __restrict__ idx,
+                                               double* __restrict__ d_Cz1, double* __restrict__ d_S)
+{
+    const long long t = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const long long ncol = static_cast<long long>(nfrag) + 1;
+    if (t >= static_cast<long long>(nfrag) * ncol) return;
+    const int f = static_cast<int>(t / ncol), c = static_cast<int>(t % ncol);
+    double acc = 0.0;
+    for (int p = off[f]; p < off[f + 1]; ++p) acc += d_rhs[static_cast<size_t>(c) * N + idx[p]];
+    if (c == 0) d_Cz1[f] = acc; else d_S[static_cast<size_t>(f) * nfrag + (c - 1)] = acc;
 }
 
 __global__ void k_eeq_schur_nfrag1(

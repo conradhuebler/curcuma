@@ -1981,6 +1981,11 @@ void FFWorkspaceGPU::computeBondHBCN()
         impl.d_hb_cn_per_atom.ptr,
         27.5,   // kn
         900.0); // thr_sq
+    {   // fixed-point accumulator -> double (order-independent, docs/GPU_REPRODUCIBILITY.md)
+        auto cfgc = getLaunchConfig(N, m_block_size);
+        k_fix_to_double<<<cfgc.gridSize, cfgc.blockSize, 0, impl.stream>>>(
+            N, impl.d_hb_cn_per_atom.ptr, 1.0 / GFNFF_FIX_CN);
+    }
 
     // Pass 2: map per-H CN to per-bond CN
     auto cfg2 = getLaunchConfig(impl.bonds.n, m_block_size);
@@ -2891,8 +2896,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // NOTE: k_coulomb is NOT launched here — it needs EEQ charges
     // Per-kernel snapshot: after stream A repulsion (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_sA.ptr) {
-        cudaMemcpyAsync(impl.d_grad_after_sA.ptr, impl.d_grad.ptr,
-                        3*N*sizeof(double), cudaMemcpyDeviceToDevice, sA);
+        k_fix_copy<<<(3*N + 255) / 256, 256, 0, sA>>>(3*N, impl.d_grad.ptr, impl.d_grad_after_sA.ptr, 1.0 / GFNFF_FIX_FORCE);
     }
     if (m_record_kernel_timings) cudaEventRecord(impl.timing_sA_end, sA);
     cudaEventRecord(impl.event_pairwise, sA);
@@ -2929,8 +2933,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     // Per-kernel snapshot: after k_bonds (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_bonds.ptr) {
-        cudaMemcpyAsync(impl.d_grad_after_bonds.ptr, impl.d_grad.ptr,
-                        3*N*sizeof(double), cudaMemcpyDeviceToDevice, sB);
+        k_fix_copy<<<(3*N + 255) / 256, 256, 0, sB>>>(3*N, impl.d_grad.ptr, impl.d_grad_after_bonds.ptr, 1.0 / GFNFF_FIX_FORCE);
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
@@ -2949,8 +2952,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     // Per-kernel snapshot: after k_angles (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_angles.ptr) {
-        cudaMemcpyAsync(impl.d_grad_after_angles.ptr, impl.d_grad.ptr,
-                        3*N*sizeof(double), cudaMemcpyDeviceToDevice, sB);
+        k_fix_copy<<<(3*N + 255) / 256, 256, 0, sB>>>(3*N, impl.d_grad.ptr, impl.d_grad_after_angles.ptr, 1.0 / GFNFF_FIX_FORCE);
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
@@ -3006,6 +3008,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     if (gradient && impl.hb_alpha.n > 0 && impl.d_zz_hb.ptr) {
         constexpr double hb_kn = 27.5;
+        // zz_hb is a fixed-point accumulator (k_bonds): convert before the chain rule reads it
+        k_fix_to_double<<<(N + 255) / 256, 256, 0, sB>>>(N, impl.d_zz_hb.ptr, 1.0 / GFNFF_FIX_FORCE);
         LaunchConfig cfg = getLaunchConfig(impl.hb_alpha.n, m_block_size);
         k_hb_alpha_chainrule<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.hb_alpha.n,
@@ -3021,8 +3025,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     // Per-kernel snapshot: after all stream B kernels (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_sB.ptr) {
-        cudaMemcpyAsync(impl.d_grad_after_sB.ptr, impl.d_grad.ptr,
-                        3*N*sizeof(double), cudaMemcpyDeviceToDevice, sB);
+        k_fix_copy<<<(3*N + 255) / 256, 256, 0, sB>>>(3*N, impl.d_grad.ptr, impl.d_grad_after_sB.ptr, 1.0 / GFNFF_FIX_FORCE);
     }
     if (m_record_kernel_timings) cudaEventRecord(impl.timing_sB_end, sB);
     cudaEventRecord(impl.event_bonded, sB);
@@ -3128,8 +3131,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     // Per-kernel snapshot: after all stream C kernels (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_sC.ptr) {
-        cudaMemcpyAsync(impl.d_grad_after_sC.ptr, impl.d_grad.ptr,
-                        3*N*sizeof(double), cudaMemcpyDeviceToDevice, sC);
+        k_fix_copy<<<(3*N + 255) / 256, 256, 0, sC>>>(3*N, impl.d_grad.ptr, impl.d_grad_after_sC.ptr, 1.0 / GFNFF_FIX_FORCE);
     }
     if (m_record_kernel_timings) cudaEventRecord(impl.timing_sC_end, sC);
     cudaEventRecord(impl.event_threebody, sC);
@@ -3359,6 +3361,15 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // =========================================================================
 
     const bool need_snapshots = (m_verbosity >= 3);
+    // d_dEdcn / d_grad are fixed-point accumulators (order-independent, docs/GPU_REPRODUCIBILITY.md): dEdcn is
+    // converted to doubles once every producer is done (before its first double consumer), d_grad after the
+    // CN chain rule (the last accumulation), before the download.
+    bool dEdcn_converted = false;
+    auto convert_dEdcn = [&] {
+        if (dEdcn_converted) return;
+        k_fix_to_double<<<(N + 255) / 256, 256, 0, stream>>>(N, impl.d_dEdcn.ptr, 1.0 / GFNFF_FIX_FORCE);
+        dEdcn_converted = true;
+    };
     if (m_coulomb_enabled && impl.coul_self_on_gpu) {
         // Wait for pairwise+bonded streams (dEdcn dependency for qtmp subtraction).
         // event_p2_pairwise: Phase-2-dedicated — always wait (records k_coulomb completion).
@@ -3367,6 +3378,7 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
         if (!p1_was_graph)
             cudaStreamWaitEvent(stream, impl.event_bonded, 0);
 
+        convert_dEdcn();
         // d_dEdcn_snapshot must always be populated — dEdcnTotal() is public API
         // used by external code (tests, chain-rule validation) regardless of verbosity.
         if (m_coulomb_enabled && impl.coul_self_on_gpu && impl.d_dEdcn_snapshot.ptr) {
@@ -3376,8 +3388,7 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
 
         if (need_snapshots) {
             // Grad snapshot is only for diagnostics at verbosity >= 3
-            cudaMemcpyAsync(impl.d_grad_snapshot.ptr, impl.d_grad.ptr,
-                            3*N*sizeof(double), cudaMemcpyDeviceToDevice, stream);
+            k_fix_copy<<<(3*N + 255) / 256, 256, 0, stream>>>(3*N, impl.d_grad.ptr, impl.d_grad_snapshot.ptr, 1.0 / GFNFF_FIX_FORCE);
         }
 
         // WP5-B: do_subtract only needs the GPU CNF buffer + EEQ charges — no CPU vector.
@@ -3410,9 +3421,9 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             cudaStreamWaitEvent(stream, impl.event_threebody, 0);
         }
 
+        convert_dEdcn();
         if (need_snapshots) {
-            cudaMemcpyAsync(impl.d_grad_snapshot.ptr, impl.d_grad.ptr,
-                            3*N*sizeof(double), cudaMemcpyDeviceToDevice, stream);
+            k_fix_copy<<<(3*N + 255) / 256, 256, 0, stream>>>(3*N, impl.d_grad.ptr, impl.d_grad_snapshot.ptr, 1.0 / GFNFF_FIX_FORCE);
         }
 
         LaunchConfig cfg_cn = getLaunchConfig(impl.n_cn_pairs, m_block_size);
@@ -3445,6 +3456,9 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
         cudaStreamWaitEvent(stream, impl.event_threebody, 0);
     }
 
+    convert_dEdcn();   // no-op unless neither the Coulomb postprocess nor the chain rule ran
+    if (gradient)      // last accumulation is done: fixed-point -> double before the download
+        k_fix_to_double<<<(3*N + 255) / 256, 256, 0, stream>>>(3*N, impl.d_grad.ptr, 1.0 / GFNFF_FIX_FORCE);
     checkCuda(cudaGetLastError(), "postprocess final check");
 
     // Async energy download (pinned m_h_energies buffer)
@@ -3825,6 +3839,9 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
             impl.coords.d_z.ptr,
             impl.d_cn_raw.ptr,
             kn);
+        // fixed-point accumulator -> double (order-independent CN, docs/GPU_REPRODUCIBILITY.md)
+        k_fix_to_double<<<cfg_zero.gridSize, cfg_zero.blockSize, 0, impl.stream>>>(
+            N, impl.d_cn_raw.ptr, 1.0 / GFNFF_FIX_CN);
 
         // Log squashing: cn_final[i] = log(1+exp(cnmax)) - log(1+exp(cnmax-cn_raw[i]))
         // BOUNDS_LIGHT kernel — cap block at 256.

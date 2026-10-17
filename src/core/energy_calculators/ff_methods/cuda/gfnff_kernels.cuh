@@ -805,6 +805,19 @@ __global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_map_to_bonds(
 // For nfrag == 1 only (common case). nfrag > 1 falls back to CPU path.
 // ============================================================================
 
+// Fixed-point scales of the order-independent accumulators (gfnff_kernels.cu, fix_add): CN-like quantities are
+// small (< 64) and get 2^-56, forces and their chain-rule inputs 2^-52 (range +-2048 Eh/Bohr).
+constexpr double GFNFF_FIX_CN = 72057594037927936.0;          // 2^56
+constexpr double GFNFF_FIX_FORCE = 4503599627370496.0;        // 2^52
+__global__ void k_fix_to_double(int n, double* __restrict__ buf, double inv_scale);
+__global__ void k_fix_copy(int n, const double* __restrict__ src, double* __restrict__ dst, double inv_scale);
+__global__ void k_eeq_reduce_sums_det(int N, const double* __restrict__ d_rhs, double* __restrict__ d_sums);
+__global__ void k_frag_sum_csr(int nfrag, const double* __restrict__ v, const int* __restrict__ off,
+                               const int* __restrict__ idx, double* __restrict__ out);
+__global__ void k_eeq_reduce_fragment_sums_csr(int N, int nfrag, const double* __restrict__ d_rhs,
+                                               const int* __restrict__ off, const int* __restrict__ idx,
+                                               double* __restrict__ d_Cz1, double* __restrict__ d_S);
+
 /// Block-reduce S = sum(Z2_col0) and Cz1 = sum(z1) on GPU.
 /// Launch with 1 block. Shared mem: 2 * blockSize * sizeof(double).
 /// Writes 2 scalars to d_sums[0] = Cz1, d_sums[1] = S.

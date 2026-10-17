@@ -43,7 +43,7 @@ Stand.
 - **`DC13/c20bowl`**: Coulomb -6,29 kcal/mol gegen die Referenz, Ladungen ~6x zu groß, nicht eingegrenzt (Known Issue #14).
 - **Reproduzierbarkeit**: GPU läuft nicht bitgleich (`atomicAdd`-Reihenfolge); CPU nicht bitgleich über verschiedene Threadzahlen
   (`FFWorkspace` partitioniert nach Threadzahl). Betreiber 2026-09-27: später. Erster Schritt: Repulsion als Sammel-Kernel hinter
-  einem Schalter, messen auf A4500 und H200. Archiv: "CPU/GPU-Trajektorien-Divergenz" und "Bitgleichheit". Stand 17. Okt. 2026: GFN1/GFN2-SCF auf der GPU bitgleich; offen sind die Gradient-Atomics (5e-16) und GFN-FF (38 Atomic-Stellen, EEQ-Reduktionen, Listenbau), Optionen in [docs/GPU_REPRODUCIBILITY.md](docs/GPU_REPRODUCIBILITY.md).
+  einem Schalter, messen auf A4500 und H200. Archiv: "CPU/GPU-Trajektorien-Divergenz" und "Bitgleichheit". Stand 17. Okt. 2026: GFN1/GFN2-SCF auf der GPU bitgleich; GFN-FF-CUDA-Ladungs- und Kraftpfad ebenfalls (Fixkomma, 9 von 9 Trajektorien identisch); offen sind die Gradient-Atomics von GFN1/GFN2 (5e-16), die GFN-FF-Energiesummen und ROCm, Optionen in [docs/GPU_REPRODUCIBILITY.md](docs/GPU_REPRODUCIBILITY.md).
 - **Verbosity** ist ein geteilter Static und lässt sich über `CxxThreadPool`-Worker nicht sauber scopen (Known Issue #3).
 - **ConfSearch**: Wide-Hill-MTD-Aufblähung innerhalb eines Laufs; `threads=1` im Legacy-Modus mit Fortschrittsbalken (SIGSEGV nach der
   Optimierung, Eintrag von 2025, nicht erneut geprüft). [docs/CONFSEARCH_ROADMAP.md](docs/CONFSEARCH_ROADMAP.md).
