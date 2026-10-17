@@ -494,3 +494,11 @@ small kernels, one host round trip) are in series with that. Remaining ideas, no
 fewer columns (also changes the matrix build per device), one host thread per helper device to issue the chains in parallel, an in-kernel
 (persistent) PCG with grid synchronisation. Each is bounded by the PCG span of 4.5 of 18 ms.
 
+### Sweeping the MD step (Oct 18, 2026)
+
+`scripts/tuning_sweep.py ... --method gfnff --gpu cuda --md` scans the knobs of this document for the GFN-FF MD step time (ms per step from runs of
+two lengths, warm-up run discarded because the first run writes the topology cache and understated the baseline: 14.0 against 19.2 ms/step). Run on the
+A4500 box for validation (polymer_2x, 2 repeats, subset of knobs): `auto` 19.13, `none` 41.35, `all` 18.58, `0,1` 25.17, `0,1,2` 20.24 ms/step;
+`gpu_eeq_mixed_rho` 1e-5 / 1e-4 / 1e-6: 19.05 / 19.13 / 19.20 ms/step (noise floor 0.6 ms); the energies of all settings agree with the baseline within the tolerance.
+The H200 procedure is item 8 of docs/MULTI_GPU.md.
+
