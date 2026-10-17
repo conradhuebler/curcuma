@@ -414,3 +414,20 @@ with `-gpu cuda` against 0.02 to 0.05 s on the CPU (3 runs each). At 66 to 300 a
 GPU needs roughly 500 to 2000 MD steps to repay it; for single points and short optimisations of small molecules it
 does not. Not measured: water boxes, charged or multi-fragment systems, other GPUs, CPU thread counts other than 16.
 
+### GFN-FF split path: matrix build, fragment sums (Oct 17, 2026, AI-run, RTX A4500 x4, polymer_2x)
+
+nsys of one MD step (13.3 ms of kernel timeline; wall 20 ms with the host stages) showed the critical path on device 0:
+`k_eeq_build_cols` 2.1 ms, then ~18 PCG iterations of 0.29 ms of which the matvec is 0.1 ms, then Coulomb 2.2 ms.
+
+| Change | Measured |
+|---|---|
+| `k_eeq_build_cols`: 2-D grid (no 64-bit `tid % N`, `tid / N`) | 2.10 -> 1.89 ms per call (400 calls, nsys) |
+| same, far field with `rsqrt` instead of FP64 `sqrt` + division (1 ulp, as `k_coulomb_tiles`) | -> 1.33 ms per call |
+| fragment sums for many small fragments: warp per fragment (`k_frag_sum_warp`), block per fragment otherwise | 21 -> 9.5 us per call (4095 calls) |
+| MD step, `-gpu_split_devices all`, 3 runs of 600 steps (difference of 700 and 100 steps) | 20.33 21.30 20.61 ms before; 18.90 19.22 19.88 and 19.13 19.38 19.29 ms after (6 runs, median 19.25 vs 20.61 ms) |
+
+Values: the fragment sums change their summation order and the far-field column elements differ by 1 ulp, so
+trajectories are not bit-identical to the build before, but they stay run-to-run and GPU-count independent
+(see GPU_REPRODUCIBILITY.md): 9 of 9 single-GPU MD final states equal, 4, 3 and 2 GPUs equal. Energy and gradient against
+the CPU: polymer 4.6e-12 Eh / 4.4e-14 Eh/A. The remaining cost of the matrix build is FP64 throughput (1/64 rate on this GPU).
+

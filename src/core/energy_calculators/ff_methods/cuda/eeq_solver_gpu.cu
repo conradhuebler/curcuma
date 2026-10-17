@@ -419,11 +419,13 @@ void k_eeq_build_cols(int N, int c0, int ncols,
                       const double* __restrict__ gam, double* __restrict__ A_blk, double cutoff_sq,
                       float* __restrict__ A_blk32 = nullptr)
 {
-    const long long tid = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
-    const long long tot = static_cast<long long>(N) * ncols;
-    if (tid >= tot) return;
-    const int row = static_cast<int>(tid % N);
-    const int col = c0 + static_cast<int>(tid / N);
+    // Oct 2026: 2-D grid (x = rows, y = columns, grid-stride in y) instead of one linear index: the 64-bit
+    // tid % N and tid / N cost more than the element itself in the far field. Same element, same value.
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= N) return;
+    for (int lc = blockIdx.y; lc < ncols; lc += gridDim.y) {
+    const long long tid = static_cast<long long>(lc) * N + row;
+    const int col = c0 + lc;
     double v;
     if (row == col) {
         v = gam[row] + TSQRT2PI_GPU / sqrt(alpha[row]);
@@ -437,12 +439,13 @@ void k_eeq_build_cols(int N, int c0, int ncols,
         if (cutoff_sq > 0.0 && r_sq > cutoff_sq) {
             v = 0.0;
         } else {
-            const double r = sqrt(r_sq);
             const double asum = alpha[i] + alpha[j];
             if (r_sq >= GFNFF_COUL_FARFIELD_X2 * asum) {
-                // Far field (Claude Generated, Oct 2026): same shortcut as k_eeq_build_matrix, erf == 1.0
-                v = 1.0 / r;
+                // Far field (Claude Generated, Oct 2026): erf == 1.0 as in k_eeq_build_matrix; rsqrt (1 ulp)
+                // replaces the FP64 sqrt and division (r_sq >= 36 asum > 0, so no zero distance here)
+                v = rsqrt(r_sq);
             } else {
+                const double r = sqrt(r_sq);
                 const double gamma_ij = 1.0 / sqrt(asum);
                 v = erf(gamma_ij * r) / r;
             }
@@ -450,6 +453,7 @@ void k_eeq_build_cols(int N, int c0, int ncols,
     }
     A_blk[tid] = v;
     if (A_blk32) A_blk32[tid] = static_cast<float>(v);   // Oct 2026: FP32 copy for the mixed-precision matvec
+    }
 }
 
 /// 1 / A_ii straight from alpha/gam (= k_pcg_extract_diag_inv on the full matrix). Claude Generated.
@@ -2106,7 +2110,11 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUPCG(
 // Deterministic fragment sum out[f] = sum_{i in f} v[i] (fixed order; replaces the atomicAdd k_frag_sum).
 static inline void fragSumDet(EEQSolverGPUImpl& impl, int nfrag, const double* d_v, double* d_out, cudaStream_t s)
 {
-    k_frag_sum_csr<<<nfrag, 256, 256 * sizeof(double), s>>>(nfrag, d_v, impl.d_frag_off.ptr, impl.d_frag_idx.ptr, d_out);
+    // many small fragments: one warp each (8 fragments per block); few large ones: one block each
+    if (static_cast<long long>(impl.d_frag_idx.n) <= 64LL * nfrag)
+        k_frag_sum_warp<<<(nfrag + 7) / 8, 256, 0, s>>>(nfrag, d_v, impl.d_frag_off.ptr, impl.d_frag_idx.ptr, d_out);
+    else
+        k_frag_sum_csr<<<nfrag, 256, 256 * sizeof(double), s>>>(nfrag, d_v, impl.d_frag_off.ptr, impl.d_frag_idx.ptr, d_out);
 }
 
 // r ← P·r, the projection onto the constraint tangent space: subtract the
@@ -2279,17 +2287,15 @@ static void splitBuild(EEQSolverGPUImpl& impl, int N, const double* cx, const do
         cudaMemcpyPeerAsync(P.alpha.ptr, P.dev, alpha, impl.own_device, bytes, P.stream);
         cudaMemcpyPeerAsync(P.gam.ptr, P.dev, gam, impl.own_device, bytes, P.stream);
         const int nc = P.c1 - P.c0;
-        const long long tot = static_cast<long long>(N) * nc;
         const int blk = 256;
-        const int grd = static_cast<int>((tot + blk - 1) / blk);
+        const dim3 grd((N + blk - 1) / blk, std::min(nc, 65535));
         k_eeq_build_cols<<<grd, blk, 0, P.stream>>>(N, P.c0, nc, P.x.ptr, P.y.ptr, P.z.ptr,
                                                      P.alpha.ptr, P.gam.ptr, P.A.ptr, cutoff_sq,
                                                      impl.split_mixed ? P.Af.ptr : nullptr);
     }
     cudaSetDevice(impl.own_device);
-    const long long tot = static_cast<long long>(N) * impl.split_c1_own;
     const int blk = 256;
-    const int grd = static_cast<int>((tot + blk - 1) / blk);
+    const dim3 grd((N + blk - 1) / blk, std::min(impl.split_c1_own, 65535));
     k_eeq_build_cols<<<grd, blk, 0, impl.stream>>>(N, 0, impl.split_c1_own, cx, cy, cz,
                                                    alpha, gam, impl.d_A_own.ptr, cutoff_sq,
                                                    impl.split_mixed ? impl.d_A_own_f.ptr : nullptr);

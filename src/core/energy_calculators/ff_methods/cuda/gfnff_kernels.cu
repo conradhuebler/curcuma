@@ -3772,6 +3772,21 @@ __global__ void k_frag_sum_csr(int nfrag, const double* __restrict__ v, const in
     if (tid == 0) out[f] = sh[0];
 }
 
+// Warp per fragment (Oct 2026): for many small fragments (water boxes: 1500 blocks of 256 threads with 8 barriers each
+// cost 21 us per call, twice per PCG iteration). Lane l sums atoms l, l+32, ... of the fragment in ascending order,
+// a fixed shuffle tree adds the 32 partials: the same result in every run, independent of the launch shape.
+__global__ void k_frag_sum_warp(int nfrag, const double* __restrict__ v, const int* __restrict__ off,
+                                const int* __restrict__ idx, double* __restrict__ out)
+{
+    const int lane = threadIdx.x & 31;
+    const int f = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
+    if (f >= nfrag) return;
+    double a = 0.0;
+    for (int p = off[f] + lane; p < off[f + 1]; p += 32) a += v[idx[p]];
+    for (int o = 16; o > 0; o >>= 1) a += __shfl_down_sync(0xffffffffu, a, o);
+    if (lane == 0) out[f] = a;
+}
+
 // Deterministic twin of k_eeq_reduce_fragment_sums: one thread per (fragment, column), atoms in ascending order.
 // Column 0 -> Cz1[f], column g + 1 -> S[f * nfrag + g].
 __global__ void k_eeq_reduce_fragment_sums_csr(int N, int nfrag, const double* __restrict__ d_rhs,

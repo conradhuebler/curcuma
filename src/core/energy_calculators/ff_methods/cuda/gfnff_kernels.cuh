@@ -818,6 +818,8 @@ __global__ void k_fix_copy(int n, const double* __restrict__ src, double* __rest
 __global__ void k_eeq_reduce_sums_det(int N, const double* __restrict__ d_rhs, double* __restrict__ d_sums);
 __global__ void k_frag_sum_csr(int nfrag, const double* __restrict__ v, const int* __restrict__ off,
                                const int* __restrict__ idx, double* __restrict__ out);
+__global__ void k_frag_sum_warp(int nfrag, const double* __restrict__ v, const int* __restrict__ off,
+                                const int* __restrict__ idx, double* __restrict__ out);
 __global__ void k_eeq_reduce_fragment_sums_csr(int N, int nfrag, const double* __restrict__ d_rhs,
                                                const int* __restrict__ off, const int* __restrict__ idx,
                                                double* __restrict__ d_Cz1, double* __restrict__ d_S);
