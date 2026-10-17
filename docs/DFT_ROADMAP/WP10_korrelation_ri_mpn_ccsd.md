@@ -5,7 +5,8 @@
   implementiert, 🤖 AI-generated, ⚙️ machine-tested (Okt 2026, Abschnitte WP10, WP11 und RI-MP2 unten), ebenso der
   analytische Gradient fuer RI-J/RI-JK-HF (Abschnitt "WP10 -- Gradient") und der analytische Gradient des kanonischen
   MP2/SCS/SOS (CPU, 2e-Ableitungsteil auch CUDA; Abschnitt "WP11 -- MP2-Gradient"); RI-MP2 mit def2-SVP/C, der
-  RI-MP2-Gradient und WP13-WP15 sind Plan.
+  RI-MP2-Gradient und WP13 sind Plan; fuer WP15 (und die Metrikfrage aus WP14) liegt eine Python-Machbarkeitsmessung
+  vor (Abschnitt WP15), kein Engine-Code.
 - **Abhaengigkeit:** WP3 (RHF, ERI-Engine, `QMEngine`), fuer die GPU-Teile die Stufen Q-G1/Q-G2 aus
   [../QM_GPU_ROADMAP.md](../QM_GPU_ROADMAP.md).
 - **Referenzen auf dieser Maschine:** PySCF (venv `~/.venvs/qmref`), ORCA 6.1 (`~/Downloads/orca_6_1_0_...`).
@@ -465,6 +466,15 @@ steht in der Git-Historie dieser Datei.
 
 ## WP15 -- Lokales MP2 mit PNO-Truncation in ueberlappenden Domaenen (Idee des Betreibers, Okt 2026)
 
+**Stand 17.10.2026: Python-Prototyp gemessen, kein C++ in der Engine** (🤖 AI-generated, ⚙️ machine-tested;
+[../LOCAL_MP2_FEASIBILITY_2026-10.md](../LOCAL_MP2_FEASIBILITY_2026-10.md), Skripte `scripts/local_mp2/`). Alkane bis
+C20H42, (H2O)4-16, Benzol bis Pentacen, def2-SVP, RI mit JKFIT, Referenz volles RI-MP2:
+- Paarenergien fallen mit R^-6 (Acene R^-5.7), Zahl signifikanter Paare und PNO-Gesamtzahl linear; BP(0.02)-Domaenen
+  verlieren 1-2.5 %, BP(0.02) + 7 Bohr und T_CutPNO 1e-8 geben 3e-6 (Wasser) bis 3e-5 Eh/Atom (Pentacen), ORCA
+  NormalPNO 2-3e-5 Eh/Atom.
+- Schwarz-Vorkonditionierer (Stufe 5): halbiert die Iterationen (7-9 -> 3-5), kostet aber das 3-30fache; kein Gewinn.
+- Empfehlung des Dokuments: C++-LMP2 erst, wenn MP2 fuer > 100 Atome Ziel ist und die SCF dort skaliert.
+
 **Abgrenzung:** kein Nachbau von DLPNO-CCSD(T) (zu gross, viele Naeherungsschichten), sondern ein lokales MP2 nach
 dem Muster Pulay-Saebo-LMP2 + PNO. Die ueberlappenden Domaenen sind genau die Schwarz-artigen Teilgebiete aus WP14,
 aber auf der Ebene des **Wellenfunktionsraums**, nicht der Metrikinversion -- dort liegt der Skalierungshebel.
@@ -559,6 +569,11 @@ Die folgende Tabelle ist eine **Hypothesenliste aus dem Quelltext und der Litera
    bis zum Gegenbeweis ebenso.
 3. Ein ML-Anteil fuer die **Energie** (Lesart B der Vault-Notiz, Delta-Lernen) ist ein anderes Vorhaben und gehoert
    nicht in diesen Plan.
+
+**Messung Okt 2026** ([../LOCAL_MP2_FEASIBILITY_2026-10.md](../LOCAL_MP2_FEASIBILITY_2026-10.md), Q4): die Inverse
+der JKFIT-Metrik ist nicht lokal (bei 30-50 Bohr nur 1-1.5 Groessenordnungen unter J); robuste lokale Fits erfuellen den
+ersten Falsifikator fuer RI-J (<= 6e-8 Eh/Atom bei 8 Bohr) und RI-MP2 in Alkanen/Wasser, verfehlen ihn fuer RI-MP2 in
+Acenen ab Anthracen (1.3-2.2e-6); lokales Cholesky schneller erst ab naux ~7000-14000, dort dauert das globale 0.3-2 s.
 
 **Falsifikatoren (vor der Messung festgelegt):**
 
