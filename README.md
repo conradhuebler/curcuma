@@ -188,8 +188,11 @@ write a restart file and finish. A second Ctrl-C while `stop` exists ends the pr
 
 ### Delta-ML: cheap method with a learned correction
 
-Learns the energy difference between a cheap base method and an expensive reference, so conformer search and
-pre-optimisation run at base-method cost. Conformers at fixed topology only, not reactions.
+Learns the energy difference between a cheap base method and an expensive reference. The aim is conformer search
+and pre-optimisation near reference quality; **on the one molecule tested this is not achieved** (the joint model ranks
+conformers worse than GFN-FF and optimises into spurious minima, cost 11 to 25 times GFN-FF; the forces are about 4x
+better, see [docs/DELTA_ML_USECASE_TEST_2026-10.md](docs/DELTA_ML_USECASE_TEST_2026-10.md)). Conformers at fixed topology
+only, not reactions.
 
 ```sh
 curcuma -activelearn conf.xyz -method gfnff -ref_method gfn2 -threads 8   # fit

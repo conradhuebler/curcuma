@@ -11,8 +11,10 @@ E_ref(R) ~ E_base(R) + Delta(R)
 
 The gain is statistical. `Var(Delta)` is far smaller than `Var(E_ref)` and `Delta` is a
 smoother function of geometry, so a few hundred reference points suffice where direct
-learning would need tens of thousands. The purpose here is conformer work: run conformer
+learning would need tens of thousands. The intended purpose is conformer work: run conformer
 search and pre-optimisation at GFN-FF cost while ranking conformers at the reference level.
+**This purpose is not met on the one molecule tested** (ranking and pre-optimisation no better than
+GFN-FF, cost 11 to 25x GFN-FF): see [DELTA_ML_USECASE_TEST_2026-10.md](DELTA_ML_USECASE_TEST_2026-10.md).
 
 ## When this applies, and when it does not
 
@@ -486,6 +488,14 @@ coordinates and belongs to the dynamic state by design; pinning it makes the ene
 for the actual geometry and, worse, inconsistent with the gradient -- which is exactly the
 signature of the NVE drift reported above. Fixing the anchor to freeze the bond graph only
 is the obvious next step, and the drift numbers should be remeasured afterwards.
+
+**Measured over a whole data set (Oct 2026):** the `energy_base` stored by `-activelearn` for the 353 conformers is
+not what `-sp -method gfnff` returns for the same geometry: fresh minus stored = -1.21 +- 0.70 kcal/mol (min -3.05,
+max 0.00), as large as the GFN2 spread of the set (2.2 kcal/mol). The model learns `E_ref - E_stored` and is applied
+on top of the fresh energy by `-sp`; the true GFN2 minimum has GFN-FF rank 7 with the stored and 31 with the fresh
+energy. The labelling and the single-point path must use the same base energy before the held-out numbers can be
+transferred to deployment (details and the effect on the ranking test:
+[DELTA_ML_USECASE_TEST_2026-10.md](DELTA_ML_USECASE_TEST_2026-10.md)).
 
 ## A numerical trap worth knowing about
 

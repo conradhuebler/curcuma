@@ -1,8 +1,8 @@
 # src/core/ml - Delta-Machine-Learning Core
 
 Learns the energy difference between a cheap base method and an expensive reference:
-`E_ref ~ E_base + Delta(R)`. Used to run conformer search and pre-optimisation at
-GFN-FF cost with reference-level forces (measured 4x on held-out conformers); the relative energy error is reduced only with the separate energy model, ranking is not shown to improve. See [docs/DELTA_ML.md](../../../docs/DELTA_ML.md).
+`E_ref ~ E_base + Delta(R)`. Intended for conformer search and pre-optimisation near reference quality;
+measured on one molecule: forces 4x better on held-out conformers, but ranking and pre-optimisation no better than GFN-FF, cost 11 to 25x GFN-FF (application test, docs/DELTA_ML_USECASE_TEST_2026-10.md). See [docs/DELTA_ML.md](../../../docs/DELTA_ML.md).
 
 ## Files
 
@@ -40,6 +40,10 @@ Automated: `ctest -R deltaml` (unit test `test_deltaml` + CLI tests 01-03; 03 is
 - Descriptor Jacobian vs. finite differences: h^2 convergence to the roundoff floor
   (1.5e-5 at h=1e-3 down to 6e-10 at h=1e-6); translation invariance 2e-16, rotation 1e-15
 - Model gradient vs. finite differences: 1.2e-11 Eh/Angstrom
+- Application test (one molecule, Oct 2026, docs/DELTA_ML_USECASE_TEST_2026-10.md): joint models worse than GFN-FF in ranking
+  (paired Spearman -0.146 +- 0.095 and -0.099 +- 0.112, n=10 folds) and pre-optimisation (GFN2 energy at the result +59 and +75 kcal/mol, n=20);
+  cost 11x and 25x GFN-FF; the stored base energy differs from fresh GFN-FF by 1.2 +- 0.7 kcal/mol (n=353), so numbers from
+  `-activelearn` and from `-sp` are not in the same frame
 - Energy from the gradient path and the plain path agree bit-for-bit
 - JSON round-trip reproduces energies and gradients exactly
 - Energy-only fit interpolates its training energies to 1.5e-4 kcal/mol, which separates a

@@ -51,6 +51,8 @@ Stand.
 - **Ladungsplatzierung** (Known Issue #31) nicht getestet für periodische Systeme, GPU-Laufzeit, viele Fragmente in Kontakt und lange MD mit
   `frag_charge_s_max` > 1.
 - **LBFGSpp prüft die Krümmung nicht** (geprüft 2026-10-18, n=1): `BFGSMat::add_correction` überspringt das Update bei `s'y <= 0` nicht; auf einer rauen Delta-ML-Fläche (alte Defaults, 120 Zentren) bricht der Optimierer `auto` mit Exit 1 ab. Beobachtet an `cli_deltaml_01` mit dem alten ACSF-Gitter, mit den neuen Defaults (6 Schalen, eta 4) konvergiert er. Details: `AIChangelog.md` (Delta-ML), Vault `Projekte/curcuma Delta-ML`.
+- **Delta-ML: gespeicherte Basisenergie ≠ frische GFN-FF-Energie** (gemessen 2026-10-18, n=353): `energy_base` aus `-activelearn` minus `-sp -method gfnff` am selben Geometriepunkt = +1,21 ± 0,70 kcal/mol (bis 3,05), so groß wie die GFN2-Spanne des Satzes; Training und Einsatz liegen in verschiedenen Bezugssystemen. Ursache vermutlich eingefrorene CN/D4 im wiederverwendeten Calculator (`docs/DELTA_ML.md`, "Open: the anchor freezes more than it should"); Labelling mit frischem Calculator pro Struktur testen. Details: `docs/DELTA_ML_USECASE_TEST_2026-10.md`.
+- **Delta-ML: Optimierung auf den Joint-Modellen endet in Scheinminima** (n=20, 2026-10-18): GFN2-Energie am Ergebnis +59 bis +75 kcal/mol über GFN-FF, Modellenergie dort 100 bis 165 kcal/mol unter GFN2; Ursache nicht diagnostiziert (kleines lambda, Extrapolation; Vertrauensradius über `uncertainty` denkbar). Details: `docs/DELTA_ML_USECASE_TEST_2026-10.md`.
 
 ## 2. Leistung
 
